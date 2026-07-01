@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plaita"
-version = "0.3.16"
+version = "0.4.0"
 description = "Official Python Runtime for Plaita -- Logic Compose Engine"
 requires-python = ">=3.10"
 authors = [
