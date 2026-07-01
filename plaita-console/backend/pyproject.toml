@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plaita-console-backend"
+version = "1.0.0"
+description = "Plaita Console Backend API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "redis>=5.0.0",
+    "python-dotenv>=1.0.0",
+    "sse-starlette>=1.8.0",
+    "sqlalchemy>=2.0.0",
+    "httpx>=0.25.0",
+]
+
+[project.scripts]
+plaita-console = "main:run_server"
+
+[tool.setuptools.packages.find]
+where = ["."]
+

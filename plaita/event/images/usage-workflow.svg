@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="600" height="250" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景 -->
+  <rect width="600" height="250" fill="#f8f9fa" rx="10" ry="10"/>
+  <text x="300" y="30" text-anchor="middle" font-size="20" font-family="Arial, sans-serif" font-weight="bold">Plaita 事件系统工作流程</text>
+  
+  <!-- 流程图 -->
+  <rect x="50" y="70" width="120" height="50" fill="#D5F5E3" stroke="#2ECC71" stroke-width="2" rx="5" ry="5"/>
+  <text x="110" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">发布事件</text>
+  
+  <rect x="240" y="70" width="120" height="50" fill="#D6EAF8" stroke="#3498DB" stroke-width="2" rx="5" ry="5"/>
+  <text x="300" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">事件总线</text>
+  
+  <rect x="430" y="70" width="120" height="50" fill="#D6EAF8" stroke="#3498DB" stroke-width="2" rx="5" ry="5"/>
+  <text x="490" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">事件存储</text>
+  
+  <rect x="150" y="170" width="120" height="50" fill="#FADBD8" stroke="#E74C3C" stroke-width="2" rx="5" ry="5"/>
+  <text x="210" y="200" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">处理器A</text>
+  
+  <rect x="330" y="170" width="120" height="50" fill="#FADBD8" stroke="#E74C3C" stroke-width="2" rx="5" ry="5"/>
+  <text x="390" y="200" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">处理器B</text>
+  
+  <!-- 连接箭头 -->
+  <line x1="170" y1="95" x2="240" y2="95" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="360" y1="95" x2="430" y2="95" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  
+  <line x1="300" y1="120" x2="300" y2="140" stroke="#555" stroke-width="2"/>
+  <line x1="300" y1="140" x2="210" y2="140" stroke="#555" stroke-width="2"/>
+  <line x1="300" y1="140" x2="390" y2="140" stroke="#555" stroke-width="2"/>
+  <line x1="210" y1="140" x2="210" y2="170" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="390" y1="140" x2="390" y2="170" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  
+  <!-- 箭头标记 -->
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#555"/>
+    </marker>
+  </defs>
+</svg> 

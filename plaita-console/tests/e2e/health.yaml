@@ -1,0 +1,39 @@
+name: 健康检查
+sequential: true
+
+cases:
+  - name: "根路径返回 200"
+    request:
+      method: GET
+      url: http://localhost:18080/
+    expect:
+      status: 200
+      body:
+        status: "ok"
+        service: "plaita-console"
+
+  - name: "Health 端点返回 healthy"
+    request:
+      method: GET
+      url: http://localhost:18080/health
+    expect:
+      status: 200
+      body:
+        status: "healthy"
+      responseTime: { lt: 500 }
+
+  - name: "API 前缀路由可达"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services
+    expect:
+      status: 200
+      body:
+        total: { type: number }
+
+  - name: "不存在的路由返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/nonexistent
+    expect:
+      status: 404

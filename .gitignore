@@ -1,0 +1,24 @@
+.python-version
+*.db
+*.log
+dist
+build
+*.pyc
+.idea
+*.egg-info
+.pytest_cache
+.DS_Store
+venv
+tmp
+.pypirc
+.a2a/
+.playwright-mcp/
+node_modules/
+.coverage
+.cursor/
+.worktrees/
+.specify/
+
+# Console test artifacts
+*_test_results.json
+*_test_screenshots/

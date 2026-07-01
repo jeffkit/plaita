@@ -1,0 +1,50 @@
+{
+  "skill_name": "plaita-flow-builder",
+  "evals": [
+    {
+      "id": 1,
+      "name": "simple-if-branch",
+      "prompt": "帮我用 plaita 编排一个判断成年的流程：输入 age，大于等于 18 返回 \"成年\"，否则返回 \"未成年\"。给我能直接跑的 JSON。",
+      "expected_output": "符合 plaita 规范的 JSON flow：inputType.dataType=object，含 start、if（gte 18，next+else_next）、end。表达式用 $INPUT.age。附 flow.run(age=20) 示例。",
+      "files": [],
+      "assertions": [
+        "生成的 flow.json 是合法 JSON",
+        "包含 type=if 的节点，且 condition.operator 为 gte、value 为 18",
+        "if 节点同时具有 next 与 else_next 两个跳转",
+        "表达式使用 $INPUT.age 而非错误的 ${INPUT.age}",
+        "包含 start 与 end 节点，且所有 next/else_next 指向的节点 id 都存在",
+        "response 中附带了 flow.run(...) 调用示例"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "collection-map",
+      "prompt": "写一个 plaita flow，接收一个数字数组 numbers，把每个数字乘以 2 返回新数组。我想用 map 节点。",
+      "expected_output": "JSON flow 含 map 节点，collection=$INPUT.numbers，childFlow 内 start/end，end 用 $F.mul($INPUT.item, 2)。表达式前缀正确。",
+      "files": [],
+      "assertions": [
+        "生成的 flow.json 是合法 JSON",
+        "包含 type=map 的节点",
+        "map 节点的 collection 引用了 $INPUT.numbers",
+        "map 节点包含 childFlow，且 childFlow 内有 start 与 end 节点",
+        "childFlow 的 end 节点 output 使用 $F.mul($INPUT.item, 2) 或等价的乘以 2 表达式",
+        "所有表达式使用 $ 前缀而非错误的 ${} 前缀"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "http-with-error-handling",
+      "prompt": "编排一个流程：调用 HTTP 接口 POST https://api.example.com/users 创建用户，请求体 {\"name\": 输入的 name}。如果接口失败就用默认值 {\"data\": null} 继续并返回。需要提醒我装什么依赖。",
+      "expected_output": "JSON flow 含 http 节点（POST, url, body=$INPUT.name, errorHandler=continue_with, defaultValue={data:null}），end 引用 $NODE.http_id.data。提醒装 logic-plaita[http]。",
+      "files": [],
+      "assertions": [
+        "生成的 flow.json 是合法 JSON",
+        "包含 type=http 的节点，method 为 POST，url 为 https://api.example.com/users",
+        "http 节点的 body 引用了 $INPUT.name",
+        "errorHandler.strategy 为 continue_with，且 defaultValue 为 {\"data\": null}",
+        "end 节点的 output 引用了 http 节点的输出（如 $NODE.<http_id>.data）",
+        "response 中明确提醒安装 logic-plaita[http] extra"
+      ]
+    }
+  ]
+}

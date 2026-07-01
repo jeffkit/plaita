@@ -1,0 +1,105 @@
+name: 事件管理
+sequential: true
+
+cases:
+  - name: "获取事件列表（初始为空或有数据）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/events
+    expect:
+      status: 200
+      body:
+        events: { type: array }
+        total: { type: number }
+
+  - name: "获取订阅列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/events/subscriptions
+    expect:
+      status: 200
+      body:
+        subscriptions: { type: array }
+        total: { type: number }
+
+  - name: "发布事件"
+    request:
+      method: POST
+      url: http://localhost:18080/api/events/publish
+      headers:
+        Content-Type: application/json
+      body:
+        event_type: "e2e_test_event"
+        data:
+          test_key: "test_value"
+          timestamp: "{{timestamp}}"
+        correlation_id: "e2e-correlation-001"
+    expect:
+      status: 200
+      body:
+        success: true
+        event_id: { exists: true, type: string }
+        event_type: "e2e_test_event"
+        message: { contains: "已发布" }
+    save:
+      published_event_id: "event_id"
+
+  - name: "验证发布的事件出现在事件列表中"
+    request:
+      method: GET
+      url: http://localhost:18080/api/events?event_type=e2e_test_event
+    expect:
+      status: 200
+      body:
+        events:
+          length: { gt: 0 }
+        total: { gt: 0 }
+
+  - name: "按事件类型筛选事件"
+    request:
+      method: GET
+      url: http://localhost:18080/api/events?event_type=nonexistent_type
+    expect:
+      status: 200
+      body:
+        events: { length: 0 }
+        total: 0
+
+  - name: "发布无 correlation_id 的事件"
+    request:
+      method: POST
+      url: http://localhost:18080/api/events/publish
+      headers:
+        Content-Type: application/json
+      body:
+        event_type: "simple_event"
+        data:
+          action: "test"
+    expect:
+      status: 200
+      body:
+        success: true
+        event_id: { exists: true }
+
+  - name: "获取不存在的订阅返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/events/subscriptions/nonexistent-sub-id
+    expect:
+      status: 404
+
+  - name: "删除不存在的订阅返回 404"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/events/subscriptions/nonexistent-sub-id
+    expect:
+      status: 404
+
+  - name: "按 flow_id 筛选订阅"
+    request:
+      method: GET
+      url: http://localhost:18080/api/events/subscriptions?flow_id=nonexistent-flow
+    expect:
+      status: 200
+      body:
+        subscriptions: { length: 0 }

@@ -1,0 +1,57 @@
+{
+    "flow_id": "router",
+    "inputType": { "dataType": "object" },
+    "nodes": [
+        { "type": "start", "id": "start", "next": "classify" },
+        {
+            "type": "llm",
+            "id": "classify",
+            "model": "classifier",
+            "system": "你是意图分类器，输出 sales / support / billing 之一。",
+            "prompt": "用户输入：{% $INPUT.message %}\n请输出意图标签。",
+            "next": "route"
+        },
+        {
+            "type": "switch",
+            "id": "route",
+            "branches": [
+                { "name": "sales", "next": "respond_sales", "condition": { "field": "$NODE.classify", "operator": "eq", "value": "sales" } },
+                { "name": "support", "next": "respond_support", "condition": { "field": "$NODE.classify", "operator": "eq", "value": "support" } },
+                { "name": "billing", "next": "respond_billing", "condition": { "field": "$NODE.classify", "operator": "eq", "value": "billing" } },
+                { "name": "other", "next": "respond_general", "isDefault": true }
+            ]
+        },
+        {
+            "type": "llm",
+            "id": "respond_sales",
+            "model": "responder",
+            "prompt": "你是销售客服。用户输入：{% $INPUT.message %}，请给出销售回复。",
+            "next": "end_sales"
+        },
+        {
+            "type": "llm",
+            "id": "respond_support",
+            "model": "responder",
+            "prompt": "你是技术支持。用户输入：{% $INPUT.message %}，请给出技术支持回复。",
+            "next": "end_support"
+        },
+        {
+            "type": "llm",
+            "id": "respond_billing",
+            "model": "responder",
+            "prompt": "你是计费客服。用户输入：{% $INPUT.message %}，请给出计费回复。",
+            "next": "end_billing"
+        },
+        {
+            "type": "llm",
+            "id": "respond_general",
+            "model": "responder",
+            "prompt": "你是通用客服。用户输入：{% $INPUT.message %}，请给出通用回复。",
+            "next": "end_general"
+        },
+        { "type": "end", "id": "end_sales", "output": "$NODE.respond_sales", "resultType": "success" },
+        { "type": "end", "id": "end_support", "output": "$NODE.respond_support", "resultType": "success" },
+        { "type": "end", "id": "end_billing", "output": "$NODE.respond_billing", "resultType": "success" },
+        { "type": "end", "id": "end_general", "output": "$NODE.respond_general", "resultType": "success" }
+    ]
+}

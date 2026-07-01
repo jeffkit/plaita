@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 550">
+  <defs>
+    <style>
+      .participant-box { fill: #edf2f7; stroke: #4a5568; stroke-width: 2; rx: 6; }
+      .participant-text { font-family: 'SF Mono', 'Monaco', monospace; font-size: 13px; font-weight: bold; fill: #2d3748; }
+      .lifeline { stroke: #a0aec0; stroke-width: 1; stroke-dasharray: 6,4; }
+      .activation { fill: #bee3f8; stroke: #3182ce; stroke-width: 1.5; }
+      .message { stroke: #4a5568; stroke-width: 1.5; }
+      .message-text { font-family: 'SF Mono', 'Monaco', monospace; font-size: 11px; fill: #2d3748; }
+      .return { stroke: #718096; stroke-width: 1.5; stroke-dasharray: 5,3; }
+      .loop-box { fill: none; stroke: #805ad5; stroke-width: 1.5; }
+      .loop-label { fill: #805ad5; }
+      .loop-text { font-family: 'SF Mono', 'Monaco', monospace; font-size: 10px; fill: #553c9a; font-weight: bold; }
+      .self-call { stroke: #4a5568; stroke-width: 1.5; fill: none; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4a5568"/>
+    </marker>
+    <marker id="arrowhead-return" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#718096"/>
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="375" y="25" text-anchor="middle" font-family="SF Mono, Monaco, monospace" font-size="16" font-weight="bold" fill="#1a202c">Flow Execution Sequence</text>
+  
+  <!-- Participants -->
+  <g transform="translate(50, 45)">
+    <rect class="participant-box" x="0" y="0" width="80" height="35"/>
+    <text class="participant-text" x="40" y="23" text-anchor="middle">User</text>
+  </g>
+  
+  <g transform="translate(180, 45)">
+    <rect class="participant-box" x="0" y="0" width="80" height="35"/>
+    <text class="participant-text" x="40" y="23" text-anchor="middle">Flow</text>
+  </g>
+  
+  <g transform="translate(310, 45)">
+    <rect class="participant-box" x="0" y="0" width="120" height="35"/>
+    <text class="participant-text" x="60" y="23" text-anchor="middle">FlowExecution</text>
+  </g>
+  
+  <g transform="translate(480, 45)">
+    <rect class="participant-box" x="0" y="0" width="80" height="35"/>
+    <text class="participant-text" x="40" y="23" text-anchor="middle">Node</text>
+  </g>
+  
+  <g transform="translate(610, 45)">
+    <rect class="participant-box" x="0" y="0" width="110" height="35"/>
+    <text class="participant-text" x="55" y="23" text-anchor="middle">Callback</text>
+  </g>
+  
+  <!-- Lifelines -->
+  <line class="lifeline" x1="90" y1="80" x2="90" y2="520"/>
+  <line class="lifeline" x1="220" y1="80" x2="220" y2="520"/>
+  <line class="lifeline" x1="370" y1="80" x2="370" y2="520"/>
+  <line class="lifeline" x1="520" y1="80" x2="520" y2="520"/>
+  <line class="lifeline" x1="665" y1="80" x2="665" y2="520"/>
+  
+  <!-- Activations -->
+  <rect class="activation" x="85" y="100" width="10" height="30"/>
+  <rect class="activation" x="215" y="100" width="10" height="400"/>
+  <rect class="activation" x="365" y="130" width="10" height="350"/>
+  <rect class="activation" x="515" y="280" width="10" height="60"/>
+  <rect class="activation" x="660" y="160" width="10" height="40"/>
+  <rect class="activation" x="660" y="240" width="10" height="30"/>
+  <rect class="activation" x="660" y="350" width="10" height="30"/>
+  <rect class="activation" x="660" y="420" width="10" height="30"/>
+  
+  <!-- Messages -->
+  
+  <!-- User -> Flow: run(params) -->
+  <line class="message" x1="95" y1="110" x2="210" y2="110" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="140" y="105">run(params)</text>
+  
+  <!-- Flow -> FlowExecution: run_compatible() -->
+  <line class="message" x1="225" y1="140" x2="360" y2="140" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="265" y="135">run_compatible(flow, params)</text>
+  
+  <!-- FlowExecution -> Callback: on_flow_start() -->
+  <line class="message" x1="375" y1="170" x2="655" y2="170" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="485" y="165">on_flow_start()</text>
+  
+  <!-- Loop Box -->
+  <rect class="loop-box" x="195" y="215" width="520" height="200" rx="3"/>
+  <rect class="loop-label" x="195" y="215" width="100" height="18" rx="3"/>
+  <text class="loop-text" x="205" y="228">loop [Until End]</text>
+  
+  <!-- FlowExecution -> Flow: next_node() -->
+  <line class="message" x1="365" y1="250" x2="230" y2="250" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="265" y="245">next_node()</text>
+  
+  <!-- Flow -> FlowExecution: Node Instance -->
+  <line class="return" x1="225" y1="270" x2="360" y2="270" marker-end="url(#arrowhead-return)"/>
+  <text class="message-text" x="265" y="285">Node Instance</text>
+  
+  <!-- FlowExecution -> Node: run(execution) -->
+  <line class="message" x1="375" y1="300" x2="510" y2="300" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="415" y="295">run(execution)</text>
+  
+  <!-- Node -> FlowExecution: Result -->
+  <line class="return" x1="515" y1="330" x2="380" y2="330" marker-end="url(#arrowhead-return)"/>
+  <text class="message-text" x="430" y="325">Result</text>
+  
+  <!-- FlowExecution -> Callback: on_node_end() -->
+  <line class="message" x1="375" y1="360" x2="655" y2="360" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="485" y="355">on_node_end()</text>
+  
+  <!-- Self call: Update Context -->
+  <path class="self-call" d="M375,390 L410,390 L410,405 L375,405" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="415" y="400">Update Context</text>
+  
+  <!-- FlowExecution -> Callback: on_flow_end() -->
+  <line class="message" x1="375" y1="440" x2="655" y2="440" marker-end="url(#arrowhead)"/>
+  <text class="message-text" x="485" y="435">on_flow_end()</text>
+  
+  <!-- FlowExecution -> User: Final Result -->
+  <line class="return" x1="365" y1="480" x2="100" y2="480" marker-end="url(#arrowhead-return)"/>
+  <text class="message-text" x="200" y="475">Final Result</text>
+</svg>
+

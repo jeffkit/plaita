@@ -1,0 +1,24 @@
+name: 服务拓扑
+sequential: true
+
+cases:
+  - name: "获取服务拓扑结构"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services/topology
+    expect:
+      status: 200
+      body:
+        nodes: { type: array }
+        edges: { type: array }
+        timestamp: { exists: true }
+
+  - name: "拓扑节点结构验证"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services/topology
+    expect:
+      status: 200
+      body:
+        nodes: { type: array }
+        edges: { type: array }

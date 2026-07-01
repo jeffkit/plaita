@@ -1,0 +1,87 @@
+eventbus:
+  type: memory
+infrastructure:
+  kafka:
+    bootstrap_servers: localhost:9092
+    display_name: Kafka 消息队列
+    docker:
+      image: confluentinc/cp-kafka:7.5.0
+      ports:
+      - 9092:9092
+    enabled: false
+    type: kafka
+  postgresql:
+    display_name: PostgreSQL 数据库
+    docker:
+      env:
+        POSTGRES_DB: plaita
+        POSTGRES_PASSWORD: plaita
+        POSTGRES_USER: plaita
+      image: postgres:15-alpine
+      ports:
+      - 5432:5432
+    enabled: false
+    type: database
+    url: postgresql://localhost:5432/plaita
+  redis:
+    display_name: Redis 缓存/队列
+    docker:
+      image: redis:7-alpine
+      ports:
+      - 6379:6379
+      volumes: []
+    enabled: true
+    type: redis
+    url: redis://localhost:6379/0
+mode: process
+queue:
+  type: memory
+redis:
+  url: redis://localhost:6379/0
+services:
+  delay_service:
+    default_instances: 1
+    display_name: 延迟定时服务
+    docker:
+      image: plaita/delay-service:latest
+    env:
+      LOKI_CHECK_INTERVAL: '5'
+      LOKI_REDIS_URL: ${redis.url}
+    max_instances: 3
+    process:
+      command: python -m plaita.server.services delay_service
+  flow_worker:
+    default_instances: 1
+    display_name: 流程执行器
+    docker:
+      image: plaita/flow-worker:latest
+      ports: []
+    env:
+      LOKI_QUEUE_NAME: plaita:flow:queue
+      LOKI_REDIS_URL: ${redis.url}
+    max_instances: 10
+    process:
+      module: plaita.server.flow_worker
+  http_callback_service:
+    default_instances: 1
+    display_name: HTTP 回调服务
+    docker:
+      image: plaita/http-callback-service:latest
+    env:
+      LOKI_REDIS_URL: ${redis.url}
+    max_instances: 3
+    process:
+      command: python -m plaita.server.services http_callback_service
+  redis_queue_service:
+    default_instances: 1
+    display_name: Redis 队列服务
+    docker:
+      image: plaita/redis-queue-service:latest
+    env:
+      LOKI_QUEUE_PREFIX: 'plaita:queue:'
+      LOKI_REDIS_URL: ${redis.url}
+    max_instances: 5
+    process:
+      command: python -m plaita.server.services redis_queue_service
+storage:
+  type: memory

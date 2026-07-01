@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="600" height="350" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景 -->
+  <rect width="600" height="350" fill="#f8f9fa" rx="10" ry="10"/>
+  <text x="300" y="30" text-anchor="middle" font-size="18" font-family="Arial, sans-serif" font-weight="bold">事件发布流程</text>
+  
+  <!-- 时序图 -->
+  <!-- 角色 -->
+  <text x="100" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">发布者</text>
+  <line x1="100" y1="80" x2="100" y2="320" stroke="#555" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <text x="300" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">EventBus</text>
+  <line x1="300" y1="80" x2="300" y2="320" stroke="#555" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <text x="500" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">EventStorage</text>
+  <line x1="500" y1="80" x2="500" y2="320" stroke="#555" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <!-- 交互 -->
+  <!-- 1. 发布事件 -->
+  <line x1="100" y1="100" x2="300" y2="100" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="200" y="95" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">publish(event)</text>
+  
+  <!-- 2. 规范化事件 -->
+  <rect x="250" y="110" width="100" height="30" fill="#e1f5fe" stroke="#0288d1" stroke-width="1" rx="5" ry="5"/>
+  <text x="300" y="130" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">规范化事件对象</text>
+  
+  <!-- 3. 存储事件 -->
+  <line x1="300" y1="150" x2="500" y2="150" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="400" y="145" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">store_event(event)</text>
+  
+  <rect x="450" y="160" width="100" height="30" fill="#e8f5e9" stroke="#388e3c" stroke-width="1" rx="5" ry="5"/>
+  <text x="500" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">保存事件到存储</text>
+  
+  <!-- 4. 返回事件ID -->
+  <line x1="500" y1="200" x2="300" y2="200" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="5,0"/>
+  <text x="400" y="195" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">返回 event_id</text>
+  
+  <!-- 5. 分发事件 -->
+  <rect x="250" y="210" width="100" height="40" fill="#fff8e1" stroke="#ffa000" stroke-width="1" rx="5" ry="5"/>
+  <text x="300" y="230" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">创建任务分发事件</text>
+  <text x="300" y="245" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">到所有匹配处理器</text>
+  
+  <!-- 6. 返回事件ID给发布者 -->
+  <line x1="300" y1="260" x2="100" y2="260" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="5,0"/>
+  <text x="200" y="255" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">返回 event_id</text>
+  
+  <!-- 7. 异步处理 -->
+  <rect x="250" y="280" width="100" height="30" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1" rx="5" ry="5"/>
+  <text x="300" y="300" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">异步处理事件</text>
+  
+  <!-- 箭头标记 -->
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#555"/>
+    </marker>
+  </defs>
+</svg> 

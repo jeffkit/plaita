@@ -1,0 +1,180 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600">
+  <defs>
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366F1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#4F46E5;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="extendedGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#10B981;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#059669;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="serviceGrad2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#F59E0B;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#D97706;stop-opacity:1" />
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4B5563"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563EB"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#059669"/>
+    </marker>
+  </defs>
+  
+  <!-- Background -->
+  <rect x="0" y="0" width="900" height="600" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="2"/>
+  
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#1E293B">断点续执组件关系图</text>
+  
+  <!-- Node Hierarchy (Left side) -->
+  <text x="150" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#1E293B">节点继承体系</text>
+  
+  <!-- Node base -->
+  <rect x="80" y="75" width="140" height="50" rx="6" fill="url(#nodeGrad)" stroke="#4338CA" stroke-width="2"/>
+  <text x="150" y="105" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">Node</text>
+  <text x="150" y="117" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">基础节点</text>
+  
+  <!-- Arrow -->
+  <path d="M 150 125 L 150 150" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  
+  <!-- EventNode -->
+  <rect x="80" y="155" width="140" height="50" rx="6" fill="url(#nodeGrad)" stroke="#4338CA" stroke-width="2"/>
+  <text x="150" y="185" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">EventNode</text>
+  <text x="150" y="197" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">事件节点</text>
+  
+  <!-- Arrow -->
+  <path d="M 150 205 L 150 230" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  
+  <!-- BaseExtendedNode -->
+  <rect x="60" y="235" width="180" height="50" rx="6" fill="url(#extendedGrad)" stroke="#047857" stroke-width="2"/>
+  <text x="150" y="265" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">BaseExtendedNode</text>
+  <text x="150" y="277" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">扩展节点基类</text>
+  
+  <!-- Extended Nodes -->
+  <path d="M 150 285 L 150 305 L 40 305 L 40 325" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 150 285 L 150 305 L 100 305 L 100 325" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 150 285 L 150 305 L 160 305 L 160 325" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 150 285 L 150 305 L 220 305 L 220 325" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  
+  <rect x="10" y="330" width="70" height="40" rx="4" fill="#8B5CF6" stroke="#7C3AED" stroke-width="1"/>
+  <text x="45" y="355" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">DelayNode</text>
+  
+  <rect x="85" y="330" width="70" height="40" rx="4" fill="#8B5CF6" stroke="#7C3AED" stroke-width="1"/>
+  <text x="120" y="350" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">RedisQueue</text>
+  <text x="120" y="362" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Node</text>
+  
+  <rect x="160" y="330" width="70" height="40" rx="4" fill="#8B5CF6" stroke="#7C3AED" stroke-width="1"/>
+  <text x="195" y="350" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">HttpCallback</text>
+  <text x="195" y="362" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Node</text>
+  
+  <rect x="235" y="330" width="70" height="40" rx="4" fill="#8B5CF6" stroke="#7C3AED" stroke-width="1"/>
+  <text x="270" y="350" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Approval</text>
+  <text x="270" y="362" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Node</text>
+
+  <!-- Execution Engine (Center) -->
+  <text x="500" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#1E293B">执行引擎</text>
+  
+  <rect x="380" y="75" width="240" height="120" rx="8" fill="#1E40AF" stroke="#1E3A8A" stroke-width="2"/>
+  <text x="500" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="white">FlowExecution</text>
+  <line x1="400" y1="110" x2="600" y2="110" stroke="rgba(255,255,255,0.3)"/>
+  <text x="410" y="130" font-family="Arial, sans-serif" font-size="10" fill="white">• run_distributed()</text>
+  <text x="410" y="145" font-family="Arial, sans-serif" font-size="10" fill="white">• _handle_resume_operation()</text>
+  <text x="410" y="160" font-family="Arial, sans-serif" font-size="10" fill="white">• _subscribe_event()</text>
+  <text x="410" y="175" font-family="Arial, sans-serif" font-size="10" fill="white">• trigger_flow_suspend/resume()</text>
+  
+  <!-- FlowWorker -->
+  <rect x="380" y="215" width="240" height="100" rx="8" fill="#7C3AED" stroke="#6D28D9" stroke-width="2"/>
+  <text x="500" y="245" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="white">FlowWorker</text>
+  <line x1="400" y1="255" x2="600" y2="255" stroke="rgba(255,255,255,0.3)"/>
+  <text x="410" y="275" font-family="Arial, sans-serif" font-size="10" fill="white">• start_flow()</text>
+  <text x="410" y="290" font-family="Arial, sans-serif" font-size="10" fill="white">• resume_flow()</text>
+  <text x="410" y="305" font-family="Arial, sans-serif" font-size="10" fill="white">• _process_execution_result()</text>
+  
+  <!-- Arrow between FlowExecution and FlowWorker -->
+  <path d="M 500 195 L 500 213" stroke="#2563EB" stroke-width="2" fill="none" marker-end="url(#arrowBlue)"/>
+  <text x="510" y="207" font-family="Arial, sans-serif" font-size="9" fill="#2563EB">调用</text>
+  
+  <!-- Services (Right side) -->
+  <text x="750" y="60" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#1E293B">外延服务体系</text>
+  
+  <!-- ServiceManager -->
+  <rect x="680" y="75" width="180" height="60" rx="6" fill="url(#serviceGrad2)" stroke="#B45309" stroke-width="2"/>
+  <text x="770" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">ServiceManager</text>
+  <text x="770" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">服务管理器</text>
+  
+  <!-- Arrow -->
+  <path d="M 770 135 L 770 160" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  
+  <!-- BaseExtendedService -->
+  <rect x="660" y="165" width="200" height="60" rx="6" fill="url(#serviceGrad2)" stroke="#B45309" stroke-width="2"/>
+  <text x="760" y="190" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">BaseExtendedService</text>
+  <text x="760" y="210" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">外延服务基类</text>
+  
+  <!-- Service implementations -->
+  <path d="M 760 225 L 760 245 L 680 245 L 680 265" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 760 225 L 760 245 L 760 265" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 760 225 L 760 245 L 840 245 L 840 265" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  
+  <rect x="640" y="270" width="80" height="40" rx="4" fill="#F97316" stroke="#EA580C" stroke-width="1"/>
+  <text x="680" y="290" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Delay</text>
+  <text x="680" y="302" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Service</text>
+  
+  <rect x="725" y="270" width="80" height="40" rx="4" fill="#F97316" stroke="#EA580C" stroke-width="1"/>
+  <text x="765" y="290" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">RedisQueue</text>
+  <text x="765" y="302" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Service</text>
+  
+  <rect x="810" y="270" width="80" height="40" rx="4" fill="#F97316" stroke="#EA580C" stroke-width="1"/>
+  <text x="850" y="290" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Http</text>
+  <text x="850" y="302" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="white">Callback</text>
+
+  <!-- Event System (Bottom) -->
+  <text x="450" y="395" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#1E293B">事件系统</text>
+  
+  <rect x="200" y="410" width="500" height="70" rx="8" fill="#0D9488" stroke="#0F766E" stroke-width="2"/>
+  
+  <rect x="220" y="425" width="140" height="45" rx="4" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+  <text x="290" y="450" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">EventBus</text>
+  <text x="290" y="463" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">发布/订阅</text>
+  
+  <rect x="380" y="425" width="140" height="45" rx="4" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+  <text x="450" y="450" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">EventStorage</text>
+  <text x="450" y="463" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">事件存储</text>
+  
+  <rect x="540" y="425" width="140" height="45" rx="4" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+  <text x="610" y="450" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">SubscriptionStorage</text>
+  <text x="610" y="463" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">订阅管理</text>
+
+  <!-- Storage (Very Bottom) -->
+  <text x="450" y="510" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#1E293B">状态存储</text>
+  
+  <rect x="200" y="525" width="230" height="55" rx="6" fill="#DC2626" stroke="#B91C1C" stroke-width="2"/>
+  <text x="315" y="550" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">ExecutionStorage</text>
+  <text x="315" y="567" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">执行状态持久化</text>
+  
+  <rect x="470" y="525" width="230" height="55" rx="6" fill="#DC2626" stroke="#B91C1C" stroke-width="2"/>
+  <text x="585" y="550" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="white">FlowStorage</text>
+  <text x="585" y="567" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="white">流程定义存储</text>
+
+  <!-- Connecting lines -->
+  <!-- Node to FlowExecution -->
+  <path d="M 220 180 L 378 130" stroke="#059669" stroke-width="2" stroke-dasharray="4,2" fill="none" marker-end="url(#arrowGreen)"/>
+  <text x="280" y="140" font-family="Arial, sans-serif" font-size="9" fill="#059669">执行</text>
+  
+  <!-- FlowWorker to EventBus -->
+  <path d="M 500 315 L 450 408" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
+  <text x="455" y="365" font-family="Arial, sans-serif" font-size="9" fill="#059669">订阅/发布</text>
+  
+  <!-- Service to EventBus -->
+  <path d="M 760 310 L 610 423" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
+  <text x="700" y="370" font-family="Arial, sans-serif" font-size="9" fill="#059669">触发事件</text>
+  
+  <!-- FlowWorker to Storage -->
+  <path d="M 420 315 L 340 523" stroke="#2563EB" stroke-width="2" fill="none" marker-end="url(#arrowBlue)"/>
+  <text x="350" y="425" font-family="Arial, sans-serif" font-size="9" fill="#2563EB">保存/加载</text>
+  
+  <!-- EventBus to Storage -->
+  <path d="M 450 480 L 450 523" stroke="#4B5563" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+</svg>

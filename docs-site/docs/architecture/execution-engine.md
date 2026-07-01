@@ -1,0 +1,102 @@
+# 执行引擎
+
+`FlowExecution` 是一个**薄 facade**，自身几乎不持有逻辑，而是组合四个独立组件 + 一组策略类完成执行。这种拆分让每个组件可独立测试与替换。
+
+## 组件职责
+
+```mermaid
+flowchart TD
+    FE["FlowExecution facade"]
+    FE --> CTX["ExecutionContext<br/>状态存储 / 变量作用域 / 表达式求值 / 序列化"]
+    FE --> RUN["NodeRunner<br/>单节点执行 / 超时 / 重试 / 错误策略 / 协作取消"]
+    FE --> CM["CallbackManager<br/>生命周期事件分发"]
+    FE --> ST["ExecutionStrategy<br/>Normal / Generator / Distributed"]
+    ST --> CTX
+    ST --> RUN
+    ST --> CM
+```
+
+| 组件 | 模块 | 职责 |
+|------|------|------|
+| `ExecutionContext` | `plaita.core.context` | 状态、变量作用域、父子链、event bus 获取、`to_dict`/`from_dict` |
+| `NodeRunner` | `plaita.core.runner` | 单节点执行 + 超时 + 重试 + 错误策略 + 协作式取消 |
+| `CallbackManager` | `plaita.core.callback` | 把 `on_*` 事件分发给多个 `FlowCallback` |
+| `ExecutionStrategy` | `plaita.core.executor` | 模式相关的控制流：`NormalStrategy` / `GeneratorStrategy` / `DistributedStrategy` |
+
+## facade 的属性代理
+
+`FlowExecution` 通过 `__getattr__` / `__setattr__` 把属性读写代理到 `ExecutionContext`，让旧的"在 execution 上直接读写状态"的 API 保持可用，同时类本身保持纤薄：
+
+- 已知真实属性（`mode` / `timeout` / `parent` / `_ctx` 等）写到 facade 自身
+- `ExecutionContext` 上已有的属性（如 `express_prefix`）写到 context
+- 其它未知属性默认写入 context state（可被分布式 `to_dict` 持久化、读写对称）
+- `strict_attrs=True` 时未知属性写入直接抛 `AttributeError`，避免拼写错误（如 `tiemout`）静默持久化
+
+`trigger_*` 会被映射到 `CallbackManager.on_*`，作为手动触发事件的捷径。
+
+## 执行策略
+
+三种策略实现同一 `ExecutionStrategy` Protocol：
+
+### NormalStrategy
+
+```python
+next_node = flow.start_node
+while next_node:
+    result, branch = await runner.run_node(flow, next_node, max_timeout_ms=remaining, ...)
+    if next_node is End: break
+    next_node = flow.next_node(next_node, branch)
+return result
+```
+
+同步阻塞跑到 `End`，维护流程级剩余超时预算下传给每个节点。
+
+### GeneratorStrategy
+
+与 Normal 类似，但每节点 `yield` 一次 `_create_lazy_output`，把 `(id, type, result, branch, context, is_end)` 交给调用方。`on_flow_end` 推迟到生成器消费完毕或关闭时触发。
+
+### DistributedStrategy
+
+每次调用只推进一个节点：
+
+1. 若有 `saved_context`：恢复上下文；否则 `clean` + `setup_flow` + `on_flow_start`
+2. 若 `resume_type != "continue"`：走 `_handle_resume`（cancel/timeout/event 唤醒事件节点）
+3. 否则确定当前节点（从 `LAST_NODE` 续跑或从 start 开始），执行一个节点
+4. 若是 `EventNode`：订阅事件 → `on_node_suspend` / `on_flow_suspend` → 返回 `is_suspend=True` 的输出
+
+## NodeRunner 详解
+
+`NodeRunner.run_node` 负责一个节点的完整执行周期：
+
+1. `callback_manager.on_node_start`
+2. `_execute_with_retry`：按 `retryTimes` 重试，每次按 `min(节点timeout, 剩余预算)` 设超时
+3. 成功：写 `LAST_NODE` / `BRANCH` / `$NODE[id]`，`on_node_end`，返回 `(result, branch)`
+4. 异常分支处理：
+    - `FlowResultError` → 包装为 `FlowExecutionException(ERROR_RESULT)`
+    - `TimeoutError` → 走 `timeoutHandler`（abort 抛异常 / continue 返 None / continue_with 返默认值）
+    - 其它异常 → 重试耗尽后走 `errorHandler`（abort/continue/continue_with）
+
+### 同步/异步执行桥接
+
+- **异步节点**（`async_node=True` 或有 `arun` 协程）：`asyncio.wait_for(node.arun(ctx), timeout)`
+- **同步节点**：跑在 daemon 线程上，经 `loop.create_future()` + `call_soon_threadsafe` 桥接结果；超时时 set `cancel_event` 并放弃线程（不 join，保持事件循环自由）
+
+## 超时合并
+
+`_merge_timeout` 把"流程 `timeout`"与"调用方 `timeout`"取更严者；节点执行时再与"节点自身 `timeout`"取更严。任一为空表示"无限制"。
+
+## 公共入口
+
+| 方法 | 用途 |
+|------|------|
+| `Flow.run()` / `Flow.arun()` / `Flow.debug()` | Normal / 异步 Normal / Generator 入口 |
+| `FlowExecution.run_compatible(flow, lazy, *args)` | 同步执行（lazy=True 返回同步生成器） |
+| `FlowExecution.arun_compatible(flow, lazy, *args)` | 异步执行（lazy=True 返回异步生成器） |
+| `FlowExecution.run_distributed(flow, params, *, saved_context, resume_type, resume_data)` | Distributed 推进一步 |
+| `FlowExecution.run(..., mode=...)` | 类方法入口，distributed 路由到 `run_distributed` |
+
+## 下一步
+
+- [状态管理](state-management.md)
+- [时序图](sequence-diagrams.md)
+- [API: plaita.core.executor](../api/executor.md)

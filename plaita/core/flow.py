@@ -1,0 +1,242 @@
+"""
+plaita.core.flow — Flow model definition and entry-point helpers.
+
+Contains the canonical Flow class, parse(), and parse_and_run().
+"""
+
+from __future__ import annotations
+
+import json
+import warnings
+from typing import Any, Dict, List, Optional, Union
+
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+
+from plaita.core import types
+from plaita.core.errors import FlowErrorType, FlowExecutionException
+from plaita.io import Property
+from plaita.logger import logger
+from plaita.node import End, Node, Start, get_default_registry
+
+
+class Flow(BaseModel):
+    """流程定义
+
+    ``flow_id`` is the canonical identifier.  The legacy ``id`` accessor
+    still works but emits a DeprecationWarning.
+    """
+
+    flow_id: Optional[str] = None
+    version: Optional[str] = None
+    runtime: str = "python"
+    input_type: Optional[Union[Property, str]] = None
+    output_type: Optional[Union[Property, str]] = None
+    nodes: Optional[List[Node]] = Field(default_factory=list)
+    author: Optional[str] = ""
+    desc: Optional[str] = ""
+    metadata: Optional[Dict] = Field(default_factory=dict)
+    timeout: Optional[str] = ""
+    global_context: Optional[Dict] = Field(default_factory=dict)
+
+    # 节点 id -> Node 的索引, 惰性构建, 让 find_node_by_id/start_node 不必每次线性扫描
+    _node_index: Dict[str, Node] = PrivateAttr(default_factory=dict)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def id(self) -> Optional[str]:
+        """Deprecated — use ``flow_id`` instead."""
+        warnings.warn(
+            "Flow.id is deprecated, use Flow.flow_id instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.flow_id
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_flow(cls, data: Dict) -> Dict:
+        """Parse flow definition and handle field name compatibility."""
+        if not data:
+            raise ValueError("Flow content cannot be empty")
+
+        normalized = data.copy()
+
+        # Normalize id / flowId → flow_id (flow_id takes priority)
+        if "flow_id" not in normalized or normalized.get("flow_id") is None:
+            for legacy_key in ("flowId", "id"):
+                if legacy_key in normalized and normalized[legacy_key] is not None:
+                    normalized["flow_id"] = normalized.pop(legacy_key)
+                    break
+        # Remove legacy keys so Pydantic doesn't choke on unknown fields
+        normalized.pop("flowId", None)
+        normalized.pop("id", None)
+
+        camel_mappings = {
+            "inputType": "input_type",
+            "outputType": "output_type",
+            "globalContext": "global_context",
+        }
+        for old_key, new_key in camel_mappings.items():
+            if old_key in normalized:
+                value = normalized.pop(old_key)
+                if value is not None:
+                    normalized[new_key] = value
+
+        for key in ["input_type", "output_type"]:
+            if key in normalized:
+                normalized[key] = Property.from_json(normalized[key])
+
+        if "nodes" in normalized:
+            _registry = get_default_registry()
+            normalized["nodes"] = [_registry.parse_node(node) for node in normalized["nodes"]]
+
+        return normalized
+
+    @staticmethod
+    def from_string(content: str) -> Flow:
+        """从 JSON 或 YAML 字符串解析 Flow。
+
+        JSON 走 ``model_validate_json``；YAML（及无法按 JSON 解析的内容）
+        走 ``plaita.io_format.loads`` 再 ``model_validate``。
+        """
+        from plaita.io_format import loads
+
+        if not content or not content.strip():
+            raise ValueError("Flow content cannot be empty")
+        # 优先 JSON，保持历史行为与错误信息
+        if content.lstrip()[:1] in ("{", "["):
+            try:
+                return Flow.model_validate_json(content)
+            except Exception:
+                pass
+        data = loads(content)
+        return Flow.model_validate(data)
+
+    @classmethod
+    def from_file(cls, path: str) -> "Flow":
+        """从文件加载 Flow，按后缀（.json/.yaml/.yml）选择解析器。"""
+        from plaita.io_format import load_file
+
+        data = load_file(path)
+        return cls.model_validate(data)
+
+    def _ensure_index(self) -> Dict[str, Node]:
+        """构建/刷新节点 id 索引, O(n) 摊销。"""
+        if self._node_index and len(self._node_index) == len(self.nodes or []):
+            return self._node_index
+        self._node_index = {n.id: n for n in (self.nodes or [])}
+        return self._node_index
+
+    @property
+    def start_node(self):
+        index = self._ensure_index()
+        for node in self.nodes:
+            if node.node_type == Start.node_type:
+                return node
+
+        # 无显式 Start: 找入度为 0 的节点(未被任何节点引用为 next/branch.next)
+        referenced = set()
+        for n in self.nodes:
+            if n.next:
+                referenced.add(n.next)
+            if getattr(n, "branches", None):
+                for b in n.branches:
+                    if b.next:
+                        referenced.add(b.next)
+        for n in self.nodes:
+            if n.id not in referenced:
+                return n
+        return self.nodes[0] if self.nodes else None
+
+    def find_node_by_id(self, node_id) -> Optional[Node]:
+        if node_id is None:
+            return None
+        index = self._ensure_index()
+        node = index.get(node_id)
+        if node is None:
+            raise FlowExecutionException(
+                -500,
+                f"Node with id '{node_id}' not found",
+                FlowErrorType.NODE_NOT_FOUND,
+            )
+        return node
+
+    def next_node(self, current: Node, branch=None) -> Optional[Node]:
+        if current.node_type == End.node_type:
+            return None
+        target = self._get_target_node(current, branch)
+        ret = self.find_node_by_id(target)
+        logger.debug(f"finding next node {target} for {current.id}, result: {ret.id if ret else None}")
+        return ret
+
+    def _get_target_node(self, current: Node, branch=None) -> str:
+        if (not current.branching) and current.next:
+            return current.next
+        return self._get_branch_target(current, branch)
+
+    def _get_branch_target(self, current: Node, branch: str) -> str:
+        if not hasattr(current, "branches"):
+            logger.warning(f"Node {current.id} has no branches")
+            return None
+        logger.debug(f"current node {current.id} has branches: {current.branches}")
+        for b in current.branches:
+            target = b.next or b.name
+            if target == branch:
+                return target
+        logger.warning(f"branch {branch} not found for node {current.id}")
+        return None
+
+    def run(self, *args, **params):
+        from plaita.core.executor import FlowExecution
+        return FlowExecution().run_compatible(self, False, *args, **params)
+
+    async def arun(self, *args, **params):
+        from plaita.core.executor import FlowExecution
+        return await FlowExecution().arun_compatible(self, False, *args, **params)
+
+    def debug(self, *args, **params):
+        from plaita.core.executor import FlowExecution
+        return FlowExecution().run_compatible(self, True, *args, **params)
+
+    @property
+    def input_property(self):
+        return self.input_type
+
+    @property
+    def output_property(self):
+        return self.output_type
+
+
+def parse(content: Union[str, dict]) -> Optional[Flow]:
+    """Parse flow definition from JSON/YAML string or dict.
+
+    字符串内容自动识别 JSON 或 YAML（YAML 需安装 ``plaita[yaml]``）；
+    dict 直接走模型校验。所有解析最终都经过 ``Flow.parse_flow`` 这个
+    model_validator，行为与历史完全一致。
+    """
+    if not content:
+        return None
+    if isinstance(content, str):
+        from plaita.io_format import loads
+
+        data = loads(content)
+    else:
+        data = content
+    runtime = data.get("runtime", "python")
+    if runtime != "python":
+        raise RuntimeError(f"UnSupport runtime：{runtime}")
+    return Flow.model_validate(data)
+
+
+def parse_and_run(content: str, *args, **kwargs):
+    """Parse and execute a flow definition.
+
+    支持 JSON 与 YAML 两种文本格式。
+    """
+    from plaita.core.executor import FlowExecution
+    from plaita.io_format import loads
+
+    data = loads(content)
+    flow = Flow.model_validate(data)
+    return FlowExecution().run_compatible(flow, False, *args, **kwargs)

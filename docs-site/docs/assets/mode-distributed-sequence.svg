@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 620">
+  <defs>
+    <style>
+      .participant-box { fill: #fff5f5; stroke: #c53030; stroke-width: 2; rx: 6; }
+      .participant-text { font-family: 'PingFang SC', 'Microsoft YaHei', 'SF Mono', monospace; font-size: 11px; font-weight: bold; fill: #742a2a; }
+      .lifeline { stroke: #feb2b2; stroke-width: 1; stroke-dasharray: 6,4; }
+      .activation { fill: #fed7d7; stroke: #f56565; stroke-width: 1.5; }
+      .message { stroke: #c53030; stroke-width: 1.5; }
+      .message-text { font-family: 'PingFang SC', 'Microsoft YaHei', 'SF Mono', monospace; font-size: 10px; fill: #742a2a; }
+      .return { stroke: #fc8181; stroke-width: 1.5; stroke-dasharray: 5,3; }
+      .loop-box { fill: rgba(197, 48, 48, 0.1); stroke: #c53030; stroke-width: 1.5; }
+      .loop-label { fill: #c53030; }
+      .loop-text { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 10px; fill: white; font-weight: bold; }
+      .note-box { fill: #feebc8; stroke: #dd6b20; stroke-width: 1; }
+      .note-text { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 9px; fill: #7b341e; }
+      .storage-box { fill: #bee3f8; stroke: #3182ce; stroke-width: 1.5; rx: 3; }
+      .storage-text { font-family: 'PingFang SC', 'Microsoft YaHei', 'SF Mono', monospace; font-size: 10px; fill: #2c5282; }
+      .title { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 16px; font-weight: bold; fill: #742a2a; }
+      .subtitle { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 11px; fill: #4a5568; }
+      .phase-label { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 11px; fill: #c53030; font-weight: bold; }
+      .process-box { fill: #f7fafc; stroke: #718096; stroke-width: 1; stroke-dasharray: 3,2; }
+    </style>
+    <marker id="arrow-dist" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#c53030"/>
+    </marker>
+    <marker id="arrow-return-dist" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fc8181"/>
+    </marker>
+    <marker id="arrow-storage" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#3182ce"/>
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text class="title" x="425" y="25" text-anchor="middle">Distributed 模式 - 跨进程执行</text>
+  <text class="subtitle" x="425" y="42" text-anchor="middle">通过上下文持久化实现跨进程暂停和恢复执行</text>
+  
+  <!-- Process boundaries -->
+  <rect class="process-box" x="25" y="55" width="260" height="540" rx="5"/>
+  <text class="phase-label" x="155" y="72" text-anchor="middle">进程 A（初始执行）</text>
+  
+  <rect class="process-box" x="300" y="55" width="260" height="540" rx="5"/>
+  <text class="phase-label" x="430" y="72" text-anchor="middle">存储层</text>
+  
+  <rect class="process-box" x="575" y="55" width="260" height="540" rx="5"/>
+  <text class="phase-label" x="705" y="72" text-anchor="middle">进程 B（恢复执行）</text>
+  
+  <!-- Participants -->
+  <g transform="translate(40, 80)">
+    <rect class="participant-box" x="0" y="0" width="80" height="32"/>
+    <text class="participant-text" x="40" y="21" text-anchor="middle">调度器</text>
+  </g>
+  
+  <g transform="translate(160, 80)">
+    <rect class="participant-box" x="0" y="0" width="110" height="32"/>
+    <text class="participant-text" x="55" y="21" text-anchor="middle">执行器 A</text>
+  </g>
+  
+  <g transform="translate(370, 80)">
+    <rect class="storage-box" x="0" y="0" width="100" height="32"/>
+    <text class="storage-text" x="50" y="21" text-anchor="middle">上下文存储</text>
+  </g>
+  
+  <g transform="translate(600, 80)">
+    <rect class="participant-box" x="0" y="0" width="80" height="32"/>
+    <text class="participant-text" x="40" y="21" text-anchor="middle">调度器</text>
+  </g>
+  
+  <g transform="translate(710, 80)">
+    <rect class="participant-box" x="0" y="0" width="110" height="32"/>
+    <text class="participant-text" x="55" y="21" text-anchor="middle">执行器 B</text>
+  </g>
+  
+  <!-- Lifelines -->
+  <line class="lifeline" x1="80" y1="112" x2="80" y2="580"/>
+  <line class="lifeline" x1="215" y1="112" x2="215" y2="580"/>
+  <line class="lifeline" x1="420" y1="112" x2="420" y2="580"/>
+  <line class="lifeline" x1="640" y1="112" x2="640" y2="580"/>
+  <line class="lifeline" x1="765" y1="112" x2="765" y2="580"/>
+  
+  <!-- Activations -->
+  <rect class="activation" x="75" y="130" width="10" height="160"/>
+  <rect class="activation" x="210" y="145" width="10" height="130"/>
+  <rect class="activation" x="415" y="240" width="10" height="30"/>
+  <rect class="activation" x="415" y="350" width="10" height="30"/>
+  <rect class="activation" x="635" y="400" width="10" height="150"/>
+  <rect class="activation" x="760" y="415" width="10" height="120"/>
+  
+  <!-- Phase 1: Initial Execution -->
+  <text class="phase-label" x="35" y="145">阶段 1</text>
+  
+  <!-- Scheduler -> Execution A: run distributed -->
+  <line class="message" x1="85" y1="155" x2="205" y2="155" marker-end="url(#arrow-dist)"/>
+  <text class="message-text" x="120" y="150">run(mode='distributed')</text>
+  
+  <!-- Execution A: process nodes -->
+  <path class="message" d="M220,175 L250,175 L250,190 L220,190" marker-end="url(#arrow-dist)"/>
+  <text class="message-text" x="255" y="185">处理节点...</text>
+  
+  <!-- Wait/Pause point note -->
+  <rect class="note-box" x="130" y="200" width="100" height="35" rx="3"/>
+  <text class="note-text" x="180" y="215" text-anchor="middle">到达异步</text>
+  <text class="note-text" x="180" y="227" text-anchor="middle">等待点</text>
+  
+  <!-- Execution A -> Context Store: save context -->
+  <line class="message" x1="220" y1="250" x2="410" y2="250" stroke="#3182ce" stroke-width="1.5" marker-end="url(#arrow-storage)"/>
+  <text class="storage-text" x="295" y="245">save_context(flow_id, context)</text>
+  
+  <!-- Context Store: persist -->
+  <path stroke="#3182ce" fill="none" stroke-width="1.5" d="M425,260 L455,260 L455,275 L425,275" marker-end="url(#arrow-storage)"/>
+  <text class="storage-text" x="460" y="270">持久化到 Redis/DB</text>
+  
+  <!-- Return to Scheduler -->
+  <line class="return" x1="210" y1="290" x2="90" y2="290" marker-end="url(#arrow-return-dist)"/>
+  <text class="message-text" x="130" y="285">{status: 'waiting', context_id}</text>
+  
+  <!-- Time passing indicator -->
+  <line stroke="#718096" stroke-width="1" stroke-dasharray="10,5" x1="50" y1="320" x2="820" y2="320"/>
+  <text class="message-text" x="435" y="335" text-anchor="middle" fill="#718096" font-style="italic">... 时间流逝，外部事件发生 ...</text>
+  
+  <!-- Phase 2: Resume Execution -->
+  <text class="phase-label" x="590" y="400">阶段 2</text>
+  
+  <!-- Scheduler B -> Context Store: load context -->
+  <line class="message" x1="635" y1="360" x2="430" y2="360" stroke="#3182ce" stroke-width="1.5" marker-end="url(#arrow-storage)"/>
+  <text class="storage-text" x="510" y="355">load_context(context_id)</text>
+  
+  <!-- Context Store -> Scheduler B: context -->
+  <line class="return" x1="420" y1="380" x2="630" y2="380" stroke="#3182ce" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow-storage)"/>
+  <text class="storage-text" x="510" y="375">上下文数据</text>
+  
+  <!-- Scheduler B -> Execution B: resume -->
+  <line class="message" x1="645" y1="420" x2="755" y2="420" marker-end="url(#arrow-dist)"/>
+  <text class="message-text" x="680" y="415">run(context=ctx)</text>
+  
+  <!-- Execution B: restore and continue -->
+  <path class="message" d="M770,440 L805,440 L805,455 L770,455" marker-end="url(#arrow-dist)"/>
+  <text class="message-text" x="690" y="450">恢复上下文</text>
+  
+  <!-- Execution B: continue processing -->
+  <path class="message" d="M770,470 L805,470 L805,485 L770,485" marker-end="url(#arrow-dist)"/>
+  <text class="message-text" x="650" y="480">从上次节点继续</text>
+  
+  <!-- Execution B: complete -->
+  <path class="message" d="M770,500 L805,500 L805,515 L770,515" marker-end="url(#arrow-dist)"/>
+  <text class="message-text" x="680" y="510">完成流程</text>
+  
+  <!-- Return final result -->
+  <line class="return" x1="760" y1="535" x2="650" y2="535" marker-end="url(#arrow-return-dist)"/>
+  <text class="message-text" x="690" y="530">最终结果</text>
+  
+  <!-- Key characteristics note -->
+  <rect fill="#fff5f5" stroke="#c53030" x="15" y="560" width="820" height="35" rx="4"/>
+  <text class="message-text" x="25" y="575" font-weight="bold">主要特点：</text>
+  <text class="message-text" x="25" y="588">• 上下文序列化与持久化  • 跨进程/跨机器恢复  • 适用于长时间工作流  • 处理异步等待和外部事件</text>
+</svg>

@@ -1,0 +1,13 @@
+{
+  "message": "这是通过文件加载的测试事件数据",
+  "timestamp": 1683000000,
+  "data": {
+    "value1": 100,
+    "value2": "测试字符串",
+    "value3": {
+      "nested": true,
+      "list": [1, 2, 3, 4, 5]
+    }
+  },
+  "source": "test_event.json"
+} 

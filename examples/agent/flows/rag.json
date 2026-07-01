@@ -1,0 +1,24 @@
+{
+    "flow_id": "rag",
+    "inputType": { "dataType": "object" },
+    "nodes": [
+        { "type": "start", "id": "start", "next": "retrieve" },
+        {
+            "type": "retrieve",
+            "id": "retrieve",
+            "query": "$INPUT.question",
+            "library": "kb",
+            "top_k": 2,
+            "next": "answer"
+        },
+        {
+            "type": "llm",
+            "id": "answer",
+            "model": "responder",
+            "system": "你是问答助手，只能根据提供的资料回答。",
+            "prompt": "资料：{% $F.join($NODE.retrieve, \", \") %}\n\n问题：{% $INPUT.question %}\n\n请用一句话回答。",
+            "next": "end"
+        },
+        { "type": "end", "id": "end", "output": "$NODE.answer", "resultType": "success" }
+    ]
+}

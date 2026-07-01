@@ -1,0 +1,63 @@
+version: "1"
+
+project:
+  name: plaita-console
+  description: "Plaita Console 管理台 E2E 测试"
+
+service:
+  build:
+    dockerfile: /Users/kongjie/projects/plaita/plaita/plaita-console/Dockerfile.e2e
+    context: /Users/kongjie/projects/plaita/plaita/plaita-console
+    image: plaita-console-e2e:latest
+
+  container:
+    name: plaita-console-backend-e2e
+    ports:
+      - "18080:80"
+    environment:
+      LOKI_CONSOLE_REDIS_URL: redis://host.docker.internal:6379/0
+      LOKI_CONSOLE_HOST: "0.0.0.0"
+      LOKI_CONSOLE_PORT: "80"
+    healthcheck:
+      path: /health
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      startPeriod: 20s
+
+  vars:
+    base_url: http://localhost:18080
+
+tests:
+  suites:
+    - name: 健康检查
+      id: health
+      file: tests/e2e/health.yaml
+
+    - name: 执行管理
+      id: executions
+      file: tests/e2e/executions.yaml
+
+    - name: 事件管理
+      id: events
+      file: tests/e2e/events.yaml
+
+    - name: 服务与拓扑
+      id: services
+      file: tests/e2e/services.yaml
+
+    - name: 队列与日志
+      id: queues-logs
+      file: tests/e2e/queues-logs.yaml
+
+    - name: 服务拓扑
+      id: services-topology
+      file: tests/e2e/services-topology.yaml
+
+    - name: 集群管理
+      id: cluster
+      file: tests/e2e/cluster.yaml
+
+    - name: 错误处理
+      id: errors
+      file: tests/e2e/errors.yaml

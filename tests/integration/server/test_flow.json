@@ -1,0 +1,58 @@
+{
+  "flow_id": "event_flow_demo",
+  "name": "事件流程演示",
+  "version": "1.0.0",
+  "desc": "使用真正的EventNode节点演示事件驱动流程",
+  "author": "Plaita开发团队",
+  "runtime": "python",
+  "timeout": "PT60S",
+  "input_type": {
+    "type": "object",
+    "properties": {
+      "event_type": {
+        "type": "string",
+        "description": "事件类型",
+        "default": "demo.user.action"
+      },
+      "message": {
+        "type": "string",
+        "description": "要传递的消息",
+        "default": "Hello Event World"
+      }
+    }
+  },
+  "output_type": {
+    "type": "string",
+    "description": "返回的消息"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "name": "开始",
+      "type": "start",
+      "next": "wait_for_event"
+    },
+    {
+      "id": "wait_for_event",
+      "name": "等待事件",
+      "type": "event",
+      "event_type": "$INPUT.event_type",
+      "event_filter": {
+        "source": "test"
+      },
+      "next": "end"
+    },
+    {
+      "id": "end",
+      "name": "结束",
+      "type": "end",
+      "result_type": "success",
+      "output": "$INPUT.message"
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "description": "演示延时和事件节点的流程",
+    "categories": ["demo", "event", "delay"]
+  }
+} 

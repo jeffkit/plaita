@@ -1,0 +1,222 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { api } from '../services/api'
+import { useFlowEditor } from '../stores/flowEditor'
+import { jsonToFlow, flowToJson, extractLayout, type FlowNodeData } from '../components/flow/flowConverter'
+import NodePalette from '../components/flow/NodePalette'
+import FlowCanvas from '../components/flow/FlowCanvas'
+import NodeConfigDrawer from '../components/flow/NodeConfigDrawer'
+import DryRunPanel from '../components/flow/DryRunPanel'
+import SourceViewPanel from '../components/flow/SourceViewPanel'
+import type { Node, Edge } from '@xyflow/react'
+
+export default function FlowEditor() {
+  const { flowId } = useParams<{ flowId: string }>()
+  const [search] = useSearchParams()
+  const versionParam = search.get('version') || ''
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+
+  const [version, setVersion] = useState(versionParam || '0.0.1')
+  const [desc, setDesc] = useState('')
+  // 流程输入类型：决定 $INPUT 在试跑/运行时是否可用。默认 object，使
+  // $INPUT.xxx 表达式能取到传入参数；加载已有版本时沿用其声明。
+  const [inputType, setInputType] = useState<unknown>({ dataType: 'object' })
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [showDryRun, setShowDryRun] = useState(false)
+  const [showSource, setShowSource] = useState(false)
+
+  const setFlowContext = useFlowEditor((s) => s.setFlowContext)
+  const setGraph = useFlowEditor((s) => s.setGraph)
+  const reset = useFlowEditor((s) => s.reset)
+  const nodes = useFlowEditor((s) => s.nodes)
+  const edges = useFlowEditor((s) => s.edges)
+  const dirty = useFlowEditor((s) => s.dirty)
+
+  const flowQuery = useQuery({
+    queryKey: ['flow', flowId],
+    queryFn: () => api.getFlow(flowId!),
+    enabled: !!flowId,
+  })
+
+  const versionQuery = useQuery({
+    queryKey: ['version', flowId, versionParam],
+    queryFn: () => api.getVersion(flowId!, versionParam),
+    enabled: !!flowId && !!versionParam,
+    retry: false,
+  })
+
+  // 初始化画布
+  useEffect(() => {
+    if (!flowId) return
+    if (versionParam && versionQuery.data) {
+      const def = JSON.parse(versionQuery.data.definition || '{}') as Record<string, unknown>
+      const layout = JSON.parse(versionQuery.data.layout || '{}') as Record<string, { x: number; y: number }>
+      const { nodes: ns, edges: es } = jsonToFlow(def, layout)
+      setGraph(ns as Node[], es as Edge[])
+      setDesc((def.desc as string) || versionQuery.data.definition || '')
+      setInputType(def.inputType ?? { dataType: 'object' })
+      setVersion(versionParam)
+      setFlowContext(flowId, versionParam, { flow_id: flowId, version: versionParam, desc: def.desc as string })
+    } else if (!versionParam) {
+      // 新版本：放 start + end 两个默认节点
+      const start: Node = {
+        id: 'start',
+        type: 'plaitaNode',
+        position: { x: 200, y: 80 },
+        data: { type: 'start', name: 'start', fields: {} },
+      }
+      const end: Node = {
+        id: 'end',
+        type: 'plaitaNode',
+        position: { x: 200, y: 240 },
+        data: { type: 'end', name: 'end', fields: { output: '$INPUT.name', resultType: 'success' } },
+      }
+      const edge: Edge = { id: 'e-start-end', source: 'start', target: 'end', sourceHandle: 'true' }
+      setGraph([start, end], [edge])
+      setFlowContext(flowId, version, { flow_id: flowId, version })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowId, versionParam, versionQuery.data])
+
+  useEffect(() => () => reset(), [reset])
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const meta = { flow_id: flowId, version, desc, inputType }
+      const def = flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], meta)
+      const layout = extractLayout(nodes as Node[])
+      return api.saveVersion(flowId!, version, {
+        definition: JSON.stringify(def, null, 2),
+        layout: JSON.stringify(layout),
+      })
+    },
+    onSuccess: () => {
+      setSaveError(null)
+      setMsg(`已保存草稿 ${flowId}@${version}`)
+      qc.invalidateQueries({ queryKey: ['flow', flowId] })
+    },
+    onError: (e: Error) => setSaveError(e.message),
+  })
+
+  const publishMutation = useMutation({
+    mutationFn: async () => {
+      // 先保存再发布
+      const meta = { flow_id: flowId, version, desc, inputType }
+      const def = flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], meta)
+      const layout = extractLayout(nodes as Node[])
+      await api.saveVersion(flowId!, version, {
+        definition: JSON.stringify(def, null, 2),
+        layout: JSON.stringify(layout),
+      })
+      return api.publishFlow(flowId!, version)
+    },
+    onSuccess: () => {
+      setSaveError(null)
+      setMsg(`已发布 ${flowId}@${version}`)
+      qc.invalidateQueries({ queryKey: ['flow', flowId] })
+    },
+    onError: (e: Error) => setSaveError(e.message),
+  })
+
+  const status = useMemo(() => {
+    const versions = flowQuery.data?.versions || []
+    return versions.find((v) => v.version === version)?.status
+  }, [flowQuery.data, version])
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* 顶部工具栏 */}
+      <div className="flex items-center gap-3 px-4 py-2 bg-dark-900/80 border-b border-dark-700 text-sm">
+        <button
+          onClick={() => navigate('/flows')}
+          className="text-dark-300 hover:text-dark-100"
+        >
+          ← 返回列表
+        </button>
+        <span className="font-semibold text-dark-100">{flowId}</span>
+        <span className="text-dark-400">@</span>
+        <input
+          value={version}
+          onChange={(e) => setVersion(e.target.value)}
+          className="input w-28"
+          placeholder="0.0.1"
+        />
+        {status && (
+          <span className={`text-xs px-2 py-0.5 rounded ${status === 'published' ? 'bg-green-600/30 text-green-400' : 'bg-dark-700 text-dark-300'}`}>
+            {status}
+          </span>
+        )}
+        <input
+          value={desc}
+          onChange={(e) => setDesc(e.target.value)}
+          placeholder="流程描述"
+          className="input w-48"
+        />
+        <div className="flex-1" />
+        {dirty && <span className="text-xs text-yellow-400">未保存</span>}
+        <button
+          onClick={() => saveMutation.mutate()}
+          disabled={saveMutation.isPending}
+          className="bg-dark-700 hover:bg-dark-600 px-3 py-1.5 rounded text-dark-100"
+        >
+          保存草稿
+        </button>
+        <button
+          onClick={() => publishMutation.mutate()}
+          disabled={publishMutation.isPending}
+          className="bg-plaita-600 hover:bg-plaita-500 px-3 py-1.5 rounded text-white"
+        >
+          发布
+        </button>
+        <button
+          onClick={() => setShowDryRun((v) => !v)}
+          className="bg-dark-700 hover:bg-dark-600 px-3 py-1.5 rounded text-dark-100"
+        >
+          试跑
+        </button>
+        <button
+          onClick={() => setShowSource((v) => !v)}
+          className={`px-3 py-1.5 rounded text-dark-100 ${
+            showSource ? 'bg-plaita-600 hover:bg-plaita-500 text-white' : 'bg-dark-700 hover:bg-dark-600'
+          }`}
+        >
+          源码
+        </button>
+      </div>
+
+      {saveError && (
+        <div className="px-4 py-1 bg-red-600/20 text-red-300 text-xs">{saveError}</div>
+      )}
+      {msg && (
+        <div className="px-4 py-1 bg-green-600/20 text-green-300 text-xs">{msg}</div>
+      )}
+
+      {/* 编辑器主体 */}
+      <div className="flex-1 flex min-h-0">
+        <NodePalette />
+        <FlowCanvas />
+        <NodeConfigDrawer />
+        {showDryRun && (
+          <DryRunPanel
+            flowJson={JSON.stringify(
+              flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], { flow_id: flowId, version, desc, inputType }),
+              null,
+              2
+            )}
+            onClose={() => setShowDryRun(false)}
+          />
+        )}
+        {showSource && (
+          <SourceViewPanel
+            flow={flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], { flow_id: flowId, version, desc, inputType })}
+            onClose={() => setShowSource(false)}
+          />
+        )}
+      </div>
+      <style>{`.input{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 8px;color:#e2e8f0;font-size:13px}`}</style>
+    </div>
+  )
+}

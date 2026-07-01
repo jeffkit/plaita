@@ -1,0 +1,107 @@
+name: 错误处理
+sequential: true
+
+cases:
+  # --- 404 错误 ---
+  - name: "不存在的 API 路由返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/does-not-exist
+    expect:
+      status: 404
+
+  - name: "不存在的执行 ID 返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions/00000000-0000-0000-0000-000000000000
+    expect:
+      status: 404
+      body:
+        detail: { contains: "执行不存在" }
+
+  - name: "不存在的服务实例返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services/nonexistent
+    expect:
+      status: 404
+
+  - name: "不存在的订阅返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/events/subscriptions/nonexistent
+    expect:
+      status: 404
+      body:
+        detail: { contains: "订阅不存在" }
+
+  # --- 422 请求验证 ---
+  - name: "启动流程缺少 flow_id 返回 422"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        params: {}
+    expect:
+      status: 422
+
+  - name: "发布事件缺少 event_type 返回 422"
+    request:
+      method: POST
+      url: http://localhost:18080/api/events/publish
+      headers:
+        Content-Type: application/json
+      body:
+        data: {}
+    expect:
+      status: 422
+
+  - name: "恢复执行缺少 resume_type 返回 422"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions/some-id/resume
+      headers:
+        Content-Type: application/json
+      body:
+        data: {}
+    expect:
+      status: 422
+
+  # --- 边界情况 ---
+  - name: "空 body POST 请求"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body: {}
+    expect:
+      status: 422
+
+  - name: "超大分页参数不崩溃"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?page=99999&size=20
+    expect:
+      status: 200
+      body:
+        executions: { type: array }
+        page: 99999
+        total: { type: number }
+
+  - name: "日志 limit 超限使用默认值"
+    request:
+      method: GET
+      url: http://localhost:18080/api/logs?limit=9999
+    expect:
+      status: 422
+
+  - name: "Health 端点响应时间在 SLA 内"
+    request:
+      method: GET
+      url: http://localhost:18080/health
+    expect:
+      status: 200
+      responseTime: { lt: 200 }

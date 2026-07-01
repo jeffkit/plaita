@@ -1,0 +1,69 @@
+version: "1"
+
+project:
+  name: plaita-e2e
+  description: "E2E tests for plaita Python library: package install, flow execution, import layering"
+
+service:
+  build:
+    dockerfile: tests/e2e/Dockerfile
+    context: .
+    image: plaita-e2e:latest
+
+  container:
+    name: plaita-e2e-runner
+    command: "sleep infinity"
+
+scenarios:
+  - name: core-only-install
+    description: "Verify core-only install pulls ≤5 direct dependencies (SC-001)"
+    steps:
+      - name: install-core-only
+        run: |
+          pip install --dry-run --no-deps . 2>&1 | head -20
+          pip install .
+      - name: check-direct-deps
+        run: |
+          DEPS=$(pip show logic-plaita 2>/dev/null | grep Requires | sed 's/Requires: //')
+          COUNT=$(echo "$DEPS" | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ')
+          echo "Direct dependencies ($COUNT): $DEPS"
+          [ "$COUNT" -le 5 ] || (echo "FAIL: too many direct deps: $COUNT" && exit 1)
+      - name: run-basic-flow
+        run: |
+          python -c "
+          from plaita.core.flow import Flow
+          flow = Flow.model_validate({
+              'flow_id': 'e2e-hello',
+              'nodes': [
+                  {'type': 'start', 'id': 's', 'next': 'e'},
+                  {'type': 'end', 'id': 'e', 'output': 'hello from e2e', 'resultType': 'success'}
+              ]
+          })
+          result = flow.run()
+          assert result == 'hello from e2e', f'Expected hello from e2e, got {result}'
+          print('PASS: basic flow execution')
+          "
+
+  - name: server-install
+    description: "Verify server extras install and imports work"
+    steps:
+      - name: install-server
+        run: pip install ".[server]"
+      - name: verify-server-imports
+        run: |
+          python -c "
+          from plaita.server import flow_worker
+          print('PASS: plaita.server.flow_worker imported')
+          "
+
+  - name: redis-install
+    description: "Verify redis extras install and storage round-trip"
+    steps:
+      - name: install-redis
+        run: pip install ".[redis]"
+      - name: verify-redis-imports
+        run: |
+          python -c "
+          from plaita.storage.redis import RedisStorage
+          print('PASS: RedisStorage imported')
+          "

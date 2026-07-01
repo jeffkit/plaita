@@ -1,0 +1,81 @@
+{
+  "flow_id": "test_delay_flow",
+  "name": "延迟节点测试流程",
+  "version": "1.0.0",
+  "desc": "测试延迟节点和延迟服务的集成功能",
+  "author": "Plaita开发团队",
+  "runtime": "python",
+  "timeout": "PT120S",
+  "input_type": {
+    "type": "object",
+    "properties": {
+      "delay_seconds": {
+        "type": "number",
+        "description": "延迟秒数",
+        "default": 3
+      },
+      "message": {
+        "type": "string",
+        "description": "要传递的消息",
+        "default": "Hello Delay World"
+      }
+    }
+  },
+  "output_type": {
+    "type": "object",
+    "description": "返回延迟结果"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "name": "开始",
+      "type": "start",
+      "next": "prepare_message"
+    },
+    {
+      "id": "prepare_message",
+      "name": "准备消息",
+      "type": "assignment",
+      "result": {
+        "start_time": "${new Date().toISOString()}",
+        "input_message": "$INPUT.message",
+        "delay_config": {
+          "seconds": "$INPUT.delay_seconds"
+        }
+      },
+      "next": "delay_step"
+    },
+    {
+      "id": "delay_step",
+      "name": "延迟步骤",
+      "type": "delay",
+      "delay_seconds": "$INPUT.delay_seconds",
+      "delay_unit": "seconds",
+      "event_type": "delay_trigger",
+      "next": "complete_message"
+    },
+    {
+      "id": "complete_message",
+      "name": "完成消息",
+      "type": "assignment",
+      "result": {
+        "end_time": "${new Date().toISOString()}",
+        "original_message": "$NODE.prepare_message.input_message",
+        "delay_event": "$NODE.delay_step",
+        "success": true
+      },
+      "next": "end"
+    },
+    {
+      "id": "end",
+      "name": "结束",
+      "type": "end",
+      "output": "$NODE.complete_message"
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "description": "测试延迟节点功能的完整流程",
+    "categories": ["test", "delay", "extended_nodes"]
+  }
+} 

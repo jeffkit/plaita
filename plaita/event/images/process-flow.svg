@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="600" height="400" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景 -->
+  <rect width="600" height="400" fill="#f8f9fa" rx="10" ry="10"/>
+  <text x="300" y="30" text-anchor="middle" font-size="18" font-family="Arial, sans-serif" font-weight="bold">事件处理流程</text>
+  
+  <!-- 时序图 -->
+  <!-- 角色 -->
+  <text x="100" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">EventBus</text>
+  <line x1="100" y1="80" x2="100" y2="370" stroke="#555" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <text x="300" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">EventHandler</text>
+  <line x1="300" y1="80" x2="300" y2="370" stroke="#555" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <text x="500" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-size="14">ProcessingTracker</text>
+  <line x1="500" y1="80" x2="500" y2="370" stroke="#555" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <!-- 交互 -->
+  <!-- 1. 调度事件 -->
+  <rect x="50" y="100" width="100" height="30" fill="#e1f5fe" stroke="#0288d1" stroke-width="1" rx="5" ry="5"/>
+  <text x="100" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">_dispatch_event</text>
+  
+  <!-- 2. 检查是否已处理 -->
+  <line x1="100" y1="140" x2="500" y2="140" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="300" y="135" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">mark_event_processed()</text>
+  
+  <rect x="450" y="150" width="100" height="30" fill="#e8f5e9" stroke="#388e3c" stroke-width="1" rx="5" ry="5"/>
+  <text x="500" y="170" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">标记为已处理</text>
+  
+  <!-- 3. 返回结果 -->
+  <line x1="500" y1="190" x2="100" y2="190" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="5,0"/>
+  <text x="300" y="185" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">返回是否新事件</text>
+  
+  <!-- 4. 处理事件 -->
+  <line x1="100" y1="220" x2="300" y2="220" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="200" y="215" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">handler(event)</text>
+  
+  <rect x="250" y="230" width="100" height="30" fill="#fff8e1" stroke="#ffa000" stroke-width="1" rx="5" ry="5"/>
+  <text x="300" y="250" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">处理事件</text>
+  
+  <!-- 5. 返回处理结果 -->
+  <line x1="300" y1="270" x2="100" y2="270" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="5,0"/>
+  <text x="200" y="265" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">处理完成</text>
+  
+  <!-- 6. 记录处理结果 -->
+  <line x1="100" y1="300" x2="500" y2="300" stroke="#0288d1" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="300" y="295" text-anchor="middle" font-family="Arial, sans-serif" font-size="12">record_processing_attempt()</text>
+  
+  <rect x="450" y="310" width="100" height="40" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1" rx="5" ry="5"/>
+  <text x="500" y="330" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">记录处理历史</text>
+  <text x="500" y="345" text-anchor="middle" font-family="Arial, sans-serif" font-size="10">(成功/失败)</text>
+  
+  <!-- 箭头标记 -->
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#555"/>
+    </marker>
+  </defs>
+</svg> 

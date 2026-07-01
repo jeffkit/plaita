@@ -1,0 +1,84 @@
+name: 执行管理
+sequential: true
+
+cases:
+  - name: "获取执行列表（初始为空）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions
+    expect:
+      status: 200
+      body:
+        executions: { type: array }
+        total: { type: number }
+        page: 1
+        size: 20
+
+  - name: "启动流程执行"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-test-flow"
+        version: "1.0"
+        params:
+          input: "test-value"
+    expect:
+      status: 200
+      body:
+        status: "queued"
+        flow_id: "e2e-test-flow"
+        message: { exists: true }
+
+  - name: "执行列表分页参数生效"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?page=1&size=5
+    expect:
+      status: 200
+      body:
+        page: 1
+        size: 5
+
+  - name: "按状态筛选执行列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?status=running
+    expect:
+      status: 200
+      body:
+        executions: { type: array }
+
+  - name: "获取不存在的执行返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions/nonexistent-id
+    expect:
+      status: 404
+
+  - name: "恢复不存在的执行返回 404"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions/nonexistent-id/resume
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "continue"
+    expect:
+      status: 404
+
+  - name: "取消不存在的执行返回 404"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions/nonexistent-id/cancel
+    expect:
+      status: 404
+
+  - name: "删除不存在的执行返回 404"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/executions/nonexistent-id
+    expect:
+      status: 404

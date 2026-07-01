@@ -1,0 +1,49 @@
+name: 服务与拓扑
+sequential: true
+
+cases:
+  - name: "获取服务列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services
+    expect:
+      status: 200
+      body:
+        services: { type: array }
+        total: { type: number }
+
+  - name: "获取服务拓扑"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services/topology
+    expect:
+      status: 200
+      body:
+        nodes: { type: array }
+        edges: { type: array }
+        timestamp: { exists: true }
+
+  - name: "获取服务类型列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services/types/list
+    expect:
+      status: 200
+
+  - name: "获取不存在的服务实例"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services/nonexistent-instance
+    expect:
+      status: 404
+
+  - name: "停止不存在的服务"
+    request:
+      method: POST
+      url: http://localhost:18080/api/services/nonexistent-instance/stop
+      headers:
+        Content-Type: application/json
+      body:
+        graceful: true
+    expect:
+      status: 404

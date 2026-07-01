@@ -1,0 +1,57 @@
+"""
+应用配置
+"""
+import os
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class Settings(BaseModel):
+    """应用配置"""
+    
+    # Redis 配置
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis 连接 URL"
+    )
+    
+    # 服务器配置
+    host: str = Field(default="0.0.0.0", description="服务器监听地址")
+    port: int = Field(default=8080, description="服务器监听端口")
+    debug: bool = Field(default=False, description="调试模式")
+    
+    # CORS 配置
+    cors_origins: list = Field(
+        default=["http://localhost:5173", "http://localhost:3000"],
+        description="允许的跨域来源"
+    )
+    
+    # API 配置
+    api_prefix: str = Field(default="/api", description="API 路径前缀")
+
+    # 流程编排持久化（SQLAlchemy）配置
+    db_url: str = Field(
+        default="sqlite:///./plaita_console.db",
+        description="流程定义/节点描述持久化数据库 URL（SQLAlchemy）"
+    )
+
+    # 对外契约接口 /api/flowVersion/semver/detail 的 HMAC 鉴权密钥
+    secret_id: str = Field(default="", description="HMAC secret-id（空则禁用对外接口）")
+    secret_key: str = Field(default="", description="HMAC secret-key")
+
+    class Config:
+        env_prefix = "LOKI_CONSOLE_"
+
+
+def get_settings() -> Settings:
+    """获取配置实例"""
+    return Settings(
+        redis_url=os.getenv("LOKI_CONSOLE_REDIS_URL", "redis://localhost:6379/0"),
+        host=os.getenv("LOKI_CONSOLE_HOST", "0.0.0.0"),
+        port=int(os.getenv("LOKI_CONSOLE_PORT", "8080")),
+        debug=os.getenv("LOKI_CONSOLE_DEBUG", "false").lower() == "true",
+        db_url=os.getenv("LOKI_CONSOLE_DB_URL", "sqlite:///./plaita_console.db"),
+        secret_id=os.getenv("LOKI_CONSOLE_SECRET_ID", ""),
+        secret_key=os.getenv("LOKI_CONSOLE_SECRET_KEY", ""),
+    )
+

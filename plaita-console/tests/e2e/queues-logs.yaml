@@ -1,0 +1,72 @@
+name: 队列与日志
+sequential: true
+
+cases:
+  # --- 队列 ---
+  - name: "获取队列列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/queues
+    expect:
+      status: 200
+      body:
+        queues: { type: array }
+        total: { type: number }
+
+  - name: "获取指定队列详情"
+    request:
+      method: GET
+      url: http://localhost:18080/api/queues/plaita%3Aflow%3Aqueue
+    expect:
+      status: 200
+      body:
+        name: { exists: true }
+        length: { type: number }
+
+  # --- 日志 ---
+  - name: "获取日志列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/logs?limit=10
+    expect:
+      status: 200
+      body:
+        logs: { type: array }
+        total: { type: number }
+
+  - name: "按级别筛选日志"
+    request:
+      method: GET
+      url: http://localhost:18080/api/logs?level=ERROR&limit=10
+    expect:
+      status: 200
+      body:
+        logs: { type: array }
+
+  - name: "获取日志统计"
+    request:
+      method: GET
+      url: http://localhost:18080/api/logs/stats
+    expect:
+      status: 200
+      body:
+        stats: { type: array }
+        total_logs: { type: number }
+
+  - name: "获取实例日志"
+    request:
+      method: GET
+      url: http://localhost:18080/api/logs/instance/test-instance?limit=10
+    expect:
+      status: 200
+      body:
+        logs: { type: array }
+
+  - name: "日志排序参数（asc）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/logs/instance/test-instance?order=asc&limit=5
+    expect:
+      status: 200
+      body:
+        logs: { type: array }

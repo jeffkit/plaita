@@ -1,0 +1,312 @@
+name: 集群管理
+sequential: true
+
+cases:
+  # === 集群配置 ===
+  - name: "获取集群配置"
+    request:
+      method: GET
+      url: http://localhost:18080/api/cluster/config
+    expect:
+      status: 200
+      body:
+        mode: { exists: true }
+
+  - name: "获取可启动服务类型"
+    request:
+      method: GET
+      url: http://localhost:18080/api/cluster/service-types
+    expect:
+      status: 200
+      body:
+        mode: { exists: true }
+        service_types: { type: array }
+
+  - name: "获取托管实例列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/cluster/instances
+    expect:
+      status: 200
+      body:
+        instances: { type: array }
+        total: { type: number }
+
+  # === 快速测试 - 5 种类型 ===
+  - name: "快速测试 - simple 计算（value=21 期望 output=42）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/cluster/quick-test
+      headers:
+        Content-Type: application/json
+      body:
+        test_type: "simple"
+        params:
+          value: 21
+    expect:
+      status: 200
+      body:
+        success: true
+        result:
+          output: 42
+
+  - name: "快速测试 - distributed 分布式"
+    request:
+      method: POST
+      url: http://localhost:18080/api/cluster/quick-test
+      headers:
+        Content-Type: application/json
+      body:
+        test_type: "distributed"
+    expect:
+      status: 200
+      body:
+        success: true
+
+  - name: "快速测试 - event 事件驱动"
+    request:
+      method: POST
+      url: http://localhost:18080/api/cluster/quick-test
+      headers:
+        Content-Type: application/json
+      body:
+        test_type: "event"
+    expect:
+      status: 200
+      body:
+        success: true
+
+  - name: "快速测试 - delay 延迟任务（状态为 pending）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/cluster/quick-test
+      headers:
+        Content-Type: application/json
+      body:
+        test_type: "delay"
+    expect:
+      status: 200
+      body:
+        success: true
+        result:
+          status: "pending"
+
+  - name: "快速测试 - approval 审批流（状态为 pending）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/cluster/quick-test
+      headers:
+        Content-Type: application/json
+      body:
+        test_type: "approval"
+    expect:
+      status: 200
+      body:
+        success: true
+        result:
+          status: "pending"
+
+  - name: "获取测试模板列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/cluster/test-templates
+    expect:
+      status: 200
+      body:
+        templates: { type: array }
+
+  # === 基础设施 CRUD 生命周期 ===
+  - name: "获取基础设施列表（初始状态）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/cluster/infrastructure
+    expect:
+      status: 200
+      body:
+        infrastructure: { type: array }
+        total: { type: number }
+
+  - name: "获取基础设施模板"
+    request:
+      method: GET
+      url: http://localhost:18080/api/cluster/infrastructure-templates
+    expect:
+      status: 200
+      body:
+        templates: { type: array }
+
+  - name: "创建基础设施"
+    request:
+      method: POST
+      url: http://localhost:18080/api/cluster/infrastructure
+      headers:
+        Content-Type: application/json
+      body:
+        name: "e2e-test-infra"
+        display_name: "E2E 测试 Redis"
+        type: "redis"
+        url: "redis://host.docker.internal:6379/15"
+    expect:
+      status: 200
+      body:
+        name: "e2e-test-infra"
+        type: "redis"
+    save:
+      infra_name: "name"
+
+  - name: "获取刚创建的基础设施"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/cluster/infrastructure/{{runtime.infra_name}}"
+    expect:
+      status: 200
+      body:
+        name: "e2e-test-infra"
+        type: "redis"
+        url: { exists: true }
+
+  - name: "检查基础设施健康"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/cluster/infrastructure/{{runtime.infra_name}}/check"
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 200
+      body:
+        name: "e2e-test-infra"
+        status: { exists: true }
+
+  - name: "更新基础设施"
+    request:
+      method: PUT
+      url: "http://localhost:18080/api/cluster/infrastructure/{{runtime.infra_name}}"
+      headers:
+        Content-Type: application/json
+      body:
+        description: "Updated by E2E test"
+        url: "redis://host.docker.internal:6379/14"
+    expect:
+      status: 200
+      body:
+        name: "e2e-test-infra"
+
+  - name: "删除基础设施"
+    request:
+      method: DELETE
+      url: "http://localhost:18080/api/cluster/infrastructure/{{runtime.infra_name}}"
+    expect:
+      status: 200
+
+  - name: "验证基础设施已删除"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/cluster/infrastructure/{{runtime.infra_name}}"
+    expect:
+      status: 404
+
+  # === 多集群 CRUD 生命周期 ===
+  - name: "获取集群列表"
+    request:
+      method: GET
+      url: http://localhost:18080/api/clusters
+    expect:
+      status: 200
+      body:
+        clusters: { type: array }
+
+  - name: "获取活跃集群"
+    request:
+      method: GET
+      url: http://localhost:18080/api/clusters/active
+    expect:
+      status: 200
+      body:
+        id: { exists: true }
+        name: { exists: true }
+
+  - name: "创建测试集群"
+    request:
+      method: POST
+      url: http://localhost:18080/api/clusters
+      headers:
+        Content-Type: application/json
+      body:
+        id: "e2e-test-cluster"
+        name: "E2E Test Cluster"
+        description: "Created by E2E test"
+    expect:
+      status: 200
+      body:
+        id: "e2e-test-cluster"
+        name: "E2E Test Cluster"
+    save:
+      test_cluster_id: "id"
+
+  - name: "验证新集群出现在列表中"
+    request:
+      method: GET
+      url: http://localhost:18080/api/clusters
+    expect:
+      status: 200
+      body:
+        clusters:
+          length: { gt: 0 }
+
+  - name: "获取测试集群配置"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/clusters/{{runtime.test_cluster_id}}/config"
+    expect:
+      status: 200
+
+  - name: "更新测试集群"
+    request:
+      method: PUT
+      url: "http://localhost:18080/api/clusters/{{runtime.test_cluster_id}}"
+      headers:
+        Content-Type: application/json
+      body:
+        name: "E2E Updated Cluster"
+        description: "Updated by E2E test"
+    expect:
+      status: 200
+      body:
+        name: "E2E Updated Cluster"
+
+  - name: "获取测试集群详情"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/clusters/{{runtime.test_cluster_id}}"
+    expect:
+      status: 200
+      body:
+        id: "e2e-test-cluster"
+        name: "E2E Updated Cluster"
+
+  - name: "删除测试集群"
+    request:
+      method: DELETE
+      url: "http://localhost:18080/api/clusters/{{runtime.test_cluster_id}}"
+    expect:
+      status: 200
+
+  - name: "验证集群已被删除"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/clusters/{{runtime.test_cluster_id}}"
+    expect:
+      status: 404
+
+teardown:
+  - name: "清理: 删除测试集群（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/clusters/e2e-test-cluster
+    ignoreError: true
+
+  - name: "清理: 删除测试基础设施（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/cluster/infrastructure/e2e-test-infra
+    ignoreError: true

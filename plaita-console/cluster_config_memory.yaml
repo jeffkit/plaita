@@ -1,0 +1,53 @@
+# Plaita Console 纯内存版本集群配置
+# 不依赖任何外部服务（Redis/Kafka/数据库），所有状态存储在内存中
+# 适用于：开发测试、演示、单机轻量级部署
+
+# 服务管理模式: process (本地进程) 或 docker (Docker 容器)
+mode: process
+
+# 存储后端配置
+# 纯内存版本使用内存存储，不需要 Redis
+storage:
+  type: memory  # memory 或 redis
+  
+# 事件总线配置
+eventbus:
+  type: memory  # memory 或 redis
+
+# 队列配置
+queue:
+  type: memory  # memory 或 redis
+
+# 基础设施服务配置（纯内存版本不需要）
+infrastructure: {}
+
+# 程序服务配置
+services:
+  # FlowWorker 配置 - 纯内存模式
+  flow_worker:
+    display_name: 流程执行器（内存模式）
+    process:
+      module: plaita.server.flow_worker
+    docker:
+      image: plaita/flow-worker:latest
+    env:
+      # 使用内存存储
+      LOKI_STORAGE_TYPE: memory
+      LOKI_EVENTBUS_TYPE: memory
+      LOKI_QUEUE_TYPE: memory
+    default_instances: 1
+    max_instances: 5
+
+  # 延迟服务配置 - 纯内存模式
+  delay_service:
+    display_name: 延迟定时服务（内存模式）
+    process:
+      command: python -m plaita.server.services delay_service
+    docker:
+      image: plaita/delay-service:latest
+    env:
+      LOKI_STORAGE_TYPE: memory
+      LOKI_EVENTBUS_TYPE: memory
+      LOKI_CHECK_INTERVAL: "5"
+    default_instances: 1
+    max_instances: 2

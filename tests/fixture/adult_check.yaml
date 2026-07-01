@@ -1,0 +1,12 @@
+flow_id: adult_check
+desc: 判断成年：输入 age，大于等于 18 返回成年，否则未成年
+inputType: { dataType: object }
+nodes:
+  - { type: start, id: start, next: check_age }
+  - type: if
+    id: check_age
+    condition: { field: $INPUT.age, operator: gte, value: 18 }
+    next: end_adult
+    else_next: end_minor
+  - { type: end, id: end_adult, output: 成年, resultType: success }
+  - { type: end, id: end_minor, output: 未成年, resultType: success }

@@ -1,0 +1,34 @@
+# 仅启动第三方依赖服务
+# 用法: docker-compose -f docker-compose.deps.yml up -d
+version: '3.8'
+
+services:
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: plaita-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Commander (可选的 Redis 可视化工具)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: plaita-redis-commander
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    depends_on:
+      - redis
+
+volumes:
+  redis_data:
+

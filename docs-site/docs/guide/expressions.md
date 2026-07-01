@@ -1,0 +1,141 @@
+# 表达式
+
+表达式是 plaita 的"数据胶水"：在节点的 `output`、`condition`、`input` 等字段中引用上下文数据、调用内置函数。本页给出完整语法。
+
+!!! warning "重要：表达式前缀是 `$`，不是 `${}`
+
+    plaita 的变量引用写作 **`$INPUT.name`**，函数调用写作 **`$F.upper($INPUT.name)`**。
+    不要写成 `${INPUT.name}`——那是错误的语法，会被当作普通字符串原样返回。
+
+## 变量引用
+
+用 `$` 前缀引用执行上下文中的命名空间：
+
+| 表达式 | 含义 |
+|--------|------|
+| `$INPUT` | 整个输入对象 |
+| `$INPUT.name` | 输入对象的 `name` 字段 |
+| `$NODE.assign` | 节点 `assign` 的输出 |
+| `$NODE.assign.field` | 节点 `assign` 输出的 `field` 字段 |
+| `$GLOBAL.key` | 全局上下文变量 |
+| `$PARENT.x` | 父流程上下文（子流程中可用） |
+| `$ENV.PATH` | 环境变量 `PATH` |
+
+支持的命名空间由 `ExecutionContext` 维护：`INPUT` / `NODE` / `GLOBAL` / `PARENT` / `ENV`。命名空间名本身可通过 `express_input_name` 等参数自定义。
+
+!!! note "$ENV 自动过滤敏感变量"
+
+    出于安全，plaita 在初始化 `$ENV` 时会过滤掉以 `SECRET` / `TOKEN` / `PASSWORD` / `API_KEY` / `CREDENTIAL` / `DATABASE_` 等前缀开头的环境变量，避免敏感信息泄漏到流程上下文。
+
+### 数组索引
+
+支持数字索引与 `[n]` 语法：
+
+```
+$NODE.list.0           # 列表第 0 项
+$NODE.list[0]          # 等价写法
+$NODE.list[-1]         # 末项
+```
+
+## 字符串插值
+
+当表达式只是字符串的**一部分**时，用 `{% ... %}` 包裹表达式做插值：
+
+```json
+"output": "你好，{% $INPUT.name %}，今年 {% $INPUT.age %} 岁"
+```
+
+!!! tip "纯表达式 vs 插值"
+
+    - 整个值就是表达式：`"output": "$INPUT.name"` —— 直接写 `$INPUT.name`
+    - 表达式是字符串的一部分：`"output": "hi {% $INPUT.name %}"` —— 用 `{% %}`
+
+## 函数调用
+
+用 `$F.funcName(args)` 调用内置函数，参数本身也可以是表达式：
+
+```json
+"output": "$F.upper($INPUT.name)"
+"output": "$F.concat($INPUT.first, '-', $INPUT.last)"
+"output": "$F.len($NODE.items)"
+```
+
+### 内置函数一览
+
+plaita 内置 60+ 函数，按类别分布在 `ExpressionRegistry` 中：
+
+=== "数学 math"
+
+    `add` `sub` `mul` `div` `mod` `pow` `abs` `ceil` `floor` `round` `trunc` `sqrt`
+
+=== "字符串 string"
+
+    `lower` `upper` `capitalize` `title` `strip` `lstrip` `rstrip` `replace` `split` `join` `startswith` `endswith` `concat` `isDigit`
+
+=== "逻辑 logic"
+
+    `and` `or` `not`
+
+=== "数组 array"
+
+    纯函数：`len` `length` `index` `slice` `append` `extend` `insert` `remove` `reverse` `sort` `getListItem` `addListItem` `insertListItem`
+
+    带副作用（就地修改，非线程安全）：`pop` `delListItem` `setListItem`
+
+=== "字典 dict"
+
+    纯函数：`keys` `values` `items` `get` `getDictValue` `getDictKeys` `getDictValues`
+
+    带副作用：`set` `delete` `clear` `setDictValue` `delDictValue` `clearDict`
+
+=== "日期时间 datetime"
+
+    `now` `today`（接受可选 `fmt` 参数）
+
+=== "JSON"
+
+    `json_loads` `json_dumps`
+
+!!! warning "副作用函数非线程安全"
+
+    `pop` / `set` / `delete` / `clear` 等会就地修改输入。在 `Parallel` 并行或共享上下文的异步场景中使用它们可能造成数据竞争——要么串行化访问，要么先拷贝再修改。
+
+## 自定义函数
+
+通过 `ExpressionRegistry` 注册自定义函数，再传给 `ExpressionEvaluator`：
+
+```python
+from plaita.core.expression import (
+    ExpressionEvaluator, ExpressionRegistry, FunctionCategory,
+)
+
+registry = ExpressionRegistry()
+registry.register(
+    "greet",
+    lambda name: f"hello {name}",
+    FunctionCategory.STRING,
+    description="打招呼",
+    override=True,
+)
+
+evaluator = ExpressionEvaluator(registry=registry)
+```
+
+之后在流程中即可用 `$F.greet($INPUT.name)`。
+
+## 求值 API
+
+在自定义节点里，用 `execution.evaluate(value)` 对任意值求值（递归处理 list/dict）：
+
+```python
+def execute(self, execution):
+    text = execution.evaluate(self.output)  # 解析其中的表达式
+    return text.upper()
+```
+
+当某表达式在当前上下文解析为 `None` 且存在父上下文时，plaita 会自动向上回溯到父级再求值。
+
+## 下一步
+
+- [内置节点](../nodes/builtin.md) 看各节点如何使用 `output` / `condition`
+- [API: plaita.core.expression](../api/expression.md) 查看 `ExpressionRegistry` 完整接口

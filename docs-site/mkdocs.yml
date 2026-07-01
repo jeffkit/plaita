@@ -1,0 +1,187 @@
+site_name: plaita 文档
+site_description: Plaita 逻辑编排系统的 Python 运行时 —— 架构、使用指南与 API 参考
+site_url: https://jeffkit.github.io/plaita/
+repo_name: jeffkit/plaita
+repo_url: https://github.com/jeffkit/plaita
+edit_uri: edit/main/docs-site/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.select
+    - content.action.edit
+    - content.action.view
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切换至暗色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切换至亮色模式
+  font:
+    text: Noto Sans SC
+    code: JetBrains Mono
+  icon:
+    logo: material/graph-outline
+  favicon: assets/favicon.png
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+  - mermaid2:
+      arguments:
+        theme: |
+          {
+            "dark": "dark",
+            "default": "default"
+          }
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - ..
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            show_signature: true
+            show_signature_annotations: true
+            separate_signature: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+            show_docstring_attributes: true
+            show_docstring_functions: true
+            show_docstring_classes: true
+            show_docstring_modules: true
+            heading_level: 2
+            inherited_members: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid_custom
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/jeffkit/plaita
+  generator: false
+
+nav:
+  - 首页: index.md
+  - 指南:
+      - guide/index.md
+      - 安装: guide/installation.md
+      - 快速开始: guide/quickstart.md
+      - 流程定义: guide/flow-definition.md
+      - YAML 与 Python DSL 编排: guide/yaml-and-dsl.md
+      - 类代码 DSL：S-expr 与 @flow: guide/code-dsl.md
+      - 表达式: guide/expressions.md
+      - 执行模式: guide/execution-modes.md
+      - 错误处理与超时: guide/error-handling.md
+      - 回调机制: guide/callbacks.md
+      - 调试: guide/debugging.md
+  - 架构:
+      - architecture/index.md
+      - 总览: architecture/overview.md
+      - 执行引擎: architecture/execution-engine.md
+      - 状态管理: architecture/state-management.md
+      - 分层约束: architecture/layering.md
+      - 时序图: architecture/sequence-diagrams.md
+  - 节点系统:
+      - nodes/index.md
+      - 内置节点: nodes/builtin.md
+      - 自定义节点: nodes/custom.md
+      - 节点注册表与插件: nodes/registry.md
+      - 弃用迁移: nodes/migration.md
+  - 断点续执:
+      - distributed/index.md
+      - Checkpoint 概念: distributed/checkpoint.md
+      - 事件系统: distributed/event-system.md
+      - FlowWorker: distributed/flow-worker.md
+      - 扩展节点: distributed/extended-nodes.md
+      - 外延服务: distributed/services.md
+  - 应用场景:
+      - scenarios/index.md
+      - Agent 编排: scenarios/agent-orchestration.md
+      - 回声流程: scenarios/echo.md
+      - HTTP 集成: scenarios/http-integration.md
+      - 审批流: scenarios/approval-flow.md
+      - 队列触发: scenarios/queue-trigger.md
+      - 生成器调试器: scenarios/debug-with-generator.md
+  - API 参考:
+      - api/index.md
+      - plaita.core.flow: api/flow.md
+      - plaita.core.executor: api/executor.md
+      - plaita.core.context: api/context.md
+      - plaita.core.runner: api/runner.md
+      - plaita.core.callback: api/callback.md
+      - plaita.core.errors: api/errors.md
+      - plaita.core.expression: api/expression.md
+      - plaita.node: api/node.md
+      - plaita.event.core: api/event.md
+      - plaita.storage.base: api/storage.md
+      - plaita.server.flow_worker: api/server.md
+  - 参考:
+      - reference/index.md
+      - 配置与可选依赖: reference/configuration.md
+      - 命令行: reference/cli.md
+      - 迁移指南: reference/migration-guide.md
+  - 关于:
+      - about/index.md
+      - 更新日志: about/changelog.md
+      - 许可证: about/license.md

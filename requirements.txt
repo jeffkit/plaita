@@ -1,0 +1,28 @@
+# NOTE: pyproject.toml is the canonical source for dependencies.
+# This file is kept for backward compatibility with legacy tooling.
+
+# Core dependencies
+pydantic>=2.0
+pyparsing>=3.0
+isodate
+
+# Optional: redis
+redis>=4.0.0
+
+# Optional: server
+fastapi>=0.68.0
+uvicorn>=0.15.0
+python-multipart>=0.0.5
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+SQLAlchemy>=1.4.0
+
+# Optional: code
+pyexecjs
+
+# Optional: http
+requests
+aiohttp>=3.8.0
+
+# Dev
+fakeredis

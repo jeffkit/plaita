@@ -1,0 +1,121 @@
+# 执行模式
+
+plaita 支持三种执行模式以适应不同场景。三种模式共享同一套 `Flow` 定义与节点体系，差异在于**控制权交给方式**与**是否支持跨进程暂停/恢复**。
+
+| 特性 | Normal | Generator | Distributed |
+|------|--------|-----------|-------------|
+| 阻塞 | 是 | 否（yield） | 否（可挂起） |
+| 跨进程 | 否 | 否 | 是 |
+| 状态检查 | 否 | 是 | 是 |
+| 最适用于 | 快速流程 | 调试 | 长时工作流 |
+| 复杂度 | 低 | 中 | 高 |
+
+## Normal 模式（默认）
+
+同步阻塞执行，跑到 `End` 节点后一次性返回结果。适合快速、请求-响应式的流程。
+
+```python
+from plaita import Flow
+
+flow = Flow.from_string(open("echo.json").read())
+result = flow.run(name="kongjie")  # 阻塞直到完成
+```
+
+异步版本：
+
+```python
+result = await flow.arun(name="kongjie")
+```
+
+## Generator 模式
+
+异步生成器，**每执行完一个节点就 yield 一次输出**，调用方控制节奏、可在步骤间检查或修改上下文。适合调试器、可视化单步、交互式检查。
+
+```python
+from plaita import Flow
+
+flow = Flow.from_string(open("flow.json").read())
+
+for step in flow.debug(name="test"):
+    print(f"[{step['type']}] {step['id']} -> {step['result']}")
+    print(f"context: {step['context']}")
+    if step["is_end"]:
+        print("流程完成")
+        break
+    # 可选：在此检查/修改 step["context"]，或暂停
+```
+
+每次 yield 的字典结构：
+
+| 字段 | 含义 |
+|------|------|
+| `id` / `type` / `name` | 节点 id / 类型 / 展示名 |
+| `result` | 该节点输出 |
+| `branch` | 命中的分支（分支节点） |
+| `context` | 当前执行上下文快照 |
+| `is_end` | 是否到达 End 节点 |
+| `is_suspend` | 是否在事件节点挂起（Distributed） |
+| `execution_id` | 本次执行 ID |
+
+!!! note "Generator 模式的 on_flow_end 时机"
+
+    `on_flow_end` 回调会推迟到生成器**真正被消费完毕或关闭**时才触发，而非 `flow.debug()` 调用返回时。这样保证生命周期回调与实际执行进度一致。
+
+## Distributed 模式
+
+为跨进程、长时运行的工作流设计。每次调用**只推进一个节点**，执行上下文可序列化持久化，流程在事件节点处挂起，外部事件到达后从断点恢复。
+
+```python
+from plaita import Flow, FlowExecution
+
+flow = Flow.from_string(open("approval_flow.json").read())
+execution = FlowExecution()
+
+# 第一次推进：执行到事件节点并挂起
+step = execution.run_distributed(flow, {"applicant": "alice"})
+# step: {"is_suspend": True, "context": {...}, ...}
+
+# 把 step["context"] 持久化（如存入 ExecutionStorage）
+save(execution._ctx.execution_id, step["context"])
+
+# ... 一段时间后，外部事件到达，在另一个进程恢复 ...
+saved_context = load(execution_id)
+step = execution.run_distributed(
+    flow,
+    None,
+    saved_context=saved_context,
+    resume_type="event",
+    resume_data={"approved": True},
+)
+```
+
+### 恢复类型（resume_type）
+
+挂起在 `EventNode` 后，恢复时通过 `resume_type` 决定如何唤醒：
+
+| resume_type | 行为 |
+|-------------|------|
+| `event` | 事件到达，调用 `node.on_event(execution, resume_data)` |
+| `timeout` | 等待超时，调用 `node.on_timeout(execution)` |
+| `cancel` | 取消等待，调用 `node.on_cancel(execution)` |
+| `continue` | 不走恢复分支，从上次 `LAST_NODE` 之后继续推进下一节点 |
+
+!!! tip "用 run_distributed 而非 run"
+
+    `FlowExecution.run(..., mode='distributed')` 会路由到 `run_distributed`，但**每次都会新建一个 execution 实例**，导致用户回调无法跨步骤保留。需要跨步骤保留回调时，请像上面那样**复用同一个 `FlowExecution` 实例**并直接调用 `run_distributed`。
+
+## 如何选择
+
+- **短时、要立即拿结果** → Normal
+- **要单步、要检查中间状态、做调试器** → Generator
+- **要等外部事件、要跨进程、要长时运行** → Distributed（配合 [断点续执](../distributed/index.md)）
+
+## 时序图
+
+三种模式的交互时序见 [架构 - 时序图](../architecture/sequence-diagrams.md)。
+
+## 下一步
+
+- [调试](debugging.md) —— Generator 模式的实际用法
+- [断点续执](../distributed/index.md) —— Distributed 模式深度
+- [API: plaita.core.executor](../api/executor.md)

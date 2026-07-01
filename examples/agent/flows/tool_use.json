@@ -1,0 +1,48 @@
+{
+    "flow_id": "tool_use",
+    "inputType": { "dataType": "object" },
+    "nodes": [
+        { "type": "start", "id": "start", "next": "plan" },
+        {
+            "type": "llm",
+            "id": "plan",
+            "model": "planner",
+            "system": "你是规划器，根据用户问题选择一个工具：weather / calc / search。只输出工具名。",
+            "prompt": "用户问题：{% $INPUT.question %}\n请输出工具名。",
+            "next": "route"
+        },
+        {
+            "type": "switch",
+            "id": "route",
+            "branches": [
+                { "name": "weather", "next": "call_weather", "condition": { "field": "$NODE.plan", "operator": "eq", "value": "weather" } },
+                { "name": "calc", "next": "call_calc", "condition": { "field": "$NODE.plan", "operator": "eq", "value": "calc" } },
+                { "name": "search", "next": "call_search", "isDefault": true }
+            ]
+        },
+        {
+            "type": "tool",
+            "id": "call_weather",
+            "action": "weather",
+            "params": { "city": "$INPUT.city" },
+            "next": "end_weather"
+        },
+        {
+            "type": "tool",
+            "id": "call_calc",
+            "action": "calc",
+            "params": { "a": "$INPUT.a", "b": "$INPUT.b" },
+            "next": "end_calc"
+        },
+        {
+            "type": "tool",
+            "id": "call_search",
+            "action": "search",
+            "params": { "query": "$INPUT.question" },
+            "next": "end_search"
+        },
+        { "type": "end", "id": "end_weather", "output": "$NODE.call_weather", "resultType": "success" },
+        { "type": "end", "id": "end_calc", "output": "$NODE.call_calc", "resultType": "success" },
+        { "type": "end", "id": "end_search", "output": "$NODE.call_search", "resultType": "success" }
+    ]
+}

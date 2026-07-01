@@ -1,0 +1,47 @@
+{
+  "skill_name": "plaita-flow-runner",
+  "evals": [
+    {
+      "id": 1,
+      "name": "run-normal-echo",
+      "prompt": "我在 plaita 项目里。本地跑一下这个 echo flow 并告诉我结果，输入用 name=kongjie：\n\n{\"flow_id\":\"echo\",\"inputType\":{\"dataType\":\"object\"},\"nodes\":[{\"type\":\"start\",\"id\":\"start\",\"next\":\"end\"},{\"type\":\"end\",\"id\":\"end\",\"output\":\"$INPUT.name\",\"resultType\":\"success\"}]}",
+      "expected_output": "本地执行 flow.run(name=\"kongjie\")，结果 \"kongjie\"。说明 dataType=object 对应关键字传参。解读 end.output=$INPUT.name。不用远程 PlaitaClient。",
+      "files": [],
+      "assertions": [
+        "实际执行了流程（写脚本并运行），而非仅描述",
+        "报告的执行结果为 \"kongjie\"",
+        "使用 Flow.from_string / parse 等本地方式加载，并以关键字参数 flow.run(name=\"kongjie\") 传参",
+        "未使用远程 PlaitaClient",
+        "response 中解读了结果来源（end.output=$INPUT.name 产生该值）"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "debug-generator-mode",
+      "prompt": "帮我把下面这个 plaita flow 用调试模式跑一下，我想看每一步执行了什么节点、结果是什么：\n\n{\"flow_id\":\"linear\",\"inputType\":{\"dataType\":\"object\"},\"nodes\":[{\"type\":\"start\",\"id\":\"start\",\"next\":\"assign\"},{\"type\":\"assignment\",\"id\":\"assign\",\"output\":\"$F.upper($INPUT.name)\",\"outputType\":{\"dataType\":\"string\"},\"next\":\"end\"},{\"type\":\"end\",\"id\":\"end\",\"output\":\"$NODE.assign\",\"resultType\":\"success\"}]}\n\n输入 name=world。",
+      "expected_output": "用 flow.debug(name=\"world\") Generator 模式，展示 start→assign(\"WORLD\")→end(\"WORLD\") 逐步输出。",
+      "files": [],
+      "assertions": [
+        "使用 Generator/调试模式（flow.debug(...)）执行，而非普通 run",
+        "response 中展示了逐步输出（至少包含 assign 与 end 两步）",
+        "assign 步骤结果为 \"WORLD\"",
+        "最终/end 步骤结果为 \"WORLD\"",
+        "使用 is_end 终止迭代（或在 end 步骤停止）"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "diagnose-expression-bug",
+      "prompt": "这个 plaita flow 跑出来结果不对，我期望返回输入的 name，但它返回了一个字符串 \"{${INPUT.name}}\"。帮我看看哪里有问题并修好：\n\n{\"flow_id\":\"echo\",\"inputType\":{\"dataType\":\"object\"},\"nodes\":[{\"type\":\"start\",\"id\":\"start\",\"next\":\"end\"},{\"type\":\"end\",\"id\":\"end\",\"output\":\"${INPUT.name}\",\"resultType\":\"success\"}]}",
+      "expected_output": "指出 ${INPUT.name} 错误语法，应改 $INPUT.name。给出修复 JSON 并本地执行验证。",
+      "files": [],
+      "assertions": [
+        "诊断出问题：${INPUT.name} 是错误语法，会被当普通字符串原样返回",
+        "给出修复方案：将 output 改为 $INPUT.name",
+        "保存了修复后的 fixed_flow.json，其 end.output 为 \"$INPUT.name\"",
+        "实际执行修复后的 flow 验证，结果为输入的 name 值",
+        "response 同时说明了错误语法的原理（$ 前缀 vs ${} 前缀）"
+      ]
+    }
+  ]
+}

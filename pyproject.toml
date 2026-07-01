@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plaita"
+version = "0.3.16"
+description = "Official Python Runtime for Plaita -- Logic Compose Engine"
+requires-python = ">=3.10"
+authors = [
+    { name = "Jeff kit", email = "bbmyth@gmail.com" },
+]
+
+dependencies = [
+    "pydantic>=2.0",
+    "pyparsing>=3.0",
+    "isodate",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=4.0.0"]
+server = [
+    "fastapi>=0.68.0",
+    "uvicorn>=0.15.0",
+    "python-multipart>=0.0.5",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "SQLAlchemy>=1.4.0",
+    "cachetools>=5.0.0",
+]
+code = ["PyExecJS"]
+http = ["requests", "aiohttp>=3.8.0"]
+yaml = ["PyYAML>=6.0"]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "fakeredis",
+    "pytest-cov",
+]
+lint = [
+    "mypy",
+    "flake8",
+    "black",
+]
+all = ["plaita[redis,server,code,http,yaml]"]
+
+[project.urls]
+Homepage = "https://jeffkit.github.io/plaita/"
+Repository = "https://github.com/jeffkit/plaita"
+Documentation = "https://jeffkit.github.io/plaita/"
+
+[project.entry-points."plaita.nodes"]
+delay = "plaita.server.nodes.delay_node:DelayNode"
+redis_queue = "plaita.server.nodes.redis_queue_node:RedisQueueNode"
+kafka_queue = "plaita.server.nodes.kafka_queue_node:KafkaQueueNode"
+http_callback = "plaita.server.nodes.http_callback_node:HttpCallbackNode"
+approval = "plaita.server.nodes.approval_node:ApprovalNode"
+
+[tool.setuptools.packages.find]
+include = ["plaita", "plaita.*"]
+exclude = ["tests*", "examples*", "plaita-console*", "plaita_console*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests that exercise multiple components / optional backends (deselect with '-m \"not integration\"')",
+    "e2e: marks end-to-end tests",
+]
+
+[tool.coverage.run]
+# The gate measures core library logic reachable from `pytest tests/`.
+# Omitted: optional backends needing live infra (redis/kafka/sqlalchemy/http
+# services), demo/example scripts, and the remote client — these are covered
+# by integration/E2E suites or separate extras, not the unit gate.
+omit = [
+  "plaita/storage/redis.py",
+  "plaita/storage/sqlalchemy.py",
+  "plaita/server/**",
+  "plaita/node/redis.py",
+  "plaita/node/http.py",
+  "plaita/client.py",
+  "plaita/event/demo_eventbus.py",
+  "plaita/event/timeout_example.py",
+  "plaita/event/redis.py",
+  "plaita/event/sqlalchemy.py",
+  "plaita/event/timeout.py",
+  "plaita/event/utils.py",
+]
