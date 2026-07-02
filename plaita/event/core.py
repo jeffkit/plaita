@@ -338,12 +338,24 @@ class EventBus(ABC):
 
 
 # 装饰器，简化事件处理器注册
-def event_handler(event_bus: EventBus, 
-                 event_type: Optional[str] = None, 
+def event_handler(event_bus: EventBus,
+                 event_type: Optional[str] = None,
                  filter_condition: Optional[Dict[str, Any]] = None,
                  retry_policy: Optional[RetryPolicy] = None):
-    """事件处理器装饰器"""
-        
+    """事件处理器装饰器
+
+    注册是异步的 (``EventBus.register_handler`` 是 coroutine)。本装饰器在
+    模块导入期被触发, 当时未必有 running loop, 直接 ``asyncio.create_task``
+    会抛 ``RuntimeError`` 或 (即使成功) task 引用丢失被 GC 回收。
+
+    处理策略:
+    1. 检测到 running loop —— ``create_task`` 并把引用存进模块级集合, 由 loop
+       自然驱动; 任务完成后从集合移除 (``done_callback``)。
+    2. 没 running loop (典型场景: 模块导入期) —— 把 register coroutine 存进
+       模块级待办列表, 暴露 ``flush_pending_handler_registrations()`` 让用户
+       在 loop 起来后显式 await。
+    """
+
     def decorator(func: EventHandler):
         async def register():
             await event_bus.register_handler(
@@ -352,9 +364,35 @@ def event_handler(event_bus: EventBus,
                 filter_condition=filter_condition,
                 retry_policy=retry_policy
             )
-        
-        # 使用 asyncio 创建任务来注册处理器
-        asyncio.create_task(register())
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 没运行中的 loop —— 暂存, 等用户在 async 上下文里 flush
+            _pending_handler_registrations.append(register)
+            return func
+
+        task = loop.create_task(register())
+        _handler_registration_tasks.add(task)
+        task.add_done_callback(_handler_registration_tasks.discard)
         return func
-        
-    return decorator 
+
+    return decorator
+
+
+# 模块级引用持有: 防 GC 回收 fire-and-forget 注册任务
+_handler_registration_tasks: Set[asyncio.Task] = set()
+# 没 running loop 时暂存的注册 coroutine, 等 loop 起来后由
+# ``flush_pending_handler_registrations`` 显式驱动。
+_pending_handler_registrations: List[Callable[[], "asyncio.Awaitable"]] = []
+
+
+async def flush_pending_handler_registrations() -> None:
+    """驱动所有在无 running loop 期间被 ``@event_handler`` 排队的注册任务。
+
+    典型用法: 应用启动、``asyncio.run`` 入口里 ``await flush_...()`` 一次。
+    """
+    pending = list(_pending_handler_registrations)
+    _pending_handler_registrations.clear()
+    for register in pending:
+        await register()
