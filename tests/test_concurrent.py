@@ -174,21 +174,51 @@ class TestParallel(TestCase):
         self.assertEqual({"branch1": "input_value", "branch2": "input_value"}, result)
 
     def test_execute(self):
-        for mode in ["thread", "process", "coroutine"]:
+        # coroutine 模式已下线（sync 桥接里嵌套 asyncio.run_until_complete，
+        # 任何 running 事件循环下必崩），不再覆盖。
+        for mode in ["thread", "process"]:
             with self.subTest(mode=mode):
                 self.setUp()
                 self._test_pool_execute(mode)
 
     def test_context(self):
-        for mode in ["thread", "process", "coroutine"]:
+        for mode in ["thread", "process"]:
             with self.subTest(mode=mode):
                 self.setUp()
                 self._test_concurrent_with_context(mode)
 
     def test_concurrent_in_camel_case(self):
-        for mode in ["thread", "process", "coroutine"]:
+        for mode in ["thread", "process"]:
             with self.subTest(mode=mode):
+                self.setUp()
                 self._test_concurrent_in_camel_case(mode)
+
+    def test_coroutine_mode_is_rejected(self):
+        """coroutine 模式已显式拒绝，调用方应得到清晰的 ValueError 而不是
+        在事件循环里崩出 RuntimeError。"""
+        flow = Flow(
+            flow_id="test-parallel-coroutine-rejected",
+            version="1",
+            runtime="python",
+            output_type=Property(data_type=types.OBJECT, is_required=True),
+            nodes=[
+                Start(id="start", next="parallel"),
+                Parallel(
+                    id="parallel",
+                    name="parallel",
+                    branches=[{"name": "b1", "flow": self.flow_data, "input": "x"}],
+                    mode="coroutine",
+                    join_branches=["b1"],
+                    next="end",
+                ),
+                End(id="end", resultType="success", output="$NODE.parallel"),
+            ],
+        )
+        # coroutine 模式抛 ValueError, 经 runner 默认 abort 包装为 NodeExecutionError。
+        # 注意 message 里仍含原始 "coroutine" 字样, 用于断言。
+        with self.assertRaises(Exception) as ctx:
+            flow.run()
+        self.assertIn("coroutine", str(ctx.exception).lower())
 
     def test_parallel_with_assignment_nodes(self):
         # 创建只包含 Assignment 节点的子流程
@@ -198,6 +228,7 @@ class TestParallel(TestCase):
             runtime="python",
             input_type=Property(data_type=types.STRING, is_required=True),
             nodes=[
+                Start(id="start", next="assign1"),
                 Assignment(
                     id="assign1",
                     name="assign1",
@@ -240,10 +271,10 @@ class TestParallel(TestCase):
         # 运行流程
         result = main_flow.run({"value": "Main flow input"})
 
-        # 检查结果
+        # 检查结果（sub_flow 显式加了 Start 节点，故 $NODE 子流程结果含 'start': None）
         expected_result = {
-            "branch1": {"assign1": "Value 1", "assign2": 42, "assign3": "Main flow input"},
-            "branch2": {"assign1": "Value 1", "assign2": 42, "assign3": "Main flow input"},
+            "branch1": {"start": None, "assign1": "Value 1", "assign2": 42, "assign3": "Main flow input"},
+            "branch2": {"start": None, "assign1": "Value 1", "assign2": 42, "assign3": "Main flow input"},
         }
         self.assertEqual(result, expected_result)
 

@@ -197,9 +197,16 @@ class ErrorStrategy(Enum):
 
 
 class ErrorHandler(BaseModel):
-    """错误处理器"""
+    """错误处理器
 
-    strategy: Optional[str] = Field(ErrorStrategy.ABORT.value)
+    ``strategy`` 字段是 ``ErrorStrategy`` enum (2026-07 重构前是 ``Optional[str]``，
+    比较时全程依赖 ``_strategy_eq`` 这个 wart 同时识别 enum 与字符串)。Pydantic
+    会自动处理 enum ↔ "abort"/"continue"/"continue-with" 字符串的双向序列化，
+    JSON 输入仍写字符串即可。历史 ``continue_with`` (下划线) 别名在 validator
+    里归一化为规范连字符。
+    """
+
+    strategy: ErrorStrategy = Field(ErrorStrategy.ABORT)
     default_value: Optional[dict] = Field(None, alias="defaultValue")
     error_code: Optional[int] = Field(-9527, alias="code")
     error_message: Optional[str] = Field(None, alias="message")
@@ -208,15 +215,18 @@ class ErrorHandler(BaseModel):
     @classmethod
     def _validate_strategy(cls, v):
         if v is None:
-            return ErrorStrategy.ABORT.value
+            return ErrorStrategy.ABORT
         if isinstance(v, ErrorStrategy):
-            return v.value
-        # 接受下划线别名 continue_with，归一化为规范的连字符 continue-with。
-        if v == "continue_with":
-            v = ErrorStrategy.CONTINUE_WITH.value
-        if v not in {s.value for s in ErrorStrategy}:
-            raise ValueError(f"Invalid error handler strategy: {v}")
-        return v
+            return v
+        if isinstance(v, str):
+            # 接受下划线别名 continue_with, 归一化为规范的连字符 continue-with
+            if v == "continue_with":
+                v = ErrorStrategy.CONTINUE_WITH.value
+            try:
+                return ErrorStrategy(v)
+            except ValueError:
+                raise ValueError(f"Invalid error handler strategy: {v!r}")
+        raise ValueError(f"Invalid error handler strategy: {v!r}")
 
     def handle(self):
         """
@@ -225,18 +235,20 @@ class ErrorHandler(BaseModel):
         - continue: 返回None
         - continue-with: 返回默认值
         """
-        s = self.strategy
-        if _strategy_eq(s, ErrorStrategy.ABORT):
+        if self.strategy == ErrorStrategy.ABORT:
             message = self.error_message or "Node execution timed out"
             raise TimeoutError(message)
-        elif _strategy_eq(s, ErrorStrategy.CONTINUE):
+        elif self.strategy == ErrorStrategy.CONTINUE:
             return None
-        elif _strategy_eq(s, ErrorStrategy.CONTINUE_WITH):
+        elif self.strategy == ErrorStrategy.CONTINUE_WITH:
             return self.default_value
 
 
 def _strategy_eq(value, member: ErrorStrategy) -> bool:
-    """Compare a strategy value that may be an ErrorStrategy member or its string value."""
+    """.. deprecated:: 2026-07
+    ``ErrorHandler.strategy`` 现已存为 ``ErrorStrategy`` enum, 直接用 ``==`` 比较即可。
+    本函数仅为向后兼容外部 import 保留, 内部所有调用点已迁移。
+    """
     return value == member or value == member.value
 
 

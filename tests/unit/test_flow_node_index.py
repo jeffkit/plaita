@@ -1,8 +1,9 @@
 """B5 复现: Flow 应缓存节点索引, start_node/find_node_by_id 不应每次线性扫描。
 
-正确性要求(原行为保持):
+正确性要求 (2026-07 重构后):
 - 显式 Start 节点时, start_node 返回该 Start;
-- 无显式 Start 时, start_node 返回"没有被任何节点引用为 next/branch.next"的节点;
+- 无显式 Start 时, start_node 抛 ``FlowStartMissingError``——历史上"入度 0
+  推断"已删除 (多个孤儿节点时返回顺序依赖 nodes 数组顺序, 行为不稳定);
 - find_node_by_id 命中返回节点, 未命中抛错。
 
 性能要求: 对大流程反复 find_node_by_id 应为 O(1); 这里用一个 1000 节点流程
@@ -50,10 +51,14 @@ class TestFlowNodeIndex(unittest.TestCase):
         flow = _linear_flow(3)
         self.assertEqual(flow.start_node.id, "start")
 
-    def test_start_node_inferred_when_no_start_node(self):
-        # 没有 start 类型节点时, 应推断入度为 0 的节点
+    def test_start_node_missing_raises_when_no_start_node(self):
+        # 2026-07: 没有 Start 节点时不再"猜"入口, 直接报错。原入度 0 推断
+        # 在多个孤儿节点时会按数组顺序选第一个, 让可视化工具导出顺序的微小
+        # 差异就能改变流程入口。
+        from plaita.core.errors import FlowStartMissingError
+
         flow = Flow(
-            flow_id="b5-inferred",
+            flow_id="b5-no-start",
             version="1.0",
             runtime="python",
             nodes=[
@@ -61,7 +66,8 @@ class TestFlowNodeIndex(unittest.TestCase):
                 End(id="end", **{"resultType": "success", "output": "ok"}),
             ],
         )
-        self.assertEqual(flow.start_node.id, "root")
+        with self.assertRaises(FlowStartMissingError):
+            _ = flow.start_node
 
     def test_find_node_by_id_o1_for_large_flow(self):
         flow = _linear_flow(1000)

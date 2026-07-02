@@ -30,6 +30,8 @@ class Flow(BaseModel):
     still works but emits a DeprecationWarning.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+
     flow_id: Optional[str] = None
     version: Optional[str] = None
     runtime: str = "python"
@@ -41,11 +43,14 @@ class Flow(BaseModel):
     metadata: Optional[Dict] = Field(default_factory=dict)
     timeout: Optional[str] = ""
     global_context: Optional[Dict] = Field(default_factory=dict)
+    # ``$ENV`` 暴露给流程表达式的环境变量 allowlist。默认空——避免黑名单遗漏
+    # 的 secret（如 STRIPE_KEY / OPENAI_API_KEY / PG_CONN）通过 ``$ENV.XXX``
+    # 流入流程表达式或被 ``to_dict()`` 序列化进分布式 checkpoint。
+    # 用户需要环境变量时显式列出：``Flow(..., expose_env=["HOME", "API_BASE"])``。
+    expose_env: Optional[List[str]] = Field(default_factory=list, alias="exposeEnv")
 
     # 节点 id -> Node 的索引, 惰性构建, 让 find_node_by_id/start_node 不必每次线性扫描
     _node_index: Dict[str, Node] = PrivateAttr(default_factory=dict)
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @property
     def id(self) -> Optional[str]:
@@ -142,31 +147,22 @@ class Flow(BaseModel):
 
     @property
     def start_node(self):
-        index = self._ensure_index()
-        for node in self.nodes:
+        """流程入口节点。
+
+        2026-07 行为变更: 入度 0 "启发式推断" 已删除——历史上无显式 Start 时
+        本属性会扫描 nodes 数组找"未被任何 next/branch 引用的节点"作为入口,
+        但当存在多个孤儿节点时返回结果依赖数组顺序, 让可视化编排工具导出
+        顺序的细微差异就能改变流程行为。现在统一要求显式 Start 节点:
+        没有 Start 就抛 ``FlowStartMissingError``, 让问题在解析期暴露。
+        """
+        for node in self.nodes or []:
             if node.node_type == Start.node_type:
                 return node
-
-        # 无显式 Start: 找入度为 0 的节点(未被任何节点引用为 next/branch.next)
-        referenced = set()
-        for n in self.nodes:
-            if n.next:
-                referenced.add(n.next)
-            if getattr(n, "branches", None):
-                for b in n.branches:
-                    if b.next:
-                        referenced.add(b.next)
-        for n in self.nodes:
-            if n.id not in referenced:
-                return n
-
-        # 没有显式 Start 且所有节点都有入度 (成环或空) —— 不再静默回退 nodes[0]
-        # 瞎猜入口, 直接报错让用户显式指定 Start 节点或打破环。
         if not self.nodes:
             return None
         raise FlowStartMissingError(
-            "无法确定流程入口: 没有显式 Start 节点, 且所有节点都被引用 (可能成环)。"
-            "请添加一个 Start 节点, 或确保存在一个未被任何节点 next/branch 指向的入口节点。"
+            "无法确定流程入口: 没有显式 Start 节点。"
+            "请添加一个 type=start 的节点, 或通过 FlowBuilder.start_with(...) 指定入口。"
         )
 
     def find_node_by_id(self, node_id) -> Optional[Node]:

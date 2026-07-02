@@ -641,7 +641,9 @@ def _compile_for(
             loop_vars[names[1]] = "$INPUT.index"
 
     child_ctx = _CompileCtx(loop_vars=loop_vars, module_globals=ctx.module_globals)
-    _compile_block(list(head.body), child_ctx, succ=None)  # 子流程体必须自行 return
+    child_entry = _compile_block(list(head.body), child_ctx, succ=None)  # 子流程体必须自行 return
+    if child_entry is None:
+        raise _CodeflowError("循环体为空或全部悬空：请补 return", head.body[0] if head.body else head)
 
     # 节点 id：优先 id= 关键字，否则自动
     node_id = None
@@ -650,6 +652,14 @@ def _compile_for(
         node_id = str(id_kw.value)
     node_id = ctx.auto_id(node_id)
 
+    # 子流程节点列表前置一个 Start 节点指向编译出的入口节点；
+    # Flow.start_node 2026-07 起不再做"入度 0 推断"，没有 Start 就直接报错。
+    child_start_id = child_ctx.auto_id("start")
+    child_nodes: List[Dict[str, Any]] = [
+        {"type": "start", "id": child_start_id, "next": child_entry},
+        *child_ctx.nodes,
+    ]
+
     spec: Dict[str, Any] = {
         "type": kind.lower(),
         "id": node_id,
@@ -657,7 +667,7 @@ def _compile_for(
         "childFlow": {
             "runtime": "python",
             "inputType": child_input_type,
-            "nodes": child_ctx.nodes,
+            "nodes": child_nodes,
         },
     }
     if kind == "MAP":

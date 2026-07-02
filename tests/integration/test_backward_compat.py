@@ -105,6 +105,9 @@ class TestBackwardCompatImports:
             warnings.simplefilter("ignore", DeprecationWarning)
             from plaita.errors import ErrorHandler, RecoverableErrorHandler
         handler = ErrorHandler()
-        assert handler.strategy == "abort"
+        # strategy 字段 2026-07 起存为 ErrorStrategy enum; == enum 或其 .value 均成立
+        from plaita.core.errors import ErrorStrategy
+        assert handler.strategy == ErrorStrategy.ABORT
+        assert handler.strategy.value == "abort"
         recoverable = RecoverableErrorHandler()
         assert recoverable.retry_times == 0
