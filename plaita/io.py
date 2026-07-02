@@ -1,20 +1,17 @@
 import json
 import re
 import warnings
-from collections import namedtuple
 from collections.abc import MutableMapping
-from copy import copy
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Dict, Iterator, List, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from plaita.core import types
 from plaita.core.expression import (
     ExpressionRegistry,
     FunctionCategory,
-    FunctionDescriptor,
     get_default_expression_registry,
 )
 from plaita.core.expression_parser import (
@@ -22,9 +19,105 @@ from plaita.core.expression_parser import (
     _parser_components_cache,
 )
 from .logger import logger
-from plaita.core.types import ValidationError
 
-FieldError = namedtuple("FieldError", ["field", "message"])
+
+def get_value(content, *keys, default=None):
+    for key in keys:
+        if key in content:
+            return content[key]
+    return default
+
+
+class Property(BaseModel):
+    """描述一个数据槽的类型 schema。
+
+    只保留运行时真正消费的字段：``data_type`` + 嵌套结构（``children`` /
+    ``item_type``）+ 元信息（``name`` / ``label`` / ``desc`` / ``is_required`` /
+    ``default_value``）。值域约束（min/max/maxLength/choices/validators/ref）
+    历史上曾被解析但 ``match`` 从不读取，已移除以免"声明了却不生效"误导用户。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    data_type: str = Field(alias=AliasChoices("data_type", "dataType", "type"))
+    name: Optional[str] = None
+    label: Optional[str] = Field(default=None, alias=AliasChoices("label", "title"))
+    desc: Optional[str] = Field(default=None, alias=AliasChoices("desc", "description"))
+    is_required: bool = Field(default=False, alias=AliasChoices("is_required", "isRequired"))
+    default_value: Optional[Union[str, int, float, bool, Decimal, List, Dict, datetime, date]] = Field(
+        default=None, alias=AliasChoices("default_value", "defaultValue", "default")
+    )
+    item_type: Optional["Property"] = Field(default=None, alias=AliasChoices("item_type", "itemType"))
+    children: Optional[Union[List["Property"], Dict[str, "Property"]]] = Field(default_factory=list)
+
+    def handle_object_type(self, content):
+        children = content.get("children", {}) or content.get("properties", {})
+        self.children = {}
+        for key, value in children.items():
+            prop = Property.from_json(value)
+            if prop.name is None:
+                prop.name = key
+            self.children[key] = prop
+        if isinstance(content.get("required"), list):
+            for name in content["required"]:
+                if name in self.children:
+                    self.children[name].is_required = True
+
+    def handle_array_type(self, content):
+        item_type = content.get("item_type") or content.get("items")
+        children = content.get("children") or content.get("properties", [])
+        if item_type:
+            self.item_type = Property.from_json(item_type)
+        elif children:
+            self.children = [Property.from_json(child) for child in children]
+
+    @classmethod
+    def from_json(cls, content):
+        if not content:
+            return None
+        if isinstance(content, cls):
+            return content
+        if isinstance(content, str):
+            content = json.loads(content)
+
+        pro = cls._create_property(content)
+        cls._handle_required(pro, content)
+        cls._handle_complex_types(pro, content)
+
+        return pro
+
+    @classmethod
+    def _create_property(cls, content):
+        return cls(
+            data_type=get_value(content, "data_type", "dataType", "type"),
+            name=content.get("name"),
+            label=get_value(content, "label", "title"),
+            desc=get_value(content, "desc", "description"),
+            is_required=get_value(content, "is_required", "isRequired", default=False),
+            default_value=get_value(content, "default_value", "defaultValue", "default"),
+        )
+
+    @staticmethod
+    def _handle_required(pro, content):
+        if isinstance(content.get("required"), bool):
+            pro.is_required = content["required"]
+
+    @staticmethod
+    def _handle_complex_types(pro, content):
+        if pro.data_type == types.OBJECT:
+            pro.handle_object_type(content)
+        elif pro.data_type == types.ARRAY:
+            pro.handle_array_type(content)
+
+    def __str__(self):
+        if self.data_type == types.ARRAY:
+            if self.item_type:
+                return str([{str(self.item_type)}])
+            elif self.children:
+                return f"{[str(child) for child in self.children]}"
+        if self.data_type == types.OBJECT:
+            return f"{self.name}: {json.dumps(dict([(k, str(v)) for k, v in self.children.items()]))}"
+        return f"{self.data_type}"
 
 
 class _RegisteredFunctionsProxy(MutableMapping):
@@ -102,215 +195,6 @@ def register_function(name, func):
     registry.register(name, func, FunctionCategory.TYPE, override=True)
 
 
-def get_value(content, *keys, default=None):
-    for key in keys:
-        if key in content:
-            return content[key]
-    return default
-
-
-class PropertyException(RuntimeError):
-    def __init__(self, *field_errors):
-        self.errors = field_errors
-
-
-class Property(BaseModel):
-    data_type: str
-    name: Optional[str] = None
-    label: Optional[str] = None
-    desc: Optional[str] = None
-    is_required: bool = False
-    choices: Optional[List] = None
-    default_value: Optional[Union[str, int, float, bool, Decimal, List, Dict, datetime, date]] = None
-    item_type: Optional["Property"] = None
-    children: Optional[Union[List["Property"], Dict[str, "Property"]]] = Field(default_factory=list)
-    validators: Optional[List[Union[str, Dict]]] = Field(default_factory=list)
-    min: Optional[Union[int, float, Decimal]] = None
-    max: Optional[Union[int, float, Decimal]] = None
-    max_length: Optional[int] = None
-    ref: Optional[str] = None
-    additional: Optional[Dict] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_property(cls, data: Dict) -> Dict:
-        """Initialize validators based on property constraints"""
-        if not data:
-            return data
-
-        # Create a new dict for normalized data
-        normalized = data.copy()
-
-        # Handle field name mappings
-        field_mappings = {
-            "dataType": "data_type",
-            "isRequired": "is_required",
-            "defaultValue": "default_value",
-            "itemType": "item_type",
-            "maxLength": "max_length",
-        }
-
-        # Normalize field names
-        for old_key, new_key in field_mappings.items():
-            if old_key in data:
-                logger.debug(f"normalize field {old_key} to {new_key}")
-                normalized[new_key] = data.pop(old_key)
-
-        # Initialize or get existing validators list
-        validators = normalized.get("validators", [])
-        if not isinstance(validators, list):
-            validators = []
-
-        # Add required validator if needed
-        if normalized.get("is_required"):
-            if "required" not in validators:
-                validators.append("required")
-
-        # Add max_length validator for string type if not already present
-        if normalized.get("data_type") == types.STRING and normalized.get("max_length"):
-            max_length_validator = {"name": "max_length", "length": normalized["max_length"]}
-            if max_length_validator not in validators:
-                validators.append(max_length_validator)
-
-        # Add min validator if not already present
-        if normalized.get("min") is not None:
-            min_validator = {"name": "min", "min_value": normalized["min"]}
-            if min_validator not in validators:
-                validators.append(min_validator)
-
-        # Add max validator if not already present
-        if normalized.get("max") is not None:
-            max_validator = {"name": "max", "max_value": normalized["max"]}
-            if max_validator not in validators:
-                validators.append(max_validator)
-
-        normalized["validators"] = validators
-        logger.debug(f"normalized: {normalized}")
-        return normalized
-
-    # 2. 简化 OBJECT 和 ARRAY 类型的处理
-    def handle_object_type(self, content):
-        children = content.get("children", {}) or content.get("properties", {})
-        self.children = {}
-        for key, value in children.items():
-            prop = Property.from_json(value)
-            if prop.name is None:
-                prop.name = key
-            self.children[key] = prop
-        if isinstance(content.get("required"), list):
-            for name in content["required"]:
-                if name in self.children:
-                    self.children[name].is_required = True
-
-    def handle_array_type(self, content):
-        item_type = content.get("item_type") or content.get("items")
-        children = content.get("children") or content.get("properties", [])
-        if item_type:
-            self.item_type = Property.from_json(item_type)
-        elif children:
-            self.children = [Property.from_json(child) for child in children]
-
-    # 3. 优化后的 from_json 函数
-    @classmethod
-    def from_json(cls, content):
-        if not content:
-            return None
-        if isinstance(content, cls):
-            return content
-        if isinstance(content, str):
-            content = json.loads(content)
-
-        pro = cls._create_property(content)
-        cls._handle_required(pro, content)
-        cls._handle_complex_types(pro, content)
-
-        return pro
-
-    @classmethod
-    def _create_property(cls, content):
-        return cls(
-            data_type=get_value(content, "data_type", "dataType", "type"),
-            name=content.get("name"),
-            label=get_value(content, "label", "title"),
-            desc=get_value(content, "desc", "description"),
-            is_required=get_value(content, "is_required", "isRequired", default=False),
-            default_value=get_value(content, "default_value", "defaultValue", "default"),
-            choices=content.get("choices"),
-            validators=content.get("validators", []),
-            max=content.get("max"),
-            min=content.get("min"),
-            max_length=get_value(content, "max_length", "maxLength"),
-            ref=content.get("ref"),
-            additional=content.get("additional"),
-        )
-
-    @staticmethod
-    def _handle_required(pro, content):
-        if isinstance(content.get("required"), bool):
-            pro.is_required = content["required"]
-
-    @staticmethod
-    def _handle_complex_types(pro, content):
-        if pro.data_type == types.OBJECT:
-            pro.handle_object_type(content)
-        elif pro.data_type == types.ARRAY:
-            pro.handle_array_type(content)
-
-    def valid(self, value):
-        return types.valid(self.data_type, value, self.validators)
-
-    def from_str(self, text):
-        # 从字符串转换为对应类型的值，并调用valid函数进行校验
-        def parse_json(text_obj):
-            try:
-                return json.loads(text_obj)
-            except json.JSONDecodeError:
-                raise ValidationError(f"invalid json string: {text_obj}")
-
-        cast_map = {
-            types.STRING: str,
-            types.BOOL: bool,
-            types.INTEGER: int,
-            types.FLOAT: float,
-            types.DECIMAL: float,
-            types.ARRAY: parse_json,
-            types.OBJECT: parse_json,
-            types.MAP: parse_json,
-        }
-        if self.data_type in cast_map:
-            value = cast_map[self.data_type](text)
-        else:
-            raise ValidationError(f"unsupported data type: {self.data_type}")
-        if value is None:
-            raise ValidationError(f"invalid value: {text}")
-        self.valid(value)
-        return value
-
-    def property_for_path(self, path: Union[str, List[str]]) -> Optional["Property"]:
-        assert self.data_type == types.OBJECT, f'invalid call of "property_for_path" on data_type: {self.data_type}'
-        assert path, f"path is required for getting property from {self.name}"
-        real_path = path
-        if isinstance(path, str):
-            real_path = path.split(".")
-        if real_path[0] not in self.children:
-            return None
-        prop = self.children[real_path[0]]
-        rest_path = real_path[1:]
-        if prop.data_type == types.OBJECT:
-            return prop.property_for_path(rest_path)
-        return prop
-
-    def __str__(self):
-        if self.data_type == types.ARRAY:
-            if self.item_type:
-                return str([{str(self.item_type)}])
-            elif self.children:
-                return f"{[str(child) for child in self.children]}"
-        if self.data_type == types.OBJECT:
-            return f"{self.name}: {json.dumps(dict([(k, str(v)) for k, v in self.children.items()]))}"
-        return f"{self.data_type}"
-
-
 def get_attr(obj, path):
     # Note: used by Property matching (``_match_object``), not by the
     # expression evaluator. Kept here as a structural helper.
@@ -376,12 +260,6 @@ def match(props: Property, obj, context=None):
     :param context: 可选的上下文，用于处理复杂的属性匹配
     :return: 如果结构符合要求，则返回True
     """
-    # 如果props是字符串，尝试从context中解析
-    if isinstance(props, str):
-        props = find_property(props, context) if context else None
-        if not props:
-            return False
-
     # 处理None值的情况
     if obj is None:
         return not props.is_required
@@ -406,15 +284,6 @@ def match(props: Property, obj, context=None):
     elif props.data_type == types.NUMBER:
         return isinstance(obj, (int, float, Decimal))
 
-    return False
-
-
-def _match_complex_type(props: Property, obj):
-    """Helper method to match complex types"""
-    if props.data_type == types.ARRAY:
-        return _match_array(props, obj)
-    elif props.data_type == types.OBJECT:
-        return _match_object(props, obj)
     return False
 
 
@@ -453,202 +322,3 @@ def _match_object(props: Property, obj):
         return True
 
     return all(match(prop, get_attr(obj, field)) for field, prop in props.children.items())
-
-
-def find_property(path, context=None):
-    """
-    Find a property based on a path, optionally using a context.
-
-    :param path: Property path to find
-    :param context: Optional context dictionary to resolve references
-    :return: Resolved property or False
-    """
-    if not context:
-        context = {}
-
-    # Determine property source based on path prefix
-    if path.startswith("INPUT"):
-        # Assuming input_property is a method or attribute in the context
-        prop = context.get("input_property")
-    elif path.startswith("PARENT"):
-        # For parent, recursively find property in parent context
-        parent_context = context.get("parent", {})
-        return find_property(path[len("PARENT.") :], parent_context)
-    elif path.startswith("NODE"):
-        # For node, find node's output property
-        node_id = path[len("NODE.") :]
-        nodes = context.get("nodes", [])
-        node = next((n for n in nodes if n.id == node_id), None)
-        prop = node.output_property if node else None
-    elif path.startswith("GLOBAL"):
-        # Global context: create a property from global context keys
-        global_context = context.get("global_context", {})
-        prop = Property(
-            data_type=types.OBJECT, children={k: Property(data_type=types.ANY) for k in global_context.keys()}
-        )
-    else:
-        return False
-
-    if not prop:
-        return False
-
-    # If no further path specified, return the property
-    if "." not in path:
-        return prop
-
-    # Expand property for nested paths
-    return _expand_property(prop, path.split(".")[1:])
-
-
-def _expand_property(prop, path_parts):
-    """
-    Expand a property based on a path
-
-    :param prop: Initial property
-    :param path_parts: List of path parts to traverse
-    :return: Expanded property
-    """
-    if not prop:
-        return None
-
-    # For simple types, can't expand further
-    if prop.data_type not in [types.ARRAY, types.OBJECT]:
-        return prop
-
-    # Create a copy to avoid modifying original
-    prop = prop.model_copy()
-
-    if prop.data_type == types.ARRAY:
-        if prop.item_type:
-            prop.item_type = _expand_property(prop.item_type, path_parts)
-        elif prop.children:
-            prop.children = [_expand_property(child, path_parts) for child in prop.children]
-    elif prop.data_type == types.OBJECT:
-        prop.children = {field: _expand_property(val, path_parts) for field, val in prop.children.items()}
-
-    return prop
-
-
-def expanded_property(prop: Union[Property, str], context=None) -> Optional[Property]:
-    """
-    展开Property，把一些引用的属性展开成真实结构
-    :param prop: 需要展开的属性
-    :param context: 上下文，用于解析引用属性
-    :return: Property，展开后的真实结构
-    """
-    if not prop:
-        return None
-
-    if isinstance(prop, Property):
-        return _expand_property_object(prop, context)
-    elif isinstance(prop, str):
-        if prop.startswith("@"):
-            return _expand_reference_property(prop, context)
-        elif prop.startswith("$"):
-            # Assuming evaluate is imported or defined in this module
-            return evaluate(prop)
-
-    return prop
-
-
-def _expand_property_object(prop: Property, context=None) -> Property:
-    if prop.data_type not in [types.ARRAY, types.OBJECT]:
-        return prop
-
-    prop = copy(prop)
-    if prop.data_type == types.ARRAY:
-        prop = _expand_array_property(prop, context)
-    elif prop.data_type == types.OBJECT:
-        prop = _expand_object_property(prop, context)
-
-    return prop
-
-
-def _expand_array_property(prop: Property, context=None) -> Property:
-    if prop.item_type:
-        prop.item_type = expanded_property(prop.item_type, context)
-    elif prop.children:
-        prop.children = [expanded_property(child, context) for child in prop.children]
-    return prop
-
-
-def _expand_object_property(prop: Property, context=None) -> Property:
-    if not prop.children:
-        return prop
-    prop.children = {field: expanded_property(val, context) for field, val in prop.children.items()}
-    return prop
-
-
-def _expand_reference_property(prop: str, context=None) -> Optional[Property]:
-    """
-    展开引用属性
-    :param prop: 引用属性字符串
-    :param context: 上下文，用于解析引用属性
-    :return: 展开后的属性
-    """
-    if not context:
-        context = {}
-
-    if prop.startswith("@INPUT"):
-        return _expand_input_property(prop, context)
-    if prop.startswith("@OUTPUT"):
-        return _expand_output_property(prop, context)
-    if prop.startswith("@node#"):
-        return _expand_node_property(prop, context)
-
-    return None
-
-
-def _expand_input_property(prop: str, context: dict) -> Optional[Property]:
-    """
-    展开输入属性
-    :param prop: 输入属性引用
-    :param context: 上下文
-    :return: 展开后的属性
-    """
-    input_type = context.get("input_type")
-    if not input_type:
-        return None
-
-    if "." in prop:
-        return input_type.property_for_path(prop[len("@INPUT.") :])
-    return input_type
-
-
-def _expand_output_property(prop: str, context: dict) -> Optional[Property]:
-    """
-    展开输出属性
-    :param prop: 输出属性引用
-    :param context: 上下文
-    :return: 展开后的属性
-    """
-    output_type = context.get("output_type")
-    if not output_type:
-        return None
-
-    if "." in prop:
-        return output_type.property_for_path(prop[len("@OUTPUT.") :])
-    return output_type
-
-
-def _expand_node_property(prop: str, context: dict) -> Optional[Property]:
-    """
-    展开节点属性
-    :param prop: 节点属性引用
-    :param context: 上下文
-    :return: 展开后的属性
-    """
-    paths = prop.split(".")
-    node_id = paths[0].split("-")[-1]
-    nodes = context.get("nodes", [])
-    node = next((n for n in nodes if n.id == node_id), None)
-
-    if not node:
-        return None
-
-    if prop.startswith("@node#in"):
-        return node.input_type.property_for_path(paths[1:]) if len(paths) >= 2 else node.input_type
-    if prop.startswith("@node#out"):
-        return node.output_type.property_for_path(paths[1:]) if len(paths) >= 2 else node.output_type
-
-    return None

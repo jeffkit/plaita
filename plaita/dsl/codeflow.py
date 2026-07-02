@@ -18,7 +18,7 @@ plaita.dsl.codeflow — 用纯 Python 函数写 flow（AST 编译到 Flow IR）�
 
     from plaita.dsl.codeflow import flow, HTTP, ErrorHandler
 
-    @flow("create_user", input_type={"age": int, "name": str})
+    @flow("create_user", desc="创建用户")
     def create_user(INPUT):
         if INPUT.age >= 18:
             resp = HTTP.post(
@@ -30,7 +30,7 @@ plaita.dsl.codeflow — 用纯 Python 函数写 flow（AST 编译到 Flow IR）�
             return resp.data
         return "未成年"
 
-    create_user.run(name="alice", age=20)
+    create_user.run(name="alice", age=20)  # $INPUT = {"name": "alice", "age": 20}
 
 支持的语句：``if/elif/else``、``return``、赋值、表达式语句、
 ``for x in MAP/FILTER/FIND/LOOP(...)``、``for a,b in REDUCE(...)``。
@@ -45,6 +45,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from plaita.core.flow import Flow
@@ -850,6 +851,20 @@ def _func_ast(func: Callable) -> ast.FunctionDef:
     return fdef
 
 
+def _warn_deprecated_type_opts(opts: Dict[str, Any]) -> None:
+    if opts.get("input_type") is not None or opts.get("output_type") is not None:
+        warnings.warn(
+            "input_type/output_type on @flow/@childflow is deprecated and ignored; "
+            "$INPUT is always a dict from run(**kwargs) or run({...}).",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
+
+def _default_input_type() -> Dict[str, str]:
+    return {"dataType": "object"}
+
+
 def _compile_fdef(
     fdef: ast.FunctionDef,
     flow_id: Optional[str],
@@ -868,12 +883,8 @@ def _compile_fdef(
     ctx.nodes.insert(0, start_node)
 
     data: Dict[str, Any] = {"runtime": "python", "flow_id": flow_id or fdef.name}
-    it = opts.get("input_type")
-    if it is not None:
-        data["inputType"] = _type_spec(it)
-    ot = opts.get("output_type")
-    if ot is not None:
-        data["outputType"] = _type_spec(ot)
+    _warn_deprecated_type_opts(opts)
+    data["inputType"] = _default_input_type()
     for fld in ("desc", "version", "author", "timeout"):
         if opts.get(fld) is not None:
             data[fld] = opts[fld]
@@ -901,12 +912,8 @@ def _compile_childflow_fdef(
     start_id = ctx.auto_id("start")
     ctx.nodes.insert(0, {"type": "start", "id": start_id, "next": entry})
     data: Dict[str, Any] = {"runtime": "python", "nodes": ctx.nodes}
-    it = opts.get("input_type")
-    if it is not None:
-        data["inputType"] = _type_spec(it)
-    ot = opts.get("output_type")
-    if ot is not None:
-        data["outputType"] = _type_spec(ot)
+    _warn_deprecated_type_opts(opts)
+    data["inputType"] = _default_input_type()
     if opts.get("desc") is not None:
         data["desc"] = opts["desc"]
     return data
@@ -920,20 +927,9 @@ def _compile_func(func: Callable, flow_id: Optional[str], opts: Dict[str, Any]) 
     )
 
 
-def _type_spec(x: Any) -> Any:
-    if isinstance(x, str):
-        return {"dataType": x}
-    if isinstance(x, dict):
-        # {"age": int, ...} -> object with children；这里简化为 object
-        return {"dataType": "object"}
-    return x
-
-
 def flow(
     flow_id: Optional[str] = None,
     *,
-    input_type: Any = None,
-    output_type: Any = None,
     desc: Optional[str] = None,
     version: Optional[str] = None,
     author: Optional[str] = None,
@@ -943,10 +939,10 @@ def flow(
 ) -> Callable[[Callable], Flow]:
     """把一个纯 Python 函数编译成 ``Flow``。
 
-    装饰后该名字绑定到 ``Flow`` 对象，调用 ``.run(**params)`` 执行。
+    装饰后该名字绑定到 ``Flow`` 对象，调用 ``.run(**params)`` 或
+    ``.run({...})`` 执行；``$INPUT`` 始终为传入的 dict。
     """
-    opts = dict(input_type=input_type, output_type=output_type, desc=desc,
-                version=version, author=author, timeout=timeout,
+    opts = dict(desc=desc, version=version, author=author, timeout=timeout,
                 global_context=global_context, metadata=metadata)
 
     def decorator(func: Callable) -> Flow:
@@ -959,8 +955,6 @@ def flow(
 
 
 def childflow(
-    input_type: Any = None,
-    output_type: Any = None,
     desc: Optional[str] = None,
 ) -> Callable[[Callable], "_ChildFlowMarker"]:
     """``@childflow`` 装饰一个子流程函数，供 ``CHILD/REFERENCE/PARALLEL`` 引用。
@@ -972,7 +966,7 @@ def childflow(
         fdef = _func_ast(func)
         data = _compile_childflow_fdef(
             fdef,
-            {"input_type": input_type, "output_type": output_type, "desc": desc},
+            {"desc": desc},
             module_globals=getattr(func, "__globals__", {}),
         )
         return _ChildFlowMarker(data, func)
@@ -1002,8 +996,7 @@ def compile_func(func: Callable, flow_id: Optional[str] = None, **opts: Any) -> 
 # ---------------------------------------------------------------------------
 
 _DECO_OPT_KEYS = (
-    "input_type", "output_type", "desc", "version", "author",
-    "timeout", "global_context", "metadata",
+    "desc", "version", "author", "timeout", "global_context", "metadata",
 )
 # 装饰器关键字参数名 → IR opts 键
 _DECO_KW_ALIASES = {
@@ -1030,9 +1023,6 @@ def _eval_deco_value(node: ast.AST) -> Any:
     try:
         return ast.literal_eval(node)
     except (ValueError, SyntaxError):
-        # 例如 input_type={"age": int} 里的 int 不是字面量——交给 _type_spec 兜底
-        if isinstance(node, ast.Dict):
-            return {"dataType": "object"}
         return None
 
 

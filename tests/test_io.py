@@ -7,62 +7,6 @@ from plaita.io import REGISTERED_FUNCTIONS, Property
 
 class IOTestCase(TestCase):
 
-    def test_property_for_path_string(self):
-        p = Property(name="name", data_type=types.STRING)
-        with self.assertRaises(AssertionError, msg=f'invalid call of "property_for_path" on data_type: {types.STRING}'):
-            p.property_for_path("name")
-
-    def test_property_for_path_without_path(self):
-        p = Property(name="name", data_type=types.STRING)
-        with self.assertRaises(AssertionError, msg="path is required for getting property from name"):
-            p.property_for_path([])
-
-    def test_property_for_path(self):
-        user = Property(
-            name="user",
-            data_type=types.OBJECT,
-            children={
-                "name": Property(name="name", data_type=types.STRING),
-                "age": Property(name="age", data_type=types.INTEGER),
-            },
-        )
-        ret = user.property_for_path("name")
-        self.assertEqual("name", ret.name)
-        self.assertEqual(types.STRING, ret.data_type)
-
-    def test_property_for_path_missing_path(self):
-        user = Property(
-            name="user",
-            data_type=types.OBJECT,
-            children={
-                "name": Property(name="name", data_type=types.STRING),
-                "age": Property(name="age", data_type=types.INTEGER),
-            },
-        )
-        ret = user.property_for_path("gender")
-        self.assertIsNone(ret)
-
-    def test_property_for_path_nest(self):
-        user = Property(
-            name="user",
-            data_type=types.OBJECT,
-            children={
-                "name": Property(name="name", data_type=types.STRING),
-                "age": Property(name="age", data_type=types.INTEGER),
-                "partner": Property(
-                    name="user",
-                    data_type=types.OBJECT,
-                    children={
-                        "name": Property(name="name", data_type=types.STRING),
-                        "age": Property(name="age", data_type=types.INTEGER),
-                    },
-                ),
-            },
-        )
-        ret = user.property_for_path("partner.age")
-        self.assertEqual(ret.data_type, types.INTEGER)
-        self.assertEqual(ret.name, "age")
-
     def test_create_property_from_dict(self):
         schema_data = {
             "name": "",

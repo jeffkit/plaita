@@ -12,6 +12,7 @@ import os
 import uuid
 import logging
 import threading
+import warnings
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from plaita.core import types
@@ -42,19 +43,49 @@ def _safe_environment() -> Dict[str, str]:
     }
 
 
-def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
-    """Resolve the flow input value from positional/keyword args per ``in_format``.
+def _warn_legacy_positional_input(args: tuple) -> None:
+    warnings.warn(
+        "Passing flow input via non-dict positional arguments is deprecated; "
+        "use flow.run({...}) or flow.run(key=value).",
+        DeprecationWarning,
+        stacklevel=4,
+    )
 
-    Pure helper extracted from ``ExecutionContext.setup_flow`` so the class
-    body stays under the SC-003 LOC budget.
-    """
-    if in_format.data_type in (types.OBJECT, types.MAP):
-        if in_format.data_type == types.OBJECT and args and isinstance(args[0], dict):
-            return args[0]
-        return kwargs
+
+def _legacy_positional_value(in_format, args: tuple) -> Any:
+    if in_format is None or in_format.data_type in (types.OBJECT, types.MAP):
+        return {}
     if in_format.data_type == types.ARRAY:
         return args
     return args[0] if args else None
+
+
+def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
+    """Resolve flow invocation arguments into the value stored at ``$INPUT``.
+
+    Modern API: keyword arguments and/or a single dict positional argument.
+    For object/map flows (including the default ``@flow`` compile output),
+    ``$INPUT`` is always a ``dict``.
+
+    Legacy: positional scalar or tuple input for flows whose ``input_type`` is
+    ``string`` or ``array`` still works but emits ``DeprecationWarning``.
+    """
+    if kwargs:
+        if args:
+            if len(args) == 1 and isinstance(args[0], dict):
+                return {**args[0], **kwargs}
+            _warn_legacy_positional_input(args)
+            return kwargs
+        return kwargs
+
+    if not args:
+        return {}
+
+    if len(args) == 1 and isinstance(args[0], dict):
+        return args[0]
+
+    _warn_legacy_positional_input(args)
+    return _legacy_positional_value(in_format, args)
 
 # 依赖反转: core 不直接 import plaita.event, 而是持有一个由上层 (plaita 顶层包)
 # 注册的 "默认 event bus provider" 可调用对象。这样 core → event 的反向依赖
@@ -161,12 +192,8 @@ class ExecutionContext:
 
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         """Initialize context with flow-level variables."""
-        in_format = flow.input_type
-        if in_format:
-            context_value = _coerce_input_value(in_format, args, kwargs)
-            self.set_state(f"{self.express_prefix}{self.express_input_name}", context_value)
-        else:
-            self.set_state(f"{self.express_prefix}{self.express_input_name}", {})
+        context_value = _coerce_input_value(flow.input_type, args, kwargs)
+        self.set_state(f"{self.express_prefix}{self.express_input_name}", context_value)
         self.set_state(
             f"{self.express_prefix}{self.express_parent_name}",
             self.parent.context if self.parent else {},

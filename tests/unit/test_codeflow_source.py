@@ -1,6 +1,7 @@
 """Tests for plaita.dsl.codeflow — flow_from_source 源码模式（运行期生成）。"""
 
 import unittest
+import warnings
 
 from plaita.dsl.codeflow import flow_from_source, compile_source
 
@@ -13,7 +14,7 @@ class TestFlowFromSource(unittest.TestCase):
                 return "成年"
             return "未成年"
         '''
-        f = flow_from_source(src, flow_id="adult_check", input_type="object")
+        f = flow_from_source(src, flow_id="adult_check")
         self.assertEqual(f.run(age=20), "成年")
         self.assertEqual(f.run(age=15), "未成年")
 
@@ -30,22 +31,22 @@ class TestFlowFromSource(unittest.TestCase):
                 return resp.data
             return "未成年"
         '''
-        d = compile_source(src, flow_id="create_user", input_type="object")
+        d = compile_source(src, flow_id="create_user")
         h = [n for n in d["nodes"] if n["type"] == "http"][0]
         self.assertEqual(h["method"], "POST")
         self.assertEqual(h["body"], {"name": "$INPUT.name"})
         self.assertEqual(h["errorHandler"]["strategy"], "continue_with")
         self.assertEqual(h["errorHandler"]["defaultValue"], {"data": None})
-        f = flow_from_source(src, flow_id="create_user", input_type="object")
+        f = flow_from_source(src, flow_id="create_user")
         self.assertEqual(f.flow_id, "create_user")
 
     def test_childflow_reference(self):
         src = '''
-        @childflow(input_type="object")
+        @childflow()
         def double_each(INPUT):
             return F.mul(INPUT.item, 2)
 
-        @flow("double_via_child", input_type="object")
+        @flow("double_via_child")
         def double_via_child(INPUT):
             r = CHILD(input={"item": INPUT.payload}, flow=double_each)
             return r
@@ -55,7 +56,7 @@ class TestFlowFromSource(unittest.TestCase):
 
     def test_decorator_opts_extracted(self):
         src = '''
-        @flow("grade", input_type="object", desc="分级")
+        @flow("grade", desc="分级")
         def grade(INPUT):
             if INPUT.score >= 90:
                 return "A"
@@ -73,7 +74,7 @@ class TestFlowFromSource(unittest.TestCase):
 
     def test_explicit_opts_override_decorator(self):
         src = '''
-        @flow("grade", input_type="object", desc="装饰器里的描述")
+        @flow("grade", desc="装饰器里的描述")
         def grade(INPUT):
             return INPUT.x
         '''
@@ -97,8 +98,22 @@ class TestFlowFromSource(unittest.TestCase):
         def bar(INPUT):
             return INPUT.y
         '''
-        f = flow_from_source(src, flow_id="bar", input_type="object")
+        f = flow_from_source(src, flow_id="bar")
         self.assertEqual(f.run(y=5), 5)
+
+    def test_deprecated_input_type_warns(self):
+        src = '''
+        @flow("grade", input_type="object")
+        def grade(INPUT):
+            return INPUT.x
+        '''
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            flow_from_source(src)
+        self.assertTrue(any(
+            issubclass(w.category, DeprecationWarning) and "input_type" in str(w.message)
+            for w in caught
+        ))
 
 
 if __name__ == "__main__":

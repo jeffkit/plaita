@@ -11,14 +11,14 @@ from plaita.dsl.codeflow import (
 )
 
 
-@flow("adult_check", input_type="object", desc="判断成年")
+@flow("adult_check", desc="判断成年")
 def adult_check(INPUT):
     if INPUT.age >= 18:
         return "成年"
     return "未成年"
 
 
-@flow("grade", input_type="object")
+@flow("grade")
 def grade(INPUT):
     if INPUT.score >= 90:
         return "A"
@@ -28,20 +28,20 @@ def grade(INPUT):
         return "C"
 
 
-@flow("greet", input_type="object")
+@flow("greet")
 def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)
 
 
-@flow("double_numbers", input_type="object")
+@flow("double_numbers")
 def double_numbers(INPUT):
     for x in MAP(INPUT.numbers, id="dbl"):
         return F.mul(x, 2)
     return NODE.dbl
 
 
-@flow("evens", input_type="object")
+@flow("evens")
 def evens(INPUT):
     for x in FILTER(INPUT.nums, id="flt"):
         if F.mod(x, 2) == 0:
@@ -50,7 +50,7 @@ def evens(INPUT):
     return NODE.flt
 
 
-@flow("first_even", input_type="object")
+@flow("first_even")
 def first_even(INPUT):
     for x in FIND(INPUT.nums, id="fd"):
         if F.mod(x, 2) == 0:
@@ -59,32 +59,32 @@ def first_even(INPUT):
     return NODE.fd
 
 
-@flow("loop_echo", input_type="object")
+@flow("loop_echo")
 def loop_echo(INPUT):
     for x in LOOP(INPUT.nums, id="lp"):
         return x
     return NODE.lp
 
 
-@childflow(input_type="object")
+@childflow()
 def double_each(INPUT):
     return F.mul(INPUT.item, 2)
 
 
-@flow("double_via_child", input_type="object")
+@flow("double_via_child")
 def double_via_child(INPUT):
     r = CHILD(input={"item": INPUT.payload}, flow=double_each)
     return r
 
 
-@flow("with_and", input_type="object")
+@flow("with_and")
 def with_and(INPUT):
     if INPUT.age >= 18 and INPUT.vip == True:  # noqa: E712
         return "通过"
     return "拒绝"
 
 
-@flow("with_not", input_type="object")
+@flow("with_not")
 def with_not(INPUT):
     if not (INPUT.role == "blocked"):
         return "通过"
@@ -145,6 +145,15 @@ class TestCodeflowIR(unittest.TestCase):
         self.assertIn("if", types)
         self.assertIn("end", types)
 
+    def test_always_emits_object_input_type(self):
+        from plaita.dsl.codeflow import compile_func
+        d = compile_func(adult_check.__wrapped__, "adult_check")
+        self.assertEqual(d["inputType"], {"dataType": "object"})
+        self.assertNotIn("outputType", d)
+
+    def test_run_accepts_dict(self):
+        self.assertEqual(adult_check.run({"age": 20}), "成年")
+
     def test_expression_compiles_to_dollar_form(self):
         from plaita.dsl.codeflow import compile_func
         d = compile_func(greet.__wrapped__, "greet")
@@ -155,7 +164,7 @@ class TestCodeflowIR(unittest.TestCase):
         self.assertIn("$NODE.name", end["output"])
 
 
-@flow("http_with_error_handler", input_type="object")
+@flow("http_with_error_handler")
 def http_with_error_handler(INPUT):
     if INPUT.age >= 18:
         resp = HTTP.post(

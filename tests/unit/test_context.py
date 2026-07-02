@@ -120,8 +120,7 @@ class TestExecutionContextState(unittest.TestCase):
     def test_setup_flow(self):
         from plaita.io import Property
         from plaita.core import types
-        from pydantic import BaseModel, Field
-        from typing import Optional, Dict, List
+        from plaita.core.context import _coerce_input_value
 
         class FakeFlow:
             flow_id = "f1"
@@ -136,6 +135,25 @@ class TestExecutionContextState(unittest.TestCase):
         global_ctx = ctx.get_state("$GLOBAL")
         self.assertEqual(global_ctx["env"], "test")
         self.assertEqual(global_ctx["flow_id"], "f1")
+
+    def test_coerce_input_value_dict_positional(self):
+        from plaita.core.context import _coerce_input_value
+        self.assertEqual(_coerce_input_value(None, ({"a": 1},), {}), {"a": 1})
+
+    def test_coerce_input_value_kwargs(self):
+        from plaita.core.context import _coerce_input_value
+        self.assertEqual(_coerce_input_value(None, (), {"a": 1}), {"a": 1})
+
+    def test_coerce_input_value_merge_dict_and_kwargs(self):
+        from plaita.core.context import _coerce_input_value
+        self.assertEqual(
+            _coerce_input_value(None, ({"a": 1},), {"b": 2}),
+            {"a": 1, "b": 2},
+        )
+
+    def test_coerce_input_value_no_input_type_empty(self):
+        from plaita.core.context import _coerce_input_value
+        self.assertEqual(_coerce_input_value(None, (), {}), {})
 
     def test_get_or_create_event_bus_no_bus(self):
         ctx = ExecutionContext()
