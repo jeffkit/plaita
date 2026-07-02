@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures.process import ProcessPoolExecutor
 from multiprocessing import Lock as ProcessLock
@@ -9,6 +10,8 @@ from pydantic import Field, model_validator
 
 from plaita.node import Node
 from plaita.node.decide import Branch
+
+logger = logging.getLogger(__name__)
 
 ARTIFICIAL = "artificial"
 COROUTINE = "coroutine"
@@ -79,17 +82,18 @@ class Parallel(Node):
         pass
 
     def exec_branch(self, pb: ParallelBranch, execution):
-        """执行并行节点的分支flow"""
-        try:
-            branch_execution = execution.get_child_execution()
-            lazy = execution.mode == "generator"
-            input_value = execution.evaluate(pb.input)
-            rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
-            print(f"branch {pb.name} executed: {rs}")
-            return rs
-        except Exception as e:
-            print(f"branch {pb.name} generated an exception: {e}")
-            return None
+        """执行并行节点的分支flow
+
+        异常不在此处吞咽——交由调用方（``_process_future_result`` / coroutine 路径）
+        显式决定如何记录。历史上这里 ``return None`` 让崩溃分支与"返回 None"无法
+        区分，导致下游节点拿到静默错误结果继续执行。
+        """
+        branch_execution = execution.get_child_execution()
+        lazy = execution.mode == "generator"
+        input_value = execution.evaluate(pb.input)
+        rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
+        logger.debug("branch %s executed: %s", pb.name, rs)
+        return rs
 
     def pool_execute(self, pool_type=THREAD, execution=None):
         """使用线程池或进程池来执行并行节点"""
@@ -139,12 +143,23 @@ class Parallel(Node):
         return results
 
     def _process_future_result(self, future, branch, results, lock):
+        """收集 future 结果。分支抛错时记一个显式错误对象，不静默丢成 None。
+
+        返回的 ``results`` 字典里：成功分支值为子流程产出；失败分支值为
+        ``{"__parallel_error__": str(exc), "__branch__": branch.name}`` 这种哨兵，
+        下游节点拿到时一眼可识别（不像 None 那样跟合法返回混淆）。
+        """
         try:
             result = future.result()
             with lock:
                 results[branch.name] = result
-        except (Exception, ValueError) as exc:
-            print(f"{branch.name} generated an exception: {exc}")
+        except Exception as exc:
+            logger.warning("parallel branch %s raised: %s", branch.name, exc, exc_info=True)
+            with lock:
+                results[branch.name] = {
+                    "__parallel_error__": str(exc),
+                    "__branch__": branch.name,
+                }
 
     def thread_execute(self, execution):
         """使用线程池来执行并行节点"""
@@ -155,28 +170,22 @@ class Parallel(Node):
         return self.pool_execute(PROCESS, execution)
 
     def coroutine_execute(self, execution):
-        """使用协程来执行并行节点"""
-        branches_to_execute = self.match_condition_branches(execution)
-        join_branches = [b for b in branches_to_execute if b.name in self.join_branches]
+        """使用协程来执行并行节点。
 
-        async def execute_branch(pb: ParallelBranch):
-            branch_execution = execution.get_child_execution()
-            input_value = execution.evaluate(pb.input)
-            lazy = execution.mode == "generator"
-            return branch_execution.run_compatible(pb.flow, lazy, input_value)
+        历史实现用 ``loop.run_until_complete`` 自驱事件循环——在已有事件循环
+        （FastAPI / Starlette / 任何 async 框架）中调用必抛 RuntimeError。
 
-        async def gather_results():
-            tasks = [execute_branch(branch) for branch in join_branches]
-            return await asyncio.gather(*tasks)
-
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        results = loop.run_until_complete(gather_results())
-        return {branch.name: result for branch, result in zip(join_branches, results)}
+        当前节点的 ``execute`` 是 sync 接口、由 ``run_compatible`` 同步驱动：
+        试图在 sync 路径里再嵌套一个事件循环本质上是同步-异步桥接套娃。
+        在不引入完整 async strategy 改造的前提下，直接拒绝该模式，避免静默崩。
+        需要真并发的用户请用 ``mode=thread`` 或 ``mode=process``。
+        """
+        raise ValueError(
+            "parallel mode='coroutine' is no longer supported in sync execution path: "
+            "it nested asyncio.run_until_complete inside the sync bridge and reliably "
+            "crashed under any running event loop (FastAPI / async frameworks). "
+            "Use mode='thread' or mode='process' for concurrent branch execution."
+        )
 
     def execute(self, execution):
         """执行并行节点, 根据mode来选择执行方式"""

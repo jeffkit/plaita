@@ -163,46 +163,50 @@ class TestExecutionContextState(unittest.TestCase):
 
 
 class TestExecutionContextEnvFiltering(unittest.TestCase):
-    """T038: Sensitive prefix filtering for environment variables."""
+    """2026-07 安全模型重构：``$ENV`` 默认空（不再泄漏 os.environ），
+    flow 通过 ``expose_env`` allowlist 显式声明需要的环境变量。"""
 
-    def test_sensitive_env_vars_filtered(self):
-        test_env = {
-            "PATH": "/usr/bin",
-            "HOME": "/home/user",
-            "SECRET_KEY": "s3cret",
-            "AWS_SECRET_ACCESS_KEY": "aws_secret",
-            "DATABASE_URL": "postgres://...",
-            "TOKEN_API": "tok123",
-            "PASSWORD_DB": "pass123",
-            "NORMAL_VAR": "normal",
-        }
-        with patch.dict(os.environ, test_env, clear=True):
+    def test_default_env_is_empty(self):
+        """没有 allowlist 时 ``$ENV`` 必须为空——这是反转后的核心保证。"""
+        with patch.dict(os.environ, {"HOME": "/h", "PATH": "/p", "SECRET_KEY": "s"}, clear=True):
             ctx = ExecutionContext()
             ctx.clean()
             env = ctx.get_state("$ENV")
-            self.assertIn("PATH", env)
-            self.assertIn("HOME", env)
-            self.assertIn("NORMAL_VAR", env)
-            self.assertNotIn("SECRET_KEY", env)
-            self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
-            self.assertNotIn("DATABASE_URL", env)
-            self.assertNotIn("TOKEN_API", env)
-            self.assertNotIn("PASSWORD_DB", env)
+            self.assertEqual(env, {})
 
-    def test_all_sensitive_prefixes_blocked(self):
+    def test_expose_env_allowlist_returns_only_listed_keys(self):
+        with patch.dict(os.environ, {"HOME": "/h", "PATH": "/p", "OTHER": "x"}, clear=True):
+            ctx = ExecutionContext(expose_env=["HOME", "PATH", "MISSING"])
+            ctx.clean()
+            env = ctx.get_state("$ENV")
+            self.assertEqual(env, {"HOME": "/h", "PATH": "/p"})
+            self.assertNotIn("OTHER", env)
+            self.assertNotIn("MISSING", env)  # 不存在的 key 静默跳过
+
+    def test_sensitive_prefix_still_blocked_even_when_allowlisted(self):
+        """allowlist 命中敏感前缀时仍拒绝——深度防御层。"""
+        with patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "k"}, clear=True):
+            ctx = ExecutionContext(expose_env=["AWS_SECRET_ACCESS_KEY"])
+            ctx.clean()
+            env = ctx.get_state("$ENV")
+            self.assertEqual(env, {})  # 被深度防御层拦下
+
+    def test_sensitive_prefix_blacklist_covers_all_documented_prefixes(self):
+        """黑名单本身保留——用作 allowlist 之上的二次过滤。"""
         for prefix in _SENSITIVE_ENV_PREFIXES:
-            key = f"{prefix}_TEST_VALUE"
+            key = f"{prefix}_VAR"
             with patch.dict(os.environ, {key: "secret"}, clear=True):
-                ctx = ExecutionContext()
+                ctx = ExecutionContext(expose_env=[key])
                 ctx.clean()
                 env = ctx.get_state("$ENV")
-                self.assertNotIn(key, env, f"Prefix {prefix} should be filtered")
+                self.assertNotIn(key, env, f"Prefix {prefix} should be blocked by defense layer")
 
     def test_custom_express_prefix(self):
-        ctx = ExecutionContext(express_prefix="#")
-        ctx.clean()
-        env = ctx.get_state("#ENV")
-        self.assertIsInstance(env, dict)
+        ctx = ExecutionContext(express_prefix="#", expose_env=["HOME"])
+        with patch.dict(os.environ, {"HOME": "/h"}, clear=True):
+            ctx.clean()
+            env = ctx.get_state("#ENV")
+            self.assertEqual(env, {"HOME": "/h"})
 
 
 if __name__ == "__main__":

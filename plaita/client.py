@@ -132,11 +132,11 @@ class PlaitaClient:
         self.redis_ttl = redis_ttl
         self.memory_cache = {}
         self.memory_cache_lock = Lock()
-        
+
         # 初始化 Redis 客户端
         self._redis_client = None
         self._redis_available = False
-        
+
         if redis_client is not None:
             # 使用传入的 Redis 客户端
             self._redis_client = redis_client
@@ -144,7 +144,19 @@ class PlaitaClient:
         elif redis_config is not None:
             # 根据配置创建 Redis 客户端
             self._init_redis_from_config(redis_config)
-    
+
+    def __repr__(self) -> str:
+        # secret_key 是高敏凭证, 默认 repr 会把它打印到日志/调试器/traceback。
+        # 历史上 PlaitaClient 实例的 repr 会泄漏完整 secret_key; 这里只暴露
+        # secret_id 的前几位用于辨识, key 一律打码。
+        masked_key = f"{self.secret_key[:2]}***{self.secret_key[-2:]}" if self.secret_key else "***"
+        return (
+            f"PlaitaClient(secret_id={self.secret_id!r}, "
+            f"secret_key={masked_key!r}, url={self.url!r})"
+        )
+
+    __str__ = __repr__
+
     def _init_redis_from_config(self, config: Union[RedisConfig, Dict[str, Any]]) -> None:
         """
         根据配置初始化 Redis 客户端

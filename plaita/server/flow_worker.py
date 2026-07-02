@@ -495,11 +495,7 @@ def main():
                       help="服务注册TTL(秒)")
     parser.add_argument("--heartbeat-interval", type=int, default=10,
                       help="心跳间隔(秒)")
-    
-    # 临时调试模式
-    parser.add_argument("--debug-mode", action="store_true",
-                     help="启用调试模式，手动处理队列中的消息")
-    
+
     args = parser.parse_args()
     
     # 处理注册开关
@@ -558,66 +554,13 @@ def main():
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
-        
-        # 如果是调试模式，直接读取Redis中的流程定义并手动处理队列
-        if args.debug_mode:
-            logger.info("启用调试模式，手动处理队列中的消息")
-            
-            import redis
-            import json
-            
-            # 连接Redis
-            redis_client = redis.from_url(args.redis_url)
-            
-            # 手动处理流程定义 - 直接设置到内存中，绕过RedisFlowStorage.get_flow方法
-            flow_id = "event_flow_demo"
-            version = "1.0.0"
-            key = f"plaita:flow:{flow_id}:{version}"
-            
-            # 从Redis中获取流程定义
-            flow_data = redis_client.get(key)
-            if flow_data:
-                # 转换为字典
-                flow_definition = json.loads(flow_data)
-                logger.info(f"已载入流程定义: {flow_definition.get('name')}")
-                
-                # 加入缓存
-                flow = Flow.model_validate(flow_definition)
-                worker.flow_definition_cache[f"{flow_id}:{version}"] = flow
-                
-                # 手动处理消息队列中的任务
-                lrange_result = redis_client.lrange(args.queue_name, 0, -1)
-                if lrange_result:
-                    for item in lrange_result:
-                        message_data = json.loads(item)
-                        logger.info(f"处理队列消息: {message_data}")
-                        message_type = message_data.get("type")
-                        
-                        if message_type == "start":
-                            worker.start_flow(
-                                message_data.get("flow_id"), 
-                                message_data.get("params", {}), 
-                                message_data.get("version")
-                            )
-                        elif message_type == "resume":
-                            worker.resume_flow(
-                                message_data.get("flow_id"),
-                                message_data.get("execution_id"),
-                                message_data.get("resume_type"),
-                                message_data.get("data")
-                            )
-                            
-                        # 移除已处理的消息
-                        redis_client.lrem(args.queue_name, 1, item)
-                else:
-                    logger.info(f"队列 {args.queue_name} 中没有消息")
-            else:
-                logger.error(f"无法从Redis加载流程定义: {key}")
-        else:
-            # 正常模式：启动工作器
-            logger.info(f"流程工作器启动成功，监听队列: {args.queue_name}")
-            worker.run()
-        
+
+        # 启动工作器。历史上这里有 --debug-mode 分支硬编码 flow_id="event_flow_demo"
+        # 直接读 Redis + 手动 lrem 队列消息, 是开发期临时脚本——已删除。需要类似
+        # 调试请用 Redis CLI 或独立 dev 脚本, 不要留在生产 CLI 入口里。
+        logger.info(f"流程工作器启动成功，监听队列: {args.queue_name}")
+        worker.run()
+
     except Exception as e:
         logger.error(f"流程工作器启动失败: {e}")
         sys.exit(1)

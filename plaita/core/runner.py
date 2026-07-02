@@ -37,7 +37,6 @@ from plaita.core.errors import (
     NodeException,
     NodeExecutionError,
     NodeTimeoutError,
-    _strategy_eq,
 )
 
 if TYPE_CHECKING:
@@ -57,6 +56,28 @@ def _node_loc_suffix(node) -> str:
     """拼运行期错误消息的源码行号后缀，无回标时返回空串。"""
     sl = _node_source_loc(node)
     return f" (源码第 {sl} 行)" if sl is not None else ""
+
+
+def _coerce_strategy(value) -> ErrorStrategy:
+    """容忍 ErrorStrategy enum / 字符串 / Mock / None, 一律归一为 enum。
+
+    历史上 runner 用 ``_strategy_eq`` 同时比较 enum 和字符串; ErrorHandler 字段
+    重构为 enum 后, 仍有外部代码 (含单元测试里的 Mock 对象) 把 strategy 设为
+    裸字符串。本 helper 让 runner 在所有输入形态下都能正确比较。
+    """
+    if isinstance(value, ErrorStrategy):
+        return value
+    if value is None:
+        return ErrorStrategy.ABORT
+    if isinstance(value, str):
+        if value == "continue_with":
+            return ErrorStrategy.CONTINUE_WITH
+        try:
+            return ErrorStrategy(value)
+        except ValueError:
+            return ErrorStrategy.ABORT
+    # 兜底: 未知类型 (如 Mock) 默认 abort, 行为最安全
+    return ErrorStrategy.ABORT
 
 
 class NodeRunner:
@@ -215,8 +236,8 @@ class NodeRunner:
 
     def _handle_node_error(self, flow, node, error_handler, e: Exception):
         logger.warning("handle node error: %s", node.name or node.id, exc_info=True)
-        strategy = error_handler.strategy if error_handler else ErrorStrategy.ABORT
-        if not error_handler or _strategy_eq(strategy, ErrorStrategy.ABORT):
+        strategy = _coerce_strategy(error_handler.strategy if error_handler else None)
+        if not error_handler or strategy == ErrorStrategy.ABORT:
             code = DEFAULT_NODE_ABORT_CODE if not error_handler else error_handler.error_code
             message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}{_node_loc_suffix(node)}"
             if error_handler and error_handler.error_message:
@@ -224,18 +245,18 @@ class NodeRunner:
             err = NodeExecutionError(message, node=node, code=code)
             err.source_line = _node_source_loc(node)
             raise err from e
-        elif _strategy_eq(strategy, ErrorStrategy.CONTINUE):
+        elif strategy == ErrorStrategy.CONTINUE:
             return None
-        elif _strategy_eq(strategy, ErrorStrategy.CONTINUE_WITH):
+        elif strategy == ErrorStrategy.CONTINUE_WITH:
             return error_handler.default_value
 
     def _get_error_result(self, error_handler):
         if not error_handler:
             return None
-        strategy = error_handler.strategy
-        if _strategy_eq(strategy, ErrorStrategy.CONTINUE):
+        strategy = _coerce_strategy(error_handler.strategy)
+        if strategy == ErrorStrategy.CONTINUE:
             return None
-        elif _strategy_eq(strategy, ErrorStrategy.CONTINUE_WITH):
+        elif strategy == ErrorStrategy.CONTINUE_WITH:
             return error_handler.default_value
         return None
 

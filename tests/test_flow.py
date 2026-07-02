@@ -171,12 +171,14 @@ class FlowTestCase(TestCase):
         self.assertEqual(end_node["result"], "kongjie")
 
     def test_environment_variable(self):
-        # 全局上下文
+        # ``$ENV`` 默认空（2026-07 安全模型），flow 必须显式 ``expose_env``
+        # 才能读到环境变量。
         flow = Flow(
             flow_id="test4",
             version="04",
             runtime="python",
             output_type=Property(data_type=types.INTEGER, name="code", is_required=True),
+            expose_env=["HOME"],
             nodes=[
                 Start(id="start", name="开始", next="end"),
                 End(id="end", **{"resultType": "success", "output": "$ENV.HOME"}, label="结束"),

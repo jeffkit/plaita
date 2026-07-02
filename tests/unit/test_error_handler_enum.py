@@ -1,8 +1,8 @@
 """B9 复现: ErrorHandler.strategy 应使用 ErrorStrategy 枚举, 而非裸字符串。
 
-当前 ``strategy: Optional[str] = Field(ErrorStrategy.ABORT.value)`` 把枚举值
-拆成字符串存储, 类型安全丢失, 比较处处 ``== ErrorStrategy.X.value``。
-应为枚举类型, 同时保持对字符串输入的兼容与现有行为正确。
+2026-07 重构落地: ``strategy`` 字段类型已从 ``Optional[str]`` 改为
+``ErrorStrategy``, 字符串输入在 validator 里自动 coerce 为 enum。
+比较处不再需要 ``_strategy_eq``, 直接 ``==`` 即可。
 """
 
 import unittest
@@ -13,15 +13,18 @@ from plaita.core.errors import ErrorHandler, ErrorStrategy, RecoverableErrorHand
 class TestErrorHandlerStrategyEnum(unittest.TestCase):
     def test_default_strategy_value(self):
         h = ErrorHandler()
-        # use_enum_values: 存储为枚举值字符串, 保持向后兼容 (== "abort")
-        self.assertEqual(h.strategy, "abort")
-        self.assertEqual(h.strategy, ErrorStrategy.ABORT.value)
+        # 字段存为 ErrorStrategy enum; == enum 与 == enum.value 都成立
+        self.assertEqual(h.strategy, ErrorStrategy.ABORT)
+        self.assertEqual(h.strategy.value, "abort")
 
     def test_string_input_validated_and_coerced(self):
         h = ErrorHandler(strategy="continue")
-        self.assertEqual(h.strategy, "continue")
+        self.assertEqual(h.strategy, ErrorStrategy.CONTINUE)
         h2 = ErrorHandler(strategy="continue-with")
-        self.assertEqual(h2.strategy, "continue-with")
+        self.assertEqual(h2.strategy, ErrorStrategy.CONTINUE_WITH)
+        # 下划线别名 continue_with 也应归一化为 continue-with
+        h3 = ErrorHandler(strategy="continue_with")
+        self.assertEqual(h3.strategy, ErrorStrategy.CONTINUE_WITH)
 
     def test_invalid_strategy_rejected(self):
         from pydantic import ValidationError
@@ -43,7 +46,7 @@ class TestErrorHandlerStrategyEnum(unittest.TestCase):
 
     def test_recoverable_handler_inherits_enum_strategy(self):
         h = RecoverableErrorHandler(strategy="continue", retryTimes=2)
-        self.assertEqual(h.strategy, "continue")
+        self.assertEqual(h.strategy, ErrorStrategy.CONTINUE)
         self.assertEqual(h.retry_times, 2)
 
 

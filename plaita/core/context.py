@@ -22,6 +22,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("plaita.core.context")
 
+# 历史遗留：环境变量"敏感前缀黑名单"。**仅作为深度防御**——当 Flow 显式
+# ``expose_env`` allowlist 命中某个看起来敏感的 key 时，这里仍会拦下，避免
+# 用户无意中把 ``expose_env=["AWS_SECRET_ACCESS_KEY"]`` 写出来。
+#
+# 默认 ``$ENV`` 已经不再走"全 os.environ 减去黑名单"模型——见 ``expose_env``
+# 字段说明。新代码请显式声明需要的环境变量。
 _SENSITIVE_ENV_PREFIXES = (
     "AWS_SECRET", "AWS_SESSION", "DATABASE_", "DB_PASSWORD",
     "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL",
@@ -29,17 +35,39 @@ _SENSITIVE_ENV_PREFIXES = (
 )
 
 
-def _safe_environment() -> Dict[str, str]:
-    """Return a filtered copy of ``os.environ`` with sensitive keys removed.
+def _safe_environment(allowlist: Optional[List[str]] = None) -> Dict[str, str]:
+    """Return the ``$ENV`` dict for the given expose list.
 
-    Used by ``ExecutionContext.clean`` to populate ``$ENV``.  Kept at module
-    level so the class body stays small and the rule is unit-testable in
-    isolation.
+    Security model (2026-07 refactor):
+
+    - **Default (no allowlist)**: returns ``{}``. ``$ENV`` is empty unless the
+      flow explicitly opts in. Previously this returned ``os.environ`` minus a
+      prefix blacklist — that was a failed-security pattern: any secret whose
+      name did not match the blacklist (e.g. ``STRIPE_KEY``, ``OPENAI_API_KEY``,
+      ``PG_CONN``) was silently exposed to flow expressions and serialized
+      into distributed checkpoints via ``to_dict()``.
+    - **With allowlist**: returns only the listed keys that actually exist in
+      ``os.environ``. Then runs the sensitive-prefix blacklist as a second
+      defense layer and refuses to emit matches (logs a warning instead).
+      ``KeyError``-style misses are silently dropped — typos in ``expose_env``
+      should not crash the flow.
     """
-    return {
-        k: v for k, v in os.environ.items()
-        if not any(k.upper().startswith(p) for p in _SENSITIVE_ENV_PREFIXES)
-    }
+    if not allowlist:
+        return {}
+    exposed: Dict[str, str] = {}
+    for key in allowlist:
+        if key in os.environ:
+            exposed[key] = os.environ[key]
+    leaked = [k for k in exposed
+              if any(k.upper().startswith(p) for p in _SENSITIVE_ENV_PREFIXES)]
+    for k in leaked:
+        logger.warning(
+            "expose_env lists a sensitive-looking key %r; dropping it. "
+            "If this is intentional, rename the env var or override "
+            "_safe_environment locally.", k,
+        )
+        exposed.pop(k, None)
+    return exposed
 
 
 def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
@@ -114,10 +142,14 @@ class ExecutionContext:
         express_environment_variable: str = "ENV",
         event_bus=None,
         evaluator: Optional[ExpressionEvaluator] = None,
+        expose_env: Optional[List[str]] = None,
     ) -> None:
         self._context: Dict[str, Any] = {}
         self.parent = parent
         self.event_bus = event_bus
+        # $ENV 的 allowlist。``None`` / 空列表都意味着默认空 $ENV（不再泄漏
+        # os.environ）。Flow 层会从 Flow.expose_env 把这份名单传下来。
+        self.expose_env = list(expose_env) if expose_env else []
         # 协作取消令牌: 超时/取消时由 NodeRunner 设置, 节点可 poll 此事件提前退出。
         # 注: 并行分支经 get_child_execution 拿到独立子 context (各自 _context dict),
         # 不共享父级 $NODE, 故 update_node_result 无需加锁; 加 threading.Lock 反而会
@@ -165,11 +197,17 @@ class ExecutionContext:
         A fresh ``execution_id`` is generated here (not lazily on first read)
         so that the ID is stable for the entire run and does not change if
         ``execution_id`` is read multiple times or before ``setup_flow``.
+
+        ``$ENV`` 内容来自 ``self.expose_env`` allowlist（默认空）。``clean()``
+        不会清空 ``expose_env`` 本身——它属于 context 配置，不是状态。
         """
         self._context = {}
         self.cancel_event = threading.Event()
         self.set_state(f"{self.express_prefix}EXECUTION_ID", uuid.uuid4().hex)
-        self.set_state(f"{self.express_prefix}{self.express_environment_variable}", _safe_environment())
+        self.set_state(
+            f"{self.express_prefix}{self.express_environment_variable}",
+            _safe_environment(self.expose_env),
+        )
 
     def __getstate__(self):
         # threading.Event 不可 pickle; 进程模式下子进程会得到一个全新的(未触发)事件,
@@ -186,7 +224,16 @@ class ExecutionContext:
     # -- flow setup --
 
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
-        """Initialize context with flow-level variables."""
+        """Initialize context with flow-level variables.
+
+        Also propagates ``flow.expose_env`` to ``self.expose_env`` and re-runs
+        ``_safe_environment`` so that ``$ENV`` reflects the flow-level allowlist
+        rather than whatever ``clean()`` wrote (which used the previous, possibly
+        empty, allowlist). This keeps ``$ENV`` consistent across re-runs.
+        """
+        flow_allowlist = list(getattr(flow, "expose_env", None) or [])
+        if flow_allowlist != self.expose_env:
+            self.expose_env = flow_allowlist
         context_value = _coerce_input_value(flow.input_type, args, kwargs)
         self.set_state(f"{self.express_prefix}{self.express_input_name}", context_value)
         self.set_state(
@@ -198,6 +245,12 @@ class ExecutionContext:
         self.set_state(f"{self.express_prefix}{self.express_global_name}", global_context)
         self.set_state("EXPRESS_PREFIX", self.express_prefix)
         self.set_state(f"{self.express_prefix}FLOW_ID", flow.flow_id)
+        # 用最终的 allowlist 重新刷新 $ENV，避免 child/parent allowlist 差异导致
+        # 旧值残留。
+        self.set_state(
+            f"{self.express_prefix}{self.express_environment_variable}",
+            _safe_environment(self.expose_env),
+        )
 
     # -- expression evaluation --
 
@@ -282,6 +335,7 @@ class ExecutionContext:
             express_environment_variable=self.express_environment_variable,
             event_bus=self.event_bus,
             evaluator=self._evaluator,
+            expose_env=self.expose_env,
         )
 
     # -- serialization for distributed execution --
