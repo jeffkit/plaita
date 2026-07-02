@@ -14,6 +14,8 @@ from ...logger import logger
 try:
     import redis
     import redis.asyncio as aioredis
+    from redis.retry import Retry
+    from redis.backoff import NoBackoff
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
@@ -252,6 +254,9 @@ class RedisQueueService(BaseExtendedService):
         socket_connect_timeout = redis_config.get("socket_connect_timeout", 5.0)
         
         # 创建异步Redis客户端
+        # redis-py 6.0 起 retry_on_timeout 已废弃（TimeoutError 默认就在重试白名单里），
+        # 改用显式的 Retry 对象保留「超时重试 1 次」的语义。
+        retry = Retry(NoBackoff(), 1) if REDIS_AVAILABLE else None
         client = aioredis.Redis(
             host=host,
             port=port,
@@ -260,7 +265,7 @@ class RedisQueueService(BaseExtendedService):
             decode_responses=True,
             socket_timeout=socket_timeout,
             socket_connect_timeout=socket_connect_timeout,
-            retry_on_timeout=True,
+            retry=retry,
             health_check_interval=30
         )
         
