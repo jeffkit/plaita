@@ -34,8 +34,9 @@ yaml = ["PyYAML>=6.0"]
 dev = [
     "pytest",
     "pytest-asyncio",
-    "fakeredis",
+    "fakeredis>=2.30.1",
     "pytest-cov",
+    "mutmut>=3.6",
 ]
 lint = [
     "mypy",
@@ -90,3 +91,93 @@ omit = [
   "plaita/event/sqlalchemy.py",
   "plaita/event/utils.py",
 ]
+
+# 单元测试覆盖率门槛：当前 gate 范围（见 [tool.coverage.run] omit）整体 ≈ 80%
+# （实测 79.8%）。门禁设在 79%——既能挡住明显回退，又给新增代码留一点波动空间。
+# 目标：把整体覆盖拉到 85%+ 后，把 fail_under 上调到 80/85。
+[tool.coverage.report]
+fail_under = 79
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
+
+# ──────────────────────────────────────────────────────────────────────────
+# 变异测试（mutation testing）配置 —— mutmut 3.x
+#
+# 目标：在「行覆盖」之上，度量测试集能否真正捕获逻辑缺陷。
+# 跑法（详见 docs/mutation-testing.md）：
+#   mutmut run            # 全量跑当前 only_mutate 范围
+#   mutmut results        # 查看存活/已杀变异点
+#   mutmut show <id>      # 查看某个变异点的具体改动
+#   mutmut junitxml > mutation-report.xml   # 产出可消费的报告
+#
+# 基线策略：先在「高覆盖 + 高风险」的核心模块上建立 mutation score 基线，
+# 再逐步把 only_mutate 扩到更多模块。mutate_only_covered_lines=true 让
+# 变异点只落在已被覆盖的代码行，避免「未覆盖即被杀死」的噪声。
+# ──────────────────────────────────────────────────────────────────────────
+[tool.mutmut]
+source_paths = ["plaita"]
+# 基线范围：覆盖率高、纯逻辑、无外部依赖的核心模块。
+# 扩大基线时，把目标文件追加到 only_mutate 即可。
+only_mutate = [
+  "plaita/core/callback.py",
+  "plaita/core/expression.py",
+  "plaita/node/calculate.py",
+  "plaita/node/decide.py",
+]
+# 注意：多模块合并跑（876 个变异点）会触发 mutmut worker 长时复用挂起，
+# 结果不稳定。复跑时建议临时把 only_mutate 改成单个文件逐模块跑
+#（见 docs/mutation-testing.md §4.4）。
+do_not_mutate = [
+  "plaita/server/**",
+  "plaita/storage/redis.py",
+  "plaita/storage/sqlalchemy.py",
+  "plaita/client.py",
+  "plaita/event/demo_eventbus.py",
+  "plaita/event/redis.py",
+  "plaita/event/sqlalchemy.py",
+  "tests/**",
+  "examples/**",
+]
+mutate_only_covered_lines = true
+# 变异点执行时跑单元测试（排除 integration/e2e 以控制时长）。
+# --ignore 防止这些目录在 collection 阶段就因可选依赖缺失而报错。
+# tests/test_concurrent.py 的 `mode="process"` 子测试会与 mutmut 强制设置的
+# multiprocessing fork 启动方式冲突而崩溃，故在变异测试中忽略该文件
+# （其线程/协程子流程由其他测试间接覆盖；见 docs/mutation-testing.md）。
+pytest_add_cli_args = [
+  "-m", "not integration and not e2e",
+  "-q", "--no-header",
+  "--ignore=tests/e2e",
+  "--ignore=tests/integration",
+  "--ignore=tests/test_concurrent.py",
+]
+# 让 mutmut 仅运行与被改模块相关的测试，缩短单变异点耗时。
+# 当前覆盖 only_mutate 列出的 4 个基线模块对应的「纯同步」测试文件：callback /
+# expression / calculate / decide。根目录与 unit 中的部分 async/timeout 测试
+# （test_approval_integration、test_call_timeout 等）在 mutmut 进程内
+# pytest.main() 执行时与 pytest-asyncio 事件循环 / asyncio 超时机制冲突，
+# 故不纳入。扩大 only_mutate 时请同步把目标模块对应的「纯同步」测试文件加入
+# 此列表（见 docs/mutation-testing.md）。
+pytest_add_cli_args_test_selection = [
+  "tests/unit/test_callback.py",
+  "tests/unit/test_run_forwards_callbacks.py",
+  "tests/unit/test_child_callback_dedup.py",
+  "tests/unit/test_expression.py",
+  "tests/unit/test_expression_golden.py",
+  "tests/test_calculate.py",
+  "tests/test_decide.py",
+]
+# mutmut 的超时机制存在已知缺陷：multiprocessing Pool 复用 worker 时，旧变异点
+# 的 deadline 不会被取消，会在 ~timeout 秒后误杀正在跑新变异点的同一 worker，
+# 产生假阳性 timeout。这里用较短 timeout 让 worker 周期性被回收（避免长时复用
+# 导致的挂起），代价是末段少量变异点会被误判为 timeout——可用
+# scripts/recheck_mutants.sh timeout 对 timeout 逐个复核真实状态。
+# 详见 docs/mutation-testing.md。
+timeout_multiplier = 12.0
+timeout_constant = 2.0

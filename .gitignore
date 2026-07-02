@@ -22,3 +22,13 @@ node_modules/
 # Console test artifacts
 *_test_results.json
 *_test_screenshots/
+
+# Coverage / mutation testing artifacts
+.coverage
+.coverage.*
+htmlcov/
+mutants/
+.mutmut-cache/
+mutation-baseline.txt
+mutation-recheck.txt
+

@@ -7,6 +7,7 @@ from plaita.io import Property
 from plaita.node import End, Start
 from plaita.node.assignment import Assignment
 from plaita.node.decide import Bool, Condition, ConditionGroup, Logic, Switch, SwitchLegacy, condition_from_json
+from plaita.node.decide import _create_condition_group, _parse_condition_content
 
 
 class ConditionTestCse(TestCase):
@@ -335,3 +336,167 @@ class AssignmentTestCase(TestCase):
         )
         self.assertEqual("KongJie", flow.run({"flag": True}))
         self.assertEqual("nobody", flow.run({"flag": False}))
+
+
+# ---------------------------------------------------------------------------
+# 强化：精确断言 Condition / ConditionGroup / parse / Switch.execute 的边界语义。
+# 杀死仅靠「能跑通」蒙混的变异点（prefix 透传、None 处理分支、parse 的 and/or、
+# 日志文案、_create_condition_group 缺省值）。
+# ---------------------------------------------------------------------------
+
+
+class _FakeExecution:
+    """最小执行上下文，供 Switch.execute 直接调用。"""
+
+    def __init__(self, context, express_prefix="$"):
+        self.context = context
+        self.express_prefix = express_prefix
+
+
+class TestConditionMatchSemantics(TestCase):
+    """Condition.match 的 prefix 透传与 None 处理分支。"""
+
+    def test_default_prefix_resolves_variable(self):
+        # 不传 prefix 时使用默认 "$" —— 变异默认前缀会令变量无法解析
+        cond = Condition(field="$X", operator="eq", value=5)
+        self.assertIs(cond.match({"$X": 5}), True)
+        self.assertIs(cond.match({"$X": 6}), False)
+
+    def test_custom_prefix_propagates_to_field(self):
+        # prefix="#" 必须透传给 evaluate(field) —— 丢前缀会让 #X 不解析
+        cond = Condition(field="#X", operator="eq", value=5)
+        self.assertIs(cond.match({"#X": 5}, "#"), True)
+
+    def test_custom_prefix_propagates_to_value(self):
+        # prefix="#" 必须透传给 evaluate(value) —— 丢前缀会让 #X 不解析
+        cond = Condition(field=5, operator="eq", value="#X")
+        self.assertIs(cond.match({"#X": 5}, "#"), True)
+
+    def test_none_left_with_non_eq_operator_returns_false(self):
+        # left=None, right 非 None, op=gt: 原逻辑走 None 分支返回 False；
+        # 把 `or` 改成 `and` 的变异会跳过分支并对 None>5 抛 TypeError
+        cond = Condition(field="$A", operator="gt", value=5)
+        self.assertIs(cond.match({"$A": None}, "$"), False)
+
+    def test_both_none_eq_returns_true(self):
+        # 两侧都 None + eq => True（`left is right`）。
+        # 把 == 改成 != 的变异会落进 else 返回 False；把 `is` 改成 `is not` 同理
+        cond = Condition(field="$A", operator="eq", value="$B")
+        self.assertIs(cond.match({"$A": None, "$B": None}, "$"), True)
+
+    def test_both_none_ne_returns_false(self):
+        # 两侧都 None + ne => `left is not right` => False
+        cond = Condition(field="$A", operator="ne", value="$B")
+        self.assertIs(cond.match({"$A": None, "$B": None}, "$"), False)
+
+    def test_none_left_eq_against_value_returns_false(self):
+        # left=None, right=5, eq => None is 5 => False
+        cond = Condition(field="$A", operator="eq", value=5)
+        self.assertIs(cond.match({"$A": None}, "$"), False)
+
+
+class TestConditionGroupMatchSemantics(TestCase):
+    """ConditionGroup.match 的 prefix 透传与空条件。"""
+
+    def test_empty_conditions_returns_true(self):
+        group = ConditionGroup(relation="and", conditions=[])
+        self.assertIs(group.match({}, "$"), True)
+
+    def test_custom_prefix_propagates_to_conditions(self):
+        # prefix="#" 必须透传给每个 condition.match —— 丢前缀会让 #X 不解析
+        group = ConditionGroup(
+            relation="and",
+            conditions=[Condition(field="#X", operator="eq", value=5)],
+        )
+        self.assertIs(group.match({"#X": 5}, "#"), True)
+
+    def test_or_relation_any_matches(self):
+        group = ConditionGroup(
+            relation="or",
+            conditions=[
+                Condition(field="$A", operator="eq", value=1),
+                Condition(field="$B", operator="eq", value=2),
+            ],
+        )
+        self.assertIs(group.match({"$A": 99, "$B": 2}, "$"), True)
+        self.assertIs(group.match({"$A": 99, "$B": 99}, "$"), False)
+
+
+class TestParseConditionContent(TestCase):
+    """_parse_condition_content 的 and/or 分支必须精确。"""
+
+    def test_relation_only_without_conditions_returns_none(self):
+        # 只有 relation 没有 conditions —— `and` 改 `or` 的变异会误判成 group
+        self.assertIsNone(condition_from_json({"relation": "and"}))
+
+    def test_field_operator_without_value_returns_none(self):
+        # field+operator 但缺 value —— `and` 改 `or` 的变异会误判成 condition
+        self.assertIsNone(condition_from_json({"field": "x", "operator": "eq"}))
+
+    def test_operator_value_without_field_returns_none(self):
+        # operator+value 但缺 field —— 同理
+        self.assertIsNone(condition_from_json({"operator": "eq", "value": 5}))
+
+    def test_full_group_parsed(self):
+        result = condition_from_json({"relation": "and", "conditions": []})
+        self.assertIsInstance(result, ConditionGroup)
+        self.assertEqual(result.relation, "and")
+
+    def test_full_condition_parsed(self):
+        result = condition_from_json({"field": "x", "operator": "eq", "value": 5})
+        self.assertIsInstance(result, Condition)
+        self.assertEqual(result.field, "x")
+        self.assertEqual(result.operator, "eq")
+        self.assertEqual(result.value, 5)
+
+
+class TestCreateConditionGroupDefault(TestCase):
+    """_create_condition_group 缺 conditions 键时必须回退到空列表而非 None。"""
+
+    def test_missing_conditions_key_defaults_to_empty(self):
+        # 直接调用 _create_condition_group，缺 conditions 键。
+        # 默认值改成 None 的变异会让 map(None) 抛 TypeError
+        group = _create_condition_group({"relation": "and"})
+        self.assertEqual(group.relation, "and")
+        self.assertEqual(group.conditions, [])
+
+    def test_conditions_key_present_uses_it(self):
+        group = _create_condition_group({
+            "relation": "or",
+            "conditions": [{"field": "x", "operator": "eq", "value": 1}],
+        })
+        self.assertEqual(len(group.conditions), 1)
+
+
+class TestSwitchExecuteLogging(TestCase):
+    """Switch.execute 命中分支 / 默认分支时的日志文案必须精确。"""
+
+    def _make_switch(self):
+        return Switch(
+            id="sw",
+            branches=[
+                {"name": "hit", "next": "next_hit",
+                 "condition": {"field": "$INPUT.x", "operator": "eq", "value": 1}},
+                {"name": "def", "isDefault": True, "next": "next_def"},
+            ],
+        )
+
+    def test_matching_branch_logs_exact_message(self):
+        sw = self._make_switch()
+        with self.assertLogs("plaita", level="INFO") as cm:
+            result = sw.execute(_FakeExecution({"$INPUT": {"x": 1}}, "$"))
+        self.assertEqual(result, "next_hit")
+        self.assertTrue(
+            any("test branches, hit, next_hit" in m for m in cm.output),
+            f"expected branch-hit log not found in {cm.output}",
+        )
+
+    def test_default_branch_logs_exact_message(self):
+        sw = self._make_switch()
+        with self.assertLogs("plaita", level="INFO") as cm:
+            result = sw.execute(_FakeExecution({"$INPUT": {"x": 999}}, "$"))
+        self.assertEqual(result, "next_def")
+        self.assertTrue(
+            any("default branches def, next_def" in m for m in cm.output),
+            f"expected default-branch log not found in {cm.output}",
+        )

@@ -129,8 +129,86 @@ class TestCallbackManager(unittest.TestCase):
         self.assertEqual(h.on_node_resume.call_count, 1)
 
 
+class TestCallbackManagerDispatchArgs(unittest.TestCase):
+    """断言每个生命周期方法把「正确的事件名 + 参数」原样分发到 handler。
+
+    这一组断言用来杀死「改事件名字符串 / 丢弃或篡改 flow/node/result 参数」
+    的变异点——只看 call_count 看不出这类缺陷。
+    """
+
+    def test_lifecycle_methods_dispatch_exact_args(self):
+        h = MagicMock(spec=FlowCallback)
+        mgr = CallbackManager([h])
+        flow = FakeFlow()
+        node = FakeNode()
+        exc = ValueError("boom")
+        mgr.on_flow_start(flow, extra="x")
+        mgr.on_flow_end(flow, result="ok", error="err", exception=exc, tag="t")
+        mgr.on_flow_suspend(flow, reason="pause")
+        mgr.on_flow_resume(flow, reason="resume")
+        mgr.on_node_start(flow, node, phase="start")
+        mgr.on_node_end(flow, node, result="ok", error="err", exception=exc, tag="t")
+        mgr.on_node_suspend(flow, node, reason="pause")
+        mgr.on_node_resume(flow, node, reason="resume")
+
+        h.on_flow_start.assert_called_once_with(flow, extra="x")
+        h.on_flow_end.assert_called_once_with(flow, "ok", "err", exc, tag="t")
+        h.on_flow_suspend.assert_called_once_with(flow, reason="pause")
+        h.on_flow_resume.assert_called_once_with(flow, reason="resume")
+        h.on_node_start.assert_called_once_with(flow, node, phase="start")
+        h.on_node_end.assert_called_once_with(flow, node, "ok", "err", exc, tag="t")
+        h.on_node_suspend.assert_called_once_with(flow, node, reason="pause")
+        h.on_node_resume.assert_called_once_with(flow, node, reason="resume")
+
+
+class TestCallbackManagerInit(unittest.TestCase):
+    """断言 __init__ 的 parent 记录与 inherit_handlers 默认行为（False 时不继承）。"""
+
+    def test_parent_recorded(self):
+        parent = CallbackManager([MagicMock(spec=FlowCallback)])
+        child = CallbackManager([], parent=parent)
+        self.assertIs(child.parent, parent)
+
+    def test_default_does_not_inherit_parent_handlers(self):
+        parent_h = MagicMock(spec=FlowCallback)
+        parent = CallbackManager([parent_h])
+        own_h = MagicMock(spec=FlowCallback)
+        # 不传 inherit_handlers：默认 False，不应把 parent 的 handler 并入。
+        mgr = CallbackManager([own_h], parent=parent)
+        self.assertEqual(mgr.handlers, [own_h])
+        self.assertNotIn(parent_h, mgr.handlers)
+
+    def test_inherit_handlers_true_extends_from_parent(self):
+        parent_h = MagicMock(spec=FlowCallback)
+        parent = CallbackManager([parent_h])
+        own_h = MagicMock(spec=FlowCallback)
+        mgr = CallbackManager([own_h], parent=parent, inherit_handlers=True)
+        self.assertEqual(mgr.handlers, [own_h, parent_h])
+
+
+class TestCallHandlersErrorLogging(unittest.TestCase):
+    """断言 handler 抛错时，_call_handlers 写出的 warning 包含方法名、错误信息
+    且带 traceback（exc_info）。用来杀死改 logger.warning 参数 / 丢 exc_info
+    的变异点。"""
+
+    def test_error_in_handler_logged_with_method_error_and_exc_info(self):
+        class BadHandler(FlowCallback):
+            def on_flow_start(self, flow, **kwargs):
+                raise RuntimeError("boom")
+
+        mgr = CallbackManager([BadHandler()])
+        with self.assertLogs("plaita.core.callback", level="WARNING") as cm:
+            mgr.on_flow_start(FakeFlow())  # 不得抛出
+
+        self.assertEqual(len(cm.records), 1)
+        record = cm.records[0]
+        self.assertEqual(record.getMessage(), "Error in on_flow_start callback: boom")
+        # exc_info=True 应得到 traceback 三元组；改 exc_info=False 的变异点会留下 False。
+        self.assertTrue(record.exc_info)
+
+
 class TestLoggerCallback(unittest.TestCase):
-    """LoggerCallback smoke test."""
+    """LoggerCallback smoke test + 断言日志内容（杀死改日志字符串/参数的变异点）。"""
 
     def test_logger_callback_no_crash(self):
         cb = LoggerCallback()
@@ -144,6 +222,34 @@ class TestLoggerCallback(unittest.TestCase):
         cb.on_flow_resume(flow)
         cb.on_node_suspend(flow, node)
         cb.on_node_resume(flow, node)
+
+    def test_log_messages_contain_event_flow_and_node_ids(self):
+        cb = LoggerCallback()
+        flow = FakeFlow()
+        node = FakeNode()
+        with self.assertLogs("plaita.core.callback", level="INFO") as cm:
+            cb.on_flow_start(flow)
+            cb.on_flow_end(flow, result="ok", error=None, exception=None)
+            cb.on_node_start(flow, node)
+            cb.on_node_end(flow, node, result="ok", error=None, exception=None)
+            cb.on_flow_suspend(flow)
+            cb.on_flow_resume(flow)
+            cb.on_node_suspend(flow, node)
+            cb.on_node_resume(flow, node)
+
+        # 每个事件一条 INFO；逐条校验，避免 join 后的子串误判。
+        messages = [r.getMessage() for r in cm.records]
+        self.assertEqual(messages[0], "[flow start] test")
+        self.assertEqual(messages[1], "[flow end] test with result: ok, error: None, exception: None")
+        self.assertEqual(messages[2], "[node start] n1 @ flow test")
+        self.assertEqual(
+            messages[3],
+            "[node end] n1 @ flow test with result: ok, error: None, exception: None",
+        )
+        self.assertEqual(messages[4], "[flow suspend] test")
+        self.assertEqual(messages[5], "[flow resume] test")
+        self.assertEqual(messages[6], "[node suspend] n1 @ flow test")
+        self.assertEqual(messages[7], "[node resume] n1 @ flow test")
 
 
 class TestFlowEvent(unittest.TestCase):

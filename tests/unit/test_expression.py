@@ -194,7 +194,8 @@ class TestDefaultRegistryCompleteness(TestCase):
         self.assertTrue(self.reg.get_callable("and")(True, True))
         self.assertFalse(self.reg.get_callable("and")(True, False))
         self.assertTrue(self.reg.get_callable("or")(False, True))
-        self.assertFalse(self.reg.get_callable("or")(False, False))
+        # or 的 falsy 回退必须是 False 而不是 None —— 精确断言类型
+        self.assertIs(self.reg.get_callable("or")(False, False), False)
         self.assertTrue(self.reg.get_callable("or")(False, False, True))
         self.assertTrue(self.reg.get_callable("not")(False))
         self.assertFalse(self.reg.get_callable("not")(True))
@@ -208,7 +209,9 @@ class TestDefaultRegistryCompleteness(TestCase):
         self.assertEqual(self.reg.get_callable("append")(lst, 4), [1, 2, 3, 4])
         self.assertEqual(self.reg.get_callable("extend")(lst, [4, 5]), [1, 2, 3, 4, 5])
         self.assertEqual(self.reg.get_callable("insert")(lst, 1, 2), [1, 2, 2, 3])
-        self.assertEqual(self.reg.get_callable("remove")(lst, 3), [1, 2])
+        # remove 用 4 元素列表：mutant 把 a[index(b)+1:] 改成 a[index(b)+2:] 时
+        # 在 3 元素列表上仍可能巧合得到同样结果，故用 4 元素拉开差异
+        self.assertEqual(self.reg.get_callable("remove")([1, 2, 3, 4], 2), [1, 3, 4])
         self.assertEqual(self.reg.get_callable("reverse")(lst), [3, 2, 1])
         self.assertEqual(self.reg.get_callable("sort")(lst), [1, 2, 3])
         self.assertEqual(self.reg.get_callable("sort")(lst, None, True), [3, 2, 1])
@@ -455,3 +458,234 @@ class TestExpressionEvaluator(TestCase):
 
     def test_registry_property(self):
         self.assertIsInstance(self.evaluator.registry, ExpressionRegistry)
+
+
+# ---------------------------------------------------------------------------
+# 强化：精确断言 default registry 的元数据（name/category/side-effect/description）
+# 与 register/unregister/evaluator 的边界语义。杀死仅靠「能跑通」蒙混的变异点。
+# ---------------------------------------------------------------------------
+
+
+# default registry 里每个函数的精确元数据 (category, has_side_effects, description)。
+# 任何字符串常量/分类/副作用标记被变异都应被这表精确命中。
+EXPECTED_DEFAULT_FUNCTIONS = {
+    # math
+    "add": (FunctionCategory.MATH, False, "Add two values"),
+    "sub": (FunctionCategory.MATH, False, "Subtract b from a"),
+    "mul": (FunctionCategory.MATH, False, "Multiply two values"),
+    "div": (FunctionCategory.MATH, False, "Divide a by b"),
+    "mod": (FunctionCategory.MATH, False, "Modulo a by b"),
+    "pow": (FunctionCategory.MATH, False, "Raise a to the power of b"),
+    "abs": (FunctionCategory.MATH, False, "Absolute value"),
+    "ceil": (FunctionCategory.MATH, False, "Ceiling"),
+    "floor": (FunctionCategory.MATH, False, "Floor"),
+    "round": (FunctionCategory.MATH, False, "Round to n digits"),
+    "trunc": (FunctionCategory.MATH, False, "Truncate to integer"),
+    "sqrt": (FunctionCategory.MATH, False, "Square root"),
+    # string
+    "lower": (FunctionCategory.STRING, False, "Lowercase"),
+    "upper": (FunctionCategory.STRING, False, "Uppercase"),
+    "capitalize": (FunctionCategory.STRING, False, "Capitalize first char"),
+    "title": (FunctionCategory.STRING, False, "Title-case"),
+    "strip": (FunctionCategory.STRING, False, "Strip whitespace"),
+    "lstrip": (FunctionCategory.STRING, False, "Strip leading whitespace"),
+    "rstrip": (FunctionCategory.STRING, False, "Strip trailing whitespace"),
+    "replace": (FunctionCategory.STRING, False, "Replace substring"),
+    "split": (FunctionCategory.STRING, False, "Split string"),
+    "join": (FunctionCategory.STRING, False, "Join iterable with separator"),
+    "startswith": (FunctionCategory.STRING, False, "Check string prefix"),
+    "endswith": (FunctionCategory.STRING, False, "Check string suffix"),
+    "concat": (FunctionCategory.STRING, False, "Concatenate values as strings"),
+    "isDigit": (FunctionCategory.STRING, False, "Check if string is all digits"),
+    # array — pure
+    "len": (FunctionCategory.ARRAY, False, "Length of sequence"),
+    "length": (FunctionCategory.ARRAY, False, "Length of sequence (alias)"),
+    "index": (FunctionCategory.ARRAY, False, "Find index of element"),
+    "slice": (FunctionCategory.ARRAY, False, "Slice list"),
+    "append": (FunctionCategory.ARRAY, False, "Append element (returns new list)"),
+    "extend": (FunctionCategory.ARRAY, False, "Extend list (returns new list)"),
+    "insert": (FunctionCategory.ARRAY, False, "Insert element (returns new list)"),
+    "remove": (FunctionCategory.ARRAY, False, "Remove first occurrence (returns new list)"),
+    "reverse": (FunctionCategory.ARRAY, False, "Reverse list (returns new list)"),
+    "sort": (FunctionCategory.ARRAY, False, "Sort list (returns new list)"),
+    "getListItem": (FunctionCategory.ARRAY, False, "Get item by index"),
+    "addListItem": (FunctionCategory.ARRAY, False, "Add item (returns new list)"),
+    "insertListItem": (FunctionCategory.ARRAY, False, "Insert item (returns new list)"),
+    # array — side-effect
+    "pop": (FunctionCategory.ARRAY, True, "Pop item at index (mutates list)"),
+    "delListItem": (FunctionCategory.ARRAY, True, "Delete item at index (mutates list)"),
+    "setListItem": (FunctionCategory.ARRAY, True, "Set item at index (mutates list)"),
+    # dict — pure
+    "keys": (FunctionCategory.DICT, False, "Dict keys"),
+    "values": (FunctionCategory.DICT, False, "Dict values"),
+    "items": (FunctionCategory.DICT, False, "Dict items"),
+    "get": (FunctionCategory.DICT, False, "Get value with default"),
+    "getDictValue": (FunctionCategory.DICT, False, "Get dict value with default"),
+    "getDictKeys": (FunctionCategory.DICT, False, "Get dict keys"),
+    "getDictValues": (FunctionCategory.DICT, False, "Get dict values"),
+    # dict — side-effect
+    "set": (FunctionCategory.DICT, True, "Set dict value (mutates dict)"),
+    "delete": (FunctionCategory.DICT, True, "Delete dict key (mutates dict)"),
+    "clear": (FunctionCategory.DICT, True, "Clear all dict entries (mutates dict)"),
+    "setDictValue": (FunctionCategory.DICT, True, "Set dict value (mutates dict)"),
+    "delDictValue": (FunctionCategory.DICT, True, "Delete dict key (mutates dict)"),
+    "clearDict": (FunctionCategory.DICT, True, "Clear all dict entries (mutates dict)"),
+    # logic
+    "and": (FunctionCategory.LOGIC, False, "Logical AND"),
+    "or": (FunctionCategory.LOGIC, False, "Logical OR (returns first truthy value)"),
+    "not": (FunctionCategory.LOGIC, False, "Logical NOT"),
+    # datetime
+    "now": (FunctionCategory.DATETIME, False, "Current datetime formatted"),
+    "today": (FunctionCategory.DATETIME, False, "Current date formatted"),
+    # json
+    "json_loads": (FunctionCategory.JSON, False, "Parse JSON string"),
+    "json_dumps": (FunctionCategory.JSON, False, "Serialize to JSON string"),
+}
+
+
+class TestDefaultRegistryMetadata(TestCase):
+    """逐函数精确断言 default registry 的元数据 —— 杀死 _register_* 中
+    对描述字符串 / 分类 / 副作用标记的字符串常量变异。"""
+
+    def setUp(self):
+        self.reg = get_default_expression_registry()
+
+    def test_function_count(self):
+        self.assertEqual(len(self.reg), len(EXPECTED_DEFAULT_FUNCTIONS))
+
+    def test_no_unexpected_functions(self):
+        names = set(self.reg.all_functions().keys())
+        self.assertEqual(names, set(EXPECTED_DEFAULT_FUNCTIONS.keys()))
+
+    def test_each_function_metadata(self):
+        for name, (cat, se, desc) in EXPECTED_DEFAULT_FUNCTIONS.items():
+            d = self.reg.get(name)
+            self.assertIsNotNone(d, f"function {name!r} not registered")
+            self.assertEqual(d.name, name, f"name mismatch for {name!r}")
+            self.assertEqual(d.category, cat, f"category mismatch for {name!r}")
+            self.assertEqual(d.has_side_effects, se, f"side-effect flag mismatch for {name!r}")
+            self.assertEqual(d.description, desc, f"description mismatch for {name!r}")
+
+    def test_categories_function_counts(self):
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.MATH)), 12)
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.STRING)), 14)
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.ARRAY)), 16)
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.DICT)), 13)
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.LOGIC)), 3)
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.DATETIME)), 2)
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.JSON)), 2)
+        # TYPE 分类在 default registry 中未使用
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.TYPE)), 0)
+
+    def test_repr(self):
+        self.assertEqual(repr(self.reg), f"<ExpressionRegistry functions={len(self.reg)}>")
+
+
+class TestRegisterSemantics(TestCase):
+    """精确断言 register 的错误文案、默认 description、override 行为。"""
+
+    def test_empty_name_error_message(self):
+        reg = ExpressionRegistry()
+        with self.assertRaises(ValueError) as cm:
+            reg.register("", lambda: None, FunctionCategory.MATH)
+        self.assertEqual(str(cm.exception), "Function name must not be empty")
+
+    def test_duplicate_name_error_message(self):
+        reg = ExpressionRegistry()
+        reg.register("add", lambda a, b: a + b, FunctionCategory.MATH)
+        with self.assertRaises(ValueError) as cm:
+            reg.register("add", lambda a, b: a - b, FunctionCategory.MATH)
+        self.assertEqual(str(cm.exception), "Function 'add' is already registered")
+
+    def test_default_description_is_empty_string(self):
+        # register 不传 description 时必须落成 ""（而不是 None / "XXXX"）
+        reg = ExpressionRegistry()
+        reg.register("foo", lambda: 1, FunctionCategory.MATH)
+        self.assertEqual(reg.get("foo").description, "")
+
+    def test_explicit_description_recorded(self):
+        reg = ExpressionRegistry()
+        reg.register("foo", lambda: 1, FunctionCategory.MATH, description="hi there")
+        self.assertEqual(reg.get("foo").description, "hi there")
+
+    def test_override_replaces_existing(self):
+        reg = ExpressionRegistry()
+        reg.register("add", lambda a, b: a + b, FunctionCategory.MATH, description="orig")
+        # override=True 不抛错，且替换 func / description
+        reg.register("add", lambda a, b: a * b, FunctionCategory.MATH,
+                     description="replaced", override=True)
+        self.assertEqual(reg.get_callable("add")(3, 4), 12)
+        self.assertEqual(reg.get("add").description, "replaced")
+        self.assertEqual(len(reg), 1)
+
+    def test_override_false_does_not_touch_existing(self):
+        reg = ExpressionRegistry()
+        reg.register("add", lambda a, b: a + b, FunctionCategory.MATH, description="orig")
+        # override=False 对同名注册抛错，原有 registration 不变
+        with self.assertRaises(ValueError):
+            reg.register("add", lambda a, b: a * b, FunctionCategory.MATH, override=False)
+        self.assertEqual(reg.get_callable("add")(3, 4), 7)
+        self.assertEqual(reg.get("add").description, "orig")
+
+
+class TestUnregisterSemantics(TestCase):
+    """unregister 必须按名移除，且对未注册名是 no-op（不抛 KeyError）。"""
+
+    def test_unregister_removes_by_name(self):
+        reg = ExpressionRegistry()
+        reg.register("add", lambda a, b: a + b, FunctionCategory.MATH)
+        reg.register("sub", lambda a, b: a - b, FunctionCategory.MATH)
+        reg.unregister("add")
+        self.assertNotIn("add", reg)
+        self.assertIn("sub", reg)  # 别的函数不受影响
+        self.assertEqual(len(reg), 1)
+
+    def test_unregister_missing_is_noop(self):
+        reg = ExpressionRegistry()
+        reg.register("add", lambda a, b: a + b, FunctionCategory.MATH)
+        # 对未注册名调用 unregister 不能抛 KeyError
+        reg.unregister("definitely_not_here")
+        self.assertIn("add", reg)
+        self.assertEqual(len(reg), 1)
+
+
+class TestDefaultRegistryCaching(TestCase):
+    """get_default_expression_registry 懒加载并缓存单例。"""
+
+    def test_returns_same_instance(self):
+        import plaita.core.expression as mod
+        # 重置缓存以隔离测试
+        original = mod._default_registry
+        try:
+            mod._default_registry = None
+            first = get_default_expression_registry()
+            second = get_default_expression_registry()
+            self.assertIs(first, second)
+        finally:
+            mod._default_registry = original
+
+    def test_caches_built_registry(self):
+        import plaita.core.expression as mod
+        original = mod._default_registry
+        try:
+            mod._default_registry = None
+            reg = get_default_expression_registry()
+            self.assertIs(mod._default_registry, reg)
+            self.assertIn("add", reg)
+        finally:
+            mod._default_registry = original
+
+
+class TestEvaluatorPrefixPropagation(TestCase):
+    """evaluate 必须把 prefix 透传给 plaita.io.evaluate —— 非 $ 前缀要生效。"""
+
+    def test_custom_prefix_resolves_variable(self):
+        evaluator = ExpressionEvaluator()
+        ctx = {"#INPUT": "hello"}
+        # prefix="#" 时 #INPUT 应被解析为变量值
+        self.assertEqual(evaluator.evaluate("#INPUT", ctx, prefix="#"), "hello")
+
+    def test_custom_prefix_function_call(self):
+        evaluator = ExpressionEvaluator()
+        # prefix="#" 时函数调用前缀也应是 #F
+        self.assertEqual(evaluator.evaluate("#F.add(1, 2)", {}, prefix="#"), 3)
