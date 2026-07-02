@@ -28,6 +28,10 @@ class Node(BaseModel):
     node_name: ClassVar[str] = "ignore"
     branching: ClassVar[bool] = False
     async_node: ClassVar[bool] = False
+    # 是否为"挂起型"节点: 执行后暂停流程, 等待外部 resume (如 EventNode)。
+    # 内核 DistributedStrategy 据此走 suspend 分支并调 resume(), 不再 isinstance
+    # 具体节点类型, 从而切断 core -> plaita.node.event_node 的反向依赖。
+    is_suspending: ClassVar[bool] = False
 
     # Instance fields
     id: str = Field(..., description="Node identifier")
@@ -71,3 +75,15 @@ class Node(BaseModel):
     def execute(self, execution) -> Any:
         """执行节点并返回输出。``execution`` 为必传的执行上下文（facade）。"""
         raise NotImplementedError()
+
+    def resume(self, execution, resume_type, resume_data=None) -> Any:
+        """恢复一个此前挂起的节点 (仅 ``is_suspending`` 节点需要实现)。
+
+        内核 ``DistributedStrategy._handle_resume`` 通过本方法多态分发 resume,
+        避免直接 ``isinstance`` 具体挂起节点类型 (如 EventNode), 让 core 层
+        不反向依赖 node 插件层。基类默认抛错, 挂起型节点覆写之。
+        """
+        raise NotImplementedError(
+            f"Node {self.id} ({type(self).__name__}) is not a suspending node and "
+            f"cannot be resumed; is_suspending={self.is_suspending}"
+        )

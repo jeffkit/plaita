@@ -41,6 +41,12 @@
 - **顺手补漏**：迁掉 `plaita/node/child.py` 残留的 `from ..flow import Flow`（相对导入 shim），仓库内部不再有 shim 用法。
 - **未动**：`_BUILTIN_TO_F` / `_BINOP_TO_F` 的类型推断（让 `str→concat`、`+` 多态在编译期就按类型拒绝/允许）会改变现有可用流程的语义，属产品决策，本轮不动，已在文档显式标注为已知边界。
 
+### C3：循环依赖带状消除
+
+- **core → node.event_node 反向依赖切断**（真正的分层违规）：给 `Node` 基类加 `is_suspending: ClassVar[bool] = False` 标志与多态 `resume(execution, resume_type, resume_data)` 方法；`EventNode` 置 `is_suspending = True` 并实现 `resume()`（内部按 `ResumeType` 分发 `on_cancel/on_timeout/on_event`）。`DistributedStrategy._execute_current_node` 改问 `current_node.is_suspending`，`_handle_resume` 改调 `current_node.resume(...)`——`plaita/core/executor.py` 中 3 处 `from plaita.node.event_node import EventNode` 函数内导入（含 1 处 B1 后遗留的死导入）全部消除，内核不再 `isinstance` 具体节点类型。
+- **flow ↔ executor 伪 band-aid 提到顶部**：核查发现 `executor.py` 顶部并不反引 `flow`（`Flow` 仅作运行时鸭子类型参数），`runner.py` 运行时只引 `core.errors`，`callback/context/expression` 均不反引 flow——**这条根本不是真环**，`flow.py` 里 4 处 `from plaita.core.executor import FlowExecution` 函数内导入是历史遗留的伪 band-aid。全部提到模块顶部坦诚声明，`Flow.run/arun/debug` 与 `parse_and_run` 不再藏 import。
+- **保留**：`flow.py` 顶部 `from plaita.node import End, Node, Start` 是 core→node 的真实依赖（node→core.errors 是 DAG 无环），且 `is_end_node` 已把 End 判断收口到 `flow.py` 一处，故保留。
+
 ### B 档：结构与并发
 
 - **三 Strategy 共享单步推进**：抽 `_advance_one(flow, runner, callback_manager, node)` 原语，统一「run → 判 End → 解析 next」序列；`NormalStrategy` / `GeneratorStrategy` 复用之，`DistributedStrategy` 因 `EventNode` 挂起语义保留独立单步路径。新增 `Flow.is_end_node(node)`，`executor.py` 中散落的 `from plaita.node import End` 函数内导入全部消除（circular-import 带状消除到 `flow.py` 一处）。

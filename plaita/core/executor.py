@@ -131,8 +131,6 @@ class DistributedStrategy:
     """Execute one node per call with context persistence for suspend/resume."""
 
     async def execute(self, flow, context, runner, callback_manager, params=None, timeout_ms=None, **options):
-        from plaita.node.event_node import EventNode
-
         saved_context = options.get("saved_context")
         resume_type = ResumeType.coerce(options.get("resume_type", "continue"))
         resume_data = options.get("resume_data")
@@ -188,14 +186,12 @@ class DistributedStrategy:
         return current_node, result, branch
 
     async def _execute_current_node(self, flow, context, runner, callback_manager, current_node):
-        from plaita.node.event_node import EventNode
-
         result, branch = await runner.run_node(flow, current_node, callback_manager=callback_manager)
 
         if flow.is_end_node(current_node):
             return _create_end_output(current_node, result, context.context, execution_id=context.execution_id)
 
-        if isinstance(current_node, EventNode):
+        if current_node.is_suspending:
             await _subscribe_event(current_node, flow, result, context)
             callback_manager.on_node_suspend(flow, current_node)
             callback_manager.on_flow_suspend(flow)
@@ -206,7 +202,6 @@ class DistributedStrategy:
         return _create_lazy_output(current_node, result, branch, context.context, execution_id=context.execution_id)
 
     async def _handle_resume(self, flow, context, runner, callback_manager, resume_type, resume_data):
-        from plaita.node.event_node import EventNode
         # 统一在此 coerce, 覆盖 execute (已 coerce, 幂等) 与 _handle_resume_operation
         # (历史直传字符串) 两条入口, 避免裸字符串漏到下面的 enum 比较。
         resume_type = ResumeType.coerce(resume_type)
@@ -217,7 +212,9 @@ class DistributedStrategy:
             raise ResumeError("No suspended node found for resume")
 
         current_node = flow.find_node_by_id(last_node_id)
-        if not isinstance(current_node, EventNode):
+        # 用 is_suspending 标志判定, 而非 isinstance(EventNode): core 层不反向依赖
+        # node 插件层; 保留 "is not an EventNode" 文案以兼容历史测试断言。
+        if not current_node.is_suspending:
             raise ResumeError(f"Node {current_node.id} is not an EventNode", node=current_node)
         node_results = context.get_state(f"{pfx}{context.express_node_name}", {})
         prev_state = node_results.get(last_node_id, {})
@@ -237,12 +234,8 @@ class DistributedStrategy:
         callback_manager.on_node_resume(flow, current_node)
 
         try:
-            if resume_type is ResumeType.CANCEL:
-                result = current_node.on_cancel(exec_ctx)
-            elif resume_type is ResumeType.TIMEOUT:
-                result = current_node.on_timeout(exec_ctx)
-            else:
-                result = current_node.on_event(exec_ctx, resume_data)
+            # 多态分发下沉到节点自身 (Node.resume), core 不再 import EventNode
+            result = current_node.resume(exec_ctx, resume_type, resume_data)
             callback_manager.on_node_end(flow, current_node, result)
         except Exception as e:
             error = {"code": -500, "message": str(e)}

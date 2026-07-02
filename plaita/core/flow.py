@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from plaita.core import types
 from plaita.core.errors import FlowStartMissingError, NodeNotFoundError
+# FlowExecution 在 flow.run/arun/debug 便捷方法里被实例化。executor 顶部并不反引
+# flow (仅 TYPE_CHECKING 引 EventBus), 故这是一条单向依赖, 可在模块顶部坦诚声明,
+# 不必藏在方法里装作没有 (历史遗留的伪 band-aid)。
+from plaita.core.executor import FlowExecution
 from plaita.io import Property
 from plaita.logger import logger
 from plaita.node import End, Node, Start, get_default_registry
@@ -206,15 +210,12 @@ class Flow(BaseModel):
         return None
 
     def run(self, *args, **params):
-        from plaita.core.executor import FlowExecution
         return FlowExecution().run_compatible(self, False, *args, **params)
 
     async def arun(self, *args, **params):
-        from plaita.core.executor import FlowExecution
         return await FlowExecution().arun_compatible(self, False, *args, **params)
 
     def debug(self, *args, **params):
-        from plaita.core.executor import FlowExecution
         return FlowExecution().run_compatible(self, True, *args, **params)
 
     @property
@@ -252,7 +253,6 @@ def parse_and_run(content: str, *args, **kwargs):
 
     支持 JSON 与 YAML 两种文本格式。
     """
-    from plaita.core.executor import FlowExecution
     from plaita.io_format import loads
 
     data = loads(content)

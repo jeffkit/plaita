@@ -28,6 +28,7 @@ class EventNode(Node):
     node_type: ClassVar[str] = "event"
     node_name: ClassVar[str] = "事件节点"
     async_node: ClassVar[bool] = True
+    is_suspending: ClassVar[bool] = True
     
     # 只保留配置属性
     event_type: str
@@ -200,6 +201,20 @@ class EventNode(Node):
         
         # 返回更新后的状态
         return self._create_result(state)
+
+    def resume(self, execution, resume_type, resume_data=None):
+        """多态 resume 入口: 按 resume_type 分发到 on_cancel/on_timeout/on_event。
+
+        由内核 ``DistributedStrategy._handle_resume`` 调用, 让 core 层不必
+        ``isinstance`` EventNode、也不必知道 on_cancel/on_timeout/on_event 的
+        分发表, 从而切断 core -> plaita.node.event_node 反向依赖。
+        """
+        from plaita.core.errors import ResumeType
+        if resume_type is ResumeType.CANCEL:
+            return self.on_cancel(execution)
+        if resume_type is ResumeType.TIMEOUT:
+            return self.on_timeout(execution)
+        return self.on_event(execution, resume_data)
     
     def can_handle_event(self, event_type, event_data):
         """
