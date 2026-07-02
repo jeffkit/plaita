@@ -40,6 +40,9 @@ class Node(BaseModel):
     output: Optional[Any] = None
     next: Optional[Any] = None
     timeout: str = Field("", description="Timeout configuration")
+    # 源码行号回标：仅 @flow 前端在编译期写入 IR，运行期错误可据此定位到
+    # 用户书写的 Python 源码行。JSON/S-expr/Builder 前端不产生此字段，保持 None。
+    source_line: Optional[int] = Field(None, description="@flow 编译期回标的源码行号")
     # input_type: Optional[Union[Property, List[Property]]] = None
     # output_type: Optional[Union[Property, List[Property]]] = None
     timeout_handler: ErrorHandler = Field(default_factory=lambda: ErrorHandler())

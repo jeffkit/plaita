@@ -47,6 +47,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("plaita.core.runner")
 
+
+def _node_source_loc(node) -> Optional[int]:
+    """取节点回标的源码行号（仅 @flow 前端编译期写入；其余前端为 None）。"""
+    return getattr(node, "source_line", None)
+
+
+def _node_loc_suffix(node) -> str:
+    """拼运行期错误消息的源码行号后缀，无回标时返回空串。"""
+    sl = _node_source_loc(node)
+    return f" (源码第 {sl} 行)" if sl is not None else ""
+
+
 class NodeRunner:
     """Handles single-node execution with timeout, retry, and error handling."""
 
@@ -189,22 +201,29 @@ class NodeRunner:
             message = f"Timeout handler strategy for executing node {node.name or node.id} is abort"
         else:
             message = f"Node {node.name or node.id} execution timeout"
+        message += _node_loc_suffix(node)
 
         error_type = FlowErrorType.FLOW_ERROR if time_limit_by_flow else FlowErrorType.NODE_ERROR
-        raise NodeTimeoutError(message, node=node, error_type=error_type)
+        err = NodeTimeoutError(message, node=node, error_type=error_type)
+        err.source_line = _node_source_loc(node)
+        raise err
 
     def _handle_flow_result_error(self, flow, node, e: FlowResultError):
-        raise ErrorResultException(e.code, e.message, node=node) from e
+        err = ErrorResultException(e.code, e.message, node=node)
+        err.source_line = _node_source_loc(node)
+        raise err from e
 
     def _handle_node_error(self, flow, node, error_handler, e: Exception):
         logger.warning("handle node error: %s", node.name or node.id, exc_info=True)
         strategy = error_handler.strategy if error_handler else ErrorStrategy.ABORT
         if not error_handler or _strategy_eq(strategy, ErrorStrategy.ABORT):
             code = DEFAULT_NODE_ABORT_CODE if not error_handler else error_handler.error_code
-            message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}"
+            message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}{_node_loc_suffix(node)}"
             if error_handler and error_handler.error_message:
                 message = error_handler.error_message
-            raise NodeExecutionError(message, node=node, code=code) from e
+            err = NodeExecutionError(message, node=node, code=code)
+            err.source_line = _node_source_loc(node)
+            raise err from e
         elif _strategy_eq(strategy, ErrorStrategy.CONTINUE):
             return None
         elif _strategy_eq(strategy, ErrorStrategy.CONTINUE_WITH):

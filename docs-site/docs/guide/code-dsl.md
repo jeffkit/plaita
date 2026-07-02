@@ -184,6 +184,75 @@ from plaita.dsl.codeflow import compile_func
 print(compile_func(create_user.__wrapped__, "create_user"))
 ```
 
+### 自定义节点（注册的 Node 子类）
+
+`@flow` 不止能调内置占位符。任何注册到 `NodeRegistry` 的自定义 `Node` 子类，都能在源码里用 **`node_type` 大写化** 的名字作为占位符调用。这让 AI 生成的 `@flow` 可以直接用业务自定义动作节点（LLM、检索、工具、领域 action），而不必降级到 JSON IR。
+
+```python
+from typing import ClassVar, Optional
+
+from plaita import Node
+from plaita.node import get_default_registry
+from plaita.dsl.codeflow import flow_from_source
+
+class LLMNode(Node):
+    node_type: ClassVar[str] = "llm"
+    prompt: Optional[str] = None
+    system: Optional[str] = None
+    model: Optional[str] = None
+    def execute(self, execution):
+        prompt = execution.evaluate(self.prompt) if self.prompt else ""
+        ...
+
+get_default_registry().register(LLMNode)
+
+src = '''
+@flow("answer", desc="带资料回答")
+def answer(INPUT):
+    retrieved = RETRIEVE(query=INPUT.question, library="kb", top_k=2)
+    ans = LLM(model="responder", system="只根据资料回答",
+              prompt="资料：{% $NODE.retrieved %}\\n问题：{% $INPUT.question %}")
+    return ans
+'''
+flow_from_source(src).run(question="plaita 是什么")
+```
+
+规则：
+
+- **占位符名 = `node_type` 大写**（`llm` → `LLM`、`retrieve` → `RETRIEVE`、`tool` → `TOOL`）。编译期查 registry：名字全大写且 `.lower()` 是已注册 node_type 即识别为该类型的节点调用。
+- **只能作语句或赋值右侧**，和 `HTTP`/`CHILD` 一样不能嵌在表达式里（`return LLM(...)` 要拆成 `r = LLM(...); return r`）。
+- **只接受关键字参数**（`字段名=值`），不支持位置参数。字段名须与 `Node` 子类的 pydantic 字段（snake_case）一致。
+- **字段值经表达式编译**：`INPUT.x` → `$INPUT.x`、字面量原样、含 `{% ... %}` 的模板字符串原样透传给节点 `execute` 自行求值。
+- **节点 id**：赋值时用变量名（`a = LLM(...)` → id `a`，后续 `a` 引用为 `$NODE.a`）；表达式语句可用 `id="name"` 命名。赋值时不要同时传 `id=`。
+- **通用字段**：`id=`、`timeout=`、`on_error=ErrorHandler(...)` 对所有自定义节点有效（走基类 `Node` 的 `timeout`/`errorHandler`）；其余 kwargs 按名进 IR。
+- **未注册的大写名 → 编译期报错并列出可用类型**（供 AI 自纠）：`未注册的自定义节点 FOO(...)：node_type 'foo' 不在 registry 中。可用类型：['llm', 'retrieve', ...]`。
+- **内置专用占位符优先**：`HTTP`/`CODE`/`EVENT`/`CHILD`/`REFERENCE`/`PARALLEL`/`MAP`/... 仍走各自的硬编码分支，不会被当自定义节点；不要注册同名的自定义 node_type。
+
+> **类型提示**：自定义节点的 pydantic 字段若是 `int`/`bool` 等强类型，传入表达式串（`$INPUT.x`）会在构建 `Flow` 时被 pydantic 拒绝。要让字段能接表达式，声明成 `Optional[Any]`/`Optional[str]`（如 `LLMNode.prompt`），或在外层用字面量。
+
+### 运行期错误回标到源码行
+
+`@flow` 不仅在编译期报行号，还会把每个节点对应的源码行号写进 IR（`source_line` 字段）。这样**运行期**某个节点抛错时，错误也能定位回你写的 Python 源码行，而不只是节点 id：
+
+- 编译期：`if` / `return` / 赋值 / 节点调用（`HTTP`/`CODE`/`CHILD`/...）/ 集合节点（`MAP`/`FILTER`/...）及其子流程节点都会带上 `source_line`。合成的 `start` 节点没有源码对应，不带该字段。
+- 运行期：节点抛错且策略为 `abort` 时，`NodeExecutionError`（及 `NodeTimeoutError` / `ErrorResultException` / `ResumeError`）会带上 `source_line` 属性，消息末尾追加 `(源码第 N 行)`：
+
+```
+执行节点boom出错了: ZeroDivisionError: division by zero (源码第 2 行)
+```
+
+```python
+from plaita.core.errors import NodeExecutionError
+
+try:
+    flow.run(n=1)
+except NodeExecutionError as e:
+    print(e.source_line)   # 2
+    print(e.message)       # ... (源码第 2 行)
+```
+
+> JSON / S-expr / Builder 前端不产生 `source_line`，对应节点该字段为 `None`，运行期错误消息不附加行号后缀——仍按节点 id 定位。
+
 ### 运行期生成：`flow_from_source`
 
 `@flow` 装饰器依赖 `inspect.getsource`，要求函数定义在真实 `.py` 源文件里。**运行期动态生成**的场景（AI 拼一段源码字符串、立刻编译执行）走装饰器会失败——动态函数没有源文件。
@@ -381,7 +450,8 @@ print(flow_to_sexpr(d))   # 回到可读的 S-expr
 
 - **`reduce`**：子流程输入命名为 `first`（累积值）和 `second`（当前元素）。可选 `initial` 指定初始值（注意：`0`/`[]`/`""` 这类 falsy 值也是有效初始值）。
 - **`@flow` 函数须定义在模块级**：`inspect.getsource` 才能取到源码做 AST 编译（函数体内定义的局部函数无法编译）。**运行期动态生成**请改用 `flow_from_source(src)`，它直接解析字符串，无源文件依赖。
-- **节点调用位置受限**：`HTTP` / `CODE` / `EVENT` / `CHILD` / `REFERENCE` / `PARALLEL` / 集合调用只能作为语句或赋值右侧，不能嵌在表达式里（如 `return HTTP.post(...)` 需拆成 `resp = HTTP.post(...); return resp.data`）。
+- **节点调用位置受限**：`HTTP` / `CODE` / `EVENT` / `CHILD` / `REFERENCE` / `PARALLEL` / 集合调用 / **自定义节点（`LLM`/`RETRIEVE`/... 等大写占位符）** 只能作为语句或赋值右侧，不能嵌在表达式里（如 `return HTTP.post(...)` 需拆成 `resp = HTTP.post(...); return resp.data`）。
+- **自定义节点字段类型**：`@flow` 现在支持直接调用注册的自定义 `Node` 子类（占位符名 = `node_type` 大写）。但 pydantic 字段若是 `int`/`bool` 等强类型，传表达式串会被拒——接表达式的字段声明成 `Optional[Any]`/`Optional[str]`，详见上文「自定义节点」。
 - **`str(x)` 是近似映射**：编译成 `$F.concat(x)`（`"".join(str(a) for a in args)`），单参与 `str()` 等价，但语义是"拼成字符串"而非"类型转换"。
 - **`+` 多态、编译期不查类型**：`a + b` 编译成 `$F.add(a, b)` 即 Python `a + b`，对 int/str/list 按 Python `+` 各自语义；要强制字符串拼接请显式用 `F.concat(...)`。完整的支持/不支持写法与精确语义见上文「表达式语义边界」。
 
@@ -396,7 +466,8 @@ print(flow_to_sexpr(d))   # 回到可读的 S-expr
 | `plaita.dsl.codeflow.compile_source(src, ...)` | 源码字符串 → IR dict（不构建） |
 | `plaita.dsl.codeflow.childflow(...)` | 装饰器：子流程函数 |
 | `plaita.dsl.codeflow.compile_func(fn, flow_id)` | Python 函数 → IR dict（不构建） |
-| `plaita.dsl.codeflow.HTTP / CODE / EVENT / MAP / FILTER / FIND / LOOP / REDUCE / CHILD / REFERENCE / PARALLEL` | 节点调用占位符 |
+| `plaita.dsl.codeflow.HTTP / CODE / EVENT / MAP / FILTER / FIND / LOOP / REDUCE / CHILD / REFERENCE / PARALLEL` | 内置节点调用占位符 |
+| 自定义节点占位符 | `node_type` 大写（如 `LLM`/`RETRIEVE`/`TOOL`），须先 `get_default_registry().register(NodeSubclass)` |
 | `plaita.dsl.codeflow.F / INPUT / NODE / GLOBAL / PARENT / ENV` | 命名空间占位符 |
 | `plaita.dsl.codeflow.ErrorHandler(...)` | 错误处理策略构造器 |
 | `plaita.dsl.sexpr.parse_sexpr(src)` | S-expr 源码 → `Flow`（含静态校验） |

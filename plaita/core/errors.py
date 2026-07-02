@@ -87,11 +87,15 @@ class FlowExecutionException(RuntimeError):
     code: int = -500
     error_type: "FlowErrorType" = FlowErrorType.FLOW_ERROR
 
-    def __init__(self, code: int = -500, message: str = "", error_type=None, node=None):
+    def __init__(self, code: int = -500, message: str = "", error_type=None, node=None,
+                 source_line: Optional[int] = None):
         self.code = code
         self.message = message
         self.error_type = error_type if error_type is not None else type(self).error_type
         self.node = node
+        # 运行期错误回标的源码行号（仅 @flow 前端编译期写入 IR 时可用）。
+        # 调用方可显式传入；未传时由 runner 从 node.source_line 兜底回填。
+        self.source_line = source_line
         super().__init__(message)
 
 

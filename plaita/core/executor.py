@@ -241,7 +241,9 @@ class DistributedStrategy:
             error = {"code": -500, "message": str(e)}
             callback_manager.on_node_end(flow, current_node, None, error, exception=e)
             logger.error("Error during resume: %s", e, exc_info=True)
-            raise ResumeError(str(e), node=current_node) from e
+            resume_err = ResumeError(str(e), node=current_node)
+            resume_err.source_line = getattr(current_node, "source_line", None)
+            raise resume_err from e
 
         context.update_node_result(current_node, result)
         return _create_lazy_output(current_node, result, None, context.context, is_suspend=False, execution_id=context.execution_id)

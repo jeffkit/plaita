@@ -175,6 +175,65 @@ _NEGATE_OP = {
 _NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL"}
 _COLLECTION_CALL_NAMES = {"MAP", "FILTER", "FIND", "LOOP", "REDUCE"}
 
+# 已被专用占位符（HTTP/CODE/CHILD/...）或合成节点（start/end/if/assignment/switch/bool）
+# 接手的 node_type 集合。自定义节点路径不走这些类型，避免 START(...)/END(...) 之类
+# 被误当成自定义节点调用。
+_BUILTIN_HANDLED_TYPES = {
+    "http", "code", "event", "child", "reference", "parallel",
+    "map", "filter", "find", "loop", "reduce",
+    "start", "end", "if", "assignment", "switch", "bool",
+}
+
+
+def _is_upper_ident(name: str) -> bool:
+    """全大写 ASCII 标识符（字母/数字/下划线，至少含一个字母）。
+
+    自定义节点占位符的命名约定：``node_type`` 大写化（``llm`` → ``LLM``）。
+    """
+    return (
+        name.isupper()
+        and name.replace("_", "").isalnum()
+        and any(c.isalpha() for c in name)
+    )
+
+
+def _default_known_node_types() -> set:
+    """从默认 NodeRegistry 取已知 node_type 集合（懒加载，避免循环 import）。"""
+    try:
+        from plaita.node import get_default_registry
+        return set(get_default_registry().list_types())
+    except Exception:
+        return set()
+
+
+def _custom_node_type(func: ast.expr, ctx: "_CompileCtx") -> Optional[str]:
+    """若 ``func`` 是自定义节点占位调用，返回 node_type；否则 None。
+
+    识别规则：``func`` 是 ``ast.Name``、名字全大写、``name.lower()`` 在 registry 里、
+    且不在 ``_BUILTIN_HANDLED_TYPES``（内置专用类型走各自的占位符）。
+    """
+    if isinstance(func, ast.Name) and _is_upper_ident(func.id):
+        nt = func.id.lower()
+        if nt in _BUILTIN_HANDLED_TYPES:
+            return None
+        if nt in ctx.known_node_types:
+            return nt
+    return None
+
+
+def _raise_if_unregistered_custom(func: ast.expr, ctx: "_CompileCtx") -> None:
+    """大写占位名但未注册 → 报可读错误并列出可用类型，供 AI 自纠。"""
+    if isinstance(func, ast.Name) and _is_upper_ident(func.id):
+        nt = func.id.lower()
+        if nt in _BUILTIN_HANDLED_TYPES or nt in ctx.known_node_types:
+            return
+        available = sorted(t for t in ctx.known_node_types if t not in _BUILTIN_HANDLED_TYPES)
+        raise _CodeflowError(
+            f"未注册的自定义节点 {func.id}(...)：node_type {nt!r} 不在 registry 中。"
+            f"可用类型：{available or '（无）'}",
+            func,
+        )
+
 # 常见 Python 写法在 @flow 表达式里不支持——给出可读的重写提示, 而不是抛
 # 不可读的 ast.dump / 裸类型名。这些构造当前本就会编译失败, 加提示是纯 DX 提升。
 _FOOTGUN_HINTS = {
@@ -226,6 +285,7 @@ class _CompileCtx:
         loop_vars: Optional[Dict[str, str]] = None,
         module_globals: Optional[Dict[str, Any]] = None,
         childflows: Optional[Dict[str, Dict[str, Any]]] = None,
+        known_node_types: Optional[set] = None,
     ) -> None:
         self._counter = 0
         self._claimed: set = set()
@@ -238,6 +298,9 @@ class _CompileCtx:
         # 源码模式：name → 子流程 IR，供 CHILD/REFERENCE/PARALLEL 的 flow=<name> 解析。
         # 装饰器模式则走 module_globals 里的 _ChildFlowMarker。
         self.childflows: Dict[str, Dict[str, Any]] = childflows or {}
+        # 已注册的 node_type 集合，用于识别自定义节点占位符（LLM/RETRIEVE/...）。
+        # 默认从默认 NodeRegistry 取；调用方可覆盖（如隔离测试）。
+        self.known_node_types: set = known_node_types if known_node_types is not None else _default_known_node_types()
 
     def auto_id(self, hint: Optional[str] = None) -> str:
         if hint:
@@ -265,6 +328,18 @@ class _CodeflowError(Exception):
     def __init__(self, msg: str, node: Optional[ast.AST] = None) -> None:
         line = getattr(node, "lineno", "?") if node else "?"
         super().__init__(f"[codeflow] 第 {line} 行: {msg}")
+
+
+def _annotate_source(spec: Dict[str, Any], node: Optional[ast.AST]) -> Dict[str, Any]:
+    """把 AST 节点的源码行号写进 IR spec，供运行期错误回标定位。
+
+    仅 ``@flow`` 前端调用；合成节点（如自动 start）传 ``node=None`` 即跳过。
+    """
+    if node is not None:
+        line = getattr(node, "lineno", None)
+        if line is not None:
+            spec["source_line"] = line
+    return spec
 
 
 # ---------------------------------------------------------------------------
@@ -379,11 +454,17 @@ def _compile_call_expr(node: ast.Call, ctx: _CompileCtx) -> Any:
         bad = node_kind or (func.id if isinstance(func, ast.Name) else "节点")
         raise _CodeflowError(
             f"{bad}(...) 是节点调用，只能作为语句或赋值右侧，不能嵌在表达式里", node)
+    # 自定义节点调用同样只能作语句/赋值右侧
+    if _custom_node_type(func, ctx) is not None:
+        raise _CodeflowError(
+            f"{func.id}(...) 是节点调用，只能作为语句或赋值右侧，不能嵌在表达式里", node)
     # 内置 len/abs/round -> $F.len(...)
     if isinstance(func, ast.Name) and func.id in _BUILTIN_TO_F:
         args = [_compile_expr(a, ctx) for a in node.args]
         rendered = ", ".join(_render_arg(a) for a in args)
         return f"$F.{_BUILTIN_TO_F[func.id]}({rendered})"
+    # 大写占位名但未注册 → 给可读错误（供 AI 自纠）
+    _raise_if_unregistered_custom(func, ctx)
     # 其它调用都不支持——给可读的调用名而不是 ast.dump
     call_name = _describe_call(func)
     raise _CodeflowError(
@@ -462,10 +543,12 @@ def _compile_block(
     if isinstance(head, ast.Return):
         end_id = ctx.auto_id()
         output = _compile_expr(head.value, ctx) if head.value is not None else None
-        ctx.nodes.append({
+        end_node: Dict[str, Any] = {
             "type": "end", "id": end_id,
             "output": output, "resultType": "success",
-        })
+        }
+        _annotate_source(end_node, head)
+        ctx.nodes.append(end_node)
         if rest:
             raise _CodeflowError("return 之后还有不可达语句", rest[0])
         return end_id
@@ -495,6 +578,7 @@ def _compile_if(
     if_id = ctx.auto_id()
     # 先在节点列表里占位，保证输出顺序 if 在前
     if_node: Dict[str, Any] = {"type": "if", "id": if_id, "condition": cond}
+    _annotate_source(if_node, head)
     ctx.nodes.append(if_node)
 
     # if 之后的语句入口（即两条分支 fall-through 的去处）
@@ -591,6 +675,7 @@ def _compile_for(
     if after is None:
         raise _CodeflowError("集合节点之后悬空：请补 return 或后续语句", head)
     spec["next"] = after
+    _annotate_source(spec, head)
     ctx.nodes.append(spec)
     return node_id
 
@@ -611,17 +696,23 @@ def _compile_assign(
     if after is None:
         raise _CodeflowError(f"赋值 {name} 之后悬空：请补 return 或后续语句", head)
 
-    if isinstance(value, ast.Call) and _node_call_kind(value.func) is not None:
+    if isinstance(value, ast.Call) and (
+        _node_call_kind(value.func) is not None
+        or _custom_node_type(value.func, ctx) is not None
+    ):
         spec = _compile_node_call(value, ctx, name)
         spec["next"] = after
+        _annotate_source(spec, value)
         ctx.nodes.insert(anchor, spec)
         return name
 
     output = _compile_expr(value, ctx)
     ctx.claim(name)
-    ctx.nodes.insert(anchor, {
+    assign_node: Dict[str, Any] = {
         "type": "assignment", "id": name, "output": output, "next": after,
-    })
+    }
+    _annotate_source(assign_node, head)
+    ctx.nodes.insert(anchor, assign_node)
     return name
 
 
@@ -633,15 +724,21 @@ def _compile_expr_stmt(
     after = _compile_block(rest, ctx, succ)
     if after is None:
         raise _CodeflowError("表达式语句之后悬空：请补 return 或后续语句", head)
-    if isinstance(value, ast.Call) and _node_call_kind(value.func) is not None:
+    if isinstance(value, ast.Call) and (
+        _node_call_kind(value.func) is not None
+        or _custom_node_type(value.func, ctx) is not None
+    ):
         spec = _compile_node_call(value, ctx, None)
         spec["next"] = after
+        _annotate_source(spec, value)
         ctx.nodes.insert(anchor, spec)
         return spec["id"]
     nid = ctx.auto_id()
-    ctx.nodes.insert(anchor, {
+    expr_node: Dict[str, Any] = {
         "type": "assignment", "id": nid, "output": _compile_expr(value, ctx), "next": after,
-    })
+    }
+    _annotate_source(expr_node, head)
+    ctx.nodes.insert(anchor, expr_node)
     return nid
 
 
@@ -649,7 +746,13 @@ def _compile_node_call(
     node: ast.Call, ctx: _CompileCtx, assign_name: Optional[str],
 ) -> Dict[str, Any]:
     kind = _node_call_kind(node.func)
+    is_custom = kind is None
     if kind is None:
+        kind = _custom_node_type(node.func, ctx)
+    if kind is None:
+        # 大写占位名但未注册 → 可读错误（列可用类型，供 AI 自纠）
+        if isinstance(node.func, ast.Name) and _is_upper_ident(node.func.id):
+            _raise_if_unregistered_custom(node.func, ctx)
         raise _CodeflowError("不支持的节点调用", node)
     kw = {k.arg: k.value for k in node.keywords}
     pos = node.args
@@ -659,7 +762,9 @@ def _compile_node_call(
             return None
         return _compile_expr(k, ctx)
 
-    nid = ctx.claim(assign_name) if assign_name else ctx.auto_id()
+    # 自定义节点的 id 由 _compile_custom_node 自行 claim（支持 id= 覆盖）；
+    # 内置节点在此处统一 claim/auto_id。
+    nid = None if is_custom else (ctx.claim(assign_name) if assign_name else ctx.auto_id())
 
     if kind == "HTTP":
         method = "POST"
@@ -737,7 +842,49 @@ def _compile_node_call(
             spec["isConditional"] = True
         return spec
 
-    raise _CodeflowError(f"未知节点调用 {kind}", node)
+    # 走到这里：kind 来自 _custom_node_type（自定义节点占位符）
+    return _compile_custom_node(node, ctx, assign_name, kind)
+
+
+def _compile_custom_node(
+    node: ast.Call, ctx: _CompileCtx, assign_name: Optional[str], node_type: str,
+) -> Dict[str, Any]:
+    """编译自定义节点调用 → ``{"type": node_type, "id": ..., <字段>: ...}``。
+
+    字段值经 ``_compile_expr`` 编译（``INPUT.x`` → ``$INPUT.x``，字面量原样，
+    含 ``{% ... %}`` 模板的字符串原样透传给节点的 ``execute`` 自行求值）。
+    通用字段：``id=``（覆盖节点 id）、``timeout=``、``on_error=ErrorHandler(...)``；
+    其余 kwargs 按名进 IR，须与注册 Node 子类的字段名（snake_case）一致。
+    """
+    if node.args:
+        raise _CodeflowError(
+            f"自定义节点 {node_type} 只接受关键字参数（字段名=值），不支持位置参数", node)
+    kw = {k.arg: k.value for k in node.keywords}
+
+    id_kw = kw.pop("id", None)
+    if assign_name:
+        if id_kw is not None:
+            raise _CodeflowError(
+                f"自定义节点已用赋值变量 {assign_name!r} 作为 id，不要同时传 id=", id_kw)
+        nid = ctx.claim(assign_name)
+    elif id_kw is not None:
+        if not isinstance(id_kw, ast.Constant) or not isinstance(id_kw.value, str):
+            raise _CodeflowError("自定义节点 id= 必须是字符串常量", id_kw)
+        nid = ctx.claim(id_kw.value)
+    else:
+        nid = ctx.auto_id()
+
+    spec: Dict[str, Any] = {"type": node_type, "id": nid}
+    if "timeout" in kw:
+        spec["timeout"] = _compile_expr(kw.pop("timeout"), ctx)
+    eh = kw.pop("on_error", None) or kw.pop("on_error_handler", None)
+    if eh is not None:
+        spec["errorHandler"] = _eval_error_handler(eh, ctx)
+    for arg_name, arg_node in kw.items():
+        if arg_name is None:  # **kwargs 解包
+            raise _CodeflowError("自定义节点不支持 **kwargs 解包", node)
+        spec[arg_name] = _compile_expr(arg_node, ctx)
+    return spec
 
 
 def _eval_error_handler(node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
@@ -871,9 +1018,14 @@ def _compile_fdef(
     opts: Dict[str, Any],
     module_globals: Optional[Dict[str, Any]] = None,
     childflows: Optional[Dict[str, Dict[str, Any]]] = None,
+    known_node_types: Optional[set] = None,
 ) -> Dict[str, Any]:
     """编译一个 ``FunctionDef`` AST 到 Flow IR dict（装饰器模式与源码模式共用）。"""
-    ctx = _CompileCtx(module_globals=module_globals or {}, childflows=childflows or {})
+    ctx = _CompileCtx(
+        module_globals=module_globals or {},
+        childflows=childflows or {},
+        known_node_types=known_node_types,
+    )
     entry = _compile_block(list(fdef.body), ctx, succ=None)
     if entry is None:
         raise _CodeflowError("函数体为空", fdef)
@@ -903,9 +1055,14 @@ def _compile_childflow_fdef(
     opts: Dict[str, Any],
     module_globals: Optional[Dict[str, Any]] = None,
     childflows: Optional[Dict[str, Dict[str, Any]]] = None,
+    known_node_types: Optional[set] = None,
 ) -> Dict[str, Any]:
     """编译一个 ``@childflow`` FunctionDef 到子流程 IR dict。"""
-    ctx = _CompileCtx(module_globals=module_globals or {}, childflows=childflows or {})
+    ctx = _CompileCtx(
+        module_globals=module_globals or {},
+        childflows=childflows or {},
+        known_node_types=known_node_types,
+    )
     entry = _compile_block(list(fdef.body), ctx, succ=None)
     if entry is None:
         raise _CodeflowError("子流程函数体为空", fdef)
