@@ -184,5 +184,47 @@ class TestCodeflowHttp(unittest.TestCase):
         self.assertEqual(h["errorHandler"]["defaultValue"], {"data": None})
 
 
+class TestCodeflowExpressionErrors(unittest.TestCase):
+    """@flow 表达式层不支持某些 Python 写法时, 报错应可读且带重写提示,
+    而不是抛 ast.dump / 裸类型名。"""
+
+    def _compile(self, src):
+        from plaita.dsl.codeflow import flow_from_source
+        return flow_from_source(src, flow_id="t")
+
+    def _expect_hint(self, src, fragment):
+        from plaita.dsl.codeflow import _CodeflowError
+        with self.assertRaises(_CodeflowError) as cm:
+            self._compile(src)
+        self.assertIn(fragment, str(cm.exception))
+
+    def test_fstring_unsupported_with_hint(self):
+        self._expect_hint("def t(INPUT):\n    return f'hi {INPUT.name}'", "F.concat")
+
+    def test_ternary_unsupported_with_hint(self):
+        self._expect_hint(
+            "def t(INPUT):\n    x = INPUT.a if INPUT.b else INPUT.c\n    return x",
+            "if/else 语句分支",
+        )
+
+    def test_listcomp_unsupported_with_hint(self):
+        self._expect_hint(
+            "def t(INPUT):\n    return [i for i in INPUT.items]", "MAP/FILTER",
+        )
+
+    def test_method_call_on_literal_readable(self):
+        # 不再抛 ast.dump; 调用名应可读 (Attribute.upper(...))
+        self._expect_hint(
+            "def t(INPUT):\n    return INPUT.name.upper()", "upper",
+        )
+
+    def test_str_maps_to_concat_and_compiles(self):
+        # str(x) 仍近似映射到 $F.concat, 不应报错
+        from plaita.node.end import End
+        flow = self._compile("def t(INPUT):\n    return str(INPUT.name)")
+        end = [n for n in flow.nodes if isinstance(n, End)][0]
+        self.assertEqual(end.output, "$F.concat($INPUT.name)")
+
+
 if __name__ == "__main__":
     unittest.main()

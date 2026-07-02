@@ -33,6 +33,14 @@
 - **`Node` 基类收紧**：`execute(execution)` 改为必选参数（所有内置子类本就必选，仅 `http.py` 残留 `=None` 一并清理）；删掉从未被调用的 `_validate_input` 死占位；`validate` / `_validate_output` 作为真实扩展钩子保留并补 docstring。
 - **logger 反模式修正**：`plaita/core/runner.py` / `callback.py` 的 `f"... {x}"` + `exc_info=True` 改为 `%` 延迟格式化；随后把 `plaita/server/**` 与 `plaita/event/memory.py` 下同类 `logger.error(f"... {e}", exc_info=True)` 一并清理（共 46 处），全仓不再有 f-string + exc_info 反模式。
 
+### C2：`@flow` 表达式语义边界
+
+- **编译错误可读化**：`plaita/dsl/codeflow.py` 最后一处 `ast.dump(node)` 报错改为可读调用名（`_describe_call`）；`_compile_expr` 的通用 fallback 不再抛裸类型名，改为带「@flow 只支持…详见 code-dsl 文档」的提示。
+- **常见 Python 写法给重写提示**：新增 `_FOOTGUN_HINTS` 表，f-string / 三元 / 列表-集合-字典推导式 / `lambda` / `await` / 海象 / `*args` 解包 / 集合字面量等不支持写法各自给出可操作重写建议（如 f-string → `F.concat(...)`）。这些写法本就会编译失败，加提示是纯 DX 提升，不改任何成功编译的语义。
+- **语义边界文档化**：`docs-site/docs/guide/code-dsl.md` 新增「表达式语义边界」小节，列全支持写法与精确语义、`str → $F.concat` 的近似映射、`+` 多态陷阱（编译期不查类型），以及不支持写法清单；编译期校验表与「已知边界」同步更新。
+- **顺手补漏**：迁掉 `plaita/node/child.py` 残留的 `from ..flow import Flow`（相对导入 shim），仓库内部不再有 shim 用法。
+- **未动**：`_BUILTIN_TO_F` / `_BINOP_TO_F` 的类型推断（让 `str→concat`、`+` 多态在编译期就按类型拒绝/允许）会改变现有可用流程的语义，属产品决策，本轮不动，已在文档显式标注为已知边界。
+
 ### B 档：结构与并发
 
 - **三 Strategy 共享单步推进**：抽 `_advance_one(flow, runner, callback_manager, node)` 原语，统一「run → 判 End → 解析 next」序列；`NormalStrategy` / `GeneratorStrategy` 复用之，`DistributedStrategy` 因 `EventNode` 挂起语义保留独立单步路径。新增 `Flow.is_end_node(node)`，`executor.py` 中散落的 `from plaita.node import End` 函数内导入全部消除（circular-import 带状消除到 `flow.py` 一处）。

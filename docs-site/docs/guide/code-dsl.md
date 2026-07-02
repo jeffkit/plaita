@@ -58,6 +58,36 @@ create_user.run(name="alice", age=20)
 
 > 比较与 `and`/`or`/`not` 只能出现在 `if` 判断位置；算术 `+ - * / %` 编译成 `$F.add/sub/mul/div/mod`（表达式语言没有中缀运算符）。
 
+### 表达式语义边界
+
+`@flow` 用 Python 语法做皮、子集做骨：函数体**不被当 Python 执行**，只走静态 AST 编译。能编译的写法与精确语义如下，**写法不在表里就会在构建 `Flow` 前报错（带行号与重写提示）**。
+
+**支持的 Python 表达式**
+
+| 写法 | 编译产物 | 精确语义 |
+|------|----------|----------|
+| 字面量 `1` `"x"` `True` `None` `[1,2]` `{"a":1}` | 原值 | 原样；dict key 必须是常量 |
+| `INPUT.x` / `NODE.r.data` / `GLOBAL.k` / `PARENT.x` / `ENV.K` | `$INPUT.x` / `$NODE.r.data` / … | 命名空间变量解析 |
+| `obj.path[0]` / `obj.path[-1]` | `$obj.path[0]` / `$obj.path[-1]` | 仅整数常量下标 |
+| `F.foo(a, b)` | `$F.foo(a, b)` | 调用注册的表达式函数 |
+| `len(x)` / `abs(x)` / `round(x)` | `$F.len` / `$F.abs` / `$F.round` | 映射到**真 Python 内置**, 语义精确 |
+| `str(x)` | `$F.concat(x)` | **近似映射**: `concat` = `"".join(str(a) for a in args)`, 单参时与 `str()` 等价; `str` 当类型转换的意图被实现成"拼成字符串" |
+| `a + b` `a - b` `a * b` `a / b` `a % b` `a ** b` | `$F.add/sub/mul/div/mod/pow` | 直接对应 Python 运算符 (`a + b`), 因此 `+` 对 int/str/list 都按 Python `+` 多态——**类型决定语义, 编译期不做类型检查** |
+
+**不支持、会报错的 Python 写法（含重写提示）**
+
+| 写法 | 报错提示 |
+|------|----------|
+| f-string `f"hi {name}"` | 用 `F.concat('hi ', INPUT.name)` |
+| 三元 `a if c else b` | 用 `if/else` 语句分支 |
+| 列表/集合/字典推导式 | 用 `MAP`/`FILTER` 节点 |
+| `lambda` / `await` / 海象 `:=` / `*args` 解包 | 不支持, 拆成节点或普通赋值 |
+| 比较与 `and`/`or`/`not` 在表达式位置 | 只能出现在 `if` 判断位置 |
+| 字面量方法调用 `"x".upper()` / 任意非 `F.*` 非 `len/abs/round/str` 调用 | 表达式里只能调 `F.xxx(...)` 或上述内置 |
+| 集合字面量 `{1,2}` | 用列表 |
+
+> **关于 `+` 的多态陷阱**：`name + "!"` 编译成 `$F.add($INPUT.name, "!")`，运行时 `+` 对字符串是拼接、对数字是加——结果**取决于运行时类型**, 编译期不拦。若要强制字符串拼接且对非字符串报错, 显式用 `F.concat(...)`。
+
 ### if / elif / else、return、赋值
 
 ```python
@@ -144,6 +174,8 @@ double_via_child.run(payload=21)   # -> 42
 | 节点调用嵌在表达式里 | `HTTP(...) 是节点调用，只能作为语句或赋值右侧` |
 | `not` 出现在非条件位置 | `not 要用在条件位置（if/while 判断）` |
 | 赋值后悬空（无 return/后续） | `赋值 xxx 之后悬空：请补 return 或后续语句` |
+| f-string / 三元 / 推导式 / lambda 等不支持写法 | 带重写提示（见上文「表达式语义边界」） |
+| 非 `F.*` 的方法/函数调用 | `不支持的调用 Xxx.yyy(...)：…` |
 
 只编译不构建：`compile_func(fn, flow_id)` 返回 IR dict，便于审查 / 序列化 / 生成器回写。
 
@@ -350,6 +382,8 @@ print(flow_to_sexpr(d))   # 回到可读的 S-expr
 - **`reduce`**：子流程输入命名为 `first`（累积值）和 `second`（当前元素）。可选 `initial` 指定初始值（注意：`0`/`[]`/`""` 这类 falsy 值也是有效初始值）。
 - **`@flow` 函数须定义在模块级**：`inspect.getsource` 才能取到源码做 AST 编译（函数体内定义的局部函数无法编译）。**运行期动态生成**请改用 `flow_from_source(src)`，它直接解析字符串，无源文件依赖。
 - **节点调用位置受限**：`HTTP` / `CODE` / `EVENT` / `CHILD` / `REFERENCE` / `PARALLEL` / 集合调用只能作为语句或赋值右侧，不能嵌在表达式里（如 `return HTTP.post(...)` 需拆成 `resp = HTTP.post(...); return resp.data`）。
+- **`str(x)` 是近似映射**：编译成 `$F.concat(x)`（`"".join(str(a) for a in args)`），单参与 `str()` 等价，但语义是"拼成字符串"而非"类型转换"。
+- **`+` 多态、编译期不查类型**：`a + b` 编译成 `$F.add(a, b)` 即 Python `a + b`，对 int/str/list 按 Python `+` 各自语义；要强制字符串拼接请显式用 `F.concat(...)`。完整的支持/不支持写法与精确语义见上文「表达式语义边界」。
 
 ---
 

@@ -174,6 +174,35 @@ _NEGATE_OP = {
 _NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL"}
 _COLLECTION_CALL_NAMES = {"MAP", "FILTER", "FIND", "LOOP", "REDUCE"}
 
+# 常见 Python 写法在 @flow 表达式里不支持——给出可读的重写提示, 而不是抛
+# 不可读的 ast.dump / 裸类型名。这些构造当前本就会编译失败, 加提示是纯 DX 提升。
+_FOOTGUN_HINTS = {
+    ast.IfExp: "三元表达式 `a if c else b` 不支持, 请用 if/else 语句分支实现",
+    ast.JoinedStr: "f-string 不支持, 请用 F.concat(...) 拼接, 例: F.concat('hi ', INPUT.name)",
+    ast.FormattedValue: "f-string 不支持, 请用 F.concat(...) 拼接",
+    ast.Lambda: "lambda 不支持, @flow 函数体本身即流程, 请拆成节点",
+    ast.Await: "await 不支持, @flow 函数体不被当作 Python 执行",
+    ast.Starred: "*args / **kwargs 解包不支持",
+    ast.Set: "集合字面量不支持, 请用列表",
+    ast.ListComp: "列表推导式不支持, 请用 MAP/FILTER 节点",
+    ast.SetComp: "集合推导式不支持, 请用 MAP/FILTER 节点",
+    ast.DictComp: "字典推导式不支持, 请用 MAP 节点构造",
+    ast.GeneratorExp: "生成器表达式不支持, 请用 MAP/FILTER 节点",
+    ast.NamedExpr: "海象运算符 := 不支持, 请用普通赋值语句",
+}
+
+
+def _describe_call(func: ast.expr) -> str:
+    """把 Call 的 func 渲染成可读字符串, 用于报错。"""
+    if isinstance(func, ast.Name):
+        return f"{func.id}(...)"
+    if isinstance(func, ast.Attribute):
+        base = _describe_call(func.value) if isinstance(func.value, ast.Call) else (
+            func.value.id if isinstance(func.value, ast.Name) else type(func.value).__name__
+        )
+        return f"{base}.{func.attr}(...)"
+    return type(func).__name__
+
 
 def _node_call_kind(func: ast.expr) -> Optional[str]:
     """识别节点调用种类：``HTTP(...)`` / ``HTTP.post(...)`` / ``CODE.python(...)``。
@@ -286,7 +315,15 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
         return [_compile_expr(e, ctx) for e in node.elts]
     if isinstance(node, ast.BoolOp) or isinstance(node, ast.Compare):
         raise _CodeflowError("比较/and/or 只能出现在条件位置（if 判断）", node)
-    raise _CodeflowError(f"不支持的表达式 {type(node).__name__}", node)
+    # 常见 Python 写法在 @flow 里不支持——给重写提示, 而不是抛 ast.dump
+    _footgun_hint = _FOOTGUN_HINTS.get(type(node))
+    if _footgun_hint:
+        raise _CodeflowError(_footgun_hint, node)
+    raise _CodeflowError(
+        f"不支持的表达式 {type(node).__name__}（@flow 只支持字面量/变量/属性/下标/"
+        f"函数调用/算术/字典与列表字面量, 详见 code-dsl 文档「表达式语义边界」）",
+        node,
+    )
 
 
 def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
@@ -346,7 +383,12 @@ def _compile_call_expr(node: ast.Call, ctx: _CompileCtx) -> Any:
         args = [_compile_expr(a, ctx) for a in node.args]
         rendered = ", ".join(_render_arg(a) for a in args)
         return f"$F.{_BUILTIN_TO_F[func.id]}({rendered})"
-    raise _CodeflowError(f"不支持的调用 {ast.dump(node)}", node)
+    # 其它调用都不支持——给可读的调用名而不是 ast.dump
+    call_name = _describe_call(func)
+    raise _CodeflowError(
+        f"不支持的调用 {call_name}：@flow 表达式里只能调 F.xxx(...) 或内置 len/abs/round/str",
+        node,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ class FlowNode(Node):
 
     @model_validator(mode="before")
     def setup_child_flow(cls, values: Dict) -> Dict:
-        from ..flow import Flow
+        from plaita.core.flow import Flow
 
         child_flow = values.get("childFlow") or values.get("child_flow")
         if isinstance(child_flow, str):
