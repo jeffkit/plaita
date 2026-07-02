@@ -251,6 +251,13 @@ tests/
 | 13 | `FlowExecution` 拆分（Driver/State/Hooks） | P3 | 高 | 1d+ | 🕯️ 暂缓（重大重构，独立 milestone） |
 | 14 | `ExecutionState(BaseModel)` 替换 magic key dict | P3 | 高 | 1d+ | 🕯️ 暂缓（同上） |
 | 15 | `CodeNode` 移出默认注册 + 沙箱化 | P3 | 高 | 1d+ | 🕯️ 暂缓（独立设计） |
+| 16 | `_node_index` 缓存失效改指纹（原第 7 节） | P2 | 低 | 30min | ✅ 完成（批2） |
+| 17 | `@event_handler` 注册不再 fire-and-forget（原第 7 节） | P1 | 中 | 30min | ✅ 完成（批2） |
+| 18 | `BackGroundThreadPool/ProcessPool` 加 max_workers + atexit（原第 7 节） | P1 | 低 | 30min | ✅ 完成（批2） |
+| 19 | 核心模块 logger lazy formatting（原第 7 节） | P2 | 低 | 1h | ✅ 完成（批2，57 处） |
+| 20 | `plaita/server/` logger lazy formatting | P2 | 低 | 2h | ✅ 完成（批3，154 处） |
+| 21 | 节点图遍历逻辑收敛 + characterization test（原第 7 节） | P2 | 中 | 1h | ✅ 完成（批3，已确认主要复制点早先已收敛，本批仅补测试钉死） |
+| 22 | HMAC 重放保护 nonce + 缓存（原第 7 节） | P1 | 中 | 2h | ✅ 完成（批3，B 方案增量兼容） |
 
 ---
 
@@ -362,6 +369,26 @@ tests/
 - 状态: ✅ 完成 (核心模块)
 - 遗留: `plaita/server/` 下约 152 处 logger f-string 未清, 全是 INFO 级配置日志, 几乎总会输出, lazy 收益微, 留作独立 PR。
 
+### 2026-07-02 (批3) `plaita/server/` logger f-string 改 lazy formatting
+- 改动: 19 个文件共 154 处 `logger.LEVEL(f"...")` → `logger.LEVEL("...%s...", args)`。涉及 `services/` (kafka/redis/base/service_manager/delay/approval/http_callback/`__main__`)、`nodes/` (delay/redis_queue/kafka_queue/http_callback/approval/base_extended)、`flow_worker.py`、`event_filter.py`、`control.py`、`registry.py`、`factory.py`。1 处 `{delay:.1f}` format spec 翻译为 `%.1f`。
+- 验证: `pytest tests/ -q --ignore=tests/{integration,e2e} -m "not integration" --ignore=tests/test_{flow_worker,loop}.py` 781 passed。全仓库 `logger.LEVEL(f"` grep 已 0 命中。
+- 状态: ✅ 完成
+
+### 2026-07-02 (批3) 节点图遍历逻辑收敛确认 + characterization test
+- 复核结论: 上一批整改里 `DistributedStrategy._get_next_from_last` 已统一走 `flow.next_node` (注释明确"避免重复实现易漂移的图遍历")。`_advance_one` 被 Normal/Generator 两个策略共享, DistributedStrategy 因为语义不同 (suspend on `EventNode`) 保留自己的逻辑——合理。**主要复制点其实已经收敛了**, 本任务实际工作只有"把行为钉死"。
+- 改动: `tests/unit/test_flow_next_node.py` 新文件, 8 个 case 覆盖: 非分支节点按 next 推进、End 节点返回 None、分支节点按 branch 参数、未知 branch 返回 None、branch=None 走 `_get_branch_target` 而非 next 字段、三种执行模式 (Normal/Generator/Distributed) 在线性 flow 上最终结果一致。
+- 验证: `pytest tests/unit/test_flow_next_node.py -q` 8 passed。主仓库全套 781 passed。
+- 状态: ✅ 完成 (行为钉死, 未来 #14 `ExecutionState(BaseModel)` 重构时的回归保护已就位)
+
+### 2026-07-02 (批3) HMAC 重放保护 (B 方案, 增量兼容)
+- 改动:
+  - `plaita/client.py`: `generate_signature` 加可选 `nonce: Optional[str]` 参数, 非 None 时签名材料改为 `"{sign_time}\n{nonce}\n"` 并把 `nonce` 字段加进 Authorization; `PlaitaClient.__init__` 加 `replay_protected: bool = False` 参数, True 时 `get_flow` 每次请求生成 uuid4 nonce 调 `generate_signature(..., nonce=nonce)`。默认 False 保持向后兼容。
+  - `plaita-console/backend/services/signature.py`: 重构 `verify_authorization` 为 _parse_authorization / _validate_key_time / _compute_signature 子函数; 检测 Authorization 里有没有 `nonce` 字段决定走新/旧验签路径。新增 `_NonceCache` 进程内单例 (内存字典 + 锁 + 惰性清理), TTL = sign_expire; 提供 `reset_nonce_cache()` 测试钩子。
+  - `plaita-console/backend/tests/console/test_signature.py`: 新文件, 14 个 case 覆盖: 旧路径兼容 (7)、新路径重放保护 (7, 含首次放行/重放拒绝/不同 nonce 各自一次性/nonce 进入签名材料/旧式 auth 在 nonce 路径后仍可用/篡改 nonce 被拒/nonce 自然过期后可复用)。
+- 验证: `pytest tests/console/test_signature.py -q` 14 passed; `pytest tests/console/` 53 passed; 主仓库 781 passed。
+- 状态: ✅ 完成
+- 注意: 这是增量方案——未升级的服务端继续按旧算法验签, 不影响现有部署; 客户端启用 `replay_protected=True` 后**必须**配合已升级的服务端。多进程部署 (gunicorn -w N) 下每个 worker 有独立 nonce 缓存, 跨 worker 重放仍可能在 3 秒窗口期内绕过——生产部署建议注入 Redis 后端 (TTL 原生支持), 已在 `_NonceCache` 文档里登记。
+
 ---
 
 ## 7. 还未处理的事项（明确登记，不假装做完）
@@ -371,9 +398,6 @@ tests/
 - **#13 `FlowExecution` 拆分 Driver/State/Hooks**：390 行的 God Object，重构影响面大，应作为独立 milestone，配 e2e 回归测试。
 - **#14 `ExecutionState(BaseModel)` 替换 magic key dict**：当前 `_context: Dict[str, Any]` + `f"${prefix}LAST_NODE"` magic key 模型，替换要改所有读写点（runner/executor/distributed strategy/loop/parallel/...），并保证分布式序列化往返一致。**这是最值钱也最危险的重构**。
 - **#15 `CodeNode` 沙箱化**：PyExecJS 无沙箱、已弃维护。要么换 `restrictedpython`/`py-mini-racer` + 资源限制，要么默认不注册、需要显式 opt-in（甚至独立 `plaita-sandbox` 包，配 Docker/nsjail）。
-- **HMAC 重放保护**：`PlaitaClient` 应加 nonce/jti + 已用签名缓存，3 秒窗口内重放完全可行。
-- **flow.py / executor.py / runner.py 三处复制节点图遍历逻辑**：`flow.next_node` / `_get_target_node` / `_get_branch_target` / DistributedStrategy 自己那份——收敛到 `Flow` 单一入口。
-- **`plaita/server/` 节点/服务文件 logger f-string**：2026-07 批次只清理了 core/event/node/storage/client（约 57 处）。server/ 下 152 处 INFO 级配置日志几乎总会输出，lazy 收益微，留作独立 PR。
 
 ---
 
