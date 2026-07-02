@@ -75,7 +75,7 @@ class ApprovalNode(BaseExtendedNode):
             "retry_config": self.get_default_retry_config()
         }
         
-        logger.info(f"审批节点 [{self.id}] 配置: 审批ID={approval_id}, 审批人={resolved_config['approvers']['approvers']}")
+        logger.info("审批节点 [%s] 配置: 审批ID=%s, 审批人=%s", self.id, approval_id, resolved_config['approvers']['approvers'])
         
         return config
     
@@ -164,7 +164,7 @@ class ApprovalNode(BaseExtendedNode):
                 resolved = execution.evaluate(value)
                 return resolved if resolved is not None else value
             except Exception as e:
-                logger.warning(f"解析变量引用失败 {value}: {e}")
+                logger.warning("解析变量引用失败 %s: %s", value, e)
                 return value
         
         return value
@@ -182,7 +182,7 @@ class ApprovalNode(BaseExtendedNode):
         required_fields = ["approval_config", "approver_config", "form_config", "node_id", "event_type"]
         for field in required_fields:
             if field not in config:
-                logger.error(f"审批节点配置缺少必要字段: {field}")
+                logger.error("审批节点配置缺少必要字段: %s", field)
                 return False
         
         # 验证审批配置

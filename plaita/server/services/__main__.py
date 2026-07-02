@@ -50,7 +50,7 @@ def main():
     
     # 连接 Redis
     redis_url = args.redis_url
-    logger.info(f"连接 Redis: {redis_url}")
+    logger.info("连接 Redis: %s", redis_url)
     
     redis_client = Redis.from_url(redis_url)
     
@@ -58,7 +58,7 @@ def main():
         redis_client.ping()
         logger.info("Redis 连接成功")
     except Exception as e:
-        logger.error(f"Redis 连接失败: {e}")
+        logger.error("Redis 连接失败: %s", e)
         sys.exit(1)
     
     # 创建事件总线
@@ -97,7 +97,7 @@ def main():
     
     def signal_handler(sig, frame):
         nonlocal running
-        logger.info(f"收到信号 {sig}，正在停止服务...")
+        logger.info("收到信号 %s，正在停止服务...", sig)
         running = False
         service.stop_service()
     
@@ -105,13 +105,13 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     # 启动服务
-    logger.info(f"启动服务: {args.service_type} (实例ID: {instance_id})")
+    logger.info("启动服务: %s (实例ID: %s)", args.service_type, instance_id)
     
     if not service.start_service():
         logger.error("服务启动失败")
         sys.exit(1)
     
-    logger.info(f"服务 {args.service_type} 已启动，按 Ctrl+C 停止")
+    logger.info("服务 %s 已启动，按 Ctrl+C 停止", args.service_type)
     
     # 主循环
     import time

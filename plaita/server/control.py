@@ -118,7 +118,7 @@ class ControlListener:
         )
         self._listener_thread.start()
         
-        logger.info(f"控制监听器已启动: {self.control_channel}")
+        logger.info("控制监听器已启动: %s", self.control_channel)
     
     def stop(self):
         """停止监听"""
@@ -129,7 +129,7 @@ class ControlListener:
                 self._pubsub.unsubscribe(self.control_channel)
                 self._pubsub.close()
             except Exception as e:
-                logger.warning(f"关闭 Pub/Sub 时出错: {e}")
+                logger.warning("关闭 Pub/Sub 时出错: %s", e)
         
         if self._listener_thread:
             self._listener_thread.join(timeout=5)
@@ -143,7 +143,7 @@ class ControlListener:
             self._pubsub = self.redis_client.pubsub()
             self._pubsub.subscribe(self.control_channel)
             
-            logger.info(f"开始监听控制通道: {self.control_channel}")
+            logger.info("开始监听控制通道: %s", self.control_channel)
             
             while not self._stop_event.is_set():
                 message = self._pubsub.get_message(timeout=1.0)
@@ -166,7 +166,7 @@ class ControlListener:
                 data = data.decode()
             
             command = ControlCommand.from_json(data)
-            logger.info(f"收到控制指令: {command.command}")
+            logger.info("收到控制指令: %s", command.command)
             
             # 处理命令
             if command.command == ControlCommand.STOP:
@@ -178,14 +178,14 @@ class ControlListener:
             elif command.command in self._handlers:
                 self._handlers[command.command](command)
             else:
-                logger.warning(f"未知的控制指令: {command.command}")
+                logger.warning("未知的控制指令: %s", command.command)
                 
         except Exception as e:
             logger.error("处理控制指令失败: %s", e, exc_info=True)
     
     def _handle_stop(self, command: ControlCommand):
         """处理停止指令"""
-        logger.info(f"收到停止指令，优雅停止: {command.graceful}")
+        logger.info("收到停止指令，优雅停止: %s", command.graceful)
         
         if self.on_stop:
             self.on_stop(command.graceful)
@@ -199,7 +199,7 @@ class ControlListener:
         if self.on_status:
             status = self.on_status()
             # 可以通过另一个通道返回状态
-            logger.info(f"当前状态: {status}")
+            logger.info("当前状态: %s", status)
         else:
             logger.warning("未配置状态回调")
     
@@ -209,7 +209,7 @@ class ControlListener:
         
         if self.on_reload_config:
             success = self.on_reload_config()
-            logger.info(f"重新加载配置: {'成功' if success else '失败'}")
+            logger.info("重新加载配置: %s", '成功' if success else '失败')
         else:
             logger.warning("未配置重新加载配置回调")
 
@@ -256,7 +256,7 @@ class ControlMixin:
         停止命令回调
         子类应该重写此方法
         """
-        logger.info(f"收到停止命令，优雅停止: {graceful}")
+        logger.info("收到停止命令，优雅停止: %s", graceful)
         # 子类实现具体的停止逻辑
     
     def _on_status_command(self) -> Dict[str, Any]:

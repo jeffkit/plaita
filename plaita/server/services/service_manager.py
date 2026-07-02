@@ -50,7 +50,7 @@ class ServiceManager:
         """
         with self._lock:
             self.service_classes[service_type] = service_class
-            logger.info(f"注册服务类: {service_type} -> {service_class.__name__}")
+            logger.info("注册服务类: %s -> %s", service_type, service_class.__name__)
     
     def start_all_services(self, service_configs: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
         """
@@ -82,15 +82,15 @@ class ServiceManager:
                     if service.start_service():
                         self.services[service_type] = service
                         success_count += 1
-                        logger.info(f"服务 {service_type} 启动成功")
+                        logger.info("服务 %s 启动成功", service_type)
                     else:
-                        logger.error(f"服务 {service_type} 启动失败")
+                        logger.error("服务 %s 启动失败", service_type)
                         
                 except Exception as e:
                     logger.error("启动服务 %s 时出错: %s", service_type, e, exc_info=True)
             
             self.is_running = success_count > 0
-            logger.info(f"服务管理器启动完成，成功启动 {success_count}/{len(self.service_classes)} 个服务")
+            logger.info("服务管理器启动完成，成功启动 %s/%s 个服务", success_count, len(self.service_classes))
             
             return success_count == len(self.service_classes)
     
@@ -116,7 +116,7 @@ class ServiceManager:
                     # 关闭服务
                     service.shutdown(timeout)
                     success_count += 1
-                    logger.info(f"服务 {service_type} 停止成功")
+                    logger.info("服务 %s 停止成功", service_type)
                     
                 except Exception as e:
                     logger.error("停止服务 %s 时出错: %s", service_type, e, exc_info=True)
@@ -125,7 +125,7 @@ class ServiceManager:
             self.services.clear()
             self.is_running = False
             
-            logger.info(f"服务管理器停止完成，成功停止 {success_count} 个服务")
+            logger.info("服务管理器停止完成，成功停止 %s 个服务", success_count)
             
             return success_count > 0
     
@@ -142,7 +142,7 @@ class ServiceManager:
         """
         with self._lock:
             if service_type not in self.services:
-                logger.error(f"服务类型 {service_type} 不存在或未启动")
+                logger.error("服务类型 %s 不存在或未启动", service_type)
                 return ""
             
             service = self.services[service_type]
@@ -207,7 +207,7 @@ class ServiceManager:
                 
                 # 启动新服务
                 if service_type not in self.service_classes:
-                    logger.error(f"未知的服务类型: {service_type}")
+                    logger.error("未知的服务类型: %s", service_type)
                     return False
                 
                 service_class = self.service_classes[service_type]
@@ -217,10 +217,10 @@ class ServiceManager:
                 
                 if new_service.start_service():
                     self.services[service_type] = new_service
-                    logger.info(f"服务 {service_type} 重启成功")
+                    logger.info("服务 %s 重启成功", service_type)
                     return True
                 else:
-                    logger.error(f"服务 {service_type} 重启失败")
+                    logger.error("服务 %s 重启失败", service_type)
                     return False
                     
             except Exception as e:

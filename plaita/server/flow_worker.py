@@ -63,11 +63,11 @@ class FlowWorker:
         
         # 尝试从缓存获取
         if cache_key in self.flow_definition_cache:
-            logger.info(f"从缓存获取流程定义: {cache_key}")
+            logger.info("从缓存获取流程定义: %s", cache_key)
             return self.flow_definition_cache[cache_key]
         
         # 缓存未命中，从存储获取
-        logger.info(f"从存储获取流程定义: {flow_id}, 版本: {version or 'latest'}")
+        logger.info("从存储获取流程定义: %s, 版本: %s", flow_id, version or 'latest')
         flow_definition = self.flow_storage.get_flow(flow_id, version)
         
         if not flow_definition:
@@ -86,7 +86,7 @@ class FlowWorker:
 
         # 解析流程定义
         try:
-            logger.info(f"成功获取流程定义: {flow_id}, 数据: {flow_definition.get('name', 'unknown')}")
+            logger.info("成功获取流程定义: %s, 数据: %s", flow_id, flow_definition.get('name', 'unknown'))
             flow = Flow.model_validate(flow_definition)
         except Exception as e:
             error_msg = f"解析流程定义失败: {e}"
@@ -114,7 +114,7 @@ class FlowWorker:
         
         
         
-        logger.info(f"开始执行流程: {flow_id}, 版本: {version or '最新版本'}")
+        logger.info("开始执行流程: %s, 版本: %s", flow_id, version or '最新版本')
         
         try:
             # 创建流程执行器并执行流程
@@ -143,7 +143,7 @@ class FlowWorker:
             # 保存执行状态
             success = self.execution_storage.save_execution_state(execution_id, state)
             if not success:
-                logger.error(f"保存执行状态失败: {execution_id}")
+                logger.error("保存执行状态失败: %s", execution_id)
                 raise RuntimeError(f"保存执行状态失败: {execution_id}")
 
             # 处理执行结果
@@ -189,7 +189,7 @@ class FlowWorker:
         flow = self.get_flow_definition(flow_id, version)
         
         # 解析流程定义
-        logger.info(f"恢复流程执行: {flow_id}, 执行ID: {execution_id}, 恢复类型: {resume_type}")
+        logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
         
         try:
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
@@ -288,7 +288,7 @@ class FlowWorker:
                         state.last_update_time = datetime.now().isoformat()
                         self.execution_storage.save_execution_state(execution_id, state)
                         steps_since_persist = 0
-                        logger.info(f"流程步骤执行完成，继续下一步: {execution_id}")
+                        logger.info("流程步骤执行完成，继续下一步: %s", execution_id)
 
                 except Exception as e:
                     logger.error("流程执行出错: %s", e, exc_info=True)
@@ -380,7 +380,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             # 启动控制监听
             self.start_control_listener()
         
-        logger.info(f"流程工作器已启动，监听队列: {self.queue_name}")
+        logger.info("流程工作器已启动，监听队列: %s", self.queue_name)
         
         try:
             while self._running:
@@ -435,7 +435,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     
     def _on_stop_command(self, graceful: bool):
         """响应停止命令"""
-        logger.info(f"收到远程停止命令，优雅停止: {graceful}")
+        logger.info("收到远程停止命令，优雅停止: %s", graceful)
         self.stop()
     
     def _on_status_command(self) -> Dict[str, Any]:
@@ -513,7 +513,7 @@ def main():
             "execution",
             **storage_kwargs
         )
-        logger.info(f"已创建执行状态存储: {args.execution_storage_type}类型")
+        logger.info("已创建执行状态存储: %s类型", args.execution_storage_type)
         
         # 创建流程定义存储
         flow_storage = create_storage_component(
@@ -521,7 +521,7 @@ def main():
             "flow",
             **storage_kwargs
         )
-        logger.info(f"已创建流程定义存储: {args.flow_storage_type}类型")
+        logger.info("已创建流程定义存储: %s类型", args.flow_storage_type)
         
         # 创建事件总线（可选）
         event_bus = None
@@ -530,7 +530,7 @@ def main():
                 args.event_bus_type,
                 **storage_kwargs
             )
-            logger.info(f"已创建事件总线: {args.event_bus_type}类型")
+            logger.info("已创建事件总线: %s类型", args.event_bus_type)
         
         # 创建Redis流程工作器
         worker = RedisFlowWorker(
@@ -548,7 +548,7 @@ def main():
         
         # 注册信号处理器以支持优雅关闭
         def signal_handler(signum, frame):
-            logger.info(f"收到信号 {signum}，正在关闭...")
+            logger.info("收到信号 %s，正在关闭...", signum)
             worker.stop()
             sys.exit(0)
         
@@ -558,11 +558,11 @@ def main():
         # 启动工作器。历史上这里有 --debug-mode 分支硬编码 flow_id="event_flow_demo"
         # 直接读 Redis + 手动 lrem 队列消息, 是开发期临时脚本——已删除。需要类似
         # 调试请用 Redis CLI 或独立 dev 脚本, 不要留在生产 CLI 入口里。
-        logger.info(f"流程工作器启动成功，监听队列: {args.queue_name}")
+        logger.info("流程工作器启动成功，监听队列: %s", args.queue_name)
         worker.run()
 
     except Exception as e:
-        logger.error(f"流程工作器启动失败: {e}")
+        logger.error("流程工作器启动失败: %s", e)
         sys.exit(1)
 
 if __name__ == "__main__":

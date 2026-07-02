@@ -190,7 +190,9 @@ class ServiceRegistry:
             )
             
             logger.info(
-                f"服务已注册: {service_info.service_type}:{service_info.instance_id}"
+                "服务已注册: %s:%s",
+                service_info.service_type,
+                service_info.instance_id
             )
             
             # 保存当前注册的服务信息
@@ -226,7 +228,7 @@ class ServiceRegistry:
             # 删除注册信息
             self.redis_client.delete(key)
             
-            logger.info(f"服务已注销: {service_type}:{instance_id}")
+            logger.info("服务已注销: %s:%s", service_type, instance_id)
             
             self._registered_service = None
             
@@ -263,7 +265,9 @@ class ServiceRegistry:
             )
             
             logger.debug(
-                f"心跳成功: {service_info.service_type}:{service_info.instance_id}"
+                "心跳成功: %s:%s",
+                service_info.service_type,
+                service_info.instance_id
             )
             
             return True
@@ -300,7 +304,9 @@ class ServiceRegistry:
         self._heartbeat_thread.start()
         
         logger.info(
-            f"心跳线程已启动: {service_info.service_type}:{service_info.instance_id}"
+            "心跳线程已启动: %s:%s",
+            service_info.service_type,
+            service_info.instance_id
         )
     
     def stop_heartbeat(self):

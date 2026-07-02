@@ -149,7 +149,7 @@ class RedisQueueService(BaseExtendedService):
             
             node_id = task_config.get("node_id")
             
-            logger.info(f"开始监听Redis队列: node_id={node_id}, queue={queue_config.get('name')}")
+            logger.info("开始监听Redis队列: node_id=%s, queue=%s", node_id, queue_config.get('name'))
             
             # 创建Redis连接（带重试）
             redis_client = await self._create_redis_client_with_retry(redis_config, execution_id)
@@ -176,7 +176,7 @@ class RedisQueueService(BaseExtendedService):
                 elif queue_type == "pubsub":
                     result = await self._listen_pubsub_queue(redis_client, task_config)
                 else:
-                    logger.error(f"不支持的队列类型: {queue_type}")
+                    logger.error("不支持的队列类型: %s", queue_type)
                     return False
                 
                 # 删除任务完成标志键
@@ -188,7 +188,7 @@ class RedisQueueService(BaseExtendedService):
                 await self._cleanup_client(execution_id)
                 
         except asyncio.CancelledError:
-            logger.info(f"Redis队列任务被取消: {execution_id}")
+            logger.info("Redis队列任务被取消: %s", execution_id)
             await self._cleanup_client(execution_id)
             raise
         except Exception as e:
@@ -218,20 +218,20 @@ class RedisQueueService(BaseExtendedService):
             try:
                 client = await self._create_redis_client(redis_config)
                 self._connection_state = ConnectionState.CONNECTED
-                logger.info(f"Redis连接成功: execution_id={execution_id}")
+                logger.info("Redis连接成功: execution_id=%s", execution_id)
                 return client
             except Exception as e:
                 if attempt < self.retry_config.max_retries:
                     delay = self.retry_config.get_delay(attempt)
                     self._connection_state = ConnectionState.RECONNECTING
                     logger.warning(
-                        f"Redis连接失败 (尝试 {attempt + 1}/{self.retry_config.max_retries + 1}): {e}, "
-                        f"{delay:.1f}秒后重试"
+                        "Redis连接失败 (尝试 %d/%d): %s, %.1f秒后重试",
+                        attempt + 1, self.retry_config.max_retries + 1, e, delay,
                     )
                     await asyncio.sleep(delay)
                 else:
                     self._connection_state = ConnectionState.FAILED
-                    logger.error(f"Redis连接失败，已达到最大重试次数: {e}")
+                    logger.error("Redis连接失败，已达到最大重试次数: %s", e)
                     return None
         
         return None
@@ -281,7 +281,7 @@ class RedisQueueService(BaseExtendedService):
             try:
                 await client.close()
             except Exception as e:
-                logger.debug(f"关闭Redis连接时出错: {e}")
+                logger.debug("关闭Redis连接时出错: %s", e)
     
     async def _trigger_error_event(self, task_config: Dict[str, Any], error_message: str):
         """触发错误事件"""
@@ -297,7 +297,7 @@ class RedisQueueService(BaseExtendedService):
             }
             await self.trigger_event(task_config.get("event_type"), error_event_data)
         except Exception as e:
-            logger.error(f"触发错误事件失败: {e}")
+            logger.error("触发错误事件失败: %s", e)
     
     async def _listen_list_queue(self, redis_client, task_config: Dict[str, Any]) -> bool:
         """
@@ -330,12 +330,12 @@ class RedisQueueService(BaseExtendedService):
                 # 检查任务是否已完成
                 complete_flag = await redis_client.get(task_complete_key)
                 if complete_flag == "1":
-                    logger.info(f"Redis队列任务已标记为完成，停止监听: {execution_id}")
+                    logger.info("Redis队列任务已标记为完成，停止监听: %s", execution_id)
                     return True
                 
                 # 如果消息已处理，检查是否超时
                 if message_processed and (time.time() - message_processed_time) > max_wait_after_message:
-                    logger.info(f"Redis队列任务处理后等待超时，自动完成: {execution_id}")
+                    logger.info("Redis队列任务处理后等待超时，自动完成: %s", execution_id)
                     await redis_client.set(task_complete_key, "1")
                     return True
                 
@@ -361,7 +361,7 @@ class RedisQueueService(BaseExtendedService):
                     
                     await self.trigger_event(task_config.get("event_type"), event_data)
                     
-                    logger.info(f"从Redis列表队列 {queue_name} 接收到消息")
+                    logger.info("从Redis列表队列 %s 接收到消息", queue_name)
                     message_processed = True
                     message_processed_time = time.time()
                     consecutive_errors = 0
@@ -369,7 +369,7 @@ class RedisQueueService(BaseExtendedService):
                     await asyncio.sleep(0.5)
                     
                     if await self._check_flow_completion(execution_id):
-                        logger.info(f"流程 {execution_id} 已完成，标记Redis任务为完成")
+                        logger.info("流程 %s 已完成，标记Redis任务为完成", execution_id)
                         await redis_client.set(task_complete_key, "1")
                         return True
                 
@@ -379,7 +379,7 @@ class RedisQueueService(BaseExtendedService):
                 continue
             except (redis.ConnectionError, redis.TimeoutError) as e:
                 consecutive_errors += 1
-                logger.warning(f"Redis连接错误 ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                logger.warning("Redis连接错误 (%s/%s): %s", consecutive_errors, max_consecutive_errors, e)
                 
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error("达到最大连续错误次数，停止监听")
@@ -422,7 +422,7 @@ class RedisQueueService(BaseExtendedService):
                 return len(subscriptions) == 0
             return False
         except Exception as e:
-            logger.warning(f"检查流程完成状态时出错: {e}")
+            logger.warning("检查流程完成状态时出错: %s", e)
             return False
     
     async def _listen_stream_queue(self, redis_client, task_config: Dict[str, Any]) -> bool:
@@ -448,11 +448,11 @@ class RedisQueueService(BaseExtendedService):
             try:
                 complete_flag = await redis_client.get(task_complete_key)
                 if complete_flag == "1":
-                    logger.info(f"Redis流队列任务已标记为完成，停止监听: {execution_id}")
+                    logger.info("Redis流队列任务已标记为完成，停止监听: %s", execution_id)
                     return True
                 
                 if message_processed and (time.time() - message_processed_time) > max_wait_after_message:
-                    logger.info(f"Redis流队列任务处理后等待超时，自动完成: {execution_id}")
+                    logger.info("Redis流队列任务处理后等待超时，自动完成: %s", execution_id)
                     await redis_client.set(task_complete_key, "1")
                     return True
                 
@@ -481,7 +481,7 @@ class RedisQueueService(BaseExtendedService):
                             await self.trigger_event(task_config.get("event_type"), event_data)
                             last_id = message_id
                             
-                            logger.info(f"从Redis流 {stream_name} 接收到消息: {message_id}")
+                            logger.info("从Redis流 %s 接收到消息: %s", stream_name, message_id)
                             message_processed = True
                             message_processed_time = time.time()
                             consecutive_errors = 0
@@ -489,7 +489,7 @@ class RedisQueueService(BaseExtendedService):
                             await asyncio.sleep(0.5)
                             
                             if await self._check_flow_completion(execution_id):
-                                logger.info(f"流程 {execution_id} 已完成，标记Redis流任务为完成")
+                                logger.info("流程 %s 已完成，标记Redis流任务为完成", execution_id)
                                 await redis_client.set(task_complete_key, "1")
                                 return True
                 
@@ -499,7 +499,7 @@ class RedisQueueService(BaseExtendedService):
                 continue
             except (redis.ConnectionError, redis.TimeoutError) as e:
                 consecutive_errors += 1
-                logger.warning(f"Redis流连接错误 ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                logger.warning("Redis流连接错误 (%s/%s): %s", consecutive_errors, max_consecutive_errors, e)
                 
                 if consecutive_errors >= max_consecutive_errors:
                     return False
@@ -536,7 +536,7 @@ class RedisQueueService(BaseExtendedService):
         
         try:
             await pubsub.subscribe(channel_name)
-            logger.info(f"已订阅Redis频道: {channel_name}")
+            logger.info("已订阅Redis频道: %s", channel_name)
             
             async for message in pubsub.listen():
                 if self.is_shutdown_requested():
@@ -544,11 +544,11 @@ class RedisQueueService(BaseExtendedService):
                 
                 complete_flag = await redis_client.get(task_complete_key)
                 if complete_flag == "1":
-                    logger.info(f"Redis发布/订阅任务已标记为完成，停止监听: {execution_id}")
+                    logger.info("Redis发布/订阅任务已标记为完成，停止监听: %s", execution_id)
                     break
                 
                 if message_processed and (time.time() - message_processed_time) > max_wait_after_message:
-                    logger.info(f"Redis发布/订阅任务处理后等待超时，自动完成: {execution_id}")
+                    logger.info("Redis发布/订阅任务处理后等待超时，自动完成: %s", execution_id)
                     await redis_client.set(task_complete_key, "1")
                     break
                 
@@ -570,14 +570,14 @@ class RedisQueueService(BaseExtendedService):
                     
                     await self.trigger_event(task_config.get("event_type"), event_data)
                     
-                    logger.info(f"从Redis频道 {channel_name} 接收到消息")
+                    logger.info("从Redis频道 %s 接收到消息", channel_name)
                     message_processed = True
                     message_processed_time = time.time()
                     
                     await asyncio.sleep(0.5)
                     
                     if await self._check_flow_completion(execution_id):
-                        logger.info(f"流程 {execution_id} 已完成，标记Redis发布/订阅任务为完成")
+                        logger.info("流程 %s 已完成，标记Redis发布/订阅任务为完成", execution_id)
                         await redis_client.set(task_complete_key, "1")
                         break
             
@@ -600,7 +600,7 @@ class RedisQueueService(BaseExtendedService):
             else:
                 return message
         except Exception as e:
-            logger.warning(f"解析消息失败: {e}, 返回原始消息")
+            logger.warning("解析消息失败: %s, 返回原始消息", e)
             return message
     
     def _parse_stream_message(self, fields: Dict[str, str], message_format: str) -> Any:
@@ -615,7 +615,7 @@ class RedisQueueService(BaseExtendedService):
             else:
                 return fields
         except Exception as e:
-            logger.warning(f"解析流消息失败: {e}, 返回原始字段")
+            logger.warning("解析流消息失败: %s, 返回原始字段", e)
             return fields
     
     def validate_task_config(self, task_config: Dict[str, Any]) -> bool:

@@ -55,7 +55,7 @@ class DelayNode(BaseExtendedNode):
             "retry_config": self.get_default_retry_config()
         }
         
-        logger.info(f"延迟节点 [{self.id}] 配置: 延迟{delay_ms}ms，触发时间戳{trigger_timestamp}")
+        logger.info("延迟节点 [%s] 配置: 延迟%sms，触发时间戳%s", self.id, delay_ms, trigger_timestamp)
         
         return config
     
@@ -75,10 +75,10 @@ class DelayNode(BaseExtendedNode):
                 if resolved is not None and isinstance(resolved, (int, float)):
                     return resolved
                 else:
-                    logger.warning(f"延迟时间变量引用解析失败，使用默认值: {self.delay_seconds}")
+                    logger.warning("延迟时间变量引用解析失败，使用默认值: %s", self.delay_seconds)
                     return 60  # 默认60秒
             except Exception as e:
-                logger.error(f"解析延迟时间变量引用时出错: {e}")
+                logger.error("解析延迟时间变量引用时出错: %s", e)
                 return 60  # 默认60秒
         
         return float(self.delay_seconds)
@@ -117,7 +117,7 @@ class DelayNode(BaseExtendedNode):
         required_fields = ["delay_ms", "trigger_timestamp", "node_id", "event_type"]
         for field in required_fields:
             if field not in config:
-                logger.error(f"延迟节点配置缺少必要字段: {field}")
+                logger.error("延迟节点配置缺少必要字段: %s", field)
                 return False
         
         if config["delay_ms"] <= 0:

@@ -70,7 +70,7 @@ class KafkaQueueNode(BaseExtendedNode):
             "retry_config": self.get_default_retry_config()
         }
         
-        logger.info(f"Kafka队列节点 [{self.id}] 配置: {resolved_config}")
+        logger.info("Kafka队列节点 [%s] 配置: %s", self.id, resolved_config)
         
         return config
     
@@ -133,7 +133,7 @@ class KafkaQueueNode(BaseExtendedNode):
                 resolved = execution.evaluate(value)
                 return resolved if resolved is not None else value
             except Exception as e:
-                logger.warning(f"解析变量引用失败 {value}: {e}")
+                logger.warning("解析变量引用失败 %s: %s", value, e)
                 return value
         
         return value
@@ -151,7 +151,7 @@ class KafkaQueueNode(BaseExtendedNode):
         required_fields = ["kafka_config", "topic_config", "consumer_config", "node_id", "event_type"]
         for field in required_fields:
             if field not in config:
-                logger.error(f"Kafka队列节点配置缺少必要字段: {field}")
+                logger.error("Kafka队列节点配置缺少必要字段: %s", field)
                 return False
         
         # 验证Kafka配置

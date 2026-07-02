@@ -83,7 +83,7 @@ class HttpCallbackNode(BaseExtendedNode):
             "retry_config": self.get_default_retry_config()
         }
         
-        logger.info(f"HTTP回调节点 [{self.id}] 配置: 回调URL={config['callback_config']['full_url']}")
+        logger.info("HTTP回调节点 [%s] 配置: 回调URL=%s", self.id, config['callback_config']['full_url'])
         
         return config
     
@@ -202,7 +202,7 @@ class HttpCallbackNode(BaseExtendedNode):
                 resolved = execution.evaluate(value)
                 return resolved if resolved is not None else value
             except Exception as e:
-                logger.warning(f"解析变量引用失败 {value}: {e}")
+                logger.warning("解析变量引用失败 %s: %s", value, e)
                 return value
         
         return value
@@ -220,7 +220,7 @@ class HttpCallbackNode(BaseExtendedNode):
         required_fields = ["callback_config", "auth_config", "validation_config", "node_id", "event_type"]
         for field in required_fields:
             if field not in config:
-                logger.error(f"HTTP回调节点配置缺少必要字段: {field}")
+                logger.error("HTTP回调节点配置缺少必要字段: %s", field)
                 return False
         
         # 验证回调配置

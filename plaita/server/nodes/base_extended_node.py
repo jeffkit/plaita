@@ -23,7 +23,7 @@ class BaseExtendedNode(EventNode):
         """
         扩展节点的执行逻辑
         """
-        logger.info(f"开始执行扩展节点 [{self.id}] - {self.node_name}")
+        logger.info("开始执行扩展节点 [%s] - %s", self.id, self.node_name)
         
         # 调用子类的具体配置生成逻辑
         service_config = self.generate_service_config(execution)
@@ -37,7 +37,7 @@ class BaseExtendedNode(EventNode):
             "node_subtype": self.node_type
         })
         
-        logger.info(f"扩展节点 [{self.id}] 配置生成完成: {service_config}")
+        logger.info("扩展节点 [%s] 配置生成完成: %s", self.id, service_config)
         
         return result
     

@@ -20,7 +20,7 @@ def _parse_redis_url(redis_url: str):
                 port = int(match.group(4)) if match.group(4) else port
                 db = int(match.group(6)) if match.group(6) else db
         except Exception as e:
-            logger.warning(f"解析Redis URL失败: {e}, 使用默认连接参数")
+            logger.warning("解析Redis URL失败: %s, 使用默认连接参数", e)
     return host, port, db, password
 
 

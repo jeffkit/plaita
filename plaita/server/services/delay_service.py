@@ -74,7 +74,7 @@ class DelayService(BaseExtendedService):
             flow_id = task_config.get("flow_id")
             event_type = task_config.get("event_type")
             
-            logger.info(f"开始处理延迟任务: node_id={node_id}, delay_ms={delay_ms}")
+            logger.info("开始处理延迟任务: node_id=%s, delay_ms=%s", node_id, delay_ms)
             
             # 计算实际需要等待的时间
             current_time = int(time.time() * 1000)
@@ -88,7 +88,7 @@ class DelayService(BaseExtendedService):
             # 如果需要等待的时间太长，可以考虑分段等待
             if wait_ms > 0:
                 wait_seconds = wait_ms / 1000.0
-                logger.info(f"延迟任务等待中: {wait_seconds}秒")
+                logger.info("延迟任务等待中: %s秒", wait_seconds)
                 
                 # 分段等待，每次最多等待60秒，以便及时响应关闭请求
                 while wait_seconds > 0 and not self.is_shutdown_requested():
@@ -98,7 +98,7 @@ class DelayService(BaseExtendedService):
                 
                 # 检查是否被要求关闭
                 if self.is_shutdown_requested():
-                    logger.info(f"延迟任务被中断: node_id={node_id}")
+                    logger.info("延迟任务被中断: node_id=%s", node_id)
                     return False
             
             # 构造事件数据
@@ -116,7 +116,7 @@ class DelayService(BaseExtendedService):
             # 触发事件
             await self.trigger_event(event_type, event_data)
             
-            logger.info(f"延迟任务完成: node_id={node_id}")
+            logger.info("延迟任务完成: node_id=%s", node_id)
             return True
             
         except Exception as e:

@@ -98,7 +98,7 @@ class KafkaQueueService(BaseExtendedService):
             logger.warning("无法连接到Kafka Broker，管理功能将不可用")
             self.admin_client = None
         except Exception as e:
-            logger.warning(f"初始化Kafka管理客户端失败: {e}")
+            logger.warning("初始化Kafka管理客户端失败: %s", e)
             self.admin_client = None
     
     def stop_service(self) -> bool:
@@ -114,7 +114,7 @@ class KafkaQueueService(BaseExtendedService):
                 try:
                     self.admin_client.close()
                 except Exception as e:
-                    logger.warning(f"关闭管理客户端失败: {e}")
+                    logger.warning("关闭管理客户端失败: %s", e)
             
             logger.info("Kafka队列服务已停止")
             return True
@@ -129,9 +129,9 @@ class KafkaQueueService(BaseExtendedService):
                 try:
                     if group_info.consumer:
                         group_info.consumer.close()
-                        logger.info(f"消费者组 {group_id} 已关闭")
+                        logger.info("消费者组 %s 已关闭", group_id)
                 except Exception as e:
-                    logger.warning(f"关闭消费者组 {group_id} 失败: {e}")
+                    logger.warning("关闭消费者组 %s 失败: %s", group_id, e)
             
             self.consumer_groups.clear()
     
@@ -154,7 +154,7 @@ class KafkaQueueService(BaseExtendedService):
         
         with self._lock:
             if group_id in self.consumer_groups:
-                logger.warning(f"消费者组 {group_id} 已存在")
+                logger.warning("消费者组 %s 已存在", group_id)
                 return self.consumer_groups[group_id]
             
             try:
@@ -181,7 +181,7 @@ class KafkaQueueService(BaseExtendedService):
                 )
                 
                 self.consumer_groups[group_id] = group_info
-                logger.info(f"消费者组 {group_id} 创建成功，订阅主题: {topic}")
+                logger.info("消费者组 %s 创建成功，订阅主题: %s", group_id, topic)
                 
                 return group_info
                 
@@ -201,7 +201,7 @@ class KafkaQueueService(BaseExtendedService):
         """
         with self._lock:
             if group_id not in self.consumer_groups:
-                logger.warning(f"消费者组 {group_id} 不存在")
+                logger.warning("消费者组 %s 不存在", group_id)
                 return False
             
             try:
@@ -210,7 +210,7 @@ class KafkaQueueService(BaseExtendedService):
                     group_info.consumer.close()
                 
                 del self.consumer_groups[group_id]
-                logger.info(f"消费者组 {group_id} 已销毁")
+                logger.info("消费者组 %s 已销毁", group_id)
                 return True
                 
             except Exception as e:
@@ -266,12 +266,12 @@ class KafkaQueueService(BaseExtendedService):
         """
         with self._lock:
             if group_id not in self.consumer_groups:
-                logger.error(f"消费者组 {group_id} 不存在")
+                logger.error("消费者组 %s 不存在", group_id)
                 return False
-            
+
             group_info = self.consumer_groups[group_id]
             if not group_info.consumer:
-                logger.error(f"消费者组 {group_id} 的消费者未初始化")
+                logger.error("消费者组 %s 的消费者未初始化", group_id)
                 return False
             
             try:
@@ -286,7 +286,7 @@ class KafkaQueueService(BaseExtendedService):
                     # 提交当前偏移量
                     group_info.consumer.commit()
                 
-                logger.info(f"消费者组 {group_id} 偏移量已提交")
+                logger.info("消费者组 %s 偏移量已提交", group_id)
                 return True
                 
             except Exception as e:
@@ -307,17 +307,17 @@ class KafkaQueueService(BaseExtendedService):
         """
         with self._lock:
             if group_id not in self.consumer_groups:
-                logger.error(f"消费者组 {group_id} 不存在")
+                logger.error("消费者组 %s 不存在", group_id)
                 return False
-            
+
             group_info = self.consumer_groups[group_id]
             if not group_info.consumer:
                 return False
-            
+
             try:
                 tp = TopicPartition(group_info.topic, partition)
                 group_info.consumer.seek(tp, offset)
-                logger.info(f"消费者组 {group_id} 已定位到分区 {partition} 偏移量 {offset}")
+                logger.info("消费者组 %s 已定位到分区 %s 偏移量 %s", group_id, partition, offset)
                 return True
                 
             except Exception as e:
@@ -339,7 +339,7 @@ class KafkaQueueService(BaseExtendedService):
             topic = topic_config.get("topic")
             execution_id = task_config.get("execution_id")
             
-            logger.info(f"开始监听Kafka主题: node_id={node_id}, topic={topic}")
+            logger.info("开始监听Kafka主题: node_id=%s, topic=%s", node_id, topic)
             
             # 检查流程完成的回调函数
             flow_completion_callback = task_config.get("completion_callback")
@@ -451,7 +451,7 @@ class KafkaQueueService(BaseExtendedService):
             return False
 
         except Exception as e:
-            logger.warning(f"检查流程完成状态失败: {e}")
+            logger.warning("检查流程完成状态失败: %s", e)
             return False
     
     def register_flow_completion_callback(self, callback: Callable[[str], bool]):
@@ -471,7 +471,7 @@ class KafkaQueueService(BaseExtendedService):
             try:
                 await redis_client.set(task_complete_key, "1")
             except Exception as e:
-                logger.warning(f"标记任务完成失败: {e}")
+                logger.warning("标记任务完成失败: %s", e)
     
     async def _listen_kafka_topic(self, task_config: Dict[str, Any],
                                 flow_completion_checker: Callable[[], Awaitable[bool]] = None,
@@ -571,7 +571,7 @@ class KafkaQueueService(BaseExtendedService):
                 nonlocal task_completed
                 try:
                     # 创建一个新的消费者
-                    logger.info(f"创建Kafka消费者: {bootstrap_servers}, topic={topic}")
+                    logger.info("创建Kafka消费者: %s, topic=%s", bootstrap_servers, topic)
                     consumer = KafkaConsumer(
                         topic,
                         **consumer_kwargs
@@ -585,13 +585,13 @@ class KafkaQueueService(BaseExtendedService):
                         start_time = time.time()
                         max_time = 20  # 最多等待20秒
                         
-                        logger.info(f"开始轮询Kafka消息: topic={topic}, auto_offset_reset={auto_offset_reset}")
+                        logger.info("开始轮询Kafka消息: topic=%s, auto_offset_reset=%s", topic, auto_offset_reset)
                         while not self.is_shutdown_requested() and not task_completed and time.time() - start_time < max_time:
                             # 轮询消息
                             records = consumer.poll(timeout_ms=poll_timeout_ms)
                             
                             if records:
-                                logger.info(f"轮询到Kafka消息: {len(records)}")
+                                logger.info("轮询到Kafka消息: %s", len(records))
                                 for tp, messages in records.items():
                                     for message in messages:
                                         # 将消息放入队列
@@ -601,21 +601,21 @@ class KafkaQueueService(BaseExtendedService):
                                         })
                                         # 设置消息接收事件
                                         message_received_event.set()
-                                        logger.info(f"接收到Kafka消息: partition={tp.partition}, offset={message.offset}")
+                                        logger.info("接收到Kafka消息: partition=%s, offset=%s", tp.partition, message.offset)
                             
                             # 短暂等待以减轻CPU负担
                             await asyncio.sleep(0.1)
                             
                             # 检查流程是否已完成
                             if flow_completion_checker and await flow_completion_checker():
-                                logger.info(f"检测到流程 {execution_id} 已完成，停止轮询")
+                                logger.info("检测到流程 %s 已完成，停止轮询", execution_id)
                                 task_completed = True
                                 if mark_task_complete:
                                     await mark_task_complete()
                                 break
                         
                         if time.time() - start_time >= max_time:
-                            logger.warning(f"Kafka消息轮询超时: {topic}")
+                            logger.warning("Kafka消息轮询超时: %s", topic)
                         
                     finally:
                         # 关闭消费者
@@ -623,7 +623,7 @@ class KafkaQueueService(BaseExtendedService):
                         logger.info("Kafka消费者已关闭")
                 
                 except Exception as e:
-                    logger.error(f"Kafka消费任务出错: {e}")
+                    logger.error("Kafka消费任务出错: %s", e)
             
             # 启动Kafka消费任务
             consumer_task = asyncio.create_task(kafka_consumer_task())
@@ -656,13 +656,13 @@ class KafkaQueueService(BaseExtendedService):
                     # 触发事件
                     await self.trigger_event(task_config.get("event_type"), event_data)
                     
-                    logger.info(f"从Kafka主题 {topic} 处理消息: partition={tp.partition}, offset={message.offset}")
+                    logger.info("从Kafka主题 %s 处理消息: partition=%s, offset=%s", topic, tp.partition, message.offset)
                     
                     # 等待流程完成
                     await self._wait_for_flow_completion(execution_id, flow_completion_checker, mark_task_complete)
                     
             except asyncio.TimeoutError:
-                logger.warning(f"等待Kafka消息超时: {topic}")
+                logger.warning("等待Kafka消息超时: %s", topic)
             
             # 清理任务
             consumer_task.cancel()
@@ -699,7 +699,7 @@ class KafkaQueueService(BaseExtendedService):
             else:
                 return message
         except Exception as e:
-            logger.warning(f"解析消息失败: {e}, 返回原始消息")
+            logger.warning("解析消息失败: %s, 返回原始消息", e)
             return message
     
     async def _wait_for_flow_completion(self, execution_id: str,
@@ -711,7 +711,7 @@ class KafkaQueueService(BaseExtendedService):
         
         # 检查流程是否已完成
         if flow_completion_checker and await flow_completion_checker():
-            logger.info(f"流程 {execution_id} 已完成")
+            logger.info("流程 %s 已完成", execution_id)
             if mark_task_complete:
                 await mark_task_complete()
             return
@@ -720,12 +720,12 @@ class KafkaQueueService(BaseExtendedService):
         for _ in range(10):  # 检查10次，每次0.5秒
             await asyncio.sleep(0.5)
             if flow_completion_checker and await flow_completion_checker():
-                logger.info(f"流程 {execution_id} 已完成")
+                logger.info("流程 %s 已完成", execution_id)
                 if mark_task_complete:
                     await mark_task_complete()
                 return
         
-        logger.info(f"等待超时，强制标记Kafka任务 {execution_id} 为完成")
+        logger.info("等待超时，强制标记Kafka任务 %s 为完成", execution_id)
         if mark_task_complete:
             await mark_task_complete()
     
@@ -757,17 +757,17 @@ class KafkaQueueService(BaseExtendedService):
             # 等待发送完成
             try:
                 record_metadata = future.get(timeout=10)
-                logger.info(f"消息发送成功: topic={topic}, partition={record_metadata.partition}, offset={record_metadata.offset}")
+                logger.info("消息发送成功: topic=%s, partition=%s, offset=%s", topic, record_metadata.partition, record_metadata.offset)
                 producer.flush()
                 producer.close()
                 return True
             except Exception as e:
-                logger.error(f"发送消息超时: {e}")
+                logger.error("发送消息超时: %s", e)
                 producer.close()
                 return False
                 
         except Exception as e:
-            logger.error(f"发送Kafka消息失败: {e}")
+            logger.error("发送Kafka消息失败: %s", e)
             return False
     
     def validate_task_config(self, task_config: Dict[str, Any]) -> bool:

@@ -58,7 +58,7 @@ class HttpCallbackService(BaseExtendedService):
                     "registered_time": int(time.time() * 1000)
                 }
                 
-                logger.info(f"HTTP回调路径已注册: {callback_path} for node {node_id}")
+                logger.info("HTTP回调路径已注册: %s for node %s", callback_path, node_id)
                 
                 # 在实际实现中，这里会启动HTTP服务器或注册路由
                 # 目前只是简单存储配置
@@ -108,7 +108,7 @@ class HttpCallbackService(BaseExtendedService):
             # 移除已处理的回调
             del self.registered_callbacks[path]
             
-            logger.info(f"HTTP回调已处理: {path}")
+            logger.info("HTTP回调已处理: %s", path)
             
             # 返回成功响应
             response_config = task_config.get("response_config", {})

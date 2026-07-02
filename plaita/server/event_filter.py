@@ -58,11 +58,11 @@ class EventFilter:
             event: 接收到的事件对象
         """
         try:
-            logger.info(f"接收到事件: {event.event_id}, 类型: {event.event_type}")
+            logger.info("接收到事件: %s, 类型: %s", event.event_id, event.event_type)
             
             # 如果事件没有correlation_id，无法关联到流程执行
             if not event.correlation_id:
-                logger.debug(f"事件没有correlation_id，跳过处理: {event.event_id}")
+                logger.debug("事件没有correlation_id，跳过处理: %s", event.event_id)
                 return
             
             # 使用correlation_id作为execution_id查询执行状态
@@ -70,14 +70,14 @@ class EventFilter:
             state = self.execution_storage.load_execution_state(execution_id)
             
             if not state:
-                logger.debug(f"找不到关联的执行状态，跳过处理: {execution_id}")
+                logger.debug("找不到关联的执行状态，跳过处理: %s", execution_id)
                 return
             
             # 查询与事件匹配的订阅
             subscriptions = await self.subscription_storage.find_matching_subscriptions(event, state.context)
             
             if not subscriptions:
-                logger.debug(f"没有匹配的订阅，跳过处理: {event.event_id}")
+                logger.debug("没有匹配的订阅，跳过处理: %s", event.event_id)
                 return
             
             for subscription in subscriptions:
@@ -86,7 +86,7 @@ class EventFilter:
                     
                     dedup_key = f"plaita:event_filter:dedup:{event.event_id}:{subscription.subscription_id}"
                     if not self.redis_client.set(dedup_key, "1", nx=True, ex=3600):
-                        logger.debug(f"事件已被其他实例处理，跳过: {event.event_id}/{subscription.subscription_id}")
+                        logger.debug("事件已被其他实例处理，跳过: %s/%s", event.event_id, subscription.subscription_id)
                         continue
                     
                     resume_task = {
@@ -107,7 +107,7 @@ class EventFilter:
                         json.dumps(resume_task)
                     )
                     
-                    logger.info(f"已将事件 {event.event_id} 添加到队列，关联订阅: {subscription.subscription_id}")
+                    logger.info("已将事件 %s 添加到队列，关联订阅: %s", event.event_id, subscription.subscription_id)
                     
                     await self.subscription_storage.mark_event_processed(
                         subscription.subscription_id, 
@@ -115,7 +115,7 @@ class EventFilter:
                     )
                     
                 else:
-                    logger.debug(f"订阅与当前执行无关，跳过: {subscription.subscription_id}")
+                    logger.debug("订阅与当前执行无关，跳过: %s", subscription.subscription_id)
             
         except Exception as e:
             logger.error("处理事件出错: %s", e, exc_info=True)
@@ -141,14 +141,14 @@ class EventFilter:
             )
             
             event_type_desc = event_type if event_type else "所有事件类型"
-            logger.info(f"事件过滤器已启动，订阅ID: {self._subscription_id}, 监听事件类型: {event_type_desc}")
+            logger.info("事件过滤器已启动，订阅ID: %s, 监听事件类型: %s", self._subscription_id, event_type_desc)
             
             # 保持运行直到停止
             while self._running:
                 await asyncio.sleep(1)
                 
         except Exception as e:
-            logger.error(f"启动事件过滤器时出错: {e}")
+            logger.error("启动事件过滤器时出错: %s", e)
             self._running = False
     
     async def stop(self):
@@ -167,9 +167,9 @@ class EventFilter:
                 else:
                     # 兼容性处理
                     await self.event_bus.unregister_subscription(self._subscription_id)
-                logger.info(f"已取消事件订阅: {self._subscription_id}")
+                logger.info("已取消事件订阅: %s", self._subscription_id)
             except Exception as e:
-                logger.error(f"取消事件订阅时出错: {e}")
+                logger.error("取消事件订阅时出错: %s", e)
     
     @staticmethod
     def create_event_filter(
@@ -220,7 +220,7 @@ async def main_async(args):
             "execution",
             **storage_kwargs
         )
-        logger.info(f"已创建执行状态存储: {args.execution_storage_type}类型")
+        logger.info("已创建执行状态存储: %s类型", args.execution_storage_type)
         
         # 创建事件订阅存储
         subscription_storage = create_storage_component(
@@ -228,14 +228,14 @@ async def main_async(args):
             "subscription",
             **storage_kwargs
         )
-        logger.info(f"已创建事件订阅存储: {args.subscription_storage_type}类型")
+        logger.info("已创建事件订阅存储: %s类型", args.subscription_storage_type)
         
         # 创建事件总线
         event_bus = create_event_bus(
             args.event_bus_type,
             **storage_kwargs
         )
-        logger.info(f"已创建事件总线: {args.event_bus_type}类型")
+        logger.info("已创建事件总线: %s类型", args.event_bus_type)
         
         # 创建事件过滤器
         event_filter = EventFilter.create_event_filter(
@@ -247,7 +247,7 @@ async def main_async(args):
         )
         
         # 启动事件过滤器
-        logger.info(f"事件过滤器启动中，队列名称: {args.queue_name}")
+        logger.info("事件过滤器启动中，队列名称: %s", args.queue_name)
         await event_filter.start(event_type=args.event_type)
         
     except Exception as e:

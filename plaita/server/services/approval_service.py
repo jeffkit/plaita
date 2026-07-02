@@ -64,7 +64,7 @@ class ApprovalService(BaseExtendedService):
             
             self.pending_approvals[approval_id] = approval_record
             
-            logger.info(f"审批任务已创建: {approval_id}, 审批人: {approval_record['required_approvers']}")
+            logger.info("审批任务已创建: %s, 审批人: %s", approval_id, approval_record['required_approvers'])
             
             # 在实际实现中，这里会发送通知给审批人
             # 目前只是简单存储审批记录
@@ -139,11 +139,11 @@ class ApprovalService(BaseExtendedService):
                 approval_record["completed_time"] = int(time.time() * 1000)
                 del self.pending_approvals[approval_id]
                 
-                logger.info(f"审批完成: {approval_id}, 最终决策: {final_decision}")
+                logger.info("审批完成: %s, 最终决策: %s", approval_id, final_decision)
                 
                 return {"status": "success", "final_decision": final_decision, "message": "审批完成"}
             else:
-                logger.info(f"审批进行中: {approval_id}, 当前审批数: {len(approval_record['approvals'])}")
+                logger.info("审批进行中: %s, 当前审批数: %s", approval_id, len(approval_record['approvals']))
                 return {"status": "success", "message": "审批已记录，等待其他审批人"}
                 
         except Exception as e:

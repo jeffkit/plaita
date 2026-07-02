@@ -151,7 +151,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         task_id = self._generate_task_id(task_config)
         
         if not self.validate_task_config(task_config):
-            logger.error(f"任务配置验证失败: {task_config}")
+            logger.error("任务配置验证失败: %s", task_config)
             return ""
         
         # 将任务添加到活跃任务集合
@@ -169,7 +169,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             # 同步任务
             future = self.thread_pool.submit(self._run_sync_task, task_config, task_id)
         
-        logger.info(f"任务 {task_id} 已提交到 {self.get_service_type()} 服务")
+        logger.info("任务 %s 已提交到 %s 服务", task_id, self.get_service_type())
         
         return task_id
     
@@ -189,7 +189,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             # 运行异步任务
             result = loop.run_until_complete(self.handle_task(task_config))
             
-            logger.info(f"异步任务 {task_id} 执行完成: {result}")
+            logger.info("异步任务 %s 执行完成: %s", task_id, result)
             
         except Exception as e:
             logger.error("异步任务 %s 执行失败: %s", task_id, e, exc_info=True)
@@ -215,7 +215,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         """
         try:
             result = self.handle_task(task_config)
-            logger.info(f"同步任务 {task_id} 执行完成: {result}")
+            logger.info("同步任务 %s 执行完成: %s", task_id, result)
             
         except Exception as e:
             logger.error("同步任务 %s 执行失败: %s", task_id, e, exc_info=True)
@@ -255,7 +255,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         required_fields = ["node_id", "event_type"]
         for field in required_fields:
             if field not in task_config:
-                logger.error(f"任务配置缺少必要字段: {field}")
+                logger.error("任务配置缺少必要字段: %s", field)
                 return False
         return True
     
@@ -300,8 +300,8 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 await self.event_bus.publish(event)
             else:
                 self.event_bus.publish(event)
-            logger.info(f"事件总线: {self.event_bus}")
-            logger.info(f"事件已触发: {event_type}, 数据: {event_data}")
+            logger.info("事件总线: %s", self.event_bus)
+            logger.info("事件已触发: %s, 数据: %s", event_type, event_data)
             
         except Exception as e:
             logger.error("触发事件失败: %s", e, exc_info=True)
@@ -334,7 +334,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         Args:
             timeout: 超时时间（秒）
         """
-        logger.info(f"开始关闭 {self.get_service_type()} 服务...")
+        logger.info("开始关闭 %s 服务...", self.get_service_type())
         
         # 设置关闭标志
         self._shutdown_event.set()
@@ -354,9 +354,9 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         try:
             self.thread_pool.shutdown(wait=True)
         except Exception as e:
-            logger.warning(f"关闭线程池时出错: {e}")
+            logger.warning("关闭线程池时出错: %s", e)
         
-        logger.info(f"{self.get_service_type()} 服务已关闭")
+        logger.info("%s 服务已关闭", self.get_service_type())
 
     def start_with_registry(self) -> bool:
         """
@@ -377,7 +377,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
     
     def _on_stop_command(self, graceful: bool):
         """响应停止命令"""
-        logger.info(f"收到远程停止命令，优雅停止: {graceful}")
+        logger.info("收到远程停止命令，优雅停止: %s", graceful)
         self.shutdown()
     
     def _on_status_command(self) -> Dict[str, Any]:
