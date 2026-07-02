@@ -398,12 +398,12 @@ class InMemoryEventBus(EventBus):
             # 检查处理器是否是协程函数
             if inspect.iscoroutinefunction(handler):
                 # 异步处理器
-                logger.info(f"异步处理器: {handler_id} 处理事件: {event.event_id}")
+                logger.info("异步处理器: %s 处理事件: %s", handler_id, event.event_id)
                 await handler(event)
             else:
                 # 同步处理器，在执行器中运行
                 loop = asyncio.get_running_loop()
-                logger.info(f"同步处理器: {handler_id} 处理事件: {event.event_id}")
+                logger.info("同步处理器: %s 处理事件: %s", handler_id, event.event_id)
                 await loop.run_in_executor(None, handler, event)
                 
             await self.processing_tracker.record_processing_attempt(

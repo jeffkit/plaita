@@ -153,11 +153,11 @@ class Switch(Node):
         self.branches.sort(key=lambda x: x.priority, reverse=True)
         for branch in self.branches:
             if branch.condition and branch.condition.match(execution.context, prefix=execution.express_prefix):
-                logger.info(f"test branches, {branch.name}, {branch.next}")
+                logger.info("test branches, %s, %s", branch.name, branch.next)
                 return branch.next or branch.name
         for branch in self.branches:
             if branch.is_default:
-                logger.info(f"default branches {branch.name}, {branch.next}")
+                logger.info("default branches %s, %s", branch.name, branch.next)
                 return branch.next or branch.name
         return None
 

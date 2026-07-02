@@ -59,7 +59,7 @@ class SubscriptionTimeoutChecker:
             try:
                 await self._check_timeouts()
             except Exception as e:
-                logger.error(f"超时检查出错: {e}")
+                logger.error("超时检查出错: %s", e)
             
             await asyncio.sleep(self.check_interval)
     
@@ -81,4 +81,4 @@ class SubscriptionTimeoutChecker:
                         try:
                             await callback(subscription)
                         except Exception as e:
-                            logger.error(f"超时回调执行出错: {e}") 
+                            logger.error("超时回调执行出错: %s", e) 

@@ -177,7 +177,7 @@ class PlaitaClient:
             self._redis_client = redis.Redis(**config.to_dict())
             self._validate_redis_connection()
         except Exception as e:
-            logger.warning(f"初始化 Redis 客户端失败: {e}")
+            logger.warning("初始化 Redis 客户端失败: %s", e)
             self._redis_client = None
             self._redis_available = False
     
@@ -198,7 +198,7 @@ class PlaitaClient:
             logger.info("Redis 连接验证成功")
             return True
         except Exception as e:
-            logger.warning(f"Redis 连接验证失败: {e}")
+            logger.warning("Redis 连接验证失败: %s", e)
             self._redis_available = False
             return False
     
@@ -241,7 +241,7 @@ class PlaitaClient:
         with self.memory_cache_lock:
             cached_flow = self.memory_cache.get(cache_key)
             if cached_flow:
-                logger.debug(f"从内存缓存获取流程: {cache_key}")
+                logger.debug("从内存缓存获取流程: %s", cache_key)
                 return cached_flow
 
         # 2. 尝试从 Redis 缓存获取
@@ -249,17 +249,17 @@ class PlaitaClient:
             try:
                 config_data = self._redis_client.get(cache_key)
                 if config_data:
-                    logger.debug(f"从 Redis 缓存获取流程: {cache_key}")
+                    logger.debug("从 Redis 缓存获取流程: %s", cache_key)
                     flow_obj = Flow.model_validate_json(json.loads(config_data))
                     # 更新内存缓存
                     with self.memory_cache_lock:
                         self.memory_cache[cache_key] = flow_obj
                     return flow_obj
             except Exception as e:
-                logger.warning(f"从 Redis 获取缓存失败: {e}")
+                logger.warning("从 Redis 获取缓存失败: %s", e)
 
         # 3. 从远程服务获取
-        logger.debug(f"从远程服务获取流程: {cache_key}")
+        logger.debug("从远程服务获取流程: %s", cache_key)
         flow_data = self._fetch_flow(flow_id, version)
         flow_obj = Flow.model_validate_json(flow_data)
         
@@ -289,9 +289,9 @@ class PlaitaClient:
                     json.dumps(flow_data),
                     ex=self.redis_ttl  # 设置过期时间
                 )
-                logger.debug(f"已更新 Redis 缓存: {cache_key}, TTL: {self.redis_ttl}s")
+                logger.debug("已更新 Redis 缓存: %s, TTL: %ss", cache_key, self.redis_ttl)
             except Exception as e:
-                logger.warning(f"更新 Redis 缓存失败: {e}")
+                logger.warning("更新 Redis 缓存失败: %s", e)
     
     def clear_cache(self, flow_id: Optional[str] = None, version: Optional[str] = None) -> int:
         """
@@ -318,14 +318,14 @@ class PlaitaClient:
                 try:
                     self._redis_client.delete(cache_key)
                 except Exception as e:
-                    logger.warning(f"清除 Redis 缓存失败: {e}")
+                    logger.warning("清除 Redis 缓存失败: %s", e)
         else:
             # 清除所有缓存
             with self.memory_cache_lock:
                 cleared_count = len(self.memory_cache)
                 self.memory_cache.clear()
             
-            logger.info(f"已清除 {cleared_count} 个内存缓存项")
+            logger.info("已清除 %s 个内存缓存项", cleared_count)
         
         return cleared_count
 
@@ -375,7 +375,7 @@ class PlaitaClient:
         if not flow_str:
             raise Exception("获取流程配置失败: flow 字段为空")
         
-        logger.debug(f"成功获取流程定义: flow_id={flow_id}, version={version}")
+        logger.debug("成功获取流程定义: flow_id=%s, version=%s", flow_id, version)
         return json.loads(flow_str)
 
 

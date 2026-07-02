@@ -62,7 +62,7 @@ class EventNode(Node):
             # 如果都不存在，返回默认值
             return default or {}
         except Exception as e:
-            logger.warning(f"获取节点状态失败: {e}")
+            logger.warning("获取节点状态失败: %s", e)
             return default or {}
     
     def execute(self, execution):
@@ -77,7 +77,7 @@ class EventNode(Node):
             dict: 包含事件监听信息和当前状态的字典
         """
         # 记录节点开始执行
-        logger.info(f"开始执行事件节点 [{self.id}]，配置信息: 事件类型={self.event_type}, 过滤条件={self.event_filter}")
+        logger.info("开始执行事件节点 [%s]，配置信息: 事件类型=%s, 过滤条件=%s", self.id, self.event_type, self.event_filter)
         
         # 尝试解析变量引用的事件类型
         resolved_event_type = self.event_type
@@ -88,15 +88,15 @@ class EventNode(Node):
                     resolved = execution.evaluate(self.event_type)
                     if resolved and isinstance(resolved, str):
                         resolved_event_type = resolved
-                        logger.info(f"成功解析事件类型变量引用: {self.event_type} -> {resolved}")
+                        logger.info("成功解析事件类型变量引用: %s -> %s", self.event_type, resolved)
                     else:
-                        logger.warning(f"解析事件类型变量引用失败，结果非字符串或为空: {self.event_type} -> {resolved}")
+                        logger.warning("解析事件类型变量引用失败，结果非字符串或为空: %s -> %s", self.event_type, resolved)
                         resolved_event_type = self.event_type  # 保留原始引用
                 else:
-                    logger.warning(f"执行上下文不支持evaluate方法，无法解析变量引用: {self.event_type}")
+                    logger.warning("执行上下文不支持evaluate方法，无法解析变量引用: %s", self.event_type)
                     resolved_event_type = self.event_type  # 保留原始引用
             except Exception as e:
-                logger.error(f"解析事件类型变量引用时出错: {e}")
+                logger.error("解析事件类型变量引用时出错: %s", e)
                 resolved_event_type = self.event_type  # 保留原始引用
         
         # 创建新的状态
@@ -112,7 +112,7 @@ class EventNode(Node):
         result = self._create_result(state)
         result["event_type"] = resolved_event_type
         
-        logger.info(f"事件节点 [{self.id}] 执行结果: {result}")
+        logger.info("事件节点 [%s] 执行结果: %s", self.id, result)
         
         return result
     

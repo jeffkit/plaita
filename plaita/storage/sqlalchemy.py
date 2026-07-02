@@ -90,7 +90,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
             asyncio.run(create_all())
             logger.info("SQLAlchemy存储: 表结构创建成功")
         except Exception as e:
-            logger.error(f"SQLAlchemy存储: 创建表结构失败: {e}")
+            logger.error("SQLAlchemy存储: 创建表结构失败: %s", e)
             raise
     
     async def save_execution_state(self, execution_id: str, state: ExecutionState) -> bool:
@@ -124,7 +124,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                 return True
                 
         except Exception as e:
-            logger.error(f"保存执行状态失败: {e}")
+            logger.error("保存执行状态失败: %s", e)
             return False
     
     async def load_execution_state(self, execution_id: str) -> Optional[ExecutionState]:
@@ -158,7 +158,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                 return ExecutionState(**state_dict)
                 
         except Exception as e:
-            logger.error(f"加载执行状态失败: {e}")
+            logger.error("加载执行状态失败: %s", e)
             return None
     
     async def delete_execution_state(self, execution_id: str) -> bool:
@@ -179,7 +179,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                 return True
                 
         except Exception as e:
-            logger.error(f"删除执行状态失败: {e}")
+            logger.error("删除执行状态失败: %s", e)
             return False
     
     async def list_executions(self, query: Optional[Any] = None, order_by: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[ExecutionState]:
@@ -238,7 +238,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                 return states
                 
         except Exception as e:
-            logger.error(f"列出执行状态失败: {e}")
+            logger.error("列出执行状态失败: %s", e)
             return []
 
 
@@ -282,7 +282,7 @@ class SqlalchemyFlowStorage(FlowStorage):
             asyncio.run(create_all())
             logger.info("SQLAlchemy存储: 表结构创建成功")
         except Exception as e:
-            logger.error(f"SQLAlchemy存储: 创建表结构失败: {e}")
+            logger.error("SQLAlchemy存储: 创建表结构失败: %s", e)
             raise
     
     async def save_flow(self, flow: Dict[str, Any]) -> bool:
@@ -321,7 +321,7 @@ class SqlalchemyFlowStorage(FlowStorage):
                 return True
                 
         except Exception as e:
-            logger.error(f"保存流程定义失败: {e}")
+            logger.error("保存流程定义失败: %s", e)
             return False
     
     async def get_flow(self, flow_id: str, version: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -375,7 +375,7 @@ class SqlalchemyFlowStorage(FlowStorage):
                     return None
                 
         except Exception as e:
-            logger.error(f"获取流程定义失败: {e}")
+            logger.error("获取流程定义失败: %s", e)
             return None
     
     async def list_flows(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -397,7 +397,7 @@ class SqlalchemyFlowStorage(FlowStorage):
                 return flows
                 
         except Exception as e:
-            logger.error(f"列出流程定义失败: {e}")
+            logger.error("列出流程定义失败: %s", e)
             return []
     
     async def get_flow_versions(self, flow_id: str) -> List[str]:
@@ -412,7 +412,7 @@ class SqlalchemyFlowStorage(FlowStorage):
                 return list(versions)
                 
         except Exception as e:
-            logger.error(f"获取流程版本失败: {e}")
+            logger.error("获取流程版本失败: %s", e)
             return []
     
     async def delete_flow(self, flow_id: str, version: Optional[str] = None) -> bool:
@@ -450,5 +450,5 @@ class SqlalchemyFlowStorage(FlowStorage):
                 return True
                 
         except Exception as e:
-            logger.error(f"删除流程定义失败: {e}")
+            logger.error("删除流程定义失败: %s", e)
             return False 

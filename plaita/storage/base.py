@@ -111,7 +111,7 @@ class ExecutionStorage(ABC):
         try:
             return json.dumps(state)
         except Exception as e:
-            logger.error(f"Failed to serialize state: {e}")
+            logger.error("Failed to serialize state: %s", e)
             raise
     
     def deserialize_state(self, data: str) -> Dict[str, Any]:
@@ -127,7 +127,7 @@ class ExecutionStorage(ABC):
         try:
             return json.loads(data)
         except Exception as e:
-            logger.error(f"Failed to deserialize state: {e}")
+            logger.error("Failed to deserialize state: %s", e)
             raise 
     
 

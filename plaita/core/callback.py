@@ -144,27 +144,31 @@ class LoggerCallback(FlowCallback):
     """Callback that logs flow/node lifecycle events."""
 
     def on_flow_start(self, flow, **kwargs) -> None:
-        logger.info(f"[flow start] {flow.flow_id}")
+        logger.info("[flow start] %s", flow.flow_id)
 
     def on_flow_end(self, flow, result=None, error=None, exception=None, **kwargs) -> None:
-        logger.info(f"[flow end] {flow.flow_id} with result: {result}, error: {error}, exception: {exception}")
+        logger.info(
+            "[flow end] %s with result: %s, error: %s, exception: %s",
+            flow.flow_id, result, error, exception,
+        )
 
     def on_node_start(self, flow, node, **kwargs) -> None:
-        logger.info(f"[node start] {node.id} @ flow {flow.flow_id}")
+        logger.info("[node start] %s @ flow %s", node.id, flow.flow_id)
 
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:
         logger.info(
-            f"[node end] {node.id} @ flow {flow.flow_id} with result: {result}, error: {error}, exception: {exception}"
+            "[node end] %s @ flow %s with result: %s, error: %s, exception: %s",
+            node.id, flow.flow_id, result, error, exception,
         )
 
     def on_flow_suspend(self, flow, **kwargs) -> None:
-        logger.info(f"[flow suspend] {flow.flow_id}")
+        logger.info("[flow suspend] %s", flow.flow_id)
 
     def on_flow_resume(self, flow, **kwargs) -> None:
-        logger.info(f"[flow resume] {flow.flow_id}")
+        logger.info("[flow resume] %s", flow.flow_id)
 
     def on_node_suspend(self, flow, node, **kwargs) -> None:
-        logger.info(f"[node suspend] {node.id} @ flow {flow.flow_id}")
+        logger.info("[node suspend] %s @ flow %s", node.id, flow.flow_id)
 
     def on_node_resume(self, flow, node, **kwargs) -> None:
-        logger.info(f"[node resume] {node.id} @ flow {flow.flow_id}")
+        logger.info("[node resume] %s @ flow %s", node.id, flow.flow_id)

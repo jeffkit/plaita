@@ -78,7 +78,7 @@ class RedisExecutionStorage(ExecutionStorage):
             self.client.set(key, serialized)
             return True
         except Exception as e:
-            logger.error(f"Failed to save execution state: {e}")
+            logger.error("Failed to save execution state: %s", e)
             return False
     
     def load_execution_state(self, execution_id: str) -> Optional[ExecutionState]:
@@ -91,7 +91,7 @@ class RedisExecutionStorage(ExecutionStorage):
             state_dict = self.deserialize_state(data)
             return ExecutionState.model_validate(state_dict)
         except Exception as e:
-            logger.error(f"Failed to load execution state: {e}")
+            logger.error("Failed to load execution state: %s", e)
             return None
     
     def delete_execution_state(self, execution_id: str) -> bool:
@@ -101,7 +101,7 @@ class RedisExecutionStorage(ExecutionStorage):
             self.client.delete(execution_key)
             return True
         except Exception as e:
-            logger.error(f"Failed to delete execution state: {e}")
+            logger.error("Failed to delete execution state: %s", e)
             return False
     
     def list_executions(self, query: Optional[Any] = None, order_by: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[ExecutionState]:
@@ -138,7 +138,7 @@ class RedisExecutionStorage(ExecutionStorage):
                     
                     execution_states.append(state)
                 except Exception as e:
-                    logger.error(f"Failed to process execution state: {e}")
+                    logger.error("Failed to process execution state: %s", e)
                     continue
             
             # 排序
@@ -159,7 +159,7 @@ class RedisExecutionStorage(ExecutionStorage):
             return execution_states[offset:offset + limit]
             
         except Exception as e:
-            logger.error(f"Failed to list executions: {e}")
+            logger.error("Failed to list executions: %s", e)
             return [] 
 
 
@@ -244,7 +244,7 @@ class RedisFlowStorage(FlowStorage):
             
             return True
         except Exception as e:
-            logger.error(f"Failed to save flow definition: {e}")
+            logger.error("Failed to save flow definition: %s", e)
             return False
     
     def get_flow(self, flow_id: str, version: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -304,7 +304,7 @@ class RedisFlowStorage(FlowStorage):
                 
             return json.loads(data)
         except Exception as e:
-            logger.error(f"Failed to get flow definition: {e}")
+            logger.error("Failed to get flow definition: %s", e)
             return None
     
     def list_flows(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -334,7 +334,7 @@ class RedisFlowStorage(FlowStorage):
             
             return result
         except Exception as e:
-            logger.error(f"Failed to list flows: {e}")
+            logger.error("Failed to list flows: %s", e)
             return []
     
     def get_flow_versions(self, flow_id: str) -> List[str]:
@@ -352,7 +352,7 @@ class RedisFlowStorage(FlowStorage):
             versions = self.client.smembers(flow_versions_key)
             return list(versions)
         except Exception as e:
-            logger.error(f"Failed to get flow versions: {e}")
+            logger.error("Failed to get flow versions: %s", e)
             return []
     
     def delete_flow(self, flow_id: str, version: Optional[str] = None) -> bool:
@@ -401,7 +401,7 @@ class RedisFlowStorage(FlowStorage):
             
             return True
         except Exception as e:
-            logger.error(f"Failed to delete flow: {e}")
+            logger.error("Failed to delete flow: %s", e)
 
     def diagnose_missing_flow(self, flow_id: str) -> None:
         """Log Redis-specific diagnostics when a flow definition cannot be found.
