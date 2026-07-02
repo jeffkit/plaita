@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import logging
+import uuid
 from threading import Lock
 from time import time
 from typing import Any, Dict, Optional, Union
@@ -108,6 +109,7 @@ class PlaitaClient:
         redis_client: Optional[Any] = None,
         redis_config: Optional[Union[RedisConfig, Dict[str, Any]]] = None,
         redis_ttl: int = DEFAULT_REDIS_TTL,
+        replay_protected: bool = False,
     ):
         """
         初始化 PlaitaClient
@@ -123,6 +125,11 @@ class PlaitaClient:
             redis_client: 已有的 Redis 客户端实例（优先使用）
             redis_config: Redis 配置（当 redis_client 为 None 时使用）
             redis_ttl: Redis 缓存过期时间（秒）
+            replay_protected: 是否启用重放保护 (2026-07 新增)。True 时每次请求
+                生成 uuid nonce 并纳入签名, 阻止签名在 ``signature_validity`` 秒
+                窗口内被重放。**需要服务端配套支持** (plaita-console >= 2026.07)。
+                未升级的服务端不识别 nonce 字段, 会按旧算法验签失败。默认 False
+                保持向后兼容。
         """
         self.secret_id = secret_id
         self.secret_key = secret_key
@@ -130,6 +137,7 @@ class PlaitaClient:
         self.url = url
         self.headers = headers if headers is not None else {}
         self.redis_ttl = redis_ttl
+        self.replay_protected = replay_protected
         self.memory_cache = {}
         self.memory_cache_lock = Lock()
 
@@ -344,9 +352,13 @@ class PlaitaClient:
             Exception: 获取流程失败时抛出异常
         """
         data = {"flowId": flow_id, "version": version}
+        nonce = str(uuid.uuid4()) if self.replay_protected else None
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": generate_signature(self.secret_key, self.secret_id, self.signature_validity, int(time())),
+            "Authorization": generate_signature(
+                self.secret_key, self.secret_id, self.signature_validity, int(time()),
+                nonce=nonce,
+            ),
         }
         headers.update(self.headers)  # 合并额外的请求头
         
@@ -379,16 +391,25 @@ class PlaitaClient:
         return json.loads(flow_str)
 
 
-def generate_signature(secret_key: str, secret_id: str, signature_validity: int, sign_time: int) -> str:
+def generate_signature(
+    secret_key: str,
+    secret_id: str,
+    signature_validity: int,
+    sign_time: int,
+    nonce: Optional[str] = None,
+) -> str:
     """
     生成 API 请求签名
-    
+
     Args:
         secret_key: API 密钥
         secret_id: API 密钥 ID
         signature_validity: 签名有效期（秒）
         sign_time: 签名时间戳
-        
+        nonce: 可选, 重放保护 nonce。非 None 时会同时纳入签名计算并作为
+            ``nonce`` 字段加进 Authorization。服务端检测到该字段后启用重放
+            校验 (plaita-console >= 2026.07)。
+
     Returns:
         str: URL 编码的签名字符串
     """
@@ -400,12 +421,24 @@ def generate_signature(secret_key: str, secret_id: str, signature_validity: int,
     key = hmac.new(secret_key.encode(), key_time.encode(), hashlib.sha256)
     key_string = key.hexdigest()
 
-    string_to_sign = f"{sign_time}\n"
+    if nonce is None:
+        string_to_sign = f"{sign_time}\n"
+    else:
+        # nonce 进入签名材料: 即使 nonce 不被服务端校验, 它也已经把"同一个签名
+        # 用在别的请求上"变得不可能 (改 nonce 即改 signature)。
+        string_to_sign = f"{sign_time}\n{nonce}\n"
     signature_key = hmac.new(key_string.encode(), string_to_sign.encode(), hashlib.sha256)
     sign = signature_key.hexdigest()
 
-    data = urlencode({"secret-id": secret_id, "sign-time": str(sign_time), "key-time": key_time, "signature": sign})
-    return data
+    fields = {
+        "secret-id": secret_id,
+        "sign-time": str(sign_time),
+        "key-time": key_time,
+        "signature": sign,
+    }
+    if nonce is not None:
+        fields["nonce"] = nonce
+    return urlencode(fields)
 
 
 # Example Usage
