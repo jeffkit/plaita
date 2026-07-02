@@ -6,20 +6,22 @@ import unittest
 import sys
 import os
 
-# 确保当前目录在路径中
+# 确保仓库根在 sys.path 上 (让 ``tests.`` 包可被 import)
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
+repo_root = os.path.dirname(os.path.dirname(current_dir))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
-# 导入测试模块
-from tests.test_storage import TestStateStorageBase, TestMemoryStateStorage
-from tests.test_storage_commons import get_standard_test_cases
+# 导入测试模块 (2026-07 归类后这些 test_storage* 都搬到 tests/integration/)
+from tests.integration.test_storage import TestStateStorageBase, TestMemoryStateStorage
+from tests.integration.test_storage_commons import get_standard_test_cases
 from plaita.storage import MemoryExecutionStorage
 
 # 尝试导入Redis相关测试
 try:
-    from tests.test_storage_redis import TestRedisStateStorage, StandardRedisStateStorageTests
+    from tests.integration.test_storage_redis import (
+        TestRedisStateStorage, StandardRedisStateStorageTests,
+    )
     REDIS_TESTS_AVAILABLE = True
 except ImportError:
     REDIS_TESTS_AVAILABLE = False

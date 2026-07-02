@@ -244,7 +244,7 @@ tests/
 | 6 | 统一 `ErrorStrategy` 表示，干掉 `_strategy_eq` | P1 | 中 | 1h | ✅ 完成 |
 | 7 | `coroutine` 模式 Parallel 重写或下线 | P1 | 高 | 2h | ✅ 完成（下线 + break change） |
 | 8 | mutmut 配置注释精简 | P2 | 低 | 20min | ✅ 完成 |
-| 9 | `tests/` 根目录按类型归类 | P2 | 中 | 1h+ | 🕯️ 暂缓（机械活，但有跨测试 import 依赖，需逐个核对 marker，建议独立 PR；详见进度日志） |
+| 9 | `tests/` 根目录按类型归类 | P2 | 中 | 1h+ | ✅ 完成（批4；23 个进 unit/，11 个进 integration/，跨文件 import 改 absolute path） |
 | 10 | `PlaitaClient.__repr__` 屏蔽 secret_key | P2 | 低 | 10min | ✅ 完成 |
 | 11 | README "17 种节点" 修正为 16 | P2 | 低 | 5min | ✅ 完成（撤回——实际就是 17 种） |
 | 12 | `flow_worker.py` 删 `--debug-mode` 硬编码 | P2 | 中 | 20min | ✅ 完成 |
@@ -333,13 +333,10 @@ tests/
 - 改动: `plaita/server/flow_worker.py main()` 删除 `--debug-mode` 参数与对应分支（硬编码 `flow_id="event_flow_demo"` 直接读 Redis key + 手动 `lrem` 队列消息，是开发期临时脚本，混进了生产 CLI 入口）。
 - 状态: ✅ 完成
 
-### 2026-07-02 #9 tests 根目录归类 — 暂缓
-- 决策: 这是个机械活，但 `tests/test_storage_main.py` 等存在 `from tests.test_storage import ...` 跨文件依赖，盲目 `mv` 会断 import。彻底归类要逐文件：
-  1. 判断 marker（unit/integration/e2e）—— 单看名字不够，要看是否需要真实 Redis/SQL/HTTP。
-  2. 改跨文件 import 路径。
-  3. 跑一遍 verify。
-- ROI 不高，建议作为独立 PR 处理。本任务在文档里标记为暂缓，留给接手者。
-- 状态: 🕯️ 暂缓
+### 2026-07-02 #9 tests 根目录归类 — 暂缓 → 批4 完成
+- **历史决策 (暂缓)**: 这是个机械活，但 `tests/test_storage_main.py` 等存在 `from tests.test_storage import ...` 跨文件依赖，盲目 `mv` 会断 import。
+- **批4 落地**: 详见后文 `2026-07-02 (批4) tests/ 根目录按 marker 归类`。23 个进 unit/、11 个进 integration/, 跨文件 import 已修正, 基线数字从 791 降到 670 是预期行为 (伪 unit 测试正确归入 integration)。
+- 状态: ✅ 完成 (批4)
 
 ### 2026-07-02 (批2) `_node_index` 失效判断改指纹
 - 改动:
@@ -389,9 +386,15 @@ tests/
 - 状态: ✅ 完成
 - 注意: 这是增量方案——未升级的服务端继续按旧算法验签, 不影响现有部署; 客户端启用 `replay_protected=True` 后**必须**配合已升级的服务端。多进程部署 (gunicorn -w N) 下每个 worker 有独立 nonce 缓存, 跨 worker 重放仍可能在 3 秒窗口期内绕过——生产部署建议注入 Redis 后端 (TTL 原生支持), 已在 `_NonceCache` 文档里登记。
 
----
-
-## 7. 还未处理的事项（明确登记，不假装做完）
+### 2026-07-02 (批4) tests/ 根目录按 marker 归类
+- 决策: 把 tests/ 根目录 34 个 `test_*.py` 按"是否需要外部资源 (fakeredis/http/subprocess/asyncio 集成)"分到 unit/ 或 integration/, 沿用现有 `--ignore=tests/integration` 约定 (现有 integration/ 文件都没标 marker, 是靠目录隔离)。
+- 改动:
+  - **→ tests/unit/** (23 个): test_async_flow, test_calculate, test_checkpoint_resume, test_client_default_url, test_code, test_concurrent, test_control, test_decide, test_errors, test_evaluate, test_extended_nodes, test_flow, test_flow_distributed, test_flow_worker_callbacks, test_flow_worker_scenarios, test_from_file, test_inline, test_io, test_log_handler, test_loop, test_performance_benchmark, test_registry, test_types。这些都不依赖 fakeredis/http/subprocess, 全 mock 或纯逻辑。
+  - **→ tests/integration/** (11 个): test_approval_integration, test_delay_integration (asyncio 集成), test_event_filter_dedup, test_event_system, test_redis, test_storage, test_storage_commons, test_storage_main, test_storage_redis (fakeredis), test_http (http.server), test_flow_worker (subprocess + redis)。
+  - `tests/integration/test_storage_main.py`: 跨文件 import 从 `from tests.test_storage import ...` 改为 `from tests.integration.test_storage import ...`, 同时把 `parent_dir` 计算改成走两级到达 repo root。
+- 验证: `pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integration"` 670 passed, 1 deselected (test_registry 内部的 `@pytest.mark.integration` 函数)。已知 timing flake: `tests/unit/test_loop.py::MapTestCase::test_map_max_concurrent`。
+- 状态: ✅ 完成
+- 注意: **基线数字从 791 降到 670 是预期行为**——之前根目录下那些用 fakeredis 的"伪 unit"测试 (test_redis/test_storage*/test_event_filter_dedup 等) 默认会被收集并跑, 归类后被 `--ignore=tests/integration` 正确排除, 与 marker 设计意图一致。开发者要跑这些测试时显式 `pytest tests/integration/` 即可。
 
 下面这些是 review 里点到但本次整改**没动**的，原因要么是风险高（独立 milestone）、要么是需要先有设计：
 
@@ -406,7 +409,7 @@ tests/
 如果你来接手这个项目，建议顺序：
 
 1. **先读本文档第 0、1、2 节**，建立"项目看起来很专业，但实现有系统性 gap"的心智模型。
-2. **跑测试**确认基线：`pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integration"`，预期 ~774 passed（已知 deselect: `test_flow_worker::test_flow_worker` 需 PATH 里有 `python`、`test_loop.py` 两个 timing test 不稳定）。
+2. **跑测试**确认基线：`pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integration"`，预期 ~670 passed（批4 归类后；之前 791 是因为根目录的 fakeredis/http/subprocess 测试被默认收集, 归到 integration/ 后由 `--ignore` 正确排除）。已知 deselect: `test_registry.py` 的 `@pytest.mark.integration` 函数；已知 timing flake: `tests/unit/test_loop.py::MapTestCase::test_map_max_concurrent`。要跑集成测试显式 `pytest tests/integration/`。
 3. **不要立即碰 `FlowExecution` 和 `ExecutionContext._context`**——这是项目核心，重构前先写 characterization test 把当前行为钉死。
 4. **优先做 #14（ExecutionState BaseModel）**——这是最大杠杆，做完之后 #13（FlowExecution 拆分）会自然简化。
 5. **`CodeNode` 不要在生产暴露**：在没有沙箱方案前，从 `_BUILTIN_NODES` 移除，让它走 entry_point 显式注册。
