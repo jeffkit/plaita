@@ -299,13 +299,13 @@ class AssignmentTestCase(TestCase):
             flow_id="assignment",
             version="1.0",
             runtime="python",
-            input_type=Property(data_type=types.BOOL, is_required=True),
+            input_type=Property(data_type=types.OBJECT, is_required=True),
             output_type=Property(data_type=types.STRING),
             nodes=[
                 Start(id="start", next="bool"),
                 Bool(
                     id="bool",
-                    condition={"field": "$INPUT", "operator": "eq", "value": True},
+                    condition={"field": "$INPUT.flag", "operator": "eq", "value": True},
                     next="assign-KongJie",
                     else_next="assign-others",
                 ),
@@ -333,5 +333,5 @@ class AssignmentTestCase(TestCase):
                 End(id="end", **{"resultType": "success", "output": "$NODE.assign-join"}),
             ],
         )
-        self.assertEqual("KongJie", flow.run(True))
-        self.assertEqual("nobody", flow.run(False))
+        self.assertEqual("KongJie", flow.run({"flag": True}))
+        self.assertEqual("nobody", flow.run({"flag": False}))

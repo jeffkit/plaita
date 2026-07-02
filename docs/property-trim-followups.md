@@ -24,18 +24,16 @@
 
 价值：让"声明即生效"，替代历史上名实不副的 `Property` 值域字段。
 
-## 2. legacy 传参迁移 + 移除 DeprecationWarning
+## 2. ~~legacy 传参迁移 + 移除 DeprecationWarning~~ ✅ 已完成
 
-引擎仍兼容 `flow.run(1)` / `flow.run("hello")` / `flow.run([1,2,3])`
-（仅 `input_type` 为 scalar/array 的 JSON flow），发 `DeprecationWarning`。
-后续：
+公共 `Flow.run` / `arun` / `debug` / `parse_and_run` 已改为 **dict-only**：
+非 dict 位置参数直接 `TypeError`。`_coerce_input_value` 删除 deprecation
+分支，对内部子流程调用（InlineFlow / 并行分支 / 循环）的单值位置参数保持
+宽松（这是合法的内部机制，不走公共入口）。`tests/` / `skills/` /
+`docs-site/` 中的 scalar/array 位置传参示例已迁移为 dict 形态。
 
-- 把 `tests/` 里 `flow.run("scalar")` 形态迁到 `flow.run(value="...")` 或
-  `flow.run({...})`
-- `examples/` 同步
-- 文档（`docs/zh/usage.md` 等）示例更新
-- 一版之后删除 `_warn_legacy_positional_input` / `_legacy_positional_value`，
-  `_coerce_input_value` 收成纯 dict 逻辑
+> 注：JSON/YAML flow 定义里的 `inputType` 仍可声明，供 Console 展示与
+> dry-run；它不再驱动 Python 侧 `run()` 的传参分支。
 
 ## 3. `FlowBuilder` / S-expr DSL 的 `input_type` 对齐
 

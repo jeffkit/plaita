@@ -125,13 +125,16 @@ flow = (
 )
 ```
 
-`inputType.dataType` 决定 `flow.run(...)` 的传参方式与 `$INPUT` 形态：
+`flow.run(...)` 统一接受 **dict 或关键字参数**，`$INPUT` 始终是传入的 dict：
 
-| dataType | 传参 | `$INPUT` |
-|----------|------|----------|
-| `object`/`map` | 关键字参数 `flow.run(name="x")` | 关键字组成的 dict |
-| `array` | 位置参数 `flow.run(a, b, c)` | 参数元组 |
-| 其它（`string`/`number`…） | 位置首参 `flow.run("x")` | 该单值 |
+| 调用方式 | `$INPUT` |
+|----------|----------|
+| `flow.run(name="x")` | `{"name": "x"}` |
+| `flow.run({"name": "x"})` | 该 dict |
+| `flow.run()` | `{}` |
+
+> 历史 scalar/array 位置传参（`flow.run("x")` / `flow.run(a, b, c)`）已移除；
+> 标量/数组输入用 dict 包装并在表达式里引用对应字段（如 `$INPUT.value` / `$INPUT.items`）。
 
 > 三种形态的加载入口：`Flow.from_string(s)`（自动识别 JSON/YAML）、`Flow.from_file(path)`（按后缀 `.json`/`.yaml`/`.yml`）、`plaita.dsl.build(...).build()`。完整对照见 `docs-site/docs/guide/yaml-and-dsl.md`。
 

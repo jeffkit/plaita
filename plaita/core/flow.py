@@ -210,12 +210,15 @@ class Flow(BaseModel):
         return None
 
     def run(self, *args, **params):
+        _enforce_dict_input(args)
         return FlowExecution().run_compatible(self, False, *args, **params)
 
     async def arun(self, *args, **params):
+        _enforce_dict_input(args)
         return await FlowExecution().arun_compatible(self, False, *args, **params)
 
     def debug(self, *args, **params):
+        _enforce_dict_input(args)
         return FlowExecution().run_compatible(self, True, *args, **params)
 
     @property
@@ -225,6 +228,20 @@ class Flow(BaseModel):
     @property
     def output_property(self):
         return self.output_type
+
+
+def _enforce_dict_input(args: tuple) -> None:
+    """Public ``Flow.run``/``arun``/``debug`` accept only dict/kwargs input.
+
+    Internal callers (InlineFlow, parallel branches, loops) bypass this and
+    may pass a single non-dict value as a child flow's ``$INPUT``.
+    """
+    if args and not (len(args) == 1 and isinstance(args[0], dict)):
+        raise TypeError(
+            "flow.run() accepts a single dict and/or keyword arguments; "
+            f"got positional args={args!r}. Wrap scalar/array input in a dict, "
+            "e.g. flow.run({'value': '...'}) and reference $INPUT.value."
+        )
 
 
 def parse(content: Union[str, dict]) -> Optional[Flow]:
@@ -255,6 +272,7 @@ def parse_and_run(content: str, *args, **kwargs):
     """
     from plaita.io_format import loads
 
+    _enforce_dict_input(args)
     data = loads(content)
     flow = Flow.model_validate(data)
     return FlowExecution().run_compatible(flow, False, *args, **kwargs)

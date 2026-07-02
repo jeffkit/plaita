@@ -36,13 +36,17 @@ plaita 在解析时自动归一化常见驼峰字段，便于与可视化编排�
 
 ## 输入类型
 
-`inputType.dataType` 决定 `$INPUT` 的形态与传参方式：
+`flow.run(...)` 统一接受 **dict 或关键字参数**，`$INPUT` 始终是传入的 dict：
 
-| dataType | `flow.run(...)` 传参 | `$INPUT` 形态 |
-|----------|---------------------|--------------|
-| `object` / `map` | 关键字参数 `flow.run(name="x")` 或位置首参（dict） | 关键字参数组成的 dict |
-| `array` | 位置参数 `flow.run(a, b, c)` | 参数元组 |
-| 其它（`string` / `number` …） | 位置首参 `flow.run("x")` | 该单值 |
+| 调用方式 | `$INPUT` 形态 |
+|----------|---------------|
+| `flow.run(name="x")` | `{"name": "x"}` |
+| `flow.run({"name": "x"})` | 该 dict |
+| `flow.run()` | `{}` |
+
+> 历史 scalar/array 位置传参（`flow.run("x")` / `flow.run(a, b, c)`）已移除。
+> 标量/数组输入用 dict 包装，表达式引用对应字段（如 `$INPUT.value` / `$INPUT.items`）。
+> JSON/YAML 里的 `inputType` 仍可声明，主要供 Console 展示与 dry-run 使用。
 
 ## 节点与控制流 { #control-flow }
 

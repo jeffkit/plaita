@@ -12,7 +12,6 @@ import os
 import uuid
 import logging
 import threading
-import warnings
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from plaita.core import types
@@ -43,49 +42,45 @@ def _safe_environment() -> Dict[str, str]:
     }
 
 
-def _warn_legacy_positional_input(args: tuple) -> None:
-    warnings.warn(
-        "Passing flow input via non-dict positional arguments is deprecated; "
-        "use flow.run({...}) or flow.run(key=value).",
-        DeprecationWarning,
-        stacklevel=4,
-    )
-
-
-def _legacy_positional_value(in_format, args: tuple) -> Any:
-    if in_format is None or in_format.data_type in (types.OBJECT, types.MAP):
-        return {}
-    if in_format.data_type == types.ARRAY:
-        return args
-    return args[0] if args else None
-
-
 def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
     """Resolve flow invocation arguments into the value stored at ``$INPUT``.
 
-    Modern API: keyword arguments and/or a single dict positional argument.
-    For object/map flows (including the default ``@flow`` compile output),
-    ``$INPUT`` is always a ``dict``.
+    Used by both the public ``Flow.run`` path and internal child-flow
+    invocations (InlineFlow / parallel branches / loops), which legitimately
+    pass a single non-dict value as the child's ``$INPUT``.
 
-    Legacy: positional scalar or tuple input for flows whose ``input_type`` is
-    ``string`` or ``array`` still works but emits ``DeprecationWarning``.
+    - ``run(key=value, ...)``         → ``{key: value, ...}``
+    - ``run({...})`` / ``run(scalar)``→ that value as-is (single positional)
+    - ``run()``                       → ``{}``
+    - multiple positional args        → ``TypeError`` (array splat no longer
+      supported; wrap in a dict, e.g. ``run({"items": [...]})``)
     """
     if kwargs:
         if args:
-            if len(args) == 1 and isinstance(args[0], dict):
-                return {**args[0], **kwargs}
-            _warn_legacy_positional_input(args)
-            return kwargs
+            if len(args) == 1:
+                if isinstance(args[0], dict):
+                    return {**args[0], **kwargs}
+                raise TypeError(
+                    "flow.run() cannot mix a non-dict positional argument with "
+                    f"keyword arguments; got args={args!r}"
+                )
+            raise TypeError(
+                "flow.run() accepts a single dict and/or keyword arguments; "
+                f"got positional args={args!r}"
+            )
         return kwargs
 
     if not args:
         return {}
 
-    if len(args) == 1 and isinstance(args[0], dict):
+    if len(args) == 1:
         return args[0]
 
-    _warn_legacy_positional_input(args)
-    return _legacy_positional_value(in_format, args)
+    raise TypeError(
+        "flow.run() accepts a single dict and/or keyword arguments; "
+        f"got positional args={args!r}. Wrap scalar/array input in a dict, "
+        "e.g. flow.run({'items': [...]}) and reference $INPUT.items."
+    )
 
 # 依赖反转: core 不直接 import plaita.event, 而是持有一个由上层 (plaita 顶层包)
 # 注册的 "默认 event bus provider" 可调用对象。这样 core → event 的反向依赖

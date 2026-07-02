@@ -58,15 +58,16 @@ flow 来源可能是：
 
 ### 3. 推断输入参数
 
-`inputType.dataType` 决定传参方式，**传错会直接抛错**：
+`flow.run(...)` 统一接受 **dict 或关键字参数**，`$INPUT` 始终是传入的 dict：
 
-| dataType | 传参 | 示例 |
-|----------|------|------|
-| `object`/`map` | 关键字参数 | `flow.run(name="kongjie", age=18)` |
-| `array` | 位置参数 | `flow.run(a, b, c)` |
-| 其它（`string`/`number`…） | 位置首参 | `flow.run("kongjie")` |
+| 调用方式 | `$INPUT` |
+|----------|----------|
+| `flow.run(name="kongjie", age=18)` | `{"name": "kongjie", "age": 18}` |
+| `flow.run({"name": "kongjie"})` | 该 dict |
+| `flow.run()` | `{}` |
 
-如果 flow 没声明 `inputType`，默认按 `object` 处理（关键字参数）。
+> 历史 scalar/array 位置传参（`flow.run("x")` / `flow.run(a, b, c)`）已移除。
+> 标量/数组输入用 dict 包装，例如 `flow.run({"value": "kongjie"})` 并在表达式里引用 `$INPUT.value`。
 
 **不要凭空编参数**。从用户那里确认输入值；若用户只给了一部分，问清楚缺的；若用户说「随便给个示例」，就给一个最小可行示例并说明你用了什么值。
 

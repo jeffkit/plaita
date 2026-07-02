@@ -23,7 +23,7 @@ class FlowTestCase(TestCase):
     "inputType": {
         "name": "name",
         "label": "姓名",
-        "dataType": "string",
+        "dataType": "object",
         "default": "",
         "required": true
     },
@@ -42,12 +42,12 @@ class FlowTestCase(TestCase):
             "label": "结束",
             "id": "end",
             "resultType": "success",
-            "output": "$INPUT"
+            "output": "$INPUT.name"
         }
     ]
 }
         """
-        result = parse_and_run(flow, "KongJie")
+        result = parse_and_run(flow, {"name": "KongJie"})
         self.assertEqual(result, "KongJie")
 
     def test_property_match_simple(self):

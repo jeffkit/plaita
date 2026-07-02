@@ -41,7 +41,7 @@ class LoopTestCase(TestCase):
             flow_id="loop",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         nodes = [
@@ -63,16 +63,16 @@ class LoopTestCase(TestCase):
 
     def test_loop(self):
 
-        flow = self.create_flow(user, "$INPUT")
+        flow = self.create_flow(user, "$INPUT.items")
         self.assertEqual(
             1,
             flow.run(
-                *[
+                {"items": [
                     {"name": "jie", "age": 22},
                     {"name": "Kong", "age": 10},
                     {"name": "KongJie", "age": 29},
                     {"name": "kongJie", "age": 40},
-                ]
+                ]}
             ),
         )
 
@@ -136,7 +136,7 @@ class MapTestCase(TestCase):
             flow_id="map",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         nodes = [
@@ -152,13 +152,13 @@ class MapTestCase(TestCase):
     def test_map(self):
         self.assertEqual(
             ["young", "young", "young", "old"],
-            self.create_flow(None, "$INPUT").run(
-                *[
+            self.create_flow(None, "$INPUT.items").run(
+                {"items": [
                     {"name": "jie", "age": 22},
                     {"name": "Kong", "age": 10},
                     {"name": "KongJie", "age": 29},
                     {"name": "kongJie", "age": 40},
-                ]
+                ]}
             ),
         )
 
@@ -168,7 +168,7 @@ class MapTestCase(TestCase):
             flow_id="map",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         nodes = [
@@ -177,7 +177,7 @@ class MapTestCase(TestCase):
                 id="map",
                 item_type=None,
                 flow=flow,
-                collection="$INPUT",
+                collection="$INPUT.items",
                 child_flow=self.child_flow,
                 next="end",
                 concurrent=True  # Enable concurrent execution
@@ -188,12 +188,12 @@ class MapTestCase(TestCase):
 
         # Test with the same input data
         result = flow.run(
-            *[
+            {"items": [
                 {"name": "jie", "age": 22},
                 {"name": "Kong", "age": 10},
                 {"name": "KongJie", "age": 29},
                 {"name": "kongJie", "age": 40},
-            ]
+            ]}
         )
         
         # Verify the results are the same as sequential execution
@@ -208,7 +208,7 @@ class MapTestCase(TestCase):
             flow_id="map-sequential",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         sequential_flow.nodes = [
@@ -217,7 +217,7 @@ class MapTestCase(TestCase):
                 id="map",
                 item_type=None,
                 flow=sequential_flow,
-                collection="$INPUT",
+                collection="$INPUT.items",
                 child_flow=self.slow_child_flow,
                 next="end",
                 concurrent=False
@@ -230,7 +230,7 @@ class MapTestCase(TestCase):
             flow_id="map-concurrent",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         concurrent_flow.nodes = [
@@ -239,7 +239,7 @@ class MapTestCase(TestCase):
                 id="map",
                 item_type=None,
                 flow=concurrent_flow,
-                collection="$INPUT",
+                collection="$INPUT.items",
                 child_flow=self.slow_child_flow,
                 next="end",
                 concurrent=True
@@ -250,12 +250,12 @@ class MapTestCase(TestCase):
         # 测量顺序执行时间
         import time
         sequential_start = time.time()
-        sequential_result = sequential_flow.run(*test_data)
+        sequential_result = sequential_flow.run({"items": test_data})
         sequential_time = time.time() - sequential_start
 
         # 测量并发执行时间
         concurrent_start = time.time()
-        concurrent_result = concurrent_flow.run(*test_data)
+        concurrent_result = concurrent_flow.run({"items": test_data})
         concurrent_time = time.time() - concurrent_start
 
         # 验证结果相同
@@ -279,7 +279,7 @@ class MapTestCase(TestCase):
             flow_id="map-max-concurrent-2",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         concurrent_flow_2.nodes = [
@@ -288,7 +288,7 @@ class MapTestCase(TestCase):
                 id="map",
                 item_type=None,
                 flow=concurrent_flow_2,
-                collection="$INPUT",
+                collection="$INPUT.items",
                 child_flow=self.slow_child_flow,
                 next="end",
                 concurrent=True,
@@ -297,7 +297,7 @@ class MapTestCase(TestCase):
             End(id="end", **{"resultType": "success", "output": "$NODE.map"}, flow=concurrent_flow_2),
         ]
         start_2 = time.time()
-        result_2 = concurrent_flow_2.run(*test_data)
+        result_2 = concurrent_flow_2.run({"items": test_data})
         time_2 = time.time() - start_2
 
         # 创建 max_concurrent=4 的并发流程（理论约0.25秒）
@@ -305,7 +305,7 @@ class MapTestCase(TestCase):
             flow_id="map-max-concurrent-4",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         concurrent_flow_4.nodes = [
@@ -314,7 +314,7 @@ class MapTestCase(TestCase):
                 id="map",
                 item_type=None,
                 flow=concurrent_flow_4,
-                collection="$INPUT",
+                collection="$INPUT.items",
                 child_flow=self.slow_child_flow,
                 next="end",
                 concurrent=True,
@@ -323,7 +323,7 @@ class MapTestCase(TestCase):
             End(id="end", **{"resultType": "success", "output": "$NODE.map"}, flow=concurrent_flow_4),
         ]
         start_4 = time.time()
-        result_4 = concurrent_flow_4.run(*test_data)
+        result_4 = concurrent_flow_4.run({"items": test_data})
         time_4 = time.time() - start_4
 
         # 验证结果相同
@@ -358,7 +358,7 @@ class FilterTestCase(TestCase):
             flow_id="filter",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         nodes = [
@@ -379,13 +379,13 @@ class FilterTestCase(TestCase):
     def test_filter(self):
         self.assertEqual(
             [{"name": "jie", "age": 22}, {"name": "Kong", "age": 10}, {"name": "KongJie", "age": 29}],
-            self.create_flow(None, "$INPUT").run(
-                *[
+            self.create_flow(None, "$INPUT.items").run(
+                {"items": [
                     {"name": "jie", "age": 22},
                     {"name": "Kong", "age": 10},
                     {"name": "KongJie", "age": 29},
                     {"name": "kongJie", "age": 40},
-                ]
+                ]}
             ),
         )
 
@@ -413,7 +413,7 @@ class FindTestCase(TestCase):
             flow_id="find",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.ARRAY, item_type=user),
+            input_type=Property(data_type=types.OBJECT),
             output_type=user,
         )
         nodes = [
@@ -427,13 +427,13 @@ class FindTestCase(TestCase):
     def test_find(self):
         self.assertEqual(
             {"name": "jie", "age": 22},
-            self.create_flow(None, "$INPUT").run(
-                *[
+            self.create_flow(None, "$INPUT.items").run(
+                {"items": [
                     {"name": "jie", "age": 22},
                     {"name": "Kong", "age": 10},
                     {"name": "KongJie", "age": 29},
                     {"name": "kongJie", "age": 40},
-                ]
+                ]}
             ),
         )
 

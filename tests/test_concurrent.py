@@ -212,7 +212,7 @@ class TestParallel(TestCase):
                     output=42,
                     next="assign3",
                 ),
-                Assignment(id="assign3", name="assign3", output_type=Property(data_type=types.STRING), output="$INPUT"),
+                Assignment(id="assign3", name="assign3", output_type=Property(data_type=types.STRING), output="$INPUT.value"),
             ],
         )
 
@@ -221,7 +221,7 @@ class TestParallel(TestCase):
             flow_id="main-flow",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.STRING, is_required=True),
+            input_type=Property(data_type=types.OBJECT, is_required=True),
             output_type=Property(data_type=types.OBJECT, is_required=True),
             nodes=[
                 Start(id="start", next="parallel"),
@@ -238,7 +238,7 @@ class TestParallel(TestCase):
         )
 
         # 运行流程
-        result = main_flow.run("Main flow input")
+        result = main_flow.run({"value": "Main flow input"})
 
         # 检查结果
         expected_result = {
@@ -290,15 +290,15 @@ class TestParallel(TestCase):
             flow_id="test-mixed-var",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.STRING, is_required=True),
-            output_type=Property(data_type=types.STRING, is_required=True),
+            input_type=Property(data_type=types.OBJECT, is_required=True),
+            output_type=Property(data_type=types.OBJECT, is_required=True),
             nodes=[
                 Start(id="start", next="assign1"),
                 Assignment(
                     id="assign1",
                     name="assign1",
                     output_type=Property(data_type=types.STRING),
-                    output="$INPUT",
+                    output="$INPUT.value",
                     next="assign2",
                 ),
                 Assignment(
@@ -313,7 +313,7 @@ class TestParallel(TestCase):
                     name="assign3",
                     output_type=Property(data_type=types.OBJECT, is_required=True),
                     output={
-                        "parent_input": "$INPUT",
+                        "parent_input": "$INPUT.value",
                         "self_node1": "$NODE.assign1",
                         "self_node2": "$NODE.assign2",
                         "parent_global": "$GLOBAL.name",
@@ -326,7 +326,7 @@ class TestParallel(TestCase):
             flow_id="main-flow",
             version="1",
             runtime="python",
-            input_type=Property(data_type=types.STRING, is_required=True),
+            input_type=Property(data_type=types.OBJECT, is_required=True),
             output_type=Property(data_type=types.OBJECT, is_required=True),
             global_context={"name": "kongjie", "age": 19},
             nodes=[
@@ -342,7 +342,7 @@ class TestParallel(TestCase):
                 End(id="end", result_type="success", output="$NODE.parallel"),
             ],
         )
-        result = main_flow.run("hello")
+        result = main_flow.run({"value": "hello"})
         self.assertEqual(
             result,
             {
