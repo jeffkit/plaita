@@ -100,9 +100,25 @@ step = execution.run_distributed(
 | `cancel` | 取消等待，调用 `node.on_cancel(execution)` |
 | `continue` | 不走恢复分支，从上次 `LAST_NODE` 之后继续推进下一节点 |
 
-!!! tip "用 run_distributed 而非 run"
+!!! warning "两种调用方式的关键区别"
 
-    `FlowExecution.run(..., mode='distributed')` 会路由到 `run_distributed`，但**每次都会新建一个 execution 实例**，导致用户回调无法跨步骤保留。需要跨步骤保留回调时，请像上面那样**复用同一个 `FlowExecution` 实例**并直接调用 `run_distributed`。
+    **正确模式（推荐）**：实例化 `FlowExecution` 并复用它：
+
+    ```python
+    execution = FlowExecution(callback_handlers=[my_callback])
+    step1 = execution.run_distributed(flow, params)           # 第一步
+    step2 = execution.run_distributed(flow, saved_context=...) # 恢复步骤，回调仍在
+    ```
+
+    **注意陷阱**：`FlowExecution.run(flow, mode='distributed')` 是类方法，**每次调用都会创建新实例**。如果你注册了回调，这些回调在后续调用中会丢失：
+
+    ```python
+    # ⚠️ 这样做，回调只在第一次调用时生效
+    step1 = FlowExecution.run(flow, params, mode='distributed', callback_handlers=[my_callback])
+    step2 = FlowExecution.run(flow, None, mode='distributed', context=step1["context"])  # 回调丢失！
+    ```
+
+    如果只有单次 fire-and-forget 调用（不需要在多步骤间保留回调），则类方法也是可以的。
 
 ## 如何选择
 

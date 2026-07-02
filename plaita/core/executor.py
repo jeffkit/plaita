@@ -432,6 +432,10 @@ class FlowExecution:
         if execution.mode == "distributed":
             # 统一走 run_distributed, 避免与 run_distributed 维护两份几乎相同的
             # 桥接/错误处理逻辑; options 里可带 resume_type / resume_data。
+            #
+            # 注意：本方法每次调用都创建新实例。如果需要跨多个步骤保留用户回调，
+            # 应直接实例化 FlowExecution 并复用同一实例调用 run_distributed()，
+            # 而非反复调用此类方法。
             return execution.run_distributed(
                 flow,
                 params,

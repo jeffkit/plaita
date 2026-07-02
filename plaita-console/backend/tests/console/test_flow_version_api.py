@@ -37,8 +37,8 @@ def _echo_def(flow_id: str = "echo") -> str:
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch) -> TestClient:
-    monkeypatch.setenv("LOKI_CONSOLE_SECRET_ID", SECRET_ID)
-    monkeypatch.setenv("LOKI_CONSOLE_SECRET_KEY", SECRET_KEY)
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_ID", SECRET_ID)
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_KEY", SECRET_KEY)
     flow_store.init_engine(f"sqlite:///{tmp_path / 'fv.db'}")
     app = FastAPI()
     app.include_router(fv.router, prefix="/api")

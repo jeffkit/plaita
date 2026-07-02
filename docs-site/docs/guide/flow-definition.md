@@ -1,4 +1,8 @@
-# 流程定义
+# JSON 流程定义
+
+!!! tip "这是 JSON 格式的参考页"
+
+    plaita 支持 JSON / YAML / Python Builder / S-expr / @flow 五种方式定义流程，本页只覆盖 **JSON 字段参考**。如果你还没选定格式，先看 [流程编写方式](flow-authoring.md) 做选型。
 
 一个 `Flow` 是一段 JSON 描述的静态流程定义。本页列出全部字段、字段名兼容规则，以及如何用节点与分支描述控制流。
 

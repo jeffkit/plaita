@@ -45,8 +45,8 @@ services:
     docker:
       image: plaita/delay-service:latest
     env:
-      LOKI_CHECK_INTERVAL: '5'
-      LOKI_REDIS_URL: ${redis.url}
+      PLAITA_CHECK_INTERVAL: '5'
+      PLAITA_REDIS_URL: ${redis.url}
     max_instances: 3
     process:
       command: python -m plaita.server.services delay_service
@@ -57,8 +57,8 @@ services:
       image: plaita/flow-worker:latest
       ports: []
     env:
-      LOKI_QUEUE_NAME: plaita:flow:queue
-      LOKI_REDIS_URL: ${redis.url}
+      PLAITA_QUEUE_NAME: plaita:flow:queue
+      PLAITA_REDIS_URL: ${redis.url}
     max_instances: 10
     process:
       module: plaita.server.flow_worker
@@ -68,7 +68,7 @@ services:
     docker:
       image: plaita/http-callback-service:latest
     env:
-      LOKI_REDIS_URL: ${redis.url}
+      PLAITA_REDIS_URL: ${redis.url}
     max_instances: 3
     process:
       command: python -m plaita.server.services http_callback_service
@@ -78,8 +78,8 @@ services:
     docker:
       image: plaita/redis-queue-service:latest
     env:
-      LOKI_QUEUE_PREFIX: 'plaita:queue:'
-      LOKI_REDIS_URL: ${redis.url}
+      PLAITA_QUEUE_PREFIX: 'plaita:queue:'
+      PLAITA_REDIS_URL: ${redis.url}
     max_instances: 5
     process:
       command: python -m plaita.server.services redis_queue_service

@@ -1374,8 +1374,8 @@ const BUILTIN_SERVICE_TEMPLATES = [
     default_instances: 1,
     max_instances: 10,
     default_env: {
-      'LOKI_REDIS_URL': '${redis.url}',
-      'LOKI_QUEUE_NAME': 'plaita:flow:queue'
+      'PLAITA_REDIS_URL': '${redis.url}',
+      'PLAITA_QUEUE_NAME': 'plaita:flow:queue'
     }
   },
   {
@@ -1387,8 +1387,8 @@ const BUILTIN_SERVICE_TEMPLATES = [
     default_instances: 1,
     max_instances: 3,
     default_env: {
-      'LOKI_REDIS_URL': '${redis.url}',
-      'LOKI_CHECK_INTERVAL': '5'
+      'PLAITA_REDIS_URL': '${redis.url}',
+      'PLAITA_CHECK_INTERVAL': '5'
     }
   },
   {
@@ -1400,8 +1400,8 @@ const BUILTIN_SERVICE_TEMPLATES = [
     default_instances: 1,
     max_instances: 5,
     default_env: {
-      'LOKI_REDIS_URL': '${redis.url}',
-      'LOKI_QUEUE_PREFIX': 'plaita:queue:'
+      'PLAITA_REDIS_URL': '${redis.url}',
+      'PLAITA_QUEUE_PREFIX': 'plaita:queue:'
     }
   },
   {
@@ -1413,7 +1413,7 @@ const BUILTIN_SERVICE_TEMPLATES = [
     default_instances: 1,
     max_instances: 3,
     default_env: {
-      'LOKI_REDIS_URL': '${redis.url}'
+      'PLAITA_REDIS_URL': '${redis.url}'
     }
   },
   {
@@ -1425,7 +1425,7 @@ const BUILTIN_SERVICE_TEMPLATES = [
     default_instances: 1,
     max_instances: 2,
     default_env: {
-      'LOKI_REDIS_URL': '${redis.url}'
+      'PLAITA_REDIS_URL': '${redis.url}'
     }
   }
 ]

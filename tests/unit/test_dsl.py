@@ -385,5 +385,152 @@ class TestLinearBuilder(unittest.TestCase):
         self.assertEqual(flow.run(age=20), "成年")
 
 
+class TestBuilderMutation(unittest.TestCase):
+    """Tests for FlowBuilder mutation methods: remove_node / update_node / reroute / from_dict."""
+
+    def _simple_builder(self):
+        """echo flow: start -> greet -> end"""
+        return (
+            build("echo", input_type="object")
+            .add(start(id="start", next="greet"))
+            .add(assignment(id="greet", output="$F.concat('hi ', $INPUT.name)", next="end"))
+            .add(end("end", output="$NODE.greet"))
+        )
+
+    def test_remove_node(self):
+        b = self._simple_builder()
+        b.remove_node("greet")
+        ids = [n["id"] for n in b._nodes]
+        self.assertNotIn("greet", ids)
+        self.assertEqual(len(ids), 2)
+
+    def test_remove_node_missing_raises(self):
+        b = self._simple_builder()
+        with self.assertRaises(KeyError):
+            b.remove_node("nonexistent")
+
+    def test_update_node(self):
+        b = self._simple_builder()
+        b.update_node("greet", output="$F.concat('hello ', $INPUT.name)")
+        node = next(n for n in b._nodes if n["id"] == "greet")
+        self.assertEqual(node["output"], "$F.concat('hello ', $INPUT.name)")
+
+    def test_update_node_missing_raises(self):
+        b = self._simple_builder()
+        with self.assertRaises(KeyError):
+            b.update_node("ghost", output="x")
+
+    def test_reroute_next(self):
+        b = self._simple_builder()
+        b.reroute("start", next="end")
+        node = next(n for n in b._nodes if n["id"] == "start")
+        self.assertEqual(node["next"], "end")
+
+    def test_reroute_missing_raises(self):
+        b = self._simple_builder()
+        with self.assertRaises(KeyError):
+            b.reroute("missing", next="end")
+
+    def test_from_dict_roundtrip(self):
+        from plaita.dsl import FlowBuilder
+        builder = self._simple_builder()
+        # from_dict 使用 to_dict() 产出的格式（与 JSON 格式一致）
+        raw = builder.to_dict()
+        rebuilt = FlowBuilder.from_dict(raw).build()
+        self.assertEqual(rebuilt.run(name="alice"), "hi alice")
+
+    def test_mutation_then_build(self):
+        """remove greet node, reroute start to end directly"""
+        from plaita.dsl import FlowBuilder
+        b = self._simple_builder()
+        b.remove_node("greet")
+        b.reroute("start", next="end")
+        b.update_node("end", output="$INPUT.name")
+        flow = b.build()
+        self.assertEqual(flow.run(name="bob"), "bob")
+
+
+class TestReduceNode(unittest.TestCase):
+    """Tests for the reduce node (bug fix verification)."""
+
+    def _make_sum_child(self):
+        """子流程：接收 first + second，返回 first + second"""
+        return (
+            build(input_type="object")
+            .add(start(next="sum"))
+            .add(end("sum", output="$F.add($INPUT.first, $INPUT.second)"))
+        ).to_dict()
+
+    def test_reduce_sum(self):
+        import json
+        child = self._make_sum_child()
+        flow_def = {
+            "flow_id": "sum_test",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "reduce"},
+                {
+                    "type": "reduce",
+                    "id": "reduce",
+                    "collection": "$INPUT.nums",
+                    "childFlow": child,
+                    "next": "end",
+                },
+                {"type": "end", "id": "end", "output": "$NODE.reduce", "resultType": "success"},
+            ],
+        }
+        from plaita.core.flow import Flow
+        flow = Flow.model_validate(flow_def)
+        result = flow.run(nums=[1, 2, 3, 4])
+        self.assertEqual(result, 10)
+
+    def test_reduce_with_initial(self):
+        child = self._make_sum_child()
+        flow_def = {
+            "flow_id": "sum_initial",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "reduce"},
+                {
+                    "type": "reduce",
+                    "id": "reduce",
+                    "collection": "$INPUT.nums",
+                    "initial": 100,
+                    "childFlow": child,
+                    "next": "end",
+                },
+                {"type": "end", "id": "end", "output": "$NODE.reduce", "resultType": "success"},
+            ],
+        }
+        from plaita.core.flow import Flow
+        flow = Flow.model_validate(flow_def)
+        result = flow.run(nums=[1, 2, 3])
+        self.assertEqual(result, 106)
+
+    def test_reduce_initial_zero_is_valid(self):
+        """initial=0 是有效初始值，不应被误判为 falsy"""
+        child = self._make_sum_child()
+        flow_def = {
+            "flow_id": "sum_zero_initial",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "reduce"},
+                {
+                    "type": "reduce",
+                    "id": "reduce",
+                    "collection": "$INPUT.nums",
+                    "initial": 0,
+                    "childFlow": child,
+                    "next": "end",
+                },
+                {"type": "end", "id": "end", "output": "$NODE.reduce", "resultType": "success"},
+            ],
+        }
+        from plaita.core.flow import Flow
+        flow = Flow.model_validate(flow_def)
+        result = flow.run(nums=[5, 3, 2])
+        self.assertEqual(result, 10)
+
+
 if __name__ == "__main__":
     unittest.main()

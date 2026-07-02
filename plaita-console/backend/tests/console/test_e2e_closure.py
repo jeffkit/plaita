@@ -53,8 +53,8 @@ def _echo_def() -> str:
 
 @pytest.fixture()
 def server(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOKI_CONSOLE_SECRET_ID", SECRET_ID)
-    monkeypatch.setenv("LOKI_CONSOLE_SECRET_KEY", SECRET_KEY)
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_ID", SECRET_ID)
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_KEY", SECRET_KEY)
     flow_store.init_engine(f"sqlite:///{tmp_path / 'e2e.db'}")
 
     store = flow_store.get_flow_store()

@@ -478,7 +478,7 @@ class FlowBuilder:
         self.runtime = runtime
         self._nodes: List[NodeSpec] = []
 
-    # -- 收集节点 --------------------------------------------------------
+    # -- 收集 / 修改 / 删除节点 -----------------------------------------
 
     def add(self, node: NodeSpec) -> "FlowBuilder":
         """追加一个节点，返回 self。"""
@@ -486,6 +486,80 @@ class FlowBuilder:
             raise TypeError(f"add() 只接受节点工厂的产物，得到 {type(node).__name__}")
         self._nodes.append(NodeSpec(node))  # type: ignore[arg-type]
         return self
+
+    def remove_node(self, node_id: str) -> "FlowBuilder":
+        """按 id 删除节点。若 id 不存在则抛 KeyError。"""
+        before = len(self._nodes)
+        self._nodes = [n for n in self._nodes if n.get("id") != node_id]
+        if len(self._nodes) == before:
+            raise KeyError(f"节点 id {node_id!r} 不存在")
+        return self
+
+    def update_node(self, node_id: str, **fields: Any) -> "FlowBuilder":
+        """修改已有节点的字段。若 id 不存在则抛 KeyError。
+
+        示例：
+            builder.update_node("greet", output="$F.concat('Hi, ', $INPUT.name)")
+        """
+        for node in self._nodes:
+            if node.get("id") == node_id:
+                node.update(fields)
+                return self
+        raise KeyError(f"节点 id {node_id!r} 不存在")
+
+    def reroute(
+        self,
+        node_id: str,
+        *,
+        next: Optional[str] = None,
+        else_next: Optional[str] = None,
+    ) -> "FlowBuilder":
+        """修改节点的跳转目标。
+
+        - ``next``：普通节点的后继，或 if 节点的真分支目标。
+        - ``else_next``：if 节点的假分支目标。
+
+        只传入想改的字段，其余保持不变。
+        """
+        for node in self._nodes:
+            if node.get("id") == node_id:
+                if next is not None:
+                    node["next"] = next
+                if else_next is not None:
+                    node["else_next"] = else_next
+                return self
+        raise KeyError(f"节点 id {node_id!r} 不存在")
+
+    # -- 从外部数据加载 --------------------------------------------------
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FlowBuilder":
+        """从 ``Flow.model_dump()`` / JSON 解析出的 dict 加载为 FlowBuilder。
+
+        常用于「加载已有流程，修改部分节点，再 build」：
+
+        ::
+
+            import json
+            builder = FlowBuilder.from_dict(json.load(open("my_flow.json")))
+            builder.update_node("greet", output="'hello'")
+            new_flow = builder.build()
+        """
+        builder = cls(
+            flow_id=data.get("flow_id"),
+            input_type=data.get("inputType"),
+            output_type=data.get("outputType"),
+            desc=data.get("desc"),
+            version=data.get("version"),
+            author=data.get("author"),
+            timeout=data.get("timeout"),
+            global_context=data.get("globalContext"),
+            metadata=data.get("metadata"),
+            runtime=data.get("runtime", "python"),
+        )
+        for raw_node in data.get("nodes", []):
+            builder._nodes.append(NodeSpec(raw_node))
+        return builder
 
     # -- 序列化 ----------------------------------------------------------
 

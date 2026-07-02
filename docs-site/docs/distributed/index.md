@@ -50,6 +50,64 @@ flowchart LR
     DS --> SM
 ```
 
+## 零依赖快速体验
+
+!!! tip "不需要 Redis 也能跑断点续执"
+
+    断点续执不强制依赖 Redis 或外部数据库。用内存版实现，无任何额外依赖，适合本地开发验证和演示。
+
+```python
+from plaita import Flow, FlowExecution
+from plaita.event.memory import InMemoryEventBus
+from plaita.storage.memory import MemoryExecutionStorage
+
+# 一个等待外部事件的简单流程（event 节点模拟人工确认）
+flow_json = """
+{
+  "flow_id": "confirm_demo",
+  "nodes": [
+    {"type": "start", "id": "start", "next": "wait"},
+    {"type": "event", "id": "wait", "eventType": "user_confirm", "next": "end"},
+    {"type": "end", "id": "end", "output": "$NODE.wait.event_data", "resultType": "success"}
+  ]
+}
+"""
+import asyncio
+from plaita.event.core import Event
+
+flow = Flow.from_string(flow_json)
+bus = InMemoryEventBus()
+
+# 同一个 execution 实例，跨步骤复用
+execution = FlowExecution(event_bus=bus)
+
+# 第一步：推进到事件节点，挂起
+step1 = execution.run_distributed(flow, {})
+assert step1["is_suspend"] is True
+exec_id = execution._ctx.execution_id
+saved_ctx = step1["context"]          # 可序列化后持久化，此处直接用内存
+
+# 模拟外部事件到达（生产中由 ApprovalService / HTTP 回调等触发）
+asyncio.run(bus.publish(Event(
+    event_type="user_confirm",
+    data={"approved": True},
+    correlation_id=exec_id,
+)))
+
+# 第二步：用事件数据恢复
+step2 = execution.run_distributed(
+    flow, None,
+    saved_context=saved_ctx,
+    resume_type="event",
+    resume_data={"approved": True},
+)
+print(step2["result"])   # -> {"approved": True}
+```
+
+**需要生产级部署？** 把 `InMemoryEventBus` 换成 `RedisEventBus`，把 `MemoryExecutionStorage` 换成 `RedisStorage` 或 `SQLAlchemyStorage`，代码逻辑不变。
+
+---
+
 ## 章节导览
 
 - [Checkpoint 概念](checkpoint.md) —— 挂起/恢复的执行模型与 resume_type

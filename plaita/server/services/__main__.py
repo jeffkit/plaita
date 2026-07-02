@@ -42,7 +42,7 @@ def main():
     )
     parser.add_argument(
         '--redis-url',
-        default=os.environ.get('LOKI_REDIS_URL', os.environ.get('REDIS_URL', 'redis://localhost:6379/0')),
+        default=os.environ.get('PLAITA_REDIS_URL', os.environ.get('REDIS_URL', 'redis://localhost:6379/0')),
         help='Redis 连接 URL'
     )
     
@@ -65,7 +65,7 @@ def main():
     event_bus = RedisEventBus(redis_url=redis_url)
     
     # 获取实例 ID
-    instance_id = os.environ.get('LOKI_INSTANCE_ID', f'{args.service_type}-{os.getpid()}')
+    instance_id = os.environ.get('PLAITA_INSTANCE_ID', f'{args.service_type}-{os.getpid()}')
     
     # 创建服务配置
     service_config = {

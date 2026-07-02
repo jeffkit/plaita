@@ -465,12 +465,12 @@ def main():
     """命令行入口程序"""
     parser = argparse.ArgumentParser(description="Plaita流程工作器")
     
-    # Redis参数（支持环境变量 REDIS_URL / LOKI_REDIS_URL）
+    # Redis参数（支持环境变量 PLAITA_REDIS_URL / REDIS_URL）
     parser.add_argument("--redis-url",
-                      default=os.environ.get("LOKI_REDIS_URL", os.environ.get("REDIS_URL", "redis://localhost:6379/0")),
+                      default=os.environ.get("PLAITA_REDIS_URL", os.environ.get("REDIS_URL", "redis://localhost:6379/0")),
                       help="Redis连接URL")
     parser.add_argument("--queue-name",
-                      default=os.environ.get("LOKI_QUEUE_NAME", os.environ.get("QUEUE_NAME", "plaita:flow:queue")),
+                      default=os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", "plaita:flow:queue")),
                       help="Redis队列名称")
     
     # 数据库参数

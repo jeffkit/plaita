@@ -52,10 +52,10 @@ pip install plaita[server]
 
 ```python
 from plaita import FlowExecution
-from plaita.event.memory import MemoryEventBus
+from plaita.event.memory import InMemoryEventBus
 
 flow = Flow.from_string(open("leave_request.json").read())
-bus = MemoryEventBus()
+bus = InMemoryEventBus()
 execution = FlowExecution(event_bus=bus, callback_handlers=[])
 
 step = execution.run_distributed(flow, {"applicant": "alice", "reason": "年假"})
@@ -145,7 +145,7 @@ sequenceDiagram
 
 - `approval` 节点在 Distributed 模式下自动挂起，恢复时 `event_data` 含决策
 - `correlation_id = execution_id` 是把事件路由回正确流程的关键
-- 生产用 `FlowWorker` + `ApprovalService` 组成闭环，开发可用 `MemoryEventBus` 手动 `publish` 验证
+- 生产用 `FlowWorker` + `ApprovalService` 组成闭环，开发可用 `InMemoryEventBus` 手动 `publish` 验证
 
 ## 下一步
 

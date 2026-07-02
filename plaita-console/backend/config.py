@@ -40,18 +40,18 @@ class Settings(BaseModel):
     secret_key: str = Field(default="", description="HMAC secret-key")
 
     class Config:
-        env_prefix = "LOKI_CONSOLE_"
+        env_prefix = "PLAITA_CONSOLE_"
 
 
 def get_settings() -> Settings:
     """获取配置实例"""
     return Settings(
-        redis_url=os.getenv("LOKI_CONSOLE_REDIS_URL", "redis://localhost:6379/0"),
-        host=os.getenv("LOKI_CONSOLE_HOST", "0.0.0.0"),
-        port=int(os.getenv("LOKI_CONSOLE_PORT", "8080")),
-        debug=os.getenv("LOKI_CONSOLE_DEBUG", "false").lower() == "true",
-        db_url=os.getenv("LOKI_CONSOLE_DB_URL", "sqlite:///./plaita_console.db"),
-        secret_id=os.getenv("LOKI_CONSOLE_SECRET_ID", ""),
-        secret_key=os.getenv("LOKI_CONSOLE_SECRET_KEY", ""),
+        redis_url=os.getenv("PLAITA_CONSOLE_REDIS_URL", "redis://localhost:6379/0"),
+        host=os.getenv("PLAITA_CONSOLE_HOST", "0.0.0.0"),
+        port=int(os.getenv("PLAITA_CONSOLE_PORT", "8080")),
+        debug=os.getenv("PLAITA_CONSOLE_DEBUG", "false").lower() == "true",
+        db_url=os.getenv("PLAITA_CONSOLE_DB_URL", "sqlite:///./plaita_console.db"),
+        secret_id=os.getenv("PLAITA_CONSOLE_SECRET_ID", ""),
+        secret_key=os.getenv("PLAITA_CONSOLE_SECRET_KEY", ""),
     )
 

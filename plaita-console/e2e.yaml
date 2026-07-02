@@ -15,9 +15,9 @@ service:
     ports:
       - "18080:80"
     environment:
-      LOKI_CONSOLE_REDIS_URL: redis://host.docker.internal:6379/0
-      LOKI_CONSOLE_HOST: "0.0.0.0"
-      LOKI_CONSOLE_PORT: "80"
+      PLAITA_CONSOLE_REDIS_URL: redis://host.docker.internal:6379/0
+      PLAITA_CONSOLE_HOST: "0.0.0.0"
+      PLAITA_CONSOLE_PORT: "80"
     healthcheck:
       path: /health
       interval: 5s

@@ -32,9 +32,9 @@ services:
       image: plaita/flow-worker:latest
     env:
       # 使用内存存储
-      LOKI_STORAGE_TYPE: memory
-      LOKI_EVENTBUS_TYPE: memory
-      LOKI_QUEUE_TYPE: memory
+      PLAITA_STORAGE_TYPE: memory
+      PLAITA_EVENTBUS_TYPE: memory
+      PLAITA_QUEUE_TYPE: memory
     default_instances: 1
     max_instances: 5
 
@@ -46,8 +46,8 @@ services:
     docker:
       image: plaita/delay-service:latest
     env:
-      LOKI_STORAGE_TYPE: memory
-      LOKI_EVENTBUS_TYPE: memory
-      LOKI_CHECK_INTERVAL: "5"
+      PLAITA_STORAGE_TYPE: memory
+      PLAITA_EVENTBUS_TYPE: memory
+      PLAITA_CHECK_INTERVAL: "5"
     default_instances: 1
     max_instances: 2

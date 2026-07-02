@@ -158,13 +158,13 @@ plaita-console/
 
 | 变量名 | 默认值 | 描述 |
 |--------|--------|------|
-| `LOKI_CONSOLE_REDIS_URL` | `redis://localhost:6379/0` | Redis 连接 URL |
-| `LOKI_CONSOLE_HOST` | `0.0.0.0` | 监听地址 |
-| `LOKI_CONSOLE_PORT` | `8080` | 监听端口 |
-| `LOKI_CONSOLE_DEBUG` | `false` | 调试模式 |
-| `LOKI_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | 流程定义/版本/节点描述持久化（SQLAlchemy） |
-| `LOKI_CONSOLE_SECRET_ID` | _空_ | 对外契约接口 HMAC secret-id（为空则禁用 `/api/flowVersion/semver/detail`） |
-| `LOKI_CONSOLE_SECRET_KEY` | _空_ | 对外契约接口 HMAC secret-key |
+| `PLAITA_CONSOLE_REDIS_URL` | `redis://localhost:6379/0` | Redis 连接 URL |
+| `PLAITA_CONSOLE_HOST` | `0.0.0.0` | 监听地址 |
+| `PLAITA_CONSOLE_PORT` | `8080` | 监听端口 |
+| `PLAITA_CONSOLE_DEBUG` | `false` | 调试模式 |
+| `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | 流程定义/版本/节点描述持久化（SQLAlchemy） |
+| `PLAITA_CONSOLE_SECRET_ID` | _空_ | 对外契约接口 HMAC secret-id（为空则禁用 `/api/flowVersion/semver/detail`） |
+| `PLAITA_CONSOLE_SECRET_KEY` | _空_ | 对外契约接口 HMAC secret-key |
 
 ## 开发指南
 

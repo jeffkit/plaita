@@ -127,9 +127,11 @@ nav:
       - guide/index.md
       - 安装: guide/installation.md
       - 快速开始: guide/quickstart.md
-      - 流程定义: guide/flow-definition.md
-      - YAML 与 Python DSL 编排: guide/yaml-and-dsl.md
-      - 类代码 DSL：S-expr 与 @flow: guide/code-dsl.md
+      - 流程编写方式:
+          - guide/flow-authoring.md
+          - JSON 流程定义: guide/flow-definition.md
+          - YAML 与 Python Builder DSL: guide/yaml-and-dsl.md
+          - "@flow DSL": guide/code-dsl.md
       - 表达式: guide/expressions.md
       - 执行模式: guide/execution-modes.md
       - 错误处理与超时: guide/error-handling.md

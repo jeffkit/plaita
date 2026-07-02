@@ -26,7 +26,7 @@ COPY plaita-console/cluster_config.yaml ./plaita-console/cluster_config.yaml
 
 EXPOSE 8080
 
-ENV LOKI_CONSOLE_PORT=8080
+ENV PLAITA_CONSOLE_PORT=8080
 
-CMD uvicorn backend.main:app --host 0.0.0.0 --port ${LOKI_CONSOLE_PORT}
+CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PLAITA_CONSOLE_PORT}
 

@@ -180,11 +180,10 @@ class Reduce(Loop):
 
     def execute(self, execution):
         collection = execution.evaluate(self.collection)
-        result = execution.evaluate(self.initial) if self.initial else collection[0]
+        result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
 
-        if not self.initial:
-            collection = collection[1:]
-        for item in collection:
+        items = collection[1:] if self.initial is None else collection
+        for item in items:
             item_execution = execution.get_child_execution()
-            result = item_execution.run_compatible(self.child_flow, False, result, item)
+            result = item_execution.run_compatible(self.child_flow, False, first=result, second=item)
         return result

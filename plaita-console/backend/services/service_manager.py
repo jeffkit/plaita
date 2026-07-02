@@ -21,7 +21,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 # 项目根目录（支持通过环境变量覆盖，用于 Docker 环境）
-PROJECT_ROOT = Path(os.environ.get("LOKI_PROJECT_ROOT", str(Path(__file__).parent.parent.parent.parent)))
+PROJECT_ROOT = Path(os.environ.get("PLAITA_PROJECT_ROOT", str(Path(__file__).parent.parent.parent.parent)))
 
 
 class ServiceConfig(BaseModel):
@@ -109,7 +109,7 @@ class ProcessLauncher(ServiceLauncher):
         # 构建环境变量
         process_env = os.environ.copy()
         process_env.update(env)
-        process_env["LOKI_INSTANCE_ID"] = instance_id
+        process_env["PLAITA_INSTANCE_ID"] = instance_id
         process_env["PYTHONPATH"] = str(PROJECT_ROOT)
         
         # 获取模块路径
@@ -258,7 +258,7 @@ class DockerLauncher(ServiceLauncher):
         # 添加环境变量
         for key, value in env.items():
             cmd.extend(["-e", f"{key}={value}"])
-        cmd.extend(["-e", f"LOKI_INSTANCE_ID={instance_id}"])
+        cmd.extend(["-e", f"PLAITA_INSTANCE_ID={instance_id}"])
         
         # 添加端口映射
         for port in config.docker.get("ports", []):
@@ -401,7 +401,7 @@ class ServiceManager:
         
         redis_config = raw_config.get("redis", {})
         # 允许环境变量覆盖 Redis URL（Docker 环境中 redis 服务地址不同）
-        env_redis_url = os.environ.get("LOKI_CONSOLE_REDIS_URL")
+        env_redis_url = os.environ.get("PLAITA_CONSOLE_REDIS_URL")
         if env_redis_url:
             redis_config["url"] = env_redis_url
         
@@ -436,7 +436,7 @@ class ServiceManager:
         for key, value in env.items():
             if "${redis.url}" in value:
                 value = value.replace("${redis.url}", actual_redis_url)
-            elif key.upper() in ("REDIS_URL", "LOKI_REDIS_URL") and "localhost" in value:
+            elif key.upper() in ("REDIS_URL", "PLAITA_REDIS_URL") and "localhost" in value:
                 value = actual_redis_url
             resolved[key] = value
         return resolved

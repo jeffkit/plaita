@@ -93,7 +93,13 @@ print(result)
 
 ## 下一步
 
-- [流程定义](flow-definition.md) —— 完整字段与字段名兼容
+**选择你的流程编写方式（推荐先看这里）：**
+
+- [流程编写方式](flow-authoring.md) —— JSON / YAML / Python Builder / S-expr / @flow 五种方式对比，帮你选最适合的
+
+**继续深入：**
+
 - [表达式](expressions.md) —— `$INPUT` / `$NODE` / `$F.func(...)`
 - [执行模式](execution-modes.md) —— Normal / Generator / Distributed
+- [JSON 流程定义参考](flow-definition.md) —— 完整字段与字段名兼容
 - [回声流程实战](../scenarios/echo.md)

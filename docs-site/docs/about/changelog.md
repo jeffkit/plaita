@@ -1,8 +1,38 @@
 # 更新日志
 
-本页从 git 历史提炼近期变更，按主题归类。完整提交历史见仓库 `git log`。
+本页记录 **v0.4.0 及以后**的正式变更历史，按版本倒序排列。  
+0.4.0 之前的历史可通过 `git log --oneline` 查阅仓库完整提交记录。
 
-## 0.3.16 — 分层架构重构
+## 0.4.0 — 品牌统一 & API 清理
+
+### 品牌
+
+- **环境变量前缀统一**：控制台所有环境变量从 `LOKI_CONSOLE_*` 重命名为 `PLAITA_CONSOLE_*`；服务端环境变量从 `LOKI_*` 统一为 `PLAITA_*`（`REDIS_URL` / `QUEUE_NAME` 等通用名仍保留作为回退）
+- **版本号对齐**：`plaita/__init__.py` 中 `__version__` 与 `pyproject.toml` 保持一致
+
+### API
+
+- **`run_distributed` 明确为首选分布式入口**：移除高层 `run(mode='distributed')` 与实例方法之间的行为差异文档警告；`run(mode='distributed')` 已统一路由到实例的 `run_distributed`，跨步骤保留回调**仍需复用同一实例**（见[执行模式文档](../guide/execution-modes.md)）
+
+### 文档
+
+- **DSL 文档重组**：`@flow` 升为首选 Python API，JSON/YAML 合为「配置文件格式」，S-expr 降为高级用法，Builder 明确定位为「动态流程修改 API」
+- **reduce 节点 bug 修复**：子流程输入改为关键字参数 `first`/`second`（原为位置参数导致归约结果错误）；`initial` 判断改为 `is None` 以支持 `0`/`[]` 等 falsy 初始值
+- **定位澄清**：plaita 定位为**通用逻辑编排运行时**，AI Agent 编排为典型应用场景之一
+
+---
+
+## 0.3.x（历史参考）
+
+- 分层架构重构：`plaita.core` 执行核心层、依赖反转、三策略分离
+- 引入 Checkpoint / 断点续执、事件系统、FlowWorker 与扩展节点
+- 引入 `CodeNode` / `HTTP` / `Parallel` 等节点
+
+> 完整历史：`git log --oneline v0.3.16`
+
+---
+
+## 历史详情（0.3.16）
 
 ### 架构
 
