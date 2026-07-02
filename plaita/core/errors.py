@@ -244,13 +244,5 @@ class ErrorHandler(BaseModel):
             return self.default_value
 
 
-def _strategy_eq(value, member: ErrorStrategy) -> bool:
-    """.. deprecated:: 2026-07
-    ``ErrorHandler.strategy`` 现已存为 ``ErrorStrategy`` enum, 直接用 ``==`` 比较即可。
-    本函数仅为向后兼容外部 import 保留, 内部所有调用点已迁移。
-    """
-    return value == member or value == member.value
-
-
 class RecoverableErrorHandler(ErrorHandler):
     retry_times: int = Field(0, alias="retryTimes")

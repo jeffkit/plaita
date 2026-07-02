@@ -61,9 +61,9 @@ def _node_loc_suffix(node) -> str:
 def _coerce_strategy(value) -> ErrorStrategy:
     """容忍 ErrorStrategy enum / 字符串 / Mock / None, 一律归一为 enum。
 
-    历史上 runner 用 ``_strategy_eq`` 同时比较 enum 和字符串; ErrorHandler 字段
-    重构为 enum 后, 仍有外部代码 (含单元测试里的 Mock 对象) 把 strategy 设为
-    裸字符串。本 helper 让 runner 在所有输入形态下都能正确比较。
+    ErrorHandler.strategy 字段已是 enum, 但仍有外部代码 (含单元测试里的
+    Mock 对象) 把 strategy 设为裸字符串。本 helper 让 runner 在所有输入
+    形态下都能正确比较, 不必每个调用点都重复 ``==`` + ``.value`` 两套判断。
     """
     if isinstance(value, ErrorStrategy):
         return value

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from typing import Any, ClassVar, Dict, Optional, Union
 
 from pydantic import model_validator
@@ -53,10 +54,14 @@ class Loop(BaseCollectionNode):
             result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
             results.append(result)
             if self.condition:
-                # Shallow-merge is sufficient: condition.match is read-only.
-                # A full deepcopy here is an O(context_size) allocation per iteration
-                # with zero benefit — avoid it.
-                loop_ctx = dict(execution.context)
+                # 表达式引擎里有 ``$F.set`` / ``$F.pop`` / ``$F.setListItem`` 等
+                # mutate 操作 (见 plaita/core/expression.py), condition.match 通过
+                # evaluate 调用它们时会改 context 内 value 对象。``dict(...)``
+                # shallow copy 只防 top-level key 增删, 不防 value 对象被改——
+                # 历史上注释自安慰 "match is read-only" 是错的。每次迭代 deepcopy
+                # 把隔离做实, O(context_size) 的成本对 loop 而言可接受 (condition
+                # 已经是少数路径, 不在 hot loop)。
+                loop_ctx = deepcopy(execution.context)
                 loop_ctx[f"{pfx}LOOP-ITEM"] = item
                 loop_ctx[f"{pfx}LOOP-INDEX"] = index
                 loop_ctx[f"{pfx}LOOP-RESULT"] = result

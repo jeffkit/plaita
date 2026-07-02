@@ -196,7 +196,22 @@ class Parallel(Node):
         return self.pool_execute(THREAD, execution)
 
     def process_execute(self, execution):
-        """使用进程池来执行并行节点"""
+        """使用进程池来执行并行节点。
+
+        **cancel 信号限制**: ``ExecutionContext.__getstate__`` 会把不可 pickle
+        的 ``threading.Event`` (cancel_event) 弹掉, 子进程拿到的是全新未触发
+        的 Event。父进程的超时取消信号**不会跨进程传播**——如果分支内节点
+        需要响应取消 (例如父 flow 已超时), 应改用 ``mode=thread``。
+
+        唯一能做的进程边界检查: 进入 process_execute 时若父进程 cancel_event
+        已被 set, 直接放弃启动子进程, 避免无谓开销。
+        """
+        cancel_event = getattr(execution, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            logger.warning(
+                "parallel %s: cancel_event already set, skip process branches", self.id,
+            )
+            return {}
         return self.pool_execute(PROCESS, execution)
 
     def coroutine_execute(self, execution):

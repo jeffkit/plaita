@@ -396,6 +396,26 @@ tests/
 - 状态: ✅ 完成
 - 注意: **基线数字从 791 降到 670 是预期行为**——之前根目录下那些用 fakeredis 的"伪 unit"测试 (test_redis/test_storage*/test_event_filter_dedup 等) 默认会被收集并跑, 归类后被 `--ignore=tests/integration` 正确排除, 与 marker 设计意图一致。开发者要跑这些测试时显式 `pytest tests/integration/` 即可。
 
+### 2026-07-02 (批5) loop condition deepcopy 隔离 + process cancel 提前检查 + _strategy_eq 彻底删除
+
+#### loop condition shallow copy → deepcopy
+- **问题**: `loop.py` 用 `dict(execution.context)` shallow copy 给 condition 求值，注释自安慰"condition.match is read-only"——但 `$F.set` / `$F.pop` 等 mutate 函数（见 `plaita/core/expression.py`）会改 value 对象内部状态，shallow copy 无法防住，跨迭代污染原 context。
+- **改动**: `plaita/node/loop.py` — `loop_ctx = dict(execution.context)` → `loop_ctx = deepcopy(execution.context)` + `from copy import deepcopy`。
+- **新增测试**: `tests/unit/test_loop.py::TestLoopConditionIsolation` — 构造一个使用 `$F.set` 的 condition，验证 mutate 不泄漏到原 `execution.context`。
+- **验证**: `pytest tests/unit/test_loop.py -q` 13 passed。
+
+#### process 模式 cancel 信号提前检查
+- **改动**: `plaita/node/concurrent.py::Parallel.process_execute` — 进入时若 `cancel_event` 已被 set，直接 `return {}` 并 warning，避免启动子进程后因 pickle 丢失 cancel_event 而无谓运行。`plaita/core/context.py::__getstate__` 注释更新为明确说明限制（cancel 跨进程传播不支持，应改用 mode=thread）。
+- **验证**: 行为兼容性验证通过；cancel 跨进程传播的根本限制（pickle 弹掉 Event）记录在注释里，未来如需支持须用 IPC 方案。
+
+#### `_strategy_eq` 彻底删除
+- **背景**: 批 #6 把它标为 deprecated 保留外部 import；经核查无外部调用者，彻底删除。
+- **改动**: `plaita/core/errors.py` — 删除 `_strategy_eq` 函数及 docstring。`plaita/core/runner.py` — `_coerce_strategy` 注释同步精简（不再引用已删函数）。
+- **验证**: 全套 670 passed（-1 known timing flake `test_map_max_concurrent`）。
+- **状态**: ✅ 完成
+
+---
+
 下面这些是 review 里点到但本次整改**没动**的，原因要么是风险高（独立 milestone）、要么是需要先有设计：
 
 - **#13 `FlowExecution` 拆分 Driver/State/Hooks**：390 行的 God Object，重构影响面大，应作为独立 milestone，配 e2e 回归测试。

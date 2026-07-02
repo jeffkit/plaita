@@ -89,6 +89,79 @@ class LoopTestCase(TestCase):
         self.assertEqual(1, flow.run())
 
 
+class TestLoopConditionIsolation(unittest.TestCase):
+    """2026-07 整改: Loop condition 求值用的 ctx 必须与 execution.context 隔离。
+
+    历史上 loop.py 用 ``dict(execution.context)`` shallow copy, 注释自安慰
+    "condition.match is read-only"。但表达式引擎里有 ``$F.set`` / ``$F.pop``
+    等 mutate 函数 (见 plaita/core/expression.py), 一旦 condition 引用它们
+    就会污染原 context 里 value 对象, 跨迭代累积。deepcopy 把隔离做实。
+    """
+
+    def test_condition_using_set_function_does_not_mutate_original(self):
+        from plaita.node.decide import Condition, CONDITION_OP_EQ
+
+        # child_flow 把 item 原样返回; condition 用 $F.set 写一个 key (mutate)
+        # 再判等"counter != LOOP-RESULT"——永远为真, 让 loop 跑完所有 iteration
+        # 不 break, 同时每次 condition 求值都会触发 mutate。
+        # 关键: condition 求值用的 ctx 是 deepcopy 出来的, 不应污染原 context。
+        child = Flow(
+            flow_id="cond-isolation-child",
+            version="1",
+            runtime="python",
+            input_type=Property(
+                data_type=types.OBJECT,
+                children={"item": Property(data_type=types.INTEGER),
+                          "index": Property(data_type=types.INTEGER)},
+            ),
+            output_type=Property(data_type=types.INTEGER),
+            nodes=[
+                Start(id="cs", next="ce"),
+                End(id="ce", **{"resultType": "success", "output": "$INPUT.item"}),
+            ],
+        )
+
+        flow = Flow(
+            flow_id="cond-isolation",
+            version="1",
+            runtime="python",
+            input_type=Property(data_type=types.OBJECT),
+            global_context={"counter": 0},
+            nodes=[
+                Start(id="start", next="loop"),
+                Loop(
+                    id="loop",
+                    collection=[1, 2, 3],
+                    child_flow=child,
+                    # condition 故意 mutate $GLOBAL.counter, 然后用一条永远为真
+                    # 的判断 (counter != -1) 让 loop 跑完。
+                    condition=Condition(
+                        field="$F.set($GLOBAL, 'counter', $LOOP-RESULT)",
+                        operator=CONDITION_OP_EQ,
+                        value=0,
+                    ),
+                    next="end",
+                ),
+                End(id="end", **{"resultType": "success", "output": "$NODE.loop"}),
+            ],
+        )
+
+        execution = FlowExecution()
+        # condition 第一轮: $F.set 返回 None, None == 0 → False → break。
+        # 所以 loop 只跑第一个 item, result = 1。
+        # 但 mutate 在 condition 求值中已经发生 ($GLOBAL.counter 被改成 1)。
+        # 关键是: 这个 mutate 不应泄漏到原 execution.context。
+        result = execution.run_compatible(flow, lazy=False, input=None)
+        self.assertEqual(result, 1)
+        # deepcopy 隔离生效时 counter 仍是 0; shallow copy 时 counter 会被改成
+        # condition 写入的值 (1)。
+        self.assertEqual(
+            execution.context.get("$GLOBAL", {}).get("counter"),
+            0,
+            "condition 求值不应污染原 execution.context",
+        )
+
+
 class MapTestCase(TestCase):
     def setUp(self) -> None:
         self.child_flow = Flow(  # 如果age大于35，则映射为old ...

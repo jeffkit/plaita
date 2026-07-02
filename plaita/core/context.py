@@ -210,8 +210,11 @@ class ExecutionContext:
         )
 
     def __getstate__(self):
-        # threading.Event 不可 pickle; 进程模式下子进程会得到一个全新的(未触发)事件,
-        # 跨进程取消本就不适用。
+        # threading.Event 不可 pickle。进程模式下子进程会经 ``__setstate__``
+        # 重建一个**全新未触发**的 Event——这意味着父进程的 cancel 信号无法
+        # 通过 pickle 传给子进程。如果调用方依赖 cancel 跨进程传播 (例如
+        # Parallel mode=process 的分支内节点需要响应父进程超时取消), 当前实现
+        # 不支持, 应改用 mode=thread 或显式 IPC。
         state = self.__dict__.copy()
         state.pop("cancel_event", None)
         return state
