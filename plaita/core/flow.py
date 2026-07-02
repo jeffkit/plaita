@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from plaita.core import types
-from plaita.core.errors import FlowErrorType, FlowExecutionException
+from plaita.core.errors import FlowStartMissingError, NodeNotFoundError
 from plaita.io import Property
 from plaita.logger import logger
 from plaita.node import End, Node, Start, get_default_registry
@@ -99,6 +99,8 @@ class Flow(BaseModel):
 
         JSON 走 ``model_validate_json``；YAML（及无法按 JSON 解析的内容）
         走 ``plaita.io_format.loads`` 再 ``model_validate``。
+        JSON 解析失败时把原始异常作为 cause 保留，避免真正的报错被
+        YAML fallback 的次级报错淹没。
         """
         from plaita.io_format import loads
 
@@ -108,8 +110,14 @@ class Flow(BaseModel):
         if content.lstrip()[:1] in ("{", "["):
             try:
                 return Flow.model_validate_json(content)
-            except Exception:
-                pass
+            except ValueError as json_err:
+                # 不要静默吞掉 JSON 报错——若 YAML fallback 也失败，
+                # 把原始 JSON 异常作为 cause 一并抛出，方便定位真凶。
+                try:
+                    data = loads(content)
+                    return Flow.model_validate(data)
+                except Exception:
+                    raise json_err
         data = loads(content)
         return Flow.model_validate(data)
 
@@ -147,7 +155,15 @@ class Flow(BaseModel):
         for n in self.nodes:
             if n.id not in referenced:
                 return n
-        return self.nodes[0] if self.nodes else None
+
+        # 没有显式 Start 且所有节点都有入度 (成环或空) —— 不再静默回退 nodes[0]
+        # 瞎猜入口, 直接报错让用户显式指定 Start 节点或打破环。
+        if not self.nodes:
+            return None
+        raise FlowStartMissingError(
+            "无法确定流程入口: 没有显式 Start 节点, 且所有节点都被引用 (可能成环)。"
+            "请添加一个 Start 节点, 或确保存在一个未被任何节点 next/branch 指向的入口节点。"
+        )
 
     def find_node_by_id(self, node_id) -> Optional[Node]:
         if node_id is None:
@@ -155,15 +171,17 @@ class Flow(BaseModel):
         index = self._ensure_index()
         node = index.get(node_id)
         if node is None:
-            raise FlowExecutionException(
-                -500,
-                f"Node with id '{node_id}' not found",
-                FlowErrorType.NODE_NOT_FOUND,
-            )
+            raise NodeNotFoundError(node_id)
         return node
 
+    def is_end_node(self, node) -> bool:
+        """True if *node* is an End node. Lives on Flow so callers (strategies,
+        helpers) need not import ``plaita.node.End`` and re-trigger the
+        core → node circular import."""
+        return node is not None and node.node_type == End.node_type
+
     def next_node(self, current: Node, branch=None) -> Optional[Node]:
-        if current.node_type == End.node_type:
+        if self.is_end_node(current):
             return None
         target = self._get_target_node(current, branch)
         ret = self.find_node_by_id(target)

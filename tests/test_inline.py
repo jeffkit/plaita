@@ -1,7 +1,7 @@
 from unittest import TestCase
 
 from plaita.core import types
-from plaita.flow import Flow
+from plaita.core.flow import Flow
 from plaita.io import Property
 from plaita.node import End, InlineFlow, Start
 

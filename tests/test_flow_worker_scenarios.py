@@ -9,7 +9,8 @@ import asyncio
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 
-from plaita.flow import Flow, FlowExecution, ExecutionMode
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 from plaita.storage.base import ExecutionState
 from plaita.server.flow_worker import FlowWorker

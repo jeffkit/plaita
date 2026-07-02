@@ -10,19 +10,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 import isodate
 
+# Bounded shared pool for sync-node execution. Replaces the old per-node
+# daemon-thread spawn so a parallel fan-out of sync nodes is bounded instead of
+# unbounded. A stuck node occupies a worker until it returns (same abandon
+# semantics as before on timeout — cancel_event is set cooperatively); sizing is
+# generous to avoid starving legitimate concurrent sync work.
+_SYNC_NODE_POOL = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("PLAITA_SYNC_NODE_POOL_SIZE", "32")),
+    thread_name_prefix="plaita-sync-node",
+)
+
 from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
+    ErrorResultException,
     ErrorStrategy,
     FlowErrorType,
     FlowExecutionException,
     FlowResultError,
     NodeException,
+    NodeExecutionError,
+    NodeTimeoutError,
     _strategy_eq,
 )
 
@@ -32,17 +46,6 @@ if TYPE_CHECKING:
     from plaita.node.basic import Node
 
 logger = logging.getLogger("plaita.core.runner")
-
-
-def _set_result(fut, value):
-    if not fut.done():
-        fut.set_result(value)
-
-
-def _set_exc(fut, exc):
-    if not fut.done():
-        fut.set_exception(exc)
-
 
 class NodeRunner:
     """Handles single-node execution with timeout, retry, and error handling."""
@@ -148,33 +151,26 @@ class NodeRunner:
         return await node.arun(exec_ctx)
 
     async def _run_sync_node(self, node, timeout_ms: Optional[int]) -> Any:
-        """Run sync node on a daemon thread; bridge result via a Future.
+        """Run a sync node on the bounded shared thread pool; bridge via the loop.
 
-        Keeps the event loop free (we ``await`` a future, never ``join``).
-        On timeout, set ``cancel_event`` (cooperative cancel) and abandon the
-        daemon thread -- it keeps running but won't block loop teardown/exit.
+        Uses ``loop.run_in_executor`` against ``_SYNC_NODE_POOL`` instead of
+        spawning a fresh daemon thread per node, so concurrent sync work is
+        bounded. On timeout we set ``cancel_event`` (cooperative cancel) and let
+        ``wait_for`` abandon the future — the underlying worker keeps running
+        the node to completion but won't block loop teardown (daemon threads in
+        the pool).
         """
         exec_ctx = self.node_execution or self.context
         loop = asyncio.get_running_loop()
         cancel_event = getattr(exec_ctx, "cancel_event", None)
-        fut = loop.create_future()
-
-        def _run():
-            try:
-                result = node.run(exec_ctx)
-            except BaseException as e:  # noqa: BLE001 - 透传节点原始异常
-                if not fut.done():
-                    loop.call_soon_threadsafe(_set_exc, fut, e)
-            else:
-                if not fut.done():
-                    loop.call_soon_threadsafe(_set_result, fut, result)
-
-        threading.Thread(target=_run, daemon=True).start()
 
         if timeout_ms is None:
-            return await fut
+            return await loop.run_in_executor(_SYNC_NODE_POOL, node.run, exec_ctx)
         try:
-            return await asyncio.wait_for(fut, timeout=timeout_ms / 1000.0)
+            return await asyncio.wait_for(
+                loop.run_in_executor(_SYNC_NODE_POOL, node.run, exec_ctx),
+                timeout=timeout_ms / 1000.0,
+            )
         except asyncio.TimeoutError:
             if cancel_event is not None:
                 cancel_event.set()
@@ -194,23 +190,21 @@ class NodeRunner:
         else:
             message = f"Node {node.name or node.id} execution timeout"
 
-        error = {"code": -1, "message": message}
         error_type = FlowErrorType.FLOW_ERROR if time_limit_by_flow else FlowErrorType.NODE_ERROR
-        raise FlowExecutionException(-1, message, error_type, node)
+        raise NodeTimeoutError(message, node=node, error_type=error_type)
 
     def _handle_flow_result_error(self, flow, node, e: FlowResultError):
-        error = {"code": e.code, "message": e.message}
-        raise FlowExecutionException(e.code, e.message, FlowErrorType.ERROR_RESULT) from e
+        raise ErrorResultException(e.code, e.message, node=node) from e
 
     def _handle_node_error(self, flow, node, error_handler, e: Exception):
-        logger.warning(f"handle node error: {node.name or node.id}", exc_info=True)
+        logger.warning("handle node error: %s", node.name or node.id, exc_info=True)
         strategy = error_handler.strategy if error_handler else ErrorStrategy.ABORT
         if not error_handler or _strategy_eq(strategy, ErrorStrategy.ABORT):
             code = DEFAULT_NODE_ABORT_CODE if not error_handler else error_handler.error_code
             message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}"
             if error_handler and error_handler.error_message:
                 message = error_handler.error_message
-            raise FlowExecutionException(code, message, FlowErrorType.NODE_ERROR, node) from e
+            raise NodeExecutionError(message, node=node, code=code) from e
         elif _strategy_eq(strategy, ErrorStrategy.CONTINUE):
             return None
         elif _strategy_eq(strategy, ErrorStrategy.CONTINUE_WITH):

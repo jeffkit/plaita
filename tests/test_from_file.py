@@ -1,6 +1,6 @@
 import unittest
 
-from plaita.flow import Flow
+from plaita.core.flow import Flow
 
 
 class MyTestCase(unittest.TestCase):

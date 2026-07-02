@@ -15,7 +15,7 @@ python -m plaita
 内置一个事件总线演示脚本（内存后端），便于理解发布/订阅：
 
 ```bash
-python -m plaita.event.demo_eventbus --backend memory
+python -m examples.event_demo.demo_eventbus --backend memory
 ```
 
 > 该脚本在覆盖率配置中被 omit，仅供演示，不属于稳定 CLI。
@@ -26,7 +26,7 @@ python -m plaita.event.demo_eventbus --backend memory
 
 ```bash
 pip install plaita[server]
-python -m plaita.server.extended_nodes_demo
+python -m examples.server_demo.extended_nodes_demo
 ```
 
 ## 外延服务入口

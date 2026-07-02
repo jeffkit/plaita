@@ -151,7 +151,7 @@ class ControlListener:
                     self._handle_message(message["data"])
                     
         except Exception as e:
-            logger.error(f"控制监听器出错: {e}", exc_info=True)
+            logger.error("控制监听器出错: %s", e, exc_info=True)
     
     def _handle_message(self, data):
         """
@@ -181,7 +181,7 @@ class ControlListener:
                 logger.warning(f"未知的控制指令: {command.command}")
                 
         except Exception as e:
-            logger.error(f"处理控制指令失败: {e}", exc_info=True)
+            logger.error("处理控制指令失败: %s", e, exc_info=True)
     
     def _handle_stop(self, command: ControlCommand):
         """处理停止指令"""

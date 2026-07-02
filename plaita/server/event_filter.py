@@ -118,7 +118,7 @@ class EventFilter:
                     logger.debug(f"订阅与当前执行无关，跳过: {subscription.subscription_id}")
             
         except Exception as e:
-            logger.error(f"处理事件出错: {e}", exc_info=True)
+            logger.error("处理事件出错: %s", e, exc_info=True)
     
     async def start(self, event_type: Optional[str] = None):
         """
@@ -251,7 +251,7 @@ async def main_async(args):
         await event_filter.start(event_type=args.event_type)
         
     except Exception as e:
-        logger.error(f"事件过滤器启动失败: {e}", exc_info=True)
+        logger.error("事件过滤器启动失败: %s", e, exc_info=True)
         sys.exit(1)
 
 def main():

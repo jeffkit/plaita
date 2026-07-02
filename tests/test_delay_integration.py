@@ -10,7 +10,8 @@ import time
 from datetime import datetime
 from unittest.mock import Mock, patch, MagicMock
 
-from plaita.flow import Flow, FlowExecution, ExecutionMode
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.event.memory import InMemoryEventBus
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 from plaita.storage.base import ExecutionState

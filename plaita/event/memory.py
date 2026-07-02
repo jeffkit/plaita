@@ -387,7 +387,7 @@ class InMemoryEventBus(EventBus):
                 try:
                     await self._process_event(handler, event, handler_id)
                 except Exception as e:
-                    logger.error(f"处理事件 {event.event_id} 出错: {str(e)}", exc_info=True)
+                    logger.error("处理事件 %s 出错: %s", event.event_id, e, exc_info=True)
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
         """处理事件并记录结果"""

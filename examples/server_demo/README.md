@@ -26,7 +26,7 @@
 运行所有扩展节点的完整演示：
 
 ```bash
-python -m plaita.server.extended_nodes_demo
+python -m examples.server_demo.extended_nodes_demo
 ```
 
 ### 简化演示
@@ -34,7 +34,7 @@ python -m plaita.server.extended_nodes_demo
 运行核心功能的简化演示：
 
 ```bash
-python -m plaita.server.extended_nodes_demo simple
+python -m examples.server_demo.extended_nodes_demo simple
 ```
 
 ## 演示内容

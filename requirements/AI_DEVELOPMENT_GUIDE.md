@@ -214,10 +214,10 @@ python -m black plaita/
 
 ```bash
 # 事件系统演示（内存后端）
-python -m plaita.event.demo_eventbus --backend memory
+python -m examples.event_demo.demo_eventbus --backend memory
 
 # 扩展节点演示
-python -m plaita.server.extended_nodes_demo
+python -m examples.server_demo.extended_nodes_demo
 ```
 
 ---

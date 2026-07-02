@@ -323,7 +323,7 @@ if result1.get("is_suspend"):
 cd plaita/runtime/python
 
 # 运行演示
-python -m plaita.server.extended_nodes_demo
+python -m examples.server_demo.extended_nodes_demo
 ```
 
 演示将展示：

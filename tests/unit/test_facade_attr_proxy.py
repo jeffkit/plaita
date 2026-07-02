@@ -1,7 +1,10 @@
 """FlowExecution facade 属性代理行为测试。
 
-strict_attrs=True（默认）: 未知公共属性写入抛 AttributeError，防止拼写错误静默落入 context。
-strict_attrs=False: 未知公共属性写入 context（向后兼容模式，显式 opt-in）。
+重构后 FlowExecution 不再用 ``__getattr__``/``__setattr__`` 兜底代理：
+context / express_* / execution_id / event_bus / cancel_event 都是**显式**
+property，state 访问走显式 ``set_state``/``get_state``/``evaluate`` 等方法。
+未声明的属性就是普通 Python 实例属性——不会再静默落进 context state，
+也不会再凭空代理到 context 的任意方法。
 """
 
 import unittest
@@ -9,22 +12,7 @@ import unittest
 from plaita.core.executor import FlowExecution
 
 
-class TestFacadeNoPhantomAttrs(unittest.TestCase):
-    def test_unknown_public_attr_lands_on_context(self):
-        # strict_attrs=False: 未知属性落入 context 而不是 facade.__dict__
-        execution = FlowExecution(strict_attrs=False)
-        execution.my_marker = 42
-
-        self.assertEqual(execution._ctx.get_state("my_marker"), 42)
-        self.assertNotIn("my_marker", execution.__dict__)
-
-    def test_unknown_attr_round_trips(self):
-        # strict_attrs=False: 读写对称
-        execution = FlowExecution(strict_attrs=False)
-        execution.temp_value = "hello"
-        self.assertEqual(execution.temp_value, "hello")
-        self.assertEqual(execution._ctx.get_state("temp_value"), "hello")
-
+class TestFacadeExplicitDelegation(unittest.TestCase):
     def test_real_attrs_stay_on_facade(self):
         execution = FlowExecution()
         execution.mode = "normal"
@@ -35,17 +23,45 @@ class TestFacadeNoPhantomAttrs(unittest.TestCase):
         self.assertNotIn("mode", execution._ctx.context)
         self.assertNotIn("timeout", execution._ctx.context)
 
-    def test_strict_attrs_rejects_unknown_writes(self):
-        """strict_attrs=True 时拼写错误不再静默落到 context state。"""
-        execution = FlowExecution(strict_attrs=True)
-        with self.assertRaises(AttributeError):
-            execution.tiemout = 100  # 拼写错误的 timeout
-        # 真实属性仍可正常写入
-        execution.timeout = 100
-        self.assertEqual(execution.timeout, 100)
-        # context 已有属性(如 express_prefix)仍可写
+    def test_context_property_round_trips_to_underlying_ctx(self):
+        execution = FlowExecution()
+        execution.context = {"$INPUT": {"x": 1}}
+        self.assertEqual(execution._ctx.context, {"$INPUT": {"x": 1}})
+        self.assertEqual(execution.context, {"$INPUT": {"x": 1}})
+
+    def test_express_prefix_property_delegates_to_ctx(self):
+        execution = FlowExecution()
         execution.express_prefix = "#"
         self.assertEqual(execution.express_prefix, "#")
+        self.assertEqual(execution._ctx.express_prefix, "#")
+
+    def test_unknown_attr_does_not_leak_into_context_state(self):
+        # 没有 strict_attrs 开关了：拼写错误就是普通实例属性，
+        # 关键保证是它**不会**静默落进 context state 造成持久化污染。
+        execution = FlowExecution()
+        execution.tiemout = 100  # 拼写错误的 timeout
+        self.assertEqual(execution.tiemout, 100)
+        self.assertNotIn("tiemout", execution._ctx.context)
+        # 真实属性照常工作
+        execution.timeout = 100
+        self.assertEqual(execution.timeout, 100)
+
+    def test_no_phantom_context_method_delegation(self):
+        # context 上有的方法不应自动出现在 facade 上（除非显式声明）。
+        # 这里用一个 context 独有、facade 未声明的方法验证。
+        execution = FlowExecution()
+        self.assertFalse(hasattr(execution, "child"))
+        # 显式声明的 delegate 仍然在
+        self.assertTrue(hasattr(execution, "evaluate"))
+        self.assertTrue(hasattr(execution, "set_state"))
+        self.assertTrue(hasattr(execution, "get_state"))
+
+    def test_execution_id_is_read_only_property(self):
+        execution = FlowExecution()
+        eid = execution.execution_id
+        self.assertEqual(eid, execution._ctx.execution_id)
+        with self.assertRaises(AttributeError):
+            execution.execution_id = "hacked"
 
 
 if __name__ == "__main__":

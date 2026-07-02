@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from plaita.flow import Flow
+from plaita.core.flow import Flow
 
 # 获取logger
 logger = logging.getLogger("plaita.client")

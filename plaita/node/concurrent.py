@@ -28,7 +28,7 @@ class ParallelBranch(Branch):
     @model_validator(mode="before")
     @classmethod
     def setup_flow(cls, values: Dict) -> Dict:
-        from plaita.flow import Flow
+        from plaita.core.flow import Flow
 
         flow = values.get("flow")
         if isinstance(flow, str):

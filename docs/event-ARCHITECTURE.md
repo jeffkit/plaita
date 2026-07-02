@@ -370,10 +370,10 @@ Plaita事件系统支持混合使用不同的组件实现，为不同应用场�
 
 ```shell
 # 使用Redis事件总线和DB存储
-python -m plaita.event.demo_eventbus --backend mixed --bus-type redis --storage-type db --subscription-type redis --tracker-type db
+python -m examples.event_demo.demo_eventbus --backend mixed --bus-type redis --storage-type db --subscription-type redis --tracker-type db
 
 # 使用Memory事件总线和Redis存储
-python -m plaita.event.demo_eventbus --backend mixed --bus-type memory --storage-type redis --subscription-type memory --tracker-type redis
+python -m examples.event_demo.demo_eventbus --backend mixed --bus-type memory --storage-type redis --subscription-type memory --tracker-type redis
 ```
 
 ### 8.5 事件处理流程详解

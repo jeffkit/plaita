@@ -2,7 +2,9 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from plaita.flow import Flow, FlowExecution, FlowExecutionException
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution
+from plaita.core.errors import FlowExecutionException
 from plaita.node import Start, End, Node, Switch
 from plaita.core.errors import FlowErrorType
 

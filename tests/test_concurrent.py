@@ -1,7 +1,7 @@
 import json
 from unittest import TestCase
 
-from plaita.flow import Flow
+from plaita.core.flow import Flow
 from plaita.io import Property, types
 from plaita.node import End, Start
 from plaita.node.assignment import Assignment  # 添加这行导入

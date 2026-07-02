@@ -6,7 +6,7 @@ import pytest
 import time
 from unittest.mock import Mock, MagicMock
 
-from plaita.flow import FlowExecution
+from plaita.core.executor import FlowExecution
 from plaita.event.memory import InMemoryEventBus
 from plaita.server.nodes.base_extended_node import BaseExtendedNode
 from plaita.server.nodes.delay_node import DelayNode

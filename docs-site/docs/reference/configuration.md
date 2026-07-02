@@ -66,7 +66,6 @@ omit = [
   "plaita/node/http.py",
   "plaita/client.py",
   "plaita/event/demo_eventbus.py",
-  "plaita/event/timeout_example.py",
   "plaita/event/redis.py",
   "plaita/event/sqlalchemy.py",
   "plaita/event/timeout.py",

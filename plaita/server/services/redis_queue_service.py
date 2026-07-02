@@ -96,7 +96,7 @@ class RedisQueueService(BaseExtendedService):
             logger.info("Redis队列服务已启动")
             return True
         except Exception as e:
-            logger.error(f"启动Redis队列服务失败: {e}", exc_info=True)
+            logger.error("启动Redis队列服务失败: %s", e, exc_info=True)
             return False
     
     def stop_service(self) -> bool:
@@ -122,7 +122,7 @@ class RedisQueueService(BaseExtendedService):
             logger.info("Redis队列服务已停止")
             return True
         except Exception as e:
-            logger.error(f"停止Redis队列服务失败: {e}", exc_info=True)
+            logger.error("停止Redis队列服务失败: %s", e, exc_info=True)
             return False
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -190,7 +190,7 @@ class RedisQueueService(BaseExtendedService):
             await self._cleanup_client(execution_id)
             raise
         except Exception as e:
-            logger.error(f"处理Redis队列任务失败: {e}", exc_info=True)
+            logger.error("处理Redis队列任务失败: %s", e, exc_info=True)
             await self._trigger_error_event(task_config, str(e))
             await self._cleanup_client(execution_id)
             return False
@@ -384,7 +384,7 @@ class RedisQueueService(BaseExtendedService):
                 await asyncio.sleep(delay)
             except Exception as e:
                 consecutive_errors += 1
-                logger.error(f"监听Redis列表队列出错: {e}", exc_info=True)
+                logger.error("监听Redis列表队列出错: %s", e, exc_info=True)
                 
                 if consecutive_errors >= max_consecutive_errors:
                     return False
@@ -503,7 +503,7 @@ class RedisQueueService(BaseExtendedService):
                 await asyncio.sleep(delay)
             except Exception as e:
                 consecutive_errors += 1
-                logger.error(f"监听Redis流队列出错: {e}", exc_info=True)
+                logger.error("监听Redis流队列出错: %s", e, exc_info=True)
                 
                 if consecutive_errors >= max_consecutive_errors:
                     return False

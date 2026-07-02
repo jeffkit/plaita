@@ -83,7 +83,7 @@ class KafkaQueueService(BaseExtendedService):
             logger.info("Kafka队列服务已启动")
             return True
         except Exception as e:
-            logger.error(f"启动Kafka队列服务失败: {e}", exc_info=True)
+            logger.error("启动Kafka队列服务失败: %s", e, exc_info=True)
             return False
     
     def _init_admin_client(self):
@@ -119,7 +119,7 @@ class KafkaQueueService(BaseExtendedService):
             logger.info("Kafka队列服务已停止")
             return True
         except Exception as e:
-            logger.error(f"停止Kafka队列服务失败: {e}", exc_info=True)
+            logger.error("停止Kafka队列服务失败: %s", e, exc_info=True)
             return False
     
     def _close_all_consumer_groups(self):
@@ -186,7 +186,7 @@ class KafkaQueueService(BaseExtendedService):
                 return group_info
                 
             except Exception as e:
-                logger.error(f"创建消费者组 {group_id} 失败: {e}", exc_info=True)
+                logger.error("创建消费者组 %s 失败: %s", group_id, e, exc_info=True)
                 return None
     
     def destroy_consumer_group(self, group_id: str) -> bool:
@@ -214,7 +214,7 @@ class KafkaQueueService(BaseExtendedService):
                 return True
                 
             except Exception as e:
-                logger.error(f"销毁消费者组 {group_id} 失败: {e}", exc_info=True)
+                logger.error("销毁消费者组 %s 失败: %s", group_id, e, exc_info=True)
                 return False
     
     def get_consumer_group_status(self, group_id: str = None) -> Dict[str, Any]:
@@ -290,7 +290,7 @@ class KafkaQueueService(BaseExtendedService):
                 return True
                 
             except Exception as e:
-                logger.error(f"提交偏移量失败: {e}", exc_info=True)
+                logger.error("提交偏移量失败: %s", e, exc_info=True)
                 return False
     
     def seek_to_offset(self, group_id: str, partition: int, offset: int) -> bool:
@@ -321,7 +321,7 @@ class KafkaQueueService(BaseExtendedService):
                 return True
                 
             except Exception as e:
-                logger.error(f"定位偏移量失败: {e}", exc_info=True)
+                logger.error("定位偏移量失败: %s", e, exc_info=True)
                 return False
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -369,7 +369,7 @@ class KafkaQueueService(BaseExtendedService):
                 )
                 return True
             except Exception as e:
-                logger.error(f"Kafka监听任务执行失败: {e}", exc_info=True)
+                logger.error("Kafka监听任务执行失败: %s", e, exc_info=True)
                 
                 # 触发错误事件
                 error_event_data = {
@@ -389,7 +389,7 @@ class KafkaQueueService(BaseExtendedService):
                 return False
                 
         except Exception as e:
-            logger.error(f"处理Kafka队列任务失败: {e}", exc_info=True)
+            logger.error("处理Kafka队列任务失败: %s", e, exc_info=True)
             
             # 触发错误事件
             try:
@@ -675,7 +675,7 @@ class KafkaQueueService(BaseExtendedService):
                 await redis_client.close()
                 
         except Exception as e:
-            logger.error(f"Kafka消息监听错误: {e}", exc_info=True)
+            logger.error("Kafka消息监听错误: %s", e, exc_info=True)
             if redis_client:
                 await redis_client.close()
             raise

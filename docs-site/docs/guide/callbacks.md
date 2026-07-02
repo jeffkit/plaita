@@ -87,14 +87,16 @@ execution = FlowExecution(callback_handlers=[A(), B()])
 
 Distributed 模式下，每次 `run_distributed` 推进一个节点。若希望回调**贯穿所有步骤**，必须**复用同一个 `FlowExecution` 实例**（见 [执行模式 - Distributed](execution-modes.md#distributed)）；用 `FlowExecution.run(..., mode='distributed')` 类方法每次会新建实例，回调不保留。
 
-## facade 上的触发捷径
+## 手动触发回调
 
-`FlowExecution` facade 把 `trigger_*` 映射到 `CallbackManager.on_*`，方便自定义节点手动触发事件：
+自定义节点需要手动触发回调时，直接调用 `CallbackManager` 上的 `on_*` 方法：
 
 ```python
 def execute(self, execution):
-    execution.trigger_my_event(...)  # 等价于 execution.callback_manager.on_my_event(...)
+    execution.callback_manager.on_node_end(flow, node, result)
 ```
+
+`FlowExecution` 不再提供 `trigger_*` 魔法捷径——所有可用的 facade 方法都是显式声明的，避免属性查找的黑箱。
 
 ## 下一步
 

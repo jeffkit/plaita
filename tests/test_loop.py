@@ -3,7 +3,8 @@ import json
 import unittest
 
 from plaita.core import types
-from plaita.flow import Flow, FlowExecution
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution
 from plaita.io import Property
 from plaita.node import End, Start, decide
 from plaita.node.loop import Filter, Find, Loop, Map

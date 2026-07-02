@@ -8,11 +8,12 @@ import logging
 import time
 from typing import Dict, Any
 
-from .nodes import DelayNode, RedisQueueNode, KafkaQueueNode, HttpCallbackNode, ApprovalNode
-from .services import ServiceManager, DelayService, HttpCallbackService, ApprovalService
-from ..flow import Flow, FlowExecution
-from ..event import InMemoryEventBus, get_default_event_bus
-from ..logger import logger
+from plaita.server.nodes import DelayNode, RedisQueueNode, KafkaQueueNode, HttpCallbackNode, ApprovalNode
+from plaita.server.services import ServiceManager, DelayService, HttpCallbackService, ApprovalService
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution
+from plaita.event import InMemoryEventBus, get_default_event_bus
+from plaita.logger import logger
 
 # 演示脚本自行配置日志输出（库本身不再强制任何 handler/级别）。
 logging.basicConfig(
@@ -239,7 +240,7 @@ class ExtendedNodesDemo:
             ApprovalNode
         ]
         
-        from ..node import get_default_registry
+        from plaita.node import get_default_registry
         registry = get_default_registry()
         for node_class in extended_nodes:
             try:
@@ -760,7 +761,7 @@ async def simple_demo():
         logger.info(f"事件处理器已注册: delay={delay_handler_id}, approval={approval_handler_id}")
         
         # 注册节点类型
-        from ..node import get_default_registry
+        from plaita.node import get_default_registry
         registry = get_default_registry()
         for node_class in [DelayNode, ApprovalNode, HttpCallbackNode, KafkaQueueNode]:
             registry.register(node_class)

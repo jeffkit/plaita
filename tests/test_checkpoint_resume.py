@@ -6,7 +6,9 @@ T033: 端到端断点续执场景测试（挂起→恢复→完成）
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
-from plaita.flow import Flow, FlowExecution, FlowExecutionException, ExecutionMode
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution, ExecutionMode
+from plaita.core.errors import FlowExecutionException
 from plaita.node import Start, End, Node
 from plaita.node.event_node import EventNode
 from plaita.core.errors import FlowErrorType

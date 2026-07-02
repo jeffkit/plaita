@@ -192,7 +192,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             logger.info(f"异步任务 {task_id} 执行完成: {result}")
             
         except Exception as e:
-            logger.error(f"异步任务 {task_id} 执行失败: {e}", exc_info=True)
+            logger.error("异步任务 %s 执行失败: %s", task_id, e, exc_info=True)
             self._handle_task_error(task_config, e)
         finally:
             # 从活跃任务集合中移除
@@ -218,7 +218,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             logger.info(f"同步任务 {task_id} 执行完成: {result}")
             
         except Exception as e:
-            logger.error(f"同步任务 {task_id} 执行失败: {e}", exc_info=True)
+            logger.error("同步任务 %s 执行失败: %s", task_id, e, exc_info=True)
             self._handle_task_error(task_config, e)
         finally:
             # 从活跃任务集合中移除
@@ -282,7 +282,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             self.event_bus.publish_sync("service_error", **error_event_data)
             
         except Exception as e:
-            logger.error(f"处理任务错误时出错: {e}", exc_info=True)
+            logger.error("处理任务错误时出错: %s", e, exc_info=True)
     
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """
@@ -304,7 +304,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             logger.info(f"事件已触发: {event_type}, 数据: {event_data}")
             
         except Exception as e:
-            logger.error(f"触发事件失败: {e}", exc_info=True)
+            logger.error("触发事件失败: %s", e, exc_info=True)
     
     def get_active_task_count(self) -> int:
         """

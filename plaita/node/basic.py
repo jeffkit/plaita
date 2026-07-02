@@ -53,30 +53,21 @@ class Node(BaseModel):
             values["error_handler"] = RecoverableErrorHandler(**error_handler_config)
         return values
 
-    # @property
-    # def input_property(self):
-    #     return self.input_type
+    def validate(self) -> None:
+        """构造期校验节点配置。由 ``FlowBuilder.validate`` 调用，子类可覆写
+        （如 ``Switch`` / ``HTTP``）以在流程构建阶段就拦下非法配置。"""
+        return None
 
-    # @property
-    # def output_property(self):
-    #     return self.output_type
+    def _validate_output(self, result: Any) -> None:
+        """运行期校验节点输出。``run`` 会在 ``execute`` 后调用本方法，子类可
+        覆写以校验产出格式。默认无操作。"""
+        return None
 
-    def validate(self):
-        # 校验节点配置是否正确,在构造Flow时本方法会被调用。
-        pass
-
-    def _validate_input(self, *args, **kwargs):
-        # 校验输入值是否满足要求
-        pass
-
-    def _validate_output(self, result):
-        # 校验输出值是否符合预期格式
-        pass
-
-    def run(self, execution: FlowExecution = None) -> Any:
+    def run(self, execution) -> Any:
         result = self.execute(execution)
         self._validate_output(result)
         return result
 
-    def execute(self, execution: FlowExecution = None) -> Any:
+    def execute(self, execution) -> Any:
+        """执行节点并返回输出。``execution`` 为必传的执行上下文（facade）。"""
         raise NotImplementedError()

@@ -42,14 +42,141 @@ class FlowErrorType(Enum):
     CALLBACK_TIMEOUT = "callback_timeout"
 
 
-class FlowExecutionException(RuntimeError):
-    """流程执行异常"""
+class ResumeType(Enum):
+    """分布式恢复语义类型, 取代裸字符串 magic string。
 
-    def __init__(self, code, message, error_type, node=None):
+    ``CONTINUE`` 为默认 (带 saved_context 直接续跑), 其余三种仅对挂起的
+    ``EventNode`` 生效 (由 ``DistributedStrategy._handle_resume`` 处理)。
+    """
+
+    CONTINUE = "continue"
+    CANCEL = "cancel"
+    TIMEOUT = "timeout"
+    EVENT = "event"
+
+    @classmethod
+    def coerce(cls, value) -> "ResumeType":
+        """接受 enum 或字符串 (兼容外部旧调用方), 无法识别时抛 ``ResumeError``。"""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            try:
+                return cls(value)
+            except ValueError:
+                raise ResumeError(f"Unsupported resume type: {value!r}")
+        raise ResumeError(f"Unsupported resume type: {value!r}")
+
+
+# 节点 abort 时, 未配置 error_handler 用的默认错误码。
+# 与 ErrorHandler.error_code 的默认 (-9527) 区分: 后者是"用户配了 handler 但
+# 没显式给 code"的默认; 这里是"根本没有 handler"的兜底码。
+# 定义在异常子类之前, 供 NodeExecutionError 作为默认 code 引用。
+DEFAULT_NODE_ABORT_CODE = -520
+
+
+class FlowExecutionException(RuntimeError):
+    """流程执行异常基类。
+
+    保留 ``(code, message, error_type, node)`` 位置签名以兼容历史调用方。
+    新代码应优先抛出具体子类（``NodeNotFoundError`` / ``NodeExecutionError``
+    / ``FlowErrorException`` 等），它们自带默认 ``code`` / ``error_type``，
+    调用方只需提供 ``message`` 与 ``node``，不必再往调用点塞魔法数字。
+    """
+
+    # 子类覆盖这两个类属性来声明默认语义；直接实例化基类时也安全。
+    code: int = -500
+    error_type: "FlowErrorType" = FlowErrorType.FLOW_ERROR
+
+    def __init__(self, code: int = -500, message: str = "", error_type=None, node=None):
         self.code = code
         self.message = message
-        self.error_type = error_type
+        self.error_type = error_type if error_type is not None else type(self).error_type
         self.node = node
+        super().__init__(message)
+
+
+class NodeNotFoundError(FlowExecutionException):
+    """节点找不到（含流程缺少 start 节点）。"""
+
+    code = -500
+    error_type = FlowErrorType.NODE_NOT_FOUND
+
+    def __init__(self, node_id=None, message=None, node=None):
+        if message is None:
+            message = f"Node with id '{node_id}' not found" if node_id else "Node not found"
+        super().__init__(self.code, message, self.error_type, node)
+
+
+class FlowStartMissingError(NodeNotFoundError):
+    """流程缺少起始节点。共享 NODE_NOT_FOUND 语义。"""
+
+    def __init__(self, message="Flow has no start node", node=None):
+        super().__init__(message=message, node=node)
+
+
+class NodeExecutionError(FlowExecutionException):
+    """节点执行出错（abort 策略）。
+
+    ``code`` 默认取 ``DEFAULT_NODE_ABORT_CODE``；当调用方配了 error_handler
+    时由 runner 传入该 handler 的 ``error_code``。
+    """
+
+    code = DEFAULT_NODE_ABORT_CODE
+    error_type = FlowErrorType.NODE_ERROR
+
+    def __init__(self, message: str, node=None, code: int = DEFAULT_NODE_ABORT_CODE):
+        super().__init__(code, message, self.error_type, node)
+
+
+class NodeTimeoutError(FlowExecutionException):
+    """节点超时。``error_type`` 随超时来源切换：节点自身超时为 NODE_ERROR，
+    流程级超时强加给节点时为 FLOW_ERROR。"""
+
+    code = -1
+    error_type = FlowErrorType.NODE_ERROR
+
+    def __init__(self, message: str, node=None, error_type=FlowErrorType.NODE_ERROR):
+        super().__init__(self.code, message, error_type, node)
+
+
+class FlowTimeoutError(FlowExecutionException):
+    """流程整体超时。"""
+
+    code = -1
+    error_type = FlowErrorType.FLOW_ERROR
+
+    def __init__(self, message: str = "Flow execution timeout", node=None):
+        super().__init__(self.code, message, self.error_type, node)
+
+
+class FlowErrorException(FlowExecutionException):
+    """流程执行通用错误（兜底包装）。"""
+
+    code = -500
+    error_type = FlowErrorType.FLOW_ERROR
+
+    def __init__(self, message: str, node=None):
+        super().__init__(self.code, message, self.error_type, node)
+
+
+class ErrorResultException(FlowExecutionException):
+    """End 节点返回错误结果。code/message 来自 ``FlowResultError``。"""
+
+    error_type = FlowErrorType.ERROR_RESULT
+
+    def __init__(self, code: int, message: str, node=None):
+        super().__init__(code, message, self.error_type, node)
+
+
+class ResumeError(FlowExecutionException):
+    """分布式恢复阶段的不合法状态（无挂起节点 / 节点非 EventNode / 状态不对 /
+    resume_type 不支持 / 恢复执行抛错）。"""
+
+    code = -500
+    error_type = FlowErrorType.NODE_ERROR
+
+    def __init__(self, message: str, node=None):
+        super().__init__(self.code, message, self.error_type, node)
 
 
 class ErrorStrategy(Enum):
@@ -111,9 +238,3 @@ def _strategy_eq(value, member: ErrorStrategy) -> bool:
 
 class RecoverableErrorHandler(ErrorHandler):
     retry_times: int = Field(0, alias="retryTimes")
-
-
-# 节点 abort 时, 未配置 error_handler 用的默认错误码。
-# 与 ErrorHandler.error_code 的默认 (-9527) 区分: 后者是"用户配了 handler 但
-# 没显式给 code"的默认; 这里是"根本没有 handler"的兜底码。
-DEFAULT_NODE_ABORT_CODE = -520

@@ -23,16 +23,15 @@ flowchart TD
 | `CallbackManager` | `plaita.core.callback` | 把 `on_*` 事件分发给多个 `FlowCallback` |
 | `ExecutionStrategy` | `plaita.core.executor` | 模式相关的控制流：`NormalStrategy` / `GeneratorStrategy` / `DistributedStrategy` |
 
-## facade 的属性代理
+## facade 的显式委托
 
-`FlowExecution` 通过 `__getattr__` / `__setattr__` 把属性读写代理到 `ExecutionContext`，让旧的"在 execution 上直接读写状态"的 API 保持可用，同时类本身保持纤薄：
+`FlowExecution` 是一个薄壳 facade，把节点允许访问的状态/方法**显式**委托给底层 `ExecutionContext`：
 
-- 已知真实属性（`mode` / `timeout` / `parent` / `_ctx` 等）写到 facade 自身
-- `ExecutionContext` 上已有的属性（如 `express_prefix`）写到 context
-- 其它未知属性默认写入 context state（可被分布式 `to_dict` 持久化、读写对称）
-- `strict_attrs=True` 时未知属性写入直接抛 `AttributeError`，避免拼写错误（如 `tiemout`）静默持久化
+- 真实属性（`mode` / `timeout` / `parent` / `verbose` / `callback_manager` / `_ctx` 等）写在 facade 自身
+- `context` / `execution_id` / `event_bus` / `cancel_event` / `express_prefix` 等 context 上的字段通过**具名 property** 读写，setter 直接落到 `ExecutionContext`
+- state 访问走显式方法：`set_state` / `get_state` / `evaluate` / `get_global_variable` / `get_or_create_event_bus` / `update_node_result` / `clean` / `setup_flow` / `get_child_execution`
 
-`trigger_*` 会被映射到 `CallbackManager.on_*`，作为手动触发事件的捷径。
+没有 `__getattr__` / `__setattr__` 兜底，也没有 `trigger_*` → `on_*` 魔法映射。未声明的属性就是普通 Python 实例属性——拼写错误（如 `tiemout`）不会再静默落进 context state 被分布式持久化，而是停留为一个普通属性，调试时一目了然。要手动触发回调，直接调 `execution.callback_manager.on_xxx(...)`。
 
 ## 执行策略
 

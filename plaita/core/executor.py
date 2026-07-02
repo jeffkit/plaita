@@ -21,7 +21,14 @@ from plaita.core.callback import (
     LoggerCallback,
 )
 from plaita.core.context import ExecutionContext
-from plaita.core.errors import FlowErrorType, FlowExecutionException, FlowResultError
+from plaita.core.errors import (
+    FlowErrorException,
+    FlowExecutionException,
+    FlowStartMissingError,
+    FlowTimeoutError,
+    ResumeError,
+    ResumeType,
+)
 from plaita.core.runner import NodeRunner
 
 if TYPE_CHECKING:
@@ -59,12 +66,9 @@ class NormalStrategy:
     """Execute all nodes to completion, return final result."""
 
     async def execute(self, flow, context, runner, callback_manager, params=None, timeout_ms=None, **options):
-        from plaita.node import End
         next_node = flow.start_node
         if next_node is None:
-            raise FlowExecutionException(
-                -500, "Flow has no start node", FlowErrorType.NODE_NOT_FOUND,
-            )
+            raise FlowStartMissingError()
         result = None
         reached_end = False
         start_time = time.time()
@@ -75,19 +79,16 @@ class NormalStrategy:
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 remaining = max(0, timeout_ms - elapsed_ms)
 
-            result, branch = await runner.run_node(
-                flow, next_node, max_timeout_ms=remaining, callback_manager=callback_manager,
+            result, branch, next_node, reached_end = await _advance_one(
+                flow, runner, callback_manager, next_node, max_timeout_ms=remaining,
             )
-
-            if next_node.node_type == End.node_type:
-                reached_end = True
+            if reached_end:
                 break
 
-            next_node = flow.next_node(next_node, branch)
             logger.debug("next_node: %s with branch: %s", next_node, branch)
 
             if timeout_ms is not None and (time.time() - start_time) > timeout_ms / 1000:
-                raise FlowExecutionException(-1, "Flow execution timeout", FlowErrorType.FLOW_ERROR)
+                raise FlowTimeoutError()
 
         if not reached_end:
             logger.debug("not reached_end: %s", next_node)
@@ -101,44 +102,39 @@ class GeneratorStrategy:
     """Async generator yielding per-node output for debug/stepping."""
 
     async def execute(self, flow, context, runner, callback_manager, params=None, timeout_ms=None, **options):
-        from plaita.node import End
         next_node = flow.start_node
         if next_node is None:
-            raise FlowExecutionException(
-                -500, "Flow has no start node", FlowErrorType.NODE_NOT_FOUND,
-            )
+            raise FlowStartMissingError()
         reached_end = False
 
         while next_node:
-            result, branch = await runner.run_node(
-                flow, next_node, callback_manager=callback_manager,
+            current = next_node
+            result, branch, next_node, reached_end = await _advance_one(
+                flow, runner, callback_manager, current,
             )
-
-            yield _create_lazy_output(next_node, result, branch, context.context, execution_id=context.execution_id)
-
-            if next_node.node_type == End.node_type:
-                reached_end = True
+            yield _create_lazy_output(
+                current, result, branch, context.context, execution_id=context.execution_id,
+            )
+            if reached_end:
                 break
 
-            next_node = flow.next_node(next_node, branch)
             logger.debug("next_node: %s with branch: %s", next_node, branch)
 
         if not reached_end:
             logger.debug("not reached_end: %s", next_node)
             pfx = context.express_prefix
             result = context.get_state(f"{pfx}{context.express_node_name}", {})
-            yield _create_end_output(next_node, result, context.context, execution_id=context.execution_id)
+            yield _create_end_output(None, result, context.context, execution_id=context.execution_id)
 
 
 class DistributedStrategy:
     """Execute one node per call with context persistence for suspend/resume."""
 
     async def execute(self, flow, context, runner, callback_manager, params=None, timeout_ms=None, **options):
-        from plaita.node import End
         from plaita.node.event_node import EventNode
 
         saved_context = options.get("saved_context")
-        resume_type = options.get("resume_type", "continue")
+        resume_type = ResumeType.coerce(options.get("resume_type", "continue"))
         resume_data = options.get("resume_data")
         pfx = context.express_prefix
 
@@ -149,7 +145,7 @@ class DistributedStrategy:
             context.setup_flow(flow, (), params or {})
             callback_manager.on_flow_start(flow)
 
-        if saved_context and resume_type != "continue":
+        if saved_context and resume_type is not ResumeType.CONTINUE:
             return await self._handle_resume(flow, context, runner, callback_manager, resume_type, resume_data)
 
         current_node, result, branch = await self._determine_current_node(flow, context, runner, callback_manager)
@@ -192,12 +188,11 @@ class DistributedStrategy:
         return current_node, result, branch
 
     async def _execute_current_node(self, flow, context, runner, callback_manager, current_node):
-        from plaita.node import End
         from plaita.node.event_node import EventNode
 
         result, branch = await runner.run_node(flow, current_node, callback_manager=callback_manager)
 
-        if current_node.node_type == End.node_type:
+        if flow.is_end_node(current_node):
             return _create_end_output(current_node, result, context.context, execution_id=context.execution_id)
 
         if isinstance(current_node, EventNode):
@@ -212,33 +207,39 @@ class DistributedStrategy:
 
     async def _handle_resume(self, flow, context, runner, callback_manager, resume_type, resume_data):
         from plaita.node.event_node import EventNode
+        # 统一在此 coerce, 覆盖 execute (已 coerce, 幂等) 与 _handle_resume_operation
+        # (历史直传字符串) 两条入口, 避免裸字符串漏到下面的 enum 比较。
+        resume_type = ResumeType.coerce(resume_type)
         pfx = context.express_prefix
 
         last_node_id = context.get_state(f"{pfx}LAST_NODE")
         if not last_node_id:
-            raise FlowExecutionException(-500, "No suspended node found for resume", FlowErrorType.NODE_ERROR, None)
+            raise ResumeError("No suspended node found for resume")
 
         current_node = flow.find_node_by_id(last_node_id)
-        if not current_node:
-            raise FlowExecutionException(-500, f"Cannot find node {last_node_id}", FlowErrorType.NODE_ERROR, None)
         if not isinstance(current_node, EventNode):
-            raise FlowExecutionException(-500, f"Node {current_node.id} is not an EventNode", FlowErrorType.NODE_ERROR, current_node)
-
+            raise ResumeError(f"Node {current_node.id} is not an EventNode", node=current_node)
         node_results = context.get_state(f"{pfx}{context.express_node_name}", {})
         prev_state = node_results.get(last_node_id, {})
         if prev_state.get("status", "") != "pending":
-            raise FlowExecutionException(-500, f"EventNode {current_node.id} is not in pending status: {prev_state.get('status', '')}", FlowErrorType.NODE_ERROR, current_node)
-        if resume_type not in ("cancel", "timeout", "event"):
-            raise FlowExecutionException(-500, f"Unsupported resume type for EventNode: {resume_type}, only support cancel, timeout, event", FlowErrorType.NODE_ERROR, current_node)
+            raise ResumeError(
+                f"EventNode {current_node.id} is not in pending status: {prev_state.get('status', '')}",
+                node=current_node,
+            )
+        if resume_type not in (ResumeType.CANCEL, ResumeType.TIMEOUT, ResumeType.EVENT):
+            raise ResumeError(
+                f"Unsupported resume type for EventNode: {resume_type.value}, only support cancel, timeout, event",
+                node=current_node,
+            )
 
         exec_ctx = runner.node_execution or context
         callback_manager.on_flow_resume(flow)
         callback_manager.on_node_resume(flow, current_node)
 
         try:
-            if resume_type == "cancel":
+            if resume_type is ResumeType.CANCEL:
                 result = current_node.on_cancel(exec_ctx)
-            elif resume_type == "timeout":
+            elif resume_type is ResumeType.TIMEOUT:
                 result = current_node.on_timeout(exec_ctx)
             else:
                 result = current_node.on_event(exec_ctx, resume_data)
@@ -247,7 +248,7 @@ class DistributedStrategy:
             error = {"code": -500, "message": str(e)}
             callback_manager.on_node_end(flow, current_node, None, error, exception=e)
             logger.error("Error during resume: %s", e, exc_info=True)
-            raise FlowExecutionException(-500, str(e), FlowErrorType.NODE_ERROR, current_node) from e
+            raise ResumeError(str(e), node=current_node) from e
 
         context.update_node_result(current_node, result)
         return _create_lazy_output(current_node, result, None, context.context, is_suspend=False, execution_id=context.execution_id)
@@ -271,16 +272,13 @@ from plaita.core.async_utils import (  # noqa: E402
 class FlowExecution:
     """Thin facade composing ExecutionContext, NodeRunner, and strategies.
 
-    Nodes receive this instance as the ``execution`` parameter; context,
-    state, and callback attributes are proxied to the underlying
-    ExecutionContext and CallbackManager so the public API stays
-    backward-compatible while the class itself stays small.
+    Nodes receive this instance as the ``execution`` parameter.  State and
+    context access is delegated to the underlying ``ExecutionContext`` via
+    **explicit** properties/methods — there is no ``__getattr__``/``__setattr__``
+    catch-all, so ``execution.foo`` is either a real attribute, an explicit
+    delegate, or a loud ``AttributeError``.  No more phantom attributes that
+    silently land in context state.
     """
-
-    _REAL_ATTRS = frozenset({
-        "mode", "timeout", "parent", "verbose", "_ctx",
-        "callback_manager", "_runner", "_strategies", "_strict_attrs",
-    })
 
     def __init__(
         self,
@@ -290,15 +288,7 @@ class FlowExecution:
         callback_handlers: Optional[List[FlowCallback]] = None,
         callback_manager: Optional[BaseCallbackManager] = None,
         event_bus: Optional[EventBus] = None,
-        strict_attrs: bool = True,
     ):
-        # strict_attrs=True (default): unknown public attribute writes raise
-        # AttributeError immediately, so typos like ``self.tiemout = 10`` are
-        # caught at the point of assignment instead of silently landing in the
-        # context state and causing mysterious runtime bugs.
-        # Pass strict_attrs=False only if you intentionally need to store
-        # arbitrary keys in the execution context via attribute syntax.
-        self._strict_attrs = strict_attrs
         self.mode = mode
         self.timeout = None
         self.parent = parent
@@ -322,51 +312,109 @@ class FlowExecution:
             ExecutionMode.DISTRIBUTED.value: DistributedStrategy(),
         }
 
-    # -- attribute proxy to ExecutionContext / CallbackManager --
+    # -- explicit delegation to ExecutionContext --
+    #
+    # Every attribute a node is allowed to read/write on ``execution`` is
+    # declared here.  Anything not listed simply does not exist on the facade,
+    # which is the whole point: typos fail loudly instead of mutating context.
 
-    def __getattr__(self, name: str):
-        # Only invoked when normal attribute lookup fails.
-        # 不要代理双下方法(如 __getstate__/__setstate__/__reduce_ex__), 否则会把
-        # context 的协议方法泄漏到 facade 上, 破坏 pickle 等机制。
-        if name.startswith("__") and name.endswith("__"):
-            raise AttributeError(f"{type(self).__name__!r} has no attribute {name!r}")
-        ctx = self.__dict__.get("_ctx")
-        if ctx is not None:
-            if hasattr(ctx, name):
-                return getattr(ctx, name)
-            # 读写对称: 已写入 context state 的键可经由属性访问读回
-            if name in ctx.context:
-                return ctx.context[name]
-        if name.startswith("trigger_"):
-            cm = self.__dict__.get("callback_manager")
-            if cm is not None:
-                method = getattr(cm, "on_" + name[len("trigger_"):], None)
-                if callable(method):
-                    return method
-        raise AttributeError(f"{type(self).__name__!r} has no attribute {name!r}")
+    @property
+    def context(self) -> Dict[str, Any]:
+        return self._ctx.context
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in self._REAL_ATTRS or name.startswith("_"):
-            object.__setattr__(self, name, value)
-            return
-        ctx = self.__dict__.get("_ctx")
-        if ctx is not None and hasattr(ctx, name):
-            # context 上已有的属性(如 express_prefix)写到 context
-            setattr(ctx, name, value)
-            return
-        if self.__dict__.get("_strict_attrs"):
-            # fail-fast: 拼写错误(如 self.tiemout = ...)不再静默持久化
-            raise AttributeError(
-                f"{type(self).__name__!r} has no attribute {name!r}; "
-                f"set strict_attrs=False to persist unknown attrs into context state, "
-                f"or use set_state() explicitly."
-            )
-        if ctx is not None:
-            # 未知公共属性写入 context state, 避免在 facade 上产生"幻影属性",
-            # 并使其可被分布式持久化(to_dict)与读写对称访问。
-            ctx.set_state(name, value)
-            return
-        object.__setattr__(self, name, value)
+    @context.setter
+    def context(self, value: Dict[str, Any]) -> None:
+        self._ctx.context = value
+
+    @property
+    def execution_id(self) -> str:
+        return self._ctx.execution_id
+
+    @property
+    def event_bus(self):
+        return self._ctx.event_bus
+
+    @event_bus.setter
+    def event_bus(self, value) -> None:
+        self._ctx.event_bus = value
+
+    @property
+    def cancel_event(self):
+        return self._ctx.cancel_event
+
+    @property
+    def express_prefix(self) -> str:
+        return self._ctx.express_prefix
+
+    @express_prefix.setter
+    def express_prefix(self, value: str) -> None:
+        self._ctx.express_prefix = value
+
+    @property
+    def express_input_name(self) -> str:
+        return self._ctx.express_input_name
+
+    @express_input_name.setter
+    def express_input_name(self, value: str) -> None:
+        self._ctx.express_input_name = value
+
+    @property
+    def express_parent_name(self) -> str:
+        return self._ctx.express_parent_name
+
+    @express_parent_name.setter
+    def express_parent_name(self, value: str) -> None:
+        self._ctx.express_parent_name = value
+
+    @property
+    def express_node_name(self) -> str:
+        return self._ctx.express_node_name
+
+    @express_node_name.setter
+    def express_node_name(self, value: str) -> None:
+        self._ctx.express_node_name = value
+
+    @property
+    def express_global_name(self) -> str:
+        return self._ctx.express_global_name
+
+    @express_global_name.setter
+    def express_global_name(self, value: str) -> None:
+        self._ctx.express_global_name = value
+
+    @property
+    def express_environment_variable(self) -> str:
+        return self._ctx.express_environment_variable
+
+    @express_environment_variable.setter
+    def express_environment_variable(self, value: str) -> None:
+        self._ctx.express_environment_variable = value
+
+    # -- state helpers (delegate to ExecutionContext) --
+
+    def set_state(self, key: str, value: Any) -> None:
+        return self._ctx.set_state(key, value)
+
+    def get_state(self, key: str, default: Any = None) -> Any:
+        return self._ctx.get_state(key, default)
+
+    def evaluate(self, value: Any) -> Any:
+        return self._ctx.evaluate(value)
+
+    def get_global_variable(self, key: str, default: Any = None) -> Any:
+        return self._ctx.get_global_variable(key, default)
+
+    def get_or_create_event_bus(self):
+        return self._ctx.get_or_create_event_bus()
+
+    def update_node_result(self, node, result: Any) -> None:
+        return self._ctx.update_node_result(node, result)
+
+    def clean(self) -> None:
+        return self._ctx.clean()
+
+    def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
+        return self._ctx.setup_flow(flow, args, kwargs)
 
     # -- renamed context helpers (kept for backward compat) --
 
@@ -551,13 +599,13 @@ class FlowExecution:
     async def _finish(self, coro, flow):
         try:
             result = await coro
+        except FlowExecutionException:
+            raise
         except Exception as e:
-            if isinstance(e, FlowExecutionException):
-                raise
             error = {"code": -500, "message": str(e)}
             self.callback_manager.on_flow_end(flow, None, error, exception=e)
             logger.error("flow error", exc_info=True)
-            raise FlowExecutionException(-500, str(e), FlowErrorType.FLOW_ERROR) from e
+            raise FlowErrorException(str(e)) from e
         self.callback_manager.on_flow_end(flow, result=result)
         return result
 
@@ -583,13 +631,16 @@ class FlowExecution:
             flow, self._ctx, self._runner, self.callback_manager, params, timeout,
             saved_context=saved_context, resume_type=resume_type, resume_data=resume_data,
         )
+        # 历史上 run_distributed 把任何异常（含具体的 FlowExecutionException 子类）
+        # 归一化为 FLOW_ERROR / -500 作为分布式对外契约；此处保留该契约，
+        # 具体子类仅用于内部抛点与 normal 模式（_finish 让其透传）。
         try:
             return _run_async_sync(coro)
         except Exception as e:
             error = {"code": -500, "message": str(e)}
             self.callback_manager.on_flow_end(flow, None, error, exception=e)
             logger.error("flow error", exc_info=True)
-            raise FlowExecutionException(-500, str(e), FlowErrorType.FLOW_ERROR) from e
+            raise FlowErrorException(str(e)) from e
 
     def _run_distributed(self, flow, params=None, timeout=None, context=None,
                          resume_type="continue", resume_data=None, **options):
@@ -628,12 +679,28 @@ def _create_lazy_output(node, result, branch, context, is_suspend=False, executi
     }
 
 
+async def _advance_one(flow, runner, callback_manager, node, max_timeout_ms=None):
+    """Run one node via *runner*, update LAST_NODE/BRANCH/$NODE state, then resolve
+    the next node. Returns ``(result, branch, next_node, is_end)``.
+
+    Shared by ``NormalStrategy`` and ``GeneratorStrategy`` so the
+    run → detect-end → resolve-next sequence lives in exactly one place.
+    Distributed mode cannot share it wholesale because it suspends on
+    ``EventNode`` instead of advancing, so it keeps its own single-step path.
+    """
+    result, branch = await runner.run_node(
+        flow, node, max_timeout_ms=max_timeout_ms, callback_manager=callback_manager,
+    )
+    is_end = flow.is_end_node(node)
+    next_node = None if is_end else flow.next_node(node, branch)
+    return result, branch, next_node, is_end
+
+
 def _create_end_output(node, result, context, execution_id=None):
-    from plaita.node import End
     return {
         "id": node.id if node else None,
-        "type": End.node_type,
-        "name": node.name if node else End.node_name,
+        "type": "end",
+        "name": node.name if node else "结束",
         "result": result,
         "branch": "",
         "context": context,

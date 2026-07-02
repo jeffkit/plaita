@@ -5,7 +5,8 @@ import asyncio
 import unittest
 import json
 
-from plaita.flow import Flow, FlowExecution
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution
 
 
 class TestAsyncFlowExecution(unittest.IsolatedAsyncioTestCase):

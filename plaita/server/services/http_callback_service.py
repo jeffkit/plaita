@@ -30,7 +30,7 @@ class HttpCallbackService(BaseExtendedService):
             logger.info("HTTP回调服务已启动")
             return True
         except Exception as e:
-            logger.error(f"启动HTTP回调服务失败: {e}", exc_info=True)
+            logger.error("启动HTTP回调服务失败: %s", e, exc_info=True)
             return False
     
     def stop_service(self) -> bool:
@@ -41,7 +41,7 @@ class HttpCallbackService(BaseExtendedService):
             logger.info("HTTP回调服务已停止")
             return True
         except Exception as e:
-            logger.error(f"停止HTTP回调服务失败: {e}", exc_info=True)
+            logger.error("停止HTTP回调服务失败: %s", e, exc_info=True)
             return False
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -69,7 +69,7 @@ class HttpCallbackService(BaseExtendedService):
                 return False
                 
         except Exception as e:
-            logger.error(f"处理HTTP回调任务失败: {e}", exc_info=True)
+            logger.error("处理HTTP回调任务失败: %s", e, exc_info=True)
             return False
     
     async def handle_callback_request(self, path: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -115,7 +115,7 @@ class HttpCallbackService(BaseExtendedService):
             return response_config.get("success_response", {"status": "success"})
             
         except Exception as e:
-            logger.error(f"处理HTTP回调请求失败: {e}", exc_info=True)
+            logger.error("处理HTTP回调请求失败: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
     
     def validate_task_config(self, task_config: Dict[str, Any]) -> bool:

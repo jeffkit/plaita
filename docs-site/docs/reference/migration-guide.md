@@ -22,6 +22,8 @@
 
 旧路径仍可用，但触发 `DeprecationWarning`，未来大版本移除。
 
+> **退役时间表**：`plaita.flow` / `plaita.errors` / `plaita.types` 三个 shim 模块将在 **0.6.0** 移除。请尽快迁到上表右侧的推荐路径（或更精确的 `plaita.core.*` 子模块）。
+
 ## 节点注册迁移
 
 ```python

@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 from plaita.core import types
 from plaita.core.errors import FlowErrorType, FlowExecutionException
-from plaita.flow import Flow, FlowExecution, parse_and_run
+from plaita.core.flow import Flow, parse_and_run
+from plaita.core.executor import FlowExecution
 from plaita.io import Property, match
 from plaita.node import Assignment, End, Node, Start
 

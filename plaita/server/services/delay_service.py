@@ -37,7 +37,7 @@ class DelayService(BaseExtendedService):
             logger.info("延迟服务已启动")
             return True
         except Exception as e:
-            logger.error(f"启动延迟服务失败: {e}", exc_info=True)
+            logger.error("启动延迟服务失败: %s", e, exc_info=True)
             return False
     
     def stop_service(self) -> bool:
@@ -52,7 +52,7 @@ class DelayService(BaseExtendedService):
             logger.info("延迟服务已停止")
             return True
         except Exception as e:
-            logger.error(f"停止延迟服务失败: {e}", exc_info=True)
+            logger.error("停止延迟服务失败: %s", e, exc_info=True)
             return False
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -120,7 +120,7 @@ class DelayService(BaseExtendedService):
             return True
             
         except Exception as e:
-            logger.error(f"处理延迟任务失败: {e}", exc_info=True)
+            logger.error("处理延迟任务失败: %s", e, exc_info=True)
             
             # 触发错误事件
             try:

@@ -30,7 +30,7 @@ class ApprovalService(BaseExtendedService):
             logger.info("审批服务已启动")
             return True
         except Exception as e:
-            logger.error(f"启动审批服务失败: {e}", exc_info=True)
+            logger.error("启动审批服务失败: %s", e, exc_info=True)
             return False
     
     def stop_service(self) -> bool:
@@ -41,7 +41,7 @@ class ApprovalService(BaseExtendedService):
             logger.info("审批服务已停止")
             return True
         except Exception as e:
-            logger.error(f"停止审批服务失败: {e}", exc_info=True)
+            logger.error("停止审批服务失败: %s", e, exc_info=True)
             return False
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -72,7 +72,7 @@ class ApprovalService(BaseExtendedService):
             return True
             
         except Exception as e:
-            logger.error(f"处理审批任务失败: {e}", exc_info=True)
+            logger.error("处理审批任务失败: %s", e, exc_info=True)
             return False
     
     async def submit_approval_decision(self, approval_id: str, approver_id: str, decision: str, comments: str = "") -> Dict[str, Any]:
@@ -147,7 +147,7 @@ class ApprovalService(BaseExtendedService):
                 return {"status": "success", "message": "审批已记录，等待其他审批人"}
                 
         except Exception as e:
-            logger.error(f"提交审批决策失败: {e}", exc_info=True)
+            logger.error("提交审批决策失败: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
     
     def _check_approval_result(self, approval_record: Dict[str, Any]) -> str:

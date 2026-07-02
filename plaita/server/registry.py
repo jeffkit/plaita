@@ -199,7 +199,7 @@ class ServiceRegistry:
             return True
             
         except Exception as e:
-            logger.error(f"服务注册失败: {e}", exc_info=True)
+            logger.error("服务注册失败: %s", e, exc_info=True)
             return False
     
     def unregister(self, service_type: str, instance_id: str) -> bool:
@@ -233,7 +233,7 @@ class ServiceRegistry:
             return True
             
         except Exception as e:
-            logger.error(f"服务注销失败: {e}", exc_info=True)
+            logger.error("服务注销失败: %s", e, exc_info=True)
             return False
     
     def heartbeat(self, service_info: ServiceInfo) -> bool:
@@ -269,7 +269,7 @@ class ServiceRegistry:
             return True
             
         except Exception as e:
-            logger.error(f"心跳失败: {e}", exc_info=True)
+            logger.error("心跳失败: %s", e, exc_info=True)
             return False
     
     def start_heartbeat(self, service_info: ServiceInfo):
@@ -364,7 +364,7 @@ class ServiceRegistry:
             return None
             
         except Exception as e:
-            logger.error(f"获取服务信息失败: {e}", exc_info=True)
+            logger.error("获取服务信息失败: %s", e, exc_info=True)
             return None
     
     def list_services(
@@ -393,7 +393,7 @@ class ServiceRegistry:
             return services
             
         except Exception as e:
-            logger.error(f"列出服务失败: {e}", exc_info=True)
+            logger.error("列出服务失败: %s", e, exc_info=True)
             return []
     
     def get_service_types(self) -> List[str]:
@@ -418,7 +418,7 @@ class ServiceRegistry:
             return list(service_types)
             
         except Exception as e:
-            logger.error(f"获取服务类型失败: {e}", exc_info=True)
+            logger.error("获取服务类型失败: %s", e, exc_info=True)
             return []
 
 

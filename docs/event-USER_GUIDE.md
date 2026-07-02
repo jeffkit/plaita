@@ -81,16 +81,16 @@ Plaita提供了统一的演示程序，可以方便地测试不同后端的功�
 
 ```bash
 # 使用内存后端
-python -m plaita.event.demo_eventbus --backend memory
+python -m examples.event_demo.demo_eventbus --backend memory
 
 # 使用Redis后端
-python -m plaita.event.demo_eventbus --backend redis --redis-url redis://localhost:6379/0
+python -m examples.event_demo.demo_eventbus --backend redis --redis-url redis://localhost:6379/0
 
 # 使用SQLAlchemy后端
-python -m plaita.event.demo_eventbus --backend db --database-url sqlite+aiosqlite:///event_demo.db
+python -m examples.event_demo.demo_eventbus --backend db --database-url sqlite+aiosqlite:///event_demo.db
 
 # 使用混合后端
-python -m plaita.event.demo_eventbus --backend mixed --bus-type redis --storage-type db
+python -m examples.event_demo.demo_eventbus --backend mixed --bus-type redis --storage-type db
 ```
 
 ## 3. 发布事件
@@ -456,15 +456,15 @@ for record in history:
 
 ```bash
 # 基本用法
-python -m plaita.event.demo_eventbus --help
+python -m examples.event_demo.demo_eventbus --help
 
 # 不同后端选项示例
-python -m plaita.event.demo_eventbus --backend memory
-python -m plaita.event.demo_eventbus --backend redis --redis-url redis://localhost:6379/0
-python -m plaita.event.demo_eventbus --backend db --database-url postgresql+asyncpg://user:pass@localhost/db
+python -m examples.event_demo.demo_eventbus --backend memory
+python -m examples.event_demo.demo_eventbus --backend redis --redis-url redis://localhost:6379/0
+python -m examples.event_demo.demo_eventbus --backend db --database-url postgresql+asyncpg://user:pass@localhost/db
 
 # 混合后端示例
-python -m plaita.event.demo_eventbus --backend mixed \
+python -m examples.event_demo.demo_eventbus --backend mixed \
   --bus-type redis \
   --storage-type db \
   --subscription-type redis \

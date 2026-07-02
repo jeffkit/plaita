@@ -240,7 +240,7 @@ class HTTP(Node):
         if self.method not in valid_methods:
             raise ValueError(f"Invalid HTTP method: {self.method}")
     
-    def execute(self, execution=None):
+    def execute(self, execution):
         """执行HTTP请求"""
         http_rsp = None
         

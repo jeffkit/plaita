@@ -60,6 +60,11 @@ approval = "plaita.server.nodes.approval_node:ApprovalNode"
 include = ["plaita", "plaita.*"]
 exclude = ["tests*", "examples*", "plaita-console*", "plaita_console*"]
 
+# 演示脚本、伴生文档与测试 fixture 不得进入 wheel——它们属于 examples/ 或 docs/。
+# 即便有人误把 .md/.json/.txt 拖回 plaita/ 子包，这里也会拦下。
+[tool.setuptools.exclude-package-data]
+plaita = ["*.md", "*.json", "*.txt", "*demo*", "*example*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
@@ -80,9 +85,8 @@ omit = [
   "plaita/node/http.py",
   "plaita/client.py",
   "plaita/event/demo_eventbus.py",
-  "plaita/event/timeout_example.py",
+  "plaita/event/timeout.py",
   "plaita/event/redis.py",
   "plaita/event/sqlalchemy.py",
-  "plaita/event/timeout.py",
   "plaita/event/utils.py",
 ]

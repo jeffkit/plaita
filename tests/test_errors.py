@@ -1,7 +1,7 @@
 from unittest import TestCase
 
 from plaita.core.errors import FlowErrorType, FlowExecutionException
-from plaita.flow import Flow
+from plaita.core.flow import Flow
 from plaita.node import Assignment, End, Start
 
 

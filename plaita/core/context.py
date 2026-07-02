@@ -28,6 +28,34 @@ _SENSITIVE_ENV_PREFIXES = (
     "PASSWORD", "PASS_", "REDIS_PASSWORD",
 )
 
+
+def _safe_environment() -> Dict[str, str]:
+    """Return a filtered copy of ``os.environ`` with sensitive keys removed.
+
+    Used by ``ExecutionContext.clean`` to populate ``$ENV``.  Kept at module
+    level so the class body stays small and the rule is unit-testable in
+    isolation.
+    """
+    return {
+        k: v for k, v in os.environ.items()
+        if not any(k.upper().startswith(p) for p in _SENSITIVE_ENV_PREFIXES)
+    }
+
+
+def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
+    """Resolve the flow input value from positional/keyword args per ``in_format``.
+
+    Pure helper extracted from ``ExecutionContext.setup_flow`` so the class
+    body stays under the SC-003 LOC budget.
+    """
+    if in_format.data_type in (types.OBJECT, types.MAP):
+        if in_format.data_type == types.OBJECT and args and isinstance(args[0], dict):
+            return args[0]
+        return kwargs
+    if in_format.data_type == types.ARRAY:
+        return args
+    return args[0] if args else None
+
 # 依赖反转: core 不直接 import plaita.event, 而是持有一个由上层 (plaita 顶层包)
 # 注册的 "默认 event bus provider" 可调用对象。这样 core → event 的反向依赖
 # 被消除, 同时保留 "未注入 event_bus 时自动取默认总线" 的旧行为。
@@ -64,7 +92,10 @@ class ExecutionContext:
         self._context: Dict[str, Any] = {}
         self.parent = parent
         self.event_bus = event_bus
-        # 协作取消令牌: 超时/取消时由 NodeRunner 设置, 节点可 poll 此事件提前退出
+        # 协作取消令牌: 超时/取消时由 NodeRunner 设置, 节点可 poll 此事件提前退出。
+        # 注: 并行分支经 get_child_execution 拿到独立子 context (各自 _context dict),
+        # 不共享父级 $NODE, 故 update_node_result 无需加锁; 加 threading.Lock 反而会
+        # 破坏 process 模式对 execution 的 pickle (见 test_concurrent)。
         self.cancel_event = threading.Event()
         self.express_prefix = express_prefix
         self.express_input_name = express_input_name
@@ -112,11 +143,7 @@ class ExecutionContext:
         self._context = {}
         self.cancel_event = threading.Event()
         self.set_state(f"{self.express_prefix}EXECUTION_ID", uuid.uuid4().hex)
-        safe_env = {
-            k: v for k, v in os.environ.items()
-            if not any(k.upper().startswith(p) for p in _SENSITIVE_ENV_PREFIXES)
-        }
-        self.set_state(f"{self.express_prefix}{self.express_environment_variable}", safe_env)
+        self.set_state(f"{self.express_prefix}{self.express_environment_variable}", _safe_environment())
 
     def __getstate__(self):
         # threading.Event 不可 pickle; 进程模式下子进程会得到一个全新的(未触发)事件,
@@ -136,7 +163,7 @@ class ExecutionContext:
         """Initialize context with flow-level variables."""
         in_format = flow.input_type
         if in_format:
-            context_value = self._get_context_value(in_format, args, kwargs)
+            context_value = _coerce_input_value(in_format, args, kwargs)
             self.set_state(f"{self.express_prefix}{self.express_input_name}", context_value)
         else:
             self.set_state(f"{self.express_prefix}{self.express_input_name}", {})
@@ -149,14 +176,6 @@ class ExecutionContext:
         self.set_state(f"{self.express_prefix}{self.express_global_name}", global_context)
         self.set_state("EXPRESS_PREFIX", self.express_prefix)
         self.set_state(f"{self.express_prefix}FLOW_ID", flow.flow_id)
-
-    def _get_context_value(self, in_format, args, kwargs):
-        if in_format.data_type in (types.OBJECT, types.MAP):
-            return args[0] if in_format.data_type == types.OBJECT and args and isinstance(args[0], dict) else kwargs
-        elif in_format.data_type == types.ARRAY:
-            return args
-        else:
-            return args[0] if args else None
 
     # -- expression evaluation --
 

@@ -7,27 +7,19 @@ Plaita事件系统统一演示程序
 2. Redis实现: 适用于分布式环境
 3. SQLAlchemy实现: 适用于需要持久化的场景
 
-运行示例:
-python -m plaita.event.demo_eventbus --backend memory  # 使用内存后端
-python -m plaita.event.demo_eventbus --backend redis   # 使用Redis后端
-python -m plaita.event.demo_eventbus --backend db      # 使用SQLAlchemy后端
+运行示例（在仓库根目录执行）:
+python -m examples.event_demo.demo_eventbus --backend memory  # 使用内存后端
+python -m examples.event_demo.demo_eventbus --backend redis   # 使用Redis后端
+python -m examples.event_demo.demo_eventbus --backend db      # 使用SQLAlchemy后端
 """
 
 import argparse
 import asyncio
 import logging
 import random
-import sys
-import os
 import time
 from typing import Dict, List, Any, Optional, Union, Type
 from abc import ABC, abstractmethod
-
-# 处理导入冲突
-original_path = list(sys.path)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir in sys.path:
-    sys.path.remove(current_dir)
 
 # 根据需要导入不同后端的库
 try:
@@ -41,11 +33,7 @@ try:
 except ImportError:
     sa = None
 
-# 恢复原始路径
-sys.path = original_path
-
-# 从核心模块导入
-from .core import Event, EventBus, EventStorage, EventSubscription, RetryPolicy
+from plaita.event.core import Event, EventBus, EventStorage, EventSubscription, RetryPolicy
 
 # 设置日志
 logging.basicConfig(
@@ -63,7 +51,7 @@ memory_components = None  # 内存组件
 redis_components = None   # Redis组件
 db_components = None      # SQLAlchemy组件
 
-from .memory import InMemoryEventBus, MemoryEventStorage, InMemoryEventSubscriptionStorage, InMemoryProcessingTracker
+from plaita.event.memory import InMemoryEventBus, MemoryEventStorage, InMemoryEventSubscriptionStorage, InMemoryProcessingTracker
 
 class EventDemoApp(ABC):
     """事件示例应用基类"""
@@ -381,7 +369,7 @@ class MemoryEventDemoApp(EventDemoApp):
     
     async def initialize(self):
         """初始化内存实现的组件"""
-        from .memory import InMemoryEventBus
+        from plaita.event.memory import InMemoryEventBus
         self.event_bus = InMemoryEventBus()
         self.event_storage = self.event_bus.event_storage
         self.subscription_storage = self.event_bus.subscription_storage
@@ -399,7 +387,7 @@ class RedisEventDemoApp(EventDemoApp):
         # 导入Redis组件
         global redis_components
         if redis_components is None:
-            from .redis import (
+            from plaita.event.redis import (
                 RedisEventBus, RedisEventStorage, 
                 RedisEventSubscriptionStorage, RedisProcessingTracker
             )
@@ -460,7 +448,7 @@ class SQLAlchemyEventDemoApp(EventDemoApp):
         # 导入SQLAlchemy组件
         global db_components
         if db_components is None:
-            from .sqlalchemy import (
+            from plaita.event.sqlalchemy import (
                 SqlalchemyEventBus, SqlalchemyEventStorage,
                 SqlalchemyEventSubscriptionStorage, SqlalchemyEventProcessingTracker
             )
@@ -568,7 +556,7 @@ class MixedEventDemoApp(EventDemoApp):
         # 导入内存组件
         global memory_components
         if memory_components is None:
-            from .memory import (
+            from plaita.event.memory import (
                 InMemoryEventBus, MemoryEventStorage,
                 InMemoryEventSubscriptionStorage, InMemoryProcessingTracker
             )
@@ -583,7 +571,7 @@ class MixedEventDemoApp(EventDemoApp):
         global redis_components
         if redis_components is None:
             try:
-                from .redis import (
+                from plaita.event.redis import (
                     RedisEventBus, RedisEventStorage,
                     RedisEventSubscriptionStorage, RedisProcessingTracker
                 )
@@ -601,7 +589,7 @@ class MixedEventDemoApp(EventDemoApp):
         global db_components
         if db_components is None:
             try:
-                from .sqlalchemy import (
+                from plaita.event.sqlalchemy import (
                     SqlalchemyEventBus, SqlalchemyEventStorage,
                     SqlalchemyEventSubscriptionStorage, SqlalchemyEventProcessingTracker
                 )

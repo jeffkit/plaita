@@ -87,7 +87,7 @@ class ServiceManager:
                         logger.error(f"服务 {service_type} 启动失败")
                         
                 except Exception as e:
-                    logger.error(f"启动服务 {service_type} 时出错: {e}", exc_info=True)
+                    logger.error("启动服务 %s 时出错: %s", service_type, e, exc_info=True)
             
             self.is_running = success_count > 0
             logger.info(f"服务管理器启动完成，成功启动 {success_count}/{len(self.service_classes)} 个服务")
@@ -119,7 +119,7 @@ class ServiceManager:
                     logger.info(f"服务 {service_type} 停止成功")
                     
                 except Exception as e:
-                    logger.error(f"停止服务 {service_type} 时出错: {e}", exc_info=True)
+                    logger.error("停止服务 %s 时出错: %s", service_type, e, exc_info=True)
             
             # 清空服务字典
             self.services.clear()
@@ -224,7 +224,7 @@ class ServiceManager:
                     return False
                     
             except Exception as e:
-                logger.error(f"重启服务 {service_type} 时出错: {e}", exc_info=True)
+                logger.error("重启服务 %s 时出错: %s", service_type, e, exc_info=True)
                 return False
     
     def handle_node_config(self, node_config: Dict[str, Any]) -> str:

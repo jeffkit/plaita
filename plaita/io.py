@@ -454,7 +454,9 @@ def _lookup_function(registry, func_name):
     """Resolve a function callable by name from *registry* (or the default).
 
     Returns ``None`` when the function is not registered.  Callers should
-    fall back to the "undefined" sentinel to preserve historical behavior.
+    fall back to the "undefined" sentinel to preserve historical behavior
+    (scoped registries deliberately return ``"undefined"`` for functions they
+    don't expose — see test_expression.py).
     """
     if registry is None:
         return REGISTERED_FUNCTIONS.get(func_name)
@@ -490,8 +492,16 @@ def parse_function(expression, context, prefix="$", registry=None):
     def evaluate_function(tokens):
         func_name = tokens[0].split(".")[1].split("(")[0]
         args = [evaluate(arg, context, prefix, registry) for arg in tokens[1]]
-        logger.debug(f"parse_function: func_name={func_name}, args={args}")
-        func = _lookup_function(registry, func_name) or _UNDEFINED
+        logger.debug("parse_function: func_name=%s, args=%s", func_name, args)
+        func = _lookup_function(registry, func_name)
+        if func is None:
+            # 不再静默：函数未注册时记一条 warning，让拼写错误 / 沙箱漏注册可被
+            # 日志捕捉。返回值仍是 "undefined" 以兼容 scoped registry 语义。
+            logger.warning(
+                "expression function %r not registered (registry=%r); returning 'undefined'",
+                func_name, registry,
+            )
+            func = _UNDEFINED
         return func(*args)
 
     # 获取缓存的基础组件

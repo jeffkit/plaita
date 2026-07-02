@@ -152,7 +152,7 @@ class FlowWorker:
             return final_result
 
         except Exception as e:
-            logger.error(f"执行流程出错: {e}", exc_info=True)
+            logger.error("执行流程出错: %s", e, exc_info=True)
             raise RuntimeError(f"执行流程出错: {e}")
     
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -213,7 +213,7 @@ class FlowWorker:
             return final_result
 
         except Exception as e:
-            logger.error(f"恢复流程执行出错: {e}", exc_info=True)
+            logger.error("恢复流程执行出错: %s", e, exc_info=True)
 
             # 更新执行状态为错误
             state.status = "error"
@@ -291,7 +291,7 @@ class FlowWorker:
                         logger.info(f"流程步骤执行完成，继续下一步: {execution_id}")
 
                 except Exception as e:
-                    logger.error(f"流程执行出错: {e}", exc_info=True)
+                    logger.error("流程执行出错: %s", e, exc_info=True)
                     state.status = "error"
                     state.context = context
                     state.error = {"message": str(e)}

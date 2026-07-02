@@ -11,7 +11,8 @@ from typing import Dict, Any, List
 from datetime import datetime
 from statistics import mean, stdev
 
-from plaita.flow import Flow, FlowExecution, ExecutionMode
+from plaita.core.flow import Flow
+from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.event.memory import InMemoryEventBus
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 from plaita.storage.base import ExecutionState

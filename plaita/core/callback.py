@@ -110,7 +110,7 @@ class CallbackManager(BaseCallbackManager):
             try:
                 getattr(handler, handler_method)(*args, **kwargs)
             except Exception as e:
-                logger.warning(f"Error in {handler_method} callback: {e}", exc_info=True)
+                logger.warning("Error in %s callback: %s", handler_method, e, exc_info=True)
 
     def on_flow_start(self, flow, **kwargs) -> None:
         self._call_handlers("on_flow_start", flow, **kwargs)

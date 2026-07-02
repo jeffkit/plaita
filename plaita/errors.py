@@ -21,14 +21,23 @@ __all__ = [
     "ErrorStrategy",
     "ErrorHandler",
     "RecoverableErrorHandler",
+    "FlowErrorException",
+    "FlowStartMissingError",
+    "FlowTimeoutError",
+    "NodeNotFoundError",
+    "NodeExecutionError",
+    "NodeTimeoutError",
+    "ErrorResultException",
+    "ResumeError",
+    "ResumeType",
 ]
 
 
 def __getattr__(name: str):
     if name in __all__:
         _warnings.warn(
-            f"Importing '{name}' from 'plaita.errors' is deprecated. "
-            f"Use 'plaita.core.errors' instead.",
+            f"Importing '{name}' from 'plaita.errors' is deprecated and will be "
+            f"removed in plaita 0.6.0. Use 'plaita.core.errors' instead.",
             DeprecationWarning,
             stacklevel=2,
         )
