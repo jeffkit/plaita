@@ -14,7 +14,9 @@ logger = logging.getLogger("test_wildcard")
 
 class TestWildcardEvents:
     """测试通配符事件匹配"""
-    
+
+    __test__ = False  # 手动脚本式测试运行器（见文件末 main()），不让 pytest 采集
+
     def __init__(self):
         self.event_bus = InMemoryEventBus()
         self.received_events = []

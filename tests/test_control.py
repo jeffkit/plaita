@@ -124,7 +124,9 @@ class TestControlMixin:
     
     class TestService(ControlMixin):
         """测试服务类"""
-        
+
+        __test__ = False  # 嵌套辅助类，不参与 pytest 采集
+
         def __init__(self, redis_client, instance_id):
             self.stopped = False
             self.init_control(redis_client, instance_id)

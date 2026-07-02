@@ -99,7 +99,9 @@ class DebugEventFilter(EventFilter):
 
 class TestEventFilterWildcard:
     """测试EventFilter的通配符功能"""
-    
+
+    __test__ = False  # 手动脚本式测试运行器（见文件末 main()），不让 pytest 采集
+
     def __init__(self):
         self.event_bus = InMemoryEventBus()
         self.subscription_storage = InMemoryEventSubscriptionStorage()
