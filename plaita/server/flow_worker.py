@@ -71,24 +71,15 @@ class FlowWorker:
         flow_definition = self.flow_storage.get_flow(flow_id, version)
         
         if not flow_definition:
-            # 添加更多诊断信息
-            if hasattr(self.flow_storage, 'client') and hasattr(self.flow_storage, 'get_namespace_key'):
+            # Delegate diagnostic details to the storage layer via an optional
+            # diagnose() method — FlowWorker must not peek at storage internals
+            # (e.g. Redis keys / namespaces) directly.
+            if hasattr(self.flow_storage, "diagnose_missing_flow"):
                 try:
-                    # Redis存储特有的诊断
-                    key_pattern = self.flow_storage.get_namespace_key('flow', flow_id, '*')
-                    matching_keys = self.flow_storage.client.keys(key_pattern)
-                    
-                    # 获取所有流程列表
-                    flow_list_key = self.flow_storage.get_namespace_key('flow_list')
-                    flow_ids = self.flow_storage.client.smembers(flow_list_key)
-                    
-                    logger.error(f"Redis诊断 - 流程ID: {flow_id}")
-                    logger.error(f"Redis诊断 - 匹配的键: {matching_keys}")
-                    logger.error(f"Redis诊断 - 所有流程ID: {flow_ids}")
-                    logger.error(f"Redis诊断 - 使用的命名空间: {self.flow_storage.namespace}")
-                except Exception as e:
-                    logger.error(f"Redis诊断失败: {e}")
-            
+                    self.flow_storage.diagnose_missing_flow(flow_id)
+                except Exception:
+                    pass
+
             error_msg = f"找不到流程定义: {flow_id}"
             logger.error(error_msg)
             raise ValueError(error_msg)

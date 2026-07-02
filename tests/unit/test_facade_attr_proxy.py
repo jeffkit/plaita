@@ -1,11 +1,7 @@
-"""A2 复现: FlowExecution facade 不应产生"幻影属性"。
+"""FlowExecution facade 属性代理行为测试。
 
-当前 ``__setattr__`` 对既不在 _REAL_ATTRS、又不以 _ 开头、且 context 上没有
-的属性, 会落到 ``object.__setattr__`` 挂在 facade 实例上。这类属性:
-- 不进入 ``_ctx._context``, 分布式持久化(to_dict)时丢失;
-- 与"facade 是 context 的薄代理"的契约不符。
-
-期望: 未知公共属性应写入 context, 使其可被持久化、且读写对称。
+strict_attrs=True（默认）: 未知公共属性写入抛 AttributeError，防止拼写错误静默落入 context。
+strict_attrs=False: 未知公共属性写入 context（向后兼容模式，显式 opt-in）。
 """
 
 import unittest
@@ -15,15 +11,16 @@ from plaita.core.executor import FlowExecution
 
 class TestFacadeNoPhantomAttrs(unittest.TestCase):
     def test_unknown_public_attr_lands_on_context(self):
-        execution = FlowExecution()
+        # strict_attrs=False: 未知属性落入 context 而不是 facade.__dict__
+        execution = FlowExecution(strict_attrs=False)
         execution.my_marker = 42
 
-        # 应该写到 context, 而不是 facade 的 __dict__
         self.assertEqual(execution._ctx.get_state("my_marker"), 42)
         self.assertNotIn("my_marker", execution.__dict__)
 
     def test_unknown_attr_round_trips(self):
-        execution = FlowExecution()
+        # strict_attrs=False: 读写对称
+        execution = FlowExecution(strict_attrs=False)
         execution.temp_value = "hello"
         self.assertEqual(execution.temp_value, "hello")
         self.assertEqual(execution._ctx.get_state("temp_value"), "hello")

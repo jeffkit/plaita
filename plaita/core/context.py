@@ -72,6 +72,10 @@ class ExecutionContext:
         self.express_node_name = express_node_name
         self.express_global_name = express_global_name
         self.express_environment_variable = express_environment_variable
+        # Eagerly generate an execution ID so it is available before clean() or
+        # setup_flow() is called.  clean() replaces this with a fresh ID for
+        # each new run; from_dict() overwrites it with the persisted value.
+        self._context[f"{express_prefix}EXECUTION_ID"] = uuid.uuid4().hex
         self._evaluator = evaluator or ExpressionEvaluator()
 
     # -- dict-like access for backward compat (FlowExecution.context) --
@@ -100,9 +104,14 @@ class ExecutionContext:
         cancellation is thread-local and best-effort; cross-process cancel
         is not supported (a child process gets a fresh, unset event — see
         ``__getstate__``).
+
+        A fresh ``execution_id`` is generated here (not lazily on first read)
+        so that the ID is stable for the entire run and does not change if
+        ``execution_id`` is read multiple times or before ``setup_flow``.
         """
         self._context = {}
         self.cancel_event = threading.Event()
+        self.set_state(f"{self.express_prefix}EXECUTION_ID", uuid.uuid4().hex)
         safe_env = {
             k: v for k, v in os.environ.items()
             if not any(k.upper().startswith(p) for p in _SENSITIVE_ENV_PREFIXES)
@@ -191,11 +200,14 @@ class ExecutionContext:
 
     @property
     def execution_id(self) -> str:
-        eid = self.get_state(f"{self.express_prefix}EXECUTION_ID")
-        if not eid:
-            eid = uuid.uuid4().hex
-            self.set_state(f"{self.express_prefix}EXECUTION_ID", eid)
-        return eid
+        """Return the current execution ID (pure read-only).
+
+        The ID is initialised in ``clean()`` for a fresh run, or restored from
+        the persisted context dict in distributed resume scenarios.  Child
+        contexts that were never ``clean()``-ed may not carry their own ID;
+        callers needing the root-flow ID should access the root context.
+        """
+        return self.get_state(f"{self.express_prefix}EXECUTION_ID", "")
 
     # -- event bus --
 

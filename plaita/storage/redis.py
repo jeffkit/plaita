@@ -402,4 +402,23 @@ class RedisFlowStorage(FlowStorage):
             return True
         except Exception as e:
             logger.error(f"Failed to delete flow: {e}")
+
+    def diagnose_missing_flow(self, flow_id: str) -> None:
+        """Log Redis-specific diagnostics when a flow definition cannot be found.
+
+        This method is called by FlowWorker via an optional duck-type protocol;
+        keeping the Redis introspection here ensures FlowWorker stays agnostic
+        of the underlying storage implementation.
+        """
+        try:
+            key_pattern = self.get_namespace_key("flow", flow_id, "*")
+            matching_keys = self.client.keys(key_pattern)
+            flow_list_key = self.get_namespace_key("flow_list")
+            flow_ids = self.client.smembers(flow_list_key)
+            logger.error("Redis diagnostics — flow_id: %s", flow_id)
+            logger.error("Redis diagnostics — matching keys: %s", matching_keys)
+            logger.error("Redis diagnostics — known flow IDs: %s", flow_ids)
+            logger.error("Redis diagnostics — namespace: %s", self.namespace)
+        except Exception as e:
+            logger.error("Redis diagnostics failed: %s", e)
             return False 

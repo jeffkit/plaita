@@ -25,7 +25,7 @@ from .concurrent import Parallel
 from .decide import Bool, Switch, SwitchLegacy
 from .end import End
 from .event_node import EventNode
-from .loop import Filter, Find, Loop, Map, Reduce
+from .loop import BaseCollectionNode, Filter, Find, Loop, Map, Reduce
 from .start import Start
 from .http import HTTP
 
@@ -49,6 +49,8 @@ _BUILTIN_NODES: list[Type[Node]] = [
     Parallel,
     HTTP,
     EventNode,
+    # BaseCollectionNode is intentionally excluded: it is abstract and has no
+    # node_type, so it should never appear in the registry directly.
 ]
 
 

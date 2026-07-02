@@ -1,8 +1,21 @@
-from typing import Any, ClassVar, Dict, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
 from plaita.core.errors import ErrorHandler, RecoverableErrorHandler
+
+if TYPE_CHECKING:
+    # FlowExecution is the concrete type passed as `execution` at runtime.
+    # It is declared here only for static analysis; importing it at module level
+    # would create a circular dependency (node → executor → node).
+    #
+    # Design note: ideally nodes would depend on a narrow NodeExecutionContext
+    # interface (evaluate, get_state, get_child_execution) rather than the full
+    # FlowExecution facade.  That refactor is deferred; for now this annotation
+    # documents the intent without changing runtime behaviour.
+    from plaita.core.executor import FlowExecution
 
 
 class NodeConfigException(RuntimeError):
@@ -60,10 +73,10 @@ class Node(BaseModel):
         # 校验输出值是否符合预期格式
         pass
 
-    def run(self, execution=None):
+    def run(self, execution: FlowExecution = None) -> Any:
         result = self.execute(execution)
-        self._validate_output(result)  # 对结果进行校验。
+        self._validate_output(result)
         return result
 
-    def execute(self, execution=None):
+    def execute(self, execution: FlowExecution = None) -> Any:
         raise NotImplementedError()

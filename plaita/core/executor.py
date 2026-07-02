@@ -186,11 +186,9 @@ class DistributedStrategy:
 
         result, branch = await runner.run_node(flow, start_node, callback_manager=callback_manager)
 
-        if start_node.next:
-            current_node = flow.find_node_by_id(start_node.next)
-        else:
-            current_node = flow.next_node(start_node, branch)
-
+        # flow.next_node already handles both branching and non-branching nodes;
+        # no need to replicate the "if start_node.next" guard here.
+        current_node = flow.next_node(start_node, branch)
         return current_node, result, branch
 
     async def _execute_current_node(self, flow, context, runner, callback_manager, current_node):
@@ -292,11 +290,14 @@ class FlowExecution:
         callback_handlers: Optional[List[FlowCallback]] = None,
         callback_manager: Optional[BaseCallbackManager] = None,
         event_bus: Optional[EventBus] = None,
-        strict_attrs: bool = False,
+        strict_attrs: bool = True,
     ):
-        # strict_attrs=True 时, 未知公共属性写入会抛 AttributeError 而不是
-        # 静默落到 context state。给想要 fail-fast、避免拼写错误(如 tiemout)
-        # 静默持久化的调用方一个安全开关; 默认 False 保持向后兼容。
+        # strict_attrs=True (default): unknown public attribute writes raise
+        # AttributeError immediately, so typos like ``self.tiemout = 10`` are
+        # caught at the point of assignment instead of silently landing in the
+        # context state and causing mysterious runtime bugs.
+        # Pass strict_attrs=False only if you intentionally need to store
+        # arbitrary keys in the execution context via attribute syntax.
         self._strict_attrs = strict_attrs
         self.mode = mode
         self.timeout = None

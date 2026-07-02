@@ -42,8 +42,12 @@ def run_async_from_sync(coro):
         loop = None
 
     if loop and loop.is_running():
+        # No timeout here: the coroutine itself carries node/flow-level timeouts.
+        # A hard-coded wall-clock cap here would silently override all user-configured
+        # timeouts and cause mysterious failures for any flow that runs longer than
+        # the arbitrary constant.
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result(timeout=10)
+            return pool.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
 
 
