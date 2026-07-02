@@ -51,6 +51,11 @@ class Flow(BaseModel):
 
     # 节点 id -> Node 的索引, 惰性构建, 让 find_node_by_id/start_node 不必每次线性扫描
     _node_index: Dict[str, Node] = PrivateAttr(default_factory=dict)
+    # 缓存指纹: ``(id(self.nodes), tuple(node.id for node in nodes))``。访问索引前
+    # 比对一次, 不一致就重建。消除旧实现 "len==len 即认为有效" 的 staleness——
+    # 节点被替换、id 被原地修改、列表被换引用都会被抓到。指纹比对本身 O(n),
+    # 但只在 ``_ensure_index`` 实际需要重建的同一刻才会跑; 命中缓存时直接返回。
+    _node_index_sig: tuple = PrivateAttr(default_factory=tuple)
 
     @property
     def id(self) -> Optional[str]:
@@ -139,11 +144,25 @@ class Flow(BaseModel):
         return cls.model_validate(data)
 
     def _ensure_index(self) -> Dict[str, Node]:
-        """构建/刷新节点 id 索引, O(n) 摊销。"""
-        if self._node_index and len(self._node_index) == len(self.nodes or []):
+        """构建/刷新节点 id 索引, O(n) 摊销。
+
+        失效判断用指纹 ``(id(self.nodes), tuple(n.id for n in nodes))``, 而不是
+        旧实现的 ``len == len``——后者在节点 id 被原地修改、节点被替换为同长度
+        不同 id、列表引用被换时全部静默失效。
+        """
+        nodes = self.nodes or []
+        sig = (id(nodes), tuple(n.id for n in nodes))
+        if self._node_index and self._node_index_sig == sig:
             return self._node_index
-        self._node_index = {n.id: n for n in (self.nodes or [])}
+        self._node_index = {n.id: n for n in nodes}
+        self._node_index_sig = sig
         return self._node_index
+
+    def rebuild_node_index(self) -> None:
+        """显式重建节点索引。直接修改 ``flow.nodes`` 内节点 id 后调用一次即可,
+        不必新建 Flow。"""
+        self._node_index_sig = ()
+        self._ensure_index()
 
     @property
     def start_node(self):
@@ -185,7 +204,7 @@ class Flow(BaseModel):
             return None
         target = self._get_target_node(current, branch)
         ret = self.find_node_by_id(target)
-        logger.debug(f"finding next node {target} for {current.id}, result: {ret.id if ret else None}")
+        logger.debug("finding next node %s for %s, result: %s", target, current.id, ret.id if ret else None)
         return ret
 
     def _get_target_node(self, current: Node, branch=None) -> str:
@@ -195,14 +214,14 @@ class Flow(BaseModel):
 
     def _get_branch_target(self, current: Node, branch: str) -> str:
         if not hasattr(current, "branches"):
-            logger.warning(f"Node {current.id} has no branches")
+            logger.warning("Node %s has no branches", current.id)
             return None
-        logger.debug(f"current node {current.id} has branches: {current.branches}")
+        logger.debug("current node %s has branches: %s", current.id, current.branches)
         for b in current.branches:
             target = b.next or b.name
             if target == branch:
                 return target
-        logger.warning(f"branch {branch} not found for node {current.id}")
+        logger.warning("branch %s not found for node %s", branch, current.id)
         return None
 
     def run(self, *args, **params):

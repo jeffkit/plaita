@@ -78,6 +78,40 @@ class TestFlowNodeIndex(unittest.TestCase):
         # O(1) 索引: 1000 次查找应远低于 0.1s; 线性扫描的 O(n^2) 会高得多
         self.assertLess(elapsed, 0.1, f"find_node_by_id 似乎未走索引: {elapsed:.3f}s")
 
+    def test_index_rebuilds_when_node_id_mutated_in_place(self):
+        # 2026-07: 旧实现的 ``len == len`` 失效判断在 "节点 id 被原地改字符串"
+        # 时静默失效——索引仍然指向旧 id, find_node_by_id 用旧 id 还能命中, 用
+        # 新 id 反而找不到。指纹方案把这种情况抓出来。
+        flow = _linear_flow(5)
+        # 先触发索引构建
+        self.assertEqual(flow.find_node_by_id("n2").id, "n2")
+        # _linear_flow(5) 的 nodes[3] 是 id="n2"
+        flow.nodes[3].id = "n2-renamed"
+        # 原地改 id 后, 旧 id 应该找不到了 (说明索引已重建)
+        with self.assertRaises(Exception):
+            flow.find_node_by_id("n2")
+        # 新 id 应能命中
+        self.assertEqual(flow.find_node_by_id("n2-renamed").id, "n2-renamed")
+
+    def test_index_rebuilds_when_nodes_list_replaced(self):
+        # ``flow.nodes = [...]`` 换列表引用后索引也要失效。
+        flow = _linear_flow(3)
+        new_nodes = [
+            Start(id="another-start", next="end"),
+            End(id="end", **{"resultType": "success", "output": "ok"}),
+        ]
+        flow.nodes = new_nodes
+        self.assertEqual(flow.find_node_by_id("another-start").id, "another-start")
+
+    def test_rebuild_node_index_api(self):
+        flow = _linear_flow(3)
+        # 先触发索引构建
+        flow.find_node_by_id("start")
+        self.assertEqual(flow._node_index["start"].id, "start")
+        # 显式重建后内部索引仍然完整
+        flow.rebuild_node_index()
+        self.assertEqual(len(flow._node_index), len(flow.nodes))
+
 
 if __name__ == "__main__":
     unittest.main()
