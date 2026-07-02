@@ -334,6 +334,34 @@ tests/
 - ROI 不高，建议作为独立 PR 处理。本任务在文档里标记为暂缓，留给接手者。
 - 状态: 🕯️ 暂缓
 
+### 2026-07-02 (批2) `_node_index` 失效判断改指纹
+- 改动:
+  - `plaita/core/flow.py`: `_ensure_index` 失效判断从 `len == len` 改为指纹比对 `(id(self.nodes), tuple(n.id for n in nodes))`, 新增 `_node_index_sig` 私有属性缓存上次重建时的指纹; 新增 `rebuild_node_index()` 显式 API。
+  - `tests/unit/test_flow_node_index.py`: 新增 3 个回归 case (`test_index_rebuilds_when_node_id_mutated_in_place` / `test_index_rebuilds_when_nodes_list_replaced` / `test_rebuild_node_index_api`)。
+- 验证: `pytest tests/unit/test_flow_node_index.py -q` 9 passed。
+- 状态: ✅ 完成
+- 注意: 旧实现的 `len == len` 在节点 id 被原地改字符串、节点被替换为同长度不同 id、列表引用被换时全部静默失效。指纹方案把这三类都抓到; 仍未覆盖的极端场景 (节点对象引用不变但 id 通过 `__setattr__` 间接改且未触发 list rebuild) 由显式 `rebuild_node_index()` 兜底。
+
+### 2026-07-02 (批2) `@event_handler` 装饰器注册改造
+- 改动:
+  - `plaita/event/core.py`: 装饰器内 `asyncio.create_task(register())` 改为两路: running loop 存在 → `loop.create_task` 并把 task 引用存进模块级 `_handler_registration_tasks` 集合, `done_callback` 自动清理; 无 running loop → register 函数入 `_pending_handler_registrations` 列表, 暴露 `flush_pending_handler_registrations()` 让用户在 loop 起来后 await。
+  - `tests/unit/test_event_handler_decorator.py`: 新文件, 3 个 case 覆盖两条路径。
+- 验证: `pytest tests/unit/test_event_handler_decorator.py tests/test_event_system.py -q` 全过。
+- 状态: ✅ 完成
+- 注意: 不改公共签名 (`@event_handler(bus, ...)` 用法不变), 不需要现有文档示例改动。新增的 `flush_pending_handler_registrations` 仅在用户于模块导入期使用 `@event_handler` 且后续会在 async 上下文运行时才需要调用一次。
+
+### 2026-07-02 (批2) `BackGroundThreadPool`/`BackGroundProcessPool` 加 max_workers + atexit
+- 改动:
+  - `plaita/node/concurrent.py`: 两个模块级池加 `max_workers` (线程池默认 8、进程池默认 cpu 数, 可用环境变量 `PLAITA_BG_THREAD_WORKERS`/`PLAITA_BG_PROCESS_WORKERS` 覆盖); 线程池加 `thread_name_prefix="plaita-bg-thread"`; 注册 `atexit` 钩子 `_shutdown_background_pools` 在解释器退出时 `shutdown(wait=False, cancel_futures=True)`, 避免排队中的待办任务悬挂。
+- 验证: `pytest tests/test_concurrent.py -q` 7 passed; 手测 max_workers 与 atexit 注册生效。
+- 状态: ✅ 完成
+
+### 2026-07-02 (批2) `logger.xxx(f"...")` 改 lazy formatting (核心模块)
+- 改动: `plaita/core/callback.py` (7)、`plaita/core/flow.py` (4)、`plaita/client.py` (11)、`plaita/event/timeout.py` (2)、`plaita/event/memory.py` (2)、`plaita/storage/base.py` (2)、`plaita/storage/redis.py` (10)、`plaita/storage/sqlalchemy.py` (10)、`plaita/node/decide.py` (2)、`plaita/node/event_node.py` (7) — 共 57 处 `f"..."` 改 `"...%s...", args`。
+- 验证: 全套 782 passed (与基线一致 + 7 个新增测试)。
+- 状态: ✅ 完成 (核心模块)
+- 遗留: `plaita/server/` 下约 152 处 logger f-string 未清, 全是 INFO 级配置日志, 几乎总会输出, lazy 收益微, 留作独立 PR。
+
 ---
 
 ## 7. 还未处理的事项（明确登记，不假装做完）
@@ -343,13 +371,9 @@ tests/
 - **#13 `FlowExecution` 拆分 Driver/State/Hooks**：390 行的 God Object，重构影响面大，应作为独立 milestone，配 e2e 回归测试。
 - **#14 `ExecutionState(BaseModel)` 替换 magic key dict**：当前 `_context: Dict[str, Any]` + `f"${prefix}LAST_NODE"` magic key 模型，替换要改所有读写点（runner/executor/distributed strategy/loop/parallel/...），并保证分布式序列化往返一致。**这是最值钱也最危险的重构**。
 - **#15 `CodeNode` 沙箱化**：PyExecJS 无沙箱、已弃维护。要么换 `restrictedpython`/`py-mini-racer` + 资源限制，要么默认不注册、需要显式 opt-in（甚至独立 `plaita-sandbox` 包，配 Docker/nsjail）。
-- **`_node_index` 缓存失效靠长度比较**：可改为每次重建（O(n) 在 flow 启动时跑一次无所谓），或加 dirty 标记。
-- **`event_handler` 装饰器 `asyncio.create_task` 注册**（event/core.py:357）：fire-and-forget 任务可被 GC 回收，应改为返回 awaitable 或维护 task 引用。
 - **HMAC 重放保护**：`PlaitaClient` 应加 nonce/jti + 已用签名缓存，3 秒窗口内重放完全可行。
-- **`logger.info(f"...")` 全 f-string**：换成 `logger.info("...%s", val)` 走 lazy formatting。
-- **模块级 `BackGroundThreadPool`/`BackGroundProcessPool`**：无 max_workers、无 shutdown 钩子，建议改为 `atexit` 注册或实例级池。
-- **`logger.info` 在 flow.py 多处**：`logger.debug(f"finding next node ...")` 同样问题。
 - **flow.py / executor.py / runner.py 三处复制节点图遍历逻辑**：`flow.next_node` / `_get_target_node` / `_get_branch_target` / DistributedStrategy 自己那份——收敛到 `Flow` 单一入口。
+- **`plaita/server/` 节点/服务文件 logger f-string**：2026-07 批次只清理了 core/event/node/storage/client（约 57 处）。server/ 下 152 处 INFO 级配置日志几乎总会输出，lazy 收益微，留作独立 PR。
 
 ---
 
