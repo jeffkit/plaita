@@ -1,5 +1,6 @@
-import asyncio
+import atexit
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures.process import ProcessPoolExecutor
 from multiprocessing import Lock as ProcessLock
@@ -18,8 +19,37 @@ COROUTINE = "coroutine"
 PROCESS = "process"
 THREAD = "thread"
 
-BackGroundThreadPool = ThreadPoolExecutor()
-BackGroundProcessPool = ProcessPoolExecutor()
+# 后台分支是 fire-and-forget (submit 后不持 future 引用, 不取结果)。模块级
+# 池子的两个问题历史遗留: 无 max_workers (默认会按 ``min(32, os.cpu_count()+4)``
+# 算 thread 池, 进程池按 cpu 数), 无 shutdown 钩子。pytest/Jupyter/Web 服务
+# 进程隐式持有这两个 pool, 解释器退出时若不显式 shutdown, 待办 future 可能丢。
+_DEFAULT_BG_THREAD_WORKERS = int(os.environ.get("PLAITA_BG_THREAD_WORKERS", "8"))
+_DEFAULT_BG_PROCESS_WORKERS = int(os.environ.get("PLAITA_BG_PROCESS_WORKERS", str(os.cpu_count() or 4)))
+
+BackGroundThreadPool = ThreadPoolExecutor(
+    max_workers=_DEFAULT_BG_THREAD_WORKERS,
+    thread_name_prefix="plaita-bg-thread",
+)
+BackGroundProcessPool = ProcessPoolExecutor(
+    max_workers=_DEFAULT_BG_PROCESS_WORKERS,
+)
+
+
+def _shutdown_background_pools() -> None:
+    """进程退出时显式 shutdown 后台池, 避免待办任务悬挂。"""
+    # cancel_futures=True: 解释器已经在退出, 没机会跑排队中的任务, 与其卡住
+    # 等, 不如直接丢。已在跑的会被 wait。
+    for pool, name in (
+        (BackGroundThreadPool, "BackGroundThreadPool"),
+        (BackGroundProcessPool, "BackGroundProcessPool"),
+    ):
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # pragma: no cover - 退出路径上的 best-effort
+            logger.debug("%s shutdown raised during atexit", name, exc_info=True)
+
+
+atexit.register(_shutdown_background_pools)
 
 
 class ParallelBranch(Branch):
