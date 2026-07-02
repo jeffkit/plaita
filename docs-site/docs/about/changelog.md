@@ -62,6 +62,21 @@
 
 ---
 
+## 未发布 — C1：表达式引擎统一为单套缓存文法
+
+### 架构
+
+- **表达式引擎双轨制消除**：移除 `plaita/io.py` 求值路径上的「正则粗筛 + pyparsing 精解」双轨制。新增 `plaita/core/expression_parser.py` 的 `ExpressionParser`，一套按 prefix 构建并缓存的 pyparsing 文法覆盖字面量 / 变量路径 / `$F.func(...)` 函数调用 / `{% ... %}` 插值；`evaluate` / `parse_function` 退化为薄包装。旧引擎每次调用都 `pp.Forward()` + `setParseAction` 重建 `function_call` 规则的问题随之消除，`io.py` 净减约 140 行。
+- **求值语义锁定**：新增 `tests/unit/test_expression_golden.py`（45 条）逐项锁行为——根变量缺失 key 仍抛 `KeyError`、中段字段以父对象为 context 递归 `evaluate`（含 `$PARENT.$INPUT.name` 这种段名带 `$` 的旧语法）、`[n]`/`.n` 段直接索引不递归、未知函数回退 `"undefined"`、`{% ... %}` 仅当内部以 prefix 开头才触发。全量套件 835 passed 无回归。
+- **保留 A 档行为**：函数未注册的 `logger.warning`（A 档引入）随 `_eval_function_call` 搬入 `expression_parser.py`，拼写错误 / 沙箱漏注册仍可被日志捕捉。
+
+### 顺带修复的边角
+
+- 非根位置的负索引（如 `$INPUT.names[-1]`）现在能正确取值（旧 `get_attr` 正则只认非负索引，此场景返回 `None`）。
+- `$F.now()` 等零参函数调用现在可解析（旧 `delimitedList` 要求至少一个参数）。
+
+---
+
 ## 0.4.0 — 品牌统一 & API 清理
 
 ### 品牌

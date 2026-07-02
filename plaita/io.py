@@ -1,5 +1,4 @@
 import json
-import math
 import re
 import warnings
 from collections import namedtuple
@@ -9,7 +8,6 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Dict, Iterator, List, Optional, Union
 
-import pyparsing as pp
 from pydantic import BaseModel, Field, model_validator
 
 from plaita.core import types
@@ -18,6 +16,10 @@ from plaita.core.expression import (
     FunctionCategory,
     FunctionDescriptor,
     get_default_expression_registry,
+)
+from plaita.core.expression_parser import (
+    ExpressionParser,
+    _parser_components_cache,
 )
 from .logger import logger
 from plaita.core.types import ValidationError
@@ -310,6 +312,8 @@ class Property(BaseModel):
 
 
 def get_attr(obj, path):
+    # Note: used by Property matching (``_match_object``), not by the
+    # expression evaluator. Kept here as a structural helper.
     if re.search(r"\[\d+\]", path):  # 判断路径是否有数组索引
         key, index = re.findall(r"([^\[\]]+)", path)
         if isinstance(obj, dict):
@@ -335,138 +339,13 @@ def evaluate(value, context, prefix="$", registry=None):
             回退到模块级 ``REGISTERED_FUNCTIONS``，保持向后兼容。传入自定义
             registry 后，``$F.func(...)`` 调用将从该 registry 解析函数，
             从而让 scoped/自定义 registry 真正生效。
+
+    求值由 ``plaita.core.expression_parser.ExpressionParser`` 驱动 —— 单套
+    pyparsing 文法覆盖字面量 / 变量路径 / 函数调用 / ``{% ... %}`` 插值，
+    解析器按 prefix 构建一次并缓存。历史上的「正则粗筛 + pyparsing 精解」
+    双轨制已移除。
     """
-    if not isinstance(value, str):
-        return _evaluate_non_string(value, context, prefix, registry)
-
-    if not value.startswith(prefix):
-        return _evaluate_non_prefix_string(value, context, prefix, registry)
-
-    return _evaluate_prefix_string(value, context, prefix, registry)
-
-
-def _evaluate_non_string(value, context, prefix, registry=None):
-    if isinstance(value, list):
-        return [evaluate(item, context, prefix, registry) for item in value]
-    if isinstance(value, dict):
-        return {key: evaluate(val, context, prefix, registry) for key, val in value.items()}
-    return value
-
-
-def _evaluate_non_prefix_string(value, context, prefix, registry=None):
-    pattern = r"\{%\s*(" + re.escape(prefix) + r"(?:(?!\{%|\%\}).)*?)\s*\%}"
-    regx = re.compile(pattern, re.DOTALL)
-    if not regx.search(value):
-        return value
-    return regx.sub(lambda m: str(evaluate(m.group(1).strip(), context, prefix, registry)), value)
-
-
-def _evaluate_prefix_string(value, context, prefix, registry=None):
-    pattern = r"^" + re.escape(prefix) + r"F\.([a-zA-Z_][a-zA-Z0-9_]*?)\((.*?)\)$"
-    if re.match(pattern, value):
-        return parse_function(value, context, prefix, registry)
-
-    paths = value.split(".")
-    obj = _get_initial_object(paths, context)
-    paths = _adjust_paths(paths)
-
-    for path in paths:
-        obj = _get_object_attribute(obj, path, context, prefix, registry)
-        if obj is None:
-            return None
-    return obj
-
-
-def _get_initial_object(paths, context):
-    if len(paths) > 1 and paths[1].isdigit():
-        return context[paths[0]][int(paths[1])]
-    if re.search(r"\[\-?\d+\]", paths[0]):
-        key, index = re.findall(r"([^\[\]]+)", paths[0])
-        return context[key][int(index)]
-    return context[paths[0]]
-
-
-def _adjust_paths(paths):
-    if len(paths) > 1 and paths[1].isdigit():
-        return paths[2:]
-    if re.search(r"\[\-?\d+\]", paths[0]):
-        return paths[1:]
-    return paths[1:]
-
-
-def _get_object_attribute(obj, path, context, prefix, registry=None):
-    if path.isdigit():
-        return obj[int(path)]
-    # 为子层级的变量补充前缀
-    path = f"{prefix}{path}" if path in ["GLOBAL", "INPUT", "NODE", "PARENT", "ENV"] else path
-    return evaluate(get_attr(obj, path), obj, prefix, registry)
-
-
-# 缓存解析器基础组件，避免每次调用都重新创建
-_parser_components_cache = {}
-_parser_cache_lock = __import__("threading").Lock()
-
-
-def _get_parser_components(prefix: str):
-    """
-    获取或创建基础解析器组件
-    
-    Args:
-        prefix: 表达式前缀
-        
-    Returns:
-        解析器基础组件元组 (constant, variable, identifier)
-    """
-    cache_key = prefix
-    
-    with _parser_cache_lock:
-        if cache_key in _parser_components_cache:
-            return _parser_components_cache[cache_key]
-    
-    # 定义常量
-    number = pp.pyparsing_common.number
-    boolean = pp.Keyword("True") | pp.Keyword("False") | pp.Keyword("true") | pp.Keyword("false")
-    string = pp.QuotedString('"') | pp.QuotedString("'")
-    constant = boolean | string | number
-
-    # 定义标识符
-    identifier = pp.Word(pp.alphas, pp.alphanums + "_")
-
-    # 支持0层和多层变量路径
-    variable_path = pp.Combine(identifier + pp.ZeroOrMore("." + identifier))
-    variable_prefix = (
-        pp.Literal(f"{prefix}INPUT")
-        | pp.Literal(f"{prefix}NODE")
-        | pp.Literal(f"{prefix}PARENT")
-        | pp.Literal(f"{prefix}GLOBAL")
-        | pp.Literal(f"{prefix}ENV")
-    )
-    # variable需要支持0层和多层变量路径，如 $INPUT, $INPUT.name, $INPUT.step1.name
-    variable = pp.Combine(variable_prefix + pp.Optional("." + variable_path))
-    
-    with _parser_cache_lock:
-        _parser_components_cache[cache_key] = (constant, variable, identifier)
-    
-    return constant, variable, identifier
-
-
-def _lookup_function(registry, func_name):
-    """Resolve a function callable by name from *registry* (or the default).
-
-    Returns ``None`` when the function is not registered.  Callers should
-    fall back to the "undefined" sentinel to preserve historical behavior
-    (scoped registries deliberately return ``"undefined"`` for functions they
-    don't expose — see test_expression.py).
-    """
-    if registry is None:
-        return REGISTERED_FUNCTIONS.get(func_name)
-    if isinstance(registry, ExpressionRegistry):
-        return registry.get_callable(func_name)
-    # 兼容旧的 dict-like proxy
-    return registry.get(func_name)
-
-
-_UNDEFINED = lambda *args, **kwargs: "undefined"  # noqa: E731
+    return ExpressionParser.for_prefix(prefix).evaluate(value, context, registry)
 
 
 def parse_function(expression, context, prefix="$", registry=None):
@@ -482,46 +361,11 @@ def parse_function(expression, context, prefix="$", registry=None):
             registry 解析，使 scoped 表达式引擎生效。
 
     Returns:
-        解析并执行后的结果，如果无法解析则返回原始表达式
+        解析并执行后的结果；若不含 ``{prefix}F.`` 调用则原样返回。
     """
-    # 快速检查是否可能包含函数调用
-    if f"{prefix}F." not in expression:
-        return expression
-
-    # 定义求值函数（需要访问 context 和 prefix）
-    def evaluate_function(tokens):
-        func_name = tokens[0].split(".")[1].split("(")[0]
-        args = [evaluate(arg, context, prefix, registry) for arg in tokens[1]]
-        logger.debug("parse_function: func_name=%s, args=%s", func_name, args)
-        func = _lookup_function(registry, func_name)
-        if func is None:
-            # 不再静默：函数未注册时记一条 warning，让拼写错误 / 沙箱漏注册可被
-            # 日志捕捉。返回值仍是 "undefined" 以兼容 scoped registry 语义。
-            logger.warning(
-                "expression function %r not registered (registry=%r); returning 'undefined'",
-                func_name, registry,
-            )
-            func = _UNDEFINED
-        return func(*args)
-
-    # 获取缓存的基础组件
-    constant, variable, identifier = _get_parser_components(prefix)
-
-    # 创建新的 function_call（因为 Forward 需要每次绑定不同的 parseAction）
-    function_call = pp.Forward()
-    expr = constant | variable | function_call
-
-    # 定义函数调用规则并绑定 parseAction
-    function_call <<= (
-        pp.Combine(f"{prefix}F." + identifier + "(") + pp.Group(pp.delimitedList(expr) + pp.Optional(",")) + ")"
-    )
-    function_call.setParseAction(evaluate_function)
-
-    try:
-        parsed = function_call.parseString(expression, parseAll=True)
-        return parsed[0]
-    except pp.exceptions.ParseException:
-        return expression
+    parser = ExpressionParser.for_prefix(prefix)
+    _parser_components_cache[prefix] = parser  # backward-compat for old tests
+    return parser.parse_function(expression, context, registry)
 
 
 def match(props: Property, obj, context=None):
