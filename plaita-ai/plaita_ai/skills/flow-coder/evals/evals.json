@@ -1,0 +1,285 @@
+{
+  "skill_name": "flow-coder",
+  "evals": [
+    {
+      "id": 1,
+      "name": "cond-grade",
+      "prompt": "实现一个评分流程：输入 score（整数），score>=90 返回 'A'，60<=score<90 返回 'B'，否则返回 'C'。",
+      "expected_output": "所有测试用例通过（5 条）",
+      "files": [],
+      "expectations": [
+        "{'score': 95} → 'A'",
+        "{'score': 72} → 'B'",
+        "{'score': 60} → 'B'",
+        "{'score': 59} → 'C'",
+        "{'score': 0} → 'C'",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "str-greet",
+      "prompt": "实现打招呼流程：输入 name（字符串），先把它转大写，再返回 'HELLO, ' + 大写名 + '!' 的拼接结果。（注意：不要用 f-string 或 + 拼字符串，用 F.concat）",
+      "expected_output": "所有测试用例通过（2 条）",
+      "files": [],
+      "expectations": [
+        "{'name': 'alice'} → 'HELLO, ALICE!'",
+        "{'name': 'Bob'} → 'HELLO, BOB!'",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "arith-calc",
+      "prompt": "实现一个简单计算器：输入 a、b（整数），返回 (a + b) * 2 的结果。",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'a': 3, 'b': 5} → 16",
+        "{'a': 0, 'b': 0} → 0",
+        "{'a': -2, 'b': 4} → 4",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "map-double",
+      "prompt": "实现翻倍列表流程：输入 numbers（整数列表），返回每个元素乘 2 后的新列表。（用 MAP 集合节点）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'numbers': [1, 2, 3, 4]} → [2, 4, 6, 8]",
+        "{'numbers': []} → []",
+        "{'numbers': [10]} → [20]",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "filter-evens",
+      "prompt": "实现过滤偶数流程：输入 nums（整数列表），返回只含偶数的新列表。（用 FILTER 集合节点，子流程返回 bool）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'nums': [1, 2, 3, 4, 5, 6]} → [2, 4, 6]",
+        "{'nums': [1, 3, 5]} → []",
+        "{'nums': [2, 4]} → [2, 4]",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "find-first-even",
+      "prompt": "实现找首个偶数流程：输入 nums（整数列表），返回第一个偶数；若没有偶数返回 None。（用 FIND 集合节点）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'nums': [1, 3, 4, 6]} → 4",
+        "{'nums': [2, 4, 6]} → 2",
+        "{'nums': [1, 3, 5]} → None",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "childflow-double",
+      "prompt": "用子流程实现翻倍：定义一个 @childflow 把输入的 item 翻倍，主流程用 CHILD 调用它，输入 payload（整数），返回翻倍结果。",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'payload': 21} → 42",
+        "{'payload': 0} → 0",
+        "{'payload': -5} → -10",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "router-intent",
+      "prompt": "实现意图路由流程：输入 type（字符串）。type=='sales' 返回 '销售客服'；type=='support' 返回 '技术支持'；type=='billing' 返回 '计费客服'；其余返回 '通用客服'。",
+      "expected_output": "所有测试用例通过（4 条）",
+      "files": [],
+      "expectations": [
+        "{'type': 'sales'} → '销售客服'",
+        "{'type': 'support'} → '技术支持'",
+        "{'type': 'billing'} → '计费客服'",
+        "{'type': 'other'} → '通用客服'",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "map-filter-chain",
+      "prompt": "实现组合流程：输入 nums（整数列表）。先把每个元素乘 3（MAP），再过滤出大于 10 的结果（FILTER），返回最终列表。可以用两个集合节点串起来，或用子流程组合。",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'nums': [1, 2, 3, 4, 5]} → [12, 15]",
+        "{'nums': [0, 1]} → []",
+        "{'nums': [10]} → [30]",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "discount-price",
+      "prompt": "实现折扣计算流程：输入 price（原价，数字）和 is_vip（布尔）。VIP 打 8 折，非 VIP 打 9 折；若折后价低于 50，则取 50（保底价）。返回最终价格。",
+      "expected_output": "所有测试用例通过（4 条）",
+      "files": [],
+      "expectations": [
+        "{'price': 100, 'is_vip': True} → 80",
+        "{'price': 100, 'is_vip': False} → 90",
+        "{'price': 40, 'is_vip': True} → 50",
+        "{'price': 50, 'is_vip': False} → 50",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 14,
+      "name": "in-op-small",
+      "prompt": "实现判定流程：输入 x（整数）。若 x 在 [1, 2, 3] 中返回 'small'，否则返回 'big'。（用 in 操作符，写在 if 判断位置）",
+      "expected_output": "所有测试用例通过（4 条）",
+      "files": [],
+      "expectations": [
+        "{'x': 2} → 'small'",
+        "{'x': 3} → 'small'",
+        "{'x': 9} → 'big'",
+        "{'x': 0} → 'big'",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "len-count",
+      "prompt": "实现计数流程：输入 items（列表），返回其长度。（用 F.len）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'items': [1, 2, 3, 4, 5]} → 5",
+        "{'items': []} → 0",
+        "{'items': ['a']} → 1",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "arith-precedence",
+      "prompt": "实现算术流程：输入 a、b、c（整数），返回 (a + b) * c。（表达式语言没有中缀优先级，先用赋值算 a+b，再乘 c）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'a': 3, 'b': 5, 'c': 2} → 16",
+        "{'a': 1, 'b': 2, 'c': 10} → 30",
+        "{'a': 0, 'b': 0, 'c': 99} → 0",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 17,
+      "name": "string-template",
+      "prompt": "实现字符串模板流程：输入 name（字符串）和 age（整数），返回 'name=<name>, age=<age>'。（不要用 f-string；用 F.concat 把各段拼起来，age 需要拼成字符串）",
+      "expected_output": "所有测试用例通过（2 条）",
+      "files": [],
+      "expectations": [
+        "{'name': 'alice', 'age': 20} → 'name=alice, age=20'",
+        "{'name': 'bob', 'age': 5} → 'name=bob, age=5'",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 18,
+      "name": "map-dict-price",
+      "prompt": "实现价格翻倍流程：输入 items（列表，每个元素是 {'price': 数字}），用 MAP 对每个元素的 price 乘 2，返回翻倍后的价格列表。",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'items': [{'price': 10}, {'price': 5}]} → [20, 10]",
+        "{'items': [{'price': 0}]} → [0]",
+        "{'items': []} → []",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 19,
+      "name": "filter-count",
+      "prompt": "实现偶数计数流程：输入 nums（整数列表），用 FILTER 过滤出偶数，再返回偶数的个数。（用 F.len 统计 FILTER 结果）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'nums': [1, 2, 3, 4, 5, 6]} → 3",
+        "{'nums': [1, 3, 5]} → 0",
+        "{'nums': [2, 4]} → 2",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 20,
+      "name": "nested-childflow",
+      "prompt": "用嵌套子流程实现：定义子流程 add_one（输入 v，返回 v+1），再定义子流程 double_then_add（输入 v，用 CHILD 调 add_one，把结果乘 2 返回）。主流程输入 v，用 CHILD 调 double_then_add，返回结果。",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'v': 10} → 22",
+        "{'v': 0} → 2",
+        "{'v': -1} → 0",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 21,
+      "name": "guard-validate",
+      "prompt": "实现带校验的流程：输入 age（整数）。若 age < 0 或 age > 150，返回 'invalid'；否则若 age >= 18 返回 'adult'，否则返回 'minor'。",
+      "expected_output": "所有测试用例通过（5 条）",
+      "files": [],
+      "expectations": [
+        "{'age': 25} → 'adult'",
+        "{'age': 10} → 'minor'",
+        "{'age': -1} → 'invalid'",
+        "{'age': 200} → 'invalid'",
+        "{'age': 18} → 'adult'",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 22,
+      "name": "assignment-chain",
+      "prompt": "实现多步计算流程：输入 x（整数）。先算 step1 = x + 1，再算 step2 = step1 * 3，最后返回 step2 - 2。（用三个赋值节点串联，引用上游节点输出）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'x': 5} → 16",
+        "{'x': 0} → 1",
+        "{'x': 1} → 4",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 23,
+      "name": "map-dict-filter-chain",
+      "prompt": "实现组合流程：输入 items（列表，每个元素是 {'price': 数字}）。先用 MAP 把每个 price 乘 2，再用 FILTER 过滤出大于 20 的结果，返回最终列表。（MAP 与 FILTER 串联；注意集合节点输出引用）",
+      "expected_output": "所有测试用例通过（3 条）",
+      "files": [],
+      "expectations": [
+        "{'items': [{'price': 5}, {'price': 12}, {'price': 3}]} → [24]",
+        "{'items': [{'price': 1}, {'price': 2}]} → []",
+        "{'items': [{'price': 100}]} → [200]",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    },
+    {
+      "id": 24,
+      "name": "tiered-discount",
+      "prompt": "实现阶梯折扣流程：输入 price（原价，数字）。price > 100 打 7 折；50 < price <= 100 打 85 折；其余不打折。返回折后价（数字，不做保底）。",
+      "expected_output": "所有测试用例通过（5 条）",
+      "files": [],
+      "expectations": [
+        "{'price': 200} → 140",
+        "{'price': 100} → 85",
+        "{'price': 60} → 51",
+        "{'price': 50} → 50",
+        "{'price': 30} → 30",
+        "用 @flow DSL 表达，未用普通 Python 绕过"
+      ]
+    }
+  ]
+}

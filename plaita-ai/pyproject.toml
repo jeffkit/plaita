@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plaita-ai"
+version = "0.1.0"
+description = "AI integrations for Plaita — MCP tools, CLI, FoT agent, and flow-coder skills"
+requires-python = ">=3.10"
+authors = [
+    { name = "Jeff kit", email = "bbmyth@gmail.com" },
+]
+dependencies = [
+    "plaita>=0.4.0",
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+agent = [
+    "langchain>=1.0",
+    "langchain-core>=1.0",
+]
+fot = [
+    "langchain>=1.0",
+    "langchain-core>=1.0",
+]
+openai = [
+    "langchain-openai>=0.3",
+]
+dev = [
+    "pytest",
+]
+all = ["plaita-ai[agent,openai,dev]"]
+
+[project.scripts]
+plaita-ai = "plaita_ai.cli.main:main"
+
+[project.urls]
+Homepage = "https://jeffkit.github.io/plaita/"
+Repository = "https://github.com/jeffkit/plaita"
+Documentation = "https://jeffkit.github.io/plaita/"
+
+[tool.setuptools.packages.find]
+include = ["plaita_ai", "plaita_ai.*"]
+
+[tool.setuptools.package-data]
+plaita_ai = [
+    "skills/**/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
