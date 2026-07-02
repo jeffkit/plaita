@@ -1,4 +1,5 @@
-.python-version
+# 注意: .python-version 不再 ignore —— pyenv 需要它确定项目 Python 版本,
+# git clean -fdX 会删它, 删了之后团队/CI 都不知道用哪个解释器。
 *.db
 *.log
 dist

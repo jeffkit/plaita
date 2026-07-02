@@ -3,11 +3,14 @@
 """
 import asyncio
 import json
+import logging
 import time
 import uuid
 import sys
 import os
 from typing import Any, Callable, Dict, List, Optional, Set, Union, Awaitable
+
+logger = logging.getLogger(__name__)
 
 # 临时修改sys.path以避免本地文件冲突
 original_path = list(sys.path)
@@ -569,7 +572,7 @@ class RedisProcessingTracker(EventProcessingTracker):
                     removed += 1
             except (ValueError, TypeError) as e:
                 # 处理解析错误
-                print(f"清理记录时出错: {e}, key={key_str}")
+                logger.warning("清理记录时出错: %s, key=%s", e, key_str)
         
         return removed
     
@@ -830,7 +833,7 @@ class RedisEventBus(EventBus):
                                     future.set_result(event)
                                 break
                         except Exception as e:
-                            print(f"解析事件数据失败: {e}")
+                            logger.warning("解析事件数据失败: %s", e)
                     
                     # 检查future是否已完成（可能来自其他来源）
                     if future.done():
@@ -989,7 +992,7 @@ class RedisEventBus(EventBus):
                 asyncio.create_task(self._process_event(handler, event, handler_id))
                 
         except Exception as e:
-            print(f"处理事件消息失败: {e}")
+            logger.warning("处理事件消息失败: %s", e)
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
         """处理事件并记录结果"""

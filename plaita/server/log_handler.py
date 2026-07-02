@@ -171,7 +171,7 @@ class RedisStreamHandler(logging.Handler):
             # 重新加入队列
             with self._queue_lock:
                 self._queue = entries + self._queue
-            print(f"日志刷新失败: {e}")
+            logging.getLogger(__name__).warning("日志刷新失败: %s", e)
     
     def close(self):
         """关闭处理器"""
