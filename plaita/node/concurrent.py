@@ -1,7 +1,7 @@
 import atexit
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from concurrent.futures.process import ProcessPoolExecutor
 from multiprocessing import Lock as ProcessLock
 from threading import Lock
@@ -126,14 +126,21 @@ class Parallel(Node):
         return rs
 
     def pool_execute(self, pool_type=THREAD, execution=None):
-        """使用线程池或进程池来执行并行节点"""
+        """使用共享后台池执行并行节点。
+
+        历史上每个 Parallel 节点 ``with ThreadPoolExecutor()`` 自起+销毁一个池——
+        节点递归嵌套时会指数级开 worker、且默认无 ``max_workers``（按
+        ``min(32, cpu+4)``），单 flow 里多个 Parallel 节点同时跑很快打满。改为
+        复用模块级单例池（``BackGroundThreadPool`` / ``BackGroundProcessPool``，
+        都有 ``max_workers`` 与 ``atexit`` 钩子）。
+        """
         branches_to_execute = self.match_condition_branches(execution)
         join_branches, background_branches = self._split_branches(branches_to_execute)
 
-        pool = self._create_pool(pool_type)
+        pool = self._select_pool(pool_type)
         lock = self._create_lock(pool_type)
 
-        self._execute_background_branches(background_branches, pool_type, execution)
+        self._execute_background_branches(background_branches, pool, execution)
 
         results = self._execute_join_branches(join_branches, pool, lock, execution)
 
@@ -144,32 +151,35 @@ class Parallel(Node):
         background_branches = [b for b in branches if b.name not in self.join_branches]
         return join_branches, background_branches
 
-    def _create_pool(self, pool_type):
+    def _select_pool(self, pool_type):
         if pool_type == THREAD:
-            return ThreadPoolExecutor()
+            return BackGroundThreadPool
         elif pool_type == PROCESS:
-            return ProcessPoolExecutor()
+            return BackGroundProcessPool
         else:
             raise ValueError(f"Unknown pool type: {pool_type}")
 
     def _create_lock(self, pool_type):
         return Lock() if pool_type == THREAD else ProcessLock()
 
-    def _execute_background_branches(self, background_branches, pool_type, execution):
-        if background_branches:
-            bg_pool = BackGroundThreadPool if pool_type == THREAD else BackGroundProcessPool
-            for branch in background_branches:
-                bg_pool.submit(self.exec_branch, branch, execution)
+    def _execute_background_branches(self, background_branches, pool, execution):
+        for branch in background_branches:
+            pool.submit(self.exec_branch, branch, execution)
 
     def _execute_join_branches(self, join_branches, pool, lock, execution):
+        # submit 全部分支后用 ``wait`` 阻塞到所有 future 完成。不再用 ``with pool``
+        # 因为 pool 是共享单例，``__exit__`` 会把池关掉。等所有 future（含抛错的）
+        # 完成后再统一收集结果，避免某分支抛错时 results 缺字段让下游拿到 KeyError。
         results = {}
-        with pool as executor:
-            future_to_branch = {
-                executor.submit(self.exec_branch, branch, execution): branch for branch in join_branches
-            }
-            for future in as_completed(future_to_branch):
-                branch = future_to_branch[future]
-                self._process_future_result(future, branch, results, lock)
+        if not join_branches:
+            return results
+        future_to_branch = {
+            pool.submit(self.exec_branch, branch, execution): branch for branch in join_branches
+        }
+        done, _ = wait(future_to_branch)
+        for future in done:
+            branch = future_to_branch[future]
+            self._process_future_result(future, branch, results, lock)
         return results
 
     def _process_future_result(self, future, branch, results, lock):
