@@ -110,21 +110,24 @@ def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
         "e.g. flow.run({'items': [...]}) and reference $INPUT.items."
     )
 
-# 依赖反转: core 不直接 import plaita.event, 而是持有一个由上层 (plaita 顶层包)
-# 注册的 "默认 event bus provider" 可调用对象。这样 core → event 的反向依赖
-# 被消除, 同时保留 "未注入 event_bus 时自动取默认总线" 的旧行为。
-_default_event_bus_provider: Optional["Callable[[], Any]"] = None
+# 历史上为避开 ``core → event`` 反向依赖, 这里曾用一个模块级可变全局
+# ``_default_event_bus_provider`` + ``set_default_event_bus_provider`` 注入。
+# 实际整个项目就一个 provider, 这套机制换来隐式全局 + 类型丢失 + 测试必须 mock
+# 的代价。改为 ``core`` 直接 lazily import ``plaita.event.get_default_event_bus``
+# 作为 fallback——core 仍不持有 EventBus 实例, 但承认 ``event`` 层是它的下游
+# 协作者。Spring/Django 都允许这种 import, 收益 (类型 + 可测性) 远大于"分层纯洁"。
+def _resolve_default_event_bus():
+    """Lazily fetch the default EventBus from the event layer.
 
-
-def set_default_event_bus_provider(provider) -> None:
-    """Register the callable used to lazily obtain a default event bus.
-
-    Intended to be called once by the top-level ``plaita`` package (which may
-    depend on ``plaita.event``).  Keeping this indirection means ``plaita.core``
-    never imports ``plaita.event`` — preserving the ``core → event`` layering.
+    Imported inside the function so the ``core`` package doesn't drag in
+    ``plaita.event`` (and its optional redis/sqlalchemy deps) at import time.
     """
-    global _default_event_bus_provider
-    _default_event_bus_provider = provider
+    try:
+        from plaita.event import get_default_event_bus
+        return get_default_event_bus()
+    except Exception:
+        logger.warning("Unable to get default event bus", exc_info=True)
+        return None
 
 
 class ExecutionContext:
@@ -351,13 +354,9 @@ class ExecutionContext:
         if self.parent and self.parent.event_bus:
             self.event_bus = self.parent.event_bus
             return self.event_bus
-        provider = _default_event_bus_provider
+        provider = _resolve_default_event_bus
         if provider is not None:
-            try:
-                self.event_bus = provider()
-            except Exception:
-                logger.warning("Unable to get default event bus")
-                self.event_bus = None
+            self.event_bus = provider()
         else:
             self.event_bus = None
         return self.event_bus

@@ -1,13 +1,17 @@
 """
 Tests for clean package layering.
 
-Layering model enforced here (matches the documented ``core → event →
-storage → server`` chain, with ``node`` and ``io`` treated as part of the
-foundation layer since they are mutually imported by ``core``):
+Layering model enforced here:
 
     foundation = {plaita.core, plaita.node, plaita.io}
         may import each other freely
-        MUST NOT import plaita.event / plaita.storage / plaita.server
+        may **lazily** import plaita.event (function-body ``from plaita.event
+        import ...`` only — see "Lazy event import" below) for default-bus
+        fallback resolution
+        MUST NOT import plaita.storage / plaita.server
+        MUST NOT ``from plaita.event import ...`` at module top level (would
+        force every foundation user to drag event's deps even if they never
+        touch distributed execution)
     plaita.event
         may import foundation
         MUST NOT import plaita.storage / plaita.server
@@ -20,10 +24,15 @@ foundation layer since they are mutually imported by ``core``):
 ``TYPE_CHECKING`` imports are exempt — they are type-only and never execute
 at runtime, so they cannot create a real reverse dependency.
 
-This makes SC-002 ("no reverse imports") verifiable instead of a false
-positive: the previous version only forbade ``plaita.server`` /
-``plaita.storage.redis`` / ``plaita.storage.sqlalchemy`` inside ``plaita.core``
-and missed ``core → event`` and the foundation's other upward edges.
+Lazy event import
+-----------------
+Historically foundation→event was forbidden outright and worked around with a
+global mutable ``_default_event_bus_provider`` (an anti-pattern of its own).
+Foundation now lazy-imports ``plaita.event`` inside function bodies for the
+default-bus fallback path — runtime cost is one import per cold-cache miss,
+no global state, full type hints. This is allowed **only inside functions**;
+top-level imports remain forbidden so importing ``plaita.core`` does not
+force event's optional deps on every consumer.
 """
 
 import ast
@@ -35,11 +44,17 @@ _LOKI = _REPO_ROOT / "plaita"
 
 # layer name -> (set of module prefixes that members of this layer may NOT import)
 _FORBIDDEN = {
-    "foundation": ("plaita.event", "plaita.storage", "plaita.server"),
+    "foundation": ("plaita.storage", "plaita.server"),
     "event": ("plaita.storage", "plaita.server"),
     "storage": ("plaita.server",),
     "server": (),
 }
+
+# Foundation is also allowed to **lazily** (function-body only) import
+# ``plaita.event`` for default-bus fallback — see module docstring.
+# Foundation MUST NOT import event at module top level. We approximate
+# "top level" as "import not nested in any FunctionDef/AsyncFunctionDef" —
+# ``_collect_top_level_imports`` below enforces this.
 
 # module prefix -> layer name
 def _layer_for(module_path: pathlib.Path) -> str | None:
@@ -112,6 +127,71 @@ def _all_py_files(layer: str):
             continue
         # skip the compat shim package __init__ noise but keep modules
         yield pyfile
+
+
+def _collect_top_level_imports(tree: ast.AST) -> list[str]:
+    """Imports that live at module top level (not nested in any function).
+
+    Foundation files may lazy-import ``plaita.event`` inside a function body
+    for default-bus fallback, but top-level foundation→event imports are still
+    forbidden (would force event's optional deps on every foundation consumer).
+
+    ``if TYPE_CHECKING:`` blocks are exempt — those imports are type-only and
+    never execute at runtime, so they cannot create a real reverse dependency.
+    """
+    imports: list[str] = []
+
+    class _Walker(ast.NodeVisitor):
+        def __init__(self):
+            self.in_function = 0
+            self.in_type_checking = 0
+
+        def visit_Import(self, node: ast.Import):
+            if not self.in_function and not self.in_type_checking:
+                for alias in node.names:
+                    imports.append(alias.name)
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom):
+            if not self.in_function and not self.in_type_checking and node.level == 0 and node.module:
+                imports.append(node.module)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            self.in_function += 1
+            self.generic_visit(node)
+            self.in_function -= 1
+
+        def visit_AsyncFunctionDef(self, node):
+            self.in_function += 1
+            self.generic_visit(node)
+            self.in_function -= 1
+
+        def visit_If(self, node):
+            # ``if TYPE_CHECKING:`` (optionally ``if False:`` / ``if typing.TYPE_CHECKING``)
+            # guards type-only imports that never run — exempt them.
+            if self._is_type_checking_guard(node.test):
+                self.in_type_checking += 1
+                self.generic_visit(node)
+                self.in_type_checking -= 1
+            else:
+                self.generic_visit(node)
+
+        @staticmethod
+        def _is_type_checking_guard(test: ast.AST) -> bool:
+            if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+                return True
+            if (
+                isinstance(test, ast.Attribute)
+                and isinstance(test.value, ast.Name)
+                and test.value.id == "typing"
+                and test.attr == "TYPE_CHECKING"
+            ):
+                return True
+            return False
+
+    _Walker().visit(tree)
+    return imports
 
 
 class TestCoreLayeringImports:
@@ -187,7 +267,27 @@ class TestReverseImportStaticAnalysis:
     def test_foundation_no_upward_imports(self):
         violations = self._violations_for_layer("foundation")
         assert violations == [], (
-            "Foundation layer (core/node/io) must not import event/storage/server:\n"
+            "Foundation layer (core/node/io) must not import storage/server:\n"
+            + "\n".join(f"  - {v}" for v in violations)
+        )
+
+    def test_foundation_no_top_level_event_imports(self):
+        """Foundation may lazy-import ``plaita.event`` inside function bodies
+        (for default-bus fallback), but a top-level foundation→event import
+        would force event's optional deps on every consumer and is forbidden.
+        """
+        violations = []
+        for pyfile in _all_py_files("foundation"):
+            try:
+                tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=str(pyfile))
+            except SyntaxError:
+                continue
+            for imp in _collect_top_level_imports(tree):
+                if imp == "plaita.event" or imp.startswith("plaita.event."):
+                    violations.append(f"{pyfile.relative_to(_REPO_ROOT)}: top-level import {imp}")
+        assert violations == [], (
+            "Foundation layer may only lazy-import plaita.event inside function "
+            "bodies (top-level imports force event's deps on every consumer):\n"
             + "\n".join(f"  - {v}" for v in violations)
         )
 

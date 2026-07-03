@@ -52,23 +52,11 @@ def _check_extra_available(extra_name: str) -> bool:
         )
 
 
-# 依赖反转: 注册一个 lazy 的默认 event bus provider, 让 plaita.core.context
-# 在需要时自动取默认总线, 而 core 层不必 import plaita.event (避免 core→event
-# 反向依赖)。provider 仅在第一次被调用时才 import plaita.event。
-def _default_event_bus_provider():
-    from plaita.event import get_default_event_bus
-    return get_default_event_bus()
+# 历史遗留: ``_default_event_bus_provider`` 全局可变 singleton 已被删除,
+# ``core.context`` 现在直接 lazily import ``plaita.event.get_default_event_bus``
+# 作为 fallback (见 ``plaita/core/context.py::_resolve_default_event_bus``)。
+# 顶层包不再做任何 provider 注册——core 与 event 是直接协作者, 不必表演"分层"。
 
-
-def _register_default_event_bus_provider() -> None:
-    try:
-        from plaita.core.context import set_default_event_bus_provider
-        set_default_event_bus_provider(_default_event_bus_provider)
-    except Exception:
-        _logger.debug("Unable to register default event bus provider", exc_info=True)
-
-
-_register_default_event_bus_provider()
 
 
 # Upgrade guide: provide clear error messages when accessing optional features
