@@ -27,11 +27,24 @@ flowchart TD
 
 `FlowExecution` 是一个薄壳 facade，把节点允许访问的状态/方法**显式**委托给底层 `ExecutionContext`：
 
-- 真实属性（`mode` / `timeout` / `parent` / `verbose` / `callback_manager` / `_ctx` 等）写在 facade 自身
-- `context` / `execution_id` / `event_bus` / `cancel_event` / `express_prefix` 等 context 上的字段通过**具名 property** 读写，setter 直接落到 `ExecutionContext`
-- state 访问走显式方法：`set_state` / `get_state` / `evaluate` / `get_global_variable` / `get_or_create_event_bus` / `update_node_result` / `clean` / `setup_flow` / `get_child_execution`
+- 每次运行配置（`mode` / `timeout`）归拢到 `RunOptions` dataclass，由 facade 持有；`execution.mode` / `execution.timeout` 仍是具名 property 读写，落到 `self.options`。
+- `context` / `execution_id` / `event_bus` / `cancel_event` / `express_prefix` 等 context 上的字段通过**具名 property** 读写，setter 直接落到 `ExecutionContext`。
+- typed 系统状态（`flow_id` / `last_node_id` / `last_branch`）走 `execution.state.xxx` 视图（`_StateView`，`None` 归一化），不再以裸属性透传——这是 0.4.0 break change，见 MIGRATION。
+- state 访问走显式方法：`set_state` / `get_state` / `evaluate` / `get_global_variable` / `get_or_create_event_bus` / `update_node_result` / `clean` / `setup_flow` / `get_child_execution`。
 
 没有 `__getattr__` / `__setattr__` 兜底，也没有 `trigger_*` → `on_*` 魔法映射。未声明的属性就是普通 Python 实例属性——拼写错误（如 `tiemout`）不会再静默落进 context state 被分布式持久化，而是停留为一个普通属性，调试时一目了然。要手动触发回调，直接调 `execution.callback_manager.on_xxx(...)`。
+
+## sync/async 桥接与错误归一化
+
+facade 自身不再手写 sync/async × lazy/eager 四套桥接，而是下沉到 `plaita.core.async_utils.drive_strategy`，`run_compatible` / `arun_compatible` 退化为传一个 `_prepare_strategy` 产物 + 两个回调（`finish_coro` / `on_lazy_finally`）。
+
+错误归一化集中在 `plaita.core._error_normalization`，三条**故意不同**的策略放一处便于对照：
+
+- `finish_normal` — normal 模式：`FlowExecutionException` 子类透传（自带 `on_flow_end`），其它异常包成 `FlowErrorException` / `-500`。
+- `raise_distributed_error` — distributed 模式：所有异常（含子类）统一拍平成 `FlowErrorException` / `-500`，对外单一契约。
+- `emit_flow_end_on_close` — lazy 生成器 `finally`：非子类异常发 `-500` 的 `on_flow_end`，否则发 `result=None` 的 `on_flow_end`。
+
+> 不要把 normal 与 distributed 两条归一化合并——它们的对外契约是**有意不同**的（distributed 调用方期望单一错误形态，子类细节只作内部抛点）。
 
 ## 执行策略
 

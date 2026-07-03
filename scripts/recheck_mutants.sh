@@ -35,7 +35,7 @@ fi
 # 复核时跑的测试集合：必须覆盖 only_mutate 当前目标模块对应的纯同步测试，
 # 否则变异点会被误判为 survived。和 pyproject.toml 的
 # pytest_add_cli_args_test_selection 保持一致（见 docs/mutation-testing.md）。
-TESTS="tests/unit/test_callback.py tests/unit/test_run_forwards_callbacks.py tests/unit/test_child_callback_dedup.py tests/unit/test_expression.py tests/unit/test_expression_golden.py tests/test_calculate.py tests/test_decide.py"
+TESTS="tests/unit/test_callback.py tests/unit/test_run_forwards_callbacks.py tests/unit/test_child_callback_dedup.py tests/unit/test_expression.py tests/unit/test_expression_golden.py tests/unit/test_parallel_executor.py tests/test_calculate.py tests/test_decide.py"
 cd mutants 2>/dev/null || { echo "mutants/ 不存在，先执行 mutmut run 生成。" >&2; exit 1; }
 
 killed=0; survived=0; other=0; total=0

@@ -107,14 +107,19 @@ exclude_lines = [
 ]
 
 # 变异测试 (mutmut 3.x)。完整背景、跑法、workaround 见 docs/mutation-testing.md。
-# 已知不覆盖: async/distributed/timeout 路径——mutmut 进程内跑 pytest.main()
-# 与 pytest-asyncio/事件循环冲突; 这些路径靠常规单测保证。
+# 基线范围: 纯同步、高覆盖率、无外部依赖的核心模块。async/distributed/timeout
+# 路径 mutmut 并行模式跑不了 (pytest-asyncio 事件循环 + mutmut 进程内 pytest.main
+# 冲突) —— 这些模块用 scripts/run_mutation_baseline.sh 逐变异点独立进程跑, 详见
+# docs/mutation-testing.md §5。
 [tool.mutmut]
 source_paths = ["plaita"]
 # 基线范围: 覆盖率高、纯逻辑、无外部依赖的核心模块。扩大基线时追加文件即可。
+# 注意: 4+ 模块合并并行跑会触发 mutmut worker 长时复用挂起, 逐模块跑 (临时把
+# only_mutate 改成单文件) 是已验证的可靠方式。
 only_mutate = [
   "plaita/core/callback.py",
   "plaita/core/expression.py",
+  "plaita/core/parallel_executor.py",
   "plaita/node/calculate.py",
   "plaita/node/decide.py",
 ]
@@ -137,13 +142,16 @@ pytest_add_cli_args = [
   "--ignore=tests/integration",
   "--ignore=tests/test_concurrent.py",
 ]
-# 只跑对应模块的「纯同步」测试; async 测试不纳入 (见上方已知不覆盖说明)。
+# 并行模式只跑对应模块的「纯同步」测试; async 测试不纳入 (见上方说明)。
+# async/distributed 模块 (executor/runner/concurrent) 的变异测试用
+# scripts/run_mutation_baseline.sh 逐变异点独立进程跑, 见 docs §5。
 pytest_add_cli_args_test_selection = [
   "tests/unit/test_callback.py",
   "tests/unit/test_run_forwards_callbacks.py",
   "tests/unit/test_child_callback_dedup.py",
   "tests/unit/test_expression.py",
   "tests/unit/test_expression_golden.py",
+  "tests/unit/test_parallel_executor.py",
   "tests/test_calculate.py",
   "tests/test_decide.py",
 ]

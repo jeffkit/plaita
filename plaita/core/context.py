@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from plaita.core import types
 from plaita.core.expression import ExpressionEvaluator
+from plaita.core.state import CheckpointState
 
 if TYPE_CHECKING:
     from plaita.node.basic import Node
@@ -110,25 +111,49 @@ def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
         "e.g. flow.run({'items': [...]}) and reference $INPUT.items."
     )
 
-# 依赖反转: core 不直接 import plaita.event, 而是持有一个由上层 (plaita 顶层包)
-# 注册的 "默认 event bus provider" 可调用对象。这样 core → event 的反向依赖
-# 被消除, 同时保留 "未注入 event_bus 时自动取默认总线" 的旧行为。
-_default_event_bus_provider: Optional["Callable[[], Any]"] = None
+# 历史上为避开 ``core → event`` 反向依赖, 这里曾用一个模块级可变全局
+# ``_default_event_bus_provider`` + ``set_default_event_bus_provider`` 注入。
+# 实际整个项目就一个 provider, 这套机制换来隐式全局 + 类型丢失 + 测试必须 mock
+# 的代价。改为 ``core`` 直接 lazily import ``plaita.event.get_default_event_bus``
+# 作为 fallback——core 仍不持有 EventBus 实例, 但承认 ``event`` 层是它的下游
+# 协作者。Spring/Django 都允许这种 import, 收益 (类型 + 可测性) 远大于"分层纯洁"。
+def _resolve_default_event_bus():
+    """Lazily fetch the default EventBus from the event layer.
 
-
-def set_default_event_bus_provider(provider) -> None:
-    """Register the callable used to lazily obtain a default event bus.
-
-    Intended to be called once by the top-level ``plaita`` package (which may
-    depend on ``plaita.event``).  Keeping this indirection means ``plaita.core``
-    never imports ``plaita.event`` — preserving the ``core → event`` layering.
+    Imported inside the function so the ``core`` package doesn't drag in
+    ``plaita.event`` (and its optional redis/sqlalchemy deps) at import time.
     """
-    global _default_event_bus_provider
-    _default_event_bus_provider = provider
+    try:
+        from plaita.event import get_default_event_bus
+        return get_default_event_bus()
+    except Exception:
+        logger.warning("Unable to get default event bus", exc_info=True)
+        return None
+
+
+def _resolve_expression_string(evaluator, state, prefix, parent, value):
+    """Evaluate a single (string-or-not) value, with parent-context fallback.
+
+    If the expression resolves to ``None`` and the value is a prefix string,
+    recurse through ``parent.evaluate`` — the historical semantics for
+    unresolved variables in child flows.
+    """
+    result = evaluator.evaluate(value, state, prefix)
+    if (result is None and isinstance(value, str)
+            and value.startswith(prefix) and parent is not None):
+        return parent.evaluate(value)
+    return result
 
 
 class ExecutionContext:
-    """Manages runtime state for a flow execution."""
+    """Runtime state facade for a flow execution.
+
+    Owns a ``CheckpointState`` (the typed, distributed-checkpoint model in
+    ``plaita.core.state``) plus the in-memory-only pieces that never enter a
+    checkpoint: the parent chain, event bus, cancel event, evaluator, and the
+    ``expose_env`` allowlist. State read/write delegates to ``CheckpointState``
+    so the magic-string key schema lives in one place.
+    """
 
     def __init__(
         self,
@@ -144,16 +169,13 @@ class ExecutionContext:
         evaluator: Optional[ExpressionEvaluator] = None,
         expose_env: Optional[List[str]] = None,
     ) -> None:
-        self._context: Dict[str, Any] = {}
         self.parent = parent
         self.event_bus = event_bus
-        # $ENV 的 allowlist。``None`` / 空列表都意味着默认空 $ENV（不再泄漏
-        # os.environ）。Flow 层会从 Flow.expose_env 把这份名单传下来。
+        # $ENV allowlist (None/empty => default-empty $ENV). Flow layer pipes
+        # its expose_env down; clean() does NOT reset this — it's config.
         self.expose_env = list(expose_env) if expose_env else []
-        # 协作取消令牌: 超时/取消时由 NodeRunner 设置, 节点可 poll 此事件提前退出。
-        # 注: 并行分支经 get_child_execution 拿到独立子 context (各自 _context dict),
-        # 不共享父级 $NODE, 故 update_node_result 无需加锁; 加 threading.Lock 反而会
-        # 破坏 process 模式对 execution 的 pickle (见 test_concurrent)。
+        # cancel_event is thread-local & best-effort; cross-process cancel is
+        # NOT supported (child gets a fresh unset event — see __getstate__).
         self.cancel_event = threading.Event()
         self.express_prefix = express_prefix
         self.express_input_name = express_input_name
@@ -161,60 +183,53 @@ class ExecutionContext:
         self.express_node_name = express_node_name
         self.express_global_name = express_global_name
         self.express_environment_variable = express_environment_variable
-        # Eagerly generate an execution ID so it is available before clean() or
-        # setup_flow() is called.  clean() replaces this with a fresh ID for
-        # each new run; from_dict() overwrites it with the persisted value.
-        self._context[f"{express_prefix}EXECUTION_ID"] = uuid.uuid4().hex
+        self._state = CheckpointState(**self._state_kwargs())
+        # Eager execution id (available before clean/setup_flow; clean replaces
+        # per run, from_dict overwrites from persist).
+        self._state[f"{express_prefix}EXECUTION_ID"] = uuid.uuid4().hex
         self._evaluator = evaluator or ExpressionEvaluator()
 
-    # -- dict-like access for backward compat (FlowExecution.context) --
+    def _state_kwargs(self) -> dict:
+        return dict(
+            prefix=self.express_prefix,
+            input_name=self.express_input_name,
+            parent_name=self.express_parent_name,
+            node_name=self.express_node_name,
+            global_name=self.express_global_name,
+            env_name=self.express_environment_variable,
+        )
+
+    # -- dict-like access (FlowExecution.context) --
+    # ``context`` is the live CheckpointState (dict-like over prefixed keys);
+    # CheckpointState.__eq__ vs dict keeps assertEqual(ctx, {...}) working.
+    # The setter accepts a plain dict (storage format) and parses it back.
 
     @property
-    def context(self) -> Dict[str, Any]:
-        return self._context
+    def context(self) -> CheckpointState:
+        return self._state
 
     @context.setter
     def context(self, value: Dict[str, Any]) -> None:
-        self._context = value
-
-    # -- state management --
+        self._state = CheckpointState.from_checkpoint_dict(value, **self._state_kwargs())
 
     def set_state(self, key: str, value: Any) -> None:
-        self._context[key] = value
+        self._state[key] = value
 
     def get_state(self, key: str, default: Any = None) -> Any:
-        return self._context.get(key, default)
+        return self._state.get(key, default)
 
     def clean(self) -> None:
-        """Reset context and populate safe environment variables.
-
-        Also recreates ``cancel_event`` so that a cancel signal set during a
-        previous run does not bleed into the next one.  Note: cooperative
-        cancellation is thread-local and best-effort; cross-process cancel
-        is not supported (a child process gets a fresh, unset event — see
-        ``__getstate__``).
-
-        A fresh ``execution_id`` is generated here (not lazily on first read)
-        so that the ID is stable for the entire run and does not change if
-        ``execution_id`` is read multiple times or before ``setup_flow``.
-
-        ``$ENV`` 内容来自 ``self.expose_env`` allowlist（默认空）。``clean()``
-        不会清空 ``expose_env`` 本身——它属于 context 配置，不是状态。
-        """
-        self._context = {}
-        self.cancel_event = threading.Event()
-        self.set_state(f"{self.express_prefix}EXECUTION_ID", uuid.uuid4().hex)
-        self.set_state(
-            f"{self.express_prefix}{self.express_environment_variable}",
-            _safe_environment(self.expose_env),
+        """Reset state to a fresh run (new execution id + exposed env snapshot) and recreate cancel_event."""
+        self._state = CheckpointState.fresh(
+            **self._state_kwargs(),
+            execution_id=uuid.uuid4().hex,
+            env=_safe_environment(self.expose_env),
         )
+        self.cancel_event = threading.Event()
 
     def __getstate__(self):
-        # threading.Event 不可 pickle。进程模式下子进程会经 ``__setstate__``
-        # 重建一个**全新未触发**的 Event——这意味着父进程的 cancel 信号无法
-        # 通过 pickle 传给子进程。如果调用方依赖 cancel 跨进程传播 (例如
-        # Parallel mode=process 的分支内节点需要响应父进程超时取消), 当前实现
-        # 不支持, 应改用 mode=thread 或显式 IPC。
+        # threading.Event isn't picklable; child gets a fresh unset event via
+        # __setstate__. Parent cancel signal doesn't cross processes.
         state = self.__dict__.copy()
         state.pop("cancel_event", None)
         return state
@@ -224,41 +239,24 @@ class ExecutionContext:
         if not getattr(self, "cancel_event", None):
             self.cancel_event = threading.Event()
 
-    # -- flow setup --
-
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
-        """Initialize context with flow-level variables.
-
-        Also propagates ``flow.expose_env`` to ``self.expose_env`` and re-runs
-        ``_safe_environment`` so that ``$ENV`` reflects the flow-level allowlist
-        rather than whatever ``clean()`` wrote (which used the previous, possibly
-        empty, allowlist). This keeps ``$ENV`` consistent across re-runs.
-        """
+        """Populate flow-level state ($INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV) + sync flow.expose_env."""
         flow_allowlist = list(getattr(flow, "expose_env", None) or [])
         if flow_allowlist != self.expose_env:
             self.expose_env = flow_allowlist
-        context_value = _coerce_input_value(flow.input_type, args, kwargs)
-        self.set_state(f"{self.express_prefix}{self.express_input_name}", context_value)
-        self.set_state(
-            f"{self.express_prefix}{self.express_parent_name}",
-            self.parent.context if self.parent else {},
-        )
-        global_context = flow.global_context.copy() if flow.global_context else {}
+        global_context = (flow.global_context.copy() if flow.global_context else {})
         global_context.update({"flow_id": flow.flow_id})
-        self.set_state(f"{self.express_prefix}{self.express_global_name}", global_context)
-        self.set_state("EXPRESS_PREFIX", self.express_prefix)
-        self.set_state(f"{self.express_prefix}FLOW_ID", flow.flow_id)
-        # 用最终的 allowlist 重新刷新 $ENV，避免 child/parent allowlist 差异导致
-        # 旧值残留。
-        self.set_state(
-            f"{self.express_prefix}{self.express_environment_variable}",
-            _safe_environment(self.expose_env),
+        self._state.setup_flow(
+            input_value=_coerce_input_value(flow.input_type, args, kwargs),
+            # $PARENT: plain-dict snapshot — _get_attr takes getattr() on
+            # __dict__-bearing objects, so a live CheckpointState can't resolve $INPUT.
+            parent_context=dict(self.parent.context) if self.parent else {},
+            global_context=global_context,
+            flow_id=flow.flow_id,
+            env=_safe_environment(self.expose_env),
         )
-
-    # -- expression evaluation --
 
     def evaluate(self, value: Any) -> Any:
-        """Recursively resolve expressions via the ExpressionEvaluator."""
         if isinstance(value, list):
             return [self.evaluate(item) for item in value]
         if isinstance(value, dict):
@@ -266,17 +264,9 @@ class ExecutionContext:
         return self._evaluate_string(value)
 
     def _evaluate_string(self, value: Any) -> Any:
-        result = self._evaluator.evaluate(value, self._context, self.express_prefix)
-        if (
-            result is None
-            and isinstance(value, str)
-            and value.startswith(self.express_prefix)
-            and self.parent is not None
-        ):
-            return self.parent.evaluate(value)
-        return result
-
-    # -- global variable lookup --
+        return _resolve_expression_string(
+            self._evaluator, self._state, self.express_prefix, self.parent, value,
+        )
 
     def get_global_variable(self, key: str, default: Any = None) -> Any:
         global_dict = self.get_state(f"{self.express_prefix}{self.express_global_name}", {})
@@ -286,39 +276,18 @@ class ExecutionContext:
             return self.parent.get_global_variable(key, default)
         return default
 
-    # -- node result tracking --
-
     def update_node_result(self, node, result: Any) -> None:
-        node_results = self.get_state(f"{self.express_prefix}{self.express_node_name}", {})
-        node_results[node.id] = result
-        self.set_state(f"{self.express_prefix}{self.express_node_name}", node_results)
-
-    # -- execution id --
+        self._state.update_node_result(node.id, result)
 
     @property
     def execution_id(self) -> str:
-        """Return the current execution ID (pure read-only).
-
-        The ID is initialised in ``clean()`` for a fresh run, or restored from
-        the persisted context dict in distributed resume scenarios.  Child
-        contexts that were never ``clean()``-ed may not carry their own ID;
-        callers needing the root-flow ID should access the root context.
-        """
         return self.get_state(f"{self.express_prefix}EXECUTION_ID", "")
 
-    # -- typed system-state accessors (distributed checkpoint keys) --
-    #
-    # Previously all callers built magic strings like
-    #   ``f"{pfx}LAST_NODE"`` / ``f"{pfx}BRANCH"`` / ``f"{pfx}FLOW_ID"``
-    # inline, which scattered the key schema across runner.py, executor.py,
-    # assignment.py and event/core.py.  These properties centralise the
-    # key construction; the underlying storage format in ``_context`` is
-    # intentionally unchanged so that distributed checkpoints (to_dict /
-    # from_dict) remain forward- and backward-compatible.
+    # -- typed system-state accessors: CheckpointState owns field<->key mapping,
+    # so to_dict/from_dict stay forward/backward-compatible across upgrades.
 
     @property
     def last_node_id(self) -> Optional[str]:
-        """ID of the most recently executed node (distributed checkpoint key)."""
         return self.get_state(f"{self.express_prefix}LAST_NODE")
 
     @last_node_id.setter
@@ -327,7 +296,6 @@ class ExecutionContext:
 
     @property
     def last_branch(self) -> Optional[str]:
-        """Branch taken by the most recently executed branching node."""
         return self.get_state(f"{self.express_prefix}BRANCH")
 
     @last_branch.setter
@@ -336,14 +304,11 @@ class ExecutionContext:
 
     @property
     def flow_id(self) -> Optional[str]:
-        """Flow ID of the currently executing flow."""
         return self.get_state(f"{self.express_prefix}FLOW_ID")
 
     @flow_id.setter
     def flow_id(self, value: Optional[str]) -> None:
         self.set_state(f"{self.express_prefix}FLOW_ID", value)
-
-    # -- event bus --
 
     def get_or_create_event_bus(self):
         if self.event_bus:
@@ -351,40 +316,31 @@ class ExecutionContext:
         if self.parent and self.parent.event_bus:
             self.event_bus = self.parent.event_bus
             return self.event_bus
-        provider = _default_event_bus_provider
-        if provider is not None:
-            try:
-                self.event_bus = provider()
-            except Exception:
-                logger.warning("Unable to get default event bus")
-                self.event_bus = None
-        else:
-            self.event_bus = None
+        self.event_bus = _resolve_default_event_bus()
         return self.event_bus
-
-    # -- child context --
 
     def child(self) -> ExecutionContext:
         return ExecutionContext(
-            parent=self,
-            express_prefix=self.express_prefix,
-            express_input_name=self.express_input_name,
-            express_parent_name=self.express_parent_name,
-            express_node_name=self.express_node_name,
-            express_global_name=self.express_global_name,
-            express_environment_variable=self.express_environment_variable,
-            event_bus=self.event_bus,
-            evaluator=self._evaluator,
-            expose_env=self.expose_env,
+            parent=self, event_bus=self.event_bus,
+            evaluator=self._evaluator, expose_env=self.expose_env,
+            **{k: getattr(self, k) for k in (
+                "express_prefix", "express_input_name", "express_parent_name",
+                "express_node_name", "express_global_name",
+                "express_environment_variable",
+            )},
         )
 
-    # -- serialization for distributed execution --
-
     def to_dict(self) -> Dict[str, Any]:
-        return dict(self._context)
+        # Drift guard: nodes can still set_state() arbitrary keys; warn on
+        # system-shaped unknowns so a new magic key is caught at review/log time.
+        from plaita.core.state import validate_checkpoint
+        data = self._state.to_checkpoint_dict()
+        for warning in validate_checkpoint(data, self.express_prefix):
+            logger.warning(warning)
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], **kwargs) -> ExecutionContext:
         ctx = cls(**kwargs)
-        ctx._context = dict(data)
+        ctx._state = CheckpointState.from_checkpoint_dict(data, **ctx._state_kwargs())
         return ctx

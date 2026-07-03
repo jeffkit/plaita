@@ -217,8 +217,14 @@ class Flow(BaseModel):
             logger.warning("Node %s has no branches", current.id)
             return None
         logger.debug("current node %s has branches: %s", current.id, current.branches)
+        from plaita.node.decide import resolve_branch_target
+
         for b in current.branches:
-            target = b.next or b.name
+            # ``resolve_branch_target`` 把 ``b.next or b.name`` 兜底契约显式化:
+            # 仅当节点声明 ``branch_name_as_target`` (Switch/Logic) 时才用 name
+            # 回退。其他 branching 节点未显式 ``next`` 时返回 None, 不再静默跳到
+            # 以 branch.name 命名的节点 (任务 #6)。
+            target = resolve_branch_target(current, b)
             if target == branch:
                 return target
         logger.warning("branch %s not found for node %s", branch, current.id)

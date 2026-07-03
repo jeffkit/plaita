@@ -4,7 +4,7 @@
 
 ## 命名空间
 
-状态存在一个内部 dict 里，用 `$` 前缀的命名空间键组织（前缀可配置，默认 `$`）：
+状态存在 `CheckpointState`（`plaita.core.state`，Pydantic `BaseModel`）里，用 `$` 前缀的命名空间键组织（前缀可配置，默认 `$`）。`CheckpointState` 暴露 dict-like 视图（`__getitem__`/`__contains__`/`get`/`keys`...），表达式引擎与节点插件仍像用 dict 一样访问 `execution.context`，底层却是 typed model——key schema 集中在 `CheckpointSchema` 单一事实源。节点经 `set_state("任意键", ...)` 写的非 schema 字段落到 model 的 `extra`。
 
 | 键 | 含义 | 写入时机 |
 |----|------|---------|
@@ -56,10 +56,10 @@ flowchart TD
 
 1. 自身已设的 `event_bus`
 2. 父链上的 `event_bus`
-3. 由顶层 `plaita` 包注册的**默认 event bus provider**（惰性，首次调用才 import `plaita.event`）
+3. 惰性 import `plaita.event.get_default_event_bus`（函数体内 import，不污染 `core` 的 import-time 依赖）
 4. 都没有则返回 `None`
 
-这种 provider 注入是为了让 `plaita.core` 不直接 import `plaita.event`，保住分层（见 [分层约束](layering.md)）。
+`core` 仍不持有 `EventBus` 实例；函数体内 lazy import 保住 `core → event` 分层（顶层包不再做 provider 注入，历史的全局 `_default_event_bus_provider` singleton 已删除）。
 
 ## 敏感环境变量过滤
 
@@ -84,9 +84,11 @@ PASSWORD, PASS_, REDIS_PASSWORD
 ## 序列化（分布式）
 
 ```python
-ctx.to_dict()          # => dict(self._context)
+ctx.to_dict()          # => CheckpointState.to_checkpoint_dict()（与旧 dict 格式逐键兼容）
 ExecutionContext.from_dict(data, **kwargs)
 ```
+
+`to_dict()` 会顺带跑 `validate_checkpoint` 漂移扫描——节点经 `set_state` 写的"看起来是 system key 但不在 `CheckpointSchema`"的字段会 warning，让新加 magic key 在 review/日志被发现。
 
 分布式模式下，把 `to_dict()` 的结果存入 `ExecutionStorage`，下次 `run_distributed(saved_context=...)` 时恢复。
 

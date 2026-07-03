@@ -1,6 +1,7 @@
 """B3 复现: 异常包装应保留原始异常的因果链与信息。
 
-`FlowExecution._finish` / `_run_distributed` / `run_distributed` 把任意非
+`FlowExecution` 的 normal/distributed 归一化（`plaita.core._error_normalization` 的
+`finish_normal` / `raise_distributed_error` / `run_distributed`）把任意非
 `FlowExecutionException` 异常压成 ``FlowExecutionException(-500, str(e), FLOW_ERROR)``,
 但 ``raise ...`` 没有 ``from e``, 丢失 ``__cause__``, 调试时无法看到原始栈。
 节点级错误处理同理。

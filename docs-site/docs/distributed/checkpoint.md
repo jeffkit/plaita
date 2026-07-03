@@ -73,7 +73,7 @@ sequenceDiagram
 
 ## 上下文序列化
 
-`ExecutionContext.to_dict()` 返回 `dict(self._context)`，可 JSON 序列化存入 `ExecutionStorage`。恢复时由 `DistributedStrategy` 把 `saved_context` 直接赋给 `context.context`。
+`ExecutionContext.to_dict()` 返回 `CheckpointState.to_checkpoint_dict()`（与旧 `dict(self._context)` 格式逐键兼容，可 JSON 序列化存入 `ExecutionStorage`）。恢复时由 `DistributedStrategy` 把 `saved_context`（plain dict）赋给 `context.context`，setter 经 `CheckpointState.from_checkpoint_dict` 解析回 typed model。
 
 注意 `cancel_event`（`threading.Event`）不可 pickle，子进程会拿到全新未触发事件——跨进程取消不支持（见 [状态管理](../architecture/state-management.md#cancellation)）。
 
