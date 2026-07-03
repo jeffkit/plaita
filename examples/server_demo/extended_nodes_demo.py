@@ -378,7 +378,7 @@ class ExtendedNodesDemo:
             logger.info(f"恢复流程执行: {execution_id}")
             
             # 恢复流程执行
-            from plaita.flow import ExecutionMode
+            from plaita import ExecutionMode
             resume_result = FlowExecution.run(
                 flow, 
                 params={}, 
@@ -446,7 +446,7 @@ class ExtendedNodesDemo:
             logger.info(f"创建流程成功: {flow.flow_id}")
             
             # 执行流程
-            from plaita.flow import ExecutionMode
+            from plaita import ExecutionMode
             result = FlowExecution.run(
                 flow, 
                 params={}, 

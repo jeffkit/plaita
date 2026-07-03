@@ -4,6 +4,7 @@ from pydantic import model_validator
 
 from ..io import match
 from ..node.basic import Node
+from plaita.core.strategies import ExecutionMode
 
 
 class FlowNode(Node):
@@ -39,7 +40,7 @@ class InlineFlow(FlowNode):
         if self.child_flow.input_property:
             assert match(self.child_flow.input_property, self.input), "input not match required"
         child_execution = execution.get_child_execution()
-        lazy = execution.mode == "generator"
+        lazy = execution.mode == ExecutionMode.GENERATOR
         return child_execution.run_compatible(self.child_flow, lazy, execution.evaluate(self.input))
 
 
@@ -63,5 +64,5 @@ class ReferenceFlow(FlowNode):
         assert self.child_flow is not None, "child_flow for reference flow node is required"
         assert match(self.child_flow.input_property, self.input), "input not match required"
         child_execution = execution.get_child_execution()
-        lazy = execution.mode == "generator"
+        lazy = execution.mode == ExecutionMode.GENERATOR
         return child_execution.run_compatible(self.child_flow, lazy, execution.evaluate(self.input))

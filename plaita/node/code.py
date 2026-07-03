@@ -78,6 +78,29 @@ try:
 except ImportError:
     _RESTRICTED_AVAILABLE = False
 
+
+# 默认 Python 沙箱后端。0.5.0 起默认 ``"docker"`` (容器级隔离: 无网络 / 只读 FS /
+# 资源上限)——0.4.x 的 ``"restricted"`` (RestrictedPython, AST 级) 已被证明存在
+# 绕过向量, 不适合作为"对用户透明"的默认值。``register_code_node(default_backend=...)``
+# 在启动期把它改成实际生效的后端, 并在生效后端为 docker 但 daemon 不可用时**拒绝注册**。
+_DEFAULT_SANDBOX_BACKEND = "docker"
+
+
+def _docker_available() -> bool:
+    """探测 docker CLI 与 daemon 是否可用。``register_code_node`` 在默认后端为
+    docker 时调用, 不可用则拒绝注册 (避免运行期才崩)。"""
+    import shutil
+    if not shutil.which("docker"):
+        return False
+    try:
+        proc = subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=5,
+        )
+        return proc.returncode == 0
+    except Exception:
+        logger.debug("docker daemon probe failed", exc_info=True)
+        return False
+
 JS_FUNC_NAME = "run"
 PYTHON_FUNC_NAME = "run"
 
@@ -492,13 +515,15 @@ class CodeNode(Node):
         JS: must define a ``run`` function.
     input : Any
         Passed as the single argument to ``run``.  Supports flow expressions.
-    sandbox_backend : str
-        Python-only isolation level:
+    sandbox_backend : Optional[str]
+        Python-only isolation level。``None`` 时取模块级默认
+        (``_DEFAULT_SANDBOX_BACKEND``, 0.5.0 起 ``"docker"``; 由
+        ``register_code_node(default_backend=...)`` 在启动期设定)。
 
-        * ``"restricted"`` (default) — RestrictedPython in-process sandbox.
-        * ``"subprocess"`` — fresh Python process, resource-limited.
-        * ``"docker"`` — Docker container, network+fs isolated.
-        * ``"unsafe"`` — raw ``exec``, no sandbox.
+        * ``"docker"`` (默认) — Docker 容器, 网络+FS 隔离。
+        * ``"restricted"`` — RestrictedPython in-process 沙箱 (AST 级, 有绕过向量)。
+        * ``"subprocess"`` — fresh Python process, 资源受限。
+        * ``"unsafe"`` — raw ``exec``, 无沙箱。
 
     .. warning::
         ``CodeNode`` executes arbitrary user-supplied code.  It is **not**
@@ -511,11 +536,14 @@ class CodeNode(Node):
     language: Optional[str] = None
     code: Optional[str] = None
     input: Optional[Any] = None
-    sandbox_backend: str = "restricted"
+    sandbox_backend: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
     def validate_code_node(cls, data):
+        # 未显式指定后端时取模块级默认 (0.5.0 默认 docker)。
+        if not data.get("sandbox_backend"):
+            data["sandbox_backend"] = _DEFAULT_SANDBOX_BACKEND
         if data.get("language") is None:
             data["language"] = "python"
         if data["language"] == "python":

@@ -13,6 +13,7 @@ from plaita.core.parallel_executor import (
 )
 from plaita.node import Node
 from plaita.node.decide import Branch
+from plaita.core.strategies import ExecutionMode
 
 # re-export
 __all__ = [
@@ -30,6 +31,27 @@ logger = logging.getLogger(__name__)
 
 ARTIFICIAL = "artificial"
 COROUTINE = "coroutine"
+
+# 后台分支可观测性状态: execution_id -> {"futures": [...], "errors": [...]}。
+# 故意不挂在 ``execution`` 实例上——process 模式下 ``execution`` 会被 pickle 到
+# 子进程, 而 ``concurrent.futures.Future`` / 锁不可 pickle, 挂在 execution 上会让
+# 后续 join 分支提交时 pickle 失败。模块级 dict 按 execution_id 索引, 子进程不
+# 触碰, callback 在主进程跑, 安全。
+import threading as _threading
+
+# RLock: get_background_errors 在持锁状态下会再调 _get_bg_state, 需可重入。
+_BG_LOCK = _threading.RLock()
+_BG_STATE: Dict[str, Dict[str, list]] = {}
+
+
+def _get_bg_state(execution) -> Dict[str, list]:
+    eid = getattr(execution, "execution_id", None) or str(id(execution))
+    with _BG_LOCK:
+        st = _BG_STATE.get(eid)
+        if st is None:
+            st = {"futures": [], "errors": []}
+            _BG_STATE[eid] = st
+        return st
 
 
 class ParallelBranch(Branch):
@@ -99,7 +121,7 @@ class Parallel(Node):
         区分，导致下游节点拿到静默错误结果继续执行。
         """
         branch_execution = execution.get_child_execution()
-        lazy = execution.mode == "generator"
+        lazy = execution.mode == ExecutionMode.GENERATOR
         input_value = execution.evaluate(pb.input)
         rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
         logger.debug("branch %s executed: %s", pb.name, rs)
@@ -143,9 +165,71 @@ class Parallel(Node):
         return join_branches, background_branches
 
     def _execute_background_branches(self, background_branches, executor, execution):
-        # fire-and-forget: submit 后不持 future 引用, 不取结果。
+        """fire-and-forget: submit 后持有 future 引用 + ``done_callback`` 记录失败。
+
+        不等结果 (保持 fire-and-forget 语义), 但失败不再沉默——callback 把异常
+        记进模块级 ``_BG_STATE[execution_id]["errors"]`` (一个
+        ``[{branch, error}, ...]`` 列表) 并 ``logger.warning``。future 引用存
+        在同处供调试期可选等待 (``wait_background_branches``)。
+
+        状态存模块级而非 ``execution`` 实例: process 模式下 ``execution`` 被
+        pickle 到子进程, Future/锁不可 pickle, 挂在 execution 上会让后续 join
+        分支提交 pickle 失败。
+
+        历史上这里是真 fire-and-forget: 不持 future、无回调、无超时, 分支崩溃
+        全静默, 运维侧无任何信号。0.5.0 起失败至少留痕。
+        """
+        if not background_branches:
+            return
+        state = _get_bg_state(execution)
+        errors = state["errors"]
         for branch in background_branches:
-            executor.submit(self.exec_branch, branch, execution)
+            fut = executor.submit(self.exec_branch, branch, execution)
+            state["futures"].append(fut)
+            fut.add_done_callback(
+                self._make_background_done_callback(branch, errors)
+            )
+
+    @staticmethod
+    def _make_background_done_callback(branch, errors):
+        """构造 future done_callback: 失败时把异常追加到共享 errors 列表。"""
+        def _on_done(fut):
+            try:
+                exc = fut.exception()
+            except Exception as e:  # cancelled / executor shutdown
+                logger.debug("background future.exception() unavailable", exc_info=True)
+                exc = e
+            if exc is None:
+                return
+            logger.warning(
+                "parallel background branch %r raised: %s", branch.name, exc,
+                exc_info=True,
+            )
+            with _BG_LOCK:
+                errors.append({"branch": branch.name, "error": str(exc)})
+        return _on_done
+
+    def wait_background_branches(self, execution, timeout=None):
+        """调试用: 等待本节点提交的后台分支 future 完成 (不取结果, 仅 join)。
+
+        返回 ``{"done": n, "not_done": m}``。生产路径无需调用——后台分支本就是
+        fire-and-forget; 此接口供测试与故障排查时确认后台分支是否已落地。
+        """
+        import concurrent.futures as _cf
+        futures = _get_bg_state(execution)["futures"]
+        if not futures:
+            return {"done": 0, "not_done": 0}
+        done, not_done = _cf.wait(list(futures), timeout=timeout)
+        return {"done": len(done), "not_done": len(not_done)}
+
+    def get_background_errors(self, execution) -> list:
+        """读取本执行实例的后台分支失败记录 (``[{branch, error}, ...]`` 的拷贝)。
+
+        失败分支在 ``done_callback`` 里记入; 主流程不抛、不阻塞——仅留痕供
+        运维/测试侧观测。返回拷贝避免外部误改内部状态。
+        """
+        with _BG_LOCK:
+            return list(_get_bg_state(execution)["errors"])
 
     def _execute_join_branches(self, join_branches, executor, execution):
         # submit 全部分支后用 ``wait`` 阻塞到所有 future 完成。等所有 future（含

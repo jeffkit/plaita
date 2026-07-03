@@ -130,7 +130,7 @@ plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`，其余能
 |-------|---------|---------|
 | `redis` | `pip install plaita[redis]` | Redis 存储 / Redis EventBus |
 | `server` | `pip install plaita[server]` | FastAPI 服务端、FlowWorker、扩展节点 |
-| `code` | `pip install plaita[code]` | `CodeNode`——默认 RestrictedPython 沙箱（Python），可选 subprocess / docker / unsafe；JS 后端仍走 PyExecJS（无沙箱，慎用） |
+| `code` | `pip install plaita[code]` | `CodeNode`——0.5.0 起**默认 `docker` 容器级沙箱**（`--network none` / `--read-only` / 资源上限，需本机 Docker daemon）；可选 `subprocess` / `restricted`(AST) / `unsafe`；JS 后端仍走 PyExecJS（无沙箱，慎用） |
 | `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp） |
 | `yaml` | `pip install plaita[yaml]` | YAML 格式流程定义 |
 | `all` | `pip install plaita[all]` | 上述全部 |
@@ -153,9 +153,11 @@ plaita 提供三种主要形态定义流程，最终均编译为同一执行模�
 
 ## 内置节点
 
-16 种内置节点覆盖常见控制流与数据处理（`code` 节点 0.4.0 起移出默认注册表，需 `register_code_node()` 显式 opt-in）：
+16 种内置节点覆盖常见控制流与数据处理（`code` 节点不在默认注册表，需 `register_code_node()` 显式 opt-in；0.5.0 起 `register_code_node()` 默认走 `docker` 沙箱，daemon 不可用时拒绝注册——见下方[安全](#安全)小节）：
 
 `start` · `end` · `assignment` · `switch` · `if` · `case` · `loop` · `map` · `filter` · `find` · `reduce` · `child` · `reference` · `parallel` · `http` · `event`
+
+> `parallel` 节点的 `mode` 取 `thread` / `process`；`coroutine` mode 已于 0.4.0 下线（在任何 running event loop 下必崩），改用 `thread`。
 
 扩展节点（通过 `server` extra 或 entry_points）：`delay` · `redis_queue` · `kafka_queue` · `http_callback` · `approval`
 
@@ -179,6 +181,55 @@ registry.register(MyNode)
 flow = Flow.from_string('....', registry=registry)
 result = flow.run()
 ```
+
+---
+
+## 安全
+
+plaita 在三个地方有显式安全边界，升级到 0.5.0 时行为有变化：
+
+### `$ENV` allowlist（环境变量白名单）
+
+`$ENV.XXX` 表达式默认**读不到**任何环境变量（0.4.0 起 allowlist 模型，默认空）。Flow 必须显式声明 `expose_env` 才能读到：
+
+```python
+flow = Flow.from_string(
+    '{"flow_id": "demo", "exposeEnv": ["HOME", "API_BASE"], ...}',
+)
+# 或 Python 构造：Flow(flow_id="demo", expose_env=["HOME", "API_BASE"], ...)
+```
+
+0.5.0 起，若流程里引用了 `$ENV.HOME` 但 `expose_env` 为空，`Flow` 解析时 `logger.warning` 一次列出 key 名 + 修复指引（不报错，让沉默变可见）。升级后留意日志。
+
+### CodeNode 默认 `docker` 沙箱
+
+0.5.0 起 `register_code_node()` 默认 `sandbox_backend="docker"`（容器级隔离），**Docker daemon 不可用时拒绝注册**并报错，不允许静默降级：
+
+```python
+from plaita.node import register_code_node
+
+register_code_node()                          # 默认 docker, 需本机 Docker daemon
+register_code_node(default_backend="subprocess")  # 半信任: 进程级, 不隔离 FS/网络
+register_code_node(default_backend="restricted")  # 显式声明半信任 (AST 沙箱, 有已知绕过向量)
+register_code_node(default_backend="unsafe")      # 完全信任代码作者
+```
+
+daemon 不可用且未显式降级时，注册期报错并指明三种降级路径。
+
+### HMAC nonce Redis 后端（多 worker 重放保护）
+
+plaita-console 的 HMAC 鉴权 nonce 缓存默认是**进程内**单例——gunicorn 多 worker 下每个 worker 独立缓存，3 秒窗口内**跨 worker 重放可行**。生产多 worker 部署必须配 Redis 后端：
+
+```python
+from plaita_console.backend.services.signature import (
+    configure_nonce_store, enable_replay_protection,
+)
+
+configure_nonce_store(redis_url="redis://...")   # 自动切 RedisNonceStore (SET NX EX ttl)
+enable_replay_protection()                       # 多 worker 真重放保护
+```
+
+未配 Redis store 时 `enable_replay_protection()` 启动 `logger.warning` 明确告知"仅单 worker 保护"。完整 break change 与迁移步骤见 [MIGRATION.md](MIGRATION.md#0500)。
 
 ---
 

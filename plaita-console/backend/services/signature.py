@@ -10,27 +10,33 @@ HMAC 签名对称验签
 
 验签：解析 Authorization → 校 secret-id → 校时效（从 key-time 取 sign_expire）
 → 用客户端的 key-time 重算 signature → 常量时间比较。
-→ 若带 nonce: 查 nonce 缓存, 命中即拒绝 (重放), 未命中则记入。
+→ 若带 nonce: 查 nonce store, 命中即拒绝 (重放), 未命中则记入。
 
-2026-07 新增重放保护 (B 方案, 增量兼容):
+2026-07 重放保护 (B 方案, 增量兼容) + 多 worker Redis 后端:
 - 客户端 ``replay_protected=True`` 时每次请求生成 uuid nonce 并覆盖进签名;
 - 服务端检测 Authorization 里有没有 ``nonce`` 字段决定走新/旧验签路径,
   未升级的旧客户端继续走旧路径, 不影响。
-- nonce 缓存 process-local (内存字典 + TTL 惰性清理)。多进程部署需要换
-  Redis 实现, 见 ``_NonceCache`` 文档。
+- nonce 存储抽象为 ``NonceStore``: ``InMemoryNonceStore`` (单进程/测试) 与
+  ``RedisNonceStore`` (生产, 跨 worker 共享, 用 ``SET key NX EX ttl`` 原子去重)。
+  用 ``enable_replay_protection(redis_url=...)`` 或 ``configure_nonce_store(...)``
+  注入。默认仍是进程内 store——未配置 Redis 时多 worker 部署会在窗口期内漏重放,
+  ``enable_replay_protection`` 会显式 warning 提醒。
 """
 import hashlib
 import hmac
 import logging
 import threading
 from time import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Protocol, Tuple
 from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
 # 允许的时钟偏移（秒），客户端签发时间不应过分超前于此
 _MAX_SKEW = 300
+
+# Redis nonce key 前缀
+_REDIS_NONCE_PREFIX = "plaita:nonce:"
 
 
 def _compute_signature(secret_key: str, sign_time: int, key_time: str,
@@ -47,14 +53,27 @@ def _compute_signature(secret_key: str, sign_time: int, key_time: str,
     ).hexdigest()
 
 
-class _NonceCache:
+class NonceStore(Protocol):
+    """nonce 存储抽象——记录已用 nonce 防重放。
+
+    ``check_and_record`` 必须是原子的"未见过则记入并返回 True, 见过返回 False",
+    否则并发下有 TOCTOU 漏洞。``InMemoryNonceStore`` 用锁保证; ``RedisNonceStore``
+    用 ``SET key NX EX ttl`` 单命令原子保证。
+    """
+
+    def check_and_record(self, nonce: str, expire_at: float) -> bool: ...
+
+    def reset(self) -> None: ...
+
+
+class InMemoryNonceStore:
     """进程内 nonce 缓存, 记录已用过的 nonce 防重放。
 
     TTL = ``sign_expire`` (取自每次验签的 key-time)。惰性清理: 每次 ``check``
     顺手清掉已过期的条目, 避免独立清理线程。
 
     多进程部署 (gunicorn -w N) 下每个 worker 有独立缓存, 跨 worker 重放仍
-    可能在窗口期内绕过——生产部署建议注入 Redis 后端 (TTL 原生支持)。
+    可能在窗口期内绕过——生产部署请用 ``RedisNonceStore``。
     """
 
     def __init__(self) -> None:
@@ -80,13 +99,73 @@ class _NonceCache:
             self._seen.clear()
 
 
-# 模块级单例。测试可通过 reset_nonce_cache() 重置。
-_nonce_cache = _NonceCache()
+class RedisNonceStore:
+    """跨 worker 共享的 nonce 存储, 用 Redis ``SET key NX EX ttl`` 原子去重。
+
+    所有 worker 进程连同一 Redis, 真正实现多 worker 重放保护。TTL 由 Redis
+    原生过期, 无需惰性清理。``redis`` 客户端在构造期创建一次, 之后复用。
+
+    Args:
+        redis_url: Redis 连接字符串 (``redis://host:port/db``)。
+        key_prefix: nonce key 前缀, 默认 ``plaita:nonce:``。
+    """
+
+    def __init__(self, redis_url: str, key_prefix: str = _REDIS_NONCE_PREFIX) -> None:
+        import redis  # 延迟导入: 仅启用 Redis 后端时依赖 redis 包
+        self._redis = redis.Redis.from_url(redis_url)
+        self._prefix = key_prefix
+
+    def check_and_record(self, nonce: str, expire_at: float) -> bool:
+        now = time()
+        ttl = int(expire_at - now)
+        if ttl < 1:
+            # 已过期或刚好到期: 不必记入, 让上层时效校验拒绝即可。
+            return True
+        key = f"{self._prefix}{nonce}"
+        # SET key value NX EX ttl: 仅当 key 不存在时设置, 原子去重。
+        acquired = self._redis.set(key, "1", nx=True, ex=ttl)
+        return bool(acquired)
+
+    def reset(self) -> None:
+        """测试专用: 清掉本前缀下的 nonce。仅用于 fakeredis/测试库, 生产勿调。"""
+        for key in self._redis.scan_iter(f"{self._prefix}*"):
+            self._redis.delete(key)
+
+
+# 模块级默认 store。测试可通过 reset_nonce_cache() 重置。
+_default_nonce_store: NonceStore = InMemoryNonceStore()
+
+
+def configure_nonce_store(store: NonceStore) -> None:
+    """注入自定义 nonce store (如 ``RedisNonceStore``)。"""
+    global _default_nonce_store
+    _default_nonce_store = store
 
 
 def reset_nonce_cache() -> None:
-    """测试专用: 清空进程内 nonce 缓存。"""
-    _nonce_cache.reset()
+    """测试专用: 清空默认 nonce store。"""
+    _default_nonce_store.reset()
+
+
+def enable_replay_protection(redis_url: Optional[str] = None) -> None:
+    """启用服务端重放保护, 配置 nonce store。
+
+    - ``redis_url`` 非空: 配置 ``RedisNonceStore``, 多 worker 共享, 真重放保护。
+    - ``redis_url`` 为 None: 用 ``InMemoryNonceStore``——**仅在单 worker 部署下
+      有效**, 多 worker (gunicorn -w N) 下跨 worker 重放仍可能在窗口期内绕过。
+      会显式 ``logger.warning`` 提醒。
+    """
+    if redis_url:
+        configure_nonce_store(RedisNonceStore(redis_url))
+        logger.info("replay protection enabled with Redis nonce store (multi-worker safe)")
+    else:
+        configure_nonce_store(InMemoryNonceStore())
+        logger.warning(
+            "replay protection enabled with IN-MEMORY nonce store: multi-worker "
+            "deployments (gunicorn -w N) will NOT be protected against cross-worker "
+            "replay within the validity window. Pass redis_url=... to enable a "
+            "RedisNonceStore for production."
+        )
 
 
 def _parse_authorization(authorization: str) -> Optional[dict]:
@@ -126,8 +205,14 @@ def verify_authorization(
     secret_id: str,
     secret_key: str,
     now: Optional[float] = None,
+    nonce_store: Optional[NonceStore] = None,
 ) -> bool:
-    """校验 Authorization 头。通过返回 True，否则 False。"""
+    """校验 Authorization 头。通过返回 True，否则 False。
+
+    Args:
+        nonce_store: 可选 nonce 存储覆盖默认 store。默认用模块级 store
+            (经 ``configure_nonce_store`` / ``enable_replay_protection`` 配置)。
+    """
     fields = _parse_authorization(authorization)
     if fields is None:
         return False
@@ -152,9 +237,10 @@ def verify_authorization(
     if not hmac.compare_digest(fields["signature"], expected_sig):
         return False
 
+    store = nonce_store if nonce_store is not None else _default_nonce_store
     # 签名 + 时效都对, 再做重放检查 (仅当 nonce 存在)
     if fields["nonce"] is not None:
-        if not _nonce_cache.check_and_record(fields["nonce"], sign_expire):
+        if not store.check_and_record(fields["nonce"], sign_expire):
             logger.warning("replay detected: nonce=%s already used", fields["nonce"])
             return False
 

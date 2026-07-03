@@ -117,7 +117,7 @@ class RedisQueueService(BaseExtendedService):
                 try:
                     asyncio.get_event_loop().run_until_complete(client.close())
                 except Exception:
-                    pass
+                    logger.warning("redis client close failed during stop (execution_id=%s)", execution_id, exc_info=True)
             self._active_clients.clear()
             
             self._connection_state = ConnectionState.DISCONNECTED
@@ -588,7 +588,7 @@ class RedisQueueService(BaseExtendedService):
                 await pubsub.unsubscribe(channel_name)
                 await pubsub.close()
             except Exception:
-                pass
+                logger.debug("pubsub unsubscribe/close failed", exc_info=True)
     
     def _parse_message(self, message: str, message_format: str) -> Any:
         """解析消息"""

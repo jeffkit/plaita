@@ -78,7 +78,7 @@ class FlowWorker:
                 try:
                     self.flow_storage.diagnose_missing_flow(flow_id)
                 except Exception:
-                    pass
+                    logger.warning("flow_storage.diagnose_missing_flow(%s) failed", flow_id, exc_info=True)
 
             error_msg = f"找不到流程定义: {flow_id}"
             logger.error(error_msg)
@@ -123,7 +123,7 @@ class FlowWorker:
                 event_bus=self.event_bus,
                 callback_handlers=self.callback_handlers,
             )
-            execution.mode = ExecutionMode.DISTRIBUTED.value
+            execution.mode = ExecutionMode.DISTRIBUTED
 
             # 执行流程，获取初始结果
             result = execution.run_distributed(flow, params=params)
@@ -197,7 +197,7 @@ class FlowWorker:
                 event_bus=self.event_bus,
                 callback_handlers=self.callback_handlers,
             )
-            execution.mode = ExecutionMode.DISTRIBUTED.value
+            execution.mode = ExecutionMode.DISTRIBUTED
 
             # 直接使用 run_distributed 恢复执行
             result = execution.run_distributed(
@@ -248,7 +248,7 @@ class FlowWorker:
                 event_bus=self.event_bus,
                 callback_handlers=self.callback_handlers,
             )
-            execution.mode = ExecutionMode.DISTRIBUTED.value
+            execution.mode = ExecutionMode.DISTRIBUTED
 
         PERSIST_EVERY = 5
         steps_since_persist = 0

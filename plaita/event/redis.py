@@ -145,7 +145,7 @@ class RedisEventStorage(EventStorage):
                         try:
                             result.append(Event.model_validate_json(event_data))
                         except Exception:
-                            pass
+                            logger.warning("skipping unparseable event payload in mget batch", exc_info=True)
         else:
             type_keys = []
             cursor = 0
@@ -183,8 +183,8 @@ class RedisEventStorage(EventStorage):
                             try:
                                 result.append(Event.model_validate_json(event_data))
                             except Exception:
-                                pass
-                
+                                logger.warning("skipping unparseable event payload in paged mget", exc_info=True)
+
                 if len(result) >= limit:
                     break
         

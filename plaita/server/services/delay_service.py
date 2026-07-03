@@ -133,9 +133,9 @@ class DelayService(BaseExtendedService):
                     "success": False
                 }
                 await self.trigger_event(task_config.get("event_type"), error_event_data)
-            except:
-                pass
-            
+            except Exception:
+                logger.warning("delay error-event trigger failed", exc_info=True)
+
             return False
     
     def validate_task_config(self, task_config: Dict[str, Any]) -> bool:

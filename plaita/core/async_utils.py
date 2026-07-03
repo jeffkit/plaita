@@ -135,7 +135,7 @@ def async_gen_to_sync(agen):
             try:
                 loop.run_until_complete(agen.aclose())
             except Exception:
-                pass
+                logger.debug("async gen aclose failed during sync drain", exc_info=True)
             loop.close()
     else:
         import queue as _queue
@@ -160,7 +160,7 @@ def async_gen_to_sync(agen):
                 try:
                     loop.run_until_complete(agen.aclose())
                 except Exception:
-                    pass
+                    logger.debug("async gen aclose failed in worker thread", exc_info=True)
                 loop.close()
 
         worker = threading.Thread(target=_drive, daemon=True)

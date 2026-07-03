@@ -14,6 +14,8 @@ import unittest
 
 from plaita.core.errors import NodeExecutionError
 from plaita.dsl.codeflow import compile_source, flow_from_source
+from plaita.node import code as _code_module
+from plaita.node import get_default_registry, register_code_node
 
 
 class TestCodeflowSourceLineIR(unittest.TestCase):
@@ -96,6 +98,19 @@ def double_numbers(INPUT):
 
 
 class TestCodeflowRuntimeErrorSourceLine(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # 用例用 CODE 节点跑 1/0 触发 ZeroDivisionError; 单测环境无 docker,
+        # 显式选 unsafe 后端让 raw exec 直接抛。保存/恢复全局默认后端, 不污染
+        # 其他测试模块 (0.5.0 起 register_code_node 默认要求 docker)。
+        cls._saved_backend = _code_module._DEFAULT_SANDBOX_BACKEND
+        register_code_node(default_backend="unsafe")
+
+    @classmethod
+    def tearDownClass(cls):
+        _code_module._DEFAULT_SANDBOX_BACKEND = cls._saved_backend
+        get_default_registry().unregister("code")
+
     def test_runtime_error_carries_source_line(self):
         # CODE 节点运行 1/0 触发 ZeroDivisionError -> NodeExecutionError
         src = (

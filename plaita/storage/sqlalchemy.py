@@ -362,7 +362,8 @@ class SqlalchemyFlowStorage(FlowStorage):
                         if numeric_versions:
                             return numeric_versions[-1].definition
                     except Exception:
-                        pass
+                        # 版本号非纯数字或不可比较——回退到下方"任意版本"。
+                        logger.debug("model version sort failed, falling back to first", exc_info=True)
                     
                     # 如果都不满足，返回任意一个
                     return models[0].definition

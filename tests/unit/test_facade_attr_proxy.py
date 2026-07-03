@@ -15,9 +15,12 @@ from plaita.core.executor import FlowExecution
 class TestFacadeExplicitDelegation(unittest.TestCase):
     def test_real_attrs_stay_on_facade(self):
         execution = FlowExecution()
-        execution.mode = "normal"
+        execution.mode = "normal"  # 字符串入口, setter coerce 成 enum
         execution.timeout = 100
-        self.assertEqual(execution.mode, "normal")
+        # 0.5.0 起 execution.mode 是 ExecutionMode enum (内部统一), 公共入口
+        # 仍接受字符串。字符串 "normal" coerce 后等价于 ExecutionMode.NORMAL。
+        from plaita.core.executor import ExecutionMode
+        self.assertEqual(execution.mode, ExecutionMode.NORMAL)
         self.assertEqual(execution.timeout, 100)
         # mode/timeout 不应污染 context state
         self.assertNotIn("mode", execution._ctx.context)

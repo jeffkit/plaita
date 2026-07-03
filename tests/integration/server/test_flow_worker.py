@@ -2,7 +2,7 @@ import json
 import os
 import unittest
 
-from plaita.flow import Flow
+from plaita import Flow
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 from plaita.storage.base import ExecutionState
 from plaita.server.flow_worker import FlowWorker

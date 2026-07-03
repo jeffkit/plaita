@@ -402,9 +402,9 @@ class KafkaQueueService(BaseExtendedService):
                     "success": False
                 }
                 await self.trigger_event(task_config.get("event_type"), error_event_data)
-            except:
-                pass
-            
+            except Exception:
+                logger.warning("kafka error-event trigger failed", exc_info=True)
+
             return False
     
     async def _check_flow_completion(self, execution_id: str) -> bool:
@@ -445,7 +445,7 @@ class KafkaQueueService(BaseExtendedService):
                         if callback(execution_id):
                             return True
                     except Exception:
-                        pass
+                        logger.warning("flow completion callback raised", exc_info=True)
 
             # 默认返回False，保守策略不提前结束
             return False

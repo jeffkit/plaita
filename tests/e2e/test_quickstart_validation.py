@@ -111,13 +111,21 @@ class TestQuickstartMigration:
     """Validate migration (backward compat) examples from quickstart.md."""
 
     def test_old_import_plaita_flow(self):
-        """quickstart: Old import path plaita.flow should still work."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            from plaita.flow import Flow, FlowExecution, parse
+        """quickstart: 0.5.0 删了 ``plaita.flow`` shim, 旧 import 路径不再可用。
+
+        迁移: ``from plaita.flow import ...`` → ``from plaita import ...``
+        (或 ``from plaita.core.flow import ...`` / ``from plaita.core.executor import ...``)。
+        """
+        # 新路径可用
+        from plaita import Flow, FlowExecution, parse
         assert Flow is not None
         assert FlowExecution is not None
         assert parse is not None
+        # 0.5.0 起 plaita.flow 模块已删除
+        import importlib
+
+        with pytest.raises(ImportError):
+            importlib.import_module("plaita.flow")
 
     def test_old_import_plaita_io(self):
         """quickstart: Old import path plaita.io should still work."""

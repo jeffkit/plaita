@@ -3,6 +3,16 @@
 > 状态：基线已建立（`plaita/core/callback.py`），流程可复用。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
+> **⚠️ 覆盖范围声明（2026-07，诚实降级）**
+> 当前变异测试**仅覆盖纯同步路径**：`callback.py` / `expression.py` /
+> `parallel_executor.py` / `calculate.py` / `decide.py`（见 §2.3）。**async /
+> distributed / timeout 路径（`executor.py` / `runner.py` / `concurrent.py` /
+> `code.py`）不在 mutmut 自动覆盖范围内**——`pytest-asyncio` 事件循环与
+> mutmut 进程内 `pytest.main()` 冲突，并行模式会挂/假阳性（见 §3、§6）。
+> 这些模块靠普通单测 + 集成测试覆盖，**不**把变异测试当作全量质量背书。
+> §6 提供逐变异点独立进程的人工跑法，是已验证可行的扩基线路径，但属独立
+> follow-up，当前未跑全。引用本仓库变异测试结果时请明确标注"仅同步路径"。
+
 ## 1. 为什么做变异测试
 
 行覆盖率只能证明「代码被跑过」，不能证明「测试能抓住缺陷」。变异测试会

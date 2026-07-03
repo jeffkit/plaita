@@ -2,7 +2,141 @@
 
 本文件列出 plaita 历次版本中**破坏向后兼容**的改动，并给出迁移步骤。如果你升级后遇到行为变化，先来这里查。
 
-完整背景（含批评与设计动机）见内部 [docs/ARCHITECTURE_REVIEW_2026-07.md](docs/ARCHITECTURE_REVIEW_2026-07.md)；本文件只关心**怎么改代码**。
+本文件只关心**怎么改代码**。
+
+---
+
+## 0.5.0
+
+0.5.0 是一次"激进 break"主版本，按架构师/开发者/使用者三视角批评集中整改。下面按"踩坑概率从高到低"排序。
+
+### 1. `plaita.flow` shim 删除（import 路径 break）
+
+**变更前**：`from plaita.flow import Flow, FlowExecution, ...` 可用（带 `DeprecationWarning`，原计划 0.6.0 删）。
+**变更后**：`plaita/flow.py` 模块**已删除**，`from plaita.flow import ...` 直接 `ImportError`。
+
+```diff
+-from plaita.flow import Flow, FlowExecution, ExecutionMode
++from plaita import Flow, FlowExecution, ExecutionMode
+# 或显式走 core:
++from plaita.core.flow import Flow
++from plaita.core.executor import FlowExecution, ExecutionMode
+```
+
+**迁移**：全局搜索 `from plaita.flow import` / `import plaita.flow`，改成 `from plaita import ...`（推荐）或 `from plaita.core.* import ...`。`parse` / `parse_and_run` / `FlowCallback` / `FlowEvent` / `CallbackManager` / `LoggerCallback` / `FlowExecutionException` 同样从 `plaita` 顶层导出。
+
+### 2. CodeNode 默认 `sandbox_backend` 改 `docker`（需装 Docker daemon）
+
+**变更前**：`register_code_node()` 默认 `sandbox_backend="restricted"`（RestrictedPython AST 沙箱，文档自承有 AST 绕过向量）。
+**变更后**：默认 `sandbox_backend="docker"`（容器级隔离：`--network none` / `--read-only` / 资源上限）。Docker daemon 不可用时 **`register_code_node()` 拒绝注册** 并报错，列出三种降级路径，**不允许静默降级到 `restricted`**。
+
+```python
+from plaita.node import register_code_node
+
+register_code_node()                  # 0.5.0 默认 docker, 需本机 Docker daemon
+register_code_node(default_backend="subprocess")  # 半信任: 进程级, 不隔离 FS/网络
+register_code_node(default_backend="unsafe")      # 完全信任代码作者
+register_code_node(default_backend="restricted")  # 显式声明半信任 (AST 沙箱, 有已知绕过向量)
+```
+
+**迁移**：
+- 生产多租户：装 Docker daemon，开箱即用。
+- 无 Docker 环境 / 半信任：显式 `register_code_node(default_backend="subprocess")`。
+- 内部开发完全信任：`register_code_node(default_backend="unsafe")`。
+- daemon 不可用且未显式降级时，注册期报错：`CodeNode default sandbox backend is "docker" but Docker daemon is unavailable. Install Docker, or pass default_backend="subprocess"|"unsafe"|"restricted".`
+
+### 3. HMAC nonce 改 Redis 后端（多 worker 真重放保护）
+
+**变更前**：`plaita-console` 的 HMAC nonce 缓存是进程内单例，gunicorn 多 worker 下每个 worker 独立缓存，3 秒窗口内**跨 worker 重放可行**。`replay_protected=True` 给"已保护"的错觉。
+**变更后**：抽象 `NonceStore` 接口，新增 `RedisNonceStore`（`SET nonce NX EX ttl` 原子操作，跨 worker 共享）。`verify_authorization` / `PlaitaClient` 启动时按配置注入 store。
+
+```python
+from plaita_console.backend.services.signature import (
+    configure_nonce_store, enable_replay_protection,
+)
+
+# 单进程 / 测试 (默认)
+enable_replay_protection()                       # InMemoryNonceStore
+
+# 生产多 worker (推荐)
+configure_nonce_store(redis_url="redis://...")   # 自动切 RedisNonceStore
+enable_replay_protection()
+```
+
+**break**：`replay_protected=True` 在多 worker 部署下若未配 Redis store，启动时 `logger.warning` 明确告知"仅单 worker 保护"。
+
+**迁移**：多 worker 部署（gunicorn/uvicorn workers>1）配 `configure_nonce_store(redis_url=...)`；单进程可继续用默认 `InMemoryNonceStore`。
+
+### 4. `Flow.parse_flow` 解耦全局 registry（解析/执行分离）
+
+**变更前**：`Flow` 在 Pydantic `model_validator(mode="before")` 里调 `get_default_registry()`，Flow 解析隐式耦合模块级单例 registry 状态——import 期注册了坏节点，全进程解析任何 flow 都坏。
+**变更后**：`Flow` 只解析结构，`nodes` 字段保留为原始 dict；节点解析延迟到执行期 `Flow.resolve_nodes(registry)`。`Flow.from_string` / `from_file` / `Flow.model_validate` 默认仍调一次 `resolve_nodes(get_default_registry())`，**99% 用户用法不变**。
+
+**迁移**：一般无需改动。仅当**自定义 registry** 或**在 import 期注册节点**时：
+- 显式传 registry：`FlowExecution(flow, registry=my_registry)` 或 `flow.resolve_nodes(my_registry)`。
+- 不再依赖"import 期注册的节点立刻对 `Flow.from_string` 生效"——确保注册发生在 `Flow` 解析之前（`init_default_registry()` 是推荐入口，见下条）。
+
+### 5. `init_default_registry()` 显式初始化入口
+
+**变更前**：默认 `NodeRegistry` 是模块级 `_default_registry = NodeRegistry()`，import 期静默创建，插件发现首次 `get_default_registry()` 时隐式触发——隐式可变单例 + import 期副作用。
+**变更后**：新增 `init_default_registry(*extra_nodes, auto_discover=True)` 显式入口，建议在启动脚本调一次。`get_default_registry()` 仍可用，但首次隐式调用会 `logger.debug` 提示。
+
+```python
+from plaita.node import init_default_registry, register_code_node
+
+init_default_registry()                       # 显式装载内置 + 插件节点
+register_code_node(default_backend="docker")  # 按需 opt-in CodeNode
+```
+
+**迁移**：建议在应用启动脚本顶部把"隐式 `get_default_registry()`"换成显式 `init_default_registry()`。不调仍可用（向后兼容），仅多一条 debug 日志。
+
+### 6. `execution.mode` 内部类型 str → `ExecutionMode` enum
+
+**变更前**：`execution.mode` 是裸字符串（`"normal"`/`"generator"`/`"distributed"`），全库散落 `mode == "generator"` 字符串比较——拼写错误静默成 `False`。
+**变更后**：内部类型 `Optional[ExecutionMode]`，比较一律走 enum。**公共入口仍接受字符串**：`Flow.run(mode="generator")` / `FlowExecution(mode="generator")` / `execution.mode = "generator"` 在边界处经 `_coerce_mode` 统一一次。
+
+```python
+from plaita.core.executor import ExecutionMode
+
+# 这两种写法等价 (公共入口接受字符串):
+flow.run(mode="generator")
+flow.run(mode=ExecutionMode.GENERATOR)
+
+# 节点插件内部比较改 enum (若你直接读 execution.mode):
+if execution.mode == ExecutionMode.GENERATOR:   # 0.5.0
+    ...
+# 而非:
+# if execution.mode == "generator":             # 0.4.x (0.5.0 起不再推荐)
+```
+
+**迁移**：99% 代码无需改动（公共入口兼容字符串）。仅当你**直接读 `execution.mode` 并和字符串比较**（第三方节点插件），建议改成 `ExecutionMode.GENERATOR` / `ExecutionMode.DISTRIBUTED` / `ExecutionMode.NORMAL`。`execution.mode` getter 现在返回 `ExecutionMode` enum（不再是 str），`assertEqual(execution.mode, "normal")` 这类断言需改成 `ExecutionMode.NORMAL`。
+
+### 7. `Parallel` background branches 失败不再静默
+
+**变更前**：`Parallel` 节点 fire-and-forget 后台分支失败时无 future 引用、无错误回调、无超时——失败完全沉默。
+**变更后**：持有 future 引用，`add_done_callback` 记录失败分支异常到模块级 `_BG_STATE`（按 `execution_id` 索引，避免 `FlowExecution` 在多进程下不可 pickle）。新增调试接口：
+
+```python
+from plaita.node.concurrent import wait_background_branches, get_background_errors
+
+wait_background_branches(execution, timeout=5)   # 可选: 等后台分支收尾
+errors = get_background_errors(execution)         # 取后台分支失败列表
+```
+
+**迁移**：无需改动（fire-and-forget 语义不变，只是失败不再沉默）。调试时可调 `wait_background_branches` / `get_background_errors`。
+
+### 8. `$ENV` 升级静默失败告警
+
+**变更前**（0.4.0）：`$ENV` 改 allowlist，旧 flow 升级后 `$ENV.HOME` 静默变空字符串，下游继续跑不报错——"沉默地坏掉"。
+**变更后**：`Flow.model_validate` / `model_validate_json` 扫描所有节点表达式，若发现 `$ENV.` 引用但 `expose_env` 为空，`logger.warning` 一次列出 key 名 + 修复指引。**不报错**（保持兼容），让沉默变可见。
+
+**迁移**：无需改动。升级后留意日志 warning，按提示把 key 加到 `expose_env`。
+
+### 附：异常治理 / executor 拆分 / mutmut 范围
+
+- **bare `except:` 清零**：`plaita/` 内 5 处 bare `except:` 全部改 `except Exception:` 并加 `logger.warning`/`debug`；`ruff` 配 `E722`（error）/ `BLE001`（blind-except warn），新代码 PR 拦截。
+- **`executor.py` 拆分**：757 行拆成 `plaita/core/strategies.py`（`RunOptions`/`ExecutionMode`/三策略/helper）+ `plaita/core/executor.py`（`FlowExecution` facade）。公共导出不变（`from plaita import FlowExecution, ExecutionMode` 仍可用）。
+- **mutmut 覆盖范围诚实声明**：变异测试**仅覆盖纯同步路径**（callback/expression/parallel_executor/calculate/decide）；async/distributed/timeout 不在 mutmut 自动覆盖范围，见 `docs/mutation-testing.md` 顶部声明。引用变异测试结果时请标注"仅同步路径"。
 
 ---
 
@@ -158,6 +292,16 @@ branch = execution.state.last_branch
 ---
 
 ## 升级检查清单
+
+升级到 0.5.0 前过一遍：
+
+- [ ] 全局搜索 `from plaita.flow import` —— 改成 `from plaita import ...`
+- [ ] 全局搜索 `register_code_node` —— 确认 Docker daemon 可用，或显式 `default_backend="subprocess"|"unsafe"|"restricted"`
+- [ ] 多 worker 部署：配 `configure_nonce_store(redis_url=...)` + `enable_replay_protection()`
+- [ ] 节点插件直接读 `execution.mode` 的：字符串比较改 `ExecutionMode` enum
+- [ ] 启动脚本：用 `init_default_registry()` 显式初始化默认 registry（可选，向后兼容）
+- [ ] 跑一遍单元测试套件：`pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integration"`
+- [ ] 跑一遍集成测试套件：`pytest tests/integration/`
 
 升级到 0.4.0 前过一遍：
 

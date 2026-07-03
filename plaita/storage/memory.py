@@ -135,7 +135,8 @@ class MemoryFlowStorage(FlowStorage):
                                      key=lambda x: [int(p) for p in x.split(".")])
             if numeric_versions:
                 return versions[numeric_versions[-1]]
-        except:
+        except Exception:
+            # 版本号非纯数字或不可比较——回退到下方"任意版本", 不影响功能。
             pass
         
         # 如果无法按版本号排序，返回任意一个版本

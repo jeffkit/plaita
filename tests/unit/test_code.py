@@ -29,18 +29,33 @@ except Exception:
 from plaita.core.flow import Flow
 from plaita.core import types
 from plaita.io import Property
-from plaita.node import End, Start, register_code_node
+from plaita.node import End, Start, get_default_registry, register_code_node
+from plaita.node import code as _code_module
 from plaita.node.code import (
     CodeNode, run_python, run_python_restricted,
     run_python_subprocess, run_python_docker,
 )
 
 
-# CodeNode is not in the default registry; opt in for this test module.
-register_code_node()
+# CodeNode is not in the default registry; opt in for this test module via
+# setUpClass. 0.5.0 起库默认后端为 docker (需 daemon); 单测环境无 docker,
+# 显式降级到 restricted 以保持 create_flow() 系列用例可在 CI 跑。需要
+# docker/subprocess 的用例各自在 CodeNode 上显式传 sandbox_backend 或 @skipUnless。
+# setUpClass/tearDownClass 负责保存与恢复 ``_DEFAULT_SANDBOX_BACKEND`` 全局,
+# 不污染其他测试模块 (见 test_code_default_backend.py)。
 
 
 class CodeNodeTestCase(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_backend = _code_module._DEFAULT_SANDBOX_BACKEND
+        register_code_node(default_backend="restricted")
+
+    @classmethod
+    def tearDownClass(cls):
+        _code_module._DEFAULT_SANDBOX_BACKEND = cls._saved_backend
+        get_default_registry().unregister("code")
 
     def test_run_python(self):
         self.assertEqual(5, run_python("def run(a):\n    return a - 1", a=6))
@@ -225,7 +240,9 @@ def run(b):
 
     @unittest.skipUnless(_RESTRICTED_AVAILABLE, "RestrictedPython not installed")
     def test_sandbox_restricted_default_via_node(self):
-        """CodeNode defaults to sandbox_backend='restricted'."""
+        """CodeNode 默认后端取自 ``register_code_node(default_backend=...)``;
+        本测试模块注册时显式选 'restricted', 故 create_flow() 不带后端的
+        CodeNode 走 restricted 路径。"""
         result = self.create_flow().run(
             language="python",
             code="def run(a):\n    return a * 2",

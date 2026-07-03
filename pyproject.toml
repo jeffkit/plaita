@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plaita"
-version = "0.4.0"
+version = "0.5.0"
 description = "Official Python Runtime for Plaita -- Logic Compose Engine"
 requires-python = ">=3.10"
 authors = [
@@ -42,6 +42,7 @@ lint = [
     "mypy",
     "flake8",
     "black",
+    "ruff>=0.6",
 ]
 all = ["plaita[redis,server,code,http,yaml]"]
 
@@ -60,6 +61,21 @@ approval = "plaita.server.nodes.approval_node:ApprovalNode"
 [tool.setuptools.packages.find]
 include = ["plaita", "plaita.*"]
 exclude = ["tests*", "examples*", "plaita-console*", "plaita_console*"]
+
+# Ruff lint。``BLE001`` (blind-except) 设为 warn——``except Exception`` /
+# ``except:`` 不带 ``logger``/``raise`` 的静默吞咽是本项目历史重灾区。新代码
+# PR 拦截, 老位点随各文件整改逐步清理。E722 (bare except) 直接 error。
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E722", "BLE001"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# 测试代码允许 ``except Exception`` 兜底, 不强制记日志。
+"tests/**" = ["BLE001"]
 
 # 演示脚本、伴生文档与测试 fixture 不得进入 wheel——它们属于 examples/ 或 docs/。
 # 即便有人误把 .md/.json/.txt 拖回 plaita/ 子包，这里也会拦下。

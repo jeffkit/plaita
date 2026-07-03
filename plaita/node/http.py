@@ -145,7 +145,8 @@ class HttpExecutor:
             res = None
             try:
                 res = response.json()
-            except:
+            except Exception:
+                # JSON 解析失败时回退到原始文本——预期分支, 不必记日志。
                 res = data
                 
             return HttpResponse(

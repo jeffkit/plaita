@@ -20,7 +20,7 @@ from plaita.core.errors import FlowStartMissingError, NodeNotFoundError
 from plaita.core.executor import FlowExecution
 from plaita.io import Property
 from plaita.logger import logger
-from plaita.node import End, Node, Start, get_default_registry
+from plaita.node import End, Node, Start
 
 
 class Flow(BaseModel):
@@ -37,7 +37,12 @@ class Flow(BaseModel):
     runtime: str = "python"
     input_type: Optional[Union[Property, str]] = None
     output_type: Optional[Union[Property, str]] = None
-    nodes: Optional[List[Node]] = Field(default_factory=list)
+    # ``nodes`` 接受 dict (JSON/YAML 原始结构) 或已解析的 ``Node`` 实例。节点
+    # 解析**不再**在 ``parse_flow`` validator 里发生——那会隐式耦合到模块级
+    # 默认 registry 的状态。改由 ``resolve_nodes()`` 显式解析，``model_validate``
+    # / ``model_validate_json`` 默认用 ``get_default_registry()`` 自动调一次，
+    # 保持 ``Flow.from_string`` / ``parse`` 等常规入口开箱即用。
+    nodes: Optional[List[Any]] = Field(default_factory=list)
     author: Optional[str] = ""
     desc: Optional[str] = ""
     metadata: Optional[Dict] = Field(default_factory=dict)
@@ -101,11 +106,94 @@ class Flow(BaseModel):
             if key in normalized:
                 normalized[key] = Property.from_json(normalized[key])
 
-        if "nodes" in normalized:
-            _registry = get_default_registry()
-            normalized["nodes"] = [_registry.parse_node(node) for node in normalized["nodes"]]
-
+        # 节点解析已移除——历史上此处调 ``get_default_registry().parse_node``
+        # 把每个 node dict 解析成对应 ``Node`` 子类。这让 Pydantic validator
+        # 产生副作用并隐式耦合到模块级默认 registry 的当前状态 (import 期注册了
+        # 坏节点会让全进程解析任何 flow 都坏)。现在节点保持为原始 dict，由
+        # ``Flow.resolve_nodes`` 显式解析，``model_validate`` 默认自动调一次。
         return normalized
+
+    @classmethod
+    def model_validate(cls, data, *, registry=None, **kwargs):
+        """Parse + validate a Flow, then resolve node dicts into ``Node`` 子类。
+
+        默认用 ``get_default_registry()`` 解析节点，保持常规用法开箱即用；传
+        ``registry=`` 可注入自定义注册表，避免隐式依赖进程级单例。
+        """
+        flow = super().model_validate(data, **kwargs)
+        flow.resolve_nodes(registry)
+        flow._warn_uncovered_env_refs()
+        return flow
+
+    @classmethod
+    def model_validate_json(cls, json_data, *, registry=None, **kwargs):
+        """JSON 解析 + 校验 + 节点解析（见 ``model_validate`` 说明）。"""
+        flow = super().model_validate_json(json_data, **kwargs)
+        flow.resolve_nodes(registry)
+        flow._warn_uncovered_env_refs()
+        return flow
+
+    def resolve_nodes(self, registry=None) -> None:
+        """把 ``self.nodes`` 里 dict 形态的节点解析成对应 ``Node`` 子类实例。
+
+        幂等：已经是 ``Node`` 实例的节点原样保留，重复调用安全。这是节点解析
+        的**显式**入口——不再藏在 Pydantic validator 里，调用方可随时用自定义
+        ``registry`` 重新解析。``model_validate`` / ``model_validate_json`` /
+        ``from_string`` / ``from_file`` / ``parse`` 默认会用
+        ``get_default_registry()`` 自动调一次。
+        """
+        from plaita.node import Node, get_default_registry
+
+        if not self.nodes:
+            return
+        reg = registry if registry is not None else get_default_registry()
+        resolved: List[Any] = []
+        changed = False
+        for n in self.nodes:
+            if isinstance(n, Node):
+                resolved.append(n)
+            elif isinstance(n, dict):
+                resolved.append(reg.parse_node(n))
+                changed = True
+            else:
+                resolved.append(n)
+        if changed:
+            self.nodes = resolved
+            # 节点集合变了, 失效索引指纹
+            self._node_index_sig = ()
+
+    def _warn_uncovered_env_refs(self) -> None:
+        """扫描节点表达式里 ``$ENV.<key>`` 引用, 若 ``expose_env`` 为空则 warning。
+
+        0.5.0 起 ``$ENV`` 默认不暴露任何环境变量 (allowlist 模型)。旧 flow 升级
+        后, 任何 ``$ENV.HOME`` 之类引用会**静默**解析为空字符串, 下游节点拿到空
+        值继续跑——典型"沉默地坏掉"。本方法在 ``model_validate`` 后扫一次, 命中即
+        ``logger.warning`` 列出引用的 key 名与修复指引 (加到 ``expose_env=[...]``)。
+        不报错, 保持兼容; 只是把沉默变可见。
+
+        仅扫默认 ``$ENV`` 前缀; 自定义 ``express_environment_variable`` 的流程不
+        覆盖 (罕见场景, 不值得复杂化)。
+        """
+        if self.expose_env:
+            return  # 显式声明过, 不告警
+        refs: set = set()
+        for node in self.nodes or []:
+            if isinstance(node, dict):
+                _collect_env_refs(node, refs)
+                continue
+            try:
+                dump = node.model_dump()
+            except Exception:
+                logger.debug("node model_dump failed during $ENV ref scan", exc_info=True)
+                continue
+            _collect_env_refs(dump, refs)
+        if refs:
+            logger.warning(
+                "flow %r 引用了 $ENV.%s 但 expose_env 为空——0.5.0 起 $ENV 默认不"
+                "暴露任何环境变量, 这些引用会静默解析为空。请在 Flow 上显式声明: "
+                "Flow(..., expose_env=%s)。详见 MIGRATION.md。",
+                self.flow_id, sorted(refs), sorted(refs),
+            )
 
     @staticmethod
     def from_string(content: str) -> Flow:
@@ -249,6 +337,36 @@ class Flow(BaseModel):
     @property
     def output_property(self):
         return self.output_type
+
+
+_ENV_REF_PREFIX = "$ENV."
+
+
+def _collect_env_refs(obj, refs: set) -> None:
+    """递归收集 ``$ENV.<key>`` 引用到的 key 名到 ``refs``。
+
+    扫 dict 的 value / list 的元素 / 字符串字面量。匹配 ``$ENV.<key>`` 起始
+    的子串, key 取到下一个非标识符字符为止 (``$ENV.HOME.foo`` 取 ``HOME``)。
+    """
+    if isinstance(obj, str):
+        start = 0
+        while True:
+            idx = obj.find(_ENV_REF_PREFIX, start)
+            if idx < 0:
+                break
+            key_start = idx + len(_ENV_REF_PREFIX)
+            j = key_start
+            while j < len(obj) and (obj[j].isalnum() or obj[j] == "_"):
+                j += 1
+            if j > key_start:
+                refs.add(obj[key_start:j])
+            start = j + 1
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _collect_env_refs(v, refs)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _collect_env_refs(v, refs)
 
 
 def _enforce_dict_input(args: tuple) -> None:

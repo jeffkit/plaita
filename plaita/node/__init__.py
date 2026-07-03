@@ -164,6 +164,55 @@ class NodeRegistry:
 # ---------------------------------------------------------------------------
 
 _default_registry = NodeRegistry()
+# 标记默认 registry 是否经 ``init_default_registry`` 显式初始化。``False`` 时
+# ``get_default_registry()`` 的首次调用走"隐式 discover"并 debug 提示, 鼓励
+# 用户在启动脚本里显式调一次 ``init_default_registry``——把"进程级单例可变状态"
+# 从隐式 import 期副作用变成显式、可读、可复现的启动步骤。
+_default_registry_explicitly_initialized = False
+
+
+def init_default_registry(*extra_nodes, auto_discover: bool = True) -> NodeRegistry:
+    """显式 (重新) 初始化进程级默认 ``NodeRegistry``。
+
+    历史上默认 registry 是模块级 ``_default_registry = NodeRegistry()`` 在 import
+    期静默创建, 插件发现 (``plaita.nodes`` entry points) 在首次
+    ``get_default_registry()`` 时隐式触发——"隐式可变单例 + import 期副作用"是
+    典型反模式: 测试间状态污染、插件加载顺序敏感、复现困难。本入口把它变成
+    **显式启动步骤**:
+
+    - 清空并重建默认 registry (重注册内置节点);
+    - ``auto_discover=True`` 时扫描 ``plaita.nodes`` entry points 装载插件节点;
+    - 把 ``extra_nodes`` (节点类) 逐个注册进去;
+    - 标记为"已显式初始化", 之后 ``get_default_registry()`` 不再发隐式初始化提示。
+
+    建议在应用启动脚本顶部调用一次::
+
+        from plaita.node import init_default_registry, register_code_node
+        init_default_registry()              # 显式装载内置 + 插件节点
+        register_code_node(default_backend="docker")  # 按需 opt-in CodeNode
+
+    Args:
+        *extra_nodes: 额外要注册的 ``Node`` 子类 (例如自定义节点)。
+        auto_discover: 是否扫描 entry points 装载插件节点, 默认 True。
+
+    Returns:
+        初始化后的默认 ``NodeRegistry`` (即 ``get_default_registry()`` 将返回者)。
+    """
+    global _default_registry_explicitly_initialized
+    reg = _default_registry
+    reg._nodes.clear()
+    reg._discovered = False
+    reg._register_builtins()
+    if auto_discover:
+        reg.discover()
+    for node_cls in extra_nodes:
+        reg.register(node_cls)
+    _default_registry_explicitly_initialized = True
+    _logger.debug(
+        "init_default_registry: %d node types registered (%s)",
+        len(reg._nodes), sorted(reg._nodes.keys()),
+    )
+    return reg
 
 
 def get_default_registry() -> NodeRegistry:
@@ -172,7 +221,18 @@ def get_default_registry() -> NodeRegistry:
     Plugin discovery via ``plaita.nodes`` entry points happens lazily on the
     first call, not at import time, so importing ``plaita.node`` does not pull
     in optional server/plugin dependencies.
+
+    若未先调 ``init_default_registry``, 首次调用走"隐式 discover"并 ``debug``
+    提示——建议在启动脚本显式调 ``init_default_registry()`` 一次, 把进程级
+    单例状态变成显式、可复现的启动步骤。
     """
+    global _default_registry_explicitly_initialized
+    if not _default_registry_explicitly_initialized and not _default_registry._discovered:
+        _logger.debug(
+            "get_default_registry() called without explicit init_default_registry(); "
+            "doing implicit plugin discovery. Call init_default_registry() at startup "
+            "for an explicit, reproducible node set."
+        )
     _default_registry.discover()
     return _default_registry
 
@@ -233,28 +293,52 @@ nodes = _RegistryDictProxy(_default_registry)
 # ---------------------------------------------------------------------------
 
 
-def register_code_node(registry: Optional[NodeRegistry] = None) -> None:
+def register_code_node(registry: Optional[NodeRegistry] = None,
+                       default_backend: Optional[str] = None) -> None:
     """Register :class:`CodeNode` for use in flows.
 
     ``CodeNode`` executes **arbitrary user-supplied code** (Python ``exec``
-    and/or PyExecJS JS) without a sandbox.  It is therefore excluded from the
-    default registry and must be enabled explicitly.
+    and/or PyExecJS JS).  It is therefore excluded from the default registry
+    and must be enabled explicitly.
 
     Args:
         registry: The :class:`NodeRegistry` to register into.  If *None*, the
             process-wide default registry is used.
+        default_backend: Python 沙箱后端默认值, 写入 ``code._DEFAULT_SANDBOX_BACKEND``。
+            未指定时沿用模块默认 (0.5.0 起 ``"docker"``)。
+
+            **安全 gate**: 若生效后端 (``default_backend`` 或模块默认) 为 ``"docker"``
+            但当前环境 docker daemon 不可用, **拒绝注册**并抛 ``RuntimeError``, 指明
+            三种降级路径——装 Docker / ``default_backend="subprocess"`` /
+            ``default_backend="unsafe"``。不允许静默降级到 ``"restricted"`` (其 AST
+            沙箱有已知绕过向量, 不该作为"对用户透明"的兜底)。
 
     Example::
 
         from plaita.node import register_code_node
-        register_code_node()   # enables CodeNode in the default registry
+        register_code_node()                      # 默认 docker, 需 daemon
+        register_code_node(default_backend="subprocess")  # 半信任, 无需 docker
 
     .. warning::
         Only call this if you trust all flow definitions that will be executed
         in this process. A ``CodeNode`` in a flow JSON allows any code the flow
-        author chooses to run, including arbitrary file-system and network
-        access.
+        author chooses to run; ``"unsafe"`` 后端连文件系统/网络访问都不限制。
     """
+    from . import code as _code_module
+    effective = default_backend if default_backend is not None else _code_module._DEFAULT_SANDBOX_BACKEND
+    if effective == "docker" and not _code_module._docker_available():
+        raise RuntimeError(
+            "register_code_node: default sandbox_backend is 'docker' but the "
+            "Docker daemon is not available. Either install/start Docker, or "
+            "explicitly choose a weaker backend: "
+            "register_code_node(default_backend='subprocess') (process-level, "
+            "no FS/network isolation) or "
+            "register_code_node(default_backend='unsafe') (no sandbox, only "
+            "for fully-trusted flow authors). 'restricted' is no longer the "
+            "default because RestrictedPython has known AST bypass vectors."
+        )
+    if default_backend is not None:
+        _code_module._DEFAULT_SANDBOX_BACKEND = default_backend
     target = registry if registry is not None else get_default_registry()
     target.register(CodeNode)
 

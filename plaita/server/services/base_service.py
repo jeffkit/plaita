@@ -202,8 +202,8 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 self.update_registry_info(active_tasks=len(self.active_tasks))
             try:
                 loop.close()
-            except:
-                pass
+            except Exception:
+                logger.warning("event loop close failed during task cleanup", exc_info=True)
     
     def _run_sync_task(self, task_config: Dict[str, Any], task_id: str):
         """

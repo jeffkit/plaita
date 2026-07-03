@@ -863,7 +863,7 @@ async def run_quick_test(request: QuickTestRequest):
         
         # 尝试导入 Plaita 并执行测试
         try:
-            from plaita.flow import Flow, FlowExecution
+            from plaita import Flow, FlowExecution
             from plaita.node import nodes as node_registry, node_register
             
             # 确保扩展节点已注册
@@ -894,7 +894,7 @@ async def run_quick_test(request: QuickTestRequest):
                 # 分布式测试 - 使用分布式模式执行流程，直接完成
                 # 这个测试演示分布式执行模式的工作原理（多步执行）
                 try:
-                    from plaita.flow import FlowExecution, ExecutionMode
+                    from plaita import FlowExecution, ExecutionMode
                     
                     context = None
                     result = None
@@ -961,7 +961,7 @@ async def run_quick_test(request: QuickTestRequest):
                 # 事件驱动测试 - 使用真实 EventBus 发送事件
                 try:
                     import asyncio
-                    from plaita.flow import FlowExecution, ExecutionMode
+                    from plaita import FlowExecution, ExecutionMode
                     from plaita.event.memory import InMemoryEventBus
                     from plaita.event.core import Event
                     

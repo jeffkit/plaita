@@ -14,7 +14,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from plaita.flow import Flow, FlowExecution
+from plaita import Flow, FlowExecution
 from plaita.event.core import EventBus
 from plaita.event.memory import InMemoryEventBus
 from plaita.logger import logger
