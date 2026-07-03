@@ -12,7 +12,7 @@ import os
 import uuid
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from plaita.core import types
 from plaita.core.expression import ExpressionEvaluator
@@ -23,23 +23,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("plaita.core.context")
 
-# 历史遗留：环境变量"敏感前缀黑名单"。**仅作为深度防御**——当 Flow 显式
-# ``expose_env`` allowlist 命中某个看起来敏感的 key 时，这里仍会拦下，避免
-# 用户无意中把 ``expose_env=["AWS_SECRET_ACCESS_KEY"]`` 写出来。
-#
-# 默认 ``$ENV`` 已经不再走"全 os.environ 减去黑名单"模型——见 ``expose_env``
-# 字段说明。新代码请显式声明需要的环境变量。
-_SENSITIVE_ENV_PREFIXES = (
-    "AWS_SECRET", "AWS_SESSION", "DATABASE_", "DB_PASSWORD",
-    "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL",
-    "PASSWORD", "PASS_", "REDIS_PASSWORD",
-)
+# 2026-07 安全模型曾保留一份「敏感前缀黑名单」作为 allowlist 之上的「第二层
+# 防御」。但它用 ``startswith`` 匹配，挡不住 vendor 前缀的真实密钥名（如
+# ``OPENAI_API_KEY``、``STRIPE_KEY``、``PG_CONN``——它们不以 ``API_KEY``/
+# ``SECRET``/``TOKEN`` 开头）。这种「挡不住却给人安全感」的机制比没有更危险，
+# 已移除。现在的模型：allowlist 即用户责任，命中即打 warning 仅做审计可见性，
+# 不做任何拦截——避免再制造虚假安全感。
 
 
 def _safe_environment(allowlist: Optional[List[str]] = None) -> Dict[str, str]:
     """Return the ``$ENV`` dict for the given expose list.
 
-    Security model (2026-07 refactor):
+    Security model (2026-07 refactor, blacklist removed this release):
 
     - **Default (no allowlist)**: returns ``{}``. ``$ENV`` is empty unless the
       flow explicitly opts in. Previously this returned ``os.environ`` minus a
@@ -48,10 +43,11 @@ def _safe_environment(allowlist: Optional[List[str]] = None) -> Dict[str, str]:
       ``PG_CONN``) was silently exposed to flow expressions and serialized
       into distributed checkpoints via ``to_dict()``.
     - **With allowlist**: returns only the listed keys that actually exist in
-      ``os.environ``. Then runs the sensitive-prefix blacklist as a second
-      defense layer and refuses to emit matches (logs a warning instead).
-      ``KeyError``-style misses are silently dropped — typos in ``expose_env``
-      should not crash the flow.
+      ``os.environ``. The allowlist is the user's responsibility — every hit
+      is logged at WARNING purely for audit visibility; nothing is silently
+      dropped-or-kept on a "looks sensitive" heuristic (the old heuristic was
+      incomplete and bred false confidence). ``KeyError``-style misses (typos
+      in ``expose_env``) are silently dropped — typos should not crash the flow.
     """
     if not allowlist:
         return {}
@@ -59,19 +55,14 @@ def _safe_environment(allowlist: Optional[List[str]] = None) -> Dict[str, str]:
     for key in allowlist:
         if key in os.environ:
             exposed[key] = os.environ[key]
-    leaked = [k for k in exposed
-              if any(k.upper().startswith(p) for p in _SENSITIVE_ENV_PREFIXES)]
-    for k in leaked:
-        logger.warning(
-            "expose_env lists a sensitive-looking key %r; dropping it. "
-            "If this is intentional, rename the env var or override "
-            "_safe_environment locally.", k,
-        )
-        exposed.pop(k, None)
+            logger.warning(
+                "expose_env: $ENV.%s 被暴露给 flow 表达式（allowlist 命中，"
+                "请确认这是预期行为；该值会进入 checkpoint 序列化）", key,
+            )
     return exposed
 
 
-def _coerce_input_value(in_format, args: tuple, kwargs: dict) -> Any:
+def _coerce_input_value(args: tuple, kwargs: dict) -> Any:
     """Resolve flow invocation arguments into the value stored at ``$INPUT``.
 
     Used by both the public ``Flow.run`` path and internal child-flow
@@ -126,6 +117,9 @@ def _resolve_default_event_bus():
     try:
         from plaita.event import get_default_event_bus
         return get_default_event_bus()
+    except ImportError:
+        logger.warning("plaita.event 不可导入，默认 EventBus 未启用", exc_info=True)
+        return None
     except Exception:
         logger.warning("Unable to get default event bus", exc_info=True)
         return None
@@ -172,11 +166,12 @@ class ExecutionContext:
         self.parent = parent
         self.event_bus = event_bus
         # $ENV allowlist (None/empty => default-empty $ENV). Flow layer pipes
-        # its expose_env down; clean() does NOT reset this — it's config.
+        # its expose_env down via setup_flow (the single source of truth).
         self.expose_env = list(expose_env) if expose_env else []
-        # cancel_event is thread-local & best-effort; cross-process cancel is
-        # NOT supported (child gets a fresh unset event — see __getstate__).
-        self.cancel_event = threading.Event()
+        # cancel_event: 进程内协作取消。有 parent 时共享 parent 的 Event，使
+        # 父 flow 取消能传到进程内子 flow / 并行分支（thread 模式）。跨进程
+        # 不传播——__getstate__ 会 pop 掉，子进程经 __setstate__ 重建全新 Event。
+        self.cancel_event = parent.cancel_event if parent is not None else threading.Event()
         self.express_prefix = express_prefix
         self.express_input_name = express_input_name
         self.express_parent_name = express_parent_name
@@ -219,17 +214,32 @@ class ExecutionContext:
         return self._state.get(key, default)
 
     def clean(self) -> None:
-        """Reset state to a fresh run (new execution id + exposed env snapshot) and recreate cancel_event."""
+        """Reset state to a fresh run and re-sync cancel_event.
+
+        - new ``$EXECUTION_ID`` + exposed env snapshot (from current allowlist)
+        - ``expose_env`` itself is NOT reset here: ``setup_flow`` is the single
+          source of truth and will overwrite it from ``flow.expose_env`` (and
+          re-snapshot ``$ENV``) before the flow observes state. Production
+          never constructs an ExecutionContext with a non-empty allowlist, so
+          no cross-flow residue is possible.
+        - ``cancel_event``: root context gets a fresh Event; child context
+          re-syncs to its parent's current Event so the in-process cancel
+          chain survives clean() cycles.
+        """
         self._state = CheckpointState.fresh(
             **self._state_kwargs(),
             execution_id=uuid.uuid4().hex,
             env=_safe_environment(self.expose_env),
         )
-        self.cancel_event = threading.Event()
+        self.cancel_event = (
+            self.parent.cancel_event if self.parent is not None
+            else threading.Event()
+        )
 
     def __getstate__(self):
-        # threading.Event isn't picklable; child gets a fresh unset event via
-        # __setstate__. Parent cancel signal doesn't cross processes.
+        # threading.Event isn't picklable; child process gets a fresh unset
+        # event via __setstate__. In-process cancel propagation (parent→child
+        # sharing the same Event) does NOT cross the process boundary.
         state = self.__dict__.copy()
         state.pop("cancel_event", None)
         return state
@@ -247,9 +257,11 @@ class ExecutionContext:
         global_context = (flow.global_context.copy() if flow.global_context else {})
         global_context.update({"flow_id": flow.flow_id})
         self._state.setup_flow(
-            input_value=_coerce_input_value(flow.input_type, args, kwargs),
-            # $PARENT: plain-dict snapshot — _get_attr takes getattr() on
-            # __dict__-bearing objects, so a live CheckpointState can't resolve $INPUT.
+            input_value=_coerce_input_value(args, kwargs),
+            # $PARENT: plain-dict snapshot. After the _get_attr root fix a live
+            # CheckpointState would also resolve, but parent_context is stored
+            # on CheckpointState and serialized into distributed checkpoints —
+            # nesting a live CheckpointState here would break to_checkpoint_dict.
             parent_context=dict(self.parent.context) if self.parent else {},
             global_context=global_context,
             flow_id=flow.flow_id,

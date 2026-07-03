@@ -164,7 +164,7 @@ flow = Flow(flow_id="demo", expose_env=["HOME", "API_BASE"], ...)
 
 **迁移**：搜索代码库所有 `$ENV.` 引用，把 key 名收集起来，加到对应 Flow 的 `expose_env`（JSON 写 `exposeEnv`，Python 写 `expose_env`）。
 
-**深度防御**：即便显式列出了看起来敏感的 key（如 `AWS_SECRET_ACCESS_KEY`），仍会被 `_SENSITIVE_ENV_PREFIXES` 拦下并 warning。如果**确实**需要这类变量，要么重命名环境变量，要么 monkeypatch `plaita.core.context._safe_environment`。
+**注意（黑名单已移除）**：早期 0.4.0 曾保留 `_SENSITIVE_ENV_PREFIXES` 黑名单作为 allowlist 之上的「第二层防御」，但它的 `startswith` 匹配挡不住 vendor 前缀密钥名（`OPENAI_API_KEY` / `STRIPE_KEY` / `PG_CONN` 等），已移除。现在 allowlist 命中即暴露，仅打 `logger.warning` 做审计——**请自行确认 `expose_env` 里没有不该暴露的密钥**，不要再依赖任何「敏感词拦截」。
 
 ### 2. `CodeNode` 移出默认注册表（opt-in）
 

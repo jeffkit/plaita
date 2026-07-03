@@ -3,6 +3,34 @@
 本页记录 **v0.4.0 及以后**的正式变更历史，按版本倒序排列。  
 0.4.0 之前的历史可通过 `git log --oneline` 查阅仓库完整提交记录。
 
+## 未发布 — Runtime & Harness Review 修复
+
+### 安全模型
+
+- **移除不完备的 `$ENV` 敏感前缀黑名单**：`_SENSITIVE_ENV_PREFIXES` 用 `startswith` 匹配，挡不住 vendor 前缀的真实密钥名（`OPENAI_API_KEY` / `STRIPE_KEY` / `PG_CONN` 等），是「挡不住却给人安全感」的纸糊防御。改为 allowlist 命中即暴露、打 `logger.warning` 做审计可见性，**allowlist 即用户责任**。`tests/unit/test_context.py` 的 env 契约测试同步改写。
+- **`_safe_environment` docstring 同步**：删除「second defense layer」表述，写明 warn 仅做审计。
+
+### 运行时正确性
+
+- **`_get_attr` 根因修复**（`plaita/core/expression_parser.py`）：dict-like 对象（含 live `CheckpointState`）优先走 `.get(path)`，而非 `getattr`。`$INPUT` 是 storage key 不是 Python 属性，旧行为导致 live `CheckpointState` 无法解析 `$PARENT.$INPUT.<field>`，靠 `setup_flow` 把 `$PARENT` 拍成 plain dict 绕过。根因修复后两路都通；plain-dict 快照保留用于 checkpoint 序列化，注释更新为真实职责。新增直接单测。
+- **`cancel_event` 进程内传播**：子 `ExecutionContext` 共享父的 `Event`（`__init__` / `child()`），`clean()` 时根上下文重建、子上下文重新同步到父当前 `Event`，使父 flow 取消能传到进程内子 flow / 并行分支（thread 模式）。跨进程不传播的语义不变。新增 `TestExecutionContextCancelPropagation`。
+- **`_coerce_input_value` 删死参数 `in_format`**：签名声明但函数体未用，移除并更新调用点。
+- **`_resolve_default_event_bus` 收窄 except**：`ImportError` 单独 warning，其它异常仍兜底并保留 traceback。
+- **`List` import 补齐**：`context.py` 顶部 `typing` import 缺 `List`（靠 `from __future__ import annotations` 没运行时炸，但静态检查会报）。
+
+### LLM harness 工具化（`plaita-ai/tests/llm/`）
+
+- **删 `.zshrc` 读取**：`_resolve_deepseek_key` → `_resolve_api_key`，只认 env（`PLAITA_LLM_API_KEY` 优先，`DEEPSEEK_API_KEY` 回退）；`conftest.py` 同步，无 key 则 skip `@pytest.mark.llm`。
+- **去 `sys.path` hack**：新增 `_bench_tasks.py` 用 `importlib` 显式加载 `agent-benchmark/tasks.py`（目录名含连字符，无法作为包导入），不再 `sys.path.insert` 相对路径。
+- **ReAct source 提取去脆弱**：优先 `plaita_run_flow`、回退 `plaita_compile_flow`、再回退从 `AIMessage.content` 解析 fenced `@flow` 块；提取失败打 warning 而非静默 `""`。
+- **`input_fields_hint` 用全部用例 keys 并集**，避免异构用例误导 planner。
+- **instruction 外置 + 版本化**：`prompts.py` 定义 `FOT_INSTRUCTION` / `REACT_INSTRUCTION` 与 `PROMPT_VERSION`，结果带 `prompt_version`。
+- **`select_tasks` 支持 `task_ids` 过滤**；`run_react_task` 类型注解对齐 `ToolLike`。
+- **新增 `runner.py` benchmark 入口**：`run_benchmark(agent, task_ids, ..., seed=0)` 落盘 `<out_dir>/<timestamp>_<agent>_<model>.json` + `summary.json`，控制台打印汇总表，失败任务摘要进 stderr。结果含 `seed` / `model` / `provider` / `base_url` / `prompt_version` 保证可复现可比。`plaita-ai llm-benchmark` CLI 子命令转调之（dev tool，需从 checkout 运行）。
+- **`plaita-ai/pyproject.toml`** 新增 `anthropic` optional extra（`langchain-anthropic>=0.3`），并入 `all`。
+
+---
+
 ## 未发布 — 架构止血三件套
 
 ### 包结构

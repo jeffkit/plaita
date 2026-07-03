@@ -27,10 +27,13 @@ fot = [
 openai = [
     "langchain-openai>=0.3",
 ]
+anthropic = [
+    "langchain-anthropic>=0.3",
+]
 dev = [
     "pytest",
 ]
-all = ["plaita-ai[agent,openai,dev]"]
+all = ["plaita-ai[agent,openai,anthropic,dev]"]
 
 [project.scripts]
 plaita-ai = "plaita_ai.cli.main:main"

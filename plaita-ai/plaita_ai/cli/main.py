@@ -74,6 +74,32 @@ def cmd_mcp(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_llm_benchmark(args: argparse.Namespace) -> int:
+    """Drive the LLM benchmark harness over the agent-benchmark task set.
+
+    The runner lives under ``tests/llm`` (a dev/research tool, not shipped in
+    the wheel). It is only importable from a source checkout, so we locate the
+    ``plaita-ai/`` root relative to this module and put it on ``sys.path``.
+    """
+    import sys as _sys
+    plaita_ai_root = Path(__file__).resolve().parents[2]
+    if str(plaita_ai_root) not in _sys.path:
+        _sys.path.insert(0, str(plaita_ai_root))
+    from tests.llm.runner import run_benchmark  # type: ignore[import-not-found]
+
+    seed: Optional[int] = None if str(args.seed).lower() == "none" else args.seed
+    run_benchmark(
+        agent=args.agent,
+        task_ids=args.task_ids,
+        difficulty=args.difficulty,
+        include_broken=args.include_broken,
+        include_http=args.include_http,
+        out_dir=args.out_dir,
+        seed=seed,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="plaita-ai",
@@ -105,6 +131,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="Start MCP stdio server (plaita-flow)")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_bench = sub.add_parser("llm-benchmark", help="Run FoT/ReAct × agent-benchmark (dev tool, needs checkout)")
+    p_bench.add_argument("--agent", choices=["fot", "react", "both"], default="both")
+    p_bench.add_argument("--task-ids", nargs="*", default=None)
+    p_bench.add_argument("--difficulty", default=None)
+    p_bench.add_argument("--include-broken", action="store_true")
+    p_bench.add_argument("--include-http", action="store_true")
+    p_bench.add_argument("--out-dir", default="runs")
+    p_bench.add_argument("--seed", default="0", help="int seed, or 'none' to disable")
+    p_bench.set_defaults(func=cmd_llm_benchmark)
 
     return parser
 

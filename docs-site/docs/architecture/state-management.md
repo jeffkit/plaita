@@ -63,23 +63,17 @@ flowchart TD
 
 ## 敏感环境变量过滤
 
-`clean()` 时按前缀过滤 `os.environ`，避免泄漏到 `$ENV`：
+`$ENV` 采用 **allowlist 模型**（2026-07 重构）：`clean()` / `setup_flow()` 时只把 Flow 显式声明的 `expose_env` 中、且真实存在于 `os.environ` 的 key 放进 `$ENV`；未声明时 `$ENV` 为空。
 
-```
-AWS_SECRET, AWS_SESSION, DATABASE_, DB_PASSWORD,
-SECRET, TOKEN, API_KEY, PRIVATE_KEY, CREDENTIAL,
-PASSWORD, PASS_, REDIS_PASSWORD
-```
-
-匹配规则是键名**大写**后 `startswith` 任一前缀。
+历史上这里曾叠了一份「敏感前缀黑名单」作为 allowlist 之上的「第二层防御」，但它的 `startswith` 匹配挡不住 vendor 前缀的真实密钥名（如 `OPENAI_API_KEY`、`STRIPE_KEY`、`PG_CONN`），「挡不住却给人安全感」比没有更危险，已移除。现在的策略：**allowlist 即用户责任**，每个命中的 key 会打一条 `logger.warning` 做审计可见性，但不做任何启发式拦截。如果确实需要暴露敏感变量，自行把关 `expose_env` 内容即可。
 
 ## 协作取消 { #cancellation }
 
 `cancel_event` 是一个 `threading.Event`：
 
-- `clean()` 时重建，避免上次取消信号串到下次
+- **进程内传播**：子 `ExecutionContext`（经 `__init__` 传入 parent，或 `child()`）共享父的 `Event`，父 flow 取消能传到进程内子 flow / 并行分支（thread 模式）；`clean()` 时根上下文重建新 `Event`，子上下文重新同步到父当前 `Event`，取消链跨 clean 周期不丢
 - `NodeRunner` 在同步节点超时时 set 它，节点可 poll 提前退出
-- **不可 pickle**：`__getstate__` 会剔除它，子进程得到全新未触发事件——因此跨进程取消不支持
+- **不可 pickle**：`__getstate__` 会剔除它，子进程得到全新未触发事件——因此**跨进程取消不支持**（process 模式仅做启动前 `is_set()` 检查，详见 `ParallelExecutor.supports_cancel_propagation`）
 
 ## 序列化（分布式）
 

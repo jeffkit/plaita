@@ -72,13 +72,21 @@ def _lookup_function(registry: Optional[Any], func_name: str) -> Optional[Callab
 
 def _get_attr(obj: Any, path: str) -> Any:
     """Read *path* off *obj* — mirrors the non-bracket branch of the old
-    ``plaita.io.get_attr``: objects with ``__dict__`` use ``getattr``,
-    plain dicts use ``.get``.
+    ``plaita.io.get_attr``.
+
+    Order matters: dict-like objects (``dict`` or anything exposing both
+    ``__getitem__`` and ``get``) are read via ``.get(path)`` so storage-key
+    mappings such as a live ``CheckpointState`` resolve correctly (its
+    ``$INPUT`` is a storage key, not a Python attribute). Only objects that
+    are neither dict-like fall back to ``getattr`` — this covers plain
+    attribute access on user data classes / Pydantic models passed as input.
     """
-    if hasattr(obj, "__dict__"):
-        return getattr(obj, path, None)
     if isinstance(obj, dict):
         return obj.get(path, None)
+    if hasattr(obj, "__getitem__") and hasattr(obj, "get"):
+        return obj.get(path, None)
+    if hasattr(obj, "__dict__"):
+        return getattr(obj, path, None)
     return None
 
 

@@ -4,7 +4,10 @@ import os
 import unittest
 from unittest.mock import patch
 
-from plaita.core.context import ExecutionContext, _SENSITIVE_ENV_PREFIXES
+from plaita.core.context import ExecutionContext
+from plaita.core.expression import ExpressionEvaluator
+from plaita.core.expression_parser import _get_attr
+from plaita.core.state import CheckpointState
 
 
 class TestExecutionContextState(unittest.TestCase):
@@ -138,22 +141,22 @@ class TestExecutionContextState(unittest.TestCase):
 
     def test_coerce_input_value_dict_positional(self):
         from plaita.core.context import _coerce_input_value
-        self.assertEqual(_coerce_input_value(None, ({"a": 1},), {}), {"a": 1})
+        self.assertEqual(_coerce_input_value(({"a": 1},), {}), {"a": 1})
 
     def test_coerce_input_value_kwargs(self):
         from plaita.core.context import _coerce_input_value
-        self.assertEqual(_coerce_input_value(None, (), {"a": 1}), {"a": 1})
+        self.assertEqual(_coerce_input_value((), {"a": 1}), {"a": 1})
 
     def test_coerce_input_value_merge_dict_and_kwargs(self):
         from plaita.core.context import _coerce_input_value
         self.assertEqual(
-            _coerce_input_value(None, ({"a": 1},), {"b": 2}),
+            _coerce_input_value(({"a": 1},), {"b": 2}),
             {"a": 1, "b": 2},
         )
 
     def test_coerce_input_value_no_input_type_empty(self):
         from plaita.core.context import _coerce_input_value
-        self.assertEqual(_coerce_input_value(None, (), {}), {})
+        self.assertEqual(_coerce_input_value((), {}), {})
 
     def test_get_or_create_event_bus_no_bus(self):
         ctx = ExecutionContext()
@@ -164,7 +167,9 @@ class TestExecutionContextState(unittest.TestCase):
 
 class TestExecutionContextEnvFiltering(unittest.TestCase):
     """2026-07 安全模型重构：``$ENV`` 默认空（不再泄漏 os.environ），
-    flow 通过 ``expose_env`` allowlist 显式声明需要的环境变量。"""
+    flow 通过 ``expose_env`` allowlist 显式声明需要的环境变量。本次移除了
+    不完备的「敏感前缀黑名单」——allowlist 即用户责任，命中即打 warning
+    做审计可见性，不做任何「看起来敏感」的拦截。"""
 
     def test_default_env_is_empty(self):
         """没有 allowlist 时 ``$ENV`` 必须为空——这是反转后的核心保证。"""
@@ -183,23 +188,29 @@ class TestExecutionContextEnvFiltering(unittest.TestCase):
             self.assertNotIn("OTHER", env)
             self.assertNotIn("MISSING", env)  # 不存在的 key 静默跳过
 
-    def test_sensitive_prefix_still_blocked_even_when_allowlisted(self):
-        """allowlist 命中敏感前缀时仍拒绝——深度防御层。"""
-        with patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "k"}, clear=True):
-            ctx = ExecutionContext(expose_env=["AWS_SECRET_ACCESS_KEY"])
-            ctx.clean()
-            env = ctx.get_state("$ENV")
-            self.assertEqual(env, {})  # 被深度防御层拦下
-
-    def test_sensitive_prefix_blacklist_covers_all_documented_prefixes(self):
-        """黑名单本身保留——用作 allowlist 之上的二次过滤。"""
-        for prefix in _SENSITIVE_ENV_PREFIXES:
-            key = f"{prefix}_VAR"
-            with patch.dict(os.environ, {key: "secret"}, clear=True):
-                ctx = ExecutionContext(expose_env=[key])
+    def test_expose_env_warns_on_every_hit(self):
+        """allowlist 命中即 warning（审计可见性），不区分 key 是否「看起来敏感」。"""
+        with patch.dict(os.environ, {"HOME": "/h", "OPENAI_API_KEY": "sk-x"}, clear=True):
+            ctx = ExecutionContext(expose_env=["HOME", "OPENAI_API_KEY"])
+            with self.assertLogs("plaita.core.context", level="WARNING") as cm:
                 ctx.clean()
-                env = ctx.get_state("$ENV")
-                self.assertNotIn(key, env, f"Prefix {prefix} should be blocked by defense layer")
+            env = ctx.get_state("$ENV")
+            # 两个 key 都被暴露——allowlist 即用户责任，不做启发式拦截
+            self.assertEqual(env, {"HOME": "/h", "OPENAI_API_KEY": "sk-x"})
+            joined = "\n".join(cm.output)
+            self.assertIn("HOME", joined)
+            self.assertIn("OPENAI_API_KEY", joined)
+
+    def test_sensitive_vendor_prefixed_key_is_not_blocked(self):
+        """回归保证：vendor 前缀密钥（旧黑名单 startswith 漏掉的那类）在
+        allowlist 命中时会被暴露——不再有虚假的「第二层防御」。用户需自行
+        把关 expose_env 内容。"""
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-x", "STRIPE_KEY": "sk-y"}, clear=True):
+            ctx = ExecutionContext(expose_env=["OPENAI_API_KEY", "STRIPE_KEY"])
+            with self.assertLogs("plaita.core.context", level="WARNING"):
+                ctx.clean()
+            env = ctx.get_state("$ENV")
+            self.assertEqual(env, {"OPENAI_API_KEY": "sk-x", "STRIPE_KEY": "sk-y"})
 
     def test_custom_express_prefix(self):
         ctx = ExecutionContext(express_prefix="#", expose_env=["HOME"])
@@ -207,6 +218,74 @@ class TestExecutionContextEnvFiltering(unittest.TestCase):
             ctx.clean()
             env = ctx.get_state("#ENV")
             self.assertEqual(env, {"HOME": "/h"})
+
+
+class TestExecutionContextCancelPropagation(unittest.TestCase):
+    """cancel_event 进程内传播：父 set → 子能观测到（thread 模式）。
+    跨进程不传播（pickle 剔除），见 parallel_executor 的协议声明。"""
+
+    def test_child_shares_parent_cancel_event(self):
+        parent = ExecutionContext()
+        child = ExecutionContext(parent=parent)
+        self.assertIs(child.cancel_event, parent.cancel_event)
+        parent.cancel_event.set()
+        self.assertTrue(child.cancel_event.is_set())
+
+    def test_child_method_shares_cancel_event(self):
+        parent = ExecutionContext()
+        child = parent.child()
+        self.assertIs(child.cancel_event, parent.cancel_event)
+        parent.cancel_event.set()
+        self.assertTrue(child.cancel_event.is_set())
+
+    def test_root_clean_creates_fresh_event(self):
+        ctx = ExecutionContext()
+        old = ctx.cancel_event
+        ctx.clean()
+        self.assertIsNot(ctx.cancel_event, old)
+        self.assertFalse(ctx.cancel_event.is_set())
+
+    def test_child_clean_resyncs_to_parent_event(self):
+        """子 clean() 后仍指向父当前 Event，不脱离取消链。"""
+        parent = ExecutionContext()
+        child = ExecutionContext(parent=parent)
+        parent.clean()  # 父换新 Event
+        child.clean()   # 子重新同步到父的新 Event
+        self.assertIs(child.cancel_event, parent.cancel_event)
+        parent.cancel_event.set()
+        self.assertTrue(child.cancel_event.is_set())
+
+
+class TestGetAttrRootFix(unittest.TestCase):
+    """_get_attr 根因修复：mapping 对象（含 live CheckpointState）走 ``.get``，
+    而非 ``getattr``——``$INPUT`` 是 storage key 不是 Python 属性。"""
+
+    def test_dict_uses_get(self):
+        self.assertEqual(_get_attr({"a": 1}, "a"), 1)
+        self.assertIsNone(_get_attr({"a": 1}, "b"))
+
+    def test_object_with_dict_falls_back_to_getattr(self):
+        class Obj:
+            def __init__(self):
+                self.field = "v"
+        self.assertEqual(_get_attr(Obj(), "field"), "v")
+        self.assertIsNone(_get_attr(Obj(), "missing"))
+
+    def test_live_checkpoint_state_resolves_storage_key(self):
+        cs = CheckpointState()
+        cs["$INPUT"] = {"name": "alice"}
+        # 旧行为：getattr(cs, "$INPUT") → None。修复后：cs.get("$INPUT") → 值。
+        self.assertEqual(_get_attr(cs, "$INPUT"), {"name": "alice"})
+
+    def test_parent_input_walked_through_live_checkpoint_state(self):
+        """$PARENT.$INPUT.name 在 $PARENT 指向 live CheckpointState 时也能解析
+        （不再依赖 setup_flow 把 $PARENT 拍成 plain dict）。"""
+        parent = CheckpointState()
+        parent["$INPUT"] = {"name": "alice"}
+        child = CheckpointState()
+        child["$PARENT"] = parent  # 故意塞 live 对象，模拟「不靠快照」
+        ev = ExpressionEvaluator()
+        self.assertEqual(ev.evaluate("$PARENT.$INPUT.name", child), "alice")
 
 
 if __name__ == "__main__":
