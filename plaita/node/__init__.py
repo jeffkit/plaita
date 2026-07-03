@@ -107,7 +107,13 @@ class NodeRegistry:
             raise RuntimeError(f"not specific node type: {node_dict}")
         node_cls = self._nodes.get(node_type)
         if not node_cls:
-            raise RuntimeError(f"unRecognized node type: {node_type}")
+            hint = ""
+            if node_type == "code":
+                hint = (
+                    " CodeNode was moved out of the default registry in 0.4.0; "
+                    "call register_code_node() at startup to opt in."
+                )
+            raise RuntimeError(f"unRecognized node type: {node_type}.{hint}")
         content = node_dict.copy()
         del content["type"]
         return node_cls.model_validate(content)

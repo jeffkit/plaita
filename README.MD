@@ -97,7 +97,7 @@ for step in flow.debug(input_key="value"):
 
 ### Distributed — 断点续执
 
-**无需 Redis，纯内存版即可体验：**
+**无需 Redis，纯内存版即可体验（仅用于本地调试与单元测试；生产部署请改用 `RedisEventBus` + `RedisStorage`，`InMemoryEventBus` 进程重启即丢失所有挂起状态）：**
 
 ```python
 from plaita import Flow, FlowExecution
@@ -130,7 +130,7 @@ plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`，其余能
 |-------|---------|---------|
 | `redis` | `pip install plaita[redis]` | Redis 存储 / Redis EventBus |
 | `server` | `pip install plaita[server]` | FastAPI 服务端、FlowWorker、扩展节点 |
-| `code` | `pip install plaita[code]` | `CodeNode` JavaScript 执行（PyExecJS） |
+| `code` | `pip install plaita[code]` | `CodeNode`——默认 RestrictedPython 沙箱（Python），可选 subprocess / docker / unsafe；JS 后端仍走 PyExecJS（无沙箱，慎用） |
 | `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp） |
 | `yaml` | `pip install plaita[yaml]` | YAML 格式流程定义 |
 | `all` | `pip install plaita[all]` | 上述全部 |
@@ -153,9 +153,9 @@ plaita 提供三种主要形态定义流程，最终均编译为同一执行模�
 
 ## 内置节点
 
-17 种内置节点覆盖常见控制流与数据处理：
+16 种内置节点覆盖常见控制流与数据处理（`code` 节点 0.4.0 起移出默认注册表，需 `register_code_node()` 显式 opt-in）：
 
-`start` · `end` · `assignment` · `switch` · `if` · `case` · `loop` · `map` · `filter` · `find` · `reduce` · `child` · `reference` · `parallel` · `code` · `http` · `event`
+`start` · `end` · `assignment` · `switch` · `if` · `case` · `loop` · `map` · `filter` · `find` · `reduce` · `child` · `reference` · `parallel` · `http` · `event`
 
 扩展节点（通过 `server` extra 或 entry_points）：`delay` · `redis_queue` · `kafka_queue` · `http_callback` · `approval`
 

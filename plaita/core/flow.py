@@ -218,6 +218,9 @@ class Flow(BaseModel):
             return None
         logger.debug("current node %s has branches: %s", current.id, current.branches)
         for b in current.branches:
+            # ``b.next or b.name``: Switch/Logic 类节点允许 branch 不显式声明
+            # ``next``——此时 branch.name 自身就是目标节点 id（如 Logic 节点）。
+            # 显式声明的优先用 ``next``。这是 Switch 的设计语义而非 bug，保留。
             target = b.next or b.name
             if target == branch:
                 return target

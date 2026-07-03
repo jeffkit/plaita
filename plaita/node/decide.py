@@ -68,6 +68,14 @@ class ConditionGroup(BaseModel):
 
 
 class Branch(BaseModel):
+    """分支定义。
+
+    ``next`` 是显式目标节点 id。``next`` 留空时，Switch/Logic 类节点会把
+    ``name`` 当作目标节点 id 用——这是 Switch 的设计语义（如 Logic 节点）。
+    其他节点（Bool/SwitchLegacy）由 validator 自动注入 ``next``。改 ``name``
+    字段时务必同步改 ``next``，否则可能跳到不存在的节点。
+    """
+
     name: Optional[str] = None
     condition: Optional[Union[Condition, ConditionGroup]] = None
     priority: Optional[int] = 0
