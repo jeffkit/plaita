@@ -11,9 +11,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING
 
+from plaita.core._error_normalization import (
+    emit_flow_end_on_close as _emit_flow_end_on_close,
+    finish_normal as _finish_normal,
+    raise_distributed_error as _raise_distributed_error,
+)
 from plaita.core.callback import (
     BaseCallbackManager,
     CallbackManager,
@@ -22,8 +28,6 @@ from plaita.core.callback import (
 )
 from plaita.core.context import ExecutionContext
 from plaita.core.errors import (
-    FlowErrorException,
-    FlowExecutionException,
     FlowStartMissingError,
     FlowTimeoutError,
     ResumeError,
@@ -35,6 +39,49 @@ if TYPE_CHECKING:
     from plaita.event.core import EventBus
 
 logger = logging.getLogger("plaita.core.executor")
+
+
+@dataclass
+class RunOptions:
+    """Per-run execution knobs, owned by the Driver (``FlowExecution``).
+
+    Bundling ``mode`` / ``timeout`` into a dataclass makes "these are call-time
+    options, not component lifecycle state" explicit. Strategies still receive
+    ``timeout_ms`` as a loose param (their protocol is fixed by SC-010 tests);
+    this object is Driver-internal plus the ``execution.options`` facade for
+    node plugins that read ``execution.mode``.
+    """
+
+    mode: Optional[str] = None
+    timeout: Optional[int] = None
+
+
+class _StateView:
+    """Typed, ``None``-normalized read view over ``ExecutionContext`` state.
+
+    ``execution.state.flow_id`` returns ``None`` for an unset key, vs the raw
+    ``CheckpointState`` field which holds the ``_UNSET`` sentinel. Replaces the
+    historical ``execution.flow_id`` / ``execution.last_node_id`` /
+    ``execution.last_branch`` facade pass-throughs so the Driver no longer
+    re-exports typed state under bare attribute names.
+    """
+
+    __slots__ = ("_ctx",)
+
+    def __init__(self, ctx: ExecutionContext) -> None:
+        self._ctx = ctx
+
+    @property
+    def flow_id(self) -> Optional[str]:
+        return self._ctx.get_state(f"{self._ctx.express_prefix}FLOW_ID")
+
+    @property
+    def last_node_id(self) -> Optional[str]:
+        return self._ctx.get_state(f"{self._ctx.express_prefix}LAST_NODE")
+
+    @property
+    def last_branch(self) -> Optional[str]:
+        return self._ctx.get_state(f"{self._ctx.express_prefix}BRANCH")
 
 
 class ExecutionMode(Enum):
@@ -254,7 +301,7 @@ class DistributedStrategy:
 # 桥接逻辑下沉到 plaita.core.async_utils, 避免 core 反向依赖 event 层。
 
 from plaita.core.async_utils import (  # noqa: E402
-    async_gen_to_sync as _async_gen_to_sync,
+    drive_strategy as _drive_strategy,
     run_async_from_sync as _run_async_sync,
 )
 
@@ -283,8 +330,7 @@ class FlowExecution:
         callback_manager: Optional[BaseCallbackManager] = None,
         event_bus: Optional[EventBus] = None,
     ):
-        self.mode = mode
-        self.timeout = None
+        self.options = RunOptions(mode=mode, timeout=None)
         self.parent = parent
         self.verbose = verbose
         self._ctx = ExecutionContext(parent=parent._ctx if parent else None, event_bus=event_bus)
@@ -384,31 +430,35 @@ class FlowExecution:
     def express_environment_variable(self, value: str) -> None:
         self._ctx.express_environment_variable = value
 
-    # -- typed system-state delegates (see ExecutionContext for rationale) --
+    # -- typed system-state access: bare attributes removed, use .state --
 
     @property
-    def last_node_id(self) -> Optional[str]:
-        return self._ctx.last_node_id
+    def state(self) -> _StateView:
+        """Typed, ``None``-normalized view over context state.
 
-    @last_node_id.setter
-    def last_node_id(self, value: Optional[str]) -> None:
-        self._ctx.last_node_id = value
+        ``execution.state.flow_id`` / ``.last_node_id`` / ``.last_branch``.
+        Replaces the former ``execution.flow_id`` etc. bare-attribute
+        pass-throughs (break change — see MIGRATION.md).
+        """
+        return _StateView(self._ctx)
 
-    @property
-    def last_branch(self) -> Optional[str]:
-        return self._ctx.last_branch
-
-    @last_branch.setter
-    def last_branch(self, value: Optional[str]) -> None:
-        self._ctx.last_branch = value
+    # -- per-run options (RunOptions facade; keeps execution.mode/.timeout API) --
 
     @property
-    def flow_id(self) -> Optional[str]:
-        return self._ctx.flow_id
+    def mode(self) -> Optional[str]:
+        return self.options.mode
 
-    @flow_id.setter
-    def flow_id(self, value: Optional[str]) -> None:
-        self._ctx.flow_id = value
+    @mode.setter
+    def mode(self, value: Optional[str]) -> None:
+        self.options.mode = value
+
+    @property
+    def timeout(self) -> Optional[int]:
+        return self.options.timeout
+
+    @timeout.setter
+    def timeout(self, value: Optional[int]) -> None:
+        self.options.timeout = value
 
     # -- state helpers (delegate to ExecutionContext) --
 
@@ -517,57 +567,24 @@ class FlowExecution:
         immediately with the unconsumed generator as ``result``, which meant
         the lifecycle end callback ran before any node executed.
         """
-        if lazy:
-            return self._lazy_sync_generator(flow, args, kwargs)
-        return _run_async_sync(self._finish(self._prepare_strategy(flow, False, args, kwargs), flow))
-
-    def _emit_flow_end_on_close(self, flow, exception):
-        """Generator finally 共享逻辑: 抛错时归一化为 -500 + on_flow_end, 否则发
-        ``result=None`` 的 on_flow_end。``FlowExecutionException`` 子类内部已经
-        在抛点附近发过 on_flow_end, 这里不重复发。
-
-        抽出来是因为 ``_lazy_sync_generator`` 和 ``_lazy_async_generator`` 的
-        finally 字段曾 100% 复制粘贴, 任何 on_flow_end 行为修改都要改两处。
-        """
-        if exception is not None and not isinstance(exception, FlowExecutionException):
-            error = {"code": -500, "message": str(exception)}
-            self.callback_manager.on_flow_end(flow, None, error, exception=exception)
-        else:
-            self.callback_manager.on_flow_end(flow, result=None)
-
-    def _lazy_sync_generator(self, flow, args, kwargs):
-        syncgen = _async_gen_to_sync(self._prepare_strategy(flow, True, args, kwargs))
-        exception = None
-        try:
-            while True:
-                try:
-                    yield next(syncgen)
-                except StopIteration:
-                    break
-        except Exception as e:
-            exception = e
-            raise
-        finally:
-            syncgen.close()
-            self._emit_flow_end_on_close(flow, exception)
+        return _drive_strategy(
+            self._prepare_strategy(flow, lazy, args, kwargs),
+            lazy=lazy, sync=True,
+            finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+            on_lazy_finally=lambda exc: _emit_flow_end_on_close(flow, exc, self.callback_manager),
+        )
 
     async def arun_compatible(self, flow, lazy, *args, **kwargs):
         """Async execution — canonical path."""
+        driven = _drive_strategy(
+            self._prepare_strategy(flow, lazy, args, kwargs),
+            lazy=lazy, sync=False,
+            finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+            on_lazy_finally=lambda exc: _emit_flow_end_on_close(flow, exc, self.callback_manager),
+        )
         if lazy:
-            return self._lazy_async_generator(flow, args, kwargs)
-        return await self._finish(self._prepare_strategy(flow, False, args, kwargs), flow)
-
-    async def _lazy_async_generator(self, flow, args, kwargs):
-        agen = self._prepare_strategy(flow, True, args, kwargs)
-        exception = None
-        try:
-            async for item in agen:
-                yield item
-        except Exception as e:
-            exception = e
-            raise
-        finally:
-            self._emit_flow_end_on_close(flow, exception)
+            return driven
+        return await driven
 
     def _prepare_strategy(self, flow, lazy, args, kwargs):
         """Sync orchestration: clean, flow_start, setup_flow. Returns the
@@ -605,20 +622,7 @@ class FlowExecution:
             return a_ms
         return min(a_ms, b_ms)
 
-    async def _finish(self, coro, flow):
-        try:
-            result = await coro
-        except FlowExecutionException:
-            raise
-        except Exception as e:
-            error = {"code": -500, "message": str(e)}
-            self.callback_manager.on_flow_end(flow, None, error, exception=e)
-            logger.error("flow error", exc_info=True)
-            raise FlowErrorException(str(e)) from e
-        self.callback_manager.on_flow_end(flow, result=result)
-        return result
-
-    # -- distributed mode (sync, preserves legacy -500 error semantics) --
+    # -- distributed mode (sync; flat -500 error contract — see _error_normalization) --
 
     def run_distributed(
         self,
@@ -642,14 +646,11 @@ class FlowExecution:
         )
         # 历史上 run_distributed 把任何异常（含具体的 FlowExecutionException 子类）
         # 归一化为 FLOW_ERROR / -500 作为分布式对外契约；此处保留该契约，
-        # 具体子类仅用于内部抛点与 normal 模式（_finish 让其透传）。
+        # 具体子类仅用于内部抛点与 normal 模式（_finish_normal 让其透传）。
         try:
             return _run_async_sync(coro)
         except Exception as e:
-            error = {"code": -500, "message": str(e)}
-            self.callback_manager.on_flow_end(flow, None, error, exception=e)
-            logger.error("flow error", exc_info=True)
-            raise FlowErrorException(str(e)) from e
+            _raise_distributed_error(e, flow, self.callback_manager)
 
     def _run_distributed(self, flow, params=None, timeout=None, context=None,
                          resume_type="continue", resume_data=None, **options):

@@ -65,7 +65,7 @@ class ApprovalNode(BaseExtendedNode):
             "node_id": self.id,
             "approval_id": approval_id,
             "execution_id": execution.execution_id,
-            "flow_id": execution.flow_id,
+            "flow_id": execution.state.flow_id,
             "event_type": self.event_type,
             "event_filter": self.event_filter,
             "approval_config": resolved_config["approval"],

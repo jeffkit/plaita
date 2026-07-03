@@ -49,7 +49,7 @@ class DelayNode(BaseExtendedNode):
             "trigger_timestamp": trigger_timestamp,
             "node_id": self.id,
             "execution_id": execution.execution_id,
-            "flow_id": execution.flow_id,
+            "flow_id": execution.state.flow_id,
             "event_type": self.event_type,
             "event_filter": self.event_filter,
             "retry_config": self.get_default_retry_config()

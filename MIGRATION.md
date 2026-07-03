@@ -125,6 +125,29 @@ execution.context.get("$NODE", {})
 - `to_dict()` / `from_dict()` 的存储格式**逐键兼容**，Redis/SQL 里旧的 checkpoint 无需迁移即可加载（round-trip property test 钉死）。
 - 把 `execution.context` 当 dict 传给第三方库（`json.dumps` / `dict(...)` / `deepcopy`）仍可用（dict-like 协议）；但需要"纯 dict"的场景请显式 `dict(execution.context)` 或 `execution.to_dict()`。
 
+### 7. `execution.flow_id` / `last_node_id` / `last_branch` → `execution.state.xxx`
+
+**变更前**：`FlowExecution` facade 以裸属性透传 typed 系统状态——`execution.flow_id`、`execution.last_node_id`、`execution.last_branch`（13 个 `@property` 透传的一部分）。
+**变更后**：裸属性删除，统一走 `execution.state` 视图（`plaita.core.executor._StateView`，`None` 归一化）：
+
+```python
+# 变更前
+flow_id = execution.flow_id or "unknown"
+upstream = execution.last_node_id
+
+# 变更后
+flow_id = execution.state.flow_id or "unknown"
+upstream = execution.state.last_node_id
+branch = execution.state.last_branch
+```
+
+**迁移**：
+
+- `plaita/server/nodes/{redis_queue,kafka_queue,http_callback,delay,approval}_node.py` 与 `plaita/node/assignment.py` 已一并改到新 API；第三方节点插件读这几处需同步改。
+- `execution.context["$FLOW_ID"]` / `execution.get_state("$FLOW_ID")` 字典式访问**不变**，仍可用。
+- `execution.mode` / `execution.timeout` 不变（内部改存 `RunOptions`，facade property 保持兼容）。
+- `ExecutionContext`（内部对象）的 `last_node_id` / `last_branch` / `flow_id` typed property 保留——它们是 `execution.state` 视图的底层实现，runner / strategy 仍用。
+
 ### 附：`ErrorStrategy` 字段类型 str → enum
 
 **变更前**：`ErrorHandler.strategy` 字段类型 `Optional[str]`，比较时用 `_strategy_eq(value, member)` 容忍字符串/enum 混用。

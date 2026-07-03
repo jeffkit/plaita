@@ -136,13 +136,19 @@ parent: Optional["ExecutionContext"] = Field(default=None, exclude=True)
 
 ---
 
-### 任务 #2 — FlowExecution 真拆 Driver / State / Hooks
+### 任务 #2 — FlowExecution 真拆 Driver / State / Hooks ✅
 
 **优先级**：P2（架构清晰度问题，但当前 750 行能跑，不阻塞功能）
 
-**为什么没做完**：
+**状态**：已完成（见 commit `refactor(executor): FlowExecution Driver/State/Hooks 拆分`，分支 `feat/checkpoint-state-basemodel`）。
 
-上一轮我只抽了 `_emit_flow_end_on_close` 共享 helper 消除 generator finally 复制。`executor.py` 仍是 750 行，`FlowExecution` 仍是 God Object：13 个 `@property` 透传 + `_lazy_sync_generator`/`_lazy_async_generator` 两套生成器 + `run_compatible`/`arun_compatible` + `_finish`/`run_distributed` 两套归一化（**故意不同**，注释写了）。
+- **2.1 sync/async 桥接下沉**：`plaita.core.async_utils.drive_strategy` 统一 sync/async × lazy/eager 四组合；`run_compatible` / `arun_compatible` 退化为传 `_prepare_strategy` 产物 + 两个回调。`_lazy_sync_generator` / `_lazy_async_generator` 删除，逻辑挪到 `async_utils._drive_lazy_sync/_drive_lazy_async`。SC-004（`run_compatible` 不含 `while`、委托 `_prepare_strategy`）仍 green。
+- **2.2 错误归一化抽模块**：新建 `plaita.core._error_normalization`，`finish_normal`（normal 透传 `FlowExecutionException`）/ `raise_distributed_error`（distributed 全拍平 -500）/ `emit_flow_end_on_close`（lazy finally）三条**故意不同**的策略放一处对照。`_finish` / `_emit_flow_end_on_close` 方法删除。normal vs distributed 契约差异未合并。
+- **2.3 RunOptions + 删 typed property 透传 + `execution.state.xxx`**：`RunOptions(mode, timeout)` dataclass 持有 per-run 配置，`execution.mode`/`execution.timeout` 退化为 facade property（不破坏 concurrent/child/flow_worker 的 `execution.mode` 访问）。`_StateView` 提供 `execution.state.flow_id`/`last_node_id`/`last_branch`（`None` 归一化）。删除 facade 上 3 个 typed property 裸透传；6 个插件调用点（`assignment.py` + 5 个 server node）已改到新 API。MIGRATION 加第 7 条 break change。Strategy Protocol 签名未动（SC-010 钉死）。
+
+**效果**：`FlowExecution` 类从 ~480 LOC 降到 358 LOC；`executor.py` 文件 757 行（策略 + facade + 模块级 helper 分层清晰）。三策略均 < 200 LOC（SC-003 green）。
+
+**预计耗时**：1.5 天。**风险**：中（节点 plugin API 变更）。**验证**：单元 700 passed / 集成+e2e 269 passed，0 回归。
 
 拆分目标：
 

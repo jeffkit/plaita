@@ -51,6 +51,63 @@ def run_async_from_sync(coro):
     return asyncio.run(coro)
 
 
+def drive_strategy(target, *, lazy, sync, finish_coro, on_lazy_finally):
+    """Unified sync/async × lazy/eager bridge for ``FlowExecution``.
+
+    ``target`` is what ``_prepare_strategy`` produced: a coroutine (eager) or
+    an async generator (lazy). The return type is polymorphic by design:
+
+    - **sync + eager**: the driven result (via :func:`run_async_from_sync`).
+    - **sync + lazy** : a sync generator yielding per-node outputs.
+    - **async + eager**: a coroutine to be awaited by the caller.
+    - **async + lazy** : an async generator yielding per-node outputs.
+
+    ``finish_coro(coro)`` wraps the eager coroutine with ``on_flow_end`` + error
+    normalization (see ``plaita.core._error_normalization.finish_normal``).
+    ``on_lazy_finally(exception)`` runs in the lazy generator's ``finally``
+    (see ``emit_flow_end_on_close``). Keeping the bridge here means
+    ``run_compatible`` / ``arun_compatible`` no longer duplicate the sync/async
+    driving mechanics.
+    """
+    if lazy:
+        if sync:
+            return _drive_lazy_sync(target, on_lazy_finally)
+        return _drive_lazy_async(target, on_lazy_finally)
+    finished = finish_coro(target)
+    if sync:
+        return run_async_from_sync(finished)
+    return finished
+
+
+def _drive_lazy_sync(agen, on_finally):
+    syncgen = async_gen_to_sync(agen)
+    exception = None
+    try:
+        while True:
+            try:
+                yield next(syncgen)
+            except StopIteration:
+                break
+    except Exception as e:
+        exception = e
+        raise
+    finally:
+        syncgen.close()
+        on_finally(exception)
+
+
+async def _drive_lazy_async(agen, on_finally):
+    exception = None
+    try:
+        async for item in agen:
+            yield item
+    except Exception as e:
+        exception = e
+        raise
+    finally:
+        on_finally(exception)
+
+
 def async_gen_to_sync(agen):
     """Drive an async generator from sync code, yielding each item.
 
