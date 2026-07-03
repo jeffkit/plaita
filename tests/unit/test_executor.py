@@ -170,8 +170,14 @@ class TestFlowExecutionFacade(unittest.TestCase):
     def test_context_property_backward_compat(self):
         fe = FlowExecution()
         fe.clean()
-        self.assertIsInstance(fe.context, dict)
+        # ``execution.context`` is now a ``CheckpointState`` (typed BaseModel)
+        # that exposes a dict-like view over the prefixed storage keys. It is
+        # NOT a ``dict`` subclass anymore — see MIGRATION.md / HANDOFF task #1.
+        from plaita.core.state import CheckpointState
+        self.assertIsInstance(fe.context, CheckpointState)
+        # ...but it still behaves like the old dict for every call site:
         self.assertIn("$ENV", fe.context)
+        self.assertEqual(fe.context, dict(fe.context))
 
     def test_evaluate_proxy(self):
         fe = FlowExecution()

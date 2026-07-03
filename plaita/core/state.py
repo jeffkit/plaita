@@ -1,52 +1,57 @@
-"""plaita.core.state — Distributed checkpoint schema.
+"""plaita.core.state — Distributed checkpoint schema + typed state model.
 
-Central registry of the magic-string keys ``ExecutionContext._context`` uses
-for system state. Historical callers built these inline as
-``f"{pfx}LAST_NODE"`` etc, scattering the key schema across runner.py /
-executor.py / assignment.py / event/core.py — making any rename a multi-file
-shotgun surgery and hiding how much actually lives in a checkpoint.
+Central registry of the magic-string keys ``ExecutionContext._context`` used
+for system state, plus ``CheckpointState`` — a Pydantic ``BaseModel`` that IS
+the live store (replacing the loose ``Dict[str, Any]``) while exposing a
+dict-like view over the **prefixed** storage keys so the expression engine
+and node plugins consume it without knowing it is a model.
 
-This module is the **single source of truth** for the checkpoint schema. Any
-new system-state key MUST be added here (and to ``CHECKPOINT_KEYS``) before it
-is written, otherwise it is not officially part of the contract and may be
-dropped without a migration.
+Why a BaseModel?
+----------------
+Historically ``ExecutionContext._context`` was a ``Dict[str, Any]`` with keys
+like ``f"{pfx}LAST_NODE"`` / ``f"{pfx}BRANCH"`` built inline across
+runner.py / executor.py / assignment.py / event/core.py. Renaming any key was
+multi-file shotgun surgery, and the schema was implicit. ``CheckpointState``
+makes the schema explicit and centralises every magic string here.
 
-Why not a full Pydantic ``ExecutionState(BaseModel)``?
-------------------------------------------------------
-A real BaseModel rewrite would also have to:
+Binary-compatibility with existing checkpoints
+-----------------------------------------------
+Redis/SQL persisted checkpoints are JSON of the old ``dict(self._context)``.
+``to_checkpoint_dict()`` / ``from_checkpoint_dict()`` round-trip the **exact**
+key set (presence-tracked via ``_present``), so a checkpoint written by the
+old dict-based code loads and re-saves losslessly. See
+``tests/unit/test_state.py`` for the round-trip property test.
 
-1. Stay byte-for-byte compatible with the existing distributed checkpoint
-   format (Redis/SQL persisted checkpoints must still load).
-2. Tolerate unknown keys written by node plugins (``set_state("my_key", ...)``
-   is a supported escape hatch for node-local state).
-3. Round-trip cleanly through ``json.dumps`` for ``RedisStorage`` and through
-   ``SQLAlchemy`` JSON columns.
-
-Until that migration is done (a dedicated PR), this module at least makes the
-**existing schema explicit** so future drift is caught at code review.
+Note: the storage layer already owns a class named ``ExecutionState``
+(``plaita.storage.base.ExecutionState`` — the persisted envelope holding
+``execution_id`` / ``flow_id`` / ``context`` / ``status`` ...). The core
+checkpoint model is therefore named ``CheckpointState`` to avoid the collision.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
-def _key(prefix: str, name: str) -> str:
-    return f"{prefix}{name}"
+# Sentinel for "field has not been set / key is absent". Distinct from ``None``
+# because a checkpoint value may legitimately be ``None`` (e.g. ``$INPUT: null``)
+# and we must not treat that as "missing".
+_UNSET = object()
 
 
 class CheckpointSchema:
-    """Schema definition for the distributed-checkpoint portion of ``_context``.
+    """Static description of the checkpoint key namespace.
 
     A checkpoint key is one of:
 
-    - A *system key*: pinned here in ``SYSTEM_KEY_NAMES``. These are written
-      and read by core/runner code and survive ``to_dict`` / ``from_dict``.
+    - A *system key*: pinned here in ``SYSTEM_KEY_NAMES``. Written and read by
+      core/runner code, survives ``to_dict`` / ``from_dict``.
     - An *expression key*: ``$INPUT`` / ``$NODE`` / ``$GLOBAL`` / ``$PARENT``
       / ``$ENV`` — prefix plus one of the configurable expression-namespace
-      names. Names themselves live on ``ExecutionContext`` as
-      ``express_input_name`` etc, so we only register the *static* suffixes
-      here.
+      names. The names themselves live on ``ExecutionContext``
+      (``express_input_name`` etc); only the static suffixes are registered here.
     - ``EXPRESS_PREFIX`` — the literal unprefixed key recording the prefix in
       use (so a checkpoint can be restored even if the prefix was customised).
     - *Node-local keys*: anything else. ``set_state("anything", ...)`` is
@@ -54,6 +59,7 @@ class CheckpointSchema:
     """
 
     # System keys (prefixed by ``express_prefix``, default ``$``).
+    # The suffix is fixed (not configurable): these are core-internal state.
     SYSTEM_KEY_NAMES = (
         "LAST_NODE",     # most recently executed node id
         "BRANCH",        # branch taken by the most recent branching node
@@ -93,6 +99,10 @@ class CheckpointSchema:
         )
 
 
+def _key(prefix: str, name: str) -> str:
+    return f"{prefix}{name}"
+
+
 def validate_checkpoint(data: Dict[str, Any], prefix: str = "$") -> List[str]:
     """Inspect a checkpoint dict and return a list of drift warnings.
 
@@ -116,3 +126,275 @@ def validate_checkpoint(data: Dict[str, Any], prefix: str = "$") -> List[str]:
                 f"register it in CheckpointSchema.SYSTEM_KEY_NAMES."
             )
     return warnings
+
+
+# ---------------------------------------------------------------------------
+# CheckpointState — the live, typed checkpoint model
+# ---------------------------------------------------------------------------
+
+# Field name <-> storage key mapping is built per-instance because the prefix
+# and the expression-namespace names are configurable. The static suffixes
+# come from CheckpointSchema; the instance supplies the prefix + names.
+# Order matters for stable ``to_checkpoint_dict`` output (matches the order
+# keys were historically written: system keys, then expression keys, then
+# EXPRESS_PREFIX). Extras (node-local keys) preserve their own insertion order.
+
+
+class CheckpointState(BaseModel):
+    """Typed model backing ``ExecutionContext``'s distributed-checkpoint state.
+
+    The model holds the typed system/expression fields plus arbitrary
+    node-local extras (``extra="allow"``). It exposes a **dict-like interface
+    over the prefixed storage keys** (``$LAST_NODE`` etc) so callers that
+    historically received ``Dict[str, Any]`` — the expression engine
+    (``context[root_key]``), ``Condition.match``, ``deepcopy``, node plugins
+    (``execution.context.get(...)``) — work unchanged.
+
+    Presence of each schema key is tracked in ``_present`` so that
+    ``to_checkpoint_dict()`` reproduces the exact key set of the source
+    checkpoint (a schema field that was never written is not emitted). This
+    is what makes round-trip with old dict-based checkpoints lossless.
+    """
+
+    model_config = ConfigDict(
+        extra="allow",
+        arbitrary_types_allowed=True,
+        # Mutation happens via __setitem__/setattr throughout the run; do not
+        # re-validate on every assignment (also lets Any-typed fields hold
+        # arbitrary JSON-able values without coercion changing them).
+        validate_assignment=False,
+    )
+
+    # -- typed data fields (default _UNSET == "key absent") --
+    last_node_id: Any = _UNSET
+    last_branch: Any = _UNSET
+    flow_id: Any = _UNSET
+    execution_id: Any = _UNSET
+    input_value: Any = _UNSET
+    node_results: Any = _UNSET
+    global_context: Any = _UNSET
+    parent_context: Any = _UNSET
+    env: Any = _UNSET
+
+    # -- routing config (not serialised; used to map fields <-> storage keys) --
+    prefix: str = Field(default="$", exclude=True)
+    input_name: str = Field(default="INPUT", exclude=True)
+    parent_name: str = Field(default="PARENT", exclude=True)
+    node_name: str = Field(default="NODE", exclude=True)
+    global_name: str = Field(default="GLOBAL", exclude=True)
+    env_name: str = Field(default="ENV", exclude=True)
+
+    # -- presence tracker: which storage keys are currently "set" --
+    # Holds the *storage* key strings (e.g. ``$LAST_NODE``, ``EXPRESS_PREFIX``).
+    # Private attr (not a field): not serialised, not validated, mutated freely.
+    _present: set = PrivateAttr(default_factory=set)
+
+    # ------------------------------------------------------------------
+    # key <-> field routing
+    # ------------------------------------------------------------------
+
+    def _field_to_key(self) -> Dict[str, str]:
+        """Map field name -> storage key for the current prefix/names."""
+        p = self.prefix
+        return {
+            "last_node_id": _key(p, "LAST_NODE"),
+            "last_branch": _key(p, "BRANCH"),
+            "flow_id": _key(p, "FLOW_ID"),
+            "execution_id": _key(p, "EXECUTION_ID"),
+            "input_value": _key(p, self.input_name),
+            "node_results": _key(p, self.node_name),
+            "global_context": _key(p, self.global_name),
+            "parent_context": _key(p, self.parent_name),
+            "env": _key(p, self.env_name),
+        }
+
+    def _key_to_field(self) -> Dict[str, str]:
+        return {v: k for k, v in self._field_to_key().items()}
+
+    @property
+    def _extras(self) -> Dict[str, Any]:
+        return self.__pydantic_extra__ or {}
+
+    # ------------------------------------------------------------------
+    # dict-like protocol (over prefixed storage keys)
+    # ------------------------------------------------------------------
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "EXPRESS_PREFIX":
+            if "EXPRESS_PREFIX" in self._present:
+                return self.prefix
+            raise KeyError(key)
+        mapping = self._key_to_field()
+        if key in mapping:
+            if key in self._present:
+                return getattr(self, mapping[key])
+            raise KeyError(key)
+        extras = self._extras
+        if key in extras:
+            return extras[key]
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key == "EXPRESS_PREFIX":
+            # EXPRESS_PREFIX records the prefix string; routing prefix follows.
+            self.prefix = value
+            self._present.add("EXPRESS_PREFIX")
+            return
+        mapping = self._key_to_field()
+        if key in mapping:
+            object.__setattr__(self, mapping[key], value)
+            self._present.add(key)
+            return
+        if self.__pydantic_extra__ is None:
+            # pydantic lazily allocates the extras dict; force it so mutation
+            # sticks without going through model_validate.
+            self.__pydantic_extra__ = {}
+        self.__pydantic_extra__[key] = value
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, str):
+            return False
+        if key == "EXPRESS_PREFIX":
+            return key in self._present
+        return key in self._present or key in self._extras
+
+    def __iter__(self):
+        # _present already holds storage keys; extras hold their own keys.
+        for k in self._present:
+            yield k
+        for k in self._extras:
+            if k not in self._present:
+                yield k
+
+    def __len__(self) -> int:
+        return len(self._present) + len(self._extras)
+
+    def keys(self):
+        return list(self.__iter__())
+
+    def items(self):
+        return [(k, self[k]) for k in self]
+
+    def values(self):
+        return [self[k] for k in self]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, CheckpointState):
+            return self.to_checkpoint_dict() == other.to_checkpoint_dict()
+        if isinstance(other, dict):
+            return self.to_checkpoint_dict() == other
+        return NotImplemented
+
+    __hash__ = None  # explicit: CheckpointState is mutable, not hashable.
+
+    # ------------------------------------------------------------------
+    # serialisation
+    # ------------------------------------------------------------------
+
+    def to_checkpoint_dict(self) -> Dict[str, Any]:
+        """Return the plain ``Dict[str, Any]`` storage form.
+
+        Lossless inverse of ``from_checkpoint_dict``: only keys that have been
+        set are emitted, preserving the exact key set of the source checkpoint.
+        """
+        return {k: self[k] for k in self}
+
+    @classmethod
+    def from_checkpoint_dict(
+        cls,
+        data: Dict[str, Any],
+        *,
+        prefix: str = "$",
+        input_name: str = "INPUT",
+        parent_name: str = "PARENT",
+        node_name: str = "NODE",
+        global_name: str = "GLOBAL",
+        env_name: str = "ENV",
+    ) -> "CheckpointState":
+        """Build a ``CheckpointState`` from an old-style prefixed dict.
+
+        ``prefix`` / ``input_name`` / ... are fallbacks used when the dict does
+        not carry ``EXPRESS_PREFIX`` (e.g. a context that was never
+        ``setup_flow``-ed). When ``EXPRESS_PREFIX`` is present it wins and the
+        keys are interpreted under that prefix.
+        """
+        resolved_prefix = data.get("EXPRESS_PREFIX", prefix) if isinstance(data, dict) else prefix
+        obj = cls(
+            prefix=resolved_prefix,
+            input_name=input_name,
+            parent_name=parent_name,
+            node_name=node_name,
+            global_name=global_name,
+            env_name=env_name,
+        )
+        for key, value in (data or {}).items():
+            obj[key] = value
+        return obj
+
+    # ------------------------------------------------------------------
+    # state-mutation helpers (called by ExecutionContext; keep the flow
+    # runtime's state logic on the state model, not on the context facade)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def fresh(
+        cls,
+        *,
+        prefix: str = "$",
+        input_name: str = "INPUT",
+        parent_name: str = "PARENT",
+        node_name: str = "NODE",
+        global_name: str = "GLOBAL",
+        env_name: str = "ENV",
+        execution_id: str,
+        env: Dict[str, Any],
+    ) -> "CheckpointState":
+        """A clean state carrying only ``$EXECUTION_ID`` and ``$ENV``.
+
+        Equivalent to what ``ExecutionContext.clean()`` needs before any
+        ``setup_flow``: a fresh model with the run-scoped id and the exposed
+        environment snapshot. Everything else is absent.
+        """
+        obj = cls(
+            prefix=prefix, input_name=input_name, parent_name=parent_name,
+            node_name=node_name, global_name=global_name, env_name=env_name,
+        )
+        obj[f"{prefix}EXECUTION_ID"] = execution_id
+        obj[f"{prefix}{env_name}"] = env
+        return obj
+
+    def setup_flow(
+        self,
+        *,
+        input_value: Any,
+        parent_context: Dict[str, Any],
+        global_context: Dict[str, Any],
+        flow_id: str,
+        env: Dict[str, Any],
+    ) -> None:
+        """Populate the flow-level state keys (``$INPUT``/``$PARENT``/...).
+
+        ``parent_context`` is a plain-dict snapshot of the parent's context
+        (see ``ExecutionContext.setup_flow`` — a live ``CheckpointState`` would
+        break expression path walking via ``_get_attr``).
+        """
+        p = self.prefix
+        self[f"{p}{self.input_name}"] = input_value
+        self[f"{p}{self.parent_name}"] = parent_context
+        self[f"{p}{self.global_name}"] = global_context
+        self["EXPRESS_PREFIX"] = p
+        self[f"{p}FLOW_ID"] = flow_id
+        self[f"{p}{self.env_name}"] = env
+
+    def update_node_result(self, node_id: str, result: Any) -> None:
+        """Record a node's result under ``$NODE`` (creating the map if absent)."""
+        key = f"{self.prefix}{self.node_name}"
+        node_results = self.get(key, {})
+        node_results[node_id] = result
+        self[key] = node_results

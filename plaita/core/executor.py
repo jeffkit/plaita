@@ -113,7 +113,7 @@ class GeneratorStrategy:
                 flow, runner, callback_manager, current,
             )
             yield _create_lazy_output(
-                current, result, branch, context.context, execution_id=context.execution_id,
+                current, result, branch, context.to_dict(), execution_id=context.execution_id,
             )
             if reached_end:
                 break
@@ -124,7 +124,7 @@ class GeneratorStrategy:
             logger.debug("not reached_end: %s", next_node)
             pfx = context.express_prefix
             result = context.get_state(f"{pfx}{context.express_node_name}", {})
-            yield _create_end_output(None, result, context.context, execution_id=context.execution_id)
+            yield _create_end_output(None, result, context.to_dict(), execution_id=context.execution_id)
 
 
 class DistributedStrategy:
@@ -150,7 +150,7 @@ class DistributedStrategy:
 
         if not current_node:
             result = context.get_state(f"{pfx}{context.express_node_name}", {})
-            return _create_end_output(None, result, context.context, execution_id=context.execution_id)
+            return _create_end_output(None, result, context.to_dict(), execution_id=context.execution_id)
 
         return await self._execute_current_node(flow, context, runner, callback_manager, current_node)
 
@@ -188,17 +188,17 @@ class DistributedStrategy:
         result, branch = await runner.run_node(flow, current_node, callback_manager=callback_manager)
 
         if flow.is_end_node(current_node):
-            return _create_end_output(current_node, result, context.context, execution_id=context.execution_id)
+            return _create_end_output(current_node, result, context.to_dict(), execution_id=context.execution_id)
 
         if current_node.is_suspending:
             await _subscribe_event(current_node, flow, result, context)
             callback_manager.on_node_suspend(flow, current_node)
             callback_manager.on_flow_suspend(flow)
             return _create_lazy_output(
-                current_node, result, branch, context.context, is_suspend=True, execution_id=context.execution_id,
+                current_node, result, branch, context.to_dict(), is_suspend=True, execution_id=context.execution_id,
             )
 
-        return _create_lazy_output(current_node, result, branch, context.context, execution_id=context.execution_id)
+        return _create_lazy_output(current_node, result, branch, context.to_dict(), execution_id=context.execution_id)
 
     async def _handle_resume(self, flow, context, runner, callback_manager, resume_type, resume_data):
         # 统一在此 coerce, 覆盖 execute (已 coerce, 幂等) 与 _handle_resume_operation
@@ -245,7 +245,7 @@ class DistributedStrategy:
             raise resume_err from e
 
         context.update_node_result(current_node, result)
-        return _create_lazy_output(current_node, result, None, context.context, is_suspend=False, execution_id=context.execution_id)
+        return _create_lazy_output(current_node, result, None, context.to_dict(), is_suspend=False, execution_id=context.execution_id)
 
 
 # ---------------------------------------------------------------------------

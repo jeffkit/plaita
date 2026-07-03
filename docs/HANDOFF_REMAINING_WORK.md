@@ -35,9 +35,8 @@ pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integrati
 ### 0.3 已知非回归 fail（基线就 fail，不是我引入的）
 
 1. **`tests/e2e/test_success_criteria.py::TestSC003LargestClassUnder200LOC::test_execution_context_under_200_loc`**
-   - `ExecutionContext` 当前 263 LOC（限制 200）。基线 261 LOC。
-   - 这是项目自定的 SC-003 设计目标，e2e 默认不进基线命令。
-   - **修这条要么真拆 ExecutionState（见下面任务 #1），要么把 ExecutionContext 里的 typed property 抽到 mixin**。
+   - ~~`ExecutionContext` 当前 263 LOC（限制 200）。基线 261 LOC。~~
+   - **已修**（任务 #1）：`ExecutionContext` 状态逻辑挪进 `CheckpointState` 后降到 199 LOC，此测试已 green。
 
 2. **`tests/unit/test_loop.py::MapTestCase::test_map_max_concurrent`**
    - timing flake，文档自评（`ARCHITECTURE_REVIEW_2026-07.md`）已记录。
@@ -68,9 +67,11 @@ M  tests/integration/test_layering.py
 
 ## 1. 真正的大活：3 件
 
-### 任务 #1 — ExecutionState 完整 BaseModel 重写
+### 任务 #1 — ExecutionState 完整 BaseModel 重写 ✅
 
 **优先级**：P1（架构债最重，且修完顺带解决 SC-003 LOC fail）
+
+**状态**：已完成（见 commit `feat(state): CheckpointState BaseModel 重写`，分支 `feat/checkpoint-state-basemodel`）。核心层 model 命名 `CheckpointState`（`plaita.core.state`），避让 `plaita.storage.base.ExecutionState` 的名字冲突。`ExecutionContext._context` dict 已替换为 `CheckpointState(BaseModel)`，实现 dict-like 协议（prefixed key 视图）+ `_present` presence 跟踪，`to_checkpoint_dict`/`from_checkpoint_dict` 与旧 dict 格式逐键 round-trip（property test 钉死）。7 处 result 构造改用 `to_dict()` 快照。SC-003 LOC fail 顺带修好（ExecutionContext 306→199 LOC）。剩余的 task #2（删 13 个 property 透传、`execution.state.xxx` API）未做。
 
 **为什么没做完**：
 

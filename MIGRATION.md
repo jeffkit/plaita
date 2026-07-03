@@ -101,6 +101,30 @@ register_code_node()  # 默认注册到全局 registry
 2. 用 `@flow` / `FlowBuilder` 的：框架会自动注入，无需改动。
 3. 用可视化编排工具导出的：检查导出结果是否包含 Start 节点。
 
+### 6. `execution.context` 类型由 `dict` 改为 `CheckpointState`
+
+**变更前**：`ExecutionContext.context` / `FlowExecution.context` 返回 `Dict[str, Any]`（内部 `_context` dict 的活引用）。
+**变更后**：底层存储改为 `plaita.core.state.CheckpointState`（Pydantic `BaseModel`），`context` 返回该 model 实例。它实现完整 dict-like 协议（`__getitem__`/`__setitem__`/`__contains__`/`get`/`keys`/`items`/`__iter__`/`__eq__`），对 `$INPUT`/`$NODE` 等 prefixed key 的访问与旧 dict 完全一致；`__eq__` 与 plain dict 比较也保持兼容（`assertEqual(ctx.context, {...})` 仍通过）。
+
+```python
+# 变更前
+assert isinstance(execution.context, dict)
+
+# 变更后
+from plaita.core.state import CheckpointState
+assert isinstance(execution.context, CheckpointState)
+# dict-like 行为不变：
+execution.context["$INPUT"]
+"$LAST_NODE" in execution.context
+execution.context.get("$NODE", {})
+```
+
+**迁移**：
+
+- 直接 `isinstance(ctx, dict)` 的断言会失败——改用 `isinstance(ctx, CheckpointState)` 或只断言 dict-like 行为（`in` / `[]` / `.get`）。
+- `to_dict()` / `from_dict()` 的存储格式**逐键兼容**，Redis/SQL 里旧的 checkpoint 无需迁移即可加载（round-trip property test 钉死）。
+- 把 `execution.context` 当 dict 传给第三方库（`json.dumps` / `dict(...)` / `deepcopy`）仍可用（dict-like 协议）；但需要"纯 dict"的场景请显式 `dict(execution.context)` 或 `execution.to_dict()`。
+
 ### 附：`ErrorStrategy` 字段类型 str → enum
 
 **变更前**：`ErrorHandler.strategy` 字段类型 `Optional[str]`，比较时用 `_strategy_eq(value, member)` 容忍字符串/enum 混用。
