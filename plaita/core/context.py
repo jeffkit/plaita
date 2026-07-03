@@ -380,6 +380,12 @@ class ExecutionContext:
     # -- serialization for distributed execution --
 
     def to_dict(self) -> Dict[str, Any]:
+        # 序列化前扫一遍 schema 漂移: 任何"看起来是 system key 但不在 CheckpointSchema"
+        # 的字段都 warn。这是 ``ExecutionState(BaseModel)`` 完整建模路径上的中间步——
+        # 在 schema 真做完之前, 至少让新加 magic key 的人在 review 时被发现。
+        from plaita.core.state import validate_checkpoint
+        for warning in validate_checkpoint(self._context, self.express_prefix):
+            logger.warning(warning)
         return dict(self._context)
 
     @classmethod

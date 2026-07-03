@@ -521,6 +521,20 @@ class FlowExecution:
             return self._lazy_sync_generator(flow, args, kwargs)
         return _run_async_sync(self._finish(self._prepare_strategy(flow, False, args, kwargs), flow))
 
+    def _emit_flow_end_on_close(self, flow, exception):
+        """Generator finally 共享逻辑: 抛错时归一化为 -500 + on_flow_end, 否则发
+        ``result=None`` 的 on_flow_end。``FlowExecutionException`` 子类内部已经
+        在抛点附近发过 on_flow_end, 这里不重复发。
+
+        抽出来是因为 ``_lazy_sync_generator`` 和 ``_lazy_async_generator`` 的
+        finally 字段曾 100% 复制粘贴, 任何 on_flow_end 行为修改都要改两处。
+        """
+        if exception is not None and not isinstance(exception, FlowExecutionException):
+            error = {"code": -500, "message": str(exception)}
+            self.callback_manager.on_flow_end(flow, None, error, exception=exception)
+        else:
+            self.callback_manager.on_flow_end(flow, result=None)
+
     def _lazy_sync_generator(self, flow, args, kwargs):
         syncgen = _async_gen_to_sync(self._prepare_strategy(flow, True, args, kwargs))
         exception = None
@@ -535,11 +549,7 @@ class FlowExecution:
             raise
         finally:
             syncgen.close()
-            if exception is not None and not isinstance(exception, FlowExecutionException):
-                error = {"code": -500, "message": str(exception)}
-                self.callback_manager.on_flow_end(flow, None, error, exception=exception)
-            else:
-                self.callback_manager.on_flow_end(flow, result=None)
+            self._emit_flow_end_on_close(flow, exception)
 
     async def arun_compatible(self, flow, lazy, *args, **kwargs):
         """Async execution — canonical path."""
@@ -557,11 +567,7 @@ class FlowExecution:
             exception = e
             raise
         finally:
-            if exception is not None and not isinstance(exception, FlowExecutionException):
-                error = {"code": -500, "message": str(exception)}
-                self.callback_manager.on_flow_end(flow, None, error, exception=exception)
-            else:
-                self.callback_manager.on_flow_end(flow, result=None)
+            self._emit_flow_end_on_close(flow, exception)
 
     def _prepare_strategy(self, flow, lazy, args, kwargs):
         """Sync orchestration: clean, flow_start, setup_flow. Returns the
