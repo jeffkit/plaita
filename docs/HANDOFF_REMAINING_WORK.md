@@ -192,11 +192,35 @@ def drive_strategy(coro_or_agen, *, lazy: bool, sync: bool):
 
 ---
 
-### 任务 #3 — 三种执行模式的调度路径统一
+### 任务 #3 — 三种执行模式的调度路径统一 ✅
 
 **优先级**：P3（架构洁癖问题，bug 风险低但改起来烦）
 
-**为什么没动**：
+**状态**：已完成（见 `plaita/core/parallel_executor.py` + `plaita/node/concurrent.py` /
+`plaita/node/loop.py` 改造 + `tests/unit/test_parallel_executor.py`）。
+
+- **3.1 抽 `ParallelExecutor` 协议**：`plaita/core/parallel_executor.py` 定义
+  `ParallelExecutor` Protocol（`map` / `submit` / `wait` / `lock` /
+  `supports_cancel_propagation`）+ `ThreadParallelExecutor` /
+  `ProcessParallelExecutor` / `SequentialExecutor` 三个实现 + `make_executor` 工厂。
+  模块级单例池 `BackGroundThreadPool` / `BackGroundProcessPool` + atexit 钩子迁来
+  此处，`plaita/node/concurrent.py` re-export 兼容。
+- **3.2 Map/Parallel 走 ParallelExecutor**：`Map.concurrent=True` 不再
+  `with ThreadPoolExecutor()` 自起池，改用 `ThreadParallelExecutor`（复用单例池，
+  `max_concurrent` 用 `Semaphore` gate，而非新开池）；非并发路径用
+  `SequentialExecutor`，两条路径共用同一套 `executor.map` 控制流。`Parallel.pool_execute`
+  走 `make_executor(self.mode)`，fire-and-forget / join 两种语义用 `executor.submit` /
+  `wait` / `lock`。Filter/Find/Reduce 保持顺序语义（无 concurrent 模式，强制走
+  executor 会破坏 Find 的短路，得不偿失）。
+- **3.3 cancel/timeout 协议文档化**：`ProcessParallelExecutor.supports_cancel_propagation
+  = False` 把 cancel_event 跨进程丢失显式声明在协议上；`Parallel.process_execute`
+  在父进程 cancel_event 已 set 时直接放弃启动子进程。
+
+**验证**：单元 725 passed（含 20 个新 `test_parallel_executor.py`），集成 200 passed，
+0 回归。`plaita/core/parallel_executor.py` 变异测试 100%（39 变异点，初筛 27 killed
++ 12 假阳性 timeout，`recheck_mutants.sh` 复核 12/12 killed）。
+
+**为什么没动**（历史状态）：
 
 当前 `next_node` 决策有 3 个实现：
 
@@ -234,9 +258,16 @@ class ProcessParallelExecutor(ParallelExecutor): ...
 
 ## 2. 没做完但优先级低的小活
 
-### 任务 #4 — `examples/agent/` 补真示例或 README 删宣传
+### 任务 #4 — `examples/agent/` 补真示例或 README 删宣传 ✅
 
 **优先级**：P3
+
+**状态**：已完成（上一会话已补齐，本轮复核确认可跑）。`examples/agent/` 现有
+`flows/rag.json` + `flows/tool_use.json` + `flows/router.json` 三个端到端 flow，
+`demo.py` 的 `run_rag` / `run_tool_use` / `run_router` 三个案例，配套
+`nodes.py`（`LLMNode` / `ToolNode` / `RetrieverNode`）+ `tools.py` + `corpus.py` +
+`README.md`。`python -m examples.agent.demo` 零 API key 可跑，输出符合 README 预期。
+走的是选项 (a) 补真示例——plaita 卖点即 agent 编排，有示例才不自杀。
 
 README 表格里宣传 "AI Agent 多步工具编排" 是首要场景，但 `examples/agent/` 只有 `demo.py` (120 行) + `nodes.py` (277 行)，没有 RAG / tool-use / router 示例。
 
@@ -246,17 +277,46 @@ README 表格里宣传 "AI Agent 多步工具编排" 是首要场景，但 `exam
 
 走 (a) 更值——plaita 卖点就是 agent 编排，没示例等于自杀。
 
-### 任务 #5 — mutmut 覆盖 async/distributed 路径
+### 任务 #5 — mutmut 覆盖 async/distributed 路径 🟡
 
 **优先级**：P3
+
+**状态**：部分完成。
+
+- ✅ **同步基线扩展**：`plaita/core/parallel_executor.py`（任务 #3 抽出的纯同步
+  执行器协议）纳入 `only_mutate`，`tests/unit/test_parallel_executor.py` 纳入
+  `pytest_add_cli_args_test_selection` 与 `scripts/recheck_mutants.sh` 的 TESTS。
+  逐模块基线 100%（39 变异点，初筛 27 killed + 12 假阳性 timeout，recheck 12/12
+  killed）。测试补了精确断言：`max_workers` 透传、pool 单例绑定、异常文案精确匹配、
+  `Semaphore` 并发上限实测。
+- ✅ **async/distributed 工作流文档化**：`docs/mutation-testing.md` 新增 §6，给出
+  "逐变异点独立进程"（`scripts/run_mutation_baseline.sh`，每个变异点全新进程=全新
+  事件循环，避开 mutmut Pool worker 复用导致的假阳性）的完整操作步骤，以
+  `plaita/core/runner.py` 为例。这是文档指出的两条真正修法之一（另一条是改
+  pytest-asyncio mode，侵入性更大）。
+- 🟡 **async 模块全量基线未跑**：`executor.py` / `runner.py` / `concurrent.py` /
+  `code.py` 的逐变异点基线是独立 1+ 天工作量（每模块数百变异点 × ~30s/个 ≈ 数小时，
+  且 runner 超时用例需逐点复核 `timeout_constant` 误杀），留作 follow-up，不阻塞
+  当前同步基线。
 
 `pyproject.toml [tool.mutmut] only_mutate` 只列了 4 个纯同步模块（callback/expression/calculate/decide）。`executor.py`（750 行 async 桥接）、`runner.py`（超时+重试+cancel）、`concurrent.py`（线程/进程）、`code.py`（沙箱）全部不进变异测试。
 
 文档自评里说"async/distributed/timeout 路径在 mutmut 进程内冲突"——这是已知 workaround。**真正修法**：要么把 async 测试改成 `pytest-asyncio` mode 让 mutmut 能跑，要么给 mutmut 配 separate-process worker。
 
-### 任务 #6 — `_get_branch_target` 兜底契约再审视
+### 任务 #6 — `_get_branch_target` 兜底契约再审视 ✅
 
 **优先级**：P4（我上次误判，标完文档后留观察）
+
+**状态**：已完成（选项 a 落地）。新增 `plaita/node/decide.py:resolve_branch_target`
+把 `b.next or b.name` 兜底契约显式化：仅当所属节点声明 `branch_name_as_target:
+ClassVar[bool] = True` 时才用 `name` 回退。`Switch`（含 `Logic`）设 True，
+`Bool`/`SwitchLegacy` 由 validator 自动注入 `next`（标志对它们无影响）；
+**新增的非 Switch 子类 branching 节点默认 False**，分支未显式 `next` 时返回 None
+（调度期表现为"未匹配到分支"），不再静默跳到以 branch.name 命名的节点。
+
+`Switch.execute` 与 `flow._get_branch_target` 两处 `b.next or b.name` 统一改调
+`resolve_branch_target`，消除两份易漂移的兜底逻辑。`tests/unit/test_branch_target_contract.py`
+钉死三条契约：显式 `next` 优先、Switch name 回退保留、自定义节点不回退。
 
 `plaita/core/flow.py:217` 的 `target = b.next or b.name` 是 `Switch`/`Logic` 类节点的设计语义（branch.name 自身就是目标节点 id）。我加了 `Branch` docstring 文档化。
 

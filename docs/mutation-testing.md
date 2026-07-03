@@ -141,19 +141,24 @@ make mutation-recheck       # 等价于：bash scripts/recheck_mutants.sh timeou
 
 ### 4.4 固化基线 / 扩基线
 
-`only_mutate` 当前包含 4 个模块，`pytest_add_cli_args_test_selection` 已含它们
-对应的纯同步测试文件。**但 4 模块合并跑（876 个变异点）会触发 mutmut worker
-长时复用挂起，结果不稳定**。复跑时建议**逐模块**：临时把 `only_mutate` 改成
-单个文件，再：
+`only_mutate` 当前包含 5 个模块，`pytest_add_cli_args_test_selection` 已含它们
+对应的纯同步测试文件。**但多模块合并跑会触发 mutmut worker 长时复用挂起，结果
+不稳定**。复跑时建议**逐模块**：临时把 `only_mutate` 改成单个文件，再：
 
 ```bash
 make mutation && make mutation-recheck
 ```
 
 逐模块基线已测（见 §2.3）：callback 100%、expression 100%、calculate 98.7%、
-decide 100%（均为「初筛 + 全量复核」后的真实值）。本轮已参照 callback 的做法，
-给 expression / calculate / decide 的测试补「精确断言」（运算结果、操作符语义、
-分支条件、错误文案、元数据），全部拉到 80%+ 目标之上。
+decide 100%、**parallel_executor 100%**（均为「初筛 + 全量复核」后的真实值）。
+本轮已参照 callback 的做法，给 expression / calculate / decide / parallel_executor
+的测试补「精确断言」（运算结果、操作符语义、分支条件、错误文案、元数据、
+max_workers 透传 / pool 单例绑定 / 异常文案），全部拉到 80%+ 目标之上。
+
+`plaita/core/parallel_executor.py` 是 2026-07 任务 #3 抽出的纯同步执行器协议
+（``ParallelExecutor`` / ``ThreadParallelExecutor`` / ``ProcessParallelExecutor``
+/ ``SequentialExecutor``），无 async、无外部依赖，是天然的变异测试目标——纳入
+基线即把"三种执行模式调度路径统一"的新抽象钉死。
 
 扩到新模块时：把目标文件加入 `only_mutate`，把其对应的**纯同步**测试文件加入
 `pytest_add_cli_args_test_selection`（含 async/超时/进程的测试文件不要加，见
@@ -187,3 +192,73 @@ server、client、demo 等）整体行覆盖 **≈ 80.5%**，909 个单元测试
 
 `async_utils.py`（sync/async 桥接）几乎无直接单测，仅被间接覆盖——
 是性价比最高的补测目标。
+
+## 6. async / distributed / timeout 路径的变异测试
+
+`plaita/core/executor.py`（async 桥接 + 三策略）、`plaita/core/runner.py`
+（超时 + 重试 + cancel）、`plaita/node/concurrent.py`（线程/进程）、
+`plaita/node/code.py`（沙箱）是项目最复杂、最易出 bug 的部分，却长期不进变异
+测试。**根本原因**：mutmut 并行模式在 worker 进程内跑 `pytest.main()`，与
+`pytest-asyncio` 的事件循环 / asyncio `CancelledError` / `multiprocessing fork`
+冲突（见 §3 第 1、2 条），一跑就挂或假阳性。
+
+### 6.1 真正的修法：逐变异点独立进程
+
+`scripts/run_mutation_baseline.sh` 已经是这条路的实现：它对 `only_mutate` 范围内
+每个变异点单独跑 `mutmut run <mutant>`，每个变异点拿到一个**全新进程**=全新事件
+循环，从根本上避开 mutmut Pool worker 复用导致的：
+
+- 事件循环跨变异点残留；
+- 过期 timeout deadline 误杀（§3 第 3 条）；
+- `multiprocessing fork` 启动方式与 `mode="process"` 测试冲突（§3 第 1 条）。
+
+代价是慢（每变异点一次 `mutmut run` 冷启动，~25–60s/个），但**结果可信**——
+没有假阳性 timeout / survived 的污染，不需要再 `make mutation-recheck`。
+
+### 6.2 操作步骤（以 `plaita/core/runner.py` 为例）
+
+1. 临时把 `only_mutate` 收窄到目标模块，并把 `pytest_add_cli_args` 里针对该模块
+   的 `--ignore` / 测试选择配好。async 模块**不要**走 `pytest_add_cli_args_test_selection`
+   的纯同步子集——让 mutmut 跑该模块的全量测试（含 async）：
+
+   ```toml
+   only_mutate = ["plaita/core/runner.py"]
+   pytest_add_cli_args_test_selection = [
+       # 留空或只放该模块的测试；async 测试在独立进程里能跑
+   ]
+   ```
+   （`pytest_add_cli_args` 里的 `--ignore=tests/test_concurrent.py` 仍保留，因为
+   `mode="process"` 与 mutmut 的 fork 冲突是进程级问题，独立进程也躲不开。）
+
+2. 先 `mutmut run` 生成变异点（并行初筛，可接受挂起/假阳性，只为生成 `mutants/`）：
+
+   ```bash
+   make mutation
+   ```
+
+3. 再用逐变异点独立进程跑真实结果：
+
+   ```bash
+   scripts/run_mutation_baseline.sh          # 写入 mutation-baseline.txt
+   ```
+
+   或只复核初筛标 `not checked` / `timeout` 的：
+
+   ```bash
+   scripts/run_mutation_baseline.sh --recheck
+   ```
+
+4. 看 `mutation-baseline.txt` 末尾的 `Mutation score`。对 survived 的逐个
+   `mutmut show <id>` 补精确断言（async 路径尤其要断言：超时确实触发 `FlowTimeoutError`、
+   cancel 传播到子节点、重试次数边界、异常类型而非仅"抛了"）。
+
+### 6.3 当前进度与边界
+
+- ✅ 同步基线已扩到 `parallel_executor.py`（任务 #3 副产物，100% 变异得分）。
+- 🟡 async/distributed 模块（executor/runner/concurrent/code）的**逐变异点基线
+  尚未跑全**：每模块数百变异点 × ~30s/个 ≈ 数小时，且 runner 的超时用例需逐点
+  复核是否被 `timeout_constant` 误杀。这是独立的 1+ 天工作量，留作 follow-up，
+  不阻塞当前同步基线。
+- ❌ 不要把 async 模块塞进 `mutmut run` 并行模式——会挂/假阳性，白跑。
+- ❌ 不要为了过变异测试把 async 测试改成同步——丢失 async 语义本身比变异得分
+  倒退更严重。
