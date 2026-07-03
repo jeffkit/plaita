@@ -115,8 +115,8 @@ class DelayIntegrationTest:
             # 创建执行上下文
             execution = FlowExecution(event_bus=self.event_bus)
             execution.clean()
-            execution._set_state("$FLOW_ID", "test_flow")
-            execution._set_state("$EXECUTION_ID", "test_exec_123")
+            execution.set_state("$FLOW_ID", "test_flow")
+            execution.set_state("$EXECUTION_ID", "test_exec_123")
             
             # 执行节点
             result = delay_node.execute(execution)

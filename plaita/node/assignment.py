@@ -39,7 +39,7 @@ class Assignment(Node):
         if len(self.upstream_output) == 1:
             value = self.upstream_output[0]["value"]
         elif len(self.upstream_output) > 1:
-            upstream = execution._get_state(f"{execution.express_prefix}LAST_NODE", None)
+            upstream = execution.last_node_id
             value = [out for out in self.upstream_output if out["upstream"] == upstream]
             if value:
                 value = value[0]["value"]

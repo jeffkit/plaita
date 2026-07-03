@@ -176,7 +176,7 @@ class TestFlowExecutionFacade(unittest.TestCase):
     def test_evaluate_proxy(self):
         fe = FlowExecution()
         fe.clean()
-        fe._set_state("$INPUT", {"val": 100})
+        fe.set_state("$INPUT", {"val": 100})
         self.assertEqual(fe.evaluate("$INPUT.val"), 100)
 
     def test_get_child_execution(self):

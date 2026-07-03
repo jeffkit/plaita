@@ -98,20 +98,19 @@ class NodeRunner:
         """Execute a node and return (result, branch).
 
         Triggers callback_manager.on_node_start/on_node_end.
-        Updates context with LAST_NODE, BRANCH, and node result.
+        Updates context with last_node_id, last_branch, and node result.
         """
         if callback_manager:
             callback_manager.on_node_start(flow, node)
 
         result = await self._execute_with_retry(flow, node, max_timeout_ms)
 
-        pfx = self.context.express_prefix
-        self.context.set_state(f"{pfx}LAST_NODE", node.id)
+        self.context.last_node_id = node.id
         logger.debug("result: %s", result)
         logger.debug("set last node id: %s", node.id)
 
         branch = result if node.branching else None
-        self.context.set_state(f"{pfx}BRANCH", branch)
+        self.context.last_branch = branch
         self.context.update_node_result(node, result)
 
         if callback_manager:

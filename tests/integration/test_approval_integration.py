@@ -131,8 +131,8 @@ class TestApprovalNodeBasic:
         # 创建模拟执行上下文
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "test_flow")
-        execution._set_state("$EXECUTION_ID", "exec_123")
+        execution.set_state("$FLOW_ID", "test_flow")
+        execution.set_state("$EXECUTION_ID", "exec_123")
         
         config = approval_node.generate_service_config(execution)
         

@@ -145,7 +145,7 @@ class ExpressionParser:
             pp.Keyword("True") | pp.Keyword("False")
             | pp.Keyword("true") | pp.Keyword("false")
         )
-        boolean.setParseAction(self._eval_boolean)
+        boolean.set_parse_action(self._eval_boolean)
         string = pp.QuotedString('"') | pp.QuotedString("'")
         constant = boolean | string | number
 
@@ -158,19 +158,19 @@ class ExpressionParser:
         # segment is the literal key "$INPUT" on the parent context).
         identifier = pp.Word(pp.alphas, pp.alphanums + "_")
         name_token = pp.Word(pp.alphanums + "_-$")
-        pos_int = pp.Word(pp.nums).setParseAction(lambda t: int(t[0]))
+        pos_int = pp.Word(pp.nums).set_parse_action(lambda t: int(t[0]))
         signed_int = pp.Combine(pp.Optional("-") + pp.Word(pp.nums))
-        signed_int.setParseAction(lambda t: int(t[0]))
+        signed_int.set_parse_action(lambda t: int(t[0]))
 
         # --- variable path segments --------------------------------------
         # dot_int must be tried before dot_field so ``.0`` is an index, not a
         # field named "0" (matches ``str.isdigit`` behaviour of the old walk).
         index_seg = pp.Suppress("[") + signed_int + pp.Suppress("]")
-        index_seg.setParseAction(lambda t: f"index:{t[0]}")
+        index_seg.set_parse_action(lambda t: f"index:{t[0]}")
         dot_int = pp.Suppress(".") + pos_int
-        dot_int.setParseAction(lambda t: f"index:{t[0]}")
+        dot_int.set_parse_action(lambda t: f"index:{t[0]}")
         dot_field = pp.Suppress(".") + name_token
-        dot_field.setParseAction(lambda t: f"field:{t[0]}")
+        dot_field.set_parse_action(lambda t: f"field:{t[0]}")
 
         segment = index_seg | dot_int | dot_field
         # Root key is any ``$<name>`` — the old engine resolved the first
@@ -186,7 +186,7 @@ class ExpressionParser:
 
         # variable = root + zero-or-more segments
         variable = root + pp.Group(pp.ZeroOrMore(segment))
-        variable.setParseAction(self._eval_variable)
+        variable.set_parse_action(self._eval_variable)
 
         # ``expr`` is the union of literals, variables and function calls,
         # used for function arguments and interpolation bodies. function_call
@@ -196,11 +196,11 @@ class ExpressionParser:
 
         # --- function call ----------------------------------------------
         func_head = pp.Combine(pp.Literal(f"{prefix}F.") + identifier + pp.Literal("("))
-        arg_list = pp.Optional(pp.delimitedList(expr) + pp.Optional(","))
+        arg_list = pp.Optional(pp.DelimitedList(expr) + pp.Optional(","))
         function_call <<= (
             func_head + pp.Group(arg_list) + pp.Suppress(")")
         )
-        function_call.setParseAction(self._eval_function_call)
+        function_call.set_parse_action(self._eval_function_call)
 
         # Full-expression grammar (parseAll=True target)
         self._prefix_expr = function_call | variable
@@ -210,7 +210,7 @@ class ExpressionParser:
         # ``_eval_template`` stitches literal segments + str(value) back
         # together, mirroring the old ``re.sub(lambda m: str(evaluate(...)))``.
         interpolation = pp.Suppress("{%") + expr + pp.Suppress("%}")
-        interpolation.setParseAction(lambda t: [t[0]])
+        interpolation.set_parse_action(lambda t: [t[0]])
         self._interpolation = interpolation
 
     # --- parse actions ---------------------------------------------------
@@ -296,7 +296,7 @@ class ExpressionParser:
         # the parse failure propagate preserves that "invalid prefix
         # expression -> node error" behaviour.  (``parse_function`` wraps
         # calls that should instead return the raw string on parse failure.)
-        parsed = self._prefix_expr.parseString(value, parseAll=True)
+        parsed = self._prefix_expr.parse_string(value, parse_all=True)
         return parsed[0]
 
     def _eval_template(self, value: str) -> Any:
@@ -307,7 +307,7 @@ class ExpressionParser:
         out: list = []
         last = 0
         matched = False
-        for tokens, start, end in self._interpolation.scanString(value):
+        for tokens, start, end in self._interpolation.scan_string(value):
             matched = True
             out.append(value[last:start])
             out.append(str(tokens[0]))

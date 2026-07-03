@@ -196,7 +196,8 @@ class MapTestCase(TestCase):
                     next="bool",
                     language="python",
                     code="def run(input):\n    import time\n    time.sleep(0.1)\n    return input",
-                    input="$INPUT"
+                    input="$INPUT",
+                    sandbox_backend="unsafe",
                 ),
                 decide.Bool(id="bool", condition={"field": "$INPUT.item.age", "operator": "gte", "value": 35}),
                 End(id="true", **{"resultType": "success", "output": "old"}),

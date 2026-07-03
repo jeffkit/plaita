@@ -119,16 +119,29 @@ class TestNodeRegistry:
         assert "test_another" not in reg
 
     def test_builtins_registered(self):
-        """Default registry should have all built-in node types."""
+        """Default registry should have all built-in node types.
+
+        'code' is intentionally excluded: CodeNode executes arbitrary user
+        code without a sandbox and must be opted in via register_code_node().
+        """
         reg = self._make_registry(auto_discover=False)
         expected = [
             "start", "end", "switch", "case", "if",
             "assignment", "loop", "map", "filter", "find",
-            "reduce", "child", "reference", "code",
+            "reduce", "child", "reference",
             "parallel", "http", "event",
         ]
         for nt in expected:
             assert nt in reg, f"Built-in node type '{nt}' not registered"
+        assert "code" not in reg, "CodeNode should NOT be in the default registry"
+
+    def test_code_node_opt_in(self):
+        """register_code_node() should add CodeNode to the target registry."""
+        from plaita.node import register_code_node
+        reg = self._make_registry(auto_discover=False)
+        assert "code" not in reg
+        register_code_node(reg)
+        assert "code" in reg
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +196,8 @@ class TestBackwardCompatDictProxy:
 
     def test_nodes_dict_len(self):
         from plaita.node import nodes
-        assert len(nodes) >= 17
+        # CodeNode is excluded from the default registry (opt-in required).
+        assert len(nodes) >= 16
 
     def test_nodes_dict_iter(self):
         from plaita.node import nodes

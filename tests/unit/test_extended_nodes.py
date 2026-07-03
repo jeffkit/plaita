@@ -43,8 +43,8 @@ class TestDelayNode:
         event_bus = InMemoryEventBus()
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "test_flow")
-        execution._set_state("$EXECUTION_ID", "exec_123")
+        execution.set_state("$FLOW_ID", "test_flow")
+        execution.set_state("$EXECUTION_ID", "exec_123")
         return execution
     
     def test_create_with_seconds(self):
@@ -96,7 +96,7 @@ class TestDelayNode:
             delay_unit="seconds"
         )
         
-        execution._set_state("$INPUT", {"delay": 10})
+        execution.set_state("$INPUT", {"delay": 10})
         delay_value = node._resolve_delay_time(execution)
         
         assert delay_value == 10
@@ -178,8 +178,8 @@ class TestRedisQueueNode:
         event_bus = InMemoryEventBus()
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "test_flow")
-        execution._set_state("$EXECUTION_ID", "exec_123")
+        execution.set_state("$FLOW_ID", "test_flow")
+        execution.set_state("$EXECUTION_ID", "exec_123")
         return execution
     
     def test_create_with_defaults(self):
@@ -302,8 +302,8 @@ class TestHttpCallbackNode:
         event_bus = InMemoryEventBus()
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "test_flow")
-        execution._set_state("$EXECUTION_ID", "exec_123")
+        execution.set_state("$FLOW_ID", "test_flow")
+        execution.set_state("$EXECUTION_ID", "exec_123")
         return execution
     
     def test_create_with_defaults(self):
@@ -426,8 +426,8 @@ class TestApprovalNode:
         event_bus = InMemoryEventBus()
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "test_flow")
-        execution._set_state("$EXECUTION_ID", "exec_123")
+        execution.set_state("$FLOW_ID", "test_flow")
+        execution.set_state("$EXECUTION_ID", "exec_123")
         return execution
     
     def test_create_basic(self):
@@ -502,7 +502,7 @@ class TestApprovalNode:
             approvers=["admin"]
         )
         
-        execution._set_state("$INPUT", {"title": "动态标题"})
+        execution.set_state("$INPUT", {"title": "动态标题"})
         
         config = node.generate_service_config(execution)
         
@@ -518,7 +518,7 @@ class TestApprovalNode:
             approvers=["$INPUT.approver"]
         )
         
-        execution._set_state("$INPUT", {"approver": "dynamic_user"})
+        execution.set_state("$INPUT", {"approver": "dynamic_user"})
         
         config = node._resolve_approval_config(execution)
         
@@ -594,8 +594,8 @@ class TestKafkaQueueNode:
         event_bus = InMemoryEventBus()
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "test_flow")
-        execution._set_state("$EXECUTION_ID", "exec_123")
+        execution.set_state("$FLOW_ID", "test_flow")
+        execution.set_state("$EXECUTION_ID", "exec_123")
         return execution
     
     def test_create_with_defaults(self):

@@ -67,8 +67,8 @@ class TestDelayNodeBasic:
         # 创建模拟执行上下文
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "test_flow")
-        execution._set_state("$EXECUTION_ID", "exec_123")
+        execution.set_state("$FLOW_ID", "test_flow")
+        execution.set_state("$EXECUTION_ID", "exec_123")
         
         config = delay_node.generate_service_config(execution)
         
@@ -89,7 +89,7 @@ class TestDelayNodeBasic:
         
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$INPUT", {"delay": 5})
+        execution.set_state("$INPUT", {"delay": 5})
         
         delay_value = delay_node._resolve_delay_time(execution)
         

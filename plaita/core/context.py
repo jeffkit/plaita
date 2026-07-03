@@ -306,6 +306,43 @@ class ExecutionContext:
         """
         return self.get_state(f"{self.express_prefix}EXECUTION_ID", "")
 
+    # -- typed system-state accessors (distributed checkpoint keys) --
+    #
+    # Previously all callers built magic strings like
+    #   ``f"{pfx}LAST_NODE"`` / ``f"{pfx}BRANCH"`` / ``f"{pfx}FLOW_ID"``
+    # inline, which scattered the key schema across runner.py, executor.py,
+    # assignment.py and event/core.py.  These properties centralise the
+    # key construction; the underlying storage format in ``_context`` is
+    # intentionally unchanged so that distributed checkpoints (to_dict /
+    # from_dict) remain forward- and backward-compatible.
+
+    @property
+    def last_node_id(self) -> Optional[str]:
+        """ID of the most recently executed node (distributed checkpoint key)."""
+        return self.get_state(f"{self.express_prefix}LAST_NODE")
+
+    @last_node_id.setter
+    def last_node_id(self, value: Optional[str]) -> None:
+        self.set_state(f"{self.express_prefix}LAST_NODE", value)
+
+    @property
+    def last_branch(self) -> Optional[str]:
+        """Branch taken by the most recently executed branching node."""
+        return self.get_state(f"{self.express_prefix}BRANCH")
+
+    @last_branch.setter
+    def last_branch(self, value: Optional[str]) -> None:
+        self.set_state(f"{self.express_prefix}BRANCH", value)
+
+    @property
+    def flow_id(self) -> Optional[str]:
+        """Flow ID of the currently executing flow."""
+        return self.get_state(f"{self.express_prefix}FLOW_ID")
+
+    @flow_id.setter
+    def flow_id(self, value: Optional[str]) -> None:
+        self.set_state(f"{self.express_prefix}FLOW_ID", value)
+
     # -- event bus --
 
     def get_or_create_event_bus(self):

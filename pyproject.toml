@@ -28,7 +28,7 @@ server = [
     "SQLAlchemy>=1.4.0",
     "cachetools>=5.0.0",
 ]
-code = ["PyExecJS"]
+code = ["PyExecJS", "RestrictedPython>=7.0"]
 http = ["requests", "aiohttp>=3.8.0"]
 yaml = ["PyYAML>=6.0"]
 dev = [

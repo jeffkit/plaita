@@ -45,7 +45,10 @@ _BUILTIN_NODES: list[Type[Node]] = [
     Find,
     Reduce,
     ReferenceFlow,
-    CodeNode,
+    # CodeNode is intentionally excluded from the default registry.
+    # It executes arbitrary user-supplied code (Python exec / PyExecJS JS) without
+    # a sandbox. To opt in, call register_code_node() or
+    # get_default_registry().register(CodeNode) explicitly.
     Parallel,
     HTTP,
     EventNode,
@@ -217,6 +220,37 @@ class _RegistryDictProxy:
 
 
 nodes = _RegistryDictProxy(_default_registry)
+
+
+# ---------------------------------------------------------------------------
+# CodeNode opt-in helper
+# ---------------------------------------------------------------------------
+
+
+def register_code_node(registry: Optional[NodeRegistry] = None) -> None:
+    """Register :class:`CodeNode` for use in flows.
+
+    ``CodeNode`` executes **arbitrary user-supplied code** (Python ``exec``
+    and/or PyExecJS JS) without a sandbox.  It is therefore excluded from the
+    default registry and must be enabled explicitly.
+
+    Args:
+        registry: The :class:`NodeRegistry` to register into.  If *None*, the
+            process-wide default registry is used.
+
+    Example::
+
+        from plaita.node import register_code_node
+        register_code_node()   # enables CodeNode in the default registry
+
+    .. warning::
+        Only call this if you trust all flow definitions that will be executed
+        in this process. A ``CodeNode`` in a flow JSON allows any code the flow
+        author chooses to run, including arbitrary file-system and network
+        access.
+    """
+    target = registry if registry is not None else get_default_registry()
+    target.register(CodeNode)
 
 
 # ---------------------------------------------------------------------------

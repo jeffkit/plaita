@@ -444,8 +444,8 @@ class TestNodePerformance:
         event_bus = InMemoryEventBus()
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$FLOW_ID", "perf_test")
-        execution._set_state("$EXECUTION_ID", "perf_exec")
+        execution.set_state("$FLOW_ID", "perf_test")
+        execution.set_state("$EXECUTION_ID", "perf_exec")
         return execution
     
     def test_delay_node_config_generation_performance(self, execution):

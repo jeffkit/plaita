@@ -155,8 +155,7 @@ class DistributedStrategy:
         return await self._execute_current_node(flow, context, runner, callback_manager, current_node)
 
     async def _determine_current_node(self, flow, context, runner, callback_manager):
-        pfx = context.express_prefix
-        last_node_id = context.get_state(f"{pfx}LAST_NODE")
+        last_node_id = context.last_node_id
         if last_node_id:
             return self._get_next_from_last(flow, context, last_node_id)
         return await self._start_new_flow(flow, context, runner, callback_manager)
@@ -166,7 +165,7 @@ class DistributedStrategy:
         current_node = flow.find_node_by_id(last_node_id)
         node_results = context.get_state(f"{pfx}{context.express_node_name}", {})
         result = node_results.get(last_node_id)
-        branch = context.get_state(f"{pfx}BRANCH")
+        branch = context.last_branch
 
         # 统一走 flow.next_node: 分支节点按 branch 选 branch.next, 普通节点走 next,
         # 避免在此重复实现一套与 flow._get_branch_target 易漂移的图遍历逻辑。
@@ -207,7 +206,7 @@ class DistributedStrategy:
         resume_type = ResumeType.coerce(resume_type)
         pfx = context.express_prefix
 
-        last_node_id = context.get_state(f"{pfx}LAST_NODE")
+        last_node_id = context.last_node_id
         if not last_node_id:
             raise ResumeError("No suspended node found for resume")
 
@@ -385,6 +384,32 @@ class FlowExecution:
     def express_environment_variable(self, value: str) -> None:
         self._ctx.express_environment_variable = value
 
+    # -- typed system-state delegates (see ExecutionContext for rationale) --
+
+    @property
+    def last_node_id(self) -> Optional[str]:
+        return self._ctx.last_node_id
+
+    @last_node_id.setter
+    def last_node_id(self, value: Optional[str]) -> None:
+        self._ctx.last_node_id = value
+
+    @property
+    def last_branch(self) -> Optional[str]:
+        return self._ctx.last_branch
+
+    @last_branch.setter
+    def last_branch(self, value: Optional[str]) -> None:
+        self._ctx.last_branch = value
+
+    @property
+    def flow_id(self) -> Optional[str]:
+        return self._ctx.flow_id
+
+    @flow_id.setter
+    def flow_id(self, value: Optional[str]) -> None:
+        self._ctx.flow_id = value
+
     # -- state helpers (delegate to ExecutionContext) --
 
     def set_state(self, key: str, value: Any) -> None:
@@ -411,24 +436,7 @@ class FlowExecution:
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         return self._ctx.setup_flow(flow, args, kwargs)
 
-    # -- renamed context helpers (kept for backward compat) --
-
-    def _set_state(self, key, value):
-        self._ctx.set_state(key, value)
-
-    def _get_state(self, key, default=None):
-        return self._ctx.get_state(key, default)
-
-    def _update_node_result(self, node, result):
-        self._ctx.update_node_result(node, result)
-
-    def _get_execution_id(self):
-        return self._ctx.execution_id
-
-    def _setup_flow_context(self, flow, args, kwargs):
-        self._ctx.setup_flow(flow, args, kwargs)
-
-    # -- backward-compat delegates to NodeRunner / DistributedStrategy --
+    # -- sync helpers (used by tests and distributed bootstrap) --
 
     def _process_node(self, flow, node, lazy=False, max_timeout=None):
         return _run_async_sync(self._runner.run_node(

@@ -60,8 +60,8 @@ class KafkaQueueNode(BaseExtendedNode):
         config = {
             "type": "kafka_queue",
             "node_id": self.id,
-            "execution_id": execution._get_execution_id() if hasattr(execution, '_get_execution_id') else None,
-            "flow_id": execution._get_state(f"{execution.express_prefix}FLOW_ID", None) if hasattr(execution, '_get_state') else None,
+            "execution_id": execution.execution_id,
+            "flow_id": execution.flow_id,
             "event_type": self.event_type,
             "event_filter": self.event_filter,
             "kafka_config": resolved_config["kafka"],

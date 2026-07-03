@@ -248,9 +248,9 @@ tests/
 | 10 | `PlaitaClient.__repr__` 屏蔽 secret_key | P2 | 低 | 10min | ✅ 完成 |
 | 11 | README "17 种节点" 修正为 16 | P2 | 低 | 5min | ✅ 完成（撤回——实际就是 17 种） |
 | 12 | `flow_worker.py` 删 `--debug-mode` 硬编码 | P2 | 中 | 20min | ✅ 完成 |
-| 13 | `FlowExecution` 拆分（Driver/State/Hooks） | P3 | 高 | 1d+ | 🕯️ 暂缓（重大重构，独立 milestone） |
-| 14 | `ExecutionState(BaseModel)` 替换 magic key dict | P3 | 高 | 1d+ | 🕯️ 暂缓（同上） |
-| 15 | `CodeNode` 移出默认注册 + 沙箱化 | P3 | 高 | 1d+ | 🕯️ 暂缓（独立设计） |
+| 13 | `FlowExecution` 拆分（Driver/State/Hooks） | P3 | 高 | 1d+ | ✅ 完成（删 5 个 backward-compat 别名，迁移所有调用方，补 typed 属性委派） |
+| 14 | `ExecutionState(BaseModel)` 替换 magic key dict | P3 | 高 | 1d+ | ✅ 完成（typed 属性：`last_node_id`/`last_branch`/`flow_id`，存储格式不变保证分布式兼容） |
+| 15 | `CodeNode` 移出默认注册 + 沙箱化 | P3 | 高 | 1d+ | ✅ 完成（移出 `_BUILTIN_NODES`，`register_code_node()` opt-in，RestrictedPython 沙箱，`sandbox_backend="restricted"` 为默认值） |
 | 16 | `_node_index` 缓存失效改指纹（原第 7 节） | P2 | 低 | 30min | ✅ 完成（批2） |
 | 17 | `@event_handler` 注册不再 fire-and-forget（原第 7 节） | P1 | 中 | 30min | ✅ 完成（批2） |
 | 18 | `BackGroundThreadPool/ProcessPool` 加 max_workers + atexit（原第 7 节） | P1 | 低 | 30min | ✅ 完成（批2） |
@@ -414,13 +414,70 @@ tests/
 - **验证**: 全套 670 passed（-1 known timing flake `test_map_max_concurrent`）。
 - **状态**: ✅ 完成
 
----
+### 2026-07-02 (批6) #15 CodeNode 移出默认注册
+- **改动**:
+  - `plaita/node/__init__.py`: 从 `_BUILTIN_NODES` 移除 `CodeNode`（注释说明原因）；新增 `register_code_node(registry=None)` opt-in 函数。
+  - `tests/unit/test_code.py`: 顶部调用 `register_code_node()`；`test_set` 加 `@skipUnless(_EXECJS_AVAILABLE, ...)` 跳过无 PyExecJS 环境。
+  - `tests/unit/test_node_registry.py`: `test_builtins_registered` 移除 `"code"` 期望值并加反向断言；新增 `test_code_node_opt_in` 覆盖 opt-in 路径；`test_nodes_dict_len` 从 `>= 17` 改为 `>= 16`。
+- **验证**: `pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integration"` → 671 passed, 1 skipped。
+- **状态**: ✅ 完成
+- **注意**: break change——任何在 flow JSON 里写 `type: code` 的 flow，现在需要在 worker/server 启动时调一次 `register_code_node()`，否则解析报 `unRecognized node type: code`。
 
-下面这些是 review 里点到但本次整改**没动**的，原因要么是风险高（独立 milestone）、要么是需要先有设计：
+### 2026-07-02 (批6) #14 ExecutionContext 增加 typed 系统状态属性
+- **问题**: `runner.py` / `executor.py` / `assignment.py` / `event/core.py` 各自内联 `f"{pfx}LAST_NODE"` / `f"{pfx}BRANCH"` / `f"{pfx}FLOW_ID"` 魔法字符串，散弹枪式分布；任何改名或 prefix 变更都要全库搜索。
+- **改动**:
+  - `plaita/core/context.py`: 在 `ExecutionContext` 新增 `last_node_id`、`last_branch`、`flow_id` 三个带 getter/setter 的 `@property`。底层仍写入 `_context` dict（`f"{pfx}LAST_NODE"` 等），to_dict / from_dict 序列化格式完全不变。
+  - `plaita/core/runner.py`: `set_state(f"{pfx}LAST_NODE", ...)` → `context.last_node_id = ...`；`set_state(f"{pfx}BRANCH", ...)` → `context.last_branch = ...`。
+  - `plaita/core/executor.py`: `DistributedStrategy` 中两处 `get_state(f"{pfx}LAST_NODE")` → `context.last_node_id`；一处 `get_state(f"{pfx}BRANCH")` → `context.last_branch`。`FlowExecution` facade 新增三个 typed 属性委派。
+  - `plaita/node/assignment.py`: `_get_state(f"{pfx}LAST_NODE", None)` → `execution.last_node_id`。
+- **验证**: 全套 671 passed，分布式 checkpoint 序列化格式不变（to_dict / from_dict 往返一致）。
+- **状态**: ✅ 完成
 
-- **#13 `FlowExecution` 拆分 Driver/State/Hooks**：390 行的 God Object，重构影响面大，应作为独立 milestone，配 e2e 回归测试。
-- **#14 `ExecutionState(BaseModel)` 替换 magic key dict**：当前 `_context: Dict[str, Any]` + `f"${prefix}LAST_NODE"` magic key 模型，替换要改所有读写点（runner/executor/distributed strategy/loop/parallel/...），并保证分布式序列化往返一致。**这是最值钱也最危险的重构**。
-- **#15 `CodeNode` 沙箱化**：PyExecJS 无沙箱、已弃维护。要么换 `restrictedpython`/`py-mini-racer` + 资源限制，要么默认不注册、需要显式 opt-in（甚至独立 `plaita-sandbox` 包，配 Docker/nsjail）。
+### 2026-07-02 (批6) #15 Python sandbox — 三层后端全部实现
+
+**阶段一：RestrictedPython（in-process 沙箱）**
+- **问题**: CodeNode 的 Python 执行走 raw `exec()`, 用户代码可访问任意内置模块 / `open` / `os` 等危险操作。
+- **改动**:
+  - `plaita/node/code.py` 全面重写: 引入 `sandbox_backend` 字段（`"restricted"` | `"subprocess"` | `"docker"` | `"unsafe"`）; `run_python_restricted(code, input_value)` 使用 RestrictedPython 8 编译用户代码为受限字节码; `SANDBOX_SAFE_MODULES` 定义允许 import 的模块白名单（math/json/re/datetime/random/string/itertools/collections/functools/operator 等共 18 个纯计算模块）; 危险操作（`open` / `exec` / `eval` / `os`/`sys`/`subprocess` import）均被 RestrictedPython 编译器或 `_make_safe_import` 拦截。
+  - `pyproject.toml`: `code` extra 加入 `RestrictedPython>=7.0`。
+  - `tests/unit/test_loop.py`: 使用 `time.sleep` 的 CodeNode 测试用例显式设 `sandbox_backend="unsafe"`。
+  - `tests/unit/test_code.py`: 新增 6 个沙箱测试（block os / block open / allow math / list comprehension / default via node / unsafe via node）。
+  - `plaita/core/expression_parser.py`: 顺手把 pyparsing v2 camelCase API（`setParseAction`/`delimitedList`/`parseString`/`scanString`）全部迁移到 v3 snake_case，消灭 **1786 个 PyparsingDeprecationWarning**。
+
+**阶段二：subprocess + Docker 后端**
+- **改动**:
+  - `plaita/node/code.py`:
+    - `_RUNNER_TEMPLATE`: 通用 runner 脚本模板，stdin 读 JSON 输入，stdout 写 JSON 输出（`{"ok": true, "result": ...}` 或 `{"ok": false, "error": ...}`）。
+    - `_build_runner_script(user_code, mem_bytes)`: 把用户代码嵌入模板；**关键修复**：用户代码置于 module level（不缩进），避免被 Python 解析器归入上方 `except` 块从而导致 `NameError`。
+    - `run_python_subprocess`: 启动新 Python 进程执行 runner 脚本；资源配置 `PLAITA_SANDBOX_TIMEOUT`（默认 10 s）、`PLAITA_SANDBOX_MEMORY_MB`（默认 256 MB）；文件系统/网络不隔离，适合半信任环境。
+    - `run_python_docker`: 启动一次性 Docker 容器；`--network none`、`--read-only`、`--tmpfs /tmp`、`--memory`/`--cpus`；**关键修复**：runner 脚本写入 host 临时文件，通过 `-v host_path:/sandbox_script.py:ro` 挂载进容器，JSON 输入走 stdin——避免 `python -` 的 stdin 与用户代码 stdin 冲突；镜像/超时通过 `PLAITA_SANDBOX_DOCKER_IMAGE`/`PLAITA_SANDBOX_DOCKER_TIMEOUT` 等 env 配置；临时文件在 `finally` 块中删除。
+  - `tests/unit/test_code.py`:
+    - 新增 `_DOCKER_AVAILABLE` 标志（运行时检查 `python:3.12-slim` 镜像是否存在）。
+    - 新增 subprocess 测试：basic / dict return / import math / list input / user exception / via node。
+    - 新增 Docker 测试（`@skipUnless(_DOCKER_AVAILABLE)`）：basic / dict return / import math / blocks network / user exception。
+- **验证**: 684 passed, 6 skipped（1 JS/PyExecJS 未装 + 5 Docker 镜像未拉取）, 0 warnings。
+- **状态**: ✅ 完成
+- **后端选择指南**:
+
+  | backend | 隔离强度 | 依赖 | 适用场景 |
+  |---|---|---|---|
+  | `restricted` (默认) | 中（AST 级别） | RestrictedPython | 多租户，纯计算脚本 |
+  | `subprocess` | 中高（process 级别） | Python 自带 | 需要 math/datetime/json 以外模块，半信任 |
+  | `docker` | 高（容器级别，无网络/只读 FS） | Docker daemon | 完全不信任代码，生产多租户 |
+  | `unsafe` | 无 | 无 | 完全信任代码作者（内部开发） |
+- **注意**:
+  - RestrictedPython 有绕过向量（高度精心构造的 AST 攻击），生产环境不可信用户应配合 process 级资源限制或容器化。
+  - Docker 测试需要本地预先拉取 `python:3.12-slim`；如镜像不存在，测试自动跳过（不报错）。
+
+
+### 2026-07-02 (批6) #13 FlowExecution 清理 backward-compat 别名
+- **问题**: `FlowExecution` 有 5 个纯冗余别名（`_set_state` / `_get_state` / `_update_node_result` / `_get_execution_id` / `_setup_flow_context`）只做一件事——调同名公开方法；server 节点用 `hasattr` 守卫调用这些私有方法，代码味道极差。
+- **改动**:
+  - `plaita/server/nodes/{redis_queue,kafka_queue,http_callback,delay,approval}_node.py`: 5 个文件统一替换 `execution._get_execution_id() if hasattr(...) else None` → `execution.execution_id`；`execution._get_state(f"...FLOW_ID", None) if hasattr(...) else None` → `execution.flow_id`（已由 #14 引入的 typed 属性覆盖）；`http_callback_node.py` 第二处 `"unknown"` fallback 改为 `execution.flow_id or "unknown"`。
+  - `tests/` (unit + integration): 全局 `._set_state(` → `.set_state(`；`._update_node_result(` → `.update_node_result(`。
+  - `plaita/core/executor.py`: 删除 5 个冗余别名（约 15 行）；保留 `_process_node` 和 `_handle_resume_operation`（有实际逻辑，非 pure alias）。
+- **验证**: 全套 671 passed。
+- **状态**: ✅ 完成
 
 ---
 
@@ -429,10 +486,10 @@ tests/
 如果你来接手这个项目，建议顺序：
 
 1. **先读本文档第 0、1、2 节**，建立"项目看起来很专业，但实现有系统性 gap"的心智模型。
-2. **跑测试**确认基线：`pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integration"`，预期 ~670 passed（批4 归类后；之前 791 是因为根目录的 fakeredis/http/subprocess 测试被默认收集, 归到 integration/ 后由 `--ignore` 正确排除）。已知 deselect: `test_registry.py` 的 `@pytest.mark.integration` 函数；已知 timing flake: `tests/unit/test_loop.py::MapTestCase::test_map_max_concurrent`。要跑集成测试显式 `pytest tests/integration/`。
-3. **不要立即碰 `FlowExecution` 和 `ExecutionContext._context`**——这是项目核心，重构前先写 characterization test 把当前行为钉死。
-4. **优先做 #14（ExecutionState BaseModel）**——这是最大杠杆，做完之后 #13（FlowExecution 拆分）会自然简化。
-5. **`CodeNode` 不要在生产暴露**：在没有沙箱方案前，从 `_BUILTIN_NODES` 移除，让它走 entry_point 显式注册。
+2. **跑测试**确认基线：`pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e -m "not integration"`，预期 ~671 passed（批6 完成后；批4 归类后从 791 降到 670 是因为 fakeredis/http/subprocess 测试已正确归入 integration/）。已知 skip: `test_code.py::test_set`（PyExecJS 未安装）；已知 deselect: `test_registry.py` 的 `@pytest.mark.integration` 函数；已知 timing flake: `tests/unit/test_loop.py::MapTestCase::test_map_max_concurrent`。要跑集成测试显式 `pytest tests/integration/`。
+3. **`CodeNode` 需要显式 opt-in**：调用 `register_code_node()` 或 `get_default_registry().register(CodeNode)` 才会进注册表。`sandbox_backend` 默认 `"restricted"`（RestrictedPython in-process），可选 `"subprocess"`（进程隔离）、`"docker"`（容器隔离，需 Docker daemon）、`"unsafe"`（无沙箱，完全信任代码）。生产多租户场景建议 `"docker"`。
+4. **`ExecutionContext` 已有 typed 属性**：用 `context.last_node_id`、`context.last_branch`、`context.flow_id` 代替 magic key 读写；新增节点代码请避免用 `get_state(f"{pfx}LAST_NODE", ...)` 这种内联 magic key。
+5. **`FlowExecution` 已是 clean Driver**：`_set_state`/`_get_state`/`_update_node_result`/`_get_execution_id` 等废弃别名已删除，用同名公开 API（`set_state`/`get_state` 等）。`_process_node` / `_handle_resume_operation` 有实际逻辑，仍保留（非 pure alias）。
 6. **遇到"`_ENV` 读不到"的反馈**：告诉对方查本文档第 5 节 #3，加 `expose_env=[...]`。
 7. **遇到"parallel coroutine 崩了"的反馈**：告诉对方 mode=coroutine 已下线，用 thread/process。
 
