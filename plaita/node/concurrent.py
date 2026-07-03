@@ -1,55 +1,35 @@
-import atexit
 import logging
-import os
-from concurrent.futures import ThreadPoolExecutor, wait
-from concurrent.futures.process import ProcessPoolExecutor
-from multiprocessing import Lock as ProcessLock
-from threading import Lock
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field, model_validator
 
+from plaita.core.parallel_executor import (
+    PROCESS,
+    THREAD,
+    BackGroundProcessPool,  # re-export for backward compat (历史调用方从本模块导入)
+    BackGroundThreadPool,
+    ParallelExecutor,
+    make_executor,
+)
 from plaita.node import Node
 from plaita.node.decide import Branch
+
+# re-export
+__all__ = [
+    "Parallel",
+    "ParallelBranch",
+    "ARTIFICIAL",
+    "COROUTINE",
+    "THREAD",
+    "PROCESS",
+    "BackGroundThreadPool",
+    "BackGroundProcessPool",
+]
 
 logger = logging.getLogger(__name__)
 
 ARTIFICIAL = "artificial"
 COROUTINE = "coroutine"
-PROCESS = "process"
-THREAD = "thread"
-
-# 后台分支是 fire-and-forget (submit 后不持 future 引用, 不取结果)。模块级
-# 池子的两个问题历史遗留: 无 max_workers (默认会按 ``min(32, os.cpu_count()+4)``
-# 算 thread 池, 进程池按 cpu 数), 无 shutdown 钩子。pytest/Jupyter/Web 服务
-# 进程隐式持有这两个 pool, 解释器退出时若不显式 shutdown, 待办 future 可能丢。
-_DEFAULT_BG_THREAD_WORKERS = int(os.environ.get("PLAITA_BG_THREAD_WORKERS", "8"))
-_DEFAULT_BG_PROCESS_WORKERS = int(os.environ.get("PLAITA_BG_PROCESS_WORKERS", str(os.cpu_count() or 4)))
-
-BackGroundThreadPool = ThreadPoolExecutor(
-    max_workers=_DEFAULT_BG_THREAD_WORKERS,
-    thread_name_prefix="plaita-bg-thread",
-)
-BackGroundProcessPool = ProcessPoolExecutor(
-    max_workers=_DEFAULT_BG_PROCESS_WORKERS,
-)
-
-
-def _shutdown_background_pools() -> None:
-    """进程退出时显式 shutdown 后台池, 避免待办任务悬挂。"""
-    # cancel_futures=True: 解释器已经在退出, 没机会跑排队中的任务, 与其卡住
-    # 等, 不如直接丢。已在跑的会被 wait。
-    for pool, name in (
-        (BackGroundThreadPool, "BackGroundThreadPool"),
-        (BackGroundProcessPool, "BackGroundProcessPool"),
-    ):
-        try:
-            pool.shutdown(wait=False, cancel_futures=True)
-        except Exception:  # pragma: no cover - 退出路径上的 best-effort
-            logger.debug("%s shutdown raised during atexit", name, exc_info=True)
-
-
-atexit.register(_shutdown_background_pools)
 
 
 class ParallelBranch(Branch):
@@ -125,58 +105,60 @@ class Parallel(Node):
         logger.debug("branch %s executed: %s", pb.name, rs)
         return rs
 
-    def pool_execute(self, pool_type=THREAD, execution=None):
-        """使用共享后台池执行并行节点。
+    def _build_executor(self, mode: str, execution) -> Optional[ParallelExecutor]:
+        """按 ``mode`` 构造执行器。进程模式在父进程 cancel_event 已触发时
+        直接放弃启动子进程 (进程模式 cancel 不跨进程传播, 启动了也响应不了)。"""
+        if mode == PROCESS:
+            cancel_event = getattr(execution, "cancel_event", None)
+            if cancel_event is not None and cancel_event.is_set():
+                logger.warning(
+                    "parallel %s: cancel_event already set, skip process branches", self.id,
+                )
+                return None
+        return make_executor(mode)
+
+    def pool_execute(self, pool_type: Optional[str] = None, execution=None) -> Dict[str, Any]:
+        """使用 ``ParallelExecutor`` 执行并行节点。
 
         历史上每个 Parallel 节点 ``with ThreadPoolExecutor()`` 自起+销毁一个池——
-        节点递归嵌套时会指数级开 worker、且默认无 ``max_workers``（按
-        ``min(32, cpu+4)``），单 flow 里多个 Parallel 节点同时跑很快打满。改为
-        复用模块级单例池（``BackGroundThreadPool`` / ``BackGroundProcessPool``，
-        都有 ``max_workers`` 与 ``atexit`` 钩子）。
+        节点递归嵌套时会指数级开 worker、且默认无 ``max_workers``。现在通过
+        ``plaita.core.parallel_executor.make_executor`` 拿一个复用模块级单例池的
+        执行器 (thread/process), 与 ``Map.concurrent`` 走同一套 ``ParallelExecutor``
+        协议。cancel/timeout 跨进程限制见 ``ParallelExecutor.supports_cancel_propagation``。
         """
         branches_to_execute = self.match_condition_branches(execution)
         join_branches, background_branches = self._split_branches(branches_to_execute)
 
-        pool = self._select_pool(pool_type)
-        lock = self._create_lock(pool_type)
+        mode = pool_type or self.mode
+        executor = self._build_executor(mode, execution)
+        if executor is None:
+            return {}
 
-        self._execute_background_branches(background_branches, pool, execution)
-
-        results = self._execute_join_branches(join_branches, pool, lock, execution)
-
-        return results
+        self._execute_background_branches(background_branches, executor, execution)
+        return self._execute_join_branches(join_branches, executor, execution)
 
     def _split_branches(self, branches):
         join_branches = [b for b in branches if b.name in self.join_branches]
         background_branches = [b for b in branches if b.name not in self.join_branches]
         return join_branches, background_branches
 
-    def _select_pool(self, pool_type):
-        if pool_type == THREAD:
-            return BackGroundThreadPool
-        elif pool_type == PROCESS:
-            return BackGroundProcessPool
-        else:
-            raise ValueError(f"Unknown pool type: {pool_type}")
-
-    def _create_lock(self, pool_type):
-        return Lock() if pool_type == THREAD else ProcessLock()
-
-    def _execute_background_branches(self, background_branches, pool, execution):
+    def _execute_background_branches(self, background_branches, executor, execution):
+        # fire-and-forget: submit 后不持 future 引用, 不取结果。
         for branch in background_branches:
-            pool.submit(self.exec_branch, branch, execution)
+            executor.submit(self.exec_branch, branch, execution)
 
-    def _execute_join_branches(self, join_branches, pool, lock, execution):
-        # submit 全部分支后用 ``wait`` 阻塞到所有 future 完成。不再用 ``with pool``
-        # 因为 pool 是共享单例，``__exit__`` 会把池关掉。等所有 future（含抛错的）
-        # 完成后再统一收集结果，避免某分支抛错时 results 缺字段让下游拿到 KeyError。
-        results = {}
+    def _execute_join_branches(self, join_branches, executor, execution):
+        # submit 全部分支后用 ``wait`` 阻塞到所有 future 完成。等所有 future（含
+        # 抛错的）完成后再统一收集结果, 避免某分支抛错时 results 缺字段让下游拿
+        # 到 KeyError。
+        results: Dict[str, Any] = {}
         if not join_branches:
             return results
+        lock = executor.lock
         future_to_branch = {
-            pool.submit(self.exec_branch, branch, execution): branch for branch in join_branches
+            executor.submit(self.exec_branch, branch, execution): branch for branch in join_branches
         }
-        done, _ = wait(future_to_branch)
+        done, _ = executor.wait(future_to_branch)
         for future in done:
             branch = future_to_branch[future]
             self._process_future_result(future, branch, results, lock)
@@ -211,17 +193,12 @@ class Parallel(Node):
         **cancel 信号限制**: ``ExecutionContext.__getstate__`` 会把不可 pickle
         的 ``threading.Event`` (cancel_event) 弹掉, 子进程拿到的是全新未触发
         的 Event。父进程的超时取消信号**不会跨进程传播**——如果分支内节点
-        需要响应取消 (例如父 flow 已超时), 应改用 ``mode=thread``。
+        需要响应取消 (例如父 flow 已超时), 应改用 ``mode=thread``。该限制在
+        ``ParallelExecutor.supports_cancel_propagation`` 上显式声明。
 
         唯一能做的进程边界检查: 进入 process_execute 时若父进程 cancel_event
-        已被 set, 直接放弃启动子进程, 避免无谓开销。
+        已被 set, 直接放弃启动子进程, 避免无谓开销 (在 ``_build_executor`` 里)。
         """
-        cancel_event = getattr(execution, "cancel_event", None)
-        if cancel_event is not None and cancel_event.is_set():
-            logger.warning(
-                "parallel %s: cancel_event already set, skip process branches", self.id,
-            )
-            return {}
         return self.pool_execute(PROCESS, execution)
 
     def coroutine_execute(self, execution):

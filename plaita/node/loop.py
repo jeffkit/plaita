@@ -1,8 +1,13 @@
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from typing import Any, ClassVar, Dict, Optional, Union
 
 from pydantic import model_validator
+
+from plaita.core.parallel_executor import (
+    ParallelExecutor,
+    SequentialExecutor,
+    ThreadParallelExecutor,
+)
 
 from ..io import Property
 from .child import InlineFlow
@@ -74,7 +79,13 @@ class Loop(BaseCollectionNode):
 class Map(BaseCollectionNode):
     """
     映射节点，对集合中每个元素执行子流程并返回所有结果。
-    支持 concurrent=True 并发执行（线程池）。
+    支持 concurrent=True 并发执行。
+
+    并发与非并发两条路径统一走 ``ParallelExecutor`` 协议 (见
+    ``plaita.core.parallel_executor``): concurrent=True 时用
+    ``ThreadParallelExecutor`` (复用模块级单例池, ``max_concurrent`` 用 semaphore
+    gate, 不再每次 ``with ThreadPoolExecutor()`` 自起池); concurrent=False 时用
+    ``SequentialExecutor``, 让两条路径共用同一套 ``executor.map`` 控制流。
     """
 
     node_type: ClassVar[str] = "map"
@@ -92,29 +103,28 @@ class Map(BaseCollectionNode):
             values["concurrent"] = bool(values.get("async", False))
         return values
 
-    def execute(self, execution):
-        collection = execution.evaluate(self.collection)
-        index = 0
-
+    def _build_executor(self) -> ParallelExecutor:
         if self.concurrent:
-            max_workers = self.max_concurrent or None
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(
-                        execution.get_child_execution().run_compatible,
-                        self.child_flow, False, item=item, index=i,
-                    )
-                    for i, item in enumerate(collection)
-                ]
-                return [f.result() for f in futures]
+            return ThreadParallelExecutor(max_workers=self.max_concurrent or None)
+        return SequentialExecutor()
 
-        results = []
-        for item in collection:
-            item_execution = execution.get_child_execution()
-            result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
-            results.append(result)
-            index += 1
-        return results
+    def execute(self, execution):
+        collection = list(execution.evaluate(self.collection))
+
+        # 子执行体在主线程预先创建 (与历史并发路径行为一致), 避免 worker 线程
+        # 并发调 ``get_child_execution`` 触发 ``callback_manager.child()`` 的潜在
+        # 竞态。非并发路径也走同一路径, 代价是预先创建 N 个 child 对象 (可接受)。
+        triples = [
+            (execution.get_child_execution(), item, index)
+            for index, item in enumerate(collection)
+        ]
+
+        def run_one(triple: tuple) -> Any:
+            child, item, index = triple
+            return child.run_compatible(self.child_flow, False, item=item, index=index)
+
+        executor = self._build_executor()
+        return executor.map(run_one, triples)
 
 
 class Filter(BaseCollectionNode):
