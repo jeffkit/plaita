@@ -15,7 +15,7 @@ import types
 import unittest
 from dataclasses import dataclass
 from typing import List, Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # Ensure plaita-ai is importable
 _HERE = os.path.dirname(__file__)
@@ -41,14 +41,72 @@ from plaita_ai.agent.fot.tools import (
     tool,
 )
 
-# Check if mcp package is available
-try:
-    from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: F401
-    _MCP_AVAILABLE = True
-except ImportError:
-    _MCP_AVAILABLE = False
 
-_requires_mcp = unittest.skipUnless(_MCP_AVAILABLE, "mcp package not installed")
+@dataclass
+class _ComplexResult:
+    """Module-level dataclass for type section test."""
+    items: list
+    count: int
+
+# ---------------------------------------------------------------------------
+# Inject a stub mcp module so server.py can be imported on Python 3.9
+# (real mcp requires Python >= 3.10)
+# ---------------------------------------------------------------------------
+
+def _inject_stub_mcp():
+    """Insert a minimal stub mcp.server.fastmcp into sys.modules."""
+    if "mcp" in sys.modules:
+        return  # real package already imported
+
+    class _MockFastMCP:
+        """Minimal FastMCP stub — just enough for server.py to import."""
+        def __init__(self, name, **kwargs):
+            self.name = name
+            self.instructions = kwargs.get("instructions", "")
+
+        def tool(self, *args, **kwargs):
+            """Decorator that passes the function through unchanged."""
+            def decorator(fn):
+                return fn
+            if args and callable(args[0]):
+                return args[0]  # @mcp.tool() without args
+            return decorator
+
+        def run(self):
+            pass
+
+    # Build fake module hierarchy
+    mcp_pkg = types.ModuleType("mcp")
+    mcp_server = types.ModuleType("mcp.server")
+    mcp_fastmcp = types.ModuleType("mcp.server.fastmcp")
+    mcp_fastmcp.FastMCP = _MockFastMCP
+    mcp_pkg.server = mcp_server
+    mcp_server.fastmcp = mcp_fastmcp
+
+    sys.modules.setdefault("mcp", mcp_pkg)
+    sys.modules.setdefault("mcp.server", mcp_server)
+    sys.modules.setdefault("mcp.server.fastmcp", mcp_fastmcp)
+
+
+# Inject before any server import
+_inject_stub_mcp()
+
+# Now we can always import server tools
+# Force re-import of plaita_ai.mcp to pick up the stub
+for _mod in list(sys.modules.keys()):
+    if _mod.startswith("plaita_ai.mcp"):
+        del sys.modules[_mod]
+
+from plaita_ai.mcp.server import (  # noqa: E402
+    _build_tool_instructions,
+    _load_plugins,
+    flow_compile,
+    flow_get_skill,
+    flow_get_skill_reference,
+    flow_list_nodes,
+    flow_list_tools,
+    flow_run,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +360,6 @@ class TestResultJson(unittest.TestCase):
 # MCP server tools (server.py)
 # ---------------------------------------------------------------------------
 
-@_requires_mcp
 class TestMcpServerTools(unittest.TestCase):
     def setUp(self):
         ToolNode.clear()
@@ -400,19 +457,14 @@ class TestMcpServerTools(unittest.TestCase):
         """Test that complex types produce a type definitions section."""
         from plaita_ai.mcp.server import flow_list_tools
 
-        @dataclass
-        class ComplexResult:
-            items: list
-            count: int
-
-        def get_results() -> ComplexResult:
+        def get_results() -> _ComplexResult:
             """Get results."""
-            return ComplexResult([], 0)
+            return _ComplexResult([], 0)
 
         register_tool_node(get_results)
         output = flow_list_tools(as_json=False)
         # Should include both type defs and tool signature
-        self.assertIn("ComplexResult", output)
+        self.assertIn("_ComplexResult", output)
 
     def test_flow_get_skill_returns_text(self):
         from plaita_ai.mcp.server import flow_get_skill
@@ -436,7 +488,6 @@ class TestMcpServerTools(unittest.TestCase):
 # _load_plugins
 # ---------------------------------------------------------------------------
 
-@_requires_mcp
 class TestLoadPlugins(unittest.TestCase):
     def test_load_valid_module(self):
         from plaita_ai.mcp.server import _load_plugins
@@ -466,7 +517,6 @@ class TestLoadPlugins(unittest.TestCase):
 # _build_tool_instructions
 # ---------------------------------------------------------------------------
 
-@_requires_mcp
 class TestBuildToolInstructions(unittest.TestCase):
     def setUp(self):
         ToolNode.clear()
