@@ -124,8 +124,26 @@ class HttpExecutor:
         self.delegate = delegate
         self.c = None
 
+    def _build_request_params(self):
+        """Compute (url, headers, data) shared between sync and async paths."""
+        url = self.url
+        if self.query:
+            parsed_url = urlparse(url)
+            query_string = urlencode(self.query)
+            if parsed_url.query:
+                new_query = f"{parsed_url.query}&{query_string}"
+            else:
+                new_query = query_string
+            parts = list(parsed_url)
+            parts[4] = new_query
+            url = parsed_url._replace(query=new_query).geturl()
+
+        headers = dict(self.headers) if self.headers else {}
+        data = json.dumps(self.body).encode("utf-8") if self.body is not None else None
+        return url, headers, data
+
     def handle_request(self, ctx):
-        """处理HTTP请求"""
+        """处理HTTP请求（同步）"""
         if requests is None:
             _require_http()
         if self.c is None:
@@ -156,45 +174,74 @@ class HttpExecutor:
             ), None
         except Exception as e:
             return HttpResponse(raw_request=request, raw_response=response), e
-    
-    def new_request(self, ctx):
-        """创建HTTP请求"""
-        try:
-            # 准备请求体
-            data = None
-            if self.body is not None:
-                data = json.dumps(self.body).encode('utf-8')
-            
-            # 准备URL和查询参数
-            url = self.url
-            if self.query:
-                # 添加查询参数到URL
-                parsed_url = urlparse(url)
-                query_string = urlencode(self.query)
-                
-                if parsed_url.query:
-                    new_query = f"{parsed_url.query}&{query_string}"
-                else:
-                    new_query = query_string
-                
-                parts = list(parsed_url)
-                parts[4] = new_query
-                url = urlparse('').geturl()
-                
-            # 创建请求
-            headers = {}
-            if self.headers:
-                headers = self.headers
 
-            req = requests.Request(
-                method=self.method,
-                url=url,
-                headers=headers,
-                data=data if data else None
-            )
-            return req.prepare()
+    async def handle_request_async(self, ctx):
+        """处理HTTP请求（异步，使用 aiohttp）。
+
+        返回 (AsyncHttpResponse, error) 与同步版本保持一致的签名。
+        ``AsyncHttpResponse`` 是仅用于 async 路径的轻量包装，字段名与
+        ``HttpResponse`` 相同，让 ``HTTP.execute`` 的结果处理代码可复用。
+        """
+        if aiohttp is None:
+            _require_http()
+
+        url, headers, data = self._build_request_params()
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method=self.method,
+                    url=url,
+                    headers=headers,
+                    data=data,
+                ) as response:
+                    text = await response.text()
+                    try:
+                        import json as _json
+                        res = _json.loads(text)
+                    except Exception:
+                        res = text
+                    raw_resp = _AiohttpResponseWrapper(
+                        status_code=response.status,
+                        reason=response.reason,
+                        headers=dict(response.headers),
+                        body=res,
+                    )
+                    return HttpResponse(raw_response=raw_resp, res=res), None
         except Exception as e:
-            raise e
+            return HttpResponse(), e
+
+    def new_request(self, ctx):
+        """创建HTTP请求（同步路径用）"""
+        url, headers, data = self._build_request_params()
+        if requests is None:
+            _require_http()
+        req = requests.Request(
+            method=self.method,
+            url=url,
+            headers=headers,
+            data=data if data else None,
+        )
+        return req.prepare()
+
+
+class _AiohttpResponseWrapper:
+    """Minimal shim that exposes the same attributes as a ``requests.Response``
+    so the result-building code in ``HTTP.execute`` / ``HTTP.arun`` can be
+    shared without branching on response type."""
+
+    def __init__(self, status_code: int, reason: str, headers: dict, body):
+        self.status_code = status_code
+        self.reason = reason
+        self.headers = headers
+        self._body = body
+
+    def json(self):
+        return self._body
+
+    @property
+    def text(self):
+        return self._body if isinstance(self._body, str) else json.dumps(self._body)
 
 
 class HTTP(Node):
@@ -241,41 +288,47 @@ class HTTP(Node):
         if self.method not in valid_methods:
             raise ValueError(f"Invalid HTTP method: {self.method}")
     
+    def _build_response_result(self, http_rsp, execution):
+        """Shared response → result conversion for both sync and async paths."""
+        response = {
+            RESPONSE_DATA_KEY: http_rsp.res,
+            RESPONSE_STATUS_KEY: http_rsp.raw_response.status_code,
+            RESPONSE_STATUS_TEXT_KEY: http_rsp.raw_response.reason,
+            RESPONSE_HEADERS_KEY: dict(http_rsp.raw_response.headers),
+        }
+        if execution:
+            execution.set_node_context(self.id, RESPONSE_CTX_KEY, response)
+            execution.set_node_context(self.id, HEADER_CTX_KEY, dict(http_rsp.raw_response.headers))
+            execution.set_node_context(self.id, STATUS_CTX_KEY, http_rsp.raw_response.status_code)
+        if self.output is None:
+            return response[RESPONSE_DATA_KEY]
+        return execution.evaluate(self.output)
+
     def execute(self, execution):
-        """执行HTTP请求"""
+        """执行HTTP请求（同步）"""
         http_rsp = None
-        
         try:
             executor = self.new_executor(execution)
             if not executor:
                 return None, Exception("Failed to create HTTP executor")
-            
             http_rsp, err = executor.handle_request(execution)
             if err:
                 return self.handle_http_node_err(err, http_rsp)
-            
-            # 处理响应结果
-            response = {
-                RESPONSE_DATA_KEY: http_rsp.res,
-                RESPONSE_STATUS_KEY: http_rsp.raw_response.status_code,
-                RESPONSE_STATUS_TEXT_KEY: http_rsp.raw_response.reason,
-                RESPONSE_HEADERS_KEY: dict(http_rsp.raw_response.headers),
-            }
-            
-            # 存储响应到当前节点上下文
-            if execution:
-                execution.set_node_context(self.id, RESPONSE_CTX_KEY, response)
-                execution.set_node_context(self.id, HEADER_CTX_KEY, dict(http_rsp.raw_response.headers))
-                execution.set_node_context(self.id, STATUS_CTX_KEY, http_rsp.raw_response.status_code)
-            
-            # 设置最终结果
-            final_result = None
-            if self.output is None:
-                final_result = response[RESPONSE_DATA_KEY]
-            else:
-                final_result = execution.evaluate(self.output)
-            
-            return final_result
+            return self._build_response_result(http_rsp, execution)
+        except Exception as e:
+            return self.handle_http_node_err(e, http_rsp)
+
+    async def arun(self, execution):
+        """执行HTTP请求（异步，使用 aiohttp，不阻塞事件循环）。"""
+        http_rsp = None
+        try:
+            executor = self.new_executor(execution)
+            if not executor:
+                raise RuntimeError("Failed to create HTTP executor")
+            http_rsp, err = await executor.handle_request_async(execution)
+            if err:
+                return self.handle_http_node_err(err, http_rsp)
+            return self._build_response_result(http_rsp, execution)
         except Exception as e:
             return self.handle_http_node_err(e, http_rsp)
     

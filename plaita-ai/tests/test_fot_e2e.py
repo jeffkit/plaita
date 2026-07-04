@@ -7,13 +7,20 @@ chat model that returns scripted @flow source.
 
 from __future__ import annotations
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from plaita_ai.agent.fot import FoTAgent
 from plaita_ai.agent.fot.tools import ToolNode, register_tool_node
 
 
-@ToolNode.register("echo")
+@pytest.fixture(autouse=True)
+def clear_tool_registry():
+    ToolNode.clear()
+    yield
+    ToolNode.clear()
+
+
 def echo(text: str) -> str:
     """回显文本。"""
     return text
@@ -42,7 +49,6 @@ def use_echo(INPUT):
 
 
 def test_fot_e2e_plan_compile_run():
-    register_tool_node(echo)
     model = FakeListChatModel(responses=[VALID_FLOW])
     agent = FoTAgent(model=model, tools=[echo])
     result = agent.invoke({"task": "回显用户问题", "q": "hello"})
@@ -55,7 +61,6 @@ def test_fot_e2e_plan_compile_run():
 
 def test_fot_e2e_self_correction():
     """bad flow → compile error → review → fixed flow → run."""
-    register_tool_node(echo)
     model = FakeListChatModel(responses=[BAD_FLOW, FIXED_FLOW])
     agent = FoTAgent(model=model, tools=[echo], max_compile_retries=2)
     result = agent.invoke({"task": "回显", "q": "world"})
@@ -66,7 +71,6 @@ def test_fot_e2e_self_correction():
 
 def test_fot_e2e_compile_exhausted_reports_errors():
     """All attempts fail → ok=False with compile_errors, no run."""
-    register_tool_node(echo)
     model = FakeListChatModel(responses=[BAD_FLOW, BAD_FLOW, BAD_FLOW])
     agent = FoTAgent(model=model, tools=[echo], max_compile_retries=2)
     result = agent.invoke({"task": "回显", "q": "x"})

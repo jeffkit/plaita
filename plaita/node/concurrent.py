@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, ClassVar, Dict, List, Optional
 
@@ -315,6 +316,54 @@ class Parallel(Node):
             raise ValueError(f"Unknown mode: {self.mode}")
 
         return results
+
+    async def exec_branch_async(self, pb: "ParallelBranch", execution):
+        """异步执行单个并行分支。"""
+        branch_execution = execution.get_child_execution()
+        input_value = execution.evaluate(pb.input)
+        rs = await branch_execution.arun_compatible(pb.flow, False, input_value)
+        logger.debug("async branch %s executed: %s", pb.name, rs)
+        return rs
+
+    async def arun(self, execution):
+        """异步执行并行节点。
+
+        - coroutine 模式：用 ``asyncio.gather`` 真并发执行所有 join 分支。
+        - thread / process 模式：保持语义兼容，每个分支在线程中执行，
+          通过 ``asyncio.to_thread`` 避免阻塞事件循环。
+        """
+        branches_to_execute = self.match_condition_branches(execution)
+        join_branches, background_branches = self._split_branches(branches_to_execute)
+
+        if self.mode == COROUTINE:
+            # background branches: fire-and-forget as asyncio tasks
+            async def _bg(branch):
+                try:
+                    await self.exec_branch_async(branch, execution)
+                except Exception as exc:
+                    logger.warning("async background branch %r raised: %s", branch.name, exc, exc_info=True)
+
+            for branch in background_branches:
+                asyncio.ensure_future(_bg(branch))
+
+            # join branches: truly concurrent via gather
+            async def _join(branch):
+                try:
+                    result = await self.exec_branch_async(branch, execution)
+                    return branch.name, result
+                except Exception as exc:
+                    logger.warning("async parallel branch %s raised: %s", branch.name, exc, exc_info=True)
+                    return branch.name, {
+                        "__parallel_error__": str(exc),
+                        "__branch__": branch.name,
+                    }
+
+            pairs = await asyncio.gather(*(_join(b) for b in join_branches))
+            return {name: result for name, result in pairs}
+        else:
+            # thread / process: delegate to sync pool_execute in a thread
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self.pool_execute, self.mode, execution)
 
     def match_condition_branches(self, execution):
         """根据条件匹配需要执行的分支"""

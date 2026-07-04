@@ -67,10 +67,13 @@ def cmd_skill(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_mcp(_: argparse.Namespace) -> int:
+def cmd_mcp(args: argparse.Namespace) -> int:
     from plaita_ai.mcp.server import main as mcp_main
 
-    mcp_main()
+    mcp_main(
+        plugins=args.plugin or [],
+        extra_paths=args.plugin_path or [],
+    )
     return 0
 
 
@@ -130,6 +133,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_skill.set_defaults(func=cmd_skill)
 
     p_mcp = sub.add_parser("mcp", help="Start MCP stdio server (plaita-flow)")
+    p_mcp.add_argument(
+        "--plugin",
+        metavar="MODULE",
+        action="append",
+        default=[],
+        help=(
+            "Python module path to import before starting the server "
+            "(registers custom nodes). Repeatable. "
+            "Also reads PLAITA_PLUGINS env var (comma-separated)."
+        ),
+    )
+    p_mcp.add_argument(
+        "--plugin-path",
+        metavar="DIR",
+        action="append",
+        default=[],
+        help=(
+            "Directory to prepend to sys.path before importing plugins. "
+            "Repeatable. Also reads PLAITA_PLUGIN_PATH env var."
+        ),
+    )
     p_mcp.set_defaults(func=cmd_mcp)
 
     p_bench = sub.add_parser("llm-benchmark", help="Run FoT/ReAct × agent-benchmark (dev tool, needs checkout)")

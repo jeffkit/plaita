@@ -20,9 +20,9 @@ agent = [
     "langchain>=1.0",
     "langchain-core>=1.0",
 ]
+# "fot" is an alias for "agent" kept for backward compatibility
 fot = [
-    "langchain>=1.0",
-    "langchain-core>=1.0",
+    "plaita-ai[agent]",
 ]
 openai = [
     "langchain-openai>=0.3",
@@ -32,6 +32,7 @@ anthropic = [
 ]
 dev = [
     "pytest",
+    "pytest-asyncio",
 ]
 all = ["plaita-ai[agent,openai,anthropic,dev]"]
 
@@ -54,3 +55,4 @@ plaita_ai = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "strict"

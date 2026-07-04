@@ -157,6 +157,12 @@ nav:
       - FlowWorker: distributed/flow-worker.md
       - 扩展节点: distributed/extended-nodes.md
       - 外延服务: distributed/services.md
+  - AI 集成:
+      - ai/index.md
+      - MCP 服务: ai/mcp.md
+      - ReAct Agent: ai/react-agent.md
+      - FoT Agent: ai/fot-agent.md
+      - Skill 说明: ai/skills.md
   - 应用场景:
       - scenarios/index.md
       - Agent 编排: scenarios/agent-orchestration.md

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 import json
-from typing import Any, Dict, Optional
+import logging
+import os
+import sys
+from typing import Any, Dict, List, Optional
 
 from plaita_ai.flow_runner import (
     compile_flow,
@@ -13,6 +17,8 @@ from plaita_ai.flow_runner import (
     result_json,
     run_flow,
 )
+
+logger = logging.getLogger(__name__)
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -29,6 +35,29 @@ mcp = FastMCP(
         "On compile errors, fix the @flow source using line numbers and retry."
     ),
 )
+
+
+def _load_plugins(plugins: List[str], extra_paths: List[str]) -> None:
+    """Import plugin modules so their node registrations take effect.
+
+    Args:
+        plugins: List of Python module paths to import (e.g. ``myapp.nodes``).
+        extra_paths: Directories prepended to ``sys.path`` before importing.
+            Useful when plugin modules live outside an installed package.
+    """
+    for p in extra_paths:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    for mod_path in plugins:
+        try:
+            importlib.import_module(mod_path)
+            logger.info("plaita-ai mcp: loaded plugin %r", mod_path)
+        except Exception as exc:
+            logger.error("plaita-ai mcp: failed to load plugin %r: %s", mod_path, exc)
+            raise SystemExit(
+                f"插件模块 {mod_path!r} 加载失败: {exc}\n"
+                "请确认模块路径正确，且相关依赖已安装。"
+            ) from exc
 
 
 @mcp.tool()
@@ -99,8 +128,30 @@ def flow_get_skill_reference(
     return get_skill_reference(skill_name, reference)
 
 
-def main() -> None:
-    """Entry point: ``python -m plaita_ai.mcp.server`` or ``plaita-ai mcp``."""
+def main(plugins: Optional[List[str]] = None, extra_paths: Optional[List[str]] = None) -> None:
+    """Entry point: ``python -m plaita_ai.mcp.server`` or ``plaita-ai mcp``.
+
+    Custom node modules are loaded (in order) before the MCP server starts,
+    so generated ``@flow`` can use those node placeholders.
+
+    Plugin resolution order:
+    1. ``plugins`` parameter (programmatic / CLI ``--plugin`` flags).
+    2. ``PLAITA_PLUGINS`` environment variable (comma-separated module paths).
+    3. ``PLAITA_PLUGIN_PATH`` environment variable (extra ``sys.path`` entries).
+    """
+    all_plugins: List[str] = list(plugins or [])
+    env_plugins = os.environ.get("PLAITA_PLUGINS", "").strip()
+    if env_plugins:
+        all_plugins.extend(p.strip() for p in env_plugins.split(",") if p.strip())
+
+    all_paths: List[str] = list(extra_paths or [])
+    env_path = os.environ.get("PLAITA_PLUGIN_PATH", "").strip()
+    if env_path:
+        all_paths.extend(p.strip() for p in env_path.split(os.pathsep) if p.strip())
+
+    if all_plugins:
+        _load_plugins(all_plugins, all_paths)
+
     mcp.run()
 
 

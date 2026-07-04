@@ -1,12 +1,20 @@
 """Tests for FoT agent (LangChain FakeListChatModel, no API key)."""
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from plaita_ai.agent.fot import FoTAgent
 from plaita_ai.agent.fot.tools import ToolNode, register_tool_node
 
 
-@ToolNode.register("echo")
+@pytest.fixture(autouse=True)
+def clear_tool_registry():
+    """Isolate ToolNode registrations between tests."""
+    ToolNode.clear()
+    yield
+    ToolNode.clear()
+
+
 def echo(text: str) -> str:
     """回显文本。"""
     return text
@@ -28,7 +36,6 @@ def use_echo(INPUT):
 
 
 def test_fot_agent_compiles_and_runs():
-    register_tool_node(echo)
     model = FakeListChatModel(responses=[VALID_FLOW])
     agent = FoTAgent(model=model, tools=[echo])
     result = agent.invoke({"task": "回显用户问题", "q": "hello"})
@@ -39,7 +46,6 @@ def test_fot_agent_compiles_and_runs():
 
 
 def test_fot_agent_self_corrects_on_compile_error():
-    register_tool_node(echo)
     bad_flow = '''```python
 @flow("bad", input_type="object")
 def bad(INPUT):

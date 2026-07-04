@@ -43,6 +43,13 @@ class InlineFlow(FlowNode):
         lazy = execution.mode == ExecutionMode.GENERATOR
         return child_execution.run_compatible(self.child_flow, lazy, execution.evaluate(self.input))
 
+    async def arun(self, execution):
+        if self.child_flow.input_property:
+            assert match(self.child_flow.input_property, self.input), "input not match required"
+        child_execution = execution.get_child_execution()
+        lazy = execution.mode == ExecutionMode.GENERATOR
+        return await child_execution.arun_compatible(self.child_flow, lazy, execution.evaluate(self.input))
+
 
 class ReferenceFlow(FlowNode):
     """
@@ -66,3 +73,10 @@ class ReferenceFlow(FlowNode):
         child_execution = execution.get_child_execution()
         lazy = execution.mode == ExecutionMode.GENERATOR
         return child_execution.run_compatible(self.child_flow, lazy, execution.evaluate(self.input))
+
+    async def arun(self, execution):
+        assert self.child_flow is not None, "child_flow for reference flow node is required"
+        assert match(self.child_flow.input_property, self.input), "input not match required"
+        child_execution = execution.get_child_execution()
+        lazy = execution.mode == ExecutionMode.GENERATOR
+        return await child_execution.arun_compatible(self.child_flow, lazy, execution.evaluate(self.input))

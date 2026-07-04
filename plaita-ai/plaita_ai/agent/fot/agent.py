@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Union
 
@@ -64,15 +65,32 @@ class FoTAgent:
         if self.tools:
             register_tool_node(*self.tools)
 
+    async def ainvoke(self, inputs: Dict[str, Any]) -> FoTResult:
+        """Async equivalent of ``invoke``.
+
+        The FoT planning loop uses synchronous LLM calls internally.
+        ``ainvoke`` offloads the entire plan→compile→run pipeline to a thread
+        pool via ``asyncio.to_thread``, so the event loop is never blocked.
+
+        Usage::
+
+            result = await agent.ainvoke({"task": "查北京天气", "city": "北京"})
+        """
+        return await asyncio.to_thread(self.invoke, inputs)
+
     def invoke(self, inputs: Dict[str, Any]) -> FoTResult:
         task = str(inputs.get("task") or inputs.get("input") or "").strip()
         if not task:
             raise ValueError("FoTAgent.invoke 需要 task= 或 input= 字段")
 
+        # Strip agent-control keys; keep all user-defined flow input fields.
+        # "instruction" is intentionally NOT excluded — it may be a legitimate
+        # flow INPUT field.  Override the agent instruction via the constructor
+        # parameter, not via invoke().
         run_inputs = {
             k: v
             for k, v in inputs.items()
-            if k not in {"task", "input", "instruction"}
+            if k not in {"task", "input"}
         }
 
         source, compiled, attempts = plan_with_compile_loop(

@@ -2,11 +2,20 @@
 
 import json
 
+import pytest
 from langchain.tools import tool
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
+from plaita_ai.agent.fot.tools import ToolNode
 from plaita_ai.agent.react import PlaitaAgent, build_plaita_tools
 from plaita_ai.agent.react.prompts import build_system_prompt
+
+
+@pytest.fixture(autouse=True)
+def clear_tool_registry():
+    ToolNode.clear()
+    yield
+    ToolNode.clear()
 
 
 GOOD_SRC = '''

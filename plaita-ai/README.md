@@ -168,14 +168,16 @@ python plaita-ai/examples/fot/demo.py
 
 ## Skill
 
-内置 skill 位于 `plaita_ai/skills/flow-coder/`。可安装到 Cursor：
+内置 skill 位于 `plaita_ai/skills/`，是唯一权威副本，随包分发。软链到用户 skill 目录即可：
 
 ```bash
-# 可选：链到 ~/.cursor/skills
-ln -sf "$(pwd)/plaita-ai/plaita_ai/skills/flow-coder" ~/.cursor/skills/flow-coder
-```
+SKILLS="$(python -c 'import plaita_ai, pathlib; print(pathlib.Path(plaita_ai.__file__).parent / "skills")')"
 
-仓库根目录 `skills/flow-coder/` 为兼容入口，内容与 `plaita-ai` 包内 skill 同步维护。
+# Claude Code
+ln -snf "$SKILLS/flow-coder"          ~/.claude/skills/flow-coder
+ln -snf "$SKILLS/plaita-flow-builder" ~/.claude/skills/plaita-flow-builder
+ln -snf "$SKILLS/plaita-flow-runner"  ~/.claude/skills/plaita-flow-runner
+```
 
 ## 开发
 

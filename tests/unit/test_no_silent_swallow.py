@@ -20,7 +20,8 @@ PLAITA_DIR = Path(__file__).resolve().parents[2] / "plaita"
 # 这些是预期的 fallback 分支 (如 JSON 解析失败回退到原始文本、版本号排序
 # 失败回退到任意版本), 不记录异常是合理的。
 ALLOWED_SILENT = {
-    ("node/http.py", 148),   # response.json() 失败回退到 response.text
+    ("node/http.py", 166),   # response.json() 失败回退到 response.text (sync path)
+    ("node/http.py", 202),   # json.loads() 失败回退到原始文本 (async aiohttp path)
     ("storage/memory.py", 138),  # 版本号非纯数字排序失败, 回退到任意版本
 }
 

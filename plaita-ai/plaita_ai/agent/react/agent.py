@@ -9,12 +9,21 @@ This is a *vanilla LangChain 1.x ``create_agent``* with two additions:
 When no plaita escalation is desired (``enable_flow=False`` or no plaita tools
 injected), it behaves identically to a standard ReAct agent over the provided
 tools.
+
+Async / streaming support
+-------------------------
+- ``ainvoke``: async equivalent of ``invoke``, returns ``PlaitaAgentResult``.
+- ``astream``: async generator that yields ``str`` tokens as they arrive from
+  the LLM.  Requires the underlying model to support streaming (e.g.
+  ``ChatOpenAI(streaming=True)``).  Tool-call messages are not streamed;
+  only the final text reply tokens are yielded.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Union
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
@@ -113,6 +122,15 @@ class PlaitaAgent:
         )
         self.enable_flow = enable_flow
 
+    def _build_messages(
+        self,
+        message: str,
+        history: Optional[Sequence[BaseMessage]],
+    ) -> List[BaseMessage]:
+        msgs: List[BaseMessage] = list(history or [])
+        msgs.append(HumanMessage(content=message))
+        return msgs
+
     def invoke(
         self,
         message: str,
@@ -120,13 +138,104 @@ class PlaitaAgent:
         history: Optional[Sequence[BaseMessage]] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> PlaitaAgentResult:
-        """Run one user turn (optional prior messages for multi-turn)."""
-        messages: List[BaseMessage] = list(history or [])
-        messages.append(HumanMessage(content=message))
+        """Run one user turn synchronously (optional prior messages for multi-turn)."""
+        messages = self._build_messages(message, history)
         state = self._graph.invoke({"messages": messages}, config=config or {})
         out_messages = list(state.get("messages", messages))
         text = _last_ai_text(out_messages)
         return PlaitaAgentResult(text=text, messages=out_messages)
+
+    async def ainvoke(
+        self,
+        message: str,
+        *,
+        history: Optional[Sequence[BaseMessage]] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> PlaitaAgentResult:
+        """Async equivalent of ``invoke``.
+
+        Use this in asyncio / FastAPI contexts to avoid blocking the event loop.
+        The underlying LangGraph ``CompiledStateGraph.ainvoke`` is used directly.
+        """
+        messages = self._build_messages(message, history)
+        state = await self._graph.ainvoke({"messages": messages}, config=config or {})
+        out_messages = list(state.get("messages", messages))
+        text = _last_ai_text(out_messages)
+        return PlaitaAgentResult(text=text, messages=out_messages)
+
+    async def astream(
+        self,
+        message: str,
+        *,
+        history: Optional[Sequence[BaseMessage]] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """Async generator that yields LLM text tokens as they arrive.
+
+        Only the final assistant text reply is streamed; tool-call intermediate
+        steps are not yielded (they complete silently before streaming starts).
+
+        Requires the underlying model to support streaming (e.g.
+        ``ChatOpenAI(streaming=True)`` or ``ChatAnthropic()``).  With models
+        that don't stream, the full reply is yielded as a single token.
+
+        Usage::
+
+            async for token in agent.astream("北京天气？"):
+                print(token, end="", flush=True)
+        """
+        messages = self._build_messages(message, history)
+        cfg = config or {}
+
+        # astream_events v2 gives us on_chat_model_stream events per token.
+        # We only want tokens from the *last* model call (the final answer),
+        # not from intermediate tool-deciding steps.  We collect all tokens
+        # grouped by run_id and yield from the last non-empty group.
+        token_groups: Dict[str, List[str]] = {}
+        run_order: List[str] = []
+
+        async for event in self._graph.astream_events(
+            {"messages": messages}, config=cfg, version="v2"
+        ):
+            if event["event"] != "on_chat_model_stream":
+                continue
+            chunk = event["data"].get("chunk")
+            if chunk is None:
+                continue
+            content = chunk.content
+            if not content:
+                continue
+            token = _extract_text_token(content)
+            if not token:
+                continue
+            run_id = event.get("run_id", "")
+            if run_id not in token_groups:
+                token_groups[run_id] = []
+                run_order.append(run_id)
+            token_groups[run_id].append(token)
+
+        # Yield tokens from the last model run that produced text output.
+        for run_id in reversed(run_order):
+            tokens = token_groups[run_id]
+            if tokens:
+                for token in tokens:
+                    yield token
+                break
+
+
+def _extract_text_token(content: Any) -> str:
+    """Extract a plain-text string from an AIMessageChunk content value."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "".join(parts)
+    return ""
 
 
 def _last_ai_text(messages: Sequence[BaseMessage]) -> str:

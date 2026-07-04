@@ -33,6 +33,6 @@ def extract_flow_source(text: str) -> str:
 
 
 def _looks_like_flow_source(source: str) -> bool:
-    if any(marker in source for marker in _FLOW_MARKERS):
-        return True
-    return source.startswith("def ") and "INPUT" in source
+    # Require at least one @flow or @childflow decorator — plain Python functions
+    # that happen to contain "INPUT" would otherwise be misidentified.
+    return any(marker in source for marker in _FLOW_MARKERS)

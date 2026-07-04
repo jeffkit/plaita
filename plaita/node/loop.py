@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 from typing import Any, ClassVar, Dict, Optional, Union
 
@@ -59,13 +60,25 @@ class Loop(BaseCollectionNode):
             result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
             results.append(result)
             if self.condition:
-                # 表达式引擎里有 ``$F.set`` / ``$F.pop`` / ``$F.setListItem`` 等
-                # mutate 操作 (见 plaita/core/expression.py), condition.match 通过
-                # evaluate 调用它们时会改 context 内 value 对象。``dict(...)``
-                # shallow copy 只防 top-level key 增删, 不防 value 对象被改——
-                # 历史上注释自安慰 "match is read-only" 是错的。每次迭代 deepcopy
-                # 把隔离做实, O(context_size) 的成本对 loop 而言可接受 (condition
-                # 已经是少数路径, 不在 hot loop)。
+                loop_ctx = deepcopy(execution.context)
+                loop_ctx[f"{pfx}LOOP-ITEM"] = item
+                loop_ctx[f"{pfx}LOOP-INDEX"] = index
+                loop_ctx[f"{pfx}LOOP-RESULT"] = result
+                if not self.condition.match(loop_ctx, pfx):
+                    break
+            index += 1
+        return results[-1] if len(results) > 0 else None
+
+    async def arun(self, execution):
+        collection = execution.evaluate(self.collection)
+        results = []
+        pfx = execution.express_prefix
+        index = 0
+        for item in collection:
+            item_execution = execution.get_child_execution()
+            result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
+            results.append(result)
+            if self.condition:
                 loop_ctx = deepcopy(execution.context)
                 loop_ctx[f"{pfx}LOOP-ITEM"] = item
                 loop_ctx[f"{pfx}LOOP-INDEX"] = index
@@ -126,6 +139,31 @@ class Map(BaseCollectionNode):
         executor = self._build_executor()
         return executor.map(run_one, triples)
 
+    async def arun(self, execution):
+        """异步 Map：concurrent=True 时用 asyncio.gather 并发，否则顺序执行。"""
+        collection = list(execution.evaluate(self.collection))
+        triples = [
+            (execution.get_child_execution(), item, index)
+            for index, item in enumerate(collection)
+        ]
+
+        async def run_one_async(child, item, index):
+            return await child.arun_compatible(self.child_flow, False, item=item, index=index)
+
+        if self.concurrent:
+            sem = asyncio.Semaphore(self.max_concurrent or len(triples) or 1)
+
+            async def run_one_gated(child, item, index):
+                async with sem:
+                    return await run_one_async(child, item, index)
+
+            return list(await asyncio.gather(*(run_one_gated(c, i, idx) for c, i, idx in triples)))
+        else:
+            results = []
+            for child, item, index in triples:
+                results.append(await run_one_async(child, item, index))
+            return results
+
 
 class Filter(BaseCollectionNode):
     """
@@ -141,13 +179,21 @@ class Filter(BaseCollectionNode):
     def execute(self, execution):
         collection = execution.evaluate(self.collection)
         results = []
-        index = 0
-        for item in collection:
+        for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
             result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
             if result:
                 results.append(item)
-            index += 1
+        return results
+
+    async def arun(self, execution):
+        collection = execution.evaluate(self.collection)
+        results = []
+        for index, item in enumerate(collection):
+            item_execution = execution.get_child_execution()
+            result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
+            if result:
+                results.append(item)
         return results
 
 
@@ -164,13 +210,20 @@ class Find(BaseCollectionNode):
 
     def execute(self, execution):
         collection = execution.evaluate(self.collection)
-        index = 0
-        for item in collection:
+        for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
             result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
             if result:
                 return item
-            index += 1
+        return None
+
+    async def arun(self, execution):
+        collection = execution.evaluate(self.collection)
+        for index, item in enumerate(collection):
+            item_execution = execution.get_child_execution()
+            result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
+            if result:
+                return item
         return None
 
 
@@ -189,9 +242,17 @@ class Reduce(BaseCollectionNode):
     def execute(self, execution):
         collection = execution.evaluate(self.collection)
         result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
-
         items = collection[1:] if self.initial is None else collection
         for item in items:
             item_execution = execution.get_child_execution()
             result = item_execution.run_compatible(self.child_flow, False, first=result, second=item)
+        return result
+
+    async def arun(self, execution):
+        collection = execution.evaluate(self.collection)
+        result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
+        items = collection[1:] if self.initial is None else collection
+        for item in items:
+            item_execution = execution.get_child_execution()
+            result = await item_execution.arun_compatible(self.child_flow, False, first=result, second=item)
         return result
