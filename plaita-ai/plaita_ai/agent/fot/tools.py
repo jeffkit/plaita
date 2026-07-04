@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 ToolLike = Union[Callable[..., Any], Any]  # Callable or LangChain BaseTool
 
+# Sentinel for "parameter has no default value".
+# We CANNOT use inspect.Parameter.empty here because Python 3.9's
+# inspect module treats that sentinel as "no default" when validating
+# dataclass __init__ signatures, causing ValueError at class definition time.
+_NO_DEFAULT: Any = object()
+
 
 # ---------------------------------------------------------------------------
 # Schema helpers
@@ -215,16 +221,16 @@ class ParamSchema:
     name: str
     type: str = "any"           # JSON-schema type name (string/integer/boolean/…)
     required: bool = True
-    default: Any = inspect.Parameter.empty
+    default: Any = _NO_DEFAULT
     description: str = ""
     py_annotation: str = ""     # Original Python annotation string (e.g. "List[str]")
-    _raw_annotation: Any = field(default=None, repr=False, compare=False)
+    annotation_raw: Any = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"type": self.type, "required": self.required}
         if self.description:
             d["description"] = self.description
-        if self.default is not inspect.Parameter.empty:
+        if self.default is not _NO_DEFAULT:
             d["default"] = self.default
         return d
 
@@ -244,7 +250,7 @@ class ToolSchema:
     # Python return annotation string, e.g. "dict", "str", "List[Order]"
     return_annotation: str = ""
     # Raw return annotation object for complex type introspection
-    _raw_return: Any = field(default=None, repr=False, compare=False)
+    return_raw: Any = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
@@ -279,7 +285,7 @@ class ToolSchema:
                 part = f"{p.name}: {ptype}"
             else:
                 part = p.name
-            if not p.required and p.default is not inspect.Parameter.empty:
+            if not p.required and p.default is not _NO_DEFAULT:
                 part += f" = {p.default!r}"
             elif not p.required:
                 part += " = None"
@@ -321,10 +327,10 @@ class ToolSchema:
         # Collect all referenced complex types from params and return annotation
         complex_types: Dict[str, type] = {}
         for p in self.params:
-            if p._raw_annotation is not None:
-                _collect_complex_types(p._raw_annotation, complex_types)
-        if self._raw_return is not None:
-            _collect_complex_types(self._raw_return, complex_types)
+            if p.annotation_raw is not None:
+                _collect_complex_types(p.annotation_raw, complex_types)
+        if self.return_raw is not None:
+            _collect_complex_types(self.return_raw, complex_types)
 
         blocks: List[str] = []
         for cls in complex_types.values():
@@ -366,7 +372,7 @@ class ToolSchema:
                 part = f"{p.name}: {ptype}"
             else:
                 part = p.name
-            if not p.required and p.default is not inspect.Parameter.empty:
+            if not p.required and p.default is not _NO_DEFAULT:
                 part += f" = {p.default!r}"
             elif not p.required:
                 part += " = None"
@@ -461,7 +467,7 @@ def _build_schema(func: Callable[..., Any], name: str, description: str) -> Tool
         type_name = _py_type_name(annotation)
         py_anno = _annotation_str(annotation) if annotation is not inspect.Parameter.empty else ""
         required = param.default is inspect.Parameter.empty
-        default = param.default if not required else inspect.Parameter.empty
+        default = param.default if not required else _NO_DEFAULT
         params.append(ParamSchema(
             name=pname,
             type=type_name,
@@ -469,7 +475,7 @@ def _build_schema(func: Callable[..., Any], name: str, description: str) -> Tool
             default=default,
             description=param_docs.get(pname, ""),
             py_annotation=py_anno,
-            _raw_annotation=annotation if annotation is not inspect.Parameter.empty else None,
+            annotation_raw=annotation if annotation is not inspect.Parameter.empty else None,  # noqa: E501
         ))
     return ToolSchema(
         name=name,
@@ -477,7 +483,7 @@ def _build_schema(func: Callable[..., Any], name: str, description: str) -> Tool
         params=params,
         has_auth_context=has_auth_context,
         return_annotation=return_annotation,
-        _raw_return=return_hint if return_hint is not inspect.Parameter.empty else None,
+        return_raw=return_hint if return_hint is not inspect.Parameter.empty else None,
     )
 
 
@@ -844,10 +850,10 @@ def list_tools(as_code: bool = True) -> List[Any]:
     all_complex: Dict[str, type] = {}
     for s in schemas:
         for p in s.params:
-            if p._raw_annotation is not None:
-                _collect_complex_types(p._raw_annotation, all_complex)
-        if s._raw_return is not None:
-            _collect_complex_types(s._raw_return, all_complex)
+            if p.annotation_raw is not None:
+                _collect_complex_types(p.annotation_raw, all_complex)
+        if s.return_raw is not None:
+            _collect_complex_types(s.return_raw, all_complex)
 
     result: List[str] = []
     if all_complex:
