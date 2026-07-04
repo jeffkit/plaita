@@ -23,7 +23,14 @@ class MemoryEventStorage(EventStorage):
     def __init__(self):
         self.events: Dict[str, Event] = {}
         self.event_types: Dict[str, List[str]] = defaultdict(list)
-        self.lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        # Lazily create the lock inside an async context (Python 3.9 compat).
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
     
     async def store_event(self, event: Event) -> str:
         """存储事件"""
@@ -98,7 +105,13 @@ class InMemoryEventSubscriptionStorage(EventSubscriptionStorage):
     """
     def __init__(self):
         self.subscriptions: Dict[str, EventSubscription] = {}
-        self.lock = asyncio.Lock()  # 添加锁以确保线程安全
+        self._lock: Optional[asyncio.Lock] = None
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
     
     async def store_subscription(self, subscription: EventSubscription) -> str:
         async with self.lock:
@@ -185,7 +198,13 @@ class InMemoryProcessingTracker(EventProcessingTracker):
         self.processed_records: Dict[str, Dict[str, float]] = {}
         # 处理历史记录: {event_id: [{handler_id, status, timestamp, error}]}
         self.processing_history: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self.lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
     
     async def mark_event_processed(self, event_id: str, handler_id: str) -> bool:
         """标记事件为已处理状态"""
@@ -274,9 +293,15 @@ class InMemoryEventBus(EventBus):
         self.handler_retry_policies = {}
         # 处理器过滤条件
         self.handler_filters = {}
-        # 线程安全锁
-        self.lock = asyncio.Lock()
-    
+        # 线程安全锁（懒初始化，Python 3.9 兼容）
+        self._lock: Optional[asyncio.Lock] = None
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
     async def publish(self, event: Union[Event, str, Dict[str, Any]], 
                     prevent_duplicate_consumption: bool = True,
                     **kwargs) -> str:

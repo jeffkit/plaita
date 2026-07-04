@@ -295,6 +295,20 @@ class _Ctx:
 # 条件 / 错误处理 / childflow
 # ---------------------------------------------------------------------------
 
+def _negate_condition(cond: Dict[str, Any]) -> Dict[str, Any]:
+    """Negate an already-compiled condition dict using De Morgan's laws."""
+    if "operator" in cond:
+        op = cond["operator"]
+        if op not in _OP_NEGATIONS:
+            raise SyntaxError(f"not 无法翻转运算符 {op!r}，请改用 notIn/notContains/ne")
+        return {"field": cond["field"], "operator": _OP_NEGATIONS[op], "value": cond["value"]}
+    if cond.get("relation") == "and":
+        return {"relation": "or", "conditions": [_negate_condition(c) for c in cond["conditions"]]}
+    if cond.get("relation") == "or":
+        return {"relation": "and", "conditions": [_negate_condition(c) for c in cond["conditions"]]}
+    raise SyntaxError("not 只能作用于单个 cond 或 and/or 组")
+
+
 def _compile_condition(form: Any) -> Dict[str, Any]:
     if not isinstance(form, list) or not form:
         raise SyntaxError(f"条件必须是 (cond ...)/(and ...)/(or ...)/(not ...) 列表，得到 {form!r}")
@@ -317,18 +331,7 @@ def _compile_condition(form: Any) -> Dict[str, Any]:
         if len(rest) != 1:
             raise SyntaxError("not 只接受单个条件")
         inner = _compile_condition(rest[0])
-        if "operator" in inner:
-            op = inner["operator"]
-            if op not in _OP_NEGATIONS:
-                raise SyntaxError(f"not 无法翻转运算符 {op!r}，请改用 notIn/notContains/ne")
-            return {"field": inner["field"], "operator": _OP_NEGATIONS[op], "value": inner["value"]}
-        if inner.get("relation") == "and":
-            return {"relation": "or",
-                    "conditions": [_compile_condition(["not", c]) for c in inner["conditions"]]}
-        if inner.get("relation") == "or":
-            return {"relation": "and",
-                    "conditions": [_compile_condition(["not", c]) for c in inner["conditions"]]}
-        raise SyntaxError("not 只能作用于单个 cond 或 and/or 组")
+        return _negate_condition(inner)
     raise SyntaxError(f"未知条件形式 {name!r}")
 
 

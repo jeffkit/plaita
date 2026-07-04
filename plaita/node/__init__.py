@@ -140,7 +140,21 @@ class NodeRegistry:
             self._nodes[cls.node_type] = cls
 
     def _discover_entry_points(self) -> None:
-        for ep in entry_points(group="plaita.nodes"):
+        # entry_points(group=...) requires Python 3.10+.
+        # Python 3.9 returns a dict-like SelectableGroups from entry_points().
+        # Test mocks may patch entry_points to return a flat list directly.
+        import sys
+        if sys.version_info >= (3, 10):
+            eps = entry_points(group="plaita.nodes")
+        else:
+            raw = entry_points()
+            if hasattr(raw, "get"):
+                # Python 3.9 SelectableGroups / dict API
+                eps = raw.get("plaita.nodes", [])
+            else:
+                # Flat iterable (e.g. test mock returns [ep, ...] directly)
+                eps = raw
+        for ep in eps:
             try:
                 node_cls = ep.load()
                 self._nodes[node_cls.node_type] = node_cls

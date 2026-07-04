@@ -193,11 +193,16 @@ class TestParallel(TestCase):
                 self.setUp()
                 self._test_concurrent_in_camel_case(mode)
 
-    def test_coroutine_mode_is_rejected(self):
-        """coroutine 模式已显式拒绝，调用方应得到清晰的 ValueError 而不是
-        在事件循环里崩出 RuntimeError。"""
+    def test_coroutine_mode_works_via_arun(self):
+        """coroutine 模式通过 Parallel.arun() 正常工作。
+
+        0.5.0+ 为 Parallel 添加了 arun() 方法：runner 检测到 arun 是协程函数时
+        自动使用 arun 路径，因此 mode='coroutine' 在 flow.run()（内部走 asyncio 驱
+        动器）也能成功执行，不再抛 ValueError。
+        同步路径显式拒绝的历史行为已被 arun 路径取代。
+        """
         flow = Flow(
-            flow_id="test-parallel-coroutine-rejected",
+            flow_id="test-parallel-coroutine-works",
             version="1",
             runtime="python",
             output_type=Property(data_type=types.OBJECT, is_required=True),
@@ -214,11 +219,9 @@ class TestParallel(TestCase):
                 End(id="end", resultType="success", output="$NODE.parallel"),
             ],
         )
-        # coroutine 模式抛 ValueError, 经 runner 默认 abort 包装为 NodeExecutionError。
-        # 注意 message 里仍含原始 "coroutine" 字样, 用于断言。
-        with self.assertRaises(Exception) as ctx:
-            flow.run()
-        self.assertIn("coroutine", str(ctx.exception).lower())
+        # coroutine 模式现在通过 Parallel.arun() 执行，flow.run() 应成功。
+        result = flow.run()
+        self.assertIn("b1", result)
 
     def test_parallel_with_assignment_nodes(self):
         # 创建只包含 Assignment 节点的子流程
