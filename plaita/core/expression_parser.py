@@ -153,7 +153,7 @@ class ExpressionParser:
             pp.Keyword("True") | pp.Keyword("False")
             | pp.Keyword("true") | pp.Keyword("false")
         )
-        boolean.set_parse_action(self._eval_boolean)
+        boolean.set_parse_action(lambda s, l, t: self._eval_boolean(t))
         string = pp.QuotedString('"') | pp.QuotedString("'")
         constant = boolean | string | number
 
@@ -166,19 +166,19 @@ class ExpressionParser:
         # segment is the literal key "$INPUT" on the parent context).
         identifier = pp.Word(pp.alphas, pp.alphanums + "_")
         name_token = pp.Word(pp.alphanums + "_-$")
-        pos_int = pp.Word(pp.nums).set_parse_action(lambda t: int(t[0]))
+        pos_int = pp.Word(pp.nums).set_parse_action(lambda s, l, t: int(t[0]))
         signed_int = pp.Combine(pp.Optional("-") + pp.Word(pp.nums))
-        signed_int.set_parse_action(lambda t: int(t[0]))
+        signed_int.set_parse_action(lambda s, l, t: int(t[0]))
 
         # --- variable path segments --------------------------------------
         # dot_int must be tried before dot_field so ``.0`` is an index, not a
         # field named "0" (matches ``str.isdigit`` behaviour of the old walk).
         index_seg = pp.Suppress("[") + signed_int + pp.Suppress("]")
-        index_seg.set_parse_action(lambda t: f"index:{t[0]}")
+        index_seg.set_parse_action(lambda s, l, t: f"index:{t[0]}")
         dot_int = pp.Suppress(".") + pos_int
-        dot_int.set_parse_action(lambda t: f"index:{t[0]}")
+        dot_int.set_parse_action(lambda s, l, t: f"index:{t[0]}")
         dot_field = pp.Suppress(".") + name_token
-        dot_field.set_parse_action(lambda t: f"field:{t[0]}")
+        dot_field.set_parse_action(lambda s, l, t: f"field:{t[0]}")
 
         segment = index_seg | dot_int | dot_field
         # Root key is any ``$<name>`` — the old engine resolved the first
@@ -194,7 +194,14 @@ class ExpressionParser:
 
         # variable = root + zero-or-more segments
         variable = root + pp.Group(pp.ZeroOrMore(segment))
-        variable.set_parse_action(self._eval_variable)
+        # Use full 3-arg signature (s, loc, toks) for all parse actions to
+        # bypass pyparsing's _trim_arity arity-discovery mechanism. _trim_arity
+        # stores discovered arity in a closure-level nonlocal variable that is
+        # NOT thread-safe; concurrent evaluate() calls from PARALLEL branches
+        # can corrupt the shared state, causing subsequent calls to be invoked
+        # with the wrong number of arguments. Fixed-3-arg wrappers skip the
+        # discovery loop entirely and are always called with (s, loc, toks).
+        variable.set_parse_action(lambda s, l, t: self._eval_variable(t))
 
         # ``expr`` is the union of literals, variables and function calls,
         # used for function arguments and interpolation bodies. function_call
@@ -208,7 +215,7 @@ class ExpressionParser:
         function_call <<= (
             func_head + pp.Group(arg_list) + pp.Suppress(")")
         )
-        function_call.set_parse_action(self._eval_function_call)
+        function_call.set_parse_action(lambda s, l, t: self._eval_function_call(t))
 
         # Full-expression grammar (parseAll=True target)
         self._prefix_expr = function_call | variable
@@ -218,7 +225,7 @@ class ExpressionParser:
         # ``_eval_template`` stitches literal segments + str(value) back
         # together, mirroring the old ``re.sub(lambda m: str(evaluate(...)))``.
         interpolation = pp.Suppress("{%") + expr + pp.Suppress("%}")
-        interpolation.set_parse_action(lambda t: [t[0]])
+        interpolation.set_parse_action(lambda s, l, t: [t[0]])
         self._interpolation = interpolation
 
     # --- parse actions ---------------------------------------------------

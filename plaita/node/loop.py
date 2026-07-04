@@ -243,16 +243,46 @@ class Reduce(BaseCollectionNode):
         collection = execution.evaluate(self.collection)
         result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
+        array_input = self._child_is_array_input()
         for item in items:
             item_execution = execution.get_child_execution()
-            result = item_execution.run_compatible(self.child_flow, False, first=result, second=item)
+            if array_input:
+                # @flow DSL 编译时选择 array 输入，$INPUT[0]=first, $INPUT[1]=second
+                result = item_execution.run_compatible(self.child_flow, False, [result, item])
+            else:
+                # 历史兼容路径：object 输入，$INPUT.first / $INPUT.second
+                result = item_execution.run_compatible(
+                    self.child_flow, False, first=result, second=item
+                )
         return result
 
     async def arun(self, execution):
         collection = execution.evaluate(self.collection)
         result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
+        array_input = self._child_is_array_input()
         for item in items:
             item_execution = execution.get_child_execution()
-            result = await item_execution.arun_compatible(self.child_flow, False, first=result, second=item)
+            if array_input:
+                result = await item_execution.arun_compatible(self.child_flow, False, [result, item])
+            else:
+                result = await item_execution.arun_compatible(
+                    self.child_flow, False, first=result, second=item
+                )
         return result
+
+    def _child_is_array_input(self) -> bool:
+        """Return True when the child flow declares array input (DSL convention)."""
+        if self.child_flow is None:
+            return False
+        input_type = getattr(self.child_flow, "inputType", None) or getattr(
+            self.child_flow, "input_type", None
+        )
+        if input_type is None:
+            return False
+        if isinstance(input_type, dict):
+            return input_type.get("dataType") == "array"
+        data_type = getattr(input_type, "dataType", None) or getattr(
+            input_type, "data_type", None
+        )
+        return data_type == "array"

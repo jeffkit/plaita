@@ -14,6 +14,7 @@ from plaita_ai.flow_runner import (
     get_skill_reference,
     get_skill_text,
     list_node_types,
+    list_tools_registered,
     result_json,
     run_flow,
 )
@@ -114,6 +115,46 @@ def flow_list_nodes() -> str:
 
 
 @mcp.tool()
+def flow_list_tools(as_json: bool = False) -> str:
+    """List all tools registered via @tool / register_tool_node() / register_tools_from_module().
+
+    Call this before writing @flow to discover available TOOL(action=...) actions
+    and understand each tool's input parameters and return type.
+
+    Args:
+        as_json: When False (default), returns Python-style function signature
+            strings — directly usable as reference when writing @flow code.
+            When True, returns JSON dicts (backward compat).
+
+    Returns (as_json=False, default):
+        Python code block with one ``def tool_name(params) -> return_type:`` stub
+        per registered tool.  Example::
+
+            def get_user(user_id: str) -> dict:
+                \"\"\"查询用户信息\"\"\"
+
+            def get_order(order_id: str, include_items: bool = False) -> dict:
+                \"\"\"查询订单详情\"\"\"
+
+    Returns (as_json=True):
+        JSON array: [{name, description, params: {name: {type, required}}, return_type}, ...]
+        Empty array if no tools have been registered yet.
+    """
+    tools = list_tools_registered(as_code=not as_json)
+    if as_json:
+        return result_json(tools)
+    if not tools:
+        return "# No tools registered yet.\n# Use register_tool_node() or @tool to register tools."
+    # tools list: [type_definitions_block?, sig1, sig2, …]
+    # Separate type definitions block from function signatures for clarity
+    if len(tools) > 1 and not tools[0].startswith("def ") and not tools[0].startswith("# TOOL"):
+        type_section = "# --- Referenced Types ---\n" + tools[0]
+        func_section = "\n\n".join(tools[1:])
+        return type_section + "\n\n# --- Available Tools ---\n" + func_section
+    return "\n\n".join(tools)
+
+
+@mcp.tool()
 def flow_get_skill(skill_name: str = "flow-coder") -> str:
     """Return bundled flow-coder skill instructions for writing @flow DSL."""
     return get_skill_text(skill_name)
@@ -128,11 +169,43 @@ def flow_get_skill_reference(
     return get_skill_reference(skill_name, reference)
 
 
+def _build_tool_instructions() -> str:
+    """Return a tool-summary block for the MCP server instructions.
+
+    Called after all plugins are loaded so registered tools are known.
+    Returns an empty string when no tools are registered.
+    """
+    tools = list_tools_registered(as_code=True)
+    if not tools:
+        return ""
+    lines = [
+        "",
+        "## Available Custom Nodes (registered tools)",
+        "Call flow_list_tools for full signatures with parameter types.",
+        "Use these UPPERCASE node names directly in @flow DSL:",
+        "",
+    ]
+    # tools[0] may be type definitions, rest are DSL stubs
+    start = 0
+    if tools and not tools[0].startswith(("GET_", "SEND_", "SEARCH_", "def ")) and "\ndef " not in tools[0]:
+        start = 1  # skip type definitions block for instructions summary
+    for stub in tools[start:]:
+        # First line of each stub (the node signature)
+        first_line = stub.split("\n")[0]
+        lines.append(f"  - {first_line}")
+    return "\n".join(lines)
+
+
 def main(plugins: Optional[List[str]] = None, extra_paths: Optional[List[str]] = None) -> None:
     """Entry point: ``python -m plaita_ai.mcp.server`` or ``plaita-ai mcp``.
 
     Custom node modules are loaded (in order) before the MCP server starts,
     so generated ``@flow`` can use those node placeholders.
+
+    After plugins are loaded, registered tool signatures are automatically
+    appended to the MCP server instructions so AI agents can see the available
+    UPPERCASE node names without calling ``flow_list_tools`` first (Phase 1:
+    one-time load strategy).
 
     Plugin resolution order:
     1. ``plugins`` parameter (programmatic / CLI ``--plugin`` flags).
@@ -151,6 +224,16 @@ def main(plugins: Optional[List[str]] = None, extra_paths: Optional[List[str]] =
 
     if all_plugins:
         _load_plugins(all_plugins, all_paths)
+
+    # Phase 1: embed registered tool summary into server instructions
+    tool_instructions = _build_tool_instructions()
+    if tool_instructions:
+        base_instructions = mcp.instructions or ""
+        mcp.instructions = base_instructions + tool_instructions
+        logger.info(
+            "plaita-ai mcp: injected %d tool(s) into server instructions",
+            len(list_tools_registered(as_code=True)) - 1,  # minus type block if any
+        )
 
     mcp.run()
 

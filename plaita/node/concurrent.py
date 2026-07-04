@@ -120,10 +120,20 @@ class Parallel(Node):
         异常不在此处吞咽——交由调用方（``_process_future_result`` / coroutine 路径）
         显式决定如何记录。历史上这里 ``return None`` 让崩溃分支与"返回 None"无法
         区分，导致下游节点拿到静默错误结果继续执行。
+
+        当分支未指定 ``input``（`pb.input is None`，典型场景为 @flow DSL 编译生成
+        的 PARALLEL 节点）时，自动继承父流程的 ``$INPUT``，使分支子流程能自然地用
+        ``INPUT.x`` 访问父流程的输入字段。显式设置了 ``input`` 的分支不受影响。
         """
         branch_execution = execution.get_child_execution()
         lazy = execution.mode == ExecutionMode.GENERATOR
-        input_value = execution.evaluate(pb.input)
+        if pb.input is None:
+            # @flow DSL 生成的 PARALLEL 分支没有显式 input 字段；继承父流程 INPUT
+            # 使子流程能用 INPUT.x 访问父流程的输入（与 @childflow + CHILD 的语义一致）。
+            input_key = f"{execution.express_prefix}{execution.express_input_name}"
+            input_value = execution.evaluate(input_key)
+        else:
+            input_value = execution.evaluate(pb.input)
         rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
         logger.debug("branch %s executed: %s", pb.name, rs)
         return rs

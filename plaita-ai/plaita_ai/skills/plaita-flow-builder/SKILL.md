@@ -42,19 +42,45 @@ Plaita flow 是一段静态定义：`flow_id` + `inputType` + `nodes[]`。节点
 
 完整节点字段与行为见 `references/nodes.md`。速查：
 
-| 需求 | 节点 |
-|------|------|
-| 流程起点 / 终点 | `start` / `end` |
-| 求值、拼接、转换 | `assignment` |
-| 二分支（真/假） | `if`（`next` 真，`else_next` 假） |
-| 多路条件跳转 | `switch`（`branches` + `priority` + `isDefault`） |
-| 等值匹配 | `case`（`target` + `cases[]`） |
-| 遍历集合 | `loop` / `map` / `filter` / `find` / `reduce` |
-| 调用子流程 | `child`（共享父上下文）/ `reference`（独立） |
-| 并行多分支 | `parallel` |
-| 跑一段代码 | `code`（需 `code` extra） |
-| 发 HTTP 请求 | `http`（需 `http` extra） |
-| 等外部事件 | `event`（断点续执） |
+| 需求 | 节点（JSON/YAML type）| @flow DSL 占位符 |
+|------|------|------|
+| 流程起点 / 终点 | `start` / `end` | `START` / `END` |
+| 求值、拼接、转换 | `assignment` | `ASSIGNMENT` |
+| 二分支（真/假） | `if`（`next` 真，`else_next` 假） | `IF` |
+| 多路条件跳转 | `switch`（`branches` + `priority` + `isDefault`） | `SWITCH` |
+| 等值匹配 | `case`（`target` + `cases[]`） | `CASE` |
+| 遍历集合 | `loop` / `map` / `filter` / `find` / `reduce` | `LOOP` / `MAP` 等 |
+| 调用子流程 | `child`（共享父上下文）/ `reference`（独立） | `CHILD` / `REFERENCE` |
+| 并行多分支 | `parallel` | `PARALLEL` |
+| 跑一段代码 | `code`（需 `code` extra） | `CODE` |
+| 发 HTTP 请求 | `http`（需 `http` extra） | `HTTP` |
+| 等外部事件 | `event`（断点续执） | `EVENT` |
+| **调用已注册工具** | **自动生成（见下）** | **工具名大写（如 `GET_USER`）** |
+
+#### 调用已注册工具函数
+
+每个通过 `register_tool_node()` 注册的工具函数都自动成为**独立节点**，节点类型为工具名（snake_case），在 @flow DSL 里直接用大写形式调用：
+
+**第一步：查询可用工具（调用 MCP 工具 `flow_list_tools`）**
+```
+# 返回示例：
+GET_USER(user_id: str) -> UserInfo
+    """查询用户信息"""
+
+SEARCH_PRODUCTS(keyword: str, category: Optional[str] = None) -> List[dict]
+    """搜索商品目录"""
+```
+
+**第二步：在 @flow DSL 里直接像内置节点一样调用**
+```python
+@flow("my-flow")
+def my_flow(INPUT):
+    user = GET_USER(user_id=INPUT.user_id)       # 独立工具节点
+    products = SEARCH_PRODUCTS(keyword=INPUT.kw)  # 独立工具节点
+    return {"name": user.name, "items": products}
+```
+
+**注意：工具节点的参数直接写在括号里（不是 `params={...}` 字典）。** 每个参数都可以是 @flow 表达式（`INPUT.x`、`NODE.y.z`、`F.func(...)`）。
 
 需要某节点的**确切字段名**时，去读 `references/nodes.md` 对应小节，不要凭记忆写——字段名错了流程会跑不起来。
 
