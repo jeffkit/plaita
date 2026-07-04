@@ -251,6 +251,24 @@ class TestLoggerCallback(unittest.TestCase):
         self.assertEqual(messages[6], "[node suspend] n1 @ flow test")
         self.assertEqual(messages[7], "[node resume] n1 @ flow test")
 
+    def test_log_messages_with_real_error_and_exception(self):
+        """杀死把 error/exception 参数替换为 None 的变异点。"""
+        cb = LoggerCallback()
+        flow = FakeFlow()
+        node = FakeNode()
+        exc = ValueError("boom")
+        with self.assertLogs("plaita.core.callback", level="INFO") as cm:
+            cb.on_flow_end(flow, result="r1", error="flow-err", exception=exc)
+            cb.on_node_end(flow, node, result="r2", error="node-err", exception=exc)
+
+        messages = [r.getMessage() for r in cm.records]
+        # on_flow_end: error must appear, exception must appear
+        self.assertIn("flow-err", messages[0])
+        self.assertIn(str(exc), messages[0])
+        # on_node_end: error must appear, exception must appear
+        self.assertIn("node-err", messages[1])
+        self.assertIn(str(exc), messages[1])
+
 
 class TestFlowEvent(unittest.TestCase):
     """FlowEvent enum."""

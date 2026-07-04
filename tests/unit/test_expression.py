@@ -10,6 +10,7 @@ from plaita.core.expression import (
     ExpressionRegistry,
     FunctionCategory,
     FunctionDescriptor,
+    _reset_default_registry,
     get_default_expression_registry,
 )
 
@@ -157,6 +158,7 @@ class TestDefaultRegistryCompleteness(TestCase):
     identical results to the original REGISTERED_FUNCTIONS dict."""
 
     def setUp(self):
+        _reset_default_registry()
         self.reg = get_default_expression_registry()
 
     def test_math_functions(self):
@@ -295,6 +297,7 @@ class TestSideEffectLabeling(TestCase):
     """Verify the correct functions are marked has_side_effects=True."""
 
     def setUp(self):
+        _reset_default_registry()
         self.reg = get_default_expression_registry()
 
     def test_side_effect_array_functions(self):
@@ -548,6 +551,7 @@ class TestDefaultRegistryMetadata(TestCase):
     对描述字符串 / 分类 / 副作用标记的字符串常量变异。"""
 
     def setUp(self):
+        _reset_default_registry()
         self.reg = get_default_expression_registry()
 
     def test_function_count(self):

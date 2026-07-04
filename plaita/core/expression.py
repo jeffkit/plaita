@@ -235,6 +235,12 @@ def get_default_expression_registry() -> ExpressionRegistry:
     return _default_registry
 
 
+def _reset_default_registry() -> None:
+    """Reset the cached default registry. Used in tests to force re-initialization."""
+    global _default_registry
+    _default_registry = None
+
+
 def _register_math(reg: ExpressionRegistry) -> None:
     """Register math functions — all pure, no side effects."""
     _fns: list[tuple[str, Callable, str]] = [

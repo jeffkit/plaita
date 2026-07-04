@@ -131,14 +131,19 @@ class _RegisteredFunctionsProxy(MutableMapping):
     def __init__(self, registry: ExpressionRegistry) -> None:
         self._registry = registry
 
+    @property
+    def _current_registry(self) -> ExpressionRegistry:
+        """Always return the live default registry to handle test resets."""
+        return get_default_expression_registry()
+
     def __getitem__(self, name: str):
-        desc = self._registry.get(name)
+        desc = self._current_registry.get(name)
         if desc is None:
             raise KeyError(name)
         return desc.func
 
     def get(self, name, default=None):
-        desc = self._registry.get(name)
+        desc = self._current_registry.get(name)
         return desc.func if desc is not None else default
 
     def __setitem__(self, name: str, func) -> None:
@@ -148,7 +153,7 @@ class _RegisteredFunctionsProxy(MutableMapping):
             DeprecationWarning,
             stacklevel=2,
         )
-        self._registry.register(
+        self._current_registry.register(
             name, func, FunctionCategory.TYPE, override=True,
         )
 
@@ -159,18 +164,18 @@ class _RegisteredFunctionsProxy(MutableMapping):
             DeprecationWarning,
             stacklevel=2,
         )
-        if name not in self._registry:
+        if name not in self._current_registry:
             raise KeyError(name)
-        self._registry.unregister(name)
+        self._current_registry.unregister(name)
 
     def __contains__(self, name: object) -> bool:
-        return name in self._registry
+        return name in self._current_registry
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._registry._functions)
+        return iter(self._current_registry._functions)
 
     def __len__(self) -> int:
-        return len(self._registry)
+        return len(self._current_registry)
 
     def __repr__(self) -> str:
         return f"<_RegisteredFunctionsProxy functions={len(self._registry)}>"
