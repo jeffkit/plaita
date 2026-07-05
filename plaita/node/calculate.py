@@ -130,77 +130,81 @@ class Calculate(Node):
 number_types = [types.INTEGER, types.FLOAT, types.DECIMAL]
 
 
-#  #### 数值函数 ####
-# 加法
-register_function(
-    "add",
-    lambda left, right: left + right,
-    {
-        "left": number_types,
-        "right": number_types,
-    },
-    number_types,
-    "加法",
-    "返回两个数值类型的参数相加的结果",
-)
+def _register_all_functions() -> None:
+    """Register all built-in functions into FUNCTIONS. Called at module load and during test resets."""
+    #  #### 数值函数 ####
+    register_function(
+        "add",
+        lambda left, right: left + right,
+        {
+            "left": number_types,
+            "right": number_types,
+        },
+        number_types,
+        "加法",
+        "返回两个数值类型的参数相加的结果",
+    )
 
-# 减法
-register_function(
-    "sub",
-    lambda left, right: left - right,
-    {
-        "left": number_types,
-        "right": number_types,
-    },
-    number_types,
-    "减法",
-    "返回两个数值类型的参数相减的结果",
-)
+    register_function(
+        "sub",
+        lambda left, right: left - right,
+        {
+            "left": number_types,
+            "right": number_types,
+        },
+        number_types,
+        "减法",
+        "返回两个数值类型的参数相减的结果",
+    )
 
-# 乘法
-register_function(
-    "multiply",
-    lambda left, right: left * right,
-    {
-        "left": number_types,
-        "right": number_types,
-    },
-    number_types,
-    "乘法",
-    "返回两个数值类型的参数相乘的结果",
-)
+    register_function(
+        "multiply",
+        lambda left, right: left * right,
+        {
+            "left": number_types,
+            "right": number_types,
+        },
+        number_types,
+        "乘法",
+        "返回两个数值类型的参数相乘的结果",
+    )
 
-# 除法
-register_function(
-    "div",
-    lambda left, right: left / right,
-    {
-        "left": number_types,
-        "right": number_types,
-    },
-    number_types,
-    "除法",
-    "返回两个数值类型的参数相除的结果",
-)
+    register_function(
+        "div",
+        lambda left, right: left / right,
+        {
+            "left": number_types,
+            "right": number_types,
+        },
+        number_types,
+        "除法",
+        "返回两个数值类型的参数相除的结果",
+    )
 
-#  #### 字符串函数 ####
+    #  #### 字符串函数 ####
+    register_function(
+        "concat",
+        lambda left, right: left + right,
+        {"left": types.STRING, "right": types.STRING},
+        types.STRING,
+        "拼接字符串",
+        "",
+    )
 
-# 拼接字符串
-register_function(
-    "concat",
-    lambda left, right: left + right,
-    {"left": types.STRING, "right": types.STRING},
-    types.STRING,
-    "拼接字符串",
-    "",
-)
+    register_function(
+        "replace",
+        lambda source, which, target: source.replace(which, target),
+        {"source": types.STRING, "which": types.STRING, "target": types.STRING},
+        types.STRING,
+        "字符串替换",
+        "",
+    )
 
-# 替换字符串
-register_function(
-    "replace",
-    lambda source, which, target: source.replace(which, target),
-    {"source": types.STRING, "which": types.STRING, "target": types.STRING},
-    types.STRING,
-    "字符串替换",
-    "",
-)
+
+def _reset_functions() -> None:
+    """Clear FUNCTIONS and re-register all built-ins. Used in tests to force re-initialization."""
+    FUNCTIONS.clear()
+    _register_all_functions()
+
+
+_register_all_functions()

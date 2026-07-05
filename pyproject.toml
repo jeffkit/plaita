@@ -136,6 +136,8 @@ only_mutate = [
   "plaita/core/callback.py",
   "plaita/core/expression.py",
   "plaita/core/parallel_executor.py",
+  "plaita/core/runner.py",
+  "plaita/core/context.py",
   "plaita/node/calculate.py",
   "plaita/node/decide.py",
 ]
@@ -168,6 +170,8 @@ pytest_add_cli_args_test_selection = [
   "tests/unit/test_expression.py",
   "tests/unit/test_expression_golden.py",
   "tests/unit/test_parallel_executor.py",
+  "tests/unit/test_runner.py",
+  "tests/unit/test_context.py",
   "tests/unit/test_calculate.py",
   "tests/unit/test_decide.py",
 ]

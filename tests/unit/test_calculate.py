@@ -5,7 +5,7 @@ from plaita.core import types
 from plaita.io import Property
 from plaita.node import End, Start
 from plaita.node.calculate import Calculate
-from plaita.node.calculate import FUNCTIONS, Call
+from plaita.node.calculate import FUNCTIONS, Call, _reset_functions
 
 
 class CalculateTestCase(TestCase):
@@ -83,6 +83,9 @@ class CalculateTestCase(TestCase):
 
 class TestRegisteredFunctionMetadata(TestCase):
     """逐函数精确断言 FUNCTIONS 里每个 Function 的元数据与行为。"""
+
+    def setUp(self):
+        _reset_functions()
 
     def test_all_expected_functions_registered(self):
         self.assertEqual(
