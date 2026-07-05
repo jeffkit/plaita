@@ -10,22 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 import isodate
-
-# Bounded shared pool for sync-node execution. Replaces the old per-node
-# daemon-thread spawn so a parallel fan-out of sync nodes is bounded instead of
-# unbounded. A stuck node occupies a worker until it returns (same abandon
-# semantics as before on timeout — cancel_event is set cooperatively); sizing is
-# generous to avoid starving legitimate concurrent sync work.
-_SYNC_NODE_POOL = ThreadPoolExecutor(
-    max_workers=int(os.environ.get("PLAITA_SYNC_NODE_POOL_SIZE", "32")),
-    thread_name_prefix="plaita-sync-node",
-)
 
 from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
@@ -183,31 +172,48 @@ class NodeRunner:
         return await node.arun(exec_ctx)
 
     async def _run_sync_node(self, node, timeout_ms: Optional[int]) -> Any:
-        """Run a sync node on the bounded shared thread pool; bridge via the loop.
+        """Run a sync node in a raw daemon thread to avoid blocking process exit.
 
-        Uses ``loop.run_in_executor`` against ``_SYNC_NODE_POOL`` instead of
-        spawning a fresh daemon thread per node, so concurrent sync work is
-        bounded. On timeout we set ``cancel_event`` (cooperative cancel) and let
-        ``wait_for`` abandon the future — the underlying worker keeps running
-        the node to completion but won't block loop teardown (daemon threads in
-        the pool).
+        Uses a daemon threading.Thread instead of ThreadPoolExecutor so Python's
+        atexit mechanism does not wait for lingering threads after a timeout
+        (ThreadPoolExecutor workers are joined by atexit even when daemon=True).
+        On timeout we set cancel_event (cooperative cancel) and let wait_for
+        abandon the shielded future — the background thread keeps running but
+        will not delay pytest/process teardown.
         """
         exec_ctx = self.node_execution or self.context
-        loop = asyncio.get_running_loop()
         cancel_event = getattr(exec_ctx, "cancel_event", None)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+
+        def _target() -> None:
+            try:
+                result = node.run(exec_ctx)
+                if not loop.is_closed() and not fut.done():
+                    loop.call_soon_threadsafe(fut.set_result, result)
+            except Exception as exc:  # noqa: BLE001
+                if not loop.is_closed() and not fut.done():
+                    loop.call_soon_threadsafe(fut.set_exception, exc)
+
+        threading.Thread(
+            target=_target,
+            daemon=True,
+            name=f"plaita-sync-{getattr(node, 'id', 'node')}",
+        ).start()
 
         if timeout_ms is None:
-            return await loop.run_in_executor(_SYNC_NODE_POOL, node.run, exec_ctx)
+            return await fut
+
         try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(_SYNC_NODE_POOL, node.run, exec_ctx),
-                timeout=timeout_ms / 1000.0,
-            )
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout_ms / 1000.0)
         except asyncio.TimeoutError:
             if cancel_event is not None:
                 cancel_event.set()
-            logger.warning("Sync node %s timed out after %sms (cancel_event set)",
-                           getattr(node, "id", "unknown"), timeout_ms)
+            logger.warning(
+                "Sync node %s timed out after %sms (cancel_event set)",
+                getattr(node, "id", "unknown"),
+                timeout_ms,
+            )
             raise TimeoutError(f"Node execution timed out after {timeout_ms}ms")
 
     # -- error handling (extracted from FlowExecution) --

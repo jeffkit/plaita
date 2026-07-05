@@ -32,4 +32,6 @@ mutants/
 .mutmut-cache/
 mutation-baseline.txt
 mutation-recheck.txt
+mutation-sweep-results.txt
+setup.cfg.mutmut_test
 
