@@ -384,5 +384,179 @@ class TestCreateResultMutations(unittest.TestCase):
         self.assertIn("event_type", result)
 
 
+# ---------------------------------------------------------------------------
+# _get_node_state — default argument precision (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestGetNodeStateDefaultsMutations(unittest.TestCase):
+    def test_default_prefix_is_dollar_not_xx(self):
+        """Kill getattr(execution, 'express_prefix', 'XX$XX') mutation."""
+        node = _make_node()
+        mock = MagicMock(spec=["context"])
+        # express_prefix is NOT an attribute, so getattr uses default
+        mock.context = {"$NODE": {"evt1": {"status": "pending"}}}
+        result = node._get_node_state(mock)
+        # With default '$', key="$NODE" is found
+        self.assertEqual(result, {"status": "pending"})
+
+    def test_context_get_with_empty_dict_default(self):
+        """Kill context.get(node_key, None) mutation.
+        If node_key exists but has empty value, {} default shouldn't matter.
+        But if context.get is called without default... need to verify dict fallback."""
+        node = _make_node()
+        mock = MagicMock(spec=["context", "express_prefix"])
+        mock.express_prefix = "$"
+        # Simulated context where $NODE exists but returned as is
+        node_data = {"evt1": {"s": 1}}
+        mock.context = {"$NODE": node_data}
+        # .get() should return the actual node_data, not crash
+        result = node._get_node_state(mock)
+        self.assertEqual(result, {"s": 1})
+
+    def test_node_id_used_in_results_lookup(self):
+        """Kill node_results.get(None, ...) mutation."""
+        node = _make_node("order.created")  # node.id = "evt1"
+        mock = MagicMock(spec=["context", "express_prefix"])
+        mock.express_prefix = "$"
+        mock.context = {"$NODE": {"evt1": {"detail": "found"}, "other": {"x": 1}}}
+        result = node._get_node_state(mock)
+        self.assertEqual(result, {"detail": "found"})
+
+    def test_default_value_returned_when_not_in_node_results(self):
+        """Kill default or {} mutation in results.get(self.id, default or {})."""
+        node = _make_node()
+        mock = MagicMock(spec=["context", "express_prefix"])
+        mock.express_prefix = "$"
+        mock.context = {"$NODE": {"other_node": {"x": 1}}}  # evt1 not in node results
+        # Should return empty dict (or default) when id not found
+        result = node._get_node_state(mock)
+        self.assertIsInstance(result, dict)
+
+    def test_exception_returns_default(self):
+        """Kill mutations that suppress exceptions."""
+        node = _make_node()
+        mock = MagicMock()
+        mock.get_node_state = MagicMock(side_effect=RuntimeError("fail"))
+        result = node._get_node_state(mock, default={"fallback": True})
+        self.assertEqual(result, {"fallback": True})
+
+
+# ---------------------------------------------------------------------------
+# execute — logging arg precision (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestExecuteLoggingMutations(unittest.TestCase):
+    def test_execute_logs_node_id(self):
+        """Kill logger.info(None, self.id, ...) mutation."""
+        node = _make_node("order.created")
+        with self.assertLogs("plaita", level="INFO") as cm:
+            node.execute(_make_execution())
+        combined = " ".join(cm.output)
+        self.assertIn("evt1", combined)
+
+    def test_execute_logs_event_type(self):
+        """Kill logger.info("...", self.id, self.event_filter) mutation (drops event_type)."""
+        node = _make_node("user.signup")
+        with self.assertLogs("plaita", level="INFO") as cm:
+            node.execute(_make_execution())
+        combined = " ".join(cm.output)
+        self.assertIn("user.signup", combined)
+
+    def test_execute_logs_event_filter(self):
+        """Kill mutation that drops event_filter from log."""
+        node = _make_node("order.created", event_filter={"status": "active"})
+        with self.assertLogs("plaita", level="INFO") as cm:
+            node.execute(_make_execution())
+        combined = " ".join(cm.output)
+        self.assertIn("status", combined)
+
+
+class TestExecuteVariableResolutionLogging(unittest.TestCase):
+    def test_successful_resolution_logged_with_original_and_resolved(self):
+        """Kill logger.info(..., None, resolved) and logger.info(..., self.event_type, None) mutations."""
+        node = _make_node("$order_type")
+        execution = _make_execution()
+        execution.evaluate = lambda v: "order.placed" if v == "$order_type" else v
+
+        with self.assertLogs("plaita", level="INFO") as cm:
+            result = node.execute(execution)
+        combined = " ".join(cm.output)
+        self.assertIn("$order_type", combined)
+        self.assertIn("order.placed", combined)
+
+    def test_hasattr_evaluate_is_exact_string(self):
+        """Kill hasattr(execution, 'XXevaluateXX') mutation."""
+        node = _make_node("$var_event")
+        execution = _make_execution()
+        # execution HAS 'evaluate' → should try to resolve
+        resolution_attempted = []
+        def capturing_evaluate(v):
+            resolution_attempted.append(v)
+            return "resolved.event"
+        execution.evaluate = capturing_evaluate
+
+        result = node.execute(execution)
+        self.assertGreater(len(resolution_attempted), 0,
+                           "evaluate should have been called since execution has 'evaluate'")
+        self.assertEqual(result["event_type"], "resolved.event")
+
+    def test_no_evaluate_attr_fallback_to_original(self):
+        """Kill inverse: without 'evaluate', original event_type preserved."""
+        node = _make_node("$var_event")
+        # Create execution without 'evaluate' attribute
+        execution = MagicMock(spec=["express_prefix", "context", "get_node_state"])
+        execution.express_prefix = "$"
+        execution.context = {}
+        execution.get_node_state = MagicMock(return_value={})
+
+        result = node.execute(execution)
+        self.assertEqual(result["event_type"], "$var_event")
+
+    def test_execution_id_in_event_id_format(self):
+        """Kill mutations on event_id string formatting."""
+        node = _make_node()
+        result = node.execute(_make_execution())
+        # event_id should contain node id
+        self.assertIn("evt1", result["event_id"])
+        # Must start with "event_"
+        self.assertTrue(result["event_id"].startswith("event_evt1_"))
+
+
+# ---------------------------------------------------------------------------
+# can_handle_event — filter split and traversal precision (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestCanHandleEventFilterPrecision(unittest.TestCase):
+    def test_filter_empty_string_value_matches(self):
+        """Kill mutations that alter empty filter logic."""
+        node = _make_node("order", event_filter={})
+        self.assertTrue(node.can_handle_event("order", {"any": "data"}))
+
+    def test_deep_nested_filter_exact_key_traversal(self):
+        """Kill key.split('.') mutation."""
+        node = _make_node("ev", event_filter={"a.b.c": "deep_val"})
+        self.assertTrue(node.can_handle_event("ev", {"a": {"b": {"c": "deep_val"}}}))
+        self.assertFalse(node.can_handle_event("ev", {"a": {"b": {"c": "wrong"}}}))
+
+    def test_isinstance_check_on_current_data(self):
+        """Kill isinstance(current_data, dict) → isinstance(current_data, str) mutation."""
+        node = _make_node("ev", event_filter={"key": "val"})
+        # Non-dict event data should fail gracefully
+        self.assertFalse(node.can_handle_event("ev", "not_a_dict"))
+
+    def test_multi_filter_all_must_match(self):
+        """Kill early return in filter loop."""
+        node = _make_node("ev", event_filter={"a": "1", "b": "2"})
+        self.assertTrue(node.can_handle_event("ev", {"a": "1", "b": "2"}))
+        self.assertFalse(node.can_handle_event("ev", {"a": "1", "b": "wrong"}))
+
+    def test_event_type_exact_comparison(self):
+        """Kill event_type == → != mutation."""
+        node = _make_node("exact.type")
+        self.assertTrue(node.can_handle_event("exact.type", {}))
+        self.assertFalse(node.can_handle_event("exact.typo", {}))
+        self.assertFalse(node.can_handle_event("", {}))
+
+
 if __name__ == "__main__":
     unittest.main()

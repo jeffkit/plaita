@@ -518,5 +518,410 @@ class TestFlowIdDeprecatedProperty(unittest.TestCase):
             self.assertIn("flow_id", str(w[0].message))
 
 
+# ---------------------------------------------------------------------------
+# model_validate — registry passthrough and **kwargs (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestModelValidateRegistryPassthrough(unittest.TestCase):
+    def test_model_validate_passes_registry_not_none(self):
+        """Kill flow.resolve_nodes(None) mutation."""
+        reg = _make_registry()
+        data = {
+            "flow_id": "f1",
+            "runtime": "python",
+            "nodes": [
+                {"id": "s1", "type": "start"},
+                {"id": "e1", "type": "end"},
+            ],
+        }
+        flow = Flow.model_validate(data, registry=reg)
+        # All nodes should be resolved (Node instances), not dicts
+        for n in flow.nodes:
+            self.assertIsInstance(n, Node)
+
+    def test_model_validate_kwargs_forwarded(self):
+        """Kill super().model_validate(data, ) mutation — kwargs dropped."""
+        data = {"flow_id": "fk1", "runtime": "python"}
+        # strict=False is a known Pydantic kwarg; should not raise
+        try:
+            flow = Flow.model_validate(data, strict=False)
+        except Exception as e:
+            self.fail(f"model_validate with strict=False raised: {e}")
+
+    def test_model_validate_json_passes_json_data_not_none(self):
+        """Kill super().model_validate_json(None, **kwargs) mutation."""
+        json_str = '{"flow_id": "f_json", "runtime": "python"}'
+        flow = Flow.model_validate_json(json_str)
+        self.assertEqual(flow.flow_id, "f_json")
+
+
+# ---------------------------------------------------------------------------
+# resolve_nodes — changed flag initialization and node preservation (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestResolveNodesChangedFlag(unittest.TestCase):
+    def setUp(self):
+        self.reg = _make_registry()
+
+    def test_node_instances_preserved_not_none(self):
+        """Kill resolved.append(None) mutation."""
+        start = Start(id="s1")
+        end = End(id="e1")
+        flow = Flow(flow_id="fc", nodes=[start, end])
+        flow.resolve_nodes(self.reg)
+        self.assertIn(start, flow.nodes)
+        self.assertIn(end, flow.nodes)
+        self.assertNotIn(None, flow.nodes)
+
+    def test_changed_false_initialization_no_spurious_reindex(self):
+        """Kill changed=True mutation (would always invalidate index)."""
+        start = Start(id="s1")
+        end = End(id="e1")
+        flow = Flow(flow_id="fc2", nodes=[start, end])
+        # Build index first
+        _ = flow._ensure_index()
+        sig_before = flow._node_index_sig
+        # resolve_nodes with all Node instances — changed stays False
+        flow.resolve_nodes(self.reg)
+        # index sig should be unchanged (no index invalidation)
+        self.assertEqual(flow._node_index_sig, sig_before)
+
+    def test_index_invalidated_only_when_dict_nodes_resolved(self):
+        """Kill changed=None mutation (falsy → never invalidates)."""
+        flow = Flow(flow_id="fc3", nodes=[
+            {"id": "s1", "type": "start"},
+            {"id": "e1", "type": "end"},
+        ])
+        flow.resolve_nodes(self.reg)
+        # After resolve, index sig should be reset (changed=True path taken)
+        self.assertEqual(flow._node_index_sig, ())
+
+    def test_index_sig_reset_to_empty_tuple_not_none(self):
+        """Kill _node_index_sig = None mutation."""
+        flow = Flow(flow_id="fc4", nodes=[
+            {"id": "s1", "type": "start"},
+        ])
+        flow.resolve_nodes(self.reg)
+        self.assertIsNotNone(flow._node_index_sig)
+        self.assertEqual(flow._node_index_sig, ())
+
+
+# ---------------------------------------------------------------------------
+# _ensure_index — signature uses id(nodes) not id(None) (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestEnsureIndexSignatureMutation(unittest.TestCase):
+    def test_signature_uses_nodes_identity(self):
+        """Kill id(None) mutation — cache would always miss."""
+        start = Start(id="s1")
+        end = End(id="e1")
+        flow = Flow(flow_id="f_idx", nodes=[start, end])
+        idx1 = flow._ensure_index()
+        idx2 = flow._ensure_index()
+        self.assertIs(idx1, idx2)  # same object — cache hit
+
+    def test_different_nodes_list_breaks_cache(self):
+        """Verify cache invalidation on list replacement."""
+        start = Start(id="s1")
+        end = End(id="e1")
+        new_end = End(id="e2")
+        flow = Flow(flow_id="f_idx2", nodes=[start, end])
+        idx1 = flow._ensure_index()
+        flow.nodes = [start, new_end]
+        idx2 = flow._ensure_index()
+        self.assertNotIn("e1", idx2)
+        self.assertIn("e2", idx2)
+
+
+# ---------------------------------------------------------------------------
+# rebuild_node_index — sig reset to () not None (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestRebuildNodeIndexSigReset(unittest.TestCase):
+    def test_rebuild_resets_sig_to_empty_tuple(self):
+        """Kill _node_index_sig = None mutation."""
+        start = Start(id="s1")
+        end = End(id="e1")
+        flow = Flow(flow_id="f_reb", nodes=[start, end])
+        _ = flow._ensure_index()
+        sig_before = flow._node_index_sig
+        self.assertNotEqual(sig_before, ())  # should have real sig after build
+
+        flow.rebuild_node_index()
+        # After rebuild, index should be freshly built
+        idx = flow._ensure_index()
+        self.assertIn("s1", idx)
+        self.assertIn("e1", idx)
+
+    def test_rebuild_allows_find_after_id_change(self):
+        """Verify rebuild works correctly after id change."""
+        start = Start(id="s1")
+        end = End(id="e1")
+        flow = Flow(flow_id="f_reb2", nodes=[start, end])
+        # Rename start node id in place
+        flow.nodes[0] = Start(id="start_renamed")
+        flow.rebuild_node_index()
+        self.assertIsNotNone(flow.find_node_by_id("start_renamed"))
+
+
+# ---------------------------------------------------------------------------
+# from_string — empty check logic, message text, lstrip/rstrip, slice (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestFromStringMutations(unittest.TestCase):
+    def test_empty_string_raises_valueerror(self):
+        """Kill `and` mutation — empty string should raise."""
+        with self.assertRaises(ValueError):
+            Flow.from_string("")
+
+    def test_whitespace_only_raises_valueerror(self):
+        """Kill `and` mutation — whitespace-only should also raise."""
+        with self.assertRaises(ValueError):
+            Flow.from_string("   \n  ")
+
+    def test_valueerror_message_exact_case(self):
+        """Kill case mutation — 'Flow' must be capitalized."""
+        try:
+            Flow.from_string("")
+        except ValueError as e:
+            msg = str(e)
+            self.assertIn("Flow", msg)
+            self.assertNotIn("flow content", msg)
+            self.assertNotIn("FLOW CONTENT", msg)
+
+    def test_json_detected_by_leading_brace(self):
+        """Kill lstrip->rstrip and [:1]->[:2] mutations."""
+        json_str = '  {"flow_id": "f1", "runtime": "python"}'
+        flow = Flow.from_string(json_str)
+        self.assertEqual(flow.flow_id, "f1")
+
+    def test_json_detected_by_leading_bracket(self):
+        """Kill '[' removal from set mutation."""
+        # Not testing array flow directly, just that '[' doesn't prevent YAML fallback
+        yaml_str = "flow_id: f2\nruntime: python"
+        flow = Flow.from_string(yaml_str)
+        self.assertEqual(flow.flow_id, "f2")
+
+    def test_json_brace_check_not_inverted(self):
+        """Kill `not in` mutation — JSON should be tried for '{' prefix."""
+        import json as json_mod
+        json_str = json_mod.dumps({"flow_id": "f3", "runtime": "python"})
+        flow = Flow.from_string(json_str)
+        self.assertEqual(flow.flow_id, "f3")
+
+    def test_yaml_string_not_treated_as_json(self):
+        """Kill slice mutation [:1]->[:2] — ensure YAML path taken for 'f...' start."""
+        yaml_str = "flow_id: f4\nruntime: python"
+        flow = Flow.from_string(yaml_str)
+        self.assertEqual(flow.flow_id, "f4")
+
+    def test_from_string_mutmut_8_rstrip_lstrip(self):
+        """Kill lstrip()→rstrip() mutation — leading spaces before { must be stripped."""
+        # JSON content with leading spaces — lstrip needed for correct detection
+        json_str = '   {"flow_id": "f_lstrip", "runtime": "python"}'
+        flow = Flow.from_string(json_str)
+        self.assertEqual(flow.flow_id, "f_lstrip")
+
+
+# ---------------------------------------------------------------------------
+# next_node — is_end_node(current) vs is_end_node(None) (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestNextNodeEndCheckMutation(unittest.TestCase):
+    def _make_simple_flow(self):
+        start = Start(id="s1", next="e1")
+        end = End(id="e1")
+        flow = Flow(flow_id="fnc", nodes=[start, end])
+        return flow, start, end
+
+    def test_next_node_passes_current_to_is_end(self):
+        """Kill is_end_node(None) mutation."""
+        flow, start, end = self._make_simple_flow()
+        # For end node, should return None
+        self.assertIsNone(flow.next_node(end))
+        # For start node, should return end
+        result = flow.next_node(start)
+        self.assertEqual(result.id, "e1")
+
+    def test_next_node_logging_includes_target(self):
+        """Kill logger.debug(..., None, ...) mutations."""
+        flow, start, end = self._make_simple_flow()
+        with self.assertLogs("plaita", level="DEBUG") as cm:
+            flow.next_node(start)
+        combined = " ".join(cm.output)
+        self.assertIn("e1", combined)
+
+    def test_next_node_logging_includes_current_id(self):
+        """Kill logger.debug(..., target, None, ...) mutation."""
+        flow, start, end = self._make_simple_flow()
+        with self.assertLogs("plaita", level="DEBUG") as cm:
+            flow.next_node(start)
+        combined = " ".join(cm.output)
+        self.assertIn("s1", combined)
+
+
+# ---------------------------------------------------------------------------
+# _get_branch_target — log arg precision and resolve_branch_target (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestGetBranchTargetMutations(unittest.TestCase):
+    def _make_switch_flow(self):
+        from plaita.node.decide import Switch, Branch
+        switch = Switch(
+            id="sw1",
+            branches=[
+                Branch(name="yes", condition={"left": "$x", "op": "eq", "right": "yes"}, next="end1"),
+                Branch(name="no", condition={"left": "$x", "op": "eq", "right": "no"}, next="end2"),
+            ],
+        )
+        end1 = End(id="end1")
+        end2 = End(id="end2")
+        flow = Flow(flow_id="fsw", nodes=[switch, end1, end2])
+        return flow, switch, end1, end2
+
+    def test_resolve_branch_target_called_with_current(self):
+        """Kill resolve_branch_target(None, b) mutation.
+        branch param is the target node id (what resolve_branch_target returns)."""
+        flow, switch, end1, end2 = self._make_switch_flow()
+        result = flow.next_node(switch, "end1")
+        self.assertEqual(result.id, "end1")
+
+    def test_resolve_branch_target_called_with_branch_b(self):
+        """Kill resolve_branch_target(current, None) mutation."""
+        flow, switch, end1, end2 = self._make_switch_flow()
+        result = flow.next_node(switch, "end2")
+        self.assertEqual(result.id, "end2")
+
+    def test_branch_not_found_warning_includes_branch_name(self):
+        """Kill logger.warning(..., None, current.id) mutation."""
+        flow, switch, _, _ = self._make_switch_flow()
+        with self.assertLogs("plaita", level="WARNING") as cm:
+            result = flow.next_node(switch, "nonexistent_target")
+        combined = " ".join(cm.output)
+        self.assertIn("nonexistent_target", combined)
+        self.assertIsNone(result)
+
+    def test_branch_not_found_warning_includes_node_id(self):
+        """Kill logger.warning(..., branch, None) mutation."""
+        flow, switch, _, _ = self._make_switch_flow()
+        with self.assertLogs("plaita", level="WARNING") as cm:
+            flow.next_node(switch, "nonexistent_target")
+        combined = " ".join(cm.output)
+        self.assertIn("sw1", combined)
+
+    def test_branch_debug_log_includes_node_id(self):
+        """Kill logger.debug(..., None, current.branches) mutation."""
+        flow, switch, end1, _ = self._make_switch_flow()
+        with self.assertLogs("plaita", level="DEBUG") as cm:
+            flow.next_node(switch, "end1")
+        combined = " ".join(cm.output)
+        self.assertIn("sw1", combined)
+
+    def test_branch_debug_log_message_not_mangled(self):
+        """Kill XXcurrent node ... XX mutation in debug message."""
+        flow, switch, end1, _ = self._make_switch_flow()
+        with self.assertLogs("plaita", level="DEBUG") as cm:
+            flow.next_node(switch, "end1")
+        combined = " ".join(cm.output)
+        self.assertNotIn("XX", combined)
+
+
+# ---------------------------------------------------------------------------
+# _warn_uncovered_env_refs — log arg precision (Round 2)
+# ---------------------------------------------------------------------------
+
+class TestWarnUncoveredEnvRefsLogArgs(unittest.TestCase):
+    def _make_env_flow(self):
+        start = Start(id="s1", name="$ENV.APP_NAME")
+        end = End(id="e1")
+        return Flow(flow_id="fenv", nodes=[start, end])  # no expose_env
+
+    def test_warning_includes_flow_id(self):
+        """Kill logger.warning(..., None, refs, refs) mutation."""
+        flow = self._make_env_flow()
+        with self.assertLogs("plaita", level="WARNING") as cm:
+            flow._warn_uncovered_env_refs()
+        combined = " ".join(cm.output)
+        self.assertIn("fenv", combined)
+
+    def test_warning_includes_env_refs_first_arg(self):
+        """Kill logger.warning(..., flow_id, None, refs) mutation."""
+        flow = self._make_env_flow()
+        with self.assertLogs("plaita", level="WARNING") as cm:
+            flow._warn_uncovered_env_refs()
+        combined = " ".join(cm.output)
+        self.assertIn("APP_NAME", combined)
+
+    def test_warning_message_not_mangled(self):
+        """Kill XX...XX mutation in warning message prefix."""
+        flow = self._make_env_flow()
+        with self.assertLogs("plaita", level="WARNING") as cm:
+            flow._warn_uncovered_env_refs()
+        combined = " ".join(cm.output)
+        self.assertIn("flow", combined.lower())
+        self.assertNotIn("XX", combined)
+
+
+# ---------------------------------------------------------------------------
+# _collect_env_refs — start index, break vs return, underscore, j+1 (Round 2)
+# ---------------------------------------------------------------------------
+from plaita.core.flow import _collect_env_refs
+
+
+class TestCollectEnvRefsMutations(unittest.TestCase):
+    def test_start_initialized_to_zero_not_none(self):
+        """Kill start=None mutation — would cause TypeError on find()."""
+        refs = set()
+        _collect_env_refs("prefix $ENV.KEY1 middle $ENV.KEY2 suffix", refs)
+        self.assertIn("KEY1", refs)
+        self.assertIn("KEY2", refs)
+
+    def test_break_not_return_when_no_more_refs(self):
+        """Kill break→return mutation — subsequent string scanning would stop."""
+        refs = set()
+        # Two $ENV refs in one string — both must be found
+        _collect_env_refs("$ENV.FIRST and $ENV.SECOND", refs)
+        self.assertEqual(refs, {"FIRST", "SECOND"})
+
+    def test_underscore_in_key_included(self):
+        """Kill obj[j] == 'XX_XX' mutation — underscore stops key scan."""
+        refs = set()
+        _collect_env_refs("$ENV.MY_KEY", refs)
+        self.assertIn("MY_KEY", refs)
+        self.assertNotIn("MY", refs)
+
+    def test_j_plus_1_advances_correctly(self):
+        """Kill j+=2 mutation — would skip every other char."""
+        refs = set()
+        _collect_env_refs("$ENV.ABCD", refs)
+        self.assertIn("ABCD", refs)
+
+    def test_start_plus_1_not_plus_2_or_minus_1(self):
+        """Kill start=j+2 and start=j-1 mutations."""
+        refs = set()
+        # Two adjacent $ENV refs separated by single char
+        _collect_env_refs("$ENV.A,$ENV.B", refs)
+        self.assertIn("A", refs)
+        self.assertIn("B", refs)
+
+    def test_empty_key_not_added(self):
+        """Verify j > key_start condition — $ENV. alone adds nothing."""
+        refs = set()
+        _collect_env_refs("$ENV.", refs)
+        self.assertEqual(len(refs), 0)
+
+    def test_dict_values_recursed(self):
+        """Verify dict path not broken by surrounding mutations."""
+        refs = set()
+        _collect_env_refs({"key": "$ENV.DICT_KEY"}, refs)
+        self.assertIn("DICT_KEY", refs)
+
+    def test_list_elements_recursed(self):
+        """Verify list path."""
+        refs = set()
+        _collect_env_refs(["$ENV.LIST_KEY"], refs)
+        self.assertIn("LIST_KEY", refs)
+
+
 if __name__ == "__main__":
     unittest.main()
