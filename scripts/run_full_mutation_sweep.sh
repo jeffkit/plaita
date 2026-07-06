@@ -168,13 +168,14 @@ recheck_all_mutations() {
 
     # ── 第一轮：只跑最快的测试文件（通常 1-2s）───────────────────────
     # 注意: 用 rc=0 + || rc=$? 避免 set -e 在测试失败时提前退出
+    # 每个 mutant 最多 60s，防止 async 测试（如 wait_for_event_timeout）挂死
     rc=0
-    MUTANT_UNDER_TEST="$m" python -m pytest -x -q -p no:randomly \
+    MUTANT_UNDER_TEST="$m" timeout 60 python -m pytest -x -q -p no:randomly \
         --tb=no --no-header "$first_test" \
         < /dev/null > /dev/null 2>&1 || rc=$?
 
     if [[ $rc -ne 0 ]]; then
-      # 第一轮就被杀死，无需继续
+      # 第一轮就被杀死（含 timeout 退出码 124），无需继续
       t_killed=$((t_killed+1))
       continue
     fi
@@ -182,7 +183,7 @@ recheck_all_mutations() {
     # ── 第二轮：跑全部测试文件确认是否真的 survived ───────────────────
     if [[ "$valid_tests" != "$first_test" ]]; then
       rc=0
-      MUTANT_UNDER_TEST="$m" python -m pytest -x -q -p no:randomly \
+      MUTANT_UNDER_TEST="$m" timeout 120 python -m pytest -x -q -p no:randomly \
           --tb=no --no-header $valid_tests \
           < /dev/null > /dev/null 2>&1 || rc=$?
     fi
@@ -201,7 +202,8 @@ recheck_all_mutations() {
 }
 
 # ── 主循环 ─────────────────────────────────────────────────────────────────
-RESULTS_FILE="mutation-sweep-results.txt"
+# 支持外部通过 RESULTS_FILE 环境变量指定输出路径（供并发脚本使用）
+RESULTS_FILE="${RESULTS_FILE:-mutation-sweep-results.txt}"
 : > "$RESULTS_FILE"
 echo "=== Plaita Full Mutation Sweep $(date) ===" | tee -a "$RESULTS_FILE"
 

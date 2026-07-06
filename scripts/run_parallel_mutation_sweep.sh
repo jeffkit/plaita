@@ -110,7 +110,7 @@ for (( w=0; w<N_WORKERS; w++ )); do
 
   (
     cd "$wt_dir"
-    RESULTS_FILE="$result_file" \
+    RESULTS_FILE="${wt_dir}/mutation-sweep-results.txt" \
     PYENV_VERSION=loki \
       bash scripts/run_full_mutation_sweep.sh \
         --from-idx "${BATCH_START[$w]}" \
@@ -157,7 +157,14 @@ SUCCESS_MODULES=()
 FAIL_MODULES=()
 
 for (( w=0; w<N_WORKERS; w++ )); do
+  wt_dir="${WORKTREE_DIRS[$w]}"
+  # 优先从 worktree 内 mutation-sweep-results.txt 读取（RESULTS_FILE 变量传入方式）
+  result_file="${wt_dir}/mutation-sweep-results.txt"
+  if [[ -f "$result_file" ]]; then
+    cp "$result_file" "${RESULTS_DIR}/worker-${w}-results.txt"
+  fi
   result_file="${RESULTS_DIR}/worker-${w}-results.txt"
+
   if [[ -f "$result_file" ]]; then
     echo "--- Worker $w (indices ${BATCH_START[$w]}-${BATCH_END[$w]}) ---" >> "$MERGED_FILE"
     cat "$result_file" >> "$MERGED_FILE"

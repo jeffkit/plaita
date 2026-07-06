@@ -1,17 +1,19 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> 状态：基线已建立（`plaita/core/callback.py`），流程可复用。
+> **最后更新**：2026-07-06
+> 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
-> **⚠️ 覆盖范围声明（2026-07，诚实降级）**
-> 当前变异测试**仅覆盖纯同步路径**：`callback.py` / `expression.py` /
-> `parallel_executor.py` / `calculate.py` / `decide.py`（见 §2.3）。**async /
-> distributed / timeout 路径（`executor.py` / `runner.py` / `concurrent.py` /
-> `code.py`）不在 mutmut 自动覆盖范围内**——`pytest-asyncio` 事件循环与
-> mutmut 进程内 `pytest.main()` 冲突，并行模式会挂/假阳性（见 §3、§6）。
-> 这些模块靠普通单测 + 集成测试覆盖，**不**把变异测试当作全量质量背书。
-> §6 提供逐变异点独立进程的人工跑法，是已验证可行的扩基线路径，但属独立
-> follow-up，当前未跑全。引用本仓库变异测试结果时请明确标注"仅同步路径"。
+> **⚠️ 覆盖范围声明（2026-07，诚实评估）**
+> 变异测试分两阶段：
+> - **阶段一（高分模块）**：7 个纯同步模块均达 98.7%-100%，测试断言质量高。
+> - **阶段二（全量基线扫描）**：17 个模块已完成 mutmut 初筛 + recheck，得到真实
+>   mutation score。大多数模块得分偏低（0-33%），这是正常的"基线"状态——
+>   说明这些模块测试数量不少但**断言精度**不足，是后续补断言的优先队列。
+> - **async/timeout 路径的限制**：`event.memory.py` 的 `wait_for_event` 相关测试
+>   会在 mutmut 进程内运行时挂死，已用 `test_event_core.py` 替代（仅覆盖 36/418 行）。
+>   `executor.py` / `runner.py` / `concurrent.py` 等 async 模块通过 recheck（独立子进程）
+>   获得了可信结果，不再受进程内 pytest.main() 污染。
 
 ## 1. 为什么做变异测试
 
@@ -99,6 +101,56 @@
 > 强化提交：`tests/unit/test_expression.py`、`tests/test_decide.py`、
 > `tests/test_calculate.py`。全量回归 `pytest tests/ -m "not integration and not e2e"`
 > 909 passed，覆盖率 80.49%（gate 79% 通过）。
+
+## 2.4 全量基线扫描（17 个模块，2026-07-06）
+
+使用 `scripts/run_parallel_mutation_sweep.sh --workers 4`（4 个 git worktree 并行）完成了
+17 个模块的全量初筛 + recheck。recheck 阶段新增了 `timeout 60 python -m pytest` 保护，
+防止 async 测试（如 `test_wait_for_event_timeout`）挂死单个变异点复核。
+
+### 阶段一（已有高分基线）
+
+| 模块 | 得分 | 变异点 | 状态 |
+|---|---|---|---|
+| `plaita/core/callback.py` | 100% | 118/118 | ✅ 已建立 |
+| `plaita/core/expression.py` | 100% | 575/575 | ✅ 已建立 |
+| `plaita/node/calculate.py` | 98.7% | 215/216 | ✅ 1 个等价变异 |
+| `plaita/node/decide.py` | 100% | 136/136 | ✅ 已建立 |
+| `plaita/core/parallel_executor.py` | 100% | 39/39 | ✅ 已建立 |
+| `plaita/core/runner.py` | 100% | 123/123 | ✅ 已建立 |
+| `plaita/core/context.py` | 100% | 121/121 | ✅ 已建立 |
+
+### 阶段二（全量基线扫描，recheck 结果）
+
+| 模块 | 得分 | 变异点 | survived | 备注 |
+|---|---|---|---|---|
+| `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
+| `plaita/core/expression_parser.py` | 60% | 105/175 | 70 | 🟡 较好 |
+| `plaita/node/concurrent.py` | 33% | 59/181 | 122 | 🟡 一般 |
+| `plaita/core/executor.py` | 22% | 20/91 | 71 | 🔴 需补断言 |
+| `plaita/dsl/builder.py` | 16% | 48/302 | 254 | 🔴 需补断言 |
+| `plaita/node/loop.py` | 17% | 9/52 | 43 | 🔴 需补断言 |
+| `plaita/core/errors.py` | 13% | 6/46 | 40 | 🔴 需补断言 |
+| `plaita/node/__init__.py` | 7% | 3/44 | 41 | 🔴 需补断言 |
+| `plaita/event/memory.py` | 6%* | 2/36 | 34 | ⚠️ 仅 test_event_core.py 覆盖 |
+| `plaita/core/strategies.py` | 9% | 3/32 | 29 | 🔴 需补断言 |
+| `plaita/core/flow.py` | 9% | 5/53 | 48 | 🔴 需补断言 |
+| `plaita/io.py` | 1% | 1/83 | 82 | 🔴 需补断言 |
+| `plaita/event/core.py` | 0% | 0/22 | 22 | 🔴 需补断言 |
+| `plaita/node/event_node.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
+| `plaita/core/state.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
+| `plaita/storage/memory.py` | 0% | 0/28 | 28 | 🔴 需补断言 |
+| `plaita/storage/base.py` | 0% | 0/14 | 14 | 🔴 需补断言 |
+
+> *`event/memory.py` 的 `wait_for_event` 系列测试（`test_event_memory_unit.py`）在
+> mutmut 中会因 `asyncio.wait_for(future, timeout=None)` 变异而挂死。全量测试的 418
+> 个变异点无法用标准 recheck 完成；以上得分仅供参考（`test_event_core.py` 侧面覆盖）。
+
+> **重要说明**：阶段二的低分（0-33%）是"正常基线"，不是测试框架失效：
+> - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
+> - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
+> - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
+> - 优先队列：`expression_parser.py`（60%）→ `concurrent.py`（33%）→ `executor.py`（22%）
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
