@@ -1,7 +1,8 @@
 # 变异测试（Mutation Testing）基线与流程
 
 > **最后更新**：2026-07-06
-> 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成。
+> 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
+> `expression_parser.py` 已补强至 **100%**（313/313）。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
 > **⚠️ 覆盖范围声明（2026-07，诚实评估）**
@@ -125,7 +126,7 @@
 | 模块 | 得分 | 变异点 | survived | 备注 |
 |---|---|---|---|---|
 | `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
-| `plaita/core/expression_parser.py` | 60% | 105/175 | 70 | 🟡 较好 |
+| `plaita/core/expression_parser.py` | **100%** | 313/313 | 0 | ✅ 已强化（见 §2.5） |
 | `plaita/node/concurrent.py` | 33% | 59/181 | 122 | 🟡 一般 |
 | `plaita/core/executor.py` | 22% | 20/91 | 71 | 🔴 需补断言 |
 | `plaita/dsl/builder.py` | 16% | 48/302 | 254 | 🔴 需补断言 |
@@ -150,7 +151,44 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：`expression_parser.py`（60%）→ `concurrent.py`（33%）→ `executor.py`（22%）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ `concurrent.py`（33%）→ `executor.py`（22%）
+
+## 2.5 expression_parser.py 强化（2026-07-06，100%）
+
+`plaita/core/expression_parser.py` 从阶段二基线的 **60%（105/175）** 提升至 **100%（313/313）**。
+
+### 关键发现：class-level 缓存陷阱
+
+`ExpressionParser._instances` 是类级 dict，在 mutmut in-process 多轮 pytest 之间
+跨变异点共享。第一轮测试填充缓存后，后续 `_build_grammar` 变异点永远不会被重新
+调用 ——138 个 `_build_grammar` 变异全部幸存的根因即此。
+
+**修复方法**：新增 `tests/unit/test_expression_parser_mutations.py`，每个测试类在
+`setUp()` 中显式调用 `ExpressionParser._instances.clear()`，强制每个测试独立触发
+`_build_grammar()` 构建。
+
+### 变异点分布与测试覆盖策略
+
+| 类别 | 变异点数 | 代表模式 | 杀灭策略 |
+|---|---|---|---|
+| `_build_grammar`（语法构建）| 138 | `prefix=None`、关键字变种、`=None` | `setUp` 清空缓存 + 逐特性测试 |
+| `__init__` / `for_prefix`（构建/缓存）| 9 | default arg 变 `'XX$XX'`、`inst=None` | 直接断言 `prefix` 属性 + 缓存 identity |
+| `_eval_variable`（变量解析）| 5 | `rpartition` 替换、递归 context/registry | 嵌套表达式字符串测试 |
+| `_eval_function_call`（函数调用）| 11 | logger 参数改 `None`、warning 消息变形 | `assertLogs` 断言日志内容 |
+| `_eval_prefix` / `_eval_template`（前缀/模板）| 6 | `parse_all=False`、`matched=True` | parse_all 边界 + 多模板字符串 |
+| `parse_function` / `evaluate`（入口）| 7 | context/registry 传 `None` | 自定义函数仅在 custom registry 注册 |
+| `_get_attr`（属性访问）| 2 | 等价变异（`get(k, None)` vs `get(k,)`） | 间接测试（等价变异无法杀灭） |
+
+### 最终得分
+
+```
+mutmut in-process:   276 killed / 37 not-checked / 0 survived（总 313）
+recheck 独立进程:     37/37 not-checked → 全部 KILLED
+真实 mutation score: 313/313 = 100%
+```
+
+等价变异（`_get_attr__mutmut_3`：`obj.get(path, None)` vs `obj.get(path,)`）在独立
+recheck 中也被杀灭，因为其他测试恰好覆盖了相关路径。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
