@@ -378,6 +378,21 @@ class TestParseNodeHint(unittest.TestCase):
         # hint 应该是 "" + " CodeNode..." 而不是 None + " CodeNode..."
         self.assertIn("CodeNode", str(ctx.exception))
 
+    def test_code_hint_not_contains_none_word(self):
+        """_12: hint = None 时消息会出现 'None CodeNode...' — 应不含 'None'。"""
+        reg = NodeRegistry()
+        with self.assertRaises(RuntimeError) as ctx:
+            reg.parse_node({"type": "code"})
+        err_str = str(ctx.exception)
+        self.assertNotIn(". None", err_str)
+
+    def test_code_hint_exact_content(self):
+        """_18: hint 中 'CodeNode was moved out of the default registry' 确实存在。"""
+        reg = NodeRegistry()
+        with self.assertRaises(RuntimeError) as ctx:
+            reg.parse_node({"type": "code"})
+        self.assertIn("CodeNode was moved out of the default registry", str(ctx.exception))
+
     def test_unknown_type_no_hint(self):
         """_13,18: hint 对非 code 类型为空字符串，错误消息不应有多余内容。"""
         reg = NodeRegistry()
@@ -387,6 +402,116 @@ class TestParseNodeHint(unittest.TestCase):
         # 不应包含 CodeNode hint
         self.assertNotIn("CodeNode", err_str)
         self.assertIn("unknown_xyz", err_str)
+
+    def test_unknown_type_no_none_suffix(self):
+        """_12: hint = None 时非 code 类型消息会以 '.None' 结尾。"""
+        reg = NodeRegistry()
+        with self.assertRaises(RuntimeError) as ctx:
+            reg.parse_node({"type": "another_unknown"})
+        err_str = str(ctx.exception)
+        self.assertFalse(err_str.endswith("None"),
+                         f"消息不应以 None 结尾: {err_str!r}")
+
+
+class TestRegistryDictProxyExtended(unittest.TestCase):
+
+    def test_getitem_error_has_correct_key(self):
+        """_4: raise KeyError(None) → KeyError 应包含实际 key。"""
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        try:
+            _ = proxy["missing_key"]
+            self.fail("应该抛出 KeyError")
+        except KeyError as e:
+            self.assertEqual(e.args[0], "missing_key")
+
+    def test_setitem_stores_correct_value(self):
+        """_1: _nodes[key] = None → setitem 应存储实际 value。"""
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        proxy["custom_key"] = Start
+        self.assertIs(proxy["custom_key"], Start)
+
+    def test_setitem_overwrite(self):
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        proxy["start"] = End
+        self.assertIs(proxy["start"], End)
+
+
+class TestDiscoverEntryPointsExtended(unittest.TestCase):
+
+    @patch("plaita.node.entry_points")
+    def test_loaded_plugin_class_stored_correctly(self, mock_ep):
+        """_9: _nodes[cls.node_type] = None → 加载的插件类应被正确存储（非 None）。"""
+        fake_cls = MagicMock()
+        fake_cls.node_type = "test_plugin"
+        ep = MagicMock()
+        ep.load.return_value = fake_cls
+        mock_ep.return_value = [ep]
+
+        reg = NodeRegistry()
+        reg._discover_entry_points()
+
+        stored = reg.get("test_plugin")
+        self.assertIs(stored, fake_cls, "存储的插件类应是 fake_cls 而非 None")
+
+
+class TestWarningMessages(unittest.TestCase):
+
+    def test_node_register_warning_message_exact(self):
+        """_7,8: 'node_register()' 大小写变异 → 消息应包含 'node_register()'。"""
+        from plaita.node import node_register
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            node_register(Start)
+            self.assertGreater(len(w), 0)
+            msg = str(w[0].message)
+            self.assertIn("node_register()", msg,
+                          f"消息应含 'node_register()'，实际: {msg!r}")
+
+    def test_parse_node_warning_message_exact(self):
+        """_7,8,9: 'Module-level parse_node()' 大小写变异 → 消息应包含 'Module-level'。"""
+        import plaita.node as pn
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            pn.parse_node({"type": "start", "id": "s1"})
+            self.assertGreater(len(w), 0)
+            msg = str(w[0].message)
+            self.assertIn("Module-level", msg,
+                          f"消息应含 'Module-level'，实际: {msg!r}")
+
+
+class TestRegisterCodeNodeExtended(unittest.TestCase):
+
+    def test_default_backend_is_set(self):
+        """_9: _DEFAULT_SANDBOX_BACKEND = None → 应实际设置 default_backend。"""
+        from plaita.node import register_code_node
+        from plaita.node import code as _code_module
+        original = _code_module._DEFAULT_SANDBOX_BACKEND
+        try:
+            reg = NodeRegistry()
+            register_code_node(registry=reg, default_backend="subprocess")
+            self.assertEqual(_code_module._DEFAULT_SANDBOX_BACKEND, "subprocess")
+        finally:
+            _code_module._DEFAULT_SANDBOX_BACKEND = original
+
+    def test_register_subprocess_backend_not_raise(self):
+        """_3: effective == "docker" or not _docker_available → subprocess 不应触发 docker 检查。"""
+        from plaita.node import register_code_node
+        reg = NodeRegistry()
+        register_code_node(registry=reg, default_backend="subprocess")
+        self.assertIn("code", reg)
+
+    def test_register_unsafe_backend_not_raise(self):
+        """_4,5,6: 其他后端条件变异。"""
+        from plaita.node import register_code_node
+        reg = NodeRegistry()
+        register_code_node(registry=reg, default_backend="unsafe")
+        self.assertIn("code", reg)
 
 
 if __name__ == "__main__":
