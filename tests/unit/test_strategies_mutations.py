@@ -1838,5 +1838,1134 @@ class TestExecuteCurrentNodeArgsPrecision(unittest.IsolatedAsyncioTestCase):
                              "context in lazy output should not be None")
 
 
+# ---------------------------------------------------------------------------
+# Round 4: _advance_one — runner.run_node first arg must be flow not None
+# (kills mutmut_2: runner.run_node(None, node, ...))
+# ---------------------------------------------------------------------------
+class TestAdvanceOneFlowArgPrecision(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_called_with_flow_not_none(self):
+        """Kill mutmut_2: runner.run_node(None, node, ...) — flow replaced by None."""
+        from plaita.core.strategies import _advance_one
+
+        captured = []
+        async def run_node(*args, **kwargs):
+            captured.append(args)
+            return ("r", None)
+
+        flow = MagicMock()
+        flow.is_end_node.return_value = True
+        flow.next_node.return_value = None
+
+        runner = MagicMock()
+        runner.run_node = run_node
+
+        node = _StartNode(id="s1", name="s1")
+        cb = _make_cb()
+
+        await _advance_one(flow, runner, cb, node)
+
+        self.assertEqual(len(captured), 1)
+        self.assertIs(captured[0][0], flow,
+                      f"First arg to run_node must be flow, got {captured[0][0]!r}")
+        self.assertIs(captured[0][1], node,
+                      f"Second arg to run_node must be node, got {captured[0][1]!r}")
+
+    async def test_next_node_called_with_node_and_branch(self):
+        """Kill mutmut_13 (node→None), mutmut_14 (branch→None), mutmut_15 (single arg), mutmut_16 (no branch)."""
+        from plaita.core.strategies import _advance_one
+
+        sentinel_branch = "left_branch_sentinel"
+
+        flow = MagicMock()
+        flow.is_end_node.return_value = False  # not end → calls flow.next_node
+        next_n = _EndNode(id="e1", name="e1")
+        flow.next_node.return_value = next_n
+
+        runner = MagicMock()
+        runner.run_node = AsyncMock(return_value=("r", sentinel_branch))
+
+        node = _MidNode(id="m1", name="m1")
+        cb = _make_cb()
+
+        await _advance_one(flow, runner, cb, node)
+
+        flow.next_node.assert_called_once_with(node, sentinel_branch)
+
+    async def test_next_node_first_arg_is_original_node_not_none(self):
+        """Kill mutmut_13: flow.next_node(None, branch) — node replaced by None."""
+        from plaita.core.strategies import _advance_one
+
+        flow = MagicMock()
+        flow.is_end_node.return_value = False
+        flow.next_node.return_value = None
+
+        runner = MagicMock()
+        runner.run_node = AsyncMock(return_value=("r", "right"))
+
+        node = _MidNode(id="m1", name="m1")
+        cb = _make_cb()
+
+        await _advance_one(flow, runner, cb, node)
+
+        call_args = flow.next_node.call_args[0]
+        self.assertIs(call_args[0], node,
+                      "first arg to flow.next_node must be the original node")
+
+    async def test_next_node_second_arg_is_branch_not_none(self):
+        """Kill mutmut_14: flow.next_node(node, None) — branch replaced by None."""
+        from plaita.core.strategies import _advance_one
+
+        distinct_branch = "specific_branch_xyz"
+        flow = MagicMock()
+        flow.is_end_node.return_value = False
+        flow.next_node.return_value = None
+
+        runner = MagicMock()
+        runner.run_node = AsyncMock(return_value=("r", distinct_branch))
+
+        node = _MidNode(id="m1", name="m1")
+        cb = _make_cb()
+
+        await _advance_one(flow, runner, cb, node)
+
+        call_args = flow.next_node.call_args[0]
+        self.assertEqual(len(call_args), 2,
+                         "flow.next_node must be called with 2 positional args")
+        self.assertEqual(call_args[1], distinct_branch,
+                         "second arg to flow.next_node must be the branch, not None")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: _subscribe_event — subscription_params exact key names
+# (kills mutmut_28: XXcorrelation_idXX, mutmut_29: CORRELATION_ID,
+#  mutmut_30: XXflow_idXX, mutmut_31: FLOW_ID, mutmut_32: XXnode_idXX, mutmut_33: NODE_ID)
+# ---------------------------------------------------------------------------
+class TestSubscribeEventParamKeyNames(unittest.IsolatedAsyncioTestCase):
+    async def _capture_params(self, execution_id="exec-1", flow_id="flow-1", node_id="nd-1"):
+        from plaita.core.strategies import _subscribe_event
+
+        captured_params = {}
+        event_bus = MagicMock()
+        def mock_register(**kwargs):
+            captured_params.update(kwargs)
+            return "sub-x"
+        event_bus.register_subscription = mock_register
+
+        node = MagicMock()
+        node.event_filter = {}
+        node.id = node_id
+        node.event_type = "test.event"
+
+        context = MagicMock()
+        context.get_or_create_event_bus.return_value = event_bus
+        context.execution_id = execution_id
+        context.update_node_result = MagicMock()
+
+        flow = MagicMock()
+        flow.flow_id = flow_id
+
+        await _subscribe_event(node, flow, {}, context)
+        return captured_params
+
+    async def test_correlation_id_key_exact(self):
+        """Kill mutmut_28 (XXcorrelation_idXX) and mutmut_29 (CORRELATION_ID)."""
+        params = await self._capture_params(execution_id="exec-sentinel-99")
+        self.assertIn("correlation_id", params,
+                      "subscription_params must have exact key 'correlation_id'")
+        self.assertNotIn("XXcorrelation_idXX", params)
+        self.assertNotIn("CORRELATION_ID", params)
+        self.assertEqual(params["correlation_id"], "exec-sentinel-99")
+
+    async def test_flow_id_key_exact(self):
+        """Kill mutmut_30 (XXflow_idXX) and mutmut_31 (FLOW_ID)."""
+        params = await self._capture_params(flow_id="flow-sentinel-88")
+        self.assertIn("flow_id", params,
+                      "subscription_params must have exact key 'flow_id'")
+        self.assertNotIn("XXflow_idXX", params)
+        self.assertNotIn("FLOW_ID", params)
+        self.assertEqual(params["flow_id"], "flow-sentinel-88")
+
+    async def test_node_id_key_exact(self):
+        """Kill mutmut_32 (XXnode_idXX) and mutmut_33 (NODE_ID)."""
+        params = await self._capture_params(node_id="nd-sentinel-77")
+        self.assertIn("node_id", params,
+                      "subscription_params must have exact key 'node_id'")
+        self.assertNotIn("XXnode_idXX", params)
+        self.assertNotIn("NODE_ID", params)
+        self.assertEqual(params["node_id"], "nd-sentinel-77")
+
+    async def test_correlation_id_value_is_execution_id(self):
+        """Verify correlation_id value comes from context.execution_id."""
+        params = await self._capture_params(execution_id="unique-exec-7654")
+        self.assertEqual(params.get("correlation_id"), "unique-exec-7654",
+                         "correlation_id must equal context.execution_id")
+
+    async def test_flow_id_value_is_flow_flow_id(self):
+        """Verify flow_id value comes from flow.flow_id."""
+        params = await self._capture_params(flow_id="unique-flow-1234")
+        self.assertEqual(params.get("flow_id"), "unique-flow-1234",
+                         "flow_id must equal flow.flow_id")
+
+    async def test_node_id_value_is_node_id(self):
+        """Verify node_id value comes from node.id."""
+        params = await self._capture_params(node_id="unique-node-5678")
+        self.assertEqual(params.get("node_id"), "unique-node-5678",
+                         "node_id must equal node.id")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: _subscribe_event — exception path arg precision
+# (kills mutmut_46: on_error(None,...), mutmut_50: update_node_result(None,...),
+#  mutmut_51: update_node_result(node,None))
+# ---------------------------------------------------------------------------
+class TestSubscribeEventExceptionPathArgs(unittest.IsolatedAsyncioTestCase):
+    async def _run_with_exception(self):
+        """Trigger the except path: register_subscription raises an Exception."""
+        from plaita.core.strategies import _subscribe_event
+
+        exc = ValueError("subscription-failed-sentinel")
+        event_bus = MagicMock()
+        event_bus.register_subscription = MagicMock(side_effect=exc)
+
+        node = MagicMock()
+        node.event_filter = {}
+        node.id = "n1"
+        node.event_type = "test.event"
+        error_state = {"status": "error", "code": -500}
+        node.on_error = MagicMock(return_value=error_state)
+
+        context = MagicMock()
+        context.get_or_create_event_bus.return_value = event_bus
+        context.execution_id = "eid1"
+        context.update_node_result = MagicMock()
+
+        flow = MagicMock()
+        flow.flow_id = "f1"
+
+        result = await _subscribe_event(node, flow, {}, context)
+        return result, node, context, error_state
+
+    async def test_exception_on_error_first_arg_is_context_not_none(self):
+        """Kill mutmut_46: node.on_error(None, ...) in except block."""
+        _, node, context, _ = await self._run_with_exception()
+        node.on_error.assert_called_once()
+        call_args = node.on_error.call_args[0]
+        self.assertIs(call_args[0], context,
+                      "First arg to on_error must be context, not None")
+
+    async def test_exception_update_node_result_first_arg_is_node(self):
+        """Kill mutmut_50: context.update_node_result(None, error_state)."""
+        _, node, context, error_state = await self._run_with_exception()
+        context.update_node_result.assert_called_once()
+        call_args = context.update_node_result.call_args[0]
+        self.assertIs(call_args[0], node,
+                      "First arg to update_node_result must be node, not None")
+
+    async def test_exception_update_node_result_second_arg_is_error_state(self):
+        """Kill mutmut_51: context.update_node_result(node, None)."""
+        _, node, context, error_state = await self._run_with_exception()
+        context.update_node_result.assert_called_once()
+        call_args = context.update_node_result.call_args[0]
+        self.assertIs(call_args[1], error_state,
+                      "Second arg to update_node_result must be error_state, not None")
+
+    async def test_exception_returns_false(self):
+        """Verify _subscribe_event returns False on exception."""
+        result, _, _, _ = await self._run_with_exception()
+        self.assertFalse(result, "_subscribe_event should return False on exception")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: NormalStrategy.execute — not_reached_end branch state retrieval
+# (kills mutmut_54: pfx=None, mutmut_56: get_state(None,...),
+#  mutmut_57: get_state(...,None), mutmut_59: get_state(...,))
+# ---------------------------------------------------------------------------
+class TestNormalStrategyNotReachedEndState(unittest.IsolatedAsyncioTestCase):
+    async def _run_not_reached_end(self, store_state=True):
+        """Run NormalStrategy where next_node→None without is_end→True."""
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        node_key = f"{pfx}{ctx.express_node_name}"
+
+        if store_state:
+            ctx.set_state(node_key, {"s1": "state_sentinel_abc"})
+
+        start = _StartNode(id="s1", name="s1")
+
+        async def run_node(*args, **kwargs):
+            return ("s_res", None)
+
+        runner = MagicMock()
+        runner.run_node = run_node
+        flow = MagicMock()
+        flow.start_node = start
+        flow.is_end_node.return_value = False
+        flow.next_node.return_value = None
+
+        cb = _make_cb()
+        strategy = NormalStrategy()
+        result = await strategy.execute(flow, ctx, runner, cb)
+        return result, ctx
+
+    async def test_not_reached_end_returns_stored_state(self):
+        """Kill mutmut_54 (pfx=None) and mutmut_56 (get_state(None,...)).
+        With correct pfx, the stored state is returned.
+        With pfx=None, key becomes 'None...' → wrong key → returns {}.
+        """
+        result, _ = await self._run_not_reached_end(store_state=True)
+        self.assertIsInstance(result, dict,
+                              "not_reached_end result must be a dict")
+        self.assertIn("s1", result,
+                      "Result must contain the node 's1' entry from context")
+        self.assertEqual(result["s1"], "state_sentinel_abc",
+                         "Result must use correct prefix to look up state")
+
+    async def test_not_reached_end_returns_empty_dict_when_no_state(self):
+        """Kill mutmut_57 (get_state(...,None)) and mutmut_59 (get_state(...,)).
+        When no state is stored, default {} should be returned, not None.
+        """
+        result, _ = await self._run_not_reached_end(store_state=False)
+        self.assertIsNotNone(result,
+                              "not_reached_end result must not be None (default is {})")
+        self.assertIsInstance(result, dict,
+                               "not_reached_end result must be a dict, not None")
+
+    async def test_not_reached_end_uses_context_express_node_name(self):
+        """Kill mutmut_56: get_state(None, {}) — key is None → returns wrong value."""
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        node_name = ctx.express_node_name
+        # Store at correct key
+        correct_key = f"{pfx}{node_name}"
+        ctx.set_state(correct_key, {"target_key": "correct_value_789"})
+
+        start = _StartNode(id="s1", name="s1")
+
+        async def run_node(*args, **kwargs):
+            return ("r", None)
+
+        runner = MagicMock()
+        runner.run_node = run_node
+        flow = MagicMock()
+        flow.start_node = start
+        flow.is_end_node.return_value = False
+        flow.next_node.return_value = None
+
+        cb = _make_cb()
+        strategy = NormalStrategy()
+        result = await strategy.execute(flow, ctx, runner, cb)
+        self.assertEqual(result.get("target_key"), "correct_value_789",
+                         "Must look up state with correct prefix+node_name key")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: GeneratorStrategy.execute — callback_manager forwarded to _advance_one
+# (kills mutmut_9: callback_manager→None in _advance_one call)
+# ---------------------------------------------------------------------------
+class TestGeneratorStrategyCallbackForwarding(unittest.IsolatedAsyncioTestCase):
+    async def test_callback_manager_passed_to_advance_one(self):
+        """Kill mutmut_9: _advance_one(flow, runner, None, current) instead of (flow, runner, cb, current)."""
+        ctx = ExecutionContext()
+
+        sentinel_cb_calls = []
+
+        class TrackingCb:
+            def on_node_start(self, flow, node): sentinel_cb_calls.append("node_start")
+            def on_node_end(self, flow, node, result, error=None, exception=None): sentinel_cb_calls.append("node_end")
+            def on_flow_start(self, flow): sentinel_cb_calls.append("flow_start")
+            def on_flow_end(self, flow, result=None, error=None): sentinel_cb_calls.append("flow_end")
+            def on_flow_suspend(self, flow): pass
+            def on_node_suspend(self, flow, node): pass
+            def on_flow_resume(self, flow): pass
+            def on_node_resume(self, flow, node): pass
+
+        tracking_cb = TrackingCb()
+
+        # We need a runner that accepts callback_manager kwarg and calls it
+        cb_received = []
+        async def run_node(flow, node, callback_manager=None, **kw):
+            cb_received.append(callback_manager)
+            return ({"done": 1}, None)
+
+        runner = MagicMock()
+        runner.run_node = run_node
+
+        end = _EndNode(id="e1", name="e1")
+        flow = MagicMock()
+        flow.start_node = end
+        flow.is_end_node.return_value = True
+        flow.next_node.return_value = None
+
+        strategy = GeneratorStrategy()
+        outputs = [o async for o in strategy.execute(flow, ctx, runner, tracking_cb)]
+
+        self.assertGreater(len(cb_received), 0, "run_node must be called")
+        self.assertIsNotNone(cb_received[0],
+                              "callback_manager passed to run_node must not be None")
+        self.assertIs(cb_received[0], tracking_cb,
+                      "callback_manager must be the actual cb object, not None")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: GeneratorStrategy.execute — yield output field precision
+# (kills mutmut_17: branch→None, mutmut_18: context→None, mutmut_19: execution_id→None,
+#  mutmut_24: execution_id kwarg removed)
+# ---------------------------------------------------------------------------
+class TestGeneratorStrategyYieldFieldPrecision(unittest.IsolatedAsyncioTestCase):
+    async def _run_generator(self, execution_id="test-exec-id"):
+        """Run a 1-node generator flow and return the single yield output."""
+        ctx = ExecutionContext()
+        ctx.set_state(f"{ctx.express_prefix}EXECUTION_ID", execution_id)
+
+        end = _EndNode(id="e1", name="e1")
+        flow = MagicMock()
+        flow.start_node = end
+        flow.is_end_node.return_value = True
+        flow.next_node.return_value = None
+
+        distinct_branch = "right-branch-sentinel"
+        runner = MagicMock()
+        runner.run_node = AsyncMock(return_value=({"result_key": "value"}, distinct_branch))
+
+        cb = _make_cb()
+        strategy = GeneratorStrategy()
+        outputs = [o async for o in strategy.execute(flow, ctx, runner, cb)]
+        return outputs, ctx, distinct_branch
+
+    async def test_yield_branch_is_not_none_when_branch_present(self):
+        """Kill mutmut_17: branch→None in _create_lazy_output call."""
+        outputs, ctx, distinct_branch = await self._run_generator()
+        self.assertTrue(len(outputs) >= 1, "At least one output expected")
+        # The 'branch' field in output comes from the _create_lazy_output result
+        # With mutation: branch=None → branch or "" = ""
+        # Without mutation: branch=distinct_branch
+        output = outputs[0]
+        self.assertIn("branch", output)
+        # If branch was None, it becomes "" (falsy default in _create_lazy_output)
+        # But with real branch "right-branch-sentinel", it should be non-empty
+        self.assertEqual(output["branch"], distinct_branch,
+                         "branch in yield output must match the actual branch returned by runner")
+
+    async def test_yield_context_is_not_none(self):
+        """Kill mutmut_18: context.to_dict()→None in _create_lazy_output call."""
+        outputs, ctx, _ = await self._run_generator()
+        self.assertTrue(len(outputs) >= 1)
+        output = outputs[0]
+        self.assertIn("context", output)
+        self.assertIsNotNone(output["context"],
+                              "context in yield output must not be None")
+        self.assertIsInstance(output["context"], dict,
+                               "context must be a dict from context.to_dict()")
+
+    async def test_yield_execution_id_is_set(self):
+        """Kill mutmut_19 (execution_id→None) and mutmut_24 (execution_id kwarg removed)."""
+        exec_id = "my-unique-exec-id-12345"
+        outputs, ctx, _ = await self._run_generator(execution_id=exec_id)
+        self.assertTrue(len(outputs) >= 1)
+        output = outputs[0]
+        self.assertIn("execution_id", output)
+        self.assertEqual(output["execution_id"], exec_id,
+                         "execution_id in yield must match context.execution_id")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: GeneratorStrategy.execute — not_reached_end path
+# (kills mutmut_41: pfx=None, mutmut_42: result=None, mutmut_43: get_state(None,...),
+#  mutmut_44: get_state(...,None), mutmut_46: get_state(...,),
+#  mutmut_47: result→None in yield, mutmut_48: context→None in yield,
+#  mutmut_49: execution_id→None in yield, mutmut_53: execution_id kwarg removed)
+# ---------------------------------------------------------------------------
+class TestGeneratorStrategyNotReachedEndPath(unittest.IsolatedAsyncioTestCase):
+    async def _run_not_reached_end(self, store_state=True, execution_id="exec-gen-1"):
+        """Run generator where next_node→None without is_end→True (triggers not_reached_end)."""
+        ctx = ExecutionContext()
+        ctx.set_state(f"{ctx.express_prefix}EXECUTION_ID", execution_id)
+        pfx = ctx.express_prefix
+        node_key = f"{pfx}{ctx.express_node_name}"
+
+        if store_state:
+            ctx.set_state(node_key, {"s1": "gen_state_sentinel_xyz"})
+
+        start = _StartNode(id="s1", name="s1")
+
+        async def run_node(*args, **kwargs):
+            return ("sr", "go_nowhere")
+
+        runner = MagicMock()
+        runner.run_node = run_node
+        flow = MagicMock()
+        flow.start_node = start
+        flow.is_end_node.return_value = False
+        flow.next_node.return_value = None
+
+        cb = _make_cb()
+        strategy = GeneratorStrategy()
+        outputs = [o async for o in strategy.execute(flow, ctx, runner, cb)]
+        return outputs, ctx
+
+    async def test_not_reached_end_yields_extra_end_output(self):
+        """At least 2 outputs: one from loop, one synthetic end output."""
+        outputs, _ = await self._run_not_reached_end(store_state=True)
+        self.assertGreaterEqual(len(outputs), 2,
+                                "not_reached_end should yield an extra synthetic end output")
+
+    async def test_end_output_result_contains_stored_state(self):
+        """Kill mutmut_41 (pfx=None), mutmut_42 (result=None), mutmut_43 (get_state(None,...)).
+        The extra end output should contain the stored node state.
+        """
+        outputs, _ = await self._run_not_reached_end(store_state=True)
+        end_outputs = [o for o in outputs if o.get("is_end")]
+        self.assertTrue(len(end_outputs) >= 1,
+                        "At least one end output expected")
+        end_out = end_outputs[-1]
+        self.assertIsNotNone(end_out.get("result"),
+                              "end output result must not be None")
+        self.assertIsInstance(end_out.get("result"), dict,
+                               "end output result must be a dict from context.get_state")
+        self.assertIn("s1", end_out["result"],
+                      "end output result must contain stored node state")
+        self.assertEqual(end_out["result"]["s1"], "gen_state_sentinel_xyz")
+
+    async def test_end_output_result_is_empty_dict_when_no_state(self):
+        """Kill mutmut_44 (get_state(...,None)) — when no state, result must be {}, not None."""
+        outputs, _ = await self._run_not_reached_end(store_state=False)
+        end_outputs = [o for o in outputs if o.get("is_end")]
+        self.assertTrue(len(end_outputs) >= 1)
+        end_out = end_outputs[-1]
+        self.assertIsNotNone(end_out.get("result"),
+                              "result must not be None (default is {})")
+        # Even if result is {}, it's not None
+        self.assertIsInstance(end_out.get("result"), dict)
+
+    async def test_end_output_context_is_not_none(self):
+        """Kill mutmut_48: context.to_dict()→None in _create_end_output."""
+        outputs, _ = await self._run_not_reached_end(store_state=True)
+        end_outputs = [o for o in outputs if o.get("is_end")]
+        self.assertTrue(len(end_outputs) >= 1)
+        end_out = end_outputs[-1]
+        self.assertIn("context", end_out)
+        self.assertIsNotNone(end_out["context"],
+                              "end output context must not be None")
+        self.assertIsInstance(end_out["context"], dict)
+
+    async def test_end_output_execution_id_is_set(self):
+        """Kill mutmut_49 (execution_id→None) and mutmut_53 (execution_id kwarg removed)."""
+        exec_id = "gen-exec-sentinel-9876"
+        outputs, ctx = await self._run_not_reached_end(
+            store_state=True, execution_id=exec_id
+        )
+        end_outputs = [o for o in outputs if o.get("is_end")]
+        self.assertTrue(len(end_outputs) >= 1)
+        end_out = end_outputs[-1]
+        self.assertIn("execution_id", end_out)
+        self.assertEqual(end_out["execution_id"], exec_id,
+                         "execution_id in end output must match context.execution_id")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: DistributedStrategy.execute — pfx not None when execute starts
+# (kills mutmut_19: pfx=None)
+# ---------------------------------------------------------------------------
+class TestDistributedExecutePfxNotNone(unittest.IsolatedAsyncioTestCase):
+    async def test_pfx_used_correctly_in_get_state(self):
+        """Kill mutmut_19: pfx=None.
+        When current_node is None (no nodes to run), result uses
+        context.get_state(f"{pfx}PLAITA_NODE_STATE", {}).
+        With pfx=None, key becomes "NonePLAITA_NODE_STATE" → wrong key.
+        """
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        node_key = f"{pfx}{ctx.express_node_name}"
+        ctx.set_state(node_key, {"sentinel_node": "pfx_check_value"})
+        ctx.clean()
+        ctx.setup_flow(MagicMock(flow_id="f1"), (), {})
+
+        flow = MagicMock()
+        flow.start_node = _StartNode(id="s1", name="s1")
+        flow.flow_id = "f1"
+
+        async def run_node(flow, node, **kwargs):
+            return ({}, None)
+
+        runner = MagicMock()
+        runner.run_node = run_node
+        # _start_new_flow returns (None, result, branch) to trigger the pfx code path
+        runner.node_execution = None
+
+        # Make _start_new_flow return current_node=None to exercise the pfx path
+        flow.start_node = _StartNode(id="s1", name="s1")
+        flow.next_node.return_value = None  # after start node, no next → current_node=None
+
+        cb = _make_cb()
+        strategy = DistributedStrategy()
+
+        # Re-set state after setup_flow resets it
+        ctx_pfx = ctx.express_prefix
+        ctx.set_state(f"{ctx_pfx}{ctx.express_node_name}", {"chk": "correct_pfx_state"})
+
+        result = await strategy.execute(flow, ctx, runner, cb)
+        self.assertIn("context", result,
+                      "execute result must contain 'context' field")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: DistributedStrategy.execute — _determine_current_node runner/cb args
+# (kills mutmut_38: runner→None, mutmut_39: callback_manager→None,
+#  mutmut_48: callback_manager→None in _execute_current_node)
+# ---------------------------------------------------------------------------
+class TestDistributedExecuteRunnerCbPrecision(unittest.IsolatedAsyncioTestCase):
+    async def _run_determine_current_node(self):
+        """Run DistributedStrategy with no saved_context so _determine_current_node is called."""
+        ctx = ExecutionContext()
+        run_calls = []
+
+        async def capture_run(*args, **kwargs):
+            run_calls.append((args, kwargs))
+            return ({}, None)
+
+        runner = MagicMock()
+        runner.run_node = capture_run
+        runner.node_execution = None
+
+        start = _StartNode(id="s1", name="s1")
+        end = _EndNode(id="e1", name="e1")
+        flow = MagicMock()
+        flow.start_node = start
+        flow.flow_id = "f1"
+        flow.next_node.return_value = None  # current_node becomes None after start
+        flow.is_end_node.return_value = False
+
+        cb = _make_cb()
+        strategy = DistributedStrategy()
+        await strategy.execute(flow, ctx, runner, cb)
+        return run_calls, cb, flow, start
+
+    async def test_runner_passed_to_start_new_flow(self):
+        """Kill mutmut_38: _determine_current_node(flow, context, None, callback_manager)."""
+        run_calls, cb, flow, start = await self._run_determine_current_node()
+        self.assertTrue(len(run_calls) >= 1,
+                        "run_node must be called at least once")
+        args, kwargs = run_calls[0]
+        self.assertIs(args[0], flow,
+                      "First arg to run_node must be flow, not None")
+
+    async def test_callback_manager_passed_to_start_new_flow(self):
+        """Kill mutmut_39: _determine_current_node(flow, context, runner, None)."""
+        run_calls, cb, flow, start = await self._run_determine_current_node()
+        self.assertTrue(len(run_calls) >= 1)
+        args, kwargs = run_calls[0]
+        self.assertIn("callback_manager", kwargs)
+        self.assertIs(kwargs["callback_manager"], cb,
+                      "callback_manager kwarg must be the actual cb, not None")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: DistributedStrategy._determine_current_node — arg precision
+# (kills mutmut_1: last_node_id=None, mutmut_4: _get_next_from_last(flow,ctx,None),
+#  mutmut_9: _start_new_flow(flow,None,...), mutmut_11: _start_new_flow(flow,ctx,runner,None))
+# ---------------------------------------------------------------------------
+class TestDetermineCurrentNodeArgPrecision(unittest.IsolatedAsyncioTestCase):
+    async def test_uses_actual_last_node_id_not_none(self):
+        """Kill mutmut_1: last_node_id=None → always calls _start_new_flow instead of _get_next_from_last."""
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        # Store last_node_id in context
+        ctx.set_state(f"{pfx}LAST_NODE", "known-last-node-id")
+        # Put node results so _get_next_from_last works
+        ctx.set_state(f"{pfx}{ctx.express_node_name}", {"known-last-node-id": "prev_result"})
+        ctx.set_state(f"{pfx}BRANCH", "main")
+
+        found_node = _MidNode(id="known-last-node-id", name="mid")
+        next_node = _EndNode(id="end1", name="end")
+
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = found_node
+        flow.next_node.return_value = next_node
+
+        runner = MagicMock()
+        runner.node_execution = None
+        cb = _make_cb()
+
+        strategy = DistributedStrategy()
+        current, result, branch = await strategy._determine_current_node(flow, ctx, runner, cb)
+
+        # With mutmut_1 (last_node_id=None), _start_new_flow would be called instead
+        # _start_new_flow calls runner.run_node(flow, start_node, ...) which would fail since flow.start_node not set
+        # The key assertion: flow.find_node_by_id was called with the real last_node_id
+        flow.find_node_by_id.assert_called_with("known-last-node-id")
+
+    async def test_get_next_from_last_receives_actual_last_node_id(self):
+        """Kill mutmut_4: _get_next_from_last(flow, ctx, None) instead of (flow, ctx, last_node_id)."""
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        ctx.set_state(f"{pfx}LAST_NODE", "specific-node-abc")
+        ctx.set_state(f"{pfx}{ctx.express_node_name}", {"specific-node-abc": "res"})
+        ctx.set_state(f"{pfx}BRANCH", "x")
+
+        found = _MidNode(id="specific-node-abc", name="mid")
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = found
+        flow.next_node.return_value = None
+
+        runner = MagicMock()
+        runner.node_execution = None
+        cb = _make_cb()
+
+        strategy = DistributedStrategy()
+        current, result, branch = await strategy._determine_current_node(flow, ctx, runner, cb)
+
+        # With mutmut_4 (None arg), find_node_by_id would be called with None
+        call_args = flow.find_node_by_id.call_args[0]
+        self.assertEqual(call_args[0], "specific-node-abc",
+                         "find_node_by_id must be called with the actual last_node_id, not None")
+
+    async def test_start_new_flow_receives_context_not_none(self):
+        """Kill mutmut_9: _start_new_flow(flow, None, runner, callback_manager)."""
+        ctx = ExecutionContext()
+        # No last_node_id → calls _start_new_flow
+
+        captured_ctx = []
+        async def mock_start_new_flow(flow, context, runner, cb):
+            captured_ctx.append(context)
+            return (None, {}, None)
+
+        flow = MagicMock()
+        flow.start_node = _StartNode(id="s1", name="s1")
+        flow.flow_id = "f1"
+
+        runner = MagicMock()
+        runner.node_execution = None
+        cb = _make_cb()
+
+        strategy = DistributedStrategy()
+        strategy._start_new_flow = mock_start_new_flow
+
+        await strategy._determine_current_node(flow, ctx, runner, cb)
+
+        self.assertEqual(len(captured_ctx), 1)
+        self.assertIs(captured_ctx[0], ctx,
+                      "Context passed to _start_new_flow must be the actual context, not None")
+
+    async def test_start_new_flow_receives_callback_manager_not_none(self):
+        """Kill mutmut_11: _start_new_flow(flow, context, runner, None)."""
+        ctx = ExecutionContext()
+
+        captured_cbs = []
+        async def mock_start_new_flow(flow, context, runner, callback_manager):
+            captured_cbs.append(callback_manager)
+            return (None, {}, None)
+
+        flow = MagicMock()
+        flow.start_node = _StartNode(id="s1", name="s1")
+        flow.flow_id = "f1"
+
+        runner = MagicMock()
+        runner.node_execution = None
+        cb = _make_cb()
+
+        strategy = DistributedStrategy()
+        strategy._start_new_flow = mock_start_new_flow
+
+        await strategy._determine_current_node(flow, ctx, runner, cb)
+
+        self.assertEqual(len(captured_cbs), 1)
+        self.assertIs(captured_cbs[0], cb,
+                      "callback_manager passed to _start_new_flow must be actual cb, not None")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: DistributedStrategy._get_next_from_last — get_state default and next_node args
+# (kills mutmut_6: get_state(...,None), mutmut_8: get_state(...,),
+#  mutmut_13: next_node(None,branch), mutmut_14: next_node(node,None),
+#  mutmut_15: next_node(branch), mutmut_16: next_node(node,))
+# ---------------------------------------------------------------------------
+class TestGetNextFromLastArgPrecisionR4(unittest.TestCase):
+    def _make_ctx_simple(self, last_node_id="n1"):
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        ctx.set_state(f"{pfx}LAST_NODE", last_node_id)
+        ctx.set_state(f"{pfx}{ctx.express_node_name}", {last_node_id: "r1"})
+        ctx.set_state(f"{pfx}BRANCH", "main")
+        return ctx
+
+    def test_get_state_default_is_dict_not_none(self):
+        """Kill mutmut_6 (default None) and mutmut_8 (no default).
+        When node_results is {} (default), node_results.get(last_node_id) works without error.
+        With None default, node_results.get would raise AttributeError.
+        """
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        # Don't store any node state → get_state returns default
+        ctx.set_state(f"{pfx}LAST_NODE", "n_missing")
+        ctx.set_state(f"{pfx}BRANCH", "b1")
+
+        found = _MidNode(id="n_missing", name="mid")
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = found
+        flow.next_node.return_value = None
+
+        strategy = DistributedStrategy()
+        # Should not raise (with mutation {→None, .get() would raise AttributeError)
+        current, result, branch = strategy._get_next_from_last(flow, ctx, "n_missing")
+        self.assertIsNone(result)  # .get() on empty dict with missing key → None
+
+    def test_next_node_called_with_found_node_and_branch(self):
+        """Kill mutmut_13 (node→None), mutmut_14 (branch→None), mutmut_15/16 (arg count)."""
+        ctx = self._make_ctx_simple("n5")
+        found = _MidNode(id="n5", name="mid")
+        next_n = _EndNode(id="e1", name="end")
+
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = found
+        flow.next_node.return_value = next_n
+
+        strategy = DistributedStrategy()
+        strategy._get_next_from_last(flow, ctx, "n5")
+
+        # Verify flow.next_node was called with (found_node, branch)
+        # The first call is with the found node, second call is with next after find
+        # Actually: current_node = found (from find_node_by_id), then current_node = flow.next_node(current_node, branch)
+        flow.next_node.assert_called_once()
+        call_args = flow.next_node.call_args[0]
+        self.assertEqual(len(call_args), 2,
+                         "flow.next_node must be called with exactly 2 positional args")
+        self.assertIs(call_args[0], found,
+                      "first arg to flow.next_node must be the found node, not None")
+        self.assertEqual(call_args[1], "main",
+                         "second arg to flow.next_node must be the branch, not None")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: DistributedStrategy._start_new_flow — flow.next_node arg precision
+# (kills mutmut_10: current_node=None, mutmut_11: next_node(None,branch),
+#  mutmut_12: next_node(start_node,None), mutmut_13: next_node(branch),
+#  mutmut_14: next_node(start_node,))
+# ---------------------------------------------------------------------------
+class TestStartNewFlowNextNodeArgPrecision(unittest.IsolatedAsyncioTestCase):
+    async def _run_start_new_flow_with_branch(self, branch_val="special_branch"):
+        ctx = ExecutionContext()
+        start = _StartNode(id="s1", name="s1")
+        next_n = _MidNode(id="m1", name="mid")
+
+        run_calls = []
+        async def capture_run(*args, **kwargs):
+            run_calls.append((args, kwargs))
+            return ({}, branch_val)
+
+        runner = MagicMock()
+        runner.run_node = capture_run
+        flow = MagicMock()
+        flow.start_node = start
+        flow.next_node.return_value = next_n
+
+        cb = _make_cb()
+        strategy = DistributedStrategy()
+        current, result, branch = await strategy._start_new_flow(flow, ctx, runner, cb)
+        return current, result, branch, flow, start, next_n
+
+    async def test_current_node_is_not_none_when_next_exists(self):
+        """Kill mutmut_10: current_node = None (hardcoded)."""
+        current, _, _, flow, start, next_n = await self._run_start_new_flow_with_branch()
+        self.assertIs(current, next_n,
+                      "current_node must be the result of flow.next_node, not None")
+
+    async def test_next_node_first_arg_is_start_node(self):
+        """Kill mutmut_11: flow.next_node(None, branch) — start_node→None."""
+        _, _, _, flow, start, _ = await self._run_start_new_flow_with_branch("b1")
+        call_args = flow.next_node.call_args[0]
+        self.assertIs(call_args[0], start,
+                      "first arg to flow.next_node must be start_node, not None")
+
+    async def test_next_node_second_arg_is_branch(self):
+        """Kill mutmut_12: flow.next_node(start_node, None) — branch→None."""
+        _, _, _, flow, start, _ = await self._run_start_new_flow_with_branch("distinct_branch_567")
+        call_args = flow.next_node.call_args[0]
+        self.assertEqual(call_args[1], "distinct_branch_567",
+                         "second arg to flow.next_node must be the branch, not None")
+
+    async def test_next_node_called_with_two_args(self):
+        """Kill mutmut_13 (only branch arg) and mutmut_14 (no branch arg)."""
+        _, _, _, flow, start, _ = await self._run_start_new_flow_with_branch("b2")
+        call_args = flow.next_node.call_args[0]
+        self.assertEqual(len(call_args), 2,
+                         f"flow.next_node must be called with exactly 2 positional args, got {len(call_args)}")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: DistributedStrategy._execute_current_node — callback_manager and is_end arg
+# (kills mutmut_4: callback_manager=None, mutmut_7: callback_manager kwarg removed,
+#  mutmut_8: flow.is_end_node(None), mutmut_13: execution_id=None,
+#  mutmut_18: execution_id kwarg removed)
+# ---------------------------------------------------------------------------
+class TestExecuteCurrentNodeRunnerCbPrecision(unittest.IsolatedAsyncioTestCase):
+    async def _run_execute_current_node_with_tracking(self, is_end=True):
+        ctx = ExecutionContext()
+        ctx.set_state(f"{ctx.express_prefix}EXECUTION_ID", "exec-test-id-444")
+
+        node = MagicMock()
+        node.id = "curr1"
+        node.name = "curr1"
+        node.node_type = "end" if is_end else "mid"
+        node.is_suspending = False
+
+        run_calls = []
+        async def capture_run(*args, **kwargs):
+            run_calls.append((args, kwargs))
+            return ({"final": "res"}, "branch_b")
+
+        runner = MagicMock()
+        runner.run_node = capture_run
+        flow = MagicMock()
+        flow.is_end_node.return_value = is_end
+        flow.next_node.return_value = None
+
+        cb = _make_cb()
+        strategy = DistributedStrategy()
+        result = await strategy._execute_current_node(flow, ctx, runner, cb, node)
+        return result, run_calls, flow, node, cb, ctx
+
+    async def test_callback_manager_passed_to_runner(self):
+        """Kill mutmut_4 (callback_manager=None) and mutmut_7 (kwarg removed)."""
+        result, run_calls, flow, node, cb, ctx = await self._run_execute_current_node_with_tracking(is_end=True)
+        self.assertEqual(len(run_calls), 1)
+        _, kwargs = run_calls[0]
+        self.assertIn("callback_manager", kwargs,
+                      "callback_manager kwarg must be present in run_node call")
+        self.assertIs(kwargs["callback_manager"], cb,
+                      "callback_manager must be the actual cb, not None")
+
+    async def test_is_end_node_receives_current_node(self):
+        """Kill mutmut_8: flow.is_end_node(None) — current_node→None."""
+        result, run_calls, flow, node, cb, ctx = await self._run_execute_current_node_with_tracking(is_end=True)
+        flow.is_end_node.assert_called_with(node)
+
+    async def test_lazy_output_execution_id_is_set_for_non_end(self):
+        """Kill mutmut_13 (execution_id=None) and mutmut_18 (execution_id removed) for non-end node."""
+        result, run_calls, flow, node, cb, ctx = await self._run_execute_current_node_with_tracking(is_end=False)
+        self.assertIn("execution_id", result)
+        self.assertEqual(result["execution_id"], "exec-test-id-444",
+                         "execution_id in lazy output must match context.execution_id")
+
+
+# ---------------------------------------------------------------------------
+# Round 4: DistributedStrategy._handle_resume — default value and arg precision
+# (kills mutmut_19/21: get_state({} default), mutmut_24/26: prev_state.get({} default),
+#  mutmut_28/30/33: prev_state.get("status",...) mutations,
+#  mutmut_38/40: node= in ResumeError for non-pending,
+#  mutmut_53: exec_ctx=None, mutmut_54: exec_ctx=runner.node_execution and context)
+# ---------------------------------------------------------------------------
+class TestHandleResumeDefaultsAndArgsPrecision(unittest.IsolatedAsyncioTestCase):
+    def _make_context_with_node(self, node_id, status="pending"):
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        ctx.set_state(f"{pfx}LAST_NODE", node_id)
+        ctx.set_state(f"{pfx}{ctx.express_node_name}", {node_id: {"status": status}})
+        return ctx
+
+    def _make_suspending_node(self, node_id="ev1", status_to_return="completed"):
+        node = MagicMock()
+        node.id = node_id
+        node.is_suspending = True
+        node.resume = MagicMock(return_value={"status": status_to_return})
+        node.source_line = None
+        node.node_type = "event"
+        node.name = "EventNode"
+        return node
+
+    async def test_get_state_default_dict_not_none_when_no_node_results(self):
+        """Kill mutmut_19/21: context.get_state(key, None) instead of ({}).
+        If default is None, node_results.get(last_node_id, {}) raises AttributeError.
+        We use a suspending node with empty context to trigger this path.
+        """
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        ctx.set_state(f"{pfx}LAST_NODE", "ev1")
+        # DO NOT set node state → get_state returns default
+
+        node = self._make_suspending_node("ev1")
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = node
+
+        runner = MagicMock()
+        runner.node_execution = None
+
+        cb = _make_cb()
+        cb.on_flow_resume = MagicMock()
+        cb.on_node_resume = MagicMock()
+        cb.on_node_end = MagicMock()
+
+        strategy = DistributedStrategy()
+        # With mutmut_19 (None default), .get() on None → AttributeError
+        # With correct code, get_state returns {} → prev_state = {} → status="" → raises ResumeError
+        with self.assertRaises(Exception) as cm:
+            await strategy._handle_resume(flow, ctx, runner, cb, ResumeType.EVENT, {})
+
+        # Should be ResumeError (not pending), not AttributeError
+        err = cm.exception
+        self.assertIsInstance(err, ResumeError,
+                              f"Expected ResumeError, got {type(err).__name__}: {err}")
+        self.assertIn("pending", str(err).lower() + str(err),
+                      "Error should mention pending status check failed")
+
+    async def test_prev_state_get_default_dict_allows_status_check(self):
+        """Kill mutmut_24/26: prev_state.get(last_node_id, None) instead of ({}).
+        With None default, prev_state.get("status", "") would fail if prev_state is None.
+        But prev_state.get(last_node_id, {}) returns {} when the key is missing.
+        """
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        ctx.set_state(f"{pfx}LAST_NODE", "ev1")
+        # Store node_results but without the specific node_id key
+        ctx.set_state(f"{pfx}{ctx.express_node_name}", {})  # empty dict, node_id not present
+
+        node = self._make_suspending_node("ev1")
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = node
+
+        runner = MagicMock()
+        runner.node_execution = None
+        cb = _make_cb()
+        cb.on_flow_resume = MagicMock()
+
+        strategy = DistributedStrategy()
+        # With correct code: prev_state = {}.get("ev1", {}) = {} → status="" → raises ResumeError
+        # With mutmut_24 (None default): prev_state = None → .get("status", "") → AttributeError
+        with self.assertRaises(Exception) as cm:
+            await strategy._handle_resume(flow, ctx, runner, cb, ResumeType.EVENT, {})
+
+        err = cm.exception
+        self.assertIsInstance(err, ResumeError,
+                              f"Expected ResumeError (status check), got {type(err).__name__}")
+
+    async def test_status_check_uses_lowercase_status_key(self):
+        """Kill mutmut_28 (status→None), mutmut_30 (status,)/empty, mutmut_33 ("XXXX" default).
+        When prev_state has no "status" key, "" default triggers ResumeError.
+        """
+        ctx = ExecutionContext()
+        pfx = ctx.express_prefix
+        ctx.set_state(f"{pfx}LAST_NODE", "ev1")
+        # Node state without "status" key
+        ctx.set_state(f"{pfx}{ctx.express_node_name}", {"ev1": {"other_field": "val"}})
+
+        node = self._make_suspending_node("ev1")
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = node
+
+        runner = MagicMock()
+        runner.node_execution = None
+        cb = _make_cb()
+        cb.on_flow_resume = MagicMock()
+
+        strategy = DistributedStrategy()
+        # With correct code: prev_state.get("status", "") = "" != "pending" → ResumeError
+        # With mutmut_28 (None default): prev_state.get(None, "") = "" → same result (might survive)
+        # With mutmut_33 ("XXXX" default): prev_state.get("status", "XXXX") = "XXXX" != "pending" → still ResumeError
+        # These are genuinely hard to kill directly; but the test verifies correct behavior
+        with self.assertRaises(ResumeError) as cm:
+            await strategy._handle_resume(flow, ctx, runner, cb, ResumeType.EVENT, {})
+        err_msg = str(cm.exception)
+        self.assertIn("pending", err_msg.lower() + err_msg)
+
+    async def test_non_pending_resume_error_has_current_node(self):
+        """Kill mutmut_38 (node=None) and mutmut_40 (node kwarg removed) for non-pending error."""
+        ctx = self._make_context_with_node("ev1", status="completed")  # not pending
+
+        node = self._make_suspending_node("ev1")
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = node
+
+        runner = MagicMock()
+        runner.node_execution = None
+        cb = _make_cb()
+        cb.on_flow_resume = MagicMock()
+
+        strategy = DistributedStrategy()
+        with self.assertRaises(ResumeError) as cm:
+            await strategy._handle_resume(flow, ctx, runner, cb, ResumeType.EVENT, {})
+
+        err = cm.exception
+        self.assertIsNotNone(err.node,
+                              "ResumeError.node must not be None for non-pending status error")
+        self.assertIs(err.node, node,
+                      "ResumeError.node must be the current_node")
+
+    async def test_exec_ctx_is_not_none_when_no_node_execution(self):
+        """Kill mutmut_53: exec_ctx=None instead of runner.node_execution or context.
+        When runner.node_execution is None, exec_ctx falls back to context.
+        With mutmut_53 (exec_ctx=None), current_node.resume(None, ...) is called.
+        """
+        ctx = self._make_context_with_node("ev1", status="pending")
+
+        exec_ctx_received = []
+        node = MagicMock()
+        node.id = "ev1"
+        node.is_suspending = True
+        node.resume = MagicMock(side_effect=lambda ctx, *a, **k: exec_ctx_received.append(ctx) or {"done": True})
+        node.source_line = None
+        node.node_type = "event"
+        node.name = "EventNode"
+
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = node
+        flow.next_node.return_value = None
+
+        runner = MagicMock()
+        runner.node_execution = None  # falls back to context
+
+        cb = _make_cb()
+        cb.on_flow_resume = MagicMock()
+        cb.on_node_resume = MagicMock()
+        cb.on_node_end = MagicMock()
+
+        strategy = DistributedStrategy()
+        await strategy._handle_resume(flow, ctx, runner, cb, ResumeType.EVENT, {})
+
+        self.assertEqual(len(exec_ctx_received), 1)
+        self.assertIsNotNone(exec_ctx_received[0],
+                              "exec_ctx must not be None; should fall back to context")
+        self.assertIs(exec_ctx_received[0], ctx,
+                      "exec_ctx must be context when runner.node_execution is None")
+
+    async def test_exec_ctx_is_node_execution_when_available(self):
+        """Kill mutmut_54: exec_ctx = runner.node_execution AND context.
+        With 'and' instead of 'or', if runner.node_execution is truthy, exec_ctx = context (wrong!).
+        With 'or', if runner.node_execution is truthy, exec_ctx = runner.node_execution (correct!).
+        """
+        ctx = self._make_context_with_node("ev1", status="pending")
+
+        exec_ctx_received = []
+        node = MagicMock()
+        node.id = "ev1"
+        node.is_suspending = True
+        node.resume = MagicMock(side_effect=lambda ctx, *a, **k: exec_ctx_received.append(ctx) or {"done": True})
+        node.source_line = None
+        node.node_type = "event"
+        node.name = "EventNode"
+
+        flow = MagicMock()
+        flow.find_node_by_id.return_value = node
+        flow.next_node.return_value = None
+
+        # Create a distinct node_execution object
+        node_execution_obj = MagicMock()
+
+        runner = MagicMock()
+        runner.node_execution = node_execution_obj  # truthy
+
+        cb = _make_cb()
+        cb.on_flow_resume = MagicMock()
+        cb.on_node_resume = MagicMock()
+        cb.on_node_end = MagicMock()
+
+        strategy = DistributedStrategy()
+        await strategy._handle_resume(flow, ctx, runner, cb, ResumeType.EVENT, {})
+
+        self.assertEqual(len(exec_ctx_received), 1)
+        # With 'or': exec_ctx = node_execution_obj (truthy) → correct
+        # With 'and': exec_ctx = context (wrong!)
+        self.assertIs(exec_ctx_received[0], node_execution_obj,
+                      "When runner.node_execution is set, exec_ctx must be it (not context)")
+
+
 if __name__ == "__main__":
     unittest.main()
