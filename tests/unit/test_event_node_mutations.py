@@ -804,6 +804,23 @@ class TestExecuteEventIdTimestamp(unittest.TestCase):
         self.assertGreater(timestamp, 1_000_000_000_000,
                            f"event_id timestamp should be in milliseconds, got {timestamp}")
 
+    def test_event_id_timestamp_uses_exact_millisecond_multiplier(self):
+        """Kill mutmut_62: int(time.time() * 1001) instead of * 1000.
+        With fixed mock time, *1000 and *1001 produce different integer timestamps.
+        """
+        from unittest.mock import patch
+        node = _make_node()
+        fixed_time = 1_700_000_000.5
+        with patch("plaita.node.event_node.time.time", return_value=fixed_time):
+            result = node.execute(_make_execution())
+        event_id = result["event_id"]
+        expected_ts = int(fixed_time * 1000)
+        self.assertTrue(event_id.endswith(f"_{expected_ts}"),
+                        f"event_id should end with _{expected_ts}, got {event_id}")
+        wrong_ts = int(fixed_time * 1001)
+        self.assertNotEqual(int(event_id.rsplit("_", 1)[-1]), wrong_ts,
+                            "timestamp must use *1000 not *1001")
+
 
 # ---------------------------------------------------------------------------
 # Round 3: execute — final result log precision (kills mutmut_72,73,74,77)
@@ -811,14 +828,17 @@ class TestExecuteEventIdTimestamp(unittest.TestCase):
 
 class TestExecuteFinalLogPrecision(unittest.TestCase):
     def test_final_log_has_node_id(self):
-        """Kill mutmut_72: self.id → None in final result logger.info call."""
+        """Kill mutmut_72: self.id → None in final result logger.info call.
+        Must check the bracket prefix, not bare 'evt1' which also appears in event_id.
+        """
         node = _make_node("order.created")
         with self.assertLogs("plaita", level="INFO") as cm:
             node.execute(_make_execution())
         result_msgs = [m for m in cm.output if "执行结果" in m]
         self.assertTrue(len(result_msgs) >= 1)
-        # With mutmut_72: "[None] 执行结果" not "[evt1] 执行结果"
-        self.assertIn("evt1", result_msgs[0])
+        # Format: "事件节点 [evt1] 执行结果: ..." — mutmut_72 gives "[None]"
+        self.assertIn("事件节点 [evt1]", result_msgs[0])
+        self.assertNotIn("事件节点 [None]", result_msgs[0])
 
     def test_final_log_has_result_content(self):
         """Kill mutmut_73: result → None in final result logger.info call."""
