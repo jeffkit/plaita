@@ -6,12 +6,29 @@
 #   2. mutmut results 里所有 not-checked / timeout / survived 均用
 #      MUTANT_UNDER_TEST 单点复核，得到真实 killed/survived 统计
 #
-# 用法: bash scripts/run_full_mutation_sweep.sh [module_key_substring]
-# 例如: bash scripts/run_full_mutation_sweep.sh concurrent   # 从某模块续跑
+# 用法:
+#   bash scripts/run_full_mutation_sweep.sh [module_key_substring]
+#   bash scripts/run_full_mutation_sweep.sh --from-idx N [--to-idx M]
+# 例如:
+#   bash scripts/run_full_mutation_sweep.sh concurrent   # 从某模块续跑
+#   bash scripts/run_full_mutation_sweep.sh --from-idx 0 --to-idx 4  # 只跑前5个模块
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
-START_FROM="${1:-}"
+# 解析参数 — 支持旧式 positional 及新式 --from-idx / --to-idx
+START_FROM=""
+FROM_IDX=""
+TO_IDX=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --from-idx) FROM_IDX="$2"; shift 2 ;;
+    --to-idx)   TO_IDX="$2";   shift 2 ;;
+    --from-idx=*) FROM_IDX="${1#*=}"; shift ;;
+    --to-idx=*)   TO_IDX="${1#*=}";   shift ;;
+    *) START_FROM="$1"; shift ;;
+  esac
+done
 
 # ── 模块 + 对应测试文件（平行数组）───────────────────────────────────────
 MODULES=(
@@ -190,6 +207,9 @@ echo "=== Plaita Full Mutation Sweep $(date) ===" | tee -a "$RESULTS_FILE"
 
 SKIP=0
 [[ -n "$START_FROM" ]] && SKIP=1
+# 默认 FROM_IDX=0, TO_IDX=最后一个
+[[ -z "$FROM_IDX" ]] && FROM_IDX=0
+[[ -z "$TO_IDX" ]]   && TO_IDX=$((${#MODULES[@]} - 1))
 GLOBAL_SURVIVED=0
 SUCCESS_MODULES=()
 
@@ -197,6 +217,11 @@ for i in "${!MODULES[@]}"; do
   module="${MODULES[$i]}"
   tests="${TESTS_FOR_MODULE[$i]}"
   sync_tests="${SYNC_TESTS_FOR_MODULE[$i]:-}"
+
+  # 索引范围过滤（与 START_FROM 互斥，优先使用索引范围）
+  if [[ -z "$START_FROM" ]]; then
+    [[ $i -lt $FROM_IDX || $i -gt $TO_IDX ]] && continue
+  fi
 
   if [[ $SKIP -eq 1 ]]; then
     [[ "$module" == *"$START_FROM"* ]] && SKIP=0 || continue
