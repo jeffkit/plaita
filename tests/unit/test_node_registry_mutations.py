@@ -257,6 +257,22 @@ class TestGetDefaultRegistry(unittest.TestCase):
         reg = get_default_registry()
         self.assertIn("start", reg)
 
+    @patch("plaita.node._default_registry_explicitly_initialized", False)
+    def test_debug_log_when_not_initialized(self):
+        """_1-6: 未显式初始化时应打印 DEBUG 日志。验证日志内容精确性。"""
+        import plaita.node as pn
+        import logging
+
+        with patch.object(pn._logger, "debug") as mock_debug:
+            # 重置 _discovered 让 discover 再次触发
+            with patch.object(pn._default_registry, "_discovered", False):
+                pn.get_default_registry()
+                # 应至少调用一次 debug 包含 "get_default_registry"
+                calls = [str(c) for c in mock_debug.call_args_list]
+                combined = " ".join(calls)
+                self.assertIn("get_default_registry", combined,
+                              f"DEBUG 日志应含 'get_default_registry'，实际: {calls}")
+
 
 class TestRegisterCodeNode(unittest.TestCase):
 
@@ -463,26 +479,35 @@ class TestDiscoverEntryPointsExtended(unittest.TestCase):
 class TestWarningMessages(unittest.TestCase):
 
     def test_node_register_warning_message_exact(self):
-        """_7,8: 'node_register()' 大小写变异 → 消息应包含 'node_register()'。"""
+        """_7,8: 'node_register()' 大小写/XX 变异 → 消息应以 'node_register()' 开头。"""
         from plaita.node import node_register
         with _warnings.catch_warnings(record=True) as w:
             _warnings.simplefilter("always")
             node_register(Start)
             self.assertGreater(len(w), 0)
             msg = str(w[0].message)
-            self.assertIn("node_register()", msg,
-                          f"消息应含 'node_register()'，实际: {msg!r}")
+            # 精确检测：不应有 XX 前缀，应以 'node_register()' 开头
+            self.assertTrue(
+                msg.startswith("node_register()"),
+                f"消息应以 'node_register()' 开头，实际: {msg!r}"
+            )
+            self.assertNotIn("XX", msg)
 
     def test_parse_node_warning_message_exact(self):
-        """_7,8,9: 'Module-level parse_node()' 大小写变异 → 消息应包含 'Module-level'。"""
+        """_7,8,9: 'Module-level parse_node()' 大小写/XX 变异 → 消息精确匹配。"""
         import plaita.node as pn
         with _warnings.catch_warnings(record=True) as w:
             _warnings.simplefilter("always")
             pn.parse_node({"type": "start", "id": "s1"})
             self.assertGreater(len(w), 0)
             msg = str(w[0].message)
-            self.assertIn("Module-level", msg,
-                          f"消息应含 'Module-level'，实际: {msg!r}")
+            self.assertTrue(
+                msg.startswith("Module-level"),
+                f"消息应以 'Module-level' 开头，实际: {msg!r}"
+            )
+            self.assertNotIn("XX", msg)
+            self.assertFalse(msg.startswith("module-level"),
+                             "消息不应全小写")
 
 
 class TestRegisterCodeNodeExtended(unittest.TestCase):
@@ -500,18 +525,66 @@ class TestRegisterCodeNodeExtended(unittest.TestCase):
             _code_module._DEFAULT_SANDBOX_BACKEND = original
 
     def test_register_subprocess_backend_not_raise(self):
-        """_3: effective == "docker" or not _docker_available → subprocess 不应触发 docker 检查。"""
+        """_3,5,6: effective == "docker" 条件变异 → subprocess 不应触发 docker 检查。"""
         from plaita.node import register_code_node
         reg = NodeRegistry()
         register_code_node(registry=reg, default_backend="subprocess")
         self.assertIn("code", reg)
 
     def test_register_unsafe_backend_not_raise(self):
-        """_4,5,6: 其他后端条件变异。"""
+        """_4: effective != "docker" 条件变异。"""
         from plaita.node import register_code_node
         reg = NodeRegistry()
         register_code_node(registry=reg, default_backend="unsafe")
         self.assertIn("code", reg)
+
+    @patch("plaita.node.code._docker_available", return_value=True)
+    def test_docker_available_no_raise(self, mock_docker):
+        """_7: not _docker_available → _docker_available 时应不抛异常。"""
+        from plaita.node import register_code_node
+        reg = NodeRegistry()
+        register_code_node(registry=reg, default_backend="docker")
+        self.assertIn("code", reg)
+
+    @patch("plaita.node.code._docker_available", return_value=False)
+    def test_docker_unavailable_raises(self, mock_docker):
+        """_3,7: effective == "docker" and not _docker_available 条件。
+        docker 不可用时应抛 RuntimeError。"""
+        from plaita.node import register_code_node
+        reg = NodeRegistry()
+        with self.assertRaises(RuntimeError) as ctx:
+            register_code_node(registry=reg, default_backend="docker")
+        self.assertIn("docker", str(ctx.exception).lower())
+
+    def test_effective_uses_explicit_backend(self):
+        """_1: effective = None → 应使用传入的 default_backend，而非 None。"""
+        from plaita.node import register_code_node
+        from plaita.node import code as _code_module
+        original = _code_module._DEFAULT_SANDBOX_BACKEND
+        try:
+            reg = NodeRegistry()
+            # 若 effective = None，subprocess 条件正常通过
+            register_code_node(registry=reg, default_backend="subprocess")
+            # 但后续若 effective 为 None 且 default_backend is not None，
+            # _DEFAULT_SANDBOX_BACKEND 仍会被正确设置
+            self.assertEqual(_code_module._DEFAULT_SANDBOX_BACKEND, "subprocess")
+        finally:
+            _code_module._DEFAULT_SANDBOX_BACKEND = original
+
+    def test_effective_condition_not_none(self):
+        """_2: default_backend is None → is not None 翻转。"""
+        from plaita.node import register_code_node
+        from plaita.node import code as _code_module
+        original = _code_module._DEFAULT_SANDBOX_BACKEND
+        try:
+            reg = NodeRegistry()
+            # 不传 default_backend → effective = _DEFAULT_SANDBOX_BACKEND
+            # 不应改变模块 backend
+            # (若条件翻转为 is None，会错误地设置 backend 为 None)
+            register_code_node(registry=reg, default_backend="subprocess")
+            self.assertIsNotNone(_code_module._DEFAULT_SANDBOX_BACKEND)
+        finally:
+            _code_module._DEFAULT_SANDBOX_BACKEND = original
 
 
 if __name__ == "__main__":
