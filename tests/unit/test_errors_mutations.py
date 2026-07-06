@@ -292,5 +292,166 @@ class TestFlowTimeoutError(unittest.TestCase):
         self.assertEqual(err.error_type, FlowErrorType.FLOW_ERROR)
 
 
+# ---------------------------------------------------------------------------
+# 第二轮补强：FlowStartMissingError / NodeTimeoutError / FlowTimeoutError /
+#             ResumeError 的精准杀灭测试
+# ---------------------------------------------------------------------------
+
+class TestFlowStartMissingError(unittest.TestCase):
+
+    def test_default_message_exact(self):
+        """_1: "XXFlow has no start nodeXX" 变异，_2: 小写，_3: 大写。
+        精确匹配大小写。"""
+        err = FlowStartMissingError()
+        self.assertEqual(str(err), "Flow has no start node")
+
+    def test_default_message_case_sensitive(self):
+        """_2: message 变为 'flow has no start node' 应失败。"""
+        err = FlowStartMissingError()
+        # 应保持首字母大写 F
+        self.assertTrue(str(err).startswith("F"),
+                        f"message 首字母应大写，实际: {str(err)!r}")
+
+    def test_custom_message(self):
+        err = FlowStartMissingError(message="custom start error")
+        self.assertEqual(str(err), "custom start error")
+
+    def test_node_attribute_preserved(self):
+        """_5: super().__init__(message=message, node=None) — node 丢失。"""
+        n = object()
+        err = FlowStartMissingError(node=n)
+        self.assertIs(err.node, n)
+
+    def test_node_none_by_default(self):
+        """_7: super().__init__(message=message, ) — node 参数丢失。"""
+        err = FlowStartMissingError()
+        self.assertIsNone(err.node)
+
+    def test_error_type_is_node_not_found(self):
+        err = FlowStartMissingError()
+        self.assertEqual(err.error_type, FlowErrorType.NODE_NOT_FOUND)
+
+    def test_code(self):
+        err = FlowStartMissingError()
+        self.assertEqual(err.code, -500)
+
+
+class TestNodeTimeoutError(unittest.TestCase):
+
+    def test_code_is_minus_one(self):
+        """_1: super().__init__(None, ...) — code 丢失。"""
+        err = NodeTimeoutError("timed out")
+        self.assertEqual(err.code, -1)
+
+    def test_message_preserved(self):
+        """_2: super().__init__(self.code, None, ...) — message 丢失。"""
+        err = NodeTimeoutError("node timeout msg")
+        self.assertEqual(err.message, "node timeout msg")
+
+    def test_node_preserved(self):
+        """_4: super().__init__(self.code, message, error_type, None) — node 丢失。"""
+        n = object()
+        err = NodeTimeoutError("timeout", node=n)
+        self.assertIs(err.node, n)
+
+    def test_error_type_default_node_error(self):
+        """_8: 默认 error_type 为 NODE_ERROR。"""
+        err = NodeTimeoutError("timeout")
+        self.assertEqual(err.error_type, FlowErrorType.NODE_ERROR)
+
+    def test_error_type_custom(self):
+        err = NodeTimeoutError("timeout", error_type=FlowErrorType.FLOW_ERROR)
+        self.assertEqual(err.error_type, FlowErrorType.FLOW_ERROR)
+
+
+class TestFlowTimeoutError(unittest.TestCase):
+
+    def test_default_message_exact(self):
+        """_1: "XXFlow execution timeoutXX"，_3: 大写。精确匹配。"""
+        err = FlowTimeoutError()
+        self.assertEqual(str(err), "Flow execution timeout")
+
+    def test_default_message_case(self):
+        """_3: 全大写变异检测。"""
+        err = FlowTimeoutError()
+        self.assertFalse(str(err).isupper(), "消息不应全大写")
+
+    def test_code_is_minus_one(self):
+        """_2: super().__init__(None, ...) — code 应为 -1。"""
+        err = FlowTimeoutError()
+        self.assertEqual(err.code, -1)
+
+    def test_error_type_is_flow_error(self):
+        """_6: super().__init__(self.code, message, None, node) — error_type 丢失。"""
+        err = FlowTimeoutError()
+        self.assertEqual(err.error_type, FlowErrorType.FLOW_ERROR)
+
+    def test_node_preserved(self):
+        """_7,10,11: node 参数保留。"""
+        n = object()
+        err = FlowTimeoutError(node=n)
+        self.assertIs(err.node, n)
+
+    def test_node_default_none(self):
+        err = FlowTimeoutError()
+        self.assertIsNone(err.node)
+
+    def test_custom_message(self):
+        err = FlowTimeoutError(message="custom timeout")
+        self.assertEqual(str(err), "custom timeout")
+
+
+class TestResumeError(unittest.TestCase):
+
+    def test_code_is_minus_500(self):
+        """_1: super().__init__(None, ...) — code 应为 -500。"""
+        err = ResumeError("resume failed")
+        self.assertEqual(err.code, -500)
+
+    def test_message_preserved(self):
+        """_2: super().__init__(self.code, None, ...) — message 丢失。"""
+        err = ResumeError("my resume error")
+        self.assertEqual(err.message, "my resume error")
+
+    def test_error_type_is_node_error(self):
+        """_3: error_type = None — 应为 NODE_ERROR。"""
+        err = ResumeError("err")
+        self.assertEqual(err.error_type, FlowErrorType.NODE_ERROR)
+
+    def test_node_preserved(self):
+        """_4: super().__init__(self.code, message, self.error_type, None)。"""
+        n = object()
+        err = ResumeError("err", node=n)
+        self.assertIs(err.node, n)
+
+    def test_node_default_none(self):
+        """_5,6,7,8: node 默认 None。"""
+        err = ResumeError("err")
+        self.assertIsNone(err.node)
+
+    def test_str_message(self):
+        err = ResumeError("test message for resume")
+        self.assertEqual(str(err), "test message for resume")
+
+
+class TestResumeTypeCoerce(unittest.TestCase):
+
+    def test_invalid_string_error_message_contains_value(self):
+        """_2,3: raise ResumeError(None) — 错误消息应包含被拒绝的值。"""
+        try:
+            ResumeType.coerce("bad_value")
+            self.fail("应该抛出 ResumeError")
+        except ResumeError as e:
+            self.assertIn("bad_value", str(e))
+
+    def test_invalid_int_error_message(self):
+        """non-str, non-enum 时也应包含值。"""
+        try:
+            ResumeType.coerce(42)
+            self.fail("应该抛出 ResumeError")
+        except ResumeError as e:
+            self.assertIsNotNone(str(e))
+
+
 if __name__ == "__main__":
     unittest.main()

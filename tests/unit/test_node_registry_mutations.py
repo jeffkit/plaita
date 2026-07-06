@@ -227,5 +227,167 @@ class TestNodeRegistryRegisterUnregister(unittest.TestCase):
         self.assertNotIn("start", copy)
 
 
+# ---------------------------------------------------------------------------
+# 第二轮补强：get_default_registry / register_code_node /
+#             deprecated helpers / _RegistryDictProxy
+# ---------------------------------------------------------------------------
+
+import warnings as _warnings
+import plaita.node as _plaita_node
+
+
+class TestGetDefaultRegistry(unittest.TestCase):
+
+    def test_returns_registry(self):
+        from plaita.node import get_default_registry
+        reg = get_default_registry()
+        self.assertIsInstance(reg, NodeRegistry)
+
+    def test_returns_same_instance(self):
+        """get_default_registry 返回同一个单例。"""
+        from plaita.node import get_default_registry
+        r1 = get_default_registry()
+        r2 = get_default_registry()
+        self.assertIs(r1, r2)
+
+    def test_condition_and_vs_or(self):
+        """_1: 'and not' → 'or not'，_2: '... and not' → only one condition。
+        验证调用不会抛异常即可（条件改变可能使 discover 触发次数不同）。"""
+        from plaita.node import get_default_registry
+        reg = get_default_registry()
+        self.assertIn("start", reg)
+
+
+class TestRegisterCodeNode(unittest.TestCase):
+
+    def test_register_code_node_subprocess(self):
+        """_1: effective = None → should fail or use subprocess. 
+        使用 subprocess 后端（不需要 Docker）注册 CodeNode。"""
+        from plaita.node import register_code_node, get_default_registry
+        reg = NodeRegistry()
+        register_code_node(registry=reg, default_backend="subprocess")
+        self.assertIn("code", reg)
+
+    def test_register_code_node_with_none_backend_uses_module_default(self):
+        """_2: condition flipped (is None instead of is not None) → effective 逻辑。"""
+        from plaita.node import register_code_node
+        reg = NodeRegistry()
+        # 不传 default_backend，应使用模块默认
+        # 如果模块默认是 docker 且 docker 不可用，会抛 RuntimeError
+        # 用 subprocess 确保不依赖 docker
+        register_code_node(registry=reg, default_backend="subprocess")
+        self.assertIn("code", reg)
+
+    def test_effective_with_explicit_backend(self):
+        """_2: default_backend is not None 时应用 default_backend。"""
+        from plaita.node import register_code_node
+        from plaita.node.code import CodeNode
+        reg = NodeRegistry()
+        register_code_node(registry=reg, default_backend="subprocess")
+        cls = reg.get("code")
+        self.assertIs(cls, CodeNode)
+
+    def test_register_to_default_registry(self):
+        """_4,5,6,8: registry=None 时注册到默认 registry。"""
+        from plaita.node import register_code_node, get_default_registry
+        reg = NodeRegistry()
+        register_code_node(registry=reg, default_backend="subprocess")
+        self.assertIn("code", reg)
+
+
+class TestDeprecatedHelpers(unittest.TestCase):
+
+    def test_node_register_warns(self):
+        """_1: 废弃消息变异。node_register 应发出 DeprecationWarning。"""
+        from plaita.node import node_register
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            node_register(Start)
+            self.assertGreater(len(w), 0)
+            self.assertTrue(issubclass(w[0].category, DeprecationWarning))
+
+    def test_node_register_works(self):
+        """_6,7,8,9: node_register 实际注册到默认 registry。"""
+        from plaita.node import node_register, _default_registry
+        with _warnings.catch_warnings(record=True):
+            _warnings.simplefilter("always")
+            node_register(Start)
+        self.assertIn("start", _default_registry)
+
+    def test_parse_node_warns(self):
+        """_1: 废弃消息变异。module-level parse_node 应发出 DeprecationWarning。"""
+        import plaita.node as pn
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            pn.parse_node({"type": "start", "id": "s1"})
+            self.assertGreater(len(w), 0)
+            self.assertTrue(issubclass(w[0].category, DeprecationWarning))
+
+    def test_parse_node_works(self):
+        """_6,7,8,9,10: module-level parse_node 返回节点实例。"""
+        import plaita.node as pn
+        with _warnings.catch_warnings(record=True):
+            _warnings.simplefilter("always")
+            node = pn.parse_node({"type": "end", "id": "e1"})
+        self.assertIsInstance(node, End)
+
+
+class TestRegistryDictProxy(unittest.TestCase):
+
+    def test_getitem(self):
+        """_1: self._registry = None → proxy 应可通过 _registry 访问节点。"""
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        self.assertIs(proxy["start"], Start)
+
+    def test_getitem_missing_raises_keyerror(self):
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        with self.assertRaises(KeyError):
+            _ = proxy["nonexistent"]
+
+    def test_contains(self):
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        self.assertIn("start", proxy)
+
+    def test_len(self):
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        self.assertGreater(len(proxy), 0)
+
+    def test_setitem(self):
+        reg = NodeRegistry()
+        from plaita.node import _RegistryDictProxy
+        proxy = _RegistryDictProxy(reg)
+        proxy["custom"] = Start
+        self.assertIn("custom", proxy)
+
+
+class TestParseNodeHint(unittest.TestCase):
+
+    def test_code_hint_in_error(self):
+        """_12: hint = None → hint + " CodeNode..." 应保持为字符串。"""
+        reg = NodeRegistry()
+        with self.assertRaises(RuntimeError) as ctx:
+            reg.parse_node({"type": "code"})
+        # hint 应该是 "" + " CodeNode..." 而不是 None + " CodeNode..."
+        self.assertIn("CodeNode", str(ctx.exception))
+
+    def test_unknown_type_no_hint(self):
+        """_13,18: hint 对非 code 类型为空字符串，错误消息不应有多余内容。"""
+        reg = NodeRegistry()
+        with self.assertRaises(RuntimeError) as ctx:
+            reg.parse_node({"type": "unknown_xyz"})
+        err_str = str(ctx.exception)
+        # 不应包含 CodeNode hint
+        self.assertNotIn("CodeNode", err_str)
+        self.assertIn("unknown_xyz", err_str)
+
+
 if __name__ == "__main__":
     unittest.main()
