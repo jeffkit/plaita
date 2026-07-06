@@ -457,6 +457,104 @@ class TestPublishSync(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Round 5: batch_mark args, publish_sync event passthrough, batch_publish loop
+# ---------------------------------------------------------------------------
+
+class TestBatchMarkProcessedArgsR5(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_mark_passes_subscription_and_event_ids(self):
+        """Kill subscription_id / event_id argument swap mutations."""
+        from plaita.event.core import EventSubscriptionStorage
+
+        calls: list[tuple[str, str]] = []
+
+        class ConcreteStorage(EventSubscriptionStorage):
+            async def mark_event_processed(self, sid, eid):
+                calls.append((sid, eid))
+                return True
+            async def list_subscriptions(self, **kw): return []
+            async def store_subscription(self, s): ...
+            async def get_subscription(self, sid): ...
+            async def delete_subscription(self, sid): ...
+
+        storage = ConcreteStorage()
+        await storage.batch_mark_processed("sub-unique", ["ev-a", "ev-b"])
+        self.assertEqual(calls, [("sub-unique", "ev-a"), ("sub-unique", "ev-b")])
+
+
+class TestPublishSyncEventPassthroughR5(unittest.TestCase):
+    def test_publish_sync_passes_same_event_object(self):
+        """Kill publish_sync default event parameter mutation."""
+        received: list = []
+
+        class ConcreteEventBus(EventBus):
+            async def publish(self, event, prevent_duplicate_consumption=True, **kw):
+                received.append(event)
+                return "id"
+            async def batch_publish(self, *a, **kw): ...
+            async def register_subscription(self, *a, **kw): ...
+            async def unregister_subscription(self, *a, **kw): ...
+            async def wait_for_event(self, *a, **kw): ...
+            async def register_handler(self, *a, **kw): ...
+            async def get_event(self, *a, **kw): ...
+
+        bus = ConcreteEventBus()
+        evt = _make_event("passthrough.test")
+        bus.publish_sync(evt)
+        self.assertEqual(len(received), 1)
+        self.assertIs(received[0], evt)
+
+    def test_publish_sync_default_prevent_duplicate_true(self):
+        """Kill prevent_duplicate_consumption=True default mutation."""
+        received_flag: list = []
+
+        class ConcreteEventBus(EventBus):
+            async def publish(self, event, prevent_duplicate_consumption=True, **kw):
+                received_flag.append(prevent_duplicate_consumption)
+                return "id"
+            async def batch_publish(self, *a, **kw): ...
+            async def register_subscription(self, *a, **kw): ...
+            async def unregister_subscription(self, *a, **kw): ...
+            async def wait_for_event(self, *a, **kw): ...
+            async def register_handler(self, *a, **kw): ...
+            async def get_event(self, *a, **kw): ...
+
+        bus = ConcreteEventBus()
+        bus.publish_sync(_make_event())
+        self.assertEqual(received_flag, [True])
+
+
+class TestBatchPublishR5(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_publish_calls_publish_per_event(self):
+        """Kill batch_publish loop / append mutations."""
+        publish_calls: list = []
+
+        class ConcreteEventBus(EventBus):
+            async def publish(self, event, prevent_duplicate_consumption=True, **kw):
+                publish_calls.append((event.event_type, prevent_duplicate_consumption))
+                return f"id_{event.event_type}"
+            async def register_subscription(self, *a, **kw): ...
+            async def unregister_subscription(self, *a, **kw): ...
+            async def wait_for_event(self, *a, **kw): ...
+            async def register_handler(self, *a, **kw): ...
+            async def get_event(self, *a, **kw): ...
+
+        bus = ConcreteEventBus()
+        events = [_make_event("a"), _make_event("b")]
+        ids = await bus.batch_publish(events, prevent_duplicate_consumption=False)
+        self.assertEqual(ids, ["id_a", "id_b"])
+        self.assertEqual(publish_calls, [("a", False), ("b", False)])
+
+
+class TestExpressPrefixCustomR5(unittest.TestCase):
+    def test_custom_prefix_for_flow_id_lookup(self):
+        """Kill EXPRESS_PREFIX key / default '$' mutations with non-default prefix."""
+        sub = _make_sub("ev", flow_id="flow-99")
+        evt = _make_event("ev")
+        ctx = {"EXPRESS_PREFIX": "@", "@FLOW_ID": "flow-99"}
+        self.assertTrue(sub.matches_event(evt, ctx))
+
+
+# ---------------------------------------------------------------------------
 # flush_pending_handler_registrations
 # ---------------------------------------------------------------------------
 

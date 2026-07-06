@@ -324,7 +324,7 @@ class TestNextNodeMutations(unittest.TestCase):
 # Flow.from_string — JSON / YAML detection
 # ---------------------------------------------------------------------------
 
-class TestFromStringMutations(unittest.TestCase):
+class TestFromStringBasicCoverage(unittest.TestCase):
     def test_json_string_parsed(self):
         """Kill mutations on JSON detection lstrip()[0]."""
         import json
@@ -444,7 +444,7 @@ class TestParseFunctionMutations(unittest.TestCase):
 # _collect_env_refs
 # ---------------------------------------------------------------------------
 
-class TestCollectEnvRefsMutations(unittest.TestCase):
+class TestCollectEnvRefsBasicCoverage(unittest.TestCase):
     def test_simple_env_ref(self):
         """Kill mutations that change _ENV_REF_PREFIX string."""
         refs = set()

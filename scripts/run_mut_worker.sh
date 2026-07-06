@@ -7,20 +7,14 @@ TARGET=$1; shift
 TESTS=("$@")
 
 cd "$WT"
-# Configure pyproject.toml
-python3 - << PYEOF
-import re, sys
-target = "${TARGET}"
-tests = ${TESTS[@]+"${TESTS[@]}"}
-PYEOF
 
 # Build python snippet to edit pyproject.toml
 python3 - << PYEOF
 import re
 
 target = "$TARGET"
-tests_raw = """$(IFS=,; echo "$*")"""
-test_list = [t.strip() for t in tests_raw.split(",") if t.strip()]
+tests_raw = """$*"""
+test_list = [t.strip() for t in tests_raw.split() if t.strip()]
 
 with open("pyproject.toml", "r") as f:
     content = f.read()

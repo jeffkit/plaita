@@ -2967,5 +2967,105 @@ class TestHandleResumeDefaultsAndArgsPrecision(unittest.IsolatedAsyncioTestCase)
                       "When runner.node_execution is set, exec_ctx must be it (not context)")
 
 
+# ---------------------------------------------------------------------------
+# Round 5: NormalStrategy / GeneratorStrategy — DEBUG log arg precision
+# (kills mutmut_34/35 next_node/branch in debug; mutmut_48-53 not_reached_end log)
+# ---------------------------------------------------------------------------
+
+class TestNormalStrategyDebugLogArgsR5(unittest.IsolatedAsyncioTestCase):
+    async def test_debug_log_contains_branch_value(self):
+        """Kill mutmut_35: branch→None in logger.debug next_node line."""
+        ctx = ExecutionContext()
+        cb = _make_cb()
+        start = _StartNode(id="s1", name="s1")
+        end = _EndNode(id="e1", name="e1")
+        branch_sentinel = "left_branch_xyz"
+
+        async def run_node(flow, node, **kw):
+            if node is start:
+                return ("r", branch_sentinel)
+            return ({"done": True}, None)
+
+        runner = MagicMock()
+        runner.run_node = run_node
+        flow = MagicMock()
+        flow.start_node = start
+        flow.is_end_node.side_effect = lambda n: n is end
+        flow.next_node.return_value = end
+
+        with self.assertLogs("plaita.core.strategies", level="DEBUG") as cm:
+            await NormalStrategy().execute(flow, ctx, runner, cb)
+
+        msgs = [m for m in cm.output if "next_node" in m and "branch" in m]
+        self.assertTrue(msgs, "expected next_node/branch debug log")
+        self.assertIn(branch_sentinel, msgs[0])
+
+    async def test_debug_log_contains_next_node_id(self):
+        """Kill mutmut_34: next_node→None in logger.debug — end node id must appear."""
+        ctx = ExecutionContext()
+        cb = _make_cb()
+        start = _StartNode(id="s1", name="s1")
+        end = _EndNode(id="end_target_99", name="end")
+
+        async def run_node(flow, node, **kw):
+            if node is start:
+                return ("r", "b1")
+            return ({"done": True}, None)
+
+        runner = MagicMock()
+        runner.run_node = run_node
+        flow = MagicMock()
+        flow.start_node = start
+        flow.is_end_node.side_effect = lambda n: n is end
+        flow.next_node.return_value = end
+
+        with self.assertLogs("plaita.core.strategies", level="DEBUG") as cm:
+            await NormalStrategy().execute(flow, ctx, runner, cb)
+
+        msgs = [m for m in cm.output if "next_node" in m and "branch" in m]
+        self.assertTrue(msgs)
+        self.assertIn("end_target_99", msgs[0])
+
+
+class TestGeneratorStrategyDebugLogArgsR5(unittest.IsolatedAsyncioTestCase):
+    async def _run_two_step(self):
+        ctx = ExecutionContext()
+        cb = _make_cb()
+        start = _StartNode(id="gs1", name="gs1")
+        end = _EndNode(id="ge1", name="ge1")
+        branch_val = "gen_branch_abc"
+
+        async def run_node(flow, node, **kw):
+            if node is start:
+                return ("gr", branch_val)
+            return ({"fin": 1}, None)
+
+        runner = MagicMock()
+        runner.run_node = run_node
+        flow = MagicMock()
+        flow.start_node = start
+        flow.is_end_node.side_effect = lambda n: n is end
+        flow.next_node.return_value = end
+        return ctx, cb, runner, flow, branch_val, end
+
+    async def test_generator_debug_log_has_branch(self):
+        """Kill GeneratorStrategy execute mutmut_28: branch→None in debug log."""
+        ctx, cb, runner, flow, branch_val, _ = await self._run_two_step()
+        with self.assertLogs("plaita.core.strategies", level="DEBUG") as cm:
+            _ = [o async for o in GeneratorStrategy().execute(flow, ctx, runner, cb)]
+        msgs = [m for m in cm.output if "next_node" in m and "branch" in m]
+        self.assertTrue(msgs)
+        self.assertIn(branch_val, msgs[0])
+
+    async def test_generator_debug_log_has_next_node_id(self):
+        """Kill GeneratorStrategy execute mutmut_27: next_node→None in debug log."""
+        ctx, cb, runner, flow, _, end = await self._run_two_step()
+        with self.assertLogs("plaita.core.strategies", level="DEBUG") as cm:
+            _ = [o async for o in GeneratorStrategy().execute(flow, ctx, runner, cb)]
+        msgs = [m for m in cm.output if "next_node" in m and "branch" in m]
+        self.assertTrue(msgs)
+        self.assertIn(end.id, msgs[0])
+
+
 if __name__ == "__main__":
     unittest.main()

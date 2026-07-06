@@ -1305,5 +1305,43 @@ class TestRunDistributedContextSupplement(unittest.TestCase):
                           "run() 应将 context 作为 saved_context 传给 run_distributed")
 
 
+# ---------------------------------------------------------------------------
+# Round 5: lazy generator close → on_flow_end receives correct flow
+# (kills run_compatible._28/_29 lambda flow/exc mutations)
+# ---------------------------------------------------------------------------
+
+class TestRunCompatibleLazyCloseR5(unittest.TestCase):
+    def test_lazy_full_consume_emits_on_flow_end_with_same_flow(self):
+        flow = _simple_flow()
+        flow_ends: list = []
+
+        class CaptureEnd(LoggerCallback):
+            def on_flow_end(self, flow_arg, result=None, error=None, exception=None, **kw):
+                flow_ends.append((flow_arg, result, error, exception))
+
+        execution = FlowExecution(callback_handlers=[CaptureEnd()])
+        gen = execution.run_compatible(flow, True)
+        for _ in gen:
+            pass
+        self.assertEqual(len(flow_ends), 1)
+        self.assertIs(flow_ends[0][0], flow)
+        self.assertIsNone(flow_ends[0][1])
+
+    def test_lazy_partial_consume_then_close_still_uses_correct_flow(self):
+        flow = _simple_flow("partial-result")
+        flow_ends: list = []
+
+        class CaptureEnd(LoggerCallback):
+            def on_flow_end(self, flow_arg, result=None, error=None, exception=None, **kw):
+                flow_ends.append(flow_arg)
+
+        execution = FlowExecution(callback_handlers=[CaptureEnd()])
+        gen = execution.run_compatible(flow, True)
+        _ = next(gen)
+        gen.close()
+        self.assertEqual(len(flow_ends), 1)
+        self.assertIs(flow_ends[0], flow)
+
+
 if __name__ == "__main__":
     unittest.main()
