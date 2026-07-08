@@ -464,5 +464,419 @@ class TestUpdateNodeResultMutations(unittest.TestCase):
         self.assertEqual(s["$RESULTS"]["n1"], "r1")
 
 
+# ---------------------------------------------------------------------------
+# 补强轮：精确行为断言（与上面同类测试互补，class 名不冲突）
+# ---------------------------------------------------------------------------
+from plaita.core.state import _key
+
+
+class TestKeyHelper(unittest.TestCase):
+    def test_key_concat_prefix_and_name(self):
+        self.assertEqual(_key("$", "LAST_NODE"), "$LAST_NODE")
+        self.assertEqual(_key("#", "INPUT"), "#INPUT")
+        self.assertEqual(_key("", "X"), "X")
+
+
+class TestCheckpointSchemaExtra(unittest.TestCase):
+    def test_system_keys_custom_prefix(self):
+        self.assertEqual(
+            CheckpointSchema.system_keys("#"),
+            ["#LAST_NODE", "#BRANCH", "#FLOW_ID", "#EXECUTION_ID"],
+        )
+
+    def test_system_keys_count_matches_names(self):
+        self.assertEqual(
+            len(CheckpointSchema.system_keys("$")),
+            len(CheckpointSchema.SYSTEM_KEY_NAMES),
+        )
+
+    def test_bare_keys_is_list(self):
+        self.assertEqual(CheckpointSchema.bare_keys(), ["EXPRESS_PREFIX"])
+
+    def test_all_known_keys_combines_all_categories(self):
+        keys = set(CheckpointSchema.all_known_keys("$"))
+        for k in ["$LAST_NODE", "$BRANCH", "$FLOW_ID", "$EXECUTION_ID",
+                  "$INPUT", "$NODE", "$GLOBAL", "$PARENT", "$ENV",
+                  "EXPRESS_PREFIX"]:
+            self.assertIn(k, keys)
+
+
+class TestValidateCheckpointExtra(unittest.TestCase):
+    def test_multiple_unknown_uppercase_keys_warn_each(self):
+        warnings = validate_checkpoint({"$FOO": 1, "$BAR": 2})
+        self.assertEqual(len(warnings), 2)
+        msgs = " ".join(warnings)
+        self.assertIn("$FOO", msgs)
+        self.assertIn("$BAR", msgs)
+
+    def test_warning_message_mentions_schema_registration(self):
+        warnings = validate_checkpoint({"$TYPO": 1})
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("$TYPO", warnings[0])
+        self.assertIn("CheckpointSchema", warnings[0])
+
+    def test_custom_prefix_unknown_key_warns(self):
+        warnings = validate_checkpoint({"#UNKNOWN": 1}, prefix="#")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("#UNKNOWN", warnings[0])
+
+    def test_custom_prefix_known_system_key_no_warning(self):
+        self.assertEqual(validate_checkpoint({"#LAST_NODE": "x"}, prefix="#"), [])
+
+    def test_lowercase_node_local_keys_not_warned(self):
+        self.assertEqual(validate_checkpoint({"lower_key": 1, "mixedKey": 2}), [])
+
+    def test_bare_express_prefix_not_warned(self):
+        self.assertEqual(validate_checkpoint({"EXPRESS_PREFIX": "$"}), [])
+
+    def test_validate_prefix_but_not_uppercase_no_warning(self):
+        # "$lower" 以 $ 开头但后缀非全大写——and 条件 False，不告警；mutant(or) 会告警
+        self.assertEqual(validate_checkpoint({"$lower": 1}), [])
+
+    def test_validate_uppercase_but_no_prefix_no_warning(self):
+        # "UPPER" 全大写但无 $ 前缀——and 条件 False，不告警；mutant(or) 会告警
+        self.assertEqual(validate_checkpoint({"UPPER": 1}), [])
+
+
+class TestGetitemKeyError(unittest.TestCase):
+    def test_absent_schema_key_raises_keyerror(self):
+        s = CheckpointState()
+        with self.assertRaises(KeyError):
+            _ = s["$LAST_NODE"]
+
+    def test_absent_express_prefix_raises_keyerror(self):
+        s = CheckpointState()
+        with self.assertRaises(KeyError):
+            _ = s["EXPRESS_PREFIX"]
+
+    def test_absent_extra_raises_keyerror(self):
+        s = CheckpointState()
+        with self.assertRaises(KeyError):
+            _ = s["no_such_extra"]
+
+    def test_present_schema_key_returns_value(self):
+        s = CheckpointState()
+        s["$LAST_NODE"] = "n1"
+        self.assertEqual(s["$LAST_NODE"], "n1")
+
+    def test_express_prefix_returns_prefix_when_present(self):
+        s = CheckpointState()
+        s["EXPRESS_PREFIX"] = "#"
+        self.assertEqual(s["EXPRESS_PREFIX"], "#")
+
+    def test_extra_key_returns_value(self):
+        s = CheckpointState()
+        s["my_extra"] = 42
+        self.assertEqual(s["my_extra"], 42)
+
+
+class TestGetitemKeyErrorCarriesKey(unittest.TestCase):
+    """raise KeyError(key) vs KeyError(None)——断言异常 args[0] 是被查的键。"""
+
+    def test_absent_schema_key_error_carries_key(self):
+        s = CheckpointState()
+        with self.assertRaises(KeyError) as cm:
+            _ = s["$LAST_NODE"]
+        self.assertEqual(cm.exception.args[0], "$LAST_NODE")
+
+    def test_absent_express_prefix_error_carries_key(self):
+        s = CheckpointState()
+        with self.assertRaises(KeyError) as cm:
+            _ = s["EXPRESS_PREFIX"]
+        self.assertEqual(cm.exception.args[0], "EXPRESS_PREFIX")
+
+    def test_absent_extra_error_carries_key(self):
+        s = CheckpointState()
+        with self.assertRaises(KeyError) as cm:
+            _ = s["nope"]
+        self.assertEqual(cm.exception.args[0], "nope")
+
+
+class TestSetitemRouting(unittest.TestCase):
+    def test_setitem_express_prefix_updates_prefix_field(self):
+        s = CheckpointState()
+        s["EXPRESS_PREFIX"] = "#"
+        self.assertEqual(s.prefix, "#")
+        self.assertIn("EXPRESS_PREFIX", s)
+
+    def test_setitem_schema_key_routes_to_typed_field(self):
+        s = CheckpointState()
+        s["$FLOW_ID"] = "f1"
+        self.assertEqual(s.flow_id, "f1")
+        self.assertIn("$FLOW_ID", s)
+
+    def test_setitem_extra_creates_extras_dict(self):
+        s = CheckpointState()
+        s["my_extra"] = "v"
+        self.assertEqual(s["my_extra"], "v")
+        self.assertIn("my_extra", s)
+
+
+class TestContainsExtra(unittest.TestCase):
+    def test_non_str_key_returns_false(self):
+        s = CheckpointState()
+        self.assertFalse(99 in s)
+        self.assertFalse(None in s)
+
+    def test_express_prefix_membership_tracks_present(self):
+        s = CheckpointState()
+        self.assertNotIn("EXPRESS_PREFIX", s)
+        s["EXPRESS_PREFIX"] = "$"
+        self.assertIn("EXPRESS_PREFIX", s)
+
+    def test_schema_key_membership_tracks_present(self):
+        s = CheckpointState()
+        self.assertNotIn("$LAST_NODE", s)
+        s["$LAST_NODE"] = "n"
+        self.assertIn("$LAST_NODE", s)
+
+    def test_extra_membership(self):
+        s = CheckpointState()
+        self.assertNotIn("extra1", s)
+        s["extra1"] = 1
+        self.assertIn("extra1", s)
+
+
+class TestIterLenKeys(unittest.TestCase):
+    def test_len_counts_present_plus_extras(self):
+        s = CheckpointState()
+        s["$LAST_NODE"] = "n"
+        s["$INPUT"] = 1
+        s["extra1"] = "x"
+        self.assertEqual(len(s), 3)
+
+    def test_iter_yields_all_keys_no_duplicates(self):
+        s = CheckpointState()
+        s["$LAST_NODE"] = "n"
+        s["extra1"] = "x"
+        keys = list(s)
+        self.assertIn("$LAST_NODE", keys)
+        self.assertIn("extra1", keys)
+        self.assertEqual(len(keys), len(set(keys)))
+
+    def test_keys_items_values_consistent(self):
+        s = CheckpointState()
+        s["$LAST_NODE"] = "n"
+        s["extra1"] = "x"
+        self.assertEqual(set(s.keys()), {"$LAST_NODE", "extra1"})
+        self.assertEqual(dict(s.items()), {"$LAST_NODE": "n", "extra1": "x"})
+        self.assertEqual(sorted(s.values()), ["n", "x"])
+
+
+class TestGetDefault(unittest.TestCase):
+    def test_get_returns_default_for_absent(self):
+        s = CheckpointState()
+        self.assertIsNone(s.get("$LAST_NODE"))
+        self.assertEqual(s.get("$LAST_NODE", "fb"), "fb")
+
+    def test_get_returns_value_for_present(self):
+        s = CheckpointState()
+        s["$LAST_NODE"] = "n"
+        self.assertEqual(s.get("$LAST_NODE", "fb"), "n")
+
+
+class TestEqAndHash(unittest.TestCase):
+    def test_eq_against_other_checkpointstate(self):
+        a = CheckpointState.from_checkpoint_dict({"$INPUT": 1})
+        b = CheckpointState.from_checkpoint_dict({"$INPUT": 1})
+        c = CheckpointState.from_checkpoint_dict({"$INPUT": 2})
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+
+    def test_eq_against_non_dict_non_state_returns_false(self):
+        s = CheckpointState.from_checkpoint_dict({"$INPUT": 1})
+        self.assertFalse(s == 42)
+        self.assertFalse(s == "string")
+        self.assertFalse(s == [1, 2])
+
+    def test_not_hashable(self):
+        s = CheckpointState()
+        with self.assertRaises(TypeError):
+            hash(s)
+
+
+class TestFreshExtra(unittest.TestCase):
+    def test_fresh_carries_only_execution_id_and_env(self):
+        s = CheckpointState.fresh(execution_id="ex1", env={"E": 1})
+        self.assertEqual(s["$EXECUTION_ID"], "ex1")
+        self.assertEqual(s["$ENV"], {"E": 1})
+        self.assertNotIn("$LAST_NODE", s)
+        self.assertNotIn("$INPUT", s)
+        self.assertNotIn("$FLOW_ID", s)
+        self.assertEqual(len(s), 2)
+
+    def test_fresh_default_prefix_and_names(self):
+        s = CheckpointState.fresh(execution_id="ex", env={})
+        self.assertEqual(s.prefix, "$")
+        self.assertEqual(s.input_name, "INPUT")
+        self.assertEqual(s.parent_name, "PARENT")
+        self.assertEqual(s.node_name, "NODE")
+        self.assertEqual(s.global_name, "GLOBAL")
+        self.assertEqual(s.env_name, "ENV")
+
+    def test_fresh_custom_prefix_and_names(self):
+        s = CheckpointState.fresh(
+            prefix="#", env_name="ENVV", execution_id="ex2", env={"X": 9},
+        )
+        self.assertIn("#EXECUTION_ID", s)
+        self.assertIn("#ENVV", s)
+        self.assertNotIn("#ENV", s)
+        self.assertEqual(s["#ENVV"], {"X": 9})
+
+    def test_fresh_custom_names_propagated(self):
+        s = CheckpointState.fresh(
+            execution_id="ex", env={}, input_name="INP", parent_name="PAR",
+            node_name="NOD", global_name="GLO", env_name="ENVV",
+        )
+        self.assertEqual(s.input_name, "INP")
+        self.assertEqual(s.parent_name, "PAR")
+        self.assertEqual(s.node_name, "NOD")
+        self.assertEqual(s.global_name, "GLO")
+        self.assertEqual(s.env_name, "ENVV")
+        s2 = CheckpointState.fresh(execution_id="ex", env={}, prefix="#")
+        self.assertEqual(s2.prefix, "#")
+
+
+class TestSetupFlowExtra(unittest.TestCase):
+    def test_setup_flow_populates_all_flow_keys(self):
+        s = CheckpointState.fresh(execution_id="ex", env={})
+        s.setup_flow(
+            input_value={"x": 1}, parent_context={"p": 2}, global_context={"g": 3},
+            flow_id="f1", env={"HOME": "/h"},
+        )
+        self.assertEqual(s["$INPUT"], {"x": 1})
+        self.assertEqual(s["$PARENT"], {"p": 2})
+        self.assertEqual(s["$GLOBAL"], {"g": 3})
+        self.assertEqual(s["$FLOW_ID"], "f1")
+        self.assertEqual(s["$ENV"], {"HOME": "/h"})
+        self.assertEqual(s["EXPRESS_PREFIX"], "$")
+
+    def test_setup_flow_custom_prefix_uses_prefix(self):
+        s = CheckpointState.fresh(prefix="#", execution_id="ex", env={})
+        s.setup_flow(
+            input_value=1, parent_context={}, global_context={},
+            flow_id="f", env={},
+        )
+        self.assertEqual(s["#INPUT"], 1)
+        self.assertEqual(s["#FLOW_ID"], "f")
+        self.assertEqual(s["EXPRESS_PREFIX"], "#")
+
+
+class TestUpdateNodeResultExtra(unittest.TestCase):
+    def test_update_node_result_creates_map_when_absent(self):
+        s = CheckpointState.fresh(execution_id="ex", env={})
+        self.assertNotIn("$NODE", s)
+        s.update_node_result("n1", {"v": 1})
+        self.assertEqual(s["$NODE"], {"n1": {"v": 1}})
+
+    def test_update_node_result_appends_to_existing(self):
+        s = CheckpointState.fresh(execution_id="ex", env={})
+        s.update_node_result("n1", 1)
+        s.update_node_result("n2", 2)
+        self.assertEqual(s["$NODE"], {"n1": 1, "n2": 2})
+
+    def test_update_node_result_custom_node_name(self):
+        s = CheckpointState.fresh(execution_id="ex", env={}, node_name="NODER")
+        s.update_node_result("n1", "r")
+        self.assertEqual(s["$NODER"], {"n1": "r"})
+
+
+class TestFromCheckpointDictPrefixResolution(unittest.TestCase):
+    def test_express_prefix_in_data_overrides_fallback(self):
+        d = {"EXPRESS_PREFIX": "#", "#INPUT": 1}
+        s = CheckpointState.from_checkpoint_dict(d, prefix="$")
+        self.assertEqual(s.to_checkpoint_dict(), d)
+        self.assertEqual(s.prefix, "#")
+
+    def test_non_dict_data_falls_back_to_prefix(self):
+        s = CheckpointState.from_checkpoint_dict(None, prefix="#")  # type: ignore[arg-type]
+        self.assertEqual(s.prefix, "#")
+        self.assertEqual(s.to_checkpoint_dict(), {})
+
+
+class TestFieldToKeyTypedAccess(unittest.TestCase):
+    """_field_to_key 把每个 schema 键路由到 typed field；直接断言 typed field
+    才能杀灭各 field 行的字符串常量变异（round-trip 整体比较会被 extras 路由绕过）。"""
+
+    def test_each_schema_key_routes_to_typed_field(self):
+        s = CheckpointState()
+        s["$LAST_NODE"] = "n"
+        s["$BRANCH"] = "b"
+        s["$FLOW_ID"] = "f"
+        s["$EXECUTION_ID"] = "e"
+        s["$INPUT"] = {"x": 1}
+        s["$NODE"] = {"n1": 1}
+        s["$GLOBAL"] = {"g": 1}
+        s["$PARENT"] = {"p": 1}
+        s["$ENV"] = {"env": 1}
+        self.assertEqual(s.last_node_id, "n")
+        self.assertEqual(s.last_branch, "b")
+        self.assertEqual(s.flow_id, "f")
+        self.assertEqual(s.execution_id, "e")
+        self.assertEqual(s.input_value, {"x": 1})
+        self.assertEqual(s.node_results, {"n1": 1})
+        self.assertEqual(s.global_context, {"g": 1})
+        self.assertEqual(s.parent_context, {"p": 1})
+        self.assertEqual(s.env, {"env": 1})
+
+    def test_custom_names_route_to_typed_fields(self):
+        s = CheckpointState(input_name="INP", parent_name="PAR", node_name="NOD",
+                            global_name="GLO", env_name="ENVV")
+        s["$INP"] = 1
+        s["$PAR"] = 2
+        s["$NOD"] = 3
+        s["$GLO"] = 4
+        s["$ENVV"] = 5
+        self.assertEqual(s.input_value, 1)
+        self.assertEqual(s.parent_context, 2)
+        self.assertEqual(s.node_results, 3)
+        self.assertEqual(s.global_context, 4)
+        self.assertEqual(s.env, 5)
+
+
+class TestSchemaDefaults(unittest.TestCase):
+    def test_system_keys_default_prefix(self):
+        self.assertEqual(
+            CheckpointSchema.system_keys(),
+            ["$LAST_NODE", "$BRANCH", "$FLOW_ID", "$EXECUTION_ID"],
+        )
+
+    def test_all_known_keys_default_prefix(self):
+        keys = CheckpointSchema.all_known_keys()
+        self.assertIn("$LAST_NODE", keys)
+        self.assertIn("EXPRESS_PREFIX", keys)
+        self.assertIn("$INPUT", keys)
+
+
+class TestFromCheckpointDictNamesExtra(unittest.TestCase):
+    """from_checkpoint_dict 把各 *_name 参数透传给模型——逐个断言才能杀灭
+    `parent_name=parent_name,` / `global_name=...` / `env_name=...` 行被删的变异。"""
+
+    def test_default_prefix_and_names(self):
+        s = CheckpointState.from_checkpoint_dict({})
+        self.assertEqual(s.prefix, "$")
+        self.assertEqual(s.input_name, "INPUT")
+        self.assertEqual(s.parent_name, "PARENT")
+        self.assertEqual(s.node_name, "NODE")
+        self.assertEqual(s.global_name, "GLOBAL")
+        self.assertEqual(s.env_name, "ENV")
+
+    def test_custom_names_propagated_to_model(self):
+        s = CheckpointState.from_checkpoint_dict(
+            {}, input_name="INP", parent_name="PAR", node_name="NOD",
+            global_name="GLO", env_name="ENVV",
+        )
+        self.assertEqual(s.input_name, "INP")
+        self.assertEqual(s.parent_name, "PAR")
+        self.assertEqual(s.node_name, "NOD")
+        self.assertEqual(s.global_name, "GLO")
+        self.assertEqual(s.env_name, "ENVV")
+
+    def test_custom_names_route_keys(self):
+        s = CheckpointState.from_checkpoint_dict({"$INP": 7}, input_name="INP")
+        self.assertEqual(s.input_value, 7)
+        self.assertEqual(s.to_checkpoint_dict(), {"$INP": 7})
+
+
 if __name__ == "__main__":
     unittest.main()

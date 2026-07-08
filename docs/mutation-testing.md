@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-08（§2.11 io.py 补强至 97.4%；§2.4 event/memory.py 用完整套件重新度量；11 个未补强模块全量复跑）
+> **最后更新**：2026-07-08（§2.12 state.py 99.1%、§2.11 io.py 97.4%；§2.4 event/memory.py 重新度量；11 个未补强模块全量复跑）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -141,7 +141,7 @@
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
 | `plaita/event/core.py` | 5% | 1/22 | 21 | 🔴 需补断言 |
 | `plaita/node/event_node.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
-| `plaita/core/state.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
+| `plaita/core/state.py` | **99.1%** | 213/215 | 2 | ✅ 已强化（见 §2.12），2 等价变异 |
 | `plaita/storage/memory.py` | 0% | 0/28 | 28 | 🔴 需补断言 |
 | `plaita/storage/base.py` | 0% | 0/14 | 14 | 🔴 需补断言 |
 
@@ -159,7 +159,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ `errors.py`（13%）/ `state.py`（0%）/ `event_node.py`（0%）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ `errors.py`（13%）/ `event_node.py`（0%）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -472,6 +472,40 @@ IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥
   （True 时 default 永不生效）行为一致。
 - `get_attr._41`：`obj.get(path, None)` → `obj.get(path,)`（即 `obj.get(path)`），
   对缺失键均返回 None。
+
+## 2.12 state.py 强化（2026-07-08，99.1%）
+
+`plaita/core/state.py` 从阶段二基线的 **0%（0/80）** 提升至 **99.1%（213/215）**。
+
+> 既有 `tests/unit/test_state.py` 已有较完整的 round-trip / 整体 dict 比较，但
+> mutmut 改内部路由而 dict 视图输出相同时仍存活，故显示 0%。本轮补的是**逐行为
+> 精确断言**。
+
+### 新增 `tests/unit/test_state_mutations.py`
+
+- `_key` 拼接、`CheckpointSchema.system_keys/bare_keys/all_known_keys` 默认 + 自定义 prefix
+- `validate_checkpoint`：多 unknown 各自告警、消息含 `CheckpointSchema`、自定义 prefix、
+  **`$lower`（前缀+非大写）与 `UPPER`（大写+无前缀）均不告警**——杀 `and→or` 变异
+- `CheckpointState.__getitem__`：三类缺失键抛 `KeyError` **且 args[0]==key**（杀
+  `KeyError(key)→KeyError(None)`）、EXPRESS_PREFIX/extras 读取
+- `__setitem__`：EXPRESS_PREFIX 路由 prefix、schema 键路由 typed field、extras 懒分配
+- `__contains__`：非 str 返回 False、各键成员跟踪
+- `__iter__`/`__len__`/`keys`/`items`/`values`：计数 + 一致性
+- `get` 默认值
+- `__eq__` vs `CheckpointState` / vs 非字典非 state（返回 False）/ `__hash__` 抛 TypeError
+- `fresh`：仅 `$EXECUTION_ID`+`$ENV` 在场、默认 + 自定义 prefix/names 全量断言
+- `setup_flow`：6 键 + EXPRESS_PREFIX 全量、自定义 prefix
+- `update_node_result`：缺失时建 map、追加、自定义 node_name
+- `from_checkpoint_dict`：默认 prefix/names 全量、EXPRESS_PREFIX 覆盖 fallback、非 dict 回退
+- **`_field_to_key` 全 9 字段**：经 dict 键写入后直接断言 typed field 属性
+  （`s.last_node_id`/`s.flow_id`/...）——round-trip 整体比较会被 extras 路由绕过，
+  只有直接断言 typed field 才能杀灭各字段字符串常量变异
+
+### 剩余 2 个 survived（等价变异，不可杀灭）
+
+- `__contains__._4/_5`：`if key == "EXPRESS_PREFIX"` 常量改写为 `"XXEXPRESS_PREFIXXX"`/
+  `"express_prefix"`。由于 EXPRESS_PREFIX 的在场性本就由 `_present` 跟踪，通用分支
+  `key in self._present` 已正确处理，特殊分支冗余——变异行为与原代码一致。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 

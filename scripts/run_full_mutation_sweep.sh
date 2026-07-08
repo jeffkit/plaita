@@ -54,7 +54,7 @@ MODULES=(
 TESTS_FOR_MODULE=(
   "tests/unit/test_executor.py tests/unit/test_flow_executor_extended.py tests/unit/test_checkpoint_resume.py"
   "tests/unit/test_errors.py tests/unit/test_runner_strategies_extended.py"
-  "tests/unit/test_state.py tests/unit/test_checkpoint_resume.py tests/unit/test_context.py tests/unit/test_context_executor_extended.py"
+  "tests/unit/test_state.py tests/unit/test_state_mutations.py tests/unit/test_checkpoint_resume.py tests/unit/test_context.py tests/unit/test_context_executor_extended.py"
   "tests/unit/test_errors.py tests/unit/test_error_handler_enum.py tests/unit/test_exception_cause.py tests/unit/test_find_node_unified_exception.py"
   "tests/unit/test_flow.py tests/unit/test_flow_model.py tests/unit/test_flow_next_node.py tests/unit/test_flow_node_index.py tests/unit/test_flow_distributed.py tests/unit/test_find_node_unified_exception.py"
   "tests/unit/test_event_core.py tests/unit/test_event_core_extended.py tests/unit/test_event_handler_decorator.py"
@@ -78,7 +78,7 @@ TESTS_FOR_MODULE=(
 SYNC_TESTS_FOR_MODULE=(
   "tests/unit/test_flow_executor_extended.py tests/unit/test_checkpoint_resume.py"
   "tests/unit/test_errors.py"
-  "tests/unit/test_state.py tests/unit/test_checkpoint_resume.py tests/unit/test_context.py"
+  "tests/unit/test_state.py tests/unit/test_state_mutations.py tests/unit/test_checkpoint_resume.py tests/unit/test_context.py"
   "tests/unit/test_errors.py tests/unit/test_error_handler_enum.py tests/unit/test_exception_cause.py tests/unit/test_find_node_unified_exception.py"
   "tests/unit/test_flow_model.py tests/unit/test_flow_next_node.py tests/unit/test_flow_node_index.py tests/unit/test_flow_distributed.py tests/unit/test_find_node_unified_exception.py"
   ""
