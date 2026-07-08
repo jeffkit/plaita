@@ -1,10 +1,13 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-08（§2.12 state.py 99.1%、§2.11 io.py 97.4%；§2.4 event/memory.py 重新度量；11 个未补强模块全量复跑）
+> **最后更新**：2026-07-08（§2.13 event_node.py 94.9%、§2.12 state.py 99.1%、§2.11 io.py 97.4%；§2.4 event/memory.py 重新度量；11 个未补强模块全量复跑）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
-> `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）。
+> `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
+> `io.py` 已补强至 **97.4%**（259/266，见 §2.11）；
+> `state.py` 已补强至 **99.1%**（213/215，见 §2.12）；
+> `event_node.py` 已接入至 **94.9%**（187/197，见 §2.13）。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
 > **⚠️ 覆盖范围声明（2026-07，诚实评估）**
@@ -140,7 +143,7 @@
 | `plaita/core/flow.py` | 8% | 4/53 | 49 | 🔴 需补断言 |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
 | `plaita/event/core.py` | 5% | 1/22 | 21 | 🔴 需补断言 |
-| `plaita/node/event_node.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
+| `plaita/node/event_node.py` | **94.9%** | 187/197 | 10 | ✅ 已接入（见 §2.13），10 等价变异 |
 | `plaita/core/state.py` | **99.1%** | 213/215 | 2 | ✅ 已强化（见 §2.12），2 等价变异 |
 | `plaita/storage/memory.py` | 0% | 0/28 | 28 | 🔴 需补断言 |
 | `plaita/storage/base.py` | 0% | 0/14 | 14 | 🔴 需补断言 |
@@ -159,7 +162,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ `errors.py`（13%）/ `event_node.py`（0%）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ `errors.py`（13%）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -506,6 +509,25 @@ IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥
 - `__contains__._4/_5`：`if key == "EXPRESS_PREFIX"` 常量改写为 `"XXEXPRESS_PREFIXXX"`/
   `"express_prefix"`。由于 EXPRESS_PREFIX 的在场性本就由 `_present` 跟踪，通用分支
   `key in self._present` 已正确处理，特殊分支冗余——变异行为与原代码一致。
+
+## 2.13 event_node.py 接入（2026-07-08，94.9%）
+
+`plaita/node/event_node.py` 从阶段二基线的 **0%（0/80）** 提升至 **94.9%（187/197）**。
+
+> 根因不是缺测试：`tests/unit/test_event_node_mutations.py`（1033 行，3 轮针对具体
+> mutant id 的精确断言）在 `cb17ac9`/`755c658`/`7919c52`/`bdf56ef` 就已存在且 92 项
+> 全绿，但**从未接入** `run_full_mutation_sweep.sh` 的 `TESTS_FOR_MODULE[14]`/
+> `SYNC_TESTS_FOR_MODULE[14]`（两者只列了 `test_event_node_unit.py`），所以 event_node
+> 长期显示 0%。本轮只把该文件接入脚本，未改测试。
+
+### 剩余 10 个 survived（全为等价变异，不可杀灭）
+
+- `on_event`/`on_timeout`/`on_error`/`on_cancel` 各 `_3/_5`：调用
+  `self._get_node_state(execution, {})` 的 `{}` 默认值被改成 `None`/缺省。
+  `_get_node_state` 内部统一用 `default or {}` 兜底，`None`/缺省/`{}` 行为一致。
+- `_get_node_state._28/_30`：`execution.context.get(node_key, {})` 的 `{}` 默认值
+  被改成 `None`/缺省。该行仅在 `if node_key in execution.context:` 守卫内执行，
+  key 必然存在，default 永不生效——等价。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 

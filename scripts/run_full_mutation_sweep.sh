@@ -66,7 +66,7 @@ TESTS_FOR_MODULE=(
   "tests/unit/test_dsl.py tests/unit/test_builder_extended.py"
   "tests/unit/test_code.py tests/unit/test_code_extended.py tests/unit/test_code_default_backend.py"
   "tests/unit/test_node_registry.py tests/unit/test_node_registry_lazy_discover.py"
-  "tests/unit/test_event_node_unit.py"
+  "tests/unit/test_event_node_unit.py tests/unit/test_event_node_mutations.py"
   "tests/unit/test_storage_memory_units.py"
   "tests/unit/test_storage_base.py"
 )
@@ -90,7 +90,7 @@ SYNC_TESTS_FOR_MODULE=(
   "tests/unit/test_dsl.py"
   "tests/unit/test_code.py tests/unit/test_code_extended.py tests/unit/test_code_default_backend.py"
   "tests/unit/test_node_registry.py tests/unit/test_node_registry_lazy_discover.py"
-  "tests/unit/test_event_node_unit.py"
+  "tests/unit/test_event_node_unit.py tests/unit/test_event_node_mutations.py"
   "tests/unit/test_storage_memory_units.py"
   "tests/unit/test_storage_base.py"
 )
