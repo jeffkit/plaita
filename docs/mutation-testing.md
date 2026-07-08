@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-08（§2.4 event/memory.py 用完整测试套件重新度量，从 6%* 修正为 65%；11 个未补强模块全量复跑）
+> **最后更新**：2026-07-08（§2.11 io.py 补强至 97.4%；§2.4 event/memory.py 用完整套件重新度量；11 个未补强模块全量复跑）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -138,7 +138,7 @@
 | `plaita/event/memory.py` | **65%** | 270/418 | 148 | ⚠️ 见 §2.10（07-08 用完整套件重新度量） |
 | `plaita/core/strategies.py` | 12% | 4/32 | 28 | 🔴 需补断言 |
 | `plaita/core/flow.py` | 8% | 4/53 | 49 | 🔴 需补断言 |
-| `plaita/io.py` | 1% | 1/83 | 82 | 🔴 需补断言 |
+| `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
 | `plaita/event/core.py` | 5% | 1/22 | 21 | 🔴 需补断言 |
 | `plaita/node/event_node.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
 | `plaita/core/state.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
@@ -159,7 +159,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ `errors.py`（13%）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ `errors.py`（13%）/ `state.py`（0%）/ `event_node.py`（0%）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -432,6 +432,46 @@ pytest` 独立子进程跑，async 挂死会被 60/120s 超时兜底（超时即
 父管道写端；mutmut 提前结束后若 `kill` 漏掉，sleep 被孤儿化仍握着管道，导致上游 `tee`
 读不到 EOF、驱动脚本死等在第一模块之后。修复：看门狗放进子 shell 并
 `</dev/null >/dev/null 2>&1`，再加 `wait` 收尸。
+
+## 2.11 io.py 强化（2026-07-08，97.4%）
+
+`plaita/io.py` 从阶段二基线的 **1%（1/83）** 提升至 **97.4%（259/266）**。
+
+> 前史：`tests/unit/test_io_mutations.py` 在 `8a67839` 就已存在，但**未接入**
+> `run_full_mutation_sweep.sh` 的 `TESTS_FOR_MODULE`（只列了 `test_io.py`/
+> `test_io_format.py`），所以 io.py 长期显示 1%。本轮既补断言又接入脚本。
+
+### 修复的脚本分母 bug
+
+本轮暴露 `run_full_mutation_sweep.sh` 的分数计算缺陷：`mutmut results` 只列出
+**非 killed** 的变异点（survived / timeout / not checked / no tests），不含 killed。
+脚本用 `grep -c "plaita\."` 数 results 输出当分母，导致只要有 killed，分母就被低估、
+分数严重偏低（io.py 真实 97.4% 被脚本报成 6–12%）。**阶段二基线表中凡是有 killed
+的模块，其文档分数均可能被低估**；0% 模块（无 killed）不受影响。真实分数需用
+`mutmut run` 进度条的 total 或 `mutmut junit` 重新统计——另题修复。
+
+### 新增/补强断言（`tests/unit/test_io_mutations.py`）
+
+逐函数精确断言：`get_value` 多键回退、`Property.from_json` 全别名（data_type/
+dataType/type、label/title、desc/description、is_required/isRequired、default_value/
+defaultValue/default、item_type/items）、required bool/list 分支、handle_object_type
+children/properties 回退 + name 默认键、handle_array_type item_type 优先级 + properties
+回退、`__str__` 三态（标量/对象/数组）、`get_attr` 索引/对象/字典路径 + 缺失键
+IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥 bool、BOOL
+`is True/False` 排斥 0/1、FLOAT/NUMBER 含 Decimal）、`_match_array`/`_match_object`、
+`evaluate`/`parse_function` 默认 prefix + 自定义 registry 透传 + `_parser_components_cache`
+副作用、`_RegisteredFunctionsProxy.__repr__`。
+
+### 剩余 7 个 survived（全为等价变异，不可杀灭）
+
+- `handle_object_type._4/_6`：`content.get("children", {})` → `None`/缺省，经
+  `or content.get("properties", {})` 兜底，行为一致。
+- `handle_array_type._15/_17`：`content.get("properties", [])` → `None`/缺省，
+  falsy 短路结果一致。
+- `get_attr._23/_26`：`getattr(obj, key, [])` → `None`/缺省，经 `hasattr` 守卫
+  （True 时 default 永不生效）行为一致。
+- `get_attr._41`：`obj.get(path, None)` → `obj.get(path,)`（即 `obj.get(path)`），
+  对缺失键均返回 None。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
