@@ -145,7 +145,7 @@
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | **84.4%** | 76/90 | 14 | ✅ 接入 test_errors_mutations（见 §2.14） |
 | `plaita/node/__init__.py` | **83.9%** | 94/112 | 18 | ✅ 接入 test_node_registry_mutations（见 §2.14） |
-| `plaita/event/memory.py` | **65%** | 270/418 | 148 | ⚠️ 见 §2.10（07-08 用完整套件重新度量） |
+| `plaita/event/memory.py` | **74%** | 308/418 | 110 | ⚠️ 见 §2.10/§2.18（修 cache 污染 + 加 18 精确断言后从 65% 升至 74%，110 survived 待续） |
 | `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ 接入 + 分母 bug 修复后真实分（见 §2.14/§2.16），6 survived 多为等价 |
 | `plaita/core/flow.py` | **79.0%** | 158/200 | 42 | ✅ 接入 test_flow_mutations（见 §2.14） |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ `event/memory.py`（65%，148 survived 待补）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ ~~`event/memory.py`（6%）~~（已升至 74%，110 survived 待续）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -642,6 +642,40 @@ strategies 是异步模块，recheck 阶段每个变异点跑 161 项异步测�
 
 > 13 个 survived 全在 distributed resume 这一边缘路径，逐个补强需大量异步测试
 > 调试（recheck round2 单次 ~3 分钟），边际收益递减，暂留。
+
+## 2.18 event/memory.py 精确断言 + 脚本 cache 污染修复（2026-07-08，74%）
+
+`plaita/event/memory.py` 从 **65%（270/418）** 提升至 **74%（308/418，110 survived）**。
+
+本轮同时修了 sweep 脚本两个连锁 bug（详见 `c65854d`/`0bea42b`），它们此前使
+event/memory 的 recheck 完全跑偏或虚高 100%：
+1. **cache 污染**：recheck 的 `mutmut results` 拿到 `.mutmut-cache` 里其他模块
+   残留变异点，导致 recheck 跑的是别的模块（曾实测跑 event/memory 时实际
+   recheck 的是 dsl/builder 的 254 个变异点）。
+2. **前导空格过滤**：修 1 时用 `^${mod_prefix}` 锚定行首，但 mutmut results
+   每行有前导空格，导致 0 匹配、418 个 not_checked 全被过滤、recheck 不跑、
+   脚本误报"all killed"→虚高 100%。
+
+### 新增 18 个精确断言（tests/unit/test_event_memory_unit.py）
+
+针对变异点密集的 4 个方法区，用 spy/wrap `processing_tracker.record_processing_attempt`
+和直接断言状态：
+- `TestProcessWithRetryRecording`（4 项）：success/"error (retry N)"/"failed" +
+  "达到最大重试次数 (N)" 文本 + 异常文本透传 + 同步 handler 走 run_in_executor
+- `TestWaitForEventPrecise`（4 项）：future 注册/超时清理、deadline 过期立即抛、
+  condition 不匹配 continue 循环
+- `TestPublishNormalizationPrecise`（6 项）：dict pop event_type 出 data、
+  str 分支 data=kwargs、ValueError 消息文本、batch_publish 同理
+- `TestDispatchProcessEventRecording`（4 项）：_process_event success/error
+  status + 异常文本、prevent_duplicate_consumption 去重开关双向
+
+### 剩余 110 survived 分布
+
+`_process_event`(20)、`_process_with_retry`(12)、`_dispatch_event`(12)、
+`cleanup_old_records`(11)、`register_subscription`(11)、`list_events`(8)、
+`batch_publish`(8)、`list_subscriptions`(6)、`wait_for_event`(5) 等。多为
+logger.info/debug 字符串变异、参数透传、storage 索引维护逻辑——可继续按方法
+区补断言，但 recheck 单次 ~37 分钟（418 候选 × 两测试文件），迭代成本高。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 

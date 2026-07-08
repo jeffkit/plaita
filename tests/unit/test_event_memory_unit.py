@@ -732,5 +732,382 @@ class TestMemoryEventStorageEdgeCases(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
 
 
+class TestProcessWithRetryRecording(unittest.IsolatedAsyncioTestCase):
+    """精确断言 _process_with_retry 对 record_processing_attempt 的调用。
+
+    杀 _process_with_retry 里 record_processing_attempt 的 status 字符串变异
+    ("success" / "error (retry N)" / "failed") 及参数丢弃/None 变异。
+    """
+
+    async def test_success_records_success_status(self):
+        from plaita.event.memory import InMemoryEventBus
+        from plaita.event.core import RetryPolicy
+        bus = InMemoryEventBus()
+        calls: list[tuple] = []
+        orig = bus.processing_tracker.record_processing_attempt
+
+        async def spy(event_id, handler_id, status, *args, **kwargs):
+            calls.append((event_id, handler_id, status))
+            return await orig(event_id, handler_id, status, *args, **kwargs)
+
+        bus.processing_tracker.record_processing_attempt = spy
+
+        async def ok_handler(event):
+            return None
+
+        policy = RetryPolicy(max_retries=3, initial_delay=0.01)
+        await bus.register_handler(
+            event_type="ok.event", handler=ok_handler, retry_policy=policy
+        )
+        evt = _event("ok.event")
+        await bus.publish(evt, prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.15)
+
+        statuses = [c[2] for c in calls]
+        self.assertIn("success", statuses,
+                      "成功路径必须 record status='success'（杀 status 字符串变异）")
+        self.assertEqual(statuses[-1], "success")
+
+    async def test_retry_records_error_retry_n_status(self):
+        from plaita.event.memory import InMemoryEventBus
+        from plaita.event.core import RetryPolicy
+        bus = InMemoryEventBus()
+        calls: list[tuple] = []
+        orig = bus.processing_tracker.record_processing_attempt
+
+        async def spy(event_id, handler_id, status, *args, **kwargs):
+            calls.append((event_id, handler_id, status, args))
+            return await orig(event_id, handler_id, status, *args, **kwargs)
+
+        bus.processing_tracker.record_processing_attempt = spy
+
+        attempt = [0]
+
+        async def fails_twice(event):
+            attempt[0] += 1
+            if attempt[0] <= 2:
+                raise RuntimeError(f"boom-{attempt[0]}")
+
+        # max_retries=5 → 失败2次后第3次成功，应有2条 error (retry N) + 1 success
+        policy = RetryPolicy(max_retries=5, initial_delay=0.01,
+                             backoff_factor=1.0, max_delay=0.02)
+        await bus.register_handler(
+            event_type="retry2.event", handler=fails_twice, retry_policy=policy
+        )
+        evt = _event("retry2.event")
+        await bus.publish(evt, prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.3)
+
+        statuses = [c[2] for c in calls]
+        # 杀 "error (retry N)" 字符串变异：必须含 "error (retry 1)" 和 "error (retry 2)"
+        self.assertIn("error (retry 1)", statuses,
+                      "第1次失败必须 record 'error (retry 1)'")
+        self.assertIn("error (retry 2)", statuses,
+                      "第2次失败必须 record 'error (retry 2)'")
+        # error 路径必须带异常文本（args[0] 是 str(e)）
+        err_calls = [c for c in calls if isinstance(c[2], str) and c[2].startswith("error")]
+        self.assertTrue(all(c[3] and c[3][0] for c in err_calls),
+                        "error 路径 record_processing_attempt 必须带异常文本")
+        self.assertIn("success", statuses)
+
+    async def test_exhaust_records_failed_status_with_max_retries(self):
+        from plaita.event.memory import InMemoryEventBus
+        from plaita.event.core import RetryPolicy
+        bus = InMemoryEventBus()
+        calls: list[tuple] = []
+        orig = bus.processing_tracker.record_processing_attempt
+
+        async def spy(event_id, handler_id, status, *args, **kwargs):
+            calls.append((event_id, handler_id, status, args))
+            return await orig(event_id, handler_id, status, *args, **kwargs)
+
+        bus.processing_tracker.record_processing_attempt = spy
+
+        async def always_fails(event):
+            raise RuntimeError("nope")
+
+        policy = RetryPolicy(max_retries=2, initial_delay=0.01,
+                             backoff_factor=1.0, max_delay=0.02)
+        await bus.register_handler(
+            event_type="exhaust.event", handler=always_fails, retry_policy=policy
+        )
+        await bus.publish(_event("exhaust.event"), prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.3)
+
+        statuses = [c[2] for c in calls]
+        # 杀 "failed" status 变异 + 杀 f"达到最大重试次数 ({max_retries})" 文本变异
+        self.assertIn("failed", statuses,
+                      "重试耗尽必须 record status='failed'")
+        failed_calls = [c for c in calls if c[2] == "failed"]
+        self.assertTrue(failed_calls, "必须有 failed 记录")
+        # args[0] 是 "达到最大重试次数 (2)" —— 杀数字/文本变异
+        self.assertEqual(len(failed_calls), 1)
+        msg = failed_calls[0][3][0] if failed_calls[0][3] else None
+        self.assertIsNotNone(msg)
+        self.assertIn("达到最大重试次数", msg)
+        self.assertIn("2", msg)
+
+    async def test_sync_handler_runs_in_executor(self):
+        from plaita.event.memory import InMemoryEventBus
+        from plaita.event.core import RetryPolicy
+        bus = InMemoryEventBus()
+        seen: list = []
+
+        def sync_handler(event):
+            seen.append(event)
+
+        policy = RetryPolicy(max_retries=1, initial_delay=0.01)
+        await bus.register_handler(
+            event_type="sync.event", handler=sync_handler, retry_policy=policy
+        )
+        evt = _event("sync.event")
+        await bus.publish(evt, prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(seen), 1,
+                         "同步 handler 必须经 run_in_executor 执行（杀 iscoroutinefunction 分支变异）")
+
+
+class TestWaitForEventPrecise(unittest.IsolatedAsyncioTestCase):
+    """精确断言 wait_for_event 的 deadline/remaining/future 清理分支。
+
+    杀 wait_for_event 里 deadline 计算、remaining<=0 阈值、future 注册/移除、
+    condition continue 变异。
+    """
+
+    async def test_future_cleaned_up_on_timeout(self):
+        from plaita.event.memory import InMemoryEventBus
+        from plaita.event.exceptions import EventTimeoutError
+        bus = InMemoryEventBus()
+        with self.assertRaises(EventTimeoutError):
+            await bus.wait_for_event("clean.event", timeout=0.05)
+        # 超时后 waiting_futures 必须移除该 future（杀 remove 分支变异）
+        if "clean.event" in bus.waiting_futures:
+            self.assertEqual(bus.waiting_futures["clean.event"], [],
+                             "超时后 waiting_futures[event_type] 必须移除已完成 future")
+
+    async def test_already_expired_deadline_raises_immediately(self):
+        """deadline 已过（remaining<=0）应立即抛 EventTimeoutError，不等 await future。"""
+        from plaita.event.memory import InMemoryEventBus
+        from plaita.event.exceptions import EventTimeoutError
+        bus = InMemoryEventBus()
+        # timeout 极小，循环第一轮 remaining 很可能 <=0 → 立即抛
+        with self.assertRaises(EventTimeoutError):
+            await bus.wait_for_event("expired.event", timeout=0.0001)
+
+    async def test_condition_mismatch_loops_and_wakes_next(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        evt_first = _event("loop.event", {"x": 1})
+        evt_second = _event("loop.event", {"x": 2})
+
+        async def publish_two():
+            await asyncio.sleep(0.02)
+            await bus.publish(evt_first, prevent_duplicate_consumption=False)
+            await asyncio.sleep(0.02)
+            await bus.publish(evt_second, prevent_duplicate_consumption=False)
+
+        asyncio.create_task(publish_two())
+        result = await bus.wait_for_event(
+            "loop.event", timeout=2.0,
+            condition=lambda e: e.data.get("x") == 2,
+        )
+        # condition 不匹配必须 continue 循环等下一个（杀 condition 分支变异）
+        self.assertEqual(result.event_id, evt_second.event_id)
+        self.assertEqual(result.data.get("x"), 2)
+
+    async def test_future_registered_in_waiting_futures(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        evt = _event("reg.event")
+
+        async def publish_later():
+            await asyncio.sleep(0.05)
+            await bus.publish(evt, prevent_duplicate_consumption=False)
+
+        task = asyncio.create_task(publish_later())
+        # 在 publish 之前快照 waiting_futures，确认 future 被注册
+        waiter = asyncio.create_task(bus.wait_for_event("reg.event", timeout=2.0))
+        await asyncio.sleep(0.01)
+        self.assertIn("reg.event", bus.waiting_futures)
+        self.assertTrue(len(bus.waiting_futures["reg.event"]) >= 1,
+                        "wait_for_event 必须把 future 注册进 waiting_futures")
+        result = await waiter
+        self.assertEqual(result.event_id, evt.event_id)
+        await task
+
+
+class TestPublishNormalizationPrecise(unittest.IsolatedAsyncioTestCase):
+    """精确断言 publish/batch_publish 的 dict 标准化分支。
+
+    杀 publish 里 event.pop('event_type') 变异（data 不应再含 event_type 键）、
+    ValueError 消息文本变异、str 分支 data=kwargs 变异。
+    """
+
+    async def test_publish_dict_pops_event_type_from_data(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        evt_id = await bus.publish(
+            {"event_type": "dict.event", "k1": "v1", "k2": "v2"},
+            prevent_duplicate_consumption=False,
+        )
+        stored = await bus.get_event(evt_id)
+        self.assertEqual(stored.event_type, "dict.event")
+        # event_type 必须从 data 中 pop 掉（杀 pop 变异：data 不含 event_type 键）
+        self.assertNotIn("event_type", stored.data,
+                         "publish(dict) 必须 pop event_type 出 data")
+        self.assertEqual(stored.data, {"k1": "v1", "k2": "v2"})
+
+    async def test_publish_str_uses_kwargs_as_data(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        evt_id = await bus.publish(
+            "str.event", prevent_duplicate_consumption=False, a=1, b=2
+        )
+        stored = await bus.get_event(evt_id)
+        self.assertEqual(stored.event_type, "str.event")
+        # str 分支 data=kwargs（杀 data=kwargs 变异）
+        self.assertEqual(stored.data, {"a": 1, "b": 2})
+
+    async def test_publish_dict_missing_event_type_raises_with_message(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        with self.assertRaises(ValueError) as cm:
+            await bus.publish({"no_type": 1}, prevent_duplicate_consumption=False)
+        # 杀 ValueError 消息文本变异
+        self.assertIn("event_type", str(cm.exception))
+
+    async def test_batch_publish_dict_pops_event_type(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        ids = await bus.batch_publish(
+            [{"event_type": "b1", "x": 1}, {"event_type": "b2", "y": 2}],
+            prevent_duplicate_consumption=False,
+        )
+        await asyncio.sleep(0.1)
+        e1 = await bus.get_event(ids[0])
+        e2 = await bus.get_event(ids[1])
+        self.assertEqual(e1.event_type, "b1")
+        self.assertNotIn("event_type", e1.data)
+        self.assertEqual(e1.data, {"x": 1})
+        self.assertEqual(e2.event_type, "b2")
+        self.assertNotIn("event_type", e2.data)
+
+    async def test_batch_publish_str_has_empty_data(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        ids = await bus.batch_publish(["s1", "s2"], prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.1)
+        e1 = await bus.get_event(ids[0])
+        # str 分支 data={}（杀 data 变异）
+        self.assertEqual(e1.event_type, "s1")
+        self.assertEqual(e1.data, {})
+
+    async def test_batch_publish_dict_missing_type_raises(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        with self.assertRaises(ValueError) as cm:
+            await bus.batch_publish([{"event_type": "ok"}, {"no_type": 1}],
+                                    prevent_duplicate_consumption=False)
+        self.assertIn("event_type", str(cm.exception))
+
+
+class TestDispatchProcessEventRecording(unittest.IsolatedAsyncioTestCase):
+    """精确断言 _dispatch_event / _process_event 的 record_processing_attempt。
+
+    杀 _process_event 里 "success"/"error" status 变异、str(e) 参数变异、
+    _dispatch_event 的 prevent_duplicate_consumption 去重分支变异。
+    """
+
+    async def test_process_event_success_records_success(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        calls: list[tuple] = []
+        orig = bus.processing_tracker.record_processing_attempt
+
+        async def spy(event_id, handler_id, status, *args, **kwargs):
+            calls.append((event_id, handler_id, status, args))
+            return await orig(event_id, handler_id, status, *args, **kwargs)
+
+        bus.processing_tracker.record_processing_attempt = spy
+
+        async def ok(event):
+            return None
+
+        # 无 retry_policy → 走 _process_event 直处理分支
+        await bus.register_handler(event_type="p.event", handler=ok)
+        evt = _event("p.event")
+        await bus.publish(evt, prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.15)
+
+        statuses = [c[2] for c in calls]
+        self.assertIn("success", statuses,
+                      "_process_event 成功路径必须 record 'success'（杀 status 变异）")
+
+    async def test_process_event_error_records_error_with_message(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        calls: list[tuple] = []
+        orig = bus.processing_tracker.record_processing_attempt
+
+        async def spy(event_id, handler_id, status, *args, **kwargs):
+            calls.append((event_id, handler_id, status, args))
+            return await orig(event_id, handler_id, status, *args, **kwargs)
+
+        bus.processing_tracker.record_processing_attempt = spy
+
+        async def bad(event):
+            raise ValueError("boom-sync")
+
+        await bus.register_handler(event_type="e.event", handler=bad)
+        await bus.publish(_event("e.event"), prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.15)
+
+        statuses = [c[2] for c in calls]
+        self.assertIn("error", statuses,
+                      "_process_event 失败路径必须 record 'error'（杀 status 变异）")
+        err_calls = [c for c in calls if c[2] == "error"]
+        self.assertTrue(err_calls)
+        # args[0] 是 str(e)，必须含异常文本（杀 str(e)→None/缺省 变异）
+        self.assertTrue(err_calls[0][3] and err_calls[0][3][0])
+        self.assertIn("boom-sync", err_calls[0][3][0])
+
+    async def test_prevent_duplicate_consumption_dedups(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        seen: list = []
+
+        async def handler(event):
+            seen.append(event.event_id)
+
+        await bus.register_handler(event_type="dup.event", handler=handler)
+        evt = _event("dup.event")
+        # prevent_duplicate_consumption=True（默认）：同一 event+handler 只处理一次
+        await bus.publish(evt, prevent_duplicate_consumption=True)
+        await asyncio.sleep(0.15)
+        await bus.publish(evt, prevent_duplicate_consumption=True)
+        await asyncio.sleep(0.15)
+        # 杀 mark_event_processed 去重分支变异：第二次必须被跳过
+        self.assertEqual(len(seen), 1,
+                         "prevent_duplicate_consumption=True 时同一 event 只处理一次")
+
+    async def test_no_prevent_duplicate_processes_twice(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        seen: list = []
+
+        async def handler(event):
+            seen.append(event.event_id)
+
+        await bus.register_handler(event_type="nodup.event", handler=handler)
+        evt = _event("nodup.event")
+        await bus.publish(evt, prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.15)
+        await bus.publish(evt, prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.15)
+        # 杀 prevent_duplicate_consumption 开关变异：False 时不去重，处理两次
+        self.assertEqual(len(seen), 2,
+                         "prevent_duplicate_consumption=False 时不去重，处理两次")
+
+
 if __name__ == "__main__":
     unittest.main()
