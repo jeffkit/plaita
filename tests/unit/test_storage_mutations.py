@@ -10,7 +10,7 @@
 from __future__ import annotations
 import unittest
 
-from plaita.storage.base import ExecutionState
+from plaita.storage.base import ExecutionState, ExecutionStorage
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 
 
@@ -219,6 +219,74 @@ class TestMemoryFlowStorageGet(unittest.TestCase):
         storage.flows["f_empty"] = {}
         result = storage.get_flow("f_empty")
         self.assertIsNone(result)
+
+
+class TestSerializeDeserializeState(unittest.TestCase):
+    """ExecutionStorage.serialize_state / deserialize_state 的精确断言。
+
+    覆盖正常路径（json.dumps/loads 透传）+ 异常路径（logger.error 的格式串
+    与异常文本均进日志，且原异常被 re-raise）——杀 14 个 logger.error 参数变异。
+    """
+
+    def setUp(self):
+        self.storage = MemoryExecutionStorage()
+
+    def test_serialize_round_trips_dict(self):
+        state = {"execution_id": "ex1", "status": "running", "n": 42}
+        s = self.storage.serialize_state(state)
+        self.assertEqual(self.storage.deserialize_state(s), state)
+
+    def test_serialize_handles_nested_and_list(self):
+        state = {"a": [1, 2, {"b": 3}], "c": None}
+        s = self.storage.serialize_state(state)
+        self.assertEqual(self.storage.deserialize_state(s), state)
+
+    def test_serialize_returns_str(self):
+        s = self.storage.serialize_state({"x": 1})
+        self.assertIsInstance(s, str)
+
+    def test_deserialize_returns_dict(self):
+        d = self.storage.deserialize_state('{"x": 1}')
+        self.assertEqual(d, {"x": 1})
+
+    def test_serialize_raises_and_logs_on_unserializable(self):
+        # set 不可 JSON 序列化 → json.dumps 抛 TypeError → logger.error 后 re-raise
+        with self.assertRaises(TypeError):
+            self.storage.serialize_state({"bad": {1, 2, 3}})
+
+    def test_serialize_log_has_format_string_and_error_text(self):
+        # 杀 logger.error(None, e) / logger.error(fmt, None) / logger.error(e) /
+        # logger.error(fmt, ) / logger.error("XXfmtXX", e) / logger.error("lower", e) /
+        # logger.error("UPPER: %S", e) 等参数变异
+        with self.assertLogs("plaita", level="ERROR") as cm:
+            with self.assertRaises(TypeError):
+                self.storage.serialize_state({"bad": {1, 2}})
+        msgs = [m for m in cm.output if "serialize" in m]
+        self.assertTrue(len(msgs) >= 1, f"expected serialize error log, got {cm.output}")
+        combined = " ".join(msgs)
+        self.assertIn("Failed to serialize state", combined)
+        # 异常文本应进日志（%s 把异常转成 "Object of type set is not JSON serializable"）
+        self.assertIn("not JSON serializable", combined)
+        self.assertNotIn("XX", combined)
+        self.assertNotIn("%S", combined)
+
+    def test_deserialize_raises_and_logs_on_invalid_json(self):
+        with self.assertRaises(Exception):
+            self.storage.deserialize_state("{not valid json")
+
+    def test_deserialize_log_has_format_string_and_error_text(self):
+        # 杀 logger.error(fmt, None) / logger.error(fmt, ) ——异常文本必须进日志
+        with self.assertLogs("plaita", level="ERROR") as cm:
+            with self.assertRaises(Exception):
+                self.storage.deserialize_state("{not valid json")
+        msgs = [m for m in cm.output if "deserialize" in m]
+        self.assertTrue(len(msgs) >= 1, f"expected deserialize error log, got {cm.output}")
+        combined = " ".join(msgs)
+        self.assertIn("Failed to deserialize state", combined)
+        # 异常文本应进日志（%s 把 JSONDecodeError 转成 "Expecting property name..."）
+        self.assertIn("Expecting", combined)
+        self.assertNotIn("XX", combined)
+        self.assertNotIn("%S", combined)
 
 
 if __name__ == "__main__":

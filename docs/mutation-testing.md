@@ -6,6 +6,7 @@
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
 > `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
 > `state.py` 已补强至 **99.1%**（213/215，见 §2.12）；
+> `storage/base.py` 已强化至 **100%**（16/16，见 §2.15）；
 > `storage/memory.py` 已接入至 **95.8%**（91/95，见 §2.14）；
 > `event_node.py` 已接入至 **94.9%**（187/197，见 §2.13）；
 > `io.py` 已补强至 **97.4%**（259/266，见 §2.11）；
@@ -151,7 +152,7 @@
 | `plaita/node/event_node.py` | **94.9%** | 187/197 | 10 | ✅ 已接入（见 §2.13），10 等价变异 |
 | `plaita/core/state.py` | **99.1%** | 213/215 | 2 | ✅ 已强化（见 §2.12），2 等价变异 |
 | `plaita/storage/memory.py` | **95.8%** | 91/95 | 4 | ✅ 接入 test_storage_mutations（见 §2.14） |
-| `plaita/storage/base.py` | 12.5% | 2/16 | 14 | 🔴 test_storage_mutations 未覆盖 serialize/deserialize_state；见 §2.14 |
+| `plaita/storage/base.py` | **100%** | 16/16 | 0 | ✅ 已强化（见 §2.15） |
 
 > 上表中 `strategies`/`flow`/`event/core`/`event/memory` 的数字为 2026-07-08 复跑结果
 > （`scripts/run_unboosted_mutation_sweep.sh`，日志 `mutation-unboosted-20260707_184801.txt`）；
@@ -167,7 +168,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ `storage/base.py`（12.5%，待补 serialize/deserialize_state 断言）/ `strategies.py`（38.5%，异步 recheck 偏低，待重跑）/ `event/memory.py`（65%，148 survived 待补）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ `strategies.py`（38.5%，异步 recheck 偏低，待重跑）/ `event/memory.py`（65%，148 survived 待补）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -571,6 +572,26 @@ IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥
 strategies 是异步模块，recheck 阶段每个变异点跑 161 项异步测试易超时；
 当前 38.5% 是 recheck 未能跑全的保守值，真实分应更高。待修分母 bug +
 异步 recheck 策略后重跑。
+
+## 2.15 storage/base.py 强化（2026-07-08，100%）
+
+`plaita/storage/base.py` 从接入后的 **12.5%（2/16）** 提升至 **100%（16/16）**。
+
+> §2.14 接入 `test_storage_mutations.py` 对 base 无效，因为该文件只测
+> `ExecutionState`（数据类），不测 `ExecutionStorage.serialize_state`/
+> `deserialize_state`——14 个 survived 全在这两方法的 `logger.error(...)` 参数。
+
+### 新增 `TestSerializeDeserializeState`（tests/unit/test_storage_mutations.py）
+
+用 `MemoryExecutionStorage`（`ExecutionStorage` 的具体子类）实例化基类方法：
+- 正常路径：dict/nested/list round-trip、返回类型断言
+- 异常路径：`serialize_state({"bad": set})` 触发 `TypeError`、
+  `deserialize_state("{not valid json")` 触发 `JSONDecodeError`，断言：
+  - 原异常被 re-raise
+  - 日志含 `"Failed to serialize/deserialize state"` 格式串（杀 `None`/`e`/
+    缺省/`XXfmtXX`/小写/`%S` 等格式串变异）
+  - 日志含异常文本（`"not JSON serializable"` / `"Expecting"`）——杀
+    `logger.error(fmt, None)` 和 `logger.error(fmt, )`（异常参数被丢弃）
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
