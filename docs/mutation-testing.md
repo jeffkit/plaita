@@ -145,7 +145,7 @@
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | **84.4%** | 76/90 | 14 | ✅ 接入 test_errors_mutations（见 §2.14） |
 | `plaita/node/__init__.py` | **83.9%** | 94/112 | 18 | ✅ 接入 test_node_registry_mutations（见 §2.14） |
-| `plaita/event/memory.py` | **74%** | 308/418 | 110 | ⚠️ 见 §2.10/§2.18（修 cache 污染 + 加 18 精确断言后从 65% 升至 74%，110 survived 待续） |
+| `plaita/event/memory.py` | **91%** | 381/418 | 37 | ⚠️ 见 §2.10/§2.18（从 65%→74%→86%→91%，37 survived 待续） |
 | `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ 接入 + 分母 bug 修复后真实分（见 §2.14/§2.16），6 survived 多为等价 |
 | `plaita/core/flow.py` | **79.0%** | 158/200 | 42 | ✅ 接入 test_flow_mutations（见 §2.14） |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
