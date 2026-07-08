@@ -282,8 +282,23 @@ for i in "${!MODULES[@]}"; do
   echo "  mutmut run elapsed: ${elapsed}s"
 
   # ── 统计变异点数量 ────────────────────────────────────────────────────
+  # 注意: mutmut results 只列出 *非 killed* 的变异点（survived/timeout/
+  # not checked/no tests），不含 killed。早期脚本误把 results 行数当 total，
+  # 导致只要有 killed，分母就被低估、分数严重偏低（如 io.py 真实 97.4% 被报
+  # 成 6-12%）。正确做法是用 export-cicd-stats 拿真实 total/killed/survived。
   raw_results=$(mutmut results 2>/dev/null || echo "")
-  n_total=$(echo "$raw_results" | grep -cE "^[[:space:]]+plaita\." || true)
+
+  # 真实总数/已杀/存活来自 cicd-stats（mutmut run 后立即可用）
+  stats_file="mutants/mutmut-cicd-stats.json"
+  mutmut export-cicd-stats >/dev/null 2>&1 || true
+  n_total=$(python3 -c "import json;print(json.load(open('$stats_file')).get('total',0))" 2>/dev/null || echo 0)
+  n_killed_pre=$(python3 -c "import json;print(json.load(open('$stats_file')).get('killed',0))" 2>/dev/null || echo 0)
+  n_survived_pre=$(python3 -c "import json;print(json.load(open('$stats_file')).get('survived',0))" 2>/dev/null || echo 0)
+  n_not_checked=$(echo "$raw_results" | grep -c ": *not checked$" || true)
+  n_timeout=$(echo "$raw_results" | grep -c ": *timeout$" || true)
+  # no_tests / suspicious 也算非 killed，纳入 recheck 候选
+  n_no_tests=$(echo "$raw_results" | grep -c ": *no tests$" || true)
+  n_need_recheck=$((n_survived_pre + n_not_checked + n_timeout + n_no_tests))
 
   if [[ $n_total -eq 0 ]]; then
     echo "  WARN: 0 mutants found — skipping"
@@ -291,13 +306,7 @@ for i in "${!MODULES[@]}"; do
     continue
   fi
 
-  n_not_checked=$(echo "$raw_results" | grep -c ": *not checked$" || true)
-  n_timeout=$(echo "$raw_results" | grep -c ": *timeout$" || true)
-  n_survived_pre=$(echo "$raw_results" | grep -c ": *survived$" || true)
-  n_need_recheck=$((n_not_checked + n_timeout + n_survived_pre))
-  n_killed_pre=$((n_total - n_need_recheck))
-
-  echo "  mutants: total=${n_total} killed(pre)=${n_killed_pre} not_checked=${n_not_checked} timeout=${n_timeout} survived_pre=${n_survived_pre}"
+  echo "  mutants: total=${n_total} killed(pre)=${n_killed_pre} not_checked=${n_not_checked} timeout=${n_timeout} survived_pre=${n_survived_pre} no_tests=${n_no_tests}"
 
   # ── 全量复核所有非-killed 变异点 ──────────────────────────────────────
   RECHECK_TMPFILE=$(mktemp)
