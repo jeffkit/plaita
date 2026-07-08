@@ -364,5 +364,256 @@ class TestGetValue(unittest.TestCase):
         self.assertIsNone(result)
 
 
+# ---------------------------------------------------------------------------
+# 补强轮：别名 / required / __str__ / get_attr / match / parse_function
+# （与上面同模块测试互补，class 名不冲突）
+# ---------------------------------------------------------------------------
+import json
+from decimal import Decimal
+
+from plaita.core import types
+from plaita.core.expression import ExpressionRegistry, FunctionCategory
+from plaita.core.expression_parser import ExpressionParser, _parser_components_cache
+from plaita.io import (
+    REGISTERED_FUNCTIONS,
+    get_attr,
+    match,
+    parse_function,
+)
+
+
+class TestPropertyFromJsonAliases(unittest.TestCase):
+    def test_none_or_empty_returns_none(self):
+        self.assertIsNone(Property.from_json(None))
+        self.assertIsNone(Property.from_json(""))
+        self.assertIsNone(Property.from_json({}))
+
+    def test_pass_through_existing_property_instance(self):
+        prop = Property(data_type=types.STRING)
+        self.assertIs(Property.from_json(prop), prop)
+
+    def test_string_input_is_json_parsed(self):
+        prop = Property.from_json(json.dumps({"data_type": "integer", "name": "n"}))
+        self.assertEqual(prop.data_type, types.INTEGER)
+        self.assertEqual(prop.name, "n")
+
+    def test_data_type_aliases(self):
+        self.assertEqual(Property.from_json({"type": "string"}).data_type, types.STRING)
+        self.assertEqual(Property.from_json({"dataType": "integer"}).data_type, types.INTEGER)
+        self.assertEqual(Property.from_json({"data_type": "float"}).data_type, types.FLOAT)
+
+    def test_label_alias_title(self):
+        self.assertEqual(Property.from_json({"type": "string", "title": "T"}).label, "T")
+        self.assertEqual(Property.from_json({"type": "string", "label": "L"}).label, "L")
+
+    def test_desc_alias_description(self):
+        self.assertEqual(Property.from_json({"type": "string", "description": "D"}).desc, "D")
+        self.assertEqual(Property.from_json({"type": "string", "desc": "d"}).desc, "d")
+
+    def test_is_required_alias_isRequired(self):
+        self.assertTrue(Property.from_json({"type": "string", "isRequired": True}).is_required)
+        self.assertTrue(Property.from_json({"type": "string", "is_required": True}).is_required)
+        self.assertFalse(Property.from_json({"type": "string"}).is_required)
+
+    def test_default_value_aliases(self):
+        self.assertEqual(Property.from_json({"type": "string", "default": "x"}).default_value, "x")
+        self.assertEqual(Property.from_json({"type": "string", "defaultValue": "y"}).default_value, "y")
+        self.assertEqual(Property.from_json({"type": "string", "default_value": "z"}).default_value, "z")
+
+
+class TestPropertyRequiredHandling(unittest.TestCase):
+    def test_required_bool_true_sets_is_required(self):
+        self.assertTrue(Property.from_json({"type": "string", "required": True}).is_required)
+
+    def test_required_bool_false_clears_is_required(self):
+        prop = Property.from_json({"type": "string", "is_required": True, "required": False})
+        self.assertFalse(prop.is_required)
+
+    def test_required_list_does_not_set_bool(self):
+        prop = Property.from_json({"type": "object", "required": ["x"], "properties": {}})
+        self.assertFalse(prop.is_required)
+
+
+class TestPropertyStr(unittest.TestCase):
+    def test_scalar_returns_data_type(self):
+        self.assertEqual(str(Property(data_type=types.STRING)), types.STRING)
+        self.assertEqual(str(Property(data_type=types.INTEGER)), types.INTEGER)
+
+    def test_object_format(self):
+        prop = Property(data_type=types.OBJECT, name="myname")
+        prop.children = {"k": Property(data_type=types.STRING)}
+        self.assertEqual(str(prop), 'myname: {"k": "string"}')
+
+    def test_array_with_item_type(self):
+        prop = Property(data_type=types.ARRAY)
+        prop.item_type = Property(data_type=types.STRING)
+        self.assertEqual(str(prop), "[{'string'}]")
+
+    def test_array_with_children_list(self):
+        prop = Property(data_type=types.ARRAY)
+        prop.children = [Property(data_type=types.STRING)]
+        self.assertEqual(str(prop), "['string']")
+
+
+class TestGetAttr(unittest.TestCase):
+    def test_array_index_path_on_dict(self):
+        self.assertEqual(get_attr({"rows": [10, 20, 30]}, "rows[1]"), 20)
+
+    def test_array_index_path_on_object(self):
+        class Holder:
+            def __init__(self):
+                self.items = [100, 200]
+        self.assertEqual(get_attr(Holder(), "items[1]"), 200)
+
+    def test_plain_path_on_dict(self):
+        self.assertEqual(get_attr({"a": 1}, "a"), 1)
+        self.assertIsNone(get_attr({"a": 1}, "missing"))
+
+    def test_plain_path_on_object(self):
+        class O:
+            x = 42
+        self.assertEqual(get_attr(O(), "x"), 42)
+        self.assertIsNone(get_attr(O(), "nope"))
+
+
+class TestMatchScalar(unittest.TestCase):
+    def test_none_with_required(self):
+        self.assertFalse(match(Property(data_type=types.STRING, is_required=True), None))
+        self.assertTrue(match(Property(data_type=types.STRING, is_required=False), None))
+
+    def test_any_always_true(self):
+        self.assertTrue(match(Property(data_type=types.ANY), None))
+        self.assertTrue(match(Property(data_type=types.ANY), "anything"))
+        self.assertTrue(match(Property(data_type=types.ANY), 123))
+
+    def test_string_requires_non_empty_str(self):
+        prop = Property(data_type=types.STRING)
+        self.assertTrue(match(prop, "x"))
+        self.assertFalse(match(prop, ""))
+        self.assertFalse(match(prop, 5))
+
+    def test_integer_strict_type(self):
+        prop = Property(data_type=types.INTEGER)
+        self.assertTrue(match(prop, 5))
+        self.assertFalse(match(prop, 5.0))
+        self.assertFalse(match(prop, True))
+        self.assertFalse(match(prop, "5"))
+
+    def test_float_accepts_int_and_float(self):
+        prop = Property(data_type=types.FLOAT)
+        self.assertTrue(match(prop, 1.5))
+        self.assertTrue(match(prop, 3))
+        self.assertFalse(match(prop, "x"))
+        self.assertFalse(match(prop, Decimal("1.5")))
+
+    def test_bool_exact_true_or_false(self):
+        prop = Property(data_type=types.BOOL)
+        self.assertTrue(match(prop, True))
+        self.assertTrue(match(prop, False))
+        self.assertFalse(match(prop, 1))
+        self.assertFalse(match(prop, 0))
+
+    def test_number_accepts_decimal(self):
+        prop = Property(data_type=types.NUMBER)
+        self.assertTrue(match(prop, Decimal("1.5")))
+        self.assertTrue(match(prop, 1.5))
+        self.assertTrue(match(prop, 3))
+        self.assertFalse(match(prop, "x"))
+
+    def test_unsupported_type_returns_false(self):
+        self.assertFalse(match(Property(data_type="type_not_supported"), "x"))
+
+
+class TestMatchArray(unittest.TestCase):
+    def test_non_list_returns_false(self):
+        prop = Property(data_type=types.ARRAY)
+        self.assertFalse(match(prop, "not-a-list"))
+        self.assertFalse(match(prop, {"a": 1}))
+
+    def test_item_type_all_must_match(self):
+        prop = Property(data_type=types.ARRAY)
+        prop.item_type = Property(data_type=types.STRING)
+        self.assertTrue(match(prop, ["a", "b"]))
+        self.assertFalse(match(prop, ["a", 2]))
+        self.assertTrue(match(prop, []))
+
+    def test_children_length_must_match(self):
+        prop = Property(data_type=types.ARRAY)
+        prop.children = [Property(data_type=types.STRING), Property(data_type=types.INTEGER)]
+        self.assertTrue(match(prop, ["a", 2]))
+        self.assertFalse(match(prop, ["a"]))
+        self.assertFalse(match(prop, ["a", 2, 3]))
+        self.assertFalse(match(prop, ["a", "x"]))
+
+
+class TestMatchObject(unittest.TestCase):
+    def test_non_dict_returns_false(self):
+        prop = Property(data_type=types.OBJECT)
+        self.assertFalse(match(prop, ["a"]))
+        self.assertFalse(match(prop, "x"))
+
+    def test_empty_children_accepts_any_dict(self):
+        prop = Property(data_type=types.OBJECT)
+        self.assertTrue(match(prop, {}))
+        self.assertTrue(match(prop, {"a": 1}))
+
+    def test_children_all_must_match_via_get_attr(self):
+        prop = Property(data_type=types.OBJECT)
+        prop.children = {"k": Property(data_type=types.STRING)}
+        self.assertTrue(match(prop, {"k": "v"}))
+        self.assertFalse(match(prop, {"k": 9}))
+
+
+class TestPropertyHandleArrayPropertiesFallback(unittest.TestCase):
+    def test_children_built_from_properties_key_when_no_children(self):
+        prop = Property.from_json({
+            "type": "array",
+            "properties": [{"type": "string"}, {"type": "integer"}],
+        })
+        self.assertIsNone(prop.item_type)
+        self.assertEqual(len(prop.children), 2)
+        self.assertEqual(prop.children[0].data_type, types.STRING)
+        self.assertEqual(prop.children[1].data_type, types.INTEGER)
+
+
+class TestGetAttrMissingKeyIndex(unittest.TestCase):
+    def test_missing_key_index_on_dict_raises_index_error(self):
+        with self.assertRaises(IndexError):
+            get_attr({"a": [1]}, "missing[0]")
+
+
+class TestRegisteredFunctionsProxyRepr(unittest.TestCase):
+    def test_repr_contains_function_count(self):
+        r = repr(REGISTERED_FUNCTIONS)
+        self.assertIn("_RegisteredFunctionsProxy", r)
+        self.assertIn("functions=", r)
+
+
+class TestEvaluateAndParseFunction(unittest.TestCase):
+    def test_evaluate_resolves_default_prefix(self):
+        self.assertEqual(evaluate("$x", {"$x": 42}), 42)
+
+    def test_evaluate_uses_custom_registry(self):
+        custom = ExpressionRegistry()
+        custom.register("add", lambda a, b: 999, FunctionCategory.TYPE, override=True)
+        self.assertEqual(evaluate("$F.add(1, 2)", {}, registry=custom), 999)
+
+    def test_parse_function_resolves_default_prefix(self):
+        self.assertEqual(parse_function("$F.add(1, 2)", {}), 3)
+
+    def test_parse_function_uses_context(self):
+        self.assertEqual(parse_function("$F.add($x, 1)", {"$x": 5}), 6)
+
+    def test_parse_function_uses_custom_registry(self):
+        custom = ExpressionRegistry()
+        custom.register("add", lambda a, b: 999, FunctionCategory.TYPE, override=True)
+        self.assertEqual(parse_function("$F.add(1, 2)", {}, registry=custom), 999)
+
+    def test_parse_function_populates_components_cache(self):
+        _parser_components_cache.pop("$", None)
+        parse_function("$F.add(1, 2)", {})
+        self.assertIsInstance(_parser_components_cache.get("$"), ExpressionParser)
+
+
 if __name__ == "__main__":
     unittest.main()
