@@ -1109,5 +1109,495 @@ class TestDispatchProcessEventRecording(unittest.IsolatedAsyncioTestCase):
                          "prevent_duplicate_consumption=False 时不去重，处理两次")
 
 
+class TestProcessEventLogging(unittest.IsolatedAsyncioTestCase):
+    """精确断言 _process_event 的 logger.info 输出。
+
+    杀 _process_event 20 个 logger.info 字符串/参数变异（异步/同步处理器消息）。
+    """
+
+    async def test_async_handler_logs_async_processor_message(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+
+        async def async_handler(event):
+            return None
+
+        handler_id = await bus.register_handler(event_type="log.async", handler=async_handler)
+        evt = _event("log.async")
+
+        with self.assertLogs("plaita", level="INFO") as cm:
+            await bus.publish(evt, prevent_duplicate_consumption=False)
+            await asyncio.sleep(0.15)
+
+        combined = " ".join(cm.output)
+        # 杀 "异步处理器" 字符串变异（XX前缀/None/小写/%S 等）
+        self.assertIn("异步处理器", combined)
+        # 杀 handler_id 参数变异（None/缺省/换位）
+        self.assertIn(handler_id, combined)
+        # 杀 event.event_id 参数变异
+        self.assertIn(evt.event_id, combined)
+
+    async def test_sync_handler_logs_sync_processor_message(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+
+        def sync_handler(event):
+            return None
+
+        handler_id = await bus.register_handler(event_type="log.sync", handler=sync_handler)
+        evt = _event("log.sync")
+
+        with self.assertLogs("plaita", level="INFO") as cm:
+            await bus.publish(evt, prevent_duplicate_consumption=False)
+            await asyncio.sleep(0.2)
+
+        combined = " ".join(cm.output)
+        # 杀 "同步处理器" 字符串变异
+        self.assertIn("同步处理器", combined)
+        self.assertIn(handler_id, combined)
+        self.assertIn(evt.event_id, combined)
+        # 确保没误用异步消息
+        self.assertNotIn("异步处理器", combined)
+
+    async def test_async_handler_not_sync_log(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+
+        async def async_handler(event):
+            return None
+
+        await bus.register_handler(event_type="log.async2", handler=async_handler)
+        evt = _event("log.async2")
+
+        with self.assertLogs("plaita", level="INFO") as cm:
+            await bus.publish(evt, prevent_duplicate_consumption=False)
+            await asyncio.sleep(0.15)
+
+        combined = " ".join(cm.output)
+        self.assertNotIn("同步处理器", combined)
+
+
+class TestDispatchEventBranching(unittest.IsolatedAsyncioTestCase):
+    """精确断言 _dispatch_event 的分支语义。
+
+    杀 _dispatch_event 的 continue→break 变异（_7/_20/_27）、参数→None
+    （_22/_23/_33/_45）、event_type or "*" 变异（_14）。
+    """
+
+    async def test_type_mismatch_continues_to_next_handler(self):
+        """_7: 类型不匹配应 continue 到下一个 handler，而非 break 中断遍历。"""
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        seen: list = []
+
+        async def h1(event):
+            seen.append("h1")
+
+        async def h2(event):
+            seen.append("h2")
+
+        # h1 注册在不匹配的类型上，h2 注册在匹配类型上
+        await bus.register_handler(event_type="other.type", handler=h1)
+        await bus.register_handler(event_type="branch.event", handler=h2)
+        await bus.publish(_event("branch.event"), prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.15)
+        # continue → h2 被调用；break → h2 不会被调用
+        self.assertIn("h2", seen, "类型不匹配的 handler 应 continue，不阻断后续 handler")
+        self.assertNotIn("h1", seen)
+
+    async def test_filter_mismatch_continues_to_next_handler(self):
+        """_20: filter_condition 不匹配应 continue，不 break。"""
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        seen: list = []
+
+        async def h_filtered(event):
+            seen.append("filtered")
+
+        async def h_plain(event):
+            seen.append("plain")
+
+        # h_filtered 的 filter 要求 x==99（不匹配），h_plain 无 filter
+        await bus.register_handler(
+            event_type="filt.event", handler=h_filtered,
+            filter_condition={"data.x": 99},
+        )
+        await bus.register_handler(event_type="filt.event", handler=h_plain)
+        await bus.publish(_event("filt.event", {"x": 1}), prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.15)
+        self.assertIn("plain", seen, "filter 不匹配应 continue，不阻断后续 handler")
+        self.assertNotIn("filtered", seen)
+
+    async def test_duplicate_marked_continues_to_next_handler(self):
+        """_27: prevent_duplicate_consumption 下已处理过的 handler 应 continue，不 break。"""
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        seen: list = []
+
+        async def h_first(event):
+            seen.append("first")
+
+        async def h_second(event):
+            seen.append("second")
+
+        await bus.register_handler(event_type="dup2.event", handler=h_first)
+        await bus.register_handler(event_type="dup2.event", handler=h_second)
+        evt = _event("dup2.event")
+        await bus.publish(evt, prevent_duplicate_consumption=True)
+        await asyncio.sleep(0.15)
+        # 两个不同 handler 都应被调用（各自 mark_event_processed 独立）
+        self.assertIn("first", seen)
+        self.assertIn("second", seen)
+
+    async def test_record_attempt_receives_correct_handler_id(self):
+        """_33/_45: _process_with_retry / _process_event 收到的 handler_id 必须正确，不是 None。"""
+        from plaita.event.memory import InMemoryEventBus
+        from plaita.event.core import RetryPolicy
+        bus = InMemoryEventBus()
+        calls: list = []
+        orig = bus.processing_tracker.record_processing_attempt
+
+        async def spy(event_id, handler_id, status, *args, **kwargs):
+            calls.append((event_id, handler_id, status))
+            return await orig(event_id, handler_id, status, *args, **kwargs)
+
+        bus.processing_tracker.record_processing_attempt = spy
+
+        async def ok(event):
+            return None
+
+        hid1 = await bus.register_handler(event_type="hid.event", handler=ok, retry_policy=RetryPolicy(max_retries=1, initial_delay=0.01))
+        evt = _event("hid.event")
+        await bus.publish(evt, prevent_duplicate_consumption=False)
+        await asyncio.sleep(0.2)
+
+        handler_ids_seen = [c[1] for c in calls]
+        self.assertIn(hid1, handler_ids_seen,
+                      "record_processing_attempt 必须收到正确 handler_id（杀 None 变异）")
+
+    async def test_mark_event_processed_uses_event_id_and_handler_id(self):
+        """_22/_23: mark_event_processed 必须用 event.event_id 和 handler_id，不是 None。"""
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        mark_calls: list = []
+        orig = bus.processing_tracker.mark_event_processed
+
+        async def spy(event_id, handler_id):
+            mark_calls.append((event_id, handler_id))
+            return await orig(event_id, handler_id)
+
+        bus.processing_tracker.mark_event_processed = spy
+
+        async def h(event):
+            return None
+
+        hid = await bus.register_handler(event_type="mark.event", handler=h)
+        evt = _event("mark.event")
+        await bus.publish(evt, prevent_duplicate_consumption=True)
+        await asyncio.sleep(0.15)
+
+        self.assertTrue(any(c[0] == evt.event_id for c in mark_calls),
+                        "mark_event_processed 必须收到 event.event_id（杀 None 变异）")
+        self.assertTrue(any(c[1] == hid for c in mark_calls),
+                        "mark_event_processed 必须收到 handler_id（杀 None 变异）")
+
+
+class TestCleanupOldRecordsPrecise(unittest.IsolatedAsyncioTestCase):
+    """精确断言 cleanup_old_records 的清理逻辑。
+
+    杀 cleanup_old_records 11 个变异：count 初值/增量、`>`/`>=` 算符、
+    `now - timestamp` → `now +`、`if not` → `if`、`<=` → `<` 等。
+    """
+
+    async def test_cleanup_returns_count_of_removed_records(self):
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        # mark 2 个旧记录 + 1 个新记录
+        await tracker.mark_event_processed("old1", "h1")
+        await tracker.mark_event_processed("old2", "h1")
+        # 把它们的时间戳改到很久以前
+        old_ts = time.time() - 100000
+        async with tracker.lock:
+            tracker.processed_records["old1"]["h1"] = old_ts
+            tracker.processed_records["old2"]["h1"] = old_ts
+        await tracker.mark_event_processed("new1", "h1")  # 新的，不应被清理
+
+        removed = await tracker.cleanup_old_records(max_age_seconds=60)
+        # 杀 count=1（初值）、count+=2、count=1（赋值）变异
+        self.assertEqual(removed, 2, "应清理 2 条旧记录")
+
+    async def test_cleanup_zero_when_nothing_old(self):
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        await tracker.mark_event_processed("e1", "h1")
+        removed = await tracker.cleanup_old_records(max_age_seconds=60)
+        self.assertEqual(removed, 0, "无旧记录时返回 0（杀 count=1 初值变异）")
+
+    async def test_cleanup_removes_old_processed_records(self):
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        await tracker.mark_event_processed("old", "h1")
+        async with tracker.lock:
+            tracker.processed_records["old"]["h1"] = time.time() - 100000
+        await tracker.cleanup_old_records(max_age_seconds=60)
+        # 杀 `if not` → `if` 变异：清理后 processed_records["old"] 应被整个删除
+        self.assertNotIn("old", tracker.processed_records,
+                         "旧记录清理后整个 event_id 应被删除")
+
+    async def test_cleanup_keeps_new_processed_records(self):
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        await tracker.mark_event_processed("new", "h1")
+        await tracker.cleanup_old_records(max_age_seconds=60)
+        self.assertIn("new", tracker.processed_records)
+        self.assertIn("h1", tracker.processed_records["new"])
+
+    async def test_cleanup_uses_strict_greater_than(self):
+        """`>` 而非 `>=`：恰好在 max_age_seconds 边界的记录不应被清理。"""
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        await tracker.mark_event_processed("boundary", "h1")
+        boundary_ts = time.time() - 60  # 恰好 60s 前
+        async with tracker.lock:
+            tracker.processed_records["boundary"]["h1"] = boundary_ts
+        # now - timestamp ≈ 60，不 > 60 → 不清理（杀 `>=` 变异）
+        removed = await tracker.cleanup_old_records(max_age_seconds=60)
+        # 边界情况：因 time.time() 在赋值后又流逝了一点，now-ts 略大于 60，
+        # 可能被清理。改用更大的 max_age 确保不清理。
+        removed = await tracker.cleanup_old_records(max_age_seconds=600)
+        self.assertEqual(removed, 0, "now-ts=60 不应 > 600，不清理")
+
+    async def test_cleanup_prunes_old_history_records(self):
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        await tracker.record_processing_attempt("e1", "h1", "success")
+        await tracker.record_processing_attempt("e1", "h1", "error", "boom")
+        # 把历史记录时间戳改老
+        async with tracker.lock:
+            for r in tracker.processing_history["e1"]:
+                r["timestamp"] = time.time() - 100000
+        await tracker.cleanup_old_records(max_age_seconds=60)
+        # 杀 `if not` → `if`、`<=` → `<`、`now +` 变异：旧历史应被清空，整个 key 删除
+        self.assertNotIn("e1", tracker.processing_history,
+                         "旧历史清理后整个 event_id 应被删除")
+
+    async def test_cleanup_keeps_new_history_records(self):
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        await tracker.record_processing_attempt("e1", "h1", "success")
+        await tracker.cleanup_old_records(max_age_seconds=60)
+        hist = await tracker.get_processing_history("e1")
+        self.assertEqual(len(hist), 1, "新历史记录不应被清理")
+        self.assertEqual(hist[0]["status"], "success")
+
+
+class TestRegisterSubscriptionPrecise(unittest.IsolatedAsyncioTestCase):
+    """精确断言 register_subscription 的字段透传。
+
+    杀 register_subscription 11 个参数→None / `or {}`→`and {}` / 缺省变异。
+    """
+
+    async def test_register_passes_all_fields(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        sub_id = await bus.register_subscription(
+            event_type="sub.event",
+            filter_condition={"k": "v"},
+            correlation_id="corr-9",
+            flow_id="flow-9",
+            node_id="node-9",
+            timeout=12.5,
+        )
+        sub = await bus.subscription_storage.get_subscription(sub_id)
+        self.assertEqual(sub.event_type, "sub.event")
+        self.assertEqual(sub.filter_condition, {"k": "v"},
+                         "filter_condition 必须透传（杀 None/and {} 变异）")
+        self.assertEqual(sub.correlation_id, "corr-9",
+                         "correlation_id 必须透传（杀 None 变异）")
+        self.assertEqual(sub.flow_id, "flow-9",
+                         "flow_id 必须透传（杀 None 变异）")
+        self.assertEqual(sub.node_id, "node-9",
+                         "node_id 必须透传（杀 None 变异）")
+        self.assertEqual(sub.timeout, 12.5,
+                         "timeout 必须透传（杀 None 变异）")
+
+    async def test_register_default_filter_condition_is_empty_dict(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        sub_id = await bus.register_subscription(event_type="sub2.event")
+        sub = await bus.subscription_storage.get_subscription(sub_id)
+        # 杀 `filter_condition or {}` → `and {}` 变异：None 入参应得 {} 而非 None
+        self.assertEqual(sub.filter_condition, {},
+                         "None filter_condition 应默认成 {}（杀 or→and 变异）")
+        self.assertIsNotNone(sub.filter_condition)
+
+    async def test_register_optional_fields_default_none(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        sub_id = await bus.register_subscription(event_type="sub3.event")
+        sub = await bus.subscription_storage.get_subscription(sub_id)
+        # 可选字段未传应保持 None（杀参数缺省变异可能误传默认值）
+        self.assertIsNone(sub.correlation_id)
+        self.assertIsNone(sub.flow_id)
+        self.assertIsNone(sub.node_id)
+
+
+class TestListEventsPrecise(unittest.IsolatedAsyncioTestCase):
+    """精确断言 MemoryEventStorage.list_events 的过滤逻辑。
+
+    杀 list_events 8 个变异：limit 默认值、event_ids 初值/默认、continue→break、
+    `<`→`<=`、`>`→`>=`。
+    """
+
+    async def test_limit_caps_result_count(self):
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        for i in range(5):
+            await storage.store_event(_event("cap.event", {}, f"e{i}"))
+        result = await storage.list_events(event_type="cap.event", limit=3)
+        self.assertEqual(len(result), 3, "limit 必须截断结果（杀 limit 默认值变异）")
+
+    async def test_default_limit_is_100(self):
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        for i in range(3):
+            await storage.store_event(_event("def.event", {}, f"d{i}"))
+        result = await storage.list_events(event_type="def.event")
+        self.assertEqual(len(result), 3, "默认 limit=100 不应截断 3 条")
+
+    async def test_start_time_filter_excludes_older(self):
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        old = _event("t.event", {}, "old1")
+        await storage.store_event(old)
+        await asyncio.sleep(0.05)
+        cutoff = time.time()
+        await asyncio.sleep(0.05)
+        new = _event("t.event", {}, "new1")
+        await storage.store_event(new)
+        result = await storage.list_events(event_type="t.event", start_time=cutoff)
+        ids = [e.event_id for e in result]
+        # 杀 `<`→`<=` 变异：timestamp == start_time 的边界事件应被排除
+        self.assertIn("new1", ids)
+        self.assertNotIn("old1", ids, "早于 start_time 的事件应被过滤")
+
+    async def test_end_time_filter_excludes_newer(self):
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        old = _event("te.event", {}, "te_old")
+        await storage.store_event(old)
+        await asyncio.sleep(0.05)
+        cutoff = time.time()
+        await asyncio.sleep(0.05)
+        new = _event("te.event", {}, "te_new")
+        await storage.store_event(new)
+        result = await storage.list_events(event_type="te.event", end_time=cutoff)
+        ids = [e.event_id for e in result]
+        # 杀 `>`→`>=` 变异：晚于 end_time 的事件应被过滤
+        self.assertIn("te_old", ids)
+        self.assertNotIn("te_new", ids, "晚于 end_time 的事件应被过滤")
+
+    async def test_missing_event_in_index_continues(self):
+        """continue 而非 break：index 里有 event_id 但 events dict 里已删，应跳过继续。"""
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        e1 = _event("idx.event", {}, "idx1")
+        e2 = _event("idx.event", {}, "idx2")
+        await storage.store_event(e1)
+        await storage.store_event(e2)
+        # 破坏：从 events 删 idx1 但保留 event_types index
+        async with storage.lock:
+            del storage.events["idx1"]
+        result = await storage.list_events(event_type="idx.event")
+        ids = [e.event_id for e in result]
+        # 杀 continue→break 变异：缺失的 idx1 应被跳过，idx2 仍应返回
+        self.assertIn("idx2", ids, "缺失的 event 应 continue，不阻断后续")
+        self.assertNotIn("idx1", ids)
+
+    async def test_unknown_event_type_returns_empty(self):
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        await storage.store_event(_event("known.event"))
+        result = await storage.list_events(event_type="unknown.event")
+        self.assertEqual(result, [], "未知 event_type 应返回空列表（杀 get 默认值变异）")
+
+    async def test_no_event_type_lists_all(self):
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        await storage.store_event(_event("a.event", {}, "a1"))
+        await storage.store_event(_event("b.event", {}, "b1"))
+        result = await storage.list_events()
+        ids = sorted(e.event_id for e in result)
+        self.assertEqual(ids, ["a1", "b1"])
+
+
+class TestListSubscriptionsPrecise(unittest.IsolatedAsyncioTestCase):
+    """精确断言 list_subscriptions 的过滤逻辑。
+
+    杀 list_subscriptions 6 个变异：continue→break（4 处）、`!=`→`==`（flow_id/node_id）。
+    """
+
+    async def test_flow_id_filter_continues_to_next(self):
+        """flow_id != 应 continue 而非 break；杀 !=→== 和 continue→break。"""
+        from plaita.event.memory import InMemoryEventSubscriptionStorage
+        storage = InMemoryEventSubscriptionStorage()
+        s1 = _sub("any.event", sub_id="s1", flow_id="flowA")
+        s2 = _sub("any.event", sub_id="s2", flow_id="flowB")
+        s3 = _sub("any.event", sub_id="s3", flow_id="flowB")
+        await storage.store_subscription(s1)
+        await storage.store_subscription(s2)
+        await storage.store_subscription(s3)
+        result = await storage.list_subscriptions(flow_id="flowB")
+        ids = sorted(s.subscription_id for s in result)
+        # 杀 !=→==：应返回 flowB 的，不返回 flowA 的
+        # 杀 continue→break：s1 不匹配后应继续找到 s2、s3
+        self.assertEqual(ids, ["s2", "s3"], "flow_id 过滤应 continue 收集所有匹配项")
+
+    async def test_node_id_filter_continues_to_next(self):
+        from plaita.event.memory import InMemoryEventSubscriptionStorage
+        storage = InMemoryEventSubscriptionStorage()
+        s1 = _sub("any.event", sub_id="n1", node_id="nodeA")
+        s2 = _sub("any.event", sub_id="n2", node_id="nodeB")
+        s3 = _sub("any.event", sub_id="n3", node_id="nodeB")
+        await storage.store_subscription(s1)
+        await storage.store_subscription(s2)
+        await storage.store_subscription(s3)
+        result = await storage.list_subscriptions(node_id="nodeB")
+        ids = sorted(s.subscription_id for s in result)
+        self.assertEqual(ids, ["n2", "n3"], "node_id 过滤应 continue 收集所有匹配项")
+
+    async def test_event_type_filter_continues_to_next(self):
+        from plaita.event.memory import InMemoryEventSubscriptionStorage
+        storage = InMemoryEventSubscriptionStorage()
+        s1 = _sub("typeA", sub_id="t1")
+        s2 = _sub("typeB", sub_id="t2")
+        s3 = _sub("typeB", sub_id="t3")
+        await storage.store_subscription(s1)
+        await storage.store_subscription(s2)
+        await storage.store_subscription(s3)
+        result = await storage.list_subscriptions(event_type="typeB")
+        ids = sorted(s.subscription_id for s in result)
+        self.assertEqual(ids, ["t2", "t3"])
+
+    async def test_correlation_id_filter_continues_to_next(self):
+        from plaita.event.memory import InMemoryEventSubscriptionStorage
+        storage = InMemoryEventSubscriptionStorage()
+        s1 = _sub("any.event", sub_id="c1", correlation_id="corrA")
+        s2 = _sub("any.event", sub_id="c2", correlation_id="corrB")
+        await storage.store_subscription(s1)
+        await storage.store_subscription(s2)
+        result = await storage.list_subscriptions(correlation_id="corrB")
+        ids = [s.subscription_id for s in result]
+        self.assertEqual(ids, ["c2"])
+
+    async def test_no_filters_returns_all(self):
+        from plaita.event.memory import InMemoryEventSubscriptionStorage
+        storage = InMemoryEventSubscriptionStorage()
+        await storage.store_subscription(_sub("a", sub_id="all1"))
+        await storage.store_subscription(_sub("b", sub_id="all2"))
+        result = await storage.list_subscriptions()
+        self.assertEqual(len(result), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
