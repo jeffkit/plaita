@@ -1079,7 +1079,7 @@ class TestDispatchProcessEventRecording(unittest.IsolatedAsyncioTestCase):
             return None
 
         # 无 retry_policy → 走 _process_event 直处理分支
-        await bus.register_handler(event_type="p.event", handler=ok)
+        hid = await bus.register_handler(event_type="p.event", handler=ok)
         evt = _event("p.event")
         await bus.publish(evt, prevent_duplicate_consumption=False)
         await asyncio.sleep(0.15)
@@ -1087,6 +1087,13 @@ class TestDispatchProcessEventRecording(unittest.IsolatedAsyncioTestCase):
         statuses = [c[2] for c in calls]
         self.assertIn("success", statuses,
                       "_process_event 成功路径必须 record 'success'（杀 status 变异）")
+        # 杀 _process_event _25/_26: success record 的 event_id/handler_id 必须正确
+        ok_calls = [c for c in calls if c[2] == "success"]
+        self.assertTrue(ok_calls)
+        self.assertEqual(ok_calls[0][0], evt.event_id,
+                         "_process_event success record 必须带正确 event_id（杀 None 变异）")
+        self.assertEqual(ok_calls[0][1], hid,
+                         "_process_event success record 必须带正确 handler_id（杀 None 变异）")
 
     async def test_process_event_error_records_error_with_message(self):
         from plaita.event.memory import InMemoryEventBus
@@ -1103,8 +1110,9 @@ class TestDispatchProcessEventRecording(unittest.IsolatedAsyncioTestCase):
         async def bad(event):
             raise ValueError("boom-sync")
 
-        await bus.register_handler(event_type="e.event", handler=bad)
-        await bus.publish(_event("e.event"), prevent_duplicate_consumption=False)
+        hid = await bus.register_handler(event_type="e.event", handler=bad)
+        evt = _event("e.event")
+        await bus.publish(evt, prevent_duplicate_consumption=False)
         await asyncio.sleep(0.15)
 
         statuses = [c[2] for c in calls]
@@ -1115,6 +1123,11 @@ class TestDispatchProcessEventRecording(unittest.IsolatedAsyncioTestCase):
         # args[0] 是 str(e)，必须含异常文本（杀 str(e)→None/缺省 变异）
         self.assertTrue(err_calls[0][3] and err_calls[0][3][0])
         self.assertIn("boom-sync", err_calls[0][3][0])
+        # 杀 _process_event _33/_34: error record 的 event_id/handler_id 必须正确
+        self.assertEqual(err_calls[0][0], evt.event_id,
+                         "_process_event error record 必须带正确 event_id（杀 None 变异）")
+        self.assertEqual(err_calls[0][1], hid,
+                         "_process_event error record 必须带正确 handler_id（杀 None 变异）")
 
     async def test_prevent_duplicate_consumption_dedups(self):
         from plaita.event.memory import InMemoryEventBus
@@ -1790,6 +1803,130 @@ class TestPublishDefaultsPrecise(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.2)
         # 杀 batch_publish _35/_36：_dispatch_event(event,...)→event=None —— handler 应收到正确 event
         self.assertIn("disp1", seen, "batch_publish 必须把正确 event 分发给 handler")
+
+
+class TestRemainingSurvivorsBatch3(unittest.IsolatedAsyncioTestCase):
+    """batch3：杀剩余 37 里的可杀项。
+
+    - _process_event logger.info XX 包裹（_8/_18）
+    - record_processing_attempt 字典键名 'handler_id'（_2/_3）
+    - batch_store_events 索引 append 正确 event_id（_3）
+    - batch_publish waiting_futures 清理已完成（_32/_33）
+    - _dispatch_event 去重 continue（_27：一个 handler 已处理、一个未处理）
+    - list_events end_time 过滤 continue（_22）
+    """
+
+    async def test_process_event_log_no_xx_wrapper(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+
+        async def async_h(event):
+            return None
+
+        def sync_h(event):
+            return None
+
+        await bus.register_handler(event_type="logxx.a", handler=async_h)
+        await bus.register_handler(event_type="logxx.s", handler=sync_h)
+        with self.assertLogs("plaita", level="INFO") as cm:
+            await bus.publish(_event("logxx.a"), prevent_duplicate_consumption=False)
+            await bus.publish(_event("logxx.s"), prevent_duplicate_consumption=False)
+            await asyncio.sleep(0.2)
+        combined = " ".join(cm.output)
+        # 杀 _process_event _8/_18：XX 包裹变异
+        self.assertNotIn("XX", combined)
+        self.assertIn("异步处理器", combined)
+        self.assertIn("同步处理器", combined)
+
+    async def test_record_processing_attempt_uses_handler_id_key(self):
+        from plaita.event.memory import InMemoryProcessingTracker
+        tracker = InMemoryProcessingTracker()
+        await tracker.record_processing_attempt("e1", "h1", "success")
+        hist = await tracker.get_processing_history("e1")
+        self.assertEqual(len(hist), 1)
+        record = hist[0]
+        # 杀 _2/_3：键名必须是 'handler_id'，不是 'XXhandler_idXX'/'HANDLER_ID'
+        self.assertIn("handler_id", record)
+        self.assertEqual(record["handler_id"], "h1")
+        self.assertNotIn("XXhandler_idXX", record)
+        self.assertNotIn("HANDLER_ID", record)
+
+    async def test_batch_store_events_appends_correct_id_to_index(self):
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        e1 = _event("bs.event", {}, "bs1")
+        e2 = _event("bs.event", {}, "bs2")
+        ids = await storage.batch_store_events([e1, e2])
+        self.assertEqual(ids, ["bs1", "bs2"])
+        # 杀 batch_store_events _3：append(event.event_id)→append(None)
+        self.assertIn("bs1", storage.event_types["bs.event"])
+        self.assertIn("bs2", storage.event_types["bs.event"])
+        self.assertNotIn(None, storage.event_types["bs.event"])
+
+    async def test_batch_publish_clears_done_futures(self):
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        evt = _event("bclr.event")
+
+        async def publish_later():
+            await asyncio.sleep(0.05)
+            await bus.batch_publish([evt], prevent_duplicate_consumption=False)
+
+        asyncio.create_task(publish_later())
+        await bus.wait_for_event("bclr.event", timeout=2.0)
+        # 杀 batch_publish _32（→None）/ _33（if f.done() 保留已完成）
+        if "bclr.event" in bus.waiting_futures:
+            self.assertIsNotNone(bus.waiting_futures["bclr.event"],
+                                 "batch_publish 后 waiting_futures 不应变 None")
+            done = [f for f in bus.waiting_futures["bclr.event"] if f.done()]
+            self.assertEqual(done, [], "batch_publish 后已完成 future 应被清理")
+
+    async def test_dispatch_dedup_continues_to_unprocessed_handler(self):
+        """_27: prevent_duplicate_consumption 下，handler A 已处理过该 event、
+        handler B 未处理，应 continue 跳过 A 仍调用 B（而非 break 中断）。"""
+        from plaita.event.memory import InMemoryEventBus
+        bus = InMemoryEventBus()
+        seen: list = []
+
+        async def hA(event):
+            seen.append("A")
+
+        async def hB(event):
+            seen.append("B")
+
+        hidA = await bus.register_handler(event_type="dedup.event", handler=hA)
+        hidB = await bus.register_handler(event_type="dedup.event", handler=hB)
+        evt = _event("dedup.event")
+        # 预先标记 A 已处理过该 event
+        await bus.processing_tracker.mark_event_processed(evt.event_id, hidA)
+        await bus.publish(evt, prevent_duplicate_consumption=True)
+        await asyncio.sleep(0.2)
+        # 杀 _27：A 已处理应 continue，B 未处理应被调用
+        self.assertIn("B", seen, "A 已处理应 continue，不阻断未处理的 B")
+        self.assertNotIn("A", seen, "A 已标记处理过，应被去重跳过")
+
+    async def test_list_events_end_time_filter_continues(self):
+        """_22: end_time 过滤应 continue 而非 break——晚于 end_time 的事件被跳过，
+        后续符合时间范围的事件仍应返回。"""
+        from plaita.event.memory import MemoryEventStorage
+        storage = MemoryEventStorage()
+        # 构造 3 个事件，时间戳递增
+        e_old = _event("et.event", {}, "et_old")
+        await storage.store_event(e_old)
+        await asyncio.sleep(0.05)
+        cutoff = time.time()
+        await asyncio.sleep(0.05)
+        e_mid = _event("et.event", {}, "et_mid")  # 在 cutoff 之后
+        await storage.store_event(e_mid)
+        await asyncio.sleep(0.05)
+        e_late = _event("et.event", {}, "et_late")  # 更晚
+        await storage.store_event(e_late)
+        # end_time = cutoff：e_old 早于 cutoff（保留），e_mid/e_late 晚于 cutoff（过滤）
+        result = await storage.list_events(event_type="et.event", end_time=cutoff)
+        ids = [e.event_id for e in result]
+        # 杀 _22：晚于 end_time 的应 continue，但早于的仍应返回
+        self.assertIn("et_old", ids)
+        self.assertNotIn("et_late", ids)
 
 
 if __name__ == "__main__":
