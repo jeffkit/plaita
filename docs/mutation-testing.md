@@ -145,7 +145,7 @@
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | **84.4%** | 76/90 | 14 | ✅ 接入 test_errors_mutations（见 §2.14） |
 | `plaita/node/__init__.py` | **83.9%** | 94/112 | 18 | ✅ 接入 test_node_registry_mutations（见 §2.14） |
-| `plaita/event/memory.py` | **91%** | 381/418 | 37 | ⚠️ 见 §2.10/§2.18（从 65%→74%→86%→91%，37 survived 待续） |
+| `plaita/event/memory.py` | **94%** | 393/418 | 25 | ⚠️ 见 §2.10/§2.18（从 65%→74%→86%→91%→94%，25 survived 多为边界算符/等价） |
 | `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ 接入 + 分母 bug 修复后真实分（见 §2.14/§2.16），6 survived 多为等价 |
 | `plaita/core/flow.py` | **79.0%** | 158/200 | 42 | ✅ 接入 test_flow_mutations（见 §2.14） |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ ~~`event/memory.py`（6%）~~（已升至 74%，110 survived 待续）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ ~~`event/memory.py`（6%）~~（已升至 94%，25 survived 多为边界算符/等价）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -669,13 +669,19 @@ event/memory 的 recheck 完全跑偏或虚高 100%：
 - `TestDispatchProcessEventRecording`（4 项）：_process_event success/error
   status + 异常文本、prevent_duplicate_consumption 去重开关双向
 
-### 剩余 110 survived 分布
+### 剩余 25 survived（多为边界算符/等价变异）
 
-`_process_event`(20)、`_process_with_retry`(12)、`_dispatch_event`(12)、
-`cleanup_old_records`(11)、`register_subscription`(11)、`list_events`(8)、
-`batch_publish`(8)、`list_subscriptions`(6)、`wait_for_event`(5) 等。多为
-logger.info/debug 字符串变异、参数透传、storage 索引维护逻辑——可继续按方法
-区补断言，但 recheck 单次 ~37 分钟（418 候选 × 两测试文件），迭代成本高。
+经 4 轮补强（74%→86%→91%→94%），剩余 25 个集中在：
+- `list_events`(5)、`wait_for_event`(5)、`_dispatch_event`(5)：`<`→`<=`/`>`→`>=`
+  边界算符、`add_done_callback` lambda 变异（done_callback 异常不外显，等价）、
+  `deadline` 过期阈值边界
+- `cleanup_old_records`(3)：`86400`→`86401` 默认值、`>`→`>=` 边界算符
+- `_process_with_retry`(3)：`break`→`return`（循环末尾等价）、`delay *`→`/` backoff
+- `delete_event`(2)、`get_event`(1)、`__init__`(1)：`get` 默认值 `[]`→`None`/缺省
+  （索引存在时等价）、`defaultdict(list)`→`defaultdict(None)`（注册时不崩则等价）
+
+这些变异语义差异在 1ms / 0.1% / 边界条件量级，或属完全等价，补强成本高、
+价值低，到此为止。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
