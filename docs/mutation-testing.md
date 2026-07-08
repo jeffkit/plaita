@@ -1,13 +1,18 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-08（§2.13 event_node.py 94.9%、§2.12 state.py 99.1%、§2.11 io.py 97.4%；§2.4 event/memory.py 重新度量；11 个未补强模块全量复跑）
+> **最后更新**：2026-07-08（§2.14 7 个模块接入既有 *_mutations.py；§2.13 event_node 94.9%、§2.12 state 99.1%、§2.11 io 97.4%；§2.4 event/memory 重新度量）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
 > `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
-> `io.py` 已补强至 **97.4%**（259/266，见 §2.11）；
 > `state.py` 已补强至 **99.1%**（213/215，见 §2.12）；
-> `event_node.py` 已接入至 **94.9%**（187/197，见 §2.13）。
+> `storage/memory.py` 已接入至 **95.8%**（91/95，见 §2.14）；
+> `event_node.py` 已接入至 **94.9%**（187/197，见 §2.13）；
+> `io.py` 已补强至 **97.4%**（259/266，见 §2.11）；
+> `event/core.py` 已接入至 **91.7%**（99/108，见 §2.14）；
+> `errors.py` 已接入至 **84.4%**（76/90，见 §2.14）；
+> `node/__init__.py` 已接入至 **83.9%**（94/112，见 §2.14）；
+> `flow.py` 已接入至 **79.0%**（158/200，见 §2.14）。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
 > **⚠️ 覆盖范围声明（2026-07，诚实评估）**
@@ -136,17 +141,17 @@
 | `plaita/core/executor.py` | **90.7%** | 196/216 | 20 | ✅ 已强化（见 §2.7） |
 | `plaita/dsl/builder.py` | **99.9%** | 876/877 | 1 | ✅ 已强化（见 §2.8） |
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
-| `plaita/core/errors.py` | 13% | 6/46 | 40 | 🔴 需补断言 |
-| `plaita/node/__init__.py` | 7% | 3/44 | 41 | 🔴 需补断言 |
+| `plaita/core/errors.py` | **84.4%** | 76/90 | 14 | ✅ 接入 test_errors_mutations（见 §2.14） |
+| `plaita/node/__init__.py` | **83.9%** | 94/112 | 18 | ✅ 接入 test_node_registry_mutations（见 §2.14） |
 | `plaita/event/memory.py` | **65%** | 270/418 | 148 | ⚠️ 见 §2.10（07-08 用完整套件重新度量） |
-| `plaita/core/strategies.py` | 12% | 4/32 | 28 | 🔴 需补断言 |
-| `plaita/core/flow.py` | 8% | 4/53 | 49 | 🔴 需补断言 |
+| `plaita/core/strategies.py` | 38.5% | 20/52 | 32 | ⚠️ 接入 test_strategies_mutations（异步，recheck 不全）；见 §2.14 |
+| `plaita/core/flow.py` | **79.0%** | 158/200 | 42 | ✅ 接入 test_flow_mutations（见 §2.14） |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
-| `plaita/event/core.py` | 5% | 1/22 | 21 | 🔴 需补断言 |
+| `plaita/event/core.py` | **91.7%** | 99/108 | 9 | ✅ 接入 test_event_core_mutations（见 §2.14） |
 | `plaita/node/event_node.py` | **94.9%** | 187/197 | 10 | ✅ 已接入（见 §2.13），10 等价变异 |
 | `plaita/core/state.py` | **99.1%** | 213/215 | 2 | ✅ 已强化（见 §2.12），2 等价变异 |
-| `plaita/storage/memory.py` | 0% | 0/28 | 28 | 🔴 需补断言 |
-| `plaita/storage/base.py` | 0% | 0/14 | 14 | 🔴 需补断言 |
+| `plaita/storage/memory.py` | **95.8%** | 91/95 | 4 | ✅ 接入 test_storage_mutations（见 §2.14） |
+| `plaita/storage/base.py` | 12.5% | 2/16 | 14 | 🔴 test_storage_mutations 未覆盖 serialize/deserialize_state；见 §2.14 |
 
 > 上表中 `strategies`/`flow`/`event/core`/`event/memory` 的数字为 2026-07-08 复跑结果
 > （`scripts/run_unboosted_mutation_sweep.sh`，日志 `mutation-unboosted-20260707_184801.txt`）；
@@ -162,7 +167,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ `errors.py`（13%）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ `storage/base.py`（12.5%，待补 serialize/deserialize_state 断言）/ `strategies.py`（38.5%，异步 recheck 偏低，待重跑）/ `event/memory.py`（65%，148 survived 待补）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -528,6 +533,44 @@ IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥
 - `_get_node_state._28/_30`：`execution.context.get(node_key, {})` 的 `{}` 默认值
   被改成 `None`/缺省。该行仅在 `if node_key in execution.context:` 守卫内执行，
   key 必然存在，default 永不生效——等价。
+
+## 2.14 7 个模块接入既有 *_mutations.py（2026-07-08）
+
+与 §2.13 同模式：`tests/unit/*_mutations.py` 早已存在且全绿，但从未接入
+`run_full_mutation_sweep.sh` 的 `TESTS_FOR_MODULE`，所以基线显示 0–13%。
+本轮把 7 个模块的对应文件接入脚本（未改测试），真实分数（killed/total，非
+脚本报的偏低分——见 §2.11 分母 bug）：
+
+| 模块 | 接入前 | 接入后 | killed/total | survived | 备注 |
+|---|---|---|---|---|---|
+| `core/errors.py` | 13% | **84.4%** | 76/90 | 14 | test_errors_mutations（64 项，同步） |
+| `event/core.py` | 5% | **91.7%** | 99/108 | 9 | test_event_core_mutations（54 项，异步；recheck round2 有超时兜底） |
+| `storage/memory.py` | 0% | **95.8%** | 91/95 | 4 | test_storage_mutations（27 项，同步） |
+| `node/__init__.py` | 7% | **83.9%** | 94/112 | 18 | test_node_registry_mutations（63 项，同步） |
+| `core/flow.py` | 8% | **79.0%** | 158/200 | 42 | test_flow_mutations（84 项，同步） |
+| `core/strategies.py` | 12% | 38.5% | 20/52 | 32 | test_strategies_mutations（161 项，**异步**；recheck 未能跑全，分数偏低，待重跑） |
+| `storage/base.py` | 0% | 12.5% | 2/16 | 14 | test_storage_mutations **未覆盖** `ExecutionStorage.serialize_state`/`deserialize_state`，见下 |
+
+### 接入规则
+
+- 同步测试文件（errors/flow/node_registry/storage）同时加入 `TESTS_FOR_MODULE`
+  和 `SYNC_TESTS_FOR_MODULE`。
+- 异步测试文件（strategies 153 async def、event_core 81 async def）只加入
+  `TESTS_FOR_MODULE`（recheck round 2 用 `timeout 120` 子进程兜底，async 挂死
+  会被超时判 killed），不进 `SYNC_TESTS_FOR_MODULE`（避免 `mutmut run` 主筛
+  阶段挂死）。
+
+### storage/base.py 例外
+
+`test_storage_mutations.py` 只 import `ExecutionState`（数据类），不测
+`ExecutionStorage` 的 `serialize_state`/`deserialize_state`——14 个 survived
+全在这两个方法（各 7）。接入对 base 无效，需单独补序列化对的断言（待办）。
+
+### strategies.py 分数偏低
+
+strategies 是异步模块，recheck 阶段每个变异点跑 161 项异步测试易超时；
+当前 38.5% 是 recheck 未能跑全的保守值，真实分应更高。待修分母 bug +
+异步 recheck 策略后重跑。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 

@@ -53,11 +53,11 @@ MODULES=(
 
 TESTS_FOR_MODULE=(
   "tests/unit/test_executor.py tests/unit/test_flow_executor_extended.py tests/unit/test_checkpoint_resume.py"
-  "tests/unit/test_errors.py tests/unit/test_runner_strategies_extended.py"
+  "tests/unit/test_errors.py tests/unit/test_runner_strategies_extended.py tests/unit/test_strategies_mutations.py"
   "tests/unit/test_state.py tests/unit/test_state_mutations.py tests/unit/test_checkpoint_resume.py tests/unit/test_context.py tests/unit/test_context_executor_extended.py"
-  "tests/unit/test_errors.py tests/unit/test_error_handler_enum.py tests/unit/test_exception_cause.py tests/unit/test_find_node_unified_exception.py"
-  "tests/unit/test_flow.py tests/unit/test_flow_model.py tests/unit/test_flow_next_node.py tests/unit/test_flow_node_index.py tests/unit/test_flow_distributed.py tests/unit/test_find_node_unified_exception.py"
-  "tests/unit/test_event_core.py tests/unit/test_event_core_extended.py tests/unit/test_event_handler_decorator.py"
+  "tests/unit/test_errors.py tests/unit/test_error_handler_enum.py tests/unit/test_exception_cause.py tests/unit/test_find_node_unified_exception.py tests/unit/test_errors_mutations.py"
+  "tests/unit/test_flow.py tests/unit/test_flow_model.py tests/unit/test_flow_next_node.py tests/unit/test_flow_node_index.py tests/unit/test_flow_distributed.py tests/unit/test_find_node_unified_exception.py tests/unit/test_flow_mutations.py"
+  "tests/unit/test_event_core.py tests/unit/test_event_core_extended.py tests/unit/test_event_handler_decorator.py tests/unit/test_event_core_mutations.py"
   "tests/unit/test_concurrent.py tests/unit/test_concurrent_extended.py"
   "tests/unit/test_loop.py tests/unit/test_loop_sync.py tests/unit/test_loop_arun.py"
   "tests/unit/test_expression.py tests/unit/test_expression_golden.py tests/unit/test_sexpr.py"
@@ -65,10 +65,10 @@ TESTS_FOR_MODULE=(
   "tests/unit/test_io.py tests/unit/test_io_format.py tests/unit/test_io_mutations.py"
   "tests/unit/test_dsl.py tests/unit/test_builder_extended.py"
   "tests/unit/test_code.py tests/unit/test_code_extended.py tests/unit/test_code_default_backend.py"
-  "tests/unit/test_node_registry.py tests/unit/test_node_registry_lazy_discover.py"
+  "tests/unit/test_node_registry.py tests/unit/test_node_registry_lazy_discover.py tests/unit/test_node_registry_mutations.py"
   "tests/unit/test_event_node_unit.py tests/unit/test_event_node_mutations.py"
-  "tests/unit/test_storage_memory_units.py"
-  "tests/unit/test_storage_base.py"
+  "tests/unit/test_storage_memory_units.py tests/unit/test_storage_mutations.py"
+  "tests/unit/test_storage_base.py tests/unit/test_storage_mutations.py"
 )
 
 # 仅用于 mutmut run 初筛阶段（in-process pytest.main()）的纯同步测试子集。
@@ -79,8 +79,8 @@ SYNC_TESTS_FOR_MODULE=(
   "tests/unit/test_flow_executor_extended.py tests/unit/test_checkpoint_resume.py"
   "tests/unit/test_errors.py"
   "tests/unit/test_state.py tests/unit/test_state_mutations.py tests/unit/test_checkpoint_resume.py tests/unit/test_context.py"
-  "tests/unit/test_errors.py tests/unit/test_error_handler_enum.py tests/unit/test_exception_cause.py tests/unit/test_find_node_unified_exception.py"
-  "tests/unit/test_flow_model.py tests/unit/test_flow_next_node.py tests/unit/test_flow_node_index.py tests/unit/test_flow_distributed.py tests/unit/test_find_node_unified_exception.py"
+  "tests/unit/test_errors.py tests/unit/test_error_handler_enum.py tests/unit/test_exception_cause.py tests/unit/test_find_node_unified_exception.py tests/unit/test_errors_mutations.py"
+  "tests/unit/test_flow_model.py tests/unit/test_flow_next_node.py tests/unit/test_flow_node_index.py tests/unit/test_flow_distributed.py tests/unit/test_find_node_unified_exception.py tests/unit/test_flow_mutations.py"
   ""
   ""
   "tests/unit/test_loop_sync.py"
@@ -89,10 +89,10 @@ SYNC_TESTS_FOR_MODULE=(
   "tests/unit/test_io.py tests/unit/test_io_format.py tests/unit/test_io_mutations.py"
   "tests/unit/test_dsl.py"
   "tests/unit/test_code.py tests/unit/test_code_extended.py tests/unit/test_code_default_backend.py"
-  "tests/unit/test_node_registry.py tests/unit/test_node_registry_lazy_discover.py"
+  "tests/unit/test_node_registry.py tests/unit/test_node_registry_lazy_discover.py tests/unit/test_node_registry_mutations.py"
   "tests/unit/test_event_node_unit.py tests/unit/test_event_node_mutations.py"
-  "tests/unit/test_storage_memory_units.py"
-  "tests/unit/test_storage_base.py"
+  "tests/unit/test_storage_memory_units.py tests/unit/test_storage_mutations.py"
+  "tests/unit/test_storage_base.py tests/unit/test_storage_mutations.py"
 )
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────
