@@ -268,11 +268,14 @@ for i in "${!MODULES[@]}"; do
 
   mutmut run 2>&1 | tail -5 &
   MUTMUT_PID=$!
-  # 监控 + 超时 kill
-  sleep 600 && kill $MUTMUT_PID 2>/dev/null &
+  # 监控 + 超时 kill。看门狗必须重定向所有 fd 并在子 shell 内运行，
+  # 否则会继承父管道写端；若被孤儿化（mutmut 提前结束、kill 漏掉），
+  # 管道读端 tee 永远读不到 EOF，上游驱动脚本会死等。
+  ( sleep 600 && kill "$MUTMUT_PID" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
   KILLER_PID=$!
-  wait $MUTMUT_PID 2>/dev/null || true
-  kill $KILLER_PID 2>/dev/null || true
+  wait "$MUTMUT_PID" 2>/dev/null || true
+  kill "$KILLER_PID" 2>/dev/null || true
+  wait "$KILLER_PID" 2>/dev/null || true
 
   end_ts=$(date +%s)
   elapsed=$((end_ts - start_ts))

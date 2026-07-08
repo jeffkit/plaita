@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-06（§2.9 loop.py 99.3% 补强）
+> **最后更新**：2026-07-08（§2.4 event/memory.py 用完整测试套件重新度量，从 6%* 修正为 65%；11 个未补强模块全量复跑）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -135,19 +135,25 @@
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | 13% | 6/46 | 40 | 🔴 需补断言 |
 | `plaita/node/__init__.py` | 7% | 3/44 | 41 | 🔴 需补断言 |
-| `plaita/event/memory.py` | 6%* | 2/36 | 34 | ⚠️ 仅 test_event_core.py 覆盖 |
-| `plaita/core/strategies.py` | 9% | 3/32 | 29 | 🔴 需补断言 |
-| `plaita/core/flow.py` | 9% | 5/53 | 48 | 🔴 需补断言 |
+| `plaita/event/memory.py` | **65%** | 270/418 | 148 | ⚠️ 见 §2.10（07-08 用完整套件重新度量） |
+| `plaita/core/strategies.py` | 12% | 4/32 | 28 | 🔴 需补断言 |
+| `plaita/core/flow.py` | 8% | 4/53 | 49 | 🔴 需补断言 |
 | `plaita/io.py` | 1% | 1/83 | 82 | 🔴 需补断言 |
-| `plaita/event/core.py` | 0% | 0/22 | 22 | 🔴 需补断言 |
+| `plaita/event/core.py` | 5% | 1/22 | 21 | 🔴 需补断言 |
 | `plaita/node/event_node.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
 | `plaita/core/state.py` | 0% | 0/80 | 80 | 🔴 需补断言 |
 | `plaita/storage/memory.py` | 0% | 0/28 | 28 | 🔴 需补断言 |
 | `plaita/storage/base.py` | 0% | 0/14 | 14 | 🔴 需补断言 |
 
-> *`event/memory.py` 的 `wait_for_event` 系列测试（`test_event_memory_unit.py`）在
-> mutmut 中会因 `asyncio.wait_for(future, timeout=None)` 变异而挂死。全量测试的 418
-> 个变异点无法用标准 recheck 完成；以上得分仅供参考（`test_event_core.py` 侧面覆盖）。
+> 上表中 `strategies`/`flow`/`event/core`/`event/memory` 的数字为 2026-07-08 复跑结果
+> （`scripts/run_unboosted_mutation_sweep.sh`，日志 `mutation-unboosted-20260707_184801.txt`）；
+> 其余未补强模块仍为 07-06 基线值。`event/memory.py` 旧值 6%\* 已被 §2.10 的完整套件
+> 度量取代——之前"无法标准 recheck"的结论不成立，详见 §2.10。
+
+> *`event/memory.py` 的旧 footnote（07-06）：当时只用 `test_event_core.py` 侧面覆盖
+> 36 个变异点，得到保守的 6%\*，并认为 `wait_for_event` 系列在 mutmut 中会挂死、
+> 无法标准 recheck。**该结论已于 07-08 被推翻**——见 §2.10，用完整测试套件 + 单点
+> 超时保护后实际可跑全量 418 个变异点，杀灭 270 个。
 
 > **重要说明**：阶段二的低分（0-33%）是"正常基线"，不是测试框架失效：
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
@@ -390,6 +396,42 @@ mutmut 直接跑结果：880 killed + 156 timeout + 6 survived = 1042。
 - **`Map.arun__mutmut_19`**：`Semaphore(len(triples) or 2)` 代替 `or 1` — 当集合为空时
   `Semaphore(0 or 1)=1` vs `Semaphore(0 or 2)=2`，但 gather 有 0 个任务，结果永远是 `[]`，
   Semaphore 值无影响。
+
+## 2.10 event/memory.py 重新度量（2026-07-08，65%）
+
+`plaita/event/memory.py` 在 07-06 基线中被标为 `6%\*`，备注"仅 test_event_core.py 侧面
+覆盖 / 无法标准 recheck"。07-08 用 `scripts/run_unboosted_mutation_sweep.sh` 复跑后推翻
+该结论：
+
+| 指标 | 07-06（旧） | 07-08（新） |
+|---|---|---|
+| 变异点总数 | 36（仅 covered subset） | 418（全量） |
+| killed | 2 | **270** |
+| survived | 34 | 148 |
+| **Mutation score** | 6%\* | **65%** |
+
+### 为什么旧值偏低
+
+旧 recheck 只用了 `test_event_core.py`（侧面覆盖），没有跑模块自己的
+`test_event_memory_unit.py`，且当时认为 `wait_for_event` 的 `asyncio.wait_for(future,
+timeout=None)` 变异会让 mutmut 进程内测试挂死、无法完成全量 418 点复核。
+
+### 新做法
+
+`run_full_mutation_sweep.sh` 的 recheck 阶段对每个变异点用 `timeout 60/120 python -m
+pytest` 独立子进程跑，async 挂死会被 60/120s 超时兜底（超时即视为 killed——变异让测试
+挂住也算被抓住）。配合完整测试套件 `test_event_memory_unit.py + test_event_core.py`，
+418 个变异点全部可跑，杀灭 270 个。
+
+> 剩余 148 survived 仍需补断言（`wait_for_event` 的超时语义、`EventBus` 的 handler
+> 注册/卸载、事件 payload 透传等），但已不再是"不可度量"。
+
+### 顺带修复：看门狗 fd 泄漏
+
+复跑过程中发现 `run_full_mutation_sweep.sh` 的看门狗 `sleep 600 && kill ... &` 会继承
+父管道写端；mutmut 提前结束后若 `kill` 漏掉，sleep 被孤儿化仍握着管道，导致上游 `tee`
+读不到 EOF、驱动脚本死等在第一模块之后。修复：看门狗放进子 shell 并
+`</dev/null >/dev/null 2>&1`，再加 `wait` 收尸。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
