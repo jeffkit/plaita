@@ -139,15 +139,23 @@ PYEOF
 RECHECK_TMPFILE=""
 recheck_all_mutations() {
   local valid_tests="$1"
+  local module="$2"
   # 取第一个测试文件做快速初筛
   local first_test
   first_test=$(echo "$valid_tests" | awk '{print $1}')
 
-  # 收集所有非 killed 的变异点
+  # 把模块路径 plaita/event/memory.py 转成 mutmut 名前缀 plaita.event.memory
+  local mod_prefix
+  mod_prefix=$(echo "$module" | sed 's#/#.#g; s#\.py$##')
+
+  # 收集所有非 killed 的变异点（限定当前 only_mutate 模块，避免缓存里
+  # 其他模块的残留变异点污染 recheck——曾导致 event/memory 的 recheck
+  # 实际跑的是 dsl/builder 的变异点，分数判定完全跑偏）
   # 用 awk -F': ' 代替 BSD sed 不兼容的 \(A\|B\) 交替语法
   local names
   names=$(mutmut results 2>/dev/null | tr '\r' '\n' \
     | grep -E ": *(not checked|timeout|survived)$" \
+    | grep "^${mod_prefix}\." \
     | awk -F': ' '{print $1}' \
     | sed 's/^[[:space:]]*//' || true)
 
@@ -287,6 +295,9 @@ for i in "${!MODULES[@]}"; do
   # 导致只要有 killed，分母就被低估、分数严重偏低（如 io.py 真实 97.4% 被报
   # 成 6-12%）。正确做法是用 export-cicd-stats 拿真实 total/killed/survived。
   raw_results=$(mutmut results 2>/dev/null || echo "")
+  # 限定当前模块，避免缓存里其他模块残留变异点污染统计
+  mod_prefix=$(echo "$module" | sed 's#/#.#g; s#\.py$##')
+  raw_results=$(echo "$raw_results" | grep "^${mod_prefix}\." || true)
 
   # 真实总数/已杀/存活来自 cicd-stats（mutmut run 后立即可用）
   stats_file="mutants/mutmut-cicd-stats.json"
@@ -311,7 +322,7 @@ for i in "${!MODULES[@]}"; do
   # ── 全量复核所有非-killed 变异点 ──────────────────────────────────────
   RECHECK_TMPFILE=$(mktemp)
   if [[ $n_need_recheck -gt 0 ]]; then
-    recheck_all_mutations "$valid_tests"
+    recheck_all_mutations "$valid_tests" "$module"
     rc_survived=$(cat "$RECHECK_TMPFILE" 2>/dev/null || echo 0)
   else
     rc_survived=0
