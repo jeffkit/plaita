@@ -13,7 +13,8 @@
 > `event/core.py` 已接入至 **91.7%**（99/108，见 §2.14）；
 > `errors.py` 已接入至 **84.4%**（76/90，见 §2.14）；
 > `node/__init__.py` 已接入至 **83.9%**（94/112，见 §2.14）；
-> `flow.py` 已接入至 **79.0%**（158/200，见 §2.14）。
+> `flow.py` 已接入至 **79.0%**（158/200，见 §2.14）；
+> `strategies.py` 已校准至 **88%**（46/52，见 §2.16）。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
 > **⚠️ 覆盖范围声明（2026-07，诚实评估）**
@@ -145,7 +146,7 @@
 | `plaita/core/errors.py` | **84.4%** | 76/90 | 14 | ✅ 接入 test_errors_mutations（见 §2.14） |
 | `plaita/node/__init__.py` | **83.9%** | 94/112 | 18 | ✅ 接入 test_node_registry_mutations（见 §2.14） |
 | `plaita/event/memory.py` | **65%** | 270/418 | 148 | ⚠️ 见 §2.10（07-08 用完整套件重新度量） |
-| `plaita/core/strategies.py` | 38.5% | 20/52 | 32 | ⚠️ 接入 test_strategies_mutations（异步，recheck 不全）；见 §2.14 |
+| `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ 接入 + 分母 bug 修复后真实分（见 §2.14/§2.16），6 survived 多为等价 |
 | `plaita/core/flow.py` | **79.0%** | 158/200 | 42 | ✅ 接入 test_flow_mutations（见 §2.14） |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
 | `plaita/event/core.py` | **91.7%** | 99/108 | 9 | ✅ 接入 test_event_core_mutations（见 §2.14） |
@@ -168,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ `strategies.py`（38.5%，异步 recheck 偏低，待重跑）/ `event/memory.py`（65%，148 survived 待补）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ `event/memory.py`（65%，148 survived 待补）/ `executor.py`（90.7%，20 survived 待甄别）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -592,6 +593,26 @@ strategies 是异步模块，recheck 阶段每个变异点跑 161 项异步测�
     缺省/`XXfmtXX`/小写/`%S` 等格式串变异）
   - 日志含异常文本（`"not JSON serializable"` / `"Expecting"`）——杀
     `logger.error(fmt, None)` 和 `logger.error(fmt, )`（异常参数被丢弃）
+
+## 2.16 strategies.py 真实分数校准（2026-07-08，88%）
+
+`plaita/core/strategies.py` 在 §2.14 接入后显示 38.5%（20/52），是分母 bug +
+异步 recheck 未能跑全的双重低估。修分母 bug（§2.11）后重跑，真实分数 **88%
+（46/52，6 survived）**。
+
+### 剩余 6 个 survived（全为等价变异或边界算符，不可/不值得杀灭）
+
+- `_coerce_mode._1`（`or`→`and`）：`m is None and isinstance(m, ExecutionMode)`
+  对 None（False and X = False，走到末尾 return None）和 str（False and X =
+  False，走 str 路径）均与原代码 `or` 行为一致——等价。
+- `NormalStrategy.execute._3/_4/_5`（`result=None`→`""`、`reached_end=False`→
+  `None`/`True`）：这三个局部变量在 while 循环里被 `_advance_one` 返回值覆盖，
+  初始值永不影响输出——等价。
+- `NormalStrategy.execute._31`（`>`→`>=`）、`_33`（`/1000`→`/1001`）：超时比较
+  的边界算符 / 除数变异，差异在 1ms / 0.1% 量级，需精确 mock `time.time()` 并
+  触发恰好在边界的超时才能杀，成本高、语义价值极低，不补。
+
+> 异步模块 recheck 成本：161 项 async 测试 × 31 个候选变异点 ≈ 5.5 分钟。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
