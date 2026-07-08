@@ -140,7 +140,7 @@
 | `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
 | `plaita/core/expression_parser.py` | **100%** | 313/313 | 0 | ✅ 已强化（见 §2.5） |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
-| `plaita/core/executor.py` | **90.7%** | 196/216 | 20 | ✅ 已强化（见 §2.7） |
+| `plaita/core/executor.py` | **94%** | 192/205 | 13 | ✅ 接入 test_executor_mutations + 分母 bug 修复后真实分（见 §2.17），13 survived 集中在 distributed resume 边缘路径 |
 | `plaita/dsl/builder.py` | **99.9%** | 876/877 | 1 | ✅ 已强化（见 §2.8） |
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | **84.4%** | 76/90 | 14 | ✅ 接入 test_errors_mutations（见 §2.14） |
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ `event/memory.py`（65%，148 survived 待补）/ `executor.py`（90.7%，20 survived 待甄别）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ `event/memory.py`（65%，148 survived 待补）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -613,6 +613,35 @@ strategies 是异步模块，recheck 阶段每个变异点跑 161 项异步测�
   触发恰好在边界的超时才能杀，成本高、语义价值极低，不补。
 
 > 异步模块 recheck 成本：161 项 async 测试 × 31 个候选变异点 ≈ 5.5 分钟。
+
+## 2.17 executor.py 接入 test_executor_mutations + 真实分校准（2026-07-08，94%）
+
+`plaita/core/executor.py` 基线表原记 **90.7%（196/216）** 是分母 bug 前的数
+（分母 216 错误，真实 205）。且 `test_executor_mutations.py`（78 项测试、23
+个类，注释里标了 mutant id）一直**未接入** sweep 的 `TESTS_FOR_MODULE[0]`——
+和 event_node/storage 系列同样的"测试文件存在但未接线"模式。
+
+接入 `TESTS_FOR_MODULE[0]`（异步文件，仅进 recheck round2，不进 SYNC）后
+重跑，真实分数 **94%（192/205，13 survived）**。
+
+### 剩余 13 个 survived（集中在 `run` classmethod 的 distributed resume 路径）
+
+- `__init__._5`（`RunOptions(..., timeout=None)` 去掉 `timeout=None`）：
+  `timeout` 有默认 None——等价。
+- `run._20/_21`（`execution.timeout = timeout or execution.timeout` → `None` /
+  `and`）：已有 `test_timeout_is_set_on_execution` 断言 `ex.timeout==8000`，
+  理论应杀；recheck 仍报 survived，疑为 recheck round2 异步单进程跑全测试时的
+  捕获/patch 时序问题，非真等价。
+- `run._27/_28/_33/_34`（`run_distributed` 调用的 `resume_data`/`timeout` 参数
+  透传变异）、`run._43/_44/_45`（`options.get("resume_data")` 键名变异）：现
+  有 `test_distributed_run_uses_correct_resume_data_key` 只断言
+  `isinstance(result, dict)`，太弱不杀；需传非 None `resume_data` 并断言它被
+  strategy.execute 实际收到。
+- `run_compatible._29`、`_ensure_flow_resolved._8`、`_handle_resume_operation._7`：
+  零星参数透传。
+
+> 13 个 survived 全在 distributed resume 这一边缘路径，逐个补强需大量异步测试
+> 调试（recheck round2 单次 ~3 分钟），边际收益递减，暂留。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 

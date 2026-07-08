@@ -52,7 +52,7 @@ MODULES=(
 )
 
 TESTS_FOR_MODULE=(
-  "tests/unit/test_executor.py tests/unit/test_flow_executor_extended.py tests/unit/test_checkpoint_resume.py"
+  "tests/unit/test_executor.py tests/unit/test_executor_mutations.py tests/unit/test_flow_executor_extended.py tests/unit/test_checkpoint_resume.py"
   "tests/unit/test_errors.py tests/unit/test_runner_strategies_extended.py tests/unit/test_strategies_mutations.py"
   "tests/unit/test_state.py tests/unit/test_state_mutations.py tests/unit/test_checkpoint_resume.py tests/unit/test_context.py tests/unit/test_context_executor_extended.py"
   "tests/unit/test_errors.py tests/unit/test_error_handler_enum.py tests/unit/test_exception_cause.py tests/unit/test_find_node_unified_exception.py tests/unit/test_errors_mutations.py"
