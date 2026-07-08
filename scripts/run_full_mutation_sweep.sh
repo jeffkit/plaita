@@ -155,7 +155,7 @@ recheck_all_mutations() {
   local names
   names=$(mutmut results 2>/dev/null | tr '\r' '\n' \
     | grep -E ": *(not checked|timeout|survived)$" \
-    | grep "^${mod_prefix}\." \
+    | grep -E "^[[:space:]]*${mod_prefix}\." \
     | awk -F': ' '{print $1}' \
     | sed 's/^[[:space:]]*//' || true)
 
@@ -295,9 +295,10 @@ for i in "${!MODULES[@]}"; do
   # 导致只要有 killed，分母就被低估、分数严重偏低（如 io.py 真实 97.4% 被报
   # 成 6-12%）。正确做法是用 export-cicd-stats 拿真实 total/killed/survived。
   raw_results=$(mutmut results 2>/dev/null || echo "")
-  # 限定当前模块，避免缓存里其他模块残留变异点污染统计
+  # 限定当前模块，避免缓存里其他模块残留变异点污染统计。
+  # mutmut results 输出每行有前导空格，故用 grep -E 不锚定行首。
   mod_prefix=$(echo "$module" | sed 's#/#.#g; s#\.py$##')
-  raw_results=$(echo "$raw_results" | grep "^${mod_prefix}\." || true)
+  raw_results=$(echo "$raw_results" | grep -E "^[[:space:]]*${mod_prefix}\." || true)
 
   # 真实总数/已杀/存活来自 cicd-stats（mutmut run 后立即可用）
   stats_file="mutants/mutmut-cicd-stats.json"
