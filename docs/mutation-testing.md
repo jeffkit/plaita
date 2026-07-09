@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-09（§2.22 codeflow/_common.py 基线 95.2%；§2.23 codeflow/_expr.py 基线 72.9%；§2.20 executor 98.1%；§2.21 event/memory 真实 100%；§2.16 strategies 确认 88% 全等价/边界；§2.19 flow/errors/registry 100%）
+> **最后更新**：2026-07-09（§2.24 dsl/sexpr.py 基线 **100%**；§2.22 codeflow/_common.py 基线 95.2%；§2.23 codeflow/_expr.py 基线 72.9%；§2.20 executor 98.1%；§2.21 event/memory 真实 100%；§2.16 strategies 确认 88% 全等价/边界；§2.19 flow/errors/registry 100%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：历史低分模块多数已达 100% 或等价收尾；当前见 §7.3（strategies 88% 等价收尾；扩面可选 sexpr/codeflow/async_utils）
+> - 优先队列：历史低分模块多数已达 100% 或等价收尾；当前见 §7.3（strategies 88% 等价收尾；sexpr 已达 100%（§2.24）；扩面可选 codeflow/async_utils）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -943,6 +943,94 @@ worktree 根，`import plaita` 加载 editable 原码，变异 trampoline 未激
 
 ---
 
+## 2.24 dsl/sexpr.py 基线建立（2026-07-09，**100%**，2196/2196）
+
+独立 worktree `sexpr-mutmut-a3f7b2c9`（`~/.cursor/worktrees/sexpr-mutmut-a3f7b2c9/`）；test_sexpr_coverage4.py 从 main 复制（worktree 无此文件）。
+
+### 初筛结果
+
+| 指标 | 数值 |
+|---|---|
+| mutmut 变异点总数 | 2196 |
+| 初筛 killed | 1640 |
+| 初筛 survived | 549 |
+| 初筛 timeout | 7 |
+| **初筛初始分** | **74.7%** |
+
+### Recheck1（原 4 个测试文件）
+
+对所有 556 个非 killed 变异点用 4 个原始测试做独立子进程复核：
+
+- **7 个 false alarm**：初筛 timeout/survived 实为 killed（初筛 worker 复用假阳）
+- **549 个真实 survived**
+- **真实基线（4 测试）**：(1640+7)/2196 = **75.0%**
+
+真实 survived 集中在：
+
+| 函数 | survived 数 | 代表类型 |
+|---|---|---|
+| `_node_to_src` | 93 | 反编译格式字符串常量；`resultType != "success"` 判断 |
+| `_compile_flow` | 43 | `desc/version/author/timeout` 字段未断言 |
+| `_compile_childflow` | 31 | `outputType/desc` 未断言 |
+| `_compile_error_handler` | 26 | `retryTimes/defaultValue/errorCode/errorMessage` 未断言 |
+| `_c_pbranch` | 26 | `input/condition` 字段 |
+| `_c_parallel` | 25 | `mode/joinBranches/isConditional` |
+| `_c_if` | 23 | `next/else_next` 精确值 |
+| `_c_event` | 21 | `eventType` 键 |
+| `_flow_inner_to_src` | 19 | childflow inputType 序列化 |
+| `_c_branch` | 19 | `condition/isDefault/priority` |
+| `_atom` | 17 | 数值/关键字/布尔解析 |
+| 其他 | ～56 | 各类字段赋值、错误消息字符串 |
+
+### 新增 test_sexpr_mutations.py
+
+针对 549 个 survived，新建 `tests/unit/test_sexpr_mutations.py`（**137 个测试**）：
+
+- `TestDecodeString`：escape 序列（`\n`/`\t`/`\"`）、空串、剥外引号
+- `TestAtomParsing`：`true/false/nil/None/null`、int/float（含负数）、Keyword、Symbol、string
+- `TestCompileCondition`：所有运算符（eq/ne/gt/gte/lt/lte/in/notIn/contains/notContains）+ and/or/not
+- `TestNegateCondition`：所有翻转对、保留 field/value、未知 op 抛错
+- `TestCompileFlowFields`：`desc/version/author/timeout/flow_id/runtime/inputType`
+- `TestCompileErrorHandler`：三种 strategy、`retryTimes/defaultValue/errorCode/errorMessage` 及别名键、非法 strategy/表单
+- `TestCIfFields`：`next/else_next` 精确值、missing then/else 抛错
+- `TestCEventFields`：`eventType` 三种键、`eventFilter`、no-type 抛错
+- `TestCParallelFields`：`mode/joinBranches/isConditional/input/condition`、非 pbranch 抛错
+- `TestCSwitchFields`：`name/next/condition/isDefault`、无分支/非 branch 抛错
+- `TestCEndResultType`：`resultType == "success"` 不输出 `:result-type`；`failure` 正确输出
+- `TestNodeToSrcExact`：`flow_to_sexpr` 输出精确子串断言（覆盖 end/assignment/if/switch/loop/map/reduce/http/code/event/case + errorHandler）
+- `TestFlowInnerToSrc`：childflow `inputType/nodes` 序列化
+- `TestCollectionNodes`：`loop condition/map maxConcurrent/reduce initial/filter/find`
+- `TestCHttpFields`：`headers/body/method/url`
+- `TestCCodeFields`：`language/code`
+- `TestCCaseFields`：`target/default/match value`
+
+### Recheck2（全 5 个测试文件，仅对 549 true survivors）
+
+| 指标 | 数值 |
+|---|---|
+| 复核总数 | 549 |
+| killed（新测试贡献） | **549** |
+| survived | 0 |
+| **最终 mutation score** | **100%（2196/2196）** |
+
+> 无等价变异需记录；所有 survived 均被新测试捕获。
+
+### 操作记录
+
+```bash
+# WORKTREE_PATH: ~/.cursor/worktrees/sexpr-mutmut-a3f7b2c9/pyloki-4ab3ef8263a7
+# HEAD_COMMIT: 90f7e81
+rm -rf mutants .mutmut-cache
+# only_mutate = ["plaita/dsl/sexpr.py"] （临时）
+# pytest_add_cli_args_test_selection = [test_sexpr.py, extended, coverage3, coverage4, mutations]
+mutmut run              # 初筛：2196 点，1640 killed，549 survived，7 timeout
+bash scripts/recheck_sexpr.sh all    # Recheck1（4 测试）：7 extra killed → 真实 75.0%
+# 新建 tests/unit/test_sexpr_mutations.py（137 个精确断言）
+bash scripts/recheck_sexpr.sh all    # Recheck2（5 测试，仅 549 survivors）→ 100%
+```
+
+---
+
 ## 7. 持续推进规范（给开发者 / AI）
 
 > 本节是「怎么继续做」的操作契约。入口导航见仓库根目录 `AGENTS.md` / `CLAUDE.md`。
@@ -984,7 +1072,7 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 3. **`core/strategies.py`（88%，6 survived）** — 已分类为等价/边界，**到此为止不硬杀**
 4. ~~`dsl/codeflow/_common.py`~~ → **95.2%**（138/145，见 §2.22；剩 7 等价）
 5. **`dsl/codeflow/_expr.py`（72.9%，267/366）** — 99 survived 主要是错误消息文本检查；下一步目标
-6. **扩面（可选）**：`dsl/codeflow/_nodes.py`、`_stmt.py`、`_source.py`、`dsl/sexpr.py`
+6. **扩面（可选）**：`dsl/codeflow/_nodes.py`、`_stmt.py`、`_source.py`、~~`dsl/sexpr.py`~~ → **100%**（§2.24）
 7. **基建**：recheck 必须从 `mutants/` 内用相对 `tests/...` 路径（§2.20 坑点）
 
 ### 7.4 硬约束（违反则分数不可信）
