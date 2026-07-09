@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-09（§2.24 dsl/sexpr.py 基线 **100%**；§2.22 codeflow/_common.py 基线 95.2%；§2.23 codeflow/_expr.py 基线 72.9%；§2.20 executor 98.1%；§2.21 event/memory 真实 100%；§2.16 strategies 确认 88% 全等价/边界；§2.19 flow/errors/registry 100%）
+> **最后更新**：2026-07-09（§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22/_23 codeflow _common 95.2% / _expr 72.9%；§2.20 executor 98.1%；§2.21 event/memory 100%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -786,17 +786,17 @@ server、client、demo 等）整体行覆盖 **≈ 80.5%**，909 个单元测试
 
 | 文件 | 覆盖 | 缺失/总 |
 |---|---|---|
-| `plaita/core/async_utils.py` | 46% | 38/70 |
+| `plaita/core/async_utils.py` | 100% | 0/102 |
 | `plaita/__init__.py` | 54% | 27/59 |
-| `plaita/dsl/sexpr.py` | 64% | 245/682 |
-| `plaita/dsl/codeflow.py` | 68% | 210/653 |
+| `plaita/dsl/sexpr.py` | 100% | 0/652 |
+| `plaita/dsl/codeflow/` | ~99.9% | 1/1515（`_expr.py:94` py<3.9 不可达） |
 | `plaita/event/core.py` | 69% | 51/162 |
 | `plaita/storage/memory.py` | 69% | 22/71 |
 | `plaita/node/event_node.py` | 74% | 27/103 |
 | `plaita/dsl/builder.py` | 78% | 89/397 |
 
-`async_utils.py`（sync/async 桥接）几乎无直接单测，仅被间接覆盖——
-是性价比最高的补测目标。
+`async_utils.py` / `sexpr.py` / `codeflow/` 行覆盖已于 2026-07-09 拉到 ≥98% 并进入 mutmut
+基线（见 §2.22–§2.25）。上表旧「薄弱点」数字已过时。
 
 ## 6. async / distributed / timeout 路径的变异测试
 
@@ -1031,6 +1031,17 @@ bash scripts/recheck_sexpr.sh all    # Recheck2（5 测试，仅 549 survivors�
 
 ---
 
+## 2.25 core/async_utils.py 基线 89.3%（2026-07-09，67/75）
+
+行覆盖已先拉到 **100%**，再进 mutmut。初筛 75 点（42 killed / 8 timeout / 25 survived）；
+独立子进程 recheck 后 8 timeout 全假阳；补 8 个精准断言后真实 **67/75 = 89.3%**，
+剩 8 个等价变异（falsy `loop=""`/`has_loop=None`、`break→return`、无效 `set_event_loop`）。
+
+关键技术：`aclose→None` 变异需 `_TrackClose` proxy（CPython GC 会自动 `gen_close`，
+普通 cleanup 回调区分不了显式 `aclose`）。详见 `tests/unit/test_async_utils.py`。
+
+---
+
 ## 7. 持续推进规范（给开发者 / AI）
 
 > 本节是「怎么继续做」的操作契约。入口导航见仓库根目录 `AGENTS.md` / `CLAUDE.md`。
@@ -1070,10 +1081,12 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 1. ~~`core/executor.py`~~ → **98.1%**（§2.20；剩 4 等价）
 2. ~~`event/memory.py`~~ → **100%**（§2.21）
 3. **`core/strategies.py`（88%，6 survived）** — 已分类为等价/边界，**到此为止不硬杀**
-4. ~~`dsl/codeflow/_common.py`~~ → **95.2%**（138/145，见 §2.22；剩 7 等价）
-5. **`dsl/codeflow/_expr.py`（72.9%，267/366）** — 99 survived 主要是错误消息文本检查；下一步目标
-6. **扩面（可选）**：`dsl/codeflow/_nodes.py`、`_stmt.py`、`_source.py`、~~`dsl/sexpr.py`~~ → **100%**（§2.24）
-7. **基建**：recheck 必须从 `mutants/` 内用相对 `tests/...` 路径（§2.20 坑点）
+4. ~~`dsl/codeflow/_common.py`~~ → **95.2%**（§2.22；剩 7 等价）
+5. **`dsl/codeflow/_expr.py`（72.9%）** — 错误消息文本断言，目标 ≥90%
+6. ~~`dsl/sexpr.py`~~ → **100%**（§2.24）
+7. ~~`core/async_utils.py`~~ → **89.3%**（§2.25；8 等价）
+8. **扩面（可选）**：`codeflow/_nodes.py`、`_stmt.py`、`_source.py`
+9. **基建**：recheck 须在 `mutants/` 内用 `tests/...` 路径（§2.20）
 
 ### 7.4 硬约束（违反则分数不可信）
 

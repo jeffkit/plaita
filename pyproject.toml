@@ -161,6 +161,8 @@ only_mutate = [
   "plaita/node/event_node.py",
   "plaita/storage/memory.py",
   "plaita/storage/base.py",
+  "plaita/core/async_utils.py",
+  "plaita/dsl/sexpr.py",
   # codeflow 基线（2026-07-09 建立）
   "plaita/dsl/codeflow/_common.py",
   "plaita/dsl/codeflow/_expr.py",

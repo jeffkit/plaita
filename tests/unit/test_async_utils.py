@@ -135,6 +135,67 @@ class TestAsyncGenToSync(unittest.TestCase):
         # The error is caught by the except clause and NOT propagated.
         g.close()  # Should not raise even though aclose() internally raises
 
+    def test_aclose_error_suppressed_in_worker_thread(self):
+        """Worker-thread path suppresses agen.aclose() failures (lines 162-163)."""
+
+        class _Agen:
+            def __init__(self):
+                self._done = False
+
+            def __anext__(self):
+                async def _one():
+                    if self._done:
+                        raise StopAsyncIteration
+                    self._done = True
+                    return 1
+
+                return _one()
+
+            def aclose(self):
+                async def _boom():
+                    raise RuntimeError("worker aclose fail")
+
+                return _boom()
+
+        async def wrapper():
+            return list(async_gen_to_sync(_Agen()))
+
+        result = asyncio.run(wrapper())
+        self.assertEqual(result, [1])
+
+    def test_worker_join_timeout_logs_warning(self):
+        """If worker is still alive after join(timeout=5), log a warning (line 179)."""
+        import logging
+        import threading
+        from unittest.mock import patch
+
+        async def slow_gen():
+            yield 1
+            await asyncio.sleep(60)
+            yield 2
+
+        real_thread = threading.Thread
+
+        class StickyThread(real_thread):
+            def join(self, timeout=None):  # noqa: A003
+                return None
+
+            def is_alive(self):
+                return True
+
+        async def wrapper():
+            with patch("plaita.core.async_utils.threading.Thread", StickyThread):
+                with self.assertLogs("plaita.core.async_utils", level=logging.WARNING) as cm:
+                    g = async_gen_to_sync(slow_gen())
+                    next(g)
+                    g.close()
+                self.assertTrue(
+                    any("worker still alive" in r.getMessage() for r in cm.records),
+                    cm.output,
+                )
+
+        asyncio.run(wrapper())
+
 
 # ---------------------------------------------------------------------------
 # drive_strategy
@@ -302,6 +363,222 @@ class TestDriveStrategy(unittest.TestCase):
         asyncio.run(run())
         self.assertEqual(len(finally_called), 1)
         self.assertIsInstance(finally_called[0], ValueError)
+
+
+# ---------------------------------------------------------------------------
+# Mutation-killing tests — precise assertions to cover survived mutants
+# ---------------------------------------------------------------------------
+
+class TestRunAsyncFromSyncMutationKillers(unittest.TestCase):
+    """Targeted tests for survived mutmut mutations in run_async_from_sync."""
+
+    def test_uses_exactly_one_worker_when_loop_running(self):
+        """ThreadPoolExecutor must use max_workers=1 (not None or 2)."""
+        import concurrent.futures
+        from unittest.mock import patch
+
+        pool_kwargs: list = []
+        orig = concurrent.futures.ThreadPoolExecutor
+
+        class TrackTPE(orig):  # type: ignore[misc]
+            def __init__(self, **kw):
+                pool_kwargs.append(kw)
+                super().__init__(**kw)
+
+        async def inner():
+            async def coro():
+                return 99
+
+            import concurrent.futures as _cf
+            with patch.object(_cf, "ThreadPoolExecutor", TrackTPE):
+                return run_async_from_sync(coro())
+
+        result = asyncio.run(inner())
+        self.assertEqual(result, 99)
+        self.assertEqual(len(pool_kwargs), 1)
+        self.assertEqual(pool_kwargs[0].get("max_workers"), 1)
+
+
+class TestAsyncGenToSyncMutationKillers(unittest.TestCase):
+    """Targeted tests for survived mutmut mutations in async_gen_to_sync."""
+
+    # --- no-loop path: gen runs in the calling thread ---
+
+    def test_no_loop_gen_runs_in_calling_thread(self):
+        """In no-loop path, the async gen coroutine runs in the calling thread (not a worker)."""
+        import threading
+
+        calling_thread = threading.current_thread()
+        threads_seen: list = []
+
+        async def gen():
+            threads_seen.append(threading.current_thread())
+            yield 1
+
+        result = list(async_gen_to_sync(gen()))
+        self.assertEqual(result, [1])
+        self.assertIs(threads_seen[0], calling_thread,
+                      "no-loop path must run gen in calling thread, not a worker thread")
+
+    # --- no-loop path: aclose() is explicitly called in finally ---
+
+    def test_no_loop_aclose_called_explicitly(self):
+        """async_gen_to_sync (no-loop path) must call agen.aclose() explicitly.
+
+        Uses a wrapper to detect the call directly so GC-based auto-close
+        cannot mask a missing explicit aclose() call.
+        """
+        aclose_called: list = []
+
+        class _TrackClose:
+            """Thin proxy that records whether aclose() was explicitly invoked."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                return await self._inner.__anext__()
+
+            async def aclose(self):
+                aclose_called.append(True)
+                await self._inner.aclose()
+
+        async def gen():
+            yield 1
+            yield 2
+
+        wrapped = _TrackClose(gen())
+        g = async_gen_to_sync(wrapped)
+        _ = next(g)   # suspended after item 1
+        g.close()     # finally → loop.run_until_complete(wrapped.aclose())
+
+        self.assertEqual(aclose_called, [True],
+                         "loop.run_until_complete(agen.aclose()) must be called explicitly")
+
+    # --- no-loop path: logger.debug message and exc_info on aclose failure ---
+
+    def test_no_loop_aclose_failure_logs_correct_message(self):
+        """When aclose() fails in no-loop path, correct message and exc_info=True are logged."""
+        from unittest.mock import patch
+
+        async def gen_broken_close():
+            try:
+                yield 1
+            finally:
+                raise RuntimeError("aclose fail")
+
+        with patch("plaita.core.async_utils.logger") as mock_logger:
+            g = async_gen_to_sync(gen_broken_close())
+            _ = next(g)
+            g.close()
+
+            mock_logger.debug.assert_called_once_with(
+                "async gen aclose failed during sync drain",
+                exc_info=True,
+            )
+
+    # --- thread path: yields None items correctly (_DONE must be object(), not None) ---
+
+    def test_thread_path_yields_none_items(self):
+        """_DONE sentinel must be object() so None items are NOT misidentified as done."""
+
+        async def gen():
+            yield None
+            yield None
+
+        async def wrapper():
+            return list(async_gen_to_sync(gen()))
+
+        result = asyncio.run(wrapper())
+        self.assertEqual(result, [None, None],
+                         "_DONE = None would eat None items; must be object()")
+
+    # --- thread path: worker thread is daemon ---
+
+    def test_thread_path_worker_is_daemon(self):
+        """Worker thread spawned in has-loop path must be daemon=True."""
+        import threading
+
+        worker_daemon: list = []
+
+        async def gen():
+            worker_daemon.append(threading.current_thread().daemon)
+            yield 42
+
+        async def wrapper():
+            return list(async_gen_to_sync(gen()))
+
+        result = asyncio.run(wrapper())
+        self.assertEqual(result, [42])
+        self.assertEqual(len(worker_daemon), 1)
+        self.assertTrue(worker_daemon[0], "worker thread must be daemon=True")
+
+    # --- thread path: aclose() explicitly called in _drive's finally ---
+
+    def test_thread_path_aclose_called_explicitly(self):
+        """_drive's finally must call agen.aclose() explicitly (not just rely on GC)."""
+        import threading
+
+        aclose_called = threading.Event()
+
+        class _TrackClose:
+            """Thin proxy that records whether aclose() was explicitly invoked."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                return await self._inner.__anext__()
+
+            async def aclose(self):
+                aclose_called.set()
+                await self._inner.aclose()
+
+        async def gen():
+            yield 1
+            yield 2
+
+        async def wrapper():
+            wrapped = _TrackClose(gen())
+            g = async_gen_to_sync(wrapped)
+            first = next(g)     # suspended after item 1
+            g.close()           # consumer close → worker.join → _drive finally → aclose
+            return first, aclose_called.wait(timeout=2)
+
+        first, called = asyncio.run(wrapper())
+        self.assertEqual(first, 1)
+        self.assertTrue(called, "agen.aclose() must be explicitly called in _drive finally")
+
+    # --- thread path: worker.join uses timeout=5 ---
+
+    def test_thread_path_worker_join_uses_timeout_5(self):
+        """worker.join must be called with timeout=5 (not None or other value)."""
+        import threading
+        from unittest.mock import patch
+
+        join_timeouts: list = []
+        orig_join = threading.Thread.join
+
+        def capture_join(self_t, timeout=None):
+            join_timeouts.append(timeout)
+            return orig_join(self_t, timeout=timeout)
+
+        async def gen():
+            yield 1
+
+        async def wrapper():
+            with patch.object(threading.Thread, "join", capture_join):
+                return list(async_gen_to_sync(gen()))
+
+        result = asyncio.run(wrapper())
+        self.assertEqual(result, [1])
+        self.assertIn(5, join_timeouts, "worker.join must use timeout=5")
 
 
 if __name__ == "__main__":
