@@ -531,19 +531,14 @@ class TestPassStatement(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestDefaultKnownNodeTypes(unittest.TestCase):
-    def test_exception_returns_empty_set(self):
-        """Lines 205-206: if get_default_registry raises, returns empty set."""
+    def test_exception_propagates(self):
+        """registry 失败不再静默返回空集——必须向上抛出。"""
         from unittest.mock import patch
-        with patch("plaita.dsl.codeflow._default_known_node_types",
-                   side_effect=Exception("registry error")):
-            # We need to call the internal function directly
-            pass  # Just verify the module doesn't crash
-
         from plaita.dsl.codeflow import _default_known_node_types
-        with patch("plaita.node.get_default_registry",
-                   side_effect=Exception("fail")):
-            result = _default_known_node_types()
-        self.assertEqual(result, set())
+
+        with patch("plaita.node.get_default_registry", side_effect=RuntimeError("fail")):
+            with self.assertRaises(RuntimeError):
+                _default_known_node_types()
 
 
 if __name__ == "__main__":

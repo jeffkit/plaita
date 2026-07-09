@@ -222,20 +222,27 @@ async def main_async(args):
         )
         logger.info("已创建执行状态存储: %s类型", args.execution_storage_type)
         
-        # 创建事件订阅存储
-        subscription_storage = create_storage_component(
-            args.subscription_storage_type,
-            "subscription",
-            **storage_kwargs
-        )
-        logger.info("已创建事件订阅存储: %s类型", args.subscription_storage_type)
-        
-        # 创建事件总线
+        # 创建事件总线（先于订阅存储：优先复用 bus 自带的 subscription_storage，
+        # 避免 worker register_subscription 写入与 filter 读取落在不同后端/实例）
         event_bus = create_event_bus(
             args.event_bus_type,
             **storage_kwargs
         )
         logger.info("已创建事件总线: %s类型", args.event_bus_type)
+
+        bus_storage = getattr(event_bus, "subscription_storage", None)
+        if bus_storage is not None:
+            subscription_storage = bus_storage
+            logger.info(
+                "使用事件总线自带的订阅存储（与 register_subscription 同实例/同 keyspace）"
+            )
+        else:
+            subscription_storage = create_storage_component(
+                args.subscription_storage_type,
+                "subscription",
+                **storage_kwargs
+            )
+            logger.info("已创建事件订阅存储: %s类型", args.subscription_storage_type)
         
         # 创建事件过滤器
         event_filter = EventFilter.create_event_filter(

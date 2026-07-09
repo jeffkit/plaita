@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install package + gate deps
+        run: |
+          python -m pip install --upgrade pip
+          # dev: pytest/cov/fakeredis；lint: ruff；yaml: Flow.from_string YAML 路径
+          # redis: RedisEventBus 单元路径（fakeredis 仍需 redis 包可 import）
+          pip install -e ".[dev,lint,redis,yaml]"
+          pip install build wheel
+
+      - name: Ruff (bare-except / blind-except policy)
+        run: ruff check plaita tests
+
+      - name: CI regression gate
+        run: bash scripts/ci-gate.sh

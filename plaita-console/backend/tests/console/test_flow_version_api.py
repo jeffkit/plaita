@@ -118,3 +118,19 @@ def test_unpublished_version_returns_nonzero_code(client: TestClient):
     )
     assert r.status_code == 200
     assert r.json()["code"] != 0
+
+
+def test_empty_secret_returns_503(tmp_path, monkeypatch):
+    """空密钥 fail-closed：不再接受空串签名。"""
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_ID", "")
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_KEY", "")
+    flow_store.init_engine(f"sqlite:///{tmp_path / 'fv_empty.db'}")
+    app = FastAPI()
+    app.include_router(fv.router, prefix="/api")
+    c = TestClient(app)
+    r = c.post(
+        "/api/flowVersion/semver/detail",
+        headers={"Authorization": generate_signature("", "", 3, int(time()))},
+        data={"flowId": "echo", "version": "1.0.0"},
+    )
+    assert r.status_code == 503

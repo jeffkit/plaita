@@ -67,6 +67,7 @@ _LAZY_IMPORTS = {
     "CallbackManager": "plaita.core.callback",
     "FlowCallback": "plaita.core.callback",
     "ExpressionEvaluator": "plaita.core.expression",
+    "NodeExecutionContext": "plaita.core.node_context",
     "ExpressionRegistry": "plaita.core.expression",
     "FunctionCategory": "plaita.core.expression",
     "FunctionDescriptor": "plaita.core.expression",

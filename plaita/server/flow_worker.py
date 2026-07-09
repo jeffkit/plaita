@@ -474,11 +474,14 @@ def main():
     parser.add_argument("--flow-storage-type", choices=["memory", "redis", "db"], default="redis",
                       help="流程定义存储类型")
     
-    # 事件总线参数
+    # 事件总线参数（默认启用：分布式挂起/恢复依赖订阅写入；
+    # 历史 --use-event-bus 为 opt-in，导致默认部署订阅落内存、EventFilter 读 Redis）
     parser.add_argument("--event-bus-type", choices=["memory", "redis", "db"], default="redis",
                       help="事件总线类型")
     parser.add_argument("--use-event-bus", action="store_true",
-                      help="是否使用事件总线")
+                      help=argparse.SUPPRESS)  # 已默认启用，保留兼容旧脚本
+    parser.add_argument("--no-event-bus", action="store_true",
+                      help="禁用事件总线（仅无挂起节点的纯同步场景）")
     
     # 缓存参数
     parser.add_argument("--cache-size", type=int, default=100,
@@ -523,14 +526,16 @@ def main():
         )
         logger.info("已创建流程定义存储: %s类型", args.flow_storage_type)
         
-        # 创建事件总线（可选）
+        # 创建事件总线（默认启用；--no-event-bus 显式关闭）
         event_bus = None
-        if args.use_event_bus:
+        if not args.no_event_bus:
             event_bus = create_event_bus(
                 args.event_bus_type,
                 **storage_kwargs
             )
             logger.info("已创建事件总线: %s类型", args.event_bus_type)
+        else:
+            logger.warning("已禁用事件总线（--no-event-bus）；含挂起节点的流程将无法恢复")
         
         # 创建Redis流程工作器
         worker = RedisFlowWorker(

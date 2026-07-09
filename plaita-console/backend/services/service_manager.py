@@ -112,16 +112,29 @@ class ProcessLauncher(ServiceLauncher):
         process_env["PLAITA_INSTANCE_ID"] = instance_id
         process_env["PYTHONPATH"] = str(PROJECT_ROOT)
         
-        # 获取模块路径
+        # 白名单校验（纵深防御：即使配置绕过写入，启动时仍拦截）
+        try:
+            from .process_allowlist import ProcessConfigError, validate_process_spec
+        except ImportError:
+            from process_allowlist import ProcessConfigError, validate_process_spec
+        try:
+            validate_process_spec(config.process, service_key=service_type)
+        except ProcessConfigError as e:
+            raise ValueError(str(e)) from e
+
+        # 获取模块路径（用 shlex 解析 command，避免简单 split 的注入面）
+        import shlex
+
         module = config.process.get("module")
         command = config.process.get("command")
         
         if module:
             cmd = [sys.executable, "-m", module]
         elif command:
-            # 替换 python 为当前解释器
-            cmd_parts = command.split()
-            if cmd_parts[0] == "python":
+            cmd_parts = shlex.split(command)
+            if cmd_parts[0] in ("python", "python3") or cmd_parts[0].endswith(
+                ("/python", "/python3", "python.exe")
+            ):
                 cmd_parts[0] = sys.executable
             cmd = cmd_parts
         else:

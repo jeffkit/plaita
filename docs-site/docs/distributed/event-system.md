@@ -69,7 +69,13 @@ bus = MemoryEventBus()
 execution = FlowExecution(event_bus=bus)
 ```
 
-未显式注入时，`ExecutionContext.get_or_create_event_bus()` 会通过顶层包注册的默认 provider 取默认总线（见 [分层约束](../architecture/layering.md#event-bus-provider)）。
+未显式注入时，`ExecutionContext.get_or_create_event_bus()` 会在函数体内 lazy import `plaita.event.get_default_event_bus` 作为 fallback（见 [分层约束](../architecture/layering.md#默认-eventbus函数体内-lazy-import非全局-provider) 与 [状态管理](../architecture/state-management.md#event-bus-获取)）。
+
+### 分布式挂起 / EventFilter 接线（重要）
+
+- **订阅失败禁止挂起**：`DistributedStrategy` 在 `register_subscription` 失败（无 bus / 异常）时抛 `FlowExecutionException`，**不会**返回 `is_suspend=True`，避免僵尸执行。
+- **FlowWorker 默认启用 EventBus**：`--use-event-bus` 已废弃（兼容保留）；仅 `--no-event-bus` 可显式关闭。
+- **EventFilter 优先复用 bus 的 `subscription_storage`**：与 worker 写入同一实例/同 Redis keyspace，避免「写内存、读 Redis」导致事件永不 resume。
 
 ## 重试策略
 

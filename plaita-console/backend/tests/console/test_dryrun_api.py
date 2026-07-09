@@ -91,3 +91,31 @@ def test_dry_run_invalid_flow(client: TestClient):
     r = client.post("/api/flows/dry-run", json={"flowJson": bad})
     assert r.status_code == 200
     assert r.json()["error"] is not None
+
+
+def test_dry_run_blocks_code_node(client: TestClient):
+    """code 节点不得在 console backend 进程内执行（RCE 闸门）。"""
+    flow = json.dumps(
+        {
+            "flow_id": "evil",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "c"},
+                {
+                    "type": "code",
+                    "id": "c",
+                    "language": "python",
+                    "code": "print(1)",
+                    "next": "end",
+                },
+                {"type": "end", "id": "end", "output": "x", "resultType": "success"},
+            ],
+        }
+    )
+    r = client.post("/api/flows/dry-run", json={"flowJson": flow, "input": {}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result"] is None
+    assert body["nodes"] == []
+    assert "危险节点" in body["error"]
+    assert "code" in body["error"]

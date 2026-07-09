@@ -1469,11 +1469,20 @@ async def get_cluster_config_detail(cluster_id: str):
 @router.put("/clusters/{cluster_id}/config")
 async def save_cluster_config_detail(cluster_id: str, request: SaveClusterConfigRequest):
     """
-    保存集群配置
+    保存集群配置（写入前校验 process 白名单，拒绝任意 command 注入）
     """
     registry = get_cluster_registry()
-    
-    success = registry.save_cluster_config(cluster_id, request.config)
+
+    try:
+        from ..services.process_allowlist import ProcessConfigError
+    except ImportError:
+        from services.process_allowlist import ProcessConfigError
+
+    try:
+        success = registry.save_cluster_config(cluster_id, request.config)
+    except ProcessConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     if not success:
         raise HTTPException(status_code=400, detail=f"无法保存集群 {cluster_id} 的配置")
     

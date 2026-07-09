@@ -7,15 +7,9 @@ from pydantic import BaseModel, Field, model_validator
 from plaita.core.errors import ErrorHandler, RecoverableErrorHandler
 
 if TYPE_CHECKING:
-    # FlowExecution is the concrete type passed as `execution` at runtime.
-    # It is declared here only for static analysis; importing it at module level
-    # would create a circular dependency (node → executor → node).
-    #
-    # Design note: ideally nodes would depend on a narrow NodeExecutionContext
-    # interface (evaluate, get_state, get_child_execution) rather than the full
-    # FlowExecution facade.  That refactor is deferred; for now this annotation
-    # documents the intent without changing runtime behaviour.
-    from plaita.core.executor import FlowExecution
+    # 节点应依赖窄接口 NodeExecutionContext，而非完整 FlowExecution facade。
+    # FlowExecution 已实现该 Protocol；运行时仍传入 facade 实例。
+    from plaita.core.node_context import NodeExecutionContext
 
 
 class NodeConfigException(RuntimeError):
@@ -70,16 +64,20 @@ class Node(BaseModel):
         覆写以校验产出格式。默认无操作。"""
         return None
 
-    def run(self, execution) -> Any:
+    def run(self, execution: "NodeExecutionContext") -> Any:
         result = self.execute(execution)
         self._validate_output(result)
         return result
 
-    def execute(self, execution) -> Any:
-        """执行节点并返回输出。``execution`` 为必传的执行上下文（facade）。"""
+    def execute(self, execution: "NodeExecutionContext") -> Any:
+        """执行节点并返回输出。
+
+        ``execution`` 满足 ``NodeExecutionContext``（evaluate / state / child）。
+        运行时传入的是 ``FlowExecution`` facade，它实现该 Protocol。
+        """
         raise NotImplementedError()
 
-    def resume(self, execution, resume_type, resume_data=None) -> Any:
+    def resume(self, execution: "NodeExecutionContext", resume_type, resume_data=None) -> Any:
         """恢复一个此前挂起的节点 (仅 ``is_suspending`` 节点需要实现)。
 
         内核 ``DistributedStrategy._handle_resume`` 通过本方法多态分发 resume,

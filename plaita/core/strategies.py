@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING
 from plaita.core.callback import BaseCallbackManager, CallbackManager
 from plaita.core.context import ExecutionContext
 from plaita.core.errors import (
+    FlowExecutionException,
     FlowStartMissingError,
     FlowTimeoutError,
     ResumeError,
@@ -250,7 +251,17 @@ class DistributedStrategy:
             return _create_end_output(current_node, result, context.to_dict(), execution_id=context.execution_id)
 
         if current_node.is_suspending:
-            await _subscribe_event(current_node, flow, result, context)
+            # 订阅失败时禁止挂起：否则 execution 停在 suspended，而 pending
+            # 校验又会挡住 resume，流程永久僵尸化。
+            subscribed = await _subscribe_event(current_node, flow, result, context)
+            if not subscribed:
+                raise FlowExecutionException(
+                    message=(
+                        f"Event subscription failed for node {current_node.id}; "
+                        "refusing to suspend without an active subscription"
+                    ),
+                    node=current_node,
+                )
             callback_manager.on_node_suspend(flow, current_node)
             callback_manager.on_flow_suspend(flow)
             return _create_lazy_output(

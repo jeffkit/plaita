@@ -10,6 +10,56 @@
 
 0.5.0 是一次"激进 break"主版本，按架构师/开发者/使用者三视角批评集中整改。下面按"踩坑概率从高到低"排序。
 
+### 0. 分布式：订阅失败不再挂起 + FlowWorker 默认启用 EventBus
+
+**变更前**：`register_subscription` 失败仍返回 `is_suspend=True`；FlowWorker 需 `--use-event-bus` 才注入总线，默认与 EventFilter 订阅存储分裂。
+**变更后**：
+
+- 订阅失败抛 `FlowExecutionException`，**拒绝挂起**
+- FlowWorker **默认**创建 EventBus；仅 `--no-event-bus` 可关闭（`--use-event-bus` 保留为无操作兼容）
+- EventFilter CLI 优先使用 `event_bus.subscription_storage`
+
+```diff
+-python -m plaita.server.flow_worker --use-event-bus ...
++python -m plaita.server.flow_worker ...
++# 仅在确认无挂起节点时:
++python -m plaita.server.flow_worker --no-event-bus ...
+```
+
+### 0b. DSL：共享 ``validate_flow_ir`` + AI 编译门闭合
+
+**变更前**：拓扑校验在 builder / sexpr 各写一份；`flow_from_source` / `compile_flow` 只做 AST→IR，不查拓扑；`_default_known_node_types` 吞掉 registry 异常返回空集。
+**变更后**：
+
+- 唯一入口：`plaita.dsl.ir_validate.validate_flow_ir` / `build_flow`（默认递归 `childFlow` / parallel branch flow）
+- `FlowBuilder.build`、`parse_sexpr`、`flow_from_source`、`plaita_ai.compile_flow` 全部走同一门
+- registry 不可用时**显式抛错**，不再静默空集
+
+```python
+from plaita.dsl import validate_flow_ir, build_flow, FlowIRValidationError
+from plaita.dsl.codeflow import flow_from_source
+
+flow = flow_from_source(src)  # 含拓扑校验
+```
+
+### 0c. EventBus：handler 成功后再去重；factory db 传 engine；sexpr experimental
+
+**变更前**：三后端在 handler 执行**前** `mark_event_processed`，首次失败即永久丢事件；`create_event_bus("db")` 传 `database_url` 但构造函数要 `engine`；sexpr 与 @flow 并列宣传。
+**变更后**：
+
+- 去重改为 `is_event_processed` 跳过已成功项，**成功后再** `mark_event_processed`
+- factory db / subscription storage：`database_url → create_async_engine → engine=`
+- `plaita.dsl.sexpr` 标为 **experimental**（非一等作者路径）
+- 新增 `plaita.core.node_context.NodeExecutionContext` Protocol；`Node.execute` 类型注解切过去
+
+### 0d. codeflow 包拆分 + Console Admin/Contract 分面（非破坏）
+
+**变更前**：`plaita/dsl/codeflow.py` 单文件巨石；Console Swagger/README 未区分管理面与契约面。
+**变更后**：
+
+- `plaita.dsl.codeflow` 改为包：`_common` / `_expr` / `_nodes` / `_stmt` / `_source`；公开导入路径不变（`from plaita.dsl.codeflow import flow, ...`）
+- Console：`main.py` 用 `_mount_admin` / `_mount_contract` + OpenAPI tag `admin`/`contract`；README 增加「API 分面」说明（URL 不变）
+
 ### 1. `plaita.flow` shim 删除（import 路径 break）
 
 **变更前**：`from plaita.flow import Flow, FlowExecution, ...` 可用（带 `DeprecationWarning`，原计划 0.6.0 删）。

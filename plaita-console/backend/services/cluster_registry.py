@@ -270,11 +270,21 @@ class ClusterRegistry:
             return None
     
     def save_cluster_config(self, cluster_id: str, config: dict) -> bool:
-        """保存集群配置"""
+        """保存集群配置（写入前校验 process 白名单）。"""
         info = self._clusters.get(cluster_id)
         if not info:
             return False
-        
+
+        try:
+            from .process_allowlist import ProcessConfigError, validate_cluster_config
+        except ImportError:
+            from process_allowlist import ProcessConfigError, validate_cluster_config
+
+        try:
+            validate_cluster_config(config)
+        except ProcessConfigError:
+            raise
+
         try:
             with open(info.config_path, 'w', encoding='utf-8') as f:
                 yaml.dump(config, f, allow_unicode=True, default_flow_style=False)

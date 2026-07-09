@@ -316,9 +316,13 @@ def plan_and_run(user_task: str, planner_llm, tools_hint: str):
 
 ## S-表达式 DSL（高级用法）
 
-!!! note "何时用 S-expr"
+!!! warning "S-expr 为 experimental（非一等路径）"
 
-    S-expr 是一种**可逆**的替代前端：`flow_to_sexpr(data)` 可以把 Flow IR 反编译回 S-expr 源码，这个双向特性在某些「修改后回写」场景很有用。一般用户推荐直接使用 `@flow`。
+    S-expr **已冻结为一等作者体验**：新节点类型与自定义节点优先落在 `@flow` /
+    `FlowBuilder`；sexpr **不保证**与内置节点表同步，也不支持自定义节点占位符。
+    AI 生成与生产路径请用 `flow_from_source` 或 JSON/YAML。
+
+    仍保留的价值：`flow_to_sexpr(data)` 可逆回写，适合审查 / 实验。
 
 `plaita.dsl.sexpr` 是可选前端，纯 Python 实现，无额外依赖。
 

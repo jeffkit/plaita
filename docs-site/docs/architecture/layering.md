@@ -1,76 +1,88 @@
 # 分层约束
 
-plaita 把模块按依赖方向严格分层，并有专门的测试强制约束（`tests/` 下的 layering 测试）。
+plaita 把模块按依赖方向严格分层，并有专门的测试强制约束（`tests/integration/test_layering.py`、`tests/e2e/test_import_layering.py`）。
 
 ## 分层与依赖方向
 
 ```mermaid
 flowchart TD
-    Core["plaita.core<br/>执行核心"]
-    Node["plaita.node<br/>节点实现"]
+    Foundation["foundation<br/>plaita.core / node / io"]
     Event["plaita.event<br/>事件系统"]
     Storage["plaita.storage<br/>状态存储"]
     Server["plaita.server<br/>服务端（server extra）"]
 
-    Core --> Node
-    Event --> Core
-    Storage --> Core
-    Server --> Core
+    Event --> Foundation
+    Storage --> Foundation
+    Storage --> Event
+    Server --> Foundation
     Server --> Event
     Server --> Storage
 ```
 
-允许的依赖方向（下游 → 上游）：
+允许的依赖方向：
 
 | 层 | 可依赖 |
 |----|--------|
-| `plaita.core` | 仅标准库 + pydantic/pyparsing/isodate，**不依赖 event/storage/server** |
-| `plaita.node` | `plaita.core` |
-| `plaita.event` | `plaita.core`（桥接工具从 core 取） |
-| `plaita.storage` | `plaita.core` |
-| `plaita.server` | `plaita.core` + `plaita.event` + `plaita.storage` |
+| foundation（`plaita.core` / `plaita.node` / `plaita.io`） | 彼此可互引；**禁止**顶层 import `plaita.event` / `storage` / `server` |
+| `plaita.event` | foundation；**禁止** `storage` / `server` |
+| `plaita.storage` | foundation + `event`；**禁止** `server` |
+| `plaita.server` | 任意（顶层） |
 
-**禁止**：`core` 反向 import `event` / `storage` / `server`。这是被测试守护的硬约束。
+**禁止**：foundation / event / storage 反向依赖更上层。这是被 AST 扫描测试守护的硬约束。
 
-## 为什么 core 不能依赖 event
+## 为什么 foundation 不能顶层依赖 event
 
-`EventNode` 与 `DistributedStrategy` 需要订阅事件总线，而总线实现（memory/redis/sqlalchemy）在 `plaita.event`，属于"上层"。若 `core` 直接 import `plaita.event`，就会把可选后端（redis/sqlalchemy 的重依赖）拖进核心，破坏"核心极轻"的设计。
+`EventNode` 与 `DistributedStrategy` 需要事件总线，实现（memory/redis/sqlalchemy）在 `plaita.event`。若 `core` **在模块顶层**直接 `import plaita.event`，会把可选后端的重依赖拖进每个 foundation 消费者，破坏「核心极轻」。
 
-## 依赖反转：默认 event bus provider
+## 默认 EventBus：函数体内 lazy import（非全局 provider）
 
-`plaita.core.context` 持有一个模块级 `_default_event_bus_provider`（一个可调用对象），由**顶层 `plaita` 包**在 import 时注册：
+历史上曾用模块级 `_default_event_bus_provider` + `set_default_event_bus_provider` 做依赖反转。该全局可变 singleton 已删除。
+
+当前做法：`ExecutionContext.get_or_create_event_bus()` 在需要默认总线时，调用 `_resolve_default_event_bus()`，**仅在函数体内** lazy import：
 
 ```python
-# plaita/__init__.py
-def _default_event_bus_provider():
-    from plaita.event import get_default_event_bus
-    return get_default_event_bus()
-
-from plaita.core.context import set_default_event_bus_provider
-set_default_event_bus_provider(_default_event_bus_provider)
+# plaita/core/context.py（示意）
+def _resolve_default_event_bus():
+    try:
+        from plaita.event import get_default_event_bus
+        return get_default_event_bus()
+    except ImportError:
+        return None
 ```
 
-`ExecutionContext.get_or_create_event_bus()` 只在**真正需要总线时**才调用这个 provider，从而惰性触发 `plaita.event` 的 import。这样：
+解析优先级：
 
-- `core` 永不直接 import `event`
-- 用户仍保留"未注入 event_bus 时自动取默认总线"的旧行为
-- 注册失败仅记 DEBUG 日志，不阻断 import
+1. 自身已设的 `event_bus`
+2. 父链上的 `event_bus`
+3. 上述 lazy fallback
+4. 都没有则 `None`
+
+约束含义：
+
+- **允许**：foundation 在函数体内 `from plaita.event import ...`（默认总线 fallback）
+- **禁止**：foundation 在模块顶层 import `plaita.event`（会强制每个消费者拖入 event 依赖）
+- 顶层包 `plaita/__init__.py` **不再**注册任何 provider
+
+详见 [状态管理](state-management.md#event-bus-获取)。
 
 ## 桥接工具下沉
 
-同步 API 需要在事件循环上驱动异步内核，桥接逻辑（`run_async_from_sync` / `async_gen_to_sync`）放在 `plaita.core.async_utils`，而非 `plaita.event`。`plaita.event.core` 也从这里导入，避免 `event → core` 之外又出现 `core → event` 的环。
+同步 API 需要在事件循环上驱动异步内核，桥接逻辑（`run_async_from_sync` / `async_gen_to_sync`）放在 `plaita.core.async_utils`。`plaita.event` 也可从这里导入，避免额外环依赖。
 
 ## 顶层包的懒 re-export
 
 `plaita/__init__.py` 通过 `__getattr__` 懒加载公共 API：
 
-- `from plaita import Flow` 解析到 `plaita.core.flow.Flow`，但**不在 import 期**把 core 拉入内存
+- `from plaita import Flow` 解析到 `plaita.core.flow.Flow`，但不在 import 期把整个 core 拉入内存
 - 可选功能（`FlowWorker` / `HTTP` / `RedisEventBus` / `CodeNode` 等）访问时校验对应 extra，缺失则抛**可操作的 ImportError**
-- 旧路径 `plaita.flow` / `plaita.errors` / `plaita.types` 是 shim，转发到 `plaita.core.*` 并触发 `DeprecationWarning`
+- 兼容 shim：`plaita.errors` / `plaita.types` 转发到 `plaita.core.*` 并触发 `DeprecationWarning`；`plaita.flow` 已在 0.5.0 **删除**（见 [迁移指南](../reference/migration-guide.md)）
 
 ## 测试守护
 
-layering 测试会扫描 `plaita/core/**/*.py` 的 import，断言不出现 `plaita.event` / `plaita.storage` / `plaita.server`，确保重构不破坏分层。
+| 测试 | 作用 |
+|------|------|
+| `tests/integration/test_layering.py` | 全层 AST 扫描；允许 foundation **函数体内** lazy import event |
+| `tests/e2e/test_import_layering.py` | 断言 `plaita.core` 不 import `server` / 重型 storage 后端 |
 
 ## 下一步
 

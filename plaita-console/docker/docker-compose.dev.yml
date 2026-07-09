@@ -23,6 +23,10 @@ services:
       - PLAITA_CONSOLE_HOST=0.0.0.0
       - PLAITA_CONSOLE_PORT=8080
       - PLAITA_PROJECT_ROOT=/app
+      - PLAITA_CONSOLE_ADMIN_API_KEY=${PLAITA_CONSOLE_ADMIN_API_KEY:-dev-admin-key}
+      - PLAITA_CONSOLE_SECRET_ID=${PLAITA_CONSOLE_SECRET_ID:-dev-id}
+      - PLAITA_CONSOLE_SECRET_KEY=${PLAITA_CONSOLE_SECRET_KEY:-dev-secret}
+      # 本地 compose 也可显式放开：PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN=true
     depends_on:
       redis:
         condition: service_healthy

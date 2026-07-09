@@ -111,8 +111,21 @@ plaita-console/
 ## API 文档
 
 启动后端后，访问 http://localhost:8080/docs 查看 Swagger API 文档。
+Swagger 按 tag 分面：`admin`（管理面）/ `contract`（契约面）/ `health`。
 
-### 主要 API
+### API 分面
+
+Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式不同**：
+
+| 分面 | 调用方 | 鉴权 | 未配置密钥 |
+|------|--------|------|------------|
+| **管理面 (admin)** | Console 前端 / 运维 | `X-Admin-API-Key` 或 `Authorization: Bearer` | **503**（除非 `ALLOW_INSECURE_ADMIN=true`） |
+| **契约面 (contract)** | 外部 `PlaitaClient` | HMAC（`Authorization` 头，与 `plaita/client.py` 对称） | **503** |
+| **健康检查** | 探针 | 无 | — |
+
+路由挂载见 `backend/main.py`：`_mount_admin` / `_mount_contract`。契约面**不加** `require_admin_auth`。
+
+### 管理面 API
 
 | 端点 | 方法 | 描述 |
 |------|------|------|
@@ -132,7 +145,14 @@ plaita-console/
 | `/api/flows/dry-run` | POST | 同步试跑 Flow JSON，返回节点级结果 |
 | `/api/nodes` | GET / POST | 节点描述列表 / 注册自定义节点 |
 | `/api/nodes/{type}` | DELETE | 删除自定义节点（内置不可删） |
-| `/api/flowVersion/semver/detail` | POST | 对外契约接口：HMAC 鉴权，返回已发布流程定义（供 `PlaitaClient` 拉取） |
+| `/api/cluster/*` | — | 集群配置 / 启停（command 白名单） |
+| `/api/events/*` | — | 事件订阅与查询 |
+
+### 契约面 API
+
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/api/flowVersion/semver/detail` | POST | HMAC 鉴权；`application/x-www-form-urlencoded`（`flowId`/`version`）；返回已发布流程定义供 `PlaitaClient` 拉取 |
 
 ## 技术栈
 
@@ -163,8 +183,14 @@ plaita-console/
 | `PLAITA_CONSOLE_PORT` | `8080` | 监听端口 |
 | `PLAITA_CONSOLE_DEBUG` | `false` | 调试模式 |
 | `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | 流程定义/版本/节点描述持久化（SQLAlchemy） |
-| `PLAITA_CONSOLE_SECRET_ID` | _空_ | 对外契约接口 HMAC secret-id（为空则禁用 `/api/flowVersion/semver/detail`） |
-| `PLAITA_CONSOLE_SECRET_KEY` | _空_ | 对外契约接口 HMAC secret-key |
+| `PLAITA_CONSOLE_ADMIN_API_KEY` | _空_ | 管理面 API Key（`X-Admin-API-Key` / Bearer）。**空且未放开 insecure 时管理 API 返回 503** |
+| `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN` | `false` | 显式允许无管理密钥启动（**仅本地开发**） |
+| `PLAITA_CONSOLE_SECRET_ID` | _空_ | 对外契约 HMAC secret-id（**空则 `/api/flowVersion` 返回 503**，不再接受空串签名） |
+| `PLAITA_CONSOLE_SECRET_KEY` | _空_ | 对外契约 HMAC secret-key |
+
+前端管理面请求会自动带 `X-Admin-API-Key`：优先读 `localStorage.plaita_admin_api_key`，其次 `VITE_PLAITA_ADMIN_API_KEY`。
+
+`POST /api/flows/dry-run` **拒绝**含 `code` / `python` / `javascript` 等危险节点的流程，防止 console 进程 RCE。
 
 ## 开发指南
 

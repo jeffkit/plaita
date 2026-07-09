@@ -63,6 +63,7 @@ from .builder import (
     http,
     event,
 )
+from .ir_validate import FlowIRValidationError, build_flow, validate_flow_ir
 
 __all__ = [
     "FlowBuilder",
@@ -92,4 +93,7 @@ __all__ = [
     "code",
     "http",
     "event",
+    "FlowIRValidationError",
+    "build_flow",
+    "validate_flow_ir",
 ]

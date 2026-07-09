@@ -980,9 +980,8 @@ class RedisEventBus(EventBus):
                 if not subscription.matches_event(event, {}):
                     return
             
-            # 检查是否已处理
-            is_new = await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
-            if not is_new:
+            # 去重：仅跳过已成功处理过的；成功后再 mark（见 _process_event）
+            if await self.processing_tracker.is_event_processed(event.event_id, handler_id):
                 return
             
             # 处理事件
@@ -995,9 +994,10 @@ class RedisEventBus(EventBus):
             logger.warning("处理事件消息失败: %s", e)
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
-        """处理事件并记录结果"""
+        """处理事件并记录结果；成功后才 mark 去重。"""
         try:
             await handler(event)
+            await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
             await self.processing_tracker.record_processing_attempt(
                 event.event_id, handler_id, "success"
             )
@@ -1005,16 +1005,19 @@ class RedisEventBus(EventBus):
             await self.processing_tracker.record_processing_attempt(
                 event.event_id, handler_id, "error", str(e)
             )
+            # fire-and-forget task：吞掉异常，避免 "Task exception was never retrieved"
+            logger.warning("handler %s 处理事件 %s 失败: %s", handler_id, event.event_id, e)
     
     async def _process_with_retry(self, handler: EventHandler, event: Event, 
                                 handler_id: str, retry_policy: RetryPolicy) -> None:
-        """带重试机制的事件处理"""
+        """带重试机制的事件处理；成功后才 mark 去重。"""
         retries = 0
         delay = retry_policy.initial_delay
         
         while True:
             try:
                 await handler(event)
+                await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
                 await self.processing_tracker.record_processing_attempt(
                     event.event_id, handler_id, "success"
                 )

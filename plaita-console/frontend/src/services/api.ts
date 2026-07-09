@@ -4,13 +4,31 @@
 
 const API_BASE = '/api'
 
+/** 管理面 API Key：优先 localStorage，其次 Vite 构建期环境变量。 */
+function getAdminApiKey(): string {
+  try {
+    const fromStore = localStorage.getItem('plaita_admin_api_key')
+    if (fromStore) return fromStore
+  } catch {
+    /* SSR / 隐私模式 */
+  }
+  return (import.meta as { env?: Record<string, string> }).env?.VITE_PLAITA_ADMIN_API_KEY || ''
+}
+
 // 通用请求函数
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> | undefined),
+  }
+  const adminKey = getAdminApiKey()
+  if (adminKey) {
+    headers['X-Admin-API-Key'] = adminKey
+  }
+
   const response = await fetch(`${API_BASE}${url}`, {
-    headers: {
-      'Content-Type': 'application/json',
-    },
     ...options,
+    headers,
   })
 
   if (!response.ok) {

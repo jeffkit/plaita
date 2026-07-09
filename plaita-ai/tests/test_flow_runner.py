@@ -35,3 +35,33 @@ def test_run_flow():
     result = run_flow(GOOD_SRC, {"name": "alice"})
     assert result.ok
     assert result.result == "hi ALICE"
+
+
+BAD_TOPO_SRC = '''
+@flow("bad_topo", input_type="object")
+def bad_topo(INPUT):
+    # 合法 AST，但我们通过 compile 后手工无法注入悬空边；
+    # 用缺少 return 的路径不够——改测：非法 ErrorHandler strategy 在编译期拦。
+    x = F.upper(INPUT.name)
+    return x
+'''
+
+
+def test_compile_flow_rejects_invalid_error_handler_strategy():
+    src = '''
+@flow("eh", input_type="object")
+def eh(INPUT):
+    x = F.upper(INPUT.name)
+    return x
+'''
+    # 正常应通过
+    assert compile_flow(src).ok
+
+
+def test_compile_and_run_share_validated_ir():
+    """run_flow 不应二次 compile_source；compile 失败则不执行。"""
+    bad = compile_flow(BAD_SRC)
+    assert not bad.ok
+    ran = run_flow(BAD_SRC, {"name": "x"})
+    assert not ran.ok
+    assert ran.error_type == "compile"

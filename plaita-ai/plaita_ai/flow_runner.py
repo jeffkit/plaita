@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from plaita.dsl.codeflow import compile_source, flow_from_source
+from plaita.dsl.ir_validate import FlowIRValidationError, build_flow
 from plaita.node import get_default_registry
 
 _CODEFLOW_ERR = re.compile(r"^\[codeflow\] 第 (\?|\d+) 行: (.+)$", re.DOTALL)
@@ -72,9 +73,20 @@ def compile_flow(
     flow_id: Optional[str] = None,
     **opts: Any,
 ) -> CompileResult:
-    """Compile @flow source to Flow IR. Returns structured errors for LLM self-correction."""
+    """Compile @flow source to Flow IR + 拓扑校验。
+
+    与 ``flow_from_source`` / ``FlowBuilder.build`` 走同一 ``validate_flow_ir`` 门，
+    避免 Agent 自纠循环把「仅 AST 通过」当成编译成功。
+    """
     try:
         ir = compile_source(source, flow_id=flow_id, **opts)
+        # validate_flow_ir + Flow.model_validate（与 flow_from_source 同门）
+        build_flow(ir)
+    except FlowIRValidationError as exc:
+        return CompileResult(
+            ok=False,
+            errors=[CompileError(line=None, message=str(exc))],
+        )
     except Exception as exc:
         err = _parse_codeflow_error(exc)
         return CompileResult(ok=False, errors=[err])
@@ -91,7 +103,10 @@ def run_flow(
     globals_ctx: Optional[Dict[str, Any]] = None,
     **opts: Any,
 ) -> RunResult:
-    """Compile @flow source and execute. Compiles first; does not run on compile failure."""
+    """Compile @flow source and execute. Compiles first; does not run on compile failure.
+
+    成功编译后直接用已校验 IR 构建 Flow，避免二次 ``compile_source``。
+    """
     compiled = compile_flow(source, flow_id=flow_id, **opts)
     if not compiled.ok:
         messages = "; ".join(
@@ -101,7 +116,9 @@ def run_flow(
         return RunResult(ok=False, error=messages or "compile failed", error_type="compile")
 
     try:
-        flow = flow_from_source(source, flow_id=flow_id, **opts)
+        flow = build_flow(compiled.ir) if compiled.ir is not None else flow_from_source(
+            source, flow_id=flow_id, **opts
+        )
         if globals_ctx:
             flow.global_context = dict(globals_ctx)
         result = flow.run(**(inputs or {}))

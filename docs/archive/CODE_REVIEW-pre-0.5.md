@@ -1,3 +1,17 @@
+# plaita 代码 Review 报告（历史归档）
+
+> **归档说明（2026-07-09）**  
+> 本文档写于 0.5.0 执行引擎重构**之前**，其中多处结论已过时（例如「异步支持形同虚设」「分布式模式未实现」）。  
+> 请勿再作为当前架构真相源。现行架构见：  
+> - [分层约束](../../docs-site/docs/architecture/layering.md)  
+> - [执行引擎](../../docs-site/docs/architecture/execution-engine.md)  
+> - [状态管理](../../docs-site/docs/architecture/state-management.md)  
+> - 仓库根目录 [MIGRATION.md](../../MIGRATION.md)  
+>  
+> 保留本文件仅供对照历史决策；新的审查意见请另开文档，勿在此追加。
+
+---
+
 # plaita 代码 Review 报告
 
 本文档对 plaita 项目代码进行全面审查，提出优化建议和改进方向。

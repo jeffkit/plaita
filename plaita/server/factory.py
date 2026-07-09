@@ -24,6 +24,15 @@ def _parse_redis_url(redis_url: str):
     return host, port, db, password
 
 
+def _create_async_engine(database_url: str):
+    """从 database_url 创建 SQLAlchemy 异步引擎（event/subscription db 后端需要）。"""
+    if not database_url:
+        raise ValueError("db 后端需要 database_url")
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    return create_async_engine(database_url)
+
+
 def create_storage_component(storage_type, component_type, **kwargs):
     """
     创建存储组件实例
@@ -71,8 +80,9 @@ def create_storage_component(storage_type, component_type, **kwargs):
             from plaita.storage.sqlalchemy import SqlalchemyFlowStorage
             return SqlalchemyFlowStorage(database_url=database_url)
         elif component_type == "subscription":
+            # SqlalchemyEventSubscriptionStorage 构造函数要 engine，不是 database_url
             from plaita.event.sqlalchemy import SqlalchemyEventSubscriptionStorage
-            return SqlalchemyEventSubscriptionStorage(database_url=database_url)
+            return SqlalchemyEventSubscriptionStorage(engine=_create_async_engine(database_url))
     else:
         raise ValueError(f"不支持的存储类型: {storage_type}")
 
@@ -95,7 +105,8 @@ def create_event_bus(bus_type, **kwargs):
         from plaita.event.redis import RedisEventBus
         return RedisEventBus(redis_url=kwargs.get("redis_url"))
     elif bus_type == "db":
+        # SqlalchemyEventBus 构造函数要 engine，不是 database_url
         from plaita.event.sqlalchemy import SqlalchemyEventBus
-        return SqlalchemyEventBus(database_url=kwargs.get("database_url"))
+        return SqlalchemyEventBus(engine=_create_async_engine(kwargs.get("database_url")))
     else:
         raise ValueError(f"不支持的事件总线类型: {bus_type}")

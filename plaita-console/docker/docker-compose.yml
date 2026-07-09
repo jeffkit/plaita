@@ -27,6 +27,10 @@ services:
       - PLAITA_CONSOLE_HOST=0.0.0.0
       - PLAITA_CONSOLE_PORT=8080
       - PLAITA_PROJECT_ROOT=/app
+      # 生产必须覆盖为强随机值；空密钥时管理 API / 契约接口 fail-closed
+      - PLAITA_CONSOLE_ADMIN_API_KEY=${PLAITA_CONSOLE_ADMIN_API_KEY:-change-me-admin}
+      - PLAITA_CONSOLE_SECRET_ID=${PLAITA_CONSOLE_SECRET_ID:-change-me-id}
+      - PLAITA_CONSOLE_SECRET_KEY=${PLAITA_CONSOLE_SECRET_KEY:-change-me-secret}
     depends_on:
       redis:
         condition: service_healthy

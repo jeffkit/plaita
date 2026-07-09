@@ -36,8 +36,16 @@ class Settings(BaseModel):
     )
 
     # 对外契约接口 /api/flowVersion/semver/detail 的 HMAC 鉴权密钥
-    secret_id: str = Field(default="", description="HMAC secret-id（空则禁用对外接口）")
+    # 空密钥时接口返回 503（fail-closed），不再接受空串签名。
+    secret_id: str = Field(default="", description="HMAC secret-id（空则契约接口不可用）")
     secret_key: str = Field(default="", description="HMAC secret-key")
+
+    # 管理面 API Key（X-Admin-API-Key / Bearer）。空且未 allow_insecure_admin 时拒绝管理 API。
+    admin_api_key: str = Field(default="", description="管理面 API Key")
+    allow_insecure_admin: bool = Field(
+        default=False,
+        description="显式允许无管理密钥启动（仅本地开发）",
+    )
 
     class Config:
         env_prefix = "PLAITA_CONSOLE_"
@@ -53,5 +61,9 @@ def get_settings() -> Settings:
         db_url=os.getenv("PLAITA_CONSOLE_DB_URL", "sqlite:///./plaita_console.db"),
         secret_id=os.getenv("PLAITA_CONSOLE_SECRET_ID", ""),
         secret_key=os.getenv("PLAITA_CONSOLE_SECRET_KEY", ""),
+        admin_api_key=os.getenv("PLAITA_CONSOLE_ADMIN_API_KEY", ""),
+        allow_insecure_admin=os.getenv(
+            "PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN", "false"
+        ).lower()
+        == "true",
     )
-

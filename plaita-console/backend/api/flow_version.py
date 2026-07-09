@@ -30,6 +30,13 @@ def _envelope(code: int, message: str, flow: Optional[str] = None) -> dict:
 @router.post("/flowVersion/semver/detail")
 async def flow_version_detail(request: Request):
     settings = get_settings()
+    # fail-closed：空密钥不再接受空串签名（与「空则禁用」文档对齐为真正禁用）
+    if not settings.secret_id or not settings.secret_key:
+        raise HTTPException(
+            status_code=503,
+            detail="契约接口未配置 PLAITA_CONSOLE_SECRET_ID/SECRET_KEY，已禁用",
+        )
+
     authorization = request.headers.get("authorization", "")
 
     if not signature.verify_authorization(

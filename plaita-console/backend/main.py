@@ -6,22 +6,24 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
 
 # 支持多种运行方式的导入
 try:
     from .config import get_settings
+    from .auth import require_admin_auth
     from .api import services, executions, queues, logs, cluster, events
     from .api import nodes, flows, flow_version, dryrun
-    from .services import flow_store
+    from .services import flow_store, signature
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from config import get_settings
+    from auth import require_admin_auth
     from api import services, executions, queues, logs, cluster, events
     from api import nodes, flows, flow_version, dryrun
-    from services import flow_store
+    from services import flow_store, signature
 
 # 配置日志
 logging.basicConfig(
@@ -64,6 +66,23 @@ async def lifespan(app: FastAPI):
         logger.error(f"FlowStore 初始化失败: {e}")
         raise
 
+    # HMAC 重放保护：有 Redis 时启用 nonce store
+    try:
+        signature.enable_replay_protection(settings.redis_url)
+        logger.info("HMAC replay protection 已启用（Redis nonce store）")
+    except Exception as e:
+        logger.warning("HMAC replay protection 启用失败，回退内存 nonce: %s", e)
+
+    if not settings.admin_api_key and not settings.allow_insecure_admin:
+        logger.warning(
+            "未配置 PLAITA_CONSOLE_ADMIN_API_KEY：管理 API 将返回 503，"
+            "直到配置密钥或显式设置 ALLOW_INSECURE_ADMIN=true"
+        )
+    if not settings.secret_id or not settings.secret_key:
+        logger.warning(
+            "未配置 PLAITA_CONSOLE_SECRET_ID/SECRET_KEY：契约接口 /flowVersion 将返回 503"
+        )
+
     yield
     
     # 关闭时断开 Redis 连接
@@ -77,9 +96,21 @@ def create_app() -> FastAPI:
     
     app = FastAPI(
         title="Plaita Console API",
-        description="Plaita 流程引擎管理控制台 API",
+        description=(
+            "Plaita 流程引擎管理控制台 API。\n\n"
+            "**管理面 (admin)**：Console 前端 / 运维；鉴权 "
+            "`X-Admin-API-Key` 或 `Authorization: Bearer`。\n\n"
+            "**契约面 (contract)**：外部 `PlaitaClient`；鉴权 HMAC "
+            "（`PLAITA_CONSOLE_SECRET_ID/SECRET_KEY`）；"
+            "仅 `POST /api/flowVersion/semver/detail`。"
+        ),
         version="1.0.0",
-        lifespan=lifespan
+        lifespan=lifespan,
+        openapi_tags=[
+            {"name": "admin", "description": "管理面：需 Admin API Key"},
+            {"name": "contract", "description": "契约面：需 HMAC 签名"},
+            {"name": "health", "description": "健康检查（无鉴权）"},
+        ],
     )
     
     # 添加 CORS 中间件
@@ -90,25 +121,47 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    admin_deps = [Depends(require_admin_auth)]
+    prefix = settings.api_prefix
+
+    def _mount_admin(router, resource_tag: str) -> None:
+        """挂载管理面路由：Admin API Key + OpenAPI tag=admin/<resource>。"""
+        app.include_router(
+            router,
+            prefix=prefix,
+            tags=["admin", resource_tag],
+            dependencies=admin_deps,
+        )
+
+    def _mount_contract(router, resource_tag: str) -> None:
+        """挂载契约面路由：独立 HMAC，不加 admin 依赖。"""
+        app.include_router(
+            router,
+            prefix=prefix,
+            tags=["contract", resource_tag],
+        )
+
+    # --- 管理面（需 Admin API Key）---
+    _mount_admin(services.router, "services")
+    _mount_admin(executions.router, "executions")
+    _mount_admin(queues.router, "queues")
+    _mount_admin(logs.router, "logs")
+    _mount_admin(cluster.router, "cluster")
+    _mount_admin(events.router, "events")
+    _mount_admin(nodes.router, "nodes")
+    _mount_admin(flows.router, "flows")
+    _mount_admin(dryrun.router, "dryrun")
+
+    # --- 契约面（独立 HMAC，不加 admin 依赖）---
+    _mount_contract(flow_version.router, "flow_version")
     
-    # 注册路由
-    app.include_router(services.router, prefix=settings.api_prefix, tags=["services"])
-    app.include_router(executions.router, prefix=settings.api_prefix, tags=["executions"])
-    app.include_router(queues.router, prefix=settings.api_prefix, tags=["queues"])
-    app.include_router(logs.router, prefix=settings.api_prefix, tags=["logs"])
-    app.include_router(cluster.router, prefix=settings.api_prefix, tags=["cluster"])
-    app.include_router(events.router, prefix=settings.api_prefix, tags=["events"])
-    app.include_router(nodes.router, prefix=settings.api_prefix, tags=["nodes"])
-    app.include_router(flows.router, prefix=settings.api_prefix, tags=["flows"])
-    app.include_router(dryrun.router, prefix=settings.api_prefix, tags=["dryrun"])
-    app.include_router(flow_version.router, prefix=settings.api_prefix, tags=["flow_version"])
-    
-    @app.get("/")
+    @app.get("/", tags=["health"])
     async def root():
         """健康检查"""
         return {"status": "ok", "service": "plaita-console"}
     
-    @app.get("/health")
+    @app.get("/health", tags=["health"])
     async def health():
         """健康检查端点"""
         return {"status": "healthy"}
@@ -134,4 +187,3 @@ def run_server():
 
 if __name__ == "__main__":
     run_server()
-

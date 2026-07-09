@@ -615,74 +615,16 @@ class FlowBuilder:
     # -- 构建期校验 + 产出 Flow -----------------------------------------
 
     def validate(self) -> None:
-        """构建期静态校验，把 SKILL.md 里的常见反模式提前拦掉。"""
-        nodes = self._nodes
-        ids = [n.get("id") for n in nodes if n.get("id")]
+        """构建期静态校验（委托共享 ``validate_flow_ir``，含递归子流程）。"""
+        from plaita.dsl.ir_validate import validate_flow_ir
 
-        # 1. id 唯一
-        seen: Dict[str, int] = {}
-        dupes: List[str] = []
-        for nid in ids:
-            seen[nid] = seen.get(nid, 0) + 1
-            if seen[nid] == 2:
-                dupes.append(nid)
-        if dupes:
-            raise ValueError(f"节点 id 重复: {dupes}")
-
-        id_set = set(ids)
-
-        def _check_target(target: Optional[str], owner: str, field: str) -> None:
-            if target is None:
-                return
-            # end 节点没有 next，允许 next 为 None；指向的 id 必须存在
-            if target not in id_set:
-                raise ValueError(
-                    f"节点 {owner!r} 的 {field} 指向不存在的节点 id {target!r}"
-                )
-
-        for n in nodes:
-            nid = n.get("id")
-            ntype = n.get("type")
-            if ntype == "end":
-                continue  # end 无 next
-            _check_target(n.get("next"), nid, "next")
-
-            if ntype == "if":
-                if n.get("next") is None:
-                    raise ValueError(
-                        f"if 节点 {nid!r} 缺少真分支目标（next/then）"
-                    )
-                if n.get("else_next") is None:
-                    raise ValueError(
-                        f"if 节点 {nid!r} 缺少假分支目标（else_next/else_）"
-                    )
-                _check_target(n.get("next"), nid, "next")
-                _check_target(n.get("else_next"), nid, "else_next")
-            elif ntype == "switch":
-                has_default = False
-                for b in n.get("branches", []):
-                    _check_target(b.get("next"), nid, "branches[].next")
-                    if b.get("isDefault"):
-                        has_default = True
-                if not has_default:
-                    raise ValueError(
-                        f"switch 节点 {nid!r} 缺少 isDefault 分支，"
-                        "全部条件不命中时行为未定义"
-                    )
-            elif ntype == "case":
-                for c in n.get("cases", []):
-                    # 运行时用 case["id"] 作为跳转目标（DSL 已归一化 next→id）
-                    _check_target(c.get("id") or c.get("next"), nid, "cases[].target")
-                _check_target(n.get("default"), nid, "default")
-            elif ntype == "parallel":
-                for b in n.get("branches", []):
-                    # parallel branch 的 flow 是子流程，next 可选
-                    _check_target(b.get("next"), nid, "branches[].next")
+        validate_flow_ir(self.to_dict(), recursive=True)
 
     def build(self) -> Flow:
         """做构建期校验并产出可执行的 ``Flow``。"""
-        self.validate()
-        return Flow.model_validate(self.to_dict())
+        from plaita.dsl.ir_validate import build_flow
+
+        return build_flow(self.to_dict())
 
     # -- 便捷执行 --------------------------------------------------------
 

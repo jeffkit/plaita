@@ -1,16 +1,15 @@
 """
-plaita.dsl.sexpr — S-表达式前端。
+plaita.dsl.sexpr — S-表达式前端（**experimental**）。
+
+.. warning::
+
+   **Experimental / 非一等作者路径。** 新功能与自定义节点优先实现在
+   ``@flow``（``codeflow``）与 ``FlowBuilder``；sexpr **不保证**与内置节点
+   表同步演进，也不支持自定义节点占位符。生产 / AI 生成请用
+   ``flow_from_source`` 或 JSON/YAML。
 
 一种 Lisp 风格的 flow 编写方式，编译到现有 ``Flow`` IR，复用同一套
-``Flow.model_validate`` 校验与运行时——不是新运行时，只是新前端。
-
-为什么 S-expr 适合 flow：
-
-1. flow 本质是一棵节点树，S-expr 就是树的字面量，阻抗几乎为零；
-2. homoiconic：代码即数据即 JSON，可双向互转；
-3. 表达式层直接复用现有 ``$INPUT.x`` / ``$F.func(...)`` 字符串语言，
-   不重新造一套表达式语义；
-4. parser 极小（几百行），加节点类型只需加一个编译分支。
+共享 ``validate_flow_ir`` 与运行时——不是新运行时，只是可选前端。
 
 语法速览::
 
@@ -771,53 +770,20 @@ def compile_sexpr(src: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 静态校验：复用 builder 那套构建期检查（Flow.model_validate 不查拓扑）
+# 静态校验：委托共享 validate_flow_ir（含 recursive 子流程 / parallel）
 # ---------------------------------------------------------------------------
 
 def _static_validate(data: Dict[str, Any]) -> None:
-    nodes = data.get("nodes", [])
-    ids = [n.get("id") for n in nodes if n.get("id")]
-    seen: Dict[str, int] = {}
-    for nid in ids:
-        seen[nid] = seen.get(nid, 0) + 1
-        if seen[nid] == 2:
-            raise ValueError(f"节点 id 重复: {nid!r}")
-    id_set = set(ids)
+    from plaita.dsl.ir_validate import validate_flow_ir
 
-    def _check(target: Optional[str], owner: str, field: str) -> None:
-        if target is not None and target not in id_set:
-            raise ValueError(
-                f"节点 {owner!r} 的 {field} 指向不存在的节点 id {target!r}")
-
-    for n in nodes:
-        nid = n.get("id")
-        ntype = n.get("type")
-        if ntype == "end":
-            continue
-        _check(n.get("next"), nid, "next")
-        if ntype == "if":
-            if n.get("next") is None:
-                raise ValueError(f"if 节点 {nid!r} 缺少真分支目标（next/then）")
-            if n.get("else_next") is None:
-                raise ValueError(f"if 节点 {nid!r} 缺少假分支目标（else_next）")
-            _check(n.get("else_next"), nid, "else_next")
-        elif ntype == "switch":
-            has_default = any(b.get("isDefault") for b in n.get("branches", []))
-            for b in n.get("branches", []):
-                _check(b.get("next"), nid, "branches[].next")
-            if not has_default:
-                raise ValueError(f"switch 节点 {nid!r} 缺少 :default 分支")
-        elif ntype == "case":
-            for c in n.get("cases", []):
-                _check(c.get("id") or c.get("next"), nid, "cases[].target")
-            _check(n.get("default"), nid, "default")
+    validate_flow_ir(data, recursive=True)
 
 
 def parse_sexpr(src: str) -> Flow:
     """编译、静态校验并构建，返回可执行的 ``Flow``。"""
-    data = compile_sexpr(src)
-    _static_validate(data)
-    return Flow.model_validate(data)
+    from plaita.dsl.ir_validate import build_flow
+
+    return build_flow(compile_sexpr(src))
 
 
 # ---------------------------------------------------------------------------

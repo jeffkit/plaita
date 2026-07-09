@@ -108,11 +108,10 @@ omit = [
   "plaita/event/utils.py",
 ]
 
-# 单元测试覆盖率门槛：当前 gate 范围（见 [tool.coverage.run] omit）整体 ≈ 80%
-# （实测 79.8%）。门禁设在 79%——既能挡住明显回退，又给新增代码留一点波动空间。
-# 目标：把整体覆盖拉到 85%+ 后，把 fail_under 上调到 80/85。
+# 单元测试覆盖率门槛：与 scripts/ci-gate.sh 的 COVERAGE_THRESHOLD 对齐为 80%。
+# gate 范围见 [tool.coverage.run] omit。目标：整体覆盖拉到 85%+ 后再上调。
 [tool.coverage.report]
-fail_under = 79
+fail_under = 80
 show_missing = true
 skip_covered = false
 exclude_lines = [

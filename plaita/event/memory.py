@@ -390,10 +390,10 @@ class InMemoryEventBus(EventBus):
                     if not subscription.matches_event(event, {}):
                         continue
                 
-                # 检查是否已处理（如果启用去重）
+                # 去重：仅跳过已成功处理过的 (event, handler)。
+                # 标记在 handler 成功之后写入，避免「先 mark 再执行 → 失败永久丢事件」。
                 if prevent_duplicate_consumption:
-                    is_new = await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
-                    if not is_new:
+                    if await self.processing_tracker.is_event_processed(event.event_id, handler_id):
                         continue
                 
                 # 添加到要处理的处理器列表
@@ -415,7 +415,7 @@ class InMemoryEventBus(EventBus):
                     logger.error("处理事件 %s 出错: %s", event.event_id, e, exc_info=True)
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
-        """处理事件并记录结果"""
+        """处理事件并记录结果；成功后才 mark 去重。"""
         try:
             import asyncio
             import inspect
@@ -431,6 +431,7 @@ class InMemoryEventBus(EventBus):
                 logger.info("同步处理器: %s 处理事件: %s", handler_id, event.event_id)
                 await loop.run_in_executor(None, handler, event)
                 
+            await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
             await self.processing_tracker.record_processing_attempt(
                 event.event_id, handler_id, "success"
             )
@@ -438,6 +439,7 @@ class InMemoryEventBus(EventBus):
             await self.processing_tracker.record_processing_attempt(
                 event.event_id, handler_id, "error", str(e)
             )
+            # 与历史行为一致：记录错误后不向上抛（调用方已有 try/except 兜底）
     
     async def _process_with_retry(self, handler: EventHandler, event: Event, 
                                 handler_id: str, retry_policy: RetryPolicy) -> None:
@@ -459,6 +461,7 @@ class InMemoryEventBus(EventBus):
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, handler, event)
                     
+                await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
                 await self.processing_tracker.record_processing_attempt(
                     event.event_id, handler_id, "success"
                 )

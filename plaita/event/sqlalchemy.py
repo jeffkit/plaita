@@ -692,13 +692,12 @@ class SqlalchemyEventBus(EventBus):
         
         # 处理所有匹配的处理器
         for handler_id, handler in matching_handlers:
-            # 检查是否需要去重
+            # 去重：仅跳过已成功处理过的；成功后再 mark
             if prevent_duplicate_consumption:
-                is_new = await self.processing_tracker.mark_event_processed(
+                if await self.processing_tracker.is_event_processed(
                     event.event_id, handler_id
-                )
-                if not is_new:
-                    continue  # 已处理过，跳过
+                ):
+                    continue  # 已成功处理过，跳过
             
             # 获取处理器配置
             config = self.handlers.get(handler_id, {})
@@ -711,6 +710,9 @@ class SqlalchemyEventBus(EventBus):
                 # 直接执行，不重试
                 try:
                     await handler(event)
+                    await self.processing_tracker.mark_event_processed(
+                        event.event_id, handler_id
+                    )
                     await self.processing_tracker.record_processing_attempt(
                         event.event_id, handler_id, "success"
                     )
@@ -728,7 +730,10 @@ class SqlalchemyEventBus(EventBus):
         while retries <= retry_policy.max_retries:
             try:
                 await handler(event)
-                # 成功处理
+                # 成功处理：先 mark 去重，再记历史
+                await self.processing_tracker.mark_event_processed(
+                    event.event_id, handler_id
+                )
                 await self.processing_tracker.record_processing_attempt(
                     event.event_id, handler_id, "success"
                 )
