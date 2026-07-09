@@ -62,9 +62,9 @@ approval = "plaita.server.nodes.approval_node:ApprovalNode"
 include = ["plaita", "plaita.*"]
 exclude = ["tests*", "examples*", "plaita-console*", "plaita_console*"]
 
-# Ruff lint。``BLE001`` (blind-except) 设为 warn——``except Exception`` /
-# ``except:`` 不带 ``logger``/``raise`` 的静默吞咽是本项目历史重灾区。新代码
-# PR 拦截, 老位点随各文件整改逐步清理。E722 (bare except) 直接 error。
+# Ruff lint。E722 (bare except) 在 CI 硬失败；BLE001 (blind-except) 仅 warn
+# （``ruff check --select BLE001 --exit-zero``），存量 ``except Exception``
+# 随各文件整改逐步清理——勿把 BLE001 配成硬门禁，否则会拦下整仓历史位点。
 [tool.ruff]
 line-length = 120
 target-version = "py310"

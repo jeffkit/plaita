@@ -82,7 +82,7 @@ print(flow.run(name="kongjie"))  # => "kongjie"
 
     单步执行、检查中间状态、构建调试器：
 
-    [Generator 模式 →](guide/execution-modes.md#generator-模式) &nbsp;·&nbsp; [生成器调试器示例 →](scenarios/debug-with-generator.md)
+    [Generator 模式 →](guide/execution-modes.md#generator) &nbsp;·&nbsp; [生成器调试器示例 →](scenarios/debug-with-generator.md)
 
 ---
 

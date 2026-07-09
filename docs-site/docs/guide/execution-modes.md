@@ -27,7 +27,7 @@ result = flow.run(name="kongjie")  # 阻塞直到完成
 result = await flow.arun(name="kongjie")
 ```
 
-## Generator 模式
+## Generator 模式 { #generator }
 
 异步生成器，**每执行完一个节点就 yield 一次输出**，调用方控制节奏、可在步骤间检查或修改上下文。适合调试器、可视化单步、交互式检查。
 

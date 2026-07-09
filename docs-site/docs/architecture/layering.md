@@ -34,7 +34,7 @@ flowchart TD
 
 `EventNode` 与 `DistributedStrategy` 需要事件总线，实现（memory/redis/sqlalchemy）在 `plaita.event`。若 `core` **在模块顶层**直接 `import plaita.event`，会把可选后端的重依赖拖进每个 foundation 消费者，破坏「核心极轻」。
 
-## 默认 EventBus：函数体内 lazy import（非全局 provider）
+## 默认 EventBus：函数体内 lazy import（非全局 provider） { #默认-eventbus函数体内-lazy-import非全局-provider }
 
 历史上曾用模块级 `_default_event_bus_provider` + `set_default_event_bus_provider` 做依赖反转。该全局可变 singleton 已删除。
 

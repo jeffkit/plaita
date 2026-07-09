@@ -11,7 +11,7 @@ flowchart LR
 
 !!! tip "AI Agent 场景"
 
-    `@flow` + [`flow_from_source`](#运行期生成flow_from_source) 最适合 LLM 运行期生成流程（编译期校验 + 无源文件依赖）。端到端场景见 [应用场景 - Agent 编排](../scenarios/agent-orchestration.md)。
+    `@flow` + [`flow_from_source`](#flow_from_source) 最适合 LLM 运行期生成流程（编译期校验 + 无源文件依赖）。端到端场景见 [应用场景 - Agent 编排](../scenarios/agent-orchestration.md)。
 
 ---
 
@@ -253,7 +253,7 @@ except NodeExecutionError as e:
 
 > JSON / S-expr / Builder 前端不产生 `source_line`，对应节点该字段为 `None`，运行期错误消息不附加行号后缀——仍按节点 id 定位。
 
-### 运行期生成：`flow_from_source`
+### 运行期生成：`flow_from_source` { #flow_from_source }
 
 `@flow` 装饰器依赖 `inspect.getsource`，要求函数定义在真实 `.py` 源文件里。**运行期动态生成**的场景（AI 拼一段源码字符串、立刻编译执行）走装饰器会失败——动态函数没有源文件。
 

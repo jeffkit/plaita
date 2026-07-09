@@ -185,7 +185,7 @@ _default_registry = NodeRegistry()
 _default_registry_explicitly_initialized = False
 
 
-def init_default_registry(*extra_nodes, auto_discover: bool = True) -> NodeRegistry:
+def init_default_registry(*extra_nodes: Type[Node], auto_discover: bool = True) -> NodeRegistry:
     """显式 (重新) 初始化进程级默认 ``NodeRegistry``。
 
     历史上默认 registry 是模块级 ``_default_registry = NodeRegistry()`` 在 import

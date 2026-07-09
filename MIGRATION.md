@@ -184,7 +184,7 @@ errors = get_background_errors(execution)         # 取后台分支失败列表
 
 ### 附：异常治理 / executor 拆分 / mutmut 范围
 
-- **bare `except:` 清零**：`plaita/` 内 5 处 bare `except:` 全部改 `except Exception:` 并加 `logger.warning`/`debug`；`ruff` 配 `E722`（error）/ `BLE001`（blind-except warn），新代码 PR 拦截。
+- **bare `except:` 清零**：`plaita/` 内 5 处 bare `except:` 全部改 `except Exception:` 并加 `logger.warning`/`debug`；CI 对 `E722`（bare except）硬失败，对 `BLE001`（blind-except）仅 warn（`--exit-zero`），存量位点随整改逐步清理。
 - **`executor.py` 拆分**：757 行拆成 `plaita/core/strategies.py`（`RunOptions`/`ExecutionMode`/三策略/helper）+ `plaita/core/executor.py`（`FlowExecution` facade）。公共导出不变（`from plaita import FlowExecution, ExecutionMode` 仍可用）。
 - **mutmut 覆盖范围诚实声明**：变异测试**仅覆盖纯同步路径**（callback/expression/parallel_executor/calculate/decide）；async/distributed/timeout 不在 mutmut 自动覆盖范围，见 `docs/mutation-testing.md` 顶部声明。引用变异测试结果时请标注"仅同步路径"。
 

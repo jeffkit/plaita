@@ -50,7 +50,7 @@ flowchart TD
     C1 -.->|未命中时回溯求值| P
 ```
 
-## event bus 获取
+## event bus 获取 { #event-bus-获取 }
 
 `get_or_create_event_bus()` 按优先级解析 event bus：
 
