@@ -23,19 +23,20 @@ import time
 import uuid
 from typing import Dict, List, Set
 
+# 可选后端：缺 sqlalchemy/aiosqlite 时跳过整文件，避免 CI 未装 extra 时
+# 在 collection 阶段硬失败（与 coverage omit 的 optional backend 策略一致）。
+pytest.importorskip("sqlalchemy")
+pytest.importorskip("aiosqlite")
+
+from sqlalchemy.ext.asyncio import create_async_engine
+
 from plaita.event.core import Event, RetryPolicy
 from plaita.event.sqlalchemy import (
-    SqlalchemyEventBus, SqlalchemyEventStorage, 
+    SqlalchemyEventBus, SqlalchemyEventStorage,
     SqlalchemyEventSubscriptionStorage, SqlalchemyEventProcessingTracker,
     Base
 )
 from plaita.event.exceptions import EventTimeoutError
-
-# 导入SQLAlchemy组件
-try:
-    from sqlalchemy.ext.asyncio import create_async_engine
-except ImportError:
-    raise ImportError("请安装 SQLAlchemy 依赖: pip install sqlalchemy sqlalchemy[asyncio]")
 
 # 使用基于临时文件的 SQLite 数据库。
 # 不能用 ``sqlite+aiosqlite:///:memory:``:
