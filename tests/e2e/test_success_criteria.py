@@ -44,19 +44,19 @@ class TestSC003LargestClassUnder200LOC:
         )
 
     def test_normal_strategy_under_200_loc(self):
-        sizes = self._get_class_sizes(CORE_DIR / "executor.py")
+        sizes = self._get_class_sizes(CORE_DIR / "strategies.py")
         assert sizes["NormalStrategy"] < 200, (
             f"NormalStrategy is {sizes['NormalStrategy']} LOC (limit: 200)"
         )
 
     def test_generator_strategy_under_200_loc(self):
-        sizes = self._get_class_sizes(CORE_DIR / "executor.py")
+        sizes = self._get_class_sizes(CORE_DIR / "strategies.py")
         assert sizes["GeneratorStrategy"] < 200, (
             f"GeneratorStrategy is {sizes['GeneratorStrategy']} LOC (limit: 200)"
         )
 
     def test_distributed_strategy_under_200_loc(self):
-        sizes = self._get_class_sizes(CORE_DIR / "executor.py")
+        sizes = self._get_class_sizes(CORE_DIR / "strategies.py")
         assert sizes["DistributedStrategy"] < 200, (
             f"DistributedStrategy is {sizes['DistributedStrategy']} LOC (limit: 200)"
         )

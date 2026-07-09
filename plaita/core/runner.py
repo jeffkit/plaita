@@ -69,6 +69,69 @@ def _coerce_strategy(value) -> ErrorStrategy:
     return ErrorStrategy.ABORT
 
 
+
+def _parse_timeout(timeout) -> Optional[int]:
+    if not timeout:
+        return None
+    if isinstance(timeout, (int, float)):
+        return int(timeout)
+    if not isinstance(timeout, str):
+        return None
+    if timeout.isdigit():
+        return int(timeout)
+    duration = isodate.parse_duration(timeout)
+    return None if duration.total_seconds() == 0 else int(duration.total_seconds() * 1000)
+
+
+def _handle_timeout(flow, handler, node, time_limit_by_flow: bool):
+    try:
+        if handler:
+            return handler.handle()
+    except TimeoutError:
+        message = f"Timeout handler strategy for executing node {node.name or node.id} is abort"
+    else:
+        message = f"Node {node.name or node.id} execution timeout"
+    message += _node_loc_suffix(node)
+    error_type = FlowErrorType.FLOW_ERROR if time_limit_by_flow else FlowErrorType.NODE_ERROR
+    err = NodeTimeoutError(message, node=node, error_type=error_type)
+    err.source_line = _node_source_loc(node)
+    raise err
+
+
+def _handle_flow_result_error(flow, node, e: FlowResultError):
+    err = ErrorResultException(e.code, e.message, node=node)
+    err.source_line = _node_source_loc(node)
+    raise err from e
+
+
+def _handle_node_error(flow, node, error_handler, e: Exception):
+    logger.warning("handle node error: %s", node.name or node.id, exc_info=True)
+    strategy = _coerce_strategy(error_handler.strategy if error_handler else None)
+    if not error_handler or strategy == ErrorStrategy.ABORT:
+        code = DEFAULT_NODE_ABORT_CODE if not error_handler else error_handler.error_code
+        message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}{_node_loc_suffix(node)}"
+        if error_handler and error_handler.error_message:
+            message = error_handler.error_message
+        err = NodeExecutionError(message, node=node, code=code)
+        err.source_line = _node_source_loc(node)
+        raise err from e
+    if strategy == ErrorStrategy.CONTINUE:
+        return None
+    if strategy == ErrorStrategy.CONTINUE_WITH:
+        return error_handler.default_value
+    return None
+
+
+def _get_error_result(error_handler):
+    if not error_handler:
+        return None
+    strategy = _coerce_strategy(error_handler.strategy)
+    if strategy == ErrorStrategy.CONTINUE:
+        return None
+    if strategy == ErrorStrategy.CONTINUE_WITH:
+        return error_handler.default_value
+    return None
+
 class NodeRunner:
     """Handles single-node execution with timeout, retry, and error handling."""
 
@@ -144,14 +207,14 @@ class NodeRunner:
                 return result
 
             except FlowResultError as e:
-                self._handle_flow_result_error(flow, node, e)
+                _handle_flow_result_error(flow, node, e)
             except (TimeoutError, asyncio.TimeoutError):
-                return self._handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
+                return _handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
             except (Exception, NodeException) as e:
                 if attempt == max_retries:
-                    return self._handle_node_error(flow, node, error_handler, e)
+                    return _handle_node_error(flow, node, error_handler, e)
 
-        return self._get_error_result(error_handler)
+        return _get_error_result(error_handler)
 
     async def _run_with_timeout(self, node, timeout_ms: Optional[int]) -> Any:
         """Execute node with timeout. Uses asyncio for async nodes, threads for sync."""
@@ -216,64 +279,17 @@ class NodeRunner:
             )
             raise TimeoutError(f"Node execution timed out after {timeout_ms}ms")
 
-    # -- error handling (extracted from FlowExecution) --
-
+    # Thin wrappers keep historical ``runner._get_error_result`` call sites.
     def _handle_timeout(self, flow, handler, node, time_limit_by_flow: bool):
-        try:
-            if handler:
-                result = handler.handle()
-                return result
-        except TimeoutError:
-            message = f"Timeout handler strategy for executing node {node.name or node.id} is abort"
-        else:
-            message = f"Node {node.name or node.id} execution timeout"
-        message += _node_loc_suffix(node)
-
-        error_type = FlowErrorType.FLOW_ERROR if time_limit_by_flow else FlowErrorType.NODE_ERROR
-        err = NodeTimeoutError(message, node=node, error_type=error_type)
-        err.source_line = _node_source_loc(node)
-        raise err
+        return _handle_timeout(flow, handler, node, time_limit_by_flow)
 
     def _handle_flow_result_error(self, flow, node, e: FlowResultError):
-        err = ErrorResultException(e.code, e.message, node=node)
-        err.source_line = _node_source_loc(node)
-        raise err from e
+        return _handle_flow_result_error(flow, node, e)
 
     def _handle_node_error(self, flow, node, error_handler, e: Exception):
-        logger.warning("handle node error: %s", node.name or node.id, exc_info=True)
-        strategy = _coerce_strategy(error_handler.strategy if error_handler else None)
-        if not error_handler or strategy == ErrorStrategy.ABORT:
-            code = DEFAULT_NODE_ABORT_CODE if not error_handler else error_handler.error_code
-            message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}{_node_loc_suffix(node)}"
-            if error_handler and error_handler.error_message:
-                message = error_handler.error_message
-            err = NodeExecutionError(message, node=node, code=code)
-            err.source_line = _node_source_loc(node)
-            raise err from e
-        elif strategy == ErrorStrategy.CONTINUE:
-            return None
-        elif strategy == ErrorStrategy.CONTINUE_WITH:
-            return error_handler.default_value
+        return _handle_node_error(flow, node, error_handler, e)
 
     def _get_error_result(self, error_handler):
-        if not error_handler:
-            return None
-        strategy = _coerce_strategy(error_handler.strategy)
-        if strategy == ErrorStrategy.CONTINUE:
-            return None
-        elif strategy == ErrorStrategy.CONTINUE_WITH:
-            return error_handler.default_value
-        return None
+        return _get_error_result(error_handler)
 
-    @staticmethod
-    def _parse_timeout(timeout) -> Optional[int]:
-        if not timeout:
-            return None
-        if isinstance(timeout, (int, float)):
-            return int(timeout)
-        if not isinstance(timeout, str):
-            return None
-        if timeout.isdigit():
-            return int(timeout)
-        duration = isodate.parse_duration(timeout)
-        return None if duration.total_seconds() == 0 else int(duration.total_seconds() * 1000)
+    _parse_timeout = staticmethod(_parse_timeout)

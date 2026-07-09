@@ -88,26 +88,43 @@ else
 fi
 echo ""
 
-# 4. Module size check (SC-003: FlowExecution < 200 LOC)
-echo "[4/4] Checking module sizes..."
-EXECUTOR_LOC=$(grep -c '.' plaita/core/executor.py 2>/dev/null || echo 0)
-echo "  plaita/core/executor.py: $EXECUTOR_LOC lines total"
+# 4. Module size check (SC-003: core execution classes < 200 LOC)
+echo "[4/4] Checking module sizes (SC-003)..."
+if python -c "
+import ast, sys
+from pathlib import Path
 
-FACADE_LOC=$(python -c "
-import ast
-tree = ast.parse(open('plaita/core/executor.py').read())
-for node in ast.walk(tree):
-    if isinstance(node, ast.ClassDef) and node.name == 'FlowExecution':
-        loc = node.end_lineno - node.lineno + 1
-        print(loc)
-        break
-" 2>/dev/null || echo "unknown")
-echo "  FlowExecution class: $FACADE_LOC lines"
-if [ "$FACADE_LOC" != "unknown" ] && [ "$FACADE_LOC" -gt 200 ]; then
-    echo "  ✗ FlowExecution exceeds 200 LOC (SC-003)"
-    FAIL=1
+checks = [
+    ('plaita/core/executor.py', 'FlowExecution'),
+    ('plaita/core/context.py', 'ExecutionContext'),
+    ('plaita/core/runner.py', 'NodeRunner'),
+    ('plaita/core/strategies.py', 'NormalStrategy'),
+    ('plaita/core/strategies.py', 'GeneratorStrategy'),
+    ('plaita/core/strategies.py', 'DistributedStrategy'),
+    ('plaita/core/callback.py', 'CallbackManager'),
+]
+fail = 0
+for path, name in checks:
+    tree = ast.parse(Path(path).read_text())
+    loc = next(
+        (n.end_lineno - n.lineno + 1 for n in ast.walk(tree)
+         if isinstance(n, ast.ClassDef) and n.name == name),
+        None,
+    )
+    if loc is None:
+        print(f'  ✗ {name}: not found in {path}')
+        fail = 1
+        continue
+    mark = '✓' if loc < 200 else '✗'
+    print(f'  {mark} {name}: {loc} LOC')
+    if loc >= 200:
+        fail = 1
+sys.exit(fail)
+"; then
+    echo "  ✓ All SC-003 classes within 200 LOC"
 else
-    echo "  ✓ FlowExecution within 200 LOC (SC-003)"
+    echo "  ✗ SC-003 class size check failed"
+    FAIL=1
 fi
 echo ""
 

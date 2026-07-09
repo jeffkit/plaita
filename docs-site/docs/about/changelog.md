@@ -48,7 +48,8 @@
 ### 测试
 
 - `tests/unit/test_facade_attr_proxy.py` 改为验证显式委托行为（无 magic、未知属性不污染 context、`execution_id` 只读）。
-- 顺手把 `ExecutionContext` 拆出 `_safe_environment` / `_coerce_input_value` 两个模块级纯函数，类体回到 196 LOC，满足 SC-003 `< 200` 预算。
+- 顺手把 `ExecutionContext` 拆出 `_safe_environment` / `_coerce_input_value` 两个模块级纯函数，类体回到 SC-003 `< 200` 预算。
+- **SC-003 再收紧**：`FlowExecution` 委托属性 / 入口方法拆到 `_execution_delegates` / `_execution_entry`；`NodeRunner` 错误处理下沉为模块函数；`ExecutionContext` typed accessors 抽 mixin；`ci-gate` 与 e2e 测试改为检查 `strategies.py` 中的策略类。
 
 ---
 

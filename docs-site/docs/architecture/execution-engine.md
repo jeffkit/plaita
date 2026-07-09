@@ -21,7 +21,9 @@ flowchart TD
 | `ExecutionContext` | `plaita.core.context` | 状态、变量作用域、父子链、event bus 获取、`to_dict`/`from_dict` |
 | `NodeRunner` | `plaita.core.runner` | 单节点执行 + 超时 + 重试 + 错误策略 + 协作式取消 |
 | `CallbackManager` | `plaita.core.callback` | 把 `on_*` 事件分发给多个 `FlowCallback` |
-| `ExecutionStrategy` | `plaita.core.executor` | 模式相关的控制流：`NormalStrategy` / `GeneratorStrategy` / `DistributedStrategy` |
+| `ExecutionStrategy` | `plaita.core.strategies` | 模式相关的控制流：`NormalStrategy` / `GeneratorStrategy` / `DistributedStrategy` |
+
+`FlowExecution` 本体保持 SC-003 预算（< 200 LOC）：显式委托属性在 `plaita.core._execution_delegates`，公共入口（`run` / `run_compatible` / `run_distributed` 等）在 `plaita.core._execution_entry`。对外 API 与导入路径不变。
 
 ## facade 的显式委托
 

@@ -139,14 +139,40 @@ def _resolve_expression_string(evaluator, state, prefix, parent, value):
     return result
 
 
-class ExecutionContext:
-    """Runtime state facade for a flow execution.
 
-    Owns a ``CheckpointState`` (the typed, distributed-checkpoint model in
-    ``plaita.core.state``) plus the in-memory-only pieces that never enter a
-    checkpoint: the parent chain, event bus, cancel event, evaluator, and the
-    ``expose_env`` allowlist. State read/write delegates to ``CheckpointState``
-    so the magic-string key schema lives in one place.
+class _SystemStateAccessors:
+    """Typed LAST_NODE / BRANCH / FLOW_ID accessors over CheckpointState keys."""
+
+    @property
+    def last_node_id(self) -> Optional[str]:
+        return self.get_state(f"{self.express_prefix}LAST_NODE")
+
+    @last_node_id.setter
+    def last_node_id(self, value: Optional[str]) -> None:
+        self.set_state(f"{self.express_prefix}LAST_NODE", value)
+
+    @property
+    def last_branch(self) -> Optional[str]:
+        return self.get_state(f"{self.express_prefix}BRANCH")
+
+    @last_branch.setter
+    def last_branch(self, value: Optional[str]) -> None:
+        self.set_state(f"{self.express_prefix}BRANCH", value)
+
+    @property
+    def flow_id(self) -> Optional[str]:
+        return self.get_state(f"{self.express_prefix}FLOW_ID")
+
+    @flow_id.setter
+    def flow_id(self, value: Optional[str]) -> None:
+        self.set_state(f"{self.express_prefix}FLOW_ID", value)
+
+
+class ExecutionContext(_SystemStateAccessors):
+    """Runtime state facade: CheckpointState + parent/event_bus/cancel/evaluator.
+
+    In-memory-only pieces never enter a checkpoint; state R/W goes through
+    ``CheckpointState`` so the magic-string key schema lives in one place.
     """
 
     def __init__(
@@ -165,12 +191,8 @@ class ExecutionContext:
     ) -> None:
         self.parent = parent
         self.event_bus = event_bus
-        # $ENV allowlist (None/empty => default-empty $ENV). Flow layer pipes
-        # its expose_env down via setup_flow (the single source of truth).
         self.expose_env = list(expose_env) if expose_env else []
-        # cancel_event: 进程内协作取消。有 parent 时共享 parent 的 Event，使
-        # 父 flow 取消能传到进程内子 flow / 并行分支（thread 模式）。跨进程
-        # 不传播——__getstate__ 会 pop 掉，子进程经 __setstate__ 重建全新 Event。
+        # 进程内共享 parent Event；跨进程由 __getstate__/__setstate__ 重建。
         self.cancel_event = parent.cancel_event if parent is not None else threading.Event()
         self.express_prefix = express_prefix
         self.express_input_name = express_input_name
@@ -179,8 +201,6 @@ class ExecutionContext:
         self.express_global_name = express_global_name
         self.express_environment_variable = express_environment_variable
         self._state = CheckpointState(**self._state_kwargs())
-        # Eager execution id (available before clean/setup_flow; clean replaces
-        # per run, from_dict overwrites from persist).
         self._state[f"{express_prefix}EXECUTION_ID"] = uuid.uuid4().hex
         self._evaluator = evaluator or ExpressionEvaluator()
 
@@ -214,17 +234,10 @@ class ExecutionContext:
         return self._state.get(key, default)
 
     def clean(self) -> None:
-        """Reset state to a fresh run and re-sync cancel_event.
+        """Reset state for a fresh run and re-sync cancel_event.
 
-        - new ``$EXECUTION_ID`` + exposed env snapshot (from current allowlist)
-        - ``expose_env`` itself is NOT reset here: ``setup_flow`` is the single
-          source of truth and will overwrite it from ``flow.expose_env`` (and
-          re-snapshot ``$ENV``) before the flow observes state. Production
-          never constructs an ExecutionContext with a non-empty allowlist, so
-          no cross-flow residue is possible.
-        - ``cancel_event``: root context gets a fresh Event; child context
-          re-syncs to its parent's current Event so the in-process cancel
-          chain survives clean() cycles.
+        ``expose_env`` is not cleared here — ``setup_flow`` overwrites it from
+        ``flow.expose_env``. Root gets a new Event; child re-syncs to parent.
         """
         self._state = CheckpointState.fresh(
             **self._state_kwargs(),
@@ -237,9 +250,7 @@ class ExecutionContext:
         )
 
     def __getstate__(self):
-        # threading.Event isn't picklable; child process gets a fresh unset
-        # event via __setstate__. In-process cancel propagation (parent→child
-        # sharing the same Event) does NOT cross the process boundary.
+        # Event isn't picklable; child process gets a fresh unset Event.
         state = self.__dict__.copy()
         state.pop("cancel_event", None)
         return state
@@ -250,18 +261,15 @@ class ExecutionContext:
             self.cancel_event = threading.Event()
 
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
-        """Populate flow-level state ($INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV) + sync flow.expose_env."""
+        """Populate $INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV and sync expose_env."""
         flow_allowlist = list(getattr(flow, "expose_env", None) or [])
         if flow_allowlist != self.expose_env:
             self.expose_env = flow_allowlist
         global_context = (flow.global_context.copy() if flow.global_context else {})
         global_context.update({"flow_id": flow.flow_id})
+        # $PARENT is a plain-dict snapshot (checkpoint-safe; not a live state).
         self._state.setup_flow(
             input_value=_coerce_input_value(args, kwargs),
-            # $PARENT: plain-dict snapshot. After the _get_attr root fix a live
-            # CheckpointState would also resolve, but parent_context is stored
-            # on CheckpointState and serialized into distributed checkpoints —
-            # nesting a live CheckpointState here would break to_checkpoint_dict.
             parent_context=dict(self.parent.context) if self.parent else {},
             global_context=global_context,
             flow_id=flow.flow_id,
@@ -295,33 +303,6 @@ class ExecutionContext:
     def execution_id(self) -> str:
         return self.get_state(f"{self.express_prefix}EXECUTION_ID", "")
 
-    # -- typed system-state accessors: CheckpointState owns field<->key mapping,
-    # so to_dict/from_dict stay forward/backward-compatible across upgrades.
-
-    @property
-    def last_node_id(self) -> Optional[str]:
-        return self.get_state(f"{self.express_prefix}LAST_NODE")
-
-    @last_node_id.setter
-    def last_node_id(self, value: Optional[str]) -> None:
-        self.set_state(f"{self.express_prefix}LAST_NODE", value)
-
-    @property
-    def last_branch(self) -> Optional[str]:
-        return self.get_state(f"{self.express_prefix}BRANCH")
-
-    @last_branch.setter
-    def last_branch(self, value: Optional[str]) -> None:
-        self.set_state(f"{self.express_prefix}BRANCH", value)
-
-    @property
-    def flow_id(self) -> Optional[str]:
-        return self.get_state(f"{self.express_prefix}FLOW_ID")
-
-    @flow_id.setter
-    def flow_id(self, value: Optional[str]) -> None:
-        self.set_state(f"{self.express_prefix}FLOW_ID", value)
-
     def get_or_create_event_bus(self):
         if self.event_bus:
             return self.event_bus
@@ -332,19 +313,16 @@ class ExecutionContext:
         return self.event_bus
 
     def child(self) -> ExecutionContext:
+        express = {k: getattr(self, k) for k in (
+            "express_prefix", "express_input_name", "express_parent_name",
+            "express_node_name", "express_global_name", "express_environment_variable",
+        )}
         return ExecutionContext(
             parent=self, event_bus=self.event_bus,
-            evaluator=self._evaluator, expose_env=self.expose_env,
-            **{k: getattr(self, k) for k in (
-                "express_prefix", "express_input_name", "express_parent_name",
-                "express_node_name", "express_global_name",
-                "express_environment_variable",
-            )},
+            evaluator=self._evaluator, expose_env=self.expose_env, **express,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        # Drift guard: nodes can still set_state() arbitrary keys; warn on
-        # system-shaped unknowns so a new magic key is caught at review/log time.
         from plaita.core.state import validate_checkpoint
         data = self._state.to_checkpoint_dict()
         for warning in validate_checkpoint(data, self.express_prefix):
