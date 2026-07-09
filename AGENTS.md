@@ -52,8 +52,8 @@ mkdocs build -f docs-site/mkdocs.yml --strict   # 改文档后
 
 完整契约：[`docs/mutation-testing.md` §7](docs/mutation-testing.md)。摘要：
 - 日常只跑相关单测；改核心模块后 **单模块** mutation + recheck
-- 当前优先：`executor.py` resume 透传 → `strategies`/`event/memory` 等价分类
-- 假低分教训：flow/errors/registry 初筛「缺口」实为 cache 污染，真实 100%（§2.19）
+- 当前优先：strategies 等价收尾（不硬杀）→ 可选扩面 sexpr/codeflow/async_utils
+- 假低分教训：初筛不可信；recheck 须在 `mutants/` 内用 `tests/...` 路径（§2.20）
 
 ## 深入阅读
 

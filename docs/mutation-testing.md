@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-09（§2.19 recheck 确认 errors.py/node/__init__.py/flow.py 真实 100%；§2.14 7 个模块接入既有 *_mutations.py；§2.13 event_node 94.9%、§2.12 state 99.1%、§2.11 io 97.4%；§2.4 event/memory 重新度量）
+> **最后更新**：2026-07-09（§2.20 executor 98.1%；§2.21 event/memory 真实 100%；§2.16 strategies 确认 88% 全等价/边界；§2.19 flow/errors/registry 100%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -11,10 +11,10 @@
 > `event_node.py` 已接入至 **94.9%**（187/197，见 §2.13）；
 > `io.py` 已补强至 **97.4%**（259/266，见 §2.11）；
 > `event/core.py` 已接入至 **91.7%**（99/108，见 §2.14）；
-> `errors.py` recheck 确认真实 **100%**（90/90，见 §2.19；原 84.4% 为 cache 污染假低分）；
-> `node/__init__.py` recheck 确认真实 **100%**（112/112，见 §2.19；原 83.9% 为 cache 污染假低分）；
-> `flow.py` recheck 确认真实 **100%**（200/200，见 §2.19；原 79.0% 为 cache 污染假低分）；
-> `strategies.py` 已校准至 **88%**（46/52，见 §2.16）。
+> `errors.py` / `node/__init__.py` / `flow.py` recheck 真实 **100%**（见 §2.19）；
+> `event/memory.py` recheck 真实 **100%**（416/416，见 §2.21；原 94% 为 async 假低分）；
+> `executor.py` 补强至 **98.1%**（201/205，见 §2.20；剩 4 等价）；
+> `strategies.py` recheck 确认 **88%**（46/52，6 全等价/边界，见 §2.16）。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
 > **⚠️ 覆盖范围声明（2026-07，诚实评估）**
@@ -140,13 +140,13 @@
 | `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
 | `plaita/core/expression_parser.py` | **100%** | 313/313 | 0 | ✅ 已强化（见 §2.5） |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
-| `plaita/core/executor.py` | **94%** | 192/205 | 13 | ✅ 接入 test_executor_mutations + 分母 bug 修复后真实分（见 §2.17），13 survived 集中在 distributed resume 边缘路径 |
+| `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
 | `plaita/dsl/builder.py` | **99.9%** | 876/877 | 1 | ✅ 已强化（见 §2.8） |
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | **100%** | 90/90 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 84.4%/14 survived 为 mutmut in-process cache 污染假低分 |
 | `plaita/node/__init__.py` | **100%** | 112/112 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 83.9%/18 survived 为 mutmut in-process cache 污染假低分 |
-| `plaita/event/memory.py` | **94%** | 393/418 | 25 | ⚠️ 见 §2.10/§2.18（从 65%→74%→86%→91%→94%，25 survived 多为边界算符/等价） |
-| `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ 接入 + 分母 bug 修复后真实分（见 §2.14/§2.16），6 survived 多为等价 |
+| `plaita/event/memory.py` | **100%** | 416/416 | 0 | ✅ recheck 确认真实 100%（见 §2.21）；原 94%/25 survived 为 async 假低分 |
+| `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ recheck 确认（见 §2.16）；6 survived 全等价/边界，不硬杀 |
 | `plaita/core/flow.py` | **100%** | 200/200 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 79.0%/42 survived 为 mutmut in-process cache 污染假低分 |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
 | `plaita/event/core.py` | **91.7%** | 99/108 | 9 | ✅ 接入 test_event_core_mutations（见 §2.14） |
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（真实 100%，见 §2.19）→ ~~`flow.py`（8%）~~（真实 100%，见 §2.19）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（真实 100%，见 §2.19）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ ~~`event/memory.py`（6%）~~（已升至 94%，25 survived 多为边界算符/等价）
+> - 优先队列：历史低分模块多数已达 100% 或等价收尾；当前见 §7.3（strategies 88% 等价收尾；扩面可选 sexpr/codeflow/async_utils）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -594,25 +594,33 @@ strategies 是异步模块，recheck 阶段每个变异点跑 161 项异步测�
   - 日志含异常文本（`"not JSON serializable"` / `"Expecting"`）——杀
     `logger.error(fmt, None)` 和 `logger.error(fmt, )`（异常参数被丢弃）
 
-## 2.16 strategies.py 真实分数校准（2026-07-08，88%）
+## 2.16 strategies.py 真实分数校准（2026-07-08，88%；2026-07-09 recheck 确认）
 
 `plaita/core/strategies.py` 在 §2.14 接入后显示 38.5%（20/52），是分母 bug +
 异步 recheck 未能跑全的双重低估。修分母 bug（§2.11）后重跑，真实分数 **88%
 （46/52，6 survived）**。
 
+**2026-07-09 独立 worktree recheck 确认**：从零清缓存重跑初筛 + 对 32 个非-killed
+独立子进程 recheck（`timeout 120`，含完整 async 套件），结果仍为 **46/52 = 88%**，
+与原始记录吻合。无新真漏测，无补测。
+
 ### 剩余 6 个 survived（全为等价变异或边界算符，不可/不值得杀灭）
 
-- `_coerce_mode._1`（`or`→`and`）：`m is None and isinstance(m, ExecutionMode)`
-  对 None（False and X = False，走到末尾 return None）和 str（False and X =
-  False，走 str 路径）均与原代码 `or` 行为一致——等价。
-- `NormalStrategy.execute._3/_4/_5`（`result=None`→`""`、`reached_end=False`→
-  `None`/`True`）：这三个局部变量在 while 循环里被 `_advance_one` 返回值覆盖，
-  初始值永不影响输出——等价。
-- `NormalStrategy.execute._31`（`>`→`>=`）、`_33`（`/1000`→`/1001`）：超时比较
-  的边界算符 / 除数变异，差异在 1ms / 0.1% 量级，需精确 mock `time.time()` 并
-  触发恰好在边界的超时才能杀，成本高、语义价值极低，不补。
+| mutant id | diff 摘要 | 分类 |
+|-----------|-----------|------|
+| `_coerce_mode._1` | `or`→`and` | 等价 |
+| `execute._3` | `result=None`→`""` | 等价（初始值被 `_advance_one` 覆盖） |
+| `execute._4` | `reached_end=False`→`None` | 等价（初始值被覆盖） |
+| `execute._5` | `reached_end=False`→`True` | 等价（初始值被覆盖） |
+| `execute._31` | `>`→`>=` 超时比较 | 边界算符（1ms 级） |
+| `execute._33` | `/1000`→`/1001` 除数 | 边界算符（0.1% 级） |
 
-> 异步模块 recheck 成本：161 项 async 测试 × 31 个候选变异点 ≈ 5.5 分钟。
+详细等价分析：
+- `_coerce_mode._1`（`or`→`and`）：对 None / str 两路均与原 `or` 行为一致——等价。
+- `execute._3/_4/_5`：局部初始值在首次 `_advance_one` 后被覆盖——等价。
+- `execute._31/_33`：超时边界/除数，差异 1ms / 0.1%，不硬杀。
+
+> 异步模块 recheck 成本：约 8 分钟（含 async 全量套件）。
 
 ## 2.17 executor.py 接入 test_executor_mutations + 真实分校准（2026-07-08，94%）
 
@@ -640,8 +648,8 @@ strategies 是异步模块，recheck 阶段每个变异点跑 161 项异步测�
 - `run_compatible._29`、`_ensure_flow_resolved._8`、`_handle_resume_operation._7`：
   零星参数透传。
 
-> 13 个 survived 全在 distributed resume 这一边缘路径，逐个补强需大量异步测试
-> 调试（recheck round2 单次 ~3 分钟），边际收益递减，暂留。
+> 13 个 survived 全在 distributed resume 这一边缘路径。**2026-07-09 已补强至
+> 98.1%（见 §2.20）**，剩 4 个等价变异。
 
 ## 2.18 event/memory.py 精确断言 + 脚本 cache 污染修复（2026-07-08，74%）
 
@@ -682,6 +690,10 @@ event/memory 的 recheck 完全跑偏或虚高 100%：
 
 这些变异语义差异在 1ms / 0.1% / 边界条件量级，或属完全等价，补强成本高、
 价值低，到此为止。
+
+> **⚠️ 2026-07-09 勘误**：上述 25 survived 结论已被 §2.21 推翻。
+> 完整测试套件独立进程 recheck 后 **0 survived**，真实分数 **100%（416/416）**。
+> 「94%」来自 in-process 被迫排除 async 超时测试导致的假低分。详见 §2.21。
 
 ## 3. 已知坑点（mutmut + 本仓库）
 
@@ -891,6 +903,46 @@ server、client、demo 等）整体行覆盖 **≈ 80.5%**，909 个单元测试
 
 ---
 
+## 2.20 executor.py 补强至 98.1%（2026-07-09）
+
+在 §2.17（94%，13 survived）上继续推进。最终 **201/205 = 98.1%**，剩 4 等价。
+
+### 根因：recheck 路径错误曾导致新测试「零效果」
+
+从 `mutants/` 跑 recheck 时若用 `../tests/unit/...`，pytest rootdir 仍落在
+worktree 根，`import plaita` 加载 editable 原码，变异 trampoline 未激活。
+正确：在 `mutants/` 内用 `tests/unit/...`，rootdir=`mutants/`。
+
+### 新增测试（`tests/unit/test_executor_mutations.py`，3 类 7 方法）
+
+- `TestRunClassmethodDistributedParamForwarding`：杀 `run._27/_28/_33/_34/_43/_44/_45`
+  （`resume_data`/`timeout` 透传到 `run_distributed`）
+- `TestHandleResumeOperationParamForwarding`：杀 `_handle_resume_operation._7`
+- `TestRunCompatibleExceptionPath`：杀 `run_compatible._29`（lazy 异常路径 `on_flow_end`）
+
+### 剩余 4 个等价变异
+
+| 变异 | 等价原因 |
+|------|---------|
+| `__init__._5` | `timeout=None` 与省略默认值等价 |
+| `run._20` | 初次 `None or None = None` |
+| `run._21` | `None and x = None` 与上等价 |
+| `_ensure_flow_resolved._8` | 该路径 flow 参数无独立可观测效果 |
+
+---
+
+## 2.21 event/memory.py recheck 真实 100%（2026-07-09，416/416）
+
+§2.18 的 94%/25 survived 为假低分。独立 worktree：干净初筛 416 点、29 survived
+（因 3 个 async 超时测试在 trampoline 下抛 `CancelledError` 被迫 `--deselect`）；
+对 29 个做独立子进程全量套件 recheck → **29/29 killed，真实 100%**。
+
+假逃主因：`wait_for_event` 超时测被排除 + async spy 时序在 in-process 不稳。
+现有 `TestWaitForEventPrecise` / `TestProcessWithRetryRecording` 等已覆盖，
+**无需新测试**。
+
+---
+
 ## 7. 持续推进规范（给开发者 / AI）
 
 > 本节是「怎么继续做」的操作契约。入口导航见仓库根目录 `AGENTS.md` / `CLAUDE.md`。
@@ -925,12 +977,13 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 
 ### 7.3 当前优先队列（2026-07-09）
 
-假低分（flow / errors / registry）已校正为 100%。**剩余真实工作**：
+假低分与 resume 真漏测本轮已收尾：
 
-1. **`core/executor.py`（94%，13 survived）** — distributed resume 参数透传；需非空 `resume_data` + 断言 strategy 实收
-2. **`core/strategies.py`（88%，6 survived）** — 多为等价/边界；先 `mutmut show` 分类，等价记文档不硬杀
-3. **`event/memory.py`（94%，25 survived）** — 边界算符/等价为主；边际收益低
-4. **扩面（可选）**：`dsl/sexpr.py`、`dsl/codeflow/`、`async_utils.py` 等行覆盖仍弱的模块——先补行覆盖再进 mutmut
+1. ~~`core/executor.py`~~ → **98.1%**（§2.20；剩 4 等价）
+2. ~~`event/memory.py`~~ → **100%**（§2.21）
+3. **`core/strategies.py`（88%，6 survived）** — 已分类为等价/边界，**到此为止不硬杀**
+4. **扩面（可选）**：`dsl/sexpr.py`、`dsl/codeflow/`、`async_utils.py` — 先补行覆盖再进 mutmut
+5. **基建**：recheck 必须从 `mutants/` 内用相对 `tests/...` 路径（§2.20 坑点）
 
 ### 7.4 硬约束（违反则分数不可信）
 

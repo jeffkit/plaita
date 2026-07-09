@@ -1343,5 +1343,259 @@ class TestRunCompatibleLazyCloseR5(unittest.TestCase):
         self.assertIs(flow_ends[0], flow)
 
 
+# ---------------------------------------------------------------------------
+# Round 6: 针对真实 survived 的精准补测
+#
+# 需要杀灭的 9 个真漏测变异：
+#   run._27/_28/_33/_34/_43/_44/_45  — distributed 路径参数透传
+#   _handle_resume_operation._7      — resume_data 透传
+#   run_compatible._29               — lazy finally exception 透传
+#
+# 等价变异（不补测，记文档）：
+#   __init__._5                      — RunOptions(mode=...,) timeout 默认 None
+#   run._20/_21                      — execute() 内部重新 merge，效果等价
+#   _ensure_flow_resolved._8         — getattr(flow,"nodes",) 对有属性对象等价
+# ---------------------------------------------------------------------------
+
+
+class TestRunClassmethodDistributedParamForwarding(unittest.TestCase):
+    """Kill run._27/_28/_33/_34/_43/_44/_45.
+
+    所有这些变异的共同点：distributed 模式下 FlowExecution.run() 从 **options
+    提取 resume_data / timeout 后传给 run_distributed() 时发生了截断或错误替换。
+
+    修复方法：直接 patch FlowExecution.run_distributed，捕获它实际收到的参数。
+    """
+
+    def setUp(self):
+        self.flow = _distributed_flow()
+
+    def test_run_forwards_resume_data_from_kwargs(self):
+        """_27/_33/_43/_44/_45: options.get('resume_data') 被替换为 None / 错误 key.
+
+        传入 resume_data=<sentinel>，验证 run_distributed 接收到的是同一个对象。
+        若 key 被改为 'XXresume_dataXX' / 'RESUME_DATA' / None，options.get() 返回
+        None；若整行被删除，参数根本不传。两种情况下 run_distributed 收到的都是 None。
+        """
+        sentinel = {"node_id": "pause_node", "payload": "important_data"}
+        captured_resume_data: list = []
+
+        def _capturing_run_dist(self_ex, flow, params=None, *, saved_context=None,
+                                resume_type="continue", resume_data=None, timeout=None):
+            captured_resume_data.append(resume_data)
+            return {"result": None, "is_end": True, "context": {}}
+
+        with patch.object(FlowExecution, "run_distributed", _capturing_run_dist):
+            FlowExecution.run(self.flow, mode="distributed", resume_data=sentinel)
+
+        self.assertGreater(len(captured_resume_data), 0,
+                           "run_distributed 应被调用")
+        self.assertIs(captured_resume_data[0], sentinel,
+                      "resume_data 应从 **options 正确提取并原样传给 run_distributed，"
+                      "不是 None 或错误 key 的结果")
+
+    def test_run_forwards_timeout_to_run_distributed(self):
+        """_28/_34: distributed 路径 timeout=None 或 timeout 行被删除.
+
+        传入 timeout=9999，验证 run_distributed 接收到的是 9999，不是 None。
+        """
+        captured_timeout: list = []
+
+        def _capturing_run_dist(self_ex, flow, params=None, *, saved_context=None,
+                                resume_type="continue", resume_data=None, timeout=None):
+            captured_timeout.append(timeout)
+            return {"result": None, "is_end": True, "context": {}}
+
+        with patch.object(FlowExecution, "run_distributed", _capturing_run_dist):
+            FlowExecution.run(self.flow, mode="distributed", timeout=9999)
+
+        self.assertGreater(len(captured_timeout), 0,
+                           "run_distributed 应被调用")
+        self.assertEqual(captured_timeout[0], 9999,
+                         "timeout 应被传给 run_distributed，不是 None")
+
+    def test_run_forwards_both_resume_data_and_timeout(self):
+        """_27+_28 同时验证：resume_data 和 timeout 都正确传递。"""
+        sentinel = {"checkpoint": "node_5"}
+        captured: list = []
+
+        def _capturing_run_dist(self_ex, flow, params=None, *, saved_context=None,
+                                resume_type="continue", resume_data=None, timeout=None):
+            captured.append({"resume_data": resume_data, "timeout": timeout})
+            return {"result": None, "is_end": True, "context": {}}
+
+        with patch.object(FlowExecution, "run_distributed", _capturing_run_dist):
+            FlowExecution.run(
+                self.flow, mode="distributed",
+                resume_data=sentinel, timeout=7777,
+            )
+
+        self.assertGreater(len(captured), 0)
+        self.assertIs(captured[0]["resume_data"], sentinel,
+                     "resume_data 应原样传递")
+        self.assertEqual(captured[0]["timeout"], 7777,
+                        "timeout=7777 应被传递")
+
+
+class TestHandleResumeOperationParamForwarding(unittest.TestCase):
+    """Kill _handle_resume_operation._7.
+
+    变异：_handle_resume(…, resume_type, resume_data) → (…, resume_type, None)
+    即 resume_data 被硬编码成 None，实际传入的数据丢失。
+
+    验证方法：patch DistributedStrategy._handle_resume，捕获 resume_data 参数。
+    """
+
+    def test_handle_resume_operation_forwards_resume_data(self):
+        """_7: resume_data 应透传给 _handle_resume，不是 None。"""
+        flow = _distributed_flow()
+        ex = FlowExecution()
+        sentinel = {"node": "n1", "user_input": "approved"}
+        captured_resume_data: list = []
+
+        # patch INSTANCE 的方法（而非 class），避免 self 参数问题
+        strategy_instance = ex._strategies[ExecutionMode.DISTRIBUTED.value]
+
+        async def _capturing_handle_resume(flow_arg, ctx, runner, cm,
+                                           resume_type, resume_data):
+            captured_resume_data.append(resume_data)
+            return {}
+
+        with patch.object(strategy_instance, "_handle_resume",
+                          _capturing_handle_resume):
+            try:
+                ex._handle_resume_operation(flow, "continue", resume_data=sentinel)
+            except Exception:
+                pass
+
+        self.assertGreater(len(captured_resume_data), 0,
+                           "_handle_resume 应被调用")
+        self.assertIs(captured_resume_data[0], sentinel,
+                      "_handle_resume 应收到 resume_data，不是 None（变异后为 None）")
+
+    def test_handle_resume_operation_none_resume_data_stays_none(self):
+        """基线：resume_data=None 时，_handle_resume 也收到 None（行为一致）。"""
+        flow = _distributed_flow()
+        ex = FlowExecution()
+        captured: list = []
+
+        strategy_instance = ex._strategies[ExecutionMode.DISTRIBUTED.value]
+
+        async def _capturing(flow_arg, ctx, runner, cm, resume_type, resume_data):
+            captured.append(resume_data)
+            return {}
+
+        with patch.object(strategy_instance, "_handle_resume", _capturing):
+            try:
+                ex._handle_resume_operation(flow, "continue", resume_data=None)
+            except Exception:
+                pass
+
+        self.assertGreater(len(captured), 0)
+        self.assertIsNone(captured[0],
+                          "resume_data=None 时 _handle_resume 也应收到 None")
+
+
+class TestRunCompatibleExceptionPath(unittest.TestCase):
+    """Kill run_compatible._29.
+
+    变异：on_lazy_finally=lambda exc: _emit_flow_end_on_close(flow, None, …)
+    把 exc（真实异常）硬编码成 None，导致 on_flow_end 永远走"干净退出"路径，
+    即使 lazy generator 因异常关闭时也不携带 error 信息。
+
+    _drive_lazy_sync 的 except 块会在异常传播时把 exc 赋值：
+        except Exception as e:
+            exception = e
+            raise
+        finally:
+            on_finally(exception)
+
+    因此只要向运行中的 lazy generator 注入 RuntimeError，就能让 on_lazy_finally
+    以非 None exc 调用。通过 patch async_gen_to_sync 返回一个会在第二次 next()
+    抛 RuntimeError 的迭代器来构造这一场景。
+
+    原始代码：_emit_flow_end_on_close(flow, RuntimeError(…), …) →
+              on_flow_end(flow, None, {"code": -500, …}, exception=RuntimeError)
+    变异代码：_emit_flow_end_on_close(flow, None, …) →
+              on_flow_end(flow, result=None)  ← 无 error 字段
+    """
+
+    def test_lazy_exception_forwarded_to_emit_flow_end_on_close(self):
+        """_29: 向 lazy generator 注入异常，验证 on_flow_end 收到 error 而非 result=None。"""
+        from plaita.core import async_utils as _async_utils
+
+        flow = _simple_flow()
+        on_flow_end_calls: list = []
+
+        class CaptureEnd(LoggerCallback):
+            def on_flow_end(self, flow_arg, result=None, error=None,
+                            exception=None, **kw):
+                on_flow_end_calls.append({
+                    "flow": flow_arg,
+                    "result": result,
+                    "error": error,
+                    "exception": exception,
+                })
+
+        execution = FlowExecution(callback_handlers=[CaptureEnd()])
+        sentinel_error = RuntimeError("sentinel_for_run_compatible_mutmut_29")
+
+        def _bad_syncgen():
+            """模拟一个在第二次 next() 抛 RuntimeError 的同步迭代器。"""
+            yield "step_1"
+            raise sentinel_error
+
+        with patch.object(_async_utils, "async_gen_to_sync",
+                         return_value=_bad_syncgen()):
+            gen = execution.run_compatible(flow, True)
+            next(gen)          # 消费第一步，generator 处于 suspended 状态
+            try:
+                next(gen)      # 触发 sentinel_error，异常在 _drive_lazy_sync 中被捕获
+            except RuntimeError:
+                pass           # 异常从 _drive_lazy_sync 的 `raise` 传出
+
+        self.assertGreater(len(on_flow_end_calls), 0,
+                           "on_flow_end 应被调用")
+        # 取最后一次调用（第一次可能来自 _prepare_strategy 之前的回调，但 on_flow_end
+        # 只会在 lazy_finally 里调用一次）
+        last = on_flow_end_calls[-1]
+        self.assertIs(last["flow"], flow,
+                      "on_flow_end 应收到正确的 flow 对象")
+        self.assertIsNotNone(last["error"],
+                             "RuntimeError 应导致 on_flow_end 收到 error 字段（非 None）；"
+                             "变异后 exc=None，走干净路径，error=None")
+        self.assertIs(last["exception"], sentinel_error,
+                     "exception 应为传入的 RuntimeError 实例；变异后为 None")
+
+    def test_lazy_normal_close_still_calls_on_flow_end_cleanly(self):
+        """基线：gen.close() 正常关闭时 on_flow_end 走干净路径（result=None，无 error）。
+
+        gen.close() 注入 GeneratorExit（BaseException 非 Exception），
+        _drive_lazy_sync 的 except Exception 不捕获它，exception 保持 None，
+        on_lazy_finally(None) → _emit_flow_end_on_close(flow, None, …) →
+        on_flow_end(flow, result=None)。
+        两版本（原始 vs 变异）行为相同，基线测试仍通过。
+        """
+        flow = _simple_flow()
+        on_flow_end_calls: list = []
+
+        class CaptureEnd(LoggerCallback):
+            def on_flow_end(self, flow_arg, result=None, error=None,
+                            exception=None, **kw):
+                on_flow_end_calls.append({"error": error, "exception": exception})
+
+        execution = FlowExecution(callback_handlers=[CaptureEnd()])
+        gen = execution.run_compatible(flow, True)
+        for _ in gen:
+            pass  # 正常消费，触发 StopIteration
+        # on_flow_end 已在 finally 中调用，应为干净退出（无 error）
+        self.assertGreater(len(on_flow_end_calls), 0)
+        last = on_flow_end_calls[-1]
+        self.assertIsNone(last["error"],
+                         "正常完成后 on_flow_end 不应有 error")
+        self.assertIsNone(last["exception"],
+                         "正常完成后 on_flow_end 不应有 exception")
+
+
 if __name__ == "__main__":
     unittest.main()

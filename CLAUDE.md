@@ -9,7 +9,8 @@
    - 禁止把全量 mutmut 加进 PR CI。
    - 只做**单模块**；初筛 `survived`/`timeout` 必须 `recheck_mutants.sh` 独立进程复核。
    - 跑前 `rm -rf mutants .mutmut-cache`（防跨模块 cache 污染，见 §2.18/§2.19）。
-   - 当前优先队列：`executor.py`（resume 透传）→ strategies/event.memory 等价分类。
+   - 当前优先队列：strategies 等价收尾（不硬杀）；可选扩面 sexpr/codeflow/async_utils。
+   - recheck 须在 `mutants/` 目录内用 `tests/...` 路径（勿用 `../tests`，见 §2.20）。
 3. **分层**：`core` 不得顶层依赖 `server` / redis/sqlalchemy 后端。
 4. **提交**：不要添加 `Co-authored-by`；不要 `--no-verify`。
 5. **文档同步**：改代码后查 [`docs/DOC_CODE_MAP.md`](docs/DOC_CODE_MAP.md)。
