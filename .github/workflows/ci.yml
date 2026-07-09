@@ -27,13 +27,11 @@ jobs:
       - name: Install package + gate deps
         run: |
           python -m pip install --upgrade pip
-          # dev: pytest/cov/fakeredis；lint: ruff；yaml: Flow.from_string YAML 路径
-          # redis: RedisEventBus 单元路径（fakeredis 仍需 redis 包可 import）
-          # sqlalchemy: SqlalchemyEventBus 集成测（aiosqlite，无需外部 DB）
-          # http: plaita.client / HTTP 节点路径（requests）
-          # cachetools: FlowWorker 模块级依赖（unit/integration 会 import）
-          pip install -e ".[dev,lint,redis,yaml,sqlalchemy,http]"
-          pip install cachetools build wheel
+          # Gate 会 collect/跑到 optional 后端与节点路径（redis/sqlalchemy/http/code/server）。
+          # 用 all 一次装齐，避免缺 extra 时在 collection/首个用例上连环红。
+          # aiosqlite 已含在 sqlalchemy extra；cachetools 已含在 server extra。
+          pip install -e ".[dev,lint,all]"
+          pip install build wheel
 
       - name: Ruff E722 (bare except — hard fail)
         run: ruff check plaita tests --select E722
