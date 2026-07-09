@@ -30,8 +30,9 @@ jobs:
           # dev: pytest/cov/fakeredis；lint: ruff；yaml: Flow.from_string YAML 路径
           # redis: RedisEventBus 单元路径（fakeredis 仍需 redis 包可 import）
           # sqlalchemy: SqlalchemyEventBus 集成测（aiosqlite，无需外部 DB）
+          # http: plaita.client / HTTP 节点路径（requests）
           # cachetools: FlowWorker 模块级依赖（unit/integration 会 import）
-          pip install -e ".[dev,lint,redis,yaml,sqlalchemy]"
+          pip install -e ".[dev,lint,redis,yaml,sqlalchemy,http]"
           pip install cachetools build wheel
 
       - name: Ruff E722 (bare except — hard fail)

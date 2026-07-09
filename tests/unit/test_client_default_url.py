@@ -4,6 +4,10 @@ PlaitaClient 默认 URL 行为单测。
 默认 URL 指向本仓库 plaita-console 控制台的 /api/flowVersion/semver/detail 契约接口；
 显式传入 url 仍可覆盖。
 """
+import pytest
+
+pytest.importorskip("requests")
+
 from plaita.client import DEFAULT_CONSOLE_URL, PlaitaClient
 
 
