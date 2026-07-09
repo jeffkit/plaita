@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-08（§2.14 7 个模块接入既有 *_mutations.py；§2.13 event_node 94.9%、§2.12 state 99.1%、§2.11 io 97.4%；§2.4 event/memory 重新度量）
+> **最后更新**：2026-07-09（§2.19 recheck 确认 errors.py/node/__init__.py/flow.py 真实 100%；§2.14 7 个模块接入既有 *_mutations.py；§2.13 event_node 94.9%、§2.12 state 99.1%、§2.11 io 97.4%；§2.4 event/memory 重新度量）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -11,9 +11,9 @@
 > `event_node.py` 已接入至 **94.9%**（187/197，见 §2.13）；
 > `io.py` 已补强至 **97.4%**（259/266，见 §2.11）；
 > `event/core.py` 已接入至 **91.7%**（99/108，见 §2.14）；
-> `errors.py` 已接入至 **84.4%**（76/90，见 §2.14）；
-> `node/__init__.py` 已接入至 **83.9%**（94/112，见 §2.14）；
-> `flow.py` 已接入至 **79.0%**（158/200，见 §2.14）；
+> `errors.py` recheck 确认真实 **100%**（90/90，见 §2.19；原 84.4% 为 cache 污染假低分）；
+> `node/__init__.py` recheck 确认真实 **100%**（112/112，见 §2.19；原 83.9% 为 cache 污染假低分）；
+> `flow.py` recheck 确认真实 **100%**（200/200，见 §2.19；原 79.0% 为 cache 污染假低分）；
 > `strategies.py` 已校准至 **88%**（46/52，见 §2.16）。
 > 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
@@ -143,11 +143,11 @@
 | `plaita/core/executor.py` | **94%** | 192/205 | 13 | ✅ 接入 test_executor_mutations + 分母 bug 修复后真实分（见 §2.17），13 survived 集中在 distributed resume 边缘路径 |
 | `plaita/dsl/builder.py` | **99.9%** | 876/877 | 1 | ✅ 已强化（见 §2.8） |
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
-| `plaita/core/errors.py` | **84.4%** | 76/90 | 14 | ✅ 接入 test_errors_mutations（见 §2.14） |
-| `plaita/node/__init__.py` | **83.9%** | 94/112 | 18 | ✅ 接入 test_node_registry_mutations（见 §2.14） |
+| `plaita/core/errors.py` | **100%** | 90/90 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 84.4%/14 survived 为 mutmut in-process cache 污染假低分 |
+| `plaita/node/__init__.py` | **100%** | 112/112 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 83.9%/18 survived 为 mutmut in-process cache 污染假低分 |
 | `plaita/event/memory.py` | **94%** | 393/418 | 25 | ⚠️ 见 §2.10/§2.18（从 65%→74%→86%→91%→94%，25 survived 多为边界算符/等价） |
 | `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ 接入 + 分母 bug 修复后真实分（见 §2.14/§2.16），6 survived 多为等价 |
-| `plaita/core/flow.py` | **79.0%** | 158/200 | 42 | ✅ 接入 test_flow_mutations（见 §2.14） |
+| `plaita/core/flow.py` | **100%** | 200/200 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 79.0%/42 survived 为 mutmut in-process cache 污染假低分 |
 | `plaita/io.py` | **97.4%** | 259/266 | 7 | ✅ 已强化（见 §2.11），7 等价变异 |
 | `plaita/event/core.py` | **91.7%** | 99/108 | 9 | ✅ 接入 test_event_core_mutations（见 §2.14） |
 | `plaita/node/event_node.py` | **94.9%** | 187/197 | 10 | ✅ 已接入（见 §2.13），10 等价变异 |
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（已升至 84.4%）→ ~~`flow.py`（8%）~~（已升至 79.0%）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（已升至 83.9%）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ ~~`event/memory.py`（6%）~~（已升至 94%，25 survived 多为边界算符/等价）
+> - 优先队列：~~`expression_parser.py`（60%）~~（已升至 100%）→ ~~`concurrent.py`（33%）~~（已升至 100%）→ ~~`executor.py`（22%）~~（已升至 90.7%）→ ~~`builder.py`（16%）~~（已升至 99.9%）→ ~~`loop.py`（17%）~~（已升至 99.3%）→ ~~`io.py`（1%）~~（已升至 97.4%）→ ~~`state.py`（0%）~~（已升至 99.1%）→ ~~`event_node.py`（0%）~~（已升至 94.9%）→ ~~`errors.py`（13%）~~（真实 100%，见 §2.19）→ ~~`flow.py`（8%）~~（真实 100%，见 §2.19）→ ~~`event/core.py`（5%）~~（已升至 91.7%）→ ~~`node/__init__.py`（7%）~~（真实 100%，见 §2.19）→ ~~`storage/memory.py`（0%）~~（已升至 95.8%）→ ~~`storage/base.py`（0%）~~（已升至 100%）→ ~~`strategies.py`（12%）~~（已升至 88%）→ ~~`executor.py`（22%）~~（已升至 94%）→ ~~`event/memory.py`（6%）~~（已升至 94%，25 survived 多为边界算符/等价）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -545,11 +545,11 @@ IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥
 
 | 模块 | 接入前 | 接入后 | killed/total | survived | 备注 |
 |---|---|---|---|---|---|
-| `core/errors.py` | 13% | **84.4%** | 76/90 | 14 | test_errors_mutations（64 项，同步） |
+| `core/errors.py` | 13% | **100%** | 90/90 | 0 | test_errors_mutations（64 项，同步）；recheck §2.19 确认 14 survived 全为 cache 污染假阳性 |
 | `event/core.py` | 5% | **91.7%** | 99/108 | 9 | test_event_core_mutations（54 项，异步；recheck round2 有超时兜底） |
 | `storage/memory.py` | 0% | **95.8%** | 91/95 | 4 | test_storage_mutations（27 项，同步） |
-| `node/__init__.py` | 7% | **83.9%** | 94/112 | 18 | test_node_registry_mutations（63 项，同步） |
-| `core/flow.py` | 8% | **79.0%** | 158/200 | 42 | test_flow_mutations（84 项，同步） |
+| `node/__init__.py` | 7% | **100%** | 112/112 | 0 | test_node_registry_mutations（63 项，同步）；recheck §2.19 确认 18 survived 全为 cache 污染假阳性 |
+| `core/flow.py` | 8% | **100%** | 200/200 | 0 | test_flow_mutations（84 项，同步）；recheck 确认真实 100%（见 §2.19） |
 | `core/strategies.py` | 12% | 38.5% | 20/52 | 32 | test_strategies_mutations（161 项，**异步**；recheck 未能跑全，分数偏低，待重跑） |
 | `storage/base.py` | 0% | 12.5% | 2/16 | 14 | test_storage_mutations **未覆盖** `ExecutionStorage.serialize_state`/`deserialize_state`，见下 |
 
@@ -855,3 +855,100 @@ server、client、demo 等）整体行覆盖 **≈ 80.5%**，909 个单元测试
 - ❌ 不要把 async 模块塞进 `mutmut run` 并行模式——会挂/假阳性，白跑。
 - ❌ 不要为了过变异测试把 async 测试改成同步——丢失 async 语义本身比变异得分
   倒退更严重。
+
+---
+
+## §2.19  recheck 核实：errors.py / node/__init__.py / flow.py 真实 100%（2026-07-09）
+
+### 背景
+
+之前 §2.14 报告 `errors.py` 84.4%（14 survived）、`node/__init__.py` 83.9%（18 survived）、
+`flow.py` 79.0%（42 survived）。和 `flow.py` 的 cache 污染假低分经历（见任务背景）一致，
+怀疑这些 "survived" 同样是 mutmut in-process `pytest.main()` 模块缓存复用的假阳性。
+
+### 方法
+
+在独立 git worktree 内，对每个模块：
+
+1. `rm -rf mutants .mutmut-cache && mutmut run`（sync 测试子集，干净初筛）
+2. 逐点复核：`MUTANT_UNDER_TEST=<mutant> timeout 60 python -m pytest -x -q ... <FULL_TESTS>`
+   用完整测试集（含 `*_mutations.py`）以独立子进程跑每个 survived 变异点。
+
+### 结论
+
+| 模块 | 初筛 survived | 复核后 survived | 真实分数 |
+|---|---|---|---|
+| `plaita/core/errors.py` | 14 | **0** | **100%**（90/90） |
+| `plaita/node/__init__.py` | 18 | **0** | **100%**（112/112） |
+| `plaita/core/flow.py` | 42（§2.14） | **0** | **100%**（200/200） |
+
+全部 survived 均为 mutmut in-process 模式的 **cache 污染假阳性**：
+当 `mutmut run` 以 `pytest.main()` 在同一进程内反复跑测试时，Python 的模块缓存
+可能复用了上一次加载的（未变异的）源文件，导致变异对测试无效、被误判为 survived。
+用独立子进程重跑则每次 import 全新，变异生效，均被杀灭。
+
+不需要补充任何测试用例。
+
+---
+
+## 7. 持续推进规范（给开发者 / AI）
+
+> 本节是「怎么继续做」的操作契约。入口导航见仓库根目录 `AGENTS.md` / `CLAUDE.md`。
+
+### 7.1 什么时候跑
+
+| 场景 | 做什么 | 不要做什么 |
+|------|--------|------------|
+| 日常改业务代码 | 相关单测 + `make coverage`（或 CI gate） | 不要每次全量 mutmut |
+| 改了 `only_mutate` 内核心模块的逻辑/断言 | **单模块** mutation + recheck | 不要多模块合并初筛 |
+| 新增核心纯同步模块 | 加入 `only_mutate` + 对应 `*_mutations.py`，单模块建基线 | 不要先塞进 PR CI |
+| 季度 / 发版前 | `scripts/run_full_mutation_sweep.sh` 复扫，更新本节基线表 | 不要把全量扫当 PR 门禁 |
+| 引用分数对外/对内 | 必须写「初筛 + 独立进程 recheck 后的真实分」 | 不要直接引用 `mutmut results` 初筛 |
+
+**禁止**：把全量变异测试加进 GitHub PR CI（小时～天级，且初筛不可信）。
+
+### 7.2 单模块标准流程
+
+```bash
+# 1. 临时收窄（改完记得恢复 only_mutate 完整列表，或用 sweep 脚本自动改）
+# pyproject.toml: only_mutate = ["plaita/core/<module>.py"]
+
+rm -rf mutants .mutmut-cache
+make mutation                          # 初筛（SYNC 子集，可假阳）
+bash scripts/recheck_mutants.sh all    # 独立子进程复核（真实分）
+mutmut show <mutant-id>                # 只对真实 survived 看 diff
+# 补 tests/unit/test_<module>_mutations.py 精确断言 → 重跑验证
+# 更新 docs/mutation-testing.md 基线表 + 本文件顶部「最后更新」
+```
+
+批量可用：`bash scripts/run_full_mutation_sweep.sh <module_substring>`。
+
+### 7.3 当前优先队列（2026-07-09）
+
+假低分（flow / errors / registry）已校正为 100%。**剩余真实工作**：
+
+1. **`core/executor.py`（94%，13 survived）** — distributed resume 参数透传；需非空 `resume_data` + 断言 strategy 实收
+2. **`core/strategies.py`（88%，6 survived）** — 多为等价/边界；先 `mutmut show` 分类，等价记文档不硬杀
+3. **`event/memory.py`（94%，25 survived）** — 边界算符/等价为主；边际收益低
+4. **扩面（可选）**：`dsl/sexpr.py`、`dsl/codeflow/`、`async_utils.py` 等行覆盖仍弱的模块——先补行覆盖再进 mutmut
+
+### 7.4 硬约束（违反则分数不可信）
+
+1. **初筛 `timeout` / `survived` 不可信** → 必须独立子进程 recheck（§2.19 / §3）
+2. **逐模块跑**；4+ 模块合并初筛会挂或污染 cache
+3. **SYNC 初筛不含** async / 真实 sleep / `mode="process"`；这些只进 recheck 全量套件
+4. **跑前** `rm -rf mutants .mutmut-cache`，避免跨模块 cache 污染（§2.18）
+5. **等价变异**（如 `get(k, None)` vs `get(k,)`）记入文档，不空耗补测
+6. 引用结果时标注：**仅同步路径**（async 深路径见 §6）
+
+### 7.5 相关文件
+
+| 路径 | 用途 |
+|------|------|
+| `pyproject.toml` `[tool.mutmut]` | only_mutate / do_not_mutate / pytest 选择 |
+| `Makefile` | `mutation` / `mutation-recheck` / `coverage` |
+| `scripts/run_full_mutation_sweep.sh` | 逐模块初筛 + recheck（主路径） |
+| `scripts/recheck_mutants.sh` | 假阳复核 |
+| `scripts/run_mutation_baseline.sh` | async 逐点独立进程（慢、可信） |
+| `tests/unit/*_mutations.py` | 精准杀灭套件 |
+| `docs/mutation-testing-handoff.md` | **已过时**，勿作基线；以本文为准 |

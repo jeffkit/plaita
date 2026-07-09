@@ -1,5 +1,9 @@
 # 变异测试下一阶段 Handoff（给新会话）
 
+> **⚠️ 已过时（2026-07-09）**：下文基线数字（expression 20% 等）早已过期。
+> **请以 [`docs/mutation-testing.md`](mutation-testing.md)（含 §7 持续推进）为准**；
+> 仓库入口见根目录 `AGENTS.md` / `CLAUDE.md`。本文仅作历史交接存档。
+
 > 上一会话已完成：覆盖率评估 + 变异测试基础设施搭建 + `callback.py` 测试强化到 100%。
 > 本文档把下一阶段的工作交接清楚，目标：**把 `expression` / `calculate` / `decide`
 > 三个模块的 mutation score 从 ~20% / ~20% / ~57% 拉到 80%+**，参照 `callback.py`
