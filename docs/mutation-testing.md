@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-09（§2.20 executor 98.1%；§2.21 event/memory 真实 100%；§2.16 strategies 确认 88% 全等价/边界；§2.19 flow/errors/registry 100%）
+> **最后更新**：2026-07-09（§2.22 codeflow/_common.py 基线 95.2%；§2.23 codeflow/_expr.py 基线 72.9%；§2.20 executor 98.1%；§2.21 event/memory 真实 100%；§2.16 strategies 确认 88% 全等价/边界；§2.19 flow/errors/registry 100%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -982,8 +982,10 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 1. ~~`core/executor.py`~~ → **98.1%**（§2.20；剩 4 等价）
 2. ~~`event/memory.py`~~ → **100%**（§2.21）
 3. **`core/strategies.py`（88%，6 survived）** — 已分类为等价/边界，**到此为止不硬杀**
-4. **扩面（可选）**：`dsl/sexpr.py`、`dsl/codeflow/`、`async_utils.py` — 先补行覆盖再进 mutmut
-5. **基建**：recheck 必须从 `mutants/` 内用相对 `tests/...` 路径（§2.20 坑点）
+4. ~~`dsl/codeflow/_common.py`~~ → **95.2%**（138/145，见 §2.22；剩 7 等价）
+5. **`dsl/codeflow/_expr.py`（72.9%，267/366）** — 99 survived 主要是错误消息文本检查；下一步目标
+6. **扩面（可选）**：`dsl/codeflow/_nodes.py`、`_stmt.py`、`_source.py`、`dsl/sexpr.py`
+7. **基建**：recheck 必须从 `mutants/` 内用相对 `tests/...` 路径（§2.20 坑点）
 
 ### 7.4 硬约束（违反则分数不可信）
 
@@ -1005,3 +1007,78 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 | `scripts/run_mutation_baseline.sh` | async 逐点独立进程（慢、可信） |
 | `tests/unit/*_mutations.py` | 精准杀灭套件 |
 | `docs/mutation-testing-handoff.md` | **已过时**，勿作基线；以本文为准 |
+
+---
+
+## 2.22 codeflow/_common.py 基线（2026-07-09）
+
+### 背景
+
+在独立 git worktree 建立 `plaita/dsl/codeflow/` 的变异测试基线。
+`_common.py` 包含编译期上下文 `_CompileCtx`、占位符 `_Placeholder`、`ErrorHandler`、
+`_CodeflowError` 等共享基础设施，纯逻辑无外部依赖。
+
+### 跑法
+
+```bash
+# 临时在 pyproject.toml 中将 only_mutate 改为单文件
+only_mutate = ["plaita/dsl/codeflow/_common.py"]
+pytest_add_cli_args_test_selection = [
+  "tests/unit/test_codeflow*.py",
+  "tests/unit/test_codeflow_mutations.py",
+]
+rm -rf mutants .mutmut-cache
+mutmut run
+```
+
+### 结果
+
+| 轮次 | killed | survived | timeout | **score** | 备注 |
+|------|--------|----------|---------|-----------|------|
+| 初筛（无 mutation test） | 101 | 42 | 2 | **70.6%** | recheck 2 timeout → killed |
+| 补 `test_codeflow_mutations.py`（62 测试） | 123 | 20 | 2 | **86.2%** | +22 killed |
+| 再补（77 测试）| 136 | 7 | 2 | **95.2%** | 2 timeout recheck → killed |
+| **最终（recheck 后）** | **138** | **7** | — | **95.2%** | |
+
+### 剩余 7 survived（等价变异）
+
+| 变异点 | 说明 | 判定 |
+|--------|------|------|
+| `__is_upper_ident_mutmut_8` | `replace("_","XXXX")` vs `replace("_","")` — `isalnum()` 结果相同 | 等价 |
+| `auto_id_mutmut_3` | `counter = 1`（循环前赋值）vs `counter += 1`（从 0）— 首次行为相同 | 等价 |
+| `__raise_if_unregistered_custom_mutmut_14` | `func,\n)` → `)` 语法糖 | 等价 |
+| `_describe_call_mutmut_2` | `_describe_call(None)` — 调用路径测试较复杂 | 边界 |
+| `_CodeflowError_mutmut_10/11` | `"XX?XX"` fallback 字符串变体 | 等价字符串 |
+| `auto_id_mutmut_3` | 见上 | 等价 |
+
+---
+
+## 2.23 codeflow/_expr.py 基线（2026-07-09）
+
+### 背景
+
+`_expr.py`（8742 bytes）是 codeflow 的表达式编译器，将 Python AST 中的值/名字/运算
+转为 plaita 表达式 IR。366 个变异点，是 `_common.py` 的 2.5 倍。
+
+### 结果（初筛，含 test_codeflow_mutations.py）
+
+| 指标 | 数值 |
+|------|------|
+| 变异点总数 | 366 |
+| killed | 267 |
+| survived | 99 |
+| timeout | 0 |
+| **初筛 score** | **72.9%** |
+
+### 主要 survived 模式
+
+99 个 survived 集中在 `__compile_expr` 函数中，主要是：
+1. **错误消息文本→None**：`raise _CodeflowError(f"...", node)` 改成 `_CodeflowError(None, node)` — 
+   测试只捕获异常类型，不检查具体消息内容。
+2. **AST node→None 传参**：`_resolve_name(node.id, node, ctx)` 改成 `_resolve_name(node.id, None, ctx)` — 
+   错误消息中的行号信息未被断言。
+
+### 下一步
+
+补 `test_codeflow_mutations.py` 中针对 `_expr.py` 的错误消息精确断言，预期可从 72.9% 提升到 90%+。
+参考 `_common.py` 的补测模式：直接测试内部函数 + 断言错误消息内容。
