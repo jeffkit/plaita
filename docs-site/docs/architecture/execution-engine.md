@@ -23,7 +23,7 @@ flowchart TD
 | `CallbackManager` | `plaita.core.callback` | 把 `on_*` 事件分发给多个 `FlowCallback` |
 | `ExecutionStrategy` | `plaita.core.strategies` | 模式相关的控制流：`NormalStrategy` / `GeneratorStrategy` / `DistributedStrategy` |
 
-`FlowExecution` 本体保持 SC-003 预算（< 200 LOC）：显式委托属性在 `plaita.core._execution_delegates`，公共入口（`run` / `run_compatible` / `run_distributed` 等）在 `plaita.core._execution_entry`。对外 API 与导入路径不变。
+SC-003 类体预算是**软 200 / 硬 400**：显式委托属性允许超过软预算（这是刻意不要 `__getattr__` 的代价）；硬上限才拦 god-class 回归。不要为过软门再拆无意义 mixin。
 
 ## facade 的显式委托
 

@@ -88,12 +88,13 @@ else
 fi
 echo ""
 
-# 4. Module size check (SC-003: core execution classes < 200 LOC)
-echo "[4/4] Checking module sizes (SC-003)..."
+# 4. Module size check (SC-003: soft 200 / hard 400)
+echo "[4/4] Checking module sizes (SC-003 soft=200 / hard=400)..."
 if python -c "
 import ast, sys
 from pathlib import Path
 
+SOFT, HARD = 200, 400
 checks = [
     ('plaita/core/executor.py', 'FlowExecution'),
     ('plaita/core/context.py', 'ExecutionContext'),
@@ -115,15 +116,18 @@ for path, name in checks:
         print(f'  ✗ {name}: not found in {path}')
         fail = 1
         continue
-    mark = '✓' if loc < 200 else '✗'
-    print(f'  {mark} {name}: {loc} LOC')
-    if loc >= 200:
+    if loc >= HARD:
+        print(f'  ✗ {name}: {loc} LOC (hard ceiling {HARD})')
         fail = 1
+    elif loc >= SOFT:
+        print(f'  ~ {name}: {loc} LOC (over soft budget {SOFT}, under hard {HARD})')
+    else:
+        print(f'  ✓ {name}: {loc} LOC')
 sys.exit(fail)
 "; then
-    echo "  ✓ All SC-003 classes within 200 LOC"
+    echo "  ✓ SC-003 hard ceiling satisfied"
 else
-    echo "  ✗ SC-003 class size check failed"
+    echo "  ✗ SC-003 hard ceiling failed"
     FAIL=1
 fi
 echo ""

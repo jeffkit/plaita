@@ -6,7 +6,7 @@
 | 文档路径 | 代码路径模式 | 同步触发条件 |
 |----------|--------------|--------------|
 | `docs-site/docs/architecture/layering.md` | `plaita/core/**`, `plaita/event/**`, `plaita/storage/**`, `plaita/server/**`, `tests/integration/test_layering.py` | 分层规则、默认 EventBus 解析方式、允许/禁止的 import 方向变更 |
-| `docs-site/docs/architecture/execution-engine.md` | `plaita/core/executor.py`, `plaita/core/strategies.py`, `plaita/core/runner.py`, `plaita/core/_execution_*.py` | 执行模式、facade/strategy 拆分、公共运行入口变更；**订阅失败禁止挂起**；SC-003 类体拆分 |
+| `docs-site/docs/architecture/execution-engine.md` | `plaita/core/executor.py`, `plaita/core/strategies.py`, `plaita/core/runner.py` | 执行模式、facade/strategy 拆分、公共运行入口变更；**订阅失败禁止挂起**；SC-003 软/硬预算 |
 | `docs-site/docs/architecture/state-management.md` | `plaita/core/context.py`, `plaita/core/state.py` | Checkpoint / EventBus 解析 / `$ENV` / 取消语义变更 |
 | `docs-site/docs/distributed/event-system.md` | `plaita/event/**`, `plaita/node/event_node.py`, `plaita/server/event_filter.py`, `plaita/server/flow_worker.py` | EventBus API、后端、默认总线；EventFilter 与 worker 共享 subscription storage；FlowWorker 默认启用 bus |
 | `MIGRATION.md` | `plaita/**`, `plaita-ai/**` | 破坏性 API / 安全默认值变更 |
