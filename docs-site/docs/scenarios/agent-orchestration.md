@@ -40,6 +40,10 @@ flowchart LR
 
     详见 [`examples/agent/README.md`](https://github.com/jeffkit/plaita/tree/main/examples/agent)。
 
+    !!! note "别和 plaita-ai 工具层搞混"
+
+        这里的 `ToolNode` 是 **`examples/agent/nodes.py` 里的教学用自定义节点**（演示「怎么写 Node」），与生产路径 **`plaita-ai` 的工具层**（`@tool` / `HttpToolSource` / YAML 清单 → 动态节点 / `TOOL(...)`）不是同一套实现。生产集成请看 [工具节点与数据源](../ai/tools.md)；本页侧重「用 plaita 跑 Agent 计划」的编排模式。
+
 ## 场景一览
 
 下面六个模式覆盖了 Agent 编排的典型形态，每个都给出 **JSON**（最贴近 AI 生成与可视化平台产出）与 **`@flow` / S-expr**（最贴近人写与编译期校验）两种写法。
@@ -651,4 +655,5 @@ Agent 调外部工具必然失败，plaita 提供三级容错：
 - [审批流](approval-flow.md) —— HITL 挂起-恢复完整闭环
 - [生成器调试器](debug-with-generator.md) —— 逐步观测 Agent 决策
 - [类代码 DSL：S-expr 与 @flow](../guide/code-dsl.md) —— `flow_from_source` 与 Agent 输出沙箱
-- [自定义节点](../nodes/custom.md) —— 实现 `LLMNode`/`ToolNode`/`RetrieverNode` 等节点
+- [工具节点与数据源](../ai/tools.md) —— plaita-ai 生产工具层（非 examples 教学节点）
+- [自定义节点](../nodes/custom.md) —— 手写 `Node` 子类（含 examples/agent 教学示例）

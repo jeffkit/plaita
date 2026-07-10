@@ -9,6 +9,12 @@
 
 LangChain **不是** plaita / plaita-ai 的必需依赖；只有使用 Agent 或 `register_langchain_*` 时才需要 `plaita-ai[agent]`。
 
+!!! note "与 `examples/agent` / 手写 Node 的区别"
+
+    - **本页**：`plaita-ai` 生产工具层（注册表、YAML、动态节点、MCP `flow_list_tools`）。
+    - **`examples/agent/nodes.py` 的 `ToolNode`**：教学用自定义节点，演示如何继承 `Node`；**不是**本页的实现。
+    - 需要新控制流语义时写[自定义节点](../nodes/custom.md)；要把数据源/函数交给 Agent 编排时用本页。
+
 ## 概念关系
 
 ```mermaid

@@ -1,6 +1,6 @@
 # 内置节点
 
-下表列出 plaita 默认注册的全部内置节点（见 `plaita.node.__init__._BUILTIN_NODES`）。`node_type` 即流程 JSON 中 `type` 字段的值。
+下表列出 plaita **默认注册**的内置节点（见 `plaita.node.__init__._BUILTIN_NODES`，共 16 种）。`node_type` 即流程 JSON 中 `type` 字段的值。
 
 | type | 类 | 展示名 | 分支 | 异步 | 需 extra | 用途 |
 |------|------|--------|:----:|:----:|:--------|------|
@@ -18,13 +18,19 @@
 | `child` | `InlineFlow` | 内联子逻辑 | | | | 内联子流程，可共享父上下文 |
 | `reference` | `ReferenceFlow` | 引用逻辑 | | | | 引用独立子流程（不共享父上下文） |
 | `parallel` | `Parallel` | 并行 | | | | 多分支并行执行（thread/process/coroutine） |
-| `code` | `CodeNode` | 代码 | | | `code` | 执行 JS / Python 代码 |
 | `http` | `HTTP` | http | | | `http` | 发起 HTTP 请求 |
 | `event` | `EventNode` | 事件节点 | | ✓ | | 等待事件，用于断点续执挂起 |
 
 !!! note "未默认注册的节点"
 
-    `calculate`（`node_type="calculate"`）与 `redis`（`node_type="redis"`，需 `redis` extra）存在于源码但**不在默认 `_BUILTIN_NODES`** 中。如需使用，自行 `register` 注册。
+    - **`code`（`CodeNode`）**：0.5.0 起移出默认注册表。使用前须显式：
+
+      ```python
+      from plaita.node import register_code_node
+      register_code_node()  # 默认 docker 沙箱；无 Docker 时传 default_backend="subprocess"|"unsafe"|"restricted"
+      ```
+
+    - **`calculate`** / **`redis`**（需 `redis` extra）：存在于源码但不在 `_BUILTIN_NODES`，自行 `register`。
 
 ## start / end
 
@@ -145,7 +151,14 @@
 
 ## code
 
-执行用户代码，需 `code` extra（JS 用 PyExecJS）。`language` 为 `js` 或 `python`，代码需定义一个 `run` 函数，`input` 作为参数传入。
+执行用户代码（需 `code` extra 才能跑 JS；Python 走沙箱后端）。**0.5.0 起不在默认注册表**，使用前须：
+
+```python
+from plaita.node import register_code_node
+register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
+```
+
+`language` 为 `js` 或 `python`，代码需定义一个 `run` 函数，`input` 作为参数传入。
 
 ```json
 {

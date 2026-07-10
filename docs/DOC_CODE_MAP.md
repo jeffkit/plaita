@@ -12,6 +12,9 @@
 | `docs-site/docs/architecture/state-management.md` | `plaita/core/context.py`, `plaita/core/state.py` | Checkpoint / EventBus 解析 / `$ENV` / 取消语义变更 |
 | `docs-site/docs/distributed/event-system.md` | `plaita/event/**`, `plaita/node/event_node.py`, `plaita/server/event_filter.py`, `plaita/server/flow_worker.py` | EventBus API、后端、默认总线；EventFilter 与 worker 共享 subscription storage；FlowWorker 默认启用 bus |
 | `docs-site/docs/ai/tools.md` | `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py`, `plaita-ai/examples/tools/**`, `plaita-ai/tests/test_tool_sources.py`, `plaita-ai/tests/test_langchain_tools.py` | ToolNode 桥接、BaseToolSource（HTTP/SQL/Vector/Native）、YAML bundle、ToolContext、addressing、LangChain 适配、PLAITA_TOOLS |
+| `docs-site/docs/nodes/custom.md` / `scenarios/agent-orchestration.md` | `examples/agent/**`, `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py` | 自定义 Node vs 数据源工具叙事；examples 教学 ToolNode 与 plaita-ai 工具层区分 |
+| `docs-site/docs/nodes/builtin.md` / `api/node.md` | `plaita/node/__init__.py`, `plaita/node/code.py` | 默认注册表成员、`register_code_node`、CodeNode 沙箱默认 |
+| `docs-site/docs/reference/migration-guide.md` / `nodes/migration.md` | `plaita/__init__.py`, `MIGRATION.md` | `plaita.flow` 删除、shim 退役、0.5.0 break 清单 |
 | `docs-site/docs/ai/mcp.md` | `plaita-ai/plaita_ai/mcp/**`, `plaita-ai/plaita_ai/cli/main.py`, `plaita-ai/plaita_ai/tools/bootstrap.py` | MCP 工具列表、插件加载、PLAITA_TOOLS/RESOURCES、`tools validate\|list` |
 | `docs-site/docs/ai/fot-agent.md` / `ai/react-agent.md` | `plaita-ai/plaita_ai/agent/**` | Agent 构造参数、工具注册与双用途语义 |
 | `docs-site/docs/reference/cli.md` | `plaita-ai/plaita_ai/cli/**`, `plaita/__main__.py` | plaita / plaita-ai CLI 子命令 |

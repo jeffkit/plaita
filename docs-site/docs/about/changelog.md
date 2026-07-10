@@ -13,7 +13,7 @@
 - **HTTP addressing**：`register_addressing` 插件钩子。
 - **可选 LangChain 适配**：`register_langchain_tool` / `register_langchain_toolkit`（langchain 非必需依赖）。
 - **启动与 CLI**：`PLAITA_TOOLS` / `PLAITA_RESOURCES`、`plaita-ai tools validate|list`、MCP `--tools/--resources`。
-- **文档**：新增 [工具节点与数据源](../ai/tools.md)，并同步 MCP / Agent / CLI 页。
+- **文档**：新增 [工具节点与数据源](../ai/tools.md)，并同步 MCP / Agent / CLI 页；区分 `examples/agent` 教学 `ToolNode` 与 plaita-ai 生产工具层；修正 `plaita.flow` 已删、CodeNode 默认注册、版本号等陈旧描述。
 
 ---
 

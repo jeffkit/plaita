@@ -24,14 +24,14 @@ get_default_registry().register(MyNode)
 
 ## 导入路径
 
-| 旧（弃用） | 新（推荐） |
-|-----------|-----------|
-| `from plaita.flow import Flow` | `from plaita import Flow` |
+| 旧 | 新（推荐） |
+|----|------------|
+| `from plaita.flow import Flow` | `from plaita import Flow`（**0.5.0 起 `plaita.flow` 已删除**） |
 | `from plaita.flow import FlowExecution` | `from plaita import FlowExecution`（或 `from plaita.core.executor import FlowExecution`） |
 | `from plaita.errors import FlowExecutionException` | `from plaita import FlowExecutionException`（或 `from plaita.core.errors import ...`） |
 | `from plaita.types import STRING` | `from plaita import types` 后 `types.STRING`（或 `from plaita.core import types`） |
 
-`plaita.flow` / `plaita.errors` / `plaita.types` 是 shim，转发到 `plaita.core.*` 并在导入时发 `DeprecationWarning`。
+`plaita.errors` / `plaita.types` 仍是 shim，转发到 `plaita.core.*` 并触发 `DeprecationWarning`。`plaita.flow` 在 0.5.0 **已删除**，旧 import 会直接 `ImportError`。
 
 ## Flow 字段
 

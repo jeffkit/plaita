@@ -57,7 +57,7 @@ nodes:
 加载与执行：
 
 ```python
-from plaita.flow import Flow
+from plaita import Flow
 
 flow = Flow.from_file("flows/adult_check.yaml")
 flow.run(age=20)  # -> "成年"
@@ -311,10 +311,10 @@ flow = (
 
 | 入口 | 作用 |
 |------|------|
-| `plaita.flow.Flow.from_string(s)` | 从 JSON/YAML 字符串解析（自动识别） |
-| `plaita.flow.Flow.from_file(path)` | 按后缀加载文件 |
-| `plaita.flow.parse(content)` | 字符串/dict → `Flow` |
-| `plaita.flow.parse_and_run(content, ...)` | 解析并执行 |
+| `plaita.Flow.from_string(s)` | 从 JSON/YAML 字符串解析（自动识别） |
+| `plaita.Flow.from_file(path)` | 按后缀加载文件 |
+| `plaita.parse(content)` | 字符串/dict → `Flow` |
+| `plaita.parse_and_run(content, ...)` | 解析并执行 |
 | `plaita.dsl.build(flow_id, ...)` | 创建顶层 `FlowBuilder`（显式 id/next） |
 | `plaita.dsl.linear(flow_id, ...)` | 创建 `LinearBuilder`（隐式 next，id 按需） |
 | `plaita.dsl.child_flow(input_type=...)` | 子流程装饰器 |

@@ -16,9 +16,9 @@
 | [`plaita.core.context`](context.md) | `ExecutionContext`、默认 event bus provider |
 | [`plaita.core.runner`](runner.md) | `NodeRunner`（超时/重试/错误策略） |
 | [`plaita.core.callback`](callback.md) | `FlowCallback`、`CallbackManager`、`LoggerCallback` |
-| [`plaita.core.errors`](errors.md) | 异常类、`ErrorStrategy`、`ErrorHandler` |
+| [`plaita.core.errors`](errors.md) | 异常类（含细分子类）、`ErrorStrategy`、`ErrorHandler` |
 | [`plaita.core.expression`](expression.md) | `ExpressionRegistry`、`ExpressionEvaluator` |
-| [`plaita.node`](node.md) | `Node`、`NodeRegistry`、内置节点 |
+| [`plaita.node`](node.md) | `Node`、`NodeRegistry`、内置节点（`CodeNode` 需显式注册） |
 | [`plaita.event.core`](event.md) | `EventBus`、`Event`、`EventSubscription` |
 | [`plaita.storage.base`](storage.md) | `ExecutionStorage`、`FlowStorage`、`ExecutionState` |
 | [`plaita.server.flow_worker`](server.md) | `FlowWorker`（需 `server` extra） |

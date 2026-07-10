@@ -12,7 +12,7 @@ plaita 将 JSON 格式的逻辑流程定义解析为可执行的 `Flow`，并以
 ## 核心特性
 
 - :material-graph-outline: **JSON 流程定义** —— 用节点 + `next`/分支描述控制流，平台可视化编排或手写皆可
-- :material-cube-outline: **插件化节点** —— 内置 17 种节点，自定义节点只需实现 `execute`，支持 entry_points 自动发现
+- :material-cube-outline: **插件化节点** —— 默认 16 种内置节点（`CodeNode` 需显式注册），自定义节点只需实现 `execute`，支持 entry_points 自动发现
 - :material-robot-outline: **AI Agent 编排（典型场景）** —— LLM 规划 + plaita 执行是最常见的使用场景之一；`@flow` / JSON 有构建期校验，`flow_from_source` 让 AI 生成的流程编译期就拦错
 - :material-sync: **三种执行模式** —— Normal 同步、Generator 单步调试、Distributed 跨进程断点续执
 - :material-clock-outline: **超时与错误策略** —— 节点级/流程级 ISO 8601 超时、`abort`/`continue`/`continue_with` 错误策略与重试
@@ -92,7 +92,8 @@ print(flow.run(name="kongjie"))  # => "kongjie"
 |------|------|
 | [指南](guide/index.md) | 安装、快速开始、流程编写、表达式、执行模式、错误处理、回调、调试 |
 | [架构](architecture/index.md) | 分层设计、执行引擎、状态管理、时序图 |
-| [节点系统](nodes/index.md) | 17 种内置节点手册、自定义节点、注册表与插件 |
+| [节点系统](nodes/index.md) | 内置节点手册、自定义节点、注册表与插件 |
+| [AI 集成](ai/index.md) | MCP、工具节点与数据源、ReAct/FoT Agent、Skill |
 | [断点续执](distributed/index.md) | Checkpoint、事件系统、FlowWorker、扩展节点 |
 | [应用场景](scenarios/index.md) | Agent 编排、HTTP 集成、审批流等端到端示例 |
 | [API 参考](api/index.md) | 由源码 docstring 自动生成 |

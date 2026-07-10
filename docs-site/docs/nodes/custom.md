@@ -147,6 +147,20 @@ class SafeNode(Node):
 
 把领域节点打包成独立 Python 库，通过 `plaita.nodes` entry_points 实现**自动发现**，无需用户手动 `register`。详见 [节点注册表与插件](registry.md)。
 
+## 自定义 Node vs 数据源工具
+
+两件事容易混在一起，选型时先分清：
+
+| | **自定义 Node**（本页） | **plaita-ai 工具层** |
+|--|------------------------|----------------------|
+| 包 | `plaita` | `plaita-ai` |
+| 何时用 | 新控制流语义、领域专用节点、要进 JSON/`type` 字段 | 把 HTTP/SQL/向量/Python 函数暴露给 Agent / `@flow` |
+| 写法 | 继承 `Node`，设 `node_type`，实现 `execute` | `@tool` / `HttpToolSource` / YAML 清单 → 动态节点 |
+| `@flow` 调用 | `MY_NODE(...)`（`node_type` 大写） | `GET_USER(...)` 或兼容 `TOOL(action=...)` |
+| 文档 | 本页 | [工具节点与数据源](../ai/tools.md) |
+
+`examples/agent/` 里的 `ToolNode` 是**教学用自定义节点**，用来演示「怎么写 Node」；生产集成请走 plaita-ai 工具层，不要把两套 `ToolNode` 当成同一个类。
+
 ## 完整可运行示例：Agent 编排
 
 仓库里的 `examples/agent/` 给出三个**开箱即跑**的 LLM 相关节点（`LLMNode` 调 LLM、`ToolNode` 注册 Python 函数为工具、`RetrieverNode` 内存检索），并串成 RAG / Tool-use / Router 三个端到端 Agent 案例。内置 `FakeLLM` 无需 API key 即可运行，也可换真实 LLM。
@@ -160,5 +174,6 @@ python -m examples.agent.demo
 ## 下一步
 
 - [节点注册表与插件](registry.md)
+- [工具节点与数据源](../ai/tools.md) —— 自定义 Node 不够用、或要接 HTTP/SQL/向量时
 - [应用场景 - Agent 编排](../scenarios/agent-orchestration.md)
 - [API: plaita.node](../api/node.md)
