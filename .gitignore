@@ -33,5 +33,8 @@ mutants/
 mutation-baseline.txt
 mutation-recheck.txt
 mutation-sweep-results.txt
+mutation-unboosted-*.txt
+codeflow-*-recheck*.txt
+sexpr-recheck.txt
 setup.cfg.mutmut_test
 
