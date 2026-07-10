@@ -99,8 +99,19 @@ class TestBackgroundBranchObservability:
             self._run_on(flow, execution)
             par = next(n for n in flow.nodes if n.node_type == "parallel")
             par.wait_background_branches(execution, timeout=5)
-        assert any("background branch" in r.message and "bg" in r.message
-                   for r in caplog.records)
+            # done_callback 可能在 wait 返回后才写日志; 与 errors 轮询同理。
+            import time as _t
+            deadline = _t.time() + 2
+
+            def _matched():
+                return any(
+                    "background branch" in r.getMessage() and "bg" in r.getMessage()
+                    for r in caplog.records
+                )
+
+            while not _matched() and _t.time() < deadline:
+                _t.sleep(0.01)
+            assert _matched(), "background branch failure should be logged"
 
     def test_successful_background_branch_records_no_error(self):
         flow = _make_parallel_flow(
