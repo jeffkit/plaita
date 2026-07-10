@@ -5,16 +5,20 @@ from plaita_ai.tools.config.schema import (
     HttpToolConfig,
     NativeToolConfig,
     Resources,
+    SqlToolConfig,
     ToolBundle,
     ToolConfig,
+    VectorToolConfig,
 )
 
 __all__ = [
     "HttpToolConfig",
     "NativeToolConfig",
     "Resources",
+    "SqlToolConfig",
     "ToolBundle",
     "ToolConfig",
+    "VectorToolConfig",
     "parse_resources",
     "parse_tool_bundle",
 ]

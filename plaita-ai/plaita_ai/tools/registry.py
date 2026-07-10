@@ -19,8 +19,11 @@ from plaita_ai.tools.config.schema import (
     HttpToolConfig,
     NativeToolConfig,
     Resources,
+    SqlToolConfig,
     ToolConfig,
+    VectorToolConfig,
 )
+from plaita_ai.tools.resources import set_resource_config
 from plaita_ai.tools.source.base import (
     BaseToolSource,
     ParamDef,
@@ -28,6 +31,8 @@ from plaita_ai.tools.source.base import (
 )
 from plaita_ai.tools.source.http import HttpToolSource
 from plaita_ai.tools.source.native import NativeToolSource
+from plaita_ai.tools.source.sql import SqlToolSource, sql_param_names
+from plaita_ai.tools.source.vector import VectorToolSource
 
 PathOrData = Union[str, Path, Dict[str, Any]]
 
@@ -42,17 +47,13 @@ def _param_defs_from_config(params: Dict[str, Any]) -> Dict[str, ParamDef]:
         elif hasattr(raw, "model_dump"):
             result[name] = ParamDef.model_validate(raw.model_dump())
         else:
-            # 简写: user_id: string
             result[name] = ParamDef(type=str(raw))
     return result
 
 
 def config_to_source(cfg: ToolConfig, resources: Optional[Resources] = None) -> BaseToolSource:
-    """把扁平配置项转成 BaseToolSource 实例。
-
-    *resources* 预留：sql/vector/mcp 阶段用于绑定命名连接；HTTP/Native 暂不使用。
-    """
-    _ = resources  # Phase 1 未用；避免未使用告警
+    """把扁平配置项转成 BaseToolSource 实例。"""
+    _ = resources  # 连接解析走 resources 注册表；此处仅构造 Source
     params = _param_defs_from_config(getattr(cfg, "params", {}) or {})
     common = {
         "name": cfg.name,
@@ -78,14 +79,27 @@ def config_to_source(cfg: ToolConfig, resources: Optional[Resources] = None) -> 
             module=cfg.module,
             function=cfg.function,
         )
+    if isinstance(cfg, SqlToolConfig):
+        return SqlToolSource(
+            **common,
+            sql=cfg.sql,
+            datasource=cfg.datasource,
+            url=cfg.url,
+            row_limit=cfg.row_limit,
+        )
+    if isinstance(cfg, VectorToolConfig):
+        return VectorToolSource(
+            **common,
+            store=cfg.store,
+            search_type=cfg.search_type,
+            k=cfg.k,
+            filter=cfg.filter,
+        )
     raise TypeError(f"不支持的工具配置类型: {type(cfg).__name__}")
 
 
 def schema_from_source(source: BaseToolSource, func: Callable[..., Any]) -> ToolSchema:
-    """优先用配置 params 生成 ToolSchema；否则从 callable 签名推断。
-
-    HttpToolSource 若未声明 params，会从 URL ``{placeholder}`` 自动补全。
-    """
+    """优先用配置 params 生成 ToolSchema；否则从 callable / SQL / URL 推断。"""
     from plaita_ai.agent.fot.tools import _build_schema
 
     param_defs = dict(source.params)
@@ -95,6 +109,20 @@ def schema_from_source(source: BaseToolSource, func: Callable[..., Any]) -> Tool
         for _, fname, _, _ in string.Formatter().parse(source.url):
             if fname and fname not in param_defs:
                 param_defs[fname] = ParamDef(type="string", required=True)
+
+    if not param_defs and isinstance(source, SqlToolSource):
+        for name in sql_param_names(source.sql):
+            param_defs[name] = ParamDef(type="string", required=True)
+
+    if not param_defs and isinstance(source, VectorToolSource):
+        # retrieve(query, k=...) — k 可选
+        param_defs["query"] = ParamDef(type="string", required=True, description="检索查询")
+        param_defs["k"] = ParamDef(
+            type="integer",
+            required=False,
+            default=source.k,
+            description="返回条数",
+        )
 
     if not param_defs:
         schema = _build_schema(func, source.name, source.description)
@@ -179,6 +207,7 @@ def load_tool_bundle(
     """从 YAML/JSON（或 dict）加载并注册工具。"""
     bundle = parse_tool_bundle(tools)
     res = parse_resources(resources) if resources is not None else Resources()
+    set_resource_config(res)
     specs: List[ToolSpec] = []
     for cfg in bundle.tools:
         source = config_to_source(cfg, res)

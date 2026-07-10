@@ -10,10 +10,14 @@ from plaita_ai.tools.source.base import (
 )
 from plaita_ai.tools.source.http import HttpToolSource
 from plaita_ai.tools.source.native import NativeToolSource
+from plaita_ai.tools.source.sql import SqlToolSource
+from plaita_ai.tools.source.vector import VectorToolSource
 
 SOURCE_TYPES: dict[str, type[BaseToolSource]] = {
     "http": HttpToolSource,
     "native": NativeToolSource,
+    "sql": SqlToolSource,
+    "vector": VectorToolSource,
 }
 
 __all__ = [
@@ -21,6 +25,8 @@ __all__ = [
     "BaseToolSource",
     "HttpToolSource",
     "NativeToolSource",
+    "SqlToolSource",
+    "VectorToolSource",
     "ParamDef",
     "ToolContext",
     "build_tool_context",

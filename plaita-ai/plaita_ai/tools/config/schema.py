@@ -41,14 +41,17 @@ class ParamDefConfig(BaseModel):
     description: str = ""
 
 
-class HttpToolConfig(BaseModel):
-    type: Literal["http"]
+class _ToolConfigBase(BaseModel):
     name: str
     description: str = ""
     tags: List[str] = Field(default_factory=list)
     success_condition: Optional[str] = None
     error_message: str = "工具调用失败"
     params: Dict[str, ParamDefConfig] = Field(default_factory=dict)
+
+
+class HttpToolConfig(_ToolConfigBase):
+    type: Literal["http"]
     url: str
     method: str = "GET"
     headers: Dict[str, str] = Field(default_factory=dict)
@@ -57,20 +60,30 @@ class HttpToolConfig(BaseModel):
     content_type: str = "application/json"
 
 
-class NativeToolConfig(BaseModel):
+class NativeToolConfig(_ToolConfigBase):
     type: Literal["native"]
-    name: str
-    description: str = ""
-    tags: List[str] = Field(default_factory=list)
-    success_condition: Optional[str] = None
-    error_message: str = "工具调用失败"
-    params: Dict[str, ParamDefConfig] = Field(default_factory=dict)
     module: str
     function: str
 
 
+class SqlToolConfig(_ToolConfigBase):
+    type: Literal["sql"]
+    sql: str
+    datasource: Optional[str] = None
+    url: Optional[str] = None
+    row_limit: int = 100
+
+
+class VectorToolConfig(_ToolConfigBase):
+    type: Literal["vector"]
+    store: Optional[str] = None
+    search_type: str = "similarity"
+    k: int = 4
+    filter: Optional[Dict[str, Any]] = None
+
+
 ToolConfig = Annotated[
-    Union[HttpToolConfig, NativeToolConfig],
+    Union[HttpToolConfig, NativeToolConfig, SqlToolConfig, VectorToolConfig],
     Field(discriminator="type"),
 ]
 

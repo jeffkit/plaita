@@ -12,19 +12,27 @@ from plaita_ai.agent.fot.tools import ToolNode, list_tools
 from plaita_ai.tools import (
     HttpToolSource,
     NativeToolSource,
+    SqlToolSource,
     ToolContext,
+    VectorToolSource,
     build_tool_context,
+    clear_resources,
     load_tool_bundle,
+    register_datasource,
     register_source,
+    register_vectorstore,
 )
 from plaita_ai.tools.source.base import check_success, extract_json_path
+from plaita_ai.tools.source.sql import sql_param_names
 
 
 @pytest.fixture(autouse=True)
 def _clear_tools():
     ToolNode.clear()
+    clear_resources()
     yield
     ToolNode.clear()
+    clear_resources()
 
 
 # ---------------------------------------------------------------------------
@@ -226,3 +234,118 @@ tools:
         specs = load_tool_bundle(path)
         assert specs[0].placeholder == "GET_WEATHER"
         assert [p.name for p in specs[0].schema.params] == ["city"]
+
+
+# ---------------------------------------------------------------------------
+# SqlToolSource
+# ---------------------------------------------------------------------------
+
+class TestSqlToolSource:
+    def test_sql_param_names(self):
+        assert sql_param_names(
+            "SELECT * FROM t WHERE a = :user_id AND b::text = :x"
+        ) == ["user_id", "x"]
+
+    def test_query_sqlite(self):
+        pytest.importorskip("sqlalchemy")
+        source = SqlToolSource(
+            name="query_orders",
+            description="查订单",
+            url="sqlite:///:memory:",
+            sql="SELECT :user_id AS user_id, :limit AS lim",
+        )
+        spec = register_source(source)
+        assert [p.name for p in spec.schema.params] == ["user_id", "limit"]
+        rows = ToolNode.get_tool("query_orders")(user_id="u1", limit=5)
+        assert rows == [{"user_id": "u1", "lim": 5}]
+
+    def test_datasource_resource(self):
+        pytest.importorskip("sqlalchemy")
+        register_datasource("mem", "sqlite:///:memory:")
+        source = SqlToolSource(
+            name="ping_db",
+            description="ping",
+            datasource="mem",
+            sql="SELECT 1 AS ok",
+        )
+        register_source(source)
+        assert ToolNode.get_tool("ping_db")() == [{"ok": 1}]
+
+    def test_load_sql_from_bundle(self):
+        pytest.importorskip("sqlalchemy")
+        specs = load_tool_bundle(
+            {
+                "tools": [
+                    {
+                        "type": "sql",
+                        "name": "q",
+                        "description": "q",
+                        "url": "sqlite:///:memory:",
+                        "sql": "SELECT :id AS id",
+                    }
+                ]
+            }
+        )
+        assert specs[0].placeholder == "Q"
+        assert ToolNode.get_tool("q")(id="x") == [{"id": "x"}]
+
+
+# ---------------------------------------------------------------------------
+# VectorToolSource
+# ---------------------------------------------------------------------------
+
+class _FakeStore:
+    def similarity_search(self, query, k=4, filter=None):
+        return [
+            type("Doc", (), {"page_content": f"{query}-{i}"})()
+            for i in range(k)
+        ]
+
+
+class TestVectorToolSource:
+    def test_bind_store_and_retrieve(self):
+        source = VectorToolSource(
+            name="search_kb",
+            description="检索知识库",
+            k=2,
+        ).bind_store(_FakeStore())
+        spec = register_source(source)
+        assert [p.name for p in spec.schema.params] == ["query", "k"]
+        docs = ToolNode.get_tool("search_kb")(query="hello")
+        assert docs == ["hello-0", "hello-1"]
+
+    def test_register_vectorstore_by_name(self):
+        register_vectorstore("prod_kb", _FakeStore())
+        source = VectorToolSource(
+            name="search_kb",
+            description="检索",
+            store="prod_kb",
+            k=1,
+        )
+        register_source(source)
+        assert ToolNode.get_tool("search_kb")(query="q") == ["q-0"]
+
+    def test_callable_store(self):
+        source = VectorToolSource(name="search", description="s", k=3).bind_store(
+            lambda query, k=4: [f"{query}:{k}"]
+        )
+        register_source(source)
+        assert ToolNode.get_tool("search")(query="a", k=2) == ["a:2"]
+
+    def test_load_vector_from_bundle(self):
+        register_vectorstore("kb", _FakeStore())
+        specs = load_tool_bundle(
+            {
+                "tools": [
+                    {
+                        "type": "vector",
+                        "name": "search_docs",
+                        "description": "搜文档",
+                        "store": "kb",
+                        "k": 2,
+                    }
+                ]
+            }
+        )
+        assert specs[0].name == "search_docs"
+        assert ToolNode.get_tool("search_docs")(query="z") == ["z-0", "z-1"]

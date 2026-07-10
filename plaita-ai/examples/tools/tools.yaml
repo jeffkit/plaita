@@ -13,6 +13,30 @@ tools:
         required: true
         description: 城市名
 
+  - type: sql
+    name: query_orders
+    description: 查询用户订单
+    datasource: main_db
+    sql: |
+      SELECT id, status, amount
+      FROM orders
+      WHERE user_id = :user_id
+      LIMIT :limit
+    params:
+      user_id:
+        type: string
+        required: true
+      limit:
+        type: integer
+        required: false
+        default: 10
+
+  - type: vector
+    name: search_kb
+    description: 从知识库检索相关内容
+    store: prod_kb
+    k: 5
+
   - type: native
     name: format_report
     description: 格式化天气报告（复杂逻辑走 Python）

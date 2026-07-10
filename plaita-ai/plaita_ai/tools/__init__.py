@@ -14,7 +14,7 @@
 
     # 配置轨
     from plaita_ai.tools import load_tool_bundle
-    load_tool_bundle("tools.yaml")
+    load_tool_bundle("tools.yaml", "resources.yaml")
 """
 
 from plaita_ai.tools.registry import (
@@ -24,13 +24,20 @@ from plaita_ai.tools.registry import (
     register_sources,
     schema_from_source,
 )
+from plaita_ai.tools.resources import (
+    clear_resources,
+    register_datasource,
+    register_vectorstore,
+)
 from plaita_ai.tools.source import (
     SOURCE_TYPES,
     BaseToolSource,
     HttpToolSource,
     NativeToolSource,
     ParamDef,
+    SqlToolSource,
     ToolContext,
+    VectorToolSource,
     build_tool_context,
 )
 
@@ -39,12 +46,17 @@ __all__ = [
     "BaseToolSource",
     "HttpToolSource",
     "NativeToolSource",
+    "SqlToolSource",
+    "VectorToolSource",
     "ParamDef",
     "ToolContext",
     "build_tool_context",
+    "clear_resources",
     "config_to_source",
     "load_tool_bundle",
+    "register_datasource",
     "register_source",
     "register_sources",
+    "register_vectorstore",
     "schema_from_source",
 ]
