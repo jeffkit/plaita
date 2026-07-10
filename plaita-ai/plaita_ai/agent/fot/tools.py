@@ -247,6 +247,8 @@ class ToolSchema:
     description: str = ""
     params: List[ParamSchema] = field(default_factory=list)
     has_auth_context: bool = False
+    # 若工具声明 ``context`` 参数，运行时注入 ToolContext（无业务域语义）
+    has_tool_context: bool = False
     # Python return annotation string, e.g. "dict", "str", "List[Order]"
     return_annotation: str = ""
     # Raw return annotation object for complex type introspection
@@ -452,6 +454,7 @@ def _build_schema(func: Callable[..., Any], name: str, description: str) -> Tool
 
     params: List[ParamSchema] = []
     has_auth_context = False
+    has_tool_context = False
     try:
         sig = inspect.signature(func)
     except (TypeError, ValueError):
@@ -463,6 +466,9 @@ def _build_schema(func: Callable[..., Any], name: str, description: str) -> Tool
         if pname == "auth_context":
             has_auth_context = True
             continue  # excluded from user-facing schema; injected by runtime
+        if pname == "context":
+            has_tool_context = True
+            continue  # ToolContext; injected by runtime
         annotation = hints.get(pname, param.annotation)
         type_name = _py_type_name(annotation)
         py_anno = _annotation_str(annotation) if annotation is not inspect.Parameter.empty else ""
@@ -482,6 +488,7 @@ def _build_schema(func: Callable[..., Any], name: str, description: str) -> Tool
         description=description,
         params=params,
         has_auth_context=has_auth_context,
+        has_tool_context=has_tool_context,
         return_annotation=return_annotation,
         return_raw=return_hint if return_hint is not inspect.Parameter.empty else None,
     )
@@ -595,10 +602,12 @@ def make_tool_node_class(
             val = getattr(self, p.name, None)
             if val is not None:
                 params[p.name] = execution.evaluate(val)
-        if _schema.has_auth_context:
+        if _schema.has_auth_context or _func_has_auth_context(_func):
             auth_ctx = execution.get_global_variable("auth_context")
             if auth_ctx is not None:
                 params["auth_context"] = auth_ctx
+        if _schema.has_tool_context or _func_has_tool_context(_func):
+            params["context"] = _build_tool_context(execution)
         return _func(**params)
 
     defaults["execute"] = execute
@@ -626,6 +635,10 @@ class ToolNode(Node):
     ``auth_context`` keyword parameter, ``execute`` reads
     ``$GLOBAL.auth_context`` from the flow's global context and passes it
     automatically. The tool function is responsible for validating the value.
+
+    ``context`` injection: if the tool declares a ``context`` parameter,
+    ``execute`` builds a generic ``ToolContext`` (trace/caller/auth/baggage)
+    from ``$GLOBAL`` and passes it. Business fields belong in ``baggage``.
     """
 
     node_type: ClassVar[str] = "tool"
@@ -728,8 +741,7 @@ class ToolNode(Node):
         params = execution.evaluate(self.params) if self.params else {}
         params = params or {}
 
-        # auth_context injection: if the tool declares auth_context param,
-        # read it from $GLOBAL.auth_context in the execution context.
+        # auth_context / ToolContext injection from $GLOBAL.
         schema = self.get_schema(name)
         needs_auth = (
             (schema is not None and schema.has_auth_context)
@@ -739,6 +751,13 @@ class ToolNode(Node):
             auth_ctx = execution.get_global_variable("auth_context")
             if auth_ctx is not None:
                 params = {**params, "auth_context": auth_ctx}
+
+        needs_ctx = (
+            (schema is not None and getattr(schema, "has_tool_context", False))
+            or _func_has_tool_context(func)
+        )
+        if needs_ctx:
+            params = {**params, "context": _build_tool_context(execution)}
 
         return func(**params)
 
@@ -750,6 +769,37 @@ def _func_has_auth_context(func: Callable[..., Any]) -> bool:
         return "auth_context" in sig.parameters
     except (TypeError, ValueError):
         return False
+
+
+def _func_has_tool_context(func: Callable[..., Any]) -> bool:
+    """Return True if ``func`` declares a ``context`` parameter."""
+    try:
+        sig = inspect.signature(func)
+        return "context" in sig.parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _build_tool_context(execution: Any) -> Any:
+    """Build ToolContext from execution globals (lazy import to avoid cycles)."""
+    try:
+        from plaita_ai.tools.source.base import build_tool_context
+        return build_tool_context(execution)
+    except ImportError:  # pragma: no cover
+        # tools 包不可用时退化为简单命名空间
+        def _get(key: str, default: Any = None) -> Any:
+            try:
+                return execution.get_global_variable(key, default)
+            except Exception:
+                return default
+        return {
+            "trace_id": _get("trace_id"),
+            "request_id": _get("request_id"),
+            "caller": _get("caller"),
+            "flow_id": _get("flow_id"),
+            "auth": _get("auth_context"),
+            "baggage": _get("baggage") or {},
+        }
 
 
 # ---------------------------------------------------------------------------

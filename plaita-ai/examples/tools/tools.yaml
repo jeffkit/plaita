@@ -1,0 +1,20 @@
+# tools.yaml — 扁平工具清单示例（无 Component/Instance）
+version: "1"
+tools:
+  - type: http
+    name: get_weather
+    description: 查询城市天气
+    url: https://api.weather.example.com/v1/{city}
+    method: GET
+    response_path: $.result
+    params:
+      city:
+        type: string
+        required: true
+        description: 城市名
+
+  - type: native
+    name: format_report
+    description: 格式化天气报告（复杂逻辑走 Python）
+    module: myapp.formatters
+    function: weather_report

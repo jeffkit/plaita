@@ -1,0 +1,16 @@
+# resources.yaml — 命名资源池（连接信息，非动态类型系统）
+datasources:
+  main_db:
+    driver: postgresql
+    url: postgresql://user:pass@localhost:5432/app
+
+vectorstores:
+  prod_kb:
+    provider: chroma
+    collection: knowledge_base
+    embedding: text-embedding-3-small
+
+mcp_servers:
+  internal:
+    url: http://localhost:3000/sse
+    transport: sse
