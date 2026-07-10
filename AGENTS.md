@@ -52,8 +52,8 @@ mkdocs build -f docs-site/mkdocs.yml --strict   # 改文档后
 
 完整契约：[`docs/mutation-testing.md` §7](docs/mutation-testing.md)。摘要：
 - 日常只跑相关单测；改核心模块后 **单模块** mutation + recheck
-- 当前优先：`codeflow/_expr.py`（72.9%→目标 90%+）→ 可选 `_nodes/_stmt/_source`
-- 本轮已建基线：sexpr 100%、async_utils 89.3%、codeflow/_common 95.2%
+- 当前优先：可选扩面 `codeflow/_nodes.py` / `_stmt.py` / `_source.py`
+- 本轮已建基线：sexpr 100%、async_utils 89.3%、codeflow/_common 95.2%、_expr 99.2%
 - recheck 须在 `mutants/` 内用 `tests/...` 路径（§2.20）
 
 ## 深入阅读

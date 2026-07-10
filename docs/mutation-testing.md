@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-09（§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22/_23 codeflow _common 95.2% / _expr 72.9%；§2.20 executor 98.1%；§2.21 event/memory 100%）
+> **最后更新**：2026-07-10（§2.23 codeflow/_expr **99.2%**；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%；§2.20 executor 98.1%；§2.21 event/memory 100%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：历史低分模块多数已达 100% 或等价收尾；当前见 §7.3（strategies 88% 等价收尾；sexpr 已达 100%（§2.24）；扩面可选 codeflow/async_utils）
+> - 优先队列：历史低分模块多数已达 100% 或等价收尾；当前见 §7.3（strategies 88% 等价收尾；_expr 99.2%；扩面可选 codeflow/_nodes/_stmt/_source）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -1074,7 +1074,7 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 
 批量可用：`bash scripts/run_full_mutation_sweep.sh <module_substring>`。
 
-### 7.3 当前优先队列（2026-07-09）
+### 7.3 当前优先队列（2026-07-10）
 
 假低分与 resume 真漏测本轮已收尾：
 
@@ -1082,7 +1082,7 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 2. ~~`event/memory.py`~~ → **100%**（§2.21）
 3. **`core/strategies.py`（88%，6 survived）** — 已分类为等价/边界，**到此为止不硬杀**
 4. ~~`dsl/codeflow/_common.py`~~ → **95.2%**（§2.22；剩 7 等价）
-5. **`dsl/codeflow/_expr.py`（72.9%）** — 错误消息文本断言，目标 ≥90%
+5. ~~`dsl/codeflow/_expr.py`~~ → **99.2%**（§2.23；剩 3 等价）
 6. ~~`dsl/sexpr.py`~~ → **100%**（§2.24）
 7. ~~`core/async_utils.py`~~ → **89.3%**（§2.25；8 等价）
 8. **扩面（可选）**：`codeflow/_nodes.py`、`_stmt.py`、`_source.py`
@@ -1154,32 +1154,42 @@ mutmut run
 
 ---
 
-## 2.23 codeflow/_expr.py 基线（2026-07-09）
+## 2.23 codeflow/_expr.py 基线 → 99.2%（2026-07-09 / 补强 2026-07-10）
 
 ### 背景
 
 `_expr.py`（8742 bytes）是 codeflow 的表达式编译器，将 Python AST 中的值/名字/运算
 转为 plaita 表达式 IR。366 个变异点，是 `_common.py` 的 2.5 倍。
 
-### 结果（初筛，含 test_codeflow_mutations.py）
+### 结果
 
-| 指标 | 数值 |
-|------|------|
-| 变异点总数 | 366 |
-| killed | 267 |
-| survived | 99 |
-| timeout | 0 |
-| **初筛 score** | **72.9%** |
+| 轮次 | killed | survived | **score** | 备注 |
+|------|--------|----------|-----------|------|
+| 初筛（2026-07-09） | 267 | 99 | **72.9%** | 仅异常类型断言 |
+| 补 `_expr` 精准断言 + 独立进程 recheck（2026-07-10） | **363** | **3** | **99.2%** | 99 survivors 中 96 killed |
 
-### 主要 survived 模式
+### 补测策略
 
-99 个 survived 集中在 `__compile_expr` 函数中，主要是：
-1. **错误消息文本→None**：`raise _CodeflowError(f"...", node)` 改成 `_CodeflowError(None, node)` — 
-   测试只捕获异常类型，不检查具体消息内容。
-2. **AST node→None 传参**：`_resolve_name(node.id, node, ctx)` 改成 `_resolve_name(node.id, None, ctx)` — 
-   错误消息中的行号信息未被断言。
+在 `tests/unit/test_codeflow_mutations.py` 直接测 `_compile_expr` / `_resolve_name` /
+`_compile_call_expr` / `_compile_condition` / `_negate_condition` 等内部函数：
 
-### 下一步
+1. **错误消息精确断言**（含中文原文、禁止 `XX…XX` / 大小写翻转）
+2. **行号断言**（`第 ? 行` 不得出现 → 杀死 `node→None` / 省略 `node` 参数）
+3. **`ctx.names` 绑定路径**（杀死递归 `_compile_expr(..., None)`）
+4. **逻辑翻转**（`or→and`、`in→not in`、MAP 集合调用分支等）
 
-补 `test_codeflow_mutations.py` 中针对 `_expr.py` 的错误消息精确断言，预期可从 72.9% 提升到 90%+。
-参考 `_common.py` 的补测模式：直接测试内部函数 + 断言错误消息内容。
+### 剩余 3 survived（等价变异）
+
+| 变异点 | 说明 | 判定 |
+|--------|------|------|
+| `__compile_expr__mutmut_66` | `_eval_subscript_index(slice, None)` — `ctx` 在该函数内未使用 | 等价 |
+| `__compile_call_expr__mutmut_24` | `"节点"` → `"XX节点XX"` fallback；HTTP/MAP 路径均有 `node_kind`/`func.id`，fallback 不可达 | 死代码/等价 |
+| `__compile_condition__mutmut_16` | `_negate_condition(..., None)` — 成功路径不读 `node`；错误路径已由直接测 `_negate_condition` 覆盖 | 等价 |
+
+### 跑法
+
+```bash
+only_mutate = ["plaita/dsl/codeflow/_expr.py"]
+rm -rf mutants .mutmut-cache && mutmut run
+# 对 survived 独立进程复核（见 scripts/recheck_codeflow_expr.sh）
+```

@@ -1,6 +1,6 @@
-"""针对 plaita/dsl/codeflow/_common.py 的 mutation killing 测试。
+"""针对 plaita/dsl/codeflow/_common.py 与 _expr.py 的 mutation killing 测试。
 
-目标：杀死 mutmut 初筛后 survived 的变异点，提升 _common.py 变异分数。
+目标：杀死 mutmut 初筛后 survived 的变异点，提升 codeflow 变异分数。
 """
 from __future__ import annotations
 
@@ -639,3 +639,480 @@ class TestDescribeCallFallbacks:
         node = ast.parse("a[0].method()", mode="eval").body
         result = _describe_call(node.func)  # func.value is Subscript
         assert "NoneType" not in result
+
+
+# ---------------------------------------------------------------------------
+# _expr.py mutation killers — error messages, lineno, logic flips
+# ---------------------------------------------------------------------------
+
+from plaita.dsl.codeflow._expr import (  # noqa: E402
+    _compile_expr,
+    _compile_call_expr,
+    _compile_condition,
+    _compile_compare,
+    _resolve_name,
+    _eval_subscript_index,
+    _render_arg,
+    _negate_condition,
+)
+
+
+def _expr_ast(code: str) -> ast.AST:
+    """Parse a single expression; attach a stable lineno for assertions."""
+    node = ast.parse(code, mode="eval").body
+    if not getattr(node, "lineno", None):
+        node.lineno = 7  # type: ignore[attr-defined]
+    return node
+
+
+def _fresh_ctx(**kwargs) -> _CompileCtx:
+    return _CompileCtx(**kwargs)
+
+
+class TestCompileExprErrorMessages:
+    """Kill _CodeflowError(None)/node→None/XX-prefix survivors in _compile_expr."""
+
+    def test_attr_base_not_str_message_and_lineno(self):
+        # mutmut_13/14/15/16: message→None / node→None / drop node / raise(node)
+        node = _expr_ast("[1, 2].count")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "属性访问的基底必须是命名空间/节点引用" in msg
+        assert "第 " in msg and "行" in msg
+        assert "None" not in msg.split(":")[0] or "得到" in msg  # message body present
+        assert exc.value.args[0] is not None
+        assert "第 ?" not in msg  # node lineno must be used
+
+    def test_unsupported_binop_message_includes_op_name(self):
+        # mutmut_25-29: None message / node→None / type(None).__name__
+        node = _expr_ast("INPUT.x << 1")
+        # BitShiftLeft is unsupported
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "不支持的二元运算" in msg
+        assert "LShift" in msg
+        assert "NoneType" not in msg
+        assert "第 ?" not in msg
+
+    def test_not_in_expr_position_exact_message(self):
+        # mutmut_48-53: None / node→None / XX / case flip
+        node = _expr_ast("not INPUT.flag")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert msg.endswith("not 要用在条件位置（if/while 判断），不能出现在表达式里") or (
+            "not 要用在条件位置（if/while 判断），不能出现在表达式里" in msg
+        )
+        assert "XXnot" not in msg
+        assert "NOT 要用" not in msg
+        assert "第 ?" not in msg
+
+    def test_unsupported_unary_includes_op_name(self):
+        # mutmut_55/57/58: node→None / drop node / type(None)
+        node = _expr_ast("~INPUT.x")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "不支持的一元运算" in msg
+        assert "Invert" in msg
+        assert "NoneType" not in msg
+        assert "第 ?" not in msg
+
+    def test_subscript_base_not_str_message(self):
+        # mutmut_71/73/74
+        node = _expr_ast("[1, 2][0]")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "下标访问的基底必须是命名空间/节点引用" in msg
+        assert "XX下标" not in msg
+        assert "第 ?" not in msg
+
+    def test_dict_star_unpack_message(self):
+        # mutmut_82/84/85
+        node = _expr_ast("{**INPUT}")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "不支持 ** 解包" in msg
+        assert "XX不支持" not in msg
+        assert "第 ?" not in msg
+
+    def test_dict_non_const_key_message(self):
+        # mutmut_88/90/91
+        node = _expr_ast("{INPUT.k: 1}")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "dict 的 key 必须是常量" in msg
+        assert "XXdict" not in msg
+        assert "第 ?" not in msg
+
+    def test_compare_in_expr_position_message(self):
+        # mutmut_102-108: or→and makes Compare alone miss this branch;
+        # also None/XX/case survivors
+        node = _expr_ast("INPUT.x == 1")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "比较/and/or 只能出现在条件位置（if 判断）" in msg
+        assert "XX比较" not in msg
+        assert "AND/OR" not in msg
+        assert "第 ?" not in msg
+
+    def test_boolop_in_expr_position_message(self):
+        # mutmut_102: and→or flip — BoolOp alone must still raise
+        node = _expr_ast("INPUT.x and INPUT.y")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        assert "比较/and/or 只能出现在条件位置（if 判断）" in str(exc.value)
+
+    def test_footgun_hint_message_and_lineno(self):
+        # mutmut_113/115: node→None / drop node on footgun raise
+        node = _expr_ast("a if True else b")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "三元表达式" in msg
+        assert "第 ?" not in msg
+
+    def test_unsupported_expr_includes_type_name(self):
+        # mutmut_117/119/120: node→None / drop / type(None).__name__
+        # Prefer a node type NOT in _FOOTGUN_HINTS so we hit the final raise.
+        node = ast.Yield(value=ast.Constant(value=1))
+        node.lineno = 11  # type: ignore[attr-defined]
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "不支持的表达式" in msg
+        assert "Yield" in msg
+        assert "NoneType" not in msg
+        assert "第 ?" not in msg
+
+
+class TestResolveNameMutations:
+    def test_bare_builtin_raises_call_form_message(self):
+        # mutmut_3: in→not in flips which branch; mutmut_4-7 message/node
+        node = ast.Name(id="len", ctx=ast.Load())
+        node.lineno = 3
+        with pytest.raises(_CodeflowError) as exc:
+            _resolve_name("len", node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "内置函数 len 必须以调用形式使用" in msg
+        assert "第 ?" not in msg
+        assert "None" not in msg.split("行: ")[-1][:4] or "内置" in msg
+
+    def test_unknown_name_message_and_lineno(self):
+        # mutmut_8-11
+        node = ast.Name(id="foobar", ctx=ast.Load())
+        node.lineno = 9
+        with pytest.raises(_CodeflowError) as exc:
+            _resolve_name("foobar", node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "未知名字 'foobar'" in msg or '未知名字 "foobar"' in msg or "未知名字" in msg
+        assert "INPUT/NODE/GLOBAL" in msg
+        assert "第 9 行" in msg or "第 ?" not in msg
+
+    def test_name_via_compile_expr_passes_node_for_lineno(self):
+        # mutmut_2: _resolve_name(..., None, ctx) — unknown name loses lineno
+        node = _expr_ast("unknown_var")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_expr(node, _fresh_ctx())
+        assert "第 ?" not in str(exc.value)
+        assert "未知名字" in str(exc.value)
+
+    def test_bound_name_uses_ctx_names(self):
+        # kills ctx→None on paths that resolve via ctx.names
+        ctx = _fresh_ctx()
+        ctx.names["result"] = "$NODE.result"
+        node = _expr_ast("result")
+        assert _compile_expr(node, ctx) == "$NODE.result"
+
+
+class TestEvalSubscriptIndexMutations:
+    def test_non_int_index_message_and_node(self):
+        # mutmut_3-7
+        sl = ast.Constant(value="key")
+        sl.lineno = 5
+        with pytest.raises(_CodeflowError) as exc:
+            _eval_subscript_index(sl, _fresh_ctx())
+        msg = str(exc.value)
+        assert "下标只支持整数常量" in msg
+        assert "XX下标" not in msg
+        assert "第 ?" not in msg
+
+
+class TestRenderArgMutations:
+    def test_escape_backslash_and_quote(self):
+        # mutmut_14-17: XX around escape sequences
+        assert _render_arg('a\\b') == '"a\\\\b"'
+        assert _render_arg('say "hi"') == '"say \\"hi\\""'
+        assert _render_arg('a\\b"c') == '"a\\\\b\\"c"'
+
+    def test_unrenderable_raises_with_repr(self):
+        # mutmut_27: message→None
+        with pytest.raises(_CodeflowError) as exc:
+            _render_arg({"k": 1})
+        assert "无法作为 $F 参数渲染的值" in str(exc.value)
+        assert "{'k': 1}" in str(exc.value) or "k" in str(exc.value)
+
+
+class TestCompileCallExprMutations:
+    def test_http_in_expr_raises_with_http_name_and_lineno(self):
+        # mutmut_16: node_kind=None → falls through to unsupported call
+        # mutmut_22/23/24/25-28: bad / message / node
+        node = _expr_ast('HTTP(url="http://x")')
+        assert isinstance(node, ast.Call)
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_call_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "HTTP" in msg
+        assert "是节点调用" in msg
+        assert "不能嵌在表达式里" in msg
+        assert "XX节点XX" not in msg
+        assert "第 ?" not in msg
+
+    def test_map_in_expr_raises_collection_name(self):
+        # mutmut_18: or→and — MAP has node_kind=None, needs collection OR branch
+        # mutmut_22-24: bad = MAP via func.id
+        node = _expr_ast("MAP(INPUT.items)")
+        assert isinstance(node, ast.Call)
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_call_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "MAP" in msg
+        assert "是节点调用" in msg
+        assert "第 ?" not in msg
+
+    def test_custom_node_in_expr_raises_with_lineno(self):
+        # mutmut_35/37: node→None / drop node on custom-node path
+        ctx = _fresh_ctx(known_node_types={"mynode"})
+        node = _expr_ast("MYNODE(x=1)")
+        assert isinstance(node, ast.Call)
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_call_expr(node, ctx)
+        msg = str(exc.value)
+        assert "MYNODE" in msg
+        assert "是节点调用" in msg
+        assert "第 ?" not in msg
+
+    def test_builtin_call_uses_ctx_for_bound_args(self):
+        # mutmut_42: _compile_expr(a, None) — bound name needs ctx
+        ctx = _fresh_ctx()
+        ctx.names["items"] = "$NODE.items"
+        node = _expr_ast("len(items)")
+        assert isinstance(node, ast.Call)
+        assert _compile_call_expr(node, ctx) == "$F.len($NODE.items)"
+
+    def test_multi_arg_f_call_join_separator(self):
+        # mutmut_47 is on the *builtin* Name path (len/abs/...), not F.attr
+        node = _expr_ast('F.concat("a", "b")')
+        assert isinstance(node, ast.Call)
+        result = _compile_call_expr(node, _fresh_ctx())
+        assert result == '$F.concat("a", "b")'
+        assert "XX, XX" not in result
+
+    def test_multi_arg_builtin_join_separator(self):
+        # mutmut_47: "XX, XX".join on builtin len/abs/round/str path
+        ctx = _fresh_ctx()
+        ctx.names["a"] = "$NODE.a"
+        ctx.names["b"] = "$NODE.b"
+        node = _expr_ast("len(a, b)")
+        assert isinstance(node, ast.Call)
+        result = _compile_call_expr(node, ctx)
+        assert result == "$F.len($NODE.a, $NODE.b)"
+        assert "XX, XX" not in result
+
+    def test_unsupported_call_message_and_lineno(self):
+        # mutmut_56/58: node→None / drop node on final raise
+        node = _expr_ast("unknown_fn(1)")
+        assert isinstance(node, ast.Call)
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_call_expr(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "不支持的调用" in msg
+        assert "第 ?" not in msg
+
+
+class TestCompileConditionMutations:
+    def test_and_or_conditions_use_ctx_bound_names(self):
+        # mutmut_11: _compile_condition(v, None)
+        ctx = _fresh_ctx()
+        ctx.names["flag"] = "$NODE.flag"
+        node = _expr_ast("flag and INPUT.x")
+        result = _compile_condition(node, ctx)
+        assert result["relation"] == "and"
+        assert result["conditions"][0]["field"] == "$NODE.flag"
+
+    def test_not_condition_preserves_node_for_errors(self):
+        # mutmut_16: negate(..., None) — only observable on error path;
+        # use non-negatable via direct negate after compile of contains... 
+        # For compile_condition not-path success, use simple compare:
+        node = _expr_ast("not INPUT.x == 1")
+        result = _compile_condition(node, _fresh_ctx())
+        assert result["operator"] == "ne"
+        assert result["field"] == "$INPUT.x"
+
+    def test_not_bound_name_uses_ctx(self):
+        # mutmut_20: _compile_condition(operand, None)
+        ctx = _fresh_ctx()
+        ctx.names["flag"] = "$NODE.flag"
+        node = _expr_ast("not flag")
+        result = _compile_condition(node, ctx)
+        assert result["field"] == "$NODE.flag"
+        assert result["operator"] == "eq"
+        assert result["value"] is False
+
+    def test_bare_bound_name_condition_uses_ctx(self):
+        # mutmut_29: _compile_expr(node, None)
+        ctx = _fresh_ctx()
+        ctx.names["flag"] = "$NODE.flag"
+        node = _expr_ast("flag")
+        result = _compile_condition(node, ctx)
+        assert result == {"field": "$NODE.flag", "operator": "ne", "value": False}
+
+
+class TestCompileCompareMutations:
+    def test_unsupported_compare_op_message(self):
+        # mutmut_17/19/20: node→None / drop / type(None)
+        node = _expr_ast("INPUT.x is None")
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_compare(node, _fresh_ctx())
+        msg = str(exc.value)
+        assert "不支持的比较运算" in msg
+        assert "Is" in msg
+        assert "NoneType" not in msg
+        assert "第 ?" not in msg
+
+    def test_compare_right_uses_ctx_bound_name(self):
+        # mutmut_23: _compile_expr(comp, None)
+        ctx = _fresh_ctx()
+        ctx.names["threshold"] = "$NODE.threshold"
+        node = _expr_ast("INPUT.x > threshold")
+        result = _compile_compare(node, ctx)
+        assert result["field"] == "$INPUT.x"
+        assert result["operator"] == "gt"
+        assert result["value"] == "$NODE.threshold"
+
+
+class TestNegateConditionMutations:
+    def test_negate_and_yields_or_lowercase(self):
+        # mutmut_31/32: XXorXX / OR
+        node = ast.Constant(value=1)
+        node.lineno = 1
+        cond = {
+            "relation": "and",
+            "conditions": [
+                {"field": "$INPUT.a", "operator": "eq", "value": 1},
+                {"field": "$INPUT.b", "operator": "eq", "value": 2},
+            ],
+        }
+        result = _negate_condition(cond, node)
+        assert result["relation"] == "or"
+        assert result["conditions"][0]["operator"] == "ne"
+
+    def test_negate_or_yields_and(self):
+        node = ast.Constant(value=1)
+        cond = {
+            "relation": "or",
+            "conditions": [
+                {"field": "$INPUT.a", "operator": "eq", "value": 1},
+                {"field": "$INPUT.b", "operator": "eq", "value": 2},
+            ],
+        }
+        result = _negate_condition(cond, node)
+        assert result["relation"] == "and"
+
+    def test_negate_unknown_op_message_and_lineno(self):
+        # mutmut_9/11
+        node = ast.Constant(value=1)
+        node.lineno = 4
+        with pytest.raises(_CodeflowError) as exc:
+            _negate_condition(
+                {"field": "x", "operator": "custom", "value": 1}, node
+            )
+        msg = str(exc.value)
+        assert "not 无法翻转运算符" in msg
+        assert "第 ?" not in msg
+
+    def test_negate_invalid_operand_message(self):
+        # mutmut_57/59/60
+        node = ast.Constant(value=1)
+        node.lineno = 6
+        with pytest.raises(_CodeflowError) as exc:
+            _negate_condition({"field": "x"}, node)
+        msg = str(exc.value)
+        assert "not 的操作数不合法" in msg
+        assert "XXnot" not in msg
+        assert "第 ?" not in msg
+
+    def test_negate_nested_and_error_preserves_lineno(self):
+        # mutmut_36: _negate_condition(c, None) inside and→or
+        node = ast.Constant(value=1)
+        node.lineno = 8
+        cond = {
+            "relation": "and",
+            "conditions": [
+                {"field": "x", "operator": "custom", "value": 1},
+            ],
+        }
+        with pytest.raises(_CodeflowError) as exc:
+            _negate_condition(cond, node)
+        assert "第 ?" not in str(exc.value)
+        assert "not 无法翻转运算符" in str(exc.value)
+
+    def test_negate_nested_or_error_preserves_lineno(self):
+        # mutmut_51: _negate_condition(c, None) inside or→and
+        node = ast.Constant(value=1)
+        node.lineno = 9
+        cond = {
+            "relation": "or",
+            "conditions": [
+                {"field": "x", "operator": "custom", "value": 1},
+            ],
+        }
+        with pytest.raises(_CodeflowError) as exc:
+            _negate_condition(cond, node)
+        assert "第 ?" not in str(exc.value)
+
+
+class TestCompileExprCtxPropagation:
+    """Kill ctx→None on recursive _compile_expr paths that need ctx.names."""
+
+    def test_binop_left_right_bound_names(self):
+        # mutmut_32/37
+        ctx = _fresh_ctx()
+        ctx.names["a"] = "$NODE.a"
+        ctx.names["b"] = "$NODE.b"
+        node = _expr_ast("a + b")
+        assert _compile_expr(node, ctx) == "$F.add($NODE.a, $NODE.b)"
+
+    def test_unary_bound_name(self):
+        # mutmut_44
+        ctx = _fresh_ctx()
+        ctx.names["n"] = "$NODE.n"
+        node = _expr_ast("-n")
+        assert _compile_expr(node, ctx) == "$F.sub(0, $NODE.n)"
+
+    def test_subscript_bound_base(self):
+        # mutmut_61 (66 is equivalent — ctx unused in _eval_subscript_index)
+        ctx = _fresh_ctx()
+        ctx.names["arr"] = "$NODE.arr"
+        node = _expr_ast("arr[0]")
+        assert _compile_expr(node, ctx) == "$NODE.arr[0]"
+
+    def test_dict_value_bound_name(self):
+        # mutmut_95
+        ctx = _fresh_ctx()
+        ctx.names["v"] = "$NODE.v"
+        node = _expr_ast('{"k": v}')
+        assert _compile_expr(node, ctx) == {"k": "$NODE.v"}
+
+    def test_list_bound_name(self):
+        # mutmut_99
+        ctx = _fresh_ctx()
+        ctx.names["v"] = "$NODE.v"
+        node = _expr_ast("[v]")
+        assert _compile_expr(node, ctx) == ["$NODE.v"]

@@ -5,7 +5,7 @@
 
 | 文档路径 | 代码路径模式 | 同步触发条件 |
 |----------|--------------|--------------|
-| `docs/mutation-testing.md` | `plaita/core/**`, `plaita/node/**`, `plaita/event/memory.py`, `plaita/event/core.py`, `plaita/io.py`, `plaita/dsl/builder.py`, `plaita/storage/{base,memory}.py`, `tests/unit/*_mutations.py`, `scripts/*mutation*`, `pyproject.toml` `[tool.mutmut]` | 变异基线分数变化、only_mutate 扩缩、sweep/recheck 流程、§7 持续推进规范 |
+| `docs/mutation-testing.md` | `plaita/core/**`, `plaita/node/**`, `plaita/event/memory.py`, `plaita/event/core.py`, `plaita/io.py`, `plaita/dsl/builder.py`, `plaita/dsl/codeflow/**`, `plaita/dsl/sexpr.py`, `plaita/storage/{base,memory}.py`, `tests/unit/*_mutations.py`, `scripts/*mutation*`, `scripts/recheck_*.sh`, `pyproject.toml` `[tool.mutmut]` | 变异基线分数变化、only_mutate 扩缩、sweep/recheck 流程、§7 持续推进规范 |
 | `AGENTS.md` / `CLAUDE.md` | — | 仓库导航、质量门禁、变异测试入口约束变更 |
 | `docs-site/docs/architecture/layering.md` | `plaita/core/**`, `plaita/event/**`, `plaita/storage/**`, `plaita/server/**`, `tests/integration/test_layering.py` | 分层规则、默认 EventBus 解析方式、允许/禁止的 import 方向变更 |
 | `docs-site/docs/architecture/execution-engine.md` | `plaita/core/executor.py`, `plaita/core/strategies.py`, `plaita/core/runner.py` | 执行模式、facade/strategy 拆分、公共运行入口变更；**订阅失败禁止挂起**；SC-003 软/硬预算 |
