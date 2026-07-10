@@ -924,11 +924,21 @@ def list_tools(as_code: bool = True) -> List[Any]:
 
 def normalize_tool(tool_input: ToolLike) -> tuple[str, Callable[..., Any], str]:
     if _BaseTool is not None and isinstance(tool_input, _BaseTool):
-        func = tool_input.func
-        if func is None:
-            raise ValueError(f"LangChain tool {tool_input.name!r} 没有可调用 func")
-        name = tool_input.name or _callable_name(func)
-        desc = tool_input.description or _tool_description(func)
+        name = tool_input.name or "tool"
+        desc = tool_input.description or ""
+        func = getattr(tool_input, "func", None)
+        if not callable(func):
+            # Toolkit 常见形态：只实现 _run，无 .func → 走 invoke
+            tool = tool_input
+
+            def _call(**kwargs: Any) -> Any:
+                return tool.invoke(kwargs)
+
+            _call.__name__ = name.replace("-", "_").replace(" ", "_")
+            _call.__doc__ = desc or f"LangChain tool {name}"
+            func = _call
+        if not desc:
+            desc = _tool_description(func)
         return name, func, desc
     name = _callable_name(tool_input)
     return name, tool_input, _tool_description(tool_input)
@@ -979,6 +989,15 @@ def register_tool_node(*tools: ToolLike) -> List[ToolSpec]:
             name = existing_schema.name
             func = t
             schema = existing_schema
+        elif _BaseTool is not None and isinstance(t, _BaseTool):
+            # LangChain BaseTool（含无 .func 的 toolkit 工具）
+            try:
+                from plaita_ai.tools.langchain import adapt_langchain_tool
+
+                name, func, schema = adapt_langchain_tool(t)
+            except ImportError:
+                name, func, desc = normalize_tool(t)
+                schema = _build_schema(func, name, desc)
         else:
             name, func, desc = normalize_tool(t)
             schema = _build_schema(func, name, desc)

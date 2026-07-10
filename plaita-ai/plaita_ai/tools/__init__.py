@@ -29,6 +29,11 @@ from plaita_ai.tools.bootstrap import (
     load_tools_from_env,
     validate_tool_bundle,
 )
+from plaita_ai.tools.langchain import (
+    adapt_langchain_tool,
+    register_langchain_tool,
+    register_langchain_toolkit,
+)
 from plaita_ai.tools.registry import (
     config_to_source,
     load_tool_bundle,
@@ -64,6 +69,7 @@ __all__ = [
     "VectorToolSource",
     "ParamDef",
     "ToolContext",
+    "adapt_langchain_tool",
     "apply_addressing",
     "build_tool_context",
     "clear_addressing",
@@ -74,6 +80,8 @@ __all__ = [
     "load_tools_from_env",
     "register_addressing",
     "register_datasource",
+    "register_langchain_tool",
+    "register_langchain_toolkit",
     "register_source",
     "register_sources",
     "register_vectorstore",
