@@ -37,6 +37,7 @@ class HttpToolSource(BaseToolSource):
     timeout: float = 10.0
     response_path: Optional[str] = None  # 如 "$.data"
     content_type: str = "application/json"
+    addressing: Optional[str] = None  # 命名寻址服务（register_addressing）
 
     def to_callable(self) -> Callable[..., Any]:
         if requests is None:
@@ -48,6 +49,8 @@ class HttpToolSource(BaseToolSource):
         source = self
 
         def invoke(*, context: Optional[ToolContext] = None, auth_context: Any = None, **kwargs: Any) -> Any:
+            from plaita_ai.tools.addressing import apply_addressing
+
             if context is None and auth_context is not None:
                 context = ToolContext(auth=auth_context)
 
@@ -57,29 +60,31 @@ class HttpToolSource(BaseToolSource):
                 source._apply_context_headers(headers, context)
 
             method = source.method.upper()
-            req_kwargs: Dict[str, Any] = {
-                "method": method,
-                "url": url,
-                "headers": headers,
-                "timeout": source.timeout,
-            }
-            if method in ("GET", "HEAD", "DELETE"):
-                if remaining:
-                    req_kwargs["params"] = remaining
-            else:
-                if remaining:
-                    if source.content_type == "application/json":
-                        headers.setdefault("Content-Type", source.content_type)
-                        req_kwargs["json"] = remaining
-                    else:
-                        headers.setdefault("Content-Type", source.content_type)
-                        req_kwargs["data"] = remaining
+            with apply_addressing(url, source.addressing) as resolved_url:
+                req_kwargs: Dict[str, Any] = {
+                    "method": method,
+                    "url": resolved_url,
+                    "headers": headers,
+                    "timeout": source.timeout,
+                }
+                if method in ("GET", "HEAD", "DELETE"):
+                    if remaining:
+                        req_kwargs["params"] = remaining
+                else:
+                    if remaining:
+                        if source.content_type == "application/json":
+                            headers.setdefault("Content-Type", source.content_type)
+                            req_kwargs["json"] = remaining
+                        else:
+                            headers.setdefault("Content-Type", source.content_type)
+                            req_kwargs["data"] = remaining
 
-            logger.debug("HttpToolSource %s %s", method, url)
-            resp = requests.request(**req_kwargs)
+                logger.debug("HttpToolSource %s %s", method, resolved_url)
+                resp = requests.request(**req_kwargs)
+
             if resp.status_code >= 400:
                 raise ValueError(
-                    f"HTTP {resp.status_code} from {url}: {resp.text[:500]}"
+                    f"HTTP {resp.status_code} from {resolved_url}: {resp.text[:500]}"
                 )
 
             ctype = resp.headers.get("Content-Type") or ""

@@ -72,6 +72,7 @@ def config_to_source(cfg: ToolConfig, resources: Optional[Resources] = None) -> 
             timeout=cfg.timeout,
             response_path=cfg.response_path,
             content_type=cfg.content_type,
+            addressing=cfg.addressing,
         )
     if isinstance(cfg, NativeToolConfig):
         return NativeToolSource(

@@ -7,6 +7,7 @@ tools:
     url: https://api.weather.example.com/v1/{city}
     method: GET
     response_path: $.result
+    # addressing: polaris   # 需先 register_addressing("polaris", ...)
     params:
       city:
         type: string

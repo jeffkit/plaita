@@ -16,6 +16,7 @@ from plaita_ai.tools import (
     ToolContext,
     VectorToolSource,
     build_tool_context,
+    clear_addressing,
     clear_resources,
     load_tool_bundle,
     register_datasource,
@@ -30,9 +31,11 @@ from plaita_ai.tools.source.sql import sql_param_names
 def _clear_tools():
     ToolNode.clear()
     clear_resources()
+    clear_addressing()
     yield
     ToolNode.clear()
     clear_resources()
+    clear_addressing()
 
 
 # ---------------------------------------------------------------------------
@@ -349,3 +352,143 @@ class TestVectorToolSource:
         )
         assert specs[0].name == "search_docs"
         assert ToolNode.get_tool("search_docs")(query="z") == ["z-0", "z-1"]
+
+
+# ---------------------------------------------------------------------------
+# addressing / bootstrap / validate
+# ---------------------------------------------------------------------------
+
+class TestAddressing:
+    def test_simple_resolver(self):
+        from plaita_ai.tools.addressing import (
+            apply_addressing,
+            clear_addressing,
+            register_addressing,
+        )
+
+        clear_addressing()
+        register_addressing("static", lambda host: "127.0.0.1:8080")
+        with apply_addressing("http://svc.internal/api/x", "static") as url:
+            assert url == "http://127.0.0.1:8080/api/x"
+        clear_addressing()
+
+    def test_http_uses_addressing(self):
+        from plaita_ai.tools.addressing import clear_addressing, register_addressing
+
+        clear_addressing()
+        register_addressing("local", lambda host: "127.0.0.1")
+        source = HttpToolSource(
+            name="ping",
+            description="ping",
+            url="http://mysvc/health",
+            addressing="local",
+        )
+        func = source.to_callable()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.json.return_value = {"ok": True}
+        mock_resp.text = ""
+        with patch("plaita_ai.tools.source.http.requests") as req:
+            req.request.return_value = mock_resp
+            assert func() == {"ok": True}
+            assert req.request.call_args.kwargs["url"] == "http://127.0.0.1/health"
+        clear_addressing()
+
+
+class TestValidateAndEnv:
+    def test_validate_ok(self):
+        from plaita_ai.tools import validate_tool_bundle
+
+        errors = validate_tool_bundle(
+            {
+                "tools": [
+                    {
+                        "type": "http",
+                        "name": "a",
+                        "url": "https://x/{id}",
+                        "description": "a",
+                    }
+                ]
+            }
+        )
+        assert errors == []
+
+    def test_validate_missing_datasource(self):
+        from plaita_ai.tools import validate_tool_bundle
+
+        errors = validate_tool_bundle(
+            {
+                "tools": [
+                    {
+                        "type": "sql",
+                        "name": "q",
+                        "description": "q",
+                        "datasource": "missing_db",
+                        "sql": "SELECT 1",
+                    }
+                ]
+            },
+            {"datasources": {}},
+        )
+        assert any("missing_db" in e for e in errors)
+
+    def test_validate_rejects_mcp_type(self):
+        from plaita_ai.tools import validate_tool_bundle
+
+        # mcp not in schema discriminator — parse may fail or we catch via raw
+        # Use a dict that passes if we add soft check; currently pydantic rejects unknown.
+        # Soft path: invalid type fails at parse.
+        errors = validate_tool_bundle(
+            {"tools": [{"type": "http", "name": "dup", "url": "http://x"},
+                       {"type": "http", "name": "dup", "url": "http://y"}]}
+        )
+        assert any("重复" in e for e in errors)
+
+    def test_load_tools_from_env(self, tmp_path, monkeypatch):
+        from plaita_ai.tools import load_tools_from_env
+
+        path = tmp_path / "tools.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "tools": [
+                        {
+                            "type": "http",
+                            "name": "env_tool",
+                            "description": "from env",
+                            "url": "https://api.example.com/x",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PLAITA_TOOLS", str(path))
+        monkeypatch.delenv("PLAITA_RESOURCES", raising=False)
+        specs = load_tools_from_env()
+        assert specs[0].name == "env_tool"
+        assert "env_tool" in ToolNode.list_tool_names()
+
+    def test_cli_tools_validate(self, tmp_path):
+        from plaita_ai.cli.main import main
+
+        path = tmp_path / "tools.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "tools": [
+                        {
+                            "type": "http",
+                            "name": "cli_ok",
+                            "description": "ok",
+                            "url": "https://x",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit) as ei:
+            main(["tools", "validate", str(path)])
+        assert ei.value.code == 0

@@ -58,6 +58,7 @@ class HttpToolConfig(_ToolConfigBase):
     timeout: float = 10.0
     response_path: Optional[str] = None
     content_type: str = "application/json"
+    addressing: Optional[str] = None
 
 
 class NativeToolConfig(_ToolConfigBase):

@@ -211,6 +211,10 @@ def main(plugins: Optional[List[str]] = None, extra_paths: Optional[List[str]] =
     1. ``plugins`` parameter (programmatic / CLI ``--plugin`` flags).
     2. ``PLAITA_PLUGINS`` environment variable (comma-separated module paths).
     3. ``PLAITA_PLUGIN_PATH`` environment variable (extra ``sys.path`` entries).
+
+    Tool bundle (optional):
+    - ``PLAITA_TOOLS`` — path to tools.yaml / tools.json
+    - ``PLAITA_RESOURCES`` — path to resources.yaml (datasources / vectorstores)
     """
     all_plugins: List[str] = list(plugins or [])
     env_plugins = os.environ.get("PLAITA_PLUGINS", "").strip()
@@ -224,6 +228,19 @@ def main(plugins: Optional[List[str]] = None, extra_paths: Optional[List[str]] =
 
     if all_plugins:
         _load_plugins(all_plugins, all_paths)
+
+    # Flat tool bundle from env (HTTP/SQL/vector/native) — after plugins so
+    # addressing / vectorstore registrations in plugins are available.
+    try:
+        from plaita_ai.tools.bootstrap import load_tools_from_env
+
+        load_tools_from_env()
+    except Exception as exc:
+        logger.error("plaita-ai mcp: failed to load PLAITA_TOOLS: %s", exc)
+        raise SystemExit(
+            f"PLAITA_TOOLS 加载失败: {exc}\n"
+            "请检查 YAML/JSON 路径与 schema，或先运行: plaita-ai tools validate <file>"
+        ) from exc
 
     # Phase 1: embed registered tool summary into server instructions
     tool_instructions = _build_tool_instructions()

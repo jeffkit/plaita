@@ -17,6 +17,18 @@
     load_tool_bundle("tools.yaml", "resources.yaml")
 """
 
+from plaita_ai.tools.addressing import (
+    apply_addressing,
+    clear_addressing,
+    list_addressing,
+    register_addressing,
+)
+from plaita_ai.tools.bootstrap import (
+    ENV_RESOURCES,
+    ENV_TOOLS,
+    load_tools_from_env,
+    validate_tool_bundle,
+)
 from plaita_ai.tools.registry import (
     config_to_source,
     load_tool_bundle,
@@ -43,6 +55,8 @@ from plaita_ai.tools.source import (
 
 __all__ = [
     "SOURCE_TYPES",
+    "ENV_RESOURCES",
+    "ENV_TOOLS",
     "BaseToolSource",
     "HttpToolSource",
     "NativeToolSource",
@@ -50,13 +64,19 @@ __all__ = [
     "VectorToolSource",
     "ParamDef",
     "ToolContext",
+    "apply_addressing",
     "build_tool_context",
+    "clear_addressing",
     "clear_resources",
     "config_to_source",
+    "list_addressing",
     "load_tool_bundle",
+    "load_tools_from_env",
+    "register_addressing",
     "register_datasource",
     "register_source",
     "register_sources",
     "register_vectorstore",
     "schema_from_source",
+    "validate_tool_bundle",
 ]

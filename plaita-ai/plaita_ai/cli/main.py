@@ -70,10 +70,49 @@ def cmd_skill(args: argparse.Namespace) -> int:
 def cmd_mcp(args: argparse.Namespace) -> int:
     from plaita_ai.mcp.server import main as mcp_main
 
+    # CLI flags override / supplement env for tool bundles
+    if args.tools:
+        import os
+
+        os.environ["PLAITA_TOOLS"] = args.tools
+    if args.resources:
+        import os
+
+        os.environ["PLAITA_RESOURCES"] = args.resources
+
     mcp_main(
         plugins=args.plugin or [],
         extra_paths=args.plugin_path or [],
     )
+    return 0
+
+
+def cmd_tools_validate(args: argparse.Namespace) -> int:
+    from plaita_ai.tools import validate_tool_bundle
+
+    errors = validate_tool_bundle(args.tools, args.resources)
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 1
+    print("ok")
+    return 0
+
+
+def cmd_tools_list(args: argparse.Namespace) -> int:
+    """Validate + register tools from a bundle, then print names."""
+    from plaita_ai.agent.fot.tools import ToolNode
+    from plaita_ai.tools import load_tool_bundle, validate_tool_bundle
+
+    errors = validate_tool_bundle(args.tools, args.resources)
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 1
+    ToolNode.clear()
+    specs = load_tool_bundle(args.tools, args.resources)
+    for s in specs:
+        print(f"{s.placeholder}\t{s.name}\t{s.description}")
     return 0
 
 
@@ -154,7 +193,32 @@ def build_parser() -> argparse.ArgumentParser:
             "Repeatable. Also reads PLAITA_PLUGIN_PATH env var."
         ),
     )
+    p_mcp.add_argument(
+        "--tools",
+        metavar="FILE",
+        default=None,
+        help="Tool bundle YAML/JSON (sets PLAITA_TOOLS). Also reads PLAITA_TOOLS env.",
+    )
+    p_mcp.add_argument(
+        "--resources",
+        metavar="FILE",
+        default=None,
+        help="Resources YAML/JSON (sets PLAITA_RESOURCES).",
+    )
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_tools = sub.add_parser("tools", help="Validate / list tool bundles")
+    tools_sub = p_tools.add_subparsers(dest="tools_command", required=True)
+
+    p_tv = tools_sub.add_parser("validate", help="Validate tools.yaml without registering")
+    p_tv.add_argument("tools", help="Path to tools.yaml / tools.json")
+    p_tv.add_argument("--resources", default=None, help="Optional resources.yaml")
+    p_tv.set_defaults(func=cmd_tools_validate)
+
+    p_tl = tools_sub.add_parser("list", help="Validate, register, and list tools")
+    p_tl.add_argument("tools", help="Path to tools.yaml / tools.json")
+    p_tl.add_argument("--resources", default=None, help="Optional resources.yaml")
+    p_tl.set_defaults(func=cmd_tools_list)
 
     p_bench = sub.add_parser("llm-benchmark", help="Run FoT/ReAct × agent-benchmark (dev tool, needs checkout)")
     p_bench.add_argument("--agent", choices=["fot", "react", "both"], default="both")
