@@ -15,7 +15,15 @@
     # 配置轨
     from plaita_ai.tools import load_tool_bundle
     load_tool_bundle("tools.yaml", "resources.yaml")
+
+LangChain 适配（``register_langchain_tool`` 等）为 **可选**：
+需安装 ``plaita-ai[agent]`` / ``langchain-core``，通过 ``__getattr__`` 惰性导出，
+未安装时不影响本包其余 API。
 """
+
+from __future__ import annotations
+
+from typing import Any
 
 from plaita_ai.tools.addressing import (
     apply_addressing,
@@ -28,11 +36,6 @@ from plaita_ai.tools.bootstrap import (
     ENV_TOOLS,
     load_tools_from_env,
     validate_tool_bundle,
-)
-from plaita_ai.tools.langchain import (
-    adapt_langchain_tool,
-    register_langchain_tool,
-    register_langchain_toolkit,
 )
 from plaita_ai.tools.registry import (
     config_to_source,
@@ -57,6 +60,13 @@ from plaita_ai.tools.source import (
     VectorToolSource,
     build_tool_context,
 )
+
+# LangChain 相关符号惰性导出，避免 import plaita_ai.tools 时假设 langchain 存在
+_LANGCHAIN_EXPORTS = frozenset({
+    "adapt_langchain_tool",
+    "register_langchain_tool",
+    "register_langchain_toolkit",
+})
 
 __all__ = [
     "SOURCE_TYPES",
@@ -88,3 +98,11 @@ __all__ = [
     "schema_from_source",
     "validate_tool_bundle",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LANGCHAIN_EXPORTS:
+        from plaita_ai.tools import langchain as _lc
+
+        return getattr(_lc, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

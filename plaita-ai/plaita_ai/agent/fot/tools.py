@@ -1,4 +1,8 @@
-"""Bridge LangChain tools / Python callables to plaita ToolNode.
+"""Bridge Python callables (and optionally LangChain tools) to plaita ToolNode.
+
+LangChain 为 **可选** 依赖：未安装 ``langchain-core`` 时，本模块仍可使用
+``@tool`` / ``register_tool_node(callable)``；仅在传入真正的 BaseTool 实例
+或调用 ``plaita_ai.tools.langchain`` 适配器时才需要 langchain。
 
 新增能力（2026-07）：
 - ``@tool`` 装饰器：自动从 type hints + docstring 生成工具 Schema
@@ -7,7 +11,7 @@
 - ``list_tools()``：枚举所有已注册工具及其 Schema，供 AI 发现
 - ``auth_context`` 透传：工具函数声明了 ``auth_context`` 参数时，
   ``ToolNode.execute`` 从 flow 全局上下文（``$GLOBAL.auth_context``）
-  自动注入，工具函数自行校验/使用
+    自动注入，工具函数自行校验/使用
 """
 
 from __future__ import annotations
@@ -32,7 +36,23 @@ from plaita.node import get_default_registry
 
 logger = logging.getLogger(__name__)
 
-ToolLike = Union[Callable[..., Any], Any]  # Callable or LangChain BaseTool
+# Callable，或可选依赖 langchain 的 BaseTool（未安装时勿假设存在）
+ToolLike = Union[Callable[..., Any], Any]
+
+
+def _as_langchain_base_tool(obj: Any) -> Any:
+    """若 *obj* 是 langchain BaseTool 则返回它，否则 ``None``。
+
+    langchain 为可选依赖：未安装时恒为 ``None``，调用方不得假设其存在。
+    """
+    if _BaseTool is None:
+        return None
+    try:
+        if isinstance(obj, _BaseTool):
+            return obj
+    except TypeError:
+        return None
+    return None
 
 # Sentinel for "parameter has no default value".
 # We CANNOT use inspect.Parameter.empty here because Python 3.9's
@@ -923,13 +943,14 @@ def list_tools(as_code: bool = True) -> List[Any]:
 # ---------------------------------------------------------------------------
 
 def normalize_tool(tool_input: ToolLike) -> tuple[str, Callable[..., Any], str]:
-    if _BaseTool is not None and isinstance(tool_input, _BaseTool):
-        name = tool_input.name or "tool"
-        desc = tool_input.description or ""
-        func = getattr(tool_input, "func", None)
+    lc_tool = _as_langchain_base_tool(tool_input)
+    if lc_tool is not None:
+        name = lc_tool.name or "tool"
+        desc = lc_tool.description or ""
+        func = getattr(lc_tool, "func", None)
         if not callable(func):
-            # Toolkit 常见形态：只实现 _run，无 .func → 走 invoke
-            tool = tool_input
+            # Toolkit 常见形态：只实现 _run，无 .func → 走 invoke（不 import 适配器模块）
+            tool = lc_tool
 
             def _call(**kwargs: Any) -> Any:
                 return tool.invoke(kwargs)
@@ -989,18 +1010,20 @@ def register_tool_node(*tools: ToolLike) -> List[ToolSpec]:
             name = existing_schema.name
             func = t
             schema = existing_schema
-        elif _BaseTool is not None and isinstance(t, _BaseTool):
-            # LangChain BaseTool（含无 .func 的 toolkit 工具）
-            try:
-                from plaita_ai.tools.langchain import adapt_langchain_tool
+        else:
+            lc_tool = _as_langchain_base_tool(t)
+            if lc_tool is not None:
+                # 可选适配器：丰富 schema；失败则退回 normalize_tool
+                try:
+                    from plaita_ai.tools.langchain import adapt_langchain_tool
 
-                name, func, schema = adapt_langchain_tool(t)
-            except ImportError:
+                    name, func, schema = adapt_langchain_tool(lc_tool)
+                except ImportError:
+                    name, func, desc = normalize_tool(lc_tool)
+                    schema = _build_schema(func, name, desc)
+            else:
                 name, func, desc = normalize_tool(t)
                 schema = _build_schema(func, name, desc)
-        else:
-            name, func, desc = normalize_tool(t)
-            schema = _build_schema(func, name, desc)
 
         # 1. Keep backward-compat generic ToolNode registration
         ToolNode.register(name, func, schema=schema)
