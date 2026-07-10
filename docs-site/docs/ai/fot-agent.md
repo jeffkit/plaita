@@ -85,7 +85,7 @@ result.to_dict()      # 序列化为 dict
 
 ## 工具注册
 
-传给 `tools=` 的函数注册为 `ToolNode`，在生成的 `@flow` 里用 `TOOL(action="name", params={...})` 调用：
+传给 `tools=` 的函数注册为 `ToolNode`，并生成**独立动态节点**。在 `@flow` 里推荐直接用大写占位符：
 
 ```python
 def search(query: str, top_k: int = 5) -> list:
@@ -94,10 +94,23 @@ def search(query: str, top_k: int = 5) -> list:
 
 agent = FoTAgent(model="...", tools=[search])
 # LLM 生成的 @flow 里可以：
-# results = TOOL(action="search", params={"query": INPUT.q, "top_k": 3})
+# results = SEARCH(query=INPUT.q, top_k=3)
+# 兼容写法：TOOL(action="search", params={"query": INPUT.q, "top_k": 3})
 ```
 
-LangChain `@tool` 装饰的函数同样支持：
+也可用数据源工具 / YAML 清单预先注册，再交给 Agent（同一进程注册表）：
+
+```python
+from plaita_ai.tools import load_tool_bundle, HttpToolSource, register_source
+
+load_tool_bundle("tools.yaml", "resources.yaml")
+register_source(HttpToolSource(name="get_user", url="https://api.example.com/users/{user_id}"))
+agent = FoTAgent(model="...", tools=[])  # 已注册工具对 FoT prompt / 执行均可见
+```
+
+完整说明见 [工具节点与数据源](tools.md)。
+
+LangChain `@tool` 装饰的函数同样支持（需 `plaita-ai[agent]`）：
 
 ```python
 from langchain.tools import tool

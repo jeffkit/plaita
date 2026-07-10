@@ -1,6 +1,6 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-07-09  
+> 最后更新：2026-07-10  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 
 | 文档路径 | 代码路径模式 | 同步触发条件 |
@@ -11,6 +11,10 @@
 | `docs-site/docs/architecture/execution-engine.md` | `plaita/core/executor.py`, `plaita/core/strategies.py`, `plaita/core/runner.py` | 执行模式、facade/strategy 拆分、公共运行入口变更；**订阅失败禁止挂起**；SC-003 软/硬预算 |
 | `docs-site/docs/architecture/state-management.md` | `plaita/core/context.py`, `plaita/core/state.py` | Checkpoint / EventBus 解析 / `$ENV` / 取消语义变更 |
 | `docs-site/docs/distributed/event-system.md` | `plaita/event/**`, `plaita/node/event_node.py`, `plaita/server/event_filter.py`, `plaita/server/flow_worker.py` | EventBus API、后端、默认总线；EventFilter 与 worker 共享 subscription storage；FlowWorker 默认启用 bus |
+| `docs-site/docs/ai/tools.md` | `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py`, `plaita-ai/examples/tools/**`, `plaita-ai/tests/test_tool_sources.py`, `plaita-ai/tests/test_langchain_tools.py` | ToolNode 桥接、BaseToolSource（HTTP/SQL/Vector/Native）、YAML bundle、ToolContext、addressing、LangChain 适配、PLAITA_TOOLS |
+| `docs-site/docs/ai/mcp.md` | `plaita-ai/plaita_ai/mcp/**`, `plaita-ai/plaita_ai/cli/main.py`, `plaita-ai/plaita_ai/tools/bootstrap.py` | MCP 工具列表、插件加载、PLAITA_TOOLS/RESOURCES、`tools validate\|list` |
+| `docs-site/docs/ai/fot-agent.md` / `ai/react-agent.md` | `plaita-ai/plaita_ai/agent/**` | Agent 构造参数、工具注册与双用途语义 |
+| `docs-site/docs/reference/cli.md` | `plaita-ai/plaita_ai/cli/**`, `plaita/__main__.py` | plaita / plaita-ai CLI 子命令 |
 | `MIGRATION.md` | `plaita/**`, `plaita-ai/**` | 破坏性 API / 安全默认值变更 |
 | `docs/archive/CODE_REVIEW-pre-0.5.md` | — | **已归档**，勿再更新；新审查另开文档 |
 | `README.MD` | `plaita/__init__.py`, `pyproject.toml` | 版本、extras、快速上手示例变更 |

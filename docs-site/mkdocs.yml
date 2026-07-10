@@ -159,6 +159,7 @@ nav:
       - 外延服务: distributed/services.md
   - AI 集成:
       - ai/index.md
+      - 工具节点与数据源: ai/tools.md
       - MCP 服务: ai/mcp.md
       - ReAct Agent: ai/react-agent.md
       - FoT Agent: ai/fot-agent.md

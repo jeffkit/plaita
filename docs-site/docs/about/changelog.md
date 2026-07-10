@@ -3,6 +3,20 @@
 本页记录 **v0.4.0 及以后**的正式变更历史，按版本倒序排列。  
 0.4.0 之前的历史可通过 `git log --oneline` 查阅仓库完整提交记录。
 
+## 未发布 — 工具节点与数据源（plaita-ai）
+
+### 数据源工具层（`plaita_ai.tools`）
+
+- **双轨定义**：代码轨（`HttpToolSource` / `SqlToolSource` / `VectorToolSource` / `NativeToolSource`）与配置轨（扁平 `tools.yaml` + `resources.yaml`，无 Component/Instance）。
+- **统一注册**：`register_source` / `load_tool_bundle` → 现有 `ToolNode` + 动态节点（`GET_USER(...)`）。
+- **ToolContext**：通用横切上下文（`trace_id` / `auth` / `baggage`…），业务字段进 `baggage`。
+- **HTTP addressing**：`register_addressing` 插件钩子。
+- **可选 LangChain 适配**：`register_langchain_tool` / `register_langchain_toolkit`（langchain 非必需依赖）。
+- **启动与 CLI**：`PLAITA_TOOLS` / `PLAITA_RESOURCES`、`plaita-ai tools validate|list`、MCP `--tools/--resources`。
+- **文档**：新增 [工具节点与数据源](../ai/tools.md)，并同步 MCP / Agent / CLI 页。
+
+---
+
 ## 未发布 — Runtime & Harness Review 修复
 
 ### 安全模型

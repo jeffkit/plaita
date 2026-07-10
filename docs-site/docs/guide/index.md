@@ -22,7 +22,7 @@
     2. [流程编写方式](flow-authoring.md) —— 重点看 **@flow + `flow_from_source`** 那一列
     3. [S-expr 与 @flow DSL](code-dsl.md) —— AI 生成友好的两种格式详解
     4. [应用场景 - Agent 编排](../scenarios/agent-orchestration.md) —— 端到端的 LLM + plaita 架构
-    5. [AI 集成（plaita-ai）](../ai/index.md) —— MCP 服务、内置 ReAct/FoT Agent、flow-coder skill
+    5. [AI 集成（plaita-ai）](../ai/index.md) —— 工具节点、MCP、ReAct/FoT Agent、flow-coder skill
     6. [执行模式](execution-modes.md) —— 了解 Distributed 模式，支持 HITL（人工介入）
 
 === "我要做长时工作流"

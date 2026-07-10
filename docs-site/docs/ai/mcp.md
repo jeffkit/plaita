@@ -34,6 +34,7 @@ plaita-ai mcp
 | `flow_compile` | 编译 `@flow` 源码，返回 IR 或带行号的错误列表 |
 | `flow_run` | 编译并执行 `@flow`，返回结果或错误 |
 | `flow_list_nodes` | 列出已注册节点类型（含自定义节点占位符） |
+| `flow_list_tools` | 列出已注册业务工具（`@tool` / 工具清单 / LangChain 适配） |
 | `flow_get_skill` | 返回内置 skill 全文（如 `flow-coder`） |
 | `flow_get_skill_reference` | 返回 skill 参考文档（如完整 @flow 语法参考） |
 
@@ -64,9 +65,15 @@ flow_run(source, inputs_json?, flow_id?, globals_json?)
 [
   {"node_type": "http", "placeholder": "HTTP", "node_name": "HTTP 请求"},
   {"node_type": "tool", "placeholder": "TOOL", "node_name": "工具"},
-  {"node_type": "llm",  "placeholder": "LLM",  "node_name": "LLM"}
+  {"node_type": "get_user", "placeholder": "GET_USER", "node_name": "get_user"}
 ]
 ```
+
+### `flow_list_tools`
+
+列出通过 `@tool` / `register_tool_node` / `load_tool_bundle` / `register_langchain_*` 注册的业务工具。默认返回可直接贴进 `@flow` 的签名草稿；`as_json=true` 时返回结构化 JSON。
+
+写 `@flow` 前先调一次，避免编造不存在的工具名。
 
 ## Agent 典型闭环
 
@@ -89,24 +96,42 @@ sequenceDiagram
     A->>A: 向用户解释结果
 ```
 
-## 加载自定义节点
+## 加载自定义节点与工具清单
 
-默认的 MCP 服务只有 plaita 内置节点（`http`、`code`、`event` 等）。若你有自定义节点（如 `LLMNode`、`ToolNode`），需在服务启动时导入注册模块：
+默认的 MCP 服务只有 plaita 内置节点（`http`、`code`、`event` 等）。业务工具与自定义节点通过插件模块和/或扁平工具清单加载。
 
-### 方式 1：`--plugin` 参数
+### 方式 1：`--plugin` 参数（自定义 Node / 代码注册工具）
 
 ```bash
-plaita-ai mcp --plugin myapp.nodes --plugin myapp.llm_nodes
+plaita-ai mcp --plugin myapp.nodes --plugin myapp.tools_bootstrap
 ```
 
-多次 `--plugin` 指定多个模块，它们在 MCP 服务启动前按顺序被 `import`，节点注册作为副作用生效。
+多次 `--plugin` 指定多个模块，它们在 MCP 服务启动前按顺序被 `import`，节点/工具注册作为副作用生效。
 
 ```bash
 # 模块在项目目录下，不在 PYTHONPATH 时用 --plugin-path 补充
 plaita-ai mcp --plugin-path /path/to/myproject --plugin myapp.nodes
 ```
 
-### 方式 2：环境变量
+### 方式 2：工具清单环境变量 / CLI 参数
+
+```bash
+export PLAITA_TOOLS=/path/to/tools.yaml
+export PLAITA_RESOURCES=/path/to/resources.yaml   # 可选：datasources / vectorstores 元数据
+plaita-ai mcp
+```
+
+或：
+
+```bash
+plaita-ai mcp --tools tools.yaml --resources resources.yaml
+```
+
+启动顺序：先加载 `--plugin` / `PLAITA_PLUGINS`，再加载 `PLAITA_TOOLS`（便于插件里先 `register_vectorstore` / `register_addressing`）。
+
+完整工具类型与 YAML 格式见 [工具节点与数据源](tools.md)。
+
+### 方式 3：环境变量加载插件
 
 ```bash
 export PLAITA_PLUGINS="myapp.nodes,myapp.llm_nodes"
@@ -124,7 +149,9 @@ plaita-ai mcp
       "args": ["mcp"],
       "env": {
         "PLAITA_PLUGINS": "myapp.nodes",
-        "PLAITA_PLUGIN_PATH": "/path/to/myproject"
+        "PLAITA_PLUGIN_PATH": "/path/to/myproject",
+        "PLAITA_TOOLS": "/path/to/tools.yaml",
+        "PLAITA_RESOURCES": "/path/to/resources.yaml"
       }
     }
   }
@@ -159,8 +186,10 @@ get_default_registry().register(LLMNode)
 MCP 工具与 CLI 共用同一个 `flow_runner` 内核：
 
 ```bash
-plaita-ai compile flow.py          # 等价 flow_compile
+plaita-ai compile flow.py           # 等价 flow_compile
 plaita-ai run flow.py --input '{}'  # 等价 flow_run
-plaita-ai list-nodes               # 等价 flow_list_nodes
-plaita-ai skill                    # 等价 flow_get_skill
+plaita-ai list-nodes                # 等价 flow_list_nodes
+plaita-ai skill                     # 等价 flow_get_skill
+plaita-ai tools validate tools.yaml # 校验工具清单（不注册）
+plaita-ai tools list tools.yaml     # 校验并注册后列出工具
 ```

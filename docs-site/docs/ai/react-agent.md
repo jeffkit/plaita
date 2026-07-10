@@ -73,20 +73,23 @@ agent = PlaitaAgent(model="openai:gpt-4o-mini", tools=[weather], enable_flow=Fal
 
 ## 工具双用途
 
-传给 `tools=` 的工具**自动注册为 ToolNode**，因此同一个函数既能被 Agent 直接调用（function-call），也能在生成的 `@flow` 里被 `TOOL(action="weather", ...)` 调用：
+传给 `tools=` 的工具**自动注册为 ToolNode**，因此同一个函数既能被 Agent 直接调用（function-call），也能在生成的 `@flow` 里用动态节点或 `TOOL(action=...)` 调用：
 
 ```python
 @tool
 def weather(city: str) -> str:
-    """查天气。"""
+    """查询城市天气。"""
     return f"{city}：晴"
 
 agent = PlaitaAgent(model="...", tools=[weather])
 
 # Agent 可以：
 # 1. 直接调 weather("北京")
-# 2. 生成 @flow 里写 r = TOOL(action="weather", params={"city": INPUT.city})
+# 2. 生成 @flow：WEATHER(city=INPUT.city)
+#    或兼容写法 TOOL(action="weather", params={"city": INPUT.city})
 ```
+
+HTTP / SQL / 向量等数据源、YAML 清单、LangChain Toolkit 的注册方式见 [工具节点与数据源](tools.md)。
 
 如果某个工具只想在 `@flow` 里用（不作为直接工具），传给 `flow_only_tools=`：
 
