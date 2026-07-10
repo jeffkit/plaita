@@ -1,6 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
 
-> **最后更新**：2026-07-10（§2.23 codeflow/_expr **99.2%**；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%；§2.20 executor 98.1%；§2.21 event/memory 100%）
+> **最后更新**：2026-07-10（§2.26 codeflow/_nodes **89.8%**；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（313/313）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -169,7 +169,7 @@
 > - 这些模块的单测**数量充足**（覆盖率 92-99%），但测试大多以"能跑通"为主
 > - 缺少对返回值、操作符语义、错误路径、边界条件的**精确断言**
 > - 补强路径：参照 callback.py / expression.py 的做法，逐函数补精确断言
-> - 优先队列：历史低分模块多数已达 100% 或等价收尾；当前见 §7.3（strategies 88% 等价收尾；_expr 99.2%；扩面可选 codeflow/_nodes/_stmt/_source）
+> - 优先队列：见 §7.3（_nodes 89.8%；扩面可选 _stmt/_source）
 
 ## 2.5 expression_parser.py 强化（2026-07-06，100%）
 
@@ -1042,6 +1042,47 @@ bash scripts/recheck_sexpr.sh all    # Recheck2（5 测试，仅 549 survivors�
 
 ---
 
+## 2.26 codeflow/_nodes.py 基线 → 89.8%（2026-07-10）
+
+### 背景
+
+`_nodes.py` 编译 HTTP/CODE/EVENT/CHILD/PARALLEL/自定义节点调用。行覆盖 **100%** 后单模块 mutmut
+（640 变异点）。跑 mutmut 时 `pytest_add_cli_args_test_selection` 应**仅含 codeflow 测试**，
+勿混入 `test_event_memory_unit.py`（async 会在 stats 阶段挂死）。
+
+### 结果
+
+| 轮次 | killed | survived | **score** | 备注 |
+|------|--------|----------|-----------|------|
+| 初筛 | 448 | 192 | **70.0%** | 仅异常类型断言 |
+| 补 `test_codeflow_nodes_mutations.py` + 独立进程 recheck | **575** | **65** | **89.8%** | 127 survivors 中 112 被补测杀灭 |
+
+### 补测策略
+
+`tests/unit/test_codeflow_nodes_mutations.py` 直接测 `_compile_node_call` / `_compile_custom_node` /
+`_eval_error_handler` / `_eval_childflow_arg` / `_eval_parallel_branches` / `_eval_join`：
+
+1. 各节点 IR 字段精确断言（method/url/eventType/childFlow/branches 等）
+2. 错误消息原文 + 禁止 `XX…XX` 前缀 + `第 ? 行` 行号断言
+3. `ctx.names` / `childflows` / `module_globals` 绑定路径
+4. kw 别名：`on_error_handler`、`event_type`/`eventType`、`retryTimes` 等
+
+### 剩余 65 survived
+
+多为 `node→None` 传参（成功路径不读 node）、`ctx→None`（常量路径等价）、
+或 `_compile_custom_node` 内部边界；未继续硬杀，与 `_expr` 收尾策略一致。
+
+### 跑法
+
+```bash
+only_mutate = ["plaita/dsl/codeflow/_nodes.py"]
+# pytest_add_cli_args_test_selection 临时仅保留 test_codeflow*
+rm -rf mutants .mutmut-cache && mutmut run
+bash scripts/recheck_codeflow_nodes.sh survived
+```
+
+---
+
 ## 7. 持续推进规范（给开发者 / AI）
 
 > 本节是「怎么继续做」的操作契约。入口导航见仓库根目录 `AGENTS.md` / `CLAUDE.md`。
@@ -1085,8 +1126,9 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 5. ~~`dsl/codeflow/_expr.py`~~ → **99.2%**（§2.23；剩 3 等价）
 6. ~~`dsl/sexpr.py`~~ → **100%**（§2.24）
 7. ~~`core/async_utils.py`~~ → **89.3%**（§2.25；8 等价）
-8. **扩面（可选）**：`codeflow/_nodes.py`、`_stmt.py`、`_source.py`
-9. **基建**：recheck 须在 `mutants/` 内用 `tests/...` 路径（§2.20）
+8. ~~`dsl/codeflow/_nodes.py`~~ → **89.8%**（§2.26；剩 65 等价/边界）
+9. **扩面（可选）**：`codeflow/_stmt.py`、`_source.py`
+10. **基建**：recheck 须在 `mutants/` 内用 `tests/...` 路径（§2.20）
 
 ### 7.4 硬约束（违反则分数不可信）
 
