@@ -67,6 +67,19 @@
 **变更前**：`PERSIST_EVERY_N_STEPS = 5`，连续推进最多丢 4 步。
 **变更后**：默认 **1**（每步 `save_execution_state`）。挂起/结束/出错仍为立即落盘。
 
+### Resume：execution lease（防并发）
+
+**变更前**：多 worker 可同时 `resume_flow` 同一 `execution_id`。
+**变更后**：
+
+- `RedisFlowWorker` 默认注入 `RedisExecutionLease`（键 `plaita:execution:lease:{execution_id}`）
+- 取得租约后才 resume；失败抛 `ExecutionLeaseError`，任务**不** XACK
+- 推进循环中 `renew`；结束 `release`（仅 holder 可删）
+- CLI：`--lease-ttl-seconds`（默认 120）
+- 纯 `FlowWorker`（无 Redis）默认 `NullExecutionLease`（测试 / 单进程无约束）
+
+无调用方代码迁移；部署多 worker 时重复 resume 会被租约挡住，直至 holder 释放或 TTL 过期。
+
 ---
 
 **变更前**：部分文档写「至少一次」「容错长时工作流」「生产级」；订阅 `event_type` 被写成 fnmatch。

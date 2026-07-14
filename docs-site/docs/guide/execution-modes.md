@@ -72,7 +72,7 @@ for step in flow.debug(name="test"):
     - 任务至少一次投递（`RedisFlowWorker` 使用 Redis Stream + `XACK` / `XCLAIM`）
     - 每步必落盘（`PERSIST_EVERY_N_STEPS` 默认 **1**）
     - 每步必落盘（Worker 默认每 5 步写一次中间态）
-    - 多 worker 租约 / 幂等 resume
+    - 「恰好一次」副作用（队列仍是至少一次；resume 有 lease 防并发，但崩溃重投后节点仍可能再跑）
 
     部署前请读 [FlowWorker · 可靠性边界](../distributed/flow-worker.md#可靠性边界必读)。
 

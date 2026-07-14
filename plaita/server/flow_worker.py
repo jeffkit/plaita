@@ -24,6 +24,13 @@ from plaita.server.task_queue import (
     DEFAULT_CONSUMER_GROUP,
     RedisStreamTaskQueue,
 )
+from plaita.server.execution_lease import (
+    DEFAULT_LEASE_TTL_SECONDS,
+    ExecutionLeaseError,
+    NullExecutionLease,
+    RedisExecutionLease,
+    new_holder_token,
+)
 
 class FlowWorker:
     """
@@ -38,7 +45,17 @@ class FlowWorker:
     # 默认 1 = 每步落盘，崩溃不丢步进进度（Wave 3）。
     PERSIST_EVERY_N_STEPS = 1
 
-    def __init__(self, execution_storage: ExecutionStorage, flow_storage: FlowStorage, event_bus: EventBus=None, cache_size: int = 100, cache_ttl: int = 300, callback_handlers: Optional[list] = None):
+    def __init__(
+        self,
+        execution_storage: ExecutionStorage,
+        flow_storage: FlowStorage,
+        event_bus: EventBus = None,
+        cache_size: int = 100,
+        cache_ttl: int = 300,
+        callback_handlers: Optional[list] = None,
+        execution_lease=None,
+        lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+    ):
         """
         初始化流程工作器
 
@@ -49,6 +66,8 @@ class FlowWorker:
             cache_size: 缓存大小，默认100
             cache_ttl: 缓存过期时间(秒)，默认300秒
             callback_handlers: 分布式执行期间贯穿所有步骤的回调列表
+            execution_lease: resume 租约（默认 NullExecutionLease）；RedisFlowWorker 注入 Redis 实现
+            lease_ttl_seconds: resume 租约 TTL（秒），推进过程中会 renew
         """
         self.execution_storage = execution_storage
         self.flow_storage = flow_storage
@@ -56,6 +75,8 @@ class FlowWorker:
         self.callback_handlers = list(callback_handlers) if callback_handlers else []
         # 初始化流程定义缓存，使用TTL缓存
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
+        self.execution_lease = execution_lease or NullExecutionLease()
+        self.lease_ttl_seconds = lease_ttl_seconds
     
     def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
         """
@@ -170,16 +191,10 @@ class FlowWorker:
     
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        恢复流程执行
-        
-        Args:
-            flow_id: 流程ID
-            execution_id: 执行ID
-            resume_type: 恢复类型，支持continue(继续)、cancel(取消)、timeout(超时)、event(事件)
-            data: 恢复数据，当resume_type为event时有效
-            
-        Returns:
-            Dict[str, Any]: 流程执行结果
+        恢复流程执行。
+
+        取得 ``execution_id`` 租约后才推进；另一 worker 已持有租约时抛
+        ``ExecutionLeaseError``（RedisFlowWorker 对此**不** XACK，待租约过期后回收）。
         """
         # 加载执行状态
         state = self.execution_storage.load_execution_state(execution_id)
@@ -203,7 +218,13 @@ class FlowWorker:
         
         # 解析流程定义
         logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
-        
+
+        holder = new_holder_token(prefix="resume")
+        if not self.execution_lease.try_acquire(execution_id, holder, self.lease_ttl_seconds):
+            raise ExecutionLeaseError(
+                f"execution {execution_id} is leased by another worker; refuse concurrent resume"
+            )
+
         try:
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
             execution = FlowExecution(
@@ -221,10 +242,19 @@ class FlowWorker:
             )
 
             # 处理执行结果
-            final_result = self._process_execution_result(flow, result, state, execution)
+            final_result = self._process_execution_result(
+                flow,
+                result,
+                state,
+                execution,
+                lease_execution_id=execution_id,
+                lease_holder=holder,
+            )
 
             return final_result
 
+        except ExecutionLeaseError:
+            raise
         except Exception as e:
             logger.error("恢复流程执行出错: %s", e, exc_info=True)
 
@@ -236,8 +266,26 @@ class FlowWorker:
             self.execution_storage.save_execution_state(execution_id, state)
 
             raise RuntimeError(f"恢复流程执行出错: {e}")
+        finally:
+            self.execution_lease.release(execution_id, holder)
 
-    def _process_execution_result(self, flow: Flow, result: Dict[str, Any], state: ExecutionState, execution: Optional[FlowExecution] = None) -> Dict[str, Any]:
+    def _renew_lease_if_held(self, lease_execution_id: Optional[str], lease_holder: Optional[str]) -> None:
+        if not lease_execution_id or not lease_holder:
+            return
+        if not self.execution_lease.renew(lease_execution_id, lease_holder, self.lease_ttl_seconds):
+            raise ExecutionLeaseError(
+                f"lost lease for execution {lease_execution_id}; aborting resume"
+            )
+
+    def _process_execution_result(
+        self,
+        flow: Flow,
+        result: Dict[str, Any],
+        state: ExecutionState,
+        execution: Optional[FlowExecution] = None,
+        lease_execution_id: Optional[str] = None,
+        lease_holder: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         处理流程执行结果
 
@@ -247,6 +295,7 @@ class FlowWorker:
             state: 执行状态
             execution: 贯穿本执行全过程的 FlowExecution (复用以保留回调);
                 为 None 时按需创建, 仅供向后兼容的简单调用场景使用
+            lease_execution_id / lease_holder: resume 租约续期参数
 
         Returns:
             Dict[str, Any]: 最终的执行结果
@@ -283,6 +332,7 @@ class FlowWorker:
             else:
                 state.status = "running"
                 try:
+                    self._renew_lease_if_held(lease_execution_id, lease_holder)
                     result = execution.run_distributed(
                         flow,
                         saved_context=context,
@@ -306,6 +356,8 @@ class FlowWorker:
                         steps_since_persist = 0
                         logger.info("流程步骤执行完成，继续下一步: %s", execution_id)
 
+                except ExecutionLeaseError:
+                    raise
                 except Exception as e:
                     logger.error("流程执行出错: %s", e, exc_info=True)
                     state.status = "error"
@@ -323,6 +375,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
     任务队列语义为 **at-least-once**：consumer group + ``XACK``；处理成功前
     崩溃则 pending 可被其他 consumer 在 ``claim_min_idle_ms`` 后回收重投。
+    resume 通过 Redis execution lease 保证同一 ``execution_id`` 最多一个 worker 推进。
     控制面硬依赖 Redis。
     """
 
@@ -346,10 +399,22 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         consumer_group: str = DEFAULT_CONSUMER_GROUP,
         consumer_name: Optional[str] = None,
         claim_min_idle_ms: int = DEFAULT_CLAIM_MIN_IDLE_MS,
+        lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+        execution_lease=None,
     ):
-        super().__init__(execution_storage, flow_storage, event_bus, cache_size, cache_ttl, callback_handlers=callback_handlers)
+        redis_client = redis_client or Redis.from_url(redis_url)
+        super().__init__(
+            execution_storage,
+            flow_storage,
+            event_bus,
+            cache_size,
+            cache_ttl,
+            callback_handlers=callback_handlers,
+            execution_lease=execution_lease or RedisExecutionLease(redis_client),
+            lease_ttl_seconds=lease_ttl_seconds,
+        )
         self.redis_url = redis_url
-        self.redis_client = redis_client or Redis.from_url(redis_url)
+        self.redis_client = redis_client
         self.queue_name = queue_name
         self._running = False
         self._active_task_count = 0
@@ -467,6 +532,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     self._dispatch_task(task.body)
                     queue.ack(task.message_id)
                     acked = True
+                except ExecutionLeaseError as exc:
+                    # 另一 worker 持有 resume 租约：不 ack，待租约过期后 reclaim
+                    logger.warning(
+                        "任务 %s 未取得 execution lease，留在 pending: %s",
+                        task.message_id,
+                        exc,
+                    )
                 except ValueError as exc:
                     # 畸形消息：ack 掉避免 poison pill 无限重投
                     logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
@@ -548,6 +620,9 @@ def main():
     parser.add_argument("--claim-min-idle-ms", type=int,
                       default=int(os.environ.get("PLAITA_CLAIM_MIN_IDLE_MS", str(DEFAULT_CLAIM_MIN_IDLE_MS))),
                       help="pending 消息最短空闲毫秒数后才可被其他 consumer 回收")
+    parser.add_argument("--lease-ttl-seconds", type=int,
+                      default=int(os.environ.get("PLAITA_LEASE_TTL_SECONDS", str(DEFAULT_LEASE_TTL_SECONDS))),
+                      help="resume execution lease TTL（秒），推进中会 renew")
     
     # 数据库参数
     parser.add_argument("--database-url", default="sqlite:///flow.db",
@@ -637,6 +712,7 @@ def main():
             consumer_group=args.consumer_group,
             consumer_name=args.consumer_name or None,
             claim_min_idle_ms=args.claim_min_idle_ms,
+            lease_ttl_seconds=args.lease_ttl_seconds,
         )
         
         # 注册信号处理器以支持优雅关闭
