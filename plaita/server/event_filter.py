@@ -13,6 +13,7 @@ from redis import Redis
 
 from plaita.event.core import Event, EventSubscriptionStorage, EventBus
 from plaita.storage.base import ExecutionStorage
+from plaita.server.task_queue import enqueue_task
 
 # 获取logger
 logger = logging.getLogger("plaita.server.event_filter")
@@ -102,12 +103,9 @@ class EventFilter:
                         }
                     }
                     
-                    self.redis_client.rpush(
-                        self.queue_name,
-                        json.dumps(resume_task)
-                    )
+                    enqueue_task(self.redis_client, self.queue_name, resume_task)
                     
-                    logger.info("已将事件 %s 添加到队列，关联订阅: %s", event.event_id, subscription.subscription_id)
+                    logger.info("已将事件 %s 入队 stream %s，关联订阅: %s", event.event_id, self.queue_name, subscription.subscription_id)
                     
                     await self.subscription_storage.mark_event_processed(
                         subscription.subscription_id, 

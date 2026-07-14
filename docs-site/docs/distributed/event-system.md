@@ -28,16 +28,14 @@ Event(
 
 ## EventSubscription 与匹配
 
-订阅记录"我关心什么样的事件"。`matches_event` 按以下顺序匹配：
+订阅记录「我关心什么样的事件」。`EventSubscription.matches_event` 按以下顺序匹配：
 
-1. **event_type**：支持 fnmatch 通配符
-    - `None` / `"*"`：匹配所有
-    - `"user.*"`：前缀通配
-    - `"*.login"`：后缀通配
-    - `"*.user.*"`：中间通配
+1. **event_type**：**全等**（`!=` 即不匹配）。订阅路径**不**支持 fnmatch 通配
 2. **correlation_id**：若订阅指定了，必须与事件的相等
 3. **flow_id / node_id**：从上下文取 `$FLOW_ID` / `$LAST_NODE` 比对
-4. **filter_condition**：逐键匹配 `event.data`，缺失则不匹配
+4. **filter_condition**：对 `event.data` 做**浅层键值全等**（注释仍标「暂时简化」；非表达式求值）
+
+Handler 注册（`register_handler`）另走 `EventBus.matches_event_type`，**那里**才用 fnmatch（`user.*` 等）。不要把 handler 通配语义套到挂起订阅上。
 
 ## EventBus 接口
 
@@ -51,7 +49,7 @@ Event(
 | `get_event(event_id)` | 取事件 |
 | `publish_sync(event, ...)` | 同步发布（桥接异步 `publish`） |
 
-`publish` 支持 `prevent_duplicate_consumption` 做消费去重，配合 `EventProcessingTracker` 实现全局幂等。
+`publish` 支持 `prevent_duplicate_consumption`：在 **handler 成功之后** 才 `mark_event_processed`（失败可重试）。这是 handler 路径的去重，**不是** FlowWorker 任务队列的至少一次投递保证。
 
 ## 后端实现
 

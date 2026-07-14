@@ -93,5 +93,5 @@ pending (等待) --on_event--> completed
 ## 下一步
 
 - [事件系统](event-system.md) —— EventBus 如何连接挂起流程与外部触发
-- [FlowWorker](flow-worker.md) —— 把上述能力封装成可运行的工作器
+- [FlowWorker](flow-worker.md) —— 编排器封装；**先读** [可靠性边界](flow-worker.md#可靠性边界必读)
 - [执行模式 - Distributed](../guide/execution-modes.md#distributed)

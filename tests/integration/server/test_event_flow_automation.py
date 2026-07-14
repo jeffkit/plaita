@@ -180,7 +180,9 @@ def main():
         "version": "1.0.0"
     }
     
-    redis_client.rpush("plaita:flow:queue", json.dumps(start_message))
+    from plaita.server.task_queue import enqueue_task
+
+    enqueue_task(redis_client, "plaita:flow:queue", start_message)
     logger.info("流程启动消息已发送")
     
     # 等待流程启动
