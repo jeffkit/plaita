@@ -2,22 +2,24 @@
 
 `FlowWorker`（`plaita.server.flow_worker`，需 `server` extra）把 `FlowExecution.run_distributed` 与 `ExecutionStorage` / `FlowStorage` / `EventBus` 串起来：加载流程、持久化 checkpoint、处理 start/resume 任务。
 
-把它当成 **suspend/resume 编排器**，而不是 Temporal/Cadence 级「容错工作流引擎」。API 名里的 Distributed 指「可跨进程挂起/恢复」，**不**表示至少一次投递或崩溃安全。
+把它当成 **suspend/resume 编排器**，而不是 Temporal/Cadence 级「容错工作流引擎」。API 名里的 Distributed 指「可跨进程挂起/恢复」。
 
 ## 可靠性边界（必读）
 
 | 机制 | 当前行为 | 后果 |
 |------|----------|------|
-| 任务队列（`RedisFlowWorker`） | Redis List + `blpop`：取出即删除 | **at-most-once**。处理完成前进程崩溃 → 任务丢失；无 ACK / 可见性超时 / DLQ |
-| 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **5**） | 连续推进时每 5 步写一次；崩溃最多丢 4 步进度 |
+| 任务队列（`RedisFlowWorker`） | Redis **Stream** + consumer group；成功 `XACK`，否则 pending 可回收 | **at-least-once**（需 Redis 5+）。崩溃后另一 consumer 可在 `--claim-min-idle-ms` 后重投；业务侧应幂等 |
+| 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **1**） | 连续推进每步写盘；崩溃不丢步进进度 |
 | 挂起 / 结束 / 出错 | **立即** `save_execution_state` | 这些边界点相对安全 |
 | 并发 resume | 无 execution lease / CAS | 双 worker 同时 resume 可能竞态 |
 | 控制面 | Registry / Control / Log / Queue / EventFilter 硬绑 Redis | 换 EventBus 后端 ≠ 换部署拓扑 |
 
 选型含义：
 
-- 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受偶发丢任务或重跑的场景。
-- 不适合：把「至少一次」「自动故障转移」「金融级幂等」当默认承诺的场景——那些能力尚未实现。
+- 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受**重复投递**（幂等 resume）的场景。
+- 不适合：把「恰好一次」「自动故障转移」「金融级幂等」当默认承诺的场景——租约 / DLQ 等仍在推进中。
+
+CLI 新增：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）。`--queue-name` 现为 **Stream 键名**（与旧 List 不兼容，见 `MIGRATION.md`）。
 
 ## 职责
 
@@ -67,7 +69,7 @@ flowchart TD
     Suspend -- 是 --> Save["立即保存 context"]
     Save --> Wait["等待下一事件入队"]
     Suspend -- 否, is_end --> Done["标记 completed<br/>立即保存"]
-    Suspend -- 否, 还有节点 --> Maybe["每 N 步落一次中间态<br/>N=PERSIST_EVERY_N_STEPS"]
+    Suspend -- 否, 还有节点 --> Maybe["每步落中间态<br/>PERSIST_EVERY_N_STEPS=1"]
     Maybe --> Run
 ```
 

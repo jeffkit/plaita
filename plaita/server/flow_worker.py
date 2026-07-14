@@ -19,6 +19,11 @@ from plaita.logger import logger
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
 from plaita.server.log_handler import setup_redis_logging
+from plaita.server.task_queue import (
+    DEFAULT_CLAIM_MIN_IDLE_MS,
+    DEFAULT_CONSUMER_GROUP,
+    RedisStreamTaskQueue,
+)
 
 class FlowWorker:
     """
@@ -30,8 +35,8 @@ class FlowWorker:
     """
 
     # 连续推进时每隔 N 步落一次中间态。挂起 / 结束 / 出错始终立即持久化。
-    # Worker 进程在两次落盘之间崩溃时，最多丢失 N-1 步进度（需从上一快照重跑）。
-    PERSIST_EVERY_N_STEPS = 5
+    # 默认 1 = 每步落盘，崩溃不丢步进进度（Wave 3）。
+    PERSIST_EVERY_N_STEPS = 1
 
     def __init__(self, execution_storage: ExecutionStorage, flow_storage: FlowStorage, event_bus: EventBus=None, cache_size: int = 100, cache_ttl: int = 300, callback_handlers: Optional[list] = None):
         """
@@ -314,10 +319,11 @@ class FlowWorker:
     
 class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     """
-    基于 Redis List 队列的流程工作器（服务注册 / 心跳 / 远程控制）。
+    基于 Redis Stream 队列的流程工作器（服务注册 / 心跳 / 远程控制）。
 
-    任务队列语义为 **at-most-once**：``blpop`` 取出即删除，进程在处理完成前
-    崩溃会丢任务；无 ACK、无可见性超时、无 DLQ。控制面硬依赖 Redis。
+    任务队列语义为 **at-least-once**：consumer group + ``XACK``；处理成功前
+    崩溃则 pending 可被其他 consumer 在 ``claim_min_idle_ms`` 后回收重投。
+    控制面硬依赖 Redis。
     """
 
     SERVICE_TYPE = "flow_worker"
@@ -337,6 +343,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         enable_redis_logging: bool = True,
         redis_client: Redis = None,
         callback_handlers=None,
+        consumer_group: str = DEFAULT_CONSUMER_GROUP,
+        consumer_name: Optional[str] = None,
+        claim_min_idle_ms: int = DEFAULT_CLAIM_MIN_IDLE_MS,
     ):
         super().__init__(execution_storage, flow_storage, event_bus, cache_size, cache_ttl, callback_handlers=callback_handlers)
         self.redis_url = redis_url
@@ -345,6 +354,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._running = False
         self._active_task_count = 0
         self._log_handler = None
+        self._consumer_group = consumer_group
+        self._claim_min_idle_ms = claim_min_idle_ms
+        self._consumer_name = consumer_name
+        self._task_queue: Optional[RedisStreamTaskQueue] = None
         
         # 服务注册
         self._enable_registry = enable_registry
@@ -379,15 +392,52 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 level=logging.INFO
             )
 
+    def _resolve_consumer_name(self) -> str:
+        if self._consumer_name:
+            return self._consumer_name
+        if self._enable_registry and getattr(self, "_service_info", None):
+            return self._service_info.instance_id
+        return f"worker-{os.getpid()}"
+
+    def _get_task_queue(self) -> RedisStreamTaskQueue:
+        if self._task_queue is None:
+            self._task_queue = RedisStreamTaskQueue(
+                self.redis_client,
+                self.queue_name,
+                group_name=self._consumer_group,
+                consumer_name=self._resolve_consumer_name(),
+                claim_min_idle_ms=self._claim_min_idle_ms,
+            )
+        return self._task_queue
+
+    def _dispatch_task(self, message_data: Dict[str, Any]) -> None:
+        message_type = message_data.get("type")
+        if message_type == "start":
+            self.start_flow(
+                message_data.get("flow_id"),
+                message_data.get("params"),
+                message_data.get("version"),
+            )
+        elif message_type == "resume":
+            self.resume_flow(
+                message_data.get("flow_id"),
+                message_data.get("execution_id"),
+                message_data.get("resume_type"),
+                message_data.get("data"),
+            )
+        else:
+            raise ValueError(f"unknown task type: {message_type!r}")
+
     def run(self):
         """
-        从 Redis List 拉取 ``start`` / ``resume`` 任务并调用
-        ``FlowWorker.start_flow`` / ``resume_flow``。
+        从 Redis Stream consumer group 拉取 ``start`` / ``resume`` 任务。
 
-        ``blpop`` 取出即从队列删除：处理成功前崩溃 = 任务丢失（at-most-once）。
-        不要按「至少一次投递」做容量规划；需要可靠队列是后续 Wave 的工作。
+        成功处理后 ``XACK``；崩溃或未 ack 的消息留在 pending，超时后可被
+        其他 consumer ``XCLAIM`` 回收（at-least-once，业务侧应幂等）。
         """
         self._running = True
+        queue = self._get_task_queue()
+        queue.ensure_group()
         
         # 注册服务
         if self._enable_registry:
@@ -395,37 +445,46 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             # 启动控制监听
             self.start_control_listener()
         
-        logger.info("流程工作器已启动，监听队列: %s", self.queue_name)
+        logger.info(
+            "流程工作器已启动，监听 stream: %s (group=%s, consumer=%s)",
+            self.queue_name,
+            self._consumer_group,
+            queue.consumer_name,
+        )
         
         try:
             while self._running:
-                # blpop: 取出即删除，崩溃不重投（at-most-once）
-                message = self.redis_client.blpop(self.queue_name, timeout=10)
-                if message:
-                    self._active_task_count += 1
+                task = queue.read(block_ms=10_000)
+                if not task:
+                    continue
+
+                self._active_task_count += 1
+                if self._enable_registry:
+                    self.update_registry_info(active_tasks=self._active_task_count)
+
+                acked = False
+                try:
+                    self._dispatch_task(task.body)
+                    queue.ack(task.message_id)
+                    acked = True
+                except ValueError as exc:
+                    # 畸形消息：ack 掉避免 poison pill 无限重投
+                    logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
+                    queue.ack(task.message_id)
+                    acked = True
+                except Exception as exc:
+                    logger.error(
+                        "任务处理失败 %s，未 ack（将重投）: %s",
+                        task.message_id,
+                        exc,
+                        exc_info=True,
+                    )
+                finally:
+                    self._active_task_count -= 1
                     if self._enable_registry:
                         self.update_registry_info(active_tasks=self._active_task_count)
-                    
-                    try:
-                        message_data = json.loads(message[1])
-                        message_type = message_data.get("type")
-                        if message_type == "start":
-                            self.start_flow(
-                                message_data.get("flow_id"), 
-                                message_data.get("params"), 
-                                message_data.get("version")
-                            )
-                        elif message_type == "resume":
-                            self.resume_flow(
-                                message_data.get("flow_id"), 
-                                message_data.get("execution_id"), 
-                                message_data.get("resume_type"), 
-                                message_data.get("data")
-                            )
-                    finally:
-                        self._active_task_count -= 1
-                        if self._enable_registry:
-                            self.update_registry_info(active_tasks=self._active_task_count)
+                    if not acked:
+                        logger.debug("任务 %s 留在 pending 等待回收", task.message_id)
         finally:
             self.stop()
     
@@ -458,7 +517,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         return {
             "status": "running" if self._running else "stopped",
             "active_tasks": self._active_task_count,
-            "queue_name": self.queue_name
+            "queue_name": self.queue_name,
+            "consumer_group": self._consumer_group,
+            "consumer_name": self._resolve_consumer_name(),
         }
 
 # 新增命令行入口
@@ -477,7 +538,16 @@ def main():
                       help="Redis连接URL")
     parser.add_argument("--queue-name",
                       default=os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", "plaita:flow:queue")),
-                      help="Redis队列名称")
+                      help="Redis Stream 键名（任务队列，需 Redis 5+）")
+    parser.add_argument("--consumer-group",
+                      default=os.environ.get("PLAITA_CONSUMER_GROUP", DEFAULT_CONSUMER_GROUP),
+                      help="Stream consumer group 名称")
+    parser.add_argument("--consumer-name",
+                      default=os.environ.get("PLAITA_CONSUMER_NAME"),
+                      help="本 worker 的 consumer 名称（默认 instance_id 或 worker-pid）")
+    parser.add_argument("--claim-min-idle-ms", type=int,
+                      default=int(os.environ.get("PLAITA_CLAIM_MIN_IDLE_MS", str(DEFAULT_CLAIM_MIN_IDLE_MS))),
+                      help="pending 消息最短空闲毫秒数后才可被其他 consumer 回收")
     
     # 数据库参数
     parser.add_argument("--database-url", default="sqlite:///flow.db",
@@ -563,7 +633,10 @@ def main():
             cache_ttl=args.cache_ttl,
             enable_registry=enable_registry,
             registry_ttl=args.registry_ttl,
-            heartbeat_interval=args.heartbeat_interval
+            heartbeat_interval=args.heartbeat_interval,
+            consumer_group=args.consumer_group,
+            consumer_name=args.consumer_name or None,
+            claim_min_idle_ms=args.claim_min_idle_ms,
         )
         
         # 注册信号处理器以支持优雅关闭

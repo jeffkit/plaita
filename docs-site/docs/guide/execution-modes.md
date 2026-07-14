@@ -69,7 +69,8 @@ for step in flow.debug(name="test"):
 
     `ExecutionMode.DISTRIBUTED` / `run_distributed` 表示「单步 + suspend/resume」，**不**表示：
 
-    - 任务至少一次投递（`RedisFlowWorker` 使用 `blpop`，为 at-most-once）
+    - 任务至少一次投递（`RedisFlowWorker` 使用 Redis Stream + `XACK` / `XCLAIM`）
+    - 每步必落盘（`PERSIST_EVERY_N_STEPS` 默认 **1**）
     - 每步必落盘（Worker 默认每 5 步写一次中间态）
     - 多 worker 租约 / 幂等 resume
 

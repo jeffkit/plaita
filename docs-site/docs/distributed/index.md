@@ -104,7 +104,7 @@ step2 = execution.run_distributed(
 print(step2["result"])   # -> {"approved": True}
 ```
 
-**需要跨进程部署？** 把 `InMemoryEventBus` 换成 `RedisEventBus`，把 `MemoryExecutionStorage` 换成 `RedisExecutionStorage`（公开路径仅 memory|redis；见 [FlowWorker · 存储后端](flow-worker.md#存储后端)）。换后端**不会**自动获得可靠任务队列——`RedisFlowWorker` 仍是 `blpop` at-most-once。
+**需要跨进程部署？** 把 `InMemoryEventBus` 换成 `RedisEventBus`，把 `MemoryExecutionStorage` 换成 `RedisExecutionStorage`（公开路径仅 memory|redis）。任务经 **Redis Stream** 入队（at-least-once，见 [FlowWorker · 可靠性边界](flow-worker.md#可靠性边界必读)）。
 
 ---
 

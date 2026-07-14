@@ -2,9 +2,9 @@
 
 > **诚实性更正（2026-07-14）**  
 > 下文部分表述仍偏「目标态」。**以代码与 docs-site 为准**：  
-> - FlowWorker 任务队列为 Redis `blpop` → **at-most-once**，不是至少一次。  
+> - FlowWorker 任务队列为 Redis **Stream** consumer group → **at-least-once**（成功 `XACK`）。  
 > - EventBus handler 去重为「成功后再 mark」；挂起订阅的 `event_type` 为**全等**匹配。  
-> - 控制面（Registry/Queue/EventFilter）硬绑 Redis；「自由组合后端」不等于可换部署拓扑。  
+> - 控制面（Registry/Queue/EventFilter）硬绑 Redis。  
 > - 用户向文档见 [docs-site/distributed/flow-worker.md](../docs-site/docs/distributed/flow-worker.md) 与 [event-system.md](../docs-site/docs/distributed/event-system.md)。
 
 ## 1. 系统概述
@@ -17,7 +17,7 @@ Plaita 事件系统基于发布/订阅模式，连接挂起流程与外部触发
 
 - **解耦**：实现系统组件间的松耦合通信
 - **可扩展**：支持横向扩展，适应不同规模的应用
-- **可靠性（目标 / 现状）**：handler 路径支持重试与成功后去重；**任务队列尚未提供至少一次投递**
+- **可靠性（目标 / 现状）**：FlowWorker Stream 队列 at-least-once；handler 路径支持重试与成功后去重
 - **灵活性**：支持过滤与匹配（订阅全等 / handler fnmatch，二者不同）
 - **可维护性**：清晰的接口和简洁的代码结构
 - **可配置性**：EventBus 存储组件可组合；控制面仍以 Redis 为默认硬依赖

@@ -77,13 +77,11 @@ class DebugEventFilter(EventFilter):
                         }
                     }
                     
-                    # 将任务放入队列
-                    self.redis_client.rpush(
-                        self.queue_name,
-                        json.dumps(resume_task)
-                    )
+                    from plaita.server.task_queue import enqueue_task
+
+                    enqueue_task(self.redis_client, self.queue_name, resume_task)
                     
-                    logger.info(f"已将事件 {event.event_id} 添加到队列，关联订阅: {subscription.subscription_id}")
+                    logger.info(f"已将事件 {event.event_id} 入队 stream {self.queue_name}，关联订阅: {subscription.subscription_id}")
                     
                     # 标记事件为已处理
                     await self.subscription_storage.mark_event_processed(
@@ -111,12 +109,14 @@ class TestEventFilterWildcard:
         self.mock_redis = Mock()
         self.task_queue = []
         
-        # 模拟Redis的rpush方法
-        def mock_rpush(queue_name, task_data):
-            self.task_queue.append(json.loads(task_data))
-            return len(self.task_queue)
+        def mock_xadd(stream_key, fields, *args, **kwargs):
+            payload = fields.get("payload") if isinstance(fields, dict) else fields[b"payload"]
+            if isinstance(payload, bytes):
+                payload = payload.decode()
+            self.task_queue.append(json.loads(payload))
+            return f"{len(self.task_queue)}-0"
         
-        self.mock_redis.rpush = mock_rpush
+        self.mock_redis.xadd = mock_xadd
         
         # 创建EventFilter
         self.event_filter = DebugEventFilter(

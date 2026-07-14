@@ -40,13 +40,40 @@
 **变更前**：SQLAlchemy 符号是否进入 `plaita.event.__all__` 错误地绑定 `HAS_REDIS`。
 **变更后**：独立 `HAS_SQLALCHEMY` 标志；`__all__` 按该标志扩展。
 
-### 文档：Distributed / FlowWorker 可靠性表述收紧（非 API break）
+### 任务队列：Redis List → Stream（at-least-once）
+
+**变更前**：`EventFilter` / 测试脚本 `RPUSH`，`RedisFlowWorker` `BLPOP` — **at-most-once**。
+**变更后**：
+
+- 同一 `--queue-name` 键现为 **Redis Stream**（需 Redis 5+）
+- 入队：`XADD`（`plaita.server.task_queue.enqueue_task`）
+- 消费：consumer group（默认 `plaita-workers`）+ `XREADGROUP`；成功 `XACK`；超时 `XCLAIM` 回收 pending
+- 处理失败**不** ack → 至少一次重投；畸形消息 ack 丢弃
+- CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`
+
+**迁移**：
+
+```diff
+-redis-cli RPUSH plaita:flow:queue '{"type":"start",...}'
++python -c "from plaita.server.task_queue import enqueue_task; import redis; r=redis.from_url('redis://...'); enqueue_task(r,'plaita:flow:queue',{...})"
+```
+
+旧 List 键上的积压消息**不会**自动迁移；升级前 drain 或换新 stream 键名。
+
+重复 `start`/`resume` 在崩溃回收后可能再执行一次——节点与副作用应幂等。
+
+### 中间态落盘：每步持久化
+
+**变更前**：`PERSIST_EVERY_N_STEPS = 5`，连续推进最多丢 4 步。
+**变更后**：默认 **1**（每步 `save_execution_state`）。挂起/结束/出错仍为立即落盘。
+
+---
 
 **变更前**：部分文档写「至少一次」「容错长时工作流」「生产级」；订阅 `event_type` 被写成 fnmatch。
 **变更后（文档与注释）**：
 
-- FlowWorker = suspend/resume 编排器；任务队列为 `blpop` **at-most-once**
-- 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 5）
+- FlowWorker = suspend/resume 编排器；任务队列已改为 Stream **at-least-once**（见上节）
+- 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 1）
 - 订阅匹配为 event_type **全等**；fnmatch 仅 handler 路径
 - 用户文档入口：`docs-site/docs/distributed/flow-worker.md`「可靠性边界」
 

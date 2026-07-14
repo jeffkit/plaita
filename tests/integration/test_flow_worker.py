@@ -80,11 +80,12 @@ def save_flow_to_redis(redis_client, flow):
     print(f"流程定义已保存到Redis: {key}")
 
 def send_start_flow_task(redis_client, queue_name, flow_id, params=None):
-    """发送启动流程任务到队列"""
+    """发送启动流程任务到 Stream 队列"""
+    from plaita.server.task_queue import enqueue_task
+
     if params is None:
         params = {}
     
-    # 创建启动流程任务
     task = {
         "type": "start",
         "flow_id": flow_id,
@@ -92,16 +93,16 @@ def send_start_flow_task(redis_client, queue_name, flow_id, params=None):
         "version": "latest"
     }
     
-    # 发送任务到队列
-    redis_client.rpush(queue_name, json.dumps(task))
+    enqueue_task(redis_client, queue_name, task)
     print(f"已发送启动流程任务: {task}")
 
 def send_resume_flow_task(redis_client, queue_name, flow_id, execution_id, resume_type="continue", data=None):
-    """发送恢复流程任务到队列"""
+    """发送恢复流程任务到 Stream 队列"""
+    from plaita.server.task_queue import enqueue_task
+
     if data is None:
         data = {}
     
-    # 创建恢复流程任务
     task = {
         "type": "resume",
         "flow_id": flow_id,
@@ -110,8 +111,7 @@ def send_resume_flow_task(redis_client, queue_name, flow_id, execution_id, resum
         "data": data
     }
     
-    # 发送任务到队列
-    redis_client.rpush(queue_name, json.dumps(task))
+    enqueue_task(redis_client, queue_name, task)
     print(f"已发送恢复流程任务: {task}")
 
 def list_executions(redis_client):
