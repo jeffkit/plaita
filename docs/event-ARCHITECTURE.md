@@ -1,8 +1,15 @@
 # Plaita 事件系统架构设计文档
 
+> **诚实性更正（2026-07-14）**  
+> 下文部分表述仍偏「目标态」。**以代码与 docs-site 为准**：  
+> - FlowWorker 任务队列为 Redis `blpop` → **at-most-once**，不是至少一次。  
+> - EventBus handler 去重为「成功后再 mark」；挂起订阅的 `event_type` 为**全等**匹配。  
+> - 控制面（Registry/Queue/EventFilter）硬绑 Redis；「自由组合后端」不等于可换部署拓扑。  
+> - 用户向文档见 [docs-site/distributed/flow-worker.md](../docs-site/docs/distributed/flow-worker.md) 与 [event-system.md](../docs-site/docs/distributed/event-system.md)。
+
 ## 1. 系统概述
 
-Plaita 事件系统是一个分布式事件驱动架构，基于发布/订阅模式，实现了松耦合的组件通信机制。系统支持内存、Redis和SQLAlchemy三种实现方式，可用于单机环境和分布式环境，并支持自由组合不同后端的组件。
+Plaita 事件系统基于发布/订阅模式，连接挂起流程与外部触发源。提供 memory / Redis / SQLAlchemy 三种实现；生产编排路径（FlowWorker）另有可靠性限制，见上文更正。
 
 ![Plaita 事件系统架构](./images/arch-overview.svg)
 
@@ -10,20 +17,20 @@ Plaita 事件系统是一个分布式事件驱动架构，基于发布/订阅模
 
 - **解耦**：实现系统组件间的松耦合通信
 - **可扩展**：支持横向扩展，适应不同规模的应用
-- **可靠性**：确保事件至少被处理一次，支持重试机制
-- **灵活性**：支持多种过滤和匹配机制
+- **可靠性（目标 / 现状）**：handler 路径支持重试与成功后去重；**任务队列尚未提供至少一次投递**
+- **灵活性**：支持过滤与匹配（订阅全等 / handler fnmatch，二者不同）
 - **可维护性**：清晰的接口和简洁的代码结构
-- **可配置性**：支持自由组合不同后端的组件
+- **可配置性**：EventBus 存储组件可组合；控制面仍以 Redis 为默认硬依赖
 
 ### 1.2 核心特性
 
 - 事件发布和订阅
-- 基于条件的事件过滤
-- 事件去重和幂等处理
-- 事件处理重试机制
+- 基于条件的事件过滤（订阅侧浅层 dict；handler 侧可带 fnmatch）
+- 事件去重（handler 成功后再 mark）
+- 事件处理重试机制（handler `RetryPolicy`）
 - 异步处理和并发控制
-- 多种存储后端支持
-- 组件自由组合配置
+- 多种 EventBus 存储后端
+- 与 FlowWorker / EventFilter 的挂起恢复接线
 
 ## 2. 核心组件
 

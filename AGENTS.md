@@ -6,7 +6,8 @@
 ## 项目概述
 
 plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distributed 三种模式，
-插件化 Node + EventBus，覆盖即时请求到跨进程长时工作流。
+插件化 Node + EventBus。Distributed = 可跨进程挂起/恢复（非默认至少一次投递）；
+可靠性边界见 `docs-site/docs/distributed/flow-worker.md`。
 
 **技术栈：** Python 3.10+ · Pydantic · pytest · mutmut · ruff  
 **主仓库：** `https://github.com/jeffkit/plaita`

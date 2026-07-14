@@ -40,6 +40,18 @@
 **变更前**：SQLAlchemy 符号是否进入 `plaita.event.__all__` 错误地绑定 `HAS_REDIS`。
 **变更后**：独立 `HAS_SQLALCHEMY` 标志；`__all__` 按该标志扩展。
 
+### 文档：Distributed / FlowWorker 可靠性表述收紧（非 API break）
+
+**变更前**：部分文档写「至少一次」「容错长时工作流」「生产级」；订阅 `event_type` 被写成 fnmatch。
+**变更后（文档与注释）**：
+
+- FlowWorker = suspend/resume 编排器；任务队列为 `blpop` **at-most-once**
+- 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 5）
+- 订阅匹配为 event_type **全等**；fnmatch 仅 handler 路径
+- 用户文档入口：`docs-site/docs/distributed/flow-worker.md`「可靠性边界」
+
+无调用方代码迁移；若运维按旧文档按「至少一次」做容量规划，需按新边界重估。
+
 ---
 
 ## 0.5.0

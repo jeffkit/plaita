@@ -22,9 +22,17 @@ from plaita.server.log_handler import setup_redis_logging
 
 class FlowWorker:
     """
-    流程工作器，负责执行流程和处理恢复任务
+    流程工作器：把 ``run_distributed`` 与 ExecutionStorage / FlowStorage / EventBus 串起来。
+
+    这是 **suspend/resume 编排器**，不是具备至少一次投递或崩溃安全的工作流引擎。
+    可靠性边界见 docs-site ``distributed/flow-worker.md`` 与类常量
+    ``PERSIST_EVERY_N_STEPS`` / ``RedisFlowWorker.run`` 的队列语义说明。
     """
-    
+
+    # 连续推进时每隔 N 步落一次中间态。挂起 / 结束 / 出错始终立即持久化。
+    # Worker 进程在两次落盘之间崩溃时，最多丢失 N-1 步进度（需从上一快照重跑）。
+    PERSIST_EVERY_N_STEPS = 5
+
     def __init__(self, execution_storage: ExecutionStorage, flow_storage: FlowStorage, event_bus: EventBus=None, cache_size: int = 100, cache_ttl: int = 300, callback_handlers: Optional[list] = None):
         """
         初始化流程工作器
@@ -250,7 +258,6 @@ class FlowWorker:
             )
             execution.mode = ExecutionMode.DISTRIBUTED
 
-        PERSIST_EVERY = 5
         steps_since_persist = 0
 
         while True:
@@ -283,7 +290,11 @@ class FlowWorker:
                     is_end = result.get("is_end", False)
                     is_suspend = result.get("is_suspend", False)
 
-                    if not is_end and not is_suspend and steps_since_persist >= PERSIST_EVERY:
+                    if (
+                        not is_end
+                        and not is_suspend
+                        and steps_since_persist >= self.PERSIST_EVERY_N_STEPS
+                    ):
                         state.context = context
                         state.last_update_time = datetime.now().isoformat()
                         self.execution_storage.save_execution_state(execution_id, state)
@@ -303,11 +314,12 @@ class FlowWorker:
     
 class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     """
-    基于Redis的流程工作器
-    
-    支持服务注册、心跳机制和远程控制
+    基于 Redis List 队列的流程工作器（服务注册 / 心跳 / 远程控制）。
+
+    任务队列语义为 **at-most-once**：``blpop`` 取出即删除，进程在处理完成前
+    崩溃会丢任务；无 ACK、无可见性超时、无 DLQ。控制面硬依赖 Redis。
     """
-    
+
     SERVICE_TYPE = "flow_worker"
     
     def __init__(
@@ -369,8 +381,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
     def run(self):
         """
-        运行流程工作器, 从redis队列中获取消息，消息有start、resume 两种类型，
-        消息体的payload和FlowWorker.start_flow、FlowWorker.resume_flow的入参一致.
+        从 Redis List 拉取 ``start`` / ``resume`` 任务并调用
+        ``FlowWorker.start_flow`` / ``resume_flow``。
+
+        ``blpop`` 取出即从队列删除：处理成功前崩溃 = 任务丢失（at-most-once）。
+        不要按「至少一次投递」做容量规划；需要可靠队列是后续 Wave 的工作。
         """
         self._running = True
         
@@ -384,7 +399,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         
         try:
             while self._running:
-                # 从Redis队列中获取任务
+                # blpop: 取出即删除，崩溃不重投（at-most-once）
                 message = self.redis_client.blpop(self.queue_name, timeout=10)
                 if message:
                     self._active_task_count += 1

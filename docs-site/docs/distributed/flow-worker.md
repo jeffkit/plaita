@@ -1,14 +1,31 @@
 # FlowWorker
 
-`FlowWorker`（`plaita.server.flow_worker`，需 `server` extra）是断点续执的生产级封装：它把 `FlowExecution` 的分布式推进与 `ExecutionStorage` / `FlowStorage` / `EventBus` 串起来，负责执行流程、持久化状态、处理恢复任务。
+`FlowWorker`（`plaita.server.flow_worker`，需 `server` extra）把 `FlowExecution.run_distributed` 与 `ExecutionStorage` / `FlowStorage` / `EventBus` 串起来：加载流程、持久化 checkpoint、处理 start/resume 任务。
+
+把它当成 **suspend/resume 编排器**，而不是 Temporal/Cadence 级「容错工作流引擎」。API 名里的 Distributed 指「可跨进程挂起/恢复」，**不**表示至少一次投递或崩溃安全。
+
+## 可靠性边界（必读）
+
+| 机制 | 当前行为 | 后果 |
+|------|----------|------|
+| 任务队列（`RedisFlowWorker`） | Redis List + `blpop`：取出即删除 | **at-most-once**。处理完成前进程崩溃 → 任务丢失；无 ACK / 可见性超时 / DLQ |
+| 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **5**） | 连续推进时每 5 步写一次；崩溃最多丢 4 步进度 |
+| 挂起 / 结束 / 出错 | **立即** `save_execution_state` | 这些边界点相对安全 |
+| 并发 resume | 无 execution lease / CAS | 双 worker 同时 resume 可能竞态 |
+| 控制面 | Registry / Control / Log / Queue / EventFilter 硬绑 Redis | 换 EventBus 后端 ≠ 换部署拓扑 |
+
+选型含义：
+
+- 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受偶发丢任务或重跑的场景。
+- 不适合：把「至少一次」「自动故障转移」「金融级幂等」当默认承诺的场景——那些能力尚未实现。
 
 ## 职责
 
 - 从 `FlowStorage` 加载流程定义（带 TTL 缓存）
 - 用 `ExecutionStorage` 保存/读取执行状态
-- 推进 Distributed 流程：跑到 `EventNode` 挂起，或从断点恢复
-- 监听 `EventBus`，把外部事件路由到对应的挂起流程触发恢复
-- 贯穿所有步骤地保留用户回调
+- 推进 Distributed 流程：跑到挂起节点，或从断点恢复
+- 与 EventFilter / 外延服务配合：外部事件入队后由 worker `resume`
+- 贯穿所有步骤地保留用户回调（须复用同一 `FlowExecution` 实例）
 
 ## 构造
 
@@ -29,7 +46,7 @@ worker = FlowWorker(
 
 | 参数 | 说明 |
 |------|------|
-| `execution_storage` | 执行状态存储（`ExecutionStorage`） |
+| `execution_storage` | 执行状态存储（`ExecutionStorage`，同步契约） |
 | `flow_storage` | 流程定义存储（`FlowStorage`） |
 | `event_bus` | 事件总线 |
 | `cache_size` / `cache_ttl` | 流程定义 `TTLCache` 容量与过期秒数 |
@@ -43,15 +60,15 @@ worker = FlowWorker(
 
 ```mermaid
 flowchart TD
-    Start["外部事件到达"] --> Load["加载流程定义<br/>(缓存/存储)"]
+    Start["队列任务 start/resume"] --> Load["加载流程定义<br/>(缓存/存储)"]
     Load --> LoadState["从 ExecutionStorage 读 context"]
-    LoadState --> Run["FlowExecution.run_distributed<br/>(saved_context, resume_type, resume_data)"]
+    LoadState --> Run["FlowExecution.run_distributed"]
     Run --> Suspend{"is_suspend?"}
-    Suspend -- 是 --> Save["保存 context 到 ExecutionStorage"]
-    Save --> Wait["继续等待下一事件"]
-    Suspend -- 否, is_end --> Done["标记 completed<br/>清理状态"]
-    Suspend -- 否, 还有节点 --> Save2["保存 context (中间态)"]
-    Save2 --> Run
+    Suspend -- 是 --> Save["立即保存 context"]
+    Save --> Wait["等待下一事件入队"]
+    Suspend -- 否, is_end --> Done["标记 completed<br/>立即保存"]
+    Suspend -- 否, 还有节点 --> Maybe["每 N 步落一次中间态<br/>N=PERSIST_EVERY_N_STEPS"]
+    Maybe --> Run
 ```
 
 ## 状态模型

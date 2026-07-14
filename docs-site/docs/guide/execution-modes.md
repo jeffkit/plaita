@@ -63,7 +63,17 @@ for step in flow.debug(name="test"):
 
 ## Distributed 模式
 
-为跨进程、长时运行的工作流设计。每次调用**只推进一个节点**，执行上下文可序列化持久化，流程在事件节点处挂起，外部事件到达后从断点恢复。
+为**可跨进程挂起/恢复**设计：每次调用**只推进一个节点**，执行上下文可序列化持久化，流程在挂起节点处暂停，外部事件到达后从断点恢复。
+
+!!! warning "命名与能力边界"
+
+    `ExecutionMode.DISTRIBUTED` / `run_distributed` 表示「单步 + suspend/resume」，**不**表示：
+
+    - 任务至少一次投递（`RedisFlowWorker` 使用 `blpop`，为 at-most-once）
+    - 每步必落盘（Worker 默认每 5 步写一次中间态）
+    - 多 worker 租约 / 幂等 resume
+
+    部署前请读 [FlowWorker · 可靠性边界](../distributed/flow-worker.md#可靠性边界必读)。
 
 ```python
 from plaita import Flow, FlowExecution

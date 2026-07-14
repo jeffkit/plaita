@@ -7,7 +7,7 @@ description: 在 Python 中解析并执行 JSON 定义的逻辑流程，支持�
 
 **Plaita 逻辑编排系统的官方 Python 运行时。**
 
-plaita 将 JSON 格式的逻辑流程定义解析为可执行的 `Flow`，并以插件化的 `Node` 体系驱动执行。它把**流程定义**与**执行逻辑**分离，支持同步阻塞、生成器单步、分布式断点续执三种执行模式，能覆盖从"一次请求即返回"到"跨进程长时运行工作流"的全频谱场景。
+plaita 将 JSON 格式的逻辑流程定义解析为可执行的 `Flow`，并以插件化的 `Node` 体系驱动执行。它把**流程定义**与**执行逻辑**分离，支持同步阻塞、生成器单步、以及可跨进程挂起/恢复（Distributed）三种执行模式——从「一次请求即返回」到「等外部事件再继续」；Distributed **不是**默认具备至少一次投递的容错引擎。
 
 ## 核心特性
 
@@ -53,8 +53,8 @@ print(flow.run(name="kongjie"))  # => "kongjie"
 | 运行期执行 AI 生成的流程 | Normal + `flow_from_source` | `@flow` 源码编译期校验，再交给运行时，比直接生成可执行代码更安全 |
 | 请求-响应的即时逻辑 | Normal | 同步阻塞，一次返回结果 |
 | 流程可视化调试器 | Generator | 每节点 yield，可单步、检查上下文；天然即 Agent trace |
-| 人工审批 / 外部回调 / 定时延迟 | Distributed | 挂起-持久化-事件恢复 |
-| 跨服务编排、容错长时工作流 | Distributed | 上下文序列化跨进程恢复 |
+| 人工审批 / 外部回调 / 定时延迟 | Distributed | 挂起-持久化-事件恢复（见 [可靠性边界](distributed/flow-worker.md#可靠性边界必读)） |
+| 跨进程挂起/恢复的长时流程 | Distributed | 上下文序列化后 resume；任务队列当前为 at-most-once |
 
 详见 [应用场景](scenarios/index.md)。
 

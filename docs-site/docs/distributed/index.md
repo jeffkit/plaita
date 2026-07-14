@@ -1,6 +1,6 @@
 # 断点续执
 
-断点续执（Checkpoint）是 plaita 支持长时间运行工作流的核心特性。它让流程能在某个节点**挂起**、把上下文**持久化**，等外部事件到达后**恢复**继续执行。
+断点续执（Checkpoint）让流程能在某个节点**挂起**、把上下文**持久化**，等外部事件到达后**恢复**继续执行。这是 **suspend/resume** 能力，不是「至少一次投递」的容错引擎——部署侧可靠性边界见 [FlowWorker](flow-worker.md#可靠性边界必读)。
 
 ## 为什么需要它
 
@@ -104,7 +104,7 @@ step2 = execution.run_distributed(
 print(step2["result"])   # -> {"approved": True}
 ```
 
-**需要生产级部署？** 把 `InMemoryEventBus` 换成 `RedisEventBus`，把 `MemoryExecutionStorage` 换成 `RedisStorage` 或 `SQLAlchemyStorage`，代码逻辑不变。
+**需要跨进程部署？** 把 `InMemoryEventBus` 换成 `RedisEventBus`，把 `MemoryExecutionStorage` 换成 `RedisExecutionStorage`（公开路径仅 memory|redis；见 [FlowWorker · 存储后端](flow-worker.md#存储后端)）。换后端**不会**自动获得可靠任务队列——`RedisFlowWorker` 仍是 `blpop` at-most-once。
 
 ---
 
