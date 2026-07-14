@@ -153,7 +153,7 @@ class TestEventFilterIdempotency:
         execution_storage = MemoryExecutionStorage()
         subscription_storage = InMemoryEventSubscriptionStorage()
 
-        redis_client = fakeredis.FakeRedis()
+        redis_client = fakeredis.FakeRedis(decode_responses=True)
 
         from unittest.mock import AsyncMock
         mock_event_bus = AsyncMock()
@@ -166,6 +166,18 @@ class TestEventFilterIdempotency:
             queue_name="test:queue",
         )
         return event_filter, execution_storage, subscription_storage, redis_client
+
+    @staticmethod
+    def _stream_payloads(redis_client, stream_key: str):
+        """Read all task bodies from a Stream (post List→Stream migration)."""
+        entries = redis_client.xrange(stream_key, min="-", max="+")
+        tasks = []
+        for _mid, fields in entries:
+            raw = fields.get("payload") or fields.get(b"payload")
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            tasks.append(json.loads(raw))
+        return tasks
 
     def test_same_event_subscription_only_one_resume_task(self):
         """同一事件+订阅组合应只生成一个 resume 任务（SETNX 幂等）"""
@@ -197,11 +209,9 @@ class TestEventFilterIdempotency:
             await ef.handle_event(event)
             await ef.handle_event(event)
 
-            queue_len = redis_client.llen("test:queue")
-            assert queue_len == 1
-
-            task_json = redis_client.lpop("test:queue")
-            task = json.loads(task_json)
+            tasks = self._stream_payloads(redis_client, "test:queue")
+            assert len(tasks) == 1
+            task = tasks[0]
             assert task["type"] == "resume"
             assert task["execution_id"] == "exec-1"
             assert task["data"]["event_id"] == event.event_id
@@ -244,7 +254,7 @@ class TestEventFilterIdempotency:
             await ef.handle_event(event1)
             await ef.handle_event(event2)
 
-            queue_len = redis_client.llen("test:queue")
-            assert queue_len == 2
+            tasks = self._stream_payloads(redis_client, "test:queue")
+            assert len(tasks) == 2
 
         run(_test())
