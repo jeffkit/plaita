@@ -1,8 +1,12 @@
 # Plaita 事件系统使用手册
 
+> **诚实性更正（2026-07-14）**  
+> 生产控制面请用 **redis**（或 memory 单测）。`db`/SQLAlchemy 为 experimental（`PLAITA_ALLOW_EXPERIMENTAL_DB=1`）。  
+> FlowWorker 任务队列为 Redis Stream（at-least-once），不是 List。详见 docs-site `distributed/ops-runbook.md`。
+
 ## 1. 概述
 
-Plaita 事件系统是一个灵活、可靠的事件驱动架构实现，支持多种事件发布和订阅模式。本指南将帮助您快速上手并有效利用事件系统的各项功能。
+Plaita 事件系统是一个灵活的事件驱动架构实现，支持多种事件发布和订阅模式。本指南将帮助您快速上手并有效利用事件系统的各项功能。
 
 ![Plaita 事件系统工作流程](./images/usage-workflow.svg)
 

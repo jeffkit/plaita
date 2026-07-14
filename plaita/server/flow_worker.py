@@ -22,6 +22,7 @@ from plaita.server.log_handler import setup_redis_logging
 from plaita.server.task_queue import (
     DEFAULT_CLAIM_MIN_IDLE_MS,
     DEFAULT_CONSUMER_GROUP,
+    DEFAULT_MAX_DELIVERIES,
     RedisStreamTaskQueue,
 )
 from plaita.server.execution_lease import (
@@ -401,6 +402,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         claim_min_idle_ms: int = DEFAULT_CLAIM_MIN_IDLE_MS,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
         execution_lease=None,
+        max_deliveries: int = DEFAULT_MAX_DELIVERIES,
+        dlq_key: Optional[str] = None,
     ):
         redis_client = redis_client or Redis.from_url(redis_url)
         super().__init__(
@@ -422,6 +425,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._consumer_group = consumer_group
         self._claim_min_idle_ms = claim_min_idle_ms
         self._consumer_name = consumer_name
+        self._max_deliveries = max_deliveries
+        self._dlq_key = dlq_key
         self._task_queue: Optional[RedisStreamTaskQueue] = None
         
         # 服务注册
@@ -472,6 +477,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 group_name=self._consumer_group,
                 consumer_name=self._resolve_consumer_name(),
                 claim_min_idle_ms=self._claim_min_idle_ms,
+                max_deliveries=self._max_deliveries,
+                dlq_key=self._dlq_key,
             )
         return self._task_queue
 
@@ -534,6 +541,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     acked = True
                 except ExecutionLeaseError as exc:
                     # 另一 worker 持有 resume 租约：不 ack，待租约过期后 reclaim
+                    queue.note_lease_conflict()
                     logger.warning(
                         "任务 %s 未取得 execution lease，留在 pending: %s",
                         task.message_id,
@@ -543,14 +551,25 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # 畸形消息：ack 掉避免 poison pill 无限重投
                     logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
                     queue.ack(task.message_id)
+                    queue.note_poison()
                     acked = True
                 except Exception as exc:
-                    logger.error(
-                        "任务处理失败 %s，未 ack（将重投）: %s",
-                        task.message_id,
-                        exc,
-                        exc_info=True,
-                    )
+                    queue.note_failed()
+                    if task.delivery_count >= queue.max_deliveries:
+                        queue.dead_letter(
+                            task,
+                            reason=f"processing_failed:{type(exc).__name__}:{exc}"[:500],
+                        )
+                        acked = True
+                    else:
+                        logger.error(
+                            "任务处理失败 %s (delivery=%s/%s)，未 ack（将重投）: %s",
+                            task.message_id,
+                            task.delivery_count,
+                            queue.max_deliveries,
+                            exc,
+                            exc_info=True,
+                        )
                 finally:
                     self._active_task_count -= 1
                     if self._enable_registry:
@@ -586,13 +605,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     
     def _on_status_command(self) -> Dict[str, Any]:
         """响应状态查询命令"""
-        return {
+        status = {
             "status": "running" if self._running else "stopped",
             "active_tasks": self._active_task_count,
             "queue_name": self.queue_name,
             "consumer_group": self._consumer_group,
             "consumer_name": self._resolve_consumer_name(),
         }
+        try:
+            status["queue"] = self._get_task_queue().stats()
+        except Exception as exc:
+            status["queue_error"] = str(exc)
+        return status
 
 # 新增命令行入口
 
@@ -623,6 +647,12 @@ def main():
     parser.add_argument("--lease-ttl-seconds", type=int,
                       default=int(os.environ.get("PLAITA_LEASE_TTL_SECONDS", str(DEFAULT_LEASE_TTL_SECONDS))),
                       help="resume execution lease TTL（秒），推进中会 renew")
+    parser.add_argument("--max-deliveries", type=int,
+                      default=int(os.environ.get("PLAITA_MAX_DELIVERIES", str(DEFAULT_MAX_DELIVERIES))),
+                      help="任务最大投递次数，超过后写入 DLQ 并 ack")
+    parser.add_argument("--dlq-key",
+                      default=os.environ.get("PLAITA_DLQ_KEY"),
+                      help="死信 Stream 键（默认 <queue-name>:dlq）")
     
     # 数据库参数
     parser.add_argument("--database-url", default="sqlite:///flow.db",
@@ -636,8 +666,8 @@ def main():
     
     # 事件总线参数（默认启用：分布式挂起/恢复依赖订阅写入；
     # 历史 --use-event-bus 为 opt-in，导致默认部署订阅落内存、EventFilter 读 Redis）
-    parser.add_argument("--event-bus-type", choices=["memory", "redis", "db"], default="redis",
-                      help="事件总线类型")
+    parser.add_argument("--event-bus-type", choices=["memory", "redis"], default="redis",
+                      help="事件总线类型（生产用 redis；db/sqlalchemy 已标 experimental，见 factory）")
     parser.add_argument("--use-event-bus", action="store_true",
                       help=argparse.SUPPRESS)  # 已默认启用，保留兼容旧脚本
     parser.add_argument("--no-event-bus", action="store_true",
@@ -713,6 +743,8 @@ def main():
             consumer_name=args.consumer_name or None,
             claim_min_idle_ms=args.claim_min_idle_ms,
             lease_ttl_seconds=args.lease_ttl_seconds,
+            max_deliveries=args.max_deliveries,
+            dlq_key=args.dlq_key or None,
         )
         
         # 注册信号处理器以支持优雅关闭

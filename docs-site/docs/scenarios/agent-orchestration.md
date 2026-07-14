@@ -26,7 +26,7 @@ flowchart LR
 | Agent 多步调用难追踪 | 每个节点是一个步骤，`FlowCallback` 天然就是 Agent trace |
 | 工具调用之间数据流转乱 | `$NODE.<id>` 显式引用上一步输出，数据流即图 |
 | LLM 生成的计划可能非法 | JSON / S-expr / `@flow` 三种前端都有**构建期静态校验** |
-| 长任务等外部事件再继续 | Distributed 挂起/恢复（队列为 at-most-once，见 [可靠性边界](../distributed/flow-worker.md#可靠性边界必读)） |
+| 长任务等外部事件再继续 | Distributed 挂起/恢复（Stream at-least-once，见 [可靠性边界](../distributed/flow-worker.md#可靠性边界必读) / [幂等 Resume](../distributed/idempotent-resume.md)） |
 | 需要人工介入再继续 | `approval` / `event` 节点挂起，事件到达恢复 |
 | 多工具/多 Agent 并行 | `parallel` 节点 fan-out，`joinBranches` 汇聚 |
 

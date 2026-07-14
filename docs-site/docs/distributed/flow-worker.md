@@ -8,7 +8,7 @@
 
 | 机制 | 当前行为 | 后果 |
 |------|----------|------|
-| 任务队列（`RedisFlowWorker`） | Redis **Stream** + consumer group；成功 `XACK`，否则 pending 可回收 | **at-least-once**（需 Redis 5+）。崩溃后另一 consumer 可在 `--claim-min-idle-ms` 后重投；业务侧应幂等 |
+| 任务队列（`RedisFlowWorker`） | Redis **Stream** + consumer group；成功 `XACK`，否则 pending 可回收；超 `--max-deliveries` 进 DLQ | **at-least-once**（需 Redis 5+）。业务侧应幂等；毒丸进 `<queue>:dlq` |
 | 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **1**） | 连续推进每步写盘；崩溃不丢步进进度 |
 | 挂起 / 结束 / 出错 | **立即** `save_execution_state` | 这些边界点相对安全 |
 | 并发 resume | Redis `SET NX EX` lease（`plaita.server.execution_lease`） | 同一 `execution_id` 最多一个 resume；抢租约失败的任务**不** XACK，待 TTL 过期后 reclaim |
@@ -19,7 +19,9 @@
 - 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受**重复投递**（幂等 resume）的场景。
 - 不适合：把「恰好一次」「自动故障转移」「金融级幂等」当默认承诺的场景——无 DLQ；副作用仍须幂等。
 
-CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容，见 `MIGRATION.md`）。
+CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）、`--max-deliveries`（默认 5）、`--dlq-key`。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容）。
+
+部署步骤与故障手册见 [运维 Runbook](ops-runbook.md)；副作用设计见 [幂等 Resume](idempotent-resume.md)。
 
 ## 职责
 

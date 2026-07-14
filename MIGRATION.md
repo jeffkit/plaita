@@ -21,7 +21,7 @@
 - factory 对 `db` + `execution`/`flow` 直接 `ValueError`（说明原因与替代方案）
 - FlowWorker / EventFilter CLI：`--execution-storage-type` / `--flow-storage-type`
   仅接受 `memory` | `redis`
-- `db` **subscription** 与 **event-bus** 仍可用（调用方为 async）
+- `db` **subscription** / **event-bus** 另需 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`（见下节）
 - `plaita.storage.sqlalchemy` 类保留供实验，**不得**再经公开 factory/CLI 用于执行状态
 
 ```diff
@@ -80,17 +80,31 @@
 
 无调用方代码迁移；部署多 worker 时重复 resume 会被租约挡住，直至 holder 释放或 TTL 过期。
 
----
+### Experimental：`db` / SQLAlchemy 需显式门闩
+
+**变更前**：`create_event_bus("db")` / `create_storage_component("db", "subscription")` 默认可建。
+**变更后**：须设置环境变量 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`，否则 `ValueError`。  
+FlowWorker / EventFilter CLI 的 `--event-bus-type` / `--subscription-storage-type` **不再提供 `db` 选项**（生产用 redis）。
+
+### 任务队列：DLQ + max deliveries
+
+**变更后**：
+
+- 默认 `--max-deliveries=5`；超过后写入 `<queue-name>:dlq` 并 ack 原消息
+- CLI：`--max-deliveries`、`--dlq-key`
+- status 响应含 `queue` 统计（pending / dlq_length / dead_lettered 等）
+- List→Stream 迁移脚本：`scripts/drain_list_queue_to_stream.py`
+- 运维文档：`docs-site/docs/distributed/ops-runbook.md`；幂等：`idempotent-resume.md`
+
+### 文档：Distributed / FlowWorker 可靠性表述收紧（非 API break）
 
 **变更前**：部分文档写「至少一次」「容错长时工作流」「生产级」；订阅 `event_type` 被写成 fnmatch。
 **变更后（文档与注释）**：
 
-- FlowWorker = suspend/resume 编排器；任务队列已改为 Stream **at-least-once**（见上节）
+- FlowWorker = suspend/resume 编排器；任务队列为 Stream **at-least-once**（见上节）
 - 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 1）
 - 订阅匹配为 event_type **全等**；fnmatch 仅 handler 路径
 - 用户文档入口：`docs-site/docs/distributed/flow-worker.md`「可靠性边界」
-
-无调用方代码迁移；若运维按旧文档按「至少一次」做容量规划，需按新边界重估。
 
 ---
 

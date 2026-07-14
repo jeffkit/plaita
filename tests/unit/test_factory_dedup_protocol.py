@@ -11,30 +11,45 @@ from plaita.event.memory import InMemoryEventBus
 
 
 class TestFactoryDbEngine(unittest.TestCase):
-    def test_create_event_bus_db_passes_engine(self):
+    def test_create_event_bus_db_requires_experimental_flag(self):
+        from plaita.server.factory import create_event_bus
+
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+
+            os.environ.pop("PLAITA_ALLOW_EXPERIMENTAL_DB", None)
+            with self.assertRaises(ValueError) as ctx:
+                create_event_bus("db", database_url="sqlite+aiosqlite:///:memory:")
+            self.assertIn("experimental", str(ctx.exception))
+
+    def test_create_event_bus_db_passes_engine_when_allowed(self):
         from plaita.server.factory import create_event_bus
 
         fake_engine = object()
-        with patch("plaita.server.factory._create_async_engine", return_value=fake_engine) as mk_eng:
-            with patch("plaita.event.sqlalchemy.SqlalchemyEventBus") as Bus:
-                Bus.return_value = MagicMock()
-                create_event_bus("db", database_url="sqlite+aiosqlite:///:memory:")
-                mk_eng.assert_called_once_with("sqlite+aiosqlite:///:memory:")
-                Bus.assert_called_once()
-                kwargs = Bus.call_args.kwargs
-                self.assertIs(kwargs.get("engine"), fake_engine)
-                self.assertNotIn("database_url", kwargs)
+        with patch.dict("os.environ", {"PLAITA_ALLOW_EXPERIMENTAL_DB": "1"}):
+            with patch("plaita.server.factory._create_async_engine", return_value=fake_engine) as mk_eng:
+                with patch("plaita.event.sqlalchemy.SqlalchemyEventBus") as Bus:
+                    Bus.return_value = MagicMock()
+                    create_event_bus("db", database_url="sqlite+aiosqlite:///:memory:")
+                    mk_eng.assert_called_once_with("sqlite+aiosqlite:///:memory:")
+                    Bus.assert_called_once()
+                    kwargs = Bus.call_args.kwargs
+                    self.assertIs(kwargs.get("engine"), fake_engine)
+                    self.assertNotIn("database_url", kwargs)
 
-    def test_create_subscription_storage_db_passes_engine(self):
+    def test_create_subscription_storage_db_passes_engine_when_allowed(self):
         from plaita.server.factory import create_storage_component
 
         fake_engine = object()
-        with patch("plaita.server.factory._create_async_engine", return_value=fake_engine):
-            with patch("plaita.event.sqlalchemy.SqlalchemyEventSubscriptionStorage") as Stor:
-                Stor.return_value = MagicMock()
-                create_storage_component("db", "subscription", database_url="sqlite+aiosqlite:///:memory:")
-                Stor.assert_called_once()
-                self.assertIs(Stor.call_args.kwargs.get("engine"), fake_engine)
+        with patch.dict("os.environ", {"PLAITA_ALLOW_EXPERIMENTAL_DB": "1"}):
+            with patch("plaita.server.factory._create_async_engine", return_value=fake_engine):
+                with patch("plaita.event.sqlalchemy.SqlalchemyEventSubscriptionStorage") as Stor:
+                    Stor.return_value = MagicMock()
+                    create_storage_component(
+                        "db", "subscription", database_url="sqlite+aiosqlite:///:memory:"
+                    )
+                    Stor.assert_called_once()
+                    self.assertIs(Stor.call_args.kwargs.get("engine"), fake_engine)
 
 
 class TestDedupAfterSuccess(unittest.IsolatedAsyncioTestCase):

@@ -113,6 +113,8 @@ print(step2["result"])   # -> {"approved": True}
 - [Checkpoint 概念](checkpoint.md) —— 挂起/恢复的执行模型与 resume_type
 - [事件系统](event-system.md) —— EventBus / Event / Subscription 与三种后端
 - [FlowWorker](flow-worker.md) —— 分布式流程工作器，串联存储与执行
+- [运维 Runbook](ops-runbook.md) —— List→Stream 迁移、观测、故障手册
+- [幂等 Resume](idempotent-resume.md) —— 至少一次投递下的副作用设计
 - [扩展节点](extended-nodes.md) —— delay/queue/http_callback/approval 节点
 - [外延服务](services.md) —— ServiceManager 与后台服务
 

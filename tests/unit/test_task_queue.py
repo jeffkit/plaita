@@ -68,6 +68,41 @@ class TestRedisStreamTaskQueue(unittest.TestCase):
         length = self.redis.xlen(self.stream)
         self.assertEqual(length, 1)
 
+    def test_dead_letter_moves_and_acks(self):
+        q = RedisStreamTaskQueue(
+            self.redis,
+            self.stream,
+            group_name=self.group,
+            consumer_name="c1",
+            max_deliveries=2,
+        )
+        q.enqueue({"type": "start", "flow_id": "poison"})
+        task = q.read(block_ms=100)
+        self.assertIsNotNone(task)
+        dlq_id = q.dead_letter(task, reason="test")
+        self.assertTrue(dlq_id)
+        self.assertEqual(q.stats()["dead_lettered"], 1)
+        self.assertGreaterEqual(self.redis.xlen(q.dlq_key), 1)
+        # original should be acked — no reclaim
+        time.sleep(0.01)
+        q2 = RedisStreamTaskQueue(
+            self.redis,
+            self.stream,
+            group_name=self.group,
+            consumer_name="c2",
+            claim_min_idle_ms=1,
+            max_deliveries=2,
+        )
+        self.assertIsNone(q2.read(block_ms=50))
+
+    def test_stats_includes_keys(self):
+        q = RedisStreamTaskQueue(self.redis, self.stream, group_name=self.group)
+        q.enqueue({"type": "start", "flow_id": "f"})
+        stats = q.stats()
+        self.assertEqual(stats["stream_key"], self.stream)
+        self.assertIn("dlq_key", stats)
+        self.assertEqual(stats["enqueued"], 1)
+
 
 class TestRedisFlowWorkerDispatch(unittest.TestCase):
     def test_dispatch_start_and_resume(self):

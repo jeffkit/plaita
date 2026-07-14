@@ -1,6 +1,6 @@
 # 事件系统
 
-事件系统是断点续执的基础：它把"挂起的流程"与"外部触发源"解耦。`EventBus` 负责发布与订阅，`Event` / `EventSubscription` 是数据模型，后端有 memory / redis / sqlalchemy 三种实现。
+事件系统是断点续执的基础：它把「挂起的流程」与「外部触发源」解耦。`EventBus` 负责发布与订阅，`Event` / `EventSubscription` 是数据模型。**生产路径：memory（单测）+ redis（部署）**；sqlalchemy 为 experimental（需 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`）。控制面（Worker 队列 / Registry / EventFilter）硬绑 Redis，换 EventBus 后端不等于换部署拓扑。
 
 ## 核心抽象
 
@@ -56,8 +56,8 @@ Handler 注册（`register_handler`）另走 `EventBus.matches_event_type`，**�
 | 后端 | 模块 | 需要 extra | 适用场景 |
 |------|------|-----------|---------|
 | memory | `plaita.event.memory` | — | 单进程、开发调试 |
-| redis | `plaita.event.redis` | `redis` | 多实例、生产 |
-| sqlalchemy | `plaita.event.sqlalchemy` | `server` | 关系库持久化 |
+| redis | `plaita.event.redis` | `redis` | **生产推荐** |
+| sqlalchemy | `plaita.event.sqlalchemy` | `server` | **experimental**；factory 需 env 门闩 |
 
 ```python
 from plaita.event.memory import MemoryEventBus

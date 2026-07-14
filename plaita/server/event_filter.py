@@ -276,12 +276,12 @@ def main():
     # 存储组件类型（execution 仅 memory|redis；subscription 可为 db，调用方为 async）
     parser.add_argument("--execution-storage-type", choices=["memory", "redis"], default="redis",
                       help="执行状态存储类型（memory|redis；db 已下架）")
-    parser.add_argument("--subscription-storage-type", choices=["memory", "redis", "db"], default="redis",
-                      help="事件订阅存储类型")
+    parser.add_argument("--subscription-storage-type", choices=["memory", "redis"], default="redis",
+                      help="事件订阅存储类型（db/sqlalchemy 为 experimental，见 factory）")
     
     # 事件总线参数
-    parser.add_argument("--event-bus-type", choices=["memory", "redis", "db"], default="redis",
-                      help="事件总线类型")
+    parser.add_argument("--event-bus-type", choices=["memory", "redis"], default="redis",
+                      help="事件总线类型（生产用 redis）")
     
     # 事件类型过滤
     parser.add_argument("--event-type", type=str, default="",
