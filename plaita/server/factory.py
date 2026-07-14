@@ -33,12 +33,19 @@ def _create_async_engine(database_url: str):
     return create_async_engine(database_url)
 
 
+# FlowWorker / EventFilter 以同步方式调用 ExecutionStorage / FlowStorage。
+# Sqlalchemy* 实现是 async def，与 ABC 契约断裂，经 factory 创建会导致静默丢状态。
+_UNSUPPORTED_SYNC_DB_COMPONENTS = frozenset({"execution", "flow"})
+
+
 def create_storage_component(storage_type, component_type, **kwargs):
     """
     创建存储组件实例
 
     Args:
         storage_type: 存储类型 (memory, redis, db)
+            - execution / flow：仅 memory、redis（db 已下架，见 MIGRATION）
+            - subscription：memory、redis、db（异步调用方）
         component_type: 组件类型 (execution, flow, subscription)
         **kwargs: 组件初始化参数 (redis_url, database_url)
 
@@ -72,17 +79,21 @@ def create_storage_component(storage_type, component_type, **kwargs):
             return RedisEventSubscriptionStorage(redis_url=redis_url, key_prefix="plaita:subscription:")
 
     elif storage_type == "db":
+        if component_type in _UNSUPPORTED_SYNC_DB_COMPONENTS:
+            raise ValueError(
+                f"storage_type='db' 不支持 component_type={component_type!r}："
+                "SqlalchemyExecutionStorage / SqlalchemyFlowStorage 为 async 实现，"
+                "与 ExecutionStorage/FlowStorage 同步 ABC 及 FlowWorker/EventFilter "
+                "的同步调用不兼容，会导致状态无法落盘。"
+                "请改用 storage_type='redis' 或 'memory'。"
+                "类仍保留在 plaita.storage.sqlalchemy 供实验；公开路径重新开放前须先统一契约并补测试。"
+            )
         database_url = kwargs.get("database_url")
-        if component_type == "execution":
-            from plaita.storage.sqlalchemy import SqlalchemyExecutionStorage
-            return SqlalchemyExecutionStorage(database_url=database_url)
-        elif component_type == "flow":
-            from plaita.storage.sqlalchemy import SqlalchemyFlowStorage
-            return SqlalchemyFlowStorage(database_url=database_url)
-        elif component_type == "subscription":
+        if component_type == "subscription":
             # SqlalchemyEventSubscriptionStorage 构造函数要 engine，不是 database_url
             from plaita.event.sqlalchemy import SqlalchemyEventSubscriptionStorage
             return SqlalchemyEventSubscriptionStorage(engine=_create_async_engine(database_url))
+        raise ValueError(f"不支持的组件类型: {component_type}")
     else:
         raise ValueError(f"不支持的存储类型: {storage_type}")
 

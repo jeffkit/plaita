@@ -52,7 +52,13 @@ class ExecutionStateModel(Base):
 
 class SqlalchemyExecutionStorage(ExecutionStorage):
     """
-    基于SQLAlchemy的执行状态存储实现
+    基于SQLAlchemy的执行状态存储实现。
+
+    .. warning::
+        本类方法均为 ``async def``，与 ``ExecutionStorage`` 同步 ABC 及
+        FlowWorker/EventFilter 的同步调用**不兼容**。
+        ``create_storage_component("db", "execution")`` 已拒绝创建；
+        请勿在生产路径直接使用，直至契约统一并补齐测试。
     """
     
     def __init__(self, database_url=None, engine=None, create_tables=True):
@@ -244,7 +250,11 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
 
 class SqlalchemyFlowStorage(FlowStorage):
     """
-    基于SQLAlchemy的流程定义存储实现
+    基于SQLAlchemy的流程定义存储实现。
+
+    .. warning::
+        本类方法均为 ``async def``，与 ``FlowStorage`` 同步 ABC 及 FlowWorker
+        的同步调用**不兼容**。``create_storage_component("db", "flow")`` 已拒绝创建。
     """
     
     def __init__(self, database_url=None, engine=None, create_tables=True):

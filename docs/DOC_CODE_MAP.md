@@ -1,6 +1,6 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-07-10  
+> 最后更新：2026-07-14  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 
 | 文档路径 | 代码路径模式 | 同步触发条件 |
@@ -27,4 +27,5 @@
 | （DSL IR）`plaita/dsl/ir_validate.py` | `plaita/dsl/**`, `plaita-ai/plaita_ai/flow_runner.py` | 共享拓扑校验、`flow_from_source` / `compile_flow` 编译门、registry 静默失败策略 |
 | （codeflow 包）`plaita/dsl/codeflow/` | `plaita/dsl/codeflow/{_common,_expr,_nodes,_stmt,_source,_compiler}.py` | `@flow` 编译器拆分、公开 API re-export、私有符号兼容导出 |
 | （Event 去重 / factory）`plaita/event/{memory,redis,sqlalchemy}.py`, `plaita/server/factory.py` | `plaita/event/**`, `plaita/server/factory.py` | handler 成功后再 mark；db 后端 `database_url→engine` |
+| `MIGRATION.md`（Storage db 下架） | `plaita/server/factory.py`, `plaita/server/flow_worker.py`, `plaita/server/event_filter.py`, `plaita/storage/sqlalchemy.py`, `plaita/event/__init__.py`, `tests/unit/test_storage_contract.py` | execution/flow 的 `db` 公开路径开关；同步 ABC 契约；`HAS_SQLALCHEMY` |
 | （节点窄接口）`plaita/core/node_context.py` | `plaita/node/basic.py`, `plaita/core/executor.py` | `NodeExecutionContext` Protocol |

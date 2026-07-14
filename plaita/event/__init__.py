@@ -32,8 +32,9 @@ try:
         SqlalchemyEventBus, SqlalchemyEventStorage, SqlalchemyEventSubscriptionStorage,
         SqlalchemyEventProcessingTracker
     )
+    HAS_SQLALCHEMY = True
 except ImportError:
-    pass
+    HAS_SQLALCHEMY = False
 
 # 全局默认事件总线实例
 _default_event_bus = None
@@ -82,7 +83,8 @@ __all__ = [
     'EventNode',
     'get_default_event_bus',
     'set_default_event_bus',
-    'HAS_REDIS'
+    'HAS_REDIS',
+    'HAS_SQLALCHEMY',
 ]
 
 # 如果Redis可用，添加Redis相关类到__all__
@@ -95,7 +97,7 @@ if HAS_REDIS:
     ])
 
 # 如果SQLAlchemy可用，添加SQLAlchemy相关类到__all__
-if HAS_REDIS:
+if HAS_SQLALCHEMY:
     __all__.extend([
         'SqlalchemyEventBus',
         'SqlalchemyEventStorage',

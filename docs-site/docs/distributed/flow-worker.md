@@ -70,13 +70,16 @@ flowchart TD
 
 ## 存储后端
 
-| 后端 | 模块 | extra |
-|------|------|-------|
-| memory | `plaita.storage.memory` | — |
-| redis | `plaita.storage.redis` | `redis` |
-| sqlalchemy | `plaita.storage.sqlalchemy` | `server` |
+生产路径（`FlowWorker` CLI / `create_storage_component`）仅支持同步契约后端：
 
-`ExecutionStorage` 接口：`save_execution_state` / `load_execution_state` / `delete_execution_state` / `list_executions`，并提供 `serialize_state` / `deserialize_state`（JSON）。
+| 后端 | 模块 | extra | 备注 |
+|------|------|-------|------|
+| memory | `plaita.storage.memory` | — | 单测 / 本地 |
+| redis | `plaita.storage.redis` | `redis` | **推荐**生产默认 |
+
+`ExecutionStorage` 接口为**同步**方法：`save_execution_state` / `load_execution_state` / `delete_execution_state` / `list_executions`，并提供 `serialize_state` / `deserialize_state`（JSON）。
+
+> `plaita.storage.sqlalchemy` 仍存在，但其方法为 `async def`，与上述同步契约及 Worker 调用方式不兼容。公开路径已拒绝 `db` 作为 execution/flow 存储；详见根目录 `MIGRATION.md`「Storage：db 执行/流程存储从公开路径下架」。
 
 ## 与 ServiceManager 协作
 
