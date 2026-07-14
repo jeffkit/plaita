@@ -275,9 +275,9 @@ def main():
     parser.add_argument("--database-url", default="sqlite:///flow.db",
                       help="数据库连接URL")
     
-    # 存储组件类型
-    parser.add_argument("--execution-storage-type", choices=["memory", "redis", "db"], default="redis",
-                      help="执行状态存储类型")
+    # 存储组件类型（execution 仅 memory|redis；subscription 可为 db，调用方为 async）
+    parser.add_argument("--execution-storage-type", choices=["memory", "redis"], default="redis",
+                      help="执行状态存储类型（memory|redis；db 已下架）")
     parser.add_argument("--subscription-storage-type", choices=["memory", "redis", "db"], default="redis",
                       help="事件订阅存储类型")
     

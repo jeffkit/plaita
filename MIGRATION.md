@@ -6,6 +6,42 @@
 
 ---
 
+## Unreleased（0.5.x）
+
+### Storage：`db` 执行/流程存储从公开路径下架
+
+**变更前**：`--execution-storage-type db` / `--flow-storage-type db` 以及
+`create_storage_component("db", "execution"|"flow")` 会实例化
+`SqlalchemyExecutionStorage` / `SqlalchemyFlowStorage`。
+**问题**：这些实现的方法是 `async def`，而 `ExecutionStorage`/`FlowStorage` ABC
+与 `FlowWorker`/`EventFilter` 均为**同步**调用——状态不会真正落盘（coroutine 被当返回值）。
+
+**变更后**：
+
+- factory 对 `db` + `execution`/`flow` 直接 `ValueError`（说明原因与替代方案）
+- FlowWorker / EventFilter CLI：`--execution-storage-type` / `--flow-storage-type`
+  仅接受 `memory` | `redis`
+- `db` **subscription** 与 **event-bus** 仍可用（调用方为 async）
+- `plaita.storage.sqlalchemy` 类保留供实验，**不得**再经公开 factory/CLI 用于执行状态
+
+```diff
+-python -m plaita.server.flow_worker --execution-storage-type db --database-url ...
++python -m plaita.server.flow_worker --execution-storage-type redis --redis-url ...
+```
+
+```diff
+-create_storage_component("db", "execution", database_url=...)
++create_storage_component("redis", "execution", redis_url=...)
++# 或 memory（单测 / 本地）
+```
+
+### Event：`HAS_SQLALCHEMY` 与 `__all__` 条件修复
+
+**变更前**：SQLAlchemy 符号是否进入 `plaita.event.__all__` 错误地绑定 `HAS_REDIS`。
+**变更后**：独立 `HAS_SQLALCHEMY` 标志；`__all__` 按该标志扩展。
+
+---
+
 ## 0.5.0
 
 0.5.0 是一次"激进 break"主版本，按架构师/开发者/使用者三视角批评集中整改。下面按"踩坑概率从高到低"排序。

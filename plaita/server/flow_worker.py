@@ -468,11 +468,11 @@ def main():
     parser.add_argument("--database-url", default="sqlite:///flow.db",
                       help="数据库连接URL")
     
-    # 存储组件类型
-    parser.add_argument("--execution-storage-type", choices=["memory", "redis", "db"], default="redis",
-                      help="执行状态存储类型")
-    parser.add_argument("--flow-storage-type", choices=["memory", "redis", "db"], default="redis",
-                      help="流程定义存储类型")
+    # 存储组件类型（execution/flow 仅 memory|redis；db 与同步 ABC 不兼容，见 factory）
+    parser.add_argument("--execution-storage-type", choices=["memory", "redis"], default="redis",
+                      help="执行状态存储类型（memory|redis；db 已下架）")
+    parser.add_argument("--flow-storage-type", choices=["memory", "redis"], default="redis",
+                      help="流程定义存储类型（memory|redis；db 已下架）")
     
     # 事件总线参数（默认启用：分布式挂起/恢复依赖订阅写入；
     # 历史 --use-event-bus 为 opt-in，导致默认部署订阅落内存、EventFilter 读 Redis）
