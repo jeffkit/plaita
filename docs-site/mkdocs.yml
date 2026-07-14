@@ -155,6 +155,8 @@ nav:
       - Checkpoint 概念: distributed/checkpoint.md
       - 事件系统: distributed/event-system.md
       - FlowWorker: distributed/flow-worker.md
+      - 运维 Runbook: distributed/ops-runbook.md
+      - 幂等 Resume: distributed/idempotent-resume.md
       - 扩展节点: distributed/extended-nodes.md
       - 外延服务: distributed/services.md
   - AI 集成:

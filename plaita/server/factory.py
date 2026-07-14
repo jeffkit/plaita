@@ -1,10 +1,18 @@
 """
 统一的存储组件和事件总线工厂
+
+生产控制面路径：execution / flow / EventFilter 队列侧以 **redis**（或 memory 单测）为准。
+``db`` / SQLAlchemy 标记为 experimental，需显式
+``PLAITA_ALLOW_EXPERIMENTAL_DB=1`` 才可创建（且 execution/flow 的 db 仍因 sync/async
+契约断裂而被拒绝）。
 """
+import os
 import re
 import logging
 
 logger = logging.getLogger("plaita.server.factory")
+
+_EXPERIMENTAL_DB_ENV = "PLAITA_ALLOW_EXPERIMENTAL_DB"
 
 
 def _parse_redis_url(redis_url: str):
@@ -33,6 +41,21 @@ def _create_async_engine(database_url: str):
     return create_async_engine(database_url)
 
 
+def _require_experimental_db(feature: str) -> None:
+    if os.environ.get(_EXPERIMENTAL_DB_ENV) == "1":
+        logger.warning(
+            "%s: enabling experimental db/sqlalchemy backend (%s=1)",
+            feature,
+            _EXPERIMENTAL_DB_ENV,
+        )
+        return
+    raise ValueError(
+        f"{feature} 的 type='db'（SQLAlchemy）为 experimental，不在生产控制面支持范围内。"
+        f"请改用 redis（推荐）或 memory（单测）。"
+        f"若仅为实验，设置环境变量 {_EXPERIMENTAL_DB_ENV}=1 后重试。"
+    )
+
+
 # FlowWorker / EventFilter 以同步方式调用 ExecutionStorage / FlowStorage。
 # Sqlalchemy* 实现是 async def，与 ABC 契约断裂，经 factory 创建会导致静默丢状态。
 _UNSUPPORTED_SYNC_DB_COMPONENTS = frozenset({"execution", "flow"})
@@ -44,8 +67,8 @@ def create_storage_component(storage_type, component_type, **kwargs):
 
     Args:
         storage_type: 存储类型 (memory, redis, db)
-            - execution / flow：仅 memory、redis（db 已下架，见 MIGRATION）
-            - subscription：memory、redis、db（异步调用方）
+            - execution / flow：仅 memory、redis（db 永久拒绝，契约断裂）
+            - subscription：memory、redis；db 需 PLAITA_ALLOW_EXPERIMENTAL_DB=1
         component_type: 组件类型 (execution, flow, subscription)
         **kwargs: 组件初始化参数 (redis_url, database_url)
 
@@ -86,11 +109,10 @@ def create_storage_component(storage_type, component_type, **kwargs):
                 "与 ExecutionStorage/FlowStorage 同步 ABC 及 FlowWorker/EventFilter "
                 "的同步调用不兼容，会导致状态无法落盘。"
                 "请改用 storage_type='redis' 或 'memory'。"
-                "类仍保留在 plaita.storage.sqlalchemy 供实验；公开路径重新开放前须先统一契约并补测试。"
             )
+        _require_experimental_db(f"create_storage_component({component_type})")
         database_url = kwargs.get("database_url")
         if component_type == "subscription":
-            # SqlalchemyEventSubscriptionStorage 构造函数要 engine，不是 database_url
             from plaita.event.sqlalchemy import SqlalchemyEventSubscriptionStorage
             return SqlalchemyEventSubscriptionStorage(engine=_create_async_engine(database_url))
         raise ValueError(f"不支持的组件类型: {component_type}")
@@ -104,6 +126,7 @@ def create_event_bus(bus_type, **kwargs):
 
     Args:
         bus_type: 事件总线类型 (memory, redis, db)
+            db 需 PLAITA_ALLOW_EXPERIMENTAL_DB=1；生产请用 redis
         **kwargs: 组件初始化参数 (redis_url, database_url)
 
     Returns:
@@ -116,7 +139,7 @@ def create_event_bus(bus_type, **kwargs):
         from plaita.event.redis import RedisEventBus
         return RedisEventBus(redis_url=kwargs.get("redis_url"))
     elif bus_type == "db":
-        # SqlalchemyEventBus 构造函数要 engine，不是 database_url
+        _require_experimental_db("create_event_bus")
         from plaita.event.sqlalchemy import SqlalchemyEventBus
         return SqlalchemyEventBus(engine=_create_async_engine(kwargs.get("database_url")))
     else:

@@ -16,7 +16,7 @@ plaita 将 JSON 格式的逻辑流程定义解析为可执行的 `Flow`，并以
 - :material-robot-outline: **AI Agent 编排（典型场景）** —— LLM 规划 + plaita 执行是最常见的使用场景之一；`@flow` / JSON 有构建期校验，`flow_from_source` 让 AI 生成的流程编译期就拦错
 - :material-sync: **三种执行模式** —— Normal 同步、Generator 单步调试、Distributed 跨进程断点续执
 - :material-clock-outline: **超时与错误策略** —— 节点级/流程级 ISO 8601 超时、`abort`/`continue`/`continue_with` 错误策略与重试
-- :material-bell-ring-outline: **事件系统** —— EventBus 抽象 + memory/redis/sqlalchemy 后端，支撑长时工作流挂起与恢复
+- :material-bell-ring-outline: **事件系统** —— EventBus 抽象；生产推荐 memory（测）/ redis（跑），sqlalchemy 为 experimental
 - :material-language-python: **Python 同构** —— 基于 Pydantic，全异步内核，3.10+
 
 ## 快速上手
@@ -54,7 +54,7 @@ print(flow.run(name="kongjie"))  # => "kongjie"
 | 请求-响应的即时逻辑 | Normal | 同步阻塞，一次返回结果 |
 | 流程可视化调试器 | Generator | 每节点 yield，可单步、检查上下文；天然即 Agent trace |
 | 人工审批 / 外部回调 / 定时延迟 | Distributed | 挂起-持久化-事件恢复（见 [可靠性边界](distributed/flow-worker.md#可靠性边界必读)） |
-| 跨进程挂起/恢复的长时流程 | Distributed | 上下文序列化后 resume；任务队列当前为 at-most-once |
+| 跨进程挂起/恢复的长时流程 | Distributed | 上下文序列化后 resume；任务队列 at-least-once（须幂等） |
 
 详见 [应用场景](scenarios/index.md)。
 

@@ -88,22 +88,34 @@ class TestFactoryRejectsBrokenDbExecutionStorage(unittest.TestCase):
             )
         self.assertIn("flow", str(ctx.exception))
 
-    def test_db_subscription_still_allowed(self):
-        """subscription 路径是 async 调用方，db 仍可通过 factory。"""
+    def test_db_subscription_requires_experimental_flag(self):
+        from plaita.server.factory import create_storage_component
+        import os
+
+        os.environ.pop("PLAITA_ALLOW_EXPERIMENTAL_DB", None)
+        with self.assertRaises(ValueError) as ctx:
+            create_storage_component(
+                "db", "subscription", database_url="sqlite+aiosqlite:///:memory:"
+            )
+        self.assertIn("experimental", str(ctx.exception))
+
+    def test_db_subscription_allowed_with_flag(self):
+        """subscription db 仅在 PLAITA_ALLOW_EXPERIMENTAL_DB=1 时可用。"""
         from plaita.server.factory import create_storage_component
 
         fake_engine = object()
-        with patch(
-            "plaita.server.factory._create_async_engine", return_value=fake_engine
-        ):
+        with patch.dict("os.environ", {"PLAITA_ALLOW_EXPERIMENTAL_DB": "1"}):
             with patch(
-                "plaita.event.sqlalchemy.SqlalchemyEventSubscriptionStorage"
-            ) as Stor:
-                Stor.return_value = object()
-                create_storage_component(
-                    "db", "subscription", database_url="sqlite+aiosqlite:///:memory:"
-                )
-                Stor.assert_called_once()
+                "plaita.server.factory._create_async_engine", return_value=fake_engine
+            ):
+                with patch(
+                    "plaita.event.sqlalchemy.SqlalchemyEventSubscriptionStorage"
+                ) as Stor:
+                    Stor.return_value = object()
+                    create_storage_component(
+                        "db", "subscription", database_url="sqlite+aiosqlite:///:memory:"
+                    )
+                    Stor.assert_called_once()
 
 
 class TestSqlalchemyImplementationIsAsync(unittest.TestCase):

@@ -21,6 +21,14 @@
 
 ## 运行演示
 
+### 幂等 resume（副作用去重）
+
+```bash
+python -m examples.server_demo.idempotent_resume_demo
+```
+
+说明见 docs-site [幂等 Resume](../../docs-site/docs/distributed/idempotent-resume.md)。
+
 ### 完整演示
 
 运行所有扩展节点的完整演示：

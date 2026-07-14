@@ -64,7 +64,7 @@ Plaita 事件系统基于发布/订阅模式，连接挂起流程与外部触发
   - `SqlalchemyEventSubscriptionStorage`
   - `SqlalchemyEventProcessingTracker`
 
-- **混合模式**：自由组合上述三种实现的组件
+- **混合模式（目标态）**：组件可组合；**生产控制面仍硬绑 Redis**（见 docs-site 运维 Runbook）
 
 ## 3. 事件流程
 
