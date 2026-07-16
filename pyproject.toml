@@ -39,7 +39,7 @@ yaml = ["PyYAML>=6.0"]
 dev = [
     "pytest",
     "pytest-asyncio",
-    "fakeredis>=2.30.1",
+    "fakeredis[lua]>=2.30.1",
     "pytest-cov",
     "mutmut>=3.6",
 ]

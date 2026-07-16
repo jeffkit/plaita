@@ -25,4 +25,4 @@ requests
 aiohttp>=3.8.0
 
 # Dev
-fakeredis
+fakeredis[lua]

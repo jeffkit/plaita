@@ -176,20 +176,20 @@ class RedisStreamTaskQueue:
         dlq_len = 0
         try:
             stream_len = int(self.redis.xlen(self.stream_key) or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("xlen(%s) failed: %s", self.stream_key, exc)
         try:
             dlq_len = int(self.redis.xlen(self.dlq_key) or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("xlen(%s) failed: %s", self.dlq_key, exc)
         try:
             summary = self.redis.xpending(self.stream_key, self.group_name)
             if isinstance(summary, dict):
                 pending_count = int(summary.get("pending", 0) or 0)
             elif summary:
                 pending_count = int(summary[0] or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("xpending(%s, %s) failed: %s", self.stream_key, self.group_name, exc)
         return {
             "stream_key": self.stream_key,
             "dlq_key": self.dlq_key,
@@ -235,7 +235,8 @@ class RedisStreamTaskQueue:
                 max=message_id,
                 count=1,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("xpending_range delivery count failed for %s: %s", message_id, exc)
             return 1
         if not pending:
             return 1
@@ -256,7 +257,8 @@ class RedisStreamTaskQueue:
                 max="+",
                 count=8,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("xpending_range reclaim scan failed: %s", exc)
             return None
         if not pending:
             return None

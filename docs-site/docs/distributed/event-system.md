@@ -26,7 +26,7 @@ Event(
 
 `event_id` 与 `timestamp` 自动生成；`correlation_id` 通常用 `execution_id`，用于把事件路由回正确的挂起流程。
 
-## EventSubscription 与匹配
+## EventSubscription 与匹配 {#eventsubscription-与匹配}
 
 订阅记录「我关心什么样的事件」。`EventSubscription.matches_event` 按以下顺序匹配：
 

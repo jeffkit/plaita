@@ -27,6 +27,7 @@ from plaita.server.task_queue import (
 )
 from plaita.server.execution_lease import (
     DEFAULT_LEASE_TTL_SECONDS,
+    ExecutionLease,
     ExecutionLeaseError,
     NullExecutionLease,
     RedisExecutionLease,
@@ -54,7 +55,7 @@ class FlowWorker:
         cache_size: int = 100,
         cache_ttl: int = 300,
         callback_handlers: Optional[list] = None,
-        execution_lease=None,
+        execution_lease: Optional[ExecutionLease] = None,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
     ):
         """
@@ -401,7 +402,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         consumer_name: Optional[str] = None,
         claim_min_idle_ms: int = DEFAULT_CLAIM_MIN_IDLE_MS,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
-        execution_lease=None,
+        execution_lease: Optional[ExecutionLease] = None,
         max_deliveries: int = DEFAULT_MAX_DELIVERIES,
         dlq_key: Optional[str] = None,
     ):
