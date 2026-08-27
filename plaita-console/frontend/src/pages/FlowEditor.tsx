@@ -7,6 +7,7 @@ import { jsonToFlow, flowToJson, extractLayout, type FlowNodeData } from '../com
 import NodePalette from '../components/flow/NodePalette'
 import FlowCanvas from '../components/flow/FlowCanvas'
 import NodeConfigDrawer from '../components/flow/NodeConfigDrawer'
+import AiGenerateDialog from '../components/flow/AiGenerateDialog'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
@@ -27,6 +28,7 @@ export default function FlowEditor() {
   const [msg, setMsg] = useState<string | null>(null)
   const [showDryRun, setShowDryRun] = useState(false)
   const [showSource, setShowSource] = useState(false)
+  const [showAiDialog, setShowAiDialog] = useState(false)
 
   const setFlowContext = useFlowEditor((s) => s.setFlowContext)
   const setGraph = useFlowEditor((s) => s.setGraph)
@@ -60,23 +62,31 @@ export default function FlowEditor() {
       setInputType(def.inputType ?? { dataType: 'object' })
       setVersion(versionParam)
       setFlowContext(flowId, versionParam, { flow_id: flowId, version: versionParam, desc: def.desc as string })
-    } else if (!versionParam) {
-      // 新版本：放 start + end 两个默认节点
-      const start: Node = {
-        id: 'start',
-        type: 'plaitaNode',
-        position: { x: 200, y: 80 },
-        data: { type: 'start', name: 'start', fields: {} },
-      }
-      const end: Node = {
-        id: 'end',
-        type: 'plaitaNode',
-        position: { x: 200, y: 240 },
-        data: { type: 'end', name: 'end', fields: { output: '$INPUT.name', resultType: 'success' } },
-      }
-      const edge: Edge = { id: 'e-start-end', source: 'start', target: 'end', sourceHandle: 'true' }
-      setGraph([start, end], [edge])
-      setFlowContext(flowId, version, { flow_id: flowId, version })
+    } else if (!versionParam && flowQuery.data) {
+      // 无版本参数（列表「编辑」入口）：自动加载最新已发布版本，而非空画布
+      const versions = flowQuery.data.versions || []
+      const best = versions.find((v) => v.status === 'published') || versions.at(-1)
+      const chosen = best?.version || '0.0.1'
+      ;(async () => {
+        let def: Record<string, unknown> = {}
+        let layoutData: Record<string, { x: number; y: number }> = {}
+        if (best) {
+          try {
+            const vv = await api.getVersion(flowId, chosen)
+            def = JSON.parse(vv.definition || '{}') as Record<string, unknown>
+            layoutData = JSON.parse(vv.layout || '{}') as Record<string, { x: number; y: number }>
+          } catch { /* 加载失败回退空画布 */ }
+        }
+        if (!def.nodes) {
+          def = { nodes: [], inputType: { dataType: 'object' } }
+        }
+        const { nodes: ns, edges: es } = jsonToFlow(def, layoutData)
+        setGraph(ns as Node[], es as Edge[])
+        setDesc((def.desc as string) || '')
+        setInputType(def.inputType ?? { dataType: 'object' })
+        setVersion(chosen)
+        setFlowContext(flowId, chosen, { flow_id: flowId, version: chosen })
+      })()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowId, versionParam, versionQuery.data])
@@ -178,6 +188,13 @@ export default function FlowEditor() {
           试跑
         </button>
         <button
+          onClick={() => setShowAiDialog(true)}
+          className="bg-purple-600 hover:bg-purple-500 px-3 py-1.5 rounded text-white"
+          title="自然语言 → AI 生成 @flow（后端 agent 宿主经 agentproc 运行）"
+        >
+          ✨ AI 生成
+        </button>
+        <button
           onClick={() => setShowSource((v) => !v)}
           className={`px-3 py-1.5 rounded text-dark-100 ${
             showSource ? 'bg-plaita-600 hover:bg-plaita-500 text-white' : 'bg-dark-700 hover:bg-dark-600'
@@ -216,6 +233,22 @@ export default function FlowEditor() {
           />
         )}
       </div>
+      {showAiDialog && (
+        <AiGenerateDialog
+          onClose={() => setShowAiDialog(false)}
+          onImport={(ir) => {
+            // 复用与「加载已保存版本」相同的 IR→画布 转换器（已验证兼容）
+            const { nodes: ns, edges: es } = jsonToFlow(ir as Parameters<typeof jsonToFlow>[0], {})
+            setGraph(ns as Node[], es as Edge[])
+            setDesc(`AI 生成（${new Date().toLocaleString()}）`)
+            const draftV = `0.${Math.floor(Date.now() / 1000) % 1000}.${Math.floor(Math.random() * 100)}`
+            setVersion(draftV)
+            setFlowContext(flowId!, draftV, { flow_id: flowId, version: draftV })
+            setShowAiDialog(false)
+            qc.invalidateQueries({ queryKey: ['version', flowId] })
+          }}
+        />
+      )}
       <style>{`.input{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 8px;color:#e2e8f0;font-size:13px}`}</style>
     </div>
   )

@@ -117,6 +117,35 @@ def list_flows():
     return FlowListResponse(flows=views, total=len(views))
 
 
+class AiGenerateRequest(BaseModel):
+    prompt: str = Field(..., description="自然语言需求描述")
+    agent: str = Field("glm-52", description="编码 Agent profile（agentproc/agents.json）")
+
+
+@router.post("/flows/ai-generate/stream")
+def ai_generate_stream(req: AiGenerateRequest):
+    """AI 生成流程（SSE）：后端作为 agent 宿主跑真实编码 Agent，事件流给前端。
+
+    设计（ADR-2026-08-27 phase2）：后端不直连 LLM 端点；Agent 循环由 agentproc
+    执行的编码 Agent 负责，编译校验为宿主的确定性检查，错误回喂下一轮。
+    """
+    if not req.prompt.strip():
+        raise HTTPException(status_code=422, detail="prompt 不能为空")
+    from fastapi.responses import StreamingResponse
+    try:
+        from ..services import ai_flow
+    except ImportError:  # 平铺布局（cwd=backend）运行时
+        from services import ai_flow
+
+    def event_stream():
+        for ev in ai_flow.generate_flow_events(req.prompt.strip()):
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
 @router.post("/flows", response_model=FlowSummaryView)
 def create_flow(req: CreateFlowRequest):
     if not req.flow_id:

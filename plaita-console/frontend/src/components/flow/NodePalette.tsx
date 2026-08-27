@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../services/api'
-import { nodeTypeConfig } from './nodeTypes'
+import { resolveNodeTypeConfig } from './nodeTypes'
 
 // 节点面板：拖拽创建节点。按 category 分组展示内置 + 自定义节点。
 export default function NodePalette() {
@@ -31,16 +31,17 @@ export default function NodePalette() {
           <div className="text-xs text-dark-400 uppercase tracking-wide mb-1">{cat}</div>
           <div className="space-y-1">
             {list.map((n) => {
-              const cfg = nodeTypeConfig[n.node_type]
+              const cfg = resolveNodeTypeConfig(n.node_type)
               return (
                 <div
                   key={n.node_type}
                   draggable
                   onDragStart={(e) => onDragStart(e, n.node_type, n.node_name || n.node_type)}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-dark-800 hover:bg-dark-700 cursor-grab border border-dark-700 text-sm"
+                  className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-dark-800 hover:bg-dark-700 cursor-grab border border-dark-700 border-l-2 text-sm"
                   title={n.node_type}
+                  style={{ borderLeftColor: `var(--family-${cfg.color}, #475569)` }}
                 >
-                  <span>{cfg?.icon ?? '◆'}</span>
+                  <span>{cfg.icon}</span>
                   <span className="truncate">{n.node_name || n.node_type}</span>
                 </div>
               )

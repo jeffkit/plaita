@@ -545,6 +545,16 @@ export const api = {
     })
   },
 
+  async aiGenerateFlow(prompt: string): Promise<{
+    source: string; ir: Record<string, unknown>; rounds: number;
+  }> {
+    return request('/flows/ai-generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    })
+  },
+
   async getNodes(): Promise<NodeListResponse> {
     return request('/nodes')
   },
