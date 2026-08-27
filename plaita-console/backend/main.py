@@ -2,6 +2,7 @@
 Plaita Console Backend - FastAPI 应用入口
 """
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -88,6 +89,34 @@ async def lifespan(app: FastAPI):
     # 关闭时断开 Redis 连接
     logger.info("关闭 Redis 连接")
     redis_client.close()
+
+
+def _load_external_node_modules() -> None:
+    """加载业务侧节点模块（PLAITA_CONSOLE_NODE_MODULES=mod.path[:mod2,...]）。
+
+    console 校验/试跑业务 flow 时，其自定义节点须注册进运行时 registry。
+    模块需暴露 register_all()（或任意可调用 register）。
+    """
+    import importlib
+    import logging
+    import sys
+
+    for extra in [p for p in os.environ.get("PLAITA_CONSOLE_NODE_PATH", "").split(os.pathsep) if p]:
+        if extra not in sys.path:
+            sys.path.insert(0, extra)
+    raw = os.environ.get("PLAITA_CONSOLE_NODE_MODULES", "")
+    for mod_path in [m.strip() for m in raw.split(",") if m.strip()]:
+        try:
+            mod = importlib.import_module(mod_path)
+            register = getattr(mod, "register_all") or getattr(mod, "register")
+            register()
+            logging.getLogger("backend.main").info("已加载外部节点模块: %s", mod_path)
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger("backend.main").warning("外部节点模块加载失败 %s: %s", mod_path, exc)
+
+
+if os.environ.get("PLAITA_CONSOLE_NODE_MODULES"):
+    _load_external_node_modules()
 
 
 def create_app() -> FastAPI:
