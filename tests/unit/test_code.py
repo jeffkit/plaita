@@ -1,5 +1,9 @@
 import unittest
 
+import pytest
+
+pytest.importorskip('RestrictedPython')
+
 try:
     import execjs as _execjs
     _EXECJS_AVAILABLE = True

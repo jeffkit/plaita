@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import unittest
+
+import pytest
+
+pytest.importorskip('sqlalchemy')
 from unittest.mock import MagicMock, patch
 
 from plaita.core.executor import FlowExecution

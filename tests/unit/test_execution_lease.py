@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 import unittest
+
+import pytest
+
+pytest.importorskip('fakeredis')
+pytest.importorskip('lupa')
 from unittest.mock import MagicMock, patch
 
 import fakeredis

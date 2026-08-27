@@ -3,6 +3,9 @@
 测试各组件的性能表现和资源使用
 """
 import pytest
+
+pytest.importorskip('redis')
+pytest.importorskip('cachetools')
 import asyncio
 import time
 import gc

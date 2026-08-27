@@ -9,6 +9,10 @@ import json
 import subprocess
 import sys
 import unittest
+
+import pytest
+
+pytest.importorskip('RestrictedPython')
 from unittest.mock import MagicMock, patch
 
 import plaita.node.code as code_module

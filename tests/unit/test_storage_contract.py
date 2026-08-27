@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import inspect
 import unittest
+
+import pytest
+
+pytest.importorskip('sqlalchemy')
 from datetime import datetime, timezone
 from unittest.mock import patch
 
