@@ -14,7 +14,7 @@ import type { Node, Edge } from '@xyflow/react'
 
 export default function FlowEditor() {
   const { flowId } = useParams<{ flowId: string }>()
-  const [search] = useSearchParams()
+  const [search, setSearch] = useSearchParams()
   const versionParam = search.get('version') || ''
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -58,35 +58,33 @@ export default function FlowEditor() {
       const layout = JSON.parse(versionQuery.data.layout || '{}') as Record<string, { x: number; y: number }>
       const { nodes: ns, edges: es } = jsonToFlow(def, layout)
       setGraph(ns as Node[], es as Edge[])
-      setDesc((def.desc as string) || versionQuery.data.definition || '')
+      setDesc((def.desc as string) || '')
       setInputType(def.inputType ?? { dataType: 'object' })
       setVersion(versionParam)
       setFlowContext(flowId, versionParam, { flow_id: flowId, version: versionParam, desc: def.desc as string })
     } else if (!versionParam && flowQuery.data) {
-      // 无版本参数（列表「编辑」入口）：自动加载最新已发布版本，而非空画布
-      const versions = flowQuery.data.versions || []
+      // 无版本参数（列表「编辑」入口）：自动选最新已发布版本，交回版本加载分支
+      const versions = (flowQuery.data.versions || []) as Array<{ version: string; status?: string }>
       const best = versions.find((v) => v.status === 'published') || versions.at(-1)
-      const chosen = best?.version || '0.0.1'
-      ;(async () => {
-        let def: Record<string, unknown> = {}
-        let layoutData: Record<string, { x: number; y: number }> = {}
-        if (best) {
-          try {
-            const vv = await api.getVersion(flowId, chosen)
-            def = JSON.parse(vv.definition || '{}') as Record<string, unknown>
-            layoutData = JSON.parse(vv.layout || '{}') as Record<string, { x: number; y: number }>
-          } catch { /* 加载失败回退空画布 */ }
-        }
-        if (!def.nodes) {
-          def = { nodes: [], inputType: { dataType: 'object' } }
-        }
-        const { nodes: ns, edges: es } = jsonToFlow(def, layoutData)
-        setGraph(ns as Node[], es as Edge[])
-        setDesc((def.desc as string) || '')
-        setInputType(def.inputType ?? { dataType: 'object' })
-        setVersion(chosen)
-        setFlowContext(flowId, chosen, { flow_id: flowId, version: chosen })
-      })()
+      if (best) {
+        setSearch(new URLSearchParams({ version: best.version }))
+        return
+      }
+      const start: Node = {
+        id: 'start',
+        type: 'plaitaNode',
+        position: { x: 200, y: 80 },
+        data: { type: 'start', name: 'start', fields: {} },
+      }
+      const end: Node = {
+        id: 'end',
+        type: 'plaitaNode',
+        position: { x: 200, y: 240 },
+        data: { type: 'end', name: 'end', fields: { output: '$INPUT.name', resultType: 'success' } },
+      }
+      const edge: Edge = { id: 'e-start-end', source: 'start', target: 'end', sourceHandle: 'true' }
+      setGraph([start, end], [edge])
+      setFlowContext(flowId, version, { flow_id: flowId, version })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowId, versionParam, versionQuery.data])
