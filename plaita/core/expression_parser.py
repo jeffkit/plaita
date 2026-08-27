@@ -254,10 +254,15 @@ class ExpressionParser:
             else:  # field
                 name = f"{prefix}{raw}" if raw in _SPECIAL_ROOTS else raw
                 attr = _get_attr(obj, name)
-                # Recurse through full evaluate with the PARENT object as
-                # context — this is the historical semantics: nested
-                # expression strings in a path resolve against the parent.
-                obj = self.evaluate(attr, obj, _registry)
+                # 仅当字符串属性值本身是表达式（$ 前缀变量 / {% %} 模板）时才递归
+                # 求值——这是"嵌套表达式字符串"的历史语义。任意普通字符串（可能含
+                # [tag]、引号、换行等元字符）不再二次解析，否则节点输出一旦被下游
+                # $NODE 路径引用就会因内容触发误解析（如 "[promo] ..." 被当列表）。
+                if (isinstance(attr, str)
+                        and (attr.startswith(prefix) or "{%" in attr)):
+                    obj = self.evaluate(attr, obj, _registry)
+                else:
+                    obj = attr
         return [obj]
 
     def _eval_function_call(self, tokens) -> Any:
