@@ -1,0 +1,554 @@
+{
+ "flow_id": "pge",
+ "inputType": {
+  "dataType": "object"
+ },
+ "nodes": [
+  {
+   "type": "start",
+   "id": "start",
+   "next": "baseline"
+  },
+  {
+   "type": "capture",
+   "id": "baseline",
+   "command": [
+    "git",
+    "-C",
+    "$INPUT.repo",
+    "rev-parse",
+    "HEAD"
+   ],
+   "cwd": "$INPUT.repo",
+   "timeout_secs": 30,
+   "strict": true,
+   "next": "baseline_sha"
+  },
+  {
+   "type": "code",
+   "id": "baseline_sha",
+   "lang": "python",
+   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.baseline_sha(input['sha'])",
+   "input": {
+    "sha": "$NODE.baseline.stdout",
+    "lib_dir": "$INPUT.lib_dir"
+   },
+   "next": "worktree_add"
+  },
+  {
+   "type": "capture",
+   "id": "worktree_add",
+   "command": [
+    "git",
+    "-C",
+    "$INPUT.repo",
+    "worktree",
+    "add",
+    "$INPUT.worktree_dir"
+   ],
+   "cwd": "$INPUT.repo",
+   "timeout_secs": 60,
+   "strict": false,
+   "next": "wt_check"
+  },
+  {
+   "type": "code",
+   "id": "wt_check",
+   "lang": "python",
+   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.worktree_add(input['repo'], input['worktree_dir'])",
+   "input": {
+    "repo": "$INPUT.repo",
+    "worktree_dir": "$INPUT.worktree_dir",
+    "lib_dir": "$INPUT.lib_dir"
+   },
+   "next": "gate_run"
+  },
+  {
+   "type": "capture",
+   "id": "gate_run",
+   "command": [
+    "bash",
+    "-lc",
+    "$INPUT.gate"
+   ],
+   "cwd": "$INPUT.worktree_dir",
+   "timeout_secs": 600,
+   "next": "gate_judge"
+  },
+  {
+   "type": "code",
+   "id": "gate_judge",
+   "lang": "python",
+   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.judge_gate(int(input['exit_code'] or 0), input['gate'])",
+   "input": {
+    "exit_code": "$NODE.gate_run.exit_code",
+    "gate": "$INPUT.gate"
+   },
+   "next": "sw_gate"
+  },
+  {
+   "type": "switch",
+   "id": "sw_gate",
+   "branches": [
+    {
+     "name": "clean",
+     "condition": {
+      "field": "$NODE.gate_judge.passed",
+      "operator": "eq",
+      "value": true
+     },
+     "next": "plan"
+    },
+    {
+     "name": "dirty",
+     "is_default": true,
+     "next": "notify_dirty"
+    }
+   ]
+  },
+  {
+   "type": "notify",
+   "id": "notify_dirty",
+   "message": "PGE 中止：baseline gate 不绿。先在 main 修干净，或用 --allow-dirty-gates 跳过。",
+   "next": "end_dirty"
+  },
+  {
+   "type": "end",
+   "id": "end_dirty",
+   "output": {
+    "aborted": "dirty-gate"
+   },
+   "resultType": "success"
+  },
+  {
+   "type": "agentrun",
+   "id": "plan",
+   "agent": "$INPUT.planner_agent",
+   "repo": "$INPUT.repo",
+   "prompt": "{% $F.concat($INPUT.plan_head, chr(10)*2, '## 需求', chr(10), $INPUT.goal) %}",
+   "timeout_secs": 1800,
+   "next": "plan_parse"
+  },
+  {
+   "type": "code",
+   "id": "plan_parse",
+   "lang": "python",
+   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.parse_plan(input['raw'], int(input['max_sprints'] or 2))",
+   "input": {
+    "raw": "$NODE.plan.text",
+    "max_sprints": "$INPUT.max_sprints"
+   },
+   "next": "sw_plan"
+  },
+  {
+   "type": "switch",
+   "id": "sw_plan",
+   "branches": [
+    {
+     "name": "ok",
+     "condition": {
+      "field": "$NODE.plan_parse.ok",
+      "operator": "eq",
+      "value": true
+     },
+     "next": "notify_planned"
+    },
+    {
+     "name": "bad",
+     "is_default": true,
+     "next": "notify_plan_fail"
+    }
+   ]
+  },
+  {
+   "type": "notify",
+   "id": "notify_planned",
+   "message": "[planner] spec 就绪",
+   "next": "build_items"
+  },
+  {
+   "type": "code",
+   "id": "build_items",
+   "lang": "python",
+   "code": "def run(input):\n    items = []\n    for s in (input.get('sprints') or []):\n        items.append({**s, 'generator': input['generator'], 'gate': input['gate'],\n                      'gen_head': input['gen_head'], 'worktree_dir': input['worktree_dir'],\n                      'last_feedback': ''})\n    return {'items': items}",
+   "input": {
+    "sprints": "$NODE.plan_parse.plan.sprints",
+    "generator": "$INPUT.generator",
+    "gate": "$INPUT.gate",
+    "gen_head": "$INPUT.gen_head",
+    "worktree_dir": "$INPUT.worktree_dir"
+   },
+   "next": "sprints"
+  },
+  {
+   "type": "notify",
+   "id": "notify_plan_fail",
+   "message": "Planner 输出无法解析为 spec",
+   "next": "end_plan_fail"
+  },
+  {
+   "type": "end",
+   "id": "end_plan_fail",
+   "output": {
+    "aborted": "plan-parse"
+   },
+   "resultType": "success"
+  },
+  {
+   "type": "loop",
+   "id": "sprints",
+   "collection": "$NODE.build_items.items",
+   "condition": {
+    "field": "$LOOP-RESULT.verdict",
+    "operator": "eq",
+    "value": "pass"
+   },
+   "childFlow": {
+    "flow_id": "pge-sprint",
+    "inputType": {
+     "dataType": "object"
+    },
+    "nodes": [
+     {
+      "type": "start",
+      "id": "s_start",
+      "next": "gen"
+     },
+     {
+      "type": "agentrun",
+      "id": "gen",
+      "agent": "$INPUT.item.generator",
+      "repo": "$INPUT.worktree_dir",
+      "prompt": "{% $F.concat($INPUT.item.gen_head, '## 本 sprint（JSON）', $INPUT.item.sprint_json, '## 上轮 gate 反馈', $INPUT.item.last_feedback) %}",
+      "timeout_secs": 3600,
+      "next": "gate1"
+     },
+     {
+      "type": "capture",
+      "id": "gate1",
+      "command": [
+       "bash",
+       "-lc",
+       "$INPUT.item.gate"
+      ],
+      "cwd": "$INPUT.worktree_dir",
+      "timeout_secs": 900,
+      "next": "judge1"
+     },
+     {
+      "type": "code",
+      "id": "judge1",
+      "lang": "python",
+      "code": "def run(input): return {'passed': int(input.get('exit_code') or 0) == 0, 'output': str(input.get('stdout') or '')[-2000:]}",
+      "input": {
+       "exit_code": "$NODE.gate1.exit_code",
+       "stdout": "$NODE.gate1.stdout"
+      },
+      "next": "sw_judge1"
+     },
+     {
+      "type": "switch",
+      "id": "sw_judge1",
+      "branches": [
+       {
+        "name": "pass",
+        "condition": {
+         "field": "$NODE.judge1.passed",
+         "operator": "eq",
+         "value": true
+        },
+        "next": "s_out"
+       },
+       {
+        "name": "repair",
+        "is_default": true,
+        "next": "repair"
+       }
+      ]
+     },
+     {
+      "type": "agentrun",
+      "id": "repair",
+      "agent": "$INPUT.item.generator",
+      "repo": "$INPUT.worktree_dir",
+      "prompt": "上一轮 gate 未通过，请修复工作区代码。只修与 gate 失败直接相关的问题。",
+      "timeout_secs": 3600,
+      "next": "gate2"
+     },
+     {
+      "type": "capture",
+      "id": "gate2",
+      "command": [
+       "bash",
+       "-lc",
+       "$INPUT.item.gate"
+      ],
+      "cwd": "$INPUT.worktree_dir",
+      "timeout_secs": 900,
+      "next": "judge2"
+     },
+     {
+      "type": "code",
+      "id": "judge2",
+      "lang": "python",
+      "code": "def run(input): return {'passed': int(input.get('exit_code') or 0) == 0}",
+      "input": {
+       "exit_code": "$NODE.gate2.exit_code"
+      },
+      "next": "s_out2"
+     },
+     {
+      "type": "code",
+      "id": "s_out",
+      "lang": "python",
+      "code": "def run(input): return {'verdict': 'pass', 'name': input['item'].get('name','')}",
+      "input": {
+       "item": "$INPUT.item"
+      },
+      "next": "s_end"
+     },
+     {
+      "type": "code",
+      "id": "s_out2",
+      "lang": "python",
+      "code": "def run(input): return {'verdict': 'fail', 'name': input['item'].get('name',''), 'reason': '修复后 gate 仍红'}",
+      "input": {
+       "item": "$INPUT.item"
+      },
+      "next": "s_end2"
+     },
+     {
+      "type": "end",
+      "id": "s_end",
+      "output": "$NODE.s_out",
+      "resultType": "success"
+     },
+     {
+      "type": "end",
+      "id": "s_end2",
+      "output": "$NODE.s_out2",
+      "resultType": "success"
+     }
+    ]
+   },
+   "next": "check"
+  },
+  {
+   "type": "code",
+   "id": "check",
+   "lang": "python",
+   "code": "def run(input):\n    last = (input.get('last') or {})\n    return {'all_pass': last.get('verdict') == 'pass', 'last': last}",
+   "input": {
+    "last": "$NODE.sprints"
+   },
+   "next": "sw_check"
+  },
+  {
+   "type": "switch",
+   "id": "sw_check",
+   "branches": [
+    {
+     "name": "pass",
+     "condition": {
+      "field": "$NODE.check.all_pass",
+      "operator": "eq",
+      "value": true
+     },
+     "next": "diff"
+    },
+    {
+     "name": "abort",
+     "is_default": true,
+     "next": "notify_abort"
+    }
+   ]
+  },
+  {
+   "type": "notify",
+   "id": "notify_abort",
+   "message": "PGE 中止：sprint verdict 未通过",
+   "next": "end_abort"
+  },
+  {
+   "type": "end",
+   "id": "end_abort",
+   "output": {
+    "aborted": true,
+    "last": "$NODE.check.last"
+   },
+   "resultType": "success"
+  },
+  {
+   "type": "capture",
+   "id": "diff",
+   "command": [
+    "bash",
+    "-lc",
+    "git add --intent-to-add -A && git diff"
+   ],
+   "cwd": "$INPUT.worktree_dir",
+   "timeout_secs": 120,
+   "next": "review"
+  },
+  {
+   "type": "agentrun",
+   "id": "review",
+   "agent": "$INPUT.reviewer_agent",
+   "repo": "$INPUT.worktree_dir",
+   "prompt": "{% $F.concat($INPUT.review_head, '## 完整 diff', $NODE.diff.stdout, '## Goal', $INPUT.goal, '最后一行必须恰好是 VERDICT:PASS 或 VERDICT:NEEDS_FIX。') %}",
+   "timeout_secs": 1800,
+   "next": "verdict"
+  },
+  {
+   "type": "code",
+   "id": "verdict",
+   "lang": "python",
+   "code": "def run(input): import re; m = re.search(r'VERDICT:\\\\s*(PASS|NEEDS_FIX)', str(input.get('text',''))); return {'verdict': m.group(1) if m else 'no-verdict'}",
+   "input": {
+    "text": "$NODE.review.text"
+   },
+   "next": "sw_review"
+  },
+  {
+   "type": "switch",
+   "id": "sw_review",
+   "branches": [
+    {
+     "name": "pass",
+     "condition": {
+      "field": "$NODE.verdict.verdict",
+      "operator": "eq",
+      "value": "PASS"
+     },
+     "next": "land"
+    },
+    {
+     "name": "fix",
+     "condition": {
+      "field": "$NODE.verdict.verdict",
+      "operator": "eq",
+      "value": "NEEDS_FIX"
+     },
+     "next": "fix_gen"
+    },
+    {
+     "name": "unavailable",
+     "is_default": true,
+     "next": "land_anyway"
+    }
+   ]
+  },
+  {
+   "type": "agentrun",
+   "id": "fix_gen",
+   "agent": "$INPUT.generator",
+   "repo": "$INPUT.worktree_dir",
+   "prompt": "Reviewer 认为实现有问题，请按反馈修复工作区代码。",
+   "timeout_secs": 3600,
+   "next": "diff2"
+  },
+  {
+   "type": "capture",
+   "id": "diff2",
+   "command": [
+    "bash",
+    "-lc",
+    "git add --intent-to-add -A && git diff"
+   ],
+   "cwd": "$INPUT.worktree_dir",
+   "timeout_secs": 120,
+   "next": "review2"
+  },
+  {
+   "type": "agentrun",
+   "id": "review2",
+   "agent": "$INPUT.reviewer_agent",
+   "repo": "$INPUT.worktree_dir",
+   "prompt": "{% $F.concat($INPUT.review_head, '## 修复后的完整 diff', $NODE.diff2.stdout, '最后一行必须恰好是 VERDICT:PASS 或 VERDICT:NEEDS_FIX。') %}",
+   "timeout_secs": 1800,
+   "next": "verdict2"
+  },
+  {
+   "type": "code",
+   "id": "verdict2",
+   "lang": "python",
+   "code": "def run(input): import re; m = re.search(r'VERDICT:\\\\s*(PASS|NEEDS_FIX)', str(input.get('text',''))); return {'verdict': m.group(1) if m else 'no-verdict'}",
+   "input": {
+    "text": "$NODE.review2.text"
+   },
+   "next": "sw_review2"
+  },
+  {
+   "type": "switch",
+   "id": "sw_review2",
+   "branches": [
+    {
+     "name": "pass",
+     "condition": {
+      "field": "$NODE.verdict2.verdict",
+      "operator": "eq",
+      "value": "PASS"
+     },
+     "next": "land"
+    },
+    {
+     "name": "fail",
+     "is_default": true,
+     "next": "notify_fix_fail"
+    }
+   ]
+  },
+  {
+   "type": "notify",
+   "id": "notify_fix_fail",
+   "message": "PGE：修复轮后 review 仍未通过，worktree 保留人工处理",
+   "next": "end_fixfail"
+  },
+  {
+   "type": "end",
+   "id": "end_fixfail",
+   "output": {
+    "landed": false,
+    "reason": "review 未通过"
+   },
+   "resultType": "success"
+  },
+  {
+   "type": "capture",
+   "id": "land",
+   "command": [
+    "bash",
+    "-lc",
+    "git add -A && git commit -m \"$INPUT.commit_msg\""
+   ],
+   "cwd": "$INPUT.worktree_dir",
+   "timeout_secs": 60,
+   "next": "land_judge"
+  },
+  {
+   "type": "code",
+   "id": "land_judge",
+   "lang": "python",
+   "code": "def run(input): return {'ok': int(input.get('exit_code') or 0) == 0}",
+   "input": {
+    "exit_code": "$NODE.land.exit_code"
+   },
+   "next": "notify_done"
+  },
+  {
+   "type": "notify",
+   "id": "notify_done",
+   "message": "PGE 完成：worktree 已 commit，待人工 merge 进 main",
+   "next": "end"
+  },
+  {
+   "type": "end",
+   "id": "end",
+   "output": {
+    "landed": "$NODE.land_judge.ok",
+    "worktree": "$INPUT.worktree_dir"
+   },
+   "resultType": "success"
+  }
+ ]
+}
