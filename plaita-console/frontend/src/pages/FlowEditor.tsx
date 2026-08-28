@@ -8,6 +8,7 @@ import NodePalette from '../components/flow/NodePalette'
 import FlowCanvas from '../components/flow/FlowCanvas'
 import NodeConfigDrawer from '../components/flow/NodeConfigDrawer'
 import AiGenerateDialog from '../components/flow/AiGenerateDialog'
+import { autoLayout } from '../components/flow/FlowCanvas'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
@@ -65,7 +66,7 @@ export default function FlowEditor() {
     } else if (!versionParam && flowQuery.data) {
       // 无版本参数（列表「编辑」入口）：自动选最新已发布版本，交回版本加载分支
       const versions = (flowQuery.data.versions || []) as Array<{ version: string; status?: string }>
-      const best = versions.find((v) => v.status === 'published') || versions.at(-1)
+      const best = versions.find((v) => v.status === 'published') || versions[versions.length - 1]
       if (best) {
         setSearch(new URLSearchParams({ version: best.version }))
         return
@@ -184,6 +185,16 @@ export default function FlowEditor() {
           className="bg-dark-700 hover:bg-dark-600 px-3 py-1.5 rounded text-dark-100"
         >
           试跑
+        </button>
+        <button
+          onClick={() => {
+            const layouted = autoLayout(nodes as Node[], edges as Edge[])
+            setGraph(layouted as Node[], edges as Edge[])
+          }}
+          className="bg-dark-700 hover:bg-dark-600 px-3 py-1.5 rounded text-dark-100"
+          title="dagre 自动排列节点"
+        >
+          ⚡ 自动布局
         </button>
         <button
           onClick={() => setShowAiDialog(true)}
