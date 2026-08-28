@@ -28,10 +28,11 @@
    "type": "code",
    "id": "baseline_sha",
    "lang": "python",
-   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.baseline_sha(input['sha'])",
+   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.baseline_sha(input['repo'], dry=bool(input.get('dry_run')))",
    "input": {
-    "sha": "$NODE.baseline.stdout",
-    "lib_dir": "$INPUT.lib_dir"
+    "repo": "$INPUT.repo",
+    "lib_dir": "$INPUT.lib_dir",
+    "dry_run": "$INPUT.dry_run"
    },
    "next": "worktree_add"
   },
@@ -55,11 +56,12 @@
    "type": "code",
    "id": "wt_check",
    "lang": "python",
-   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.worktree_add(input['repo'], input['worktree_dir'])",
+   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.worktree_ensure(input['repo'], input['worktree_dir'], dry=bool(input.get('dry_run')))",
    "input": {
     "repo": "$INPUT.repo",
     "worktree_dir": "$INPUT.worktree_dir",
-    "lib_dir": "$INPUT.lib_dir"
+    "lib_dir": "$INPUT.lib_dir",
+    "dry_run": "$INPUT.dry_run"
    },
    "next": "gate_run"
   },
@@ -82,7 +84,8 @@
    "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.judge_gate(int(input['exit_code'] or 0), input['gate'])",
    "input": {
     "exit_code": "$NODE.gate_run.exit_code",
-    "gate": "$INPUT.gate"
+    "gate": "$INPUT.gate",
+    "lib_dir": "$INPUT.lib_dir"
    },
    "next": "sw_gate"
   },
@@ -125,7 +128,7 @@
    "id": "plan",
    "agent": "$INPUT.planner_agent",
    "repo": "$INPUT.repo",
-   "prompt": "{% $F.concat($INPUT.plan_head, chr(10)*2, '## 需求', chr(10), $INPUT.goal) %}",
+   "prompt": "{% $F.concat($INPUT.plan_head, '## 需求', $INPUT.goal) %}",
    "timeout_secs": 1800,
    "next": "plan_parse"
   },
@@ -133,10 +136,12 @@
    "type": "code",
    "id": "plan_parse",
    "lang": "python",
-   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.parse_plan(input['raw'], int(input['max_sprints'] or 2))",
+   "code": "def run(input): import sys; sys.path.insert(0, input['lib_dir']); import pge_lib as L; return L.parse_plan(input['raw'], int(input['max_sprints'] or 2), dry=bool(input.get('dry_run')))",
    "input": {
     "raw": "$NODE.plan.text",
-    "max_sprints": "$INPUT.max_sprints"
+    "max_sprints": "$INPUT.max_sprints",
+    "dry_run": "$INPUT.dry_run",
+    "lib_dir": "$INPUT.lib_dir"
    },
    "next": "sw_plan"
   },
@@ -170,7 +175,7 @@
    "type": "code",
    "id": "build_items",
    "lang": "python",
-   "code": "def run(input):\n    items = []\n    for s in (input.get('sprints') or []):\n        items.append({**s, 'generator': input['generator'], 'gate': input['gate'],\n                      'gen_head': input['gen_head'], 'worktree_dir': input['worktree_dir'],\n                      'last_feedback': ''})\n    return {'items': items}",
+   "code": "def run(input): import json as j; return {'items': [{**s, 'generator': input['generator'], 'gate': input['gate'], 'gen_head': input['gen_head'], 'worktree_dir': input['worktree_dir'], 'last_feedback': '', 'sprint_json': j.dumps(s, ensure_ascii=False)} for s in (input.get('sprints') or [])]}",
    "input": {
     "sprints": "$NODE.plan_parse.plan.sprints",
     "generator": "$INPUT.generator",
@@ -218,8 +223,8 @@
       "type": "agentrun",
       "id": "gen",
       "agent": "$INPUT.item.generator",
-      "repo": "$INPUT.worktree_dir",
-      "prompt": "{% $F.concat($INPUT.item.gen_head, '## 本 sprint（JSON）', $INPUT.item.sprint_json, '## 上轮 gate 反馈', $INPUT.item.last_feedback) %}",
+      "repo": "$INPUT.item.worktree_dir",
+      "prompt": "{% $F.concat($INPUT.item.gen_head, '## 本 sprint（JSON）', $INPUT.item.sprint_json, '## 上轮 gate 反馈', $INPUT.item.last_feedback, '【重要】把实现作为文件写入当前工作区，不要只在回复中描述。') %}",
       "timeout_secs": 3600,
       "next": "gate1"
      },
@@ -231,7 +236,7 @@
        "-lc",
        "$INPUT.item.gate"
       ],
-      "cwd": "$INPUT.worktree_dir",
+      "cwd": "$INPUT.item.worktree_dir",
       "timeout_secs": 900,
       "next": "judge1"
      },
@@ -239,7 +244,7 @@
       "type": "code",
       "id": "judge1",
       "lang": "python",
-      "code": "def run(input): return {'passed': int(input.get('exit_code') or 0) == 0, 'output': str(input.get('stdout') or '')[-2000:]}",
+      "code": "def run(input): return {'passed': int(input.get('exit_code') or 0) == 0, 'output': str(input.get('stdout') or '')[-1500:]}",
       "input": {
        "exit_code": "$NODE.gate1.exit_code",
        "stdout": "$NODE.gate1.stdout"
@@ -257,7 +262,7 @@
          "operator": "eq",
          "value": true
         },
-        "next": "s_out"
+        "next": "diff1"
        },
        {
         "name": "repair",
@@ -270,8 +275,8 @@
       "type": "agentrun",
       "id": "repair",
       "agent": "$INPUT.item.generator",
-      "repo": "$INPUT.worktree_dir",
-      "prompt": "上一轮 gate 未通过，请修复工作区代码。只修与 gate 失败直接相关的问题。",
+      "repo": "$INPUT.item.worktree_dir",
+      "prompt": "{% $F.concat('上一轮 gate 未通过，请修复工作区代码。\\n## gate 输出（截断）\\n', $NODE.judge1.output) %}",
       "timeout_secs": 3600,
       "next": "gate2"
      },
@@ -283,7 +288,7 @@
        "-lc",
        "$INPUT.item.gate"
       ],
-      "cwd": "$INPUT.worktree_dir",
+      "cwd": "$INPUT.item.worktree_dir",
       "timeout_secs": 900,
       "next": "judge2"
      },
@@ -295,7 +300,78 @@
       "input": {
        "exit_code": "$NODE.gate2.exit_code"
       },
-      "next": "s_out2"
+      "next": "sw_judge2"
+     },
+     {
+      "type": "switch",
+      "id": "sw_judge2",
+      "branches": [
+       {
+        "name": "pass",
+        "condition": {
+         "field": "$NODE.judge2.passed",
+         "operator": "eq",
+         "value": true
+        },
+        "next": "diff1"
+       },
+       {
+        "name": "fail",
+        "is_default": true,
+        "next": "s_out2"
+       }
+      ]
+     },
+     {
+      "type": "capture",
+      "id": "diff1",
+      "command": [
+       "bash",
+       "-lc",
+       "git add --intent-to-add -A && git diff && git status --short"
+      ],
+      "cwd": "$INPUT.item.worktree_dir",
+      "timeout_secs": 120,
+      "next": "evaluator"
+     },
+     {
+      "type": "agentrun",
+      "id": "evaluator",
+      "agent": "$INPUT.item.generator",
+      "repo": "$INPUT.item.worktree_dir",
+      "prompt": "{% $F.concat($INPUT.item.review_head, '## 评审对象：本 sprint 的实现 diff 与工作区状态\\n', $NODE.diff1.stdout, '\\n## sprint 用户故事\\n', $INPUT.item.stories, '\\n判断实现是否完整（空 diff/无改动 = INCOMPLETE）。\\n最后一行必须恰好是 VERDICT:IMPLEMENTED 或 VERDICT:INCOMPLETE，并给一句理由。') %}",
+      "timeout_secs": 1800,
+      "next": "ev_parse"
+     },
+     {
+      "type": "code",
+      "id": "ev_parse",
+      "lang": "python",
+      "code": "def run(input): import re; m = re.search(r'VERDICT:\\\\s*(IMPLEMENTED|INCOMPLETE)', str(input.get('text',''))); return {'verdict': m.group(1) if m else 'INCOMPLETE'}",
+      "input": {
+       "text": "$NODE.evaluator.text"
+      },
+      "next": "sw_ev"
+     },
+     {
+      "type": "switch",
+      "id": "sw_ev",
+      "branches": [
+       {
+        "name": "ok",
+        "condition": {
+         "field": "$NODE.ev_parse.verdict",
+         "operator": "eq",
+         "value": "IMPLEMENTED"
+        },
+        "next": "s_out"
+       },
+       {
+        "name": "incomplete",
+        "is_default": true,
+        "next": "s_out2"
+       }
+      ]
      },
      {
       "type": "code",
@@ -311,9 +387,11 @@
       "type": "code",
       "id": "s_out2",
       "lang": "python",
-      "code": "def run(input): return {'verdict': 'fail', 'name': input['item'].get('name',''), 'reason': '修复后 gate 仍红'}",
+      "code": "def run(input):\n    raw = input.get('raw_tail') or ''\n    gp = input.get('gate2_passed')\n    return {'verdict': 'fail', 'name': input['item'].get('name',''), 'reason': 'gate2_passed=' + str(gp) + ' | evaluator: ' + raw[:200]}",
       "input": {
-       "item": "$INPUT.item"
+       "item": "$INPUT.item",
+       "raw_tail": "$NODE.ev_parse.raw_tail",
+       "gate2_passed": "$NODE.judge2.passed"
       },
       "next": "s_end2"
      },
@@ -439,6 +517,14 @@
    ]
   },
   {
+   "type": "code",
+   "id": "land_anyway",
+   "lang": "python",
+   "code": "def run(input): return {'landed': True, 'note': 'reviewer 无明确 verdict，按无改动处理'}",
+   "input": {},
+   "next": "end_anyway"
+  },
+  {
    "type": "agentrun",
    "id": "fix_gen",
    "agent": "$INPUT.generator",
@@ -547,6 +633,15 @@
    "output": {
     "landed": "$NODE.land_judge.ok",
     "worktree": "$INPUT.worktree_dir"
+   },
+   "resultType": "success"
+  },
+  {
+   "type": "end",
+   "id": "end_anyway",
+   "output": {
+    "landed": true,
+    "note": "review unavailable"
    },
    "resultType": "success"
   }

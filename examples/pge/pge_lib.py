@@ -19,19 +19,26 @@ def run_git(args: list[str], cwd: str) -> dict:
             "stderr": (proc.stderr or "").strip()}
 
 
-def baseline_sha(repo: str) -> dict:
+def baseline_sha(repo: str, dry: bool = False) -> dict:
+    if dry:
+        return {"ok": True, "sha": "dry-run", "dry": True}
     r = run_git(["rev-parse", "HEAD"], repo)
     if not r["ok"]:
         return {"ok": False, "error": r["stderr"]}
     return {"ok": True, "sha": r["output"]}
 
 
-def worktree_add(repo: str, worktree_dir: str) -> dict:
-    """创建 worktree（已存在视为复用，返回 reused）。"""
+def worktree_ensure(repo: str, worktree_dir: str, dry: bool = False) -> dict:
+    """创建 worktree（已存在视为复用）。残留注册先 prune 再重试一次。"""
+    if dry:
+        return {"ok": True, "reused": True, "dry": True}
     from pathlib import Path
     if Path(worktree_dir).exists():
         return {"ok": True, "reused": True}
     r = run_git(["worktree", "add", worktree_dir], repo)
+    if not r["ok"]:
+        run_git(["worktree", "prune"], repo)
+        r = run_git(["worktree", "add", worktree_dir], repo)
     if not r["ok"]:
         return {"ok": False, "error": r["stderr"]}
     run_git(["config", "extensions.worktreeConfig", "true"], repo)
@@ -53,7 +60,10 @@ def dirty_gates_check(results: list[dict]) -> dict:
             "failed_names": [r["gate"] for r in failed]}
 
 
-def parse_plan(result_text: str, max_sprints: int) -> dict:
+def parse_plan(result_text: str, max_sprints: int, dry: bool = False) -> dict:
+    if dry:
+        return {"ok": True, "plan": {"title": "dry-run spec",
+                "sprints": [{"name": "dry-sprint", "user_stories": [], "notes": "dry"}]}}
     """从 Planner 输出提取并校验 spec（sprints 上限 clamp）。"""
     text = str(result_text or "")
     start = text.find("{")
