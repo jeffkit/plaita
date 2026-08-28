@@ -110,6 +110,12 @@ def _load_external_node_modules() -> None:
             mod = importlib.import_module(mod_path)
             register = getattr(mod, "register_all") or getattr(mod, "register")
             register()
+            # CODE 节点 opt-in（与 plaita-nodes 的 agentrun/capture 等保持一致）
+            try:
+                from plaita.node import register_code_node
+                register_code_node()
+            except ImportError:
+                pass
             logging.getLogger("backend.main").info("已加载外部节点模块: %s", mod_path)
         except Exception as exc:  # noqa: BLE001
             logging.getLogger("backend.main").warning("外部节点模块加载失败 %s: %s", mod_path, exc)
