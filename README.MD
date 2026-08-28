@@ -351,3 +351,24 @@ python -m twine upload dist/*
 ## 许可证
 
 MIT
+
+
+## Generator 提示词候选（针对 GLM-5.2 空转问题）
+
+实测现象：部分轮次 generator 只在回复中描述实现而不写文件（gate 绿基线下
+会 vacuously pass，已被 Evaluator 判定拦下）。候选强化措辞（加在 gen prompt 尾部，
+逐个试跑对比）：
+
+1. **工具指令型**（推荐先试）：
+   「你必须使用文件编辑工具完成本 sprint：逐个创建/修改上述文件，保存到磁盘。
+   禁止只在回复中描述实现。完成后运行 pytest 验证，全绿后结束。」
+2. **验收前置型**：
+   「开始编码前，先在回复第一行列出你将要创建/修改的文件清单；然后逐一写入磁盘；
+   最后运行 pytest 并粘贴输出。回复中若没有 pytest 全绿的输出粘贴，视为未完成。」
+3. **角色收紧型**（recursive 专用）：
+   「以自动提交模式工作（所有工具调用自动批准）。直接修改工作区文件，
+   不要征求确认。你的回复只需要：改动文件清单 + pytest 输出摘要。」
+
+配套运行参数：`--permission-mode auto --headless`（已内置于 plaita-nodes
+recursive-direct 执行器）。若仍空转，检查 recursive 会话 jsonl 确认工具调用
+是否被拒（`permission_denials` 字段）。
