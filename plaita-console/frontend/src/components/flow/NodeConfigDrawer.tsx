@@ -21,6 +21,7 @@ export default function NodeConfigDrawer() {
   const enterSubgraph = useFlowEditor((s) => s.enterSubgraph)
 
   const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
   const [output, setOutput] = useState('')
   const [timeout, setTimeout_] = useState('')
 
@@ -46,6 +47,7 @@ export default function NodeConfigDrawer() {
     if (!node) return
     const d = node.data as FlowNodeData
     setName(d.name || '')
+    setDesc((d.fields.desc as string) || '')
     setOutput((d.fields.output as string) || '')
     setTimeout_((d.fields.timeout as string) || '')
   }, [node])
@@ -80,10 +82,18 @@ export default function NodeConfigDrawer() {
     updateNodeData(node.id, { fields })
   }
 
-  /** 通用字段（output/timeout）即时写回 */
-  const writeCommon = (key: 'output' | 'timeout', v: string) => {
+  /** 通用单值字段（desc/output/timeout）即时写回，空值删键 */
+  const writeField = (key: string, v: string) => {
     const fields = { ...d.fields }
     if (v === '') delete fields[key]
+    else fields[key] = v
+    updateNodeData(node.id, { fields })
+  }
+
+  /** 结构化通用字段（timeout_handler/error_handler）写回 */
+  const writeHandler = (key: 'timeout_handler' | 'error_handler', v: unknown) => {
+    const fields = { ...d.fields }
+    if (v === undefined) delete fields[key]
     else fields[key] = v
     updateNodeData(node.id, { fields })
   }
@@ -117,12 +127,23 @@ export default function NodeConfigDrawer() {
             className="input w-full"
           />
         </Field>
+        <Field label="描述 desc">
+          <input
+            value={desc}
+            onChange={(e) => {
+              setDesc(e.target.value)
+              writeField('desc', e.target.value)
+            }}
+            placeholder="节点用途说明"
+            className="input w-full"
+          />
+        </Field>
         <Field label="输出 output（表达式）">
           <input
             value={output}
             onChange={(e) => {
               setOutput(e.target.value)
-              writeCommon('output', e.target.value)
+              writeField('output', e.target.value)
             }}
             placeholder="$INPUT.name"
             className="input w-full font-mono text-[12px]"
@@ -133,12 +154,28 @@ export default function NodeConfigDrawer() {
             value={timeout}
             onChange={(e) => {
               setTimeout_(e.target.value)
-              writeCommon('timeout', e.target.value)
+              writeField('timeout', e.target.value)
             }}
             placeholder="3000"
             className="input w-full font-mono text-[12px]"
           />
         </Field>
+
+        {/* 错误与超时处理：Node 基类共有字段，固定表单（不走 SchemaForm） */}
+        <div className="border-t border-line pt-3 space-y-3">
+          <p className="text-caption text-ink-muted">错误与超时处理</p>
+          <HandlerEditor
+            label="超时处理 timeout_handler"
+            value={d.fields.timeout_handler}
+            onChange={(v) => writeHandler('timeout_handler', v)}
+          />
+          <HandlerEditor
+            label="失败处理 error_handler"
+            value={d.fields.error_handler}
+            recoverable
+            onChange={(v) => writeHandler('error_handler', v)}
+          />
+        </div>
 
         <div className="border-t border-line pt-3">
           <p className="text-caption text-ink-muted mb-2">
@@ -196,6 +233,107 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div>
       <label className="block text-caption text-ink-muted mb-1">{label}</label>
       {children}
+    </div>
+  )
+}
+
+/** 错误处理策略选项（与引擎 ErrorStrategy 对齐） */
+const STRATEGY_OPTIONS = [
+  { value: '', label: '（未启用）' },
+  { value: 'abort', label: 'abort · 中止流程' },
+  { value: 'continue', label: 'continue · 忽略并继续' },
+  { value: 'continue-with', label: 'continue-with · 返回默认值' },
+]
+
+/**
+ * 超时/失败处理的固定表单（Node 基类共有字段，不走 SchemaForm）。
+ * 键名用引擎序列化别名：strategy / code / message / defaultValue / retryTimes。
+ */
+function HandlerEditor({
+  label,
+  value,
+  onChange,
+  recoverable = false,
+}: {
+  label: string
+  value: unknown
+  onChange: (v: unknown) => void
+  recoverable?: boolean
+}) {
+  const obj =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null
+  const strategy = (obj?.strategy as string) || ''
+
+  // 切换策略时重建干净对象：只保留与新策略相关的字段
+  const pick = (s: string) => {
+    if (!s) {
+      onChange(undefined)
+      return
+    }
+    const next: Record<string, unknown> = { strategy: s }
+    if (recoverable && obj?.retryTimes != null) next.retryTimes = obj.retryTimes
+    if (s === 'abort') {
+      if (obj?.code != null) next.code = obj.code
+      if (obj?.message != null) next.message = obj.message
+    }
+    if (s === 'continue-with' && obj?.defaultValue != null) next.defaultValue = obj.defaultValue
+    onChange(next)
+  }
+  const merge = (patch: Record<string, unknown>) => onChange({ ...obj, strategy, ...patch })
+
+  return (
+    <div>
+      <label className="block text-caption text-ink-muted mb-1">{label}</label>
+      <select value={strategy} onChange={(e) => pick(e.target.value)} className="input w-full">
+        {STRATEGY_OPTIONS.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {strategy === 'abort' && (
+        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+          <input
+            type="number"
+            value={obj?.code != null ? String(obj.code) : ''}
+            placeholder="错误码（默认 -9527）"
+            onChange={(e) => merge(e.target.value === '' ? {} : { code: Number(e.target.value) })}
+            className="input w-full font-mono text-[12px]"
+          />
+          <input
+            value={(obj?.message as string) || ''}
+            placeholder="错误消息"
+            onChange={(e) => merge(e.target.value === '' ? {} : { message: e.target.value })}
+            className="input w-full"
+          />
+        </div>
+      )}
+      {strategy === 'continue-with' && (
+        <div className="mt-1.5">
+          <label className="mb-1 block text-[11px] text-ink-faint">
+            默认返回值 defaultValue（JSON 对象）
+          </label>
+          <JsonField
+            value={obj?.defaultValue}
+            onChange={(v) => merge({ defaultValue: v === undefined ? null : v })}
+            compact
+          />
+        </div>
+      )}
+      {recoverable && strategy && (
+        <div className="mt-1.5 flex items-center gap-2">
+          <label className="shrink-0 text-[11px] text-ink-faint">失败重试次数 retryTimes</label>
+          <input
+            type="number"
+            min={0}
+            value={obj?.retryTimes != null ? String(obj.retryTimes) : '0'}
+            onChange={(e) => merge({ retryTimes: Math.max(0, Number(e.target.value) || 0) })}
+            className="input w-20 font-mono text-[12px]"
+          />
+        </div>
+      )}
     </div>
   )
 }

@@ -42,8 +42,9 @@ export interface FieldSpec {
   required: boolean
 }
 
-/** 通用字段（抽屉单独渲染）与由画布边推导的连接字段，不进类型表单 */
-export const COMMON_KEYS = new Set(['output', 'timeout'])
+/** 通用字段（抽屉单独渲染）与由画布边推导的连接字段，不进类型表单。
+ *  timeout_handler/error_handler/desc 是 Node 基类共有字段，由抽屉的固定表单接管。 */
+export const COMMON_KEYS = new Set(['output', 'timeout', 'desc', 'timeout_handler', 'error_handler'])
 export const CONNECT_KEYS = new Set(['type', 'id', 'name', 'desc', 'next', 'else_next'])
 /** 纯内部字段：引擎簿记用，不展示 */
 const INTERNAL_KEYS = new Set(['source_line'])
