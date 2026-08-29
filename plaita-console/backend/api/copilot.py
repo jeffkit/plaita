@@ -28,9 +28,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# 注入 context 的约定键名（前端 useCopilotReadable 对应）
-FLOW_CONTEXT_NAME = "plaita_flow_context"
-
 # Copilot system prompt：M1 通过追加到 user 消息头部送达（recursive /agui 的
 # goal 解析取最后一条 user 消息；system role 是否透传给模型不可控）。
 _COPILOT_PROMPT_HEADER = """\
@@ -63,16 +60,25 @@ def _nodes_digest() -> str:
 
 
 def _inject_context(body: dict) -> dict:
-    """把 context 中的 plaita_flow_context 与 system 头拼接进最后一条 user 消息。"""
+    """把 RunAgentInput.context 全部项（画布状态等）与 system 头拼接进最后一条 user 消息。
+
+    不依赖 context item 的 name 字段——CopilotKit useCopilotReadable 产生的
+    Context 形如 {description, value}，无 name；凡有 value 的项都拼接。
+    """
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return body
 
-    context_note = ""
+    parts = []
     for item in body.get("context") or []:
-        if isinstance(item, dict) and item.get("name") == FLOW_CONTEXT_NAME:
-            context_note = str(item.get("value") or "")
-            break
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("value") or "")
+        if not value.strip():
+            continue
+        title = item.get("name") or item.get("description") or "上下文"
+        parts.append(f"### {title}\n{value}")
+    context_note = "\n\n".join(parts)
 
     system_header = _COPILOT_PROMPT_HEADER.replace(
         "{nodes_digest}", _nodes_digest()
