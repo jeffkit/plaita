@@ -7,6 +7,12 @@ from ..node.basic import Node
 
 
 class Assignment(Node):
+    """变量赋值节点。
+
+    按 ``assignments`` 列表依次将表达式求值结果写入上下文变量，
+    供下游节点以 ``$NODE.<本节点id>.<变量名>`` 引用。
+    """
+
     node_type: ClassVar[str] = "assignment"
     node_name: ClassVar[str] = "赋值"
 

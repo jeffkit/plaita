@@ -12,6 +12,12 @@ END_TYPE_ERROR = "error"
 
 
 class End(Node):
+    """流程结束节点。
+
+    汇总流程输出：``output`` 表达式的结果作为流程返回值；
+    ``result_type`` 支持 success（正常结束，默认）/ error（以错误结束，配 ``error``）/ nop（静默结束）。
+    """
+
     model_config = ConfigDict(
         populate_by_name=True,
         extra="allow",

@@ -158,6 +158,13 @@ def _create_condition(content: dict) -> Condition:
 
 
 class Switch(Node):
+    """多路条件分支节点。
+
+    按 ``branches`` 中各分支的 condition（支持 and/or 组合）自上而下匹配，
+    命中的分支走其 ``next``，可指定 default 分支兜底；
+    输出命中的分支名，供下游以 ``$NODE.<本节点id>`` 引用。
+    """
+
     branching: ClassVar[bool] = True
     # Switch/Logic 的设计语义: branch.name 自身就是目标节点 id (当 branch.next
     # 未显式声明时)。Bool/SwitchLegacy 子类由 validator 自动注入 next, 此标志对
@@ -204,6 +211,12 @@ class Switch(Node):
 
 
 class Bool(Switch):
+    """二元条件分支节点（if/else）。
+
+    ``condition`` 满足走 ``next``（真分支），不满足走 ``else_next``（假分支）；
+    条件支持字段比较运算（eq/gt/in/contains 等）与 and/or 组合。
+    """
+
     node_name: ClassVar[str] = "IF"
     node_type: ClassVar[str] = "if"
 
@@ -236,6 +249,12 @@ class Bool(Switch):
 
 
 class SwitchLegacy(Switch):
+    """值匹配分支节点（switch-case）。
+
+    对 ``target`` 表达式的取值与 ``cases`` 中各 case 的 value 精确匹配，
+    命中走对应分支，均未命中走 ``default`` 分支。
+    """
+
     node_name: ClassVar[str] = "CASE"
     node_type: ClassVar[str] = "case"
     target: Any = None
