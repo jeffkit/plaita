@@ -42,6 +42,7 @@ _CATEGORY_MAP = {
     "filter": "循环",
     "find": "循环",
     "reduce": "循环",
+    "while": "循环",
     "child": "子流程",
     "reference": "子流程",
     "parallel": "子流程",

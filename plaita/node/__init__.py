@@ -25,7 +25,7 @@ from .concurrent import Parallel
 from .decide import Bool, Switch, SwitchLegacy
 from .end import End
 from .event_node import EventNode
-from .loop import BaseCollectionNode, Filter, Find, Loop, Map, Reduce
+from .loop import BaseCollectionNode, Filter, Find, Loop, Map, Reduce, While
 from .start import Start
 from .http import HTTP
 
@@ -44,6 +44,7 @@ _BUILTIN_NODES: list[Type[Node]] = [
     Filter,
     Find,
     Reduce,
+    While,
     ReferenceFlow,
     # CodeNode is intentionally excluded from the default registry.
     # It executes arbitrary user-supplied code (Python exec / PyExecJS JS) without

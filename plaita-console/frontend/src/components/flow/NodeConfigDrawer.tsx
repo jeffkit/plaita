@@ -10,7 +10,7 @@ import { coreFieldsOf } from './schemaForm/coreFields'
 import { normalizeFieldKeys, type JsonSchema } from './schemaForm/schemaUtils'
 
 // 内嵌 child_flow 子流程的节点类型（reference 仅有内嵌子图时也可编辑）
-const SUBFLOW_TYPES = new Set(['map', 'loop', 'filter', 'find', 'reduce', 'child'])
+const SUBFLOW_TYPES = new Set(['map', 'loop', 'filter', 'find', 'reduce', 'while', 'child'])
 
 type DrawerTab = 'config' | 'basic' | 'fault'
 const DRAWER_TABS: Array<{ key: DrawerTab; label: string }> = [

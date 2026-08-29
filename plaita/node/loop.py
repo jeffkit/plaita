@@ -1,8 +1,9 @@
 import asyncio
+import logging
 from copy import deepcopy
 from typing import Any, ClassVar, Dict, Optional, Union
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from plaita.core.parallel_executor import (
     ParallelExecutor,
@@ -13,6 +14,8 @@ from plaita.core.parallel_executor import (
 from ..io import Property
 from .child import InlineFlow
 from .decide import Condition, ConditionGroup
+
+_logger = logging.getLogger(__name__)
 
 
 class BaseCollectionNode(InlineFlow):
@@ -286,3 +289,67 @@ class Reduce(BaseCollectionNode):
             input_type, "data_type", None
         )
         return data_type == "array"
+
+
+class While(InlineFlow):
+    """条件循环节点（while 型）。
+
+    以 ``condition`` 为继续条件反复执行子流程：条件满足则继续下一轮，
+    不满足即退出；``max_iterations`` 为迭代上限保护，达到上限强制停止并告警。
+    子流程输入：item（上一轮结果，首轮为 None）、index（轮次，从 0 起）。
+    条件上下文可引用 $LOOP-ITEM（上一轮结果）/ $LOOP-INDEX（当前轮次）。
+    节点输出为最后一轮子流程结果（未执行任何轮次时为 None）。
+    """
+
+    node_type: ClassVar[str] = "while"
+    node_name: ClassVar[str] = "条件循环"
+
+    condition: Optional[Union[Condition, ConditionGroup]] = None
+    max_iterations: int = 1000
+
+    @model_validator(mode="before")
+    @classmethod
+    def _setup_max_iterations(cls, values: Dict) -> Dict:
+        if values.get("maxIterations") is not None and values.get("max_iterations") is None:
+            values["max_iterations"] = values["maxIterations"]
+        return values
+
+    def _should_continue(self, execution, index: int, result: Any) -> bool:
+        """condition 为 None 时不循环（仅执行一轮）；否则条件满足才继续。"""
+        if self.condition is None:
+            return index == 0
+        loop_ctx = deepcopy(execution.context)
+        pfx = execution.express_prefix
+        loop_ctx[f"{pfx}LOOP-ITEM"] = result
+        loop_ctx[f"{pfx}LOOP-INDEX"] = index
+        return bool(self.condition.match(loop_ctx, pfx))
+
+    def execute(self, execution):
+        index = 0
+        result = None
+        stopped_by_limit = False
+        while index < self.max_iterations and self._should_continue(execution, index, result):
+            item_execution = execution.get_child_execution()
+            result = item_execution.run_compatible(self.child_flow, False, item=result, index=index)
+            index += 1
+            stopped_by_limit = index >= self.max_iterations
+        if stopped_by_limit:
+            _logger.warning(
+                "While 节点 %s 达到 max_iterations=%s 上限，已强制停止", self.id, self.max_iterations
+            )
+        return result
+
+    async def arun(self, execution):
+        index = 0
+        result = None
+        stopped_by_limit = False
+        while index < self.max_iterations and self._should_continue(execution, index, result):
+            item_execution = execution.get_child_execution()
+            result = await item_execution.arun_compatible(self.child_flow, False, item=result, index=index)
+            index += 1
+            stopped_by_limit = index >= self.max_iterations
+        if stopped_by_limit:
+            _logger.warning(
+                "While 节点 %s 达到 max_iterations=%s 上限，已强制停止", self.id, self.max_iterations
+            )
+        return result
