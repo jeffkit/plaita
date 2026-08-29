@@ -5,6 +5,7 @@ import { useFlowEditor } from '../../stores/flowEditor'
 import { api } from '../../services/api'
 import type { FlowNodeData } from './flowConverter'
 import SchemaForm, { JsonField } from './schemaForm/SchemaForm'
+import type { VarGroup } from './schemaForm/ExpressionInput'
 import { coreFieldsOf } from './schemaForm/coreFields'
 import { normalizeFieldKeys, type JsonSchema } from './schemaForm/schemaUtils'
 
@@ -27,6 +28,9 @@ export default function NodeConfigDrawer() {
   const updateNodeData = useFlowEditor((s) => s.updateNodeData)
   const removeNode = useFlowEditor((s) => s.removeNode)
   const enterSubgraph = useFlowEditor((s) => s.enterSubgraph)
+  const allNodes = useFlowEditor((s) => s.nodes)
+  const allEdges = useFlowEditor((s) => s.edges)
+  const flowMeta = useFlowEditor((s) => s.meta)
 
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
@@ -71,6 +75,48 @@ export default function NodeConfigDrawer() {
     void _t
     return schema ? normalizeFieldKeys(rest, schema) : rest
   }, [node, schema])
+
+  // 变量目录：$INPUT 流程入参 / $NODE 上游结果（沿入边反推）/ $GLOBAL 全局上下文
+  const variableGroups = useMemo<VarGroup[]>(() => {
+    if (!node) return []
+    const groups: VarGroup[] = []
+    const inputProps = (flowMeta.inputType as Record<string, unknown> | undefined)?.properties
+    if (inputProps && typeof inputProps === 'object') {
+      groups.push({
+        label: '$INPUT · 流程入参',
+        items: Object.keys(inputProps).map((k) => ({ expr: `$INPUT.${k}` })),
+      })
+    }
+    const upstream = new Set<string>()
+    const walk = (id: string, depth: number) => {
+      if (depth > 6) return
+      for (const e of allEdges) {
+        if (e.target !== id || upstream.has(e.source)) continue
+        upstream.add(e.source)
+        walk(e.source, depth + 1)
+      }
+    }
+    walk(node.id, 0)
+    const upstreamItems = allNodes
+      .filter((n) => upstream.has(n.id))
+      .map((n) => {
+        const d = n.data as FlowNodeData
+        const out = d.fields.output
+        return {
+          expr: `$NODE.${n.id}`,
+          desc: `${d.type} · ${d.name}${typeof out === 'string' && out ? ` → ${out}` : ''}`,
+        }
+      })
+    if (upstreamItems.length > 0) groups.push({ label: '$NODE · 上游节点结果', items: upstreamItems })
+    const gc = flowMeta.globalContext
+    if (gc && typeof gc === 'object' && Object.keys(gc).length > 0) {
+      groups.push({
+        label: '$GLOBAL · 全局上下文',
+        items: Object.keys(gc).map((k) => ({ expr: `$GLOBAL.${k}` })),
+      })
+    }
+    return groups
+  }, [node, allNodes, allEdges, flowMeta])
 
   if (!selectedId || !node) return null
   const d = node.data as FlowNodeData
@@ -176,6 +222,7 @@ export default function NodeConfigDrawer() {
                   onChange={writeTypeFields}
                   excludeKeys={formExcludeKeys}
                   coreFields={coreFieldsOf(d.type)}
+                  variableGroups={variableGroups}
                 />
               ) : (
                 <FallbackJson

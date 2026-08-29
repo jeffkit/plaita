@@ -6,6 +6,8 @@ import {
   type FieldSpec,
   type JsonSchema,
 } from './schemaUtils'
+import ExpressionInput, { type VarGroup } from './ExpressionInput'
+import CodeEditor, { inferLanguage, isCodeField } from './CodeEditor'
 
 /**
  * schema 驱动的类型特定字段表单（DESIGN.md token）。
@@ -21,6 +23,7 @@ export default function SchemaForm({
   onChange,
   excludeKeys,
   coreFields,
+  variableGroups,
 }: {
   fields: Record<string, unknown>
   schema: JsonSchema | null
@@ -29,6 +32,8 @@ export default function SchemaForm({
   excludeKeys?: Set<string>
   /** 该类型的核心字段白名单（与 required 一起决定首屏平铺） */
   coreFields?: Set<string>
+  /** 变量目录（$INPUT/$NODE/$GLOBAL），供表达式输入插入 */
+  variableGroups?: VarGroup[]
 }) {
   if (!schema) return null
   const plan = buildFormPlan(fields, schema, excludeKeys, coreFields)
@@ -38,27 +43,23 @@ export default function SchemaForm({
     delete next[key]
     onChange(next)
   }
+  const ctrl = (f: FieldSpec) => (
+    <FieldControl
+      key={f.key}
+      spec={f}
+      value={fields[f.key]}
+      siblingFields={fields}
+      variableGroups={variableGroups}
+      onChange={(v) => (v === undefined ? removeValue(f.key) : setValue(f.key, v))}
+    />
+  )
 
   return (
     <div className="space-y-3">
-      {plan.core.map((f) => (
-        <FieldControl
-          key={f.key}
-          spec={f}
-          value={fields[f.key]}
-          onChange={(v) => (v === undefined ? removeValue(f.key) : setValue(f.key, v))}
-        />
-      ))}
+      {plan.core.map(ctrl)}
       {plan.more.length > 0 && (
         <CollapsibleSection title={`更多参数（${plan.more.length}）`}>
-          {plan.more.map((f) => (
-            <FieldControl
-              key={f.key}
-              spec={f}
-              value={fields[f.key]}
-              onChange={(v) => (v === undefined ? removeValue(f.key) : setValue(f.key, v))}
-            />
-          ))}
+          {plan.more.map(ctrl)}
         </CollapsibleSection>
       )}
       {plan.advanced.length > 0 && (
@@ -109,11 +110,16 @@ function FieldControl({
   value,
   onChange,
   nested = false,
+  siblingFields,
+  variableGroups,
 }: {
   spec: FieldSpec
   value: unknown
   onChange: (v: unknown) => void
   nested?: boolean
+  /** 同级字段全集（用于推断代码语言等） */
+  siblingFields?: Record<string, unknown>
+  variableGroups?: VarGroup[]
 }) {
   const label = (
     <label className={cn('block text-caption text-ink-muted mb-1', nested && 'text-[11px]')}>
@@ -131,14 +137,33 @@ function FieldControl({
   let control: React.ReactNode = null
   switch (spec.kind) {
     case 'string':
-      control = (
-        <input
-          value={typeof value === 'string' ? value : value == null ? '' : String(value)}
-          onChange={(e) => onChange(e.target.value === '' ? undefined : e.target.value)}
-          placeholder={spec.schema.default != null ? String(spec.schema.default) : undefined}
-          className="input w-full"
-        />
-      )
+      if (!nested && isCodeField(spec.key)) {
+        control = (
+          <CodeEditor
+            value={typeof value === 'string' ? value : ''}
+            language={inferLanguage(siblingFields ?? {})}
+            onChange={(v) => onChange(v === '' ? undefined : v)}
+          />
+        )
+      } else if (!nested) {
+        control = (
+          <ExpressionInput
+            value={typeof value === 'string' ? value : value == null ? '' : String(value)}
+            groups={variableGroups ?? []}
+            placeholder={spec.schema.default != null ? String(spec.schema.default) : undefined}
+            onChange={(v) => onChange(v === '' ? undefined : v)}
+          />
+        )
+      } else {
+        control = (
+          <input
+            value={typeof value === 'string' ? value : value == null ? '' : String(value)}
+            onChange={(e) => onChange(e.target.value === '' ? undefined : e.target.value)}
+            placeholder={spec.schema.default != null ? String(spec.schema.default) : undefined}
+            className="input w-full"
+          />
+        )
+      }
       break
     case 'number':
       control = (
