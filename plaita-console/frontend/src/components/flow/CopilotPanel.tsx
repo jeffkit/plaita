@@ -7,6 +7,7 @@ import '@copilotkit/react-ui/styles.css'
 import { useFlowEditor } from '../../stores/flowEditor'
 import { api } from '../../services/api'
 import { flowToJson } from './flowConverter'
+import { symmetricLayout } from './symmetricLayout'
 
 // 错误边界：Copilot 异常时不拖垮整个编辑器
 class CopilotErrorBoundary extends Component<{ children: ReactNode }, { err?: Error }> {
@@ -198,6 +199,137 @@ function CopilotInner({
         })
         .join('\n')
       return `flowError: ${res.error || '无'}\n节点执行:\n${summary || '（无节点执行）'}`
+    },
+  })
+
+  // ── 原子编辑工具集（M2-4）──────────────────────────────────────────
+
+  let nodeSeq = Date.now() % 100000
+  useCopilotAction({
+    name: 'add_node',
+    description:
+      '向当前画布追加一个节点。nodeType 见画布节点面板（如 http/map/if/assignment/code/while）；返回新节点 id',
+    parameters: [
+      { name: 'nodeType', type: 'string', description: '节点类型', required: true },
+      { name: 'name', type: 'string', description: '节点显示名', required: false },
+      { name: 'fields', type: 'object', description: '类型特定字段（如 http 的 url/method）', required: false },
+    ],
+    handler: async ({ nodeType, name, fields }) => {
+      nodeSeq += 1
+      const id = `${nodeType}_${Date.now()}_${nodeSeq}`
+      const store = useFlowEditor.getState()
+      store.addNode({
+        id,
+        type: 'plaitaNode',
+        position: { x: 240 + (store.nodes.length % 4) * 60, y: 120 + store.nodes.length * 110 },
+        data: { type: nodeType, name: name || nodeType, fields: fields ?? {} },
+      })
+      return `已添加节点 ${id}（当前画布共 ${store.nodes.length} 个节点）`
+    },
+  })
+
+  useCopilotAction({
+    name: 'update_node',
+    description:
+      '修改既有节点：fields 为与现有字段合并的增量 patch（不删除未提及字段）；name 可改显示名',
+    parameters: [
+      { name: 'nodeId', type: 'string', description: '节点 id', required: true },
+      { name: 'fields', type: 'object', description: '要合并的字段增量', required: false },
+      { name: 'name', type: 'string', description: '新显示名', required: false },
+    ],
+    handler: async ({ nodeId, fields, name }) => {
+      const target = useFlowEditor.getState().nodes.find((n) => n.id === nodeId)
+      if (!target) return `节点 ${nodeId} 不存在`
+      const d = target.data as { name?: string; fields?: Record<string, unknown> }
+      const merged = { ...(d.fields ?? {}), ...(fields ?? {}) }
+      useFlowEditor.getState().updateNodeData(nodeId, {
+        ...(name ? { name } : {}),
+        fields: merged,
+      })
+      return `已更新 ${nodeId}`
+    },
+  })
+
+  useCopilotAction({
+    name: 'remove_node',
+    description: '删除节点（级联删除其连线）',
+    parameters: [
+      { name: 'nodeId', type: 'string', description: '节点 id', required: true },
+    ],
+    handler: async ({ nodeId }) => {
+      const exists = useFlowEditor.getState().nodes.some((n) => n.id === nodeId)
+      if (!exists) return `节点 ${nodeId} 不存在`
+      useFlowEditor.getState().removeNode(nodeId)
+      return `已删除 ${nodeId}`
+    },
+  })
+
+  useCopilotAction({
+    name: 'connect_nodes',
+    description:
+      '连接两个节点。默认从 source 的真分支（next）连到 target；if 节点的假分支用 sourceHandle="false"',
+    parameters: [
+      { name: 'source', type: 'string', description: '源节点 id', required: true },
+      { name: 'target', type: 'string', description: '目标节点 id', required: true },
+      { name: 'sourceHandle', type: 'string', description: '源 handle（默认 true；if 假分支用 false）', required: false },
+    ],
+    handler: async ({ source, target, sourceHandle }) => {
+      const st = useFlowEditor.getState()
+      if (!st.nodes.some((n) => n.id === source)) return `源节点 ${source} 不存在`
+      if (!st.nodes.some((n) => n.id === target)) return `目标节点 ${target} 不存在`
+      st.onConnect({
+        source,
+        target,
+        sourceHandle: sourceHandle || 'true',
+        targetHandle: 'in',
+      })
+      return `已连接 ${source} → ${target}`
+    },
+  })
+
+  useCopilotAction({
+    name: 'enter_subgraph',
+    description: '进入指定子流程节点的子图编辑（map/loop/filter/find/reduce/while/child）',
+    parameters: [
+      { name: 'nodeId', type: 'string', description: '子流程节点 id', required: true },
+    ],
+    handler: async ({ nodeId }) => {
+      const st = useFlowEditor.getState()
+      const node = st.nodes.find((n) => n.id === nodeId)
+      if (!node) return `节点 ${nodeId} 不存在`
+      try {
+        st.enterSubgraph(nodeId, 'child_flow')
+        return `已进入 ${nodeId} 的子图`
+      } catch {
+        return `节点 ${nodeId} 不含可编辑的子流程`
+      }
+    },
+  })
+
+  useCopilotAction({
+    name: 'exit_subgraph',
+    description: '退出当前子图，返回上一层（level 0 表示主图）',
+    parameters: [
+      { name: 'level', type: 'number', description: '目标层级（默认返回上一层）', required: false },
+    ],
+    handler: async ({ level }) => {
+      const st = useFlowEditor.getState()
+      const target = typeof level === 'number' ? Math.max(0, Math.min(level, st.graphStack.length)) : st.graphStack.length - 1
+      st.exitToLevel(target)
+      return `已返回到层级 ${useFlowEditor.getState().graphStack.length}`
+    },
+  })
+
+  useCopilotAction({
+    name: 'auto_layout',
+    description: '对当前画布执行对称自动排版（分支左右均匀分布）',
+    parameters: [],
+    handler: async () => {
+      const st = useFlowEditor.getState()
+      const layouted = symmetricLayout(st.nodes, st.edges, 'TB')
+      st.setGraph(layouted, st.edges)
+      st.markDirty()
+      return '已重新排版'
     },
   })
 
