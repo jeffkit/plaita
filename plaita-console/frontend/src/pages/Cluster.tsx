@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { api, ServiceTypeInfo, ManagedInstance, InfrastructureInfo, InfrastructureTemplate, CreateInfrastructureRequest, QuickTestResponse } from '../services/api'
-import { 
-  Play, 
+import {
+  Play,
   Square,
   RefreshCw,
   Server,
@@ -27,6 +27,7 @@ import {
   Clock,
   UserCheck
 } from 'lucide-react'
+import { Button } from '../components/ui'
 
 // 状态图标
 const StatusIcon = ({ status }: { status: string }) => {
@@ -36,11 +37,11 @@ const StatusIcon = ({ status }: { status: string }) => {
     case 'stopped':
       return <Square className="w-5 h-5 text-dark-400" />
     case 'error':
-      return <XCircle className="w-5 h-5 text-red-400" />
+      return <XCircle className="w-5 h-5 text-status-error" />
     case 'starting':
-      return <RefreshCw className="w-5 h-5 text-yellow-400 animate-spin" />
+      return <RefreshCw className="w-5 h-5 text-status-warning animate-spin" />
     default:
-      return <AlertCircle className="w-5 h-5 text-yellow-400" />
+      return <AlertCircle className="w-5 h-5 text-status-warning" />
   }
 }
 
@@ -73,29 +74,24 @@ function ServiceTypeCard({
       </p>
       
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="primary"
+          size="sm"
           onClick={onStart}
           disabled={!canStart || isStarting}
-          className={`
-            flex items-center gap-1 px-3 py-1.5 rounded text-sm
-            ${canStart && !isStarting
-              ? 'bg-plaita-500 hover:bg-plaita-600 text-white'
-              : 'bg-dark-700 text-dark-400 cursor-not-allowed'
-            }
-          `}
         >
           {isStarting ? (
             <>
-              <RefreshCw className="w-4 h-4 animate-spin" />
-              启动中...
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              启动中…
             </>
           ) : (
             <>
-              <Play className="w-4 h-4" />
+              <Play className="w-3.5 h-3.5" />
               启动实例
             </>
           )}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -147,8 +143,8 @@ function ManagedInstanceRow({
           px-2 py-0.5 rounded text-xs font-medium
           ${instance.status === 'running' ? 'bg-plaita-500/20 text-plaita-400' : ''}
           ${instance.status === 'stopped' ? 'bg-dark-700 text-dark-400' : ''}
-          ${instance.status === 'error' ? 'bg-red-500/20 text-red-400' : ''}
-          ${instance.status === 'starting' ? 'bg-yellow-500/20 text-yellow-400' : ''}
+          ${instance.status === 'error' ? 'bg-status-error-dim text-status-error' : ''}
+          ${instance.status === 'starting' ? 'bg-status-warning-dim text-status-warning' : ''}
         `}>
           {instance.status}
         </span>
@@ -162,7 +158,7 @@ function ManagedInstanceRow({
           <button
             onClick={onViewLogs}
             className="flex items-center gap-1 px-2 py-1 rounded text-xs 
-                       bg-dark-700 text-dark-300 hover:bg-dark-600 hover:text-white"
+                       bg-dark-700 text-dark-300 hover:bg-dark-600 hover:text-ink-primary"
             title="查看日志"
           >
             <FileText className="w-3 h-3" />
@@ -178,7 +174,7 @@ function ManagedInstanceRow({
               onClick={onStop}
               disabled={isStopping}
               className="flex items-center gap-1 px-2 py-1 rounded text-xs 
-                         bg-red-500/20 text-red-400 hover:bg-red-500/30 
+                         bg-status-error-dim text-status-error hover:bg-status-error/20 
                          disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isStopping ? (
@@ -192,7 +188,7 @@ function ManagedInstanceRow({
           {instance.error_message && (
             <button 
               onClick={() => onViewError(instance.error_message!)}
-              className="text-xs text-red-400 hover:text-red-300 underline cursor-pointer"
+              className="text-xs text-status-error hover:text-red-300 underline cursor-pointer"
             >
               查看错误
             </button>
@@ -203,7 +199,7 @@ function ManagedInstanceRow({
               onClick={onRemove}
               disabled={isRemoving}
               className="flex items-center gap-1 px-2 py-1 rounded text-xs 
-                         bg-dark-700 text-dark-400 hover:bg-dark-600 hover:text-white
+                         bg-dark-700 text-dark-400 hover:bg-dark-600 hover:text-ink-primary
                          disabled:opacity-50 disabled:cursor-not-allowed"
               title="移除记录"
             >
@@ -230,16 +226,16 @@ function ErrorDialog({
   onClose: () => void 
 }) {
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 animate-fade bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div 
         className="bg-dark-800 rounded-lg border border-dark-700 p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-red-400">错误详情</h3>
+          <h3 className="text-section text-ink-primary text-status-error">错误详情</h3>
           <button 
             onClick={onClose}
-            className="text-dark-400 hover:text-white"
+            className="text-dark-400 hover:text-ink-primary"
           >
             ✕
           </button>
@@ -264,8 +260,8 @@ function ErrorDialog({
 const levelColors: Record<string, string> = {
   DEBUG: 'text-gray-400',
   INFO: 'text-blue-400',
-  WARNING: 'text-yellow-400',
-  ERROR: 'text-red-400',
+  WARNING: 'text-status-warning',
+  ERROR: 'text-status-error',
   CRITICAL: 'text-red-500 font-bold',
 }
 
@@ -288,7 +284,7 @@ function LogDialog({
   })
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 animate-fade bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div 
         className="bg-dark-800 rounded-lg border border-dark-700 p-6 max-w-4xl w-full mx-4 max-h-[85vh] flex flex-col"
         onClick={e => e.stopPropagation()}
@@ -296,14 +292,14 @@ function LogDialog({
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <FileText className="w-5 h-5 text-plaita-400" />
-            <h3 className="text-lg font-semibold">服务日志</h3>
+            <h3 className="text-section text-ink-primary">服务日志</h3>
             <span className="text-sm text-dark-400">
               {serviceType} / {instanceId}
             </span>
           </div>
           <button 
             onClick={onClose}
-            className="text-dark-400 hover:text-white"
+            className="text-dark-400 hover:text-ink-primary"
           >
             <X className="w-5 h-5" />
           </button>
@@ -393,11 +389,11 @@ const InfraStatusIcon = ({ status }: { status: string }) => {
     case 'healthy':
       return <CheckCircle className="w-5 h-5 text-plaita-400" />
     case 'unhealthy':
-      return <XCircle className="w-5 h-5 text-red-400" />
+      return <XCircle className="w-5 h-5 text-status-error" />
     case 'disabled':
       return <Square className="w-5 h-5 text-dark-400" />
     default:
-      return <AlertCircle className="w-5 h-5 text-yellow-400" />
+      return <AlertCircle className="w-5 h-5 text-status-warning" />
   }
 }
 
@@ -405,7 +401,7 @@ const InfraStatusIcon = ({ status }: { status: string }) => {
 const InfraTypeIcon = ({ type }: { type: string }) => {
   switch (type) {
     case 'redis':
-      return <Database className="w-5 h-5 text-red-400" />
+      return <Database className="w-5 h-5 text-status-error" />
     case 'kafka':
       return <Server className="w-5 h-5 text-orange-400" />
     case 'database':
@@ -440,7 +436,7 @@ function InfrastructureCard({
   return (
     <div className={`bg-dark-800 rounded-lg border p-4 ${
       infra.status === 'healthy' ? 'border-plaita-500/30' : 
-      infra.status === 'unhealthy' ? 'border-red-500/30' :
+      infra.status === 'unhealthy' ? 'border-status-error/30' :
       'border-dark-700'
     }`}>
       <div className="flex items-center justify-between mb-3">
@@ -452,7 +448,7 @@ function InfrastructureCard({
           <InfraStatusIcon status={infra.status} />
           <button
             onClick={onEdit}
-            className="p-1 rounded hover:bg-dark-600 text-dark-400 hover:text-white"
+            className="p-1 rounded hover:bg-dark-600 text-dark-400 hover:text-ink-primary"
             title="编辑配置"
           >
             <Edit className="w-4 h-4" />
@@ -473,7 +469,7 @@ function InfrastructureCard({
           </p>
         )}
         {!infra.enabled && (
-          <p className="text-yellow-400">已禁用</p>
+          <p className="text-status-warning">已禁用</p>
         )}
       </div>
 
@@ -503,7 +499,7 @@ function InfrastructureCard({
           {checkMutation.isPending ? (
             <>
               <RefreshCw className="w-4 h-4 animate-spin" />
-              检测中...
+              检测中…
             </>
           ) : (
             <>
@@ -520,7 +516,7 @@ function InfrastructureCard({
           }}
           disabled={deleteMutation.isPending}
           className="flex items-center gap-1 px-3 py-1.5 rounded text-sm
-                     bg-dark-700 hover:bg-red-500/20 text-dark-400 hover:text-red-400"
+                     bg-dark-700 hover:bg-status-error-dim text-dark-400 hover:text-status-error"
           title="删除"
         >
           <Trash2 className="w-4 h-4" />
@@ -631,17 +627,17 @@ function InfrastructureFormDialog({
   const isPending = createMutation.isPending || updateMutation.isPending
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 animate-fade bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div 
         className="bg-dark-800 rounded-lg border border-dark-700 p-6 max-w-xl w-full mx-4 max-h-[85vh] overflow-auto"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
+          <h3 className="text-section text-ink-primary flex items-center gap-2">
             <Database className="w-5 h-5 text-plaita-400" />
             {isEdit ? '编辑基础设施服务' : '添加基础设施服务'}
           </h3>
-          <button onClick={onClose} className="text-dark-400 hover:text-white">
+          <button onClick={onClose} className="text-dark-400 hover:text-ink-primary">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -720,7 +716,7 @@ function InfrastructureFormDialog({
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium mb-1 text-dark-300">
-                    服务 ID <span className="text-red-400">*</span>
+                    服务 ID <span className="text-status-error">*</span>
                   </label>
                   <input
                     type="text"
@@ -734,7 +730,7 @@ function InfrastructureFormDialog({
                 </div>
                 <div>
                   <label className="block text-sm font-medium mb-1 text-dark-300">
-                    显示名称 <span className="text-red-400">*</span>
+                    显示名称 <span className="text-status-error">*</span>
                   </label>
                   <input
                     type="text"
@@ -823,7 +819,7 @@ function InfrastructureFormDialog({
               <button
                 type="button"
                 onClick={() => setShowAdvanced(!showAdvanced)}
-                className="flex items-center gap-2 text-sm text-dark-400 hover:text-white"
+                className="flex items-center gap-2 text-sm text-dark-400 hover:text-ink-primary"
               >
                 {showAdvanced ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 {showAdvanced ? '隐藏' : '显示'} Docker 配置
@@ -869,7 +865,7 @@ function InfrastructureFormDialog({
             {isPending ? (
               <>
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                保存中...
+                保存中…
               </>
             ) : (
               <>
@@ -932,7 +928,7 @@ function QuickTestDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 animate-fade bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div 
         className="bg-dark-800 rounded-lg border border-dark-700 p-6 max-w-5xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}
@@ -943,7 +939,7 @@ function QuickTestDialog({
             <Zap className="w-6 h-6 text-plaita-400" />
             快速测试
           </h3>
-          <button onClick={onClose} className="text-dark-400 hover:text-white">
+          <button onClick={onClose} className="text-dark-400 hover:text-ink-primary">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -981,7 +977,7 @@ function QuickTestDialog({
                   </div>
                   <p className="text-xs text-dark-400 mt-1 ml-7">{template.description}</p>
                   {template.required_services.length > 0 && (
-                    <p className="text-xs text-yellow-400/80 mt-1 ml-7">
+                    <p className="text-xs text-status-warning/80 mt-1 ml-7">
                       需要服务: {template.required_services.join(', ')}
                     </p>
                   )}
@@ -1020,7 +1016,7 @@ function QuickTestDialog({
                 {testMutation.isPending ? (
                   <>
                     <RefreshCw className="w-5 h-5 animate-spin" />
-                    运行中...
+                    运行中…
                   </>
                 ) : (
                   <>
@@ -1055,15 +1051,15 @@ function QuickTestDialog({
                 <div className={`p-4 rounded-lg border ${
                   testResult.success 
                     ? 'bg-plaita-500/10 border-plaita-500/30' 
-                    : 'bg-red-500/10 border-red-500/30'
+                    : 'bg-status-error-dim border-status-error/30'
                 }`}>
                   <div className="flex items-start gap-2 mb-3">
                     {testResult.success ? (
                       <CheckCircle className="w-5 h-5 text-plaita-400 flex-shrink-0 mt-0.5" />
                     ) : (
-                      <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                      <XCircle className="w-5 h-5 text-status-error flex-shrink-0 mt-0.5" />
                     )}
-                    <span className={`font-medium whitespace-pre-wrap ${testResult.success ? 'text-plaita-400' : 'text-red-400'}`}>
+                    <span className={`font-medium whitespace-pre-wrap ${testResult.success ? 'text-plaita-400' : 'text-status-error'}`}>
                       {testResult.message}
                     </span>
                   </div>
@@ -1095,8 +1091,8 @@ function QuickTestDialog({
                   )}
                   
                   {testResult.error && (
-                    <div className="p-3 rounded bg-red-500/10 border border-red-500/20">
-                      <p className="text-sm font-medium text-red-400 mb-1">错误详情:</p>
+                    <div className="p-3 rounded bg-status-error-dim border border-red-500/20">
+                      <p className="text-sm font-medium text-status-error mb-1">错误详情:</p>
                       <pre className="text-xs text-red-300 whitespace-pre-wrap">{testResult.error}</pre>
                     </div>
                   )}
@@ -1141,18 +1137,18 @@ function MemoryModeNotice({ clusterId }: { clusterId: string }) {
   if (!isMemoryMode) return null
 
   return (
-    <div className="mb-4 p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+    <div className="mb-4 p-4 rounded-lg bg-yellow-500/10 border border-status-warning/30">
       <div className="flex items-start gap-3">
-        <div className="p-2 rounded bg-yellow-500/20">
-          <AlertCircle className="w-5 h-5 text-yellow-400" />
+        <div className="p-2 rounded bg-status-warning-dim">
+          <AlertCircle className="w-5 h-5 text-status-warning" />
         </div>
         <div>
-          <h3 className="font-medium text-yellow-400 mb-1">纯内存模式</h3>
-          <p className="text-sm text-yellow-400/80">
+          <h3 className="font-medium text-status-warning mb-1">纯内存模式</h3>
+          <p className="text-sm text-status-warning/80">
             当前集群配置为纯内存模式，不需要配置外部基础设施服务（如 Redis）。
             所有状态存储、事件总线和任务队列都使用内存实现，服务重启后数据会丢失。
           </p>
-          <p className="text-xs text-yellow-400/60 mt-2">
+          <p className="text-xs text-status-warning/60 mt-2">
             如需持久化存储，请在"集群配置"中将存储后端切换为 Redis 或数据库。
           </p>
         </div>
@@ -1328,7 +1324,7 @@ function BasicSettingsForm({
           </div>
           
           {formData.storage_type === 'memory' && (
-            <div className="p-2 rounded bg-yellow-500/10 border border-yellow-500/20 text-xs text-yellow-400">
+            <div className="p-2 rounded bg-yellow-500/10 border border-yellow-500/20 text-xs text-status-warning">
               ⚠️ 纯内存模式下，服务重启后所有状态会丢失，仅适用于开发测试
             </div>
           )}
@@ -1347,13 +1343,13 @@ function BasicSettingsForm({
           </div>
           <div>
             <label className="block text-xs text-dark-400 mb-1">存储后端</label>
-            <span className={`text-sm font-mono ${formData.storage_type === 'memory' ? 'text-yellow-400' : ''}`}>
+            <span className={`text-sm font-mono ${formData.storage_type === 'memory' ? 'text-status-warning' : ''}`}>
               {formData.storage_type}
             </span>
           </div>
           <div>
             <label className="block text-xs text-dark-400 mb-1">事件总线</label>
-            <span className={`text-sm font-mono ${formData.eventbus_type === 'memory' ? 'text-yellow-400' : ''}`}>
+            <span className={`text-sm font-mono ${formData.eventbus_type === 'memory' ? 'text-status-warning' : ''}`}>
               {formData.eventbus_type}
             </span>
           </div>
@@ -1533,17 +1529,17 @@ function ServiceConfigFormDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 animate-fade bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div 
         className="bg-dark-800 rounded-lg border border-dark-700 p-6 max-w-xl w-full mx-4 max-h-[85vh] overflow-auto"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
+          <h3 className="text-section text-ink-primary flex items-center gap-2">
             <Server className="w-5 h-5 text-plaita-400" />
             {isEdit ? '编辑服务配置' : '添加服务'}
           </h3>
-          <button onClick={onClose} className="text-dark-400 hover:text-white">
+          <button onClick={onClose} className="text-dark-400 hover:text-ink-primary">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -1628,7 +1624,7 @@ function ServiceConfigFormDialog({
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium mb-1 text-dark-300">
-                    服务类型 ID <span className="text-red-400">*</span>
+                    服务类型 ID <span className="text-status-error">*</span>
                   </label>
                   <input
                     type="text"
@@ -1642,7 +1638,7 @@ function ServiceConfigFormDialog({
                 </div>
                 <div>
                   <label className="block text-sm font-medium mb-1 text-dark-300">
-                    显示名称 <span className="text-red-400">*</span>
+                    显示名称 <span className="text-status-error">*</span>
                   </label>
                   <input
                     type="text"
@@ -1704,7 +1700,7 @@ function ServiceConfigFormDialog({
               <button
                 type="button"
                 onClick={() => setShowAdvanced(!showAdvanced)}
-                className="flex items-center gap-2 text-sm text-dark-400 hover:text-white"
+                className="flex items-center gap-2 text-sm text-dark-400 hover:text-ink-primary"
               >
                 {showAdvanced ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 {showAdvanced ? '隐藏高级配置' : '显示高级配置'}
@@ -1799,7 +1795,7 @@ function ServiceConfigFormDialog({
                           <button
                             type="button"
                             onClick={() => handleRemoveEnv(idx)}
-                            className="px-2 text-dark-400 hover:text-red-400"
+                            className="px-2 text-dark-400 hover:text-status-error"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -1954,7 +1950,7 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
           <span className="font-medium">集群配置</span>
           <span className="text-sm text-dark-500">({clusterId})</span>
           {hasChanges && (
-            <span className="px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400 text-xs">
+            <span className="px-2 py-0.5 rounded bg-status-warning-dim text-status-warning text-xs">
               未保存
             </span>
           )}
@@ -1972,7 +1968,7 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
               className={`px-3 py-1 rounded text-sm ${
                 viewMode === 'form' 
                   ? 'bg-plaita-500 text-white' 
-                  : 'text-dark-400 hover:text-white'
+                  : 'text-dark-400 hover:text-ink-primary'
               }`}
             >
               表单
@@ -1982,7 +1978,7 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
               className={`px-3 py-1 rounded text-sm ${
                 viewMode === 'json' 
                   ? 'bg-plaita-500 text-white' 
-                  : 'text-dark-400 hover:text-white'
+                  : 'text-dark-400 hover:text-ink-primary'
               }`}
             >
               JSON
@@ -2065,14 +2061,14 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
                           default_instances: config.default_instances || 1,
                           max_instances: config.max_instances || 10
                         })}
-                        className="p-1.5 rounded hover:bg-dark-700 text-dark-400 hover:text-white"
+                        className="p-1.5 rounded hover:bg-dark-700 text-dark-400 hover:text-ink-primary"
                         title="编辑"
                       >
                         <Edit className="w-4 h-4" />
                       </button>
                       <button
                         onClick={() => handleDeleteService(type)}
-                        className="p-1.5 rounded hover:bg-red-500/20 text-dark-400 hover:text-red-400"
+                        className="p-1.5 rounded hover:bg-status-error-dim text-dark-400 hover:text-status-error"
                         title="删除"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -2099,7 +2095,7 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
       ) : (
         <>
           {parseError && (
-            <div className="p-3 rounded bg-red-500/20 text-red-400 text-sm">
+            <div className="p-3 rounded bg-status-error-dim text-status-error text-sm">
               {parseError}
             </div>
           )}
@@ -2278,12 +2274,12 @@ export default function Cluster() {
   const runningCount = instancesData?.instances.filter(i => i.status === 'running').length || 0
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-5">
       {/* 标题栏 */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">集群管理</h1>
-          <p className="text-dark-400 mt-1">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-page-title text-ink-primary">集群管理</h1>
+          <p className="text-caption text-ink-muted mt-1">
             {activeCluster && (
               <>
                 当前集群: <span className="text-plaita-400 font-medium">{activeCluster.name}</span>
@@ -2292,41 +2288,35 @@ export default function Cluster() {
             )}
             当前模式: <span className="text-plaita-400 font-medium">{serviceTypesData?.mode || 'process'}</span>
             {' | '}
-            运行中实例: <span className="text-plaita-400 font-medium">{runningCount}</span>
+            运行中实例: <span className="text-plaita-400 font-medium tabular-nums">{runningCount}</span>
           </p>
         </div>
-        
-        <div className="flex items-center gap-2">
+
+        <div className="flex items-center gap-2 shrink-0">
           {/* 快速测试按钮 - 总是显示 */}
-          <button
-            onClick={() => setShowQuickTest(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded bg-plaita-500/20 text-plaita-400 
-                       hover:bg-plaita-500/30"
-          >
-            <Zap className="w-4 h-4" />
+          <Button variant="secondary" onClick={() => setShowQuickTest(true)}>
+            <Zap size={14} className="text-plaita-400" />
             快速测试
-          </button>
-          
+          </Button>
+
           {currentTab === 'services' && (
             <>
-              <button
+              <Button
+                variant="secondary"
                 onClick={() => clearFailedMutation.mutate()}
                 disabled={clearFailedMutation.isPending || !instancesData?.instances.some(i => i.status !== 'running')}
-                className="flex items-center gap-2 px-4 py-2 rounded bg-dark-700 text-dark-300 
-                           hover:bg-dark-600 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Trash2 className="w-4 h-4" />
+                <Trash2 size={14} />
                 清除失败记录
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="danger"
                 onClick={() => stopAllMutation.mutate()}
                 disabled={stopAllMutation.isPending || runningCount === 0}
-                className="flex items-center gap-2 px-4 py-2 rounded bg-red-500/20 text-red-400 
-                           hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Square className="w-4 h-4" />
+                <Square size={14} />
                 停止全部
-              </button>
+              </Button>
             </>
           )}
         </div>
@@ -2339,7 +2329,7 @@ export default function Cluster() {
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors
             ${currentTab === 'services' 
               ? 'border-plaita-500 text-plaita-400' 
-              : 'border-transparent text-dark-400 hover:text-white'}`}
+              : 'border-transparent text-dark-400 hover:text-ink-primary'}`}
         >
           <div className="flex items-center gap-2">
             <Server className="w-4 h-4" />
@@ -2351,7 +2341,7 @@ export default function Cluster() {
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors
             ${currentTab === 'infrastructure' 
               ? 'border-plaita-500 text-plaita-400' 
-              : 'border-transparent text-dark-400 hover:text-white'}`}
+              : 'border-transparent text-dark-400 hover:text-ink-primary'}`}
         >
           <div className="flex items-center gap-2">
             <Database className="w-4 h-4" />
@@ -2360,7 +2350,7 @@ export default function Cluster() {
               <span className={`px-1.5 py-0.5 rounded text-[10px] ${
                 infraData.infrastructure.every(i => i.status === 'healthy' || i.status === 'disabled')
                   ? 'bg-plaita-500/20 text-plaita-400'
-                  : 'bg-yellow-500/20 text-yellow-400'
+                  : 'bg-status-warning-dim text-status-warning'
               }`}>
                 {infraData.infrastructure.filter(i => i.status === 'healthy').length}/{infraData.infrastructure.filter(i => i.enabled).length}
               </span>
@@ -2372,7 +2362,7 @@ export default function Cluster() {
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors
             ${currentTab === 'config' 
               ? 'border-plaita-500 text-plaita-400' 
-              : 'border-transparent text-dark-400 hover:text-white'}`}
+              : 'border-transparent text-dark-400 hover:text-ink-primary'}`}
         >
           <div className="flex items-center gap-2">
             <Settings className="w-4 h-4" />
@@ -2386,7 +2376,7 @@ export default function Cluster() {
         <>
           {/* 可用服务类型 */}
           <section>
-            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+            <h2 className="text-section text-ink-primary mb-4 flex items-center gap-2">
               <Box className="w-5 h-5 text-plaita-400" />
               可用服务
             </h2>
@@ -2404,7 +2394,7 @@ export default function Cluster() {
 
           {/* 托管实例列表 */}
           <section>
-            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+            <h2 className="text-section text-ink-primary mb-4 flex items-center gap-2">
               <Server className="w-5 h-5 text-plaita-400" />
               托管实例
               <span className="text-sm text-dark-400 font-normal">
@@ -2459,7 +2449,7 @@ export default function Cluster() {
           )}
           
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold flex items-center gap-2">
+            <h2 className="text-section text-ink-primary flex items-center gap-2">
               <Database className="w-5 h-5 text-plaita-400" />
               基础设施服务
               <span className="text-sm text-dark-400 font-normal">

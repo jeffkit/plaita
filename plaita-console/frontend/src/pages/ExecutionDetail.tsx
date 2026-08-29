@@ -114,7 +114,7 @@ export default function ExecutionDetail() {
       {/* 头部 */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
-          <Button variant="ghost" size="sm" onClick={() => navigate('/executions')} title="返回列表">
+          <Button variant="ghost" size="sm" onClick={() => navigate('/executions')} aria-label="返回列表" title="返回列表">
             <ArrowLeft size={16} />
           </Button>
           <div className="min-w-0">
@@ -303,8 +303,8 @@ function ResumeDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-elevated border border-line-strong rounded-xl w-full max-w-lg shadow-pop">
+    <div className="fixed inset-0 animate-fade bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+      <div className="bg-elevated border border-line-strong rounded-xl w-full max-w-lg shadow-pop animate-pop">
         <div className="flex items-center justify-between px-6 py-4 border-b border-line">
           <h2 className="text-section text-ink-primary">恢复执行</h2>
           <button onClick={onClose} className="p-1 rounded-md text-ink-muted hover:text-ink-primary hover:bg-dark-700 transition-colors">
