@@ -73,7 +73,6 @@ export default function SourceViewPanel({ flow, onClose }: SourceViewPanelProps)
       <pre className="flex-1 overflow-auto rounded bg-dark-800 border border-dark-700 p-3 text-xs font-mono text-dark-100 whitespace-pre">
         {text}
       </pre>
-      <style>{`.input{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:6px 8px;color:#e2e8f0}`}</style>
     </div>
   )
 }

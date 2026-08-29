@@ -89,7 +89,6 @@ export default function DryRunPanel({ flowJson, onClose }: DryRunPanelProps) {
         ))}
         {nodes.length === 0 && <p className="text-dark-400">无节点结果</p>}
       </div>
-      <style>{`.input{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:6px 8px;color:#e2e8f0}`}</style>
     </div>
   )
 }

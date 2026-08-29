@@ -73,38 +73,39 @@ export function resolveNodeTypeConfig(type: string): {
   return { shape: 'rect', color: hashColor(type), icon: '◆' }
 }
 
-// 类型面色板（标准 Tailwind 名称，构建期可静态提取）
-const COLOR_STYLES: Record<string, { bar: string; chipBg: string; text: string }> = {
-  violet:  { bar: 'bg-violet-500',  chipBg: 'bg-violet-500/20',  text: 'text-violet-300' },
-  sky:     { bar: 'bg-sky-500',     chipBg: 'bg-sky-500/20',     text: 'text-sky-300' },
-  amber:   { bar: 'bg-amber-500',   chipBg: 'bg-amber-500/20',   text: 'text-amber-300' },
-  emerald: { bar: 'bg-emerald-500', chipBg: 'bg-emerald-500/20', text: 'text-emerald-300' },
-  slate:   { bar: 'bg-slate-400',   chipBg: 'bg-slate-400/20',   text: 'text-slate-300' },
-  teal:    { bar: 'bg-teal-500',    chipBg: 'bg-teal-500/20',    text: 'text-teal-300' },
-  cyan:    { bar: 'bg-cyan-500',    chipBg: 'bg-cyan-500/20',    text: 'text-cyan-300' },
-  indigo:  { bar: 'bg-indigo-500',  chipBg: 'bg-indigo-500/20',  text: 'text-indigo-300' },
-  rose:    { bar: 'bg-rose-500',    chipBg: 'bg-rose-500/20',    text: 'text-rose-300' },
-  fuchsia: { bar: 'bg-fuchsia-500', chipBg: 'bg-fuchsia-500/20', text: 'text-fuchsia-300' },
-  purple:  { bar: 'bg-purple-500',  chipBg: 'bg-purple-500/20',  text: 'text-purple-300' },
-  orange:  { bar: 'bg-orange-500',  chipBg: 'bg-orange-500/20',  text: 'text-orange-300' },
-  yellow:  { bar: 'bg-yellow-500',  chipBg: 'bg-yellow-500/20',  text: 'text-yellow-300' },
-  red:     { bar: 'bg-red-500',     chipBg: 'bg-red-500/20',     text: 'text-red-300' },
-  green:   { bar: 'bg-green-500',   chipBg: 'bg-green-500/20',   text: 'text-green-300' },
-  pink:    { bar: 'bg-pink-500',    chipBg: 'bg-pink-500/20',    text: 'text-pink-300' },
-  gray:    { bar: 'bg-gray-400',    chipBg: 'bg-gray-400/20',    text: 'text-gray-300' },
-  plaita:  { bar: 'bg-plaita-500',  chipBg: 'bg-plaita-500/20',  text: 'text-plaita-400' },
-  blue:    { bar: 'bg-blue-500',    chipBg: 'bg-blue-500/20',    text: 'text-blue-300' },
+// 类型面色板（左色条 + 图标 chip 底；标准 Tailwind 名称，构建期可静态提取）
+const COLOR_STYLES: Record<string, { bar: string; chipBg: string }> = {
+  violet:  { bar: 'bg-violet-500',  chipBg: 'bg-violet-500/15' },
+  sky:     { bar: 'bg-sky-500',     chipBg: 'bg-sky-500/15' },
+  amber:   { bar: 'bg-amber-500',   chipBg: 'bg-amber-500/15' },
+  emerald: { bar: 'bg-emerald-500', chipBg: 'bg-emerald-500/15' },
+  slate:   { bar: 'bg-slate-400',   chipBg: 'bg-slate-400/15' },
+  teal:    { bar: 'bg-teal-500',    chipBg: 'bg-teal-500/15' },
+  cyan:    { bar: 'bg-cyan-500',    chipBg: 'bg-cyan-500/15' },
+  indigo:  { bar: 'bg-indigo-500',  chipBg: 'bg-indigo-500/15' },
+  rose:    { bar: 'bg-rose-500',    chipBg: 'bg-rose-500/15' },
+  fuchsia: { bar: 'bg-fuchsia-500', chipBg: 'bg-fuchsia-500/15' },
+  purple:  { bar: 'bg-purple-500',  chipBg: 'bg-purple-500/15' },
+  orange:  { bar: 'bg-orange-500',  chipBg: 'bg-orange-500/15' },
+  yellow:  { bar: 'bg-yellow-500',  chipBg: 'bg-yellow-500/15' },
+  red:     { bar: 'bg-red-500',     chipBg: 'bg-red-500/15' },
+  green:   { bar: 'bg-green-500',   chipBg: 'bg-green-500/15' },
+  pink:    { bar: 'bg-pink-500',    chipBg: 'bg-pink-500/15' },
+  gray:    { bar: 'bg-gray-400',    chipBg: 'bg-gray-400/15' },
+  plaita:  { bar: 'bg-plaita-500',  chipBg: 'bg-plaita-500/15' },
+  blue:    { bar: 'bg-blue-500',    chipBg: 'bg-blue-500/15' },
 }
 
 export type NodeStatus = 'executed' | 'current' | 'suspended' | 'pending' | 'error' | 'idle'
 
-export const statusStyles: Record<NodeStatus, { bg: string; border: string; text: string }> = {
-  executed: { bg: 'bg-plaita-500/30', border: 'border-plaita-500', text: 'text-plaita-400' },
-  current: { bg: 'bg-blue-500/30', border: 'border-blue-500 animate-pulse', text: 'text-blue-400' },
-  suspended: { bg: 'bg-yellow-500/30', border: 'border-yellow-500', text: 'text-yellow-400' },
-  pending: { bg: 'bg-dark-700', border: 'border-dark-500', text: 'text-dark-400' },
-  error: { bg: 'bg-red-500/30', border: 'border-red-500', text: 'text-red-400' },
-  idle: { bg: 'bg-dark-700', border: 'border-dark-600', text: 'text-dark-300' },
+// 节点状态只表达在底色/描边上，节点名保持 ink-primary（DESIGN.md §5）
+export const statusStyles: Record<NodeStatus, { bg: string; border: string }> = {
+  executed: { bg: 'bg-status-success-dim', border: 'border-status-success/40' },
+  current: { bg: 'bg-status-running-dim', border: 'border-status-running/50' },
+  suspended: { bg: 'bg-status-warning-dim', border: 'border-status-warning/40' },
+  pending: { bg: 'bg-inset', border: 'border-line' },
+  error: { bg: 'bg-status-error-dim', border: 'border-status-error/40' },
+  idle: { bg: 'bg-surface', border: 'border-line' },
 }
 
 export interface NodeLabelData {
@@ -119,20 +120,27 @@ export function renderNodeLabel({ type, name, status }: NodeLabelData) {
   const cs = COLOR_STYLES[cfg.color] ?? COLOR_STYLES.gray
   const displayName = name.length > 15 ? name.slice(0, 15) + '...' : name
   return (
-    <div className={`relative px-3 py-2 rounded-lg border-2 ${style.bg} ${style.border} min-w-[130px] overflow-hidden`}>
+    <div className={`relative px-3 py-2 rounded-lg border shadow-card ${style.bg} ${style.border} min-w-[140px] overflow-hidden`}>
       {/* 族别左色条：一眼区分节点类别 */}
       <span className={`absolute left-0 top-0 bottom-0 w-1 ${cs.bar}`} />
       <div className="flex items-center gap-2">
-        <span className={`w-6 h-6 flex items-center justify-center rounded ${cs.chipBg} text-sm`}>{cfg.icon}</span>
+        <span className={`w-6 h-6 flex items-center justify-center rounded-md ${cs.chipBg} text-[13px] shrink-0`}>{cfg.icon}</span>
         <div className="min-w-0">
-          <div className={`font-medium text-sm truncate ${style.text}`}>{displayName}</div>
-          <div className={`text-[10px] leading-tight ${cs.text} opacity-70`}>
+          {/* 节点名 = 数据声道（mono，DESIGN.md §1） */}
+          <div className="font-mono text-[13px] leading-4 font-medium truncate text-ink-primary">{displayName}</div>
+          <div className="text-[10px] leading-tight font-mono text-ink-faint truncate">
             {type}{cfg.family ? ` · ${cfg.family}` : ''}
           </div>
         </div>
       </div>
       {status === 'executed' && (
-        <span className="absolute top-1 right-1 text-plaita-400 text-xs">✓</span>
+        <span className="absolute top-1 right-1.5 text-status-success text-xs">✓</span>
+      )}
+      {status === 'current' && (
+        <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-status-running animate-breathe" />
+      )}
+      {status === 'error' && (
+        <span className="absolute top-1 right-1.5 text-status-error text-xs">!</span>
       )}
     </div>
   )
@@ -149,11 +157,11 @@ export interface PlaitaNodeData {
 function PlaitaNodeComponent({ data, selected }: NodeProps) {
   const d = data as PlaitaNodeData
   return (
-    <div className={`relative ${selected ? 'ring-2 ring-plaita-400 rounded-lg' : ''}`}>
-      <Handle type="target" position={Position.Top} id="in" className="!bg-plaita-500" />
+    <div className={`relative ${selected ? 'ring-2 ring-plaita-400/80 rounded-lg' : ''}`}>
+      <Handle type="target" position={Position.Top} id="in" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
       {renderNodeLabel({ type: d.type, name: d.name, status: d.status ?? 'idle' })}
-      <Handle type="source" position={Position.Bottom} id="true" className="!bg-plaita-500" />
-      <Handle type="source" position={Position.Right} id="false" className="!bg-blue-500" />
+      <Handle type="source" position={Position.Bottom} id="true" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
+      <Handle type="source" position={Position.Right} id="false" className="!bg-dark-400 !w-2.5 !h-2.5 !border-2 !border-canvas" />
     </div>
   )
 }

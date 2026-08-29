@@ -50,7 +50,7 @@ function CreateClusterDialog({
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div className="fixed inset-0 animate-fade z-50 flex items-center justify-center bg-black/50">
       <div className="bg-dark-800 rounded-lg border border-dark-700 w-[480px] max-w-[90vw]">
         <div className="flex items-center justify-between p-4 border-b border-dark-700">
           <h3 className="text-lg font-semibold">创建新集群</h3>

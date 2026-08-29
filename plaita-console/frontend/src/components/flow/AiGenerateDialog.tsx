@@ -101,7 +101,7 @@ export default function AiGenerateDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="fixed inset-0 animate-fade z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
         className="w-[720px] max-h-[85vh] overflow-y-auto bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4"
         onClick={(e) => e.stopPropagation()}
