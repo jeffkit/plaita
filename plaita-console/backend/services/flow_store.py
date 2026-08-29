@@ -8,7 +8,7 @@ API 层（M3）可通过 ``run_in_executor`` 调用，避免引入 aiosqlite 额
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select
@@ -17,9 +17,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 try:
-    from ..models.flow import Base, FlowRecord, FlowVersion, NodeDescriptor
+    from ..models.flow import Base, CopilotThread, FlowRecord, FlowVersion, NodeDescriptor
 except ImportError:
-    from models.flow import Base, FlowRecord, FlowVersion, NodeDescriptor
+    from models.flow import Base, CopilotThread, FlowRecord, FlowVersion, NodeDescriptor
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +321,60 @@ class FlowStore:
                 raise ValueError(f"节点描述 {node_type} 已存在") from e
             session.refresh(row)
             return self._descriptor_to_out(row)
+
+
+    # ---- copilot threads ----
+
+    def upsert_copilot_thread(
+        self,
+        thread_id: str,
+        flow_id: str,
+        version: str = "",
+        title: str = "",
+        bump_message: bool = False,
+    ) -> None:
+        """记录/更新 Copilot 会话与流程的关联（不存在则创建）。"""
+        from datetime import datetime
+
+        with self._session_local() as session:  # type: Session
+            record = session.scalars(
+                select(CopilotThread).where(CopilotThread.thread_id == thread_id)
+            ).first()
+            if record is None:
+                record = CopilotThread(
+                    thread_id=thread_id, flow_id=flow_id, version=version, title=title
+                )
+                session.add(record)
+            else:
+                record.flow_id = flow_id or record.flow_id
+                if version:
+                    record.version = version
+                if title:
+                    record.title = title
+            if bump_message:
+                record.message_count = (record.message_count or 0) + 1
+            record.updated_at = datetime.utcnow()
+            session.commit()
+
+    def list_copilot_threads(self, flow_id: str) -> List[Dict]:
+        """列出某流程的 Copilot 会话（最近更新优先）。"""
+        with self._session_local() as session:  # type: Session
+            records = session.scalars(
+                select(CopilotThread)
+                .where(CopilotThread.flow_id == flow_id)
+                .order_by(CopilotThread.updated_at.desc())
+            ).all()
+            return [
+                {
+                    "thread_id": r.thread_id,
+                    "flow_id": r.flow_id,
+                    "version": r.version,
+                    "title": r.title,
+                    "message_count": r.message_count,
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                }
+                for r in records
+            ]
 
     def delete_node_descriptor(self, node_type: str) -> bool:
         with self._session_local() as session:

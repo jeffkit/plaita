@@ -327,6 +327,7 @@ export default function FlowEditor() {
         <CopilotPanel
           open={showCopilot}
           flowContext={copilotContext}
+          flowId={flowId || ''}
           onApplyFlow={applyAiFlow}
           onClose={() => setShowCopilot(false)}
         />

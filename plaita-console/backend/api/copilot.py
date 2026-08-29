@@ -19,10 +19,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 try:
     from ..config import get_settings
-    from .services import ai_flow
+    from .services import ai_flow, flow_store
 except ImportError:  # 直接以 backend 为工作目录启动（python run.py）
     from config import get_settings
-    from services import ai_flow
+    from services import ai_flow, flow_store
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,16 @@ async def copilot_run(request: Request):
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"detail": f"非法请求体: {exc}"})
 
+    # 会话持久化：thread_id ↔ flow_id/version 关联入库（审计与回看）
+    flow_id = request.headers.get("x-flow-id", "")
+    if flow_id and isinstance(body.get("threadId"), str) and body["threadId"]:
+        try:
+            flow_store.get_flow_store().upsert_copilot_thread(
+                thread_id=body["threadId"], flow_id=flow_id, bump_message=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("copilot thread upsert 失败: %s", exc)
+
     url = base if base.endswith("/agui") else f"{base.rstrip('/')}/agui"
     headers = {"content-type": "application/json"}
     if settings.recursive_agui_api_key:
@@ -141,3 +151,12 @@ async def copilot_run(request: Request):
             yield f"data: {payload}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.get("/copilot/threads", tags=["admin", "copilot"])
+async def list_copilot_threads(flow_id: str):
+    """列出某流程的 Copilot 会话（最近更新优先）。"""
+    try:
+        return {"threads": flow_store.get_flow_store().list_copilot_threads(flow_id)}
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"detail": str(exc)})

@@ -1,8 +1,11 @@
 import { Component, useEffect, useMemo, useRef, type ReactNode } from 'react'
-import { CopilotKit, useCopilotChat, useCopilotReadable } from '@copilotkit/react-core'
+import { CopilotKit, useCopilotAction, useCopilotChat, useCopilotReadable } from '@copilotkit/react-core'
 import { CopilotSidebar } from '@copilotkit/react-ui'
 import { HttpAgent } from '@ag-ui/client'
 import '@copilotkit/react-ui/styles.css'
+import { useFlowEditor } from '../../stores/flowEditor'
+import { api } from '../../services/api'
+import { flowToJson } from './flowConverter'
 
 // 错误边界：Copilot 异常时不拖垮整个编辑器
 class CopilotErrorBoundary extends Component<{ children: ReactNode }, { err?: Error }> {
@@ -23,11 +26,13 @@ class CopilotErrorBoundary extends Component<{ children: ReactNode }, { err?: Er
 }
 
 /**
- * 编排页 Copilot 面板（方案 docs/copilot-agent-plan.md M1）。
+ * 编排页 Copilot 面板（方案 docs/copilot-agent-plan.md M1/M2）。
  *
  * - CopilotKit selfManagedAgents 直连后端 /api/copilot（AG-UI 协议，反代 recursive /agui）
  * - 当前画布状态经 useCopilotReadable 注入每轮请求的 context（后端拼进 user 消息）
  * - agent 回复中的 ```plaita-flow 代码块 = 完整 flow IR，自动应用（onApplyFlow）
+ * - 前端工具（M2：recursive client tools 桥实时调用）：apply_flow / read_flow /
+ *   select_node / dry_run——dry_run 让 agent 自检修改后的流程是否可执行（自纠闭环）
  */
 
 // 从文本中提取最后一个 ```plaita-flow 代码块并解析为 IR
@@ -74,29 +79,99 @@ function CopilotInner({
   flowContext: string
   onApplyFlow: (ir: Record<string, unknown>) => void
 }) {
+  const nodes = useFlowEditor((s) => s.nodes)
+  const edges = useFlowEditor((s) => s.edges)
+  const meta = useFlowEditor((s) => s.meta)
+  const setSelected = useFlowEditor((s) => s.setSelected)
+
   useCopilotReadable({
     description: '当前画布的完整 flow JSON 与状态',
     value: flowContext,
   })
   useAutoApplyFlow(onApplyFlow)
+
+  // ── 前端工具（recursive client tools 桥实时调用）────────────────────
+
+  useCopilotAction({
+    name: 'apply_flow',
+    description: '把完整的新 flow IR 应用到画布（整体替换，自动刷新）',
+    parameters: [
+      { name: 'ir', type: 'object', description: '完整 flow IR（含 nodes 数组）', required: true },
+    ],
+    handler: async ({ ir }) => {
+      onApplyFlow(ir as Record<string, unknown>)
+      return '已应用到画布（未保存）'
+    },
+  })
+
+  useCopilotAction({
+    name: 'read_flow',
+    description: '读取当前画布的 flow JSON、dirty 状态与子图栈',
+    parameters: [],
+    handler: async () => flowContext,
+  })
+
+  useCopilotAction({
+    name: 'select_node',
+    description: '在画布上选中并高亮指定节点',
+    parameters: [
+      { name: 'nodeId', type: 'string', description: '节点 id', required: true },
+    ],
+    handler: async ({ nodeId }) => {
+      const exists = useFlowEditor.getState().nodes.some((n) => n.id === nodeId)
+      if (!exists) return `节点 ${nodeId} 不存在`
+      setSelected(nodeId)
+      return `已选中 ${nodeId}`
+    },
+  })
+
+  useCopilotAction({
+    name: 'dry_run',
+    description:
+      '对当前画布流程做真实试跑（引擎执行），返回每个节点状态与错误——用于自检修改后的流程是否可执行',
+    parameters: [
+      { name: 'input', type: 'object', description: '流程入参（$INPUT）', required: false },
+    ],
+    handler: async ({ input }) => {
+      const def = flowToJson(nodes as never[], edges as never[], { ...meta })
+      const res = await api.dryRun({
+        flowJson: JSON.stringify(def),
+        input: (input as Record<string, unknown>) ?? {},
+      })
+      const summary = (res.nodes || [])
+        .map((n) => {
+          const base = `[${n.status}] ${n.id ?? '(未知节点)'}`
+          return n.error ? `${base}（${String(n.error).slice(0, 120)}）` : base
+        })
+        .join('\n')
+      return `flowError: ${res.error || '无'}\n节点执行:\n${summary || '（无节点执行）'}`
+    },
+  })
+
   return null
 }
 
 export default function CopilotPanel({
   open,
   flowContext,
+  flowId,
   onApplyFlow,
   onClose,
 }: {
   open: boolean
   flowContext: string
+  flowId: string
   onApplyFlow: (ir: Record<string, unknown>) => void
   onClose: () => void
 }) {
   const agent = useMemo(
     // @copilotkit 内嵌的 @ag-ui/core 实例与直接依赖在类型上有私有字段差异，运行时同源
-    () => new HttpAgent({ url: '/api/copilot' }) as never,
-    []
+    () =>
+      new HttpAgent({
+        url: '/api/copilot',
+        headers: flowId ? { 'X-Flow-Id': flowId } : undefined,
+      }) as never,
+    [flowId]
   )
 
   return (

@@ -81,3 +81,23 @@ class NodeDescriptor(Base):
     updated_at = Column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class CopilotThread(Base):
+    """Copilot 会话（AG-UI thread 与编排流程的关联，支持历史回看/审计）
+
+    flow_id 不加外键：thread 可指向已被删除的 flow，会话历史独立留存。
+    """
+
+    __tablename__ = "copilot_threads"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    thread_id = Column(String(128), nullable=False, unique=True, index=True)
+    flow_id = Column(String(128), nullable=False, index=True)
+    version = Column(String(64), nullable=False, default="")
+    title = Column(String(256), nullable=False, default="")
+    message_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
