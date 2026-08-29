@@ -2,56 +2,245 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --plaita-green: #22c55e;
-  --plaita-dark: #0f172a;
+/*
+ * 设计 token（权威定义见 ../DESIGN.md）
+ * 全部颜色为 CSS 变量（R G B 三元组），由 tailwind.config.js 以 rgb(var(--x) / <alpha>) 引用。
+ * 主题切换：html[data-theme="dark" | "light"]，默认跟随系统，localStorage 键 plaita-theme 持久化。
+ * 规则：禁止在组件里写一次性 hex；新颜色先在这里和 tailwind.config.js 落 token。
+ */
+
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* 背景四层（DESIGN.md §2.1） */
+  --c-canvas: 11 13 18;
+  --c-surface: 16 19 26;
+  --c-elevated: 21 26 35;
+  --c-inset: 13 16 22;
+
+  /* 描边基色（白透明，DESIGN.md §2.3） */
+  --c-line: 255 255 255;
+
+  /* 品牌绿上的文字色：暗色主题绿较亮配深字，亮色主题绿较深配白字 */
+  --c-on-accent: 5 46 22;
+
+  /* 文字四档（DESIGN.md §2.2） */
+  --c-ink-primary: 232 235 240;
+  --c-ink-secondary: 168 176 191;
+  --c-ink-muted: 107 116 132;
+  --c-ink-faint: 69 77 92;
+
+  /* 语义状态色（DESIGN.md §2.5；dim 底 = 同变量 12% 透明） */
+  --c-status-running: 74 222 128;
+  --c-status-success: 52 211 153;
+  --c-status-error: 248 113 113;
+  --c-status-warning: 251 191 36;
+  --c-status-pending: 154 163 178;
+  --c-status-cancelled: 110 119 135;
+
+  /* 品牌绿 */
+  --c-plaita-50: 240 253 244;
+  --c-plaita-100: 220 252 231;
+  --c-plaita-200: 187 247 208;
+  --c-plaita-300: 134 239 172;
+  --c-plaita-400: 74 222 128;
+  --c-plaita-500: 34 197 94;
+  --c-plaita-600: 22 163 74;
+  --c-plaita-700: 21 128 61;
+  --c-plaita-800: 22 101 52;
+  --c-plaita-900: 20 83 45;
+
+  /* 存量灰阶（键名兼容旧页面） */
+  --c-dark-50: 244 246 249;
+  --c-dark-100: 232 235 240;
+  --c-dark-200: 201 207 218;
+  --c-dark-300: 168 176 191;
+  --c-dark-400: 107 116 132;
+  --c-dark-500: 69 77 92;
+  --c-dark-600: 29 35 48;
+  --c-dark-700: 30 36 48;
+  --c-dark-800: 16 19 26;
+  --c-dark-900: 11 13 18;
+  --c-dark-950: 7 8 11;
+
+  /* 阴影（只负责浮起，描边归 line token） */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
-body {
-  margin: 0;
-  min-height: 100vh;
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
-  color: #e2e8f0;
+[data-theme='light'] {
+  color-scheme: light;
+
+  --c-canvas: 245 246 248;
+  --c-surface: 255 255 255;
+  --c-elevated: 238 240 244;
+  --c-inset: 236 238 242;
+
+  --c-line: 16 19 26;
+
+  --c-on-accent: 255 255 255;
+
+  --c-ink-primary: 23 26 32;
+  --c-ink-secondary: 68 76 89;
+  --c-ink-muted: 122 130 143;
+  --c-ink-faint: 166 173 184;
+
+  /* 状态色取深档保证亮底对比度：badge 12px 文字在其 dim 底上 ≥4.5:1（v1.4 实测达标） */
+  --c-status-running: 22 101 52;
+  --c-status-success: 4 120 87;
+  --c-status-error: 185 28 28;
+  --c-status-warning: 146 64 14;
+  --c-status-pending: 71 85 105;
+  --c-status-cancelled: 75 85 99;
+
+  /* 品牌绿下移至 green-700 起步：文字/图标在浅底 ≥4.5:1（v1.4 实测达标） */
+  --c-plaita-50: 240 253 244;
+  --c-plaita-100: 220 252 231;
+  --c-plaita-200: 187 247 208;
+  --c-plaita-300: 22 163 74;
+  --c-plaita-400: 21 128 61;
+  --c-plaita-500: 22 101 52;
+  --c-plaita-600: 20 83 45;
+  --c-plaita-700: 20 83 45;
+  --c-plaita-800: 16 74 40;
+  --c-plaita-900: 12 58 31;
+
+  /* 存量灰阶整体反转：100 系变深色文字、800/900 变浅色背景 */
+  --c-dark-50: 245 246 248;
+  --c-dark-100: 23 26 32;
+  --c-dark-200: 58 64 75;
+  --c-dark-300: 68 76 89;
+  --c-dark-400: 122 130 143;
+  --c-dark-500: 160 166 176;
+  --c-dark-600: 224 227 232;
+  --c-dark-700: 234 237 241;
+  --c-dark-800: 255 255 255;
+  --c-dark-900: 245 246 248;
+  --c-dark-950: 236 238 242;
+
+  --shadow-card: 0 1px 2px rgba(16, 19, 26, 0.06);
+  --shadow-pop: 0 12px 32px rgba(16, 19, 26, 0.14);
 }
 
-/* 自定义滚动条 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: #1e293b;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #475569;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #64748b;
-}
-
-/* 动画 */
-@keyframes pulse-green {
-  0%, 100% {
-    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* 全局等宽数字：控制台数值不跳宽（JetBrains Mono 天生等宽，Inter 走 tabular） */
+    font-variant-numeric: tabular-nums;
   }
-  50% {
-    box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);
+
+  body {
+    @apply bg-canvas text-ink-secondary font-sans text-body;
+    margin: 0;
+    min-height: 100vh;
+  }
+
+  /* 触屏：消除双击缩放延迟（Web Interface Guidelines） */
+  a,
+  button,
+  select,
+  label {
+    touch-action: manipulation;
+  }
+
+  ::selection {
+    @apply bg-plaita-500/30 text-ink-primary;
+  }
+
+  /* 键盘焦点环：所有可交互元素可见（DESIGN.md §7） */
+  :focus-visible {
+    outline: 2px solid rgb(var(--c-plaita-400));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* 滚动条：贴边细条式 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--c-dark-600));
+    border-radius: 5px;
+    border: 2px solid rgb(var(--c-canvas));
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--c-dark-500));
   }
 }
 
-.animate-pulse-green {
-  animation: pulse-green 2s infinite;
+@layer components {
+  /* 表单输入基元（统一替代各页面内联的 .input <style> 注入） */
+  .input {
+    @apply w-full bg-inset border border-line rounded-md px-2.5 py-1.5
+           text-body text-ink-secondary placeholder:text-ink-faint
+           transition-colors duration-150;
+  }
+  .input:focus {
+    @apply outline-none border-plaita-400/60 ring-1 ring-plaita-400/30;
+  }
 }
 
-/* 渐变文字 */
-.gradient-text {
-  background: linear-gradient(135deg, #22c55e 0%, #4ade80 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+/* ── React Flow 画布主题化（DESIGN.md §5）：全部走 token，禁止写死色值 ──
+   边的 stroke 来自 flowLayout 的内联 style，故此处需 !important 覆盖 */
+.react-flow__edge .react-flow__edge-path {
+  stroke: rgb(var(--c-dark-500));
+}
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: rgb(var(--c-ink-muted)) !important;
+}
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: rgb(var(--c-plaita-400)) !important;
+}
+.react-flow__arrowhead {
+  fill: rgb(var(--c-dark-500)) !important;
+}
+.react-flow__background circle {
+  fill: rgb(var(--c-dark-600));
+}
+.react-flow__controls {
+  border: 1px solid rgb(var(--c-line));
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+.react-flow__controls-button {
+  width: 26px;
+  height: 26px;
+  background: rgb(var(--c-surface));
+  border-bottom: 1px solid rgb(var(--c-line));
+  color: rgb(var(--c-ink-secondary));
+}
+.react-flow__controls-button:hover {
+  background: rgb(var(--c-elevated));
+}
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+.react-flow__minimap {
+  background: rgb(var(--c-surface)) !important;
+  border: 1px solid rgb(var(--c-line));
+  border-radius: 8px;
+  overflow: hidden;
+}
+.react-flow__minimap-node {
+  fill: rgb(var(--c-dark-500));
+}
+.react-flow__minimap-mask {
+  fill: rgb(var(--c-line) / 0.08);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
