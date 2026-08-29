@@ -85,12 +85,7 @@ function CopilotInner({
   const edges = useFlowEditor((s) => s.edges)
   const meta = useFlowEditor((s) => s.meta)
   const setSelected = useFlowEditor((s) => s.setSelected)
-  const chat = useCopilotChat() as unknown as Record<string, unknown>
 
-  // dev 调试钩子：自动化测试环境无法操作聊天输入框时，经 window 触发发送
-  useEffect(() => {
-    ;(window as unknown as { __copilotChat?: Record<string, unknown> }).__copilotChat = chat
-  }, [chat])
 
   useCopilotReadable({
     description: '当前画布的完整 flow JSON 与状态',

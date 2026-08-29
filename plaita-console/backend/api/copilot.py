@@ -12,17 +12,20 @@
 """
 import json
 import logging
+import os
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic_ai.ui import SSE_CONTENT_TYPE
+from pydantic_ai.ui.ag_ui import AGUIAdapter
 
 try:
     from ..config import get_settings
-    from .services import ai_flow, claude_brain, flow_store
+    from ..services import ai_flow, claude_brain, flow_agent, flow_store
 except ImportError:  # 直接以 backend 为工作目录启动（python run.py）
     from config import get_settings
-    from services import ai_flow, claude_brain, flow_store
+    from services import ai_flow, claude_brain, flow_agent, flow_store
 
 logger = logging.getLogger(__name__)
 
@@ -103,24 +106,23 @@ def _inject_context(body: dict) -> dict:
 async def copilot_run(request: Request):
     """AG-UI 协议端点：反代 recursive `POST /agui`，SSE 透传。"""
     settings = get_settings()
-    base = (settings.recursive_agui_url or "").strip()
-    use_claude = not base and claude_brain.claude_available()
-    if not base and not use_claude:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "detail": (
-                    "Copilot 未配置大脑。可选：① 设置 PLAITA_CONSOLE_RECURSIVE_AGUI_URL"
-                    "（recursive http 服务的 /agui 端点）；② 安装 claude CLI 后自动使用"
-                    " Claude Code 大脑。"
-                )
-            },
-        )
+    brain = (
+        os.getenv("PLAITA_CONSOLE_COPILOT_BRAIN")
+        or settings.copilot_brain
+        or "flow_agent"
+    ).lower()
 
     try:
         body = _inject_context(await request.json())
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"detail": f"非法请求体: {exc}"})
+
+    # pydantic-ai 的 RunAgentInput 有必填字段（前端 useCopilotAction 会随
+    # 请求下发；curl/其他客户端缺省时补默认值）
+    if brain == "flow_agent":
+        if not isinstance(body.get("tools"), list):
+            body["tools"] = []
+        body.setdefault("forwardedProps", {})
 
     # 会话持久化：thread_id ↔ flow_id/version 关联入库（审计与回看）
     flow_id = request.headers.get("x-flow-id", "")
@@ -132,7 +134,32 @@ async def copilot_run(request: Request):
         except Exception as exc:  # noqa: BLE001
             logger.warning("copilot thread upsert 失败: %s", exc)
 
-    if not base:
+    if brain == "flow_agent":
+        try:
+            agent = flow_agent.get_flow_agent()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=503,
+                content={"detail": f"flow_agent 构造失败（检查凭证配置）: {exc}"},
+            )
+        # 手动模式：用处理后的 body（含 system 头/画布状态注入 + tools 默认值）
+        # 构造 RunAgentInput——不能用 dispatch_request(request)，它会重新解析
+        # 原始请求体，丢失全部服务端注入。
+        accept = request.headers.get("accept", SSE_CONTENT_TYPE)
+        run_input = AGUIAdapter.build_run_input(
+            json.dumps(body, ensure_ascii=False).encode()
+        )
+        adapter = AGUIAdapter(agent=agent, run_input=run_input, accept=accept)
+        event_stream = adapter.run_stream()
+        sse_stream = adapter.encode_stream(event_stream)
+        return StreamingResponse(sse_stream, media_type=accept)
+
+    if brain == "claude":
+        if not claude_brain.claude_available():
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "brain=claude 但本机未找到 claude CLI"},
+            )
         # claude 大脑：prompt 即处理后的最后一条 user 消息（含 system 头与画布状态）
         context_note = _context_note(body)
         messages = body.get("messages") or []
@@ -143,6 +170,19 @@ async def copilot_run(request: Request):
         return StreamingResponse(
             claude_brain.claude_agui_stream(body, str(goal)),
             media_type="text/event-stream",
+        )
+
+    # brain == "recursive"
+    base = (settings.recursive_agui_url or "").strip()
+    if not base:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "brain=recursive 但未设置 PLAITA_CONSOLE_RECURSIVE_AGUI_URL"
+                    "（recursive http 服务的 /agui 端点）。"
+                )
+            },
         )
 
     url = base if base.endswith("/agui") else f"{base.rstrip('/')}/agui"
