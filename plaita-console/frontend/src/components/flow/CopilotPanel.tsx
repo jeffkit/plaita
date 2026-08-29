@@ -1,5 +1,6 @@
 import { Component, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { CopilotKit, useCopilotAction, useCopilotChat, useCopilotReadable } from '@copilotkit/react-core'
+import { useInterrupt } from '@copilotkit/react-core/v2/headless'
 import { CopilotSidebar } from '@copilotkit/react-ui'
 import { HttpAgent } from '@ag-ui/client'
 import '@copilotkit/react-ui/styles.css'
@@ -83,12 +84,64 @@ function CopilotInner({
   const edges = useFlowEditor((s) => s.edges)
   const meta = useFlowEditor((s) => s.meta)
   const setSelected = useFlowEditor((s) => s.setSelected)
+  const chat = useCopilotChat() as unknown as Record<string, unknown>
+
+  // dev 调试钩子：自动化测试环境无法操作聊天输入框时，经 window 触发发送
+  useEffect(() => {
+    ;(window as unknown as { __copilotChat?: Record<string, unknown> }).__copilotChat = chat
+  }, [chat])
 
   useCopilotReadable({
     description: '当前画布的完整 flow JSON 与状态',
     value: flowContext,
   })
   useAutoApplyFlow(onApplyFlow)
+
+  /** 前端工具执行器：recursive interrupt 到达时按名分发（与下方 action 同一套语义） */
+  const executeFrontendTool = async (
+    toolName: string
+  ): Promise<Record<string, unknown> | string> => {
+    if (toolName === 'read_flow') return flowContext
+    if (toolName === 'dry_run') {
+      const def = flowToJson(nodes as never[], edges as never[], { ...meta })
+      const res = await api.dryRun({
+        flowJson: JSON.stringify(def),
+        input: {},
+      })
+      const summary = (res.nodes || [])
+        .map((n) => {
+          const base = `[${n.status}] ${n.id ?? '(未知节点)'}`
+          return n.error ? `${base}（${String(n.error).slice(0, 120)}）` : base
+        })
+        .join('\n')
+      return { flowError: res.error || null, nodes: summary || '（无节点执行）' }
+    }
+    return { error: `未知前端工具: ${toolName}` }
+  }
+
+  // ── recursive interrupt 适配：执行前端工具并自动 resume ────────────
+  // recursive 的 client tools 以 RunFinished(interrupt) 暂停，前端在此
+  // 执行对应工具并 resolve(payload)，CopilotKit 提交 resume 续跑。
+  useInterrupt({
+    agentId: 'default',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    enabled: (event: any) => {
+      const it = event.interrupt as { metadata?: { frontendTool?: boolean } } | null
+      return Boolean(it?.metadata?.frontendTool)
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    handler: async ({ interrupt, resolve }: any) => {
+      if (!interrupt) return null
+      const meta = interrupt.metadata as { toolName?: string } | undefined
+      const toolName = meta?.toolName || 'read_flow'
+      const payload = await executeFrontendTool(toolName)
+      resolve(payload)
+      return payload
+    },
+    render: () => (
+      <div className="p-2 text-caption text-ink-faint">前端工具执行中…</div>
+    ),
+  })
 
   // ── 前端工具（recursive client tools 桥实时调用）────────────────────
 
