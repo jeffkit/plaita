@@ -2,10 +2,10 @@ import type { ReactNode } from 'react'
 import type { HTMLAttributes } from 'react'
 import { cn } from './cn'
 
-/** 页面容器：统一 24px 内边距与纵向节奏 */
+/** 页面容器：统一 24px 内边距、纵向节奏与一次性入场动效（reduce-motion 自动降级） */
 export function Page({ className, children, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={cn('p-6 space-y-5', className)} {...rest}>
+    <div className={cn('p-6 space-y-5 animate-fade-up', className)} {...rest}>
       {children}
     </div>
   )
@@ -22,7 +22,7 @@ export function PageHeader({ title, subtitle, actions }: PageHeaderProps) {
   return (
     <header className="flex items-end justify-between gap-4">
       <div className="min-w-0">
-        <h1 className="text-page-title text-ink-primary">{title}</h1>
+        <h1 className="text-page-title text-ink-primary text-balance">{title}</h1>
         {subtitle && <p className="mt-0.5 text-caption text-ink-muted">{subtitle}</p>}
       </div>
       {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
