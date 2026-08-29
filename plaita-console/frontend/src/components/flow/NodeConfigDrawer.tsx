@@ -5,10 +5,18 @@ import { useFlowEditor } from '../../stores/flowEditor'
 import { api } from '../../services/api'
 import type { FlowNodeData } from './flowConverter'
 import SchemaForm, { JsonField } from './schemaForm/SchemaForm'
+import { coreFieldsOf } from './schemaForm/coreFields'
 import { normalizeFieldKeys, type JsonSchema } from './schemaForm/schemaUtils'
 
 // 内嵌 child_flow 子流程的节点类型（reference 仅有内嵌子图时也可编辑）
 const SUBFLOW_TYPES = new Set(['map', 'loop', 'filter', 'find', 'reduce', 'child'])
+
+type DrawerTab = 'config' | 'basic' | 'fault'
+const DRAWER_TABS: Array<{ key: DrawerTab; label: string }> = [
+  { key: 'config', label: '配置' },
+  { key: 'basic', label: '基础' },
+  { key: 'fault', label: '容错' },
+]
 
 // 节点配置抽屉：通用字段（name/output/timeout）+ schema 驱动的类型特定字段表单。
 // 表单变更即时写回 store（与画布交互一致，自动置 dirty）；
@@ -24,6 +32,7 @@ export default function NodeConfigDrawer() {
   const [desc, setDesc] = useState('')
   const [output, setOutput] = useState('')
   const [timeout, setTimeout_] = useState('')
+  const [tab, setTab] = useState<DrawerTab>('config')
 
   // 节点类型 schema：与节点面板共用 ['nodes'] 缓存，不额外请求
   const nodesQuery = useQuery({
@@ -50,6 +59,7 @@ export default function NodeConfigDrawer() {
     setDesc((d.fields.desc as string) || '')
     setOutput((d.fields.output as string) || '')
     setTimeout_((d.fields.timeout as string) || '')
+    setTab('config') // 切换节点时回到「配置」Tab
   }, [node])
 
   // 归一化必须在 early-return 前（hooks 顺序）
@@ -99,129 +109,171 @@ export default function NodeConfigDrawer() {
   }
 
   return (
-    <div className="w-80 shrink-0 bg-surface border-l border-line p-4 overflow-y-auto text-sm">
-      <div className="flex items-center justify-between mb-3">
+    <div className="w-96 shrink-0 bg-surface border-l border-line flex flex-col text-sm">
+      <div className="flex items-center justify-between pl-4 pr-3 pt-3">
         <h3 className="text-section text-ink-primary">节点配置</h3>
         <button
           onClick={() => removeNode(node.id)}
-          className="text-caption text-status-error hover:opacity-80"
+          className="flex items-center gap-1 text-caption text-status-error hover:opacity-80"
         >
-          删除节点
+          <Trash2 size={12} />
+          删除
         </button>
       </div>
 
-      <div className="space-y-3">
-        <Field label="节点 ID">
-          <input value={node.id} disabled className="input w-full opacity-60 font-mono text-[12px]" />
-        </Field>
-        <Field label="类型">
-          <input value={d.type} disabled className="input w-full opacity-60 font-mono text-[12px]" />
-        </Field>
-        <Field label="名称">
-          <input
-            value={name}
-            onChange={(e) => {
-              setName(e.target.value)
-              updateNodeData(node.id, { name: e.target.value })
-            }}
-            className="input w-full"
-          />
-        </Field>
-        <Field label="描述 desc">
-          <input
-            value={desc}
-            onChange={(e) => {
-              setDesc(e.target.value)
-              writeField('desc', e.target.value)
-            }}
-            placeholder="节点用途说明"
-            className="input w-full"
-          />
-        </Field>
-        <Field label="输出 output（表达式）">
-          <input
-            value={output}
-            onChange={(e) => {
-              setOutput(e.target.value)
-              writeField('output', e.target.value)
-            }}
-            placeholder="$INPUT.name"
-            className="input w-full font-mono text-[12px]"
-          />
-        </Field>
-        <Field label="超时 timeout（ms）">
-          <input
-            value={timeout}
-            onChange={(e) => {
-              setTimeout_(e.target.value)
-              writeField('timeout', e.target.value)
-            }}
-            placeholder="3000"
-            className="input w-full font-mono text-[12px]"
-          />
-        </Field>
+      {/* Tab 栏 */}
+      <div className="flex gap-1 px-3 pt-1.5 border-b border-line">
+        {DRAWER_TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-3 pb-2 pt-1.5 text-caption transition-colors border-b-2 -mb-px ${
+              tab === t.key
+                ? 'text-ink-primary border-plaita-400 font-medium'
+                : 'text-ink-muted border-transparent hover:text-ink-secondary'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-        {/* 错误与超时处理：Node 基类共有字段，固定表单（不走 SchemaForm） */}
-        <div className="border-t border-line pt-3 space-y-3">
-          <p className="text-caption text-ink-muted">错误与超时处理</p>
-          <HandlerEditor
-            label="超时处理 timeout_handler"
-            value={d.fields.timeout_handler}
-            onChange={(v) => writeHandler('timeout_handler', v)}
-          />
-          <HandlerEditor
-            label="失败处理 error_handler"
-            value={d.fields.error_handler}
-            recoverable
-            onChange={(v) => writeHandler('error_handler', v)}
-          />
-        </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {tab === 'config' && (
+          <>
+            {/* 子流程编辑入口：进入子画布（面包屑返回） */}
+            {(SUBFLOW_TYPES.has(d.type) ||
+              (d.type === 'reference' && Boolean(typeFields.child_flow))) && (
+              <div>
+                <button
+                  onClick={() => enterSubgraph(node.id, 'child_flow')}
+                  className="w-full flex items-center justify-center gap-1.5 bg-elevated border border-line hover:bg-dark-700 text-ink-primary py-1.5 rounded-md text-caption"
+                >
+                  <GitBranch size={13} />
+                  编辑子流程
+                </button>
+                <p className="mt-1 text-[11px] leading-4 text-ink-faint">
+                  {d.type === 'reference'
+                    ? '内嵌子流程（与外部 flowID 引用互斥，引擎按调度器注入优先）'
+                    : '每个元素以 item / index 注入子流程（$INPUT.item / $INPUT.index）'}
+                </p>
+              </div>
+            )}
 
-        <div className="border-t border-line pt-3">
-          <p className="text-caption text-ink-muted mb-2">
-            类型特定字段
-            {schema && <span className="ml-1.5 text-[10px] text-ink-faint">schema 驱动</span>}
-          </p>
-          {schema ? (
-            <SchemaForm
-              fields={typeFields}
-              schema={schema}
-              onChange={writeTypeFields}
-              excludeKeys={formExcludeKeys}
-            />
-          ) : (
-            <FallbackJson
-              fields={typeFields}
-              onApply={(next) => writeTypeFields(next)}
-            />
-          )}
-        </div>
+            <div>
+              <p className="text-caption text-ink-muted mb-2">
+                类型特定字段
+                {schema && (
+                  <span className="ml-1.5 text-[10px] text-ink-faint">
+                    schema 驱动 · 核心参数置顶
+                  </span>
+                )}
+              </p>
+              {schema ? (
+                <SchemaForm
+                  fields={typeFields}
+                  schema={schema}
+                  onChange={writeTypeFields}
+                  excludeKeys={formExcludeKeys}
+                  coreFields={coreFieldsOf(d.type)}
+                />
+              ) : (
+                <FallbackJson
+                  fields={typeFields}
+                  onApply={(next) => writeTypeFields(next)}
+                />
+              )}
+            </div>
 
-        {/* 子流程编辑入口：进入子画布（面包屑返回） */}
-        {(SUBFLOW_TYPES.has(d.type) || (d.type === 'reference' && Boolean(typeFields.child_flow))) && (
-          <div className="border-t border-line pt-3">
-            <button
-              onClick={() => enterSubgraph(node.id, 'child_flow')}
-              className="w-full flex items-center justify-center gap-1.5 bg-elevated border border-line hover:bg-dark-700 text-ink-primary py-1.5 rounded-md text-caption"
-            >
-              <GitBranch size={13} />
-              编辑子流程
-            </button>
-            <p className="mt-1 text-[11px] leading-4 text-ink-faint">
-              {d.type === 'reference'
-                ? '内嵌子流程（与外部 flowID 引用互斥，引擎按调度器注入优先）'
-                : '每个元素以 item / index 注入子流程（$INPUT.item / $INPUT.index）'}
-            </p>
-          </div>
+            {/* parallel：分支列表 + 每分支子图入口 */}
+            {d.type === 'parallel' && (
+              <ParallelBranches
+                fields={typeFields}
+                onChange={writeTypeFields}
+                onEditBranch={(i) => enterSubgraph(node.id, 'branch', i)}
+              />
+            )}
+          </>
         )}
 
-        {/* parallel：分支列表 + 每分支子图入口 */}
-        {d.type === 'parallel' && (
-          <ParallelBranches
-            fields={typeFields}
-            onChange={writeTypeFields}
-            onEditBranch={(i) => enterSubgraph(node.id, 'branch', i)}
-          />
+        {tab === 'basic' && (
+          <>
+            <Field label="节点 ID">
+              <input
+                value={node.id}
+                disabled
+                className="input w-full opacity-60 font-mono text-[12px]"
+              />
+            </Field>
+            <Field label="类型">
+              <input
+                value={d.type}
+                disabled
+                className="input w-full opacity-60 font-mono text-[12px]"
+              />
+            </Field>
+            <Field label="名称">
+              <input
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value)
+                  updateNodeData(node.id, { name: e.target.value })
+                }}
+                className="input w-full"
+              />
+            </Field>
+            <Field label="描述 desc">
+              <input
+                value={desc}
+                onChange={(e) => {
+                  setDesc(e.target.value)
+                  writeField('desc', e.target.value)
+                }}
+                placeholder="节点用途说明"
+                className="input w-full"
+              />
+            </Field>
+            <Field label="输出 output（表达式）">
+              <input
+                value={output}
+                onChange={(e) => {
+                  setOutput(e.target.value)
+                  writeField('output', e.target.value)
+                }}
+                placeholder="$INPUT.name"
+                className="input w-full font-mono text-[12px]"
+              />
+            </Field>
+          </>
+        )}
+
+        {tab === 'fault' && (
+          <>
+            <Field label="执行超时 timeout（ms）">
+              <input
+                value={timeout}
+                onChange={(e) => {
+                  setTimeout_(e.target.value)
+                  writeField('timeout', e.target.value)
+                }}
+                placeholder="3000"
+                className="input w-full font-mono text-[12px]"
+              />
+            </Field>
+            <HandlerEditor
+              label="超时处理 timeout_handler"
+              hint="节点执行超时后的处理策略"
+              value={d.fields.timeout_handler}
+              onChange={(v) => writeHandler('timeout_handler', v)}
+            />
+            <HandlerEditor
+              label="失败处理 error_handler"
+              hint="节点执行抛错后的处理策略"
+              value={d.fields.error_handler}
+              recoverable
+              onChange={(v) => writeHandler('error_handler', v)}
+            />
+          </>
         )}
       </div>
     </div>
@@ -251,11 +303,13 @@ const STRATEGY_OPTIONS = [
  */
 function HandlerEditor({
   label,
+  hint,
   value,
   onChange,
   recoverable = false,
 }: {
   label: string
+  hint?: string
   value: unknown
   onChange: (v: unknown) => void
   recoverable?: boolean
@@ -286,6 +340,7 @@ function HandlerEditor({
   return (
     <div>
       <label className="block text-caption text-ink-muted mb-1">{label}</label>
+      {hint && <p className="mb-1.5 text-[11px] leading-4 text-ink-faint">{hint}</p>}
       <select value={strategy} onChange={(e) => pick(e.target.value)} className="input w-full">
         {STRATEGY_OPTIONS.map((o) => (
           <option key={o.value} value={o.value}>

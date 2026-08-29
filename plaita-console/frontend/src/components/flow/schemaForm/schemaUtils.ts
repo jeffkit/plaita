@@ -40,6 +40,8 @@ export interface FieldSpec {
   schema: JsonSchema
   kind: FieldKind
   required: boolean
+  /** 核心/次要分组：required 或类型白名单命中为 true */
+  core: boolean
 }
 
 /** 通用字段（抽屉单独渲染）与由画布边推导的连接字段，不进类型表单。
@@ -163,7 +165,7 @@ export function fieldKind(s: JsonSchema): FieldKind {
 
 /**
  * 生成表单计划：
- * - fields：schema 覆盖、可表单化的字段（保持 schema 声明顺序）
+ * - core / more：schema 覆盖、可表单化的字段，按「required + 类型白名单」分核心与次要
  * - advanced：实例中存在但 schema 未覆盖的键（进「高级字段」JSON 兜底）
  * - excludeKeys：由调用方专门 UI 接管的键（如 child_flow 子图编辑、parallel 分支列表）
  */
@@ -171,8 +173,10 @@ export function buildFormPlan(
   fields: Record<string, unknown>,
   schema: JsonSchema | null,
   excludeKeys?: Set<string>,
-): { fields: FieldSpec[]; advanced: string[] } {
-  if (!schema?.properties) return { fields: [], advanced: Object.keys(fields) }
+  coreKeys?: Set<string>,
+): { core: FieldSpec[]; more: FieldSpec[]; advanced: string[] } {
+  if (!schema?.properties)
+    return { core: [], more: [], advanced: Object.keys(fields) }
   const specs: FieldSpec[] = []
   const consumed = new Set<string>([
     ...COMMON_KEYS,
@@ -183,17 +187,34 @@ export function buildFormPlan(
   for (const [schemaKey, rawProp] of Object.entries(schema.properties)) {
     if (consumed.has(schemaKey)) continue
     const prop = derefSchema(schema, rawProp)
+    const kind = fieldKind(prop)
+    if (kind === 'json') continue // 复杂结构统一进 advanced JSON 区
     specs.push({
       key: schemaKey,
       label: (prop.title as string) || schemaKey,
       desc: prop.description,
       schema: prop,
-      kind: fieldKind(prop),
+      kind,
       required: schema.required?.includes(schemaKey) ?? false,
+      core:
+        (schema.required?.includes(schemaKey) ?? false) || (coreKeys?.has(schemaKey) ?? false),
     })
   }
+  const covered = new Set(specs.map((f) => f.key))
   const advanced = Object.keys(fields).filter(
-    (k) => !consumed.has(k) && !specs.some((f) => f.key === k)
+    (k) => !consumed.has(k) && !covered.has(k)
   )
-  return { fields: specs, advanced }
+  advanced.push(
+    ...Object.entries(schema.properties)
+      .filter(([k, raw]) => {
+        if (consumed.has(k) || covered.has(k)) return false
+        return fieldKind(derefSchema(schema, raw)) === 'json'
+      })
+      .map(([k]) => k)
+  )
+  return {
+    core: specs.filter((f) => f.core),
+    more: specs.filter((f) => !f.core),
+    advanced,
+  }
 }

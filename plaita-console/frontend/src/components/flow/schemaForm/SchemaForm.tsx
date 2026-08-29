@@ -9,9 +9,10 @@ import {
 
 /**
  * schema 驱动的类型特定字段表单（DESIGN.md token）。
- * - schema 覆盖的字段按类型渲染控件，onChange 即时写回（与画布交互一致）
- * - 一层 object 嵌套平铺；复杂结构（array of object / 自由 dict / 未知类型）
- *   与 schema 未覆盖的实例字段统一落入「高级字段」JSON 兜底区，能力不锁死
+ * - 核心字段（required + 类型白名单）平铺首屏，次要标量落「更多参数」折叠区
+ * - 复杂结构（自由 dict、array of object）与 schema 未覆盖字段统一落
+ *   「高级字段」JSON 兜底区，能力不锁死
+ * - onChange 即时写回（与画布交互一致）
  * - schema 为 null 时返回 null，由调用方退化为整段 JSON 编辑
  */
 export default function SchemaForm({
@@ -19,15 +20,18 @@ export default function SchemaForm({
   schema,
   onChange,
   excludeKeys,
+  coreFields,
 }: {
   fields: Record<string, unknown>
   schema: JsonSchema | null
   onChange: (next: Record<string, unknown>) => void
   /** 由调用方专门 UI 接管的键（如 child_flow / branches），不进表单与兜底区 */
   excludeKeys?: Set<string>
+  /** 该类型的核心字段白名单（与 required 一起决定首屏平铺） */
+  coreFields?: Set<string>
 }) {
   if (!schema) return null
-  const plan = buildFormPlan(fields, schema, excludeKeys)
+  const plan = buildFormPlan(fields, schema, excludeKeys, coreFields)
   const setValue = (key: string, v: unknown) => onChange({ ...fields, [key]: v })
   const removeValue = (key: string) => {
     const next = { ...fields }
@@ -35,16 +39,9 @@ export default function SchemaForm({
     onChange(next)
   }
 
-  // 复杂结构字段 + schema 未覆盖字段 → 兜底 JSON 区
-  const advancedKeys = [
-    ...plan.fields.filter((f) => f.kind === 'json').map((f) => f.key),
-    ...plan.advanced,
-  ]
-  const normalFields = plan.fields.filter((f) => f.kind !== 'json')
-
   return (
     <div className="space-y-3">
-      {normalFields.map((f) => (
+      {plan.core.map((f) => (
         <FieldControl
           key={f.key}
           spec={f}
@@ -52,13 +49,55 @@ export default function SchemaForm({
           onChange={(v) => (v === undefined ? removeValue(f.key) : setValue(f.key, v))}
         />
       ))}
-      {advancedKeys.length > 0 && (
-        <AdvancedSection
-          keys={advancedKeys}
-          fields={fields}
-          onKeyChange={(k, v) => setValue(k, v)}
-        />
+      {plan.more.length > 0 && (
+        <CollapsibleSection title={`更多参数（${plan.more.length}）`}>
+          {plan.more.map((f) => (
+            <FieldControl
+              key={f.key}
+              spec={f}
+              value={fields[f.key]}
+              onChange={(v) => (v === undefined ? removeValue(f.key) : setValue(f.key, v))}
+            />
+          ))}
+        </CollapsibleSection>
       )}
+      {plan.advanced.length > 0 && (
+        <CollapsibleSection title={`高级字段（${plan.advanced.length}）`} defaultOpen={false}>
+          {plan.advanced.map((k) => (
+            <div key={k}>
+              <label className="block text-caption text-ink-muted mb-1">
+                <span className="font-mono text-[10px] text-ink-faint">{k}</span>
+              </label>
+              <JsonField value={fields[k]} onChange={(v) => setValue(k, v)} />
+            </div>
+          ))}
+        </CollapsibleSection>
+      )}
+    </div>
+  )
+}
+
+/** 折叠区块（更多参数 / 高级字段共用） */
+function CollapsibleSection({
+  title,
+  children,
+  defaultOpen = false,
+}: {
+  title: string
+  children: React.ReactNode
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className="border-t border-line pt-2.5">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 text-caption text-ink-muted hover:text-ink-primary"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        {title}
+      </button>
+      {open && <div className="mt-2.5 space-y-3">{children}</div>}
     </div>
   )
 }
@@ -176,6 +215,7 @@ function FieldControl({
                         ? 'array'
                         : ((Array.isArray(raw.type) ? raw.type.find((x) => x !== 'null') : raw.type) as FieldSpec['kind']) || 'json',
               required: required.includes(k),
+              core: required.includes(k),
             }
             return (
               <div key={k}>
@@ -338,39 +378,4 @@ export function JsonField({
   )
 }
 
-// ── 高级字段折叠区（兜底：schema 未覆盖 + 复杂结构）─────────────────────
-
-function AdvancedSection({
-  keys,
-  fields,
-  onKeyChange,
-}: {
-  keys: string[]
-  fields: Record<string, unknown>
-  onKeyChange: (key: string, v: unknown) => void
-}) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="border-t border-line pt-2.5">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1 text-caption text-ink-muted hover:text-ink-primary"
-      >
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        高级字段（{keys.length}）
-      </button>
-      {open && (
-        <div className="mt-2 space-y-3">
-          {keys.map((k) => (
-            <div key={k}>
-              <label className="block text-caption text-ink-muted mb-1">
-                <span className="font-mono text-[10px] text-ink-faint mr-1.5">{k}</span>
-              </label>
-              <JsonField value={fields[k]} onChange={(v) => onKeyChange(k, v)} />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
+// ── 高级字段折叠区已由 CollapsibleSection + plan.advanced 取代 ───────────
