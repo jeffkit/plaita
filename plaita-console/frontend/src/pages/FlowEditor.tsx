@@ -12,7 +12,7 @@ import { autoLayout, type LayoutDirection } from '../components/flow/flowLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
-import { ArrowLeft, Zap, Sparkles, Code2, Save, Rocket, Play } from 'lucide-react'
+import { ArrowLeft, Zap, Sparkles, Code2, Save, Rocket, Play, ChevronRight } from 'lucide-react'
 import { Button, StatusBadge } from '../components/ui'
 
 export default function FlowEditor() {
@@ -40,6 +40,18 @@ export default function FlowEditor() {
   const nodes = useFlowEditor((s) => s.nodes)
   const edges = useFlowEditor((s) => s.edges)
   const dirty = useFlowEditor((s) => s.dirty)
+  const graphStack = useFlowEditor((s) => s.graphStack)
+  const subgraphWarning = useFlowEditor((s) => s.subgraphWarning)
+  const exitToLevel = useFlowEditor((s) => s.exitToLevel)
+
+  /** 保存/发布/试跑/源码前把子图逐层归位（子图写回父节点），始终序列化主图 */
+  const collapseToRoot = () => {
+    if (useFlowEditor.getState().graphStack.length > 0) {
+      exitToLevel(0)
+      return useFlowEditor.getState()
+    }
+    return useFlowEditor.getState()
+  }
 
   const flowQuery = useQuery({
     queryKey: ['flow', flowId],
@@ -97,9 +109,10 @@ export default function FlowEditor() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
+      const state = collapseToRoot()
       const meta = { flow_id: flowId, version, desc, inputType }
-      const def = flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], meta)
-      const layout = extractLayout(nodes as Node[])
+      const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
+      const layout = extractLayout(state.nodes as Node[])
       return api.saveVersion(flowId!, version, {
         definition: JSON.stringify(def, null, 2),
         layout: JSON.stringify(layout),
@@ -116,9 +129,10 @@ export default function FlowEditor() {
   const publishMutation = useMutation({
     mutationFn: async () => {
       // 先保存再发布
+      const state = collapseToRoot()
       const meta = { flow_id: flowId, version, desc, inputType }
-      const def = flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], meta)
-      const layout = extractLayout(nodes as Node[])
+      const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
+      const layout = extractLayout(state.nodes as Node[])
       await api.saveVersion(flowId!, version, {
         definition: JSON.stringify(def, null, 2),
         layout: JSON.stringify(layout),
@@ -140,8 +154,9 @@ export default function FlowEditor() {
 
   return (
     <div className="h-full flex flex-col">
-      {/* 顶部工具栏 */}
-      <div className="flex items-center gap-2 px-4 py-2 bg-surface border-b border-line">
+      {/* 顶部工具栏：内容过宽时横向滚动，不挤压按钮 */}
+      <div className="flex items-center gap-2 px-4 py-2 bg-surface border-b border-line overflow-x-auto">
+        <div className="flex items-center gap-2 shrink-0">
         <Button variant="ghost" size="sm" onClick={() => navigate('/flows')}>
           <ArrowLeft size={14} />
           返回列表
@@ -171,7 +186,7 @@ export default function FlowEditor() {
           <Rocket size={13} />
           发布
         </Button>
-        <Button variant="secondary" size="sm" onClick={() => setShowDryRun((v) => !v)}>
+        <Button variant="secondary" size="sm" onClick={() => { collapseToRoot(); setShowDryRun((v) => !v) }}>
           <Play size={13} />
           试跑
         </Button>
@@ -209,13 +224,48 @@ export default function FlowEditor() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setShowSource((v) => !v)}
+          onClick={() => { collapseToRoot(); setShowSource((v) => !v) }}
           className={showSource ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
         >
           <Code2 size={13} />
           源码
         </Button>
+        </div>
       </div>
+
+      {/* 子图编辑面包屑：主图 › map · 处理订单 › …；点击任意层归位到该层 */}
+      {(graphStack.length > 0 || subgraphWarning) && (
+        <div className="flex items-center gap-1.5 px-4 py-1.5 bg-surface border-b border-line text-caption overflow-x-auto">
+          {graphStack.length > 0 && (
+            <>
+              <button
+                onClick={() => exitToLevel(0)}
+                className="text-ink-secondary hover:text-ink-primary shrink-0"
+              >
+                主图
+              </button>
+              {graphStack.map((f, i) => (
+                <span key={i} className="flex items-center gap-1.5 shrink-0">
+                  <ChevronRight size={12} className="text-ink-faint" />
+                  <button
+                    onClick={() => exitToLevel(i + 1)}
+                    className={
+                      i === graphStack.length - 1
+                        ? 'text-ink-primary'
+                        : 'text-ink-secondary hover:text-ink-primary'
+                    }
+                  >
+                    {f.title}
+                  </button>
+                </span>
+              ))}
+            </>
+          )}
+          {subgraphWarning && (
+            <span className="ml-auto text-status-warning shrink-0">⚠ {subgraphWarning}</span>
+          )}
+        </div>
+      )}
 
       {saveError && (
         <div className="px-4 py-1 bg-status-error-dim text-status-error text-caption">{saveError}</div>

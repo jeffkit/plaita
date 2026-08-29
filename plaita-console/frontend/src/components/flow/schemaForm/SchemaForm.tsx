@@ -18,13 +18,16 @@ export default function SchemaForm({
   fields,
   schema,
   onChange,
+  excludeKeys,
 }: {
   fields: Record<string, unknown>
   schema: JsonSchema | null
   onChange: (next: Record<string, unknown>) => void
+  /** 由调用方专门 UI 接管的键（如 child_flow / branches），不进表单与兜底区 */
+  excludeKeys?: Set<string>
 }) {
   if (!schema) return null
-  const plan = buildFormPlan(fields, schema)
+  const plan = buildFormPlan(fields, schema, excludeKeys)
   const setValue = (key: string, v: unknown) => onChange({ ...fields, [key]: v })
   const removeValue = (key: string) => {
     const next = { ...fields }
@@ -297,7 +300,7 @@ function PropertyField({
 
 // ── JSON 编辑（失焦提交，错误提示）───────────────────────────────────────
 
-function JsonField({
+export function JsonField({
   value,
   onChange,
   compact = false,

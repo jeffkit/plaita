@@ -61,21 +61,24 @@ const LEGACY_ALIASES: Record<string, string> = {
 }
 
 /**
- * 把实例 fields 的别名键归一到 schema 权威键（只迁移 schema 中确实存在的键，
- * 不盲改未知字段）。返回新对象，不修改原值。
+ * 把实例 fields 的别名键归一到 schema 权威键。
+ * - LEGACY_ALIASES 是引擎既定的输入别名映射，无条件归一（store 层无 schema 时也安全）
+ * - 通用 camel → snake 仅在 schema 提供且确认存在该键时迁移，不盲改未知字段
+ * 返回新对象，不修改原值。
  */
 export function normalizeFieldKeys(
   fields: Record<string, unknown>,
-  schema: JsonSchema | null,
+  schema?: JsonSchema | null,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...fields }
-  const canon = new Set(Object.keys(schema?.properties || {}))
   for (const [legacy, canonical] of Object.entries(LEGACY_ALIASES)) {
-    if (legacy in out && canon.has(canonical)) {
+    if (legacy in out) {
       if (!(canonical in out)) out[canonical] = out[legacy]
       delete out[legacy]
     }
   }
+  if (!schema?.properties) return out
+  const canon = new Set(Object.keys(schema.properties))
   for (const k of Object.keys(out)) {
     const snake = k.replace(/([A-Z])/g, (c) => `_${c.toLowerCase()}`)
     if (snake !== k && canon.has(snake) && !(snake in out)) {
@@ -159,16 +162,23 @@ export function fieldKind(s: JsonSchema): FieldKind {
 
 /**
  * 生成表单计划：
- * - fields：schema 覆盖、可表单化的字段（保持 schema 声明顺序，required 置顶由调用方处理）
+ * - fields：schema 覆盖、可表单化的字段（保持 schema 声明顺序）
  * - advanced：实例中存在但 schema 未覆盖的键（进「高级字段」JSON 兜底）
+ * - excludeKeys：由调用方专门 UI 接管的键（如 child_flow 子图编辑、parallel 分支列表）
  */
 export function buildFormPlan(
   fields: Record<string, unknown>,
   schema: JsonSchema | null,
+  excludeKeys?: Set<string>,
 ): { fields: FieldSpec[]; advanced: string[] } {
   if (!schema?.properties) return { fields: [], advanced: Object.keys(fields) }
   const specs: FieldSpec[] = []
-  const consumed = new Set<string>([...COMMON_KEYS, ...CONNECT_KEYS, ...INTERNAL_KEYS])
+  const consumed = new Set<string>([
+    ...COMMON_KEYS,
+    ...CONNECT_KEYS,
+    ...INTERNAL_KEYS,
+    ...(excludeKeys ?? []),
+  ])
   for (const [schemaKey, rawProp] of Object.entries(schema.properties)) {
     if (consumed.has(schemaKey)) continue
     const prop = derefSchema(schema, rawProp)
