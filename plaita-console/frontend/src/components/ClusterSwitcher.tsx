@@ -141,7 +141,7 @@ function CreateClusterDialog({
   )
 }
 
-export default function ClusterSwitcher() {
+export default function ClusterSwitcher({ collapsed = false }: { collapsed?: boolean }) {
   const [isOpen, setIsOpen] = useState(false)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -192,36 +192,48 @@ export default function ClusterSwitcher() {
   return (
     <>
       <div className="relative" ref={dropdownRef}>
-        {/* 当前集群显示 */}
+        {/* 当前集群显示：折叠态仅图标 + 活跃指示点 */}
         <button
           onClick={() => setIsOpen(!isOpen)}
-          className="w-full flex items-center gap-3 p-3 rounded-lg 
-                     bg-dark-800/50 hover:bg-dark-800 border border-dark-700
-                     transition-colors group"
+          title={collapsed ? `集群：${activeCluster?.name || '未选择'}` : undefined}
+          className={
+            collapsed
+              ? 'w-full flex justify-center p-2 rounded-lg bg-dark-800/50 hover:bg-dark-800 border border-dark-700 transition-colors'
+              : 'w-full flex items-center gap-3 p-3 rounded-lg \n                     bg-dark-800/50 hover:bg-dark-800 border border-dark-700\n                     transition-colors group'
+          }
         >
-          <div className="p-2 rounded-lg bg-plaita-500/20">
+          <div className="relative p-2 rounded-lg bg-plaita-500/20">
             <Server className="w-4 h-4 text-plaita-400" />
-          </div>
-          <div className="flex-1 text-left min-w-0">
-            {isLoading ? (
-              <div className="text-sm text-dark-500">加载中...</div>
-            ) : activeCluster ? (
-              <>
-                <div className="text-sm font-medium truncate">{activeCluster.name}</div>
-                <div className="text-xs text-dark-500 truncate">{activeCluster.id}</div>
-              </>
-            ) : (
-              <div className="text-sm text-dark-500">未选择集群</div>
+            {collapsed && activeCluster && (
+              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-plaita-400" />
             )}
           </div>
-          <ChevronUp className={`w-4 h-4 text-dark-500 transition-transform ${isOpen ? '' : 'rotate-180'}`} />
+          {!collapsed && (
+            <>
+              <div className="flex-1 text-left min-w-0">
+                {isLoading ? (
+                  <div className="text-sm text-dark-500">加载中...</div>
+                ) : activeCluster ? (
+                  <>
+                    <div className="text-sm font-medium truncate">{activeCluster.name}</div>
+                    <div className="text-xs text-dark-500 truncate">{activeCluster.id}</div>
+                  </>
+                ) : (
+                  <div className="text-sm text-dark-500">未选择集群</div>
+                )}
+              </div>
+              <ChevronUp className={`w-4 h-4 text-dark-500 transition-transform ${isOpen ? '' : 'rotate-180'}`} />
+            </>
+          )}
         </button>
 
-        {/* 下拉菜单 */}
+        {/* 下拉菜单：折叠态用固定宽度，避免被窄容器压缩 */}
         {isOpen && (
-          <div className="absolute bottom-full left-0 right-0 mb-2 
+          <div className={`absolute bottom-full left-0 mb-2 
                           bg-dark-800 border border-dark-700 rounded-lg shadow-xl
-                          max-h-[300px] overflow-y-auto z-50">
+                          max-h-[300px] overflow-y-auto z-50 ${
+                            collapsed ? 'w-60' : 'right-0'
+                          }`}>
             {/* 集群列表 */}
             <div className="p-1">
               {clusters.map((cluster) => (
@@ -272,7 +284,7 @@ export default function ClusterSwitcher() {
                   setShowCreateDialog(true)
                 }}
                 className="w-full flex items-center gap-2 p-2 rounded-md 
-                           text-sm text-dark-400 hover:bg-dark-700 hover:text-white"
+                           text-sm text-dark-400 hover:bg-dark-700 hover:text-ink-primary"
               >
                 <Plus className="w-4 h-4" />
                 创建新集群
@@ -286,7 +298,7 @@ export default function ClusterSwitcher() {
                     window.location.href = `/cluster?tab=config`
                   }}
                   className="w-full flex items-center gap-2 p-2 rounded-md 
-                             text-sm text-dark-400 hover:bg-dark-700 hover:text-white"
+                             text-sm text-dark-400 hover:bg-dark-700 hover:text-ink-primary"
                 >
                   <Settings className="w-4 h-4" />
                   管理集群配置
