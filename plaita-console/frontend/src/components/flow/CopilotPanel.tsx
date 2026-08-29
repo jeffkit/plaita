@@ -1,0 +1,126 @@
+import { Component, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { CopilotKit, useCopilotChat, useCopilotReadable } from '@copilotkit/react-core'
+import { CopilotSidebar } from '@copilotkit/react-ui'
+import { HttpAgent } from '@ag-ui/client'
+import '@copilotkit/react-ui/styles.css'
+
+// 错误边界：Copilot 异常时不拖垮整个编辑器
+class CopilotErrorBoundary extends Component<{ children: ReactNode }, { err?: Error }> {
+  state: { err?: Error } = {}
+  static getDerivedStateFromError(err: Error) {
+    return { err }
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div data-testid="copilot-err" className="p-3 text-[11px] text-status-error whitespace-pre-wrap overflow-auto">
+          {String(this.state.err.stack || this.state.err)}
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+/**
+ * 编排页 Copilot 面板（方案 docs/copilot-agent-plan.md M1）。
+ *
+ * - CopilotKit selfManagedAgents 直连后端 /api/copilot（AG-UI 协议，反代 recursive /agui）
+ * - 当前画布状态经 useCopilotReadable 注入每轮请求的 context（后端拼进 user 消息）
+ * - agent 回复中的 ```plaita-flow 代码块 = 完整 flow IR，自动应用（onApplyFlow）
+ */
+
+// 从文本中提取最后一个 ```plaita-flow 代码块并解析为 IR
+export function extractFlowIR(text: string | undefined | null): Record<string, unknown> | null {
+  if (!text) return null
+  const matches = [...text.matchAll(/```plaita-flow\s*\n([\s\S]*?)```/g)]
+  if (matches.length === 0) return null
+  try {
+    const parsed = JSON.parse(matches[matches.length - 1][1].trim())
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** 监听聊天消息流中的 plaita-flow 代码块，自动应用（内容不变不重复触发） */
+function useAutoApplyFlow(onApplyFlow: (ir: Record<string, unknown>) => void) {
+  const chat = useCopilotChat() as unknown as { messages?: Array<Record<string, unknown>> }
+  const messages = chat?.messages ?? []
+  const lastApplied = useRef('')
+  const applyRef = useRef(onApplyFlow)
+  applyRef.current = onApplyFlow
+
+  useEffect(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i] as { role?: string; content?: unknown }
+      if (m.role !== 'assistant') break
+      const content = typeof m.content === 'string' ? m.content : ''
+      const ir = extractFlowIR(content)
+      if (!ir) return
+      const key = JSON.stringify(ir)
+      if (key === lastApplied.current) return
+      lastApplied.current = key
+      applyRef.current(ir)
+      return
+    }
+  }, [messages])
+}
+
+function CopilotInner({
+  flowContext,
+  onApplyFlow,
+}: {
+  flowContext: string
+  onApplyFlow: (ir: Record<string, unknown>) => void
+}) {
+  useCopilotReadable({
+    description: '当前画布的完整 flow JSON 与状态',
+    value: flowContext,
+  })
+  useAutoApplyFlow(onApplyFlow)
+  return null
+}
+
+export default function CopilotPanel({
+  open,
+  flowContext,
+  onApplyFlow,
+  onClose,
+}: {
+  open: boolean
+  flowContext: string
+  onApplyFlow: (ir: Record<string, unknown>) => void
+  onClose: () => void
+}) {
+  const agent = useMemo(
+    // @copilotkit 内嵌的 @ag-ui/core 实例与直接依赖在类型上有私有字段差异，运行时同源
+    () => new HttpAgent({ url: '/api/copilot' }) as never,
+    []
+  )
+
+  return (
+    <div
+      data-testid="copilot-panel"
+      style={{ display: open ? undefined : 'none' }}
+      className="w-[380px] shrink-0 border-l border-line h-full"
+    >
+      <CopilotErrorBoundary>
+      <CopilotKit selfManagedAgents={{ default: agent }}>
+        <CopilotInner flowContext={flowContext} onApplyFlow={onApplyFlow} />
+        <CopilotSidebar
+          defaultOpen
+          onSetOpen={(o) => {
+            if (!o) onClose()
+          }}
+          labels={{
+            title: '编排助手',
+            initial:
+              '我可以读取并修改当前流程。试试：\n「加一个 http 节点调用 example.com」「把 map 的并发打开」',
+          }}
+        />
+      </CopilotKit>
+      </CopilotErrorBoundary>
+    </div>
+  )
+}

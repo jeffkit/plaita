@@ -16,14 +16,14 @@ try:
     from .config import get_settings
     from .auth import require_admin_auth
     from .api import services, executions, queues, logs, cluster, events
-    from .api import nodes, flows, flow_version, dryrun
+    from .api import nodes, flows, flow_version, dryrun, copilot
     from .services import flow_store, signature
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from config import get_settings
     from auth import require_admin_auth
     from api import services, executions, queues, logs, cluster, events
-    from api import nodes, flows, flow_version, dryrun
+    from api import nodes, flows, flow_version, dryrun, copilot
     from services import flow_store, signature
 
 # 配置日志
@@ -187,6 +187,7 @@ def create_app() -> FastAPI:
     _mount_admin(nodes.router, "nodes")
     _mount_admin(flows.router, "flows")
     _mount_admin(dryrun.router, "dryrun")
+    _mount_admin(copilot.router, "copilot")
 
     # --- 契约面（独立 HMAC，不加 admin 依赖）---
     _mount_contract(flow_version.router, "flow_version")

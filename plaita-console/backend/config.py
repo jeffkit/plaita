@@ -47,6 +47,17 @@ class Settings(BaseModel):
         description="显式允许无管理密钥启动（仅本地开发）",
     )
 
+    # Copilot 大脑：recursive http 服务的 AG-UI 端点（POST /agui）。
+    # URL 为空时 /api/copilot 返回 503。
+    recursive_agui_url: str = Field(
+        default="",
+        description="recursive http 服务 /agui 端点 URL（如 http://127.0.0.1:8787/agui）",
+    )
+    recursive_agui_api_key: str = Field(
+        default="",
+        description="recursive 服务 X-API-Key（对应其 RECURSIVE_API_KEYS）",
+    )
+
     class Config:
         env_prefix = "PLAITA_CONSOLE_"
 
@@ -66,4 +77,6 @@ def get_settings() -> Settings:
             "PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN", "false"
         ).lower()
         == "true",
+        recursive_agui_url=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_URL", ""),
+        recursive_agui_api_key=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_API_KEY", ""),
     )

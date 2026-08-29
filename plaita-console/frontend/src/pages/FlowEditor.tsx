@@ -13,8 +13,9 @@ import { symmetricLayout } from '../components/flow/symmetricLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
-import { ArrowLeft, Zap, Sparkles, Code2, Save, Rocket, Play, ChevronRight } from 'lucide-react'
+import { ArrowLeft, Zap, Sparkles, Code2, Save, Rocket, Play, ChevronRight, Bot } from 'lucide-react'
 import { Button, StatusBadge } from '../components/ui'
+import CopilotPanel from '../components/flow/CopilotPanel'
 
 export default function FlowEditor() {
   const { flowId } = useParams<{ flowId: string }>()
@@ -33,6 +34,8 @@ export default function FlowEditor() {
   const [showDryRun, setShowDryRun] = useState(false)
   const [showSource, setShowSource] = useState(false)
   const [showAiDialog, setShowAiDialog] = useState(false)
+  // Copilot 面板默认展开，可随时收起（关闭后本会话不再自动弹出）
+  const [showCopilot, setShowCopilot] = useState(true)
 
   const setFlowContext = useFlowEditor((s) => s.setFlowContext)
   const setGraph = useFlowEditor((s) => s.setGraph)
@@ -153,6 +156,35 @@ export default function FlowEditor() {
     return versions.find((v) => v.version === version)?.status
   }, [flowQuery.data, version])
 
+  // Copilot 上下文：当前画布完整 flow + 状态，随每轮请求自动带最新值
+  const copilotContext = useMemo(() => {
+    const def = flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], {
+      flow_id: flowId,
+      version,
+      desc,
+      inputType,
+    })
+    return JSON.stringify(
+      {
+        flow: def,
+        dirty,
+        subgraph_stack: graphStack.map((f) => f.title),
+        note: '修改画布时输出完整新 flow JSON 于 ```plaita-flow 代码块中',
+      },
+      null,
+      1
+    )
+  }, [nodes, edges, flowId, version, desc, inputType, dirty, graphStack])
+
+  // 应用 agent 的 plaita-flow 输出：归位主图 → 整图替换（自动应用）
+  const applyAiFlow = (ir: Record<string, unknown>) => {
+    exitToLevel(0)
+    const { nodes: ns, edges: es } = jsonToFlow(ir, {})
+    useFlowEditor.getState().setGraph(ns as Node[], es as Edge[])
+    markDirty()
+    setMsg('已应用 AI 助手的画布修改（未保存，可继续编辑后保存草稿）')
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* 顶部工具栏：内容过宽时横向滚动，不挤压按钮 */}
@@ -228,6 +260,15 @@ export default function FlowEditor() {
         <Button
           variant="ghost"
           size="sm"
+          onClick={() => setShowCopilot((v) => !v)}
+          className={showCopilot ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
+        >
+          <Bot size={13} />
+          AI 助手
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={() => { collapseToRoot(); setShowSource((v) => !v) }}
           className={showSource ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
         >
@@ -283,6 +324,12 @@ export default function FlowEditor() {
         <NodePalette />
         <FlowCanvas />
         <NodeConfigDrawer />
+        <CopilotPanel
+          open={showCopilot}
+          flowContext={copilotContext}
+          onApplyFlow={applyAiFlow}
+          onClose={() => setShowCopilot(false)}
+        />
         {showDryRun && (
           <DryRunPanel
             flowJson={JSON.stringify(
