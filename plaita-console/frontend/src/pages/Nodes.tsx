@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../services/api'
 import { nodeTypeConfig } from '../components/flow/nodeTypes'
+import { Page, PageHeader, Card, Button, EmptyState } from '../components/ui'
 
 const EMPTY_SCHEMA = `{
   "properties": {
@@ -40,20 +41,19 @@ export default function Nodes() {
   const nodes = nodesQuery.data?.nodes || []
 
   return (
-    <div className="p-6 max-w-5xl">
-      <h1 className="text-2xl font-bold text-dark-100 mb-1">节点管理</h1>
-      <p className="text-dark-400 text-sm mb-6">查看内置节点、注册自定义节点描述（用于编排表单）</p>
+    <Page className="max-w-5xl">
+      <PageHeader title="节点管理" subtitle="查看内置节点、注册自定义节点描述（用于编排表单）" />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* 注册表单 */}
-        <div className="bg-dark-800 border border-dark-700 rounded-lg p-4">
-          <h2 className="text-sm font-semibold text-dark-200 mb-3">注册自定义节点</h2>
+        <Card className="p-4">
+          <h2 className="text-section text-ink-primary mb-3">注册自定义节点</h2>
           <div className="space-y-2">
             <input
               value={form.node_type}
               onChange={(e) => setForm({ ...form, node_type: e.target.value })}
               placeholder="node_type（不可与内置冲突）"
-              className="input w-full"
+              className="input"
             />
             <div className="flex gap-2">
               <input
@@ -73,57 +73,63 @@ export default function Nodes() {
               value={form.schema_json}
               onChange={(e) => setForm({ ...form, schema_json: e.target.value })}
               rows={10}
-              className="input w-full font-mono text-xs"
+              className="input font-mono text-data-sm"
               placeholder="节点字段 schema (JSON)"
             />
-            <button
+            <Button
+              variant="primary"
+              className="w-full"
               onClick={() => registerMut.mutate()}
               disabled={!form.node_type || registerMut.isPending}
-              className="bg-plaita-600 hover:bg-plaita-500 disabled:opacity-50 text-white px-4 py-2 rounded w-full"
             >
               注册
-            </button>
-            {error && <p className="text-xs text-red-400">{error}</p>}
-            {msg && <p className="text-xs text-green-400">{msg}</p>}
+            </Button>
+            {error && <p className="text-caption text-status-error">{error}</p>}
+            {msg && <p className="text-caption text-status-success">{msg}</p>}
           </div>
-        </div>
+        </Card>
 
-        {/* 节点列表 */}
-        <div className="bg-dark-800 border border-dark-700 rounded-lg p-4">
-          <h2 className="text-sm font-semibold text-dark-200 mb-3">节点清单（{nodes.length}）</h2>
-          <div className="max-h-[28rem] overflow-y-auto space-y-1">
-            {nodes.map((n) => {
-              const cfg = nodeTypeConfig[n.node_type]
-              return (
-                <div
-                  key={n.node_type}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded bg-dark-900/50 border border-dark-700 text-sm"
-                >
-                  <span>{cfg?.icon ?? '◆'}</span>
-                  <span className="font-mono text-dark-100 flex-1 truncate">{n.node_type}</span>
-                  <span className="text-xs text-dark-400">{n.category}</span>
-                  {n.is_builtin ? (
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-dark-700 text-dark-300">内置</span>
-                  ) : (
-                    <button
-                      onClick={async () => {
-                        if (confirm(`删除自定义节点 ${n.node_type}？`)) {
-                          await api.deleteNode(n.node_type)
-                          qc.invalidateQueries({ queryKey: ['nodes'] })
-                        }
-                      }}
-                      className="text-xs text-red-400 hover:text-red-300"
-                    >
-                      删除
-                    </button>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </div>
+        {/* 节点清单 */}
+        <Card className="p-4">
+          <h2 className="text-section text-ink-primary mb-3">
+            节点清单<span className="ml-1.5 font-mono text-data-sm text-ink-muted tabular-nums">{nodes.length}</span>
+          </h2>
+          {nodes.length === 0 ? (
+            <EmptyState message="暂无节点" />
+          ) : (
+            <div className="max-h-[28rem] overflow-y-auto space-y-1">
+              {nodes.map((n) => {
+                const cfg = nodeTypeConfig[n.node_type]
+                return (
+                  <div
+                    key={n.node_type}
+                    className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-inset border border-line text-caption"
+                  >
+                    <span>{cfg?.icon ?? '◆'}</span>
+                    <span className="font-mono text-data-sm text-ink-primary flex-1 truncate">{n.node_type}</span>
+                    <span className="text-ink-muted">{n.category}</span>
+                    {n.is_builtin ? (
+                      <span className="px-1.5 py-0.5 rounded bg-elevated border border-line text-ink-muted">内置</span>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          if (confirm(`删除自定义节点 ${n.node_type}？`)) {
+                            await api.deleteNode(n.node_type)
+                            qc.invalidateQueries({ queryKey: ['nodes'] })
+                          }
+                        }}
+                        className="text-status-error hover:opacity-80 transition-opacity"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </Card>
       </div>
-      <style>{`.input{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:6px 10px;color:#e2e8f0}`}</style>
-    </div>
+    </Page>
   )
 }

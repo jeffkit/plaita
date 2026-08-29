@@ -5,6 +5,7 @@ import {
   Node,
   Edge,
   Background,
+  BackgroundVariant,
   Controls,
   MiniMap,
   useNodesState,
@@ -13,37 +14,38 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { api } from '../services/api'
+import { EmptyState } from '../components/ui'
 
-// 节点类型样式
+// 服务类型 → 语义色（底/描边用状态 dim 体系，图标区分类型）
 const nodeStyles: Record<string, { bg: string; border: string; icon: string }> = {
   flow_worker: {
-    bg: 'bg-plaita-500/20',
-    border: 'border-plaita-500',
+    bg: 'bg-status-running-dim',
+    border: 'border-status-running/40',
     icon: '⚙️',
   },
   delay_service: {
-    bg: 'bg-blue-500/20',
-    border: 'border-blue-500',
+    bg: 'bg-status-pending-dim',
+    border: 'border-status-pending/40',
     icon: '⏱️',
   },
   redis_queue_service: {
-    bg: 'bg-red-500/20',
-    border: 'border-red-500',
+    bg: 'bg-status-error-dim',
+    border: 'border-status-error/40',
     icon: '📬',
   },
   kafka_queue_service: {
-    bg: 'bg-orange-500/20',
-    border: 'border-orange-500',
+    bg: 'bg-status-warning-dim',
+    border: 'border-status-warning/40',
     icon: '📨',
   },
   approval_service: {
-    bg: 'bg-purple-500/20',
-    border: 'border-purple-500',
+    bg: 'bg-status-success-dim',
+    border: 'border-status-success/40',
     icon: '✅',
   },
   resource: {
-    bg: 'bg-dark-600',
-    border: 'border-dark-400',
+    bg: 'bg-inset',
+    border: 'border-line',
     icon: '🗄️',
   },
 }
@@ -81,7 +83,7 @@ export default function Topology() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-dark-400">加载中...</div>
+        <EmptyState message="加载中…" />
       </div>
     )
   }
@@ -89,27 +91,27 @@ export default function Topology() {
   return (
     <div className="h-full relative">
       {/* 标题栏 */}
-      <div className="absolute top-4 left-4 z-10 bg-dark-800/90 backdrop-blur-sm rounded-lg px-4 py-2 border border-dark-700">
-        <h1 className="text-xl font-bold">服务拓扑</h1>
-        <p className="text-dark-400 text-sm">
-          共 {topologyData?.nodes.length || 0} 个节点
+      <div className="absolute top-4 left-4 z-10 bg-surface/95 rounded-lg px-4 py-2.5 border border-line shadow-card">
+        <h1 className="text-section text-ink-primary">服务拓扑</h1>
+        <p className="text-caption text-ink-muted mt-0.5">
+          共 <span className="font-mono tabular-nums">{topologyData?.nodes.length || 0}</span> 个节点
         </p>
       </div>
 
       {/* 图例 */}
-      <div className="absolute top-4 right-4 z-10 bg-dark-800/90 backdrop-blur-sm rounded-lg px-4 py-3 border border-dark-700">
-        <p className="text-sm font-medium mb-2">图例</p>
-        <div className="space-y-1 text-xs">
+      <div className="absolute top-4 right-4 z-10 bg-surface/95 rounded-lg px-3 py-2.5 border border-line shadow-card">
+        <p className="text-micro uppercase text-ink-muted mb-2">图例</p>
+        <div className="space-y-1 text-caption text-ink-secondary">
           <div className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full bg-plaita-500"></span>
+            <span className="w-2 h-2 rounded-full bg-status-running"></span>
             <span>FlowWorker</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full bg-blue-500"></span>
+            <span className="w-2 h-2 rounded-full bg-status-pending"></span>
             <span>延迟服务</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full bg-dark-400"></span>
+            <span className="w-2 h-2 rounded-full bg-dark-400"></span>
             <span>共享资源</span>
           </div>
         </div>
@@ -124,16 +126,10 @@ export default function Topology() {
         fitView
         attributionPosition="bottom-left"
       >
-        <Background color="#475569" gap={20} />
-        <Controls className="bg-dark-800 border-dark-700" />
-        <MiniMap
-          nodeColor={(node) => {
-            const st = node.data?.serviceType as string | undefined
-            const style = (st && nodeStyles[st]) || nodeStyles.resource
-            return style.border.replace('border-', '')
-          }}
-          className="bg-dark-800 border border-dark-700"
-        />
+        <Background variant={BackgroundVariant.Dots} gap={20} />
+        {/* Controls / MiniMap / 连线配色由 index.css 的 .react-flow__* 规则统一主题化 */}
+        <Controls showInteractive={false} />
+        <MiniMap pannable zoomable />
       </ReactFlow>
     </div>
   )
@@ -163,30 +159,33 @@ function convertToFlowData(topology?: {
   const resourceNodes = topology.nodes.filter(n => n.service_type === 'resource')
 
   const nodes: Node[] = []
-  
+
   // 服务节点（上方）
   serviceNodes.forEach((node, index) => {
     const style = nodeStyles[node.service_type] || nodeStyles.resource
     const col = index % 4
     const row = Math.floor(index / 4)
-    
+
     nodes.push({
       id: node.instance_id,
       position: { x: 100 + col * 250, y: 100 + row * 150 },
       data: {
         label: (
-          <div className={`px-4 py-3 rounded-lg border-2 ${style.bg} ${style.border}`}>
+          <div className={`relative px-3.5 py-2.5 rounded-lg border shadow-card overflow-hidden ${style.bg} ${style.border}`}>
             <div className="flex items-center gap-2">
               <span>{style.icon}</span>
-              <span className="font-medium">{node.service_type}</span>
+              <span className="font-mono text-data-sm font-medium text-ink-primary">{node.service_type}</span>
             </div>
-            <div className="text-xs text-dark-400 mt-1 truncate max-w-[150px]">
-              {node.instance_id.slice(0, 12)}...
+            <div className="font-mono text-[10px] text-ink-faint mt-1 truncate max-w-[150px]">
+              {node.instance_id.slice(0, 12)}…
             </div>
-            <div className={`text-xs mt-1 ${
-              node.status === 'running' ? 'text-plaita-400' : 'text-red-400'
+            <div className={`text-[10px] font-mono mt-1 flex items-center gap-1 ${
+              node.status === 'running' ? 'text-status-success' : 'text-status-error'
             }`}>
-              ● {node.status}
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                node.status === 'running' ? 'bg-status-success' : 'bg-status-error'
+              }`} />
+              {node.status}
             </div>
           </div>
         ),
@@ -199,16 +198,16 @@ function convertToFlowData(topology?: {
   // 资源节点（下方中央）
   resourceNodes.forEach((node, index) => {
     const style = nodeStyles.resource
-    
+
     nodes.push({
       id: node.instance_id,
       position: { x: 300 + index * 250, y: 400 },
       data: {
         label: (
-          <div className={`px-6 py-4 rounded-xl border-2 ${style.bg} ${style.border}`}>
+          <div className={`relative px-5 py-3.5 rounded-lg border shadow-card overflow-hidden ${style.bg} ${style.border}`}>
             <div className="flex items-center gap-2">
               <span>{style.icon}</span>
-              <span className="font-medium">{node.name}</span>
+              <span className="font-mono text-data-sm font-medium text-ink-primary">{node.name}</span>
             </div>
           </div>
         ),
@@ -218,22 +217,21 @@ function convertToFlowData(topology?: {
     })
   })
 
-  // 边
+  // 边（配色走 CSS 变量，随主题翻转；箭头由 index.css 的 .react-flow__arrowhead 接管）
   const edges: Edge[] = topology.edges.map((edge, index) => ({
     id: `edge-${index}`,
     source: edge.source_id,
     target: edge.target_id,
     label: edge.label,
-    labelStyle: { fill: '#94a3b8', fontSize: 10 },
-    labelBgStyle: { fill: '#1e293b' },
+    labelStyle: { fill: 'rgb(var(--c-ink-muted))', fontSize: 10 },
+    labelBgStyle: { fill: 'rgb(var(--c-surface))' },
     animated: edge.edge_type.includes('event'),
-    style: { stroke: '#475569' },
+    style: { stroke: 'rgb(var(--c-dark-500))' },
     markerEnd: {
       type: MarkerType.ArrowClosed,
-      color: '#475569',
+      color: '#7a828f',
     },
   }))
 
   return { nodes, edges }
 }
-
