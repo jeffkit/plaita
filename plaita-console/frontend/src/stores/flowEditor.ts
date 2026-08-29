@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Node, Edge, Connection, OnNodesChange, OnEdgesChange, OnConnect } from '@xyflow/react'
 import { applyNodeChanges, applyEdgeChanges, addEdge } from '@xyflow/react'
 import type { FlowMeta } from '../components/flow/flowConverter'
+import { EDGE_COLOR, EDGE_TYPE } from '../components/flow/flowLayout'
 
 export interface FlowEditorState {
   flowId: string
@@ -47,7 +48,7 @@ export const useFlowEditor = create<FlowEditorState>((set) => ({
   onConnect: (connection: Connection) =>
     set((s) => ({
       edges: addEdge(
-        { ...connection, style: { stroke: '#64748b' } },
+        { ...connection, type: EDGE_TYPE, style: { stroke: EDGE_COLOR } },
         s.edges
       ) as Edge[],
       dirty: true,

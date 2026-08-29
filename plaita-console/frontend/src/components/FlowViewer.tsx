@@ -9,6 +9,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { renderNodeLabel, type NodeStatus } from './flow/nodeTypes'
+import { autoLayout, EDGE_COLOR, EDGE_TYPE } from './flow/flowLayout'
 
 interface FlowViewerProps {
   context: Record<string, unknown>
@@ -71,27 +72,20 @@ function extractFlowStructure(
     return { nodes, edges }
   }
 
-  const cols = 3
-  const xSpacing = 250
-  const ySpacing = 120
-  const startX = 100
-  const startY = 50
-
+  // 执行轨迹按顺序连线（语义：先后执行次序）；坐标用 dagre 单向布局，
+  // 替代旧的三列网格，保持与编辑器一致的纵向展开。
   flowNodes.forEach((node, index) => {
     const nodeId = (node.id as string) || `node-${index}`
     const nodeType = (node.type as string) || 'unknown'
     const nodeName = (node.name as string) || nodeId
-
-    const col = index % cols
-    const row = Math.floor(index / cols)
 
     nodes.push(
       createFlowNode({
         id: nodeId,
         type: nodeType,
         name: nodeName,
-        x: startX + col * xSpacing,
-        y: startY + row * ySpacing,
+        x: 0,
+        y: 0,
         status: getNodeStatus(nodeId, currentNodeId, executedNodes, suspendedAt, executionStatus),
       })
     )
@@ -103,16 +97,17 @@ function extractFlowStructure(
         id: `edge-${prevNodeId}-${nodeId}`,
         source: prevNodeId,
         target: nodeId,
-        style: { stroke: '#475569' },
+        type: EDGE_TYPE,
+        style: { stroke: EDGE_COLOR },
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: '#475569',
+          color: EDGE_COLOR,
         },
       })
     }
   })
 
-  return { nodes, edges }
+  return { nodes: autoLayout(nodes, edges, 'TB'), edges }
 }
 
 function getNodeStatus(

@@ -8,10 +8,12 @@ import NodePalette from '../components/flow/NodePalette'
 import FlowCanvas from '../components/flow/FlowCanvas'
 import NodeConfigDrawer from '../components/flow/NodeConfigDrawer'
 import AiGenerateDialog from '../components/flow/AiGenerateDialog'
-import { autoLayout } from '../components/flow/FlowCanvas'
+import { autoLayout, type LayoutDirection } from '../components/flow/flowLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
+import { ArrowLeft, Zap, Sparkles, Code2, Save, Rocket, Play } from 'lucide-react'
+import { Button, StatusBadge } from '../components/ui'
 
 export default function FlowEditor() {
   const { flowId } = useParams<{ flowId: string }>()
@@ -33,6 +35,7 @@ export default function FlowEditor() {
 
   const setFlowContext = useFlowEditor((s) => s.setFlowContext)
   const setGraph = useFlowEditor((s) => s.setGraph)
+  const markDirty = useFlowEditor((s) => s.markDirty)
   const reset = useFlowEditor((s) => s.reset)
   const nodes = useFlowEditor((s) => s.nodes)
   const edges = useFlowEditor((s) => s.edges)
@@ -138,86 +141,87 @@ export default function FlowEditor() {
   return (
     <div className="h-full flex flex-col">
       {/* 顶部工具栏 */}
-      <div className="flex items-center gap-3 px-4 py-2 bg-dark-900/80 border-b border-dark-700 text-sm">
-        <button
-          onClick={() => navigate('/flows')}
-          className="text-dark-300 hover:text-dark-100"
-        >
-          ← 返回列表
-        </button>
-        <span className="font-semibold text-dark-100">{flowId}</span>
-        <span className="text-dark-400">@</span>
+      <div className="flex items-center gap-2 px-4 py-2 bg-surface border-b border-line">
+        <Button variant="ghost" size="sm" onClick={() => navigate('/flows')}>
+          <ArrowLeft size={14} />
+          返回列表
+        </Button>
+        <span className="font-mono text-data font-semibold text-ink-primary">{flowId}</span>
+        <span className="text-ink-faint">@</span>
         <input
           value={version}
           onChange={(e) => setVersion(e.target.value)}
-          className="input w-28"
+          className="input w-24"
           placeholder="0.0.1"
         />
-        {status && (
-          <span className={`text-xs px-2 py-0.5 rounded ${status === 'published' ? 'bg-green-600/30 text-green-400' : 'bg-dark-700 text-dark-300'}`}>
-            {status}
-          </span>
-        )}
+        {status && <StatusBadge status={status} />}
         <input
           value={desc}
           onChange={(e) => setDesc(e.target.value)}
           placeholder="流程描述"
-          className="input w-48"
+          className="input w-44"
         />
         <div className="flex-1" />
-        {dirty && <span className="text-xs text-yellow-400">未保存</span>}
-        <button
-          onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending}
-          className="bg-dark-700 hover:bg-dark-600 px-3 py-1.5 rounded text-dark-100"
-        >
+        {dirty && <span className="text-caption text-status-warning">未保存</span>}
+        <Button variant="secondary" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+          <Save size={13} />
           保存草稿
-        </button>
-        <button
-          onClick={() => publishMutation.mutate()}
-          disabled={publishMutation.isPending}
-          className="bg-plaita-600 hover:bg-plaita-500 px-3 py-1.5 rounded text-white"
-        >
+        </Button>
+        <Button variant="primary" size="sm" onClick={() => publishMutation.mutate()} disabled={publishMutation.isPending}>
+          <Rocket size={13} />
           发布
-        </button>
-        <button
-          onClick={() => setShowDryRun((v) => !v)}
-          className="bg-dark-700 hover:bg-dark-600 px-3 py-1.5 rounded text-dark-100"
-        >
+        </Button>
+        <Button variant="secondary" size="sm" onClick={() => setShowDryRun((v) => !v)}>
+          <Play size={13} />
           试跑
-        </button>
-        <button
-          onClick={() => {
-            const layouted = autoLayout(nodes as Node[], edges as Edge[])
-            setGraph(layouted as Node[], edges as Edge[])
-          }}
-          className="bg-dark-700 hover:bg-dark-600 px-3 py-1.5 rounded text-dark-100"
-          title="dagre 自动排列节点"
+        </Button>
+        <div
+          className="flex items-center rounded-md border border-line overflow-hidden"
+          title="自动布局：从开始节点单方向展开，分支自然分叉"
         >
-          ⚡ 自动布局
-        </button>
-        <button
+          <span className="pl-2.5 pr-1.5 text-caption text-ink-muted flex items-center gap-1">
+            <Zap size={12} />
+            布局
+          </span>
+          {(['TB', 'LR'] as LayoutDirection[]).map((dir) => (
+            <button
+              key={dir}
+              onClick={() => {
+                const layouted = autoLayout(nodes as Node[], edges as Edge[], dir)
+                setGraph(layouted as Node[], edges as Edge[])
+                markDirty()
+              }}
+              className="px-2.5 h-7 text-caption text-ink-secondary hover:bg-elevated hover:text-ink-primary transition-colors"
+            >
+              {dir === 'TB' ? '纵向' : '横向'}
+            </button>
+          ))}
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setShowAiDialog(true)}
-          className="bg-purple-600 hover:bg-purple-500 px-3 py-1.5 rounded text-white"
           title="自然语言 → AI 生成 @flow（后端 agent 宿主经 agentproc 运行）"
         >
-          ✨ AI 生成
-        </button>
-        <button
+          <Sparkles size={13} className="text-plaita-400" />
+          AI 生成
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={() => setShowSource((v) => !v)}
-          className={`px-3 py-1.5 rounded text-dark-100 ${
-            showSource ? 'bg-plaita-600 hover:bg-plaita-500 text-white' : 'bg-dark-700 hover:bg-dark-600'
-          }`}
+          className={showSource ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
         >
+          <Code2 size={13} />
           源码
-        </button>
+        </Button>
       </div>
 
       {saveError && (
-        <div className="px-4 py-1 bg-red-600/20 text-red-300 text-xs">{saveError}</div>
+        <div className="px-4 py-1 bg-status-error-dim text-status-error text-caption">{saveError}</div>
       )}
       {msg && (
-        <div className="px-4 py-1 bg-green-600/20 text-green-300 text-xs">{msg}</div>
+        <div className="px-4 py-1 bg-status-success-dim text-status-success text-caption">{msg}</div>
       )}
 
       {/* 编辑器主体 */}
@@ -258,7 +262,6 @@ export default function FlowEditor() {
           }}
         />
       )}
-      <style>{`.input{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 8px;color:#e2e8f0;font-size:13px}`}</style>
     </div>
   )
 }

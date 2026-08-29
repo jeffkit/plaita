@@ -1,4 +1,5 @@
 import type { Node, Edge } from '@xyflow/react'
+import { autoLayout, NODE_WIDTH, NODE_HEIGHT, EDGE_TYPE } from './flowLayout'
 
 // 画布节点 data 结构：type + 展示名 + 类型特定配置字段（不含 next/branches/else_next，
 // 这些由画布边推导）。id 用作 Flow 节点 id。
@@ -110,11 +111,10 @@ export function jsonToFlow(
     for (const [k, v] of Object.entries(raw)) {
       if (!excluded.has(k)) fields[k] = v
     }
-    const pos = layout[id] || gridPos(i)
     nodes.push({
       id,
       type: 'plaitaNode',
-      position: pos,
+      position: layout[id] || { x: 0, y: 0 },
       data: { type, name, fields },
     })
 
@@ -125,6 +125,7 @@ export function jsonToFlow(
         source: id,
         target: raw.next,
         sourceHandle: 'true',
+        type: EDGE_TYPE,
       })
     }
     // if 假分支
@@ -134,6 +135,7 @@ export function jsonToFlow(
         source: id,
         target: raw.else_next,
         sourceHandle: 'false',
+        type: EDGE_TYPE,
       })
     }
     // switch/case 分支
@@ -148,23 +150,48 @@ export function jsonToFlow(
             source: id,
             target,
             sourceHandle: bname,
+            type: EDGE_TYPE,
           })
         }
       }
     }
   })
 
-  return { nodes, edges }
+  return { nodes: assignPositions(nodes, edges, layout), edges }
 }
 
-function gridPos(index: number): { x: number; y: number } {
-  const cols = 3
-  const xSpacing = 250
-  const ySpacing = 140
-  return {
-    x: 100 + (index % cols) * xSpacing,
-    y: 80 + Math.floor(index / cols) * ySpacing,
+/**
+ * 坐标分配：优先后端存储的 layout；完全没有时用 dagre 单向布局兜底
+ * （从入口单方向展开、分支分叉，替代旧的三列表格式布局）；个别节点缺坐标
+ * （如外部新增）放到现有包围盒右下角，不整体重排，保护已保存的手工布局。
+ */
+function assignPositions(
+  nodes: Node<FlowNodeData>[],
+  edges: Edge[],
+  layout: Record<string, { x: number; y: number }>,
+): Node<FlowNodeData>[] {
+  const missing = nodes.filter((n) => !layout[n.id])
+  if (nodes.length > 0 && missing.length === nodes.length) {
+    return autoLayout(nodes, edges, 'TB') as Node<FlowNodeData>[]
   }
+  const bounds = nodes.reduce(
+    (acc, n) => {
+      const p = layout[n.id]
+      if (!p) return acc
+      return {
+        x: Math.max(acc.x, p.x + NODE_WIDTH),
+        y: Math.max(acc.y, p.y + NODE_HEIGHT),
+      }
+    },
+    { x: 0, y: 0 },
+  )
+  let seq = 0
+  return nodes.map((n) => {
+    const p = layout[n.id]
+    if (p) return { ...n, position: p }
+    seq += 1
+    return { ...n, position: { x: bounds.x + 60, y: bounds.y + 80 * seq } }
+  })
 }
 
 /** 从画布节点提取 layout（坐标） */
