@@ -105,12 +105,22 @@ export function jsonToFlow(
     const id = (raw.id as string) || `node-${i}`
     const type = (raw.type as string) || 'unknown'
     const name = (raw.name as string) || id
+    // 分支结构保留进 fields（剥离 next：分支目标由画布边推导，保存时回填）。
+    // 覆盖 switch/case 的分支条件与 parallel 的分支子图，避免 round-trip 丢失。
+    const fieldsBranches = Array.isArray(raw.branches)
+      ? (raw.branches as Array<Record<string, unknown>>).map((b) => {
+          const { next: _n, ...rest } = b
+          void _n
+          return rest
+        })
+      : undefined
     // 提取类型特定字段：排除连接字段与元字段
     const excluded = new Set(['type', 'id', 'name', 'next', 'else_next', 'branches'])
     const fields: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(raw)) {
       if (!excluded.has(k)) fields[k] = v
     }
+    if (fieldsBranches !== undefined) fields.branches = fieldsBranches
     nodes.push({
       id,
       type: 'plaitaNode',
