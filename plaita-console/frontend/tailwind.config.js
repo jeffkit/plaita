@@ -57,7 +57,7 @@ export default {
           strong: 'rgb(var(--c-line) / 0.12)',
         },
         // ── 品牌绿上的文字/图标色（随主题翻转，DESIGN.md §2.4）──
-        onAccent: 'rgb(var(--c-on-accent) / <alpha-value>)',
+        'on-accent': 'rgb(var(--c-on-accent) / <alpha-value>)',
         // ── 文字四档（DESIGN.md §2.2）──
         ink: {
           primary: 'rgb(var(--c-ink-primary) / <alpha-value>)',
