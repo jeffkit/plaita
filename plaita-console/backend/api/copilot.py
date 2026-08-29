@@ -19,10 +19,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 try:
     from ..config import get_settings
-    from .services import ai_flow, flow_store
+    from .services import ai_flow, claude_brain, flow_store
 except ImportError:  # 直接以 backend 为工作目录启动（python run.py）
     from config import get_settings
-    from services import ai_flow, flow_store
+    from services import ai_flow, claude_brain, flow_store
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +59,8 @@ def _nodes_digest() -> str:
         return ""
 
 
-def _inject_context(body: dict) -> dict:
-    """把 RunAgentInput.context 全部项（画布状态等）与 system 头拼接进最后一条 user 消息。
-
-    不依赖 context item 的 name 字段——CopilotKit useCopilotReadable 产生的
-    Context 形如 {description, value}，无 name；凡有 value 的项都拼接。
-    """
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        return body
-
+def _context_note(body: dict) -> str:
+    """把 RunAgentInput.context 项拼为可读文本（全部带 value 的项）。"""
     parts = []
     for item in body.get("context") or []:
         if not isinstance(item, dict):
@@ -78,7 +70,19 @@ def _inject_context(body: dict) -> dict:
             continue
         title = item.get("name") or item.get("description") or "上下文"
         parts.append(f"### {title}\n{value}")
-    context_note = "\n\n".join(parts)
+    return "\n\n".join(parts)
+
+
+def _inject_context(body: dict) -> dict:
+    """把 RunAgentInput.context 全部项（画布状态等）与 system 头拼接进最后一条 user 消息。
+
+    不依赖 context item 的 name 字段——CopilotKit useCopilotReadable 产生的
+    Context 形如 {description, value}，无 name；凡有 value 的项都拼接。
+    """
+    context_note = _context_note(body)
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return body
 
     system_header = _COPILOT_PROMPT_HEADER.replace(
         "{nodes_digest}", _nodes_digest()
@@ -100,13 +104,15 @@ async def copilot_run(request: Request):
     """AG-UI 协议端点：反代 recursive `POST /agui`，SSE 透传。"""
     settings = get_settings()
     base = (settings.recursive_agui_url or "").strip()
-    if not base:
+    use_claude = not base and claude_brain.claude_available()
+    if not base and not use_claude:
         return JSONResponse(
             status_code=503,
             content={
                 "detail": (
-                    "Copilot 未配置大脑。请设置 PLAITA_CONSOLE_RECURSIVE_AGUI_URL"
-                    "（指向 recursive http 服务的 /agui 端点）后重启。"
+                    "Copilot 未配置大脑。可选：① 设置 PLAITA_CONSOLE_RECURSIVE_AGUI_URL"
+                    "（recursive http 服务的 /agui 端点）；② 安装 claude CLI 后自动使用"
+                    " Claude Code 大脑。"
                 )
             },
         )
@@ -125,6 +131,19 @@ async def copilot_run(request: Request):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("copilot thread upsert 失败: %s", exc)
+
+    if not base:
+        # claude 大脑：prompt 即处理后的最后一条 user 消息（含 system 头与画布状态）
+        context_note = _context_note(body)
+        messages = body.get("messages") or []
+        goal = next(
+            (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
+            context_note or "继续。",
+        )
+        return StreamingResponse(
+            claude_brain.claude_agui_stream(body, str(goal)),
+            media_type="text/event-stream",
+        )
 
     url = base if base.endswith("/agui") else f"{base.rstrip('/')}/agui"
     headers = {"content-type": "application/json"}
