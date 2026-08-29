@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { api, ExecutionInfo } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
+import { Button, Card } from '../components/ui'
 
 type ResumeType = 'continue' | 'event' | 'timeout' | 'cancel'
 
@@ -109,66 +110,51 @@ export default function ExecutionDetail() {
   }
 
   return (
-    <div className="p-8 h-full overflow-auto">
+    <div className="p-6 h-full overflow-auto space-y-5">
       {/* 头部 */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate('/executions')}
-            className="p-2 hover:bg-dark-700 rounded-lg transition-colors"
-          >
-            <ArrowLeft size={20} />
-          </button>
-          <div>
-            <h1 className="text-2xl font-bold">执行详情</h1>
-            <p className="text-dark-400 font-mono text-sm mt-1">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <Button variant="ghost" size="sm" onClick={() => navigate('/executions')} title="返回列表">
+            <ArrowLeft size={16} />
+          </Button>
+          <div className="min-w-0">
+            <h1 className="text-page-title text-ink-primary">执行详情</h1>
+            <p className="text-data-sm text-ink-muted mt-0.5 truncate">
               {execution.execution_id}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => refetch()}
-            className="flex items-center gap-2 bg-dark-700 hover:bg-dark-600 px-4 py-2 rounded-lg transition-colors"
-          >
-            <RefreshCw size={16} />
+        <div className="flex items-center gap-2 shrink-0">
+          <Button variant="ghost" size="sm" onClick={() => refetch()}>
+            <RefreshCw size={13} />
             刷新
-          </button>
+          </Button>
 
           {execution.status === 'running' && (
-            <button
-              onClick={() => cancelMutation.mutate()}
-              disabled={cancelMutation.isPending}
-              className="flex items-center gap-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 px-4 py-2 rounded-lg transition-colors"
-            >
-              <Square size={16} />
+            <Button variant="danger" size="sm" onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}>
+              <Square size={13} />
               停止
-            </button>
+            </Button>
           )}
 
           {execution.status === 'suspended' && (
-            <button
-              onClick={() => setShowResumeDialog(true)}
-              className="flex items-center gap-2 bg-plaita-500 hover:bg-plaita-600 px-4 py-2 rounded-lg transition-colors"
-            >
-              <Play size={16} />
+            <Button variant="primary" size="sm" onClick={() => setShowResumeDialog(true)}>
+              <Play size={13} />
               恢复
-            </button>
+            </Button>
           )}
 
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => setUseSSE(!useSSE)}
-            className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-              useSSE
-                ? 'bg-plaita-500/20 text-plaita-400 border border-plaita-500/30'
-                : 'bg-dark-700 hover:bg-dark-600 text-dark-300'
-            }`}
+            className={useSSE ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
             title={useSSE ? '使用 SSE 实时更新中' : '使用轮询模式'}
           >
-            <Radio size={14} />
+            <Radio size={13} />
             {useSSE ? '实时' : '轮询'}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -212,12 +198,12 @@ export default function ExecutionDetail() {
 
           {/* 错误信息 */}
           {execution.error && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
-              <h3 className="font-medium text-red-400 mb-2 flex items-center gap-2">
-                <AlertCircle size={16} />
+            <div className="bg-status-error-dim border border-status-error/30 rounded-xl p-4">
+              <h3 className="text-section text-status-error mb-2 flex items-center gap-2">
+                <AlertCircle size={15} />
                 错误信息
               </h3>
-              <pre className="text-sm text-red-300 whitespace-pre-wrap font-mono">
+              <pre className="text-data-sm text-status-error whitespace-pre-wrap font-mono opacity-90">
                 {JSON.stringify(execution.error, null, 2)}
               </pre>
             </div>
@@ -234,29 +220,29 @@ export default function ExecutionDetail() {
           </InfoCard>
 
           {/* 执行上下文 */}
-          <div className="bg-dark-800/50 rounded-xl border border-dark-700 overflow-hidden">
-            <div className="px-4 py-3 border-b border-dark-700">
-              <h3 className="font-medium">执行上下文</h3>
+          <Card className="overflow-hidden">
+            <div className="px-4 py-3 border-b border-line">
+              <h3 className="text-section text-ink-primary">执行上下文</h3>
             </div>
-            <div className="p-4 bg-dark-900 max-h-96 overflow-auto">
-              <pre className="text-sm font-mono text-dark-300 whitespace-pre-wrap">
+            <div className="p-4 bg-inset max-h-96 overflow-auto">
+              <pre className="text-data-sm font-mono text-ink-secondary whitespace-pre-wrap">
                 {execution.context
                   ? JSON.stringify(execution.context, null, 2)
                   : '无上下文数据'}
               </pre>
             </div>
-          </div>
+          </Card>
 
           {/* 流程可视化 */}
           {execution.context && (
-            <div className="bg-dark-800/50 rounded-xl border border-dark-700 overflow-hidden">
-              <div className="px-4 py-3 border-b border-dark-700">
-                <h3 className="font-medium">流程可视化</h3>
+            <Card className="overflow-hidden">
+              <div className="px-4 py-3 border-b border-line">
+                <h3 className="text-section text-ink-primary">流程可视化</h3>
               </div>
               <div className="h-96">
                 <FlowViewer context={execution.context} status={execution.status} />
               </div>
-            </div>
+            </Card>
           )}
         </div>
       </div>
@@ -318,11 +304,11 @@ function ResumeDialog({
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-dark-800 border border-dark-600 rounded-2xl w-full max-w-lg shadow-2xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700">
-          <h2 className="text-lg font-semibold">恢复执行</h2>
-          <button onClick={onClose} className="p-1 hover:bg-dark-700 rounded-lg transition-colors">
-            <X size={18} />
+      <div className="bg-elevated border border-line-strong rounded-xl w-full max-w-lg shadow-pop">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-line">
+          <h2 className="text-section text-ink-primary">恢复执行</h2>
+          <button onClick={onClose} className="p-1 rounded-md text-ink-muted hover:text-ink-primary hover:bg-dark-700 transition-colors">
+            <X size={16} />
           </button>
         </div>
 
@@ -332,18 +318,18 @@ function ResumeDialog({
               <button
                 key={opt.type}
                 onClick={() => setResumeType(opt.type)}
-                className={`flex items-start gap-3 p-3 rounded-xl border transition-all text-left ${
+                className={`flex items-start gap-3 p-3 rounded-lg border transition-colors text-left ${
                   resumeType === opt.type
-                    ? 'bg-plaita-500/15 border-plaita-500/40 text-plaita-300'
-                    : 'bg-dark-700/50 border-dark-600 hover:border-dark-500 text-dark-300'
+                    ? 'bg-plaita-500/10 border-plaita-400/40 text-plaita-400'
+                    : 'bg-surface border-line hover:border-line-strong text-ink-secondary'
                 }`}
               >
-                <div className={`mt-0.5 ${resumeType === opt.type ? 'text-plaita-400' : 'text-dark-400'}`}>
+                <div className={`mt-0.5 ${resumeType === opt.type ? 'text-plaita-400' : 'text-ink-muted'}`}>
                   {opt.icon}
                 </div>
                 <div>
-                  <div className="font-medium text-sm">{opt.label}</div>
-                  <div className="text-xs text-dark-400 mt-0.5">{opt.desc}</div>
+                  <div className="font-medium text-body">{opt.label}</div>
+                  <div className="text-caption text-ink-muted mt-0.5">{opt.desc}</div>
                 </div>
               </button>
             ))}
@@ -352,10 +338,10 @@ function ResumeDialog({
           {resumeType === 'event' && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-dark-300">事件数据 (JSON)</label>
+                <label className="text-body font-medium text-ink-secondary">事件数据 (JSON)</label>
                 <button
                   onClick={handleFormat}
-                  className="text-xs text-plaita-400 hover:text-plaita-300 transition-colors"
+                  className="text-caption text-plaita-400 hover:text-plaita-300 transition-colors"
                 >
                   格式化
                 </button>
@@ -364,11 +350,11 @@ function ResumeDialog({
                 value={eventData}
                 onChange={(e) => { setEventData(e.target.value); setJsonError('') }}
                 rows={6}
-                className="w-full bg-dark-900 border border-dark-600 rounded-lg px-4 py-3 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-plaita-500 resize-none"
+                className="input font-mono text-data-sm resize-none"
                 placeholder='{"event_type": "approval", "approved": true}'
               />
               {jsonError && (
-                <p className="text-xs text-red-400 flex items-center gap-1">
+                <p className="text-caption text-status-error flex items-center gap-1">
                   <AlertCircle size={12} /> {jsonError}
                 </p>
               )}
@@ -376,78 +362,71 @@ function ResumeDialog({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-dark-700">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-sm transition-colors"
-          >
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-line">
+          <Button variant="secondary" size="sm" onClick={onClose}>
             取消
-          </button>
-          <button
-            onClick={handleSubmit}
-            disabled={isPending}
-            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-plaita-500 hover:bg-plaita-600 text-sm font-medium transition-colors disabled:opacity-50"
-          >
-            {isPending ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+          </Button>
+          <Button variant="primary" size="sm" onClick={handleSubmit} disabled={isPending}>
+            {isPending ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
             恢复执行
-          </button>
+          </Button>
         </div>
       </div>
     </div>
   )
 }
 
-// 状态卡片
+// 状态卡片：语义状态色（DESIGN.md §2.5）
 function StatusCard({ execution }: { execution: ExecutionInfo }) {
   const statusConfig = {
     running: {
-      icon: <Loader2 className="animate-spin" size={32} />,
-      color: 'text-plaita-400',
-      bg: 'bg-plaita-500/10',
-      border: 'border-plaita-500/30',
+      icon: <Loader2 className="animate-spin" size={30} />,
+      color: 'text-status-running',
+      bg: 'bg-status-running-dim',
+      border: 'border-status-running/30',
       label: '运行中',
     },
     completed: {
-      icon: <CheckCircle size={32} />,
-      color: 'text-blue-400',
-      bg: 'bg-blue-500/10',
-      border: 'border-blue-500/30',
+      icon: <CheckCircle size={30} />,
+      color: 'text-status-success',
+      bg: 'bg-status-success-dim',
+      border: 'border-status-success/30',
       label: '已完成',
     },
     suspended: {
-      icon: <PauseCircle size={32} />,
-      color: 'text-yellow-400',
-      bg: 'bg-yellow-500/10',
-      border: 'border-yellow-500/30',
+      icon: <PauseCircle size={30} />,
+      color: 'text-status-warning',
+      bg: 'bg-status-warning-dim',
+      border: 'border-status-warning/30',
       label: '已暂停',
     },
     error: {
-      icon: <AlertCircle size={32} />,
-      color: 'text-red-400',
-      bg: 'bg-red-500/10',
-      border: 'border-red-500/30',
+      icon: <AlertCircle size={30} />,
+      color: 'text-status-error',
+      bg: 'bg-status-error-dim',
+      border: 'border-status-error/30',
       label: '错误',
     },
   }
 
   const config = statusConfig[execution.status as keyof typeof statusConfig] || {
-    icon: <Clock size={32} />,
-    color: 'text-dark-400',
-    bg: 'bg-dark-700',
-    border: 'border-dark-600',
+    icon: <Clock size={30} />,
+    color: 'text-ink-muted',
+    bg: 'bg-inset',
+    border: 'border-line',
     label: execution.status,
   }
 
   return (
-    <div className={`rounded-xl border p-6 ${config.bg} ${config.border}`}>
+    <Card className={`p-5 ${config.bg} ${config.border}`}>
       <div className="flex items-center gap-4">
         <div className={config.color}>{config.icon}</div>
         <div>
-          <p className="text-dark-400 text-sm">当前状态</p>
-          <p className={`text-2xl font-bold ${config.color}`}>{config.label}</p>
+          <p className="text-micro uppercase text-ink-muted">当前状态</p>
+          <p className={`text-2xl font-bold font-sans ${config.color}`}>{config.label}</p>
         </div>
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -460,21 +439,21 @@ function InfoCard({
   children: React.ReactNode
 }) {
   return (
-    <div className="bg-dark-800/50 rounded-xl border border-dark-700 overflow-hidden">
-      <div className="px-4 py-3 border-b border-dark-700">
-        <h3 className="font-medium">{title}</h3>
+    <Card className="overflow-hidden">
+      <div className="px-4 py-3 border-b border-line">
+        <h3 className="text-section text-ink-primary">{title}</h3>
       </div>
       <div className="p-4 space-y-3">{children}</div>
-    </div>
+    </Card>
   )
 }
 
 // 信息行
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between">
-      <span className="text-dark-400 text-sm">{label}</span>
-      <span className="font-mono text-sm">{value}</span>
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-caption text-ink-muted shrink-0">{label}</span>
+      <span className="font-mono text-data-sm text-ink-primary truncate">{value}</span>
     </div>
   )
 }
