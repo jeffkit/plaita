@@ -1,5 +1,6 @@
 import type { Node, Edge } from '@xyflow/react'
-import { autoLayout, NODE_WIDTH, NODE_HEIGHT, EDGE_TYPE } from './flowLayout'
+import { NODE_WIDTH, NODE_HEIGHT, EDGE_TYPE } from './flowLayout'
+import { symmetricLayout } from './symmetricLayout'
 
 // 画布节点 data 结构：type + 展示名 + 类型特定配置字段（不含 next/branches/else_next，
 // 这些由画布边推导）。id 用作 Flow 节点 id。
@@ -182,7 +183,8 @@ function assignPositions(
 ): Node<FlowNodeData>[] {
   const missing = nodes.filter((n) => !layout[n.id])
   if (nodes.length > 0 && missing.length === nodes.length) {
-    return autoLayout(nodes, edges, 'TB') as Node<FlowNodeData>[]
+    // 兜底用对称树布局：分支左右均匀分布，主干一条线
+    return symmetricLayout(nodes, edges, 'TB') as Node<FlowNodeData>[]
   }
   const bounds = nodes.reduce(
     (acc, n) => {

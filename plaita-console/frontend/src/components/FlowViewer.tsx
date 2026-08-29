@@ -9,7 +9,8 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { renderNodeLabel, type NodeStatus } from './flow/nodeTypes'
-import { autoLayout, EDGE_COLOR, EDGE_TYPE } from './flow/flowLayout'
+import { EDGE_COLOR, EDGE_TYPE } from './flow/flowLayout'
+import { symmetricLayout } from './flow/symmetricLayout'
 
 interface FlowViewerProps {
   context: Record<string, unknown>
@@ -107,7 +108,7 @@ function extractFlowStructure(
     }
   })
 
-  return { nodes: autoLayout(nodes, edges, 'TB'), edges }
+  return { nodes: symmetricLayout(nodes, edges, 'TB'), edges }
 }
 
 function getNodeStatus(

@@ -9,6 +9,7 @@ import FlowCanvas from '../components/flow/FlowCanvas'
 import NodeConfigDrawer from '../components/flow/NodeConfigDrawer'
 import AiGenerateDialog from '../components/flow/AiGenerateDialog'
 import { autoLayout, type LayoutDirection } from '../components/flow/flowLayout'
+import { symmetricLayout } from '../components/flow/symmetricLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
@@ -202,7 +203,10 @@ export default function FlowEditor() {
             <button
               key={dir}
               onClick={() => {
-                const layouted = autoLayout(nodes as Node[], edges as Edge[], dir)
+                const layouted =
+                  dir === 'TB'
+                    ? symmetricLayout(nodes as Node[], edges as Edge[], 'TB')
+                    : autoLayout(nodes as Node[], edges as Edge[], 'LR')
                 setGraph(layouted as Node[], edges as Edge[])
                 markDirty()
               }}
