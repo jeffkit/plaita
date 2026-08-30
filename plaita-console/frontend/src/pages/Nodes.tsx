@@ -41,7 +41,7 @@ export default function Nodes() {
   const nodes = nodesQuery.data?.nodes || []
 
   return (
-    <Page className="max-w-5xl">
+    <Page>
       <PageHeader title="节点管理" subtitle="查看内置节点、注册自定义节点描述（用于编排表单）" />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

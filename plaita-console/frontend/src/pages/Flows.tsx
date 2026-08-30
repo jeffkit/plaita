@@ -31,7 +31,7 @@ export default function Flows() {
   const flows = flowsQuery.data?.flows || []
 
   return (
-    <Page className="max-w-5xl">
+    <Page>
       <PageHeader title="流程编排" subtitle="可视化编排与版本管理 Plaita 流程定义" />
 
       {/* 新建流程 */}
