@@ -82,9 +82,12 @@ services:
     env:
       PLAITA_QUEUE_NAME: plaita:flow:queue
       PLAITA_REDIS_URL: ${redis.url}
+      PLAITA_PYTHON: /Users/kong/projects/infra4agent/mediaflow/.runtime/venv/bin/python
+      PLAITA_NODE_PATH: /Users/kong/projects/infra4agent/mediaflow:/Users/kong/projects/infra4agent/plaita-nodes/src
+      PLAITA_NODE_MODULES: plaita_nodes,plaita_flows.nodes
     max_instances: 10
     process:
-      module: plaita.server.flow_worker
+      command: python -m plaita.server.flow_worker
   http_callback_service:
     default_instances: 1
     display_name: HTTP 回调服务

@@ -139,6 +139,11 @@ class ProcessLauncher(ServiceLauncher):
             cmd = cmd_parts
         else:
             raise ValueError(f"服务 {service_type} 缺少 module 或 command 配置")
+
+        # 服务可用 PLAITA_PYTHON 指定业务 venv 解释器（其节点依赖装在 venv 里，
+        # 如 mediaflow/.runtime/venv 的 plaita/agentproc/plaita-nodes）
+        if process_env.get("PLAITA_PYTHON"):
+            cmd[0] = process_env["PLAITA_PYTHON"]
         
         try:
             # 启动进程
