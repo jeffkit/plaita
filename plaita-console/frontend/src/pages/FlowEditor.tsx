@@ -7,7 +7,6 @@ import { jsonToFlow, flowToJson, extractLayout, type FlowNodeData } from '../com
 import NodePalette from '../components/flow/NodePalette'
 import FlowCanvas from '../components/flow/FlowCanvas'
 import NodeConfigDrawer from '../components/flow/NodeConfigDrawer'
-import AiGenerateDialog from '../components/flow/AiGenerateDialog'
 import { autoLayout, type LayoutDirection } from '../components/flow/flowLayout'
 import { symmetricLayout } from '../components/flow/symmetricLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
@@ -16,7 +15,6 @@ import type { Node, Edge } from '@xyflow/react'
 import {
   ArrowLeft,
   Zap,
-  Sparkles,
   Code2,
   Save,
   Rocket,
@@ -98,7 +96,6 @@ export default function FlowEditor() {
   const [msg, setMsg] = useState<string | null>(null)
   const [showDryRun, setShowDryRun] = useState(false)
   const [showSource, setShowSource] = useState(false)
-  const [showAiDialog, setShowAiDialog] = useState(false)
   const [pendingAiIr, setPendingAiIr] = useState<Record<string, unknown> | null>(null)
   const [showPublish, setShowPublish] = useState(false)
   const [publishDiff, setPublishDiff] = useState<VersionDiff | null>(null)
@@ -455,15 +452,6 @@ export default function FlowEditor() {
           ))}
         </div>
         <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => setShowAiDialog(true)}
-          title="自然语言 → AI 生成 @flow（后端 agent 宿主经 agentproc 运行）"
-        >
-          <Sparkles size={13} className="text-plaita-400" />
-          AI 生成
-        </Button>
-        <Button
           variant="ghost"
           size="sm"
           onClick={() => setShowCopilot((v) => !v)}
@@ -592,16 +580,6 @@ export default function FlowEditor() {
             />
           )}
         </div>
-      )}
-      {showAiDialog && (
-        <AiGenerateDialog
-          onClose={() => setShowAiDialog(false)}
-          onImport={(ir) => {
-            // 覆盖导入前必须确认（画布上未保存的内容会丢）
-            setShowAiDialog(false)
-            setPendingAiIr(ir as Record<string, unknown>)
-          }}
-        />
       )}
       <ConfirmDialog
         open={!!pendingAiIr}

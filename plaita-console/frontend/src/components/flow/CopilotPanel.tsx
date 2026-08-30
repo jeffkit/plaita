@@ -1,9 +1,10 @@
 import { Component, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { CopilotKit, useCopilotAction, useCopilotChat, useCopilotReadable } from '@copilotkit/react-core'
 import { useInterrupt } from '@copilotkit/react-core/v2/headless'
-import { CopilotSidebar } from '@copilotkit/react-ui'
+import { CopilotChat } from '@copilotkit/react-ui'
 import { HttpAgent } from '@ag-ui/client'
 import '@copilotkit/react-ui/styles.css'
+import { X } from 'lucide-react'
 import { useFlowEditor } from '../../stores/flowEditor'
 import { api } from '../../services/api'
 import { flowToJson } from './flowConverter'
@@ -358,22 +359,31 @@ export default function CopilotPanel({
     <div
       data-testid="copilot-panel"
       style={{ display: open ? undefined : 'none' }}
-      className="w-[380px] shrink-0 border-l border-line h-full"
+      className="absolute right-0 top-0 bottom-0 z-30 w-[380px] bg-surface border-l border-line shadow-pop flex flex-col"
     >
       <CopilotErrorBoundary>
       <CopilotKit selfManagedAgents={{ default: agent }}>
+        {/* 面板头：标题 + 关闭（self-drawn，替代 CopilotSidebar 的 Help/Debug 部件） */}
+        <div className="flex items-center justify-between pl-4 pr-2 py-2 border-b border-line shrink-0">
+          <h3 className="text-section text-ink-primary">编排助手</h3>
+          <button
+            onClick={onClose}
+            title="收起"
+            className="p-1.5 rounded-md text-ink-muted hover:text-ink-primary hover:bg-elevated transition-colors"
+          >
+            <X size={15} />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <CopilotChat
+            labels={{
+              title: '编排助手',
+              initial:
+                '我可以读取并修改当前流程。试试：\n「加一个 http 节点调用 example.com」「把 map 的并发打开」',
+            }}
+          />
+        </div>
         <CopilotInner flowContext={flowContext} onApplyFlow={onApplyFlow} />
-        <CopilotSidebar
-          defaultOpen
-          onSetOpen={(o) => {
-            if (!o) onClose()
-          }}
-          labels={{
-            title: '编排助手',
-            initial:
-              '我可以读取并修改当前流程。试试：\n「加一个 http 节点调用 example.com」「把 map 的并发打开」',
-          }}
-        />
       </CopilotKit>
       </CopilotErrorBoundary>
     </div>

@@ -244,3 +244,8 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 隐藏 CopilotKit dev 工具浮动按钮（Web Inspector 入口，控制台调试用） */
+.console-button {
+  display: none !important;
+}
