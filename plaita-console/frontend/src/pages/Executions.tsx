@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play, Square, RefreshCw, ChevronRight, Plus, Trash2, Loader2, X } from 'lucide-react'
 import { api } from '../services/api'
 import StartFlowDialog from '../components/StartFlowDialog'
+import { ServiceHint } from '../components/ServiceHint'
 import { Page, PageHeader, Card, Button, StatusBadge, EmptyState, Table, Th, Tr, Td, TdData, ConfirmDialog } from '../components/ui'
 
 export default function Executions() {
@@ -110,6 +111,12 @@ export default function Executions() {
           </span>
         </div>
       )}
+
+      {/* 流程执行器未运行时：启动的流程只会停在队列——新用户最大的暗坑 */}
+      <ServiceHint
+        serviceType="flow_worker"
+        message="流程执行器（flow_worker）未运行：现在启动的流程会停留在队列不会执行"
+      />
 
       {/* 启动流程对话框 */}
       <StartFlowDialog

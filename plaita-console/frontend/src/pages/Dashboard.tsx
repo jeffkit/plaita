@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Server, Play, AlertTriangle, Activity, Inbox, ChevronRight } from 'lucide-react'
-import { api, ServiceListResponse, ExecutionListResponse, QueueListResponse } from '../services/api'
+import { api, FlowListResponse, ServiceListResponse, ExecutionListResponse, QueueListResponse } from '../services/api'
+import { ServiceHint } from '../components/ServiceHint'
 import { Page, PageHeader, Card, StatCard, StatusBadge, EmptyState, Table, Th, Tr, Td, TdData } from '../components/ui'
 
 export default function Dashboard() {
@@ -33,6 +34,13 @@ export default function Dashboard() {
     refetchInterval: 5000,
   })
 
+  // 流程数量（快速开始卡片判断用）
+  const { data: flowsData } = useQuery<FlowListResponse>({
+    queryKey: ['flows'],
+    queryFn: () => api.getFlows(),
+    refetchInterval: 8000,
+  })
+
   // 获取队列状态
   const { data: queuesData } = useQuery<QueueListResponse>({
     queryKey: ['queues'],
@@ -52,6 +60,36 @@ export default function Dashboard() {
   return (
     <Page>
       <PageHeader title="仪表盘" subtitle="集群运行概览与最近执行" />
+
+      <ServiceHint
+        serviceType="flow_worker"
+        message="流程执行器（flow_worker）未运行：启动的流程会停留在队列不会执行"
+      />
+
+      {flowsData && (flowsData.flows || []).length === 0 && (
+        <Card className="p-4">
+          <h2 className="text-section text-ink-primary mb-3">快速开始</h2>
+          <ol className="space-y-2 text-body text-ink-secondary list-none">
+            {[
+              { step: '1', to: '/cluster', title: '启动基础服务', desc: '集群管理 → 一键启动基础服务（执行器/延迟/事件/调度）' },
+              { step: '2', to: '/flows', title: '创建并发布流程', desc: '流程编排 → 新建流程 → 编辑器里编排节点后「发布」' },
+              { step: '3', to: '/executions', title: '发起执行', desc: '执行实例 → 启动流程，或用触发器按 cron 周期自动跑' },
+            ].map(({ step, to, title, desc }) => (
+              <li key={step} className="flex items-start gap-2.5">
+                <span className="shrink-0 w-5 h-5 rounded-full bg-plaita-500/10 text-plaita-400 text-caption font-medium flex items-center justify-center mt-0.5">
+                  {step}
+                </span>
+                <div className="min-w-0">
+                  <button onClick={() => navigate(to)} className="text-ink-primary hover:text-plaita-400 transition-colors">
+                    {title} <span className="text-ink-faint">→</span>
+                  </button>
+                  <p className="text-caption text-ink-muted">{desc}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </Card>
+      )}
 
       {/* 统计卡片：数值主导，图标退后；整卡可点击下钻（DESIGN.md §5） */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

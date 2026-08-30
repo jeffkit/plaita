@@ -15,6 +15,7 @@ import {
   Clock,
 } from 'lucide-react'
 import { api, ScheduleInfo, ScheduleFireRecord, FlowSummaryView } from '../services/api'
+import { ServiceHint } from '../components/ServiceHint'
 import {
   Page,
   PageHeader,
@@ -266,20 +267,11 @@ export default function Schedules() {
 
 /** 调度服务（schedule_service）注册状态提示：没有它，触发器只是配置 */
 function SchedulerHint() {
-  const { data } = useQuery({
-    queryKey: ['services'],
-    queryFn: () => api.getServices(),
-    refetchInterval: 8000,
-  })
-  const schedulerOnline = (data?.services || []).some(
-    (s) => s.service_type === 'schedule_service' && s.status === 'running'
-  )
-  if (schedulerOnline) return null
   return (
-    <div className="flex items-center gap-2 px-3 py-2 bg-status-warning-dim text-status-warning text-caption rounded-md">
-      <AlertCircle size={13} />
-      调度服务（schedule_service）未运行，触发器不会生效——请到「集群管理」启动调度服务
-    </div>
+    <ServiceHint
+      serviceType="schedule_service"
+      message="调度服务（schedule_service）未运行，触发器不会生效——请先在「集群管理」启动调度服务"
+    />
   )
 }
 

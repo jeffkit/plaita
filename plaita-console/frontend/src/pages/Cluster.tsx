@@ -2154,6 +2154,7 @@ export default function Cluster() {
   const [showAddInfra, setShowAddInfra] = useState(false)
   const [showQuickTest, setShowQuickTest] = useState(false)
   const [showStopAll, setShowStopAll] = useState(false)
+  const [bootstrapMsg, setBootstrapMsg] = useState<string | null>(null)
   
   // 当前标签页
   const currentTab = searchParams.get('tab') || 'services'
@@ -2241,6 +2242,32 @@ export default function Cluster() {
   })
 
   // 停止所有
+  // 一键启动基础服务：新用户不必知道「哪几个服务要先起」
+  const CORE_SERVICES = ['flow_worker', 'delay_service', 'event_filter', 'schedule_service']
+  const bootstrapMutation = useMutation({
+    mutationFn: async () => {
+      const results: string[] = []
+      for (const svc of CORE_SERVICES) {
+        const running = (serviceTypesData?.service_types || []).some(
+          (t) => t.service_type === svc && t.running_count > 0
+        )
+        if (running) {
+          results.push(`${svc}: 已在运行`)
+          continue
+        }
+        const res = await api.startManagedService(svc)
+        results.push(`${svc}: ${res.success ? '已启动' : `失败(${res.error || '未知'})`}`)
+      }
+      return results
+    },
+    onSuccess: (results) => {
+      setBootstrapMsg(results.join(' · '))
+      queryClient.invalidateQueries({ queryKey: ['serviceTypes'] })
+      queryClient.invalidateQueries({ queryKey: ['managedInstances'] })
+    },
+    onError: (e: Error) => setBootstrapMsg(`启动失败: ${e.message}`),
+  })
+
   const stopAllMutation = useMutation({
     mutationFn: () => api.stopAllManagedServices(),
     onSuccess: () => {
@@ -2303,6 +2330,16 @@ export default function Cluster() {
           {currentTab === 'services' && (
             <>
               <Button
+                variant="primary"
+                onClick={() => bootstrapMutation.mutate()}
+                disabled={bootstrapMutation.isPending}
+                title="启动执行器/延迟/事件恢复/调度四个核心服务"
+              >
+                <Play size={14} />
+                {bootstrapMutation.isPending ? '启动中…' : '一键启动基础服务'}
+              </Button>
+
+              <Button
                 variant="secondary"
                 onClick={() => clearFailedMutation.mutate()}
                 disabled={clearFailedMutation.isPending || !instancesData?.instances.some(i => i.status !== 'running')}
@@ -2322,6 +2359,12 @@ export default function Cluster() {
           )}
         </div>
       </div>
+
+      {bootstrapMsg && (
+        <div className="px-3 py-2 bg-plaita-500/10 text-plaita-400 text-caption rounded-md">
+          {bootstrapMsg}
+        </div>
+      )}
 
       {/* 标签页 */}
       <div className="flex gap-1 border-b border-dark-700">

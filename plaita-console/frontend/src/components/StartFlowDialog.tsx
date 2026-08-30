@@ -209,7 +209,10 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
                   size={Math.min(6, Math.max(3, matchedFlows.length))}
                 >
                   {flowsQuery.isLoading && <option value="">加载流程列表…</option>}
-                  {!flowsQuery.isLoading && matchedFlows.length === 0 && (
+                  {!flowsQuery.isLoading && flows.length === 0 && (
+                    <option value="">（还没有流程——先到「流程编排」新建并发布）</option>
+                  )}
+                  {!flowsQuery.isLoading && flows.length > 0 && matchedFlows.length === 0 && (
                     <option value="">无匹配流程</option>
                   )}
                   {matchedFlows.map((f) => (
