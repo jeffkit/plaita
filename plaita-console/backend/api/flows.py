@@ -14,15 +14,26 @@ import json
 import re
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from redis import Redis
 from pydantic import BaseModel, Field
 
 from plaita.core.flow import Flow
 
 try:
     from .services import flow_store
+    from .services.engine_sync import (
+        remove_flow_from_engine,
+        remove_flow_version_from_engine,
+        sync_flow_to_engine,
+    )
 except ImportError:
     from services import flow_store
+    from services.engine_sync import (
+        remove_flow_from_engine,
+        remove_flow_version_from_engine,
+        sync_flow_to_engine,
+    )
 
 router = APIRouter()
 
@@ -80,6 +91,11 @@ class PublishRequest(BaseModel):
 
 def _store() -> flow_store.FlowStore:
     return flow_store.get_flow_store()
+
+
+def get_redis_dep(request: Request) -> Redis:
+    """引擎运行时存储同步用的 Redis 客户端（app.state.redis）"""
+    return request.app.state.redis
 
 
 def _check_semver(version: str) -> None:
@@ -184,11 +200,13 @@ def get_flow(flow_id: str):
 
 
 @router.delete("/flows/{flow_id}")
-def delete_flow(flow_id: str):
+def delete_flow(flow_id: str, redis: Redis = Depends(get_redis_dep)):
     try:
         _store().delete_flow(flow_id)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # 引擎运行时存储同步清理（FlowWorker 从这里解析定义）
+    remove_flow_from_engine(redis, flow_id)
     return {"success": True, "flow_id": flow_id}
 
 
@@ -242,16 +260,17 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest):
 
 
 @router.delete("/flows/{flow_id}/versions/{version}")
-def delete_version(flow_id: str, version: str):
+def delete_version(flow_id: str, version: str, redis: Redis = Depends(get_redis_dep)):
     try:
         _store().delete_version(flow_id, version)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    remove_flow_version_from_engine(redis, flow_id, version)
     return {"success": True, "flow_id": flow_id, "version": version}
 
 
 @router.post("/flows/{flow_id}/publish", response_model=VersionView)
-def publish_flow(flow_id: str, req: PublishRequest):
+def publish_flow(flow_id: str, req: PublishRequest, redis: Redis = Depends(get_redis_dep)):
     _check_semver(req.version)
     store = _store()
     if store.get_flow_record(flow_id) is None:
@@ -260,6 +279,9 @@ def publish_flow(flow_id: str, req: PublishRequest):
         out = store.publish_version(flow_id, req.version)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # 发布即同步到引擎运行时存储：FlowWorker 从这里解析定义，
+    # 不同步则「发布成功、启动必失败」
+    sync_flow_to_engine(redis, flow_id, out.version, out.definition)
     return VersionView(
         flow_id=out.flow_id,
         version=out.version,

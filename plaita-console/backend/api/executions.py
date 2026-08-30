@@ -53,9 +53,33 @@ class ResumeFlowRequest(BaseModel):
 
 # ============ 工具函数 ============
 
+# 任务队列 Stream 名（与 FlowWorker 的 PLAITA_QUEUE_NAME 默认值一致）
+TASK_QUEUE_NAME = "plaita:flow:queue"
+
+try:
+    from plaita.server.task_queue import enqueue_task
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    import sys as _sys
+    from pathlib import Path as _Path
+    _plaita_root = str(_Path(__file__).resolve().parents[3])
+    if _plaita_root not in _sys.path:
+        _sys.path.insert(0, _plaita_root)
+    from plaita.server.task_queue import enqueue_task
+
+
 def get_redis(request: Request) -> Redis:
     """获取 Redis 客户端"""
     return request.app.state.redis
+
+
+def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
+    """把 start/resume 消息写入任务队列 Stream。
+
+    FlowWorker 以 Redis Stream 消费组（XREADGROUP）消费；
+    历史上这里误用 rpush（list 类型），与 Stream 同 key 类型冲突，
+    消息永远到不了 worker。统一走 XADD。
+    """
+    return enqueue_task(redis, TASK_QUEUE_NAME, message)
 
 
 # ============ API 端点 ============
@@ -161,9 +185,8 @@ async def start_execution(
         "timestamp": datetime.now().isoformat()
     }
     
-    # 推送到流程队列
-    queue_name = "plaita:flow:queue"
-    redis.rpush(queue_name, json.dumps(message))
+    # 写入任务队列 Stream（FlowWorker 消费组消费）
+    _enqueue(message, redis)
     
     return {
         "status": "queued",
@@ -206,9 +229,8 @@ async def cancel_execution(
         "timestamp": datetime.now().isoformat()
     }
     
-    queue_name = "plaita:flow:queue"
-    redis.rpush(queue_name, json.dumps(message))
-    
+    _enqueue(message, redis)
+
     # 同时直接更新状态（以防 FlowWorker 不在线）
     info["status"] = "cancelled"
     info["end_time"] = datetime.now().isoformat()
@@ -288,9 +310,8 @@ async def resume_execution(
         "timestamp": datetime.now().isoformat()
     }
     
-    queue_name = "plaita:flow:queue"
-    redis.rpush(queue_name, json.dumps(message))
-    
+    _enqueue(message, redis)
+
     return {
         "status": "resuming",
         "execution_id": execution_id,
