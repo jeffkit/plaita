@@ -39,6 +39,17 @@ queue:
 redis:
   url: redis://localhost:6379/0
 services:
+  event_filter:
+    default_instances: 1
+    display_name: 事件恢复器
+    docker:
+      image: plaita/event-filter:latest
+    env:
+      PLAITA_REDIS_URL: ${redis.url}
+      PLAITA_QUEUE_NAME: plaita:flow:queue
+    max_instances: 1
+    process:
+      module: plaita.server.event_filter
   delay_service:
     default_instances: 1
     display_name: 延迟定时服务

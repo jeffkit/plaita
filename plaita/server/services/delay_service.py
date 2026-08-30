@@ -3,6 +3,8 @@
 负责处理延迟任务，在指定时间后触发事件
 """
 import asyncio
+import json
+import threading
 import time
 from typing import Any, Dict
 
@@ -15,35 +17,51 @@ class DelayService(BaseExtendedService):
     延迟服务
     负责处理延迟任务，在指定时间后触发事件
     """
-    
+
+    def __init__(self, event_bus, redis_client=None, service_config=None):
+        super().__init__(
+            event_bus=event_bus,
+            redis_client=redis_client,
+            service_config=service_config,
+        )
+        import os
+        self.queue_key = os.environ.get("PLAITA_DELAY_QUEUE", "plaita:delay:queue")
+        self._consumer_thread = None
+
     def get_service_type(self) -> str:
         """
         获取服务类型
-        
+
         Returns:
             str: 服务类型
         """
         return "delay"
-    
+
     def start_service(self) -> bool:
         """
         启动延迟服务
-        
+
         Returns:
             bool: 启动是否成功
         """
         try:
             self.is_running = True
-            logger.info("延迟服务已启动")
+            # 消费 plaita:delay:queue：worker 挂起时把延迟任务 RPUSH 进来。
+            # 历史上没人投递也没人消费，delay 节点的执行会永久挂起。
+            self._consumer_thread = threading.Thread(
+                target=self._consume_queue, name="delay-service-consumer", daemon=True
+            )
+            self._consumer_thread.start()
+            logger.info("延迟服务已启动（队列: %s）", self.queue_key)
             return True
         except Exception as e:
             logger.error("启动延迟服务失败: %s", e, exc_info=True)
             return False
-    
+
     def stop_service(self) -> bool:
         """
         停止延迟服务
-        
+
         Returns:
             bool: 停止是否成功
         """
@@ -54,6 +72,53 @@ class DelayService(BaseExtendedService):
         except Exception as e:
             logger.error("停止延迟服务失败: %s", e, exc_info=True)
             return False
+
+    def _consume_queue(self) -> None:
+        """消费延迟任务队列（BLPOP 短超时轮询，保证关闭响应性）。"""
+        while not self.is_shutdown_requested():
+            try:
+                item = self._redis_client.blpop(self.queue_key, timeout=2)
+            except Exception as e:
+                logger.error("延迟队列消费失败: %s", e, exc_info=True)
+                self._shutdown_event.wait(timeout=2)
+                continue
+            if not item:
+                continue
+            _key, raw = item
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            try:
+                task_config = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.error("延迟任务配置非法: %r", raw[:200])
+                continue
+            self.submit_task(task_config)
+
+    async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
+        """触发事件：带 correlation_id（=execution_id），EventFilter 才能关联到挂起执行。
+
+        直接用同步 redis 客户端发布到引擎 RedisEventBus 的频道
+        （plaita:events:{type}）。不要走 self.event_bus.publish——
+        它的 aioredis 连接绑定在创建时的 event loop 上，而 handle_task
+        运行在线程池新开的 loop 里，跨 loop 使用会静默失败。
+        """
+        from ...event.core import Event
+
+        event = Event(
+            event_type=event_type,
+            data=event_data,
+            correlation_id=event_data.get("execution_id"),
+        )
+        try:
+            self._redis_client.publish(
+                f"plaita:events:{event_type}", event.model_dump_json()
+            )
+            logger.info(
+                "事件已触发: %s (correlation_id=%s)", event_type, event.correlation_id
+            )
+        except Exception as e:
+            logger.error("触发事件失败: %s", e, exc_info=True)
+
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
         """

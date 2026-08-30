@@ -330,6 +330,7 @@ class FlowWorker:
                 state.status = "suspended"
                 state.context = context
                 self.execution_storage.save_execution_state(execution_id, state)
+                self._dispatch_service_task(result, context, execution_id)
                 break
             else:
                 state.status = "running"
@@ -580,6 +581,42 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         finally:
             self.stop()
     
+    def _dispatch_service_task(
+        self, result: Dict[str, Any], context: Dict[str, Any], execution_id: str
+    ) -> None:
+        """挂起时把扩展节点的 service_config 投递给对应外延服务。
+
+        历史上挂起只落执行状态，service_config 无人消费——
+        delay/approval 等节点的任务永远不会被服务接走，执行会永久挂起。
+        service_config 通常埋在 ``context.$NODE.{最后节点}.service_config``，
+        顶层偶有直接携带；任务按 subtype 投递到 ``plaita:{subtype}:queue``，
+        由对应外延服务消费（DelayService 等）。
+        """
+        service_config = result.get("service_config")
+        if not isinstance(service_config, dict) or not service_config:
+            nodes = (context or {}).get("$NODE") or {}
+            last_node = (context or {}).get("$LAST_NODE")
+            node_result = nodes.get(last_node) if last_node else None
+            if isinstance(node_result, dict):
+                service_config = node_result.get("service_config")
+        if not isinstance(service_config, dict) or not service_config:
+            return
+        subtype = str(service_config.get("type") or result.get("node_subtype") or "").strip()
+        if not subtype:
+            return
+        queue_key = f"plaita:{subtype}:queue"
+        try:
+            task = dict(service_config)
+            task.setdefault("execution_id", execution_id)
+            self.redis_client.rpush(queue_key, json.dumps(task, ensure_ascii=False))
+            logger.info(
+                "挂起任务已投递: %s → %s (execution_id=%s)", subtype, queue_key, execution_id
+            )
+        except Exception as e:
+            logger.error(
+                "挂起任务投递失败: %s → %s: %s", subtype, queue_key, e, exc_info=True
+            )
+
     def stop(self):
         """停止流程工作器"""
         logger.info("正在停止流程工作器...")
