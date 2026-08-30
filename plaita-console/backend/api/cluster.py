@@ -880,6 +880,14 @@ async def run_quick_test(request: QuickTestRequest):
             from plaita import Flow, FlowExecution
             from plaita.node import nodes as node_registry, node_register
             
+            # CODE 节点自 0.4.0 起移出默认注册表——快速测试的 simple/distributed/
+            # event 模板都含 code 节点，不注册则全部失败
+            try:
+                from plaita.node import register_code_node
+                register_code_node(default_backend="subprocess")
+            except ImportError:
+                pass
+
             # 确保扩展节点已注册
             try:
                 from plaita.server.nodes import ApprovalNode, DelayNode
@@ -1114,7 +1122,7 @@ async def run_quick_test(request: QuickTestRequest):
                 # 其他类型返回模拟结果（需要完整服务支持）
                 return QuickTestResponse(
                     success=True,
-                    message=f"测试流程已生成。{request.test_type} 类型测试需要启动对应的服务才能执行。",
+                    message=f"✅ {request.test_type} 流程定义校验通过。注意：这是定义校验——真实执行需要在集群中运行对应的服务（delay_service / approval_service），并通过流程或执行器路径发起。",
                     execution_id=execution_id,
                     flow_definition=flow_definition,
                     result={"status": "pending", "note": "请先启动对应服务"}

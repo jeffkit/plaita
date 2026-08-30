@@ -425,7 +425,14 @@ function InfrastructureCard({
 }) {
   const checkMutation = useMutation({
     mutationFn: () => api.checkInfrastructureHealth(infra.name),
-    onSuccess: onRefresh,
+    onSuccess: (res) => {
+      onRefresh()
+      const detail = res.details && typeof res.details === 'object'
+        ? Object.entries(res.details).map(([k, v]) => `${k}=${v}`).join(', ').slice(0, 120)
+        : (res.details ?? '')
+      setActionMsg(`健康检查：${res.status}${detail ? ' — ' + detail : ''}`)
+    },
+    onError: (e: Error) => setActionMsg(`健康检查失败：${e.message}`),
   })
 
   const [actionMsg, setActionMsg] = useState<string | null>(null)
@@ -967,6 +974,9 @@ function QuickTestDialog({
     onSuccess: (result) => {
       setTestResult(result)
     },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message } as QuickTestResponse)
+    },
   })
 
   const handleRunTest = () => {
@@ -1155,9 +1165,9 @@ function QuickTestDialog({
                   )}
                   
                   {testResult.error && (
-                    <div className="p-3 rounded bg-status-error-dim border border-red-500/20">
+                    <div className="p-3 rounded bg-status-error-dim border border-status-error/20">
                       <p className="text-sm font-medium text-status-error mb-1">错误详情:</p>
-                      <pre className="text-xs text-red-300 whitespace-pre-wrap">{testResult.error}</pre>
+                      <pre className="text-xs text-ink-secondary whitespace-pre-wrap leading-relaxed">{testResult.error}</pre>
                     </div>
                   )}
                 </div>
@@ -2658,7 +2668,17 @@ export default function Cluster() {
 
       {/* 配置标签页内容 */}
       {currentTab === 'config' && activeCluster && (
-        <ConfigEditor clusterId={activeCluster.id} />
+        <>
+          <p className="text-caption text-ink-muted mb-3">
+            这里是集群的声明式配置文件（cluster_config.yaml）：
+            <b className="text-ink-secondary">services</b> 段定义「可启动哪些服务类型」——
+            服务管理页的卡片与它一一对应，改后需重启对应实例生效；
+            <b className="text-ink-secondary">infrastructure</b> 段定义基础设施连接；顶层
+            <b className="text-ink-secondary"> redis.url</b> 是全局 Redis。创建集群时的架构配套
+            （quickstart / dev / prod）生成的就是这份文件，通常无需手工修改。
+          </p>
+          <ConfigEditor clusterId={activeCluster.id} />
+        </>
       )}
 
       {/* 错误详情弹窗 */}
