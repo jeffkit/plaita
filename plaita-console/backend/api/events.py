@@ -142,8 +142,10 @@ async def publish_event(
     redis.zadd(type_key, {event_id: time.time()})
     redis.expire(type_key, 86400)
 
-    channel = f"plaita:event:channel:{request.event_type}"
-    redis.publish(channel, json.dumps(event_data))
+    # 引擎 RedisEventBus 的订阅频道是 plaita:events:{type}——
+    # 历史上只发 plaita:event:channel:{type}，引擎侧永远收不到
+    redis.publish(f"plaita:events:{request.event_type}", json.dumps(event_data))
+    redis.publish(f"plaita:event:channel:{request.event_type}", json.dumps(event_data))
 
     return {
         "success": True,
@@ -167,7 +169,15 @@ async def list_subscriptions(
 
     subscriptions: List[SubscriptionInfo] = []
     for key in keys:
-        data = redis.get(key)
+        try:
+            key_type = redis.type(key)
+            if isinstance(key_type, bytes):
+                key_type = key_type.decode()
+            if key_type != "string":
+                continue  # 跳过引擎写的 type:/correlation:/flow: 集合键
+            data = redis.get(key)
+        except Exception:
+            continue
         if not data:
             continue
         try:
@@ -199,8 +209,8 @@ async def get_subscription(
     subscription_id: str,
     redis: Redis = Depends(get_redis),
 ):
-    """获取订阅详情"""
-    key = f"plaita:subscription:{subscription_id}"
+    """获取订阅详情（引擎 RedisEventBus 写在 plaita:subscription:data:{id}）"""
+    key = f"plaita:subscription:data:{subscription_id}"
     data = redis.get(key)
     if not data:
         raise HTTPException(status_code=404, detail=f"订阅不存在: {subscription_id}")
@@ -216,9 +226,24 @@ async def delete_subscription(
     subscription_id: str,
     redis: Redis = Depends(get_redis),
 ):
-    """删除事件订阅"""
-    key = f"plaita:subscription:{subscription_id}"
+    """删除事件订阅（含引擎侧的类型/关联/流程索引）"""
+    key = f"plaita:subscription:data:{subscription_id}"
     if not redis.exists(key):
         raise HTTPException(status_code=404, detail=f"订阅不存在: {subscription_id}")
-    redis.delete(key)
+    info = {}
+    try:
+        raw = redis.get(key)
+        info = json.loads(raw) if raw else {}
+    except Exception:
+        pass
+    pipe = redis.pipeline()
+    pipe.delete(key)
+    event_type = info.get("event_type")
+    if event_type:
+        pipe.srem(f"plaita:subscription:type:{event_type}", subscription_id)
+    if info.get("correlation_id"):
+        pipe.srem(f"plaita:subscription:correlation:{info['correlation_id']}", subscription_id)
+    if info.get("flow_id"):
+        pipe.srem(f"plaita:subscription:flow:{info['flow_id']}", subscription_id)
+    pipe.execute()
     return {"success": True, "message": "订阅已删除"}

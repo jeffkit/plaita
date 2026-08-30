@@ -68,27 +68,42 @@ async def list_queues(
     """
     queues = []
     
-    # 检查已知队列
+    # 检查已知队列。plaita:flow:queue 现在是 Redis Stream（FlowWorker 消费组
+    # 消费），长度必须用 XLEN；对 Stream 调 LLEN 会 WRONGTYPE——按实际类型取。
+    def _key_type(key: str) -> str:
+        t = redis.type(key)
+        return t.decode() if isinstance(t, bytes) else t
+
+    def _queue_length(key: str) -> int:
+        t = _key_type(key)
+        if t == "stream":
+            return redis.xlen(key)
+        if t == "list":
+            return redis.llen(key)
+        if t == "zset":
+            return redis.zcard(key)
+        return 0
+
     for pattern in KNOWN_QUEUES:
-        if "*" in pattern:
-            # 模式匹配
-            keys = redis.keys(pattern)
-            for key in keys:
-                key_str = key if isinstance(key, str) else key.decode()
-                length = redis.llen(key_str)
-                if length > 0 or key_str == "plaita:flow:queue":
-                    queues.append(QueueInfo(
-                        name=key_str,
-                        length=length
-                    ))
-        else:
-            # 精确匹配
-            length = redis.llen(pattern)
+        keys = redis.keys(pattern)
+        if "*" not in pattern and not keys:
+            # 键尚不存在：保留已知队列的零值行，页面不缺行
             queues.append(QueueInfo(
                 name=pattern,
-                length=length
+                length=0,
+                queue_type="stream" if pattern == "plaita:flow:queue" else "list",
             ))
-    
+            continue
+        for key in keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            length = _queue_length(key_str)
+            if length > 0 or key_str == "plaita:flow:queue":
+                queues.append(QueueInfo(
+                    name=key_str,
+                    length=length,
+                    queue_type=_key_type(key_str),
+                ))
+
     return QueueListResponse(
         queues=queues,
         total=len(queues)
@@ -109,25 +124,46 @@ async def get_queue(
     - **start**: 起始索引
     - **count**: 获取数量
     """
-    # 获取队列长度
-    length = redis.llen(queue_name)
-    
-    # 获取任务列表
-    items = redis.lrange(queue_name, start, start + count - 1)
-    
+    key_type = redis.type(queue_name)
+    if isinstance(key_type, bytes):
+        key_type = key_type.decode()
+
     tasks = []
-    for i, item in enumerate(items):
-        try:
-            item_str = item if isinstance(item, str) else item.decode()
-            data = json.loads(item_str)
-        except Exception:
-            data = {"raw": str(item)}
-        
-        tasks.append(QueueTask(
-            index=start + i,
-            data=data
-        ))
-    
+    if key_type == "stream":
+        # Stream 队列（plaita:flow:queue）：XRANGE 取消息，payload 字段即任务 JSON
+        length = redis.xlen(queue_name)
+        entries = redis.xrange(queue_name, min=start, count=count)
+        for i, (msg_id, fields) in enumerate(entries):
+            if isinstance(msg_id, bytes):
+                msg_id = msg_id.decode()
+            payload = None
+            for k, v in fields.items():
+                k_str = k.decode() if isinstance(k, bytes) else k
+                if k_str == "payload":
+                    payload = v.decode() if isinstance(v, bytes) else v
+                    break
+            try:
+                data = json.loads(payload)
+            except Exception:
+                data = {"raw": str(payload)}
+            data = {"_msg_id": msg_id, **data}
+            tasks.append(QueueTask(index=i, data=data))
+    elif key_type == "list":
+        length = redis.llen(queue_name)
+        items = redis.lrange(queue_name, start, start + count - 1)
+        for i, item in enumerate(items):
+            try:
+                item_str = item if isinstance(item, str) else item.decode()
+                data = json.loads(item_str)
+            except Exception:
+                data = {"raw": str(item)}
+            tasks.append(QueueTask(
+                index=start + i,
+                data=data
+            ))
+    else:
+        length = 0
+
     return QueueDetailResponse(
         name=queue_name,
         length=length,
