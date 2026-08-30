@@ -38,3 +38,4 @@ codeflow-*-recheck*.txt
 sexpr-recheck.txt
 setup.cfg.mutmut_test
 
+.impeccable/
