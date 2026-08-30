@@ -371,7 +371,51 @@ class FlowWorker:
                     break
 
         return result
-    
+
+    def _dispatch_service_task(
+        self, result: Dict[str, Any], context: Dict[str, Any], execution_id: str
+    ) -> None:
+        """挂起时把扩展节点的 service_config 投递给对应外延服务。
+
+        历史上挂起只落执行状态，service_config 无人消费——
+        delay/approval 等节点的任务永远不会被服务接走，执行会永久挂起。
+        service_config 通常埋在 ``context.$NODE.{最后节点}.service_config``，
+        顶层偶有直接携带；任务按 subtype 投递到 ``plaita:{subtype}:queue``，
+        由对应外延服务消费（DelayService 等）。
+        无 redis 客户端（单测/纯内存派生类）时跳过投递。
+        """
+        service_config = result.get("service_config")
+        if not isinstance(service_config, dict) or not service_config:
+            nodes = (context or {}).get("$NODE") or {}
+            last_node = (context or {}).get("$LAST_NODE")
+            node_result = nodes.get(last_node) if last_node else None
+            if isinstance(node_result, dict):
+                service_config = node_result.get("service_config")
+        if not isinstance(service_config, dict) or not service_config:
+            return
+        subtype = str(service_config.get("type") or result.get("node_subtype") or "").strip()
+        if not subtype:
+            return
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "rpush"):
+            logger.warning(
+                "挂起任务投递跳过（无 redis 客户端）: %s (execution_id=%s)",
+                subtype, execution_id,
+            )
+            return
+        queue_key = f"plaita:{subtype}:queue"
+        try:
+            task = dict(service_config)
+            task.setdefault("execution_id", execution_id)
+            redis_client.rpush(queue_key, json.dumps(task, ensure_ascii=False))
+            logger.info(
+                "挂起任务已投递: %s → %s (execution_id=%s)", subtype, queue_key, execution_id
+            )
+        except Exception as e:
+            logger.error(
+                "挂起任务投递失败: %s → %s: %s", subtype, queue_key, e, exc_info=True
+            )
+
 class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     """
     基于 Redis Stream 队列的流程工作器（服务注册 / 心跳 / 远程控制）。
@@ -581,42 +625,6 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         finally:
             self.stop()
     
-    def _dispatch_service_task(
-        self, result: Dict[str, Any], context: Dict[str, Any], execution_id: str
-    ) -> None:
-        """挂起时把扩展节点的 service_config 投递给对应外延服务。
-
-        历史上挂起只落执行状态，service_config 无人消费——
-        delay/approval 等节点的任务永远不会被服务接走，执行会永久挂起。
-        service_config 通常埋在 ``context.$NODE.{最后节点}.service_config``，
-        顶层偶有直接携带；任务按 subtype 投递到 ``plaita:{subtype}:queue``，
-        由对应外延服务消费（DelayService 等）。
-        """
-        service_config = result.get("service_config")
-        if not isinstance(service_config, dict) or not service_config:
-            nodes = (context or {}).get("$NODE") or {}
-            last_node = (context or {}).get("$LAST_NODE")
-            node_result = nodes.get(last_node) if last_node else None
-            if isinstance(node_result, dict):
-                service_config = node_result.get("service_config")
-        if not isinstance(service_config, dict) or not service_config:
-            return
-        subtype = str(service_config.get("type") or result.get("node_subtype") or "").strip()
-        if not subtype:
-            return
-        queue_key = f"plaita:{subtype}:queue"
-        try:
-            task = dict(service_config)
-            task.setdefault("execution_id", execution_id)
-            self.redis_client.rpush(queue_key, json.dumps(task, ensure_ascii=False))
-            logger.info(
-                "挂起任务已投递: %s → %s (execution_id=%s)", subtype, queue_key, execution_id
-            )
-        except Exception as e:
-            logger.error(
-                "挂起任务投递失败: %s → %s: %s", subtype, queue_key, e, exc_info=True
-            )
-
     def stop(self):
         """停止流程工作器"""
         logger.info("正在停止流程工作器...")
@@ -728,6 +736,31 @@ def main():
                       help="心跳间隔(秒)")
 
     args = parser.parse_args()
+
+    # 外部业务节点模块加载（与 console 的 PLAITA_CONSOLE_NODE_MODULES 约定对齐）：
+    # PLAITA_NODE_PATH 冒号分隔追加 sys.path；PLAITA_NODE_MODULES 逗号分隔，
+    # 逐个 import 并调用其 register_all()（或 register）。业务仓（如 mediaflow
+    # 的 plaita_flows.nodes）由此在 console 拉起的 worker 内生效。
+    import importlib
+
+    for extra in [p for p in os.environ.get("PLAITA_NODE_PATH", "").split(os.pathsep) if p]:
+        if extra not in sys.path:
+            sys.path.insert(0, extra)
+    for mod_path in [m.strip() for m in os.environ.get("PLAITA_NODE_MODULES", "").split(",") if m.strip()]:
+        try:
+            mod = importlib.import_module(mod_path)
+            register = getattr(mod, "register_all") or getattr(mod, "register")
+            register()
+            try:
+                from plaita.node import register_code_node
+
+                register_code_node(default_backend="subprocess")
+            except ImportError:
+                pass
+            logger.info("已加载外部节点模块: %s", mod_path)
+        except Exception as e:
+            logger.error("外部节点模块加载失败 %s: %s", mod_path, e, exc_info=True)
+            raise SystemExit(f"外部节点模块加载失败: {mod_path}")
     
     # 处理注册开关
     enable_registry = args.enable_registry and not args.no_registry
