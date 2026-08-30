@@ -391,6 +391,14 @@ export const api = {
     return request(`/cluster/infrastructure/${name}`)
   },
 
+  async startInfrastructure(name: string): Promise<{ success: boolean; status?: string; message: string }> {
+    return request(`/cluster/infrastructure/${name}/start`, { method: 'POST' })
+  },
+
+  async stopInfrastructure(name: string): Promise<{ success: boolean; message: string }> {
+    return request(`/cluster/infrastructure/${name}/stop`, { method: 'POST' })
+  },
+
   async checkInfrastructureHealth(name: string): Promise<{
     name: string
     status: string

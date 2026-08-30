@@ -570,6 +570,119 @@ class ServiceManager:
             self.load_config()
         return self.config.infrastructure
     
+    # ---- 基础设施容器化拉起（docker）----
+    # 历史上 infrastructure 只有健康检查与配置 CRUD，docker: 段是死配置；
+    # 这里补上真实的 start/stop：容器名约定 plaita-infra-{name}，
+    # 启动后轮询健康检查直至 healthy（或超时返回当前状态）。
+
+    INFRA_CONTAINER_PREFIX = "plaita-infra-"
+
+    def _docker(self, *args, timeout: int = 60):
+        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+
+    def _docker_available_now(self) -> bool:
+        try:
+            return self._docker("version", timeout=5).returncode == 0
+        except Exception:
+            return False
+
+    def _infra_container_state(self, name: str) -> Optional[str]:
+        """返回容器状态（running/exited/created…）；不存在返回 None。"""
+        cname = f"{self.INFRA_CONTAINER_PREFIX}{name}"
+        result = self._docker(
+            "ps", "-a", "--filter", f"name=^{cname}$", "--format", "{{.State}}", timeout=10
+        )
+        return result.stdout.strip() or None
+
+    async def start_infrastructure(self, name: str) -> Dict[str, Any]:
+        """容器化拉起基础设施：已存在则 start，否则按 docker 配置 run；
+        启动后轮询健康检查（redis ping / kafka 探测 / 数据库连接）。"""
+        if not self.config:
+            self.load_config()
+        infra = self.config.infrastructure.get(name)
+        if infra is None:
+            return {"success": False, "message": f"基础设施未定义: {name}"}
+        docker_cfg = infra.docker or {}
+        if not docker_cfg.get("image"):
+            return {"success": False, "message": "该基础设施未配置 docker 镜像，无法容器化拉起"}
+        if not self._docker_available_now():
+            return {"success": False, "message": "Docker 不可用"}
+
+        cname = f"{self.INFRA_CONTAINER_PREFIX}{name}"
+        state = self._infra_container_state(name)
+        if state == "running":
+            pass  # 容器已运行，仍继续走健康等待
+        elif state:
+            run_result = self._docker("start", cname, timeout=60)
+            if run_result.returncode != 0:
+                return {"success": False, "message": (run_result.stderr or "docker start 失败").strip()[-300:]}
+        else:
+            # 端口占用预检：宿主端口已被监听时，发布端口会造成连接混叠
+            # （看起来启动成功，客户端连的却是别的实例）——明确拒绝
+            import socket as _socket
+            for port in docker_cfg.get("ports", []):
+                host_port = int(str(port).split(":")[0])
+                probe = _socket.socket()
+                probe.settimeout(1)
+                occupied = probe.connect_ex(("127.0.0.1", host_port)) == 0
+                probe.close()
+                if occupied:
+                    return {
+                        "success": False,
+                        "message": f"宿主机端口 {host_port} 已被占用——该端口上可能已有同类服务在运行，无需重复拉起",
+                    }
+            cmd = ["docker", "run", "-d", "--name", cname, "--restart", "unless-stopped"]
+            for port in docker_cfg.get("ports", []):
+                cmd += ["-p", str(port)]
+            for vol in docker_cfg.get("volumes", []):
+                cmd += ["-v", str(vol)]
+            for env_key, env_value in (docker_cfg.get("env") or {}).items():
+                cmd += ["-e", f"{env_key}={env_value}"]
+            cmd.append(docker_cfg["image"])
+            run_result = self._docker(*cmd[1:], timeout=180)  # 首次可能拉取镜像；cmd[0] 是 "docker"，_docker 会补
+            if run_result.returncode != 0:
+                return {"success": False, "message": (run_result.stderr or "docker run 失败").strip()[-300:]}
+
+        # 健康等待是尽力而为：容器动作成功即 success，健康状态单独回报
+        # （数据库首启初始化 / WAL 恢复可能超过等待窗口）
+        deadline = asyncio.get_event_loop().time() + 45
+        health = "unknown"
+        while asyncio.get_event_loop().time() < deadline:
+            results = await self.check_infrastructure_health()
+            health = results.get(name, {}).get("status", "unknown")
+            if health in ("healthy", "unhealthy"):
+                break
+            await asyncio.sleep(1.5)
+
+        return {
+            "success": True,
+            "status": health,
+            "container": cname,
+            "message": (
+                "容器已启动，健康检查通过"
+                if health == "healthy"
+                else f"容器已启动，健康检查为 {health}——可稍后在卡片上再次「检测」"
+            ),
+        }
+
+    async def stop_infrastructure(self, name: str) -> Dict[str, Any]:
+        """停止基础设施容器（保留容器，重启机器/手动 docker start 可恢复）。"""
+        if not self.config:
+            self.load_config()
+        infra = self.config.infrastructure.get(name)
+        if infra is None:
+            return {"success": False, "message": f"基础设施未定义: {name}"}
+        cname = f"{self.INFRA_CONTAINER_PREFIX}{name}"
+        state = self._infra_container_state(name)
+        if state is None:
+            return {"success": False, "message": "容器不存在（该基础设施从未由 console 拉起）"}
+        if state != "running":
+            return {"success": True, "message": f"容器已是 {state} 状态"}
+        result = self._docker("stop", "-t", "10", cname, timeout=60)
+        if result.returncode != 0:
+            return {"success": False, "message": (result.stderr or "docker stop 失败").strip()[-300:]}
+        return {"success": True, "message": "容器已停止（保留，可再次启动）"}
+
     async def check_infrastructure_health(self) -> Dict[str, Dict[str, Any]]:
         """
         检查所有基础设施服务的健康状态

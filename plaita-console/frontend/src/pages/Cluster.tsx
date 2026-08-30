@@ -428,6 +428,26 @@ function InfrastructureCard({
     onSuccess: onRefresh,
   })
 
+  const [actionMsg, setActionMsg] = useState<string | null>(null)
+
+  const startMutation = useMutation({
+    mutationFn: () => api.startInfrastructure(infra.name),
+    onSuccess: (res) => {
+      onRefresh()
+      setActionMsg(res.message)
+    },
+    onError: (e: Error) => setActionMsg(e.message),
+  })
+
+  const stopMutation = useMutation({
+    mutationFn: () => api.stopInfrastructure(infra.name),
+    onSuccess: (res) => {
+      onRefresh()
+      setActionMsg(res.message)
+    },
+    onError: (e: Error) => setActionMsg(e.message),
+  })
+
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteInfrastructure(infra.name),
     onSuccess: onRefresh,
@@ -484,7 +504,51 @@ function InfrastructureCard({
         </div>
       )}
       
+      {actionMsg && (
+        <div className="text-xs text-dark-300 bg-dark-900 rounded p-2 mb-2 break-all">{actionMsg}</div>
+      )}
+
       <div className="flex gap-2">
+        {infra.status === 'healthy' ? (
+          <button
+            onClick={() => stopMutation.mutate()}
+            disabled={stopMutation.isPending}
+            className="flex items-center gap-1 px-3 py-1.5 rounded text-sm flex-1 justify-center
+                       bg-dark-700 hover:bg-status-error-dim hover:text-status-error"
+            title="停止容器（保留，可再次启动）"
+          >
+            {stopMutation.isPending ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Square className="w-4 h-4" />
+            )}
+            停止
+          </button>
+        ) : (
+          <button
+            onClick={() => startMutation.mutate()}
+            disabled={startMutation.isPending || !infra.enabled}
+            className={`flex items-center gap-1 px-3 py-1.5 rounded text-sm flex-1 justify-center
+                        ${infra.enabled
+                          ? 'bg-plaita-500/20 hover:bg-plaita-500/30 text-plaita-400 border border-plaita-500/30'
+                          : 'bg-dark-800 text-dark-500 cursor-not-allowed border border-dark-700'}`}
+            title={infra.enabled
+              ? (infra.docker ? '用配置的 docker 镜像拉起并等待健康' : '未配置 docker 镜像，无法容器化拉起')
+              : '基础设施已禁用，启用后方可启动'}
+          >
+            {startMutation.isPending ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                启动中…
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4" />
+                启动
+              </>
+            )}
+          </button>
+        )}
         <button
           onClick={() => checkMutation.mutate()}
           disabled={checkMutation.isPending || !infra.enabled}
@@ -2500,8 +2564,8 @@ export default function Cluster() {
           
           <p className="text-caption text-ink-muted mb-3">
             基础设施是服务依赖的有状态后端资源（Redis / Kafka / 数据库）——相当于水电气，
-            服务是用电的工人。console 只负责健康检查与连接配置；安装与启动由外部管理
-            （如本机 brew services / docker compose）。
+            服务是用电的工人。配置了 docker 镜像的资源可在此直接容器化启停与健康检查；
+            未配置的（或外部部署的）由外部管理，console 仅做健康检查。
           </p>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-section text-ink-primary flex items-center gap-2">

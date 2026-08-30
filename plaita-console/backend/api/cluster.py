@@ -497,6 +497,20 @@ async def check_infrastructure_health(name: str):
     }
 
 
+@router.post("/cluster/infrastructure/{name}/start")
+async def start_infrastructure(name: str):
+    """容器化拉起基础设施（docker run/start + 健康等待）"""
+    manager = get_service_manager()
+    return await manager.start_infrastructure(name)
+
+
+@router.post("/cluster/infrastructure/{name}/stop")
+async def stop_infrastructure(name: str):
+    """停止基础设施容器（保留容器）"""
+    manager = get_service_manager()
+    return await manager.stop_infrastructure(name)
+
+
 @router.post("/cluster/infrastructure", response_model=InfrastructureInfo)
 async def create_infrastructure(request: CreateInfrastructureRequest):
     """
