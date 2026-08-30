@@ -1251,6 +1251,7 @@ class CreateClusterRequest(BaseModel):
     name: str = Field(..., description="集群显示名称")
     description: str = Field("", description="集群描述")
     redis_url: str = Field("redis://localhost:6379/0", description="Redis URL")
+    preset: str = Field("dev", description="架构配套：quickstart（快速上手）| dev（开发）| prod（生产）")
 
 
 class UpdateClusterRequest(BaseModel):
@@ -1358,7 +1359,8 @@ async def create_cluster(request: CreateClusterRequest):
             cluster_id=request.id,
             name=request.name,
             description=request.description,
-            redis_url=request.redis_url
+            redis_url=request.redis_url,
+            preset=request.preset
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

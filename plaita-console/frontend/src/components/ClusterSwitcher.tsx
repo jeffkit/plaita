@@ -4,6 +4,7 @@
  */
 
 import { useState, useRef, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Server, 
@@ -16,6 +17,13 @@ import {
   Loader2
 } from 'lucide-react'
 import { api, ClusterInfo, CreateClusterRequest } from '../services/api'
+
+// 架构配套预设（与后端 cluster_registry._PRESET_SERVICES 对齐）
+const PRESET_OPTIONS = [
+  { id: 'quickstart', label: '⚡ 快速上手', desc: '最小服务集：执行器 + 延迟 + 事件恢复。单机体验首选' },
+  { id: 'dev', label: '🛠 开发级别', desc: '全功能服务集（+调度/回调/队列），日常使用推荐' },
+  { id: 'prod', label: '🏭 生产级别', desc: '全家桶 + 实例上限上调；Redis 开 AOF、流程库切 PostgreSQL' },
+]
 
 // 创建集群对话框
 function CreateClusterDialog({ 
@@ -31,7 +39,8 @@ function CreateClusterDialog({
     id: '',
     name: '',
     description: '',
-    redis_url: 'redis://localhost:6379/0'
+    redis_url: 'redis://localhost:6379/0',
+    preset: 'dev'
   })
   const [error, setError] = useState('')
   
@@ -40,7 +49,7 @@ function CreateClusterDialog({
     onSuccess: (cluster) => {
       onCreated(cluster)
       onClose()
-      setFormData({ id: '', name: '', description: '', redis_url: 'redis://localhost:6379/0' })
+      setFormData({ id: '', name: '', description: '', redis_url: 'redis://localhost:6379/0', preset: 'dev' })
     },
     onError: (err: Error) => {
       setError(err.message)
@@ -114,6 +123,29 @@ function CreateClusterDialog({
                            focus:border-plaita-500 focus:outline-none font-mono text-sm"
               />
             </div>
+            
+            <div>
+              <label className="block text-sm text-dark-400 mb-1.5">架构配套</label>
+              <div className="space-y-1.5">
+                {PRESET_OPTIONS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setFormData({ ...formData, preset: p.id })}
+                    className={`w-full text-left p-2.5 rounded-md border transition-colors ${
+                      (formData.preset || 'dev') === p.id
+                        ? 'bg-plaita-500/10 border-plaita-500/40'
+                        : 'bg-dark-900 border-dark-700 hover:border-dark-600'
+                    }`}
+                  >
+                    <div className={`text-sm font-medium ${(formData.preset || 'dev') === p.id ? 'text-plaita-400' : 'text-dark-200'}`}>
+                      {p.label}
+                    </div>
+                    <div className="text-xs text-dark-500 mt-0.5">{p.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
           
           <div className="flex justify-end gap-2 p-4 border-t border-dark-700">
@@ -141,7 +173,8 @@ function CreateClusterDialog({
   )
 }
 
-export default function ClusterSwitcher({ collapsed = false }: { collapsed?: boolean }) {
+export default function ClusterSwitcher({ collapsed = false, placement = 'bottom' }: { collapsed?: boolean; placement?: 'top' | 'bottom' }) {
+  const navigate = useNavigate()
   const [isOpen, setIsOpen] = useState(false)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -229,11 +262,11 @@ export default function ClusterSwitcher({ collapsed = false }: { collapsed?: boo
 
         {/* 下拉菜单：折叠态用固定宽度，避免被窄容器压缩 */}
         {isOpen && (
-          <div className={`absolute bottom-full left-0 mb-2 
+          <div className={`absolute left-0 z-50
                           bg-dark-800 border border-dark-700 rounded-lg shadow-xl
-                          max-h-[300px] overflow-y-auto z-50 ${
-                            collapsed ? 'w-60' : 'right-0'
-                          }`}>
+                          max-h-[300px] overflow-y-auto ${
+                            placement === 'top' ? 'top-full mt-2' : 'bottom-full mb-2'
+                          } ${collapsed ? 'w-60' : 'right-0 w-64'}`}>
             {/* 集群列表 */}
             <div className="p-1">
               {clusters.map((cluster) => (
@@ -294,14 +327,13 @@ export default function ClusterSwitcher({ collapsed = false }: { collapsed?: boo
                 <button
                   onClick={() => {
                     setIsOpen(false)
-                    // 导航到集群配置页面
-                    window.location.href = `/cluster?tab=config`
+                    navigate('/cluster')
                   }}
                   className="w-full flex items-center gap-2 p-2 rounded-md 
                              text-sm text-dark-400 hover:bg-dark-700 hover:text-ink-primary"
                 >
                   <Settings className="w-4 h-4" />
-                  管理集群配置
+                  管理此集群（服务 / 基础设施 / 配置）
                 </button>
               )}
             </div>

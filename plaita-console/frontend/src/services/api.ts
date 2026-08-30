@@ -841,6 +841,8 @@ export interface CreateClusterRequest {
   name: string
   description?: string
   redis_url?: string
+  /** 架构配套预设：quickstart（快速上手）| dev（开发）| prod（生产） */
+  preset?: string
 }
 
 export interface UpdateClusterRequest {

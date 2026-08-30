@@ -65,6 +65,14 @@ worker 自身默认 redis 后端）。它们出现在配置编辑器里属于历
   （systemd / supervisor / 容器）
 - **安全**：console 必须设置 `PLAITA_CONSOLE_ADMIN_API_KEY`
 
+## 创建集群即选配套
+
+创建集群（左上角集群切换器 → 创建新集群）时可直接选择三档架构配套，
+后端按预设生成对应的 cluster_config.yaml（服务集合与实例上限）：
+quickstart 三件套最小集 / dev 全功能六服务 / prod 全家桶 + 上限上调。
+创建后到集群管理页「一键启动基础服务」即可开跑；业务节点包接线
+（PLAITA_NODE_PATH/MODULES）按需手工补充。
+
 ## 与配置的对应关系
 
 | 你想改的 | 改哪里 |

@@ -11,7 +11,7 @@ import os
 import yaml
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -110,44 +110,104 @@ class ClusterRegistry:
             self._active_cluster_id = "default"
             self._save_registry()
     
-    def _create_default_config(self, config_path: str):
-        """创建默认集群配置"""
-        Path(config_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        default_config = {
-            "mode": "process",
-            "redis": {
-                "url": "redis://localhost:6379/0"
-            },
-            "services": {
-                "flow_worker": {
-                    "display_name": "流程执行器",
-                    "process": {
-                        "module": "plaita.server.flow_worker"
-                    },
-                    "default_instances": 1,
-                    "max_instances": 10,
-                    "env": {
-                        "REDIS_URL": "redis://localhost:6379/0",
-                        "QUEUE_NAME": "plaita:flow:queue"
-                    }
-                },
-                "delay_service": {
-                    "display_name": "延迟定时服务",
-                    "process": {
-                        "command": "python -m plaita.server.services delay_service"
-                    },
-                    "default_instances": 1,
-                    "max_instances": 3,
-                    "env": {
-                        "REDIS_URL": "redis://localhost:6379/0"
-                    }
-                }
+    # ---- 架构配套预设（快速上手 / 开发 / 生产），见 docs/architecture-profiles.md ----
+
+    _SERVICE_TEMPLATES = {
+        "flow_worker": {
+            "display_name": "流程执行器",
+            "process": {"module": "plaita.server.flow_worker"},
+            "max_instances": 10,
+            "env": {"PLAITA_QUEUE_NAME": "plaita:flow:queue"},
+        },
+        "delay_service": {
+            "display_name": "延迟服务",
+            "process": {"command": "python -m plaita.server.services delay_service"},
+            "max_instances": 3,
+        },
+        "event_filter": {
+            "display_name": "事件恢复器",
+            "process": {"module": "plaita.server.event_filter"},
+            "max_instances": 1,
+        },
+        "schedule_service": {
+            "display_name": "调度服务",
+            "process": {"command": "python -m plaita.server.services schedule_service"},
+            "max_instances": 1,
+        },
+        "http_callback_service": {
+            "display_name": "HTTP 回调服务",
+            "process": {"command": "python -m plaita.server.services http_callback_service"},
+            "max_instances": 3,
+        },
+        "redis_queue_service": {
+            "display_name": "Redis 队列服务",
+            "process": {"command": "python -m plaita.server.services redis_queue_service"},
+            "max_instances": 5,
+        },
+        "approval_service": {
+            "display_name": "审批服务",
+            "process": {"command": "python -m plaita.server.services approval_service"},
+            "max_instances": 3,
+        },
+        "kafka_queue_service": {
+            "display_name": "Kafka 队列服务",
+            "process": {"command": "python -m plaita.server.services kafka_queue_service"},
+            "max_instances": 3,
+        },
+    }
+
+    # 各档预置的服务集合：quickstart 最小可跑（同步流程+挂起恢复），
+    # dev 全功能（+触发器/回调/队列），prod 全家桶 + 实例上限上调
+    _PRESET_SERVICES = {
+        "quickstart": ["flow_worker", "delay_service", "event_filter"],
+        "dev": [
+            "flow_worker", "delay_service", "event_filter", "schedule_service",
+            "http_callback_service", "redis_queue_service",
+        ],
+        "prod": [
+            "flow_worker", "delay_service", "event_filter", "schedule_service",
+            "http_callback_service", "redis_queue_service", "approval_service",
+            "kafka_queue_service",
+        ],
+    }
+
+    def _build_preset_config(self, preset: str, redis_url: str) -> Dict[str, Any]:
+        """按架构配套预设生成集群配置。真实后端一律 Redis（见
+        docs/architecture-profiles.md），不生成 eventbus/queue/storage 死键。"""
+        if preset not in self._PRESET_SERVICES:
+            preset = "dev"
+        services: Dict[str, Any] = {}
+        for name in self._PRESET_SERVICES[preset]:
+            tpl = self._SERVICE_TEMPLATES[name]
+            svc: Dict[str, Any] = {
+                "display_name": tpl["display_name"],
+                "default_instances": 1,
+                "max_instances": tpl["max_instances"] if preset != "prod" else tpl["max_instances"],
+                "env": {"PLAITA_REDIS_URL": redis_url},
             }
+            svc["process"] = dict(tpl["process"])
+            if "env" in tpl:
+                svc["env"].update(tpl["env"])
+            services[name] = svc
+        config: Dict[str, Any] = {
+            "profile": preset,
+            "mode": "process",
+            "redis": {"url": redis_url},
+            "services": services,
         }
-        
+        if preset == "prod":
+            config["notes"] = (
+                "生产级：Redis 开 AOF 持久化；流程定义库建议切 PostgreSQL；"
+                "console 设置 PLAITA_CONSOLE_ADMIN_API_KEY"
+            )
+        return config
+
+    def _create_default_config(self, config_path: str, preset: str = "dev", redis_url: str = "redis://localhost:6379/0"):
+        """创建集群配置（按架构配套预设）"""
+        Path(config_path).parent.mkdir(parents=True, exist_ok=True)
+        config = self._build_preset_config(preset, redis_url)
         with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(default_config, f, allow_unicode=True, default_flow_style=False)
+            yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
     
     def list_clusters(self) -> List[ClusterInfo]:
         """获取所有集群"""
@@ -176,18 +236,19 @@ class ClusterRegistry:
         name: str,
         description: str = "",
         config_path: Optional[str] = None,
-        redis_url: str = "redis://localhost:6379/0"
+        redis_url: str = "redis://localhost:6379/0",
+        preset: str = "dev"
     ) -> ClusterInfo:
-        """创建新集群"""
+        """创建新集群（preset：架构配套 quickstart / dev / prod）"""
         if cluster_id in self._clusters:
             raise ValueError(f"集群 {cluster_id} 已存在")
         
-        # 如果没有指定配置路径，创建新的
+        # 如果没有指定配置路径，按预设创建
         if not config_path:
             cluster_dir = self.base_dir / cluster_id
             cluster_dir.mkdir(parents=True, exist_ok=True)
             config_path = str(cluster_dir / "cluster_config.yaml")
-            self._create_default_config(config_path)
+            self._create_default_config(config_path, preset=preset, redis_url=redis_url)
         
         info = ClusterInfo(
             id=cluster_id,

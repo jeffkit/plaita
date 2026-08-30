@@ -6,7 +6,6 @@ import {
   Play,
   ScrollText,
   Inbox,
-  Server,
   Zap,
   Workflow,
   Boxes,
@@ -39,7 +38,6 @@ const NAV_GROUPS = [
     label: '总览',
     items: [
       { to: '/', icon: <LayoutGrid size={16} />, label: '仪表盘', end: true },
-      { to: '/cluster', icon: <Server size={16} />, label: '集群管理' },
       { to: '/topology', icon: <GitBranch size={16} />, label: '服务拓扑' },
     ],
   },
@@ -133,6 +131,11 @@ function Layout() {
           </button>
         </div>
 
+        {/* 集群上下文：全局切换器置顶——切换影响整个 console（执行/拓扑/服务视图） */}
+        <div className="p-2 border-b border-line">
+          <ClusterSwitcher collapsed={collapsed} placement="top" />
+        </div>
+
         {/* 导航分组 */}
         <div className="flex-1 overflow-y-auto py-1">
           {NAV_GROUPS.map((group) => (
@@ -157,10 +160,6 @@ function Layout() {
           ))}
         </div>
 
-        {/* 底部 - 集群切换器 */}
-        <div className="p-2 border-t border-line">
-          <ClusterSwitcher collapsed={collapsed} />
-        </div>
       </nav>
 
       {/* 主内容区 */}
