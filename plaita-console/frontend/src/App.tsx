@@ -6,6 +6,7 @@ import {
   Play,
   ScrollText,
   Inbox,
+  Server,
   Zap,
   Workflow,
   Boxes,
@@ -32,17 +33,26 @@ import Schedules from './pages/Schedules'
 import ClusterSwitcher from './components/ClusterSwitcher'
 import ThemeToggle from './components/ThemeToggle'
 
-// 侧边导航分组（DESIGN.md §1：micro 大写分组标签 + body 字号导航项）
-const NAV_GROUPS = [
+// 侧边导航分组：按「定义 / 运行 / 集群」三个域划分——
+// 编排域关注流程定义（不关注运行），运行域关注观测与运维，
+// 集群域是平台基础设施视图。定义与运行的存储本就分离
+// （定义库 SQLite / 运行态 Redis），导航与之一一对应。
+interface NavItem {
+  to: string
+  icon: React.ReactNode
+  label: string
+  end?: boolean
+}
+
+const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: '总览',
     items: [
       { to: '/', icon: <LayoutGrid size={16} />, label: '仪表盘', end: true },
-      { to: '/topology', icon: <GitBranch size={16} />, label: '服务拓扑' },
     ],
   },
   {
-    label: '编排',
+    label: '编排 · 定义',
     items: [
       { to: '/flows', icon: <Workflow size={16} />, label: '流程编排' },
       { to: '/schedules', icon: <Clock size={16} />, label: '触发器' },
@@ -50,12 +60,19 @@ const NAV_GROUPS = [
     ],
   },
   {
-    label: '运行',
+    label: '运行 · 观测',
     items: [
       { to: '/executions', icon: <Play size={16} />, label: '执行实例' },
       { to: '/events', icon: <Zap size={16} />, label: '事件管理' },
       { to: '/logs', icon: <ScrollText size={16} />, label: '日志查看' },
       { to: '/queues', icon: <Inbox size={16} />, label: '任务队列' },
+    ],
+  },
+  {
+    label: '集群 · 运维',
+    items: [
+      { to: '/topology', icon: <GitBranch size={16} />, label: '服务拓扑' },
+      { to: '/cluster', icon: <Server size={16} />, label: '集群管理' },
     ],
   },
 ]
