@@ -104,11 +104,25 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
 
   setGraph: (nodes, edges) => set({ nodes, edges, dirty: false }),
 
-  onNodesChange: (changes) =>
-    set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) as Node[], dirty: true })),
+  // 选中/尺寸变化是 xyflow 的交互噪音，不算「未保存」；
+  // 只有增删节点、改位置、改连线才置 dirty，否则唯一的状态指示器会失去公信力
+  onNodesChange: (changes) => {
+    const meaningful = changes.some(
+      (c) => c.type !== 'select' && c.type !== 'dimensions'
+    )
+    set((s) => ({
+      nodes: applyNodeChanges(changes, s.nodes) as Node[],
+      dirty: meaningful ? true : s.dirty,
+    }))
+  },
 
-  onEdgesChange: (changes) =>
-    set((s) => ({ edges: applyEdgeChanges(changes, s.edges) as Edge[], dirty: true })),
+  onEdgesChange: (changes) => {
+    const meaningful = changes.some((c) => c.type !== 'select')
+    set((s) => ({
+      edges: applyEdgeChanges(changes, s.edges) as Edge[],
+      dirty: meaningful ? true : s.dirty,
+    }))
+  },
 
   onConnect: (connection: Connection) =>
     set((s) => ({

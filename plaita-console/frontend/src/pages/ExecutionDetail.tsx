@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -20,11 +20,15 @@ import {
 } from 'lucide-react'
 import { api, ExecutionInfo } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
-import { Button, Card } from '../components/ui'
+import { Button, Card, StatusBadge } from '../components/ui'
 
 type ResumeType = 'continue' | 'event' | 'timeout' | 'cancel'
 
-function useExecutionSSE(executionId: string | undefined, enabled: boolean) {
+function useExecutionSSE(
+  executionId: string | undefined,
+  enabled: boolean,
+  onLoss: () => void
+) {
   const queryClient = useQueryClient()
 
   useEffect(() => {
@@ -47,11 +51,43 @@ function useExecutionSSE(executionId: string | undefined, enabled: boolean) {
     })
 
     evtSource.onerror = () => {
+      // 断开不允许静默：通知调用方回落轮询，页面冻结比报错更危险
       evtSource.close()
+      onLoss()
     }
 
     return () => evtSource.close()
-  }, [executionId, enabled, queryClient])
+  }, [executionId, enabled, queryClient, onLoss])
+}
+
+// 从 error 对象中解析人话：优先常见 message 键，stack/traceback 归入详情
+function parseExecutionError(err: unknown): { message: string; details?: string } {
+  if (err == null) return { message: '' }
+  if (typeof err === 'string') {
+    try {
+      return parseExecutionError(JSON.parse(err))
+    } catch {
+      return { message: err }
+    }
+  }
+  if (typeof err === 'object') {
+    const obj = err as Record<string, unknown>
+    const messageKey = ['message', 'msg', 'error', 'exception', 'detail', 'reason'].find(
+      (k) => typeof obj[k] === 'string' && (obj[k] as string).trim()
+    )
+    const message = messageKey ? (obj[messageKey] as string) : JSON.stringify(obj)
+    const stackKey = ['stack', 'traceback', 'details'].find(
+      (k) => typeof obj[k] === 'string' && (obj[k] as string).trim()
+    )
+    const details =
+      stackKey && obj[stackKey] !== (messageKey ? obj[messageKey] : undefined)
+        ? (obj[stackKey] as string)
+        : messageKey
+          ? JSON.stringify(obj, null, 2)
+          : undefined
+    return { message, details }
+  }
+  return { message: String(err) }
 }
 
 export default function ExecutionDetail() {
@@ -60,10 +96,16 @@ export default function ExecutionDetail() {
   const queryClient = useQueryClient()
   const [showResumeDialog, setShowResumeDialog] = useState(false)
   const [useSSE, setUseSSE] = useState(true)
+  const [sseLost, setSseLost] = useState(false)
 
-  useExecutionSSE(executionId, useSSE)
+  const handleSSELoss = useCallback(() => {
+    setUseSSE(false)
+    setSseLost(true)
+  }, [])
 
-  const { data: execution, isLoading, refetch } = useQuery({
+  useExecutionSSE(executionId, useSSE, handleSSELoss)
+
+  const { data: execution, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['execution', executionId],
     queryFn: () => api.getExecution(executionId!),
     enabled: !!executionId,
@@ -94,9 +136,29 @@ export default function ExecutionDetail() {
     )
   }
 
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-ink-muted">
+        <AlertCircle size={48} className="mb-4 text-status-error" />
+        <p>执行加载失败：{(error as Error).message}</p>
+        <div className="mt-4 flex gap-2">
+          <Button variant="secondary" size="sm" onClick={() => refetch()}>
+            重试
+          </Button>
+          <button
+            onClick={() => navigate('/executions')}
+            className="text-plaita-400 hover:underline text-body"
+          >
+            返回列表
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   if (!execution) {
     return (
-      <div className="flex flex-col items-center justify-center h-full text-dark-400">
+      <div className="flex flex-col items-center justify-center h-full text-ink-muted">
         <AlertCircle size={48} className="mb-4" />
         <p>执行不存在</p>
         <button
@@ -148,12 +210,27 @@ export default function ExecutionDetail() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setUseSSE(!useSSE)}
-            className={useSSE ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
-            title={useSSE ? '使用 SSE 实时更新中' : '使用轮询模式'}
+            onClick={() => {
+              setSseLost(false)
+              setUseSSE(!useSSE)
+            }}
+            className={
+              useSSE
+                ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400'
+                : sseLost
+                  ? 'text-status-warning hover:text-status-warning'
+                  : undefined
+            }
+            title={
+              useSSE
+                ? '使用 SSE 实时更新中'
+                : sseLost
+                  ? '实时连接已断开，自动切换为轮询（点击重连）'
+                  : '使用轮询模式'
+            }
           >
             <Radio size={13} />
-            {useSSE ? '实时' : '轮询'}
+            {useSSE ? '实时' : sseLost ? '轮询（已断开）' : '轮询'}
           </Button>
         </div>
       </div>
@@ -196,28 +273,51 @@ export default function ExecutionDetail() {
             />
           </InfoCard>
 
-          {/* 错误信息 */}
-          {execution.error && (
-            <div className="bg-status-error-dim border border-status-error/30 rounded-xl p-4">
-              <h3 className="text-section text-status-error mb-2 flex items-center gap-2">
-                <AlertCircle size={15} />
-                错误信息
-              </h3>
-              <pre className="text-data-sm text-status-error whitespace-pre-wrap font-mono opacity-90">
-                {JSON.stringify(execution.error, null, 2)}
-              </pre>
-            </div>
-          )}
+          {/* 错误信息：人话优先，原始详情折叠 */}
+          {execution.error && (() => {
+            const { message, details } = parseExecutionError(execution.error)
+            return (
+              <div className="bg-status-error-dim border border-status-error/30 rounded-xl p-4">
+                <h3 className="text-section text-status-error mb-2 flex items-center gap-2">
+                  <AlertCircle size={15} />
+                  错误信息
+                </h3>
+                <p className="text-body text-status-error whitespace-pre-wrap break-all">{message}</p>
+                {details && (
+                  <details className="mt-2.5">
+                    <summary className="text-caption text-status-error/70 cursor-pointer select-none">
+                      原始错误数据
+                    </summary>
+                    <pre className="mt-2 text-data-sm text-status-error whitespace-pre-wrap font-mono opacity-90 max-h-60 overflow-auto">
+                      {details}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            )
+          })()}
         </div>
 
         {/* 右侧：上下文和流程图 */}
         <div className="lg:col-span-2 space-y-6">
-          {/* 流程信息 */}
+          {/* 流程信息：flow_id 可点回编辑器，接上「失败 → 改流程」的断点 */}
           <InfoCard title="流程信息">
-            <InfoRow label="流程 ID" value={execution.flow_id} />
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-caption text-ink-muted shrink-0">流程 ID</span>
+              <button
+                onClick={() => navigate(`/flows/${execution.flow_id}/edit${execution.flow_version ? `?version=${encodeURIComponent(execution.flow_version)}` : ''}`)}
+                className="font-mono text-data-sm text-plaita-400 hover:underline truncate"
+                title="在编辑器中打开该流程"
+              >
+                {execution.flow_id}
+              </button>
+            </div>
             <InfoRow label="版本" value={execution.flow_version || '最新'} />
             <InfoRow label="调用者" value={execution.invoker || '-'} />
           </InfoCard>
+
+          {/* 节点时间线：从上下文里还原每个节点的执行痕迹，替代整包 JSON dump */}
+          <NodeTimeline context={execution.context} />
 
           {/* 执行上下文 */}
           <Card className="overflow-hidden">
@@ -240,7 +340,12 @@ export default function ExecutionDetail() {
                 <h3 className="text-section text-ink-primary">流程可视化</h3>
               </div>
               <div className="h-96">
-                <FlowViewer context={execution.context} status={execution.status} />
+                <FlowViewer
+                  flowId={execution.flow_id}
+                  version={execution.flow_version}
+                  context={execution.context}
+                  status={execution.status}
+                />
               </div>
             </Card>
           )}
@@ -455,6 +560,84 @@ function InfoRow({ label, value }: { label: string; value: string }) {
       <span className="text-caption text-ink-muted shrink-0">{label}</span>
       <span className="font-mono text-data-sm text-ink-primary truncate">{value}</span>
     </div>
+  )
+}
+
+// 节点时间线：兼容两种 context 形态——
+// 分布式运行态 ``$NODE``（dict: node_id → 节点结果）与历史 ``nodes`` 数组；
+// 每个节点可展开看原始 in/out，错误节点标红。
+function NodeTimeline({ context }: { context?: Record<string, unknown> }) {
+  interface TimelineEntry {
+    id: string
+    raw: Record<string, unknown>
+  }
+  const entries: TimelineEntry[] = []
+  const nodeMap = context?.$NODE as Record<string, unknown> | undefined
+  if (nodeMap && typeof nodeMap === 'object') {
+    for (const [id, result] of Object.entries(nodeMap)) {
+      entries.push({
+        id,
+        raw: (result && typeof result === 'object' ? result : {}) as Record<string, unknown>,
+      })
+    }
+  }
+  const nodeList = (context?.nodes as Array<Record<string, unknown>>) || []
+  nodeList.forEach((node, index) => {
+    entries.push({ id: String(node.id ?? `node-${index}`), raw: node })
+  })
+  if (entries.length === 0) return null
+
+  return (
+    <Card className="overflow-hidden">
+      <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+        <h3 className="text-section text-ink-primary">节点时间线</h3>
+        <span className="text-data-sm text-ink-muted tabular-nums">{entries.length} 个节点</span>
+      </div>
+      <div className="divide-y divide-line">
+        {entries.map((entry, index) => {
+          const raw = entry.raw
+          const type = String(raw.type ?? raw.node_subtype ?? '')
+          const name = typeof raw.name === 'string' && raw.name ? raw.name : entry.id
+          const status = typeof raw.status === 'string' ? raw.status : ''
+          const errorText =
+            typeof raw.error === 'string'
+              ? raw.error
+              : raw.error != null
+                ? JSON.stringify(raw.error)
+                : ''
+          const hasError = !!errorText
+          const rest = { ...raw }
+          delete (rest as Record<string, unknown>).error
+          return (
+            <details key={`${entry.id}-${index}`} className="group px-4 py-2.5">
+              <summary className="flex items-center gap-2.5 cursor-pointer select-none list-none">
+                <span className="font-mono text-data-sm text-ink-faint tabular-nums w-6 text-right shrink-0">
+                  {index + 1}
+                </span>
+                <span className="font-mono text-data-sm text-ink-primary truncate">{name}</span>
+                {type && <span className="text-caption text-ink-faint shrink-0">{type}</span>}
+                {status && <StatusBadge status={status} />}
+                {hasError && (
+                  <span className="ml-auto text-caption text-status-error truncate max-w-[50%]">
+                    {errorText.split('\n')[0]}
+                  </span>
+                )}
+              </summary>
+              <div className="mt-2 ml-8">
+                {hasError && (
+                  <pre className="mb-2 text-data-sm text-status-error whitespace-pre-wrap font-mono bg-status-error-dim rounded-md p-2.5">
+                    {errorText}
+                  </pre>
+                )}
+                <pre className="text-data-sm font-mono text-ink-faint whitespace-pre-wrap max-h-52 overflow-auto bg-inset rounded-md p-2.5">
+                  {JSON.stringify(rest, null, 2)}
+                </pre>
+              </div>
+            </details>
+          )
+        })}
+      </div>
+    </Card>
   )
 }
 

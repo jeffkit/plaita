@@ -27,7 +27,7 @@ import {
   Clock,
   UserCheck
 } from 'lucide-react'
-import { Button } from '../components/ui'
+import { Button, ConfirmDialog } from '../components/ui'
 
 // 状态图标
 const StatusIcon = ({ status }: { status: string }) => {
@@ -2153,6 +2153,7 @@ export default function Cluster() {
   const [editingInfra, setEditingInfra] = useState<InfrastructureInfo | null>(null)
   const [showAddInfra, setShowAddInfra] = useState(false)
   const [showQuickTest, setShowQuickTest] = useState(false)
+  const [showStopAll, setShowStopAll] = useState(false)
   
   // 当前标签页
   const currentTab = searchParams.get('tab') || 'services'
@@ -2311,7 +2312,7 @@ export default function Cluster() {
               </Button>
               <Button
                 variant="danger"
-                onClick={() => stopAllMutation.mutate()}
+                onClick={() => setShowStopAll(true)}
                 disabled={stopAllMutation.isPending || runningCount === 0}
               >
                 <Square size={14} />
@@ -2582,6 +2583,19 @@ export default function Cluster() {
       {showQuickTest && (
         <QuickTestDialog onClose={() => setShowQuickTest(false)} />
       )}
+
+      {/* 停止全部确认：一次中断所有运行中实例，必须有明确确认 */}
+      <ConfirmDialog
+        open={showStopAll}
+        title={`停止全部托管实例（${runningCount} 个运行中）？`}
+        variant="danger"
+        confirmLabel="全部停止"
+        busy={stopAllMutation.isPending}
+        onCancel={() => setShowStopAll(false)}
+        onConfirm={() => stopAllMutation.mutate(undefined, { onSuccess: () => setShowStopAll(false) })}
+      >
+        正在执行的流程会被中断；实例可在下方重新启动。
+      </ConfirmDialog>
     </div>
   )
 }

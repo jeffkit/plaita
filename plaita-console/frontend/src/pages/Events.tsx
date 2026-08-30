@@ -13,7 +13,7 @@ import {
   Clock,
 } from 'lucide-react'
 import { api, EventInfo, SubscriptionInfo } from '../services/api'
-import { PageHeader, Card, Button, EmptyState, Table, Th, Tr, Td, TdData, cn } from '../components/ui'
+import { PageHeader, Card, Button, EmptyState, Table, Th, Tr, Td, TdData, ConfirmDialog, cn } from '../components/ui'
 
 type Tab = 'subscriptions' | 'events' | 'publish'
 
@@ -76,6 +76,7 @@ export default function Events() {
 
 function SubscriptionsPanel({ eventType }: { eventType: string }) {
   const queryClient = useQueryClient()
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['subscriptions', eventType],
@@ -85,7 +86,10 @@ function SubscriptionsPanel({ eventType }: { eventType: string }) {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.deleteSubscription(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['subscriptions'] })
+      setPendingDeleteId(null)
+    },
   })
 
   const subscriptions = data?.subscriptions || []
@@ -112,12 +116,26 @@ function SubscriptionsPanel({ eventType }: { eventType: string }) {
             <SubscriptionCard
               key={sub.subscription_id}
               subscription={sub}
-              onDelete={() => deleteMutation.mutate(sub.subscription_id)}
-              isDeleting={deleteMutation.isPending}
+              onDelete={() => setPendingDeleteId(sub.subscription_id)}
+              isDeleting={deleteMutation.isPending && pendingDeleteId === sub.subscription_id}
             />
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!pendingDeleteId}
+        title="删除这个事件订阅？"
+        variant="danger"
+        confirmLabel="确认删除"
+        busy={deleteMutation.isPending}
+        onCancel={() => setPendingDeleteId(null)}
+        onConfirm={() => {
+          if (pendingDeleteId) deleteMutation.mutate(pendingDeleteId)
+        }}
+      >
+        删除后，等待该订阅恢复的挂起节点将无法被此订阅唤醒。
+      </ConfirmDialog>
     </div>
   )
 }

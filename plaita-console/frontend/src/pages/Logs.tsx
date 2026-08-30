@@ -1,13 +1,26 @@
 import { useState, useEffect, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Play, Pause, RefreshCw, Search, Radio, ScrollText } from 'lucide-react'
+import { Play, Pause, RefreshCw, Search, Radio, ScrollText, X, AlertTriangle } from 'lucide-react'
 import { api, LogEntry } from '../services/api'
 import { PageHeader, Button, EmptyState } from '../components/ui'
 
 export default function Logs() {
+  // 筛选进 URL：Cluster 实例页的「查看更多」深链可以直达了
+  const [searchParams, setSearchParams] = useSearchParams()
+  const levelFilter = searchParams.get('level') || ''
+  const instanceFilter = searchParams.get('instance_id') || ''
+
+  const setParam = (key: string, value: string) => {
+    const next = new URLSearchParams(searchParams)
+    if (value) next.set(key, value)
+    else next.delete(key)
+    setSearchParams(next)
+  }
+
   const [isStreaming, setIsStreaming] = useState(false)
   const [useSSE, setUseSSE] = useState(false)
-  const [levelFilter, setLevelFilter] = useState<string>('')
+  const [sseLost, setSseLost] = useState(false)
   const [searchText, setSearchText] = useState('')
   const [autoScroll, setAutoScroll] = useState(true)
   const [sseLogs, setSseLogs] = useState<LogEntry[]>([])
@@ -18,6 +31,7 @@ export default function Logs() {
 
     const params = new URLSearchParams()
     if (levelFilter) params.set('level', levelFilter)
+    if (instanceFilter) params.set('instance_id', instanceFilter)
     const evtSource = new EventSource(`/api/logs/stream?${params}`)
 
     evtSource.addEventListener('log', (e) => {
@@ -28,16 +42,23 @@ export default function Logs() {
     })
 
     evtSource.onerror = () => {
+      // 断开回落轮询，不允许静默停更
       evtSource.close()
       setUseSSE(false)
+      setSseLost(true)
     }
 
     return () => evtSource.close()
-  }, [isStreaming, useSSE, levelFilter])
+  }, [isStreaming, useSSE, levelFilter, instanceFilter])
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['logs', levelFilter],
-    queryFn: () => api.getLogs({ level: levelFilter || undefined, limit: 200 }),
+    queryKey: ['logs', levelFilter, instanceFilter],
+    queryFn: () =>
+      api.getLogs({
+        level: levelFilter || undefined,
+        instance_id: instanceFilter || undefined,
+        limit: 200,
+      }),
     refetchInterval: isStreaming && !useSSE ? 2000 : false,
   })
 
@@ -78,7 +99,7 @@ export default function Logs() {
             {/* 级别筛选 */}
             <select
               value={levelFilter}
-              onChange={(e) => setLevelFilter(e.target.value)}
+              onChange={(e) => setParam('level', e.target.value)}
               className="input w-32"
             >
               <option value="">全部级别</option>
@@ -92,12 +113,28 @@ export default function Logs() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => { setUseSSE(!useSSE); if (!isStreaming) setIsStreaming(true) }}
-              className={useSSE ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
-              title={useSSE ? 'SSE 实时推送' : '轮询模式'}
+              onClick={() => {
+                setSseLost(false)
+                setUseSSE((v) => !v)
+                if (!isStreaming) setIsStreaming(true)
+              }}
+              className={
+                useSSE
+                  ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400'
+                  : sseLost
+                    ? 'text-status-warning hover:text-status-warning'
+                    : undefined
+              }
+              title={
+                useSSE
+                  ? 'SSE 实时推送'
+                  : sseLost
+                    ? '实时连接已断开，自动回落轮询（点击重试 SSE）'
+                    : '轮询模式'
+              }
             >
               <Radio size={13} />
-              {useSSE ? 'SSE' : '轮询'}
+              {useSSE ? 'SSE' : sseLost ? '轮询（已断开）' : '轮询'}
             </Button>
 
             {/* 实时开关 */}
@@ -119,6 +156,28 @@ export default function Logs() {
         }
       />
 
+      {/* 活跃筛选 chips：来源可见、可移除 */}
+      {(instanceFilter || levelFilter) && (
+        <div className="flex items-center gap-2">
+          {instanceFilter && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-line bg-plaita-500/10 text-caption text-plaita-400 font-mono">
+              {instanceFilter}
+              <button onClick={() => setParam('instance_id', '')} aria-label="移除实例筛选" title="移除实例筛选">
+                <X size={12} />
+              </button>
+            </span>
+          )}
+          {levelFilter && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-line bg-plaita-500/10 text-caption text-plaita-400">
+              {levelFilter}
+              <button onClick={() => setParam('level', '')} aria-label="移除级别筛选" title="移除级别筛选">
+                <X size={12} />
+              </button>
+            </span>
+          )}
+        </div>
+      )}
+
       {/* 日志列表：下沉区（inset）+ 数据声道 */}
       <div
         ref={logsContainerRef}
@@ -127,7 +186,11 @@ export default function Logs() {
         {isLoading ? (
           <EmptyState message="加载中…" />
         ) : filteredLogs.length === 0 ? (
-          <EmptyState icon={<ScrollText size={20} />} message="暂无日志" hint="调整搜索词或级别筛选试试" />
+          <EmptyState
+            icon={<ScrollText size={20} />}
+            message={instanceFilter || levelFilter || searchText ? '没有匹配的日志' : '暂无日志'}
+            hint={instanceFilter ? '该实例可能尚未产生日志；可移除筛选查看全部' : undefined}
+          />
         ) : (
           <div className="p-3 space-y-0.5">
             {filteredLogs.map((log, index) => (
@@ -139,7 +202,15 @@ export default function Logs() {
 
       {/* 底部状态栏 */}
       <div className="flex items-center justify-between text-caption text-ink-muted">
-        <span>共 <span className="font-mono tabular-nums">{filteredLogs.length}</span> 条日志</span>
+        <span className="flex items-center gap-3">
+          <span>共 <span className="font-mono tabular-nums">{filteredLogs.length}</span> 条日志</span>
+          {sseLost && (
+            <span className="flex items-center gap-1 text-status-warning">
+              <AlertTriangle size={12} />
+              实时连接已断开，已回落轮询
+            </span>
+          )}
+        </span>
         <label className="flex items-center gap-2 cursor-pointer select-none">
           <input
             type="checkbox"

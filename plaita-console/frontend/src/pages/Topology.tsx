@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   ReactFlow,
@@ -15,6 +16,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import { api } from '../services/api'
 import { EmptyState } from '../components/ui'
+import { GitBranch } from 'lucide-react'
 
 // 服务类型 → 语义色（底/描边用状态 dim 体系，图标区分类型）
 const nodeStyles: Record<string, { bg: string; border: string; icon: string }> = {
@@ -27,6 +29,11 @@ const nodeStyles: Record<string, { bg: string; border: string; icon: string }> =
     bg: 'bg-status-pending-dim',
     border: 'border-status-pending/40',
     icon: '⏱️',
+  },
+  schedule_service: {
+    bg: 'bg-status-warning-dim',
+    border: 'border-status-warning/40',
+    icon: '⏰',
   },
   redis_queue_service: {
     bg: 'bg-status-error-dim',
@@ -51,6 +58,7 @@ const nodeStyles: Record<string, { bg: string; border: string; icon: string }> =
 }
 
 export default function Topology() {
+  const navigate = useNavigate()
   const { data: topologyData, isLoading } = useQuery({
     queryKey: ['topology'],
     queryFn: api.getTopology,
@@ -66,19 +74,11 @@ export default function Topology() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
 
-  // 当数据变化时更新节点和边
+  // 数据变化时同步（包括清空：注册表最后一条服务下线后画布不能残留旧节点）
   useEffect(() => {
-    if (flowNodes.length > 0) {
-      setNodes(flowNodes)
-      setEdges(flowEdges)
-    }
+    setNodes(flowNodes)
+    setEdges(flowEdges)
   }, [flowNodes, flowEdges, setNodes, setEdges])
-
-  // 节点点击处理
-  const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
-    console.log('Node clicked:', node)
-    // TODO: 显示节点详情面板
-  }, [])
 
   if (isLoading) {
     return (
@@ -88,13 +88,34 @@ export default function Topology() {
     )
   }
 
+  // 拓扑图来自服务注册表（plaita:registry:*），没有实例注册时是「无数据」而不是「空图」
+  if (!topologyData || topologyData.nodes.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <EmptyState
+          icon={<GitBranch size={20} />}
+          message="暂无拓扑数据"
+          hint="拓扑图由注册到服务注册表（plaita:registry）的实例自动生成；可在「集群管理」启动 FlowWorker 等托管实例"
+          action={
+            <button
+              onClick={() => navigate('/cluster')}
+              className="text-caption text-plaita-400 hover:underline"
+            >
+              去集群管理 →
+            </button>
+          }
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="h-full relative">
-      {/* 标题栏 */}
+      {/* 标题栏：节点数与画布同源（topologyData.nodes），不再和 /services 计数打架 */}
       <div className="absolute top-4 left-4 z-10 bg-surface/95 rounded-lg px-4 py-2.5 border border-line shadow-card">
         <h1 className="text-section text-ink-primary">服务拓扑</h1>
         <p className="text-caption text-ink-muted mt-0.5">
-          共 <span className="font-mono tabular-nums">{topologyData?.nodes.length || 0}</span> 个节点
+          共 <span className="font-mono tabular-nums">{nodes.length}</span> 个节点
         </p>
       </div>
 
@@ -111,6 +132,10 @@ export default function Topology() {
             <span>延迟服务</span>
           </div>
           <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-status-warning"></span>
+            <span>调度服务</span>
+          </div>
+          <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-dark-400"></span>
             <span>共享资源</span>
           </div>
@@ -122,7 +147,6 @@ export default function Topology() {
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeClick={onNodeClick}
         fitView
         attributionPosition="bottom-left"
       >

@@ -576,6 +576,63 @@ export const api = {
       body: JSON.stringify(payload),
     })
   },
+
+  // ============ 调度（触发器） ============
+
+  async getSchedules(): Promise<ScheduleListResponse> {
+    return request('/schedules')
+  },
+
+  async createSchedule(payload: {
+    name: string
+    flow_id: string
+    version?: string
+    cron: string
+    params?: Record<string, unknown>
+    enabled?: boolean
+  }): Promise<ScheduleInfo> {
+    return request('/schedules', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  async updateSchedule(
+    scheduleId: string,
+    payload: { name?: string; version?: string; cron?: string; params?: Record<string, unknown> }
+  ): Promise<ScheduleInfo> {
+    return request(`/schedules/${scheduleId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  async deleteSchedule(scheduleId: string): Promise<{ success: boolean }> {
+    return request(`/schedules/${scheduleId}`, { method: 'DELETE' })
+  },
+
+  async enableSchedule(scheduleId: string): Promise<ScheduleInfo> {
+    return request(`/schedules/${scheduleId}/enable`, { method: 'POST' })
+  },
+
+  async disableSchedule(scheduleId: string): Promise<ScheduleInfo> {
+    return request(`/schedules/${scheduleId}/disable`, { method: 'POST' })
+  },
+
+  async triggerSchedule(scheduleId: string): Promise<{ success: boolean; msg_id: string }> {
+    return request(`/schedules/${scheduleId}/trigger`, { method: 'POST' })
+  },
+
+  async getScheduleHistory(
+    scheduleId: string,
+    limit = 10
+  ): Promise<{ schedule_id: string; records: ScheduleFireRecord[]; total: number }> {
+    return request(`/schedules/${scheduleId}/history?limit=${limit}`)
+  },
+
+  async previewCron(cron: string, count = 5): Promise<{ cron: string; next: string[] }> {
+    return request(`/schedules/preview?cron=${encodeURIComponent(cron)}&count=${count}`)
+  },
 }
 
 // ============ 流程编排类型定义 ============
@@ -795,5 +852,40 @@ export interface UpdateClusterRequest {
 export interface ClusterConfigDetail {
   cluster_id: string
   config: object
+}
+
+// ============ 调度（触发器） ============
+
+export interface ScheduleInfo {
+  schedule_id: string
+  name: string
+  flow_id: string
+  version?: string | null
+  cron: string
+  params: Record<string, unknown>
+  enabled: boolean
+  /** 列表视图计算字段：running=已启用 / paused=已暂停 */
+  status?: string
+  created_at?: string
+  updated_at?: string
+  created_by?: string
+  /** 下次触发时间（epoch 毫秒，由后端/调度服务维护） */
+  next_run_at?: string | number
+  last_fired_at?: string
+  last_enqueue_ok?: boolean | string
+}
+
+export interface ScheduleListResponse {
+  schedules: ScheduleInfo[]
+  total: number
+}
+
+export interface ScheduleFireRecord {
+  fired_at: string
+  trigger_kind: string
+  flow_id: string
+  version?: string
+  enqueue: string
+  msg_id?: string
 }
 

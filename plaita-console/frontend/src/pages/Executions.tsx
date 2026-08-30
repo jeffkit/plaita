@@ -1,22 +1,42 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Play, Square, RefreshCw, ChevronRight, Plus, Trash2, Loader2 } from 'lucide-react'
+import { Play, Square, RefreshCw, ChevronRight, Plus, Trash2, Loader2, X } from 'lucide-react'
 import { api } from '../services/api'
 import StartFlowDialog from '../components/StartFlowDialog'
-import { Page, PageHeader, Card, Button, StatusBadge, EmptyState, Table, Th, Tr, Td, TdData } from '../components/ui'
+import { Page, PageHeader, Card, Button, StatusBadge, EmptyState, Table, Th, Tr, Td, TdData, ConfirmDialog } from '../components/ui'
 
 export default function Executions() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [page, setPage] = useState(1)
-  const [statusFilter, setStatusFilter] = useState<string>('')
+  // 筛选/页码进 URL：仪表盘下钻、启动后回跳都可分享、可刷新
+  const [searchParams, setSearchParams] = useSearchParams()
+  const page = Number(searchParams.get('page')) || 1
+  const statusFilter = searchParams.get('status') || ''
+  const flowFilter = searchParams.get('flow_id') || ''
   const [showStartDialog, setShowStartDialog] = useState(false)
   const [actioningId, setActioningId] = useState<string | null>(null)
+  const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+
+  const setParam = (key: string, value: string) => {
+    const next = new URLSearchParams(searchParams)
+    if (value) next.set(key, value)
+    else next.delete(key)
+    // 筛选条件变化时回到第一页
+    if (key !== 'page') next.delete('page')
+    setSearchParams(next)
+  }
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['executions', page, statusFilter],
-    queryFn: () => api.getExecutions({ page, size: 20, status: statusFilter || undefined }),
+    queryKey: ['executions', page, statusFilter, flowFilter],
+    queryFn: () =>
+      api.getExecutions({
+        page,
+        size: 20,
+        status: statusFilter || undefined,
+        flow_id: flowFilter || undefined,
+      }),
     refetchInterval: 5000,
   })
 
@@ -25,6 +45,7 @@ export default function Executions() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['executions'] })
       setActioningId(null)
+      setConfirmCancelId(null)
     },
     onError: () => {
       setActioningId(null)
@@ -36,23 +57,12 @@ export default function Executions() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['executions'] })
       setActioningId(null)
+      setConfirmDeleteId(null)
     },
     onError: () => {
       setActioningId(null)
     },
   })
-
-  const handleCancel = (executionId: string) => {
-    setActioningId(executionId)
-    cancelMutation.mutate(executionId)
-  }
-
-  const handleDelete = (executionId: string) => {
-    if (confirm('确定要删除这条执行记录吗？此操作不可恢复。')) {
-      setActioningId(executionId)
-      deleteMutation.mutate(executionId)
-    }
-  }
 
   const executions = data?.executions || []
   const total = data?.total || 0
@@ -67,7 +77,7 @@ export default function Executions() {
           <>
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => setParam('status', e.target.value)}
               className="input w-28"
             >
               <option value="">全部状态</option>
@@ -75,6 +85,7 @@ export default function Executions() {
               <option value="completed">已完成</option>
               <option value="suspended">已暂停</option>
               <option value="error">错误</option>
+              <option value="cancelled">已取消</option>
             </select>
             <Button variant="ghost" onClick={() => refetch()}>
               <RefreshCw size={14} />
@@ -88,13 +99,25 @@ export default function Executions() {
         }
       />
 
+      {/* 流程筛选 chip（从启动对话框/流程页跳转而来时可移除） */}
+      {flowFilter && (
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-line bg-plaita-500/10 text-caption text-plaita-400">
+            流程：{flowFilter}
+            <button onClick={() => setParam('flow_id', '')} title="移除筛选" aria-label="移除流程筛选">
+              <X size={12} />
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* 启动流程对话框 */}
       <StartFlowDialog
         isOpen={showStartDialog}
         onClose={() => setShowStartDialog(false)}
       />
 
-      {/* 执行列表 */}
+      {/* 执行列表：整行可点进详情 */}
       <Card className="overflow-hidden">
         <Table>
           <thead>
@@ -122,7 +145,11 @@ export default function Executions() {
               </tr>
             ) : (
               executions.map((exec) => (
-                <Tr key={exec.execution_id}>
+                <Tr
+                  key={exec.execution_id}
+                  className="cursor-pointer"
+                  onClick={() => navigate(`/executions/${exec.execution_id}`)}
+                >
                   <TdData className="text-ink-primary">{exec.execution_id.slice(0, 16)}…</TdData>
                   <TdData>{exec.flow_id}</TdData>
                   <Td><StatusBadge status={exec.status} /></Td>
@@ -132,12 +159,12 @@ export default function Executions() {
                   <TdData className="text-ink-muted tabular-nums">
                     {calculateDuration(exec.start_time, exec.end_time)}
                   </TdData>
-                  <Td>
+                  <Td onClick={(e) => e.stopPropagation()}>
                     <div className="flex items-center justify-end gap-0.5">
                       {/* 取消按钮 - 仅对运行中的执行显示 */}
                       {exec.status === 'running' && (
                         <button
-                          onClick={() => handleCancel(exec.execution_id)}
+                          onClick={() => setConfirmCancelId(exec.execution_id)}
                           disabled={actioningId === exec.execution_id}
                           className="p-1.5 rounded-md text-status-error hover:bg-status-error-dim transition-colors
                                      disabled:opacity-50 disabled:cursor-not-allowed"
@@ -150,9 +177,10 @@ export default function Executions() {
                           )}
                         </button>
                       )}
-                      {/* 恢复按钮 - 仅对暂停的执行显示 */}
+                      {/* 恢复 - 跳详情页操作（详情页有完整的恢复对话框） */}
                       {exec.status === 'suspended' && (
                         <button
+                          onClick={() => navigate(`/executions/${exec.execution_id}`)}
                           className="p-1.5 rounded-md text-plaita-400 hover:bg-plaita-500/10 transition-colors"
                           title="恢复执行"
                         >
@@ -161,7 +189,7 @@ export default function Executions() {
                       )}
                       {/* 删除按钮 - 对所有状态显示 */}
                       <button
-                        onClick={() => handleDelete(exec.execution_id)}
+                        onClick={() => setConfirmDeleteId(exec.execution_id)}
                         disabled={actioningId === exec.execution_id}
                         className="p-1.5 rounded-md text-ink-muted hover:text-status-error hover:bg-status-error-dim transition-colors
                                    disabled:opacity-50 disabled:cursor-not-allowed"
@@ -193,17 +221,63 @@ export default function Executions() {
       {/* 分页 */}
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-2">
-          <Button variant="secondary" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setParam('page', String(Math.max(1, page - 1)))}
+            disabled={page === 1}
+          >
             上一页
           </Button>
           <span className="px-3 text-caption text-ink-muted tabular-nums">
             {page} / {totalPages}
           </span>
-          <Button variant="secondary" size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setParam('page', String(Math.min(totalPages, page + 1)))}
+            disabled={page === totalPages}
+          >
             下一页
           </Button>
         </div>
       )}
+
+      {/* 取消执行确认 */}
+      <ConfirmDialog
+        open={!!confirmCancelId}
+        title="取消这条执行？"
+        variant="danger"
+        confirmLabel="确认取消"
+        busy={cancelMutation.isPending}
+        onCancel={() => setConfirmCancelId(null)}
+        onConfirm={() => {
+          if (confirmCancelId) {
+            setActioningId(confirmCancelId)
+            cancelMutation.mutate(confirmCancelId)
+          }
+        }}
+      >
+        运行中的流程将被中断，状态标记为「已取消」。
+      </ConfirmDialog>
+
+      {/* 删除记录确认 */}
+      <ConfirmDialog
+        open={!!confirmDeleteId}
+        title="删除这条执行记录？"
+        variant="danger"
+        confirmLabel="确认删除"
+        busy={deleteMutation.isPending}
+        onCancel={() => setConfirmDeleteId(null)}
+        onConfirm={() => {
+          if (confirmDeleteId) {
+            setActioningId(confirmDeleteId)
+            deleteMutation.mutate(confirmDeleteId)
+          }
+        }}
+      >
+        删除后不可恢复。
+      </ConfirmDialog>
     </Page>
   )
 }

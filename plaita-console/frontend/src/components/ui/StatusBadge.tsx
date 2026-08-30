@@ -6,6 +6,7 @@ import { cn } from './cn'
  */
 const STATUS_STYLES: Record<string, { badge: string; dot: string; breathing?: boolean }> = {
   running:   { badge: 'text-status-running bg-status-running-dim',     dot: 'bg-status-running',     breathing: true },
+  active:    { badge: 'text-status-running bg-status-running-dim',     dot: 'bg-status-running' },
   current:   { badge: 'text-status-running bg-status-running-dim',     dot: 'bg-status-running',     breathing: true },
   completed: { badge: 'text-status-success bg-status-success-dim',     dot: 'bg-status-success' },
   success:   { badge: 'text-status-success bg-status-success-dim',     dot: 'bg-status-success' },
@@ -24,6 +25,7 @@ const STATUS_STYLES: Record<string, { badge: string; dot: string; breathing?: bo
 // 已知状态的中文标签；未知状态回退展示原值
 const STATUS_LABELS: Record<string, string> = {
   running: '运行中',
+  active: '已启用',
   current: '执行中',
   completed: '已完成',
   success: '成功',
@@ -40,7 +42,8 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 export function StatusBadge({ status, className }: { status: string; className?: string }) {
-  const style = STATUS_STYLES[status] ?? STATUS_STYLES.stopped
+  // 未知状态（引擎新增）用中性 pending 底并显示原值，不误标为「已停止」这类终态
+  const style = STATUS_STYLES[status] ?? STATUS_STYLES.pending
   return (
     <span
       className={cn(
