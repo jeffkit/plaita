@@ -19,6 +19,7 @@ from redis import Redis
 from ...logger import logger
 from ...event.redis import RedisEventBus
 from .delay_service import DelayService
+from .schedule_service import ScheduleService
 from .redis_queue_service import RedisQueueService
 from .approval_service import ApprovalService
 from .http_callback_service import HttpCallbackService
@@ -27,6 +28,7 @@ from .http_callback_service import HttpCallbackService
 # 服务类映射
 SERVICE_CLASSES = {
     'delay_service': DelayService,
+    'schedule_service': ScheduleService,
     'redis_queue_service': RedisQueueService,
     'approval_service': ApprovalService,
     'http_callback_service': HttpCallbackService,
@@ -75,8 +77,8 @@ def main():
     # 根据服务类型创建服务实例（不同服务有不同的初始化参数）
     service_class = SERVICE_CLASSES[args.service_type]
     
-    if args.service_type == 'delay_service':
-        # DelayService 继承自 BaseExtendedService，支持 redis_client
+    if args.service_type in ('delay_service', 'schedule_service'):
+        # 两者均继承自 BaseExtendedService，支持 redis_client
         service = service_class(
             event_bus=event_bus,
             redis_client=redis_client,

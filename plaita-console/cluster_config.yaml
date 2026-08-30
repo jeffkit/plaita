@@ -50,6 +50,18 @@ services:
     max_instances: 1
     process:
       module: plaita.server.event_filter
+  schedule_service:
+    default_instances: 1
+    display_name: 调度服务
+    docker:
+      image: plaita/schedule-service:latest
+    env:
+      PLAITA_CHECK_INTERVAL: '1'
+      PLAITA_QUEUE_NAME: plaita:flow:queue
+      PLAITA_REDIS_URL: ${redis.url}
+    max_instances: 1
+    process:
+      command: python -m plaita.server.services schedule_service
   delay_service:
     default_instances: 1
     display_name: 延迟定时服务

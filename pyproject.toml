@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.0",
     "pyparsing>=3.0",
     "isodate",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]
