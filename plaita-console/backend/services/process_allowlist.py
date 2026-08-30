@@ -21,6 +21,7 @@ ALLOWED_SERVICE_SUBCOMMANDS: Set[str] = {
     "http_callback_service",
     "approval_service",
     "kafka_queue_service",
+    "schedule_service",
 }
 
 

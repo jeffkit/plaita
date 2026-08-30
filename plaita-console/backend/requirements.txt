@@ -7,6 +7,7 @@ python-dotenv>=1.0.0
 sse-starlette>=1.8.0
 sqlalchemy>=2.0.0
 httpx>=0.25.0
+croniter>=2.0.0
 
 pydantic-ai-slim[anthropic]>=2.36
 ag-ui-protocol>=0.1.21
