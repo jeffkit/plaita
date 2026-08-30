@@ -555,7 +555,7 @@ function InfrastructureCard({
           className={`
             flex items-center gap-1 px-3 py-1.5 rounded text-sm flex-1 justify-center
             ${infra.enabled
-              ? 'bg-dark-700 hover:bg-dark-600 text-white'
+              ? 'bg-dark-700 hover:bg-dark-600 text-ink-primary'
               : 'bg-dark-800 text-dark-500 cursor-not-allowed'
             }
           `}
@@ -923,7 +923,7 @@ function InfrastructureFormDialog({
           <button
             onClick={handleSubmit}
             disabled={isPending || (!selectedTemplate && !isCustom && !isEdit) || !formData.name}
-            className="flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 
+            className="flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent 
                        text-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isPending ? (
@@ -1074,7 +1074,7 @@ function QuickTestDialog({
               <button
                 onClick={handleRunTest}
                 disabled={!selectedTest || testMutation.isPending}
-                className="flex items-center gap-2 px-6 py-2.5 rounded bg-plaita-500 hover:bg-plaita-600 
+                className="flex items-center gap-2 px-6 py-2.5 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent 
                            disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {testMutation.isPending ? (
@@ -1308,7 +1308,7 @@ function BasicSettingsForm({
               <button
                 onClick={handleSave}
                 disabled={isSaving}
-                className="text-xs px-3 py-1 rounded bg-plaita-500 hover:bg-plaita-600 flex items-center gap-1"
+                className="text-xs px-3 py-1 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent flex items-center gap-1"
               >
                 {isSaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
                 保存
@@ -1888,7 +1888,7 @@ function ServiceConfigFormDialog({
           <button
             onClick={handleSubmit}
             disabled={!formData.service_type}
-            className="flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 
+            className="flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent 
                        text-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Save className="w-4 h-4" />
@@ -2054,7 +2054,7 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
             <button
               onClick={handleSave}
               disabled={!hasChanges || saveMutation.isPending}
-              className="flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600
+              className="flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent
                          disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saveMutation.isPending ? (
@@ -2092,7 +2092,7 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
               </h3>
               <button
                 onClick={() => setShowAddService(true)}
-                className="flex items-center gap-1 px-3 py-1 rounded bg-plaita-500 hover:bg-plaita-600 text-sm"
+                className="flex items-center gap-1 px-3 py-1 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent text-sm"
               >
                 <Plus className="w-4 h-4" />
                 添加服务
@@ -2586,7 +2586,7 @@ export default function Cluster() {
               </button>
               <button
                 onClick={() => setShowAddInfra(true)}
-                className="flex items-center gap-2 px-4 py-1.5 rounded bg-plaita-500 hover:bg-plaita-600 text-sm"
+                className="flex items-center gap-2 px-4 py-1.5 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent text-sm"
               >
                 <Plus className="w-4 h-4" />
                 添加服务
@@ -2619,7 +2619,7 @@ export default function Cluster() {
               </p>
               <button
                 onClick={() => setShowAddInfra(true)}
-                className="mt-4 flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 text-sm mx-auto"
+                className="mt-4 flex items-center gap-2 px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent text-sm mx-auto"
               >
                 <Plus className="w-4 h-4" />
                 添加服务

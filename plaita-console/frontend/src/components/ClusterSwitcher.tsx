@@ -159,7 +159,7 @@ function CreateClusterDialog({
             <button
               type="submit"
               disabled={createMutation.isPending || !formData.id || !formData.name}
-              className="px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 
+              className="px-4 py-2 rounded bg-plaita-500 hover:bg-plaita-600 text-on-accent 
                          disabled:opacity-50 disabled:cursor-not-allowed
                          flex items-center gap-2"
             >
