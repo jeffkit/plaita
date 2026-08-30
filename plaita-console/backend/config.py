@@ -47,6 +47,12 @@ class Settings(BaseModel):
         description="显式允许无管理密钥启动（仅本地开发）",
     )
 
+    # Copilot 大脑：flow_agent（默认，轻量内置 agent）| recursive | claude
+    copilot_brain: str = Field(
+        default="flow_agent",
+        description="Copilot 大脑：flow_agent | recursive | claude",
+    )
+
     # Copilot 大脑：recursive http 服务的 AG-UI 端点（POST /agui）。
     # URL 为空时 /api/copilot 返回 503。
     recursive_agui_url: str = Field(
@@ -77,6 +83,7 @@ def get_settings() -> Settings:
             "PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN", "false"
         ).lower()
         == "true",
+        copilot_brain=os.getenv("PLAITA_CONSOLE_COPILOT_BRAIN", "flow_agent"),
         recursive_agui_url=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_URL", ""),
         recursive_agui_api_key=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_API_KEY", ""),
     )
