@@ -18,14 +18,19 @@ class DelayService(BaseExtendedService):
     负责处理延迟任务，在指定时间后触发事件
     """
 
-    def __init__(self, event_bus, redis_client=None, service_config=None):
+    def __init__(self, event_bus, service_config=None, redis_client=None):
+        # 签名对齐基类：(event_bus, service_config, redis_client)——
+        # 位置传参 DelayService(bus, {...}) 时第二位是 service_config
         super().__init__(
             event_bus=event_bus,
             redis_client=redis_client,
             service_config=service_config,
         )
         import os
-        self.queue_key = os.environ.get("PLAITA_DELAY_QUEUE", "plaita:delay:queue")
+        self.queue_key = os.environ.get(
+            "PLAITA_DELAY_QUEUE",
+            (service_config or {}).get("delay_queue", "plaita:delay:queue"),
+        )
         self._consumer_thread = None
 
     def get_service_type(self) -> str:
@@ -48,6 +53,9 @@ class DelayService(BaseExtendedService):
             self.is_running = True
             # 消费 plaita:delay:queue：worker 挂起时把延迟任务 RPUSH 进来。
             # 历史上没人投递也没人消费，delay 节点的执行会永久挂起。
+            if self._redis_client is None or not hasattr(self._redis_client, "blpop"):
+                logger.warning("延迟服务无 redis 客户端，队列消费不启动")
+                return True
             self._consumer_thread = threading.Thread(
                 target=self._consume_queue, name="delay-service-consumer", daemon=True
             )
