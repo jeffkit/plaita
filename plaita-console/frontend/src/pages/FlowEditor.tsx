@@ -557,11 +557,9 @@ export default function FlowEditor() {
           )}
           <NodeConfigDrawer />
           <CopilotPanel
-            open={showCopilot}
             flowContext={copilotContext}
             flowId={flowId || ''}
             onApplyFlow={applyAiFlow}
-            onClose={() => setShowCopilot(false)}
           />
           {showDryRun && (
             <DryRunPanel

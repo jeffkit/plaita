@@ -1,10 +1,10 @@
-import { Component, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { CopilotKit, useCopilotAction, useCopilotChat, useCopilotReadable } from '@copilotkit/react-core'
 import { useInterrupt } from '@copilotkit/react-core/v2/headless'
 import { CopilotChat } from '@copilotkit/react-ui'
 import { HttpAgent } from '@ag-ui/client'
 import '@copilotkit/react-ui/styles.css'
-import { X } from 'lucide-react'
+import { Bot, X } from 'lucide-react'
 import { useFlowEditor } from '../../stores/flowEditor'
 import { api } from '../../services/api'
 import { flowToJson } from './flowConverter'
@@ -333,18 +333,16 @@ function CopilotInner({
 }
 
 export default function CopilotPanel({
-  open,
   flowContext,
   flowId,
   onApplyFlow,
-  onClose,
 }: {
-  open: boolean
   flowContext: string
   flowId: string
   onApplyFlow: (ir: Record<string, unknown>) => void
-  onClose: () => void
 }) {
+  // 气泡（收起）/ 面板（展开）状态自管理；CopilotKit 子树常驻，会话不因收起丢失
+  const [open, setOpen] = useState(false)
   const agent = useMemo(
     // @copilotkit 内嵌的 @ag-ui/core 实例与直接依赖在类型上有私有字段差异，运行时同源
     () =>
@@ -356,10 +354,22 @@ export default function CopilotPanel({
   )
 
   return (
+    <>
+    {!open && (
+      <button
+        data-testid="copilot-bubble"
+        onClick={() => setOpen(true)}
+        title="编排助手"
+        className="fixed right-6 bottom-6 z-40 w-14 h-14 rounded-full bg-plaita-500 hover:bg-plaita-600 text-on-accent shadow-pop flex items-center justify-center transition-colors"
+      >
+        <Bot size={22} />
+      </button>
+    )}
     <div
       data-testid="copilot-panel"
-      style={{ display: open ? undefined : 'none' }}
-      className="absolute right-0 top-0 bottom-0 z-30 w-[380px] bg-surface border-l border-line shadow-pop flex flex-col"
+      className={`fixed right-0 top-0 bottom-0 z-50 w-[380px] bg-surface border-l border-line shadow-pop flex flex-col transition-transform duration-200 ${
+        open ? 'translate-x-0' : 'translate-x-full'
+      }`}
     >
       <CopilotErrorBoundary>
       <CopilotKit selfManagedAgents={{ default: agent }}>
@@ -367,7 +377,7 @@ export default function CopilotPanel({
         <div className="flex items-center justify-between pl-4 pr-2 py-2 border-b border-line shrink-0">
           <h3 className="text-section text-ink-primary">编排助手</h3>
           <button
-            onClick={onClose}
+            onClick={() => setOpen(false)}
             title="收起"
             className="p-1.5 rounded-md text-ink-muted hover:text-ink-primary hover:bg-elevated transition-colors"
           >
@@ -387,5 +397,6 @@ export default function CopilotPanel({
       </CopilotKit>
       </CopilotErrorBoundary>
     </div>
+    </>
   )
 }
