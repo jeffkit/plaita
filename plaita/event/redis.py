@@ -21,6 +21,8 @@ if current_dir in sys.path:
 # 需要安装的第三方库
 try:
     import redis.asyncio as aioredis
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+    from redis.exceptions import ConnectionError as RedisConnectionError
 except ImportError:
     raise ImportError("请安装redis.asyncio依赖: pip install redis")
 finally:
@@ -914,7 +916,11 @@ class RedisEventBus(EventBus):
             await pubsub.subscribe(f"plaita:events:{event_type}")
             
             while handler_id in self.handlers:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                try:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except (RedisTimeoutError, RedisConnectionError, OSError):
+                    # redis-py 5+ 空轮询超时抛异常而非返回 None，属正常节奏
+                    continue
                 if message and message['type'] == 'message':
                     await self._process_message(message, handler_id)
         finally:
@@ -930,7 +936,10 @@ class RedisEventBus(EventBus):
             await pubsub.psubscribe("plaita:events:*")
             
             while handler_id in self.handlers:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                try:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except (RedisTimeoutError, RedisConnectionError, OSError):
+                    continue
                 if message and message['type'] == 'pmessage':
                     await self._process_message(message, handler_id)
         finally:
@@ -947,7 +956,11 @@ class RedisEventBus(EventBus):
             await pubsub.psubscribe(redis_pattern)
             
             while handler_id in self.handlers:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                try:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except (RedisTimeoutError, RedisConnectionError, OSError):
+                    # redis-py 5+ 空轮询超时抛异常而非返回 None，属正常节奏
+                    continue
                 if message and message['type'] == 'pmessage':
                     await self._process_message(message, handler_id)
         finally:

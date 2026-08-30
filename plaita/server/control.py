@@ -139,17 +139,25 @@ class ControlListener:
     
     def _listen_loop(self):
         """监听循环"""
+        from redis.exceptions import ConnectionError as RedisConnectionError
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+
         try:
             self._pubsub = self.redis_client.pubsub()
             self._pubsub.subscribe(self.control_channel)
-            
+
             logger.info("开始监听控制通道: %s", self.control_channel)
-            
+
             while not self._stop_event.is_set():
-                message = self._pubsub.get_message(timeout=1.0)
+                try:
+                    message = self._pubsub.get_message(timeout=1.0)
+                except (RedisTimeoutError, RedisConnectionError, OSError):
+                    # redis-py 5+ 空轮询超时会抛 TimeoutError（旧版返回 None），
+                    # 属正常节奏，不能当致命错误——否则服务启动数秒后即退出
+                    continue
                 if message and message["type"] == "message":
                     self._handle_message(message["data"])
-                    
+
         except Exception as e:
             logger.error("控制监听器出错: %s", e, exc_info=True)
     

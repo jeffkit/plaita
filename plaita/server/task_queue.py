@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
 
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 logger = logging.getLogger("plaita.server.task_queue")
 
 DEFAULT_CONSUMER_GROUP = "plaita-workers"
@@ -118,13 +120,19 @@ class RedisStreamTaskQueue:
             self._metrics["reclaimed"] += 1
             return reclaimed
 
-        resp = self.redis.xreadgroup(
-            groupname=self.group_name,
-            consumername=self.consumer_name,
-            streams={self.stream_key: ">"},
-            count=1,
-            block=block_ms,
-        )
+        try:
+            resp = self.redis.xreadgroup(
+                groupname=self.group_name,
+                consumername=self.consumer_name,
+                streams={self.stream_key: ">"},
+                count=1,
+                block=block_ms,
+            )
+        except RedisTimeoutError:
+            # redis-py 5+ 在 BLOCK 到期时抛 TimeoutError（旧版返回空列表）。
+            # 空轮询是常态，必须返回 None 让上层继续循环——
+            # 否则异常炸穿 run() 主循环，worker 启动数秒后即退出。
+            return None
         task = self._parse_read_response(resp, delivery_count=1)
         if task is not None and task.delivery_count >= self.max_deliveries:
             self.dead_letter(task, reason=f"max_deliveries={self.max_deliveries}")
