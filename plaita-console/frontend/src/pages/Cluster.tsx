@@ -1143,13 +1143,15 @@ function MemoryModeNotice({ clusterId }: { clusterId: string }) {
           <AlertCircle className="w-5 h-5 text-status-warning" />
         </div>
         <div>
-          <h3 className="font-medium text-status-warning mb-1">纯内存模式</h3>
+          <h3 className="font-medium text-status-warning mb-1">配置中存在 memory 后端声明</h3>
           <p className="text-sm text-status-warning/80">
-            当前集群配置为纯内存模式，不需要配置外部基础设施服务（如 Redis）。
-            所有状态存储、事件总线和任务队列都使用内存实现，服务重启后数据会丢失。
+            集群配置里 storage / eventbus / queue 声明为 memory。注意：这些键只影响
+            内嵌运行路径（如 plaita_flows.run 本地脚本）；console 拉起的执行器与
+            服务始终使用下方「基础设施」里的 Redis 作为队列与状态存储。
           </p>
           <p className="text-xs text-status-warning/60 mt-2">
-            如需持久化存储，请在"集群配置"中将存储后端切换为 Redis 或数据库。
+            如需持久化，请在"集群配置"中将存储后端切换为 Redis 或数据库，并确保
+            Redis 自身开启持久化（AOF）。
           </p>
         </div>
       </div>
@@ -2418,6 +2420,10 @@ export default function Cluster() {
       {/* 服务管理标签页内容 */}
       {currentTab === 'services' && (
         <>
+          <p className="text-caption text-ink-muted -mt-1 mb-3">
+            服务是 console 拉起并管理生命周期的运行进程（执行流程、延迟唤醒、事件恢复等）。
+            它们连接「基础设施」中的 Redis / Kafka 干活；下方「托管实例」即这些进程的运行实例。
+          </p>
           {/* 可用服务类型 */}
           <section>
             <h2 className="text-section text-ink-primary mb-4 flex items-center gap-2">
@@ -2492,6 +2498,11 @@ export default function Cluster() {
             <MemoryModeNotice clusterId={activeCluster.id} />
           )}
           
+          <p className="text-caption text-ink-muted mb-3">
+            基础设施是服务依赖的有状态后端资源（Redis / Kafka / 数据库）——相当于水电气，
+            服务是用电的工人。console 只负责健康检查与连接配置；安装与启动由外部管理
+            （如本机 brew services / docker compose）。
+          </p>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-section text-ink-primary flex items-center gap-2">
               <Database className="w-5 h-5 text-plaita-400" />
