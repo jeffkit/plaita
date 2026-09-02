@@ -1,14 +1,17 @@
-from typing import Any, ClassVar, Dict, Optional
+from typing import Annotated, Any, ClassVar, Dict, Optional
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from ..io import match
-from ..node.basic import Node
+from .basic import Expression, Node
 from plaita.core.strategies import ExecutionMode
 
 
 class FlowNode(Node):
-    input: Optional[Any] = None
+    input: Annotated[
+        Expression,
+        Field(description="注入子流程的输入，通常为表达式（$INPUT.xxx / $NODE.xxx），也可为字面量"),
+    ] = None
     child_flow: Optional[Any] = None
 
     @model_validator(mode="before")
@@ -60,11 +63,19 @@ class ReferenceFlow(FlowNode):
     node_type: ClassVar[str] = "reference"
     node_name: ClassVar[str] = "引用逻辑"
 
+    # 调度器据此解析并注入 child_flow；若不声明为字段，pydantic 会按
+    # extra=ignore 把 validator 写入的值静默丢弃，定义里就存不下引用信息。
+    flow_id: Optional[str] = Field(None, description="引用的流程定义 ID（调度器据此注入子流程）")
+    flow_version: Optional[str] = Field(None, description="引用的流程版本；未设置时由调度器取最新/默认版本")
+
     @model_validator(mode="before")
     @classmethod
     def setup_child_flow(cls, values: Dict) -> Dict:
-        values["flow_id"] = values.get("flowID")
-        values["flow_version"] = values.get("flowVersion")
+        # 只在 camelCase 别名存在时迁移，避免把已按规范键存好的值覆盖回 None
+        if values.get("flowID") is not None:
+            values["flow_id"] = values["flowID"]
+        if values.get("flowVersion") is not None:
+            values["flow_version"] = values["flowVersion"]
         return values
 
     def execute(self, execution):

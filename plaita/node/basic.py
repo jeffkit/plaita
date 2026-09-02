@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Dict, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -10,6 +10,13 @@ if TYPE_CHECKING:
     # 节点应依赖窄接口 NodeExecutionContext，而非完整 FlowExecution facade。
     # FlowExecution 已实现该 Protocol；运行时仍传入 facade 实例。
     from plaita.core.node_context import NodeExecutionContext
+
+
+# 表达式语义字段：运行时接受任意值（$INPUT.x / $NODE.x 表达式或字面量，经
+# execution.evaluate 求值），仅在 JSON Schema 层标注为 string，供编排控制台
+# 渲染为带变量插入的表达式输入框。直接收紧类型注解会拒收存量 flow 里的
+# 字面量 dict/list，故运行时保持 Any。
+Expression = Annotated[Any, Field(json_schema_extra={"type": "string"})]
 
 
 class NodeConfigException(RuntimeError):

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from copy import deepcopy
-from typing import Any, ClassVar, Dict, Optional, Union
+from typing import Annotated, Any, ClassVar, Dict, Optional, Union
 
 from pydantic import Field, model_validator
 
@@ -12,6 +12,7 @@ from plaita.core.parallel_executor import (
 )
 
 from ..io import Property
+from .basic import Expression
 from .child import InlineFlow
 from .decide import Condition, ConditionGroup
 
@@ -28,7 +29,10 @@ class BaseCollectionNode(InlineFlow):
     """
 
     item_type: Optional[Property] = None
-    collection: Any = None
+    collection: Annotated[
+        Expression,
+        Field(description="待处理的集合，通常为表达式（$INPUT.xxx / $NODE.xxx），也可为字面量数组"),
+    ] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -240,7 +244,10 @@ class Reduce(BaseCollectionNode):
 
     node_type: ClassVar[str] = "reduce"
     node_name: ClassVar[str] = "归纳"
-    initial: Optional[Any] = None
+    initial: Annotated[
+        Expression,
+        Field(description="归纳的初始累积值，通常为表达式或字面量（如 0 / \"\"）；未设置时以首元素为初始值"),
+    ] = None
 
     def execute(self, execution):
         collection = execution.evaluate(self.collection)
