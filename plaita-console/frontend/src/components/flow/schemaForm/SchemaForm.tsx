@@ -137,6 +137,12 @@ function FieldControl({
   let control: React.ReactNode = null
   switch (spec.kind) {
     case 'string':
+      // 存量 flow 可能在 string 型字段上存了结构化值（字面量数组/对象）：
+      // 退化为 JSON 编辑，避免 String(value) 渲染成 [object Object]
+      if (value != null && typeof value !== 'string') {
+        control = <JsonField value={value} onChange={onChange} />
+        break
+      }
       if (!nested && isCodeField(spec.key)) {
         control = (
           <CodeEditor
