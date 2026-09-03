@@ -127,6 +127,7 @@ nav:
       - guide/index.md
       - 安装: guide/installation.md
       - 快速开始: guide/quickstart.md
+      - 编排台: guide/console.md
       - 流程编写方式:
           - guide/flow-authoring.md
           - JSON 流程定义: guide/flow-definition.md
