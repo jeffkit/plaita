@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plaita-console"
+version = "0.5.0"
+description = "Plaita Console — 流程编排可视化控制台（FastAPI 后端 + 打包 Web 前端，pip 安装即用）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "plaita>=0.5.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "redis>=5.0.0",
+    "python-dotenv>=1.0.0",
+    "sse-starlette>=1.8.0",
+    "sqlalchemy>=2.0.0",
+    "httpx>=0.25.0",
+    "croniter>=2.0.0",
+    "pydantic-ai-slim[anthropic]>=2.36",
+    "ag-ui-protocol>=0.1.21",
+]
+
+[project.optional-dependencies]
+# 业务节点插件：安装即经 plaita.nodes entry-points 自动注册（无需 NODE_MODULES）
+nodes = ["plaita-nodes>=0.1.0"]
+
+[project.scripts]
+plaita-console = "plaita_console.__main__:main"
+
+# backend/ 以包名 plaita_console 发布；webDist（前端构建产物）由
+# scripts/build_package.sh 在打包前填充进 backend/，随 wheel 一起分发
+[tool.hatch.build.targets.wheel]
+force-include = { "backend" = "plaita_console" }
+
+[tool.hatch.build]
+exclude = ["**/__pycache__", "**/*.pyc"]

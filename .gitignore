@@ -39,3 +39,7 @@ sexpr-recheck.txt
 setup.cfg.mutmut_test
 
 .impeccable/
+
+# console 打包时由 build_package.sh 填充的前端产物
+plaita-console/backend/webDist/
+.build-venv/

@@ -193,16 +193,40 @@ def create_app() -> FastAPI:
     # --- 契约面（独立 HMAC，不加 admin 依赖）---
     _mount_contract(flow_version.router, "flow_version")
     
-    @app.get("/", tags=["health"])
-    async def root():
-        """健康检查"""
-        return {"status": "ok", "service": "plaita-console"}
-    
     @app.get("/health", tags=["health"])
     async def health():
         """健康检查端点"""
         return {"status": "healthy"}
-    
+
+    # --- 打包发布模式：后端直接托管前端构建产物（pip 安装后无需 Node 环境）---
+    # webDist 由 scripts/build_package.sh 从 frontend/dist 填充；仓库开发模式
+    # 下该目录不存在，走 vite dev server，此处静默跳过。挂载在 API 路由之后，
+    # /api 与上方健康检查不受影响；"/" 让给前端首页，健康检查走 /health。
+    web_dist = Path(__file__).parent / "webDist"
+    if web_dist.is_dir():
+        from fastapi.staticfiles import StaticFiles
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        class SPAStaticFiles(StaticFiles):
+            """BrowserRouter 深链接回退：未命中的静态路径一律回 index.html。"""
+
+            async def get_response(self, path: str, scope):
+                try:
+                    return await super().get_response(path, scope)
+                except StarletteHTTPException as exc:
+                    if exc.status_code == 404:
+                        return await super().get_response("index.html", scope)
+                    raise
+
+        app.mount("/", SPAStaticFiles(directory=web_dist, html=True), name="web")
+        logger.info("已托管前端静态资源: %s", web_dist)
+    else:
+
+        @app.get("/", tags=["health"])
+        async def root():
+            """健康检查"""
+            return {"status": "ok", "service": "plaita-console"}
+
     return app
 
 
