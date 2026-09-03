@@ -1,5 +1,3 @@
-eventbus:
-  type: memory
 infrastructure:
   kafka:
     bootstrap_servers: localhost:9092
@@ -20,7 +18,7 @@ infrastructure:
       image: postgres:15-alpine
       ports:
       - 5432:5432
-    enabled: false
+    enabled: true
     type: database
     url: postgresql://localhost:5432/plaita
   redis:
@@ -34,34 +32,9 @@ infrastructure:
     type: redis
     url: redis://localhost:6379/0
 mode: process
-queue:
-  type: memory
 redis:
   url: redis://localhost:6379/0
 services:
-  event_filter:
-    default_instances: 1
-    display_name: 事件恢复器
-    docker:
-      image: plaita/event-filter:latest
-    env:
-      PLAITA_REDIS_URL: ${redis.url}
-      PLAITA_QUEUE_NAME: plaita:flow:queue
-    max_instances: 1
-    process:
-      module: plaita.server.event_filter
-  schedule_service:
-    default_instances: 1
-    display_name: 调度服务
-    docker:
-      image: plaita/schedule-service:latest
-    env:
-      PLAITA_CHECK_INTERVAL: '1'
-      PLAITA_QUEUE_NAME: plaita:flow:queue
-      PLAITA_REDIS_URL: ${redis.url}
-    max_instances: 1
-    process:
-      command: python -m plaita.server.services schedule_service
   delay_service:
     default_instances: 1
     display_name: 延迟定时服务
@@ -73,6 +46,17 @@ services:
     max_instances: 3
     process:
       command: python -m plaita.server.services delay_service
+  event_filter:
+    default_instances: 1
+    display_name: 事件恢复器
+    docker:
+      image: plaita/event-filter:latest
+    env:
+      PLAITA_QUEUE_NAME: plaita:flow:queue
+      PLAITA_REDIS_URL: ${redis.url}
+    max_instances: 1
+    process:
+      module: plaita.server.event_filter
   flow_worker:
     default_instances: 1
     display_name: 流程执行器
@@ -80,11 +64,11 @@ services:
       image: plaita/flow-worker:latest
       ports: []
     env:
+      PLAITA_NODE_MODULES: plaita_nodes,plaita_flows.nodes
+      PLAITA_NODE_PATH: /Users/kong/projects/infra4agent/mediaflow:/Users/kong/projects/infra4agent/plaita-nodes/src:/Users/kong/projects/infra4agent/agentproc/sdk/python/src
+      PLAITA_PYTHON: /Users/kong/projects/infra4agent/mediaflow/.runtime/venv/bin/python
       PLAITA_QUEUE_NAME: plaita:flow:queue
       PLAITA_REDIS_URL: ${redis.url}
-      PLAITA_PYTHON: /Users/kong/projects/infra4agent/mediaflow/.runtime/venv/bin/python
-      PLAITA_NODE_PATH: /Users/kong/projects/infra4agent/mediaflow:/Users/kong/projects/infra4agent/plaita-nodes/src
-      PLAITA_NODE_MODULES: plaita_nodes,plaita_flows.nodes
     max_instances: 10
     process:
       command: python -m plaita.server.flow_worker
@@ -109,5 +93,15 @@ services:
     max_instances: 5
     process:
       command: python -m plaita.server.services redis_queue_service
-storage:
-  type: memory
+  schedule_service:
+    default_instances: 1
+    display_name: 调度服务
+    docker:
+      image: plaita/schedule-service:latest
+    env:
+      PLAITA_CHECK_INTERVAL: '1'
+      PLAITA_QUEUE_NAME: plaita:flow:queue
+      PLAITA_REDIS_URL: ${redis.url}
+    max_instances: 1
+    process:
+      command: python -m plaita.server.services schedule_service
