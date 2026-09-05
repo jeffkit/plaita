@@ -29,6 +29,36 @@ python -m plaita_console              # 或使用 plaita-console 命令
 | `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN=true` | 本地开发免密；局域网/生产请改设 `PLAITA_CONSOLE_ADMIN_API_KEY` |
 | `PLAITA_CONSOLE_SECRET_ID` / `SECRET_KEY` | 对外契约接口的 HMAC 密钥 |
 
+## 本地单机模式（零依赖上手）
+
+**不装 Redis 也能用**：console 启动时若 Redis 不可达，自动进入本地单机模式——
+流程在 console 进程内执行、执行历史与节点级 trace 存 SQLite，首次启动还会
+写入 3 个示例流程（快速开始 / 循环与映射 / HTTP 调用）。
+
+本地模式的边界：集群管理、任务队列、事件挂起/恢复（审批等）不可用，对应
+页面会明确提示；恢复方式就是启动 Redis 并重启 console。
+
+## 调试：数据固定与单节点重放
+
+试跑面板支持 n8n 式调试：
+
+- **节点级 IO 检视**：点击时间线节点展开完整输入/输出 JSON（不再截断）
+- **数据固定（pin）**：把某次试跑的节点输出固定下来，后续试跑跳过该节点
+  真实执行（HTTP 调用等重副作用节点尤其实用），面板以 mock 高亮
+- **仅运行此节点**：上游取固定值、下游 mock 化无副作用，只真实执行目标节点
+
+固定值只在试跑内存里，不会写进流程定义。
+
+## 凭据
+
+外部服务机密（webhook 地址、数据库密码等）集中在「凭据」页管理：Fernet
+加密落库，流程节点按名引用（`credential: "feishu-bot"`），流程定义里不落
+明文。保存后自动导出加密文件供引擎节点运行时解密；console 拉起的
+flow_worker 自动带上密钥环境。
+
+密钥来源：`PLAITA_CREDENTIALS_KEY` 环境变量，或自动生成于 DB 同目录的
+`.plaita-credentials.key`。多机部署请统一注入同一密钥。
+
 ## 主要能力
 
 - **流程编排**：拖拽画布 + 节点面板；节点配置面板由节点 schema 自动生成表单
