@@ -1,11 +1,12 @@
 """P0-3 回归: ``RedisNonceStore`` 跨 worker 重放保护 + ``NonceStore`` 抽象。
 
 用进程内 ``_FakeRedis`` 模拟 ``redis.Redis`` 的 ``SET key NX EX ttl`` 原子语义
-与 ``scan_iter``/``delete``, 不引入 fakeredis 依赖。验证:
+与 ``scan_iter``/``delete``/``ping``, 不引入 fakeredis 依赖。验证:
 - RedisNonceStore 首次 nonce 放行, 重放拒绝;
 - 不同 nonce 各自一次性;
-- ``enable_replay_protection`` 在无 redis_url 时 warning、有 redis_url 时配 Redis store;
-- ``verify_authorization`` 可注入自定义 store。
+- ``enable_replay_protection`` 在无 redis_url 时 warning、有 redis_url 且可达时
+  配 Redis store、不可达时降级 InMemory 并 warning;
+- ``verify_authorization`` 可注入自定义 store; store 故障时降级进程内判定。
 """
 from __future__ import annotations
 
@@ -29,15 +30,19 @@ SECRET_KEY = "test-secret-key"
 
 
 class _FakeRedis:
-    """极简 in-process fake, 只实现 RedisNonceStore 用到的 3 个操作。
+    """极简 in-process fake, 只实现 RedisNonceStore 用到的操作。
 
     ``set(... nx=True, ex=ttl)``: 仅当 key 不存在时设置并标记过期时间, 返回 True;
-    已存在返回 None。``scan_iter`` / ``delete`` 用于 reset。
+    已存在返回 None。``scan_iter`` / ``delete`` 用于 reset; ``ping`` 供启动期
+    可达性探测。
     """
 
     def __init__(self) -> None:
         self._data: Dict[str, str] = {}
         self._expire: Dict[str, float] = {}
+
+    def ping(self):
+        return True
 
     def set(self, key, value, nx=False, ex=None):
         import time as _time
@@ -155,3 +160,51 @@ class TestEnableReplayProtection:
         auth = _make_auth(nonce="uuid-cfg")
         assert signature.verify_authorization(auth, SECRET_ID, SECRET_KEY) is True
         assert signature.verify_authorization(auth, SECRET_ID, SECRET_KEY) is False
+        # 还原默认 store, 避免污染后续用例
+        signature.configure_nonce_store(signature.InMemoryNonceStore())
+
+    def test_unreachable_redis_falls_back_to_memory(self, monkeypatch, caplog):
+        """启动期 ping 失败: 降级 InMemoryNonceStore 并 warning, 不虚报 multi-worker safe。"""
+
+        class _Dead:
+            @staticmethod
+            def from_url(url):
+                raise ConnectionError("connection refused")
+
+        monkeypatch.setitem(sys.modules, "redis",
+                            type("R", (), {"Redis": _Dead}))
+        with caplog.at_level(logging.WARNING, logger="services.signature"):
+            signature.enable_replay_protection(redis_url="redis://localhost:1")
+        assert any("降级" in r.message and "IN-MEMORY" in r.message
+                   for r in caplog.records)
+        assert not any("multi-worker safe" in r.message for r in caplog.records)
+        # 降级后的默认 store 仍能拦截本进程内重放
+        signature.reset_nonce_cache()
+        auth = _make_auth(nonce="uuid-degraded")
+        assert signature.verify_authorization(auth, SECRET_ID, SECRET_KEY) is True
+        assert signature.verify_authorization(auth, SECRET_ID, SECRET_KEY) is False
+        signature.configure_nonce_store(signature.InMemoryNonceStore())
+
+
+class TestVerifyAuthorizationDegradation:
+    def test_store_error_degrades_to_in_memory(self, caplog):
+        """nonce store 连接类故障: 验签不 500, 降级进程内判定并 warning。"""
+
+        class _BrokenStore:
+            def check_and_record(self, nonce, expire_at):
+                raise ConnectionError("redis down")
+
+            def reset(self):
+                pass
+
+        signature._fallback_nonce_store.reset()
+        auth = _make_auth(nonce="uuid-outage")
+        with caplog.at_level(logging.WARNING, logger="services.signature"):
+            assert signature.verify_authorization(
+                auth, SECRET_ID, SECRET_KEY, nonce_store=_BrokenStore()
+            ) is True
+            # 降级 store 记了 nonce: 同一 nonce 的重放在降级窗口内仍被拦截
+            assert signature.verify_authorization(
+                auth, SECRET_ID, SECRET_KEY, nonce_store=_BrokenStore()
+            ) is False
+        assert any("降级为进程内重放判定" in r.message for r in caplog.records)

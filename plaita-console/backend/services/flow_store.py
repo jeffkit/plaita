@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -456,6 +456,29 @@ def update_local_execution(execution_id: str, **fields: str) -> None:
         for key, value in fields.items():
             setattr(row, key, value)
         session.commit()
+
+
+def update_local_execution_status_if(
+    execution_id: str, expected_status: str, new_status: str
+) -> bool:
+    """条件状态推进：``UPDATE ... WHERE status=<expected>``，返回是否命中。
+
+    原子条件更新，用于消除"读状态→判断→写新状态"的 TOCTOU 窗口（如
+    resume：两个并发请求都读到 suspended、都拉起执行线程）。命中行数为
+    0 时（记录不存在或状态已非 expected）返回 False。
+    """
+    store = get_flow_store()
+    with store._session_local() as session:
+        result = session.execute(
+            update(LocalExecution)
+            .where(
+                LocalExecution.execution_id == execution_id,
+                LocalExecution.status == expected_status,
+            )
+            .values(status=new_status)
+        )
+        session.commit()
+        return bool(result.rowcount)
 
 
 def finish_local_execution(

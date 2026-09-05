@@ -586,15 +586,8 @@ export const api = {
     })
   },
 
-  async aiGenerateFlow(prompt: string): Promise<{
-    source: string; ir: Record<string, unknown>; rounds: number;
-  }> {
-    return request('/flows/ai-generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt }),
-    })
-  },
+  // 注：AI 生成流程走 /flows/ai-generate/stream（SSE），由 AiGenerateDialog
+  // 直接 fetch 流式端点，此处不再提供非流式封装（后端无该端点）。
 
   async getNodes(): Promise<NodeListResponse> {
     return request('/nodes')

@@ -151,9 +151,9 @@ async def list_executions(
             ExecutionInfo(**info) for info in local.list_local_executions(status=status, flow_id=flow_id)
         ]
     else:
-        # 获取所有执行状态
+        # 获取所有执行状态（SCAN 增量遍历，不阻塞 Redis；KEYS 是 O(N) 阻塞命令）
         pattern = "plaita:execution:*"
-        keys = redis.keys(pattern)
+        keys = list(redis.scan_iter(match=pattern))
         
         executions = []
         for key in keys:

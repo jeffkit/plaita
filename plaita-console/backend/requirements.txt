@@ -8,6 +8,10 @@ sse-starlette>=1.8.0
 sqlalchemy>=2.0.0
 httpx>=0.25.0
 croniter>=2.0.0
+# credentials_svc 用 Fernet 加密凭据（api/credentials.py 链式依赖）
+cryptography>=42.0
+# starlette Request.form()（含 x-www-form-urlencoded）硬依赖此库，缺失即 500
+python-multipart>=0.0.12
 
 pydantic-ai-slim[anthropic]>=2.36
 ag-ui-protocol>=0.1.21

@@ -41,11 +41,30 @@ _lock = threading.Lock()
 
 
 class _LocalTraceCallback(FlowCallback):
-    """把节点开始/结束写回本地执行记录（每节点一次 SQLite 更新，示例规模可接受）。"""
+    """把节点开始/结束写回本地执行记录（每节点一次 SQLite 更新，示例规模可接受）。
+
+    同时负责把 console 侧的执行 ID 同步进流程状态的 ``$EXECUTION_ID``：
+    plaita 运行时在 fresh start 时会 ``clean()`` 重新生成 ``$EXECUTION_ID``，
+    而 ``on_flow_start`` 在 clean/setup 之后、首个节点执行之前触发，是唯一
+    能在不侵入运行时的前提下覆写它的时机（resume 路径从 checkpoint 恢复，
+    天然保留首次注入的 ID，无需再设）。
+    """
 
     def __init__(self, execution_id: str, initial_nodes: Optional[List[Dict[str, Any]]] = None):
         self._execution_id = execution_id
         self._nodes: List[Dict[str, Any]] = initial_nodes or []
+        self._execution: Optional[FlowExecution] = None
+
+    def bind_execution(self, execution: FlowExecution) -> None:
+        self._execution = execution
+
+    def on_flow_start(self, flow, **kwargs) -> None:
+        # fresh start 时在此把 $EXECUTION_ID 覆写为 console 的 execution_id，
+        # 使流程内 ${$EXECUTION_ID} 与执行页显示/查询的 ID 一致。
+        if self._execution is not None:
+            self._execution.set_state(
+                f"{self._execution.express_prefix}EXECUTION_ID", self._execution_id
+            )
 
     def _flush(self) -> None:
         fs.update_local_execution(
@@ -156,20 +175,37 @@ def resume_local_execution(
     if context is None:
         raise ValueError("挂起 checkpoint 缺失，无法恢复")
 
-    fs.update_local_execution(execution_id, status="running")
-    _spawn(execution_id, _run_flow,
-           store, execution_id, row["flow_id"], row["flow_version"], definition,
-           {}, {"context": context, "resume_type": resume_type, "data": data},
-           initial_nodes=row.get("nodes") or [])
+    # TOCTOU 防护：不用上面的快照做最终判定，而是原子条件更新
+    # （UPDATE ... WHERE status='suspended'），并发 resume 只有一个能抢到，
+    # 抢不到的按当前真实状态报错。
+    if not fs.update_local_execution_status_if(execution_id, "suspended", "running"):
+        current = fs.get_local_execution(execution_id)
+        raise ValueError(
+            f"仅挂起状态可恢复: 当前 {current['status'] if current else '已删除'}"
+        )
+
+    try:
+        _spawn(execution_id, _run_flow,
+               store, execution_id, row["flow_id"], row["flow_version"], definition,
+               {}, {"context": context, "resume_type": resume_type, "data": data},
+               initial_nodes=row.get("nodes") or [])
+    except RuntimeError:
+        # 同执行 ID 的线程仍存活：回滚状态并拒绝，避免双线程写同一执行记录。
+        fs.update_local_execution(execution_id, status="suspended")
+        raise ValueError(f"执行 {execution_id} 尚有线程在运行，不能重复恢复")
     return True
 
 
 def _spawn(execution_id: str, target, *args, **kwargs) -> None:
-    thread = threading.Thread(
-        target=target, args=args, kwargs=kwargs,
-        name=f"local-exec-{execution_id}", daemon=True,
-    )
+    """启动执行线程。同一 execution_id 已有存活线程时拒绝（防重复启动/恢复）。"""
     with _lock:
+        existing = _threads.get(execution_id)
+        if existing is not None and existing.is_alive():
+            raise RuntimeError(f"执行 {execution_id} 已有运行中的线程")
+        thread = threading.Thread(
+            target=target, args=args, kwargs=kwargs,
+            name=f"local-exec-{execution_id}", daemon=True,
+        )
         _threads[execution_id] = thread
     thread.start()
 
@@ -197,6 +233,9 @@ def _run_flow(
         callback = _LocalTraceCallback(execution_id, initial_nodes=initial_nodes)
         execution = FlowExecution(callback_handlers=[callback])
         execution.mode = ExecutionMode.DISTRIBUTED
+        # 让回调能拿到 execution：fresh start 的 on_flow_start（clean 之后触发）
+        # 会把 $EXECUTION_ID 覆写为 console 的 execution_id，保持两边一致。
+        callback.bind_execution(execution)
 
         if resume is None:
             result = execution.run_distributed(flow, params=params)

@@ -17,6 +17,10 @@ dependencies = [
     "sse-starlette>=1.8.0",
     "sqlalchemy>=2.0.0",
     "httpx>=0.25.0",
+    "croniter>=2.0.0",
+    # credentials_svc 的 Fernet 凭据加密 / starlette 表单解析
+    "cryptography>=42.0",
+    "python-multipart>=0.0.12",
 ]
 
 [project.scripts]
