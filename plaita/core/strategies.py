@@ -437,9 +437,12 @@ def _handle_unmatched_branch(node, branch):
     handler = getattr(node, "error_handler", None)
     strategy = handler.strategy if handler is not None else None
     if strategy in (ErrorStrategy.CONTINUE, ErrorStrategy.CONTINUE_WITH):
+        # 逃生口语义（与 0.5.x 历史行为一致）：分支节点的"下游"由分支定义，
+        # 未命中即无下游——流程在此收尾，$NODE 状态表作为流程结果返回。
         logger.warning(
-            "branching node %s matched no branch and has no default "
-            "(branch=%r); continuing because errorHandler.strategy=%s",
+            "branching node %s matched no branch and has no default (branch=%r); "
+            "ending the flow with the $NODE state as its result "
+            "(errorHandler.strategy=%s legacy behavior)",
             node.id, branch, strategy.value,
         )
         return

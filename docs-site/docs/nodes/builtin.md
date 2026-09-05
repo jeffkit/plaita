@@ -74,7 +74,23 @@
 }
 ```
 
-`upstreamOutput` 用于多上游汇聚时按 `upstream`（上一个节点 id）挑选对应输出。
+`upstreamOutput` 用于多上游汇聚时按 `upstream`（上一个节点 id）挑选对应输出，
+类型是**列表**，每项形如 `{"upstream": "<上游节点id>", "output": "<表达式>"}`：
+
+```json
+{
+  "type": "assignment", "id": "merge",
+  "upstreamOutput": [
+    {"upstream": "fetch_user",  "output": "$NODE.fetch_user"},
+    {"upstream": "fetch_order", "output": "$NODE.fetch_order"}
+  ],
+  "next": "e"
+}
+```
+
+> 多分支汇总裁决的更简惯用法：`End` 节点的 `output` 直接写对象字面量聚合各分支
+> 结果，例如 `"output": {"user": "$NODE.fetch_user", "order": "$NODE.fetch_order"}`
+> ——未实际执行的分支其节点结果解析为 `None`，不需要 `upstreamOutput` 逐项挑选。
 
 ## switch / if / case
 

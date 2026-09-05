@@ -300,9 +300,16 @@ class HTTP(Node):
             RESPONSE_HEADERS_KEY: dict(http_rsp.raw_response.headers),
         }
         if execution:
-            execution.set_node_context(self.id, RESPONSE_CTX_KEY, response)
-            execution.set_node_context(self.id, HEADER_CTX_KEY, dict(http_rsp.raw_response.headers))
-            execution.set_node_context(self.id, STATUS_CTX_KEY, http_rsp.raw_response.status_code)
+            # 响应上下文经公开 API 写入 $NODE.<id>.*，下游可引用
+            # （$NODE.<id>.RESPONSE / .HEADERS / .STATUS）。历史方法
+            # set_node_context 在运行时里从未存在，真实请求一到响应处理
+            # 就 AttributeError——集成测试全用带该方法的 mock execution，
+            # 掩盖了这条主路径。
+            prefix = getattr(execution, "express_prefix", "$") or "$"
+            node_prefix = f"{prefix}NODE.{self.id}."
+            execution.set_state(f"{node_prefix}{RESPONSE_CTX_KEY}", response)
+            execution.set_state(f"{node_prefix}{HEADER_CTX_KEY}", dict(http_rsp.raw_response.headers))
+            execution.set_state(f"{node_prefix}{STATUS_CTX_KEY}", http_rsp.raw_response.status_code)
         if self.output is None:
             return response[RESPONSE_DATA_KEY]
         return execution.evaluate(self.output)

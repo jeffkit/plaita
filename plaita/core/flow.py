@@ -338,6 +338,11 @@ class Flow(BaseModel):
         if not hasattr(current, "branches"):
             logger.warning("Node %s has no branches", current.id)
             return None
+        if not branch:
+            # branch 为空 = 分支未命中（或无分支条件）。不再打 "branch None not
+            # found" 的误导性 warning——该情况的错误语义由调度层统一处理
+            # （硬失败或 errorHandler continue 逃生口）。
+            return None
         logger.debug("current node %s has branches: %s", current.id, current.branches)
         from plaita.node.decide import resolve_branch_target
 

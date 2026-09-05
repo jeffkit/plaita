@@ -43,6 +43,8 @@ PLAITA_CONSOLE_REDIS_URL=redis://127.0.0.1:1/0 python run.py
 本地档能力边界（与集群档的差异，如实说明）：
 
 - **可用**：流程编排/发布、本地执行与节点级 trace、挂起-恢复（审批/事件节点，checkpoint 存 SQLite）、日志/执行页、内置调度循环（替代集群档的 schedule_service 进程）、HMAC 契约接口 `/api/flowVersion/semver/detail`。
+- **UI 入口**：本地档只起后端 API；干净 clone 下 `backend/webDist/` 不存在（gitignore），访问 `/` 不会有前端页面。要看控制台界面，另起前端开发服务（`cd frontend && pnpm install && pnpm dev`，访问 http://localhost:5173），或运行 `scripts/build_package.sh` 生成 webDist。
+- **用 PlaitaClient 拉流程**：需要 `requests`（`pip install "plaita[http]"` 或 `pip install requests`），缺依赖时 plaita 会给出可操作的安装指引。
 - **不可用**：集群/服务拓扑/服务启停、事件总线、任务队列视图——对应管理 API 返回 503。
 - **限制**：执行与恢复必须在同一个 console 进程内；进程重启后进程内事件订阅丢失，挂起的执行需显式 resume 继续；cancel 为尽力而为（只标记状态，不中断正在运行的线程）；HMAC 重放保护退化为进程内 nonce 判定，仅单进程部署有效。
 

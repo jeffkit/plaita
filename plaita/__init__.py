@@ -84,6 +84,8 @@ _FEATURE_EXTRAS_MAP = {
 _LAZY_EXPORTS = {
     # plaita.core.flow
     "Flow": "plaita.core.flow",
+    # plaita.client（README/console 文档的公开入口写法 plaita.PlaitaClient）
+    "PlaitaClient": "plaita.client",
     "parse": "plaita.core.flow",
     "parse_and_run": "plaita.core.flow",
     # plaita.core.executor

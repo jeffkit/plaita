@@ -19,6 +19,7 @@ from plaita.node.http import (
     HEADER_CTX_KEY
 )
 from plaita.core.errors import NodeException
+from plaita import Flow
 
 
 class MockResponse:
@@ -39,10 +40,14 @@ class MockResponse:
 
 
 class MockExecution:
-    """Mock执行上下文"""
+    """Mock执行上下文（对齐 FlowExecution 公开 API：set_state + express_prefix）"""
     def __init__(self):
         self._context = {}
         self._node_context = {}
+        self.express_prefix = "$"
+
+    def set_state(self, key, value):
+        self._node_context[key] = value
     
     def evaluate(self, expression):
         """模拟表达式解析"""
@@ -575,6 +580,7 @@ class TestHTTPNodeAdditional(unittest.TestCase):
         
         # 模拟执行上下文
         execution = MagicMock()
+        execution.express_prefix = "$"  # MagicMock 默认属性会让 f-string 拼出垃圾键
         execution.evaluate.side_effect = lambda expr: "bar" if expr == "$RESPONSE.data.foo" else expr
         
         # 模拟HttpExecutor的方法
@@ -604,14 +610,14 @@ class TestHTTPNodeAdditional(unittest.TestCase):
             # 验证结果
             self.assertEqual(result, "bar")
             
-            # 验证上下文设置
-            execution.set_node_context.assert_any_call("http_ctx", RESPONSE_CTX_KEY, {
+            # 验证上下文设置（公开 API set_state，键为 $NODE.<id>.<KEY>）
+            execution.set_state.assert_any_call("$NODE.http_ctx.RESPONSE", {
                 "data": {"foo": "bar"},
                 "status": 200,
                 "statusText": "OK",
                 "headers": mock_response.headers
             })
-            execution.set_node_context.assert_any_call("http_ctx", STATUS_CTX_KEY, 200)
+            execution.set_state.assert_any_call("$NODE.http_ctx.STATUS", 200)
     
     @patch('plaita.node.http.HTTP.new_executor')
     def test_delegate_method(self, mock_new_executor):
@@ -670,14 +676,13 @@ class TestHTTPNodeAdditional(unittest.TestCase):
         class SimpleExecution:
             def __init__(self):
                 self.node_context = {}
-                
+                self.express_prefix = "$"
+
             def evaluate(self, expr):
                 return expr
-                
-            def set_node_context(self, node_id, key, value):
-                if node_id not in self.node_context:
-                    self.node_context[node_id] = {}
-                self.node_context[node_id][key] = value
+
+            def set_state(self, key, value):
+                self.node_context[key] = value
         
         execution = SimpleExecution()
         
@@ -692,3 +697,83 @@ class TestHTTPNodeAdditional(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main() 
+
+class TestHTTPNodeRealEndToEnd(unittest.TestCase):
+    """真实链路 e2e：本地起 http.server，**全程零 mock**——锁定 evaluate 参数、
+    set_state 响应写入、errorHandler 兜底三条真实路径（R2/R3 评审曾发现这三条
+    被全 mock 的集成测试掩盖）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"hello": "world", "path": self.path}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_DELETE(self):
+                self.send_response(405)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        cls._server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        cls.port = cls._server.server_address[1]
+        cls._thread = threading.Thread(target=cls._server.serve_forever, daemon=True)
+        cls._thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._server.shutdown()
+        cls._server.server_close()
+
+    def _http_node_flow(self, url_expr, error_handler=None):
+        node = {"type": "http", "id": "fetch", "method": "GET", "url": url_expr, "next": "e"}
+        if error_handler:
+            node["errorHandler"] = error_handler
+        return json.dumps({
+            "flow_id": "real_http",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "fetch"},
+                node,
+                {"type": "end", "id": "e", "output": "$NODE.fetch", "resultType": "success"},
+            ],
+        })
+
+    def test_real_get_request_succeeds(self):
+        """真实 GET 全链路：表达式 URL 求值 → 请求 → 响应写入 $NODE.<id>.*。"""
+        flow = Flow.from_string(self._http_node_flow(f"http://127.0.0.1:{self.port}/api/ping"))
+        result = flow.run()
+        # 无 output 的 http 节点返回 response.data 本身
+        self.assertEqual(result, {"hello": "world", "path": "/api/ping"})
+
+    def test_real_request_error_uses_error_handler_default(self):
+        """不可路由端口 → errorHandler continue_with 的 defaultValue 生效。"""
+        flow = Flow.from_string(self._http_node_flow(
+            f"http://127.0.0.1:1/dead",
+            error_handler={"strategy": "continue_with", "defaultValue": "fallback"},
+        ))
+        self.assertEqual(flow.run(), "fallback")
+
+    def test_real_http_error_status_is_a_response_not_a_failure(self):
+        """405 响应属于"正常响应"而非节点失败：http 节点只对传输层错误抛错
+        （连接拒绝/超时等，见 test_real_request_error_uses_error_handler_default）。
+        流程照常推进到 End。"""
+        flow = Flow.from_string(json.dumps({
+            "flow_id": "real_http_405",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "fetch"},
+                {"type": "http", "id": "fetch", "method": "DELETE",
+                 "url": f"http://127.0.0.1:{self.port}/api/x", "next": "e"},
+                {"type": "end", "id": "e", "output": "1"},
+            ],
+        }))
+        self.assertEqual(flow.run(), "1")

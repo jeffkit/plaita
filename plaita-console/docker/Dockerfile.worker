@@ -6,6 +6,9 @@ WORKDIR /app
 # 安装依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# flow_worker 模块级 import cachetools（TTLCache），而它属于 plaita 的 server
+# extra——不装则容器启动即 ModuleNotFoundError（Dockerfile.backend 同款补救）
+RUN pip install --no-cache-dir cachetools
 
 # 复制代码
 COPY plaita/ ./plaita/

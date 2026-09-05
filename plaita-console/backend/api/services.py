@@ -93,13 +93,20 @@ def parse_service_data(data: str) -> Optional[ServiceInfo]:
 @router.get("/services", response_model=ServiceListResponse)
 async def list_services(
     service_type: Optional[str] = None,
-    redis: Redis = Depends(get_redis)
+    request: Request = None,
 ):
     """
     获取所有服务列表（包含 Redis 注册的服务、托管实例和基础设施服务）
     
     - **service_type**: 可选，按服务类型筛选
     """
+    redis = get_redis(request) if request is not None else None
+    if redis is None:
+        # 本地单机档无 Redis：与 queues/events 一致返回 503（此前 NoneType.keys 500）
+        raise HTTPException(
+            status_code=503,
+            detail="服务注册表依赖 Redis，本地单机档不可用",
+        )
     services = []
     added_instance_ids = set()
     
@@ -109,7 +116,7 @@ async def list_services(
     else:
         pattern = "plaita:registry:*"
     
-    keys = redis.keys(pattern)
+    keys = list(redis.scan_iter(match=pattern))
     
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
@@ -292,14 +299,21 @@ async def list_services(
 
 @router.get("/services/topology", response_model=ServiceTopology)
 async def get_topology(
-    redis: Redis = Depends(get_redis)
+    request: Request = None,
 ):
     """
     获取服务拓扑结构（含关联关系）
     """
-    # 获取所有服务
+    redis = get_redis(request) if request is not None else None
+    if redis is None:
+        # 本地单机档无 Redis：与 queues/events 一致返回 503（此前 NoneType.keys 500）
+        raise HTTPException(
+            status_code=503,
+            detail="服务注册表依赖 Redis，本地单机档不可用",
+        )
+    # 获取所有服务（scan_iter 替代 keys，避免大库 O(N) 阻塞）
     pattern = "plaita:registry:*"
-    keys = redis.keys(pattern)
+    keys = list(redis.scan_iter(match=pattern))
     
     nodes: List[ServiceNode] = []
     edges: List[ServiceEdge] = []

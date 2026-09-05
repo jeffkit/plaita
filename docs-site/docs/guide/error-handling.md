@@ -117,7 +117,10 @@ plaita 用一套规范异常类型（定义在 `plaita.core.errors`）：
 
 ### 主动返回错误
 
-`End` 节点 `resultType: "error"` 会抛 `FlowResultError`，把业务错误码透传给调用方：
+`End` 节点 `resultType: "error"` 会以业务错误终止流程：运行时把节点内的
+`FlowResultError` 包装为 `ErrorResultException`（`plaita.core.errors`，携带同样的
+`code` / `message`）抛给调用方——**捕获时用 `ErrorResultException`**（它同时是
+`FlowExecutionException` 子类）：
 
 ```json
 {
