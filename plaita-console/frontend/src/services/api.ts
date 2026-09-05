@@ -590,6 +590,29 @@ export const api = {
     })
   },
 
+  // ============ 凭据 ============
+
+  async getCredentials(): Promise<CredentialListResponse> {
+    return request('/credentials')
+  },
+
+  async getCredential(name: string): Promise<CredentialDetail> {
+    return request(`/credentials/${encodeURIComponent(name)}`)
+  },
+
+  async saveCredential(payload: {
+    name: string
+    type: string
+    desc?: string
+    data: Record<string, unknown>
+  }): Promise<{ success: boolean; name: string; message: string }> {
+    return request('/credentials', { method: 'POST', body: JSON.stringify(payload) })
+  },
+
+  async deleteCredential(name: string): Promise<{ success: boolean }> {
+    return request(`/credentials/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+
   // ============ 调度（触发器） ============
 
   async getSchedules(): Promise<ScheduleListResponse> {
@@ -904,3 +927,23 @@ export interface ScheduleFireRecord {
   msg_id?: string
 }
 
+
+
+export interface CredentialItem {
+  name: string
+  type: string
+  desc: string
+  updated_at: string
+}
+
+export interface CredentialListResponse {
+  credentials: CredentialItem[]
+  total: number
+}
+
+export interface CredentialDetail {
+  name: string
+  type: string
+  desc: string
+  data: Record<string, unknown>
+}

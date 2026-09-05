@@ -127,3 +127,24 @@ class LocalExecution(Base):
     last_update_time = Column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class Credential(Base):
+    """凭据（加密存储）：外部服务的机密信息，流程节点按名引用。
+
+    ``data_json`` 为 Fernet 加密后的 JSON 字符串；明文只在保存/使用瞬间存在。
+    保存时同步导出到 PLAITA_CREDENTIALS_FILE（默认 .plaita-credentials.json）
+    供引擎节点运行时解密读取。
+    """
+
+    __tablename__ = "credentials"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False, unique=True, index=True)
+    type = Column(String(64), nullable=False, default="generic")
+    data_json = Column(Text, nullable=False)
+    desc = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

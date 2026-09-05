@@ -20,6 +20,8 @@ dependencies = [
 
 [project.optional-dependencies]
 redis = ["redis>=4.0.0"]
+# 凭据加密（plaita.credentials / 编排台凭据管理）
+credentials = ["cryptography>=42.0"]
 # SQLAlchemy EventBus / Storage 路径（含 aiosqlite 供 CI 文件库测）
 sqlalchemy = [
     "SQLAlchemy>=1.4.0",

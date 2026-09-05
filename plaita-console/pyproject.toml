@@ -22,6 +22,7 @@ dependencies = [
     "croniter>=2.0.0",
     "pydantic-ai-slim[anthropic]>=2.36",
     "ag-ui-protocol>=0.1.21",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

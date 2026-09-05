@@ -1,3 +1,5 @@
+import { KeyRound } from 'lucide-react'
+import Credentials from './pages/Credentials'
 import { createBrowserRouter, RouterProvider, NavLink, Outlet } from 'react-router-dom'
 import { useState } from 'react'
 import {
@@ -57,6 +59,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: '/flows', icon: <Workflow size={16} />, label: '流程编排' },
       { to: '/schedules', icon: <Clock size={16} />, label: '触发器' },
       { to: '/nodes', icon: <Boxes size={16} />, label: '节点管理' },
+      { to: '/credentials', icon: <KeyRound size={16} />, label: '凭据' },
     ],
   },
   {
@@ -98,6 +101,7 @@ const router = createBrowserRouter([
       { path: 'schedules', element: <Schedules /> },
       { path: 'flows/:flowId/edit', element: <FlowEditor /> },
       { path: 'nodes', element: <Nodes /> },
+      { path: 'credentials', element: <Credentials /> },
     ],
   },
 ])

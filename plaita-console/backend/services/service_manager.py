@@ -111,6 +111,22 @@ class ProcessLauncher(ServiceLauncher):
         process_env.update(env)
         process_env["PLAITA_INSTANCE_ID"] = instance_id
         process_env["PYTHONPATH"] = str(PROJECT_ROOT)
+
+        # 凭据文件/密钥透传：worker 节点运行时经 plaita.credentials 解密读取
+        try:
+            from . import credentials_svc
+        except ImportError:
+            import credentials_svc  # type: ignore
+        process_env.setdefault(
+            "PLAITA_CREDENTIALS_FILE", str(credentials_svc.credentials_file())
+        )
+        key_env = os.environ.get("PLAITA_CREDENTIALS_KEY")
+        if key_env:
+            process_env["PLAITA_CREDENTIALS_KEY"] = key_env
+        elif credentials_svc.credentials_key_file().is_file():
+            process_env.setdefault(
+                "PLAITA_CREDENTIALS_KEY_FILE", str(credentials_svc.credentials_key_file())
+            )
         
         # 白名单校验（纵深防御：即使配置绕过写入，启动时仍拦截）
         try:
