@@ -62,7 +62,7 @@ execution = FlowExecution(event_bus=bus, callback_handlers=[])
 step = execution.run_distributed(flow, {"applicant": "alice", "reason": "年假"})
 assert step["is_suspend"] is True
 
-exec_id = execution._ctx.execution_id
+exec_id = step["execution_id"]
 save_context(exec_id, step["context"])   # 存入 ExecutionStorage
 ```
 

@@ -46,7 +46,7 @@ execution = FlowExecution(event_bus=bus)
 
 step = execution.run_distributed(flow, {"order_id": "o-1"})
 assert step["is_suspend"] is True
-exec_id = execution._ctx.execution_id
+exec_id = step["execution_id"]
 save_context(exec_id, step["context"])
 ```
 

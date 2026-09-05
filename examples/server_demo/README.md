@@ -21,7 +21,11 @@
 
 ## 运行演示
 
-### 幂等 resume（副作用去重）
+以下命令均在 **plaita 仓库根目录**执行。依赖：仅需 `pip install -e .`
+（本目录 demo 不需要 `plaita[server]` extra；Redis/Kafka 集成需要对应
+服务与 `redis` / `kafka-python` 包，见下）。
+
+### 幂等 resume（副作用去重，零外部依赖）
 
 ```bash
 python -m examples.server_demo.idempotent_resume_demo
@@ -29,21 +33,28 @@ python -m examples.server_demo.idempotent_resume_demo
 
 说明见 docs-site [幂等 Resume](../../docs-site/docs/distributed/idempotent-resume.md)。
 
-### 完整演示
+### 简化演示（推荐先跑，零外部依赖）
 
-运行所有扩展节点的完整演示：
+延迟 + 审批两个核心演示，全程内存事件总线：
+
+```bash
+python -m examples.server_demo.extended_nodes_demo simple
+```
+
+### 完整演示（Kafka 流程需外部服务，其余本地可跑）
+
+运行所有扩展节点的完整演示（含延迟、审批、HTTP 回调、Redis 队列、Kafka 队列）：
 
 ```bash
 python -m examples.server_demo.extended_nodes_demo
 ```
 
-### 简化演示
+**SKIP 条件**：只有 Kafka 队列流程需要外部服务——本地 Kafka（`localhost:9092`）
+且安装 `kafka-python`；没有时该流程会在总结中标记失败（其余 4 个流程不受影响）。
+Redis 队列流程在有本地 Redis（`localhost:6379`）时可通过；无 Redis 时 delay 服务
+自动走进程内事件总线，延迟/审批/HTTP 回调三个流程仍可全部通过。
 
-运行核心功能的简化演示：
-
-```bash
-python -m examples.server_demo.extended_nodes_demo simple
-```
+也可单跑某类节点：`python -m examples.server_demo.extended_nodes_demo delay|approval|http_callback|redis|kafka`。
 
 ## 演示内容
 

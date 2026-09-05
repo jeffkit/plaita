@@ -61,7 +61,7 @@ sequenceDiagram
     ```python
     execution = FlowExecution(callback_handlers=[MyCallback()])
     step = execution.run_distributed(flow, params)             # 挂起
-    save(execution._ctx.execution_id, step["context"])
+    save(step["execution_id"], step["context"])
     # ...
     step = execution.run_distributed(flow, None, saved_context=load(...),
                                      resume_type="event", resume_data=data)  # 恢复

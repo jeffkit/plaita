@@ -128,6 +128,14 @@ plaita 内置 60+ 函数，按类别分布在 `ExpressionRegistry` 中：
 
     `pop` / `set` / `delete` / `clear` 等会就地修改输入。在 `Parallel` 并行或共享上下文的异步场景中使用它们可能造成数据竞争——要么串行化访问，要么先拷贝再修改。
 
+!!! warning "未注册的函数名求值为 'undefined' 字符串"
+
+    `$F` 是作用域注册表：调用未注册（或拼写错）的函数名**不会报错**，而是把整
+    个调用求值为字符串 `'undefined'`（默认 registry 未注册该名字时也一样）。例如
+    `$F.uppr($INPUT.name)`（拼错）静默得到 `'undefined'`，下游拿到的就是这串文本。
+    排查时先核对函数注册名是否与[内置函数一览](#内置函数一览)或你的
+    `registry.register(...)` 名字完全一致。
+
 ## 自定义函数
 
 通过 `ExpressionRegistry` 注册自定义函数，再传给 `ExpressionEvaluator`：

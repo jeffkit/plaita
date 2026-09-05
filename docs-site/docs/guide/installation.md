@@ -48,6 +48,8 @@ ImportError: The 'http' extra is required for this feature but is not installed.
 Install it with: pip install plaita[http]
 ```
 
+> 注意：`http` extra 包含 `requests` 与 `aiohttp` 两个库。`HTTP` 节点在入口会**同时探测两者**，缺少任一个都会在报错中列出缺失的库名——按提示 `pip install plaita[http]` 一次装齐即可。
+
 ## 开发依赖
 
 贡献代码或本地构建文档时安装：

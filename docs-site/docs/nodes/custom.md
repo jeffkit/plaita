@@ -79,7 +79,7 @@ print(flow.run(name="kongjie"))  # => "hello, kongjie"
 | 能力 | 用法 |
 |------|------|
 | 求值表达式 | `execution.evaluate(value)` |
-| 读状态 | `execution.get_state("$INPUT")` 或 `execution._ctx.context` |
+| 读状态 | `execution.get_state("$INPUT")` 或 `execution.context` |
 | 写状态 | `execution.set_state(key, value)` |
 | 全局变量 | `execution.get_global_variable(key)` |
 | 子流程 | `execution.get_child_execution()` |

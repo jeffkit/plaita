@@ -84,7 +84,7 @@ execution = FlowExecution(event_bus=bus)
 # 第一步：推进到事件节点，挂起
 step1 = execution.run_distributed(flow, {})
 assert step1["is_suspend"] is True
-exec_id = execution._ctx.execution_id
+exec_id = step1["execution_id"]
 saved_ctx = step1["context"]          # 可序列化后持久化，此处直接用内存
 
 # 模拟外部事件到达（生产中由 ApprovalService / HTTP 回调等触发）

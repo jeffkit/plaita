@@ -33,6 +33,8 @@ pip install plaita[server,http]
 pip install plaita[all]
 ```
 
+> `http` extra 同时探测 `requests` 与 `aiohttp`：使用 `HTTP` 节点时缺少任一个都会抛出 ImportError 并列出缺失的库名（`PlaitaClient` 仅依赖 `requests`）。
+
 ## entry_points：节点插件
 
 `pyproject.toml` 声明了 `plaita.nodes` entry_points，把 `server` 扩展节点自动注册：

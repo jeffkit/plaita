@@ -10,6 +10,9 @@
 python -m examples.agent.demo
 ```
 
+依赖：只需 plaita 本体（仓库根目录 `pip install -e .`），无需任何 API key、
+无需 plaita-nodes 等插件包。
+
 预期输出（节选）：
 
 ```

@@ -489,13 +489,14 @@ Agent 在敏感动作前（发款、发消息、改库）需要人类确认。�
         {
             "type": "approval",
             "id": "confirm",
-            "approvalTitle": "Agent 草稿待确认",
-            "approvalContent": "草稿: {% $NODE.draft.data.text %}",
-            "approvalType": "manual",
+            "event_type": "approval_decision",
+            "approval_title": "Agent 草稿待确认",
+            "approval_content": "草稿: {% $NODE.draft.data.text %}",
+            "approval_type": "manual",
             "approvers": ["reviewer_a"],
-            "approvalStrategy": "any",
-            "formFields": [],
-            "allowComments": true,
+            "approval_strategy": "any",
+            "form_fields": [],
+            "allow_comments": true,
             "next": "decide"
         },
         {

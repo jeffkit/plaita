@@ -89,7 +89,7 @@ step = execution.run_distributed(flow, {"applicant": "alice"})
 # step: {"is_suspend": True, "context": {...}, ...}
 
 # 把 step["context"] 持久化（如存入 ExecutionStorage）
-save(execution._ctx.execution_id, step["context"])
+save(step["execution_id"], step["context"])
 
 # ... 一段时间后，外部事件到达，在另一个进程恢复 ...
 saved_context = load(execution_id)

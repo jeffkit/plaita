@@ -21,7 +21,6 @@
    ],
    "cwd": "$INPUT.repo",
    "timeout_secs": 30,
-   "strict": true,
    "next": "baseline_sha"
   },
   {
@@ -49,7 +48,6 @@
    ],
    "cwd": "$INPUT.repo",
    "timeout_secs": 60,
-   "strict": false,
    "next": "wt_check"
   },
   {

@@ -1,32 +1,34 @@
 """
 演示如何使用独立的SubscriptionTimeoutChecker
+
+注意：超时回调通过闭包直接引用本 demo 创建的 InMemoryEventBus 实例，
+而不是 plaita.event.get_default_event_bus() 返回的默认总线——
+两者是不同的对象，混用会导致订阅注册在 A 总线、回调却操作 B 总线。
 """
 import asyncio
 import time
-from typing import Dict, Any
+from typing import Any
 
 from plaita.event import (
-    Event, EventSubscription, InMemoryEventBus, SubscriptionTimeoutChecker, 
-    get_eventbus
+    EventSubscription, InMemoryEventBus, SubscriptionTimeoutChecker
 )
-
-async def timeout_callback(subscription: EventSubscription) -> None:
-    """订阅超时的回调函数"""
-    print(f"订阅已超时: {subscription.subscription_id}")
-    print(f"订阅类型: {subscription.event_type}")
-    print(f"超时时间: {subscription.timeout} 秒")
-    print(f"创建时间: {time.ctime(subscription.created_at)}")
-    
-    # 可以在这里进行处理，例如发送通知或记录日志
-    # 也可以根据需要自动取消订阅
-    event_bus = get_eventbus()
-    await event_bus.unregister_subscription(subscription.subscription_id)
 
 
 async def main():
     # 创建事件总线
     event_bus = InMemoryEventBus()
-    
+
+    async def timeout_callback(subscription: EventSubscription) -> None:
+        """订阅超时的回调函数（闭包引用上面的 event_bus）"""
+        print(f"订阅已超时: {subscription.subscription_id}")
+        print(f"订阅类型: {subscription.event_type}")
+        print(f"超时时间: {subscription.timeout} 秒")
+        print(f"创建时间: {time.ctime(subscription.created_at)}")
+
+        # 可以在这里进行处理，例如发送通知或记录日志
+        # 也可以根据需要自动取消订阅
+        await event_bus.unregister_subscription(subscription.subscription_id)
+
     # 创建独立的超时检查器
     timeout_checker = SubscriptionTimeoutChecker(
         event_bus.subscription_storage,
