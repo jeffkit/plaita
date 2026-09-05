@@ -65,12 +65,14 @@ execution.run_compatible(flow, False, name="test")
 from plaita import FlowExecution, FlowCallback
 
 class DebugCallback(FlowCallback):
-    def on_node_end(self, flow, node, result=None, error=None, **kwargs):
+    def on_node_end(self, flow, node, result, error, exception, **kwargs):
         # 发到 tracing / metrics / 文件...
         print(f"NODE {node.id} done: {result!r} err={error!r}")
 
 execution = FlowExecution(callback_handlers=[DebugCallback()])
 ```
+
+回调签名必须接受框架传入的全部位置参数，否则会被捕获为 warning 且回调静默失效——详见 [回调机制](callbacks.md)。
 
 ## 调用方超时诊断
 

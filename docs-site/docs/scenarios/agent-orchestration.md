@@ -35,6 +35,9 @@ flowchart LR
     仓库 `examples/agent/` 提供了三个**开箱即跑**的案例（RAG / Tool-use / Router），含 `LLMNode`/`ToolNode`/`RetrieverNode` 三个自定义节点与内置 `FakeLLM`，无需 API key：
 
     ```bash
+    # examples/ 不随 wheel 分发，需 clone 仓库后在仓库根目录运行
+    git clone https://github.com/jeffkit/plaita.git
+    cd plaita
     python -m examples.agent.demo
     ```
 
@@ -114,7 +117,7 @@ flowchart LR
     ```python
     from plaita.dsl.codeflow import flow, HTTP
 
-    @flow("teleplay_info", input_type="object", desc="查剧集信息与首集")
+    @flow("teleplay_info", desc="查剧集信息与首集")
     def teleplay_info(INPUT):
         find_id = HTTP.get(url="https://api.example.com/teleplays?name={% $INPUT.name %}", timeout="PT3S")
         tid = find_id.data[0].id
@@ -214,7 +217,7 @@ Agent 常见决策："根据上一步结果决定接下来调哪个工具"。用
     ```python
     from plaita.dsl.codeflow import flow, HTTP
 
-    @flow("maybe_translate", input_type="object")
+    @flow("maybe_translate")
     def maybe_translate(INPUT):
         detect = HTTP.post(url="https://api.example.com/detect", body={"text": INPUT.text}, timeout="PT3S")
         if detect.data.need_trans == True:
@@ -301,7 +304,7 @@ Agent 常见决策："根据上一步结果决定接下来调哪个工具"。用
     ```python
     from plaita.dsl.codeflow import flow, childflow, CHILD, HTTP
 
-    @childflow(input_type="object")
+    @childflow()
     def summarize(INPUT):
         llm = HTTP.post(
             url="https://api.example.com/llm",
@@ -310,7 +313,7 @@ Agent 常见决策："根据上一步结果决定接下来调哪个工具"。用
         )
         return llm.data.text
 
-    @flow("summarize_then_translate", input_type="object")
+    @flow("summarize_then_translate")
     def summarize_then_translate(INPUT):
         summary = CHILD(input={"text": INPUT.text}, flow=summarize)
         translated = HTTP.post(
@@ -340,7 +343,7 @@ Agent 常见决策："根据上一步结果决定接下来调哪个工具"。用
       (end end :output "$NODE.translate.data.text"))
     ```
 
-子流程的 `input` 要匹配其 `input_type`：`object` 传 dict，`array` 传 list。
+子流程的 `input` 要与其输入形态匹配：`$INPUT` 恒为 dict，`input` 就传 dict。
 
 ---
 
@@ -418,17 +421,17 @@ Agent 经常需要同时调多个工具或多个子 Agent 再汇总（例如多�
     ```python
     from plaita.dsl.codeflow import flow, childflow, PARALLEL, HTTP
 
-    @childflow(input_type="object")
+    @childflow()
     def web_search(INPUT):
         q = HTTP.get(url="https://api.example.com/search?q={% $INPUT.query %}", timeout="PT5S")
         return q.data
 
-    @childflow(input_type="object")
+    @childflow()
     def kb_query(INPUT):
         q = HTTP.get(url="https://kb.example.com/query?q={% $INPUT.query %}", timeout="PT5S")
         return q.data
 
-    @flow("multi_source_lookup", input_type="object")
+    @flow("multi_source_lookup")
     def multi_source_lookup(INPUT):
         results = PARALLEL(branches={"web": web_search, "kb": kb_query}, join=["web", "kb"], mode="thread")
         return {"web": results.web, "kb": results.kb}
@@ -531,7 +534,7 @@ from plaita.dsl.codeflow import flow_from_source
 
 # 假设这是 LLM 根据用户问题生成的流程源码
 ai_generated_src = '''
-@flow("agent_plan", input_type="object", desc="查找并翻译")
+@flow("agent_plan", desc="查找并翻译")
 def agent_plan(INPUT):
     find = HTTP.get(url="https://api.example.com/items?q={% INPUT.q %}", timeout="PT3S")
     if find.data.need_trans == True:
@@ -584,7 +587,7 @@ sequenceDiagram
 from plaita import Flow, FlowExecution, FlowCallback
 
 class AgentTrace(FlowCallback):
-    def on_node_end(self, flow, node, result=None, error=None, **kwargs):
+    def on_node_end(self, flow, node, result, error, exception, **kwargs):
         status = "error" if error else "ok"
         print(f"[step] {node.node_type}/{node.id} -> {status}")
         if error:
@@ -592,7 +595,7 @@ class AgentTrace(FlowCallback):
         else:
             print(f"       result: {result}")
 
-    def on_flow_end(self, flow, result=None, **kwargs):
+    def on_flow_end(self, flow, result, error, exception, **kwargs):
         print(f"[done] final -> {result}")
 
 flow = Flow.from_string(open("teleplay_info.json").read())

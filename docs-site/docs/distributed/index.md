@@ -67,7 +67,7 @@ flow_json = """
   "flow_id": "confirm_demo",
   "nodes": [
     {"type": "start", "id": "start", "next": "wait"},
-    {"type": "event", "id": "wait", "eventType": "user_confirm", "next": "end"},
+    {"type": "event", "id": "wait", "event_type": "user_confirm", "next": "end"},
     {"type": "end", "id": "end", "output": "$NODE.wait.event_data", "resultType": "success"}
   ]
 }
@@ -101,7 +101,7 @@ step2 = execution.run_distributed(
     resume_type="event",
     resume_data={"approved": True},
 )
-print(step2["result"])   # -> {"approved": True}
+print(step2["result"]["event_data"])   # -> {"approved": True}
 ```
 
 **需要跨进程部署？** 把 `InMemoryEventBus` 换成 `RedisEventBus`，把 `MemoryExecutionStorage` 换成 `RedisExecutionStorage`（公开路径仅 memory|redis）。任务经 **Redis Stream** 入队（at-least-once，见 [FlowWorker · 可靠性边界](flow-worker.md#可靠性边界必读)）。

@@ -82,6 +82,8 @@ class PollableNode(Node):
 | `continue` | 忽略错误，本节点返回 `None`，继续往下 |
 | `continue_with` | 用 `defaultValue` 作为本节点输出，继续往下 |
 
+`defaultValue` 接受**任意类型**——标量、字符串、对象均可，不再限定 dict。
+
 `retryTimes` 控制重试次数：在重试耗尽前不触发策略，重试全部失败后才按 `strategy` 处理。
 
 ### 超时处理器
@@ -126,7 +128,7 @@ plaita 用一套规范异常类型（定义在 `plaita.core.errors`）：
 }
 ```
 
-`resultType` 三种：`success`（正常返回 `output`）/ `nop`（返回 `None`）/ `error`（抛 `FlowResultError`）。
+`resultType` 三种：`success`（正常返回 `output`，**不写时的默认值**）/ `nop`（返回 `None`）/ `error`（抛 `FlowResultError`）。写了无法识别的值会打 `logger.warning` 并按 `success` 处理。
 
 ## 回调通知
 

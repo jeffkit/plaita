@@ -24,16 +24,21 @@ python3 -m plaita
 
 若输出版本号（当前 **0.5.0**）即安装成功。
 
-## 可选依赖（extras）
+## 核心依赖
 
-plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`。其余能力按需安装对应的 extra：
+plaita 核心只依赖 `pydantic`、`pyparsing`、`isodate`、`croniter`，其余能力按需安装 extra。
+
+## 可选依赖（extras）
 
 | extra | 安装命令 | 提供能力 |
 |-------|---------|---------|
 | `redis` | `pip install plaita[redis]` | Redis 存储 / Redis EventBus / Redis 节点 |
 | `server` | `pip install plaita[server]` | FastAPI 服务端、SQLAlchemy 存储、FlowWorker、扩展节点 |
-| `code` | `pip install plaita[code]` | `CodeNode` 的 JavaScript 执行（PyExecJS） |
-| `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp） |
+| `code` | `pip install plaita[code]` | `CodeNode`（RestrictedPython AST 沙箱 + PyExecJS JS 后端）。0.5.0 起 `register_code_node()` **默认 `docker` 容器级沙箱**（需本机 Docker daemon），可选 `subprocess` / `restricted` / `unsafe` |
+| `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp）；`PlaitaClient`（requests） |
+| `yaml` | `pip install plaita[yaml]` | YAML 格式流程定义 |
+| `sqlalchemy` | `pip install plaita[sqlalchemy]` | SQLAlchemy EventBus / Storage（实验性） |
+| `credentials` | `pip install plaita[credentials]` | 凭据加密（`plaita.credentials`） |
 | `all` | `pip install plaita[all]` | 上述全部 |
 
 当你尝试使用未安装 extra 的功能时，plaita 会抛出**可操作的 `ImportError`**，明确提示应安装哪个 extra，例如：
@@ -81,7 +86,7 @@ python -m plaita_console
 
 ## 节点插件包
 
-内置 22 种节点之外，通用业务节点以插件包形式分发，**pip 安装即自动注册**
+默认注册表 23 种内置节点之外，通用业务节点以插件包形式分发，**pip 安装即自动注册**
 （经 `plaita.nodes` entry-points，无需手动登记）：
 
 ```bash

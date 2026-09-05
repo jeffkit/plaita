@@ -8,16 +8,21 @@ plaita 提供少量命令行入口；AI 集成相关命令由 **`plaita-ai`** �
 
 ```bash
 python -m plaita
+# 输出版本号（当前 0.5.0）
 ```
 
-### 事件系统 / 扩展节点演示
+!!! note "演示脚本不在 wheel 内"
 
-```bash
-python -m examples.event_demo.demo_eventbus --backend memory
+    `examples/` 目录**不随 wheel 分发**，`python -m examples.*` 需 clone 仓库后在仓库根目录运行：
 
-pip install plaita[server]
-python -m examples.server_demo.extended_nodes_demo
-```
+    ```bash
+    git clone https://github.com/jeffkit/plaita.git
+    cd plaita
+    python -m examples.event_demo.demo_eventbus --backend memory
+
+    pip install plaita[server]
+    python -m examples.server_demo.extended_nodes_demo
+    ```
 
 ### 外延服务入口
 

@@ -19,13 +19,14 @@ pip install plaita[server]
         {
             "type": "approval",
             "id": "approve",
-            "approvalTitle": "请假申请",
-            "approvalContent": "申请人: {% $INPUT.applicant %}, 事由: {% $INPUT.reason %}",
-            "approvalType": "manual",
+            "event_type": "approval_decision",
+            "approval_title": "请假申请",
+            "approval_content": "申请人: {% $INPUT.applicant %}, 事由: {% $INPUT.reason %}",
+            "approval_type": "manual",
             "approvers": ["manager_a", "manager_b"],
-            "approvalStrategy": "any",
-            "formFields": [],
-            "allowComments": true,
+            "approval_strategy": "any",
+            "form_fields": [],
+            "allow_comments": true,
             "next": "decide"
         },
         {
@@ -46,7 +47,7 @@ pip install plaita[server]
 }
 ```
 
-`approval` 节点挂起后，恢复时 `event_data` 含审批结果，`switch` 据此分支。
+`approval` 节点字段为小写下划线形式（`event_type` 必填，继承自事件节点），无驼峰归一化。挂起恢复后 `event_data` 含审批结果，`switch` 据此分支。
 
 ## 提交申请（首次推进，挂起）
 
@@ -88,6 +89,8 @@ asyncio.run(approve(exec_id))
 
 ## 恢复流程
 
+`resume_type="event"` 只**消费事件并恢复挂起节点本身**——后续节点要用 `resume_type="continue"` 逐步推进（每次 `run_distributed` 推进一个节点）：
+
 ```python
 ctx = load_context(exec_id)
 step = execution.run_distributed(
@@ -97,6 +100,13 @@ step = execution.run_distributed(
     resume_type="event",
     resume_data={"approved": True, "comment": "同意"},
 )
+print(step["id"])       # => "approve"（事件已消费，event_data 已写入）
+
+# 继续推进：switch 分支 -> end，每次一个节点
+while not step["is_end"]:
+    step = execution.run_distributed(
+        flow, None, saved_context=step["context"], resume_type="continue",
+    )
 print(step["result"])   # => "已批准"
 assert step["is_end"] is True
 ```

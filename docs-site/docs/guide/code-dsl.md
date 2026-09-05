@@ -22,7 +22,7 @@ flowchart LR
 ```python
 from plaita.dsl.codeflow import flow, F, NODE, MAP, HTTP, ErrorHandler
 
-@flow("create_user", input_type="object", desc="创建用户")
+@flow("create_user", desc="创建用户")
 def create_user(INPUT):
     if INPUT.age >= 18:
         resp = HTTP.post(
@@ -42,6 +42,10 @@ create_user.run(name="alice", age=20)
 - **写起来就是纯 Python**：有补全、有类型、写错编译期就报。
 - **`INPUT` / `F` / `HTTP` 这些名字不需要 import**——它们在函数体里只是语法占位，AST 编译期被识别，运行期不会真正查这几个名字（可选 import 仅用于 IDE 提示）。
 - **编译产物仍是 `Flow` IR**，与 JSON/YAML/Builder 完全等价。
+
+!!! note "input_type / output_type 已废弃"
+
+    `@flow` / `@childflow` 的 `input_type` / `output_type` 参数**已废弃且被忽略**：`$INPUT` 恒为 `run()` 传入的 dict，无需声明。示例统一写作 `@flow("id")`；旧代码里写了也会被忽略（`flow_from_source` 路径发 `DeprecationWarning`，直接装饰器调用会 `TypeError`）。
 
 ### 表达式映射
 
@@ -91,7 +95,7 @@ create_user.run(name="alice", age=20)
 ### if / elif / else、return、赋值
 
 ```python
-@flow("grade", input_type="object")
+@flow("grade")
 def grade(INPUT):
     if INPUT.score >= 90:
         return "A"
@@ -106,7 +110,7 @@ grade.run(score=95)   # -> "A"
 赋值会生成 `assignment` 节点，后续用变量名引用其输出：
 
 ```python
-@flow("greet", input_type="object")
+@flow("greet")
 def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)
@@ -120,7 +124,7 @@ greet.run(name="alice")   # -> "hi ALICE"
 `map` / `filter` / `find` / `loop` 用 `for x in MAP(...)` 语法，子流程直接写在函数体里：
 
 ```python
-@flow("double_numbers", input_type="object")
+@flow("double_numbers")
 def double_numbers(INPUT):
     for x in MAP(INPUT.numbers, id="dbl"):
         return F.mul(x, 2)
@@ -132,7 +136,7 @@ double_numbers.run(numbers=[1, 2, 3, 4])   # -> [2, 4, 6, 8]
 `filter` / `find` 的子流程需要返回 bool，惯例是 `if ... return True` / `return False`：
 
 ```python
-@flow("first_even", input_type="object")
+@flow("first_even")
 def first_even(INPUT):
     for x in FIND(INPUT.nums, id="fd"):
         if F.mod(x, 2) == 0:
@@ -150,11 +154,11 @@ first_even.run(nums=[1, 3, 4, 6])   # -> 4
 ```python
 from plaita.dsl.codeflow import flow, childflow, CHILD, F
 
-@childflow(input_type="object")
+@childflow()
 def double_each(INPUT):
     return F.mul(INPUT.item, 2)
 
-@flow("double_via_child", input_type="object")
+@flow("double_via_child")
 def double_via_child(INPUT):
     r = CHILD(input={"item": INPUT.payload}, flow=double_each)
     return r
@@ -162,7 +166,7 @@ def double_via_child(INPUT):
 double_via_child.run(payload=21)   # -> 42
 ```
 
-> `CHILD` 的 `input` 要匹配子流程的 `input_type`：`object` 就传 dict，`array` 就传 list。
+> `CHILD` 的 `input` 要与子流程的输入形态匹配：`$INPUT` 恒为 dict，`input` 就传 dict。
 
 ### 编译期校验
 
@@ -189,7 +193,7 @@ print(compile_func(create_user.__wrapped__, "create_user"))
 `@flow` 不止能调内置占位符。任何注册到 `NodeRegistry` 的自定义 `Node` 子类，都能在源码里用 **`node_type` 大写化** 的名字作为占位符调用。这让 AI 生成的 `@flow` 可以直接用业务自定义动作节点（LLM、检索、工具、领域 action），而不必降级到 JSON IR。
 
 ```python
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 from plaita import Node
 from plaita.node import get_default_registry
@@ -204,7 +208,17 @@ class LLMNode(Node):
         prompt = execution.evaluate(self.prompt) if self.prompt else ""
         ...
 
+class RetrieveNode(Node):
+    node_type: ClassVar[str] = "retrieve"
+    query: Optional[Any] = None
+    library: Optional[str] = None
+    top_k: int = 3
+    def execute(self, execution):
+        q = execution.evaluate(self.query)
+        return [f"doc:{q}#{i}" for i in range(self.top_k)]   # 演示用假检索
+
 get_default_registry().register(LLMNode)
+get_default_registry().register(RetrieveNode)
 
 src = '''
 @flow("answer", desc="带资料回答")
@@ -263,11 +277,11 @@ except NodeExecutionError as e:
 from plaita.dsl.codeflow import flow_from_source
 
 src = '''
-@childflow(input_type="object")
+@childflow()
 def double_each(INPUT):
     return F.mul(INPUT.item, 2)
 
-@flow("double_via_child", input_type="object")
+@flow("double_via_child")
 def double_via_child(INPUT):
     r = CHILD(input={"item": INPUT.payload}, flow=double_each)
     return r
@@ -280,10 +294,11 @@ flow.run(payload=21)           # -> 42
 
 - 源码里可含多个函数：`@childflow` 装饰的子流程会被收集进注册表，供主流程用 `flow=<name>` 引用（不需要真正执行装饰器）。
 - 主流程是 `@flow` 装饰的函数，或唯一一个非 childflow 函数；有多个候选时用 `flow_from_source(src, flow_id="bar")` 指定。
-- `@flow("id", input_type=..., desc=...)` 装饰器参数会被自动提取；显式传给 `flow_from_source` 的同名参数覆盖装饰器值。
+- `@flow("id", desc=...)` 装饰器参数会被自动提取；显式传给 `flow_from_source` 的同名参数覆盖装饰器值。
+- `input_type` / `output_type` 参数**已废弃且被忽略**：`$INPUT` 恒为 `run()` 传入的 dict，无需声明。源码里若仍写了（如 AI 生成的旧式代码），编译期会发 `DeprecationWarning` 并忽略。
 - `compile_source(src)` 只编译成 IR dict 不构建，便于审查/序列化。
 
-> 装饰器参数只支持字面量（字符串、数字、dict 字面量）。若 `input_type` 写成 `{"age": int}` 这种含类型对象的非字面量，会被兜底成 `object`；需要精确类型时通过 `flow_from_source(src, input_type=...)` 显式传。
+> 装饰器参数只支持字面量（字符串、数字、dict 字面量），非字面量参数会被跳过。
 
 ### Agent 编排：把 `flow_from_source` 当输出沙箱
 

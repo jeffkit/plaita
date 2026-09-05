@@ -225,7 +225,8 @@ enable_replay_protection()
 **变更后**：`Flow` 只解析结构，`nodes` 字段保留为原始 dict；节点解析延迟到执行期 `Flow.resolve_nodes(registry)`。`Flow.from_string` / `from_file` / `Flow.model_validate` 默认仍调一次 `resolve_nodes(get_default_registry())`，**99% 用户用法不变**。
 
 **迁移**：一般无需改动。仅当**自定义 registry** 或**在 import 期注册节点**时：
-- 显式传 registry：`FlowExecution(flow, registry=my_registry)` 或 `flow.resolve_nodes(my_registry)`。
+- 解析期显式传 registry：`Flow.from_string(content, registry=my_registry)` / `Flow.from_file(path, registry=my_registry)` / `Flow.model_validate(data, registry=my_registry)`，或对已解析对象调 `flow.resolve_nodes(my_registry)`。
+- 也可实例化 `FlowExecution(registry=my_registry)`（注意第一位置参数是 parent execution，不是 flow），再调用其 `run_compatible` / `run_distributed`。
 - 不再依赖"import 期注册的节点立刻对 `Flow.from_string` 生效"——确保注册发生在 `Flow` 解析之前（`init_default_registry()` 是推荐入口，见下条）。
 
 ### 5. `init_default_registry()` 显式初始化入口
@@ -245,14 +246,18 @@ register_code_node(default_backend="docker")  # 按需 opt-in CodeNode
 ### 6. `execution.mode` 内部类型 str → `ExecutionMode` enum
 
 **变更前**：`execution.mode` 是裸字符串（`"normal"`/`"generator"`/`"distributed"`），全库散落 `mode == "generator"` 字符串比较——拼写错误静默成 `False`。
-**变更后**：内部类型 `Optional[ExecutionMode]`，比较一律走 enum。**公共入口仍接受字符串**：`Flow.run(mode="generator")` / `FlowExecution(mode="generator")` / `execution.mode = "generator"` 在边界处经 `_coerce_mode` 统一一次。
+**变更后**：内部类型 `Optional[ExecutionMode]`，比较一律走 enum。**公共入口仍接受字符串**：`FlowExecution(mode="generator")` / `execution.mode = "generator"` / `FlowExecution.run(flow, mode="generator")` 在边界处经 `_coerce_mode` 统一一次。注意 `Flow.run()` / `flow.debug()` **没有** `mode` 参数（`flow.run(mode=...)` 会把 `mode` 当作输入 dict 的一个键）——生成器模式请用 `flow.debug()`。
 
 ```python
 from plaita.core.executor import ExecutionMode
 
 # 这两种写法等价 (公共入口接受字符串):
-flow.run(mode="generator")
-flow.run(mode=ExecutionMode.GENERATOR)
+FlowExecution.run(flow, mode="generator")
+FlowExecution.run(flow, mode=ExecutionMode.GENERATOR)
+
+# 同步生成器单步调试的便捷写法 (等价于上面的 generator 模式):
+for step in flow.debug():
+    ...
 
 # 节点插件内部比较改 enum (若你直接读 execution.mode):
 if execution.mode == ExecutionMode.GENERATOR:   # 0.5.0

@@ -113,7 +113,7 @@ flow_worker 自动带上密钥环境。
 
 节点能力三来源：
 
-1. **内置 22 种**（start / if / switch / loop / map / http / event / parallel 等）——随引擎自带
+1. **内置 23 种**（start / if / switch / loop / while / map / http / event / parallel 等）——随引擎自带（含经 entry_points 自动注册的 delay / approval / redis_queue / kafka_queue / http_callback 扩展节点）
 2. **插件包** `pip install plaita-nodes`——agentrun / hitl / gate 等，经
    `plaita.nodes` entry-points 自动注册
 3. **自定义**——参照[自定义节点](../nodes/custom.md)编写后，以同样机制打包分发

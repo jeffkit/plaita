@@ -60,10 +60,10 @@ Handler 注册（`register_handler`）另走 `EventBus.matches_event_type`，**�
 | sqlalchemy | `plaita.event.sqlalchemy` | `server` | **experimental**；factory 需 env 门闩 |
 
 ```python
-from plaita.event.memory import MemoryEventBus
+from plaita.event.memory import InMemoryEventBus
 # from plaita.event.redis import RedisEventBus  # 需 redis extra
 
-bus = MemoryEventBus()
+bus = InMemoryEventBus()
 execution = FlowExecution(event_bus=bus)
 ```
 

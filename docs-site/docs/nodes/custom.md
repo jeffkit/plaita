@@ -166,6 +166,9 @@ class SafeNode(Node):
 仓库里的 `examples/agent/` 给出三个**开箱即跑**的 LLM 相关节点（`LLMNode` 调 LLM、`ToolNode` 注册 Python 函数为工具、`RetrieverNode` 内存检索），并串成 RAG / Tool-use / Router 三个端到端 Agent 案例。内置 `FakeLLM` 无需 API key 即可运行，也可换真实 LLM。
 
 ```bash
+# examples/ 不随 wheel 分发，需 clone 仓库后在仓库根目录运行
+git clone https://github.com/jeffkit/plaita.git
+cd plaita
 python -m examples.agent.demo
 ```
 

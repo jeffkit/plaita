@@ -10,7 +10,7 @@
 | 引用某节点的输出 | `$NODE.节点id` | `"$NODE.assign"` |
 | 调用内置函数 | `$F.函数名(参数)` | `"$F.upper($INPUT.name)"` |
 | 字符串中嵌入变量 | `{% $INPUT.字段名 %}` | `"你好，{% $INPUT.name %}"` |
-| 引用环境变量 | `$ENV.变量名` | `"$ENV.API_KEY"` |
+| 引用环境变量 | `$ENV.变量名` | `"$ENV.API_BASE"`（须在 `exposeEnv` 白名单内） |
 
 ---
 
@@ -31,13 +31,29 @@
 | `$NODE.assign.field` | 节点 `assign` 输出的 `field` 字段 |
 | `$GLOBAL.key` | 全局上下文变量 |
 | `$PARENT.x` | 父流程上下文（子流程中可用） |
-| `$ENV.PATH` | 环境变量 `PATH` |
+| `$ENV.key` | 环境变量 `key`（须在 Flow 的 `exposeEnv` 白名单内声明，见下文） |
 
 支持的命名空间由 `ExecutionContext` 维护：`INPUT` / `NODE` / `GLOBAL` / `PARENT` / `ENV`。命名空间名本身可通过 `express_input_name` 等参数自定义。
 
-!!! note "$ENV 自动过滤敏感变量"
+!!! warning "$ENV 采用 allowlist 模型：不声明就读不到"
 
-    出于安全，plaita 在初始化 `$ENV` 时会过滤掉以 `SECRET` / `TOKEN` / `PASSWORD` / `API_KEY` / `CREDENTIAL` / `DATABASE_` 等前缀开头的环境变量，避免敏感信息泄漏到流程上下文。
+    0.4.0 起 `$ENV` 是**白名单（allowlist）模型**，且**不存在任何敏感前缀自动过滤**：
+
+    - 默认情况下流程**一个环境变量都读不到**——`$ENV.XXX` 解析不到值。
+    - Flow 必须显式声明 `exposeEnv`（JSON/YAML，Python 侧 `expose_env`）后才可读：
+
+      ```json
+      { "flow_id": "demo", "exposeEnv": ["HOME", "API_BASE"], "nodes": [ ... ] }
+      ```
+
+      ```python
+      Flow(flow_id="demo", expose_env=["HOME", "API_BASE"], ...)
+      ```
+
+    - 未声明时，0.5.0 起解析期会 `logger.warning` 一次列出被引用的 key 名与修复指引（不报错，让沉默变可见）。
+    - allowlist 命中即暴露，请自行确认列表里没有不该暴露的密钥。
+
+    升级迁移与 0.4.0 的行为对照见 [迁移指南](../reference/migration-guide.md)。
 
 ### 数组索引
 

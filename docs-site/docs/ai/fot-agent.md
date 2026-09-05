@@ -163,7 +163,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from plaita_ai.agent.fot import FoTAgent
 
 FLOW = '''```python
-@flow("greet", input_type="object")
+@flow("greet")
 def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)

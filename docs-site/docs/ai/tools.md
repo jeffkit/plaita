@@ -54,7 +54,7 @@ flowchart TB
     每个工具会注册独立 `node_type`（snake_case），占位符为大写：
 
     ```python
-    @flow("demo", input_type="object")
+    @flow("demo")
     def demo(INPUT):
         user = GET_USER(user_id=INPUT.id)      # node_type=get_user
         weather = GET_WEATHER(city=INPUT.city)
@@ -64,7 +64,7 @@ flowchart TB
 === "通用 TOOL 节点（兼容）"
 
     ```python
-    @flow("demo", input_type="object")
+    @flow("demo")
     def demo(INPUT):
         user = TOOL(action="get_user", params={"user_id": INPUT.id})
         return user

@@ -97,7 +97,7 @@ print(flow.run(user_id=42))  # => 用户名（失败时 => "unknown"）
 from plaita import FlowExecution, FlowCallback
 
 class HttpTrace(FlowCallback):
-    def on_node_end(self, flow, node, result=None, error=None, **kwargs):
+    def on_node_end(self, flow, node, result, error, exception, **kwargs):
         if node.node_type == "http":
             print(f"http {node.id} -> status={result.get('status') if result else None} err={error}")
 
