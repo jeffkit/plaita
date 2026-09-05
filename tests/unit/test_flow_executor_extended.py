@@ -195,14 +195,14 @@ class TestEnforceDictInput(unittest.TestCase):
 
 class TestFlowParse(unittest.TestCase):
     def test_non_python_runtime_raises(self):
-        """Line 403: non-python runtime raises RuntimeError."""
+        """Line 403: non-python runtime raises ValueError (was RuntimeError)."""
         data = {
             "flow_id": "x",
             "version": "1",
             "runtime": "java",
             "nodes": [],
         }
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(ValueError) as cm:
             parse(data)
         self.assertIn("java", str(cm.exception))
 

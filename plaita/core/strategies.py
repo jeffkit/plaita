@@ -104,7 +104,13 @@ class ExecutionMode(Enum):
 
     @classmethod
     def from_string(cls, mode: str) -> "ExecutionMode":
-        return cls[mode.upper()]
+        try:
+            return cls[mode.upper()]
+        except KeyError:
+            valid = ", ".join(m.value for m in cls)
+            raise ValueError(
+                f"Unknown execution mode: {mode!r}. Valid modes: {valid}"
+            ) from None
 
 
 class ExecutionStrategy(Protocol):
@@ -166,19 +172,30 @@ class GeneratorStrategy:
         if next_node is None:
             raise FlowStartMissingError()
         reached_end = False
+        start_time = time.time()
 
         while next_node:
             current = next_node
+            remaining = None
+            if timeout_ms is not None:
+                remaining = max(0, timeout_ms - int((time.time() - start_time) * 1000))
             result, branch, next_node, reached_end = await _advance_one(
-                flow, runner, callback_manager, current,
+                flow, runner, callback_manager, current, max_timeout_ms=remaining,
             )
+            # End 节点这一步就是流程终点, is_end 必须为 True——历史上这里
+            # 恒为 False, 消费方按 ``step["is_end"]`` 判完成永远不触发
+            # (0.5.0 回归: docs/guide/execution-modes.md 的完成判断失效)。
             yield _create_lazy_output(
-                current, result, branch, context.to_dict(), execution_id=context.execution_id,
+                current, result, branch, context.to_dict(),
+                is_end=reached_end, execution_id=context.execution_id,
             )
             if reached_end:
                 break
 
             logger.debug("next_node: %s with branch: %s", next_node, branch)
+
+            if timeout_ms is not None and (time.time() - start_time) > timeout_ms / 1000:
+                raise FlowTimeoutError()
 
         if not reached_end:
             logger.debug("not reached_end: %s", next_node)
@@ -205,6 +222,29 @@ class DistributedStrategy:
 
         if saved_context and resume_type is not ResumeType.CONTINUE:
             return await self._handle_resume(flow, context, runner, callback_manager, resume_type, resume_data)
+
+        if saved_context and resume_type is ResumeType.CONTINUE:
+            # 防御: 挂起中的 EventNode 不允许用默认 ``continue`` 绕过——历史上
+            # 这条路会跳过 pending 校验直接推进到 End, 流程"正常完成", 事件
+            # 永不消费且订阅泄漏, 无任何报错。只有事件已被 resume 消费
+            # (状态不再是 pending) 后才允许 continue 推进后续节点。
+            last_node_id = context.last_node_id
+            if last_node_id:
+                suspended_node = flow.find_node_by_id(last_node_id)
+                # ``is True`` 而非真值判断: is_suspending 是 bool 属性, 需要滤掉
+                # mock/异构节点对象上的 truthy 属性代理。
+                if suspended_node is not None and getattr(suspended_node, "is_suspending", False) is True:
+                    pfx_resume = context.express_prefix
+                    node_results = context.get_state(f"{pfx_resume}{context.express_node_name}", {})
+                    prev_state = node_results.get(last_node_id) if isinstance(node_results, dict) else None
+                    status = prev_state.get("status", "") if isinstance(prev_state, dict) else ""
+                    if status == "pending":
+                        raise ResumeError(
+                            f"Execution is suspended at EventNode {last_node_id!r} (status=pending); "
+                            "resume_type='continue' would silently skip it. "
+                            "Use resume_type='event'/'cancel'/'timeout' to resolve the event first.",
+                            node=suspended_node,
+                        )
 
         current_node, result, branch = await self._determine_current_node(flow, context, runner, callback_manager)
 
@@ -323,7 +363,7 @@ class DistributedStrategy:
 # ---------------------------------------------------------------------------
 
 
-def _create_lazy_output(node, result, branch, context, is_suspend=False, execution_id=None):
+def _create_lazy_output(node, result, branch, context, is_suspend=False, execution_id=None, is_end=False):
     return {
         "id": node.id,
         "type": node.node_type,
@@ -331,7 +371,7 @@ def _create_lazy_output(node, result, branch, context, is_suspend=False, executi
         "result": result,
         "branch": branch or "",
         "context": context,
-        "is_end": False,
+        "is_end": is_end,
         "is_suspend": is_suspend,
         "execution_id": execution_id,
     }

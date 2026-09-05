@@ -5,7 +5,7 @@ Migrated from plaita/errors.py (which is now a compatibility shim).
 """
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -207,7 +207,10 @@ class ErrorHandler(BaseModel):
     """
 
     strategy: ErrorStrategy = Field(ErrorStrategy.ABORT)
-    default_value: Optional[dict] = Field(None, alias="defaultValue")
+    # Any 而非 dict: 文档承诺 "continue_with 用 defaultValue 作为本节点输出",
+    # 标量/字符串是最自然的写法; 历史上限定 dict 让文档示例
+    # ({"defaultValue": "fallback"}) 直接 ValidationError。
+    default_value: Optional[Any] = Field(None, alias="defaultValue")
     error_code: Optional[int] = Field(-9527, alias="code")
     error_message: Optional[str] = Field(None, alias="message")
 

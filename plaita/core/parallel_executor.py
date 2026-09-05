@@ -27,6 +27,7 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, wait
 from concurrent.futures.process import ProcessPoolExecutor
 from multiprocessing import Lock as ProcessLock
@@ -37,6 +38,23 @@ logger = logging.getLogger(__name__)
 
 THREAD = "thread"
 PROCESS = "process"
+
+# ---------------------------------------------------------------------------
+# 嵌套提交死锁防护
+# ---------------------------------------------------------------------------
+# ``BackGroundThreadPool`` 是模块级单例。若一个任务**本身跑在该池的 worker 线程
+# 上**, 又向同一个池提交分支并原地阻塞等待 (Parallel join / Map.concurrent),
+# 则当并发分支数 >= max_workers 时: 所有 worker 都在阻塞等各自的子 future,
+# 子 future 排在队列里永远轮不到 —— 无超时、无报错的永久死锁。
+# 防护: ``ThreadParallelExecutor._wrap`` 在任务执行期间给线程打 thread-local
+# 标记; 节点层 (Parallel.pool_execute / Map._build_executor) 检测到"自己正跑
+# 在池 worker 上"就降级为串行执行, 不再向共享池提交。
+_pool_tls = threading.local()
+
+
+def in_plaita_pool_thread() -> bool:
+    """当前线程是否正在执行 ``ThreadParallelExecutor`` 提交的任务。"""
+    return getattr(_pool_tls, "in_pool", False)
 
 # 后台分支是 fire-and-forget (submit 后不持 future 引用, 不取结果)。模块级单例池
 # 的 max_workers 取自环境变量, 默认 thread 8 / process = cpu 数。pytest / Jupyter /
@@ -168,6 +186,9 @@ class ThreadParallelExecutor(_BaseExecutor):
     ``max_workers`` 给定时用 semaphore 限并发 (而非新开池), 用于 ``Map.max_concurrent``。
     ``supports_cancel_propagation=True``: ``cancel_event`` 是 ``threading.Event``,
     线程间共享, 父超时/取消能传到分支。
+
+    提交的任务执行期间线程会打上 ``in_plaita_pool_thread()`` 标记, 供嵌套的
+    Parallel/Map 检测并降级串行——见模块头"嵌套提交死锁防护"。
     """
 
     def __init__(
@@ -179,6 +200,18 @@ class ThreadParallelExecutor(_BaseExecutor):
         super().__init__(max_workers=max_workers)
         self._pool = pool or BackGroundThreadPool
         self._lock = Lock()
+
+    def _wrap(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+        wrapped = super()._wrap(fn)
+
+        def _marked(*args: Any, **kwargs: Any) -> Any:
+            _pool_tls.in_pool = True
+            try:
+                return wrapped(*args, **kwargs)
+            finally:
+                _pool_tls.in_pool = False
+
+        return _marked
 
     @property
     def supports_cancel_propagation(self) -> bool:

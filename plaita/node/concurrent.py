@@ -10,6 +10,7 @@ from plaita.core.parallel_executor import (
     BackGroundProcessPool,  # re-export for backward compat (历史调用方从本模块导入)
     BackGroundThreadPool,
     ParallelExecutor,
+    in_plaita_pool_thread,
     make_executor,
 )
 from plaita.node import Node
@@ -167,8 +168,45 @@ class Parallel(Node):
         if executor is None:
             return {}
 
+        if mode == THREAD and in_plaita_pool_thread() and (join_branches or background_branches):
+            # 本节点已跑在共享线程池的 worker 上: 再向同一池提交并阻塞 join,
+            # 分支数 >= max_workers 时所有 worker 互相等待, 永久死锁。降级为
+            # 串行内联执行 (正确性优先, 仅嵌套场景放弃并发)。
+            return self._execute_nested_inline(join_branches, background_branches, execution)
+
         self._execute_background_branches(background_branches, executor, execution)
         return self._execute_join_branches(join_branches, executor, execution)
+
+    def _execute_nested_inline(self, join_branches, background_branches, execution) -> Dict[str, Any]:
+        """池 worker 线程上的串行降级路径。
+
+        background 分支保持"失败留痕不抛"的容错语义; join 分支保持
+        ``_process_future_result`` 的错误哨兵结构, 但全部在当前线程顺序执行。
+        """
+        logger.debug(
+            "parallel %s: on a plaita pool worker thread; executing %d join + %d background "
+            "branches inline (nested shared-pool submission would starve)",
+            self.id, len(join_branches), len(background_branches),
+        )
+        results: Dict[str, Any] = {}
+        for branch in background_branches:
+            try:
+                self.exec_branch(branch, execution)
+            except Exception as exc:  # noqa: BLE001 - 与 background done_callback 同语义
+                logger.warning("parallel background branch %r raised: %s", branch.name, exc, exc_info=True)
+                state = _get_bg_state(execution)
+                with _BG_LOCK:
+                    state["errors"].append({"branch": branch.name, "error": str(exc)})
+        for branch in join_branches:
+            try:
+                results[branch.name] = self.exec_branch(branch, execution)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("parallel branch %s raised: %s", branch.name, exc, exc_info=True)
+                results[branch.name] = {
+                    "__parallel_error__": str(exc),
+                    "__branch__": branch.name,
+                }
+        return results
 
     def _split_branches(self, branches):
         join_branches = [b for b in branches if b.name in self.join_branches]

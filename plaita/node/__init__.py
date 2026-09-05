@@ -6,8 +6,8 @@ node types.  A module-level default registry is created at import time
 and populated with all built-in nodes plus any nodes discovered via
 ``importlib.metadata`` entry_points (group ``plaita.nodes``).
 
-Backward-compatible helpers (``nodes``, ``node_register``, ``parse_node``)
-are preserved but emit ``DeprecationWarning``.
+Backward-compatible helpers (``node_register``, ``parse_node``) emit
+``DeprecationWarning``; the ``nodes`` dict proxy is still silent.
 """
 
 from __future__ import annotations
@@ -90,7 +90,21 @@ class NodeRegistry:
     # -- public API ---------------------------------------------------------
 
     def register(self, node_cls: Type[Node]) -> Type[Node]:
-        """Register a node class. Returns *node_cls* so it can be used as a decorator."""
+        """Register a node class. Returns *node_cls* so it can be used as a decorator.
+
+        覆盖已注册的**不同**类时发 warning——历史上静默顶掉（包括劫持内置
+        ``start``/``end`` 等类型），排查时完全无线索。同类型重复注册（如
+        importlib 重复加载场景）不告警。
+        """
+        existing = self._nodes.get(node_cls.node_type)
+        if existing is not None and existing is not node_cls:
+            _logger.warning(
+                "NodeRegistry.register: node_type %r is being overridden: "
+                "%s -> %s. If this is unintentional, pick a different node_type.",
+                node_cls.node_type,
+                f"{existing.__module__}.{existing.__qualname__}",
+                f"{node_cls.__module__}.{node_cls.__qualname__}",
+            )
         self._nodes[node_cls.node_type] = node_cls
         return node_cls
 

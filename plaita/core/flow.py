@@ -195,14 +195,18 @@ class Flow(BaseModel):
                 self.flow_id, sorted(refs), sorted(refs),
             )
 
-    @staticmethod
-    def from_string(content: str) -> Flow:
+    @classmethod
+    def from_string(cls, content: str, *, registry: Optional["NodeRegistry"] = None) -> "Flow":
         """从 JSON 或 YAML 字符串解析 Flow。
 
         JSON 走 ``model_validate_json``；YAML（及无法按 JSON 解析的内容）
         走 ``plaita.io_format.loads`` 再 ``model_validate``。
         JSON 解析失败时把原始异常作为 cause 保留，避免真正的报错被
         YAML fallback 的次级报错淹没。
+
+        ``registry=`` 可注入自定义 ``NodeRegistry`` 解析节点（与
+        ``model_validate``/``resolve_nodes`` 对齐）；不传时用
+        ``get_default_registry()``。
         """
         from plaita.io_format import loads
 
@@ -211,25 +215,30 @@ class Flow(BaseModel):
         # 优先 JSON，保持历史行为与错误信息
         if content.lstrip()[:1] in ("{", "["):
             try:
-                return Flow.model_validate_json(content)
+                flow = cls.model_validate_json(content, registry=registry)
             except ValueError as json_err:
                 # 不要静默吞掉 JSON 报错——若 YAML fallback 也失败，
                 # 把原始 JSON 异常作为 cause 一并抛出，方便定位真凶。
                 try:
                     data = loads(content)
-                    return Flow.model_validate(data)
+                    flow = cls.model_validate(data, registry=registry)
                 except Exception:
                     raise json_err
+            return flow
         data = loads(content)
-        return Flow.model_validate(data)
+        return cls.model_validate(data, registry=registry)
 
     @classmethod
-    def from_file(cls, path: str) -> "Flow":
-        """从文件加载 Flow，按后缀（.json/.yaml/.yml）选择解析器。"""
+    def from_file(cls, path: str, *, registry: Optional["NodeRegistry"] = None) -> "Flow":
+        """从文件加载 Flow，按后缀（.json/.yaml/.yml）选择解析器。
+
+        ``registry=`` 语义同 :meth:`from_string`。
+        """
         from plaita.io_format import load_file
 
         data = load_file(path)
-        return cls.model_validate(data)
+        flow = cls.model_validate(data, registry=registry)
+        return flow
 
     def _ensure_index(self) -> Dict[str, Node]:
         """构建/刷新节点 id 索引, O(n) 摊销。
@@ -400,7 +409,10 @@ def parse(content: Union[str, dict]) -> Optional[Flow]:
         data = content
     runtime = data.get("runtime", "python")
     if runtime != "python":
-        raise RuntimeError(f"UnSupport runtime：{runtime}")
+        raise ValueError(
+            f"Unsupported runtime: {runtime!r}. plaita only executes 'python' flows; "
+            "use a matching engine for other runtimes."
+        )
     return Flow.model_validate(data)
 
 

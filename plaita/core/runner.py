@@ -178,8 +178,21 @@ class NodeRunner:
         max_timeout_ms: Optional[int],
     ) -> Any:
         error_handler = node.error_handler
-        max_retries = error_handler.retry_times if error_handler else 0
+        # retryTimes 配成负数时 range(max_retries+1) 为空, 循环体一次不跑直接
+        # 落到 _get_error_result——abort 策略下错误被静默吞掉, 流程"成功"结束。
+        # 钳到 >=0 保证至少执行一次, 错误走正常的 _handle_node_error 分发。
+        max_retries = max(0, error_handler.retry_times if error_handler else 0)
         config_timeout = self._parse_timeout(node.timeout)
+
+        # cancel_event 的作用域是**当前节点**: 上一个节点超时置位的 cancel 信号
+        # 在进入本节点前必须复位——否则本次运行后续所有消费该标志的 process
+        # 模式 Parallel 会静默跳过全部分支, 流程带着空结果"成功"结束。
+        # (被超时遗弃的上一个节点的线程不受影响: 它丢弃的是结果, 不再消费该标志。)
+        exec_ctx = self.node_execution or self.context
+        cancel_event = getattr(exec_ctx, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            logger.debug("resetting cancel_event carried over from a previous node before running %s", node.id)
+            cancel_event.clear()
 
         total_timeout_ms: Optional[int] = None
         if config_timeout:

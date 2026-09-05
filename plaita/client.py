@@ -8,9 +8,26 @@ from time import time
 from typing import Any, Dict, Optional, Union
 from urllib.parse import urlencode
 
-import requests
+try:
+    import requests
+except ImportError as _req_err:  # pragma: no cover - 取决于安装的 extras
+    requests = None
+    _REQUESTS_IMPORT_ERROR = _req_err
 
 from plaita.core.flow import Flow
+
+# PlaitaClient 错误类型: 历史上网络/HTTP/业务失败全部抛裸 Exception,
+# 调用方无法分类捕获。新异常类型均继承 Exception, 老的 ``except Exception`` 不受影响。
+class PlaitaClientError(Exception):
+    """PlaitaClient 请求/响应失败基类。"""
+
+
+class PlaitaClientNetworkError(PlaitaClientError):
+    """网络层失败: 超时、连接错误等。"""
+
+
+class PlaitaClientResponseError(PlaitaClientError):
+    """服务端响应异常: 非 200、非 JSON、业务 code 非零、数据为空等。"""
 
 # 获取logger
 logger = logging.getLogger("plaita.client")
@@ -228,7 +245,9 @@ class PlaitaClient:
             流程执行结果
         """
         flow = self.get_flow(flow_id, version)
-        return flow.run(input_data)
+        # input_data=None 时必须传 {} 而非 None: Flow.run 对位置参数强制 dict
+        # (传 None 会 TypeError), 而 Optional 签名承诺了可省略。
+        return flow.run(input_data or {})
 
     def get_flow(self, flow_id: str, version: str) -> Flow:
         """
@@ -327,6 +346,25 @@ class PlaitaClient:
                     self._redis_client.delete(cache_key)
                 except Exception as e:
                     logger.warning("清除 Redis 缓存失败: %s", e)
+        elif flow_id:
+            # 只给 flow_id 不给 version: 只清该 flow 的所有版本。
+            # 历史上这里落入"清空全部"分支, 部分指定参数的语义变成了全清。
+            prefix = f"flow:{flow_id}:"
+            with self.memory_cache_lock:
+                stale = [k for k in self.memory_cache if k.startswith(prefix)]
+                for k in stale:
+                    del self.memory_cache[k]
+                cleared_count = len(stale)
+            
+            if self._redis_available and self._redis_client:
+                try:
+                    keys = list(self._redis_client.keys(f"{prefix}*"))
+                    if keys:
+                        self._redis_client.delete(*keys)
+                        cleared_count += len(keys)
+                except Exception as e:
+                    logger.warning("清除 Redis 缓存失败: %s", e)
+            logger.info("已清除 flow %s 的 %s 个缓存项", flow_id, cleared_count)
         else:
             # 清除所有缓存
             with self.memory_cache_lock:
@@ -362,30 +400,35 @@ class PlaitaClient:
         }
         headers.update(self.headers)  # 合并额外的请求头
         
+        if requests is None:
+            raise PlaitaClientError(
+                "PlaitaClient requires the 'requests' package which is not installed. "
+                "Install it with: pip install plaita[http] (or pip install requests)"
+            ) from _REQUESTS_IMPORT_ERROR
         try:
             response = requests.post(self.url, headers=headers, data=data, timeout=30)
         except requests.exceptions.Timeout:
-            raise Exception(f"请求超时: flow_id={flow_id}, version={version}")
+            raise PlaitaClientNetworkError(f"请求超时: flow_id={flow_id}, version={version}")
         except requests.exceptions.RequestException as e:
-            raise Exception(f"请求失败: {e}")
+            raise PlaitaClientNetworkError(f"请求失败: {e}")
         
         if response.status_code != 200:
-            raise Exception(f"获取流程配置失败, HTTP状态码: {response.status_code}")
+            raise PlaitaClientResponseError(f"获取流程配置失败, HTTP状态码: {response.status_code}")
         
         try:
             response_data = response.json()
         except json.JSONDecodeError:
-            raise Exception("响应数据不是有效的 JSON 格式")
+            raise PlaitaClientResponseError("响应数据不是有效的 JSON 格式")
         
         if response_data.get("code"):
-            raise Exception(f"获取流程配置失败: {response_data.get('message', '未知错误')}")
+            raise PlaitaClientResponseError(f"获取流程配置失败: {response_data.get('message', '未知错误')}")
         
         if response_data.get("data") is None:
-            raise Exception("获取流程配置失败: 响应数据为空")
+            raise PlaitaClientResponseError("获取流程配置失败: 响应数据为空")
 
         flow_str = response_data["data"].get("flow")
         if not flow_str:
-            raise Exception("获取流程配置失败: flow 字段为空")
+            raise PlaitaClientResponseError("获取流程配置失败: flow 字段为空")
         
         logger.debug("成功获取流程定义: flow_id=%s, version=%s", flow_id, version)
         return json.loads(flow_str)
@@ -413,6 +456,13 @@ def generate_signature(
     Returns:
         str: URL 编码的签名字符串
     """
+    if signature_validity < DEFAULT_SIGNATURE_EXPIRATION:
+        # 安全是用户责任: 用户明确要求 1 秒有效期却被静默改成 3 秒不可接受;
+        # 抬到下限的同时必须把改写大声说出来。
+        logger.warning(
+            "signature_validity=%ss is below the %ss floor; it has been raised to %ss.",
+            signature_validity, DEFAULT_SIGNATURE_EXPIRATION, DEFAULT_SIGNATURE_EXPIRATION,
+        )
     signature_validity = max(DEFAULT_SIGNATURE_EXPIRATION, signature_validity)
 
     sign_expire = sign_time + signature_validity

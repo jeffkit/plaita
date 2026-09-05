@@ -1,7 +1,8 @@
 import asyncio
+import json
 import logging
 from copy import deepcopy
-from typing import Annotated, Any, ClassVar, Dict, Optional, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import Field, model_validator
 
@@ -9,6 +10,7 @@ from plaita.core.parallel_executor import (
     ParallelExecutor,
     SequentialExecutor,
     ThreadParallelExecutor,
+    in_plaita_pool_thread,
 )
 
 from ..io import Property
@@ -17,6 +19,36 @@ from .child import InlineFlow
 from .decide import Condition, ConditionGroup
 
 _logger = logging.getLogger(__name__)
+
+
+def _coerce_collection(value: Any) -> List[Any]:
+    """把 ``collection`` 表达式的求值结果归一成可迭代列表。
+
+    字符串按 JSON 数组字面量解析（字段描述宣称"也可为字面量数组"，而表达式
+    引擎不解析数组字面量、原样返回字符串——历史上 ``"[1,2,3]"`` 会被 ``list()``
+    拆成 3 个单字符"元素"，子流程对每个字符各跑一遍，结果集完全错误）；不是
+    JSON 数组的普通字符串按单元素集合处理，同样不再逐字符迭代。
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, (list, tuple)):
+                return list(parsed)
+        _logger.warning(
+            "collection expression evaluated to a plain string; treating it as a "
+            "single-element collection instead of iterating characters: %r",
+            value if len(value) < 80 else value[:77] + "...",
+        )
+        return [value]
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return list(value)
 
 
 class BaseCollectionNode(InlineFlow):
@@ -42,6 +74,9 @@ class BaseCollectionNode(InlineFlow):
             values["item_type"] = Property.from_json(type_defs)
         return values
 
+    def _eval_collection(self, execution) -> List[Any]:
+        return _coerce_collection(execution.evaluate(self.collection))
+
 
 class Loop(BaseCollectionNode):
     """
@@ -58,7 +93,7 @@ class Loop(BaseCollectionNode):
     condition: Optional[Union[Condition, ConditionGroup]] = None
 
     def execute(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         results = []
         pfx = execution.express_prefix
         index = 0
@@ -77,7 +112,7 @@ class Loop(BaseCollectionNode):
         return results[-1] if len(results) > 0 else None
 
     async def arun(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         results = []
         pfx = execution.express_prefix
         index = 0
@@ -125,11 +160,19 @@ class Map(BaseCollectionNode):
 
     def _build_executor(self) -> ParallelExecutor:
         if self.concurrent:
+            if in_plaita_pool_thread():
+                # 已在共享线程池 worker 上: 再向同一池提交会 starving 死锁
+                # (见 parallel_executor 模块头), 降级串行。
+                _logger.debug(
+                    "map %s: on a plaita pool worker thread; degrading to sequential",
+                    self.id,
+                )
+                return SequentialExecutor()
             return ThreadParallelExecutor(max_workers=self.max_concurrent or None)
         return SequentialExecutor()
 
     def execute(self, execution):
-        collection = list(execution.evaluate(self.collection))
+        collection = self._eval_collection(execution)
 
         # 子执行体在主线程预先创建 (与历史并发路径行为一致), 避免 worker 线程
         # 并发调 ``get_child_execution`` 触发 ``callback_manager.child()`` 的潜在
@@ -148,7 +191,7 @@ class Map(BaseCollectionNode):
 
     async def arun(self, execution):
         """异步 Map：concurrent=True 时用 asyncio.gather 并发，否则顺序执行。"""
-        collection = list(execution.evaluate(self.collection))
+        collection = self._eval_collection(execution)
         triples = [
             (execution.get_child_execution(), item, index)
             for index, item in enumerate(collection)
@@ -184,7 +227,7 @@ class Filter(BaseCollectionNode):
     node_name: ClassVar[str] = "过滤"
 
     def execute(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         results = []
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
@@ -194,7 +237,7 @@ class Filter(BaseCollectionNode):
         return results
 
     async def arun(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         results = []
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
@@ -216,7 +259,7 @@ class Find(BaseCollectionNode):
     node_name: ClassVar[str] = "查找"
 
     def execute(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
             result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
@@ -225,7 +268,7 @@ class Find(BaseCollectionNode):
         return None
 
     async def arun(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
             result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
@@ -250,7 +293,7 @@ class Reduce(BaseCollectionNode):
     ] = None
 
     def execute(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
         array_input = self._child_is_array_input()
@@ -267,7 +310,7 @@ class Reduce(BaseCollectionNode):
         return result
 
     async def arun(self, execution):
-        collection = execution.evaluate(self.collection)
+        collection = self._eval_collection(execution)
         result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
         array_input = self._child_is_array_input()

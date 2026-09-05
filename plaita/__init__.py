@@ -162,14 +162,25 @@ def __getattr__(name: str):
 
 
 def __dir__():
-    """Make lazy re-exports discoverable by IDEs / ``dir(plaita)``."""
+    """Make lazy re-exports discoverable by IDEs / ``dir(plaita)``.
+
+    故意**不含** ``_FEATURE_EXTRAS_MAP`` 里的名字（``CodeNode``/``HTTP`` 等）：
+    pydoc 的 ``help(plaita)`` 会对 ``__dir__`` 结果逐个 ``getattr``，缺 extra 时
+    这些名字抛出的 ImportError 会打断整个 help 输出（只剩一行报错）。它们不在
+    ``__all__`` 里，``from plaita import *`` 也不会因缺 extra 失败。
+    """
     return sorted(
         set(globals())
         | set(_LAZY_EXPORTS)
-        | set(_FEATURE_EXTRAS_MAP)
         | {"types"}
     )
 
 
-if __name__ == "__main__":
+# 显式 __all__: 0.5.0 前顶层无 __all__, ``from plaita import *`` 得到空集。
+# 只含开箱即用的名字——feature-gated（CodeNode/HTTP/Redis* 等）不进 __all__,
+# 否则缺 extra 的进程 star-import 直接崩; 这些名字的获取方式见 docs 的 extras 表。
+__all__ = sorted(set(_LAZY_EXPORTS) | {"types", "__version__"})
+
+
+if __name__ == "__main__":  # pragma: no cover
     print(__version__)
