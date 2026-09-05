@@ -119,3 +119,52 @@ def test_dry_run_blocks_code_node(client: TestClient):
     assert body["nodes"] == []
     assert "危险节点" in body["error"]
     assert "code" in body["error"]
+
+
+def test_dry_run_pinned_skips_real_execution(client: TestClient):
+    """pin 住 http 节点后，试跑不再真实发请求，输出等于固定值。"""
+    flow = {
+        "nodes": [
+            {"type": "start", "id": "start", "next": "fetch"},
+            {"type": "http", "id": "fetch", "method": "GET",
+             "url": "http://127.0.0.1:1/unreachable", "next": "end"},
+            {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.fetch"},
+        ]
+    }
+    r = client.post(
+        "/api/flows/dry-run",
+        json={"flowJson": json.dumps(flow), "input": {},
+              "pinned": {"fetch": {"status": 200, "data": {"hello": "pinned"}}}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["error"] is None
+    by_id = {n["id"]: n for n in body["nodes"]}
+    assert by_id["fetch"]["type"] == "mock"          # 被替换为 mock，未真实请求
+    assert by_id["fetch"]["output"] == {"status": 200, "data": {"hello": "pinned"}}
+    assert body["result"] == {"status": 200, "data": {"hello": "pinned"}}
+
+
+def test_dry_run_only_node_executes_single_node(client: TestClient):
+    """only_node：其余节点 mock 化，目标节点真实执行，下游无副作用。"""
+    flow = {
+        "nodes": [
+            {"type": "start", "id": "start", "next": "a"},
+            {"type": "assignment", "id": "a", "output": {"v": 1}, "next": "b"},
+            {"type": "assignment", "id": "b", "output": {"v": 2}, "next": "end"},
+            {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.b"},
+        ]
+    }
+    r = client.post(
+        "/api/flows/dry-run",
+        json={"flowJson": json.dumps(flow), "input": {},
+              "pinned": {"a": {"v": 99}}, "onlyNode": "b"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    by_id = {n["id"]: n for n in body["nodes"]}
+    assert by_id["a"]["type"] == "mock"                      # 上游被 pin → mock
+    assert by_id["a"]["output"] == {"v": 99}
+    assert by_id["b"]["type"] == "assignment"                # 目标真实执行
+    assert by_id["b"]["output"] == {"v": 2}
+    assert by_id["end"]["type"] == "mock"                    # 下游无副作用

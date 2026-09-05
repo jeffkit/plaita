@@ -21,6 +21,12 @@ router = APIRouter()
 class DryRunRequest(BaseModel):
     flowJson: str = Field(..., description="Flow 定义 JSON 字符串")
     input: Optional[Dict[str, Any]] = Field(default_factory=dict, description="输入参数")
+    pinned: Optional[Dict[str, Any]] = Field(
+        default=None, description="节点输出固定：{nodeId: value}，命中节点跳过真实执行"
+    )
+    onlyNode: Optional[str] = Field(
+        default=None, description="仅真实执行该节点（其余除 start 外以 mock 代替）"
+    )
 
 
 class NodeResult(BaseModel):
@@ -41,7 +47,7 @@ class DryRunResponse(BaseModel):
 
 @router.post("/flows/dry-run", response_model=DryRunResponse)
 def dry_run(req: DryRunRequest):
-    out = dryrun_svc.dry_run(req.flowJson, req.input)
+    out = dryrun_svc.dry_run(req.flowJson, req.input, pinned=req.pinned, only_node=req.onlyNode)
     return DryRunResponse(
         result=out["result"],
         nodes=[NodeResult(**n) for n in out["nodes"]],

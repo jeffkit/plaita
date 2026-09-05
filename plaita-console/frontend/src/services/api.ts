@@ -578,7 +578,12 @@ export const api = {
     return request(`/nodes/${nodeType}`, { method: 'DELETE' })
   },
 
-  async dryRun(payload: { flowJson: string; input?: Record<string, unknown> }): Promise<DryRunResponse> {
+  async dryRun(payload: {
+    flowJson: string
+    input?: Record<string, unknown>
+    pinned?: Record<string, unknown>
+    onlyNode?: string
+  }): Promise<DryRunResponse> {
     return request('/flows/dry-run', {
       method: 'POST',
       body: JSON.stringify(payload),

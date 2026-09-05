@@ -69,6 +69,37 @@ class _CollectingCallback(FlowCallback):
             entry["status"] = "success"
 
 
+def apply_debug_transform(
+    data: Dict[str, Any],
+    pinned: Optional[Dict[str, Any]] = None,
+    only_node: Optional[str] = None,
+) -> Dict[str, Any]:
+    """调试变换（仅顶层节点，子流程不动）：
+
+    - pinned: 把指定节点替换为 mock（value=固定输出），后续试跑跳过真实执行
+    - only_node: 除 start 与目标节点外全部替换为 mock——目标节点上游取
+      pinned 值（未 pin 的上游为 None），下游不产生真实副作用
+    """
+    if not pinned and not only_node:
+        return data
+    nodes = data.get("nodes")
+    if not isinstance(nodes, list):
+        return data
+    out: List[Any] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            out.append(node)
+            continue
+        nid = node.get("id")
+        if pinned and nid in pinned:
+            out.append({**node, "type": "mock", "value": pinned[nid]})
+        elif only_node and node.get("type") != "start" and nid != only_node:
+            out.append({**node, "type": "mock", "value": None})
+        else:
+            out.append(node)
+    return {**data, "nodes": out}
+
+
 def _collect_blocked_nodes(data: Any, path: str = "nodes") -> List[str]:
     """递归扫描 flow dict / childFlow，收集被禁节点描述。"""
     blocked: List[str] = []
@@ -98,14 +129,25 @@ def _collect_blocked_nodes(data: Any, path: str = "nodes") -> List[str]:
     return blocked
 
 
-def dry_run(flow_json: str, input_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """对给定 Flow JSON 字符串做同步试跑，返回 {result, nodes, error}。"""
+def dry_run(
+    flow_json: str,
+    input_data: Optional[Dict[str, Any]] = None,
+    pinned: Optional[Dict[str, Any]] = None,
+    only_node: Optional[str] = None,
+) -> Dict[str, Any]:
+    """对给定 Flow JSON 字符串做同步试跑，返回 {result, nodes, error}。
+
+    - pinned: 节点输出固定（该节点替换为 mock，跳过真实执行）
+    - only_node: 仅真实执行该节点（其余除 start 外替换为 mock）
+    """
     import json
 
     try:
         data = json.loads(flow_json)
     except json.JSONDecodeError as e:
         return {"result": None, "nodes": [], "error": f"flowJson 非合法 JSON: {e}"}
+
+    data = apply_debug_transform(data, pinned=pinned, only_node=only_node)
 
     blocked = _collect_blocked_nodes(data)
     if blocked:

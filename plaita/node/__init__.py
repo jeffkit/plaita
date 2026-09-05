@@ -26,6 +26,7 @@ from .decide import Bool, Switch, SwitchLegacy
 from .end import End
 from .event_node import EventNode
 from .loop import BaseCollectionNode, Filter, Find, Loop, Map, Reduce, While
+from .mock import Mock
 from .start import Start
 from .http import HTTP
 
@@ -52,6 +53,7 @@ _BUILTIN_NODES: list[Type[Node]] = [
     # get_default_registry().register(CodeNode) explicitly.
     Parallel,
     HTTP,
+    Mock,
     EventNode,
     # BaseCollectionNode is intentionally excluded: it is abstract and has no
     # node_type, so it should never appear in the registry directly.
