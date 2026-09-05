@@ -121,3 +121,5 @@ print(step2["result"])   # -> {"approved": True}
 ## 组件关系
 
 ![组件关系](../assets/checkpoint-component-relationship.svg)
+
+> 部署形态选型（本地单机 / 单机 / 分布式）见 [部署模式](../guide/deployment.md)。

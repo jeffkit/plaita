@@ -52,6 +52,11 @@ pip install plaita[dev]    # pytest / pytest-asyncio / fakeredis / pytest-cov
 pip install plaita[lint]   # mypy / flake8 / black（可选）
 ```
 
+## 部署模式总览
+
+plaita 有四档形态：本地单机（SQLite）/ 单机标准（Redis）/ 分布式 / SDK 嵌入，
+逐档平滑升级。完整对比见 [部署模式](deployment.md)。
+
 ## 编排台（可视化控制台）
 
 不想写代码编排流程？安装编排台即可获得 Web 界面（流程画布 / 节点配置 / 试运行 / 集群管理）：
