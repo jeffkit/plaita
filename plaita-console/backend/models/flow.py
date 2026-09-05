@@ -205,3 +205,52 @@ class Deployment(Base):
     actor = Column(String(64), nullable=False, default="")
     definition_hash = Column(String(64), nullable=False, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class LocalSchedule(Base):
+    """本地单机模式的调度定义（集群档存 Redis HASH，由 schedule_service 触发；
+    本地档由 console 内置调度循环触发）。"""
+
+    __tablename__ = "local_schedules"
+
+    schedule_id = Column(String(64), primary_key=True)
+    name = Column(String(128), nullable=False, default="")
+    flow_id = Column(String(128), nullable=False, index=True)
+    version = Column(String(64), nullable=True)
+    cron = Column(String(64), nullable=False, default="")
+    params_json = Column(Text, nullable=False, default="{}")
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_by = Column(String(64), nullable=False, default="")
+    next_run_at = Column(String(64), nullable=False, default="")  # ms 时间戳字符串，与集群档一致
+    last_run_at = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class LocalScheduleFire(Base):
+    """本地调度触发历史（对应集群档 plaita:schedule:fires:{id}）。"""
+
+    __tablename__ = "local_schedule_fires"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    schedule_id = Column(String(64), nullable=False, index=True)
+    execution_id = Column(String(64), nullable=False, default="")
+    trigger_kind = Column(String(16), nullable=False, default="cron")  # cron/manual
+    status = Column(String(16), nullable=False, default="fired")  # fired/failed
+    error = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class LocalLog(Base):
+    """本地单机模式执行日志（线程级捕获引擎 logging 输出）。"""
+
+    __tablename__ = "local_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    execution_id = Column(String(64), nullable=True, index=True)
+    level = Column(String(16), nullable=False, default="INFO")
+    logger = Column(String(128), nullable=False, default="")
+    message = Column(Text, nullable=False, default="")

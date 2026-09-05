@@ -76,11 +76,13 @@ async def lifespan(app: FastAPI):
                 from services import examples as examples_svc  # type: ignore
             examples_svc.seed_example_flows()
         try:
-            from .services import users_svc
+            from .services import users_svc, local_scheduler
         except ImportError:
-            from services import users_svc  # type: ignore
+            from services import users_svc, local_scheduler  # type: ignore
         app.state.store = flow_store.get_flow_store()
         users_svc.ensure_bootstrap_user(app.state.store)
+        # 本地档内置调度循环：替代集群档的 schedule_service 进程
+        local_scheduler.start_scheduler_loop(app.state.store)
     except Exception as e:
         logger.error(f"FlowStore 初始化失败: {e}")
         raise

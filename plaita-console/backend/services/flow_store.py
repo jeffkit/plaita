@@ -17,9 +17,29 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 try:
-    from ..models.flow import Base, CopilotThread, FlowRecord, FlowVersion, LocalExecution, NodeDescriptor
+    from ..models.flow import (
+    Base,
+    CopilotThread,
+    FlowRecord,
+    FlowVersion,
+    LocalExecution,
+    LocalLog,
+    LocalSchedule,
+    LocalScheduleFire,
+    NodeDescriptor,
+)
 except ImportError:
-    from models.flow import Base, CopilotThread, FlowRecord, FlowVersion, LocalExecution, NodeDescriptor  # type: ignore
+    from models.flow import (  # type: ignore
+    Base,
+    CopilotThread,
+    FlowRecord,
+    FlowVersion,
+    LocalExecution,
+    LocalLog,
+    LocalSchedule,
+    LocalScheduleFire,
+    NodeDescriptor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -552,3 +572,54 @@ def parse_layout(layout: str) -> dict:
         return json.loads(layout)
     except (json.JSONDecodeError, TypeError):
         return {}
+
+
+# ============ 本地档调度 / 触发历史 / 日志 ============
+
+def insert_local_log(execution_id: str, level: str, logger_name: str, message: str) -> None:
+    """写入一条本地执行日志（由 _ThreadLogHandler 高频调用，单行提交可接受）。"""
+    store = get_flow_store()
+    with store._session_local() as session:
+        session.add(
+            LocalLog(
+                execution_id=execution_id,
+                level=level,
+                logger=logger_name,
+                message=message,
+            )
+        )
+        session.commit()
+
+
+def list_local_logs(level: str = None, execution_id: str = None, limit: int = 200) -> list:
+    store = get_flow_store()
+    with store._session_local() as session:
+        query = select(LocalLog).order_by(LocalLog.ts.desc()).limit(max(1, min(1000, limit)))
+        if level:
+            query = query.where(LocalLog.level == level)
+        if execution_id:
+            query = query.where(LocalLog.execution_id == execution_id)
+        return [
+            {
+                "timestamp": r.ts.isoformat() if r.ts else "",
+                "level": r.level,
+                "service_type": "local-console",
+                "instance_id": r.execution_id or "",
+                "message": r.message,
+                "logger": r.logger,
+            }
+            for r in session.scalars(query).all()
+        ]
+
+
+def local_log_stats(limit: int = 1000) -> dict:
+    rows = list_local_logs(limit=limit)
+    stats: dict = {}
+    total = len(rows)
+    for r in rows:
+        service = r["service_type"]
+        level = r["level"]
+        stats.setdefault(service, {"levels": {}, "total": 0})
+        stats[service]["levels"][level] = stats[service]["levels"].get(level, 0) + 1
+        stats[service]["total"] += 1
+    return {"stats": stats, "total": total}

@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from plaita.core.callback import FlowCallback
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
 
@@ -36,7 +37,7 @@ _threads: Dict[str, threading.Thread] = {}
 _lock = threading.Lock()
 
 
-class _LocalTraceCallback:
+class _LocalTraceCallback(FlowCallback):
     """把节点开始/结束写回本地执行记录（每节点一次 SQLite 更新，示例规模可接受）。"""
 
     def __init__(self, execution_id: str):
@@ -130,11 +131,38 @@ def start_local_execution(
     return _to_info(fs.get_local_execution(execution_id))
 
 
+class _ThreadLogHandler(logging.Handler):
+    """只捕获本执行线程的 logging 记录，写入 local_logs（日志页本地档数据源）。"""
+
+    def __init__(self, execution_id: str, thread_id: int):
+        super().__init__(level=logging.INFO)
+        self._execution_id = execution_id
+        self._thread_id = thread_id
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread != self._thread_id:
+            return
+        try:
+            fs.insert_local_log(
+                execution_id=self._execution_id,
+                level=record.levelname,
+                logger_name=record.name,
+                message=record.getMessage(),
+            )
+        except Exception:  # noqa: BLE001 — 日志失败不影响执行
+            pass
+
+
 def _run_flow(execution_id: str, definition: dict, params: dict) -> None:
+    handler = _ThreadLogHandler(execution_id, threading.get_ident())
+    root = logging.getLogger()
+    root.addHandler(handler)
     try:
+        logger.info("本地执行 %s 开始（flow=%s）", execution_id, definition.get("flow_id"))
         flow = Flow.model_validate(definition)
         callback = _LocalTraceCallback(execution_id)
         result = FlowExecution(callback_handlers=[callback]).run_compatible(flow, False, **params)
+        logger.info("本地执行 %s 完成", execution_id)
         fs.finish_local_execution(
             execution_id,
             status="completed",
@@ -150,6 +178,10 @@ def _run_flow(execution_id: str, definition: dict, params: dict) -> None:
             ),
         )
     finally:
+        try:
+            root.removeHandler(handler)
+        except Exception:  # noqa: BLE001
+            pass
         with _lock:
             _threads.pop(execution_id, None)
 

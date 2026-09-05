@@ -61,6 +61,24 @@ def get_redis(request: Request) -> Redis:
     return redis
 
 
+def get_redis_or_none(request: Request) -> Redis:
+    """本地单机模式返回 None——list/instance/stats 有本地分支。"""
+    return request.app.state.redis
+
+
+# ============ API 端点 ============
+
+def _local_store(request: Request):
+    """本地单机模式 → (flow_store 模块, True)；集群模式 → (None, False)。"""
+    if getattr(request.app.state, "local_mode", False):
+        try:
+            from services import flow_store
+        except ImportError:
+            from ..services import flow_store  # type: ignore
+        return flow_store, True
+    return None, False
+
+
 # ============ API 端点 ============
 
 @router.get("/logs", response_model=LogListResponse)
@@ -69,7 +87,8 @@ async def list_logs(
     instance_id: Optional[str] = None,
     level: Optional[str] = None,
     limit: int = Query(default=100, le=1000),
-    redis: Redis = Depends(get_redis)
+    request: Request = None,
+    redis: Redis = Depends(get_redis_or_none)
 ):
     """
     获取日志列表
@@ -79,6 +98,24 @@ async def list_logs(
     - **level**: 按日志级别筛选
     - **limit**: 返回数量限制
     """
+    # 本地单机模式：读 SQLite 执行日志
+    local_fs, is_local = _local_store(request) if request else (None, False)
+    if is_local:
+        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit)
+        return LogListResponse(
+            logs=[
+                LogEntry(
+                    timestamp=r["timestamp"],
+                    level=r["level"],
+                    service_type=r["service_type"],
+                    instance_id=r["instance_id"],
+                    message=r["message"],
+                )
+                for r in rows
+            ],
+            total=len(rows),
+        )
+
     # 构建 Stream key 模式
     if service_type and instance_id:
         pattern = f"plaita:logs:{service_type}:{instance_id}"
@@ -139,7 +176,8 @@ async def get_instance_logs(
     level: Optional[str] = None,
     limit: int = Query(default=100, le=1000),
     order: str = Query(default="desc", description="排序方式: asc 或 desc"),
-    redis: Redis = Depends(get_redis)
+    request: Request = None,
+    redis: Redis = Depends(get_redis_or_none)
 ):
     """
     获取指定服务实例的日志
@@ -150,7 +188,27 @@ async def get_instance_logs(
     - **order**: 排序方式 (asc: 时间正序, desc: 时间倒序)
     """
     logs = []
-    
+
+    # 本地单机模式：instance_id 即本地执行 ID
+    local_fs, is_local = _local_store(request) if request else (None, False)
+    if is_local:
+        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit)
+        if order == "asc":
+            rows = list(reversed(rows))
+        return LogListResponse(
+            logs=[
+                LogEntry(
+                    timestamp=r["timestamp"],
+                    level=r["level"],
+                    service_type=r["service_type"],
+                    instance_id=r["instance_id"],
+                    message=r["message"],
+                )
+                for r in rows
+            ],
+            total=len(rows),
+        )
+
     # 查找所有可能包含该实例日志的 Stream key
     pattern = "plaita:logs:*"
     keys = redis.keys(pattern)
@@ -204,13 +262,25 @@ async def get_instance_logs(
 
 @router.get("/logs/stats", response_model=LogStatsResponse)
 async def get_log_stats(
-    redis: Redis = Depends(get_redis)
+    request: Request = None,
+    redis: Redis = Depends(get_redis_or_none)
 ):
     """
     获取日志统计信息
     
     返回按服务类型和日志级别分组的日志数量统计
     """
+    # 本地单机模式：统计本地执行日志
+    local_fs, is_local = _local_store(request) if request else (None, False)
+    if is_local:
+        summary = local_fs.local_log_stats()
+        entries = [
+            LogStatsEntry(service_type=svc, level=level, count=count)
+            for svc, info in summary["stats"].items()
+            for level, count in info["levels"].items()
+        ]
+        return LogStatsResponse(stats=entries, total_logs=summary["total"])
+
     stats_dict: Dict[str, Dict[str, int]] = {}  # {service_type: {level: count}}
     total_logs = 0
     
