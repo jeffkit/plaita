@@ -17,9 +17,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 try:
-    from ..models.flow import Base, CopilotThread, FlowRecord, FlowVersion, NodeDescriptor
+    from ..models.flow import Base, CopilotThread, FlowRecord, FlowVersion, LocalExecution, NodeDescriptor
 except ImportError:
-    from models.flow import Base, CopilotThread, FlowRecord, FlowVersion, NodeDescriptor
+    from models.flow import Base, CopilotThread, FlowRecord, FlowVersion, LocalExecution, NodeDescriptor  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +396,119 @@ class FlowStore:
             schema_json=row.schema_json,
             is_builtin=row.is_builtin,
         )
+
+
+# ============ 本地单机模式执行记录 ============
+
+def insert_local_execution(
+    execution_id: str,
+    flow_id: str,
+    flow_version: str,
+    status: str = "running",
+    input_json: str = "{}",
+    invoker: str = "local",
+) -> None:
+    """新建本地执行记录。"""
+    store = get_flow_store()
+    with store._session_local() as session:
+        session.add(
+            LocalExecution(
+                execution_id=execution_id,
+                flow_id=flow_id,
+                flow_version=flow_version,
+                status=status,
+                input_json=input_json,
+                invoker=invoker,
+            )
+        )
+        session.commit()
+
+
+def update_local_execution(execution_id: str, **fields: str) -> None:
+    """部分更新（nodes_json 等）。"""
+    store = get_flow_store()
+    with store._session_local() as session:
+        row = session.scalars(
+            select(LocalExecution).where(LocalExecution.execution_id == execution_id)
+        ).first()
+        if row is None:
+            return
+        for key, value in fields.items():
+            setattr(row, key, value)
+        session.commit()
+
+
+def finish_local_execution(
+    execution_id: str,
+    status: str,
+    output_json: Optional[str] = None,
+    error_json: Optional[str] = None,
+) -> None:
+    """终结一条本地执行记录。"""
+    update_local_execution(
+        execution_id,
+        status=status,
+        end_time=datetime.utcnow(),
+        **({"output_json": output_json} if output_json is not None else {}),
+        **({"error_json": error_json} if error_json is not None else {}),
+    )
+
+
+def _local_row_to_dict(row: LocalExecution) -> dict:
+    return {
+        "execution_id": row.execution_id,
+        "flow_id": row.flow_id,
+        "flow_version": row.flow_version,
+        "status": row.status,
+        "start_time": row.start_time.isoformat() if row.start_time else None,
+        "end_time": row.end_time.isoformat() if row.end_time else None,
+        "last_update_time": row.last_update_time.isoformat() if row.last_update_time else None,
+        "context": None,
+        "error": _loads_or_none(row.error_json),
+        "invoker": row.invoker,
+        "nodes": _loads_or_none(row.nodes_json) or [],
+        "input": _loads_or_none(row.input_json) or {},
+        "output": _loads_or_none(row.output_json),
+    }
+
+
+def _loads_or_none(text: Optional[str]) -> Any:
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def get_local_execution(execution_id: str) -> Optional[dict]:
+    """取本地执行详情（ExecutionInfo 兼容结构 + nodes/input/output）。"""
+    store = get_flow_store()
+    with store._session_local() as session:
+        row = session.scalars(
+            select(LocalExecution).where(LocalExecution.execution_id == execution_id)
+        ).first()
+        return _local_row_to_dict(row) if row else None
+
+
+def list_local_executions() -> List[dict]:
+    store = get_flow_store()
+    with store._session_local() as session:
+        rows = session.scalars(select(LocalExecution)).all()
+        return [_local_row_to_dict(r) for r in rows]
+
+
+def delete_local_execution(execution_id: str) -> bool:
+    store = get_flow_store()
+    with store._session_local() as session:
+        row = session.scalars(
+            select(LocalExecution).where(LocalExecution.execution_id == execution_id)
+        ).first()
+        if row is None:
+            return False
+        session.delete(row)
+        session.commit()
+        return True
 
 
 # ============ 初始化辅助 ============

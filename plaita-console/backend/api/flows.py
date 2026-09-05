@@ -94,8 +94,16 @@ def _store() -> flow_store.FlowStore:
 
 
 def get_redis_dep(request: Request) -> Redis:
-    """引擎运行时存储同步用的 Redis 客户端（app.state.redis）"""
-    return request.app.state.redis
+    redis = request.app.state.redis
+    if redis is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "当前为本地单机模式（未连接 Redis），该功能不可用。"
+                "启动 Redis 并重启 console 可恢复完整集群能力。"
+            ),
+        )
+    return redis
 
 
 def _check_semver(version: str) -> None:

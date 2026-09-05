@@ -44,25 +44,35 @@ async def lifespan(app: FastAPI):
     
     settings = get_settings()
     
-    # 启动时连接 Redis
-    logger.info(f"连接 Redis: {settings.redis_url}")
-    redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
-    
-    # 测试连接
+    # 启动时连接 Redis；不可达则进入本地单机模式（不阻断启动）
+    local_mode = False
     try:
+        redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
         redis_client.ping()
-        logger.info("Redis 连接成功")
+        logger.info(f"连接 Redis: {settings.redis_url}")
+        app.state.redis = redis_client
     except Exception as e:
-        logger.error(f"Redis 连接失败: {e}")
-        raise
-    
-    # 将 Redis 客户端注入到应用状态
-    app.state.redis = redis_client
+        redis_client = None
+        app.state.redis = None
+        local_mode = True
+        logger.warning(
+            "Redis 不可达（%s）——进入本地单机模式：流程在本进程内执行，"
+            "执行历史存 SQLite；集群/事件/队列功能不可用。"
+            "启动 Redis 并重启可恢复完整能力。",
+            e,
+        )
+    app.state.local_mode = local_mode
 
     # 初始化流程编排持久化（SQLAlchemy）—— 建表，不破坏 Redis 初始化
     try:
         flow_store.init_engine(settings.db_url)
         logger.info(f"FlowStore 已初始化: {settings.db_url}")
+        if local_mode:
+            try:
+                from .services import examples as examples_svc
+            except ImportError:
+                from services import examples as examples_svc  # type: ignore
+            examples_svc.seed_example_flows()
     except Exception as e:
         logger.error(f"FlowStore 初始化失败: {e}")
         raise

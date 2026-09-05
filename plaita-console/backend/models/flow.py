@@ -101,3 +101,29 @@ class CopilotThread(Base):
     updated_at = Column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class LocalExecution(Base):
+    """本地单机模式执行记录（无 Redis 退化模式）。
+
+    本地模式下流程在 console 进程内执行，节点级 trace 由回调写入
+    ``nodes_json``；集群模式（有 Redis）执行数据仍在 Redis，本表不使用。
+    """
+
+    __tablename__ = "local_executions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_id = Column(String(64), nullable=False, unique=True, index=True)
+    flow_id = Column(String(128), nullable=False, index=True)
+    flow_version = Column(String(64), nullable=False, default="")
+    status = Column(String(16), nullable=False, default="running")  # running/completed/failed/cancelled
+    input_json = Column(Text, nullable=False, default="{}")
+    output_json = Column(Text, nullable=False, default="null")
+    error_json = Column(Text, nullable=False, default="null")
+    nodes_json = Column(Text, nullable=False, default="[]")
+    invoker = Column(String(64), nullable=False, default="local")
+    start_time = Column(DateTime, nullable=False, default=datetime.utcnow)
+    end_time = Column(DateTime, nullable=True)
+    last_update_time = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

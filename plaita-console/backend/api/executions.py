@@ -28,6 +28,9 @@ class ExecutionInfo(BaseModel):
     context: Optional[Dict[str, Any]] = Field(None, description="执行上下文")
     error: Optional[Dict[str, Any]] = Field(None, description="错误信息")
     invoker: Optional[str] = Field(None, description="调用者")
+    # 本地单机模式专有：节点级 trace 与最终输出（集群模式为 None）
+    nodes: Optional[List[Dict[str, Any]]] = Field(None, description="节点级执行 trace（本地模式）")
+    output: Optional[Any] = Field(None, description="流程输出（本地模式）")
 
 
 class ExecutionListResponse(BaseModel):
@@ -66,10 +69,40 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         _sys.path.insert(0, _plaita_root)
     from plaita.server.task_queue import enqueue_task
 
+try:
+    from services import flow_store
+except ImportError:  # 包内布局（pip 安装）
+    from .services import flow_store  # type: ignore
+
 
 def get_redis(request: Request) -> Redis:
-    """获取 Redis 客户端"""
+    """获取 Redis 客户端（本地单机模式下拒绝并给出明确提示）"""
+    redis = request.app.state.redis
+    if redis is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "当前为本地单机模式（未连接 Redis），该功能不可用。"
+                "启动 Redis 并重启 console 可恢复完整集群能力。"
+            ),
+        )
+    return redis
+
+
+def get_redis_or_none(request: Request) -> Optional[Redis]:
+    """本地模式返回 None 而不报错——executions 端点据此走本地执行分支。"""
     return request.app.state.redis
+
+
+def get_local_executor(request: Request):
+    """本地单机模式分支：返回 local_executor 模块；集群模式返回 None。"""
+    if getattr(request.app.state, "local_mode", False):
+        try:
+            from .services import local_executor
+        except ImportError:
+            from services import local_executor  # type: ignore
+        return local_executor
+    return None
 
 
 def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
@@ -86,11 +119,12 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
 
 @router.get("/executions", response_model=ExecutionListResponse)
 async def list_executions(
+    request: Request,
     page: int = 1,
     size: int = 20,
     status: Optional[str] = None,
     flow_id: Optional[str] = None,
-    redis: Redis = Depends(get_redis)
+    redis: Optional[Redis] = Depends(get_redis_or_none),
 ):
     """
     获取执行实例列表
@@ -100,26 +134,31 @@ async def list_executions(
     - **status**: 按状态筛选
     - **flow_id**: 按流程 ID 筛选
     """
-    # 获取所有执行状态
-    pattern = "plaita:execution:*"
-    keys = redis.keys(pattern)
-    
-    executions = []
-    for key in keys:
-        data = redis.get(key)
-        if data:
-            try:
-                info = json.loads(data)
-                
-                # 筛选
-                if status and info.get("status") != status:
+    if (local := get_local_executor(request)) is not None:
+        executions = [
+            ExecutionInfo(**info) for info in local.list_local_executions(status=status, flow_id=flow_id)
+        ]
+    else:
+        # 获取所有执行状态
+        pattern = "plaita:execution:*"
+        keys = redis.keys(pattern)
+        
+        executions = []
+        for key in keys:
+            data = redis.get(key)
+            if data:
+                try:
+                    info = json.loads(data)
+                    
+                    # 筛选
+                    if status and info.get("status") != status:
+                        continue
+                    if flow_id and info.get("flow_id") != flow_id:
+                        continue
+                    
+                    executions.append(ExecutionInfo(**info))
+                except Exception:
                     continue
-                if flow_id and info.get("flow_id") != flow_id:
-                    continue
-                
-                executions.append(ExecutionInfo(**info))
-            except Exception:
-                continue
     
     # 按开始时间排序（最新的在前）
     executions.sort(
@@ -144,13 +183,20 @@ async def list_executions(
 @router.get("/executions/{execution_id}", response_model=ExecutionInfo)
 async def get_execution(
     execution_id: str,
-    redis: Redis = Depends(get_redis)
+    request: Request,
+    redis: Optional[Redis] = Depends(get_redis_or_none),
 ):
     """
     获取执行详情
     
     - **execution_id**: 执行 ID
     """
+    if (local := get_local_executor(request)) is not None:
+        info = local.get_local_execution(execution_id)
+        if info is None:
+            raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        return ExecutionInfo(**info)
+
     key = f"plaita:execution:{execution_id}"
     data = redis.get(key)
     
@@ -167,7 +213,8 @@ async def get_execution(
 @router.post("/executions")
 async def start_execution(
     request: StartFlowRequest,
-    redis: Redis = Depends(get_redis)
+    http_request: Request,
+    redis: Optional[Redis] = Depends(get_redis_or_none),
 ):
     """
     启动新的流程执行
@@ -176,6 +223,23 @@ async def start_execution(
     - **version**: 流程版本
     - **params**: 输入参数
     """
+    # 本地单机模式：console 进程内直接执行
+    if (local := get_local_executor(http_request)) is not None:
+        try:
+            info = local.start_local_execution(
+                flow_store.get_flow_store(), request.flow_id, request.version, request.params
+            )
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {
+            "status": "running",
+            "flow_id": request.flow_id,
+            "execution_id": info["execution_id"],
+            "message": "本地模式：流程已在 console 进程内启动",
+        }
+
     # 构建任务消息
     message = {
         "type": "start",
@@ -198,13 +262,25 @@ async def start_execution(
 @router.post("/executions/{execution_id}/cancel")
 async def cancel_execution(
     execution_id: str,
-    redis: Redis = Depends(get_redis)
+    request: Request,
+    redis: Optional[Redis] = Depends(get_redis_or_none),
 ):
     """
     取消/终止执行（发送取消命令到队列）
     
     - **execution_id**: 执行 ID
     """
+    # 本地单机模式：标记状态（尽力而为，不中断线程）
+    if (local := get_local_executor(request)) is not None:
+        if not local.cancel_local_execution(execution_id):
+            raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        return {
+            "success": True,
+            "status": "cancelled",
+            "execution_id": execution_id,
+            "message": "执行已取消（本地模式）",
+        }
+
     # 验证执行存在
     key = f"plaita:execution:{execution_id}"
     data = redis.get(key)
@@ -247,13 +323,24 @@ async def cancel_execution(
 @router.delete("/executions/{execution_id}")
 async def delete_execution(
     execution_id: str,
-    redis: Redis = Depends(get_redis)
+    request: Request,
+    redis: Optional[Redis] = Depends(get_redis_or_none),
 ):
     """
     删除执行记录（从 Redis 中永久删除）
     
     - **execution_id**: 执行 ID
     """
+    # 本地单机模式：从 SQLite 删除
+    if (local := get_local_executor(request)) is not None:
+        if not local.delete_local_execution(execution_id):
+            raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        return {
+            "success": True,
+            "execution_id": execution_id,
+            "message": "执行记录已删除",
+        }
+
     key = f"plaita:execution:{execution_id}"
     
     # 检查是否存在

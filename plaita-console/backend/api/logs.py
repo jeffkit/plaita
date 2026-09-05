@@ -49,8 +49,16 @@ class LogStatsResponse(BaseModel):
 # ============ 工具函数 ============
 
 def get_redis(request: Request) -> Redis:
-    """获取 Redis 客户端"""
-    return request.app.state.redis
+    redis = request.app.state.redis
+    if redis is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "当前为本地单机模式（未连接 Redis），该功能不可用。"
+                "启动 Redis 并重启 console 可恢复完整集群能力。"
+            ),
+        )
+    return redis
 
 
 # ============ API 端点 ============

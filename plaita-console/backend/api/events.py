@@ -55,7 +55,16 @@ class PublishEventRequest(BaseModel):
 # ============ 工具函数 ============
 
 def get_redis(request: Request) -> Redis:
-    return request.app.state.redis
+    redis = request.app.state.redis
+    if redis is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "当前为本地单机模式（未连接 Redis），该功能不可用。"
+                "启动 Redis 并重启 console 可恢复完整集群能力。"
+            ),
+        )
+    return redis
 
 
 def _scan_keys(redis: Redis, pattern: str, count: int = 100) -> List[str]:
