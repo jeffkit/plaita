@@ -277,7 +277,8 @@ class PlaitaClient:
                 config_data = self._redis_client.get(cache_key)
                 if config_data:
                     logger.debug("从 Redis 缓存获取流程: %s", cache_key)
-                    flow_obj = Flow.model_validate_json(json.loads(config_data))
+                    # 缓存里存的就是 flow JSON 字符串，直接反序列化
+                    flow_obj = Flow.model_validate_json(config_data)
                     # 更新内存缓存
                     with self.memory_cache_lock:
                         self.memory_cache[cache_key] = flow_obj
@@ -288,6 +289,9 @@ class PlaitaClient:
         # 3. 从远程服务获取
         logger.debug("从远程服务获取流程: %s", cache_key)
         flow_data = self._fetch_flow(flow_id, version)
+        # _fetch_flow 返回的是 JSON **字符串**（服务端 data.flow 是字符串）；
+        # 历史上它先 json.loads 成 dict 再喂给 model_validate_json 必然
+        # ValidationError——PlaitaClient 对 console 的契约接口从未端到端通过。
         flow_obj = Flow.model_validate_json(flow_data)
         
         # 更新缓存
@@ -431,7 +435,9 @@ class PlaitaClient:
             raise PlaitaClientResponseError("获取流程配置失败: flow 字段为空")
         
         logger.debug("成功获取流程定义: flow_id=%s, version=%s", flow_id, version)
-        return json.loads(flow_str)
+        # 返回原始 JSON 字符串，由 get_flow 统一 Flow.model_validate_json；
+        # 这里不再 json.loads（双重解析是历史 bug 的根源）。
+        return flow_str
 
 
 def generate_signature(

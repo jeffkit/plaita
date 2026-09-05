@@ -8,16 +8,21 @@ _EXTRAS_GUIDE = {
     "redis": ("redis", "pip install plaita[redis]"),
     "server": ("fastapi", "pip install plaita[server]"),
     "code": ("execjs", "pip install plaita[code]"),
-    "http": ("requests", "pip install plaita[http]"),
+    # http extra 实际含 requests + aiohttp 两个依赖，只探测 requests 会让
+    # "缺 extra 可操作报错"的承诺在只装 requests 时落空（运行时才炸）。
+    "http": (("requests", "aiohttp"), "pip install plaita[http]"),
 }
 
 
 def _emit_extras_guidance():
     """Log guidance once when optional extras are missing, at DEBUG level."""
     missing = []
-    for extra, (probe_module, install_cmd) in _EXTRAS_GUIDE.items():
+    for extra, (probe_modules, install_cmd) in _EXTRAS_GUIDE.items():
+        if isinstance(probe_modules, str):
+            probe_modules = (probe_modules,)
         try:
-            __import__(probe_module)
+            for probe_module in probe_modules:
+                __import__(probe_module)
         except ImportError:
             missing.append((extra, install_cmd))
     if missing:
@@ -40,9 +45,12 @@ def _check_extra_available(extra_name: str) -> bool:
     """
     if extra_name not in _EXTRAS_GUIDE:
         return True
-    probe_module, install_cmd = _EXTRAS_GUIDE[extra_name]
+    probe_modules, install_cmd = _EXTRAS_GUIDE[extra_name]
+    if isinstance(probe_modules, str):
+        probe_modules = (probe_modules,)
     try:
-        __import__(probe_module)
+        for probe_module in probe_modules:
+            __import__(probe_module)
         return True
     except ImportError:
         raise ImportError(

@@ -351,3 +351,149 @@ class TestPlaitaClientContracts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestR2UnknownKeyWarning(unittest.TestCase):
+    """未知键告警：把"沉默地配置错"变成可见（只告警不报错）。"""
+
+    def test_node_typo_key_warns(self):
+        data = json.loads(_echo_flow("x"))
+        data["nodes"][1]["resutlType"] = "error"  # 拼错——历史上被 extra=ignore 静默吞
+        with self.assertLogs("plaita.node.schema", level="WARNING") as cm:
+            Flow.model_validate(data)
+        self.assertTrue(any("resutlType" in line for line in cm.output))
+
+    def test_legacy_camel_keys_do_not_warn(self):
+        data = json.loads(_echo_flow("x"))
+        data["nodes"][1]["resultType"] = "success"  # 合法遗留别名
+        flow = Flow.model_validate(data)
+        self.assertEqual(flow.run(), "x")
+
+    def test_switch_typo_branches_key_warns_and_validate_flags(self):
+        flow_json = json.dumps({
+            "flow_id": "sw",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "sw"},
+                {"type": "switch", "id": "sw", "branchs": [  # 拼错 branches
+                    {"name": "a", "next": "e", "condition": {"field": "$INPUT.x", "operator": "eq", "value": 1}},
+                ]},
+                {"type": "end", "id": "e", "output": "1"},
+            ],
+        })
+        with self.assertLogs("plaita.node.schema", level="WARNING"):
+            Flow.from_string(flow_json)
+
+
+class TestR2SwitchNoMatch(unittest.TestCase):
+    def _flow(self, extra_node_cfg=None):
+        node = {"type": "switch", "id": "sw", "next": "e", "branches": [
+            {"name": "adult", "next": "e", "condition": {"field": "$INPUT.age", "operator": "gte", "value": 18}},
+        ]}
+        if extra_node_cfg:
+            node.update(extra_node_cfg)
+        return Flow.from_string(json.dumps({
+            "flow_id": "sw",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "sw"},
+                node,
+                {"type": "end", "id": "e", "output": "1"},
+            ],
+        }))
+
+    def test_no_match_no_default_raises(self):
+        """分支未命中且无 default：不再把 $NODE 中间态当结果"成功"返回。"""
+        from plaita.core.errors import FlowExecutionException
+        with self.assertRaises(FlowExecutionException) as cm:
+            self._flow().run(age=5)
+        self.assertIn("no branch", str(cm.exception))
+
+    def test_no_match_with_continue_strategy_keeps_legacy_behavior(self):
+        """显式 errorHandler.strategy=continue 保留旧"跳过"逃生口。"""
+        result = self._flow({"errorHandler": {"strategy": "continue"}}).run(age=5)
+        self.assertIsNotNone(result)  # 走到流程收尾（$NODE 表），不再抛错
+
+
+class TestR2SubscriptionCleanup(unittest.TestCase):
+    def test_resume_unregisters_subscription(self):
+        """resume 完成后注销挂起期订阅（历史死订阅持续匹配后续事件）。"""
+        from plaita.node import EventNode  # noqa: F401 - 确保 event 节点已注册
+
+        flow = Flow.from_string(json.dumps({
+            "flow_id": "d",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "ev"},
+                {"type": "event", "id": "ev", "event_type": "approval.next", "next": "e"},
+                {"type": "end", "id": "e", "output": "1"},
+            ],
+        }))
+        bus = InMemoryEventBus()
+        execution = FlowExecution(event_bus=bus)
+        step = execution.run_distributed(flow, {})
+        self.assertTrue(step["is_suspend"])
+        step2 = execution.run_distributed(
+            flow, None, saved_context=step["context"],
+            resume_type="event", resume_data={"approved": True},
+        )
+        self.assertFalse(step2["is_suspend"])
+        # 订阅应已被清理
+        subs = list(bus.subscription_storage.subscriptions.values())
+        self.assertEqual(len(subs), 0)
+
+
+class TestR2RunnerContracts(unittest.TestCase):
+    def test_http_error_strategy_continue_with_returns_default(self):
+        """http 失败现在走 errorHandler（continue_with 返回 defaultValue）。
+
+        历史上 NodeException 被当返回值传回，errorHandler 永不生效。 unroutable
+        端口保证快速连接失败。
+        """
+        flow = Flow.from_string(json.dumps({
+            "flow_id": "h",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "h"},
+                {"type": "http", "id": "h", "method": "GET",
+                 "url": "http://127.0.0.1:1/nope", "next": "e",
+                 "errorHandler": {"strategy": "continue_with", "defaultValue": "unknown"}},
+                {"type": "end", "id": "e", "output": "$NODE.h", "resultType": "success"},
+            ],
+        }))
+        self.assertEqual(flow.run(), "unknown")
+
+    def test_invalid_timeout_message_lists_formats(self):
+        from plaita.core.runner import NodeRunner
+        with self.assertRaises(ValueError) as cm:
+            NodeRunner._parse_timeout("100ms")
+        self.assertIn("ISO 8601", str(cm.exception))
+
+    def test_execution_reentry_guard(self):
+        ex = FlowExecution()
+        ex._begin_run()
+        try:
+            with self.assertRaises(Exception) as cm:
+                ex._begin_run()
+            self.assertIn("already running", str(cm.exception))
+        finally:
+            ex._running = False
+
+
+class TestR2PlaitaClientContract(unittest.TestCase):
+    def test_get_flow_parses_server_flow_string(self):
+        """契约接口 data.flow 是 JSON 字符串——历史上被双重解析必崩。"""
+        from unittest.mock import patch
+        import plaita.client as client_mod
+        from plaita.client import PlaitaClient
+
+        flow_str = json.dumps({
+            "flow_id": "remote",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "e"},
+                {"type": "end", "id": "e", "output": "$INPUT.name", "resultType": "success"},
+            ],
+        })
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"code": 0, "data": {"flow": flow_str}}
+        with patch.object(client_mod.requests, "post", return_value=response):
+            client = PlaitaClient("id", "key")
+            flow = client.get_flow("259", "0.0.2")
+            self.assertEqual(flow.run(name="kongjie"), "kongjie")

@@ -90,6 +90,9 @@ class Parallel(Node):
     mode: str = Field(default=THREAD)
     join_branches: List[str] = Field(default_factory=list)
 
+    # setup_branches 消费的 camelCase 遗留键（is_conditional/join_branches 已是声明字段）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"joinBranches", "isConditional"})
+
     @model_validator(mode="before")
     @classmethod
     def setup_branches(cls, values: Dict) -> Dict:

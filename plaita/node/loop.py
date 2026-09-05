@@ -66,6 +66,9 @@ class BaseCollectionNode(InlineFlow):
         Field(description="待处理的集合，通常为表达式（$INPUT.xxx / $NODE.xxx），也可为字面量数组"),
     ] = None
 
+    # _setup_item_type 消费的遗留键（item_type 字段无 alias）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"typeDefs", "itemType"})
+
     @model_validator(mode="before")
     @classmethod
     def _setup_item_type(cls, values: Dict) -> Dict:
@@ -148,6 +151,9 @@ class Map(BaseCollectionNode):
 
     concurrent: bool = False
     max_concurrent: Optional[int] = None
+
+    # "async" 是 concurrent 的历史别名（保留字做 dict 键易混淆，仅兼容存量 flow）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"async"})
 
     @model_validator(mode="before")
     @classmethod
@@ -356,6 +362,8 @@ class While(InlineFlow):
 
     condition: Optional[Union[Condition, ConditionGroup]] = None
     max_iterations: int = 1000
+
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"maxIterations"})
 
     @model_validator(mode="before")
     @classmethod

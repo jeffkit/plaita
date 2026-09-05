@@ -51,9 +51,21 @@ from plaita.core.strategies import (  # noqa: F401
     _create_lazy_output,
     _subscribe_event,
 )
+from plaita.core.errors import FlowExecutionException
 
 if TYPE_CHECKING:
     from plaita.event.core import EventBus
+
+
+def _reentry_error() -> FlowExecutionException:
+    """FlowExecution 非重入守卫的错误构造（消息含修复指引）。"""
+    return FlowExecutionException(
+        message=(
+            "This FlowExecution instance is already running; concurrent runs on one "
+            "instance corrupt shared execution state ($INPUT/$NODE/LAST_NODE). Create "
+            "a new FlowExecution per concurrent run, or use child executions for sub-flows."
+        )
+    )
 
 
 class FlowExecution:
@@ -86,6 +98,10 @@ class FlowExecution:
         # registry 跑某个 flow"的场景而不依赖进程级单例。
         self._registry = registry
         self._ctx = ExecutionContext(parent=parent._ctx if parent else None, event_bus=event_bus)
+        # 非重入守卫: FlowExecution 的 $INPUT/$NODE/LAST_NODE 全是实例级状态,
+        # 两个线程同时对同一实例 run 会互相踩状态（静默结果串扰）。子流程走
+        # get_child_execution() 的新实例, 不受影响。
+        self._running = False
 
         if callback_manager:
             self.callback_manager = callback_manager
@@ -305,6 +321,11 @@ class FlowExecution:
             self.timeout = merged
         return self.run_compatible(flow, lazy, **params)
 
+    def _begin_run(self):
+        if self._running:
+            raise _reentry_error()
+        self._running = True
+
     def run_compatible(self, flow, lazy, *args, **kwargs):
         """Sync execution. Returns the result, or a sync generator when lazy.
 
@@ -313,24 +334,40 @@ class FlowExecution:
         immediately with the unconsumed generator as ``result``, which meant
         the lifecycle end callback ran before any node executed.
         """
-        return _drive_strategy(
-            self._prepare_strategy(flow, lazy, args, kwargs),
-            lazy=lazy, sync=True,
-            finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-            on_lazy_finally=lambda exc: _emit_flow_end_on_close(flow, exc, self.callback_manager),
-        )
+        self._begin_run()
+        try:
+            return _drive_strategy(
+                self._prepare_strategy(flow, lazy, args, kwargs),
+                lazy=lazy, sync=True,
+                finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+                on_lazy_finally=lambda exc: (
+                    _emit_flow_end_on_close(flow, exc, self.callback_manager),
+                    setattr(self, "_running", False),
+                ),
+            )
+        finally:
+            if not lazy:
+                self._running = False
 
     async def arun_compatible(self, flow, lazy, *args, **kwargs):
         """Async execution — canonical path."""
-        driven = _drive_strategy(
-            self._prepare_strategy(flow, lazy, args, kwargs),
-            lazy=lazy, sync=False,
-            finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-            on_lazy_finally=lambda exc: _emit_flow_end_on_close(flow, exc, self.callback_manager),
-        )
-        if lazy:
-            return driven
-        return await driven
+        self._begin_run()
+        try:
+            driven = _drive_strategy(
+                self._prepare_strategy(flow, lazy, args, kwargs),
+                lazy=lazy, sync=False,
+                finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+                on_lazy_finally=lambda exc: (
+                    _emit_flow_end_on_close(flow, exc, self.callback_manager),
+                    setattr(self, "_running", False),
+                ),
+            )
+            if lazy:
+                return driven
+            return await driven
+        finally:
+            if not lazy:
+                self._running = False
 
     def _ensure_flow_resolved(self, flow) -> None:
         """执行前兜底：若 ``flow.nodes`` 仍含 dict 形态节点 (绕过

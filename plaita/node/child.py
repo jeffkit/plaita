@@ -68,6 +68,9 @@ class ReferenceFlow(FlowNode):
     flow_id: Optional[str] = Field(None, description="引用的流程定义 ID（调度器据此注入子流程）")
     flow_version: Optional[str] = Field(None, description="引用的流程版本；未设置时由调度器取最新/默认版本")
 
+    # setup_child_flow 消费的 camelCase 遗留键
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"flowID", "flowVersion"})
+
     @model_validator(mode="before")
     @classmethod
     def setup_child_flow(cls, values: Dict) -> Dict:

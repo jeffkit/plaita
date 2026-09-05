@@ -20,11 +20,13 @@ class End(Node):
 
     model_config = ConfigDict(
         populate_by_name=True,
-        extra="allow",
     )
 
     node_type: ClassVar[str] = "end"
     node_name: ClassVar[str] = "结束"
+
+    # setup_end 消费的遗留键（result_type 字段无 alias）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"resultType"})
 
     result_type: Optional[str] = Field(
         END_TYPE_NORMAL,

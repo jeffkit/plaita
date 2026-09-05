@@ -191,13 +191,14 @@ class TestHTTPNode(unittest.TestCase):
         # 创建一个模拟请求，这样会触发HTTP_DO_REQUEST_ERROR
         mock_request = MagicMock()
         with patch.object(HttpExecutor, 'new_request', return_value=mock_request):
-            # 执行测试
-            result = self.http_node.execute(self.execution)
-            
+            # 执行测试——错误路径现在 raise（曾经把 NodeException 当返回值，
+            # 导致 errorHandler 的 continue/continue_with 永不生效）
+            with self.assertRaises(NodeException) as cm:
+                self.http_node.execute(self.execution)
+
             # 验证结果
-            self.assertIsInstance(result, NodeException)
-            self.assertEqual(result.code, HTTP_DO_REQUEST_ERROR)
-            self.assertIn("Connection error", result.message)
+            self.assertEqual(cm.exception.code, HTTP_DO_REQUEST_ERROR)
+            self.assertIn("Connection error", cm.exception.message)
             
         mock_send.assert_called_once()
         
@@ -681,7 +682,8 @@ class TestHTTPNodeAdditional(unittest.TestCase):
         execution = SimpleExecution()
         
         # 执行实际HTTP请求
-        with patch('plaita.node.http.evaluate', side_effect=lambda ctx, expr: f"{self.base_url}/api/v1/foo" if expr == http_node.url else expr):
+        # evaluate 真实签名是 (value, context)——http 节点 0.5.x 修复了传参颠倒
+        with patch('plaita.node.http.evaluate', side_effect=lambda expr, ctx: f"{self.base_url}/api/v1/foo" if expr == http_node.url else expr):
             result = http_node.execute(execution)
             
         # 验证结果

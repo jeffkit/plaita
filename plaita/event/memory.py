@@ -112,7 +112,7 @@ class InMemoryEventSubscriptionStorage(EventSubscriptionStorage):
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
-    
+
     async def store_subscription(self, subscription: EventSubscription) -> str:
         async with self.lock:
             self.subscriptions[subscription.subscription_id] = subscription
@@ -277,6 +277,8 @@ class InMemoryEventBus(EventBus):
         """
         初始化内存事件总线
         """
+        # fire-and-forget 分发任务的强引用集合（见 _track_task）
+        self._pending_tasks: set = set()
         # 存储等待特定事件的future
         self.waiting_futures: Dict[str, List[asyncio.Future]] = {}
         # 事件存储
@@ -302,7 +304,17 @@ class InMemoryEventBus(EventBus):
             self._lock = asyncio.Lock()
         return self._lock
 
-    async def publish(self, event: Union[Event, str, Dict[str, Any]], 
+    def _track_task(self, task: "asyncio.Task") -> None:
+        """持住 fire-and-forget 分发任务的强引用。
+
+        裸 ``create_task`` 的任务没有任何引用时可能被 GC 中途取消，且 loop
+        关闭竞态下静默不执行（仅 'Task was destroyed' 警告）。完成回调自动
+        从集合丢弃，不阻碍回收。
+        """
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def publish(self, event: Union[Event, str, Dict[str, Any]],
                     prevent_duplicate_consumption: bool = True,
                     **kwargs) -> str:
         """发布事件"""
@@ -330,7 +342,7 @@ class InMemoryEventBus(EventBus):
             self.waiting_futures[event.event_type] = [f for f in futures if not f.done()]
         
         # 分发事件到所有匹配的处理器
-        asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption))
+        self._track_task(asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption)))
         
         return event.event_id
     
@@ -367,7 +379,7 @@ class InMemoryEventBus(EventBus):
                 self.waiting_futures[event.event_type] = [f for f in futures if not f.done()]
                 
             # 分发事件
-            asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption))
+            self._track_task(asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption)))
         
         return event_ids
     

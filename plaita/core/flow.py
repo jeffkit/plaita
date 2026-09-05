@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
@@ -113,6 +113,18 @@ class Flow(BaseModel):
         # ``Flow.resolve_nodes`` 显式解析，``model_validate`` 默认自动调一次。
         return normalized
 
+    # parse_flow validator 消费的遗留键（input_type 等字段无 alias）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset(
+        {"flowId", "id", "inputType", "outputType", "globalContext"}
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _schema_hygiene(cls, data):
+        from plaita.node.basic import warn_unknown_keys
+
+        return warn_unknown_keys(cls, data)
+
     @classmethod
     def model_validate(cls, data, *, registry=None, **kwargs):
         """Parse + validate a Flow, then resolve node dicts into ``Node`` 子类。
@@ -161,6 +173,19 @@ class Flow(BaseModel):
             self.nodes = resolved
             # 节点集合变了, 失效索引指纹
             self._node_index_sig = ()
+        # 构建期校验：JSON 直载路径历史上从不执行 node.validate()，builder 路径
+        # 却会（如 Switch 无 branches 直接抛错）——同一类配置错误一条路响一条路哑。
+        # 这里以 warning 降级执行（存量 JSON 流程可能带有 builder 才会拦的配置），
+        # 致命的运行期问题仍由调度层兜底（如分支未命中硬失败）。
+        for node in resolved:
+            if isinstance(node, Node):
+                try:
+                    node.validate()
+                except Exception as e:
+                    logger.warning(
+                        "flow %s node %s (%s) failed construction-time validation: %s",
+                        self.flow_id, getattr(node, "id", "?"), getattr(node, "node_type", "?"), e,
+                    )
 
     def _warn_uncovered_env_refs(self) -> None:
         """扫描节点表达式里 ``$ENV.<key>`` 引用, 若 ``expose_env`` 为空则 warning。

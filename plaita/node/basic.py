@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Dict, Optional
+import logging
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Dict, FrozenSet, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -10,6 +11,49 @@ if TYPE_CHECKING:
     # 节点应依赖窄接口 NodeExecutionContext，而非完整 FlowExecution facade。
     # FlowExecution 已实现该 Protocol；运行时仍传入 facade 实例。
     from plaita.core.node_context import NodeExecutionContext
+
+_logger = logging.getLogger("plaita.node.schema")
+
+# _known_input_keys 的按类缓存（model_fields 是反射结果，解析期反复调用）
+_KNOWN_KEYS_CACHE: Dict[type, FrozenSet[str]] = {}
+
+
+def warn_unknown_keys(cls, values):
+    """Schema 卫生：原始 dict 里的未知键告警（不报错）。
+
+    pydantic 对未声明字段默认 ``extra="ignore"``——JSON 流程里拼错的字段名
+    （如 ``"conditon"``）会被静默吞掉，流程带着错误配置"成功"运行。0.5.0 的
+    一贯策略是把沉默变可见：逐键对照 声明字段+alias+LEGACY_KEYS，未知即
+    ``logger.warning``（带节点 id 与合法键提示），不改变解析结果。
+    """
+    if not isinstance(values, dict):
+        return values
+    known = _known_input_keys(cls)
+    unknown = sorted(k for k in values if isinstance(k, str) and k not in known)
+    if unknown:
+        _logger.warning(
+            "%s %r: unknown config keys %s will be IGNORED (possible typo?). "
+            "Known keys: %s",
+            cls.__name__, values.get("id", "?"), unknown, sorted(known),
+        )
+    return values
+
+
+def _known_input_keys(cls) -> FrozenSet[str]:
+    cached = _KNOWN_KEYS_CACHE.get(cls)
+    if cached is None:
+        keys = {"type"}
+        try:
+            for name, field in cls.model_fields.items():
+                keys.add(name)
+                if field.alias:
+                    keys.add(field.alias)
+        except Exception:  # pragma: no cover - 反射失败的极端场景退化为无告警
+            return frozenset()
+        keys |= set(getattr(cls, "LEGACY_KEYS", ()) or ())
+        cached = frozenset(keys)
+        _KNOWN_KEYS_CACHE[cls] = cached
+    return cached
 
 
 # 表达式语义字段：运行时接受任意值（$INPUT.x / $NODE.x 表达式或字面量，经
@@ -34,6 +78,12 @@ class Node(BaseModel):
     # 具体节点类型, 从而切断 core -> plaita.node.event_node 的反向依赖。
     is_suspending: ClassVar[bool] = False
 
+    # validator 消费但非声明字段的遗留键（camelCase 别名等），unknown-key 告警的
+    # 白名单由「声明字段 ∪ alias ∪ LEGACY_KEYS」构成；子类按需扩展。
+    LEGACY_KEYS: ClassVar[FrozenSet[str]] = frozenset(
+        {"timeoutHandler", "timeout_handler", "errorHandler", "error_handler"}
+    )
+
     # Instance fields
     id: str = Field(..., description="Node identifier")
     name: Optional[str] = Field(None, description="Node name")
@@ -48,6 +98,11 @@ class Node(BaseModel):
     # output_type: Optional[Union[Property, List[Property]]] = None
     timeout_handler: ErrorHandler = Field(default_factory=lambda: ErrorHandler())
     error_handler: RecoverableErrorHandler = Field(default_factory=lambda: RecoverableErrorHandler())
+
+    @model_validator(mode="before")
+    @classmethod
+    def _schema_hygiene(cls, values: Dict) -> Dict:
+        return warn_unknown_keys(cls, values)
 
     @model_validator(mode="before")
     @classmethod

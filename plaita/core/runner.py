@@ -79,7 +79,14 @@ def _parse_timeout(timeout) -> Optional[int]:
         return None
     if timeout.isdigit():
         return int(timeout)
-    duration = isodate.parse_duration(timeout)
+    try:
+        duration = isodate.parse_duration(timeout)
+    except Exception as e:
+        # 历史上第三方 isodate.ISO8601Error 裸穿透，用户不知道合法格式长什么样
+        raise ValueError(
+            f"Invalid timeout {timeout!r}: use milliseconds as a plain number "
+            f"(e.g. '300') or an ISO 8601 duration (e.g. 'PT0.3S', 'PT2S', 'PT1M')"
+        ) from e
     return None if duration.total_seconds() == 0 else int(duration.total_seconds() * 1000)
 
 

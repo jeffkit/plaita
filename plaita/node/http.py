@@ -251,6 +251,9 @@ class HTTP(Node):
     
     method: str = Field("GET", description="HTTP方法")
     content_type: str = Field("application/json", description="内容类型")
+
+    # validator 消费的 camelCase 遗留键（content_type 字段无 alias）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"contentType"})
     url: str = Field(..., description="请求URL")
     query: Optional[Any] = Field(None, description="查询参数")
     headers: Optional[Any] = Field(None, description="请求头")
@@ -313,10 +316,12 @@ class HTTP(Node):
                 return None, Exception("Failed to create HTTP executor")
             http_rsp, err = executor.handle_request(execution)
             if err:
-                return self.handle_http_node_err(err, http_rsp)
+                # raise 而非 return：把 NodeException 当返回值会让 errorHandler
+                # （continue/continue_with 的 defaultValue）永远不生效
+                raise self.handle_http_node_err(err, http_rsp)
             return self._build_response_result(http_rsp, execution)
         except Exception as e:
-            return self.handle_http_node_err(e, http_rsp)
+            raise self.handle_http_node_err(e, http_rsp)
 
     async def arun(self, execution):
         """执行HTTP请求（异步，使用 aiohttp，不阻塞事件循环）。"""
@@ -327,10 +332,10 @@ class HTTP(Node):
                 raise RuntimeError("Failed to create HTTP executor")
             http_rsp, err = await executor.handle_request_async(execution)
             if err:
-                return self.handle_http_node_err(err, http_rsp)
+                raise self.handle_http_node_err(err, http_rsp)
             return self._build_response_result(http_rsp, execution)
         except Exception as e:
-            return self.handle_http_node_err(e, http_rsp)
+            raise self.handle_http_node_err(e, http_rsp)
     
     def new_executor(self, ctx):
         """创建HTTP执行器"""
@@ -361,13 +366,13 @@ class HTTP(Node):
         
         delegate_name = ""
         if "name" in self.delegate:
-            name_value = evaluate(ctx, self.delegate["name"])
+            name_value = evaluate(self.delegate["name"], ctx)
             if name_value:
                 delegate_name = str(name_value)
         
         delegate_params = None
         if "params" in self.delegate:
-            params_value = evaluate(ctx, self.delegate["params"])
+            params_value = evaluate(self.delegate["params"], ctx)
             if params_value:
                 delegate_params = json.dumps(params_value).encode('utf-8')
         
@@ -383,13 +388,13 @@ class HTTP(Node):
         
         addr_name = ""
         if "name" in self.addressing:
-            name_value = evaluate(ctx, self.addressing["name"])
+            name_value = evaluate(self.addressing["name"], ctx)
             if name_value:
                 addr_name = str(name_value)
         
         addr_params = None
         if "params" in self.addressing:
-            params_value = evaluate(ctx, self.addressing["params"])
+            params_value = evaluate(self.addressing["params"], ctx)
             if params_value:
                 addr_params = json.dumps(params_value).encode('utf-8')
         
@@ -404,7 +409,7 @@ class HTTP(Node):
             return None
         
         try:
-            body = evaluate(ctx, self.body)
+            body = evaluate(self.body, ctx)
             return body
         except Exception as e:
             raise Exception(f"Failed to parse body: {str(e)}")
@@ -415,7 +420,7 @@ class HTTP(Node):
             return None
         
         try:
-            query = evaluate(ctx, self.query)
+            query = evaluate(self.query, ctx)
             if isinstance(query, dict):
                 return query
             return None
@@ -432,7 +437,7 @@ class HTTP(Node):
             return headers
         
         try:
-            parsed_headers = evaluate(ctx, self.headers)
+            parsed_headers = evaluate(self.headers, ctx)
             if isinstance(parsed_headers, dict):
                 for key, value in parsed_headers.items():
                     if isinstance(value, str):
@@ -444,7 +449,7 @@ class HTTP(Node):
     def parse_url(self, ctx):
         """解析URL"""
         try:
-            url_value = evaluate(ctx, self.url)
+            url_value = evaluate(self.url, ctx)
             return str(url_value)
         except Exception as e:
             raise Exception(f"Failed to parse URL: {str(e)}")
@@ -488,5 +493,5 @@ class HTTP(Node):
 
 # 注册HTTP节点类型
 def register():
-    from plaita.node import node_register
-    node_register(HTTP) 
+    from plaita.node import get_default_registry
+    get_default_registry().register(HTTP) 

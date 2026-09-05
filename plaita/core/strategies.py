@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING
 from plaita.core.callback import BaseCallbackManager, CallbackManager
 from plaita.core.context import ExecutionContext
 from plaita.core.errors import (
+    ErrorStrategy,
     FlowExecutionException,
     FlowStartMissingError,
     FlowTimeoutError,
@@ -269,8 +270,12 @@ class DistributedStrategy:
 
         # 统一走 flow.next_node: 分支节点按 branch 选 branch.next, 普通节点走 next,
         # 避免在此重复实现一套与 flow._get_branch_target 易漂移的图遍历逻辑。
-        current_node = flow.next_node(current_node, branch)
-        return current_node, result, branch
+        next_node = flow.next_node(current_node, branch)
+        if next_node is None and not flow.is_end_node(current_node) and getattr(current_node, "branching", False):
+            # 与 Normal/Generator 的 _advance_one 对齐: 分支未命中不允许
+            # 静默"完成"（历史上 distributed 会合成一个 is_end=True 的假 End 步）。
+            _handle_unmatched_branch(current_node, branch)
+        return next_node, result, branch
 
     async def _start_new_flow(self, flow, context, runner, callback_manager):
         start_node = flow.start_node
@@ -355,7 +360,32 @@ class DistributedStrategy:
             raise resume_err from e
 
         context.update_node_result(current_node, result)
+        await self._unregister_suspended_subscription(current_node, context, prev_state)
         return _create_lazy_output(current_node, result, None, context.to_dict(), is_suspend=False, execution_id=context.execution_id)
+
+    async def _unregister_suspended_subscription(self, node, context, prev_state):
+        """resume 完成后注销挂起期注册的事件订阅。
+
+        历史上订阅永不注销：分布式部署下每个后续同类型事件都会匹配到死订阅、
+        经 event_filter 再 enqueue 一次注定失败的 resume（ResumeError 噪音 +
+        队列垃圾）。hasattr 探测保持对简化 bus 实现的兼容。
+        """
+        if not isinstance(prev_state, dict):
+            return
+        subscription_id = prev_state.get("subscription_id")
+        if not subscription_id:
+            return
+        event_bus = context.get_or_create_event_bus()
+        unregister = getattr(event_bus, "unregister_subscription", None) if event_bus else None
+        if unregister is None:
+            return
+        try:
+            outcome = unregister(subscription_id)
+            if asyncio.iscoroutine(outcome):
+                await outcome
+            logger.debug("unregistered subscription %s for resumed node %s", subscription_id, node.id)
+        except Exception as e:  # noqa: BLE001 - 注销失败不影响 resume 结果
+            logger.warning("failed to unregister subscription %s after resume: %s", subscription_id, e)
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +421,37 @@ async def _advance_one(flow, runner, callback_manager, node, max_timeout_ms=None
     )
     is_end = flow.is_end_node(node)
     next_node = None if is_end else flow.next_node(node, branch)
+    if next_node is None and not is_end and getattr(node, "branching", False):
+        _handle_unmatched_branch(node, branch)
     return result, branch, next_node, is_end
+
+
+def _handle_unmatched_branch(node, branch):
+    """分支节点未命中任何分支且无 default：拒绝静默"成功"。
+
+    历史行为是返回 None → 调度层把整个 ``$NODE`` 状态表当流程结果返回，
+    流程带着中间态"成功"结束——这是编排框架最危险的静默错误结果。
+    现在默认抛错；节点显式配置 ``errorHandler.strategy=continue/continue-with``
+    时保留旧的"继续"逃生口（降级为 warning）。
+    """
+    handler = getattr(node, "error_handler", None)
+    strategy = handler.strategy if handler is not None else None
+    if strategy in (ErrorStrategy.CONTINUE, ErrorStrategy.CONTINUE_WITH):
+        logger.warning(
+            "branching node %s matched no branch and has no default "
+            "(branch=%r); continuing because errorHandler.strategy=%s",
+            node.id, branch, strategy.value,
+        )
+        return
+    raise FlowExecutionException(
+        message=(
+            f"Branching node '{node.id}' ({getattr(node, 'node_type', '?')}) matched "
+            f"no branch and has no default branch; refusing to end the flow with an "
+            f"ambiguous intermediate result. Add a default branch, or set this node's "
+            f"errorHandler.strategy='continue' to opt into the legacy skip behavior."
+        ),
+        node=node,
+    )
 
 
 def _create_end_output(node, result, context, execution_id=None):

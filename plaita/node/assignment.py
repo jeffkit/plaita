@@ -19,6 +19,9 @@ class Assignment(Node):
     output_type: Optional[Property] = None
     upstream_output: list[dict] = Field(default_factory=list)
 
+    # setup_assignment 消费的 camelCase 遗留键
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"outputType", "upstreamOutput"})
+
     @model_validator(mode="before")
     @classmethod
     def setup_assignment(cls, values) -> "Assignment":
