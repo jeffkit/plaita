@@ -1,5 +1,14 @@
 """
 基于内存的事件总线和存储实现
+
+内存总线语义（与 Redis/SQLAlchemy 后端不同，使用前请知悉）：
+- ``wait_for_event`` 只能看到**注册之后**发布的事件——未来先注册、后 publish；
+  先发布的事件不会回放（即使还在 event_storage 里）。
+- ``register_subscription`` 只把订阅写入订阅存储，**不驱动任何分发**；
+  总线分发只认 ``register_handler``。订阅记录供 EventFilter 等外部组件
+  按 correlation_id 检索消费。
+- ``publish`` 是 fire-and-forget：handler 在独立 task 中异步分发。
+  publish 返回后立即关闭事件循环，**不保证** handler 已经执行。
 """
 import asyncio
 import time
