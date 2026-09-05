@@ -55,7 +55,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     headers,
   })
 
-  if (response.status === 401 && !url.startsWith('/auth/login')) {
+  if (response.status === 401 && !url.startsWith('/auth/login') && !url.startsWith('/auth/setup')) {
     clearSession()
     window.location.assign('/login')
     throw new Error('登录已过期，请重新登录')
@@ -117,6 +117,9 @@ export interface ExecutionInfo {
   context?: Record<string, unknown>
   error?: Record<string, unknown>
   invoker?: string
+  // 本地单机模式专有：节点级 trace 与最终输出
+  nodes?: Array<{ id: string; type: string; name?: string; input?: unknown; output?: unknown; status: string; error?: string }> | null
+  output?: unknown
 }
 
 export interface ExecutionListResponse {
@@ -640,6 +643,16 @@ export const api = {
   },
 
   // ============ 认证与用户 ============
+
+  async setupStatus(): Promise<{ needs_setup: boolean }> {
+    return request('/auth/setup-status')
+  },
+
+  async setup(payload: { username: string; password: string }): Promise<{
+    token: string; username: string; role: string
+  }> {
+    return request('/auth/setup', { method: 'POST', body: JSON.stringify(payload) })
+  },
 
   async login(username: string, password: string): Promise<{
     token: string; username: string; role: string; expires_at: string

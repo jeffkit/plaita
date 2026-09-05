@@ -3,9 +3,10 @@ import Credentials from './pages/Credentials'
 import Users from './pages/Users'
 import Audit from './pages/Audit'
 import Login from './pages/Login'
+import Setup from './pages/Setup'
 import { api, clearSession, getRole } from './services/api'
 import { createBrowserRouter, RouterProvider, NavLink, Outlet } from 'react-router-dom'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   LayoutGrid,
   GitBranch,
@@ -267,11 +268,25 @@ function NavItem({
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem('plaita_token'))
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
+
+  // 无会话时探测：users 为空 → 首次启动向导；否则登录页
+  useEffect(() => {
+    if (!token) {
+      api.setupStatus()
+        .then((r) => setNeedsSetup(r.needs_setup))
+        .catch(() => setNeedsSetup(false))
+    }
+  }, [token])
+
   if (!token) {
-    return (
-      <Login
-        onSuccess={() => setToken(localStorage.getItem('plaita_token'))}
-      />
+    if (needsSetup === null) {
+      return <div className="h-screen bg-surface" />
+    }
+    return needsSetup ? (
+      <Setup onSuccess={() => setToken(localStorage.getItem('plaita_token'))} />
+    ) : (
+      <Login onSuccess={() => setToken(localStorage.getItem('plaita_token'))} />
     )
   }
   return <RouterProvider router={router} />

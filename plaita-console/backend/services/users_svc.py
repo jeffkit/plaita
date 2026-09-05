@@ -51,24 +51,39 @@ def verify_password(password: str, stored: str) -> bool:
 
 # ---- 引导 ----
 
-def ensure_bootstrap_user(store) -> Optional[str]:
-    """users 为空时创建首个 admin；返回明文密码（仅随机生成时），否则 None。"""
+def has_any_user(store) -> bool:
+    """users 表是否已有用户（决定前端走登录页还是首次启动向导）。"""
     with store._session_local() as session:
-        if session.scalars(select(User)).first() is not None:
-            return None
-        import os
+        return session.scalars(select(User)).first() is not None
 
-        username = "admin"
-        password = os.environ.get("PLAITA_CONSOLE_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
-        session.add(User(username=username, password_hash=hash_password(password), role="admin"))
-        session.commit()
-    if not os.environ.get("PLAITA_CONSOLE_ADMIN_PASSWORD"):
-        logger.warning(
-            "已创建初始管理员 admin（随机密码：%s）——请立即登录并修改密码", password
+
+def ensure_bootstrap_user(store) -> Optional[str]:
+    """无人值守引导：仅在设置了 PLAITA_CONSOLE_ADMIN_PASSWORD 时自动创建 admin。
+
+    未设置该环境变量时不自动创建——前端进入「创建管理员」向导
+    （POST /api/auth/setup），避免随机密码打印到日志的粗糙体验。
+    返回明文密码（仅环境变量路径），否则 None。
+    """
+    import os
+
+    env_password = os.environ.get("PLAITA_CONSOLE_ADMIN_PASSWORD")
+    if not env_password or has_any_user(store):
+        return None
+    with store._session_local() as session:
+        session.add(
+            User(username="admin", password_hash=hash_password(env_password), role="admin")
         )
-        return password
+        session.commit()
     logger.info("已创建初始管理员 admin（密码来自 PLAITA_CONSOLE_ADMIN_PASSWORD）")
-    return None
+    return env_password
+
+
+def setup_admin(store, username: str, password: str) -> Dict[str, Any]:
+    """首次启动向导：创建首个 admin 用户（仅 users 表为空时允许）。"""
+    if has_any_user(store):
+        raise UserError("管理员已存在，禁止重复初始化")
+    create_user(store, username, password, "admin")
+    return {"username": username, "role": "admin"}
 
 
 # ---- 登录/会话 ----

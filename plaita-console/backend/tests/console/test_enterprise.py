@@ -33,7 +33,7 @@ GOOD_DEF = json.dumps({"nodes": [
 ]})
 
 
-def _build_app(tmp_path, monkeypatch, env="dev", admin_key: str = "") -> FastAPI:
+def _build_app(tmp_path, monkeypatch, env="dev", admin_key: str = "", with_user: bool = True) -> FastAPI:
     monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", f"sqlite:///{tmp_path}/rbac.db")
     monkeypatch.delenv("PLAITA_CREDENTIALS_KEY", raising=False)
     monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", str(tmp_path / "creds.key"))
@@ -46,6 +46,8 @@ def _build_app(tmp_path, monkeypatch, env="dev", admin_key: str = "") -> FastAPI
 
     flow_store.init_engine(f"sqlite:///{tmp_path}/rbac.db")
     store = flow_store.get_flow_store()
+    if with_user:
+        users_svc.create_user(store, "admin", "admin-password-1", "admin")
 
     app = FastAPI()
     app.state.redis = None
@@ -88,7 +90,7 @@ def client(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def client_with_users(tmp_path, monkeypatch):
-    app = _build_app(tmp_path, monkeypatch)
+    app = _build_app(tmp_path, monkeypatch, with_user=False)
     store = flow_store.get_flow_store()
     users_svc.create_user(store, "admin", "admin-password-1", "admin")
     users_svc.create_user(store, "editor1", "editor-password-1", "editor")
@@ -239,3 +241,41 @@ def test_promotion_export_import_fingerprint(client_with_users, tmp_path, monkey
 
     deps = client.get("/api/deployments", headers=h).json()["deployments"]
     assert any(d["flow_id"] == "hello-plaita" and d["version"] == "2.0.1" for d in deps)
+
+
+# ---- 首次启动向导 ----
+
+def test_setup_wizard_flow(tmp_path, monkeypatch):
+    """users 为空 → needs_setup=true → setup 创建 admin 并直接签发会话。"""
+    monkeypatch.delenv("PLAITA_CONSOLE_ADMIN_PASSWORD", raising=False)
+    app = _build_app(tmp_path, monkeypatch, with_user=False)
+    client = TestClient(app)
+
+    assert client.get("/api/auth/setup-status").json()["needs_setup"] is True
+
+    # setup 创建 admin 并直接返回会话
+    r = client.post("/api/auth/setup", json={"username": "boss", "password": "init-password-1"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["username"] == "boss" and body["role"] == "admin"
+
+    # 已初始化后：needs_setup=false，重复 setup 被拒
+    assert client.get("/api/auth/setup-status").json()["needs_setup"] is False
+    r = client.post("/api/auth/setup", json={"username": "evil", "password": "init-password-1"})
+    assert r.status_code == 409
+
+    # 用向导设的密码登录
+    r = client.post("/api/auth/login", json={"username": "boss", "password": "init-password-1"})
+    assert r.status_code == 200
+
+
+def test_headless_bootstrap_still_works(tmp_path, monkeypatch):
+    """无人值守：设置了 PLAITA_CONSOLE_ADMIN_PASSWORD → 启动即自动建 admin。"""
+    monkeypatch.setenv("PLAITA_CONSOLE_ADMIN_PASSWORD", "headless-pw-1")
+    app = _build_app(tmp_path, monkeypatch, with_user=False)
+    store = flow_store.get_flow_store()
+    assert users_svc.ensure_bootstrap_user(store) == "headless-pw-1"
+    assert users_svc.login(store, "admin", "headless-pw-1") is not None
+    # 已有用户 → 向导关闭
+    client = TestClient(app)
+    assert client.get("/api/auth/setup-status").json()["needs_setup"] is False

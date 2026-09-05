@@ -45,6 +45,23 @@ class PasswordRequest(BaseModel):
     password: str = Field(..., min_length=8)
 
 
+@router.get("/auth/setup-status")
+def setup_status():
+    """首次启动向导探测：users 为空 = 需要初始化管理员。"""
+    return {"needs_setup": not users_svc.has_any_user(get_flow_store())}
+
+
+@router.post("/auth/setup")
+def setup(req: CreateUserRequest):
+    """创建首个管理员（仅 users 表为空时可用），成功直接返回会话。"""
+    try:
+        info = users_svc.setup_admin(get_flow_store(), req.username, req.password)
+    except users_svc.UserError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    session = users_svc.login(get_flow_store(), req.username, req.password)
+    return session
+
+
 @router.post("/auth/login")
 def login(req: LoginRequest, request: Request):
     info = users_svc.login(get_flow_store(), req.username, req.password)

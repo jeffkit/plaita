@@ -300,6 +300,20 @@ export default function ExecutionDetail() {
 
         {/* 右侧：上下文和流程图 */}
         <div className="lg:col-span-2 space-y-6">
+          {/* 流程输出（本地模式） */}
+          {execution.output !== undefined && execution.output !== null && (
+            <Card className="overflow-hidden">
+              <div className="px-4 py-3 border-b border-line">
+                <h3 className="text-section text-ink-primary">流程输出</h3>
+              </div>
+              <div className="p-4 bg-inset max-h-72 overflow-auto">
+                <pre className="text-data-sm font-mono text-green-300/90 whitespace-pre-wrap break-all">
+                  {JSON.stringify(execution.output, null, 2)}
+                </pre>
+              </div>
+            </Card>
+          )}
+
           {/* 流程信息：flow_id 可点回编辑器，接上「失败 → 改流程」的断点 */}
           <InfoCard title="流程信息">
             <div className="flex items-center justify-between gap-3">
@@ -315,6 +329,21 @@ export default function ExecutionDetail() {
             <InfoRow label="版本" value={execution.flow_version || '最新'} />
             <InfoRow label="调用者" value={execution.invoker || '-'} />
           </InfoCard>
+
+          {/* 本地单机模式：真实节点级 trace（回调采集，含输入/输出） */}
+          {execution.nodes && execution.nodes.length > 0 && (
+            <Card className="overflow-hidden">
+              <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+                <h3 className="text-section text-ink-primary">节点执行</h3>
+                <span className="text-[11px] text-ink-faint">本地模式 · 采集自执行回调</span>
+              </div>
+              <div className="p-4 space-y-2">
+                {execution.nodes.map((n, i) => (
+                  <NodeTraceRow key={`${n.id}-${i}`} node={n} />
+                ))}
+              </div>
+            </Card>
+          )}
 
           {/* 节点时间线：从上下文里还原每个节点的执行痕迹，替代整包 JSON dump */}
           <NodeTimeline context={execution.context} />
@@ -655,3 +684,49 @@ function calculateDuration(start?: string, end?: string): string {
   return `${(duration / 3600000).toFixed(1)}h`
 }
 
+
+
+function NodeTraceRow({ node }: { node: NonNullable<ExecutionInfo['nodes']>[number] }) {
+  const [open, setOpen] = useState(false)
+  const tone =
+    node.status === 'error'
+      ? 'border-status-error/50 bg-status-error/5'
+      : node.status === 'running'
+        ? 'border-plaita-500/50'
+        : 'border-line'
+  return (
+    <div className={`rounded-lg border ${tone} bg-elevated text-xs`}>
+      <button
+        className="w-full flex items-center justify-between gap-2 px-3 py-2"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="font-mono text-ink-primary truncate">{node.name || node.id}</span>
+          <span className="text-ink-faint">{node.type}</span>
+        </span>
+        <StatusBadge status={node.status} />
+      </button>
+      {open && (
+        <div className="px-3 pb-2 space-y-1.5">
+          {node.input !== undefined && node.input !== null && (
+            <div>
+              <p className="text-ink-faint mb-0.5">input</p>
+              <pre className="bg-inset rounded p-2 font-mono text-[11px] text-ink-secondary whitespace-pre-wrap break-all max-h-48 overflow-auto">
+                {JSON.stringify(node.input, null, 2)}
+              </pre>
+            </div>
+          )}
+          {node.output !== undefined && node.output !== null && (
+            <div>
+              <p className="text-ink-faint mb-0.5">output</p>
+              <pre className="bg-inset rounded p-2 font-mono text-[11px] text-ink-secondary whitespace-pre-wrap break-all max-h-48 overflow-auto">
+                {JSON.stringify(node.output, null, 2)}
+              </pre>
+            </div>
+          )}
+          {node.error && <p className="text-status-error">{node.error}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
