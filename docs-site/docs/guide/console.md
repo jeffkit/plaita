@@ -49,6 +49,20 @@ python -m plaita_console              # 或使用 plaita-console 命令
 
 固定值只在试跑内存里，不会写进流程定义。
 
+## 连接器
+
+`pip install plaita-nodes` 自带的连接器节点（凭据按名引用，机密不落流程定义）：
+
+| 节点 | 用途 | 凭据数据 |
+|------|------|----------|
+| `feishu_webhook` / `wecom_webhook` / `slack_webhook` / `dingtalk_webhook` | IM 群通知 | `{"url": ...}`；钉钉可加 `"secret"` 自动加签 |
+| `generic_webhook` | 任意 Webhook POST | `{"url": ...}` |
+| `api_request` | 通用 REST（静态 Header 鉴权） | `{"base_url": ..., "headers": {...}}` |
+| `sql_query` | SQL 查询/写入（SQLAlchemy） | `{"url": "postgresql://..."}` 或 host/port/user/password/database |
+| `email_send` | SMTP 邮件 | `{"host", "port", "username", "password", "use_tls"/"use_ssl"}` |
+
+新增连接器即一个新的节点类 + entry-point 注册，无需改动编排台。
+
 ## 凭据
 
 外部服务机密（webhook 地址、数据库密码等）集中在「凭据」页管理：Fernet
