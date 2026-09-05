@@ -1,5 +1,9 @@
-import { KeyRound } from 'lucide-react'
+import { KeyRound, LogOut, UserCog } from 'lucide-react'
 import Credentials from './pages/Credentials'
+import Users from './pages/Users'
+import Audit from './pages/Audit'
+import Login from './pages/Login'
+import { api, clearSession, getRole } from './services/api'
 import { createBrowserRouter, RouterProvider, NavLink, Outlet } from 'react-router-dom'
 import { useState } from 'react'
 import {
@@ -46,6 +50,8 @@ interface NavItem {
   end?: boolean
 }
 
+const ADMIN_ONLY_PATHS = new Set(['/credentials', '/cluster', '/users', '/audit'])
+
 const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: '总览',
@@ -60,6 +66,8 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: '/schedules', icon: <Clock size={16} />, label: '触发器' },
       { to: '/nodes', icon: <Boxes size={16} />, label: '节点管理' },
       { to: '/credentials', icon: <KeyRound size={16} />, label: '凭据' },
+      { to: '/users', icon: <UserCog size={16} />, label: '用户' },
+      { to: '/audit', icon: <ScrollText size={16} />, label: '审计' },
     ],
   },
   {
@@ -102,6 +110,8 @@ const router = createBrowserRouter([
       { path: 'flows/:flowId/edit', element: <FlowEditor /> },
       { path: 'nodes', element: <Nodes /> },
       { path: 'credentials', element: <Credentials /> },
+      { path: 'users', element: <Users /> },
+      { path: 'audit', element: <Audit /> },
     ],
   },
 ])
@@ -111,6 +121,17 @@ function Layout() {
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem(NAV_COLLAPSED_KEY) === '1'
   )
+  const isAdmin = getRole() === 'admin'
+  const username = localStorage.getItem('plaita_username') || ''
+  const logout = async () => {
+    try {
+      await api.logout()
+    } catch {
+      /* 会话已无效也照常退出 */
+    }
+    clearSession()
+    window.location.assign('/login')
+  }
   const toggleCollapsed = () =>
     setCollapsed((v) => {
       localStorage.setItem(NAV_COLLAPSED_KEY, v ? '0' : '1')
@@ -160,25 +181,43 @@ function Layout() {
         {/* 导航分组 */}
         <div className="flex-1 overflow-y-auto py-1">
           {NAV_GROUPS.map((group) => (
-            <div key={group.label}>
+            <div key={group.label} className={group.label === '集群 · 运维' && !isAdmin ? 'hidden' : ''}>
               {!collapsed && (
                 <p className="px-5 pt-4 pb-1.5 text-micro uppercase text-ink-faint">
                   {group.label}
                 </p>
               )}
               {collapsed && <div className="h-2" />}
-              {group.items.map((item) => (
-                <NavItem
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  icon={item.icon}
-                  label={item.label}
-                  collapsed={collapsed}
-                />
-              ))}
+              {group.items
+                .filter((item) => isAdmin || !ADMIN_ONLY_PATHS.has(item.to))
+                .map((item) => (
+                  <NavItem
+                    key={item.to}
+                    to={item.to}
+                    end={item.end}
+                    icon={item.icon}
+                    label={item.label}
+                    collapsed={collapsed}
+                  />
+                ))}
             </div>
           ))}
+        </div>
+
+        {/* 用户菜单 */}
+        <div className={`p-2 border-t border-line ${collapsed ? 'flex justify-center' : 'flex items-center justify-between gap-2'}`}>
+          {!collapsed && (
+            <span className="text-caption text-ink-muted truncate" title={username}>
+              {username || '未登录'}
+            </span>
+          )}
+          <button
+            onClick={logout}
+            className="text-ink-faint hover:text-status-error shrink-0"
+            title="退出登录"
+          >
+            <LogOut size={14} />
+          </button>
         </div>
 
       </nav>
@@ -227,5 +266,13 @@ function NavItem({
 }
 
 export default function App() {
+  const [token, setToken] = useState(() => localStorage.getItem('plaita_token'))
+  if (!token) {
+    return (
+      <Login
+        onSuccess={() => setToken(localStorage.getItem('plaita_token'))}
+      />
+    )
+  }
   return <RouterProvider router={router} />
 }

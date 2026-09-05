@@ -29,6 +29,28 @@ python -m plaita_console              # 或使用 plaita-console 命令
 | `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN=true` | 本地开发免密；局域网/生产请改设 `PLAITA_CONSOLE_ADMIN_API_KEY` |
 | `PLAITA_CONSOLE_SECRET_ID` / `SECRET_KEY` | 对外契约接口的 HMAC 密钥 |
 
+## 企业能力：RBAC / 审计 / 环境晋升
+
+**RBAC**：`PLAITA_CONSOLE_ADMIN_PASSWORD` 未设时，首次启动自动生成 admin
+账号（随机密码打印到日志，请立即修改）。角色三级：
+
+- **admin**：全部权限（用户管理 / 凭据 / 集群 / 审计 / 生产环境删除）
+- **editor**：编排与执行（增删改流程、发布、试跑、启动执行）
+- **viewer**：只读
+
+登录后走会话 token（7 天）；`X-Admin-API-Key` 服务账号兼容（等价 admin）。
+角色/密码变更即时撤销旧会话。「用户」页管理账号与角色。
+
+**审计**：「审计」页留痕管理面敏感操作（发布、保存、删除、执行、凭据变更、
+用户管理），含操作人 / IP / 时间 / 元数据——机密内容永不入审计。
+
+**环境晋升**：console 实例经 `PLAITA_CONSOLE_ENV` 标识环境（dev/test/prod）：
+
+- 每次发布写部署记录（环境、操作人、定义 SHA-256 指纹）
+- 「导出晋升包」→ 目标环境 console「导入」：指纹校验防篡改，导入为草稿
+  再发布，形成 dev → prod 的受控晋升
+- `PLAITA_CONSOLE_ENV=prod` 时删除操作需要 admin
+
 ## 本地单机模式（零依赖上手）
 
 **不装 Redis 也能用**：console 启动时若 Redis 不可达，自动进入本地单机模式——

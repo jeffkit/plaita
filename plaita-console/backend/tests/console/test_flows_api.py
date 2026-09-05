@@ -35,6 +35,9 @@ def _echo_def(flow_id: str = "echo") -> str:
 def client(tmp_path) -> TestClient:
     flow_store.init_engine(f"sqlite:///{tmp_path / 'flows.db'}")
     app = FastAPI()
+    app.state.redis = None      # 本地单机模式：发布/删除跳过引擎同步
+    app.state.local_mode = True
+    app.state.store = flow_store.get_flow_store()
     app.include_router(flows_api.router, prefix="/api")
     return TestClient(app)
 

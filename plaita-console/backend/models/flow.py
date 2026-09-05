@@ -148,3 +148,60 @@ class Credential(Base):
     updated_at = Column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class User(Base):
+    """编排台用户。role ∈ admin/editor/viewer。
+
+    密码存 PBKDF2-SHA256（格式 salt$hash，stdlib 实现，无额外依赖）。
+    """
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(64), nullable=False, unique=True, index=True)
+    password_hash = Column(String(256), nullable=False)
+    role = Column(String(16), nullable=False, default="viewer")
+    disabled = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class SessionToken(Base):
+    """登录会话。只存 token 的 SHA-256，明文 token 仅在签发时返回给前端。"""
+
+    __tablename__ = "session_tokens"
+
+    token_hash = Column(String(64), primary_key=True)
+    username = Column(String(64), nullable=False, index=True)
+    role = Column(String(16), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AuditLog(Base):
+    """审计日志：管理面敏感操作留痕（操作人不记密钥/机密内容）。"""
+
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    actor = Column(String(64), nullable=False, default="")
+    action = Column(String(64), nullable=False, index=True)
+    resource = Column(String(64), nullable=False, default="")
+    resource_id = Column(String(128), nullable=False, default="")
+    detail_json = Column(Text, nullable=False, default="{}")
+    ip = Column(String(64), nullable=False, default="")
+
+
+class Deployment(Base):
+    """部署记录：每次 publish 留痕（环境、操作人、定义指纹），支撑环境晋升审计。"""
+
+    __tablename__ = "deployments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    flow_id = Column(String(128), nullable=False, index=True)
+    version = Column(String(64), nullable=False)
+    environment = Column(String(32), nullable=False, default="dev")
+    actor = Column(String(64), nullable=False, default="")
+    definition_hash = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)

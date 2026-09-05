@@ -15,21 +15,51 @@ function getAdminApiKey(): string {
   return (import.meta as { env?: Record<string, string> }).env?.VITE_PLAITA_ADMIN_API_KEY || ''
 }
 
+// 会话 token（RBAC 登录后保存）
+export function getToken(): string | null {
+  return localStorage.getItem('plaita_token')
+}
+
+export function setSession(token: string, username: string, role: string): void {
+  localStorage.setItem('plaita_token', token)
+  localStorage.setItem('plaita_username', username)
+  localStorage.setItem('plaita_role', role)
+}
+
+export function clearSession(): void {
+  localStorage.removeItem('plaita_token')
+  localStorage.removeItem('plaita_username')
+  localStorage.removeItem('plaita_role')
+}
+
+export function getRole(): string {
+  return localStorage.getItem('plaita_role') || 'viewer'
+}
+
 // 通用请求函数
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options?.headers as Record<string, string> | undefined),
   }
-  const adminKey = getAdminApiKey()
-  if (adminKey) {
-    headers['X-Admin-API-Key'] = adminKey
+  const token = getToken()
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  } else {
+    const adminKey = getAdminApiKey()
+    if (adminKey) headers['X-Admin-API-Key'] = adminKey
   }
 
   const response = await fetch(`${API_BASE}${url}`, {
     ...options,
     headers,
   })
+
+  if (response.status === 401 && !url.startsWith('/auth/login')) {
+    clearSession()
+    window.location.assign('/login')
+    throw new Error('登录已过期，请重新登录')
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '请求失败' }))
@@ -588,6 +618,61 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     })
+  },
+
+  // ============ 审计与部署 ============
+
+  async getAudit(params?: { action?: string; actor?: string; limit?: number }): Promise<{
+    logs: Array<{ ts: string; actor: string; action: string; resource: string; resource_id: string; detail: Record<string, unknown>; ip: string }>
+  }> {
+    const q = new URLSearchParams()
+    if (params?.action) q.set('action', params.action)
+    if (params?.actor) q.set('actor', params.actor)
+    if (params?.limit) q.set('limit', String(params.limit))
+    return request(`/audit?${q}`)
+  },
+
+  async getDeployments(flowId?: string): Promise<{
+    deployments: Array<{ flow_id: string; version: string; environment: string; actor: string; definition_hash: string; created_at: string }>
+  }> {
+    const q = flowId ? `?flow_id=${encodeURIComponent(flowId)}` : ''
+    return request(`/deployments${q}`)
+  },
+
+  // ============ 认证与用户 ============
+
+  async login(username: string, password: string): Promise<{
+    token: string; username: string; role: string; expires_at: string
+  }> {
+    return request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
+  },
+
+  async me(): Promise<{ actor: string; role: string }> {
+    return request('/auth/me')
+  },
+
+  async logout(): Promise<{ success: boolean }> {
+    return request('/auth/logout', { method: 'POST' })
+  },
+
+  async getUsers(): Promise<{ users: Array<{ username: string; role: string; disabled: boolean; created_at: string }> }> {
+    return request('/users')
+  },
+
+  async createUser(payload: { username: string; password: string; role: string }): Promise<{ success: boolean }> {
+    return request('/users', { method: 'POST', body: JSON.stringify(payload) })
+  },
+
+  async setUserRole(username: string, role: string): Promise<{ success: boolean }> {
+    return request(`/users/${encodeURIComponent(username)}/role`, { method: 'POST', body: JSON.stringify({ role }) })
+  },
+
+  async setUserPassword(username: string, password: string): Promise<{ success: boolean }> {
+    return request(`/users/${encodeURIComponent(username)}/password`, { method: 'POST', body: JSON.stringify({ password }) })
+  },
+
+  async deleteUser(username: string): Promise<{ success: boolean }> {
+    return request(`/users/${encodeURIComponent(username)}`, { method: 'DELETE' })
   },
 
   // ============ 凭据 ============

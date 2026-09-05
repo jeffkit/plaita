@@ -94,6 +94,17 @@ def get_redis_or_none(request: Request) -> Optional[Redis]:
     return request.app.state.redis
 
 
+def _audit(request: Request, action: str, resource_id: str, detail: Dict | None = None) -> None:
+    try:
+        from .services import audit as audit_svc
+    except ImportError:
+        try:
+            from services import audit as audit_svc  # type: ignore
+        except ImportError:
+            return
+    audit_svc.record(request, action=action, resource="execution", resource_id=resource_id, detail=detail)
+
+
 def get_local_executor(request: Request):
     """本地单机模式分支：返回 local_executor 模块；集群模式返回 None。"""
     if getattr(request.app.state, "local_mode", False):
@@ -233,6 +244,8 @@ async def start_execution(
             raise HTTPException(status_code=404, detail=str(e))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        _audit(http_request, "execution.start", info["execution_id"],
+               {"flow_id": request.flow_id, "version": request.version, "mode": "local"})
         return {
             "status": "running",
             "flow_id": request.flow_id,
@@ -252,6 +265,8 @@ async def start_execution(
     # 写入任务队列 Stream（FlowWorker 消费组消费）
     _enqueue(message, redis)
     
+    _audit(http_request, "execution.start", request.flow_id,
+           {"version": request.version, "mode": "queue"})
     return {
         "status": "queued",
         "flow_id": request.flow_id,
@@ -274,6 +289,7 @@ async def cancel_execution(
     if (local := get_local_executor(request)) is not None:
         if not local.cancel_local_execution(execution_id):
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        _audit(request, "execution.cancel", execution_id)
         return {
             "success": True,
             "status": "cancelled",
@@ -312,6 +328,7 @@ async def cancel_execution(
     info["end_time"] = datetime.now().isoformat()
     redis.set(key, json.dumps(info))
     
+    _audit(request, "execution.cancel", execution_id)
     return {
         "success": True,
         "status": "cancelled",
@@ -335,6 +352,7 @@ async def delete_execution(
     if (local := get_local_executor(request)) is not None:
         if not local.delete_local_execution(execution_id):
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        _audit(request, "execution.delete", execution_id)
         return {
             "success": True,
             "execution_id": execution_id,
@@ -354,6 +372,7 @@ async def delete_execution(
     event_key = f"plaita:execution:events:{execution_id}"
     redis.delete(event_key)
     
+    _audit(request, "execution.delete", execution_id)
     return {
         "success": True,
         "execution_id": execution_id,

@@ -14,17 +14,19 @@ from redis import Redis
 # 支持多种运行方式的导入
 try:
     from .config import get_settings
-    from .auth import require_admin_auth
+    from .auth import require_auth
     from .api import services, executions, queues, logs, cluster, events
-    from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials
-    from .services import flow_store, signature
+    from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit
+    from .services import flow_store, signature, users_svc
+    from .api import auth_users
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from config import get_settings
-    from auth import require_admin_auth
+    from auth import require_auth
     from api import services, executions, queues, logs, cluster, events
-    from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials
-    from services import flow_store, signature
+    from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit  # type: ignore
+    from services import flow_store, signature, users_svc  # type: ignore
+    from api import auth_users  # type: ignore
 
 # 配置日志
 logging.basicConfig(
@@ -73,6 +75,12 @@ async def lifespan(app: FastAPI):
             except ImportError:
                 from services import examples as examples_svc  # type: ignore
             examples_svc.seed_example_flows()
+        try:
+            from .services import users_svc
+        except ImportError:
+            from services import users_svc  # type: ignore
+        app.state.store = flow_store.get_flow_store()
+        users_svc.ensure_bootstrap_user(app.state.store)
     except Exception as e:
         logger.error(f"FlowStore 初始化失败: {e}")
         raise
@@ -167,7 +175,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    admin_deps = [Depends(require_admin_auth)]
+    admin_deps = [Depends(require_auth)]
     prefix = settings.api_prefix
 
     def _mount_admin(router, resource_tag: str) -> None:
@@ -200,9 +208,13 @@ def create_app() -> FastAPI:
     _mount_admin(copilot.router, "copilot")
     _mount_admin(schedules.router, "schedules")
     _mount_admin(credentials.router, "credentials")
+    _mount_admin(audit.router, "audit")
 
     # --- 契约面（独立 HMAC，不加 admin 依赖）---
     _mount_contract(flow_version.router, "flow_version")
+
+    # --- 登录/用户管理（自带角色规则；users 前缀要求 admin）---
+    app.include_router(auth_users.router, prefix=prefix)
     
     @app.get("/health", tags=["health"])
     async def health():

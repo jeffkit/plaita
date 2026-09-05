@@ -7,7 +7,7 @@
 """
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
@@ -47,18 +47,31 @@ def get_credential(name: str):
 
 
 @router.post("/credentials")
-def save_credential(req: CredentialSaveRequest):
+def save_credential(req: CredentialSaveRequest, request: Request = None):
     try:
         credentials_svc.save_credential(req.name, req.type, req.data, req.desc)
     except credentials_svc.CredentialsDisabledError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if request is not None:
+        try:
+            from .services import audit as audit_svc
+        except ImportError:
+            from services import audit as audit_svc  # type: ignore
+        audit_svc.record(request, action="credential.save", resource="credential",
+                         resource_id=req.name, detail={"type": req.type})
     return {"success": True, "name": req.name, "message": "凭据已保存并导出"}
 
 
 @router.delete("/credentials/{name}")
-def delete_credential(name: str):
+def delete_credential(name: str, request: Request = None):
     if not credentials_svc.delete_credential(name):
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
+    if request is not None:
+        try:
+            from .services import audit as audit_svc
+        except ImportError:
+            from services import audit as audit_svc  # type: ignore
+        audit_svc.record(request, action="credential.delete", resource="credential", resource_id=name)
     return {"success": True, "name": name, "message": "凭据已删除"}

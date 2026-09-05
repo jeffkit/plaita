@@ -12,7 +12,7 @@
 """
 import json
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from redis import Redis
@@ -94,16 +94,8 @@ def _store() -> flow_store.FlowStore:
 
 
 def get_redis_dep(request: Request) -> Redis:
-    redis = request.app.state.redis
-    if redis is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "当前为本地单机模式（未连接 Redis），该功能不可用。"
-                "启动 Redis 并重启 console 可恢复完整集群能力。"
-            ),
-        )
-    return redis
+    """引擎同步用 Redis 客户端。本地单机模式返回 None（发布/删除跳过引擎同步）。"""
+    return request.app.state.redis
 
 
 def _check_semver(version: str) -> None:
@@ -208,13 +200,16 @@ def get_flow(flow_id: str):
 
 
 @router.delete("/flows/{flow_id}")
-def delete_flow(flow_id: str, redis: Redis = Depends(get_redis_dep)):
+def delete_flow(flow_id: str, request: Request = None, redis: Redis = Depends(get_redis_dep)):
     try:
         _store().delete_flow(flow_id)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    # 引擎运行时存储同步清理（FlowWorker 从这里解析定义）
-    remove_flow_from_engine(redis, flow_id)
+    # 引擎运行时存储同步清理（本地模式无 Redis，无需清理）
+    if redis is not None:
+        remove_flow_from_engine(redis, flow_id)
+    if request is not None:
+        _audit(request, "flow.delete", flow_id)
     return {"success": True, "flow_id": flow_id}
 
 
@@ -236,7 +231,8 @@ def get_version(flow_id: str, version: str):
 
 
 @router.put("/flows/{flow_id}/versions/{version}", response_model=VersionView)
-def save_version(flow_id: str, version: str, req: SaveVersionRequest):
+def save_version(flow_id: str, version: str, req: SaveVersionRequest,
+                 request: Request = None):  # noqa: ANN001 — FastAPI 注入
     _check_semver(version)
     _validate_definition(req.definition)
     store = _store()
@@ -255,6 +251,8 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     out = store.get_version(flow_id, version)
+    if request is not None:
+        _audit(request, "flow.save_version", f"{flow_id}@{version}", {"bytes": len(req.definition)})
     return VersionView(
         flow_id=out.flow_id,
         version=out.version,
@@ -268,17 +266,20 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest):
 
 
 @router.delete("/flows/{flow_id}/versions/{version}")
-def delete_version(flow_id: str, version: str, redis: Redis = Depends(get_redis_dep)):
+def delete_version(flow_id: str, version: str, request: Request = None,
+                   redis: Redis = Depends(get_redis_dep)):
     try:
         _store().delete_version(flow_id, version)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    remove_flow_version_from_engine(redis, flow_id, version)
+    if redis is not None:
+        remove_flow_version_from_engine(redis, flow_id, version)
     return {"success": True, "flow_id": flow_id, "version": version}
 
 
 @router.post("/flows/{flow_id}/publish", response_model=VersionView)
-def publish_flow(flow_id: str, req: PublishRequest, redis: Redis = Depends(get_redis_dep)):
+def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
+                 redis: Redis = Depends(get_redis_dep)):
     _check_semver(req.version)
     store = _store()
     if store.get_flow_record(flow_id) is None:
@@ -288,8 +289,27 @@ def publish_flow(flow_id: str, req: PublishRequest, redis: Redis = Depends(get_r
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     # 发布即同步到引擎运行时存储：FlowWorker 从这里解析定义，
-    # 不同步则「发布成功、启动必失败」
-    sync_flow_to_engine(redis, flow_id, out.version, out.definition)
+    # 不同步则「发布成功、启动必失败」。本地单机模式无 Redis：
+    # 执行走 console 进程内（SQLite 定义），无需同步。
+    if redis is not None:
+        sync_flow_to_engine(redis, flow_id, out.version, out.definition)
+    if request is not None:
+        try:
+            from .config import get_settings
+        except ImportError:
+            from config import get_settings
+        env = get_settings().console_env
+        _audit(request, "flow.publish", f"{flow_id}@{out.version}", {"env": env})
+        # 部署记录（切片 C）
+        try:
+            from .services import deployments as deployments_svc
+        except ImportError:
+            from services import deployments as deployments_svc  # type: ignore
+        deployments_svc.record(
+            flow_id=flow_id, version=out.version, environment=env,
+            actor=getattr(request.state, "actor", ""),
+            definition=out.definition,
+        )
     return VersionView(
         flow_id=out.flow_id,
         version=out.version,
@@ -300,3 +320,72 @@ def publish_flow(flow_id: str, req: PublishRequest, redis: Redis = Depends(get_r
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
     )
+
+
+def _audit(request: Request, action: str, resource_id: str, detail: Dict | None = None) -> None:
+    try:
+        from .services import audit as audit_svc
+    except ImportError:
+        try:
+            from services import audit as audit_svc  # type: ignore
+        except ImportError:
+            return
+    audit_svc.record(request, action=action, resource="flow", resource_id=resource_id, detail=detail)
+
+
+@router.get("/flows/{flow_id}/versions/{version}/export")
+def export_version(flow_id: str, version: str):
+    """导出晋升包（定义 + 指纹 + 元信息），跨环境 console 晋升的载体。"""
+    try:
+        from .services import deployments as deployments_svc
+    except ImportError:
+        from services import deployments as deployments_svc  # type: ignore
+    try:
+        return deployments_svc.build_promotion_package(_store(), flow_id, version)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class ImportPromotionRequest(BaseModel):
+    package: Dict[str, Any]
+    new_version: Optional[str] = None
+    publish: bool = False
+
+
+@router.post("/flows/import-version")
+def import_version(req: ImportPromotionRequest, request: Request = None,
+                   redis: Redis = Depends(get_redis_dep)):
+    try:
+        from .services import deployments as deployments_svc
+    except ImportError:
+        from services import deployments as deployments_svc  # type: ignore
+    """导入晋升包：默认为草稿；publish=true 等价于发布（引擎同步 + 部署记录）。"""
+    try:
+        result = deployments_svc.import_promotion_package(
+            _store(), req.package, new_version=req.new_version, publish=False
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    flow_id, version = result["flow_id"], result["version"]
+    if req.publish:
+        try:
+            out = _store().publish_version(flow_id, version)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        sync_flow_to_engine(redis, flow_id, out.version, out.definition)
+        try:
+            from .config import get_settings
+        except ImportError:
+            from config import get_settings
+        deployments_svc.record(
+            flow_id=flow_id, version=out.version,
+            environment=get_settings().console_env,
+            actor=getattr(request.state, "actor", "") if request else "",
+            definition=out.definition,
+        )
+        result["status"] = "published"
+
+    if request is not None:
+        _audit(request, "flow.import", f"{flow_id}@{version}", {"publish": req.publish})
+    return result

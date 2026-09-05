@@ -47,6 +47,9 @@ class Settings(BaseModel):
         description="显式允许无管理密钥启动（仅本地开发）",
     )
 
+    # 部署环境标识（写入部署记录/审计；prod 时删除操作需 admin）
+    console_env: str = Field(default="dev", description="环境标识：dev/test/prod")
+
     # Copilot 大脑：flow_agent（默认，轻量内置 agent）| recursive | claude
     copilot_brain: str = Field(
         default="flow_agent",
@@ -83,6 +86,7 @@ def get_settings() -> Settings:
             "PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN", "false"
         ).lower()
         == "true",
+        console_env=os.getenv("PLAITA_CONSOLE_ENV", "dev"),
         copilot_brain=os.getenv("PLAITA_CONSOLE_COPILOT_BRAIN", "flow_agent"),
         recursive_agui_url=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_URL", ""),
         recursive_agui_api_key=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_API_KEY", ""),
