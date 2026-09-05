@@ -19,7 +19,9 @@ try:
     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit
     from .services import flow_store, signature, users_svc
     from .api import auth_users
-except ImportError:
+except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该走到这里
+    if __package__ == "plaita_console":
+        raise
     sys.path.insert(0, str(Path(__file__).parent))
     from config import get_settings
     from auth import require_auth

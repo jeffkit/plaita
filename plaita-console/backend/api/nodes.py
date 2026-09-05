@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 try:
-    from .services import flow_store, node_registry_svc
+    from ..services import flow_store, node_registry_svc
 except ImportError:
     from services import flow_store, node_registry_svc
 

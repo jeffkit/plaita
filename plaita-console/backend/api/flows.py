@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 from plaita.core.flow import Flow
 
 try:
-    from .services import flow_store
-    from .services.engine_sync import (
+    from ..services import flow_store
+    from ..services.engine_sync import (
         remove_flow_from_engine,
         remove_flow_version_from_engine,
         sync_flow_to_engine,
@@ -295,14 +295,14 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
         sync_flow_to_engine(redis, flow_id, out.version, out.definition)
     if request is not None:
         try:
-            from .config import get_settings
+            from ..config import get_settings
         except ImportError:
             from config import get_settings
         env = get_settings().console_env
         _audit(request, "flow.publish", f"{flow_id}@{out.version}", {"env": env})
         # 部署记录（切片 C）
         try:
-            from .services import deployments as deployments_svc
+            from ..services import deployments as deployments_svc
         except ImportError:
             from services import deployments as deployments_svc  # type: ignore
         deployments_svc.record(
@@ -324,7 +324,7 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
 
 def _audit(request: Request, action: str, resource_id: str, detail: Dict | None = None) -> None:
     try:
-        from .services import audit as audit_svc
+        from ..services import audit as audit_svc
     except ImportError:
         try:
             from services import audit as audit_svc  # type: ignore
@@ -337,7 +337,7 @@ def _audit(request: Request, action: str, resource_id: str, detail: Dict | None 
 def export_version(flow_id: str, version: str):
     """导出晋升包（定义 + 指纹 + 元信息），跨环境 console 晋升的载体。"""
     try:
-        from .services import deployments as deployments_svc
+        from ..services import deployments as deployments_svc
     except ImportError:
         from services import deployments as deployments_svc  # type: ignore
     try:
@@ -356,7 +356,7 @@ class ImportPromotionRequest(BaseModel):
 def import_version(req: ImportPromotionRequest, request: Request = None,
                    redis: Redis = Depends(get_redis_dep)):
     try:
-        from .services import deployments as deployments_svc
+        from ..services import deployments as deployments_svc
     except ImportError:
         from services import deployments as deployments_svc  # type: ignore
     """导入晋升包：默认为草稿；publish=true 等价于发布（引擎同步 + 部署记录）。"""
@@ -375,7 +375,7 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
             raise HTTPException(status_code=404, detail=str(e))
         sync_flow_to_engine(redis, flow_id, out.version, out.definition)
         try:
-            from .config import get_settings
+            from ..config import get_settings
         except ImportError:
             from config import get_settings
         deployments_svc.record(

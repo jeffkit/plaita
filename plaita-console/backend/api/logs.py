@@ -72,9 +72,9 @@ def _local_store(request: Request):
     """本地单机模式 → (flow_store 模块, True)；集群模式 → (None, False)。"""
     if getattr(request.app.state, "local_mode", False):
         try:
-            from services import flow_store
+            from ..services import flow_store
         except ImportError:
-            from ..services import flow_store  # type: ignore
+            from services import flow_store  # type: ignore
         return flow_store, True
     return None, False
 

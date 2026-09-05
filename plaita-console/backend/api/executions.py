@@ -71,9 +71,9 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     from plaita.server.task_queue import enqueue_task
 
 try:
-    from services import flow_store
-except ImportError:  # 包内布局（pip 安装）
-    from .services import flow_store  # type: ignore
+    from ..services import flow_store
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from services import flow_store  # type: ignore
 
 
 def get_redis(request: Request) -> Redis:
@@ -97,7 +97,7 @@ def get_redis_or_none(request: Request) -> Optional[Redis]:
 
 def _audit(request: Request, action: str, resource_id: str, detail: Dict | None = None) -> None:
     try:
-        from .services import audit as audit_svc
+        from ..services import audit as audit_svc
     except ImportError:
         try:
             from services import audit as audit_svc  # type: ignore
@@ -110,7 +110,7 @@ def get_local_executor(request: Request):
     """本地单机模式分支：返回 local_executor 模块；集群模式返回 None。"""
     if getattr(request.app.state, "local_mode", False):
         try:
-            from .services import local_executor
+            from ..services import local_executor
         except ImportError:
             from services import local_executor  # type: ignore
         return local_executor

@@ -15,9 +15,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
-    from .auth import require_auth
-    from .services import users_svc
-    from .services.flow_store import get_flow_store
+    from ..auth import require_auth
+    from ..services import users_svc
+    from ..services.flow_store import get_flow_store
 except ImportError:
     from auth import require_auth  # type: ignore
     from services import users_svc  # type: ignore
@@ -134,7 +134,7 @@ def delete_user(username: str, request: Request, _: Dict = Depends(require_auth)
 def _audit(request: Request, action: str, resource_id: str, detail: Dict) -> None:
     """审计钩子（users 模块内置埋点；audit 服务缺失时静默跳过）。"""
     try:
-        from .services import audit as audit_svc
+        from ..services import audit as audit_svc
     except ImportError:
         try:
             from services import audit as audit_svc  # type: ignore

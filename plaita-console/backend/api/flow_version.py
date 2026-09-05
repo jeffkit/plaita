@@ -13,11 +13,11 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 
 try:
-    from .config import get_settings
-    from .services import flow_store, signature
+    from ..config import get_settings
+    from ..services import flow_store, signature
 except ImportError:
-    from config import get_settings
-    from services import flow_store, signature
+    from config import get_settings  # type: ignore
+    from services import flow_store, signature  # type: ignore
 
 router = APIRouter()
 

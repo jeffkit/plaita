@@ -95,7 +95,7 @@ def _get_local(request: Request):
     """本地单机模式 → local_scheduler 模块；集群模式 → None。"""
     if getattr(request.app.state, "local_mode", False):
         try:
-            from .services import local_scheduler
+            from ..services import local_scheduler
         except ImportError:
             from services import local_scheduler  # type: ignore
         return local_scheduler

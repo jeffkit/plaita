@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
-    from .services import credentials_svc
+    from ..services import credentials_svc
 except ImportError:
     from services import credentials_svc  # type: ignore
 
@@ -56,7 +56,7 @@ def save_credential(req: CredentialSaveRequest, request: Request = None):
         raise HTTPException(status_code=400, detail=str(e))
     if request is not None:
         try:
-            from .services import audit as audit_svc
+            from ..services import audit as audit_svc
         except ImportError:
             from services import audit as audit_svc  # type: ignore
         audit_svc.record(request, action="credential.save", resource="credential",
@@ -70,7 +70,7 @@ def delete_credential(name: str, request: Request = None):
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
     if request is not None:
         try:
-            from .services import audit as audit_svc
+            from ..services import audit as audit_svc
         except ImportError:
             from services import audit as audit_svc  # type: ignore
         audit_svc.record(request, action="credential.delete", resource="credential", resource_id=name)

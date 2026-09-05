@@ -6,8 +6,8 @@ from typing import Dict, Optional
 from fastapi import APIRouter, Depends
 
 try:
-    from .auth import require_auth
-    from .services import audit as audit_svc
+    from ..auth import require_auth
+    from ..services import audit as audit_svc
 except ImportError:
     from auth import require_auth  # type: ignore
     from services import audit as audit_svc  # type: ignore
@@ -33,7 +33,7 @@ def list_deployments(flow_id: Optional[str] = None, _: Dict = Depends(require_au
 
 def audit_svc_deployments(flow_id: Optional[str]):
     try:
-        from .services import deployments as deployments_svc
+        from ..services import deployments as deployments_svc
     except ImportError:
         from services import deployments as deployments_svc  # type: ignore
     return deployments_svc.list_deployments(flow_id=flow_id)
