@@ -463,6 +463,7 @@ def finish_local_execution(
     status: str,
     output_json: Optional[str] = None,
     error_json: Optional[str] = None,
+    context_json: Optional[str] = None,
 ) -> None:
     """终结一条本地执行记录。"""
     update_local_execution(
@@ -471,6 +472,7 @@ def finish_local_execution(
         end_time=datetime.utcnow(),
         **({"output_json": output_json} if output_json is not None else {}),
         **({"error_json": error_json} if error_json is not None else {}),
+        **({"context_json": context_json} if context_json is not None else {}),
     )
 
 
@@ -483,7 +485,7 @@ def _local_row_to_dict(row: LocalExecution) -> dict:
         "start_time": row.start_time.isoformat() if row.start_time else None,
         "end_time": row.end_time.isoformat() if row.end_time else None,
         "last_update_time": row.last_update_time.isoformat() if row.last_update_time else None,
-        "context": None,
+        "context": _loads_or_none(getattr(row, "context_json", None)),
         "error": _loads_or_none(row.error_json),
         "invoker": row.invoker,
         "nodes": _loads_or_none(row.nodes_json) or [],
@@ -548,6 +550,27 @@ def create_all() -> None:
     if _engine is None:
         raise RuntimeError("引擎未初始化，请先调用 init_engine()")
     Base.metadata.create_all(_engine)
+    _migrate_sqlite_columns()
+
+
+def _migrate_sqlite_columns() -> None:
+    """轻量迁移：旧 SQLite 库补新增列（仅 ADD COLUMN，保守策略）。"""
+    if _engine is None:
+        return
+    from sqlalchemy import text as _text
+
+    wanted = {
+        "local_executions": {"context_json": "TEXT NOT NULL DEFAULT 'null'"},
+    }
+    with _engine.begin() as conn:
+        for table, columns in wanted.items():
+            rows = conn.execute(_text(f"PRAGMA table_info({table})")).fetchall()
+            existing = {r[1] for r in rows}
+            if not existing:
+                continue  # 新库由 create_all 直接建全
+            for col, ddl in columns.items():
+                if col not in existing:
+                    conn.execute(_text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
 
 
 def get_init_engine() -> Engine:

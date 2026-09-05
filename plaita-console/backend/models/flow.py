@@ -121,6 +121,8 @@ class LocalExecution(Base):
     output_json = Column(Text, nullable=False, default="null")
     error_json = Column(Text, nullable=False, default="null")
     nodes_json = Column(Text, nullable=False, default="[]")
+    # 分布式模式 checkpoint：挂起/每步推进后的上下文快照（resume 用）
+    context_json = Column(Text, nullable=False, default="null")
     invoker = Column(String(64), nullable=False, default="local")
     start_time = Column(DateTime, nullable=False, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)

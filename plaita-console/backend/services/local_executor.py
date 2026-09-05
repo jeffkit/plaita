@@ -1,13 +1,15 @@
 """本地单机模式执行器。
 
-Redis 不可达时（``app.state.local_mode = True``），流程在 console 进程内
-以普通线程执行：SQLite 落执行记录，回调采集节点级 trace，executions API
-读本模块写入的记录（与 Redis 模式的 ExecutionInfo 结构对齐）。
+Redis 不可达时（``app.state.local_mode = True``），流程在 console 进程内以
+**分布式策略** 执行：EventBus 用进程内 InMemoryEventBus，checkpoint 存
+SQLite（local_executions.context_json）。
 
-限制（设计取舍）：
-- 无 distributed/eventbus：挂起型节点（event/approval）在本模式下不会真正
-  挂起，直接把 pending 结果当作普通输出继续往下走。
-- cancel 为尽力而为：标记状态后不中断正在运行的线程。
+因此本地档支持挂起-恢复（审批/事件节点挂起后，经 /resume 或进程内事件
+恢复）。限制（如实说明）：
+
+- 无跨进程：resume 必须走同一个 console 进程；进程重启后挂起的执行
+  checkpoint 仍在（SQLite），显式 resume 可继续，但进程内事件订阅已丢失
+- cancel 为尽力而为：标记状态，不中断正在运行的线程
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from plaita.core.callback import FlowCallback
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
+from plaita.core.strategies import ExecutionMode
 
 try:
     from . import flow_store as fs
@@ -32,7 +35,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 已启动线程表：execution_id -> Thread（进程内生命周期，仅防重复启动）
+# 已启动线程表：execution_id -> Thread（进程内生命周期，仅防重复启动/恢复）
 _threads: Dict[str, threading.Thread] = {}
 _lock = threading.Lock()
 
@@ -40,9 +43,9 @@ _lock = threading.Lock()
 class _LocalTraceCallback(FlowCallback):
     """把节点开始/结束写回本地执行记录（每节点一次 SQLite 更新，示例规模可接受）。"""
 
-    def __init__(self, execution_id: str):
+    def __init__(self, execution_id: str, initial_nodes: Optional[List[Dict[str, Any]]] = None):
         self._execution_id = execution_id
-        self._nodes: List[Dict[str, Any]] = []
+        self._nodes: List[Dict[str, Any]] = initial_nodes or []
 
     def _flush(self) -> None:
         fs.update_local_execution(
@@ -88,6 +91,17 @@ def _now() -> str:
     return datetime.utcnow().isoformat()
 
 
+def _load_definition(store: FlowStore, flow_id: str, version: Optional[str]) -> Dict[str, Any]:
+    version = version or _latest_published(store, flow_id)
+    record = store.get_version(flow_id, version)
+    if record is None:
+        raise LookupError(f"流程版本不存在: {flow_id}@{version}")
+    definition = json.loads(record.definition)
+    definition["flow_id"] = flow_id
+    definition["version"] = version
+    return definition
+
+
 def start_local_execution(
     store: FlowStore,
     flow_id: str,
@@ -95,7 +109,7 @@ def start_local_execution(
     params: Optional[Dict[str, Any]],
     invoker: str = "local",
 ) -> Dict[str, Any]:
-    """以本地模式启动流程：同步建档 + 后台线程执行。返回 ExecutionInfo dict。"""
+    """以本地模式启动流程：同步建档 + 后台线程以分布式策略执行。"""
     version = version or _latest_published(store, flow_id)
     if version is None:
         raise ValueError(f"流程 {flow_id} 没有已发布版本，请先在编排页发布")
@@ -119,16 +133,127 @@ def start_local_execution(
         invoker=invoker,
     )
 
+    _spawn(execution_id, _run_flow,
+           store, execution_id, flow_id, version, definition, params or {}, None)
+    return _to_info(fs.get_local_execution(execution_id))
+
+
+def resume_local_execution(
+    store: FlowStore,
+    execution_id: str,
+    resume_type: str,
+    data: Optional[Dict[str, Any]],
+) -> bool:
+    """恢复挂起的执行：从 SQLite checkpoint 继续（分布式策略）。"""
+    row = fs.get_local_execution(execution_id)
+    if row is None:
+        return False
+    if row["status"] != "suspended":
+        raise ValueError(f"仅挂起状态可恢复: 当前 {row['status']}")
+
+    definition = _load_definition(store, row["flow_id"], row["flow_version"])
+    context = row.get("context")
+    if context is None:
+        raise ValueError("挂起 checkpoint 缺失，无法恢复")
+
+    fs.update_local_execution(execution_id, status="running")
+    _spawn(execution_id, _run_flow,
+           store, execution_id, row["flow_id"], row["flow_version"], definition,
+           {}, {"context": context, "resume_type": resume_type, "data": data},
+           initial_nodes=row.get("nodes") or [])
+    return True
+
+
+def _spawn(execution_id: str, target, *args, **kwargs) -> None:
     thread = threading.Thread(
-        target=_run_flow,
-        args=(execution_id, definition, params or {}),
-        name=f"local-exec-{execution_id}",
-        daemon=True,
+        target=target, args=args, kwargs=kwargs,
+        name=f"local-exec-{execution_id}", daemon=True,
     )
     with _lock:
         _threads[execution_id] = thread
     thread.start()
-    return _to_info(fs.get_local_execution(execution_id))
+
+
+def _run_flow(
+    store: FlowStore,
+    execution_id: str,
+    flow_id: str,
+    version: str,
+    definition: Dict[str, Any],
+    params: Dict[str, Any],
+    resume: Optional[Dict[str, Any]],
+    initial_nodes: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """分布式策略驱动循环（与集群档 FlowWorker._process_execution_result 对齐）。"""
+    handler = _ThreadLogHandler(execution_id, threading.get_ident())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        logger.info(
+            "本地执行 %s %s（flow=%s@%s）",
+            execution_id, "恢复" if resume else "开始", flow_id, version,
+        )
+        flow = Flow.model_validate(definition)
+        callback = _LocalTraceCallback(execution_id, initial_nodes=initial_nodes)
+        execution = FlowExecution(callback_handlers=[callback])
+        execution.mode = ExecutionMode.DISTRIBUTED
+
+        if resume is None:
+            result = execution.run_distributed(flow, params=params)
+        else:
+            result = execution.run_distributed(
+                flow,
+                saved_context=resume["context"],
+                resume_type=resume["resume_type"],
+                resume_data=resume.get("data"),
+            )
+        context = result.get("context")
+
+        while True:
+            context = result.get("context", context)
+            if result.get("is_end"):
+                logger.info("本地执行 %s 完成", execution_id)
+                fs.finish_local_execution(
+                    execution_id,
+                    status="completed",
+                    output_json=json.dumps(_safe(result.get("result")), ensure_ascii=False),
+                    context_json=json.dumps(_safe(context), ensure_ascii=False),
+                )
+                break
+            if result.get("is_suspend"):
+                logger.info("本地执行 %s 挂起，等待恢复", execution_id)
+                fs.update_local_execution(
+                    execution_id,
+                    status="suspended",
+                    context_json=json.dumps(_safe(context), ensure_ascii=False),
+                )
+                break
+
+            # 单步推进：resume_type="continue"
+            fs.update_local_execution(
+                execution_id,
+                status="running",
+                context_json=json.dumps(_safe(context), ensure_ascii=False),
+            )
+            result = execution.run_distributed(
+                flow, saved_context=context, resume_type="continue"
+            )
+    except Exception as e:  # noqa: BLE001 — 执行失败要落库而不是带崩线程
+        logger.warning("本地执行 %s 失败: %s", execution_id, e)
+        fs.finish_local_execution(
+            execution_id,
+            status="failed",
+            error_json=json.dumps(
+                {"message": str(e), "type": type(e).__name__}, ensure_ascii=False
+            ),
+        )
+    finally:
+        try:
+            root.removeHandler(handler)
+        except Exception:  # noqa: BLE001
+            pass
+        with _lock:
+            _threads.pop(execution_id, None)
 
 
 class _ThreadLogHandler(logging.Handler):
@@ -151,39 +276,6 @@ class _ThreadLogHandler(logging.Handler):
             )
         except Exception:  # noqa: BLE001 — 日志失败不影响执行
             pass
-
-
-def _run_flow(execution_id: str, definition: dict, params: dict) -> None:
-    handler = _ThreadLogHandler(execution_id, threading.get_ident())
-    root = logging.getLogger()
-    root.addHandler(handler)
-    try:
-        logger.info("本地执行 %s 开始（flow=%s）", execution_id, definition.get("flow_id"))
-        flow = Flow.model_validate(definition)
-        callback = _LocalTraceCallback(execution_id)
-        result = FlowExecution(callback_handlers=[callback]).run_compatible(flow, False, **params)
-        logger.info("本地执行 %s 完成", execution_id)
-        fs.finish_local_execution(
-            execution_id,
-            status="completed",
-            output_json=json.dumps(_safe(result), ensure_ascii=False),
-        )
-    except Exception as e:  # noqa: BLE001 — 执行失败要落库而不是带崩线程
-        logger.warning("本地执行 %s 失败: %s", execution_id, e)
-        fs.finish_local_execution(
-            execution_id,
-            status="failed",
-            error_json=json.dumps(
-                {"message": str(e), "type": type(e).__name__}, ensure_ascii=False
-            ),
-        )
-    finally:
-        try:
-            root.removeHandler(handler)
-        except Exception:  # noqa: BLE001
-            pass
-        with _lock:
-            _threads.pop(execution_id, None)
 
 
 def _latest_published(store: FlowStore, flow_id: str) -> Optional[str]:
@@ -214,7 +306,7 @@ def cancel_local_execution(execution_id: str) -> bool:
     row = fs.get_local_execution(execution_id)
     if row is None:
         return False
-    if row["status"] == "running":
+    if row["status"] in ("running", "suspended"):
         fs.finish_local_execution(execution_id, status="cancelled")
     return True
 

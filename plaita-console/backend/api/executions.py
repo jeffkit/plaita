@@ -2,6 +2,7 @@
 执行实例管理 API
 提供执行列表、详情、启动、停止等接口
 """
+import asyncio
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -384,7 +385,8 @@ async def delete_execution(
 async def resume_execution(
     execution_id: str,
     request: ResumeFlowRequest,
-    redis: Redis = Depends(get_redis)
+    http_request: Request,
+    redis: Optional[Redis] = Depends(get_redis_or_none),
 ):
     """
     恢复暂停的执行
@@ -393,6 +395,25 @@ async def resume_execution(
     - **resume_type**: 恢复类型
     - **data**: 恢复数据
     """
+    # 本地单机模式：从 SQLite checkpoint 继续（分布式策略）
+    if (local := get_local_executor(http_request)) is not None:
+        try:
+            ok = local.resume_local_execution(
+                flow_store.get_flow_store(), execution_id, request.resume_type, request.data
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        _audit(http_request, "execution.resume", execution_id,
+               {"resume_type": request.resume_type, "mode": "local"})
+        return {
+            "status": "resuming",
+            "execution_id": execution_id,
+            "resume_type": request.resume_type,
+            "message": "恢复请求已受理（本地模式）",
+        }
+
     # 验证执行存在
     key = f"plaita:execution:{execution_id}"
     data = redis.get(key)
@@ -430,13 +451,38 @@ async def resume_execution(
 async def stream_execution(
     execution_id: str,
     request: Request,
-    redis: Redis = Depends(get_redis)
+    redis: Optional[Redis] = Depends(get_redis_or_none)
 ):
     """
     SSE 端点：实时推送执行状态变化
     
-    事件类型：status_changed, context_updated, completed, error
+    - 集群档：Redis pubsub 订阅
+    - 本地档：对 SQLite 执行记录做 1s 轮询，变化才推
     """
+    if (local := get_local_executor(request)) is not None:
+        info = local.get_local_execution(execution_id)
+        if info is None:
+            raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+
+        async def local_event_generator():
+            last = None
+            yield {"event": "initial_state", "data": json.dumps(info, ensure_ascii=False)}
+            while True:
+                await asyncio.sleep(1.0)
+                current = local.get_local_execution(execution_id)
+                if current is None:
+                    break
+                payload = json.dumps(current, ensure_ascii=False, default=str)
+                if payload != last:
+                    last = payload
+                    yield {"event": "update", "data": payload}
+                if current.get("status") in ("completed", "failed", "cancelled"):
+                    break
+                if await request.is_disconnected():
+                    break
+
+        return EventSourceResponse(local_event_generator())
+
     # 验证执行存在
     key = f"plaita:execution:{execution_id}"
     if not redis.exists(key):

@@ -3,6 +3,7 @@
 覆盖：示例流程种子、进程内执行、节点级 trace、状态终结、
 本地模式下的执行 CRUD，以及集群接口的 503 提示。
 """
+import json
 import sys
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ if str(BACKEND_DIR) not in sys.path:
 from api import executions as executions_api  # noqa: E402
 from api import queues as queues_api  # noqa: E402
 from services import examples, flow_store  # noqa: E402
+from services import examples as examples_svc  # noqa: E402
 
 
 @pytest.fixture()
@@ -109,3 +111,65 @@ def test_cluster_api_returns_503_in_local_mode(client: TestClient):
     r = client.get("/api/queues")
     assert r.status_code == 503
     assert "本地单机模式" in r.json()["detail"]
+
+
+# ---- 挂起-恢复（本地分布式执行） ----
+
+APPROVAL_DEF = json.dumps({"nodes": [
+    {"type": "start", "id": "start", "next": "wait"},
+    {"type": "event", "id": "wait", "event_type": "approval", "next": "end"},
+    {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.wait"},
+]})
+
+
+def test_approval_suspend_then_resume(app: FastAPI, client: TestClient):
+    """本地分布式执行：审批事件挂起 → /resume 恢复 → 完成。"""
+    store = flow_store.get_flow_store()
+    store.ensure_flow("approval-demo")
+    store.save_flow_definition("approval-demo", "1.0.0", APPROVAL_DEF, status="draft")
+    store.publish_version("approval-demo", "1.0.0")
+
+    r = client.post("/api/executions", json={"flow_id": "approval-demo"})
+    assert r.status_code == 200
+    eid = r.json()["execution_id"]
+
+    # 等待挂起
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        body = client.get(f"/api/executions/{eid}").json()
+        if body["status"] == "suspended":
+            break
+        time.sleep(0.2)
+    assert body["status"] == "suspended", body
+
+    # 恢复（审批通过）
+    r = client.post(f"/api/executions/{eid}/resume",
+                    json={"resume_type": "event", "data": {"approved": True}})
+    assert r.status_code == 200
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        body = client.get(f"/api/executions/{eid}").json()
+        if body["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.2)
+    assert body["status"] == "completed"
+    assert body["output"]["event_data"] == {"approved": True}
+    # checkpoint 已持久化
+    assert body["context"]
+
+
+def test_resume_rejects_non_suspended(app: FastAPI, client: TestClient):
+    examples_svc.seed_example_flows()
+    r = client.post("/api/executions", json={"flow_id": "hello-plaita"})
+    eid = r.json()["execution_id"]
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        body = client.get(f"/api/executions/{eid}").json()
+        if body["status"] in ("completed", "failed", "cancelled"):
+            break
+        time.sleep(0.2)
+    r = client.post(f"/api/executions/{eid}/resume",
+                    json={"resume_type": "event", "data": {}})
+    assert r.status_code == 400
+    assert "挂起" in r.json()["detail"]
