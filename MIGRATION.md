@@ -8,6 +8,46 @@
 
 ## Unreleased（0.5.x）
 
+### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
+
+本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程
+本身有配置问题——以下是判断与迁移方法：
+
+1. **switch/if 分支未命中且无 default → 抛 `FlowExecutionException`**
+   - 变更前：调度层把整个 `$NODE` 状态表当流程结果返回，流程"成功"结束。
+   - 迁移：给分支节点补 default 分支；或在该节点上配
+     `"errorHandler": {"strategy": "continue"}` 显式保留旧的跳过行为。
+2. **http 节点失败 → raise（errorHandler 真正生效）**
+   - 变更前：请求失败时把 `NodeException` 对象当**节点结果**返回，下游拿到
+     异常对象当数据用；`errorHandler` 的 continue/continue_with 永不生效。
+   - 迁移：依赖旧行为（拿到 NodeException 对象继续跑）的流程，改为配置
+     `errorHandler`（`continue` / `continue_with` + `defaultValue`）。
+   - 同时修复了 http 节点表达式求值的参数颠倒——0.5.x 里真实 HTTP 请求
+     实际上从不成功（集成测试全 mock 未覆盖真实路径）。
+3. **挂起中的 EventNode 拒绝 `resume_type="continue"` 绕过**（抛 `ResumeError`）：
+   必须先用 `event`/`cancel`/`timeout` 消费事件，之后才能 continue 推进。
+4. **分布式 resume 完成后注销事件订阅**：此前死订阅会持续匹配后续同类型
+   事件。依赖"死订阅仍命中"的行为（不应该存在）需自行改掉。
+5. **`FlowExecution` 实例不可重入**：同一实例并发/重入 run 会抛错。并发场景
+   每次新建实例（`Flow.run()` 每次新建，不受影响）。
+6. **End 节点 `resultType` 默认 `success`**：不再需要显式写
+   `"resultType": "success"` 才能拿到 output；未知的 resultType 值打
+   warning 并按 success 处理（此前静默返回 None）。
+7. **未知配置键告警**：节点/Flow JSON 里拼错的字段名（如 `conditon`）现在
+   打 warning（含合法键清单），不再被 pydantic `extra=ignore` 静默吞掉。
+   CI 里若把 warning 当错误需注意存量流程的清理。
+8. **`ExecutionMode.from_string` 非法值抛 `ValueError`**（原裸 `KeyError`）；
+   `parse()` 对非 python runtime 抛 `ValueError`（原 `RuntimeError`）。
+9. **`retryTimes` 负数按 0 处理**：至少执行一次节点；此前负数会静默跳过
+   节点执行并吞掉 abort 错误。
+10. **PlaitaClient**：新增 `PlaitaClientError`/`PlaitaClientNetworkError`/
+    `PlaitaClientResponseError`（均继承 `Exception`，老 `except Exception` 不受影响）；
+    `run_flow` 不传 `input_data` 现在等价于 `{}`；`clear_cache(flow_id)` 只清
+    该 flow 的版本（此前静默清空全部）。
+11. **`timeout` 字段非法格式**（如 `"100ms"`）抛 `ValueError` 并列出合法写法
+    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
+
+
 ### Storage：`db` 执行/流程存储从公开路径下架
 
 **变更前**：`--execution-storage-type db` / `--flow-storage-type db` 以及
