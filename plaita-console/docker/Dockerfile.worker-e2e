@@ -1,0 +1,30 @@
+# Flow Worker —— argusai E2E 专用镜像
+# 与 docker/Dockerfile.worker 同源；差异在 CMD：先等 Redis 可连，再带完整参数
+# 起 flow_worker（与 docker-compose.yml 的 flow-worker 命令一致）。
+# approval/delay 等扩展节点经 plaita.nodes entry_points 自动发现，无需额外注册。
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# 容器内访问 PyPI 偶发读超时，放宽超时与重试
+ENV PIP_DEFAULT_TIMEOUT=180 \
+    PIP_RETRIES=10
+
+# 安装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# flow_worker 模块级 import cachetools（TTLCache），不装则启动即 ModuleNotFoundError
+RUN pip install --no-cache-dir cachetools
+
+# 复制代码
+COPY plaita/ ./plaita/
+# setup.py 只是 shim，全部元数据（含 plaita.nodes entry_points）在
+# pyproject.toml——不 COPY 它，pip install . 会得到 0.0.0 无插件的空壳
+COPY pyproject.toml .
+COPY setup.py .
+
+# 必须 pip 安装而非仅 COPY：approval/delay 等扩展节点经
+# [project.entry-points."plaita.nodes"] 自动发现，依赖安装元数据
+RUN pip install --no-cache-dir .
+
+CMD ["sh", "-c", "until python -c \"import os,socket; socket.create_connection((os.environ.get('E2E_TEST_REDIS_HOST','redis'), 6379), timeout=1).close()\" 2>/dev/null; do echo 'e2e: waiting for redis...'; sleep 1; done; exec python -m plaita.server.flow_worker --redis-url ${PLAITA_REDIS_URL} --queue-name plaita:flow:queue --execution-storage-type redis --flow-storage-type redis --enable-registry"]
