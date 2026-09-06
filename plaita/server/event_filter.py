@@ -3,6 +3,7 @@
 将订阅信息组装成flow worker任务放入队列
 """
 import json
+import os
 import logging
 import asyncio
 import argparse
@@ -81,6 +82,27 @@ class EventFilter:
                 logger.debug("没有匹配的订阅，跳过处理: %s", event.event_id)
                 return
             
+            # 终态执行的残留订阅就地回收（2026-09 分布式评审 P2-5）：
+            # error 路径泄漏的订阅会被后续同类事件反复匹配并入队注定失败的
+            # resume；检测到终态直接注销订阅、跳过入队。没有这步 GC，残留
+            # 键只能等 7 天 TTL。
+            state_status = getattr(state, "status", "") or ""
+            if state_status in ("completed", "error"):
+                for subscription in subscriptions:
+                    try:
+                        await self.subscription_storage.unregister_subscription(
+                            subscription.subscription_id
+                        )
+                        logger.info(
+                            "执行 %s 已终态(%s)，回收残留订阅 %s",
+                            execution_id, state_status, subscription.subscription_id,
+                        )
+                    except Exception:  # noqa: BLE001 — 回收失败不影响主流程
+                        logger.debug(
+                            "回收订阅 %s 失败", subscription.subscription_id, exc_info=True
+                        )
+                return
+
             for subscription in subscriptions:
                 if (subscription.flow_id and subscription.flow_id == state.flow_id) or \
                    (subscription.correlation_id and subscription.correlation_id == execution_id):
@@ -264,8 +286,9 @@ def main():
     parser = argparse.ArgumentParser(description="Plaita事件过滤器")
     
     # Redis参数
-    parser.add_argument("--redis-url", default="redis://localhost:6379/0",
-                      help="Redis连接URL")
+    parser.add_argument("--redis-url",
+                        default=os.environ.get("PLAITA_REDIS_URL", "redis://localhost:6379/0"),
+                        help="Redis 连接地址（默认取 PLAITA_REDIS_URL，与 flow_worker 一致）")
     parser.add_argument("--queue-name", default="plaita:flow:queue",
                       help="Redis队列名称")
     

@@ -432,6 +432,10 @@ def parse(content: Union[str, dict]) -> Optional[Flow]:
     字符串内容自动识别 JSON 或 YAML（YAML 需安装 ``plaita[yaml]``）；
     dict 直接走模型校验。所有解析最终都经过 ``Flow.parse_flow`` 这个
     model_validator，行为与历史完全一致。
+
+    与 ``Flow.from_string`` 的空输入约定不同：本函数对空内容返回 ``None``
+    （历史契约，签名即 ``Optional[Flow]``），而 ``from_string("")`` 抛
+    ``ValueError``。
     """
     if not content:
         return None

@@ -467,6 +467,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         execution_lease: Optional[ExecutionLease] = None,
         max_deliveries: int = DEFAULT_MAX_DELIVERIES,
         dlq_key: Optional[str] = None,
+        read_block_ms: int = 1_000,
     ):
         redis_client = redis_client or Redis.from_url(redis_url)
         super().__init__(
@@ -483,6 +484,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self.redis_client = redis_client
         self.queue_name = queue_name
         self._running = False
+        # 消费阻塞窗口上限（毫秒）——见 run() 主循环内的分片说明
+        self.read_block_ms = max(100, int(read_block_ms))
         self._active_task_count = 0
         self._log_handler = None
         self._consumer_group = consumer_group
@@ -589,7 +592,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         
         try:
             while self._running:
-                task = queue.read(block_ms=10_000)
+                # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
+                # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
+                # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
+                # 上限 ≈1s，空轮询的 Redis 往返开销可忽略。
+                task = queue.read(block_ms=min(self.read_block_ms, 1_000))
                 if not task:
                     continue
 
@@ -689,6 +696,12 @@ from plaita.server.factory import create_storage_component, create_event_bus  # 
 
 def main():
     """命令行入口程序"""
+    # CLI 默认给控制台日志：库内 logger 无 handler，原样跑运维看到的是
+    # 零输出（2026-09 分布式评审 P2-6）。--quiet / PLAITA_LOG_LEVEL 可调。
+    logging.basicConfig(
+        level=os.environ.get("PLAITA_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Plaita流程工作器")
     
     # Redis参数（支持环境变量 PLAITA_REDIS_URL / REDIS_URL）
@@ -749,10 +762,17 @@ def main():
                       help="禁用服务注册")
     parser.add_argument("--registry-ttl", type=int, default=30,
                       help="服务注册TTL(秒)")
+    parser.add_argument("--read-block-ms", type=int, default=1_000,
+                        help="XREADGROUP 阻塞窗口上限（毫秒）。默认 1000：让 SIGTERM "
+                             "后的停机延迟 ≤1s；调大可略降 Redis 往返次数")
+    parser.add_argument("--quiet", action="store_true",
+                        help="关闭 INFO 级控制台日志（等价 PLAITA_LOG_LEVEL=WARNING）")
     parser.add_argument("--heartbeat-interval", type=int, default=10,
                       help="心跳间隔(秒)")
 
     args = parser.parse_args()
+    if args.quiet:
+        logging.getLogger().setLevel(logging.WARNING)
 
     # 外部业务节点模块加载（与 console 的 PLAITA_CONSOLE_NODE_MODULES 约定对齐）：
     # PLAITA_NODE_PATH 冒号分隔追加 sys.path；PLAITA_NODE_MODULES 逗号分隔，
@@ -833,6 +853,7 @@ def main():
             lease_ttl_seconds=args.lease_ttl_seconds,
             max_deliveries=args.max_deliveries,
             dlq_key=args.dlq_key or None,
+            read_block_ms=args.read_block_ms,
         )
         
         # 注册信号处理器以支持优雅关闭

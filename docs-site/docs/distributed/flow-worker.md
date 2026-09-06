@@ -112,3 +112,16 @@ flowchart TD
 - [扩展节点](extended-nodes.md) —— 在流程里声明等待
 - [外延服务](services.md) —— 在流程外触发恢复
 - [API: plaita.server.flow_worker](../api/server.md)
+
+## 停机与运维参数（2026-09）
+
+- **优雅停机**：SIGTERM/SIGINT 后 worker 在当前任务完成后退出。消费阻塞窗口
+  上限由 `--read-block-ms`（默认 1000ms）控制——XREADGROUP 的 BLOCK 无法被
+  信号中断，窗口越大停机延迟越长；默认值保证停机延迟 ≲1s。
+- **CLI 日志**：`python -m plaita.server.flow_worker` 默认输出 INFO 级控制台
+  日志（`PLAITA_LOG_LEVEL` 可调，`--quiet` 关闭）。
+- **event_filter** 的 `--redis-url` 默认取 `PLAITA_REDIS_URL` 环境变量（与
+  flow_worker 一致）。
+- **残留订阅 GC**：EventFilter 匹配到已终态（completed/error）执行的订阅时，
+  就地注销该订阅而不是入队注定失败的 resume——error 路径泄漏的订阅不再
+  需要等 7 天 TTL。

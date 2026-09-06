@@ -127,6 +127,15 @@ class InMemoryEventSubscriptionStorage(EventSubscriptionStorage):
             self.subscriptions[subscription.subscription_id] = subscription
             return subscription.subscription_id
     
+    async def unregister_subscription(self, subscription_id: str) -> bool:
+        """注销订阅——与 RedisEventSubscriptionStorage 的公开契约对齐。
+
+        历史上内存后端只有 ``delete_subscription``，订阅清理调用方
+        （strategies 的 resume 注销 / event_filter 的终态回收）在内存后端上
+        静默 AttributeError（被 except 吞掉）。
+        """
+        return await self.delete_subscription(subscription_id)
+
     async def get_subscription(self, subscription_id: str) -> Optional[EventSubscription]:
         async with self.lock:
             return self.subscriptions.get(subscription_id)

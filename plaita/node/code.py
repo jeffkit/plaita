@@ -128,6 +128,10 @@ SANDBOX_DOCKER_IMAGE: str = os.environ.get("PLAITA_SANDBOX_DOCKER_IMAGE", "pytho
 SANDBOX_DOCKER_TIMEOUT: int = int(os.environ.get("PLAITA_SANDBOX_DOCKER_TIMEOUT", "30"))
 SANDBOX_DOCKER_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_DOCKER_MEMORY_MB", "128"))
 SANDBOX_DOCKER_CPUS: str = os.environ.get("PLAITA_SANDBOX_DOCKER_CPUS", "0.5")
+# 容器运行用户（如 "65534:65534"）。默认空 = 镜像默认用户（root）。
+# python:3.12-slim 的 /tmp tmpfs 为 1777，nobody 可写；设了用户后沙箱内
+# 代码写非 /tmp 路径会失败——这是预期约束而非 bug。
+SANDBOX_DOCKER_USER: str = os.environ.get("PLAITA_SANDBOX_DOCKER_USER", "")
 
 # Modules that restricted sandboxed code is allowed to import.
 #
@@ -460,11 +464,12 @@ def run_python_docker(code, input_value):
         "--memory", f"{SANDBOX_DOCKER_MEMORY_MB}m",
         "--cpus", SANDBOX_DOCKER_CPUS,
         # 加固（2026-09 安全评审 P2）：防 fork bomb / 能力收敛 / 防提权。
-        # 不加 --user：/tmp tmpfs 写权限在部分镜像+uid 组合下会失败，保持
-        # 容器默认用户；网络已由 --network none 隔离。
+        # --user 经 PLAITA_SANDBOX_DOCKER_USER 按需启用（默认镜像用户 root；
+        # /tmp tmpfs 为 1777，nobody 可写）。网络已由 --network none 隔离。
         "--pids-limit", "64",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        *(["--user", SANDBOX_DOCKER_USER] if SANDBOX_DOCKER_USER else []),
         "-i",
         "-e", f"_PLAITA_SCRIPT={runner_b64}",
         SANDBOX_DOCKER_IMAGE,
