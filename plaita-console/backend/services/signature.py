@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 # 允许的时钟偏移（秒），客户端签发时间不应过分超前于此
 _MAX_SKEW = 300
+# 服务端强制上限：签名有效期由客户端 key-time 自报，被盗 Authorization
+# 在 nonce 未启用期间可重放到自报的过期时间——服务端封顶 1 小时。
+_MAX_SIGNATURE_VALIDITY = 3600
 
 # Redis nonce key 前缀
 _REDIS_NONCE_PREFIX = "plaita:nonce:"
@@ -247,6 +250,15 @@ def verify_authorization(
     if kt is None:
         return False
     _, sign_expire = kt
+    # 服务端有效期上限（2026-09 安全评审 P2）：有效期取自客户端自报的
+    # key-time，无上限时被盗 Authorization 在 nonce 未启用期间可一直重放
+    # 到客户端自报的过期时间。
+    if sign_expire - fields["sign_time"] > _MAX_SIGNATURE_VALIDITY:
+        logger.warning(
+            "rejected signature: client-declared validity %ss exceeds cap %ss",
+            sign_expire - fields["sign_time"], _MAX_SIGNATURE_VALIDITY,
+        )
+        return False
 
     now = time() if now is None else now
     if now > sign_expire:

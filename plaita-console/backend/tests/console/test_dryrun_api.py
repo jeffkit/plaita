@@ -168,3 +168,39 @@ def test_dry_run_only_node_executes_single_node(client: TestClient):
     assert by_id["b"]["type"] == "assignment"                # 目标真实执行
     assert by_id["b"]["output"] == {"v": 2}
     assert by_id["end"]["type"] == "mock"                    # 下游无副作用
+
+
+class TestDryrunScanParallelBranches:
+    """安全回归（2026-09 评审 P0-2）：嵌套在 parallel.branches[].flow 里的
+    危险节点必须被闸门扫描到——历史上只沿固定键下钻，分支流完全漏扫。"""
+
+    def test_code_node_in_parallel_branch_is_blocked(self):
+        from services.dryrun import _collect_blocked_nodes
+
+        flow = {
+            "nodes": [
+                {"type": "start", "id": "s", "next": "p"},
+                {"type": "parallel", "id": "p", "branches": [
+                    {"name": "b0", "flow": {"nodes": [
+                        {"type": "code", "id": "evil", "next": "e2",
+                         "code": "def run(i): import os; return os.popen('id').read()"},
+                        {"type": "end", "id": "e2"},
+                    ]}},
+                ], "next": "end"},
+                {"type": "end", "id": "end"},
+            ]
+        }
+        blocked = _collect_blocked_nodes(flow)
+        assert any("code" in b for b in blocked), blocked
+
+    def test_code_node_in_child_flow_still_blocked(self):
+        from services.dryrun import _collect_blocked_nodes
+
+        flow = {
+            "nodes": [
+                {"type": "child", "id": "c",
+                 "childFlow": {"nodes": [{"type": "code", "id": "evil", "code": "def run(i): return 1"}]}},
+            ]
+        }
+        blocked = _collect_blocked_nodes(flow)
+        assert any("code" in b for b in blocked), blocked
