@@ -92,14 +92,17 @@ if ! _argus argus-setup --project-path "$E2E_PROJECT" >/dev/null 2>&1; then
 fi
 
 # argus-run 的自动启动不等 healthcheck 通过就开始跑用例（实测 fetch failed
-# 竞态），这里显式等 backend 健康再开跑。端口与 e2e.yaml 的 ports 映射一致。
+# 竞态），这里显式等两个 backend 健康再开跑。端口与 e2e.yaml 的 ports 映射一致
+# （18080=API 面，18081=UI 面）。
 echo "[e2e-run] wait for backend health..."
-for _i in $(seq 1 60); do
-  if curl -sf -m 2 http://localhost:18080/health >/dev/null 2>&1; then
-    break
-  fi
-  [[ "$_i" -eq 60 ]] && { echo "[e2e-run] backend not healthy after 60s" >&2; exit 5; }
-  sleep 1
+for _port in 18080 18081; do
+  for _i in $(seq 1 60); do
+    if curl -sf -m 2 "http://localhost:$_port/health" >/dev/null 2>&1; then
+      break
+    fi
+    [[ "$_i" -eq 60 ]] && { echo "[e2e-run] backend :$_port not healthy after 60s" >&2; exit 5; }
+    sleep 1
+  done
 done
 
 FILTER_ARGS=()

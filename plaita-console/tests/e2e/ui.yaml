@@ -1,0 +1,71 @@
+name: 控制台 UI
+sequential: true
+
+# Playwright 驱动（argusai browser 步骤，headless chromium），覆盖打包发布模式
+# 的最小用户旅程：未登录见登录页 → admin 登录（PLAITA_CONSOLE_ADMIN_PASSWORD
+# bootstrap）→ 仪表盘 → 执行实例页。浏览器会话在同一 suite 内复用，localStorage
+# token 跨 case 保持，故登录一次即可。
+# 注意：
+#   - 断言的选择器来自 frontend/src（Login 占位符、PageHeader 标题文案），
+#     改 UI 文案需同步这里
+#   - 元素断言一律用 waitForSelector 等待式而非 goto 后直接断言——全量跑时
+#     机器负载高，React 渲染会晚于 domcontentloaded，直接断言必闪失败
+
+cases:
+  - name: "打开控制台根路径"
+    browser:
+      action: goto
+      url: http://localhost:18081/
+
+  - name: "未登录渲染登录页（等待式）"
+    browser:
+      action: waitForSelector
+      selector: input[placeholder="用户名"]
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          - input[placeholder="用户名"]
+          - input[placeholder="密码"]
+
+  - name: "填入用户名"
+    browser:
+      action: fill
+      selector: input[placeholder="用户名"]
+      value: admin
+
+  - name: "填入密码"
+    browser:
+      action: fill
+      selector: input[placeholder="密码"]
+      value: e2e-admin-pass
+
+  - name: "提交登录"
+    browser:
+      action: click
+      selector: text=登录
+
+  - name: "登录后进入仪表盘"
+    browser:
+      action: waitForSelector
+      selector: text=仪表盘
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          - text=仪表盘
+
+  - name: "执行实例页可渲染"
+    browser:
+      action: goto
+      url: http://localhost:18081/executions
+
+  - name: "执行实例页内容就绪（等待式）"
+    browser:
+      action: waitForSelector
+      selector: text=执行实例
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          - text=执行实例

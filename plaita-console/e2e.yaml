@@ -68,7 +68,7 @@ services:
         E2E_TEST_REDIS_HOST: plaita-e2e-redis
         PLAITA_REDIS_URL: redis://plaita-e2e-redis:6379/0
 
-  # 调度/外延服务 suite 需要：cron 扫描、延迟唤醒、审批实例（一容器三进程）。
+  # 调度/外延服务 suite 需要：cron 扫描、延迟唤醒、审批实例（一容器四进程）。
   - name: ext-services
     build:
       dockerfile: plaita-console/docker/Dockerfile.services-e2e
@@ -81,6 +81,36 @@ services:
       environment:
         E2E_TEST_REDIS_HOST: plaita-e2e-redis
         PLAITA_REDIS_URL: redis://plaita-e2e-redis:6379/0
+
+  # UI suite 需要：backend 托管 SPA（打包发布模式）。与 API 面容器分离——
+  # 各自端口互不干扰；bootstrap admin 经 PLAITA_CONSOLE_ADMIN_PASSWORD 注入，
+  # UI 登录走真实会话鉴权（此容器不设 ALLOW_INSECURE_ADMIN）。
+  - name: ui-backend
+    build:
+      dockerfile: plaita-console/docker/Dockerfile.e2e
+      context: ..
+      image: plaita-console-ui-e2e:latest
+      args:
+        KEEP_WEBDIST: "1"
+    dependsOn: [redis]
+    container:
+      name: plaita-console-ui-e2e
+      ports:
+        - "18081:8080"
+      environment:
+        E2E_TEST_REDIS_HOST: plaita-e2e-redis
+        PLAITA_CONSOLE_REDIS_URL: redis://plaita-e2e-redis:6379/0
+        PLAITA_CONSOLE_HOST: 0.0.0.0
+        PLAITA_CONSOLE_PORT: "8080"
+        PLAITA_CONSOLE_DB_URL: "sqlite:////tmp/plaita_console_ui_e2e.db"
+        PLAITA_CONSOLE_ADMIN_PASSWORD: e2e-admin-pass
+        PLAITA_PROJECT_ROOT: /app
+      healthcheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        retries: 30
+        startPeriod: 20s
 
 tests:
   suites:
@@ -123,3 +153,7 @@ tests:
     - name: 调度与外延服务
       id: scheduler
       file: tests/e2e/scheduler.yaml
+
+    - name: 控制台 UI
+      id: ui
+      file: tests/e2e/ui.yaml

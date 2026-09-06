@@ -37,9 +37,11 @@ RUN pip install --no-cache-dir .
 # 复制 console backend 代码
 COPY plaita-console/backend/ ./backend/
 
-# E2E 只测 API 面：开发机残留的 backend/webDist（前端构建产物）会让 "/"
-# 从 JSON 健康响应变成 SPA index.html，删掉以匹配纯后端形态
-RUN rm -rf /app/backend/webDist
+# API 面 E2E（默认）：开发机残留的 backend/webDist（前端构建产物）会让 "/"
+# 从 JSON 健康响应变成 SPA index.html，删掉以匹配纯后端形态。
+# UI 面 E2E：KEEP_WEBDIST=1 保留前端产物，backend 直接托管 SPA（打包发布模式）。
+ARG KEEP_WEBDIST=0
+RUN if [ "$KEEP_WEBDIST" != "1" ]; then rm -rf /app/backend/webDist; fi
 
 # 复制集群配置文件
 COPY plaita-console/cluster_config.yaml ./plaita-console/cluster_config.yaml
