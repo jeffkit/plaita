@@ -48,6 +48,10 @@ export function flowToJson(
     for (const [k, v] of Object.entries(d.fields || {})) {
       nodeObj[k] = v
     }
+    // assignment 缺 outputType 时注入引擎默认（后端校验要求；老流程静默补齐）
+    if (d.type === 'assignment' && nodeObj.outputType === undefined && nodeObj.output_type === undefined) {
+      nodeObj.outputType = { dataType: 'object' }
+    }
 
     const outEdges = edges.filter((e) => e.source === n.id)
     if (d.type === IF_TYPE) {

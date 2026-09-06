@@ -408,9 +408,15 @@ export default function FlowEditor() {
         />
         <div className="flex-1" />
         {dirty && <span className="text-caption text-status-warning">未保存</span>}
-        <Button variant="secondary" size="sm" onClick={doSave} disabled={saveMutation.isPending || flowLoading} title="Cmd/Ctrl+S">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={doSave}
+          disabled={saveMutation.isPending || flowLoading}
+          title={editingPublishedBase ? `基于已发布版本编辑：将另存为新草稿版本 ${suggestedNext}` : 'Cmd/Ctrl+S'}
+        >
           <Save size={13} />
-          {editingPublishedBase ? '保存为新版本' : '保存草稿'}
+          保存草稿
         </Button>
         <Button
           variant="primary"
@@ -508,7 +514,8 @@ export default function FlowEditor() {
 
       {editingPublishedBase && (
         <div className="px-4 py-1 bg-status-warning-dim text-status-warning text-caption">
-          已发布版本不可修改（发布即不可变）：当前编辑基于 {versionQuery.data?.version}，保存将创建新版本 {suggestedNext}
+          已发布版本不可修改（发布即不可变）：当前编辑基于 {versionQuery.data?.version}，
+          「保存草稿」将创建新草稿版本 {suggestedNext}，满意后可再发布
         </div>
       )}
 
