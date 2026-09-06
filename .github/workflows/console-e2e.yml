@@ -57,7 +57,9 @@ jobs:
       # 再预构建镜像，UI 镜像才有 SPA 可托管。
       - name: Build console frontend
         run: |
-          corepack enable
+          # 钉 pnpm@9：corepack 默认拉 pnpm 12，其默认拒绝依赖构建脚本
+          # （esbuild postinstall）直接 ERR_PNPM_IGNORED_BUILDS
+          npm i -g pnpm@9
           cd plaita-console/frontend
           pnpm install --frozen-lockfile
           pnpm build
