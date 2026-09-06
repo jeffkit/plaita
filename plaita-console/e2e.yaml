@@ -146,6 +146,10 @@ tests:
       id: errors
       file: tests/e2e/errors.yaml
 
+    - name: 试跑（dry-run）
+      id: dryrun
+      file: tests/e2e/dryrun.yaml
+
     - name: 引擎链路（多进程）
       id: engine
       file: tests/e2e/engine.yaml

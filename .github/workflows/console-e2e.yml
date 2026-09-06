@@ -1,0 +1,58 @@
+name: Console E2E
+
+# plaita-console 全系统 E2E（argusai）+ Redis 瞬断混沌回归。
+# 独立于 ci.yml：E2E 含 Docker 构建（冷缓存约 5-10 分钟），且只需在
+# console/引擎代码变更时跑，故单独成 workflow 做路径过滤。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "plaita-console/**"
+      - "plaita/**"
+      - ".github/workflows/console-e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "plaita-console/**"
+      - "plaita/**"
+      - ".github/workflows/console-e2e.yml"
+
+concurrency:
+  group: console-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: argusai gate + chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install E2E toolchain
+        run: |
+          uv tool install mcp2cli
+          npm i -g argusai-mcp playwright
+          # playwright 是 argusai-core 的可选 peer 依赖，浏览器二进制需单独装
+          npx -y playwright install chromium
+
+      - name: Full E2E gate (11 suites)
+        run: bash plaita-console/scripts/e2e-gate.sh
+
+      - name: Redis outage chaos regression
+        run: bash plaita-console/scripts/e2e-chaos-redis.sh
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a --format '{{.Names}} {{.Status}}' | grep -i plaita || true
+          docker network ls | grep argusai || true
+          for c in $(docker ps -a --filter "label=argusai.project=plaita-console" --format '{{.Names}}'); do
+            echo "===== $c ====="
+            docker logs --tail 50 "$c" 2>&1 || true
+          done
