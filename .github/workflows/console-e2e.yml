@@ -44,6 +44,12 @@ jobs:
           # playwright 是 argusai-core 的可选 peer 依赖，浏览器二进制需单独装
           npx -y playwright install chromium
 
+      - name: Docker sanity
+        run: |
+          docker info --format '{{.ServerVersion}} drivers={{.Driver}}'
+          docker buildx version
+          docker ps
+
       - name: Full E2E gate (11 suites)
         run: bash plaita-console/scripts/e2e-gate.sh
 

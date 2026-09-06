@@ -83,11 +83,39 @@ fi
 
 if [[ "$NO_BUILD" -eq 0 ]]; then
   echo "[e2e-run] build..."
-  _argus argus-build --project-path "$E2E_PROJECT" >/dev/null 2>&1 || echo "[e2e-run] build warned (continuing with existing image)" >&2
+  BUILD_OUT="$(_argus argus-build --project-path "$E2E_PROJECT" 2>&1)"
+  # argusai 的信封几乎总是 success:true，真实失败在 services[].status=failed
+  # 里——必须逐服务打印，否则 CI 上 build 假成功、后面健康等待才爆，难排查
+  echo "$BUILD_OUT" | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+i = raw.find("{")
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    print("  build: 无 JSON 输出:", raw[:400]); raise SystemExit(0)
+for s in (d.get("data", {}) or {}).get("services", []) or []:
+    print("  build %s: %s %s" % (s.get("name"), s.get("status"), (s.get("error") or "")[:300]))
+' || true
+  docker images --format '{{.Repository}}' | grep -E "^plaita" | sort -u | sed 's/^/  image: /' || echo "  (无 plaita 镜像——build 未产出！)"
 fi
 
 echo "[e2e-run] setup..."
-if ! _argus argus-setup --project-path "$E2E_PROJECT" >/dev/null 2>&1; then
+SETUP_OUT="$(_argus argus-setup --project-path "$E2E_PROJECT" 2>&1)"
+echo "$SETUP_OUT" | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+i = raw.find("{")
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    print("  setup: 无 JSON 输出:", raw[:400]); raise SystemExit(0)
+if not d.get("success", True):
+    print("  setup envelope success=false:", str(d.get("error"))[:300])
+for s in (d.get("data", {}) or {}).get("services", []) or []:
+    print("  setup %s: %s %s" % (s.get("name"), s.get("status"), (s.get("error") or "")[:300]))
+' || true
+if ! echo "$SETUP_OUT" | python3 -c "import sys,json; raw=sys.stdin.read(); d=json.loads(raw[raw.find('{'):]); import sys as s; s.exit(0 if d.get('success',True) else 1)" 2>/dev/null; then
   echo "[e2e-run] setup failed" >&2; exit 5
 fi
 
