@@ -79,7 +79,7 @@ jobs:
           docker build -f plaita-console/docker/Dockerfile.worker-e2e -t plaita-e2e-worker:latest .
           docker build -f plaita-console/docker/Dockerfile.services-e2e -t plaita-e2e-services:latest .
 
-      - name: Full E2E gate (11 suites)
+      - name: Full E2E gate
         run: bash plaita-console/scripts/e2e-gate.sh --no-build
 
       - name: Redis outage chaos regression
