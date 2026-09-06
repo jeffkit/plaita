@@ -9,7 +9,7 @@ import json
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from ..services import flow_store, node_registry_svc
@@ -20,10 +20,14 @@ router = APIRouter()
 
 
 class NodeDescriptorView(BaseModel):
+    # 同 NodeDescriptorOut：字段名避开 pydantic v2 schema_json shadow 警告，
+    # alias 保持 API 线格式（FastAPI 响应默认按 alias 序列化为 schema_json）。
+    model_config = ConfigDict(populate_by_name=True)
+
     node_type: str
     node_name: str = ""
     category: str = ""
-    schema_json: str = "{}"
+    node_schema_json: str = Field("{}", alias="schema_json")
     is_builtin: bool = False
 
 
@@ -33,10 +37,13 @@ class NodeListResponse(BaseModel):
 
 
 class RegisterNodeRequest(BaseModel):
+    # 字段名避开 pydantic v2 schema_json shadow 警告；alias 保持请求体键名不变
+    model_config = ConfigDict(populate_by_name=True)
+
     node_type: str = Field(..., description="节点类型（唯一）")
     node_name: str = Field("", description="展示名")
     category: str = Field("", description="分类")
-    schema_json: str = Field("{}", description="节点字段 schema（JSON 字符串）")
+    node_schema_json: str = Field("{}", alias="schema_json", description="节点字段 schema（JSON 字符串）")
 
 
 def _store() -> flow_store.FlowStore:
@@ -60,7 +67,7 @@ def register_node(req: RegisterNodeRequest):
             node_type=req.node_type,
             node_name=req.node_name,
             category=req.category,
-            schema_json=req.schema_json,
+            schema_json=req.node_schema_json,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -85,7 +92,7 @@ def parsed_schema(node_type: str) -> dict:
     for d in out:
         if d.node_type == node_type:
             try:
-                return json.loads(d.schema_json)
+                return json.loads(d.node_schema_json)
             except (json.JSONDecodeError, TypeError):
                 return {}
     return {}

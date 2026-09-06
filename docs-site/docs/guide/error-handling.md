@@ -131,7 +131,27 @@ plaita 用一套规范异常类型（定义在 `plaita.core.errors`）：
 }
 ```
 
-`resultType` 三种：`success`（正常返回 `output`，**不写时的默认值**）/ `nop`（返回 `None`）/ `error`（抛 `FlowResultError`）。写了无法识别的值会打 `logger.warning` 并按 `success` 处理。
+`resultType` 三种：`success`（正常返回 `output`，**不写时的默认值**）/ `nop`（返回 `None`）/ `error`（包装为 `ErrorResultException` 抛出，见上节）。写了无法识别的值会打 `logger.warning` 并按 `success` 处理。
+
+## 分布式模式的错误契约
+
+Normal / Generator 模式抛出的异常保持具体类型（`NodeNotFoundError` /
+`NodeTimeoutError` / `ErrorResultException` …）；**Distributed 模式把它们统一归一为
+`FlowErrorException`（code=-500）**——这是分布式执行的外部契约：跨进程恢复时调用方
+拿到的错误形状只有一种，原始类型的细节只保留在 `message` 文本里。
+
+按 `error_type` / 异常子类分支处理的代码在分布式路径上不生效；需要区分错误类别时
+从 `message` 解析，或改在 Normal 模式做细粒度错误处理。
+
+```python
+from plaita.core.errors import FlowErrorException
+
+try:
+    execution.run_distributed(flow, params)
+except FlowErrorException as e:
+    # 分布式模式下所有错误都是这个形状；具体原因看 e.message
+    ...
+```
 
 ## 回调通知
 

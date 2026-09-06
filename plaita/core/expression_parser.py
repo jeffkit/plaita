@@ -244,6 +244,10 @@ class ExpressionParser:
     def _eval_variable(self, tokens) -> Any:
         context, _registry, prefix = _current_frame()
         root_key = tokens[0]
+        # ``$FLOW`` 是 ``$FLOW_ID`` 的文档别名——历史上 ``$FLOW`` 根不存在，
+        # 直接 KeyError 崩，与其他前缀缺省返回 None 的口径不一致。
+        if root_key == f"{prefix}FLOW":
+            root_key = f"{prefix}FLOW_ID"
         # Root lookup: KeyError preserved for missing keys (matches old engine)
         obj = context[root_key]
         segments = tokens[1]  # ParseResults of "index:n" / "field:name"
@@ -253,6 +257,11 @@ class ExpressionParser:
                 obj = obj[int(raw)]
             else:  # field
                 name = f"{prefix}{raw}" if raw in _SPECIAL_ROOTS else raw
+                if root_key == f"{prefix}INPUT" and isinstance(obj, dict) and name not in obj:
+                    # 静默 None 是 INPUT 缺键的历史语义；debug 留痕便于排查拼写错误
+                    logger.debug(
+                        "expression references missing input key %r; evaluating to None", raw,
+                    )
                 attr = _get_attr(obj, name)
                 # 仅当字符串属性值本身是表达式（$ 前缀变量 / {% %} 模板）时才递归
                 # 求值——这是"嵌套表达式字符串"的历史语义。任意普通字符串（可能含

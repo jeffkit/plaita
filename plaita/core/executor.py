@@ -17,6 +17,7 @@ _subscribe_event`` 通过下方 re-export 保持不变, 不影响既有调用方
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from plaita.core._error_normalization import (
@@ -35,6 +36,8 @@ from plaita.core.callback import (
     LoggerCallback,
 )
 from plaita.core.context import ExecutionContext
+
+logger = logging.getLogger(__name__)
 from plaita.core.runner import NodeRunner
 # 策略层符号 re-export, 保持 ``from plaita.core.executor import ...`` 历史路径。
 from plaita.core.strategies import (  # noqa: F401
@@ -55,6 +58,14 @@ from plaita.core.errors import FlowExecutionException
 
 if TYPE_CHECKING:
     from plaita.event.core import EventBus
+
+
+# ``FlowExecution.run`` 认识的调用期 options（express_* 命名空间与分布式 resume 参数）
+_KNOWN_RUN_OPTIONS = frozenset({
+    "resume_type", "resume_data",
+    "express_prefix", "express_input_name", "express_parent_name",
+    "express_node_name", "express_global_name", "express_environment_variable",
+})
 
 
 def _reentry_error() -> FlowExecutionException:
@@ -291,7 +302,13 @@ class FlowExecution:
             if opt in options:
                 setattr(execution, opt, options[opt])
         execution.mode = mode  # setter 内部 _coerce_mode 统一成 enum
-        execution.timeout = timeout or execution.timeout
+        # ``timeout=0`` 是合法值（立即超时），不再被 ``or`` 当 falsy 丢弃
+        execution.timeout = timeout if timeout is not None else execution.timeout
+        # 历史上未知 options 静默忽略——"express_prefx" 这类拼写错误无声失效
+        unknown_options = set(options) - _KNOWN_RUN_OPTIONS
+        if unknown_options:
+            logger.warning("FlowExecution.run: ignoring unknown options %s (valid: %s)",
+                           sorted(unknown_options), sorted(_KNOWN_RUN_OPTIONS))
         execution.clean()
         if execution.mode == ExecutionMode.DISTRIBUTED:
             # 统一走 run_distributed, 避免与 run_distributed 维护两份几乎相同的
@@ -341,8 +358,7 @@ class FlowExecution:
                 lazy=lazy, sync=True,
                 finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
                 on_lazy_finally=lambda exc: (
-                    _emit_flow_end_on_close(flow, exc, self.callback_manager),
-                    setattr(self, "_running", False),
+                    _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
                 ),
             )
         finally:
@@ -358,8 +374,7 @@ class FlowExecution:
                 lazy=lazy, sync=False,
                 finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
                 on_lazy_finally=lambda exc: (
-                    _emit_flow_end_on_close(flow, exc, self.callback_manager),
-                    setattr(self, "_running", False),
+                    _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
                 ),
             )
             if lazy:

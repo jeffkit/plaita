@@ -22,6 +22,7 @@ HELLO = {
             {
                 "type": "assignment",
                 "id": "greet",
+                "outputType": {"dataType": "object"},
                 "output": {"message": "你好，Plaita！", "from": "$FLOW_ID"},
                 "next": "end",
             },
@@ -98,10 +99,12 @@ def seed_example_flows(store: FlowStore | None = None) -> int:
     for flow_id, desc, spec in _EXAMPLES:
         try:
             store.ensure_flow(flow_id, author="plaita", desc=spec["desc"] or desc)
+            # 注入 flow_id：定义里的 $FLOW_ID 才能解析（否则恒为 null）
+            definition = {"flow_id": flow_id, **spec["definition"]}
             store.save_flow_definition(
                 flow_id,
                 "1.0.0",
-                json.dumps(spec["definition"], ensure_ascii=False),
+                json.dumps(definition, ensure_ascii=False),
                 layout="",
                 status="draft",
                 created_by="plaita",

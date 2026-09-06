@@ -12,7 +12,11 @@ class EventTimeoutError(EventError):
     def __init__(self, event_type: str, timeout: float):
         self.event_type = event_type
         self.timeout = timeout
-        super().__init__(f"等待事件 '{event_type}' 超时，等待时间 {timeout}秒")
+        super().__init__(
+            f"等待事件 '{event_type}' 超时，等待时间 {timeout}秒。"
+            "注意：内存事件总线不回放——在开始等待之前发布的事件不会送达本等待者"
+            "（分布式/持久化总线语义见 docs-site/docs/distributed/event-system.md）"
+        )
 
 
 class EventNotFoundError(EventError):

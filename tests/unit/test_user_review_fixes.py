@@ -497,3 +497,93 @@ class TestR2PlaitaClientContract(unittest.TestCase):
             client = PlaitaClient("id", "key")
             flow = client.get_flow("259", "0.0.2")
             self.assertEqual(flow.run(name="kongjie"), "kongjie")
+
+
+class TestP2Polish(unittest.TestCase):
+    """P2 打磨轮：日志噪音治理 / 表达式前缀统一 / executor 参数校验 / @flow REPL。"""
+
+    def test_flow_root_alias(self):
+        """``$FLOW`` 是 ``$FLOW_ID`` 的别名（历史上 KeyError 崩）。"""
+        flow = Flow.from_string(json.dumps({
+            "flow_id": "probe",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "e"},
+                {"type": "end", "id": "e", "output": "$FLOW", "resultType": "success"},
+            ],
+        }))
+        self.assertEqual(flow.run(), "probe")
+
+    def test_handled_node_error_logs_concise_no_traceback(self):
+        """被 errorHandler 兜住的节点错误只打一行简明告警，不再双份 traceback。"""
+        from plaita.node import get_default_registry
+
+        class Boom(Node):
+            node_type = "boomP2"
+
+            def execute(self, execution=None):
+                raise RuntimeError("boom-cause")
+
+        get_default_registry().register(Boom)
+        flow = Flow.from_string(json.dumps({
+            "flow_id": "he",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "b"},
+                {"type": "boomP2", "id": "b", "next": "e",
+                 "errorHandler": {"strategy": "continue_with", "defaultValue": "d"}},
+                {"type": "end", "id": "e", "output": "'x'", "resultType": "success"},
+            ],
+        }))
+        with self.assertLogs("plaita.core.runner", level="WARNING") as cm:
+            flow.run()
+        self.assertTrue(any("handled (errorHandler.strategy=continue-with)" in line
+                            and "RuntimeError: boom-cause" in line
+                            for line in cm.output))
+        self.assertTrue(all("Traceback" not in line for line in cm.output))
+
+    def test_run_respects_timeout_zero(self):
+        """``FlowExecution.run(timeout=0)`` 不再被 ``or`` 当 falsy 丢弃。"""
+        from unittest.mock import patch
+        from plaita.core.executor import FlowExecution
+
+        captured = {}
+
+        def spy(self, flow, params=None, **kw):
+            captured["timeout"] = self.timeout
+            raise KeyboardInterrupt
+
+        flow = Flow.from_string(_echo_flow("1"))
+        with patch.object(FlowExecution, "run_distributed", spy):
+            with self.assertRaises(KeyboardInterrupt):
+                FlowExecution.run(flow, timeout=0, mode="distributed")
+        self.assertEqual(captured["timeout"], 0)
+
+    def test_run_warns_on_unknown_options(self):
+        from unittest.mock import patch
+        from plaita.core.executor import FlowExecution
+
+        def spy(self, flow, params=None, **kw):
+            raise KeyboardInterrupt
+
+        flow = Flow.from_string(_echo_flow("1"))
+        with self.assertLogs("plaita.core.executor", level="WARNING") as cm:
+            with patch.object(FlowExecution, "run_distributed", spy):
+                with self.assertRaises(KeyboardInterrupt):
+                    FlowExecution.run(flow, mode="distributed", express_prefx="$!")
+        self.assertTrue(any("express_prefx" in line for line in cm.output))
+
+    def test_flow_decorator_repl_friendly_error(self):
+        """REPL/Jupyter 里用 @flow：报错指路 .py 文件 / flow_from_source。"""
+        src = (
+            "from plaita.dsl.codeflow import flow\n"
+            "@flow('repl_probe')\n"
+            "def repl_probe(x):\n"
+            "    return {'v': x}\n"
+        )
+        with self.assertRaises(Exception) as cm:
+            exec(src, {})  # noqa: S102 - 刻意在 exec 中复现"无源文件"场景
+        self.assertIn("flow_from_source", str(cm.exception))
+
+    def test_event_timeout_mentions_no_replay(self):
+        from plaita.event.exceptions import EventTimeoutError
+        err = EventTimeoutError("a.b", 1.0)
+        self.assertIn("不回放", str(err))

@@ -23,15 +23,17 @@
 
 用 `$` 前缀引用执行上下文中的命名空间：
 
-| 表达式 | 含义 |
-|--------|------|
-| `$INPUT` | 整个输入对象 |
-| `$INPUT.name` | 输入对象的 `name` 字段 |
-| `$NODE.assign` | 节点 `assign` 的输出 |
-| `$NODE.assign.field` | 节点 `assign` 输出的 `field` 字段 |
-| `$GLOBAL.key` | 全局上下文变量 |
-| `$PARENT.x` | 父流程上下文（子流程中可用） |
-| `$ENV.key` | 环境变量 `key`（须在 Flow 的 `exposeEnv` 白名单内声明，见下文） |
+| 表达式 | 含义 | 引用不存在的键时 |
+|--------|------|------------------|
+| `$INPUT` / `$INPUT.name` | 整个输入对象 / 其 `name` 字段 | `None`（DEBUG 日志留痕） |
+| `$NODE.assign` / `$NODE.assign.field` | 节点 `assign` 的输出 / 其字段 | `None` |
+| `$GLOBAL.key` | 全局上下文变量（含 `flow_id`） | `None` |
+| `$FLOW_ID` | 当前流程的 `flow_id` | — |
+| `$FLOW` | `$FLOW_ID` 的别名（0.5.x 起，历史写法 `$FLOW` 会 KeyError 崩） | — |
+| `$PARENT.x` | 父流程上下文（子流程中可用） | `None` |
+| `$ENV.key` | 环境变量（须在 `exposeEnv` 白名单内，见下文） | `None`（未声明时另有解析期 warning） |
+
+缺省口径统一为"缺键返回 `None`"；唯一的例外是整个根不存在（如上下文尚未建立 `$NODE` 状态）时保留 `KeyError`——那通常意味着流程逻辑错误，静默反而危险。
 
 支持的命名空间由 `ExecutionContext` 维护：`INPUT` / `NODE` / `GLOBAL` / `PARENT` / `ENV`。命名空间名本身可通过 `express_input_name` 等参数自定义。
 
@@ -169,7 +171,13 @@ def execute(self, execution):
     return text.upper()
 ```
 
-当某表达式在当前上下文解析为 `None` 且存在父上下文时，plaita 会自动向上回溯到父级再求值。
+!!! warning "子流程中的静默回退：`$INPUT.x` 解析为 `None` 时会回溯父上下文"
+
+    当某表达式在当前上下文解析为 `None` 且存在父上下文时，plaita 会自动向上
+    回溯到父级再求值。这是一个**跨流程边界的隐式数据通路**：子流程里写
+    `$INPUT.name`，若子流程输入没有 `name`，实际可能拿到的是**父流程**的
+    `name`。它让嵌套流程少写传参，但也意味着"字段不存在"与"来自父流程"
+    在结果上无法区分——需要严格隔离时，给子流程输入显式传齐字段。
 
 ## 下一步
 

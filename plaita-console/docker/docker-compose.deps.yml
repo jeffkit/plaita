@@ -1,6 +1,5 @@
 # 仅启动第三方依赖服务
 # 用法: docker-compose -f docker-compose.deps.yml up -d
-version: '3.8'
 
 services:
   # Redis

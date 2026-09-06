@@ -16,7 +16,18 @@ from plaita.dsl.codeflow._common import (
 from plaita.dsl.codeflow._stmt import _compile_block
 
 def _func_ast(func: Callable) -> ast.FunctionDef:
-    src = inspect.getsource(func)
+    try:
+        src = inspect.getsource(func)
+    except OSError as e:
+        # REPL / Jupyter / python -c 里定义的函数没有源文件——历史上裸抛
+        # ``OSError: could not get source code``，用户不知道该往哪走。
+        raise _CodeflowError(
+            f"could not read source of function {getattr(func, '__name__', '?')!r}: "
+            "functions defined in a REPL / Jupyter notebook / `python -c` have no "
+            "source file for @flow to compile. Define the flow function in a .py "
+            "file, or use flow_from_source(src) to compile from a source string.",
+            None,
+        ) from e
     src = textwrap.dedent(src)
     mod = ast.parse(src)
     # 去掉装饰器行后取第一个 FunctionDef

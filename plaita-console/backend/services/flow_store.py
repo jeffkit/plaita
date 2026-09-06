@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -80,10 +80,14 @@ class SaveFlowDefinitionResult(BaseModel):
 class NodeDescriptorOut(BaseModel):
     """节点描述（内置 + 自定义）"""
 
+    # 字段名用 node_schema_json 避开 pydantic v2 "schema_json shadows BaseModel"
+    # 启动警告；alias 保持对外键名不变（构造/序列化仍认 schema_json）。
+    model_config = ConfigDict(populate_by_name=True)
+
     node_type: str
     node_name: str = ""
     category: str = ""
-    schema_json: str = "{}"
+    node_schema_json: str = Field("{}", alias="schema_json")
     is_builtin: bool = False
 
 

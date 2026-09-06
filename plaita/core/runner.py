@@ -112,9 +112,10 @@ def _handle_flow_result_error(flow, node, e: FlowResultError):
 
 
 def _handle_node_error(flow, node, error_handler, e: Exception):
-    logger.warning("handle node error: %s", node.name or node.id, exc_info=True)
     strategy = _coerce_strategy(error_handler.strategy if error_handler else None)
     if not error_handler or strategy == ErrorStrategy.ABORT:
+        # abort：紧接着 raise，完整 traceback 由异常本身携带——这里再打一份
+        # exc_info 是双份噪音，故只留 raise。
         code = DEFAULT_NODE_ABORT_CODE if not error_handler else error_handler.error_code
         message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}{_node_loc_suffix(node)}"
         if error_handler and error_handler.error_message:
@@ -122,6 +123,13 @@ def _handle_node_error(flow, node, error_handler, e: Exception):
         err = NodeExecutionError(message, node=node, code=code)
         err.source_line = _node_source_loc(node)
         raise err from e
+    # 被 errorHandler 兜住的错误：简明一行（含策略与异常摘要），完整 traceback
+    # 只在 DEBUG 级别提供——历史上无条件 exc_info 打整段栈，是主要日志噪音源。
+    logger.warning(
+        "node %s error handled (errorHandler.strategy=%s): %s: %s",
+        node.name or node.id, strategy.value, type(e).__name__, e,
+    )
+    logger.debug("handled node error traceback", exc_info=True)
     if strategy == ErrorStrategy.CONTINUE:
         return None
     if strategy == ErrorStrategy.CONTINUE_WITH:

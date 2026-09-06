@@ -183,7 +183,8 @@ class Flow(BaseModel):
                     node.validate()
                 except Exception as e:
                     logger.warning(
-                        "flow %s node %s (%s) failed construction-time validation: %s",
+                        "flow %s node %s (%s) failed construction-time validation "
+                        "(non-fatal, the flow still runs): %s",
                         self.flow_id, getattr(node, "id", "?"), getattr(node, "node_type", "?"), e,
                     )
 
@@ -371,10 +372,13 @@ class Flow(BaseModel):
 
     @property
     def input_property(self):
+        """历史别名（第 3/4 个名字）：等价 ``input_type``。勿在新代码使用——
+        同一概念现有 inputType（JSON）/ input_type（Python 字段）两个规范名。"""
         return self.input_type
 
     @property
     def output_property(self):
+        """历史别名：等价 ``output_type``。见 :attr:`input_property` 说明。"""
         return self.output_type
 
 

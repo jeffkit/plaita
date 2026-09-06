@@ -342,6 +342,7 @@ class InMemoryEventBus(EventBus):
         await self.event_storage.store_event(event)
         
         # 通知等待的future
+        # （注意：本总线不回放——等待开始前发布的事件不会送达，见模块 docstring）
         if event.event_type in self.waiting_futures:
             futures = self.waiting_futures[event.event_type]
             for future in futures:

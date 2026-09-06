@@ -354,7 +354,7 @@ class DistributedStrategy:
         except Exception as e:
             error = {"code": -500, "message": str(e)}
             callback_manager.on_node_end(flow, current_node, None, error, exception=e)
-            logger.error("Error during resume: %s", e, exc_info=True)
+            logger.error("Error during resume: %s", e)
             resume_err = ResumeError(str(e), node=current_node)
             resume_err.source_line = getattr(current_node, "source_line", None)
             raise resume_err from e
