@@ -68,6 +68,20 @@ services:
         E2E_TEST_REDIS_HOST: plaita-e2e-redis
         PLAITA_REDIS_URL: redis://plaita-e2e-redis:6379/0
 
+  # 调度/外延服务 suite 需要：cron 扫描、延迟唤醒、审批实例（一容器三进程）。
+  - name: ext-services
+    build:
+      dockerfile: plaita-console/docker/Dockerfile.services-e2e
+      context: ..
+      image: plaita-e2e-services:latest
+    dependsOn: [redis]
+    container:
+      name: plaita-e2e-services
+      ports: []
+      environment:
+        E2E_TEST_REDIS_HOST: plaita-e2e-redis
+        PLAITA_REDIS_URL: redis://plaita-e2e-redis:6379/0
+
 tests:
   suites:
     - name: 健康检查
@@ -105,3 +119,7 @@ tests:
     - name: 引擎链路（多进程）
       id: engine
       file: tests/e2e/engine.yaml
+
+    - name: 调度与外延服务
+      id: scheduler
+      file: tests/e2e/scheduler.yaml

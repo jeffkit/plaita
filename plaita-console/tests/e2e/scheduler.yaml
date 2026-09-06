@@ -1,0 +1,273 @@
+name: 调度与外延服务
+sequential: true
+
+# 覆盖 phase2.8 人工串测剩余断点中依赖外延服务进程的链路：
+#   - 调度：手动 trigger（与手动启动同源写队列 Stream）+ schedule_service cron
+#     自动扫描触发 + fire history 记录
+#   - delay_service 闭环：delay 节点挂起 → 服务任务被消费 → 事件唤醒续跑至完成
+#     （这是「挂起必须有人接」这条链的唯一自动化回归）
+# cron 自动触发用 "* * * * *"，最坏等 60s，故本 suite 放最后。
+# approval_service 随容器运行（审批实例生成），但其消费侧断言依赖服务内部
+# 状态暂无对外只读接口，事件唤醒部分已由 engine suite 的 resume 用例覆盖。
+
+cases:
+  # === 准备：两个已发布流程 ===
+  - name: "创建调度目标流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-sched-flow"
+        author: "e2e"
+        desc: "scheduler suite 简单流程"
+    expect:
+      status: 200
+
+  - name: "保存调度目标流程定义"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-sched-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-sched-flow","name":"E2E Sched","description":"start→end","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"$INPUT.value","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "发布调度目标流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-sched-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  - name: "创建延迟流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-sched-delay"
+        author: "e2e"
+        desc: "scheduler suite 延迟流程"
+    expect:
+      status: 200
+
+  - name: "保存延迟流程定义"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-sched-delay/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-sched-delay","name":"E2E Delay","description":"start→delay→end","nodes":[{"id":"start","type":"start","next":"delay"},{"id":"delay","type":"delay","delay_seconds":2,"event_type":"delay_trigger","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "发布延迟流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-sched-delay/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  # === 调度：手动触发（与手动启动同源写队列 Stream）===
+  - name: "创建调度（每小时，仅用手动触发验证）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/schedules
+      headers:
+        Content-Type: application/json
+      body:
+        name: "e2e-sched-manual"
+        flow_id: "e2e-sched-flow"
+        cron: "0 * * * *"
+        params:
+          value: 7
+        created_by: "e2e"
+    expect:
+      status: 200
+      body:
+        name: "e2e-sched-manual"
+    save:
+      manual_sched_id: "schedule_id"
+
+  - name: "立即触发一次"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}/trigger"
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 200
+      body:
+        success: true
+
+  - name: "触发历史有记录（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}/history"
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+
+  - name: "触发的执行被 worker 消费（轮询）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-sched-flow
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+    save:
+      sched_exec_id: "executions.0.execution_id"
+
+  - name: "调度触发的执行最终完成"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.sched_exec_id}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "completed"
+        flow_id: "e2e-sched-flow"
+
+  # === 调度：cron 自动触发（schedule_service 扫描）===
+  - name: "创建每分钟调度"
+    request:
+      method: POST
+      url: http://localhost:18080/api/schedules
+      headers:
+        Content-Type: application/json
+      body:
+        name: "e2e-sched-cron"
+        flow_id: "e2e-sched-flow"
+        cron: "* * * * *"
+        params:
+          value: 42
+        created_by: "e2e"
+    expect:
+      status: 200
+      body:
+        name: "e2e-sched-cron"
+    save:
+      cron_sched_id: "schedule_id"
+
+  - name: "schedule_service 自动触发（cron 到点，最坏等 60s）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/schedules/{{runtime.cron_sched_id}}/history"
+    retry:
+      maxAttempts: 75
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+
+  - name: "停用每分钟调度（避免后续噪音）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/schedules/{{runtime.cron_sched_id}}/disable"
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 200
+
+  # === delay_service 闭环：挂起 → 服务唤醒 → 完成 ===
+  - name: "启动延迟流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-sched-delay"
+        version: "1.0.0"
+        params: {}
+    expect:
+      status: 200
+      body:
+        status: "queued"
+
+  - name: "延迟执行出现（轮询取执行 ID）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-sched-delay
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+    save:
+      delay_exec_id: "executions.0.execution_id"
+
+  - name: "delay_service 唤后续跑至完成（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.delay_exec_id}}"
+    retry:
+      maxAttempts: 30
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "completed"
+
+teardown:
+  - name: "清理: 停用并删除手动调度（容错）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}/disable"
+      headers:
+        Content-Type: application/json
+    ignoreError: true
+
+  - name: "清理: 删除手动调度（容错）"
+    request:
+      method: DELETE
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}"
+    ignoreError: true
+
+  - name: "清理: 删除每分钟调度（容错）"
+    request:
+      method: DELETE
+      url: "http://localhost:18080/api/schedules/{{runtime.cron_sched_id}}"
+    ignoreError: true
+
+  - name: "清理: 删除调度目标流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-sched-flow
+    ignoreError: true
+
+  - name: "清理: 删除延迟流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-sched-delay
+    ignoreError: true
