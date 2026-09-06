@@ -45,7 +45,11 @@ export function flowToJson(
     const nodeObj: Record<string, unknown> = { type: d.type, id: n.id }
     if (d.name) nodeObj.name = d.name
     // 类型特定字段（排除由边推导的连接字段）
+    // null/undefined 一律剔除：显式 None 会让 pydantic 的 list/dict 字段
+    // 校验直接失败（如 upstream_output=None → "Input should be a valid list"），
+    // 而「不写该键」对 Optional 字段是等价且安全的
     for (const [k, v] of Object.entries(d.fields || {})) {
+      if (v === null || v === undefined) continue
       nodeObj[k] = v
     }
     // assignment 缺 outputType 时注入引擎默认（后端校验要求；老流程静默补齐）

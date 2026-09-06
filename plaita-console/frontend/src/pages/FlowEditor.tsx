@@ -570,6 +570,15 @@ export default function FlowEditor() {
           />
           {showDryRun && (
             <DryRunPanel
+              nodesByType={(() => {
+                const acc: Record<string, string[]> = {}
+                for (const n of nodes) {
+                  const t = (n.data as FlowNodeData).type
+                  ;(acc[t] ||= []).push(n.id)
+                }
+                return acc
+              })()}
+              onErrorNodeId={(id) => useFlowEditor.setState({ selectedNodeId: id })}
               flowJson={JSON.stringify(
                 flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], { flow_id: flowId, version, desc, inputType }),
                 null,

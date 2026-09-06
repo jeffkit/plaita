@@ -11,7 +11,10 @@ interface DryRunPanelProps {
 // 试跑面板：输入 JSON → 调 /api/flows/dry-run → 节点级结果时间线。
 // 调试能力：节点输出可「固定」（pin），后续试跑跳过真实执行；
 // 每个节点可「仅运行此节点」（上游取 pin 值，下游 mock 无副作用）。
-export default function DryRunPanel({ flowJson, onClose }: DryRunPanelProps) {
+export default function DryRunPanel({ flowJson, onClose, nodesByType, onErrorNodeId }: DryRunPanelProps & {
+  nodesByType?: Record<string, string[]>
+  onErrorNodeId?: (id: string) => void
+}) {
   const [inputJson, setInputJson] = useState('{\n  "name": "plaita"\n}')
   const [inputError, setInputError] = useState<string | null>(null)
   const [pins, setPins] = useState<Record<string, unknown>>({})
@@ -94,7 +97,39 @@ export default function DryRunPanel({ flowJson, onClose }: DryRunPanelProps) {
       </div>
 
       {inputError && <p className="text-xs text-red-400 mb-2">{inputError}</p>}
-      {mut.isError && <p className="text-xs text-red-400 mb-2">{(mut.error as Error).message}</p>}
+      {mut.isError && (() => {
+        const msg = (mut.error as Error).message
+        // "Flow 校验失败: 1 validation error for Assignment upstream_output ..."
+        // → 解析出错节点类型，列出画布上的同名节点并支持一键打开配置
+        // （2026-09 UI 旅程评审：裸 pydantic 文案让用户无从定位）
+        const typeMatch = msg.match(/for ([A-Z]\w+)/)
+        const nodeType = typeMatch
+          ? typeMatch[1].replace(/([A-Z])/g, (c) => '_' + c.toLowerCase()).toLowerCase()
+          : null
+        const ids = (nodeType && nodesByType?.[nodeType]) || []
+        return (
+          <div className="mb-2 p-2 rounded border border-red-500/40 bg-red-500/10">
+            <p className="text-xs text-red-400">{msg}</p>
+            {nodeType && ids.length > 0 && (
+              <div className="mt-1.5 text-[11px] text-ink-secondary">
+                出错节点类型：<span className="font-mono">{nodeType}</span>
+                {ids.length > 0 && <>，画布上对应的节点：
+                  {ids.map((id) => (
+                    <button
+                      key={id}
+                      className="mx-0.5 px-1 py-0.5 rounded border border-line bg-dark-800 text-dark-100 hover:border-plaita-500 font-mono"
+                      onClick={() => onErrorNodeId?.(id)}
+                      title="点击打开该节点的配置"
+                    >
+                      {id}
+                    </button>
+                  ))}
+                </>}
+              </div>
+            )}
+          </div>
+        )
+      })()}
       {result?.error && <p className="text-xs text-red-400 mb-2">{result.error}</p>}
 
       {Object.keys(pins).length > 0 && (

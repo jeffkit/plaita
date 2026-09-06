@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { GitBranch, Plus, Trash2 } from 'lucide-react'
 import { useFlowEditor } from '../../stores/flowEditor'
@@ -63,8 +63,18 @@ export default function NodeConfigDrawer() {
     setDesc((d.fields.desc as string) || '')
     setOutput((d.fields.output as string) || '')
     setTimeout_((d.fields.timeout as string) || '')
-    setTab('config') // 切换节点时回到「配置」Tab
   }, [node])
+
+  // Tab 重置只在**切换选中节点**时发生——历史上依赖 [node]，而节点对象在
+  // 每次字段编辑后都会换新引用，导致「容错 Tab 里选个超时就被踢回配置」
+  // （2026-09 UI 旅程评审用户实测）。
+  const prevSelectedId = useRef(selectedId)
+  useEffect(() => {
+    if (prevSelectedId.current !== selectedId) {
+      prevSelectedId.current = selectedId
+      setTab('config')
+    }
+  }, [selectedId])
 
   // 归一化必须在 early-return 前（hooks 顺序）
   const schema = node ? (schemaByType.get((node.data as FlowNodeData).type) ?? null) : null
@@ -227,8 +237,11 @@ export default function NodeConfigDrawer() {
                   onChange={(e) => {
                     const dt = e.target.value
                     const fields = { ...d.fields }
-                    if (dt === 'object') delete fields.output_type
-                    else fields.output_type = { dataType: dt }
+                    // 两种历史键都清掉，只写 schema 规范键 output_type，
+                    // 避免「高级字段」里 output_type / outputType 双写重复
+                    delete fields.output_type
+                    delete fields.outputType
+                    if (dt !== 'object') fields.output_type = { dataType: dt }
                     updateNodeData(node.id, { fields })
                   }}
                 >
