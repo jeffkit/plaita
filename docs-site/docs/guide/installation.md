@@ -34,7 +34,7 @@ plaita 核心只依赖 `pydantic`、`pyparsing`、`isodate`、`croniter`，其�
 |-------|---------|---------|
 | `redis` | `pip install plaita[redis]` | Redis 存储 / Redis EventBus / Redis 节点 |
 | `server` | `pip install plaita[server]` | FastAPI 服务端、SQLAlchemy 存储、FlowWorker、扩展节点 |
-| `code` | `pip install plaita[code]` | `CodeNode`（RestrictedPython AST 沙箱 + PyExecJS JS 后端）。0.5.0 起 `register_code_node()` **默认 `docker` 容器级沙箱**（需本机 Docker daemon），可选 `subprocess` / `restricted` / `unsafe` |
+| `code` | `pip install plaita[code]` | `CodeNode`。0.5.0 起 `register_code_node()` **默认 `docker` 容器级沙箱**（需本机 Docker daemon）；可选 `subprocess`（进程级，默认环境变量白名单）/ `restricted`（**仅防误用**——AST 沙箱有确定性逃逸路径，禁止用于半信任作者）/ `unsafe`。多租户部署务必用 `register_code_node(allowed_backends=(...))` 限定后端，防止流程 JSON 逐节点覆盖成更弱沙箱 |
 | `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp）；`PlaitaClient`（requests） |
 | `yaml` | `pip install plaita[yaml]` | YAML 格式流程定义 |
 | `sqlalchemy` | `pip install plaita[sqlalchemy]` | SQLAlchemy EventBus / Storage（实验性） |

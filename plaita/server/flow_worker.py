@@ -211,6 +211,23 @@ class FlowWorker:
             error_msg = f"流程ID不匹配: 期望 {flow_id}, 实际 {stored_flow_id}"
             logger.error(error_msg)
             raise ValueError(error_msg)
+
+        # 终态短路（2026-09 分布式评审 P1-1）：at-least-once 下重复投递的
+        # resume 任务会命中已完成的执行。历史实现走完正常 resume 再在异常
+        # 处理里把终态改写成 error——监控按 status 查询会得出错误结论。
+        # 幂等语义：已终态的执行直接原样返回，不再推进。
+        state_status = getattr(state, "status", "") or ""
+        if state_status in ("completed", "error"):
+            logger.info(
+                "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
+            )
+            return {
+                "execution_id": execution_id,
+                "status": state_status,
+                "already_terminal": True,
+                "result": getattr(state, "result", None),
+                "error": getattr(state, "error", None),
+            }
         
         # 获取流程版本
         version = state.flow_version

@@ -223,7 +223,7 @@ from plaita.node import register_code_node
 
 register_code_node()                          # 默认 docker, 需本机 Docker daemon
 register_code_node(default_backend="subprocess")  # 半信任: 进程级, 不隔离 FS/网络
-register_code_node(default_backend="restricted")  # 显式声明半信任 (AST 沙箱, 有已知绕过向量)
+register_code_node(default_backend="restricted")  # 仅防误用：AST 沙箱有确定性逃逸路径（allowlist 模块可达宿主能力），禁止用于半信任作者
 register_code_node(default_backend="unsafe")      # 完全信任代码作者
 ```
 

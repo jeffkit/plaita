@@ -646,3 +646,131 @@ class TestBgStateBounded(unittest.TestCase):
         finally:
             pool.shutdown(wait=False)
             conc._BG_STATE.clear()
+
+
+class TestR4SecurityHardening(unittest.TestCase):
+    """R4 安全专项修复回归：沙箱后端白名单 / restricted 定位 / DoS 上限 /
+    $ENV 脚枪 / SSRF 策略 / 子进程环境白名单 / 循环绑定客户端。"""
+
+    def tearDown(self):
+        import plaita.node.code as code_mod
+        code_mod._ALLOWED_SANDBOX_BACKENDS = None
+
+    def test_allowed_backends_blocks_per_flow_override(self):
+        """流程 JSON 不得把运营者选定的沙箱后端逐节点覆盖为更弱后端。"""
+        import plaita.node.code as code_mod
+        from plaita.node import get_default_registry, register_code_node
+
+        register_code_node(default_backend="restricted",
+                           allowed_backends=("docker", "restricted"))
+        registry = get_default_registry()
+        with self.assertRaises(Exception) as cm:
+            registry.parse_node({
+                "type": "code", "id": "c", "code": "def run(i): return 1",
+                "sandbox_backend": "unsafe",
+            })
+        self.assertIn("not allowed", str(cm.exception))
+        # 白名单内后端正常
+        node = registry.parse_node({
+            "type": "code", "id": "c2", "code": "def run(i): return 1",
+            "sandbox_backend": "docker",
+        })
+        self.assertEqual(node.sandbox_backend, "docker")
+
+    def test_pow_exponent_capped(self):
+        """$F.pow 指数上限：20 字节表达式不再能烧分钟级 CPU。"""
+        from plaita.core.expression import _fn_pow
+        with self.assertRaises(ValueError):
+            _fn_pow(9, 9999999)
+        self.assertEqual(_fn_pow(2, 10), 1024)
+
+    def test_expose_env_rejects_wildcard_and_blank(self):
+        from plaita.core.context import _safe_environment
+        for bad in (["*"], [""], [" HOME"]):
+            with self.assertRaises(ValueError):
+                _safe_environment(bad)
+
+    def test_restricted_sandbox_blocks_operator_import(self):
+        """operator/functools 已从 restricted 白名单移除（attrgetter 逃逸路径）。"""
+        from plaita.node.code import run_python_restricted
+        code = "def run(i):\n    import operator\n    return 1"
+        with self.assertRaises(Exception):
+            run_python_restricted(code, {})
+
+    def test_subprocess_env_whitelist(self):
+        """subprocess 后端子进程不再继承宿主全量环境变量。"""
+        import os
+
+        from plaita.node.code import run_python_subprocess
+        os.environ["PLAITA_TEST_SECRET_DO_NOT_LEAK"] = "s3cr3t"
+        code = (
+            "def run(i):\n"
+            "    import os\n"
+            "    return {'has_secret': 'PLAITA_TEST_SECRET_DO_NOT_LEAK' in os.environ, "
+            "'has_path': 'PATH' in os.environ}\n"
+        )
+        result = run_python_subprocess(code, {})
+        self.assertFalse(result["has_secret"])
+        self.assertTrue(result["has_path"])
+
+    def test_host_policy(self):
+        from plaita.node.http import URLPolicyError, _host_allowed
+        # 私网拦截
+        with self.assertRaises(URLPolicyError):
+            _host_allowed("http://127.0.0.1:1/x", None, None, True)
+        # 精确 deny
+        with self.assertRaises(URLPolicyError):
+            _host_allowed("http://internal.example.com/x", None, ["internal.example.com"], False)
+        # allowlist 外拒
+        with self.assertRaises(URLPolicyError):
+            _host_allowed("http://api.example.com/x", ["other.com"], None, False)
+        # 命中 allowlist 放行（公网域名不解析也可——无 blockPrivate 时不需要解析）
+        _host_allowed("http://api.example.com/x", ["api.example.com"], None, False)
+        # 非 http(s) scheme 拒
+        with self.assertRaises(URLPolicyError):
+            _host_allowed("file:///etc/passwd", None, None, False)
+
+    def test_redis_client_recreated_across_event_loops(self):
+        """P0-1：worker 每步新循环——缓存的 aioredis 客户端必须按循环重建。"""
+        import asyncio
+
+        import plaita.event.redis as redis_mod
+        from plaita.event.redis import RedisEventBus
+
+        created = []
+
+        class _FakeClient:
+            def __init__(self, tag):
+                self.tag = tag
+
+        async def _fake_from_url(url):
+            created.append(len(created))
+            return _FakeClient(len(created))
+
+        bus = RedisEventBus.__new__(RedisEventBus)
+        bus.redis_url = "redis://localhost:6379/9"
+        bus.key_prefix = "plaita"
+        bus.redis = None
+        bus.ttl = 3600
+        bus.listeners = []
+        bus.handlers = {}
+        bus.lock = asyncio.Lock()
+
+        orig = redis_mod.aioredis.from_url
+        redis_mod.aioredis.from_url = _fake_from_url
+        try:
+            async def _same_loop_twice():
+                await bus.initialize()
+                first = bus.redis
+                await bus.initialize()  # 同循环复用，不重建
+                return first, bus.redis is first
+
+            first_client, reused = asyncio.run(_same_loop_twice())
+            self.assertIsNotNone(first_client)
+            self.assertTrue(reused)
+            # 新循环必须重建客户端（P0-1 的核心契约：worker 每步一个新循环）
+            created.clear()
+            asyncio.run(bus.initialize())
+            self.assertEqual(created, [0])
+        finally:
+            redis_mod.aioredis.from_url = orig

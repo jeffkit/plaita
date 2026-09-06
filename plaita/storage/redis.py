@@ -266,7 +266,10 @@ class RedisFlowStorage(FlowStorage):
             
             # 获取版本信息
             flow_versions_key = self.get_namespace_key('flow_versions', flow_id)
-            all_versions = self.client.smembers(flow_versions_key)
+            all_versions = {
+                v.decode("utf-8") if isinstance(v, bytes) else v
+                for v in (self.client.smembers(flow_versions_key) or set())
+            }
             
             if not all_versions:
                 return None
@@ -389,7 +392,10 @@ class RedisFlowStorage(FlowStorage):
                     self.client.srem(flow_list_key, flow_id)
             else:
                 # 删除所有版本
-                all_versions = self.client.smembers(flow_versions_key)
+                all_versions = {
+                v.decode("utf-8") if isinstance(v, bytes) else v
+                for v in (self.client.smembers(flow_versions_key) or set())
+            }
                 pipe = self.client.pipeline()
                 for ver in all_versions:
                     key = self.get_namespace_key('flow', flow_id, ver)

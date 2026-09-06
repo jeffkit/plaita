@@ -17,7 +17,8 @@
 选型含义：
 
 - 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受**重复投递**（幂等 resume）的场景。
-- 不适合：把「恰好一次」「自动故障转移」「金融级幂等」当默认承诺的场景——无 DLQ；副作用仍须幂等。
+- 不适合：把「恰好一次」「自动故障转移」「金融级幂等」当默认承诺的场景——副作用仍须幂等。
+- **崩溃恢复的如实语义（2026-09 实测）**：worker 崩溃后 pending 里的 start 任务被重投时，会**创建全新执行从头重跑**（新 execution_id）——每步落盘的 checkpoint 不会被 start 任务消费；旧执行会停留在 `running` 状态，目前没有内置的僵尸清扫，需要运维侧按 `end_time IS NULL` 巡检。resume 任务的重投是安全的：终态执行会被幂等短路（原样返回，不再推进，也不会被改写状态）。
 
 CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）、`--max-deliveries`（默认 5）、`--dlq-key`。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容）。
 

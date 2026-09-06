@@ -51,6 +51,14 @@ def _safe_environment(allowlist: Optional[List[str]] = None) -> Dict[str, str]:
     """
     if not allowlist:
         return {}
+    # 运营者脚枪显式化（2026-09 安全评审 P2）："*" / 空串 / 带空白键此前
+    # 静默落空（用户以为暴露了实际什么都没暴露），现在直接报错。
+    bad = [k for k in allowlist if not isinstance(k, str) or not k or k.strip() != k or "*" in k]
+    if bad:
+        raise ValueError(
+            f"expose_env contains invalid entries {bad!r}: no wildcards, no blank "
+            "or whitespace-padded keys. List exact environment variable names."
+        )
     exposed: Dict[str, str] = {}
     for key in allowlist:
         if key in os.environ:

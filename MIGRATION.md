@@ -8,6 +8,35 @@
 
 ## Unreleased（0.5.x）
 
+### 安全与分布式加固（2026-09 R4 定向深潜轮）
+
+安全专项（威胁模型：能写流程 JSON 的人是半信任主体）：
+
+1. **CodeNode 后端白名单**：`register_code_node(allowed_backends=(...))` 设置后，
+   流程 JSON 里的 `sandbox_backend` 不在白名单内即**解析期硬失败**。此前流程作者
+   可把运营者选定的默认后端逐节点覆盖为 `"unsafe"`（宿主任意代码执行）。
+2. **restricted 沙箱移除 `functools`/`operator`**：`operator.attrgetter("__class__")`
+   走 C 层属性访问绕过 `_getattr_` 拦截，可完整逃逸（确定性 PoC 已验证）。
+   restricted 定位收敛为"仅防误用"，禁止用于半信任作者。
+3. **subprocess 沙箱环境变量白名单**：子进程不再继承宿主全量 `os.environ`
+   （历史等于把 API key/云凭证交给沙箱内代码）。白名单外用
+   `code.SUBPROCESS_ENV_EXTRA` 按需补充。注意 macOS 无 RLIMIT 内存上限。
+4. **HTTP 节点 SSRF 防护钩子**（默认行为不变）：新增 `requestTimeout`（默认 30s）、
+   `allowedHosts` / `deniedHosts`（精确/`*.suffix`/CIDR）、`blockPrivateNetworks`、
+   `maxRedirects`。任一策略激活时重定向改为逐跳校验后手动跟随。
+5. **`$F.pow` 指数上限**（默认 10000）：`$F.pow(9, 9999999)` 这类 20 字节表达式
+   曾可烧掉分钟级 CPU。
+6. **`expose_env` 拒绝 `"*"`/空串/带空白键**：此前静默落空（以为暴露了实际没有）。
+
+分布式专项（Redis 全链路实测）：
+
+7. **RedisEventBus/RedisStorage 客户端按事件循环重建**：worker 每个分布式步骤
+   跑在新建的 asyncio 循环里，缓存的 aioredis 连接跨循环失效——含 event 节点的
+   流程约每两次挂起即失败一次并丢单。修复后按循环重建（外部注入的客户端不接管）。
+8. **重复投递的 resume 任务幂等短路**：终态执行的 resume 原样返回，不再把
+   completed/error 改写。`redis publish` 的 dict/str 形式支持 `correlation_id`
+   关键字（EventFilter 的 correlation 匹配此前无法通过该形式设置）。
+
 ### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
 
 本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程

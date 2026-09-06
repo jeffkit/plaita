@@ -115,6 +115,14 @@ LANGUAGE_PYTHON = "python"
 SANDBOX_SUBPROCESS_TIMEOUT: int = int(os.environ.get("PLAITA_SANDBOX_TIMEOUT", "10"))
 SANDBOX_SUBPROCESS_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_MEMORY_MB", "256"))
 
+# subprocess 后端的子进程环境变量白名单（2026-09 安全评审 P1）：
+# 历史上子进程继承宿主全量 os.environ。需要额外变量时往 SUBPROCESS_ENV_EXTRA
+# 里加（模块级，启动脚本里设置），或直接改这个白名单。
+SUBPROCESS_ENV_ALLOWLIST: FrozenSet[str] = frozenset({
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING",
+})
+SUBPROCESS_ENV_EXTRA: dict = {}
+
 # docker backend
 SANDBOX_DOCKER_IMAGE: str = os.environ.get("PLAITA_SANDBOX_DOCKER_IMAGE", "python:3.12-slim")
 SANDBOX_DOCKER_TIMEOUT: int = int(os.environ.get("PLAITA_SANDBOX_DOCKER_TIMEOUT", "30"))
@@ -122,13 +130,25 @@ SANDBOX_DOCKER_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_DOCKER_MEMORY
 SANDBOX_DOCKER_CPUS: str = os.environ.get("PLAITA_SANDBOX_DOCKER_CPUS", "0.5")
 
 # Modules that restricted sandboxed code is allowed to import.
+#
+# 安全边界声明（2026-09 安全评审）：restricted 后端**只防误用，不防恶意作者**。
+# functools/operator 曾在白名单里——`operator.attrgetter("__class__")` 走 C 层
+# 属性访问，绕过 Python 层的 _getattr_ 拦截，可经 __subclasses__/__globals__
+# 完整逃逸（确定性 PoC），已移除。即便如此也不应把 restricted 当半信任沙箱：
+# 半信任作者的代码请用 docker 后端（容器级隔离）。
 SANDBOX_SAFE_MODULES: FrozenSet[str] = frozenset([
     "math", "json", "re", "datetime", "random", "string",
-    "itertools", "collections", "functools", "operator",
+    "itertools", "collections",
     "decimal", "fractions", "statistics", "textwrap",
     "base64", "hashlib", "hmac", "struct",
     "enum", "dataclasses", "typing",
 ])
+
+# 运营者通过 ``register_code_node(allowed_backends=(...))`` 设置的后端白名单。
+# None = 不限制（历史行为）。设置后，流程 JSON 里的 ``sandbox_backend`` 不在
+# 白名单内即**解析期硬失败**——没有这个约束，流程作者可以把运营者选定的
+# 默认后端逐节点覆盖成 "unsafe"（宿主任意代码执行）。
+_ALLOWED_SANDBOX_BACKENDS: Optional[FrozenSet[str]] = None
 
 # ---------------------------------------------------------------------------
 # Runner script template shared by subprocess and docker backends
@@ -360,12 +380,22 @@ def run_python_subprocess(code, input_value):
     """
     mem_bytes = SANDBOX_SUBPROCESS_MEMORY_MB * 1024 * 1024
     runner = _build_runner_script(code, mem_bytes=mem_bytes)
+    # 环境变量白名单重建（2026-09 安全评审 P1）：历史实现未传 env=，子进程
+    # 拿到宿主全量 os.environ——生产环境里等于把 API key/云凭证交给沙箱内
+    # 代码。白名单外可用 SUBPROCESS_ENV_EXTRA 按需补充。
+    child_env = {
+        key: os.environ[key]
+        for key in sorted(SUBPROCESS_ENV_ALLOWLIST)
+        if key in os.environ
+    }
+    child_env.update(SUBPROCESS_ENV_EXTRA)
     try:
         proc = subprocess.run(
             [sys.executable, "-c", runner],
             input=json.dumps(input_value).encode(),
             capture_output=True,
             timeout=SANDBOX_SUBPROCESS_TIMEOUT,
+            env=child_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
@@ -429,6 +459,12 @@ def run_python_docker(code, input_value):
         "--tmpfs", "/tmp",
         "--memory", f"{SANDBOX_DOCKER_MEMORY_MB}m",
         "--cpus", SANDBOX_DOCKER_CPUS,
+        # 加固（2026-09 安全评审 P2）：防 fork bomb / 能力收敛 / 防提权。
+        # 不加 --user：/tmp tmpfs 写权限在部分镜像+uid 组合下会失败，保持
+        # 容器默认用户；网络已由 --network none 隔离。
+        "--pids-limit", "64",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
         "-i",
         "-e", f"_PLAITA_SCRIPT={runner_b64}",
         SANDBOX_DOCKER_IMAGE,
@@ -544,6 +580,17 @@ class CodeNode(Node):
         # 未显式指定后端时取模块级默认 (0.5.0 默认 docker)。
         if not data.get("sandbox_backend"):
             data["sandbox_backend"] = _DEFAULT_SANDBOX_BACKEND
+        # 运营者白名单硬校验（2026-09 安全评审 P0）：流程 JSON 逐节点把
+        # sandbox_backend 覆盖成 unsafe/subprocess 必须在解析期拦下，而不是
+        # 等到执行期才生效——运营者的 register_code_node 选择是安全边界。
+        allowed = _ALLOWED_SANDBOX_BACKENDS
+        if allowed is not None and data["sandbox_backend"] not in allowed:
+            raise ValueError(
+                f"sandbox_backend={data['sandbox_backend']!r} is not allowed by the "
+                f"operator. Allowed backends: {sorted(allowed)}. "
+                "This restriction is set via register_code_node(allowed_backends=...) "
+                "and cannot be overridden per flow."
+            )
         if data.get("language") is None:
             data["language"] = "python"
         if data["language"] == "python":
