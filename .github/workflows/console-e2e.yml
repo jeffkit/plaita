@@ -52,6 +52,19 @@ jobs:
           docker buildx version
           docker ps
 
+      # webDist 在 .gitignore 里，干净 checkout 没有它——本地能过纯属开发机
+      # 有现成构建。CI 上先构建前端（pnpm，产物 frontend/dist → backend/webDist）
+      # 再预构建镜像，UI 镜像才有 SPA 可托管。
+      - name: Build console frontend
+        run: |
+          corepack enable
+          cd plaita-console/frontend
+          pnpm install --frozen-lockfile
+          pnpm build
+          cd ..
+          rm -rf backend/webDist
+          cp -R frontend/dist backend/webDist
+
       # argusai 的 build 从 mcp2cli daemon 里 spawn docker build 在 runner 上
       # 会秒挂（docker run 正常、buildx 异常，仅 CI 复现），故在普通步骤里
       # 预构建全部镜像——失败时本步直接打印 docker 真实报错；gate/chaos 用
