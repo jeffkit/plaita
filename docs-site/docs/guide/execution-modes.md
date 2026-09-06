@@ -64,6 +64,10 @@ for step in flow.debug(name="test"):
 !!! warning "Generator 模式同样执行流程级 timeout"
 
     流程的 `timeout` 字段（ISO 8601 时长，如 `"PT1S"`）在 Generator 模式下**同样生效**——你在步骤间检查/暂停消耗的时间计入预算，超时后抛 `FlowTimeoutError`（或节点级 `NodeTimeoutError`）。调试器场景请给流程留足 `timeout`，或依赖节点级超时。
+    !!! warning "超时精度下限"
+        节点/流程超时由调度与派发粒度共同决定——**毫秒级超时（如 1-10ms）不可靠**，
+        实际可能在超时触发前就完成派发，或晚若干毫秒才触发。压测显示 1ms 级
+        timeout 存在与派发耗时相当的固有抖动；请将最小超时设在 50ms 以上。
 
 ## Distributed 模式
 

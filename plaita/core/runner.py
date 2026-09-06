@@ -153,6 +153,21 @@ def _get_error_result(error_handler):
 # 复用池消除线程创建开销；带超时的节点仍走裸 daemon 线程——超时遗弃语义
 # 需要"线程不进 atexit 等待"，池做不到。
 _SYNC_NODE_POOL = ThreadPoolExecutor(thread_name_prefix="plaita-node")
+# 嵌套防护（与 parallel_executor 的池饿死修复同思路）：worker 线程内再提交
+# 同一池并阻塞等待（子流程/分支内的 sync 节点），任务数 >= max_workers 时
+# 全部 worker 互相等待——CI 2 核（pool=6）上宽分支流程 30 分钟挂死实测。
+# 已在池 worker 上的嵌套节点直接内联执行。
+_NODE_POOL_TLS = threading.local()
+
+
+def _node_pool_bound(fn):
+    def _wrapped(ctx):
+        _NODE_POOL_TLS.in_node_pool = True
+        try:
+            return fn(ctx)
+        finally:
+            _NODE_POOL_TLS.in_node_pool = False
+    return _wrapped
 
 
 class NodeRunner:
@@ -285,9 +300,13 @@ class NodeRunner:
 
         if timeout_ms is None:
             # 无超时：直接在共享池中执行并 await——不参与超时遗弃语义，
-            # 也就无需裸线程。并发安全性：池与 asyncio 默认执行器同规模
-            # （min(32, cpu+4)），多执行/多线程并发取任务亦安全。
-            return await loop.run_in_executor(_SYNC_NODE_POOL, node.run, exec_ctx)
+            # 也就无需裸线程。已在池 worker 上的嵌套调用内联执行（防池饿死，
+            # 见 _NODE_POOL_TLS 说明）。
+            if getattr(_NODE_POOL_TLS, "in_node_pool", False):
+                return node.run(exec_ctx)
+            return await loop.run_in_executor(
+                _SYNC_NODE_POOL, _node_pool_bound(node.run), exec_ctx,
+            )
 
         cancel_event = getattr(exec_ctx, "cancel_event", None)
         fut: asyncio.Future = loop.create_future()

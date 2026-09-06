@@ -201,7 +201,13 @@ class FlowWorker:
         # 加载执行状态
         state = self.execution_storage.load_execution_state(execution_id)
         if not state:
-            error_msg = f"找不到执行状态: {execution_id}"
+            # load 为 None 有两种可能：键不存在，或 context 损坏反序列化失败
+            # （storage 层吞成 None 并已打 error 日志）——报错要覆盖两种情况，
+            # 否则"记录明明在"的场景被误导排障（2026-09 升级演练 P2）。
+            error_msg = (
+                f"找不到执行状态（或状态损坏无法解析）: {execution_id}；"
+                "若 Redis 中确有该键，查看 storage 日志中的反序列化错误"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
         
@@ -321,6 +327,16 @@ class FlowWorker:
         """
 
         # 初始化状态
+        # 凭据可见性（升级演练 P2-1 + MIGRATION 轮换提醒）：expose_env 白名单
+        # 命中的变量会随 checkpoint 持久化到 Redis——每个执行只告警一次。
+        context_for_warn = result.get("context") or {}
+        env_snapshot = context_for_warn.get("$ENV") if isinstance(context_for_warn, dict) else None
+        if env_snapshot:
+            logger.warning(
+                "执行 %s 的 checkpoint 包含 $ENV 快照（%d 个变量，可能含密钥）。"
+                "这些值会在 Redis 中存活至 TTL/删除——请在升级/退役窗口轮换凭据。",
+                state.execution_id if state is not None else "?", len(env_snapshot),
+            )
         # id 以「被加载记录的 execution_id」为准（升级演练 P2-2）：老 checkpoint
         # 的 context 可能缺 $EXECUTION_ID，信任 result 会把终态写到
         # plaita:execution: 空键，原记录永久停留 suspended。

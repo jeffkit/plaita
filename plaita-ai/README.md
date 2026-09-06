@@ -8,6 +8,11 @@ Plaita 的 **AI 集成层**（第二个可安装包）：把 `@flow` 编译/执�
 
 ```bash
 # 在 plaita 仓库根目录
+
+> **发布策略**：plaita-ai 当前仅支持**源码安装**（`pip install -e ./plaita-ai`），
+> 尚未发布到 PyPI（包名注册与发布管线待定，publish.yml 不覆盖本目录）。
+> 跑测试需要 dev extra：`pip install -e "plaita-ai[dev]"`（含 pytest-asyncio；
+> 不装则 async 用例收集报错）。agent/ReAct 示例还需 `.[agent]`（langchain）。
 pip install -e ./plaita
 pip install -e "./plaita-ai"              # MCP + CLI + skill 资源
 pip install -e "./plaita-ai[agent]"       # + LangChain 1.x 内置 Agent（ReAct + FoT）
