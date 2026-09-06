@@ -12,17 +12,7 @@ import { symmetricLayout } from '../components/flow/symmetricLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
-import {
-  ArrowLeft,
-  Zap,
-  Code2,
-  Save,
-  Rocket,
-  Play,
-  ChevronRight,
-  Bot,
-  AlertTriangle,
-} from 'lucide-react'
+import { ArrowLeft, Zap, Code2, Save, Rocket, Play, ChevronRight, AlertTriangle } from 'lucide-react'
 import { Button, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui'
 import CopilotPanel from '../components/flow/CopilotPanel'
 
@@ -100,7 +90,6 @@ export default function FlowEditor() {
   const [showPublish, setShowPublish] = useState(false)
   const [publishDiff, setPublishDiff] = useState<VersionDiff | null>(null)
   // Copilot 面板默认展开，可随时收起（关闭后本会话不再自动弹出）
-  const [showCopilot, setShowCopilot] = useState(true)
 
   const setFlowContext = useFlowEditor((s) => s.setFlowContext)
   const setGraph = useFlowEditor((s) => s.setGraph)
@@ -457,15 +446,6 @@ export default function FlowEditor() {
             </button>
           ))}
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setShowCopilot((v) => !v)}
-          className={showCopilot ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
-        >
-          <Bot size={13} />
-          AI 助手
-        </Button>
         <Button
           variant="ghost"
           size="sm"
