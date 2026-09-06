@@ -11,6 +11,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plaita-ai:
+    name: plaita-ai (MCP/CLI/agents)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install plaita + plaita-ai
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install -e plaita-ai
+          # 真实 mcp 导入冒烟：历史上被 sys.modules stub 掩盖（mcp 2.x 即坏）
+          python -c "from mcp.server.fastmcp import FastMCP; print('FastMCP OK')"
+      - name: pytest plaita-ai
+        run: python -m pytest plaita-ai/tests -q
+
   gate:
     name: Regression gate
     runs-on: ubuntu-latest

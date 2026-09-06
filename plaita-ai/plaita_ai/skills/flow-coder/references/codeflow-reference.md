@@ -5,13 +5,13 @@
 ## 1. 函数骨架
 
 ```python
-@flow("<flow_id>", input_type="object", desc="<说明>")
+@flow("<flow_id>", desc="<说明>")
 def <name>(INPUT):
     # 仅支持：if/elif/else、for...in MAP/FILTER/FIND/LOOP/REDUCE、赋值、return
     return <expr>
 ```
 
-- `input_type`：`"object"`（dict，字段 `INPUT.x`）或 `"array"`（list）。需要精确类型时由调用方传 `flow_from_source(src, input_type=...)`。
+- **`input_type` 已废弃且被忽略**：`$INPUT` 恒为 `run()` 传入的 dict，无需也不能声明类型。传了该参数（含 `flow_from_source(src, input_type=...)` 形式）只会触发 DeprecationWarning。
 - `desc` 装饰器参数只支持字面量（字符串/数字/dict 字面量）。
 - **AI 动态生成一律走 `flow_from_source(src)`**，不要走 `@flow` 装饰器（动态函数无源文件，`inspect.getsource` 会失败）。
 
@@ -71,7 +71,7 @@ if not (INPUT.status == "blocked"):          # ✅
 ### if / elif / else
 
 ```python
-@flow("grade", input_type="object")
+@flow("grade")
 def grade(INPUT):
     if INPUT.score >= 90:
         return "A"
@@ -84,7 +84,7 @@ def grade(INPUT):
 ### 赋值 + return
 
 ```python
-@flow("greet", input_type="object")
+@flow("greet")
 def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)
@@ -97,7 +97,7 @@ def greet(INPUT):
 ### MAP
 
 ```python
-@flow("double_numbers", input_type="object")
+@flow("double_numbers")
 def double_numbers(INPUT):
     for x in MAP(INPUT.numbers, id="dbl"):
         return F.mul(x, 2)
@@ -108,7 +108,7 @@ def double_numbers(INPUT):
 ### FILTER（子流程返回 bool）
 
 ```python
-@flow("evens", input_type="object")
+@flow("evens")
 def evens(INPUT):
     for x in FILTER(INPUT.nums, id="flt"):
         if F.mod(x, 2) == 0:
@@ -120,7 +120,7 @@ def evens(INPUT):
 ### FIND（返回首个命中元素）
 
 ```python
-@flow("first_even", input_type="object")
+@flow("first_even")
 def first_even(INPUT):
     for x in FIND(INPUT.nums, id="fd"):
         if F.mod(x, 2) == 0:
@@ -132,7 +132,7 @@ def first_even(INPUT):
 ### REDUCE（累积值 `first`，当前元素 `second`）
 
 ```python
-@flow("sum_nums", input_type="object")
+@flow("sum_nums")
 def sum_nums(INPUT):
     for x in REDUCE(INPUT.nums, id="rdc", initial=0):
         return F.add(x.first, x.second)
@@ -144,24 +144,24 @@ def sum_nums(INPUT):
 ## 6. 子流程 @childflow + CHILD
 
 ```python
-@childflow(input_type="object")
+@childflow()
 def double_each(INPUT):
     return F.mul(INPUT.item, 2)
 
-@flow("double_via_child", input_type="object")
+@flow("double_via_child")
 def double_via_child(INPUT):
     r = CHILD(input={"item": INPUT.payload}, flow=double_each)
     return r
 # run(payload=21) -> 42
 ```
 
-- `CHILD` 的 `input` 要匹配子流程 `input_type`：`object` 传 dict，`array` 传 list。
+- `CHILD` 的 `input` 恒为 dict（`$INPUT` 已不支持数组形态）。
 - 运行期生成时，源码里可含**多个 `@childflow` + 一个 `@flow` 主函数**，`flow_from_source` 自动收集子流程注册表，主流程用 `flow=<name>` 引用。有多个候选主流程时用 `flow_from_source(src, flow_id="bar")` 指定。
 
 ## 7. HTTP + 错误处理
 
 ```python
-@flow("create_user", input_type="object", desc="创建用户")
+@flow("create_user", desc="创建用户")
 def create_user(INPUT):
     if INPUT.age >= 18:
         resp = HTTP.post(
@@ -183,15 +183,15 @@ def create_user(INPUT):
 `branches` 用 **dict 字面量**`{名: 子流程}` 或 **`(名, 子流程)` 元组列表**（不是 `[{name, flow, input}]`）。要等待结果汇合的分支名用关键字 **`join=`**（不是 `join_branches=`）。`mode` 可选 `"thread"`/`"process"`/`"coroutine"`/`"artificial"`，默认 `"thread"`。返回 dict `{分支名: result}`。
 
 ```python
-@childflow(input_type="object")
+@childflow()
 def sub_a(INPUT):
     return F.mul(INPUT.x, 2)
 
-@childflow(input_type="object")
+@childflow()
 def sub_b(INPUT):
     return F.add(INPUT.x, 10)
 
-@flow("fan_out", input_type="object")
+@flow("fan_out")
 def fan_out(INPUT):
     r = PARALLEL(
         branches={"a": sub_a, "b": sub_b},
@@ -276,7 +276,7 @@ flow_from_source(src).run(question="plaita 是什么")
 from plaita.dsl.codeflow import flow_from_source, compile_source
 
 src = '''
-@flow("greet", input_type="object", desc="打招呼")
+@flow("greet", desc="打招呼")
 def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)

@@ -12,7 +12,9 @@ authors = [
 ]
 dependencies = [
     "plaita>=0.5.0",
-    "mcp>=1.0",
+    # 上界必须 pin：mcp 2.x 把 FastMCP 改名为 MCPServer，`plaita-ai mcp`
+    # 在全新安装下直接 ImportError（2026-09 盲区评审 P0-1）。
+    "mcp>=1.0,<2",
 ]
 
 [project.optional-dependencies]

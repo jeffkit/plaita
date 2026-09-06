@@ -180,13 +180,19 @@ class Map(BaseCollectionNode):
     def execute(self, execution):
         collection = self._eval_collection(execution)
 
-        # 子执行体在主线程预先创建 (与历史并发路径行为一致), 避免 worker 线程
-        # 并发调 ``get_child_execution`` 触发 ``callback_manager.child()`` 的潜在
-        # 竞态。非并发路径也走同一路径, 代价是预先创建 N 个 child 对象 (可接受)。
-        triples = [
-            (execution.get_child_execution(), item, index)
-            for index, item in enumerate(collection)
-        ]
+        # 并发路径在主线程预先创建子执行体, 避免 worker 线程并发调
+        # ``get_child_execution`` 的潜在竞态; 串行路径改为逐元素懒创建——
+        # 10k 元素曾一次性预建 10k 个 FlowExecution（实测 RSS +71MB）。
+        if self.concurrent:
+            triples = [
+                (execution.get_child_execution(), item, index)
+                for index, item in enumerate(collection)
+            ]
+        else:
+            triples = (
+                (execution.get_child_execution(), item, index)
+                for index, item in enumerate(collection)
+            )
 
         def run_one(triple: tuple) -> Any:
             child, item, index = triple

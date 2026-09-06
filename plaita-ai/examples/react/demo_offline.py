@@ -23,7 +23,7 @@ def weather(city: str) -> str:
 
 
 FLOW = '''
-@flow("weather_flow", input_type="object")
+@flow("weather_flow")
 def weather_flow(INPUT):
     r = TOOL(action="weather", params={"city": INPUT.city})
     return r

@@ -333,6 +333,10 @@ class ExpressionParser:
         # substituting str(evaluated_value) for each match — identical to the
         # old ``re.sub`` behaviour. When no match is present the string is
         # returned unchanged.
+        # 快速预筛（2026-09 性能评审 P1）：不含模板标记的纯文本直接返回，
+        # 省掉 scanString 全串扫描——纯文本路径实测 43.5µs/次。
+        if "{%" not in value:
+            return value
         out: list = []
         last = 0
         matched = False

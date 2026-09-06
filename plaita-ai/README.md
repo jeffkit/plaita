@@ -7,7 +7,7 @@ Plaita 的 **AI 集成层**（第二个可安装包）：把 `@flow` 编译/执�
 ## 安装
 
 ```bash
-# 在 pyloki 仓库根目录
+# 在 plaita 仓库根目录
 pip install -e ./plaita
 pip install -e "./plaita-ai"              # MCP + CLI + skill 资源
 pip install -e "./plaita-ai[agent]"       # + LangChain 1.x 内置 Agent（ReAct + FoT）
@@ -190,4 +190,4 @@ pytest tests/ -q
 
 - [ ] agent-benchmark 增加 `--arm mcp` 对比  
 - [ ] FoT / ReAct：LLMNode / RetrieverNode 与 `examples/agent` 对齐  
-- [ ] 修 `@flow` PARALLEL+INPUT / REDUCE 运行时 bug  
+- [ ] 修 `@flow` PARALLEL+INPUT / REDUCE 运行时 bug（REDUCE 现象为 IndexError，由 NodeExecutionError 包裹抛出）  

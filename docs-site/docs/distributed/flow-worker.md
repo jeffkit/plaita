@@ -113,6 +113,21 @@ flowchart TD
 - [外延服务](services.md) —— 在流程外触发恢复
 - [API: plaita.server.flow_worker](../api/server.md)
 
+## checkpoint 成本警示（2026-09 性能实测）
+
+`$NODE` 保留**每个节点**的结果，且每步 checkpoint 对**全量上下文**重新 JSON
+序列化——落盘成本随步数 **二次方**增长，随 payload 大小线性放大：
+
+| payload（10 节点流程，每步落盘） | 单步 save 耗时 | Redis used_memory 峰值 |
+|---|---|---|
+| 1 MB | 6 → 35 ms（逐步递增） | 25 MB |
+| 10 MB | 66 → 306 ms | **223 MB** |
+
+节点执行本身仅 2-13 ms/步：大 payload 下落盘开销是节点执行的 17-24 倍。
+**缓解**：让大 payload 只在被消费时进入上下文（避免透传 1MB+ 的中间结果存进
+`$NODE`）；调大 `PERSIST_EVERY_N_STEPS`；长流程拆分为 child/子执行。
+增量式 checkpoint（每节点结果独立 key）在路线图上，当前版本请按上述方式规避。
+
 ## 停机与运维参数（2026-09）
 
 - **优雅停机**：SIGTERM/SIGINT 后 worker 在当前任务完成后退出。消费阻塞窗口

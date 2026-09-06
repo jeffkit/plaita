@@ -15,6 +15,7 @@ import time
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 import isodate
+from concurrent.futures import ThreadPoolExecutor
 
 from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
@@ -147,6 +148,13 @@ def _get_error_result(error_handler):
         return error_handler.default_value
     return None
 
+# 无超时同步节点的共享执行池（2026-09 性能评审 P1）：历史上每个 sync 节点
+# 无条件裸起一条 daemon 线程，thread start+join 占线性流程运行时间的 64%。
+# 复用池消除线程创建开销；带超时的节点仍走裸 daemon 线程——超时遗弃语义
+# 需要"线程不进 atexit 等待"，池做不到。
+_SYNC_NODE_POOL = ThreadPoolExecutor(thread_name_prefix="plaita-node")
+
+
 class NodeRunner:
     """Handles single-node execution with timeout, retry, and error handling."""
 
@@ -273,8 +281,15 @@ class NodeRunner:
         will not delay pytest/process teardown.
         """
         exec_ctx = self.node_execution or self.context
-        cancel_event = getattr(exec_ctx, "cancel_event", None)
         loop = asyncio.get_running_loop()
+
+        if timeout_ms is None:
+            # 无超时：直接在共享池中执行并 await——不参与超时遗弃语义，
+            # 也就无需裸线程。并发安全性：池与 asyncio 默认执行器同规模
+            # （min(32, cpu+4)），多执行/多线程并发取任务亦安全。
+            return await loop.run_in_executor(_SYNC_NODE_POOL, node.run, exec_ctx)
+
+        cancel_event = getattr(exec_ctx, "cancel_event", None)
         fut: asyncio.Future = loop.create_future()
 
         def _target() -> None:

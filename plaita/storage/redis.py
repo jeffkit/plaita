@@ -78,7 +78,7 @@ class RedisExecutionStorage(ExecutionStorage):
             self.client.set(key, serialized)
             return True
         except Exception as e:
-            logger.error("Failed to save execution state: %s", e)
+            logger.error("Failed to save execution state %s: %s", execution_id, e)
             return False
     
     def load_execution_state(self, execution_id: str) -> Optional[ExecutionState]:

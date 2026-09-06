@@ -193,7 +193,7 @@
 
 ## parallel
 
-多分支并行执行，`mode` 选择执行方式：`thread`（默认）/ `process`（`coroutine` 模式已于 0.4.0 下线）。`joinBranches` 列出的分支会汇聚结果（`{branchName: result}`），其余作为后台分支 fire-and-forget。`isConditional` 为真时按 `branches[].condition` 过滤要执行的分支。
+多分支并行执行，`mode` 选择执行方式：`thread`（默认）/ `process`（`coroutine` 模式已于 0.4.0 下线）。**`thread` 模式受 GIL 限制，只对 IO 型分支有加速**——纯 CPU 分支实测 32 workers 与 2 workers 同速，CPU 密集场景请用 `process`。`joinBranches` 列出的分支会汇聚结果（`{branchName: result}`），其余作为后台分支 fire-and-forget。`isConditional` 为真时按 `branches[].condition` 过滤要执行的分支。
 
 ```json
 {
