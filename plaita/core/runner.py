@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from typing import Any, Optional, Tuple, TYPE_CHECKING
@@ -152,7 +153,24 @@ def _get_error_result(error_handler):
 # 无条件裸起一条 daemon 线程，thread start+join 占线性流程运行时间的 64%。
 # 复用池消除线程创建开销；带超时的节点仍走裸 daemon 线程——超时遗弃语义
 # 需要"线程不进 atexit 等待"，池做不到。
-_SYNC_NODE_POOL = ThreadPoolExecutor(thread_name_prefix="plaita-node")
+_SYNC_NODE_POOL: Optional[ThreadPoolExecutor] = None
+_SYNC_NODE_POOL_PID: Optional[int] = None
+
+
+def _get_sync_node_pool() -> ThreadPoolExecutor:
+    """按进程惰性创建共享节点池。
+
+    ``Parallel(mode=process)`` 在 Linux 上 fork 子进程执行分支——fork 不继承
+    线程，模块级池在子进程里是"没有 worker 的空壳"，提交任务即永久挂死
+    （CI Linux 实测 30 分钟 hang；macOS spawn 重新 import 不受影响，故本地
+    不复现）。按 PID 检测并在 fork 后重建。
+    """
+    global _SYNC_NODE_POOL, _SYNC_NODE_POOL_PID
+    pid = os.getpid()
+    if _SYNC_NODE_POOL is None or _SYNC_NODE_POOL_PID != pid:
+        _SYNC_NODE_POOL = ThreadPoolExecutor(thread_name_prefix="plaita-node")
+        _SYNC_NODE_POOL_PID = pid
+    return _SYNC_NODE_POOL
 # 嵌套防护（与 parallel_executor 的池饿死修复同思路）：worker 线程内再提交
 # 同一池并阻塞等待（子流程/分支内的 sync 节点），任务数 >= max_workers 时
 # 全部 worker 互相等待——CI 2 核（pool=6）上宽分支流程 30 分钟挂死实测。
@@ -305,7 +323,7 @@ class NodeRunner:
             if getattr(_NODE_POOL_TLS, "in_node_pool", False):
                 return node.run(exec_ctx)
             return await loop.run_in_executor(
-                _SYNC_NODE_POOL, _node_pool_bound(node.run), exec_ctx,
+                _get_sync_node_pool(), _node_pool_bound(node.run), exec_ctx,
             )
 
         cancel_event = getattr(exec_ctx, "cancel_event", None)
