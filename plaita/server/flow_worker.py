@@ -321,7 +321,12 @@ class FlowWorker:
         """
 
         # 初始化状态
-        execution_id = result.get("execution_id")
+        # id 以「被加载记录的 execution_id」为准（升级演练 P2-2）：老 checkpoint
+        # 的 context 可能缺 $EXECUTION_ID，信任 result 会把终态写到
+        # plaita:execution: 空键，原记录永久停留 suspended。
+        execution_id = result.get("execution_id") or (
+            state.execution_id if state is not None else None
+        )
         context = result.get("context")
 
         if execution is None:

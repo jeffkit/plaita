@@ -51,6 +51,26 @@ from plaita.logger import logger
 
 _UNDEFINED: Callable[..., Any] = lambda *args, **kwargs: "undefined"  # noqa: E731
 
+# 可疑字面量特征（2026-09 LLM 作者模拟 P0-1）：Jinja 双花括号 / Python f-string /
+# await 调用 / 裸函数调用——这些字符串几乎从不是合法的 plaita 表达式意图
+_SUSPICIOUS_LITERAL = __import__("re").compile(
+    r"\{\{|\}\}|\bf['\"]|\bawait\b|[A-Za-z_]\w*\([^)]*\$")
+_warned_literals: "set[str]" = set()
+
+
+def _warn_suspicious_literal(value: str) -> None:
+    if value in _warned_literals:
+        return
+    if len(_warned_literals) > 512:
+        _warned_literals.clear()
+    _warned_literals.add(value)
+    logger.warning(
+        "expression %r looks like templating/Python code from another language and was "
+        "returned AS-IS (no evaluation happened). plaita expressions use $INPUT.x / "
+        "$NODE.id / $F.fn(...) and {%% ... %%} for interpolation — rewrite the string.",
+        value if len(value) < 120 else value[:117] + "...",
+    )
+
 _SPECIAL_ROOTS = ("INPUT", "NODE", "PARENT", "GLOBAL", "ENV")
 
 
@@ -249,7 +269,18 @@ class ExpressionParser:
         if root_key == f"{prefix}FLOW":
             root_key = f"{prefix}FLOW_ID"
         # Root lookup: KeyError preserved for missing keys (matches old engine)
-        obj = context[root_key]
+        try:
+            obj = context[root_key]
+        except KeyError:
+            # 保留 KeyError 类型（语义：流程逻辑错误），但给出可用根清单——
+            # 历史上裸 KeyError: '$node' 让 AI 作者无从自纠
+            # （2026-09 LLM 作者模拟 P1-2）。
+            raise KeyError(
+                f"{root_key!r} not found in expression context. "
+                f"Available roots (with {prefix!r} prefix): "
+                "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+            ) from None
+
         segments = tokens[1]  # ParseResults of "index:n" / "field:name"
         for seg in segments:
             kind, _, raw = seg.partition(":")
@@ -282,9 +313,19 @@ class ExpressionParser:
         logger.debug("parse_function: func_name=%s, args=%s", func_name, args)
         func = _lookup_function(registry, func_name)
         if func is None:
-            # 不静默：函数未注册时记一条 warning，让拼写错误 / 沙箱漏注册可被
-            # 日志捕捉。返回值仍是 "undefined" 以兼容 scoped registry 语义
-            # （scoped registry 故意对未暴露函数返回 "undefined"）。
+            if registry is None:
+                # 默认注册表未命中 = 调用方（或 AI 作者）拼写错误——返回
+                # 'undefined' 字符串会让错误值静默流入下游（LLM 作者模拟 P0-3）。
+                import difflib
+
+                available = sorted(get_default_expression_registry().names())
+                close = difflib.get_close_matches(func_name, available, n=3, cutoff=0.6)
+                hint = f" Did you mean {close!r}?" if close else ""
+                raise NameError(
+                    f"Unknown expression function {func_name!r} (default registry)."
+                    f"{hint} Available: {available}"
+                )
+            # scoped registry 故意对未暴露函数返回 "undefined"——保留契约
             logger.warning(
                 "expression function %r not registered (registry=%r); returning 'undefined'",
                 func_name, registry,
@@ -336,6 +377,12 @@ class ExpressionParser:
         # 快速预筛（2026-09 性能评审 P1）：不含模板标记的纯文本直接返回，
         # 省掉 scanString 全串扫描——纯文本路径实测 43.5µs/次。
         if "{%" not in value:
+            # 可疑字面量告警（2026-09 LLM 作者模拟 P0-1）：{{name}}/f''/
+            # await xxx()/fn(...) 是 LLM 从其他模板语言/Python 迁移来的
+            # 高频写法——历史上原样返回字面量且零告警，AI 会把字面量当
+            # 正确结果直接消费。同串只告警一次（LRU 去重）。
+            if _SUSPICIOUS_LITERAL.search(value):
+                _warn_suspicious_literal(value)
             return value
         out: list = []
         last = 0

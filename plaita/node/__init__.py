@@ -124,12 +124,19 @@ class NodeRegistry:
             raise RuntimeError(f"not specific node type: {node_dict}")
         node_cls = self._nodes.get(node_type)
         if not node_cls:
+            import difflib
+
+            available = sorted(self._nodes.keys())
+            close = difflib.get_close_matches(node_type, available, n=3, cutoff=0.6)
             hint = ""
             if node_type == "code":
                 hint = (
                     " CodeNode was moved out of the default registry in 0.4.0; "
                     "call register_code_node() at startup to opt in."
                 )
+            elif close:
+                hint = f" Did you mean {close!r}?"
+            hint += f" Available node types: {available}"
             raise RuntimeError(f"unRecognized node type: {node_type}.{hint}")
         content = node_dict.copy()
         del content["type"]

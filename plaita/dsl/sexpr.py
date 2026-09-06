@@ -471,6 +471,13 @@ def _c_assignment(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     pos = _take_id(pos, kw)
     if not pos:
         raise SyntaxError("assign 需要一个 output 表达式")
+    if len(pos) > 1:
+        # 静默丢弃多余位置参数曾造成"按 Lisp 直觉不加引号的函数调用"被
+        # 错编译成 output="$F.mul"（参数列表丢失），运行期得到错值。
+        raise SyntaxError(
+            f"assign 只接受一个 output 表达式，收到 {len(pos)} 个；"
+            '函数调用表达式需要加引号，如 "$F.mul($INPUT.x, 10)"'
+        )
     spec: Dict[str, Any] = {"type": "assignment", "output": _value(pos[0])}
     _common_fields(kw, spec, ctx)
     ot = _opt(kw, "output-type", "outputType")

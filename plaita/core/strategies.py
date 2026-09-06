@@ -224,6 +224,16 @@ class DistributedStrategy:
         if saved_context and resume_type is not ResumeType.CONTINUE:
             return await self._handle_resume(flow, context, runner, callback_manager, resume_type, resume_data)
 
+        if not saved_context and resume_type is not ResumeType.CONTINUE:
+            # checkpoint 丢失/未传时，resume_type='cancel' 等会被静默丢弃、
+            # 直接开跑全新流程——掩盖故障（R6 fuzz B2）。显式给出非 continue
+            # 的 resume 意图却没有可恢复状态，应当报错。
+            raise ResumeError(
+                f"resume_type={resume_type.value!r} requires a saved_context, "
+                "but none was provided; the execution cannot be resumed. To start "
+                "a fresh run, omit resume_type (or pass resume_type='continue')."
+            )
+
         if saved_context and resume_type is ResumeType.CONTINUE:
             # 防御: 挂起中的 EventNode 不允许用默认 ``continue`` 绕过——历史上
             # 这条路会跳过 pending 校验直接推进到 End, 流程"正常完成", 事件

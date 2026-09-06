@@ -79,6 +79,28 @@ class EventFilter:
             subscriptions = await self.subscription_storage.find_matching_subscriptions(event, state.context)
             
             if not subscriptions:
+                # 升级演练 P1-1：0.4.x 的订阅挂在**未解析表达式**的 type 索引下
+                # （如 `type:$INPUT.event_type`），升级后 EventFilter 按解析后的
+                # event_type 检索永远查不到——升级前挂起在 event 节点的执行，
+                # 事件驱动 resume 全部静默失效。无匹配时检查同 flow 的孤儿订阅
+                # 并大声告警。
+                try:
+                    flow_subs = await self.subscription_storage.list_subscriptions()
+                    orphans = [
+                        s for s in (flow_subs or [])
+                        if getattr(s, "flow_id", None) == state.flow_id
+                    ]
+                except Exception:  # noqa: BLE001 — 巡检失败不影响主流程
+                    orphans = []
+                if orphans:
+                    logger.warning(
+                        "执行 %s（flow %s）没有匹配本事件的订阅，但同 flow 下存在 %d 条"
+                        "孤儿订阅（类型: %s）。旧版本订阅可能挂在未解析的 $INPUT.* type "
+                        "索引下——事件驱动 resume 不会生效，请手动 resume_flow 或重新"
+                        "注册订阅。",
+                        execution_id, state.flow_id, len(orphans),
+                        sorted({s.event_type for s in orphans}),
+                    )
                 logger.debug("没有匹配的订阅，跳过处理: %s", event.event_id)
                 return
             

@@ -31,16 +31,22 @@ jobs:
         run: python -m pytest plaita-ai/tests -q
 
   gate:
-    name: Regression gate
+    name: Regression gate (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12/3.13 为 2026-09 版本矩阵评审补充：本机验证一直在 3.13、CI 只测
+        # 3.10，中间版本从未被任何环境覆盖
+        python-version: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install package + gate deps

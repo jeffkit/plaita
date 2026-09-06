@@ -30,6 +30,12 @@ class FlowIRValidationError(ValueError):
         super().__init__(f"{prefix}{message}")
 
 
+# 这些节点类型必须有 childFlow（reference 由调度器注入，除外）
+_CHILD_FLOW_REQUIRED = frozenset({
+    "child", "loop", "while", "map", "filter", "find", "reduce",
+})
+
+
 def validate_flow_ir(
     data: Dict[str, Any],
     *,
@@ -100,6 +106,16 @@ def _validate_nodes(nodes: List[Any], *, path: str) -> None:
         ntype = n.get("type")
         if ntype == "end":
             continue
+        # 子流程宿主节点必须有 childFlow（R5-2 差分评审 P1-2：filter 缺
+        # childFlow 在共享校验器里完全静默，各前端暴露时机/类型各异）。
+        # reference 除外——它由调度器按 flow_id 注入。
+        if ntype in _CHILD_FLOW_REQUIRED and not (
+            n.get("childFlow") or n.get("child_flow")
+        ):
+            raise FlowIRValidationError(
+                f"节点 {nid!r}（{ntype}）缺少 childFlow/child_flow",
+                path=path,
+            )
         _check_target(n.get("next"), nid, "next")
 
         if ntype == "if":

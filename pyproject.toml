@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "plaita"
 version = "0.5.0"
 description = "Official Python Runtime for Plaita -- Logic Compose Engine"
+readme = "README.MD"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [
     { name = "Jeff kit", email = "bbmyth@gmail.com" },
@@ -30,11 +32,14 @@ sqlalchemy = [
 server = [
     "fastapi>=0.68.0",
     "uvicorn>=0.15.0",
-    "python-multipart>=0.0.5",
-    "python-jose[cryptography]>=3.3.0",
-    "passlib[bcrypt]>=1.7.4",
+    # redis: plaita/server 下 8 个模块模块级 import redis——缺它则 server extra
+    # 不自足（2026-09 打包审计 P1-1）
+    "redis>=4.0.0",
     "SQLAlchemy>=1.4.0",
     "cachetools>=5.0.0",
+    # python-jose/passlib/python-multipart 已裁撤（2026-09 打包审计 P2-1）：
+    # plaita 源码从不 import（编排台才用），且 python-jose 传递引入的 ecdsa
+    # 有无修复版本的 CVSS 7.4 公告——它们属于 plaita-console 的依赖清单。
 ]
 code = ["PyExecJS", "RestrictedPython>=7.0"]
 http = ["requests", "aiohttp>=3.8.0"]
@@ -49,8 +54,14 @@ dev = [
     "redis>=4.0.0",
     "SQLAlchemy>=1.4.0",
     "aiosqlite>=0.19.0",
+    # greenlet: SQLAlchemy async 引擎的传递硬依赖（importorskip 探测主依赖
+    # 探不到它，干净环境 25F+15E 的元凶，2026-09 版本矩阵评审）
+    "greenlet",
     "RestrictedPython>=7.0",
     "cachetools>=5.0.0",
+    # http 集成测试与 client 单测依赖（原不在 dev，干净环境 9F）
+    "requests",
+    "aiohttp>=3.8.0",
 ]
 lint = [
     "mypy",
@@ -58,7 +69,7 @@ lint = [
     "black",
     "ruff>=0.6",
 ]
-all = ["plaita[redis,server,code,http,yaml,sqlalchemy]"]
+all = ["plaita[redis,server,code,http,yaml,sqlalchemy,credentials]"]
 
 [project.urls]
 Homepage = "https://jeffkit.github.io/plaita/"

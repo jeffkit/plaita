@@ -75,6 +75,23 @@
     该 flow 的版本（此前静默清空全部）。
 11. **`timeout` 字段非法格式**（如 `"100ms"`）抛 `ValueError` 并列出合法写法
     （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
+12. **表达式默认注册表未知函数 → `NameError`**（带 did-you-mean 与可用清单）：
+    `$F.JSON_DUMPS(...)` 这类拼写错误不再返回 `'undefined'` 字符串流入下游。
+    scoped 自定义注册表保持 `'undefined'` 契约不变。
+13. **可疑字面量告警**：表达式位置出现 `{{name}}`、f-string、`await ...`、
+    裸函数调用等"其他语言模板/代码习惯"的字符串，现在打 warning（原样返回
+    不变，历史上零告警）。
+14. **JSON 路径结构检查告警**：`Flow.from_string` 现在会跑 ir_validate 的
+    结构检查（id 重复 / next 悬空 / if 缺分支目标 / switch 缺 default /
+    子流程节点缺 childFlow），命中即 warning——历史上这些只在
+    Builder/codeflow 路径生效，JSON 路径重复 id 静默 last-wins。
+15. **`$FLOW` 别名 / 表达式 KeyError 带可用根清单 / YAML fallback 告警**：
+    `$FLOW` 等价 `$FLOW_ID`；未知根的 KeyError 列出全部可用根；JSON 解析
+    失败但 YAML fallback 成功时打 warning（YAML 会把裸 `no/on` 篡改成
+    `False/True`）。
+
+
+    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
 
 
 ### Storage：`db` 执行/流程存储从公开路径下架
@@ -174,6 +191,24 @@ FlowWorker / EventFilter CLI 的 `--event-bus-type` / `--subscription-storage-ty
 - 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 1）
 - 订阅匹配为 event_type **全等**；fnmatch 仅 handler 路径
 - 用户文档入口：`docs-site/docs/distributed/flow-worker.md`「可靠性边界」
+
+### 升级时存量状态处理（Redis / SQLite 里已有的东西怎么办）
+
+0.4.x → 0.5.x 的执行状态 JSON schema 逐键兼容（已实测：0.4.0 挂起 → 0.5.x
+手动 resume 可完成；回滚方向数据层亦可读）。断层在**键的语义与通道**：
+
+1. **升级前 drain 队列**：队列键 `plaita:flow:queue` 从 0.4.x 的 List 换成了
+   Stream（同名不同形）。不 drain 则新 worker 启动即 `WRONGTYPE`。用
+   `scripts/drain_list_queue_to_stream.py` 迁移积压。
+2. **回滚（0.5.x → 0.4.x）前必须排干 Stream**：0.4.x worker 用 BLPOP 消费
+   List，对 Stream 同样 WRONGTYPE。手动 `XACK`+`DEL` 或让新 worker 清空后再回滚。
+3. **存量挂起执行的事件驱动 resume 会静默失效**：0.4.x 的订阅 type 索引挂的是
+   未解析表达式（`plaita:subscription:type:$INPUT.event_type`），0.5.x 的
+   EventFilter 按解析后的类型检索查不到。手动 `resume_flow` 兜底可用；0.5.x 起
+   EventFilter 对同 flow 孤儿订阅会打 warning 提示。
+4. **凭据轮换提醒**：分布式 checkpoint 的 context 含**全量 `$ENV` 快照**
+   （两版皆然），Redis 里的旧 state 携带密钥——升级窗口应轮换凭据。
+
 
 ---
 

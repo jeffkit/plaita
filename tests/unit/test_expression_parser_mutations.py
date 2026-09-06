@@ -539,9 +539,10 @@ class TestEvalVariable(TestCase):
 
         _clear_parser_cache()
         p2 = _fresh()
-        # 不传 registry → 使用 default registry，xyzzy_fn 不存在 → "undefined"
-        result_no_reg = p2.evaluate("$INPUT.func_result", ctx)
-        self.assertEqual(result_no_reg, "undefined")
+        # 不传 registry → 使用 default registry，xyzzy_fn 不存在 →
+        # NameError（P0-3 新契约；'undefined' 仅属于 scoped registry）
+        with self.assertRaises(NameError):
+            p2.evaluate("$INPUT.func_result", ctx)
 
 
 # ===========================================================================
@@ -570,18 +571,24 @@ class TestEvalFunctionCall(TestCase):
         self.assertEqual(p.evaluate("$F.my_func(10)", {}, reg), 11)
 
     def test_unknown_function_returns_undefined(self):
-        """未注册函数返回 'undefined'（不抛出异常）。"""
+        """scoped registry 下未注册函数返回 'undefined'（不抛出异常）；
+        默认注册表下则抛 NameError（LLM 作者模拟 P0-3 新契约）。"""
+        from plaita.core.expression import ExpressionRegistry
         p = _fresh()
-        self.assertEqual(p.evaluate("$F.nonexistent(1)", {}), "undefined")
+        scoped = ExpressionRegistry()
+        self.assertEqual(p.evaluate("$F.nonexistent(1)", {}, registry=scoped), "undefined")
+        with self.assertRaises(NameError):
+            p.evaluate("$F.nonexistent(1)", {})
 
     def test_unregistered_function_logs_warning_with_func_name(self):
-        """_eval_function_call__mutmut_29: func_name→None — warning 日志必须含函数名。
+        """scoped registry 未命中 → warning 日志必须含函数名与 registry。
 
-        mutmut_30: registry→None — warning 中 registry 参数必须正确记录。
-        注意：logger 使用 getLogger('plaita')，需用 'plaita' 捕获日志。"""
+        默认注册表未命中现在直接 NameError（不再有 warning 路径）。"""
+        from plaita.core.expression import ExpressionRegistry
         p = _fresh()
+        scoped = ExpressionRegistry()
         with self.assertLogs("plaita", level=logging.WARNING) as cm:
-            result = p.evaluate("$F.definitely_not_in_registry_abc(42)", {})
+            result = p.evaluate("$F.definitely_not_in_registry_abc(42)", {}, registry=scoped)
         self.assertEqual(result, "undefined")
         # warning 必须包含实际函数名（不能是 None）
         self.assertTrue(
@@ -605,10 +612,11 @@ class TestEvalFunctionCall(TestCase):
         reg = _registry(xyzzy=lambda: "xyzzy!")
         p = _fresh()
         self.assertEqual(p.evaluate("$F.xyzzy()", {}, reg), "xyzzy!")
-        # 不传 registry 时，相同函数名 → undefined
+        # 不传 registry 时，默认注册表没有 xyzzy → NameError（P0-3 新契约）
         _clear_parser_cache()
         p2 = _fresh()
-        self.assertEqual(p2.evaluate("$F.xyzzy()", {}), "undefined")
+        with self.assertRaises(NameError):
+            p2.evaluate("$F.xyzzy()", {})
 
 
 # ===========================================================================

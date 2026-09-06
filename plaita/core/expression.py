@@ -128,6 +128,10 @@ class ExpressionRegistry:
         desc = self._functions.get(name)
         return desc.func if desc else None
 
+    def names(self) -> list:
+        """已注册的函数名清单（供报错提示/补全）。"""
+        return list(self._functions.keys())
+
     def by_category(self, category: FunctionCategory) -> List[FunctionDescriptor]:
         """Return all functions in *category*."""
         return [d for d in self._functions.values() if d.category == category]

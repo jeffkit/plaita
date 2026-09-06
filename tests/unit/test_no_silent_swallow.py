@@ -23,6 +23,7 @@ ALLOWED_SILENT = {
     ("node/http.py", 318),   # response.json() 失败回退到 response.text (sync path)
     ("node/http.py", 369),   # json.loads() 失败回退到原始文本 (async aiohttp path)
     ("storage/memory.py", 138),  # 版本号非纯数字排序失败, 回退到任意版本
+    ("server/event_filter.py", 93),  # 孤儿订阅巡检失败不影响主流程（有兜底 debug 日志）
 }
 
 

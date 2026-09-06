@@ -53,12 +53,38 @@ class Condition(BaseModel):
                 return left is not right
             return False
 
-        return condition_matcher[self.operator](left, right)
+        try:
+            matcher = condition_matcher[self.operator]
+        except KeyError:
+            # 非法 operator 曾裸 KeyError: 'bogus-op'，不列合法算子（R6 fuzz B1）
+            import difflib
+
+            close = difflib.get_close_matches(
+                self.operator, list(condition_matcher), n=2, cutoff=0.6
+            )
+            hint = f" Did you mean {close!r}?" if close else ""
+            raise ValueError(
+                f"Unknown condition operator {self.operator!r}.{hint} "
+                f"Valid operators: {sorted(condition_matcher)}"
+            ) from None
+
+        return matcher(left, right)
 
 
 class ConditionGroup(BaseModel):
     relation: str
     conditions: List[Union[Condition, "ConditionGroup"]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_relation(cls, values):
+        # "xor" 等非法 relation 曾静默降级为 any——分支语义静默改变
+        # （R6 fuzz B4）。只接受 and/or。
+        if isinstance(values, dict) and values.get("relation") not in (LOGIC_TYPE_AND, LOGIC_TYPE_OR):
+            raise ValueError(
+                f"condition relation must be 'and' or 'or', got {values.get('relation')!r}"
+            )
+        return values
 
     def match(self, context, prefix=None):
         if not self.conditions:
@@ -288,6 +314,18 @@ class SwitchLegacy(Switch):
         cases = values.get("cases", [])
         default = values.get("default", "default")
 
+        for i, case in enumerate(cases):
+            # 缺 id 曾直接裸 KeyError: 'id'，无任何上下文（R5 差分评审 P1-5）
+            if not isinstance(case, dict) or "id" not in case:
+                raise ValueError(
+                    f"switch-case node {values.get('id', '?')!r}: cases[{i}] 缺少必填的 "
+                    f"'id' 字段（得到 {case!r}）。每个 case 需要 id/value，可选 name。"
+                )
+            if "value" not in case:
+                raise ValueError(
+                    f"switch-case node {values.get('id', '?')!r}: cases[{i}] ({case.get('id')!r}) "
+                    "缺少必填的 'value' 字段。"
+                )
         branches = [
             Branch(
                 name=case["id"],

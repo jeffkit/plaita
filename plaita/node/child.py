@@ -39,6 +39,10 @@ class InlineFlow(FlowNode):
     node_type: ClassVar[str] = "child"
     node_name: ClassVar[str] = "内联子逻辑"
 
+    # setup_child_flow 消费的 camelCase 键（child_flow 字段无 alias）——
+    # 不登记会误报 unknown-key warning，诱导 AI 作者"修复"正确的流程
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"childFlow"})
+
     def execute(self, execution):
         if self.child_flow.input_property:
             assert match(self.child_flow.input_property, self.input), "input not match required"
@@ -82,7 +86,11 @@ class ReferenceFlow(FlowNode):
         return values
 
     def execute(self, execution):
-        assert self.child_flow is not None, "child_flow for reference flow node is required"
+        if self.child_flow is None:
+            raise ValueError(
+                f"reference 节点 {self.id!r} 缺少 child_flow（调度器尚未注入引用的子流程）。"
+                "请确认 flow_id/flow_version 指向存在的流程定义。"
+            )
         assert match(self.child_flow.input_property, self.input), "input not match required"
         child_execution = execution.get_child_execution()
         lazy = execution.mode == ExecutionMode.GENERATOR
