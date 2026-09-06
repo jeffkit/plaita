@@ -152,6 +152,10 @@ print("  status=%s totals=%s" % (data.get("status"), t))
 for s in data.get("suites", []):
     print("  suite %s (%s): passed=%s failed=%s skipped=%s" % (
         s.get("id"), s.get("name", ""), s.get("passed"), s.get("failed"), s.get("skipped")))
+    for c in s.get("cases", []):
+        if c.get("status") == "failed":
+            f = c.get("failure") or {}
+            print("    FAIL %s: %s" % (c.get("name"), str(f.get("error"))[:300]))
 ' 2>&1 || true
 
 if echo "$RUN_OUT" | python3 -c '

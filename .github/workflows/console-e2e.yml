@@ -41,8 +41,10 @@ jobs:
         run: |
           uv tool install mcp2cli
           npm i -g argusai-mcp playwright
-          # playwright 是 argusai-core 的可选 peer 依赖，浏览器二进制需单独装
-          npx -y playwright install chromium
+          # playwright 是 argusai-core 的可选 peer 依赖，浏览器二进制需单独装；
+          # --with-deps 一并装 chromium 的系统库（runner 缺库时页面白屏、
+          # waitForSelector 超时）
+          npx -y playwright install --with-deps chromium
 
       - name: Docker sanity
         run: |
