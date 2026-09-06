@@ -7,8 +7,9 @@ sequential: true
 #   - delay_service 闭环：delay 节点挂起 → 服务任务被消费 → 事件唤醒续跑至完成
 #     （这是「挂起必须有人接」这条链的唯一自动化回归）
 # cron 自动触发用 "* * * * *"，最坏等 60s，故本 suite 放最后。
-# approval_service 随容器运行（审批实例生成），但其消费侧断言依赖服务内部
-# 状态暂无对外只读接口，事件唤醒部分已由 engine suite 的 resume 用例覆盖。
+# approval_service 随容器运行供拓扑/实例可见；其审批实例存进程内存
+# （pending_approvals dict），消费侧无外部可观测状态，E2E 不直接断言——
+# 审批的事件唤醒链已由 engine suite 覆盖（console resume 路径 + 事件发布路径）。
 
 cases:
   # === 准备：两个已发布流程 ===

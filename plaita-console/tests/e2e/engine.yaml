@@ -201,6 +201,79 @@ cases:
       body:
         status: "completed"
 
+  # === 事件驱动恢复：console 发布事件 → event_filter 匹配订阅 → 回投恢复任务
+  # （回归 phase2.8 断点⑤：事件键位/correlation_id 关联链；与上面 console
+  # resume 路径互补，两条恢复通道都要有回归）
+  - name: "再次启动审批流程（事件路径用）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-engine-approval"
+        version: "1.0.0"
+        params: {}
+    expect:
+      status: 200
+      body:
+        status: "queued"
+
+  - name: "第二个审批执行出现（轮询，列表按开始时间倒序取最新）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-engine-approval
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 2 }
+    save:
+      event_exec_id: "executions.0.execution_id"
+
+  - name: "审批节点再次挂起（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.event_exec_id}}"
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "suspended"
+
+  - name: "发布审批决策事件（correlation_id=执行 ID，走 event_filter 链）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/events/publish
+      headers:
+        Content-Type: application/json
+      body:
+        event_type: "approval_decision"
+        data:
+          decision: "approved"
+          approver: "e2e_user"
+        correlation_id: "{{runtime.event_exec_id}}"
+    expect:
+      status: 200
+      body:
+        success: true
+
+  - name: "事件驱动续跑至完成（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.event_exec_id}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "completed"
+
   # === 服务注册与心跳（回归断点⑥）===
   - name: "worker 服务注册与心跳可见"
     request:
