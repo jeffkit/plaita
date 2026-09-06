@@ -98,11 +98,14 @@ for _i in $(seq 1 30); do
 done
 echo "[chaos] Redis 已重连，验证恢复消费..."
 
-# ---- 断言 2：恢复后全链路可跑（worker 恢复消费，不只是活着）-------------------
+# ---- 断言 2：恢复后全链路可跑（不只 worker 活着，整条事件链都要重连成功）-----
+# 用 delay 流程而非 start→end：执行要经 worker 消费 → delay_service 消费任务
+# → 事件发布 → event_filter 匹配订阅 → resume 回投 → worker 续跑。瞬断后任何
+# 一环没恢复（重订阅失败、连接池坏死）都会卡在 suspended，60s 轮询必超时。
 curl -s -X POST "$API/api/flows" -H 'Content-Type: application/json' \
   -d '{"flow_id":"e2e-chaos-flow","author":"chaos"}' >/dev/null
 curl -s -X PUT "$API/api/flows/e2e-chaos-flow/versions/1.0.0" -H 'Content-Type: application/json' \
-  -d '{"definition":"{\"id\":\"e2e-chaos-flow\",\"name\":\"chaos\",\"nodes\":[{\"id\":\"start\",\"type\":\"start\",\"next\":\"end\"},{\"id\":\"end\",\"type\":\"end\",\"output\":\"$INPUT.value\",\"result_type\":\"success\"}]}","created_by":"chaos"}' >/dev/null
+  -d '{"definition":"{\"id\":\"e2e-chaos-flow\",\"name\":\"chaos\",\"nodes\":[{\"id\":\"start\",\"type\":\"start\",\"next\":\"delay\"},{\"id\":\"delay\",\"type\":\"delay\",\"delay_seconds\":2,\"event_type\":\"delay_trigger\",\"next\":\"end\"},{\"id\":\"end\",\"type\":\"end\",\"result_type\":\"success\"}]}","created_by":"chaos"}' >/dev/null
 curl -s -X POST "$API/api/flows/e2e-chaos-flow/publish" -H 'Content-Type: application/json' -d '{"version":"1.0.0"}' >/dev/null
 curl -s -X POST "$API/api/executions" -H 'Content-Type: application/json' \
   -d '{"flow_id":"e2e-chaos-flow","version":"1.0.0","params":{"value":1}}' >/dev/null
