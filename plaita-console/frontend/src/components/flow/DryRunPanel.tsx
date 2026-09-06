@@ -134,7 +134,7 @@ export default function DryRunPanel({ flowJson, onClose, nodesByType, onErrorNod
 
       {Object.keys(pins).length > 0 && (
         <div className="mb-3 p-2 rounded bg-plaita-600/10 border border-plaita-600/40">
-          <div className="text-xs text-plaita-600 dark:text-plaita-600 dark:text-plaita-300 mb-1">
+          <div className="text-xs text-plaita-600 dark:text-plaita-300 mb-1">
             已固定 {Object.keys(pins).length} 个节点输出（试跑时跳过真实执行）
           </div>
           <div className="flex flex-wrap gap-1">
@@ -220,7 +220,7 @@ export default function DryRunPanel({ flowJson, onClose, nodesByType, onErrorNod
                     <div className="mt-1 text-dark-400">in: <span className="text-dark-200">{short(n.input)}</span></div>
                   )}
                   {n.output !== undefined && n.output !== null && (
-                    <div className="mt-0.5 text-dark-400">out: <span className="text-green-300">{short(n.output)}</span></div>
+                    <div className="mt-0.5 text-dark-400">out: <span className="text-emerald-700 dark:text-green-300">{short(n.output)}</span></div>
                   )}
                 </>
               )}
@@ -250,7 +250,7 @@ function NodeIOTree({
   if (value === undefined || value === null) return null
   const text = JSON.stringify(value, null, 2)
   // 亮色主题下 green-300 过淡不可读：dark 用亮绿、light 用深绿
-  const toneCls = tone === 'green' ? 'text-green-700 dark:text-green-300' : 'text-dark-200'
+  const toneCls = tone === 'green' ? 'text-emerald-700 dark:text-green-300' : 'text-dark-200'
   return (
     <div>
       <button className="text-dark-400 flex items-center gap-0.5" onClick={() => setOpen((v) => !v)}>
