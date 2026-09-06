@@ -587,3 +587,62 @@ class TestP2Polish(unittest.TestCase):
         from plaita.event.exceptions import EventTimeoutError
         err = EventTimeoutError("a.b", 1.0)
         self.assertIn("不回放", str(err))
+
+
+class TestBgStateBounded(unittest.TestCase):
+    """并行分支登记表 _BG_STATE 必须有界（长时进程泄漏防护）。"""
+
+    def test_bg_state_evicts_oldest_beyond_capacity(self):
+        import plaita.node.concurrent as conc
+
+        executions = []
+        original_max = conc._BG_STATE_MAX
+        try:
+            conc._BG_STATE_MAX = 8
+            conc._BG_STATE.clear()
+            for i in range(32):
+                ex = MagicMock()
+                ex.execution_id = f"exec-{i}"
+                executions.append(ex)
+                conc._get_bg_state(ex)
+            self.assertLessEqual(len(conc._BG_STATE), 8)
+            # LRU：最新的在，最老的被淘汰
+            self.assertIn("exec-31", conc._BG_STATE)
+            self.assertNotIn("exec-0", conc._BG_STATE)
+        finally:
+            conc._BG_STATE_MAX = original_max
+            conc._BG_STATE.clear()
+
+    def test_done_future_removed_from_state(self):
+        """完成的 future 从登记表摘除，不再钉住分支结果。"""
+        import concurrent.futures as cf
+
+        import plaita.node.concurrent as conc
+
+        conc._BG_STATE.clear()
+        ex = MagicMock()
+        ex.execution_id = "exec-done-test"
+        state = conc._get_bg_state(ex)
+        pool = cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            node = MagicMock()
+            node.id = "p"
+            node.match_condition_branches.return_value = []
+            p_node = conc.Parallel.model_validate({
+                "id": "p", "branches": [], "joinBranches": [],
+            })
+            fut = pool.submit(lambda: {"payload": "x" * 100})
+            state["futures"].append(fut)
+            errors = state["errors"]
+            cb = p_node._make_background_done_callback(
+                MagicMock(name="b0"), errors, state,
+            )
+            fut.add_done_callback(cb)
+            fut.result()
+            cf.wait([fut])
+            # done_callback 已把 future 摘除
+            self.assertEqual(state["futures"], [])
+            self.assertEqual(errors, [])
+        finally:
+            pool.shutdown(wait=False)
+            conc._BG_STATE.clear()

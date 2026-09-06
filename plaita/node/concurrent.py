@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+from collections import OrderedDict
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field, model_validator
@@ -43,7 +45,14 @@ import threading as _threading
 
 # RLock: get_background_errors 在持锁状态下会再调 _get_bg_state, 需可重入。
 _BG_LOCK = _threading.RLock()
-_BG_STATE: Dict[str, Dict[str, list]] = {}
+# 模块级登记表按 execution_id 保留后台分支状态。它没有与执行生命周期绑定的
+# 清理点（执行完成无回调走到这里），历史上只增不减——长时进程（console/
+# FlowWorker）里每个带并行节点的执行都泄漏一条记录，且 list 里留存的
+# completed future 会把整个分支结果钉在内存里。现在两层防护：
+# 1) OrderedDict 容量上限（环境变量 PLAITA_BG_STATE_MAX，默认 256），LRU 淘汰；
+# 2) future 完成即从列表摘除（done_callback），不再钉住结果对象。
+_BG_STATE: "OrderedDict[str, Dict[str, list]]" = OrderedDict()
+_BG_STATE_MAX = int(os.environ.get("PLAITA_BG_STATE_MAX", "256"))
 
 
 def _get_bg_state(execution) -> Dict[str, list]:
@@ -51,8 +60,12 @@ def _get_bg_state(execution) -> Dict[str, list]:
     with _BG_LOCK:
         st = _BG_STATE.get(eid)
         if st is None:
-            st = {"futures": [], "errors": []}
+            st = {"futures": [], "errors": [], "done": 0}
             _BG_STATE[eid] = st
+            while len(_BG_STATE) > _BG_STATE_MAX:
+                _BG_STATE.popitem(last=False)
+        else:
+            _BG_STATE.move_to_end(eid)
         return st
 
 
@@ -239,13 +252,23 @@ class Parallel(Node):
             fut = executor.submit(self.exec_branch, branch, execution)
             state["futures"].append(fut)
             fut.add_done_callback(
-                self._make_background_done_callback(branch, errors)
+                self._make_background_done_callback(branch, errors, state)
             )
 
     @staticmethod
-    def _make_background_done_callback(branch, errors):
-        """构造 future done_callback: 失败时把异常追加到共享 errors 列表。"""
+    def _make_background_done_callback(branch, errors, state):
+        """构造 future done_callback: 失败时把异常追加到共享 errors 列表。
+
+        完成的 future 一律从 ``state["futures"]`` 摘除——future 持有
+        result/exception 引用，留在登记表里会把整个分支产出钉在内存。
+        """
         def _on_done(fut):
+            with _BG_LOCK:
+                try:
+                    state["futures"].remove(fut)
+                except ValueError:
+                    pass
+                state["done"] = state.get("done", 0) + 1
             try:
                 exc = fut.exception()
             except Exception as e:  # cancelled / executor shutdown
@@ -268,11 +291,19 @@ class Parallel(Node):
         fire-and-forget; 此接口供测试与故障排查时确认后台分支是否已落地。
         """
         import concurrent.futures as _cf
-        futures = _get_bg_state(execution)["futures"]
-        if not futures:
-            return {"done": 0, "not_done": 0}
-        done, not_done = _cf.wait(list(futures), timeout=timeout)
-        return {"done": len(done), "not_done": len(not_done)}
+        state = _get_bg_state(execution)
+        futures = state["futures"]
+        if futures:
+            _cf.wait(list(futures), timeout=timeout)
+        # 完成的 future 由 done_callback 摘除（避免 future 钉住分支结果），
+        # 摘除后的数量由 state["done"] 计数器给出；仍留在列表里的已完成
+        # future（手工注册/回调竞态窗口）持锁扫描计数，与回调互斥不重不漏。
+        with _BG_LOCK:
+            listed_done = sum(1 for f in futures if f.done())
+            return {
+                "done": state.get("done", 0) + listed_done,
+                "not_done": len(futures) - listed_done,
+            }
 
     def get_background_errors(self, execution) -> list:
         """读取本执行实例的后台分支失败记录 (``[{branch, error}, ...]`` 的拷贝)。
