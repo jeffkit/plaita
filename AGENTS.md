@@ -49,6 +49,7 @@ plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distri
 pip install -e ".[dev,lint,all]"          # 与 CI 对齐的 extras
 bash scripts/ci-gate.sh                   # 回归门禁（测+覆盖+分层+SC-003）
 bash plaita-console/scripts/e2e-run.sh    # console 全系统 E2E（argusai；需 Docker + mcp2cli + npm i -g argusai-mcp）
+bash plaita-console/scripts/e2e-gate.sh   # 同上，门禁形态：前置硬检查 + 残留自清理 + 退出码红绿（--quick 冒烟子集）
 make coverage                             # 单元覆盖率 gate
 make mutation && make mutation-recheck    # 单模块变异（先收窄 only_mutate）
 mkdocs build -f docs-site/mkdocs.yml --strict   # 改文档后

@@ -27,6 +27,7 @@ NO_BUILD=0
 for _a in "$@"; do
   case "$_a" in
     --no-build) NO_BUILD=1 ;;
+    --*) ;;  # 未知 flag 忽略（e2e-gate 会透传自己的选项）
     *) SUITE="$_a" ;;
   esac
 done
