@@ -37,6 +37,19 @@ class TestRedisStreamTaskQueue(unittest.TestCase):
         again = q_cons.read(block_ms=50)
         self.assertIsNone(again)
 
+    def test_read_tolerates_connection_error(self):
+        """redis 瞬断（DNS/连接失败）不炸穿主循环：退避后返回 None 继续轮询。
+
+        2026-09 的空轮询修复只容忍了 BLOCK 到期的 TimeoutError；ConnectionError
+        仍会炸穿 run() 主循环致 worker 退出（e2e-chaos-redis.sh 混沌实测）。
+        """
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        q = RedisStreamTaskQueue(self.redis, self.stream, group_name=self.group, consumer_name="c1")
+        with patch.object(self.redis, "xreadgroup", side_effect=RedisConnectionError("boom")), \
+             patch("plaita.server.task_queue.RECONNECT_BACKOFF_SECONDS", 0):
+            self.assertIsNone(q.read(block_ms=100))
+
     def test_unacked_message_reclaimed_by_other_consumer(self):
         q1 = RedisStreamTaskQueue(
             self.redis,

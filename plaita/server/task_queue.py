@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
 
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 logger = logging.getLogger("plaita.server.task_queue")
@@ -16,6 +17,9 @@ PAYLOAD_FIELD = "payload"
 DEFAULT_CLAIM_MIN_IDLE_MS = 60_000
 DEFAULT_MAX_DELIVERIES = 5
 DEFAULT_DLQ_SUFFIX = ":dlq"
+# redis 瞬断（DNS 解析失败/连接拒绝）后的重试退避：退避完返回 None 让主循环
+# 继续轮询，Redis 恢复后下一次 read 自动重连恢复消费。模块常量便于测试归零。
+RECONNECT_BACKOFF_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,17 @@ class RedisStreamTaskQueue:
         Messages that already exceeded ``max_deliveries`` are moved to the DLQ
         and acked (not returned).
         """
+        try:
+            return self._read_once(block_ms)
+        except RedisConnectionError:
+            # 瞬断（DNS 解析失败/连接拒绝）不得炸穿 run() 主循环——2026-09 的
+            # 修复只容忍了 BLOCK 到期的 TimeoutError，漏了这一支：容器网络抖动
+            # /Redis 重启窗口内 worker 直接退出（e2e-chaos-redis.sh 实测复现）。
+            # 退避后返回 None 继续轮询，Redis 恢复后自动重连恢复消费。
+            time.sleep(RECONNECT_BACKOFF_SECONDS)
+            return None
+
+    def _read_once(self, block_ms: int) -> Optional[StreamTask]:
         self.ensure_group()
         # Drain any over-delivered pending into DLQ before serving work.
         while True:
