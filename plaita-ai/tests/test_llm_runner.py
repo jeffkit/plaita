@@ -12,6 +12,11 @@ _ROOT = _HERE.parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import pytest  # noqa: E402
+
+pytest.importorskip(
+    "langchain_core", reason="langchain extra not installed: pip install 'plaita-ai[agent]'"
+)  # noqa: E402
 from tests.llm.harness import select_tasks  # noqa: E402
 from tests.llm.runner import _envelope, _summary  # noqa: E402
 

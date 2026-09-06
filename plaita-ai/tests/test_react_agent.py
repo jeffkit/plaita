@@ -3,6 +3,7 @@
 import json
 
 import pytest
+pytest.importorskip("langchain", reason="langchain extra not installed: pip install 'plaita-ai[agent]'")
 from langchain.tools import tool
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
