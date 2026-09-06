@@ -17,6 +17,22 @@ cases:
       action: goto
       url: http://localhost:18081/
 
+  # CI 排查用的截图证据：argusai-mcp 进程侧写盘，workflow 失败时上传 artifact
+  - name: "goto 后立即截图"
+    browser:
+      action: screenshot
+      path: e2e-artifacts/ui-1-after-goto.png
+
+  - name: "等待网络空闲"
+    browser:
+      action: waitForLoadState
+      state: networkidle
+
+  - name: "网络空闲后截图"
+    browser:
+      action: screenshot
+      path: e2e-artifacts/ui-2-networkidle.png
+
   - name: "未登录渲染登录页（等待式）"
     browser:
       action: waitForSelector
