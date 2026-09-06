@@ -1,1 +1,53 @@
-FROM plaita-console-backend:e2e
+# Plaita Console Backend —— argusai E2E 专用镜像
+# 与 docker/Dockerfile.backend 同源（构建上下文 = plaita 仓根），差异仅在 CMD：
+# 先等 E2E_TEST_REDIS_HOST:6379 可连再起 uvicorn。console 的 lifespan 在 Redis
+# 不可达时会静默降级为本地单机模式（不报错），而 E2E 断言全部基于集群档行为
+# （入队走 Stream、执行状态在 Redis），必须保证启动时 Redis 已就绪。
+# argusai 的 healthcheck 是 HTTP-path 型，表达不了「Redis 就绪」，只能在这里兜。
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# 容器内访问 PyPI 偶发读超时，放宽超时与重试
+ENV PIP_DEFAULT_TIMEOUT=180 \
+    PIP_RETRIES=10
+
+RUN apt-get update && apt-get install -y --no-install-recommends wget curl && rm -rf /var/lib/apt/lists/*
+
+# 先安装 plaita 核心包依赖
+COPY requirements.txt ./requirements-plaita.txt
+RUN pip install --no-cache-dir -r requirements-plaita.txt && \
+    pip install --no-cache-dir cachetools
+
+# 安装 console backend 依赖
+COPY plaita-console/backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制 plaita 核心包
+COPY plaita/ ./plaita/
+# setup.py 只是 shim，全部元数据（含 plaita.nodes entry_points）在
+# pyproject.toml——不 COPY 它，pip install . 会得到 0.0.0 无插件的空壳
+COPY pyproject.toml .
+COPY setup.py .
+
+# 必须 pip 安装而非仅 COPY：approval/delay 等扩展节点经
+# [project.entry-points."plaita.nodes"] 自动发现，依赖安装元数据
+RUN pip install --no-cache-dir .
+
+# 复制 console backend 代码
+COPY plaita-console/backend/ ./backend/
+
+# API 面 E2E（默认）：开发机残留的 backend/webDist（前端构建产物）会让 "/"
+# 从 JSON 健康响应变成 SPA index.html，删掉以匹配纯后端形态。
+# UI 面 E2E：KEEP_WEBDIST=1 保留前端产物，backend 直接托管 SPA（打包发布模式）。
+ARG KEEP_WEBDIST=0
+RUN if [ "$KEEP_WEBDIST" != "1" ]; then rm -rf /app/backend/webDist; fi
+
+# 复制集群配置文件
+COPY plaita-console/cluster_config.yaml ./plaita-console/cluster_config.yaml
+
+EXPOSE 8080
+
+ENV PLAITA_CONSOLE_PORT=8080
+
+CMD ["sh", "-c", "until python -c \"import os,socket; socket.create_connection((os.environ.get('E2E_TEST_REDIS_HOST','redis'), 6379), timeout=1).close()\" 2>/dev/null; do echo 'e2e: waiting for redis...'; sleep 1; done; exec uvicorn backend.main:app --host 0.0.0.0 --port ${PLAITA_CONSOLE_PORT}"]

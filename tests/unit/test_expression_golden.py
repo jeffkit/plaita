@@ -184,7 +184,16 @@ class GoldenFunctionCalls(unittest.TestCase):
         self.assertEqual(evaluate("$F.or($INPUT.test.value, 0, '3')", ctx), "3")
 
     def test_unknown_function_returns_undefined(self):
-        self.assertEqual(evaluate("$F.does_not_exist(1, 2)", {}), "undefined")
+        """默认注册表未命中 → NameError 带 did-you-mean（LLM 作者模拟 P0-3：
+        返回 'undefined' 字符串会让错误值静默流入下游）；scoped registry 仍返回
+        'undefined'（既有契约）。"""
+        from plaita.core.expression import ExpressionRegistry
+        with self.assertRaises(NameError) as cm:
+            evaluate("$F.does_not_exist(1, 2)", {})
+        self.assertIn("does_not_exist", str(cm.exception))
+
+        scoped = ExpressionRegistry()
+        self.assertEqual(evaluate("$F.does_not_exist(1, 2)", {}, registry=scoped), "undefined")
 
     def test_parse_function_non_function_returns_input(self):
         # parse_function only handles $F.* ; a bare variable path is returned as-is

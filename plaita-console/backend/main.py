@@ -89,12 +89,12 @@ async def lifespan(app: FastAPI):
         logger.error(f"FlowStore 初始化失败: {e}")
         raise
 
-    # HMAC 重放保护：有 Redis 时启用 nonce store
-    try:
-        signature.enable_replay_protection(settings.redis_url)
-        logger.info("HMAC replay protection 已启用（Redis nonce store）")
-    except Exception as e:
-        logger.warning("HMAC replay protection 启用失败，回退内存 nonce: %s", e)
+    # HMAC 重放保护：本地档（Redis 不可达）直接配进程内存档；集群档配 Redis
+    # nonce store（enable_replay_protection 内部会 ping 一次，连不上同样降级
+    # 并 warning，避免启动日志虚报 "multi-worker safe"）。
+    signature.enable_replay_protection(None if local_mode else settings.redis_url)
+    if local_mode:
+        logger.info("本地单机模式：HMAC replay protection 使用进程内 nonce store（仅单进程有效）")
 
     if not settings.admin_api_key and not settings.allow_insecure_admin:
         logger.warning(

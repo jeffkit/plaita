@@ -76,7 +76,10 @@ def error_handler(
     error_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     """构造 ``errorHandler``。``strategy`` ∈ abort/continue/continue_with。"""
-    if strategy not in ("abort", "continue", "continue_with"):
+    if strategy not in ("abort", "continue", "continue_with", "continue-with"):
+        # 连字符 "continue-with" 是 ErrorStrategy 的规范枚举值 (core 层两种拼写
+        # 都收并归一化); DSL 层历史上只收下划线, 用户从 enum 取 .value 填进来会被拒。
+        strategy = "continue_with" if strategy == "continue-with" else strategy
         raise ValueError(f"unknown error handler strategy: {strategy!r}")
     spec: Dict[str, Any] = {"strategy": strategy}
     if retry_times is not None:
@@ -544,16 +547,26 @@ class FlowBuilder:
             builder = FlowBuilder.from_dict(json.load(open("my_flow.json")))
             builder.update_node("greet", output="'hello'")
             new_flow = builder.build()
+
+        字段名同时接受 camelCase（手写 JSON 常用 ``inputType``）与 snake_case
+        （``Flow.model_dump()`` 产出 ``input_type``）——历史上只读 camelCase,
+        roundtrip ``from_dict(flow.model_dump())`` 会静默丢 input/output/global_context。
         """
+        def _pick(*keys: str) -> Any:
+            for key in keys:
+                if data.get(key) is not None:
+                    return data[key]
+            return None
+
         builder = cls(
-            flow_id=data.get("flow_id"),
-            input_type=data.get("inputType"),
-            output_type=data.get("outputType"),
-            desc=data.get("desc"),
+            flow_id=_pick("flow_id", "flowId"),
+            input_type=_pick("inputType", "input_type"),
+            output_type=_pick("outputType", "output_type"),
+            desc=_pick("desc", "description"),
             version=data.get("version"),
             author=data.get("author"),
             timeout=data.get("timeout"),
-            global_context=data.get("globalContext"),
+            global_context=_pick("globalContext", "global_context"),
             metadata=data.get("metadata"),
             runtime=data.get("runtime", "python"),
         )

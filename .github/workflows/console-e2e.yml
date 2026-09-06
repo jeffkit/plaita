@@ -1,0 +1,104 @@
+name: Console E2E
+
+# plaita-console 全系统 E2E（argusai）+ Redis 瞬断混沌回归。
+# 独立于 ci.yml：E2E 含 Docker 构建（冷缓存约 5-10 分钟），且只需在
+# console/引擎代码变更时跑，故单独成 workflow 做路径过滤。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "plaita-console/**"
+      - "plaita/**"
+      - ".github/workflows/console-e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "plaita-console/**"
+      - "plaita/**"
+      - ".github/workflows/console-e2e.yml"
+
+concurrency:
+  group: console-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: argusai gate + chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install E2E toolchain
+        run: |
+          uv tool install mcp2cli
+          npm i -g argusai-mcp playwright
+          # playwright 是 argusai-core 的可选 peer 依赖，浏览器二进制需单独装；
+          # --with-deps 一并装 chromium 的系统库（runner 缺库时页面白屏、
+          # waitForSelector 超时）
+          npx -y playwright install --with-deps chromium
+
+      - name: Docker sanity
+        run: |
+          docker info --format '{{.ServerVersion}} drivers={{.Driver}}'
+          docker buildx version
+          docker ps
+
+      # webDist 在 .gitignore 里，干净 checkout 没有它——本地能过纯属开发机
+      # 有现成构建。CI 上先构建前端（pnpm，产物 frontend/dist → backend/webDist）
+      # 再预构建镜像，UI 镜像才有 SPA 可托管。
+      - name: Build console frontend
+        run: |
+          # 钉 pnpm@9：corepack 默认拉 pnpm 12，其默认拒绝依赖构建脚本
+          # （esbuild postinstall）直接 ERR_PNPM_IGNORED_BUILDS
+          npm i -g pnpm@9
+          cd plaita-console/frontend
+          pnpm install --frozen-lockfile
+          pnpm build
+          cd ..
+          rm -rf backend/webDist
+          cp -R frontend/dist backend/webDist
+
+      # argusai 的 build 从 mcp2cli daemon 里 spawn docker build 在 runner 上
+      # 会秒挂（docker run 正常、buildx 异常，仅 CI 复现），故在普通步骤里
+      # 预构建全部镜像——失败时本步直接打印 docker 真实报错；gate/chaos 用
+      # --no-build 消费现成镜像。
+      - name: Pre-build E2E images
+        run: |
+          docker build -f plaita-console/docker/Dockerfile.redis-e2e -t plaita-e2e-redis:latest .
+          docker build -f plaita-console/docker/Dockerfile.e2e -t plaita-console-e2e:latest .
+          docker build -f plaita-console/docker/Dockerfile.e2e --build-arg KEEP_WEBDIST=1 -t plaita-console-ui-e2e:latest .
+          docker build -f plaita-console/docker/Dockerfile.worker-e2e -t plaita-e2e-worker:latest .
+          docker build -f plaita-console/docker/Dockerfile.services-e2e -t plaita-e2e-services:latest .
+
+      - name: Full E2E gate (11 suites)
+        run: bash plaita-console/scripts/e2e-gate.sh --no-build
+
+      - name: Redis outage chaos regression
+        run: bash plaita-console/scripts/e2e-chaos-redis.sh --no-build
+
+      - name: Upload UI debug screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: "**/e2e-artifacts/*.png"
+          if-no-files-found: ignore
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a --format '{{.Names}} {{.Status}}' | grep -i plaita || true
+          docker network ls | grep argusai || true
+          for c in $(docker ps -a --filter "label=argusai.project=plaita-console" --format '{{.Names}}'); do
+            echo "===== $c ====="
+            docker logs --tail 50 "$c" 2>&1 || true
+          done

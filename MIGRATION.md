@@ -8,6 +8,92 @@
 
 ## Unreleased（0.5.x）
 
+### 安全与分布式加固（2026-09 R4 定向深潜轮）
+
+安全专项（威胁模型：能写流程 JSON 的人是半信任主体）：
+
+1. **CodeNode 后端白名单**：`register_code_node(allowed_backends=(...))` 设置后，
+   流程 JSON 里的 `sandbox_backend` 不在白名单内即**解析期硬失败**。此前流程作者
+   可把运营者选定的默认后端逐节点覆盖为 `"unsafe"`（宿主任意代码执行）。
+2. **restricted 沙箱移除 `functools`/`operator`**：`operator.attrgetter("__class__")`
+   走 C 层属性访问绕过 `_getattr_` 拦截，可完整逃逸（确定性 PoC 已验证）。
+   restricted 定位收敛为"仅防误用"，禁止用于半信任作者。
+3. **subprocess 沙箱环境变量白名单**：子进程不再继承宿主全量 `os.environ`
+   （历史等于把 API key/云凭证交给沙箱内代码）。白名单外用
+   `code.SUBPROCESS_ENV_EXTRA` 按需补充。注意 macOS 无 RLIMIT 内存上限。
+4. **HTTP 节点 SSRF 防护钩子**（默认行为不变）：新增 `requestTimeout`（默认 30s）、
+   `allowedHosts` / `deniedHosts`（精确/`*.suffix`/CIDR）、`blockPrivateNetworks`、
+   `maxRedirects`。任一策略激活时重定向改为逐跳校验后手动跟随。
+5. **`$F.pow` 指数上限**（默认 10000）：`$F.pow(9, 9999999)` 这类 20 字节表达式
+   曾可烧掉分钟级 CPU。
+6. **`expose_env` 拒绝 `"*"`/空串/带空白键**：此前静默落空（以为暴露了实际没有）。
+
+分布式专项（Redis 全链路实测）：
+
+7. **RedisEventBus/RedisStorage 客户端按事件循环重建**：worker 每个分布式步骤
+   跑在新建的 asyncio 循环里，缓存的 aioredis 连接跨循环失效——含 event 节点的
+   流程约每两次挂起即失败一次并丢单。修复后按循环重建（外部注入的客户端不接管）。
+8. **重复投递的 resume 任务幂等短路**：终态执行的 resume 原样返回，不再把
+   completed/error 改写。`redis publish` 的 dict/str 形式支持 `correlation_id`
+   关键字（EventFilter 的 correlation 匹配此前无法通过该形式设置）。
+
+### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
+
+本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程
+本身有配置问题——以下是判断与迁移方法：
+
+1. **switch/if 分支未命中且无 default → 抛 `FlowExecutionException`**
+   - 变更前：调度层把整个 `$NODE` 状态表当流程结果返回，流程"成功"结束。
+   - 迁移：给分支节点补 default 分支；或在该节点上配
+     `"errorHandler": {"strategy": "continue"}` 显式保留旧的跳过行为。
+2. **http 节点失败 → raise（errorHandler 真正生效）**
+   - 变更前：请求失败时把 `NodeException` 对象当**节点结果**返回，下游拿到
+     异常对象当数据用；`errorHandler` 的 continue/continue_with 永不生效。
+   - 迁移：依赖旧行为（拿到 NodeException 对象继续跑）的流程，改为配置
+     `errorHandler`（`continue` / `continue_with` + `defaultValue`）。
+   - 同时修复了 http 节点表达式求值的参数颠倒——0.5.x 里真实 HTTP 请求
+     实际上从不成功（集成测试全 mock 未覆盖真实路径）。
+3. **挂起中的 EventNode 拒绝 `resume_type="continue"` 绕过**（抛 `ResumeError`）：
+   必须先用 `event`/`cancel`/`timeout` 消费事件，之后才能 continue 推进。
+4. **分布式 resume 完成后注销事件订阅**：此前死订阅会持续匹配后续同类型
+   事件。依赖"死订阅仍命中"的行为（不应该存在）需自行改掉。
+5. **`FlowExecution` 实例不可重入**：同一实例并发/重入 run 会抛错。并发场景
+   每次新建实例（`Flow.run()` 每次新建，不受影响）。
+6. **End 节点 `resultType` 默认 `success`**：不再需要显式写
+   `"resultType": "success"` 才能拿到 output；未知的 resultType 值打
+   warning 并按 success 处理（此前静默返回 None）。
+7. **未知配置键告警**：节点/Flow JSON 里拼错的字段名（如 `conditon`）现在
+   打 warning（含合法键清单），不再被 pydantic `extra=ignore` 静默吞掉。
+   CI 里若把 warning 当错误需注意存量流程的清理。
+8. **`ExecutionMode.from_string` 非法值抛 `ValueError`**（原裸 `KeyError`）；
+   `parse()` 对非 python runtime 抛 `ValueError`（原 `RuntimeError`）。
+9. **`retryTimes` 负数按 0 处理**：至少执行一次节点；此前负数会静默跳过
+   节点执行并吞掉 abort 错误。
+10. **PlaitaClient**：新增 `PlaitaClientError`/`PlaitaClientNetworkError`/
+    `PlaitaClientResponseError`（均继承 `Exception`，老 `except Exception` 不受影响）；
+    `run_flow` 不传 `input_data` 现在等价于 `{}`；`clear_cache(flow_id)` 只清
+    该 flow 的版本（此前静默清空全部）。
+11. **`timeout` 字段非法格式**（如 `"100ms"`）抛 `ValueError` 并列出合法写法
+    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
+12. **表达式默认注册表未知函数 → `NameError`**（带 did-you-mean 与可用清单）：
+    `$F.JSON_DUMPS(...)` 这类拼写错误不再返回 `'undefined'` 字符串流入下游。
+    scoped 自定义注册表保持 `'undefined'` 契约不变。
+13. **可疑字面量告警**：表达式位置出现 `{{name}}`、f-string、`await ...`、
+    裸函数调用等"其他语言模板/代码习惯"的字符串，现在打 warning（原样返回
+    不变，历史上零告警）。
+14. **JSON 路径结构检查告警**：`Flow.from_string` 现在会跑 ir_validate 的
+    结构检查（id 重复 / next 悬空 / if 缺分支目标 / switch 缺 default /
+    子流程节点缺 childFlow），命中即 warning——历史上这些只在
+    Builder/codeflow 路径生效，JSON 路径重复 id 静默 last-wins。
+15. **`$FLOW` 别名 / 表达式 KeyError 带可用根清单 / YAML fallback 告警**：
+    `$FLOW` 等价 `$FLOW_ID`；未知根的 KeyError 列出全部可用根；JSON 解析
+    失败但 YAML fallback 成功时打 warning（YAML 会把裸 `no/on` 篡改成
+    `False/True`）。
+
+
+    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
+
+
 ### Storage：`db` 执行/流程存储从公开路径下架
 
 **变更前**：`--execution-storage-type db` / `--flow-storage-type db` 以及
@@ -105,6 +191,24 @@ FlowWorker / EventFilter CLI 的 `--event-bus-type` / `--subscription-storage-ty
 - 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 1）
 - 订阅匹配为 event_type **全等**；fnmatch 仅 handler 路径
 - 用户文档入口：`docs-site/docs/distributed/flow-worker.md`「可靠性边界」
+
+### 升级时存量状态处理（Redis / SQLite 里已有的东西怎么办）
+
+0.4.x → 0.5.x 的执行状态 JSON schema 逐键兼容（已实测：0.4.0 挂起 → 0.5.x
+手动 resume 可完成；回滚方向数据层亦可读）。断层在**键的语义与通道**：
+
+1. **升级前 drain 队列**：队列键 `plaita:flow:queue` 从 0.4.x 的 List 换成了
+   Stream（同名不同形）。不 drain 则新 worker 启动即 `WRONGTYPE`。用
+   `scripts/drain_list_queue_to_stream.py` 迁移积压。
+2. **回滚（0.5.x → 0.4.x）前必须排干 Stream**：0.4.x worker 用 BLPOP 消费
+   List，对 Stream 同样 WRONGTYPE。手动 `XACK`+`DEL` 或让新 worker 清空后再回滚。
+3. **存量挂起执行的事件驱动 resume 会静默失效**：0.4.x 的订阅 type 索引挂的是
+   未解析表达式（`plaita:subscription:type:$INPUT.event_type`），0.5.x 的
+   EventFilter 按解析后的类型检索查不到。手动 `resume_flow` 兜底可用；0.5.x 起
+   EventFilter 对同 flow 孤儿订阅会打 warning 提示。
+4. **凭据轮换提醒**：分布式 checkpoint 的 context 含**全量 `$ENV` 快照**
+   （两版皆然），Redis 里的旧 state 携带密钥——升级窗口应轮换凭据。
+
 
 ---
 
@@ -225,7 +329,8 @@ enable_replay_protection()
 **变更后**：`Flow` 只解析结构，`nodes` 字段保留为原始 dict；节点解析延迟到执行期 `Flow.resolve_nodes(registry)`。`Flow.from_string` / `from_file` / `Flow.model_validate` 默认仍调一次 `resolve_nodes(get_default_registry())`，**99% 用户用法不变**。
 
 **迁移**：一般无需改动。仅当**自定义 registry** 或**在 import 期注册节点**时：
-- 显式传 registry：`FlowExecution(flow, registry=my_registry)` 或 `flow.resolve_nodes(my_registry)`。
+- 解析期显式传 registry：`Flow.from_string(content, registry=my_registry)` / `Flow.from_file(path, registry=my_registry)` / `Flow.model_validate(data, registry=my_registry)`，或对已解析对象调 `flow.resolve_nodes(my_registry)`。
+- 也可实例化 `FlowExecution(registry=my_registry)`（注意第一位置参数是 parent execution，不是 flow），再调用其 `run_compatible` / `run_distributed`。
 - 不再依赖"import 期注册的节点立刻对 `Flow.from_string` 生效"——确保注册发生在 `Flow` 解析之前（`init_default_registry()` 是推荐入口，见下条）。
 
 ### 5. `init_default_registry()` 显式初始化入口
@@ -245,14 +350,18 @@ register_code_node(default_backend="docker")  # 按需 opt-in CodeNode
 ### 6. `execution.mode` 内部类型 str → `ExecutionMode` enum
 
 **变更前**：`execution.mode` 是裸字符串（`"normal"`/`"generator"`/`"distributed"`），全库散落 `mode == "generator"` 字符串比较——拼写错误静默成 `False`。
-**变更后**：内部类型 `Optional[ExecutionMode]`，比较一律走 enum。**公共入口仍接受字符串**：`Flow.run(mode="generator")` / `FlowExecution(mode="generator")` / `execution.mode = "generator"` 在边界处经 `_coerce_mode` 统一一次。
+**变更后**：内部类型 `Optional[ExecutionMode]`，比较一律走 enum。**公共入口仍接受字符串**：`FlowExecution(mode="generator")` / `execution.mode = "generator"` / `FlowExecution.run(flow, mode="generator")` 在边界处经 `_coerce_mode` 统一一次。注意 `Flow.run()` / `flow.debug()` **没有** `mode` 参数（`flow.run(mode=...)` 会把 `mode` 当作输入 dict 的一个键）——生成器模式请用 `flow.debug()`。
 
 ```python
 from plaita.core.executor import ExecutionMode
 
 # 这两种写法等价 (公共入口接受字符串):
-flow.run(mode="generator")
-flow.run(mode=ExecutionMode.GENERATOR)
+FlowExecution.run(flow, mode="generator")
+FlowExecution.run(flow, mode=ExecutionMode.GENERATOR)
+
+# 同步生成器单步调试的便捷写法 (等价于上面的 generator 模式):
+for step in flow.debug():
+    ...
 
 # 节点插件内部比较改 enum (若你直接读 execution.mode):
 if execution.mode == ExecutionMode.GENERATOR:   # 0.5.0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+pytest.importorskip("langchain", reason="langchain extra not installed: pip install 'plaita-ai[agent]'")
 from langchain.tools import tool
 from langchain_core.messages import AIMessageChunk
 

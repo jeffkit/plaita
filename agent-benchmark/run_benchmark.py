@@ -8,7 +8,7 @@ flow-coder skill 的有效性。
   1. 在 runs/<arm>/<task_id>/ 下写入 inputs.json（只含测试输入，不含 expected，
      防止 agent "背答案"）。
   2. 用 skill（可选）+ 任务需求 + 输出规范拼成 prompt，调用：
-        claude -p --model <model> --dangerously-skip-permissions -d <pyloki_root> <prompt>
+        claude -p --model <model> --dangerously-skip-permissions -d <plaita_root> <prompt>
      环境变量把请求路由到 DeepSeek 的 anthropic 兼容端点：
         ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
         ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY
@@ -50,8 +50,13 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from tasks import TASKS, VALIDATORS  # noqa: E402
 
-PYLOKI_ROOT = ROOT.parent
-SKILL_DIR = Path.home() / ".claude" / "skills" / "flow-coder"
+PLAITA_ROOT = ROOT.parent
+# skill 读取优先级：包内权威副本（plaita_ai/skills/flow-coder，随评审同步）>
+# 家目录副本（用户安装的旧版）。此前只读家目录——本地副本陈旧时 --arm skill
+# 测的是旧 skill，评分结论失真（2026-09 盲区评审 P1-3）。
+_SKILL_PKG_DIR = PLAITA_ROOT / "plaita-ai" / "plaita_ai" / "skills" / "flow-coder"
+_SKILL_HOME_DIR = Path.home() / ".claude" / "skills" / "flow-coder"
+SKILL_DIR = _SKILL_PKG_DIR if (_SKILL_PKG_DIR / "SKILL.md").exists() else _SKILL_HOME_DIR
 SKILL_MD = SKILL_DIR / "SKILL.md"
 SKILL_REF = SKILL_DIR / "references" / "codeflow-reference.md"
 # 隔离工作区：放在仓库外，agent 无法浏览 plaita 源码/文档，只能靠 prompt 里的知识。
@@ -493,7 +498,7 @@ def main() -> int:
     ap.add_argument("--include-broken", action="store_true",
                     help="包含 known_broken 任务（默认跳过，避免在 plaita 运行时 bug 上浪费超时）")
     ap.add_argument("--no-isolated", action="store_true",
-                    help="关闭隔离模式：在 pyloki 仓库内运行（agent 可读源码/文档，不推荐用于评估 skill）")
+                    help="关闭隔离模式：在 plaita 仓库内运行（agent 可读源码/文档，不推荐用于评估 skill）")
     ap.add_argument("--list", action="store_true", help="列出任务后退出")
     args = ap.parse_args()
 

@@ -49,7 +49,10 @@ class ErrorHandler:
         error_code: Optional[int] = None,
         error_message: Optional[str] = None,
     ) -> None:
-        if strategy not in ("abort", "continue", "continue_with"):
+        if strategy not in ("abort", "continue", "continue_with", "continue-with"):
+            # 连字符 "continue-with" 是 ErrorStrategy 的规范枚举值 (core 层两种拼写
+            # 都收并归一化); DSL 层历史上只收下划线, 用户从 enum 取 .value 填进来会被拒。
+            strategy = "continue_with" if strategy == "continue-with" else strategy
             raise ValueError(f"unknown error handler strategy: {strategy!r}")
         self.spec: Dict[str, Any] = {"strategy": strategy}
         if retry_times is not None:

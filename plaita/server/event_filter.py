@@ -3,6 +3,7 @@
 将订阅信息组装成flow worker任务放入队列
 """
 import json
+import os
 import logging
 import asyncio
 import argparse
@@ -78,9 +79,52 @@ class EventFilter:
             subscriptions = await self.subscription_storage.find_matching_subscriptions(event, state.context)
             
             if not subscriptions:
+                # 升级演练 P1-1：0.4.x 的订阅挂在**未解析表达式**的 type 索引下
+                # （如 `type:$INPUT.event_type`），升级后 EventFilter 按解析后的
+                # event_type 检索永远查不到——升级前挂起在 event 节点的执行，
+                # 事件驱动 resume 全部静默失效。无匹配时检查同 flow 的孤儿订阅
+                # 并大声告警。
+                try:
+                    flow_subs = await self.subscription_storage.list_subscriptions()
+                    orphans = [
+                        s for s in (flow_subs or [])
+                        if getattr(s, "flow_id", None) == state.flow_id
+                    ]
+                except Exception:  # noqa: BLE001 — 巡检失败不影响主流程
+                    orphans = []
+                if orphans:
+                    logger.warning(
+                        "执行 %s（flow %s）没有匹配本事件的订阅，但同 flow 下存在 %d 条"
+                        "孤儿订阅（类型: %s）。旧版本订阅可能挂在未解析的 $INPUT.* type "
+                        "索引下——事件驱动 resume 不会生效，请手动 resume_flow 或重新"
+                        "注册订阅。",
+                        execution_id, state.flow_id, len(orphans),
+                        sorted({s.event_type for s in orphans}),
+                    )
                 logger.debug("没有匹配的订阅，跳过处理: %s", event.event_id)
                 return
             
+            # 终态执行的残留订阅就地回收（2026-09 分布式评审 P2-5）：
+            # error 路径泄漏的订阅会被后续同类事件反复匹配并入队注定失败的
+            # resume；检测到终态直接注销订阅、跳过入队。没有这步 GC，残留
+            # 键只能等 7 天 TTL。
+            state_status = getattr(state, "status", "") or ""
+            if state_status in ("completed", "error"):
+                for subscription in subscriptions:
+                    try:
+                        await self.subscription_storage.unregister_subscription(
+                            subscription.subscription_id
+                        )
+                        logger.info(
+                            "执行 %s 已终态(%s)，回收残留订阅 %s",
+                            execution_id, state_status, subscription.subscription_id,
+                        )
+                    except Exception:  # noqa: BLE001 — 回收失败不影响主流程
+                        logger.debug(
+                            "回收订阅 %s 失败", subscription.subscription_id, exc_info=True
+                        )
+                return
+
             for subscription in subscriptions:
                 if (subscription.flow_id and subscription.flow_id == state.flow_id) or \
                    (subscription.correlation_id and subscription.correlation_id == execution_id):
@@ -264,8 +308,9 @@ def main():
     parser = argparse.ArgumentParser(description="Plaita事件过滤器")
     
     # Redis参数
-    parser.add_argument("--redis-url", default="redis://localhost:6379/0",
-                      help="Redis连接URL")
+    parser.add_argument("--redis-url",
+                        default=os.environ.get("PLAITA_REDIS_URL", "redis://localhost:6379/0"),
+                        help="Redis 连接地址（默认取 PLAITA_REDIS_URL，与 flow_worker 一致）")
     parser.add_argument("--queue-name", default="plaita:flow:queue",
                       help="Redis队列名称")
     

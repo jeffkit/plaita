@@ -187,7 +187,6 @@ def create_demo_flow_with_http_callback_node() -> Dict[str, Any]:
                 "event_type": "http_callback_trigger",
                 "callback_method": "POST",
                 "require_auth": False,
-                "service_config": {"base_url": "http://localhost:8080"},
                 "next": "end"
             },
             {
@@ -544,19 +543,19 @@ class ExtendedNodesDemo:
                         pending = approval_service.get_pending_approvals()
                         logger.info(f"待审批任务: {json.dumps(pending, indent=2, ensure_ascii=False)}")
                         
-                        # 找到对应的审批任务并决策
-                        for approval_id, approval_info in pending.items():
-                            if approval_info.get("execution_id") == execution_id:
-                                decision_result = await approval_service.submit_approval_decision(
-                                    approval_id, "manager1", "approve", "同意申请"
-                                )
-                                logger.info(f"提交审批决策: {json.dumps(decision_result, ensure_ascii=False)}")
-                                
-                                # 再等待一下看是否完成
-                                await asyncio.sleep(3)
-                                if execution_id not in self.suspended_executions:
-                                    logger.info("✓ 审批流程通过决策完成！")
-                                    return True
+                        # 对所有待审批任务提交决策（get_pending_approvals 返回的
+                        # 是摘要 dict，不含 execution_id；demo 一次只挂起一个审批）
+                        for approval_id in list(pending.keys()):
+                            decision_result = await approval_service.submit_approval_decision(
+                                approval_id, "manager1", "approve", "同意申请"
+                            )
+                            logger.info(f"提交审批决策: {json.dumps(decision_result, ensure_ascii=False)}")
+
+                            # 再等待一下看是否完成
+                            await asyncio.sleep(3)
+                            if execution_id not in self.suspended_executions:
+                                logger.info("✓ 审批流程通过决策完成！")
+                                return True
                     break
         
         return success
@@ -650,8 +649,11 @@ class ExtendedNodesDemo:
                 logger.info(f"已注册的回调: {json.dumps(callbacks, indent=2, ensure_ascii=False)}")
                 
                 # 找到回调路径并模拟请求
+                # （回调记录的 path 在 task_config.callback_config 里）
                 for callback_id, callback_info in callbacks.items():
-                    callback_path = callback_info.get("path")
+                    callback_path = (callback_info.get("task_config", {})
+                                              .get("callback_config", {})
+                                              .get("path"))
                     if callback_path:
                         mock_request_data = {
                             "status": "completed",
@@ -781,7 +783,7 @@ async def simple_demo():
         delay_node = DelayNode(id="test_delay", delay_seconds=2)
         execution = FlowExecution(event_bus=event_bus)
         execution.clean()
-        execution._set_state("$EXECUTION_ID", "test_001")
+        execution.set_state("$EXECUTION_ID", "test_001")
         
         result = delay_node.execute(execution)
         logger.info(f"延迟节点状态: {result.get('status')}")
@@ -832,7 +834,7 @@ async def simple_demo():
         
         execution2 = FlowExecution(event_bus=event_bus)
         execution2.clean()
-        execution2._set_state("$EXECUTION_ID", "test_002")
+        execution2.set_state("$EXECUTION_ID", "test_002")
         
         result = approval_node.execute(execution2)
         logger.info(f"审批节点状态: {result.get('status')}")

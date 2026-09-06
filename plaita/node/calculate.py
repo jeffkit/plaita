@@ -28,6 +28,14 @@ class Function(BaseModel):
             params[key] = value
         return self.func(**params)
 
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"paramType", "returnType"})
+
+    @model_validator(mode="before")
+    @classmethod
+    def _schema_hygiene(cls, values):
+        from .basic import warn_unknown_keys
+        return warn_unknown_keys(cls, values)
+
     @model_validator(mode="before")
     @classmethod
     def setup_param_type(cls, values):

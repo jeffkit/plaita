@@ -423,8 +423,8 @@ class TestParseFunctionMutations(unittest.TestCase):
         self.assertIsNone(parse({}))
 
     def test_parse_non_python_runtime_raises(self):
-        """Kill mutations on runtime != 'python' check."""
-        with self.assertRaises(RuntimeError) as cm:
+        """Kill mutations on runtime != 'python' check (ValueError since fix)."""
+        with self.assertRaises(ValueError) as cm:
             parse({"flow_id": "f1", "runtime": "node", "nodes": []})
         self.assertIn("node", str(cm.exception))
 

@@ -57,9 +57,31 @@ class RedisEventStorage(EventStorage):
         self.ttl = ttl if ttl is not None else self.DEFAULT_TTL
     
     async def initialize(self):
-        """初始化Redis连接"""
-        if self.redis is None:
+        """初始化Redis连接（按事件循环缓存客户端）。
+
+        worker 的每个分布式步骤跑在 ``asyncio.run`` 新建的循环里
+        （``core/async_utils.run_async_from_sync``），aioredis 客户端的连接
+        绑定首次使用的循环——跨步骤复用会拿到已关闭循环上的连接，表现为
+        随机的 "Event loop is closed"（2026-09 分布式评审 P0-1：约每两次
+        挂起失败一次并丢单）。按循环重建客户端 + 刷新 asyncio.Lock。
+        """
+        loop = asyncio.get_running_loop()
+        # 只重建**由本类创建**的客户端（_redis_loop 已登记）；外部注入的
+        # client（如测试的 fakeredis、共用连接池）不接管。
+        own_client_stale = (
+            self.redis is not None
+            and getattr(self, "_redis_loop", None) is not None
+            and self._redis_loop is not loop
+        )
+        if self.redis is None or own_client_stale:
             self.redis = await aioredis.from_url(self.redis_url)
+            self._redis_loop = loop
+            # 旧循环上的连接交由 GC 回收：跨循环 aclose 会触碰死循环的
+            # socket，反而报错。
+        if hasattr(self, "lock") and getattr(self, "_lock_loop", None) is not None \
+                and self._lock_loop is not loop:
+            self.lock = asyncio.Lock()
+            self._lock_loop = loop
     
     async def store_event(self, event: Event) -> str:
         """存储事件"""
@@ -240,9 +262,31 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         self.lock = asyncio.Lock()  # 用于原子操作
 
     async def initialize(self):
-        """初始化Redis连接"""
-        if self.redis is None:
+        """初始化Redis连接（按事件循环缓存客户端）。
+
+        worker 的每个分布式步骤跑在 ``asyncio.run`` 新建的循环里
+        （``core/async_utils.run_async_from_sync``），aioredis 客户端的连接
+        绑定首次使用的循环——跨步骤复用会拿到已关闭循环上的连接，表现为
+        随机的 "Event loop is closed"（2026-09 分布式评审 P0-1：约每两次
+        挂起失败一次并丢单）。按循环重建客户端 + 刷新 asyncio.Lock。
+        """
+        loop = asyncio.get_running_loop()
+        # 只重建**由本类创建**的客户端（_redis_loop 已登记）；外部注入的
+        # client（如测试的 fakeredis、共用连接池）不接管。
+        own_client_stale = (
+            self.redis is not None
+            and getattr(self, "_redis_loop", None) is not None
+            and self._redis_loop is not loop
+        )
+        if self.redis is None or own_client_stale:
             self.redis = await aioredis.from_url(self.redis_url)
+            self._redis_loop = loop
+            # 旧循环上的连接交由 GC 回收：跨循环 aclose 会触碰死循环的
+            # socket，反而报错。
+        if hasattr(self, "lock") and getattr(self, "_lock_loop", None) is not None \
+                and self._lock_loop is not loop:
+            self.lock = asyncio.Lock()
+            self._lock_loop = loop
     
     async def store_subscription(self, subscription: EventSubscription) -> str:
         """存储事件订阅"""
@@ -480,9 +524,31 @@ class RedisProcessingTracker(EventProcessingTracker):
         self.redis = None
     
     async def initialize(self):
-        """初始化Redis连接"""
-        if self.redis is None:
+        """初始化Redis连接（按事件循环缓存客户端）。
+
+        worker 的每个分布式步骤跑在 ``asyncio.run`` 新建的循环里
+        （``core/async_utils.run_async_from_sync``），aioredis 客户端的连接
+        绑定首次使用的循环——跨步骤复用会拿到已关闭循环上的连接，表现为
+        随机的 "Event loop is closed"（2026-09 分布式评审 P0-1：约每两次
+        挂起失败一次并丢单）。按循环重建客户端 + 刷新 asyncio.Lock。
+        """
+        loop = asyncio.get_running_loop()
+        # 只重建**由本类创建**的客户端（_redis_loop 已登记）；外部注入的
+        # client（如测试的 fakeredis、共用连接池）不接管。
+        own_client_stale = (
+            self.redis is not None
+            and getattr(self, "_redis_loop", None) is not None
+            and self._redis_loop is not loop
+        )
+        if self.redis is None or own_client_stale:
             self.redis = await aioredis.from_url(self.redis_url)
+            self._redis_loop = loop
+            # 旧循环上的连接交由 GC 回收：跨循环 aclose 会触碰死循环的
+            # socket，反而报错。
+        if hasattr(self, "lock") and getattr(self, "_lock_loop", None) is not None \
+                and self._lock_loop is not loop:
+            self.lock = asyncio.Lock()
+            self._lock_loop = loop
     
     async def mark_event_processed(self, event_id: str, handler_id: str) -> bool:
         """标记事件已由特定处理器处理"""
@@ -692,10 +758,33 @@ class RedisEventBus(EventBus):
         self.lock = asyncio.Lock()
     
     async def initialize(self):
-        """初始化Redis连接"""
-        if self.redis is None:
+        """初始化Redis连接（按事件循环缓存客户端）。
+
+        worker 的每个分布式步骤跑在 ``asyncio.run`` 新建的循环里
+        （``core/async_utils.run_async_from_sync``），aioredis 客户端的连接
+        绑定首次使用的循环——跨步骤复用会拿到已关闭循环上的连接，表现为
+        随机的 "Event loop is closed"（2026-09 分布式评审 P0-1：约每两次
+        挂起失败一次并丢单）。按循环重建客户端 + 刷新 asyncio.Lock。
+        """
+        loop = asyncio.get_running_loop()
+        # 只重建**由本类创建**的客户端（_redis_loop 已登记）；外部注入的
+        # client（如测试的 fakeredis、共用连接池）不接管。
+        own_client_stale = (
+            self.redis is not None
+            and getattr(self, "_redis_loop", None) is not None
+            and self._redis_loop is not loop
+        )
+        if self.redis is None or own_client_stale:
             self.redis = await aioredis.from_url(self.redis_url)
-            self.pubsub = self.redis.pubsub()
+            self._redis_loop = loop
+            # pubsub 绑定客户端连接，必须随客户端一起重建
+            if getattr(self, "pubsub", None) is not None:
+                self.pubsub = self.redis.pubsub()
+            # 旧循环上的连接交由 GC 回收：跨循环 aclose 会触碰死循环的
+            # socket，反而报错。
+        if hasattr(self, "lock") and getattr(self, "_lock_loop", None) is not None                 and self._lock_loop is not loop:
+            self.lock = asyncio.Lock()
+            self._lock_loop = loop
     
     async def publish(self, event: Union[Event, str, Dict[str, Any]], 
                     prevent_duplicate_consumption: bool = True,
@@ -703,16 +792,22 @@ class RedisEventBus(EventBus):
         """发布事件"""
         await self.initialize()
         
-        # 标准化事件对象
+        # 标准化事件对象；correlation_id 可经关键字参数传入（EventFilter 的
+        # correlation 匹配依赖它——dict/str 形式历史上无法设置，见评审 P2-1）
+        correlation_id = kwargs.pop("correlation_id", None)
         if isinstance(event, str):
-            event = Event(event_type=event, data=kwargs)
+            event = Event(event_type=event, data=kwargs, correlation_id=correlation_id)
         elif isinstance(event, dict):
             if 'event_type' not in event:
                 raise ValueError("事件字典必须包含event_type字段")
                 
             event = dict(event)
             event_type = event.pop('event_type')
-            event = Event(event_type=event_type, data=event)
+            if correlation_id is None:
+                correlation_id = event.pop('correlation_id', None)
+            else:
+                event.pop('correlation_id', None)
+            event = Event(event_type=event_type, data=event, correlation_id=correlation_id)
         
         # 存储事件
         event_id = await self.event_storage.store_event(event)

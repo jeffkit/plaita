@@ -170,9 +170,15 @@ def _eval_error_handler(node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
         strategy = pos[0].value if pos and isinstance(pos[0], ast.Constant) else "abort"
         if "strategy" in kw and isinstance(kw["strategy"], ast.Constant):
             strategy = kw["strategy"].value
+        # "continue-with" 是 ErrorStrategy 的规范枚举值——R1 已让
+        # builder/sexpr/_common 三处接受，这里补齐 codeflow AST 路径，
+        # 五前端口径一致。
+        if strategy == "continue-with":
+            strategy = "continue_with"
         if strategy not in ("abort", "continue", "continue_with"):
             raise _CodeflowError(
-                f"unknown error handler strategy: {strategy!r}",
+                f"unknown error handler strategy: {strategy!r} "
+                f"(valid: abort / continue / continue_with / continue-with)",
                 node,
             )
         spec: Dict[str, Any] = {"strategy": strategy}

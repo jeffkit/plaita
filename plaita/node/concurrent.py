@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+from collections import OrderedDict
 from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field, model_validator
@@ -10,6 +12,7 @@ from plaita.core.parallel_executor import (
     BackGroundProcessPool,  # re-export for backward compat (历史调用方从本模块导入)
     BackGroundThreadPool,
     ParallelExecutor,
+    in_plaita_pool_thread,
     make_executor,
 )
 from plaita.node import Node
@@ -42,7 +45,14 @@ import threading as _threading
 
 # RLock: get_background_errors 在持锁状态下会再调 _get_bg_state, 需可重入。
 _BG_LOCK = _threading.RLock()
-_BG_STATE: Dict[str, Dict[str, list]] = {}
+# 模块级登记表按 execution_id 保留后台分支状态。它没有与执行生命周期绑定的
+# 清理点（执行完成无回调走到这里），历史上只增不减——长时进程（console/
+# FlowWorker）里每个带并行节点的执行都泄漏一条记录，且 list 里留存的
+# completed future 会把整个分支结果钉在内存里。现在两层防护：
+# 1) OrderedDict 容量上限（环境变量 PLAITA_BG_STATE_MAX，默认 256），LRU 淘汰；
+# 2) future 完成即从列表摘除（done_callback），不再钉住结果对象。
+_BG_STATE: "OrderedDict[str, Dict[str, list]]" = OrderedDict()
+_BG_STATE_MAX = int(os.environ.get("PLAITA_BG_STATE_MAX", "256"))
 
 
 def _get_bg_state(execution) -> Dict[str, list]:
@@ -50,8 +60,12 @@ def _get_bg_state(execution) -> Dict[str, list]:
     with _BG_LOCK:
         st = _BG_STATE.get(eid)
         if st is None:
-            st = {"futures": [], "errors": []}
+            st = {"futures": [], "errors": [], "done": 0}
             _BG_STATE[eid] = st
+            while len(_BG_STATE) > _BG_STATE_MAX:
+                _BG_STATE.popitem(last=False)
+        else:
+            _BG_STATE.move_to_end(eid)
         return st
 
 
@@ -88,6 +102,9 @@ class Parallel(Node):
     is_conditional: bool = Field(default=False)
     mode: str = Field(default=THREAD)
     join_branches: List[str] = Field(default_factory=list)
+
+    # setup_branches 消费的 camelCase 遗留键（is_conditional/join_branches 已是声明字段）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"joinBranches", "isConditional"})
 
     @model_validator(mode="before")
     @classmethod
@@ -167,8 +184,45 @@ class Parallel(Node):
         if executor is None:
             return {}
 
+        if mode == THREAD and in_plaita_pool_thread() and (join_branches or background_branches):
+            # 本节点已跑在共享线程池的 worker 上: 再向同一池提交并阻塞 join,
+            # 分支数 >= max_workers 时所有 worker 互相等待, 永久死锁。降级为
+            # 串行内联执行 (正确性优先, 仅嵌套场景放弃并发)。
+            return self._execute_nested_inline(join_branches, background_branches, execution)
+
         self._execute_background_branches(background_branches, executor, execution)
         return self._execute_join_branches(join_branches, executor, execution)
+
+    def _execute_nested_inline(self, join_branches, background_branches, execution) -> Dict[str, Any]:
+        """池 worker 线程上的串行降级路径。
+
+        background 分支保持"失败留痕不抛"的容错语义; join 分支保持
+        ``_process_future_result`` 的错误哨兵结构, 但全部在当前线程顺序执行。
+        """
+        logger.debug(
+            "parallel %s: on a plaita pool worker thread; executing %d join + %d background "
+            "branches inline (nested shared-pool submission would starve)",
+            self.id, len(join_branches), len(background_branches),
+        )
+        results: Dict[str, Any] = {}
+        for branch in background_branches:
+            try:
+                self.exec_branch(branch, execution)
+            except Exception as exc:  # noqa: BLE001 - 与 background done_callback 同语义
+                logger.warning("parallel background branch %r raised: %s", branch.name, exc, exc_info=True)
+                state = _get_bg_state(execution)
+                with _BG_LOCK:
+                    state["errors"].append({"branch": branch.name, "error": str(exc)})
+        for branch in join_branches:
+            try:
+                results[branch.name] = self.exec_branch(branch, execution)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("parallel branch %s raised: %s", branch.name, exc, exc_info=True)
+                results[branch.name] = {
+                    "__parallel_error__": str(exc),
+                    "__branch__": branch.name,
+                }
+        return results
 
     def _split_branches(self, branches):
         join_branches = [b for b in branches if b.name in self.join_branches]
@@ -198,13 +252,23 @@ class Parallel(Node):
             fut = executor.submit(self.exec_branch, branch, execution)
             state["futures"].append(fut)
             fut.add_done_callback(
-                self._make_background_done_callback(branch, errors)
+                self._make_background_done_callback(branch, errors, state)
             )
 
     @staticmethod
-    def _make_background_done_callback(branch, errors):
-        """构造 future done_callback: 失败时把异常追加到共享 errors 列表。"""
+    def _make_background_done_callback(branch, errors, state):
+        """构造 future done_callback: 失败时把异常追加到共享 errors 列表。
+
+        完成的 future 一律从 ``state["futures"]`` 摘除——future 持有
+        result/exception 引用，留在登记表里会把整个分支产出钉在内存。
+        """
         def _on_done(fut):
+            with _BG_LOCK:
+                try:
+                    state["futures"].remove(fut)
+                except ValueError:
+                    pass
+                state["done"] = state.get("done", 0) + 1
             try:
                 exc = fut.exception()
             except Exception as e:  # cancelled / executor shutdown
@@ -227,11 +291,19 @@ class Parallel(Node):
         fire-and-forget; 此接口供测试与故障排查时确认后台分支是否已落地。
         """
         import concurrent.futures as _cf
-        futures = _get_bg_state(execution)["futures"]
-        if not futures:
-            return {"done": 0, "not_done": 0}
-        done, not_done = _cf.wait(list(futures), timeout=timeout)
-        return {"done": len(done), "not_done": len(not_done)}
+        state = _get_bg_state(execution)
+        futures = state["futures"]
+        if futures:
+            _cf.wait(list(futures), timeout=timeout)
+        # 完成的 future 由 done_callback 摘除（避免 future 钉住分支结果），
+        # 摘除后的数量由 state["done"] 计数器给出；仍留在列表里的已完成
+        # future（手工注册/回调竞态窗口）持锁扫描计数，与回调互斥不重不漏。
+        with _BG_LOCK:
+            listed_done = sum(1 for f in futures if f.done())
+            return {
+                "done": state.get("done", 0) + listed_done,
+                "not_done": len(futures) - listed_done,
+            }
 
     def get_background_errors(self, execution) -> list:
         """读取本执行实例的后台分支失败记录 (``[{branch, error}, ...]`` 的拷贝)。

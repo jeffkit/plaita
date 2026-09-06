@@ -73,7 +73,7 @@ class TimingCallback(FlowCallback):
         self._t = {}
     def on_node_start(self, flow, node, **kwargs):
         self._t[node.id] = time.time()
-    def on_node_end(self, flow, node, result=None, **kwargs):
+    def on_node_end(self, flow, node, result, error, exception, **kwargs):
         dt = (time.time() - self._t.get(node.id, time.time())) * 1000
         print(f"  (耗时 {dt:.1f}ms)")
 

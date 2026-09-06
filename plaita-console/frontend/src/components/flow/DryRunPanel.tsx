@@ -11,7 +11,10 @@ interface DryRunPanelProps {
 // 试跑面板：输入 JSON → 调 /api/flows/dry-run → 节点级结果时间线。
 // 调试能力：节点输出可「固定」（pin），后续试跑跳过真实执行；
 // 每个节点可「仅运行此节点」（上游取 pin 值，下游 mock 无副作用）。
-export default function DryRunPanel({ flowJson, onClose }: DryRunPanelProps) {
+export default function DryRunPanel({ flowJson, onClose, nodesByType, onErrorNodeId }: DryRunPanelProps & {
+  nodesByType?: Record<string, string[]>
+  onErrorNodeId?: (id: string) => void
+}) {
   const [inputJson, setInputJson] = useState('{\n  "name": "plaita"\n}')
   const [inputError, setInputError] = useState<string | null>(null)
   const [pins, setPins] = useState<Record<string, unknown>>({})
@@ -94,12 +97,44 @@ export default function DryRunPanel({ flowJson, onClose }: DryRunPanelProps) {
       </div>
 
       {inputError && <p className="text-xs text-red-400 mb-2">{inputError}</p>}
-      {mut.isError && <p className="text-xs text-red-400 mb-2">{(mut.error as Error).message}</p>}
+      {mut.isError && (() => {
+        const msg = (mut.error as Error).message
+        // "Flow 校验失败: 1 validation error for Assignment upstream_output ..."
+        // → 解析出错节点类型，列出画布上的同名节点并支持一键打开配置
+        // （2026-09 UI 旅程评审：裸 pydantic 文案让用户无从定位）
+        const typeMatch = msg.match(/for ([A-Z]\w+)/)
+        const nodeType = typeMatch
+          ? typeMatch[1].replace(/([A-Z])/g, (c) => '_' + c.toLowerCase()).toLowerCase()
+          : null
+        const ids = (nodeType && nodesByType?.[nodeType]) || []
+        return (
+          <div className="mb-2 p-2 rounded border border-red-500/40 bg-red-500/10">
+            <p className="text-xs text-red-400">{msg}</p>
+            {nodeType && ids.length > 0 && (
+              <div className="mt-1.5 text-[11px] text-ink-secondary">
+                出错节点类型：<span className="font-mono">{nodeType}</span>
+                {ids.length > 0 && <>，画布上对应的节点：
+                  {ids.map((id) => (
+                    <button
+                      key={id}
+                      className="mx-0.5 px-1 py-0.5 rounded border border-line bg-dark-800 text-dark-100 hover:border-plaita-500 font-mono"
+                      onClick={() => onErrorNodeId?.(id)}
+                      title="点击打开该节点的配置"
+                    >
+                      {id}
+                    </button>
+                  ))}
+                </>}
+              </div>
+            )}
+          </div>
+        )
+      })()}
       {result?.error && <p className="text-xs text-red-400 mb-2">{result.error}</p>}
 
       {Object.keys(pins).length > 0 && (
         <div className="mb-3 p-2 rounded bg-plaita-600/10 border border-plaita-600/40">
-          <div className="text-xs text-plaita-300 mb-1">
+          <div className="text-xs text-plaita-600 dark:text-plaita-300 mb-1">
             已固定 {Object.keys(pins).length} 个节点输出（试跑时跳过真实执行）
           </div>
           <div className="flex flex-wrap gap-1">
@@ -147,7 +182,7 @@ export default function DryRunPanel({ flowJson, onClose }: DryRunPanelProps) {
                   {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                   <span className="font-mono text-dark-100 truncate">{n.name || n.id}</span>
                   {n.type === 'mock' && (
-                    <span className="text-[10px] text-plaita-300 border border-plaita-600/50 rounded px-1">
+                    <span className="text-[10px] text-plaita-600 dark:text-plaita-300 border border-plaita-600/50 rounded px-1">
                       mock
                     </span>
                   )}
@@ -185,7 +220,7 @@ export default function DryRunPanel({ flowJson, onClose }: DryRunPanelProps) {
                     <div className="mt-1 text-dark-400">in: <span className="text-dark-200">{short(n.input)}</span></div>
                   )}
                   {n.output !== undefined && n.output !== null && (
-                    <div className="mt-0.5 text-dark-400">out: <span className="text-green-300">{short(n.output)}</span></div>
+                    <div className="mt-0.5 text-dark-400">out: <span className="text-emerald-700 dark:text-green-300">{short(n.output)}</span></div>
                   )}
                 </>
               )}
@@ -214,7 +249,8 @@ function NodeIOTree({
   const [open, setOpen] = useState(defaultOpen)
   if (value === undefined || value === null) return null
   const text = JSON.stringify(value, null, 2)
-  const toneCls = tone === 'green' ? 'text-green-300' : 'text-dark-200'
+  // 亮色主题下 green-300 过淡不可读：dark 用亮绿、light 用深绿
+  const toneCls = tone === 'green' ? 'text-emerald-700 dark:text-green-300' : 'text-dark-200'
   return (
     <div>
       <button className="text-dark-400 flex items-center gap-0.5" onClick={() => setOpen((v) => !v)}>

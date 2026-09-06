@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 # 允许的时钟偏移（秒），客户端签发时间不应过分超前于此
 _MAX_SKEW = 300
+# 服务端强制上限：签名有效期由客户端 key-time 自报，被盗 Authorization
+# 在 nonce 未启用期间可重放到自报的过期时间——服务端封顶 1 小时。
+_MAX_SIGNATURE_VALIDITY = 3600
 
 # Redis nonce key 前缀
 _REDIS_NONCE_PREFIX = "plaita:nonce:"
@@ -115,6 +118,10 @@ class RedisNonceStore:
         self._redis = redis.Redis.from_url(redis_url)
         self._prefix = key_prefix
 
+    def ping(self) -> None:
+        """可达性探测：连接/认证失败抛异常，供启动期降级判定。"""
+        self._redis.ping()
+
     def check_and_record(self, nonce: str, expire_at: float) -> bool:
         now = time()
         ttl = int(expire_at - now)
@@ -135,6 +142,10 @@ class RedisNonceStore:
 # 模块级默认 store。测试可通过 reset_nonce_cache() 重置。
 _default_nonce_store: NonceStore = InMemoryNonceStore()
 
+# 外部 store（Redis 等）连接类故障时的进程内兜底 store：降级期间重放判定
+# 退化为单进程有效（与本地单机档能力一致），恢复后自动切回原 store。
+_fallback_nonce_store = InMemoryNonceStore()
+
 
 def configure_nonce_store(store: NonceStore) -> None:
     """注入自定义 nonce store (如 ``RedisNonceStore``)。"""
@@ -150,14 +161,29 @@ def reset_nonce_cache() -> None:
 def enable_replay_protection(redis_url: Optional[str] = None) -> None:
     """启用服务端重放保护, 配置 nonce store。
 
-    - ``redis_url`` 非空: 配置 ``RedisNonceStore``, 多 worker 共享, 真重放保护。
+    - ``redis_url`` 非空: 配置 ``RedisNonceStore`` (多 worker 共享, 真重放保护)。
+      配置前先 ping 一次做可达性校验, 连不上则**降级**为 ``InMemoryNonceStore``
+      并 ``logger.warning``——不让 nonce store 的连接故障拖垮启动或造成
+      "multi-worker safe" 的假象。
     - ``redis_url`` 为 None: 用 ``InMemoryNonceStore``——**仅在单 worker 部署下
       有效**, 多 worker (gunicorn -w N) 下跨 worker 重放仍可能在窗口期内绕过。
       会显式 ``logger.warning`` 提醒。
     """
     if redis_url:
-        configure_nonce_store(RedisNonceStore(redis_url))
-        logger.info("replay protection enabled with Redis nonce store (multi-worker safe)")
+        try:
+            store = RedisNonceStore(redis_url)
+            store.ping()
+        except Exception as exc:  # noqa: BLE001 — 连接/认证类故障统一降级
+            logger.warning(
+                "Redis nonce store 不可达（%s: %s），重放保护降级为 IN-MEMORY "
+                "nonce store：多 worker 部署在故障期间无法跨 worker 防重放。"
+                "恢复 Redis 并重启可启用完整保护。",
+                type(exc).__name__, exc,
+            )
+            configure_nonce_store(InMemoryNonceStore())
+        else:
+            configure_nonce_store(store)
+            logger.info("replay protection enabled with Redis nonce store (multi-worker safe)")
     else:
         configure_nonce_store(InMemoryNonceStore())
         logger.warning(
@@ -224,6 +250,15 @@ def verify_authorization(
     if kt is None:
         return False
     _, sign_expire = kt
+    # 服务端有效期上限（2026-09 安全评审 P2）：有效期取自客户端自报的
+    # key-time，无上限时被盗 Authorization 在 nonce 未启用期间可一直重放
+    # 到客户端自报的过期时间。
+    if sign_expire - fields["sign_time"] > _MAX_SIGNATURE_VALIDITY:
+        logger.warning(
+            "rejected signature: client-declared validity %ss exceeds cap %ss",
+            sign_expire - fields["sign_time"], _MAX_SIGNATURE_VALIDITY,
+        )
+        return False
 
     now = time() if now is None else now
     if now > sign_expire:
@@ -240,7 +275,20 @@ def verify_authorization(
     store = nonce_store if nonce_store is not None else _default_nonce_store
     # 签名 + 时效都对, 再做重放检查 (仅当 nonce 存在)
     if fields["nonce"] is not None:
-        if not store.check_and_record(fields["nonce"], sign_expire):
+        try:
+            ok = store.check_and_record(fields["nonce"], sign_expire)
+        except Exception as exc:  # noqa: BLE001 — nonce store 故障不拖垮验签
+            # 降级口径（与 main.py 本地单机档一致：可用性优先）：
+            # 外部 store（Redis）连接类故障时不让验签 500/fail-closed，而是
+            # 退回进程内判定——本进程内重放仍被拦截，跨 worker 防护在故障
+            # 窗口内弱化；store 恢复后下一次请求自动走回原路径。
+            logger.warning(
+                "nonce store 不可用（%s: %s），降级为进程内重放判定"
+                "（故障窗口内多 worker 部署的跨 worker 防护弱化）",
+                type(exc).__name__, exc,
+            )
+            ok = _fallback_nonce_store.check_and_record(fields["nonce"], sign_expire)
+        if not ok:
             logger.warning("replay detected: nonce=%s already used", fields["nonce"])
             return False
 

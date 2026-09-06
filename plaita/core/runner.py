@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 import isodate
+from concurrent.futures import ThreadPoolExecutor
 
 from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
@@ -79,7 +81,14 @@ def _parse_timeout(timeout) -> Optional[int]:
         return None
     if timeout.isdigit():
         return int(timeout)
-    duration = isodate.parse_duration(timeout)
+    try:
+        duration = isodate.parse_duration(timeout)
+    except Exception as e:
+        # 历史上第三方 isodate.ISO8601Error 裸穿透，用户不知道合法格式长什么样
+        raise ValueError(
+            f"Invalid timeout {timeout!r}: use milliseconds as a plain number "
+            f"(e.g. '300') or an ISO 8601 duration (e.g. 'PT0.3S', 'PT2S', 'PT1M')"
+        ) from e
     return None if duration.total_seconds() == 0 else int(duration.total_seconds() * 1000)
 
 
@@ -105,9 +114,10 @@ def _handle_flow_result_error(flow, node, e: FlowResultError):
 
 
 def _handle_node_error(flow, node, error_handler, e: Exception):
-    logger.warning("handle node error: %s", node.name or node.id, exc_info=True)
     strategy = _coerce_strategy(error_handler.strategy if error_handler else None)
     if not error_handler or strategy == ErrorStrategy.ABORT:
+        # abort：紧接着 raise，完整 traceback 由异常本身携带——这里再打一份
+        # exc_info 是双份噪音，故只留 raise。
         code = DEFAULT_NODE_ABORT_CODE if not error_handler else error_handler.error_code
         message = f"执行节点{node.name or node.id}出错了: {type(e).__name__}: {e}{_node_loc_suffix(node)}"
         if error_handler and error_handler.error_message:
@@ -115,6 +125,13 @@ def _handle_node_error(flow, node, error_handler, e: Exception):
         err = NodeExecutionError(message, node=node, code=code)
         err.source_line = _node_source_loc(node)
         raise err from e
+    # 被 errorHandler 兜住的错误：简明一行（含策略与异常摘要），完整 traceback
+    # 只在 DEBUG 级别提供——历史上无条件 exc_info 打整段栈，是主要日志噪音源。
+    logger.warning(
+        "node %s error handled (errorHandler.strategy=%s): %s: %s",
+        node.name or node.id, strategy.value, type(e).__name__, e,
+    )
+    logger.debug("handled node error traceback", exc_info=True)
     if strategy == ErrorStrategy.CONTINUE:
         return None
     if strategy == ErrorStrategy.CONTINUE_WITH:
@@ -131,6 +148,45 @@ def _get_error_result(error_handler):
     if strategy == ErrorStrategy.CONTINUE_WITH:
         return error_handler.default_value
     return None
+
+# 无超时同步节点的共享执行池（2026-09 性能评审 P1）：历史上每个 sync 节点
+# 无条件裸起一条 daemon 线程，thread start+join 占线性流程运行时间的 64%。
+# 复用池消除线程创建开销；带超时的节点仍走裸 daemon 线程——超时遗弃语义
+# 需要"线程不进 atexit 等待"，池做不到。
+_SYNC_NODE_POOL: Optional[ThreadPoolExecutor] = None
+_SYNC_NODE_POOL_PID: Optional[int] = None
+
+
+def _get_sync_node_pool() -> ThreadPoolExecutor:
+    """按进程惰性创建共享节点池。
+
+    ``Parallel(mode=process)`` 在 Linux 上 fork 子进程执行分支——fork 不继承
+    线程，模块级池在子进程里是"没有 worker 的空壳"，提交任务即永久挂死
+    （CI Linux 实测 30 分钟 hang；macOS spawn 重新 import 不受影响，故本地
+    不复现）。按 PID 检测并在 fork 后重建。
+    """
+    global _SYNC_NODE_POOL, _SYNC_NODE_POOL_PID
+    pid = os.getpid()
+    if _SYNC_NODE_POOL is None or _SYNC_NODE_POOL_PID != pid:
+        _SYNC_NODE_POOL = ThreadPoolExecutor(thread_name_prefix="plaita-node")
+        _SYNC_NODE_POOL_PID = pid
+    return _SYNC_NODE_POOL
+# 嵌套防护（与 parallel_executor 的池饿死修复同思路）：worker 线程内再提交
+# 同一池并阻塞等待（子流程/分支内的 sync 节点），任务数 >= max_workers 时
+# 全部 worker 互相等待——CI 2 核（pool=6）上宽分支流程 30 分钟挂死实测。
+# 已在池 worker 上的嵌套节点直接内联执行。
+_NODE_POOL_TLS = threading.local()
+
+
+def _node_pool_bound(fn):
+    def _wrapped(ctx):
+        _NODE_POOL_TLS.in_node_pool = True
+        try:
+            return fn(ctx)
+        finally:
+            _NODE_POOL_TLS.in_node_pool = False
+    return _wrapped
+
 
 class NodeRunner:
     """Handles single-node execution with timeout, retry, and error handling."""
@@ -178,8 +234,21 @@ class NodeRunner:
         max_timeout_ms: Optional[int],
     ) -> Any:
         error_handler = node.error_handler
-        max_retries = error_handler.retry_times if error_handler else 0
+        # retryTimes 配成负数时 range(max_retries+1) 为空, 循环体一次不跑直接
+        # 落到 _get_error_result——abort 策略下错误被静默吞掉, 流程"成功"结束。
+        # 钳到 >=0 保证至少执行一次, 错误走正常的 _handle_node_error 分发。
+        max_retries = max(0, error_handler.retry_times if error_handler else 0)
         config_timeout = self._parse_timeout(node.timeout)
+
+        # cancel_event 的作用域是**当前节点**: 上一个节点超时置位的 cancel 信号
+        # 在进入本节点前必须复位——否则本次运行后续所有消费该标志的 process
+        # 模式 Parallel 会静默跳过全部分支, 流程带着空结果"成功"结束。
+        # (被超时遗弃的上一个节点的线程不受影响: 它丢弃的是结果, 不再消费该标志。)
+        exec_ctx = self.node_execution or self.context
+        cancel_event = getattr(exec_ctx, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            logger.debug("resetting cancel_event carried over from a previous node before running %s", node.id)
+            cancel_event.clear()
 
         total_timeout_ms: Optional[int] = None
         if config_timeout:
@@ -245,8 +314,19 @@ class NodeRunner:
         will not delay pytest/process teardown.
         """
         exec_ctx = self.node_execution or self.context
-        cancel_event = getattr(exec_ctx, "cancel_event", None)
         loop = asyncio.get_running_loop()
+
+        if timeout_ms is None:
+            # 无超时：直接在共享池中执行并 await——不参与超时遗弃语义，
+            # 也就无需裸线程。已在池 worker 上的嵌套调用内联执行（防池饿死，
+            # 见 _NODE_POOL_TLS 说明）。
+            if getattr(_NODE_POOL_TLS, "in_node_pool", False):
+                return node.run(exec_ctx)
+            return await loop.run_in_executor(
+                _get_sync_node_pool(), _node_pool_bound(node.run), exec_ctx,
+            )
+
+        cancel_event = getattr(exec_ctx, "cancel_event", None)
         fut: asyncio.Future = loop.create_future()
 
         def _target() -> None:

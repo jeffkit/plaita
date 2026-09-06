@@ -100,32 +100,45 @@ def apply_debug_transform(
     return {**data, "nodes": out}
 
 
-def _collect_blocked_nodes(data: Any, path: str = "nodes") -> List[str]:
-    """递归扫描 flow dict / childFlow，收集被禁节点描述。"""
+def _collect_blocked_nodes(data: Any, path: str = "nodes", _depth: int = 0) -> List[str]:
+    """递归扫描 flow dict / 嵌套节点结构，收集被禁节点描述。
+
+    2026-09 安全评审 P0 修复：原实现只沿固定键（childFlow/flows/branches/children）
+    下钻，且把 branches[i] 当 flow dict 找 nodes——而 Parallel 的嵌套 flow 挂在
+    ``branches[i].flow``，藏进分支的危险节点（code 等）永远不会被扫描，dry-run
+    闸门被整个绕过。改为泛型遍历：含 ``type``/``node_type`` 的 dict 一律视为节点
+    （检查并入其所有值下钻），含 ``nodes`` 的 dict 视为子流程，其余容器继续下钻。
+    """
     blocked: List[str] = []
-    if not isinstance(data, dict):
+    if _depth > 32:  # 防御性深度上限；JSON 结构本无环
         return blocked
-    nodes = data.get("nodes") or []
-    if not isinstance(nodes, list):
+    if isinstance(data, dict):
+        ntype = str(data.get("type") or data.get("node_type") or "").strip().lower()
+        if ntype:
+            nid = data.get("id") or "?"
+            if ntype in _BLOCKED_NODE_TYPES:
+                blocked.append(f"{path}[{nid}].type={ntype}")
+            for key, value in data.items():
+                blocked.extend(
+                    _collect_blocked_nodes(value, path=f"{path}[{nid}].{key}", _depth=_depth + 1)
+                )
+            return blocked
+        if "nodes" in data:
+            for i, node in enumerate(data.get("nodes") or []):
+                blocked.extend(
+                    _collect_blocked_nodes(node, path=path, _depth=_depth + 1)
+                )
+            return blocked
+        for key, value in data.items():
+            blocked.extend(
+                _collect_blocked_nodes(value, path=f"{path}.{key}", _depth=_depth + 1)
+            )
         return blocked
-    for i, node in enumerate(nodes):
-        if not isinstance(node, dict):
-            continue
-        ntype = str(node.get("type") or node.get("node_type") or "").strip().lower()
-        nid = node.get("id") or f"[{i}]"
-        if ntype in _BLOCKED_NODE_TYPES:
-            blocked.append(f"{path}[{nid}].type={ntype}")
-        child = node.get("childFlow") or node.get("child_flow")
-        if isinstance(child, dict):
-            blocked.extend(_collect_blocked_nodes(child, path=f"{path}[{nid}].childFlow"))
-        for key in ("flows", "branches", "children"):
-            nested = node.get(key)
-            if isinstance(nested, list):
-                for j, item in enumerate(nested):
-                    if isinstance(item, dict):
-                        blocked.extend(
-                            _collect_blocked_nodes(item, path=f"{path}[{nid}].{key}[{j}]")
-                        )
+    if isinstance(data, list):
+        for i, item in enumerate(data):
+            blocked.extend(
+                _collect_blocked_nodes(item, path=f"{path}[{i}]", _depth=_depth + 1)
+            )
     return blocked
 
 

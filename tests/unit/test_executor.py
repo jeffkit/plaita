@@ -55,8 +55,12 @@ class TestExecutionMode(unittest.TestCase):
         self.assertEqual(ExecutionMode.from_string("distributed"), ExecutionMode.DISTRIBUTED)
 
     def test_from_string_invalid(self):
-        with self.assertRaises(KeyError):
+        # 0.5.0 回归修复: 非法 mode 现在抛带合法值清单的 ValueError（原来是裸 KeyError）
+        with self.assertRaises(ValueError) as cm:
             ExecutionMode.from_string("invalid")
+        self.assertIn("normal", str(cm.exception))
+        self.assertIn("generator", str(cm.exception))
+        self.assertIn("distributed", str(cm.exception))
 
 
 class TestNormalStrategy(unittest.IsolatedAsyncioTestCase):

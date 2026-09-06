@@ -24,7 +24,8 @@ sequenceDiagram
     Caller->>FE: run_distributed(flow, None, saved_context, resume_type="event", resume_data)
     FE->>FE: on_flow_resume + on_node_resume
     FE->>FE: node.on_event(execution, resume_data)
-    FE->>FE: 续跑后续节点
+    FE-->>Caller: 恢复挂起节点本身（is_end=false）
+    Caller->>FE: 继续推进：run_distributed(resume_type="continue")×N
     FE-->>Caller: {is_end: true, result}
 ```
 
@@ -49,6 +50,8 @@ sequenceDiagram
 | `cancel` | 取消等待 | `node.on_cancel(execution)` |
 | `continue` | 不唤醒，从 `LAST_NODE` 之后继续下一节点 | — |
 
+注意 `event` / `timeout` / `cancel` **只恢复挂起节点本身**（本次调用的返回即该节点状态）；后续节点要用 `resume_type="continue"` 逐次推进，直到 `is_end`。`continue` 在挂起节点仍为 `pending` 时会被拒绝（防止静默跳过事件）。
+
 恢复前会校验：挂起节点确实是 `EventNode`、其状态为 `pending`、`resume_type` 在允许集合内，否则抛 `FlowExecutionException`。
 
 ## 复用 execution 实例
@@ -58,7 +61,7 @@ sequenceDiagram
     ```python
     execution = FlowExecution(callback_handlers=[MyCallback()])
     step = execution.run_distributed(flow, params)             # 挂起
-    save(execution._ctx.execution_id, step["context"])
+    save(step["execution_id"], step["context"])
     # ...
     step = execution.run_distributed(flow, None, saved_context=load(...),
                                      resume_type="event", resume_data=data)  # 恢复

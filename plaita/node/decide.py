@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 from plaita.core import types
 from ..io import Property, evaluate
 from ..logger import logger
-from .basic import Node
+from .basic import Node, warn_unknown_keys
 
 CONDITION_OP_EQ = "eq"
 CONDITION_OP_NE = "ne"
@@ -53,12 +53,38 @@ class Condition(BaseModel):
                 return left is not right
             return False
 
-        return condition_matcher[self.operator](left, right)
+        try:
+            matcher = condition_matcher[self.operator]
+        except KeyError:
+            # 非法 operator 曾裸 KeyError: 'bogus-op'，不列合法算子（R6 fuzz B1）
+            import difflib
+
+            close = difflib.get_close_matches(
+                self.operator, list(condition_matcher), n=2, cutoff=0.6
+            )
+            hint = f" Did you mean {close!r}?" if close else ""
+            raise ValueError(
+                f"Unknown condition operator {self.operator!r}.{hint} "
+                f"Valid operators: {sorted(condition_matcher)}"
+            ) from None
+
+        return matcher(left, right)
 
 
 class ConditionGroup(BaseModel):
     relation: str
     conditions: List[Union[Condition, "ConditionGroup"]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_relation(cls, values):
+        # "xor" 等非法 relation 曾静默降级为 any——分支语义静默改变
+        # （R6 fuzz B4）。只接受 and/or。
+        if isinstance(values, dict) and values.get("relation") not in (LOGIC_TYPE_AND, LOGIC_TYPE_OR):
+            raise ValueError(
+                f"condition relation must be 'and' or 'or', got {values.get('relation')!r}"
+            )
+        return values
 
     def match(self, context, prefix=None):
         if not self.conditions:
@@ -92,12 +118,28 @@ class Branch(BaseModel):
     next: Optional[str] = None
     is_default: bool = Field(default=False)
 
+    # setup_condition 消费的遗留键
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"isDefault"})
+
+    @model_validator(mode="before")
+    @classmethod
+    def _schema_hygiene(cls, values: Dict) -> Dict:
+        return warn_unknown_keys(cls, values)
+
     @model_validator(mode="before")
     @classmethod
     def setup_condition(cls, values: Dict) -> Dict:
         condition = values.get("condition")
         if condition and not isinstance(condition, (Condition, ConditionGroup)):
             values["condition"] = condition_from_json(condition)
+            # 输入非空但解析结果为 None = 残缺 condition（如漏写 value）——
+            # 历史上静默变 None，该分支永不命中，无 default 时流程假成功。
+            if values["condition"] is None:
+                logger.warning(
+                    "branch %r: condition %r could not be parsed (needs field/operator/value "
+                    "or relation/conditions); the branch will NEVER match",
+                    values.get("name", "?"), condition,
+                )
         if "isDefault" in values:
             values["is_default"] = values.pop("isDefault")
         values["next"] = values.get("next", None)
@@ -178,6 +220,9 @@ class Switch(Node):
 
     branches: List[Branch] = Field(default_factory=list)
 
+    # setup_branches 消费的遗留键（output_type 字段无 alias）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"outputType"})
+
     @model_validator(mode="before")
     def setup_branches(cls, values: Dict) -> Dict:
         branches = values.get("branches", [])
@@ -198,8 +243,9 @@ class Switch(Node):
         assert self.branches, "branches is required for decide node"
 
     def execute(self, execution):
-        self.branches.sort(key=lambda x: x.priority, reverse=True)
-        for branch in self.branches:
+        # 非原地排序：branches 是共享的 pydantic 模型字段，原地 sort 会永久改变
+        # 模型状态（并发 run 同一 Flow 对象是数据竞争，console/debug 展示失真）。
+        for branch in sorted(self.branches, key=lambda x: x.priority or 0, reverse=True):
             if branch.condition and branch.condition.match(execution.context, prefix=execution.express_prefix):
                 logger.info("test branches, %s, %s", branch.name, branch.next)
                 return resolve_branch_target(self, branch)
@@ -268,6 +314,18 @@ class SwitchLegacy(Switch):
         cases = values.get("cases", [])
         default = values.get("default", "default")
 
+        for i, case in enumerate(cases):
+            # 缺 id 曾直接裸 KeyError: 'id'，无任何上下文（R5 差分评审 P1-5）
+            if not isinstance(case, dict) or "id" not in case:
+                raise ValueError(
+                    f"switch-case node {values.get('id', '?')!r}: cases[{i}] 缺少必填的 "
+                    f"'id' 字段（得到 {case!r}）。每个 case 需要 id/value，可选 name。"
+                )
+            if "value" not in case:
+                raise ValueError(
+                    f"switch-case node {values.get('id', '?')!r}: cases[{i}] ({case.get('id')!r}) "
+                    "缺少必填的 'value' 字段。"
+                )
         branches = [
             Branch(
                 name=case["id"],

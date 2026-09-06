@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { GitBranch, Plus, Trash2 } from 'lucide-react'
 import { useFlowEditor } from '../../stores/flowEditor'
@@ -63,8 +63,18 @@ export default function NodeConfigDrawer() {
     setDesc((d.fields.desc as string) || '')
     setOutput((d.fields.output as string) || '')
     setTimeout_((d.fields.timeout as string) || '')
-    setTab('config') // 切换节点时回到「配置」Tab
   }, [node])
+
+  // Tab 重置只在**切换选中节点**时发生——历史上依赖 [node]，而节点对象在
+  // 每次字段编辑后都会换新引用，导致「容错 Tab 里选个超时就被踢回配置」
+  // （2026-09 UI 旅程评审用户实测）。
+  const prevSelectedId = useRef(selectedId)
+  useEffect(() => {
+    if (prevSelectedId.current !== selectedId) {
+      prevSelectedId.current = selectedId
+      setTab('config')
+    }
+  }, [selectedId])
 
   // 归一化必须在 early-return 前（hooks 顺序）
   const schema = node ? (schemaByType.get((node.data as FlowNodeData).type) ?? null) : null
@@ -125,9 +135,11 @@ export default function NodeConfigDrawer() {
   const formExcludeKeys = new Set<string>(
     d.type === 'parallel'
       ? ['branches']
-      : SUBFLOW_TYPES.has(d.type) || d.type === 'reference'
-        ? ['child_flow']
-        : []
+      : d.type === 'assignment'
+        ? ['output_type', 'outputType']
+        : SUBFLOW_TYPES.has(d.type) || d.type === 'reference'
+          ? ['child_flow']
+          : []
   )
 
   /** 写回类型字段（保留通用字段），空值键剔除 */
@@ -203,6 +215,42 @@ export default function NodeConfigDrawer() {
                     ? '内嵌子流程（与外部 flowID 引用互斥，引擎按调度器注入优先）'
                     : '每个元素以 item / index 注入子流程（$INPUT.item / $INPUT.index）'}
                 </p>
+              </div>
+            )}
+
+            {d.type === 'assignment' && (
+              <div>
+                <label className="block text-caption text-ink-muted mb-1">
+                  输出类型
+                  <span className="ml-1.5 text-[10px] text-ink-faint">
+                    通常保持「对象」即可，无需修改
+                  </span>
+                </label>
+                <select
+                  className="input w-full"
+                  value={(() => {
+                    const ot = (typeFields.output_type ?? typeFields.outputType) as
+                      | Record<string, unknown>
+                      | undefined
+                    return (ot?.dataType as string) || 'object'
+                  })()}
+                  onChange={(e) => {
+                    const dt = e.target.value
+                    const fields = { ...d.fields }
+                    // 两种历史键都清掉，只写 schema 规范键 output_type，
+                    // 避免「高级字段」里 output_type / outputType 双写重复
+                    delete fields.output_type
+                    delete fields.outputType
+                    if (dt !== 'object') fields.output_type = { dataType: dt }
+                    updateNodeData(node.id, { fields })
+                  }}
+                >
+                  <option value="object">对象（dict，推荐）</option>
+                  <option value="array">数组（list）</option>
+                  <option value="string">字符串</option>
+                  <option value="number">数值</option>
+                  <option value="boolean">布尔</option>
+                </select>
               </div>
             )}
 

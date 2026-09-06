@@ -345,7 +345,10 @@ def _compile_error_handler(form: Any) -> Dict[str, Any]:
     if not pos:
         raise SyntaxError("on-error 需要指定 strategy")
     strategy = str(pos[0])
-    if strategy not in ("abort", "continue", "continue_with"):
+    if strategy not in ("abort", "continue", "continue_with", "continue-with"):
+        # 连字符 "continue-with" 是 ErrorStrategy 的规范枚举值 (core 层两种拼写
+        # 都收并归一化); DSL 层历史上只收下划线, 用户从 enum 取 .value 填进来会被拒。
+        strategy = "continue_with" if strategy == "continue-with" else strategy
         raise SyntaxError(f"unknown error handler strategy: {strategy!r}")
     spec: Dict[str, Any] = {"strategy": strategy}
     retry = _opt(kw, "retry", "retry-times")
@@ -468,6 +471,13 @@ def _c_assignment(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     pos = _take_id(pos, kw)
     if not pos:
         raise SyntaxError("assign 需要一个 output 表达式")
+    if len(pos) > 1:
+        # 静默丢弃多余位置参数曾造成"按 Lisp 直觉不加引号的函数调用"被
+        # 错编译成 output="$F.mul"（参数列表丢失），运行期得到错值。
+        raise SyntaxError(
+            f"assign 只接受一个 output 表达式，收到 {len(pos)} 个；"
+            '函数调用表达式需要加引号，如 "$F.mul($INPUT.x, 10)"'
+        )
     spec: Dict[str, Any] = {"type": "assignment", "output": _value(pos[0])}
     _common_fields(kw, spec, ctx)
     ot = _opt(kw, "output-type", "outputType")

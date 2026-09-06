@@ -6,8 +6,8 @@ node types.  A module-level default registry is created at import time
 and populated with all built-in nodes plus any nodes discovered via
 ``importlib.metadata`` entry_points (group ``plaita.nodes``).
 
-Backward-compatible helpers (``nodes``, ``node_register``, ``parse_node``)
-are preserved but emit ``DeprecationWarning``.
+Backward-compatible helpers (``node_register``, ``parse_node``) emit
+``DeprecationWarning``; the ``nodes`` dict proxy is still silent.
 """
 
 from __future__ import annotations
@@ -90,7 +90,21 @@ class NodeRegistry:
     # -- public API ---------------------------------------------------------
 
     def register(self, node_cls: Type[Node]) -> Type[Node]:
-        """Register a node class. Returns *node_cls* so it can be used as a decorator."""
+        """Register a node class. Returns *node_cls* so it can be used as a decorator.
+
+        覆盖已注册的**不同**类时发 warning——历史上静默顶掉（包括劫持内置
+        ``start``/``end`` 等类型），排查时完全无线索。同类型重复注册（如
+        importlib 重复加载场景）不告警。
+        """
+        existing = self._nodes.get(node_cls.node_type)
+        if existing is not None and existing is not node_cls:
+            _logger.warning(
+                "NodeRegistry.register: node_type %r is being overridden: "
+                "%s -> %s. If this is unintentional, pick a different node_type.",
+                node_cls.node_type,
+                f"{existing.__module__}.{existing.__qualname__}",
+                f"{node_cls.__module__}.{node_cls.__qualname__}",
+            )
         self._nodes[node_cls.node_type] = node_cls
         return node_cls
 
@@ -110,12 +124,19 @@ class NodeRegistry:
             raise RuntimeError(f"not specific node type: {node_dict}")
         node_cls = self._nodes.get(node_type)
         if not node_cls:
+            import difflib
+
+            available = sorted(self._nodes.keys())
+            close = difflib.get_close_matches(node_type, available, n=3, cutoff=0.6)
             hint = ""
             if node_type == "code":
                 hint = (
                     " CodeNode was moved out of the default registry in 0.4.0; "
                     "call register_code_node() at startup to opt in."
                 )
+            elif close:
+                hint = f" Did you mean {close!r}?"
+            hint += f" Available node types: {available}"
             raise RuntimeError(f"unRecognized node type: {node_type}.{hint}")
         content = node_dict.copy()
         del content["type"]
@@ -311,7 +332,8 @@ nodes = _RegistryDictProxy(_default_registry)
 
 
 def register_code_node(registry: Optional[NodeRegistry] = None,
-                       default_backend: Optional[str] = None) -> None:
+                       default_backend: Optional[str] = None,
+                       allowed_backends: Optional[list] = None) -> None:
     """Register :class:`CodeNode` for use in flows.
 
     ``CodeNode`` executes **arbitrary user-supplied code** (Python ``exec``
@@ -323,6 +345,13 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
             process-wide default registry is used.
         default_backend: Python 沙箱后端默认值, 写入 ``code._DEFAULT_SANDBOX_BACKEND``。
             未指定时沿用模块默认 (0.5.0 起 ``"docker"``)。
+        allowed_backends: 沙箱后端白名单（2026-09 安全评审 P0）。设置后，流程 JSON
+            里声明的 ``sandbox_backend`` 不在白名单内即**解析期硬失败**——没有它，
+            流程作者可把运营者选定的默认后端逐节点覆盖为 ``"unsafe"``（宿主任意
+            代码执行）。多租户部署务必显式设置，且不要发放 ``unsafe``/``subprocess``::
+
+                register_code_node(default_backend="docker",
+                                   allowed_backends=("docker",))
 
             **安全 gate**: 若生效后端 (``default_backend`` 或模块默认) 为 ``"docker"``
             但当前环境 docker daemon 不可用, **拒绝注册**并抛 ``RuntimeError``, 指明
@@ -356,6 +385,14 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
         )
     if default_backend is not None:
         _code_module._DEFAULT_SANDBOX_BACKEND = default_backend
+    if allowed_backends is not None:
+        invalid = [b for b in allowed_backends if b not in _code_module._PYTHON_BACKENDS]
+        if invalid:
+            raise ValueError(
+                f"register_code_node: unknown sandbox backend(s) {invalid}; "
+                f"supported: {sorted(_code_module._PYTHON_BACKENDS)}"
+            )
+        _code_module._ALLOWED_SANDBOX_BACKENDS = frozenset(allowed_backends)
     target = registry if registry is not None else get_default_registry()
     target.register(CodeNode)
 

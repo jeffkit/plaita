@@ -8,6 +8,7 @@ chat model that returns scripted @flow source.
 from __future__ import annotations
 
 import pytest
+pytest.importorskip("langchain", reason="langchain extra not installed: pip install 'plaita-ai[agent]'")
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from plaita_ai.agent.fot import FoTAgent

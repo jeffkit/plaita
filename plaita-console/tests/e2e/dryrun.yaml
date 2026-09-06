@@ -1,0 +1,81 @@
+name: 试跑（dry-run）
+sequential: true
+
+# dry-run 在 console 进程内同步执行内联 flow JSON（POST /api/flows/dry-run），
+# 不需要发布/Redis/worker——覆盖逐节点 trace 与 pinned 调试语义。
+# 流程 JSON 避开 code 节点（默认注册表不含，且 dry-run 有危险节点拦截防 RCE）。
+
+cases:
+  - name: "基本试跑：结果输出 + 逐节点 trace"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-basic","name":"dryrun-basic","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"$INPUT.value","result_type":"success"}]}'
+        input:
+          value: 21
+    expect:
+      status: 200
+      body:
+        result: 21
+        nodes:
+          length: { gte: 2 }
+
+  - name: "pinned：固定节点输出跳过真实执行（pinned 后 result 为节点输出字典）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-pinned","name":"dryrun-pinned","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"$INPUT.value","result_type":"success"}]}'
+        input:
+          value: 21
+        pinned:
+          end: 42
+    expect:
+      status: 200
+      body:
+        result:
+          end: 42
+
+  - name: "flowJson 非法 JSON 返回 error（HTTP 仍 200，错误在 body）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: "not-a-json"
+    expect:
+      status: 200
+      body:
+        error: { contains: "非合法 JSON" }
+
+  - name: "未知节点类型被拒"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-bad","name":"bad","nodes":[{"id":"start","type":"start","next":"x"},{"id":"x","type":"no_such_node","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+    expect:
+      status: 200
+      body:
+        error: { contains: "unRecognized node type" }
+
+  - name: "危险节点拦截（code 节点防 console 进程 RCE）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-code","name":"code","nodes":[{"id":"start","type":"start","next":"c"},{"id":"c","type":"code","language":"python","code":"def run(v):\n    return v","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+    expect:
+      status: 200
+      body:
+        error: { contains: "危险节点" }

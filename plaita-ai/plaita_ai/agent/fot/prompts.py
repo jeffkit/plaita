@@ -15,7 +15,7 @@ COMPOSE_SYSTEM = """你是 Plaita 流程规划器。根据用户需求和可用�
 - 函数体从不作为 Python 执行，只做静态编译；必须在 @flow 支持子集内书写。
 
 ## @flow 速记（完整语法见下方《@flow DSL 参考》，以参考为准）
-- 主流程用 @flow("id", input_type="object")，字段从 INPUT.x 读取。
+- 主流程用 @flow("id")，字段从 INPUT.x 读取。
 - 字符串拼接用 F.concat，禁止 f-string；条件比较只能写在 if/elif 判断位置。
 - HTTP/TOOL/CHILD/PARALLEL/MAP 等节点不能嵌在 return 表达式里，先赋值再 return。
 - **不要发明 F.xxx 函数**——只允许参考文档里列出的已注册函数；大小/相等比较用

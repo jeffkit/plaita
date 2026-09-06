@@ -46,7 +46,7 @@ CLI 等价命令（与 MCP 共用内核）：`plaita-ai compile` / `plaita-ai ru
 from plaita.dsl.codeflow import flow_from_source, compile_source
 
 src = '''
-@flow("greet", input_type="object", desc="打招呼")
+@flow("greet", desc="打招呼")
 def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)
@@ -64,7 +64,7 @@ print(flow.run(name="alice"))   # -> "hi ALICE"
 ### 函数骨架
 
 ```python
-@flow("<flow_id>", input_type="object", desc="<说明>")
+@flow("<flow_id>", desc="<说明>")
 def <name>(INPUT):
     # if / elif / else / for / return / 赋值
     return <expr>
@@ -72,7 +72,7 @@ def <name>(INPUT):
 
 - `INPUT` / `F` / `NODE` / `GLOBAL` / `PARENT` / `ENV` / `HTTP` / `CODE` / `EVENT` / `MAP` / `FILTER` / `FIND` / `LOOP` / `REDUCE` / `CHILD` / `REFERENCE` / `PARALLEL` 这些名字**不需要 import**，是 AST 编译期识别的占位符。
 - **自定义节点占位符**：任何注册到 `NodeRegistry` 的 `Node` 子类，用 `node_type` 大写化作占位符即可在 `@flow` 里直接调用（如 `node_type="llm"` → `LLM(prompt=..., model=...)`、`"retrieve"` → `RETRIEVE(query=...)`、`"tool"` → `TOOL(action=...)`）。编译期查 registry，未注册的大写名会报错并列出可用类型，便于自纠。详见下方「自定义节点」。
-- `input_type` 常用 `"object"`（输入是 dict，字段用 `INPUT.x` 访问）或 `"array"`（输入是 list）。
+- **不要写 `input_type`**：该参数已废弃且被忽略。`$INPUT` 恒为 `run()` 传入的 dict，字段用 `INPUT.x` 访问。
 - **函数体从不被当 Python 执行**，只做静态 AST 分析。所以写法必须在支持子集内，否则编译期报错。
 
 ### 表达式映射（你写的 Python → 编译成的表达式）
@@ -114,7 +114,7 @@ return "minor"
 ### if / elif / else、赋值、return
 
 ```python
-@flow("grade", input_type="object")
+@flow("grade")
 def grade(INPUT):
     if INPUT.score >= 90:
         return "A"
@@ -127,7 +127,7 @@ def grade(INPUT):
 赋值生成 `assignment` 节点，后续用变量名引用其输出：
 
 ```python
-@flow("greet", input_type="object")
+@flow("greet")
 def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)
@@ -138,7 +138,7 @@ def greet(INPUT):
 用 `for x in MAP(...):` 语法，子流程写在函数体里：
 
 ```python
-@flow("double_numbers", input_type="object")
+@flow("double_numbers")
 def double_numbers(INPUT):
     for x in MAP(INPUT.numbers, id="dbl"):
         return F.mul(x, 2)
@@ -150,7 +150,7 @@ double_numbers.run(numbers=[1, 2, 3, 4])   # -> [2, 4, 6, 8]
 `FILTER` / `FIND` 子流程要返回 bool，惯例 `if ... return True` / `return False`：
 
 ```python
-@flow("first_even", input_type="object")
+@flow("first_even")
 def first_even(INPUT):
     for x in FIND(INPUT.nums, id="fd"):
         if F.mod(x, 2) == 0:
@@ -162,23 +162,23 @@ def first_even(INPUT):
 ### 子流程：@childflow + CHILD
 
 ```python
-@childflow(input_type="object")
+@childflow()
 def double_each(INPUT):
     return F.mul(INPUT.item, 2)
 
-@flow("double_via_child", input_type="object")
+@flow("double_via_child")
 def double_via_child(INPUT):
     r = CHILD(input={"item": INPUT.payload}, flow=double_each)
     return r
 ```
 
-> `CHILD` 的 `input` 要匹配子流程 `input_type`：`object` 传 dict，`array` 传 list。
+> `CHILD` 的 `input` 恒为 dict（`$INPUT` 已不支持数组形态）。
 > **运行期生成时**，源码里可同时含多个 `@childflow` 函数 + 一个 `@flow` 主函数，`flow_from_source` 会自动收集子流程注册表，主流程用 `flow=<name>` 引用。
 
 ### HTTP 调用 + 错误处理
 
 ```python
-@flow("create_user", input_type="object", desc="创建用户")
+@flow("create_user", desc="创建用户")
 def create_user(INPUT):
     if INPUT.age >= 18:
         resp = HTTP.post(
@@ -198,15 +198,15 @@ def create_user(INPUT):
 `branches` 用 **dict 字面量**`{名: 子流程}` 或 **`(名, 子流程)` 元组列表**；要等待结果汇合的分支名用 **`join=`**（不是 `join_branches=`）。返回 dict `{分支名: result}`。
 
 ```python
-@childflow(input_type="object")
+@childflow()
 def sub_a(INPUT):
     return F.mul(INPUT.x, 2)
 
-@childflow(input_type="object")
+@childflow()
 def sub_b(INPUT):
     return F.add(INPUT.x, 10)
 
-@flow("fan_out", input_type="object")
+@flow("fan_out")
 def fan_out(INPUT):
     r = PARALLEL(
         branches={"a": sub_a, "b": sub_b},
@@ -272,7 +272,7 @@ flow_from_source(src).run(q="plaita 是什么")
 ### 第 2 步：生成 @flow 源码
 
 写一段**自包含**的 `@flow` 源码字符串（含必要的 `@childflow`）。务必：
-- `input_type` 用 `"object"`，字段全从 `INPUT.x` 取。
+- 不写 `input_type`（已废弃）；字段全从 `INPUT.x` 取。
 - 节点调用（`HTTP`/`CHILD`/`PARALLEL`/`MAP` 等）只作语句或赋值右侧。
 - 字符串拼接用 `F.concat`，不要用 f-string 或 `+`（除非确认两端都是数字/列表）。
 - 每条分支路径都有 `return`，避免"赋值后悬空"。

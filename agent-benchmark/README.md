@@ -19,7 +19,7 @@ agent-benchmark/
 
 1. **claude code CLI** 已安装并在 PATH（`which claude`）。
 2. **DEEPSEEK_API_KEY** 已在 `~/.zshrc` 里 `export`（harness 会回退解析它）。
-3. 当前在 pyloki 仓库根目录，`plaita` 可 `import`（`pip install -e .`）。
+3. 当前在 plaita 仓库根目录，`plaita` 可 `import`（`pip install -e .`）。
 4. HTTP 类任务需 `pip install plaita[http]`；不想跑外网任务用 `--skip-http`。
 
 harness 把请求路由到 DeepSeek 的 Anthropic 兼容端点：
@@ -55,7 +55,7 @@ python agent-benchmark/run_benchmark.py --skip-http
 # 包含 known_broken 任务（REDUCE/PARALLEL，plaita 运行时 bug，默认跳过）
 python agent-benchmark/run_benchmark.py --include-broken
 
-# 关闭隔离模式：在 pyloki 仓库内运行（agent 可读源码/文档，不推荐用于评估 skill）
+# 关闭隔离模式：在 plaita 仓库内运行（agent 可读源码/文档，不推荐用于评估 skill）
 python agent-benchmark/run_benchmark.py --no-isolated
 ```
 
@@ -64,7 +64,7 @@ python agent-benchmark/run_benchmark.py --no-isolated
 默认在**仓库外的隔离目录**（`~/.claude/skills/flow-coder-workspace/runs/`）运行 agent：
 - agent 的工作目录与 `-d` 都指向隔离目录，**不会被指向 plaita 仓库**；
 - prompt 显式禁止 agent 去文件系统搜索 plaita 源码/文档；
-- `plaita` 只通过 `PYTHONPATH=<pyloki_root>` 让 `solution.py` 能 `import`，agent 无法浏览其源码。
+- `plaita` 只通过 `PYTHONPATH=<plaita_root>` 让 `solution.py` 能 `import`，agent 无法浏览其源码。
 
 这样 `without_skill` 臂只能凭 prompt 里给的极简 API 提示完成任务，**才能真正测出 skill 的边际价值**。
 非隔离模式（`--no-isolated`）下 agent 能读 `docs-site/docs/guide/code-dsl.md` 和 `examples/`，baseline 会被仓库文档污染（实测 easy/medium 任务两臂都会 pass，看不出 skill 增益）。
@@ -84,7 +84,7 @@ python agent-benchmark/run_benchmark.py --no-isolated
 1. harness 在 `runs/<arm>/<task_id>/` 写 `inputs.json`——**只含测试输入，不含 expected**，防止 agent "背答案"。
 2. 把 `flow-coder` skill 内容（`--arm skill` 时）+ 需求 + 输出规范拼成 prompt，调用：
    ```
-   claude -p --model deepseek-v4-flash --dangerously-skip-permissions -d <pyloki_root> <prompt>
+   claude -p --model deepseek-v4-flash --dangerously-skip-permissions -d <plaita_root> <prompt>
    ```
 3. agent 在该目录产出 `solution.py`（含 `@flow` 源码的运行器）与 `results.json`：
    ```json

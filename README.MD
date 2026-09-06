@@ -14,7 +14,7 @@ plaita 将 JSON 格式的逻辑流程定义解析为可执行的 `Flow`，并以
 ## 核心特性
 
 - **JSON 流程定义** —— 用节点 + `next`/分支描述控制流，平台可视化编排或手写皆可
-- **插件化节点** —— 内置 17 种节点，自定义节点只需实现 `execute`，支持 `entry_points` 自动发现
+- **插件化节点** —— 默认注册表内置 23 种节点，自定义节点只需实现 `execute`，支持 `entry_points` 自动发现
 - **AI Agent 编排** —— 作为典型场景之一：LLM 规划 + plaita 执行，`@flow` / JSON 均有构建期校验，`flow_from_source` 让 AI 生成的流程编译期就拦错
 - **三种执行模式** —— Normal 同步、Generator 单步调试、Distributed 跨进程断点续执
 - **超时与错误策略** —— 节点级/流程级 ISO 8601 超时、`abort`/`continue`/`continue_with` 错误策略与重试
@@ -92,7 +92,8 @@ result = flow.run(input_key="value")   # 同步返回
 
 ```python
 for step in flow.debug(input_key="value"):
-    print(step.node_id, step.output)   # 每节点 yield 一次
+    print(step["id"], step["result"])   # 每节点 yield 一次（dict）
+# 到达 End 节点的那一步 step["is_end"] 为 True
 ```
 
 ### Distributed — 断点续执
@@ -108,7 +109,7 @@ execution = FlowExecution(event_bus=InMemoryEventBus())
 
 # 推进一步（遇到 event 节点则挂起）
 step = execution.run_distributed(flow, {"key": "value"})
-# 恢复（外部事件到达后）
+# 恢复（外部事件到达后；resume 只消费事件并恢复挂起节点本身）
 if step["is_suspend"]:
     step = execution.run_distributed(
         flow, None,
@@ -116,6 +117,11 @@ if step["is_suspend"]:
         resume_type="event",
         resume_data={"approved": True},
     )
+    # 后续节点继续用 resume_type="continue" 推进，直至 step["is_end"] 为 True
+    while not step["is_end"]:
+        step = execution.run_distributed(
+            flow, None, saved_context=step["context"], resume_type="continue",
+        )
 ```
 
 生产部署时换成 `RedisEventBus` 和 `RedisStorage`，代码逻辑不变。
@@ -124,15 +130,17 @@ if step["is_suspend"]:
 
 ## 可选依赖（extras）
 
-plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`，其余能力按需安装：
+plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`、`croniter`，其余能力按需安装：
 
 | extra | 安装命令 | 提供能力 |
 |-------|---------|---------|
 | `redis` | `pip install plaita[redis]` | Redis 存储 / Redis EventBus |
 | `server` | `pip install plaita[server]` | FastAPI 服务端、FlowWorker、扩展节点 |
 | `code` | `pip install plaita[code]` | `CodeNode`——0.5.0 起**默认 `docker` 容器级沙箱**（`--network none` / `--read-only` / 资源上限，需本机 Docker daemon）；可选 `subprocess` / `restricted`(AST) / `unsafe`；JS 后端仍走 PyExecJS（无沙箱，慎用） |
-| `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp） |
+| `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp）；`PlaitaClient`（requests） |
 | `yaml` | `pip install plaita[yaml]` | YAML 格式流程定义 |
+| `sqlalchemy` | `pip install plaita[sqlalchemy]` | SQLAlchemy EventBus / Storage（实验性） |
+| `credentials` | `pip install plaita[credentials]` | 凭据加密（`plaita.credentials`） |
 | `all` | `pip install plaita[all]` | 上述全部 |
 
 缺失 extra 时会抛出**可操作的 `ImportError`**，明确提示安装哪个 extra。
@@ -153,20 +161,20 @@ plaita 提供三种主要形态定义流程，最终均编译为同一执行模�
 
 ## 内置节点
 
-16 种内置节点覆盖常见控制流与数据处理（`code` 节点不在默认注册表，需 `register_code_node()` 显式 opt-in；0.5.0 起 `register_code_node()` 默认走 `docker` 沙箱，daemon 不可用时拒绝注册——见下方[安全](#安全)小节）：
+默认注册表含 23 种节点，覆盖常见控制流与数据处理（`code` 节点不在默认注册表，需 `register_code_node()` 显式 opt-in；0.5.0 起 `register_code_node()` 默认走 `docker` 沙箱，daemon 不可用时拒绝注册——见下方[安全](#安全)小节）：
 
-`start` · `end` · `assignment` · `switch` · `if` · `case` · `loop` · `map` · `filter` · `find` · `reduce` · `child` · `reference` · `parallel` · `http` · `event`
+`start` · `end` · `assignment` · `switch` · `if` · `case` · `loop` · `while` · `map` · `filter` · `find` · `reduce` · `child` · `reference` · `parallel` · `http` · `event` · `mock` · `delay` · `approval` · `redis_queue` · `kafka_queue` · `http_callback`
 
 > `parallel` 节点的 `mode` 取 `thread` / `process`；`coroutine` mode 已于 0.4.0 下线（在任何 running event loop 下必崩），改用 `thread`。
 
-扩展节点（通过 `server` extra 或 entry_points）：`delay` · `redis_queue` · `kafka_queue` · `http_callback` · `approval`
+其中 `delay` · `approval` · `redis_queue` · `kafka_queue` · `http_callback` 这 5 个扩展节点经 `plaita.nodes` entry_points 随包自动注册（无需 extra 即可解析；实际执行需相应基础设施），完整节点清单见[内置节点手册](https://jeffkit.github.io/plaita/nodes/builtin/)。
 
 ---
 
 ## 自定义节点
 
 ```python
-from plaita import Node, NodeRegistry, Flow
+from plaita import Node, NodeRegistry, Flow, get_default_registry
 
 class MyNode(Node):
     node_type = "myNode"   # 流程 JSON 里 "type" 字段对应的值
@@ -175,9 +183,14 @@ class MyNode(Node):
     def execute(self, execution=None):
         return {"result": "ok"}
 
+# 方式一：注册到全局默认 registry（对该进程后续解析的所有 Flow 生效）
+get_default_registry().register(MyNode)
+flow = Flow.from_string('....')
+result = flow.run()
+
+# 方式二：用独立 registry，经 registry= 注入（只影响这一个 Flow）
 registry = NodeRegistry()
 registry.register(MyNode)
-
 flow = Flow.from_string('....', registry=registry)
 result = flow.run()
 ```
@@ -210,7 +223,7 @@ from plaita.node import register_code_node
 
 register_code_node()                          # 默认 docker, 需本机 Docker daemon
 register_code_node(default_backend="subprocess")  # 半信任: 进程级, 不隔离 FS/网络
-register_code_node(default_backend="restricted")  # 显式声明半信任 (AST 沙箱, 有已知绕过向量)
+register_code_node(default_backend="restricted")  # 仅防误用：AST 沙箱有确定性逃逸路径（allowlist 模块可达宿主能力），禁止用于半信任作者
 register_code_node(default_backend="unsafe")      # 完全信任代码作者
 ```
 
@@ -292,7 +305,7 @@ pnpm dev        # 默认 http://localhost:5173
 plaita/
 ├── plaita/              # Python 运行时核心包
 │   ├── core/            # 执行核心（Flow/FlowExecution/NodeRunner/ExecutionContext）
-│   ├── node/            # 内置节点（17 种）
+│   ├── node/            # 内置节点（默认注册表 23 种；code 需显式注册）
 │   ├── dsl/             # 流程 DSL（YAML/Builder/S-expr/@flow）
 │   ├── event/           # 事件系统（memory/redis/sqlalchemy）
 │   ├── storage/         # 执行状态与流程定义存储
@@ -351,24 +364,3 @@ python -m twine upload dist/*
 ## 许可证
 
 MIT
-
-
-## Generator 提示词候选（针对 GLM-5.2 空转问题）
-
-实测现象：部分轮次 generator 只在回复中描述实现而不写文件（gate 绿基线下
-会 vacuously pass，已被 Evaluator 判定拦下）。候选强化措辞（加在 gen prompt 尾部，
-逐个试跑对比）：
-
-1. **工具指令型**（推荐先试）：
-   「你必须使用文件编辑工具完成本 sprint：逐个创建/修改上述文件，保存到磁盘。
-   禁止只在回复中描述实现。完成后运行 pytest 验证，全绿后结束。」
-2. **验收前置型**：
-   「开始编码前，先在回复第一行列出你将要创建/修改的文件清单；然后逐一写入磁盘；
-   最后运行 pytest 并粘贴输出。回复中若没有 pytest 全绿的输出粘贴，视为未完成。」
-3. **角色收紧型**（recursive 专用）：
-   「以自动提交模式工作（所有工具调用自动批准）。直接修改工作区文件，
-   不要征求确认。你的回复只需要：改动文件清单 + pytest 输出摘要。」
-
-配套运行参数：`--permission-mode auto --headless`（已内置于 plaita-nodes
-recursive-direct 执行器）。若仍空转，检查 recursive 会话 jsonl 确认工具调用
-是否被拒（`permission_denials` 字段）。

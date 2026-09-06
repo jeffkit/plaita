@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING
 from plaita.core.callback import BaseCallbackManager, CallbackManager
 from plaita.core.context import ExecutionContext
 from plaita.core.errors import (
+    ErrorStrategy,
     FlowExecutionException,
     FlowStartMissingError,
     FlowTimeoutError,
@@ -104,7 +105,13 @@ class ExecutionMode(Enum):
 
     @classmethod
     def from_string(cls, mode: str) -> "ExecutionMode":
-        return cls[mode.upper()]
+        try:
+            return cls[mode.upper()]
+        except KeyError:
+            valid = ", ".join(m.value for m in cls)
+            raise ValueError(
+                f"Unknown execution mode: {mode!r}. Valid modes: {valid}"
+            ) from None
 
 
 class ExecutionStrategy(Protocol):
@@ -166,19 +173,30 @@ class GeneratorStrategy:
         if next_node is None:
             raise FlowStartMissingError()
         reached_end = False
+        start_time = time.time()
 
         while next_node:
             current = next_node
+            remaining = None
+            if timeout_ms is not None:
+                remaining = max(0, timeout_ms - int((time.time() - start_time) * 1000))
             result, branch, next_node, reached_end = await _advance_one(
-                flow, runner, callback_manager, current,
+                flow, runner, callback_manager, current, max_timeout_ms=remaining,
             )
+            # End 节点这一步就是流程终点, is_end 必须为 True——历史上这里
+            # 恒为 False, 消费方按 ``step["is_end"]`` 判完成永远不触发
+            # (0.5.0 回归: docs/guide/execution-modes.md 的完成判断失效)。
             yield _create_lazy_output(
-                current, result, branch, context.to_dict(), execution_id=context.execution_id,
+                current, result, branch, context.to_dict(),
+                is_end=reached_end, execution_id=context.execution_id,
             )
             if reached_end:
                 break
 
             logger.debug("next_node: %s with branch: %s", next_node, branch)
+
+            if timeout_ms is not None and (time.time() - start_time) > timeout_ms / 1000:
+                raise FlowTimeoutError()
 
         if not reached_end:
             logger.debug("not reached_end: %s", next_node)
@@ -206,6 +224,39 @@ class DistributedStrategy:
         if saved_context and resume_type is not ResumeType.CONTINUE:
             return await self._handle_resume(flow, context, runner, callback_manager, resume_type, resume_data)
 
+        if not saved_context and resume_type is not ResumeType.CONTINUE:
+            # checkpoint 丢失/未传时，resume_type='cancel' 等会被静默丢弃、
+            # 直接开跑全新流程——掩盖故障（R6 fuzz B2）。显式给出非 continue
+            # 的 resume 意图却没有可恢复状态，应当报错。
+            raise ResumeError(
+                f"resume_type={resume_type.value!r} requires a saved_context, "
+                "but none was provided; the execution cannot be resumed. To start "
+                "a fresh run, omit resume_type (or pass resume_type='continue')."
+            )
+
+        if saved_context and resume_type is ResumeType.CONTINUE:
+            # 防御: 挂起中的 EventNode 不允许用默认 ``continue`` 绕过——历史上
+            # 这条路会跳过 pending 校验直接推进到 End, 流程"正常完成", 事件
+            # 永不消费且订阅泄漏, 无任何报错。只有事件已被 resume 消费
+            # (状态不再是 pending) 后才允许 continue 推进后续节点。
+            last_node_id = context.last_node_id
+            if last_node_id:
+                suspended_node = flow.find_node_by_id(last_node_id)
+                # ``is True`` 而非真值判断: is_suspending 是 bool 属性, 需要滤掉
+                # mock/异构节点对象上的 truthy 属性代理。
+                if suspended_node is not None and getattr(suspended_node, "is_suspending", False) is True:
+                    pfx_resume = context.express_prefix
+                    node_results = context.get_state(f"{pfx_resume}{context.express_node_name}", {})
+                    prev_state = node_results.get(last_node_id) if isinstance(node_results, dict) else None
+                    status = prev_state.get("status", "") if isinstance(prev_state, dict) else ""
+                    if status == "pending":
+                        raise ResumeError(
+                            f"Execution is suspended at EventNode {last_node_id!r} (status=pending); "
+                            "resume_type='continue' would silently skip it. "
+                            "Use resume_type='event'/'cancel'/'timeout' to resolve the event first.",
+                            node=suspended_node,
+                        )
+
         current_node, result, branch = await self._determine_current_node(flow, context, runner, callback_manager)
 
         if not current_node:
@@ -229,8 +280,12 @@ class DistributedStrategy:
 
         # 统一走 flow.next_node: 分支节点按 branch 选 branch.next, 普通节点走 next,
         # 避免在此重复实现一套与 flow._get_branch_target 易漂移的图遍历逻辑。
-        current_node = flow.next_node(current_node, branch)
-        return current_node, result, branch
+        next_node = flow.next_node(current_node, branch)
+        if next_node is None and not flow.is_end_node(current_node) and getattr(current_node, "branching", False):
+            # 与 Normal/Generator 的 _advance_one 对齐: 分支未命中不允许
+            # 静默"完成"（历史上 distributed 会合成一个 is_end=True 的假 End 步）。
+            _handle_unmatched_branch(current_node, branch)
+        return next_node, result, branch
 
     async def _start_new_flow(self, flow, context, runner, callback_manager):
         start_node = flow.start_node
@@ -309,13 +364,38 @@ class DistributedStrategy:
         except Exception as e:
             error = {"code": -500, "message": str(e)}
             callback_manager.on_node_end(flow, current_node, None, error, exception=e)
-            logger.error("Error during resume: %s", e, exc_info=True)
+            logger.error("Error during resume: %s", e)
             resume_err = ResumeError(str(e), node=current_node)
             resume_err.source_line = getattr(current_node, "source_line", None)
             raise resume_err from e
 
         context.update_node_result(current_node, result)
+        await self._unregister_suspended_subscription(current_node, context, prev_state)
         return _create_lazy_output(current_node, result, None, context.to_dict(), is_suspend=False, execution_id=context.execution_id)
+
+    async def _unregister_suspended_subscription(self, node, context, prev_state):
+        """resume 完成后注销挂起期注册的事件订阅。
+
+        历史上订阅永不注销：分布式部署下每个后续同类型事件都会匹配到死订阅、
+        经 event_filter 再 enqueue 一次注定失败的 resume（ResumeError 噪音 +
+        队列垃圾）。hasattr 探测保持对简化 bus 实现的兼容。
+        """
+        if not isinstance(prev_state, dict):
+            return
+        subscription_id = prev_state.get("subscription_id")
+        if not subscription_id:
+            return
+        event_bus = context.get_or_create_event_bus()
+        unregister = getattr(event_bus, "unregister_subscription", None) if event_bus else None
+        if unregister is None:
+            return
+        try:
+            outcome = unregister(subscription_id)
+            if asyncio.iscoroutine(outcome):
+                await outcome
+            logger.debug("unregistered subscription %s for resumed node %s", subscription_id, node.id)
+        except Exception as e:  # noqa: BLE001 - 注销失败不影响 resume 结果
+            logger.warning("failed to unregister subscription %s after resume: %s", subscription_id, e)
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +403,7 @@ class DistributedStrategy:
 # ---------------------------------------------------------------------------
 
 
-def _create_lazy_output(node, result, branch, context, is_suspend=False, execution_id=None):
+def _create_lazy_output(node, result, branch, context, is_suspend=False, execution_id=None, is_end=False):
     return {
         "id": node.id,
         "type": node.node_type,
@@ -331,7 +411,7 @@ def _create_lazy_output(node, result, branch, context, is_suspend=False, executi
         "result": result,
         "branch": branch or "",
         "context": context,
-        "is_end": False,
+        "is_end": is_end,
         "is_suspend": is_suspend,
         "execution_id": execution_id,
     }
@@ -351,7 +431,40 @@ async def _advance_one(flow, runner, callback_manager, node, max_timeout_ms=None
     )
     is_end = flow.is_end_node(node)
     next_node = None if is_end else flow.next_node(node, branch)
+    if next_node is None and not is_end and getattr(node, "branching", False):
+        _handle_unmatched_branch(node, branch)
     return result, branch, next_node, is_end
+
+
+def _handle_unmatched_branch(node, branch):
+    """分支节点未命中任何分支且无 default：拒绝静默"成功"。
+
+    历史行为是返回 None → 调度层把整个 ``$NODE`` 状态表当流程结果返回，
+    流程带着中间态"成功"结束——这是编排框架最危险的静默错误结果。
+    现在默认抛错；节点显式配置 ``errorHandler.strategy=continue/continue-with``
+    时保留旧的"继续"逃生口（降级为 warning）。
+    """
+    handler = getattr(node, "error_handler", None)
+    strategy = handler.strategy if handler is not None else None
+    if strategy in (ErrorStrategy.CONTINUE, ErrorStrategy.CONTINUE_WITH):
+        # 逃生口语义（与 0.5.x 历史行为一致）：分支节点的"下游"由分支定义，
+        # 未命中即无下游——流程在此收尾，$NODE 状态表作为流程结果返回。
+        logger.warning(
+            "branching node %s matched no branch and has no default (branch=%r); "
+            "ending the flow with the $NODE state as its result "
+            "(errorHandler.strategy=%s legacy behavior)",
+            node.id, branch, strategy.value,
+        )
+        return
+    raise FlowExecutionException(
+        message=(
+            f"Branching node '{node.id}' ({getattr(node, 'node_type', '?')}) matched "
+            f"no branch and has no default branch; refusing to end the flow with an "
+            f"ambiguous intermediate result. Add a default branch, or set this node's "
+            f"errorHandler.strategy='continue' to opt into the legacy skip behavior."
+        ),
+        node=node,
+    )
 
 
 def _create_end_output(node, result, context, execution_id=None):

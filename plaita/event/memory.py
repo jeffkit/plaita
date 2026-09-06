@@ -1,5 +1,14 @@
 """
 基于内存的事件总线和存储实现
+
+内存总线语义（与 Redis/SQLAlchemy 后端不同，使用前请知悉）：
+- ``wait_for_event`` 只能看到**注册之后**发布的事件——未来先注册、后 publish；
+  先发布的事件不会回放（即使还在 event_storage 里）。
+- ``register_subscription`` 只把订阅写入订阅存储，**不驱动任何分发**；
+  总线分发只认 ``register_handler``。订阅记录供 EventFilter 等外部组件
+  按 correlation_id 检索消费。
+- ``publish`` 是 fire-and-forget：handler 在独立 task 中异步分发。
+  publish 返回后立即关闭事件循环，**不保证** handler 已经执行。
 """
 import asyncio
 import time
@@ -112,12 +121,21 @@ class InMemoryEventSubscriptionStorage(EventSubscriptionStorage):
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
-    
+
     async def store_subscription(self, subscription: EventSubscription) -> str:
         async with self.lock:
             self.subscriptions[subscription.subscription_id] = subscription
             return subscription.subscription_id
     
+    async def unregister_subscription(self, subscription_id: str) -> bool:
+        """注销订阅——与 RedisEventSubscriptionStorage 的公开契约对齐。
+
+        历史上内存后端只有 ``delete_subscription``，订阅清理调用方
+        （strategies 的 resume 注销 / event_filter 的终态回收）在内存后端上
+        静默 AttributeError（被 except 吞掉）。
+        """
+        return await self.delete_subscription(subscription_id)
+
     async def get_subscription(self, subscription_id: str) -> Optional[EventSubscription]:
         async with self.lock:
             return self.subscriptions.get(subscription_id)
@@ -277,6 +295,8 @@ class InMemoryEventBus(EventBus):
         """
         初始化内存事件总线
         """
+        # fire-and-forget 分发任务的强引用集合（见 _track_task）
+        self._pending_tasks: set = set()
         # 存储等待特定事件的future
         self.waiting_futures: Dict[str, List[asyncio.Future]] = {}
         # 事件存储
@@ -302,7 +322,17 @@ class InMemoryEventBus(EventBus):
             self._lock = asyncio.Lock()
         return self._lock
 
-    async def publish(self, event: Union[Event, str, Dict[str, Any]], 
+    def _track_task(self, task: "asyncio.Task") -> None:
+        """持住 fire-and-forget 分发任务的强引用。
+
+        裸 ``create_task`` 的任务没有任何引用时可能被 GC 中途取消，且 loop
+        关闭竞态下静默不执行（仅 'Task was destroyed' 警告）。完成回调自动
+        从集合丢弃，不阻碍回收。
+        """
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def publish(self, event: Union[Event, str, Dict[str, Any]],
                     prevent_duplicate_consumption: bool = True,
                     **kwargs) -> str:
         """发布事件"""
@@ -321,6 +351,7 @@ class InMemoryEventBus(EventBus):
         await self.event_storage.store_event(event)
         
         # 通知等待的future
+        # （注意：本总线不回放——等待开始前发布的事件不会送达，见模块 docstring）
         if event.event_type in self.waiting_futures:
             futures = self.waiting_futures[event.event_type]
             for future in futures:
@@ -330,7 +361,7 @@ class InMemoryEventBus(EventBus):
             self.waiting_futures[event.event_type] = [f for f in futures if not f.done()]
         
         # 分发事件到所有匹配的处理器
-        asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption))
+        self._track_task(asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption)))
         
         return event.event_id
     
@@ -367,7 +398,7 @@ class InMemoryEventBus(EventBus):
                 self.waiting_futures[event.event_type] = [f for f in futures if not f.done()]
                 
             # 分发事件
-            asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption))
+            self._track_task(asyncio.create_task(self._dispatch_event(event, prevent_duplicate_consumption)))
         
         return event_ids
     

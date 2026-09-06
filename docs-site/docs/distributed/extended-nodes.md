@@ -1,16 +1,20 @@
 # 扩展节点
 
-扩展节点（`plaita.server.nodes`，需 `server` extra）是基于 `EventNode` 的预置节点，覆盖四类常见长时等待场景。它们通过 `plaita.nodes` entry_points 自动注册。
+扩展节点（`plaita.server.nodes`）是基于 `EventNode` 的预置节点，覆盖四类常见长时等待场景。它们经 `plaita.nodes` entry_points **随包自动注册**（无需额外安装即可解析；实际执行需相应基础设施，通常配合 `server` extra 的外延服务）。
+
+!!! note "字段名与事件类型"
+
+    扩展节点字段均为**小写下划线**形式（无驼峰归一化）；字段值不支持 `{{ }}` 模板插值，支持 `$` 前缀表达式。除 `delay` 外，其余扩展节点会在构造时把 `event_type` **固定**为约定值——外延服务按该类型发布事件。
 
 ## 总览
 
-| type | 类 | 用途 |
-|------|------|------|
-| `delay` | `DelayNode` | 延迟指定时间后触发 |
-| `redis_queue` | `RedisQueueNode` | 等待 Redis 队列消息 |
-| `kafka_queue` | `KafkaQueueNode` | 等待 Kafka 队列消息 |
-| `http_callback` | `HttpCallbackNode` | 等待外部 HTTP 回调 |
-| `approval` | `ApprovalNode` | 等待人工审批决策 |
+| type | 类 | 触发事件（固定） | 用途 |
+|------|------|------|------|
+| `delay` | `DelayNode` | `delay_trigger`（默认，可改） | 延迟指定时间后触发 |
+| `redis_queue` | `RedisQueueNode` | `redis_message` | 等待 Redis 队列消息 |
+| `kafka_queue` | `KafkaQueueNode` | `kafka_message` | 等待 Kafka 队列消息 |
+| `http_callback` | `HttpCallbackNode` | `http_callback` | 等待外部 HTTP 回调 |
+| `approval` | `ApprovalNode` | `approval_decision` | 等待人工审批决策 |
 
 ## BaseExtendedNode
 
@@ -34,17 +38,16 @@ def execute(self, execution):
 {
     "type": "delay",
     "id": "wait_5m",
-    "delaySeconds": 5,
-    "delayUnit": "minutes",
-    "eventType": "delay_trigger"
+    "delay_seconds": 5,
+    "delay_unit": "minutes"
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `delaySeconds` | 延迟数值，支持 `$` 表达式 |
-| `delayUnit` | `seconds` / `minutes` / `hours` / `days` |
-| `eventType` | 触发事件类型，默认 `delay_trigger` |
+| `delay_seconds` | 延迟数值（必填），支持 `$` 表达式 |
+| `delay_unit` | `seconds`（默认）/ `minutes` / `hours` / `days` |
+| `event_type` | 触发事件类型，默认 `delay_trigger`（此节点可自定义） |
 
 `generate_service_config` 产出 `{type, delay_ms, trigger_timestamp, node_id, execution_id, flow_id, event_type, event_filter, retry_config}`。
 
@@ -56,10 +59,12 @@ def execute(self, execution):
 {
     "type": "redis_queue",
     "id": "wait_msg",
-    "queueName": "orders",
-    "eventType": "redis_queue_message"
+    "event_type": "redis_message",
+    "queue_name": "orders"
 }
 ```
+
+`redis_queue` 必填 `queue_name`（另有 `redis_host` / `redis_port` / `queue_type` 等可选字段）；`event_type` 会被固定为 `redis_message`。`kafka_queue` 必填 `bootstrap_servers` / `topic` / `group_id`，`event_type` 固定为 `kafka_message`。
 
 ## http_callback
 
@@ -69,11 +74,12 @@ def execute(self, execution):
 {
     "type": "http_callback",
     "id": "wait_cb",
-    "path": "/callback/order/{request_id}",
-    "method": "POST",
-    "eventType": "http_callback_received"
+    "callback_path": "/callback/order/{request_id}",
+    "callback_method": "POST"
 }
 ```
+
+主要字段：`callback_path`（为空自动生成）/ `callback_method`（默认 `POST`）/ `callback_timeout_minutes`（默认 60）及认证相关 `require_auth` / `auth_type` / `auth_token` 等；`event_type` 固定为 `http_callback`。
 
 ## approval
 
@@ -83,28 +89,30 @@ def execute(self, execution):
 {
     "type": "approval",
     "id": "manager_approve",
-    "approvalTitle": "请假申请",
-    "approvalContent": "{% $INPUT.reason %}",
-    "approvalType": "manual",
+    "event_type": "approval_decision",
+    "approval_title": "请假申请",
+    "approval_content": "{% $INPUT.reason %}",
+    "approval_type": "manual",
     "approvers": ["alice", "bob"],
-    "approvalStrategy": "any",
-    "autoEscalation": false,
-    "formFields": [],
-    "allowComments": true
+    "approval_strategy": "any",
+    "auto_escalation": false,
+    "form_fields": [],
+    "allow_comments": true
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `approvalTitle` / `approvalContent` | 标题 / 内容（支持 `$` 表达式） |
-| `approvalType` | `manual` / `auto` |
+| `approval_title` / `approval_content` | 标题 / 内容（均必填，支持 `$` 表达式） |
+| `event_type` | 必填（继承自事件节点）；构造后固定为 `approval_decision` |
+| `approval_type` | `manual`（默认）/ `auto` |
 | `approvers` | 审批人列表（用户 id 或邮箱，支持表达式） |
-| `approvalStrategy` | `any`（任一）/ `all`（全部）/ `majority`（多数） |
-| `autoEscalation` / `escalationTimeoutHours` / `escalationApprovers` | 自动升级配置 |
-| `formFields` | 审批表单字段 |
-| `allowComments` / `requireComments` | 审批意见开关 |
+| `approval_strategy` | `any`（默认，任一）/ `all`（全部）/ `majority`（多数） |
+| `auto_escalation` / `escalation_timeout_hours` / `escalation_approvers` | 自动升级配置 |
+| `form_fields` | 审批表单字段 |
+| `allow_comments` / `require_comments` | 审批意见开关 |
 
-`ApprovalNode` 默认监听 `approval_decision` 事件；`generate_service_config` 产出审批实例 id、审批人、表单、通知配置等供 `ApprovalService` 使用。详见 [审批流场景](../scenarios/approval-flow.md)。
+`ApprovalNode` 恢复事件固定为 `approval_decision`；`generate_service_config` 产出审批实例 id、审批人、表单、通知配置等供 `ApprovalService` 使用。详见 [审批流场景](../scenarios/approval-flow.md)。
 
 ## 在流程中使用
 
@@ -112,9 +120,10 @@ def execute(self, execution):
 
 ```python
 from plaita import Flow, FlowExecution
+from plaita.event.memory import InMemoryEventBus
 
 flow = Flow.from_string(open("approval_flow.json").read())
-execution = FlowExecution(event_bus=bus)
+execution = FlowExecution(event_bus=InMemoryEventBus())
 step = execution.run_distributed(flow, {"applicant": "alice", "reason": "请假"})
 # step["is_suspend"] == True
 ```

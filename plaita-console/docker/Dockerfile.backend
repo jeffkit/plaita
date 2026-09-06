@@ -16,7 +16,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制 plaita 核心包
 COPY plaita/ ./plaita/
+COPY pyproject.toml .
 COPY setup.py .
+
+# plaita 必须真正安装而非仅源码落盘：approval/delay 等扩展节点经
+# [project.entry-points."plaita.nodes"] 自动发现，依赖安装元数据——
+# setup.py 只是 shim，缺 pyproject.toml 时 pip install . 得到 0.0.0
+# 无插件空壳（2026-09 console E2E 实证：保存 approval flow 即 422）
+RUN pip install --no-cache-dir .
 
 # 复制 console backend 代码
 COPY plaita-console/backend/ ./backend/

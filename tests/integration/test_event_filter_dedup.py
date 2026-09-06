@@ -258,3 +258,90 @@ class TestEventFilterIdempotency:
             assert len(tasks) == 2
 
         run(_test())
+
+
+class TestEventFilterTerminalSubscriptionGC:
+    """分布式评审 P2-5 回归：终态执行的残留订阅在 event_filter 侧就地回收，
+    不再入队注定失败的 resume。"""
+
+    def _make_filter(self):
+        execution_storage = MemoryExecutionStorage()
+        subscription_storage = InMemoryEventSubscriptionStorage()
+        redis_client = fakeredis.FakeRedis(decode_responses=True)
+        from unittest.mock import AsyncMock
+        event_filter = EventFilter(
+            execution_storage=execution_storage,
+            subscription_storage=subscription_storage,
+            redis_client=redis_client,
+            event_bus=AsyncMock(),
+            queue_name="test:gc-queue",
+        )
+        return event_filter, execution_storage, subscription_storage, redis_client
+
+    def test_terminal_execution_subscription_is_reaped(self):
+        try:
+            from plaita.event.core import Event
+        except ImportError:
+            pytest.skip("fakeredis not available")
+
+        event_filter, execution_storage, subscription_storage, redis_client = self._make_filter()
+
+        async def _test():
+            from plaita.storage.base import ExecutionState
+
+            # 终态（completed）执行 + 残留订阅
+            state = ExecutionState(
+                execution_id="exec-gc-1", flow_id="flow-gc", status="completed",
+                context={},
+            )
+            execution_storage.save_execution_state(state.execution_id, state)
+            sub = EventSubscription(
+                event_type="gc.event", correlation_id="exec-gc-1", flow_id="flow-gc",
+            )
+            await subscription_storage.store_subscription(sub)
+
+            await event_filter.handle_event(
+                Event(event_type="gc.event", data={"approved": True},
+                      correlation_id="exec-gc-1")
+            )
+
+            # 订阅被回收、队列入队为零
+            remaining = await subscription_storage.list_subscriptions(
+                event_type="gc.event"
+            )
+            assert len(remaining) == 0
+            assert redis_client.xlen("test:gc-queue") == 0
+
+        run(_test())
+
+    def test_running_execution_still_enqueues(self):
+        """运行中的执行不受回收逻辑影响，正常入队。"""
+        from plaita.event.core import Event
+
+        event_filter, execution_storage, subscription_storage, redis_client = self._make_filter()
+
+        async def _test():
+            from plaita.storage.base import ExecutionState
+
+            state = ExecutionState(
+                execution_id="exec-run-1", flow_id="flow-run", status="running",
+                context={},
+            )
+            execution_storage.save_execution_state(state.execution_id, state)
+            sub = EventSubscription(
+                event_type="run.event", correlation_id="exec-run-1", flow_id="flow-run",
+            )
+            await subscription_storage.store_subscription(sub)
+
+            await event_filter.handle_event(
+                Event(event_type="run.event", data={"approved": True},
+                      correlation_id="exec-run-1")
+            )
+
+            remaining = await subscription_storage.list_subscriptions(
+                event_type="run.event"
+            )
+            assert len(remaining) == 1
+            assert redis_client.xlen("test:gc-queue") == 1
+
+        run(_test())

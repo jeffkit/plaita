@@ -2,31 +2,115 @@ version: "1"
 
 project:
   name: plaita-console
-  description: "Plaita Console 管理台 E2E 测试"
+  description: "Plaita Console 管理台 E2E 测试（argusai，集群档多进程编排）"
 
-service:
-  build:
-    dockerfile: /Users/kongjie/projects/plaita/plaita/plaita-console/Dockerfile.e2e
-    context: /Users/kongjie/projects/plaita/plaita/plaita-console
-    image: plaita-console-e2e:latest
+# 跑法：scripts/e2e-run.sh [suite-id] [--no-build]
+# 前提：Docker、Node>=20、mcp2cli、npm i -g argusai-mcp
+# （argusai CLI 已冻结在 0.12.3，必须走 mcp2cli → argusai-mcp 路径。）
+#
+# 架构：redis + console-backend 两容器（engine 级 suite 追加 flow-worker）。
+# console 的 lifespan 连不上 Redis 会静默降级本地单机模式，故 backend 的
+# CMD（见 docker/Dockerfile.e2e）先等 Redis 端口可连再起 uvicorn。
+#
+# 鉴权取舍：E2E 只验跨进程接线，不验鉴权（已有 tests/console/test_admin_auth.py
+# 单测覆盖），backend 以 PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN=true 启动，
+# 现有 suite 免配 X-Admin-API-Key。
 
-  container:
-    name: plaita-console-backend-e2e
-    ports:
-      - "18080:80"
-    environment:
-      PLAITA_CONSOLE_REDIS_URL: redis://host.docker.internal:6379/0
-      PLAITA_CONSOLE_HOST: "0.0.0.0"
-      PLAITA_CONSOLE_PORT: "80"
-    healthcheck:
-      path: /health
-      interval: 5s
-      timeout: 3s
-      retries: 15
-      startPeriod: 20s
+services:
+  - name: redis
+    build:
+      # argusai services[] 每项都必须可构建，不支持直接引用 image，故包一层
+      dockerfile: plaita-console/docker/Dockerfile.redis-e2e
+      context: ..
+      image: plaita-e2e-redis:latest
+    container:
+      name: plaita-e2e-redis
+      # ports 为 argusai services[] 必填字段；映射到宿主高位端口仅供调试
+      ports:
+        - "16379:6379"
 
-  vars:
-    base_url: http://localhost:18080
+  - name: console-backend
+    build:
+      dockerfile: plaita-console/docker/Dockerfile.e2e
+      context: ..
+      image: plaita-console-e2e:latest
+    dependsOn: [redis]
+    container:
+      name: plaita-console-backend-e2e
+      ports:
+        - "18080:8080"
+      environment:
+        E2E_TEST_REDIS_HOST: plaita-e2e-redis
+        PLAITA_CONSOLE_REDIS_URL: redis://plaita-e2e-redis:6379/0
+        PLAITA_CONSOLE_HOST: 0.0.0.0
+        PLAITA_CONSOLE_PORT: "8080"
+        PLAITA_CONSOLE_DB_URL: "sqlite:////tmp/plaita_console_e2e.db"
+        PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN: "true"
+        PLAITA_PROJECT_ROOT: /app
+      healthcheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        retries: 30
+        startPeriod: 20s
+
+  # engine 级 suite 需要：真实多进程消费队列、服务注册心跳。
+  - name: flow-worker
+    build:
+      dockerfile: plaita-console/docker/Dockerfile.worker-e2e
+      context: ..
+      image: plaita-e2e-worker:latest
+    dependsOn: [redis]
+    container:
+      name: plaita-e2e-worker
+      ports: []
+      environment:
+        E2E_TEST_REDIS_HOST: plaita-e2e-redis
+        PLAITA_REDIS_URL: redis://plaita-e2e-redis:6379/0
+
+  # 调度/外延服务 suite 需要：cron 扫描、延迟唤醒、审批实例（一容器四进程）。
+  - name: ext-services
+    build:
+      dockerfile: plaita-console/docker/Dockerfile.services-e2e
+      context: ..
+      image: plaita-e2e-services:latest
+    dependsOn: [redis]
+    container:
+      name: plaita-e2e-services
+      ports: []
+      environment:
+        E2E_TEST_REDIS_HOST: plaita-e2e-redis
+        PLAITA_REDIS_URL: redis://plaita-e2e-redis:6379/0
+
+  # UI suite 需要：backend 托管 SPA（打包发布模式）。与 API 面容器分离——
+  # 各自端口互不干扰；bootstrap admin 经 PLAITA_CONSOLE_ADMIN_PASSWORD 注入，
+  # UI 登录走真实会话鉴权（此容器不设 ALLOW_INSECURE_ADMIN）。
+  - name: ui-backend
+    build:
+      dockerfile: plaita-console/docker/Dockerfile.e2e
+      context: ..
+      image: plaita-console-ui-e2e:latest
+      args:
+        KEEP_WEBDIST: "1"
+    dependsOn: [redis]
+    container:
+      name: plaita-console-ui-e2e
+      ports:
+        - "18081:8080"
+      environment:
+        E2E_TEST_REDIS_HOST: plaita-e2e-redis
+        PLAITA_CONSOLE_REDIS_URL: redis://plaita-e2e-redis:6379/0
+        PLAITA_CONSOLE_HOST: 0.0.0.0
+        PLAITA_CONSOLE_PORT: "8080"
+        PLAITA_CONSOLE_DB_URL: "sqlite:////tmp/plaita_console_ui_e2e.db"
+        PLAITA_CONSOLE_ADMIN_PASSWORD: e2e-admin-pass
+        PLAITA_PROJECT_ROOT: /app
+      healthcheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        retries: 30
+        startPeriod: 20s
 
 tests:
   suites:
@@ -61,3 +145,19 @@ tests:
     - name: 错误处理
       id: errors
       file: tests/e2e/errors.yaml
+
+    - name: 试跑（dry-run）
+      id: dryrun
+      file: tests/e2e/dryrun.yaml
+
+    - name: 引擎链路（多进程）
+      id: engine
+      file: tests/e2e/engine.yaml
+
+    - name: 调度与外延服务
+      id: scheduler
+      file: tests/e2e/scheduler.yaml
+
+    - name: 控制台 UI
+      id: ui
+      file: tests/e2e/ui.yaml

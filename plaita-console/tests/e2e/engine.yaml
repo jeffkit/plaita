@@ -1,0 +1,301 @@
+name: 引擎链路（多进程）
+sequential: true
+
+# 覆盖 phase2.8 人工串测发现的核心断点，做成永久回归：
+#   ① console 入队与 FlowWorker 消费的队列类型一致性（XADD Stream）
+#   ② console 与引擎的双存储断层（publish 必须同步到引擎 Redis 存储）
+#   ④ 挂起 → 恢复整链（approval 节点挂起，console resume 驱动续跑）
+#   ⑥ worker 服务注册与心跳（30s TTL 内可见）
+# 执行 ID 由 worker 侧生成（启动响应里没有），故经 flow_id 过滤列表轮询获取。
+
+cases:
+  # === 简单流程：发布 → 入队 → worker 消费 → 完成 ===
+  - name: "创建测试流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-engine-flow"
+        author: "e2e"
+        desc: "engine suite 简单流程"
+    expect:
+      status: 200
+      body:
+        flow_id: "e2e-engine-flow"
+
+  - name: "保存 1.0.0 版本定义"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-engine-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-engine-flow","name":"E2E Simple","description":"start→end 最小链路","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"$INPUT.value","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+      body:
+        flow_id: "e2e-engine-flow"
+        version: "1.0.0"
+
+  - name: "发布版本（同步到引擎 Redis 存储，回归断点②）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-engine-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+      body:
+        version: "1.0.0"
+
+  - name: "启动流程执行（入队走 Stream XADD，回归断点①）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-engine-flow"
+        version: "1.0.0"
+        params:
+          value: 21
+    expect:
+      status: 200
+      body:
+        status: "queued"
+
+  - name: "worker 消费后执行状态可见（轮询）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-engine-flow
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+    save:
+      engine_exec_id: "executions.0.execution_id"
+
+  - name: "执行最终完成"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.engine_exec_id}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "completed"
+        flow_id: "e2e-engine-flow"
+
+  # === 审批流程：挂起 → console resume（event）→ 续跑完成（回归断点④） ===
+  - name: "创建审批测试流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-engine-approval"
+        author: "e2e"
+        desc: "engine suite 审批流程"
+    expect:
+      status: 200
+
+  - name: "保存审批流程定义"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-engine-approval/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-engine-approval","name":"E2E Approval","description":"start→approval→end","nodes":[{"id":"start","type":"start","next":"approval"},{"id":"approval","type":"approval","approval_title":"E2E 审批","approval_content":"engine suite 自动审批","approvers":["e2e_user"],"event_type":"approval_decision","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "发布审批流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-engine-approval/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  - name: "启动审批流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-engine-approval"
+        version: "1.0.0"
+        params: {}
+    expect:
+      status: 200
+      body:
+        status: "queued"
+
+  - name: "审批执行出现（轮询取执行 ID）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-engine-approval
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+    save:
+      approval_exec_id: "executions.0.execution_id"
+
+  - name: "审批节点挂起（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.approval_exec_id}}"
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "suspended"
+
+  - name: "console resume 审批通过（resume_type=event，continue 会被内核拒绝）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/executions/{{runtime.approval_exec_id}}/resume"
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "event"
+        data:
+          decision: "approved"
+          approver: "e2e_user"
+          comment: "e2e auto approve"
+    expect:
+      status: 200
+
+  - name: "审批流程续跑至完成（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.approval_exec_id}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "completed"
+
+  # === 事件驱动恢复：console 发布事件 → event_filter 匹配订阅 → 回投恢复任务
+  # （回归 phase2.8 断点⑤：事件键位/correlation_id 关联链；与上面 console
+  # resume 路径互补，两条恢复通道都要有回归）
+  - name: "再次启动审批流程（事件路径用）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-engine-approval"
+        version: "1.0.0"
+        params: {}
+    expect:
+      status: 200
+      body:
+        status: "queued"
+
+  - name: "第二个审批执行出现（轮询，列表按开始时间倒序取最新）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-engine-approval
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 2 }
+    save:
+      event_exec_id: "executions.0.execution_id"
+
+  - name: "审批节点再次挂起（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.event_exec_id}}"
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "suspended"
+
+  - name: "发布审批决策事件（correlation_id=执行 ID，走 event_filter 链）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/events/publish
+      headers:
+        Content-Type: application/json
+      body:
+        event_type: "approval_decision"
+        data:
+          decision: "approved"
+          approver: "e2e_user"
+        correlation_id: "{{runtime.event_exec_id}}"
+    expect:
+      status: 200
+      body:
+        success: true
+
+  - name: "事件驱动续跑至完成（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.event_exec_id}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "completed"
+
+  # === 服务注册与心跳（回归断点⑥）===
+  - name: "worker 服务注册与心跳可见"
+    request:
+      method: GET
+      url: http://localhost:18080/api/services
+    retry:
+      maxAttempts: 10
+      delay: 2s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+
+teardown:
+  - name: "清理: 删除测试流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-engine-flow
+    ignoreError: true
+
+  - name: "清理: 删除审批流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-engine-approval
+    ignoreError: true

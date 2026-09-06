@@ -10,7 +10,7 @@
 | 引用某节点的输出 | `$NODE.节点id` | `"$NODE.assign"` |
 | 调用内置函数 | `$F.函数名(参数)` | `"$F.upper($INPUT.name)"` |
 | 字符串中嵌入变量 | `{% $INPUT.字段名 %}` | `"你好，{% $INPUT.name %}"` |
-| 引用环境变量 | `$ENV.变量名` | `"$ENV.API_KEY"` |
+| 引用环境变量 | `$ENV.变量名` | `"$ENV.API_BASE"`（须在 `exposeEnv` 白名单内） |
 
 ---
 
@@ -23,21 +23,39 @@
 
 用 `$` 前缀引用执行上下文中的命名空间：
 
-| 表达式 | 含义 |
-|--------|------|
-| `$INPUT` | 整个输入对象 |
-| `$INPUT.name` | 输入对象的 `name` 字段 |
-| `$NODE.assign` | 节点 `assign` 的输出 |
-| `$NODE.assign.field` | 节点 `assign` 输出的 `field` 字段 |
-| `$GLOBAL.key` | 全局上下文变量 |
-| `$PARENT.x` | 父流程上下文（子流程中可用） |
-| `$ENV.PATH` | 环境变量 `PATH` |
+| 表达式 | 含义 | 引用不存在的键时 |
+|--------|------|------------------|
+| `$INPUT` / `$INPUT.name` | 整个输入对象 / 其 `name` 字段 | `None`（DEBUG 日志留痕） |
+| `$NODE.assign` / `$NODE.assign.field` | 节点 `assign` 的输出 / 其字段 | `None` |
+| `$GLOBAL.key` | 全局上下文变量（含 `flow_id`） | `None` |
+| `$FLOW_ID` | 当前流程的 `flow_id` | — |
+| `$FLOW` | `$FLOW_ID` 的别名（0.5.x 起，历史写法 `$FLOW` 会 KeyError 崩） | — |
+| `$PARENT.x` | 父流程上下文（子流程中可用） | `None` |
+| `$ENV.key` | 环境变量（须在 `exposeEnv` 白名单内，见下文） | `None`（未声明时另有解析期 warning） |
+
+缺省口径统一为"缺键返回 `None`"；唯一的例外是整个根不存在（如上下文尚未建立 `$NODE` 状态）时保留 `KeyError`——那通常意味着流程逻辑错误，静默反而危险。
 
 支持的命名空间由 `ExecutionContext` 维护：`INPUT` / `NODE` / `GLOBAL` / `PARENT` / `ENV`。命名空间名本身可通过 `express_input_name` 等参数自定义。
 
-!!! note "$ENV 自动过滤敏感变量"
+!!! warning "$ENV 采用 allowlist 模型：不声明就读不到"
 
-    出于安全，plaita 在初始化 `$ENV` 时会过滤掉以 `SECRET` / `TOKEN` / `PASSWORD` / `API_KEY` / `CREDENTIAL` / `DATABASE_` 等前缀开头的环境变量，避免敏感信息泄漏到流程上下文。
+    0.4.0 起 `$ENV` 是**白名单（allowlist）模型**，且**不存在任何敏感前缀自动过滤**：
+
+    - 默认情况下流程**一个环境变量都读不到**——`$ENV.XXX` 解析不到值。
+    - Flow 必须显式声明 `exposeEnv`（JSON/YAML，Python 侧 `expose_env`）后才可读：
+
+      ```json
+      { "flow_id": "demo", "exposeEnv": ["HOME", "API_BASE"], "nodes": [ ... ] }
+      ```
+
+      ```python
+      Flow(flow_id="demo", expose_env=["HOME", "API_BASE"], ...)
+      ```
+
+    - 未声明时，0.5.0 起解析期会 `logger.warning` 一次列出被引用的 key 名与修复指引（不报错，让沉默变可见）。
+    - allowlist 命中即暴露，请自行确认列表里没有不该暴露的密钥。
+
+    升级迁移与 0.4.0 的行为对照见 [迁移指南](../reference/migration-guide.md)。
 
 ### 数组索引
 
@@ -112,6 +130,14 @@ plaita 内置 60+ 函数，按类别分布在 `ExpressionRegistry` 中：
 
     `pop` / `set` / `delete` / `clear` 等会就地修改输入。在 `Parallel` 并行或共享上下文的异步场景中使用它们可能造成数据竞争——要么串行化访问，要么先拷贝再修改。
 
+!!! warning "未注册的函数名求值为 'undefined' 字符串"
+
+    `$F` 是作用域注册表：调用未注册（或拼写错）的函数名**不会报错**，而是把整
+    个调用求值为字符串 `'undefined'`（默认 registry 未注册该名字时也一样）。例如
+    `$F.uppr($INPUT.name)`（拼错）静默得到 `'undefined'`，下游拿到的就是这串文本。
+    排查时先核对函数注册名是否与[内置函数一览](#内置函数一览)或你的
+    `registry.register(...)` 名字完全一致。
+
 ## 自定义函数
 
 通过 `ExpressionRegistry` 注册自定义函数，再传给 `ExpressionEvaluator`：
@@ -145,7 +171,13 @@ def execute(self, execution):
     return text.upper()
 ```
 
-当某表达式在当前上下文解析为 `None` 且存在父上下文时，plaita 会自动向上回溯到父级再求值。
+!!! warning "子流程中的静默回退：`$INPUT.x` 解析为 `None` 时会回溯父上下文"
+
+    当某表达式在当前上下文解析为 `None` 且存在父上下文时，plaita 会自动向上
+    回溯到父级再求值。这是一个**跨流程边界的隐式数据通路**：子流程里写
+    `$INPUT.name`，若子流程输入没有 `name`，实际可能拿到的是**父流程**的
+    `name`。它让嵌套流程少写传参，但也意味着"字段不存在"与"来自父流程"
+    在结果上无法区分——需要严格隔离时，给子流程输入显式传齐字段。
 
 ## 下一步
 

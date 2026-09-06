@@ -11,23 +11,29 @@ plaita 的权威构建配置在 [`pyproject.toml`](https://github.com/jeffkit/pl
 | `pydantic>=2.0` | 数据模型（`Flow` / `Node` / `Event` 等） |
 | `pyparsing>=3.0` | 表达式解析 |
 | `isodate` | ISO 8601 超时时长解析 |
+| `croniter>=2.0` | cron 定时表达式解析（定时触发器） |
 
 ## 可选依赖（extras）
 
 | extra | 依赖 | 提供能力 |
 |-------|------|---------|
 | `redis` | `redis>=4.0` | Redis 存储 / Redis EventBus / Redis 节点 |
-| `server` | `fastapi`、`uvicorn`、`python-multipart`、`python-jose`、`passlib[bcrypt]`、`SQLAlchemy>=1.4`、`cachetools>=5.0` | 服务端、SQLAlchemy 后端、FlowWorker、扩展节点 |
-| `code` | `PyExecJS` | `CodeNode` 的 JS 执行 |
-| `http` | `requests`、`aiohttp>=3.8` | `HTTP` 节点 |
-| `dev` | `pytest`、`pytest-asyncio`、`fakeredis`、`pytest-cov` | 开发/测试 |
-| `lint` | `mypy`、`flake8`、`black` | 静态检查/格式化（可选） |
-| `all` | 上述 redis/server/code/http 全部 | 一键装齐 |
+| `server` | `fastapi`、`uvicorn`、`python-multipart`、`python-jose[cryptography]`、`passlib[bcrypt]`、`SQLAlchemy>=1.4`、`cachetools>=5.0` | 服务端、SQLAlchemy 后端、FlowWorker、扩展节点 |
+| `code` | `PyExecJS`、`RestrictedPython>=7.0` | `CodeNode`（Python AST 沙箱 + JS 执行；0.5.0 起默认 docker 沙箱，需 Docker daemon） |
+| `http` | `requests`、`aiohttp>=3.8` | `HTTP` 节点；`PlaitaClient`（requests） |
+| `yaml` | `PyYAML>=6.0` | YAML 格式流程定义 |
+| `sqlalchemy` | `SQLAlchemy>=1.4`、`aiosqlite>=0.19` | SQLAlchemy EventBus / Storage 路径（实验性） |
+| `credentials` | `cryptography>=42.0` | 凭据加密（`plaita.credentials`） |
+| `dev` | `pytest`、`pytest-asyncio`、`fakeredis`、`pytest-cov` 等 | 开发/测试 |
+| `lint` | `mypy`、`flake8`、`black`、`ruff>=0.6` | 静态检查/格式化（可选） |
+| `all` | 上述 redis/server/code/http/yaml/sqlalchemy 全部 | 一键装齐 |
 
 ```bash
 pip install plaita[server,http]
 pip install plaita[all]
 ```
+
+> `http` extra 同时探测 `requests` 与 `aiohttp`：使用 `HTTP` 节点时缺少任一个都会抛出 ImportError 并列出缺失的库名（`PlaitaClient` 仅依赖 `requests`）。
 
 ## entry_points：节点插件
 

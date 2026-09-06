@@ -18,8 +18,15 @@ import asyncio
 import logging
 import random
 import time
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Type
 from abc import ABC, abstractmethod
+
+# 本 demo 的所有文件副作用（日志 / SQLite 数据库）都固定写到本目录内，
+# 不污染运行命令时所在的 cwd。见同目录 README.md。
+_DEMO_DIR = Path(__file__).resolve().parent
+LOG_FILE = _DEMO_DIR / "plaita.log"
+DATABASE_URL = f"sqlite+aiosqlite:///{_DEMO_DIR / 'event_demo.db'}"
 
 # 根据需要导入不同后端的库
 try:
@@ -40,7 +47,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("plaita.log"),
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )
@@ -440,11 +447,11 @@ class RedisEventDemoApp(EventDemoApp):
 class SQLAlchemyEventDemoApp(EventDemoApp):
     """SQLAlchemy实现的事件演示应用"""
     
-    def __init__(self, database_url: str = "sqlite+aiosqlite:///event_demo.db"):
+    def __init__(self, database_url: str = DATABASE_URL):
         """初始化SQLAlchemy事件演示应用"""
         super().__init__()
         self.database_url = database_url
-        
+
         # 导入SQLAlchemy组件
         global db_components
         if db_components is None:
@@ -462,14 +469,14 @@ class SQLAlchemyEventDemoApp(EventDemoApp):
     async def initialize(self):
         """初始化SQLAlchemy实现的组件"""
         SqlalchemyEventBus = db_components["EventBus"]
-        
+
+        # 当前 API 接收异步 engine（而非 database_url），建表走 create_tables/ensure_tables
+        engine = create_async_engine(self.database_url)
         self.event_bus = SqlalchemyEventBus(
-            database_url=self.database_url,
+            engine=engine,
             create_tables=True  # 自动创建表结构
         )
-        
-        # 初始化事件总线
-        await self.event_bus.initialize()
+        await self.event_bus.ensure_tables()
         
         self.event_storage = self.event_bus.event_storage
         self.subscription_storage = self.event_bus.subscription_storage
@@ -528,7 +535,7 @@ class MixedEventDemoApp(EventDemoApp):
                  subscription_type: str = "memory",
                  tracker_type: str = "memory",
                  redis_url: str = "redis://localhost:6379/0",
-                 database_url: str = "sqlite+aiosqlite:///event_demo.db"):
+                 database_url: str = DATABASE_URL):
         """
         初始化混合后端事件演示应用
         
@@ -661,11 +668,12 @@ class MixedEventDemoApp(EventDemoApp):
         elif component_type == "db":
             components = db_components
             if component_name == "bus":
+                engine = create_async_engine(self.database_url)
                 component = db_components["EventBus"](
-                    database_url=self.database_url,
+                    engine=engine,
                     create_tables=True
                 )
-                await component.initialize()
+                await component.ensure_tables()
                 return component
             elif component_name == "storage":
                 engine = create_async_engine(self.database_url)
@@ -828,8 +836,8 @@ async def main():
                       help="事件系统后端，可选: memory, redis, db, mixed")
     parser.add_argument("--redis-url", default="redis://localhost:6379/0",
                       help="Redis连接URL，当使用Redis组件时有效")
-    parser.add_argument("--db-url", default="sqlite+aiosqlite:///event_demo.db",
-                      help="数据库连接URL，当使用数据库组件时有效")
+    parser.add_argument("--db-url", default=DATABASE_URL,
+                      help="数据库连接URL，当使用数据库组件时有效（默认写到本示例目录内）")
                       
     # 混合后端专用参数
     parser.add_argument("--bus-type", choices=["memory", "redis", "db"], default="memory",

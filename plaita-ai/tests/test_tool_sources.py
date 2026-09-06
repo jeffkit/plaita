@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+# HTTP 工具源测试依赖 requests/http extra（无则整模块优雅跳过）
+pytest.importorskip("requests", reason="requests not installed: pip install 'plaita[http]'")
 
 from plaita_ai.agent.fot.tools import ToolNode, list_tools
 from plaita_ai.tools import (

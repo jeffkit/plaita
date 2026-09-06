@@ -128,6 +128,10 @@ class ExpressionRegistry:
         desc = self._functions.get(name)
         return desc.func if desc else None
 
+    def names(self) -> list:
+        """已注册的函数名清单（供报错提示/补全）。"""
+        return list(self._functions.keys())
+
     def by_category(self, category: FunctionCategory) -> List[FunctionDescriptor]:
         """Return all functions in *category*."""
         return [d for d in self._functions.values() if d.category == category]
@@ -159,7 +163,21 @@ def _fn_sub(a, b): return a - b
 def _fn_mul(a, b): return a * b
 def _fn_div(a, b): return a / b
 def _fn_mod(a, b): return a % b
-def _fn_pow(a, b): return a ** b
+_POW_MAX_EXPONENT = 10_000
+
+
+def _fn_pow(a, b):
+    """幂运算，指数设上限（2026-09 安全评审 P1）。
+
+    ``$F.pow(9, 9999999)`` 这种约 20 字节的表达式曾可烧掉分钟级 CPU 并膨胀
+    数十 MB 内存——单流程即可拖死 worker，并行分支还能线性放大。
+    """
+    if isinstance(b, int) and abs(b) > _POW_MAX_EXPONENT:
+        raise ValueError(
+            f"$F.pow exponent too large: {b} (limit {_POW_MAX_EXPONENT}). "
+            "Refusing to burn CPU on an unbounded power computation."
+        )
+    return a ** b
 
 def _fn_lower(a): return a.lower()
 def _fn_upper(a): return a.upper()

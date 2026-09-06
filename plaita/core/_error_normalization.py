@@ -43,7 +43,8 @@ async def finish_normal(coro, flow, callback_manager):
     except Exception as e:
         error = {"code": -500, "message": str(e)}
         callback_manager.on_flow_end(flow, None, error, exception=e)
-        logger.error("flow error", exc_info=True)
+        # raise 已携带完整 traceback，这里不再重复打栈
+        logger.error("flow error: %s", e)
         raise FlowErrorException(str(e)) from e
     callback_manager.on_flow_end(flow, result=result)
     return result
@@ -58,7 +59,7 @@ def raise_distributed_error(e, flow, callback_manager):
     """
     error = {"code": -500, "message": str(e)}
     callback_manager.on_flow_end(flow, None, error, exception=e)
-    logger.error("flow error", exc_info=True)
+    logger.error("flow error: %s", e)
     raise FlowErrorException(str(e)) from e
 
 

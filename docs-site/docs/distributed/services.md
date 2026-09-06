@@ -62,7 +62,7 @@ flowchart LR
 
 ### ApprovalService
 
-对接审批系统：通知审批人、收集决策；满足 `approvalStrategy`（any/all/majority）后发布 `approval_decision` 事件，`event_data` 含审批结果与意见。支持自动升级（`autoEscalation`）。
+对接审批系统：通知审批人、收集决策；满足 `approval_strategy`（any/all/majority）后发布 `approval_decision` 事件，`event_data` 含审批结果与意见。支持自动升级（`auto_escalation`）。
 
 ## 启动入口
 

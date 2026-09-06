@@ -1,0 +1,29 @@
+# 外延服务 —— argusai E2E 专用镜像
+# 与 Dockerfile.worker-e2e 同源；一个容器并跑四个进程：
+# schedule_service（cron 扫描）/ delay_service（延迟唤醒）/
+# approval_service（审批实例）/ event_filter（事件→匹配订阅→回投恢复任务，
+# 部署文档列为独立按需进程——缺它 delay/approval 事件唤醒整链断裂）。
+# 仅 E2E 用；生产按服务拆分独立进程（见 docs-site 部署文档）。
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# 容器内访问 PyPI 偶发读超时，放宽超时与重试
+ENV PIP_DEFAULT_TIMEOUT=180 \
+    PIP_RETRIES=10
+
+# 安装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir cachetools
+
+# 复制代码
+COPY plaita/ ./plaita/
+# setup.py 只是 shim，全部元数据（含 plaita.nodes entry_points）在
+# pyproject.toml——不 COPY 它，pip install . 会得到 0.0.0 无插件的空壳
+COPY pyproject.toml .
+COPY setup.py .
+RUN pip install --no-cache-dir .
+
+# 先等 Redis 就绪（同 Dockerfile.e2e 的理由），再并跑四个服务进程
+CMD ["sh", "-c", "until python -c \"import os,socket; socket.create_connection((os.environ.get('E2E_TEST_REDIS_HOST','redis'), 6379), timeout=1).close()\" 2>/dev/null; do echo 'e2e: waiting for redis...'; sleep 1; done; python -m plaita.server.services schedule_service --redis-url ${PLAITA_REDIS_URL} & python -m plaita.server.services delay_service --redis-url ${PLAITA_REDIS_URL} & python -m plaita.server.services approval_service --redis-url ${PLAITA_REDIS_URL} & python -m plaita.server.event_filter --redis-url ${PLAITA_REDIS_URL} & wait"]

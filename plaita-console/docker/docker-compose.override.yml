@@ -1,7 +1,0 @@
-# 本机适配（勿提交）：宿主 6379 已有原生 redis，console 复用它而非起容器 redis
-services:
-  redis:
-    ports: !override []
-  backend:
-    environment:
-      PLAITA_CONSOLE_REDIS_URL: redis://host.docker.internal:6379/1

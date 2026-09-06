@@ -12,17 +12,7 @@ import { symmetricLayout } from '../components/flow/symmetricLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
-import {
-  ArrowLeft,
-  Zap,
-  Code2,
-  Save,
-  Rocket,
-  Play,
-  ChevronRight,
-  Bot,
-  AlertTriangle,
-} from 'lucide-react'
+import { ArrowLeft, Zap, Code2, Save, Rocket, Play, ChevronRight, AlertTriangle } from 'lucide-react'
 import { Button, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui'
 import CopilotPanel from '../components/flow/CopilotPanel'
 
@@ -100,7 +90,6 @@ export default function FlowEditor() {
   const [showPublish, setShowPublish] = useState(false)
   const [publishDiff, setPublishDiff] = useState<VersionDiff | null>(null)
   // Copilot 面板默认展开，可随时收起（关闭后本会话不再自动弹出）
-  const [showCopilot, setShowCopilot] = useState(true)
 
   const setFlowContext = useFlowEditor((s) => s.setFlowContext)
   const setGraph = useFlowEditor((s) => s.setGraph)
@@ -408,9 +397,15 @@ export default function FlowEditor() {
         />
         <div className="flex-1" />
         {dirty && <span className="text-caption text-status-warning">未保存</span>}
-        <Button variant="secondary" size="sm" onClick={doSave} disabled={saveMutation.isPending || flowLoading} title="Cmd/Ctrl+S">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={doSave}
+          disabled={saveMutation.isPending || flowLoading}
+          title={editingPublishedBase ? `基于已发布版本编辑：将另存为新草稿版本 ${suggestedNext}` : 'Cmd/Ctrl+S'}
+        >
           <Save size={13} />
-          {editingPublishedBase ? '保存为新版本' : '保存草稿'}
+          保存草稿
         </Button>
         <Button
           variant="primary"
@@ -451,15 +446,6 @@ export default function FlowEditor() {
             </button>
           ))}
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setShowCopilot((v) => !v)}
-          className={showCopilot ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
-        >
-          <Bot size={13} />
-          AI 助手
-        </Button>
         <Button
           variant="ghost"
           size="sm"
@@ -508,7 +494,8 @@ export default function FlowEditor() {
 
       {editingPublishedBase && (
         <div className="px-4 py-1 bg-status-warning-dim text-status-warning text-caption">
-          已发布版本不可修改（发布即不可变）：当前编辑基于 {versionQuery.data?.version}，保存将创建新版本 {suggestedNext}
+          已发布版本不可修改（发布即不可变）：当前编辑基于 {versionQuery.data?.version}，
+          「保存草稿」将创建新草稿版本 {suggestedNext}，满意后可再发布
         </div>
       )}
 
@@ -563,6 +550,15 @@ export default function FlowEditor() {
           />
           {showDryRun && (
             <DryRunPanel
+              nodesByType={(() => {
+                const acc: Record<string, string[]> = {}
+                for (const n of nodes) {
+                  const t = (n.data as FlowNodeData).type
+                  ;(acc[t] ||= []).push(n.id)
+                }
+                return acc
+              })()}
+              onErrorNodeId={(id) => useFlowEditor.setState({ selectedNodeId: id })}
               flowJson={JSON.stringify(
                 flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], { flow_id: flowId, version, desc, inputType }),
                 null,

@@ -17,6 +17,10 @@
 | `on_node_suspend(flow, node)` | 事件节点挂起 |
 | `on_node_resume(flow, node)` | 事件节点恢复 |
 
+!!! warning "签名不匹配 = 回调静默失效"
+
+    覆写时必须接受框架传入的**全部位置参数**（签名如表中所列；不需要的参数用 `**kwargs` 吸收也可以，但不能少写位置参数）。签名不匹配时框架按**位置**传参会抛 `TypeError`，被 `CallbackManager` 捕获为 warning——你的回调**静默失效**，流程照常跑。
+
 ## 自定义回调
 
 ```python
@@ -29,10 +33,10 @@ class TraceCallback(FlowCallback):
     def on_node_start(self, flow, node, **kwargs):
         print(f"[node start] {node.id}")
 
-    def on_node_end(self, flow, node, result=None, error=None, **kwargs):
-        print(f"[node end] {node.id} -> {result}")
+    def on_node_end(self, flow, node, result, error, exception, **kwargs):
+        print(f"[node end] {node.id} -> {result}, error={error}")
 
-    def on_flow_end(self, flow, result=None, error=None, exception=None, **kwargs):
+    def on_flow_end(self, flow, result, error, exception, **kwargs):
         print(f"[flow end] {flow.flow_id} -> {result}, error={error}")
 
 flow = Flow.from_string(open("flow.json").read())
@@ -69,11 +73,11 @@ logging.basicConfig(level=logging.INFO)
 from plaita import FlowExecution, FlowCallback
 
 class A(FlowCallback):
-    def on_node_end(self, flow, node, result=None, **kwargs):
+    def on_node_end(self, flow, node, result, error, exception, **kwargs):
         raise ValueError("oops")  # 会被捕获、记录，不影响流程
 
 class B(FlowCallback):
-    def on_node_end(self, flow, node, result=None, **kwargs):
+    def on_node_end(self, flow, node, result, error, exception, **kwargs):
         print(f"B got {result}")  # 仍会执行
 
 execution = FlowExecution(callback_handlers=[A(), B()])

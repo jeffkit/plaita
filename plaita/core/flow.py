@@ -7,8 +7,9 @@ Contains the canonical Flow class, parse(), and parse_and_run().
 from __future__ import annotations
 
 import json
+import logging
 import warnings
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
@@ -113,6 +114,18 @@ class Flow(BaseModel):
         # ``Flow.resolve_nodes`` 显式解析，``model_validate`` 默认自动调一次。
         return normalized
 
+    # parse_flow validator 消费的遗留键（input_type 等字段无 alias）
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset(
+        {"flowId", "id", "inputType", "outputType", "globalContext"}
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _schema_hygiene(cls, data):
+        from plaita.node.basic import warn_unknown_keys
+
+        return warn_unknown_keys(cls, data)
+
     @classmethod
     def model_validate(cls, data, *, registry=None, **kwargs):
         """Parse + validate a Flow, then resolve node dicts into ``Node`` 子类。
@@ -161,6 +174,74 @@ class Flow(BaseModel):
             self.nodes = resolved
             # 节点集合变了, 失效索引指纹
             self._node_index_sig = ()
+        # 构建期结构检查（2026-09 LLM 作者模拟 P0-2）：id 重复 last-wins、
+        # next 悬空、if 缺分支目标、switch 缺 default——ir_validate 的这些检查
+        # 历史上只在 builder/codeflow/sexpr 路径生效，README 主入口
+        # Flow.from_string（JSON，可视化导出格式、LLM 最常输出的形态）完全不
+        # 经过。降级为 warning 保持兼容，把"静默成功"变成可见。
+        if any(isinstance(n, Node) for n in resolved):
+            try:
+                from plaita.dsl.ir_validate import validate_flow_ir
+
+                validate_flow_ir(
+                    {"nodes": [n.model_dump() for n in resolved if isinstance(n, Node)]},
+                    recursive=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "flow %s structural check (non-fatal, flow still runs): %s",
+                    self.flow_id, e,
+                )
+
+        # 环检测（R6 fuzz B3）：next/branches 成环且无 flow 级 timeout 时
+        # Normal 模式永久挂起，解析期零提示。O(n) BFS 从 start 出发，
+        # 回边即环。仅告警——显式 loop/while 有自己的迭代上限。
+        if any(isinstance(n, Node) for n in resolved):
+            start = self.start_node
+            id_to_node = {n.id: n for n in resolved if isinstance(n, Node) and n.id}
+            visited: set = set()
+            stack = [start.id] if start is not None and start.id else []
+            has_cycle = False
+            while stack:
+                cur = stack.pop()
+                if cur in visited:
+                    has_cycle = True
+                    continue
+                visited.add(cur)
+                node_obj = id_to_node.get(cur)
+                targets: List[str] = []
+                if node_obj is not None:
+                    if node_obj.next and isinstance(node_obj.next, str):
+                        targets.append(node_obj.next)
+                    for b in getattr(node_obj, "branches", None) or []:
+                        nxt = getattr(b, "next", None)
+                        if isinstance(nxt, str):
+                            targets.append(nxt)
+                for t in targets:
+                    if t in id_to_node:
+                        stack.append(t)
+            if has_cycle:
+                logger.warning(
+                    "flow %s contains a cycle in next/branches; without a flow-level "
+                    "timeout a Normal run will loop forever. If intentional, set "
+                    "flow timeout or use loop/while nodes with iteration limits.",
+                    self.flow_id,
+                )
+
+        # 构建期校验：JSON 直载路径历史上从不执行 node.validate()，builder 路径
+        # 却会（如 Switch 无 branches 直接抛错）——同一类配置错误一条路响一条路哑。
+        # 这里以 warning 降级执行（存量 JSON 流程可能带有 builder 才会拦的配置），
+        # 致命的运行期问题仍由调度层兜底（如分支未命中硬失败）。
+        for node in resolved:
+            if isinstance(node, Node):
+                try:
+                    node.validate()
+                except Exception as e:
+                    logger.warning(
+                        "flow %s node %s (%s) failed construction-time validation "
+                        "(non-fatal, the flow still runs): %s",
+                        self.flow_id, getattr(node, "id", "?"), getattr(node, "node_type", "?"), e,
+                    )
 
     def _warn_uncovered_env_refs(self) -> None:
         """扫描节点表达式里 ``$ENV.<key>`` 引用, 若 ``expose_env`` 为空则 warning。
@@ -195,14 +276,18 @@ class Flow(BaseModel):
                 self.flow_id, sorted(refs), sorted(refs),
             )
 
-    @staticmethod
-    def from_string(content: str) -> Flow:
+    @classmethod
+    def from_string(cls, content: str, *, registry: Optional["NodeRegistry"] = None) -> "Flow":
         """从 JSON 或 YAML 字符串解析 Flow。
 
         JSON 走 ``model_validate_json``；YAML（及无法按 JSON 解析的内容）
         走 ``plaita.io_format.loads`` 再 ``model_validate``。
         JSON 解析失败时把原始异常作为 cause 保留，避免真正的报错被
         YAML fallback 的次级报错淹没。
+
+        ``registry=`` 可注入自定义 ``NodeRegistry`` 解析节点（与
+        ``model_validate``/``resolve_nodes`` 对齐）；不传时用
+        ``get_default_registry()``。
         """
         from plaita.io_format import loads
 
@@ -211,25 +296,38 @@ class Flow(BaseModel):
         # 优先 JSON，保持历史行为与错误信息
         if content.lstrip()[:1] in ("{", "["):
             try:
-                return Flow.model_validate_json(content)
+                flow = cls.model_validate_json(content, registry=registry)
             except ValueError as json_err:
                 # 不要静默吞掉 JSON 报错——若 YAML fallback 也失败，
                 # 把原始 JSON 异常作为 cause 一并抛出，方便定位真凶。
                 try:
                     data = loads(content)
-                    return Flow.model_validate(data)
                 except Exception:
                     raise json_err
+                # YAML fallback 成功本身要大声说：JSON 语法错（尾逗号等）被
+                # YAML 静默吸收，且 YAML 会把裸 no/on 翻译成 False/True 篡改值
+                # （2026-09 LLM 作者模拟 D8）。
+                logging.getLogger("plaita.core.flow").warning(
+                    "content failed JSON parsing (%s) but parsed as YAML — "
+                    "double-check the syntax; YAML also coerces bare no/on to "
+                    "False/True", json_err,
+                )
+                flow = cls.model_validate(data, registry=registry)
+            return flow
         data = loads(content)
-        return Flow.model_validate(data)
+        return cls.model_validate(data, registry=registry)
 
     @classmethod
-    def from_file(cls, path: str) -> "Flow":
-        """从文件加载 Flow，按后缀（.json/.yaml/.yml）选择解析器。"""
+    def from_file(cls, path: str, *, registry: Optional["NodeRegistry"] = None) -> "Flow":
+        """从文件加载 Flow，按后缀（.json/.yaml/.yml）选择解析器。
+
+        ``registry=`` 语义同 :meth:`from_string`。
+        """
         from plaita.io_format import load_file
 
         data = load_file(path)
-        return cls.model_validate(data)
+        flow = cls.model_validate(data, registry=registry)
+        return flow
 
     def _ensure_index(self) -> Dict[str, Node]:
         """构建/刷新节点 id 索引, O(n) 摊销。
@@ -291,7 +389,19 @@ class Flow(BaseModel):
         if self.is_end_node(current):
             return None
         target = self._get_target_node(current, branch)
-        ret = self.find_node_by_id(target)
+        try:
+            ret = self.find_node_by_id(target)
+        except NodeNotFoundError as e:
+            hint = ""
+            if isinstance(target, str) and target in ("true", "false") and current.node_type == "if":
+                hint = (
+                    " Note: 'true'/'false' are placeholder defaults of if-nodes "
+                    "(next/else_next) — set them to your real target node ids."
+                )
+            raise NodeNotFoundError(
+                f"{e} (referenced by node {current.id!r} of type {current.node_type!r})"
+                + hint
+            ) from None
         logger.debug("finding next node %s for %s, result: %s", target, current.id, ret.id if ret else None)
         return ret
 
@@ -303,6 +413,11 @@ class Flow(BaseModel):
     def _get_branch_target(self, current: Node, branch: str) -> str:
         if not hasattr(current, "branches"):
             logger.warning("Node %s has no branches", current.id)
+            return None
+        if not branch:
+            # branch 为空 = 分支未命中（或无分支条件）。不再打 "branch None not
+            # found" 的误导性 warning——该情况的错误语义由调度层统一处理
+            # （硬失败或 errorHandler continue 逃生口）。
             return None
         logger.debug("current node %s has branches: %s", current.id, current.branches)
         from plaita.node.decide import resolve_branch_target
@@ -332,10 +447,13 @@ class Flow(BaseModel):
 
     @property
     def input_property(self):
+        """历史别名（第 3/4 个名字）：等价 ``input_type``。勿在新代码使用——
+        同一概念现有 inputType（JSON）/ input_type（Python 字段）两个规范名。"""
         return self.input_type
 
     @property
     def output_property(self):
+        """历史别名：等价 ``output_type``。见 :attr:`input_property` 说明。"""
         return self.output_type
 
 
@@ -389,6 +507,10 @@ def parse(content: Union[str, dict]) -> Optional[Flow]:
     字符串内容自动识别 JSON 或 YAML（YAML 需安装 ``plaita[yaml]``）；
     dict 直接走模型校验。所有解析最终都经过 ``Flow.parse_flow`` 这个
     model_validator，行为与历史完全一致。
+
+    与 ``Flow.from_string`` 的空输入约定不同：本函数对空内容返回 ``None``
+    （历史契约，签名即 ``Optional[Flow]``），而 ``from_string("")`` 抛
+    ``ValueError``。
     """
     if not content:
         return None
@@ -400,7 +522,10 @@ def parse(content: Union[str, dict]) -> Optional[Flow]:
         data = content
     runtime = data.get("runtime", "python")
     if runtime != "python":
-        raise RuntimeError(f"UnSupport runtime：{runtime}")
+        raise ValueError(
+            f"Unsupported runtime: {runtime!r}. plaita only executes 'python' flows; "
+            "use a matching engine for other runtimes."
+        )
     return Flow.model_validate(data)
 
 

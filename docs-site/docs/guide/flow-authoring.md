@@ -21,7 +21,7 @@ flowchart LR
 ```python
 from plaita.dsl.codeflow import flow
 
-@flow("adult_check", input_type="object")
+@flow("adult_check")
 def adult_check(INPUT):
     if INPUT.age >= 18:
         return "成年"
@@ -36,7 +36,7 @@ adult_check.run(age=20)  # -> "成年"
 from plaita.dsl.codeflow import flow_from_source
 
 src = '''
-@flow("adult_check", input_type="object")
+@flow("adult_check")
 def adult_check(INPUT):
     if INPUT.age >= 18:
         return "成年"
@@ -44,6 +44,8 @@ def adult_check(INPUT):
 '''
 flow_from_source(src).run(age=20)  # -> "成年"
 ```
+
+> `@flow` 的 `input_type` / `output_type` 参数已废弃且被忽略——`$INPUT` 恒为 `run()` 传入的 dict，无需声明。
 
 → 完整语法（含集合、子流程、`flow_from_source` Agent 场景）：[@flow DSL](code-dsl.md)
 
@@ -116,7 +118,7 @@ JSON 是 plaita 的**标准序列化格式**，也是可视化编排工具的导
 from plaita.dsl import build, start, end, if_, cond
 
 flow = (
-    build("adult_check", input_type="object")
+    build("adult_check")
     .add(start(next="check_age"))
     .add(if_(
         id="check_age",

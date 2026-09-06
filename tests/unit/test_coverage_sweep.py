@@ -30,11 +30,18 @@ class TestRunnerLine165(unittest.TestCase):
         return NodeRunner(ctx)
 
     def test_negative_retry_continue_returns_none(self):
-        """retry_times=-1 with CONTINUE → _get_error_result → None."""
+        """retry_times=-1 会被钳到 0（至少执行一次），CONTINUE 在节点失败后返回 None。
+
+        历史行为：range(-1+1) 为空 → 不执行节点 → _get_error_result 静默返回
+        None，abort 策略下错误被吞、流程"成功"。钳制后节点必然执行，错误走
+        正常的 _handle_node_error 分发。
+        """
         runner = self._make_runner()
         node = MagicMock()
         node.timeout = None
         node.timeout_handler = None
+        node.id = "n1"
+        node.run.side_effect = RuntimeError("boom")
         handler = RecoverableErrorHandler.model_validate(
             {"strategy": "continue", "retryTimes": -1}
         )
@@ -43,13 +50,17 @@ class TestRunnerLine165(unittest.TestCase):
         flow.max_timeout = None
         result = asyncio.run(runner._execute_with_retry(flow, node, None))
         self.assertIsNone(result)
+        # 钳制生效：节点至少被执行了一次（而不是被静默跳过）
+        self.assertEqual(node.run.call_count, 1)
 
     def test_negative_retry_continue_with_returns_default(self):
-        """retry_times=-1 with CONTINUE_WITH → _get_error_result → default."""
+        """retry_times=-1 with CONTINUE_WITH → 节点执行失败后返回 default。"""
         runner = self._make_runner()
         node = MagicMock()
         node.timeout = None
         node.timeout_handler = None
+        node.id = "n1"
+        node.run.side_effect = RuntimeError("boom")
         handler = RecoverableErrorHandler.model_construct(
             retry_times=-1,
             strategy=ErrorStrategy.CONTINUE_WITH,
@@ -60,6 +71,7 @@ class TestRunnerLine165(unittest.TestCase):
         flow.max_timeout = None
         result = asyncio.run(runner._execute_with_retry(flow, node, None))
         self.assertEqual(result, {"value": "fallback"})
+        self.assertEqual(node.run.call_count, 1)
 
 
 # ---------------------------------------------------------------------------

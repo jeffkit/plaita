@@ -82,6 +82,8 @@ class PollableNode(Node):
 | `continue` | 忽略错误，本节点返回 `None`，继续往下 |
 | `continue_with` | 用 `defaultValue` 作为本节点输出，继续往下 |
 
+`defaultValue` 接受**任意类型**——标量、字符串、对象均可，不再限定 dict。
+
 `retryTimes` 控制重试次数：在重试耗尽前不触发策略，重试全部失败后才按 `strategy` 处理。
 
 ### 超时处理器
@@ -115,7 +117,10 @@ plaita 用一套规范异常类型（定义在 `plaita.core.errors`）：
 
 ### 主动返回错误
 
-`End` 节点 `resultType: "error"` 会抛 `FlowResultError`，把业务错误码透传给调用方：
+`End` 节点 `resultType: "error"` 会以业务错误终止流程：运行时把节点内的
+`FlowResultError` 包装为 `ErrorResultException`（`plaita.core.errors`，携带同样的
+`code` / `message`）抛给调用方——**捕获时用 `ErrorResultException`**（它同时是
+`FlowExecutionException` 子类）：
 
 ```json
 {
@@ -126,7 +131,27 @@ plaita 用一套规范异常类型（定义在 `plaita.core.errors`）：
 }
 ```
 
-`resultType` 三种：`success`（正常返回 `output`）/ `nop`（返回 `None`）/ `error`（抛 `FlowResultError`）。
+`resultType` 三种：`success`（正常返回 `output`，**不写时的默认值**）/ `nop`（返回 `None`）/ `error`（包装为 `ErrorResultException` 抛出，见上节）。写了无法识别的值会打 `logger.warning` 并按 `success` 处理。
+
+## 分布式模式的错误契约
+
+Normal / Generator 模式抛出的异常保持具体类型（`NodeNotFoundError` /
+`NodeTimeoutError` / `ErrorResultException` …）；**Distributed 模式把它们统一归一为
+`FlowErrorException`（code=-500）**——这是分布式执行的外部契约：跨进程恢复时调用方
+拿到的错误形状只有一种，原始类型的细节只保留在 `message` 文本里。
+
+按 `error_type` / 异常子类分支处理的代码在分布式路径上不生效；需要区分错误类别时
+从 `message` 解析，或改在 Normal 模式做细粒度错误处理。
+
+```python
+from plaita.core.errors import FlowErrorException
+
+try:
+    execution.run_distributed(flow, params)
+except FlowErrorException as e:
+    # 分布式模式下所有错误都是这个形状；具体原因看 e.message
+    ...
+```
 
 ## 回调通知
 

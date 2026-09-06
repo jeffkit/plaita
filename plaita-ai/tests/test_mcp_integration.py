@@ -49,9 +49,17 @@ class _ComplexResult:
     count: int
 
 # ---------------------------------------------------------------------------
-# Inject a stub mcp module so server.py can be imported on Python 3.9
-# (real mcp requires Python >= 3.10)
+# 真实 mcp 优先；stub 仅在 mcp 未安装时兜底，让 flow_runner 相关测试仍可导入
+# server 模块。历史上无条件注入 stub，导致 mcp 2.x 真实安装下 `plaita-ai mcp`
+# 已崩而测试全绿（2026-09 盲区评审 P0-2）——server 专属测试现以 _REAL_MCP 区分。
 # ---------------------------------------------------------------------------
+
+try:
+    import mcp.server.fastmcp as _real_fastmcp  # noqa: F401
+    _REAL_MCP = True
+except ImportError:
+    _REAL_MCP = False
+
 
 def _inject_stub_mcp():
     """Insert a minimal stub mcp.server.fastmcp into sys.modules."""
@@ -360,6 +368,7 @@ class TestResultJson(unittest.TestCase):
 # MCP server tools (server.py)
 # ---------------------------------------------------------------------------
 
+@unittest.skipUnless(_REAL_MCP, "real mcp package required: pip install 'mcp>=1.0,<2'")
 class TestMcpServerTools(unittest.TestCase):
     def setUp(self):
         ToolNode.clear()
@@ -488,6 +497,7 @@ class TestMcpServerTools(unittest.TestCase):
 # _load_plugins
 # ---------------------------------------------------------------------------
 
+@unittest.skipUnless(_REAL_MCP, "real mcp package required: pip install 'mcp>=1.0,<2'")
 class TestLoadPlugins(unittest.TestCase):
     def test_load_valid_module(self):
         from plaita_ai.mcp.server import _load_plugins
@@ -517,6 +527,7 @@ class TestLoadPlugins(unittest.TestCase):
 # _build_tool_instructions
 # ---------------------------------------------------------------------------
 
+@unittest.skipUnless(_REAL_MCP, "real mcp package required: pip install 'mcp>=1.0,<2'")
 class TestBuildToolInstructions(unittest.TestCase):
     def setUp(self):
         ToolNode.clear()

@@ -12,7 +12,7 @@ plaita 将 JSON 格式的逻辑流程定义解析为可执行的 `Flow`，并以
 ## 核心特性
 
 - :material-graph-outline: **JSON 流程定义** —— 用节点 + `next`/分支描述控制流，平台可视化编排或手写皆可
-- :material-cube-outline: **插件化节点** —— 默认 16 种内置节点（`CodeNode` 需显式注册），自定义节点只需实现 `execute`，支持 entry_points 自动发现
+- :material-cube-outline: **插件化节点** —— 默认注册表 23 种内置节点（`CodeNode` 需显式注册），自定义节点只需实现 `execute`，支持 entry_points 自动发现
 - :material-robot-outline: **AI Agent 编排（典型场景）** —— LLM 规划 + plaita 执行是最常见的使用场景之一；`@flow` / JSON 有构建期校验，`flow_from_source` 让 AI 生成的流程编译期就拦错
 - :material-sync: **三种执行模式** —— Normal 同步、Generator 单步调试、Distributed 跨进程断点续执
 - :material-clock-outline: **超时与错误策略** —— 节点级/流程级 ISO 8601 超时、`abort`/`continue`/`continue_with` 错误策略与重试

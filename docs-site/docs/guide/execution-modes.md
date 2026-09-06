@@ -53,13 +53,21 @@ for step in flow.debug(name="test"):
 | `result` | 该节点输出 |
 | `branch` | 命中的分支（分支节点） |
 | `context` | 当前执行上下文快照 |
-| `is_end` | 是否到达 End 节点 |
+| `is_end` | 是否为到达 End 节点的那一步（是则 `True`，流程随即结束） |
 | `is_suspend` | 是否在事件节点挂起（Distributed） |
 | `execution_id` | 本次执行 ID |
 
 !!! note "Generator 模式的 on_flow_end 时机"
 
     `on_flow_end` 回调会推迟到生成器**真正被消费完毕或关闭**时才触发，而非 `flow.debug()` 调用返回时。这样保证生命周期回调与实际执行进度一致。
+
+!!! warning "Generator 模式同样执行流程级 timeout"
+
+    流程的 `timeout` 字段（ISO 8601 时长，如 `"PT1S"`）在 Generator 模式下**同样生效**——你在步骤间检查/暂停消耗的时间计入预算，超时后抛 `FlowTimeoutError`（或节点级 `NodeTimeoutError`）。调试器场景请给流程留足 `timeout`，或依赖节点级超时。
+    !!! warning "超时精度下限"
+        节点/流程超时由调度与派发粒度共同决定——**毫秒级超时（如 1-10ms）不可靠**，
+        实际可能在超时触发前就完成派发，或晚若干毫秒才触发。压测显示 1ms 级
+        timeout 存在与派发耗时相当的固有抖动；请将最小超时设在 50ms 以上。
 
 ## Distributed 模式
 
@@ -70,11 +78,9 @@ for step in flow.debug(name="test"):
     `ExecutionMode.DISTRIBUTED` / `run_distributed` 表示「单步 + suspend/resume」，**不**表示：
 
     - 任务至少一次投递（`RedisFlowWorker` 使用 Redis Stream + `XACK` / `XCLAIM`）
-    - 每步必落盘（`PERSIST_EVERY_N_STEPS` 默认 **1**）
-    - 每步必落盘（Worker 默认每 5 步写一次中间态）
     - 「恰好一次」副作用（队列仍是至少一次；resume 有 lease 防并发，但崩溃重投后节点仍可能再跑）
 
-    部署前请读 [FlowWorker · 可靠性边界](../distributed/flow-worker.md#可靠性边界必读)。
+    中间态落盘间隔由 `PERSIST_EVERY_N_STEPS` 控制，默认 **1**（每步落盘）。部署前请读 [FlowWorker · 可靠性边界](../distributed/flow-worker.md#可靠性边界必读)。
 
 ```python
 from plaita import Flow, FlowExecution
@@ -87,7 +93,7 @@ step = execution.run_distributed(flow, {"applicant": "alice"})
 # step: {"is_suspend": True, "context": {...}, ...}
 
 # 把 step["context"] 持久化（如存入 ExecutionStorage）
-save(execution._ctx.execution_id, step["context"])
+save(step["execution_id"], step["context"])
 
 # ... 一段时间后，外部事件到达，在另一个进程恢复 ...
 saved_context = load(execution_id)

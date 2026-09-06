@@ -2,7 +2,13 @@ import re
 import urllib.parse
 from typing import ClassVar, Optional
 
-import redis
+try:
+    import redis
+except ImportError as e:  # pragma: no cover - 取决于安装的 extras
+    raise ImportError(
+        "plaita.node.redis (RedisNode) requires the 'redis' package. "
+        "Install it with: pip install plaita[redis]"
+    ) from e
 from pydantic import ConfigDict, Field
 
 from .basic import Node

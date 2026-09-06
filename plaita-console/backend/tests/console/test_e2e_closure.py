@@ -89,9 +89,11 @@ def server(tmp_path, monkeypatch):
 
 def test_e2e_plaita_client_fetch_and_run(server: str):
     client = PlaitaClient(secret_id=SECRET_ID, secret_key=SECRET_KEY, url=server)
-    flow_dict = client._fetch_flow("echo", "1.0.0")
-    assert flow_dict["flow_id"] == "echo"
+    # _fetch_flow 返回 flow JSON **字符串**（服务端 data.flow 是字符串，客户端
+    # 不再二次解析——双重解析 bug 已修）；完整性断言 + run_flow 全链路。
+    flow_json = client._fetch_flow("echo", "1.0.0")
+    assert isinstance(flow_json, str)
+    assert json.loads(flow_json)["flow_id"] == "echo"
 
-    flow = Flow.model_validate(flow_dict)
-    result = flow.run(name="kongjie")
+    result = client.run_flow("echo", "1.0.0", {"name": "kongjie"})
     assert result == "kongjie"

@@ -162,7 +162,7 @@ class TestBackgroundDoneCallbackException(unittest.TestCase):
         branch.name = "bg_branch"
         errors = []
 
-        callback = Parallel._make_background_done_callback(branch, errors)
+        callback = Parallel._make_background_done_callback(branch, errors, {"futures": [], "done": 0})
 
         # future.exception() raises (e.g., CancelledFuture)
         fut = MagicMock()
@@ -178,7 +178,7 @@ class TestBackgroundDoneCallbackException(unittest.TestCase):
         branch = MagicMock()
         branch.name = "ok_branch"
         errors = []
-        callback = Parallel._make_background_done_callback(branch, errors)
+        callback = Parallel._make_background_done_callback(branch, errors, {"futures": [], "done": 0})
         fut = MagicMock()
         fut.exception.return_value = None
         callback(fut)
@@ -189,8 +189,10 @@ class TestBackgroundDoneCallbackException(unittest.TestCase):
         branch = MagicMock()
         branch.name = "failing_branch"
         errors = []
-        callback = Parallel._make_background_done_callback(branch, errors)
+        state = {"futures": [], "done": 0}
+        callback = Parallel._make_background_done_callback(branch, errors, state)
         fut = MagicMock()
+        state["futures"].append(fut)
         fut.exception.return_value = ValueError("boom")
         callback(fut)
         self.assertEqual(len(errors), 1)

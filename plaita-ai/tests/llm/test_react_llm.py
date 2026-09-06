@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 import pytest
+pytest.importorskip("langchain", reason="langchain extra not installed: pip install 'plaita-ai[agent]'")
 
 from tests.llm.harness import build_model, run_react_task, select_tasks
 
