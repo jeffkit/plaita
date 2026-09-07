@@ -31,8 +31,10 @@ class EventNode(Node):
     is_suspending: ClassVar[bool] = True
     
     # 只保留配置属性
-    event_type: str
-    event_filter: Dict[str, Any] = Field(default_factory=dict)
+    # event_type 是 event 节点唯一真实的用户字段：与事件发布方的 type 精确匹配
+    # （console POST /api/events/publish 或扩展节点服务），支持 $ 表达式
+    event_type: str = Field(description="订阅的事件类型：须与事件发布方的 type 一致（支持 $ 表达式）")
+    event_filter: Dict[str, Any] = Field(default_factory=dict, description="事件过滤器：按点路径匹配事件负载字段，如 {\"data.status\": \"ok\"}")
     
     def _get_node_state(self, execution, default=None):
         """

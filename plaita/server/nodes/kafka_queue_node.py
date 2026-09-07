@@ -2,8 +2,8 @@
 Kafka队列节点实现
 支持监听Kafka主题消息并触发流程继续执行
 """
-from typing import Any, ClassVar, Dict, List, Optional, Union
-from pydantic import Field
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
@@ -14,35 +14,53 @@ class KafkaQueueNode(BaseExtendedNode):
     Kafka队列节点
     监听Kafka主题消息，接收到消息时触发事件继续流程
     """
-    
+
     node_type: ClassVar[str] = "kafka_queue"
     node_name: ClassVar[str] = "Kafka队列节点"
-    
+
+    # 运行时契约：固定订阅 kafka_message 事件。历史上 event_type 必填而用户值
+    # 必被 __init__ 覆盖（伪必填地雷，2026-09 表单评审）；现在由 _set_event_type
+    # 在校验前注入，schema 不再 required
+    event_type: str = Field(default="kafka_message", description="内部事件类型标识，由节点自动设定，请勿修改")
+
     # Kafka配置
     bootstrap_servers: Union[str, List[str]] = Field(description="Kafka服务器地址，支持多个服务器")
-    security_protocol: str = Field(default="PLAINTEXT", description="安全协议: PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL")
-    sasl_mechanism: Optional[str] = Field(default=None, description="SASL机制: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512")
+    # 以下 Literal 生成 schema enum（console 表单渲染下拉）；非法历史值此前
+    # 要到 Kafka consumer 启动才报错，现在解析期即拦截
+    security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = Field(
+        default="PLAINTEXT", description="安全协议: PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL"
+    )
+    sasl_mechanism: Optional[Literal["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"]] = Field(
+        default=None, description="SASL 机制: PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512"
+    )
     sasl_username: Optional[str] = Field(default=None, description="SASL用户名")
     sasl_password: Optional[str] = Field(default=None, description="SASL密码")
-    
+
     # 主题配置
     topic: str = Field(description="Kafka主题名称")
     partition: Optional[int] = Field(default=None, description="指定分区，None表示监听所有分区")
-    
+
     # 消费者配置
     group_id: str = Field(description="消费者组ID")
-    auto_offset_reset: str = Field(default="latest", description="偏移量重置策略: earliest, latest")
+    auto_offset_reset: Literal["earliest", "latest"] = Field(
+        default="latest", description="偏移量重置策略: earliest / latest"
+    )
     enable_auto_commit: bool = Field(default=True, description="是否自动提交偏移量")
     max_poll_records: int = Field(default=1, description="单次拉取的最大记录数")
-    
+
     # 消息处理配置
-    message_format: str = Field(default="json", description="消息格式: json, text, avro")
+    # 注意：历史描述声明过 avro，但消费服务从未实现（静默按未知格式落地），
+    # 这里收敛为已实现的 json/text；存量 avro 配置会在解析期得到明确报错
+    message_format: Literal["json", "text"] = Field(default="json", description="消息格式: json / text")
     timeout_ms: int = Field(default=30000, description="消费超时时间（毫秒）")
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Kafka队列节点默认监听kafka_message事件
-        self.event_type = "kafka_message"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _set_event_type(cls, values):
+        # 强制事件订阅契约（原 __init__ 无条件覆盖行为的等价迁移）
+        if isinstance(values, dict):
+            values["event_type"] = "kafka_message"
+        return values
         
     def generate_service_config(self, execution) -> Dict[str, Any]:
         """

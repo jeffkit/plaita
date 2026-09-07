@@ -3,8 +3,8 @@
 支持人工审批流程，等待审批决策后触发事件继续流程
 """
 import time
-from typing import Any, ClassVar, Dict, List, Optional, Union
-from pydantic import Field
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
@@ -15,35 +15,51 @@ class ApprovalNode(BaseExtendedNode):
     审批节点
     发起人工审批流程，等待审批决策后触发事件继续流程
     """
-    
+
     node_type: ClassVar[str] = "approval"
     node_name: ClassVar[str] = "审批节点"
-    
+
+    # 运行时契约：审批节点固定订阅 approval_decision 事件。历史上 event_type
+    # 必填而用户值必被 __init__ 覆盖（伪必填地雷，2026-09 表单评审）；现在由
+    # _normalize_enums 在校验前注入，schema 不再 required
+    event_type: str = Field(default="approval_decision", description="内部事件类型标识，由节点自动设定，请勿修改")
+
     # 审批配置
     approval_title: str = Field(description="审批标题")
     approval_content: str = Field(description="审批内容")
-    approval_type: str = Field(default="manual", description="审批类型: manual, auto")
-    
+    # Literal 生成 schema enum（console 表单渲染下拉）；大小写归一见 _normalize_enums
+    approval_type: Literal["manual", "auto"] = Field(default="manual", description="审批类型: manual（人工审批）/ auto（自动通过）")
+
     # 审批人配置
     approvers: List[str] = Field(description="审批人列表（用户ID或邮箱）")
-    approval_strategy: str = Field(default="any", description="审批策略: any(任一审批), all(全部审批), majority(多数审批)")
+    approval_strategy: Literal["any", "all", "majority"] = Field(
+        default="any", description="审批策略: any（任一审批）/ all（全部审批）/ majority（多数审批）"
+    )
     auto_escalation: bool = Field(default=False, description="是否自动升级")
     escalation_timeout_hours: int = Field(default=24, description="升级超时时间（小时）")
     escalation_approvers: List[str] = Field(default_factory=list, description="升级审批人列表")
-    
+
     # 表单配置
     form_fields: List[Dict[str, Any]] = Field(default_factory=list, description="审批表单字段")
     allow_comments: bool = Field(default=True, description="是否允许审批意见")
     require_comments: bool = Field(default=False, description="是否必须填写审批意见")
-    
+
     # 通知配置
     notification_config: Dict[str, Any] = Field(default_factory=dict, description="通知配置")
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        # 审批节点默认监听approval_decision事件
-        self.event_type = "approval_decision"
-        
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_enums(cls, values):
+        # "ALL"/"Manual" 等历史写法曾无任何校验直接透传，Literal 之前先归一
+        if isinstance(values, dict):
+            for key in ("approval_type", "approval_strategy"):
+                v = values.get(key)
+                if isinstance(v, str):
+                    values[key] = v.lower()
+            # 强制事件订阅契约（原 __init__ 无条件覆盖行为的等价迁移）
+            values["event_type"] = "approval_decision"
+        return values
+
     def generate_service_config(self, execution) -> Dict[str, Any]:
         """
         生成审批服务配置
