@@ -85,6 +85,9 @@ jobs:
       - name: Redis outage chaos regression
         run: bash plaita-console/scripts/e2e-chaos-redis.sh --no-build
 
+      - name: Console restart chaos regression
+        run: bash plaita-console/scripts/e2e-chaos-console-restart.sh --no-build
+
       - name: Upload UI debug screenshots
         if: failure()
         uses: actions/upload-artifact@v4

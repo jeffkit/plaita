@@ -222,8 +222,12 @@ class FlowWorker:
         # resume 任务会命中已完成的执行。历史实现走完正常 resume 再在异常
         # 处理里把终态改写成 error——监控按 status 查询会得出错误结论。
         # 幂等语义：已终态的执行直接原样返回，不再推进。
+        # cancelled 同为终态（console cancel 端点先写 cancelled 再投
+        # resume_type=cancel 消息；若此处不放行，挂起执行会被 on_cancel
+        # 续跑到 end 翻成 completed、非挂起执行被 ResumeError 翻成 error
+        # ——「已取消」跳回「已完成/失败」。E2E cancel 回归用例钉住此语义）。
         state_status = getattr(state, "status", "") or ""
-        if state_status in ("completed", "error"):
+        if state_status in ("completed", "error", "cancelled"):
             logger.info(
                 "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
             )

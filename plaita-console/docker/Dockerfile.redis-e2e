@@ -1,3 +1,6 @@
 # argusai E2E 专用 Redis。argusai 的 services[] 要求每个服务都可构建
 # （不支持直接引用现成镜像），故包一层。
+# appendonly 与生产 compose（docker/docker-compose.yml --appendonly yes）对齐：
+# E2E 要测「Redis 重启后状态存活」这类真实姿态，无持久化的姿态生产不存在。
 FROM redis:7-alpine
+CMD ["redis-server", "--appendonly", "yes"]
