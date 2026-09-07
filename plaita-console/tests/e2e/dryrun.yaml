@@ -125,3 +125,33 @@ cases:
       status: 200
       body:
         error: { contains: "执行失败" }
+
+  # === onlyNode：仅真实执行目标节点，其余以 mock（output=null）代替 ===
+  - name: "onlyNode=end：mock 上游仍算出真实结果"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-only","name":"only","nodes":[{"id":"start","type":"start","next":"m1"},{"id":"m1","type":"mock","value":5,"next":"end"},{"id":"end","type":"end","output":"$INPUT.value","result_type":"success"}]}'
+        input:
+          value: 21
+        onlyNode: "end"
+    expect:
+      status: 200
+      body:
+        result: 21
+
+  - name: "onlyNode=m1：目标节点真实执行（mock 节点 value=5 透传）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-only2","name":"only2","nodes":[{"id":"start","type":"start","next":"m1"},{"id":"m1","type":"mock","value":5,"next":"end"},{"id":"end","type":"end","output":"$NODE.m1","result_type":"success"}]}'
+        input: {}
+        onlyNode: "m1"
+    expect:
+      status: 200

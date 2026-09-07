@@ -1,0 +1,185 @@
+name: 流程版本管理
+sequential: true
+service: redis   # exec 默认容器路由到 redis（redis-cli 断言引擎侧清理联动）
+
+# 版本管理 CRUD 分支 + 「删除时引擎侧清理联动」——双存储断点家族的另一半：
+# 发布同步（engine suite 断点②）有回归，而删除流程/版本必须同步清掉
+# 引擎 Redis 存储键（flows.py → engine_sync.remove_flow_*），此前零断言。
+# export 晋升包断言 kind/definition_hash；import 往返因包结构契约较重暂缓。
+
+cases:
+  - name: "创建版本管理测试流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-fv-flow"
+        author: "e2e"
+        desc: "flows-versions suite"
+    expect:
+      status: 200
+
+  - name: "重复创建同 id 流程返回 409"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-fv-flow"
+    expect:
+      status: 409
+
+  - name: "PUT 非法 semver 版本号返回 422"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-fv-flow","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 422
+
+  - name: "PUT 非法定义返回 422"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: "not-a-json"
+        created_by: "e2e"
+    expect:
+      status: 422
+
+  - name: "对不存在的流程 PUT 版本返回 404"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-fv-nope/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-fv-nope","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 404
+
+  - name: "保存并发布 1.0.0"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-fv-flow","name":"E2E FV","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"published-1-0-0","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+      body:
+        status: { exists: true }
+
+  - name: "发布 1.0.0"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-fv-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  - name: "发布不存在的版本返回 404"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-fv-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "9.9.9"
+    expect:
+      status: 404
+
+  - name: "读取版本详情（published）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.0.0
+    expect:
+      status: 200
+      body:
+        version: "1.0.0"
+
+  - name: "读取不存在的版本返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/9.9.9
+    expect:
+      status: 404
+
+  - name: "export 晋升包（kind + definition_hash）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.0.0/export
+    expect:
+      status: 200
+      body:
+        kind: { contains: "promotion" }
+        definition_hash: { exists: true }
+
+  - name: "保存 1.1.0 草稿"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.1.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-fv-flow","name":"E2E FV","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"draft-1-1-0","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "删除 1.1.0 草稿版本"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.1.0
+    expect:
+      status: 200
+
+  - name: "被删版本读取返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/flows/e2e-fv-flow/versions/1.1.0
+    expect:
+      status: 404
+
+  - name: "删除整个流程"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-fv-flow
+    expect:
+      status: 200
+
+  - name: "流程详情返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/flows/e2e-fv-flow
+    expect:
+      status: 404
+
+  - name: "引擎侧存储已联动清理（plaita:flow:{id}:1.0.0 不存在）"
+    exec:
+      command: redis-cli EXISTS plaita:flow:e2e-fv-flow:1.0.0
+    expect:
+      output:
+        contains: "0"
+
+  - name: "引擎侧版本注册已联动清理"
+    exec:
+      command: redis-cli SISMEMBER plaita:flow_versions:e2e-fv-flow 1.0.0
+    expect:
+      output:
+        contains: "0"

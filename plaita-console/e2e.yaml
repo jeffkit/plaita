@@ -59,6 +59,9 @@ services:
         startPeriod: 20s
 
   # engine 级 suite 需要：真实多进程消费队列、服务注册心跳。
+  # 注意：消费组共享下不要给 worker 配激进 reclaim 旋钮（PLAITA_CLAIM_MIN_IDLE_MS
+  # 过小会抢走兄弟 worker 处理中的任务，叠加小 max_deliveries 直接误进 DLQ——
+  # 实测首个冷启动任务就超 3s）。DLQ 场景用 e2e-chaos-dlq.sh 的独立清道夫 worker。
   - name: flow-worker
     build:
       dockerfile: plaita-console/docker/Dockerfile.worker-e2e
@@ -67,6 +70,20 @@ services:
     dependsOn: [redis]
     container:
       name: plaita-e2e-worker
+      ports: []
+      environment:
+        E2E_TEST_REDIS_HOST: plaita-e2e-redis
+        PLAITA_REDIS_URL: redis://plaita-e2e-redis:6379/0
+
+  # 第二个 worker：消费组自然分摊，验证多实例租约互斥与注册可见性
+  - name: flow-worker-2
+    build:
+      dockerfile: plaita-console/docker/Dockerfile.worker-e2e
+      context: ..
+      image: plaita-e2e-worker:latest
+    dependsOn: [redis]
+    container:
+      name: plaita-e2e-worker-2
       ports: []
       environment:
         E2E_TEST_REDIS_HOST: plaita-e2e-redis
@@ -164,6 +181,16 @@ tests:
       id: engine
       file: tests/e2e/engine.yaml
 
+    - name: 引擎可靠性
+      id: engine-reliability
+      service: redis
+      file: tests/e2e/engine-reliability.yaml
+
+    - name: 流程版本管理
+      id: flows-versions
+      service: redis
+      file: tests/e2e/flows-versions.yaml
+
     - name: 契约面（HMAC）
       id: contract
       service: console-backend   # exec 默认容器随此路由（suite 文件内无 service 键）
@@ -172,6 +199,10 @@ tests:
     - name: 调度与外延服务
       id: scheduler
       file: tests/e2e/scheduler.yaml
+
+    - name: 控制台注册表与审计
+      id: console-registry
+      file: tests/e2e/console-registry.yaml
 
     - name: 控制台 UI
       id: ui

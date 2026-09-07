@@ -1,0 +1,151 @@
+name: 引擎可靠性
+sequential: true
+service: redis   # exec 默认容器路由到 redis（redis-cli 断言 DLQ/注册表）
+
+# 多实例消费、终态幂等、DLQ 收容、事件订阅负例。
+# 拓扑前置：e2e.yaml 双 flow-worker（消费组分摊）+ PLAITA_MAX_DELIVERIES=1 /
+# PLAITA_CLAIM_MIN_IDLE_MS=3000（DLQ 用例秒级出结果）。
+# 语义注记：resume_type=continue 打在 approval 挂起执行上会被内核拒绝
+# （ResumeError——continue 不允许绕过 pending 的挂起节点）→ 状态翻 error →
+# 任务经失败分支进 DLQ（max_deliveries=1 即首败收容）。
+
+cases:
+  - name: "创建可靠性测试审批流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-rel-flow"
+        author: "e2e"
+        desc: "reliability suite"
+    expect:
+      status: 200
+
+  - name: "保存并发布"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-rel-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-rel-flow","name":"E2E Rel","nodes":[{"id":"start","type":"start","next":"approval"},{"id":"approval","type":"approval","approval_title":"Rel","approval_content":"rel","approvers":["e2e"],"event_type":"approval_decision","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "发布"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-rel-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  - name: "启动审批流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-rel-flow"
+        version: "1.0.0"
+        params: {}
+    expect:
+      status: 200
+      body:
+        status: "queued"
+
+  - name: "审批执行挂起（轮询取 ID）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-rel-flow
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+    save:
+      rel_exec_id: "executions.0.execution_id"
+
+  - name: "确认挂起"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "suspended"
+
+  - name: "continue 恢复挂起审批 → 内核拒绝（终态 error，不得绕过挂起节点）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "continue"
+    expect:
+      status: 200
+
+  - name: "执行终态 error（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "error"
+
+  # DLQ 收容断言不放在共享组 suite 里：需要激进 reclaim/max_deliveries 旋钮，
+  # 旋钮在共享消费组上会抢兄弟 worker 处理中的任务（实测冷启动任务超 3s 即被
+  # 回收误进 DLQ）。该场景由 e2e-chaos-dlq.sh 的独立清道夫 worker 承担。
+
+  - name: "对 error 终态重复 resume → 幂等跳过（状态保持 error）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "event"
+        data:
+          decision: "approved"
+    expect:
+      status: 200
+
+  - name: "终态未被重复 resume 改写"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
+    expect:
+      status: 200
+      body:
+        status: "error"
+
+  - name: "双 worker 注册可见（redis 注册表恰 2 个 flow_worker 实例）"
+    exec:
+      command: redis-cli --scan --pattern 'plaita:registry:flow_worker:*' | wc -l
+    expect:
+      output:
+        contains: "2"
+
+teardown:
+  - name: "清理: 删除可靠性流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-rel-flow
+    ignoreError: true
