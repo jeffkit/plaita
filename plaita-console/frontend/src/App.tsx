@@ -40,10 +40,11 @@ import Schedules from './pages/Schedules'
 import ClusterSwitcher from './components/ClusterSwitcher'
 import ThemeToggle from './components/ThemeToggle'
 
-// 侧边导航分组：按「定义 / 运行 / 集群」三个域划分——
-// 编排域关注流程定义（不关注运行），运行域关注观测与运维，
-// 集群域是平台基础设施视图。定义与运行的存储本就分离
-// （定义库 SQLite / 运行态 Redis），导航与之一一对应。
+// 侧边导航分组（2026-09 信息架构定案·方案 A）：
+// 编排域=设计时（流程/触发器/节点），运行域=运行态只读观测（执行/事件/日志/
+// 队列/拓扑/审计），管理域=admin 供给的共享资源（凭据/用户/集群）。
+// 审计归观测是域归属（只读事件流），admin-only 是权限（ADMIN_ONLY_PATHS），
+// 二者正交。定义与运行的存储本就分离（定义库 SQLite / 运行态 Redis）。
 interface NavItem {
   to: string
   icon: React.ReactNode
@@ -66,9 +67,6 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: '/flows', icon: <Workflow size={16} />, label: '流程编排' },
       { to: '/schedules', icon: <Clock size={16} />, label: '触发器' },
       { to: '/nodes', icon: <Boxes size={16} />, label: '节点管理' },
-      { to: '/credentials', icon: <KeyRound size={16} />, label: '凭据' },
-      { to: '/users', icon: <UserCog size={16} />, label: '用户' },
-      { to: '/audit', icon: <ScrollText size={16} />, label: '审计' },
     ],
   },
   {
@@ -78,12 +76,15 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: '/events', icon: <Zap size={16} />, label: '事件管理' },
       { to: '/logs', icon: <ScrollText size={16} />, label: '日志查看' },
       { to: '/queues', icon: <Inbox size={16} />, label: '任务队列' },
+      { to: '/topology', icon: <GitBranch size={16} />, label: '服务拓扑' },
+      { to: '/audit', icon: <ScrollText size={16} />, label: '审计' },
     ],
   },
   {
-    label: '集群 · 运维',
+    label: '平台 · 管理',
     items: [
-      { to: '/topology', icon: <GitBranch size={16} />, label: '服务拓扑' },
+      { to: '/credentials', icon: <KeyRound size={16} />, label: '凭据' },
+      { to: '/users', icon: <UserCog size={16} />, label: '用户' },
       { to: '/cluster', icon: <Server size={16} />, label: '集群管理' },
     ],
   },
@@ -182,7 +183,7 @@ function Layout() {
         {/* 导航分组 */}
         <div className="flex-1 overflow-y-auto py-1">
           {NAV_GROUPS.map((group) => (
-            <div key={group.label} className={group.label === '集群 · 运维' && !isAdmin ? 'hidden' : ''}>
+            <div key={group.label} className={group.label === '平台 · 管理' && !isAdmin ? 'hidden' : ''}>
               {!collapsed && (
                 <p className="px-5 pt-4 pb-1.5 text-micro uppercase text-ink-faint">
                   {group.label}

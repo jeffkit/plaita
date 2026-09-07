@@ -2,16 +2,25 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { KeyRound, Plus, Trash2 } from 'lucide-react'
 import { api } from '../services/api'
+import type { CredentialTemplate } from '../services/api'
 import { Page, PageHeader } from '../components/ui/Page'
 
-// 凭据管理：外部服务机密的集中加密存储，流程节点按名引用。
-// 明文仅在保存/编辑回填瞬间出现，列表不含任何机密内容。
+// 凭据管理（2026-09 重设计）：模板化表单取代裸 JSON——选中类型模板 → 类型化
+// 字段（secret 掩码）→ 序列化回现有 data JSON 载荷，存储格式零变更；
+// 「自定义 (JSON)」保留为兜底。模板来自后端注册表（GET /api/credential-templates）。
+const CUSTOM_MODE = '__custom__'
+
 export default function Credentials() {
   const qc = useQueryClient()
   const [editing, setEditing] = useState<string | null>(null) // null=列表态，''=新建，名字=编辑
   const list = useQuery({
     queryKey: ['credentials'],
     queryFn: () => api.getCredentials(),
+  })
+  const templatesQuery = useQuery({
+    queryKey: ['credential-templates'],
+    queryFn: () => api.getCredentialTemplates(),
+    staleTime: 5 * 60_000,
   })
 
   const del = useMutation({
@@ -20,6 +29,8 @@ export default function Credentials() {
   })
 
   const items = list.data?.credentials ?? []
+  const templates = templatesQuery.data?.templates ?? []
+
   return (
     <Page>
       <PageHeader
@@ -39,6 +50,8 @@ export default function Credentials() {
       {editing !== null && (
         <CredentialForm
           name={editing || null}
+          templates={templates}
+          templatesLoading={templatesQuery.isLoading}
           onDone={() => {
             setEditing(null)
             qc.invalidateQueries({ queryKey: ['credentials'] })
@@ -89,7 +102,17 @@ export default function Credentials() {
   )
 }
 
-function CredentialForm({ name, onDone }: { name: string | null; onDone: () => void }) {
+function CredentialForm({
+  name,
+  templates,
+  templatesLoading,
+  onDone,
+}: {
+  name: string | null
+  templates: CredentialTemplate[]
+  templatesLoading: boolean
+  onDone: () => void
+}) {
   const qc = useQueryClient()
   const existing = useQuery({
     queryKey: ['credential', name],
@@ -98,18 +121,31 @@ function CredentialForm({ name, onDone }: { name: string | null; onDone: () => v
   })
 
   const [name_, setName] = useState(name ?? '')
-  const [type, setType] = useState('generic')
+  const [typeSel, setTypeSel] = useState<string | null>(null)
   const [desc, setDesc] = useState('')
-  const [dataText, setDataText] = useState('{\n  \n}')
+  const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
+  const [customText, setCustomText] = useState('{\n  \n}')
   const [loaded, setLoaded] = useState(false)
 
-  // 编辑态：回填一次
+  const knownTypes = new Set(templates.map((t) => t.type))
+  // 类型解析：编辑态等 existing 回填后锁定；新建默认第一个模板；无模板时自定义
+  const effectiveType =
+    typeSel ??
+    (name && existing.data && !knownTypes.has(existing.data.type ?? '')
+      ? CUSTOM_MODE
+      : templates[0]?.type ?? CUSTOM_MODE)
+  const template = templates.find((t) => t.type === effectiveType) ?? null
+  const isCustom = effectiveType === CUSTOM_MODE || template === null
+
+  // 编辑态：回填一次（模板字段从 data 预填；非模板历史类型整体进自定义 JSON）
   useEffect(() => {
     if (existing.data && !loaded) {
       setName(name as string)
-      setType(existing.data.type)
-      setDesc(existing.data.desc)
-      setDataText(JSON.stringify(existing.data.data, null, 2))
+      setTypeSel(knownTypes.has(existing.data.type ?? '') ? existing.data.type : CUSTOM_MODE)
+      setDesc(existing.data.desc ?? '')
+      const data = (existing.data.data ?? {}) as Record<string, unknown>
+      setFieldValues(Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])))
+      setCustomText(JSON.stringify(data ?? {}, null, 2))
       setLoaded(true)
     }
   }, [existing.data, loaded, name])
@@ -117,13 +153,29 @@ function CredentialForm({ name, onDone }: { name: string | null; onDone: () => v
   const save = useMutation({
     mutationFn: async () => {
       let data: Record<string, unknown>
-      try {
-        data = JSON.parse(dataText)
-      } catch (e) {
-        throw new Error(`数据 JSON 非法: ${(e as Error).message}`)
+      if (isCustom) {
+        try {
+          data = JSON.parse(customText)
+        } catch (e) {
+          throw new Error(`数据 JSON 非法: ${(e as Error).message}`)
+        }
+      } else {
+        data = {}
+        for (const f of template!.fields) {
+          const v = (fieldValues[f.key] ?? '').trim()
+          if (f.required && v === '') throw new Error(`「${f.label}」为必填`)
+          if (v !== '') data[f.key] = f.input_type === 'number' ? Number(v) : v
+        }
+        // 模板外历史字段原样保留（轮换不丢配置）
+        for (const [k, v] of Object.entries(fieldValues)) {
+          if (!(template!.fields ?? []).some((f) => f.key === k) && v !== '') {
+            data[k] = v
+          }
+        }
       }
       if (!name_.trim()) throw new Error('凭据名不能为空')
-      return api.saveCredential({ name: name_.trim(), type: type || 'generic', desc, data })
+      const type = isCustom ? (effectiveType === CUSTOM_MODE ? 'generic' : effectiveType) : template!.type
+      return api.saveCredential({ name: name_.trim(), type, desc, data })
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['credentials'] })
@@ -131,44 +183,76 @@ function CredentialForm({ name, onDone }: { name: string | null; onDone: () => v
     },
   })
 
+  const setField = (key: string, v: string) => setFieldValues((s) => ({ ...s, [key]: v }))
+
   return (
     <div className="mb-4 p-4 rounded-lg bg-elevated border border-line space-y-2.5">
       <div className="flex items-center gap-2">
-        <span className="text-caption text-ink-muted w-24">凭据名</span>
+        <span className="text-caption text-ink-muted w-24 shrink-0">凭据名</span>
         <input
           value={name_}
           disabled={!!name}
           onChange={(e) => setName(e.target.value)}
           placeholder="如 feishu-bot-1（节点按名引用）"
-          className="input flex-1 font-mono text-[12px] disabled:opacity-60"
+          className="input flex-1 font-mono text-data-sm disabled:opacity-60"
         />
       </div>
       <div className="flex items-center gap-2">
-        <span className="text-caption text-ink-muted w-24">类型标签</span>
-        <input
-          value={type}
-          onChange={(e) => setType(e.target.value)}
-          placeholder="webhook-bearer / database / generic"
-          className="input flex-1 font-mono text-[12px]"
-        />
-      </div>
-      <div className="flex items-start gap-2">
-        <span className="text-caption text-ink-muted w-24 pt-2">用途说明</span>
-        <input
-          value={desc}
-          onChange={(e) => setDesc(e.target.value)}
+        <span className="text-caption text-ink-muted w-24 shrink-0">类型</span>
+        <select
+          value={effectiveType}
+          onChange={(e) => setTypeSel(e.target.value)}
           className="input flex-1"
-        />
+        >
+          {templates.map((t) => (
+            <option key={t.type} value={t.type}>
+              {t.label}（{t.type}）
+            </option>
+          ))}
+          {!isCustom && effectiveType !== CUSTOM_MODE && !knownTypes.has(effectiveType) && (
+            <option value={effectiveType}>{effectiveType}（历史类型）</option>
+          )}
+          <option value={CUSTOM_MODE}>自定义（JSON）</option>
+        </select>
       </div>
-      <div>
-        <span className="text-caption text-ink-muted">数据（JSON，保存后加密）</span>
-        <textarea
-          value={dataText}
-          onChange={(e) => setDataText(e.target.value)}
-          rows={5}
-          className="input w-full font-mono text-[12px] mt-1"
-        />
+      {template?.desc && <p className="ml-24 text-[11px] text-ink-faint">{template.desc}</p>}
+      <div className="flex items-center gap-2">
+        <span className="text-caption text-ink-muted w-24 shrink-0">用途说明</span>
+        <input value={desc} onChange={(e) => setDesc(e.target.value)} className="input flex-1" />
       </div>
+
+      {isCustom ? (
+        <div>
+          <span className="text-caption text-ink-muted">数据（JSON，保存后加密）</span>
+          <textarea
+            value={customText}
+            onChange={(e) => setCustomText(e.target.value)}
+            rows={5}
+            className="input w-full font-mono text-data-sm mt-1"
+          />
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <span className="text-caption text-ink-muted">模板字段</span>
+          {templatesLoading && <p className="text-caption text-ink-faint">模板加载中…</p>}
+          {(template?.fields ?? []).map((f) => (
+            <div key={f.key} className="flex items-center gap-2">
+              <span className="text-caption text-ink-muted w-24 shrink-0 text-right">
+                {f.label}
+                {f.required && <span className="text-status-error ml-0.5">*</span>}
+              </span>
+              <input
+                type={f.secret ? 'password' : f.input_type === 'number' ? 'number' : 'text'}
+                value={fieldValues[f.key] ?? ''}
+                onChange={(e) => setField(f.key, e.target.value)}
+                autoComplete={f.secret ? 'new-password' : 'off'}
+                className="input flex-1 font-mono text-data-sm"
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
       {save.isError && (
         <p className="text-caption text-status-error">{(save.error as Error).message}</p>
       )}
