@@ -56,3 +56,15 @@
 2. **E2E 的价值在跨进程断点**：单测/集成全绿 ≠ 系统能跑。本次 4 个真 bug（#13/#14 + webDist + 竞态）全是单元与集成层看不见的。
 3. **确定性设计先于断言**：全链路不碰真 LLM（确定性节点 + dry_run 契约 + stub）、状态轮询用 retry 而非 sleep、失败取证前置——测试的稳定性一半来自被测系统的可控入口，一半来自测试自身的确定性。
 4. **假绿灯比红灯贵**：`total>0` guard、逐服务打印、失败用例详情打印，都是在「绿灯但什么都没测到」上交过学费后的防御。
+
+## 六、三轮扩容补充（二轮/三轮实测）
+
+| # | 坑 | 事实与对策 |
+|---|-----|-----------|
+| 27 | **exec 命令里 `{{runtime.*}}` 解析为空串** | save 提取的 runtime 变量在 request url/body 里可用，但 exec command 里实测解析为空（HSET 少一个参数报 wrong number）。exec 里需要动态值时在容器内自取（如按 name grep 匹配），不跨用例传变量 |
+| 28 | **suite 文件里没有 service 键** | `service` 只存在于 e2e.yaml 的 `tests.suites[]` 条目（路由 baseUrl/configVars/**exec 默认容器**）；suite YAML 文件里写了会被静默忽略。且步骤级 `exec.container` 会被 suite 默认容器压住（源码 `containerName \|\| execConfig.container`）——改 exec 目标容器的唯一正道是 suites[].service |
+| 29 | **宿主机 docker 注入的代理劫持容器间请求** | 开发机 docker config 的 proxies 默认值会进容器 env，容器 A 经网络别名请求容器 B 时被代理拦截返回 502。exec 命令用 `env -u http_proxy -u https_proxy ...` 剥离 |
+| 30 | **共享消费组上禁配激进 reclaim 旋钮** | PLAITA_CLAIM_MIN_IDLE_MS 调小会让兄弟 worker 抢走处理中的任务（实测冷启动任务超 3s 即被回收），叠加小 max_deliveries 直接误进 DLQ。DLQ 场景用独立「清道夫 worker」（激进旋钮 + 用完即焚），主 worker 保持默认 |
+| 31 | **busybox ash/sed 的坑** | redis:7-alpine 的 ash：算术 `$(( ))` 内不能嵌套 `$( )`（展开为空）；busybox sed 不认 GNU `\?`。JSON 手术（改 hash 里 JSON 的某字段）用「先变量后算术 + 双 -e 兼容带引号/不带引号两种形态」 |
+| 32 | **plaita:schedules 的 next_run_at 在 JSON 字符串里** | 调度 hash 的 value 是整个调度 JSON，next_run_at 是 JSON 内字段（且以字符串形态存储）——手术式触发要 HGET→sed→HSET -x 写回，不能直接 HSET 子字段 |
+| 33 | **确定性触发替代真实时钟等待** | cron 粒度是分钟的，E2E 等 cron 边界最坏 60s 且随相位波动。手术式把 next_run_at 设到 now+2s 后，schedule_service 的秒级扫描 3-6s 内必然触发，回归目标（扫描→到期→入队→history）不变，gate 从 ~80s 稳定降到 ~35s |

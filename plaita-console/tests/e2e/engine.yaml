@@ -329,11 +329,11 @@ cases:
         success: true
         status: "cancelled"
 
-  - name: "延迟 10s 后终态仍为 cancelled（worker 消费掉 cancel 消息也不得翻转）"
+  - name: "延迟 5s 后终态仍为 cancelled（worker 消费掉 cancel 消息也不得翻转）"
     request:
       method: GET
       url: "http://localhost:18080/api/executions/{{runtime.cancel_exec_id}}"
-      delay: 10s
+      delay: 5s
     expect:
       status: 200
       body:

@@ -284,12 +284,45 @@ cases:
     save:
       cron_sched_id: "schedule_id"
 
-  - name: "schedule_service 自动触发（cron 到点，最坏等 60s）"
+  # 手术式触发：schedule_service 每秒扫描 plaita:schedules（hash：field=调度
+  # id，value=调度 JSON），把 JSON 内的 next_run_at 改到 2s 后即确定性触发，
+  # 省掉分钟粒度的 cron 边界等待（最多 60s）。回归目标不变：服务扫描→到期
+  # →XADD 入队→history 记录。首次 tick 后服务会把 next_run_at 自愈写进 JSON，
+  # 故先 sleep 2 再 sed 替换（容器内是 busybox ash：算术里不得嵌套 $( )，
+  # 且 hash 的 HSET 奇数参数就是 redis 的"wrong number"——最初的踩坑点）。
+  - name: "手术式设 next_run_at 至 2 秒后"
+    exec:
+      command: |-
+        sh -c 'sleep 2
+        for id in $(redis-cli --raw HKEYS plaita:schedules); do
+          if redis-cli --raw HGET plaita:schedules "$id" | grep -q e2e-sched-cron; then
+            NOW=$(date +%s)
+            TS=$(( NOW * 1000 + 2000 ))
+            redis-cli --raw HGET plaita:schedules "$id" | sed -e "s/\"next_run_at\": \"[0-9]*\"/\"next_run_at\": \"$TS\"/" -e "s/\"next_run_at\": [0-9][0-9]*/\"next_run_at\": \"$TS\"/" | redis-cli -x HSET plaita:schedules "$id"
+          fi
+        done'
+    expect:
+      output:
+        contains: "0"
+
+  - name: "schedule_service 自动触发（确定性 ≤10s）"
     request:
       method: GET
       url: "http://localhost:18080/api/schedules/{{runtime.cron_sched_id}}/history"
     retry:
-      maxAttempts: 75
+      maxAttempts: 12
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+
+  - name: "触发的执行到达 completed（轮询，回归 fire→queue→worker 链）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions?flow_id=e2e-sched-flow&status=completed"
+    retry:
+      maxAttempts: 20
       delay: 1s
     expect:
       status: 200
