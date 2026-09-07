@@ -47,6 +47,10 @@ services:
         PLAITA_CONSOLE_DB_URL: "sqlite:////tmp/plaita_console_e2e.db"
         PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN: "true"
         PLAITA_PROJECT_ROOT: /app
+        # HMAC 契约面（/api/flowVersion/semver/detail）：不配则 503 fail-closed，
+        # contract suite 验证签名成功/负例与 fail-closed 姿态
+        PLAITA_CONSOLE_SECRET_ID: e2e-secret-id
+        PLAITA_CONSOLE_SECRET_KEY: e2e-secret-key
       healthcheck:
         path: /health
         interval: 5s
@@ -104,6 +108,8 @@ services:
         PLAITA_CONSOLE_PORT: "8080"
         PLAITA_CONSOLE_DB_URL: "sqlite:////tmp/plaita_console_ui_e2e.db"
         PLAITA_CONSOLE_ADMIN_PASSWORD: e2e-admin-pass
+        # auth suite 验证 X-Admin-API-Key 直通 admin 的语义
+        PLAITA_CONSOLE_ADMIN_API_KEY: e2e-admin-api-key
         PLAITA_PROJECT_ROOT: /app
       healthcheck:
         path: /health
@@ -146,6 +152,10 @@ tests:
       id: errors
       file: tests/e2e/errors.yaml
 
+    - name: 鉴权与RBAC
+      id: auth
+      file: tests/e2e/auth.yaml
+
     - name: 试跑（dry-run）
       id: dryrun
       file: tests/e2e/dryrun.yaml
@@ -153,6 +163,11 @@ tests:
     - name: 引擎链路（多进程）
       id: engine
       file: tests/e2e/engine.yaml
+
+    - name: 契约面（HMAC）
+      id: contract
+      service: console-backend   # exec 默认容器随此路由（suite 文件内无 service 键）
+      file: tests/e2e/contract.yaml
 
     - name: 调度与外延服务
       id: scheduler

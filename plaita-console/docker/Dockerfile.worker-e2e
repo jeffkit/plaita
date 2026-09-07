@@ -25,6 +25,7 @@ COPY setup.py .
 
 # 必须 pip 安装而非仅 COPY：approval/delay 等扩展节点经
 # [project.entry-points."plaita.nodes"] 自动发现，依赖安装元数据
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir setuptools wheel && \
+    pip install --no-cache-dir --no-build-isolation .
 
 CMD ["sh", "-c", "until python -c \"import os,socket; socket.create_connection((os.environ.get('E2E_TEST_REDIS_HOST','redis'), 6379), timeout=1).close()\" 2>/dev/null; do echo 'e2e: waiting for redis...'; sleep 1; done; exec python -m plaita.server.flow_worker --redis-url ${PLAITA_REDIS_URL} --queue-name plaita:flow:queue --execution-storage-type redis --flow-storage-type redis --enable-registry"]

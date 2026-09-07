@@ -79,3 +79,49 @@ cases:
       status: 200
       body:
         error: { contains: "危险节点" }
+
+  # === switch 控制流节点：分支路由是引擎核心语义，此前无任何回归 ===
+  - name: "switch 命中条件分支（value=21 → gt 10 → end_big 输出 big）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-switch","name":"switch","nodes":[{"id":"start","type":"start","next":"route"},{"id":"route","type":"switch","branches":[{"name":"end_big","condition":{"field":"$INPUT.value","operator":"gt","value":10}},{"name":"end_small","is_default":true}]},{"id":"end_big","type":"end","output":"big","result_type":"success"},{"id":"end_small","type":"end","output":"small","result_type":"success"}]}'
+        input:
+          value: 21
+    expect:
+      status: 200
+      body:
+        result: "big"
+
+  - name: "switch 走 default 分支（value=3 → end_small 输出 small）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-switch","name":"switch","nodes":[{"id":"start","type":"start","next":"route"},{"id":"route","type":"switch","branches":[{"name":"end_big","condition":{"field":"$INPUT.value","operator":"gt","value":10}},{"name":"end_small","is_default":true}]},{"id":"end_big","type":"end","output":"big","result_type":"success"},{"id":"end_small","type":"end","output":"small","result_type":"success"}]}'
+        input:
+          value: 3
+    expect:
+      status: 200
+      body:
+        result: "small"
+
+  - name: "switch 无命中且无 default → 拒绝假成功"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/dry-run
+      headers:
+        Content-Type: application/json
+      body:
+        flowJson: '{"id":"dryrun-switch2","name":"switch2","nodes":[{"id":"start","type":"start","next":"route"},{"id":"route","type":"switch","branches":[{"name":"end_big","condition":{"field":"$INPUT.value","operator":"gt","value":10}}]},{"id":"end_big","type":"end","output":"big","result_type":"success"}]}'
+        input:
+          value: 3
+    expect:
+      status: 200
+      body:
+        error: { contains: "执行失败" }

@@ -1,0 +1,272 @@
+name: 鉴权与RBAC
+sequential: true
+
+# 打 ui-backend(18081) 的真实会话鉴权（无 ALLOW_INSECURE_ADMIN，bootstrap admin
+# 经 PLAITA_CONSOLE_ADMIN_PASSWORD 注入），覆盖 18080 API suite 被 insecure 开关
+# 绕过的整个 auth_users.py / require_auth 面：登录会话生命周期、RBAC 角色矩阵
+# （viewer 只读 / editor 写 / users|audit|credentials|cluster 前缀 admin 专属）、
+# X-Admin-API-Key 直通、以及 18080 上「insecure 模式下无效 Bearer 仍须 401」
+# 的语义（token 分支先于 insecure 分支，改坏即全盲）。
+# 语义注记：set_role 改角色会主动注销该用户全部会话（安全设计）——升级后
+# 必须重新登录；这是用例首版「角色实时生效免重登」假设被实测证伪后的修正。
+
+cases:
+  - name: "setup-status：bootstrap admin 已存在"
+    request:
+      method: GET
+      url: http://localhost:18081/api/auth/setup-status
+    expect:
+      status: 200
+      body:
+        needs_setup: false
+
+  - name: "重复 setup 返回 409"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/setup
+      headers:
+        Content-Type: application/json
+      body:
+        username: "another-admin"
+        password: "whatever-pass-123"
+    expect:
+      status: 409
+
+  - name: "错误密码登录返回 401"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/login
+      headers:
+        Content-Type: application/json
+      body:
+        username: "admin"
+        password: "wrong-password"
+    expect:
+      status: 401
+
+  - name: "无 token 访问 /api/auth/me 返回 401"
+    request:
+      method: GET
+      url: http://localhost:18081/api/auth/me
+    expect:
+      status: 401
+
+  - name: "admin 登录"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/login
+      headers:
+        Content-Type: application/json
+      body:
+        username: "admin"
+        password: "e2e-admin-pass"
+    expect:
+      status: 200
+      body:
+        username: "admin"
+        role: "admin"
+    save:
+      admin_token: "token"
+
+  - name: "携带会话访问 /api/auth/me（角色实时取 users 表）"
+    request:
+      method: GET
+      url: http://localhost:18081/api/auth/me
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+    expect:
+      status: 200
+      body:
+        role: "admin"
+
+  - name: "admin 创建 viewer 用户"
+    request:
+      method: POST
+      url: http://localhost:18081/api/users
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+        Content-Type: application/json
+      body:
+        username: "e2e-viewer"
+        password: "viewer-pass-123"
+        role: "viewer"
+    expect:
+      status: 200
+
+  - name: "用户列表包含新 viewer"
+    request:
+      method: GET
+      url: http://localhost:18081/api/users
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+    expect:
+      status: 200
+      body:
+        users: { length: { gte: 2 } }
+
+  - name: "X-Admin-API-Key 直通 admin"
+    request:
+      method: GET
+      url: http://localhost:18081/api/users
+      headers:
+        X-Admin-API-Key: e2e-admin-api-key
+    expect:
+      status: 200
+
+  - name: "viewer 登录"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/login
+      headers:
+        Content-Type: application/json
+      body:
+        username: "e2e-viewer"
+        password: "viewer-pass-123"
+    expect:
+      status: 200
+      body:
+        role: "viewer"
+    save:
+      viewer_token: "token"
+
+  - name: "viewer 只读放行（GET /api/flows 200）"
+    request:
+      method: GET
+      url: http://localhost:18081/api/flows
+      headers:
+        Authorization: "Bearer {{runtime.viewer_token}}"
+    expect:
+      status: 200
+
+  - name: "viewer 写操作拒绝（POST /api/flows 403）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/flows
+      headers:
+        Authorization: "Bearer {{runtime.viewer_token}}"
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-auth-denied"
+    expect:
+      status: 403
+
+  - name: "viewer 访问 admin 专属前缀拒绝（GET /api/users 403）"
+    request:
+      method: GET
+      url: http://localhost:18081/api/users
+      headers:
+        Authorization: "Bearer {{runtime.viewer_token}}"
+    expect:
+      status: 403
+
+  - name: "admin 将 viewer 升级为 editor（会话随角色变更被注销）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/users/e2e-viewer/role
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+        Content-Type: application/json
+      body:
+        role: "editor"
+    expect:
+      status: 200
+
+  - name: "旧会话在角色变更后失效（401，set_role 主动注销）"
+    request:
+      method: GET
+      url: http://localhost:18081/api/auth/me
+      headers:
+        Authorization: "Bearer {{runtime.viewer_token}}"
+    expect:
+      status: 401
+
+  - name: "升级后重新登录为 editor"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/login
+      headers:
+        Content-Type: application/json
+      body:
+        username: "e2e-viewer"
+        password: "viewer-pass-123"
+    expect:
+      status: 200
+      body:
+        role: "editor"
+    save:
+      editor_token: "token"
+
+  - name: "editor 可写（POST /api/flows 200）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/flows
+      headers:
+        Authorization: "Bearer {{runtime.editor_token}}"
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-auth-editor-flow"
+        author: "auth-suite"
+    expect:
+      status: 200
+      body:
+        flow_id: "e2e-auth-editor-flow"
+
+  - name: "editor 访问 admin 专属前缀仍拒绝（POST /api/users 403）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/users
+      headers:
+        Authorization: "Bearer {{runtime.editor_token}}"
+        Content-Type: application/json
+      body:
+        username: "e2e-sneaky"
+        password: "sneaky-pass-123"
+        role: "admin"
+    expect:
+      status: 403
+
+  - name: "logout 后会话失效（/api/auth/me 401）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/logout
+      headers:
+        Authorization: "Bearer {{runtime.editor_token}}"
+    expect:
+      status: 200
+
+  - name: "已注销会话访问 me 返回 401"
+    request:
+      method: GET
+      url: http://localhost:18081/api/auth/me
+      headers:
+        Authorization: "Bearer {{runtime.editor_token}}"
+    expect:
+      status: 401
+
+  # 18080 负例：insecure 模式下 token 分支仍先于 insecure 分支——
+  # 无效 Bearer 必须 401，不能被 insecure 吞掉
+  - name: "insecure 模式下无效 Bearer 仍返回 401（18080）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/auth/me
+      headers:
+        Authorization: "Bearer garbage-token-not-valid"
+    expect:
+      status: 401
+
+teardown:
+  - name: "清理: 删除 editor 创建的流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18081/api/flows/e2e-auth-editor-flow
+      headers:
+        X-Admin-API-Key: e2e-admin-api-key
+    ignoreError: true
+
+  - name: "清理: 删除 viewer 用户（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18081/api/users/e2e-viewer
+      headers:
+        X-Admin-API-Key: e2e-admin-api-key
+    ignoreError: true
