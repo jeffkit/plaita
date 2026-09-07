@@ -263,7 +263,34 @@ class TestFlowWorkerResumeScenarios:
             )
         except Exception:
             pass
-    
+
+    def test_resume_cancelled_is_terminal(self, setup_suspended_flow):
+        """cancelled 是终态：重复投递的 cancel/resume 消息幂等跳过，不再推进。
+
+        console cancel 端点先写 cancelled 再投 resume_type=cancel 消息；
+        若终态短路不认 cancelled，挂起执行会被 on_cancel 续跑到 end 翻成
+        completed（「已取消」跳回「已完成」）。E2E cancel 回归用例钉同一语义。
+        """
+        worker = setup_suspended_flow["worker"]
+        execution_storage = setup_suspended_flow["execution_storage"]
+        execution_id = setup_suspended_flow["execution_id"]
+
+        # 模拟 console cancel 端点已写入的终态
+        state = execution_storage.load_execution_state(execution_id)
+        state.status = "cancelled"
+        execution_storage.save_execution_state(execution_id, state)
+
+        result = worker.resume_flow(
+            flow_id="event_test_flow",
+            execution_id=execution_id,
+            resume_type="cancel",
+            data={},
+        )
+        assert result["already_terminal"] is True
+        assert result["status"] == "cancelled"
+        # 状态未被改写
+        assert execution_storage.load_execution_state(execution_id).status == "cancelled"
+
     def test_resume_invalid_execution_id(self, setup_suspended_flow):
         """测试无效执行ID恢复"""
         worker = setup_suspended_flow["worker"]

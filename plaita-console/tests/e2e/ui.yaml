@@ -69,7 +69,10 @@ cases:
     expect:
       page:
         visible:
-          - text=仪表盘
+          # 断言 PageHeader subtitle 与 StatCard 标签——「仪表盘」同时是侧边导航
+          # 文案，任何页面都渲染，仅断言它有白屏假绿风险
+          - text=集群运行概览与最近执行
+          - text=在线服务
 
   - name: "执行实例页可渲染"
     browser:
@@ -84,4 +87,6 @@ cases:
     expect:
       page:
         visible:
-          - text=执行实例
+          # 同理：subtitle 与「启动流程」按钮是页面专属内容，导航文案不作数
+          - text=全部流程执行记录与状态
+          - text=启动流程

@@ -1,0 +1,206 @@
+name: 契约面（HMAC）
+sequential: true
+
+# 注意：exec 的默认容器由 e2e.yaml suites[] 条目的 service 字段路由到
+# console-backend（suite 文件内没有 service 键——写了会被静默忽略；
+# 步骤级 exec.container 也会被 suite 默认容器压住，argusai 源码
+# `containerName || execConfig.container`）。
+
+# /api/flowVersion/semver/detail 是 PlaitaClient 拉取流程定义的生产契约入口：
+# 独立双层 HMAC 验签（签名 = HMAC(HMAC(secret_key,"t;expire"),"t\n")，
+# Authorization 为 query-string 形态），与 admin 鉴权完全独立。
+# 双层 HMAC 无法在 request DSL 表达，用 exec 步骤在 backend 容器内以 python
+# 计算签名并 POST（容器内 localhost:8080，curl/python3 均已装）。
+# 注意：exec 的 container 名带 argusai 项目命名空间前缀，与 e2e.yaml 耦合
+# （isolation.namespace 未启用时的确定性命名）。
+# 环境前置：console-backend 配了 SECRET_ID/KEY（e2e.yaml）；ui-backend 未配
+# （fail-closed 503 姿态的负例）。断言码表：0 成功 / 1 缺参 / 2 不存在 / 3 未发布。
+
+cases:
+  - name: "创建契约测试流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-contract-flow"
+        author: "e2e"
+        desc: "contract suite"
+    expect:
+      status: 200
+
+  - name: "保存并发布 1.0.0"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-contract-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-contract-flow","name":"E2E Contract","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"$INPUT.value","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "发布 1.0.0"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-contract-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  - name: "保存 1.1.0 草稿（不发布）"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-contract-flow/versions/1.1.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-contract-flow","name":"E2E Contract","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"draft","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "正确签名查已发布版本 → code 0 + 返回定义"
+    exec:
+      command: |-
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(b"e2e-secret-key",kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=e2e-secret-id&sign-time=%d&key-time=%s&signature=%s"%(tid,kt,sig)
+        data=urllib.parse.urlencode({"flowId":"e2e-contract-flow","version":"1.0.0"}).encode()
+        req=urllib.request.Request("http://localhost:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        json:
+          code: 0
+          data:
+            flow: { contains: "e2e-contract-flow" }
+
+  - name: "查未发布草稿 → code 3"
+    exec:
+      command: |-
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(b"e2e-secret-key",kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=e2e-secret-id&sign-time=%d&key-time=%s&signature=%s"%(tid,kt,sig)
+        data=urllib.parse.urlencode({"flowId":"e2e-contract-flow","version":"1.1.0"}).encode()
+        req=urllib.request.Request("http://localhost:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        json:
+          code: 3
+
+  - name: "查不存在的版本 → code 2"
+    exec:
+      command: |-
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(b"e2e-secret-key",kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=e2e-secret-id&sign-time=%d&key-time=%s&signature=%s"%(tid,kt,sig)
+        data=urllib.parse.urlencode({"flowId":"e2e-contract-flow","version":"9.9.9"}).encode()
+        req=urllib.request.Request("http://localhost:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        json:
+          code: 2
+
+  - name: "缺 flowId → code 1"
+    exec:
+      command: |-
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(b"e2e-secret-key",kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=e2e-secret-id&sign-time=%d&key-time=%s&signature=%s"%(tid,kt,sig)
+        data=urllib.parse.urlencode({"version":"1.0.0"}).encode()
+        req=urllib.request.Request("http://localhost:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        json:
+          code: 1
+
+  - name: "错误密钥签名 → HTTP 401"
+    exec:
+      command: |-
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(b"wrong-secret-key",kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=e2e-secret-id&sign-time=%d&key-time=%s&signature=%s"%(tid,kt,sig)
+        data=urllib.parse.urlencode({"flowId":"e2e-contract-flow","version":"1.0.0"}).encode()
+        req=urllib.request.Request("http://localhost:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        contains: "HTTP 401"
+
+  - name: "未配密钥的容器 → HTTP 503（fail-closed 姿态，ui-backend 无 SECRET env；经网络别名打 ui-backend）"
+    exec:
+      command: |-
+        env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(b"e2e-secret-key",kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=e2e-secret-id&sign-time=%d&key-time=%s&signature=%s"%(tid,kt,sig)
+        data=urllib.parse.urlencode({"flowId":"e2e-contract-flow","version":"1.0.0"}).encode()
+        req=urllib.request.Request("http://plaita-console-ui-e2e:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        contains: "HTTP 503"
+
+teardown:
+  - name: "清理: 删除契约测试流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-contract-flow
+    ignoreError: true

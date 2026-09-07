@@ -23,7 +23,8 @@ COPY plaita/ ./plaita/
 # pyproject.toml——不 COPY 它，pip install . 会得到 0.0.0 无插件的空壳
 COPY pyproject.toml .
 COPY setup.py .
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir setuptools wheel && \
+    pip install --no-cache-dir --no-build-isolation .
 
 # 先等 Redis 就绪（同 Dockerfile.e2e 的理由），再并跑四个服务进程
 CMD ["sh", "-c", "until python -c \"import os,socket; socket.create_connection((os.environ.get('E2E_TEST_REDIS_HOST','redis'), 6379), timeout=1).close()\" 2>/dev/null; do echo 'e2e: waiting for redis...'; sleep 1; done; python -m plaita.server.services schedule_service --redis-url ${PLAITA_REDIS_URL} & python -m plaita.server.services delay_service --redis-url ${PLAITA_REDIS_URL} & python -m plaita.server.services approval_service --redis-url ${PLAITA_REDIS_URL} & python -m plaita.server.event_filter --redis-url ${PLAITA_REDIS_URL} & wait"]

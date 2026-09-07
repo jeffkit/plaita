@@ -311,7 +311,17 @@ async def cancel_execution(
         status = info.get("status")
     except Exception:
         raise HTTPException(status_code=500, detail="数据解析失败")
-    
+
+    # 终态幂等：已终态的执行不再取消（与 worker 侧 resume_flow 的终态短路
+    # 同一语义——否则对 completed 执行的 cancel 会把状态改写成 cancelled）
+    if status in ("completed", "error", "cancelled"):
+        return {
+            "success": True,
+            "status": status,
+            "execution_id": execution_id,
+            "message": f"执行已是终态（{status}），忽略取消",
+        }
+
     # 发送取消消息到队列（如果有 FlowWorker 在监听）
     message = {
         "type": "resume",
