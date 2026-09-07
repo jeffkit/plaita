@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../services/api'
 import { useFlowEditor } from '../stores/flowEditor'
 import { jsonToFlow, flowToJson, extractLayout, type FlowNodeData } from '../components/flow/flowConverter'
+import { normalizeFieldKeys, validateNodeFields, type JsonSchema } from '../components/flow/schemaForm/schemaUtils'
 import NodePalette from '../components/flow/NodePalette'
 import FlowCanvas from '../components/flow/FlowCanvas'
 import NodeConfigDrawer from '../components/flow/NodeConfigDrawer'
@@ -41,6 +42,26 @@ function versionStatusLabel(status?: string): string {
   if (status === 'published') return '已发布'
   if (status === 'draft') return '草稿'
   return status || ''
+}
+
+/** 保存/发布前的流程级字段校验（B5 后半）：返回「节点.字段 问题」清单 */
+function collectFlowSchemaErrors(
+  nodes: Node<FlowNodeData>[],
+  schemaByType: Map<string, JsonSchema>
+): string[] {
+  const errs: string[] = []
+  for (const n of nodes) {
+    const d = n.data as FlowNodeData
+    const schema = schemaByType.get(d.type)
+    if (!schema) continue
+    const { output: _o, timeout: _t, ...rest } = d.fields
+    void _o
+    void _t
+    for (const e of validateNodeFields(normalizeFieldKeys(rest, schema), schema)) {
+      errs.push(`${n.id}.${e.key} ${e.message}`)
+    }
+  }
+  return errs
 }
 
 interface VersionDiff {
@@ -188,6 +209,24 @@ export default function FlowEditor() {
   const loadedStatus = versionQuery.data?.status
   const editingPublishedBase = loadedStatus === 'published'
 
+  // 节点类型 schema：与节点面板/配置抽屉共用 ['nodes'] 缓存（B5 后半保存前校验用）
+  const nodesSchemaQuery = useQuery({
+    queryKey: ['nodes'],
+    queryFn: () => api.getNodes(),
+    staleTime: 5 * 60_000,
+  })
+  const schemaByType = useMemo(() => {
+    const map = new Map<string, JsonSchema>()
+    for (const d of nodesSchemaQuery.data?.nodes || []) {
+      try {
+        map.set(d.node_type, JSON.parse(d.schema_json || '{}') as JsonSchema)
+      } catch {
+        // 坏 schema 的类型按无 schema 处理
+      }
+    }
+    return map
+  }, [nodesSchemaQuery.data])
+
   // 成功提示自动消失，避免与新错误长期并存
   useEffect(() => {
     if (!msg) return
@@ -198,6 +237,15 @@ export default function FlowEditor() {
   const saveMutation = useMutation({
     mutationFn: async (targetVersion: string) => {
       const state = collapseToRoot()
+      // B5 后半：保存前用同一份节点 schema 校验字段（required/type/enum），
+      // 未通过即阻断并定位到 节点.字段——引擎 422 的报错现场远离编辑器
+      const schemaErrs = collectFlowSchemaErrors(state.nodes as Node<FlowNodeData>[], schemaByType)
+      if (schemaErrs.length) {
+        throw new Error(
+          `字段校验未通过，未保存：${schemaErrs.slice(0, 3).join('；')}` +
+            (schemaErrs.length > 3 ? ` 等 ${schemaErrs.length} 项` : '')
+        )
+      }
       const meta = { flow_id: flowId, version: targetVersion, desc, inputType }
       const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
       const layout = extractLayout(state.nodes as Node[])
@@ -221,6 +269,13 @@ export default function FlowEditor() {
     mutationFn: async (targetVersion: string) => {
       // 先保存再发布；后端保证已发布版本不可覆盖（409）
       const state = collapseToRoot()
+      const schemaErrs = collectFlowSchemaErrors(state.nodes as Node<FlowNodeData>[], schemaByType)
+      if (schemaErrs.length) {
+        throw new Error(
+          `字段校验未通过，未发布：${schemaErrs.slice(0, 3).join('；')}` +
+            (schemaErrs.length > 3 ? ` 等 ${schemaErrs.length} 项` : '')
+        )
+      }
       const meta = { flow_id: flowId, version: targetVersion, desc, inputType }
       const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
       const layout = extractLayout(state.nodes as Node[])
@@ -550,6 +605,11 @@ export default function FlowEditor() {
           />
           {showDryRun && (
             <DryRunPanel
+              inputType={inputType}
+              onRunStatus={(erroredIds) => {
+                // 出错节点画布标红 / 新一轮清除（不置 dirty）
+                useFlowEditor.getState().setRunErrorNodes(erroredIds)
+              }}
               nodesByType={(() => {
                 const acc: Record<string, string[]> = {}
                 for (const n of nodes) {
