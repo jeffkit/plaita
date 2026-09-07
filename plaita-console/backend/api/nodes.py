@@ -29,6 +29,9 @@ class NodeDescriptorView(BaseModel):
     category: str = ""
     node_schema_json: str = Field("{}", alias="schema_json")
     is_builtin: bool = False
+    # 代码位置：仅内置节点有（Python 模块路径与类名）；控制台自定义节点为空
+    source_module: str = ""
+    source_class: str = ""
 
 
 class NodeListResponse(BaseModel):
