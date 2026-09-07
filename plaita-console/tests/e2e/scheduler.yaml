@@ -156,6 +156,113 @@ cases:
         status: "completed"
         flow_id: "e2e-sched-flow"
 
+  # === CRUD 边界：update/enable 语义与校验分支（插在 cron 等待前）===
+  - name: "调度详情可读"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}"
+    expect:
+      status: 200
+      body:
+        schedule_id: { exists: true }
+
+  - name: "调度列表包含已建调度"
+    request:
+      method: GET
+      url: http://localhost:18080/api/schedules
+    expect:
+      status: 200
+      body:
+        schedules: { length: { gte: 1 } }
+        total: { gte: 1 }
+
+  - name: "更新调度 cron（next_run_at 重算非空）"
+    request:
+      method: PUT
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}"
+      headers:
+        Content-Type: application/json
+      body:
+        cron: "30 2 * * *"
+    expect:
+      status: 200
+      body:
+        cron: "30 2 * * *"
+        next_run_at: { exists: true }
+
+  - name: "disable 后 next_run_at 清空、状态 paused"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}/disable"
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 200
+      body:
+        status: "paused"
+
+  - name: "enable 后 next_run_at 重算非空"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/schedules/{{runtime.manual_sched_id}}/enable"
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 200
+      body:
+        status: "running"
+
+  - name: "非法 cron 创建返回 422"
+    request:
+      method: POST
+      url: http://localhost:18080/api/schedules
+      headers:
+        Content-Type: application/json
+      body:
+        name: "e2e-bad-cron"
+        flow_id: "e2e-sched-flow"
+        cron: "not-a-cron"
+    expect:
+      status: 422
+
+  - name: "不存在的 flow_id 创建返回 422"
+    request:
+      method: POST
+      url: http://localhost:18080/api/schedules
+      headers:
+        Content-Type: application/json
+      body:
+        name: "e2e-bad-flow"
+        flow_id: "no-such-flow"
+        cron: "0 * * * *"
+    expect:
+      status: 422
+
+  - name: "cron 预览返回未来触发时间"
+    request:
+      method: GET
+      url: http://localhost:18080/api/schedules/preview?cron=0%209%20*%20*%201-5&count=3
+    expect:
+      status: 200
+      body:
+        next: { length: 3 }
+
+  - name: "cron 预览非法表达式返回 422"
+    request:
+      method: GET
+      url: http://localhost:18080/api/schedules/preview?cron=bogus
+    expect:
+      status: 422
+
+  - name: "对不存在的调度 trigger 返回 404"
+    request:
+      method: POST
+      url: http://localhost:18080/api/schedules/sched-nonexistent/trigger
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 404
+
   # === 调度：cron 自动触发（schedule_service 扫描）===
   - name: "创建每分钟调度"
     request:

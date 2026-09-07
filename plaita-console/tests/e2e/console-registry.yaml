@@ -1,0 +1,180 @@
+name: 控制台注册表与审计
+sequential: true
+
+# 节点注册表 CRUD（内置保护/自定义注册）、凭据明文往返与删除、审计查询
+# （前序 suite 的埋点在此回收断言）、部署记录、copilot 无凭据负例。
+# copilot 的真实 LLM 环路依赖外部服务，豁免（已有 mock 单测兜底）。
+
+cases:
+  # === 前置：自给自足地造一次发布（审计/部署记录断言不依赖套件顺序）===
+  - name: "前置: 创建并发布审计种子流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-registry-flow"
+        author: "e2e"
+    expect:
+      status: 200
+
+  - name: "前置: 保存定义"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-registry-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-registry-flow","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "前置: 发布"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-registry-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  # === 节点注册表 ===
+  - name: "节点列表含内置节点"
+    request:
+      method: GET
+      url: http://localhost:18080/api/nodes
+    expect:
+      status: 200
+      body:
+        nodes: { length: { gte: 10 } }
+        total: { gte: 10 }
+
+  - name: "注册自定义节点描述"
+    request:
+      method: POST
+      url: http://localhost:18080/api/nodes
+      headers:
+        Content-Type: application/json
+      body:
+        node_type: "e2e_custom"
+        node_name: "E2E 自定义节点"
+        category: "test"
+        schema_json: "{}"
+    expect:
+      status: 200
+
+  - name: "与内置节点 type 冲突返回 400"
+    request:
+      method: POST
+      url: http://localhost:18080/api/nodes
+      headers:
+        Content-Type: application/json
+      body:
+        node_type: "start"
+        node_name: "冒名 start"
+    expect:
+      status: 400
+
+  - name: "删除自定义节点"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/nodes/e2e_custom
+    expect:
+      status: 200
+
+  - name: "删除内置节点返回 400"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/nodes/start
+    expect:
+      status: 400
+
+  - name: "删除不存在的节点返回 404"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/nodes/e2e_custom
+    expect:
+      status: 404
+
+  # === 凭据 ===
+  - name: "保存凭据"
+    request:
+      method: POST
+      url: http://localhost:18080/api/credentials
+      headers:
+        Content-Type: application/json
+      body:
+        name: "e2e-cred"
+        type: "generic"
+        data:
+          token: "secret-token-abc"
+        desc: "registry suite"
+    expect:
+      status: 200
+      body:
+        success: true
+
+  - name: "凭据详情明文往返（供编辑回填）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/credentials/e2e-cred
+    expect:
+      status: 200
+      body:
+        name: "e2e-cred"
+        data:
+          token: "secret-token-abc"
+
+  - name: "删除凭据"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/credentials/e2e-cred
+    expect:
+      status: 200
+
+  - name: "已删凭据详情返回 404"
+    request:
+      method: GET
+      url: http://localhost:18080/api/credentials/e2e-cred
+    expect:
+      status: 404
+
+  # === 审计与部署记录（前序 suite 的埋点回收）===
+  - name: "审计日志含流程发布埋点"
+    request:
+      method: GET
+      url: http://localhost:18080/api/audit?action=flow.publish&limit=50
+    expect:
+      status: 200
+      body:
+        logs: { length: { gte: 1 } }
+
+  - name: "部署记录含已发布流程"
+    request:
+      method: GET
+      url: http://localhost:18080/api/deployments?flow_id=e2e-registry-flow
+    expect:
+      status: 200
+      body:
+        deployments: { length: { gte: 1 } }
+
+  # === copilot threads 只读 ===
+  - name: "copilot threads 只读端点可用"
+    request:
+      method: GET
+      url: http://localhost:18080/api/copilot/threads?flow_id=e2e-registry-flow
+    expect:
+      status: 200
+      body:
+        threads: { type: "array" }
+
+teardown:
+  - name: "清理: 删除审计种子流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-registry-flow
+    ignoreError: true

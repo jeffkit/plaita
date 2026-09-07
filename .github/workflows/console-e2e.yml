@@ -88,6 +88,12 @@ jobs:
       - name: Console restart chaos regression
         run: bash plaita-console/scripts/e2e-chaos-console-restart.sh --no-build
 
+      - name: Worker restart chaos regression
+        run: bash plaita-console/scripts/e2e-chaos-worker-restart.sh --no-build
+
+      - name: DLQ chaos regression
+        run: bash plaita-console/scripts/e2e-chaos-dlq.sh --no-build
+
       - name: Upload UI debug screenshots
         if: failure()
         uses: actions/upload-artifact@v4
