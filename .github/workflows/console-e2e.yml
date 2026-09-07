@@ -46,6 +46,15 @@ jobs:
           # waitForSelector 超时）
           npx -y playwright install --with-deps chromium
 
+      # 浏览器缓存：命中时 playwright install 秒级 no-op；版本不匹配时自动
+      # 重下（key 未命中回落 restore-keys，正确性不受影响）
+      - name: Cache playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium
+          restore-keys: playwright-${{ runner.os }}-chromium
+
       - name: Docker sanity
         run: |
           docker info --format '{{.ServerVersion}} drivers={{.Driver}}'
@@ -71,13 +80,61 @@ jobs:
       # 会秒挂（docker run 正常、buildx 异常，仅 CI 复现），故在普通步骤里
       # 预构建全部镜像——失败时本步直接打印 docker 真实报错；gate/chaos 用
       # --no-build 消费现成镜像。
-      - name: Pre-build E2E images
-        run: |
-          docker build -f plaita-console/docker/Dockerfile.redis-e2e -t plaita-e2e-redis:latest .
-          docker build -f plaita-console/docker/Dockerfile.e2e -t plaita-console-e2e:latest .
-          docker build -f plaita-console/docker/Dockerfile.e2e --build-arg KEEP_WEBDIST=1 -t plaita-console-ui-e2e:latest .
-          docker build -f plaita-console/docker/Dockerfile.worker-e2e -t plaita-e2e-worker:latest .
-          docker build -f plaita-console/docker/Dockerfile.services-e2e -t plaita-e2e-services:latest .
+      # buildx + GHA 缓存：suite/YAML 改动时 5 个镜像全部层命中（秒级），
+      # 引擎/依赖改动时只重跑受影响层。
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (redis)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plaita-console/docker/Dockerfile.redis-e2e
+          tags: plaita-e2e-redis:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build image (console-backend)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plaita-console/docker/Dockerfile.e2e
+          tags: plaita-console-e2e:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build image (console-ui)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plaita-console/docker/Dockerfile.e2e
+          tags: plaita-console-ui-e2e:latest
+          load: true
+          build-args: KEEP_WEBDIST=1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build image (flow-worker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plaita-console/docker/Dockerfile.worker-e2e
+          tags: plaita-e2e-worker:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build image (ext-services)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: plaita-console/docker/Dockerfile.services-e2e
+          tags: plaita-e2e-services:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Full E2E gate
         run: bash plaita-console/scripts/e2e-gate.sh --no-build
