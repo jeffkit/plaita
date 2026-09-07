@@ -88,16 +88,18 @@ class Node(BaseModel):
     id: str = Field(..., description="Node identifier")
     name: Optional[str] = Field(None, description="Node name")
     desc: Optional[str] = Field(None, description="Node description")
-    output: Optional[Any] = None
-    next: Optional[Any] = None
-    timeout: str = Field("", description="Timeout configuration")
+    # 以下描述会随 model_json_schema 下发到 console 表单（×全部节点类型放大），
+    # 保持中文、写清格式约定，避免用户只能靠猜
+    output: Optional[Any] = Field(None, description="节点输出：字面量或表达式（如 $INPUT.name），下游经 $NODE.<id> 引用")
+    next: Optional[Any] = Field(None, description="下一个节点的 id（通常由画布连线维护，无需手填）")
+    timeout: str = Field("", description="节点级超时：毫秒数字（如 3000）或 ISO8601 时长（如 PT2S）")
     # 源码行号回标：仅 @flow 前端在编译期写入 IR，运行期错误可据此定位到
     # 用户书写的 Python 源码行。JSON/S-expr/Builder 前端不产生此字段，保持 None。
     source_line: Optional[int] = Field(None, description="@flow 编译期回标的源码行号")
     # input_type: Optional[Union[Property, List[Property]]] = None
     # output_type: Optional[Union[Property, List[Property]]] = None
-    timeout_handler: ErrorHandler = Field(default_factory=lambda: ErrorHandler())
-    error_handler: RecoverableErrorHandler = Field(default_factory=lambda: RecoverableErrorHandler())
+    timeout_handler: ErrorHandler = Field(default_factory=lambda: ErrorHandler(), description="超时处理策略（容错 Tab 专用表单）")
+    error_handler: RecoverableErrorHandler = Field(default_factory=lambda: RecoverableErrorHandler(), description="失败处理策略（容错 Tab 专用表单）")
 
     @model_validator(mode="before")
     @classmethod

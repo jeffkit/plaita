@@ -46,6 +46,8 @@ export interface FlowEditorState {
   exitSubgraph: () => void
   /** 归位到指定层（0 = 主图） */
   exitToLevel: (level: number) => void
+  /** 试跑结果标记：出错节点写 status=error、其余清除——不置 dirty（运行态不是编辑内容） */
+  setRunErrorNodes: (ids: string[]) => void
   reset: () => void
 }
 
@@ -141,6 +143,17 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
         n.id === id ? { ...n, data: { ...n.data, ...data } } : n
       ),
       dirty: true,
+    })),
+
+  setRunErrorNodes: (ids) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        const isErr = ids.includes(n.id)
+        const cur = (n.data as Record<string, unknown>).status
+        if (isErr && cur !== 'error') return { ...n, data: { ...n.data, status: 'error' } }
+        if (!isErr && cur === 'error') return { ...n, data: { ...n.data, status: 'idle' } }
+        return n
+      }),
     })),
 
   removeNode: (id) =>

@@ -3,8 +3,8 @@
 支持指定延迟时间后触发事件继续流程
 """
 import time
-from typing import Any, ClassVar, Dict, Optional, Union
-from pydantic import Field
+from typing import Any, ClassVar, Dict, Literal, Optional, Union
+from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
@@ -15,14 +15,28 @@ class DelayNode(BaseExtendedNode):
     延迟节点
     在指定的延迟时间后触发事件，继续流程执行
     """
-    
+
     node_type: ClassVar[str] = "delay"
     node_name: ClassVar[str] = "延迟节点"
-    
+
     # 延迟节点特有配置
     delay_seconds: Union[int, float, str] = Field(description="延迟秒数，支持变量引用")
-    delay_unit: str = Field(default="seconds", description="时间单位: seconds, minutes, hours, days")
-    event_type: str = Field(default="delay_trigger", description="事件类型")
+    # Literal 生成 schema enum（console 表单渲染下拉）；大小写归一见 _normalize_unit。
+    # 历史上未知单位静默按 seconds 换算（5「分钟」变 5 秒），现在解析期即报错。
+    delay_unit: Literal["seconds", "minutes", "hours", "days"] = Field(
+        default="seconds", description="时间单位: seconds / minutes / hours / days"
+    )
+    event_type: str = Field(default="delay_trigger", description="事件类型（与发布侧约定一致，支持 $ 表达式；默认值即可用）")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_unit(cls, values):
+        # "Minutes"/"MINUTES" 等历史写法曾依赖运行期 lower() 兜底，Literal 之前先归一
+        if isinstance(values, dict):
+            unit = values.get("delay_unit")
+            if isinstance(unit, str):
+                values["delay_unit"] = unit.lower()
+        return values
     
     def generate_service_config(self, execution) -> Dict[str, Any]:
         """

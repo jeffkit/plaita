@@ -5,12 +5,23 @@ import { useFlowEditor } from '../../stores/flowEditor'
 import { api } from '../../services/api'
 import type { FlowNodeData } from './flowConverter'
 import SchemaForm, { JsonField } from './schemaForm/SchemaForm'
+import ConditionEditor from './schemaForm/ConditionEditor'
+import ExpressionInput from './schemaForm/ExpressionInput'
 import type { VarGroup } from './schemaForm/ExpressionInput'
 import { coreFieldsOf } from './schemaForm/coreFields'
-import { normalizeFieldKeys, type JsonSchema } from './schemaForm/schemaUtils'
+import { conditionOperators, normalizeFieldKeys, type JsonSchema } from './schemaForm/schemaUtils'
 
 // 内嵌 child_flow 子流程的节点类型（reference 仅有内嵌子图时也可编辑）
 const SUBFLOW_TYPES = new Set(['map', 'loop', 'filter', 'find', 'reduce', 'while', 'child'])
+// 顶层 condition 字段的节点类型：条件走三段式构造器（2026-09 表单评审 B4）
+const CONDITION_TYPES = new Set(['if', 'loop', 'while', 'filter', 'find'])
+const CONDITION_HINT: Record<string, string> = {
+  if: '不满足时走 else 分支',
+  while: '条件成立时继续循环',
+  loop: '满足时继续重复，不满足时结束',
+  filter: '对集合元素逐个判断，命中才保留',
+  find: '返回第一个命中的元素',
+}
 
 type DrawerTab = 'config' | 'basic' | 'fault'
 const DRAWER_TABS: Array<{ key: DrawerTab; label: string }> = [
@@ -86,6 +97,31 @@ export default function NodeConfigDrawer() {
     return schema ? normalizeFieldKeys(rest, schema) : rest
   }, [node, schema])
 
+  // 引用流程下拉数据源（B6）：与启动弹窗共用 ['flows'] 缓存，仅 reference 节点启用
+  const flowsQuery = useQuery({
+    queryKey: ['flows'],
+    queryFn: () => api.getFlows(),
+    enabled: node?.data.type === 'reference',
+    staleTime: 30_000,
+  })
+
+  // 真上游节点（沿入边反向遍历）：变量目录与「声明上游依赖」下拉共用——
+  // 声明上游只能选当前节点之前可达的节点，不能是任意节点（2026-09 用户反馈）
+  const upstreamIds = useMemo(() => {
+    const ids = new Set<string>()
+    if (!node) return ids
+    const walk = (id: string, depth: number) => {
+      if (depth > 6) return
+      for (const e of allEdges) {
+        if (e.target !== id || ids.has(e.source)) continue
+        ids.add(e.source)
+        walk(e.source, depth + 1)
+      }
+    }
+    walk(node.id, 0)
+    return ids
+  }, [node, allEdges])
+
   // 变量目录：$INPUT 流程入参 / $NODE 上游结果（沿入边反推）/ $GLOBAL 全局上下文
   const variableGroups = useMemo<VarGroup[]>(() => {
     if (!node) return []
@@ -97,18 +133,8 @@ export default function NodeConfigDrawer() {
         items: Object.keys(inputProps).map((k) => ({ expr: `$INPUT.${k}` })),
       })
     }
-    const upstream = new Set<string>()
-    const walk = (id: string, depth: number) => {
-      if (depth > 6) return
-      for (const e of allEdges) {
-        if (e.target !== id || upstream.has(e.source)) continue
-        upstream.add(e.source)
-        walk(e.source, depth + 1)
-      }
-    }
-    walk(node.id, 0)
     const upstreamItems = allNodes
-      .filter((n) => upstream.has(n.id))
+      .filter((n) => upstreamIds.has(n.id))
       .map((n) => {
         const d = n.data as FlowNodeData
         const out = d.fields.output
@@ -126,21 +152,24 @@ export default function NodeConfigDrawer() {
       })
     }
     return groups
-  }, [node, allNodes, allEdges, flowMeta])
+  }, [node, allNodes, allEdges, upstreamIds, flowMeta])
 
   if (!selectedId || !node) return null
   const d = node.data as FlowNodeData
 
-  /** 由专门 UI 接管、不进通用表单的键：child_flow 走子图编辑，branches 走分支列表 */
-  const formExcludeKeys = new Set<string>(
-    d.type === 'parallel'
-      ? ['branches']
-      : d.type === 'assignment'
-        ? ['output_type', 'outputType']
-        : SUBFLOW_TYPES.has(d.type) || d.type === 'reference'
-          ? ['child_flow']
-          : []
-  )
+  /** 由专门 UI 接管、不进通用表单的键：child_flow 走子图编辑，branches 走分支
+   *  列表，condition 走三段式构造器。一个节点可同时命中多类（如 loop =
+   *  子图入口 + 条件构造器），逐类累加 */
+  const formExcludeKeys = new Set<string>()
+  if (d.type === 'parallel') formExcludeKeys.add('branches')
+  if (d.type === 'assignment') {
+    formExcludeKeys.add('output_type')
+    formExcludeKeys.add('outputType')
+  }
+  if (SUBFLOW_TYPES.has(d.type) || d.type === 'reference') formExcludeKeys.add('child_flow')
+  if (CONDITION_TYPES.has(d.type)) formExcludeKeys.add('condition')
+  if (d.type === 'reference') formExcludeKeys.add('flow_id') // B6：流程下拉接管
+  if (d.type === 'assignment') formExcludeKeys.add('upstream_output') // B6：行编辑器接管
 
   /** 写回类型字段（保留通用字段），空值键剔除 */
   const writeTypeFields = (next: Record<string, unknown>) => {
@@ -196,7 +225,10 @@ export default function NodeConfigDrawer() {
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      {/* key=node.id：切换选中节点时强制重挂载内容区。JsonField/HandlerEditor
+          等内部 useState 只在挂载时取值，不重挂载会把上一节点的内容串写进
+          当前节点（2026-09 表单评审 P1-7） */}
+      <div key={node.id} className="flex-1 overflow-y-auto p-4 space-y-3">
         {tab === 'config' && (
           <>
             {/* 子流程编辑入口：进入子画布（面包屑返回） */}
@@ -218,39 +250,85 @@ export default function NodeConfigDrawer() {
               </div>
             )}
 
+            {d.type === 'reference' && (
+              <div>
+                <label className="block text-caption text-ink-muted mb-1">
+                  引用流程
+                  <span className="ml-1.5 text-[10px] text-ink-faint">
+                    版本留空取最新；入参经下方 input 字段注入（引用流程不共享父上下文）
+                  </span>
+                </label>
+                <select
+                  value={String(typeFields.flow_id ?? '')}
+                  onChange={(e) =>
+                    writeTypeFields({ ...typeFields, flow_id: e.target.value || undefined })
+                  }
+                  className="input w-full font-mono text-data-sm"
+                >
+                  <option value="">（选择要引用的流程）</option>
+                  {(flowsQuery.data?.flows ?? []).map((f) => (
+                    <option key={f.flow_id} value={f.flow_id}>
+                      {f.flow_id}
+                      {f.desc ? ` — ${f.desc}` : ''}
+                    </option>
+                  ))}
+                  {/* 当前值不在流程列表（如已删除）时保留显示，避免静默丢值 */}
+                  {String(typeFields.flow_id ?? '') &&
+                    !(flowsQuery.data?.flows ?? []).some((f) => f.flow_id === typeFields.flow_id) && (
+                      <option value={String(typeFields.flow_id)}>
+                        {String(typeFields.flow_id)}（不在流程列表中）
+                      </option>
+                    )}
+                </select>
+              </div>
+            )}
+
+            {d.type === 'assignment' && (
+              <UpstreamOutputEditor
+                value={typeFields.upstream_output}
+                nodeIds={allNodes.filter((n) => upstreamIds.has(n.id)).map((n) => n.id)}
+                variableGroups={variableGroups}
+                onChange={(v) => writeTypeFields({ ...typeFields, upstream_output: v })}
+              />
+            )}
+
+            {CONDITION_TYPES.has(d.type) && (
+              <div>
+                <label className="block text-caption text-ink-muted mb-1">
+                  执行条件
+                  <span className="ml-1.5 text-[10px] text-ink-faint">
+                    {CONDITION_HINT[d.type]}
+                  </span>
+                </label>
+                <ConditionEditor
+                  value={typeFields.condition}
+                  onChange={(v) => writeTypeFields({ ...typeFields, condition: v })}
+                  operatorEnum={schema ? conditionOperators(schema) : undefined}
+                  variableGroups={variableGroups}
+                />
+              </div>
+            )}
+
             {d.type === 'assignment' && (
               <div>
                 <label className="block text-caption text-ink-muted mb-1">
                   输出类型
-                  <span className="ml-1.5 text-[10px] text-ink-faint">
-                    通常保持「对象」即可，无需修改
-                  </span>
+                <span className="ml-1.5 text-[10px] text-ink-faint">
+                  输出值的类型闸：不匹配时引擎静默返回 None，务必与实际输出一致
+                </span>
                 </label>
-                <select
-                  className="input w-full"
-                  value={(() => {
-                    const ot = (typeFields.output_type ?? typeFields.outputType) as
-                      | Record<string, unknown>
-                      | undefined
-                    return (ot?.dataType as string) || 'object'
-                  })()}
-                  onChange={(e) => {
-                    const dt = e.target.value
+                <OutputTypeEditor
+                  value={typeFields.output_type ?? typeFields.outputType}
+                  onChange={(v) => {
                     const fields = { ...d.fields }
                     // 两种历史键都清掉，只写 schema 规范键 output_type，
                     // 避免「高级字段」里 output_type / outputType 双写重复
                     delete fields.output_type
                     delete fields.outputType
-                    if (dt !== 'object') fields.output_type = { dataType: dt }
+                    if (v !== undefined) fields.output_type = v
                     updateNodeData(node.id, { fields })
                   }}
-                >
-                  <option value="object">对象（dict，推荐）</option>
-                  <option value="array">数组（list）</option>
-                  <option value="string">字符串</option>
-                  <option value="number">数值</option>
-                  <option value="boolean">布尔</option>
-                </select>
+                />
               </div>
             )}
 
@@ -482,6 +560,245 @@ function HandlerEditor({
             onChange={(e) => merge({ retryTimes: Math.max(0, Number(e.target.value) || 0) })}
             className="input w-20 font-mono text-[12px]"
           />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** assignment 上游依赖声明（B6）：upstream 只能选**真上游**（沿入边可达的
+ *  前置节点），value 为取值表达式。引擎语义（plaita/node/assignment.py）：
+ *  单条声明=执行时对该表达式求值作为输出；多条=按实际执行到的上一节点匹配
+ *  对应声明（分支汇聚场景）。历史上只能在高级 JSON 里手写数组。 */
+function UpstreamOutputEditor({
+  value,
+  nodeIds,
+  variableGroups,
+  onChange,
+}: {
+  value: unknown
+  nodeIds: string[]
+  variableGroups: VarGroup[]
+  onChange: (v: unknown) => void
+}) {
+  const rows = (Array.isArray(value) ? value : []) as Array<Record<string, unknown>>
+  const setRows = (next: Array<Record<string, unknown>>) => onChange(next.length ? next : undefined)
+  if (nodeIds.length === 0) {
+    return (
+      <div className="space-y-1.5">
+        <p className="text-caption text-ink-muted">上游依赖</p>
+        <p className="text-caption text-ink-faint">
+          当前节点没有上游连线——先用连线接入前置节点，才能在这里声明从哪个上游取值。
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1.5">
+      <p className="text-caption text-ink-muted">
+        上游依赖
+        <span className="ml-1.5 text-[10px] text-ink-faint">
+          只能声明真实上游（沿连线可达的前置节点）。单条=执行时对该表达式求值作为输出；多条=按实际执行到的上游节点匹配（分支汇聚场景）
+        </span>
+      </p>
+      {rows.map((r, i) => (
+        <div key={i} className="flex items-center gap-1.5">
+          <select
+            value={String(r.upstream ?? '')}
+            onChange={(e) =>
+              setRows(rows.map((x, j) => (j === i ? { ...x, upstream: e.target.value } : x)))
+            }
+            className="input w-40 shrink-0 font-mono text-[12px]"
+            title="上游节点"
+          >
+            <option value="">（选择上游节点）</option>
+            {nodeIds.map((id) => (
+              <option key={id} value={id}>{id}</option>
+            ))}
+            {String(r.upstream ?? '') && !nodeIds.includes(String(r.upstream)) && (
+              <option value={String(r.upstream)}>{String(r.upstream)}（已不是上游）</option>
+            )}
+          </select>
+          <div className="flex-1 min-w-0">
+            <UpstreamValueInput
+              row={r}
+              variableGroups={variableGroups}
+              onChange={(n) => setRows(rows.map((x, j) => (j === i ? n : x)))}
+            />
+          </div>
+          <button
+            onClick={() => setRows(rows.filter((_, j) => j !== i))}
+            className="text-ink-faint hover:text-status-error shrink-0"
+            title="移除"
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      ))}
+      <button
+        onClick={() => setRows([...rows, { upstream: nodeIds[0] ?? '', value: '' }])}
+        className="flex items-center gap-1 text-caption text-plaita-400 hover:text-plaita-300"
+      >
+        <Plus size={12} />
+        声明上游依赖
+      </button>
+      <p className="text-[11px] leading-4 text-ink-faint">
+        取值表达式示例：<span className="font-mono">$NODE.http1.data</span>
+        （取 http 节点输出里的 data 字段）、<span className="font-mono">$INPUT.name</span>
+        （流程入参）、字面量如 <span className="font-mono">42</span>。结果经类型闸校验后作为本节点输出，下游以{' '}
+        <span className="font-mono">$NODE.&lt;本节点id&gt;</span> 引用。
+      </p>
+    </div>
+  )
+}
+
+/** 上游取值输入：本地文本态保留输入中间过程（如 "1."），$ 菜单插变量 */
+function UpstreamValueInput({
+  row,
+  variableGroups,
+  onChange,
+}: {
+  row: Record<string, unknown>
+  variableGroups: VarGroup[]
+  onChange: (v: Record<string, unknown>) => void
+}) {
+  const [text, setText] = useState(() =>
+    typeof row.value === 'string' ? row.value : row.value == null ? '' : JSON.stringify(row.value)
+  )
+  return (
+    <ExpressionInput
+      value={text}
+      onChange={(v) => {
+        setText(v)
+        onChange({ ...row, value: v === '' ? undefined : v })
+      }}
+      groups={variableGroups}
+      placeholder="取值表达式，如 $NODE.http1.data"
+    />
+  )
+}
+
+/** assignment 输出类型结构化编辑（Property 结构，2026-09 用户反馈）：
+ *  object 定义 children 字段结构、array 定义元素类型、标量直接选——
+ *  替代只表达顶层类型名的下拉。语义：输出值经 Property.match 校验，
+ *  不匹配时引擎静默返回 None，所以「未设置」= 不校验、原样返回。 */
+const OUTPUT_SCALAR_TYPES = ['string', 'integer', 'number', 'boolean', 'any']
+
+function OutputTypeEditor({
+  value,
+  onChange,
+}: {
+  value: unknown
+  onChange: (v: unknown) => void
+}) {
+  const prop = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>
+  const dataType = String(prop.data_type ?? prop.dataType ?? '')
+  const itemTypeRaw = (prop.item_type ?? prop.itemType) as Record<string, unknown> | undefined
+  const itemType = String(itemTypeRaw?.data_type ?? itemTypeRaw?.dataType ?? 'string')
+  const childrenRaw = prop.children
+  const childRows: Array<{ name: string; type: string }> = Array.isArray(childrenRaw)
+    ? (childrenRaw as Array<Record<string, unknown>>).map((c) => ({
+        name: String(c?.name ?? ''),
+        type: String(c?.data_type ?? c?.dataType ?? 'string'),
+      }))
+    : childrenRaw && typeof childrenRaw === 'object'
+      ? Object.entries(childrenRaw as Record<string, unknown>).map(([k, v]) => ({
+          name: k,
+          type: String((v as Record<string, unknown>)?.data_type ?? (v as Record<string, unknown>)?.dataType ?? 'string'),
+        }))
+      : []
+
+  const emit = (next: Record<string, unknown> | null) => {
+    if (next === null || Object.keys(next).length === 0) {
+      onChange(undefined)
+      return
+    }
+    onChange(next)
+  }
+  const setDataType = (t: string) => {
+    if (!t) return emit(null)
+    if (t === 'object') {
+      const children = Object.fromEntries(
+        childRows.filter((r) => r.name.trim()).map((r) => [r.name.trim(), { data_type: r.type }])
+      )
+      return emit({ data_type: 'object', children })
+    }
+    if (t === 'array') return emit({ data_type: 'array', item_type: { data_type: itemType || 'string' } })
+    return emit({ data_type: t })
+  }
+  const setChildren = (rows: Array<{ name: string; type: string }>) =>
+    emit({
+      data_type: 'object',
+      children: Object.fromEntries(
+        rows.filter((r) => r.name.trim()).map((r) => [r.name.trim(), { data_type: r.type }])
+      ),
+    })
+
+  return (
+    <div className="space-y-1.5">
+      <select value={dataType} onChange={(e) => setDataType(e.target.value)} className="input w-full">
+        <option value="">未设置（不做类型校验，输出原样返回）</option>
+        <option value="object">对象（dict）— 可定义字段结构</option>
+        <option value="array">数组（list）— 可定义元素类型</option>
+        {OUTPUT_SCALAR_TYPES.filter((t) => t !== 'any').map((t) => (
+          <option key={t} value={t}>{t}</option>
+        ))}
+      </select>
+      {dataType === 'array' && (
+        <div className="flex items-center gap-1.5">
+          <span className="text-caption text-ink-muted shrink-0">元素类型</span>
+          <select
+            value={itemType}
+            onChange={(e) => emit({ data_type: 'array', item_type: { data_type: e.target.value } })}
+            className="input w-32"
+          >
+            {OUTPUT_SCALAR_TYPES.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {dataType === 'object' && (
+        <div className="border-l border-line pl-3 space-y-1.5">
+          <p className="text-[11px] text-ink-faint">字段结构（输出 dict 应包含的键及其类型）：</p>
+          {childRows.map((r, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <input
+                value={r.name}
+                onChange={(e) =>
+                  setChildren(childRows.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
+                }
+                placeholder="字段名"
+                className="input w-36 font-mono text-data-sm"
+              />
+              <select
+                value={OUTPUT_SCALAR_TYPES.includes(r.type) ? r.type : 'any'}
+                onChange={(e) =>
+                  setChildren(childRows.map((x, j) => (j === i ? { ...x, type: e.target.value } : x)))
+                }
+                className="input w-28"
+              >
+                {OUTPUT_SCALAR_TYPES.map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => setChildren(childRows.filter((_, j) => j !== i))}
+                className="text-ink-faint hover:text-status-error shrink-0"
+                title="移除字段"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() => setChildren([...childRows, { name: '', type: 'string' }])}
+            className="flex items-center gap-1 text-caption text-plaita-400 hover:text-plaita-300"
+          >
+            <Plus size={12} />
+            添加输出字段
+          </button>
+          <p className="text-[10px] text-ink-faint">更深的嵌套结构请切「源码」直接编辑定义。</p>
         </div>
       )}
     </div>

@@ -27,6 +27,7 @@ try:
     LocalSchedule,
     LocalScheduleFire,
     NodeDescriptor,
+    PropertyType,
 )
 except ImportError:
     from models.flow import (  # type: ignore
@@ -39,6 +40,7 @@ except ImportError:
     LocalSchedule,
     LocalScheduleFire,
     NodeDescriptor,
+    PropertyType,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +91,21 @@ class NodeDescriptorOut(BaseModel):
     category: str = ""
     node_schema_json: str = Field("{}", alias="schema_json")
     is_builtin: bool = False
+    # 代码位置（2026-09 节点管理重设计）：仅内置节点有——Python 模块路径与类名，
+    # 供控制台展示「该节点在哪实现」；控制台注册的自定义节点是纯编排元数据，
+    # 没有可执行代码，留空。
+    source_module: str = ""
+    source_class: str = ""
+
+
+class PropertyTypeOut(BaseModel):
+    """自定义属性类型（命名别名）"""
+
+    name: str
+    base_type: str = "string"
+    enum_options: List[Any] = Field(default_factory=list)
+    default_value: Optional[Any] = None
+    desc: str = ""
 
 
 # ============ 服务 ============
@@ -419,6 +436,71 @@ class FlowStore:
             category=row.category,
             schema_json=row.schema_json,
             is_builtin=row.is_builtin,
+        )
+
+    # ---- property types（自定义属性类型，2026-09 节点管理重设计）----
+
+    def list_property_types(self) -> List[PropertyTypeOut]:
+        with self._session_local() as session:
+            rows = session.scalars(select(PropertyType).order_by(PropertyType.name.asc())).all()
+            return [self._property_type_to_out(r) for r in rows]
+
+    def upsert_property_type(
+        self,
+        name: str,
+        base_type: str,
+        enum_json: str = "[]",
+        default_json: str = "null",
+        desc: str = "",
+    ) -> PropertyTypeOut:
+        """插入或更新自定义属性类型（name 唯一）。"""
+        with self._session_local() as session:
+            row = session.scalars(
+                select(PropertyType).where(PropertyType.name == name)
+            ).first()
+            if row is None:
+                row = PropertyType(
+                    name=name,
+                    base_type=base_type,
+                    enum_json=enum_json,
+                    default_json=default_json,
+                    desc=desc,
+                )
+                session.add(row)
+            else:
+                row.base_type = base_type
+                row.enum_json = enum_json
+                row.default_json = default_json
+                row.desc = desc
+            session.commit()
+            session.refresh(row)
+            return self._property_type_to_out(row)
+
+    def delete_property_type(self, name: str) -> bool:
+        with self._session_local() as session:
+            row = session.scalars(select(PropertyType).where(PropertyType.name == name)).first()
+            if row is None:
+                raise LookupError(f"属性类型不存在: {name}")
+            session.delete(row)
+            session.commit()
+            return True
+
+    @staticmethod
+    def _property_type_to_out(row: PropertyType) -> PropertyTypeOut:
+        import json as _json
+
+        def _load(text: str, fallback):
+            try:
+                return _json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                return fallback
+
+        return PropertyTypeOut(
+            name=row.name,
+            base_type=row.base_type,
+            enum_options=_load(row.enum_json, []),
+            default_value=_load(row.default_json, None),
+            desc=row.desc,
         )
 
 

@@ -2,7 +2,7 @@ import ipaddress
 import json
 import logging
 import socket
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 from urllib.parse import urljoin, urlparse, urlencode
 import io
 from pydantic import ConfigDict, Field, model_validator
@@ -419,7 +419,12 @@ class HTTP(Node):
     node_type: ClassVar[str] = "http"
     node_name: ClassVar[str] = "HTTP请求"
     
-    method: str = Field("GET", description="HTTP方法")
+    # Literal 生成 schema enum（console 表单渲染下拉）；大小写归一由 setup_http
+    # before-validator 完成（先 upper 再校验，存量小写值不受影响）。合法集与
+    # validate() 的 valid_methods 保持一致。
+    method: Literal[
+        "GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "CONNECT", "OPTIONS", "TRACE"
+    ] = Field("GET", description="HTTP 方法")
     content_type: str = Field("application/json", description="内容类型")
 
     # ---- 访问策略（2026-09 安全评审 P1-1：SSRF 防护）----

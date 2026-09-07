@@ -117,10 +117,13 @@ class TestHTTPNode(unittest.TestCase):
             node.validate()
             
     def test_validate_failure_invalid_method(self):
-        """测试验证失败 - 无效的HTTP方法"""
-        node = HTTP(id="test_http", url="https://example.com", method="INVALID")
-        with self.assertRaises(ValueError):
-            node.validate()
+        """测试验证失败 - 无效的HTTP方法
+
+        2026-09 起 method 为 Literal 声明：非法值在构造（解析期）即被拒绝，
+        不再等到 validate()。
+        """
+        with self.assertRaises(Exception):
+            HTTP(id="test_http", url="https://example.com", method="INVALID")
             
     @patch("requests.Session.send")
     def test_execute_success(self, mock_send):

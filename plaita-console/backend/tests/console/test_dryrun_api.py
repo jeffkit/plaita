@@ -170,6 +170,102 @@ def test_dry_run_only_node_executes_single_node(client: TestClient):
     assert by_id["end"]["type"] == "mock"                    # 下游无副作用
 
 
+def test_dry_run_hierarchy_inline_child(client: TestClient):
+    """子图层级：inline child 内的节点 depth=1、flow_path 两级，根层节点 depth=0。"""
+    flow = json.dumps(
+        {
+            "flow_id": "main",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "c1"},
+                {
+                    "type": "child",
+                    "id": "c1",
+                    "childFlow": {
+                        "nodes": [
+                            {"type": "start", "id": "cs", "next": "ca"},
+                            {"type": "assignment", "id": "ca", "output": {"v": 1}, "next": "ce"},
+                            {"type": "end", "id": "ce", "resultType": "success", "output": "$NODE.ca"},
+                        ]
+                    },
+                    "next": "end",
+                },
+                {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.c1"},
+            ],
+        }
+    )
+    r = client.post("/api/flows/dry-run", json={"flowJson": flow, "input": {}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["error"] is None
+    assert body["result"] == {"v": 1}
+    by_id = {n["id"]: n for n in body["nodes"]}
+    # 根层
+    for nid in ("start", "c1", "end"):
+        assert by_id[nid]["depth"] == 0, (nid, by_id[nid])
+        assert by_id[nid]["flow_path"] == ["main"]
+        assert by_id[nid]["flow_id"] == "main"
+    # 子流程层：标签取启动节点名，flow_id 为空（内联子流程无 id）
+    for nid in ("cs", "ca"):
+        assert by_id[nid]["depth"] == 1, (nid, by_id[nid])
+        assert by_id[nid]["flow_path"] == ["main", "c1"]
+        assert by_id[nid]["flow_id"] is None
+
+
+def test_dry_run_hierarchy_parallel_branches(client: TestClient):
+    """子图层级：parallel 分支 flow 在 thread 池 worker 里启动，两个兄弟分支
+    必须归到共同父（depth=1），而不是经爬链失败互相嵌套（depth=2）。"""
+    flow = json.dumps(
+        {
+            "flow_id": "par",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "p"},
+                {
+                    "type": "parallel",
+                    "id": "p",
+                    "branches": [
+                        {
+                            "name": "b1",
+                            "flow": {"nodes": [
+                                {"type": "start", "id": "b1s", "next": "b1a"},
+                                {"type": "assignment", "id": "b1a", "output": {"w": "b1"}, "next": "b1e"},
+                                {"type": "end", "id": "b1e", "resultType": "success", "output": "$NODE.b1a"},
+                            ]},
+                        },
+                        {
+                            "name": "b2",
+                            "flow": {"nodes": [
+                                {"type": "start", "id": "b2s", "next": "b2a"},
+                                {"type": "assignment", "id": "b2a", "output": {"w": "b2"}, "next": "b2e"},
+                                {"type": "end", "id": "b2e", "resultType": "success", "output": "$NODE.b2a"},
+                            ]},
+                        },
+                    ],
+                    "next": "end",
+                },
+                {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.p"},
+            ],
+        }
+    )
+    r = client.post("/api/flows/dry-run", json={"flowJson": flow, "input": {}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["error"] is None, body["error"]
+    by_id = {n["id"]: n for n in body["nodes"]}
+    for nid in ("start", "p", "end"):
+        assert by_id[nid]["depth"] == 0, (nid, by_id[nid])
+        assert by_id[nid]["flow_path"] == ["par"]
+    # 兄弟分支同层：都归到 parallel 节点之下的 depth=1
+    for nid in ("b1s", "b1a", "b2s", "b2a"):
+        assert by_id[nid]["depth"] == 1, (nid, by_id[nid])
+        assert by_id[nid]["flow_path"] == ["par", "p"], (nid, by_id[nid])
+        assert by_id[nid]["flow_id"] is None
+    # 分支真实执行了（thread 池不丢结果）
+    assert by_id["b1a"]["output"] == {"w": "b1"}
+    assert by_id["b2a"]["output"] == {"w": "b2"}
+
+
 class TestDryrunScanParallelBranches:
     """安全回归（2026-09 评审 P0-2）：嵌套在 parallel.branches[].flow 里的
     危险节点必须被闸门扫描到——历史上只沿固定键下钻，分支流完全漏扫。"""

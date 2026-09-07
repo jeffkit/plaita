@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '../../ui/cn'
 import {
   buildFormPlan,
+  fieldError,
   type FieldSpec,
   type JsonSchema,
 } from './schemaUtils'
@@ -24,6 +25,7 @@ export default function SchemaForm({
   excludeKeys,
   coreFields,
   variableGroups,
+  includeCommonKeys,
 }: {
   fields: Record<string, unknown>
   schema: JsonSchema | null
@@ -34,9 +36,11 @@ export default function SchemaForm({
   coreFields?: Set<string>
   /** 变量目录（$INPUT/$NODE/$GLOBAL），供表达式输入插入 */
   variableGroups?: VarGroup[]
+  /** 流程入参等非节点编辑场景：跳过 Node 基类字段排除清单（name/id 等是合法入参名） */
+  includeCommonKeys?: boolean
 }) {
   if (!schema) return null
-  const plan = buildFormPlan(fields, schema, excludeKeys, coreFields)
+  const plan = buildFormPlan(fields, schema, excludeKeys, coreFields, { includeCommonKeys })
   const setValue = (key: string, v: unknown) => onChange({ ...fields, [key]: v })
   const removeValue = (key: string) => {
     const next = { ...fields }
@@ -64,12 +68,19 @@ export default function SchemaForm({
       )}
       {plan.advanced.length > 0 && (
         <CollapsibleSection title={`高级字段（${plan.advanced.length}）`} defaultOpen={false}>
-          {plan.advanced.map((k) => (
-            <div key={k}>
+          {plan.advanced.map((m) => (
+            <div key={m.key}>
               <label className="block text-caption text-ink-muted mb-1">
-                <span className="font-mono text-[10px] text-ink-faint">{k}</span>
+                {/* 有 title 的字段（如 http.headers「请求头」）不再只露裸键名 */}
+                {m.title || <span className="font-mono text-[10px] text-ink-faint">{m.key}</span>}
               </label>
-              <JsonField value={fields[k]} onChange={(v) => setValue(k, v)} />
+              <JsonField
+                value={fields[m.key] === undefined ? {} : fields[m.key]}
+                onChange={(v) => setValue(m.key, v)}
+              />
+              {m.desc && (
+                <p className="mt-1 text-[11px] leading-4 text-ink-faint line-clamp-2">{m.desc}</p>
+              )}
             </div>
           ))}
         </CollapsibleSection>
@@ -183,19 +194,29 @@ function FieldControl({
         />
       )
       break
-    case 'boolean':
+    case 'boolean': {
+      // B2：引擎 default=true 的字段（require_auth/enable_auto_commit/allow_comments），
+      // 取消勾选须显式写 false——删键会被引擎默认值重新翻开；未设置时文案也不再谎报「关闭」
+      const defaultTrue = spec.schema.default === true
       control = (
         <label className="flex items-center gap-2 cursor-pointer select-none">
           <input
             type="checkbox"
             checked={value === true}
-            onChange={(e) => onChange(e.target.checked ? true : undefined)}
+            onChange={(e) => onChange(e.target.checked ? true : defaultTrue ? false : undefined)}
             className="accent-plaita-500 w-3.5 h-3.5"
           />
-          <span className="text-caption text-ink-secondary">{value === true ? '开启' : '关闭'}</span>
+          <span className="text-caption text-ink-secondary">
+            {value === true
+              ? '开启'
+              : defaultTrue
+                ? '关闭（不勾选时引擎默认开启）'
+                : '关闭'}
+          </span>
         </label>
       )
       break
+    }
     case 'enum':
       control = (
         <select
@@ -271,6 +292,11 @@ function FieldControl({
     case 'property':
       control = <PropertyField value={value} onChange={onChange} />
       break
+    case 'kv':
+      // B5：键值对表格（headers/query/validate_*）——引擎只收字符串值，
+      // 编辑器只产出 string，杜绝「非 string 值被引擎静默丢弃」
+      control = <KVTable value={value} onChange={onChange} />
+      break
     case 'json':
     default:
       control = <JsonField value={value} onChange={onChange} />
@@ -281,6 +307,11 @@ function FieldControl({
       {label}
       {control}
       {hint}
+      {(() => {
+        // B5 后半：schema 驱动的即时校验（required/type/enum），定位到字段
+        const err = fieldError(spec, value)
+        return err ? <p className="mt-1 text-[11px] text-status-error">{err}</p> : null
+      })()}
     </div>
   )
 }
@@ -405,6 +436,67 @@ export function JsonField({
         )}
       />
       {error && <p className="mt-1 text-[11px] text-status-error">{error}</p>}
+    </div>
+  )
+}
+
+// ── 键值对表格：headers/query 等字符串字典（B5）──────────────────────────
+
+function KVTable({
+  value,
+  onChange,
+}: {
+  value: unknown
+  onChange: (v: unknown) => void
+}) {
+  // 坏实例（非对象，如历史上存了字符串）退回 JSON 编辑
+  if (value != null && (typeof value !== 'object' || Array.isArray(value))) {
+    return <JsonField value={value} onChange={onChange} />
+  }
+  const entries = Object.entries((value ?? {}) as Record<string, unknown>)
+  const commit = (next: Array<[string, unknown]>) => {
+    const cleaned = next.filter(([k]) => k.trim() !== '')
+    if (cleaned.length === 0) {
+      onChange(undefined)
+      return
+    }
+    onChange(Object.fromEntries(cleaned))
+  }
+  return (
+    <div className="space-y-1.5">
+      {entries.map(([k, v], i) => (
+        <div key={i} className="flex items-center gap-1.5">
+          <input
+            value={k}
+            onChange={(e) =>
+              commit(entries.map(([ok, ov], j) => (j === i ? [e.target.value, ov] : [ok, ov])))
+            }
+            placeholder="名称"
+            className="input w-2/5 font-mono text-[12px]"
+          />
+          <input
+            value={v == null ? '' : String(v)}
+            onChange={(e) =>
+              commit(entries.map(([ok, ov], j) => (j === i ? [ok, e.target.value] : [ok, ov])))
+            }
+            placeholder="值"
+            className="input flex-1 font-mono text-[12px]"
+          />
+          <button
+            onClick={() => commit(entries.filter((_, j) => j !== i))}
+            className="text-ink-faint hover:text-status-error text-xs px-1 shrink-0"
+            title="移除"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <button
+        onClick={() => commit([...entries, ['', '']])}
+        className="text-caption text-plaita-400 hover:text-plaita-300"
+      >
+        + 添加一项
+      </button>
     </div>
   )
 }

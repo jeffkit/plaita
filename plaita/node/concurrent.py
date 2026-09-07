@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from collections import OrderedDict
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from pydantic import Field, model_validator
 
@@ -100,7 +100,13 @@ class Parallel(Node):
 
     branches: List[ParallelBranch] = Field(default_factory=list)
     is_conditional: bool = Field(default=False)
-    mode: str = Field(default=THREAD)
+    # Literal 生成 schema enum（console 表单渲染下拉）；非法历史值在 execute
+    # 分发处本就抛 ValueError，现在提前到解析期。注意：同步 run 路径不支持
+    # coroutine（见 _build_executor/execute 分发）。
+    mode: Literal[THREAD, PROCESS, COROUTINE] = Field(
+        default=THREAD,
+        description="分支执行模式: thread（线程池，默认）/ process（进程池）/ coroutine（协程，仅异步执行）",
+    )
     join_branches: List[str] = Field(default_factory=list)
 
     # setup_branches 消费的 camelCase 遗留键（is_conditional/join_branches 已是声明字段）

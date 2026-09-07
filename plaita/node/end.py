@@ -1,4 +1,4 @@
-from typing import ClassVar, Dict, Optional
+from typing import ClassVar, Dict, Literal, Optional
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -28,9 +28,13 @@ class End(Node):
     # setup_end 消费的遗留键（result_type 字段无 alias）
     LEGACY_KEYS: ClassVar[frozenset] = frozenset({"resultType"})
 
-    result_type: Optional[str] = Field(
+    # Literal 生成 schema enum（console 表单渲染下拉）；非法历史值由 setup_end
+    # before-validator 先归一为 success（带 warning），Literal 校验其结果
+    result_type: Optional[
+        Literal["success", "error", "nop"]
+    ] = Field(
         END_TYPE_NORMAL,
-        description="Result type of the end node: success (default) / error / nop",
+        description="结束类型: success（正常结束，默认）/ error（以错误结束，配 error）/ nop（静默结束）",
     )
     error: Optional[Dict] = None
 

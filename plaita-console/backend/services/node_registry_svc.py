@@ -70,12 +70,16 @@ def _builtin_descriptor(cls: type) -> NodeDescriptorOut:
     except Exception as e:  # 个别节点 schema 生成可能失败
         logger.warning("生成节点 %s schema 失败: %s", node_type, e)
         schema_json = "{}"
+    # 代码位置（2026-09 节点管理重设计）：内置节点透出 Python 实现位置，
+    # 控制台表格/抽屉展示「该节点在哪实现」
     return NodeDescriptorOut(
         node_type=node_type,
         node_name=node_name,
         category=_CATEGORY_MAP.get(node_type, ""),
         schema_json=schema_json,
         is_builtin=True,
+        source_module=getattr(cls, "__module__", ""),
+        source_class=getattr(cls, "__qualname__", "") or getattr(cls, "__name__", ""),
     )
 
 
@@ -145,3 +149,58 @@ def delete_custom(store: Optional[FlowStore], node_type: str) -> bool:
     if node_type in builtin_types():
         raise ValueError(f"内置节点 {node_type} 不可删除")
     return store.delete_node_descriptor(node_type)
+
+
+# ---- 自定义属性类型（2026-09 节点管理重设计）----
+
+# base_type 允许集：运行时 Property.match 认识的内置类型（plaita/io.py）。
+# 自定义类型只是 console 侧命名别名，保存节点 schema 时展开为基础类型+约束，
+# 运行时永不接触自定义类型名，因此 base 必须收敛到运行时真实支持的集合。
+_PROPERTY_BASE_TYPES = {"string", "integer", "number", "boolean", "array", "object"}
+
+
+def list_property_types(store: Optional[FlowStore] = None) -> List:
+    if store is None:
+        store = get_flow_store()
+    return store.list_property_types()
+
+
+def upsert_property_type(
+    store: Optional[FlowStore],
+    name: str,
+    base_type: str,
+    enum_options: Optional[List] = None,
+    default_value=None,
+    desc: str = "",
+):
+    import json as _json
+
+    if store is None:
+        store = get_flow_store()
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("类型名不能为空")
+    if len(name) > 64:
+        raise ValueError("类型名过长（≤64 字符）")
+    base_type = (base_type or "").strip().lower()
+    if base_type not in _PROPERTY_BASE_TYPES:
+        raise ValueError(
+            f"基础类型须为运行时内置类型之一: {sorted(_PROPERTY_BASE_TYPES)}，得到 {base_type!r}"
+        )
+    if enum_options is None:
+        enum_options = []
+    if not isinstance(enum_options, list):
+        raise ValueError("enum 选项须为列表")
+    return store.upsert_property_type(
+        name=name,
+        base_type=base_type,
+        enum_json=_json.dumps(enum_options, ensure_ascii=False),
+        default_json=_json.dumps(default_value, ensure_ascii=False) if default_value is not None else "null",
+        desc=desc or "",
+    )
+
+
+def delete_property_type(store: Optional[FlowStore], name: str) -> bool:
+    if store is None:
+        store = get_flow_store()
+    return store.delete_property_type(name)

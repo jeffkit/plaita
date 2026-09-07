@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { X, Play, AlertCircle, Check, ChevronRight } from 'lucide-react'
 import { api, FlowSummaryView } from '../services/api'
 import { Button } from './ui'
+import SchemaInput from './flow/schemaForm/SchemaInput'
 
 interface StartFlowDialogProps {
   isOpen: boolean
@@ -17,7 +18,6 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
   const [flowSearch, setFlowSearch] = useState('')
   const [version, setVersion] = useState('')
   const [paramsJson, setParamsJson] = useState('{\n  \n}')
-  const [jsonError, setJsonError] = useState<string | null>(null)
   const [startedFlowId, setStartedFlowId] = useState('')
 
   // 流程与版本不再靠手输记忆：打开时拉全量流程列表
@@ -41,6 +41,22 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
   })
   const versions = (flowDetailQuery.data?.versions || []) as Array<{ version: string; status?: string }>
   const defaultVersion = versions.find((v) => v.status === 'published')?.version || versions[versions.length - 1]?.version || ''
+  const effectiveVersion = version || defaultVersion
+
+  // C9：拉选中版本的定义取 inputType，驱动输入参数的表单态（SchemaInput）
+  const versionDetailQuery = useQuery({
+    queryKey: ['flow-version', flowId, effectiveVersion],
+    queryFn: () => api.getVersion(flowId, effectiveVersion),
+    enabled: isOpen && !!flowId && !!effectiveVersion,
+  })
+  const inputType = (() => {
+    try {
+      const def = JSON.parse(versionDetailQuery.data?.definition || '{}')
+      return def.inputType ?? def.input_type ?? null
+    } catch {
+      return null
+    }
+  })()
 
   const startMutation = useMutation({
     mutationFn: api.startExecution,
@@ -56,7 +72,6 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
     setFlowSearch('')
     setVersion('')
     setParamsJson('{\n  \n}')
-    setJsonError(null)
     setStartedFlowId('')
   }
 
@@ -70,35 +85,7 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
     if (e.key === 'Escape') handleClose()
   }
 
-  const validateJson = (json: string): boolean => {
-    try {
-      JSON.parse(json)
-      setJsonError(null)
-      return true
-    } catch (e) {
-      setJsonError((e as Error).message)
-      return false
-    }
-  }
-
-  const handleParamsChange = (value: string) => {
-    setParamsJson(value)
-    if (value.trim()) {
-      validateJson(value)
-    } else {
-      setJsonError(null)
-    }
-  }
-
-  const formatJson = () => {
-    try {
-      const parsed = JSON.parse(paramsJson)
-      setParamsJson(JSON.stringify(parsed, null, 2))
-      setJsonError(null)
-    } catch (e) {
-      setJsonError((e as Error).message)
-    }
-  }
+  // 输入 JSON 的语法校验由 SchemaInput 兜底（非法时锁表单 tab、提交前再拦一次）
 
   const handleSubmit = () => {
     if (!flowId.trim()) return
@@ -106,9 +93,8 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
     if (paramsJson.trim()) {
       try {
         params = JSON.parse(paramsJson)
-      } catch (e) {
-        setJsonError((e as Error).message)
-        return
+      } catch {
+        return // SchemaInput 已提示语法错误，这里兜底阻断
       }
     }
     startMutation.mutate({
@@ -248,43 +234,23 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
                 </select>
               </div>
 
-              {/* 输入参数 */}
+              {/* 输入参数：表单 ⇄ JSON（schema 来自版本定义的 inputType，C9） */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-caption text-ink-muted">输入参数 (JSON)</label>
-                  <button
-                    onClick={formatJson}
-                    className="text-caption text-plaita-400 hover:text-plaita-300 transition-colors"
-                  >
-                    格式化
-                  </button>
+                  <label className="text-caption text-ink-muted">输入参数</label>
+                  {effectiveVersion && (
+                    <span className="text-[10px] text-ink-faint font-mono">
+                      {flowId}@{effectiveVersion}
+                      {versionDetailQuery.isFetching ? ' · 读取入参 schema…' : ''}
+                    </span>
+                  )}
                 </div>
-                <div className="relative">
-                  <textarea
-                    value={paramsJson}
-                    onChange={(e) => handleParamsChange(e.target.value)}
-                    rows={8}
-                    spellCheck={false}
-                    className={`input w-full font-mono text-data-sm resize-none ${
-                      jsonError ? '!border-status-error/50' : ''
-                    }`}
-                  />
-                  {/* JSON 状态指示器 */}
-                  <div className="absolute top-3 right-3">
-                    {paramsJson.trim() && !jsonError && (
-                      <Check size={16} className="text-plaita-400" />
-                    )}
-                    {jsonError && (
-                      <AlertCircle size={16} className="text-status-error" />
-                    )}
-                  </div>
-                </div>
-                {jsonError && (
-                  <p className="text-status-error text-caption mt-2 flex items-center gap-2">
-                    <AlertCircle size={14} />
-                    JSON 格式错误: {jsonError}
-                  </p>
-                )}
+                <SchemaInput
+                  inputType={inputType}
+                  text={paramsJson}
+                  onTextChange={setParamsJson}
+                  rows={8}
+                />
               </div>
             </div>
 
@@ -296,7 +262,7 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
               <Button
                 variant="primary"
                 onClick={handleSubmit}
-                disabled={!flowId || !!jsonError || startMutation.isPending}
+                disabled={!flowId || startMutation.isPending}
               >
                 {startMutation.isPending ? (
                   <>

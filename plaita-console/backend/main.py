@@ -16,7 +16,7 @@ try:
     from .config import get_settings
     from .auth import require_auth
     from .api import services, executions, queues, logs, cluster, events
-    from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit
+    from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
     from .services import flow_store, signature, users_svc
     from .api import auth_users
 except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该走到这里
@@ -26,7 +26,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
     from config import get_settings
     from auth import require_auth
     from api import services, executions, queues, logs, cluster, events
-    from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit  # type: ignore
+    from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
     from services import flow_store, signature, users_svc  # type: ignore
     from api import auth_users  # type: ignore
 
@@ -212,6 +212,8 @@ def create_app() -> FastAPI:
     _mount_admin(copilot.router, "copilot")
     _mount_admin(schedules.router, "schedules")
     _mount_admin(credentials.router, "credentials")
+    _mount_admin(property_types.router, "property_types")
+    _mount_admin(credential_templates.router, "credential_templates")
     _mount_admin(audit.router, "audit")
 
     # --- 契约面（独立 HMAC，不加 admin 依赖）---

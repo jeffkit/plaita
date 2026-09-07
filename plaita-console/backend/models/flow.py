@@ -83,6 +83,30 @@ class NodeDescriptor(Base):
     )
 
 
+class PropertyType(Base):
+    """自定义属性类型（2026-09 节点管理重设计）
+
+    命名别名：base_type 必须是运行时内置类型；enum/default 是录入约束。
+    关键语义——别名只在 console 生成节点 schema_json 时**展开**为基础类型 +
+    约束，运行时（Property.match）永不接触自定义类型名（未知 data_type 一律
+    匹配失败），所以这里不需要任何运行时注册机制。
+    """
+
+    __tablename__ = "property_types"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), nullable=False, unique=True, index=True)
+    base_type = Column(String(32), nullable=False, default="string")
+    # enum 选项与默认值存 JSON（list / 标量），读取方负责解析
+    enum_json = Column(Text, nullable=False, default="[]")
+    default_json = Column(Text, nullable=False, default="null")
+    desc = Column(String(256), nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class CopilotThread(Base):
     """Copilot 会话（AG-UI thread 与编排流程的关联，支持历史回看/审计）
 

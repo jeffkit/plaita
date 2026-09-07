@@ -3,8 +3,8 @@ HTTP回调节点实现
 支持等待HTTP回调请求并触发流程继续执行
 """
 import uuid
-from typing import Any, ClassVar, Dict, List, Optional, Union
-from pydantic import Field
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
@@ -15,33 +15,47 @@ class HttpCallbackNode(BaseExtendedNode):
     HTTP回调节点
     等待HTTP回调请求，接收到回调时触发事件继续流程
     """
-    
+
     node_type: ClassVar[str] = "http_callback"
     node_name: ClassVar[str] = "HTTP回调节点"
-    
+
+    # 运行时契约：固定订阅 http_callback 事件。历史上 event_type 必填而用户值
+    # 必被 __init__ 覆盖（伪必填地雷，2026-09 表单评审）；现在由 _normalize_enums
+    # 在校验前注入，schema 不再 required
+    event_type: str = Field(default="http_callback", description="内部事件类型标识，由节点自动设定，请勿修改")
+
     # 回调URL配置
     callback_path: Optional[str] = Field(default=None, description="回调路径，为空时自动生成")
-    callback_method: str = Field(default="POST", description="回调HTTP方法")
+    # Literal 生成 schema enum（console 表单渲染下拉）；大小写归一见 _normalize_enums
+    callback_method: Literal["GET", "POST", "PUT", "DELETE"] = Field(default="POST", description="回调 HTTP 方法")
     callback_timeout_minutes: int = Field(default=60, description="回调超时时间（分钟）")
-    
+
     # 安全配置
     require_auth: bool = Field(default=True, description="是否需要认证")
-    auth_type: str = Field(default="token", description="认证类型: token, basic, signature")
+    # 历史上未知 auth_type 静默产出无凭证配置，Literal 使其在解析期报错
+    auth_type: Literal["token", "basic", "signature"] = Field(default="token", description="认证类型: token / basic / signature")
     auth_token: Optional[str] = Field(default=None, description="认证令牌")
-    
+
     # 请求验证配置
     validate_headers: Dict[str, str] = Field(default_factory=dict, description="需要验证的请求头")
     validate_params: Dict[str, str] = Field(default_factory=dict, description="需要验证的请求参数")
-    
+
     # 响应配置
     success_response: Dict[str, Any] = Field(default_factory=lambda: {"status": "success"}, description="成功响应内容")
     error_response: Dict[str, Any] = Field(default_factory=lambda: {"status": "error"}, description="错误响应内容")
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        # HTTP回调节点默认监听http_callback事件
-        self.event_type = "http_callback"
-        
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_enums(cls, values):
+        # "post" 等历史小写写法曾靠运行期 .upper() 兜底，Literal 之前先归一
+        if isinstance(values, dict):
+            m = values.get("callback_method")
+            if isinstance(m, str):
+                values["callback_method"] = m.upper()
+            # 强制事件订阅契约（原 __init__ 无条件覆盖行为的等价迁移）
+            values["event_type"] = "http_callback"
+        return values
+
     def generate_service_config(self, execution) -> Dict[str, Any]:
         """
         生成HTTP回调服务配置

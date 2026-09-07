@@ -2,8 +2,8 @@
 Redis队列节点实现
 支持监听Redis队列消息并触发流程继续执行
 """
-from typing import Any, ClassVar, Dict, List, Optional, Union
-from pydantic import Field
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
@@ -14,31 +14,45 @@ class RedisQueueNode(BaseExtendedNode):
     Redis队列节点
     监听Redis队列消息，接收到消息时触发事件继续流程
     """
-    
+
     node_type: ClassVar[str] = "redis_queue"
     node_name: ClassVar[str] = "Redis队列节点"
-    
+
+    # 运行时契约：固定订阅 redis_message 事件。历史上 event_type 必填而用户值
+    # 必被 __init__ 覆盖（伪必填地雷，2026-09 表单评审）；现在由 _set_event_type
+    # 在校验前注入，schema 不再 required
+    event_type: str = Field(default="redis_message", description="内部事件类型标识，由节点自动设定，请勿修改")
+
     # Redis配置
     redis_host: str = Field(default="localhost", description="Redis主机地址")
     redis_port: int = Field(default=6379, description="Redis端口")
     redis_db: int = Field(default=0, description="Redis数据库")
     redis_password: Optional[str] = Field(default=None, description="Redis密码")
-    
+
     # 队列配置
     queue_name: str = Field(description="队列名称")
-    queue_type: str = Field(default="list", description="队列类型: list, stream, pubsub")
-    
+    # Literal 生成 schema enum（console 表单渲染下拉）；未知历史值此前静默
+    # 按消费服务的兜底分支处理，现在解析期即拦截
+    queue_type: Literal["list", "stream", "pubsub"] = Field(
+        default="list", description="队列类型: list / stream / pubsub"
+    )
+
     # 监听配置
     timeout_seconds: int = Field(default=0, description="监听超时时间，0表示无限等待")
     batch_size: int = Field(default=1, description="批量处理大小")
-    
+
     # 消息处理配置
-    message_format: str = Field(default="json", description="消息格式: json, text, raw")
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Redis队列节点默认监听redis_message事件
-        self.event_type = "redis_message"
+    message_format: Literal["json", "text", "raw"] = Field(
+        default="json", description="消息格式: json / text / raw"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _set_event_type(cls, values):
+        # 强制事件订阅契约（原 __init__ 无条件覆盖行为的等价迁移）
+        if isinstance(values, dict):
+            values["event_type"] = "redis_message"
+        return values
         
     def generate_service_config(self, execution) -> Dict[str, Any]:
         """

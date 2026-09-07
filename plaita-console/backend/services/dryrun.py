@@ -2,11 +2,13 @@
 dry-run 服务：实例化 Flow 并同步执行，收集节点级结果。
 
 使用 ``FlowExecution.run(flow, params, callback_handlers=[...])`` 注入采集回调，
-按节点聚合 input(配置)/output(执行结果)/status。
+按节点聚合 input(配置)/output(执行结果)/status，并维护主/子流程层级
+（``depth`` / ``flow_path`` / ``flow_id``，供试跑面板做子图缩进）。
 
 安全闸门：拒绝含 code / 可执行脚本类危险节点的 flow，避免 console backend 进程 RCE。
 """
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Set
 
 from plaita.core.callback import FlowCallback
@@ -29,44 +31,161 @@ _BLOCKED_NODE_TYPES: Set[str] = {
 }
 
 
+class _FlowCtx:
+    """flow 执行上下文（层级归因用）。
+
+    ``ref`` 持有 flow 对象本身：注册期间对象不可回收，id() 不会复用。
+    ``spawned_by`` 记录启动本 flow 的节点 id()，供跨线程反查时向上爬链。
+    """
+
+    __slots__ = ("depth", "path", "flow_id", "spawned_by", "ref")
+
+    def __init__(self, depth: int, path: List[str], flow_id: Optional[str], spawned_by: Optional[int], ref: Any):
+        self.depth = depth
+        self.path = path
+        self.flow_id = flow_id
+        self.spawned_by = spawned_by
+        self.ref = ref
+
+
 class _CollectingCallback(FlowCallback):
+    """采集节点级结果 + 主/子流程层级。
+
+    层级归因（2026-09 试跑面板子图缩进）：
+    - ``on_node_start`` 的 ``flow`` 参数即节点所属 flow，ctx 直接查表，精确；
+    - ``on_flow_start`` 只带 flow 不带来源，需反查启动节点：
+      * 同线程（inline child 与父同线程执行）取线程本地节点栈顶；
+      * 跨线程（parallel 默认 thread 池，分支 flow 在 worker 里启动）取最近
+        启动的未结束节点，再沿 ``ctx.spawned_by`` 链爬到仍 open 的启动节点——
+        使同一 parallel 的各兄弟分支归到共同父，而非互相嵌套。
+    - 已知边界：跨线程事件到达顺序由调度决定，极端交错下个别 flow 的
+      depth/path 仍可能偏差；节点自身的 input/output 数据不受影响。
+    """
+
     def __init__(self) -> None:
         self.nodes: List[Dict[str, Any]] = []
-        self._started: Dict[str, Dict[str, Any]] = {}
+        self._started: Dict[Any, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        # id(flow) -> _FlowCtx（含 ref，注册期内 id 不复用）
+        self._ctx_of: Dict[int, _FlowCtx] = {}
+        # id(node) -> 启动节点记录（节点结束即清除）
+        self._open_nodes: Dict[int, Dict[str, Any]] = {}
+        self._seq = 0
+        self._tls = threading.local()
+
+    # ── flow 生命周期 ────────────────────────────────────────────────
+
+    def on_flow_start(self, flow, **kwargs) -> None:
+        with self._lock:
+            spawn = self._find_spawn_node_record()
+            fid = getattr(flow, "flow_id", None)
+            if spawn is None:
+                ctx = _FlowCtx(0, [fid or "root"], fid, None, flow)
+            else:
+                label = fid or spawn["name"] or "子流程"
+                ctx = _FlowCtx(
+                    spawn["ctx"].depth + 1,
+                    spawn["ctx"].path + [label],
+                    fid,
+                    spawn["node_id"],
+                    flow,
+                )
+            self._ctx_of[id(flow)] = ctx
+
+    def on_flow_end(self, flow, result=None, error=None, exception=None, **kwargs) -> None:
+        with self._lock:
+            self._ctx_of.pop(id(flow), None)
+
+    def _find_spawn_node_record(self) -> Optional[Dict[str, Any]]:
+        """定位正在启动的 flow 的启动节点记录（调用方持有锁）。"""
+        stack = getattr(self._tls, "node_stack", None)
+        if stack:
+            rec = self._open_nodes.get(stack[-1])
+            if rec is not None:
+                return rec
+        if not self._open_nodes:
+            return None
+        # 跨线程：最近启动的未结束节点，沿 spawned_by 爬到仍 open 的启动节点
+        rec = max(self._open_nodes.values(), key=lambda r: r["seq"])
+        seen: Set[int] = set()
+        while rec is not None:
+            rid = rec["ctx"].spawned_by
+            if rid is None or rid in seen:
+                break
+            seen.add(rid)
+            candidate = self._open_nodes.get(rid)
+            if candidate is None:
+                break
+            rec = candidate
+        return rec
+
+    # ── 节点生命周期 ────────────────────────────────────────────────
 
     def on_node_start(self, flow, node, **kwargs) -> None:
-        entry = {
-            "id": getattr(node, "id", None),
-            "type": getattr(node, "node_type", None),
-            "name": getattr(node, "name", None) or getattr(node, "id", None),
-            "input": getattr(node, "input", None),
-            "output": None,
-            "status": "running",
-            "error": None,
-        }
-        self._started[entry["id"]] = entry
-        self.nodes.append(entry)
+        with self._lock:
+            ctx = self._ctx_of.get(id(flow))
+            if ctx is None:
+                # 防御：flow_start 未经过本采集器（外部构造的执行）——按根层处理
+                fid = getattr(flow, "flow_id", None)
+                ctx = _FlowCtx(0, [fid or "root"], fid, None, flow)
+                self._ctx_of[id(flow)] = ctx
+            entry = {
+                "id": getattr(node, "id", None),
+                "type": getattr(node, "node_type", None),
+                "name": getattr(node, "name", None) or getattr(node, "id", None),
+                "input": getattr(node, "input", None),
+                "output": None,
+                "status": "running",
+                "error": None,
+                "depth": ctx.depth,
+                "flow_path": list(ctx.path),
+                "flow_id": ctx.flow_id,
+            }
+            self._started[entry["id"]] = entry
+            self.nodes.append(entry)
+            self._seq += 1
+            self._open_nodes[id(node)] = {
+                "ref": node,
+                "node_id": id(node),
+                "name": entry["name"],
+                "ctx": ctx,
+                "seq": self._seq,
+            }
+            stack = getattr(self._tls, "node_stack", None)
+            if stack is None:
+                stack = []
+                self._tls.node_stack = stack
+            stack.append(id(node))
 
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:
         nid = getattr(node, "id", None)
-        entry = self._started.get(nid)
-        if entry is None:
-            entry = {
-                "id": nid,
-                "type": getattr(node, "node_type", None),
-                "name": getattr(node, "name", None) or nid,
-                "input": getattr(node, "input", None),
-                "output": None,
-                "status": "success",
-                "error": None,
-            }
-            self.nodes.append(entry)
-        entry["output"] = result
-        if error is not None or exception is not None:
-            entry["status"] = "error"
-            entry["error"] = str(error or exception)
-        else:
-            entry["status"] = "success"
+        with self._lock:
+            entry = self._started.get(nid)
+            if entry is None:
+                entry = {
+                    "id": nid,
+                    "type": getattr(node, "node_type", None),
+                    "name": getattr(node, "name", None) or nid,
+                    "input": getattr(node, "input", None),
+                    "output": None,
+                    "status": "success",
+                    "error": None,
+                    "depth": 0,
+                    "flow_path": [],
+                    "flow_id": getattr(flow, "flow_id", None),
+                }
+                self.nodes.append(entry)
+            entry["output"] = result
+            if error is not None or exception is not None:
+                entry["status"] = "error"
+                entry["error"] = str(error or exception)
+            else:
+                entry["status"] = "success"
+            self._open_nodes.pop(id(node), None)
+            stack = getattr(self._tls, "node_stack", None)
+            if stack and id(node) in stack:
+                # 正常路径同线程 LIFO；防御性按值移除
+                stack.remove(id(node))
 
 
 def apply_debug_transform(

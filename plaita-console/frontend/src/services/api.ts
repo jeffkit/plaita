@@ -604,6 +604,26 @@ export const api = {
     return request(`/nodes/${nodeType}`, { method: 'DELETE' })
   },
 
+  // ---- 自定义属性类型（C2：console 侧命名别名，保存节点 schema 时展开为内置基础类型）----
+
+  async getPropertyTypes(): Promise<PropertyTypeListResponse> {
+    return request('/property-types')
+  },
+
+  async upsertPropertyType(payload: UpsertPropertyTypeRequest): Promise<PropertyTypeView> {
+    return request('/property-types', { method: 'POST', body: JSON.stringify(payload) })
+  },
+
+  async deletePropertyType(name: string): Promise<{ success: boolean }> {
+    return request(`/property-types/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+
+  // ---- 凭据类型模板（C3：后端内置注册表，只读）----
+
+  async getCredentialTemplates(): Promise<CredentialTemplatesResponse> {
+    return request('/credential-templates')
+  },
+
   async dryRun(payload: {
     flowJson: string
     input?: Record<string, unknown>
@@ -808,6 +828,50 @@ export interface NodeDescriptorView {
   category: string
   schema_json: string
   is_builtin: boolean
+  /** 代码位置：仅内置节点有（Python 模块路径 + 类名）；控制台自定义节点为空 */
+  source_module: string
+  source_class: string
+}
+
+export interface PropertyTypeView {
+  name: string
+  base_type: string
+  enum_options: unknown[]
+  default_value: unknown
+  desc: string
+}
+
+export interface UpsertPropertyTypeRequest {
+  name: string
+  base_type: string
+  enum_options?: unknown[]
+  default_value?: unknown
+  desc?: string
+}
+
+export interface PropertyTypeListResponse {
+  types: PropertyTypeView[]
+  total: number
+}
+
+export interface CredentialTemplateField {
+  key: string
+  label: string
+  input_type: 'string' | 'number'
+  required: boolean
+  secret: boolean
+}
+
+export interface CredentialTemplate {
+  type: string
+  label: string
+  desc: string
+  fields: CredentialTemplateField[]
+}
+
+export interface CredentialTemplatesResponse {
+  templates: CredentialTemplate[]
+  total: number
 }
 
 export interface NodeListResponse {
@@ -830,6 +894,12 @@ export interface DryRunNodeResult {
   output?: unknown
   status: string
   error?: string | null
+  /** 主/子流程层级：根层 depth=0，子流程内节点按嵌套深度递增（试跑面板子图缩进用） */
+  depth?: number
+  /** 自根 flow 起的标签路径，如 ["main", "c1"] */
+  flow_path?: string[]
+  /** 节点所属 flow 的 id（内联子流程为 null） */
+  flow_id?: string | null
 }
 
 export interface DryRunResponse {

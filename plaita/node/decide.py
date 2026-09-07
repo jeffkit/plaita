@@ -1,5 +1,5 @@
 import json
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -38,7 +38,20 @@ LOGIC_TYPE_OR = "or"
 
 class Condition(BaseModel):
     field: Any
-    operator: str
+    # Literal 生成 schema enum（console 条件编辑器渲染算子下拉），并把
+    # ">= 这类拼错值从运行期报错提前到解析期；合法集即 condition_matcher
+    operator: Literal[
+        CONDITION_OP_EQ,
+        CONDITION_OP_NE,
+        CONDITION_OP_GT,
+        CONDITION_OP_GTE,
+        CONDITION_OP_LT,
+        CONDITION_OP_LTE,
+        CONDITION_OP_IN,
+        CONDITION_OP_NOTIN,
+        CONDITION_OP_CONTAINS,
+        CONDITION_OP_NOT_CONTAINS,
+    ]
     value: Any
 
     def match(self, context, prefix="$"):
@@ -72,7 +85,9 @@ class Condition(BaseModel):
 
 
 class ConditionGroup(BaseModel):
-    relation: str
+    # Literal 生成 schema enum（前端 and/or 下拉）；_validate_relation 保留——
+    # 它在 Literal 校验前给出中文错误并拦住非 dict 输入
+    relation: Literal[LOGIC_TYPE_AND, LOGIC_TYPE_OR]
     conditions: List[Union[Condition, "ConditionGroup"]] = Field(default_factory=list)
 
     @model_validator(mode="before")

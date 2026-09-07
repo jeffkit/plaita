@@ -3,9 +3,10 @@ dry-run API
 
 POST /api/flows/dry-run
 - 请求：{ flowJson: string, input?: object }
-- 响应：{ result, nodes: [{id,type,name,input,output,status,error}], error }
+- 响应：{ result, nodes: [{id,type,name,input,output,status,error,depth,flow_path,flow_id}], error }
+  其中 depth/flow_path/flow_id 为主/子流程层级（根层 depth=0），供试跑面板子图缩进。
 """
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -37,6 +38,11 @@ class NodeResult(BaseModel):
     output: Optional[Any] = None
     status: str = "success"
     error: Optional[str] = None
+    # 主/子流程层级：根层 depth=0；flow_path 自根 flow 起的标签路径；
+    # flow_id 为节点所属 flow 的 id（内联子流程为 null）
+    depth: int = 0
+    flow_path: List[str] = Field(default_factory=list)
+    flow_id: Optional[str] = None
 
 
 class DryRunResponse(BaseModel):
