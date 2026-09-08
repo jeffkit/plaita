@@ -339,6 +339,10 @@ class ExpressionParser:
 
     # --- backward-compat shim -------------------------------------------
 
+    @staticmethod
+    def get_registered_names() -> list[str]:
+        return sorted(get_default_expression_registry().all_functions())
+
     def parse_function(self, expression: str, context: Dict[str, Any],
                        registry: Optional[Any] = None) -> Any:
         """Evaluate a (possibly function) expression.
