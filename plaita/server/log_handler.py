@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional
 
 from redis import Redis
 
+from .tenant_context import current_tenant
+
 
 class RedisStreamHandler(logging.Handler):
     """
@@ -112,6 +114,9 @@ class RedisStreamHandler(logging.Handler):
             "message": record.getMessage(),
             "service_type": self.service_type,
             "instance_id": self.instance_id,
+            # 多租户：当前任务租户随条目落库（键保持平台级 plaita:logs:*，
+            # console 按条目字段过滤，避免键段错位）
+            "tenant_id": current_tenant(),
             "logger": record.name,
             "module": record.module,
             "line": record.lineno,

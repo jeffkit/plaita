@@ -129,7 +129,8 @@ async def copilot_run(request: Request):
     if flow_id and isinstance(body.get("threadId"), str) and body["threadId"]:
         try:
             flow_store.get_flow_store().upsert_copilot_thread(
-                thread_id=body["threadId"], flow_id=flow_id, bump_message=True
+                thread_id=body["threadId"], flow_id=flow_id, bump_message=True,
+                tenant_id=getattr(request.state, "tenant_id", "") or "",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("copilot thread upsert 失败: %s", exc)
@@ -213,9 +214,17 @@ async def copilot_run(request: Request):
 
 
 @router.get("/copilot/threads", tags=["admin", "copilot"])
-async def list_copilot_threads(flow_id: str):
-    """列出某流程的 Copilot 会话（最近更新优先）。"""
+async def list_copilot_threads(flow_id: str, request: Request):
+    """列出某流程的 Copilot 会话（最近更新优先；租户视角只看本租户）。"""
     try:
-        return {"threads": flow_store.get_flow_store().list_copilot_threads(flow_id)}
+        from ..auth import tenant_scope
+    except ImportError:
+        from auth import tenant_scope  # type: ignore
+    try:
+        return {
+            "threads": flow_store.get_flow_store().list_copilot_threads(
+                flow_id, tenant_id=tenant_scope(request)
+            )
+        }
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"detail": str(exc)})

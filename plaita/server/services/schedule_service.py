@@ -83,6 +83,8 @@ def fire_schedule(
 
     message: Dict[str, Any] = {
         "type": "start",
+        # 调度定义归属租户（console 写入 HASH 值）；缺省视为 default（兼容旧值）
+        "tenant_id": schedule.get("tenant_id") or "default",
         "flow_id": schedule["flow_id"],
         "params": schedule.get("params") or {},
         "timestamp": now.isoformat(),

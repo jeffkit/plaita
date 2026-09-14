@@ -33,6 +33,12 @@ from plaita.server.execution_lease import (
     RedisExecutionLease,
     new_holder_token,
 )
+from plaita.server.tenant_context import (
+    TenantRoutingExecutionLease,
+    current_tenant,
+    reset_current_tenant,
+    set_current_tenant,
+)
 
 class FlowWorker:
     """
@@ -94,8 +100,8 @@ class FlowWorker:
         Raises:
             ValueError: 如果找不到流程定义或版本不匹配
         """
-        # 生成缓存键
-        cache_key = f"{flow_id}:{version or 'latest'}"
+        # 生成缓存键（含租户段：同名流程可共存于不同租户 namespace）
+        cache_key = f"{current_tenant()}:{flow_id}:{version or 'latest'}"
         
         # 尝试从缓存获取
         if cache_key in self.flow_definition_cache:
@@ -170,6 +176,7 @@ class FlowWorker:
                 execution_id=execution_id,
                 flow_id=flow_id,
                 flow_version=version,
+                tenant_id=current_tenant(),
                 context=result.get("context"),
                 status="running",
                 start_time=datetime.now().isoformat(),
@@ -449,6 +456,8 @@ class FlowWorker:
         try:
             task = dict(service_config)
             task.setdefault("execution_id", execution_id)
+            # 挂起服务消费后要 resume 原执行——透传租户，服务侧据此路由
+            task.setdefault("tenant_id", current_tenant())
             redis_client.rpush(queue_key, json.dumps(task, ensure_ascii=False))
             logger.info(
                 "挂起任务已投递: %s → %s (execution_id=%s)", subtype, queue_key, execution_id
@@ -502,7 +511,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             cache_size,
             cache_ttl,
             callback_handlers=callback_handlers,
-            execution_lease=execution_lease or RedisExecutionLease(redis_client),
+            execution_lease=execution_lease or TenantRoutingExecutionLease(redis_client),
             lease_ttl_seconds=lease_ttl_seconds,
         )
         self.redis_url = redis_url
@@ -574,22 +583,28 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         return self._task_queue
 
     def _dispatch_task(self, message_data: Dict[str, Any]) -> None:
-        message_type = message_data.get("type")
-        if message_type == "start":
-            self.start_flow(
-                message_data.get("flow_id"),
-                message_data.get("params"),
-                message_data.get("version"),
-            )
-        elif message_type == "resume":
-            self.resume_flow(
-                message_data.get("flow_id"),
-                message_data.get("execution_id"),
-                message_data.get("resume_type"),
-                message_data.get("data"),
-            )
-        else:
-            raise ValueError(f"unknown task type: {message_type!r}")
+        # 租户上下文：消息携带 tenant_id（缺省 = default，兼容旧生产方）；
+        # 存储路由包装器/日志 handler/租约据此选租户 namespace。
+        token = set_current_tenant(message_data.get("tenant_id"))
+        try:
+            message_type = message_data.get("type")
+            if message_type == "start":
+                self.start_flow(
+                    message_data.get("flow_id"),
+                    message_data.get("params"),
+                    message_data.get("version"),
+                )
+            elif message_type == "resume":
+                self.resume_flow(
+                    message_data.get("flow_id"),
+                    message_data.get("execution_id"),
+                    message_data.get("resume_type"),
+                    message_data.get("data"),
+                )
+            else:
+                raise ValueError(f"unknown task type: {message_type!r}")
+        finally:
+            reset_current_tenant(token)
 
     def run(self):
         """
@@ -837,17 +852,19 @@ def main():
         execution_storage = create_storage_component(
             args.execution_storage_type,
             "execution",
+            tenant_routing=True,
             **storage_kwargs
         )
-        logger.info("已创建执行状态存储: %s类型", args.execution_storage_type)
-        
+        logger.info("已创建执行状态存储: %s类型（多租户路由）", args.execution_storage_type)
+
         # 创建流程定义存储
         flow_storage = create_storage_component(
             args.flow_storage_type,
             "flow",
+            tenant_routing=True,
             **storage_kwargs
         )
-        logger.info("已创建流程定义存储: %s类型", args.flow_storage_type)
+        logger.info("已创建流程定义存储: %s类型（多租户路由）", args.flow_storage_type)
         
         # 创建事件总线（默认启用；--no-event-bus 显式关闭）
         event_bus = None

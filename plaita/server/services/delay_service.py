@@ -187,6 +187,7 @@ class DelayService(BaseExtendedService):
                 "node_id": node_id,
                 "execution_id": execution_id,
                 "flow_id": flow_id,
+                "tenant_id": task_config.get("tenant_id") or "default",
                 "trigger_type": "delay_completed",
                 "delay_ms": delay_ms,
                 "actual_trigger_timestamp": int(time.time() * 1000),
@@ -209,6 +210,7 @@ class DelayService(BaseExtendedService):
                     "node_id": task_config.get("node_id"),
                     "execution_id": task_config.get("execution_id"),
                     "flow_id": task_config.get("flow_id"),
+                    "tenant_id": task_config.get("tenant_id") or "default",
                     "trigger_type": "delay_error",
                     "error_message": str(e),
                     "success": False

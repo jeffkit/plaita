@@ -13,6 +13,19 @@
 
 memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`，且 **永不**用于 execution/flow。
 
+## 多租户键空间（2026-09 起）
+
+租户数据键按租户 namespace 隔离，规则由 `plaita/server/tenant_context.py` 单点定义：
+
+| 键族 | default / 空租户 | 其他租户 |
+|------|------------------|----------|
+| 流程定义 / 注册表 | `plaita:flow:*`、`plaita:flow_list`、`plaita:flow_versions:*` | `plaita:{tenant}:flow:*` 等 |
+| 执行状态 | `plaita:execution:{id}` | `plaita:{tenant}:execution:{id}` |
+| resume lease | `plaita:execution:lease:{id}` | `plaita:{tenant}:execution:lease:{id}` |
+| 任务队列 | `plaita:flow:queue`（平台共享，消息内带 `tenant_id`） | 同左 |
+
+兼容规则：消息缺 `tenant_id` 视为 default；default 租户沿用历史键前缀，新旧版本混跑时 default 流量不受影响，非 default 租户需 console 与 worker 双侧升级。
+
 ## 环境变量速查
 
 | 变量 | 默认 | 含义 |

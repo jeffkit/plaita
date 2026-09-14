@@ -91,12 +91,23 @@ def create_storage_component(storage_type, component_type, **kwargs):
 
         if component_type in ("execution", "flow"):
             host, port, db, password = _parse_redis_url(redis_url)
+            conn = dict(host=host, port=port, db=db, password=password)
+            # 多租户路由包装器：按 ContextVar 租户选择 namespace
+            # （default → 历史 plaita 前缀；其余 plaita:{tenant}）
+            if kwargs.get("tenant_routing"):
+                from plaita.server.tenant_context import (
+                    TenantRoutingExecutionStorage,
+                    TenantRoutingFlowStorage,
+                )
+                if component_type == "execution":
+                    return TenantRoutingExecutionStorage(**conn)
+                return TenantRoutingFlowStorage(**conn)
             if component_type == "execution":
                 from plaita.storage.redis import RedisExecutionStorage
-                return RedisExecutionStorage(host=host, port=port, db=db, password=password)
+                return RedisExecutionStorage(**conn)
             else:
                 from plaita.storage.redis import RedisFlowStorage
-                return RedisFlowStorage(host=host, port=port, db=db, password=password)
+                return RedisFlowStorage(**conn)
         elif component_type == "subscription":
             from plaita.event.redis import RedisEventSubscriptionStorage
             return RedisEventSubscriptionStorage(redis_url=redis_url, key_prefix="plaita:subscription:")

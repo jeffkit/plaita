@@ -46,3 +46,6 @@ plaita-console/backend/webDist/
 plaita-console/docker/docker-compose.override.yml
 .argusai/
 e2e-artifacts/
+
+# 个人本地用脚本/工具（不入库）
+local/

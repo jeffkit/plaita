@@ -12,8 +12,10 @@ from pydantic import BaseModel, Field
 
 try:
     from ..services import credentials_svc
+    from ..auth import tenant_scope
 except ImportError:
     from services import credentials_svc  # type: ignore
+    from auth import tenant_scope  # type: ignore
 
 router = APIRouter()
 
@@ -27,20 +29,23 @@ class CredentialSaveRequest(BaseModel):
 
 class CredentialDetail(BaseModel):
     name: str
+    tenant_id: str = ""
     type: str
     desc: str = ""
     data: Dict[str, Any]
 
 
 @router.get("/credentials")
-def list_credentials():
-    items = credentials_svc.list_credentials()
+def list_credentials(request: Request = None):
+    tenant = tenant_scope(request) if request is not None else None
+    items = credentials_svc.list_credentials(tenant_id=tenant)
     return {"credentials": items, "total": len(items)}
 
 
 @router.get("/credentials/{name}", response_model=CredentialDetail)
-def get_credential(name: str):
-    record = credentials_svc.get_credential_record(name)
+def get_credential(name: str, request: Request = None):
+    tenant = tenant_scope(request) if request is not None else None
+    record = credentials_svc.get_credential_record(name, tenant_id=tenant)
     if record is None:
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
     return CredentialDetail(**record)
@@ -48,8 +53,10 @@ def get_credential(name: str):
 
 @router.post("/credentials")
 def save_credential(req: CredentialSaveRequest, request: Request = None):
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
-        credentials_svc.save_credential(req.name, req.type, req.data, req.desc)
+        credentials_svc.save_credential(req.name, req.type, req.data, req.desc,
+                                        tenant_id=tenant)
     except credentials_svc.CredentialsDisabledError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
@@ -66,7 +73,8 @@ def save_credential(req: CredentialSaveRequest, request: Request = None):
 
 @router.delete("/credentials/{name}")
 def delete_credential(name: str, request: Request = None):
-    if not credentials_svc.delete_credential(name):
+    tenant = tenant_scope(request) if request is not None else None
+    if not credentials_svc.delete_credential(name, tenant_id=tenant):
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
     if request is not None:
         try:

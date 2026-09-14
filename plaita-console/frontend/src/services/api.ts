@@ -20,20 +20,58 @@ export function getToken(): string | null {
   return localStorage.getItem('plaita_token')
 }
 
-export function setSession(token: string, username: string, role: string): void {
+export interface MembershipInfo {
+  tenant_id: string
+  role: string
+}
+
+export function setSession(
+  token: string,
+  username: string,
+  role: string,
+  opts?: { tenantId?: string | null; platformAdmin?: boolean; memberships?: MembershipInfo[] },
+): void {
   localStorage.setItem('plaita_token', token)
   localStorage.setItem('plaita_username', username)
   localStorage.setItem('plaita_role', role)
+  localStorage.setItem('plaita_tenant', opts?.tenantId || '')
+  localStorage.setItem('plaita_platform_admin', opts?.platformAdmin ? '1' : '')
+  localStorage.setItem('plaita_memberships', JSON.stringify(opts?.memberships || []))
 }
 
 export function clearSession(): void {
   localStorage.removeItem('plaita_token')
   localStorage.removeItem('plaita_username')
   localStorage.removeItem('plaita_role')
+  localStorage.removeItem('plaita_tenant')
+  localStorage.removeItem('plaita_platform_admin')
+  localStorage.removeItem('plaita_memberships')
 }
 
 export function getRole(): string {
   return localStorage.getItem('plaita_role') || 'viewer'
+}
+
+/** 当前活跃租户（多租户成员；空串 = 平台全量视角） */
+export function getTenant(): string {
+  return localStorage.getItem('plaita_tenant') || ''
+}
+
+export function setTenant(tenantId: string, role?: string): void {
+  localStorage.setItem('plaita_tenant', tenantId || '')
+  if (role) localStorage.setItem('plaita_role', role)
+}
+
+export function isPlatformAdmin(): boolean {
+  return localStorage.getItem('plaita_platform_admin') === '1'
+}
+
+export function getMemberships(): MembershipInfo[] {
+  try {
+    return JSON.parse(localStorage.getItem('plaita_memberships') || '[]')
+  } catch {
+    return []
+  }
 }
 
 // 通用请求函数
@@ -48,6 +86,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   } else {
     const adminKey = getAdminApiKey()
     if (adminKey) headers['X-Admin-API-Key'] = adminKey
+  }
+  // 平台管理员显式声明租户上下文（普通用户服务端钉死活跃租户，带头会 403）
+  if (isPlatformAdmin() && getTenant()) {
+    headers['X-Tenant-ID'] = getTenant()
   }
 
   const response = await fetch(`${API_BASE}${url}`, {
@@ -669,23 +711,93 @@ export const api = {
 
   async login(username: string, password: string): Promise<{
     token: string; username: string; role: string; expires_at: string
+    platform_admin?: boolean; active_tenant?: string | null
+    memberships?: MembershipInfo[]
   }> {
     return request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
   },
 
-  async me(): Promise<{ actor: string; role: string }> {
+  async me(): Promise<{
+    actor: string; role: string; tenant_id: string | null; platform_admin: boolean
+  }> {
     return request('/auth/me')
+  },
+
+  async switchTenant(tenantId: string): Promise<{
+    actor: string; role: string; tenant_id: string | null; platform_admin: boolean
+  }> {
+    return request('/auth/switch-tenant', {
+      method: 'POST',
+      body: JSON.stringify({ tenant_id: tenantId }),
+    })
+  },
+
+  // ============ 租户管理（平台管理员） ============
+
+  async getTenants(): Promise<{
+    tenants: Array<{
+      id: string; name: string; status: string
+      contract_secret_id: string; member_count: number; created_at: string | null
+    }>
+  }> {
+    return request('/tenants')
+  },
+
+  async createTenant(payload: { id: string; name?: string }): Promise<{
+    id: string; contract_secret_id: string; contract_secret_key: string
+  }> {
+    return request('/tenants', { method: 'POST', body: JSON.stringify(payload) })
+  },
+
+  async setTenantStatus(tenantId: string, status: 'active' | 'disabled'): Promise<{ success: boolean }> {
+    return request(`/tenants/${encodeURIComponent(tenantId)}/status`, {
+      method: 'POST', body: JSON.stringify({ status }),
+    })
+  },
+
+  async rotateTenantSecret(tenantId: string): Promise<{
+    tenant_id: string; contract_secret_id: string; contract_secret_key: string
+  }> {
+    return request(`/tenants/${encodeURIComponent(tenantId)}/rotate-secret`, { method: 'POST' })
+  },
+
+  async deleteTenant(tenantId: string): Promise<{ success: boolean }> {
+    return request(`/tenants/${encodeURIComponent(tenantId)}`, { method: 'DELETE' })
+  },
+
+  async getTenantMembers(tenantId: string): Promise<{
+    members: Array<{ username: string; tenant_id: string; role: string }>
+  }> {
+    return request(`/tenants/${encodeURIComponent(tenantId)}/members`)
+  },
+
+  async addTenantMember(tenantId: string, username: string, role: string): Promise<{ success: boolean }> {
+    return request(`/tenants/${encodeURIComponent(tenantId)}/members`, {
+      method: 'POST', body: JSON.stringify({ username, role }),
+    })
+  },
+
+  async setTenantMemberRole(tenantId: string, username: string, role: string): Promise<{ success: boolean }> {
+    return request(`/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(username)}`, {
+      method: 'PUT', body: JSON.stringify({ username, role }),
+    })
+  },
+
+  async removeTenantMember(tenantId: string, username: string): Promise<{ success: boolean }> {
+    return request(`/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(username)}`, {
+      method: 'DELETE',
+    })
   },
 
   async logout(): Promise<{ success: boolean }> {
     return request('/auth/logout', { method: 'POST' })
   },
 
-  async getUsers(): Promise<{ users: Array<{ username: string; role: string; disabled: boolean; created_at: string }> }> {
+  async getUsers(): Promise<{ users: Array<{ username: string; role: string; platform_admin?: boolean; disabled: boolean; memberships?: MembershipInfo[]; created_at: string }> }> {
     return request('/users')
   },
 
-  async createUser(payload: { username: string; password: string; role: string }): Promise<{ success: boolean }> {
+  async createUser(payload: { username: string; password: string; role: string; platform_admin?: boolean; memberships?: MembershipInfo[] }): Promise<{ success: boolean }> {
     return request('/users', { method: 'POST', body: JSON.stringify(payload) })
   },
 

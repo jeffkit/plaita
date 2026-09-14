@@ -25,14 +25,52 @@ from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
+# 多租户：存量数据/默认租户的固定 slug（首次多租户启动时创建）
+DEFAULT_TENANT_ID = "default"
+
+
+class Tenant(Base):
+    """租户。id 为 slug（创建后不可改），contract_secret_* 为对外 HMAC 契约凭证。"""
+
+    __tablename__ = "tenants"
+
+    id = Column(String(64), primary_key=True)
+    name = Column(String(128), nullable=False, default="")
+    status = Column(String(16), nullable=False, default="active")  # active | disabled
+    contract_secret_id = Column(String(64), nullable=False, default="", unique=True, index=True)
+    contract_secret_key = Column(String(128), nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class TenantMember(Base):
+    """租户成员（用户↔租户多对多，租户内角色）。授权角色以本表为准。"""
+
+    __tablename__ = "tenant_members"
+
+    username = Column(
+        String(64),
+        ForeignKey("users.username", ondelete="CASCADE"),
+        nullable=False,
+        primary_key=True,
+    )
+    tenant_id = Column(
+        String(64),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        primary_key=True,
+    )
+    role = Column(String(16), nullable=False, default="viewer")  # admin | editor | viewer
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
 
 class FlowRecord(Base):
-    """流程记录（flow_id 维度的元信息）"""
+    """流程记录（租户内 flow_id 维度的元信息）"""
 
     __tablename__ = "flows"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    flow_id = Column(String(128), nullable=False, unique=True, index=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
+    flow_id = Column(String(128), nullable=False, index=True)
     author = Column(String(128), nullable=False, default="")
     desc = Column(Text, nullable=False, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -40,13 +78,18 @@ class FlowRecord(Base):
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "flow_id", name="uq_tenant_flow"),
+    )
+
 
 class FlowVersion(Base):
-    """流程版本（flow_id + version 唯一；草稿/发布状态机）"""
+    """流程版本（租户内 flow_id + version 唯一；草稿/发布状态机）"""
 
     __tablename__ = "flow_versions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
     flow_id = Column(
         String(128),
         ForeignKey("flows.flow_id", ondelete="CASCADE"),
@@ -62,17 +105,18 @@ class FlowVersion(Base):
     created_by = Column(String(128), nullable=False, default="")
 
     __table_args__ = (
-        UniqueConstraint("flow_id", "version", name="uq_flow_version"),
+        UniqueConstraint("tenant_id", "flow_id", "version", name="uq_tenant_flow_version"),
     )
 
 
 class NodeDescriptor(Base):
-    """节点描述（内置 + 自定义，node_type 唯一）"""
+    """节点描述（内置 + 租户自定义；租户内 node_type 唯一）"""
 
     __tablename__ = "node_descriptors"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    node_type = Column(String(128), nullable=False, unique=True, index=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
+    node_type = Column(String(128), nullable=False, index=True)
     node_name = Column(String(128), nullable=False, default="")
     category = Column(String(64), nullable=False, default="")
     schema_json = Column(Text, nullable=False, default="{}")
@@ -80,6 +124,10 @@ class NodeDescriptor(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "node_type", name="uq_tenant_node_type"),
     )
 
 
@@ -90,12 +138,14 @@ class PropertyType(Base):
     关键语义——别名只在 console 生成节点 schema_json 时**展开**为基础类型 +
     约束，运行时（Property.match）永不接触自定义类型名（未知 data_type 一律
     匹配失败），所以这里不需要任何运行时注册机制。
+    租户内 name 唯一。
     """
 
     __tablename__ = "property_types"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
+    name = Column(String(64), nullable=False, index=True)
     base_type = Column(String(32), nullable=False, default="string")
     # enum 选项与默认值存 JSON（list / 标量），读取方负责解析
     enum_json = Column(Text, nullable=False, default="[]")
@@ -104,6 +154,10 @@ class PropertyType(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_tenant_property_type"),
     )
 
 
@@ -116,6 +170,7 @@ class CopilotThread(Base):
     __tablename__ = "copilot_threads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
     thread_id = Column(String(128), nullable=False, unique=True, index=True)
     flow_id = Column(String(128), nullable=False, index=True)
     version = Column(String(64), nullable=False, default="")
@@ -137,6 +192,7 @@ class LocalExecution(Base):
     __tablename__ = "local_executions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
     execution_id = Column(String(64), nullable=False, unique=True, index=True)
     flow_id = Column(String(128), nullable=False, index=True)
     flow_version = Column(String(64), nullable=False, default="")
@@ -166,7 +222,8 @@ class Credential(Base):
     __tablename__ = "credentials"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(128), nullable=False, unique=True, index=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
+    name = Column(String(128), nullable=False, index=True)
     type = Column(String(64), nullable=False, default="generic")
     data_json = Column(Text, nullable=False)
     desc = Column(Text, nullable=False, default="")
@@ -175,12 +232,14 @@ class Credential(Base):
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_tenant_credential"),
+    )
+
 
 class User(Base):
-    """编排台用户。role ∈ admin/editor/viewer。
-
-    密码存 PBKDF2-SHA256（格式 salt$hash，stdlib 实现，无额外依赖）。
-    """
+    """编排台用户。role 为遗留全局角色（无租户上下文时回退用）；
+    授权角色以 tenant_members 为准。platform_admin 为平台级管理员。"""
 
     __tablename__ = "users"
 
@@ -188,18 +247,21 @@ class User(Base):
     username = Column(String(64), nullable=False, unique=True, index=True)
     password_hash = Column(String(256), nullable=False)
     role = Column(String(16), nullable=False, default="viewer")
+    platform_admin = Column(Boolean, nullable=False, default=False)
     disabled = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class SessionToken(Base):
-    """登录会话。只存 token 的 SHA-256，明文 token 仅在签发时返回给前端。"""
+    """登录会话。只存 token 的 SHA-256，明文 token 仅在签发时返回给前端。
+    active_tenant 为会话当前所在租户（多租户成员切换）。"""
 
     __tablename__ = "session_tokens"
 
     token_hash = Column(String(64), primary_key=True)
     username = Column(String(64), nullable=False, index=True)
     role = Column(String(16), nullable=False)
+    active_tenant = Column(String(64), nullable=True, default=None)
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -211,6 +273,7 @@ class AuditLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
     actor = Column(String(64), nullable=False, default="")
     action = Column(String(64), nullable=False, index=True)
     resource = Column(String(64), nullable=False, default="")
@@ -225,6 +288,7 @@ class Deployment(Base):
     __tablename__ = "deployments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
     flow_id = Column(String(128), nullable=False, index=True)
     version = Column(String(64), nullable=False)
     environment = Column(String(32), nullable=False, default="dev")
@@ -240,6 +304,7 @@ class LocalSchedule(Base):
     __tablename__ = "local_schedules"
 
     schedule_id = Column(String(64), primary_key=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
     name = Column(String(128), nullable=False, default="")
     flow_id = Column(String(128), nullable=False, index=True)
     version = Column(String(64), nullable=True)
@@ -276,6 +341,7 @@ class LocalLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
     execution_id = Column(String(64), nullable=True, index=True)
     level = Column(String(16), nullable=False, default="INFO")
     logger = Column(String(128), nullable=False, default="")

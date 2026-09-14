@@ -11,6 +11,11 @@ from pydantic import BaseModel, Field
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 
+try:
+    from ..auth import tenant_scope
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from auth import tenant_scope  # type: ignore
+
 router = APIRouter()
 
 
@@ -101,7 +106,8 @@ async def list_logs(
     # 本地单机模式：读 SQLite 执行日志
     local_fs, is_local = _local_store(request) if request else (None, False)
     if is_local:
-        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit)
+        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit,
+                                        tenant_id=tenant_scope(request))
         return LogListResponse(
             logs=[
                 LogEntry(
@@ -128,16 +134,27 @@ async def list_logs(
         keys = redis.keys(pattern)
     
     logs = []
-    
+    tenant = tenant_scope(request)
+    tenant_id_filter = tenant if tenant else None
+
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
-        
+
         try:
             # 从 Redis Stream 读取日志
             entries = redis.xrevrange(key_str, count=limit)
-            
+
             for entry_id, entry_data in entries:
                 try:
+                    # 多租户：日志键平台级共享，按条目内 tenant_id 过滤
+                    # （旧条目无该字段，视为 default 租户）
+                    if tenant_id_filter:
+                        entry_tenant = entry_data.get("tenant_id") or "default"
+                        if isinstance(entry_tenant, bytes):
+                            entry_tenant = entry_tenant.decode()
+                        if entry_tenant != tenant_id_filter:
+                            continue
+
                     log_entry = LogEntry(
                         timestamp=entry_data.get("timestamp", entry_id),
                         level=entry_data.get("level", "INFO"),
@@ -192,7 +209,8 @@ async def get_instance_logs(
     # 本地单机模式：instance_id 即本地执行 ID
     local_fs, is_local = _local_store(request) if request else (None, False)
     if is_local:
-        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit)
+        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit,
+                                        tenant_id=tenant_scope(request))
         if order == "asc":
             rows = list(reversed(rows))
         return LogListResponse(
@@ -273,7 +291,7 @@ async def get_log_stats(
     # 本地单机模式：统计本地执行日志
     local_fs, is_local = _local_store(request) if request else (None, False)
     if is_local:
-        summary = local_fs.local_log_stats()
+        summary = local_fs.local_log_stats(tenant_id=tenant_scope(request))
         entries = [
             LogStatsEntry(service_type=svc, level=level, count=count)
             for svc, info in summary["stats"].items()

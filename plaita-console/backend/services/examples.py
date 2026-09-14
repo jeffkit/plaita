@@ -90,15 +90,16 @@ _EXAMPLES = [
 ]
 
 
-def seed_example_flows(store: FlowStore | None = None) -> int:
-    """flows 表为空时写入示例流程（1.0.0 已发布）。返回写入数量。"""
+def seed_example_flows(store: FlowStore | None = None, tenant_id: str = "default") -> int:
+    """某租户 flows 为空时写入示例流程（1.0.0 已发布）。返回写入数量。"""
     store = store or get_flow_store()
-    if store.list_flows():
+    if store.list_flows(tenant_id):
         return 0
     created = 0
     for flow_id, desc, spec in _EXAMPLES:
         try:
-            store.ensure_flow(flow_id, author="plaita", desc=spec["desc"] or desc)
+            store.ensure_flow(flow_id, author="plaita", desc=spec["desc"] or desc,
+                              tenant_id=tenant_id)
             # 注入 flow_id：定义里的 $FLOW_ID 才能解析（否则恒为 null）
             definition = {"flow_id": flow_id, **spec["definition"]}
             store.save_flow_definition(
@@ -108,11 +109,13 @@ def seed_example_flows(store: FlowStore | None = None) -> int:
                 layout="",
                 status="draft",
                 created_by="plaita",
+                tenant_id=tenant_id,
             )
-            store.publish_version(flow_id, "1.0.0")
+            store.publish_version(flow_id, "1.0.0", tenant_id=tenant_id)
             created += 1
         except Exception as e:  # noqa: BLE001 — 单个示例失败不影响启动
             logger.warning("写入示例流程 %s 失败: %s", flow_id, e)
     if created:
-        logger.info("已写入 %d 个示例流程（hello-plaita / list-map / http-echo）", created)
+        logger.info("已为租户 %s 写入 %d 个示例流程（hello-plaita / list-map / http-echo）",
+                    tenant_id, created)
     return created

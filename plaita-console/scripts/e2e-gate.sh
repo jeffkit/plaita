@@ -10,7 +10,7 @@
 #
 # 用法：
 #   scripts/e2e-gate.sh              # 全量 10 suite
-#   scripts/e2e-gate.sh --quick      # 冒烟子集（health/executions/errors，约 1 分钟）
+#   scripts/e2e-gate.sh --quick      # 冒烟子集（health/executions/errors/tenants，约 3 分钟）
 #   scripts/e2e-gate.sh --check-prereqs   # 只查前置，不跑
 #
 # 退出码：0=绿；1=套件红；3=前置缺失。
@@ -68,8 +68,8 @@ fi
 # ---- 跑套件 -----------------------------------------------------------------
 ARGS=()
 if [[ "$MODE" == "quick" ]]; then
-  echo "[e2e-gate] quick 冒烟：health + executions + errors"
-  for s in health executions errors; do
+  echo "[e2e-gate] quick 冒烟：health + executions + errors + tenants"
+  for s in health executions errors tenants; do
     "$SCRIPT_DIR/e2e-run.sh" "$s" "$@" || exit 1
   done
   echo "[e2e-gate] QUICK PASSED ✓"

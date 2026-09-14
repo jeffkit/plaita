@@ -1,12 +1,18 @@
 import { useState } from 'react'
-import { api, setSession } from '../services/api'
+import { api, setSession, type MembershipInfo } from '../services/api'
 
 // 登录页：未持会话 token 时的全屏入口。
+// 多租户成员登录后若属于多个租户，进入租户选择步骤（单租户直进）。
 export default function Login({ onSuccess }: { onSuccess: () => void }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
+  // 租户选择态：login 拿到 memberships 后进入
+  const [pendingSession, setPendingSession] = useState<{
+    token: string; username: string; role: string
+    platformAdmin: boolean; memberships: MembershipInfo[]
+  } | null>(null)
 
   const submit = async () => {
     if (!username || !password) {
@@ -16,13 +22,69 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
     setPending(true)
     try {
       const res = await api.login(username, password)
-      setSession(res.token, res.username, res.role)
-      onSuccess()
+      const memberships = res.memberships || []
+      if ((res.platform_admin && memberships.length === 0) || memberships.length <= 1) {
+        // 单租户（或纯平台管理员）直进
+        setSession(res.token, res.username, res.role, {
+          tenantId: res.active_tenant || memberships[0]?.tenant_id || '',
+          platformAdmin: res.platform_admin,
+          memberships,
+        })
+        onSuccess()
+      } else {
+        setPendingSession({
+          token: res.token,
+          username: res.username,
+          role: res.role,
+          platformAdmin: !!res.platform_admin,
+          memberships,
+        })
+      }
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setPending(false)
     }
+  }
+
+  const pickTenant = (tenantId: string) => {
+    if (!pendingSession) return
+    const m = pendingSession.memberships.find((x) => x.tenant_id === tenantId)
+    setSession(pendingSession.token, pendingSession.username, m?.role || pendingSession.role, {
+      tenantId,
+      platformAdmin: pendingSession.platformAdmin,
+      memberships: pendingSession.memberships,
+    })
+    onSuccess()
+  }
+
+  if (pendingSession) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-surface">
+        <div className="w-80 p-6 rounded-xl bg-elevated border border-line space-y-4">
+          <div>
+            <div className="text-[15px] font-semibold tracking-tight text-ink-primary">
+              选择租户
+            </div>
+            <p className="text-caption text-ink-muted">
+              {pendingSession.username} 属于 {pendingSession.memberships.length} 个租户
+            </p>
+          </div>
+          <div className="space-y-2">
+            {pendingSession.memberships.map((m) => (
+              <button
+                key={m.tenant_id}
+                onClick={() => pickTenant(m.tenant_id)}
+                className="w-full flex items-center justify-between px-3 py-2 rounded-md border border-line hover:border-plaita-400 text-caption"
+              >
+                <span className="text-ink-primary">{m.tenant_id}</span>
+                <span className="text-ink-muted">{m.role}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (

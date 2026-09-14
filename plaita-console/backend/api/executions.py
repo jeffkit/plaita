@@ -23,6 +23,7 @@ class ExecutionInfo(BaseModel):
     flow_id: str = Field(..., description="流程 ID")
     flow_version: Optional[str] = Field(None, description="流程版本")
     status: str = Field(..., description="状态")
+    tenant_id: str = Field("", description="租户 ID（本地模式）")
     start_time: Optional[str] = Field(None, description="开始时间")
     end_time: Optional[str] = Field(None, description="结束时间")
     last_update_time: Optional[str] = Field(None, description="最后更新时间")
@@ -62,6 +63,7 @@ TASK_QUEUE_NAME = "plaita:flow:queue"
 
 try:
     from plaita.server.task_queue import enqueue_task
+    from plaita.server.tenant_context import tenant_namespace
 except ImportError:  # 平铺布局（cwd=backend）运行时
     import sys as _sys
     from pathlib import Path as _Path
@@ -69,11 +71,14 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     if _plaita_root not in _sys.path:
         _sys.path.insert(0, _plaita_root)
     from plaita.server.task_queue import enqueue_task
+    from plaita.server.tenant_context import tenant_namespace
 
 try:
     from ..services import flow_store
+    from ..auth import tenant_scope
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from services import flow_store  # type: ignore
+    from auth import tenant_scope  # type: ignore
 
 
 def get_redis(request: Request) -> Redis:
@@ -127,6 +132,47 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
     return enqueue_task(redis, TASK_QUEUE_NAME, message)
 
 
+# ---- 集群档租户键助手 ----
+
+def _exec_key(tenant: Optional[str], execution_id: str) -> str:
+    """租户上下文的执行状态键：``{ns}:execution:{id}``。"""
+    return f"{tenant_namespace(tenant)}:execution:{execution_id}"
+
+
+def _tenant_from_key(key: str) -> str:
+    """从 ``plaita[:tenant]:execution:{id}`` 解析租户（default 键无租户段）。"""
+    parts = key.split(":")
+    return parts[1] if len(parts) > 3 else "default"
+
+
+def _find_execution(
+    request: Request, redis: Redis, execution_id: str
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """按租户上下文定位执行状态。
+
+    租户视角只查本租户 namespace；平台视角（tenant=None）先查 default
+    （历史前缀），再 SCAN 各租户前缀。返回 (tenant_id, data)。
+    """
+    tenant = tenant_scope(request)
+    if tenant:
+        raw = redis.get(_exec_key(tenant, execution_id))
+        if not raw:
+            return tenant, None
+        return tenant, json.loads(raw)
+
+    raw = redis.get(_exec_key(None, execution_id))
+    if raw:
+        return "default", json.loads(raw)
+    for key in redis.scan_iter(match=f"plaita:*:execution:{execution_id}"):
+        key_str = key if isinstance(key, str) else key.decode()
+        if key_str.endswith(":dlq") or ":execution:lease:" in key_str:
+            continue
+        raw = redis.get(key_str)
+        if raw:
+            return _tenant_from_key(key_str), json.loads(raw)
+    return None, None
+
+
 # ============ API 端点 ============
 
 @router.get("/executions", response_model=ExecutionListResponse)
@@ -148,29 +194,45 @@ async def list_executions(
     """
     if (local := get_local_executor(request)) is not None:
         executions = [
-            ExecutionInfo(**info) for info in local.list_local_executions(status=status, flow_id=flow_id)
+            ExecutionInfo(**info)
+            for info in local.list_local_executions(
+                status=status, flow_id=flow_id, tenant_id=tenant_scope(request)
+            )
         ]
     else:
-        # 获取所有执行状态（SCAN 增量遍历，不阻塞 Redis；KEYS 是 O(N) 阻塞命令）
-        pattern = "plaita:execution:*"
-        keys = list(redis.scan_iter(match=pattern))
-        
+        tenant = tenant_scope(request)
+        # 租户视角只扫本租户 namespace；平台视角扫 default（历史前缀）+ 各租户
+        if tenant:
+            patterns = [f"{tenant_namespace(tenant)}:execution:*"]
+        else:
+            patterns = ["plaita:execution:*", "plaita:*:execution:*"]
+
         executions = []
-        for key in keys:
-            data = redis.get(key)
-            if data:
-                try:
-                    info = json.loads(data)
-                    
-                    # 筛选
-                    if status and info.get("status") != status:
-                        continue
-                    if flow_id and info.get("flow_id") != flow_id:
-                        continue
-                    
-                    executions.append(ExecutionInfo(**info))
-                except Exception:
+        seen = set()
+        for pattern in patterns:
+            for key in redis.scan_iter(match=pattern):
+                key_str = key if isinstance(key, str) else key.decode()
+                # 排除租约/队列等同前缀机制键
+                if ":execution:lease:" in key_str or key_str.endswith(":dlq"):
                     continue
+                if key_str in seen:
+                    continue
+                seen.add(key_str)
+                data = redis.get(key_str)
+                if data:
+                    try:
+                        info = json.loads(data)
+                        info.setdefault("tenant_id", _tenant_from_key(key_str))
+
+                        # 筛选
+                        if status and info.get("status") != status:
+                            continue
+                        if flow_id and info.get("flow_id") != flow_id:
+                            continue
+
+                        executions.append(ExecutionInfo(**info))
+                    except Exception:
+                        continue
     
     # 按开始时间排序（最新的在前）
     executions.sort(
@@ -204,20 +266,17 @@ async def get_execution(
     - **execution_id**: 执行 ID
     """
     if (local := get_local_executor(request)) is not None:
-        info = local.get_local_execution(execution_id)
+        info = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
         if info is None:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         return ExecutionInfo(**info)
 
-    key = f"plaita:execution:{execution_id}"
-    data = redis.get(key)
-    
+    _tenant, data = _find_execution(request, redis, execution_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-    
+
     try:
-        info = json.loads(data)
-        return ExecutionInfo(**info)
+        return ExecutionInfo(**data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"数据解析失败: {e}")
 
@@ -237,9 +296,11 @@ async def start_execution(
     """
     # 本地单机模式：console 进程内直接执行
     if (local := get_local_executor(http_request)) is not None:
+        tenant = tenant_scope(http_request, required=True)
         try:
             info = local.start_local_execution(
-                flow_store.get_flow_store(), request.flow_id, request.version, request.params
+                flow_store.get_flow_store(), request.flow_id, request.version,
+                request.params, tenant_id=tenant,
             )
         except LookupError as e:
             raise HTTPException(status_code=404, detail=str(e))
@@ -260,6 +321,7 @@ async def start_execution(
         "flow_id": request.flow_id,
         "version": request.version,
         "params": request.params,
+        "tenant_id": tenant_scope(http_request, required=True),
         "timestamp": datetime.now().isoformat()
     }
     
@@ -288,7 +350,7 @@ async def cancel_execution(
     """
     # 本地单机模式：标记状态（尽力而为，不中断线程）
     if (local := get_local_executor(request)) is not None:
-        if not local.cancel_local_execution(execution_id):
+        if not local.cancel_local_execution(execution_id, tenant_id=tenant_scope(request)):
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(request, "execution.cancel", execution_id)
         return {
@@ -298,15 +360,11 @@ async def cancel_execution(
             "message": "执行已取消（本地模式）",
         }
 
-    # 验证执行存在
-    key = f"plaita:execution:{execution_id}"
-    data = redis.get(key)
-    
-    if not data:
+    tenant, info = _find_execution(request, redis, execution_id)
+    if not info:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-    
+
     try:
-        info = json.loads(data)
         flow_id = info.get("flow_id")
         status = info.get("status")
     except Exception:
@@ -328,16 +386,17 @@ async def cancel_execution(
         "flow_id": flow_id,
         "execution_id": execution_id,
         "resume_type": "cancel",
+        "tenant_id": tenant or "default",
         "data": None,
         "timestamp": datetime.now().isoformat()
     }
-    
+
     _enqueue(message, redis)
 
     # 同时直接更新状态（以防 FlowWorker 不在线）
     info["status"] = "cancelled"
     info["end_time"] = datetime.now().isoformat()
-    redis.set(key, json.dumps(info))
+    redis.set(_exec_key(tenant, execution_id), json.dumps(info))
     
     _audit(request, "execution.cancel", execution_id)
     return {
@@ -361,7 +420,7 @@ async def delete_execution(
     """
     # 本地单机模式：从 SQLite 删除
     if (local := get_local_executor(request)) is not None:
-        if not local.delete_local_execution(execution_id):
+        if not local.delete_local_execution(execution_id, tenant_id=tenant_scope(request)):
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(request, "execution.delete", execution_id)
         return {
@@ -370,15 +429,14 @@ async def delete_execution(
             "message": "执行记录已删除",
         }
 
-    key = f"plaita:execution:{execution_id}"
-    
-    # 检查是否存在
-    if not redis.exists(key):
+    _tenant, _data = _find_execution(request, redis, execution_id)
+    if not _data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-    
+    key = _exec_key(_tenant, execution_id)
+
     # 删除记录
     redis.delete(key)
-    
+
     # 同时删除相关的事件通道（如果存在）
     event_key = f"plaita:execution:events:{execution_id}"
     redis.delete(event_key)
@@ -409,7 +467,8 @@ async def resume_execution(
     if (local := get_local_executor(http_request)) is not None:
         try:
             ok = local.resume_local_execution(
-                flow_store.get_flow_store(), execution_id, request.resume_type, request.data
+                flow_store.get_flow_store(), execution_id, request.resume_type,
+                request.data, tenant_id=tenant_scope(http_request),
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -424,29 +483,27 @@ async def resume_execution(
             "message": "恢复请求已受理（本地模式）",
         }
 
-    # 验证执行存在
-    key = f"plaita:execution:{execution_id}"
-    data = redis.get(key)
-    
+    # 验证执行存在（按租户上下文定位）
+    resume_tenant, data = _find_execution(http_request, redis, execution_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-    
+
     try:
-        info = json.loads(data)
-        flow_id = info.get("flow_id")
+        flow_id = data.get("flow_id")
     except Exception:
         raise HTTPException(status_code=500, detail="数据解析失败")
-    
+
     # 发送恢复消息
     message = {
         "type": "resume",
         "flow_id": flow_id,
         "execution_id": execution_id,
         "resume_type": request.resume_type,
+        "tenant_id": resume_tenant or "default",
         "data": request.data,
         "timestamp": datetime.now().isoformat()
     }
-    
+
     _enqueue(message, redis)
 
     return {
@@ -470,7 +527,7 @@ async def stream_execution(
     - 本地档：对 SQLite 执行记录做 1s 轮询，变化才推
     """
     if (local := get_local_executor(request)) is not None:
-        info = local.get_local_execution(execution_id)
+        info = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
         if info is None:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
 
@@ -479,7 +536,7 @@ async def stream_execution(
             yield {"event": "initial_state", "data": json.dumps(info, ensure_ascii=False)}
             while True:
                 await asyncio.sleep(1.0)
-                current = local.get_local_execution(execution_id)
+                current = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
                 if current is None:
                     break
                 payload = json.dumps(current, ensure_ascii=False, default=str)
@@ -493,24 +550,23 @@ async def stream_execution(
 
         return EventSourceResponse(local_event_generator())
 
-    # 验证执行存在
-    key = f"plaita:execution:{execution_id}"
-    if not redis.exists(key):
+    # 验证执行存在（按租户上下文定位）
+    _tenant, data = _find_execution(request, redis, execution_id)
+    if not data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-    
+
     async def event_generator():
         """事件生成器"""
         pubsub = redis.pubsub()
         channel = f"plaita:execution:events:{execution_id}"
         pubsub.subscribe(channel)
-        
+
         try:
             # 发送初始状态
-            data = redis.get(key)
             if data:
                 yield {
                     "event": "initial_state",
-                    "data": data
+                    "data": json.dumps(data, ensure_ascii=False, default=str)
                 }
             
             # 持续监听事件

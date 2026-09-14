@@ -11,13 +11,15 @@
 """
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
     from ..services import flow_store, node_registry_svc
+    from ..auth import tenant_scope
 except ImportError:
     from services import flow_store, node_registry_svc  # type: ignore
+    from auth import tenant_scope  # type: ignore
 
 router = APIRouter()
 
@@ -48,16 +50,18 @@ def _store() -> flow_store.FlowStore:
 
 
 @router.get("/property-types", response_model=PropertyTypeListResponse)
-def list_property_types():
-    """列出全部自定义属性类型。"""
-    out = node_registry_svc.list_property_types(_store())
+def list_property_types(request: Request = None):
+    """列出本租户自定义属性类型。"""
+    tenant: Optional[str] = tenant_scope(request) if request is not None else None
+    out = node_registry_svc.list_property_types(_store(), tenant_id=tenant)
     views = [PropertyTypeView(**t.model_dump()) for t in out]
     return PropertyTypeListResponse(types=views, total=len(views))
 
 
 @router.post("/property-types", response_model=PropertyTypeView)
-def upsert_property_type(req: UpsertPropertyTypeRequest):
-    """注册或更新自定义属性类型。"""
+def upsert_property_type(req: UpsertPropertyTypeRequest, request: Request = None):
+    """注册或更新本租户自定义属性类型。"""
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
         out = node_registry_svc.upsert_property_type(
             store=_store(),
@@ -66,6 +70,7 @@ def upsert_property_type(req: UpsertPropertyTypeRequest):
             enum_options=req.enum_options,
             default_value=req.default_value,
             desc=req.desc,
+            tenant_id=tenant,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -73,9 +78,10 @@ def upsert_property_type(req: UpsertPropertyTypeRequest):
 
 
 @router.delete("/property-types/{name}")
-def delete_property_type(name: str):
+def delete_property_type(name: str, request: Request = None):
+    tenant: Optional[str] = tenant_scope(request) if request is not None else None
     try:
-        node_registry_svc.delete_property_type(_store(), name)
+        node_registry_svc.delete_property_type(_store(), name, tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"success": True, "name": name}

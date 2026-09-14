@@ -4,6 +4,14 @@ project:
   name: plaita-console
   description: "Plaita Console 管理台 E2E 测试（argusai，集群档多进程编排）"
 
+# 关闭构建熔断器（2026-09-09）：ResilientDockerEngine 失败时吞掉全部 build_log，
+# 只留 "Build exited with code 1"，且 5 个服务连败即熔断锁死后续服务。
+# 关掉后走裸 buildImage：日志实时流，失败时 error 会带最后 30 行构建输出，
+# CI 上可直读根因；代价是失败不再被熔断短路——本套件构建量小，可接受。
+resilience:
+  circuitBreaker:
+    enabled: false
+
 # 跑法：scripts/e2e-run.sh [suite-id] [--no-build]
 # 前提：Docker、Node>=20、mcp2cli、npm i -g argusai-mcp
 # （argusai CLI 已冻结在 0.12.3，必须走 mcp2cli → argusai-mcp 路径。）
@@ -20,7 +28,7 @@ services:
   - name: redis
     build:
       # argusai services[] 每项都必须可构建，不支持直接引用 image，故包一层
-      dockerfile: plaita-console/docker/Dockerfile.redis-e2e
+      dockerfile: docker/Dockerfile.redis-e2e
       context: ..
       image: plaita-e2e-redis:latest
     container:
@@ -31,7 +39,7 @@ services:
 
   - name: console-backend
     build:
-      dockerfile: plaita-console/docker/Dockerfile.e2e
+      dockerfile: docker/Dockerfile.e2e
       context: ..
       image: plaita-console-e2e:latest
     dependsOn: [redis]
@@ -64,7 +72,7 @@ services:
   # 实测首个冷启动任务就超 3s）。DLQ 场景用 e2e-chaos-dlq.sh 的独立清道夫 worker。
   - name: flow-worker
     build:
-      dockerfile: plaita-console/docker/Dockerfile.worker-e2e
+      dockerfile: docker/Dockerfile.worker-e2e
       context: ..
       image: plaita-e2e-worker:latest
     dependsOn: [redis]
@@ -78,7 +86,7 @@ services:
   # 第二个 worker：消费组自然分摊，验证多实例租约互斥与注册可见性
   - name: flow-worker-2
     build:
-      dockerfile: plaita-console/docker/Dockerfile.worker-e2e
+      dockerfile: docker/Dockerfile.worker-e2e
       context: ..
       image: plaita-e2e-worker:latest
     dependsOn: [redis]
@@ -92,7 +100,7 @@ services:
   # 调度/外延服务 suite 需要：cron 扫描、延迟唤醒、审批实例（一容器四进程）。
   - name: ext-services
     build:
-      dockerfile: plaita-console/docker/Dockerfile.services-e2e
+      dockerfile: docker/Dockerfile.services-e2e
       context: ..
       image: plaita-e2e-services:latest
     dependsOn: [redis]
@@ -108,7 +116,7 @@ services:
   # UI 登录走真实会话鉴权（此容器不设 ALLOW_INSECURE_ADMIN）。
   - name: ui-backend
     build:
-      dockerfile: plaita-console/docker/Dockerfile.e2e
+      dockerfile: docker/Dockerfile.e2e
       context: ..
       image: plaita-console-ui-e2e:latest
       args:
@@ -172,6 +180,11 @@ tests:
     - name: 鉴权与RBAC
       id: auth
       file: tests/e2e/auth.yaml
+
+    - name: 多租户隔离
+      id: tenants
+      service: ui-backend
+      file: tests/e2e/tenants.yaml
 
     - name: 试跑（dry-run）
       id: dryrun

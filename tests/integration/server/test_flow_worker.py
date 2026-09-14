@@ -66,8 +66,8 @@ class TestFlowWorker(unittest.TestCase):
         self.assertEqual(flow.flow_id, self.test_flow_json["flow_id"])
         self.assertEqual(flow.version, self.test_flow_json["version"])
         
-        # 测试缓存功能
-        self.assertIn(f"{self.test_flow_json['flow_id']}:{self.test_flow_json['version']}", 
+        # 测试缓存功能（缓存键含租户段：多租户下同名流程按租户区分）
+        self.assertIn(f"default:{self.test_flow_json['flow_id']}:{self.test_flow_json['version']}",
                       self.flow_worker.flow_definition_cache)
         
         # 测试获取最新版本

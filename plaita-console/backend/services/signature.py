@@ -211,6 +211,12 @@ def _parse_authorization(authorization: str) -> Optional[dict]:
         return None
 
 
+def extract_secret_id(authorization: str) -> Optional[str]:
+    """从 Authorization 头提取 secret-id（多租户契约接口据此定位租户）。"""
+    parsed = _parse_authorization(authorization)
+    return parsed["secret_id"] if parsed else None
+
+
 def _validate_key_time(key_time: str, sign_time: int) -> Optional[Tuple[int, int]]:
     """校 key-time 字段结构, 返回 (kt_sign_time, sign_expire) 或 None。"""
     parts = key_time.split(";")

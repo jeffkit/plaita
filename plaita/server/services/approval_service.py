@@ -123,6 +123,7 @@ class ApprovalService(BaseExtendedService):
                     "node_id": task_config.get("node_id"),
                     "execution_id": task_config.get("execution_id"),
                     "flow_id": task_config.get("flow_id"),
+                    "tenant_id": task_config.get("tenant_id") or "default",
                     "trigger_type": "approval_completed",
                     "approval_id": approval_id,
                     "final_decision": final_decision,

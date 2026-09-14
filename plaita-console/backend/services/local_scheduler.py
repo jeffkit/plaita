@@ -45,6 +45,7 @@ _lock = threading.Lock()
 def _view(row: LocalSchedule) -> Dict[str, Any]:
     return {
         "schedule_id": row.schedule_id,
+        "tenant_id": getattr(row, "tenant_id", "") or "",
         "name": row.name,
         "flow_id": row.flow_id,
         "version": row.version,
@@ -67,6 +68,7 @@ def create_schedule(store, schedule: Dict[str, Any]) -> Dict[str, Any]:
         session.add(
             LocalSchedule(
                 schedule_id=schedule["schedule_id"],
+                tenant_id=schedule.get("tenant_id") or "",
                 name=schedule["name"],
                 flow_id=schedule["flow_id"],
                 version=schedule.get("version"),
@@ -81,11 +83,13 @@ def create_schedule(store, schedule: Dict[str, Any]) -> Dict[str, Any]:
     return get_schedule(store, schedule["schedule_id"])
 
 
-def update_schedule(store, schedule_id: str, schedule: Dict[str, Any]) -> Dict[str, Any]:
+def update_schedule(store, schedule_id: str, schedule: Dict[str, Any],
+                    tenant_id: Optional[str] = None) -> Dict[str, Any]:
     with store._session_local() as session:
-        row = session.scalars(
-            select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
-        ).first()
+        query = select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
+        if tenant_id is not None:
+            query = query.where(LocalSchedule.tenant_id == tenant_id)
+        row = session.scalars(query).first()
         if row is None:
             raise LookupError(schedule_id)
         row.name = schedule["name"]
@@ -97,28 +101,35 @@ def update_schedule(store, schedule_id: str, schedule: Dict[str, Any]) -> Dict[s
         row.next_run_at = schedule.get("next_run_at") or ""
         row.updated_at = datetime.utcnow()
         session.commit()
-    return get_schedule(store, schedule_id)
+    return get_schedule(store, schedule_id, tenant_id=tenant_id)
 
 
-def get_schedule(store, schedule_id: str) -> Optional[Dict[str, Any]]:
+def get_schedule(store, schedule_id: str,
+                 tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     with store._session_local() as session:
-        row = session.scalars(
-            select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
-        ).first()
+        query = select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
+        if tenant_id is not None:
+            query = query.where(LocalSchedule.tenant_id == tenant_id)
+        row = session.scalars(query).first()
         return _view(row) if row else None
 
 
-def list_schedules(store) -> List[Dict[str, Any]]:
+def list_schedules(store, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     with store._session_local() as session:
-        rows = session.scalars(select(LocalSchedule)).all()
+        query = select(LocalSchedule)
+        if tenant_id is not None:
+            query = query.where(LocalSchedule.tenant_id == tenant_id)
+        rows = session.scalars(query).all()
         return [_view(r) for r in rows]
 
 
-def delete_schedule(store, schedule_id: str) -> bool:
+def delete_schedule(store, schedule_id: str,
+                    tenant_id: Optional[str] = None) -> bool:
     with store._session_local() as session:
-        row = session.scalars(
-            select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
-        ).first()
+        query = select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
+        if tenant_id is not None:
+            query = query.where(LocalSchedule.tenant_id == tenant_id)
+        row = session.scalars(query).first()
         if row is None:
             return False
         session.delete(row)
@@ -139,7 +150,8 @@ def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optiona
 
     try:
         info = local_executor.start_local_execution(
-            store, schedule["flow_id"], schedule.get("version"), schedule.get("params") or {}
+            store, schedule["flow_id"], schedule.get("version"), schedule.get("params") or {},
+            tenant_id=schedule.get("tenant_id") or "",
         )
         execution_id = info["execution_id"]
     except Exception as e:  # noqa: BLE001 — 触发失败要留痕

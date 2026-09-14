@@ -34,7 +34,9 @@ console_pid() {
     cat "$PID_FILE"
     return 0
   fi
-  lsof -tiTCP:"${PLAITA_CONSOLE_PORT:-8080}" -sTCP:LISTEN 2>/dev/null | head -1
+  # lsof 未命中时返回非零，pipefail 下会把整条管道置非零，
+  # 导致 stop/restart 在 console 未运行时静默退出——这里兜底为空输出
+  lsof -tiTCP:"${PLAITA_CONSOLE_PORT:-8080}" -sTCP:LISTEN 2>/dev/null | head -1 || true
 }
 
 do_start() {
@@ -51,7 +53,9 @@ do_start() {
   echo "console 启动中 (pid $(cat "$PID_FILE"))，日志: $LOG_FILE"
   for _ in $(seq 1 20); do
     sleep 1
-    if curl -sf --max-time 2 "http://127.0.0.1:${PLAITA_CONSOLE_PORT:-8080}/api/cluster/instances" >/dev/null 2>&1; then
+    # 任何 HTTP 响应都算就绪（200/401/403…）——鉴权模式下无 key 探测会拿 401
+    code="$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PLAITA_CONSOLE_PORT:-8080}/api/cluster/instances" 2>/dev/null || true)"
+    if [ -n "$code" ] && [ "$code" != "000" ]; then
       echo "console 就绪: http://127.0.0.1:${PLAITA_CONSOLE_PORT:-8080}"
       return 0
     fi

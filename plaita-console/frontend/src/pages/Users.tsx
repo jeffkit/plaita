@@ -112,6 +112,14 @@ export default function Users() {
           >
             <div className="min-w-0 flex-1">
               <span className="font-mono text-caption text-ink-primary">{u.username}</span>
+              {(u.memberships?.length ?? 0) > 0 && (
+                <span className="ml-2 text-micro text-ink-faint">
+                  {u.memberships!.map((m) => `${m.tenant_id}:${m.role}`).join(' · ')}
+                </span>
+              )}
+              {u.platform_admin && (
+                <span className="ml-2 text-micro text-plaita-400">平台管理员</span>
+              )}
             </div>
             <select
               value={u.role}

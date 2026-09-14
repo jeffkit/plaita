@@ -97,12 +97,14 @@ def _builtin_map() -> Dict[str, NodeDescriptorOut]:
     return out
 
 
-def list_descriptors(store: Optional[FlowStore] = None) -> List[NodeDescriptorOut]:
-    """返回内置 + 自定义节点描述，按 node_type 排序。自定义覆盖同 type 的内置项。"""
+def list_descriptors(store: Optional[FlowStore] = None,
+                     tenant_id: Optional[str] = None) -> List[NodeDescriptorOut]:
+    """返回内置 + 本租户自定义节点描述，按 node_type 排序。
+    tenant_id=None（平台视角）合并全部自定义项。"""
     if store is None:
         store = get_flow_store()
     builtins = _builtin_map()
-    customs = {d.node_type: d for d in store.list_node_descriptors()}
+    customs = {d.node_type: d for d in store.list_node_descriptors(tenant_id=tenant_id)}
     # 自定义不覆盖内置（内置优先展示，自定义单独标记）；二者并列
     merged: Dict[str, NodeDescriptorOut] = dict(builtins)
     for k, v in customs.items():
@@ -122,6 +124,7 @@ def register_custom(
     node_name: str = "",
     category: str = "",
     schema_json: str = "{}",
+    tenant_id: str = "",
 ) -> NodeDescriptorOut:
     if store is None:
         store = get_flow_store()
@@ -140,15 +143,17 @@ def register_custom(
         category=category,
         schema_json=schema_json,
         is_builtin=False,
+        tenant_id=tenant_id,
     )
 
 
-def delete_custom(store: Optional[FlowStore], node_type: str) -> bool:
+def delete_custom(store: Optional[FlowStore], node_type: str,
+                  tenant_id: Optional[str] = None) -> bool:
     if store is None:
         store = get_flow_store()
     if node_type in builtin_types():
         raise ValueError(f"内置节点 {node_type} 不可删除")
-    return store.delete_node_descriptor(node_type)
+    return store.delete_node_descriptor(node_type, tenant_id=tenant_id)
 
 
 # ---- 自定义属性类型（2026-09 节点管理重设计）----
@@ -159,10 +164,11 @@ def delete_custom(store: Optional[FlowStore], node_type: str) -> bool:
 _PROPERTY_BASE_TYPES = {"string", "integer", "number", "boolean", "array", "object"}
 
 
-def list_property_types(store: Optional[FlowStore] = None) -> List:
+def list_property_types(store: Optional[FlowStore] = None,
+                        tenant_id: Optional[str] = None) -> List:
     if store is None:
         store = get_flow_store()
-    return store.list_property_types()
+    return store.list_property_types(tenant_id=tenant_id)
 
 
 def upsert_property_type(
@@ -172,6 +178,7 @@ def upsert_property_type(
     enum_options: Optional[List] = None,
     default_value=None,
     desc: str = "",
+    tenant_id: str = "",
 ):
     import json as _json
 
@@ -197,10 +204,12 @@ def upsert_property_type(
         enum_json=_json.dumps(enum_options, ensure_ascii=False),
         default_json=_json.dumps(default_value, ensure_ascii=False) if default_value is not None else "null",
         desc=desc or "",
+        tenant_id=tenant_id,
     )
 
 
-def delete_property_type(store: Optional[FlowStore], name: str) -> bool:
+def delete_property_type(store: Optional[FlowStore], name: str,
+                         tenant_id: Optional[str] = None) -> bool:
     if store is None:
         store = get_flow_store()
-    return store.delete_property_type(name)
+    return store.delete_property_type(name, tenant_id=tenant_id)

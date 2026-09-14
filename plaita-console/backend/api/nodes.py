@@ -6,15 +6,17 @@
 - DELETE /api/nodes/{node_type} 删除自定义节点描述（内置不可删）
 """
 import json
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from ..services import flow_store, node_registry_svc
+    from ..auth import tenant_scope
 except ImportError:
     from services import flow_store, node_registry_svc
+    from auth import tenant_scope  # type: ignore
 
 router = APIRouter()
 
@@ -54,16 +56,18 @@ def _store() -> flow_store.FlowStore:
 
 
 @router.get("/nodes", response_model=NodeListResponse)
-def list_nodes():
-    """列出全部可用节点描述（内置 + 自定义）。"""
-    descriptors = node_registry_svc.list_descriptors(_store())
+def list_nodes(request: Request = None):
+    """列出全部可用节点描述（内置 + 当前租户自定义）。"""
+    tenant: Optional[str] = tenant_scope(request) if request is not None else None
+    descriptors = node_registry_svc.list_descriptors(_store(), tenant_id=tenant)
     views = [NodeDescriptorView(**d.model_dump()) for d in descriptors]
     return NodeListResponse(nodes=views, total=len(views))
 
 
 @router.post("/nodes", response_model=NodeDescriptorView)
-def register_node(req: RegisterNodeRequest):
-    """注册或更新自定义节点描述。与内置 type 冲突时 400。"""
+def register_node(req: RegisterNodeRequest, request: Request = None):
+    """注册或更新本租户自定义节点描述。与内置 type 冲突时 400。"""
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
         out = node_registry_svc.register_custom(
             store=_store(),
@@ -71,6 +75,7 @@ def register_node(req: RegisterNodeRequest):
             node_name=req.node_name,
             category=req.category,
             schema_json=req.node_schema_json,
+            tenant_id=tenant,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -78,10 +83,11 @@ def register_node(req: RegisterNodeRequest):
 
 
 @router.delete("/nodes/{node_type}")
-def delete_node(node_type: str):
-    """删除自定义节点描述。内置节点不可删（400）。不存在返回 404。"""
+def delete_node(node_type: str, request: Request = None):
+    """删除本租户自定义节点描述。内置节点不可删（400）。不存在返回 404。"""
+    tenant: Optional[str] = tenant_scope(request) if request is not None else None
     try:
-        node_registry_svc.delete_custom(_store(), node_type)
+        node_registry_svc.delete_custom(_store(), node_type, tenant_id=tenant)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
@@ -89,9 +95,9 @@ def delete_node(node_type: str):
     return {"success": True, "node_type": node_type}
 
 
-def parsed_schema(node_type: str) -> dict:
+def parsed_schema(node_type: str, tenant_id: Optional[str] = None) -> dict:
     """辅助：取某节点 schema_json 并解析为 dict（供其他模块复用）。"""
-    out = node_registry_svc.list_descriptors(_store())
+    out = node_registry_svc.list_descriptors(_store(), tenant_id=tenant_id)
     for d in out:
         if d.node_type == node_type:
             try:

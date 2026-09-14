@@ -88,7 +88,7 @@ def test_local_run_list_map_with_child_trace(app: FastAPI, client: TestClient):
 
 
 def test_local_run_unpublished_rejected(app: FastAPI, client: TestClient):
-    flow_store.get_flow_store().ensure_flow("draft-flow")
+    flow_store.get_flow_store().ensure_flow("draft-flow", tenant_id="default")
     flow_store.get_flow_store().save_flow_definition(
         "draft-flow", "0.1.0", '{"nodes": []}', status="draft"
     )
@@ -125,9 +125,9 @@ APPROVAL_DEF = json.dumps({"nodes": [
 def test_approval_suspend_then_resume(app: FastAPI, client: TestClient):
     """本地分布式执行：审批事件挂起 → /resume 恢复 → 完成。"""
     store = flow_store.get_flow_store()
-    store.ensure_flow("approval-demo")
-    store.save_flow_definition("approval-demo", "1.0.0", APPROVAL_DEF, status="draft")
-    store.publish_version("approval-demo", "1.0.0")
+    store.ensure_flow("approval-demo", tenant_id="default")
+    store.save_flow_definition("approval-demo", "1.0.0", APPROVAL_DEF, status="draft", tenant_id="default")
+    store.publish_version("approval-demo", "1.0.0", tenant_id="default")
 
     r = client.post("/api/executions", json={"flow_id": "approval-demo"})
     assert r.status_code == 200

@@ -13,11 +13,13 @@ SQLite（local_executions.context_json）。
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import threading
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from plaita.core.callback import FlowCallback
@@ -38,6 +40,35 @@ logger = logging.getLogger(__name__)
 # 已启动线程表：execution_id -> Thread（进程内生命周期，仅防重复启动/恢复）
 _threads: Dict[str, threading.Thread] = {}
 _lock = threading.Lock()
+
+# ---- 租户感知的凭据文件解析 ----
+# plaita 运行时每次 get_credential 都从 PLAITA_CREDENTIALS_FILE 环境变量解析
+# 路径（进程全局）；本地档多租户并发执行时不能改 env（跨租户串文件）。
+# 这里用 ContextVar 按执行线程注入租户专属凭据文件：只在包装函数内生效，
+# 未设置时与原行为完全一致。
+_tenant_credentials_file: contextvars.ContextVar = contextvars.ContextVar(
+    "plaita_console_tenant_credentials_file", default=None
+)
+
+
+def _patch_runtime_credentials() -> None:
+    import plaita.credentials as _pc
+
+    if getattr(_pc, "_console_tenant_patched", False):
+        return
+    _orig = _pc.credentials_file
+
+    def _tenant_aware_credentials_file():
+        override = _tenant_credentials_file.get()
+        if override:
+            return Path(override)
+        return _orig()
+
+    _pc.credentials_file = _tenant_aware_credentials_file
+    _pc._console_tenant_patched = True  # type: ignore[attr-defined]
+
+
+_patch_runtime_credentials()
 
 
 class _LocalTraceCallback(FlowCallback):
@@ -110,9 +141,14 @@ def _now() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _load_definition(store: FlowStore, flow_id: str, version: Optional[str]) -> Dict[str, Any]:
-    version = version or _latest_published(store, flow_id)
-    record = store.get_version(flow_id, version)
+def _load_definition(
+    store: FlowStore,
+    flow_id: str,
+    version: Optional[str],
+    tenant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    version = version or _latest_published(store, flow_id, tenant_id)
+    record = store.get_version(flow_id, version, tenant_id=tenant_id)
     if record is None:
         raise LookupError(f"流程版本不存在: {flow_id}@{version}")
     definition = json.loads(record.definition)
@@ -127,12 +163,13 @@ def start_local_execution(
     version: Optional[str],
     params: Optional[Dict[str, Any]],
     invoker: str = "local",
+    tenant_id: str = "",
 ) -> Dict[str, Any]:
     """以本地模式启动流程：同步建档 + 后台线程以分布式策略执行。"""
-    version = version or _latest_published(store, flow_id)
+    version = version or _latest_published(store, flow_id, tenant_id)
     if version is None:
         raise ValueError(f"流程 {flow_id} 没有已发布版本，请先在编排页发布")
-    record = store.get_version(flow_id, version)
+    record = store.get_version(flow_id, version, tenant_id=tenant_id or None)
     if record is None:
         raise LookupError(f"流程版本不存在: {flow_id}@{version}")
     if record.status != "published":
@@ -150,10 +187,12 @@ def start_local_execution(
         status="running",
         input_json=json.dumps(params or {}, ensure_ascii=False),
         invoker=invoker,
+        tenant_id=tenant_id,
     )
 
     _spawn(execution_id, _run_flow,
-           store, execution_id, flow_id, version, definition, params or {}, None)
+           store, execution_id, flow_id, version, definition, params or {}, None,
+           tenant_id=tenant_id)
     return _to_info(fs.get_local_execution(execution_id))
 
 
@@ -162,15 +201,17 @@ def resume_local_execution(
     execution_id: str,
     resume_type: str,
     data: Optional[Dict[str, Any]],
+    tenant_id: Optional[str] = None,
 ) -> bool:
     """恢复挂起的执行：从 SQLite checkpoint 继续（分布式策略）。"""
-    row = fs.get_local_execution(execution_id)
+    row = fs.get_local_execution(execution_id, tenant_id=tenant_id)
     if row is None:
         return False
     if row["status"] != "suspended":
         raise ValueError(f"仅挂起状态可恢复: 当前 {row['status']}")
 
-    definition = _load_definition(store, row["flow_id"], row["flow_version"])
+    definition = _load_definition(store, row["flow_id"], row["flow_version"],
+                                  tenant_id=row.get("tenant_id") or None)
     context = row.get("context")
     if context is None:
         raise ValueError("挂起 checkpoint 缺失，无法恢复")
@@ -188,7 +229,8 @@ def resume_local_execution(
         _spawn(execution_id, _run_flow,
                store, execution_id, row["flow_id"], row["flow_version"], definition,
                {}, {"context": context, "resume_type": resume_type, "data": data},
-               initial_nodes=row.get("nodes") or [])
+               initial_nodes=row.get("nodes") or [],
+               tenant_id=row.get("tenant_id") or "")
     except RuntimeError:
         # 同执行 ID 的线程仍存活：回滚状态并拒绝，避免双线程写同一执行记录。
         fs.update_local_execution(execution_id, status="suspended")
@@ -219,11 +261,20 @@ def _run_flow(
     params: Dict[str, Any],
     resume: Optional[Dict[str, Any]],
     initial_nodes: Optional[List[Dict[str, Any]]] = None,
+    tenant_id: str = "",
 ) -> None:
     """分布式策略驱动循环（与集群档 FlowWorker._process_execution_result 对齐）。"""
-    handler = _ThreadLogHandler(execution_id, threading.get_ident())
+    handler = _ThreadLogHandler(execution_id, threading.get_ident(), tenant_id)
     root = logging.getLogger()
     root.addHandler(handler)
+    # 本线程内节点解析凭据时按租户路由凭据文件（见 _patch_runtime_credentials）
+    try:
+        from . import credentials_svc as _creds
+    except ImportError:
+        import credentials_svc as _creds  # type: ignore
+    tenant_token = _tenant_credentials_file.set(
+        str(_creds.credentials_file(tenant_id or _creds.DEFAULT_TENANT_ID))
+    )
     try:
         logger.info(
             "本地执行 %s %s（flow=%s@%s）",
@@ -291,6 +342,7 @@ def _run_flow(
             root.removeHandler(handler)
         except Exception:  # noqa: BLE001
             pass
+        _tenant_credentials_file.reset(tenant_token)
         with _lock:
             _threads.pop(execution_id, None)
 
@@ -298,10 +350,11 @@ def _run_flow(
 class _ThreadLogHandler(logging.Handler):
     """只捕获本执行线程的 logging 记录，写入 local_logs（日志页本地档数据源）。"""
 
-    def __init__(self, execution_id: str, thread_id: int):
+    def __init__(self, execution_id: str, thread_id: int, tenant_id: str = ""):
         super().__init__(level=logging.INFO)
         self._execution_id = execution_id
         self._thread_id = thread_id
+        self._tenant_id = tenant_id
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.thread != self._thread_id:
@@ -312,24 +365,35 @@ class _ThreadLogHandler(logging.Handler):
                 level=record.levelname,
                 logger_name=record.name,
                 message=record.getMessage(),
+                tenant_id=self._tenant_id,
             )
         except Exception:  # noqa: BLE001 — 日志失败不影响执行
             pass
 
 
-def _latest_published(store: FlowStore, flow_id: str) -> Optional[str]:
-    published = [v for v in store.list_versions(flow_id) if v.status == "published"]
+def _latest_published(
+    store: FlowStore, flow_id: str, tenant_id: Optional[str] = None
+) -> Optional[str]:
+    published = [
+        v
+        for v in store.list_versions(flow_id, tenant_id=tenant_id)
+        if v.status == "published"
+    ]
     return published[-1].version if published else None
 
 
-def get_local_execution(execution_id: str) -> Optional[Dict[str, Any]]:
-    return fs.get_local_execution(execution_id)
+def get_local_execution(
+    execution_id: str, tenant_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    return fs.get_local_execution(execution_id, tenant_id=tenant_id)
 
 
 def list_local_executions(
-    status: Optional[str] = None, flow_id: Optional[str] = None
+    status: Optional[str] = None,
+    flow_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    rows = fs.list_local_executions()
+    rows = fs.list_local_executions(tenant_id=tenant_id)
     out = []
     for row in rows:
         if status and row.get("status") != status:
@@ -341,8 +405,10 @@ def list_local_executions(
     return out
 
 
-def cancel_local_execution(execution_id: str) -> bool:
-    row = fs.get_local_execution(execution_id)
+def cancel_local_execution(
+    execution_id: str, tenant_id: Optional[str] = None
+) -> bool:
+    row = fs.get_local_execution(execution_id, tenant_id=tenant_id)
     if row is None:
         return False
     if row["status"] in ("running", "suspended"):
@@ -350,8 +416,10 @@ def cancel_local_execution(execution_id: str) -> bool:
     return True
 
 
-def delete_local_execution(execution_id: str) -> bool:
-    return fs.delete_local_execution(execution_id)
+def delete_local_execution(
+    execution_id: str, tenant_id: Optional[str] = None
+) -> bool:
+    return fs.delete_local_execution(execution_id, tenant_id=tenant_id)
 
 
 def _to_info(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

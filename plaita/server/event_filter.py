@@ -15,6 +15,10 @@ from redis import Redis
 from plaita.event.core import Event, EventSubscriptionStorage, EventBus
 from plaita.storage.base import ExecutionStorage
 from plaita.server.task_queue import enqueue_task
+from plaita.server.tenant_context import (
+    reset_current_tenant,
+    set_current_tenant,
+)
 
 # 获取logger
 logger = logging.getLogger("plaita.server.event_filter")
@@ -67,10 +71,18 @@ class EventFilter:
                 logger.debug("事件没有correlation_id，跳过处理: %s", event.event_id)
                 return
             
-            # 使用correlation_id作为execution_id查询执行状态
+            # 使用correlation_id作为execution_id查询执行状态。
+            # 多租户：租户取自事件数据（挂起服务透传 / console 发布时写入），
+            # 缺省 default（兼容旧事件）；执行状态经租户路由存储读取，
+            # resume 消息同样携带租户（worker 据此路由定义/状态/租约）。
             execution_id = event.correlation_id
-            state = self.execution_storage.load_execution_state(execution_id)
-            
+            event_data = event.data if isinstance(event.data, dict) else {}
+            tenant_token = set_current_tenant(event_data.get("tenant_id"))
+            try:
+                state = self.execution_storage.load_execution_state(execution_id)
+            finally:
+                reset_current_tenant(tenant_token)
+
             if not state:
                 logger.debug("找不到关联的执行状态，跳过处理: %s", execution_id)
                 return
@@ -139,6 +151,9 @@ class EventFilter:
                         "flow_id": state.flow_id,
                         "execution_id": execution_id,
                         "resume_type": "event",
+                        "tenant_id": getattr(state, "tenant_id", None)
+                        or event_data.get("tenant_id")
+                        or "default",
                         "data": {
                             "event_id": event.event_id,
                             "event_type": event.event_type,
@@ -256,13 +271,14 @@ async def main_async(args):
             "database_url": args.database_url
         }
         
-        # 创建执行状态存储
+        # 创建执行状态存储（多租户路由：按事件租户读对应 namespace）
         execution_storage = create_storage_component(
             args.execution_storage_type,
             "execution",
+            tenant_routing=True,
             **storage_kwargs
         )
-        logger.info("已创建执行状态存储: %s类型", args.execution_storage_type)
+        logger.info("已创建执行状态存储: %s类型（多租户路由）", args.execution_storage_type)
         
         # 创建事件总线（先于订阅存储：优先复用 bus 自带的 subscription_storage，
         # 避免 worker register_subscription 写入与 filter 读取落在不同后端/实例）

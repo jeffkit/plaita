@@ -34,7 +34,7 @@ def definition_hash(definition: str) -> str:
 
 
 def record(flow_id: str, version: str, environment: str, actor: str = "",
-           definition: str = "") -> None:
+           definition: str = "", tenant_id: str = "") -> None:
     from datetime import datetime
 
     try:
@@ -45,6 +45,7 @@ def record(flow_id: str, version: str, environment: str, actor: str = "",
     with store._session_local() as session:
         session.add(
             Deployment(
+                tenant_id=tenant_id,
                 flow_id=flow_id,
                 version=version,
                 environment=environment,
@@ -56,7 +57,8 @@ def record(flow_id: str, version: str, environment: str, actor: str = "",
         session.commit()
 
 
-def list_deployments(flow_id: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+def list_deployments(flow_id: Optional[str] = None, limit: int = 200,
+                     tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     try:
         from .flow_store import get_flow_store
     except ImportError:
@@ -64,11 +66,14 @@ def list_deployments(flow_id: Optional[str] = None, limit: int = 200) -> List[Di
     store = get_flow_store()
     with store._session_local() as session:
         query = select(Deployment).order_by(Deployment.created_at.desc()).limit(limit)
+        if tenant_id is not None:
+            query = query.where(Deployment.tenant_id == tenant_id)
         if flow_id:
             query = query.where(Deployment.flow_id == flow_id)
         return [
             {
                 "flow_id": r.flow_id,
+                "tenant_id": r.tenant_id,
                 "version": r.version,
                 "environment": r.environment,
                 "actor": r.actor,
@@ -79,14 +84,16 @@ def list_deployments(flow_id: Optional[str] = None, limit: int = 200) -> List[Di
         ]
 
 
-def build_promotion_package(store, flow_id: str, version: str) -> Dict[str, Any]:
+def build_promotion_package(store, flow_id: str, version: str,
+                            tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """导出晋升包：定义 + 元信息 + 指纹（跨环境 console 间晋升的载体）。"""
-    record_out = store.get_version(flow_id, version)
+    record_out = store.get_version(flow_id, version, tenant_id=tenant_id)
     if record_out is None:
         raise LookupError(f"版本不存在: {flow_id}@{version}")
     return {
         "kind": "plaita-promotion",
         "flow_id": flow_id,
+        "tenant_id": tenant_id or "",
         "version": version,
         "definition": json.loads(record_out.definition),
         "layout": record_out.layout,
@@ -98,11 +105,12 @@ def build_promotion_package(store, flow_id: str, version: str) -> Dict[str, Any]
 
 def import_promotion_package(store, package: Dict[str, Any],
                              new_version: Optional[str] = None,
-                             publish: bool = False) -> Dict[str, Any]:
+                             publish: bool = False,
+                             tenant_id: str = "") -> Dict[str, Any]:
     """导入晋升包为草稿（可选直接发布）。指纹校验失败拒绝导入。
 
     返回 {flow_id, version, status}。发布需调用方（API 层）再走 publish 以
-    复用引擎同步 + 部署记录路径。
+    复用引擎同步 + 部署记录路径。导入归属当前租户上下文（tenant_id）。
     """
     if package.get("kind") != "plaita-promotion":
         raise ValueError("不是合法的晋升包（kind 不符）")
@@ -113,7 +121,7 @@ def import_promotion_package(store, package: Dict[str, Any],
     if expected and definition_hash(definition) != expected:
         raise ValueError("定义指纹校验失败：晋升包已被修改或损坏")
 
-    store.ensure_flow(flow_id)
+    store.ensure_flow(flow_id, tenant_id=tenant_id)
     store.save_flow_definition(
         flow_id=flow_id,
         version=version,
@@ -121,6 +129,7 @@ def import_promotion_package(store, package: Dict[str, Any],
         layout=package.get("layout") or "",
         status="published" if publish else "draft",
         created_by="promotion",
+        tenant_id=tenant_id,
     )
     return {"flow_id": flow_id, "version": version,
             "status": "published" if publish else "draft"}

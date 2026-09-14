@@ -16,7 +16,11 @@ export default function Setup({ onSuccess }: { onSuccess: () => void }) {
     setPending(true)
     try {
       const res = await api.setup({ username: username.trim(), password })
-      setSession(res.token, res.username, res.role)
+      setSession(res.token, res.username, res.role, {
+        tenantId: 'default',
+        platformAdmin: true,
+        memberships: [{ tenant_id: 'default', role: 'admin' }],
+      })
       onSuccess()
     } catch (e) {
       setError((e as Error).message)

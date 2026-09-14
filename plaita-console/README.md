@@ -11,7 +11,18 @@ Plaita 流程引擎可视化管理控制台
 - **可视化流程查看器** - 图形化展示流程执行进度
 - **可视化 Flow 编排** - 浏览器内拖拽编排 Plaita 流程（节点面板 + 画布 + 配置抽屉 + 试跑），保存为带 semver 版本号的流程定义，支持草稿/发布版本管理
 - **节点管理** - 查看内置节点 schema、注册/删除自定义节点描述
-- **对外契约接口** - 暴露 `/api/flowVersion/semver/detail`（HMAC 鉴权），供 `plaita.PlaitaClient` 拉取已发布流程定义
+- **多租户** - 用户可属多个租户（成员制 + 会话内切换），流程/版本/执行/调度/凭据/自定义节点/审计按租户隔离；平台管理员跨租户管理与全量视角。本地单机档与集群档均支持（集群档经消息租户 + 键 namespace 隔离，见下方"多租户边界"）
+- **对外契约接口** - 暴露 `/api/flowVersion/semver/detail`（HMAC 鉴权），供 `plaita.PlaitaClient` 拉取已发布流程定义；支持按租户签发契约密钥（租户只能拉本租户流程），全局密钥仍兼容平台级拉取
+
+## 多租户说明
+
+- **模型**：`tenants` + `tenant_members`（用户↔租户多对多，租户内 admin/editor/viewer 角色）；`users.platform_admin` 为平台管理员（管理租户/成员，可带 `X-Tenant-ID` 头跨租户操作）。
+- **会话**：登录响应含 `memberships` 与 `active_tenant`；`POST /api/auth/switch-tenant` 切换活跃租户；前端侧边栏提供租户切换器。成员变更即吊销该用户全部会话。
+- **隔离**：流程/版本/执行/调度/凭据/自定义节点/属性类型/Copilot 会话/审计/部署记录全部携带 `tenant_id`，查询按会话租户过滤，跨租户访问即 not-found。存量库首次多租户启动时自动迁移：建 `default` 租户、回填数据、legacy admin 提升为平台管理员。
+- **租户内唯一**：`flow_id`、凭据名、自定义节点 type、属性类型名的唯一性均为租户内唯一（同名流程可共存于不同租户）。
+- **契约密钥**：每个租户一组 `contract_secret_id/contract_secret_key`（租户管理页创建/轮换，明文仅显示一次），只能拉取本租户已发布流程；全局 `PLAITA_CONSOLE_SECRET_ID/SECRET_KEY` 仍可用（平台上下文，可拉任意租户），存量集成不破坏。
+- **多租户边界（如实说明）**：集群档的租户数据（流程定义、执行状态、resume 租约）按键 namespace 隔离（`plaita:{tenant}:*`，default 租户保持历史前缀 `plaita:*` 以兼容存量数据），任务消息携带 `tenant_id`（缺省视为 default），引擎日志/调度值/订阅内嵌租户字段供 console 过滤。仍保持平台级共享的：任务队列 Stream（机制通道，租户在消息内）、事件总线存储与 pubsub（跨租户事件总线，订阅按租户过滤）、服务注册/控制通道。本地档凭据按租户导出到旁文件（`.plaita-credentials.<tenant>.json`），default 租户沿用历史文件路径。
+- **滚动升级兼容**：消息缺 `tenant_id` 按 default 处理；default 租户流量走历史键前缀——旧 worker + 新 console（或反向）混跑时 default 租户不受影响，非 default 租户需双侧升级。
 
 ## 快速开始
 

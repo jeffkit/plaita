@@ -1,12 +1,22 @@
-import { KeyRound, LogOut, UserCog } from 'lucide-react'
+import { KeyRound, LogOut, UserCog, Building2 } from 'lucide-react'
 import Credentials from './pages/Credentials'
 import Users from './pages/Users'
+import Tenants from './pages/Tenants'
 import Audit from './pages/Audit'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
-import { api, clearSession, getRole } from './services/api'
-import { createBrowserRouter, RouterProvider, NavLink, Outlet } from 'react-router-dom'
+import {
+  api,
+  clearSession,
+  getRole,
+  getTenant,
+  getMemberships,
+  isPlatformAdmin,
+  setTenant,
+} from './services/api'
+import { createBrowserRouter, RouterProvider, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   LayoutGrid,
   GitBranch,
@@ -52,7 +62,7 @@ interface NavItem {
   end?: boolean
 }
 
-const ADMIN_ONLY_PATHS = new Set(['/credentials', '/cluster', '/users', '/audit'])
+const ADMIN_ONLY_PATHS = new Set(['/credentials', '/cluster', '/users', '/audit', '/tenants'])
 
 const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
@@ -85,6 +95,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { to: '/credentials', icon: <KeyRound size={16} />, label: '凭据' },
       { to: '/users', icon: <UserCog size={16} />, label: '用户' },
+      { to: '/tenants', icon: <Building2 size={16} />, label: '租户' },
       { to: '/cluster', icon: <Server size={16} />, label: '集群管理' },
     ],
   },
@@ -113,6 +124,7 @@ const router = createBrowserRouter([
       { path: 'nodes', element: <Nodes /> },
       { path: 'credentials', element: <Credentials /> },
       { path: 'users', element: <Users /> },
+      { path: 'tenants', element: <Tenants /> },
       { path: 'audit', element: <Audit /> },
     ],
   },
@@ -180,6 +192,9 @@ function Layout() {
           <ClusterSwitcher collapsed={collapsed} placement="top" />
         </div>
 
+        {/* 租户上下文：多租户成员的当前租户切换器（平台管理员可切到任意租户/全量） */}
+        <TenantSwitcher collapsed={collapsed} />
+
         {/* 导航分组 */}
         <div className="flex-1 overflow-y-auto py-1">
           {NAV_GROUPS.map((group) => (
@@ -228,6 +243,67 @@ function Layout() {
       <main className="flex-1 overflow-auto">
         <Outlet />
       </main>
+    </div>
+  )
+}
+
+// 租户切换器：列出当前用户的全部租户成员关系；切换后清空查询缓存整页刷新。
+// 平台管理员额外提供「全量视角」选项（不带租户上下文，跨租户读）。
+function TenantSwitcher({ collapsed }: { collapsed: boolean }) {
+  const memberships = getMemberships()
+  const platformAdmin = isPlatformAdmin()
+  const current = getTenant()
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+  if (!platformAdmin && memberships.length <= 1) return null
+
+  const switchTo = async (tenantId: string) => {
+    if (tenantId === current) return
+    if (tenantId === '') {
+      // 平台管理员的「全量视角」：纯本地状态（服务端以无 X-Tenant-ID 表示）
+      setTenant('')
+    } else {
+      try {
+        const res = await api.switchTenant(tenantId)
+        setTenant(tenantId, res.role)
+      } catch {
+        setTenant(tenantId)
+      }
+    }
+    qc.clear()
+    navigate('/')
+    window.location.reload()
+  }
+
+  const options = memberships.map((m) => ({ id: m.tenant_id, role: m.role }))
+
+  return (
+    <div className="p-2 border-b border-line">
+      {collapsed ? (
+        <div
+          className="flex justify-center py-1.5 text-micro text-ink-faint"
+          title={`租户: ${current || '全量'}`}
+        >
+          <Building2 size={14} />
+        </div>
+      ) : (
+        <select
+          value={current}
+          onChange={(e) => switchTo(e.target.value)}
+          className="input w-full text-caption py-1.5"
+          title="切换租户"
+        >
+          {platformAdmin && <option value="">全量视角（平台）</option>}
+          {options.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.id}（{m.role}）
+            </option>
+          ))}
+          {current && !options.some((m) => m.id === current) && (
+            <option value={current}>{current}</option>
+          )}
+        </select>
+      )}
     </div>
   )
 }

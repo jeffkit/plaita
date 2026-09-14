@@ -36,9 +36,9 @@ GOOD_DEF = json.dumps({"nodes": [
 def env(tmp_path, monkeypatch):
     flow_store.init_engine(f"sqlite:///{tmp_path / 'sched.db'}")
     store = flow_store.get_flow_store()
-    store.ensure_flow("hello")
-    store.save_flow_definition("hello", "1.0.0", GOOD_DEF, status="draft")
-    store.publish_version("hello", "1.0.0")
+    store.ensure_flow("hello", tenant_id="default")
+    store.save_flow_definition("hello", "1.0.0", GOOD_DEF, status="draft", tenant_id="default")
+    store.publish_version("hello", "1.0.0", tenant_id="default")
 
     app = FastAPI()
     app.state.redis = None

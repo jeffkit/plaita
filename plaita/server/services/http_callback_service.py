@@ -95,6 +95,7 @@ class HttpCallbackService(BaseExtendedService):
                 "node_id": task_config.get("node_id"),
                 "execution_id": task_config.get("execution_id"),
                 "flow_id": task_config.get("flow_id"),
+                "tenant_id": task_config.get("tenant_id") or "default",
                 "trigger_type": "http_callback",
                 "callback_path": path,
                 "request_data": request_data,

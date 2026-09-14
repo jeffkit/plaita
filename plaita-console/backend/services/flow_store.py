@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -20,6 +20,7 @@ try:
     from ..models.flow import (
     Base,
     CopilotThread,
+    DEFAULT_TENANT_ID,
     FlowRecord,
     FlowVersion,
     LocalExecution,
@@ -28,11 +29,15 @@ try:
     LocalScheduleFire,
     NodeDescriptor,
     PropertyType,
+    Tenant,
+    TenantMember,
+    User,
 )
 except ImportError:
     from models.flow import (  # type: ignore
     Base,
     CopilotThread,
+    DEFAULT_TENANT_ID,
     FlowRecord,
     FlowVersion,
     LocalExecution,
@@ -41,6 +46,9 @@ except ImportError:
     LocalScheduleFire,
     NodeDescriptor,
     PropertyType,
+    Tenant,
+    TenantMember,
+    User,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +60,7 @@ class FlowSummary(BaseModel):
     """流程摘要（列表项）"""
 
     flow_id: str
+    tenant_id: str = ""
     author: str = ""
     desc: str = ""
     created_at: Optional[datetime] = None
@@ -122,25 +131,43 @@ class FlowStore:
 
     # ---- flow ----
 
-    def ensure_flow(self, flow_id: str, author: str = "", desc: str = "") -> FlowRecord:
+    def ensure_flow(
+        self, flow_id: str, author: str = "", desc: str = "", tenant_id: str = ""
+    ) -> FlowRecord:
         """确保 flow 记录存在，不存在则创建。返回 ORM 记录。"""
         with self._session_local() as session:  # type: Session
             record = session.scalars(
-                select(FlowRecord).where(FlowRecord.flow_id == flow_id)
+                select(FlowRecord).where(
+                    FlowRecord.tenant_id == tenant_id, FlowRecord.flow_id == flow_id
+                )
             ).first()
             if record is None:
-                record = FlowRecord(flow_id=flow_id, author=author, desc=desc)
+                record = FlowRecord(
+                    tenant_id=tenant_id, flow_id=flow_id, author=author, desc=desc
+                )
                 session.add(record)
                 session.commit()
                 session.refresh(record)
             return record
 
-    def list_flows(self) -> List[FlowSummary]:
+    @staticmethod
+    def _tenant_filter(model, tenant_id: Optional[str]):
+        """租户过滤条件：None=平台全量（跨租户读），str=限定租户。"""
+        if tenant_id is None:
+            return True
+        return model.tenant_id == tenant_id
+
+    def list_flows(self, tenant_id: Optional[str] = None) -> List[FlowSummary]:
         with self._session_local() as session:
-            rows = session.scalars(select(FlowRecord).order_by(FlowRecord.updated_at.desc())).all()
+            rows = session.scalars(
+                select(FlowRecord)
+                .where(self._tenant_filter(FlowRecord, tenant_id))
+                .order_by(FlowRecord.updated_at.desc())
+            ).all()
             return [
                 FlowSummary(
                     flow_id=r.flow_id,
+                    tenant_id=r.tenant_id,
                     author=r.author,
                     desc=r.desc,
                     created_at=r.created_at,
@@ -149,21 +176,32 @@ class FlowStore:
                 for r in rows
             ]
 
-    def get_flow_record(self, flow_id: str) -> Optional[FlowRecord]:
+    def get_flow_record(
+        self, flow_id: str, tenant_id: Optional[str] = None
+    ) -> Optional[FlowRecord]:
         with self._session_local() as session:
             return session.scalars(
-                select(FlowRecord).where(FlowRecord.flow_id == flow_id)
+                select(FlowRecord).where(
+                    self._tenant_filter(FlowRecord, tenant_id),
+                    FlowRecord.flow_id == flow_id,
+                )
             ).first()
 
-    def create_flow(self, flow_id: str, author: str = "", desc: str = "") -> FlowRecord:
-        """新建 flow 记录，已存在则抛 ValueError。"""
+    def create_flow(
+        self, flow_id: str, author: str = "", desc: str = "", tenant_id: str = ""
+    ) -> FlowRecord:
+        """新建 flow 记录（租户内唯一），已存在则抛 ValueError。"""
         with self._session_local() as session:
             existing = session.scalars(
-                select(FlowRecord).where(FlowRecord.flow_id == flow_id)
+                select(FlowRecord).where(
+                    FlowRecord.tenant_id == tenant_id, FlowRecord.flow_id == flow_id
+                )
             ).first()
             if existing is not None:
                 raise ValueError(f"流程已存在: {flow_id}")
-            record = FlowRecord(flow_id=flow_id, author=author, desc=desc)
+            record = FlowRecord(
+                tenant_id=tenant_id, flow_id=flow_id, author=author, desc=desc
+            )
             session.add(record)
             try:
                 session.commit()
@@ -173,11 +211,14 @@ class FlowStore:
             session.refresh(record)
             return record
 
-    def delete_flow(self, flow_id: str) -> bool:
+    def delete_flow(self, flow_id: str, tenant_id: Optional[str] = None) -> bool:
         """删除 flow 及其全部版本（级联）。不存在抛 LookupError。"""
         with self._session_local() as session:
             record = session.scalars(
-                select(FlowRecord).where(FlowRecord.flow_id == flow_id)
+                select(FlowRecord).where(
+                    self._tenant_filter(FlowRecord, tenant_id),
+                    FlowRecord.flow_id == flow_id,
+                )
             ).first()
             if record is None:
                 raise LookupError(f"流程不存在: {flow_id}")
@@ -195,13 +236,16 @@ class FlowStore:
         layout: str = "",
         status: str = "draft",
         created_by: str = "",
+        tenant_id: str = "",
     ) -> SaveFlowDefinitionResult:
         """保存（草稿）版本。已存在的 published 版本不可覆盖。"""
-        self.ensure_flow(flow_id)
+        self.ensure_flow(flow_id, tenant_id=tenant_id)
         with self._session_local() as session:
             existing = session.scalars(
                 select(FlowVersion).where(
-                    FlowVersion.flow_id == flow_id, FlowVersion.version == version
+                    FlowVersion.tenant_id == tenant_id,
+                    FlowVersion.flow_id == flow_id,
+                    FlowVersion.version == version,
                 )
             ).first()
             if existing is not None:
@@ -217,6 +261,7 @@ class FlowStore:
                     flow_id=flow_id, version=version, status=existing.status
                 )
             row = FlowVersion(
+                tenant_id=tenant_id,
                 flow_id=flow_id,
                 version=version,
                 status=status,
@@ -232,53 +277,45 @@ class FlowStore:
                 raise ValueError(f"版本 {flow_id}@{version} 已存在") from e
             return SaveFlowDefinitionResult(flow_id=flow_id, version=version, status=status)
 
-    def get_version(self, flow_id: str, version: str) -> Optional[FlowVersionOut]:
+    def get_version(
+        self, flow_id: str, version: str, tenant_id: Optional[str] = None
+    ) -> Optional[FlowVersionOut]:
         with self._session_local() as session:
             row = session.scalars(
                 select(FlowVersion).where(
-                    FlowVersion.flow_id == flow_id, FlowVersion.version == version
+                    self._tenant_filter(FlowVersion, tenant_id),
+                    FlowVersion.flow_id == flow_id,
+                    FlowVersion.version == version,
                 )
             ).first()
             if row is None:
                 return None
-            return FlowVersionOut(
-                flow_id=row.flow_id,
-                version=row.version,
-                status=row.status,
-                definition=row.definition,
-                layout=row.layout,
-                created_at=row.created_at,
-                published_at=row.published_at,
-                created_by=row.created_by,
-            )
+            return self._version_to_out(row)
 
-    def list_versions(self, flow_id: str) -> List[FlowVersionOut]:
+    def list_versions(
+        self, flow_id: str, tenant_id: Optional[str] = None
+    ) -> List[FlowVersionOut]:
         with self._session_local() as session:
             rows = session.scalars(
                 select(FlowVersion)
-                .where(FlowVersion.flow_id == flow_id)
+                .where(
+                    self._tenant_filter(FlowVersion, tenant_id),
+                    FlowVersion.flow_id == flow_id,
+                )
                 .order_by(FlowVersion.created_at.asc())
             ).all()
-            return [
-                FlowVersionOut(
-                    flow_id=r.flow_id,
-                    version=r.version,
-                    status=r.status,
-                    definition=r.definition,
-                    layout=r.layout,
-                    created_at=r.created_at,
-                    published_at=r.published_at,
-                    created_by=r.created_by,
-                )
-                for r in rows
-            ]
+            return [self._version_to_out(r) for r in rows]
 
-    def publish_version(self, flow_id: str, version: str) -> FlowVersionOut:
+    def publish_version(
+        self, flow_id: str, version: str, tenant_id: Optional[str] = None
+    ) -> FlowVersionOut:
         """发布版本：draft → published。已发布则幂等返回。不存在则 LookupError。"""
         with self._session_local() as session:
             row = session.scalars(
                 select(FlowVersion).where(
-                    FlowVersion.flow_id == flow_id, FlowVersion.version == version
+                    self._tenant_filter(FlowVersion, tenant_id),
+                    FlowVersion.flow_id == flow_id,
+                    FlowVersion.version == version,
                 )
             ).first()
             if row is None:
@@ -288,22 +325,17 @@ class FlowStore:
                 row.published_at = datetime.utcnow()
                 session.commit()
                 session.refresh(row)
-            return FlowVersionOut(
-                flow_id=row.flow_id,
-                version=row.version,
-                status=row.status,
-                definition=row.definition,
-                layout=row.layout,
-                created_at=row.created_at,
-                published_at=row.published_at,
-                created_by=row.created_by,
-            )
+            return self._version_to_out(row)
 
-    def delete_version(self, flow_id: str, version: str) -> bool:
+    def delete_version(
+        self, flow_id: str, version: str, tenant_id: Optional[str] = None
+    ) -> bool:
         with self._session_local() as session:
             row = session.scalars(
                 select(FlowVersion).where(
-                    FlowVersion.flow_id == flow_id, FlowVersion.version == version
+                    self._tenant_filter(FlowVersion, tenant_id),
+                    FlowVersion.flow_id == flow_id,
+                    FlowVersion.version == version,
                 )
             ).first()
             if row is None:
@@ -312,19 +344,39 @@ class FlowStore:
             session.commit()
             return True
 
+    @staticmethod
+    def _version_to_out(row: FlowVersion) -> FlowVersionOut:
+        return FlowVersionOut(
+            flow_id=row.flow_id,
+            version=row.version,
+            status=row.status,
+            definition=row.definition,
+            layout=row.layout,
+            created_at=row.created_at,
+            published_at=row.published_at,
+            created_by=row.created_by,
+        )
+
     # ---- node descriptors ----
 
-    def list_node_descriptors(self) -> List[NodeDescriptorOut]:
+    def list_node_descriptors(self, tenant_id: Optional[str] = None) -> List[NodeDescriptorOut]:
         with self._session_local() as session:
             rows = session.scalars(
-                select(NodeDescriptor).order_by(NodeDescriptor.node_type.asc())
+                select(NodeDescriptor)
+                .where(self._tenant_filter(NodeDescriptor, tenant_id))
+                .order_by(NodeDescriptor.node_type.asc())
             ).all()
             return [self._descriptor_to_out(r) for r in rows]
 
-    def get_node_descriptor(self, node_type: str) -> Optional[NodeDescriptorOut]:
+    def get_node_descriptor(
+        self, node_type: str, tenant_id: Optional[str] = None
+    ) -> Optional[NodeDescriptorOut]:
         with self._session_local() as session:
             row = session.scalars(
-                select(NodeDescriptor).where(NodeDescriptor.node_type == node_type)
+                select(NodeDescriptor).where(
+                    self._tenant_filter(NodeDescriptor, tenant_id),
+                    NodeDescriptor.node_type == node_type,
+                )
             ).first()
             return self._descriptor_to_out(row) if row else None
 
@@ -335,14 +387,19 @@ class FlowStore:
         category: str = "",
         schema_json: str = "{}",
         is_builtin: bool = False,
+        tenant_id: str = "",
     ) -> NodeDescriptorOut:
-        """插入或更新节点描述。"""
+        """插入或更新租户内节点描述。"""
         with self._session_local() as session:
             row = session.scalars(
-                select(NodeDescriptor).where(NodeDescriptor.node_type == node_type)
+                select(NodeDescriptor).where(
+                    NodeDescriptor.tenant_id == tenant_id,
+                    NodeDescriptor.node_type == node_type,
+                )
             ).first()
             if row is None:
                 row = NodeDescriptor(
+                    tenant_id=tenant_id,
                     node_type=node_type,
                     node_name=node_name,
                     category=category,
@@ -373,6 +430,7 @@ class FlowStore:
         version: str = "",
         title: str = "",
         bump_message: bool = False,
+        tenant_id: str = "",
     ) -> None:
         """记录/更新 Copilot 会话与流程的关联（不存在则创建）。"""
         from datetime import datetime
@@ -383,7 +441,11 @@ class FlowStore:
             ).first()
             if record is None:
                 record = CopilotThread(
-                    thread_id=thread_id, flow_id=flow_id, version=version, title=title
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    flow_id=flow_id,
+                    version=version,
+                    title=title,
                 )
                 session.add(record)
             else:
@@ -397,12 +459,17 @@ class FlowStore:
             record.updated_at = datetime.utcnow()
             session.commit()
 
-    def list_copilot_threads(self, flow_id: str) -> List[Dict]:
+    def list_copilot_threads(
+        self, flow_id: str, tenant_id: Optional[str] = None
+    ) -> List[Dict]:
         """列出某流程的 Copilot 会话（最近更新优先）。"""
         with self._session_local() as session:  # type: Session
             records = session.scalars(
                 select(CopilotThread)
-                .where(CopilotThread.flow_id == flow_id)
+                .where(
+                    self._tenant_filter(CopilotThread, tenant_id),
+                    CopilotThread.flow_id == flow_id,
+                )
                 .order_by(CopilotThread.updated_at.desc())
             ).all()
             return [
@@ -417,10 +484,15 @@ class FlowStore:
                 for r in records
             ]
 
-    def delete_node_descriptor(self, node_type: str) -> bool:
+    def delete_node_descriptor(
+        self, node_type: str, tenant_id: Optional[str] = None
+    ) -> bool:
         with self._session_local() as session:
             row = session.scalars(
-                select(NodeDescriptor).where(NodeDescriptor.node_type == node_type)
+                select(NodeDescriptor).where(
+                    self._tenant_filter(NodeDescriptor, tenant_id),
+                    NodeDescriptor.node_type == node_type,
+                )
             ).first()
             if row is None:
                 raise LookupError(f"节点描述不存在: {node_type}")
@@ -440,9 +512,13 @@ class FlowStore:
 
     # ---- property types（自定义属性类型，2026-09 节点管理重设计）----
 
-    def list_property_types(self) -> List[PropertyTypeOut]:
+    def list_property_types(self, tenant_id: Optional[str] = None) -> List[PropertyTypeOut]:
         with self._session_local() as session:
-            rows = session.scalars(select(PropertyType).order_by(PropertyType.name.asc())).all()
+            rows = session.scalars(
+                select(PropertyType)
+                .where(self._tenant_filter(PropertyType, tenant_id))
+                .order_by(PropertyType.name.asc())
+            ).all()
             return [self._property_type_to_out(r) for r in rows]
 
     def upsert_property_type(
@@ -452,14 +528,18 @@ class FlowStore:
         enum_json: str = "[]",
         default_json: str = "null",
         desc: str = "",
+        tenant_id: str = "",
     ) -> PropertyTypeOut:
-        """插入或更新自定义属性类型（name 唯一）。"""
+        """插入或更新租户内自定义属性类型。"""
         with self._session_local() as session:
             row = session.scalars(
-                select(PropertyType).where(PropertyType.name == name)
+                select(PropertyType).where(
+                    PropertyType.tenant_id == tenant_id, PropertyType.name == name
+                )
             ).first()
             if row is None:
                 row = PropertyType(
+                    tenant_id=tenant_id,
                     name=name,
                     base_type=base_type,
                     enum_json=enum_json,
@@ -476,9 +556,14 @@ class FlowStore:
             session.refresh(row)
             return self._property_type_to_out(row)
 
-    def delete_property_type(self, name: str) -> bool:
+    def delete_property_type(self, name: str, tenant_id: Optional[str] = None) -> bool:
         with self._session_local() as session:
-            row = session.scalars(select(PropertyType).where(PropertyType.name == name)).first()
+            row = session.scalars(
+                select(PropertyType).where(
+                    self._tenant_filter(PropertyType, tenant_id),
+                    PropertyType.name == name,
+                )
+            ).first()
             if row is None:
                 raise LookupError(f"属性类型不存在: {name}")
             session.delete(row)
@@ -513,12 +598,14 @@ def insert_local_execution(
     status: str = "running",
     input_json: str = "{}",
     invoker: str = "local",
+    tenant_id: str = "",
 ) -> None:
     """新建本地执行记录。"""
     store = get_flow_store()
     with store._session_local() as session:
         session.add(
             LocalExecution(
+                tenant_id=tenant_id,
                 execution_id=execution_id,
                 flow_id=flow_id,
                 flow_version=flow_version,
@@ -588,6 +675,7 @@ def finish_local_execution(
 def _local_row_to_dict(row: LocalExecution) -> dict:
     return {
         "execution_id": row.execution_id,
+        "tenant_id": getattr(row, "tenant_id", "") or "",
         "flow_id": row.flow_id,
         "flow_version": row.flow_version,
         "status": row.status,
@@ -612,28 +700,42 @@ def _loads_or_none(text: Optional[str]) -> Any:
         return None
 
 
-def get_local_execution(execution_id: str) -> Optional[dict]:
+def get_local_execution(
+    execution_id: str, tenant_id: Optional[str] = None
+) -> Optional[dict]:
     """取本地执行详情（ExecutionInfo 兼容结构 + nodes/input/output）。"""
     store = get_flow_store()
     with store._session_local() as session:
         row = session.scalars(
-            select(LocalExecution).where(LocalExecution.execution_id == execution_id)
+            select(LocalExecution).where(
+                FlowStore._tenant_filter(LocalExecution, tenant_id),
+                LocalExecution.execution_id == execution_id,
+            )
         ).first()
         return _local_row_to_dict(row) if row else None
 
 
-def list_local_executions() -> List[dict]:
+def list_local_executions(tenant_id: Optional[str] = None) -> List[dict]:
     store = get_flow_store()
     with store._session_local() as session:
-        rows = session.scalars(select(LocalExecution)).all()
+        rows = session.scalars(
+            select(LocalExecution).where(
+                FlowStore._tenant_filter(LocalExecution, tenant_id)
+            )
+        ).all()
         return [_local_row_to_dict(r) for r in rows]
 
 
-def delete_local_execution(execution_id: str) -> bool:
+def delete_local_execution(
+    execution_id: str, tenant_id: Optional[str] = None
+) -> bool:
     store = get_flow_store()
     with store._session_local() as session:
         row = session.scalars(
-            select(LocalExecution).where(LocalExecution.execution_id == execution_id)
+            select(LocalExecution).where(
+                FlowStore._tenant_filter(LocalExecution, tenant_id),
+                LocalExecution.execution_id == execution_id,
+            )
         ).first()
         if row is None:
             return False
@@ -643,6 +745,26 @@ def delete_local_execution(execution_id: str) -> bool:
 
 
 # ============ 初始化辅助 ============
+
+# 需要补 tenant_id 列的表（唯一约束无需变更，ADD COLUMN 即可）
+_TENANT_ADDCOLUMN_TABLES = (
+    "audit_logs",
+    "copilot_threads",
+    "deployments",
+    "local_executions",
+    "local_logs",
+    "local_schedules",
+)
+# 唯一约束必须改为「租户内唯一」的表：SQLite 改约束要重建表
+# （备份 → 删 → create_all 重建新 schema → 回填数据 → 删备份）
+_TENANT_REBUILD_TABLES = (
+    "credentials",
+    "flow_versions",
+    "flows",
+    "node_descriptors",
+    "property_types",
+)
+
 
 def init_engine(db_url: str) -> Engine:
     """创建/替换全局引擎并建表。返回引擎实例。"""
@@ -655,11 +777,118 @@ def init_engine(db_url: str) -> Engine:
 
 
 def create_all() -> None:
-    """在当前引擎上创建所有表。"""
+    """在当前引擎上创建所有表（含多租户 schema 迁移）。"""
     if _engine is None:
         raise RuntimeError("引擎未初始化，请先调用 init_engine()")
+    _migrate_tenant_schema()
     Base.metadata.create_all(_engine)
     _migrate_sqlite_columns()
+
+
+def _sqlite_columns(conn, table: str) -> list[str]:
+    from sqlalchemy import text as _text
+
+    return [r[1] for r in conn.execute(_text(f"PRAGMA table_info({table})")).fetchall()]
+
+
+def _migrate_tenant_schema() -> None:
+    """多租户 schema 迁移（仅 SQLite；幂等，以 tenant_id 列存在与否为判据）。
+
+    - 5 张全局唯一约束表：旧形态（无 tenant_id 列）→ 备份/删除，交由
+      create_all 按新 schema（租户内唯一）重建后回填；
+    - 其余表 + users/session_tokens：直接 ADD COLUMN。
+    """
+    if _engine is None or _engine.url.get_backend_name() != "sqlite":
+        return
+    from sqlalchemy import text as _text
+
+    rebuild: list[str] = []
+    with _engine.begin() as conn:
+        for table in _TENANT_REBUILD_TABLES:
+            cols = _sqlite_columns(conn, table)
+            if not cols or "tenant_id" in cols:
+                continue  # 新库由 create_all 直接建全；或已迁移
+            conn.execute(_text(f"CREATE TABLE {table}_mig_old AS SELECT * FROM {table}"))
+            conn.execute(_text(f"DROP TABLE {table}"))
+            rebuild.append(table)
+        for table in _TENANT_ADDCOLUMN_TABLES:
+            cols = _sqlite_columns(conn, table)
+            if not cols or "tenant_id" in cols:
+                continue
+            conn.execute(_text(f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''"))
+        for table, col, ddl in (
+            ("users", "platform_admin", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("session_tokens", "active_tenant", "TEXT NULL"),
+        ):
+            cols = _sqlite_columns(conn, table)
+            if cols and col not in cols:
+                conn.execute(_text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+        if rebuild:
+            # 重建出的表由 create_all 补齐索引/约束
+            Base.metadata.create_all(_engine)
+            for table in rebuild:
+                old = f"{table}_mig_old"
+                cols = _sqlite_columns(conn, old)
+                col_list = ", ".join(cols)
+                conn.execute(
+                    _text(
+                        f"INSERT INTO {table} ({col_list}, tenant_id) "
+                        f"SELECT {col_list}, '{DEFAULT_TENANT_ID}' FROM {old}"
+                    )
+                )
+                conn.execute(_text(f"DROP TABLE {old}"))
+    if rebuild:
+        logger.info("多租户迁移：重建表 %s，存量数据归入租户 '%s'", ",".join(rebuild), DEFAULT_TENANT_ID)
+
+
+def ensure_tenant_bootstrap() -> None:
+    """多租户启动引导（幂等，多租户首次启动时把存量数据收编进 default 租户）。
+
+    - default 租户不存在则创建；
+    - 各租户域表中 tenant_id='' 的存量行归入 default；
+    - 无任何 membership 的非平台管理员补 membership(default, users.role)；
+    - 首次引导（tenants 表为空）时，既有全局 admin 提升为 platform_admin。
+    """
+    if _engine is None:
+        raise RuntimeError("引擎未初始化，请先调用 init_engine()")
+    with _SessionLocal() as session:  # type: Session
+        first_boot = session.query(Tenant).count() == 0
+        if first_boot:
+            session.add(Tenant(id=DEFAULT_TENANT_ID, name="默认租户", status="active"))
+        elif session.query(Tenant).filter(Tenant.id == DEFAULT_TENANT_ID).count() == 0:
+            session.add(Tenant(id=DEFAULT_TENANT_ID, name="默认租户", status="active"))
+
+        with _engine.begin() as conn:
+            for table in _TENANT_ADDCOLUMN_TABLES + _TENANT_REBUILD_TABLES:
+                cols = _sqlite_columns(conn, table)
+                if cols and "tenant_id" in cols:
+                    conn.execute(
+                        text(
+                            f"UPDATE {table} SET tenant_id = '{DEFAULT_TENANT_ID}' "
+                            f"WHERE tenant_id = ''"
+                        )
+                    )
+
+        # 成员回填（先于平台管理员提升：legacy admin 也要拿到 default 成员资格）
+        users = session.query(User).all()
+        existing = {
+            m.username
+            for m in session.query(TenantMember).filter(TenantMember.tenant_id == DEFAULT_TENANT_ID)
+        }
+        for user in users:
+            if user.platform_admin or user.username in existing:
+                continue
+            session.add(
+                TenantMember(
+                    username=user.username, tenant_id=DEFAULT_TENANT_ID, role=user.role
+                )
+            )
+        if first_boot:
+            # legacy 全局 admin 提升为平台管理员（首次多租户启动一次性执行）
+            session.query(User).filter(User.role == "admin").update(
+                {User.platform_admin: True}
+            )
+        session.commit()
 
 
 def _migrate_sqlite_columns() -> None:
@@ -708,12 +937,19 @@ def parse_layout(layout: str) -> dict:
 
 # ============ 本地档调度 / 触发历史 / 日志 ============
 
-def insert_local_log(execution_id: str, level: str, logger_name: str, message: str) -> None:
+def insert_local_log(
+    execution_id: str,
+    level: str,
+    logger_name: str,
+    message: str,
+    tenant_id: str = "",
+) -> None:
     """写入一条本地执行日志（由 _ThreadLogHandler 高频调用，单行提交可接受）。"""
     store = get_flow_store()
     with store._session_local() as session:
         session.add(
             LocalLog(
+                tenant_id=tenant_id,
                 execution_id=execution_id,
                 level=level,
                 logger=logger_name,
@@ -723,10 +959,20 @@ def insert_local_log(execution_id: str, level: str, logger_name: str, message: s
         session.commit()
 
 
-def list_local_logs(level: str = None, execution_id: str = None, limit: int = 200) -> list:
+def list_local_logs(
+    level: str = None,
+    execution_id: str = None,
+    limit: int = 200,
+    tenant_id: Optional[str] = None,
+) -> list:
     store = get_flow_store()
     with store._session_local() as session:
-        query = select(LocalLog).order_by(LocalLog.ts.desc()).limit(max(1, min(1000, limit)))
+        query = (
+            select(LocalLog)
+            .where(FlowStore._tenant_filter(LocalLog, tenant_id))
+            .order_by(LocalLog.ts.desc())
+            .limit(max(1, min(1000, limit)))
+        )
         if level:
             query = query.where(LocalLog.level == level)
         if execution_id:
@@ -744,8 +990,8 @@ def list_local_logs(level: str = None, execution_id: str = None, limit: int = 20
         ]
 
 
-def local_log_stats(limit: int = 1000) -> dict:
-    rows = list_local_logs(limit=limit)
+def local_log_stats(limit: int = 1000, tenant_id: Optional[str] = None) -> dict:
+    rows = list_local_logs(limit=limit, tenant_id=tenant_id)
     stats: dict = {}
     total = len(rows)
     for r in rows:

@@ -28,6 +28,7 @@ class ExecutionState(BaseModel):
     flow_id: Optional[str] = None
     flow_name: Optional[str] = None
     flow_version: Optional[str] = None
+    tenant_id: Optional[str] = None
     context: Dict[str, Any]
     status: str = Field(default="running")
     start_time: Optional[str] = None

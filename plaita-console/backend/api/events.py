@@ -170,9 +170,16 @@ async def publish_event(
 async def list_subscriptions(
     event_type: Optional[str] = None,
     flow_id: Optional[str] = None,
+    request: Request = None,
     redis: Redis = Depends(get_redis),
 ):
-    """获取事件订阅列表"""
+    """获取事件订阅列表（租户视角按订阅内的 tenant_id 过滤）"""
+    try:
+        from ..auth import tenant_scope
+    except ImportError:
+        from auth import tenant_scope  # type: ignore
+    tenant = tenant_scope(request) if request is not None else None
+
     pattern = "plaita:subscription:*"
     keys = _scan_keys(redis, pattern)
 
@@ -195,6 +202,11 @@ async def list_subscriptions(
                 continue
             if flow_id and info.get("flow_id") != flow_id:
                 continue
+            # 订阅是流程级数据（流程归租户）；旧订阅无 tenant_id 字段视为 default
+            if tenant:
+                info_tenant = info.get("tenant_id") or "default"
+                if info_tenant != tenant:
+                    continue
             subscriptions.append(SubscriptionInfo(
                 subscription_id=info.get("subscription_id", key.split(":")[-1]),
                 event_type=info.get("event_type", "unknown"),

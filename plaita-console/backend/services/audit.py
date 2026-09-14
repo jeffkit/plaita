@@ -31,11 +31,14 @@ def record(request: Any, action: str, resource: str, resource_id: str = "",
         from flow_store import get_flow_store  # type: ignore
     try:
         store = get_flow_store()
-        actor = getattr(getattr(request, "state", None), "actor", "") or "anonymous"
+        state = getattr(request, "state", None)
+        actor = getattr(state, "actor", "") or "anonymous"
+        tenant_id = getattr(state, "tenant_id", "") or ""
         ip = request.client.host if getattr(request, "client", None) else ""
         with store._session_local() as session:
             session.add(
                 AuditLog(
+                    tenant_id=tenant_id,
                     actor=actor,
                     action=action,
                     resource=resource,
@@ -50,7 +53,7 @@ def record(request: Any, action: str, resource: str, resource_id: str = "",
 
 
 def list_audit(action: Optional[str] = None, actor: Optional[str] = None,
-               limit: int = 200) -> List[Dict[str, Any]]:
+               limit: int = 200, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     try:
         from .flow_store import get_flow_store
     except ImportError:
@@ -58,6 +61,8 @@ def list_audit(action: Optional[str] = None, actor: Optional[str] = None,
     store = get_flow_store()
     with store._session_local() as session:
         query = select(AuditLog).order_by(AuditLog.ts.desc()).limit(limit)
+        if tenant_id is not None:
+            query = query.where(AuditLog.tenant_id == tenant_id)
         if action:
             query = query.where(AuditLog.action == action)
         if actor:
@@ -66,6 +71,7 @@ def list_audit(action: Optional[str] = None, actor: Optional[str] = None,
         return [
             {
                 "ts": r.ts.isoformat(),
+                "tenant_id": r.tenant_id,
                 "actor": r.actor,
                 "action": r.action,
                 "resource": r.resource,

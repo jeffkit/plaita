@@ -126,7 +126,7 @@ class TestFlowWorkerBasicScenarios:
         assert flow1 is flow2  # 应该是同一个对象（来自缓存）
         
         cache_key = f"{test_flow['flow_id']}:{test_flow['version']}"
-        assert cache_key in worker.flow_definition_cache
+        assert f"default:{cache_key}" in worker.flow_definition_cache
     
     def test_get_latest_version(self, setup_worker):
         """测试获取最新版本流程"""

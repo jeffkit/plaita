@@ -2,25 +2,26 @@
 
 - POST /api/auth/login    用户名密码换会话 token（无需认证）
 - GET  /api/auth/me       当前身份（需认证）
+- POST /api/auth/switch-tenant  切换会话活跃租户（需认证）
 - POST /api/auth/logout   注销当前会话（需认证）
 - GET  /api/users         用户列表（admin）
-- POST /api/users         创建用户（admin）
-- POST /api/users/{u}/role      改角色（admin）
+- POST /api/users         创建用户（admin；platform_admin/跨租户 memberships 需平台管理员）
+- POST /api/users/{u}/role      改遗留全局角色（admin）
 - POST /api/users/{u}/password  重置密码（admin）
 - DELETE /api/users/{u}         删除用户（admin）
 """
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
     from ..auth import require_auth
-    from ..services import users_svc
+    from ..services import tenants_svc, users_svc
     from ..services.flow_store import get_flow_store
 except ImportError:
     from auth import require_auth  # type: ignore
-    from services import users_svc  # type: ignore
+    from services import tenants_svc, users_svc  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
 
 router = APIRouter()
@@ -35,6 +36,10 @@ class CreateUserRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=8)
     role: str = "viewer"
+    platform_admin: bool = False
+    memberships: Optional[List[Dict[str, str]]] = Field(
+        None, description="租户成员关系 [{tenant_id, role}]（仅平台管理员可设置）"
+    )
 
 
 class RoleRequest(BaseModel):
@@ -43,6 +48,10 @@ class RoleRequest(BaseModel):
 
 class PasswordRequest(BaseModel):
     password: str = Field(..., min_length=8)
+
+
+class SwitchTenantRequest(BaseModel):
+    tenant_id: str = Field(..., min_length=1)
 
 
 @router.get("/auth/setup-status")
@@ -72,7 +81,36 @@ def login(req: LoginRequest, request: Request):
 
 @router.get("/auth/me")
 def me(request: Request, identity: Dict = Depends(require_auth)):
-    return identity
+    out = dict(identity)
+    out["memberships"] = _memberships(identity.get("actor", ""))
+    return out
+
+
+def _memberships(username: str) -> List[Dict[str, str]]:
+    """当前用户的全部租户成员关系（切换器数据源）。"""
+    try:
+        from ..models.flow import TenantMember
+    except ImportError:
+        from models.flow import TenantMember  # type: ignore
+    store = get_flow_store()
+    with store._session_local() as session:
+        rows = session.query(TenantMember).filter(
+            TenantMember.username == username
+        ).all()
+        return [{"tenant_id": r.tenant_id, "role": r.role} for r in rows]
+
+
+@router.post("/auth/switch-tenant")
+def switch_tenant(req: SwitchTenantRequest, request: Request,
+                  identity: Dict = Depends(require_auth)):
+    auth_header = request.headers.get("Authorization") or ""
+    token = auth_header.strip().split(None, 1)[-1]
+    try:
+        context = users_svc.switch_tenant(get_flow_store(), token, req.tenant_id)
+    except users_svc.UserError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit(request, "auth.switch_tenant", req.tenant_id, {})
+    return context
 
 
 @router.post("/auth/logout")
@@ -89,12 +127,20 @@ def list_users(_: Dict = Depends(require_auth)):
 
 
 @router.post("/users")
-def create_user(req: CreateUserRequest, request: Request, _: Dict = Depends(require_auth)):
+def create_user(req: CreateUserRequest, request: Request, identity: Dict = Depends(require_auth)):
+    # 平台管理员专属字段：platform_admin / 跨租户 memberships
+    if (req.platform_admin or req.memberships) and not identity.get("platform_admin"):
+        raise HTTPException(status_code=403, detail="仅平台管理员可设置平台权限或租户成员关系")
     try:
-        users_svc.create_user(get_flow_store(), req.username, req.password, req.role)
+        users_svc.create_user(
+            get_flow_store(), req.username, req.password, req.role,
+            platform_admin=req.platform_admin,
+            memberships=req.memberships,
+        )
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _audit(request, "user.create", req.username, {"role": req.role})
+    _audit(request, "user.create", req.username,
+           {"role": req.role, "platform_admin": req.platform_admin})
     return {"success": True, "username": req.username}
 
 

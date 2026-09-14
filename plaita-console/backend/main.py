@@ -17,6 +17,7 @@ try:
     from .auth import require_auth
     from .api import services, executions, queues, logs, cluster, events
     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
+    from .api import tenants
     from .services import flow_store, signature, users_svc
     from .api import auth_users
 except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该走到这里
@@ -27,6 +28,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
     from auth import require_auth
     from api import services, executions, queues, logs, cluster, events
     from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
+    from api import tenants  # type: ignore
     from services import flow_store, signature, users_svc  # type: ignore
     from api import auth_users  # type: ignore
 
@@ -70,13 +72,15 @@ async def lifespan(app: FastAPI):
     # 初始化流程编排持久化（SQLAlchemy）—— 建表，不破坏 Redis 初始化
     try:
         flow_store.init_engine(settings.db_url)
+        # 多租户引导（幂等）：default 租户、存量数据归租户、legacy admin 提平台管理员
+        flow_store.ensure_tenant_bootstrap()
         logger.info(f"FlowStore 已初始化: {settings.db_url}")
         if local_mode:
             try:
                 from .services import examples as examples_svc
             except ImportError:
                 from services import examples as examples_svc  # type: ignore
-            examples_svc.seed_example_flows()
+            examples_svc.seed_example_flows(tenant_id="default")
         try:
             from .services import users_svc, local_scheduler
         except ImportError:
@@ -103,7 +107,8 @@ async def lifespan(app: FastAPI):
         )
     if not settings.secret_id or not settings.secret_key:
         logger.warning(
-            "未配置 PLAITA_CONSOLE_SECRET_ID/SECRET_KEY：契约接口 /flowVersion 将返回 503"
+            "未配置 PLAITA_CONSOLE_SECRET_ID/SECRET_KEY：契约接口仅接受租户契约密钥"
+            "（在租户管理页创建/轮换），全局密钥路径不可用"
         )
 
     yield
@@ -215,6 +220,7 @@ def create_app() -> FastAPI:
     _mount_admin(property_types.router, "property_types")
     _mount_admin(credential_templates.router, "credential_templates")
     _mount_admin(audit.router, "audit")
+    _mount_admin(tenants.router, "tenants")
 
     # --- 契约面（独立 HMAC，不加 admin 依赖）---
     _mount_contract(flow_version.router, "flow_version")

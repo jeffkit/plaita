@@ -27,6 +27,7 @@ try:
         remove_flow_version_from_engine,
         sync_flow_to_engine,
     )
+    from ..auth import tenant_scope
 except ImportError:
     from services import flow_store
     from services.engine_sync import (
@@ -34,6 +35,7 @@ except ImportError:
         remove_flow_version_from_engine,
         sync_flow_to_engine,
     )
+    from auth import tenant_scope
 
 router = APIRouter()
 
@@ -44,6 +46,7 @@ _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$")
 
 class FlowSummaryView(BaseModel):
     flow_id: str
+    tenant_id: str = ""
     author: str = ""
     desc: str = ""
     created_at: Optional[str] = None
@@ -118,11 +121,13 @@ def _validate_definition(definition: str) -> None:
 # ============ 端点 ============
 
 @router.get("/flows", response_model=FlowListResponse)
-def list_flows():
-    flows = _store().list_flows()
+def list_flows(request: Request = None):
+    tenant = tenant_scope(request) if request is not None else None
+    flows = _store().list_flows(tenant_id=tenant)
     views = [
         FlowSummaryView(
             flow_id=f.flow_id,
+            tenant_id=f.tenant_id,
             author=f.author,
             desc=f.desc,
             created_at=f.created_at.isoformat() if f.created_at else None,
@@ -163,15 +168,18 @@ def ai_generate_stream(req: AiGenerateRequest):
 
 
 @router.post("/flows", response_model=FlowSummaryView)
-def create_flow(req: CreateFlowRequest):
+def create_flow(req: CreateFlowRequest, request: Request = None):
     if not req.flow_id:
         raise HTTPException(status_code=422, detail="flow_id 不能为空")
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
-        rec = _store().create_flow(req.flow_id, author=req.author, desc=req.desc)
+        rec = _store().create_flow(req.flow_id, author=req.author, desc=req.desc,
+                                   tenant_id=tenant)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return FlowSummaryView(
         flow_id=rec.flow_id,
+        tenant_id=rec.tenant_id,
         author=rec.author,
         desc=rec.desc,
         created_at=rec.created_at.isoformat() if rec.created_at else None,
@@ -180,9 +188,10 @@ def create_flow(req: CreateFlowRequest):
 
 
 @router.get("/flows/{flow_id}", response_model=FlowDetailResponse)
-def get_flow(flow_id: str):
+def get_flow(flow_id: str, request: Request = None):
+    tenant = tenant_scope(request) if request is not None else None
     store = _store()
-    rec = store.get_flow_record(flow_id)
+    rec = store.get_flow_record(flow_id, tenant_id=tenant)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
     versions = [
@@ -192,7 +201,7 @@ def get_flow(flow_id: str):
             "created_at": v.created_at.isoformat() if v.created_at else None,
             "published_at": v.published_at.isoformat() if v.published_at else None,
         }
-        for v in store.list_versions(flow_id)
+        for v in store.list_versions(flow_id, tenant_id=tenant)
     ]
     return FlowDetailResponse(
         flow_id=rec.flow_id, author=rec.author, desc=rec.desc, versions=versions
@@ -201,21 +210,23 @@ def get_flow(flow_id: str):
 
 @router.delete("/flows/{flow_id}")
 def delete_flow(flow_id: str, request: Request = None, redis: Redis = Depends(get_redis_dep)):
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
-        _store().delete_flow(flow_id)
+        _store().delete_flow(flow_id, tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     # 引擎运行时存储同步清理（本地模式无 Redis，无需清理）
     if redis is not None:
-        remove_flow_from_engine(redis, flow_id)
+        remove_flow_from_engine(redis, flow_id, tenant_id=tenant)
     if request is not None:
         _audit(request, "flow.delete", flow_id)
     return {"success": True, "flow_id": flow_id}
 
 
 @router.get("/flows/{flow_id}/versions/{version}", response_model=VersionView)
-def get_version(flow_id: str, version: str):
-    out = _store().get_version(flow_id, version)
+def get_version(flow_id: str, version: str, request: Request = None):
+    tenant = tenant_scope(request) if request is not None else None
+    out = _store().get_version(flow_id, version, tenant_id=tenant)
     if out is None:
         raise HTTPException(status_code=404, detail=f"版本不存在: {flow_id}@{version}")
     return VersionView(
@@ -233,11 +244,12 @@ def get_version(flow_id: str, version: str):
 @router.put("/flows/{flow_id}/versions/{version}", response_model=VersionView)
 def save_version(flow_id: str, version: str, req: SaveVersionRequest,
                  request: Request = None):  # noqa: ANN001 — FastAPI 注入
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     _check_semver(version)
     _validate_definition(req.definition)
     store = _store()
     # 确保 flow 记录存在
-    if store.get_flow_record(flow_id) is None:
+    if store.get_flow_record(flow_id, tenant_id=tenant) is None:
         raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
     try:
         store.save_flow_definition(
@@ -247,10 +259,11 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
             layout=req.layout,
             status="draft",
             created_by=req.created_by,
+            tenant_id=tenant,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    out = store.get_version(flow_id, version)
+    out = store.get_version(flow_id, version, tenant_id=tenant)
     if request is not None:
         _audit(request, "flow.save_version", f"{flow_id}@{version}", {"bytes": len(req.definition)})
     return VersionView(
@@ -268,31 +281,33 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
 @router.delete("/flows/{flow_id}/versions/{version}")
 def delete_version(flow_id: str, version: str, request: Request = None,
                    redis: Redis = Depends(get_redis_dep)):
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
-        _store().delete_version(flow_id, version)
+        _store().delete_version(flow_id, version, tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     if redis is not None:
-        remove_flow_version_from_engine(redis, flow_id, version)
+        remove_flow_version_from_engine(redis, flow_id, version, tenant_id=tenant)
     return {"success": True, "flow_id": flow_id, "version": version}
 
 
 @router.post("/flows/{flow_id}/publish", response_model=VersionView)
 def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
                  redis: Redis = Depends(get_redis_dep)):
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     _check_semver(req.version)
     store = _store()
-    if store.get_flow_record(flow_id) is None:
+    if store.get_flow_record(flow_id, tenant_id=tenant) is None:
         raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
     try:
-        out = store.publish_version(flow_id, req.version)
+        out = store.publish_version(flow_id, req.version, tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     # 发布即同步到引擎运行时存储：FlowWorker 从这里解析定义，
     # 不同步则「发布成功、启动必失败」。本地单机模式无 Redis：
     # 执行走 console 进程内（SQLite 定义），无需同步。
     if redis is not None:
-        sync_flow_to_engine(redis, flow_id, out.version, out.definition)
+        sync_flow_to_engine(redis, flow_id, out.version, out.definition, tenant_id=tenant)
     if request is not None:
         try:
             from ..config import get_settings
@@ -309,6 +324,7 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
             flow_id=flow_id, version=out.version, environment=env,
             actor=getattr(request.state, "actor", ""),
             definition=out.definition,
+            tenant_id=tenant,
         )
     return VersionView(
         flow_id=out.flow_id,
@@ -334,14 +350,16 @@ def _audit(request: Request, action: str, resource_id: str, detail: Dict | None 
 
 
 @router.get("/flows/{flow_id}/versions/{version}/export")
-def export_version(flow_id: str, version: str):
+def export_version(flow_id: str, version: str, request: Request = None):
     """导出晋升包（定义 + 指纹 + 元信息），跨环境 console 晋升的载体。"""
+    tenant = tenant_scope(request) if request is not None else None
     try:
         from ..services import deployments as deployments_svc
     except ImportError:
         from services import deployments as deployments_svc  # type: ignore
     try:
-        return deployments_svc.build_promotion_package(_store(), flow_id, version)
+        return deployments_svc.build_promotion_package(_store(), flow_id, version,
+                                                       tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -355,6 +373,7 @@ class ImportPromotionRequest(BaseModel):
 @router.post("/flows/import-version")
 def import_version(req: ImportPromotionRequest, request: Request = None,
                    redis: Redis = Depends(get_redis_dep)):
+    tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
         from ..services import deployments as deployments_svc
     except ImportError:
@@ -362,7 +381,8 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
     """导入晋升包：默认为草稿；publish=true 等价于发布（引擎同步 + 部署记录）。"""
     try:
         result = deployments_svc.import_promotion_package(
-            _store(), req.package, new_version=req.new_version, publish=False
+            _store(), req.package, new_version=req.new_version, publish=False,
+            tenant_id=tenant,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -370,10 +390,10 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
     flow_id, version = result["flow_id"], result["version"]
     if req.publish:
         try:
-            out = _store().publish_version(flow_id, version)
+            out = _store().publish_version(flow_id, version, tenant_id=tenant)
         except LookupError as e:
             raise HTTPException(status_code=404, detail=str(e))
-        sync_flow_to_engine(redis, flow_id, out.version, out.definition)
+        sync_flow_to_engine(redis, flow_id, out.version, out.definition, tenant_id=tenant)
         try:
             from ..config import get_settings
         except ImportError:
@@ -383,6 +403,7 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
             environment=get_settings().console_env,
             actor=getattr(request.state, "actor", "") if request else "",
             definition=out.definition,
+            tenant_id=tenant,
         )
         result["status"] = "published"
 

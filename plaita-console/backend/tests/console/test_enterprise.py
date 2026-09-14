@@ -116,7 +116,8 @@ def test_login_ok_and_me(client_with_users):
     info = _login(client, "editor1", "editor-password-1")
     assert info["role"] == "editor"
     me = client.get("/api/auth/me", headers=_auth(info["token"])).json()
-    assert me == {"actor": "editor1", "role": "editor"}
+    assert me["actor"] == "editor1" and me["role"] == "editor"
+    assert me["tenant_id"] is None and me["platform_admin"] is False
 
 
 def test_login_wrong_password(client_with_users):
@@ -170,7 +171,9 @@ def test_api_key_maps_to_admin(tmp_path, monkeypatch):
     client = TestClient(app)
     r = client.get("/api/secure", headers={"X-Admin-API-Key": "svc-key-1"})
     assert r.status_code == 200
-    assert r.json() == {"actor": "api-key", "role": "admin"}
+    body = r.json()
+    assert body["actor"] == "api-key" and body["role"] == "admin"
+    assert body["platform_admin"] is True and body["tenant_id"] is None
 
 
 def test_prod_delete_requires_admin(tmp_path, monkeypatch):

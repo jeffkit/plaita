@@ -1,0 +1,388 @@
+name: 多租户隔离
+sequential: true
+service: ui-backend
+
+# 打 ui-backend(18081)：真实鉴权（无 ALLOW_INSECURE_ADMIN）+ bootstrap 平台管理员
+# （PLAITA_CONSOLE_ADMIN_PASSWORD 注入），且连真实 e2e Redis + flow-worker 容器。
+#
+# 覆盖多租户全链路（集群档）：
+# 1. 平台管理员建租户（契约密钥一次性下发）
+# 2. 成员制用户（创建时挂租户）→ 登录即钉在活跃租户
+# 3. 租户内流程发布 → 启动 → 执行状态落在租户 namespace（qa 视角可见、
+#    default 视角 404）——验证 console 消息租户 + worker 键路由 + 列表扫描全链
+# 4. 跨租户隔离（qa 看不到 default 的流程）
+# 5. 契约接口按租户密钥拉取（本租户 code 0 / 他租户 code 2）
+# 6. 权限矩阵：非平台管理员禁入租户管理、禁带 X-Tenant-ID、非成员租户禁切换
+# 7. 清理：删流程 → 删租户（有流程时 409 的语义顺带覆盖）
+
+cases:
+  - name: "平台管理员登录"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/login
+      headers:
+        Content-Type: application/json
+      body:
+        username: "admin"
+        password: "e2e-admin-pass"
+    expect:
+      status: 200
+      body:
+        platform_admin: true
+    save:
+      admin_token: "token"
+
+  - name: "建租户 e2e-qa（响应一次性返回契约密钥）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/tenants
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.admin_token}}"
+      body:
+        id: "e2e-qa"
+        name: "E2E 验收租户"
+    expect:
+      status: 200
+      body:
+        id: "e2e-qa"
+        status: "active"
+    save:
+      tenant_secret_id: "contract_secret_id"
+      tenant_secret_key: "contract_secret_key"
+
+  - name: "建成员制用户 qa-user（挂 e2e-qa editor）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/users
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.admin_token}}"
+      body:
+        username: "qa-user"
+        password: "qa-user-pass-123"
+        role: "viewer"
+        memberships:
+          - tenant_id: "e2e-qa"
+            role: "editor"
+    expect:
+      status: 200
+
+  - name: "qa-user 登录：活跃租户即 e2e-qa"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/login
+      headers:
+        Content-Type: application/json
+      body:
+        username: "qa-user"
+        password: "qa-user-pass-123"
+    expect:
+      status: 200
+      body:
+        active_tenant: "e2e-qa"
+    save:
+      qa_token: "token"
+
+  - name: "qa-user me：tenant_id 钉在 e2e-qa"
+    request:
+      method: GET
+      url: http://localhost:18081/api/auth/me
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+    expect:
+      status: 200
+      body:
+        actor: "qa-user"
+        role: "editor"
+        tenant_id: "e2e-qa"
+        platform_admin: false
+
+  - name: "admin 在 default 建 e2e-default-flow"
+    request:
+      method: POST
+      url: http://localhost:18081/api/flows
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.admin_token}}"
+      body:
+        flow_id: "e2e-default-flow"
+        author: "e2e"
+    expect:
+      status: 200
+      body:
+        tenant_id: "default"
+
+  - name: "隔离：qa-user 看 default 的流程 → 404"
+    request:
+      method: GET
+      url: http://localhost:18081/api/flows/e2e-default-flow
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+    expect:
+      status: 404
+
+  - name: "qa-user 建 e2e-tenant-flow（自动归 e2e-qa）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/flows
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.qa_token}}"
+      body:
+        flow_id: "e2e-tenant-flow"
+        author: "e2e"
+    expect:
+      status: 200
+      body:
+        tenant_id: "e2e-qa"
+
+  - name: "qa-user 保存并发布 1.0.0"
+    request:
+      method: PUT
+      url: http://localhost:18081/api/flows/e2e-tenant-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.qa_token}}"
+      body:
+        definition: '{"id":"e2e-tenant-flow","name":"E2E Tenant","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"ok","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "qa-user 发布 1.0.0"
+    request:
+      method: POST
+      url: http://localhost:18081/api/flows/e2e-tenant-flow/publish
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.qa_token}}"
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+      body:
+        status: "published"
+
+  - name: "qa-user 启动流程（消息带租户，worker 落租户 namespace）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/executions
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.qa_token}}"
+      body:
+        flow_id: "e2e-tenant-flow"
+        params: {}
+    expect:
+      status: 200
+
+  - name: "qa 视角列表出现本租户执行（租户 namespace 扫描）"
+    request:
+      method: GET
+      url: http://localhost:18081/api/executions?flow_id=e2e-tenant-flow
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+    save:
+      qa_execution_id: "executions.0.execution_id"
+
+  - name: "qa 视角执行归属租户 e2e-qa"
+    request:
+      method: GET
+      url: http://localhost:18081/api/executions/{{runtime.qa_execution_id}}
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+    expect:
+      status: 200
+      body:
+        tenant_id: "e2e-qa"
+
+  - name: "执行最终完成（worker 按租户路由定义与状态）"
+    request:
+      method: GET
+      url: http://localhost:18081/api/executions/{{runtime.qa_execution_id}}
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "completed"
+
+  - name: "隔离：admin（default 视角）查 qa 的执行 → 404"
+    request:
+      method: GET
+      url: http://localhost:18081/api/executions/{{runtime.qa_execution_id}}
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+    expect:
+      status: 404
+
+  - name: "契约：租户密钥拉本租户流程 → code 0"
+    exec:
+      command: |-
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        sid="{{runtime.tenant_secret_id}}"; skey="{{runtime.tenant_secret_key}}"
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(skey.encode(),kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=%s&sign-time=%d&key-time=%s&signature=%s"%(sid,tid,kt,sig)
+        data=urllib.parse.urlencode({"flowId":"e2e-tenant-flow","version":"1.0.0"}).encode()
+        req=urllib.request.Request("http://localhost:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        json:
+          code: 0
+
+  - name: "admin 发布 default 流程（供跨租户拉取负例）"
+    request:
+      method: PUT
+      url: http://localhost:18081/api/flows/e2e-default-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.admin_token}}"
+      body:
+        definition: '{"id":"e2e-default-flow","name":"E2E Default","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"ok","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "admin 发布 e2e-default-flow 1.0.0"
+    request:
+      method: POST
+      url: http://localhost:18081/api/flows/e2e-default-flow/publish
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.admin_token}}"
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  - name: "契约：租户密钥拉 default 流程 → code 2（不可见）"
+    exec:
+      command: |-
+        python3 -c '
+        import hmac,hashlib,time,urllib.request,urllib.parse,urllib.error
+        sid="{{runtime.tenant_secret_id}}"; skey="{{runtime.tenant_secret_key}}"
+        tid=int(time.time()); kt=str(tid)+";"+str(tid+600)
+        k=hmac.new(skey.encode(),kt.encode(),hashlib.sha256).hexdigest()
+        sig=hmac.new(k.encode(),(str(tid)+"\n").encode(),hashlib.sha256).hexdigest()
+        auth="secret-id=%s&sign-time=%d&key-time=%s&signature=%s"%(sid,tid,kt,sig)
+        data=urllib.parse.urlencode({"flowId":"e2e-default-flow","version":"1.0.0"}).encode()
+        req=urllib.request.Request("http://localhost:8080/api/flowVersion/semver/detail",data=data)
+        req.add_header("Authorization",auth)
+        try:
+            print(urllib.request.urlopen(req).read().decode())
+        except urllib.error.HTTPError as e:
+            print("HTTP",e.code)
+        '
+    expect:
+      output:
+        json:
+          code: 2
+
+  - name: "建第二个租户 e2e-other（切换负例用）"
+    request:
+      method: POST
+      url: http://localhost:18081/api/tenants
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.admin_token}}"
+      body:
+        id: "e2e-other"
+    expect:
+      status: 200
+
+  - name: "qa-user 切到非成员租户 → 400"
+    request:
+      method: POST
+      url: http://localhost:18081/api/auth/switch-tenant
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{runtime.qa_token}}"
+      body:
+        tenant_id: "e2e-other"
+    expect:
+      status: 400
+
+  - name: "非平台管理员访问租户管理 → 403"
+    request:
+      method: GET
+      url: http://localhost:18081/api/tenants
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+    expect:
+      status: 403
+
+  - name: "非平台管理员带 X-Tenant-ID → 403"
+    request:
+      method: GET
+      url: http://localhost:18081/api/flows
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+        X-Tenant-ID: "e2e-other"
+    expect:
+      status: 403
+
+  - name: "admin 删有流程的租户 → 409"
+    request:
+      method: DELETE
+      url: http://localhost:18081/api/tenants/e2e-qa
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+    expect:
+      status: 409
+
+  # ---- 清理（保证套件可重跑）----
+  - name: "清理：qa-user 删本租户流程"
+    request:
+      method: DELETE
+      url: http://localhost:18081/api/flows/e2e-tenant-flow
+      headers:
+        Authorization: "Bearer {{runtime.qa_token}}"
+    expect:
+      status: 200
+
+  - name: "清理：admin 删 default 流程"
+    request:
+      method: DELETE
+      url: http://localhost:18081/api/flows/e2e-default-flow
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+    expect:
+      status: 200
+
+  - name: "清理：删租户 e2e-qa"
+    request:
+      method: DELETE
+      url: http://localhost:18081/api/tenants/e2e-qa
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+    expect:
+      status: 200
+
+  - name: "清理：删租户 e2e-other"
+    request:
+      method: DELETE
+      url: http://localhost:18081/api/tenants/e2e-other
+      headers:
+        Authorization: "Bearer {{runtime.admin_token}}"
+    expect:
+      status: 200
