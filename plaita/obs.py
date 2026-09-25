@@ -12,12 +12,15 @@
   观测数据不能丢）
 - ``on_flow_end`` → trace 收口（output / level）+ flush
 
-**跨进程 trace 续写契约（Distributed）**：trace id 只读自
-``flow.global_context[trace_id_key]``；未设置时现场随机生成。global_context
-在执行启动时拷贝进执行状态，回调读的是 **Flow 对象上的那份**——因此分布式
-流程的每个进程在重建 Flow 时都必须把同一个 key 注入 global_context（与
-dry_run 等全局变量同一通道，FlowWorker/console 从执行实例记录带出）。
-没有这个 key 时每个进程各自成 trace，不做隐式关联。
+**跨进程 trace 续写契约（Distributed）**：trace id 解析链——
+1. `flow.global_context[trace_id_key]`（显式指定，最高优先）；
+2. 绑定的 `FlowExecution` 状态里的运行时 `$EXECUTION_ID`（经
+   :meth:`bind_execution` 注入）。`$EXECUTION_ID` 由运行时 fresh start 生成、
+   随 checkpoint 持久化，resume 后另一进程读到同一值——**宿主只需在每次
+   新建 FlowExecution 后调用 bind_execution**，同一条分布式流程的所有步骤
+   天然落在同一条 trace 上（console `_LocalTraceCallback` 覆写
+   `$EXECUTION_ID` 时排在它前面即可让 trace id 与控制台记录一致）；
+3. 都没有时现场随机生成（各进程各自成 trace，不做隐式关联）。
 
 适配器自身按"观测旁路"约束构建：任何内部异常都吞掉并记 warning，
 绝不影响流程执行（CallbackManager 本身也有一层兜底）。
@@ -76,8 +79,9 @@ class LangfuseCallback(FlowCallback):
         client_kwargs: 透传给 ``langfuse.Langfuse(**kwargs)`` 的额外参数
             （release / environment / timeout 等）。
         trace_id_key / session_id_key / user_id_key: 读取运行身份的
-            ``flow.global_context`` 键名。trace_id 缺失时现场生成（跨进程
-            契约见模块 docstring）；session/user 缺失即不上报对应字段。
+            ``flow.global_context`` 键名。trace_id 缺失时依次回退到绑定
+            execution 的 ``$EXECUTION_ID``、随机生成（跨进程契约见模块
+            docstring）；session/user 缺失即不上报对应字段。
         tags: 追加到每条 trace 的标签（自动附带 ``flow:<flow_id>``）。
         max_content_chars: input/output/metadata 里字符串的截断长度，
             防止大 payload 拖垮采集侧。
@@ -106,12 +110,25 @@ class LangfuseCallback(FlowCallback):
         self._tags = list(tags or [])
         self._max_chars = max_content_chars
         self._lock = threading.Lock()
-        # 每次运行的观测状态（on_flow_start 重置）
+        self._execution: Optional[Any] = None
+        # 每次运行的观测状态（on_flow_start / bind_execution 重置）
         self._trace: Optional[Any] = None
         # 节点 id → 未收口 span 栈（loop/子流程会重入同一 node.id，LIFO 配对）
         self._open_spans: Dict[str, List[Any]] = {}
 
     # ------------------------------------------------------------------ 构造
+
+    def bind_execution(self, execution: Any) -> None:
+        """绑定当前 ``FlowExecution``（trace id 解析链第 2 级的数据来源）。
+
+        常驻宿主（FlowWorker / console）为每次处理循环新建 execution 但复用
+        同一回调实例——绑定新 execution 时重置 run 状态，防止上一个执行的
+        trace/span 串到下一个。
+        """
+        self._execution = execution
+        with self._lock:
+            self._trace = None
+            self._open_spans = {}
 
     @staticmethod
     def _build_client(public_key, secret_key, host, client_kwargs):
@@ -158,11 +175,27 @@ class LangfuseCallback(FlowCallback):
             return gc[key]
         return None
 
+    def _execution_trace_id(self) -> Optional[str]:
+        """从绑定的 execution 状态读运行时 ``$EXECUTION_ID``（解析链第 2 级）。"""
+        execution = self._execution
+        getter = getattr(execution, "get_state", None) if execution is not None else None
+        if not callable(getter):
+            return None
+        try:
+            prefix = getattr(execution, "express_prefix", "$")
+            value = getter(f"{prefix}EXECUTION_ID")
+        except Exception:  # noqa: BLE001 — 观测旁路
+            logger.warning("读取 $EXECUTION_ID 失败", exc_info=True)
+            return None
+        return str(value) if value else None
+
     def _ensure_trace(self, flow):
         if self._trace is not None:
             return self._trace
-        trace_id = self._global_of(flow, self._trace_id_key) or (
-            f"{flow.flow_id}-{uuid.uuid4().hex[:12]}"
+        trace_id = (
+            self._global_of(flow, self._trace_id_key)
+            or self._execution_trace_id()
+            or f"{flow.flow_id}-{uuid.uuid4().hex[:12]}"
         )
         tags = self._tags + [f"flow:{flow.flow_id}"]
         kwargs: Dict[str, Any] = {

@@ -77,3 +77,59 @@ class TestDistributedCallbacksPersist:
         result = worker.start_flow(flow_id="a4-multi", params={}, version="1.0.0")
         assert result.get("is_end") is True
         assert len(counter.node_starts) == 4
+
+
+# ---- 观测回调接线（plaita.obs.LangfuseCallback）：bind + trace id = $EXECUTION_ID ----
+
+from plaita.obs import LangfuseCallback  # noqa: E402
+from tests.unit.test_obs_langfuse import FakeRecorder  # noqa: E402
+
+
+class BindSpy(FlowCallback):
+    """记录被绑定的 execution 实例（观测回调的宿主接线契约）。"""
+
+    def __init__(self):
+        self.bound = []
+
+    def bind_execution(self, execution):
+        self.bound.append(execution)
+
+
+def _worker_with(*handlers):
+    execution_storage = MemoryExecutionStorage()
+    flow_storage = MemoryFlowStorage()
+    flow_storage.save_flow(_multi_node_flow())
+    return FlowWorker(
+        execution_storage=execution_storage,
+        flow_storage=flow_storage,
+        event_bus=InMemoryEventBus(),
+        callback_handlers=list(handlers),
+    )
+
+
+class TestObserverBinding:
+    def test_bindable_callbacks_are_bound_on_start(self):
+        spy = BindSpy()
+        worker = _worker_with(spy)
+        result = worker.start_flow(flow_id="a4-multi", params={}, version="1.0.0")
+        assert result.get("is_end") is True
+        assert len(spy.bound) == 1
+
+    def test_plain_callbacks_are_ignored_by_binder(self):
+        counter = CountingCallback()  # 无 bind_execution 方法，绑定循环必须跳过
+        worker = _worker_with(counter)
+        result = worker.start_flow(flow_id="a4-multi", params={}, version="1.0.0")
+        assert result.get("is_end") is True
+        assert len(counter.node_starts) == 4
+
+    def test_langfuse_trace_id_equals_runtime_execution_id(self):
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder)
+        worker = _worker_with(cb)
+        result = worker.start_flow(flow_id="a4-multi", params={}, version="1.0.0")
+        assert result.get("is_end") is True
+        assert result.get("execution_id")
+        assert recorder.trace_kwargs, "LangfuseCallback 未收到任何 trace"
+        assert recorder.trace_kwargs[0]["id"] == result["execution_id"]
+        # distributed 模式内核不发 on_flow_end，终结 flush 由宿主负责
+        assert recorder.flushes >= 1

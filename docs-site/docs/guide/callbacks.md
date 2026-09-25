@@ -128,9 +128,16 @@ execution.run_compatible(flow, False)
 
 ### Distributed 模式的跨进程续写
 
-trace id 只读自 `flow.global_context["langfuse_trace_id"]`（键名可配），未设置时现场生成。
-global_context 在执行启动时拷贝进执行状态，回调读的是 Flow 对象上的那份——因此**每个进程**
-重建 Flow 时都要注入同一个 key（与 dry_run 等全局变量同一通道），各步骤才会落在同一条 trace 上。
+trace id 解析链：`flow.global_context["langfuse_trace_id"]`（显式 key，最高优先）→
+绑定 execution 的运行时 `$EXECUTION_ID` → 随机生成。`$EXECUTION_ID` 由运行时 fresh start
+生成、随 checkpoint 持久化，因此**宿主只需在每次新建 `FlowExecution` 后调用
+`cb.bind_execution(execution)`**，同一条分布式流程的所有步骤（含另一进程的 resume）自动
+落在同一条 trace 上，无需注入流程定义。plaita-console 与 FlowWorker 的内建接线即此模式。
+
+### 终结 flush 的宿主责任
+
+distributed 模式下内核不发 `on_flow_end`（is_end 由宿主循环判定），宿主在 run 终结
+（completed / failed）时应调用 `cb.flush()`——FlowWorker 与 console 的内建接线已内置。
 
 ### 错误语义
 

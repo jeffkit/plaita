@@ -333,6 +333,67 @@ class TestDirectErrorHooks(unittest.TestCase):
         self.assertEqual(recorder.observations, [])
 
 
+class TestBoundExecutionTraceId(unittest.TestCase):
+    """bind_execution：trace id 解析链第 2 级——运行时 $EXECUTION_ID。"""
+
+    class FakeExecutionState:
+        express_prefix = "$"
+
+        def __init__(self, execution_id: str):
+            self._id = execution_id
+
+        def get_state(self, key, default=None):
+            return self._id if key == "$EXECUTION_ID" else default
+
+    def setUp(self):
+        self.recorder = FakeRecorder()
+        self.cb = LangfuseCallback(client=self.recorder)
+        self.flow_json = {
+            "flow_id": "obs-bind",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "end"},
+                {"type": "end", "id": "end", "output": "ok", "resultType": "success"},
+            ],
+        }
+
+    def _run_bound(self) -> str:
+        """跑一次真实 Flow；运行时在 clean() 阶段生成 $EXECUTION_ID，
+        on_flow_start 时已就绪——返回运行时真实生成的 id 供断言。"""
+        flow = Flow.from_string(json.dumps(self.flow_json))
+        execution = FlowExecution(callback_handlers=[self.cb])
+        self.cb.bind_execution(execution)
+        execution.run_compatible(flow, False)
+        return str(execution.get_state("$EXECUTION_ID"))
+
+    def test_trace_id_from_execution_state(self):
+        exec_id = self._run_bound()
+        self.assertTrue(exec_id)
+        self.assertEqual(self.recorder.trace_kwargs[0]["id"], exec_id)
+
+    def test_rebind_resets_run_state(self):
+        """常驻宿主复用回调实例：换 execution 绑定必须换 trace。"""
+        first = self._run_bound()
+        second = self._run_bound()
+        self.assertNotEqual(first, second)
+        ids = [kw["id"] for kw in self.recorder.trace_kwargs]
+        self.assertEqual(ids, [first, second])
+
+    def test_global_context_key_overrides_execution_state(self):
+        self.flow_json["globalContext"] = {"langfuse_trace_id": "tr-explicit"}
+        flow = Flow.from_string(json.dumps(self.flow_json))
+        execution = FlowExecution(callback_handlers=[self.cb])
+        self.cb.bind_execution(execution)
+        execution.set_state("$EXECUTION_ID", "exec-ignored")
+        execution.run_compatible(flow, False)
+        self.assertEqual(self.recorder.trace_kwargs[0]["id"], "tr-explicit")
+
+    def test_unbound_falls_back_to_random(self):
+        flow = Flow.from_string(json.dumps(self.flow_json))
+        FlowExecution(callback_handlers=[self.cb]).run_compatible(flow, False)
+        self.assertTrue(self.recorder.trace_kwargs[0]["id"].startswith("obs-bind-"))
+
+
 class TestRunIsolation(unittest.TestCase):
     """同一 callback 实例跨多次 run 不串状态。"""
 

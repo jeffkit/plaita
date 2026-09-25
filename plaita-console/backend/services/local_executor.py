@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import os
 import threading
 import uuid
 from datetime import datetime
@@ -252,6 +253,37 @@ def _spawn(execution_id: str, target, *args, **kwargs) -> None:
     thread.start()
 
 
+_lf_warned = False
+
+
+def _build_langfuse_callback():
+    """按配置构造 LangfuseCallback（可选观测，任何失败都降级为不观测）。
+
+    - ``PLAITA_CONSOLE_LANGFUSE=false`` 强制关；
+    - ``true`` 强制开；``auto``（默认）= 配了 ``LANGFUSE_PUBLIC_KEY`` 才开；
+    - 缺 ``plaita[langfuse]`` 依赖或 SDK 初始化失败（如缺凭据）只告警一次。
+    """
+    global _lf_warned
+    mode = os.getenv("PLAITA_CONSOLE_LANGFUSE", "auto").strip().lower()
+    public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    if mode == "false" or (mode == "auto" and not public_key):
+        return None
+    try:
+        from plaita.obs import LangfuseCallback
+
+        return LangfuseCallback()
+    except ImportError as e:
+        if not _lf_warned:
+            _lf_warned = True
+            logger.warning("Langfuse 观测未启用（缺 plaita[langfuse] 依赖）: %s", e)
+        return None
+    except Exception as e:  # noqa: BLE001 — SDK 初始化失败（如缺凭据）不阻塞执行
+        if not _lf_warned:
+            _lf_warned = True
+            logger.warning("Langfuse 观测未启用: %s", e)
+        return None
+
+
 def _run_flow(
     store: FlowStore,
     execution_id: str,
@@ -275,18 +307,27 @@ def _run_flow(
     tenant_token = _tenant_credentials_file.set(
         str(_creds.credentials_file(tenant_id or _creds.DEFAULT_TENANT_ID))
     )
+    langfuse_callback = None
     try:
         logger.info(
             "本地执行 %s %s（flow=%s@%s）",
             execution_id, "恢复" if resume else "开始", flow_id, version,
         )
         flow = Flow.model_validate(definition)
-        callback = _LocalTraceCallback(execution_id, initial_nodes=initial_nodes)
-        execution = FlowExecution(callback_handlers=[callback])
+        # _LocalTraceCallback 必须在前：它把 $EXECUTION_ID 覆写为 console 的
+        # execution_id，随后的 LangfuseCallback 读到的 trace id 与控制台记录一致。
+        trace_callback = _LocalTraceCallback(execution_id, initial_nodes=initial_nodes)
+        handlers: List[FlowCallback] = [trace_callback]
+        langfuse_callback = _build_langfuse_callback()
+        if langfuse_callback is not None:
+            handlers.append(langfuse_callback)
+        execution = FlowExecution(callback_handlers=handlers)
         execution.mode = ExecutionMode.DISTRIBUTED
         # 让回调能拿到 execution：fresh start 的 on_flow_start（clean 之后触发）
         # 会把 $EXECUTION_ID 覆写为 console 的 execution_id，保持两边一致。
-        callback.bind_execution(execution)
+        trace_callback.bind_execution(execution)
+        if langfuse_callback is not None:
+            langfuse_callback.bind_execution(execution)
 
         if resume is None:
             result = execution.run_distributed(flow, params=params)
@@ -309,6 +350,8 @@ def _run_flow(
                     output_json=json.dumps(_safe(result.get("result")), ensure_ascii=False),
                     context_json=json.dumps(_safe(context), ensure_ascii=False),
                 )
+                if langfuse_callback is not None:
+                    langfuse_callback.flush()  # distributed 模式内核不发 on_flow_end
                 break
             if result.get("is_suspend"):
                 logger.info("本地执行 %s 挂起，等待恢复", execution_id)
@@ -337,6 +380,8 @@ def _run_flow(
                 {"message": str(e), "type": type(e).__name__}, ensure_ascii=False
             ),
         )
+        if langfuse_callback is not None:
+            langfuse_callback.flush()
     finally:
         try:
             root.removeHandler(handler)

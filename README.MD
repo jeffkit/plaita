@@ -268,15 +268,29 @@ print(result)
 
 `LangfuseCallback`（`pip install plaita[langfuse]`）把 8 个生命周期钩子映射到 Langfuse 的
 trace / span / generation 模型：流程 → trace、节点 → span、LLM 形状输出（含 `usage`）→
-generation，token 用量自动归并到 run 级；挂起即 flush，Distributed 模式把
-`langfuse_trace_id` 写进 `globalContext` 即可跨进程续写同一条 trace。
+generation，token 用量自动归并到 run 级；挂起即 flush。
+
+**trace id 解析链**：`globalContext` 显式 key → 绑定 execution 的运行时 `$EXECUTION_ID`
+→ 随机。宿主每次新建 `FlowExecution` 后调 `bind_execution(execution)`，同一条分布式流程
+的所有步骤（含跨进程 resume，`$EXECUTION_ID` 随 checkpoint 持久化）自动落在同一条 trace 上。
+
+内建宿主接线（开箱即用）：
+
+- **plaita-console 本地档**：`PLAITA_CONSOLE_LANGFUSE=auto|true|false`（默认 auto=配了
+  `LANGFUSE_PUBLIC_KEY` 即开）；trace id = 执行实例 ID，与控制台执行页一一对应；
+  缺 `plaita[langfuse]` 依赖自动降级为不观测。
+- **FlowWorker（集群档）**：启动加 `--langfuse`（或 `PLAITA_WORKER_LANGFUSE=1`）；
+  trace id = 运行时 execution_id。
 
 ```python
 from plaita import FlowExecution
 from plaita.obs import LangfuseCallback   # 凭据经 LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST 环境变量
 
-execution = FlowExecution(callback_handlers=[LangfuseCallback()])
+cb = LangfuseCallback()
+execution = FlowExecution(callback_handlers=[cb])
+cb.bind_execution(execution)
 execution.run_compatible(flow, False)
+cb.flush()   # distributed 模式内核不发 on_flow_end，终结 flush 由宿主负责
 ```
 
 注意：abort 策略的节点失败以异常穿透、不触发 `on_flow_end`（内核现状），此时 trace 保持

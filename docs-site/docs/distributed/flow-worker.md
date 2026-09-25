@@ -135,6 +135,11 @@ flowchart TD
   信号中断，窗口越大停机延迟越长；默认值保证停机延迟 ≲1s。
 - **CLI 日志**：`python -m plaita.server.flow_worker` 默认输出 INFO 级控制台
   日志（`PLAITA_LOG_LEVEL` 可调，`--quiet` 关闭）。
+- **Langfuse 观测**：`--langfuse`（或 `PLAITA_WORKER_LANGFUSE=1`）启用
+  [LangfuseCallback](../guide/callbacks.md#集成-langfuse-plaita-obs-langfusecallback)
+  （需 `pip install plaita[langfuse]`，凭据走 `LANGFUSE_*` 环境变量）。trace id =
+  运行时 execution_id（随 checkpoint 持久化，跨进程 resume 续写同一 trace）；
+  依赖缺失或 SDK 初始化失败只告警降级，不影响执行。
 - **event_filter** 的 `--redis-url` 默认取 `PLAITA_REDIS_URL` 环境变量（与
   flow_worker 一致）。
 - **残留订阅 GC**：EventFilter 匹配到已终态（completed/error）执行的订阅时，

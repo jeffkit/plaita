@@ -139,6 +139,35 @@ class FlowWorker:
         
         return flow
     
+    def _flush_observers(self) -> None:
+        """run 终结（completed/failed）时冲刷观测回调。
+
+        distributed 模式下内核不发 on_flow_end（is_end 由宿主循环判定），
+        Langfuse 等批量上报的观测回调需要宿主显式 flush。
+        """
+        for handler in self.callback_handlers:
+            flusher = getattr(handler, "flush", None)
+            if callable(flusher):
+                try:
+                    flusher()
+                except Exception:
+                    logger.warning("观测回调 flush 失败: %r", handler, exc_info=True)
+
+    def _bind_observers(self, execution) -> None:
+        """把执行实例通知给支持 ``bind_execution`` 的观测回调（plaita.obs）。
+
+        LangfuseCallback 等观测回调以此拿到运行时 ``$EXECUTION_ID`` 作跨进程
+        trace id；绑定同时重置其 run 状态，防止上一执行的 trace 串入。绑定
+        失败只告警，不影响执行。
+        """
+        for handler in self.callback_handlers:
+            binder = getattr(handler, "bind_execution", None)
+            if callable(binder):
+                try:
+                    binder(execution)
+                except Exception:
+                    logger.warning("观测回调 bind_execution 失败: %r", handler, exc_info=True)
+
     def start_flow(self, flow_id: str, params: Dict[str, Any], version: Optional[str] = None) -> Dict[str, Any]:
         """
         启动流程执行
@@ -166,6 +195,7 @@ class FlowWorker:
                 callback_handlers=self.callback_handlers,
             )
             execution.mode = ExecutionMode.DISTRIBUTED
+            self._bind_observers(execution)
 
             # 执行流程，获取初始结果
             result = execution.run_distributed(flow, params=params)
@@ -196,8 +226,9 @@ class FlowWorker:
 
         except Exception as e:
             logger.error("执行流程出错: %s", e, exc_info=True)
+            self._flush_observers()
             raise RuntimeError(f"执行流程出错: {e}")
-    
+
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         恢复流程执行。
@@ -268,6 +299,7 @@ class FlowWorker:
                 callback_handlers=self.callback_handlers,
             )
             execution.mode = ExecutionMode.DISTRIBUTED
+            self._bind_observers(execution)
 
             # 直接使用 run_distributed 恢复执行
             result = execution.run_distributed(
@@ -300,6 +332,7 @@ class FlowWorker:
             state.end_time = datetime.now().isoformat()
 
             self.execution_storage.save_execution_state(execution_id, state)
+            self._flush_observers()
 
             raise RuntimeError(f"恢复流程执行出错: {e}")
         finally:
@@ -362,6 +395,7 @@ class FlowWorker:
                 callback_handlers=self.callback_handlers,
             )
             execution.mode = ExecutionMode.DISTRIBUTED
+            self._bind_observers(execution)
 
         steps_since_persist = 0
 
@@ -374,6 +408,7 @@ class FlowWorker:
                 state.context = context
                 state.end_time = datetime.now().isoformat()
                 self.execution_storage.save_execution_state(execution_id, state)
+                self._flush_observers()
                 break
             elif is_suspend:
                 state.status = "suspended"
@@ -809,10 +844,26 @@ def main():
                         help="关闭 INFO 级控制台日志（等价 PLAITA_LOG_LEVEL=WARNING）")
     parser.add_argument("--heartbeat-interval", type=int, default=10,
                       help="心跳间隔(秒)")
+    parser.add_argument("--langfuse", action="store_true", default=None,
+                        help="启用 Langfuse 观测（需 pip install plaita[langfuse]；"
+                             "凭据走 LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST 环境变量）。"
+                             "也可用环境变量 PLAITA_WORKER_LANGFUSE=1 开启")
 
     args = parser.parse_args()
     if args.quiet:
         logging.getLogger().setLevel(logging.WARNING)
+
+    callback_handlers = []
+    if args.langfuse or os.environ.get("PLAITA_WORKER_LANGFUSE") == "1":
+        try:
+            from plaita.obs import LangfuseCallback
+
+            callback_handlers.append(LangfuseCallback())
+            logger.info("Langfuse 观测已启用（trace id = 运行时 $EXECUTION_ID）")
+        except ImportError as e:
+            logger.warning("Langfuse 观测未启用（缺依赖）: %s", e)
+        except Exception as e:  # noqa: BLE001 — SDK 初始化失败（如缺凭据）只降级不退出
+            logger.warning("Langfuse 观测未启用: %s", e)
 
     # 外部业务节点模块加载（与 console 的 PLAITA_CONSOLE_NODE_MODULES 约定对齐）：
     # PLAITA_NODE_PATH 冒号分隔追加 sys.path；PLAITA_NODE_MODULES 逗号分隔，
@@ -884,6 +935,7 @@ def main():
             execution_storage=execution_storage,
             flow_storage=flow_storage,
             event_bus=event_bus,
+            callback_handlers=callback_handlers or None,
             cache_size=args.cache_size,
             cache_ttl=args.cache_ttl,
             enable_registry=enable_registry,
