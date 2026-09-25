@@ -11,6 +11,8 @@ _EXTRAS_GUIDE = {
     # http extra 实际含 requests + aiohttp 两个依赖，只探测 requests 会让
     # "缺 extra 可操作报错"的承诺在只装 requests 时落空（运行时才炸）。
     "http": (("requests", "aiohttp"), "pip install plaita[http]"),
+    # 观测适配（plaita.obs.LangfuseCallback，SDK v3 = OTel 内核一代）
+    "langfuse": ("langfuse", "pip install plaita[langfuse]"),
 }
 
 
@@ -76,6 +78,7 @@ _FEATURE_EXTRAS_MAP = {
     "RedisEventBus": "redis",
     "CodeNode": "code",
     "HTTP": "http",
+    "LangfuseCallback": "langfuse",
 }
 
 # Canonical home for each lazily re-exported public name. Kept explicit so
@@ -133,6 +136,7 @@ _EXTRA_EXPORTS = {
     "RedisEventBus": "plaita.event.redis",
     "CodeNode": "plaita.node.code",
     "HTTP": "plaita.node.http",
+    "LangfuseCallback": "plaita.obs",
 }
 
 

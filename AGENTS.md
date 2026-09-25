@@ -23,6 +23,7 @@ plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distri
 - `plaita/node/` — 内置节点与 registry
 - `plaita/event/` · `plaita/storage/` — 事件总线与执行状态
 - `plaita/dsl/` — `@flow` / builder / sexpr
+- `plaita/obs.py` — 执行观测适配（`LangfuseCallback`，langfuse extra；只依赖 `FlowCallback` 窄接口）
 - `plaita/server/` — FlowWorker 与外延服务（optional）
 - `plaita-console/` — FastAPI + React 管理台（backend API 面与集群档链路经 argusai E2E 覆盖）
 - `tests/unit/` — 单测与 `*_mutations.py`

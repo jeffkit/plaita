@@ -102,6 +102,43 @@ def execute(self, execution):
 
 `FlowExecution` 不再提供 `trigger_*` 魔法捷径——所有可用的 facade 方法都是显式声明的，避免属性查找的黑箱。
 
+## 集成：Langfuse（`plaita.obs.LangfuseCallback`）
+
+官方观测适配器把 8 个钩子映射到 Langfuse 的 trace / span / generation 模型：
+
+| 钩子 | Langfuse 对象 |
+|------|---------------|
+| `on_flow_start` | trace（name = flow_id，tags 自动附 `flow:<flow_id>`） |
+| `on_node_start` / `on_node_end` | span；输出形如 `{"model", "usage", ...}`（llm 节点契约）时额外记 generation，OpenAI 用量键自动换算为 `{input, output, total, unit}` |
+| `on_flow_suspend` / `on_node_suspend` | 立即 flush（挂起进程随时可能消失） |
+| `on_flow_end` | trace 收口（output / level）+ flush |
+
+```bash
+pip install plaita[langfuse]
+export LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=... LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+```python
+from plaita import FlowExecution
+from plaita.obs import LangfuseCallback
+
+execution = FlowExecution(callback_handlers=[LangfuseCallback()])
+execution.run_compatible(flow, False)
+```
+
+### Distributed 模式的跨进程续写
+
+trace id 只读自 `flow.global_context["langfuse_trace_id"]`（键名可配），未设置时现场生成。
+global_context 在执行启动时拷贝进执行状态，回调读的是 Flow 对象上的那份——因此**每个进程**
+重建 Flow 时都要注入同一个 key（与 dry_run 等全局变量同一通道），各步骤才会落在同一条 trace 上。
+
+### 错误语义
+
+内核只在节点**成功**路径发 `on_node_end`；abort 策略的节点失败以 `NodeExecutionError`
+穿透、不触发 `on_flow_end`——此时 trace/span 保持 open，由宿主收尾（Langfuse TTL 兜底）。
+`on_node_end(error=...)` / `on_flow_end(error=...)` 的 ERROR 标记契约保留，供未来内核补发
+或自定义节点手动触发。适配器内部任何异常都吞掉记 warning，不影响流程执行。
+
 ## 下一步
 
 - [调试](debugging.md) —— 回调 + Generator 模式构建调试器

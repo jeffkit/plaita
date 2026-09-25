@@ -141,6 +141,7 @@ plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`、`croniter
 | `yaml` | `pip install plaita[yaml]` | YAML 格式流程定义 |
 | `sqlalchemy` | `pip install plaita[sqlalchemy]` | SQLAlchemy EventBus / Storage（实验性） |
 | `credentials` | `pip install plaita[credentials]` | 凭据加密（`plaita.credentials`） |
+| `langfuse` | `pip install plaita[langfuse]` | Langfuse 观测适配（`plaita.obs.LangfuseCallback`） |
 | `all` | `pip install plaita[all]` | 上述全部 |
 
 缺失 extra 时会抛出**可操作的 `ImportError`**，明确提示安装哪个 extra。
@@ -260,6 +261,26 @@ client = PlaitaClient('your-secret-id', 'your-secret-key')
 result = client.run_flow('259', '0.0.2', {"age": 14})
 print(result)
 ```
+
+---
+
+## 可观测性（plaita.obs）
+
+`LangfuseCallback`（`pip install plaita[langfuse]`）把 8 个生命周期钩子映射到 Langfuse 的
+trace / span / generation 模型：流程 → trace、节点 → span、LLM 形状输出（含 `usage`）→
+generation，token 用量自动归并到 run 级；挂起即 flush，Distributed 模式把
+`langfuse_trace_id` 写进 `globalContext` 即可跨进程续写同一条 trace。
+
+```python
+from plaita import FlowExecution
+from plaita.obs import LangfuseCallback   # 凭据经 LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST 环境变量
+
+execution = FlowExecution(callback_handlers=[LangfuseCallback()])
+execution.run_compatible(flow, False)
+```
+
+注意：abort 策略的节点失败以异常穿透、不触发 `on_flow_end`（内核现状），此时 trace 保持
+open；ERROR 标记契约见 `plaita/obs.py` 模块文档。
 
 ---
 

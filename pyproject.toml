@@ -44,6 +44,9 @@ server = [
 code = ["PyExecJS", "RestrictedPython>=7.0"]
 http = ["requests", "aiohttp>=3.8.0"]
 yaml = ["PyYAML>=6.0"]
+# 观测适配：plaita.obs.LangfuseCallback 按 SDK v3（OTel 内核）的
+# trace/span/generation 与 usage {input,output,total} 契约编写
+langfuse = ["langfuse>=3.0"]
 dev = [
     "pytest",
     "pytest-asyncio",
@@ -69,7 +72,7 @@ lint = [
     "black",
     "ruff>=0.6",
 ]
-all = ["plaita[redis,server,code,http,yaml,sqlalchemy,credentials]"]
+all = ["plaita[redis,server,code,http,yaml,sqlalchemy,credentials,langfuse]"]
 
 [project.urls]
 Homepage = "https://jeffkit.github.io/plaita/"
