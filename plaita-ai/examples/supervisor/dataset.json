@@ -1,0 +1,1 @@
+{"cases": [{"id": "ada", "input": {"name": "ada"}, "expect": {"contains": "hello ada"}}, {"id": "bob", "input": {"name": "bob"}, "expect": {"contains": "hello bob"}}, {"id": "carol", "input": {"name": "carol"}, "expect": {"contains": "hello carol"}}]}

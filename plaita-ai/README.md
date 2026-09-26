@@ -233,6 +233,28 @@ result = sup.run_loop("my-flow", load_dataset("evals/my-flow/"))
 每个 case `{"id", "input", "expect"}`；expect 支持 `contains` / `equals_path` /
 `not_empty` / `judge`（LLM 评审，未配置 judge 时该维度跳过而非瞎猜）。
 
+## 场景 5：金丝雀 / 影子切分（0.3.0）
+
+promote 之前的最后一道实证：让候选版本先在**真实流量**上证明自己。
+
+- **split**：按 `canary_key` 的稳定哈希把真实执行分流到 baseline/candidate 双臂
+  （同一 key 永远同一臂），逐次记录结果;
+- **shadow**：生产流量不受影响——baseline 真跑返回给调用方，candidate 用同输入走
+  console 进程内 dry-run。**零风险**的上线前验证。
+
+```python
+from plaita_ai.canary import CanaryRun, CanaryPolicy, shadow_once
+
+run = CanaryRun(client, "my-flow", candidate_version="1.3.0",
+                policy=CanaryPolicy(mode="shadow"))   # 或 mode="split", ratio=0.1
+out = run.invoke({"city": "北京"})       # 调用方拿到的永远是 baseline 结果
+print(run.report())                       # 双臂成功率/时延对比
+print(run.verdict(min_count=10))          # keep_running / promote / rollback + 发布命令
+```
+
+运行状态可 `to_dict()` / `from_dict()` 序列化（JSON），金丝雀可以跨进程续跑。
+MCP 侧:`canary_shadow_once`（单输入影子检查）/ `canary_verdict`（从序列化状态出建议）。
+
 ## Skill
 
 内置 skill 位于 `plaita_ai/skills/`，是唯一权威副本，随包分发。软链到用户 skill 目录即可：
@@ -256,7 +278,7 @@ pytest tests/ -q
 ## 后续
 
 - [x] 0.2.0：console ops 工具面 + runtime evals + supervisor 循环（人签 promote）
-- [ ] 金丝雀/影子流量切分（双版本并行对比的调度策略）
+- [x] 0.3.0：金丝雀/影子流量切分（split sticky 双臂 + shadow 零风险验证 + verdict 建议）
 - [x] agent-benchmark 增加 `--arm mcp` 对比  
 - [ ] FoT / ReAct：LLMNode / RetrieverNode 与 `examples/agent` 对齐  
 - [ ] 修 `@flow` PARALLEL+INPUT / REDUCE 运行时 bug（REDUCE 现象为 IndexError，由 NodeExecutionError 包裹抛出）  

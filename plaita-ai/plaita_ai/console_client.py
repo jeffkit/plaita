@@ -143,6 +143,9 @@ class ConsoleClient:
     def get_flow(self, flow_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/flows/{flow_id}")
 
+    def create_flow(self, flow_id: str, author: str = "plaita-ai", desc: str = "") -> Dict[str, Any]:
+        return self._request("POST", "/flows", json={"flow_id": flow_id, "author": author, "desc": desc})
+
     def get_version(self, flow_id: str, version: str) -> Dict[str, Any]:
         return self._request("GET", f"/flows/{flow_id}/versions/{version}")
 

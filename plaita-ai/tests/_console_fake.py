@@ -119,6 +119,15 @@ class FakeConsole:
             return httpx.Response(401, json={"detail": "unauthorized"})
 
         # flows ----------------------------------------------------------
+        if route == "/flows" and method == "POST":
+            flow_id = body.get("flow_id", "")
+            if not flow_id:
+                return httpx.Response(422, json={"detail": "flow_id required"})
+            self.flows.setdefault(
+                flow_id,
+                {"flow_id": flow_id, "author": body.get("author", ""), "desc": body.get("desc", ""), "versions": {}, "order": []},
+            )
+            return httpx.Response(200, json={"flow_id": flow_id})
         if route == "/flows" and method == "GET":
             flows = [
                 {

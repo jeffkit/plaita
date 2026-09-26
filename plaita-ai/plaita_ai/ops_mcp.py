@@ -240,3 +240,29 @@ def register(mcp: Any) -> None:
         from plaita_ai.evals import load_dataset
 
         return supervisor.run_loop(flow_id, load_dataset(dataset_path))
+
+    # -- canary / shadow -------------------------------------------------
+
+    @mcp.tool()
+    @_guarded
+    def canary_shadow_once(
+        flow_id: str, candidate_version: str, params_json: str = "{}", baseline_version: Optional[str] = None
+    ) -> str:
+        """Stateless one-input shadow check: the baseline version runs for real
+        while the candidate receives the same input as an in-process dry-run.
+        Returns both outputs side by side — the zero-risk pre-promote check."""
+        from plaita_ai.canary import shadow_once
+
+        params = json.loads(params_json) if params_json else {}
+        return shadow_once(_get_client(), flow_id, candidate_version, params, baseline_version=baseline_version)
+
+    @mcp.tool()
+    @_guarded
+    def canary_verdict(state_json: str, min_count: int = 10, tolerance: float = 0.02) -> str:
+        """Promote/rollback recommendation from a serialized CanaryRun state
+        (the {"flow_id", "baseline_version", "candidate_version", "policy",
+        "records"} dict)."""
+        from plaita_ai.canary import CanaryRun
+
+        run = CanaryRun.from_dict(_get_client(), json.loads(state_json))
+        return run.verdict(min_count=min_count, tolerance=tolerance)

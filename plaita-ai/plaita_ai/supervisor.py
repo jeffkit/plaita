@@ -194,7 +194,6 @@ class Supervisor:
 
     def iterate(self, flow_id: str, dataset: Dataset) -> Dict[str, Any]:
         """One full iteration; returns a JSON-able IterationResult dict."""
-        policy = self.policy
         baseline = self.baseline(flow_id, dataset)
         context = {
             "flow_id": flow_id,
@@ -217,6 +216,26 @@ class Supervisor:
         if not proposal or not proposal.get("definition"):
             result["reason"] = "proposer returned no candidate"
             return result
+        return self.evaluate_proposal(flow_id, dataset, proposal, baseline=baseline)
+
+    def evaluate_proposal(
+        self,
+        flow_id: str,
+        dataset: Dataset,
+        proposal: Dict[str, Any],
+        baseline: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Save one proposal as the next patch version, evaluate it against the
+        dataset, compare with the baseline, and apply the promote gate. This is
+        the reusable half of :meth:`iterate` (the flow template calls it
+        directly, with the proposal produced upstream)."""
+        policy = self.policy
+        baseline = baseline or self.baseline(flow_id, dataset)
+        result: Dict[str, Any] = {
+            "flow_id": flow_id,
+            "baseline_version": baseline.get("version"),
+            "baseline_avg_score": baseline.get("avg_score"),
+        }
 
         # Save as the next patch version so humans can see the lineage.
         detail = self.client.get_flow(flow_id)
