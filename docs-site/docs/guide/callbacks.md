@@ -109,7 +109,7 @@ def execute(self, execution):
 | 钩子 | Langfuse 对象 |
 |------|---------------|
 | `on_flow_start` | trace（name = flow_id，tags 自动附 `flow:<flow_id>`） |
-| `on_node_start` / `on_node_end` | span；输出形如 `{"model", "usage", ...}`（llm 节点契约）时额外记 generation，OpenAI 用量键自动换算为 `{input, output, total, unit}` |
+| `on_node_start` / `on_node_end` | span；输出形如 `{"model", "usage", ...}`（llm 节点契约）时额外记 generation，OpenAI 用量键自动换算为 `{input, output, total}` |
 | `on_flow_suspend` / `on_node_suspend` | 立即 flush（挂起进程随时可能消失） |
 | `on_flow_end` | trace 收口（output / level）+ flush |
 
@@ -134,10 +134,12 @@ trace id 解析链：`flow.global_context["langfuse_trace_id"]`（显式 key，�
 `cb.bind_execution(execution)`**，同一条分布式流程的所有步骤（含另一进程的 resume）自动
 落在同一条 trace 上，无需注入流程定义。plaita-console 与 FlowWorker 的内建接线即此模式。
 
-### 终结 flush 的宿主责任
+### 终态收尾的宿主责任
 
-distributed 模式下内核不发 `on_flow_end`（is_end 由宿主循环判定），宿主在 run 终结
-（completed / failed）时应调用 `cb.flush()`——FlowWorker 与 console 的内建接线已内置。
+distributed 模式下内核不发 `on_flow_end`（is_end 由宿主循环判定）。v4 的流程根是
+真 OTel span，不 end 不导出——宿主在 run 终结（completed / failed）时应调用
+`cb.finalize()`（收口根 span + flush）；挂起场景用 `cb.flush()`（根保持 open 供
+resume 续写）。FlowWorker 与 console 的内建接线已内置 finalize。
 
 ### 错误语义
 

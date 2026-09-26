@@ -2,15 +2,16 @@
 
 langfuse SDK 从不真装：fake 模块注入 ``sys.modules["langfuse"]``，
 构造路径（``client=None``）经惰性 import 命中 fake；注入 client 的路径
-则完全绕开 SDK。断言面是"发给 Langfuse 的对象形状"，不是 SDK 行为。
+则完全绕开 SDK。断言面是"发给 Langfuse 的对象形状"（SDK v4 API：
+create_trace_id / start_observation / OTel 根属性）。
 
 错误语义与内核对齐（runner 只在成功路径发 on_node_end）：abort 策略下
-错误节点的 span 保持 open、flow 级经 on_flow_end(exception) 标 ERROR——
-span 级 ERROR 标记只在直调 on_node_end(error=...) 时生效，契约保留给
-未来内核补发错误回调 / 手动触发场景。
+错误节点与整条 run 的回调都不再发——span 级 ERROR 标记只在直调
+on_node_end(error=...) 时生效，契约保留给未来内核补发 / 手动触发场景。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import unittest
@@ -22,8 +23,28 @@ from plaita.core.errors import NodeExecutionError
 from plaita.event.memory import InMemoryEventBus
 from plaita.obs import LangfuseCallback, map_openai_usage
 
+# Langfuse v4 trace 级 OTel 属性名（字面量，与 SDK LangfuseOtelSpanAttributes
+# 对齐——CI 环境不装真 SDK，字面量同时锁死契约）
+TRACE_NAME = "langfuse.trace.name"
+TRACE_TAGS = "langfuse.trace.tags"
+TRACE_METADATA = "langfuse.trace.metadata"
+TRACE_SESSION_ID = "session.id"
+TRACE_USER_ID = "user.id"
+
 
 # ---------------------------------------------------------------- fake SDK
+
+class FakeRawSpan:
+    """根 span 的 OTel 载体：记录 set_attributes（trace 级身份）。"""
+
+    def __init__(self, recorder: "FakeRecorder"):
+        self.recorder = recorder
+        self.attrs: Dict[str, Any] = {}
+
+    def set_attributes(self, attrs):
+        self.attrs.update(attrs)
+        self.recorder.root_attrs.append(dict(attrs))
+
 
 class FakeObservation:
     def __init__(self, recorder: "FakeRecorder", kind: str, **kwargs):
@@ -32,6 +53,7 @@ class FakeObservation:
         self.kwargs = kwargs
         self.updates: List[Dict[str, Any]] = []
         self.ended = False
+        self._otel_span = FakeRawSpan(recorder)
         recorder.observations.append(self)
 
     def update(self, **kwargs):
@@ -40,28 +62,31 @@ class FakeObservation:
     def end(self, **kwargs):
         self.ended = True
 
-    def span(self, **kwargs):
-        return self._child("span", **kwargs)
-
-    def generation(self, **kwargs):
-        return self._child("generation", **kwargs)
-
-    def _child(self, kind: str, **kwargs):
-        recorder = self.kwargs["_recorder"]
+    def start_observation(self, **kwargs):
+        recorder = self._otel_span.recorder
+        kind = kwargs.get("as_type", "span")
         return FakeObservation(recorder, kind, _recorder=recorder, **kwargs)
 
 
 class FakeRecorder:
-    """fake client，同时收集全部上报对象。"""
+    """fake client（SDK v4 形状）：create_trace_id/start_observation/flush。"""
 
     def __init__(self):
         self.observations: List[FakeObservation] = []
-        self.trace_kwargs: List[Dict[str, Any]] = []
+        self.roots: List[Dict[str, Any]] = []
+        self.root_attrs: List[Dict[str, Any]] = []
+        self.trace_id_seeds: List[str] = []
         self.flushes = 0
 
-    def trace(self, **kwargs):
-        self.trace_kwargs.append(kwargs)
-        return FakeObservation(self, "trace", _recorder=self, **kwargs)
+    def create_trace_id(self, seed: Optional[str] = None) -> str:
+        self.trace_id_seeds.append(str(seed))
+        # 32 位 hex、由种子确定——与真 SDK 的派生契约对齐
+        return hashlib.md5(str(seed).encode()).hexdigest()
+
+    def start_observation(self, **kwargs):
+        self.roots.append(kwargs)
+        return FakeObservation(self, kwargs.get("as_type", "span"),
+                               _recorder=self, **kwargs)
 
     def flush(self):
         self.flushes += 1
@@ -76,8 +101,11 @@ class FakeLangfuseClient:
         self.recorder = FakeRecorder()
         FakeLangfuseClient.last_kwargs = kwargs
 
-    def trace(self, **kwargs):
-        return self.recorder.trace(**kwargs)
+    def create_trace_id(self, seed: Optional[str] = None) -> str:
+        return self.recorder.create_trace_id(seed=seed)
+
+    def start_observation(self, **kwargs):
+        return self.recorder.start_observation(**kwargs)
 
     def flush(self):
         self.recorder.flushes += 1
@@ -92,15 +120,15 @@ class FakeLangfuseModule:
 class TestMapOpenaiUsage(unittest.TestCase):
     def test_openai_shape_translated(self):
         out = map_openai_usage({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
-        self.assertEqual(out, {"input": 10, "output": 5, "total": 15, "unit": "TOKENS"})
+        self.assertEqual(out, {"input": 10, "output": 5, "total": 15})
 
     def test_partial_openai_keys_kept(self):
         out = map_openai_usage({"total_tokens": 7})
-        self.assertEqual(out, {"total": 7, "unit": "TOKENS"})
+        self.assertEqual(out, {"total": 7})
 
-    def test_native_shape_passthrough(self):
-        native = {"input": 1, "output": 2, "unit": "TOKENS"}
-        self.assertEqual(map_openai_usage(native), native)
+    def test_non_int_values_dropped(self):
+        out = map_openai_usage({"prompt_tokens": 10, "unit": "TOKENS"})
+        self.assertEqual(out, {"input": 10})
 
     def test_non_dict_returns_none(self):
         self.assertIsNone(map_openai_usage(None))
@@ -201,30 +229,35 @@ class TestRealFlowIntegration(unittest.TestCase):
 
     def test_trace_identity_from_global_context(self):
         _run(self.flow_json, self.cb, self.registry)
-        self.assertEqual(len(self.recorder.trace_kwargs), 1)
-        kwargs = self.recorder.trace_kwargs[0]
-        self.assertEqual(kwargs["id"], "tr-fixed-1")
-        self.assertEqual(kwargs["name"], "obs-flow")
-        self.assertEqual(kwargs["session_id"], "sess-9")
-        self.assertEqual(kwargs["user_id"], "u-7")
-        self.assertIn("flow:obs-flow", kwargs["tags"])
-        self.assertEqual(kwargs["metadata"]["flow_id"], "obs-flow")
+        # 语义 id 经 create_trace_id(seed=) 确定性派生
+        self.assertEqual(self.recorder.trace_id_seeds, ["tr-fixed-1"])
+        root = self.recorder.roots[0]
+        self.assertEqual(root["name"], "obs-flow")
+        self.assertRegex(root["trace_context"]["trace_id"], r"^[0-9a-f]{32}$")
+        # trace 级身份走根 span 的 OTel 属性
+        attrs = self.recorder.root_attrs[0]
+        self.assertEqual(attrs[TRACE_NAME], "obs-flow")
+        self.assertIn("flow:obs-flow", attrs[TRACE_TAGS])
+        self.assertEqual(attrs[TRACE_SESSION_ID], "sess-9")
+        self.assertEqual(attrs[TRACE_USER_ID], "u-7")
+        self.assertIn("flow_id", json.loads(attrs[TRACE_METADATA]))
 
     def test_spans_and_generation_shape(self):
         result = _run(self.flow_json, self.cb, self.registry)
         self.assertEqual(result, "生成的文本")
         spans = {o.name: o for o in self.recorder.observations if o.kind == "span"}
         gens = [o for o in self.recorder.observations if o.kind == "generation"]
-        # start / call / end 三个节点各一条 span，且全部收口
-        self.assertEqual(set(spans), {"start", "call", "end"})
+        # 根 span（流程）+ start/call/end 三个节点 span，全部收口（v4 根是
+        # 真 OTel span，on_flow_end 必须 end 它才导出）
+        self.assertEqual(set(spans), {"obs-flow", "start", "call", "end"})
         self.assertTrue(all(s.ended for s in spans.values()))
-        # llm 形状输出 → 一条 generation，usage 换算为 v3 形状
+        # llm 形状输出 → 一条 generation，usage 换算为 v4 usage_details
         self.assertEqual(len(gens), 1)
         gen = gens[0]
         self.assertEqual(gen.name, "call.generation")
         self.assertEqual(gen.kwargs["model"], "glm-5")
-        self.assertEqual(gen.kwargs["usage"],
-                         {"input": 10, "output": 5, "total": 15, "unit": "TOKENS"})
+        self.assertEqual(gen.kwargs["usage_details"],
+                         {"input": 10, "output": 5, "total": 15})
         self.assertEqual(gen.kwargs["output"], "生成的文本")
         self.assertTrue(gen.ended)
 
@@ -235,16 +268,13 @@ class TestRealFlowIntegration(unittest.TestCase):
     def test_random_trace_id_without_key(self):
         self.flow_json["globalContext"] = {}
         _run(self.flow_json, self.cb, self.registry)
-        trace_id = self.recorder.trace_kwargs[0]["id"]
-        self.assertTrue(trace_id.startswith("obs-flow-"))
-        suffix = trace_id.rsplit("-", 1)[1]
-        self.assertRegex(suffix, r"^[0-9a-f]{12}$")
+        seed = self.recorder.trace_id_seeds[0]
+        self.assertTrue(seed.startswith("obs-flow-"))
 
     def test_abort_leaves_trace_open(self):
         """abort 策略（内核现状）：错误节点与整条 run 的回调都不再发——
         on_node_end 只走成功路径，NodeExecutionError 直接穿透不触发
-        on_flow_end。trace/span 保持 open，由宿主决定收尾（Langfuse 侧
-        TTL 兜底）；ERROR 标记路径见 TestDirectErrorHooks。"""
+        on_flow_end。span 保持 open，由宿主收尾（Langfuse TTL 兜底）。"""
         flow_json = {
             "flow_id": "obs-boom",
             "inputType": {"dataType": "object"},
@@ -259,8 +289,6 @@ class TestRealFlowIntegration(unittest.TestCase):
         spans = {o.name: o for o in self.recorder.observations if o.kind == "span"}
         self.assertIn("boom", spans)
         self.assertFalse(spans["boom"].ended)
-        trace = [o for o in self.recorder.observations if o.kind == "trace"][0]
-        self.assertEqual(trace.updates, [{"metadata": {"status": "running"}}])
 
     def test_content_clip(self):
         big_node = type("BigNode", (Node,), {
@@ -285,7 +313,7 @@ class TestRealFlowIntegration(unittest.TestCase):
 
     def test_sdk_failure_does_not_break_flow(self):
         class ExplodingClient:
-            def trace(self, **kwargs):
+            def create_trace_id(self, seed=None):
                 raise RuntimeError("sdk down")
 
             def flush(self):
@@ -313,7 +341,8 @@ class TestDirectErrorHooks(unittest.TestCase):
 
         cb.on_node_start(F(), N())
         cb.on_node_end(F(), N(), error="炸了")
-        span = [o for o in recorder.observations if o.kind == "span"][0]
+        span = [o for o in recorder.observations
+                if o.kind == "span" and o.name == "n1"][0]
         self.assertEqual(span.updates[0]["level"], "ERROR")
         self.assertEqual(span.updates[0]["status_message"], "炸了")
         self.assertTrue(span.ended)
@@ -334,16 +363,7 @@ class TestDirectErrorHooks(unittest.TestCase):
 
 
 class TestBoundExecutionTraceId(unittest.TestCase):
-    """bind_execution：trace id 解析链第 2 级——运行时 $EXECUTION_ID。"""
-
-    class FakeExecutionState:
-        express_prefix = "$"
-
-        def __init__(self, execution_id: str):
-            self._id = execution_id
-
-        def get_state(self, key, default=None):
-            return self._id if key == "$EXECUTION_ID" else default
+    """bind_execution：语义 trace id 解析链第 2 级——运行时 $EXECUTION_ID。"""
 
     def setUp(self):
         self.recorder = FakeRecorder()
@@ -366,32 +386,32 @@ class TestBoundExecutionTraceId(unittest.TestCase):
         execution.run_compatible(flow, False)
         return str(execution.get_state("$EXECUTION_ID"))
 
-    def test_trace_id_from_execution_state(self):
+    def test_trace_seed_from_execution_state(self):
         exec_id = self._run_bound()
         self.assertTrue(exec_id)
-        self.assertEqual(self.recorder.trace_kwargs[0]["id"], exec_id)
+        self.assertEqual(self.recorder.trace_id_seeds, [exec_id])
+        self.assertRegex(self.recorder.roots[0]["trace_context"]["trace_id"],
+                         r"^[0-9a-f]{32}$")
 
     def test_rebind_resets_run_state(self):
         """常驻宿主复用回调实例：换 execution 绑定必须换 trace。"""
         first = self._run_bound()
         second = self._run_bound()
         self.assertNotEqual(first, second)
-        ids = [kw["id"] for kw in self.recorder.trace_kwargs]
-        self.assertEqual(ids, [first, second])
+        self.assertEqual(self.recorder.trace_id_seeds, [first, second])
 
     def test_global_context_key_overrides_execution_state(self):
         self.flow_json["globalContext"] = {"langfuse_trace_id": "tr-explicit"}
         flow = Flow.from_string(json.dumps(self.flow_json))
         execution = FlowExecution(callback_handlers=[self.cb])
         self.cb.bind_execution(execution)
-        execution.set_state("$EXECUTION_ID", "exec-ignored")
         execution.run_compatible(flow, False)
-        self.assertEqual(self.recorder.trace_kwargs[0]["id"], "tr-explicit")
+        self.assertEqual(self.recorder.trace_id_seeds, ["tr-explicit"])
 
     def test_unbound_falls_back_to_random(self):
         flow = Flow.from_string(json.dumps(self.flow_json))
         FlowExecution(callback_handlers=[self.cb]).run_compatible(flow, False)
-        self.assertTrue(self.recorder.trace_kwargs[0]["id"].startswith("obs-bind-"))
+        self.assertTrue(self.recorder.trace_id_seeds[0].startswith("obs-bind-"))
 
 
 class TestRunIsolation(unittest.TestCase):
@@ -411,12 +431,12 @@ class TestRunIsolation(unittest.TestCase):
         }
         _run(flow_json, cb, registry)
         _run(flow_json, cb, registry)
-        self.assertEqual(len(recorder.trace_kwargs), 2)
-        self.assertNotEqual(recorder.trace_kwargs[0]["id"], recorder.trace_kwargs[1]["id"])
+        self.assertEqual(len(recorder.roots), 2)
+        self.assertNotEqual(recorder.trace_id_seeds[0], recorder.trace_id_seeds[1])
 
 
 class TestDistributedContract(unittest.TestCase):
-    """挂起 flush + 跨进程（新 Flow 对象 + 新执行实例）按同一 trace id 续写。"""
+    """挂起 flush + 跨进程（新 Flow 对象 + 新执行实例）按同一语义 id 续写。"""
 
     def test_suspend_flush_and_cross_process_trace_id(self):
         recorder = FakeRecorder()
@@ -448,8 +468,42 @@ class TestDistributedContract(unittest.TestCase):
         while not step2["is_end"]:
             step2 = execution2.run_distributed(
                 flow2, None, saved_context=step2["context"], resume_type="continue")
-        trace_ids = [kw["id"] for kw in recorder.trace_kwargs]
-        self.assertEqual(trace_ids, ["tr-dist-1", "tr-dist-1"])
+        # 两个进程的语义 id 同源 → 派生 trace id 相同
+        self.assertEqual(recorder.trace_id_seeds, ["tr-dist-1", "tr-dist-1"])
+        # 宿主终态调用 finalize：收口 root（distributed 不发 on_flow_end）
+        cb2.finalize()
+        roots = [o for o in recorder.observations if o.kind == "span"
+                 and o.name == "obs-dist"]
+        self.assertEqual(len(roots), 2)  # 两个进程各一个虚拟根
+        self.assertTrue(roots[-1].ended)  # 进程 2 的根被 finalize 收口
+        self.assertFalse(roots[0].ended)  # 进程 1 挂起未终态，root 保持 open
+
+    def test_finalize_idempotent_and_closes_root(self):
+        """finalize：无 on_flow_end 场景收口 root；重复调用不炸。"""
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder)
+        flow_json = {
+            "flow_id": "obs-fin",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "end"},
+                {"type": "end", "id": "end", "output": "ok", "resultType": "success"},
+            ],
+        }
+        flow = Flow.from_string(json.dumps(flow_json))
+        execution = FlowExecution(event_bus=InMemoryEventBus(), callback_handlers=[cb])
+        cb.bind_execution(execution)
+        step = execution.run_distributed(flow, {})
+        while not step["is_end"]:
+            step = execution.run_distributed(flow, None, saved_context=step["context"],
+                                             resume_type="continue")
+        root = [o for o in recorder.observations
+                if o.kind == "span" and o.name == "obs-fin"][0]
+        self.assertFalse(root.ended)
+        cb.finalize()
+        self.assertTrue(root.ended)
+        cb.finalize()  # 幂等
+        self.assertGreaterEqual(recorder.flushes, 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

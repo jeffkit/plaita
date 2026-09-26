@@ -37,29 +37,33 @@ class FakeSpan:
     def end(self, **kwargs):
         pass
 
-    def span(self, **kwargs):
-        return FakeSpan(self.store, **kwargs)
-
-    def generation(self, **kwargs):
+    def start_observation(self, **kwargs):
         return FakeSpan(self.store, **kwargs)
 
 
-class FakeTrace(FakeSpan):
+class FakeRootSpan(FakeSpan):
     def __init__(self, store, **kwargs):
         super().__init__(store, **kwargs)
-        store["traces"].append(kwargs)
-        self.kind = "trace"
+        store["roots"].append(kwargs)
 
 
 class FakeLangfuseClient:
+    """SDK v4 形状：create_trace_id + start_observation。"""
+
     instances: list = []
 
     def __init__(self, **kwargs):
-        self.store = {"traces": [], "spans": [], "flushes": 0}
+        self.store = {"roots": [], "spans": [], "flushes": 0, "seeds": []}
         FakeLangfuseClient.instances.append(self)
 
-    def trace(self, **kwargs):
-        return FakeTrace(self.store, **kwargs)
+    def create_trace_id(self, seed=None):
+        import hashlib
+
+        self.store["seeds"].append(str(seed))
+        return hashlib.md5(str(seed).encode()).hexdigest()
+
+    def start_observation(self, **kwargs):
+        return FakeRootSpan(self.store, **kwargs)
 
     def flush(self):
         self.store["flushes"] += 1
@@ -121,9 +125,9 @@ def test_trace_id_is_console_execution_id(app, client, clean_instances, monkeypa
 
     assert len(FakeLangfuseClient.instances) == 1
     store = FakeLangfuseClient.instances[0].store
-    assert store["traces"], "未产生任何 trace"
-    assert store["traces"][0]["id"] == execution_id
-    assert store["traces"][0]["name"] == "hello-plaita"
+    assert store["roots"], "未产生任何 trace"
+    assert store["seeds"] == [execution_id]  # 语义 id = console 执行实例 ID
+    assert store["roots"][0]["name"] == "hello-plaita"
     assert store["flushes"] >= 1
 
 
@@ -146,7 +150,8 @@ def test_forced_on_without_public_key_still_observes(app, client, clean_instance
     execution_id = _start(client)
     _wait_completed(client, execution_id)
     assert len(FakeLangfuseClient.instances) == 1
-    assert FakeLangfuseClient.instances[0].store["traces"][0]["id"] == execution_id
+    assert FakeLangfuseClient.instances[0].store["roots"]
+    assert FakeLangfuseClient.instances[0].store["seeds"] == [execution_id]
 
 
 def test_missing_extra_degrades_gracefully(app, client, clean_instances, monkeypatch):

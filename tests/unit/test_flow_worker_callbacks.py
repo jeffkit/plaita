@@ -129,7 +129,8 @@ class TestObserverBinding:
         result = worker.start_flow(flow_id="a4-multi", params={}, version="1.0.0")
         assert result.get("is_end") is True
         assert result.get("execution_id")
-        assert recorder.trace_kwargs, "LangfuseCallback 未收到任何 trace"
-        assert recorder.trace_kwargs[0]["id"] == result["execution_id"]
+        assert recorder.trace_id_seeds, "LangfuseCallback 未派生任何 trace"
+        # 语义 id = 运行时 execution_id（create_trace_id(seed=) 派生 32 位 hex）
+        assert recorder.trace_id_seeds == [result["execution_id"]]
         # distributed 模式内核不发 on_flow_end，终结 flush 由宿主负责
         assert recorder.flushes >= 1

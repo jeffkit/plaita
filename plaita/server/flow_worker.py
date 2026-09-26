@@ -139,19 +139,23 @@ class FlowWorker:
         
         return flow
     
-    def _flush_observers(self) -> None:
-        """run 终结（completed/failed）时冲刷观测回调。
+    def _finalize_observers(self) -> None:
+        """run 终结（completed/failed）时收尾观测回调。
 
-        distributed 模式下内核不发 on_flow_end（is_end 由宿主循环判定），
-        Langfuse 等批量上报的观测回调需要宿主显式 flush。
+        distributed 模式下内核不发 on_flow_end（is_end 由宿主循环判定）。
+        观测回调实现 finalize()（如 LangfuseCallback：收口根 span + flush）
+        则终态调用之，仅有 flush() 的退化为直接 flush。
         """
         for handler in self.callback_handlers:
+            finalizer = getattr(handler, "finalize", None)
             flusher = getattr(handler, "flush", None)
-            if callable(flusher):
-                try:
+            try:
+                if callable(finalizer):
+                    finalizer()
+                elif callable(flusher):
                     flusher()
-                except Exception:
-                    logger.warning("观测回调 flush 失败: %r", handler, exc_info=True)
+            except Exception:
+                logger.warning("观测回调终态收尾失败: %r", handler, exc_info=True)
 
     def _bind_observers(self, execution) -> None:
         """把执行实例通知给支持 ``bind_execution`` 的观测回调（plaita.obs）。
@@ -226,7 +230,7 @@ class FlowWorker:
 
         except Exception as e:
             logger.error("执行流程出错: %s", e, exc_info=True)
-            self._flush_observers()
+            self._finalize_observers()
             raise RuntimeError(f"执行流程出错: {e}")
 
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -332,7 +336,7 @@ class FlowWorker:
             state.end_time = datetime.now().isoformat()
 
             self.execution_storage.save_execution_state(execution_id, state)
-            self._flush_observers()
+            self._finalize_observers()
 
             raise RuntimeError(f"恢复流程执行出错: {e}")
         finally:
@@ -408,7 +412,7 @@ class FlowWorker:
                 state.context = context
                 state.end_time = datetime.now().isoformat()
                 self.execution_storage.save_execution_state(execution_id, state)
-                self._flush_observers()
+                self._finalize_observers()
                 break
             elif is_suspend:
                 state.status = "suspended"

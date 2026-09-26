@@ -44,9 +44,10 @@ server = [
 code = ["PyExecJS", "RestrictedPython>=7.0"]
 http = ["requests", "aiohttp>=3.8.0"]
 yaml = ["PyYAML>=6.0"]
-# 观测适配：plaita.obs.LangfuseCallback 按 SDK v3（OTel 内核）的
-# trace/span/generation 与 usage {input,output,total} 契约编写
-langfuse = ["langfuse>=3.0"]
+# 观测适配：plaita.obs.LangfuseCallback 按 Python SDK v4（OTel 内核，
+# start_observation/create_trace_id API）编写；v4 的 trace id 须为 32 位 hex，
+# 适配器经 create_trace_id(seed=语义id) 确定性派生
+langfuse = ["langfuse>=4.0"]
 dev = [
     "pytest",
     "pytest-asyncio",

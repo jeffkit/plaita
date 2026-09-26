@@ -351,7 +351,7 @@ def _run_flow(
                     context_json=json.dumps(_safe(context), ensure_ascii=False),
                 )
                 if langfuse_callback is not None:
-                    langfuse_callback.flush()  # distributed 模式内核不发 on_flow_end
+                    langfuse_callback.finalize()  # distributed 不发 on_flow_end，终态收口 root
                 break
             if result.get("is_suspend"):
                 logger.info("本地执行 %s 挂起，等待恢复", execution_id)
@@ -381,7 +381,7 @@ def _run_flow(
             ),
         )
         if langfuse_callback is not None:
-            langfuse_callback.flush()
+            langfuse_callback.finalize()
     finally:
         try:
             root.removeHandler(handler)
