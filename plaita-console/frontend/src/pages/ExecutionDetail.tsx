@@ -17,6 +17,7 @@ import {
   XCircle,
   ChevronRight,
   Radio,
+  ExternalLink,
 } from 'lucide-react'
 import { api, ExecutionInfo } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
@@ -181,8 +182,20 @@ export default function ExecutionDetail() {
           </Button>
           <div className="min-w-0">
             <h1 className="text-page-title text-ink-primary">执行详情</h1>
-            <p className="text-data-sm text-ink-muted mt-0.5 truncate">
-              {execution.execution_id}
+            <p className="text-data-sm text-ink-muted mt-0.5 truncate flex items-center gap-2">
+              <span className="truncate">{execution.execution_id}</span>
+              {execution.langfuse_trace_url && (
+                <a
+                  href={execution.langfuse_trace_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-plaita-400 hover:text-plaita-300 hover:underline shrink-0"
+                  title="在 Langfuse 中查看完整 trace（含 agent 内部事件与 token 用量）"
+                >
+                  <ExternalLink size={12} />
+                  Langfuse
+                </a>
+              )}
             </p>
           </div>
         </div>

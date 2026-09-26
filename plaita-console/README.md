@@ -222,7 +222,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN` | `false` | 显式允许无管理密钥启动（**仅本地开发**） |
 | `PLAITA_CONSOLE_SECRET_ID` | _空_ | 对外契约 HMAC secret-id（**空则 `/api/flowVersion` 返回 503**，不再接受空串签名） |
 | `PLAITA_CONSOLE_SECRET_KEY` | _空_ | 对外契约 HMAC secret-key |
-| `PLAITA_CONSOLE_LANGFUSE` | `auto` | Langfuse 观测（[plaita.obs](../README.MD#可观测性plaitaobs)）：`auto`=配了 `LANGFUSE_PUBLIC_KEY` 即开；`true` 强制开；`false` 强制关。trace id = 执行实例 ID；缺 `plaita[langfuse]` 依赖自动降级为不观测（集群档对应 worker 的 `--langfuse` / `PLAITA_WORKER_LANGFUSE=1`） |
+| `PLAITA_CONSOLE_LANGFUSE` | `auto` | Langfuse 观测（[plaita.obs](../README.MD#可观测性plaitaobs)）：`auto`=配了 `LANGFUSE_PUBLIC_KEY` 即开；`true` 强制开；`false` 强制关。trace id = 执行实例 ID；缺 `plaita[langfuse]` 依赖自动降级为不观测（集群档对应 worker 的 `--langfuse` / `PLAITA_WORKER_LANGFUSE=1`）。另需 `LANGFUSE_PROJECT_ID`（如 proj-plaita-local）——执行详情页的「Langfuse」深链依赖它计算 trace URL |
 
 前端管理面请求会自动带 `X-Admin-API-Key`：优先读 `localStorage.plaita_admin_api_key`，其次 `VITE_PLAITA_ADMIN_API_KEY`。
 

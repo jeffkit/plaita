@@ -12,6 +12,11 @@ from pydantic import BaseModel, Field
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 
+try:
+    from services import obs_link
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    import obs_link  # type: ignore
+
 router = APIRouter()
 
 
@@ -33,6 +38,8 @@ class ExecutionInfo(BaseModel):
     # 本地单机模式专有：节点级 trace 与最终输出（集群模式为 None）
     nodes: Optional[List[Dict[str, Any]]] = Field(None, description="节点级执行 trace（本地模式）")
     output: Optional[Any] = Field(None, description="流程输出（本地模式）")
+    # Langfuse 观测深链（启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
+    langfuse_trace_url: Optional[str] = Field(None, description="Langfuse trace 页面 URL")
 
 
 class ExecutionListResponse(BaseModel):
@@ -269,6 +276,8 @@ async def get_execution(
         info = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
         if info is None:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        info = dict(info)
+        info["langfuse_trace_url"] = obs_link.langfuse_trace_url(execution_id)
         return ExecutionInfo(**info)
 
     _tenant, data = _find_execution(request, redis, execution_id)
@@ -276,6 +285,8 @@ async def get_execution(
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
 
     try:
+        data = dict(data)
+        data["langfuse_trace_url"] = obs_link.langfuse_trace_url(execution_id)
         return ExecutionInfo(**data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"数据解析失败: {e}")

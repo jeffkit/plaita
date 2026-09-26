@@ -162,6 +162,8 @@ export interface ExecutionInfo {
   // 本地单机模式专有：节点级 trace 与最终输出
   nodes?: Array<{ id: string; type: string; name?: string; input?: unknown; output?: unknown; status: string; error?: string }> | null
   output?: unknown
+  // Langfuse 观测深链（后端启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
+  langfuse_trace_url?: string | null
 }
 
 export interface ExecutionListResponse {
