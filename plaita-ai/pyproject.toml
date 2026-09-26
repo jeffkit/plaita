@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plaita-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI integrations for Plaita — MCP tools, CLI, FoT agent, and flow-coder skills"
 requires-python = ">=3.10"
 authors = [
@@ -12,6 +12,8 @@ authors = [
 ]
 dependencies = [
     "plaita>=0.5.0",
+    # Console ops plane (supervisor data plane) + LLM judge/proposer calls.
+    "httpx>=0.24",
     # 上界必须 pin：mcp 2.x 把 FastMCP 改名为 MCPServer，`plaita-ai mcp`
     # 在全新安装下直接 ImportError（2026-09 盲区评审 P0-1）。
     "mcp>=1.0,<2",

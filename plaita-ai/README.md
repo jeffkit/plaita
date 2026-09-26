@@ -29,7 +29,11 @@ plaita-ai/
 │   ├── cli/main.py          # CLI（与 MCP 共用 flow_runner）
 │   ├── agent/react/         # 内置 ReAct Agent（create_agent + plaita 工具）
 │   ├── agent/fot/           # FoT Agent（一次性规划 @flow + 编译自纠）
-│   └── skills/flow-coder/   # 内置 skill + reference + evals
+│   ├── skills/flow-coder/   # 内置 skill + reference + evals
+│   ├── console_client.py    # console 管理 API 客户端（supervisor 数据面）
+│   ├── ops.py / ops_mcp.py  # 版本/run/metrics/diff 高层操作 + console_* MCP 工具
+│   ├── evals/               # 运行时评测：数据集 / scorer / 版本对比报告
+│   └── supervisor.py        # supervisor 循环：propose→eval→compare→人签 promote
 ├── examples/react/          # ReAct 在线/离线 demo
 ├── examples/fot/            # FoT 离线 demo
 └── tests/
@@ -171,6 +175,64 @@ print(result.attempts) # 编译自纠轮数
 python plaita-ai/examples/fot/demo.py
 ```
 
+## 场景 4：Supervisor（自迭代工作流，0.2.0）
+
+`flow_*` 工具服务**编辑期**闭环（生成 → 编译自纠 → 执行）；`console_*` / `eval_*` /
+`supervisor_*` 工具服务**运行期**闭环——对着一个已部署的 plaita（console），让 Agent
+持续观测 flow 的真实运行，用评测集驱动版本迭代，人签后才发布：
+
+```
+propose → 保存为下一 patch 版本 → evaluate（评测集打分）→ compare（N-1 vs N）
+        → 改善 → 返回 promotion ticket（人工 console_flow_publish 才上线）
+        → 未改善/回归 → 丢弃；连续失败 → 暂停
+```
+
+**红线：循环本身永远不发布**——`promote_gate` 默认 `manual`，产出的是带对比数据的
+promotion ticket，由人执行发布；这是整个形态的安全底座。
+
+环境配置（console 侧）：
+
+```bash
+export PLAITA_CONSOLE_URL=http://127.0.0.1:8000     # console 地址
+export PLAITA_CONSOLE_ADMIN_API_KEY=...             # 机器首选；或 USERNAME/PASSWORD
+# 可选：LLM 提案者 / 评测 judge（OpenAI 兼容端点）
+export PLAITA_AI_PROPOSER_BASE_URL=... PLAITA_AI_PROPOSER_MODEL=... PLAITA_AI_PROPOSER_API_KEY=...
+export PLAITA_AI_JUDGE_BASE_URL=...   PLAITA_AI_JUDGE_MODEL=...   PLAITA_AI_JUDGE_API_KEY=...
+```
+
+MCP 工具（`plaita-ai mcp` 自动注册；未配置 console 时调用返回带指引的错误）：
+
+| 工具 | 作用 |
+|------|------|
+| `console_flow_list` / `console_flow_get` | flow 清单 / 版本谱（semver 排序、published 标记） |
+| `console_flow_version_get` / `_save` | 读 / 保存版本定义（草稿，不上线） |
+| `console_flow_publish` | 发布版本——**人工闸门** |
+| `console_flow_diff` / `console_flow_metrics` | 版本 diff / 最近执行健康（成功率、时延、失败） |
+| `console_runs_list` / `console_run_get` / `_start` / `_cancel` | 执行面（可 wait 到终态） |
+| `console_dry_run` | 定义进程内试跑（无部署） |
+| `eval_run` / `eval_compare` | 版本过评测集 / 两份报告对比（N-1 vs N） |
+| `supervisor_iterate` | 跑一轮自迭代，返回 promotion ticket |
+
+Python 侧同一能力：
+
+```python
+from plaita_ai.console_client import client_from_env
+from plaita_ai.evals import load_dataset
+from plaita_ai.supervisor import Supervisor, SupervisorPolicy, StaticProposer
+
+sup = Supervisor(
+    client_from_env(),
+    policy=SupervisorPolicy(promote_gate="manual", max_iterations=5),
+    proposer=StaticProposer([...]),   # 或 PromptProposer()（PLAITA_AI_PROPOSER_* env）
+)
+result = sup.run_loop("my-flow", load_dataset("evals/my-flow/"))
+# result["iterations"][-1]["promotion_ticket"] → 人确认后 console_flow_publish
+```
+
+评测集是纯 JSON（可进 git）：单文件 `{"cases": [...]}` 或目录（`_*.json` 为元数据不当作用例），
+每个 case `{"id", "input", "expect"}`；expect 支持 `contains` / `equals_path` /
+`not_empty` / `judge`（LLM 评审，未配置 judge 时该维度跳过而非瞎猜）。
+
 ## Skill
 
 内置 skill 位于 `plaita_ai/skills/`，是唯一权威副本，随包分发。软链到用户 skill 目录即可：
@@ -193,6 +255,8 @@ pytest tests/ -q
 
 ## 后续
 
-- [ ] agent-benchmark 增加 `--arm mcp` 对比  
+- [x] 0.2.0：console ops 工具面 + runtime evals + supervisor 循环（人签 promote）
+- [ ] 金丝雀/影子流量切分（双版本并行对比的调度策略）
+- [x] agent-benchmark 增加 `--arm mcp` 对比  
 - [ ] FoT / ReAct：LLMNode / RetrieverNode 与 `examples/agent` 对齐  
 - [ ] 修 `@flow` PARALLEL+INPUT / REDUCE 运行时 bug（REDUCE 现象为 IndexError，由 NodeExecutionError 包裹抛出）  

@@ -33,7 +33,11 @@ mcp = FastMCP(
     instructions=(
         "Compile and run Plaita @flow DSL workflows. "
         "Use flow_compile to validate generated source before flow_run. "
-        "On compile errors, fix the @flow source using line numbers and retry."
+        "On compile errors, fix the @flow source using line numbers and retry. "
+        "For a deployed plaita (console configured via PLAITA_CONSOLE_URL), the "
+        "console_* tools observe versions/runs/metrics, eval_* runs benchmark "
+        "datasets against a version, and supervisor_iterate proposes + evaluates "
+        "an improved version — it returns a promotion ticket and never publishes."
     ),
 )
 
@@ -251,6 +255,16 @@ def main(plugins: Optional[List[str]] = None, extra_paths: Optional[List[str]] =
             "plaita-ai mcp: injected %d tool(s) into server instructions",
             len(list_tools_registered(as_code=True)) - 1,  # minus type block if any
         )
+
+    # Console ops plane (the supervisor data plane) — registered
+    # unconditionally; tools read PLAITA_CONSOLE_* config lazily on first
+    # call and report a clear error when the console is not configured.
+    try:
+        from plaita_ai import ops_mcp
+
+        ops_mcp.register(mcp)
+    except Exception as exc:  # pragma: no cover — registration is definition-only
+        logger.error("plaita-ai mcp: failed to register console ops tools: %s", exc)
 
     mcp.run()
 
