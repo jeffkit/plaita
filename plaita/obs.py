@@ -61,10 +61,10 @@ __all__ = ["LangfuseCallback", "map_openai_usage"]
 
 
 def map_openai_usage(usage: Any) -> Optional[Dict[str, int]]:
-    """OpenAI / Agent CLI 用量形状 → Langfuse ``usage_details`` 形状。
+    """OpenAI / Anthropic / Agent CLI 用量形状 → Langfuse ``usage_details``。
 
-    已知键原位翻译（``prompt_tokens``/``input_tokens`` → ``input`` 等），
-    非 int 值丢弃；已是目标形状的原样保留；非 dict 返回 None。
+    已知键原位翻译；``total`` 缺失时由 input+output 兜底；非 int 值丢弃；
+    已是目标形状的原样保留；非 dict 返回 None。
     """
     if not isinstance(usage, dict):
         return None
@@ -74,12 +74,17 @@ def map_openai_usage(usage: Any) -> Optional[Dict[str, int]]:
         "total_tokens": "total",
         "input_tokens": "input",
         "output_tokens": "output",
+        "cache_read_input_tokens": "input_cached",
+        "cache_creation_input_tokens": "input_cache_creation",
     }
     mapped: Dict[str, int] = {}
     for key, value in usage.items():
         canonical = rename.get(key, key)
-        if canonical in ("input", "output", "total") and isinstance(value, int):
+        if canonical in ("input", "output", "total", "input_cached",
+                         "input_cache_creation") and isinstance(value, int):
             mapped[canonical] = value
+    if "total" not in mapped and "input" in mapped and "output" in mapped:
+        mapped["total"] = mapped["input"] + mapped["output"]
     return mapped or None
 
 

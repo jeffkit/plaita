@@ -130,6 +130,14 @@ class TestMapOpenaiUsage(unittest.TestCase):
         out = map_openai_usage({"prompt_tokens": 10, "unit": "TOKENS"})
         self.assertEqual(out, {"input": 10})
 
+    def test_anthropic_shape_with_cache_and_total_fallback(self):
+        """Anthropic 形状（recursive 输出）：缓存键映射 + total 由 input+output 兜底。"""
+        out = map_openai_usage({"input_tokens": 36, "output_tokens": 3,
+                                "cache_read_input_tokens": 7680,
+                                "cache_creation_input_tokens": 36})
+        self.assertEqual(out, {"input": 36, "output": 3, "input_cached": 7680,
+                               "input_cache_creation": 36, "total": 39})
+
     def test_agent_cli_shape_translated(self):
         """Agent CLI 常见的 input_tokens/output_tokens 形状（agentrun 输出）。"""
         out = map_openai_usage({"input_tokens": 120, "output_tokens": 30,
