@@ -325,6 +325,47 @@ class TestRealFlowIntegration(unittest.TestCase):
         self.assertLessEqual(len(output["text"]), 10_100)
         self.assertTrue(output["text"].endswith(f"…[{50_000} chars]"))
 
+    def test_observations_render_children_and_aggregate_generation(self):
+        """agentrun details 输出：observations 建子 generation/span，
+        聚合 generation（带 usage）同时存在——用量不重复计数（子级无 usage）。"""
+        node = type("AgentNode", (Node,), {
+            "node_type": "agentrun", "node_name": "Agent",
+            "execute": lambda self, execution=None: {
+                "text": "搞定", "model": "GLM-5.2",
+                "usage": {"input_tokens": 5, "output_tokens": 1},
+                "observations": [
+                    {"type": "span", "name": "tool:Bash",
+                     "input": {"command": "echo hi"}, "output": "hi"},
+                    {"type": "generation", "name": "turn:1",
+                     "model": "GLM-5.2", "output": "搞定"},
+                ],
+            },
+        })
+        flow_json = {
+            "flow_id": "obs-agent",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "agent"},
+                {"type": "agentrun", "id": "agent", "next": "end"},
+                {"type": "end", "id": "end", "output": "$NODE.agent.text",
+                 "resultType": "success"},
+            ],
+        }
+        _run(flow_json, self.cb, _registry(node))
+        children = {o.name: o for o in self.recorder.observations
+                    if o.name in ("tool:Bash", "turn:1")}
+        assert set(children) == {"tool:Bash", "turn:1"}
+        assert children["tool:Bash"].kind == "span"
+        assert children["turn:1"].kind == "generation"
+        assert children["turn:1"].kwargs["model"] == "GLM-5.2"
+        self.assertTrue(all(c.ended for c in children.values()))
+        # 聚合 generation 仍在且带 usage；子级不带 usage
+        gens = [o for o in self.recorder.observations if o.kind == "generation"]
+        agg = [g for g in gens if g.name == "agent.generation"]
+        self.assertEqual(len(agg), 1)
+        self.assertEqual(agg[0].kwargs["usage_details"], {"input": 5, "output": 1, "total": 6})
+        self.assertNotIn("usage_details", children["turn:1"].kwargs)
+
     def test_sdk_failure_does_not_break_flow(self):
         class ExplodingClient:
             def create_trace_id(self, seed=None):

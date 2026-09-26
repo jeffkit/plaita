@@ -10,6 +10,9 @@ trace / span / generation 模型：
   ``{"model", "usage", ...}``（llm 节点输出形状）时额外记一条 generation，
   token 用量自动归并到 run 级
 - ``on_node_end`` 带 error/exception → span 标记 ERROR 后收口
+- ``on_node_end`` 结果含 ``observations`` 列表（agentrun ``details=true`` 输出）
+  → 逐条建 agent span 的子 observation（generation/span），打开 agent 内部
+  循环的可见性
 - ``on_flow_suspend`` / ``on_node_suspend`` → 立即 flush（挂起进程随时可能消失，
   观测数据不能丢）
 - ``on_flow_end`` → 根 span 收口（output / level）+ flush
@@ -350,28 +353,44 @@ class LangfuseCallback(FlowCallback):
         try:
             if error or exception:
                 self._mark_error(span, error, exception)
-            elif isinstance(result, dict) and "usage" in result and "model" in result:
-                # LLM 形状输出（llm 节点契约 {text, model, usage, dry_run}）→ generation
-                usage = map_openai_usage(result.get("usage"))
-                gen_kwargs: Dict[str, Any] = {
-                    "name": f"{node.id}.generation",
-                    "as_type": "generation",
-                    "model": result.get("model"),
-                    "metadata": self._clip(
-                        {k: v for k, v in result.items() if k not in ("text", "usage")}),
-                }
-                if usage is not None:
-                    gen_kwargs["usage_details"] = usage
-                completion = result.get("text")
-                if completion is not None:
-                    gen_kwargs["output"] = self._clip(completion)
-                generation = span.start_observation(**gen_kwargs)
-                ender = getattr(generation, "end", None)
-                if callable(ender):
-                    ender()
-                output_setter = getattr(span, "update", None)
-                if callable(output_setter):
-                    output_setter(output=self._clip(result))
+            elif isinstance(result, dict):
+                # agent 节点的内部事件（agentrun details 输出）：建子
+                # observation——工具调用为 span、文本轮为 generation（无逐轮
+                # usage，用量由节点聚合 generation 承载，不重复计数）
+                for item in result.get("observations") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        self._render_child_observation(span, item)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("langfuse 子 observation 失败", exc_info=True)
+                if "usage" in result and "model" in result:
+                    # LLM 形状输出（llm/agentrun 节点契约）→ 聚合 generation
+                    usage = map_openai_usage(result.get("usage"))
+                    gen_kwargs: Dict[str, Any] = {
+                        "name": f"{node.id}.generation",
+                        "as_type": "generation",
+                        "model": result.get("model"),
+                        "metadata": self._clip(
+                            {k: v for k, v in result.items()
+                             if k not in ("text", "usage", "observations")}),
+                    }
+                    if usage is not None:
+                        gen_kwargs["usage_details"] = usage
+                    completion = result.get("text")
+                    if completion is not None:
+                        gen_kwargs["output"] = self._clip(completion)
+                    generation = span.start_observation(**gen_kwargs)
+                    ender = getattr(generation, "end", None)
+                    if callable(ender):
+                        ender()
+                    output_setter = getattr(span, "update", None)
+                    if callable(output_setter):
+                        output_setter(output=self._clip(result))
+                else:
+                    updater = getattr(span, "update", None)
+                    if callable(updater):
+                        updater(output=self._clip(result))
             else:
                 updater = getattr(span, "update", None)
                 if callable(updater):
@@ -381,6 +400,30 @@ class LangfuseCallback(FlowCallback):
                 ender()
         except Exception:  # noqa: BLE001
             logger.warning("langfuse span end failed", exc_info=True)
+
+    def _render_child_observation(self, span, item: Dict[str, Any]) -> None:
+        """把 agent 内部事件渲染为 agent span 的子 observation（立即收口）。"""
+        name = str(item.get("name") or item.get("type") or "detail")[:200]
+        kwargs: Dict[str, Any] = {
+            "name": name,
+            "as_type": "generation" if item.get("type") == "generation" else "span",
+        }
+        if item.get("type") == "generation" and item.get("model"):
+            kwargs["model"] = item["model"]
+        for src, dst in (("input", "input"), ("output", "output")):
+            if item.get(src) is not None:
+                kwargs[dst] = self._clip(item[src])
+        metadata = {k: v for k, v in item.items()
+                    if k not in ("type", "name", "model", "input", "output", "usage")}
+        if metadata:
+            kwargs["metadata"] = self._clip(metadata)
+        child_usage = map_openai_usage(item.get("usage"))
+        if child_usage is not None:
+            kwargs["usage_details"] = child_usage
+        child = span.start_observation(**kwargs)
+        ender = getattr(child, "end", None)
+        if callable(ender):
+            ender()
 
     def on_node_suspend(self, flow, node, **kwargs) -> None:
         self._flush()
