@@ -61,10 +61,10 @@ __all__ = ["LangfuseCallback", "map_openai_usage"]
 
 
 def map_openai_usage(usage: Any) -> Optional[Dict[str, int]]:
-    """OpenAI 用量形状 → Langfuse ``usage_details`` 形状（非 int 值丢弃）。
+    """OpenAI / Agent CLI 用量形状 → Langfuse ``usage_details`` 形状。
 
-    ``{"prompt_tokens", "completion_tokens", "total_tokens"}`` →
-    ``{"input", "output", "total"}``；已是目标形状的原样保留；非 dict 返回 None。
+    已知键原位翻译（``prompt_tokens``/``input_tokens`` → ``input`` 等），
+    非 int 值丢弃；已是目标形状的原样保留；非 dict 返回 None。
     """
     if not isinstance(usage, dict):
         return None
@@ -72,6 +72,8 @@ def map_openai_usage(usage: Any) -> Optional[Dict[str, int]]:
         "prompt_tokens": "input",
         "completion_tokens": "output",
         "total_tokens": "total",
+        "input_tokens": "input",
+        "output_tokens": "output",
     }
     mapped: Dict[str, int] = {}
     for key, value in usage.items():

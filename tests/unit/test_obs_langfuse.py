@@ -130,6 +130,12 @@ class TestMapOpenaiUsage(unittest.TestCase):
         out = map_openai_usage({"prompt_tokens": 10, "unit": "TOKENS"})
         self.assertEqual(out, {"input": 10})
 
+    def test_agent_cli_shape_translated(self):
+        """Agent CLI 常见的 input_tokens/output_tokens 形状（agentrun 输出）。"""
+        out = map_openai_usage({"input_tokens": 120, "output_tokens": 30,
+                                "total_tokens": 150})
+        self.assertEqual(out, {"input": 120, "output": 30, "total": 150})
+
     def test_non_dict_returns_none(self):
         self.assertIsNone(map_openai_usage(None))
         self.assertIsNone(map_openai_usage(42))
