@@ -18,6 +18,7 @@ try:
     from .api import services, executions, queues, logs, cluster, events
     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
     from .api import tenants
+    from .api import supervisor
     from .services import flow_store, signature, users_svc
     from .api import auth_users
 except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该走到这里
@@ -29,6 +30,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
     from api import services, executions, queues, logs, cluster, events
     from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
     from api import tenants  # type: ignore
+    from api import supervisor  # type: ignore
     from services import flow_store, signature, users_svc  # type: ignore
     from api import auth_users  # type: ignore
 
@@ -215,6 +217,7 @@ def create_app() -> FastAPI:
     _mount_admin(flows.router, "flows")
     _mount_admin(dryrun.router, "dryrun")
     _mount_admin(copilot.router, "copilot")
+    _mount_admin(supervisor.router, "supervisor")
     _mount_admin(schedules.router, "schedules")
     _mount_admin(credentials.router, "credentials")
     _mount_admin(property_types.router, "property_types")

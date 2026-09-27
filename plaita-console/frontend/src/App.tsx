@@ -1,8 +1,9 @@
-import { KeyRound, LogOut, UserCog, Building2 } from 'lucide-react'
+import { KeyRound, LogOut, UserCog, Building2, Sparkles } from 'lucide-react'
 import Credentials from './pages/Credentials'
 import Users from './pages/Users'
 import Tenants from './pages/Tenants'
 import Audit from './pages/Audit'
+import Supervisor from './pages/Supervisor'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
 import {
@@ -77,6 +78,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: '/flows', icon: <Workflow size={16} />, label: '流程编排' },
       { to: '/schedules', icon: <Clock size={16} />, label: '触发器' },
       { to: '/nodes', icon: <Boxes size={16} />, label: '节点管理' },
+      { to: '/supervisor', icon: <Sparkles size={16} />, label: 'Supervisor' },
     ],
   },
   {
@@ -121,6 +123,7 @@ const router = createBrowserRouter([
       { path: 'flows', element: <Flows /> },
       { path: 'schedules', element: <Schedules /> },
       { path: 'flows/:flowId/edit', element: <FlowEditor /> },
+      { path: 'supervisor', element: <Supervisor /> },
       { path: 'nodes', element: <Nodes /> },
       { path: 'credentials', element: <Credentials /> },
       { path: 'users', element: <Users /> },

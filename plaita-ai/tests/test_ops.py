@@ -104,3 +104,14 @@ def test_flow_metrics_empty_flow():
     assert metrics["scanned"] == 0
     assert metrics["success_rate"] is None
     assert metrics["avg_duration_s"] is None
+
+
+def test_published_version_picks_highest_among_ever_published():
+    # Real console keeps status="published" on every previously published
+    # version — production resolution must take the highest semver.
+    versions = [
+        {"version": "1.0.0", "status": "published"},
+        {"version": "2.0.0", "status": "published"},
+        {"version": "2.0.1", "status": "draft"},
+    ]
+    assert published_version(versions) == "2.0.0"

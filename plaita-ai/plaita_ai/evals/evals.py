@@ -197,6 +197,15 @@ def evaluate(
                     results.append(entry)
                     continue
                 output = done.get("output")
+                # Langfuse 对账:观测开启时执行详情带 trace 深链,逐 case 挂上,
+                # 让每条评测结论都能回放到完整轨迹。
+                if not done.get("langfuse_trace_url"):
+                    try:
+                        done = client.get_execution(execution_id)
+                    except ConsoleClientError:
+                        pass
+                if done.get("langfuse_trace_url"):
+                    entry["langfuse_trace_url"] = done["langfuse_trace_url"]
             entry["output"] = output
             entry.update(assert_score(case, output))
         except ConsoleClientError as exc:
@@ -209,6 +218,7 @@ def evaluate(
     avg_score = (
         round(sum(float(r.get("score") or 0.0) for r in scored) / len(scored), 4) if scored else None
     )
+    traces = [r["langfuse_trace_url"] for r in results if r.get("langfuse_trace_url")]
     return {
         "flow_id": flow_id,
         "version": version,
@@ -217,6 +227,8 @@ def evaluate(
         "cases": results,
         "pass_rate": pass_rate,
         "avg_score": avg_score,
+        # 对账节:观测关闭/ dry-run 模式为空列表(execution 模式逐 case 深链)
+        "langfuse_traces": traces,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
         "wall_s": round(time.monotonic() - started, 3),
     }

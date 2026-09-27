@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from plaita_ai.console_client import ConsoleClient, ConsoleConfig
@@ -163,3 +164,30 @@ def test_compare_reports():
     assert verdict["improvements"] == ["still-bad"]
     assert verdict["regressions"] == ["regressed"]
     assert len(verdict["cases"]) == 3
+
+
+def test_evaluate_execution_mode_carries_langfuse_trace(tmp_path):
+    fake = FakeConsole()
+    fake.run_handler = lambda flow_id, version, params: ("completed", {"ok": True})
+
+    original = fake.handler
+
+    def with_trace(request: "httpx.Request") -> "httpx.Response":
+        resp = original(request)
+        if request.method == "GET" and "/api/executions/" in request.url.path:
+            data = json.loads(resp.content.decode("utf-8"))
+            data["langfuse_trace_url"] = "https://langfuse.example/trace/abc123"
+            return httpx.Response(resp.status_code, json=data)
+        return resp
+
+    import httpx as _httpx
+
+    fake.handler = with_trace
+    client = ConsoleClient(ConsoleConfig(base_url="http://fake", admin_api_key="test-key"),
+                           transport=fake.transport())
+    file = tmp_path / "cases.json"
+    file.write_text(json.dumps({"cases": [{"id": "c1", "input": {"q": 1}, "expect": {"not_empty": True}}]}),
+                    encoding="utf-8")
+    report = evaluate(client, "demo", "1.0.0", load_dataset(str(file)), mode="execution")
+    assert report["cases"][0]["langfuse_trace_url"] == "https://langfuse.example/trace/abc123"
+    assert report["langfuse_traces"] == ["https://langfuse.example/trace/abc123"]

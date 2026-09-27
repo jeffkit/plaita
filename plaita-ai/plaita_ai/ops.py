@@ -53,12 +53,19 @@ def latest_version(versions: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def published_version(versions: List[Dict[str, Any]]) -> Optional[str]:
-    """The version whose status marks it as the published/production one."""
-    for entry in versions:
-        status = str(entry.get("status", "")).lower()
-        if status in ("published", "production", "active"):
-            return str(entry.get("version", "")) or None
-    return None
+    """The current production version: the highest-semver entry carrying a
+    published status. The console keeps status="published" on *every* version
+    that has ever been published (no current pointer), so recency by semver is
+    the resolution convention."""
+    published = [
+        (parse_semver(str(v.get("version", ""))), str(v.get("version")))
+        for v in versions
+        if str(v.get("status", "")).lower() in ("published", "production", "active")
+    ]
+    parsed = [(key, ver) for key, ver in published if key is not None]
+    if not parsed:
+        return None
+    return max(parsed, key=lambda pair: pair[0])[1]
 
 
 def flow_versions(client: ConsoleClient, flow_id: str) -> Dict[str, Any]:
