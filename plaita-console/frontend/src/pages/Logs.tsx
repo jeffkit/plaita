@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Play, Pause, RefreshCw, Search, Radio, ScrollText, X, AlertTriangle } from 'lucide-react'
-import { api, LogEntry } from '../services/api'
+import { api, API_BASE, LogEntry } from '../services/api'
 import { PageHeader, Button, EmptyState } from '../components/ui'
 
 export default function Logs() {
@@ -32,7 +32,7 @@ export default function Logs() {
     const params = new URLSearchParams()
     if (levelFilter) params.set('level', levelFilter)
     if (instanceFilter) params.set('instance_id', instanceFilter)
-    const evtSource = new EventSource(`/api/logs/stream?${params}`)
+    const evtSource = new EventSource(`${API_BASE}/logs/stream?${params}`)
 
     evtSource.addEventListener('log', (e) => {
       try {

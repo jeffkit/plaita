@@ -2,7 +2,11 @@
  * API 服务层
  */
 
-const API_BASE = '/api'
+// 子路径部署探测：dsht 隧道以 https://dsht.agentstudio.cc/plaita/（nginx 剥前缀）
+// 暴露；本机等根路径部署检测不命中、行为不变。
+export const SUB_PATH = /^\/plaita(\/|$)/.test(window.location.pathname) ? '/plaita' : ''
+
+export const API_BASE = `${SUB_PATH}/api`
 
 /** 管理面 API Key：优先 localStorage，其次 Vite 构建期环境变量。 */
 function getAdminApiKey(): string {

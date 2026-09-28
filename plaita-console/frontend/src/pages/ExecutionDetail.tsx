@@ -19,7 +19,7 @@ import {
   Radio,
   ExternalLink,
 } from 'lucide-react'
-import { api, ExecutionInfo } from '../services/api'
+import { api, API_BASE, ExecutionInfo } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
 import { Button, Card, StatusBadge } from '../components/ui'
 
@@ -35,7 +35,7 @@ function useExecutionSSE(
   useEffect(() => {
     if (!executionId || !enabled) return
 
-    const evtSource = new EventSource(`/api/executions/${executionId}/stream`)
+    const evtSource = new EventSource(`${API_BASE}/executions/${executionId}/stream`)
 
     evtSource.addEventListener('initial_state', (e) => {
       try {

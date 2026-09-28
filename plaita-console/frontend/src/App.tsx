@@ -14,6 +14,7 @@ import {
   getMemberships,
   isPlatformAdmin,
   setTenant,
+  SUB_PATH,
 } from './services/api'
 import { createBrowserRouter, RouterProvider, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
@@ -107,7 +108,9 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
 const NAV_COLLAPSED_KEY = 'plaita-nav-collapsed'
 
 // data router：FlowEditor 的未保存拦截（useBlocker）依赖它
-const router = createBrowserRouter([
+// basename 跟随子路径部署探测（services/api.ts 的 SUB_PATH），根路径部署为 '/'
+const router = createBrowserRouter(
+  [
   {
     path: '/',
     element: <Layout />,
@@ -130,8 +133,10 @@ const router = createBrowserRouter([
       { path: 'tenants', element: <Tenants /> },
       { path: 'audit', element: <Audit /> },
     ],
-  },
-])
+    },
+  ],
+  { basename: SUB_PATH || '/' },
+)
 
 function Layout() {
   // 侧边栏可折叠：展开 w-52，折叠 w-14 仅图标（状态存 localStorage）
