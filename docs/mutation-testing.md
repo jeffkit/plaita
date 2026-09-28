@@ -1081,6 +1081,15 @@ rm -rf mutants .mutmut-cache && mutmut run
 bash scripts/recheck_codeflow_nodes.sh survived
 ```
 
+### 后续变更（基线待复核）
+
+- **2026-09-28**：CODE 分支补 `sandbox_backend` 透传（源码里声明的节点级沙箱档位此前被
+  静默丢弃，运行期一律吃 `register_code_node(default_backend=...)`；实证见 commit
+  `fix(dsl): CODE 节点透传 sandbox_backend`）。新增一条守卫分支，两条回归测试分别覆盖
+  带/不带该字段两条路径（`tests/unit/test_codeflow_extended.py`）。**89.8% 这个数字是
+  变更前的**——本次未重跑 mutmut（当时环境未装 mutmut，且线上有 pipeline/console 在同
+  一个解释器上跑，不愿中途安装 dev 依赖），下次动本模块时一并重测并回填上表。
+
 ---
 
 ## 2.27 codeflow/_stmt.py 基线 → 95.2%（2026-07-10）
