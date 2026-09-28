@@ -363,6 +363,33 @@ class TestCodeNodeCompilation(unittest.TestCase):
                 return CODE(lang="python")  # missing code
             compile_func(_func, "test_code_missing")
 
+    def test_code_sandbox_backend_reaches_ir(self):
+        """节点级 sandbox_backend 必须进 IR（2026-09-28）。
+
+        源码里显式写的沙箱档位曾被静默丢弃 → 运行期一律吃 register_code_node 的
+        default_backend；flow 里 deliver/merge 这类要跑 git push 的 code 节点因此
+        被默认 subprocess 后端的 10s 墙钟掐死，报成引擎异常。
+        """
+        def _func(INPUT):
+            result = CODE.python("def run(x): return x", sandbox_backend="unsafe")
+            return result
+
+        ir = compile_func(_func, "test_code_sandbox_backend")
+        code_nodes = [n for n in ir["nodes"] if n.get("type") == "code"]
+        self.assertEqual(len(code_nodes), 1)
+        self.assertEqual(code_nodes[0]["sandbox_backend"], "unsafe")
+
+    def test_code_without_sandbox_backend_omits_field(self):
+        """未声明时不塞空字段——让运行期走 default_backend（不是被强制成 None）。"""
+        def _func(INPUT):
+            result = CODE.python("def run(x): return x")
+            return result
+
+        ir = compile_func(_func, "test_code_no_sandbox_backend")
+        code_nodes = [n for n in ir["nodes"] if n.get("type") == "code"]
+        self.assertEqual(len(code_nodes), 1)
+        self.assertNotIn("sandbox_backend", code_nodes[0])
+
 
 # ---------------------------------------------------------------------------
 # EVENT node compilation

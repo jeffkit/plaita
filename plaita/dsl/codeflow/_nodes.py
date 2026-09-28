@@ -77,6 +77,13 @@ def _compile_node_call(
         spec = {"type": "code", "id": nid, "language": lang, "code": code}
         if "input" in kw:
             spec["input"] = _const(kw["input"])
+        # CodeNode 的节点级字段必须原样进 IR。漏掉 sandbox_backend 会让源码里
+        # 显式声明的沙箱档位被静默丢弃，运行期一律落到 register_code_node 的
+        # default_backend——2026-09-28 实证：flow 源码写了 sandbox_backend="unsafe"，
+        # 编译产物里却是 None，deliver/merge 这类要跑 git push 的节点被默认
+        # subprocess 后端的 10s 墙钟掐死，报成引擎异常。
+        if kw.get("sandbox_backend") is not None:
+            spec["sandbox_backend"] = _const(kw["sandbox_backend"])
         return spec
 
     if kind == "EVENT":
