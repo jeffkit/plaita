@@ -202,6 +202,34 @@ class TestDefaultRegistryCompleteness(TestCase):
         self.assertTrue(self.reg.get_callable("not")(False))
         self.assertFalse(self.reg.get_callable("not")(True))
 
+    def test_comparison_functions(self):
+        # 比较函数名与 if 节点条件算子（decide.py condition_matcher）一一对应
+        eq, ne = self.reg.get_callable("eq"), self.reg.get_callable("ne")
+        gt, gte = self.reg.get_callable("gt"), self.reg.get_callable("gte")
+        lt, lte = self.reg.get_callable("lt"), self.reg.get_callable("lte")
+        f_in, not_in = self.reg.get_callable("in"), self.reg.get_callable("notIn")
+        contains, not_contains = self.reg.get_callable("contains"), self.reg.get_callable("notContains")
+        self.assertTrue(eq("human", "human"))
+        self.assertFalse(eq("human", "bot"))
+        self.assertTrue(ne(1, 2))
+        self.assertTrue(gt(3, 2))
+        self.assertTrue(gte(2, 2))
+        self.assertTrue(lt(1, 2))
+        self.assertTrue(lte(2, 2))
+        self.assertTrue(f_in("a", ["a", "b"]))
+        self.assertTrue(not_in("c", ["a", "b"]))
+        # contains 参数序与条件算子一致：contains(a, b) == b in a
+        self.assertTrue(contains("hello", "ell"))
+        self.assertTrue(not_contains("hello", "xyz"))
+
+    def test_ifelse_function(self):
+        ifelse = self.reg.get_callable("ifelse")
+        self.assertEqual(ifelse(True, "x", "y"), "x")
+        self.assertEqual(ifelse(False, "x", "y"), "y")
+        # 条件用 Python 真值语义（非布尔也可）
+        self.assertEqual(ifelse("", "x", "y"), "y")
+        self.assertEqual(ifelse([1], "x", "y"), "x")
+
     def test_array_functions(self):
         lst = [1, 2, 3]
         self.assertEqual(self.reg.get_callable("len")(lst), 3)
@@ -537,6 +565,17 @@ EXPECTED_DEFAULT_FUNCTIONS = {
     "and": (FunctionCategory.LOGIC, False, "Logical AND"),
     "or": (FunctionCategory.LOGIC, False, "Logical OR (returns first truthy value)"),
     "not": (FunctionCategory.LOGIC, False, "Logical NOT"),
+    "eq": (FunctionCategory.LOGIC, False, "Equality comparison (a == b)"),
+    "ne": (FunctionCategory.LOGIC, False, "Inequality comparison (a != b)"),
+    "gt": (FunctionCategory.LOGIC, False, "Greater than (a > b)"),
+    "gte": (FunctionCategory.LOGIC, False, "Greater than or equal (a >= b)"),
+    "lt": (FunctionCategory.LOGIC, False, "Less than (a < b)"),
+    "lte": (FunctionCategory.LOGIC, False, "Less than or equal (a <= b)"),
+    "in": (FunctionCategory.LOGIC, False, "Membership test (a in b)"),
+    "notIn": (FunctionCategory.LOGIC, False, "Negated membership test (a not in b)"),
+    "contains": (FunctionCategory.LOGIC, False, "Containment test (b in a)"),
+    "notContains": (FunctionCategory.LOGIC, False, "Negated containment (b not in a)"),
+    "ifelse": (FunctionCategory.LOGIC, False, "Ternary: returns a if c else b (both branches evaluated eagerly)"),
     # datetime
     "now": (FunctionCategory.DATETIME, False, "Current datetime formatted"),
     "today": (FunctionCategory.DATETIME, False, "Current date formatted"),
@@ -575,7 +614,7 @@ class TestDefaultRegistryMetadata(TestCase):
         self.assertEqual(len(self.reg.by_category(FunctionCategory.STRING)), 14)
         self.assertEqual(len(self.reg.by_category(FunctionCategory.ARRAY)), 16)
         self.assertEqual(len(self.reg.by_category(FunctionCategory.DICT)), 13)
-        self.assertEqual(len(self.reg.by_category(FunctionCategory.LOGIC)), 3)
+        self.assertEqual(len(self.reg.by_category(FunctionCategory.LOGIC)), 14)
         self.assertEqual(len(self.reg.by_category(FunctionCategory.DATETIME)), 2)
         self.assertEqual(len(self.reg.by_category(FunctionCategory.JSON)), 2)
         # TYPE 分类在 default registry 中未使用

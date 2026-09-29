@@ -198,6 +198,24 @@ def _fn_and(a, b): return a and b
 def _fn_or(*args): return next((arg for arg in args if arg), False)
 def _fn_not(a): return not a
 
+# 比较函数：名字与 if 节点条件算子（decide.py condition_matcher）一一对应，
+# 供表达式位置（assignment 的 output 等）做谓词/三元。contains 的参数序
+# 与条件算子一致：contains(a, b) 表示 b 在 a 中。
+def _fn_eq(a, b): return a == b
+def _fn_ne(a, b): return a != b
+def _fn_gt(a, b): return a > b
+def _fn_gte(a, b): return a >= b
+def _fn_lt(a, b): return a < b
+def _fn_lte(a, b): return a <= b
+def _fn_in(a, b): return a in b
+def _fn_notIn(a, b): return a not in b
+def _fn_contains(a, b): return b in a
+def _fn_notContains(a, b): return b not in a
+
+def _fn_ifelse(c, a, b):
+    # 三元。注意急切求值：a、b 在调用前都已算出（$F 函数皆纯，无短路风险）。
+    return a if c else b
+
 def _fn_index(a, b): return a.index(b)
 def _fn_slice(a, b, c): return a[b:c]
 def _fn_append(a, b): return a + [b]
@@ -376,6 +394,21 @@ def _register_logic(reg: ExpressionRegistry) -> None:
     reg.register("and", _fn_and, FunctionCategory.LOGIC, description="Logical AND")
     reg.register("or", _fn_or, FunctionCategory.LOGIC, description="Logical OR (returns first truthy value)")
     reg.register("not", _fn_not, FunctionCategory.LOGIC, description="Logical NOT")
+    comparisons: list[tuple[str, Callable, str]] = [
+        ("eq", _fn_eq, "Equality comparison (a == b)"),
+        ("ne", _fn_ne, "Inequality comparison (a != b)"),
+        ("gt", _fn_gt, "Greater than (a > b)"),
+        ("gte", _fn_gte, "Greater than or equal (a >= b)"),
+        ("lt", _fn_lt, "Less than (a < b)"),
+        ("lte", _fn_lte, "Less than or equal (a <= b)"),
+        ("in", _fn_in, "Membership test (a in b)"),
+        ("notIn", _fn_notIn, "Negated membership test (a not in b)"),
+        ("contains", _fn_contains, "Containment test (b in a)"),
+        ("notContains", _fn_notContains, "Negated containment (b not in a)"),
+        ("ifelse", _fn_ifelse, "Ternary: returns a if c else b (both branches evaluated eagerly)"),
+    ]
+    for name, func, desc in comparisons:
+        reg.register(name, func, FunctionCategory.LOGIC, description=desc)
 
 
 def _register_datetime(reg: ExpressionRegistry) -> None:

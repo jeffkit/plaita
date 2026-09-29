@@ -3,6 +3,14 @@
 本页记录 **v0.4.0 及以后**的正式变更历史，按版本倒序排列。  
 0.4.0 之前的历史可通过 `git log --oneline` 查阅仓库完整提交记录。
 
+## 未发布 — 表达式位置放开（assignment 即表达式载体）
+
+- **注册表新增 LOGIC 函数**：比较函数 `eq/ne/gt/gte/lt/lte/in/notIn/contains/notContains`（函数名与 `if` 节点条件算子一一对应，`contains(a,b)` 参数序与条件算子一致即 `b in a`）与三元 `ifelse(c,a,b)`（急切求值）。
+- **codeflow DSL 表达式位置放开**：`and`/`or`/`not`、比较运算、链式比较、三元表达式从「只许出现在 if 条件位置」放开到任意表达式位置（赋值右侧/节点参数/return）——分别编译为 `$F.and/$F.or/$F.not`、同名比较函数（链式比较折叠为 `$F.and` 组合）、`$F.ifelse`。`if` 条件位置不变，仍编译为结构化 ConditionGroup。
+- **assignment 节点两处修正**：① 类型校验从「匹配原始表达式字符串」改为「先求值再匹配」——数值/布尔 `output_type` 曾必然 miss 并静默返回 None；② 类型不匹配从静默 None 改为大声抛错；③ 假值字面量（`0`/`False`/`""`）不再被真值判断吞成 None。
+
+---
+
 ## 未发布 — 工具节点与数据源（plaita-ai）
 
 ### 数据源工具层（`plaita_ai.tools`）

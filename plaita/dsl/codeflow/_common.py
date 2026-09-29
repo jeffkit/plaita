@@ -166,7 +166,6 @@ def _raise_if_unregistered_custom(func: ast.expr, ctx: "_CompileCtx") -> None:
 # 常见 Python 写法在 @flow 表达式里不支持——给出可读的重写提示, 而不是抛
 # 不可读的 ast.dump / 裸类型名。这些构造当前本就会编译失败, 加提示是纯 DX 提升。
 _FOOTGUN_HINTS = {
-    ast.IfExp: "三元表达式 `a if c else b` 不支持, 请用 if/else 语句分支实现",
     ast.JoinedStr: "f-string 不支持, 请用 F.concat(...) 拼接, 例: F.concat('hi ', INPUT.name)",
     ast.FormattedValue: "f-string 不支持, 请用 F.concat(...) 拼接",
     ast.Lambda: "lambda 不支持, @flow 函数体本身即流程, 请拆成节点",

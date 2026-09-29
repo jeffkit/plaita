@@ -210,11 +210,18 @@ class TestCodeflowExpressionErrors(unittest.TestCase):
     def test_fstring_unsupported_with_hint(self):
         self._expect_hint("def t(INPUT):\n    return f'hi {INPUT.name}'", "F.concat")
 
-    def test_ternary_unsupported_with_hint(self):
-        self._expect_hint(
-            "def t(INPUT):\n    x = INPUT.a if INPUT.b else INPUT.c\n    return x",
-            "if/else 语句分支",
+    def test_ternary_supported_compiles_to_ifelse(self):
+        # 三元曾在 _FOOTGUN_HINTS；表达式位置放开后编译为 $F.ifelse(...)
+        from plaita.dsl.codeflow import compile_source
+        ir = compile_source(
+            "from plaita.dsl.codeflow import flow\n"
+            "@flow('t')\n"
+            "def t(INPUT):\n"
+            "    x = INPUT.a if INPUT.b else INPUT.c\n"
+            "    return x\n"
         )
+        outs = [n["output"] for n in ir["nodes"] if n["type"] == "assignment"]
+        self.assertEqual(outs, ["$F.ifelse($INPUT.b, $INPUT.a, $INPUT.c)"])
 
     def test_listcomp_unsupported_with_hint(self):
         self._expect_hint(

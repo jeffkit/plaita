@@ -77,16 +77,17 @@ create_user.run(name="alice", age=20)
 | `len(x)` / `abs(x)` / `round(x)` | `$F.len` / `$F.abs` / `$F.round` | 映射到**真 Python 内置**, 语义精确 |
 | `str(x)` | `$F.concat(x)` | **近似映射**: `concat` = `"".join(str(a) for a in args)`, 单参时与 `str()` 等价; `str` 当类型转换的意图被实现成"拼成字符串" |
 | `a + b` `a - b` `a * b` `a / b` `a % b` `a ** b` | `$F.add/sub/mul/div/mod/pow` | 直接对应 Python 运算符 (`a + b`), 因此 `+` 对 int/str/list 都按 Python `+` 多态——**类型决定语义, 编译期不做类型检查** |
+| `a == b` `!=` `>` `>=` `<` `<=` `in` `not in` | `$F.eq/ne/gt/gte/lt/lte/in/notIn(…)` | 表达式位置的比较落到注册表同名比较函数（函数名与 `if` 条件算子一致）；链式比较 `a < b < c` 编译为 `$F.and($F.lt(a,b), $F.lt(b,c))` |
+| `a and b` / `a or b` / `not x` | `$F.and(…)` / `$F.or(…)` / `$F.not(…)` | 表达式位置的布尔运算。`or` 返回第一个真值（Python 真值语义）；`and` 链按 Python 结合律左折叠嵌套。均**急切求值**（无短路），`$F` 函数皆纯故无副作用 |
+| `a if c else b` | `$F.ifelse(c, a, b)` | 三元。急切求值：两支都会被求值 |
 
 **不支持、会报错的 Python 写法（含重写提示）**
 
 | 写法 | 报错提示 |
 |------|----------|
 | f-string `f"hi {name}"` | 用 `F.concat('hi ', INPUT.name)` |
-| 三元 `a if c else b` | 用 `if/else` 语句分支 |
 | 列表/集合/字典推导式 | 用 `MAP`/`FILTER` 节点 |
 | `lambda` / `await` / 海象 `:=` / `*args` 解包 | 不支持, 拆成节点或普通赋值 |
-| 比较与 `and`/`or`/`not` 在表达式位置 | 只能出现在 `if` 判断位置 |
 | 字面量方法调用 `"x".upper()` / 任意非 `F.*` 非 `len/abs/round/str` 调用 | 表达式里只能调 `F.xxx(...)` 或上述内置 |
 | 集合字面量 `{1,2}` | 用列表 |
 
@@ -178,7 +179,7 @@ double_via_child.run(payload=21)   # -> 42
 | 节点调用嵌在表达式里 | `HTTP(...) 是节点调用，只能作为语句或赋值右侧` |
 | `not` 出现在非条件位置 | `not 要用在条件位置（if/while 判断）` |
 | 赋值后悬空（无 return/后续） | `赋值 xxx 之后悬空：请补 return 或后续语句` |
-| f-string / 三元 / 推导式 / lambda 等不支持写法 | 带重写提示（见上文「表达式语义边界」） |
+| f-string / 推导式 / lambda 等不支持写法 | 带重写提示（见上文「表达式语义边界」） |
 | 非 `F.*` 的方法/函数调用 | `不支持的调用 Xxx.yyy(...)：…` |
 
 只编译不构建：`compile_func(fn, flow_id)` 返回 IR dict，便于审查 / 序列化 / 生成器回写。

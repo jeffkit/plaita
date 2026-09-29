@@ -114,13 +114,18 @@ class TestExpressionErrors(unittest.TestCase):
         result = test_neg.run(value=5)
         self.assertEqual(result, -5)
 
-    def test_unary_not_in_expr_raises(self):
-        """Line 373: 'not' in non-condition position raises."""
-        with self.assertRaises(Exception):
-            @flow("test_not_expr")
-            def _test(INPUT):
-                x = not INPUT.flag  # noqa: F841
-                return x
+    def test_unary_not_in_expr_supported(self):
+        """'not' 曾在非条件位置报错；表达式位置放开后编译为 $F.not(...)。"""
+        from plaita.dsl.codeflow import compile_source
+        ir = compile_source(
+            "from plaita.dsl.codeflow import flow\n"
+            "@flow('test_not_expr')\n"
+            "def _test(INPUT):\n"
+            "    x = not INPUT.flag\n"
+            "    return x\n"
+        )
+        outs = [n["output"] for n in ir["nodes"] if n["type"] == "assignment"]
+        self.assertEqual(outs, ["$F.not($INPUT.flag)"])
 
     def test_subscript_access(self):
         """Lines 376-380: subscript access INPUT.items[0]."""
@@ -149,12 +154,26 @@ class TestExpressionErrors(unittest.TestCase):
         result = test_list.run(a=1, b=2)
         self.assertEqual(result, [1, 2, 99])
 
-    def test_boolop_in_expr_raises(self):
-        """Line 393: BoolOp in expression position raises."""
-        with self.assertRaises(Exception):
-            @flow("test_boolop_expr")
-            def _test(INPUT):
-                return INPUT.a and INPUT.b  # BoolOp in expression
+    def test_boolop_in_expr_supported(self):
+        """BoolOp 曾在表达式位置报错；放开后 and/or 编译为 $F 函数且引擎可跑。
+
+        真值语义与 Python 一致：and 返回第一个假值本身，or 返回第一个真值本身。
+        """
+        @flow("test_boolop_expr")
+        def _test(INPUT):
+            return INPUT.a and INPUT.b
+
+        self.assertEqual(_test.run(a="x", b="y"), "y")
+        self.assertEqual(_test.run(a="", b="y"), "")
+        self.assertEqual(_test.run(a=False, b="y"), False)
+
+        @flow("test_or_expr")
+        def _test_or(INPUT):
+            return INPUT.a or INPUT.b or "fallback"
+
+        self.assertEqual(_test_or.run(a="", b="y"), "y")
+        self.assertEqual(_test_or.run(a="x", b="y"), "x")
+        self.assertEqual(_test_or.run(a="", b=""), "fallback")
 
     def test_footgun_lambda_raises(self):
         """Line 397: lambda in @flow raises with readable hint."""

@@ -52,12 +52,17 @@ class Assignment(Node):
             value = [out for out in self.upstream_output if out["upstream"] == upstream]
             if value:
                 value = value[0]["value"]
-        elif self.output:  # 只有一个,不用管upstream
+        elif self.output is not None:  # 只有一个,不用管upstream；is not None——
+            # 假值字面量（0/False/""）也是合法赋值，曾因真值判断被静默吞成 None
             value = self.output
         else:
             return None
-        if self.output_type:
-            if match(self.output_type, value):
-                return execution.evaluate(value)
-        else:
-            return execution.evaluate(value)
+        # 先求值再校验类型：output 常是 "$F.xxx(...)" 表达式串，曾先 match 原始
+        # 字符串——数值/布尔 output_type 必然 miss，静默返回 None。
+        evaluated = execution.evaluate(value)
+        if self.output_type and not match(self.output_type, evaluated):
+            raise ValueError(
+                f"assignment node {self.id!r}: 求值结果 {evaluated!r} 不符合声明的 "
+                f"output_type {self.output_type.data_type!r}"
+            )
+        return evaluated

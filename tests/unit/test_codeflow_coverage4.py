@@ -565,16 +565,18 @@ def t(INPUT):
 # ---------------------------------------------------------------------------
 
 class TestFootgunHints(unittest.TestCase):
-    def test_ternary_expression_raises_with_hint(self):
-        """Line 71: ternary `a if c else b` — footgun hint for IfExp."""
-        with self.assertRaises(Exception) as ctx:
-            compile_source("""
+    def test_ternary_expression_compiles_to_ifelse(self):
+        """曾钉住 IfExp footgun 提示；三元放开后编译为 $F.ifelse(...)。"""
+        ir = compile_source("""
 from plaita.dsl.codeflow import flow, INPUT
 @flow("t")
 def t(INPUT):
     return INPUT.x if INPUT.flag else INPUT.y
 """)
-        self.assertIn("三元表达式", str(ctx.exception))
+        # return 位置的三元直接成为 end 节点 output
+        ends = [n for n in ir["nodes"] if n["type"] == "end"]
+        outs = [n["output"] for n in ends if isinstance(n.get("output"), str)]
+        self.assertIn("$F.ifelse($INPUT.flag, $INPUT.x, $INPUT.y)", outs)
 
     def test_fstring_raises_with_hint(self):
         """Line 71: f-string — footgun hint for JoinedStr."""

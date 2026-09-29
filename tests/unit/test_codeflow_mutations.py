@@ -696,18 +696,10 @@ class TestCompileExprErrorMessages:
         assert "NoneType" not in msg
         assert "第 ?" not in msg
 
-    def test_not_in_expr_position_exact_message(self):
-        # mutmut_48-53: None / node→None / XX / case flip
+    def test_not_in_expr_position_compiles_to_F_not(self):
+        # 曾钉住旧报错「not 要用在条件位置」；表达式位置放开后编译为 $F.not(...)
         node = _expr_ast("not INPUT.flag")
-        with pytest.raises(_CodeflowError) as exc:
-            _compile_expr(node, _fresh_ctx())
-        msg = str(exc.value)
-        assert msg.endswith("not 要用在条件位置（if/while 判断），不能出现在表达式里") or (
-            "not 要用在条件位置（if/while 判断），不能出现在表达式里" in msg
-        )
-        assert "XXnot" not in msg
-        assert "NOT 要用" not in msg
-        assert "第 ?" not in msg
+        assert _compile_expr(node, _fresh_ctx()) == "$F.not($INPUT.flag)"
 
     def test_unsupported_unary_includes_op_name(self):
         # mutmut_55/57/58: node→None / drop node / type(None)
@@ -750,32 +742,24 @@ class TestCompileExprErrorMessages:
         assert "XXdict" not in msg
         assert "第 ?" not in msg
 
-    def test_compare_in_expr_position_message(self):
-        # mutmut_102-108: or→and makes Compare alone miss this branch;
-        # also None/XX/case survivors
+    def test_compare_in_expr_position_compiles_to_F_eq(self):
+        # 曾钉住旧报错「比较/and/or 只能出现在条件位置」；放开后落到注册表同名比较函数
         node = _expr_ast("INPUT.x == 1")
-        with pytest.raises(_CodeflowError) as exc:
-            _compile_expr(node, _fresh_ctx())
-        msg = str(exc.value)
-        assert "比较/and/or 只能出现在条件位置（if 判断）" in msg
-        assert "XX比较" not in msg
-        assert "AND/OR" not in msg
-        assert "第 ?" not in msg
+        assert _compile_expr(node, _fresh_ctx()) == "$F.eq($INPUT.x, 1)"
 
-    def test_boolop_in_expr_position_message(self):
-        # mutmut_102: and→or flip — BoolOp alone must still raise
+    def test_boolop_in_expr_position_compiles_to_F_and(self):
+        # 同上：and/or 表达式位置放开——and 二元折叠
         node = _expr_ast("INPUT.x and INPUT.y")
-        with pytest.raises(_CodeflowError) as exc:
-            _compile_expr(node, _fresh_ctx())
-        assert "比较/and/or 只能出现在条件位置（if 判断）" in str(exc.value)
+        assert _compile_expr(node, _fresh_ctx()) == "$F.and($INPUT.x, $INPUT.y)"
 
     def test_footgun_hint_message_and_lineno(self):
         # mutmut_113/115: node→None / drop node on footgun raise
-        node = _expr_ast("a if True else b")
+        # 三元已放开（$F.ifelse），改用仍在 _FOOTGUN_HINTS 里的 f-string 验证提示链路
+        node = _expr_ast('f"hi {INPUT.name}"')
         with pytest.raises(_CodeflowError) as exc:
             _compile_expr(node, _fresh_ctx())
         msg = str(exc.value)
-        assert "三元表达式" in msg
+        assert "f-string 不支持" in msg
         assert "第 ?" not in msg
 
     def test_unsupported_expr_includes_type_name(self):

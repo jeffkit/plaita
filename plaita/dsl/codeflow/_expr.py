@@ -44,8 +44,44 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
             operand = _compile_expr(node.operand, ctx)
             return f"$F.sub(0, {_render_arg(operand)})"
         if isinstance(node.op, ast.Not):
-            raise _CodeflowError("not 要用在条件位置（if/while 判断），不能出现在表达式里", node)
+            operand = _compile_expr(node.operand, ctx)
+            return f"$F.not({_render_arg(operand)})"
         raise _CodeflowError(f"不支持的一元运算 {type(node.op).__name__}", node)
+    if isinstance(node, ast.BoolOp):
+        # and/or 落到注册表同名逻辑函数（or 返回第一个真值，与 Python 真值语义一致）。
+        # and 链左折叠嵌套——$F.and 是二元函数，a and b and c 的 Python 语义是
+        # (a and b) and c（返回第一个假值本身，而非布尔化）。
+        if isinstance(node.op, ast.And):
+            values = node.values
+            compiled = _compile_expr(values[0], ctx)
+            for v in values[1:]:
+                compiled = f"$F.and({_render_arg(compiled)}, {_render_arg(_compile_expr(v, ctx))})"
+            return compiled
+        args = [_compile_expr(v, ctx) for v in node.values]
+        rendered = ", ".join(_render_arg(a) for a in args)
+        return f"$F.or({rendered})"
+    if isinstance(node, ast.Compare):
+        # 比较落到注册表同名比较函数（函数名 == if 节点条件算子名，见 _COMPARE_OP）。
+        # 链式比较 a < b < c -> $F.and($F.lt(a,b), $F.lt(b,c))。
+        conds: List[str] = []
+        cur = _compile_expr(node.left, ctx)
+        for op, comp in zip(node.ops, node.comparators):
+            fname = _COMPARE_OP.get(type(op))
+            if fname is None:
+                raise _CodeflowError(f"不支持的比较运算 {type(op).__name__}", node)
+            right = _compile_expr(comp, ctx)
+            conds.append(f"$F.{fname}({_render_arg(cur)}, {_render_arg(right)})")
+            cur = right
+        if len(conds) == 1:
+            return conds[0]
+        rendered = ", ".join(_render_arg(c) for c in conds)
+        return f"$F.and({rendered})"
+    if isinstance(node, ast.IfExp):
+        # 三元 -> $F.ifelse(c, a, b)。急切求值：两支都会被求值（$F 函数皆纯，无副作用风险）。
+        cond = _compile_expr(node.test, ctx)
+        then = _compile_expr(node.body, ctx)
+        other = _compile_expr(node.orelse, ctx)
+        return f"$F.ifelse({_render_arg(cond)}, {_render_arg(then)}, {_render_arg(other)})"
     if isinstance(node, ast.Subscript):
         base = _compile_expr(node.value, ctx)
         idx = _eval_subscript_index(node.slice, ctx)
@@ -63,8 +99,6 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
         return d
     if isinstance(node, (ast.List, ast.Tuple)):
         return [_compile_expr(e, ctx) for e in node.elts]
-    if isinstance(node, ast.BoolOp) or isinstance(node, ast.Compare):
-        raise _CodeflowError("比较/and/or 只能出现在条件位置（if 判断）", node)
     # 常见 Python 写法在 @flow 里不支持——给重写提示, 而不是抛 ast.dump
     _footgun_hint = _FOOTGUN_HINTS.get(type(node))
     if _footgun_hint:
