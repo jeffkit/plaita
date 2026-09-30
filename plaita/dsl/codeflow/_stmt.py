@@ -230,7 +230,15 @@ def _compile_while_for(
 def _compile_for(
     head: ast.For, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
-    """``for x in MAP/FILTER/FIND/LOOP(...)`` / ``for a,b in REDUCE(...)``。"""
+    """``for x in MAP/FILTER/FIND/LOOP(...)`` / ``for a,b in REDUCE(...)``。
+
+    作用域：循环目标名（x / a,b）映射子流程输入；外层已赋值变量自动映射为
+    ``$PARENT.NODE.<名>`` 快照引用（与 while 同一约定，见 ``_while_child_flow``），
+    体内可读集合节点执行前已确定的父侧变量。子流程写不回父 context——
+    聚合语义用 REDUCE（累积值经 return 串）或对 ``NODE.<集合节点id>`` 的
+    下游表达式表达，不要试图在子流程 end 引用集合节点自身的结果
+    （父侧结果此刻尚未写回，快照里没有）。
+    """
     coll_call = head.iter
     if not isinstance(coll_call, ast.Call) or not isinstance(coll_call.func, ast.Name):
         raise _CodeflowError(
@@ -266,7 +274,14 @@ def _compile_for(
         if len(names) > 1:
             loop_vars[names[1]] = "$INPUT.index"
 
-    child_ctx = _CompileCtx(loop_vars=loop_vars, module_globals=ctx.module_globals)
+    # 外层已赋值名映射为 $PARENT 快照引用（与 while 的 _while_child_flow 同一
+    # 约定）：集合节点执行前已在父侧赋值的变量，体内可读。$PARENT 是子流程
+    # 启动时的父 context 快照，只读且循环期间冻结——所以只映射"此刻已在
+    # ctx.names 里的名字"（顺序编译保证它们都在集合节点之前赋值，快照必有值）。
+    # loop_vars 放在合并后侧：循环目标名遮蔽外层同名（与 Python 遮蔽规则一致）。
+    parent_names = {name: "$PARENT." + ref[1:] for name, ref in ctx.names.items()}
+    child_ctx = _CompileCtx(
+        loop_vars={**parent_names, **loop_vars}, module_globals=ctx.module_globals)
     child_entry = _compile_block(list(head.body), child_ctx, succ=None)  # 子流程体必须自行 return
     if child_entry is None:
         raise _CodeflowError("循环体为空或全部悬空：请补 return", head.body[0] if head.body else head)

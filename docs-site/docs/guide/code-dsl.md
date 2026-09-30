@@ -148,6 +148,25 @@ def first_even(INPUT):
 first_even.run(nums=[1, 3, 4, 6])   # -> 4
 ```
 
+**作用域**：循环体是子流程——循环目标名（`x` / `acc, it`）映射子流程输入；
+外层已赋值变量自动映射为 `$PARENT.NODE.<名>` 快照引用（与 `while` 同一约定），
+体内可读集合节点执行前已确定的父侧变量，**写不回父 context**。聚合语义用
+`REDUCE`（累积值经 `return` 串联，结果经 `NODE.<id>` 引用）或对
+`NODE.<集合节点id>`（`MAP` 的输出即结果列表）的下游表达式表达——不要试图在
+集合子流程里引用集合节点自身的结果（父侧此刻尚未写回）。裸 `INPUT` 在体内指
+子流程输入；要读外层原始输入须显式写 `PARENT.INPUT.<名>`。
+
+```python
+@flow("scaled_sum")
+def scaled_sum(INPUT):
+    limit = F.mul(INPUT.base, 100)          # 外层赋值，体内可读
+    for acc, it in REDUCE(INPUT.items, initial=[], id="rd"):
+        return F.append(acc, F.mul(it, limit))
+    return NODE.rd
+
+scaled_sum.run(base=2, items=[1, 2, 3])     # -> [200, 400, 600]
+```
+
 ### 子流程 @childflow + CHILD
 
 `@childflow` 装饰一个子流程函数，父流程用 `CHILD(...)` 引用：

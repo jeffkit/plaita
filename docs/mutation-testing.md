@@ -1286,3 +1286,18 @@ only_mutate = ["plaita/dsl/codeflow/_expr.py"]
 rm -rf mutants .mutmut-cache && mutmut run
 # 对 survived 独立进程复核（见 scripts/recheck_codeflow_expr.sh）
 ```
+
+---
+
+## 8. 待重测变更（基线数字未刷新）
+
+记录已合入/在途但基线分数尚未重测的模块变更，重测后移入对应 §2.x 并清空本节。
+
+- **`codeflow/_stmt.py`（2026-09-30，`_compile_for` 外层名映射 `$PARENT`）**：
+  集合循环（MAP/FILTER/FIND/LOOP/REDUCE）子流程体继承外层已赋值名，映射为
+  `$PARENT.NODE.<名>` 快照引用（对齐 while 的 `_while_child_flow` 约定，
+  jeffkit/plaita#16 内核侧修复）。新增 ~4 行可变异代码 + 
+  `tests/unit/test_codeflow_loop_scope.py`（7 用例，含编译形态与端到端）。
+  待办：单模块 mutmut + recheck 刷新 §2.27 基线（95.2% → ?）。
+
+---
