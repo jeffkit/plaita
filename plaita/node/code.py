@@ -55,9 +55,12 @@ import json
 import logging
 import operator as _op
 import os
+import signal
 import subprocess
 import sys
 import textwrap
+import time
+import uuid
 from typing import Any, ClassVar, FrozenSet, Optional
 
 from pydantic import model_validator
@@ -358,16 +361,90 @@ def run_python_restricted(code, input_value, *, extra_modules: Optional[FrozenSe
 
 
 # ---------------------------------------------------------------------------
+# Process-tree management (2026-09-30)
+# ---------------------------------------------------------------------------
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """对子进程的整个进程组发 SIGKILL。
+
+    子进程以 ``start_new_session=True`` 启动（自成进程组），沙箱内代码再
+    fork 出来的孙进程同组——killpg 一网打尽。历史上只杀直接子进程，沙箱
+    超时后用户的子进程（如沙箱内再起的 CLI）全部成为孤儿。组已消失或
+    平台限制时退化为杀直接子进程。
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return
+    except (TypeError, OSError):
+        # TypeError：pid 非 int（测试 mock）；OSError：组已消失/权限不足
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _popen_wait_cancellable(
+    proc: subprocess.Popen,
+    timeout: Optional[float],
+    cancel_event,
+    what: str,
+    input_bytes: bytes,
+) -> tuple:
+    """可取消地等待 Popen：超时或 cancel_event 置位都 killpg 整组再抛。
+
+    communicate 以 0.25s 步进重试（stdin 输入只在首调用传，超时续传是
+    未定义行为）；两个结束通道都先把进程树杀干净、收回输出，再抛
+    RuntimeError——调用方拿到异常的时刻进程已经不存在，不留孤儿。
+    """
+    deadline = (time.monotonic() + timeout) if timeout else None
+    first = True
+    while True:
+        try:
+            if first:
+                first = False
+                return proc.communicate(input=input_bytes, timeout=0.25)
+            return proc.communicate(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            pass
+        if cancel_event is not None and cancel_event.is_set():
+            _kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=1)
+            except Exception:
+                # 组外残留进程握住管道时会再超时——此时输出已不可得，直接放弃
+                pass
+            raise RuntimeError(f"{what} cancelled via cancel_event; process tree killed")
+        if deadline is not None and time.monotonic() > deadline:
+            _kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=1)
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"{what} timed out after {timeout}s (process tree killed). "
+                "Increase the timeout env var or optimise the code."
+            )
+
+
+# ---------------------------------------------------------------------------
 # Python runner — subprocess sandbox
 # ---------------------------------------------------------------------------
 
-def run_python_subprocess(code, input_value):
+def run_python_subprocess(code, input_value, cancel_event=None):
     """Execute *code* in a fresh Python subprocess.
 
     The child process is bounded by:
 
     * wall-clock timeout (``PLAITA_SANDBOX_TIMEOUT`` env var, default 10 s)
     * soft memory limit on Linux (``PLAITA_SANDBOX_MEMORY_MB``, default 256 MB)
+    * optional cooperative cancellation (``cancel_event`` — the code node's
+      execution cancel flag; when set mid-run the whole process tree is
+      killed and a RuntimeError raised)
+
+    The child runs in its own process group (``start_new_session``); on
+    timeout or cancel the **entire tree** is SIGKILLed — grandchildren spawned
+    by the user code do not survive (2026-09-30 孤儿修复).
 
     File system and network access are **not** restricted — use the
     ``"docker"`` backend for full network isolation.
@@ -379,8 +456,8 @@ def run_python_subprocess(code, input_value):
     Raises
     ------
     RuntimeError
-        If the subprocess times out, exits with a non-zero code, or the
-        user code raises an exception.
+        If the subprocess times out, is cancelled, exits with a non-zero
+        code, or the user code raises an exception.
     """
     mem_bytes = SANDBOX_SUBPROCESS_MEMORY_MB * 1024 * 1024
     runner = _build_runner_script(code, mem_bytes=mem_bytes)
@@ -393,22 +470,20 @@ def run_python_subprocess(code, input_value):
         if key in os.environ
     }
     child_env.update(SUBPROCESS_ENV_EXTRA)
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", runner],
-            input=json.dumps(input_value).encode(),
-            capture_output=True,
-            timeout=SANDBOX_SUBPROCESS_TIMEOUT,
-            env=child_env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"Subprocess sandbox timed out after {SANDBOX_SUBPROCESS_TIMEOUT}s. "
-            "Increase PLAITA_SANDBOX_TIMEOUT or optimise the code."
-        ) from exc
+    proc = subprocess.Popen(
+        [sys.executable, "-c", runner],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=child_env,
+        start_new_session=True,
+    )
+    out, err = _popen_wait_cancellable(
+        proc, SANDBOX_SUBPROCESS_TIMEOUT, cancel_event,
+        "Subprocess sandbox", json.dumps(input_value).encode())
 
-    stdout = proc.stdout.decode(errors="replace")
-    stderr = proc.stderr.decode(errors="replace")
+    stdout = out.decode(errors="replace") if out else ""
+    stderr = err.decode(errors="replace") if err else ""
 
     if proc.returncode != 0 and not stdout.strip():
         raise RuntimeError(
@@ -452,8 +527,42 @@ def run_python_docker(code, input_value):
     exposes the home directory, so ``/var/folders`` temp files are inaccessible
     inside the VM).
     """
+def run_python_docker(code, input_value, cancel_event=None):
+    """Execute *code* inside a one-shot Docker container.
+
+    Isolation guarantees:
+
+    * ``--network none`` — no outbound network access
+    * ``--read-only`` — container file system is read-only (``/tmp`` writable)
+    * ``--memory`` / ``--cpus`` — resource caps
+    * Container is destroyed immediately after execution (``--rm``)
+
+    Requires Docker (or a compatible daemon) to be installed and running.
+    Configure via environment variables:
+
+    * ``PLAITA_SANDBOX_DOCKER_IMAGE`` (default ``python:3.12-slim``)
+    * ``PLAITA_SANDBOX_DOCKER_TIMEOUT`` (seconds, default 30)
+    * ``PLAITA_SANDBOX_DOCKER_MEMORY_MB`` (MB, default 128)
+    * ``PLAITA_SANDBOX_DOCKER_CPUS`` (default ``"0.5"``)
+
+    Input and output are serialised as JSON.
+
+    Implementation note
+    -------------------
+    The runner script is base64-encoded and passed via the ``_PLAITA_SCRIPT``
+    environment variable.  The container entry-point is a one-liner that decodes
+    and ``exec``s it; JSON input arrives via stdin.  This avoids both the
+    ``python -`` pipe-conflict and volume-mount issues (e.g. colima's sshfs only
+    exposes the home directory, so ``/var/folders`` temp files are inaccessible
+    inside the VM).
+
+    Timeout/cancel (2026-09-30): the container gets a unique ``--name``; the
+    wait loop kills the whole ``docker run`` client process group and runs a
+    best-effort ``docker rm -f`` so the container does not outlive the call.
+    """
     runner = _build_runner_script(code, mem_bytes=0)  # resource limits via Docker flags
     runner_b64 = base64.b64encode(runner.encode()).decode()
+    container_name = f"plaita-sbx-{uuid.uuid4().hex[:12]}"
 
     cmd = [
         "docker", "run",
@@ -470,6 +579,7 @@ def run_python_docker(code, input_value):
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         *(["--user", SANDBOX_DOCKER_USER] if SANDBOX_DOCKER_USER else []),
+        "--name", container_name,
         "-i",
         "-e", f"_PLAITA_SCRIPT={runner_b64}",
         SANDBOX_DOCKER_IMAGE,
@@ -478,11 +588,12 @@ def run_python_docker(code, input_value):
     ]
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            input=json.dumps(input_value).encode(),
-            capture_output=True,
-            timeout=SANDBOX_DOCKER_TIMEOUT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -490,13 +601,24 @@ def run_python_docker(code, input_value):
             "Install Docker and ensure the daemon is running, "
             "or use sandbox_backend='subprocess' or 'restricted'."
         ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"Docker sandbox timed out after {SANDBOX_DOCKER_TIMEOUT}s."
-        ) from exc
+    try:
+        out, err = _popen_wait_cancellable(
+            proc, SANDBOX_DOCKER_TIMEOUT, cancel_event,
+            "Docker sandbox", json.dumps(input_value).encode())
+    except RuntimeError:
+        # 客户端进程组已杀；容器本体归 dockerd 管，--rm 只在容器正常退出时
+        # 生效——强杀客户端后必须显式 rm，否则容器残活。
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                capture_output=True, timeout=15,
+            )
+        except Exception:
+            logger.debug("docker rm -f %s failed", container_name, exc_info=True)
+        raise
 
-    stdout = proc.stdout.decode(errors="replace")
-    stderr = proc.stderr.decode(errors="replace")
+    stdout = out.decode(errors="replace") if out else ""
+    stderr = err.decode(errors="replace") if err else ""
 
     if proc.returncode != 0 and not stdout.strip():
         stderr_text = stderr[:500] or "(empty)"
@@ -506,11 +628,12 @@ def run_python_docker(code, input_value):
             "cannot connect to the docker daemon",
             "is the docker daemon running",
             "connection refused",
+            "command not found",
         ]
         if any(sig in stderr_text.lower() for sig in _daemon_down_signals):
             raise RuntimeError(
-                "Docker daemon is not running or not accessible. "
-                "Start Docker and try again, or use "
+                "Docker is not installed or the daemon is not running/accessible. "
+                "Install Docker and start the daemon, or use "
                 "sandbox_backend='subprocess' or 'restricted'."
             )
         raise RuntimeError(
@@ -626,6 +749,12 @@ class CodeNode(Node):
                 raise ValueError(
                     f"Unknown sandbox_backend={self.sandbox_backend!r}. "
                     f"Supported: {list(_PYTHON_BACKENDS)}"
+                )
+            if self.sandbox_backend in ("subprocess", "docker"):
+                # 协作式取消：cancel_event 置位时子进程树整组击杀（2026-09-30）
+                return backend_fn(
+                    code, input_value,
+                    cancel_event=getattr(execution, "cancel_event", None),
                 )
             return backend_fn(code, input_value)
 

@@ -209,25 +209,26 @@ class TestRunPythonRestricted(unittest.TestCase):
 
 class TestRunPythonSubprocess(unittest.TestCase):
     def test_timeout_raises_runtime_error(self):
-        """Lines 370-371: subprocess timeout → RuntimeError."""
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
-            cmd="python", timeout=10
-        )):
-            from plaita.node.code import run_python_subprocess
+        """2026-09-30 起走 Popen+killpg：真实超时 → RuntimeError（整组击杀）。"""
+        from plaita.node import code as code_mod
+        from plaita.node.code import run_python_subprocess
+        old = code_mod.SANDBOX_SUBPROCESS_TIMEOUT
+        code_mod.SANDBOX_SUBPROCESS_TIMEOUT = 1
+        try:
             with self.assertRaises(RuntimeError) as ctx:
-                run_python_subprocess("def run(x): return x", {})
+                run_python_subprocess(
+                    "def run(x):\n    import time\n    time.sleep(10)", {})
+        finally:
+            code_mod.SANDBOX_SUBPROCESS_TIMEOUT = old
         self.assertIn("timed out", str(ctx.exception))
+        self.assertIn("process tree killed", str(ctx.exception))
 
     def test_nonzero_exit_with_empty_stdout_raises(self):
-        """Line 380: non-zero returncode and empty stdout → RuntimeError."""
-        mock_proc = MagicMock()
-        mock_proc.returncode = 1
-        mock_proc.stdout = b""
-        mock_proc.stderr = b"SomeError"
-        with patch("subprocess.run", return_value=mock_proc):
-            from plaita.node.code import run_python_subprocess
-            with self.assertRaises(RuntimeError) as ctx:
-                run_python_subprocess("def run(x): return x", {})
+        """非零退出且 stdout 为空 → RuntimeError。"""
+        from plaita.node.code import run_python_subprocess
+        code = "def run(x):\n    import os\n    os._exit(1)"
+        with self.assertRaises(RuntimeError) as ctx:
+            run_python_subprocess(code, {})
         self.assertIn("Subprocess exited", str(ctx.exception))
 
 
@@ -237,42 +238,54 @@ class TestRunPythonSubprocess(unittest.TestCase):
 
 class TestRunPythonDockerErrors(unittest.TestCase):
     def test_file_not_found_error_raises_docker_missing_message(self):
-        """Lines 446-451: FileNotFoundError → RuntimeError about Docker not installed."""
-        with patch("subprocess.run", side_effect=FileNotFoundError("docker not found")):
+        """Popen FileNotFoundError → RuntimeError about Docker not installed."""
+        with patch("subprocess.Popen", side_effect=FileNotFoundError("docker not found")):
             from plaita.node.code import run_python_docker
             with self.assertRaises(RuntimeError) as ctx:
                 run_python_docker("def run(x): return x", {})
         self.assertIn("Docker is not installed", str(ctx.exception))
 
-    def test_timeout_raises_runtime_error(self):
-        """Lines 452-455: docker subprocess timeout → RuntimeError."""
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
-            cmd="docker", timeout=30
-        )):
-            from plaita.node.code import run_python_docker
-            with self.assertRaises(RuntimeError) as ctx:
-                run_python_docker("def run(x): return x", {})
+    def test_timeout_kills_client_and_raises(self):
+        """wait 循环超时 → killpg 客户端组 + best-effort docker rm -f → RuntimeError。"""
+        from plaita.node import code as code_mod
+        mock_proc = MagicMock()
+        # communicate 恒超时（deadline 前反复重试），killpg 后 reap 再超时也须吞掉
+        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(
+            cmd="docker", timeout=30)
+        old = code_mod.SANDBOX_DOCKER_TIMEOUT
+        code_mod.SANDBOX_DOCKER_TIMEOUT = 1
+        try:
+            with patch("subprocess.Popen", return_value=mock_proc), \
+                    patch("subprocess.run") as mock_run:
+                from plaita.node.code import run_python_docker
+                with self.assertRaises(RuntimeError) as ctx:
+                    run_python_docker("def run(x): return x", {})
+        finally:
+            code_mod.SANDBOX_DOCKER_TIMEOUT = old
         self.assertIn("timed out", str(ctx.exception))
+        self.assertIn("process tree killed", str(ctx.exception))
+        # 容器不残活：rm -f 被调用
+        self.assertTrue(any(
+            "rm" in str(call) for call in mock_run.call_args_list))
 
     def test_daemon_not_running_detected(self):
-        """Lines 469-474: stderr contains daemon-down signal → specific message."""
+        """stderr 含 daemon-down 信号 → 可行动的报错信息。"""
         mock_proc = MagicMock()
         mock_proc.returncode = 1
-        mock_proc.stdout = b""
-        mock_proc.stderr = b"Cannot connect to the Docker daemon is the docker daemon running"
-        with patch("subprocess.run", return_value=mock_proc):
+        mock_proc.communicate.return_value = (
+            b"", b"Cannot connect to the Docker daemon is the docker daemon running")
+        with patch("subprocess.Popen", return_value=mock_proc):
             from plaita.node.code import run_python_docker
             with self.assertRaises(RuntimeError) as ctx:
                 run_python_docker("def run(x): return x", {})
-        self.assertIn("Docker daemon is not running", str(ctx.exception))
+        self.assertIn("Docker is not installed or the daemon", str(ctx.exception))
 
     def test_generic_nonzero_exit(self):
-        """Line 475-478: non-zero exit without daemon signal → generic message."""
+        """非零退出且无 daemon 信号 → 通用报错。"""
         mock_proc = MagicMock()
         mock_proc.returncode = 2
-        mock_proc.stdout = b""
-        mock_proc.stderr = b"some other error"
-        with patch("subprocess.run", return_value=mock_proc):
+        mock_proc.communicate.return_value = (b"", b"some other error")
+        with patch("subprocess.Popen", return_value=mock_proc):
             from plaita.node.code import run_python_docker
             with self.assertRaises(RuntimeError) as ctx:
                 run_python_docker("def run(x): return x", {})

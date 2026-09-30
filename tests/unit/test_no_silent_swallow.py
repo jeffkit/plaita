@@ -24,6 +24,12 @@ ALLOWED_SILENT = {
     ("node/http.py", 369),   # json.loads() 失败回退到原始文本 (async aiohttp path)
     ("storage/memory.py", 138),  # 版本号非纯数字排序失败, 回退到任意版本
     ("server/event_filter.py", 105),  # 孤儿订阅巡检失败不影响主流程（有兜底 debug 日志）
+    # 2026-09-30 killpg 孤儿修复：强杀路径是 best-effort——组消失/权限不足/mock pid
+    # 时退化杀直接子进程；reap 的 communicate 再超时（组外进程握住管道）则放弃收尸
+    # 直接抛错。异常细节不影响「进程组已被杀」这一主结果。
+    ("node/code.py", 383),
+    ("node/code.py", 414),
+    ("node/code.py", 422),
 }
 
 
