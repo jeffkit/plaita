@@ -50,6 +50,9 @@ def _compile_block(
     if isinstance(head, ast.If):
         return _compile_if(head, ctx, succ, rest)
 
+    if isinstance(head, ast.While):
+        return _compile_while(head, ctx, succ, rest)
+
     if isinstance(head, ast.For):
         return _compile_for(head, ctx, succ, rest)
 
@@ -99,15 +102,144 @@ def _compile_if(
     return if_id
 
 
+# While 循环变量名 → 上下文键。条件与体的求值上下文不同：
+# 条件在引擎侧拿 $LOOP-ITEM/$LOOP-INDEX（父 context + 注入键），
+# 体是子流程，item/rounds 走 $INPUT.item/$INPUT.index。
+_WHILE_COND_VARS: Dict[str, str] = {"item": "$LOOP-ITEM", "rounds": "$LOOP-INDEX"}
+_WHILE_BODY_VARS: Dict[str, str] = {"item": "$INPUT.item", "rounds": "$INPUT.index"}
+
+
+def _while_cond(test: ast.expr, ctx: _CompileCtx) -> Dict[str, Any]:
+    """编译 while 条件：``item``→$LOOP-ITEM、``rounds``→$LOOP-INDEX，外层名按父侧引用。"""
+    cond_ctx = _CompileCtx(module_globals=ctx.module_globals)
+    cond_ctx.names = {**ctx.names, **_WHILE_COND_VARS}
+    return _compile_condition(test, cond_ctx)
+
+
+def _while_child_flow(body: List[ast.stmt], ctx: _CompileCtx) -> Dict[str, Any]:
+    """编译 while 循环体为子流程。体外层赋值名自动映射 $PARENT.NODE.<名>。"""
+    parent_names = {name: "$PARENT." + ref[1:] for name, ref in ctx.names.items()}
+    child_ctx = _CompileCtx(
+        loop_vars={**parent_names, **_WHILE_BODY_VARS}, module_globals=ctx.module_globals)
+    child_entry = _compile_block(list(body), child_ctx, succ=None)
+    if child_entry is None:
+        raise _CodeflowError(
+            "while 循环体为空或全部悬空：请以 return 结束（返回值成为下一轮的 item）", body[0] if body else None)
+    child_start_id = child_ctx.auto_id("start")
+    return {
+        "runtime": "python",
+        "inputType": {"dataType": "object"},
+        "nodes": [
+            {"type": "start", "id": child_start_id, "next": child_entry},
+            *child_ctx.nodes,
+        ],
+    }
+
+
+def _compile_while(
+    head: ast.While, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
+) -> str:
+    """``while <cond>:`` 条件循环 -> While 节点（引擎 plaita.node.loop.While）。
+
+    语义与引擎对齐，循环体编译为子流程并**必须以 return 结束**——return 值
+    即下一轮的 ``item``（首轮为 None），循环结束后也是本节点的输出。子流程
+    状态与父隔离，体内 assignment 不会写回父 context，循环状态只能靠 return
+    串（函数式）。条件与体内可用 ``item`` 与 ``rounds``（轮次，从 0 起）；
+    首轮 item 为 None，bootstrap 惯用 ``while rounds == 0 or item.xxx:``。
+
+    可依赖的引擎语义（2026-09-30 实测钉死）：条件组求值不短路但点路径打
+    None 优雅返回 None、None 参与算子比较不炸（引擎吞 TypeError 记 False），
+    故 ``item.n > 0`` 等写法在首轮是安全的。唯一退出通道是条件转假（引擎
+    max_iterations=1000 兜底，业务上限应写进条件）；不支持 break/continue/
+    while-else。``while True:`` 合法但只会跑满 max_iterations。
+
+    作用域：体的子流程 INPUT 只有 item/index。外层已赋值变量由编译器自动
+    映射为 ``$PARENT.NODE.<名>``（$PARENT 是子流程启动时的父 context 快照，
+    循环期间父侧冻结）——体内直接裸用外层变量名即可。条件运行在父侧
+    loop_ctx，外层变量按父侧引用解析。外层原始 INPUT 在体内须显式写
+    ``PARENT.INPUT.<名>``（裸 INPUT 指子流程输入，静默 None 是陷阱）。
+    """
+    if head.orelse:
+        raise _CodeflowError("while-else 不支持，请把 else 体移到 while 之后", head.orelse[0])
+
+    cond = _while_cond(head.test, ctx)
+    child_flow = _while_child_flow(head.body, ctx)
+
+    node_id = ctx.auto_id()
+
+    after = _compile_block(rest, ctx, succ)
+    if after is None:
+        raise _CodeflowError("while 节点之后悬空：请补 return 或后续语句", head)
+
+    spec: Dict[str, Any] = {
+        "type": "while",
+        "id": node_id,
+        "condition": cond,
+        # While 模型只认 child_flow（无 childFlow camelCase 兼容键，
+        # 2026-09-30 实测：写 childFlow 会被 schema 当未知键静默忽略）。
+        "child_flow": child_flow,
+        "next": after,
+    }
+    _annotate_source(spec, head)
+    ctx.nodes.append(spec)
+    return node_id
+
+
+def _compile_while_for(
+    head: ast.For, coll_call: ast.Call, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
+) -> str:
+    """``for x in WHILE(cond, id="w"):`` —— While 的 for-head 形态。
+
+    与 ``while`` 语句同引擎节点，差别仅在节点可命名（id=），循环的最终态
+    （最后一轮 return 值）下游经 ``NODE.<id>`` 引用。可选
+    ``max_iterations=`` 覆盖引擎默认 1000。
+    """
+    kw = {k.arg: k.value for k in coll_call.keywords}
+    pos = coll_call.args
+    if not pos:
+        raise _CodeflowError("WHILE 需要一个条件表达式", coll_call)
+
+    cond = _while_cond(pos[0], ctx)
+    child_flow = _while_child_flow(head.body, ctx)
+
+    node_id = None
+    id_kw = kw.get("id")
+    if id_kw is not None and isinstance(id_kw, ast.Constant):
+        node_id = str(id_kw.value)
+    node_id = ctx.auto_id(node_id)
+
+    spec: Dict[str, Any] = {
+        "type": "while",
+        "id": node_id,
+        "condition": cond,
+        "child_flow": child_flow,
+    }
+    mi = kw.get("max_iterations")
+    if mi is not None and isinstance(mi, ast.Constant) and isinstance(mi.value, int):
+        spec["max_iterations"] = mi.value
+
+    after = _compile_block(rest, ctx, succ)
+    if after is None:
+        raise _CodeflowError("WHILE 节点之后悬空：请补 return 或后续语句", head)
+    spec["next"] = after
+    _annotate_source(spec, head)
+    ctx.nodes.append(spec)
+    return node_id
+
+
 def _compile_for(
     head: ast.For, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
     """``for x in MAP/FILTER/FIND/LOOP(...)`` / ``for a,b in REDUCE(...)``。"""
     coll_call = head.iter
-    if not isinstance(coll_call, ast.Call) or not isinstance(coll_call.func, ast.Name) \
-            or coll_call.func.id not in _COLLECTION_CALL_NAMES:
+    if not isinstance(coll_call, ast.Call) or not isinstance(coll_call.func, ast.Name):
         raise _CodeflowError(
-            "for 循环的迭代对象必须是 MAP/FILTER/FIND/LOOP/REDUCE(...) 节点调用", coll_call)
+            "for 循环的迭代对象必须是 MAP/FILTER/FIND/LOOP/REDUCE/WHILE(...) 节点调用", coll_call)
+    if coll_call.func.id == "WHILE":
+        return _compile_while_for(head, coll_call, ctx, succ, rest)
+    if coll_call.func.id not in _COLLECTION_CALL_NAMES:
+        raise _CodeflowError(
+            "for 循环的迭代对象必须是 MAP/FILTER/FIND/LOOP/REDUCE/WHILE(...) 节点调用", coll_call)
     kind = coll_call.func.id
     kw = {k.arg: k.value for k in coll_call.keywords}
     pos = coll_call.args

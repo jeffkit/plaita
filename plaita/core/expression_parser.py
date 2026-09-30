@@ -169,9 +169,13 @@ class ExpressionParser:
 
         # --- literals ----------------------------------------------------
         number = pp.pyparsing_common.number
+        # null/None 字面量（2026-09-30）：codeflow 编译器把 None 参数渲染成
+        # "null"（_render_arg），文法里没有它时整句函数调用解析失败、退化成
+        # 变量路径解析，报 "$F not found" 误导排查方向。
         boolean = (
             pp.Keyword("True") | pp.Keyword("False")
             | pp.Keyword("true") | pp.Keyword("false")
+            | pp.Keyword("null") | pp.Keyword("None")
         )
         boolean.set_parse_action(lambda s, l, t: self._eval_boolean(t))
         string = pp.QuotedString('"') | pp.QuotedString("'")
@@ -259,6 +263,8 @@ class ExpressionParser:
     @staticmethod
     def _eval_boolean(tokens):
         raw = tokens[0]
+        if raw in ("null", "None"):
+            return [None]
         return [raw in ("True", "true")]
 
     def _eval_variable(self, tokens) -> Any:

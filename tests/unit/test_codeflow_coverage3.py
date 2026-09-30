@@ -149,18 +149,32 @@ class TestNegateOrCondition(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Unsupported statement (line 571)
+# Unsupported statement
 # ---------------------------------------------------------------------------
 
 class TestUnsupportedStatement(unittest.TestCase):
-    def test_while_loop_raises(self):
-        """Line 571: while loop in @flow raises _CodeflowError."""
+    def test_unsupported_statement_raises(self):
+        """while 已支持（2026-09-30）；真正不支持的语句（with）仍报 _CodeflowError。"""
         with self.assertRaises(Exception):
-            @flow("test_while")
+            @flow("test_with_stmt")
             def _test(INPUT):
-                while INPUT.x > 0:  # not supported  # noqa: F821
+                with open(INPUT.p):  # not supported  # noqa
                     return INPUT.x
                 return 0
+
+    def test_while_loop_now_supported(self):
+        """while 语句自 2026-09-30 起编译为 While 条件循环节点。"""
+        from plaita.dsl.codeflow import compile_source
+        ir = compile_source("""
+from plaita.dsl.codeflow import flow
+@flow("test_while_ok")
+def _test(INPUT):
+    while INPUT.x > 0:
+        return INPUT.x
+    return 0
+""")
+        nodes = [n for n in ir["nodes"] if n.get("type") == "while"]
+        assert len(nodes) == 1
 
 
 # ---------------------------------------------------------------------------

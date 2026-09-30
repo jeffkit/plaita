@@ -74,10 +74,11 @@ class TestCompileBlockMutations:
         assert ctx.nodes[-1]["type"] == "end"
 
     def test_unsupported_stmt_message(self):
+        # while 已支持（2026-09-30），用 with 代表真正不支持的语句
         with pytest.raises(_CodeflowError) as exc:
-            _compile_block(_stmts("while True: pass"), _ctx(), "succ")
+            _compile_block(_stmts("with INPUT.f: pass"), _ctx(), "succ")
         msg = str(exc.value)
-        assert "不支持的语句 While" in msg
+        assert "不支持的语句 With" in msg
         assert "XX不支持的语句" not in msg
         assert "第 ?" not in msg
 

@@ -33,6 +33,10 @@ FILTER = _Placeholder("FILTER")
 FIND = _Placeholder("FIND")
 LOOP = _Placeholder("LOOP")
 REDUCE = _Placeholder("REDUCE")
+# WHILE 只在 for-head 位置合法：`for x in WHILE(cond, id="w")` —— 条件循环
+# （引擎 While 节点），体必须以 return 结束（返回值即下一轮 item）。别处使用
+# 会被当成未注册自定义节点拒绝。
+WHILE = _Placeholder("WHILE")
 CHILD = _Placeholder("CHILD")
 REFERENCE = _Placeholder("REFERENCE")
 PARALLEL = _Placeholder("PARALLEL")
@@ -101,6 +105,8 @@ _NEGATE_OP = {
 
 _NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL"}
 _COLLECTION_CALL_NAMES = {"MAP", "FILTER", "FIND", "LOOP", "REDUCE"}
+# WHILE 走 for-head 专属编译路径（条件循环，无 collection），不算 collection call
+_WHILE_CALL_NAME = "WHILE"
 
 # 已被专用占位符（HTTP/CODE/CHILD/...）或合成节点（start/end/if/assignment/switch/bool）
 # 接手的 node_type 集合。自定义节点路径不走这些类型，避免 START(...)/END(...) 之类
