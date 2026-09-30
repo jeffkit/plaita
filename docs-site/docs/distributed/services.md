@@ -50,7 +50,17 @@ flowchart LR
 
 ### DelayService
 
-按 `service_config.delay_ms` 设定定时器，到点发布 `delay_trigger` 事件。适合"X 分钟后继续"的场景。
+延迟任务到点后发布 `delay_trigger` 事件恢复流程，适合"X 分钟后继续"的场景。两种运行形态：
+
+- **独立部署（有 Redis，`python -m plaita.server.services delay_service`）**：消费
+  `plaita:delay:queue`，任务**出队即落** `plaita:delay:pending` ZSET
+  （member=任务 JSON，score=触发时刻 epoch ms），每秒扫描到点即触发。
+  **重启/被杀不再丢唤醒**：进程恢复后首扫自动补触发到期任务，执行不会永久
+  停留在 suspended。触发语义为 **at-least-once**——先发布事件后出集，崩溃
+  窗口内的重复触发由 worker 侧幂等 resume 短路；多实例经
+  `plaita:delay:lock:{execution_id}`（NX+PX 30s）互斥防双发。
+- **进程内（无 Redis，ServiceManager 形态）**：`handle_task` 分段 sleep 到点后
+  经 InMemoryEventBus 发布，无重启恢复能力（进程本身都不在了）。
 
 ### RedisQueueService / KafkaQueueService
 

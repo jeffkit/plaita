@@ -1,6 +1,6 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-09-06  
+> 最后更新：2026-09-30  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 
 | 文档路径 | 代码路径模式 | 同步触发条件 |
@@ -15,6 +15,7 @@
 | `docs-site/docs/ai/tools.md` | `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py`, `plaita-ai/examples/tools/**`, `plaita-ai/tests/test_tool_sources.py`, `plaita-ai/tests/test_langchain_tools.py` | ToolNode 桥接、BaseToolSource（HTTP/SQL/Vector/Native）、YAML bundle、ToolContext、addressing、LangChain 适配、PLAITA_TOOLS |
 | `docs-site/docs/nodes/custom.md` / `scenarios/agent-orchestration.md` | `examples/agent/**`, `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py` | 自定义 Node vs 数据源工具叙事；examples 教学 ToolNode 与 plaita-ai 工具层区分 |
 | `docs-site/docs/nodes/builtin.md` / `api/node.md` | `plaita/node/__init__.py`, `plaita/node/code.py` | 默认注册表成员、`register_code_node`、CodeNode 沙箱默认 |
+| `docs-site/docs/distributed/services.md` / `extended-nodes.md` | `plaita/server/services/**`, `plaita/server/nodes/**` | 外延服务职责、队列/pending 键、触发语义、重启恢复行为、扩展节点字段变更 |
 | `docs-site/docs/reference/migration-guide.md` / `nodes/migration.md` | `plaita/__init__.py`, `MIGRATION.md` | `plaita.flow` 删除、shim 退役、0.5.0 break 清单 |
 | `docs-site/docs/ai/mcp.md` | `plaita-ai/plaita_ai/mcp/**`, `plaita-ai/plaita_ai/cli/main.py`, `plaita-ai/plaita_ai/tools/bootstrap.py` | MCP 工具列表、插件加载、PLAITA_TOOLS/RESOURCES、`tools validate\|list` |
 | `docs-site/docs/ai/fot-agent.md` / `ai/react-agent.md` | `plaita-ai/plaita_ai/agent/**` | Agent 构造参数、工具注册与双用途语义 |

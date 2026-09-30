@@ -11,6 +11,7 @@
 | 任务队列（`RedisFlowWorker`） | Redis **Stream** + consumer group；成功 `XACK`，否则 pending 可回收；超 `--max-deliveries` 进 DLQ | **at-least-once**（需 Redis 5+）。业务侧应幂等；毒丸进 `<queue>:dlq` |
 | 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **1**） | 连续推进每步写盘；崩溃不丢步进进度 |
 | 挂起 / 结束 / 出错 | **立即** `save_execution_state` | 这些边界点相对安全 |
+| 延迟唤醒（`DelayService`，独立部署） | 任务出队即落 `plaita:delay:pending` ZSET，每秒扫描到点触发，重启后首扫补触发（NX 锁防多实例双发） | **at-least-once**：delay_service 崩溃不再丢唤醒，重复触发被幂等 resume 短路 |
 | 并发 resume | Redis `SET NX EX` lease（`plaita.server.execution_lease`） | 同一 `execution_id` 最多一个 resume；抢租约失败的任务**不** XACK，待 TTL 过期后 reclaim |
 | 控制面 | Registry / Control / Log / Queue / EventFilter 硬绑 Redis | 换 EventBus 后端 ≠ 换部署拓扑 |
 

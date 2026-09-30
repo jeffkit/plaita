@@ -39,6 +39,9 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
+| `PLAITA_DELAY_QUEUE` | `plaita:delay:queue` | 延迟任务队列（DelayService 消费） |
+| `PLAITA_DELAY_PENDING` | `plaita:delay:pending` | 延迟任务 pending ZSET（重启恢复源） |
+| `PLAITA_DELAY_SWEEP_INTERVAL` | `1` | 延迟任务扫描间隔（秒） |
 
 ## List → Stream 迁移（升级必做）
 
@@ -71,6 +74,7 @@ python scripts/drain_list_queue_to_stream.py \
 redis-cli XLEN plaita:flow:queue
 redis-cli XPENDING plaita:flow:queue plaita-workers
 redis-cli XLEN plaita:flow:queue:dlq
+redis-cli ZCARD plaita:delay:pending
 redis-cli KEYS 'plaita:execution:lease:*'
 ```
 
@@ -83,6 +87,7 @@ redis-cli KEYS 'plaita:execution:lease:*'
 | DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌 |
 | 双 resume | 旧版本无 lease | 升级到含 lease 的版本；查 lease key |
 | 挂起永不恢复 | EventBus 与 subscription 不同 Redis；`--no-event-bus` | Worker/Filter 同总线；去掉 no-event-bus |
+| 延迟任务长期滞留 pending | delay_service 未启动/未连同一 Redis | `ZCARD plaita:delay:pending` 观测；启动 delay_service 后 1 个扫描周期内到期任务自动补触发 |
 
 ## 与可靠性文档的关系
 
