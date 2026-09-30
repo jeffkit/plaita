@@ -60,9 +60,16 @@ def get_redis(request: Request) -> Redis:
 KNOWN_QUEUES = [
     "plaita:flow:queue",           # 流程任务队列
     "plaita:delay:queue",          # 延迟任务队列
+    "plaita:delay:pending",        # 延迟任务 pending（ZSET，重启恢复源）
     "plaita:redis_queue:*",        # Redis 队列服务
     "plaita:kafka_queue:*",        # Kafka 队列服务
 ]
+
+# 键尚不存在时零值行的展示类型（缺省 list）
+ZERO_ROW_TYPES = {
+    "plaita:flow:queue": "stream",
+    "plaita:delay:pending": "zset",
+}
 
 
 # ============ API 端点 ============
@@ -99,7 +106,7 @@ async def list_queues(
             queues.append(QueueInfo(
                 name=pattern,
                 length=0,
-                queue_type="stream" if pattern == "plaita:flow:queue" else "list",
+                queue_type=ZERO_ROW_TYPES.get(pattern, "list"),
             ))
             continue
         for key in keys:
@@ -169,6 +176,18 @@ async def get_queue(
                 index=start + i,
                 data=data
             ))
+    elif key_type == "zset":
+        # 延迟任务 pending（score=触发时刻 ms）：member 即任务 JSON
+        length = redis.zcard(queue_name)
+        entries = redis.zrange(queue_name, start, start + count - 1, withscores=True)
+        for i, (member, score) in enumerate(entries):
+            member_str = member if isinstance(member, str) else member.decode()
+            try:
+                data = json.loads(member_str)
+            except Exception:
+                data = {"raw": member_str}
+            data = {"_trigger_at": int(score), **data}
+            tasks.append(QueueTask(index=start + i, data=data))
     else:
         length = 0
 
