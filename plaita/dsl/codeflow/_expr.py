@@ -136,7 +136,15 @@ def _render_arg(v: Any) -> str:
     if isinstance(v, str):
         if v.startswith("$"):
             return v
-        return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        # 控制字符必须转义：裸换行的字符串常量（多行 prompt 的常态）会让
+        # 文法解析整句失败、退化成变量路径，误报 "$F not found"（2026-09-30
+        # self-improve v2 冒烟实证）。文法的字符串字面量已支持 \n/\t 转义。
+        escaped = (v.replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                    .replace("\n", "\\n")
+                    .replace("\r", "\\r")
+                    .replace("\t", "\\t"))
+        return '"' + escaped + '"'
     if isinstance(v, bool):
         return "true" if v else "false"
     if v is None:

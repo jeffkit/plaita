@@ -104,6 +104,14 @@ class TestWhileCompileShape(unittest.TestCase):
 # for-head WHILE：节点可命名（id=），循环最终态经 NODE.<id> 引用
 # ---------------------------------------------------------------------------
 
+@flow("while_multiline_prompt")
+def while_multiline_prompt(INPUT):
+    # 多行字符串常量进 $F 参数：_render_arg 必须转义裸换行（2026-09-30
+    # self-improve v2 冒烟实证——不转义整句解析失败、误报 "$F not found"）
+    prompt = F.concat("line1\n\nline2: ", INPUT.tail, "\nline3")
+    return prompt
+
+
 @flow("while_poll_state")
 def while_poll_state(INPUT):
     base = INPUT.base
@@ -144,6 +152,11 @@ class TestWhileEndToEnd(unittest.TestCase):
     def test_statement_form_runs(self):
         # 语句形态（自动 id，输出不可命名引用）执行语义一致
         self.assertEqual(while_stmt_runs.run(), "done")
+
+    def test_multiline_string_constant_in_F_args(self):
+        self.assertEqual(
+            while_multiline_prompt.run(tail="T"),
+            "line1\n\nline2: T\nline3")
 
 
 class TestWhileForHeadCompile(unittest.TestCase):
