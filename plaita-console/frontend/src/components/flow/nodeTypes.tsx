@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import { memo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { useFlowEditor } from '../../stores/flowEditor'
 
 // 节点类型配置：图标与配色
 export const nodeTypeConfig: Record<string, { shape: string; color: string; icon: string }> = {
@@ -175,7 +176,26 @@ export function renderSubtitle(
   return ''
 }
 
-export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, next, elseNext }: NodeLabelData) {
+/** 子流程迷你带 chip：体节点逐个（跳过 start），while 尾部加回条件标记 */
+export function subflowBandChips(fields: Record<string, unknown> = {}): Array<{ icon: string; label: string; title: string }> {
+  const cf = (fields.childFlow || fields.child_flow) as { nodes?: Array<Record<string, unknown>> } | undefined
+  const nodes = (cf?.nodes || []).filter(n => n.type !== 'start')
+  if (!nodes.length) return []
+  const chips = nodes.slice(0, 4).map(n => {
+    const cfg = resolveNodeTypeConfig(String(n.type ?? ''))
+    const label = String(n.name || n.id || '')
+    return { icon: cfg.icon, label: label.length > 12 ? label.slice(0, 12) + '…' : label, title: label }
+  })
+  if (nodes.length > 4) chips.push({ icon: '⋯', label: `+${nodes.length - 4}`, title: `其余 ${nodes.length - 4} 个节点` })
+  if (String(nodes[0]?.type) === 'end' || type_is_while(nodes)) chips.push({ icon: '↺', label: '回条件', title: '每轮回到循环条件' })
+  return chips
+}
+// while 体的 return 即下一轮 item——带尾加「回条件」标记
+function type_is_while(nodes: Array<Record<string, unknown>>): boolean {
+  return nodes.length > 0 && nodes.every(n => n.type === 'end')
+}
+
+export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, next, elseNext, onBandClick }: NodeLabelData & { onBandClick?: () => void }) {
   const cfg = resolveNodeTypeConfig(type)
   const style = statusStyles[status] ?? statusStyles.idle
   const cs = COLOR_STYLES[cfg.color] ?? COLOR_STYLES.gray
@@ -203,6 +223,29 @@ export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, 
           )}
         </div>
       </div>
+      {(() => {
+        // 子流程迷你带（方案 B）：循环族卡片第三行，只读拓扑概览；
+        // onBandClick 由编辑器画布传入（点击整条带进入子图编辑），FlowViewer 只读
+        if (!fields) return null
+        const chips = subflowBandChips(fields)
+        if (!chips.length) return null
+        return (
+          <div
+            className={`-mx-3 -mb-2 mt-1.5 flex items-center gap-1 border-t px-2 py-1 bg-inset/60 overflow-hidden ${onBandClick ? 'cursor-pointer hover:bg-inset' : 'pointer-events-none'}`}
+            onClick={onBandClick ? (e) => { e.stopPropagation(); onBandClick() } : undefined}
+            title="子流程概览（点击进入子图编辑）"
+          >
+            {chips.map((c, i) => (
+              <span key={i} className="flex items-center gap-1 shrink-0" title={c.title}>
+                {i > 0 && <span className="text-dark-500 text-[9px]">─▶</span>}
+                <span className="rounded bg-dark-800/70 px-1 py-px text-[9px] font-mono text-ink-secondary whitespace-nowrap">
+                  {c.icon} {c.label}
+                </span>
+              </span>
+            ))}
+          </div>
+        )
+      })()}
       {status === 'executed' && (
         <span className="absolute top-1 right-1.5 text-status-success text-xs">✓</span>
       )}
@@ -226,12 +269,16 @@ export interface PlaitaNodeData {
   [key: string]: unknown
 }
 
-function PlaitaNodeComponent({ data, selected }: NodeProps) {
+function PlaitaNodeComponent({ data, selected, id }: NodeProps) {
   const d = data as PlaitaNodeData
   return (
     <div className={`relative ${selected ? 'ring-2 ring-plaita-400/80 rounded-lg' : ''}`}>
       <Handle type="target" position={Position.Top} id="in" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
-      {renderNodeLabel({ type: d.type, name: d.name, status: d.status ?? 'idle', desc: d.desc, sourceLine: d.sourceLine, fields: d.fields as Record<string, unknown> | undefined, next: d.next as string | undefined, elseNext: d.elseNext as string | undefined })}
+      {renderNodeLabel({
+        type: d.type, name: d.name, status: d.status ?? 'idle', desc: d.desc, sourceLine: d.sourceLine,
+        fields: d.fields as Record<string, unknown> | undefined, next: d.next as string | undefined, elseNext: d.elseNext as string | undefined,
+        onBandClick: () => useFlowEditor.getState().enterSubgraph(id, 'child_flow'),
+      })}
       <Handle type="source" position={Position.Bottom} id="true" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
       <Handle type="source" position={Position.Right} id="false" className="!bg-dark-400 !w-2.5 !h-2.5 !border-2 !border-canvas" />
     </div>

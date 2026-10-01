@@ -224,3 +224,7 @@ tests:
     - name: 控制台 UI 语义化节点 id
       id: ui-semantic-ids
       file: tests/e2e/ui-semantic-ids.yaml
+
+    - name: 控制台 UI 循环形态
+      id: ui-loops
+      file: tests/e2e/ui-loops.yaml

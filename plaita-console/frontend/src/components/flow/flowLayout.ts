@@ -6,6 +6,24 @@ import { MarkerType, type Node, type Edge } from '@xyflow/react'
 export const NODE_WIDTH = 240
 export const NODE_HEIGHT = 60
 
+/** 循环族节点第三行（子流程迷你带）高度 */
+export const SUBFLOW_BAND_H = 24
+
+/** 循环族类型：卡片带子流程迷你带（体更高，视觉上与普通节点区分） */
+const SUBFLOW_BAND_TYPES = new Set(['map', 'filter', 'find', 'loop', 'reduce', 'while', 'child', 'reference'])
+
+/** 该节点是否渲染子流程迷你带（有体数据才带） */
+export function hasSubflowBand(n: { type?: string; data?: unknown }): boolean {
+  const d = (n.data ?? {}) as Record<string, unknown>
+  const f = (d.fields ?? {}) as Record<string, unknown>
+  return SUBFLOW_BAND_TYPES.has(n.type ?? '') && !!(f.childFlow || f.child_flow)
+}
+
+/** dagre 布局用节点高度（循环族 + 迷你带） */
+export function nodeHeightFor(n: { type?: string; data?: unknown }): number {
+  return hasSubflowBand(n) ? NODE_HEIGHT + SUBFLOW_BAND_H : NODE_HEIGHT
+}
+
 export type LayoutDirection = 'TB' | 'LR'
 
 /**
@@ -20,18 +38,19 @@ export function autoLayout(
   const g = new dagre.graphlib.Graph({ compound: true })
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: direction, nodesep: 60, ranksep: 120, marginx: 40, marginy: 40 })
-  nodes.forEach((n) => g.setNode(n.id, { width: NODE_WIDTH, height: NODE_HEIGHT }))
+  nodes.forEach((n) => g.setNode(n.id, { width: NODE_WIDTH, height: nodeHeightFor(n) }))
   edges.forEach((e) => {
     if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target)
   })
   dagre.layout(g)
   return nodes.map((n) => {
     const pos = g.node(n.id)
+    const h = nodeHeightFor(n)
     return {
       ...n,
       position: {
         x: (pos?.x ?? n.position.x + NODE_WIDTH / 2) - NODE_WIDTH / 2,
-        y: (pos?.y ?? n.position.y + NODE_HEIGHT / 2) - NODE_HEIGHT / 2,
+        y: (pos?.y ?? n.position.y + h / 2) - h / 2,
       },
     }
   })

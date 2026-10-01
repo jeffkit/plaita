@@ -19,7 +19,7 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SUITE = os.path.join(HERE, "..", "tests", "e2e", "ui-semantic-ids.yaml")
+SUITE = os.path.join(HERE, "..", "tests", "e2e", os.environ.get("SUITE_FILE", "ui-semantic-ids.yaml"))
 BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8124").rstrip("/")
 PASSWORD = os.environ.get("ADMIN_PASSWORD", "test-admin-1234")
 
