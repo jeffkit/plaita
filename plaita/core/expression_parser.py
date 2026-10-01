@@ -26,15 +26,33 @@ Evaluation semantics are preserved bit-for-bit against the battle-tested
 * unknown functions fall back to the ``"undefined"`` sentinel
 * ``{% ... %}`` only fires when the inner expression starts with the prefix
 
-Thread-safety: the grammar is built once and shared; per-call context is
-carried on a thread-local call-frame stack, so concurrent ``evaluate`` calls
-do not clobber each other.
+Compile-to-thunk caching (2026-10 BFF hot-path review): parse actions no
+longer evaluate against a thread-local frame inline; they build **context-
+parameterized thunks** (``(context, registry) -> value`` closures).  The
+grammar itself is deterministic per ``(parser, string)``, so successful
+compiles are memoized in a per-instance LRU (``_compile_cache``).  Thunks
+capture only *structure* — root keys, normalized segments, function names,
+argument thunks — never context values, so the same compiled thunk is
+correct for every context it is later called with (guards against cache
+poisoning are in ``tests/unit/test_expression_cache.py``).  Function
+resolution stays at call time so per-call scoped registries and runtime
+``registry.register()`` keep working unchanged.  Compile failures
+(ParseException) are not cached and propagate exactly as before, keeping
+the ``parse_function`` "return the raw string on parse failure" contract.
+
+Thread-safety: the grammar is built once and shared; compiled thunks are
+pure functions of their frame, so concurrent ``evaluate`` calls (parallel
+branches, thread pools) are safe without any shared mutable eval state.
+The historical thread-local frame stack (``_push_frame`` / ``_pop_frame``)
+is kept only for backward compatibility of the private helpers — the hot
+path passes the frame explicitly.
 """
 
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict, Optional
+from collections import OrderedDict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pyparsing as pp
 
@@ -50,6 +68,11 @@ from plaita.logger import logger
 # ---------------------------------------------------------------------------
 
 _UNDEFINED: Callable[..., Any] = lambda *args, **kwargs: "undefined"  # noqa: E731
+
+# A call frame: (context, registry, prefix). Thunks receive it explicitly —
+# no thread-local state on the evaluation hot path.
+Frame = Tuple[Any, Optional[Any], str]
+Thunk = Callable[[Frame], Any]
 
 # 可疑字面量特征（2026-09 LLM 作者模拟 P0-1）：Jinja 双花括号 / Python f-string /
 # await 调用 / 裸函数调用——这些字符串几乎从不是合法的 plaita 表达式意图
@@ -72,6 +95,13 @@ def _warn_suspicious_literal(value: str) -> None:
     )
 
 _SPECIAL_ROOTS = ("INPUT", "NODE", "PARENT", "GLOBAL", "ENV")
+
+
+def _const_thunk(value: Any) -> Thunk:
+    """Compile a literal token into a constant thunk."""
+    def thunk(frame: Frame) -> Any:
+        return value
+    return thunk
 
 
 def _lookup_function(registry: Optional[Any], func_name: str) -> Optional[Callable]:
@@ -111,8 +141,11 @@ def _get_attr(obj: Any, path: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Per-call context — thread-local call-frame stack
+# Per-call context — legacy thread-local frame stack
 # ---------------------------------------------------------------------------
+# The evaluation hot path no longer uses these: thunks receive the frame
+# explicitly.  Kept as private helpers because they were part of this
+# module's historical surface; nothing in plaita itself calls them anymore.
 
 _frame_local = threading.local()
 
@@ -137,20 +170,31 @@ def _current_frame():
 # ExpressionParser
 # ---------------------------------------------------------------------------
 
-
 class ExpressionParser:
-    """Single-grammar, cached expression parser & evaluator.
+    """Single-grammar, compile-once expression parser & evaluator.
 
     One instance per *prefix* is cached and reused — the pyparsing grammar
     (including the recursive ``function_call`` rule, which the old engine
     rebuilt on every call) is constructed exactly once.
+
+    On top of the grammar cache, each expression/template *string* is
+    compiled once into a thunk tree and memoized in a per-instance LRU
+    (``_MAX_CACHE_ENTRIES`` entries).  Strings longer than
+    ``_MAX_CACHED_LEN`` are evaluated uncached every call — they are data
+    (long prompt bodies with an interpolation slot), not expressions, and
+    caching them would pin large texts in memory for the process lifetime.
     """
 
     _instances: Dict[str, "ExpressionParser"] = {}
     _instances_lock = threading.Lock()
 
+    _MAX_CACHE_ENTRIES = 8192
+    _MAX_CACHED_LEN = 4096
+
     def __init__(self, prefix: str = "$") -> None:
         self.prefix = prefix
+        self._compile_cache: "OrderedDict[str, Any]" = OrderedDict()
+        self._cache_lock = threading.Lock()
         self._build_grammar()
 
     # --- construction ----------------------------------------------------
@@ -225,7 +269,10 @@ class ExpressionParser:
         # can corrupt the shared state, causing subsequent calls to be invoked
         # with the wrong number of arguments. Fixed-3-arg wrappers skip the
         # discovery loop entirely and are always called with (s, loc, toks).
-        variable.set_parse_action(lambda s, l, t: self._eval_variable(t))
+        #
+        # Parse actions here COMPILE: they return thunks and never evaluate —
+        # there is no context available at parse time in this design.
+        variable.set_parse_action(lambda s, l, t: self._compile_variable(t))
 
         # ``expr`` is the union of literals, variables and function calls,
         # used for function arguments and interpolation bodies. function_call
@@ -239,26 +286,20 @@ class ExpressionParser:
         function_call <<= (
             func_head + pp.Group(arg_list) + pp.Suppress(")")
         )
-        function_call.set_parse_action(lambda s, l, t: self._eval_function_call(t))
+        function_call.set_parse_action(lambda s, l, t: self._compile_function_call(t))
 
         # Full-expression grammar (parseAll=True target)
         self._prefix_expr = function_call | variable
 
         # --- interpolation / template -----------------------------------
         # ``scanString`` yields (tokens, start, end) for each {% ... %} match;
-        # ``_eval_template`` stitches literal segments + str(value) back
-        # together, mirroring the old ``re.sub(lambda m: str(evaluate(...)))``.
+        # compilation records (start, end, thunk) offsets so the literal text
+        # is sliced at call time instead of being copied into the cache.
         interpolation = pp.Suppress("{%") + expr + pp.Suppress("%}")
         interpolation.set_parse_action(lambda s, l, t: [t[0]])
         self._interpolation = interpolation
 
-    # --- parse actions ---------------------------------------------------
-    #
-    # Every parse action wraps its return value in a single-element list.
-    # pyparsing treats a ``None`` return as "leave tokens unchanged" and a
-    # bare list return as "these are the new tokens" (flattening one level),
-    # so wrapping guarantees ``parsed[0]`` is always the evaluated value —
-    # including when that value is ``None`` or a list.
+    # --- compile-time helpers --------------------------------------------
 
     @staticmethod
     def _eval_boolean(tokens):
@@ -267,115 +308,181 @@ class ExpressionParser:
             return [None]
         return [raw in ("True", "true")]
 
-    def _eval_variable(self, tokens) -> Any:
-        context, _registry, prefix = _current_frame()
+    def _compile_variable(self, tokens) -> Thunk:
+        """Compile a variable path into a thunk.
+
+        The thunk captures only structure: the (alias-rewritten) root key and
+        pre-normalized segments as ``(kind, target, raw)`` tuples — ``raw`` is
+        kept solely for the missing-INPUT-key debug log, matching the
+        historical log wording.  All context/registry access happens at call
+        time; nested expression strings stored as attribute values re-enter
+        the public ``evaluate`` (cache lookup applies) with the *parent
+        object* as context, exactly like the fused parse-and-eval engine.
+        """
+        parser = self
         root_key = tokens[0]
         # ``$FLOW`` 是 ``$FLOW_ID`` 的文档别名——历史上 ``$FLOW`` 根不存在，
         # 直接 KeyError 崩，与其他前缀缺省返回 None 的口径不一致。
-        if root_key == f"{prefix}FLOW":
-            root_key = f"{prefix}FLOW_ID"
-        # Root lookup: KeyError preserved for missing keys (matches old engine)
-        try:
-            obj = context[root_key]
-        except KeyError:
-            # 保留 KeyError 类型（语义：流程逻辑错误），但给出可用根清单——
-            # 历史上裸 KeyError: '$node' 让 AI 作者无从自纠
-            # （2026-09 LLM 作者模拟 P1-2）。
-            raise KeyError(
-                f"{root_key!r} not found in expression context. "
-                f"Available roots (with {prefix!r} prefix): "
-                "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
-            ) from None
-
-        segments = tokens[1]  # ParseResults of "index:n" / "field:name"
-        for seg in segments:
+        if root_key == f"{self.prefix}FLOW":
+            root_key = f"{self.prefix}FLOW_ID"
+        segments: List[Tuple[str, Any, str]] = []
+        for seg in tokens[1]:
             kind, _, raw = seg.partition(":")
             if kind == "index":
-                obj = obj[int(raw)]
-            else:  # field
-                name = f"{prefix}{raw}" if raw in _SPECIAL_ROOTS else raw
-                if root_key == f"{prefix}INPUT" and isinstance(obj, dict) and name not in obj:
+                segments.append(("index", int(raw), raw))
+            else:
+                name = f"{self.prefix}{raw}" if raw in _SPECIAL_ROOTS else raw
+                segments.append(("field", name, raw))
+
+        def thunk(frame: Frame) -> Any:
+            context, registry, prefix = frame
+            # Root lookup: KeyError preserved for missing keys (matches old engine)
+            try:
+                obj = context[root_key]
+            except KeyError:
+                # 保留 KeyError 类型（语义：流程逻辑错误），但给出可用根清单——
+                # 历史上裸 KeyError: '$node' 让 AI 作者无从自纠
+                # （2026-09 LLM 作者模拟 P1-2）。
+                raise KeyError(
+                    f"{root_key!r} not found in expression context. "
+                    f"Available roots (with {parser.prefix!r} prefix): "
+                    "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+                ) from None
+            for kind, target, raw in segments:
+                if kind == "index":
+                    obj = obj[target]
+                    continue
+                if root_key == f"{prefix}INPUT" and isinstance(obj, dict) and target not in obj:
                     # 静默 None 是 INPUT 缺键的历史语义；debug 留痕便于排查拼写错误
                     logger.debug(
                         "expression references missing input key %r; evaluating to None", raw,
                     )
-                attr = _get_attr(obj, name)
+                attr = _get_attr(obj, target)
                 # 仅当字符串属性值本身是表达式（$ 前缀变量 / {% %} 模板）时才递归
                 # 求值——这是"嵌套表达式字符串"的历史语义。任意普通字符串（可能含
                 # [tag]、引号、换行等元字符）不再二次解析，否则节点输出一旦被下游
                 # $NODE 路径引用就会因内容触发误解析（如 "[promo] ..." 被当列表）。
                 if (isinstance(attr, str)
                         and (attr.startswith(prefix) or "{%" in attr)):
-                    obj = self.evaluate(attr, obj, _registry)
+                    obj = parser.evaluate(attr, obj, registry)
                 else:
                     obj = attr
-        return [obj]
+            return obj
 
-    def _eval_function_call(self, tokens) -> Any:
-        _context, registry, _prefix = _current_frame()
+        return thunk
+
+    def _compile_function_call(self, tokens) -> Thunk:
+        """Compile ``$F.name(arg, ...)`` into a thunk.
+
+        Function *resolution* stays at call time (registry arrives per call —
+        scoped registries must keep returning ``"undefined"`` for functions
+        they don't expose, and the default-registry miss must keep raising
+        the NameError with the difflib hint).  Arguments are thunks compiled
+        bottom-up by pyparsing; constant tokens arrive as plain values and
+        are wrapped here.
+        """
         head = tokens[0]            # e.g. "$F.add("
         func_name = head.split(".")[1].split("(")[0]
-        args = list(tokens[1])      # already-evaluated arg values
-        logger.debug("parse_function: func_name=%s, args=%s", func_name, args)
-        func = _lookup_function(registry, func_name)
-        if func is None:
-            if registry is None:
-                # 默认注册表未命中 = 调用方（或 AI 作者）拼写错误——返回
-                # 'undefined' 字符串会让错误值静默流入下游（LLM 作者模拟 P0-3）。
-                import difflib
+        arg_thunks: List[Thunk] = [
+            tok if callable(tok) else _const_thunk(tok) for tok in tokens[1]
+        ]
 
-                available = sorted(get_default_expression_registry().names())
-                close = difflib.get_close_matches(func_name, available, n=3, cutoff=0.6)
-                hint = f" Did you mean {close!r}?" if close else ""
-                raise NameError(
-                    f"Unknown expression function {func_name!r} (default registry)."
-                    f"{hint} Available: {available}"
+        def thunk(frame: Frame) -> Any:
+            _context, registry, _prefix = frame
+            args = [arg(frame) for arg in arg_thunks]
+            logger.debug("parse_function: func_name=%s, args=%s", func_name, args)
+            func = _lookup_function(registry, func_name)
+            if func is None:
+                if registry is None:
+                    # 默认注册表未命中 = 调用方（或 AI 作者）拼写错误——返回
+                    # 'undefined' 字符串会让错误值静默流入下游（LLM 作者模拟 P0-3）。
+                    import difflib
+
+                    available = sorted(get_default_expression_registry().names())
+                    close = difflib.get_close_matches(func_name, available, n=3, cutoff=0.6)
+                    hint = f" Did you mean {close!r}?" if close else ""
+                    raise NameError(
+                        f"Unknown expression function {func_name!r} (default registry)."
+                        f"{hint} Available: {available}"
+                    )
+                # scoped registry 故意对未暴露函数返回 "undefined"——保留契约
+                logger.warning(
+                    "expression function %r not registered (registry=%r); returning 'undefined'",
+                    func_name, registry,
                 )
-            # scoped registry 故意对未暴露函数返回 "undefined"——保留契约
-            logger.warning(
-                "expression function %r not registered (registry=%r); returning 'undefined'",
-                func_name, registry,
-            )
-            func = _UNDEFINED
-        return [func(*args)]
+                func = _UNDEFINED
+            return func(*args)
+
+        return thunk
+
+    # --- compilation cache -------------------------------------------------
+
+    def _cached_compile(self, value: str, compile_fn: Callable[[str], Any]) -> Any:
+        """Return the memoized compilation of *value*, compiling on miss.
+
+        Compile failures propagate and are NOT cached (a failed parse must
+        keep failing identically on every call — ``parse_function`` relies on
+        catching the ParseException).  Only strings up to ``_MAX_CACHED_LEN``
+        are memoized; longer strings are data, not expressions.
+        """
+        cache = self._compile_cache
+        compiled = cache.get(value)
+        if compiled is not None:
+            try:
+                cache.move_to_end(value)
+            except KeyError:  # pragma: no cover - evicted between get and move
+                pass
+            return compiled
+        compiled = compile_fn(value)
+        if len(value) <= self._MAX_CACHED_LEN:
+            with self._cache_lock:
+                cache[value] = compiled
+                cache.move_to_end(value)
+                while len(cache) > self._MAX_CACHE_ENTRIES:
+                    cache.popitem(last=False)
+        return compiled
 
     # --- entry points ----------------------------------------------------
 
     def evaluate(self, value: Any, context: Dict[str, Any],
                  registry: Optional[Any] = None) -> Any:
-        _push_frame(context, registry, self.prefix)
-        try:
-            return self._eval(value)
-        finally:
-            _pop_frame()
+        return self._eval(value, context, registry)
 
-    def _eval(self, value: Any) -> Any:
+    def _eval(self, value: Any, context: Dict[str, Any],
+              registry: Optional[Any] = None) -> Any:
         if not isinstance(value, str):
-            return self._eval_non_string(value)
+            return self._eval_non_string(value, context, registry)
         if not value.startswith(self.prefix):
-            return self._eval_template(value)
-        return self._eval_prefix(value)
+            return self._eval_template(value, context, registry)
+        return self._eval_prefix(value, context, registry)
 
-    def _eval_non_string(self, value: Any) -> Any:
+    def _eval_non_string(self, value: Any, context: Dict[str, Any],
+                         registry: Optional[Any] = None) -> Any:
         if isinstance(value, list):
-            return [self._eval(item) for item in value]
+            return [self._eval(item, context, registry) for item in value]
         if isinstance(value, dict):
-            return {key: self._eval(val) for key, val in value.items()}
+            return {key: self._eval(val, context, registry) for key, val in value.items()}
         return value
 
-    def _eval_prefix(self, value: str) -> Any:
-        # Parse the whole prefix string as a function call or variable path.
-        # On success the parse action returns the evaluated value.  A
-        # ParseException propagates: the old engine's path walk had no
-        # "return unchanged" path for prefix strings — an unresolvable key
-        # raised KeyError, which the runtime surfaces as a node error.  Letting
-        # the parse failure propagate preserves that "invalid prefix
-        # expression -> node error" behaviour.  (``parse_function`` wraps
-        # calls that should instead return the raw string on parse failure.)
+    def _eval_prefix(self, value: str, context: Dict[str, Any],
+                     registry: Optional[Any] = None) -> Any:
+        # Parse the whole prefix string as a function call or variable path,
+        # then apply the compiled thunk.  A ParseException propagates: the old
+        # engine's path walk had no "return unchanged" path for prefix
+        # strings — an unresolvable key raised KeyError, which the runtime
+        # surfaces as a node error.  Letting the parse failure propagate
+        # preserves that "invalid prefix expression -> node error" behaviour.
+        # (``parse_function`` wraps calls that should instead return the raw
+        # string on parse failure.)
+        thunk = self._cached_compile(value, self._compile_prefix)
+        return thunk((context, registry, self.prefix))
+
+    def _compile_prefix(self, value: str) -> Thunk:
         parsed = self._prefix_expr.parse_string(value, parse_all=True)
         return parsed[0]
 
-    def _eval_template(self, value: str) -> Any:
+    def _eval_template(self, value: str, context: Dict[str, Any],
+                       registry: Optional[Any] = None) -> Any:
         # Scan for {% ... %} matches and stitch the string back together,
         # substituting str(evaluated_value) for each match — identical to the
         # old ``re.sub`` behaviour. When no match is present the string is
@@ -390,18 +497,37 @@ class ExpressionParser:
             if _SUSPICIOUS_LITERAL.search(value):
                 _warn_suspicious_literal(value)
             return value
-        out: list = []
-        last = 0
-        matched = False
-        for tokens, start, end in self._interpolation.scan_string(value):
-            matched = True
-            out.append(value[last:start])
-            out.append(str(tokens[0]))
-            last = end
-        if not matched:
+        segs = self._cached_compile(value, self._compile_template)
+        if not segs:
             return value
-        out.append(value[last:])
+        frame = (context, registry, self.prefix)
+        out: list = []
+        for start, end, seg_thunk in segs:
+            if seg_thunk is None:  # literal gap between matches
+                out.append(value[start:end])
+            else:
+                out.append(str(seg_thunk(frame)))
         return "".join(out)
+
+    def _compile_template(self, value: str) -> list:
+        """Compile a template string into ``[(start, end, thunk), ...]``.
+
+        Literal segments are stored as offsets (sliced at call time) so the
+        cache never pins copies of long template bodies.  An empty list means
+        "no match" — the caller returns the string unchanged, mirroring the
+        historical ``matched=False`` behaviour (e.g. unclosed ``"a {% b"``).
+        """
+        segs: list = []
+        last = 0
+        for tokens, start, end in self._interpolation.scan_string(value):
+            if start > last:
+                segs.append((last, start, None))
+            inner = tokens[0]
+            segs.append((start, end, inner if callable(inner) else _const_thunk(inner)))
+            last = end
+        if last < len(value):
+            segs.append((last, len(value), None))
+        return segs
 
     # --- backward-compat shim -------------------------------------------
 

@@ -51,6 +51,35 @@ def run_async_from_sync(coro):
     return asyncio.run(coro)
 
 
+async def _flow_session_scoped(coro):
+    """Drive *coro* inside a flow-scoped shared HTTP session (2026-10).
+
+    The scope is opened before any node task can fan out (so Parallel/Map
+    child tasks inherit the session via their context copy) and closed on
+    the same, still-running loop when the flow ends.  See
+    :mod:`plaita.core.http_session` for the lifecycle rationale.
+    """
+    from plaita.core.http_session import close_flow_session, open_flow_session
+
+    await open_flow_session()
+    try:
+        return await coro
+    finally:
+        await close_flow_session()
+
+
+async def _flow_session_scoped_agen(agen):
+    """Async-generator twin of :func:`_flow_session_scoped` for lazy mode."""
+    from plaita.core.http_session import close_flow_session, open_flow_session
+
+    await open_flow_session()
+    try:
+        async for item in agen:
+            yield item
+    finally:
+        await close_flow_session()
+
+
 def drive_strategy(target, *, lazy, sync, finish_coro, on_lazy_finally):
     """Unified sync/async × lazy/eager bridge for ``FlowExecution``.
 
@@ -68,12 +97,17 @@ def drive_strategy(target, *, lazy, sync, finish_coro, on_lazy_finally):
     (see ``emit_flow_end_on_close``). Keeping the bridge here means
     ``run_compatible`` / ``arun_compatible`` no longer duplicate the sync/async
     driving mechanics.
+
+    Every driven shape is wrapped in the flow-scoped HTTP session scope:
+    one shared ``aiohttp.ClientSession`` per flow run (deterministically
+    closed on the same loop), instead of one session per HTTP-node request.
     """
     if lazy:
+        target = _flow_session_scoped_agen(target)
         if sync:
             return _drive_lazy_sync(target, on_lazy_finally)
         return _drive_lazy_async(target, on_lazy_finally)
-    finished = finish_coro(target)
+    finished = _flow_session_scoped(finish_coro(target))
     if sync:
         return run_async_from_sync(finished)
     return finished

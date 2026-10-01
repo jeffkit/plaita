@@ -30,7 +30,7 @@ checkpoint model is therefore named ``CheckpointState`` to avoid the collision.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -188,15 +188,28 @@ class CheckpointState(BaseModel):
     # Holds the *storage* key strings (e.g. ``$LAST_NODE``, ``EXPRESS_PREFIX``).
     # Private attr (not a field): not serialised, not validated, mutated freely.
     _present: set = PrivateAttr(default_factory=set)
+    # routing 缓存（2026-10 BFF 热路径评审）：__getitem__/__setitem__ 每次访问
+    # 重建 key<->field 映射实测 ~13µs/节点。路由元组不变即命中；prefix 经
+    # EXPRESS_PREFIX 写入变更时元组失配自动重建。
+    _route_cache_field: Optional[Tuple[tuple, Dict[str, str]]] = PrivateAttr(default=None)
+    _route_cache_key: Optional[Tuple[tuple, Dict[str, str]]] = PrivateAttr(default=None)
 
     # ------------------------------------------------------------------
     # key <-> field routing
     # ------------------------------------------------------------------
 
+    def _routing(self) -> tuple:
+        return (self.prefix, self.input_name, self.parent_name,
+                self.node_name, self.global_name, self.env_name)
+
     def _field_to_key(self) -> Dict[str, str]:
         """Map field name -> storage key for the current prefix/names."""
+        route = self._routing()
+        cached = self._route_cache_field
+        if cached is not None and cached[0] == route:
+            return cached[1]
         p = self.prefix
-        return {
+        mapping = {
             "last_node_id": _key(p, "LAST_NODE"),
             "last_branch": _key(p, "BRANCH"),
             "flow_id": _key(p, "FLOW_ID"),
@@ -207,9 +220,17 @@ class CheckpointState(BaseModel):
             "parent_context": _key(p, self.parent_name),
             "env": _key(p, self.env_name),
         }
+        self._route_cache_field = (route, mapping)
+        return mapping
 
     def _key_to_field(self) -> Dict[str, str]:
-        return {v: k for k, v in self._field_to_key().items()}
+        route = self._routing()
+        cached = self._route_cache_key
+        if cached is not None and cached[0] == route:
+            return cached[1]
+        mapping = {v: k for k, v in self._field_to_key().items()}
+        self._route_cache_key = (route, mapping)
+        return mapping
 
     @property
     def _extras(self) -> Dict[str, Any]:

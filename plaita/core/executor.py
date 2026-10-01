@@ -26,6 +26,7 @@ from plaita.core._error_normalization import (
     raise_distributed_error as _raise_distributed_error,
 )
 from plaita.core.async_utils import (
+    _flow_session_scoped as _flow_session_scoped,
     drive_strategy as _drive_strategy,
     run_async_from_sync as _run_async_sync,
 )
@@ -452,6 +453,8 @@ class FlowExecution:
             flow, self._ctx, self._runner, self.callback_manager, params, timeout,
             saved_context=saved_context, resume_type=resume_type, resume_data=resume_data,
         )
+        # 分布式每步独立 loop：步内同包 flow-scoped HTTP session（复用窗口=本步）
+        coro = _flow_session_scoped(coro)
         # 历史上 run_distributed 把任何异常（含具体的 FlowExecutionException 子类）
         # 归一化为 FLOW_ERROR / -500 作为分布式对外契约；此处保留该契约，
         # 具体子类仅用于内部抛点与 normal 模式（_finish_normal 让其透传）。

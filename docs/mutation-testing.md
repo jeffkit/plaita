@@ -1,8 +1,7 @@
 # 变异测试（Mutation Testing）基线与流程
-
-> **最后更新**：2026-07-10（§2.27 codeflow/_stmt **95.2%**；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%）
+> **最后更新**：2026-10-01（§2.5 expression_parser 重写为 thunk 编译缓存版后重跑单模块基线：**100%（433/433，recheck 后）**；2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
-> `expression_parser.py` 已补强至 **100%**（313/313）；
+> `expression_parser.py` 已补强至 **100%**（2026-10 重写后重跑 433/433，见 §2.5 末节）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
 > `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
 > `state.py` 已补强至 **99.1%**（213/215，见 §2.12）；
@@ -207,6 +206,17 @@ recheck 独立进程:     37/37 not-checked → 全部 KILLED
 
 等价变异（`_get_attr__mutmut_3`：`obj.get(path, None)` vs `obj.get(path,)`）在独立
 recheck 中也被杀灭，因为其他测试恰好覆盖了相关路径。
+
+### 2026-10 重写后再基线（thunk 编译缓存版，仍 100%）
+
+BFF 热路径改造把 parse action 从「融合求值」重写为「编译为 context 参数化
+thunk + 实例级 LRU」（见 `tests/unit/test_expression_cache.py`），模块变异点
+从 313 增至 **433**。单模块 mutmut（临时收窄 `only_mutate`）结果：
+433 中 348 killed / 85 survived / 0 timeout——85 个 survived 经
+`scripts/recheck_mutants.sh survived`（TESTS 收窄为 parser 六测试文件）独立进程
+复核**全部为 worker 复用假阳性，真实 killed=433/433 = 100%**。
+缓存行为本身的护栏（跨 context 串扰 / 嵌套递归命中 / 并发命中 / 长串豁免 /
+失败不缓存）由 `test_expression_cache.py` 提供，变异依赖它杀灭。
 
 ## 2.6 concurrent.py 强化（2026-07-06，100%）
 
