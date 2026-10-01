@@ -16,10 +16,17 @@ echo ""
 
 # 1. Run pytest with coverage
 echo "[1/4] Running pytest with coverage..."
+# pytest-timeout（thread 模式）：单测试卡死 150s 内判红并 dump 堆栈——
+# 2026-10-01 CI 回归门三腿停滞 35min 无日志的教训；durations 抓慢测试。
+TIMEOUT_ARGS=""
+if python -c "import pytest_timeout" 2>/dev/null; then
+    TIMEOUT_ARGS="--timeout=150 --timeout-method=thread --durations=25"
+fi
 if python -m pytest tests/ \
     --cov=plaita \
     --cov-report=term-missing \
     --cov-fail-under="$COVERAGE_THRESHOLD" \
+    $TIMEOUT_ARGS \
     -x -q; then
     echo "  ✓ All tests passed with coverage >= ${COVERAGE_THRESHOLD}%"
 else

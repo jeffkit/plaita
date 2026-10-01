@@ -40,6 +40,11 @@ jobs:
         # 3.12/3.13 为 2026-09 版本矩阵评审补充：本机验证一直在 3.13、CI 只测
         # 3.10，中间版本从未被任何环境覆盖
         python-version: ["3.10", "3.12", "3.13"]
+    # 钉 ubuntu-24.04：2026-10-01 起 ubuntu-latest 镜像漂移导致回归门 pytest
+    # 步三腿同步停滞（35min 超时，纯 main 可复现），钉版本隔离镜像变量。
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -55,7 +60,9 @@ jobs:
           # Gate 会 collect/跑到 optional 后端与节点路径（redis/sqlalchemy/http/code/server）。
           # 用 all 一次装齐，避免缺 extra 时在 collection/首个用例上连环红。
           # aiosqlite 已含在 sqlalchemy extra；cachetools 已含在 server extra。
-          pip install -e ".[dev,lint,all]"
+          # pytest-timeout：门禁挂死时 150s 内把「卡住的测试」变成带堆栈的快速红
+          # （2026-10-01 回归门三腿停滞、日志全黑的教训），并给出 durations 排慢。
+          pip install -e ".[dev,lint,all]" pytest-timeout
           pip install build wheel
 
       - name: Ruff E722 (bare except — hard fail)
