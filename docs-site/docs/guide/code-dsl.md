@@ -301,6 +301,37 @@ flow.run(payload=21)           # -> 42
 
 > 装饰器参数只支持字面量（字符串、数字、dict 字面量），非字面量参数会被跳过。
 
+### 反向生成：`emit_source`（JSON → `@flow` 源码）{ #emit_source }
+
+`emit_source(ir)` 是 `compile_source` 的逆操作：把 JSON/YAML/builder 产出的 Flow IR dict 重构为可读的 `@flow` Python 源码（含被引用的 `@childflow` 函数），存量 JSON flow 由此迁移到 codeflow DSL：
+
+```python
+from plaita.dsl.codeflow import compile_source, emit_source, flow_from_source
+
+ir = {"runtime": "python", "flow_id": "legacy",
+      "inputType": {"dataType": "object"},
+      "nodes": [
+          {"type": "start", "id": "start", "next": "fetch"},
+          {"type": "http", "id": "fetch", "method": "GET",
+           "url": "https://api.example.com", "next": "ret"},
+          {"type": "end", "id": "ret", "output": "$NODE.fetch.status",
+           "resultType": "success"},
+      ]}
+src = emit_source(ir)
+# @flow('legacy')
+# def legacy(INPUT):
+#     fetch = HTTP(method='GET', url='https://api.example.com')
+#     return fetch.status
+flow = flow_from_source(src)   # 迁移后走同一执行入口
+```
+
+语义保证与边界：
+
+- **语义等价而非逐字节等价**：`compile_source(emit_source(ir))` 与 `ir` 在「剥派生注解（name/desc/source_line）+ 非语义 id 规范化」口径下相等。变量名 id 与显式 `id=` 钉住的 id 恒定；if/return 的派生 id、无名节点 `_n{n}` 计数 id 由重编译时的语句形态决定，可能变化。
+- **不可表达构造抛 `EmitError`**（不产出错误代码）：`switch`/`bool` 合成节点（builder 专属）、非 object `inputType`、空真分支或两分支同址的 if、无法结构化的任意图。
+- IR 里以 `$` 开头的字符串一律按表达式逆映射；原始字面量恰以 `$` 开头的场景编译期已丢失区分，属已知边界。
+- 验收测试口径见 `tests/unit/test_codeflow_emit.py`（round-trip 语料 + 手写 JSON IR + 负面路径）。
+
 ### Agent 编排：把 `flow_from_source` 当输出沙箱
 
 `flow_from_source` 是 plaita 与 LLM Agent 结合的**标准入口**：让 LLM 直接产出 `@flow` 源码，运行期编译并执行。相比让 LLM 生成可执行 Python，它有两道安全护栏——
