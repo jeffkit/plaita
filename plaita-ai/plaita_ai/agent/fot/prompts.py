@@ -1,7 +1,9 @@
 """FoT planner prompts — @flow only (no JSON actions).
 
-DSL 知识的权威来源是 flow-coder skill 的 `codeflow-reference.md`，由 planner
-注入到 `{dsl_section}`。本文件只保留输出格式与几条高频踩坑的"速记"护栏，
+DSL 语法与编写规范的权威来源是 flow-coder skill 的 `codeflow-reference.md` 与
+`authoring-spec.md`，由 planner 分别注入 `{dsl_section}` / `{spec_section}`；
+进程内已注册的业务节点（自定义 Node 子类）由 planner 从 NodeRegistry 生成
+`{nodes_section}`。本文件只保留输出格式与几条高频踩坑的"速记"护栏，
 不重复维护 DSL 细节，避免与 skill 漂移。
 """
 
@@ -27,6 +29,10 @@ COMPOSE_SYSTEM = """你是 Plaita 流程规划器。根据用户需求和可用�
 ## @flow DSL 参考（权威，flow-coder skill）
 {dsl_section}
 
+{spec_section}
+
+{nodes_section}
+
 {instruction_section}"""
 
 REVIEW_SYSTEM = """你是 Plaita @flow 源码审查员。根据编译错误修正源码，输出完整可编译的 @flow Python 代码。
@@ -36,7 +42,7 @@ REVIEW_SYSTEM = """你是 Plaita @flow 源码审查员。根据编译错误修�
 - 不要 JSON actions，不要额外说明。
 
 ## 修正原则
-- 对照下方《@flow DSL 参考》确认语法，不要发明 F.xxx；节点调用不要嵌在 return 里。
+- 对照下方《@flow DSL 参考》《编写规范》确认语法与约束，不要发明 F.xxx；节点调用不要嵌在 return 里。
 - 优先按 errors 的 line/message 定点修正，保持未报错部分不动。
 
 ## 可用工具（TOOL 节点）
@@ -44,6 +50,10 @@ REVIEW_SYSTEM = """你是 Plaita @flow 源码审查员。根据编译错误修�
 
 ## @flow DSL 参考（权威，flow-coder skill）
 {dsl_section}
+
+{spec_section}
+
+{nodes_section}
 
 {instruction_section}"""
 
@@ -75,6 +85,19 @@ def format_tools_section(tools_section: str) -> str:
 def format_dsl_section(reference: str) -> str:
     """Embed the canonical flow-coder DSL reference (authoritative)."""
     return reference.strip() if reference and reference.strip() else "（未加载到 DSL 参考；仅凭速记书写。）"
+
+
+def format_spec_section(reference: str) -> str:
+    """Embed the canonical authoring-spec (single source of authoring constraints)."""
+    if reference and reference.strip():
+        return "## 编写规范（权威，flow-coder authoring-spec）\n\n" + reference.strip()
+    return "## 编写规范\n\n（编写规范文档未加载。硬约束底线：变量名即节点 id，禁止跨分支/循环体同名赋值——分支与循环子流程作用域相互隔离，跨分支传值只能经节点输出引用。）"
+
+
+def format_nodes_section(nodes_section: str) -> str:
+    if not nodes_section.strip():
+        return ""
+    return "## 已注册业务节点（自定义节点，可直接以大写占位符调用）\n" + nodes_section
 
 
 def format_instruction_section(instruction: str) -> str:
