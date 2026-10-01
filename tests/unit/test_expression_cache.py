@@ -175,15 +175,29 @@ class TestCacheBoundaries(TestCase):
     def tearDown(self):
         ExpressionParser._instances.clear()
 
-    def test_long_string_evaluated_correctly_uncached(self):
-        """> _MAX_CACHED_LEN 的串不入缓存，但求值正确。"""
+    def test_long_string_uses_dedicated_small_lru(self):
+        """> _MAX_CACHED_LEN 的长串进独立小 LRU：命中正确且主缓存不受污染。"""
         long_body = "x" * 5000
         template = f"head {{% $INPUT.v %}} {long_body}"
-        self.assertEqual(
-            self.p.evaluate(template, {"$INPUT": {"v": 7}}),
-            f"head 7 {long_body}",
-        )
+        for _ in range(2):  # 第二次走长串缓存命中
+            self.assertEqual(
+                self.p.evaluate(template, {"$INPUT": {"v": 7}}),
+                f"head 7 {long_body}",
+            )
         self.assertNotIn(template, self.p._compile_cache)
+        self.assertIn(template, self.p._long_cache)
+
+    def test_long_cache_bounded(self):
+        """长串 LRU 有条数上限，防大文本驻留。"""
+        p = self.p
+        old_max = ExpressionParser._LONG_CACHE_ENTRIES
+        ExpressionParser._LONG_CACHE_ENTRIES = 4
+        try:
+            for i in range(10):
+                p.evaluate(f"a {{% $INPUT.v %}} {'y' * 5000}{i}", {"$INPUT": {"v": 1}})
+            self.assertLessEqual(len(p._long_cache), 4)
+        finally:
+            ExpressionParser._LONG_CACHE_ENTRIES = old_max
 
     def test_parse_exception_not_cached(self):
         """编译失败不缓存：parse_function 反复调用反复原样返回。"""

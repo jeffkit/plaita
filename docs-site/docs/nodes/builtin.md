@@ -237,7 +237,7 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 
 ## http
 
-发起 HTTP 请求，需 `http` extra（requests + aiohttp）。支持表达式寻址、headers、body、代理等。响应可通过 `$NODE.http_id.data` / `.status` / `.headers` 引用。
+发起 HTTP 请求，需 `http` extra（requests + aiohttp）。支持表达式寻址、headers、body、代理等。响应可通过 `$NODE.http_id.data` / `.status` / `.headers` 引用。。可选装 `fast` extra（orjson）加速大 payload 的 JSON 编解码（缺失自动回退标准库）
 
 ```json
 {

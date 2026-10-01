@@ -142,6 +142,7 @@ plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`、`croniter
 | `sqlalchemy` | `pip install plaita[sqlalchemy]` | SQLAlchemy EventBus / Storage（实验性） |
 | `credentials` | `pip install plaita[credentials]` | 凭据加密（`plaita.credentials`） |
 | `langfuse` | `pip install plaita[langfuse]` | Langfuse 观测适配（`plaita.obs.LangfuseCallback`） |
+| `fast` | `pip install plaita[fast]` | HTTP 节点 JSON 加速（orjson，大 payload 序列化/反序列化 5~10x）；缺失自动回退标准库 |
 | `all` | `pip install plaita[all]` | 上述全部 |
 
 缺失 extra 时会抛出**可操作的 `ImportError`**，明确提示安装哪个 extra。

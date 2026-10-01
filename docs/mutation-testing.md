@@ -210,13 +210,18 @@ recheck 中也被杀灭，因为其他测试恰好覆盖了相关路径。
 ### 2026-10 重写后再基线（thunk 编译缓存版，仍 100%）
 
 BFF 热路径改造把 parse action 从「融合求值」重写为「编译为 context 参数化
-thunk + 实例级 LRU」（见 `tests/unit/test_expression_cache.py`），模块变异点
-从 313 增至 **433**。单模块 mutmut（临时收窄 `only_mutate`）结果：
-433 中 348 killed / 85 survived / 0 timeout——85 个 survived 经
-`scripts/recheck_mutants.sh survived`（TESTS 收窄为 parser 六测试文件）独立进程
-复核**全部为 worker 复用假阳性，真实 killed=433/433 = 100%**。
-缓存行为本身的护栏（跨 context 串扰 / 嵌套递归命中 / 并发命中 / 长串豁免 /
-失败不缓存）由 `test_expression_cache.py` 提供，变异依赖它杀灭。
+thunk + 实例级 LRU」（见 `tests/unit/test_expression_cache.py`）。两轮单模块
+mutmut（临时收窄 `only_mutate`）均为同一形态：
+
+- wave1（433 变异）：348 killed / 85 survived → recheck 后 **433/433 = 100%**；
+- wave2（长模板二级 LRU 加入，449 变异）：364 killed / 85 survived →
+  recheck 后 **449/449 = 100%**。
+
+两轮的 survived 经 `scripts/recheck_mutants.sh survived`（TESTS 收窄为 parser
+六测试文件）独立进程复核**全部为 worker 复用假阳性**——「mutmut survived
+不可信」在重写后的代码上同样成立，流程照 §7 执行即可。
+缓存行为本身的护栏（跨 context 串扰 / 嵌套递归命中 / 并发命中 / 长串二级
+LRU 有界 / 失败不缓存）由 `test_expression_cache.py` 提供，变异依赖它杀灭。
 
 ## 2.6 concurrent.py 强化（2026-07-06，100%）
 

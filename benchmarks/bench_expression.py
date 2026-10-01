@@ -98,15 +98,16 @@ def main() -> None:
     results["plain_text"] = bench_one("plain_text", "just a plain string body", 20000)
     print(f"{'plain_text':22s} {results['plain_text']:10.2f} us/call   (预筛快路径)")
 
-    # 加权总账不含 long/template_5kb：>4KB 模板按设计不入缓存，成本由
-    # scanString 全串扫描主导（与缓存无关，改前改后同价），折进去会淹没
-    # 其他类别——它是下一波（模板编译段缓存/orjson）的优化对象，单独列示。
+    # 加权总账不含 long/template_5kb：>4KB 长模板走独立小 LRU（64 条），
+    # 命中后为 µs 级；首解析仍付 scanString 全串扫描（ms 级），单独列示
+    # 以免首轮成本淹没其他类别。
     weights_wo_long = {k: w for k, w in WEIGHTS.items() if k != "long/template_5kb"}
     renorm = sum(weights_wo_long.values())
     total = sum(results[k] * w for k, w in weights_wo_long.items()) / renorm
     print(f"\nweighted total (BFF 配比，不含 >4KB 长模板): {total:.2f} us/eval")
-    print(f"long/template_5kb（单独列示）: {results['long/template_5kb']:.0f} us/call"
-          f" —— scanString 主导，缓存豁免（len>{plaita.core.expression_parser.ExpressionParser._MAX_CACHED_LEN}）")
+    print(f"long/template_5kb（单独列示，命中后）: {results['long/template_5kb']:.2f} us/call"
+          f" —— 二级 LRU（{plaita.core.expression_parser.ExpressionParser._LONG_CACHE_ENTRIES} 条）；"
+          f"首解析另付 scanString 全串成本")
     cache = plaita.core.expression_parser.ExpressionParser.for_prefix("$")._compile_cache
     print(f"compile cache entries after run: {len(cache)}")
 

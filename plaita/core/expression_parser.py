@@ -178,11 +178,11 @@ class ExpressionParser:
     rebuilt on every call) is constructed exactly once.
 
     On top of the grammar cache, each expression/template *string* is
-    compiled once into a thunk tree and memoized in a per-instance LRU
-    (``_MAX_CACHE_ENTRIES`` entries).  Strings longer than
-    ``_MAX_CACHED_LEN`` are evaluated uncached every call — they are data
-    (long prompt bodies with an interpolation slot), not expressions, and
-    caching them would pin large texts in memory for the process lifetime.
+    compiled once into a thunk tree and memoized: the main LRU holds up to
+    ``_MAX_CACHE_ENTRIES`` short expressions; long strings (long template
+    bodies with an interpolation slot) go into a small dedicated LRU of
+    ``_LONG_CACHE_ENTRIES`` entries so repeated evaluation skips the
+    expensive full-string scan without pinning unbounded text in memory.
     """
 
     _instances: Dict[str, "ExpressionParser"] = {}
@@ -190,10 +190,15 @@ class ExpressionParser:
 
     _MAX_CACHE_ENTRIES = 8192
     _MAX_CACHED_LEN = 4096
+    # >_MAX_CACHED_LEN 的长串（长模板正文带插值槽）进独立小 LRU：条数少所以
+    # 键内存有界（64 × 串长），同时给模板密集流程免去每次 19~24ms 的
+    # scanString 全串扫描（2026-10 wave2）。
+    _LONG_CACHE_ENTRIES = 64
 
     def __init__(self, prefix: str = "$") -> None:
         self.prefix = prefix
         self._compile_cache: "OrderedDict[str, Any]" = OrderedDict()
+        self._long_cache: "OrderedDict[str, Any]" = OrderedDict()
         self._cache_lock = threading.Lock()
         self._build_grammar()
 
@@ -422,10 +427,19 @@ class ExpressionParser:
 
         Compile failures propagate and are NOT cached (a failed parse must
         keep failing identically on every call — ``parse_function`` relies on
-        catching the ParseException).  Only strings up to ``_MAX_CACHED_LEN``
-        are memoized; longer strings are data, not expressions.
+        catching the ParseException).  Strings up to ``_MAX_CACHED_LEN`` go
+        into the main LRU; longer strings (long template bodies) go into a
+        small dedicated LRU (``_LONG_CACHE_ENTRIES``) so repeat evaluation
+        skips the scanString pass without pinning unbounded text in memory.
         """
-        cache = self._compile_cache
+        if len(value) > self._MAX_CACHED_LEN:
+            return self._lookup_and_store(self._long_cache, self._LONG_CACHE_ENTRIES,
+                                          value, compile_fn)
+        return self._lookup_and_store(self._compile_cache, self._MAX_CACHE_ENTRIES,
+                                      value, compile_fn)
+
+    def _lookup_and_store(self, cache: "OrderedDict[str, Any]", maxsize: int,
+                          value: str, compile_fn: Callable[[str], Any]) -> Any:
         compiled = cache.get(value)
         if compiled is not None:
             try:
@@ -434,12 +448,11 @@ class ExpressionParser:
                 pass
             return compiled
         compiled = compile_fn(value)
-        if len(value) <= self._MAX_CACHED_LEN:
-            with self._cache_lock:
-                cache[value] = compiled
-                cache.move_to_end(value)
-                while len(cache) > self._MAX_CACHE_ENTRIES:
-                    cache.popitem(last=False)
+        with self._cache_lock:
+            cache[value] = compiled
+            cache.move_to_end(value)
+            while len(cache) > maxsize:
+                cache.popitem(last=False)
         return compiled
 
     # --- entry points ----------------------------------------------------
