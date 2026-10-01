@@ -34,6 +34,8 @@ _SYNTAX_RULES = """\
 - 函数骨架：@flow("<flow_id>") def f(INPUT): 单一主函数；子流程用模块级 @childflow def sub(INPUT): ...
 - 语句仅支持：赋值（右侧为节点调用 / F.xxx(...)）、if/elif/else、for x in MAP/FILTER/FIND/REDUCE(coll, id="xx"):、return
 - 变量名即节点 id：全局唯一，禁止跨分支同名赋值；下游用 NODE.<变量名>.<字段> 引用输出
+- 无赋值名的节点（if/while/return）编译器会按条件语义自动起 id（如 INPUT.score >= 90 →
+  score_ge_90）并带 name/desc；无需也无法为 if 显式命名——保持条件里的字段名可读即可
 - 表达式：INPUT.x / NODE.id.field / F.concat(a,b) / F.join(list,sep)；比较与 and/or/not 只能出现在 if 条件
 - 禁止：f-string、三元表达式、推导式、lambda、while、print、任意 Python 内置函数调用、以及显式调用 end(...) 节点
 - return 语句就是流程/分支的结束与结果输出：主流程最终 return 结果 dict；不要创建名为 end 的变量

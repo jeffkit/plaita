@@ -31,6 +31,10 @@ export interface FlowEditorState {
   graphStack: GraphFrame[]
   /** 退出子图时的结构校验提示（如缺 start/end） */
   subgraphWarning: string | null
+  /** 当前 flow 定义是否带 @flow 源码（metadata.source）——节点详情「查看源码」按钮的开关 */
+  hasFlowSource: boolean
+  /** 节点详情发起的「跳源码第 N 行」请求；FlowEditor 消费后置回 null */
+  sourceLineRequest: number | null
 
   setFlowContext: (flowId: string, version: string, meta: FlowMeta) => void
   setGraph: (nodes: Node[], edges: Edge[]) => void
@@ -101,6 +105,8 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
   dirty: false,
   graphStack: [],
   subgraphWarning: null,
+  hasFlowSource: false,
+  sourceLineRequest: null,
 
   setFlowContext: (flowId, version, meta) => set({ flowId, version, meta }),
 
@@ -279,5 +285,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       dirty: false,
       graphStack: [],
       subgraphWarning: null,
+      hasFlowSource: false,
+      sourceLineRequest: null,
     }),
 }))

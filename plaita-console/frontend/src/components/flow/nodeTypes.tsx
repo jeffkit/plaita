@@ -112,15 +112,24 @@ export interface NodeLabelData {
   type: string
   name: string
   status: NodeStatus
+  /** 人类可读描述（@flow 编译产物自带），有值时替换第二行展示 */
+  desc?: string
+  /** @flow 源码行号；name 缺失（旧 flow 的 _n 节点）时用于可读兜底 */
+  sourceLine?: number
 }
 
-export function renderNodeLabel({ type, name, status }: NodeLabelData) {
+export function renderNodeLabel({ type, name, status, desc, sourceLine }: NodeLabelData) {
   const cfg = resolveNodeTypeConfig(type)
   const style = statusStyles[status] ?? statusStyles.idle
   const cs = COLOR_STYLES[cfg.color] ?? COLOR_STYLES.gray
-  const displayName = name.length > 15 ? name.slice(0, 15) + '...' : name
+  // 渲染层兜底：name 缺失（多为旧 flow 的 _n{id} 节点）显示「类型 · L行号」，
+  // 不裸显合成 id；不回写 data.name，避免编辑保存时污染 IR。
+  const fallbackName = sourceLine ? `${type} · L${sourceLine}` : name
+  const label = /^_n\d+$/.test(name) ? fallbackName : name
+  const displayName = label.length > 15 ? label.slice(0, 15) + '...' : label
+  const secondLine = desc || `${type}${cfg.family ? ` · ${cfg.family}` : ''}`
   return (
-    <div className={`relative px-3 py-2 rounded-lg border shadow-card ${style.bg} ${style.border} min-w-[140px] overflow-hidden`}>
+    <div className={`relative px-3 py-2 rounded-lg border shadow-card ${style.bg} ${style.border} min-w-[140px] overflow-hidden`} title={desc || undefined}>
       {/* 族别左色条：一眼区分节点类别 */}
       <span className={`absolute left-0 top-0 bottom-0 w-1 ${cs.bar}`} />
       <div className="flex items-center gap-2">
@@ -129,7 +138,7 @@ export function renderNodeLabel({ type, name, status }: NodeLabelData) {
           {/* 节点名 = 数据声道（mono，DESIGN.md §1） */}
           <div className="font-mono text-[13px] leading-4 font-medium truncate text-ink-primary">{displayName}</div>
           <div className="text-[10px] leading-tight font-mono text-ink-faint truncate">
-            {type}{cfg.family ? ` · ${cfg.family}` : ''}
+            {secondLine}
           </div>
         </div>
       </div>
@@ -151,6 +160,8 @@ export interface PlaitaNodeData {
   type: string
   name: string
   status?: NodeStatus
+  desc?: string
+  sourceLine?: number
   [key: string]: unknown
 }
 
@@ -159,7 +170,7 @@ function PlaitaNodeComponent({ data, selected }: NodeProps) {
   return (
     <div className={`relative ${selected ? 'ring-2 ring-plaita-400/80 rounded-lg' : ''}`}>
       <Handle type="target" position={Position.Top} id="in" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
-      {renderNodeLabel({ type: d.type, name: d.name, status: d.status ?? 'idle' })}
+      {renderNodeLabel({ type: d.type, name: d.name, status: d.status ?? 'idle', desc: d.desc, sourceLine: d.sourceLine })}
       <Handle type="source" position={Position.Bottom} id="true" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
       <Handle type="source" position={Position.Right} id="false" className="!bg-dark-400 !w-2.5 !h-2.5 !border-2 !border-canvas" />
     </div>

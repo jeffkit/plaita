@@ -42,6 +42,7 @@ export default function NodeConfigDrawer() {
   const allNodes = useFlowEditor((s) => s.nodes)
   const allEdges = useFlowEditor((s) => s.edges)
   const flowMeta = useFlowEditor((s) => s.meta)
+  const hasFlowSource = useFlowEditor((s) => s.hasFlowSource)
 
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
@@ -195,6 +196,8 @@ export default function NodeConfigDrawer() {
     updateNodeData(node.id, { fields })
   }
 
+  const nodeSourceLine = d.sourceLine
+
   return (
     <div className="w-96 shrink-0 bg-surface border-l border-line flex flex-col text-sm">
       <div className="flex items-center justify-between pl-4 pr-3 pt-3">
@@ -207,6 +210,18 @@ export default function NodeConfigDrawer() {
           删除
         </button>
       </div>
+
+      {d.desc && (
+        <p className="px-4 pt-1.5 text-caption text-ink-muted truncate" title={d.desc}>{d.desc}</p>
+      )}
+      {hasFlowSource && nodeSourceLine != null && (
+        <button
+          onClick={() => useFlowEditor.setState({ sourceLineRequest: nodeSourceLine })}
+          className="mx-4 mt-1.5 self-start text-caption text-plaita-400 hover:text-plaita-300"
+        >
+          查看权威源码 · 第 {nodeSourceLine} 行 ↗
+        </button>
+      )}
 
       {/* Tab 栏 */}
       <div className="flex gap-1 px-3 pt-1.5 border-b border-line">

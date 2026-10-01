@@ -7,6 +7,10 @@ import { symmetricLayout } from './symmetricLayout'
 export interface FlowNodeData {
   type: string
   name: string
+  /** 人类可读描述（@flow 编译产物自带；形如 "if INPUT.score >= 90（第 4 行）"） */
+  desc?: string
+  /** @flow 编译期回标的源码行号（配合 flow 定义的 metadata.source 可跳转源码） */
+  sourceLine?: number
   fields: Record<string, unknown>
   status?: string
   [key: string]: unknown
@@ -113,6 +117,10 @@ export function jsonToFlow(
   rawNodes.forEach((raw, i) => {
     const id = (raw.id as string) || `node-${i}`
     const type = (raw.type as string) || 'unknown'
+    // name 保持 IR 原语义（无 name 即 id），可读性兜底在渲染层做（避免保存时把
+    // 合成名污染回 IR）；desc/sourceLine 透传给节点卡片展示与源码跳转。
+    const sourceLine = raw.source_line as number | undefined
+    const desc = (raw.desc as string) || ''
     const name = (raw.name as string) || id
     // 分支结构保留进 fields（剥离 next：分支目标由画布边推导，保存时回填）。
     // 覆盖 switch/case 的分支条件与 parallel 的分支子图，避免 round-trip 丢失。
@@ -134,8 +142,7 @@ export function jsonToFlow(
       id,
       type: 'plaitaNode',
       position: layout[id] || { x: 0, y: 0 },
-      data: { type, name, fields },
-    })
+      data: { type, name, desc, sourceLine, fields },    })
 
     // 线性 next（统一从 'true' handle 出发）
     if (typeof raw.next === 'string') {

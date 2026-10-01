@@ -108,6 +108,16 @@ export default function FlowEditor() {
   const [showDryRun, setShowDryRun] = useState(false)
   const [showSource, setShowSource] = useState(false)
   const [pendingAiIr, setPendingAiIr] = useState<Record<string, unknown> | null>(null)
+
+  // 节点详情发起的「跳源码第 N 行」→ 打开源码面板并高亮
+  const sourceLineRequest = useFlowEditor((s) => s.sourceLineRequest)
+  useEffect(() => {
+    if (sourceLineRequest != null) {
+      setShowSource(true)
+      setSourceHighlight(sourceLineRequest)
+      useFlowEditor.setState({ sourceLineRequest: null })
+    }
+  }, [sourceLineRequest])
   const [showPublish, setShowPublish] = useState(false)
   const [publishDiff, setPublishDiff] = useState<VersionDiff | null>(null)
   // Copilot 面板默认展开，可随时收起（关闭后本会话不再自动弹出）
@@ -146,6 +156,11 @@ export default function FlowEditor() {
 
   // 载入画布时的基准定义：发布确认里的变更摘要与它对比
   const baseDefRef = useRef<Record<string, unknown> | null>(null)
+  // 原定义的 metadata（含 @flow 源码）：保存/发布时透传，源码面板读取
+  const metadataRef = useRef<Record<string, unknown> | undefined>(undefined)
+  const [flowSource, setFlowSource] = useState('')
+  // 节点详情「查看源码」跳转：高亮行
+  const [sourceHighlight, setSourceHighlight] = useState<number | null>(null)
 
   // 初始化画布
   useEffect(() => {
@@ -156,6 +171,12 @@ export default function FlowEditor() {
         const layout = JSON.parse(versionQuery.data.layout || '{}') as Record<string, { x: number; y: number }>
         const { nodes: ns, edges: es } = jsonToFlow(def, layout)
         baseDefRef.current = def
+        // 原定义的 metadata（可能含 @flow 源码）原样透传：保存/发布不丢，源码面板可用
+        const defMeta = (def.metadata as Record<string, unknown> | undefined) || undefined
+        metadataRef.current = defMeta
+        const src = defMeta && typeof defMeta.source === 'string' ? defMeta.source : ''
+        setFlowSource(src)
+        useFlowEditor.setState({ hasFlowSource: !!src, sourceLineRequest: null })
         setGraph(ns as Node[], es as Edge[])
         setDesc((def.desc as string) || '')
         setInputType(def.inputType ?? { dataType: 'object' })
@@ -164,6 +185,9 @@ export default function FlowEditor() {
       } catch (e) {
         // 定义损坏时不静默：清空画布并把错误交给保存/发布前的序列化兜底
         baseDefRef.current = null
+        metadataRef.current = undefined
+        setFlowSource('')
+        useFlowEditor.setState({ hasFlowSource: false, sourceLineRequest: null })
         setGraph([], [])
         setMsg(`版本定义解析失败：${(e as Error).message}`)
       }
@@ -246,7 +270,7 @@ export default function FlowEditor() {
             (schemaErrs.length > 3 ? ` 等 ${schemaErrs.length} 项` : '')
         )
       }
-      const meta = { flow_id: flowId, version: targetVersion, desc, inputType }
+      const meta = { flow_id: flowId, version: targetVersion, desc, inputType, metadata: metadataRef.current }
       const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
       const layout = extractLayout(state.nodes as Node[])
       return api.saveVersion(flowId!, targetVersion, {
@@ -276,7 +300,7 @@ export default function FlowEditor() {
             (schemaErrs.length > 3 ? ` 等 ${schemaErrs.length} 项` : '')
         )
       }
-      const meta = { flow_id: flowId, version: targetVersion, desc, inputType }
+      const meta = { flow_id: flowId, version: targetVersion, desc, inputType, metadata: metadataRef.current }
       const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
       const layout = extractLayout(state.nodes as Node[])
       await api.saveVersion(flowId!, targetVersion, {
@@ -630,7 +654,13 @@ export default function FlowEditor() {
           {showSource && (
             <SourceViewPanel
               flow={flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], { flow_id: flowId, version, desc, inputType })}
-              onClose={() => setShowSource(false)}
+              source={flowSource || undefined}
+              highlightLine={sourceHighlight}
+              onHighlightDone={() => setSourceHighlight(null)}
+              onClose={() => {
+                setShowSource(false)
+                setSourceHighlight(null)
+              }}
             />
           )}
         </div>
