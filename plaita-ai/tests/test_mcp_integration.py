@@ -494,6 +494,55 @@ class TestMcpServerTools(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# flow_from_json（JSON IR → @flow 源码反向生成）
+# ---------------------------------------------------------------------------
+
+class TestFlowFromJson(unittest.TestCase):
+    LINEAR_IR = {
+        "runtime": "python",
+        "flow_id": "legacy_flow",
+        "inputType": {"dataType": "object"},
+        "nodes": [
+            {"type": "start", "id": "start", "next": "fetch"},
+            {"type": "http", "id": "fetch", "method": "GET",
+             "url": "https://api.example.com", "next": "ret"},
+            {"type": "end", "id": "ret", "output": "$NODE.fetch.status",
+             "resultType": "success"},
+        ],
+    }
+
+    def test_valid_ir_returns_compilable_source(self):
+        from plaita_ai.flow_runner import compile_flow
+        from plaita_ai.mcp.server import flow_from_json
+        output = flow_from_json(json.dumps(self.LINEAR_IR))
+        data = json.loads(output)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["flow_id"], "legacy_flow")
+        self.assertIn("fetch = HTTP", data["source"])
+        self.assertTrue(compile_flow(data["source"]).ok)
+
+    def test_unexpressible_construct_rejected(self):
+        from plaita_ai.mcp.server import flow_from_json
+        ir = dict(self.LINEAR_IR)
+        ir["flow_id"] = "sw"
+        ir["nodes"] = [
+            {"type": "start", "id": "start", "next": "sw"},
+            {"type": "switch", "id": "sw", "expression": "$INPUT.x", "next": "e",
+             "branches": [{"target": "e", "value": "1", "priority": 0}]},
+            {"type": "end", "id": "e", "resultType": "success"},
+        ]
+        data = json.loads(flow_from_json(json.dumps(ir)))
+        self.assertFalse(data["ok"])
+        self.assertIn("switch", data.get("error", ""))
+
+    def test_invalid_json_rejected(self):
+        from plaita_ai.mcp.server import flow_from_json
+        data = json.loads(flow_from_json("{not json"))
+        self.assertFalse(data["ok"])
+        self.assertIn("not valid JSON", data.get("error", ""))
+
+
+# ---------------------------------------------------------------------------
 # _load_plugins
 # ---------------------------------------------------------------------------
 

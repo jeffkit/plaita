@@ -47,6 +47,7 @@ plaita-ai/
 |------|------|
 | `flow_compile` | 编译 `@flow` 源码，返回 IR 或带行号错误 |
 | `flow_run` | 编译并执行 |
+| `flow_from_json` | JSON flow definition 反向生成 `@flow` 源码（含 round-trip 编译校验） |
 | `flow_list_nodes` | 列出已注册节点类型（含自定义节点占位符） |
 | `flow_get_skill` | 返回内置 `flow-coder` skill 全文 |
 | `flow_get_skill_reference` | 返回 `@flow` 完整语法参考 |
@@ -85,6 +86,7 @@ CLI 与 MCP **共用** `flow_runner`（不是 subprocess 包 MCP，而是同一�
 ```bash
 plaita-ai compile flow.py
 plaita-ai run flow.py --input '{"name":"alice"}'
+plaita-ai emit flow.json            # JSON definition → @flow 源码（--out 写文件）
 plaita-ai list-nodes
 plaita-ai skill
 plaita-ai mcp
@@ -197,6 +199,8 @@ export PLAITA_CONSOLE_URL=http://127.0.0.1:8000     # console 地址
 export PLAITA_CONSOLE_ADMIN_API_KEY=...             # 机器首选；或 USERNAME/PASSWORD
 # 可选：LLM 提案者 / 评测 judge（OpenAI 兼容端点）
 export PLAITA_AI_PROPOSER_BASE_URL=... PLAITA_AI_PROPOSER_MODEL=... PLAITA_AI_PROPOSER_API_KEY=...
+# 提案走 CoDeFlow：LLM 返回完整 @flow 源码（编译校验后转 IR 入库），
+# context 自动携带 current_source（emit_source 反推的当前源码）供最小改动
 export PLAITA_AI_JUDGE_BASE_URL=...   PLAITA_AI_JUDGE_MODEL=...   PLAITA_AI_JUDGE_API_KEY=...
 ```
 
