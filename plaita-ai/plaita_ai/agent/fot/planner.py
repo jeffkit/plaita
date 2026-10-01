@@ -7,6 +7,9 @@ from typing import Any, List, Optional, Sequence
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from plaita import Node
+from plaita.node import get_default_registry
+
 from plaita_ai.agent.fot.extract import extract_flow_source
 from plaita_ai.agent.fot.prompts import (
     COMPOSE_SYSTEM,
@@ -16,6 +19,8 @@ from plaita_ai.agent.fot.prompts import (
     format_compile_errors,
     format_dsl_section,
     format_instruction_section,
+    format_nodes_section,
+    format_spec_section,
     format_tools_section,
 )
 from plaita_ai.agent.fot.tools import ToolLike, ToolSpec, register_tool_node, tools_prompt_section
@@ -30,7 +35,72 @@ def _load_dsl_reference() -> str:
         return ""
 
 
+def _load_authoring_reference() -> str:
+    """Load the canonical authoring-spec once per process.
+
+    authoring-spec 随 flow-coder skill v0.3 起提供；旧版本包里没有该文件时
+    返回空串，prompts 层降级为内置硬约束底线提示。
+    """
+    try:
+        return get_skill_reference("flow-coder", "authoring-spec.md")
+    except FileNotFoundError:
+        return ""
+
+
 _DSL_REFERENCE = _load_dsl_reference()
+_AUTHORING_REFERENCE = _load_authoring_reference()
+
+# 内置专用占位符/合成节点类型（来源：plaita.dsl.codeflow._common 的
+# _BUILTIN_HANDLED_TYPES；此处复制以免耦合编译器私有集合）
+_BUILTIN_PLACEHOLDER_TYPES = {
+    "http", "code", "event", "child", "reference", "parallel",
+    "map", "filter", "find", "loop", "reduce",
+    "start", "end", "if", "assignment", "switch", "bool",
+}
+# Node 基类实例字段（所有节点共有，列进节点清单只是噪音）
+_BASE_NODE_FIELDS = frozenset(
+    ("id", "name", "desc", "output", "next", "timeout",
+     "source_line", "timeout_handler", "error_handler")
+)
+_MAX_LISTED_NODES = 40
+
+
+def _registered_nodes_section(tool_specs: Optional[List[ToolSpec]] = None) -> str:
+    """从默认 NodeRegistry 生成已注册业务节点清单（供 LLM 直接以大写占位符调用）。
+
+    排除：内置专用类型、通用 TOOL 兜底节点、FoT 已在「可用工具」段落列出的
+    动态工具节点。registry 不可用时返回空串（该段落整体消失）。
+    """
+    exclude = set(_BUILTIN_PLACEHOLDER_TYPES) | {"tool"}
+    for spec in tool_specs or []:
+        if spec.node_type:
+            exclude.add(spec.node_type)
+    try:
+        registry = get_default_registry()
+        types = sorted(t for t in registry.list_types() if t not in exclude)
+    except Exception:
+        return ""
+    lines: List[str] = []
+    for node_type in types:
+        cls = registry.get(node_type)
+        if cls is None or not (isinstance(cls, type) and issubclass(cls, Node)):
+            continue
+        fields = [
+            name for name in getattr(cls, "model_fields", {})
+            if name not in _BASE_NODE_FIELDS
+        ]
+        doc = (cls.__doc__ or "").strip().splitlines()
+        desc = doc[0].strip() if doc else ""
+        line = f"- {node_type.upper()}({', '.join(fields)})"
+        if desc:
+            line += f" —— {desc}"
+        lines.append(line)
+        if len(lines) >= _MAX_LISTED_NODES:
+            remaining = len(types) - len(lines)
+            if remaining > 0:
+                lines.append(f"…（其余 {remaining} 个已注册节点省略）")
+            break
+    return "\n".join(lines)
 
 
 def _invoke_model(model: BaseChatModel, system: str, user: str) -> str:
@@ -61,6 +131,8 @@ def plan_flow_source(
     system = COMPOSE_SYSTEM.format(
         tools_section=format_tools_section(tools_prompt_section(specs)),
         dsl_section=format_dsl_section(_DSL_REFERENCE),
+        spec_section=format_spec_section(_AUTHORING_REFERENCE),
+        nodes_section=format_nodes_section(_registered_nodes_section(specs)),
         instruction_section=format_instruction_section(instruction),
     )
     user = COMPOSE_USER.format(task=task)
@@ -82,6 +154,8 @@ def review_flow_source(
     system = REVIEW_SYSTEM.format(
         tools_section=format_tools_section(tools_prompt_section(specs)),
         dsl_section=format_dsl_section(_DSL_REFERENCE),
+        spec_section=format_spec_section(_AUTHORING_REFERENCE),
+        nodes_section=format_nodes_section(_registered_nodes_section(specs)),
         instruction_section=format_instruction_section(instruction),
     )
     user = REVIEW_USER.format(
