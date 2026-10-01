@@ -51,7 +51,12 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+          # 不开 cache: pip——2026-10-01 三腿回归门停滞排查：同 workflow 无
+          # cache 无 matrix 的 plaita-ai 腿一直绿，矩阵腿必停（runner 心跳在、
+          # 日志 blob 从未上传、纯 main 可复现、本地 mac/linux 断网全量 70s
+          # 绿=套件无网络依赖无挂点）。首个对齐变量就是 pip cache（restore/
+          # save 大环境）；ubuntu-24.04 钉版未能修复，逐变量消元。
+          # cache: pip
 
       - name: Install package + gate deps
         run: |
