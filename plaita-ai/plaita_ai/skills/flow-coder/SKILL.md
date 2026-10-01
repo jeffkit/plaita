@@ -1,6 +1,7 @@
 ---
 name: flow-coder
-description: 用 plaita 的 @flow DSL 把自然语言需求编译成可执行流程并运行。当用户要求"用 @flow 实现"、"生成一个 flow"、"编排一个流程/Agent/工作流并执行"时使用本技能。技能指导 AI 产出 @flow 源码 → 编译期校验 → 运行期执行 → 错误回灌自纠，形成闭环。
+version: 0.3.0
+description: 用 plaita 的 @flow DSL 把自然语言需求编译成可执行流程并运行。当用户要求"用 @flow 实现"、"生成一个 flow"、"编排一个流程/Agent/工作流并执行"、"写业务编排/迁移到 plaita"、"发布 flow 到 console"时使用本技能。技能指导 AI 产出 @flow 源码 → 编译期校验 → 运行期执行 → 错误回灌自纠，形成闭环；业务场景（plaita-nodes 节点、项目结构、console 发布）见 authoring-spec 规范。
 ---
 
 # flow-coder：用 @flow 生成并执行流程
@@ -12,6 +13,7 @@ description: 用 plaita 的 @flow DSL 把自然语言需求编译成可执行流
 - 用户说"用 @flow 实现 …"、"生成一个 flow 做 …"、"编排一个流程并跑一下"。
 - 用户描述的需求可以被拆成**有向步骤**：条件分支、循环/集合处理、HTTP 调用、子流程、并行、工具调用等。
 - 用户希望**生成即执行**，而不是只产出代码片段。
+- 用户要写**业务编排**（调 Agent、HITL、通知、外部连接器）或把存量流程迁移到 plaita——这类必须配合 `references/authoring-spec.md`（业务节点在 plaita-nodes 仓，不在 plaita 内置占位符里）。
 
 不要用于：纯一次性算术、单次字符串处理这类没有"流程"语义的任务（直接写 Python 更合适）。
 
@@ -216,7 +218,7 @@ def fan_out(INPUT):
     return r
 ```
 
-`mode` 可选 `"thread"` / `"process"` / `"coroutine"` / `"artificial"`，默认 `"thread"`。
+`mode` 可选 `"thread"` / `"process"` / `"artificial"`，默认 `"thread"`。**不要用 `"coroutine"`**——已于 0.4.0 下线（在任何 running event loop 下必崩），一律用 `"thread"`。
 
 > **已知限制（重要）**：`@flow` 的 PARALLEL 编译期**不接受 per-branch `input`**——分支只能带 `name` + `flow`，子流程的输入由运行时分发。当前 plaita 运行时在 parallel 子流程里访问 `INPUT.x` / `PARENT.INPUT.x` / `GLOBAL.x` 会触发表达式求值 bug（`ExpressionParser._eval_variable missing 'tokens'`），**输入相关的并行分支在 `@flow` 源码模式下目前跑不通**。若任务必须按输入做并行扇出，建议改用 `CHILD` 串行编排或在 builder/JSON 层构建 Parallel 节点（那里支持 per-branch `input`），并在 prompt 里提示用户这一限制，不要在 `@flow` 里硬试 PARALLEL+输入。
 
@@ -263,6 +265,17 @@ flow_from_source(src).run(q="plaita 是什么")
 - 接表达式的字段声明成 `Optional[Any]`/`Optional[str]`，避免 `int`/`bool` 强类型拒绝表达式串。
 - 未注册的大写名 → 编译期报错列可用类型：`未注册的自定义节点 FOO(...)：node_type 'foo' 不在 registry 中。可用类型：[...]`——把错误回灌 LLM 自纠即可。
 
+## 业务 flow：plaita-nodes 集成（业务编排必读）
+
+内置占位符（`HTTP`/`CODE`/`MAP`/`CHILD`…）之外，**大仓业务 flow 的 Agent 调用、HITL、通知、凭据化连接器都在兄弟仓 plaita-nodes**（`agentrun`/`hitl`/`gate`/`api_request` 等 22 节点，`node_type` 大写化作占位符直接调）。要点：
+
+- **安装即注册 ≠ 可用**：plaita-nodes 走 entry_points 懒发现，须在 `flow_from_source` **之前**显式 `import plaita_nodes` → 业务 `register_all()` → `get_default_registry()` 触发。
+- **大仓内安装**：`pip install -e ../plaita[http] -e ../agentproc/sdk/python -e ../plaita-nodes -e .`（plaita 未发 PyPI，不要 `pip install` 裸名）。
+- **agentrun 配置**：agents.json/providers.json 搜索 `~/.plaita`（新，优先）→ `~/.flowcast`（存量兜底），深合并；`env` 按配置透传、`timeout_secs` 默认 1800（与 flowcast 有意不同）。
+- **发布 console 前必查**：worker 侧要用 `PLAITA_NODE_PATH` / `PLAITA_NODE_MODULES` / `PLAITA_PYTHON` 注入业务节点，否则发布成功、调度必败。
+
+业务 flow 项目结构、dry-run 双通道、跨作用域传数据的正规姿势、交付自检清单——**全部在 `references/authoring-spec.md`**，写业务编排前先读它。
+
 ## 工作流（每次执行都按这五步走）
 
 ### 第 1 步：理解需求
@@ -276,6 +289,7 @@ flow_from_source(src).run(q="plaita 是什么")
 - 节点调用（`HTTP`/`CHILD`/`PARALLEL`/`MAP` 等）只作语句或赋值右侧。
 - 字符串拼接用 `F.concat`，不要用 f-string 或 `+`（除非确认两端都是数字/列表）。
 - 每条分支路径都有 `return`，避免"赋值后悬空"。
+- **authoring-spec 硬约束速记**（详见规范 §2）：跨分支同名赋值禁止（合流用 `FIRST_NON_NULL` 类节点）；集合子流程读父快照、写不回；`timeout=` 是保留 kwargs；接表达式的节点字段声明 `Optional[Any]`；业务节点先注册再 `flow_from_source`。
 
 ### 第 3 步：编译期校验
 
@@ -326,6 +340,8 @@ print(result)
 
 ## 参考资料索引
 
+- `references/authoring-spec.md` —— **编写规范权威单源**：作者硬约束（编译期不拦的坑）、plaita-nodes 业务集成、业务 flow 项目结构、console 发布链路、交付自检清单。写业务编排/迁移前必读。
 - `references/codeflow-reference.md` —— @flow 完整语法、表达式语义边界、节点清单、已知边界、可运行示例集。**生成复杂流程前先查它**。
 - 项目内文档：`docs-site/docs/guide/code-dsl.md`（@flow DSL 完整指南）、`docs-site/docs/scenarios/agent-orchestration.md`（Agent 编排模式）。
 - 示例代码：`examples/agent/nodes.py`（自定义 LLM/Tool/Retriever 节点）、`examples/agent/flows/*.json`（三个端到端 Agent 案例）。
+- 大仓决议：`<monorepo>/docs/ADR-2026-08-27-orchestration-converge-on-plaita.md`（编排收敛、执行层 agentproc、@flow 为权威定义）。

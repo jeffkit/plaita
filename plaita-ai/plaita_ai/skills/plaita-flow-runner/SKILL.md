@@ -16,15 +16,18 @@ version: 0.2.0
 python3 -c "import plaita; print(plaita.__version__)"
 ```
 
-若报 `ModuleNotFoundError: No module named 'plaita'`，提示用户安装：
+若报 `ModuleNotFoundError: No module named 'plaita'`，提示用户安装。**注意：plaita 未发布 PyPI，`pip install plaita` / `logic-plaita` 装不到**：
 
 ```bash
-pip install logic-plaita
+# 大仓内（infra4agent）：editable 安装兄弟仓（标准做法）
+pip install -e ../plaita[http]
+# 仓外：从 plaita 源码仓路径安装
+pip install -e <plaita仓路径>[http]
 ```
 
-若 flow 里用到 `code` / `http` 节点，还需对应 extra：`pip install logic-plaita[code]` / `logic-plaita[http]`。若 flow 是 YAML 格式，需 `pip install logic-plaita[yaml]`。
+若 flow 里用到 `code` / `http` / YAML，加对应 extra：`".[code]"` / `".[http]"` / `".[yaml]"`（editable 安装时对仓库路径加 extra）。
 
-> 如果用户在 plaita 仓库内工作（仓库根目录有 `plaita/` 包），直接 `import plaita` 会用仓库源码，无需 pip 安装。
+> 如果用户在 plaita 仓库内工作（仓库根目录有 `plaita/` 包），直接 `import plaita` 会用仓库源码，无需安装。业务仓（如 mediaflow）用其 `.runtime/venv`，plaita/plaita-nodes/agentproc 都已 editable 装好，不要另建环境。
 
 ## 工作流程
 
@@ -40,7 +43,7 @@ flow 来源可能是：
 - 文件路径 → `Flow.from_file(path)`：按后缀 `.json`/`.yaml`/`.yml` 选择解析器
 - 想一步到位 → `parse_and_run(content, ...)`：同样自动识别
 
-> YAML 需要 `logic-plaita[yaml]`。若用户贴的是 YAML 且解析报「需要 PyYAML」，提示安装 extra。加载入口都已统一，无需手动 `json.loads`——但仍要捕获解析异常，区分「格式错」与「执行错」。
+> YAML 需要 `yaml` extra（editable 安装：`pip install -e ../plaita[yaml]`）。若用户贴的是 YAML 且解析报「需要 PyYAML」，提示安装 extra。加载入口都已统一，无需手动 `json.loads`——但仍要捕获解析异常，区分「格式错」与「执行错」。
 
 ### 2. 选执行模式
 
@@ -141,7 +144,7 @@ step = execution.run_distributed(
 
 | 现象 | 可能原因 | 排查 |
 |------|---------|------|
-| `ModuleNotFoundError: execjs/requests` | 用了 `code`/`http` 节点但没装 extra | `pip install logic-plaita[code]` / `[http]` |
+| `ModuleNotFoundError: execjs/requests` | 用了 `code`/`http` 节点但没装 extra | editable 安装补 extra：`pip install -e ../plaita[code]` / `[http]` |
 | 表达式被原样返回字符串 | 写成了 `${INPUT.x}` | 改成 `$INPUT.x` |
 | `KeyError` / 字段为 None | 表达式引用了不存在的字段 | 用 Generator 模式逐节点看 `context` |
 | 节点 `id` 找不到 / `next` 断链 | JSON 拓扑错误 | 检查所有 `next` 指向的 id 存在 |

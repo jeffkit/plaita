@@ -25,7 +25,17 @@ ln -snf "$SKILLS/plaita-flow-runner"  ~/.claude/skills/plaita-flow-runner
 
 # Cursor（可选）
 ln -snf "$SKILLS/flow-coder"          ~/.cursor/skills/flow-coder
+
+# DeepSeek Harness（DSH）——原生 skill 发现路径是 ~/.dsh/skills/
+ln -snf "$SKILLS/flow-coder"          ~/.dsh/skills/flow-coder
+ln -snf "$SKILLS/plaita-flow-builder" ~/.dsh/skills/plaita-flow-builder
+ln -snf "$SKILLS/plaita-flow-runner"  ~/.dsh/skills/plaita-flow-runner
 ```
+
+!!! tip "大仓内开发请软链工作区副本"
+
+    在 infra4agent 大仓内开发时，`SKILLS` 应指向**工作区源码**而非已安装 wheel：
+    `SKILLS=<大仓路径>/plaita/plaita-ai/plaita_ai/skills`——软链权威副本，skill 内容更新即生效，无需重装。
 
 安装后，Agent 可以在需要时读取 skill 指令，按规范生成并执行 `@flow` 代码。
 

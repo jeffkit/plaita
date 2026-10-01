@@ -2,6 +2,8 @@
 
 本文件是 `flow-coder` skill 的参考资料。生成复杂 `@flow` 流程前先查阅对应小节，避免踩"会报错的写法"。
 
+> **分工**：本文件只管**语法**（能写什么、编译成什么）。语法之外的**作者硬约束**（跨分支同名赋值、作用域边界、`params=` 语义）、**plaita-nodes 业务集成**、项目结构与 console 发布，见 [authoring-spec.md](authoring-spec.md)——写业务编排前必读。
+
 ## 1. 函数骨架
 
 ```python

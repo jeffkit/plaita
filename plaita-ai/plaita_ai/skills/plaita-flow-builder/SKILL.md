@@ -12,7 +12,7 @@ version: 0.2.0
 
 plaita 的运行时只认 dict，JSON / YAML / Python DSL 只是同一份 flow 的不同序列化/抽象层，运行时行为完全一致。**按下面优先级选择产出形态：**
 
-1. **配置文件 → 默认用 YAML**：可读性高、支持 `#` 注释、多行 `code` 字段不用 `\n` 转义。需要 `pip install logic-plaita[yaml]`。
+1. **配置文件 → 默认用 YAML**：可读性高、支持 `#` 注释、多行 `code` 字段不用 `\n` 转义。需要 `yaml` extra（大仓内 editable：`pip install -e ../plaita[yaml]`；plaita 未发布 PyPI）。
 2. **在 Python 代码里声明 / 写测试 / 生成模板 → 用 Python DSL**（`plaita.dsl`）：IDE 自动补全 + 构建期静态校验，把反模式在 build 时拦掉。
 3. **与可视化编排工具互通 / 旧系统对接 → 用 JSON**：保持历史行为，无额外依赖。
 
@@ -175,7 +175,7 @@ flow = (
 5. **超时**用 ISO 8601：`PT5S`/`PT1M`/`PT1H`，可加在流程级或节点级。
 6. **错误处理**：节点可配 `errorHandler.strategy`：`abort`（默认中止）/ `continue`（忽略继续）/ `continue_with`（用 `defaultValue` 继续）。
 7. **并发副作用**：`map.concurrent` 与 `parallel` 会并发，不要在里面用 `pop`/`set`/`clear` 等带副作用函数，也不要在共享上下文写竞争数据。
-8. **`code`/`http` 节点需要 extra**：`pip install logic-plaita[code]` / `logic-plaita[http]`。生成这两个节点时，在交付说明里提醒用户装对应 extra。
+8. **`code`/`http` 节点需要 extra**：editable 安装补 `pip install -e ../plaita[code]` / `[http]`（plaita 未发布 PyPI，裸名装不到）。生成这两个节点时，在交付说明里提醒用户装对应 extra。
 
 ## 交付规范
 
@@ -185,7 +185,7 @@ flow = (
 2. **flow 定义代码块**：默认用 **YAML**；用户明确要 JSON、或场景是工具互通时用 JSON；用户在 Python 代码里要用时给 DSL。代码块要带语言标注（```yaml / ```json / ```python）。
 3. **节点拓扑说明**：用简短一行描述控制流，例如 `start → check(if) → [adult/minor] → end`。
 4. **执行示例**：给出对应的 `flow.run(...)` 调用，让用户能直接验证。
-5. **注意事项**：用到的 extra（`http`/`code`/`yaml`）、可能的边界情况、需要用户确认的假设。产出 YAML 时提醒 `pip install logic-plaita[yaml]`。
+5. **注意事项**：用到的 extra（`http`/`code`/`yaml`）、可能的边界情况、需要用户确认的假设。产出 YAML 时提醒安装 `yaml` extra（`pip install -e ../plaita[yaml]`）。
 
 如果用户给了保存路径：YAML 用 `.yaml`/`.yml` 后缀，JSON 用 `.json` 后缀——`Flow.from_file` 按后缀选择解析器。否则在对话里展示。
 
