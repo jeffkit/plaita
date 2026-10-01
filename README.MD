@@ -399,3 +399,5 @@ python -m twine upload dist/*
 ## 许可证
 
 MIT
+
+<!-- ci probe 2026-10-01 -->
