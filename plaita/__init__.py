@@ -198,3 +198,23 @@ __all__ = sorted(set(_LAZY_EXPORTS) | {"types", "__version__"})
 
 if __name__ == "__main__":  # pragma: no cover
     print(__version__)
+
+
+# 可选事件循环加速（2026-10 wave3）：PLAITA_LOOP=uvloop 时安装 uvloop policy。
+# unix-only；uvloop 未装时仅 debug 留痕、行为不变。进程级 opt-in——本模块
+# import 即生效，须在首个事件循环创建前（run_async_from_sync /
+# async_gen_to_sync 均经当前 policy 建循环）。
+def _maybe_install_uvloop() -> None:
+    import os
+
+    if os.environ.get("PLAITA_LOOP", "").strip().lower() != "uvloop":
+        return
+    try:
+        import uvloop
+    except Exception:  # noqa: BLE001 - 可选加速缺失：仅留痕，行为不变
+        _logger.debug("PLAITA_LOOP=uvloop but uvloop is not installed", exc_info=True)
+        return
+    uvloop.install()
+
+
+_maybe_install_uvloop()

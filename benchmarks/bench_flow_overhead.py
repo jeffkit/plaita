@@ -85,6 +85,67 @@ def main() -> None:
     print(f"\n验收线（小 payload <0.5ms/节点）: {'PASS' if ok else 'FAIL'}"
           f"（实测边际 {per_node:.1f}us）")
 
+    # 流 C：挂观测 handler 的派发方式对照——**标定型合成口径**：stub 以自旋
+    # 模拟每次事件的固定成本（评审对真实 Langfuse handler 的实测文档值为
+    # 100~400µs/事件，取 50µs 与 300µs 两档）。真实成本随 payload/SDK 变化，
+    # 此处只验证机制：handler 成本 >> 线程交接（~几十µs/事件）时 background
+    # 把成本移出关键路径；handler 极轻时 background 反而亏，用 background=False。
+    import time as _time
+    from plaita.obs import LangfuseCallback
+
+    class _CostlyStubClient:
+        """按 cost_us 自旋模拟每次 SDK 交互的真实成本。"""
+
+        def __init__(self, cost_us: int):
+            self.cost = cost_us / 1e6
+            self.n = 0
+
+        def _spin(self):
+            deadline = _time.perf_counter() + self.cost
+            while _time.perf_counter() < deadline:
+                pass
+            self.n += 1
+
+        def create_trace_id(self, seed=None):
+            return "0" * 32
+
+        def start_observation(self, **kw):
+            self._spin()
+            return self
+
+        def update(self, output=None, **kw):
+            self._spin()
+
+        def end(self, **kw):
+            self._spin()
+
+        def set_attributes(self, attrs):
+            self._spin()
+
+        def flush(self):
+            self._spin()
+
+    payload = {"bench": True}
+    for cost_us, reps_c in ((50, 20), (300, 10)):
+        wall = {}
+        for background in (True, False):
+            best = float("inf")
+            for _ in range(reps_c):
+                client = _CostlyStubClient(cost_us)
+                cb = LangfuseCallback(client=client, background=background,
+                                      background_drain_timeout=5.0)
+                execution = FlowExecution(callback_handlers=[cb])
+                execution.clean()
+                t0 = time.perf_counter()
+                execution.execute(build_flow(0, 5), params=payload)
+                best = min(best, time.perf_counter() - t0)
+            wall[background] = best * 1e3
+        delta = (wall[False] - wall[True]) / 5 * 1000
+        verdict = (f"每节点省 {delta:.0f}µs" if delta > 0
+                   else f"background 反而慢 {-delta:.0f}µs/节点（handler 过轻，background=False）")
+        print(f"[流C 观测 handler·{cost_us}µs/事件] 5 节点链：同步 {wall[False]:.2f} ms/run"
+              f" vs background {wall[True]:.2f} ms/run → {verdict}")
+
 
 def best_run(node_ms: int, count: int, reps: int) -> float:
     """reps 次整链运行，返回单次最优墙钟（秒）。"""
