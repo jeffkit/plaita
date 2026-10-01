@@ -32,7 +32,6 @@ jobs:
 
   gate:
     name: Regression gate (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
