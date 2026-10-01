@@ -9,8 +9,10 @@ from plaita.dsl.codeflow._common import (
     _CodeflowError,
     _CompileCtx,
     _annotate_source,
+    _cond_slug,
     _const_bool,
     _custom_node_type,
+    _human_label,
     _node_call_kind,
     _unpack_names,
 )
@@ -35,12 +37,18 @@ def _compile_block(
     head, rest = stmts[0], stmts[1:]
 
     if isinstance(head, ast.Return):
-        end_id = ctx.auto_id()
         output = _compile_expr(head.value, ctx) if head.value is not None else None
+        # 语义化 id/标签：return "A" -> ret_a；canvas/dry-run/报错不再显示 _n3
+        ret_slug = _cond_slug(head.value)
+        end_id = ctx.semantic_id(f"ret_{ret_slug}" if ret_slug else None)
+        expr_text = ast.unparse(head.value) if head.value is not None else ""
         end_node: Dict[str, Any] = {
             "type": "end", "id": end_id,
             "output": output, "resultType": "success",
         }
+        if expr_text:
+            end_node["name"] = _human_label(f"return {expr_text}")
+        end_node["desc"] = _human_label(f"return {expr_text}（第 {head.lineno} 行）", 60)
         _annotate_source(end_node, head)
         ctx.nodes.append(end_node)
         if rest:
@@ -72,9 +80,15 @@ def _compile_if(
     head: ast.If, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
     cond = _compile_condition(head.test, ctx)
-    if_id = ctx.auto_id()
+    # 语义化 id/标签：if INPUT.score >= 90 -> id=score_ge_90，画布/报错自带语义
+    cond_text = ast.unparse(head.test)
+    if_id = ctx.semantic_id(_cond_slug(head.test))
     # 先在节点列表里占位，保证输出顺序 if 在前
-    if_node: Dict[str, Any] = {"type": "if", "id": if_id, "condition": cond}
+    if_node: Dict[str, Any] = {
+        "type": "if", "id": if_id, "condition": cond,
+        "name": _human_label(f"{cond_text}?"),
+        "desc": _human_label(f"if {cond_text}（第 {head.lineno} 行）", 80),
+    }
     _annotate_source(if_node, head)
     ctx.nodes.append(if_node)
 
@@ -165,7 +179,8 @@ def _compile_while(
     cond = _while_cond(head.test, ctx)
     child_flow = _while_child_flow(head.body, ctx)
 
-    node_id = ctx.auto_id()
+    cond_text = ast.unparse(head.test)
+    node_id = ctx.semantic_id(_cond_slug(head.test))
 
     after = _compile_block(rest, ctx, succ)
     if after is None:
@@ -175,6 +190,8 @@ def _compile_while(
         "type": "while",
         "id": node_id,
         "condition": cond,
+        "name": _human_label(f"{cond_text}?"),
+        "desc": _human_label(f"while {cond_text}（第 {head.lineno} 行）", 80),
         # While 模型只认 child_flow（无 childFlow camelCase 兼容键，
         # 2026-09-30 实测：写 childFlow 会被 schema 当未知键静默忽略）。
         "child_flow": child_flow,
@@ -385,8 +402,11 @@ def _compile_expr_stmt(
         ctx.nodes.insert(anchor, spec)
         return spec["id"]
     nid = ctx.auto_id()
+    expr_text = ast.unparse(value)
     expr_node: Dict[str, Any] = {
         "type": "assignment", "id": nid, "output": _compile_expr(value, ctx), "next": after,
+        "name": _human_label(expr_text),
+        "desc": _human_label(f"{expr_text}（第 {head.lineno} 行）", 60),
     }
     _annotate_source(expr_node, head)
     ctx.nodes.insert(anchor, expr_node)

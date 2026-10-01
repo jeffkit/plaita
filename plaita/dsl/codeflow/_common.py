@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import warnings
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -249,6 +250,24 @@ class _CompileCtx:
         self._claimed.add(cand)
         return cand
 
+    def semantic_id(self, slug: Optional[str]) -> str:
+        """语义化 id：slug 可用则直接采用，冲突时依次尝试 ``<slug>_2.._5``，
+        仍冲突或 slug 为空回退 ``auto_id()``（``_n{n}``）。
+
+        用于 if/while/end 等无自然名字的节点，让 console 画布、dry-run、
+        运行期报错里的 id 自带语义（如 ``score_ge_90``）。
+        """
+        if slug:
+            if slug not in self._claimed:
+                self._claimed.add(slug)
+                return slug
+            for k in range(2, 6):
+                cand = f"{slug}_{k}"
+                if cand not in self._claimed:
+                    self._claimed.add(cand)
+                    return cand
+        return self.auto_id()
+
     def claim(self, nid: str) -> str:
         if nid in self._claimed:
             raise ValueError(f"节点 id 重复: {nid!r}")
@@ -274,6 +293,92 @@ def _annotate_source(spec: Dict[str, Any], node: Optional[ast.AST]) -> Dict[str,
         if line is not None:
             spec["source_line"] = line
     return spec
+
+
+# ---------------------------------------------------------------------------
+# 语义化 id 与人类可读标签（console 画布 / dry-run / 报错信息可读性）
+# ---------------------------------------------------------------------------
+
+_SLUG_MAX_LEN = 24
+_CMP_OP_SLUGS = {
+    ast.Gt: "gt", ast.GtE: "ge", ast.Lt: "lt", ast.LtE: "le",
+    ast.Eq: "eq", ast.NotEq: "ne", ast.In: "in", ast.NotIn: "not_in",
+    ast.Is: "is", ast.IsNot: "is_not",
+}
+
+
+def _slug_tokens(node: Optional[ast.expr], out: List[str], depth: int = 0) -> None:
+    """把表达式 AST 摘成语义 token（顺序即阅读顺序），供 ``_cond_slug`` 拼接。
+
+    只取「稳定语义」的部分：字段/变量名、比较算子、and/or/not、字面量。
+    深度与 token 数量设上限，保证纯函数有界。
+    """
+    if node is None or depth > 6 or len(out) >= 8:
+        return
+    if isinstance(node, ast.Compare):
+        _slug_tokens(node.left, out, depth + 1)
+        for op, comp in zip(node.ops, node.comparators):
+            out.append(_CMP_OP_SLUGS.get(type(op), "cmp"))
+            _slug_tokens(comp, out, depth + 1)
+    elif isinstance(node, ast.BoolOp):
+        op = "and" if isinstance(node.op, ast.And) else "or"
+        for i, v in enumerate(node.values):
+            if i:
+                out.append(op)
+            _slug_tokens(v, out, depth + 1)
+    elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        out.append("not")
+        _slug_tokens(node.operand, out, depth + 1)
+    elif isinstance(node, ast.Attribute):
+        out.append(node.attr)
+    elif isinstance(node, ast.Name):
+        out.append(node.id)
+    elif isinstance(node, ast.Call):
+        fn = node.func
+        fname = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
+        if fname:
+            out.append(fname)
+        for a in node.args:
+            _slug_tokens(a, out, depth + 1)
+    elif isinstance(node, ast.Subscript):
+        _slug_tokens(node.value, out, depth + 1)
+        if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, int):
+            out.append(f"at{node.slice.value}")
+    elif isinstance(node, ast.Constant):
+        v = node.value
+        if v is None:
+            out.append("none")
+        elif isinstance(v, bool):
+            out.append("true" if v else "false")
+        elif isinstance(v, (int, float)):
+            out.append(re.sub(r"[^0-9]+", "_", str(v)).strip("_") or "num")
+        elif isinstance(v, str):
+            out.append(v)
+
+
+def _cond_slug(node: Optional[ast.expr]) -> Optional[str]:
+    """表达式 → 语义 slug（如 ``INPUT.score >= 90`` → ``score_ge_90``）。
+
+    仅 ASCII 小写字母/数字/下划线；不可 slug（全中文/空表达式等）返回 None，
+    调用方回退 ``_n{n}``。纯函数，供单测钉行为。
+    """
+    toks: List[str] = []
+    _slug_tokens(node, toks)
+    cleaned = []
+    for t in toks:
+        t = re.sub(r"[^0-9a-zA-Z]+", "_", t).strip("_").lower()
+        if t:
+            cleaned.append(t)
+    slug = "_".join(cleaned)
+    if not slug:
+        return None
+    return slug[:_SLUG_MAX_LEN].rstrip("_")
+
+
+def _human_label(text: str, limit: int = 28) -> str:
+    """压缩空白并截断成人类可读标签（超长以 … 结尾）。"""
+    t = " ".join(text.split())
+    return t if len(t) <= limit else t[: max(limit - 1, 1)] + "…"
 
 def _unpack_names(target: ast.AST) -> List[str]:
     if isinstance(target, ast.Name):
