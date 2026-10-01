@@ -122,6 +122,9 @@ export function jsonToFlow(
     const sourceLine = raw.source_line as number | undefined
     const desc = (raw.desc as string) || ''
     const name = (raw.name as string) || id
+    // 分支目标透传（画布 if 节点副标题显示去向；保存仍走边推导，不回写）
+    const nextId = (raw.next as string) || undefined
+    const elseNextId = (raw.else_next as string) || undefined
     // 分支结构保留进 fields（剥离 next：分支目标由画布边推导，保存时回填）。
     // 覆盖 switch/case 的分支条件与 parallel 的分支子图，避免 round-trip 丢失。
     const fieldsBranches = Array.isArray(raw.branches)
@@ -142,7 +145,7 @@ export function jsonToFlow(
       id,
       type: 'plaitaNode',
       position: layout[id] || { x: 0, y: 0 },
-      data: { type, name, desc, sourceLine, fields },    })
+      data: { type, name, desc, sourceLine, next: nextId, elseNext: elseNextId, fields },    })
 
     // 线性 next（统一从 'true' handle 出发）
     if (typeof raw.next === 'string') {

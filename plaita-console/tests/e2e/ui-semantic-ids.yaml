@@ -101,7 +101,9 @@ cases:
         visible:
           # 主名 = 语义条件全文（截断阈值 24 字符，18 字符名完整可见）
           - text=INPUT.score >= 90?
-          - text=if
+          # 副标题 = 分支去向摘要（✓ 真分支 / ✗ 假分支）
+          - text=✓ ret_excellent
+          - text=✗ score_ge_60
         hidden:
           # 合成 id 不再出现；desc/行号不上画布（悬停 tooltip 与抽屉里才有）
           - text=_n1

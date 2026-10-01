@@ -112,13 +112,70 @@ export interface NodeLabelData {
   type: string
   name: string
   status: NodeStatus
-  /** 人类可读描述（@flow 编译产物自带），有值时替换第二行展示 */
+  /** 人类可读描述（@flow 编译产物自带）——仅悬停 tooltip，不上画布 */
   desc?: string
   /** @flow 源码行号；name 缺失（旧 flow 的 _n 节点）时用于可读兜底 */
   sourceLine?: number
+  /** 类型特定字段（副标题参数摘要的数据源） */
+  fields?: Record<string, unknown>
+  /** if 真分支目标（副标题显示去向） */
+  next?: string
+  /** if 假分支目标 */
+  elseNext?: string
 }
 
-export function renderNodeLabel({ type, name, status, desc, sourceLine }: NodeLabelData) {
+/** 副标题截断（副标题 10px mono，约为 10 字符宽 ×2） */
+function sub(v: unknown, n = 22): string {
+  if (typeof v !== 'string') return ''
+  return v.length > n ? v.slice(0, n) + '…' : v
+}
+
+/**
+ * 第二行 = 类型相关的高价值参数摘要（类型辨识交给图标/色条，不再重复）。
+ * 逐类型定制；无话可说返回空串（第二行不渲染）。
+ */
+export function renderSubtitle(
+  type: string,
+  fields: Record<string, unknown> = {},
+  next?: string,
+  elseNext?: string,
+): string {
+  if (type === 'if') {
+    const parts: string[] = []
+    if (next) parts.push('✓ ' + sub(next, 14))
+    if (elseNext) parts.push('✗ ' + sub(elseNext, 14))
+    return parts.join('   ')
+  }
+  if (type === 'switch' || type === 'case') {
+    const bs = (fields.branches as Array<{ name?: string; next?: string }>) || []
+    return bs.map(b => `${sub(b.name, 8)}→${sub(b.next, 12)}`).join('  ')
+  }
+  if (type === 'assignment') return sub(fields.output, 28)
+  if (type === 'http' || type === 'generic_webhook') return sub(fields.url, 28)
+  if (['map', 'filter', 'find', 'loop', 'reduce'].includes(type)) {
+    const cf = fields.child_flow as { nodes?: unknown[] } | undefined
+    const bodyN = cf?.nodes ? Math.max(0, cf.nodes.length - 1) : undefined
+    const bits: string[] = []
+    const coll = sub(fields.collection, 18)
+    if (coll) bits.push('× ' + coll)
+    if (bodyN !== undefined) bits.push(`体 ${bodyN}`)
+    if (fields.concurrent === true) bits.push('并发')
+    return bits.join(' · ')
+  }
+  if (type === 'while') {
+    const cf = fields.child_flow as { nodes?: unknown[] } | undefined
+    if (cf?.nodes) return `体 ${Math.max(0, cf.nodes.length - 1)} · ≤${(fields.max_iterations as number) || 1000} 轮`
+    return ''
+  }
+  // 业务节点通用：常见关键参数白名单，取第一个有值者
+  for (const k of ['agent', 'model', 'path', 'to', 'channel', 'topic', 'sql', 'webhook', 'library', 'flow_id']) {
+    const v = sub(fields[k], 24)
+    if (v) return `${k}=${v}`
+  }
+  return ''
+}
+
+export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, next, elseNext }: NodeLabelData) {
   const cfg = resolveNodeTypeConfig(type)
   const style = statusStyles[status] ?? statusStyles.idle
   const cs = COLOR_STYLES[cfg.color] ?? COLOR_STYLES.gray
@@ -128,8 +185,8 @@ export function renderNodeLabel({ type, name, status, desc, sourceLine }: NodeLa
   const label = /^_n\d+$/.test(name) ? fallbackName : name
   // 截断阈值与卡片 max-w-[240px] / 布局 NODE_WIDTH=240 对齐（24 字符 mono）
   const displayName = label.length > 24 ? label.slice(0, 24) + '…' : label
-  // 第二行回归「类型 · 族别」：desc 不上画布（与主名重复）——悬停 tooltip 可见
-  const secondLine = `${type}${cfg.family ? ` · ${cfg.family}` : ''}`
+  // 第二行 = 参数摘要（类型辨识交给图标/色条）；无摘要则不渲染该行
+  const secondLine = renderSubtitle(type, fields, next, elseNext)
   return (
     <div className={`relative px-3 py-2 rounded-lg border shadow-card ${style.bg} ${style.border} min-w-[140px] max-w-[240px] overflow-hidden`} title={desc || undefined}>
       {/* 族别左色条：一眼区分节点类别 */}
@@ -139,9 +196,11 @@ export function renderNodeLabel({ type, name, status, desc, sourceLine }: NodeLa
         <div className="min-w-0">
           {/* 节点名 = 数据声道（mono，DESIGN.md §1） */}
           <div className="font-mono text-[13px] leading-4 font-medium truncate text-ink-primary">{displayName}</div>
-          <div className="text-[10px] leading-tight font-mono text-ink-faint truncate">
-            {secondLine}
-          </div>
+          {secondLine && (
+            <div className="text-[10px] leading-tight font-mono text-ink-faint truncate">
+              {secondLine}
+            </div>
+          )}
         </div>
       </div>
       {status === 'executed' && (
@@ -172,7 +231,7 @@ function PlaitaNodeComponent({ data, selected }: NodeProps) {
   return (
     <div className={`relative ${selected ? 'ring-2 ring-plaita-400/80 rounded-lg' : ''}`}>
       <Handle type="target" position={Position.Top} id="in" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
-      {renderNodeLabel({ type: d.type, name: d.name, status: d.status ?? 'idle', desc: d.desc, sourceLine: d.sourceLine })}
+      {renderNodeLabel({ type: d.type, name: d.name, status: d.status ?? 'idle', desc: d.desc, sourceLine: d.sourceLine, fields: d.fields as Record<string, unknown> | undefined, next: d.next as string | undefined, elseNext: d.elseNext as string | undefined })}
       <Handle type="source" position={Position.Bottom} id="true" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
       <Handle type="source" position={Position.Right} id="false" className="!bg-dark-400 !w-2.5 !h-2.5 !border-2 !border-canvas" />
     </div>
