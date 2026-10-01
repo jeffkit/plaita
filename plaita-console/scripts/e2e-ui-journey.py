@@ -143,8 +143,8 @@ def main() -> int:
         print("[1] 编辑器画布")
         open_editor()
         t = pg.locator(".react-flow").inner_text()
-        check("if 节点显示语义名", "score >= 90" in t)
-        check("desc 副标题带源码行号", "第 5 行" in t)
+        check("if 节点显示语义名（完整不截断）", "score >= 90?" in t)
+        check("画布不含行号（行号只在抽屉/tooltip）", "第 5 行" not in t)
         check("无裸 _n/_IF 合成 id", "_n" not in t and "_IF" not in t)
 
         # ========== 2. 节点抽屉 + 源码跳转 ==========

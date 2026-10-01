@@ -126,10 +126,12 @@ export function renderNodeLabel({ type, name, status, desc, sourceLine }: NodeLa
   // 不裸显合成 id；不回写 data.name，避免编辑保存时污染 IR。
   const fallbackName = sourceLine ? `${type} · L${sourceLine}` : name
   const label = /^_n\d+$/.test(name) ? fallbackName : name
-  const displayName = label.length > 15 ? label.slice(0, 15) + '...' : label
-  const secondLine = desc || `${type}${cfg.family ? ` · ${cfg.family}` : ''}`
+  // 截断阈值与卡片 max-w-[240px] / 布局 NODE_WIDTH=240 对齐（24 字符 mono）
+  const displayName = label.length > 24 ? label.slice(0, 24) + '…' : label
+  // 第二行回归「类型 · 族别」：desc 不上画布（与主名重复）——悬停 tooltip 可见
+  const secondLine = `${type}${cfg.family ? ` · ${cfg.family}` : ''}`
   return (
-    <div className={`relative px-3 py-2 rounded-lg border shadow-card ${style.bg} ${style.border} min-w-[140px] overflow-hidden`} title={desc || undefined}>
+    <div className={`relative px-3 py-2 rounded-lg border shadow-card ${style.bg} ${style.border} min-w-[140px] max-w-[240px] overflow-hidden`} title={desc || undefined}>
       {/* 族别左色条：一眼区分节点类别 */}
       <span className={`absolute left-0 top-0 bottom-0 w-1 ${cs.bar}`} />
       <div className="flex items-center gap-2">

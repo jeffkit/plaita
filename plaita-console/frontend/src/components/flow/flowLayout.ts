@@ -1,8 +1,9 @@
 import dagre from '@dagrejs/dagre'
 import { MarkerType, type Node, type Edge } from '@xyflow/react'
 
-/** 画布节点布局估计尺寸（与 nodeTypes.tsx 的节点渲染尺寸对齐） */
-export const NODE_WIDTH = 200
+/** 画布节点布局估计尺寸（与 nodeTypes.tsx 的节点渲染尺寸对齐：
+ *  卡片 min-w-140 / max-w-240，语义名截断 24 字符时可达 ~240px */
+export const NODE_WIDTH = 240
 export const NODE_HEIGHT = 60
 
 export type LayoutDirection = 'TB' | 'LR'
