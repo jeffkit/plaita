@@ -19,9 +19,18 @@ export function hasSubflowBand(n: { type?: string; data?: unknown }): boolean {
   return SUBFLOW_BAND_TYPES.has(n.type ?? '') && !!(f.childFlow || f.child_flow)
 }
 
-/** dagre 布局用节点高度（循环族 + 迷你带） */
+/** dagre 布局用节点高度（循环族 + 迷你带；展开容器用容器实际高度） */
 export function nodeHeightFor(n: { type?: string; data?: unknown }): number {
+  const d = (n.data ?? {}) as Record<string, unknown>
+  if (d.expanded && typeof d.containerH === 'number') return d.containerH
   return hasSubflowBand(n) ? NODE_HEIGHT + SUBFLOW_BAND_H : NODE_HEIGHT
+}
+
+/** dagre 布局用节点宽度（展开容器用容器实际宽度） */
+export function nodeWidthFor(n: { type?: string; data?: unknown }): number {
+  const d = (n.data ?? {}) as Record<string, unknown>
+  if (d.expanded && typeof d.containerW === 'number') return d.containerW
+  return NODE_WIDTH
 }
 
 export type LayoutDirection = 'TB' | 'LR'
@@ -38,18 +47,21 @@ export function autoLayout(
   const g = new dagre.graphlib.Graph({ compound: true })
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: direction, nodesep: 60, ranksep: 120, marginx: 40, marginy: 40 })
-  nodes.forEach((n) => g.setNode(n.id, { width: NODE_WIDTH, height: nodeHeightFor(n) }))
+  nodes.forEach((n) => {
+    g.setNode(n.id, { width: nodeWidthFor(n), height: nodeHeightFor(n) })
+  })
   edges.forEach((e) => {
     if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target)
   })
   dagre.layout(g)
   return nodes.map((n) => {
     const pos = g.node(n.id)
+    const w = nodeWidthFor(n)
     const h = nodeHeightFor(n)
     return {
       ...n,
       position: {
-        x: (pos?.x ?? n.position.x + NODE_WIDTH / 2) - NODE_WIDTH / 2,
+        x: (pos?.x ?? n.position.x + w / 2) - w / 2,
         y: (pos?.y ?? n.position.y + h / 2) - h / 2,
       },
     }

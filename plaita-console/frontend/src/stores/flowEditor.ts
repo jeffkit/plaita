@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { Node, Edge, Connection, OnNodesChange, OnEdgesChange, OnConnect } from '@xyflow/react'
 import { applyNodeChanges, applyEdgeChanges, addEdge } from '@xyflow/react'
 import { jsonToFlow, flowToJson, type FlowMeta, type FlowNodeData } from '../components/flow/flowConverter'
-import { EDGE_COLOR, EDGE_TYPE } from '../components/flow/flowLayout'
+import { EDGE_COLOR, EDGE_TYPE, nodeHeightFor } from '../components/flow/flowLayout'
 import { normalizeFieldKeys } from '../components/flow/schemaForm/schemaUtils'
 
 /** 编辑栈中的一层：进入子图时暂存的父图状态 */
@@ -47,6 +47,8 @@ export interface FlowEditorState {
   setSelected: (id: string | null) => void
   markDirty: () => void
   enterSubgraph: (nodeId: string, kind: 'child_flow' | 'branch', branchIndex?: number) => void
+  /** 方案 A：循环族节点原位容器展开/收拢（视图态，不进 IR；子节点编辑双写回 childFlow） */
+  toggleSubflowExpanded: (nodeId: string) => void
   exitSubgraph: () => void
   /** 归位到指定层（0 = 主图） */
   exitToLevel: (level: number) => void
@@ -144,12 +146,112 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
   addNode: (node) => set((s) => ({ nodes: [...s.nodes, node], dirty: true })),
 
   updateNodeData: (id, data) =>
-    set((s) => ({
-      nodes: s.nodes.map((n) =>
+    set((s) => {
+      let nodes = s.nodes.map((n) =>
         n.id === id ? { ...n, data: { ...n.data, ...data } } : n
-      ),
-      dirty: true,
-    })),
+      )
+      // 容器展开态的子节点（id 形如 owner::childId）：参数编辑双写回
+      // owner 的 childFlow/child_flow.nodes——「编辑存在于 childflow，
+      // 不产生任何新的内容」（不新增顶层节点/版本结构）
+      const sep = id.lastIndexOf('::')
+      if (sep > 0) {
+        const ownerId = id.slice(0, sep)
+        const childId = id.slice(sep + 2)
+        nodes = nodes.map((n) => {
+          if (n.id !== ownerId) return n
+          const d = n.data as FlowNodeData
+          const fields = { ...(d.fields ?? {}) } as Record<string, unknown>
+          const cfKey = fields.childFlow ? 'childFlow' : 'child_flow'
+          const cf = fields[cfKey] as { nodes?: Array<Record<string, unknown>> } | undefined
+          if (!cf?.nodes) return n
+          const cfNodes = cf.nodes.map((ir) => {
+            if (ir.id !== childId) return ir
+            const merged = { ...ir }
+            if (data.name !== undefined) merged.name = data.name
+            for (const [k, v] of Object.entries(data.fields ?? {})) merged[k] = v
+            return merged
+          })
+          fields[cfKey] = { ...cf, nodes: cfNodes }
+          return { ...n, data: { ...d, fields } }
+        })
+      }
+      return { nodes, dirty: true }
+    }),
+
+  toggleSubflowExpanded: (nodeId) => {
+    const s = get()
+    const node = s.nodes.find((n) => n.id === nodeId)
+    if (!node) return
+    const d = node.data as FlowNodeData
+
+    // ---- 收拢：移除本容器展开出的全部子节点/子边，还原原子卡片 ----
+    if (d.expanded) {
+      const prefix = nodeId + '::'
+      const childIds = new Set(s.nodes.filter((n) => n.id.startsWith(prefix)).map((n) => n.id))
+      set({
+        nodes: s.nodes
+          .filter((n) => !n.id.startsWith(prefix))
+          .map((n) =>
+            n.id === nodeId
+              ? { ...n, data: { ...d, expanded: false }, style: undefined, extent: undefined }
+              : n
+          ),
+        edges: s.edges.filter((e) => !childIds.has(e.source) && !childIds.has(e.target)),
+      })
+      return
+    }
+
+    // ---- 展开：childFlow/child_flow -> 容器内真节点（纵向栈布局） ----
+    const fields = (d.fields ?? {}) as Record<string, unknown>
+    const cf = (fields.childFlow || fields.child_flow) as
+      | { runtime?: string; inputType?: unknown; nodes?: Array<Record<string, unknown>> }
+      | undefined
+    if (!cf?.nodes?.length) return
+    const childDef = {
+      runtime: cf.runtime || 'python',
+      flow_id: nodeId,
+      inputType: cf.inputType ?? { dataType: 'object' },
+      nodes: cf.nodes,
+    }
+    const { nodes: cn, edges: ce } = jsonToFlow(
+      childDef as Record<string, unknown>,
+      {},
+      {},
+      { parentId: nodeId }
+    )
+    // 纵向栈布局（循环体通常 1-3 节点的线性链；分支按 IR 序排布）。
+    // 首个节点从容器标题栏（48px）之下起排，避免被 header 覆盖。
+    let y = 56
+    const laidOut = cn.map((n) => {
+      const h = nodeHeightFor(n)
+      const withPos = { ...n, position: { x: 20, y } }
+      y += h + 24
+      return withPos
+    })
+    const containerW = 240 + 40
+    const containerH = 48 + y + 6
+    const childNodes = laidOut.map((n) => ({
+      ...n,
+      parentId: nodeId,
+      extent: 'parent' as const,
+      connectable: false,
+      deletable: false,
+    }))
+    set({
+      nodes: s.nodes
+        .concat(childNodes)
+        .map((n) =>
+          n.id === nodeId
+            ? {
+                ...n,
+                data: { ...(n.data as FlowNodeData), expanded: true, containerW, containerH },
+                style: { width: containerW, height: containerH },
+              }
+            : n
+        ),
+      edges: s.edges.concat(ce),
+    })
+  },
 
   setRunErrorNodes: (ids) =>
     set((s) => ({

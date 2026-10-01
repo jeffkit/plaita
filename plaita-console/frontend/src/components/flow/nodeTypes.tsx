@@ -123,6 +123,12 @@ export interface NodeLabelData {
   next?: string
   /** if 假分支目标 */
   elseNext?: string
+  /** 方案 A：展开/收拢容器（编辑器画布传入；FlowViewer 不传则不渲染按钮） */
+  onToggleExpand?: () => void
+  /** 容器形态标记与尺寸（展开时由画布传入） */
+  expanded?: boolean
+  containerW?: number
+  containerH?: number
 }
 
 /** 副标题截断（副标题 10px mono，约为 10 字符宽 ×2） */
@@ -195,10 +201,43 @@ function type_is_while(nodes: Array<Record<string, unknown>>): boolean {
   return nodes.length > 0 && nodes.every(n => n.type === 'end')
 }
 
-export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, next, elseNext, onBandClick }: NodeLabelData & { onBandClick?: () => void }) {
+export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, next, elseNext, onBandClick, onToggleExpand, expanded, containerW, containerH }: NodeLabelData & { onBandClick?: () => void }) {
   const cfg = resolveNodeTypeConfig(type)
   const style = statusStyles[status] ?? statusStyles.idle
   const cs = COLOR_STYLES[cfg.color] ?? COLOR_STYLES.gray
+
+  // ---- 方案 A：容器形态（expanded）——虚线框 + 紧凑标题栏 + 收拢钮 ----
+  // 子节点由 React Flow 以 parentId 挂载，坐标相对容器，铺在标题栏下方。
+  if (expanded) {
+    const headerName = name.length > 24 ? name.slice(0, 24) + '…' : name
+    return (
+      <div
+        className="w-full h-full rounded-xl border-2 border-dashed border-plaita-500/60 bg-canvas/50 overflow-hidden"
+        title={desc ? `${desc} · 容器 ${containerW ?? '?'}×${containerH ?? '?'}` : undefined}
+      >
+        <div className={`flex items-center gap-2 px-3 py-2 border-b border-dashed border-plaita-500/40 ${style.bg}`}>
+          <span className={`w-6 h-6 flex items-center justify-center rounded-md ${cs.chipBg} text-[13px] shrink-0`}>{cfg.icon}</span>
+          <div className="min-w-0 flex-1">
+            <div className="font-mono text-[13px] leading-4 font-medium truncate text-ink-primary">{headerName}</div>
+            {renderSubtitle(type, fields, next, elseNext) && (
+              <div className="text-[10px] leading-tight font-mono text-ink-faint truncate">
+                {renderSubtitle(type, fields, next, elseNext)}
+              </div>
+            )}
+          </div>
+          {onToggleExpand && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onToggleExpand() }}
+              className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-mono text-plaita-400 hover:bg-plaita-500/10"
+              title="收拢子流程"
+            >
+              [−]
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
   // 渲染层兜底：name 缺失（多为旧 flow 的 _n{id} 节点）显示「类型 · L行号」，
   // 不裸显合成 id；不回写 data.name，避免编辑保存时污染 IR。
   const fallbackName = sourceLine ? `${type} · L${sourceLine}` : name
@@ -246,14 +285,23 @@ export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, 
           </div>
         )
       })()}
+      {onToggleExpand && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onToggleExpand() }}
+          className="absolute top-1 right-1 rounded px-1 text-[10px] font-mono text-plaita-400/80 hover:text-plaita-400 hover:bg-plaita-500/10"
+          title="展开子流程（原位容器，编辑写入 childFlow）"
+        >
+          [⊞]
+        </button>
+      )}
       {status === 'executed' && (
-        <span className="absolute top-1 right-1.5 text-status-success text-xs">✓</span>
+        <span className="absolute top-1 right-6 text-status-success text-xs">✓</span>
       )}
       {status === 'current' && (
-        <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-status-running animate-breathe" />
+        <span className={`absolute top-1.5 ${onToggleExpand ? 'right-6' : 'right-1.5'} w-1.5 h-1.5 rounded-full bg-status-running animate-breathe`} />
       )}
       {status === 'error' && (
-        <span className="absolute top-1 right-1.5 text-status-error text-xs">!</span>
+        <span className={`absolute top-1 ${onToggleExpand ? 'right-6' : 'right-1.5'} text-status-error text-xs`}>!</span>
       )}
     </div>
   )
@@ -272,12 +320,18 @@ export interface PlaitaNodeData {
 function PlaitaNodeComponent({ data, selected, id }: NodeProps) {
   const d = data as PlaitaNodeData
   return (
-    <div className={`relative ${selected ? 'ring-2 ring-plaita-400/80 rounded-lg' : ''}`}>
+    <div className={`relative ${d.expanded ? 'w-full h-full' : ''} ${selected ? 'ring-2 ring-plaita-400/80 rounded-lg' : ''}`}>
       <Handle type="target" position={Position.Top} id="in" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
       {renderNodeLabel({
         type: d.type, name: d.name, status: d.status ?? 'idle', desc: d.desc, sourceLine: d.sourceLine,
         fields: d.fields as Record<string, unknown> | undefined, next: d.next as string | undefined, elseNext: d.elseNext as string | undefined,
         onBandClick: () => useFlowEditor.getState().enterSubgraph(id, 'child_flow'),
+        onToggleExpand: (d.fields && ((d.fields as Record<string, unknown>).childFlow || (d.fields as Record<string, unknown>).child_flow))
+          ? () => useFlowEditor.getState().toggleSubflowExpanded(id)
+          : undefined,
+        expanded: d.expanded as boolean | undefined,
+        containerW: d.containerW as number | undefined,
+        containerH: d.containerH as number | undefined,
       })}
       <Handle type="source" position={Position.Bottom} id="true" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
       <Handle type="source" position={Position.Right} id="false" className="!bg-dark-400 !w-2.5 !h-2.5 !border-2 !border-canvas" />

@@ -45,6 +45,7 @@ export function flowToJson(
   const outNodes: Record<string, unknown>[] = []
 
   for (const n of nodes) {
+    if (n.parentId) continue // 容器展开态的子节点：已双写回 owner 的 childFlow，不产顶层内容
     const d = n.data as FlowNodeData
     const nodeObj: Record<string, unknown> = { type: d.type, id: n.id }
     if (d.name) nodeObj.name = d.name
@@ -108,14 +109,18 @@ export function flowToJson(
  */
 export function jsonToFlow(
   flowJson: Record<string, unknown>,
-  layout: Record<string, { x: number; y: number }> = {}
+  layout: Record<string, { x: number; y: number }> = {},
+  _meta: FlowMeta = {},
+  opts: { parentId?: string } = {}
 ): { nodes: Node<FlowNodeData>[]; edges: Edge[] } {
   const rawNodes = (flowJson.nodes as Array<Record<string, unknown>>) || []
   const nodes: Node<FlowNodeData>[] = []
   const edges: Edge[] = []
+  const owner = opts.parentId
+  const ns = (x: string) => (owner ? `${owner}::${x}` : x)
 
   rawNodes.forEach((raw, i) => {
-    const id = (raw.id as string) || `node-${i}`
+    const id = ns((raw.id as string) || `node-${i}`)
     const type = (raw.type as string) || 'unknown'
     // name 保持 IR 原语义（无 name 即 id），可读性兜底在渲染层做（避免保存时把
     // 合成名污染回 IR）；desc/sourceLine 透传给节点卡片展示与源码跳转。
@@ -145,14 +150,16 @@ export function jsonToFlow(
       id,
       type: 'plaitaNode',
       position: layout[id] || { x: 0, y: 0 },
-      data: { type, name, desc, sourceLine, next: nextId, elseNext: elseNextId, fields },    })
+      ...(owner ? { parentId: owner, extent: 'parent' as const, connectable: false, deletable: false } : {}),
+      data: { type, name, desc, sourceLine, next: nextId, elseNext: elseNextId, fields },
+    })
 
     // 线性 next（统一从 'true' handle 出发）
     if (typeof raw.next === 'string') {
       edges.push({
-        id: `e-${id}-${raw.next}`,
+        id: ns(`e-${id}-${raw.next}`),
         source: id,
-        target: raw.next,
+        target: ns(raw.next),
         sourceHandle: 'true',
         type: EDGE_TYPE,
       })
@@ -160,9 +167,9 @@ export function jsonToFlow(
     // if 假分支
     if (typeof raw.else_next === 'string') {
       edges.push({
-        id: `e-${id}-else-${raw.else_next}`,
+        id: ns(`e-${id}-else-${raw.else_next}`),
         source: id,
-        target: raw.else_next,
+        target: ns(raw.else_next),
         sourceHandle: 'false',
         type: EDGE_TYPE,
       })
@@ -175,7 +182,7 @@ export function jsonToFlow(
         const bname = b.name as string | undefined
         if (target && bname) {
           edges.push({
-            id: `e-${id}-${bname}-${target}`,
+            id: ns(`e-${id}-${bname}-${target}`),
             source: id,
             target,
             sourceHandle: bname,
@@ -228,6 +235,7 @@ function assignPositions(
 export function extractLayout(nodes: Node[]): Record<string, { x: number; y: number }> {
   const layout: Record<string, { x: number; y: number }> = {}
   for (const n of nodes) {
+    if (n.parentId) continue // 子节点坐标相对容器，不进主图 layout
     layout[n.id] = { x: n.position.x, y: n.position.y }
   }
   return layout
