@@ -5,7 +5,7 @@ import time
 from typing import Any, ClassVar, Dict
 from enum import Enum
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from ..logger import logger
 from .basic import Node
@@ -33,7 +33,12 @@ class EventNode(Node):
     # 只保留配置属性
     # event_type 是 event 节点唯一真实的用户字段：与事件发布方的 type 精确匹配
     # （console POST /api/events/publish 或扩展节点服务），支持 $ 表达式
-    event_type: str = Field(description="订阅的事件类型：须与事件发布方的 type 一致（支持 $ 表达式）")
+    # AliasChoices：codeflow 编译器（_nodes.py EVENT 分支）发的是 camelCase
+    # "eventType"，而 JSON flow 定义历来用 "event_type"——两者都收（2026-10-01
+    # dist-demo 实证：此前 DSL 的 EVENT 从未真正构建成功过）。
+    event_type: str = Field(
+        validation_alias=AliasChoices("event_type", "eventType"),
+        description="订阅的事件类型：须与事件发布方的 type 一致（支持 $ 表达式）")
     event_filter: Dict[str, Any] = Field(default_factory=dict, description="事件过滤器：按点路径匹配事件负载字段，如 {\"data.status\": \"ok\"}")
     
     def _get_node_state(self, execution, default=None):
