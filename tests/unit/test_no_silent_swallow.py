@@ -26,8 +26,9 @@ ALLOWED_SILENT = {
     ("node/http.py", 587),   # json.loads() 失败回退到原始文本 (async aiohttp path)
     ("storage/memory.py", 138),  # 版本号非纯数字排序失败, 回退到任意版本
     # 2026-10-02 行号随 TERMINAL_EXECUTION_STATUSES 常量插入下移（105→113），位点未变；
-    # 后随波次④（订阅超时 checker 宿主）的 import 与 EventFilter 构造参数插入再下移（113→127），位点未变
-    ("server/event_filter.py", 127),  # 孤儿订阅巡检失败不影响主流程（有兜底 debug 日志）
+    # 后随波次④（订阅超时 checker 宿主）的 import 与 EventFilter 构造参数插入再下移（113→127），位点未变；
+    # 后随事件回扫（EventReconciler 宿主）的 event_storage 参数与 _reconciler 字段插入再下移（127→135），位点未变
+    ("server/event_filter.py", 135),  # 孤儿订阅巡检失败不影响主流程（有兜底 debug 日志）
     # 2026-09-30 killpg 孤儿修复：强杀路径是 best-effort——组消失/权限不足/mock pid
     # 时退化杀直接子进程；reap 的 communicate 再超时（组外进程握住管道）则放弃收尸
     # 直接抛错。异常细节不影响「进程组已被杀」这一主结果。

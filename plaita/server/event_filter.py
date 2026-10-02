@@ -12,8 +12,9 @@ from typing import Optional, Dict, Any, List
 
 from redis import Redis
 
-from plaita.event.core import Event, EventSubscription, EventSubscriptionStorage, EventBus
+from plaita.event.core import Event, EventSubscription, EventSubscriptionStorage, EventBus, EventStorage
 from plaita.event.timeout import SubscriptionTimeoutChecker
+from plaita.server.event_reconcile import EventReconciler
 from plaita.storage.base import ExecutionStorage
 from plaita.server.task_queue import enqueue_task
 from plaita.server.tenant_context import (
@@ -48,6 +49,7 @@ class EventFilter:
         queue_name: str = "plaita:flow:queue",
         enable_subscription_timeout_checker: bool = True,
         timeout_check_interval: float = 10.0,
+        event_storage: Optional[EventStorage] = None,
     ):
         """
         初始化事件过滤器
@@ -61,12 +63,18 @@ class EventFilter:
             enable_subscription_timeout_checker: 是否随本过滤器启动订阅超时检查器
                 （波次④回滚开关：置 False 即回到「订阅无限等待」的历史现状）
             timeout_check_interval: 订阅超时检查器的轮询间隔（秒）
+            event_storage: 事件存储（事件回扫用）。None 时回退探测
+                ``event_bus.event_storage``（RedisEventBus 自带）——两者都
+                拿不到（内存总线场景）则事件回扫不挂载。
         """
         self.execution_storage = execution_storage
         self.subscription_storage = subscription_storage
         self.redis_client = redis_client
         self.event_bus = event_bus
         self.queue_name = queue_name
+        # Track C 任务3：事件回扫宿主（start/stop 同生命周期挂载）
+        self.event_storage = event_storage
+        self._reconciler: Optional["EventReconciler"] = None
         self._running = False
         self._subscription_id = None
         # 波次④：EventNode 订阅自动超时的宿主。checker 只消费 subscription.timeout
@@ -298,6 +306,30 @@ class EventFilter:
             if self._timeout_checker is not None:
                 await self._timeout_checker.start()
 
+            # Track C 任务3：事件兜底回扫随过滤器同生命周期挂载——Pub/Sub
+            # 不持久，重启/重连窗口内的通知丢失会使挂起执行僵尸化，回扫器
+            # 补偿（handle_event 的 SET NX 去重键保证幂等）。
+            # 回滚开关：PLAITA_DISABLE_EVENT_RECONCILE=1（不挂载即回现状）。
+            if os.environ.get("PLAITA_DISABLE_EVENT_RECONCILE", "").strip() != "1":
+                reconcile_storage = (
+                    self.event_storage
+                    or getattr(self.event_bus, "event_storage", None)
+                )
+                if reconcile_storage is not None:
+                    self._reconciler = EventReconciler(
+                        reconcile_storage, self, self.redis_client
+                    )
+                    await self._reconciler.start()
+                    logger.info(
+                        "事件回扫已挂载（周期 %.0fs，回填窗口 %.0fs）",
+                        self._reconciler.interval_seconds,
+                        self._reconciler.backfill_seconds,
+                    )
+                else:
+                    logger.info(
+                        "事件回扫未挂载：事件总线不带事件存储（内存总线场景）"
+                    )
+
             # 保持运行直到停止
             while self._running:
                 await asyncio.sleep(1)
@@ -317,9 +349,17 @@ class EventFilter:
         if self._timeout_checker is not None:
             try:
                 await self._timeout_checker.stop()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — 停止失败不阻断其余清理
                 logger.error("停止订阅超时检查器时出错: %s", e)
-        
+
+        # 停事件回扫（与 start 对称）
+        if self._reconciler is not None:
+            try:
+                await self._reconciler.stop()
+            except Exception as e:  # noqa: BLE001 — 同上
+                logger.error("停止事件回扫时出错: %s", e)
+            self._reconciler = None
+
         # 取消事件订阅
         if self._subscription_id and self.event_bus:
             try:
