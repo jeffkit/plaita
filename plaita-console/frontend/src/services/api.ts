@@ -78,12 +78,11 @@ export function getMemberships(): MembershipInfo[] {
   }
 }
 
-// 通用请求函数
-async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options?.headers as Record<string, string> | undefined),
-  }
+/** request() 同源的鉴权头注入：token 优先，其次管理 Key；平台管理员显式声明
+ *  租户上下文（普通用户服务端钉死活跃租户，带头会 403）。供流式 fetch 等绕过
+ *  request() 的调用方复用，避免两处实现漂移。 */
+export function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {}
   const token = getToken()
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
@@ -91,9 +90,18 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     const adminKey = getAdminApiKey()
     if (adminKey) headers['X-Admin-API-Key'] = adminKey
   }
-  // 平台管理员显式声明租户上下文（普通用户服务端钉死活跃租户，带头会 403）
   if (isPlatformAdmin() && getTenant()) {
     headers['X-Tenant-ID'] = getTenant()
+  }
+  return headers
+}
+
+// 通用请求函数
+async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...authHeaders(),
+    ...(options?.headers as Record<string, string> | undefined),
   }
 
   const response = await fetch(`${API_BASE}${url}`, {

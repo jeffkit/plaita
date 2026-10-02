@@ -117,6 +117,11 @@ function subflowJsonOf(
   return typeof raw === 'string' ? (JSON.parse(raw) as Record<string, unknown>) : (raw as Record<string, unknown>)
 }
 
+// 容器子节点 IR 写回时保留的连接/元字段：jsonToFlow 把它们从 fields 剥离到
+// 画布节点本体（data.type/name/next 等），画布 fields 不携带，重建 IR 时取 IR 原值。
+// source_line/desc 等簿记键本就在画布 fields 里，随全量覆盖自然保留/更新。
+const IR_KEEP_KEYS = new Set(['id', 'type', 'name', 'next', 'else_next'])
+
 export const useFlowEditor = create<FlowEditorState>((set, get) => ({
   flowId: '',
   version: '',
@@ -236,9 +241,21 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
           if (!cf?.nodes) return n
           const cfNodes = cf.nodes.map((ir) => {
             if (ir.id !== childId) return ir
+            if (data.fields !== undefined) {
+              // fields 写回是全量 map（抽屉/副驾均先展开 d.fields 再改，删键=键
+              // 缺席）：以画布 fields 为准重建 IR 业务字段，画布已删除的键不再
+              // 残留——逐键 merge 会让被删值在收拢/保存后复活（2026-10 评审 E2）
+              const merged: Record<string, unknown> = {}
+              for (const [k, v] of Object.entries(ir)) {
+                if (IR_KEEP_KEYS.has(k)) merged[k] = v
+              }
+              Object.assign(merged, data.fields)
+              if (data.name !== undefined) merged.name = data.name
+              return merged
+            }
+            // 无 fields 的写回（如仅改名）保持叠加语义，不动业务字段
             const merged = { ...ir }
             if (data.name !== undefined) merged.name = data.name
-            for (const [k, v] of Object.entries(data.fields ?? {})) merged[k] = v
             return merged
           })
           fields[cfKey] = { ...cf, nodes: cfNodes }
@@ -436,8 +453,11 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       graphStack: s.graphStack.slice(0, -1),
       subgraphWarning: warning,
       dirty: true,
-      // 子图编辑写回父图是内容变更，记一步（undo 回到退出前的父图）
-      ...pushHist(s),
+      // 子图编辑写回父图是内容变更，记一步。必须压「父图快照」（frame 暂存的
+      // 进入时父图）而非当前子图：undo 恢复的是画布，退出后 graphStack 已空、
+      // 门禁放行，若压子图快照，撤销会把画布替换成循环体内容，再保存即把子
+      // 流程序列化成顶层 flow（2026-10 评审 E1）
+      ...pushHist({ nodes: frame.nodes, edges: frame.edges, past: s.past }),
     })
   },
 

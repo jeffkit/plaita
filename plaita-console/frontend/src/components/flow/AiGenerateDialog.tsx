@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { API_BASE, authHeaders } from '../../services/api'
 
 // 后端 agent 宿主的 SSE 事件（AG-UI 风格最小集）
 interface AgentEvent {
@@ -60,9 +61,11 @@ export default function AiGenerateDialog({
     if (!prompt.trim()) return
     setStatus('running'); setLines([]); setErrorMsg(''); setIr(null)
     try {
-      const resp = await fetch('/api/flows/ai-generate/stream', {
+      // 与 request() 同源：子路径前缀（SUB_PATH 探测）+ 鉴权头（token/管理 Key/
+      // 租户上下文）；响应是 SSE 流，不能走 request()（其消费 response.json()）
+      const resp = await fetch(`${API_BASE}/flows/ai-generate/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ prompt }),
       })
       if (!resp.ok || !resp.body) {
