@@ -176,30 +176,47 @@ def plan_with_compile_loop(
     max_retries: int = 3,
     flow_id: Optional[str] = None,
 ) -> tuple[str, CompileResult, int]:
-    """Compose/review until compile succeeds or retries exhausted."""
+    """Compose/review until compile succeeds or retries exhausted.
+
+    输出解析失败（模型没输出含 ``@flow`` 的代码块）与编译失败同等对待：
+    只烧一次 attempt，错误结构化记入 ``CompileResult.errors`` 并回喂下一轮
+    （compose 通道附加格式提示、review 通道走 errors），预算耗尽返回结构化
+    失败而非抛异常。
+    """
     specs = register_tool_node(*tools) if tools else []
     source = ""
     compiled = CompileResult(ok=False, errors=[CompileError(line=None, message="未开始")])
     attempts = 0
+    parse_feedback = ""
 
     for attempt in range(max_retries):
         attempts = attempt + 1
-        if attempt == 0 or not source:
-            source = plan_flow_source(
-                model,
-                task,
-                instruction=instruction,
-                tool_specs=specs,
+        try:
+            if attempt == 0 or not source:
+                source = plan_flow_source(
+                    model,
+                    task,
+                    instruction=f"{instruction}\n{parse_feedback}" if parse_feedback else instruction,
+                    tool_specs=specs,
+                )
+            else:
+                source = review_flow_source(
+                    model,
+                    task,
+                    source,
+                    compiled.errors,
+                    instruction=instruction,
+                    tool_specs=specs,
+                )
+        except ValueError as exc:
+            # 上游 extract_flow_source 没找到含 @flow 的代码块：不再炸穿
+            # 整个重试回路，记一次失败 attempt 并把可操作的错误回喂下一轮。
+            compiled = CompileResult(
+                ok=False,
+                errors=[CompileError(line=None, message=str(exc))],
             )
-        else:
-            source = review_flow_source(
-                model,
-                task,
-                source,
-                compiled.errors,
-                instruction=instruction,
-                tool_specs=specs,
-            )
+            parse_feedback = f"上一轮输出未包含 @flow 源码：{exc}"
+            continue
 
         compiled = compile_flow(source, flow_id=flow_id)
         if compiled.ok:

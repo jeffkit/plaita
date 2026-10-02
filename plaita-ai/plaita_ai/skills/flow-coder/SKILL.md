@@ -68,11 +68,11 @@ print(flow.run(name="alice"))   # -> "hi ALICE"
 ```python
 @flow("<flow_id>", desc="<说明>")
 def <name>(INPUT):
-    # if / elif / else / for / return / 赋值
+    # if / elif / else / while / for / return / 赋值
     return <expr>
 ```
 
-- `INPUT` / `F` / `NODE` / `GLOBAL` / `PARENT` / `ENV` / `HTTP` / `CODE` / `EVENT` / `MAP` / `FILTER` / `FIND` / `LOOP` / `REDUCE` / `CHILD` / `REFERENCE` / `PARALLEL` 这些名字**不需要 import**，是 AST 编译期识别的占位符。
+- `INPUT` / `F` / `NODE` / `GLOBAL` / `PARENT` / `ENV` / `HTTP` / `CODE` / `EVENT` / `MAP` / `FILTER` / `FIND` / `LOOP` / `REDUCE` / `WHILE` / `CHILD` / `REFERENCE` / `PARALLEL` 这些名字**不需要 import**，是 AST 编译期识别的占位符。
 - **自定义节点占位符**：任何注册到 `NodeRegistry` 的 `Node` 子类，用 `node_type` 大写化作占位符即可在 `@flow` 里直接调用（如 `node_type="llm"` → `LLM(prompt=..., model=...)`、`"retrieve"` → `RETRIEVE(query=...)`、`"tool"` → `TOOL(action=...)`）。编译期查 registry，未注册的大写名会报错并列出可用类型，便于自纠。详见下方「自定义节点」。
 - **不要写 `input_type`**：该参数已废弃且被忽略。`$INPUT` 恒为 `run()` 传入的 dict，字段用 `INPUT.x` 访问。
 - **函数体从不被当 Python 执行**，只做静态 AST 分析。所以写法必须在支持子集内，否则编译期报错。
@@ -89,9 +89,9 @@ def <name>(INPUT):
 | `a + b` `-` `*` `/` `%` `**` | `$F.add/sub/mul/div/mod/pow` | 类型决定语义，编译期不查类型 |
 | `obj.path[0]` `[-1]` | `$obj.path[0]` | 仅整数常量下标 |
 
-### 只能出现在 `if` 判断位置的比较/逻辑
+### 比较与逻辑：`if` 判断位置与任意表达式位置均可
 
-`>=` `==` `!=` `in` `and` `or` `not` **只能写在 `if`/`elif` 的条件里**，不能写在赋值或 return 的表达式位置。
+`>=` `==` `!=` `in` `and` `or` `not` 与三元 `a if c else b` 既可写在 `if`/`elif` 条件里，也可写在赋值/return 等表达式位置（编译为 `$F.*` 比较与逻辑函数；三元急切求值，两支都会算）。
 
 ```python
 if INPUT.age >= 18 and INPUT.vip == True:   # ✅
@@ -104,7 +104,6 @@ return "minor"
 | ❌ 写法 | ✅ 改写 |
 |--------|--------|
 | `f"hi {name}"` | `F.concat("hi ", INPUT.name)` |
-| `a if c else b` | `if/else` 语句分支 |
 | 列表/字典/集合推导式 | `MAP` / `FILTER` 节点 |
 | `lambda` / `await` / `:=` / `*args` | 拆成节点或普通赋值 |
 | `"x".upper()` 等字面量方法调用 | 用 `F.upper(...)` 等表达式函数 |
@@ -218,9 +217,9 @@ def fan_out(INPUT):
     return r
 ```
 
-`mode` 可选 `"thread"` / `"process"` / `"artificial"`，默认 `"thread"`。**不要用 `"coroutine"`**——已于 0.4.0 下线（在任何 running event loop 下必崩），一律用 `"thread"`。
+`mode` 可选 `"thread"` / `"process"` / `"artificial"`，默认 `"thread"`。**不要用 `"coroutine"`**——已于 0.4.0 下线，sync 执行路径不可用（分支内节点表达式求值拿到 `None`，静默产出 `__parallel_error__`），一律用 `"thread"`。
 
-> **已知限制（重要）**：`@flow` 的 PARALLEL 编译期**不接受 per-branch `input`**——分支只能带 `name` + `flow`，子流程的输入由运行时分发。当前 plaita 运行时在 parallel 子流程里访问 `INPUT.x` / `PARENT.INPUT.x` / `GLOBAL.x` 会触发表达式求值 bug（`ExpressionParser._eval_variable missing 'tokens'`），**输入相关的并行分支在 `@flow` 源码模式下目前跑不通**。若任务必须按输入做并行扇出，建议改用 `CHILD` 串行编排或在 builder/JSON 层构建 Parallel 节点（那里支持 per-branch `input`），并在 prompt 里提示用户这一限制，不要在 `@flow` 里硬试 PARALLEL+输入。
+> **已知限制**：`@flow` 的 PARALLEL 编译期**不接受 per-branch `input`**——分支只能带 `name` + `flow`（写 per-branch input 报 `PARALLEL 分支需要 (name, flow) 元组`）。分支子流程**可以**直接读主流程输入（`INPUT.x` / `GLOBAL.x`，实测编译运行通过）；要给不同分支喂不同输入，改用 `CHILD` 串行编排或在 builder/JSON 层构建 Parallel 节点（那里支持 per-branch `input`）。
 
 ### 自定义节点：LLM / 检索 / 工具 / 领域 action
 
@@ -322,9 +321,8 @@ print(result)
 |------|------|
 | `未知名字 'xxx'` | 该名字没在占位符/变量表里；检查拼写或改成 `INPUT.x` / `NODE.x` |
 | `节点调用只能作为语句或赋值右侧` | 把 `return HTTP(...)` 拆成 `r = HTTP(...); return r.data` |
-| `not 要用在条件位置` | `not` 只能放 `if` 判断里，别放表达式 |
 | `赋值 xxx 之后悬空` | 赋值后补 `return` 或后续语句 |
-| f-string / 三元 / 推导式报错 | 按上文"会报错的写法"表改写 |
+| f-string / 推导式报错 | 按上文"会报错的写法"表改写 |
 | `不支持的调用 Xxx.yyy(...)` | 表达式里只能调 `F.xxx(...)` 或 `len/abs/round/str` |
 | `未注册的自定义节点 XXX(...)：node_type 'xxx' 不在 registry 中` | 占位符名拼写错 / 节点未注册；按报错里列出的可用类型修正名字，或先 `get_default_registry().register(...)` |
 
