@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
@@ -17,6 +18,20 @@ PAYLOAD_FIELD = "payload"
 DEFAULT_CLAIM_MIN_IDLE_MS = 60_000
 DEFAULT_MAX_DELIVERIES = 5
 DEFAULT_DLQ_SUFFIX = ":dlq"
+# C4-1：DLQ 保留条数。DLQ 是纯记录流（无消费者），不裁剪会无限增长；
+# 每次入队后 XTRIM 保留最近 N 条。env 可调（PLAITA_DLQ_MAX_LEN）。
+DEFAULT_DLQ_MAX_LEN = 1000
+
+
+def _dlq_max_len_from_env() -> int:
+    raw = (os.environ.get("PLAITA_DLQ_MAX_LEN") or "").strip()
+    if not raw:
+        return DEFAULT_DLQ_MAX_LEN
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("PLAITA_DLQ_MAX_LEN=%r 非法，回退默认 %d", raw, DEFAULT_DLQ_MAX_LEN)
+        return DEFAULT_DLQ_MAX_LEN
 # redis 瞬断（DNS 解析失败/连接拒绝）后的重试退避：退避完返回 None 让主循环
 # 继续轮询，Redis 恢复后下一次 read 自动重连恢复消费。模块常量便于测试归零。
 RECONNECT_BACKOFF_SECONDS = 1.0
@@ -68,6 +83,7 @@ class RedisStreamTaskQueue:
         claim_min_idle_ms: int = DEFAULT_CLAIM_MIN_IDLE_MS,
         max_deliveries: int = DEFAULT_MAX_DELIVERIES,
         dlq_key: Optional[str] = None,
+        dlq_max_len: Optional[int] = None,
     ):
         self.redis = redis_client
         self.stream_key = stream_key
@@ -76,6 +92,11 @@ class RedisStreamTaskQueue:
         self.claim_min_idle_ms = claim_min_idle_ms
         self.max_deliveries = max(1, int(max_deliveries))
         self.dlq_key = dlq_key or dlq_stream_key(stream_key)
+        # C4-1：DLQ 裁剪上限（构造参数优先，其次 env，最后默认值）
+        if dlq_max_len is not None:
+            self.dlq_max_len = max(1, int(dlq_max_len))
+        else:
+            self.dlq_max_len = _dlq_max_len_from_env()
         self._metrics = {
             "enqueued": 0,
             "acked": 0,
@@ -155,8 +176,25 @@ class RedisStreamTaskQueue:
         return task
 
     def ack(self, message_id: str) -> None:
-        self.redis.xack(self.stream_key, self.group_name, message_id)
+        acked = self.redis.xack(self.stream_key, self.group_name, message_id)
         self._metrics["acked"] += 1
+        if acked:
+            # C4-1：ack 成功后从 Stream 精确删除该条目，否则已确认消息永驻
+            # 内存（stream 只增不减，长跑 worker 的 Redis 占用线性膨胀）。
+            # 安全性已核实：XACK 把条目移出本消费组 PEL 后，XDEL 仅清理条目
+            # 本体；对已 ack 的条目 XDEL 不会影响任何 pending 语义。本仓
+            # 每 Stream 只挂一个消费组（plaita-workers），不存在其他组 PEL
+            # 引用被删条目的路径。best-effort：XDEL 失败只影响空间回收，
+            # 不回滚 ack（消息语义已终结）。
+            try:
+                self.redis.xdel(self.stream_key, message_id)
+            except Exception as exc:
+                logger.debug(
+                    "xdel(%s, %s) failed (ack already applied): %s",
+                    self.stream_key,
+                    message_id,
+                    exc,
+                )
 
     def dead_letter(self, task: StreamTask, *, reason: str) -> str:
         """Move task payload to DLQ stream and ack the original message."""
@@ -172,6 +210,11 @@ class RedisStreamTaskQueue:
             self.dlq_key,
             {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
         )
+        # C4-1：DLQ 无消费者，入队后裁剪只保留最近 N 条，防无限增长。
+        try:
+            self.redis.xtrim(self.dlq_key, maxlen=self.dlq_max_len, approximate=False)
+        except Exception as exc:
+            logger.debug("xtrim(%s, maxlen=%s) failed: %s", self.dlq_key, self.dlq_max_len, exc)
         self.ack(task.message_id)
         self._metrics["dead_lettered"] += 1
         logger.error(

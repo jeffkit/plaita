@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from typing import Any, Dict, List, Optional, Union, Tuple
 
@@ -18,6 +19,33 @@ def _require_redis():
             "redis package is required for Redis storage. "
             "Install it with: pip install plaita[redis]"
         )
+
+
+# C4-3：终态执行状态键 TTL。非终态（running/suspended）必须可恢复，不设；
+# 终态（completed/error/cancelled）只服务于查询/审计，默认 30 天自清理。
+# env ``PLAITA_EXECUTION_STATE_TTL_DAYS`` 可调（<=0 关闭 TTL）。
+DEFAULT_EXECUTION_STATE_TTL_DAYS = 30
+TERMINAL_EXECUTION_STATUSES = frozenset({"completed", "error", "cancelled"})
+
+
+def execution_state_ttl_seconds() -> int:
+    """终态执行状态键的 TTL（秒）；<=0 表示禁用 TTL。"""
+    raw = (os.environ.get("PLAITA_EXECUTION_STATE_TTL_DAYS") or "").strip()
+    if not raw:
+        days = DEFAULT_EXECUTION_STATE_TTL_DAYS
+    else:
+        try:
+            days = int(raw)
+        except ValueError:
+            logger.warning(
+                "PLAITA_EXECUTION_STATE_TTL_DAYS=%r 非法，回退默认 %d 天",
+                raw,
+                DEFAULT_EXECUTION_STATE_TTL_DAYS,
+            )
+            days = DEFAULT_EXECUTION_STATE_TTL_DAYS
+    if days <= 0:
+        return 0
+    return days * 86400
 
 
 class ExecutionStateLoadError(RuntimeError):
@@ -86,11 +114,29 @@ class RedisExecutionStorage(ExecutionStorage):
             return f"{self.namespace}:{key_type}"
     
     def save_execution_state(self, execution_id: str, state: ExecutionState) -> bool:
-        """保存流程执行状态"""
+        """保存流程执行状态。
+
+        C4-3：仅终态（completed/error/cancelled）写入带 TTL（默认 30 天，
+        env ``PLAITA_EXECUTION_STATE_TTL_DAYS`` 可调，<=0 关闭）；非终态
+        （running/suspended）是可恢复执行的活动状态，必须不过期。
+
+        已核实（C4-3 报告注）：``FencedExecutionStorage`` 持 fence 世代时走
+        单段 Lua 直接 SET 状态键，不经过本方法——经 worker resume 路径
+        （fenced）落盘的终态键拿不到 TTL。控制面读取路径已做读时补偿
+        （console ``_find_execution`` 对无 TTL 的终态键补 EXPIRE）。
+        """
         key = self.get_namespace_key('execution', execution_id)
         try:
             serialized = self.serialize_state(state.model_dump())
-            self.client.set(key, serialized)
+            ttl = (
+                execution_state_ttl_seconds()
+                if state.status in TERMINAL_EXECUTION_STATUSES
+                else 0
+            )
+            if ttl > 0:
+                self.client.set(key, serialized, ex=ttl)
+            else:
+                self.client.set(key, serialized)
             return True
         except Exception as e:
             logger.error("Failed to save execution state %s: %s", execution_id, e)
@@ -135,10 +181,11 @@ class RedisExecutionStorage(ExecutionStorage):
         try:
             # 构建查询模式
             pattern = self.get_namespace_key('execution', '*')
-            
-            # 获取所有匹配的键
-            all_keys = self.client.keys(pattern)
-            
+
+            # C4-3：keys() 是 O(N) 阻塞命令，键多时卡死整个 Redis——
+            # 改用游标式 scan_iter（语义等价，非阻塞、可分批）。
+            all_keys = self.client.scan_iter(match=pattern)
+
             # 获取执行状态列表
             execution_states = []
             for key in all_keys:
@@ -146,7 +193,7 @@ class RedisExecutionStorage(ExecutionStorage):
                     data = self.client.get(key)
                     if not data:
                         continue
-                    
+
                     state_dict = self.deserialize_state(data)
                     state = ExecutionState.model_validate(state_dict)
                     
@@ -444,7 +491,8 @@ class RedisFlowStorage(FlowStorage):
         """
         try:
             key_pattern = self.get_namespace_key("flow", flow_id, "*")
-            matching_keys = self.client.keys(key_pattern)
+            # C4-3：诊断路径同样避免 O(N) 阻塞的 keys()，改 scan_iter。
+            matching_keys = list(self.client.scan_iter(match=key_pattern))
             flow_list_key = self.get_namespace_key("flow_list")
             flow_ids = self.client.smembers(flow_list_key)
             logger.error("Redis diagnostics — flow_id: %s", flow_id)

@@ -19,7 +19,7 @@ import {
   Radio,
   ExternalLink,
 } from 'lucide-react'
-import { api, API_BASE, ExecutionInfo } from '../services/api'
+import { api, API_BASE, authHeaders, ExecutionInfo } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
 import { Button, Card, StatusBadge } from '../components/ui'
 
@@ -35,29 +35,59 @@ function useExecutionSSE(
   useEffect(() => {
     if (!executionId || !enabled) return
 
-    const evtSource = new EventSource(`${API_BASE}/executions/${executionId}/stream`)
+    let cancelled = false
+    let evtSource: EventSource | null = null
 
-    evtSource.addEventListener('initial_state', (e) => {
-      try {
-        const data = JSON.parse(e.data)
-        queryClient.setQueryData(['execution', executionId], data)
-      } catch { /* ignore parse errors */ }
-    })
+    // C4-4：EventSource 无法携带 Authorization/X-Admin-API-Key 头，鉴权部署
+    // 下直连必然 401——先带头 POST 换 60s 一次性票据，再 ?ticket= 连接。
+    // 票据不可用（本地单机模式 503 / viewer 403 / 网络失败）时退回直连：
+    // 免鉴权部署照常工作，严格鉴权部署由 onerror 回落轮询。
+    const connect = (ticket: string | null) => {
+      if (cancelled) return
+      const query = ticket ? `?ticket=${encodeURIComponent(ticket)}` : ''
+      evtSource = new EventSource(`${API_BASE}/executions/${executionId}/stream${query}`)
 
-    evtSource.addEventListener('update', (e) => {
-      try {
-        const data = JSON.parse(e.data)
-        queryClient.setQueryData(['execution', executionId], data)
-      } catch { /* ignore parse errors */ }
-    })
+      evtSource.addEventListener('initial_state', (e) => {
+        try {
+          const data = JSON.parse(e.data)
+          queryClient.setQueryData(['execution', executionId], data)
+        } catch { /* ignore parse errors */ }
+      })
 
-    evtSource.onerror = () => {
-      // 断开不允许静默：通知调用方回落轮询，页面冻结比报错更危险
-      evtSource.close()
-      onLoss()
+      evtSource.addEventListener('update', (e) => {
+        try {
+          const data = JSON.parse(e.data)
+          queryClient.setQueryData(['execution', executionId], data)
+        } catch { /* ignore parse errors */ }
+      })
+
+      evtSource.onerror = () => {
+        // 断开不允许静默：通知调用方回落轮询，页面冻结比报错更危险
+        // （票据一次性：EventSource 自动重连也会 401，统一走回落）
+        evtSource?.close()
+        onLoss()
+      }
     }
 
-    return () => evtSource.close()
+    void (async () => {
+      let ticket: string | null = null
+      try {
+        const resp = await fetch(
+          `${API_BASE}/executions/${executionId}/stream/ticket`,
+          { method: 'POST', headers: authHeaders() }
+        )
+        if (resp.ok) {
+          const body = await resp.json()
+          ticket = typeof body?.ticket === 'string' ? body.ticket : null
+        }
+      } catch { /* 票据获取失败 → 直连尝试 */ }
+      connect(ticket)
+    })()
+
+    return () => {
+      cancelled = true
+      evtSource?.close()
+    }
   }, [executionId, enabled, queryClient, onLoss])
 }
 

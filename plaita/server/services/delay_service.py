@@ -1,6 +1,22 @@
 """
 延迟服务实现
 负责处理延迟任务，在指定时间后触发事件
+
+C4-2 改造（2026-10）：历史实现 BLPOP 出队即提交线程池、handle_task 内睡眠
+等待触发点——存在三个问题：
+1. 出队后任务只存在于内存，进程崩溃则任务永久丢失（延迟执行永久挂起）；
+2. 每个未到期任务占一个线程池坑位睡眠，10 个长延迟即可占满默认池；
+3. shutdown 时睡眠中的任务被丢弃，不回队。
+
+现改为「list 传输 + ZSET 排程」两段式：
+- 生产者（flow_worker._dispatch_service_task）仍 RPUSH JSON 到 list 键
+  （``plaita:delay:queue``，格式不变，生产者侧零改动）；
+- 消费线程每周期把 list 条目**搬运**进内部 ZSET ``{queue}:scheduled``
+  （member=原始 JSON，score=触发时间戳 ms）。先 ZADD 成功再 LREM：
+  崩溃在两步之间只会导致下轮重复搬运（ZADD 按 member 幂等），不丢任务；
+- 到期轮询：ZSET 中 score<=now 的任务才提交线程池，处理走完才 ZREM
+  （at-least-once：崩溃后任务仍在 ZSET，重启后被下一周期捡起；
+  shutdown 中断的任务同样留在 ZSET 等待下次启动恢复）。
 """
 import asyncio
 import json
@@ -10,6 +26,12 @@ from typing import Any, Dict
 
 from .base_service import BaseExtendedService
 from ...logger import logger
+
+# 到期轮询/搬运周期（秒）。service_config.poll_interval 可覆盖。
+DELAY_POLL_INTERVAL_SECONDS = 0.5
+# 每周期搬运/提交的最大条数（防单周期阻塞过久）。
+DELAY_CONVEY_BATCH = 200
+DELAY_DUE_BATCH = 50
 
 
 class DelayService(BaseExtendedService):
@@ -31,7 +53,17 @@ class DelayService(BaseExtendedService):
             "PLAITA_DELAY_QUEUE",
             (service_config or {}).get("delay_queue", "plaita:delay:queue"),
         )
+        # C4-2：排程 ZSET（member=任务 JSON，score=触发时间戳 ms）。
+        # list 键仍是生产者契约（flow_worker RPUSH），ZSET 是本服务内部的
+        # 崩溃可恢复排程态。
+        self.scheduled_key = f"{self.queue_key}:scheduled"
+        self._poll_interval = float(
+            (service_config or {}).get("poll_interval", DELAY_POLL_INTERVAL_SECONDS)
+        )
         self._consumer_thread = None
+        # in-flight 去重（进程内）：同一 member 在处理期间不重复提交。
+        self._inflight: set = set()
+        self._inflight_lock = threading.Lock()
 
     def get_service_type(self) -> str:
         """
@@ -53,14 +85,21 @@ class DelayService(BaseExtendedService):
             self.is_running = True
             # 消费 plaita:delay:queue：worker 挂起时把延迟任务 RPUSH 进来。
             # 历史上没人投递也没人消费，delay 节点的执行会永久挂起。
-            if self._redis_client is None or not hasattr(self._redis_client, "blpop"):
+            # C4-2 后需要 ZSET 原语做排程；list 键由搬运逻辑持续迁入 ZSET。
+            if (
+                self._redis_client is None
+                or not hasattr(self._redis_client, "zadd")
+                or not hasattr(self._redis_client, "lrange")
+            ):
                 logger.warning("延迟服务无 redis 客户端，队列消费不启动")
                 return True
             self._consumer_thread = threading.Thread(
                 target=self._consume_queue, name="delay-service-consumer", daemon=True
             )
             self._consumer_thread.start()
-            logger.info("延迟服务已启动（队列: %s）", self.queue_key)
+            logger.info(
+                "延迟服务已启动（队列: %s，排程: %s）", self.queue_key, self.scheduled_key
+            )
             return True
         except Exception as e:
             logger.error("启动延迟服务失败: %s", e, exc_info=True)
@@ -82,25 +121,144 @@ class DelayService(BaseExtendedService):
             return False
 
     def _consume_queue(self) -> None:
-        """消费延迟任务队列（BLPOP 短超时轮询，保证关闭响应性）。"""
+        """消费循环：list→ZSET 搬运 + 到期任务提交（无阻塞原语，周期轮询）。
+
+        C4-2：替代历史 BLPOP——出队即内存持有、崩溃即丢。现任务先落 ZSET
+        再出 list，且只有到期任务才进线程池。
+        """
         while not self.is_shutdown_requested():
             try:
-                item = self._redis_client.blpop(self.queue_key, timeout=2)
+                self._convey_list_to_zset()
+                self._submit_due_tasks()
             except Exception as e:
-                logger.error("延迟队列消费失败: %s", e, exc_info=True)
-                self._shutdown_event.wait(timeout=2)
-                continue
-            if not item:
-                continue
-            _key, raw = item
+                logger.error("延迟队列轮询失败: %s", e, exc_info=True)
+            self._shutdown_event.wait(timeout=self._poll_interval)
+
+    # ---- list → ZSET 搬运 ----
+
+    def _due_score_ms(self, task_config: Dict[str, Any]) -> int:
+        """计算触发时间戳（ms）：trigger_timestamp 优先，其次 now+delay_ms。"""
+        trigger_ts = task_config.get("trigger_timestamp")
+        if trigger_ts:
+            return int(trigger_ts)
+        delay_ms = task_config.get("delay_ms") or 0
+        return int(time.time() * 1000 + float(delay_ms))
+
+    def _convey_list_to_zset(self) -> None:
+        """把 list 队列条目搬进排程 ZSET（先 ZADD 后 LREM，崩溃安全）。
+
+        启动时遗留的旧 list 任务由此在同周期迁入——即「一次性迁移」的
+        持续化版本（生产者持续 RPUSH list，单次启动迁移不够）。
+        """
+        raw_items = self._redis_client.lrange(self.queue_key, 0, DELAY_CONVEY_BATCH - 1)
+        if not raw_items:
+            return
+        valid = []
+        for raw in raw_items:
             if isinstance(raw, bytes):
                 raw = raw.decode()
             try:
                 task_config = json.loads(raw)
             except json.JSONDecodeError:
-                logger.error("延迟任务配置非法: %r", raw[:200])
+                logger.error("延迟任务配置非法（丢弃）: %r", raw[:200])
+                self._lrem_raw(raw)
                 continue
-            self.submit_task(task_config)
+            if not isinstance(task_config, dict) or not self.validate_task_config(task_config):
+                logger.error("延迟任务配置校验失败（丢弃）: %r", raw[:200])
+                self._lrem_raw(raw)
+                continue
+            valid.append((raw, self._due_score_ms(task_config)))
+        if not valid:
+            return
+        pipe = self._redis_client.pipeline()
+        for raw, score in valid:
+            pipe.zadd(self.scheduled_key, {raw: score})
+        pipe.execute()
+        # ZADD 成功后才出 list：中途崩溃 → 下轮重复搬运，ZADD 按 member 幂等。
+        pipe = self._redis_client.pipeline()
+        for raw, _score in valid:
+            pipe.lrem(self.queue_key, 1, raw)
+        pipe.execute()
+        logger.debug("延迟任务搬运 %d 条 → %s", len(valid), self.scheduled_key)
+
+    def _lrem_raw(self, raw: str) -> None:
+        try:
+            self._redis_client.lrem(self.queue_key, 1, raw)
+        except Exception as e:
+            logger.error("延迟队列坏条目移除失败: %s", e)
+
+    # ---- 到期提交 ----
+
+    def _submit_due_tasks(self) -> None:
+        """提交已到期且不在处理中的任务（未到期不动，不占线程池坑位）。"""
+        now_ms = int(time.time() * 1000)
+        due = (
+            self._redis_client.zrangebyscore(
+                self.scheduled_key, "-inf", now_ms, start=0, num=DELAY_DUE_BATCH
+            )
+            or []
+        )
+        for member in due:
+            if isinstance(member, bytes):
+                member = member.decode()
+            with self._inflight_lock:
+                if member in self._inflight:
+                    continue
+                self._inflight.add(member)
+            self._start_scheduled_task(member)
+
+    def _start_scheduled_task(self, member: str) -> None:
+        try:
+            task_config = json.loads(member)
+        except json.JSONDecodeError:
+            logger.error("排程任务反序列化失败（移除）: %r", member[:200])
+            self._finalize_scheduled(member)
+            return
+        if not isinstance(task_config, dict):
+            logger.error("排程任务非法（移除）: %r", member[:200])
+            self._finalize_scheduled(member)
+            return
+        self.thread_pool.submit(self._run_scheduled_task, member, task_config)
+        logger.info("到期延迟任务已提交: node_id=%s", task_config.get("node_id"))
+
+    def _run_scheduled_task(self, member: str, task_config: Dict[str, Any]) -> None:
+        """线程池内执行到期任务；处理走完才 ZREM（at-least-once）。"""
+        task_id = self._generate_task_id(task_config)
+        self.active_tasks.add(task_id)
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(self.handle_task(task_config))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    logger.warning("event loop close failed during task cleanup", exc_info=True)
+            logger.info("延迟任务 %s 执行完成: %s", task_id, result)
+        except Exception as e:
+            logger.error("延迟任务 %s 执行失败: %s", task_id, e, exc_info=True)
+            self._handle_task_error(task_config, e)
+        finally:
+            self.active_tasks.discard(task_id)
+            if self.is_shutdown_requested():
+                # shutdown 中断的任务留在 ZSET，下次启动由到期轮询捡起。
+                with self._inflight_lock:
+                    self._inflight.discard(member)
+            else:
+                self._finalize_scheduled(member)
+
+    def _finalize_scheduled(self, member: str) -> None:
+        """任务处理走完：ZREM 出排程态并清 in-flight。
+
+        ZREM 失败只导致下次重复触发一次（事件侧 EventFilter 去重幂等）。
+        """
+        try:
+            self._redis_client.zrem(self.scheduled_key, member)
+        except Exception as e:
+            logger.error("延迟任务完成登记失败: %s", e)
+        with self._inflight_lock:
+            self._inflight.discard(member)
 
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """触发事件：带 correlation_id（=execution_id），EventFilter 才能关联到挂起执行。
@@ -255,13 +413,22 @@ class DelayService(BaseExtendedService):
     def get_pending_tasks_info(self) -> Dict[str, Any]:
         """
         获取待处理任务信息
-        
+
         Returns:
             Dict[str, Any]: 任务信息
         """
+        scheduled_count = 0
+        try:
+            if self._redis_client is not None and hasattr(self._redis_client, "zcard"):
+                scheduled_count = int(self._redis_client.zcard(self.scheduled_key) or 0)
+        except Exception as e:
+            logger.debug("zcard(%s) failed: %s", self.scheduled_key, e)
         return {
             "service_type": self.get_service_type(),
             "active_task_count": self.get_active_task_count(),
+            "scheduled_task_count": scheduled_count,
+            "queue_key": self.queue_key,
+            "scheduled_key": self.scheduled_key,
             "is_running": self.is_running,
             "max_workers": self.get_max_workers()
         } 
