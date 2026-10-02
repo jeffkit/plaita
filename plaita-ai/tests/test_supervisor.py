@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from plaita_ai.console_client import ConsoleClient, ConsoleConfig
@@ -198,3 +200,74 @@ def test_prompt_proposer_parse_tolerates_fences():
     assert parsed["definition"] == '{"a": 1}'
     assert PromptProposer._parse("no json here") is None
     assert PromptProposer._parse('{"no_definition": true}') is None
+
+
+# -- prompt proposer CoDeFlow parsing (offline) -----------------------------------
+
+
+def test_prompt_proposer_parses_codeflow_block():
+    content = (
+        "```python\n"
+        "# Rationale: tweak greeting suffix\n"
+        '@flow("greeter")\n'
+        "def greeter(INPUT):\n"
+        '    return F.concat(INPUT.hi, "!")\n'
+        "```\n"
+    )
+    parsed = PromptProposer._parse(content)
+    assert parsed is not None
+    definition = json.loads(parsed["definition"])
+    assert definition["flow_id"] == "greeter"
+    # 编译产物是标准 IR dict——与 legacy 提案走同一条 save/evaluate 下游
+    assert definition["nodes"][0]["type"] == "start"
+    assert "tweak greeting suffix" in parsed["rationale"]
+    assert "@flow" in parsed["source"]
+
+
+def test_prompt_proposer_rejects_uncompilable_source_without_legacy():
+    content = (
+        "```python\n"
+        "@flow(\"broken\")\n"
+        "def broken(INPUT):\n"
+        "    return INPUT.a + INPUT.b * \n"  # 语法错误
+        "```\n"
+    )
+    assert PromptProposer._parse(content) is None
+
+
+def test_prompt_proposer_uncompilable_source_falls_back_to_legacy_json():
+    content = (
+        "```python\n"
+        "@flow(\"broken\")\n"
+        "def broken(INPUT):\n"
+        "    return oops\n"
+        "```\n"
+        '{"definition": "{\\"fallback\\": true}", "rationale": "legacy path"}\n'
+    )
+    parsed = PromptProposer._parse(content)
+    assert parsed is not None
+    assert parsed["definition"] == '{"fallback": true}'
+    assert parsed["rationale"] == "legacy path"
+
+
+def test_prompt_proposer_current_source_from_json_string():
+    definition = json.dumps({
+        "runtime": "python", "flow_id": "legacy", "inputType": {"dataType": "object"},
+        "nodes": [
+            {"type": "start", "id": "start", "next": "e"},
+            {"type": "end", "id": "e", "output": "$INPUT.x", "resultType": "success"},
+        ],
+    })
+    source = PromptProposer._emit_current_source(definition)
+    assert "def legacy(INPUT):" in source
+    # dict 形态同样支持
+    assert "def legacy(INPUT):" in PromptProposer._emit_current_source(json.loads(definition))
+
+
+def test_prompt_proposer_current_source_degrades_gracefully():
+    assert PromptProposer._emit_current_source("") == ""
+    assert PromptProposer._emit_current_source(None) == ""
+    assert PromptProposer._emit_current_source("not json at all") == ""
+    # switch 节点不可表达 → 空串（LLM 退回看 JSON definition）
+    switch_ir = {"flow_id": "sw", "nodes": [{"type": "switch", "id": "s"}]}
+    assert PromptProposer._emit_current_source(switch_ir) == ""

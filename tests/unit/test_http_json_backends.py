@@ -20,6 +20,14 @@ from unittest.mock import patch
 import plaita.node.http as http_mod
 from plaita.node.http import HttpExecutor, _json_dumps_bytes, _loads_lenient
 
+try:
+    import orjson as _orjson  # noqa: F401
+    _ORJSON_AVAILABLE = http_mod.orjson is not None
+except ImportError:
+    _ORJSON_AVAILABLE = False
+
+import unittest as _ut
+
 
 class TestDumpsBackend(TestCase):
     def test_plain_body_matches_stdlib_semantics(self):
@@ -27,6 +35,7 @@ class TestDumpsBackend(TestCase):
         data = _json_dumps_bytes(body)
         self.assertEqual(json.loads(data), body)
 
+    @_ut.skipUnless(_ORJSON_AVAILABLE, "orjson not installed (stdlib backend active)")
     def test_datetime_serialized_natively(self):
         """orjson 原生序列化 datetime（stdlib 会 TypeError）——文档化改进。"""
         body = {"ts": datetime.datetime(2026, 10, 2, 12, 0, 0)}
@@ -66,6 +75,7 @@ class TestNodeFallbackWithoutOrjson(TestCase):
             self.assertEqual(_loads_lenient('{"b": 2}'), {"b": 2})
 
 
+@_ut.skipUnless(_ORJSON_AVAILABLE, "orjson not installed (stdlib backend active)")
 class TestExecutorUsesBackends(TestCase):
     def _executor(self):
         return HttpExecutor(url="http://127.0.0.1:1/x", method="POST", query=None,

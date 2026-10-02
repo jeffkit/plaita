@@ -39,6 +39,19 @@ def cmd_compile(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def cmd_emit(args: argparse.Namespace) -> int:
+    """JSON flow definition → @flow source（emit_source + round-trip 校验）。"""
+    from plaita_ai.mcp.server import flow_from_json
+
+    raw = sys.stdin.read() if args.stdin else Path(args.definition).read_text(encoding="utf-8")
+    payload = json.loads(flow_from_json(raw))
+    if args.out:
+        Path(args.out).write_text(str(payload.get("source", "")), encoding="utf-8")
+        payload["source"] = f"(written to {args.out})"
+    print(result_json(payload))
+    return 0 if payload.get("ok") else 1
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = _read_source(args.source, args.stdin)
     inputs = _load_json_arg(args.input, {})
@@ -154,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_compile.add_argument("--stdin", action="store_true", help="Read source from stdin")
     p_compile.add_argument("--flow-id", dest="flow_id", default=None)
     p_compile.set_defaults(func=cmd_compile)
+
+    p_emit = sub.add_parser("emit", help="Generate @flow source from a JSON flow definition")
+    p_emit.add_argument("definition", nargs="?", help="JSON definition file path, or - with --stdin")
+    p_emit.add_argument("--stdin", action="store_true", help="Read JSON definition from stdin")
+    p_emit.add_argument("--out", default=None, help="Write generated source to this file")
+    p_emit.set_defaults(func=cmd_emit)
 
     p_run = sub.add_parser("run", help="Compile and execute @flow source")
     p_run.add_argument("source", nargs="?", help="Source file path, or - with --stdin")

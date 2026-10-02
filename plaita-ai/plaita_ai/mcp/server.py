@@ -19,6 +19,11 @@ from plaita_ai.flow_runner import (
     run_flow,
 )
 
+try:
+    from plaita.dsl.codeflow import EmitError, emit_source
+except ImportError:  # pragma: no cover - plaita is a hard dependency of plaita-ai
+    EmitError = emit_source = None
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -34,6 +39,8 @@ mcp = FastMCP(
         "Compile and run Plaita @flow DSL workflows. "
         "Use flow_compile to validate generated source before flow_run. "
         "On compile errors, fix the @flow source using line numbers and retry. "
+        "flow_from_json reverse-generates @flow source from a JSON flow "
+        "definition (migrate legacy flows to the DSL). "
         "For a deployed plaita (console configured via PLAITA_CONSOLE_URL), the "
         "console_* tools observe versions/runs/metrics, eval_* runs benchmark "
         "datasets against a version, and supervisor_iterate proposes + evaluates "
@@ -78,6 +85,47 @@ def flow_compile(source: str, flow_id: Optional[str] = None) -> str:
     """
     result = compile_flow(source, flow_id=flow_id)
     return result_json(result)
+
+
+@mcp.tool()
+def flow_from_json(definition: str) -> str:
+    """Reverse-generate @flow source from a JSON flow definition (emit_source).
+
+    Use this to migrate existing JSON/YAML flows to the @flow DSL, or to get
+    an editable handle on a deployed flow. The generated source is immediately
+    re-compiled as a round-trip check — an ``ok: true`` result is guaranteed
+    compilable.
+
+    Args:
+        definition: Flow definition as a JSON string (flow_id + inputType + nodes[]).
+
+    Returns:
+        JSON: {ok, source, flow_id, errors:[{line, message}]}
+        ``ok: false`` with ``error`` when the definition contains constructs
+        that have no @flow representation (e.g. switch nodes).
+    """
+    if emit_source is None:  # pragma: no cover
+        return result_json({"ok": False, "error": "plaita runtime with emit_source unavailable"})
+    try:
+        ir = json.loads(definition)
+    except ValueError as exc:
+        return result_json({"ok": False, "error": f"definition is not valid JSON: {exc}"})
+    try:
+        source = emit_source(ir)
+    except EmitError as exc:
+        return result_json({"ok": False, "error": f"definition cannot be expressed as @flow: {exc}"})
+    except Exception as exc:
+        return result_json({"ok": False, "error": f"emit failed: {exc}"})
+    compiled = compile_flow(source)
+    payload: Dict[str, Any] = {
+        "ok": bool(compiled.ok),
+        "source": source,
+        "flow_id": (ir or {}).get("flow_id") if isinstance(ir, dict) else None,
+    }
+    if not compiled.ok:
+        payload["error"] = "round-trip compile failed"
+        payload["errors"] = [e.to_dict() for e in compiled.errors]
+    return result_json(payload)
 
 
 @mcp.tool()
