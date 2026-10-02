@@ -16,6 +16,7 @@ import type { Node, Edge } from '@xyflow/react'
 import { ArrowLeft, Zap, Code2, Save, Rocket, Play, ChevronRight, AlertTriangle, Undo2, Redo2 } from 'lucide-react'
 import { Button, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui'
 import CopilotPanel from '../components/flow/CopilotPanel'
+import { useDebouncedValue } from '../hooks/useDebouncedValue'
 
 // ---------- 版本工具 ----------
 
@@ -108,6 +109,8 @@ export default function FlowEditor() {
   const [showDryRun, setShowDryRun] = useState(false)
   const [showSource, setShowSource] = useState(false)
   const [pendingAiIr, setPendingAiIr] = useState<Record<string, unknown> | null>(null)
+  // C5-2：Copilot 输出待确认应用的整图 IR（画布 dirty 时先确认再覆盖）
+  const [pendingCopilotIr, setPendingCopilotIr] = useState<Record<string, unknown> | null>(null)
 
   // 节点详情发起的「跳源码第 N 行」→ 打开源码面板并高亮
   const sourceLineRequest = useFlowEditor((s) => s.sourceLineRequest)
@@ -128,6 +131,10 @@ export default function FlowEditor() {
   const reset = useFlowEditor((s) => s.reset)
   const nodes = useFlowEditor((s) => s.nodes)
   const edges = useFlowEditor((s) => s.edges)
+  // C5-3 拖拽静默快照：拖拽/连线期间 nodes/edges 每帧变化，热路径序列化
+  // （copilot 上下文、源码/试跑面板）只依赖静默 300ms 后的快照
+  const quietNodes = useDebouncedValue(nodes)
+  const quietEdges = useDebouncedValue(edges)
   const dirty = useFlowEditor((s) => s.dirty)
   const graphStack = useFlowEditor((s) => s.graphStack)
   const subgraphWarning = useFlowEditor((s) => s.subgraphWarning)
@@ -160,6 +167,12 @@ export default function FlowEditor() {
 
   // 载入画布时的基准定义：发布确认里的变更摘要与它对比
   const baseDefRef = useRef<Record<string, unknown> | null>(null)
+  // C5-1 乐观锁基准：画布所基于版本的 updated_at（载入/保存成功后刷新）。
+  // 保存同版本时作为 base_updated_at 回传，服务端不一致即 409
+  const baseVersionRef = useRef<{ version: string; updatedAt: string | null }>({
+    version: '',
+    updatedAt: null,
+  })
   // 原定义的 metadata（含 @flow 源码）：保存/发布时透传，源码面板读取
   const metadataRef = useRef<Record<string, unknown> | undefined>(undefined)
   const [flowSource, setFlowSource] = useState('')
@@ -175,6 +188,8 @@ export default function FlowEditor() {
         const layout = JSON.parse(versionQuery.data.layout || '{}') as Record<string, { x: number; y: number }>
         const { nodes: ns, edges: es } = jsonToFlow(def, layout)
         baseDefRef.current = def
+        // C5-1：记录乐观锁基准（服务端最近保存时间）
+        baseVersionRef.current = { version: versionParam, updatedAt: versionQuery.data.updated_at ?? null }
         // 原定义的 metadata（可能含 @flow 源码）原样透传：保存/发布不丢，源码面板可用
         const defMeta = (def.metadata as Record<string, unknown> | undefined) || undefined
         metadataRef.current = defMeta
@@ -199,6 +214,7 @@ export default function FlowEditor() {
       } catch (e) {
         // 定义损坏时不静默：清空画布并把错误交给保存/发布前的序列化兜底
         baseDefRef.current = null
+        baseVersionRef.current = { version: '', updatedAt: null }
         metadataRef.current = undefined
         setFlowSource('')
         useFlowEditor.setState({ hasFlowSource: false, sourceLineRequest: null })
@@ -214,6 +230,7 @@ export default function FlowEditor() {
         return
       }
       baseDefRef.current = null
+      baseVersionRef.current = { version: '', updatedAt: null }
       const start: Node = {
         id: 'start',
         type: 'plaitaNode',
@@ -272,8 +289,17 @@ export default function FlowEditor() {
     return () => clearTimeout(t)
   }, [msg])
 
+  // 保存参数（C5-1）：同版本覆盖带乐观锁基准；另存新版本走服务端原子分配
+  interface SaveVars {
+    targetVersion: string
+    /** 目标版本即当前编辑版本时带上（服务端不一致返回 409 冲突） */
+    baseUpdatedAt?: string | null
+    force?: boolean
+    allocateVersion?: boolean
+    onSaved?: (saved: { version: string; updatedAt: string | null }) => void
+  }
   const saveMutation = useMutation({
-    mutationFn: async (targetVersion: string) => {
+    mutationFn: async (v: SaveVars) => {
       const state = collapseToRoot()
       // B5 后半：保存前用同一份节点 schema 校验字段（required/type/enum），
       // 未通过即阻断并定位到 节点.字段——引擎 422 的报错现场远离编辑器
@@ -284,27 +310,50 @@ export default function FlowEditor() {
             (schemaErrs.length > 3 ? ` 等 ${schemaErrs.length} 项` : '')
         )
       }
-      const meta = { flow_id: flowId, version: targetVersion, desc, inputType, metadata: metadataRef.current }
+      const meta = { flow_id: flowId, version: v.targetVersion, desc, inputType, metadata: metadataRef.current }
       const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
       const layout = extractLayout(state.nodes as Node[])
-      return api.saveVersion(flowId!, targetVersion, {
+      return api.saveVersion(flowId!, v.targetVersion, {
         definition: JSON.stringify(def, null, 2),
         layout: JSON.stringify(layout),
+        ...(v.baseUpdatedAt ? { base_updated_at: v.baseUpdatedAt } : {}),
+        ...(v.force ? { force: true } : {}),
+        ...(v.allocateVersion ? { allocate_version: true } : {}),
       })
     },
-    onSuccess: (_res, targetVersion) => {
+    onSuccess: (res, v) => {
       setSaveError(null)
-      setMsg(`已保存 ${flowId}@${targetVersion}`)
-      // 保存成功后工作版本即为目标版本；URL 由下方同步 effect 对齐
-      setVersion(targetVersion)
+      // allocate_version 时服务端可能分配了与请求不同的版本号：以响应为准
+      setMsg(`已保存 ${flowId}@${res.version}`)
+      // 保存成功后工作版本即目标版本；乐观锁基准随响应前进
+      setVersion(res.version)
+      baseVersionRef.current = { version: res.version, updatedAt: res.updated_at ?? null }
       useFlowEditor.setState({ dirty: false })
       qc.invalidateQueries({ queryKey: ['flow', flowId] })
+      v.onSaved?.({ version: res.version, updatedAt: res.updated_at ?? null })
     },
-    onError: (e: Error) => setSaveError(e.message),
+    onError: (e: Error, v) => {
+      const detail = (e as Error & { detail?: { conflict?: string } }).detail
+      if (detail?.conflict === 'version_stale') {
+        // C5-1：画布所基于的版本已被他人更新——给「加载最新 / 强制覆盖」选择
+        setSaveError(null)
+        setConflict({ retry: () => saveMutation.mutate({ ...v, force: true }) })
+      } else {
+        setSaveError(e.message)
+      }
+    },
   })
 
+  // C5-1 冲突处理中转：retry 为「强制覆盖」重放；「加载最新」走 reloadLatest
+  const [conflict, setConflict] = useState<{ retry: () => void } | null>(null)
+  const reloadLatest = () => {
+    setConflict(null)
+    useFlowEditor.setState({ dirty: false })
+    if (versionParam) qc.invalidateQueries({ queryKey: ['version', flowId, versionParam] })
+  }
+
   const publishMutation = useMutation({
-    mutationFn: async (targetVersion: string) => {
+    mutationFn: async (v: { targetVersion: string; force?: boolean }) => {
       // 先保存再发布；后端保证已发布版本不可覆盖（409）
       const state = collapseToRoot()
       const schemaErrs = collectFlowSchemaErrors(state.nodes as Node<FlowNodeData>[], schemaByType)
@@ -314,27 +363,38 @@ export default function FlowEditor() {
             (schemaErrs.length > 3 ? ` 等 ${schemaErrs.length} 项` : '')
         )
       }
-      const meta = { flow_id: flowId, version: targetVersion, desc, inputType, metadata: metadataRef.current }
+      const meta = { flow_id: flowId, version: v.targetVersion, desc, inputType, metadata: metadataRef.current }
       const def = flowToJson(state.nodes as Node<FlowNodeData>[], state.edges as Edge[], meta)
       const layout = extractLayout(state.nodes as Node[])
-      await api.saveVersion(flowId!, targetVersion, {
+      await api.saveVersion(flowId!, v.targetVersion, {
         definition: JSON.stringify(def, null, 2),
         layout: JSON.stringify(layout),
+        ...(baseVersionRef.current.version === v.targetVersion && baseVersionRef.current.updatedAt
+          ? { base_updated_at: baseVersionRef.current.updatedAt }
+          : {}),
+        ...(v.force ? { force: true } : {}),
       })
-      return api.publishFlow(flowId!, targetVersion)
+      return api.publishFlow(flowId!, v.targetVersion)
     },
-    onSuccess: (_res, targetVersion) => {
+    onSuccess: (_res, v) => {
       setSaveError(null)
       setShowPublish(false)
-      setMsg(`已发布 ${flowId}@${targetVersion}`)
-      setVersion(targetVersion)
+      setMsg(`已发布 ${flowId}@${v.targetVersion}`)
+      setVersion(v.targetVersion)
+      baseVersionRef.current = { version: v.targetVersion, updatedAt: null }
       useFlowEditor.setState({ dirty: false })
       qc.invalidateQueries({ queryKey: ['flow', flowId] })
       qc.invalidateQueries({ queryKey: ['version', flowId] })
     },
-    onError: (e: Error) => {
+    onError: (e: Error, v) => {
       setShowPublish(false)
-      setSaveError(e.message)
+      const detail = (e as Error & { detail?: { conflict?: string } }).detail
+      if (detail?.conflict === 'version_stale') {
+        setSaveError(null)
+        setConflict({ retry: () => publishMutation.mutate({ ...v, force: true }) })
+      } else {
+        setSaveError(e.message)
+      }
     },
   })
 
@@ -347,12 +407,19 @@ export default function FlowEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, versionParam, dirty])
 
-  /** 保存入口：基于已发布版本编辑时自动另存为下一个版本 */
+  /** 保存入口：基于已发布版本编辑时自动另存新版本（服务端原子分配，C5-1）；
+   *  覆盖当前草稿版本时带乐观锁基准（409 冲突弹「加载最新/强制覆盖」） */
   const doSave = useCallback(() => {
     if (saveMutation.isPending || publishMutation.isPending) return
     const target = workingStatus === 'published' ? suggestedNext : version || suggestedNext
     setMsg(null)
-    saveMutation.mutate(target)
+    const updateInPlace = !!version && target === version
+    saveMutation.mutate({
+      targetVersion: target,
+      ...(updateInPlace && baseVersionRef.current.version === target
+        ? { baseUpdatedAt: baseVersionRef.current.updatedAt }
+        : { allocateVersion: true }),
+    })
   }, [saveMutation, publishMutation.isPending, workingStatus, suggestedNext, version])
 
   const openPublish = () => {
@@ -383,7 +450,16 @@ export default function FlowEditor() {
 
   const saveThenProceed = () => {
     const target = workingStatus === 'published' ? suggestedNext : version || suggestedNext
-    saveMutation.mutate(target, { onSuccess: () => blocker.proceed?.() })
+    const updateInPlace = !!version && target === version
+    saveMutation.mutate(
+      {
+        targetVersion: target,
+        ...(updateInPlace && baseVersionRef.current.version === target
+          ? { baseUpdatedAt: baseVersionRef.current.updatedAt }
+          : { allocateVersion: true }),
+      },
+      { onSuccess: () => blocker.proceed?.() }
+    )
   }
 
   // Cmd/Ctrl+S 保存；Cmd/Ctrl+Z / +Shift+Z（或 Ctrl+Y）撤销/重做。
@@ -416,9 +492,11 @@ export default function FlowEditor() {
 
   const status = workingStatus
 
-  // Copilot 上下文：当前画布完整 flow + 状态，随每轮请求自动带最新值
+  // Copilot 上下文：当前画布完整 flow + 状态，随每轮请求自动带最新值。
+  // C5-3：依赖静默快照（quietNodes/quietEdges）——拖拽期间不再每帧
+  // flowToJson + stringify，画布静默 300ms 后一次性对齐，最终值与画布一致
   const copilotContext = useMemo(() => {
-    const def = flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], {
+    const def = flowToJson(quietNodes as Node<FlowNodeData>[], quietEdges as Edge[], {
       flow_id: flowId,
       version,
       desc,
@@ -434,15 +512,53 @@ export default function FlowEditor() {
       null,
       1
     )
-  }, [nodes, edges, flowId, version, desc, inputType, dirty, graphStack])
+  }, [quietNodes, quietEdges, flowId, version, desc, inputType, dirty, graphStack])
 
-  // 应用 agent 的 plaita-flow 输出：归位主图 → 整图替换（自动应用）
+  // C5-3：试跑面板载荷（nodesByType + flowJson）与源码面板 flow 同样走静默快照
+  const dryRunPayload = useMemo(() => {
+    const nodesByType: Record<string, string[]> = {}
+    for (const n of quietNodes) {
+      const t = (n.data as FlowNodeData).type
+      ;(nodesByType[t] ||= []).push(n.id)
+    }
+    const flowJson = JSON.stringify(
+      flowToJson(quietNodes as Node<FlowNodeData>[], quietEdges as Edge[], {
+        flow_id: flowId,
+        version,
+        desc,
+        inputType,
+      }),
+      null,
+      2
+    )
+    return { nodesByType, flowJson }
+  }, [quietNodes, quietEdges, flowId, version, desc, inputType])
+
+  const sourceFlow = useMemo(
+    () =>
+      flowToJson(quietNodes as Node<FlowNodeData>[], quietEdges as Edge[], {
+        flow_id: flowId,
+        version,
+        desc,
+        inputType,
+      }),
+    [quietNodes, quietEdges, flowId, version, desc, inputType]
+  )
+
+  // 应用 agent 的 plaita-flow 输出：归位主图 → 整图替换。C5-2：当前图先压入
+  // 撤销栈（replaceGraph）而非清空历史——Cmd+Z 可回到应用前的画布
   const applyAiFlow = (ir: Record<string, unknown>) => {
     exitToLevel(0)
     const { nodes: ns, edges: es } = jsonToFlow(ir, {})
-    useFlowEditor.getState().setGraph(ns as Node[], es as Edge[])
+    useFlowEditor.getState().replaceGraph(ns as Node[], es as Edge[])
     markDirty()
-    setMsg('已应用 AI 助手的画布修改（未保存，可继续编辑后保存草稿）')
+    setMsg('已应用 AI 助手的画布修改（未保存，可撤销或继续编辑后保存草稿）')
+  }
+
+  // C5-2：应用前若画布有未保存修改，先弹确认（不再对 agent 回复静默整图覆盖）
+  const requestApplyAiFlow = (ir: Record<string, unknown>) => {
+    if (useFlowEditor.getState().dirty) setPendingCopilotIr(ir)
+    else applyAiFlow(ir)
   }
 
   const applyAiImport = (ir: Record<string, unknown>) => {
@@ -565,7 +681,9 @@ export default function FlowEditor() {
                   dir === 'TB'
                     ? symmetricLayout(nodes as Node[], edges as Edge[], 'TB')
                     : autoLayout(nodes as Node[], edges as Edge[], 'LR')
-                setGraph(layouted as Node[], edges as Edge[])
+                // C5-4：布局走 replaceGraph（当前图入撤销栈）而非 setGraph
+                // （清空历史）——布局后可 Cmd+Z 回布局前、重做恢复布局
+                useFlowEditor.getState().replaceGraph(layouted as Node[], edges as Edge[])
                 markDirty()
               }}
               className="px-2.5 h-7 text-caption text-ink-secondary hover:bg-elevated hover:text-ink-primary transition-colors"
@@ -674,7 +792,7 @@ export default function FlowEditor() {
           <CopilotPanel
             flowContext={copilotContext}
             flowId={flowId || ''}
-            onApplyFlow={applyAiFlow}
+            onApplyFlow={requestApplyAiFlow}
           />
           {showDryRun && (
             <DryRunPanel
@@ -683,26 +801,15 @@ export default function FlowEditor() {
                 // 出错节点画布标红 / 新一轮清除（不置 dirty）
                 useFlowEditor.getState().setRunErrorNodes(erroredIds)
               }}
-              nodesByType={(() => {
-                const acc: Record<string, string[]> = {}
-                for (const n of nodes) {
-                  const t = (n.data as FlowNodeData).type
-                  ;(acc[t] ||= []).push(n.id)
-                }
-                return acc
-              })()}
+              nodesByType={dryRunPayload.nodesByType}
               onErrorNodeId={(id) => useFlowEditor.setState({ selectedNodeId: id })}
-              flowJson={JSON.stringify(
-                flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], { flow_id: flowId, version, desc, inputType }),
-                null,
-                2
-              )}
+              flowJson={dryRunPayload.flowJson}
               onClose={() => setShowDryRun(false)}
             />
           )}
           {showSource && (
             <SourceViewPanel
-              flow={flowToJson(nodes as Node<FlowNodeData>[], edges as Edge[], { flow_id: flowId, version, desc, inputType })}
+              flow={sourceFlow}
               source={flowSource || undefined}
               highlightLine={sourceHighlight}
               onHighlightDone={() => setSourceHighlight(null)}
@@ -727,6 +834,39 @@ export default function FlowEditor() {
       >
         当前画布上未保存的修改将被丢弃，AI 生成的内容会整体替换画布。
       </ConfirmDialog>
+      {/* C5-2：画布 dirty 时，Copilot 的整图修改先确认再应用（应用后可撤销） */}
+      <ConfirmDialog
+        open={!!pendingCopilotIr}
+        title="应用 AI 助手的画布修改？"
+        variant="danger"
+        confirmLabel="应用（可撤销）"
+        cancelLabel="放弃"
+        onCancel={() => setPendingCopilotIr(null)}
+        onConfirm={() => {
+          if (pendingCopilotIr) applyAiFlow(pendingCopilotIr)
+          setPendingCopilotIr(null)
+        }}
+      >
+        当前画布有未保存修改，AI 的修改会整体替换画布。应用后可用撤销（Cmd/Ctrl+Z）回到应用前。
+      </ConfirmDialog>
+      {/* C5-1：乐观锁冲突——画布所基于的版本已被他人更新 */}
+      <ConfirmDialog
+        open={!!conflict}
+        title="版本已被他人更新"
+        variant="danger"
+        confirmLabel="强制覆盖"
+        cancelLabel="加载最新"
+        onCancel={reloadLatest}
+        onConfirm={() => {
+          conflict?.retry()
+          setConflict(null)
+        }}
+      >
+        <p>画布所基于的版本已被他人更新，直接保存会覆盖对方的修改。</p>
+        <p className="text-caption">
+          「加载最新」丢弃本地未保存修改并载入服务端最新内容；「强制覆盖」以当前画布内容覆盖他人修改。
+        </p>
+      </ConfirmDialog>
       <ConfirmDialog
         open={showPublish}
         title={`发布 ${flowId}@${version}`}
@@ -735,7 +875,7 @@ export default function FlowEditor() {
         busy={publishMutation.isPending}
         wide
         onCancel={() => setShowPublish(false)}
-        onConfirm={() => publishMutation.mutate(version)}
+        onConfirm={() => publishMutation.mutate({ targetVersion: version })}
       >
         <p>发布后该版本<strong className="text-ink-primary">不可再修改</strong>；后续改动请另存新版本。</p>
         {publishDiff && (

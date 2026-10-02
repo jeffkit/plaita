@@ -117,7 +117,17 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '请求失败' }))
-    throw new Error(error.detail || '请求失败')
+    // detail 可为字符串（常规错误）或结构化对象（如 C5-1 版本冲突 409：
+    // { message, conflict, latest_updated_at }）——统一取 message 展示，
+    // 并把原始 detail 挂到 Error 上供调用方做结构化分支。
+    const rawDetail = (error as { detail?: unknown }).detail
+    const message =
+      typeof rawDetail === 'string'
+        ? rawDetail
+        : ((rawDetail as { message?: string } | null)?.message ?? '请求失败')
+    const err = new Error(message) as Error & { detail?: unknown }
+    if (rawDetail !== null && typeof rawDetail === 'object') err.detail = rawDetail
+    throw err
   }
 
   return response.json()
@@ -623,7 +633,17 @@ export const api = {
   async saveVersion(
     flowId: string,
     version: string,
-    payload: { definition: string; layout: string; created_by?: string }
+    payload: {
+      definition: string
+      layout: string
+      created_by?: string
+      /** C5-1 乐观锁基准：所基于版本的 updated_at；不一致服务端返回 409 */
+      base_updated_at?: string | null
+      /** 强制覆盖（绕过乐观锁检查） */
+      force?: boolean
+      /** 忽略 version 参数，由服务端原子分配下一个 patch 版本 */
+      allocate_version?: boolean
+    }
   ): Promise<VersionView> {
     return request(`/flows/${flowId}/versions/${version}`, {
       method: 'PUT',
@@ -946,6 +966,8 @@ export interface VersionView {
   created_at?: string | null
   published_at?: string | null
   created_by: string
+  /** C5-1：草稿最近保存时间——下次保存作为乐观锁基准回传 */
+  updated_at?: string | null
 }
 
 export interface NodeDescriptorView {

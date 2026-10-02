@@ -323,7 +323,8 @@ function CopilotInner({
     handler: async () => {
       const st = useFlowEditor.getState()
       const layouted = symmetricLayout(st.nodes, st.edges, 'TB')
-      st.setGraph(layouted, st.edges)
+      // C5-4：replaceGraph 保留撤销历史（可撤销排版），不再 setGraph 清栈
+      st.replaceGraph(layouted, st.edges)
       st.markDirty()
       return '已重新排版'
     },

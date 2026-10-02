@@ -43,6 +43,9 @@ export interface FlowEditorState {
 
   setFlowContext: (flowId: string, version: string, meta: FlowMeta) => void
   setGraph: (nodes: Node[], edges: Edge[]) => void
+  /** 文档级替换但可撤销（C5-2/C5-4）：当前图先压入撤销栈再整体替换，
+   *  不清空历史——AI 整图应用、自动布局走这里；调用方随后自行 markDirty */
+  replaceGraph: (nodes: Node[], edges: Edge[]) => void
   undo: () => void
   redo: () => void
   onNodesChange: OnNodesChange
@@ -224,6 +227,11 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
 
   // 载入/切换版本是文档级替换：历史失去前置语义，清空两栈
   setGraph: (nodes, edges) => set({ nodes, edges, dirty: false, past: [], future: [] }),
+
+  // 文档级替换但保留历史（C5-2/C5-4）：与 setGraph 的差异只在历史栈——
+  // 当前图入撤销栈、重做栈作废，替换本身可被 Cmd+Z 撤销
+  replaceGraph: (nodes, edges) =>
+    set((s) => ({ nodes, edges, ...pushHist(s) })),
 
   // 撤销/重做在子图视图内禁用：历史快照是「某编辑层的整图」，跨层回退会造成
   // 画布内容与面包屑层级错位。禁用比猜层级安全。

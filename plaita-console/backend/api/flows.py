@@ -80,12 +80,21 @@ class VersionView(BaseModel):
     created_at: Optional[str] = None
     published_at: Optional[str] = None
     created_by: str = ""
+    # C5-1：草稿最近保存时间——前端保存时的乐观锁基准
+    updated_at: Optional[str] = None
 
 
 class SaveVersionRequest(BaseModel):
     definition: str = Field(..., description="Flow 定义 JSON 字符串")
     layout: str = Field("{}", description="画布坐标 JSON 字符串")
     created_by: str = Field("", description="保存人")
+    # C5-1 乐观并发：调用方所基于版本的 updated_at（ISO 串）；不一致返回
+    # 409（conflict=version_stale，带 latest_updated_at）。force=True 绕过。
+    base_updated_at: Optional[str] = Field(None, description="乐观锁基准 updated_at")
+    force: bool = Field(False, description="强制覆盖（绕过乐观锁检查）")
+    allocate_version: bool = Field(
+        False, description="忽略 path 中的版本号，由服务端原子分配下一个 patch 版本"
+    )
 
 
 class PublishRequest(BaseModel):
@@ -200,6 +209,7 @@ def get_flow(flow_id: str, request: Request = None):
             "status": v.status,
             "created_at": v.created_at.isoformat() if v.created_at else None,
             "published_at": v.published_at.isoformat() if v.published_at else None,
+            "updated_at": v.updated_at.isoformat() if v.updated_at else None,
         }
         for v in store.list_versions(flow_id, tenant_id=tenant)
     ]
@@ -238,6 +248,7 @@ def get_version(flow_id: str, version: str, request: Request = None):
         created_at=out.created_at.isoformat() if out.created_at else None,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
+        updated_at=out.updated_at.isoformat() if out.updated_at else None,
     )
 
 
@@ -252,7 +263,7 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
     if store.get_flow_record(flow_id, tenant_id=tenant) is None:
         raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
     try:
-        store.save_flow_definition(
+        result = store.save_flow_definition(
             flow_id=flow_id,
             version=version,
             definition=req.definition,
@@ -260,12 +271,27 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
             status="draft",
             created_by=req.created_by,
             tenant_id=tenant,
+            base_updated_at=req.base_updated_at,
+            force=req.force,
+            allocate_version=req.allocate_version,
+        )
+    except flow_store.VersionConflictError as e:
+        # C5-1：结构化 409——前端据此弹「加载最新 / 强制覆盖」
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(e),
+                "conflict": "version_stale",
+                "latest_updated_at": e.latest_updated_at,
+            },
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    out = store.get_version(flow_id, version, tenant_id=tenant)
+    # allocate_version 时服务端可能分配了与 path 不同的版本号：以返回值为准
+    out = store.get_version(flow_id, result.version, tenant_id=tenant)
     if request is not None:
-        _audit(request, "flow.save_version", f"{flow_id}@{version}", {"bytes": len(req.definition)})
+        _audit(request, "flow.save_version", f"{flow_id}@{result.version}",
+               {"bytes": len(req.definition)})
     return VersionView(
         flow_id=out.flow_id,
         version=out.version,
@@ -275,6 +301,7 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
         created_at=out.created_at.isoformat() if out.created_at else None,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
+        updated_at=out.updated_at.isoformat() if out.updated_at else None,
     )
 
 
@@ -335,6 +362,7 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
         created_at=out.created_at.isoformat() if out.created_at else None,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
+        updated_at=out.updated_at.isoformat() if out.updated_at else None,
     )
 
 

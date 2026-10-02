@@ -7,11 +7,12 @@ API 层（M3）可通过 ``run_in_executor`` 调用，避免引入 aiosqlite 额
 """
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import create_engine, select, text, update
+from sqlalchemy import Column, DateTime, create_engine, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -54,6 +55,39 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# ---- C5-1 乐观并发：flow_versions.updated_at ----
+# models/flow.py 的 FlowVersion 未声明 updated_at（历史遗留：草稿更新时间无处
+# 可查，保存是 last-write-wins）。本服务层把列追加到映射表的 Table 元数据上：
+# 新库由 create_all 直接建出，旧库由 _migrate_sqlite_columns 补列（ADD COLUMN，
+# 幂等）。列刻意不走 ORM 映射（mapper 已在类定义时构建，后补列不进
+# column_attrs），读写一律经下方 _touch_updated_at/_updated_at_map 原生 SQL。
+# 旧库缺列时原生 SQL 报错 → 按无并发信息处理（退化为原行为，不阻塞保存）。
+if "updated_at" not in FlowVersion.__table__.c:
+    FlowVersion.__table__.append_column(Column("updated_at", DateTime, nullable=True))
+
+
+def _dt_to_iso(value: Any) -> str:
+    """updated_at 原生 SQL 取回值 → 标准 ISO 串（SQLite 裸查返回 str，需归一）。"""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    try:
+        return datetime.fromisoformat(str(value)).isoformat()
+    except ValueError:
+        return str(value)
+
+
+class VersionConflictError(ValueError):
+    """草稿乐观锁冲突：base_updated_at 与服务端不一致（C5-1）。
+
+    继承 ValueError 以兼容既有「ValueError → HTTP 409」映射；
+    ``latest_updated_at`` 供 API 层组装结构化错误体（前端据此提示加载最新）。
+    """
+
+    def __init__(self, message: str, latest_updated_at: Optional[str] = None):
+        super().__init__(message)
+        self.latest_updated_at = latest_updated_at
+
+
 # ============ Pydantic I/O 模型 ============
 
 class FlowSummary(BaseModel):
@@ -78,6 +112,8 @@ class FlowVersionOut(BaseModel):
     created_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
     created_by: str = ""
+    # C5-1：草稿最近一次保存时间，前端保存时作为乐观锁基准（base_updated_at）回传
+    updated_at: Optional[datetime] = None
 
 
 class SaveFlowDefinitionResult(BaseModel):
@@ -128,6 +164,8 @@ class FlowStore:
 
     def __init__(self, session_local: sessionmaker):
         self._session_local = session_local
+        # flow_versions.updated_at 列能力探测缓存（None=未探测）
+        self._updated_at_ok: Optional[bool] = None
 
     # ---- flow ----
 
@@ -228,6 +266,19 @@ class FlowStore:
 
     # ---- version ----
 
+    @staticmethod
+    def _next_semver_of(versions: List[str]) -> str:
+        """版本号列表中的下一个 patch 号（无合法 semver 时从 0.0.1 起步）。"""
+        best: tuple = (0, 0, 0)
+        for v in versions:
+            m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", v or "")
+            if not m:
+                continue
+            t = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if t > best:
+                best = t
+        return f"{best[0]}.{best[1]}.{best[2] + 1}"
+
     def save_flow_definition(
         self,
         flow_id: str,
@@ -237,10 +288,67 @@ class FlowStore:
         status: str = "draft",
         created_by: str = "",
         tenant_id: str = "",
+        base_updated_at: Optional[str] = None,
+        force: bool = False,
+        allocate_version: bool = False,
     ) -> SaveFlowDefinitionResult:
-        """保存（草稿）版本。已存在的 published 版本不可覆盖。"""
+        """保存（草稿）版本。已存在的 published 版本不可覆盖。
+
+        C5-1 乐观并发控制：
+        - ``base_updated_at``：调用方所基于版本的 updated_at（ISO 串，来自
+          读取/上次保存的响应）。更新既有草稿前与服务端比对，不一致抛
+          VersionConflictError（409 语义），消除 last-write-wins 静默覆盖；
+          ``force=True`` 绕过检查（用户显式选择强制覆盖）。
+        - ``allocate_version``：「另存新版本」时忽略调用方 version，按库内
+          现有最大 semver 原子分配 patch+1（同一 session 内读+插，
+          IntegrityError 重试兜底），消除前端本地列表算 next 的撞号；
+          实际版本号经返回值 ``version`` 通告。
+        """
         self.ensure_flow(flow_id, tenant_id=tenant_id)
+        attempts = 3 if allocate_version else 1
+        last_exc: Optional[IntegrityError] = None
+        for attempt in range(attempts):
+            try:
+                return self._save_flow_once(
+                    flow_id=flow_id,
+                    version=version,
+                    definition=definition,
+                    layout=layout,
+                    status=status,
+                    created_by=created_by,
+                    tenant_id=tenant_id,
+                    base_updated_at=base_updated_at,
+                    force=force,
+                    allocate_version=allocate_version,
+                )
+            except IntegrityError as e:
+                # allocate_version 下并发插入撞了唯一约束：重试重新分配版本号
+                last_exc = e
+                continue
+        raise ValueError(f"版本 {flow_id}@{version} 已存在") from last_exc
+
+    def _save_flow_once(
+        self,
+        flow_id: str,
+        version: str,
+        definition: str,
+        layout: str,
+        status: str,
+        created_by: str,
+        tenant_id: str,
+        base_updated_at: Optional[str],
+        force: bool,
+        allocate_version: bool,
+    ) -> SaveFlowDefinitionResult:
         with self._session_local() as session:
+            if allocate_version:
+                existing_versions = session.scalars(
+                    select(FlowVersion.version).where(
+                        FlowVersion.tenant_id == tenant_id,
+                        FlowVersion.flow_id == flow_id,
+                    )
+                ).all()
+                version = self._next_semver_of(list(existing_versions))
             existing = session.scalars(
                 select(FlowVersion).where(
                     FlowVersion.tenant_id == tenant_id,
@@ -253,9 +361,23 @@ class FlowStore:
                     raise ValueError(
                         f"版本 {flow_id}@{version} 已发布，不可覆盖"
                     )
+                stored = self._stored_updated_at(session, flow_id, version, tenant_id)
+                if (
+                    base_updated_at is not None
+                    and stored is not None
+                    and stored != base_updated_at
+                    and not force
+                ):
+                    raise VersionConflictError(
+                        f"画布所基于的版本已被他人更新（{flow_id}@{version}），"
+                        "请加载最新或选择强制覆盖",
+                        latest_updated_at=stored,
+                    )
                 existing.definition = definition
                 existing.layout = layout
                 existing.status = status
+                session.flush()
+                self._touch_updated_at(session, flow_id, version, tenant_id)
                 session.commit()
                 return SaveFlowDefinitionResult(
                     flow_id=flow_id, version=version, status=existing.status
@@ -270,12 +392,79 @@ class FlowStore:
                 created_by=created_by,
             )
             session.add(row)
-            try:
-                session.commit()
-            except IntegrityError as e:
-                session.rollback()
-                raise ValueError(f"版本 {flow_id}@{version} 已存在") from e
+            session.flush()
+            self._touch_updated_at(session, flow_id, version, tenant_id)
+            session.commit()
             return SaveFlowDefinitionResult(flow_id=flow_id, version=version, status=status)
+
+    # ---- updated_at 原生 SQL（C5-1）----
+    # 列不在 ORM 映射内（见模块头注释）；这里统一读写并做能力降级：
+    # 旧库缺列时按「无并发信息」处理，保存行为与历史版本完全一致。
+
+    def _updated_at_supported(self, session: Session) -> bool:
+        """探测 flow_versions.updated_at 列是否存在（独立连接，结果缓存）。"""
+        if self._updated_at_ok is None:
+            try:
+                with session.get_bind().connect() as conn:
+                    conn.execute(text("SELECT updated_at FROM flow_versions LIMIT 1"))
+                self._updated_at_ok = True
+            except Exception:  # noqa: BLE001 — 旧库缺列
+                self._updated_at_ok = False
+        return self._updated_at_ok
+
+    def _touch_updated_at(
+        self, session: Session, flow_id: str, version: str, tenant_id: str
+    ) -> None:
+        """同事务内刷新 updated_at（保存即前进乐观锁基准）。"""
+        if not self._updated_at_supported(session):
+            return
+        session.execute(
+            text(
+                "UPDATE flow_versions SET updated_at = :ts "
+                "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver"
+            ),
+            {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+        )
+
+    def _stored_updated_at(
+        self, session: Session, flow_id: str, version: str, tenant_id: Optional[str]
+    ) -> Optional[str]:
+        """读取某版本当前 updated_at（ISO 串）；列缺失/为空返回 None。"""
+        if not self._updated_at_supported(session):
+            return None
+        sql = "SELECT updated_at FROM flow_versions WHERE flow_id = :fid AND version = :ver"
+        params: Dict[str, Any] = {"fid": flow_id, "ver": version}
+        if tenant_id is not None:
+            sql += " AND tenant_id = :tid"
+            params["tid"] = tenant_id
+        try:
+            row = session.execute(text(sql), params).first()
+        except Exception:  # noqa: BLE001 — 旧库缺列
+            return None
+        if not row or not row[0]:
+            return None
+        return _dt_to_iso(row[0])
+
+    def _stored_updated_at_map(
+        self, session: Session, flow_id: str, tenant_id: Optional[str]
+    ) -> Dict[str, str]:
+        """一次取整个 flow 各版本的 updated_at（列表查询用）。"""
+        if not self._updated_at_supported(session):
+            return {}
+        sql = "SELECT version, updated_at FROM flow_versions WHERE flow_id = :fid"
+        params: Dict[str, Any] = {"fid": flow_id}
+        if tenant_id is not None:
+            sql += " AND tenant_id = :tid"
+            params["tid"] = tenant_id
+        try:
+            rows = session.execute(text(sql), params).all()
+        except Exception:  # noqa: BLE001 — 旧库缺列
+            return {}
+        out: Dict[str, str] = {}
+        for r in rows:
+            if r[1]:
+                out[r[0]] = _dt_to_iso(r[1])
+        return out
 
     def get_version(
         self, flow_id: str, version: str, tenant_id: Optional[str] = None
@@ -290,7 +479,8 @@ class FlowStore:
             ).first()
             if row is None:
                 return None
-            return self._version_to_out(row)
+            updated_map = self._stored_updated_at_map(session, flow_id, tenant_id)
+            return self._version_to_out(row, updated_at=updated_map.get(row.version))
 
     def list_versions(
         self, flow_id: str, tenant_id: Optional[str] = None
@@ -304,7 +494,11 @@ class FlowStore:
                 )
                 .order_by(FlowVersion.created_at.asc())
             ).all()
-            return [self._version_to_out(r) for r in rows]
+            updated_map = self._stored_updated_at_map(session, flow_id, tenant_id)
+            return [
+                self._version_to_out(r, updated_at=updated_map.get(r.version))
+                for r in rows
+            ]
 
     def publish_version(
         self, flow_id: str, version: str, tenant_id: Optional[str] = None
@@ -345,7 +539,7 @@ class FlowStore:
             return True
 
     @staticmethod
-    def _version_to_out(row: FlowVersion) -> FlowVersionOut:
+    def _version_to_out(row: FlowVersion, updated_at: Optional[str] = None) -> FlowVersionOut:
         return FlowVersionOut(
             flow_id=row.flow_id,
             version=row.version,
@@ -355,6 +549,8 @@ class FlowStore:
             created_at=row.created_at,
             published_at=row.published_at,
             created_by=row.created_by,
+            # ISO 串 → datetime（解析失败按 None，保持兼容）
+            updated_at=datetime.fromisoformat(updated_at) if updated_at else None,
         )
 
     # ---- node descriptors ----
@@ -899,6 +1095,9 @@ def _migrate_sqlite_columns() -> None:
 
     wanted = {
         "local_executions": {"context_json": "TEXT NOT NULL DEFAULT 'null'"},
+        # C5-1 乐观并发：旧库补 updated_at 列（新库由 create_all 按追加列后的
+        # 映射表直接建出；此处 PRAGMA 判缺再补，幂等）
+        "flow_versions": {"updated_at": "DATETIME"},
     }
     with _engine.begin() as conn:
         for table, columns in wanted.items():

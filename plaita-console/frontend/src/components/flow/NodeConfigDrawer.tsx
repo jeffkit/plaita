@@ -12,6 +12,7 @@ import type { VarGroup } from './schemaForm/ExpressionInput'
 import { coreFieldsOf } from './schemaForm/coreFields'
 import { conditionOperators, normalizeFieldKeys, type JsonSchema, INTERNAL_FIELD_KEYS } from './schemaForm/schemaUtils'
 import { ConfirmDialog } from '../ui/ConfirmDialog'
+import { useDebouncedValue } from '../../hooks/useDebouncedValue'
 
 // 内嵌 child_flow 子流程的节点类型（reference 仅有内嵌子图时也可编辑）
 const SUBFLOW_TYPES = new Set(['map', 'loop', 'filter', 'find', 'reduce', 'while', 'child'])
@@ -60,6 +61,10 @@ export default function NodeConfigDrawer() {
   const enterSubgraph = useFlowEditor((s) => s.enterSubgraph)
   const allNodes = useFlowEditor((s) => s.nodes)
   const allEdges = useFlowEditor((s) => s.edges)
+  // C5-3 拖拽静默快照：upstream 反向遍历/变量目录只依赖静默 300ms 后的
+  // 全量快照——拖拽期间抽屉不再每帧重算遍历；选中节点本体保持实时
+  const quietNodes = useDebouncedValue(allNodes)
+  const quietEdges = useDebouncedValue(allEdges)
   const flowMeta = useFlowEditor((s) => s.meta)
   const hasFlowSource = useFlowEditor((s) => s.hasFlowSource)
 
@@ -185,7 +190,7 @@ export default function NodeConfigDrawer() {
     if (!node) return ids
     const walk = (id: string, depth: number) => {
       if (depth > 6) return
-      for (const e of allEdges) {
+      for (const e of quietEdges) {
         if (e.target !== id || ids.has(e.source)) continue
         ids.add(e.source)
         walk(e.source, depth + 1)
@@ -193,7 +198,7 @@ export default function NodeConfigDrawer() {
     }
     walk(node.id, 0)
     return ids
-  }, [node, allEdges])
+  }, [node, quietEdges])
 
   // 变量目录：$INPUT 流程入参 / $NODE 上游结果（沿入边反推）/ $GLOBAL 全局上下文
   const variableGroups = useMemo<VarGroup[]>(() => {
@@ -215,7 +220,7 @@ export default function NodeConfigDrawer() {
     for (const d of nodesQuery.data?.nodes || []) typeName.set(d.node_type, d.node_name || d.node_type)
     // start/end 无可引用输出，不进目录
     const NO_OUTPUT_TYPES = new Set(['start', 'end'])
-    const upstreamItems = allNodes
+    const upstreamItems = quietNodes
       .filter((n) => upstreamIds.has(n.id) && !NO_OUTPUT_TYPES.has((n.data as FlowNodeData).type))
       .map((n) => {
         const d = n.data as FlowNodeData
@@ -234,7 +239,7 @@ export default function NodeConfigDrawer() {
       })
     }
     return groups
-  }, [node, allNodes, upstreamIds, flowMeta, nodesQuery.data])
+  }, [node, quietNodes, upstreamIds, flowMeta, nodesQuery.data])
 
   if (!selectedId || !node) return null
   const d = node.data as FlowNodeData
@@ -394,7 +399,7 @@ export default function NodeConfigDrawer() {
             {d.type === 'assignment' && (
               <UpstreamOutputEditor
                 value={typeFields.upstream_output}
-                nodeIds={allNodes.filter((n) => upstreamIds.has(n.id)).map((n) => n.id)}
+                nodeIds={quietNodes.filter((n) => upstreamIds.has(n.id)).map((n) => n.id)}
                 variableGroups={variableGroups}
                 onChange={(v) => writeTypeFields({ ...typeFields, upstream_output: v })}
               />
