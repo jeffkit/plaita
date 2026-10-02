@@ -154,6 +154,10 @@ def flow(
         from plaita.dsl.ir_validate import build_flow
 
         fl = build_flow(data)
+        # 保留编译期 IR：装饰器路径没有源字符串，部署方追加规则（如
+        # forbid_node_types_in_childflow）只能对 IR 复检，没有它就各自由
+        # Flow 对象重写遍历——规则的单一实现会被稀释。
+        fl.__plaita_ir__ = data  # type: ignore[attr-defined]
         fl.__wrapped__ = func  # type: ignore[attr-defined]
         return fl
 
