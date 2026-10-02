@@ -169,9 +169,15 @@ def _cancel_key(tenant: Optional[str], execution_id: str) -> str:
 
 
 def _is_mechanism_key(key: str) -> bool:
-    """排除与执行状态同前缀的机制键（租约/取消标志/死信）。"""
+    """排除与执行状态同前缀的机制键（租约/世代计数/取消标志/死信）。
+
+    fence 世代键（plaita:execution:fence:{id}，波次②）存裸整数计数器——
+    混进列表会被 Lua cjson 投影当 summary 索引而 500（2026-10-02 e2e 实证：
+    worker 开始持租约后审批/触发类轮询全 500）。
+    """
     return (
         ":execution:lease:" in key
+        or ":execution:fence:" in key
         or ":execution:cancel:" in key
         or key.endswith(":dlq")
     )

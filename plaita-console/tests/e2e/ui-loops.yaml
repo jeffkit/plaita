@@ -70,7 +70,8 @@ cases:
   - name: "点编辑进入画布"
     browser:
       action: click
-      selector: text=编辑
+      # 行内定位：列表可能同时存在其他套件播种的流程行（严格模式禁止歧义命中）
+      selector: tr:has-text("loop-showcase") >> text=编辑
   - name: "画布就绪"
     browser:
       action: waitForSelector
