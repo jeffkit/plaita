@@ -10,6 +10,11 @@ Flow Worker测试脚本
 import json
 import uuid
 import time
+
+import pytest
+
+pytest.importorskip("redis")
+
 import redis
 import argparse
 import subprocess

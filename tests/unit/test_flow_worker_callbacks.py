@@ -9,6 +9,10 @@ CallbackManager/ExecutionContext 在跨步之间保持, 从而回调贯穿整条
 """
 
 import pytest
+
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
+
 from plaita.core.callback import FlowCallback
 from plaita.event.memory import InMemoryEventBus
 from plaita.server.flow_worker import FlowWorker

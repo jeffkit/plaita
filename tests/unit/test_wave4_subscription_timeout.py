@@ -17,6 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytest.importorskip("fakeredis")
+pytest.importorskip("redis")
+
 import fakeredis
 
 from pydantic import ValidationError

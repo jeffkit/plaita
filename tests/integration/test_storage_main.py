@@ -6,6 +6,8 @@ import unittest
 import sys
 import os
 
+import pytest
+
 # 确保仓库根在 sys.path 上 (让 ``tests.`` 包可被 import)
 current_dir = os.path.dirname(os.path.abspath(__file__))
 repo_root = os.path.dirname(os.path.dirname(current_dir))
@@ -23,7 +25,10 @@ try:
         TestRedisStateStorage, StandardRedisStateStorageTests,
     )
     REDIS_TESTS_AVAILABLE = True
-except ImportError:
+except (ImportError, pytest.skip.Exception):
+    # pytest.skip.Exception：test_storage_redis 顶部 importorskip 触发的模块级
+    # skip——它继承 BaseException 而非 ImportError，须显式并入，避免把整个模块
+    # （含内存存储用例）连坐成 skip。
     REDIS_TESTS_AVAILABLE = False
 
 

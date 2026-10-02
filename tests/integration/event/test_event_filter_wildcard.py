@@ -9,6 +9,11 @@ from unittest.mock import Mock
 
 from plaita.event import InMemoryEventBus, InMemoryEventSubscriptionStorage
 from plaita.event.core import Event
+
+import pytest
+
+pytest.importorskip("redis")
+
 from plaita.server.event_filter import EventFilter
 from plaita.storage.memory import MemoryExecutionStorage
 from plaita.storage.base import ExecutionState

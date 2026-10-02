@@ -11,6 +11,11 @@ console 取消执行后残留订阅在 TTL（约 7 天）内每个匹配事件�
 import asyncio
 from unittest.mock import AsyncMock
 
+import pytest
+
+pytest.importorskip("fakeredis")
+pytest.importorskip("redis")
+
 import fakeredis
 
 from plaita.event.core import Event, EventSubscription

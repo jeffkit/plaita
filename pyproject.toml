@@ -75,10 +75,10 @@ dev = [
     "requests",
     "aiohttp>=3.8.0",
 ]
+# lint 收敛为 ruff 单工具（2026-10 决策）：mypy/flake8/black 此前声明为零配置
+# 零执行死重——全仓无对应配置段，CI 门禁只跑 ruff。未来如上类型门（mypy/pyright）
+# 再显式加回并附配置。
 lint = [
-    "mypy",
-    "flake8",
-    "black",
     "ruff>=0.6",
 ]
 all = ["plaita[redis,server,code,http,yaml,sqlalchemy,credentials,langfuse,fast]"]

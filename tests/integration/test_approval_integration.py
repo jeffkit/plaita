@@ -14,6 +14,10 @@ from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.event.memory import InMemoryEventBus
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 from plaita.storage.base import ExecutionState
+
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
+
 from plaita.server.flow_worker import FlowWorker
 from plaita.server.services.approval_service import ApprovalService
 from plaita.server.services.service_manager import ServiceManager

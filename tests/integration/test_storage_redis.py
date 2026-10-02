@@ -2,6 +2,13 @@ import unittest
 import time
 from unittest.mock import patch
 
+import pytest
+
+# 模块级守卫：缺 fakeredis/redis 时整体 skip。旧的 try/except 只能兜 ImportError，
+# 兜不住下方类定义在模块级对 RedisExecutionStorage 的求值（缺依赖时 NameError）。
+pytest.importorskip("fakeredis")
+pytest.importorskip("redis")
+
 try:
     import fakeredis
     from plaita.storage import RedisExecutionStorage, ExecutionStorage, ExecutionState

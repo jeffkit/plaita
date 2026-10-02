@@ -5,6 +5,12 @@ import unittest
 from plaita import Flow
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 from plaita.storage.base import ExecutionState
+
+import pytest
+
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
+
 from plaita.server.flow_worker import FlowWorker
 
 

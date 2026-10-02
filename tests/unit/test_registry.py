@@ -7,6 +7,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
 
+pytest.importorskip("redis")
+
 from plaita.server.registry import (
     ServiceInfo,
     ServiceRegistry,

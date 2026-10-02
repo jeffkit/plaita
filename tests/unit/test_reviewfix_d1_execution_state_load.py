@@ -12,8 +12,13 @@ Redis 抖动一次 = 挂起执行永久失去恢复机会。
 import threading
 from unittest.mock import Mock
 
-import fakeredis
 import pytest
+
+pytest.importorskip("fakeredis")
+pytest.importorskip("redis")
+pytest.importorskip("cachetools")
+
+import fakeredis
 import redis.exceptions
 
 from plaita.server.flow_worker import RedisFlowWorker

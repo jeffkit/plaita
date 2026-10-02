@@ -6,6 +6,11 @@ import time
 import unittest
 from unittest.mock import patch
 
+import pytest
+
+pytest.importorskip("fakeredis")
+pytest.importorskip("redis")
+
 import fakeredis
 
 from plaita.server.task_queue import (

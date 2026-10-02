@@ -12,6 +12,12 @@ import signal
 import threading
 from unittest.mock import Mock
 
+import pytest
+
+pytest.importorskip("fakeredis")
+pytest.importorskip("redis")
+pytest.importorskip("cachetools")
+
 import fakeredis
 
 from plaita.server.flow_worker import RedisFlowWorker, _request_graceful_stop

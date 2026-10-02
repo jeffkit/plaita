@@ -7,6 +7,8 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch
 
+pytest.importorskip("redis")
+
 from plaita.server.log_handler import (
     RedisStreamHandler,
     setup_redis_logging,
