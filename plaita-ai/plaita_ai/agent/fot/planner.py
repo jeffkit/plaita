@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, List, Optional, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -29,28 +30,47 @@ from plaita_ai.agent.fot.tools import ToolLike, ToolSpec, register_tool_node, to
 from plaita_ai.flow_runner import CompileError, CompileResult, compile_flow, get_skill_reference
 
 
+logger = logging.getLogger(__name__)
+
+_REFERENCES_DIR_HINT = "plaita_ai/skills/flow-coder/references/"
+
+
 def _load_dsl_reference() -> str:
-    """Load the canonical flow-coder DSL reference once per process."""
+    """Load the canonical flow-coder DSL reference — 每次调用现读，不进模块缓存。
+
+    MCP server 等常驻进程里 skill 参考可能随版本升级，模块 import 时读一次
+    会让注入内容凝固在首个请求时刻；13KB 级文本 IO 相比一次 LLM 调用可忽略。
+    缺失时行为仍降级为空段（prompts 层出占位护栏），但必须 warning 可观测，
+    不允许静默的质量劣化。
+    """
     try:
         return get_skill_reference("flow-coder", "codeflow-reference.md")
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        logger.warning(
+            "flow-coder DSL 参考加载失败（%s）。FoT 提示词将降级为速记护栏，"
+            "生成质量可能下降；请检查 %s 下 codeflow-reference.md 是否完整。",
+            exc,
+            _REFERENCES_DIR_HINT,
+        )
         return ""
 
 
 def _load_authoring_reference() -> str:
-    """Load the canonical authoring-spec once per process.
+    """Load the canonical authoring-spec — 每次调用现读（时效性同上）。
 
     authoring-spec 随 flow-coder skill v0.3 起提供；旧版本包里没有该文件时
-    返回空串，prompts 层降级为内置硬约束底线提示。
+    返回空串，prompts 层降级为内置硬约束底线提示，并 warning 可观测。
     """
     try:
         return get_skill_reference("flow-coder", "authoring-spec.md")
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        logger.warning(
+            "flow-coder authoring-spec 加载失败（%s）。FoT 提示词将降级为内置"
+            "硬约束底线；请检查 %s 下 authoring-spec.md 是否完整。",
+            exc,
+            _REFERENCES_DIR_HINT,
+        )
         return ""
-
-
-_DSL_REFERENCE = _load_dsl_reference()
-_AUTHORING_REFERENCE = _load_authoring_reference()
 
 # 内置专用占位符/合成节点类型（来源：plaita.dsl.codeflow._common 的
 # _BUILTIN_HANDLED_TYPES；此处复制以免耦合编译器私有集合）
@@ -132,8 +152,8 @@ def plan_flow_source(
     specs = tool_specs or (register_tool_node(*tools) if tools else [])
     system = COMPOSE_SYSTEM.format(
         tools_section=format_tools_section(tools_prompt_section(specs)),
-        dsl_section=format_dsl_section(_DSL_REFERENCE),
-        spec_section=format_spec_section(_AUTHORING_REFERENCE),
+        dsl_section=format_dsl_section(_load_dsl_reference()),
+        spec_section=format_spec_section(_load_authoring_reference()),
         nodes_section=format_nodes_section(_registered_nodes_section(specs)),
         instruction_section=format_instruction_section(instruction),
     )
@@ -155,8 +175,8 @@ def review_flow_source(
     specs = tool_specs or (register_tool_node(*tools) if tools else [])
     system = REVIEW_SYSTEM.format(
         tools_section=format_tools_section(tools_prompt_section(specs)),
-        dsl_section=format_dsl_section(_DSL_REFERENCE),
-        spec_section=format_spec_section(_AUTHORING_REFERENCE),
+        dsl_section=format_dsl_section(_load_dsl_reference()),
+        spec_section=format_spec_section(_load_authoring_reference()),
         nodes_section=format_nodes_section(_registered_nodes_section(specs)),
         instruction_section=format_instruction_section(instruction),
     )
@@ -190,8 +210,8 @@ def rewrite_flow_source_for_run_error(
     specs = tool_specs or (register_tool_node(*tools) if tools else [])
     system = RUN_REVIEW_SYSTEM.format(
         tools_section=format_tools_section(tools_prompt_section(specs)),
-        dsl_section=format_dsl_section(_DSL_REFERENCE),
-        spec_section=format_spec_section(_AUTHORING_REFERENCE),
+        dsl_section=format_dsl_section(_load_dsl_reference()),
+        spec_section=format_spec_section(_load_authoring_reference()),
         nodes_section=format_nodes_section(_registered_nodes_section(specs)),
         instruction_section=format_instruction_section(instruction),
     )
