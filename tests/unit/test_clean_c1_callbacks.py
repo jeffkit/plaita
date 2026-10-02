@@ -16,6 +16,13 @@
 import unittest
 from unittest.mock import MagicMock
 
+import pytest
+
+# 本模块用 decision 节点制造 NodeExecutionError——decision 在兄弟仓
+# plaita-nodes（不在 plaita 依赖树内）。未装时跳过（仓库约定：未装对应
+# 依赖的测试模块自动 SKIP）；C1 断言在装有 plaita-nodes 的环境照常覆盖。
+pytest.importorskip("plaita_nodes", reason="plaita-nodes not installed: decision node unavailable")
+
 from plaita.core._error_normalization import emit_flow_end_on_close, finish_normal
 from plaita.core.callback import FlowCallback
 from plaita.core.errors import (
