@@ -1,4 +1,5 @@
 from datetime import datetime
+import inspect
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from plaita.server.task_queue import (
     DEFAULT_CONSUMER_GROUP,
     DEFAULT_MAX_DELIVERIES,
     RedisStreamTaskQueue,
+    StreamTask,
 )
 from plaita.server.execution_lease import (
     DEFAULT_LEASE_TTL_SECONDS,
@@ -66,6 +68,30 @@ def _fencing_disabled() -> bool:
 def _watchdog_disabled() -> bool:
     """波次②回滚开关（看门狗半边）：PLAITA_DISABLE_LEASE_WATCHDOG=1 时不启动续租线程。"""
     return _env_switch("PLAITA_DISABLE_LEASE_WATCHDOG")
+
+
+class StatePersistError(RuntimeError):
+    """执行状态落盘失败（``save_execution_state`` 返回 False）。
+
+    Redis 后端把一切异常（网络瞬断/序列化失败）吞成 False；终态/挂起/步进
+    落盘失败若被静默放行，消息会被 ack——节点副作用已发生而执行状态永远
+    停在旧值（僵尸执行）。此处把 False 升级为异常，让 ``RedisFlowWorker.run``
+    的兜底路径不 ack 消息、走 at-least-once 重投。
+
+    刻意**不是** ValueError 子类：run() 把 ValueError 当畸形消息 poison ack，
+    继承它会让存储瞬态错误仍被丢弃（ReviewFix D1 同款教训）。
+    """
+
+
+class ServiceDispatchError(RuntimeError):
+    """挂起服务任务投递失败（有 redis 客户端时不再吞）。
+
+    挂起时先 save(suspended) 再 rpush 服务队列；rpush 失败若被吞，执行已
+    suspended、消息被 ack → delay/approval 任务永无人接，永久挂起。抛出后
+    消息走重投、下轮 resume 重新执行挂起节点再派发（重复注册的订阅由
+    EventFilter 终态 GC / TTL 兜底）。suspended 状态保留，不翻 error。
+    """
+
 
 class FlowWorker:
     """
@@ -186,6 +212,32 @@ class FlowWorker:
         if not self.execution_lease.renew(lease_execution_id, lease_holder, self.lease_ttl_seconds):
             raise ExecutionLeaseError(
                 f"lost lease for execution {lease_execution_id}; aborting resume"
+            )
+
+    def _persist_state_or_raise(self, execution_id: str, state: ExecutionState, phase: str) -> None:
+        """落盘执行状态并检查返回值：False → 抛 ``StatePersistError``。
+
+        ``save_execution_state`` 的契约是吞掉一切异常返回 False（Redis 后端
+        网络瞬断/序列化失败均如此）。start 路径历史上检查过返回值，但
+        终态/挂起/取消/步进/错误态保存与 resume 两条路径此前不检查——
+        is_end 落盘失败 → break → 正常返回 → 消息被 ack，节点副作用已发生
+        而执行状态永远停在 running/suspended（僵尸执行）。统一在此收口：
+        失败即抛，消息不 ack，走 at-least-once 重投。
+
+        注意：fenced 世代失配是 storage 层 raise ``ExecutionLeaseError``、
+        不经本方法的 False 路径——既有失租链路不受影响。
+        """
+        saved = self.execution_storage.save_execution_state(execution_id, state)
+        if not saved:
+            logger.error(
+                "保存执行状态失败 (%s): execution_id=%s, status=%s——消息将不 ack 等待重投",
+                phase,
+                execution_id,
+                getattr(state, "status", "?"),
+            )
+            raise StatePersistError(
+                f"保存执行状态失败 ({phase}): execution_id={execution_id}, "
+                f"status={getattr(state, 'status', '?')}"
             )
     
     def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
@@ -319,11 +371,8 @@ class FlowWorker:
                 invoker="worker"
             )
 
-            # 保存执行状态
-            success = self.execution_storage.save_execution_state(execution_id, state)
-            if not success:
-                logger.error("保存执行状态失败: %s", execution_id)
-                raise RuntimeError(f"保存执行状态失败: {execution_id}")
+            # 保存执行状态（失败抛 StatePersistError，与全仓调用点统一收口）
+            self._persist_state_or_raise(execution_id, state, "start")
 
             # 处理执行结果
             final_result = self._process_execution_result(flow, result, state, execution)
@@ -409,7 +458,7 @@ class FlowWorker:
             if self._cancel_requested(execution_id):
                 state.status = "cancelled"
                 state.end_time = datetime.now().isoformat()
-                self.execution_storage.save_execution_state(execution_id, state)
+                self._persist_state_or_raise(execution_id, state, "cancelled_at_resume_entry")
                 logger.info("执行 %s 在 resume 入口命中取消标志，终态化", execution_id)
                 return {
                     "execution_id": execution_id,
@@ -450,6 +499,12 @@ class FlowWorker:
 
         except ExecutionLeaseError:
             raise
+        except (StatePersistError, ServiceDispatchError):
+            # 落盘/派发失败：执行状态保持原样（is_end 前失败 → 仍 running，
+            # 挂起派发失败 → 仍 suspended），消息不 ack 走 at-least-once 重投，
+            # 下轮从 checkpoint / 挂起节点重入。绝不落 error 终态——重投消息
+            # 会命中上方 already_terminal 短路被 ack，执行永久卡死。
+            raise
         except Exception as e:
             logger.error("恢复流程执行出错: %s", e, exc_info=True)
 
@@ -458,7 +513,7 @@ class FlowWorker:
             state.error = {"message": str(e)}
             state.end_time = datetime.now().isoformat()
 
-            self.execution_storage.save_execution_state(execution_id, state)
+            self._persist_state_or_raise(execution_id, state, "resume_error_handler")
             self._finalize_observers()
 
             raise RuntimeError(f"恢复流程执行出错: {e}")
@@ -533,14 +588,14 @@ class FlowWorker:
                 state.status = "completed"
                 state.context = context
                 state.end_time = datetime.now().isoformat()
-                self.execution_storage.save_execution_state(execution_id, state)
+                self._persist_state_or_raise(execution_id, state, "completed")
                 self._finalize_observers()
                 break
             elif is_suspend:
                 self._raise_if_lease_lost(lease_execution_id)
                 state.status = "suspended"
                 state.context = context
-                self.execution_storage.save_execution_state(execution_id, state)
+                self._persist_state_or_raise(execution_id, state, "suspended")
                 self._dispatch_service_task(result, context, execution_id)
                 break
             else:
@@ -555,7 +610,7 @@ class FlowWorker:
                     state.status = "cancelled"
                     state.context = context
                     state.end_time = datetime.now().isoformat()
-                    self.execution_storage.save_execution_state(execution_id, state)
+                    self._persist_state_or_raise(execution_id, state, "cancelled")
                     self._finalize_observers()
                     logger.info("执行 %s 已在步界响应取消（标志键命中），终态化", execution_id)
                     break
@@ -582,11 +637,16 @@ class FlowWorker:
                         self._raise_if_lease_lost(lease_execution_id)
                         state.context = context
                         state.last_update_time = datetime.now().isoformat()
-                        self.execution_storage.save_execution_state(execution_id, state)
+                        self._persist_state_or_raise(execution_id, state, "step_persist")
                         steps_since_persist = 0
                         logger.info("流程步骤执行完成，继续下一步: %s", execution_id)
 
                 except ExecutionLeaseError:
+                    raise
+                except StatePersistError:
+                    # 步进落盘失败必须原样上抛：若落进下面的通用 except，
+                    # 会把可重投的瞬态失败改写成 error 终态（消息被 ack 后
+                    # 重投命中 already_terminal 短路），执行永久卡死。
                     raise
                 except Exception as e:
                     logger.error("流程执行出错: %s", e, exc_info=True)
@@ -594,7 +654,7 @@ class FlowWorker:
                     state.context = context
                     state.error = {"message": str(e)}
                     state.end_time = datetime.now().isoformat()
-                    self.execution_storage.save_execution_state(execution_id, state)
+                    self._persist_state_or_raise(execution_id, state, "error_state")
                     break
 
         return result
@@ -641,9 +701,20 @@ class FlowWorker:
                 "挂起任务已投递: %s → %s (execution_id=%s)", subtype, queue_key, execution_id
             )
         except Exception as e:
+            # 有 redis 客户端时投递失败必须上抛（任务②）：此刻执行已落盘为
+            # suspended，吞掉异常会让消息被 ack——delay/approval 任务永无人
+            # 接，执行永久挂起。抛出后消息不 ack 走重投，下轮 resume 重新
+            # 执行挂起节点再派发；suspended 状态经 resume_flow 的定向放行
+            # 保留（不翻 error）。代价：重投会重复注册订阅，EventFilter 的
+            # 终态 GC 只回收终态，孤儿订阅留到 TTL 过期——可接受。
+            # ServiceDispatchError 非 ValueError 子类，不会被 run() 毒丸 ack。
             logger.error(
                 "挂起任务投递失败: %s → %s: %s", subtype, queue_key, e, exc_info=True
             )
+            raise ServiceDispatchError(
+                f"挂起任务投递失败: {subtype} → {queue_key} "
+                f"(execution_id={execution_id}): {e}"
+            ) from e
 
 class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     """
@@ -762,16 +833,65 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
     def _get_task_queue(self) -> RedisStreamTaskQueue:
         if self._task_queue is None:
-            self._task_queue = RedisStreamTaskQueue(
-                self.redis_client,
-                self.queue_name,
+            kwargs: Dict[str, Any] = dict(
                 group_name=self._consumer_group,
                 consumer_name=self._resolve_consumer_name(),
                 claim_min_idle_ms=self._claim_min_idle_ms,
                 max_deliveries=self._max_deliveries,
                 dlq_key=self._dlq_key,
             )
+            # 死信守卫接线（Track B 契约）：队列类已支持 ``dead_letter_guard``
+            # 参数才传入（并行合入期向后兼容——旧类不收该参数，TypeError 会
+            # 炸掉 _get_task_queue 的全部调用方）。Track B 合入前守卫不生效，
+            # 合入后由集成联测覆盖。
+            if (
+                "dead_letter_guard"
+                in inspect.signature(RedisStreamTaskQueue.__init__).parameters
+            ):
+                kwargs["dead_letter_guard"] = self._dead_letter_guard
+            self._task_queue = RedisStreamTaskQueue(self.redis_client, self.queue_name, **kwargs)
         return self._task_queue
+
+    def _dead_letter_guard(self, task: StreamTask) -> bool:
+        """死信守卫（Track B 契约）：True=允许死信；False/抛异常=跳过。
+
+        消息体带 ``execution_id`` 且其 resume 租约键仍在 → 有活 worker 正
+        持有该执行（正在处理长步骤），此刻把消息打死信会切断其恢复路径
+        ——跳过死信，消息留 pending 等下轮。无 ``execution_id``（start 任务
+        入队时还没有 id）→ 放行。
+
+        租约键按消息体 ``tenant_id`` 路由，与 ``TenantRoutingExecutionLease``
+        同规则（已核实 execution_lease.py/tenant_context.py）：
+        ``{ns}:execution:lease:{id}``，ns = ``plaita``（default/空租户）或
+        ``plaita:{tenant_id}``。守卫在 run() 主循环内 ``_dispatch_task`` 之外
+        被调用——ContextVar 租户上下文已复位，必须用消息体携带的 tenant_id。
+
+        租约查询异常（Redis 瞬断）→ 保守返回 False 跳过死信：查询不了就
+        无法证明执行已死，宁可多留一轮 pending。这同时兼容 Track B 死信
+        实现是否自行兜底 guard 异常的两种情况。
+        """
+        body = getattr(task, "body", None)
+        if not isinstance(body, dict):
+            return True
+        execution_id = body.get("execution_id")
+        if not execution_id:
+            return True
+        namespace = tenant_namespace(body.get("tenant_id"))
+        lease_key = f"{namespace}:execution:lease:{execution_id}"
+        try:
+            lease_held = bool(self.redis_client.exists(lease_key))
+        except Exception as exc:  # noqa: BLE001 — 瞬断保守跳过，不误杀活执行
+            logger.warning(
+                "死信守卫查询租约失败（保守跳过死信）: %s: %s", lease_key, exc
+            )
+            return False
+        if lease_held:
+            logger.warning(
+                "死信跳过：执行 %s 租约仍在（活 worker 处理中），消息留 pending: %s",
+                execution_id,
+                getattr(task, "message_id", "?"),
+            )
+        return not lease_held
 
     # ---- 租约看门狗（波次② §4.1）----
 
