@@ -30,6 +30,7 @@ from plaita.core.errors import (
     ResumeType,
 )
 from plaita.core.runner import NodeRunner
+from plaita.tenant_context import DEFAULT_TENANT_ID, current_tenant
 
 if TYPE_CHECKING:
     from plaita.event.core import EventBus
@@ -564,6 +565,18 @@ async def _subscribe_event(node, flow, node_state, context):
         node_subscription_timeout = getattr(node, "subscription_timeout", None)
         if node_subscription_timeout is not None:
             subscription_params["timeout"] = node_subscription_timeout
+
+        # P3（2026-10-02 评审遗留 #6）：非 default 租户把当前租户写进订阅——
+        # 超时恢复路径（event_filter._on_subscription_timeout）没有事件载体，
+        # 租户必须在挂起时就随订阅持久化，否则恢复时按 default 命名空间加载
+        # 执行状态必然 miss，超时 resume 整体失效。default/空租户不带该键，
+        # 与历史参数集逐字节一致（存量简化 bus 替身零破坏，同 timeout 先例）；
+        # 挂起时租户 ContextVar 已由 worker 消息分发（_dispatch_task）设置。
+        # 租户上下文自顶层 plaita.tenant_context 引入——core 禁止 import
+        # server（import 分层检查）。
+        suspended_tenant = current_tenant()
+        if suspended_tenant and suspended_tenant != DEFAULT_TENANT_ID:
+            subscription_params["tenant_id"] = suspended_tenant
 
         if asyncio.iscoroutinefunction(event_bus.register_subscription):
             subscription_id = await event_bus.register_subscription(**subscription_params)

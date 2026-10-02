@@ -42,6 +42,13 @@ class EventSubscription(BaseModel):
     node_id: Optional[str] = None
     created_at: float = Field(default_factory=time.time)
     timeout: Optional[float] = None
+    # P3（2026-10-02 评审遗留 #6）：挂起时所在租户。租户原本只随事件数据
+    # 传递，超时恢复路径（event_filter._on_subscription_timeout）没有事件
+    # 载体、无从定位租户——非 default 租户的挂起执行超时后按 default
+    # 命名空间加载执行状态必然 miss，超时 resume 机制整体失效。挂起点
+    # （core/strategies._subscribe_event）把 current_tenant() 写进本字段；
+    # None = default/存量订阅（升级前写入，语义零回归）。
+    tenant_id: Optional[str] = None
     processed_events: Set[str] = Field(default_factory=set)
     
     def mark_event_processed(self, event_id: str) -> None:
@@ -282,13 +289,14 @@ class EventBus(ABC):
         return event_ids
     
     @abstractmethod
-    async def register_subscription(self, 
-                                  event_type: str, 
+    async def register_subscription(self,
+                                  event_type: str,
                                   filter_condition: Optional[Dict[str, Any]] = None,
                                   correlation_id: Optional[str] = None,
                                   flow_id: Optional[str] = None,
                                   node_id: Optional[str] = None,
-                                  timeout: Optional[float] = None) -> str:
+                                  timeout: Optional[float] = None,
+                                  tenant_id: Optional[str] = None) -> str:
         """注册事件订阅信息"""
         pass
     

@@ -53,6 +53,12 @@ class EventSubscriptionModel(Base):
     node_id = sa.Column(sa.String(36), nullable=True)
     created_at = sa.Column(sa.Float, nullable=False, default=time.time)
     timeout = sa.Column(sa.Float, nullable=True)  # 订阅超时时间，NULL表示无限等待
+    # P3：挂起时所在租户（None = default/存量订阅）。**存量库迁移**：本后端
+    # 建表是 CREATE TABLE IF NOT EXISTS，不会为已存在的表补列——升级前创建的
+    # 订阅表需手工执行 ``ALTER TABLE event_subscriptions ADD COLUMN
+    # tenant_id VARCHAR(255) NULL``，否则写入报 UndefinedColumn。该后端为
+    # experimental，迁移负担可接受。
+    tenant_id = sa.Column(sa.String(255), nullable=True)
 
 
 class ProcessedEventModel(Base):
@@ -275,6 +281,7 @@ class SqlalchemyEventSubscriptionStorage(EventSubscriptionStorage):
                 existing.flow_id = subscription.flow_id
                 existing.node_id = subscription.node_id
                 existing.timeout = subscription.timeout
+                existing.tenant_id = subscription.tenant_id
             else:
                 # 创建新订阅
                 db_subscription = EventSubscriptionModel(
@@ -285,7 +292,8 @@ class SqlalchemyEventSubscriptionStorage(EventSubscriptionStorage):
                     flow_id=subscription.flow_id,
                     node_id=subscription.node_id,
                     created_at=time.time(),
-                    timeout=subscription.timeout
+                    timeout=subscription.timeout,
+                    tenant_id=subscription.tenant_id
                 )
                 session.add(db_subscription)
                 
@@ -328,7 +336,8 @@ class SqlalchemyEventSubscriptionStorage(EventSubscriptionStorage):
                 node_id=db_subscription.node_id,
                 created_at=db_subscription.created_at,
                 processed_events=processed_events,
-                timeout=db_subscription.timeout
+                timeout=db_subscription.timeout,
+                tenant_id=db_subscription.tenant_id
             )
     
     async def list_subscriptions(self, 
@@ -377,7 +386,8 @@ class SqlalchemyEventSubscriptionStorage(EventSubscriptionStorage):
                     node_id=db_sub.node_id,
                     created_at=db_sub.created_at,
                     processed_events=processed_events,
-                    timeout=db_sub.timeout
+                    timeout=db_sub.timeout,
+                    tenant_id=db_sub.tenant_id
                 )
                 subscriptions.append(subscription)
             
@@ -776,7 +786,8 @@ class SqlalchemyEventBus(EventBus):
                                   correlation_id: Optional[str] = None,
                                   flow_id: Optional[str] = None,
                                   node_id: Optional[str] = None,
-                                  timeout: Optional[float] = None) -> str:
+                                  timeout: Optional[float] = None,
+                                  tenant_id: Optional[str] = None) -> str:
         """注册事件订阅"""
         await self._ensure_tables_if_pending()
         subscription = EventSubscription(
@@ -785,7 +796,9 @@ class SqlalchemyEventBus(EventBus):
             correlation_id=correlation_id,
             flow_id=flow_id,
             node_id=node_id,
-            timeout=timeout
+            timeout=timeout,
+            # P3：订阅携带租户，超时恢复路径据此定位租户命名空间（None=default）
+            tenant_id=tenant_id
         )
         
         subscription_id = await self.subscription_storage.store_subscription(subscription)

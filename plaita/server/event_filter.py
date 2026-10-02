@@ -221,9 +221,11 @@ class EventFilter:
             logger.debug("订阅 %s 超时但无 correlation_id，跳过", sub_id)
             return
 
-        # 挂起订阅本身不携带租户（租户随事件数据传递，超时路径没有事件载体），
-        # 按 default 命名空间加载执行状态（default/空租户 = 历史前缀 plaita）。
-        tenant_token = set_current_tenant(None)
+        # P3（2026-10-02 评审遗留 #6）：租户取自订阅——挂起点
+        # （core/strategies._subscribe_event）已把挂起时的租户写进订阅的
+        # tenant_id 字段。None = default/存量订阅（升级前写入），语义与历史
+        # 的 set_current_tenant(None) 零回归。
+        tenant_token = set_current_tenant(subscription.tenant_id)
         try:
             state = self.execution_storage.load_execution_state(execution_id)
         finally:
@@ -265,7 +267,11 @@ class EventFilter:
             "flow_id": state.flow_id,
             "execution_id": execution_id,
             "resume_type": "timeout",
-            "tenant_id": getattr(state, "tenant_id", None) or "default",
+            # P3：租户与状态加载同源——执行状态自订阅租户命名空间加载所得，
+            # 缺失时回退订阅租户，再回退 default（存量订阅兼容链）。
+            "tenant_id": getattr(state, "tenant_id", None)
+            or subscription.tenant_id
+            or "default",
             "data": {
                 "subscription_id": sub_id,
                 "event_type": subscription.event_type,

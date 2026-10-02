@@ -872,7 +872,8 @@ class RedisEventBus(EventBus):
                                   correlation_id: Optional[str] = None,
                                   flow_id: Optional[str] = None,
                                   node_id: Optional[str] = None,
-                                  timeout: Optional[float] = None) -> str:
+                                  timeout: Optional[float] = None,
+                                  tenant_id: Optional[str] = None) -> str:
         """注册事件订阅"""
         subscription = EventSubscription(
             event_type=event_type,
@@ -880,7 +881,9 @@ class RedisEventBus(EventBus):
             correlation_id=correlation_id,
             flow_id=flow_id,
             node_id=node_id,
-            timeout=timeout
+            timeout=timeout,
+            # P3：订阅携带租户，超时恢复路径据此定位租户命名空间（None=default）
+            tenant_id=tenant_id
         )
         
         subscription_id = await self.subscription_storage.store_subscription(subscription)

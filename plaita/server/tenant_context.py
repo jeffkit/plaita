@@ -1,47 +1,50 @@
-"""集群档多租户上下文。
+"""集群档多租户上下文（server 侧：兼容 re-export + 租户路由存储包装器）。
 
-键空间约定（与 console 侧 engine_sync 共用同一映射规则）：
-- 租户数据键跟随租户 namespace：``{ns}:execution:{id}``、``{ns}:flow:{id}:{ver}``、
-  ``{ns}:flow_list``、``{ns}:flow_versions:{id}``、``{ns}:execution:lease:{id}``；
-  ``tenant_namespace`` 把 default/空租户映射回历史前缀 ``plaita``（存量数据与
-  旧版本 worker 兼容），其余租户为 ``plaita:{tenant_id}``。
-- 平台机制键（任务队列、registry、control、event_filter 去重、调度锁）不分区。
+P3（2026-10-02 评审遗留 #6）分层下沉：ContextVar 与 namespace 纯函数
+（``DEFAULT_TENANT_ID`` / ``LEGACY_NAMESPACE`` / ``tenant_namespace`` /
+``current_tenant`` / ``set_current_tenant`` / ``reset_current_tenant`` /
+``_tenant_ctx``）移至顶层 ``plaita.tenant_context``——core 层禁止 import
+server（import 分层检查），而挂起点 ``core/strategies._subscribe_event``
+需要读租户。本模块逐名 re-export 保持全仓既有
+``from plaita.server.tenant_context import ...`` 调用点零改动；依赖
+storage 层的租户路由包装器（``_TenantRoutingMixin`` /
+``TenantRoutingExecutionStorage`` / ``TenantRoutingFlowStorage`` /
+``TenantRoutingExecutionLease``）留在原处不动。
 
-租户上下文用 ContextVar 承载：FlowWorker 每处理一条任务消息前 set、处理后
-reset；租户路由存储包装器据此选择（并按租户缓存）底层 RedisStorage 实例。
+键空间约定（与 console 侧 engine_sync 共用同一映射规则）见顶层模块
+docstring；平台机制键（任务队列、registry、control、event_filter 去重、
+调度锁）不分区。
 """
 from __future__ import annotations
 
 import threading
-from contextvars import ContextVar, Token
 from typing import Any, Dict, List, Optional
+
+from plaita.tenant_context import (  # noqa: F401 — 兼容 re-export
+    DEFAULT_TENANT_ID,
+    LEGACY_NAMESPACE,
+    _tenant_ctx,
+    current_tenant,
+    reset_current_tenant,
+    set_current_tenant,
+    tenant_namespace,
+)
 
 from ..storage.base import ExecutionStorage, FlowStorage
 from ..storage.redis import RedisExecutionStorage, RedisFlowStorage
 
-DEFAULT_TENANT_ID = "default"
-LEGACY_NAMESPACE = "plaita"
-
-_tenant_ctx: ContextVar[str] = ContextVar("plaita_tenant", default=DEFAULT_TENANT_ID)
-
-
-def tenant_namespace(tenant_id: Optional[str]) -> str:
-    """租户 → Redis 键 namespace。default/空 = 历史前缀 plaita（兼容）。"""
-    if not tenant_id or tenant_id == DEFAULT_TENANT_ID:
-        return LEGACY_NAMESPACE
-    return f"{LEGACY_NAMESPACE}:{tenant_id}"
-
-
-def current_tenant() -> str:
-    return _tenant_ctx.get()
-
-
-def set_current_tenant(tenant_id: Optional[str]) -> Token:
-    return _tenant_ctx.set(tenant_id or DEFAULT_TENANT_ID)
-
-
-def reset_current_tenant(token: Token) -> None:
-    _tenant_ctx.reset(token)
+__all__ = [
+    "DEFAULT_TENANT_ID",
+    "LEGACY_NAMESPACE",
+    "TenantRoutingExecutionLease",
+    "TenantRoutingExecutionStorage",
+    "TenantRoutingFlowStorage",
+    "_tenant_ctx",
+    "current_tenant",
+    "reset_current_tenant",
+    "set_current_tenant",
+    "tenant_namespace",
+]
 
 
 class _TenantRoutingMixin:
