@@ -38,7 +38,8 @@ jobs:
       matrix:
         # 3.12/3.13 为 2026-09 版本矩阵评审补充：本机验证一直在 3.13、CI 只测
         # 3.10，中间版本从未被任何环境覆盖
-        python-version: ["3.10", "3.12", "3.13"]
+        # 单腿消元实验：验证 matrix 并发是否为停滞触发器（结论后恢复三腿）
+        python-version: ["3.12"]
     # 钉 ubuntu-24.04：2026-10-01 起 ubuntu-latest 镜像漂移导致回归门 pytest
     # 步三腿同步停滞（35min 超时，纯 main 可复现），钉版本隔离镜像变量。
     runs-on: ubuntu-24.04
@@ -77,5 +78,13 @@ jobs:
       - name: Ruff BLE001 (blind except — warn only)
         run: ruff check plaita tests --select BLE001 --exit-zero
 
-      - name: CI regression gate
-        run: bash scripts/ci-gate.sh
+      # 拆步诊断：停滞只知「卡在 gate 大步内」，拆成 4 相位让 steps API
+      # 暴露卡点阶段（ci-gate.sh 支持相位参数；本地四相位全绿）
+      - name: CI gate [1/4] pytest + coverage
+        run: bash scripts/ci-gate.sh pytest
+      - name: CI gate [2/4] import layering
+        run: bash scripts/ci-gate.sh layering
+      - name: CI gate [3/4] wheel contents
+        run: bash scripts/ci-gate.sh wheel
+      - name: CI gate [4/4] module size SC-003
+        run: bash scripts/ci-gate.sh size
