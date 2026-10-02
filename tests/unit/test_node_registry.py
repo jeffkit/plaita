@@ -140,7 +140,10 @@ class TestNodeRegistry:
         from plaita.node import register_code_node
         reg = self._make_registry(auto_discover=False)
         assert "code" not in reg
-        register_code_node(reg)
+        # 显式弱后端：默认 docker 会做 daemon 可用性检查，无 docker 环境
+        # （GH hosted ubuntu-24.04+ 镜像已移除 docker）直接拒注册——本测试
+        # 钉的是注册解耦语义，不依赖后端形态
+        register_code_node(reg, default_backend="subprocess")
         assert "code" in reg
 
 
