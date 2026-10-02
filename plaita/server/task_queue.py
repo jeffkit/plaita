@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -84,6 +84,7 @@ class RedisStreamTaskQueue:
         max_deliveries: int = DEFAULT_MAX_DELIVERIES,
         dlq_key: Optional[str] = None,
         dlq_max_len: Optional[int] = None,
+        dead_letter_guard: Optional[Callable[[StreamTask], bool]] = None,
     ):
         self.redis = redis_client
         self.stream_key = stream_key
@@ -97,6 +98,13 @@ class RedisStreamTaskQueue:
             self.dlq_max_len = max(1, int(dlq_max_len))
         else:
             self.dlq_max_len = _dlq_max_len_from_env()
+        # Track B 任务1（2026-10-02 评审）：死信守卫。长步处理中的消息会被
+        # 同伴按 idle 阈值反复抢走，delivery_count 随之虚增到 max_deliveries；
+        # 若此时无条件死信（内部 XACK 原消息），存活持有者一崩，执行永久
+        # 失去恢复机会。守卫（如「执行租约仍被持有」）在任何 dead_letter
+        # 决策前调用：True=允许死信；False 或抛异常=跳过（消息留 pending）。
+        # None（默认）恒放行——存量行为零变化。
+        self.dead_letter_guard = dead_letter_guard
         self._metrics = {
             "enqueued": 0,
             "acked": 0,
@@ -105,6 +113,7 @@ class RedisStreamTaskQueue:
             "lease_conflicts": 0,
             "poison_acked": 0,
             "failed": 0,
+            "dlq_guard_skipped": 0,
         }
 
     def ensure_group(self) -> None:
@@ -143,16 +152,11 @@ class RedisStreamTaskQueue:
     def _read_once(self, block_ms: int) -> Optional[StreamTask]:
         self.ensure_group()
         # Drain any over-delivered pending into DLQ before serving work.
-        while True:
-            reclaimed = self._reclaim_one()
-            if reclaimed is None:
-                break
-            if reclaimed.delivery_count >= self.max_deliveries:
-                self.dead_letter(
-                    reclaimed,
-                    reason=f"max_deliveries={self.max_deliveries}",
-                )
-                continue
+        # 超限条目的处置（死信或守卫拒绝后的跳过）内联在 _reclaim_one 的
+        # 单轮扫描里——扫描天然收敛，无需外层 while 重扫（重扫会在
+        # claim_min_idle_ms 极小时对守卫拒绝的条目空转，见 _reclaim_one）。
+        reclaimed = self._reclaim_one()
+        if reclaimed is not None:
             self._metrics["reclaimed"] += 1
             return reclaimed
 
@@ -171,7 +175,8 @@ class RedisStreamTaskQueue:
             return None
         task = self._parse_read_response(resp, delivery_count=1)
         if task is not None and task.delivery_count >= self.max_deliveries:
-            self.dead_letter(task, reason=f"max_deliveries={self.max_deliveries}")
+            if self._guard_allows_dead_letter(task):
+                self.dead_letter(task, reason=f"max_deliveries={self.max_deliveries}")
             return None
         return task
 
@@ -195,6 +200,40 @@ class RedisStreamTaskQueue:
                     message_id,
                     exc,
                 )
+
+    def _guard_allows_dead_letter(self, task: StreamTask) -> bool:
+        """dead_letter 决策前的守卫闸门（Track B 任务1）。
+
+        无守卫（默认 None）恒 True——存量行为零变化。守卫返回 False 或
+        抛异常一律按「拒绝死信」处理：warning 日志、消息留在 pending 等
+        待下一轮处置、``dlq_guard_skipped`` 计数。典型守卫是「执行租约
+        是否仍被存活 worker 持有」：持有中说明持有者正常处理长步，此时
+        死信会让该执行永久失去 resume 机会。
+        """
+        guard = self.dead_letter_guard
+        if guard is None:
+            return True
+        try:
+            allowed = bool(guard(task))
+        except Exception as exc:
+            self._metrics["dlq_guard_skipped"] += 1
+            logger.warning(
+                "dead_letter_guard raised for %s (delivery_count=%s); "
+                "skip dead-letter, message stays pending: %s",
+                task.message_id,
+                task.delivery_count,
+                exc,
+            )
+            return False
+        if not allowed:
+            self._metrics["dlq_guard_skipped"] += 1
+            logger.warning(
+                "dead_letter_guard refused %s (delivery_count=%s); "
+                "skip dead-letter, message stays pending",
+                task.message_id,
+                task.delivery_count,
+            )
+        return allowed
 
     def dead_letter(self, task: StreamTask, *, reason: str) -> str:
         """Move task payload to DLQ stream and ack the original message."""
@@ -315,6 +354,14 @@ class RedisStreamTaskQueue:
         return 1
 
     def _reclaim_one(self) -> Optional[StreamTask]:
+        """抢回一条 idle 超阈的 pending 消息（一条；无则 None）。
+
+        扫描窗口（8 条）内逐条 XCLAIM；超 ``max_deliveries`` 的条目**就地
+        处置**——守卫允许则 dead_letter，被拒（False/异常）则跳过——两种
+        处置都继续扫下一条 pending。处置必须在同一轮扫描内完成而不能交给
+        调用方重扫：XCLAIM 会把条目 idle 归零，``claim_min_idle_ms`` 极小时
+        （如单测的 1ms）下一轮扫描会立刻再抢到同一条目，外层循环空转。
+        """
         try:
             pending = self.redis.xpending_range(
                 self.stream_key,
@@ -351,7 +398,15 @@ class RedisStreamTaskQueue:
                 continue
             mid, fields = claimed[0]
             # XCLAIM increments delivery count; use pending's count + 1 as best effort
-            return self._task_from_fields(
-                _decode(mid), fields, delivery_count=max(deliveries, 1) + 0
+            task = self._task_from_fields(
+                _decode(mid), fields, delivery_count=max(deliveries, 1)
             )
+            if task.delivery_count >= self.max_deliveries:
+                if self._guard_allows_dead_letter(task):
+                    self.dead_letter(
+                        task,
+                        reason=f"max_deliveries={self.max_deliveries}",
+                    )
+                continue
+            return task
         return None

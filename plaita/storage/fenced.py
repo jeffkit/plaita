@@ -26,7 +26,11 @@ from typing import Any, List, Optional
 
 from ..logger import logger
 from .base import ExecutionState, ExecutionStorage
-from .redis import RedisExecutionStorage
+from .redis import (
+    TERMINAL_EXECUTION_STATUSES,
+    RedisExecutionStorage,
+    execution_state_ttl_seconds,
+)
 
 try:  # server/__init__ 仅含轻量辅助，无循环导入风险
     from ..server.execution_lease import ExecutionLeaseError
@@ -35,11 +39,17 @@ except ImportError:  # pragma: no cover — 极端打包环境退化为 RuntimeE
 
 
 # 单段 Lua：fence 世代匹配才允许写执行状态。
-# KEYS[1]=状态键, KEYS[2]=fence 键, ARGV[1]=序列化状态, ARGV[2]=期望世代。
+# KEYS[1]=状态键, KEYS[2]=fence 键, ARGV[1]=序列化状态, ARGV[2]=期望世代,
+# ARGV[3]=TTL 秒（0=不带 EX；非终态传 0 保持无过期现状）。
 # 返回 1=写入成功；0=世代不符（键缺失也算不符）。
 _FENCED_SAVE_LUA = """
+local ttl = tonumber(ARGV[3]) or 0
 if redis.call('get', KEYS[2]) == ARGV[2] then
-  redis.call('set', KEYS[1], ARGV[1])
+  if ttl > 0 then
+    redis.call('set', KEYS[1], ARGV[1], 'EX', ttl)
+  else
+    redis.call('set', KEYS[1], ARGV[1])
+  end
   return 1
 else
   return 0
@@ -100,6 +110,16 @@ class FencedExecutionStorage(ExecutionStorage):
         fence_key = f"{namespace}:execution:fence:{execution_id}"
         try:
             serialized = self._inner.serialize_state(state.model_dump())
+            # C4-3 对齐（Track B 任务2）：fenced 落盘的终态键此前只 SET 不带
+            # EX，永不过期、只能靠 console 读时补偿。现按状态取与普通路径
+            # （RedisExecutionStorage.save_execution_state）同源的 TTL——常量
+            # 与 env 语义（PLAITA_EXECUTION_STATE_TTL_DAYS，<=0 关）经 import
+            # 复用自动继承；非终态 ttl=0 保持无过期（可恢复执行的活动状态）。
+            ttl = (
+                execution_state_ttl_seconds()
+                if state.status in TERMINAL_EXECUTION_STATUSES
+                else 0
+            )
             result = client.eval(
                 _FENCED_SAVE_LUA,
                 2,
@@ -107,6 +127,7 @@ class FencedExecutionStorage(ExecutionStorage):
                 fence_key,
                 serialized,
                 str(int(generation)),
+                str(int(ttl)),
             )
         except Exception as e:
             logger.error("Fenced save execution state %s failed: %s", execution_id, e)

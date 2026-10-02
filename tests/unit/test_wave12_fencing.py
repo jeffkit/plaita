@@ -37,7 +37,10 @@ from plaita.storage.fenced import (
     set_current_fence_token,
 )
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
-from plaita.storage.redis import RedisExecutionStorage
+from plaita.storage.redis import (
+    DEFAULT_EXECUTION_STATE_TTL_DAYS,
+    RedisExecutionStorage,
+)
 
 TEST_FLOW = {
     "flow_id": "f1",
@@ -221,6 +224,65 @@ class TestTenantRoutingInjection:
         inner = storage._storage_for("default")
         assert isinstance(inner, RedisExecutionStorage)
         assert not isinstance(inner, FencedExecutionStorage)
+
+
+class TestFencedTerminalStateTTL:
+    """Track B 任务2（2026-10-02 评审）：fenced 落盘的终态键没有 TTL。
+
+    普通路径 ``RedisExecutionStorage.save_execution_state`` 对终态
+    （completed/error/cancelled）写 TTL（默认 30 天，env
+    ``PLAITA_EXECUTION_STATE_TTL_DAYS`` 可调，<=0 关）；fenced Lua 只 SET
+    不带 EX——经 worker resume 路径（fenced）落盘的终态键永不过期，只能靠
+    console 读时补偿。修复后 fenced 与普通路径 TTL 语义对齐（常量/env 复用
+    storage.redis，不抄一份），非终态 ttl=0 保持无 TTL 现状。
+    """
+
+    def _storage(self, fake):
+        return FencedExecutionStorage(RedisExecutionStorage(client=fake))
+
+    def _state(self, status="completed"):
+        return ExecutionState(**{**STATE, "status": status})
+
+    def _save_with_fenced_token(self, fake, status) -> None:
+        fenced = self._storage(fake)
+        lease = RedisExecutionLease(fake)
+        gen = lease.try_acquire_fenced("exec-1", "h1", 60)
+        assert gen is not None
+        token = set_current_fence_token(gen)
+        try:
+            assert fenced.save_execution_state("exec-1", self._state(status)) is True
+        finally:
+            reset_current_fence_token(token)
+
+    @pytest.mark.parametrize("status", ["completed", "error", "cancelled"])
+    def test_terminal_state_via_fenced_gets_ttl(self, status):
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        self._save_with_fenced_token(fake, status)
+        ttl = fake.ttl("plaita:execution:exec-1")
+        assert 0 < ttl <= DEFAULT_EXECUTION_STATE_TTL_DAYS * 86400
+
+    @pytest.mark.parametrize("status", ["running", "suspended"])
+    def test_non_terminal_state_via_fenced_no_ttl(self, status):
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        self._save_with_fenced_token(fake, status)
+        assert fake.ttl("plaita:execution:exec-1") == -1
+
+    def test_fenced_terminal_ttl_env_override(self):
+        """env 语义经复用自动继承：7 天 → TTL ≤ 7 天。"""
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("PLAITA_EXECUTION_STATE_TTL_DAYS", "7")
+            self._save_with_fenced_token(fake, "completed")
+        ttl = fake.ttl("plaita:execution:exec-1")
+        assert 0 < ttl <= 7 * 86400
+
+    def test_fenced_terminal_ttl_env_disable(self):
+        """env <=0 关 TTL：fenced 终态同样不带 EX。"""
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("PLAITA_EXECUTION_STATE_TTL_DAYS", "0")
+            self._save_with_fenced_token(fake, "completed")
+        assert fake.ttl("plaita:execution:exec-1") == -1
 
 
 class TestT1ConcurrentResume:
