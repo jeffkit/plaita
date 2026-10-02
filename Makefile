@@ -4,7 +4,7 @@
 coverage:
 	python -m pytest tests/ -m "not integration and not e2e" \
 		--cov=plaita --cov-report=term --cov-report=html \
-		--cov-fail-under=79
+		--cov-fail-under=80  # 门槛 80：与 scripts/ci-gate.sh COVERAGE_THRESHOLD、pyproject.toml fail_under 三处字面保持一致
 
 ## 变异测试：并行初筛（~1.5min）。结果用 mutmut results 查看；
 ## timeout 类为假阳性，必须再跑 make mutation-recheck。
