@@ -121,9 +121,10 @@ class RedisExecutionStorage(ExecutionStorage):
         （running/suspended）是可恢复执行的活动状态，必须不过期。
 
         已核实（C4-3 报告注）：``FencedExecutionStorage`` 持 fence 世代时走
-        单段 Lua 直接 SET 状态键，不经过本方法——经 worker resume 路径
-        （fenced）落盘的终态键拿不到 TTL。控制面读取路径已做读时补偿
-        （console ``_find_execution`` 对无 TTL 的终态键补 EXPIRE）。
+        单段 Lua 直接 SET 状态键。历史上该 Lua 不带 EX，经 worker resume
+        路径落盘的终态键拿不到 TTL（靠 console 读时补偿）；2026-10-02 起
+        Lua 已按状态带终态 TTL（fenced.py 复用本模块的
+        ``execution_state_ttl_seconds``），读时补偿退化为无害的 EXPIRE 刷新。
         """
         key = self.get_namespace_key('execution', execution_id)
         try:

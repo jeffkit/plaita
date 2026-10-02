@@ -21,7 +21,7 @@ from plaita.storage.fenced import (
     reset_current_fence_token,
     set_current_fence_token,
 )
-from plaita.storage.redis import ExecutionStateLoadError
+from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STATUSES
 from plaita.logger import logger
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
@@ -32,6 +32,7 @@ from plaita.server.task_queue import (
     DEFAULT_MAX_DELIVERIES,
     RedisStreamTaskQueue,
     StreamTask,
+    enqueue_task,
 )
 from plaita.server.execution_lease import (
     DEFAULT_LEASE_TTL_SECONDS,
@@ -855,27 +856,51 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     def _dead_letter_guard(self, task: StreamTask) -> bool:
         """死信守卫（Track B 契约）：True=允许死信；False/抛异常=跳过。
 
-        消息体带 ``execution_id`` 且其 resume 租约键仍在 → 有活 worker 正
-        持有该执行（正在处理长步骤），此刻把消息打死信会切断其恢复路径
-        ——跳过死信，消息留 pending 等下轮。无 ``execution_id``（start 任务
-        入队时还没有 id）→ 放行。
+        判据是**执行状态**而非仅租约（合并评审修正）：delivery_count 被
+        XCLAIM 抢占虚增后不可逆——若只看「租约在」，持有者崩溃后租约过期，
+        守卫放行 → 消息立即死信，非终态执行的唯一恢复路径被切断；若只返回
+        False 拒绝，超限消息在队列回收循环里只会被反复 XCLAIM/跳过、**永远
+        不会再被派发**，同样救不回执行。因此：
 
-        租约键按消息体 ``tenant_id`` 路由，与 ``TenantRoutingExecutionLease``
-        同规则（已核实 execution_lease.py/tenant_context.py）：
-        ``{ns}:execution:lease:{id}``，ns = ``plaita``（default/空租户）或
-        ``plaita:{tenant_id}``。守卫在 run() 主循环内 ``_dispatch_task`` 之外
-        被调用——ContextVar 租户上下文已复位，必须用消息体携带的 tenant_id。
+        - 执行状态缺失或已终态（completed/error/cancelled）→ 放行死信
+          （终态消息本就会被 already_terminal 短路 ack，死信记录更可查）；
+        - 状态加载失败（Redis 瞬断/损坏）→ 保守跳过死信；
+        - 非终态 + 租约在 → 有活 worker 正持有（长步骤处理中）→ 跳过死信；
+        - 非终态 + 租约空（持有者已死）→ **重新入队一份同体消息**（delivery
+          归 1，恢复路径重生）后放行原消息死信。并发守卫双入队无害：两条
+          新消息被 resume 租约串行化，第二条命中 already_terminal 短路。
 
-        租约查询异常（Redis 瞬断）→ 保守返回 False 跳过死信：查询不了就
-        无法证明执行已死，宁可多留一轮 pending。这同时兼容 Track B 死信
-        实现是否自行兜底 guard 异常的两种情况。
+        租户路由：状态存储经 ContextVar 路由、租约键手工拼装，两者都用
+        消息体 ``tenant_id``（守卫在 run() 主循环内 ``_dispatch_task`` 之外
+        被调用，ContextVar 已复位）。键格式与 ``TenantRoutingExecutionLease``
+        同规则：``{ns}:execution:lease:{id}``，ns = ``plaita``（default/空
+        租户）或 ``plaita:{tenant_id}``。
         """
         body = getattr(task, "body", None)
         if not isinstance(body, dict):
             return True
         execution_id = body.get("execution_id")
         if not execution_id:
+            # start 任务入队时还没有 execution_id，无执行可保护。
             return True
+
+        token = set_current_tenant(body.get("tenant_id"))
+        try:
+            try:
+                state = self.execution_storage.load_execution_state(execution_id)
+            except Exception as exc:  # noqa: BLE001 — 瞬断保守跳过，不误杀活执行
+                logger.warning(
+                    "死信守卫读执行状态失败（保守跳过死信）: %s: %s", execution_id, exc
+                )
+                return False
+        finally:
+            reset_current_tenant(token)
+
+        if state is None:
+            return True
+        if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+            return True
+
         namespace = tenant_namespace(body.get("tenant_id"))
         lease_key = f"{namespace}:execution:lease:{execution_id}"
         try:
@@ -891,7 +916,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 execution_id,
                 getattr(task, "message_id", "?"),
             )
-        return not lease_held
+            return False
+        try:
+            enqueue_task(self.redis_client, self.queue_name, dict(body))
+            logger.warning(
+                "执行 %s 非终态且租约已空（持有者已死），原消息 delivery 已超限："
+                "已重新入队恢复路径，放行原消息死信: %s",
+                execution_id,
+                getattr(task, "message_id", "?"),
+            )
+        except Exception as exc:  # noqa: BLE001 — 重入队失败则不能丢原消息
+            logger.warning(
+                "死信守卫重新入队失败（保守跳过死信）: %s: %s", execution_id, exc
+            )
+            return False
+        return True
 
     # ---- 租约看门狗（波次② §4.1）----
 

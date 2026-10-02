@@ -21,8 +21,11 @@ rpush 失败被吞 → 执行已 suspended、消息被 ack → delay/approval �
   已有链路不受影响。
 
 任务③（与 Track B 的契约）：``_get_task_queue`` 在队列类支持
-``dead_letter_guard`` 参数时传入守卫；守卫按消息体 tenant_id 路由租约键
-``{ns}:execution:lease:{id}``，租约在（活 worker 处理长步骤中）→ 跳过死信。
+``dead_letter_guard`` 参数时传入守卫；守卫判据 = **执行状态优先**——
+缺失/终态放行死信；非终态 + 租约在（活 worker 处理中）跳过；非终态 +
+租约空（持有者已死）重入队一份 delivery 归 1 的新消息再放行（XCLAIM
+虚增的 delivery_count 不可逆，只跳过的话超限消息永不再被派发）。租约键
+``{ns}:execution:lease:{id}`` 按消息体 tenant_id 路由。
 """
 import threading
 from unittest.mock import MagicMock, patch
@@ -286,29 +289,82 @@ class TestDispatchFailureRaises:
 
 
 class TestDeadLetterGuard:
-    def _guard_worker(self, fake):
-        return _redis_worker(fake)
+    def _guard_worker(self, fake, storage=None):
+        return _redis_worker(fake, storage=storage)
 
     def _task(self, body):
         return StreamTask(message_id="msg-1", body=body, delivery_count=5)
+
+    def _seed_running(self, worker, execution_id="exec-1"):
+        """非终态执行状态（守卫判据 = 状态优先）。"""
+        worker.execution_storage.save_execution_state(
+            execution_id, _state(execution_id=execution_id, status="running")
+        )
 
     def test_guard_allows_start_task_without_execution_id(self):
         """start 任务入队时还没有 execution_id → 放行死信。"""
         worker = self._guard_worker(fakeredis.FakeRedis(decode_responses=True))
         assert worker._dead_letter_guard(self._task({"type": "start", "flow_id": "f1"})) is True
 
-    def test_guard_allows_when_no_lease(self):
-        """无租约（执行空闲/已终态）→ 放行死信。"""
-        fake = fakeredis.FakeRedis(decode_responses=True)
-        worker = self._guard_worker(fake)
+    def test_guard_allows_when_state_missing(self):
+        """执行状态缺失（无可恢复对象）→ 放行死信，租约无需检查。"""
+        worker = self._guard_worker(fakeredis.FakeRedis(decode_responses=True))
+        fake = worker.redis_client
+        fake.set("plaita:execution:lease:exec-1", "resume:abc:3", ex=60)
         task = self._task({"type": "resume", "execution_id": "exec-1", "tenant_id": "default"})
         assert worker._dead_letter_guard(task) is True
 
-    def test_guard_blocks_when_lease_held(self):
-        """租约在（活 worker 正处理长步骤）→ 跳过死信。"""
+    def test_guard_allows_when_terminal(self):
+        """执行已终态 → 放行死信（already_terminal 短路本会 ack），不重入队。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         worker = self._guard_worker(fake)
+        worker.execution_storage.save_execution_state(
+            "exec-1", _state(execution_id="exec-1", status="completed")
+        )
+        task = self._task({"type": "resume", "execution_id": "exec-1", "tenant_id": "default"})
+        assert worker._dead_letter_guard(task) is True
+        assert fake.xlen("test:worker-save-guard") == 0
+
+    def test_guard_blocks_when_lease_held(self):
+        """非终态 + 租约在（活 worker 正处理长步骤）→ 跳过死信。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = self._guard_worker(fake)
+        self._seed_running(worker)
         fake.set("plaita:execution:lease:exec-1", "resume:abc:3", ex=60)
+        task = self._task({"type": "resume", "execution_id": "exec-1", "tenant_id": "default"})
+        assert worker._dead_letter_guard(task) is False
+        assert fake.xlen("test:worker-save-guard") == 0
+
+    def test_guard_requeues_when_holder_dead(self):
+        """非终态 + 租约空（持有者已死）→ 重入队恢复路径后放行死信。
+
+        delivery_count 被 XCLAIM 虚增不可逆：只跳过死信的话超限消息永不再
+        被派发，执行照样僵尸——必须重入队一份 delivery 归 1 的新消息。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = self._guard_worker(fake)
+        self._seed_running(worker)
+        body = {"type": "resume", "execution_id": "exec-1", "tenant_id": "default",
+                "resume_type": "event"}
+        task = self._task(body)
+        assert worker._dead_letter_guard(task) is True
+        assert fake.xlen("test:worker-save-guard") == 1
+        import json as _json
+
+        entry = fake.xrange("test:worker-save-guard")
+        payload = entry[0][1]["payload"] if isinstance(entry[0][1], dict) else entry[0][1][b"payload"]
+        assert _json.loads(payload) == body
+
+    def test_guard_skips_when_reenqueue_fails(self):
+        """重入队失败（Redis 瞬断）→ 保守跳过死信，原消息留 pending。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = self._guard_worker(fake)
+        self._seed_running(worker)
+
+        def blip(*a, **kw):
+            raise ConnectionError("connection reset")
+
+        fake.xadd = blip
         task = self._task({"type": "resume", "execution_id": "exec-1", "tenant_id": "default"})
         assert worker._dead_letter_guard(task) is False
 
@@ -316,23 +372,39 @@ class TestDeadLetterGuard:
         """租约键按消息体 tenant_id 路由（守卫运行时 ContextVar 已复位）。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         worker = self._guard_worker(fake)
-        # 只在 acme 租户 namespace 有租约
+        self._seed_running(worker, execution_id="exec-9")
+        # 只在 acme 租户 namespace 有租约 → 跳过死信
         fake.set("plaita:acme:execution:lease:exec-9", "resume:abc:3", ex=60)
         task_acme = self._task({"type": "resume", "execution_id": "exec-9", "tenant_id": "acme"})
         assert worker._dead_letter_guard(task_acme) is False
-        # 同名执行 id 在 default namespace 无租约 → 放行
+        # 同名执行在 default namespace 无租约 → 持有者已死路径：重入队后放行
         task_default = self._task({"type": "resume", "execution_id": "exec-9", "tenant_id": "default"})
         assert worker._dead_letter_guard(task_default) is True
+        assert fake.xlen("test:worker-save-guard") == 1
 
-    def test_guard_skips_dead_letter_when_redis_query_fails(self):
-        """租约查询异常（瞬断）→ 保守跳过死信（留 pending），不误杀活执行。"""
+    def test_guard_skips_dead_letter_when_lease_query_fails(self):
+        """非终态下租约查询异常（瞬断）→ 保守跳过死信，不误杀活执行。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         worker = self._guard_worker(fake)
+        self._seed_running(worker)
 
         def blip(key):
             raise ConnectionError("connection reset")
 
         fake.exists = blip
+        task = self._task({"type": "resume", "execution_id": "exec-1", "tenant_id": "default"})
+        assert worker._dead_letter_guard(task) is False
+
+    def test_guard_skips_when_state_load_raises(self):
+        """执行状态加载失败（瞬断/损坏）→ 保守跳过死信。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = self._guard_worker(fake)
+
+        class BlipStorage(MemoryExecutionStorage):
+            def load_execution_state(self, execution_id):
+                raise RuntimeError("redis blip")
+
+        worker = self._guard_worker(fake, storage=BlipStorage())
         task = self._task({"type": "resume", "execution_id": "exec-1", "tenant_id": "default"})
         assert worker._dead_letter_guard(task) is False
 
