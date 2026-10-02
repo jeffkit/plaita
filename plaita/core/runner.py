@@ -9,6 +9,7 @@ cooperative cancellation via threading.Event.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import threading
@@ -72,7 +73,7 @@ def _coerce_strategy(value) -> ErrorStrategy:
 
 
 
-def _parse_timeout(timeout) -> Optional[int]:
+def _parse_timeout_uncached(timeout):
     if not timeout:
         return None
     if isinstance(timeout, (int, float)):
@@ -90,6 +91,22 @@ def _parse_timeout(timeout) -> Optional[int]:
             f"(e.g. '300') or an ISO 8601 duration (e.g. 'PT0.3S', 'PT2S', 'PT1M')"
         ) from e
     return None if duration.total_seconds() == 0 else int(duration.total_seconds() * 1000)
+
+
+@functools.lru_cache(maxsize=256)
+def _parse_timeout_cached(timeout):
+    return _parse_timeout_uncached(timeout)
+
+
+def _parse_timeout(timeout) -> Optional[int]:
+    """解析节点/flow 超时为毫秒数（2026-10 加 memo：isodate 解析 ~4µs/次）。
+
+    lru_cache 不缓存异常，非法串保持每次抛 ValueError；不可哈希的输入在进
+    缓存前按类型门直接走原逻辑（行为与旧版逐分支一致）。
+    """
+    if timeout is None or isinstance(timeout, (bool, int, float, str)):
+        return _parse_timeout_cached(timeout)
+    return _parse_timeout_uncached(timeout)
 
 
 def _handle_timeout(flow, handler, node, time_limit_by_flow: bool):

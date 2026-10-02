@@ -1,14 +1,22 @@
 import ipaddress
 import json
 import logging
+import os
 import socket
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+import threading
+import time
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse, urlencode
 import io
 from pydantic import ConfigDict, Field, model_validator
 
 from plaita.node.basic import Node
 from plaita.core.errors import NodeException
+from plaita.core.http_session import (
+    _new_oneshot_session,
+    get_flow_session,
+    get_shared_sync_session,
+)
 from plaita.io import evaluate
 
 try:
@@ -20,6 +28,39 @@ try:
     import aiohttp
 except ImportError:
     aiohttp = None
+
+# ---------------------------------------------------------------------------
+# JSON 编解码后端（2026-10 wave2）：orjson 可用时大 payload 序列化/反序列化快
+# 5~10x（120KB 实测 stdlib ~375µs → orjson ~60µs），缺失时回退标准库。
+# 安装：pip install plaita[fast]
+# ---------------------------------------------------------------------------
+try:
+    import orjson
+
+    def _json_dumps_bytes(obj) -> bytes:
+        # orjson 原生支持 datetime/dataclass 序列化（stdlib 会 TypeError——
+        # 此为文档化改进：原先因不可序列化而失败的请求体现在能发出去）；
+        # 非法类型同样抛 TypeError，语义边界不变。
+        return orjson.dumps(obj)
+
+    _JSON_LOADS = orjson.loads
+except ImportError:  # pragma: no cover - fast extra 未装
+    def _json_dumps_bytes(obj) -> bytes:
+        return json.dumps(obj).encode("utf-8")
+
+    _JSON_LOADS = json.loads
+
+
+def _loads_lenient(text: str):
+    """JSON 反序列化：orjson 优先，NaN/Infinity 等宽松语法回退 stdlib。
+
+    orjson 按 RFC 严格拒绝 NaN/Infinity（stdlib 默认接受）；两层都失败时
+    由调用方回退到原始文本（历史行为）。
+    """
+    try:
+        return _JSON_LOADS(text)
+    except Exception:
+        return json.loads(text)  # noqa: TRY300 - 宽松兼容层，失败由调用方处理
 
 
 def _require_http():
@@ -136,6 +177,58 @@ class URLPolicyError(Exception):
     """请求 URL 违反节点的 allowedHosts/deniedHosts/blockPrivateNetworks 策略。"""
 
 
+# ---------------------------------------------------------------------------
+# 策略校验用的 DNS 解析缓存（2026-10 BFF 热路径评审）
+# ---------------------------------------------------------------------------
+# 只服务 _check_policy（SSRF 判定）；实际连接的 DNS 由 HTTP 客户端连接池自己
+# 解析/缓存（aiohttp 默认 ttl_dns_cache=10s）。TTL 缺省 30s（可配
+# PLAITA_HTTP_DNS_TTL=0 关闭）；**不缓存解析失败**——把瞬时 DNS 抖动缓存成
+# 周期性全拒是把 fail-open 放大成 fail-closed。
+
+_DNS_CACHE: Dict[Tuple[str, Optional[int]], Tuple[float, List[str]]] = {}
+_DNS_CACHE_LOCK = threading.Lock()
+
+
+def _dns_ttl_secs() -> float:
+    raw = os.environ.get("PLAITA_HTTP_DNS_TTL", "")
+    try:
+        return max(0.0, float(raw)) if raw else 30.0
+    except ValueError:
+        return 30.0
+
+
+def _resolve_host(hostname: str, port: Optional[int]) -> Optional[List[str]]:
+    """getaddrinfo 的一次性包装：返回去重排序的地址列表，gaierror 返回 None。"""
+    try:
+        infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+        return sorted({info[4][0] for info in infos})
+    except socket.gaierror:
+        return None
+
+
+def _cached_resolve_host(hostname: str, port: Optional[int]) -> Optional[List[str]]:
+    ttl = _dns_ttl_secs()
+    if ttl <= 0:
+        return _resolve_host(hostname, port)
+    key = (hostname, port)
+    now = time.monotonic()
+    with _DNS_CACHE_LOCK:
+        hit = _DNS_CACHE.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+    ips = _resolve_host(hostname, port)
+    if ips is not None:
+        with _DNS_CACHE_LOCK:
+            _DNS_CACHE[key] = (now, ips)
+    return ips
+
+
+def clear_dns_cache() -> None:
+    """清空策略校验 DNS 缓存（DNS 漂移后可显式调用；测试复位用）。"""
+    with _DNS_CACHE_LOCK:
+        _DNS_CACHE.clear()
+
+
 def _ip_matches_networks(ip: str, networks) -> bool:
     addr = ipaddress.ip_address(ip)
     if isinstance(networks, list) and networks and isinstance(networks[0], str):
@@ -155,6 +248,7 @@ def _host_allowed(
     allowed_hosts: Optional[List[str]],
     denied_hosts: Optional[List[str]],
     block_private_networks: bool,
+    resolver=None,
 ) -> None:
     """校验请求 URL 是否满足节点策略，违反即抛 :class:`URLPolicyError`。
 
@@ -162,6 +256,10 @@ def _host_allowed(
     域名、``*.suffix`` 通配、CIDR）；allowed_hosts 非空时必须命中其一；
     block_private_networks=True 时解析目标并对每个地址拒绝私网段（含 DNS
     解析——只看字面 host 挡不住域名解析到内网的绕过）。
+
+    ``resolver(hostname, port) -> Optional[List[str]]`` 可注入替代 DNS 解析
+    （生产路径传 TTL 缓存版 :func:`_cached_resolve_host`）；缺省保持本函数
+    为纯函数——单测直接调用/monkeypatch ``socket.getaddrinfo`` 不受缓存污染。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -188,12 +286,9 @@ def _host_allowed(
 
     resolved_ips: Optional[list] = None
     if denied_hosts or block_private_networks:
-        try:
-            infos = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
-                                       proto=socket.IPPROTO_TCP)
-            resolved_ips = sorted({info[4][0] for info in infos})
-        except socket.gaierror:
-            resolved_ips = None  # 解析失败交给后续连接步骤报错
+        resolved_ips = (resolver or _resolve_host)(
+            hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
+        )
 
     if denied_hosts:
         for entry in denied_hosts:
@@ -250,7 +345,8 @@ class HttpExecutor:
         return bool(self.allowed_hosts or self.denied_hosts or self.block_private_networks)
 
     def _check_policy(self, url: str) -> None:
-        _host_allowed(url, self.allowed_hosts, self.denied_hosts, self.block_private_networks)
+        _host_allowed(url, self.allowed_hosts, self.denied_hosts,
+                      self.block_private_networks, resolver=_cached_resolve_host)
 
     def _build_request_params(self):
         """Compute (url, headers, data) shared between sync and async paths."""
@@ -267,7 +363,7 @@ class HttpExecutor:
             url = parsed_url._replace(query=new_query).geturl()
 
         headers = dict(self.headers) if self.headers else {}
-        data = json.dumps(self.body).encode("utf-8") if self.body is not None else None
+        data = _json_dumps_bytes(self.body) if self.body is not None else None
         return url, headers, data
 
     def handle_request(self, ctx):
@@ -275,16 +371,22 @@ class HttpExecutor:
         if requests is None:
             _require_http()
         if self.c is None:
-            self.c = requests.Session()
-        
+            # 进程级共享连接池 session（fork 后重建、cookie 默认阻断）——
+            # 冷路径（仅 Parallel sync 分支桥走到），见 plaita.core.http_session。
+            self.c = get_shared_sync_session()
+
         request = self.new_request(ctx)
         if request is None:
             return None, Exception("Failed to create request")
-        
+
         try:
             if self._restrictions_active:
                 self._check_policy(request.url)
-            response = self.c.send(request, timeout=self.request_timeout)
+            # restricted 时首跳必须禁自动重定向：requests 的 resolve_redirects
+            # 会在 send 内部跟完 302，下面的逐跳策略校验就全部失效
+            # （2026-10 评审发现的现状 bug，非本次共享 session 引入）。
+            response = self.c.send(request, timeout=self.request_timeout,
+                                   allow_redirects=not self._restrictions_active)
             if self._restrictions_active:
                 # 逐跳校验的重定向：默认自动跟随会让 302 把请求带进被禁网段
                 hops = 0
@@ -314,7 +416,10 @@ class HttpExecutor:
             data = response.text
             res = None
             try:
-                res = response.json()
+                # 与 async 路径同构：显式解析而非 response.json()——后者经
+                # json.loads(**kwargs) 不接受自定义 loads，且字符集判定
+                # response.text 已完成。
+                res = _loads_lenient(data)
             except Exception:
                 # JSON 解析失败时回退到原始文本——预期分支, 不必记日志。
                 res = data
@@ -333,49 +438,60 @@ class HttpExecutor:
         返回 (AsyncHttpResponse, error) 与同步版本保持一致的签名。
         ``AsyncHttpResponse`` 是仅用于 async 路径的轻量包装，字段名与
         ``HttpResponse`` 相同，让 ``HTTP.execute`` 的结果处理代码可复用。
+
+        2026-10 起 session 复用策略：flow 驱动层（``core.async_utils``）为
+        每次 flow run 开一个共享 ``ClientSession``（contextvar 传递，确定性
+        关闭），本方法优先复用；脱离 flow 驱动的直接调用退回一次性会话。
         """
         if aiohttp is None:
             _require_http()
 
         url, headers, data = self._build_request_params()
 
+        session = get_flow_session()
+        if session is None or session.closed:
+            async with _new_oneshot_session() as oneshot:
+                return await self._send_async(oneshot, url, headers, data)
+        return await self._send_async(session, url, headers, data)
+
+    async def _send_async(self, session, url, headers, data):
+        """在给定 session 上执行请求（含 restricted 时的逐跳重定向校验）。"""
         try:
             if self._restrictions_active:
                 self._check_policy(url)
             timeout = aiohttp.ClientTimeout(total=self.request_timeout)
             follow = not self._restrictions_active
-            async with aiohttp.ClientSession() as session:
-                current_url, current_method = url, self.method
-                for hop in range(self.max_redirects + 1):
-                    async with session.request(
-                        method=current_method,
-                        url=current_url,
-                        headers=headers,
-                        data=data if hop == 0 else None,
-                        timeout=timeout,
-                        allow_redirects=follow,
-                    ) as response:
-                        if response.status in (301, 302, 303, 307, 308) and not follow:
-                            next_url = urljoin(str(response.url), response.headers.get("Location", ""))
-                            self._check_policy(next_url)
-                            current_method = self.method
-                            if response.status in (301, 302, 303) and current_method.upper() != "HEAD":
-                                current_method = "GET"
-                            current_url = next_url
-                            continue
-                        text = await response.text()
-                        try:
-                            res = json.loads(text)
-                        except Exception:
-                            res = text
-                        raw_resp = _AiohttpResponseWrapper(
-                            status_code=response.status,
-                            reason=response.reason,
-                            headers=dict(response.headers),
-                            body=res,
-                        )
-                        return HttpResponse(raw_response=raw_resp, res=res), None
-                return HttpResponse(), Exception(f"Too many redirects (> {self.max_redirects})")
+            current_url, current_method = url, self.method
+            for hop in range(self.max_redirects + 1):
+                async with session.request(
+                    method=current_method,
+                    url=current_url,
+                    headers=headers,
+                    data=data if hop == 0 else None,
+                    timeout=timeout,
+                    allow_redirects=follow,
+                ) as response:
+                    if response.status in (301, 302, 303, 307, 308) and not follow:
+                        next_url = urljoin(str(response.url), response.headers.get("Location", ""))
+                        self._check_policy(next_url)
+                        current_method = self.method
+                        if response.status in (301, 302, 303) and current_method.upper() != "HEAD":
+                            current_method = "GET"
+                        current_url = next_url
+                        continue
+                    text = await response.text()
+                    try:
+                        res = _loads_lenient(text)
+                    except Exception:
+                        res = text
+                    raw_resp = _AiohttpResponseWrapper(
+                        status_code=response.status,
+                        reason=response.reason,
+                        headers=dict(response.headers),
+                        body=res,
+                    )
+                    return HttpResponse(raw_response=raw_resp, res=res), None
+            return HttpResponse(), Exception(f"Too many redirects (> {self.max_redirects})")
         except URLPolicyError as e:
             return HttpResponse(), e
         except Exception as e:

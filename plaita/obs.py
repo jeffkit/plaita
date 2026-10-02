@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import uuid
 from typing import Any, Dict, List, Optional
@@ -91,6 +92,83 @@ def map_openai_usage(usage: Any) -> Optional[Dict[str, int]]:
     return mapped or None
 
 
+
+class _ObserverWorker:
+    """观察事件的独立 FIFO worker（2026-10 wave3）。
+
+    单线程串行执行事件闭包 → 事件顺序与同步派发完全一致；有界队列满时
+    丢弃并计数告警（观测损失可接受，绝不反压流程关键路径）。边界事件
+    （flow_end / flow_suspend）由调用方 :meth:`drain`——挂起/结束前必须
+    清空队列，否则子 span 晚于根 end 处理、trace 出现缺口。
+    """
+
+    _CLOSE = object()
+
+    def __init__(self, queue_size: int = 1000, drain_timeout: float = 5.0) -> None:
+        self._queue: "queue.Queue" = queue.Queue(maxsize=queue_size)
+        self._drain_timeout = drain_timeout
+        self._pending = 0
+        self._dropped = 0
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._thread: Optional[threading.Thread] = None
+
+    def _ensure_thread(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run, name="plaita-langfuse-observer", daemon=True)
+            self._thread.start()
+
+    def submit(self, fn) -> None:
+        self._ensure_thread()
+        try:
+            self._queue.put_nowait(fn)
+        except queue.Full:
+            self._dropped += 1
+            if self._dropped == 1 or self._dropped % 100 == 0:
+                logger.warning(
+                    "langfuse observer queue full; events dropped (total=%d)",
+                    self._dropped)
+            return
+        with self._cond:
+            self._pending += 1
+
+    def drain(self) -> bool:
+        """等待队列清空（含已 submit 的边界事件）；超时仅告警不抛。
+
+        Condition 等待（worker 每完成一件 notify）——边界调用零轮询延迟。
+        """
+        with self._cond:
+            if self._pending > 0:
+                self._cond.wait_for(lambda: self._pending == 0,
+                                    timeout=self._drain_timeout)
+            if self._pending > 0:
+                logger.warning(
+                    "langfuse observer drain timeout (%.1fs); %d event(s) pending, "
+                    "trace may be incomplete", self._drain_timeout, self._pending)
+                return False
+            return True
+
+    def _run(self) -> None:
+        while True:
+            fn = self._queue.get()
+            try:
+                if fn is self._CLOSE:
+                    return
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001 - 观测失败不影响流程
+                    logger.warning("langfuse observer event failed", exc_info=True)
+            finally:
+                with self._cond:
+                    self._pending -= 1
+                    if self._pending == 0:
+                        self._cond.notify_all()
+                self._queue.task_done()
+
+
 class LangfuseCallback(FlowCallback):
     """把流程执行上报为 Langfuse trace/span/generation（SDK v4，OTel 内核）。
 
@@ -109,6 +187,20 @@ class LangfuseCallback(FlowCallback):
         tags: 追加到每条 trace 的标签（自动附带 ``flow:<flow_id>``）。
         max_content_chars: input/output/metadata 里字符串的截断长度，
             防止大 payload 拖垮采集侧。
+        background: True 时节点事件经独立 FIFO worker 线程上报——
+            payload 裁剪/属性写入移出流程关键路径，事件顺序不变；
+            flow_end / flow_suspend / bind_execution 会同步清空队列
+            （超时 background_drain_timeout 秒仅告警）。False（默认）
+            保持历史同步派发。
+            ⚠️ 取值依据（2026-10 标定型基准，benchmarks/bench_flow_overhead.py
+            流 C）：GIL 下 CPU 型 handler 的自旋工作后台化后依然串行——纯
+            CPU 流程 background 反亏 ~30-60µs/事件；收益只在**节点间有
+            I/O 间隔**的流程（flow 线程等 HTTP 时 worker 并行消化积压）
+            或 handler 本身含 I/O 时成立。观测开销对节点耗时占比显著且
+            节点间有 I/O 的场景再开。
+        background_queue_size / background_drain_timeout: 后台队列上限与
+            边界 drain 超时。队列满时丢事件并计数告警（观测损失可接受，
+            绝不反压流程）。
     """
 
     def __init__(
@@ -124,6 +216,9 @@ class LangfuseCallback(FlowCallback):
         user_id_key: str = "langfuse_user_id",
         tags: Optional[List[str]] = None,
         max_content_chars: int = 10_000,
+        background: bool = False,
+        background_queue_size: int = 1000,
+        background_drain_timeout: float = 5.0,
     ) -> None:
         if client is None:
             client = self._build_client(public_key, secret_key, host, client_kwargs or {})
@@ -139,6 +234,22 @@ class LangfuseCallback(FlowCallback):
         self._root: Optional[Any] = None
         # 节点 id → 未收口 span 栈（loop/子流程会重入同一 node.id，LIFO 配对）
         self._open_spans: Dict[str, List[Any]] = {}
+        # 后台观测 worker（2026-10 wave3）：节点事件的序列化/属性写入移出
+        # 流程关键路径；None = 同步派发（background=False 的兼容路径）。
+        self._worker: Optional[_ObserverWorker] = (
+            _ObserverWorker(queue_size=background_queue_size,
+                            drain_timeout=background_drain_timeout)
+            if background else None
+        )
+
+    def _dispatch(self, fn, boundary: bool) -> None:
+        """事件派发：background 时进 FIFO worker；边界事件同步 drain。"""
+        if self._worker is None:
+            fn()
+            return
+        self._worker.submit(fn)
+        if boundary:
+            self._worker.drain()
 
     # ------------------------------------------------------------------ 构造
 
@@ -149,6 +260,9 @@ class LangfuseCallback(FlowCallback):
         同一回调实例——绑定新 execution 时重置 run 状态，防止上一个执行的
         trace/span 串到下一个。
         """
+        if self._worker is not None:
+            # 上一 run 的在途事件先落定，再重置状态（防新旧 run 串台）
+            self._worker.drain()
         self._execution = execution
         with self._lock:
             self._root = None
@@ -284,12 +398,19 @@ class LangfuseCallback(FlowCallback):
     # -------------------------------------------------------- 生命周期钩子
 
     def on_flow_start(self, flow, **kwargs) -> None:
+        self._dispatch(lambda: self._on_flow_start_impl(flow), boundary=False)
+
+    def _on_flow_start_impl(self, flow) -> None:
         with self._lock:
             self._root = None
             self._open_spans = {}
         self._ensure_root(flow)
 
     def on_flow_end(self, flow, result=None, error=None, exception=None, **kwargs) -> None:
+        self._dispatch(lambda: self._on_flow_end_impl(flow, result, error, exception),
+                       boundary=True)
+
+    def _on_flow_end_impl(self, flow, result, error, exception) -> None:
         root = self._ensure_root(flow)
         try:
             fields: Dict[str, Any] = {
@@ -318,7 +439,8 @@ class LangfuseCallback(FlowCallback):
             self._open_spans = {}
 
     def on_flow_suspend(self, flow, **kwargs) -> None:
-        self._flush()
+        # 边界：挂起进程随时可能消失——清空队列再 flush（docstring 契约）
+        self._dispatch(lambda: self._flush(), boundary=True)
 
     def on_flow_resume(self, flow, **kwargs) -> None:
         # trace 惰性重建：跨进程 resume 后本实例是空状态，下一个节点事件
@@ -326,6 +448,9 @@ class LangfuseCallback(FlowCallback):
         pass
 
     def on_node_start(self, flow, node, **kwargs) -> None:
+        self._dispatch(lambda: self._on_node_start_impl(flow, node), boundary=False)
+
+    def _on_node_start_impl(self, flow, node) -> None:
         try:
             root = self._ensure_root(flow)
             span = root.start_observation(
@@ -347,6 +472,10 @@ class LangfuseCallback(FlowCallback):
             logger.warning("langfuse span start failed", exc_info=True)
 
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:
+        self._dispatch(lambda: self._on_node_end_impl(flow, node, result, error, exception),
+                       boundary=False)
+
+    def _on_node_end_impl(self, flow, node, result, error, exception) -> None:
         span = self._pop_span(str(node.id))
         if span is None:
             return

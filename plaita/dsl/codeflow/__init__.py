@@ -39,6 +39,7 @@ from plaita.dsl.codeflow._compiler import (  # noqa: F401
     flow,
     flow_from_source,
 )
+from plaita.dsl.codeflow._emit import EmitError, emit_source  # noqa: F401
 
 __all__ = [
     "flow",
@@ -46,6 +47,8 @@ __all__ = [
     "flow_from_source",
     "compile_source",
     "compile_func",
+    "emit_source",
+    "EmitError",
     "HTTP",
     "CODE",
     "EVENT",

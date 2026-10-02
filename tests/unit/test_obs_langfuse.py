@@ -156,17 +156,17 @@ class TestConstruction(unittest.TestCase):
         with mock.patch("builtins.__import__",
                         side_effect=ImportError("No module named 'langfuse'")):
             with self.assertRaises(ImportError) as ctx:
-                LangfuseCallback()
+                LangfuseCallback(background=False)
         self.assertIn("pip install plaita[langfuse]", str(ctx.exception))
 
     def test_lazy_import_path_uses_sys_modules(self):
         with mock.patch.dict(sys.modules, {"langfuse": FakeLangfuseModule}):
-            cb = LangfuseCallback()
+            cb = LangfuseCallback(background=False)
         self.assertIsInstance(cb._client, FakeLangfuseClient)
 
     def test_injected_client_skips_import(self):
         recorder = FakeRecorder()
-        cb = LangfuseCallback(client=recorder)
+        cb = LangfuseCallback(client=recorder, background=False)
         self.assertIs(cb._client, recorder)
 
     def test_top_level_gated_export(self):
@@ -176,7 +176,7 @@ class TestConstruction(unittest.TestCase):
 
     def test_ctor_kwargs_passthrough(self):
         with mock.patch.dict(sys.modules, {"langfuse": FakeLangfuseModule}):
-            LangfuseCallback(public_key="pk", secret_key="sk", host="http://lf",
+            LangfuseCallback(background=False, public_key="pk", secret_key="sk", host="http://lf",
                              client_kwargs={"release": "r1"})
         self.assertEqual(FakeLangfuseClient.last_kwargs,
                          {"public_key": "pk", "secret_key": "sk",
@@ -224,7 +224,7 @@ def _run(flow_json: dict, cb: LangfuseCallback, registry: NodeRegistry):
 class TestRealFlowIntegration(unittest.TestCase):
     def setUp(self):
         self.recorder = FakeRecorder()
-        self.cb = LangfuseCallback(client=self.recorder)
+        self.cb = LangfuseCallback(client=self.recorder, background=False)
         self.flow_json = {
             "flow_id": "obs-flow",
             "inputType": {"dataType": "object"},
@@ -374,7 +374,7 @@ class TestRealFlowIntegration(unittest.TestCase):
             def flush(self):
                 raise RuntimeError("sdk down")
 
-        cb = LangfuseCallback(client=ExplodingClient())
+        cb = LangfuseCallback(client=ExplodingClient(), background=False)
         result = _run(self.flow_json, cb, self.registry)
         self.assertEqual(result, "生成的文本")
 
@@ -385,7 +385,7 @@ class TestDirectErrorHooks(unittest.TestCase):
 
     def test_mark_error_on_open_span(self):
         recorder = FakeRecorder()
-        cb = LangfuseCallback(client=recorder)
+        cb = LangfuseCallback(client=recorder, background=False)
 
         class F:
             flow_id = "f"
@@ -404,7 +404,7 @@ class TestDirectErrorHooks(unittest.TestCase):
 
     def test_unmatched_node_end_is_noop(self):
         recorder = FakeRecorder()
-        cb = LangfuseCallback(client=recorder)
+        cb = LangfuseCallback(client=recorder, background=False)
 
         class F:
             flow_id = "f"
@@ -422,7 +422,7 @@ class TestBoundExecutionTraceId(unittest.TestCase):
 
     def setUp(self):
         self.recorder = FakeRecorder()
-        self.cb = LangfuseCallback(client=self.recorder)
+        self.cb = LangfuseCallback(client=self.recorder, background=False)
         self.flow_json = {
             "flow_id": "obs-bind",
             "inputType": {"dataType": "object"},
@@ -474,7 +474,7 @@ class TestRunIsolation(unittest.TestCase):
 
     def test_sequential_runs_get_fresh_traces(self):
         recorder = FakeRecorder()
-        cb = LangfuseCallback(client=recorder)
+        cb = LangfuseCallback(client=recorder, background=False)
         registry = _registry(LlmShapedNode)
         flow_json = {
             "flow_id": "obs-multi",
@@ -506,7 +506,7 @@ class TestDistributedContract(unittest.TestCase):
             ],
         }
         flow = Flow.from_string(json.dumps(flow_json))
-        cb = LangfuseCallback(client=recorder)
+        cb = LangfuseCallback(client=recorder, background=False)
         execution = FlowExecution(event_bus=InMemoryEventBus(), callback_handlers=[cb])
         step = execution.run_distributed(flow, {})
         self.assertTrue(step["is_suspend"])
@@ -515,7 +515,7 @@ class TestDistributedContract(unittest.TestCase):
         # 模拟另一进程：全新 Flow 对象 + 全新执行实例，global_context 注入同一 key。
         # 挂起的 event 节点必须以 resume_type="event" 解决（continue 会被内核拒绝）。
         flow2 = Flow.from_string(json.dumps(flow_json))
-        cb2 = LangfuseCallback(client=recorder)
+        cb2 = LangfuseCallback(client=recorder, background=False)
         execution2 = FlowExecution(event_bus=InMemoryEventBus(), callback_handlers=[cb2])
         step2 = execution2.run_distributed(
             flow2, None, saved_context=step["context"],
@@ -536,7 +536,7 @@ class TestDistributedContract(unittest.TestCase):
     def test_finalize_idempotent_and_closes_root(self):
         """finalize：无 on_flow_end 场景收口 root；重复调用不炸。"""
         recorder = FakeRecorder()
-        cb = LangfuseCallback(client=recorder)
+        cb = LangfuseCallback(client=recorder, background=False)
         flow_json = {
             "flow_id": "obs-fin",
             "inputType": {"dataType": "object"},
@@ -559,6 +559,119 @@ class TestDistributedContract(unittest.TestCase):
         self.assertTrue(root.ended)
         cb.finalize()  # 幂等
         self.assertGreaterEqual(recorder.flushes, 1)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()
+
+
+# ------------------------------------------------------ background 派发（wave3）
+
+class TestBackgroundDispatch(unittest.TestCase):
+    """background=True：事件走 FIFO worker，顺序不变、边界事件同步落定。"""
+
+    def _flow(self):
+        from plaita.node import Node as BaseNode
+        from plaita.node.start import Start
+
+        class _N(BaseNode):
+            pass
+
+        return Flow.model_validate({"nodes": [Start(id="s", next="n1"),
+                                              _N(id="n1"), _N(id="n2")]})
+
+    def test_events_delivered_in_order_after_boundary(self):
+        """on_flow_end 返回时，此前所有节点事件必须已落盘（drain 契约）。"""
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder)
+        flow = self._flow()
+        node = flow.nodes[1]
+        cb.on_flow_start(flow)
+        cb.on_node_start(flow, node)
+        cb.on_node_end(flow, node, result={"k": "v"})
+        cb.on_flow_end(flow, result={"done": True})
+        # flow_end 返回后不再等 worker：此刻断言即证明 drain 生效
+        self.assertTrue(any(o.kind == "span" and o.name == "n1"
+                            for o in recorder.observations))
+        self.assertTrue(recorder.observations[-1].ended or recorder.flushes >= 1)
+        self.assertGreaterEqual(recorder.flushes, 1)
+
+    def test_fifo_ordering_many_nodes(self):
+        """多节点事件顺序与提交顺序一致（单 worker 串行）。"""
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder)
+        flow = self._flow()
+        for node in flow.nodes[1:]:
+            cb.on_node_start(flow, node)
+            cb.on_node_end(flow, node, result={"n": node.id})
+        cb.on_flow_end(flow, result={})
+        names = [o.name for o in recorder.observations
+                 if o.kind == "span" and o.name in ("n1", "n2")]
+        self.assertEqual(names, ["n1", "n2"])
+
+    def test_background_false_is_synchronous(self):
+        """background=False：handler 返回即落盘（历史行为）。"""
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder, background=False)
+        flow = self._flow()
+        node = flow.nodes[1]
+        cb.on_node_start(flow, node)
+        self.assertEqual(len(cb._open_spans["n1"]), 1)  # 状态同步更新
+
+    def test_worker_drops_on_full_queue(self):
+        """队列满：丢事件计数告警，不反压提交方。"""
+        from plaita.obs import _ObserverWorker
+        import threading
+
+        w = _ObserverWorker(queue_size=1, drain_timeout=0.5)
+        release = threading.Event()
+        ran: list = []
+
+        def blocker():
+            release.wait(2.0)
+
+        w.submit(blocker)          # 占住 worker
+        w._ensure_thread()
+        # pending 在 submit 时即 +1（不等取件）——必须等 worker 真把 blocker
+        # 取走（pending==1 且队列空），此时队列才腾出槽位
+        deadline = __import__("time").monotonic() + 2.0
+        while not (w._pending == 1 and w._queue.qsize() == 0) \
+                and __import__("time").monotonic() < deadline:
+            __import__("time").sleep(0.001)
+        w.submit(lambda: ran.append(1))   # 入队（pending=2）
+        w.submit(lambda: ran.append(2))   # 队满 → 丢弃
+        self.assertGreaterEqual(w._dropped, 1)
+        release.set()
+        self.assertTrue(w.drain())
+        self.assertEqual(ran, [1])        # 被丢的那个没有执行
+
+    def test_worker_drain_timeout_returns_false(self):
+        from plaita.obs import _ObserverWorker
+        import threading
+
+        w = _ObserverWorker(queue_size=10, drain_timeout=0.05)
+        release = threading.Event()
+        w._ensure_thread()
+        w.submit(release.wait)  # 长任务
+        deadline = __import__("time").monotonic() + 2.0
+        while w._pending == 0 and __import__("time").monotonic() < deadline:
+            __import__("time").sleep(0.001)
+        self.assertFalse(w.drain())
+        release.set()
+        self.assertTrue(w.drain())
+
+    def test_bind_execution_drains_inflight(self):
+        """bind_execution 前 drain：上一 run 的在途事件先落定再重置状态。"""
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder)
+        flow = self._flow()
+        node = flow.nodes[1]
+        cb.on_flow_start(flow)
+        cb.on_node_start(flow, node)
+        cb.bind_execution(object())  # 内部 drain → span 已建
+        spans = [o for o in recorder.observations if o.kind == "span" and o.name == "n1"]
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(cb._open_spans, {})  # 重置发生在在途事件之后
 
 
 if __name__ == "__main__":  # pragma: no cover

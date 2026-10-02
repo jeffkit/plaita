@@ -99,6 +99,9 @@ return result
 
 `_merge_timeout` 把"流程 `timeout`"与"调用方 `timeout`"取更严者；节点执行时再与"节点自身 `timeout`"取更严。任一为空表示"无限制"。
 
+超时串解析（`_parse_timeout`，数字毫秒或 ISO 8601 时长）带 LRU memo——
+同一 timeout 串每进程只解析一次；非法串不被缓存、每次照常抛 `ValueError`。
+
 ## 公共入口
 
 | 方法 | 用途 |
