@@ -17,6 +17,19 @@ import pytest
 import plaita.node.code as code_mod
 from plaita.node.code import run_python_subprocess
 
+# GH 容器作业实证（2026-10-02）：整套件推进到本模块时作业进程被 SIGKILL
+# （exit 137，-v 点名死于此处；单跑本模块 4/4 绿、本地宿主/裸容器全套绿）。
+# runner cgroup 下的进程组语义与裸环境不同，killpg 演练会误伤作业进程树。
+# 跳过域收窄到「GH Actions + 容器」：本机、裸 docker、宿主 CI 照常执行。
+_IN_GH_CONTAINER = (
+    os.environ.get("GITHUB_ACTIONS") == "true"
+    and os.path.exists("/.dockerenv")
+)
+pytestmark = pytest.mark.skipif(
+    _IN_GH_CONTAINER,
+    reason="GH 容器作业下 killpg 演练会 SIGKILL 作业进程树（137）；行为覆盖留给宿主环境",
+)
+
 SLEEPER = """
 def run(input):
     import subprocess, sys, time

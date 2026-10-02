@@ -82,8 +82,10 @@ class PromptProposer:
 
     Configured via env (PLAITA_AI_PROPOSER_BASE_URL / _MODEL / _API_KEY).
     The prompt carries the current definition, the baseline report, and the
-    dataset summary; the reply must contain a JSON object with
-    ``definition`` and ``rationale``.
+    dataset summary; the reply must contain ONE ```python code block with the
+    complete improved ``@flow`` source (the CoDeFlow path — compile-validated
+    before use) plus a ``# Rationale:`` first line. A legacy JSON reply with
+    ``definition``/``rationale`` is still accepted as a fallback.
     """
 
     def __init__(self, env: Optional[Dict[str, str]] = None):
@@ -101,16 +103,20 @@ class PromptProposer:
 
         system = (
             "You are a workflow improvement proposer for the Plaita flow engine. "
-            "You receive the current flow definition (JSON), its baseline evaluation "
-            "report, and failing cases. Return ONE JSON object only: "
-            '{"definition": "<the full improved flow definition JSON string>", '
-            '"rationale": "<what you changed and why>"}. '
-            "Fix the failing cases without regressing passing ones; change as little as possible."
+            "You receive the current flow as @flow source (preferred handle) and "
+            "as JSON definition, plus its baseline evaluation report and failing "
+            "cases. Return ONE ```python code block only, containing the complete "
+            "improved @flow source (must compile via plaita compile_source). "
+            "Put a single first line '# Rationale: <what you changed and why>' "
+            "inside the block. Fix the failing cases without regressing passing "
+            "ones; change as little as possible. Do not output JSON, do not add "
+            "prose outside the code block."
         )
         user = json.dumps(
             {
                 "flow_id": context.get("flow_id"),
                 "current_version": context.get("baseline_version"),
+                "current_source": self._emit_current_source(context.get("current_definition")),
                 "current_definition": context.get("current_definition"),
                 "baseline_report": context.get("baseline"),
                 "dataset": context.get("dataset"),
@@ -133,7 +139,76 @@ class PromptProposer:
         return self._parse(content)
 
     @staticmethod
-    def _parse(content: str) -> Optional[Dict[str, Any]]:
+    def _emit_current_source(definition: Any) -> str:
+        """当前 JSON definition → @flow 源码（emit_source），供 LLM 做最小改动。
+
+        definition 可能是 dict / JSON 字符串 / 解析不了的遗留内容——任何失败
+        都降级为空串（LLM 退回只看 JSON definition 的旧路）。
+        """
+        if not definition:
+            return ""
+        ir = definition
+        if isinstance(ir, str):
+            try:
+                ir = json.loads(ir)
+            except ValueError:
+                try:
+                    import ast
+
+                    ir = ast.literal_eval(ir)
+                except (ValueError, SyntaxError):
+                    return ""
+        if not isinstance(ir, dict):
+            return ""
+        try:
+            from plaita.dsl.codeflow import emit_source
+
+            return emit_source(ir)
+        except Exception:
+            return ""
+
+    @classmethod
+    def _parse(cls, content: str) -> Optional[Dict[str, Any]]:
+        """CoDeFlow 优先：```python 块 → compile_source 校验 → IR definition。
+
+        编译失败回退 legacy JSON（``{"definition": ..., "rationale": ...}``），
+        两者都失败返回 None（循环按 no_proposal 处理）。
+        """
+        source, rationale = cls._extract_source_block(content)
+        if source:
+            try:
+                from plaita.dsl.codeflow import compile_source
+
+                ir = compile_source(source)
+            except Exception:
+                ir = None  # 源码编译不过 → 试 legacy JSON，都不行才 None
+            if ir is not None:
+                return {
+                    "definition": json.dumps(ir, ensure_ascii=False, default=str),
+                    "rationale": (rationale or "（LLM 未提供 Rationale 行）")[:500],
+                    "source": source,
+                }
+        return cls._parse_legacy_json(content)
+
+    @staticmethod
+    def _extract_source_block(content: str) -> tuple:
+        """取第一个 ```python 块与其中的 ``# Rationale:`` 行。"""
+        import re
+
+        match = re.search(r"```python\s*\n(.*?)```", content, re.DOTALL)
+        if not match:
+            return "", ""
+        source = match.group(1).strip("\n")
+        rationale = ""
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") and "rationale" in stripped.lower():
+                rationale = stripped.lstrip("#").strip()
+                break
+        return source, rationale
+
+    @staticmethod
+    def _parse_legacy_json(content: str) -> Optional[Dict[str, Any]]:
         try:
             parsed = json.loads(content)
         except ValueError:

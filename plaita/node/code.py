@@ -373,8 +373,14 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
     平台限制时退化为杀直接子进程。
     """
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        return
+        target_pgid = os.getpgid(proc.pid)
+        # 防御栏：目标组==自身组说明子进程未按约定自成组（spawn 路径回归/
+        # mock 失真）——killpg 会连自己带整个测试/运行进程组一起 SIGKILL
+        # （2026-10-02 CI 事故根因：runner agent 被回杀→作业假停滞 35min、
+        # 日志永不落盘）。此况退化为只杀直接子进程。
+        if target_pgid != os.getpgid(0):
+            os.killpg(target_pgid, signal.SIGKILL)
+            return
     except (TypeError, OSError):
         # TypeError：pid 非 int（测试 mock）；OSError：组已消失/权限不足
         pass
