@@ -316,6 +316,26 @@ def _host_allowed(
                 )
 
 
+# 凭据类请求头：跨源重定向时必须剥离（2026-10 评审 C1：restricted 逐跳手动
+# 跟随原先原样透传全部头，Authorization/Cookie 会泄漏给重定向目标）。
+# 语义对齐 RFC 7231 §9.4 与浏览器/requests 的 rebuild_auth——同源（host
+# 未变）重定向保留全部头。
+_SENSITIVE_REDIRECT_HEADERS = frozenset({
+    "authorization", "cookie", "cookie2",
+    "proxy-authorization", "proxy-authenticate", "www-authenticate",
+})
+
+
+def _strip_sensitive_headers(headers: Dict[str, str], from_url: str, to_url: str) -> Dict[str, str]:
+    """重定向跨源（host 变化）时剥离凭据类头；同源原样返回。"""
+    if urlparse(from_url).hostname == urlparse(to_url).hostname:
+        return headers
+    return {
+        k: v for k, v in headers.items()
+        if k.lower() not in _SENSITIVE_REDIRECT_HEADERS
+    }
+
+
 class HttpExecutor:
     """HTTP执行器"""
     def __init__(self, url, method, query, body, headers, addressing, delegate,
@@ -396,9 +416,12 @@ class HttpExecutor:
                     method = self.method
                     if response.status_code in (301, 302, 303) and method.upper() != "HEAD":
                         method = "GET"
+                    # 跨源重定向剥离凭据类头（host/content-length 恒剥离）
+                    hop_headers = _strip_sensitive_headers(
+                        request.headers, response.url, next_url)
                     request = requests.Request(
                         method=method, url=next_url,
-                        headers={k: v for k, v in request.headers.items()
+                        headers={k: v for k, v in hop_headers.items()
                                  if k.lower() not in ("host", "content-length")},
                     ).prepare()
                     response = self.c.send(request, timeout=self.request_timeout, allow_redirects=False)
@@ -477,6 +500,9 @@ class HttpExecutor:
                         current_method = self.method
                         if response.status in (301, 302, 303) and current_method.upper() != "HEAD":
                             current_method = "GET"
+                        # 跨源重定向剥离凭据类头（后续跳沿用裁剪后的头）
+                        headers = _strip_sensitive_headers(
+                            headers, str(response.url), next_url)
                         current_url = next_url
                         continue
                     text = await response.text()

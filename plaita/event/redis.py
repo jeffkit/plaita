@@ -911,19 +911,30 @@ class RedisEventBus(EventBus):
         
         # 创建一个监听器来接收事件
         async def listen_for_event():
+            # 每个等待者独立的 pubsub（2026-10 评审 C3）：历史上用的是
+            # self.pubsub——它恒为 None（initialize 只在非 None 时重绑），
+            # 首个等待者在 subscribe 处 AttributeError 且异常滞留在任务里
+            # （仅 "Task exception was never retrieved" 告警），future 永不
+            # resolve 挂到超时；即便初始化了，多个等待者共享一条 pubsub，
+            # 一个等待者 finally 的 unsubscribe 会拆掉别人的订阅。
+            # 做法 _listen_for_events 相同：局部 pubsub，finally 里 aclose。
+            pubsub = self.redis.pubsub()
             try:
-                # 订阅事件类型对应的频道
-                await self.pubsub.subscribe(f"plaita:events:{event_type}")
-                
+                await pubsub.subscribe(f"plaita:events:{event_type}")
+
                 while True:
-                    # 接收消息
-                    message = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    try:
+                        # 接收消息
+                        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    except (RedisTimeoutError, RedisConnectionError, OSError):
+                        # redis-py 5+ 空轮询超时抛异常而非返回 None，属正常节奏
+                        continue
                     if message and message['type'] == 'message':
                         try:
                             # 解析事件数据
                             event_data = message['data']
                             event = Event.model_validate_json(event_data)
-                            
+
                             # 检查条件
                             if not condition or condition(event):
                                 if not future.done():
@@ -931,13 +942,26 @@ class RedisEventBus(EventBus):
                                 break
                         except Exception as e:
                             logger.warning("解析事件数据失败: %s", e)
-                    
+
                     # 检查future是否已完成（可能来自其他来源）
                     if future.done():
                         break
+            except Exception as e:
+                # 监听协程的异常必须传播给等待者，否则只留一条
+                # "Task exception was never retrieved"，调用方拿到的是
+                # 掩盖真实原因的 EventTimeoutError
+                if not future.done():
+                    future.set_exception(e)
             finally:
-                # 取消订阅
-                await self.pubsub.unsubscribe(f"plaita:events:{event_type}")
+                # 取消订阅并关闭本次等待者自己的 pubsub
+                try:
+                    await pubsub.unsubscribe(f"plaita:events:{event_type}")
+                except Exception:
+                    logger.warning("wait_for_event 取消订阅失败", exc_info=True)
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    logger.warning("wait_for_event 关闭 pubsub 失败", exc_info=True)
         
         # 启动监听器
         listen_task = asyncio.create_task(listen_for_event())
@@ -949,13 +973,23 @@ class RedisEventBus(EventBus):
             else:
                 # 无限等待
                 event = await future
-                
+
             return event
         except asyncio.TimeoutError:
             # 超时时从等待列表中移除
             if event_type in self.waiting_futures:
                 self.waiting_futures[event_type].remove(future)
             raise EventTimeoutError(event_type, timeout)
+        except BaseException:
+            # 监听协程失败（连接错误等）：真实异常已 set 到 future，这里
+            # 清理等待列表后原样抛出（评审 C3：不再吞成 Task exception
+            # was never retrieved + 永久超时）
+            if event_type in self.waiting_futures:
+                try:
+                    self.waiting_futures[event_type].remove(future)
+                except ValueError:
+                    pass
+            raise
         finally:
             # 取消监听任务
             if not listen_task.done():
