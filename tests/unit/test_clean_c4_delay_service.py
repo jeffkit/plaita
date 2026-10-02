@@ -175,7 +175,12 @@ class TestCrashRecovery(DelayServiceTestBase):
         """启动后发现旧 list 队列条目：搬运进 ZSET，坏条目按既有语义丢弃。"""
         svc = self.make_service()
         good1 = json.dumps(_task(trigger_timestamp=int(time.time() * 1000) + 60_000, node_id="ok1"))
-        good2 = json.dumps(_task(delay_ms=1, node_id="ok2"))
+        # 两个好条目都必须远未到期：本用例只验证「搬运 + 坏条目丢弃」，到期
+        # 触发语义由 TestScheduledTrigger 覆盖。历史上 good2 用 delay_ms=1，
+        # 搬进 ZSET 后 1ms 即到期——consumer 下个轮询周期（50ms）就可能提交
+        # 执行并 ZREM，主线程断言 zrange 时好条目已消失（裸跑约 2/5 挂的
+        # 时序竞态，2026-10 Track P2 修复）。
+        good2 = json.dumps(_task(delay_ms=60_000, node_id="ok2"))
         self.redis.rpush(
             self.queue_key, good1, "{not-json", json.dumps({"node_id": "bad"}), good2
         )
