@@ -8,6 +8,23 @@ cd "$PROJECT_ROOT"
 
 COVERAGE_THRESHOLD=80
 FAIL=0
+
+# Python 解析优先级（Track P2 任务4）：仓根 .python-version=3.13（git 跟踪，
+# 供 CI 矩阵对齐）而本机 pyenv 无 3.13 时，裸 python 被 shim 拦下报
+# "version '3.13' is not installed"——历史上必须手工
+# PATH="$PWD/.venv/bin:$PATH" 前缀才能本地跑门禁。这里解析一次全脚本共用：
+#   1. PLAITA_PYTHON 环境变量（显式覆盖；worktree 无自己的 .venv 时的出路）
+#   2. 仓根 .venv/bin/python（本地存在时）
+#   3. 裸 python（GitHub runner/容器无 .venv、未设变量：行为零变化）
+if [ -n "${PLAITA_PYTHON:-}" ]; then
+    PYTHON_BIN="$PLAITA_PYTHON"
+elif [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+else
+    PYTHON_BIN="python"
+fi
+echo "Python interpreter: $PYTHON_BIN"
+echo ""
 # 相位选择：./ci-gate.sh [pytest|layering|wheel|size]——CI 拆步调用（停滞时
 # steps API 暴露卡点阶段）；无参跑全量（本地用法不变）
 PHASE="${1:-all}"
@@ -25,10 +42,10 @@ echo "[1/4] Running pytest with coverage..."
 # pytest-timeout（thread 模式）：单测试卡死 150s 内判红并 dump 堆栈——
 # 2026-10-01 CI 回归门三腿停滞 35min 无日志的教训；durations 抓慢测试。
 TIMEOUT_ARGS=""
-if python -c "import pytest_timeout" 2>/dev/null; then
+if "$PYTHON_BIN" -c "import pytest_timeout" 2>/dev/null; then
     TIMEOUT_ARGS="--timeout=150 --timeout-method=thread --durations=25"
 fi
-if python -m pytest tests/ \
+if "$PYTHON_BIN" -m pytest tests/ \
     --cov=plaita \
     --cov-report=term-missing \
     --cov-fail-under="$COVERAGE_THRESHOLD" \
@@ -45,9 +62,9 @@ fi
 # 2. Import layering check
 if run_phase layering; then
 echo "[2/4] Checking import layering (no plaita.core → plaita.server imports)..."
-if python -m pytest tests/e2e/test_import_layering.py -x -q 2>/dev/null; then
+if "$PYTHON_BIN" -m pytest tests/e2e/test_import_layering.py -x -q 2>/dev/null; then
     echo "  ✓ No reverse imports detected"
-elif python -c "
+elif "$PYTHON_BIN" -c "
 import ast, pathlib, sys
 core_dir = pathlib.Path('plaita/core')
 violations = []
@@ -85,10 +102,10 @@ echo "[3/4] Checking wheel contents (no test_*.py files)..."
 WHEEL_DIR=$(mktemp -d)
 trap "rm -rf $WHEEL_DIR" EXIT
 
-if python -m pip wheel . --no-deps --wheel-dir="$WHEEL_DIR" -q 2>/dev/null; then
+if "$PYTHON_BIN" -m pip wheel . --no-deps --wheel-dir="$WHEEL_DIR" -q 2>/dev/null; then
     WHEEL_FILE=$(ls "$WHEEL_DIR"/*.whl 2>/dev/null | head -1)
     if [ -n "$WHEEL_FILE" ]; then
-        TEST_FILES=$(python -m zipfile -l "$WHEEL_FILE" 2>/dev/null | grep 'test_.*\.py' || true)
+        TEST_FILES=$("$PYTHON_BIN" -m zipfile -l "$WHEEL_FILE" 2>/dev/null | grep 'test_.*\.py' || true)
         if [ -z "$TEST_FILES" ]; then
             echo "  ✓ No test_*.py files in wheel"
         else
@@ -109,7 +126,7 @@ fi
 # 4. Module size check (SC-003: soft 200 / hard 400)
 if run_phase size; then
 echo "[4/4] Checking module sizes (SC-003 soft=200 / hard=400)..."
-if python -c "
+if "$PYTHON_BIN" -c "
 import ast, sys
 from pathlib import Path
 
