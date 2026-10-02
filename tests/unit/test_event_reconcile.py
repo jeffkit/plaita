@@ -226,6 +226,20 @@ class TestReconcileResumesMissedEvents(ReconcileTestBase):
         self.assertEqual(replayed, 0)
         self.assertEqual(_stream_payloads(self.redis_client, self.QUEUE), [])
 
+    def test_cursor_readable_on_bytes_client(self):
+        """生产 Redis.from_url 不带 decode_responses：游标读回 bytes 也要能解析。"""
+        self._setup_pending()
+        self._store_event_directly()
+        bytes_client = fakeredis.FakeRedis(server=self.server)  # bytes 模式
+        bytes_client.set(EventReconciler.CURSOR_KEY, str(time.time() + 600))
+
+        reconciler = EventReconciler(
+            self.event_storage, self.event_filter, bytes_client
+        )
+        replayed = run(reconciler.scan_once())
+
+        self.assertEqual(replayed, 0, "bytes 游标解析失败导致回填窗口重扫")
+
     def test_storage_error_swallowed(self):
         """存储扫描异常吞掉打 warning，绝不外溢影响推送主链路。"""
 

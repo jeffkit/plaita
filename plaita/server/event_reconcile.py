@@ -140,6 +140,8 @@ class EventReconciler:
             return None
         if not raw:
             return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
         try:
             return float(raw)
         except (TypeError, ValueError):
