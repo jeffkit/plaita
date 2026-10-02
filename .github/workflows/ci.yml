@@ -95,10 +95,14 @@ jobs:
         run: |
           ls tests/unit/test_*.py | sort | awk 'NR % 3 == 1' | tr '\n' '\0' | xargs -0 \
             python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 --timeout-method=thread -x -q
-      - name: CI gate [1d/6] pytest unit R-Z
+      - name: CI gate [1d/6] pytest unit R-Z（带内存取证）
         run: |
+          apt-get install -yq time procps
+          ( while sleep 3; do free -m | awk 'NR==2{print "MEM available_MB="$7}' >> /tmp/mem.log; done ) & WATCH=$!
           ls tests/unit/test_*.py | sort | awk 'NR % 3 == 2' | tr '\n' '\0' | xargs -0 \
-            python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 --timeout-method=thread -v -x -q
+            /usr/bin/time -v python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 --timeout-method=thread -v -x -q 2>&1 | tail -40
+          kill $WATCH 2>/dev/null || true
+          cat /tmp/mem.log
       - name: CI gate [2/4] import layering
         run: bash scripts/ci-gate.sh layering
       - name: CI gate [3/4] wheel contents
