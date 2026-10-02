@@ -420,10 +420,13 @@ class TestStartPathRetry:
                 _node_failure_exc(),
             ]
             with pytest.raises(NodeExecutionRetryableError):
-                worker.start_flow("f1", {}, version="1")
+                worker.start_flow("f1", {}, version="1", execution_id="exec-new")
         assert finalized == []
+        # G1（43828aa）先行落行 + 波次二任务①：可重试失败不终态化，行停在
+        # running（context 为先行落行的空 checkpoint）
         saved = storage.load_execution_state("exec-new")
         assert saved.status == "running"
+        assert saved.error is None
 
 
 # ---------- run() 主循环：不 ack、不 poison、留 pending ----------

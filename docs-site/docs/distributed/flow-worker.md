@@ -71,6 +71,12 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   error（`error.node_retries` 记录重试次数），消息走 DLQ。刻意**不**用消息
   `delivery_count` 判预算：回收路径上报的是 XCLAIM 前的投递数（少计 1），且
   达限消息在队列层就地死信、不进处理函数——按它判预算永不触发。
+  计数语义是「当前节点的**连续**失败次数」：任一节点成功推进即清零，不同
+  节点的失败不共享预算。
+- **与 G1 retry 唤醒的组合**（43828aa）：预算耗尽终态化的执行仍可经人工
+  `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零计数键，人工
+  唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持 error
+  （修复定义后仍可再 retry）。
 - **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）。
 - **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
   失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
@@ -102,13 +108,16 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
 
 - 消息体可选 `dedup_key`（console BFF `POST /executions` 请求体 additive 字段
   同名透传）：worker 在**首节点执行之前**以 `SET NX EX 7d` 原子认领
-  `{ns}:start-dedup:{key}`（execution_id 在 `FlowExecution` 构造时即生成，
-  可在 `run_distributed` 前读取）；
+  `{ns}:start-dedup:{key}`，映射值 = G1 预铸的 execution_id（BFF start 时
+  铸造随消息透传）或就地铸造的 id——认领在先行落 running 行**之前**，重投/
+  双开在任何新行落盘前即被拦截；
 - 命中 → 读映射的执行状态，**绝不二次 start**：已终态 → 返回 already 形状；
   running（崩溃/重试搁浅）→ 重入队一份 resume 消息接续执行再 ack start；
   suspended → 只返回现状形状（挂起执行自有 delay/approval 的 resume 链路）；
-- 孤儿映射（认领后首次执行从未落盘，如 crash 在 claim 与 save 之间）→ 释放
-  后重新认领、按新启动继续（首节点可能重跑——首节点须幂等仍是既有约定）；
+- 孤儿映射（认领后首次执行从未落盘，如 crash 在 claim 与先行落行之间）→
+  释放后重新认领、按新启动继续（首节点可能重跑——首节点须幂等仍是既有约定）；
+  G1 先行落行后该窗口已收窄到极小；命中 running 的重入队 resume 对
+  context={} 的先行行同样正确（无 last_node_id → 从首节点步进）；
 - **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
   不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
   为重复启动而永不执行。键按租户隔离，7 天过期。

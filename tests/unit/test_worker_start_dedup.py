@@ -107,7 +107,8 @@ class TestClaimSemantics:
             final={"execution_id": "exec-1", "is_end": True, "context": {}}
         )
         def run(inst):
-            return worker.start_flow("f1", {}, version="1", dedup_key="k1")
+            return worker.start_flow("f1", {}, version="1", dedup_key="k1",
+                                     execution_id="exec-1")
 
         run()
         assert fake.get("plaita:start-dedup:k1") == "exec-1"
@@ -129,7 +130,8 @@ class TestClaimSemantics:
         def run(inst):
             token = set_current_tenant("acme")
             try:
-                return worker.start_flow("f1", {}, version="1", dedup_key="k1")
+                return worker.start_flow("f1", {}, version="1", dedup_key="k1",
+                                         execution_id="exec-a")
             finally:
                 reset_current_tenant(token)
 
@@ -184,7 +186,8 @@ class TestDedupHit:
         )
         def first(inst):
             calls.append(1)
-            return worker.start_flow("f1", {}, version="1", dedup_key="k1")
+            return worker.start_flow("f1", {}, version="1", dedup_key="k1",
+                                     execution_id="exec-1")
 
         first()
         assert len(calls) == 1
@@ -194,11 +197,14 @@ class TestDedupHit:
             inst = MagicMock()
             FE.return_value = inst
             inst.execution_id = "exec-2"  # 若二次 start 会生成新执行
-            result = worker.start_flow("f1", {}, version="1", dedup_key="k1")
+            result = worker.start_flow("f1", {}, version="1", dedup_key="k1",
+                                       execution_id="exec-2")
         assert result["execution_id"] == "exec-1"
         assert result["already_terminal"] is True
         assert result["deduplicated"] is True
-        assert inst.run_distributed.assert_not_called() is None
+        inst.run_distributed.assert_not_called()
+        # 组合语义（G1 先行落行）：命中在落新行**之前**返回，不产生新执行行
+        assert storage.load_execution_state("exec-2") is None
 
     def test_hit_running_reenqueues_resume_and_never_restarts(self):
         """命中 + 非终态 running（崩溃/重试搁浅）→ 重入队 resume 接续，
@@ -277,7 +283,8 @@ class TestDedupHit:
             inst.run_distributed.return_value = {
                 "execution_id": "exec-new", "is_end": True, "context": {},
             }
-            result = worker.start_flow("f1", {}, version="1", dedup_key="k1")
+            result = worker.start_flow("f1", {}, version="1", dedup_key="k1",
+                                       execution_id="exec-new")
 
         assert result["is_end"] is True
         inst.run_distributed.assert_called_once()  # 确实启动了
@@ -315,8 +322,10 @@ class TestDispatchPassthrough:
         seen = {}
         original = worker.start_flow
 
-        def spy(flow_id, params, version=None, dedup_key=None, delivery_count=None):
+        def spy(flow_id, params, version=None, execution_id=None,
+                dedup_key=None, delivery_count=None):
             seen["dedup_key"] = dedup_key
+            seen["execution_id"] = execution_id
             return {"is_end": True}
 
         worker.start_flow = spy
@@ -325,6 +334,7 @@ class TestDispatchPassthrough:
             delivery_count=1,
         )
         assert seen["dedup_key"] == "abc"
+        assert seen["execution_id"] is None  # 消息未带预铸 id
 
 
 class TestConsoleBFF:
