@@ -82,15 +82,15 @@ jobs:
       - name: CI gate [1a/6] pytest integration + e2e
         run: |
           python -m pytest tests/integration tests/e2e \
-            --cov=plaita --cov-report= --timeout=150 --timeout-method=thread -x -q
+            --cov=plaita --cov-fail-under=0 --cov-report= --timeout=150 --timeout-method=thread -x -q
       - name: CI gate [1b/6] pytest unit A-F
         run: |
           ls tests/unit/test_*.py | sort | awk 'NR % 3 == 0' | tr '\n' '\0' | xargs -0 \
-            python -m pytest --cov=plaita --cov-append --cov-report= --timeout=150 --timeout-method=thread -x -q
+            python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 --timeout-method=thread -x -q
       - name: CI gate [1c/6] pytest unit G-Q
         run: |
           ls tests/unit/test_*.py | sort | awk 'NR % 3 == 1' | tr '\n' '\0' | xargs -0 \
-            python -m pytest --cov=plaita --cov-append --cov-report= --timeout=150 --timeout-method=thread -x -q
+            python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 --timeout-method=thread -x -q
       - name: CI gate [1d/6] pytest unit R-Z
         run: |
           ls tests/unit/test_*.py | sort | awk 'NR % 3 == 2' | tr '\n' '\0' | xargs -0 \
