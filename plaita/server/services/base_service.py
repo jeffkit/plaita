@@ -287,7 +287,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """
         触发事件
-        
+
         Args:
             event_type: 事件类型
             event_data: 事件数据
@@ -295,16 +295,57 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         try:
             # 创建Event对象
             event = Event(event_type=event_type, data=event_data)
-            
+
             if asyncio.iscoroutinefunction(self.event_bus.publish):
                 await self.event_bus.publish(event)
             else:
                 self.event_bus.publish(event)
             logger.info("事件总线: %s", self.event_bus)
             logger.info("事件已触发: %s, 数据: %s", event_type, event_data)
-            
+
         except Exception as e:
             logger.error("触发事件失败: %s", e, exc_info=True)
+
+    async def publish_resume_event(self, event_type: str, event_data: Dict[str, Any]):
+        """触发 resume 链路事件：带 correlation_id（=execution_id）。
+
+        历史缺陷（2026-10 分布式可靠性修复）：trigger_event 构造的 Event 不带
+        correlation_id，而 EventFilter.handle_event 开头即丢弃无 correlation_id
+        的事件——审批完成 / HTTP 回调触发的事件永远到不了挂起执行的 resume，
+        恢复链路是断的。DelayService 已先行修复（其 trigger_event override，
+        手法与本方法一致）；approval / http_callback 的同名 override 统一收敛
+        到这里复用。
+
+        发布通道与 DelayService 同款：
+        - 有 Redis 客户端时，直接用同步 redis 客户端发布到引擎 RedisEventBus
+          的频道（plaita:events:{type}）。不要走 self.event_bus.publish——
+          它的 aioredis 连接绑定在创建时的 event loop 上，而 handle_task
+          运行在线程池新开的 loop 里，跨 loop 使用会静默失败。
+        - 无 Redis 客户端（进程内 InMemoryEventBus 场景，如 examples/server_demo）
+          时回退到 self.event_bus.publish。
+        """
+        event = Event(
+            event_type=event_type,
+            data=event_data,
+            correlation_id=event_data.get("execution_id"),
+        )
+        try:
+            if self._redis_client is None:
+                if asyncio.iscoroutinefunction(self.event_bus.publish):
+                    await self.event_bus.publish(event)
+                else:
+                    self.event_bus.publish(event)
+            else:
+                self._redis_client.publish(
+                    f"plaita:events:{event_type}", event.model_dump_json()
+                )
+            logger.info(
+                "resume 事件已触发: %s (correlation_id=%s)",
+                event_type,
+                event.correlation_id,
+            )
+        except Exception as e:  # noqa: BLE001 — 发布失败只告警，不打断任务主流程
+            logger.error("触发 resume 事件失败: %s", e, exc_info=True)
     
     def get_active_task_count(self) -> int:
         """

@@ -15,14 +15,33 @@ class HttpCallbackService(BaseExtendedService):
     负责注册HTTP回调路径并等待回调触发
     """
     
-    def __init__(self, event_bus, service_config=None):
-        super().__init__(event_bus, service_config)
-        self.registered_callbacks = {}  # 存储注册的回调信息
+    def __init__(self, event_bus, service_config=None, redis_client=None):
+        # 签名对齐基类（同 DelayService）：(event_bus, service_config, redis_client)
+        # ——位置传参 HttpCallbackService(bus, {...}) 时第二位是 service_config。
+        # redis_client 用于：resume 事件直发 plaita:events:{type} 频道 + 回调
+        # 注册跨实例共享（无 redis 时回退进程内存，单测/内存模式不受影响）。
+        super().__init__(
+            event_bus=event_bus,
+            service_config=service_config,
+            redis_client=redis_client,
+        )
+        self.registered_callbacks = {}  # 存储注册的回调信息（无 redis 回退用）
     
     def get_service_type(self) -> str:
         """获取服务类型"""
         return "http_callback"
-    
+
+    async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
+        """触发事件：带 correlation_id（=execution_id），EventFilter 才能关联到挂起执行。
+
+        基类 trigger_event 构造的 Event 不带 correlation_id，会被
+        EventFilter.handle_event 直接丢弃——回调到达后挂起执行永远等不到
+        resume。统一走基类 publish_resume_event（与 DelayService 的
+        trigger_event override 同手法：有 redis 直发 plaita:events:{type}
+        频道，无 redis 回退 event_bus.publish）。
+        """
+        await self.publish_resume_event(event_type, event_data)
+
     def start_service(self) -> bool:
         """启动HTTP回调服务"""
         try:
