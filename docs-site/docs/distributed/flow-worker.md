@@ -10,7 +10,8 @@
 |------|----------|------|
 | 任务队列（`RedisFlowWorker`） | Redis **Stream** + consumer group；成功 `XACK`，否则 pending 可回收；超 `--max-deliveries` 进 DLQ | **at-least-once**（需 Redis 5+）。业务侧应幂等；毒丸进 `<queue>:dlq` |
 | 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **1**） | 连续推进每步写盘；崩溃不丢步进进度 |
-| 挂起 / 结束 / 出错 | **立即** `save_execution_state` | 这些边界点相对安全 |
+| 挂起 / 结束 / 出错 | **立即** `save_execution_state`；返回 False（Redis 后端吞异常的失败形态）即抛 `StatePersistError`，消息**不** ack 走重投 | 落盘失败不再静默成僵尸执行（2026-10 评审修复；start 路径此前已检查，其余调用点统一收口 `_persist_state_or_raise`） |
+| 挂起服务任务派发 | `rpush` 到 `plaita:{subtype}:queue` 失败（有 redis 时）抛 `ServiceDispatchError`；suspended 状态保留、消息重投后重新执行挂起节点再派发 | 重投会重复注册订阅——EventFilter 终态 GC 只回收终态，孤儿订阅留到 TTL 过期（可接受） |
 | 并发 resume | Redis `SET NX EX` lease（`plaita.server.execution_lease`） | 同一 `execution_id` 最多一个 resume；抢租约失败的任务**不** XACK，待 TTL 过期后 reclaim |
 | 控制面 | Registry / Control / Log / Queue / EventFilter 硬绑 Redis | 换 EventBus 后端 ≠ 换部署拓扑 |
 
@@ -18,9 +19,34 @@
 
 - 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受**重复投递**（幂等 resume）的场景。
 - 不适合：把「恰好一次」「自动故障转移」「金融级幂等」当默认承诺的场景——副作用仍须幂等。
-- **崩溃恢复的如实语义（2026-09 实测）**：worker 崩溃后 pending 里的 start 任务被重投时，会**创建全新执行从头重跑**（新 execution_id）——每步落盘的 checkpoint 不会被 start 任务消费；旧执行会停留在 `running` 状态，目前没有内置的僵尸清扫，需要运维侧按 `end_time IS NULL` 巡检。resume 任务的重投是安全的：终态执行会被幂等短路（原样返回，不再推进，也不会被改写状态）。
+- **崩溃恢复的如实语义（2026-09 实测）**：worker 崩溃后 pending 里的 start 任务被重投时，会**创建全新执行从头重跑**（新 execution_id，即从首节点起全部节点重跑——**首节点必须幂等**）——每步落盘的 checkpoint 不会被 start 任务消费；旧执行会停留在 `running` 状态，目前没有内置的僵尸清扫，需要运维侧按 `end_time IS NULL` 巡检。resume 任务的重投是安全的：终态执行会被幂等短路（原样返回，不再推进，也不会被改写状态）。
 
 CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）、`--max-deliveries`（默认 5）、`--dlq-key`。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容）。
+
+## 长步骤与消息回收（claim_min_idle_ms / XCLAIM） {#长步骤与消息回收}
+
+一条任务从被 `XREADGROUP` 读到 `XACK` 前一直留在 consumer group 的 pending
+列表。**单个步骤**执行超过 `--claim-min-idle-ms`（默认 60000ms）后，这条
+「仍在处理中」的消息就对其他 consumer 的 XCLAIM 回收可见——回收本身不是
+故障，双跑由 resume 租约拦截：
+
+1. 抢到消息的 worker resume 时拿不到租约 → `ExecutionLeaseError`，消息
+   **不 ack** 留在 pending（计一次 `lease_conflicts`）；
+2. 持租约的活 worker 由看门狗每 lease TTL/3（默认 120s → 40s）续租，步骤
+   执行期间租约不会过期——XCLAIM 真正接手的只有已死 worker 的消息；
+3. 退化路径：`PLAITA_DISABLE_LEASE_WATCHDOG=1` 且单步超过 lease TTL 时，
+   租约可能在步骤中途过期、接管者拿到更新的 fence 世代——旧 worker 的
+   下一次落盘被 fencing CAS 拒绝、步界续租失败自爆（均 `ExecutionLeaseError`
+   且不 ack），状态不会被双写，但当前步副作用可能重复，业务侧仍须幂等。
+
+因此调小 `claim_min_idle_ms` 只加快「死 worker 消息」的回收，不会中断活
+worker 的执行；调大到超过最长步骤耗时，可减少 `lease_conflicts` 噪音。
+
+**死信守卫**：超过 `--max-deliveries` 的消息进 DLQ 前，先查消息体
+`execution_id` 的 resume 租约（键 `{ns}:execution:lease:{id}`，`ns` 按消息体
+`tenant_id` 路由：default/空 = `plaita`，其余 = `plaita:{tenant_id}`）——租约
+仍在（活 worker 正处理长步骤）则跳过死信、消息留 pending；start 任务入队时
+还没有 `execution_id`，直接放行；租约查询失败同样保守跳过。
 
 部署步骤与故障手册见 [运维 Runbook](ops-runbook.md)；副作用设计见 [幂等 Resume](idempotent-resume.md)。
 
