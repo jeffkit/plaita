@@ -137,6 +137,27 @@ class Parallel(Node):
         # Add validation logic here
         pass
 
+    def _resolve_branch_input(self, pb: ParallelBranch, execution):
+        """分支输入解析（sync ``exec_branch`` 与 async ``exec_branch_async`` 共用）。
+
+        分支未指定 ``input``（`pb.input is None`，典型场景为 @flow DSL 编译生成
+        的 PARALLEL 节点）时，自动继承父流程的 ``$INPUT``，使分支子流程能自然地用
+        ``INPUT.x`` 访问父流程的输入字段（与 @childflow + CHILD 的语义一致）。
+        显式设置了 ``input`` 的分支按表达式求值，不受影响。
+
+        C2-2：此前只有 sync 路径有该兜底，async 直接 ``evaluate(pb.input)`` 对
+        None 得 None——同一 flow sync/async 行为分叉（子流程插值字符串等父级
+        表达式 fallback 救不了的场景拿到 None）。两条路径的 ``execution`` 是同一
+        ExecutionContext 形状（evaluate / express_prefix / express_input_name
+        同构），故此解析可安全共用。
+        """
+        if pb.input is None:
+            # @flow DSL 生成的 PARALLEL 分支没有显式 input 字段；继承父流程 INPUT
+            # 使子流程能用 INPUT.x 访问父流程的输入（与 @childflow + CHILD 的语义一致）。
+            input_key = f"{execution.express_prefix}{execution.express_input_name}"
+            return execution.evaluate(input_key)
+        return execution.evaluate(pb.input)
+
     def exec_branch(self, pb: ParallelBranch, execution):
         """执行并行节点的分支flow
 
@@ -144,19 +165,12 @@ class Parallel(Node):
         显式决定如何记录。历史上这里 ``return None`` 让崩溃分支与"返回 None"无法
         区分，导致下游节点拿到静默错误结果继续执行。
 
-        当分支未指定 ``input``（`pb.input is None`，典型场景为 @flow DSL 编译生成
-        的 PARALLEL 节点）时，自动继承父流程的 ``$INPUT``，使分支子流程能自然地用
-        ``INPUT.x`` 访问父流程的输入字段。显式设置了 ``input`` 的分支不受影响。
+        分支输入解析（含无 input 时继承父 $INPUT 的兜底）见
+        ``_resolve_branch_input``——sync/async 共用同一实现。
         """
         branch_execution = execution.get_child_execution()
         lazy = execution.mode == ExecutionMode.GENERATOR
-        if pb.input is None:
-            # @flow DSL 生成的 PARALLEL 分支没有显式 input 字段；继承父流程 INPUT
-            # 使子流程能用 INPUT.x 访问父流程的输入（与 @childflow + CHILD 的语义一致）。
-            input_key = f"{execution.express_prefix}{execution.express_input_name}"
-            input_value = execution.evaluate(input_key)
-        else:
-            input_value = execution.evaluate(pb.input)
+        input_value = self._resolve_branch_input(pb, execution)
         rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
         logger.debug("branch %s executed: %s", pb.name, rs)
         return rs
@@ -413,9 +427,13 @@ class Parallel(Node):
         return results
 
     async def exec_branch_async(self, pb: "ParallelBranch", execution):
-        """异步执行单个并行分支。"""
+        """异步执行单个并行分支。
+
+        分支输入解析与 sync ``exec_branch`` 完全共用（``_resolve_branch_input``，
+        含无 input 时继承父 $INPUT 的兜底）——同一 flow sync/async 同结果。
+        """
         branch_execution = execution.get_child_execution()
-        input_value = execution.evaluate(pb.input)
+        input_value = self._resolve_branch_input(pb, execution)
         rs = await branch_execution.arun_compatible(pb.flow, False, input_value)
         logger.debug("async branch %s executed: %s", pb.name, rs)
         return rs
