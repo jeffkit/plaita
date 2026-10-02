@@ -263,35 +263,14 @@ class DelayService(BaseExtendedService):
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """触发事件：带 correlation_id（=execution_id），EventFilter 才能关联到挂起执行。
 
-        有 Redis 客户端时，直接用同步 redis 客户端发布到引擎 RedisEventBus
-        的频道（plaita:events:{type}）。不要走 self.event_bus.publish——
-        它的 aioredis 连接绑定在创建时的 event loop 上，而 handle_task
-        运行在线程池新开的 loop 里，跨 loop 使用会静默失败。
-
-        无 Redis 客户端（进程内 InMemoryEventBus 场景，如 examples/server_demo）
-        时回退到 self.event_bus.publish，否则 publish 必然抛
-        AttributeError: 'NoneType' object has no attribute 'publish'，
-        事件永远到不了总线，挂起流程无法恢复。
+        实现收敛到基类 publish_resume_event（与本文件历史 override 同手法：
+        有 redis 直发 plaita:events:{type} 频道绕开 aioredis 跨 loop 问题，
+        无 redis 回退 event_bus.publish）。Track P2 起直发前还按
+        RedisEventStorage 键格式尽力落盘——直发不经 RedisEventBus.publish
+        不落存储，EventReconciler 回扫补偿不到；delay 的 resume 与审批/回调
+        同待遇。
         """
-        from ...event.core import Event
-
-        event = Event(
-            event_type=event_type,
-            data=event_data,
-            correlation_id=event_data.get("execution_id"),
-        )
-        try:
-            if self._redis_client is None:
-                await self.event_bus.publish(event)
-            else:
-                self._redis_client.publish(
-                    f"plaita:events:{event_type}", event.model_dump_json()
-                )
-            logger.info(
-                "事件已触发: %s (correlation_id=%s)", event_type, event.correlation_id
-            )
-        except Exception as e:
-            logger.error("触发事件失败: %s", e, exc_info=True)
+        await self.publish_resume_event(event_type, event_data)
 
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:

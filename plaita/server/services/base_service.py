@@ -16,6 +16,13 @@ from ...event.core import EventBus, Event
 from ..registry import RegistryMixin, ServiceRegistry
 from ..control import ControlMixin
 
+# resume 事件尽力落盘的键前缀与 TTL（Track P2 任务2）：与 RedisEventStorage
+# （event/redis.py，key_prefix 默认 "plaita:event:"、DEFAULT_TTL 7 天）键格式
+# 耦合——EventReconciler 靠同一格式扫描补偿；若那边改前缀/键形状，这里必须
+# 同步，否则服务直发的 resume 事件回扫不到。
+RESUME_EVENT_STORAGE_PREFIX = "plaita:event:"
+RESUME_EVENT_TTL_SECONDS = 7 * 86400
+
 
 class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
     """
@@ -306,6 +313,42 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         except Exception as e:
             logger.error("触发事件失败: %s", e, exc_info=True)
 
+    def _persist_resume_event_best_effort(self, event: Event) -> None:
+        """尽力把直发频道的 resume 事件写进事件存储（fail-open）。
+
+        publish_resume_event 用同步 redis 直发 plaita:events:{type} 频道，
+        不经 RedisEventBus.publish → 事件不落存储 → EventReconciler（扫事件
+        存储 zset 索引做兜底）补偿不到，Pub/Sub 丢通知窗口内 resume 照样丢。
+        这里按 RedisEventStorage.store_event 的键格式（plaita:event:events:
+        {id} SET + plaita:event:types:{type} ZADD，score=事件时间戳，TTL
+        7 天）同步直写。
+
+        选同步直写而非复用 store_event：其一，handle_task 运行在线程池新开
+        的 loop 里，asyncio.run 包 async store_event 会嵌套运行中 loop 直接
+        RuntimeError；其二，store_event 内部 initialize() 会把共享
+        RedisEventBus 的 aioredis 客户端重绑到本任务的临时 loop（从服务线程
+        改总线共享状态，与引擎 loop 并发使用相互拆台）。同步客户端本就在
+        手边（resume 直发用的就是它），管道三命令写完即走。
+
+        任何失败只 warning——落盘是回扫兜底链路，绝不阻塞 resume 主链路
+        （与 EventReconciler 扫描失败 fail-open 同风格）。
+        """
+        if self._redis_client is None:
+            return
+        try:
+            event_key = f"{RESUME_EVENT_STORAGE_PREFIX}events:{event.event_id}"
+            type_key = f"{RESUME_EVENT_STORAGE_PREFIX}types:{event.event_type}"
+            pipe = self._redis_client.pipeline()
+            pipe.set(event_key, event.model_dump_json(), ex=RESUME_EVENT_TTL_SECONDS)
+            pipe.zadd(type_key, {event.event_id: event.timestamp})
+            pipe.expire(type_key, RESUME_EVENT_TTL_SECONDS)
+            pipe.execute()
+        except Exception as e:  # noqa: BLE001 — 兜底链路失败不外溢
+            logger.warning(
+                "resume 事件落盘失败（不影响直发主链路，回扫补偿缺失窗口）: %s",
+                e, exc_info=True,
+            )
+
     async def publish_resume_event(self, event_type: str, event_data: Dict[str, Any]):
         """触发 resume 链路事件：带 correlation_id（=execution_id）。
 
@@ -323,6 +366,10 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
           运行在线程池新开的 loop 里，跨 loop 使用会静默失败。
         - 无 Redis 客户端（进程内 InMemoryEventBus 场景，如 examples/server_demo）
           时回退到 self.event_bus.publish。
+
+        直发不经 RedisEventBus.publish、不落事件存储，故直发前按
+        RedisEventStorage 键格式尽力落盘（_persist_resume_event_best_effort，
+        fail-open）——EventReconciler 的回扫兜底才能覆盖 Pub/Sub 丢通知窗口。
         """
         event = Event(
             event_type=event_type,
@@ -336,6 +383,11 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 else:
                     self.event_bus.publish(event)
             else:
+                # 先尽力落盘再直发频道：落盘成功而 Pub/Sub 通知丢失时，
+                # EventReconciler 仍能从事件存储补偿（直发不经
+                # RedisEventBus.publish，落盘没人代劳，见 _persist_resume_
+                # event_best_effort）；落盘失败只 warning，不阻塞直发。
+                self._persist_resume_event_best_effort(event)
                 self._redis_client.publish(
                     f"plaita:events:{event_type}", event.model_dump_json()
                 )
