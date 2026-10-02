@@ -435,39 +435,46 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         return results[-1] > 0
         
     async def mark_event_processed(self, subscription_id: str, event_id: str) -> bool:
-        """原子操作：标记事件为已处理状态"""
+        """原子操作：标记事件为已处理状态（跨进程去重）。
+
+        历史实现是 get 整份订阅 JSON → 内存标记 → set 回去：非原子——两个
+        进程并发 mark 同一 (subscription, event) 时各自基于旧快照覆盖写回，
+        双双返回 True，同一事件被重复 resume（评审 C3-3）。现改为 SET NX
+        去重键（参照 server/event_filter.py 去重的既有模式）：仅首次生效；
+        订阅 JSON 里的 processed_events 只在拿到 NX 时顺带同步（读侧
+        get_subscription 依赖），权威判重以 NX 键为准。订阅注销不去重键
+        ——subscription_id 全局唯一不复用，键随 TTL 自过期。
+        """
         await self.initialize()
-        
-        # 获取订阅
+
+        # 获取订阅（存在性检查）
         subscription = await self.get_subscription(subscription_id)
         if not subscription:
             return False
-            
-        # 标记事件为已处理
+
+        dedup_key = f"{self.key_prefix}processed:{subscription_id}:{event_id}"
+        is_new = await self.redis.set(dedup_key, "1", nx=True, ex=self.ttl)
+        if not is_new:
+            return False
+
+        # 同步订阅数据（best-effort 读侧视图；并发写仍可能互相覆盖，不影响判重）
         subscription.mark_event_processed(event_id)
-        
-        # 更新订阅数据
         subscription_key = f"{self.key_prefix}data:{subscription_id}"
         await self.redis.set(subscription_key, subscription.model_dump_json())
-        
+
         return True
     
     async def batch_mark_processed(self, subscription_id: str, event_ids: List[str]) -> bool:
-        """批量标记事件为已处理"""
+        """批量标记事件为已处理（与单发 mark 同一原子去重原语）"""
         await self.initialize()
         
-        # 获取订阅
+        # 获取订阅（存在性检查）
         subscription = await self.get_subscription(subscription_id)
         if not subscription:
             return False
             
-        # 标记所有事件为已处理
         for event_id in event_ids:
-            subscription.mark_event_processed(event_id)
-        
-        # 更新订阅数据
-        subscription_key = f"{self.key_prefix}data:{subscription_id}"
-        await self.redis.set(subscription_key, subscription.model_dump_json())
+            await self.mark_event_processed(subscription_id, event_id)
         
         return True
     
@@ -614,26 +621,14 @@ class RedisProcessingTracker(EventProcessingTracker):
                 last_updated = float(last_updated_str) if last_updated_str else None
                 
                 if last_updated and last_updated < oldest_time:
-                    # 获取处理器IDs
-                    handlers = {}
-                    cursor = 0
-                    
-                    # 使用hscan替代hgetall来分批处理
-                    while True:
-                        cursor, items = await self.redis.hscan(key, cursor)
-                        for hk, hv in items.items():
-                            hk_str = hk.decode('utf-8') if isinstance(hk, bytes) else hk
-                            if hk_str != "last_updated":
-                                handlers[hk_str] = hv
-                        
-                        if cursor == 0:
-                            break
-                    
-                    if handlers:
-                        # 删除每个处理器的历史记录
-                        for handler_id in handlers:
-                            history_key = f"{self.key_prefix}history:{handler_id}"
-                            await self.redis.delete(history_key)
+                    # 历史记录键与写入/读取对齐（评审 C3-1）：history 写在
+                    # ``history:{event_id}``（record_processing_attempt /
+                    # get_processing_history），清理必须按同一形状删——历史上
+                    # 按 ``history:{handler_id}`` 删，形状不符等于不清理，且
+                    # handler_id 与某个新鲜事件 event_id 同名时会误删它的历史。
+                    event_id = key_str.rsplit(":", 1)[-1]
+                    history_key = f"{self.key_prefix}history:{event_id}"
+                    await self.redis.delete(history_key)
                     
                     # 删除记录本身
                     await self.redis.delete(key)
