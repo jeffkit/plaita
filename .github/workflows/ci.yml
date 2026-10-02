@@ -53,8 +53,8 @@ jobs:
       # 混用两者会出现 tool-cache python 与容器 python 的 PATH 错位
       # （2026-10-02 实证：pip 装进 /usr/local，gate 的 python 解析到
       # /__t → No module named pytest）。一律 python -m pip，杜绝裸 pip。
-      - name: Install git (checkout 依赖)
-        run: apt-get update -q && apt-get install -yq git && git --version
+      - name: Install git + nodejs (checkout / code 节点 js 用例依赖)
+        run: apt-get update -q && apt-get install -yq git nodejs && git --version && node --version
       - uses: actions/checkout@v6
 
       - name: Install package + gate deps

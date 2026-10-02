@@ -11,6 +11,21 @@ except ImportError:
     _execjs = None
     _EXECJS_AVAILABLE = False
 
+
+def _js_runtime_ready() -> bool:
+    """execjs 可 import ≠ 有可用 runtime（裸容器无 node 时探测会抛
+    RuntimeUnavailableError）——真实探针一次，供 skipUnless 使用。"""
+    if not _EXECJS_AVAILABLE:
+        return False
+    try:
+        _execjs.eval("1 + 1")
+        return True
+    except Exception:
+        return False
+
+
+_JS_READY = _js_runtime_ready()
+
 try:
     import RestrictedPython as _rp  # noqa: F401
     _RESTRICTED_AVAILABLE = True
@@ -134,7 +149,7 @@ def run(b):
         flow.nodes = nodes
         return flow
 
-    @unittest.skipUnless(_EXECJS_AVAILABLE, "PyExecJS not installed (pip install plaita[code])")
+    @unittest.skipUnless(_JS_READY, "no available JavaScript runtime (execjs present but node/js engine missing)")
     def test_set(self):
         self.assertEqual(
             5,
