@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { GitBranch, Plus, Trash2 } from 'lucide-react'
+import { GitBranch, Plus, Trash2, X } from 'lucide-react'
 import { useFlowEditor } from '../../stores/flowEditor'
 import { api } from '../../services/api'
 import type { FlowNodeData } from './flowConverter'
 import SchemaForm, { JsonField } from './schemaForm/SchemaForm'
 import ConditionEditor from './schemaForm/ConditionEditor'
 import ExpressionInput from './schemaForm/ExpressionInput'
+import CodeEditor from './schemaForm/CodeEditor'
 import type { VarGroup } from './schemaForm/ExpressionInput'
 import { coreFieldsOf } from './schemaForm/coreFields'
-import { conditionOperators, normalizeFieldKeys, type JsonSchema } from './schemaForm/schemaUtils'
+import { conditionOperators, normalizeFieldKeys, type JsonSchema, INTERNAL_FIELD_KEYS } from './schemaForm/schemaUtils'
+import { ConfirmDialog } from '../ui/ConfirmDialog'
 
 // 内嵌 child_flow 子流程的节点类型（reference 仅有内嵌子图时也可编辑）
 const SUBFLOW_TYPES = new Set(['map', 'loop', 'filter', 'find', 'reduce', 'while', 'child'])
@@ -30,6 +32,23 @@ const DRAWER_TABS: Array<{ key: DrawerTab; label: string }> = [
   { key: 'fault', label: '容错' },
 ]
 
+// ── 抽屉宽度（2026-10 用户反馈：默认 384px 偏窄，长表达式/长文案看不全）──
+const DRAWER_W_KEY = 'plaita-drawer-w'
+const DRAWER_W_DEFAULT = 384
+const DRAWER_W_MIN = 320
+const DRAWER_W_MAX = 720
+function clampDrawerW(v: number): number {
+  return Math.min(DRAWER_W_MAX, Math.max(DRAWER_W_MIN, Math.round(v)))
+}
+function loadDrawerW(): number {
+  try {
+    const v = Number(localStorage.getItem(DRAWER_W_KEY))
+    return Number.isFinite(v) && v > 0 ? clampDrawerW(v) : DRAWER_W_DEFAULT
+  } catch {
+    return DRAWER_W_DEFAULT
+  }
+}
+
 // 节点配置抽屉：通用字段（name/output/timeout）+ schema 驱动的类型特定字段表单。
 // 表单变更即时写回 store（与画布交互一致，自动置 dirty）；
 // 无 schema 的自定义/未知类型退化为整段 JSON 编辑。
@@ -49,6 +68,59 @@ export default function NodeConfigDrawer() {
   const [output, setOutput] = useState('')
   const [timeout, setTimeout_] = useState('')
   const [tab, setTab] = useState<DrawerTab>('config')
+
+  // 面板宽度：可拖拽（左缘手柄），持久化到 localStorage，双击复位
+  const [width, setWidth] = useState<number>(() => loadDrawerW())
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null)
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault()
+    dragRef.current = { startX: e.clientX, startW: width }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    const onMove = (ev: PointerEvent) => {
+      if (!dragRef.current) return
+      // 向左拖 → 变宽
+      setWidth(clampDrawerW(dragRef.current.startW + (dragRef.current.startX - ev.clientX)))
+    }
+    const onUp = () => {
+      dragRef.current = null
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      setWidth((w) => {
+        try { localStorage.setItem(DRAWER_W_KEY, String(w)) } catch { /* 隐私模式忽略 */ }
+        return w
+      })
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+  const resetWidth = () => {
+    setWidth(DRAWER_W_DEFAULT)
+    try { localStorage.setItem(DRAWER_W_KEY, String(DRAWER_W_DEFAULT)) } catch { /* 忽略 */ }
+  }
+
+  // 删除确认弹窗（删除入口在抽屉底部，头部只留关闭——2026-10 用户反馈）
+  const [confirmDel, setConfirmDel] = useState(false)
+  const confirmDelRef = useRef(false)
+  confirmDelRef.current = confirmDel
+
+  // Esc 关闭抽屉：焦点在输入框/编辑器里时不抢（那里 Esc 有自己的语义，
+  // 如关闭表达式菜单）；确认弹窗打开时也不关
+  const escTargetId = selectedId
+  useEffect(() => {
+    if (!escTargetId) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (confirmDelRef.current) return
+      useFlowEditor.setState({ selectedNodeId: null })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [escTargetId])
 
   // 节点类型 schema：与节点面板共用 ['nodes'] 缓存，不额外请求
   const nodesQuery = useQuery({
@@ -128,20 +200,29 @@ export default function NodeConfigDrawer() {
     if (!node) return []
     const groups: VarGroup[] = []
     const inputProps = (flowMeta.inputType as Record<string, unknown> | undefined)?.properties
-    if (inputProps && typeof inputProps === 'object') {
-      groups.push({
-        label: '$INPUT · 流程入参',
-        items: Object.keys(inputProps).map((k) => ({ expr: `$INPUT.${k}` })),
-      })
-    }
+    const keys = inputProps && typeof inputProps === 'object' ? Object.keys(inputProps) : []
+    // $INPUT 组常驻（2026-10 表单评审）：引擎对 $INPUT.<任意键> 求值，未声明
+    // properties 的流程（@flow 编译产物常见）此前整组消失，只能手打
+    groups.push({
+      label: '$INPUT · 流程入参',
+      items:
+        keys.length > 0
+          ? keys.map((k) => ({ expr: `$INPUT.${k}` }))
+          : [{ expr: '$INPUT.', desc: '入参对象（未声明 schema，可取任意键）' }],
+    })
+    // 展示名用节点描述符的人类名（agentrun → AgentRun），没有再退回实现类型
+    const typeName = new Map<string, string>()
+    for (const d of nodesQuery.data?.nodes || []) typeName.set(d.node_type, d.node_name || d.node_type)
+    // start/end 无可引用输出，不进目录
+    const NO_OUTPUT_TYPES = new Set(['start', 'end'])
     const upstreamItems = allNodes
-      .filter((n) => upstreamIds.has(n.id))
+      .filter((n) => upstreamIds.has(n.id) && !NO_OUTPUT_TYPES.has((n.data as FlowNodeData).type))
       .map((n) => {
         const d = n.data as FlowNodeData
         const out = d.fields.output
         return {
           expr: `$NODE.${n.id}`,
-          desc: `${d.type} · ${d.name}${typeof out === 'string' && out ? ` → ${out}` : ''}`,
+          desc: `${typeName.get(d.type) ?? d.type} · ${d.name}${typeof out === 'string' && out ? ` → ${out}` : ''}`,
         }
       })
     if (upstreamItems.length > 0) groups.push({ label: '$NODE · 上游节点结果', items: upstreamItems })
@@ -153,7 +234,7 @@ export default function NodeConfigDrawer() {
       })
     }
     return groups
-  }, [node, allNodes, allEdges, upstreamIds, flowMeta])
+  }, [node, allNodes, upstreamIds, flowMeta, nodesQuery.data])
 
   if (!selectedId || !node) return null
   const d = node.data as FlowNodeData
@@ -199,15 +280,25 @@ export default function NodeConfigDrawer() {
   const nodeSourceLine = d.sourceLine
 
   return (
-    <div className="w-96 shrink-0 bg-surface border-l border-line flex flex-col text-sm">
+    <div
+      className="relative shrink-0 bg-surface border-l border-line flex flex-col text-sm"
+      style={{ width }}
+    >
+      {/* 拖宽手柄：覆盖左边框 ±4px 命中区，hover 提示；双击复位默认宽度 */}
+      <div
+        onPointerDown={startResize}
+        onDoubleClick={resetWidth}
+        title="拖拽调整面板宽度（双击复位）"
+        className="absolute -left-1 top-0 bottom-0 w-2 cursor-col-resize z-20 hover:bg-plaita-500/25 transition-colors"
+      />
       <div className="flex items-center justify-between pl-4 pr-3 pt-3">
         <h3 className="text-section text-ink-primary">节点配置</h3>
         <button
-          onClick={() => removeNode(node.id)}
-          className="flex items-center gap-1 text-caption text-status-error hover:opacity-80"
+          onClick={() => useFlowEditor.setState({ selectedNodeId: null })}
+          title="关闭（Esc）"
+          className="p-1 rounded-md text-ink-muted hover:text-ink-primary hover:bg-elevated transition-colors"
         >
-          <Trash2 size={12} />
-          删除
+          <X size={14} />
         </button>
       </div>
 
@@ -348,14 +439,13 @@ export default function NodeConfigDrawer() {
             )}
 
             <div>
-              <p className="text-caption text-ink-muted mb-2">
-                类型特定字段
-                {schema && (
-                  <span className="ml-1.5 text-[10px] text-ink-faint">
-                    schema 驱动 · 核心参数置顶
-                  </span>
-                )}
-              </p>
+              <p className="text-caption text-ink-muted mb-2">类型特定字段</p>
+              {!schema && (
+                <p className="mb-2 text-[11px] leading-4 text-ink-faint">
+                  该节点类型未登记表单描述（可在「节点管理」按类型登记 schema
+                  获得结构化表单）。以下为原始字段 JSON；引擎内部字段已隐藏。
+                </p>
+              )}
               {schema ? (
                 <SchemaForm
                   fields={typeFields}
@@ -422,14 +512,14 @@ export default function NodeConfigDrawer() {
               />
             </Field>
             <Field label="输出 output（表达式）">
-              <input
+              <ExpressionInput
                 value={output}
-                onChange={(e) => {
-                  setOutput(e.target.value)
-                  writeField('output', e.target.value)
+                onChange={(v) => {
+                  setOutput(v)
+                  writeField('output', v)
                 }}
+                groups={variableGroups}
                 placeholder="$INPUT.name"
-                className="input w-full font-mono text-[12px]"
               />
             </Field>
           </>
@@ -464,6 +554,37 @@ export default function NodeConfigDrawer() {
           </>
         )}
       </div>
+
+      {/* 底部安静删除入口（头部只留关闭——2026-10 用户反馈：红色删除与
+          关闭并列太过扎眼；删除是低频破坏性操作，配确认弹窗防误触） */}
+      <div className="border-t border-line px-4 py-2">
+        <button
+          onClick={() => setConfirmDel(true)}
+          className="flex items-center gap-1 text-caption text-ink-faint hover:text-status-error transition-colors"
+          title={`删除 ${node.id} 及其连线`}
+        >
+          <Trash2 size={12} />
+          删除节点
+        </button>
+      </div>
+
+      <ConfirmDialog
+        open={confirmDel}
+        title="删除节点"
+        variant="danger"
+        confirmLabel="删除"
+        onCancel={() => setConfirmDel(false)}
+        onConfirm={() => {
+          setConfirmDel(false)
+          removeNode(node.id)
+        }}
+      >
+        <p>
+          将删除节点{' '}
+          <span className="font-mono text-ink-primary">{node.id}</span>（{d.type}
+          ）及其全部连线。误删可用 Cmd/Ctrl+Z 撤销。
+        </p>
+      </ConfirmDialog>
     </div>
   )
 }
@@ -566,14 +687,16 @@ function HandlerEditor({
         </div>
       )}
       {recoverable && strategy && (
-        <div className="mt-1.5 flex items-center gap-2">
-          <label className="shrink-0 text-[11px] text-ink-faint">失败重试次数 retryTimes</label>
+        <div className="mt-1.5">
+          <label className="mb-1 block text-[11px] text-ink-faint">
+            失败重试次数 retryTimes
+          </label>
           <input
             type="number"
             min={0}
             value={obj?.retryTimes != null ? String(obj.retryTimes) : '0'}
             onChange={(e) => merge({ retryTimes: Math.max(0, Number(e.target.value) || 0) })}
-            className="input w-20 font-mono text-[12px]"
+            className="input w-full font-mono text-[12px]"
           />
         </div>
       )}
@@ -900,43 +1023,47 @@ function ParallelBranches({
   )
 }
 
-/** 无 schema 时的整段 JSON 编辑（fallback，保持原能力） */function FallbackJson({
+/** 无 schema 时的整段 JSON 编辑（fallback，保持原能力） */
+function FallbackJson({
   fields,
   onApply,
 }: {
   fields: Record<string, unknown>
   onApply: (next: Record<string, unknown>) => void
 }) {
-  const [text, setText] = useState(() => JSON.stringify(fields, null, 2))
+  // 引擎簿记键（source_line 等）不进编辑区、应用时原值保留（2026-10 表单评审）：
+  // 既不把内部实现泄漏成可编辑 JSON，也不因整段替换丢掉 @flow 行号回标。
+  // CodeMirror(json) + 合法即写回，非法输入即时红字——不再需要「应用 JSON」按钮
+  const preserved: Record<string, unknown> = {}
+  const visible: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    const bucket = INTERNAL_FIELD_KEYS.has(k) ? preserved : visible
+    bucket[k] = v
+  }
+  const visibleJson = JSON.stringify(visible, null, 2)
+  // 本地文本缓冲：CodeMirror 受控值来自本地态而非 props，避免「输入 → 写回
+  // store → 重渲染 → value 回流」把光标/格式来回重置（与 JsonField 同款）
+  const [text, setText] = useState(visibleJson)
   const [error, setError] = useState<string | null>(null)
-  const dirty = text !== JSON.stringify(fields, null, 2)
-  const apply = () => {
-    try {
-      const parsed = text.trim() ? JSON.parse(text) : {}
+  const update = (next: string) => {
+    setText(next)
+    if (next.trim() === '') {
       setError(null)
-      onApply(parsed)
+      onApply({ ...preserved })
+      return
+    }
+    try {
+      const parsed = JSON.parse(next)
+      setError(null)
+      onApply({ ...preserved, ...parsed })
     } catch (e) {
       setError(`字段 JSON 非法: ${(e as Error).message}`)
     }
   }
   return (
     <div>
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        rows={10}
-        spellCheck={false}
-        className={`input w-full font-mono text-[11px] leading-4 ${error ? 'border-status-error/60' : ''}`}
-      />
+      <CodeEditor value={text} language="json" height="220px" onChange={update} />
       {error && <p className="mt-1 text-[11px] text-status-error">{error}</p>}
-      {dirty && (
-        <button
-          onClick={apply}
-          className="mt-2 w-full bg-plaita-500 hover:bg-plaita-600 text-on-accent py-1.5 rounded-md text-caption"
-        >
-          应用 JSON
-        </button>
-      )}
     </div>
   )
 }

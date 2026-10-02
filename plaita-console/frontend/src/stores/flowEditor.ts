@@ -35,9 +35,16 @@ export interface FlowEditorState {
   hasFlowSource: boolean
   /** 节点详情发起的「跳源码第 N 行」请求；FlowEditor 消费后置回 null */
   sourceLineRequest: number | null
+  /** 撤销/重做栈（2026-10 表单评审）：画布与表单编辑历史；载入版本时清空 */
+  past: Array<{ nodes: Node[]; edges: Edge[] }>
+  future: Array<{ nodes: Node[]; edges: Edge[] }>
+  /** 调色板「点击添加」入口：由 FlowCanvas 注册（需要 useReactFlow 换算视口坐标） */
+  addNodeFromPalette: ((nodeType: string, name: string) => void) | null
 
   setFlowContext: (flowId: string, version: string, meta: FlowMeta) => void
   setGraph: (nodes: Node[], edges: Edge[]) => void
+  undo: () => void
+  redo: () => void
   onNodesChange: OnNodesChange
   onEdgesChange: OnEdgesChange
   onConnect: OnConnect
@@ -66,6 +73,19 @@ const ITEM_INDEX_INPUT = {
       index: { dataType: 'integer', label: '索引' },
     },
   },
+}
+
+// ── 撤销/重做（2026-10 表单评审）────────────────────────────────────────
+const HISTORY_LIMIT = 50
+let lastPushAt = 0
+let lastPushNodeId = ''
+type HistSnap = { nodes: Node[]; edges: Edge[] }
+/** 变更前快照入栈，并作废重做栈 */
+function pushHist(s: { nodes: Node[]; edges: Edge[]; past: HistSnap[] }): Pick<FlowEditorState, 'past' | 'future'> {
+  return {
+    past: [...s.past, { nodes: s.nodes, edges: s.edges }].slice(-HISTORY_LIMIT),
+    future: [],
+  }
 }
 
 function seedSubflowJson(nodeType: string): Record<string, unknown> {
@@ -109,10 +129,44 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
   subgraphWarning: null,
   hasFlowSource: false,
   sourceLineRequest: null,
+  past: [],
+  future: [],
+  addNodeFromPalette: null,
 
   setFlowContext: (flowId, version, meta) => set({ flowId, version, meta }),
 
-  setGraph: (nodes, edges) => set({ nodes, edges, dirty: false }),
+  // 载入/切换版本是文档级替换：历史失去前置语义，清空两栈
+  setGraph: (nodes, edges) => set({ nodes, edges, dirty: false, past: [], future: [] }),
+
+  // 撤销/重做在子图视图内禁用：历史快照是「某编辑层的整图」，跨层回退会造成
+  // 画布内容与面包屑层级错位。禁用比猜层级安全。
+  undo: () => {
+    const s = get()
+    if (s.past.length === 0 || s.graphStack.length > 0) return
+    const prev = s.past[s.past.length - 1]
+    lastPushAt = 0 // 撤销后重置合并窗口，下一次编辑从新的一步开始
+    set({
+      nodes: prev.nodes,
+      edges: prev.edges,
+      past: s.past.slice(0, -1),
+      future: [...s.future, { nodes: s.nodes, edges: s.edges }].slice(-HISTORY_LIMIT),
+      dirty: true,
+    })
+  },
+
+  redo: () => {
+    const s = get()
+    if (s.future.length === 0 || s.graphStack.length > 0) return
+    const next = s.future[s.future.length - 1]
+    lastPushAt = 0
+    set({
+      nodes: next.nodes,
+      edges: next.edges,
+      future: s.future.slice(0, -1),
+      past: [...s.past, { nodes: s.nodes, edges: s.edges }].slice(-HISTORY_LIMIT),
+      dirty: true,
+    })
+  },
 
   // 选中/尺寸变化是 xyflow 的交互噪音，不算「未保存」；
   // 只有增删节点、改位置、改连线才置 dirty，否则唯一的状态指示器会失去公信力
@@ -120,9 +174,17 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
     const meaningful = changes.some(
       (c) => c.type !== 'select' && c.type !== 'dimensions'
     )
+    // 拖拽中的 position 微步（dragging:true 批次）不进历史，落点批次
+    // （dragging:false）或增删才记一步——否则一次拖拽刷出几十条撤销步
+    const dragTail = changes.some(
+      (c) => c.type === 'position' && (c as { dragging?: boolean }).dragging === false,
+    )
+    const structural = changes.some((c) => c.type === 'add' || c.type === 'remove')
+    const record = meaningful && (structural || dragTail)
     set((s) => ({
       nodes: applyNodeChanges(changes, s.nodes) as Node[],
       dirty: meaningful ? true : s.dirty,
+      ...(record ? pushHist(s) : {}),
     }))
   },
 
@@ -131,6 +193,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
     set((s) => ({
       edges: applyEdgeChanges(changes, s.edges) as Edge[],
       dirty: meaningful ? true : s.dirty,
+      ...(meaningful ? pushHist(s) : {}),
     }))
   },
 
@@ -141,12 +204,19 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
         s.edges
       ) as Edge[],
       dirty: true,
+      ...pushHist(s),
     })),
 
-  addNode: (node) => set((s) => ({ nodes: [...s.nodes, node], dirty: true })),
+  addNode: (node) =>
+    set((s) => ({ nodes: [...s.nodes, node], dirty: true, ...pushHist(s) })),
 
   updateNodeData: (id, data) =>
     set((s) => {
+      // 表单抽屉逐键写回：600ms 内对同一节点的连续编辑合并为一步历史
+      const now = Date.now()
+      const coalesce = now - lastPushAt < 600 && lastPushNodeId === id
+      lastPushAt = now
+      lastPushNodeId = id
       let nodes = s.nodes.map((n) =>
         n.id === id ? { ...n, data: { ...n.data, ...data } } : n
       )
@@ -175,7 +245,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
           return { ...n, data: { ...d, fields } }
         })
       }
-      return { nodes, dirty: true }
+      return { nodes, dirty: true, ...(!coalesce ? pushHist(s) : {}) }
     }),
 
   toggleSubflowExpanded: (nodeId) => {
@@ -270,6 +340,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       edges: s.edges.filter((e) => e.source !== id && e.target !== id),
       selectedNodeId: s.selectedNodeId === id ? null : s.selectedNodeId,
       dirty: true,
+      ...pushHist(s),
     })),
 
   setSelected: (id) => set({ selectedNodeId: id }),
@@ -365,6 +436,8 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       graphStack: s.graphStack.slice(0, -1),
       subgraphWarning: warning,
       dirty: true,
+      // 子图编辑写回父图是内容变更，记一步（undo 回到退出前的父图）
+      ...pushHist(s),
     })
   },
 
@@ -389,5 +462,8 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       subgraphWarning: null,
       hasFlowSource: false,
       sourceLineRequest: null,
+      past: [],
+      future: [],
+      addNodeFromPalette: null,
     }),
 }))

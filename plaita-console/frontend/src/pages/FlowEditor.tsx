@@ -13,7 +13,7 @@ import { symmetricLayout } from '../components/flow/symmetricLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
 import type { Node, Edge } from '@xyflow/react'
-import { ArrowLeft, Zap, Code2, Save, Rocket, Play, ChevronRight, AlertTriangle } from 'lucide-react'
+import { ArrowLeft, Zap, Code2, Save, Rocket, Play, ChevronRight, AlertTriangle, Undo2, Redo2 } from 'lucide-react'
 import { Button, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui'
 import CopilotPanel from '../components/flow/CopilotPanel'
 
@@ -132,6 +132,10 @@ export default function FlowEditor() {
   const graphStack = useFlowEditor((s) => s.graphStack)
   const subgraphWarning = useFlowEditor((s) => s.subgraphWarning)
   const exitToLevel = useFlowEditor((s) => s.exitToLevel)
+  // 子图视图内撤销/重做禁用（历史快照按编辑层整图记录，跨层回退会错位）
+  const inSubgraph = graphStack.length > 0
+  const canUndo = useFlowEditor((s) => s.past.length > 0) && !inSubgraph
+  const canRedo = useFlowEditor((s) => s.future.length > 0) && !inSubgraph
 
   /** 保存/发布/试跑/源码前把子图逐层归位（子图写回父节点），始终序列化主图 */
   const collapseToRoot = () => {
@@ -181,7 +185,17 @@ export default function FlowEditor() {
         setDesc((def.desc as string) || '')
         setInputType(def.inputType ?? { dataType: 'object' })
         setVersion(versionParam)
-        setFlowContext(flowId, versionParam, { flow_id: flowId, version: versionParam, desc: def.desc as string })
+        // inputType/globalContext 必须进 store meta：节点抽屉的变量目录
+        // （$INPUT 分组）从 flowMeta 读取（2026-10 表单评审，此前整组消失）
+        setFlowContext(flowId, versionParam, {
+          flow_id: flowId,
+          version: versionParam,
+          desc: def.desc as string,
+          inputType: def.inputType,
+          ...(def.globalContext !== undefined
+            ? { globalContext: def.globalContext as Record<string, unknown> }
+            : {}),
+        })
       } catch (e) {
         // 定义损坏时不静默：清空画布并把错误交给保存/发布前的序列化兜底
         baseDefRef.current = null
@@ -372,12 +386,28 @@ export default function FlowEditor() {
     saveMutation.mutate(target, { onSuccess: () => blocker.proceed?.() })
   }
 
-  // Cmd/Ctrl+S 保存
+  // Cmd/Ctrl+S 保存；Cmd/Ctrl+Z / +Shift+Z（或 Ctrl+Y）撤销/重做。
+  // 焦点在输入框时放行浏览器文本撤销；子图视图内历史禁用（见 store 注释）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+      const mod = e.metaKey || e.ctrlKey
+      if (!mod) return
+      const key = e.key.toLowerCase()
+      if (key === 's') {
         e.preventDefault()
         doSave()
+        return
+      }
+      if (key === 'z' || key === 'y') {
+        const t = e.target as HTMLElement | null
+        const typing =
+          !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
+        if (typing) return
+        e.preventDefault()
+        const editor = useFlowEditor.getState()
+        const redo = key === 'y' || e.shiftKey
+        if (redo) editor.redo()
+        else editor.undo()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -422,7 +452,7 @@ export default function FlowEditor() {
     // 落到下一个新草稿版本，避免与现有版本号撞车
     const target = workingStatus === 'published' ? suggestedNext : version || suggestedNext
     setVersion(target)
-    setFlowContext(flowId!, target, { flow_id: flowId, version: target })
+    setFlowContext(flowId!, target, { flow_id: flowId, version: target, inputType })
     useFlowEditor.setState({ dirty: true })
     qc.invalidateQueries({ queryKey: ['version', flowId] })
   }
@@ -500,6 +530,25 @@ export default function FlowEditor() {
           <Play size={13} />
           试跑
         </Button>
+        {/* 撤销/重做：画布与表单编辑共用一套历史（store 层）；子图视图内禁用 */}
+        <div className="flex items-center rounded-md border border-line overflow-hidden">
+          <button
+            onClick={() => useFlowEditor.getState().undo()}
+            disabled={!canUndo}
+            title="撤销（Cmd/Ctrl+Z）"
+            className="px-2 h-7 text-caption text-ink-secondary hover:bg-elevated hover:text-ink-primary transition-colors disabled:opacity-40 disabled:pointer-events-none"
+          >
+            <Undo2 size={13} />
+          </button>
+          <button
+            onClick={() => useFlowEditor.getState().redo()}
+            disabled={!canRedo}
+            title="重做（Cmd/Ctrl+Shift+Z / Ctrl+Y）"
+            className="px-2 h-7 text-caption text-ink-secondary hover:bg-elevated hover:text-ink-primary transition-colors border-l border-line disabled:opacity-40 disabled:pointer-events-none"
+          >
+            <Redo2 size={13} />
+          </button>
+        </div>
         <div
           className="flex items-center rounded-md border border-line overflow-hidden"
           title="自动布局：从开始节点单方向展开，分支自然分叉"

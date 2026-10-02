@@ -1,10 +1,12 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import {
   ReactFlow,
+  ReactFlowProvider,
   Background,
   BackgroundVariant,
   Controls,
   MiniMap,
+  useReactFlow,
   type Node,
   type Edge,
 } from '@xyflow/react'
@@ -17,7 +19,16 @@ import type { FlowNodeData } from './flowConverter'
 let _nodeSeq = 0
 
 export default function FlowCanvas() {
+  return (
+    <ReactFlowProvider>
+      <FlowCanvasInner />
+    </ReactFlowProvider>
+  )
+}
+
+function FlowCanvasInner() {
   const wrapperRef = useRef<HTMLDivElement>(null)
+  const { screenToFlowPosition } = useReactFlow()
   const nodes = useFlowEditor((s) => s.nodes)
   const edges = useFlowEditor((s) => s.edges)
   const onNodesChange = useFlowEditor((s) => s.onNodesChange)
@@ -26,6 +37,43 @@ export default function FlowCanvas() {
   const addNode = useFlowEditor((s) => s.addNode)
   const setSelected = useFlowEditor((s) => s.setSelected)
   const selectedNodeId = useFlowEditor((s) => s.selectedNodeId)
+
+  /** 构造新节点（拖拽落点 / 调色板点击共用） */
+  const buildNode = useCallback(
+    (nodeType: string, name: string, position: { x: number; y: number }): Node => {
+      _nodeSeq += 1
+      const id = `${nodeType}_${Date.now()}_${_nodeSeq}`
+      const data: FlowNodeData = { type: nodeType, name, fields: {} }
+      return { id, type: 'plaitaNode', position, data, selected: false }
+    },
+    []
+  )
+
+  // 调色板「点击添加」（2026-10 表单评审：此前只能拖拽，点击无反馈）：
+  // 落在画布视口中心附近，小幅级联偏移避免连点堆叠，并选中以直接开配置
+  const addToCanvas = useCallback(
+    (nodeType: string, name: string) => {
+      const bounds = wrapperRef.current?.getBoundingClientRect()
+      const center = bounds
+        ? screenToFlowPosition({
+            x: bounds.left + bounds.width / 2,
+            y: bounds.top + bounds.height / 2,
+          })
+        : { x: 200, y: 120 }
+      const node = buildNode(nodeType, name, {
+        x: center.x - 60 + (_nodeSeq % 5) * 28,
+        y: center.y - 20 + (_nodeSeq % 5) * 20,
+      })
+      addNode(node)
+      setSelected(node.id)
+    },
+    [addNode, setSelected, buildNode, screenToFlowPosition]
+  )
+
+  useEffect(() => {
+    useFlowEditor.setState({ addNodeFromPalette: addToCanvas })
+    return () => useFlowEditor.setState({ addNodeFromPalette: null })
+  }, [addToCanvas])
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -42,19 +90,9 @@ export default function FlowCanvas() {
       const position = bounds
         ? { x: e.clientX - bounds.left - 60, y: e.clientY - bounds.top - 20 }
         : { x: 200, y: 100 }
-      _nodeSeq += 1
-      const id = `${nodeType}_${Date.now()}_${_nodeSeq}`
-      const data: FlowNodeData = { type: nodeType, name, fields: {} }
-      const node: Node = {
-        id,
-        type: 'plaitaNode',
-        position,
-        data,
-        selected: false,
-      }
-      addNode(node)
+      addNode(buildNode(nodeType, name, position))
     },
-    [addNode]
+    [addNode, buildNode]
   )
 
   return (
