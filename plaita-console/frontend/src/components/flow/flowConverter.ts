@@ -13,6 +13,12 @@ export interface FlowNodeData {
   sourceLine?: number
   fields: Record<string, unknown>
   status?: string
+  /** 容器展开态子节点显式标记（jsonToFlow 注入，2026-10 评审 MC1）：
+   *  子节点编辑经 ownerId 链写回各层 childFlow IR，取代 id 含 '::' 的
+   *  字符串启发式——顶层 id 恰好含 :: 不再误触发写回 */
+  isContainerChild?: boolean
+  /** isContainerChild 的宿主容器画布节点 id */
+  ownerId?: string
   [key: string]: unknown
 }
 
@@ -151,7 +157,12 @@ export function jsonToFlow(
       type: 'plaitaNode',
       position: layout[id] || { x: 0, y: 0 },
       ...(owner ? { parentId: owner, extent: 'parent' as const, connectable: false, deletable: false } : {}),
-      data: { type, name, desc, sourceLine, next: nextId, elseNext: elseNextId, fields },
+      data: {
+        type, name, desc, sourceLine, next: nextId, elseNext: elseNextId, fields,
+        // 容器子节点显式打标（MC1）：写回路径据此沿 owner 链镜像进各层 IR，
+        // 不再依赖「id 含 ::」启发式；同时容器内禁止再展开（方案 Y）
+        ...(owner ? { isContainerChild: true, ownerId: owner } : {}),
+      },
     })
 
     // 线性 next（统一从 'true' handle 出发）
@@ -184,7 +195,9 @@ export function jsonToFlow(
           edges.push({
             id: ns(`e-${id}-${bname}-${target}`),
             source: id,
-            target,
+            // 容器内分支目标同样要挂 owner 前缀（MC3-①）：否则边指向不存在的
+            // 顶层 id，画布悬空、保存时 flowToJson 按 sourceHandle 回填丢目标
+            target: ns(target),
             sourceHandle: bname,
             type: EDGE_TYPE,
           })

@@ -238,6 +238,8 @@ export default function NodeConfigDrawer() {
 
   if (!selectedId || !node) return null
   const d = node.data as FlowNodeData
+  // 容器展开态子节点（jsonToFlow 显式打标）：抽屉删除入口禁用（MC2）
+  const isContainerChild = d.isContainerChild === true
 
   /** 由专门 UI 接管、不进通用表单的键：child_flow 走子图编辑，branches 走分支
    *  列表，condition 走三段式构造器。一个节点可同时命中多类（如 loop =
@@ -556,16 +558,32 @@ export default function NodeConfigDrawer() {
       </div>
 
       {/* 底部安静删除入口（头部只留关闭——2026-10 用户反馈：红色删除与
-          关闭并列太过扎眼；删除是低频破坏性操作，配确认弹窗防误触） */}
+          关闭并列太过扎眼；删除是低频破坏性操作，配确认弹窗防误触）。
+          容器子节点禁删（MC2）：直接删画布子节点无法写回 owner 的 childFlow
+          IR，收拢再展开节点会「复活」——删除请进入子图编辑或收拢容器后操作 */}
       <div className="border-t border-line px-4 py-2">
-        <button
-          onClick={() => setConfirmDel(true)}
-          className="flex items-center gap-1 text-caption text-ink-faint hover:text-status-error transition-colors"
-          title={`删除 ${node.id} 及其连线`}
+        <span
+          title={
+            isContainerChild
+              ? '容器子节点不可直接删除：请进入子图编辑中删除，或收拢容器后在对应层删除（直接删除不会写回子流程，节点会复活）'
+              : undefined
+          }
+          className={isContainerChild ? 'inline-block cursor-not-allowed' : undefined}
         >
-          <Trash2 size={12} />
-          删除节点
-        </button>
+          <button
+            onClick={() => { if (!isContainerChild) setConfirmDel(true) }}
+            disabled={isContainerChild}
+            className={`flex items-center gap-1 text-caption transition-colors ${
+              isContainerChild
+                ? 'text-ink-faint/50 cursor-not-allowed'
+                : 'text-ink-faint hover:text-status-error'
+            }`}
+            title={`删除 ${node.id} 及其连线`}
+          >
+            <Trash2 size={12} />
+            删除节点
+          </button>
+        </span>
       </div>
 
       <ConfirmDialog

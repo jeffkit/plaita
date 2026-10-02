@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { useFlowEditor } from '../../stores/flowEditor'
 
@@ -123,6 +123,9 @@ export interface NodeLabelData {
   next?: string
   /** if 假分支目标 */
   elseNext?: string
+  /** switch/case 分支去向（handle=分支名 → 画布边 target）：jsonToFlow 把
+   *  fields.branches 的 next 剥掉由画布边推导，副标题需从边反查（MC3-③） */
+  branchTargets?: Record<string, string>
   /** 方案 A：展开/收拢容器（编辑器画布传入；FlowViewer 不传则不渲染按钮） */
   onToggleExpand?: () => void
   /** 容器形态标记与尺寸（展开时由画布传入） */
@@ -146,6 +149,7 @@ export function renderSubtitle(
   fields: Record<string, unknown> = {},
   next?: string,
   elseNext?: string,
+  branchTargets?: Record<string, string>,
 ): string {
   if (type === 'if') {
     const parts: string[] = []
@@ -155,12 +159,18 @@ export function renderSubtitle(
   }
   if (type === 'switch' || type === 'case') {
     const bs = (fields.branches as Array<{ name?: string; next?: string }>) || []
-    return bs.map(b => `${sub(b.name, 8)}→${sub(b.next, 12)}`).join('  ')
+    // 分支去向：优先画布边反查（fields.branches 被 jsonToFlow 剥掉 next，
+    // MC3-③），无边信息时退回 IR 原值（FlowViewer 等直读 IR 的场景）
+    return bs.map(b => {
+      const target = (b.name && branchTargets?.[b.name]) || b.next || ''
+      return `${sub(b.name, 8)}→${sub(target, 12)}`
+    }).join('  ')
   }
   if (type === 'assignment') return sub(fields.output, 28)
   if (type === 'http' || type === 'generic_webhook') return sub(fields.url, 28)
   if (['map', 'filter', 'find', 'loop', 'reduce'].includes(type)) {
-    const cf = fields.child_flow as { nodes?: unknown[] } | undefined
+    // 存量实例可能带 camelCase 别名键（引擎 validator 兼容接受），一并识别（MC3-②）
+    const cf = (fields.child_flow || fields.childFlow) as { nodes?: unknown[] } | undefined
     const bodyN = cf?.nodes ? Math.max(0, cf.nodes.length - 1) : undefined
     const bits: string[] = []
     const coll = sub(fields.collection, 18)
@@ -170,7 +180,7 @@ export function renderSubtitle(
     return bits.join(' · ')
   }
   if (type === 'while') {
-    const cf = fields.child_flow as { nodes?: unknown[] } | undefined
+    const cf = (fields.child_flow || fields.childFlow) as { nodes?: unknown[] } | undefined
     if (cf?.nodes) return `体 ${Math.max(0, cf.nodes.length - 1)} · ≤${(fields.max_iterations as number) || 1000} 轮`
     return ''
   }
@@ -201,7 +211,7 @@ function type_is_while(nodes: Array<Record<string, unknown>>): boolean {
   return nodes.length > 0 && nodes.every(n => n.type === 'end')
 }
 
-export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, next, elseNext, onBandClick, onToggleExpand, expanded, containerW, containerH }: NodeLabelData & { onBandClick?: () => void }) {
+export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, next, elseNext, branchTargets, onBandClick, onToggleExpand, expanded, containerW, containerH }: NodeLabelData & { onBandClick?: () => void }) {
   const cfg = resolveNodeTypeConfig(type)
   const style = statusStyles[status] ?? statusStyles.idle
   const cs = COLOR_STYLES[cfg.color] ?? COLOR_STYLES.gray
@@ -219,9 +229,9 @@ export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, 
           <span className={`w-6 h-6 flex items-center justify-center rounded-md ${cs.chipBg} text-[13px] shrink-0`}>{cfg.icon}</span>
           <div className="min-w-0 flex-1">
             <div className="font-mono text-[13px] leading-4 font-medium truncate text-ink-primary">{headerName}</div>
-            {renderSubtitle(type, fields, next, elseNext) && (
+            {renderSubtitle(type, fields, next, elseNext, branchTargets) && (
               <div className="text-[10px] leading-tight font-mono text-ink-faint truncate">
-                {renderSubtitle(type, fields, next, elseNext)}
+                {renderSubtitle(type, fields, next, elseNext, branchTargets)}
               </div>
             )}
           </div>
@@ -245,7 +255,7 @@ export function renderNodeLabel({ type, name, status, desc, sourceLine, fields, 
   // 截断阈值与卡片 max-w-[240px] / 布局 NODE_WIDTH=240 对齐（24 字符 mono）
   const displayName = label.length > 24 ? label.slice(0, 24) + '…' : label
   // 第二行 = 参数摘要（类型辨识交给图标/色条）；无摘要则不渲染该行
-  const secondLine = renderSubtitle(type, fields, next, elseNext)
+  const secondLine = renderSubtitle(type, fields, next, elseNext, branchTargets)
   return (
     <div className={`relative px-3 py-2 rounded-lg border shadow-card ${style.bg} ${style.border} min-w-[140px] max-w-[240px] overflow-hidden`} title={desc || undefined}>
       {/* 族别左色条：一眼区分节点类别 */}
@@ -319,14 +329,31 @@ export interface PlaitaNodeData {
 
 function PlaitaNodeComponent({ data, selected, id }: NodeProps) {
   const d = data as PlaitaNodeData
+  // switch/case 分支去向：fields.branches 的 next 被 jsonToFlow 剥掉，从画布
+  // 出边反查（handle=分支名 → target）。订阅边数组在边变化时才触发本节点重渲染
+  const edges = useFlowEditor((s) => s.edges)
+  const branchTargets = useMemo(() => {
+    const out: Record<string, string> = {}
+    for (const e of edges) {
+      if (e.source !== id || !e.sourceHandle) continue
+      if (e.sourceHandle === 'true' || e.sourceHandle === 'false') continue
+      out[e.sourceHandle] = String(e.target)
+    }
+    return out
+  }, [edges, id])
+  const isContainerChild = d.isContainerChild === true
   return (
     <div className={`relative ${d.expanded ? 'w-full h-full' : ''} ${selected ? 'ring-2 ring-plaita-400/80 rounded-lg' : ''}`}>
       <Handle type="target" position={Position.Top} id="in" className="!bg-plaita-500 !w-2.5 !h-2.5 !border-2 !border-canvas" />
       {renderNodeLabel({
         type: d.type, name: d.name, status: d.status ?? 'idle', desc: d.desc, sourceLine: d.sourceLine,
         fields: d.fields as Record<string, unknown> | undefined, next: d.next as string | undefined, elseNext: d.elseNext as string | undefined,
+        branchTargets,
         onBandClick: () => useFlowEditor.getState().enterSubgraph(id, 'child_flow'),
-        onToggleExpand: (d.fields && ((d.fields as Record<string, unknown>).childFlow || (d.fields as Record<string, unknown>).child_flow))
+        // 方案 Y（MC1）：容器子节点不再渲染 [⊞]——嵌套原位展开的写回极易丢层，
+        // 嵌套体编辑统一走「进入子图编辑」（面包屑逐层进出，天然单层写回）
+        onToggleExpand: !isContainerChild &&
+          (d.fields && ((d.fields as Record<string, unknown>).childFlow || (d.fields as Record<string, unknown>).child_flow))
           ? () => useFlowEditor.getState().toggleSubflowExpanded(id)
           : undefined,
         expanded: d.expanded as boolean | undefined,

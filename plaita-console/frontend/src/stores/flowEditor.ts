@@ -122,6 +122,88 @@ function subflowJsonOf(
 // source_line/desc 等簿记键本就在画布 fields 里，随全量覆盖自然保留/更新。
 const IR_KEEP_KEYS = new Set(['id', 'type', 'name', 'next', 'else_next'])
 
+// ── 容器子节点 → owner 链写回（2026-10 评审 MC1）────────────────────────
+// 显式打标（data.isContainerChild/ownerId，jsonToFlow 注入）取代
+// 「id.lastIndexOf('::')」字符串启发式：手写 IR 顶层 id 恰好含 :: 不再误触发。
+/** 把容器子节点 canvasChild 的最新画布形态重建为 owner childFlow IR 条目：
+ *  簿记键取 IR 原值，业务字段以画布 fields 全量覆盖（与 E2 写回逻辑同源），
+ *  连接字段（next/else_next/branches[].next）由父层画布边回填——画布边是
+ *  连接拓扑的唯一推导来源（fields.branches 被 jsonToFlow 剥掉 next）。 */
+function irEntryFromCanvasChild(
+  ir: Record<string, unknown>,
+  child: Node,
+  edges: Edge[],
+  ownerId: string,
+): Record<string, unknown> {
+  const cd = child.data as FlowNodeData
+  const merged: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(ir)) {
+    if (IR_KEEP_KEYS.has(k)) merged[k] = v
+  }
+  for (const [k, v] of Object.entries(cd.fields ?? {})) merged[k] = v
+  // name 回填：IR 有名 → 取画布名（改名传播）；IR 无名且画布名仍是 jsonToFlow
+  // 的合成兜底（'owner::裸id'）→ 不写，避免把合成名污染回 IR
+  const prefix = ownerId + '::'
+  const bare = (x: string) => (x.startsWith(prefix) ? x.slice(prefix.length) : x)
+  if (ir.name !== undefined || cd.name !== child.id) merged.name = cd.name
+  // 连接字段回填：target 去掉 owner 前缀还原裸 id（与 flowToJson 的边推导一致）
+  const outEdges = edges.filter((e) => e.source === child.id)
+  if (cd.type === 'if') {
+    delete merged.next
+    delete merged.else_next
+    for (const e of outEdges) {
+      if (e.sourceHandle === 'false') merged.else_next = bare(e.target)
+      else merged.next = bare(e.target)
+    }
+  } else if (cd.type === 'switch' || cd.type === 'case') {
+    const branches = (Array.isArray(merged.branches) ? merged.branches : []) as Array<
+      Record<string, unknown>
+    >
+    const resolved = branches.map((b) => ({ ...b }))
+    for (const e of outEdges) {
+      const idx = e.sourceHandle ? resolved.findIndex((b) => b.name === e.sourceHandle) : -1
+      if (idx >= 0) resolved[idx].next = bare(e.target)
+    }
+    if (branches.length > 0) merged.branches = resolved
+  } else if (outEdges.length > 0) {
+    merged.next = bare(outEdges[0].target)
+  } else {
+    delete merged.next
+  }
+  return merged
+}
+
+/** 把容器子节点 childId 的编辑沿 owner 链逐层镜像：每层 owner 的 childFlow IR
+ *  都更新到以最内层画布为真相源的最新值（方案 Y 下通常只有一层，链式上溯是
+ *  对「owner 自身也是容器子节点」的兜底，保证任何层收拢/保存都不丢编辑）。 */
+function syncContainerChildUp(nodes: Node[], edges: Edge[], childId: string): Node[] {
+  const child = nodes.find((n) => n.id === childId)
+  if (!child) return nodes
+  const cd = child.data as FlowNodeData
+  if (!cd.isContainerChild || !cd.ownerId) return nodes
+  const ownerId = cd.ownerId
+  const owner = nodes.find((n) => n.id === ownerId)
+  if (!owner) return nodes
+  const bareId = childId.startsWith(ownerId + '::') ? childId.slice(ownerId.length + 2) : childId
+  const od = owner.data as FlowNodeData
+  const fields = { ...(od.fields ?? {}) } as Record<string, unknown>
+  const cfKey = fields.childFlow ? 'childFlow' : 'child_flow'
+  const cf = fields[cfKey] as { nodes?: Array<Record<string, unknown>> } | undefined
+  if (!cf?.nodes) return nodes
+  let hit = false
+  const cfNodes = cf.nodes.map((ir) => {
+    if (ir.id !== bareId) return ir
+    hit = true
+    return irEntryFromCanvasChild(ir, child, edges, ownerId)
+  })
+  if (!hit) return nodes
+  fields[cfKey] = { ...cf, nodes: cfNodes }
+  const nextNodes = nodes.map((n) =>
+    n.id === ownerId ? { ...n, data: { ...od, fields } } : n
+  )
+  return syncContainerChildUp(nextNodes, edges, ownerId)
+}
+
 export const useFlowEditor = create<FlowEditorState>((set, get) => ({
   flowId: '',
   version: '',
@@ -225,42 +307,15 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       let nodes = s.nodes.map((n) =>
         n.id === id ? { ...n, data: { ...n.data, ...data } } : n
       )
-      // 容器展开态的子节点（id 形如 owner::childId）：参数编辑双写回
-      // owner 的 childFlow/child_flow.nodes——「编辑存在于 childflow，
-      // 不产生任何新的内容」（不新增顶层节点/版本结构）
-      const sep = id.lastIndexOf('::')
-      if (sep > 0) {
-        const ownerId = id.slice(0, sep)
-        const childId = id.slice(sep + 2)
-        nodes = nodes.map((n) => {
-          if (n.id !== ownerId) return n
-          const d = n.data as FlowNodeData
-          const fields = { ...(d.fields ?? {}) } as Record<string, unknown>
-          const cfKey = fields.childFlow ? 'childFlow' : 'child_flow'
-          const cf = fields[cfKey] as { nodes?: Array<Record<string, unknown>> } | undefined
-          if (!cf?.nodes) return n
-          const cfNodes = cf.nodes.map((ir) => {
-            if (ir.id !== childId) return ir
-            if (data.fields !== undefined) {
-              // fields 写回是全量 map（抽屉/副驾均先展开 d.fields 再改，删键=键
-              // 缺席）：以画布 fields 为准重建 IR 业务字段，画布已删除的键不再
-              // 残留——逐键 merge 会让被删值在收拢/保存后复活（2026-10 评审 E2）
-              const merged: Record<string, unknown> = {}
-              for (const [k, v] of Object.entries(ir)) {
-                if (IR_KEEP_KEYS.has(k)) merged[k] = v
-              }
-              Object.assign(merged, data.fields)
-              if (data.name !== undefined) merged.name = data.name
-              return merged
-            }
-            // 无 fields 的写回（如仅改名）保持叠加语义，不动业务字段
-            const merged = { ...ir }
-            if (data.name !== undefined) merged.name = data.name
-            return merged
-          })
-          fields[cfKey] = { ...cf, nodes: cfNodes }
-          return { ...n, data: { ...d, fields } }
-        })
+      // 容器展开态的子节点（jsonToFlow 显式打标 isContainerChild/ownerId）：
+      // 参数编辑沿 owner 链逐层镜像写回各层 childFlow IR——「编辑存在于
+      // childflow，不产生任何新的内容」（不新增顶层节点/版本结构）。
+      // 逐层镜像保证 owner 自身也在容器内时（嵌套兜底），任何一层收拢/保存
+      // 都不丢编辑（2026-10 评审 MC1）；真相源=本节点画布 data。
+      const target = nodes.find((n) => n.id === id)
+      const td = target?.data as FlowNodeData | undefined
+      if (td?.isContainerChild && td.ownerId) {
+        nodes = syncContainerChildUp(nodes, s.edges, id)
       }
       return { nodes, dirty: true, ...(!coalesce ? pushHist(s) : {}) }
     }),
@@ -270,6 +325,10 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
     const node = s.nodes.find((n) => n.id === nodeId)
     if (!node) return
     const d = node.data as FlowNodeData
+    // 方案 Y（MC1）：容器子节点禁止再原位展开——嵌套容器的编辑写回极易丢层，
+    // 且容器高度/布局只按单层设计。嵌套体编辑统一走「进入子图编辑」路径
+    // （exitSubgraph 已沿 owner 链写回），节点画布不渲染 [⊞]，此处兜底守卫
+    if (d.isContainerChild) return
 
     // ---- 收拢：移除本容器展开出的全部子节点/子边，还原原子卡片 ----
     if (d.expanded) {
@@ -351,14 +410,21 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       }),
     })),
 
-  removeNode: (id) =>
-    set((s) => ({
+  removeNode: (id) => {
+    const s = get()
+    // 容器子节点不可经此删除（MC2）：画布删除无法写回 owner 的 childFlow IR，
+    // 收拢/保存后节点会「复活」。删除子流程节点请进入子图编辑（写回落 IR）
+    // 或收拢容器后在对应层操作；画布已设 deletable:false，这里兜底所有入口
+    const td = s.nodes.find((n) => n.id === id)?.data as FlowNodeData | undefined
+    if (td?.isContainerChild) return
+    set({
       nodes: s.nodes.filter((n) => n.id !== id),
       edges: s.edges.filter((e) => e.source !== id && e.target !== id),
       selectedNodeId: s.selectedNodeId === id ? null : s.selectedNodeId,
       dirty: true,
       ...pushHist(s),
-    })),
+    })
+  },
 
   setSelected: (id) => set({ selectedNodeId: id }),
 
@@ -437,6 +503,16 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       return { ...n, data: { ...d, fields } }
     })
 
+    // 容器展开态下编辑的是容器子节点（frame.nodeId 打了 isContainerChild 标，
+    // MC1）：上面的写回落在本画布节点，还需沿 owner 链镜像进顶层 IR——否则
+    // 收拢容器时本画布节点随容器子节点一起被移除，本次编辑静默丢失
+    let writeBackNodes = parentNodes
+    const frameTarget = parentNodes.find((n) => n.id === frame.nodeId)
+    const fd = frameTarget?.data as FlowNodeData | undefined
+    if (fd?.isContainerChild && fd.ownerId) {
+      writeBackNodes = syncContainerChildUp(parentNodes, frame.edges, frame.nodeId)
+    }
+
     const hasStart = subNodes.some((nd) => nd.type === 'start')
     const hasEnd = subNodes.some((nd) => nd.type === 'end')
     const warning =
@@ -447,7 +523,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
           }${!hasEnd ? 'end' : ''} 节点，保存后端校验会失败`
 
     set({
-      nodes: parentNodes,
+      nodes: writeBackNodes,
       edges: frame.edges,
       selectedNodeId: frame.selectedNodeId,
       graphStack: s.graphStack.slice(0, -1),
