@@ -37,6 +37,7 @@ from plaita.core.callback import (
     LoggerCallback,
 )
 from plaita.core.context import ExecutionContext
+from plaita.core.executor_compat import CompatRunMixin
 
 logger = logging.getLogger(__name__)
 from plaita.core.runner import NodeRunner
@@ -80,7 +81,7 @@ def _reentry_error() -> FlowExecutionException:
     )
 
 
-class FlowExecution:
+class FlowExecution(CompatRunMixin):
     """Thin facade composing ExecutionContext, NodeRunner, and strategies.
 
     Nodes receive this instance as the ``execution`` parameter.  State and
@@ -366,64 +367,6 @@ class FlowExecution:
         if self._running:
             raise _reentry_error()
         self._running = True
-
-    def run_compatible(self, flow, lazy, *args, **kwargs):
-        """Sync execution. Returns the result, or a sync generator when lazy.
-
-        In lazy/generator mode ``on_flow_end`` is deferred until the returned
-        generator is actually consumed or closed — historically it fired
-        immediately with the unconsumed generator as ``result``, which meant
-        the lifecycle end callback ran before any node executed.
-        """
-        self._begin_run()
-        try:
-            try:
-                return _drive_strategy(
-                    self._prepare_strategy(flow, lazy, args, kwargs),
-                    lazy=lazy, sync=True,
-                    finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-                    on_lazy_finally=lambda exc: (
-                        _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
-                    ),
-                )
-            except BaseException:
-                # review-fix B3: lazy 模式下 generator 交出前抛错（典型是
-                # _prepare_strategy 校验失败）时 on_lazy_finally 尚未注册，
-                # 不复位 _running 会永久毒化实例——下次 run 报 "already
-                # running" 伪装真实死因。交出之后由 on_lazy_finally 复位。
-                if lazy:
-                    self._running = False
-                raise
-        finally:
-            if not lazy:
-                self._running = False
-
-    async def arun_compatible(self, flow, lazy, *args, **kwargs):
-        """Async execution — canonical path."""
-        self._begin_run()
-        try:
-            try:
-                driven = _drive_strategy(
-                    self._prepare_strategy(flow, lazy, args, kwargs),
-                    lazy=lazy, sync=False,
-                    finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-                    on_lazy_finally=lambda exc: (
-                        _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
-                    ),
-                )
-            except BaseException:
-                # review-fix B3: 同 run_compatible——lazy 交出 generator 前
-                # 抛错必须复位 _running，否则实例永久毒化。
-                if lazy:
-                    self._running = False
-                raise
-            if lazy:
-                return driven
-            return await driven
-        finally:
-            if not lazy:
-                self._running = False
-
 
     def _ensure_flow_resolved(self, flow) -> None:
         """执行前兜底：若 ``flow.nodes`` 仍含 dict 形态节点 (绕过
