@@ -49,31 +49,22 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
     steps:
+      # 容器内不用 actions/setup-python：容器镜像即目标 Python（3.13），
+      # 混用两者会出现 tool-cache python 与容器 python 的 PATH 错位
+      # （2026-10-02 实证：pip 装进 /usr/local，gate 的 python 解析到
+      # /__t → No module named pytest）。一律 python -m pip，杜绝裸 pip。
       - name: Install git (checkout 依赖)
         run: apt-get update -q && apt-get install -yq git && git --version
       - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-          # 不开 cache: pip——2026-10-01 三腿回归门停滞排查：同 workflow 无
-          # cache 无 matrix 的 plaita-ai 腿一直绿，矩阵腿必停（runner 心跳在、
-          # 日志 blob 从未上传、纯 main 可复现、本地 mac/linux 断网全量 70s
-          # 绿=套件无网络依赖无挂点）。首个对齐变量就是 pip cache（restore/
-          # save 大环境）；ubuntu-24.04 钉版未能修复，逐变量消元。
-          # cache: pip
 
       - name: Install package + gate deps
         run: |
           python -m pip install --upgrade pip
           # Gate 会 collect/跑到 optional 后端与节点路径（redis/sqlalchemy/http/code/server）。
           # 用 all 一次装齐，避免缺 extra 时在 collection/首个用例上连环红。
-          # aiosqlite 已含在 sqlalchemy extra；cachetools 已含在 server extra。
-          # pytest-timeout：门禁挂死时 150s 内把「卡住的测试」变成带堆栈的快速红
-          # （2026-10-01 回归门三腿停滞、日志全黑的教训），并给出 durations 排慢。
-          pip install -e ".[dev,lint,all]" pytest-timeout
-          pip install build wheel
+          # pytest-timeout：门禁挂死时 150s 内把「卡住的测试」变成带堆栈的快速红，
+          # 并给出 durations 排慢（2026-10-01 回归门停滞、日志全黑的教训）。
+          python -m pip install -e ".[dev,lint,all]" pytest-timeout build wheel
 
       - name: Ruff E722 (bare except — hard fail)
         run: ruff check plaita tests --select E722
