@@ -941,21 +941,23 @@ class TestCompileConditionMutations:
 
     def test_not_bound_name_uses_ctx(self):
         # mutmut_20: _compile_condition(operand, None)
+        # 2026-10-02 truthy 语义修正：裸真值不再是 `eq False`（空集合/空串误判）
         ctx = _fresh_ctx()
         ctx.names["flag"] = "$NODE.flag"
         node = _expr_ast("not flag")
         result = _compile_condition(node, ctx)
         assert result["field"] == "$NODE.flag"
-        assert result["operator"] == "eq"
-        assert result["value"] is False
+        assert result["operator"] == "falsy"
+        assert result["value"] is True
 
     def test_bare_bound_name_condition_uses_ctx(self):
         # mutmut_29: _compile_expr(node, None)
+        # 2026-10-02 truthy 语义修正：裸真值不再是 `ne False`（空集合/空串误判）
         ctx = _fresh_ctx()
         ctx.names["flag"] = "$NODE.flag"
         node = _expr_ast("flag")
         result = _compile_condition(node, ctx)
-        assert result == {"field": "$NODE.flag", "operator": "ne", "value": False}
+        assert result == {"field": "$NODE.flag", "operator": "truthy", "value": True}
 
 
 class TestCompileCompareMutations:

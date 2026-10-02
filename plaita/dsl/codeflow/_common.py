@@ -102,6 +102,8 @@ _COMPARE_OP = {
 _NEGATE_OP = {
     "eq": "ne", "ne": "eq", "gt": "lte", "gte": "lt",
     "lt": "gte", "lte": "gt", "in": "notIn", "notIn": "in",
+    # 裸真值测试的取反（`not x`）：truthy <-> falsy（2026-10 评审修复包 A1）
+    "truthy": "falsy", "falsy": "truthy",
 }
 
 _NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL"}

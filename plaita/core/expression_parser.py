@@ -94,6 +94,26 @@ def _warn_suspicious_literal(value: str) -> None:
         value if len(value) < 120 else value[:117] + "...",
     )
 
+
+# 含 `{%` 但没有任何插值匹配成功的串（内层表达式不合法/未闭合）——历史上原样
+# 返回且零告警，AI 作者会把未求值模板当正确结果消费（2026-10 评审修复包 A4）。
+# 同串只告警一次（去重集合，与 _warned_literals 同口径）。
+_warned_unmatched_templates: "set[str]" = set()
+
+
+def _warn_unmatched_template(value: str) -> None:
+    if value in _warned_unmatched_templates:
+        return
+    if len(_warned_unmatched_templates) > 512:
+        _warned_unmatched_templates.clear()
+    _warned_unmatched_templates.add(value)
+    logger.warning(
+        "expression %r contains '{%%' but no valid {%% ... %%} expression matched "
+        "(inner expression is malformed or unclosed); it was returned AS-IS without "
+        "evaluation — fix the inner expression (e.g. {%% $INPUT.x %%}).",
+        value if len(value) < 120 else value[:117] + "...",
+    )
+
 _SPECIAL_ROOTS = ("INPUT", "NODE", "PARENT", "GLOBAL", "ENV")
 
 
@@ -227,7 +247,19 @@ class ExpressionParser:
             | pp.Keyword("null") | pp.Keyword("None")
         )
         boolean.set_parse_action(lambda s, l, t: self._eval_boolean(t))
-        string = pp.QuotedString('"') | pp.QuotedString("'")
+        # esc_char 必须配齐（2026-10 评审修复包 A2）：codeflow 编译器 _render_arg
+        # 对 `\` `"` `\n` `\r` `\t` 做反斜杠转义，文法侧不配 esc_char 时 `\"` 让
+        # 字符串匹配提前终止（整个函数调用解析失败），`\\` 不回退、且
+        # convert_whitespace_escapes 会把 `\t` 吃成制表符——求值结果静默腐蚀。
+        # 本配置与 _render_arg 严格互逆（round-trip 金标见
+        # tests/unit/test_reviewfix_a_strings.py）。
+        # esc_quote 用**成对引号序列**（""/''）：pyparsing 语义是「转义一个内嵌
+        # 引号的字符序列」，传单个引号字符会把每个内嵌引号当转义序列，手写
+        # `$F.concat('a', 'b')` 会整段吞成 "a', 'b"（已实证）。
+        string = (
+            pp.QuotedString('"', esc_char="\\", esc_quote='""')
+            | pp.QuotedString("'", esc_char="\\", esc_quote="''")
+        )
         constant = boolean | string | number
 
         # --- identifiers / integers --------------------------------------
@@ -260,7 +292,16 @@ class ExpressionParser:
         # must work.  ``name_token`` is Optional so a bare ``$`` root (e.g.
         # ``$.not_exist``) still parses and raises KeyError at lookup time,
         # matching the old walk's ``context[paths[0]]`` behaviour.
-        root = pp.Combine(pp.Literal(prefix) + pp.Optional(name_token))
+        #
+        # ``$F.`` 负前瞻（2026-10 评审修复包 A5）：``$F`` 是函数命名空间，不是
+        # 上下文根。没有这个前瞻时，残缺的 ``$F.concat(...)``（如字符串引号未
+        # 转义）回退被 variable 吞成 ``$F.concat`` 变量路径——残缺串恰好整体
+        # 匹配时求值期抛 KeyError '$F' not found（假诊断，掩盖真实文法错误与
+        # 列号）。前瞻后 ``$F.`` 开头的非函数调用串直接在文法层失败，报
+        # ParseException。``$FLOW`` / ``$FOO`` 等根不受影响（``$F`` 后无 ``.``）。
+        root = pp.Combine(
+            ~pp.Literal(f"{prefix}F.") + pp.Literal(prefix) + pp.Optional(name_token)
+        )
 
         # Forward declaration for the recursive function-call rule
         function_call = pp.Forward()
@@ -487,8 +528,29 @@ class ExpressionParser:
         # preserves that "invalid prefix expression -> node error" behaviour.
         # (``parse_function`` wraps calls that should instead return the raw
         # string on parse failure.)
-        thunk = self._cached_compile(value, self._compile_prefix)
+        try:
+            thunk = self._cached_compile(value, self._compile_prefix)
+        except pp.ParseException as exc:
+            # 保留 ParseException 类型（parse_function 契约 + 节点错误语义），
+            # 但补上下文：裸「Expected end of text」不带原文、原因提示，AI 作者
+            # 无从自纠（2026-10 评审修复包 A5）。
+            raise self._annotate_parse_error(value, exc) from None
         return thunk((context, registry, self.prefix))
+
+    def _annotate_parse_error(self, value: str,
+                              exc: pp.ParseException) -> pp.ParseException:
+        """把文法解析失败包装成带原文/列号/常见原因提示的 ParseException。"""
+        line = exc.line or value
+        col = max(exc.column, 1)
+        caret = " " * (col - 1) + "^"
+        msg = (
+            f"无法解析表达式：{value!r}\n"
+            f"  {line}\n  {caret}（第 {col} 列附近：{exc.msg}）\n"
+            "常见原因：字符串常量里的引号/反斜杠未转义（写作 \\\" 或 \\\\）；"
+            "使用了不支持的写法（列表/字典字面量、{{...}}、f-string、裸函数调用）；"
+            "或 {% ... %} 模板未闭合。"
+        )
+        return pp.ParseException(value, exc.loc, msg, self._prefix_expr)
 
     def _compile_prefix(self, value: str) -> Thunk:
         parsed = self._prefix_expr.parse_string(value, parse_all=True)
@@ -500,18 +562,19 @@ class ExpressionParser:
         # substituting str(evaluated_value) for each match — identical to the
         # old ``re.sub`` behaviour. When no match is present the string is
         # returned unchanged.
+        # 可疑字面量告警在模板入口统一检查（2026-10 评审修复包 A4：原只在无
+        # `{%` 的快速路径检查，含 `{%` 但内层不合法的串走不到）。
+        if _SUSPICIOUS_LITERAL.search(value):
+            _warn_suspicious_literal(value)
         # 快速预筛（2026-09 性能评审 P1）：不含模板标记的纯文本直接返回，
         # 省掉 scanString 全串扫描——纯文本路径实测 43.5µs/次。
         if "{%" not in value:
-            # 可疑字面量告警（2026-09 LLM 作者模拟 P0-1）：{{name}}/f''/
-            # await xxx()/fn(...) 是 LLM 从其他模板语言/Python 迁移来的
-            # 高频写法——历史上原样返回字面量且零告警，AI 会把字面量当
-            # 正确结果直接消费。同串只告警一次（LRU 去重）。
-            if _SUSPICIOUS_LITERAL.search(value):
-                _warn_suspicious_literal(value)
             return value
         segs = self._cached_compile(value, self._compile_template)
-        if not segs:
+        if not any(seg_thunk is not None for _, _, seg_thunk in segs):
+            # 含 `{%` 但没有任何插值匹配成功（内层表达式不合法/未闭合）——
+            # 保持原样返回（不抛错，避免破坏存量语义），补告警留痕。
+            _warn_unmatched_template(value)
             return value
         frame = (context, registry, self.prefix)
         out: list = []

@@ -142,10 +142,37 @@ def _atom(kind: str, text: str) -> Any:
     return Symbol(text)
 
 
+# 字符串转义映射：显式白名单而非 unicode_escape——后者把多字节 UTF-8 按
+# latin-1 逐字节解码，含中文/emoji 的字符串静默乱码（如「中文」→
+# 'ä¸\xadæ\x96\x87'，2026-10 评审修复包 A3）。未列出的转义序列原样保留。
+_STRING_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    '"': '"',
+    "\\": "\\",
+}
+
+
 def _decode_string(text: str) -> str:
     # 去掉首尾引号，处理常见转义
     body = text[1:-1]
-    return body.encode("utf-8").decode("unicode_escape") if "\\" in body else body
+    if "\\" not in body:
+        return body
+    out: List[str] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\" and i + 1 < n:
+            mapped = _STRING_ESCAPES.get(body[i + 1])
+            if mapped is not None:
+                out.append(mapped)
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def read_forms(src: str) -> List[Any]:
