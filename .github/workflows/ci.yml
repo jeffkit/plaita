@@ -63,5 +63,13 @@ jobs:
       - name: Ruff BLE001 (blind except — warn only)
         run: ruff check plaita tests --select BLE001 --exit-zero
 
+      # 单次重试兜底：crypto 上还有其他自主会话的项目，其清理脚本会周期性
+      # pkill 掉 python 进程树（2026-10-02 实证 19:26/19:59 两次击杀 runner）。
+      # Restart=always 保 runner 复活；这里保单次作业错开击杀窗口。
       - name: CI regression gate
-        run: bash scripts/ci-gate.sh
+        run: |
+          attempt=1
+          until bash scripts/ci-gate.sh; do
+            if [ $attempt -ge 2 ]; then echo "gate failed 2 attempts"; exit 1; fi
+            attempt=$((attempt+1)); echo "== gate retry (attempt $attempt) =="; sleep 60
+          done
