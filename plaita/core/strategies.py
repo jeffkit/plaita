@@ -551,6 +551,14 @@ async def _subscribe_event(node, flow, node_state, context):
             "flow_id": flow.flow_id,
             "node_id": node.id,
         }
+        # 波次④（订阅自动超时）：仅当节点配置了 subscription_timeout 才携带
+        # timeout 形参。存量节点（None）保持与历史完全一致的参数集——不依赖
+        # 各 bus 实现是否接受该形参（register_subscription 的 ABC/redis/memory/
+        # sqlalchemy 均已就绪，简化测试替身未必），超时语义由 event_filter 侧
+        # SubscriptionTimeoutChecker 消费，此处只负责透传。
+        node_subscription_timeout = getattr(node, "subscription_timeout", None)
+        if node_subscription_timeout is not None:
+            subscription_params["timeout"] = node_subscription_timeout
 
         if asyncio.iscoroutinefunction(event_bus.register_subscription):
             subscription_id = await event_bus.register_subscription(**subscription_params)

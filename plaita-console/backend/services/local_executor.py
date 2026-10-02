@@ -9,7 +9,8 @@ SQLite（local_executions.context_json）。
 
 - 无跨进程：resume 必须走同一个 console 进程；进程重启后挂起的执行
   checkpoint 仍在（SQLite），显式 resume 可继续，但进程内事件订阅已丢失
-- cancel 为尽力而为：标记状态，不中断正在运行的线程
+- cancel 为步界协作取消（波次①）：置位取消 Event + 落 cancelled 终态，
+  执行线程在步界收口；在途节点不中断（软中断默认语义，设计稿 §3.3）
 """
 from __future__ import annotations
 
@@ -41,6 +42,41 @@ logger = logging.getLogger(__name__)
 # 已启动线程表：execution_id -> Thread（进程内生命周期，仅防重复启动/恢复）
 _threads: Dict[str, threading.Thread] = {}
 _lock = threading.Lock()
+
+# 取消事件表（设计稿 §3.1 本地档，波次①）：execution_id -> threading.Event，
+# 与 _threads 同锁管理。cancel_local_execution 置位；执行线程在步界消费并
+# 终态化，每步状态落库改用条件更新——执行线程不再无条件覆写终态。
+_cancel_events: Dict[str, threading.Event] = {}
+
+
+def _register_cancel_event(execution_id: str) -> None:
+    with _lock:
+        _cancel_events[execution_id] = threading.Event()
+
+
+def _pop_cancel_event(execution_id: str) -> None:
+    with _lock:
+        _cancel_events.pop(execution_id, None)
+
+
+def _cancel_event_set(execution_id: str) -> bool:
+    with _lock:
+        event = _cancel_events.get(execution_id)
+    return bool(event is not None and event.is_set())
+
+
+def _finalize_cancelled(execution_id: str, context: Optional[Dict[str, Any]]) -> None:
+    """本地档取消收口：落 cancelled 终态（context = 取消点前 checkpoint）。
+
+    幂等：cancel_local_execution 可能已写过 cancelled，此处再写仅补
+    context 快照，不产生覆写战争（条件更新闸门保证线程侧不再翻回 running）。
+    """
+    fs.finish_local_execution(
+        execution_id,
+        status="cancelled",
+        context_json=json.dumps(_safe(context), ensure_ascii=False),
+    )
+    logger.info("本地执行 %s 已取消（步界收口）", execution_id)
 
 # ---- 租户感知的凭据文件解析 ----
 # plaita 运行时每次 get_credential 都从 PLAITA_CREDENTIALS_FILE 环境变量解析
@@ -245,6 +281,8 @@ def _spawn(execution_id: str, target, *args, **kwargs) -> None:
         existing = _threads.get(execution_id)
         if existing is not None and existing.is_alive():
             raise RuntimeError(f"执行 {execution_id} 已有运行中的线程")
+        # 新执行线程配对一个新的取消事件（旧线程已退出才会走到这里）
+        _cancel_events[execution_id] = threading.Event()
         thread = threading.Thread(
             target=target, args=args, kwargs=kwargs,
             name=f"local-exec-{execution_id}", daemon=True,
@@ -342,32 +380,54 @@ def _run_flow(
 
         while True:
             context = result.get("context", context)
+            # 取消检查点（波次① §3.1 本地档）：cancel_local_execution 置位
+            # 的事件在此消费，步界终态化（软中断默认语义：在途节点跑完）。
+            if _cancel_event_set(execution_id):
+                _finalize_cancelled(execution_id, context)
+                if langfuse_callback is not None:
+                    langfuse_callback.finalize()
+                break
             if result.get("is_end"):
                 logger.info("本地执行 %s 完成", execution_id)
-                fs.finish_local_execution(
+                # 条件推进 running→completed：已被置 cancelled 时条件不命中，
+                # 不覆写既有终态（覆写战争消失，T8）。字段先落、状态后翻，
+                # 中间态（running+output）无观察者依赖。
+                fs.update_local_execution(
                     execution_id,
-                    status="completed",
                     output_json=json.dumps(_safe(result.get("result")), ensure_ascii=False),
                     context_json=json.dumps(_safe(context), ensure_ascii=False),
                 )
-                if langfuse_callback is not None:
-                    langfuse_callback.finalize()  # distributed 不发 on_flow_end，终态收口 root
+                if fs.update_local_execution_status_if(execution_id, "running", "completed"):
+                    fs.update_local_execution(execution_id, end_time=datetime.utcnow())
+                    if langfuse_callback is not None:
+                        langfuse_callback.finalize()  # distributed 不发 on_flow_end，终态收口 root
+                else:
+                    logger.info("本地执行 %s 已非 running，保留现有终态", execution_id)
                 break
             if result.get("is_suspend"):
                 logger.info("本地执行 %s 挂起，等待恢复", execution_id)
                 fs.update_local_execution(
                     execution_id,
-                    status="suspended",
                     context_json=json.dumps(_safe(context), ensure_ascii=False),
                 )
+                # 条件推进 running→suspended：取消已落 cancelled 时不覆写
+                if not fs.update_local_execution_status_if(execution_id, "running", "suspended"):
+                    logger.info("本地执行 %s 已被取消，保持 cancelled 终态", execution_id)
                 break
 
-            # 单步推进：resume_type="continue"
+            # 单步推进：resume_type="continue"。checkpoint 先落、状态用
+            # 条件更新充当取消闸门（原语已在 resume_local_execution 使用）：
+            # cancel_local_execution 已写 cancelled 时条件不命中 → 立即收口，
+            # 不再翻回 running。
             fs.update_local_execution(
                 execution_id,
-                status="running",
                 context_json=json.dumps(_safe(context), ensure_ascii=False),
             )
+            if not fs.update_local_execution_status_if(execution_id, "running", "running"):
+                _finalize_cancelled(execution_id, context)
+                if langfuse_callback is not None:
+                    langfuse_callback.finalize()
+                break
             result = execution.run_distributed(
                 flow, saved_context=context, resume_type="continue"
             )
@@ -390,6 +450,7 @@ def _run_flow(
         _tenant_credentials_file.reset(tenant_token)
         with _lock:
             _threads.pop(execution_id, None)
+        _pop_cancel_event(execution_id)
 
 
 class _ThreadLogHandler(logging.Handler):
@@ -453,9 +514,19 @@ def list_local_executions(
 def cancel_local_execution(
     execution_id: str, tenant_id: Optional[str] = None
 ) -> bool:
+    """取消本地执行（波次① §3.1 本地档）。
+
+    - 置位取消事件：执行线程在步界消费并终态化（在途节点跑完，软中断）；
+    - 同步落 cancelled 终态：控制面立即反馈；线程侧每步状态改用条件更新，
+      不会把 cancelled 翻回 running/completed——覆写战争消失。
+    """
     row = fs.get_local_execution(execution_id, tenant_id=tenant_id)
     if row is None:
         return False
+    with _lock:
+        event = _cancel_events.get(execution_id)
+    if event is not None:
+        event.set()
     if row["status"] in ("running", "suspended"):
         fs.finish_local_execution(execution_id, status="cancelled")
     return True

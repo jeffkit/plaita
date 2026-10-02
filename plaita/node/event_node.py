@@ -2,7 +2,7 @@
 事件节点实现，用于在Flow流程中等待事件
 """
 import time
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar, Dict, Optional
 from enum import Enum
 
 from pydantic import AliasChoices, Field
@@ -40,6 +40,16 @@ class EventNode(Node):
         validation_alias=AliasChoices("event_type", "eventType"),
         description="订阅的事件类型：须与事件发布方的 type 一致（支持 $ 表达式）")
     event_filter: Dict[str, Any] = Field(default_factory=dict, description="事件过滤器：按点路径匹配事件负载字段，如 {\"data.status\": \"ok\"}")
+    # 订阅超时（秒）：挂起等待事件的 最长时限，超时后由 event_filter 进程的
+    # SubscriptionTimeoutChecker 触发 resume_type=timeout，节点落 timeout 状态。
+    # None = 无限等待（默认，与历史行为完全一致——未配置该字段的存量流程零变化）。
+    # gt=0：0/负数无意义（0 会让订阅一注册就超时），构造期直接 ValidationError 拒绝。
+    # AliasChoices 与 event_type 同理由：codeflow 编译器/console 表单发 camelCase。
+    subscription_timeout: Optional[float] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices("subscription_timeout", "subscriptionTimeout"),
+        description="订阅超时秒数：等待事件超过该时长则节点落 timeout 状态；缺省 None=无限等待")
     
     def _get_node_state(self, execution, default=None):
         """

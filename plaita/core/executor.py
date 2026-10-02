@@ -159,6 +159,29 @@ class FlowExecution:
         return self._ctx.cancel_event
 
     @property
+    def cancel_requested(self):
+        """执行级取消意图（粘滞；与每节点 clear 的 ``cancel_event`` 职责拆分）。"""
+        return self._ctx.cancel_requested
+
+    def cancel(self) -> None:
+        """请求取消本执行（幂等，多次调用无害）。
+
+        同时置位两个 Event，各司其职：
+
+        - ``cancel_event``：节点级协作取消信号——code 沙箱等待循环
+          （``code._popen_wait_cancellable``）观察到置位当场 killpg 整个
+          进程树；历史 sync 超时置位/下节点入口 clear 语义不变。
+        - ``cancel_requested``：粘滞的执行级取消意图——引擎在节点边界
+          拒绝继续（抛 ``FlowCancelledException``），不被任何节点入口 clear。
+
+        子执行与父执行共享同一对 Event 实例（``ExecutionContext`` 父子共享
+        规则），对链上任一执行调用 ``cancel()`` 即传播到整条执行链。取消的
+        默认语义是步界取消（在途非沙箱节点跑完当前节点，§3.3）。
+        """
+        self._ctx.cancel_event.set()
+        self._ctx.cancel_requested.set()
+
+    @property
     def express_prefix(self) -> str:
         return self._ctx.express_prefix
 
@@ -400,6 +423,7 @@ class FlowExecution:
         finally:
             if not lazy:
                 self._running = False
+
 
     def _ensure_flow_resolved(self, flow) -> None:
         """执行前兜底：若 ``flow.nodes`` 仍含 dict 形态节点 (绕过

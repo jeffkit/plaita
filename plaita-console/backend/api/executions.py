@@ -146,6 +146,30 @@ def _exec_key(tenant: Optional[str], execution_id: str) -> str:
     return f"{tenant_namespace(tenant)}:execution:{execution_id}"
 
 
+# 取消标志键 TTL：7 天自清理（设计稿 §3.1，与 worker 侧 CANCEL_FLAG_TTL_SECONDS 同值）
+CANCEL_FLAG_TTL_SECONDS = 7 * 86400
+
+
+def _cancel_key(tenant: Optional[str], execution_id: str) -> str:
+    """取消意图标志键：``{ns}:execution:cancel:{id}``（租户路由复用 _exec_key 规则）。
+
+    意图与状态分离（设计稿 §3.1 选型 B）：控制面对运行中执行只写本键 +
+    投 cancel 消息，不再直写 status=cancelled——推进中的 worker 每步会把
+    内存 state 覆写回 running，直写等于覆写战争起点；worker 在步界消费
+    本键后终态化。带 TTL 自清理。
+    """
+    return f"{tenant_namespace(tenant)}:execution:cancel:{execution_id}"
+
+
+def _is_mechanism_key(key: str) -> bool:
+    """排除与执行状态同前缀的机制键（租约/取消标志/死信）。"""
+    return (
+        ":execution:lease:" in key
+        or ":execution:cancel:" in key
+        or key.endswith(":dlq")
+    )
+
+
 def _tenant_from_key(key: str) -> str:
     """从 ``plaita[:tenant]:execution:{id}`` 解析租户（default 键无租户段）。"""
     parts = key.split(":")
@@ -172,7 +196,7 @@ def _find_execution(
         return "default", json.loads(raw)
     for key in redis.scan_iter(match=f"plaita:*:execution:{execution_id}"):
         key_str = key if isinstance(key, str) else key.decode()
-        if key_str.endswith(":dlq") or ":execution:lease:" in key_str:
+        if _is_mechanism_key(key_str):
             continue
         raw = redis.get(key_str)
         if raw:
@@ -219,8 +243,8 @@ async def list_executions(
         for pattern in patterns:
             for key in redis.scan_iter(match=pattern):
                 key_str = key if isinstance(key, str) else key.decode()
-                # 排除租约/队列等同前缀机制键
-                if ":execution:lease:" in key_str or key_str.endswith(":dlq"):
+                # 排除租约/取消标志/队列等同前缀机制键
+                if _is_mechanism_key(key_str):
                     continue
                 if key_str in seen:
                     continue
@@ -391,7 +415,8 @@ async def cancel_execution(
             "message": f"执行已是终态（{status}），忽略取消",
         }
 
-    # 发送取消消息到队列（如果有 FlowWorker 在监听）
+    # 取消消息入队（保留）：worker 全灭后的死人开关——消息留在 pending，
+    # worker 恢复后经 XCLAIM 重投、resume 入口取消检查点终态化。
     message = {
         "type": "resume",
         "flow_id": flow_id,
@@ -401,20 +426,32 @@ async def cancel_execution(
         "data": None,
         "timestamp": datetime.now().isoformat()
     }
-
     _enqueue(message, redis)
 
-    # 同时直接更新状态（以防 FlowWorker 不在线）
-    info["status"] = "cancelled"
-    info["end_time"] = datetime.now().isoformat()
-    redis.set(_exec_key(tenant, execution_id), json.dumps(info))
-    
+    if status == "suspended":
+        # 挂起执行保持现状（已验证路径，设计稿 §3.5 兼容红线）：直接写
+        # cancelled + 入队 cancel 消息；worker resume_flow 终态短路原样
+        # 返回，EventNode 的 on_cancel 不会续跑到 end。
+        info["status"] = "cancelled"
+        info["end_time"] = datetime.now().isoformat()
+        redis.set(_exec_key(tenant, execution_id), json.dumps(info))
+    else:
+        # 运行中执行（波次① §3.1）：只表达取消意图——写标志键（7 天 TTL
+        # 自清理），不再直接写 status=cancelled。推进中的 worker 每步会把
+        # 内存 state 覆写回 running，直写必被覆写；worker 在步界检查点
+        # 消费标志键后终态化（cancelled 的 context = 取消点前一步 checkpoint）。
+        redis.set(
+            _cancel_key(tenant, execution_id),
+            datetime.now().isoformat(),
+            ex=CANCEL_FLAG_TTL_SECONDS,
+        )
+
     _audit(request, "execution.cancel", execution_id)
     return {
         "success": True,
         "status": "cancelled",
         "execution_id": execution_id,
-        "message": "执行已取消"
+        "message": "执行已取消",
     }
 
 
@@ -445,8 +482,9 @@ async def delete_execution(
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
     key = _exec_key(_tenant, execution_id)
 
-    # 删除记录
+    # 删除记录（连同取消标志键，避免残留意图键指向已删除的执行）
     redis.delete(key)
+    redis.delete(_cancel_key(_tenant, execution_id))
 
     # 同时删除相关的事件通道（如果存在）
     event_key = f"plaita:execution:events:{execution_id}"

@@ -162,13 +162,20 @@ class Parallel(Node):
         return rs
 
     def _build_executor(self, mode: str, execution) -> Optional[ParallelExecutor]:
-        """按 ``mode`` 构造执行器。进程模式在父进程 cancel_event 已触发时
-        直接放弃启动子进程 (进程模式 cancel 不跨进程传播, 启动了也响应不了)。"""
+        """按 ``mode`` 构造执行器。进程模式在父进程取消信号已触发时
+        直接放弃启动子进程 (进程模式 cancel 不跨进程传播, 启动了也响应不了)。
+
+        同时查两个 Event (2026-10 波次③): ``cancel_event`` 是节点级信号,
+        在本节点入口已被 runner clear——真正可靠的执行级取消意图是粘滞的
+        ``cancel_requested`` (cancel() 置位, 节点入口只读不 clear)。"""
         if mode == PROCESS:
             cancel_event = getattr(execution, "cancel_event", None)
-            if cancel_event is not None and cancel_event.is_set():
+            cancel_requested = getattr(execution, "cancel_requested", None)
+            if (cancel_event is not None and cancel_event.is_set()) or (
+                cancel_requested is not None and cancel_requested.is_set()
+            ):
                 logger.warning(
-                    "parallel %s: cancel_event already set, skip process branches", self.id,
+                    "parallel %s: cancel already requested, skip process branches", self.id,
                 )
                 return None
         return make_executor(mode)

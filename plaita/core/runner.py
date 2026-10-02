@@ -23,6 +23,7 @@ from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
     ErrorResultException,
     ErrorStrategy,
+    FlowCancelledException,
     FlowErrorType,
     FlowExecutionException,
     FlowResultError,
@@ -266,6 +267,21 @@ class NodeRunner:
         if cancel_event is not None and cancel_event.is_set():
             logger.debug("resetting cancel_event carried over from a previous node before running %s", node.id)
             cancel_event.clear()
+
+        # cancel_requested 是**执行级**取消意图 (2026-10 波次③): 由
+        # ``FlowExecution.cancel()`` 置位, 粘滞、不随节点复位, 与上面每节点
+        # clear 的 cancel_event 职责拆分。置位时在本节点入口直接拒绝执行——
+        # 在重试循环与 errorHandler 分发之前抛出, 保证取消不被重试/continue
+        # 策略吞掉, 沿 FlowExecutionException 同族语义冒泡。只读, 永不 clear。
+        cancel_requested = getattr(exec_ctx, "cancel_requested", None)
+        if cancel_requested is not None and cancel_requested.is_set():
+            err = FlowCancelledException(
+                f"Execution cancelled before running node {node.name or node.id}",
+                node=node,
+            )
+            err.source_line = _node_source_loc(node)
+            logger.info("node %s rejected: execution cancellation requested", node.id)
+            raise err
 
         total_timeout_ms: Optional[int] = None
         if config_timeout:

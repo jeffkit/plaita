@@ -203,6 +203,13 @@ class ExecutionContext(_SystemStateAccessors):
         self.expose_env = list(expose_env) if expose_env else []
         # 进程内共享 parent Event；跨进程由 __getstate__/__setstate__ 重建。
         self.cancel_event = parent.cancel_event if parent is not None else threading.Event()
+        # 执行级取消意图（2026-10 波次③）：与 cancel_event 职责拆分——
+        # cancel_event 是"当前节点"级信号（sync 超时置位、下节点入口 clear），
+        # cancel_requested 是粘滞的"整个执行"级取消意图（cancel() 置位、
+        # 节点入口只读不 clear）。父子共享规则与 cancel_event 同型。
+        self.cancel_requested = (
+            parent.cancel_requested if parent is not None else threading.Event()
+        )
         self.express_prefix = express_prefix
         self.express_input_name = express_input_name
         self.express_parent_name = express_parent_name
@@ -243,7 +250,7 @@ class ExecutionContext(_SystemStateAccessors):
         return self._state.get(key, default)
 
     def clean(self) -> None:
-        """Reset state for a fresh run and re-sync cancel_event.
+        """Reset state for a fresh run and re-sync cancel_event/cancel_requested.
 
         ``expose_env`` is not cleared here — ``setup_flow`` overwrites it from
         ``flow.expose_env``. Root gets a new Event; child re-syncs to parent.
@@ -257,17 +264,24 @@ class ExecutionContext(_SystemStateAccessors):
             self.parent.cancel_event if self.parent is not None
             else threading.Event()
         )
+        self.cancel_requested = (
+            self.parent.cancel_requested if self.parent is not None
+            else threading.Event()
+        )
 
     def __getstate__(self):
         # Event isn't picklable; child process gets a fresh unset Event.
         state = self.__dict__.copy()
         state.pop("cancel_event", None)
+        state.pop("cancel_requested", None)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         if not getattr(self, "cancel_event", None):
             self.cancel_event = threading.Event()
+        if not getattr(self, "cancel_requested", None):
+            self.cancel_requested = threading.Event()
 
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         """Populate $INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV and sync expose_env."""

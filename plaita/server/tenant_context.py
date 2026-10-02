@@ -73,10 +73,24 @@ class _TenantRoutingMixin:
         return getattr(self._current_storage(), name)
 
 
+def _fenced_execution_storage_cls(**kwargs: Any):
+    """ExecutionStorage 的 ``_storage_cls`` 同位注入点（设计稿 §4.2/§6 波次②）。
+
+    默认给 RedisExecutionStorage 套 ``FencedExecutionStorage``（save 变世代
+    CAS 写，fencing token 经 ContextVar 由 worker 注入）；``PLAITA_DISABLE_
+    FENCING=1`` 时回滚为裸存储（§6 波次②回滚门：摘除包装器）。
+    """
+    from ..storage.fenced import build_fenced_execution_storage
+
+    return build_fenced_execution_storage(**kwargs)
+
+
 class TenantRoutingExecutionStorage(_TenantRoutingMixin, ExecutionStorage):
     """ExecutionStorage 租户路由包装器。"""
 
-    _storage_cls = RedisExecutionStorage
+    # staticmethod：mixin 以 ``self._storage_cls(namespace=..., **kwargs)``
+    # 调用——普通函数经实例访问会变成绑定方法，需显式静态化。
+    _storage_cls = staticmethod(_fenced_execution_storage_cls)
 
     def save_execution_state(self, execution_id: str, state: Any) -> bool:
         return self._current_storage().save_execution_state(execution_id, state)
@@ -113,7 +127,8 @@ class TenantRoutingFlowStorage(_TenantRoutingMixin, FlowStorage):
 
 class TenantRoutingExecutionLease:
     """resume 租约按租户路由键前缀：``{ns}:execution:lease:{id}``。
-    default/空租户保持历史前缀 ``plaita:execution:lease:``（兼容存量锁）。"""
+    default/空租户保持历史前缀 ``plaita:execution:lease:``（兼容存量锁）。
+    fence 世代键跟随同一 namespace：``{ns}:execution:fence:{id}``。"""
 
     def __init__(self, redis_client: Any) -> None:
         self._redis_client = redis_client
@@ -135,6 +150,12 @@ class TenantRoutingExecutionLease:
 
     def try_acquire(self, execution_id: str, holder: str, ttl_seconds: int) -> bool:
         return self._lease().try_acquire(execution_id, holder, ttl_seconds)
+
+    def try_acquire_fenced(
+        self, execution_id: str, holder: str, ttl_seconds: int
+    ) -> Optional[int]:
+        """fencing 注入点接线（设计稿 §4.2）：世代号 acquire 按租户路由。"""
+        return self._lease().try_acquire_fenced(execution_id, holder, ttl_seconds)
 
     def release(self, execution_id: str, holder: str) -> bool:
         return self._lease().release(execution_id, holder)

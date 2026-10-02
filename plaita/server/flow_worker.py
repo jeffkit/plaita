@@ -3,7 +3,8 @@ import json
 import logging
 import os
 import signal
-from typing import Dict, Any, Optional
+import threading
+from typing import Dict, Any, Optional, Set, Tuple
 
 import argparse
 import importlib
@@ -15,6 +16,10 @@ from plaita.event.core import EventBus
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.storage.base import ExecutionState, ExecutionStorage, FlowStorage
+from plaita.storage.fenced import (
+    reset_current_fence_token,
+    set_current_fence_token,
+)
 from plaita.storage.redis import ExecutionStateLoadError
 from plaita.logger import logger
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
@@ -39,7 +44,28 @@ from plaita.server.tenant_context import (
     current_tenant,
     reset_current_tenant,
     set_current_tenant,
+    tenant_namespace,
 )
+
+
+def _env_switch(name: str) -> bool:
+    """读 ``=1`` 形式的环境回滚开关（每次调用读取，便于测试注入）。"""
+    return os.environ.get(name, "").strip() == "1"
+
+
+def _cancel_checkpoint_disabled() -> bool:
+    """波次①回滚开关：PLAITA_DISABLE_CANCEL_CHECKPOINT=1 时 worker 不查取消标志键。"""
+    return _env_switch("PLAITA_DISABLE_CANCEL_CHECKPOINT")
+
+
+def _fencing_disabled() -> bool:
+    """波次②回滚开关（fencing 半边）：PLAITA_DISABLE_FENCING=1 时退回 SET NX acquire。"""
+    return _env_switch("PLAITA_DISABLE_FENCING")
+
+
+def _watchdog_disabled() -> bool:
+    """波次②回滚开关（看门狗半边）：PLAITA_DISABLE_LEASE_WATCHDOG=1 时不启动续租线程。"""
+    return _env_switch("PLAITA_DISABLE_LEASE_WATCHDOG")
 
 class FlowWorker:
     """
@@ -86,6 +112,81 @@ class FlowWorker:
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
         self.lease_ttl_seconds = lease_ttl_seconds
+
+    # ---- 取消检查点（波次①，设计稿 §3.1 选型 B：独立取消标志键）----
+
+    # 取消标志键 TTL：7 天自清理（设计稿 §3.1；复用 event_filter 去重键的
+    # 同类「带 TTL 意图键」模式）。BFF 侧写入（executions.py._cancel_key）。
+    CANCEL_FLAG_TTL_SECONDS = 7 * 86400
+
+    def _cancel_flag_key(self, execution_id: str) -> str:
+        """取消标志键：``{ns}:execution:cancel:{id}``（租户路由，与 _exec_key 同规则）。"""
+        return f"{tenant_namespace(current_tenant())}:execution:cancel:{execution_id}"
+
+    def _cancel_requested(self, execution_id: str) -> bool:
+        """步间取消检查：控制面写的意图标志键是否存在。
+
+        - 无 redis 客户端（内存 worker / 单测派生类）或查询异常 → 容错降级
+          视为未取消（设计稿 §3.5 兼容红线）；
+        - ``PLAITA_DISABLE_CANCEL_CHECKPOINT=1``（波次①回滚开关）→ 跳过检查。
+        """
+        if _cancel_checkpoint_disabled():
+            return False
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "exists"):
+            return False
+        try:
+            return bool(redis_client.exists(self._cancel_flag_key(execution_id)))
+        except Exception as e:
+            logger.warning(
+                "取消标志检查失败（视为未取消，下个步界重试）: %s: %s", execution_id, e
+            )
+            return False
+
+    # ---- 租约看门狗挂钩（波次②；基类 no-op，RedisFlowWorker 覆写）----
+
+    def _acquire_lease(self, execution_id: str, holder: str) -> Tuple[Optional[str], Optional[int]]:
+        """取得执行租约，返回 ``(lease_value, fence_token)``。
+
+        fencing 开启且 lease 实现支持时走世代号 acquire（execution_lease.
+        try_acquire_fenced）：租约值变为 ``{holder}:{gen}``，renew/release 与
+        fenced storage CAS 均以完整 value 串比较。回滚开关
+        ``PLAITA_DISABLE_FENCING=1`` 或 lease 为 NullExecutionLease（内存/
+        单测）时退回 SET NX，fence_token=None（设计稿 §4.2 / §6 波次②回滚）。
+        lease_value 为 None 表示 acquire 失败（已被他人持有）。
+        """
+        if not _fencing_disabled():
+            fenced = getattr(self.execution_lease, "try_acquire_fenced", None)
+            if callable(fenced):
+                generation = fenced(execution_id, holder, self.lease_ttl_seconds)
+                if generation is not None:
+                    return f"{holder}:{generation}", generation
+                return None, None
+        acquired = self.execution_lease.try_acquire(
+            execution_id, holder, self.lease_ttl_seconds
+        )
+        return (holder if acquired else None), None
+
+    def _register_lease_watch(
+        self, execution_id: str, lease_value: str, execution: Any
+    ) -> None:
+        """登记活跃执行供看门狗续租（基类 no-op）。"""
+
+    def _unregister_lease_watch(self, execution_id: str, lease_value: str) -> None:
+        """注销看门狗登记（基类 no-op）。"""
+
+    def _raise_if_lease_lost(self, execution_id: Optional[str]) -> None:
+        """看门狗已标记失租则抛 ExecutionLeaseError（基类 no-op）。"""
+
+    def _renew_lease_if_held(self, lease_execution_id: Optional[str], lease_holder: Optional[str]) -> None:
+        if not lease_execution_id or not lease_holder:
+            return
+        # 看门狗已判死（含注入式 renew 失败）：步界立即自爆，不再续期
+        self._raise_if_lease_lost(lease_execution_id)
+        if not self.execution_lease.renew(lease_execution_id, lease_holder, self.lease_ttl_seconds):
+            raise ExecutionLeaseError(
+                f"lost lease for execution {lease_execution_id}; aborting resume"
+            )
     
     def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
         """
@@ -288,12 +389,34 @@ class FlowWorker:
         logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
 
         holder = new_holder_token(prefix="resume")
-        if not self.execution_lease.try_acquire(execution_id, holder, self.lease_ttl_seconds):
+        lease_value, fence_token = self._acquire_lease(execution_id, holder)
+        if lease_value is None:
             raise ExecutionLeaseError(
                 f"execution {execution_id} is leased by another worker; refuse concurrent resume"
             )
 
+        fence_token_reset = None
+        if fence_token is not None:
+            # fencing 写侧守门（设计稿 §4.2）：本 resume 的所有状态落盘带
+            # 世代号，FencedExecutionStorage 据此 CAS；finally 复位。
+            fence_token_reset = set_current_fence_token(fence_token)
+
         try:
+            # XCLAIM 恢复路径取消检查点（设计稿 §3.1）：crash 后 cancel 消息
+            # 或任一 resume 消息被重投，若取消标志在（控制面对运行中执行写的
+            # 意图键），直接终态化而非继续推进。上一 checkpoint 已落盘，
+            # cancelled 的 context 即取消点前一步的完整快照（§3.3）。
+            if self._cancel_requested(execution_id):
+                state.status = "cancelled"
+                state.end_time = datetime.now().isoformat()
+                self.execution_storage.save_execution_state(execution_id, state)
+                logger.info("执行 %s 在 resume 入口命中取消标志，终态化", execution_id)
+                return {
+                    "execution_id": execution_id,
+                    "status": "cancelled",
+                    "cancelled_at_resume": True,
+                }
+
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
             execution = FlowExecution(
                 event_bus=self.event_bus,
@@ -301,6 +424,9 @@ class FlowWorker:
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
+            # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
+            # 被 XCLAIM 抢占双跑
+            self._register_lease_watch(execution_id, lease_value, execution)
 
             # 直接使用 run_distributed 恢复执行
             result = execution.run_distributed(
@@ -317,7 +443,7 @@ class FlowWorker:
                 state,
                 execution,
                 lease_execution_id=execution_id,
-                lease_holder=holder,
+                lease_holder=lease_value,
             )
 
             return final_result
@@ -337,15 +463,11 @@ class FlowWorker:
 
             raise RuntimeError(f"恢复流程执行出错: {e}")
         finally:
-            self.execution_lease.release(execution_id, holder)
-
-    def _renew_lease_if_held(self, lease_execution_id: Optional[str], lease_holder: Optional[str]) -> None:
-        if not lease_execution_id or not lease_holder:
-            return
-        if not self.execution_lease.renew(lease_execution_id, lease_holder, self.lease_ttl_seconds):
-            raise ExecutionLeaseError(
-                f"lost lease for execution {lease_execution_id}; aborting resume"
-            )
+            self._unregister_lease_watch(execution_id, lease_value)
+            if fence_token_reset is not None:
+                reset_current_fence_token(fence_token_reset)
+            # release 对整个租约 value 串 compare（fencing 档 = {holder}:{gen}）
+            self.execution_lease.release(execution_id, lease_value)
 
     def _process_execution_result(
         self,
@@ -405,6 +527,9 @@ class FlowWorker:
             is_suspend = result.get("is_suspend", False)
 
             if is_end:
+                # 落盘前失租检查（波次② §4.1）：看门狗已判死则不写状态，
+                # 消息不 ack 走重投——防止与接管者双写终态
+                self._raise_if_lease_lost(lease_execution_id)
                 state.status = "completed"
                 state.context = context
                 state.end_time = datetime.now().isoformat()
@@ -412,12 +537,28 @@ class FlowWorker:
                 self._finalize_observers()
                 break
             elif is_suspend:
+                self._raise_if_lease_lost(lease_execution_id)
                 state.status = "suspended"
                 state.context = context
                 self.execution_storage.save_execution_state(execution_id, state)
                 self._dispatch_service_task(result, context, execution_id)
                 break
             else:
+                # 取消检查点（波次① §3.1 选型 B）：控制面对运行中执行只写
+                # 取消标志键不再直写 cancelled；worker 在步界消费意图——
+                # 上一节点结果已随 PERSIST_EVERY_N_STEPS=1 落盘，此处
+                # state.context 即取消点前一步的完整 checkpoint（§3.3）。
+                # 默认语义：在途节点跑完（软中断），code 沙箱类由引擎层
+                # cancel_event 即时击杀（§3.3，波次③）。
+                if self._cancel_requested(execution_id):
+                    self._raise_if_lease_lost(lease_execution_id)
+                    state.status = "cancelled"
+                    state.context = context
+                    state.end_time = datetime.now().isoformat()
+                    self.execution_storage.save_execution_state(execution_id, state)
+                    self._finalize_observers()
+                    logger.info("执行 %s 已在步界响应取消（标志键命中），终态化", execution_id)
+                    break
                 state.status = "running"
                 try:
                     self._renew_lease_if_held(lease_execution_id, lease_holder)
@@ -438,6 +579,7 @@ class FlowWorker:
                         and not is_suspend
                         and steps_since_persist >= self.PERSIST_EVERY_N_STEPS
                     ):
+                        self._raise_if_lease_lost(lease_execution_id)
                         state.context = context
                         state.last_update_time = datetime.now().isoformat()
                         self.execution_storage.save_execution_state(execution_id, state)
@@ -538,6 +680,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         max_deliveries: int = DEFAULT_MAX_DELIVERIES,
         dlq_key: Optional[str] = None,
         read_block_ms: int = 1_000,
+        watchdog_interval_seconds: Optional[float] = None,
     ):
         redis_client = redis_client or Redis.from_url(redis_url)
         super().__init__(
@@ -564,6 +707,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._max_deliveries = max_deliveries
         self._dlq_key = dlq_key
         self._task_queue: Optional[RedisStreamTaskQueue] = None
+
+        # 租约看门狗（波次② §4.1）：登记活跃 (execution_id → 租约值串/
+        # FlowExecution/租户)，每 watchdog_interval_seconds（默认 TTL/3）
+        # renew 一次，保证存活 worker 的租约永不空窗——XCLAIM 只会捡到
+        # 真死 worker 的消息，抢占双跑被根除，fencing 是其下第二道保险。
+        self._watchdog_interval_seconds = watchdog_interval_seconds
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._watchdog_stop = threading.Event()
+        self._lease_watch_lock = threading.Lock()
+        # execution_id -> (lease_value, execution, tenant_id)
+        self._lease_watch: Dict[str, tuple] = {}
+        self._lease_lost: Set[str] = set()
         
         # 服务注册
         self._enable_registry = enable_registry
@@ -618,6 +773,125 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
         return self._task_queue
 
+    # ---- 租约看门狗（波次② §4.1）----
+
+    def _register_lease_watch(
+        self, execution_id: str, lease_value: str, execution: Any
+    ) -> None:
+        """登记活跃执行：看门狗据此续租；失租鸭子调 execution.cancel()。"""
+        with self._lease_watch_lock:
+            # 同一执行的新租约（重投 resume 重入）清除陈旧失租标记
+            self._lease_lost.discard(execution_id)
+            self._lease_watch[execution_id] = (
+                lease_value,
+                execution,
+                current_tenant(),
+            )
+
+    def _unregister_lease_watch(self, execution_id: str, lease_value: str) -> None:
+        with self._lease_watch_lock:
+            entry = self._lease_watch.get(execution_id)
+            # 只撤自己的登记（防误撤后来者的新世代租约）
+            if entry is not None and entry[0] == lease_value:
+                self._lease_watch.pop(execution_id, None)
+            self._lease_lost.discard(execution_id)
+
+    def _raise_if_lease_lost(self, execution_id: Optional[str]) -> None:
+        if not execution_id:
+            return
+        with self._lease_watch_lock:
+            lost = execution_id in self._lease_lost
+        if lost:
+            raise ExecutionLeaseError(
+                f"execution {execution_id} lease lost (watchdog flagged); aborting"
+            )
+
+    def _start_lease_watchdog(self) -> None:
+        """启动看门狗线程（run() 调用）；PLAITA_DISABLE_LEASE_WATCHDOG=1 不启动。"""
+        if _watchdog_disabled():
+            logger.info("租约看门狗已禁用（PLAITA_DISABLE_LEASE_WATCHDOG=1）")
+            return
+        if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
+            return
+        self._watchdog_stop.clear()
+        self._watchdog_thread = threading.Thread(
+            target=self._lease_watchdog_loop,
+            name="plaita-lease-watchdog",
+            daemon=True,
+        )
+        self._watchdog_thread.start()
+
+    def _stop_lease_watchdog(self) -> None:
+        self._watchdog_stop.set()
+        watchdog = self._watchdog_thread
+        if (
+            watchdog is not None
+            and watchdog is not threading.current_thread()
+            and watchdog.is_alive()
+        ):
+            watchdog.join(timeout=2.0)
+        self._watchdog_thread = None
+
+    def _watchdog_interval(self) -> float:
+        if self._watchdog_interval_seconds is not None:
+            return max(0.01, float(self._watchdog_interval_seconds))
+        # 默认 TTL/3（设计稿 §4.1：120s TTL → 40s renew）
+        return max(1.0, self.lease_ttl_seconds / 3.0)
+
+    def _lease_watchdog_loop(self) -> None:
+        interval = self._watchdog_interval()
+        logger.info(
+            "租约看门狗已启动（renew 间隔 %.2fs, ttl=%ss）", interval, self.lease_ttl_seconds
+        )
+        while not self._watchdog_stop.wait(interval):
+            try:
+                self._watchdog_renew_once()
+            except Exception:  # noqa: BLE001 — 看门狗自身绝不能带崩 worker
+                logger.error("租约看门狗周期异常", exc_info=True)
+
+    def _watchdog_renew_once(self) -> None:
+        """对全部活跃执行续租一轮；renew 失败（Lua compare 不符 = 已被他人
+        持有/过期）→ 标记 lease_lost + 鸭子调 execution.cancel() 中止当前步
+        （引擎 cancel() 为波次③实现，缺席时跳过——失租兜底是步界
+        _renew_lease_if_held / persist 前失租检查抛 ExecutionLeaseError 且
+        不写状态，消息不 ack）。Redis 瞬断（renew 抛异常）不判死，下周期重试。
+        """
+        with self._lease_watch_lock:
+            entries = list(self._lease_watch.items())
+        for execution_id, (lease_value, execution, tenant_id) in entries:
+            token = set_current_tenant(tenant_id)
+            try:
+                renewed = self.execution_lease.renew(
+                    execution_id, lease_value, self.lease_ttl_seconds
+                )
+            except Exception as exc:  # noqa: BLE001 — 瞬断不判死
+                logger.warning(
+                    "看门狗 renew 异常（下周期重试）: %s: %s", execution_id, exc
+                )
+                continue
+            finally:
+                reset_current_tenant(token)
+            if renewed:
+                continue
+            with self._lease_watch_lock:
+                self._lease_lost.add(execution_id)
+                self._lease_watch.pop(execution_id, None)
+            cancel = getattr(execution, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:  # noqa: BLE001 — cancel 失败不影响失租兜底
+                    logger.warning(
+                        "看门狗调 execution.cancel() 失败: %s", execution_id, exc_info=True
+                    )
+            else:
+                logger.debug("执行对象无 cancel()（引擎侧波次③前），仅步界兜底")
+            logger.error(
+                "执行 %s 租约续期失败（已被他人持有/过期），已标记 lease_lost "
+                "并请求中止当前步；消息将在步界以 ExecutionLeaseError 退出不 ack",
+                execution_id,
+            )
+
     def _dispatch_task(self, message_data: Dict[str, Any]) -> None:
         # 租户上下文：消息携带 tenant_id（缺省 = default，兼容旧生产方）；
         # 存储路由包装器/日志 handler/租约据此选租户 namespace。
@@ -652,7 +926,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._running = True
         queue = self._get_task_queue()
         queue.ensure_group()
-        
+
+        # 租约看门狗（波次②）：持租约执行每 TTL/3 续租，防长步被 XCLAIM 抢占
+        self._start_lease_watchdog()
+
         # 注册服务
         if self._enable_registry:
             self.register_service()
@@ -735,7 +1012,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """停止流程工作器"""
         logger.info("正在停止流程工作器...")
         self._running = False
-        
+
+        # 停止租约看门狗（波次②）
+        self._stop_lease_watchdog()
+
         # 停止控制监听
         if self._enable_registry:
             self.stop_control_listener()
