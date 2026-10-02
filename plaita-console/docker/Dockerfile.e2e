@@ -14,11 +14,9 @@ ENV PIP_DEFAULT_TIMEOUT=180 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends wget curl && rm -rf /var/lib/apt/lists/*
 
-# 先安装 plaita 核心包依赖
-COPY requirements.txt ./requirements-plaita.txt
-RUN pip install --no-cache-dir -r requirements-plaita.txt && \
-    pip install --no-cache-dir cachetools
-
+# plaita 核心依赖随最终 pip install . 从 pyproject 解析（仓根 requirements.txt
+# 已于 C6 清理删除——列着已裁撤且带 CVCS 公告的 python-jose 等）。cachetools
+# 是 console 后端直接 import 的库，不随 plaita base 依赖，显式装。
 # 安装 console backend 依赖
 COPY plaita-console/backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -32,7 +30,7 @@ COPY setup.py .
 
 # 必须 pip 安装而非仅 COPY：approval/delay 等扩展节点经
 # [project.entry-points."plaita.nodes"] 自动发现，依赖安装元数据
-RUN pip install --no-cache-dir setuptools wheel && \
+RUN pip install --no-cache-dir setuptools wheel cachetools && \
     pip install --no-cache-dir --no-build-isolation .
 
 # 复制 console backend 代码
