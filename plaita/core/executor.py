@@ -424,12 +424,16 @@ class FlowExecution(CompatRunMixin):
         resume_type: str = "continue",
         resume_data: Optional[Any] = None,
         timeout: Optional[int] = None,
+        execution_id: Optional[str] = None,
     ) -> Dict:
         """Drive one distributed step, **reusing this execution's** context /
         runner / callback manager so user callbacks persist across steps.
 
         Prefer this over the ``FlowExecution.run`` classmethod when you need
         to advance a distributed flow node-by-node without losing callbacks.
+
+        ``execution_id``：预铸种子（首跑传，续跑不传）——worker 先落 running
+        行再执行时，行 id 与引擎 result.execution_id 保持一致（P0 可见性）。
 
         「复用同一实例」指跨步骤**顺序**复用（每步调用返回后再调下一步）；
         并发重叠调用同一实例仍然禁止——review-fix B4 起套用与
@@ -439,9 +443,13 @@ class FlowExecution(CompatRunMixin):
         self._begin_run()
         try:
             self._ensure_flow_resolved(flow)
+            # 种子仅在调用方显式给出时透传——不带新 kwarg 地保持既有
+            # execute 签名兼容（DistributedStrategy 经 **options 消化）。
+            seed = {"execution_id": execution_id} if execution_id else {}
             coro = self._strategies[ExecutionMode.DISTRIBUTED.value].execute(
                 flow, self._ctx, self._runner, self.callback_manager, params, timeout,
                 saved_context=saved_context, resume_type=resume_type, resume_data=resume_data,
+                **seed,
             )
             # 分布式每步独立 loop：步内同包 flow-scoped HTTP session（复用窗口=本步）
             coro = _flow_session_scoped(coro)

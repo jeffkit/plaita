@@ -45,11 +45,15 @@ class FlowErrorType(Enum):
 class ResumeType(Enum):
     """分布式恢复语义类型, 取代裸字符串 magic string。
 
-    ``CONTINUE`` 为默认 (带 saved_context 直接续跑), 其余三种仅对挂起的
-    ``EventNode`` 生效 (由 ``DistributedStrategy._handle_resume`` 处理)。
+    ``CONTINUE`` 为默认 (带 saved_context 直接续跑); ``RETRY`` 专对 error 态
+    execution 放行 (worker 终态短路例外), 策略层与 continue 同一条步进路径——
+    失败节点在 checkpoint 里无条目, 从 last_node_id 后继步进即恰好重跑失败
+    节点 (G1); 其余三种仅对挂起的 ``EventNode`` 生效 (由
+    ``DistributedStrategy._handle_resume`` 处理)。
     """
 
     CONTINUE = "continue"
+    RETRY = "retry"
     CANCEL = "cancel"
     TIMEOUT = "timeout"
     EVENT = "event"

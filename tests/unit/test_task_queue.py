@@ -298,7 +298,12 @@ class TestRedisFlowWorkerDispatch(unittest.TestCase):
         )
         with patch.object(worker, "start_flow") as start:
             worker._dispatch_task({"type": "start", "flow_id": "f", "params": {}, "version": "1"})
-            start.assert_called_once_with("f", {}, "1")
+            start.assert_called_once_with("f", {}, "1", execution_id=None)
+        with patch.object(worker, "start_flow") as start:
+            # BFF 预铸 id 随消息透传（P0 可见性：提交方即刻可轮询）
+            worker._dispatch_task({"type": "start", "flow_id": "f", "params": {},
+                                   "version": "1", "execution_id": "pre-1"})
+            start.assert_called_once_with("f", {}, "1", execution_id="pre-1")
         with patch.object(worker, "resume_flow") as resume:
             worker._dispatch_task(
                 {

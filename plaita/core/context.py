@@ -249,15 +249,17 @@ class ExecutionContext(_SystemStateAccessors):
     def get_state(self, key: str, default: Any = None) -> Any:
         return self._state.get(key, default)
 
-    def clean(self) -> None:
+    def clean(self, execution_id: Optional[str] = None) -> None:
         """Reset state for a fresh run and re-sync cancel_event/cancel_requested.
 
         ``expose_env`` is not cleared here — ``setup_flow`` overwrites it from
         ``flow.expose_env``. Root gets a new Event; child re-syncs to parent.
+        ``execution_id`` 可由调用方预铸（worker 先落 running 行再执行的可见性
+        修复），缺省仍就地铸造。
         """
         self._state = CheckpointState.fresh(
             **self._state_kwargs(),
-            execution_id=uuid.uuid4().hex,
+            execution_id=execution_id or uuid.uuid4().hex,
             env=_safe_environment(self.expose_env),
         )
         self.cancel_event = (

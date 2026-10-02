@@ -217,24 +217,29 @@ class DistributedStrategy:
         if saved_context:
             context.context = saved_context
         else:
-            context.clean()
+            context.clean(execution_id=options.get("execution_id"))
             context.setup_flow(flow, (), params or {})
             callback_manager.on_flow_start(flow)
 
-        if saved_context and resume_type is not ResumeType.CONTINUE:
+        # G1：RETRY 与 CONTINUE 同一条步进路径——error 态 execution 的
+        # checkpoint 里失败节点无条目（runner 成功后才写 last_node_id/结果），
+        # 从 last_node_id 后继步进即恰好重跑失败节点、已完成节点不重放。
+        # _handle_resume 是 EventNode 挂起专用路径，retry 不进。
+        if saved_context and resume_type not in (ResumeType.CONTINUE, ResumeType.RETRY):
             return await self._handle_resume(flow, context, runner, callback_manager, resume_type, resume_data)
 
         if not saved_context and resume_type is not ResumeType.CONTINUE:
             # checkpoint 丢失/未传时，resume_type='cancel' 等会被静默丢弃、
             # 直接开跑全新流程——掩盖故障（R6 fuzz B2）。显式给出非 continue
-            # 的 resume 意图却没有可恢复状态，应当报错。
+            # 的 resume 意图却没有可恢复状态，应当报错（retry 同理：它只能
+            # 唤醒已存在的 error 执行，不能凭空开新跑）。
             raise ResumeError(
                 f"resume_type={resume_type.value!r} requires a saved_context, "
                 "but none was provided; the execution cannot be resumed. To start "
                 "a fresh run, omit resume_type (or pass resume_type='continue')."
             )
 
-        if saved_context and resume_type is ResumeType.CONTINUE:
+        if saved_context and resume_type in (ResumeType.CONTINUE, ResumeType.RETRY):
             # 防御: 挂起中的 EventNode 不允许用默认 ``continue`` 绕过——历史上
             # 这条路会跳过 pending 校验直接推进到 End, 流程"正常完成", 事件
             # 永不消费且订阅泄漏, 无任何报错。只有事件已被 resume 消费
@@ -252,7 +257,7 @@ class DistributedStrategy:
                     if status == "pending":
                         raise ResumeError(
                             f"Execution is suspended at EventNode {last_node_id!r} (status=pending); "
-                            "resume_type='continue' would silently skip it. "
+                            "resume_type='continue'/'retry' would silently skip it. "
                             "Use resume_type='event'/'cancel'/'timeout' to resolve the event first.",
                             node=suspended_node,
                         )

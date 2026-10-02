@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import threading
+import uuid
 from typing import Dict, Any, Optional, Set, Tuple
 
 import argparse
@@ -13,6 +14,7 @@ import sys
 
 from cachetools import TTLCache
 from redis import Redis
+from plaita.core.errors import ResumeType
 from plaita.event.core import EventBus
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
@@ -327,15 +329,18 @@ class FlowWorker:
                 except Exception:
                     logger.warning("观测回调 bind_execution 失败: %r", handler, exc_info=True)
 
-    def start_flow(self, flow_id: str, params: Dict[str, Any], version: Optional[str] = None) -> Dict[str, Any]:
+    def start_flow(self, flow_id: str, params: Dict[str, Any], version: Optional[str] = None,
+                   execution_id: Optional[str] = None) -> Dict[str, Any]:
         """
         启动流程执行
-        
+
         Args:
             flow_id: 流程ID
             params: 流程输入参数
             version: 流程版本，如果不指定则使用最新版本
-            
+            execution_id: 预铸 id（BFF start 时铸造、随消息透传）——提交方
+                即刻拿 id 返给调用方，无需等 worker 消费；缺省就地铸造
+
         Returns:
             Dict[str, Any]: 流程执行结果
         """
@@ -356,24 +361,28 @@ class FlowWorker:
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
 
-            # 执行流程，获取初始结果
-            result = execution.run_distributed(flow, params=params)
-            execution_id = result.get("execution_id")
-
-            # 创建执行状态对象
+            # P0 可见性修复（keeper 迁移设计稿 §5.5 清单①）：先落 running 行
+            # 再执行。旧实现 run_distributed 返回后才 save——首节点期间
+            # /api/executions 查无此行，cancel 无从发起，zombie 判定没锚。
+            # execution_id 优先吃 BFF 预铸（随消息透传，提交方即刻可轮询），
+            # 否则就地铸造；种子喂引擎（context.clean），行 id 与
+            # result.execution_id 天然一致。异常遗留的 running 行是 zombie，
+            # 交 reaper/心跳年龄判定处置。
+            execution_id = execution_id or uuid.uuid4().hex
             state = ExecutionState(
                 execution_id=execution_id,
                 flow_id=flow_id,
                 flow_version=version,
                 tenant_id=current_tenant(),
-                context=result.get("context"),
+                context={},
                 status="running",
                 start_time=datetime.now().isoformat(),
                 invoker="worker"
             )
-
-            # 保存执行状态（失败抛 StatePersistError，与全仓调用点统一收口）
             self._persist_state_or_raise(execution_id, state, "start")
+
+            # 执行流程，获取初始结果
+            result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
             # 处理执行结果
             final_result = self._process_execution_result(flow, result, state, execution)
@@ -416,8 +425,13 @@ class FlowWorker:
         # resume_type=cancel 消息；若此处不放行，挂起执行会被 on_cancel
         # 续跑到 end 翻成 completed、非挂起执行被 ResumeError 翻成 error
         # ——「已取消」跳回「已完成/失败」。E2E cancel 回归用例钉住此语义）。
+        # G1 例外：error + resume_type=retry 放行——error 不再是绝对终态，
+        # 从断点（上一成功节点的后继）步进重跑失败节点（keeper 迁移设计稿
+        # §G1，验收=失败节点恰重跑一次、已完成不重放）。
         state_status = getattr(state, "status", "") or ""
-        if state_status in ("completed", "error", "cancelled"):
+        retry_wakeup = state_status == "error" and \
+            ResumeType.coerce(resume_type) is ResumeType.RETRY
+        if state_status in ("completed", "error", "cancelled") and not retry_wakeup:
             logger.info(
                 "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
             )
@@ -466,6 +480,17 @@ class FlowWorker:
                     "status": "cancelled",
                     "cancelled_at_resume": True,
                 }
+
+            # G1 retry 唤醒：error → running 翻转并先落盘（观察者/监控立即
+            # 可见；若本 worker 接着硬死，行是 running 而非 error——再一轮
+            # retry 仍可放行，zombie 判定也不误报「终态」）。checkpoint 原样，
+            # saved_context 由下方 run_distributed 携带。
+            if retry_wakeup:
+                state.status = "running"
+                state.error = None
+                state.end_time = None
+                self._persist_state_or_raise(execution_id, state, "retry_wakeup")
+                logger.info("执行 %s error 态经 retry 放行，从断点步进", execution_id)
 
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
             execution = FlowExecution(
@@ -1062,6 +1087,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     message_data.get("flow_id"),
                     message_data.get("params"),
                     message_data.get("version"),
+                    execution_id=message_data.get("execution_id"),
                 )
             elif message_type == "resume":
                 self.resume_flow(

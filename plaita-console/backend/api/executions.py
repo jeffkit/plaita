@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import secrets
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -64,7 +65,8 @@ class StartFlowRequest(BaseModel):
 
 class ResumeFlowRequest(BaseModel):
     """恢复流程请求"""
-    resume_type: str = Field(..., description="恢复类型: continue, cancel, timeout, event")
+    resume_type: str = Field(
+        ..., description="恢复类型: continue, retry(error 态断点重跑), cancel, timeout, event")
     data: Optional[Dict[str, Any]] = Field(None, description="恢复数据")
 
 
@@ -512,24 +514,29 @@ async def start_execution(
             "message": "本地模式：流程已在 console 进程内启动",
         }
 
-    # 构建任务消息
+    # 构建任务消息。execution_id 提交时铸造并随消息透传（worker
+    # start_flow 认账）——调用方即刻可凭 id 轮询/取消，无需等 worker
+    # 消费后从执行列表里猜（P0 可见性修复的 API 侧一半）。
+    execution_id = uuid.uuid4().hex
     message = {
         "type": "start",
         "flow_id": request.flow_id,
         "version": request.version,
         "params": request.params,
+        "execution_id": execution_id,
         "tenant_id": tenant_scope(http_request, required=True),
         "timestamp": datetime.now().isoformat()
     }
-    
+
     # 写入任务队列 Stream（FlowWorker 消费组消费）
     _enqueue(message, redis)
-    
-    _audit(http_request, "execution.start", request.flow_id,
-           {"version": request.version, "mode": "queue"})
+
+    _audit(http_request, "execution.start", execution_id,
+           {"flow_id": request.flow_id, "version": request.version, "mode": "queue"})
     return {
         "status": "queued",
         "flow_id": request.flow_id,
+        "execution_id": execution_id,
         "message": "流程启动请求已加入队列"
     }
 
