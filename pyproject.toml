@@ -43,6 +43,10 @@ server = [
 ]
 code = ["PyExecJS", "RestrictedPython>=7.0"]
 http = ["requests", "aiohttp>=3.8.0"]
+# JSON 加速后端（HTTP 节点大 payload 序列化/反序列化 5~10x；缺失自动回退标准库）
+fast = ["orjson>=3.8"]
+# uvloop 事件循环（unix-only，PLAITA_LOOP=uvloop 启用；不进 all/dev——Windows CI 安全）
+uvloop = ["uvloop>=0.19; sys_platform != 'win32'"]
 yaml = ["PyYAML>=6.0"]
 # 观测适配：plaita.obs.LangfuseCallback 按 Python SDK v4（OTel 内核，
 # start_observation/create_trace_id API）编写；v4 的 trace id 须为 32 位 hex，
@@ -54,6 +58,8 @@ dev = [
     "pytest-cov",
     "mutmut>=3.6",
     # 单测全量依赖：未装对应 extras 的测试模块自动 SKIP（importorskip），装齐即全量执行
+    # fast: HTTP 节点 JSON 后端双路径（orjson + stdlib 回退）都要在 CI 覆盖
+    "orjson>=3.8",
     "fakeredis[lua]>=2.30.1",
     "redis>=4.0.0",
     "SQLAlchemy>=1.4.0",
@@ -73,7 +79,7 @@ lint = [
     "black",
     "ruff>=0.6",
 ]
-all = ["plaita[redis,server,code,http,yaml,sqlalchemy,credentials,langfuse]"]
+all = ["plaita[redis,server,code,http,yaml,sqlalchemy,credentials,langfuse,fast]"]
 
 [project.urls]
 Homepage = "https://jeffkit.github.io/plaita/"
