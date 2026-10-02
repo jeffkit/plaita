@@ -61,6 +61,7 @@ import sys
 import textwrap
 import time
 import uuid
+from pathlib import Path
 from typing import Any, ClassVar, FrozenSet, Optional
 
 from pydantic import model_validator
@@ -371,19 +372,48 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
     fork 出来的孙进程同组——killpg 一网打尽。历史上只杀直接子进程，沙箱
     超时后用户的子进程（如沙箱内再起的 CLI）全部成为孤儿。组已消失或
     平台限制时退化为杀直接子进程。
+
+    安全护栏（2026-10-02 事故根因修复，缺一不可）：
+
+    - ``target_pgid <= 1`` 拒杀——pgid 0/1 意味着 killpg(0/1)≡kill(0/-1)：
+      前者屠杀调用方自身所在进程组，后者屠杀全机所有可杀进程。触发源是
+      mock 对象的 ``pid`` 经 ``__index__`` 协议被解析成 0/1（getpgid 不抛
+      TypeError、护栏不拦、kernel 直接整组 SIGKILL——2026-10-01~02 CI
+      大规模「假停滞/137/日志失联」事故的最终根因）。
+    - ``== os.getpgid(0)``（自身组）拒杀——子进程未按约定自成组时（spawn
+      路径回归/mock 失真），killpg 会连测试/运行进程组一起带走。
+    - pid 回收竞争：getpgid 与 killpg 之间目标 pid 可能易主他组——Linux 上
+      用 /proc/<pid>/stat 的 pgrp 复核（两次读取一致才 killpg）；其他平台
+      退化为 proc.kill()。
     """
+    my_pgid = os.getpgid(0)
+    target_pgid = None
     try:
         target_pgid = os.getpgid(proc.pid)
-        # 防御栏：目标组==自身组说明子进程未按约定自成组（spawn 路径回归/
-        # mock 失真）——killpg 会连自己带整个测试/运行进程组一起 SIGKILL
-        # （2026-10-02 CI 事故根因：runner agent 被回杀→作业假停滞 35min、
-        # 日志永不落盘）。此况退化为只杀直接子进程。
-        if target_pgid != os.getpgid(0):
+    except (TypeError, OSError):
+        # TypeError：pid 非 int（测试 mock）；OSError：进程已消失
+        pass
+    # 不安全目标：pgid 0/1（killpg(0)≡kill(0)、killpg(1)≡kill(-1) 都会
+    # 屠杀整组/全机）、等于自身组——一律退化为只杀直接子进程
+    if target_pgid is not None and target_pgid > 1 and target_pgid != my_pgid:
+        if sys.platform == "linux":
+            # Linux：用 /proc/<pid>/stat 的 pgrp 复核（对抗 getpgid→killpg 之间
+            # 的 pid 回收竞争——回收后 killpg 会误杀新主人的整组）。复核不过
+            # （pid 已消失/易主）退化为 proc.kill()。
+            try:
+                stat_text = Path(f"/proc/{proc.pid}/stat").read_text()
+                # comm 可含空格/括号：取右括号之后的字段——[0]=state [1]=ppid
+                # [2]=pgrp（与 getpgid 对应的字段）
+                pgrp = int(stat_text.rsplit(")", 1)[1].split()[2])
+                if pgrp == target_pgid:
+                    os.killpg(target_pgid, signal.SIGKILL)
+                    return
+            except (OSError, ValueError, IndexError):
+                pass
+        else:
+            # macOS/Windows：无 /proc 复核（回收窗口极窄且历史无害），直接杀
             os.killpg(target_pgid, signal.SIGKILL)
             return
-    except (TypeError, OSError):
-        # TypeError：pid 非 int（测试 mock）；OSError：组已消失/权限不足
-        pass
     try:
         proc.kill()
     except Exception:

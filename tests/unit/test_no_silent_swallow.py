@@ -32,11 +32,10 @@ ALLOWED_SILENT = {
     # 2026-09-30 killpg 孤儿修复：强杀路径是 best-effort——组消失/权限不足/mock pid
     # 时退化杀直接子进程；reap 的 communicate 再超时（组外进程握住管道）则放弃收尸
     # 直接抛错。异常细节不影响「进程组已被杀」这一主结果。
-    ("node/code.py", 384),
-    ("node/code.py", 389),
     ("node/code.py", 414),
-    ("node/code.py", 420),
-    ("node/code.py", 428),
+    ("node/code.py", 419),
+    ("node/code.py", 450),
+    ("node/code.py", 458),
 }
 
 
