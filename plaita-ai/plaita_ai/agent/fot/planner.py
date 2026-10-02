@@ -16,6 +16,8 @@ from plaita_ai.agent.fot.prompts import (
     COMPOSE_USER,
     REVIEW_SYSTEM,
     REVIEW_USER,
+    RUN_REVIEW_SYSTEM,
+    RUN_REVIEW_USER,
     format_compile_errors,
     format_dsl_section,
     format_instruction_section,
@@ -167,6 +169,38 @@ def review_flow_source(
     return extract_flow_source(raw)
 
 
+def rewrite_flow_source_for_run_error(
+    model: BaseChatModel,
+    task: str,
+    source: str,
+    *,
+    error: str,
+    error_type: str = "",
+    instruction: str = "",
+    tool_specs: Optional[List[ToolSpec]] = None,
+    tools: Optional[Sequence[ToolLike]] = None,
+) -> str:
+    """Rewrite a compiled-but-run-failed source once, guided by the run error.
+
+    REVIEW 通道处理「编译没过」；本函数处理「编译过了、执行炸了」——同一套
+    注入口径（工具/DSL 参考/编写规范/已注册节点），错误段换为运行期报错。
+    源码解析失败仍抛 ``ValueError``（与 plan/review 通道一致，由调用方决定
+    是否计入重试预算）。
+    """
+    specs = tool_specs or (register_tool_node(*tools) if tools else [])
+    system = RUN_REVIEW_SYSTEM.format(
+        tools_section=format_tools_section(tools_prompt_section(specs)),
+        dsl_section=format_dsl_section(_DSL_REFERENCE),
+        spec_section=format_spec_section(_AUTHORING_REFERENCE),
+        nodes_section=format_nodes_section(_registered_nodes_section(specs)),
+        instruction_section=format_instruction_section(instruction),
+    )
+    error_text = f"[{error_type}] {error}" if error_type else error
+    user = RUN_REVIEW_USER.format(task=task, source=source, errors=error_text)
+    raw = _invoke_model(model, system, user)
+    return extract_flow_source(raw)
+
+
 def plan_with_compile_loop(
     model: BaseChatModel,
     task: str,
@@ -182,6 +216,11 @@ def plan_with_compile_loop(
     只烧一次 attempt，错误结构化记入 ``CompileResult.errors`` 并回喂下一轮
     （compose 通道附加格式提示、review 通道走 errors），预算耗尽返回结构化
     失败而非抛异常。
+
+    语义备注：``max_retries`` 是**总尝试次数**（含首次 compose，即
+    ``range(max_retries)``），不是额外重试次数——3 意味着至多
+    1 次 compose + 2 次 review。运行期错误的重试由 FoTAgent 的
+    ``max_run_retries`` 环独立预算（见 agent.invoke）。
     """
     specs = register_tool_node(*tools) if tools else []
     source = ""

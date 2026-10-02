@@ -15,7 +15,13 @@ from typing import Any, Dict, Optional
 
 from plaita_ai.console_client import ConsoleClient, ConsoleClientError, client_from_env
 from plaita_ai.ops import flow_metrics, flow_versions, version_diff
-from plaita_ai.supervisor import PromptProposer, StaticProposer, Supervisor, SupervisorPolicy
+from plaita_ai.supervisor import (
+    FlowSourceProposer,
+    PromptProposer,
+    StaticProposer,
+    Supervisor,
+    SupervisorPolicy,
+)
 
 _shared_client: Optional[ConsoleClient] = None
 
@@ -218,7 +224,7 @@ def register(mcp: Any) -> None:
     def supervisor_iterate(
         flow_id: str,
         dataset_path: str,
-        proposer: str = "prompt",
+        proposer: str = "flow",
         max_iterations: int = 1,
     ) -> str:
         """Run the self-iteration loop: evaluate the published baseline, ask
@@ -228,14 +234,23 @@ def register(mcp: Any) -> None:
         ticket via console_flow_publish.
 
         Args:
-            proposer: "prompt" (LLM via PLAITA_AI_PROPOSER_* env) or "static".
+            proposer: "flow" (default — LLM writes @flow source, compile-gated,
+                the compiled IR JSON is saved as the version definition) or
+                "prompt" (legacy — LLM returns a raw flow-definition JSON string,
+                no compile gate) or "static".
             max_iterations: Iterations in this call (1 = single step).
         """
         policy = SupervisorPolicy(max_iterations=max(1, max_iterations), promote_gate="manual")
         if proposer == "static":
             agent: Any = StaticProposer()
-        else:
+        elif proposer == "prompt":
             agent = PromptProposer()
+        elif proposer == "flow":
+            agent = FlowSourceProposer()
+        else:
+            raise ValueError(
+                f"unknown proposer {proposer!r}: use 'flow' (default) | 'prompt' | 'static'"
+            )
         supervisor = Supervisor(_get_client(), policy=policy, proposer=agent)
         from plaita_ai.evals import load_dataset
 
