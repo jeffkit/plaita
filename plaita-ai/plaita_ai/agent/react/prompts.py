@@ -38,9 +38,9 @@ FLOW_ESCALATION_SECTION = """
 
 ### 必守护栏（即便不查参考也要记住）
 - 只产出 `@flow` 源码，**不要**产出 JSON actions。
-- 函数体只做静态编译：不支持 f-string、三元表达式、推导式、lambda；字符串用 `F.concat`。
+- 函数体只做静态编译：不支持 f-string、推导式、lambda；字符串用 `F.concat`（比较/逻辑与三元 `a if c else b` 在 if 条件或表达式位置均可）。
 - `HTTP/TOOL/CHILD/PARALLEL/MAP` 等节点调用只能作语句或赋值右侧，**不能**嵌在 `return` 表达式里——先赋值，再 return 变量。
-- **不要发明 `F.xxx` 函数**——只允许参考文档列出的已注册函数；比较用中缀 `>= > == != <` 写在 `if` 条件里，不要写成 `F.ge/F.gt`。
+- **不要发明 `F.xxx` 函数**——只允许参考文档列出的已注册函数；比较用中缀 `>= > == != <`（if 条件与表达式位置均可），不要写成 `F.ge/F.gt`。
 - 调用已注册工具：`r = TOOL(action="工具名", params={{"k": INPUT.x}})`；普通模式能直接调的工具在 @flow 里也可这样调用。
 """
 

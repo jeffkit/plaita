@@ -123,7 +123,7 @@ export default function Supervisor() {
       const resp = await fetch(`/api/flows/${flowId}/supervisor/iterate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataset, max_iterations: maxIterations, proposer: 'prompt' }),
+        body: JSON.stringify({ dataset, max_iterations: maxIterations }),
       })
       const body = await resp.json()
       if (!resp.ok) {

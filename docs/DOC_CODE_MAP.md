@@ -1,10 +1,11 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-09-06  
+> 最后更新：2026-09-30  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 
 | 文档路径 | 代码路径模式 | 同步触发条件 |
 |----------|--------------|--------------|
+| `plaita-ai/plaita_ai/skills/flow-coder/references/authoring-spec.md`（编写规范权威单源） | `plaita/dsl/codeflow/**`, `plaita/core/flow.py`（run/params 语义）, plaita-nodes 节点语义（仓外）, 大仓 `docs/ADR-2026-08-27`, mediaflow `plaita_flows` 结构模式 | 作者硬约束、plaita-nodes 集成方式、业务 flow 项目结构、console 发布/worker 注入、自检清单任何一项变化；**skill 内 SKILL.md / codeflow-reference.md 引用本文件，不复制内容** |
 | `docs/mutation-testing.md` | `plaita/core/**`, `plaita/node/**`, `plaita/event/memory.py`, `plaita/event/core.py`, `plaita/io.py`, `plaita/dsl/builder.py`, `plaita/dsl/codeflow/**`, `plaita/dsl/sexpr.py`, `plaita/storage/{base,memory}.py`, `tests/unit/*_mutations.py`, `scripts/*mutation*`, `scripts/recheck_*.sh`, `pyproject.toml` `[tool.mutmut]` | 变异基线分数变化、only_mutate 扩缩、sweep/recheck 流程、§7 持续推进规范 |
 | `AGENTS.md` / `CLAUDE.md` | — | 仓库导航、质量门禁、变异测试入口约束变更 |
 | `docs-site/docs/architecture/layering.md` | `plaita/core/**`, `plaita/event/**`, `plaita/storage/**`, `plaita/server/**`, `tests/integration/test_layering.py` | 分层规则、默认 EventBus 解析方式、允许/禁止的 import 方向变更 |

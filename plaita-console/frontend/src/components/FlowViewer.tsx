@@ -64,6 +64,8 @@ export default function FlowViewer({ flowId, version, context, status }: FlowVie
               type: String(d.type ?? ''),
               name: String(d.name ?? d.type ?? n.id),
               status: getNodeStatus(String(n.id), context, status),
+              desc: d.desc ? String(d.desc) : undefined,
+              sourceLine: typeof d.source_line === 'number' ? d.source_line : undefined,
             }),
           },
         }
@@ -167,6 +169,8 @@ function extractFlowStructure(
         x: 0,
         y: 0,
         status: getNodeStatus(nodeId, context, executionStatus),
+        desc: node.desc ? String(node.desc) : undefined,
+        sourceLine: typeof node.source_line === 'number' ? node.source_line : undefined,
       })
     )
 
@@ -197,6 +201,8 @@ function createFlowNode({
   x,
   y,
   status,
+  desc,
+  sourceLine,
 }: {
   id: string
   type: string
@@ -204,12 +210,14 @@ function createFlowNode({
   x: number
   y: number
   status: NodeStatus
+  desc?: string
+  sourceLine?: number
 }): Node {
   return {
     id,
     position: { x, y },
     data: {
-      label: renderNodeLabel({ type, name, status }),
+      label: renderNodeLabel({ type, name, status, desc, sourceLine }),
     },
     style: { background: 'transparent', border: 'none' },
   }

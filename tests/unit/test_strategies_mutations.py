@@ -346,12 +346,17 @@ class TestNormalStrategyReturnValue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_count["n"], 2)
 
     async def test_result_none_when_not_reached_end(self):
-        """Kill not_reached_end path (next_node returns None before is_end)."""
+        """Kill not_reached_end path (next_node returns None before is_end).
+
+        0.5.x 起「非 End 节点缺 next」默认抛错（review-fix B1）；这里显式配置
+        errorHandler.strategy=continue 走遗留逃生口，仍然压到 not_reached_end
+        回退路径（返回 $NODE 状态表而非节点返回值）。
+        """
         ctx = ExecutionContext()
         runner = MagicMock()
         cb = _make_cb()
 
-        start_node = _StartNode(id="s1", name="s1")
+        start_node = _StartNode(id="s1", name="s1", error_handler={"strategy": "continue"})
 
         runner.run_node = AsyncMock(return_value=("start_val", None))
         flow = MagicMock()
@@ -468,12 +473,16 @@ class TestGeneratorStrategyMutations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(last["result"], {"fin": 2})
 
     async def test_not_reached_end_yields_extra_end_output(self):
-        """Kill mutations around not_reached_end path."""
+        """Kill mutations around not_reached_end path.
+
+        review-fix B1 后缺 next 默认抛错；errorHandler.strategy=continue
+        走遗留逃生口，仍然压到 not_reached_end 合成 end 输出路径。
+        """
         ctx = ExecutionContext()
         runner = MagicMock()
         cb = _make_cb()
 
-        start = _StartNode(id="s1", name="s1")
+        start = _StartNode(id="s1", name="s1", error_handler={"strategy": "continue"})
         runner.run_node = AsyncMock(return_value=("s_res", None))
         flow = MagicMock()
         flow.start_node = start
@@ -1902,7 +1911,8 @@ class TestAdvanceOneFlowArgPrecision(unittest.IsolatedAsyncioTestCase):
         runner = MagicMock()
         runner.run_node = AsyncMock(return_value=("r", "right"))
 
-        node = _MidNode(id="m1", name="m1")
+        # review-fix B1: 缺 next 非 End 节点默认抛错, 用 continue 逃生口压 arg 精度
+        node = _MidNode(id="m1", name="m1", error_handler={"strategy": "continue"})
         cb = _make_cb()
 
         await _advance_one(flow, runner, cb, node)
@@ -1923,7 +1933,8 @@ class TestAdvanceOneFlowArgPrecision(unittest.IsolatedAsyncioTestCase):
         runner = MagicMock()
         runner.run_node = AsyncMock(return_value=("r", distinct_branch))
 
-        node = _MidNode(id="m1", name="m1")
+        # review-fix B1: 缺 next 非 End 节点默认抛错, 用 continue 逃生口压 arg 精度
+        node = _MidNode(id="m1", name="m1", error_handler={"strategy": "continue"})
         cb = _make_cb()
 
         await _advance_one(flow, runner, cb, node)
@@ -2082,7 +2093,11 @@ class TestSubscribeEventExceptionPathArgs(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 class TestNormalStrategyNotReachedEndState(unittest.IsolatedAsyncioTestCase):
     async def _run_not_reached_end(self, store_state=True):
-        """Run NormalStrategy where next_node→None without is_end→True."""
+        """Run NormalStrategy where next_node→None without is_end→True.
+
+        review-fix B1: 缺 next 默认抛错；这里用 errorHandler.strategy=continue
+        走遗留逃生口，仍然压到 not_reached_end 状态回退路径。
+        """
         ctx = ExecutionContext()
         pfx = ctx.express_prefix
         node_key = f"{pfx}{ctx.express_node_name}"
@@ -2090,7 +2105,7 @@ class TestNormalStrategyNotReachedEndState(unittest.IsolatedAsyncioTestCase):
         if store_state:
             ctx.set_state(node_key, {"s1": "state_sentinel_abc"})
 
-        start = _StartNode(id="s1", name="s1")
+        start = _StartNode(id="s1", name="s1", error_handler={"strategy": "continue"})
 
         async def run_node(*args, **kwargs):
             return ("s_res", None)
@@ -2139,7 +2154,8 @@ class TestNormalStrategyNotReachedEndState(unittest.IsolatedAsyncioTestCase):
         correct_key = f"{pfx}{node_name}"
         ctx.set_state(correct_key, {"target_key": "correct_value_789"})
 
-        start = _StartNode(id="s1", name="s1")
+        # review-fix B1: continue 逃生口压 not_reached_end 状态回退
+        start = _StartNode(id="s1", name="s1", error_handler={"strategy": "continue"})
 
         async def run_node(*args, **kwargs):
             return ("r", None)
@@ -2286,7 +2302,8 @@ class TestGeneratorStrategyNotReachedEndPath(unittest.IsolatedAsyncioTestCase):
         if store_state:
             ctx.set_state(node_key, {"s1": "gen_state_sentinel_xyz"})
 
-        start = _StartNode(id="s1", name="s1")
+        # review-fix B1: continue 逃生口压 generator not_reached_end 合成 end 输出
+        start = _StartNode(id="s1", name="s1", error_handler={"strategy": "continue"})
 
         async def run_node(*args, **kwargs):
             return ("sr", "go_nowhere")
@@ -2427,7 +2444,8 @@ class TestDistributedExecuteRunnerCbPrecision(unittest.IsolatedAsyncioTestCase):
         runner.run_node = capture_run
         runner.node_execution = None
 
-        start = _StartNode(id="s1", name="s1")
+        # review-fix B1: Start 后无后继默认抛错, continue 逃生口压 cb/runner 透传
+        start = _StartNode(id="s1", name="s1", error_handler={"strategy": "continue"})
         end = _EndNode(id="e1", name="e1")
         flow = MagicMock()
         flow.start_node = start

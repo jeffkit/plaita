@@ -14,7 +14,7 @@ plaita 将 JSON 格式的逻辑流程定义解析为可执行的 `Flow`，并以
 ## 核心特性
 
 - **JSON 流程定义** —— 用节点 + `next`/分支描述控制流，平台可视化编排或手写皆可
-- **插件化节点** —— 默认注册表内置 23 种节点，自定义节点只需实现 `execute`，支持 `entry_points` 自动发现
+- **插件化节点** —— 默认注册表内置 18 种节点（`_BUILTIN_NODES`），server 侧另有 5 种条件注册节点（delay/approval/redis_queue/kafka_queue/http_callback，需 `server` extra），合计 23 种；自定义节点只需实现 `execute`，支持 `entry_points` 自动发现
 - **AI Agent 编排** —— 作为典型场景之一：LLM 规划 + plaita 执行，`@flow` / JSON 均有构建期校验，`flow_from_source` 让 AI 生成的流程编译期就拦错
 - **三种执行模式** —— Normal 同步、Generator 单步调试、Distributed 跨进程断点续执
 - **超时与错误策略** —— 节点级/流程级 ISO 8601 超时、`abort`/`continue`/`continue_with` 错误策略与重试
@@ -152,19 +152,19 @@ plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`、`croniter
 
 ## 流程定义方式
 
-plaita 提供三种主要形态定义流程，最终均编译为同一执行模型：
+plaita 的多种定义方式最终均编译为同一执行模型，主要三种：
 
 1. **@flow**（推荐 Python API）—— 写普通函数，`@flow` 装饰器编译为 Flow，`flow_from_source` 供 AI 运行期生成
 2. **JSON / YAML**（配置文件格式）—— `Flow.from_string(json_or_yaml_str)`，可视化编排工具导出即此格式
 3. **FlowBuilder**（动态构建 API）—— `from plaita.dsl import build`，适合运行时动态创建或修改流程
 
-> 完整格式对比及进阶用法见 [流程编写方式文档](https://jeffkit.github.io/plaita/guide/flow-authoring/)。
+> 完整格式对比（含 S-expr）及进阶用法见 [流程编写方式文档](https://jeffkit.github.io/plaita/guide/flow-authoring/)。**写业务 flow 前先读编写规范**：`plaita-ai/plaita_ai/skills/flow-coder/references/authoring-spec.md`（作者硬约束 / plaita-nodes 集成 / 项目结构）。
 
 ---
 
 ## 内置节点
 
-默认注册表含 23 种节点，覆盖常见控制流与数据处理（`code` 节点不在默认注册表，需 `register_code_node()` 显式 opt-in；0.5.0 起 `register_code_node()` 默认走 `docker` 沙箱，daemon 不可用时拒绝注册——见下方[安全](#安全)小节）：
+默认注册表含 18 种节点（`plaita/node/__init__.py` 的 `_BUILTIN_NODES`），server 侧另有 5 种条件注册节点（`plaita/server/nodes/`：delay / approval / redis_queue / kafka_queue / http_callback，需 `server` extra），合计 23 种。`code` 节点不在默认注册表，需 `register_code_node()` 显式 opt-in；0.5.0 起 `register_code_node()` 默认走 `docker` 沙箱，daemon 不可用时拒绝注册——见下方[安全](#安全)小节）：
 
 `start` · `end` · `assignment` · `switch` · `if` · `case` · `loop` · `while` · `map` · `filter` · `find` · `reduce` · `child` · `reference` · `parallel` · `http` · `event` · `mock` · `delay` · `approval` · `redis_queue` · `kafka_queue` · `http_callback`
 
@@ -349,6 +349,7 @@ plaita/
 │   ├── server/          # FlowWorker、扩展节点、外延服务（需 server extra）
 │   └── client.py        # 远程 PlaitaClient
 ├── plaita-console/      # 可视化管理控制台（React + FastAPI）
+├── plaita-ai/           # AI 集成：MCP 工具、ReAct/FoT Agent、内置 skills（flow-coder 等）
 ├── docs-site/           # MkDocs 文档站（部署至 GitHub Pages）
 ├── examples/agent/      # Agent 编排示例（RAG/Tool-use/Router）
 └── tests/               # 单元/集成/E2E 测试
@@ -394,6 +395,7 @@ python -m twine upload dist/*
 - [节点系统](https://jeffkit.github.io/plaita/nodes/) —— 内置节点手册、自定义节点、注册表与插件
 - [断点续执](https://jeffkit.github.io/plaita/distributed/) —— Checkpoint、事件系统、FlowWorker、扩展节点
 - [应用场景](https://jeffkit.github.io/plaita/scenarios/) —— Agent 编排、HTTP 集成、审批流等端到端示例
+- [AI 与 Skill](https://jeffkit.github.io/plaita/ai/skills/) —— flow-coder 等面向 AI Coding Agent 的 skill（装到 Claude Code / Cursor，或经 MCP `flow_get_skill` 拉取）
 - [API 参考](https://jeffkit.github.io/plaita/api/) —— 由源码 docstring 自动生成
 
 ---

@@ -1,5 +1,5 @@
 import type { Node, Edge } from '@xyflow/react'
-import { NODE_WIDTH, NODE_HEIGHT } from './flowLayout'
+import { NODE_WIDTH, nodeHeightFor } from './flowLayout'
 
 const SIBLING_GAP = 56 // 同层兄弟节点水平间隙
 const LEVEL_GAP = 130 // 层间距
@@ -101,7 +101,7 @@ export function symmetricLayout(
         position:
           direction === 'TB'
             ? { x: idx * (NODE_WIDTH + SIBLING_GAP), y: (maxDepth + 2) * LEVEL_GAP }
-            : { x: (maxDepth + 2) * LEVEL_GAP, y: idx * (NODE_HEIGHT + SIBLING_GAP) },
+            : { x: (maxDepth + 2) * LEVEL_GAP, y: idx * (nodeHeightFor(n) + SIBLING_GAP) },
       }
     }
     const depth = depthOf.get(n.id) ?? 0
@@ -110,7 +110,7 @@ export function symmetricLayout(
       position:
         direction === 'TB'
           ? { x: center - NODE_WIDTH / 2, y: depth * LEVEL_GAP }
-          : { x: depth * LEVEL_GAP, y: center - NODE_HEIGHT / 2 },
+          : { x: depth * LEVEL_GAP, y: center - nodeHeightFor(n) / 2 },
     }
   })
 }

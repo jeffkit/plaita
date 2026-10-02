@@ -1,5 +1,9 @@
 import unittest
 
+import pytest
+
+pytest.importorskip("fakeredis")
+
 from fakeredis import FakeStrictRedis
 
 from plaita.core.flow import Flow

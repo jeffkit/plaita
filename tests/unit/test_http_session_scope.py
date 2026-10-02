@@ -21,6 +21,11 @@ import unittest
 from unittest import TestCase
 from unittest.mock import patch
 
+import pytest
+
+pytest.importorskip("aiohttp")
+pytest.importorskip("requests")
+
 import aiohttp
 import requests
 

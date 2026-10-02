@@ -12,7 +12,8 @@ from typing import Optional, Dict, Any, List
 
 from redis import Redis
 
-from plaita.event.core import Event, EventSubscriptionStorage, EventBus
+from plaita.event.core import Event, EventSubscription, EventSubscriptionStorage, EventBus
+from plaita.event.timeout import SubscriptionTimeoutChecker
 from plaita.storage.base import ExecutionStorage
 from plaita.server.task_queue import enqueue_task
 from plaita.server.tenant_context import (
@@ -23,6 +24,14 @@ from plaita.server.tenant_context import (
 # 获取logger
 logger = logging.getLogger("plaita.server.event_filter")
 
+# 执行终态集合（ReviewFix D2）。必须与 flow_worker.resume_flow 的终态短路
+# 集合（completed / error / cancelled）对齐：cancelled 曾被本文件 GC 漏掉——
+# console 取消执行后，残留订阅在 TTL（约 7 天）内每个匹配事件都会入队一条
+# 注定在 worker 侧被终态短路丢弃的 resume，持续制造无效任务。
+# 理想做法是抽成跨文件共享常量（如放 plaita.storage.base 或独立常量模块，
+# flow_worker 一并引用）；受本次修复文件白名单约束先就地定义，后续可上移。
+TERMINAL_EXECUTION_STATUSES = ("completed", "error", "cancelled")
+
 
 class EventFilter:
     """
@@ -31,22 +40,27 @@ class EventFilter:
     """
     
     def __init__(
-        self, 
+        self,
         execution_storage: ExecutionStorage,
         subscription_storage: EventSubscriptionStorage,
         redis_client: Redis,
         event_bus: EventBus,
-        queue_name: str = "plaita:flow:queue"
+        queue_name: str = "plaita:flow:queue",
+        enable_subscription_timeout_checker: bool = True,
+        timeout_check_interval: float = 10.0,
     ):
         """
         初始化事件过滤器
-        
+
         Args:
             execution_storage: 执行状态存储
             subscription_storage: 事件订阅存储
             redis_client: Redis客户端
             event_bus: 事件总线
             queue_name: 流程工作器队列名称
+            enable_subscription_timeout_checker: 是否随本过滤器启动订阅超时检查器
+                （波次④回滚开关：置 False 即回到「订阅无限等待」的历史现状）
+            timeout_check_interval: 订阅超时检查器的轮询间隔（秒）
         """
         self.execution_storage = execution_storage
         self.subscription_storage = subscription_storage
@@ -55,6 +69,14 @@ class EventFilter:
         self.queue_name = queue_name
         self._running = False
         self._subscription_id = None
+        # 波次④：EventNode 订阅自动超时的宿主。checker 只消费 subscription.timeout
+        # 非空的订阅——存量订阅（timeout=None）即使 checker 在跑也零变化。
+        self._timeout_checker: Optional[SubscriptionTimeoutChecker] = None
+        if enable_subscription_timeout_checker:
+            self._timeout_checker = SubscriptionTimeoutChecker(
+                subscription_storage, check_interval=timeout_check_interval
+            )
+            self._timeout_checker.register_timeout_callback(self._on_subscription_timeout)
     
     async def handle_event(self, event: Event) -> None:
         """
@@ -121,7 +143,7 @@ class EventFilter:
             # resume；检测到终态直接注销订阅、跳过入队。没有这步 GC，残留
             # 键只能等 7 天 TTL。
             state_status = getattr(state, "status", "") or ""
-            if state_status in ("completed", "error"):
+            if state_status in TERMINAL_EXECUTION_STATUSES:
                 for subscription in subscriptions:
                     try:
                         await self.subscription_storage.unregister_subscription(
@@ -177,43 +199,126 @@ class EventFilter:
         except Exception as e:
             logger.error("处理事件出错: %s", e, exc_info=True)
     
+    async def _on_subscription_timeout(self, subscription: EventSubscription) -> None:
+        """SubscriptionTimeoutChecker 回调：订阅超时 → 入队 resume_type=timeout。
+
+        复用 ``handle_event`` 的 resume 任务形状与去重键模式（设计稿 §3.4）：
+        worker 侧 ``_handle_resume`` 白名单已放行 timeout，resume 完成后由
+        ``_unregister_suspended_subscription`` 注销订阅，checker 自然不再看到它。
+        """
+        sub_id = subscription.subscription_id
+        execution_id = subscription.correlation_id
+        if not execution_id:
+            # 无法关联执行的订阅无从 resume（正常挂起订阅都带 correlation_id）
+            logger.debug("订阅 %s 超时但无 correlation_id，跳过", sub_id)
+            return
+
+        # 挂起订阅本身不携带租户（租户随事件数据传递，超时路径没有事件载体），
+        # 按 default 命名空间加载执行状态（default/空租户 = 历史前缀 plaita）。
+        tenant_token = set_current_tenant(None)
+        try:
+            state = self.execution_storage.load_execution_state(execution_id)
+        finally:
+            reset_current_tenant(tenant_token)
+
+        if not state:
+            logger.warning(
+                "订阅 %s 超时但找不到执行状态 %s，跳过（不注销订阅，待执行状态恢复后可再触发）",
+                sub_id, execution_id,
+            )
+            return
+
+        # 终态执行（含取消）的残留订阅就地回收——与 handle_event 的终态 GC
+        # 同语义：否则残留订阅在去重键 TTL 过期后反复触发注定被 worker 终态
+        # 短路丢弃的 timeout resume。delete_subscription 是 EventSubscriptionStorage
+        # ABC 方法，各后端（redis/memory/sqlalchemy）均实现。
+        state_status = getattr(state, "status", "") or ""
+        if state_status in TERMINAL_EXECUTION_STATUSES:
+            try:
+                await self.subscription_storage.delete_subscription(sub_id)
+                logger.info(
+                    "执行 %s 已终态(%s)，订阅 %s 超时后回收",
+                    execution_id, state_status, sub_id,
+                )
+            except Exception:  # noqa: BLE001 — 回收失败不影响主流程
+                logger.debug("回收超时订阅 %s 失败", sub_id, exc_info=True)
+            return
+
+        # 去重：多实例 event_filter / 同一订阅重复触发只入队一次（同 handle_event
+        # 的 SET NX 模式）。TTL 过期后若订阅仍存在（worker 未成功 resume），
+        # checker 可再次触发——at-least-once 而非至多一次。
+        dedup_key = f"plaita:event_filter:timeout:{sub_id}"
+        if not self.redis_client.set(dedup_key, "1", nx=True, ex=3600):
+            logger.debug("订阅超时已被处理（其他实例或先前轮次），跳过: %s", sub_id)
+            return
+
+        resume_task = {
+            "type": "resume",
+            "flow_id": state.flow_id,
+            "execution_id": execution_id,
+            "resume_type": "timeout",
+            "tenant_id": getattr(state, "tenant_id", None) or "default",
+            "data": {
+                "subscription_id": sub_id,
+                "event_type": subscription.event_type,
+                "node_id": subscription.node_id,
+            },
+        }
+
+        enqueue_task(self.redis_client, self.queue_name, resume_task)
+        logger.info(
+            "订阅 %s 超时，已入队 timeout resume（执行 %s，队列 %s）",
+            sub_id, execution_id, self.queue_name,
+        )
+
     async def start(self, event_type: Optional[str] = None):
         """
         启动事件过滤器，开始监听事件
-        
+
         Args:
             event_type: 要监听的事件类型，默认监听所有事件
         """
         if self._running:
             logger.warning("事件过滤器已经在运行中")
             return
-            
+
         self._running = True
-        
+
         try:
             # 订阅事件，如果未指定event_type则监听所有事件
             self._subscription_id = await self.event_bus.register_handler(
                 event_type=event_type,  # None表示监听所有事件
                 handler=self.handle_event
             )
-            
+
             event_type_desc = event_type if event_type else "所有事件类型"
             logger.info("事件过滤器已启动，订阅ID: %s, 监听事件类型: %s", self._subscription_id, event_type_desc)
-            
+
+            # 波次④：订阅超时检查器随过滤器同生命周期启停（checker 不启动即回现状）
+            if self._timeout_checker is not None:
+                await self._timeout_checker.start()
+
             # 保持运行直到停止
             while self._running:
                 await asyncio.sleep(1)
-                
+
         except Exception as e:
             logger.error("启动事件过滤器时出错: %s", e)
             self._running = False
-    
+
     async def stop(self):
         """停止事件过滤器"""
         if not self._running:
             return
-            
+
         self._running = False
+
+        # 先停订阅超时检查器，再注销事件订阅
+        if self._timeout_checker is not None:
+            try:
+                await self._timeout_checker.stop()
+            except Exception as e:
+                logger.error("停止订阅超时检查器时出错: %s", e)
         
         # 取消事件订阅
         if self._subscription_id and self.event_bus:

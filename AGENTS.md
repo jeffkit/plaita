@@ -49,8 +49,8 @@ plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distri
 ```bash
 pip install -e ".[dev,lint,all]"          # 与 CI 对齐的 extras
 bash scripts/ci-gate.sh                   # 回归门禁（测+覆盖+分层+SC-003）
-bash plaita-console/scripts/e2e-run.sh    # console 全系统 E2E（argusai；需 Docker + mcp2cli + npm i -g argusai-mcp）
-bash plaita-console/scripts/e2e-gate.sh   # 同上，门禁形态：前置硬检查 + 残留自清理 + 退出码红绿（--quick 冒烟子集）
+bash plaita-console/scripts/e2e-run.sh   # console 全系统 E2E（argusai；需 Docker + mcp2cli + npm i -g argusai-mcp）
+bash plaita-console/scripts/e2e-gate.sh  # 同上，门禁形态：前置硬检查 + 残留自清理 + 退出码红绿（--quick 冒烟子集）
 make coverage                             # 单元覆盖率 gate
 make mutation && make mutation-recheck    # 单模块变异（先收窄 only_mutate）
 mkdocs build -f docs-site/mkdocs.yml --strict   # 改文档后
@@ -66,6 +66,12 @@ mkdocs build -f docs-site/mkdocs.yml --strict   # 改文档后
 - 当前优先：可选扩面 `codeflow/_source.py`（`_stmt` 95.2%、`_nodes` 89.8%、`_expr` 99.2%）
 - 本轮已建基线：sexpr 100%、async_utils 89.3%、codeflow/_common 95.2%、_expr 99.2%、_nodes 89.8%、_stmt 95.2%
 - recheck 须在 `mutants/` 内用 `tests/...` 路径（勿用 `../tests`，见 §2.20）
+
+## AI 写 / 改 @flow 流程（先做这三步）
+
+1. **装技能**（一次，软链权威副本，改了即生效）：Claude Code → `ln -snf <本仓路径>/plaita-ai/plaita_ai/skills/flow-coder ~/.claude/skills/flow-coder`；**DSH → `ln -snf <本仓路径>/plaita-ai/plaita_ai/skills/flow-coder ~/.dsh/skills/flow-coder`**（DSH 原生 skill 发现路径是 `~/.dsh/skills/`）；其余同法装 `plaita-flow-builder` / `plaita-flow-runner`。或运行期经 plaita-ai MCP `flow_get_skill(skill_name="flow-coder")` 拉取（需 plaita-ai 已安装且 MCP 已挂）。
+2. **读编写规范**：`plaita-ai/plaita_ai/skills/flow-coder/references/authoring-spec.md` —— **权威单源**：作者硬约束（跨分支同名赋值禁止、作用域边界、`params=` 语义等编译期不拦的坑）、plaita-nodes 业务集成、业务 flow 项目结构、console 发布。语法细节才看 `docs-site/docs/guide/code-dsl.md`。
+3. **业务节点不在本仓**：agentrun/hitl/gate/连接器等 22 节点在兄弟仓 `plaita-nodes`；entry_points 懒发现须显式 `get_default_registry()` 激活（见规范 §5.1）。
 
 ## 深入阅读
 

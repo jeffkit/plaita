@@ -17,6 +17,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: 校验 tag 与 plaita 版本一致（不一致 fail-fast）
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          expected="${tag#v}"
+          actual="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
+          if [ -z "$actual" ]; then
+            echo "::error::无法从 pyproject.toml 读到 version 字段"
+            exit 1
+          fi
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::tag=$tag 与 plaita 版本不一致: pyproject.toml version=$actual，期望 $expected"
+            exit 1
+          fi
+          echo "✓ tag $tag == plaita $actual"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
@@ -39,6 +55,22 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
+      - name: 校验 tag 与 plaita-console 版本一致（不一致 fail-fast）
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          expected="${tag#v}"
+          actual="$(sed -n 's/^version = "\(.*\)"$/\1/p' plaita-console/pyproject.toml | head -n1)"
+          if [ -z "$actual" ]; then
+            echo "::error::无法从 plaita-console/pyproject.toml 读到 version 字段"
+            exit 1
+          fi
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::tag=$tag 与 plaita-console 版本不一致: pyproject.toml version=$actual，期望 $expected"
+            exit 1
+          fi
+          echo "✓ tag $tag == plaita-console $actual"
       - name: 构建前端并打 wheel（backend/webDist 随包分发）
         run: plaita-console/scripts/build_package.sh
       - uses: actions/upload-artifact@v4

@@ -2,12 +2,14 @@
 
 本文件是 `flow-coder` skill 的参考资料。生成复杂 `@flow` 流程前先查阅对应小节，避免踩"会报错的写法"。
 
+> **分工**：本文件只管**语法**（能写什么、编译成什么）。语法之外的**作者硬约束**（跨分支同名赋值、作用域边界、`params=` 语义）、**plaita-nodes 业务集成**、项目结构与 console 发布，见 [authoring-spec.md](authoring-spec.md)——写业务编排前必读。
+
 ## 1. 函数骨架
 
 ```python
 @flow("<flow_id>", desc="<说明>")
 def <name>(INPUT):
-    # 仅支持：if/elif/else、for...in MAP/FILTER/FIND/LOOP/REDUCE、赋值、return
+    # 仅支持：if/elif/else、while、for...in MAP/FILTER/FIND/LOOP/REDUCE/WHILE、赋值、return
     return <expr>
 ```
 
@@ -21,7 +23,7 @@ def <name>(INPUT):
 |------|------|
 | 命名空间变量 | `INPUT` `NODE` `GLOBAL` `PARENT` `ENV` |
 | 表达式函数 | `F`（`F.upper` `F.concat` `F.add` `F.len` `F.mod` …） |
-| 内置节点调用 | `HTTP` `CODE` `EVENT` `MAP` `FILTER` `FIND` `LOOP` `REDUCE` `CHILD` `REFERENCE` `PARALLEL` |
+| 内置节点调用 | `HTTP` `CODE` `EVENT` `MAP` `FILTER` `FIND` `LOOP` `REDUCE` `WHILE` `CHILD` `REFERENCE` `PARALLEL` |
 | 自定义节点调用 | `node_type` 大写化（如 `LLM` `RETRIEVE` `TOOL` …，须已注册到 `NodeRegistry`） |
 | 错误处理 | `ErrorHandler(strategy, default=...)` |
 
@@ -41,25 +43,24 @@ def <name>(INPUT):
 | `str(x)` | `$F.concat(x)` | `"".join(str(a) for a in args)`，单参与 `str()` 等价 |
 | `a + b` `-` `*` `/` `%` `**` | `$F.add/sub/mul/div/mod/pow` | 直接对应 Python 运算符，类型决定语义，编译期不查类型 |
 
-### 比较与逻辑（只能在 `if` 判断位置）
+### 比较与逻辑（`if` 判断位置与任意表达式位置均可）
 
 ```python
 if INPUT.age >= 18 and INPUT.vip == True:   # ✅
 if not (INPUT.status == "blocked"):          # ✅
     ...
+label = "pass" if INPUT.score >= 60 else "low"   # ✅ 三元也可作表达式
 ```
 
-`>=` `>` `<=` `<` `==` `!=` `in` `and` `or` `not` 写在赋值/return 表达式位置会报错。
+`>=` `>` `<=` `<` `==` `!=` `in` `and` `or` `not` 与三元 `a if c else b` 均可写在赋值/return 等任意表达式位置，分别编译为 `$F.*` 比较与逻辑函数；三元编译为 `$F.ifelse`（**急切求值，两支都会算**——分支里不要放 None 不安全的算术）。
 
 ### 不支持、会报错的写法与改写
 
 | ❌ | ✅ |
 |----|----|
 | `f"hi {name}"` | `F.concat("hi ", INPUT.name)` |
-| `a if c else b` | `if/else` 语句分支 |
 | 列表/集合/字典推导式 | `MAP` / `FILTER` 节点 |
 | `lambda` / `await` / `:=` / `*args` 解包 | 拆成节点或普通赋值 |
-| 比较与 `and/or/not` 在表达式位置 | 只能放 `if` 判断位置 |
 | `"x".upper()` 等字面量/非 F 方法调用 | 用 `F.upper(...)` 等表达式函数 |
 | 集合字面量 `{1,2}` | 列表 `[1, 2]` |
 | `return HTTP.post(...)` | `r = HTTP.post(...); return r.data` |
@@ -91,6 +92,25 @@ def greet(INPUT):
 ```
 
 赋值生成 `assignment` 节点，后续用变量名引用其输出。**赋值后必须接 return 或后续语句**，否则报"赋值后悬空"。
+
+### while / for-head WHILE（条件循环）
+
+```python
+@flow("countdown")
+def countdown(INPUT):
+    seed = INPUT.n
+    for w in WHILE(item == None or item.left > 0, id="wcd", max_iterations=50):
+        left = F.sub(F.ifelse(item == None, seed, item.left), F.ifelse(item == None, 0, 1))
+        return {"left": left}
+    return NODE.wcd
+# run(n=3) -> {"left": 0}
+```
+
+- **循环体必须以 return 结束**：return 值即下一轮的 `item`（首轮为 `None`），也是循环结束后节点的输出；子流程状态与父隔离，体内 assignment 不写回父侧。
+- 条件与体内可用 `item`（上一轮返回值）与 `rounds`（轮次，从 0 起）；首轮 bootstrap 惯用 `while rounds == 0 or item.xxx:`。`item` 打 None 安全（点路径返回 None、None 参与比较记 False）。
+- **体内裸 `INPUT` 指子流程输入（只有 item/index），静默 None 是陷阱**——外层原始输入写 `PARENT.INPUT.<名>`；外层已赋值变量裸用名字即可（自动映射 `$PARENT` 快照）。
+- `while` 语句形态节点自动 id、输出不可命名引用；要取循环最终态用 `for w in WHILE(cond, id="w")` 形态（可选 `max_iterations=` 覆盖引擎默认 1000）。
+- 唯一退出通道是条件转假（引擎 `max_iterations=1000` 兜底，业务上限应写进条件）；**不支持 break / continue / while-else**。
 
 ## 5. 集合节点
 
@@ -129,15 +149,18 @@ def first_even(INPUT):
     return NODE.fd
 ```
 
-### REDUCE（累积值 `first`，当前元素 `second`）
+### REDUCE（累积值 `first`，当前元素 `second`；循环目标必须元组解包）
 
 ```python
 @flow("sum_nums")
 def sum_nums(INPUT):
-    for x in REDUCE(INPUT.nums, id="rdc", initial=0):
-        return F.add(x.first, x.second)
+    for (first, second) in REDUCE(INPUT.nums, id="rdc", initial=0):
+        return F.add(first, second)
     return NODE.rdc
+# run(nums=[1,2,3,4]) -> 10
 ```
+
+> 不能写 `for x in REDUCE(...)` 再用 `x.first`/`x.second`——编译报 `REDUCE 的循环变量必须是 (first, second) 两个名字`。
 
 > 可选 `initial` 指定初始值（`0`/`[]`/`""` 这类 falsy 值也是有效初始值）。
 
@@ -180,7 +203,7 @@ def create_user(INPUT):
 
 ## 8. 并行 PARALLEL
 
-`branches` 用 **dict 字面量**`{名: 子流程}` 或 **`(名, 子流程)` 元组列表**（不是 `[{name, flow, input}]`）。要等待结果汇合的分支名用关键字 **`join=`**（不是 `join_branches=`）。`mode` 可选 `"thread"`/`"process"`/`"coroutine"`/`"artificial"`，默认 `"thread"`。返回 dict `{分支名: result}`。
+`branches` 用 **dict 字面量**`{名: 子流程}` 或 **`(名, 子流程)` 元组列表**（不是 `[{name, flow, input}]`）。要等待结果汇合的分支名用关键字 **`join=`**（不是 `join_branches=`）。`mode` 可选 `"thread"`/`"process"`/`"artificial"`，默认 `"thread"`；**不要用 `"coroutine"`**——已下线，sync 执行路径不可用（分支内节点表达式求值拿到 `None`，静默产出 `__parallel_error__`）。返回 dict `{分支名: result}`。
 
 ```python
 @childflow()
@@ -201,7 +224,7 @@ def fan_out(INPUT):
     return r
 ```
 
-> **已知限制（重要）**：`@flow` 的 PARALLEL 编译期**不接受 per-branch `input`**（分支只带 `name` + `flow`）。当前 plaita 运行时在 parallel 子流程里访问 `INPUT.x` / `PARENT.INPUT.x` / `GLOBAL.x` 会触发表达式求值 bug（`ExpressionParser._eval_variable missing 'tokens'`），**输入相关的并行分支在 `@flow` 源码模式下目前跑不通**。若必须按输入并行扇出：改用 `CHILD` 串行编排，或在 builder/JSON 层构建 Parallel 节点（那里支持 per-branch `input`）。生成时如遇 PARALLEL 反复报错，应主动提示用户这一限制，不要无限重试。
+> **已知限制**：`@flow` 的 PARALLEL 编译期**不接受 per-branch `input`**（分支只带 `name` + `flow`，写 per-branch input 报 `PARALLEL 分支需要 (name, flow) 元组`）。分支子流程**可以**直接读主流程输入（`INPUT.x` / `GLOBAL.x`，实测编译运行通过）；要给不同分支喂不同输入，改用 `CHILD` 串行编排，或在 builder/JSON 层构建 Parallel 节点（那里支持 per-branch `input`）。
 
 ## 9. 编译期校验报错对照
 
@@ -209,9 +232,8 @@ def fan_out(INPUT):
 |--------|------|
 | 用了未定义的名字 | `[codeflow] 第 N 行: 未知名字 'xxx'` |
 | 节点调用嵌在表达式里 | `HTTP(...) 是节点调用，只能作为语句或赋值右侧`（自定义节点同理：`LLM(...) 是节点调用，只能...`） |
-| `not` 出现在非条件位置 | `not 要用在条件位置（if/while 判断）` |
 | 赋值后悬空 | `赋值 xxx 之后悬空：请补 return 或后续语句` |
-| f-string / 三元 / 推导式 / lambda | 带重写提示（见第 3 节） |
+| f-string / 推导式 / lambda | 带重写提示（见第 3 节） |
 | 非 `F.*` 的方法/函数调用 | `不支持的调用 Xxx.yyy(...)：…` |
 | 大写占位名但未注册 | `未注册的自定义节点 FOO(...)：node_type 'foo' 不在 registry 中。可用类型：[...]` |
 | 自定义节点传位置参数 | `自定义节点 xxx 只接受关键字参数（字段名=值），不支持位置参数` |
@@ -303,6 +325,6 @@ print(flow.run(name="alice"))   # -> "hi ALICE"
 | `plaita.dsl.codeflow.compile_func(fn, flow_id)` | Python 函数 → IR dict（不构建） |
 | `plaita.dsl.codeflow.flow(flow_id, ...)` | 装饰器：Python 函数 → `Flow`（需模块级源文件） |
 | `plaita.dsl.codeflow.childflow(...)` | 装饰器：子流程函数 |
-| 占位符 | `HTTP CODE EVENT MAP FILTER FIND LOOP REDUCE CHILD REFERENCE PARALLEL` + 自定义节点（`node_type` 大写，如 `LLM`/`RETRIEVE`/`TOOL`，须已注册） |
+| 占位符 | `HTTP CODE EVENT MAP FILTER FIND LOOP REDUCE WHILE CHILD REFERENCE PARALLEL` + 自定义节点（`node_type` 大写，如 `LLM`/`RETRIEVE`/`TOOL`，须已注册） |
 | 命名空间 | `F INPUT NODE GLOBAL PARENT ENV` |
 | 错误处理 | `ErrorHandler(...)` |

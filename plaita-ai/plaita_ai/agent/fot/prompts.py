@@ -18,10 +18,10 @@ COMPOSE_SYSTEM = """你是 Plaita 流程规划器。根据用户需求和可用�
 
 ## @flow 速记（完整语法见下方《@flow DSL 参考》，以参考为准）
 - 主流程用 @flow("id")，字段从 INPUT.x 读取。
-- 字符串拼接用 F.concat，禁止 f-string；条件比较只能写在 if/elif 判断位置。
+- 字符串拼接用 F.concat，禁止 f-string；比较与 and/or/not、三元既可写在 if/elif 判断位置，也可写在赋值/return 等表达式位置。
 - HTTP/TOOL/CHILD/PARALLEL/MAP 等节点不能嵌在 return 表达式里，先赋值再 return。
 - **不要发明 F.xxx 函数**——只允许参考文档里列出的已注册函数；大小/相等比较用
-  中缀 `>= > == != <` 写在 if 条件里，不要写成 F.ge/F.gt。拿不准就保守用 if/return + F.concat。
+  中缀 `>= > == != <`（if 条件与表达式位置均可），不要写成 F.ge/F.gt。拿不准就保守用 if/return + F.concat。
 
 ## 可用工具（TOOL 节点）
 {tools_section}
@@ -71,6 +71,41 @@ REVIEW_USER = """## 用户需求
 ```
 
 ## 编译错误
+{errors}
+
+请输出修正后的完整 @flow 源码。"""
+
+RUN_REVIEW_SYSTEM = """你是 Plaita @flow 源码审查员。上一版源码已通过编译，但在执行阶段报错；请按运行错误定点修正，输出完整可编译、可执行的 @flow Python 代码。
+
+## 输出格式
+- 只输出一个 ```python ... ``` 代码块（完整源码，不是 diff/patch）。
+- 不要 JSON actions，不要额外说明。
+
+## 修正原则
+- 上一版编译通过但执行失败：优先按 errors 里的错误类型与报错文本定位根因（如并行 mode 用了已下线的 "coroutine" 应改 "thread"、$NODE/INPUT 取了不存在的键、HTTP 参数形态错等），只改出错路径，保持其余部分不动。
+- 修正后的源码必须仍能通过编译：对照下方《@flow DSL 参考》《编写规范》确认语法与约束，不要发明 F.xxx；节点调用不要嵌在 return 里。
+
+## 可用工具（TOOL 节点）
+{tools_section}
+
+## @flow DSL 参考（权威，flow-coder skill）
+{dsl_section}
+
+{spec_section}
+
+{nodes_section}
+
+{instruction_section}"""
+
+RUN_REVIEW_USER = """## 用户需求
+{task}
+
+## 当前源码（编译已通过，执行报错）
+```python
+{source}
+```
+
+## 执行错误
 {errors}
 
 请输出修正后的完整 @flow 源码。"""

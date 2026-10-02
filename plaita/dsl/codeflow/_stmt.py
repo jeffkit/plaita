@@ -6,11 +6,14 @@ from typing import Any, Dict, List, Optional
 
 from plaita.dsl.codeflow._common import (
     _COLLECTION_CALL_NAMES,
+    _NS_PREFIX,
     _CodeflowError,
     _CompileCtx,
     _annotate_source,
+    _cond_slug,
     _const_bool,
     _custom_node_type,
+    _human_label,
     _node_call_kind,
     _unpack_names,
 )
@@ -35,12 +38,18 @@ def _compile_block(
     head, rest = stmts[0], stmts[1:]
 
     if isinstance(head, ast.Return):
-        end_id = ctx.auto_id()
         output = _compile_expr(head.value, ctx) if head.value is not None else None
+        # 语义化 id/标签：return "A" -> ret_a；canvas/dry-run/报错不再显示 _n3
+        ret_slug = _cond_slug(head.value)
+        end_id = ctx.semantic_id(f"ret_{ret_slug}" if ret_slug else None)
+        expr_text = ast.unparse(head.value) if head.value is not None else ""
         end_node: Dict[str, Any] = {
             "type": "end", "id": end_id,
             "output": output, "resultType": "success",
         }
+        if expr_text:
+            end_node["name"] = _human_label(f"return {expr_text}")
+        end_node["desc"] = _human_label(f"return {expr_text}（第 {head.lineno} 行）", 60)
         _annotate_source(end_node, head)
         ctx.nodes.append(end_node)
         if rest:
@@ -72,9 +81,15 @@ def _compile_if(
     head: ast.If, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
     cond = _compile_condition(head.test, ctx)
-    if_id = ctx.auto_id()
+    # 语义化 id/标签：if INPUT.score >= 90 -> id=score_ge_90，画布/报错自带语义
+    cond_text = ast.unparse(head.test)
+    if_id = ctx.semantic_id(_cond_slug(head.test))
     # 先在节点列表里占位，保证输出顺序 if 在前
-    if_node: Dict[str, Any] = {"type": "if", "id": if_id, "condition": cond}
+    if_node: Dict[str, Any] = {
+        "type": "if", "id": if_id, "condition": cond,
+        "name": _human_label(f"{cond_text}?"),
+        "desc": _human_label(f"if {cond_text}（第 {head.lineno} 行）", 80),
+    }
     _annotate_source(if_node, head)
     ctx.nodes.append(if_node)
 
@@ -165,7 +180,8 @@ def _compile_while(
     cond = _while_cond(head.test, ctx)
     child_flow = _while_child_flow(head.body, ctx)
 
-    node_id = ctx.auto_id()
+    cond_text = ast.unparse(head.test)
+    node_id = ctx.semantic_id(_cond_slug(head.test))
 
     after = _compile_block(rest, ctx, succ)
     if after is None:
@@ -175,6 +191,8 @@ def _compile_while(
         "type": "while",
         "id": node_id,
         "condition": cond,
+        "name": _human_label(f"{cond_text}?"),
+        "desc": _human_label(f"while {cond_text}（第 {head.lineno} 行）", 80),
         # While 模型只认 child_flow（无 childFlow camelCase 兼容键，
         # 2026-09-30 实测：写 childFlow 会被 schema 当未知键静默忽略）。
         "child_flow": child_flow,
@@ -230,7 +248,15 @@ def _compile_while_for(
 def _compile_for(
     head: ast.For, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
-    """``for x in MAP/FILTER/FIND/LOOP(...)`` / ``for a,b in REDUCE(...)``。"""
+    """``for x in MAP/FILTER/FIND/LOOP(...)`` / ``for a,b in REDUCE(...)``。
+
+    作用域：循环目标名（x / a,b）映射子流程输入；外层已赋值变量自动映射为
+    ``$PARENT.NODE.<名>`` 快照引用（与 while 同一约定，见 ``_while_child_flow``），
+    体内可读集合节点执行前已确定的父侧变量。子流程写不回父 context——
+    聚合语义用 REDUCE（累积值经 return 串）或对 ``NODE.<集合节点id>`` 的
+    下游表达式表达，不要试图在子流程 end 引用集合节点自身的结果
+    （父侧结果此刻尚未写回，快照里没有）。
+    """
     coll_call = head.iter
     if not isinstance(coll_call, ast.Call) or not isinstance(coll_call.func, ast.Name):
         raise _CodeflowError(
@@ -266,7 +292,14 @@ def _compile_for(
         if len(names) > 1:
             loop_vars[names[1]] = "$INPUT.index"
 
-    child_ctx = _CompileCtx(loop_vars=loop_vars, module_globals=ctx.module_globals)
+    # 外层已赋值名映射为 $PARENT 快照引用（与 while 的 _while_child_flow 同一
+    # 约定）：集合节点执行前已在父侧赋值的变量，体内可读。$PARENT 是子流程
+    # 启动时的父 context 快照，只读且循环期间冻结——所以只映射"此刻已在
+    # ctx.names 里的名字"（顺序编译保证它们都在集合节点之前赋值，快照必有值）。
+    # loop_vars 放在合并后侧：循环目标名遮蔽外层同名（与 Python 遮蔽规则一致）。
+    parent_names = {name: "$PARENT." + ref[1:] for name, ref in ctx.names.items()}
+    child_ctx = _CompileCtx(
+        loop_vars={**parent_names, **loop_vars}, module_globals=ctx.module_globals)
     child_entry = _compile_block(list(head.body), child_ctx, succ=None)  # 子流程体必须自行 return
     if child_entry is None:
         raise _CodeflowError("循环体为空或全部悬空：请补 return", head.body[0] if head.body else head)
@@ -316,6 +349,33 @@ def _compile_for(
     return node_id
 
 
+def _references_assign_name(expr: ast.expr, name: str) -> bool:
+    """赋值右侧是否引用了正在赋值的变量名（自引用检测，C1-1）。
+
+    codeflow 禁止同名重复赋值（每个赋值是一个节点），故 RHS 里出现的裸
+    ``name`` 只能解析成本赋值节点自己（``$NODE.<name>``）——编译期放行的话
+    运行期必然 ``NoneType`` 参与运算炸掉。覆盖：
+
+    - 裸名 ``x``（含三元 ``x = x if ... else ...``、嵌套调用/字面量内）；
+    - 显式 ``NODE.x``（赋值节点 id 即变量名，同为自引用）。
+
+    保留命名空间（INPUT/NODE/GLOBAL/...，见 ``_NS_PREFIX``）不作裸名检测——
+    它们在 ``_resolve_name`` 里先于 ``ctx.names`` 解析，赋值同名变量不会让
+    RHS 自指（如 ``NODE = NODE.x`` 写 ``$NODE.NODE``，读的是 x 节点，非环形）。
+    """
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Name) and node.id == name and name not in _NS_PREFIX:
+            return True
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == name
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "NODE"
+        ):
+            return True
+    return False
+
+
 def _compile_assign(
     head: ast.Assign, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
@@ -324,6 +384,13 @@ def _compile_assign(
     name = head.targets[0].id
     value = head.value
 
+    # C1-1：自引用在编译期显式拦截。检测先于名字登记（登记本身不受影响，
+    # 后续语句仍能解析该名字）；三元/嵌套形态经 ast.walk 全量覆盖。
+    if _references_assign_name(value, name):
+        raise _CodeflowError(
+            f"变量 {name!r} 的赋值右侧引用了它自己：自引用赋值请引入中间变量，"
+            "或用 REDUCE 做聚合", head)
+
     # 先登记名字映射（不预 claim，避免与 _compile_node_call 的 auto_id 冲突），
     # 这样后续语句引用 name 时能解析成 $NODE.<name>
     ctx.names[name] = f"$NODE.{name}"
@@ -331,6 +398,16 @@ def _compile_assign(
     after = _compile_block(rest, ctx, succ)
     if after is None:
         raise _CodeflowError(f"赋值 {name} 之后悬空：请补 return 或后续语句", head)
+
+    # C1-1：同名重复赋值此前落到 ctx.claim 的「节点 id 重复」文案，对赋值
+    # 场景有误导（变量名即节点 id，重复的其实是赋值本身）。注意 rest 先于
+    # 本赋值编译：重复赋值时后一条的节点已先 claim 了该名字，在这里统一按
+    # 赋值语义报错（节点调用路径 x = HTTP(...) 同样被此检查覆盖）。
+    if name in ctx._claimed:
+        raise _CodeflowError(
+            f"变量 {name!r} 被多次赋值：codeflow 每个赋值是一个节点，变量名即"
+            "节点 id，同一 id 只能出现一次。请换用新变量名，或把赋值收拢到"
+            "单一节点/分支里", head)
 
     if isinstance(value, ast.Call) and (
         _node_call_kind(value.func) is not None
@@ -370,8 +447,11 @@ def _compile_expr_stmt(
         ctx.nodes.insert(anchor, spec)
         return spec["id"]
     nid = ctx.auto_id()
+    expr_text = ast.unparse(value)
     expr_node: Dict[str, Any] = {
         "type": "assignment", "id": nid, "output": _compile_expr(value, ctx), "next": after,
+        "name": _human_label(expr_text),
+        "desc": _human_label(f"{expr_text}（第 {head.lineno} 行）", 60),
     }
     _annotate_source(expr_node, head)
     ctx.nodes.insert(anchor, expr_node)

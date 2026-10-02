@@ -18,6 +18,11 @@ CONDITION_OP_IN = "in"
 CONDITION_OP_NOTIN = "notIn"
 CONDITION_OP_CONTAINS = "contains"
 CONDITION_OP_NOT_CONTAINS = "notContains"
+# truthy/falsy：Python bool(left) 真值语义。codeflow 对 `if x:` 裸真值测试的
+# 规范编译形态（2026-10 评审修复包 A1）——历史实现降级为 (x != False)，空
+# 列表/空串/None 会误走真分支。falsy 是 truthy 的 not 取反形态（_NEGATE_OP）。
+CONDITION_OP_TRUTHY = "truthy"
+CONDITION_OP_FALSY = "falsy"
 
 condition_matcher = {
     CONDITION_OP_EQ: lambda left, right: left == right,
@@ -30,6 +35,8 @@ condition_matcher = {
     CONDITION_OP_NOTIN: lambda left, right: left not in right,
     CONDITION_OP_CONTAINS: lambda left, right: right in left,
     CONDITION_OP_NOT_CONTAINS: lambda left, right: right not in left,
+    CONDITION_OP_TRUTHY: lambda left, right: bool(left),
+    CONDITION_OP_FALSY: lambda left, right: not bool(left),
 }
 
 LOGIC_TYPE_AND = "and"
@@ -51,11 +58,22 @@ class Condition(BaseModel):
         CONDITION_OP_NOTIN,
         CONDITION_OP_CONTAINS,
         CONDITION_OP_NOT_CONTAINS,
+        CONDITION_OP_TRUTHY,
+        CONDITION_OP_FALSY,
     ]
     value: Any
 
     def match(self, context, prefix="$"):
         left = evaluate(self.field, context, prefix)
+
+        # truthy/falsy 走 Python bool(left) 真值语义，value 不参与比较。
+        # 必须在下面的 None 短路分支之前拦截：空集合/None/0/空串恰是该算子
+        # 的目标语义（`if items:`），走 None 分支会被误判（A1 修复）。
+        if self.operator == CONDITION_OP_TRUTHY:
+            return bool(left)
+        if self.operator == CONDITION_OP_FALSY:
+            return not bool(left)
+
         right = evaluate(self.value, context, prefix)
 
         # Handle None values

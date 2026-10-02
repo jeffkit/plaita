@@ -63,7 +63,18 @@ from .builder import (
     http,
     event,
 )
-from .ir_validate import FlowIRValidationError, build_flow, validate_flow_ir
+from .ir_validate import (
+    DEFAULT_RULES,
+    FlowIRGraph,
+    FlowIRRule,
+    FlowIRValidationError,
+    build_flow,
+    check_expression_functions,
+    check_flow_entry_and_reachability,
+    forbid_node_types_in_childflow,
+    unknown_expression_functions,
+    validate_flow_ir,
+)
 
 __all__ = [
     "FlowBuilder",
@@ -94,6 +105,13 @@ __all__ = [
     "http",
     "event",
     "FlowIRValidationError",
+    "FlowIRGraph",
+    "FlowIRRule",
+    "DEFAULT_RULES",
+    "check_flow_entry_and_reachability",
+    "check_expression_functions",
+    "forbid_node_types_in_childflow",
+    "unknown_expression_functions",
     "build_flow",
     "validate_flow_ir",
 ]

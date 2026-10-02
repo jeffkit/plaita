@@ -163,6 +163,27 @@ class FlowErrorException(FlowExecutionException):
         super().__init__(self.code, message, self.error_type, node)
 
 
+class FlowCancelledException(FlowExecutionException):
+    """执行已被取消（2026-10 波次③）。
+
+    由 ``FlowExecution.cancel()`` 置位 ``cancel_requested`` 后，引擎在**节点
+    入口**抛出本异常拒绝继续执行。职责边界：
+
+    - 不经节点 ``errorHandler`` 分发（不重试、不被 continue 策略吞掉）——
+      取消是执行级意图，不是节点错误；在 runner 重试循环**之前**抛出，
+      沿 ``FlowExecutionException`` 同族既有语义冒泡（normal 模式原样透传，
+      distributed 模式按既有契约归一化为 ``FlowErrorException``/-500）。
+    - ``code=-4`` 为取消专属错误码（与 -500 通用/-520 节点 abort/-1 超时
+      区分），供上层 worker 识别取消终态。
+    """
+
+    code = -4
+    error_type = FlowErrorType.FLOW_ERROR
+
+    def __init__(self, message: str = "Flow execution cancelled", node=None):
+        super().__init__(self.code, message, self.error_type, node)
+
+
 class ErrorResultException(FlowExecutionException):
     """End 节点返回错误结果。code/message 来自 ``FlowResultError``。"""
 

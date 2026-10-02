@@ -1,0 +1,115 @@
+name: 控制台 UI 循环形态
+sequential: true
+
+# 循环节点（方案 B 迷你带）呈现验证：播种含四种循环形态的 demo flow，
+# 断言画布上 while/map/reduce/loop 卡片渲染子流程迷你带（体节点 chip、
+# while 的「回条件」标记、while 副标题的体/轮次摘要）。
+# 数据播种同 ui-semantic-ids（evaluate + fetch，Bearer 取自 localStorage）。
+
+cases:
+  - name: "登录（bootstrap admin）"
+    browser:
+      action: goto
+      url: http://localhost:18081/
+  - name: "等待登录表单"
+    browser:
+      action: waitForSelector
+      selector: input[placeholder="用户名"]
+      timeout: 15s
+  - name: "填入用户名"
+    browser:
+      action: fill
+      selector: input[placeholder="用户名"]
+      value: admin
+  - name: "填入密码"
+    browser:
+      action: fill
+      selector: input[placeholder="密码"]
+      value: e2e-admin-pass
+  - name: "提交登录"
+    browser:
+      action: click
+      selector: text=登录
+  - name: "登录成功进入仪表盘"
+    browser:
+      action: waitForSelector
+      selector: text=仪表盘
+      timeout: 15s
+
+  - name: "播种循环形态 demo flow"
+    browser:
+      action: evaluate
+      script: |
+        (async () => {
+          const H = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + localStorage.getItem('plaita_token') };
+          await fetch('/api/flows/loop-showcase', { method: 'DELETE', headers: H });
+          const def = JSON.stringify({"runtime": "python", "flow_id": "loop-showcase", "inputType": {"dataType": "object"}, "desc": "循环形态演示：while / MAP / REDUCE / LOOP", "nodes": [{"type": "start", "id": "start", "next": "total"}, {"type": "assignment", "id": "total", "output": 0, "next": "split_orders", "source_line": 4}, {"type": "end", "id": "ret_total", "output": "$NODE.total", "resultType": "success", "name": "return total", "desc": "return total（第 15 行）", "source_line": 15}, {"type": "loop", "id": "retry3", "collection": "$INPUT.retries", "childFlow": {"runtime": "python", "inputType": {"dataType": "object"}, "nodes": [{"type": "start", "id": "start", "next": "t_ge_2"}, {"type": "if", "id": "t_ge_2", "condition": {"field": "$INPUT.item", "operator": "gte", "value": 2}, "name": "t >= 2?", "desc": "if t >= 2（第 12 行）", "source_line": 12, "next": "ret_t", "else_next": "ret_0"}, {"type": "end", "id": "ret_0", "output": 0, "resultType": "success", "name": "return 0", "desc": "return 0（第 14 行）", "source_line": 14}, {"type": "end", "id": "ret_t", "output": "$INPUT.item", "resultType": "success", "name": "return t", "desc": "return t（第 13 行）", "source_line": 13}]}, "next": "ret_total", "source_line": 11}, {"type": "while", "id": "total_lt_3", "condition": {"field": "$NODE.total", "operator": "lt", "value": 3}, "name": "total < 3?", "desc": "while total < 3（第 9 行）", "child_flow": {"runtime": "python", "inputType": {"dataType": "object"}, "nodes": [{"type": "start", "id": "start", "next": "ret_add_total_1"}, {"type": "end", "id": "ret_add_total_1", "output": "$F.add($PARENT.NODE.total, 1)", "resultType": "success", "name": "return F.add(total, 1)", "desc": "return F.add(total, 1)（第 10 行）", "source_line": 10}]}, "next": "retry3", "source_line": 9}, {"type": "reduce", "id": "sum_price", "collection": "$INPUT.orders", "childFlow": {"runtime": "python", "inputType": {"dataType": "array"}, "nodes": [{"type": "start", "id": "start", "next": "ret_add_acc_cur"}, {"type": "end", "id": "ret_add_acc_cur", "output": "$F.add($INPUT[0], $INPUT[1])", "resultType": "success", "name": "return F.add(acc, cur)", "desc": "return F.add(acc, cur)（第 8 行）", "source_line": 8}]}, "initial": 0, "next": "total_lt_3", "source_line": 7}, {"type": "map", "id": "split_orders", "collection": "$INPUT.orders", "childFlow": {"runtime": "python", "inputType": {"dataType": "object"}, "nodes": [{"type": "start", "id": "start", "next": "ret_mul_price_2"}, {"type": "end", "id": "ret_mul_price_2", "output": "$F.mul($INPUT.item.price, 2)", "resultType": "success", "name": "return F.mul(item.price, 2)", "desc": "return F.mul(item.price, 2)（第 6 行）", "source_line": 6}]}, "next": "sum_price", "source_line": 5}], "metadata": {"source": "\n@flow(\"loop-showcase\", desc=\"循环形态演示：while / MAP / REDUCE / LOOP\")\ndef loop_showcase(INPUT):\n    total = 0\n    for item in MAP(INPUT.orders, id=\"split_orders\"):\n        return F.mul(item.price, 2)\n    for acc, cur in REDUCE(INPUT.orders, initial=0, id=\"sum_price\"):\n        return F.add(acc, cur)\n    while total < 3:\n        return F.add(total, 1)\n    for t in LOOP(INPUT.retries, id=\"retry3\"):\n        if t >= 2:\n            return t\n        return 0\n    return total\n", "source_format": "plaita@flow"}});
+          const r1 = await fetch('/api/flows', { method: 'POST', headers: H,
+            body: JSON.stringify({ flow_id: 'loop-showcase', author: 'e2e', desc: '循环形态演示' }) });
+          const r2 = await fetch('/api/flows/loop-showcase/versions/0.2.0', { method: 'PUT', headers: H,
+            body: JSON.stringify({ definition: def, layout: '{}', created_by: 'e2e' }) });
+          return [r1.status, r2.status].join(',');
+        })()
+    expect:
+      page:
+        result: "200,200"
+
+  - name: "打开流程列表并进入编辑器"
+    browser:
+      action: goto
+      url: http://localhost:18081/flows
+  - name: "列表就绪"
+    browser:
+      action: waitForSelector
+      selector: text=loop-showcase
+      timeout: 15s
+  - name: "点击流程行"
+    browser:
+      action: click
+      selector: text=loop-showcase
+  - name: "点编辑进入画布"
+    browser:
+      action: click
+      selector: text=编辑
+  - name: "画布就绪"
+    browser:
+      action: waitForSelector
+      selector: .react-flow
+      timeout: 15s
+
+  - name: "while 节点渲染（等待式）"
+    browser:
+      action: waitForSelector
+      selector: text=total < 3?
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          # 主名 + 副标题（体节点数 · 轮次上限）
+          - text=total < 3?
+          - text=体 1 · ≤1000 轮
+          # 迷你带：体节点 chip + 回条件标记
+          - text=return F.add
+          - text=回条件
+
+  - name: "map 节点渲染"
+    browser:
+      action: waitForSelector
+      selector: text=split_orders
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          - text=× $INPUT.orders
+          - text=return F.mul
+
+  - name: "reduce / loop 节点渲染"
+    browser:
+      action: waitForSelector
+      selector: text=sum_price
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          - text=return F.add
+          - text=t >= 2?

@@ -281,10 +281,15 @@ class DistributedStrategy:
         # 统一走 flow.next_node: 分支节点按 branch 选 branch.next, 普通节点走 next,
         # 避免在此重复实现一套与 flow._get_branch_target 易漂移的图遍历逻辑。
         next_node = flow.next_node(current_node, branch)
-        if next_node is None and not flow.is_end_node(current_node) and getattr(current_node, "branching", False):
-            # 与 Normal/Generator 的 _advance_one 对齐: 分支未命中不允许
-            # 静默"完成"（历史上 distributed 会合成一个 is_end=True 的假 End 步）。
-            _handle_unmatched_branch(current_node, branch)
+        if next_node is None and not flow.is_end_node(current_node):
+            # 与 Normal/Generator 的 _advance_one 对齐: 后继解析不出不允许
+            # 静默"完成"——分支未命中走 _handle_unmatched_branch, 普通节点
+            # 缺 next 走 _handle_missing_next（历史上 distributed 会合成一个
+            # is_end=True 的假 End 步）。
+            if getattr(current_node, "branching", False):
+                _handle_unmatched_branch(current_node, branch)
+            else:
+                _handle_missing_next(current_node)
         return next_node, result, branch
 
     async def _start_new_flow(self, flow, context, runner, callback_manager):
@@ -297,6 +302,13 @@ class DistributedStrategy:
         # flow.next_node already handles both branching and non-branching nodes;
         # no need to replicate the "if start_node.next" guard here.
         current_node = flow.next_node(start_node, branch)
+        if current_node is None and not flow.is_end_node(start_node):
+            # 与 Normal/Generator 的 _advance_one 对齐: Start 后解析不出后继
+            # 也不允许静默合成 is_end=True 的假 End 步（首步姊妹路径）。
+            if getattr(start_node, "branching", False):
+                _handle_unmatched_branch(start_node, branch)
+            else:
+                _handle_missing_next(start_node)
         return current_node, result, branch
 
     async def _execute_current_node(self, flow, context, runner, callback_manager, current_node):
@@ -431,9 +443,45 @@ async def _advance_one(flow, runner, callback_manager, node, max_timeout_ms=None
     )
     is_end = flow.is_end_node(node)
     next_node = None if is_end else flow.next_node(node, branch)
-    if next_node is None and not is_end and getattr(node, "branching", False):
-        _handle_unmatched_branch(node, branch)
+    if next_node is None and not is_end:
+        # 非 End 节点解析不出后继：分支节点是"分支未命中"，普通节点是"缺 next"。
+        # 两条路都不允许静默"成功"（历史上流程会带着 $NODE 状态表"成功"结束）。
+        if getattr(node, "branching", False):
+            _handle_unmatched_branch(node, branch)
+        else:
+            _handle_missing_next(node)
     return result, branch, next_node, is_end
+
+
+def _handle_missing_next(node):
+    """普通（非分支）节点缺 ``next`` 且不是 End：拒绝静默"成功"。
+
+    与 :func:`_handle_unmatched_branch` 同源的姊妹路径：分支未命中早有防御，
+    但普通节点末尾漏写 next（或漏接 End）历史上同样会把整个 ``$NODE`` 状态表
+    当流程结果"成功"返回。现在默认抛错；节点显式配置
+    ``errorHandler.strategy=continue/continue-with`` 时保留旧的"继续"逃生口
+    （降级为 warning，流程以 $NODE 状态表收尾）。
+    """
+    handler = getattr(node, "error_handler", None)
+    strategy = handler.strategy if handler is not None else None
+    if strategy in (ErrorStrategy.CONTINUE, ErrorStrategy.CONTINUE_WITH):
+        logger.warning(
+            "non-branching node %s has no 'next' and is not an End node; "
+            "ending the flow with the $NODE state as its result "
+            "(errorHandler.strategy=%s legacy behavior)",
+            node.id, strategy.value,
+        )
+        return
+    raise FlowExecutionException(
+        message=(
+            f"Node '{node.id}' ({getattr(node, 'node_type', '?')}) has no 'next' "
+            f"and is not an End node; the flow cannot continue and refuses to end "
+            f"with an ambiguous intermediate result. Connect this node to a "
+            f"successor or an End node, or set its "
+            f"errorHandler.strategy='continue' to opt into the legacy skip behavior."
+        ),
+        node=node,
+    )
 
 
 def _handle_unmatched_branch(node, branch):
@@ -503,6 +551,14 @@ async def _subscribe_event(node, flow, node_state, context):
             "flow_id": flow.flow_id,
             "node_id": node.id,
         }
+        # 波次④（订阅自动超时）：仅当节点配置了 subscription_timeout 才携带
+        # timeout 形参。存量节点（None）保持与历史完全一致的参数集——不依赖
+        # 各 bus 实现是否接受该形参（register_subscription 的 ABC/redis/memory/
+        # sqlalchemy 均已就绪，简化测试替身未必），超时语义由 event_filter 侧
+        # SubscriptionTimeoutChecker 消费，此处只负责透传。
+        node_subscription_timeout = getattr(node, "subscription_timeout", None)
+        if node_subscription_timeout is not None:
+            subscription_params["timeout"] = node_subscription_timeout
 
         if asyncio.iscoroutinefunction(event_bus.register_subscription):
             subscription_id = await event_bus.register_subscription(**subscription_params)

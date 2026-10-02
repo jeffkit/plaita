@@ -14,11 +14,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 
+from plaita_ai.agent.fot.extract import extract_flow_source
+# langchain-free 提示词模块（planner 的错误格式化同源，避免两处漂移）
+from plaita_ai.agent.fot.prompts import format_compile_errors
 from plaita_ai.console_client import ConsoleClient, ConsoleClientError
 from plaita_ai.evals import Dataset, compare, evaluate
+from plaita_ai.flow_runner import compile_flow, get_skill_reference
 from plaita_ai.ops import latest_version, next_patch_version, published_version
 
 
@@ -220,6 +225,223 @@ class PromptProposer:
             "definition": str(parsed["definition"]),
             "rationale": str(parsed.get("rationale", ""))[:500],
         }
+
+
+class FlowSourceProposer:
+    """Proposer that has the model write ``@flow`` source, compile-gates it, and
+    stores the compiled IR JSON as the version definition.
+
+    编排单轨口径（ADR-2026-08-27，@flow 为权威定义）：模型提案的是 @flow 源码，
+    不是裸 JSON IR。提案必须先过 ``compile_flow`` 门（编译失败把错误拼回 prompt
+    重试，共 ``max_compile_attempts`` 次尝试），通过后才把 IR 的 JSON 字符串交给
+    ``Supervisor`` 存版本——数据面契约不变：console 里 ``definition`` 仍是 flow
+    定义 JSON 字符串（dry-run / evaluate 照常消费），坏提案不再烧迭代和版本号。
+
+    Model backend（二选一）:
+    - ``model``: 任意 ``.invoke([{role, content}, ...])`` 的 chat 模型（如
+      langchain ``FakeListChatModel``/``BaseChatModel``，鸭子类型，不强依赖 langchain）；
+    - 未给 ``model`` 时走 OpenAI 兼容端点，配置同 PromptProposer
+      （PLAITA_AI_PROPOSER_BASE_URL / _MODEL / _API_KEY env）。
+
+    编译门耗尽时 ``propose`` 返回 None（迭代按 no_proposal 结束，不写版本），
+    最后一次错误留在 ``self.last_error`` 供诊断。
+    """
+
+    #: 内置速记护栏（完整语法参考由 _dsl_reference 注入，避免两处漂移）
+    _COMPOSE_SYSTEM = """You are a workflow improvement proposer for the Plaita flow engine.
+You receive the current flow definition (flow IR JSON), its baseline evaluation report, and the dataset.
+Propose an improved flow by writing Plaita @flow Python DSL source (NOT raw JSON, NOT arbitrary Python).
+
+## 输出格式（必须遵守）
+- 只输出一个 ```python ... ``` 代码块，内含完整 @flow 源码（可含 @childflow）。
+- 代码块之后可附一个 ```json {{"rationale": "<what you changed and why>"}} ``` 块（可选）。
+- 不要输出 JSON IR、不要输出解释文字。
+
+## @flow 速记（完整语法见下方《@flow DSL 参考》，以参考为准）
+- 主流程用 @flow("id")，字段从 INPUT.x 读取；字符串拼接用 F.concat，禁止 f-string。
+- 比较与 and/or/not、三元既可写在 if/elif 判断位置，也可写在赋值/return 等表达式位置。
+- HTTP/TOOL/CHILD/PARALLEL/MAP 等节点只作语句或赋值右侧，不能嵌在 return 表达式里。
+- 不要发明 F.xxx 函数——只允许参考文档里列出的已注册函数。
+
+## @flow DSL 参考（权威）
+{dsl_section}
+
+Fix the failing cases without regressing passing ones; change as little as possible."""
+
+    _COMPOSE_USER = """## 当前流程
+flow_id: {flow_id}
+current_version: {current_version}
+current_definition (flow IR JSON):
+{current_definition}
+
+## 基线评测报告
+{baseline_report}
+
+## 数据集
+{dataset}
+
+请输出改进后的完整 @flow 源码。"""
+
+    _REVIEW_SYSTEM = """You are a Plaita @flow source reviewer. Your previous proposal FAILED TO COMPILE; fix it by the compiler errors and output the complete, compilable @flow Python source.
+
+## 输出格式（必须遵守）
+- 只输出一个 ```python ... ``` 代码块（完整源码，不是 diff/patch）。
+- 代码块之后可附一个 ```json {{"rationale": "..."}} ``` 块（可选）。
+
+## @flow DSL 参考（权威）
+{dsl_section}
+
+优先按 errors 的 line/message 定点修正，保持未报错部分不动。"""
+
+    _REVIEW_USER = """## 待修正源码
+```python
+{source}
+```
+
+## 编译错误
+{errors}
+
+请输出修正后的完整 @flow 源码。"""
+
+    _RATIONALE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+    def __init__(
+        self,
+        model: Optional[Any] = None,
+        env: Optional[Dict[str, str]] = None,
+        *,
+        max_compile_attempts: int = 3,
+        flow_id: Optional[str] = None,
+    ):
+        self.model = model
+        self.max_compile_attempts = max(1, int(max_compile_attempts))
+        self.flow_id = flow_id
+        #: 编译门耗尽后的最后错误（诊断用；propose 返回 None 时非空）
+        self.last_error: Optional[str] = None
+        self.last_source: Optional[str] = None
+        if model is None:
+            env = dict(os.environ if env is None else env)
+            self.base_url = (env.get("PLAITA_AI_PROPOSER_BASE_URL") or "").rstrip("/")
+            self.model_name = env.get("PLAITA_AI_PROPOSER_MODEL") or ""
+            self.api_key = env.get("PLAITA_AI_PROPOSER_API_KEY", "")
+            if not (self.base_url and self.model_name):
+                raise ConsoleClientError(
+                    "FlowSourceProposer needs a chat model or "
+                    "PLAITA_AI_PROPOSER_BASE_URL and PLAITA_AI_PROPOSER_MODEL."
+                )
+        else:
+            self.base_url = ""
+            self.model_name = ""
+            self.api_key = ""
+        try:
+            self._dsl_reference = get_skill_reference("flow-coder", "codeflow-reference.md")
+        except FileNotFoundError:
+            self._dsl_reference = ""
+
+    # -- model backends ------------------------------------------------------
+
+    def _invoke_model(self, system: str, user: str) -> str:
+        if self.model is not None:
+            response = self.model.invoke(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
+            )
+            content = getattr(response, "content", response)
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, str):
+                        parts.append(block)
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(str(block.get("text", "")))
+                content = "".join(parts)
+            return str(content)
+
+        import httpx
+
+        resp = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={
+                "model": self.model_name,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.2,
+            },
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        return str(resp.json()["choices"][0]["message"]["content"])
+
+    def _extract_rationale(self, content: str) -> str:
+        match = self._RATIONALE_RE.search(content)
+        if not match:
+            return ""
+        try:
+            parsed = json.loads(match.group(1))
+        except ValueError:
+            return ""
+        return str(parsed.get("rationale", ""))[:500] if isinstance(parsed, dict) else ""
+
+    # -- the propose gate ------------------------------------------------------
+
+    def propose(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Propose one improved definition; compile-gated, IR JSON out.
+
+        返回 ``{"definition": <IR JSON 字符串>, "rationale": <str>}``，与
+        PromptProposer/StaticProposer 同一数据面契约；编译门耗尽返回 None。
+        """
+        self.last_error = None
+        self.last_source = None
+        flow_id = str(context.get("flow_id") or self.flow_id or "")
+        source = ""
+        errors_text = ""
+        rationale = ""
+        parse_feedback = ""
+
+        for attempt in range(1, self.max_compile_attempts + 1):
+            if attempt == 1 or not source:
+                system = self._COMPOSE_SYSTEM.format(dsl_section=self._dsl_reference.strip())
+                user = self._COMPOSE_USER.format(
+                    flow_id=flow_id,
+                    current_version=context.get("baseline_version"),
+                    current_definition=context.get("current_definition"),
+                    baseline_report=json.dumps(context.get("baseline"), ensure_ascii=False, default=str),
+                    dataset=json.dumps(context.get("dataset"), ensure_ascii=False, default=str),
+                )
+                if parse_feedback:
+                    user += f"\n\n## 上一轮输出问题\n{parse_feedback}"
+                parse_feedback = ""
+            else:
+                system = self._REVIEW_SYSTEM.format(dsl_section=self._dsl_reference.strip())
+                user = self._REVIEW_USER.format(source=source, errors=errors_text)
+            content = self._invoke_model(system, user)
+            rationale = self._extract_rationale(content) or rationale
+            try:
+                source = extract_flow_source(content)
+            except ValueError as exc:
+                # 输出里没有 @flow 源码：烧一次 attempt，把可操作错误回喂下一轮。
+                self.last_error = f"attempt {attempt}: {exc}"
+                errors_text = str(exc)
+                parse_feedback = str(exc)
+                continue
+            compiled = compile_flow(source, flow_id=flow_id or None)
+            if compiled.ok and compiled.ir is not None:
+                self.last_source = source
+                self.last_error = None
+                return {
+                    "definition": json.dumps(compiled.ir, ensure_ascii=False, default=str),
+                    "rationale": rationale
+                    or f"compiled @flow source ({attempt} attempt(s), flow_id={flow_id})",
+                }
+            errors_text = format_compile_errors(compiled.errors)
+            self.last_error = f"attempt {attempt}: {errors_text}"
+
+        return None
 
 
 # -- the loop ------------------------------------------------------------------

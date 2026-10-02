@@ -18,6 +18,11 @@ from plaita import Flow, FlowExecution
 from plaita.event.core import EventBus
 from plaita.event.memory import InMemoryEventBus
 from plaita.logger import logger
+
+import pytest
+
+pytest.importorskip("redis")
+
 from plaita.server.services import ServiceManager, DelayService
 
 

@@ -56,34 +56,82 @@ def in_plaita_pool_thread() -> bool:
     """当前线程是否正在执行 ``ThreadParallelExecutor`` 提交的任务。"""
     return getattr(_pool_tls, "in_pool", False)
 
-# 后台分支是 fire-and-forget (submit 后不持 future 引用, 不取结果)。模块级单例池
-# 的 max_workers 取自环境变量, 默认 thread 8 / process = cpu 数。pytest / Jupyter /
+# 后台分支是 fire-and-forget (submit 后不持 future 引用, 不取结果)。池的
+# max_workers 取自环境变量, 默认 thread 8 / process = cpu 数。pytest / Jupyter /
 # Web 服务进程隐式持有这两个 pool, 解释器退出时若不显式 shutdown, 待办 future 可能
 # 丢——见下方 ``_shutdown_background_pools`` 的 atexit 钩子。
 _DEFAULT_BG_THREAD_WORKERS = int(os.environ.get("PLAITA_BG_THREAD_WORKERS", "8"))
 _DEFAULT_BG_PROCESS_WORKERS = int(os.environ.get("PLAITA_BG_PROCESS_WORKERS", str(os.cpu_count() or 4)))
 
-BackGroundThreadPool = ThreadPoolExecutor(
-    max_workers=_DEFAULT_BG_THREAD_WORKERS,
-    thread_name_prefix="plaita-bg-thread",
-)
-BackGroundProcessPool = ProcessPoolExecutor(
-    max_workers=_DEFAULT_BG_PROCESS_WORKERS,
-)
+# ---------------------------------------------------------------------------
+# 后台池按 PID 惰性单例（review-fix B5）
+# ---------------------------------------------------------------------------
+# 历史上两池是 import 期创建的模块级单例。``Parallel(mode=process)`` 在 Linux 上
+# fork 子进程执行分支——fork 不继承线程，gunicorn/FastAPI preload 这类「import 后
+# fork」部署里，子进程继承的 thread 池没有 worker（惰性建线程能否救取决于父进程
+# 退出时的 semaphore 状态），process 池的 executor-manager 线程更是必然缺失——
+# 子进程首个 Map/Parallel 提交永久挂起（与 runner._get_sync_node_pool 同根因，
+# cf0830f 已修 runner 侧并实测 CI Linux 30min hang）。这里把 runner 的 PID 检测
+# 模式抽成通用 getter：同 PID 内仍是单例，fork 后首次获取即重建。
+_BG_POOL_KINDS = ("thread", "process")
+_POOL_CACHE: dict = {}  # kind -> (pid, pool)
+_POOL_CACHE_LOCK = threading.Lock()
+
+
+def _create_background_pool(kind: str):
+    if kind == "thread":
+        return ThreadPoolExecutor(
+            max_workers=_DEFAULT_BG_THREAD_WORKERS,
+            thread_name_prefix="plaita-bg-thread",
+        )
+    if kind == "process":
+        return ProcessPoolExecutor(max_workers=_DEFAULT_BG_PROCESS_WORKERS)
+    raise ValueError(f"Unknown background pool kind: {kind!r} (expected 'thread' or 'process')")
+
+
+def get_background_pool(kind: str):
+    """按 PID 惰性获取后台池：同 PID 单例，fork 后自动重建。
+
+    供 ``ThreadParallelExecutor`` / ``ProcessParallelExecutor`` 及模块级
+    ``BackGroundThreadPool`` / ``BackGroundProcessPool`` 名字（模块 ``__getattr__``）
+    共用；检测模式与 ``runner._get_sync_node_pool`` 一致。
+    """
+    pid = os.getpid()
+    with _POOL_CACHE_LOCK:
+        entry = _POOL_CACHE.get(kind)
+        if entry is None or entry[0] != pid:
+            if entry is not None:
+                logger.debug(
+                    "background pool %r recreated after fork (cached pid %s, current %s)",
+                    kind, entry[0], pid,
+                )
+            _POOL_CACHE[kind] = (pid, _create_background_pool(kind))
+        return _POOL_CACHE[kind][1]
+
+
+def __getattr__(name):
+    # PEP 562: 保持 ``BackGroundThreadPool`` / ``BackGroundProcessPool`` 两个
+    # 历史名字可用（含 ``from ... import``），但解析为当前 PID 的池——fork 后
+    # 再访问即得重建后的池，而不是 import 期继承的空壳。
+    if name == "BackGroundThreadPool":
+        return get_background_pool("thread")
+    if name == "BackGroundProcessPool":
+        return get_background_pool("process")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _shutdown_background_pools() -> None:
-    """进程退出时显式 shutdown 后台池, 避免待办任务悬挂。"""
+    """进程退出时显式 shutdown 本进程创建过的后台池，避免待办任务悬挂。"""
     # cancel_futures=True: 解释器已经在退出, 没机会跑排队中的任务, 与其卡住等,
-    # 不如直接丢。已在跑的会被 wait。
-    for pool, name in (
-        (BackGroundThreadPool, "BackGroundThreadPool"),
-        (BackGroundProcessPool, "BackGroundProcessPool"),
-    ):
+    # 不如直接丢。已在跑的会被 wait。只清 _POOL_CACHE 里本进程创建的条目——
+    # fork 继承的父进程池不属于本进程，不碰。
+    for kind, (_pid, pool) in list(_POOL_CACHE.items()):
+        if _pid != os.getpid():
+            continue
         try:
             pool.shutdown(wait=False, cancel_futures=True)
         except Exception:  # pragma: no cover - 退出路径上的 best-effort
-            logger.debug("%s shutdown raised during atexit", name, exc_info=True)
+            logger.debug("background pool %r shutdown raised during atexit", kind, exc_info=True)
 
 
 atexit.register(_shutdown_background_pools)
@@ -198,7 +246,9 @@ class ThreadParallelExecutor(_BaseExecutor):
         max_workers: Optional[int] = None,
     ) -> None:
         super().__init__(max_workers=max_workers)
-        self._pool = pool or BackGroundThreadPool
+        # review-fix B5: 默认池经 get_background_pool 获取——fork 后自动重建，
+        # 同 PID 内仍是模块级单例。
+        self._pool = pool if pool is not None else get_background_pool("thread")
         self._lock = Lock()
 
     def _wrap(self, fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -237,7 +287,9 @@ class ProcessParallelExecutor(_BaseExecutor):
         max_workers: Optional[int] = None,
     ) -> None:
         super().__init__(max_workers=max_workers)
-        self._pool = pool or BackGroundProcessPool
+        # review-fix B5: 默认池经 get_background_pool 获取——fork 后自动重建，
+        # 同 PID 内仍是模块级单例。
+        self._pool = pool if pool is not None else get_background_pool("process")
         self._lock = ProcessLock()
 
     @property

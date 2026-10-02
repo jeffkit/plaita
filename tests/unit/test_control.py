@@ -5,6 +5,8 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
+pytest.importorskip("redis")
+
 from plaita.server.control import (
     ControlCommand,
     ControlListener,

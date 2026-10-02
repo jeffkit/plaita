@@ -75,7 +75,8 @@ def _system_of(model: _RecordingModel) -> str:
 
 
 def test_compose_prompt_contains_authoring_spec(monkeypatch, ping_node):
-    monkeypatch.setattr(planner_module, "_AUTHORING_REFERENCE", "AUTHORING-SPEC-MARKER 硬约束正文")
+    # W3 修复后参考改为每次调用现读：patch 加载函数而非（已删除的）模块级缓存
+    monkeypatch.setattr(planner_module, "_load_authoring_reference", lambda: "AUTHORING-SPEC-MARKER 硬约束正文")
     model = _RecordingModel()
     plan_flow_source(model, task="测试任务")
     system = _system_of(model)
@@ -87,7 +88,7 @@ def test_compose_prompt_contains_authoring_spec(monkeypatch, ping_node):
 
 
 def test_compose_prompt_falls_back_without_spec(monkeypatch, ping_node):
-    monkeypatch.setattr(planner_module, "_AUTHORING_REFERENCE", "")
+    monkeypatch.setattr(planner_module, "_load_authoring_reference", lambda: "")
     model = _RecordingModel()
     plan_flow_source(model, task="测试任务")
     system = _system_of(model)
@@ -100,7 +101,7 @@ def test_registered_nodes_exclude_builtin_and_tools(monkeypatch, ping_node):
         """回显文本。"""
         return text
 
-    monkeypatch.setattr(planner_module, "_AUTHORING_REFERENCE", "SPEC")
+    monkeypatch.setattr(planner_module, "_load_authoring_reference", lambda: "SPEC")
     model = _RecordingModel()
     plan_flow_source(model, task="t", tools=[echo])
     system = _system_of(model)
@@ -128,7 +129,7 @@ def test_registered_nodes_exclude_builtin_and_tools(monkeypatch, ping_node):
 
 
 def test_review_prompt_carries_sections(monkeypatch, ping_node):
-    monkeypatch.setattr(planner_module, "_AUTHORING_REFERENCE", "AUTHORING-SPEC-MARKER")
+    monkeypatch.setattr(planner_module, "_load_authoring_reference", lambda: "AUTHORING-SPEC-MARKER")
     model = _RecordingModel()
     errors = [planner_module.CompileError(line=1, message="boom")]
     review_flow_source(model, task="t", source="```python\n@flow(\"x\")\ndef x(INPUT):\n    return 1\n```",

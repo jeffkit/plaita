@@ -7,8 +7,18 @@ import { symmetricLayout } from './symmetricLayout'
 export interface FlowNodeData {
   type: string
   name: string
+  /** 人类可读描述（@flow 编译产物自带；形如 "if INPUT.score >= 90（第 4 行）"） */
+  desc?: string
+  /** @flow 编译期回标的源码行号（配合 flow 定义的 metadata.source 可跳转源码） */
+  sourceLine?: number
   fields: Record<string, unknown>
   status?: string
+  /** 容器展开态子节点显式标记（jsonToFlow 注入，2026-10 评审 MC1）：
+   *  子节点编辑经 ownerId 链写回各层 childFlow IR，取代 id 含 '::' 的
+   *  字符串启发式——顶层 id 恰好含 :: 不再误触发写回 */
+  isContainerChild?: boolean
+  /** isContainerChild 的宿主容器画布节点 id */
+  ownerId?: string
   [key: string]: unknown
 }
 
@@ -41,6 +51,7 @@ export function flowToJson(
   const outNodes: Record<string, unknown>[] = []
 
   for (const n of nodes) {
+    if (n.parentId) continue // 容器展开态的子节点：已双写回 owner 的 childFlow，不产顶层内容
     const d = n.data as FlowNodeData
     const nodeObj: Record<string, unknown> = { type: d.type, id: n.id }
     if (d.name) nodeObj.name = d.name
@@ -104,16 +115,27 @@ export function flowToJson(
  */
 export function jsonToFlow(
   flowJson: Record<string, unknown>,
-  layout: Record<string, { x: number; y: number }> = {}
+  layout: Record<string, { x: number; y: number }> = {},
+  _meta: FlowMeta = {},
+  opts: { parentId?: string } = {}
 ): { nodes: Node<FlowNodeData>[]; edges: Edge[] } {
   const rawNodes = (flowJson.nodes as Array<Record<string, unknown>>) || []
   const nodes: Node<FlowNodeData>[] = []
   const edges: Edge[] = []
+  const owner = opts.parentId
+  const ns = (x: string) => (owner ? `${owner}::${x}` : x)
 
   rawNodes.forEach((raw, i) => {
-    const id = (raw.id as string) || `node-${i}`
+    const id = ns((raw.id as string) || `node-${i}`)
     const type = (raw.type as string) || 'unknown'
+    // name 保持 IR 原语义（无 name 即 id），可读性兜底在渲染层做（避免保存时把
+    // 合成名污染回 IR）；desc/sourceLine 透传给节点卡片展示与源码跳转。
+    const sourceLine = raw.source_line as number | undefined
+    const desc = (raw.desc as string) || ''
     const name = (raw.name as string) || id
+    // 分支目标透传（画布 if 节点副标题显示去向；保存仍走边推导，不回写）
+    const nextId = (raw.next as string) || undefined
+    const elseNextId = (raw.else_next as string) || undefined
     // 分支结构保留进 fields（剥离 next：分支目标由画布边推导，保存时回填）。
     // 覆盖 switch/case 的分支条件与 parallel 的分支子图，避免 round-trip 丢失。
     const fieldsBranches = Array.isArray(raw.branches)
@@ -134,15 +156,21 @@ export function jsonToFlow(
       id,
       type: 'plaitaNode',
       position: layout[id] || { x: 0, y: 0 },
-      data: { type, name, fields },
+      ...(owner ? { parentId: owner, extent: 'parent' as const, connectable: false, deletable: false } : {}),
+      data: {
+        type, name, desc, sourceLine, next: nextId, elseNext: elseNextId, fields,
+        // 容器子节点显式打标（MC1）：写回路径据此沿 owner 链镜像进各层 IR，
+        // 不再依赖「id 含 ::」启发式；同时容器内禁止再展开（方案 Y）
+        ...(owner ? { isContainerChild: true, ownerId: owner } : {}),
+      },
     })
 
     // 线性 next（统一从 'true' handle 出发）
     if (typeof raw.next === 'string') {
       edges.push({
-        id: `e-${id}-${raw.next}`,
+        id: ns(`e-${id}-${raw.next}`),
         source: id,
-        target: raw.next,
+        target: ns(raw.next),
         sourceHandle: 'true',
         type: EDGE_TYPE,
       })
@@ -150,9 +178,9 @@ export function jsonToFlow(
     // if 假分支
     if (typeof raw.else_next === 'string') {
       edges.push({
-        id: `e-${id}-else-${raw.else_next}`,
+        id: ns(`e-${id}-else-${raw.else_next}`),
         source: id,
-        target: raw.else_next,
+        target: ns(raw.else_next),
         sourceHandle: 'false',
         type: EDGE_TYPE,
       })
@@ -165,9 +193,11 @@ export function jsonToFlow(
         const bname = b.name as string | undefined
         if (target && bname) {
           edges.push({
-            id: `e-${id}-${bname}-${target}`,
+            id: ns(`e-${id}-${bname}-${target}`),
             source: id,
-            target,
+            // 容器内分支目标同样要挂 owner 前缀（MC3-①）：否则边指向不存在的
+            // 顶层 id，画布悬空、保存时 flowToJson 按 sourceHandle 回填丢目标
+            target: ns(target),
             sourceHandle: bname,
             type: EDGE_TYPE,
           })
@@ -218,6 +248,7 @@ function assignPositions(
 export function extractLayout(nodes: Node[]): Record<string, { x: number; y: number }> {
   const layout: Record<string, { x: number; y: number }> = {}
   for (const n of nodes) {
+    if (n.parentId) continue // 子节点坐标相对容器，不进主图 layout
     layout[n.id] = { x: n.position.x, y: n.position.y }
   }
   return layout

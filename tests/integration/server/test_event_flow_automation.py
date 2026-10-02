@@ -16,6 +16,10 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+import pytest
+
+pytest.importorskip("redis")
+
 import redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 

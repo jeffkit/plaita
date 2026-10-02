@@ -435,39 +435,46 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         return results[-1] > 0
         
     async def mark_event_processed(self, subscription_id: str, event_id: str) -> bool:
-        """原子操作：标记事件为已处理状态"""
+        """原子操作：标记事件为已处理状态（跨进程去重）。
+
+        历史实现是 get 整份订阅 JSON → 内存标记 → set 回去：非原子——两个
+        进程并发 mark 同一 (subscription, event) 时各自基于旧快照覆盖写回，
+        双双返回 True，同一事件被重复 resume（评审 C3-3）。现改为 SET NX
+        去重键（参照 server/event_filter.py 去重的既有模式）：仅首次生效；
+        订阅 JSON 里的 processed_events 只在拿到 NX 时顺带同步（读侧
+        get_subscription 依赖），权威判重以 NX 键为准。订阅注销不去重键
+        ——subscription_id 全局唯一不复用，键随 TTL 自过期。
+        """
         await self.initialize()
-        
-        # 获取订阅
+
+        # 获取订阅（存在性检查）
         subscription = await self.get_subscription(subscription_id)
         if not subscription:
             return False
-            
-        # 标记事件为已处理
+
+        dedup_key = f"{self.key_prefix}processed:{subscription_id}:{event_id}"
+        is_new = await self.redis.set(dedup_key, "1", nx=True, ex=self.ttl)
+        if not is_new:
+            return False
+
+        # 同步订阅数据（best-effort 读侧视图；并发写仍可能互相覆盖，不影响判重）
         subscription.mark_event_processed(event_id)
-        
-        # 更新订阅数据
         subscription_key = f"{self.key_prefix}data:{subscription_id}"
         await self.redis.set(subscription_key, subscription.model_dump_json())
-        
+
         return True
     
     async def batch_mark_processed(self, subscription_id: str, event_ids: List[str]) -> bool:
-        """批量标记事件为已处理"""
+        """批量标记事件为已处理（与单发 mark 同一原子去重原语）"""
         await self.initialize()
         
-        # 获取订阅
+        # 获取订阅（存在性检查）
         subscription = await self.get_subscription(subscription_id)
         if not subscription:
             return False
             
-        # 标记所有事件为已处理
         for event_id in event_ids:
-            subscription.mark_event_processed(event_id)
-        
-        # 更新订阅数据
-        subscription_key = f"{self.key_prefix}data:{subscription_id}"
-        await self.redis.set(subscription_key, subscription.model_dump_json())
+            await self.mark_event_processed(subscription_id, event_id)
         
         return True
     
@@ -614,26 +621,14 @@ class RedisProcessingTracker(EventProcessingTracker):
                 last_updated = float(last_updated_str) if last_updated_str else None
                 
                 if last_updated and last_updated < oldest_time:
-                    # 获取处理器IDs
-                    handlers = {}
-                    cursor = 0
-                    
-                    # 使用hscan替代hgetall来分批处理
-                    while True:
-                        cursor, items = await self.redis.hscan(key, cursor)
-                        for hk, hv in items.items():
-                            hk_str = hk.decode('utf-8') if isinstance(hk, bytes) else hk
-                            if hk_str != "last_updated":
-                                handlers[hk_str] = hv
-                        
-                        if cursor == 0:
-                            break
-                    
-                    if handlers:
-                        # 删除每个处理器的历史记录
-                        for handler_id in handlers:
-                            history_key = f"{self.key_prefix}history:{handler_id}"
-                            await self.redis.delete(history_key)
+                    # 历史记录键与写入/读取对齐（评审 C3-1）：history 写在
+                    # ``history:{event_id}``（record_processing_attempt /
+                    # get_processing_history），清理必须按同一形状删——历史上
+                    # 按 ``history:{handler_id}`` 删，形状不符等于不清理，且
+                    # handler_id 与某个新鲜事件 event_id 同名时会误删它的历史。
+                    event_id = key_str.rsplit(":", 1)[-1]
+                    history_key = f"{self.key_prefix}history:{event_id}"
+                    await self.redis.delete(history_key)
                     
                     # 删除记录本身
                     await self.redis.delete(key)
@@ -911,19 +906,30 @@ class RedisEventBus(EventBus):
         
         # 创建一个监听器来接收事件
         async def listen_for_event():
+            # 每个等待者独立的 pubsub（2026-10 评审 C3）：历史上用的是
+            # self.pubsub——它恒为 None（initialize 只在非 None 时重绑），
+            # 首个等待者在 subscribe 处 AttributeError 且异常滞留在任务里
+            # （仅 "Task exception was never retrieved" 告警），future 永不
+            # resolve 挂到超时；即便初始化了，多个等待者共享一条 pubsub，
+            # 一个等待者 finally 的 unsubscribe 会拆掉别人的订阅。
+            # 做法 _listen_for_events 相同：局部 pubsub，finally 里 aclose。
+            pubsub = self.redis.pubsub()
             try:
-                # 订阅事件类型对应的频道
-                await self.pubsub.subscribe(f"plaita:events:{event_type}")
-                
+                await pubsub.subscribe(f"plaita:events:{event_type}")
+
                 while True:
-                    # 接收消息
-                    message = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    try:
+                        # 接收消息
+                        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    except (RedisTimeoutError, RedisConnectionError, OSError):
+                        # redis-py 5+ 空轮询超时抛异常而非返回 None，属正常节奏
+                        continue
                     if message and message['type'] == 'message':
                         try:
                             # 解析事件数据
                             event_data = message['data']
                             event = Event.model_validate_json(event_data)
-                            
+
                             # 检查条件
                             if not condition or condition(event):
                                 if not future.done():
@@ -931,13 +937,26 @@ class RedisEventBus(EventBus):
                                 break
                         except Exception as e:
                             logger.warning("解析事件数据失败: %s", e)
-                    
+
                     # 检查future是否已完成（可能来自其他来源）
                     if future.done():
                         break
+            except Exception as e:
+                # 监听协程的异常必须传播给等待者，否则只留一条
+                # "Task exception was never retrieved"，调用方拿到的是
+                # 掩盖真实原因的 EventTimeoutError
+                if not future.done():
+                    future.set_exception(e)
             finally:
-                # 取消订阅
-                await self.pubsub.unsubscribe(f"plaita:events:{event_type}")
+                # 取消订阅并关闭本次等待者自己的 pubsub
+                try:
+                    await pubsub.unsubscribe(f"plaita:events:{event_type}")
+                except Exception:
+                    logger.warning("wait_for_event 取消订阅失败", exc_info=True)
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    logger.warning("wait_for_event 关闭 pubsub 失败", exc_info=True)
         
         # 启动监听器
         listen_task = asyncio.create_task(listen_for_event())
@@ -949,13 +968,23 @@ class RedisEventBus(EventBus):
             else:
                 # 无限等待
                 event = await future
-                
+
             return event
         except asyncio.TimeoutError:
             # 超时时从等待列表中移除
             if event_type in self.waiting_futures:
                 self.waiting_futures[event_type].remove(future)
             raise EventTimeoutError(event_type, timeout)
+        except BaseException:
+            # 监听协程失败（连接错误等）：真实异常已 set 到 future，这里
+            # 清理等待列表后原样抛出（评审 C3：不再吞成 Task exception
+            # was never retrieved + 永久超时）
+            if event_type in self.waiting_futures:
+                try:
+                    self.waiting_futures[event_type].remove(future)
+                except ValueError:
+                    pass
+            raise
         finally:
             # 取消监听任务
             if not listen_task.done():

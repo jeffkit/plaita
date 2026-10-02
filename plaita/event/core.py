@@ -74,14 +74,22 @@ class EventSubscription(BaseModel):
         if self.node_id and node_id and self.node_id != node_id:
             return False
         
-        # copy一份context
-        context_copy = context.copy()
-        context_copy[f"{express_prefix}EVENT_DATA"] = event.data
-
-        # 检查过滤条件 - 暂时简化为基本字典匹配
+        # 检查过滤条件：顶层键做基本字典匹配；含 "." 的键按点路径遍历嵌套
+        # payload（与 EventNode.can_handle_event 的遍历语义一致——挂起侧把
+        # node.event_filter 原样存成 filter_condition，两处必须命中同一批事件，
+        # 否则事件驱动 resume 静默失效）。中间层非 dict 视为不匹配。
         if self.filter_condition:
             for key, expected_value in self.filter_condition.items():
-                if key in event.data:
+                if "." in key:
+                    current: Any = event.data
+                    for part in key.split("."):
+                        if isinstance(current, dict) and part in current:
+                            current = current[part]
+                        else:
+                            return False
+                    if current != expected_value:
+                        return False
+                elif key in event.data:
                     if event.data[key] != expected_value:
                         return False
                 elif hasattr(event, key):
@@ -90,7 +98,7 @@ class EventSubscription(BaseModel):
                 else:
                     # 如果事件中没有指定的字段，则不匹配
                     return False
-        
+
         return True
 
 

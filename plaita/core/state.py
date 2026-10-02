@@ -30,6 +30,8 @@ checkpoint model is therefore named ``CheckpointState`` to avoid the collision.
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
@@ -39,6 +41,93 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 # because a checkpoint value may legitimately be ``None`` (e.g. ``$INPUT: null``)
 # and we must not treat that as "missing".
 _UNSET = object()
+
+
+def _snapshot_value(value: Any) -> Any:
+    """递归物化 dict/list/tuple 容器为私有快照（C1-2，2026-10 评审修复包 C1）。
+
+    历史上 checkpoint/context 出口（``to_checkpoint_dict``、``$PARENT`` 快照）
+    是浅拷贝——``$NODE`` 等嵌套容器按引用共享，消费方（分布式宿主异步序列化、
+    子流程 ``$PARENT``）拿到的是 live 别名：写穿透回运行态、后续执行让已"落盘"
+    的数据漂移。快照只在容器边界重建；JSON 不可表达的非容器对象（与历史行为
+    一致）仍按引用共享——它们本就无法进入 checkpoint 序列化。
+    """
+    if isinstance(value, dict):
+        return {k: _snapshot_value(v) for k, v in value.items()}
+    if isinstance(value, _LazyRootSnapshot):
+        return value.materialize()
+    if isinstance(value, list):
+        return [_snapshot_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_snapshot_value(v) for v in value)
+    if isinstance(value, (set, frozenset)):
+        # 集合元素必可哈希（不可变），浅重建即快照
+        return value.copy()
+    return value
+
+
+class _LazyRootSnapshot(Mapping):
+    """按顶层根键**惰性物化**的快照视图（``$PARENT`` 专用，C1-2 折中设计）。
+
+    动机：``$PARENT`` 必须是真快照（C1-2：浅拷贝让子流程与父运行态双向写
+    穿），但子流程setup 发生在热路径上——while/for 每轮一次，全量深快照会
+    重新引入 loop.py ML1 修掉的「千次迭代 = 千次全量深拷贝」回归（实证：
+    300 轮 × ~1MB 上下文 7.7s > 5.0s 上限）。惰性方案：包装 live 源，顶层
+    键集在构造时固定，**每个根键在首次读取时**才做深快照并缓存；从未被读
+    的根键零成本。
+
+    冻结语义为何成立：子流程经 ``InlineFlow`` 同步执行，父执行在其存续期
+    内被引擎阻塞（非重入守卫），父状态不会变化——「首读时物化」与「setup
+    时全量快照」等价。跨进程边界（checkpoint 落盘/恢复）走
+    ``to_checkpoint_dict`` / ``from_checkpoint_dict``，经 ``_snapshot_value``
+    完全物化为 plain dict，惰性对象不出进程。
+
+    兼容面：表达式引擎 ``_get_attr`` 按「有 ``__getitem__`` + ``get``」识别
+    dict-like，``Mapping`` 天然满足；``__eq__``/``__repr__``/``__deepcopy__``
+    按物化视图实现，测试断言与 deepcopy 均按快照值工作。
+    """
+
+    __slots__ = ("_source", "_cache")
+
+    def __init__(self, source: Any) -> None:
+        self._source = source
+        self._cache: Dict[Any, Any] = {}
+
+    def __getitem__(self, key: Any) -> Any:
+        try:
+            return self._cache[key]
+        except KeyError:
+            pass
+        value = _snapshot_value(self._source[key])  # 源缺键 → KeyError 原样传播
+        self._cache[key] = value
+        return value
+
+    def __iter__(self):
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+    def materialize(self) -> Dict[Any, Any]:
+        """物化为 plain dict（每个已缓存根键直接复用，其余首次物化）。"""
+        return {k: self[k] for k in self}
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _LazyRootSnapshot):
+            other = other.materialize()
+        elif not isinstance(other, Mapping):
+            return NotImplemented
+        return len(self) == len(other) and all(
+            k in other and self[k] == other[k] for k in self
+        )
+
+    __hash__ = None  # 可变缓存，不可哈希
+
+    def __repr__(self) -> str:
+        return f"_LazyRootSnapshot({dict(self)!r})"
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> Dict[Any, Any]:
+        return {k: copy.deepcopy(self[k], memo) for k in self}
 
 
 class CheckpointSchema:
@@ -307,9 +396,9 @@ class CheckpointState(BaseModel):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, CheckpointState):
-            return self.to_checkpoint_dict() == other.to_checkpoint_dict()
+            return dict(self) == dict(other)
         if isinstance(other, dict):
-            return self.to_checkpoint_dict() == other
+            return dict(self) == other
         return NotImplemented
 
     __hash__ = None  # explicit: CheckpointState is mutable, not hashable.
@@ -323,8 +412,14 @@ class CheckpointState(BaseModel):
 
         Lossless inverse of ``from_checkpoint_dict``: only keys that have been
         set are emitted, preserving the exact key set of the source checkpoint.
+
+        C1-2（2026-10 评审修复包 C1）：值经 ``_snapshot_value`` 递归物化——
+        返回值与 live state 不再共享嵌套容器，消费方（checkpoint 落盘、
+        分布式每步 emit 的 context、子流程 ``$PARENT``）变异/继续执行都不会
+        写穿或漂移。此边界每次调用 O(状态总量)；分布式每步一次，与宿主侧
+        序列化同量级（见 tests/unit/test_clean_c1_state.py 的计时基线）。
         """
-        return {k: self[k] for k in self}
+        return {k: _snapshot_value(self[k]) for k in self}
 
     @classmethod
     def from_checkpoint_dict(
@@ -354,8 +449,11 @@ class CheckpointState(BaseModel):
             global_name=global_name,
             env_name=env_name,
         )
+        # C1-2：恢复侧同样走快照——浅恢复会让 live state 与调用方持有的
+        # checkpoint dict 共享嵌套容器，update_node_result 原地 mutate 直接
+        # 写穿调用方已拿到的"历史"checkpoint（分布式每步 emit→回传链路实证）。
         for key, value in (data or {}).items():
-            obj[key] = value
+            obj[key] = _snapshot_value(value)
         return obj
 
     # ------------------------------------------------------------------
@@ -401,9 +499,11 @@ class CheckpointState(BaseModel):
     ) -> None:
         """Populate the flow-level state keys (``$INPUT``/``$PARENT``/...).
 
-        ``parent_context`` is a plain-dict snapshot of the parent's context
+        ``parent_context`` is a deep-value snapshot of the parent's context
         (see ``ExecutionContext.setup_flow`` — a live ``CheckpointState`` would
-        break expression path walking via ``_get_attr``).
+        break expression path walking via ``_get_attr``, and a shallow dict
+        aliased ``$PARENT.NODE`` to the parent's live ``$NODE``; C1-2 fix,
+        2026-10 评审修复包 C1).
         """
         p = self.prefix
         self[f"{p}{self.input_name}"] = input_value

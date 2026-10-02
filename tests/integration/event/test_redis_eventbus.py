@@ -28,6 +28,11 @@ if current_dir in sys.path:
     sys.path.remove(current_dir)
 
 # 现在导入redis库
+import pytest
+
+pytest.importorskip("redis")
+pytest.importorskip("fakeredis")
+
 import redis.asyncio as aioredis
 import fakeredis.aioredis
 

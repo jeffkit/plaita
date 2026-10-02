@@ -29,7 +29,8 @@ router = APIRouter()
 class SupervisorIterateRequest(BaseModel):
     dataset: str = Field(..., description="数据集名（数据集根目录下的子目录或 .json 文件名）")
     max_iterations: int = Field(1, ge=1, le=5, description="本次跑几轮迭代")
-    proposer: str = Field("prompt", description="prompt（PLAITA_AI_PROPOSER_* env）| static")
+    #: flow = @flow 源码提案 + 编译门（编排单轨默认）；prompt = legacy JSON 提案
+    proposer: str = Field("flow", description="flow（默认，FlowSourceProposer）| prompt（legacy）| static")
 
 
 def _dataset_root() -> Path:
@@ -51,13 +52,19 @@ def _load_plaita_ai():
     try:
         from plaita_ai.console_client import ConsoleClientError  # noqa: F401
         from plaita_ai.evals import load_dataset
-        from plaita_ai.supervisor import PromptProposer, StaticProposer, Supervisor, SupervisorPolicy
+        from plaita_ai.supervisor import (
+            FlowSourceProposer,
+            PromptProposer,
+            StaticProposer,
+            Supervisor,
+            SupervisorPolicy,
+        )
     except ImportError as exc:
         raise HTTPException(
             status_code=503,
             detail=f"plaita-ai 未安装（{exc}）。在 backend 环境执行: pip install -e ./plaita-ai",
         ) from exc
-    return load_dataset, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy
+    return load_dataset, FlowSourceProposer, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy
 
 
 def _local_client(request: Request):
@@ -100,8 +107,17 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
     """对一条 flow 跑自迭代：基线评测 → 提案 → 候选评测 → 对比 → 闸门。
 
     只返回 promotion ticket；发布是人的动作（POST /flows/{id}/publish）。
+    proposer 默认 flow：提案为 @flow 源码、过 compile_flow 编译门后才存版本，
+    坏提案不再烧迭代与版本号（编排单轨 ADR-2026-08-27）；prompt 保留 legacy。
     """
-    load_dataset, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy = _load_plaita_ai()
+    if req.proposer not in ("flow", "prompt", "static"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知 proposer: {req.proposer!r}（可选 flow | prompt | static）",
+        )
+    load_dataset, FlowSourceProposer, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy = (
+        _load_plaita_ai()
+    )
     dataset_path = _resolve_dataset_path(req.dataset)
     try:
         dataset = load_dataset(str(dataset_path))
@@ -109,8 +125,13 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        proposer: Any = StaticProposer() if req.proposer == "static" else PromptProposer()
-    except Exception as exc:  # noqa: BLE001 —— proposer 未配置
+        if req.proposer == "static":
+            proposer: Any = StaticProposer()
+        elif req.proposer == "prompt":
+            proposer = PromptProposer()
+        else:
+            proposer = FlowSourceProposer()
+    except Exception as exc:  # noqa: BLE001 —— proposer 未配置（如缺 PLAITA_AI_PROPOSER_* env）
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     supervisor = Supervisor(

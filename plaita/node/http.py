@@ -138,6 +138,24 @@ class HttpResponse:
         return not self.empty() and self.raw_request is not None and self.raw_response is None
 
 
+class HttpRequestInfo:
+    """async 路径的请求快照（与 ``requests.PreparedRequest`` 的 method/url/
+    headers/body 字段名对齐的最小载体）。
+
+    C2-1：历史上 ``_send_async`` 的错误分支返回 ``HttpResponse()``——raw_request
+    为空，连接类错误被 ``handle_http_node_err`` 归为 1003（节点处理错误），
+    而同步同错误归 1002（发送请求错误）。补上请求快照让两条路径分类一致，
+    同时错误帧里能带出「请求是什么」（method/url/headers）。
+    """
+
+    def __init__(self, method: str, url: str, headers: Optional[Dict[str, str]] = None,
+                 body: Optional[bytes] = None):
+        self.method = method
+        self.url = url
+        self.headers = dict(headers) if headers else {}
+        self.body = body
+
+
 class HttpNodeErrorInfo:
     """HTTP节点错误信息"""
     def __init__(self, code: int, message: str, request=None, response=None):
@@ -316,6 +334,72 @@ def _host_allowed(
                 )
 
 
+# 凭据类请求头：跨源重定向时必须剥离（2026-10 评审 C1：restricted 逐跳手动
+# 跟随原先原样透传全部头，Authorization/Cookie 会泄漏给重定向目标）。
+# 语义对齐 RFC 7231 §9.4 与浏览器/requests 的 rebuild_auth——同源（host
+# 未变）重定向保留全部头。
+_SENSITIVE_REDIRECT_HEADERS = frozenset({
+    "authorization", "cookie", "cookie2",
+    "proxy-authorization", "proxy-authenticate", "www-authenticate",
+})
+
+
+def _strip_sensitive_headers(headers: Dict[str, str], from_url: str, to_url: str) -> Dict[str, str]:
+    """重定向跨源（host 变化）时剥离凭据类头；同源原样返回。"""
+    if urlparse(from_url).hostname == urlparse(to_url).hostname:
+        return headers
+    return {
+        k: v for k, v in headers.items()
+        if k.lower() not in _SENSITIVE_REDIRECT_HEADERS
+    }
+
+
+# ---------------------------------------------------------------------------
+# 错误帧摘要（C2-1）：HttpNodeErrorInfo 上的 status/headers/body 要进事件流，
+# body 按长度截断（思路同 obs._clip 的防大 payload，错误帧取更小量级）、
+# 凭据类头脱敏（复用重定向剥离集，响应侧补 set-cookie）。
+# ---------------------------------------------------------------------------
+_ERROR_FRAME_BODY_MAX_CHARS = 2048
+
+_SENSITIVE_ERROR_FRAME_HEADERS = _SENSITIVE_REDIRECT_HEADERS | frozenset({"set-cookie"})
+
+
+def _mask_error_frame_headers(headers: Any) -> Dict[str, Any]:
+    """凭据类响应头值替换为 '***'，其余原样保留。"""
+    if not isinstance(headers, dict):
+        return {}
+    return {
+        k: ("***" if str(k).lower() in _SENSITIVE_ERROR_FRAME_HEADERS else v)
+        for k, v in headers.items()
+    }
+
+
+def _summarize_error_frame_body(data: Any) -> Optional[str]:
+    """任意响应体 → 截断后的字符串摘要（JSON 安全，可直接进事件载荷）。"""
+    if data is None:
+        return None
+    if not isinstance(data, str):
+        try:
+            data = _json_dumps_bytes(data).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - 摘要失败不掩盖原始错误
+            data = str(data)
+    if len(data) > _ERROR_FRAME_BODY_MAX_CHARS:
+        return data[:_ERROR_FRAME_BODY_MAX_CHARS] + f"…[{len(data)} chars]"
+    return data
+
+
+def _summarize_error_frame_response(response: Optional["HttpNodeResponse"]) -> Optional[Dict[str, Any]]:
+    """HttpNodeResponse → 事件安全的 dict 摘要（status/statusText/headers/body）。"""
+    if response is None:
+        return None
+    return {
+        "status": response.status,
+        "statusText": response.status_text,
+        "headers": _mask_error_frame_headers(response.headers),
+        "body": _summarize_error_frame_body(response.data),
+    }
+
+
 class HttpExecutor:
     """HTTP执行器"""
     def __init__(self, url, method, query, body, headers, addressing, delegate,
@@ -396,9 +480,12 @@ class HttpExecutor:
                     method = self.method
                     if response.status_code in (301, 302, 303) and method.upper() != "HEAD":
                         method = "GET"
+                    # 跨源重定向剥离凭据类头（host/content-length 恒剥离）
+                    hop_headers = _strip_sensitive_headers(
+                        request.headers, response.url, next_url)
                     request = requests.Request(
                         method=method, url=next_url,
-                        headers={k: v for k, v in request.headers.items()
+                        headers={k: v for k, v in hop_headers.items()
                                  if k.lower() not in ("host", "content-length")},
                     ).prepare()
                     response = self.c.send(request, timeout=self.request_timeout, allow_redirects=False)
@@ -455,7 +542,14 @@ class HttpExecutor:
         return await self._send_async(session, url, headers, data)
 
     async def _send_async(self, session, url, headers, data):
-        """在给定 session 上执行请求（含 restricted 时的逐跳重定向校验）。"""
+        """在给定 session 上执行请求（含 restricted 时的逐跳重定向校验）。
+
+        错误分支一律携带 ``HttpRequestInfo`` 快照（C2-1）：与同步路径
+        ``handle_request`` 的 ``HttpResponse(raw_request=request)`` 对齐，让
+        ``send_request_fail()`` 在 async 路径同样成立 → 连接类错误归
+        1002(DO_REQUEST)，sync/async 同错误同码。
+        """
+        raw_request = HttpRequestInfo(method=self.method, url=url, headers=headers, body=data)
         try:
             if self._restrictions_active:
                 self._check_policy(url)
@@ -477,7 +571,15 @@ class HttpExecutor:
                         current_method = self.method
                         if response.status in (301, 302, 303) and current_method.upper() != "HEAD":
                             current_method = "GET"
+                        # 跨源重定向剥离凭据类头（后续跳沿用裁剪后的头）
+                        headers = _strip_sensitive_headers(
+                            headers, str(response.url), next_url)
                         current_url = next_url
+                        # 快照跟随实际尝试的下一跳（错误帧里带真实 url/headers）
+                        raw_request = HttpRequestInfo(
+                            method=current_method, url=current_url,
+                            headers=headers, body=None,
+                        )
                         continue
                     text = await response.text()
                     try:
@@ -490,12 +592,14 @@ class HttpExecutor:
                         headers=dict(response.headers),
                         body=res,
                     )
-                    return HttpResponse(raw_response=raw_resp, res=res), None
-            return HttpResponse(), Exception(f"Too many redirects (> {self.max_redirects})")
+                    return HttpResponse(raw_request=raw_request,
+                                        raw_response=raw_resp, res=res), None
+            return HttpResponse(raw_request=raw_request), Exception(
+                f"Too many redirects (> {self.max_redirects})")
         except URLPolicyError as e:
-            return HttpResponse(), e
+            return HttpResponse(raw_request=raw_request), e
         except Exception as e:
-            return HttpResponse(), e
+            return HttpResponse(raw_request=raw_request), e
 
     def new_request(self, ctx):
         """创建HTTP请求（同步路径用）"""
@@ -797,9 +901,19 @@ class HTTP(Node):
         return self.wrap_http_node_err(HTTP_NODE_EXEC_ERROR, str(err), http_rsp)
     
     def wrap_http_node_err(self, code, message, rsp):
-        """包装HTTP节点错误"""
+        """包装HTTP节点错误
+
+        C2-1：历史上这里构造的 ``HttpNodeErrorInfo``（含 request/response 明细）
+        被直接丢弃，``NodeException`` 只剩 code/message——errorHandler 与事件层
+        无法按 HTTP 状态分支。现在以最小侵入方式挂载（core 层 NodeException
+        契约不变，仅加实例属性）：
+
+        - ``exc.details``  — 完整 ``HttpNodeErrorInfo``（结构化 request/response）
+        - ``exc.response`` — 事件安全的 dict 摘要（status/statusText/headers/
+          body），headers 凭据类脱敏、body 截断（``_summarize_error_frame_response``）
+        """
         error_info = None
-        
+
         if rsp and not rsp.empty():
             response_info = None
             if rsp.raw_response:
@@ -809,15 +923,19 @@ class HTTP(Node):
                     headers=dict(rsp.raw_response.headers),
                     data=rsp.res
                 )
-            
+
             error_info = HttpNodeErrorInfo(
                 code=code,
                 message=message,
                 request=rsp.raw_request,
                 response=response_info
             )
-        
-        return NodeException(code, message)
+
+        exc = NodeException(code, message)
+        if error_info is not None:
+            exc.details = error_info
+            exc.response = _summarize_error_frame_response(error_info.response)
+        return exc
 
 
 # 注册HTTP节点类型

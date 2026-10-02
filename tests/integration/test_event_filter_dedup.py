@@ -6,6 +6,9 @@ import json
 import asyncio
 import pytest
 
+pytest.importorskip("fakeredis")
+pytest.importorskip("redis")
+
 import fakeredis
 
 from plaita.event.core import Event, EventSubscription

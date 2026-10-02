@@ -37,6 +37,7 @@ from plaita.core.callback import (
     LoggerCallback,
 )
 from plaita.core.context import ExecutionContext
+from plaita.core.executor_compat import CompatRunMixin
 
 logger = logging.getLogger(__name__)
 from plaita.core.runner import NodeRunner
@@ -80,7 +81,7 @@ def _reentry_error() -> FlowExecutionException:
     )
 
 
-class FlowExecution:
+class FlowExecution(CompatRunMixin):
     """Thin facade composing ExecutionContext, NodeRunner, and strategies.
 
     Nodes receive this instance as the ``execution`` parameter.  State and
@@ -157,6 +158,29 @@ class FlowExecution:
     @property
     def cancel_event(self):
         return self._ctx.cancel_event
+
+    @property
+    def cancel_requested(self):
+        """执行级取消意图（粘滞；与每节点 clear 的 ``cancel_event`` 职责拆分）。"""
+        return self._ctx.cancel_requested
+
+    def cancel(self) -> None:
+        """请求取消本执行（幂等，多次调用无害）。
+
+        同时置位两个 Event，各司其职：
+
+        - ``cancel_event``：节点级协作取消信号——code 沙箱等待循环
+          （``code._popen_wait_cancellable``）观察到置位当场 killpg 整个
+          进程树；历史 sync 超时置位/下节点入口 clear 语义不变。
+        - ``cancel_requested``：粘滞的执行级取消意图——引擎在节点边界
+          拒绝继续（抛 ``FlowCancelledException``），不被任何节点入口 clear。
+
+        子执行与父执行共享同一对 Event 实例（``ExecutionContext`` 父子共享
+        规则），对链上任一执行调用 ``cancel()`` 即传播到整条执行链。取消的
+        默认语义是步界取消（在途非沙箱节点跑完当前节点，§3.3）。
+        """
+        self._ctx.cancel_event.set()
+        self._ctx.cancel_requested.set()
 
     @property
     def express_prefix(self) -> str:
@@ -344,47 +368,6 @@ class FlowExecution:
             raise _reentry_error()
         self._running = True
 
-    def run_compatible(self, flow, lazy, *args, **kwargs):
-        """Sync execution. Returns the result, or a sync generator when lazy.
-
-        In lazy/generator mode ``on_flow_end`` is deferred until the returned
-        generator is actually consumed or closed — historically it fired
-        immediately with the unconsumed generator as ``result``, which meant
-        the lifecycle end callback ran before any node executed.
-        """
-        self._begin_run()
-        try:
-            return _drive_strategy(
-                self._prepare_strategy(flow, lazy, args, kwargs),
-                lazy=lazy, sync=True,
-                finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-                on_lazy_finally=lambda exc: (
-                    _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
-                ),
-            )
-        finally:
-            if not lazy:
-                self._running = False
-
-    async def arun_compatible(self, flow, lazy, *args, **kwargs):
-        """Async execution — canonical path."""
-        self._begin_run()
-        try:
-            driven = _drive_strategy(
-                self._prepare_strategy(flow, lazy, args, kwargs),
-                lazy=lazy, sync=False,
-                finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-                on_lazy_finally=lambda exc: (
-                    _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
-                ),
-            )
-            if lazy:
-                return driven
-            return await driven
-        finally:
-            if not lazy:
-                self._running = False
-
     def _ensure_flow_resolved(self, flow) -> None:
         """执行前兜底：若 ``flow.nodes`` 仍含 dict 形态节点 (绕过
         ``model_validate`` 直接 ``Flow(...)`` 构造的情况), 用本实例的
@@ -447,21 +430,30 @@ class FlowExecution:
 
         Prefer this over the ``FlowExecution.run`` classmethod when you need
         to advance a distributed flow node-by-node without losing callbacks.
+
+        「复用同一实例」指跨步骤**顺序**复用（每步调用返回后再调下一步）；
+        并发重叠调用同一实例仍然禁止——review-fix B4 起套用与
+        ``run_compatible`` 相同的 ``_begin_run`` 非重入守卫（每步调用期间
+        持有，返回即释放，顺序复用零额外成本）。
         """
-        self._ensure_flow_resolved(flow)
-        coro = self._strategies[ExecutionMode.DISTRIBUTED.value].execute(
-            flow, self._ctx, self._runner, self.callback_manager, params, timeout,
-            saved_context=saved_context, resume_type=resume_type, resume_data=resume_data,
-        )
-        # 分布式每步独立 loop：步内同包 flow-scoped HTTP session（复用窗口=本步）
-        coro = _flow_session_scoped(coro)
-        # 历史上 run_distributed 把任何异常（含具体的 FlowExecutionException 子类）
-        # 归一化为 FLOW_ERROR / -500 作为分布式对外契约；此处保留该契约，
-        # 具体子类仅用于内部抛点与 normal 模式（_finish_normal 让其透传）。
+        self._begin_run()
         try:
-            return _run_async_sync(coro)
-        except Exception as e:
-            _raise_distributed_error(e, flow, self.callback_manager)
+            self._ensure_flow_resolved(flow)
+            coro = self._strategies[ExecutionMode.DISTRIBUTED.value].execute(
+                flow, self._ctx, self._runner, self.callback_manager, params, timeout,
+                saved_context=saved_context, resume_type=resume_type, resume_data=resume_data,
+            )
+            # 分布式每步独立 loop：步内同包 flow-scoped HTTP session（复用窗口=本步）
+            coro = _flow_session_scoped(coro)
+            # 历史上 run_distributed 把任何异常（含具体的 FlowExecutionException 子类）
+            # 归一化为 FLOW_ERROR / -500 作为分布式对外契约；此处保留该契约，
+            # 具体子类仅用于内部抛点与 normal 模式（_finish_normal 让其透传）。
+            try:
+                return _run_async_sync(coro)
+            except Exception as e:
+                _raise_distributed_error(e, flow, self.callback_manager)
+        finally:
+            self._running = False
 
     def _run_distributed(self, flow, params=None, timeout=None, context=None,
                          resume_type="continue", resume_data=None, **options):

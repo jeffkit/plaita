@@ -171,6 +171,7 @@ nav:
   - 应用场景:
       - scenarios/index.md
       - Agent 编排: scenarios/agent-orchestration.md
+      - 沙箱化 Coding Agent: scenarios/sandbox-coding.md
       - 回声流程: scenarios/echo.md
       - HTTP 集成: scenarios/http-integration.md
       - 审批流: scenarios/approval-flow.md

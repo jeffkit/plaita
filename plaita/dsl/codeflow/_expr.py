@@ -19,6 +19,7 @@ from plaita.dsl.codeflow._common import (
     _node_call_kind,
     _raise_if_unregistered_custom,
 )
+from plaita.logger import logger
 
 def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
     if isinstance(node, ast.Constant):
@@ -202,9 +203,17 @@ def _compile_condition(node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
         return _negate_condition(_compile_condition(node.operand, ctx), node)
     if isinstance(node, ast.Compare):
         return _compile_compare(node, ctx)
-    # 裸表达式真值测试 -> (expr != False)
+    # 裸表达式真值测试 -> truthy 算子（Python bool(x) 语义）。历史实现降级为
+    # (expr != False)，空列表/空串/None 会误走真分支——`if items:` 语义错误
+    # （2026-10 评审修复包 A1）。过渡期打编译警告，引导作者写显式比较。
     expr = _compile_expr(node, ctx)
-    return {"field": expr, "operator": "ne", "value": False}
+    logger.warning(
+        "[codeflow] 第 %s 行: 裸真值条件 %r 按 Python 真值语义（truthy）编译；"
+        "建议改为显式比较（如 len(INPUT.items) > 0、INPUT.flag == true）以避免歧义",
+        getattr(node, "lineno", "?"),
+        ast.unparse(node) if hasattr(ast, "unparse") else expr,
+    )
+    return {"field": expr, "operator": "truthy", "value": True}
 
 
 def _compile_compare(node: ast.Compare, ctx: _CompileCtx) -> Dict[str, Any]:

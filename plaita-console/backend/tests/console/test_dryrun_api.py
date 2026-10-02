@@ -145,6 +145,30 @@ def test_dry_run_pinned_skips_real_execution(client: TestClient):
     assert body["result"] == {"status": 200, "data": {"hello": "pinned"}}
 
 
+def test_dry_run_pinned_end_node_keeps_result_shape(client: TestClient):
+    """pin 住 end 节点本身：合成 End 保持 {node_id: 固定值} 的 result 形状。
+
+    引擎对「非 End 节点缺 next」已改为响亮报错——mock 直接替换 end 会悬空。
+    回归：e2e dryrun「pinned：固定节点输出跳过真实执行」。
+    """
+    flow = {
+        "nodes": [
+            {"type": "start", "id": "start", "next": "end"},
+            {"type": "end", "id": "end", "output": "$INPUT.value",
+             "result_type": "success"},
+        ]
+    }
+    r = client.post(
+        "/api/flows/dry-run",
+        json={"flowJson": json.dumps(flow), "input": {"value": 21},
+              "pinned": {"end": 42}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["error"] is None
+    assert body["result"] == {"end": 42}
+
+
 def test_dry_run_only_node_executes_single_node(client: TestClient):
     """only_node：其余节点 mock 化，目标节点真实执行，下游无副作用。"""
     flow = {

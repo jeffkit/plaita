@@ -205,17 +205,39 @@ def apply_debug_transform(
     if not isinstance(nodes, list):
         return data
     out: List[Any] = []
+    synthetic_ends: List[Any] = []
     for node in nodes:
         if not isinstance(node, dict):
             out.append(node)
             continue
         nid = node.get("id")
+        mock_value = None
+        needs_mock = False
         if pinned and nid in pinned:
-            out.append({**node, "type": "mock", "value": pinned[nid]})
+            mock_value = pinned[nid]
+            needs_mock = True
         elif only_node and node.get("type") != "start" and nid != only_node:
-            out.append({**node, "type": "mock", "value": None})
+            mock_value = None
+            needs_mock = True
+        if needs_mock:
+            replacement = {**node, "type": "mock", "value": mock_value}
+            # 引擎对「非 End 节点缺 next」响亮报错（静默收尾已移除）。被替换的
+            # 节点若是 end / 无后继，mock 会悬空——接一个合成 End，输出保持
+            # ``{node_id: pinned 值}``（与历史静默收尾的 result 形状一致，见
+            # e2e dryrun pinned 用例）。
+            if not node.get("next") or node.get("type") == "end":
+                sid = f"{nid}__pinned_end"
+                replacement["next"] = sid
+                synthetic_ends.append({
+                    "id": sid, "type": "end",
+                    "output": {nid: "$NODE." + nid},
+                    "result_type": "success",
+                })
+            out.append(replacement)
         else:
             out.append(node)
+    if synthetic_ends:
+        out.extend(synthetic_ends)
     return {**data, "nodes": out}
 
 

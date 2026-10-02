@@ -246,7 +246,10 @@ class TestParallel(TestCase):
                     output=42,
                     next="assign3",
                 ),
-                Assignment(id="assign3", name="assign3", output_type=Property(data_type=types.STRING), output="$INPUT.value"),
+                Assignment(id="assign3", name="assign3", output_type=Property(data_type=types.STRING), output="$INPUT.value", next="end"),
+                # review-fix B1: 子流程必须显式 End 收尾（缺 next 的非 End 节点
+                # 不再把 $NODE 状态表当流程结果静默返回）
+                End(id="end", result_type="success", output="$NODE.assign3"),
             ],
         )
 
@@ -274,10 +277,11 @@ class TestParallel(TestCase):
         # 运行流程
         result = main_flow.run({"value": "Main flow input"})
 
-        # 检查结果（sub_flow 显式加了 Start 节点，故 $NODE 子流程结果含 'start': None）
+        # 检查结果：review-fix B1 后子流程显式 End 收尾，分支结果为 End 的
+        # output（$NODE.assign3），不再是子流程的 $NODE 状态表
         expected_result = {
-            "branch1": {"start": None, "assign1": "Value 1", "assign2": 42, "assign3": "Main flow input"},
-            "branch2": {"start": None, "assign1": "Value 1", "assign2": 42, "assign3": "Main flow input"},
+            "branch1": "Main flow input",
+            "branch2": "Main flow input",
         }
         self.assertEqual(result, expected_result)
 
@@ -352,7 +356,10 @@ class TestParallel(TestCase):
                         "self_node2": "$NODE.assign2",
                         "parent_global": "$GLOBAL.name",
                     },
+                    next="end",
                 ),
+                # review-fix B1: 子流程显式 End 收尾，分支结果 = $NODE.assign3
+                End(id="end", result_type="success", output="$NODE.assign3"),
             ],
         )
 
@@ -377,19 +384,16 @@ class TestParallel(TestCase):
             ],
         )
         result = main_flow.run({"value": "hello"})
+        # review-fix B1 后分支结果 = 子流程 End 节点的 output（$NODE.assign3），
+        # 不再是子流程的 $NODE 状态表
         self.assertEqual(
             result,
             {
                 "branch1": {
-                    "assign1": "hello",
-                    "assign2": "hello",
-                    "start": None,
-                    "assign3": {
-                        "parent_global": "kongjie",
-                        "parent_input": "hello",
-                        "self_node1": "hello",
-                        "self_node2": "hello",
-                    },
+                    "parent_input": "hello",
+                    "self_node1": "hello",
+                    "self_node2": "hello",
+                    "parent_global": "kongjie",
                 }
             },
         )

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Play, Pause, RefreshCw, Search, Radio, ScrollText, X, AlertTriangle } from 'lucide-react'
-import { api, API_BASE, LogEntry } from '../services/api'
+import { api, API_BASE, authHeaders, LogEntry } from '../services/api'
 import { PageHeader, Button, EmptyState } from '../components/ui'
 
 export default function Logs() {
@@ -32,23 +32,70 @@ export default function Logs() {
     const params = new URLSearchParams()
     if (levelFilter) params.set('level', levelFilter)
     if (instanceFilter) params.set('instance_id', instanceFilter)
-    const evtSource = new EventSource(`${API_BASE}/logs/stream?${params}`)
 
-    evtSource.addEventListener('log', (e) => {
+    // C4-4：EventSource 无法携带 Authorization/X-Admin-API-Key 头，鉴权部署
+    // 下 SSE 连接必然 401。/logs/stream 的后端归属另一批次（本批次不可改，
+    // 无法挂一次性票据端点），故这里用 fetch 流式读替代 EventSource：
+    // fetch 可带头，鉴权/免鉴权部署下都能建流；断流仍回落轮询。
+    const controller = new AbortController()
+    let cancelled = false
+
+    const handleLogEvent = (rawData: string) => {
       try {
-        const logData = JSON.parse(e.data) as LogEntry
+        const logData = JSON.parse(rawData) as LogEntry
         setSseLogs((prev) => [...prev.slice(-499), logData])
       } catch { /* ignore */ }
-    })
-
-    evtSource.onerror = () => {
-      // 断开回落轮询，不允许静默停更
-      evtSource.close()
-      setUseSSE(false)
-      setSseLost(true)
     }
 
-    return () => evtSource.close()
+    void (async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/logs/stream?${params}`, {
+          headers: authHeaders(),
+          signal: controller.signal,
+        })
+        if (!resp.ok || !resp.body) throw new Error(`logs/stream ${resp.status}`)
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ''
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          // 尾部悬空的 \r 可能与下一块的 \n 组成 \r\n，先扣下不归一化
+          let normalizedLen = buf.length
+          if (buf.endsWith('\r')) normalizedLen -= 1
+          buf = buf.slice(0, normalizedLen).replace(/\r\n?/g, '\n') + buf.slice(normalizedLen)
+          // SSE 事件以空行分隔
+          let sep: number
+          while ((sep = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, sep)
+            buf = buf.slice(sep + 2)
+            let eventName = 'message'
+            const dataLines: string[] = []
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event:')) eventName = line.slice(6).trim()
+              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+              // ": ping" 注释行与 retry: 行忽略
+            }
+            if (eventName === 'log' && dataLines.length > 0) {
+              handleLogEvent(dataLines.join('\n'))
+            }
+          }
+        }
+        // 服务端正常收尾也视为断流：回落轮询，不允许静默停更
+        throw new Error('logs/stream ended')
+      } catch {
+        if (!cancelled && !controller.signal.aborted) {
+          setUseSSE(false)
+          setSseLost(true)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
   }, [isStreaming, useSSE, levelFilter, instanceFilter])
 
   const { data, isLoading, refetch } = useQuery({

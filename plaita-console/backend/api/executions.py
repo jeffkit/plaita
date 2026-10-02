@@ -4,6 +4,8 @@
 """
 import asyncio
 import json
+import logging
+import secrets
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -11,11 +13,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
+from starlette.routing import Route
 
 try:
     from services import obs_link
 except ImportError:  # 平铺布局（cwd=backend）运行时
     import obs_link  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -71,6 +76,7 @@ TASK_QUEUE_NAME = "plaita:flow:queue"
 try:
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
+    from plaita.storage.redis import execution_state_ttl_seconds
 except ImportError:  # 平铺布局（cwd=backend）运行时
     import sys as _sys
     from pathlib import Path as _Path
@@ -79,13 +85,14 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         _sys.path.insert(0, _plaita_root)
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
+    from plaita.storage.redis import execution_state_ttl_seconds
 
 try:
     from ..services import flow_store
-    from ..auth import tenant_scope
+    from ..auth import require_auth, tenant_scope
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from services import flow_store  # type: ignore
-    from auth import tenant_scope  # type: ignore
+    from auth import require_auth, tenant_scope  # type: ignore
 
 
 def get_redis(request: Request) -> Redis:
@@ -146,10 +153,178 @@ def _exec_key(tenant: Optional[str], execution_id: str) -> str:
     return f"{tenant_namespace(tenant)}:execution:{execution_id}"
 
 
+# 取消标志键 TTL：7 天自清理（设计稿 §3.1，与 worker 侧 CANCEL_FLAG_TTL_SECONDS 同值）
+CANCEL_FLAG_TTL_SECONDS = 7 * 86400
+
+
+def _cancel_key(tenant: Optional[str], execution_id: str) -> str:
+    """取消意图标志键：``{ns}:execution:cancel:{id}``（租户路由复用 _exec_key 规则）。
+
+    意图与状态分离（设计稿 §3.1 选型 B）：控制面对运行中执行只写本键 +
+    投 cancel 消息，不再直写 status=cancelled——推进中的 worker 每步会把
+    内存 state 覆写回 running，直写等于覆写战争起点；worker 在步界消费
+    本键后终态化。带 TTL 自清理。
+    """
+    return f"{tenant_namespace(tenant)}:execution:cancel:{execution_id}"
+
+
+def _is_mechanism_key(key: str) -> bool:
+    """排除与执行状态同前缀的机制键（租约/取消标志/死信）。"""
+    return (
+        ":execution:lease:" in key
+        or ":execution:cancel:" in key
+        or key.endswith(":dlq")
+    )
+
+
 def _tenant_from_key(key: str) -> str:
     """从 ``plaita[:tenant]:execution:{id}`` 解析租户（default 键无租户段）。"""
     parts = key.split(":")
     return parts[1] if len(parts) > 3 else "default"
+
+
+def _execution_id_from_key(key: str) -> str:
+    """从 ``{ns}:execution:{id}`` 取 execution_id（ns 可含租户段）。"""
+    return key.split(":execution:", 1)[1]
+
+
+# ---- C4-3：列表路径服务端投影 ----
+# 历史：SCAN 出全部状态键后逐键 GET 完整 JSON（含全部 context）并 json.loads，
+# 内存排序分页——执行量大时网络/内存/延迟全线劣化。
+# 选型说明：未采用「save 时维护 ZSET/Hash 索引」，因为 FencedExecutionStorage
+# 持 fence 世代时以单段 Lua 直接 SET 状态键，不经过 RedisExecutionStorage
+# .save_execution_state（已核实，fenced.py:85-122）——worker resume 路径的
+# 所有进度/终态写都不触达 save 侧索引逻辑，索引必然滞后（列表会长期显示
+# 过期 status）。改为**读时投影**：SCAN 出键后按块 EVAL，Redis 服务端
+# cjson.decode 状态 JSON、只回传列表字段，完整 context 永不离开 Redis、
+# 永不进 console 内存；数据永远取自状态键本体，零滞后、零回填。
+# EVAL 不可用（受限代理/无 Lua）时逐键回退旧全量路径，行为不劣化。
+
+_EXECUTION_PROJECTION_LUA = """
+local out = {}
+local n = 0
+local function s(v)
+  if type(v) == 'string' then return v end
+  if type(v) == 'number' then return tostring(v) end
+  return ''
+end
+for i = 1, #KEYS do
+  local ok, data = pcall(redis.call, 'GET', KEYS[i])
+  if ok and data and type(data) == 'string' then
+    local okd, obj = pcall(cjson.decode, data)
+    if okd and type(obj) == 'table' then
+      n = n + 1
+      out[n] = {KEYS[i],
+        s(obj['status']),
+        s(obj['flow_id']),
+        s(obj['flow_name']),
+        s(obj['flow_version']),
+        s(obj['start_time']),
+        s(obj['last_update_time']),
+        s(obj['end_time']),
+        s(obj['invoker'])}
+    end
+  end
+end
+return out
+"""
+
+# 单次 EVAL 处理的键数：约束 Redis 单线程被脚本阻塞的时长上限。
+EXECUTION_PROJECTION_CHUNK = 50
+
+
+def _load_full_state(redis: Redis, key: str) -> Optional[Dict[str, Any]]:
+    """逐键全量读取（回退路径）；非字符串键/坏 JSON 返回 None。"""
+    try:
+        raw = redis.get(key)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _project_summaries(
+    redis: Redis, keys: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """对状态键做服务端投影，返回 {key: 列表字段摘要}。
+
+    cjson 解析失败的键（如机制键的字符串值）回退全量 GET 兜底。
+    """
+    summaries: Dict[str, Dict[str, Any]] = {}
+    for start in range(0, len(keys), EXECUTION_PROJECTION_CHUNK):
+        chunk = keys[start : start + EXECUTION_PROJECTION_CHUNK]
+        if not chunk:
+            continue
+        rows = None
+        try:
+            rows = redis.eval(_EXECUTION_PROJECTION_LUA, len(chunk), *chunk)
+        except Exception:
+            rows = None
+        if rows is None:
+            # EVAL 不可用 → 旧全量路径兜底（本块）
+            for key in chunk:
+                info = _load_full_state(redis, key)
+                if info is not None:
+                    summaries[key] = info
+            continue
+        projected = set()
+        for row in rows:
+            key = row[0]
+            projected.add(key)
+            summaries[key] = {
+                "status": row[1] or None,
+                "flow_id": row[2] or None,
+                "flow_name": row[3] or None,
+                "flow_version": row[4] or None,
+                "start_time": row[5] or None,
+                "last_update_time": row[6] or None,
+                "end_time": row[7] or None,
+                "invoker": row[8] or None,
+            }
+        # cjson 解析失败被跳过的键：全量兜底
+        for key in chunk:
+            if key not in projected:
+                info = _load_full_state(redis, key)
+                if info is not None:
+                    summaries[key] = info
+    return summaries
+
+
+def _execution_info_from_summary(
+    key_str: str, summary: Dict[str, Any]
+) -> ExecutionInfo:
+    """由投影摘要构建列表行（context/error 不进列表响应，详情页读全量）。"""
+    return ExecutionInfo(
+        execution_id=_execution_id_from_key(key_str),
+        flow_id=summary.get("flow_id") or "",
+        flow_name=summary.get("flow_name"),
+        flow_version=summary.get("flow_version"),
+        status=summary.get("status") or "unknown",
+        tenant_id=_tenant_from_key(key_str),
+        start_time=summary.get("start_time"),
+        end_time=summary.get("end_time"),
+        last_update_time=summary.get("last_update_time"),
+        invoker=summary.get("invoker"),
+        context=None,
+        error=None,
+    )
+
+
+def _heal_terminal_ttl(redis: Redis, key: str, info: Dict[str, Any]) -> None:
+    """C4-3 读时补偿：fenced 写路径落盘的终态键没有 TTL（其 CAS Lua 只 SET），
+    控制面首次读到时补 EXPIRE，使终态键最终自清理。失败不影响本次读取。"""
+    try:
+        if info.get("status") in ("completed", "error", "cancelled"):
+            if redis.ttl(key) == -1:
+                ttl_seconds = execution_state_ttl_seconds()
+                if ttl_seconds > 0:
+                    redis.expire(key, ttl_seconds)
+    except Exception:
+        pass
 
 
 def _find_execution(
@@ -162,21 +337,29 @@ def _find_execution(
     """
     tenant = tenant_scope(request)
     if tenant:
-        raw = redis.get(_exec_key(tenant, execution_id))
+        key = _exec_key(tenant, execution_id)
+        raw = redis.get(key)
         if not raw:
             return tenant, None
-        return tenant, json.loads(raw)
+        data = json.loads(raw)
+        _heal_terminal_ttl(redis, key, data)
+        return tenant, data
 
-    raw = redis.get(_exec_key(None, execution_id))
+    key = _exec_key(None, execution_id)
+    raw = redis.get(key)
     if raw:
-        return "default", json.loads(raw)
+        data = json.loads(raw)
+        _heal_terminal_ttl(redis, key, data)
+        return "default", data
     for key in redis.scan_iter(match=f"plaita:*:execution:{execution_id}"):
         key_str = key if isinstance(key, str) else key.decode()
-        if key_str.endswith(":dlq") or ":execution:lease:" in key_str:
+        if _is_mechanism_key(key_str):
             continue
         raw = redis.get(key_str)
         if raw:
-            return _tenant_from_key(key_str), json.loads(raw)
+            data = json.loads(raw)
+            _heal_terminal_ttl(redis, key_str, data)
+            return _tenant_from_key(key_str), data
     return None, None
 
 
@@ -214,32 +397,29 @@ async def list_executions(
         else:
             patterns = ["plaita:execution:*", "plaita:*:execution:*"]
 
-        executions = []
-        seen = set()
+        # C4-3：SCAN 出键后服务端投影（EVAL+cjson）取列表字段，
+        # 完整 context 不再逐键 GET/loads 进 console 内存。
+        summaries: Dict[str, Dict[str, Any]] = {}
+        seen: set = set()
         for pattern in patterns:
+            keys: List[str] = []
             for key in redis.scan_iter(match=pattern):
                 key_str = key if isinstance(key, str) else key.decode()
-                # 排除租约/队列等同前缀机制键
-                if ":execution:lease:" in key_str or key_str.endswith(":dlq"):
-                    continue
-                if key_str in seen:
+                # 排除租约/取消标志/队列等同前缀机制键
+                if _is_mechanism_key(key_str) or key_str in seen:
                     continue
                 seen.add(key_str)
-                data = redis.get(key_str)
-                if data:
-                    try:
-                        info = json.loads(data)
-                        info.setdefault("tenant_id", _tenant_from_key(key_str))
+                keys.append(key_str)
+            summaries.update(_project_summaries(redis, keys))
 
-                        # 筛选
-                        if status and info.get("status") != status:
-                            continue
-                        if flow_id and info.get("flow_id") != flow_id:
-                            continue
-
-                        executions.append(ExecutionInfo(**info))
-                    except Exception:
-                        continue
+        executions = []
+        for key_str, summary in summaries.items():
+            # 筛选
+            if status and (summary.get("status") or "") != status:
+                continue
+            if flow_id and (summary.get("flow_id") or "") != flow_id:
+                continue
+            executions.append(_execution_info_from_summary(key_str, summary))
     
     # 按开始时间排序（最新的在前）
     executions.sort(
@@ -391,7 +571,8 @@ async def cancel_execution(
             "message": f"执行已是终态（{status}），忽略取消",
         }
 
-    # 发送取消消息到队列（如果有 FlowWorker 在监听）
+    # 取消消息入队（保留）：worker 全灭后的死人开关——消息留在 pending，
+    # worker 恢复后经 XCLAIM 重投、resume 入口取消检查点终态化。
     message = {
         "type": "resume",
         "flow_id": flow_id,
@@ -401,20 +582,38 @@ async def cancel_execution(
         "data": None,
         "timestamp": datetime.now().isoformat()
     }
-
     _enqueue(message, redis)
 
-    # 同时直接更新状态（以防 FlowWorker 不在线）
-    info["status"] = "cancelled"
-    info["end_time"] = datetime.now().isoformat()
-    redis.set(_exec_key(tenant, execution_id), json.dumps(info))
-    
+    if status == "suspended":
+        # 挂起执行保持现状（已验证路径，设计稿 §3.5 兼容红线）：直接写
+        # cancelled + 入队 cancel 消息；worker resume_flow 终态短路原样
+        # 返回，EventNode 的 on_cancel 不会续跑到 end。终态键带 TTL
+        # （C4-3，与 storage 层 save 侧同规则）自清理。
+        info["status"] = "cancelled"
+        info["end_time"] = datetime.now().isoformat()
+        _exec_payload = json.dumps(info)
+        ttl_seconds = execution_state_ttl_seconds()
+        if ttl_seconds > 0:
+            redis.set(_exec_key(tenant, execution_id), _exec_payload, ex=ttl_seconds)
+        else:
+            redis.set(_exec_key(tenant, execution_id), _exec_payload)
+    else:
+        # 运行中执行（波次① §3.1）：只表达取消意图——写标志键（7 天 TTL
+        # 自清理），不再直接写 status=cancelled。推进中的 worker 每步会把
+        # 内存 state 覆写回 running，直写必被覆写；worker 在步界检查点
+        # 消费标志键后终态化（cancelled 的 context = 取消点前一步 checkpoint）。
+        redis.set(
+            _cancel_key(tenant, execution_id),
+            datetime.now().isoformat(),
+            ex=CANCEL_FLAG_TTL_SECONDS,
+        )
+
     _audit(request, "execution.cancel", execution_id)
     return {
         "success": True,
         "status": "cancelled",
         "execution_id": execution_id,
-        "message": "执行已取消"
+        "message": "执行已取消",
     }
 
 
@@ -445,8 +644,9 @@ async def delete_execution(
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
     key = _exec_key(_tenant, execution_id)
 
-    # 删除记录
+    # 删除记录（连同取消标志键，避免残留意图键指向已删除的执行）
     redis.delete(key)
+    redis.delete(_cancel_key(_tenant, execution_id))
 
     # 同时删除相关的事件通道（如果存在）
     event_key = f"plaita:execution:events:{execution_id}"
@@ -525,18 +725,198 @@ async def resume_execution(
     }
 
 
-@router.get("/executions/{execution_id}/stream")
-async def stream_execution(
+# ---- C4-4：SSE 实时推送（一次性票据 + redis.asyncio pubsub） ----
+#
+# 两个问题：
+# 1. EventSource 无法携带 Authorization/X-Admin-API-Key 头——鉴权部署下
+#    SSE 连接必然 401（require_auth 挂在 router 级，main.py `_mount_admin`）。
+# 2. 历史实现在 async gen 内调同步 pubsub.get_message(timeout=1.0)——每次
+#    等待都阻塞整个事件循环，两个并发 SSE 就能让其他 API 卡顿秒级。
+#
+# 票据方案：鉴权客户端先 POST /executions/{id}/stream/ticket 换取 60s 单次
+# 票据，EventSource 以 ?ticket= 直连——stream 端点**并行接受**票据与标准鉴权。
+#
+# 实现说明（关键约束）：main.py 以 include_router(dependencies=[require_auth])
+# 挂载本 router——FastAPI 只对 APIRoute 附加 include 级依赖，raw Starlette
+# Route 不附加（fastapi/routing.py include 路径对 routing.Route 原样重建）。
+# 因此 stream 路由用 raw Route 注册，鉴权在端点内自行裁决：有 ticket 参数则
+# 严格校验票据（无效即 401），否则回退 require_auth（带头请求照常工作）。
+# tests/console 的回归用与 main.py 相同的挂载方式验证票据直连可用——若未来
+# FastAPI 改变该语义（raw Route 也附加依赖），该测试会失败报警。
+SSE_TICKET_TTL_SECONDS = 60
+SSE_TICKET_KEY_PREFIX = "plaita:sse:ticket:"
+# Redis 抖动时 SSE 循环的重试间隔（异常不终结流）。
+SSE_REDIS_RETRY_SECONDS = 0.5
+
+
+def _sse_ticket_key(ticket: str) -> str:
+    return f"{SSE_TICKET_KEY_PREFIX}{ticket}"
+
+
+@router.post("/executions/{execution_id}/stream/ticket")
+async def create_stream_ticket(
     execution_id: str,
     request: Request,
-    redis: Optional[Redis] = Depends(get_redis_or_none)
+    redis: Redis = Depends(get_redis),
 ):
     """
-    SSE 端点：实时推送执行状态变化
-    
-    - 集群档：Redis pubsub 订阅
+    签发 SSE 一次性连接票据（60 秒、单次使用、绑定 execution 与租户上下文）。
+
+    EventSource 无法携带鉴权头，前端先经本端点（带头 fetch）换票据，
+    再以 ``?ticket=`` 建立 SSE 连接。
+    """
+    _tenant, data = _find_execution(request, redis, execution_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+
+    ticket = secrets.token_urlsafe(32)
+    payload = json.dumps(
+        {
+            "execution_id": execution_id,
+            "tenant_id": tenant_scope(request),
+            "issued_at": datetime.now().isoformat(),
+        }
+    )
+    redis.set(_sse_ticket_key(ticket), payload, ex=SSE_TICKET_TTL_SECONDS)
+    _audit(request, "execution.stream_ticket", execution_id)
+    return {"ticket": ticket, "expires_in": SSE_TICKET_TTL_SECONDS}
+
+
+def _consume_stream_ticket(
+    request: Request, redis: Redis, ticket: str, execution_id: str
+) -> None:
+    """校验并消费一次性 SSE 票据：无效/过期/已用/execution 不符 → 401。
+
+    GETDEL 原子取走（单次语义）；校验通过后把签发方的租户上下文写回
+    request.state——EventSource 请求本身不带任何头，后续 tenant_scope
+    据此与签发方视角对齐。
+    """
+    try:
+        raw = redis.getdel(_sse_ticket_key(ticket))
+    except Exception as exc:
+        logger.warning("SSE 票据校验失败（redis 异常）: %s", exc)
+        raise HTTPException(status_code=401, detail="SSE 票据校验失败")
+    if not raw:
+        raise HTTPException(status_code=401, detail="SSE 票据无效、已使用或已过期")
+    try:
+        grant = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=401, detail="SSE 票据数据损坏")
+    if not isinstance(grant, dict) or grant.get("execution_id") != execution_id:
+        raise HTTPException(status_code=401, detail="SSE 票据与目标执行不匹配")
+    request.state.actor = "sse-ticket"
+    request.state.role = "viewer"
+    request.state.auth_source = "sse-ticket"
+    request.state.platform_admin = False
+    request.state.tenant_id = grant.get("tenant_id")
+
+
+def _resolve_stream_auth(
+    request: Request, redis: Optional[Redis], execution_id: str
+) -> None:
+    """stream 路由的双轨鉴权：?ticket= 严格校验，否则标准 require_auth。"""
+    ticket = request.query_params.get("ticket")
+    if ticket:
+        if redis is None:
+            # 本地单机模式无从校验票据（票据端点在本地档也不可用）
+            raise HTTPException(status_code=401, detail="SSE 票据在本地单机模式不可用")
+        _consume_stream_ticket(request, redis, ticket, execution_id)
+        return
+    require_auth(request)
+
+
+def _execution_stream_async_redis(request: Request):
+    """惰性创建/复用 app 级 ``redis.asyncio`` 客户端（仅 SSE pubsub 使用）。
+
+    与 lifespan 的同步客户端并存：SSE 消费必须非阻塞，同步 pubsub 的
+    get_message(timeout=1.0) 会阻塞整个事件循环。测试可直接向
+    ``app.state.execution_sse_aioredis`` 注入 fake 客户端。
+    """
+    client = getattr(request.app.state, "execution_sse_aioredis", None)
+    if client is None:
+        try:
+            from ..config import get_settings
+        except ImportError:  # 平铺布局（cwd=backend）运行时
+            from config import get_settings  # type: ignore
+        import redis.asyncio as aioredis
+
+        client = aioredis.from_url(get_settings().redis_url, decode_responses=True)
+        request.app.state.execution_sse_aioredis = client
+    return client
+
+
+async def _execution_event_stream(request: Request, data: Dict[str, Any], channel: str):
+    """集群档 SSE 事件流（redis.asyncio pubsub，非阻塞消费）。
+
+    模块级工厂便于直接单测（starlette 1.7 TestClient 会等响应整体完成，
+    无法承载无限 SSE 流）；异常不终结流，finally 必关 pubsub。
+    """
+    pubsub = None
+    try:
+        try:
+            pubsub = _execution_stream_async_redis(request).pubsub()
+            await pubsub.subscribe(channel)
+        except Exception as exc:
+            logger.warning("SSE 订阅失败 %s: %s", channel, exc)
+            yield {
+                "event": "error",
+                "data": json.dumps({"detail": "事件订阅失败，请回落轮询"}),
+            }
+            return
+
+        # 发送初始状态
+        if data:
+            yield {
+                "event": "initial_state",
+                "data": json.dumps(data, ensure_ascii=False, default=str),
+            }
+
+        # 持续监听事件
+        while True:
+            try:
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Redis 抖动不终结 SSE：短暂退避后继续消费
+                logger.warning("SSE 消费异常（保持连接）%s: %s", channel, exc)
+                await asyncio.sleep(SSE_REDIS_RETRY_SECONDS)
+                continue
+            if message and message.get("type") == "message":
+                payload = message.get("data")
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8", "replace")
+                if payload is not None:
+                    yield {"event": "update", "data": payload}
+
+            # 检查客户端是否断开
+            if await request.is_disconnected():
+                break
+    finally:
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe(channel)
+            except Exception:
+                pass
+            try:
+                await pubsub.aclose()
+            except Exception:
+                pass
+
+
+async def stream_execution_endpoint(request: Request):
+    """
+    SSE 端点：实时推送执行状态变化（raw Route，见上方 C4-4 说明）
+
+    - 集群档：redis.asyncio pubsub 订阅（非阻塞）
     - 本地档：对 SQLite 执行记录做 1s 轮询，变化才推
     """
+    execution_id = request.path_params["execution_id"]
+    redis = request.app.state.redis
+    _resolve_stream_auth(request, redis, execution_id)
+
     if (local := get_local_executor(request)) is not None:
         info = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
         if info is None:
@@ -566,35 +946,17 @@ async def stream_execution(
     if not data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
 
-    async def event_generator():
-        """事件生成器"""
-        pubsub = redis.pubsub()
-        channel = f"plaita:execution:events:{execution_id}"
-        pubsub.subscribe(channel)
+    channel = f"plaita:execution:events:{execution_id}"
+    return EventSourceResponse(_execution_event_stream(request, data, channel))
 
-        try:
-            # 发送初始状态
-            if data:
-                yield {
-                    "event": "initial_state",
-                    "data": json.dumps(data, ensure_ascii=False, default=str)
-                }
-            
-            # 持续监听事件
-            while True:
-                message = pubsub.get_message(timeout=1.0)
-                if message and message["type"] == "message":
-                    yield {
-                        "event": "update",
-                        "data": message["data"]
-                    }
-                
-                # 检查客户端是否断开
-                if await request.is_disconnected():
-                    break
-        finally:
-            pubsub.unsubscribe(channel)
-            pubsub.close()
-    
-    return EventSourceResponse(event_generator())
+
+# raw Starlette Route：绕过 include 级 require_auth（仅此路由），鉴权在端点内
+# 双轨裁决（ticket / require_auth）。不进 OpenAPI schema（FastAPI 只文档化
+# APIRoute；SSE 端点本也无文档价值）。
+router.add_route(
+    "/executions/{execution_id}/stream",
+    stream_execution_endpoint,
+    methods=["GET"],
+    include_in_schema=False,
+)
 

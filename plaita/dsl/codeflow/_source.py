@@ -147,7 +147,13 @@ def flow(
 
     def decorator(func: Callable) -> Flow:
         data = _compile_func(func, flow_id, opts)
-        fl = Flow.model_validate(data)
+        # 与 flow_from_source / FlowBuilder.build / parse_sexpr 同一校验门：
+        # 历史上装饰器路径只走 Flow.model_validate（非致命 warning 版拓扑
+        # 检查），同一前端两条入口校验双标。现在统一走 build_flow 硬门禁
+        # （含 DEFAULT_RULES：缺 start / 不可达 / $NODE / $F 引用等）。
+        from plaita.dsl.ir_validate import build_flow
+
+        fl = build_flow(data)
         fl.__wrapped__ = func  # type: ignore[attr-defined]
         return fl
 
@@ -169,6 +175,13 @@ def childflow(
             {"desc": desc},
             module_globals=getattr(func, "__globals__", {}),
         )
+        # 历史上 @childflow 完全无校验。这里先做一次独立校验（硬编码拓扑 +
+        # DEFAULT_RULES），错误在装饰期即暴露；子 flow 的完整校验仍以父流程
+        # 编译时随父 IR 递归校验为准（嵌入后 childFlow 子图还会再过一遍，
+        # 两处规则集一致，不会出现"独立过、嵌入假错"的双标）。
+        from plaita.dsl.ir_validate import DEFAULT_RULES, validate_flow_ir
+
+        validate_flow_ir(data, rules=DEFAULT_RULES)
         return _ChildFlowMarker(data, func)
 
     return decorator

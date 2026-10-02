@@ -13,6 +13,10 @@ flowchart LR
 
     `@flow` + [`flow_from_source`](#flow_from_source) 最适合 LLM 运行期生成流程（编译期校验 + 无源文件依赖）。端到端场景见 [应用场景 - Agent 编排](../scenarios/agent-orchestration.md)。
 
+!!! tip "写业务 flow 前先读编写规范"
+
+    语法之外还有一组**编译期不拦**的作者约束（跨分支同名赋值禁止、集合子流程作用域边界、`params=` 运行语义）与业务集成知识（plaita-nodes 节点激活、业务 flow 项目结构、发布 console 的 worker 节点注入）。权威单源：`plaita-ai/plaita_ai/skills/flow-coder/references/authoring-spec.md`；skill 安装见 [AI 与 Skill](../ai/skills.md)。
+
 ---
 
 ## AST Python DSL（`@flow`）
@@ -148,6 +152,25 @@ def first_even(INPUT):
 first_even.run(nums=[1, 3, 4, 6])   # -> 4
 ```
 
+**作用域**：循环体是子流程——循环目标名（`x` / `acc, it`）映射子流程输入；
+外层已赋值变量自动映射为 `$PARENT.NODE.<名>` 快照引用（与 `while` 同一约定），
+体内可读集合节点执行前已确定的父侧变量，**写不回父 context**。聚合语义用
+`REDUCE`（累积值经 `return` 串联，结果经 `NODE.<id>` 引用）或对
+`NODE.<集合节点id>`（`MAP` 的输出即结果列表）的下游表达式表达——不要试图在
+集合子流程里引用集合节点自身的结果（父侧此刻尚未写回）。裸 `INPUT` 在体内指
+子流程输入；要读外层原始输入须显式写 `PARENT.INPUT.<名>`。
+
+```python
+@flow("scaled_sum")
+def scaled_sum(INPUT):
+    limit = F.mul(INPUT.base, 100)          # 外层赋值，体内可读
+    for acc, it in REDUCE(INPUT.items, initial=[], id="rd"):
+        return F.append(acc, F.mul(it, limit))
+    return NODE.rd
+
+scaled_sum.run(base=2, items=[1, 2, 3])     # -> [200, 400, 600]
+```
+
 ### 子流程 @childflow + CHILD
 
 `@childflow` 装饰一个子流程函数，父流程用 `CHILD(...)` 引用：
@@ -183,6 +206,10 @@ double_via_child.run(payload=21)   # -> 42
 | 非 `F.*` 的方法/函数调用 | `不支持的调用 Xxx.yyy(...)：…` |
 
 只编译不构建：`compile_func(fn, flow_id)` 返回 IR dict，便于审查 / 序列化 / 生成器回写。
+
+### 语义化节点 id 与 name/desc
+
+无赋值名的节点（`if`/`while`/`return`）不再产出 `_n1` 合成 id：编译器按条件语义自动命名（`INPUT.score >= 90` → id `score_ge_90`，同 slug 冲突加 `_2.._5` 后缀；纯中文等无 ASCII 语义时回退 `_n{n}`），并写入 `name`（短标签）与 `desc`（带源码行号），console 画布 / dry-run / 运行期报错据此可读。规则详见 flow-coder skill 的 `references/authoring-spec.md` §2.6。
 
 ```python
 from plaita.dsl.codeflow import compile_func

@@ -177,11 +177,17 @@ def _invert_cond(cond: Dict[str, Any], ns: List[Tuple[str, str]]) -> str:
     field = _invert_value(cond.get("field"), ns)
     op = cond.get("operator")
     value = cond.get("value")
-    if op == "ne" and value is False:
-        # 裸真值测试的规范形态（编译器对 `if x:` 的产物）——还原为裸写法
+    if op == "truthy":
+        # 裸真值测试的规范形态（编译器对 `if x:` 的产物，A1 修复后）——还原为裸写法
         return field
+    if op == "ne" and value is False:
+        # 遗留 IR 的裸真值形态（truthy 引入前的编译产物）——同样还原为裸写法
+        return field
+    if op == "falsy":
+        # `not x` 的规范形态（truthy 取反成 falsy）——还原为 not 写法，slug 才能对上
+        return f"not {field}"
     if op == "eq" and value is True:
-        # `not x` 的产物（ne 取反成 eq+True）——还原为 not 形态，slug 才能对上
+        # `not x` 的遗留形态（ne 取反成 eq+True）——还原为 not 形态，slug 才能对上
         return f"not {field}"
     py_op = _CMP_PY.get(op)
     if py_op is None:

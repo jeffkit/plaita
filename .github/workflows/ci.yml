@@ -24,7 +24,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-          pip install -e "plaita-ai[dev]"
+          # agent extra 提供 langchain：FoT/ReAct 测试对其 importorskip，
+          # 只装 [dev] 会 33 个测试静默 skip 且绿灯（2026-10 修复）
+          pip install -e "plaita-ai[dev,agent]"
           # 真实 mcp 导入冒烟：历史上被 sys.modules stub 掩盖（mcp 2.x 即坏）
           python -c "from mcp.server.fastmcp import FastMCP; print('FastMCP OK')"
       - name: pytest plaita-ai

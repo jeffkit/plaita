@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { cn } from '../../ui/cn'
 
 export interface VarItem {
@@ -14,6 +14,7 @@ export interface VarGroup {
  * 表达式输入框：文本输入 + 右侧「$」变量菜单。
  * 菜单变量由调用方构建（$INPUT 流程入参 / $NODE 上游结果 / $GLOBAL 全局上下文），
  * 点击插入到光标位置；引擎字符串字段均支持表达式与 {% expr %} 模板插值。
+ * 菜单带搜索过滤（2026-10 表单评审）：上游多时按表达式/描述关键字筛。
  */
 export default function ExpressionInput({
   value,
@@ -27,7 +28,24 @@ export default function ExpressionInput({
   placeholder?: string
 }) {
   const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const filteredGroups = useMemo<VarGroup[]>(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return groups
+    return groups
+      .map((g) => ({
+        ...g,
+        items: g.items.filter(
+          (it) =>
+            it.expr.toLowerCase().includes(q) ||
+            (it.desc ?? '').toLowerCase().includes(q) ||
+            g.label.toLowerCase().includes(q),
+        ),
+      }))
+      .filter((g) => g.items.length > 0)
+  }, [groups, query])
 
   const insert = (expr: string) => {
     const el = inputRef.current
@@ -73,12 +91,34 @@ export default function ExpressionInput({
       </button>
       {open && (
         <div className="absolute right-0 top-full mt-1 z-50 w-80 max-h-72 overflow-y-auto bg-elevated border border-line rounded-lg shadow-pop p-1">
+          {groups.length > 6 && (
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索变量…"
+              className="input w-full mb-1 py-1 text-[12px]"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setOpen(false)
+                // Enter 插入首个命中项
+                if (e.key === 'Enter') {
+                  const first = filteredGroups[0]?.items[0]
+                  if (first) insert(first.expr)
+                }
+              }}
+            />
+          )}
           {groups.length === 0 && (
             <p className="px-2 py-2 text-[11px] text-ink-faint">
               当前无可插入变量（需上游节点或流程入参声明）
             </p>
           )}
-          {groups.map((g) => (
+          {groups.length > 0 && filteredGroups.length === 0 && (
+            <p className="px-2 py-2 text-[11px] text-ink-faint">
+              没有匹配「{query}」的变量
+            </p>
+          )}
+          {filteredGroups.map((g) => (
             <div key={g.label} className="mb-1 last:mb-0">
               <p className="px-2 pt-1.5 pb-1 text-[10px] uppercase tracking-wide text-ink-faint">
                 {g.label}

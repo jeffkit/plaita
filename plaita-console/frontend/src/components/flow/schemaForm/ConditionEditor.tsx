@@ -174,12 +174,14 @@ function ConditionRowEditor({
           <option key={op} value={op}>{op}</option>
         ))}
       </select>
-      <div className="w-32 shrink-0">
-        <input
+      <div className="w-40 shrink-0">
+        {/* 值输入同样带 $ 变量菜单（2026-10 表单评审）；parseValueInput 把可
+            JSON 解析的输入转类型化值，$ 表达式等其余输入按字符串存储 */}
+        <ExpressionInput
           value={valueText}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="值（支持 $ 表达式）"
-          className="input w-full"
+          onChange={setValue}
+          groups={variableGroups ?? []}
+          placeholder="值"
         />
       </div>
     </div>

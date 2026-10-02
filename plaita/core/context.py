@@ -8,6 +8,7 @@ and expression evaluation delegation.
 
 from __future__ import annotations
 
+import copy
 import os
 import uuid
 import logging
@@ -16,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from plaita.core import types
 from plaita.core.expression import ExpressionEvaluator
-from plaita.core.state import CheckpointState
+from plaita.core.state import CheckpointState, _LazyRootSnapshot
 
 if TYPE_CHECKING:
     from plaita.node.basic import Node
@@ -202,6 +203,13 @@ class ExecutionContext(_SystemStateAccessors):
         self.expose_env = list(expose_env) if expose_env else []
         # 进程内共享 parent Event；跨进程由 __getstate__/__setstate__ 重建。
         self.cancel_event = parent.cancel_event if parent is not None else threading.Event()
+        # 执行级取消意图（2026-10 波次③）：与 cancel_event 职责拆分——
+        # cancel_event 是"当前节点"级信号（sync 超时置位、下节点入口 clear），
+        # cancel_requested 是粘滞的"整个执行"级取消意图（cancel() 置位、
+        # 节点入口只读不 clear）。父子共享规则与 cancel_event 同型。
+        self.cancel_requested = (
+            parent.cancel_requested if parent is not None else threading.Event()
+        )
         self.express_prefix = express_prefix
         self.express_input_name = express_input_name
         self.express_parent_name = express_parent_name
@@ -242,7 +250,7 @@ class ExecutionContext(_SystemStateAccessors):
         return self._state.get(key, default)
 
     def clean(self) -> None:
-        """Reset state for a fresh run and re-sync cancel_event.
+        """Reset state for a fresh run and re-sync cancel_event/cancel_requested.
 
         ``expose_env`` is not cleared here — ``setup_flow`` overwrites it from
         ``flow.expose_env``. Root gets a new Event; child re-syncs to parent.
@@ -256,32 +264,56 @@ class ExecutionContext(_SystemStateAccessors):
             self.parent.cancel_event if self.parent is not None
             else threading.Event()
         )
+        self.cancel_requested = (
+            self.parent.cancel_requested if self.parent is not None
+            else threading.Event()
+        )
 
     def __getstate__(self):
         # Event isn't picklable; child process gets a fresh unset Event.
         state = self.__dict__.copy()
         state.pop("cancel_event", None)
+        state.pop("cancel_requested", None)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         if not getattr(self, "cancel_event", None):
             self.cancel_event = threading.Event()
+        if not getattr(self, "cancel_requested", None):
+            self.cancel_requested = threading.Event()
 
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         """Populate $INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV and sync expose_env."""
         flow_allowlist = list(getattr(flow, "expose_env", None) or [])
-        if flow_allowlist != self.expose_env:
-            self.expose_env = flow_allowlist
-        global_context = (flow.global_context.copy() if flow.global_context else {})
+        # review-fix B3（伴生）: 先验证新 allowlist 再提交——否则非法 allowlist
+        # （如 ["*"]）在此处抛错时 expose_env 已被污染，同一实例下次 run 的
+        # clean() 立刻用脏值再次爆炸，把「prepare 抛错」放大成「实例报废」。
+        env = _safe_environment(flow_allowlist)
+        self.expose_env = flow_allowlist
+        # review-fix B2: 必须 deepcopy——浅 copy 的话 run 内节点写 $GLOBAL 嵌套
+        # 值（如 $GLOBAL.cfg.timeout = 30）会穿透进 Flow 定义本体，同一 Flow
+        # 实例的下一次 run 继承脏值（跨 run 状态泄漏）。每次 run 仅此一次
+        # deepcopy，非热路径。
+        global_context = (copy.deepcopy(flow.global_context) if flow.global_context else {})
         global_context.update({"flow_id": flow.flow_id})
-        # $PARENT is a plain-dict snapshot (checkpoint-safe; not a live state).
+        # $PARENT is a snapshot (checkpoint-safe; not a live state)。
+        # C1-2（2026-10 评审修复包 C1）：历史上 ``dict(parent.context)`` 是浅
+        # 拷贝——``$PARENT.NODE`` 与父 live ``$NODE`` 是同一对象，双向写穿
+        # （子流程写 $PARENT 污染父运行态；父继续 update_node_result 让子侧
+        # "冻结"快照漂移）。
+        # 惰性按根键快照（_LazyRootSnapshot）：子流程 setup 在热路径上
+        # （while/for 每轮一次），全量深快照会重演 loop.py ML1 修掉的
+        # 「每轮全量 deepcopy」回归；父执行在 InlineFlow 子流程存续期被
+        # 引擎阻塞，按根键首读物化与 setup 时全量快照语义等价，从未读取的
+        # 根键零成本。落盘/恢复经 to_checkpoint_dict / from_checkpoint_dict
+        # 完全物化，惰性对象不出进程。
         self._state.setup_flow(
             input_value=_coerce_input_value(args, kwargs),
-            parent_context=dict(self.parent.context) if self.parent else {},
+            parent_context=_LazyRootSnapshot(self.parent.context) if self.parent else {},
             global_context=global_context,
             flow_id=flow.flow_id,
-            env=_safe_environment(self.expose_env),
+            env=env,
         )
 
     def evaluate(self, value: Any) -> Any:

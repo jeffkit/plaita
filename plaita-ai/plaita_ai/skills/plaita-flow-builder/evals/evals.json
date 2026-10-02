@@ -35,7 +35,7 @@
       "id": 3,
       "name": "http-with-error-handling",
       "prompt": "编排一个流程：调用 HTTP 接口 POST https://api.example.com/users 创建用户，请求体 {\"name\": 输入的 name}。如果接口失败就用默认值 {\"data\": null} 继续并返回。需要提醒我装什么依赖。",
-      "expected_output": "JSON flow 含 http 节点（POST, url, body=$INPUT.name, errorHandler=continue_with, defaultValue={data:null}），end 引用 $NODE.http_id.data。提醒装 logic-plaita[http]。",
+      "expected_output": "JSON flow 含 http 节点（POST, url, body=$INPUT.name, errorHandler=continue_with, defaultValue={data:null}），end 引用 $NODE.http_id.data。提醒安装 http extra（editable：pip install -e ../plaita[http]）。",
       "files": [],
       "assertions": [
         "生成的 flow.json 是合法 JSON",
@@ -43,7 +43,7 @@
         "http 节点的 body 引用了 $INPUT.name",
         "errorHandler.strategy 为 continue_with，且 defaultValue 为 {\"data\": null}",
         "end 节点的 output 引用了 http 节点的输出（如 $NODE.<http_id>.data）",
-        "response 中明确提醒安装 logic-plaita[http] extra"
+        "response 中明确提醒安装 http extra（plaita 未发 PyPI，用 editable 安装）"
       ]
     }
   ]

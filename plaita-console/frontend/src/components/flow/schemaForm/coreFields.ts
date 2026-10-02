@@ -31,6 +31,24 @@ export const CORE_FIELDS: Record<string, string[]> = {
   http_callback: ['callback_path', 'callback_method', 'callback_timeout_minutes'],
   kafka_queue: ['bootstrap_servers', 'topic', 'group_id', 'security_protocol'],
   redis_queue: ['redis_host', 'redis_port', 'queue_name', 'queue_type'],
+  // ── plaita-nodes 业务族（2026-10 表单评审）────────────────────────────
+  // 历史空缺导致这些类型首屏为空：schema required 只有 id（被画布连线接管），
+  // prompt/message/path 等真正的核心参数全落「高级字段」折叠区。按实际 schema
+  // 键名（snake_case）白名单化，改这里即调整各类型首屏。
+  llm: ['prompt', 'system', 'model', 'provider'],
+  agentrun: ['agent', 'prompt', 'repo'],
+  notify: ['message', 'channel', 'credential'],
+  writefile: ['path', 'content'],
+  report: ['action', 'entry', 'repo'],
+  decision: ['question', 'choices', 'model'],
+  capture: ['command'],
+  gate: ['gate_name', 'command'],
+  mock: ['value'],
+  parse_json: ['text'],
+  api_request: ['path', 'method', 'credential'],
+  email_send: ['to', 'subject', 'body', 'credential'],
+  hitl: ['message', 'wait_reply'],
+  hitl_await: ['message', 'event_type'],
 }
 
 export function coreFieldsOf(nodeType: string): Set<string> {

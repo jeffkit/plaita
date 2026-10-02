@@ -7,6 +7,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-react'
 import { api } from '../../services/api'
+import { useFlowEditor } from '../../stores/flowEditor'
 import { resolveNodeTypeConfig } from './nodeTypes'
 
 // 分类展示顺序（对齐后端 _CATEGORY_MAP 的分类命名）：常用类别置顶，
@@ -108,6 +109,12 @@ export default function NodePalette() {
     e.dataTransfer.effectAllowed = 'move'
   }
 
+  // 点击即添加（2026-10 表单评审：此前点击无任何反馈，只有拖拽可用）。
+  // 实际落点由 FlowCanvas 注册的 addNodeFromPalette 换算（视口中心 + 级联偏移）
+  const onAddClick = (nodeType: string, name: string) => {
+    useFlowEditor.getState().addNodeFromPalette?.(nodeType, name)
+  }
+
   if (collapsed) {
     return (
       <div className="w-9 shrink-0 bg-surface border-r border-line flex flex-col items-center py-2">
@@ -156,8 +163,9 @@ export default function NodePalette() {
                       key={n.node_type}
                       draggable
                       onDragStart={(e) => onDragStart(e, n.node_type, n.node_name || n.node_type)}
+                      onClick={() => onAddClick(n.node_type, n.node_name || n.node_type)}
                       className="group relative flex items-center gap-2 px-2 py-1.5 rounded-md bg-surface hover:bg-elevated cursor-grab border border-line overflow-hidden transition-colors duration-150 active:cursor-grabbing"
-                      title={n.node_type}
+                      title={`${n.node_type}（拖拽到画布，或点击添加到视口中心）`}
                     >
                       {/* 族别左色条（与画布节点同款配色） */}
                       <FamilyBar color={cfg.color} />
@@ -165,11 +173,12 @@ export default function NodePalette() {
                       <span className="truncate text-caption text-ink-secondary">
                         {n.node_name || n.node_type}
                       </span>
-                      {/* hover 说明触发区 */}
+                      {/* hover 说明触发区（阻断冒泡，? 不触发点击添加） */}
                       <span
                         className="ml-auto shrink-0 w-4 h-4 flex items-center justify-center rounded-full border border-line text-[9px] text-ink-faint opacity-0 group-hover:opacity-100 hover:text-ink-primary hover:border-ink-muted cursor-help transition-opacity"
                         onMouseEnter={(e) => openInfo(n, e.currentTarget)}
                         onMouseLeave={closeInfo}
+                        onClick={(e) => e.stopPropagation()}
                       >
                         ?
                       </span>

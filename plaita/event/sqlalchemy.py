@@ -723,11 +723,18 @@ class SqlalchemyEventBus(EventBus):
     
     async def _execute_with_retry(self, handler: EventHandler, event: Event, 
                                 handler_id: str, retry_policy: RetryPolicy):
-        """使用重试策略执行处理器"""
+        """使用重试策略执行处理器。
+
+        重试语义与 memory/redis 后端对齐（评审 C3-2）：总投递次数 =
+        max_retries（首次 + 重试 max_retries-1 次；max_retries=0 也保底
+        投递 1 次）——先投递、失败后判重试预算。历史上是
+        ``while retries <= max_retries`` 前置判断，总次数 = max_retries+1，
+        与另外两个后端不一致。
+        """
         retries = 0
         last_error = None
         
-        while retries <= retry_policy.max_retries:
+        while True:
             try:
                 await handler(event)
                 # 成功处理：先 mark 去重，再记历史
@@ -747,13 +754,16 @@ class SqlalchemyEventBus(EventBus):
                     event.event_id, handler_id, "retry", str(e)
                 )
                 
+                # 检查是否达到最大重试次数（与 memory/redis 同款后判式）
+                if retries >= retry_policy.max_retries:
+                    break
+                
                 # 计算下一次重试的延迟
-                if retries <= retry_policy.max_retries:
-                    delay = min(
-                        retry_policy.initial_delay * (retry_policy.backoff_factor ** (retries - 1)),
-                        retry_policy.max_delay
-                    )
-                    await asyncio.sleep(delay)
+                delay = min(
+                    retry_policy.initial_delay * (retry_policy.backoff_factor ** (retries - 1)),
+                    retry_policy.max_delay
+                )
+                await asyncio.sleep(delay)
         
         # 所有重试都失败了
         await self.processing_tracker.record_processing_attempt(

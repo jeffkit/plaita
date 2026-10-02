@@ -118,10 +118,16 @@ class TestBuildExecutorCancel(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_returns_executor_when_cancel_event_not_set(self):
-        """Normal PROCESS mode when cancel_event not set → returns executor."""
+        """Normal PROCESS mode when no cancel signal set → returns executor.
+
+        波次③（双 Event 拆分）后入口同时查 ``cancel_requested``；MagicMock
+        会为未 stub 的属性自动生成 truthy Mock，必须显式给真实未置位 Event
+        （否则"两个信号都没置 → 返回 executor"的原契约被 Mock 自动属性破坏）。
+        """
         p = _make_parallel(mode=PROCESS)
         execution = MagicMock()
         execution.cancel_event = threading.Event()
+        execution.cancel_requested = threading.Event()
         # NOT set
         result = p._build_executor(PROCESS, execution)
         self.assertIsNotNone(result)

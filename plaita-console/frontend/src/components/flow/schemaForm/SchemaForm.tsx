@@ -132,17 +132,24 @@ function FieldControl({
   siblingFields?: Record<string, unknown>
   variableGroups?: VarGroup[]
 }) {
+  // raw key 仅在 label 推不出来时展示（2026-10 表单评审）："Agent agent" 这类
+  // 纯大小写/空格派生是噪音；"Property item_type" 这类 label 语义泛化才需要
+  const keyDerivable = spec.key === spec.label.trim().toLowerCase().replace(/\s+/g, '_')
   const label = (
     <label className={cn('block text-caption text-ink-muted mb-1', nested && 'text-[11px]')}>
       {spec.label}
       {spec.required && <span className="text-status-error ml-0.5">*</span>}
-      {spec.key !== spec.label && !nested && (
+      {!keyDerivable && spec.key !== spec.label && !nested && (
         <span className="ml-1.5 font-mono text-[10px] text-ink-faint">{spec.key}</span>
       )}
     </label>
   )
-  const hint = spec.desc ? (
-    <p className="mt-1 text-[11px] leading-4 text-ink-faint line-clamp-2">{spec.desc}</p>
+  const hint = (spec.desc ||
+    // Property 数据槽的引擎 description 已收敛为空（历史 changelog 文案移除），
+    // 控件层给一句稳定的用途说明
+    (spec.kind === 'property' ? '元素/输出的类型槽，可嵌套 children / item_type' : undefined)
+  ) ? (
+    <p className="mt-1 text-[11px] leading-4 text-ink-faint line-clamp-2">{spec.desc || '元素/输出的类型槽，可嵌套 children / item_type'}</p>
   ) : null
 
   let control: React.ReactNode = null
@@ -411,11 +418,20 @@ export function JsonField({
   onChange: (v: unknown) => void
   compact?: boolean
 }) {
+  // CodeMirror(json) + 合法即写回（2026-10 表单评审）：打字中间态（半个对象、
+  // "1."）不落库，一合法立即生效——与表达式字段逐键写回的语义一致；
+  // 非法输入即时红字提示，不用等失焦或点按钮
   const [text, setText] = useState(() => JSON.stringify(value ?? null, null, 2))
   const [error, setError] = useState<string | null>(null)
-  const commit = () => {
+  const update = (next: string) => {
+    setText(next)
+    if (next.trim() === '') {
+      setError(null)
+      onChange(undefined)
+      return
+    }
     try {
-      const parsed = text.trim() === '' ? undefined : JSON.parse(text)
+      const parsed = JSON.parse(next)
       setError(null)
       onChange(parsed)
     } catch (e) {
@@ -424,16 +440,11 @@ export function JsonField({
   }
   return (
     <div>
-      <textarea
+      <CodeEditor
         value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-        rows={compact ? 4 : 6}
-        spellCheck={false}
-        className={cn(
-          'input w-full font-mono text-[11px] leading-4 resize-y',
-          error && 'border-status-error/60'
-        )}
+        language="json"
+        height={compact ? '110px' : '170px'}
+        onChange={update}
       />
       {error && <p className="mt-1 text-[11px] text-status-error">{error}</p>}
     </div>

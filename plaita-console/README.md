@@ -232,6 +232,21 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 
 参见 [AI_DEVELOPMENT_GUIDE.md](../requirements/AI_DEVELOPMENT_GUIDE.md)
 
+### UI 旅程 e2e（语义化节点 id 可读性）
+
+两个层次，覆盖同一旅程（画布语义名/desc、抽屉源码跳转、拖拽 + 保存 round-trip）：
+
+1. **argusai browser suite**（CI 主路径，随 `scripts/e2e-run.sh` 全量跑）：
+   `tests/e2e/ui-semantic-ids.yaml`——声明式 browser 步骤，单跑：
+   `scripts/e2e-run.sh ui-semantic-ids`。数据播种经浏览器 evaluate + fetch
+   （Bearer 取自 localStorage；ui-backend 容器不设 ALLOW_INSECURE_ADMIN）。
+2. **本地等价执行器**（无需 Docker/mcp2cli/argusai-mcp）：
+   `BASE_URL=... ADMIN_PASSWORD=... python scripts/e2e-ui-semantic-ids-local.py`
+   ——按同一份 YAML 逐 case 执行与断言，用于本机快速回归。
+
+注意：console 前端 vite `base: './'`（dsht 子路径部署取舍），**双层深链**直刷会
+白屏（如 `/flows/<id>/edit`）——两个 e2e 全程走客户端路由导航，不使用深链接刷新。
+
 ## 许可证
 
 MIT

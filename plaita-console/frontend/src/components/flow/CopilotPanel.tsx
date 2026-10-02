@@ -51,6 +51,19 @@ export function extractFlowIR(text: string | undefined | null): Record<string, u
   }
 }
 
+/** remove_node 工具的回复文案：按 store.removeNode 的真实结果回复——
+ *  容器子节点受守卫保护未删时如实说「未删除」并给出原因与替代操作，
+ *  不再虚报「已删除」（实际未删、收拢后还会复活）。 */
+export function removeNodeReply(nodeId: string, removed: boolean): string {
+  if (!removed) {
+    return (
+      `未删除 ${nodeId}：它是容器（子流程）内部的子节点，画布层删除无法写回容器的子流程 IR，` +
+      `收拢/保存后会「复活」。请改为进入其容器的子图编辑中删除，或收拢容器后在对应层级操作`
+    )
+  }
+  return `已删除 ${nodeId}`
+}
+
 /** 监听聊天消息流中的 plaita-flow 代码块，自动应用（内容不变不重复触发） */
 function useAutoApplyFlow(onApplyFlow: (ir: Record<string, unknown>) => void) {
   const chat = useCopilotChat() as unknown as { messages?: Array<Record<string, unknown>> }
@@ -248,15 +261,15 @@ function CopilotInner({
 
   useCopilotAction({
     name: 'remove_node',
-    description: '删除节点（级联删除其连线）',
+    description:
+      '删除节点（级联删除其连线）。容器（子流程）内部的子节点不可在此删除，会返回未删除及原因',
     parameters: [
       { name: 'nodeId', type: 'string', description: '节点 id', required: true },
     ],
     handler: async ({ nodeId }) => {
-      const exists = useFlowEditor.getState().nodes.some((n) => n.id === nodeId)
-      if (!exists) return `节点 ${nodeId} 不存在`
-      useFlowEditor.getState().removeNode(nodeId)
-      return `已删除 ${nodeId}`
+      const st = useFlowEditor.getState()
+      if (!st.nodes.some((n) => n.id === nodeId)) return `节点 ${nodeId} 不存在`
+      return removeNodeReply(nodeId, st.removeNode(nodeId))
     },
   })
 
@@ -323,7 +336,8 @@ function CopilotInner({
     handler: async () => {
       const st = useFlowEditor.getState()
       const layouted = symmetricLayout(st.nodes, st.edges, 'TB')
-      st.setGraph(layouted, st.edges)
+      // C5-4：replaceGraph 保留撤销历史（可撤销排版），不再 setGraph 清栈
+      st.replaceGraph(layouted, st.edges)
       st.markDirty()
       return '已重新排版'
     },

@@ -51,6 +51,8 @@ export const COMMON_KEYS = new Set(['output', 'timeout', 'desc', 'timeout_handle
 export const CONNECT_KEYS = new Set(['type', 'id', 'name', 'desc', 'next', 'else_next'])
 /** 纯内部字段：引擎簿记用，不展示 */
 const INTERNAL_KEYS = new Set(['source_line'])
+/** 供调用方（抽屉的 JSON 兜底区）同步隐藏内部字段，应用编辑时原值保留 */
+export const INTERNAL_FIELD_KEYS = INTERNAL_KEYS
 
 /** 已知输入别名 → schema 权威键（引擎 validator 兼容的历史写法） */
 const LEGACY_ALIASES: Record<string, string> = {
@@ -150,6 +152,21 @@ export function fieldKind(s: JsonSchema): FieldKind {
   // Property 数据槽结构（data_type + children/item_type）走专用编辑
   if (s.properties && 'data_type' in s.properties) return 'property'
   const t = Array.isArray(s.type) ? s.type.find((x) => x !== 'null') : s.type
+  // Any 字段表达式优先（2026-10 表单评审 P0）：pydantic 对无标注字段生成
+  // anyOf:[{}, null] / 空 schema，历史上全部落「高级字段」JSON 兜底——LLM 的
+  // prompt、通知的 message 因此藏进折叠区。改按表达式字符串渲染（$INPUT/$NODE
+  // 取值是引擎万能入口）；存量结构化值仍由 string 分支退化为 JSON 编辑，不锁死。
+  const hasTypeHint = Boolean(
+    t || s.properties || s.items || s.allOf?.length ||
+      s.anyOf?.some((p) => {
+        if (!p || typeof p !== 'object') return false
+        const pt = Array.isArray(p.type) ? p.type.find((x) => x !== 'null') : p.type
+        // 裸 type:'null' 分支不算类型提示（pydantic Optional[Any] 的形态）
+        if (pt && pt !== 'null') return true
+        return Boolean(p.$ref ?? p.properties ?? p.enum)
+      }),
+  )
+  if (!hasTypeHint) return 'string'
   if (t === 'boolean') return 'boolean'
   if (t === 'integer' || t === 'number') return 'number'
   if (t === 'string') return 'string'
@@ -197,8 +214,18 @@ export function buildFormPlan(
   more: FieldSpec[]
   advanced: Array<{ key: string; title?: string; desc?: string }>
 } {
-  if (!schema?.properties)
-    return { core: [], more: [], advanced: Object.keys(fields).map((k) => ({ key: k })) }
+  if (!schema?.properties) {
+    // 无 schema 兜底：隐藏引擎簿记键（source_line）与基类通用键（desc/output/
+    // timeout_* 由抽屉固定表单接管），避免内部实现泄漏进可编辑 JSON
+    const hidden = new Set([...INTERNAL_KEYS, ...COMMON_KEYS, ...CONNECT_KEYS])
+    return {
+      core: [],
+      more: [],
+      advanced: Object.keys(fields)
+        .filter((k) => !hidden.has(k))
+        .map((k) => ({ key: k })),
+    }
+  }
   const specs: FieldSpec[] = []
   const consumed = new Set<string>([
     // COMMON/CONNECT/INTERNAL 是「节点编辑」语境的排除（Node 基类字段由抽屉
@@ -248,21 +275,27 @@ export function buildFormPlan(
     })
   }
   const covered = new Set(specs.map((f) => f.key))
-  const advanced: Array<{ key: string; title?: string; desc?: string }> = Object.keys(
-    fields
-  )
-    .filter((k) => !consumed.has(k) && !covered.has(k))
-    .map((k) => ({ key: k }))
+  // 先收集 schema 判 json 兜底的键（带 title/desc 元数据），实例同名键并入其中
+  // 只渲染一份（2026-10 表单评审：此前 branches 一类「实例有值 + schema 兜底」
+  // 同键双份渲染，用户不知道改哪份生效）
+  const jsonKeys: Array<{ key: string; title?: string; desc?: string }> = []
   for (const [k, raw] of Object.entries(schema.properties)) {
     if (consumed.has(k) || covered.has(k)) continue
     const prop = derefSchema(schema, raw)
     if (fieldKind(prop) !== 'json') continue
-    advanced.push({
+    jsonKeys.push({
       key: k,
       title: prop.title as string | undefined,
       desc: prop.description,
     })
   }
+  const jsonKeySet = new Set(jsonKeys.map((j) => j.key))
+  const advanced: Array<{ key: string; title?: string; desc?: string }> = Object.keys(
+    fields
+  )
+    .filter((k) => !consumed.has(k) && !covered.has(k) && !jsonKeySet.has(k))
+    .map((k) => ({ key: k }))
+  advanced.push(...jsonKeys)
   return {
     core: specs.filter((f) => f.core),
     more: specs.filter((f) => !f.core),

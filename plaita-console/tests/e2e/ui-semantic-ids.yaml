@@ -1,0 +1,207 @@
+name: 控制台 UI 语义化节点 id
+sequential: true
+
+# @flow 语义化节点 id 可读性旅程（argusai browser 步骤，headless chromium）：
+# 画布节点显示语义 id 的 name/desc（如 INPUT.score >= 90? + 第 5 行），无裸 _n*；
+# 节点抽屉「查看权威源码」→ @flow 源码面板；拖拽新节点 + 保存草稿 round-trip
+# （原节点 name 保留、metadata.source 不丢、新节点入库）。
+#
+# 数据准备走 evaluate + fetch（Bearer 取自 localStorage）而非 request 步骤：
+# ui-backend 容器不设 ALLOW_INSECURE_ADMIN（真实会话鉴权），request 无法携带
+# 浏览器会话 token；evaluate 同源 fetch 可带。
+#
+# 只播种 draft 1.1.0（无 published 版本）：① FlowEditor 无 versionParam 时自动
+# 选最后版本打开，draft 可直接「保存草稿」（published 409 不可覆盖）；② 前端
+# vite base './' 为 dsht 子路径部署取舍，双层深链（/flows/<id>/edit）直刷会
+# 白屏——本 suite 全程列表页点击进入 + 等待式断言（house style，见 ui.yaml 注释）。
+#
+# FlowViewer（执行详情）路径由 scripts/e2e-ui-journey.py 覆盖（需 mock 执行
+# 记录，argusai 环境不便注入）。
+
+cases:
+  - name: "登录（bootstrap admin）"
+    browser:
+      action: goto
+      url: http://localhost:18081/
+  - name: "等待登录表单"
+    browser:
+      action: waitForSelector
+      selector: input[placeholder="用户名"]
+      timeout: 15s
+  - name: "填入用户名"
+    browser:
+      action: fill
+      selector: input[placeholder="用户名"]
+      value: admin
+  - name: "填入密码"
+    browser:
+      action: fill
+      selector: input[placeholder="密码"]
+      value: e2e-admin-pass
+  - name: "提交登录"
+    browser:
+      action: click
+      selector: text=登录
+  - name: "登录成功进入仪表盘"
+    browser:
+      action: waitForSelector
+      selector: text=仪表盘
+      timeout: 15s
+
+  - name: "播种 demo flow（draft 1.1.0）"
+    browser:
+      action: evaluate
+      script: |
+        (async () => {
+          const token = localStorage.getItem('plaita_token');
+          const H = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
+          // 幂等：先删旧 flow（不存在时 404 也无妨）
+          await fetch('/api/flows/e2e-semantic-ids', { method: 'DELETE', headers: H });
+          const def = JSON.stringify({"runtime": "python", "flow_id": "e2e-semantic-ids", "inputType": {"dataType": "object"}, "desc": "语义化节点 id 演示", "nodes": [{"type": "start", "id": "start", "next": "total"}, {"type": "assignment", "id": "total", "output": "$F.len($INPUT.items)", "next": "score_ge_90", "source_line": 4}, {"type": "if", "id": "score_ge_90", "condition": {"field": "$INPUT.score", "operator": "gte", "value": 90}, "name": "INPUT.score >= 90?", "desc": "if INPUT.score >= 90（第 5 行）", "source_line": 5, "next": "ret_excellent", "else_next": "score_ge_60"}, {"type": "end", "id": "ret_fail", "output": "fail", "resultType": "success", "name": "return 'fail'", "desc": "return 'fail'（第 9 行）", "source_line": 9}, {"type": "end", "id": "ret_excellent", "output": "excellent", "resultType": "success", "name": "return 'excellent'", "desc": "return 'excellent'（第 6 行）", "source_line": 6}, {"type": "if", "id": "score_ge_60", "condition": {"field": "$INPUT.score", "operator": "gte", "value": 60}, "name": "INPUT.score >= 60?", "desc": "if INPUT.score >= 60（第 7 行）", "source_line": 7, "next": "ret_pass", "else_next": "ret_fail"}, {"type": "end", "id": "ret_pass", "output": "pass", "resultType": "success", "name": "return 'pass'", "desc": "return 'pass'（第 8 行）", "source_line": 8}], "metadata": {"source": "\n@flow(\"e2e-semantic-ids\", desc=\"语义化节点 id 演示\")\ndef e2e_semantic_ids(INPUT):\n    total = F.len(INPUT.items)\n    if INPUT.score >= 90:\n        return \"excellent\"\n    elif INPUT.score >= 60:\n        return \"pass\"\n    return \"fail\"\n", "source_format": "plaita@flow"}});
+          const r1 = await fetch('/api/flows', { method: 'POST', headers: H,
+            body: JSON.stringify({ flow_id: 'e2e-semantic-ids', author: 'e2e', desc: '语义化节点 id 演示' }) });
+          // 只播种 draft 1.1.0（无 published）：编辑器自动选最后版本打开，保存草稿无 409
+          const r2 = await fetch('/api/flows/e2e-semantic-ids/versions/1.1.0', { method: 'PUT', headers: H,
+            body: JSON.stringify({ definition: def, layout: '{}', created_by: 'e2e' }) });
+          return [r1.status, r2.status].join(',');
+        })()
+    expect:
+      page:
+        result: "200,200"
+
+  - name: "打开流程列表"
+    browser:
+      action: goto
+      url: http://localhost:18081/flows
+  - name: "列表就绪"
+    browser:
+      action: waitForSelector
+      selector: text=e2e-semantic-ids
+      timeout: 15s
+  - name: "点击流程行"
+    browser:
+      action: click
+      selector: text=e2e-semantic-ids
+  - name: "点编辑进入画布"
+    browser:
+      action: click
+      selector: text=编辑
+  - name: "画布就绪"
+    browser:
+      action: waitForSelector
+      selector: .react-flow
+      timeout: 15s
+  - name: "画布渲染语义节点名（等待式）"
+    browser:
+      action: waitForSelector
+      selector: text=score >= 90?
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          # 主名 = 语义条件全文（截断阈值 24 字符，18 字符名完整可见）
+          - text=INPUT.score >= 90?
+          # 副标题 = 分支去向摘要（✓ 真分支 / ✗ 假分支）
+          - text=✓ ret_excellent
+          - text=✗ score_ge_60
+        hidden:
+          # 合成 id 不再出现；desc/行号不上画布（悬停 tooltip 与抽屉里才有）
+          - text=_n1
+          - text=_IF1
+          - text=第 5 行
+
+  - name: "点击 if 节点打开抽屉"
+    browser:
+      action: click
+      selector: text=score >= 90
+  - name: "抽屉显示 desc 与源码跳转按钮（等待式）"
+    browser:
+      action: waitForSelector
+      selector: text=查看权威源码
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          - text=if INPUT.score >= 90（第 5 行）
+          - text=查看权威源码 · 第 5 行
+
+  - name: "打开权威源码面板"
+    browser:
+      action: click
+      selector: text=查看权威源码
+  - name: "面板展示 @flow 源码原文（等待式）"
+    browser:
+      action: waitForSelector
+      selector: "text=if INPUT.score >= 90:"
+      timeout: 15s
+    expect:
+      page:
+        visible:
+          - text=@flow
+          - 'text=return "excellent"'
+
+  - name: "关闭源码面板回画布"
+    browser:
+      action: click
+      selector: button:has-text("✕")
+
+  - name: "拖拽新节点（合成 DnD，DSL 无原生拖拽动作）"
+    browser:
+      action: evaluate
+      script: |
+        (async () => {
+          const before = document.querySelectorAll('.react-flow__node').length;
+          const item = document.querySelector('[draggable="true"]');
+          const dt = new DataTransfer();
+          dt.setData('application/plaita-node', JSON.stringify({nodeType: 'notify', name: 'notify'}));
+          item.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+          const el = document.querySelector('.react-flow');
+          const rect = el.getBoundingClientRect();
+          const opts = {bubbles: true, cancelable: true, dataTransfer: dt,
+                        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
+          el.dispatchEvent(new DragEvent('dragover', opts));
+          el.dispatchEvent(new DragEvent('drop', opts));
+          // React 渲染异步：同步读 DOM 会读到旧计数（竞态），等一拍再比
+          await new Promise(r => setTimeout(r, 500));
+          return document.querySelectorAll('.react-flow__node').length > before;
+        })()
+    expect:
+      page:
+        result: true
+
+  - name: "保存草稿"
+    browser:
+      action: click
+      selector: text=保存草稿
+  - name: "保存成功消息（等待式）"
+    browser:
+      action: waitForSelector
+      selector: text=已保存 e2e-semantic-ids
+      timeout: 15s
+
+  - name: "round-trip 保真断言（最新 draft：原 name 保留 / source 不丢 / 新节点入库）"
+    browser:
+      action: evaluate
+      script: |
+        (async () => {
+          const token = localStorage.getItem('plaita_token');
+          const H = { Authorization: 'Bearer ' + token };
+          const r = await fetch('/api/flows/e2e-semantic-ids', { headers: H });
+          const flow = await r.json();
+          const drafts = (flow.versions || []).filter(v => v.status === 'draft');
+          if (!drafts.length) return 'NO_DRAFT';
+          const latest = drafts.map(v => v.version).sort().pop();
+          const d = await (await fetch('/api/flows/e2e-semantic-ids/versions/' + latest, { headers: H })).json();
+          const ir = JSON.parse(d.definition);
+          const byId = Object.fromEntries(ir.nodes.map(n => [n.id, n]));
+          const nameKept = byId['score_ge_90'] && byId['score_ge_90'].name === 'INPUT.score >= 90?';
+          const sourceKept = (ir.metadata && ir.metadata.source || '').length > 100;
+          // 新节点入库：与 seed IR 的已知 id 集合求差集（palette 首项 dragstart 的
+          // 合成事件会覆写 dataTransfer，实际拖入的是 CASE 节点——不依赖类型前缀）
+          const seeded = ['start', 'total', 'score_ge_90', 'ret_excellent', 'score_ge_60', 'ret_pass', 'ret_fail'];
+          const newNode = Object.keys(byId).some(id => seeded.indexOf(id) === -1);
+          return 'nameKept=' + nameKept + ' sourceKept=' + sourceKept + ' newNode=' + newNode;
+        })()
+    expect:
+      page:
+        result: "nameKept=true sourceKept=true newNode=true"
