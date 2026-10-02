@@ -52,7 +52,7 @@ cases:
     browser:
       action: evaluate
       script: |
-        async () => {
+        (async () => {
           const token = localStorage.getItem('plaita_token');
           const H = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
           // 幂等：先删旧 flow（不存在时 404 也无妨）
@@ -64,7 +64,7 @@ cases:
           const r2 = await fetch('/api/flows/e2e-semantic-ids/versions/1.1.0', { method: 'PUT', headers: H,
             body: JSON.stringify({ definition: def, layout: '{}', created_by: 'e2e' }) });
           return [r1.status, r2.status].join(',');
-        }
+        })()
     expect:
       page:
         result: "200,200"
@@ -149,7 +149,7 @@ cases:
     browser:
       action: evaluate
       script: |
-        async () => {
+        (async () => {
           const before = document.querySelectorAll('.react-flow__node').length;
           const item = document.querySelector('[draggable="true"]');
           const dt = new DataTransfer();
@@ -164,7 +164,7 @@ cases:
           // React 渲染异步：同步读 DOM 会读到旧计数（竞态），等一拍再比
           await new Promise(r => setTimeout(r, 500));
           return document.querySelectorAll('.react-flow__node').length > before;
-        }
+        })()
     expect:
       page:
         result: true
@@ -183,7 +183,7 @@ cases:
     browser:
       action: evaluate
       script: |
-        async () => {
+        (async () => {
           const token = localStorage.getItem('plaita_token');
           const H = { Authorization: 'Bearer ' + token };
           const r = await fetch('/api/flows/e2e-semantic-ids', { headers: H });
@@ -201,7 +201,7 @@ cases:
           const seeded = ['start', 'total', 'score_ge_90', 'ret_excellent', 'score_ge_60', 'ret_pass', 'ret_fail'];
           const newNode = Object.keys(byId).some(id => seeded.indexOf(id) === -1);
           return 'nameKept=' + nameKept + ' sourceKept=' + sourceKept + ' newNode=' + newNode;
-        }
+        })()
     expect:
       page:
         result: "nameKept=true sourceKept=true newNode=true"
