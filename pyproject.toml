@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plaita"
-version = "0.5.0"
+version = "0.6.0"
 description = "Official Python Runtime for Plaita -- Logic Compose Engine"
 readme = "README.MD"
 license = { text = "MIT" }
