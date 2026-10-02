@@ -10,11 +10,9 @@ WORKDIR /app
 ENV PIP_DEFAULT_TIMEOUT=180 \
     PIP_RETRIES=10
 
-# 安装依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-# flow_worker 模块级 import cachetools（TTLCache），不装则启动即 ModuleNotFoundError
-RUN pip install --no-cache-dir cachetools
+# plaita 核心依赖随最终 pip install . 从 pyproject 解析（仓根 requirements.txt
+# 已于 C6 清理删除）。cachetools 是 flow_worker/event_filter 直接 import 的
+# 库（plaita server extra），显式安装。
 
 # 复制代码
 COPY plaita/ ./plaita/
@@ -25,7 +23,7 @@ COPY setup.py .
 
 # 必须 pip 安装而非仅 COPY：approval/delay 等扩展节点经
 # [project.entry-points."plaita.nodes"] 自动发现，依赖安装元数据
-RUN pip install --no-cache-dir setuptools wheel && \
+RUN pip install --no-cache-dir setuptools wheel cachetools && \
     pip install --no-cache-dir --no-build-isolation .
 
 CMD ["sh", "-c", "until python -c \"import os,socket; socket.create_connection((os.environ.get('E2E_TEST_REDIS_HOST','redis'), 6379), timeout=1).close()\" 2>/dev/null; do echo 'e2e: waiting for redis...'; sleep 1; done; exec python -m plaita.server.flow_worker --redis-url ${PLAITA_REDIS_URL} --queue-name plaita:flow:queue --execution-storage-type redis --flow-storage-type redis --enable-registry"]

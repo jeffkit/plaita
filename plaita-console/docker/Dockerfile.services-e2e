@@ -12,10 +12,9 @@ WORKDIR /app
 ENV PIP_DEFAULT_TIMEOUT=180 \
     PIP_RETRIES=10
 
-# 安装依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir cachetools
+# plaita 核心依赖随最终 pip install . 从 pyproject 解析（仓根 requirements.txt
+# 已于 C6 清理删除）。cachetools 是 flow_worker/event_filter 直接 import 的
+# 库（plaita server extra），显式安装。
 
 # 复制代码
 COPY plaita/ ./plaita/
@@ -23,7 +22,7 @@ COPY plaita/ ./plaita/
 # pyproject.toml——不 COPY 它，pip install . 会得到 0.0.0 无插件的空壳
 COPY pyproject.toml .
 COPY setup.py .
-RUN pip install --no-cache-dir setuptools wheel && \
+RUN pip install --no-cache-dir setuptools wheel cachetools && \
     pip install --no-cache-dir --no-build-isolation .
 
 # 先等 Redis 就绪（同 Dockerfile.e2e 的理由），再并跑四个服务进程

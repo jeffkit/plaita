@@ -3,12 +3,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 安装依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-# flow_worker 模块级 import cachetools（TTLCache），而它属于 plaita 的 server
-# extra——不装则容器启动即 ModuleNotFoundError（Dockerfile.backend 同款补救）
-RUN pip install --no-cache-dir cachetools
+# plaita 核心依赖随最终 pip install . 从 pyproject 解析（仓根 requirements.txt
+# 已于 C6 清理删除）。cachetools 是 flow_worker 直接 import 的库（plaita server
+# extra），显式安装。
 
 # 复制代码
 COPY plaita/ ./plaita/
@@ -18,7 +15,7 @@ COPY setup.py .
 # plaita 必须真正安装而非仅源码落盘：approval/delay 等扩展节点经
 # [project.entry-points."plaita.nodes"] 自动发现，依赖安装元数据——
 # 不装则 worker 运行含 approval/delay 节点的 flow 即 unRecognized node type
-RUN pip install --no-cache-dir setuptools wheel && \
+RUN pip install --no-cache-dir setuptools wheel cachetools && \
     pip install --no-cache-dir --no-build-isolation .
 
 # 默认命令
