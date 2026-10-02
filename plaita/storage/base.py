@@ -16,6 +16,10 @@ class ExecutionState(BaseModel):
         flow_id: 流程ID，标识所属流程
         flow_name: 流程名称，标识流程名称
         flow_version: 流程版本号，标识流程定义版本
+        flow_hash: 启动时实际加载执行的 Flow 定义指纹（sha256，可选）。
+            resume 时与当前定义指纹比对，不一致则拒绝续跑（运行中发布新
+            版本会导致挂起执行走错分支）；None（老状态/老 worker 写入）
+            跳过校验，零回归。
         context: 执行上下文，存储流程执行过程中的所有状态数据
         status: 当前状态，包括 running(运行中)、suspended(挂起)、completed(完成)、error(错误)
         start_time: 流程开始时间，ISO格式字符串
@@ -28,6 +32,7 @@ class ExecutionState(BaseModel):
     flow_id: Optional[str] = None
     flow_name: Optional[str] = None
     flow_version: Optional[str] = None
+    flow_hash: Optional[str] = None
     tenant_id: Optional[str] = None
     context: Dict[str, Any]
     status: str = Field(default="running")

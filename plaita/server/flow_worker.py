@@ -1,4 +1,5 @@
 from datetime import datetime
+import hashlib
 import inspect
 import json
 import logging
@@ -16,6 +17,12 @@ from cachetools import TTLCache
 from redis import Redis
 from plaita.core.errors import ResumeType
 from plaita.event.core import EventBus
+from plaita.core.errors import (
+    FlowCancelledException,
+    FlowTimeoutError,
+    NodeExecutionError,
+    NodeTimeoutError,
+)
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.storage.base import ExecutionState, ExecutionStorage, FlowStorage
@@ -73,6 +80,49 @@ def _watchdog_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_LEASE_WATCHDOG")
 
 
+def _node_retry_disabled() -> bool:
+    """波次二任务①回滚开关：PLAITA_DISABLE_NODE_RETRY=1 时节点失败直接终态化
+    error（完全回到波次前行为）。"""
+    return _env_switch("PLAITA_DISABLE_NODE_RETRY")
+
+
+# 节点级重试判据沿 __cause__ 链回溯的最大深度。分布式归一化链固定一层
+# （FlowErrorException → NodeExecutionError），多留几层防御双重包装。
+_NODE_RETRY_CHAIN_MAX_DEPTH = 5
+
+
+def _is_retryable_node_failure(exc: BaseException) -> bool:
+    """判别「可重试的节点执行失败」vs「协议/图错误/超时/取消」。
+
+    分布式路径上 ``run_distributed`` 把一切异常归一化为 ``FlowErrorException``
+    且原始异常挂在 ``__cause__``（core/_error_normalization.py:59-69）。判据：
+
+    - 链中出现 ``NodeExecutionError``（runner.py 节点 abort 时 raise，原始
+      异常再挂它的 ``__cause__``）→ **可重试**——LLM/HTTP 网络抖动属瞬态，
+      磁盘 state 仍停在最后成功步的 checkpoint（strategies.py
+      ``_execute_current_node`` 的 ``runner.run_node`` 抛出时 context 未变）；
+    - 链中出现超时（``NodeTimeoutError``/``FlowTimeoutError``）→ **不重试**
+      （确定性信号，重试=再烧一次全款，对齐 v3 宿主 D4 决策），维持现状
+      终态化 error；
+    - 链中出现取消（``FlowCancelledException``）→ **不重试**（执行级意图）；
+    - 其余（``ResumeError`` 等协议类、图结构错误、无 ``__cause__`` 的引擎
+      管线异常）→ **不重试**，维持现状终态化。
+
+    超时/取消优先于 NodeExecutionError 判定：防御节点函数把超时包进普通
+    异常再被 abort 包装的病态链。
+    """
+    cause = getattr(exc, "__cause__", None)
+    depth = 0
+    while cause is not None and depth < _NODE_RETRY_CHAIN_MAX_DEPTH:
+        if isinstance(cause, (NodeTimeoutError, FlowTimeoutError, FlowCancelledException)):
+            return False
+        if isinstance(cause, NodeExecutionError):
+            return True
+        cause = cause.__cause__
+        depth += 1
+    return False
+
+
 class StatePersistError(RuntimeError):
     """执行状态落盘失败（``save_execution_state`` 返回 False）。
 
@@ -94,6 +144,44 @@ class ServiceDispatchError(RuntimeError):
     消息走重投、下轮 resume 重新执行挂起节点再派发（重复注册的订阅由
     EventFilter 终态 GC / TTL 兜底）。suspended 状态保留，不翻 error。
     """
+
+
+class FlowHashMismatchError(ValueError):
+    """flow 定义自启动后已变更（hash 不匹配），执行无法安全续跑（波次二任务②）。
+
+    resume_flow 在终态化 error **之后**抛出本异常：run() 把它当 ValueError
+    poison ack（终态已可观测，重投只会命中 already_terminal 短路）。刻意
+    用独立子类而非裸 ValueError——resume 的通用 except 需要区分「指纹
+    不匹配（已终态化，原样上抛）」与「引擎内部其他 ValueError（维持现状
+    终态化路径）」。
+    """
+
+
+class NodeExecutionRetryableError(RuntimeError):
+    """节点执行可重试失败（波次二任务①）：执行**未**终态化，消息等重投。
+
+    节点异常经 ``_is_retryable_node_failure`` 判为瞬态且重试预算未耗尽时，
+    处理函数跳过终态化改抛本异常——磁盘 state 停在最后成功步 checkpoint，
+    ``run()`` 对本异常仿照 ``ExecutionLeaseError`` 处理：不 ack、不计
+    poison、留 pending，消息被回收（间隔=claim_min_idle_ms，默认 60s）后
+    resume 自然重跑失败节点。
+
+    刻意**不是** ValueError 子类（同 StatePersistError 的理由）：ValueError
+    会被 run() 当畸形消息 poison ack。
+
+    Attributes:
+        execution_id: 所属执行（日志与守卫后备判据用）。
+        attempt: 已放行的重试次数（重试计数键 INCR 后的值）。
+        delivery_count: 消息当前投递次数（仅可观测；预算判定用重试计数键，
+            见 ``_record_node_retry`` 的说明）。
+    """
+
+    def __init__(self, message: str, execution_id: Optional[str] = None,
+                 attempt: int = 0, delivery_count: Optional[int] = None):
+        super().__init__(message)
+        self.execution_id = execution_id
+        self.attempt = attempt
+        self.delivery_count = delivery_count
 
 
 class FlowWorker:
@@ -141,6 +229,129 @@ class FlowWorker:
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
         self.lease_ttl_seconds = lease_ttl_seconds
+
+    # ---- 节点级有界重试（波次二任务①）----
+
+    # 重试计数键 TTL：7 天自清理（与取消标志键同款「带 TTL 意图键」模式）。
+    NODE_RETRY_COUNTER_TTL_SECONDS = 7 * 86400
+
+    def _node_retry_budget(self) -> int:
+        """节点重试预算：沿用队列 max_deliveries 语义（默认 5）。
+
+        RedisFlowWorker 以其队列配置为准；基类（内存 worker / 单测）回退
+        DEFAULT_MAX_DELIVERIES。
+        """
+        configured = getattr(self, "_max_deliveries", None)
+        try:
+            return max(1, int(configured)) if configured else DEFAULT_MAX_DELIVERIES
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_DELIVERIES
+
+    def _retry_counter_key(self, execution_id: str) -> str:
+        """节点重试计数键：``{ns}:execution:noderetry:{id}``（租户路由，与租约键同规则）。"""
+        return f"{tenant_namespace(current_tenant())}:execution:noderetry:{execution_id}"
+
+    def _read_node_retry_counter(self, execution_id: str) -> int:
+        """读重试计数；无 redis 客户端 / 键不存在 / 读取异常 → 0（按未重试过）。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "get"):
+            return 0
+        try:
+            raw = redis_client.get(self._retry_counter_key(execution_id))
+        except Exception as e:  # noqa: BLE001 — 瞬断按 0 处理（保守放行死信重入队）
+            logger.warning("读取节点重试计数失败（按 0 处理）: %s: %s", execution_id, e)
+            return 0
+        if raw is None:
+            return 0
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    def _record_node_retry(self, execution_id: str) -> int:
+        """重试放行前自增计数键（INCR + 滑动 7 天 EX），返回自增后的值。
+
+        预算判定**不**用消息 delivery_count：核实发现队列在 reclaim 路径
+        上报的是 XCLAIM **前**的 times_delivered（task_queue.py:402，与该处
+        注释 "count + 1" 相悖）、fresh 读取恒报 1，且达限消息在队列层就地
+        死信、根本不会进 handler（task_queue.py:404）——按 delivery_count
+        判预算永远不会触发，只会造成「死信守卫重入队 → delivery 归 1 →
+        再耗尽 → 再重入队」的无限循环。计数键在 worker 侧自增，语义是
+        「本执行累计已放行的节点重试次数」，预算耗尽即终态化。
+
+        无 redis 客户端（内存 worker / 单测）→ 返回 1 不设上限：预算由
+        调用方/重投机制兜底（直连调用没有 run() 循环，异常直接冒给调用方）。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "incr"):
+            return 1
+        key = self._retry_counter_key(execution_id)
+        try:
+            pipe = redis_client.pipeline(transaction=True)
+            pipe.incr(key)
+            pipe.expire(key, self.NODE_RETRY_COUNTER_TTL_SECONDS)
+            return int(pipe.execute()[0])
+        except Exception as e:  # noqa: BLE001 — 计数失败按 1 处理，不阻断重试放行
+            logger.warning("节点重试计数自增失败（按 1 处理）: %s: %s", execution_id, e)
+            return 1
+
+    def _reset_node_retry_counter(self, execution_id: str) -> None:
+        """清零节点重试计数键（DEL；键不存在为幂等 no-op）。
+
+        两个调用时机（rebase 组合语义，2026-10 二波 vs G1 43828aa）：
+
+        - G1 retry 唤醒放行时：预算耗尽终态化的执行经人工 retry 唤醒后拿
+          全新预算——否则唤醒的执行第一次失败就立刻再耗尽，G1 形同虚设；
+        - 任一节点成功推进后：计数语义是「当前节点的**连续**失败次数」，
+          不同节点的失败不共享预算——节点 A 抖一次花掉的预算不应让之后
+          节点 B 的第一次失败就少一次重试机会。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "delete"):
+            return
+        try:
+            redis_client.delete(self._retry_counter_key(execution_id))
+        except Exception as e:  # noqa: BLE001 — 清零失败无害（下次失败继续累计）
+            logger.warning("节点重试计数清零失败（忽略）: %s: %s", execution_id, e)
+
+    def _node_failure_retry_decision(
+        self,
+        exc: Exception,
+        execution_id: str,
+        delivery_count: Optional[int],
+    ) -> Optional[NodeExecutionRetryableError]:
+        """节点失败重试决策：返回 NodeExecutionRetryableError（调用方 raise，
+        状态不终态化）或 None（按现状终态化 error）。
+
+        - 回滚开关 / 判据不符 → None（现状）；
+        - 重试计数达预算 → None（现状终态化；error 里带重试次数供观测）；
+        - 其余 → 计数自增后返回重试异常。
+        """
+        if _node_retry_disabled():
+            return None
+        if not isinstance(execution_id, str) or not execution_id:
+            return None
+        if not _is_retryable_node_failure(exc):
+            return None
+        attempt = self._record_node_retry(execution_id)
+        if attempt >= self._node_retry_budget():
+            logger.error(
+                "执行 %s 节点重试预算耗尽（%s/%s），终态化 error: %s",
+                execution_id, attempt, self._node_retry_budget(), exc,
+            )
+            return None
+        logger.warning(
+            "执行 %s 节点执行失败，不终态化等待消息重投后重跑失败节点"
+            "（第 %s/%s 次重试，重投间隔=claim_min_idle_ms）: %s",
+            execution_id, attempt, self._node_retry_budget(), exc,
+        )
+        return NodeExecutionRetryableError(
+            f"节点执行失败（可重试，第 {attempt}/{self._node_retry_budget()} 次重试，"
+            f"execution_id={execution_id}）: {exc}",
+            execution_id=execution_id,
+            attempt=attempt,
+            delivery_count=delivery_count,
+        )
 
     # ---- 取消检查点（波次①，设计稿 §3.1 选型 B：独立取消标志键）----
 
@@ -296,6 +507,166 @@ class FlowWorker:
         
         return flow
     
+    # ---- flow 定义指纹（波次二任务②）----
+
+    def _compute_flow_hash(self, flow: Flow) -> str:
+        """对实际加载执行的 Flow 计算稳定指纹（sha256 of 规范化 JSON dump）。
+
+        用 ``model_dump(mode="json")`` + ``sort_keys`` 保证跨进程确定性（同一
+        pydantic 版本下字段序稳定，sort_keys 再兜底 dict 序）。指纹在 start
+        时写入 ExecutionState.flow_hash，resume 时不一致即拒绝续跑。
+        """
+        payload = json.dumps(
+            flow.model_dump(mode="json"),
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    # ---- start 幂等键（波次二任务③）----
+
+    # start 去重映射键 TTL：7 天自清理（与取消标志/重试计数键同款模式）。
+    START_DEDUP_TTL_SECONDS = 7 * 86400
+
+    def _start_dedup_key(self, dedup_key: str) -> str:
+        """start 去重映射键：``{ns}:start-dedup:{key}``（租户路由，与租约键同规则）。"""
+        return f"{tenant_namespace(current_tenant())}:start-dedup:{dedup_key}"
+
+    def _claim_start_dedup(self, dedup_key: Optional[str], execution_id: str) -> Tuple[str, Optional[str]]:
+        """原子认领 start 幂等键（SET NX + EX 7 天）。
+
+        返回 ``(action, mapped_execution_id)``：
+
+        - ``("claimed", None)``：认领成功，本消息是这条逻辑 start 的首次执行；
+        - ``("hit", mapped)``：键已存在（重投/双开），mapped 为首次执行映射的
+          execution_id，调用方**绝不二次 start**；mapped 为 None 表示键刚好
+          过期/被清（罕见竞态），调用方按孤儿映射处理；
+        - ``("inactive", None)``：未提供 dedup_key、无 redis 客户端或认领
+          瞬断——按未启用处理，行为与存量完全一致。
+
+        映射在 ``run_distributed`` **之前**认领（execution_id 在
+        ``FlowExecution``/``ExecutionContext`` 构造时即生成，core/context.py:220），
+        首节点副作用受保护；映射值指向的执行状态此后由 ``start_flow`` 正常落盘。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if not dedup_key or redis_client is None or not hasattr(redis_client, "set"):
+            return ("inactive", None)
+        key = self._start_dedup_key(dedup_key)
+        try:
+            claimed = redis_client.set(
+                key, execution_id, ex=self.START_DEDUP_TTL_SECONDS, nx=True
+            )
+        except Exception as e:  # noqa: BLE001 — 认领瞬断：不阻塞启动（退化为存量行为）
+            logger.warning("start 幂等键认领失败（按未启用处理）: %s: %s", key, e)
+            return ("inactive", None)
+        if claimed:
+            return ("claimed", None)
+        try:
+            raw = redis_client.get(key)
+        except Exception as e:  # noqa: BLE001 — 读取瞬断同上
+            logger.warning("start 幂等键读取失败（按孤儿映射处理）: %s: %s", key, e)
+            return ("hit", None)
+        mapped = raw.decode() if isinstance(raw, bytes) else raw
+        return ("hit", mapped or None)
+
+    def _release_start_dedup(self, dedup_key: str, execution_id: str) -> None:
+        """删除孤儿映射（映射指向的执行状态从未落盘）。GET==id 才 DEL，
+        防误删并发的后来者认领；比较与删除间的微小竞窗最多导致重复启动，
+        与存量 at-least-once 语义一致。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "get"):
+            return
+        key = self._start_dedup_key(dedup_key)
+        try:
+            raw = redis_client.get(key)
+            current = raw.decode() if isinstance(raw, bytes) else raw
+            if current == execution_id:
+                redis_client.delete(key)
+        except Exception as e:  # noqa: BLE001 — 释放失败无害（键 7 天自动过期）
+            logger.warning("start 幂等键孤儿释放失败（忽略）: %s: %s", key, e)
+
+    def _handle_start_dedup_hit(
+        self, flow_id: str, mapped_execution_id: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """处理幂等键命中：绝不二次 start。
+
+        - 映射缺失/指向的执行状态不存在（孤儿：认领后首次执行从未落盘，
+          如 crash 在 claim 与 save 之间）→ 返回 None，调用方释放映射后按
+          新启动继续（首节点可能重跑——首节点须幂等是既有文档约定）；
+        - 已终态 → 返回 already 形状（镜像 resume 终态短路）；
+        - 非终态 running（start 消息处理中 worker 崩溃/任务①重试搁浅）→
+          **重入队一份 resume 消息**把执行接续起来再 ack start（若只返回
+          现状形状，执行将无人推进永久卡 running）；入队失败抛
+          ServiceDispatchError 让消息重投再来；
+        - 非终态 suspended → 只返回现状形状不重入队：挂起执行自有
+          delay/approval 服务的 resume 链路，重入队 continue 会被
+          ``_handle_resume`` 的 pending 校验拒绝（ResumeError）。
+        """
+        if not mapped_execution_id:
+            return None
+        state = self.execution_storage.load_execution_state(mapped_execution_id)
+        if state is None:
+            logger.warning(
+                "start 幂等键命中但映射的执行无状态（孤儿映射）: %s",
+                mapped_execution_id,
+            )
+            return None
+        status = getattr(state, "status", "") or ""
+        if status in ("completed", "error", "cancelled"):
+            logger.info(
+                "start 幂等键命中：执行 %s 已终态 (%s)，不再二次启动",
+                mapped_execution_id, status,
+            )
+            return {
+                "execution_id": mapped_execution_id,
+                "status": status,
+                "already_terminal": True,
+                "deduplicated": True,
+                "result": getattr(state, "result", None),
+                "error": getattr(state, "error", None),
+            }
+        if status == "running":
+            # 崩溃/重试搁浅的 start：重入队 resume 接续执行（lease 保证串行）
+            redis_client = getattr(self, "redis_client", None)
+            queue_name = getattr(self, "queue_name", None)
+            if redis_client is not None and queue_name:
+                resume_msg = {
+                    "type": "resume",
+                    "flow_id": flow_id,
+                    "execution_id": mapped_execution_id,
+                    "resume_type": "continue",
+                    "tenant_id": current_tenant(),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                try:
+                    enqueue_task(redis_client, queue_name, resume_msg)
+                except Exception as e:  # noqa: BLE001 — 入队失败让 start 消息重投
+                    raise ServiceDispatchError(
+                        f"start 幂等命中后重入队 resume 失败 "
+                        f"(execution_id={mapped_execution_id}): {e}"
+                    ) from e
+                logger.info(
+                    "start 幂等键命中：执行 %s 仍在 running，已重入队 resume 接续",
+                    mapped_execution_id,
+                )
+                return {
+                    "execution_id": mapped_execution_id,
+                    "status": status,
+                    "deduplicated": True,
+                    "resume_requeued": True,
+                }
+            logger.warning(
+                "start 幂等键命中：执行 %s 仍在 running，但无队列可重入队 resume"
+                "（内存 worker），执行可能停滞", mapped_execution_id,
+            )
+        # suspended / 无队列的 running：只回报现状（绝不二次 start）
+        return {
+            "execution_id": mapped_execution_id,
+            "status": status,
+            "deduplicated": True,
+        }
+
     def _finalize_observers(self) -> None:
         """run 终结（completed/failed）时收尾观测回调。
 
@@ -330,7 +701,9 @@ class FlowWorker:
                     logger.warning("观测回调 bind_execution 失败: %r", handler, exc_info=True)
 
     def start_flow(self, flow_id: str, params: Dict[str, Any], version: Optional[str] = None,
-                   execution_id: Optional[str] = None) -> Dict[str, Any]:
+                   execution_id: Optional[str] = None,
+                   dedup_key: Optional[str] = None,
+                   delivery_count: Optional[int] = None) -> Dict[str, Any]:
         """
         启动流程执行
 
@@ -340,6 +713,9 @@ class FlowWorker:
             version: 流程版本，如果不指定则使用最新版本
             execution_id: 预铸 id（BFF start 时铸造、随消息透传）——提交方
                 即刻拿 id 返给调用方，无需等 worker 消费；缺省就地铸造
+            dedup_key: 可选 start 幂等键（消息重投/双开收敛；未提供则行为
+                与存量完全一致，见 ``_claim_start_dedup``）
+            delivery_count: 消息投递次数（可观测；见 _process_execution_result）
 
         Returns:
             Dict[str, Any]: 流程执行结果
@@ -361,18 +737,44 @@ class FlowWorker:
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
 
-            # P0 可见性修复（keeper 迁移设计稿 §5.5 清单①）：先落 running 行
-            # 再执行。旧实现 run_distributed 返回后才 save——首节点期间
-            # /api/executions 查无此行，cancel 无从发起，zombie 判定没锚。
+            # P0 可见性修复（keeper 迁移设计稿 §5.5 清单①，43828aa）：
             # execution_id 优先吃 BFF 预铸（随消息透传，提交方即刻可轮询），
-            # 否则就地铸造；种子喂引擎（context.clean），行 id 与
-            # result.execution_id 天然一致。异常遗留的 running 行是 zombie，
-            # 交 reaper/心跳年龄判定处置。
+            # 否则就地铸造；行 id 与 result.execution_id 天然一致。异常遗留
+            # 的 running 行是 zombie，交 reaper/心跳年龄判定处置。
             execution_id = execution_id or uuid.uuid4().hex
+
+            # start 幂等键（波次二任务③，与 G1 预铸 id 组合）：在先行落行
+            # 之前认领，映射值=预铸或就地铸造的 execution_id——重投/双开
+            # 在**任何新行落盘之前**即被拦截，首节点副作用由此受重投保护。
+            dedup_action, mapped_execution_id = self._claim_start_dedup(
+                dedup_key, execution_id
+            )
+            if dedup_action == "hit":
+                hit_result = self._handle_start_dedup_hit(flow_id, mapped_execution_id)
+                if hit_result is not None:
+                    return hit_result
+                # 孤儿映射（首次执行从未落盘）：释放后重新认领，让本次启动
+                # 继续受保护；并发后来者抢先认领则放弃设防（存量语义）
+                if dedup_key:
+                    self._release_start_dedup(dedup_key, mapped_execution_id)
+                    dedup_action, mapped_execution_id = self._claim_start_dedup(
+                        dedup_key, execution_id
+                    )
+                    if dedup_action == "hit":
+                        logger.warning(
+                            "start 幂等键孤儿释放后被并发认领，本次启动不设防: %s",
+                            dedup_key,
+                        )
+
+            # 先落 running 行再执行（P0 可见性）：首节点期间 /api/executions
+            # 查得到此行、cancel 有锚。flow_hash：对实际加载执行的 Flow 计算
+            # 指纹（波次二任务②）随行落盘——resume 时与当前定义比对，防运行
+            # 中改定义后续跑走错分支。
             state = ExecutionState(
                 execution_id=execution_id,
                 flow_id=flow_id,
                 flow_version=version,
+                flow_hash=self._compute_flow_hash(flow),
                 tenant_id=current_tenant(),
                 context={},
                 status="running",
@@ -385,21 +787,39 @@ class FlowWorker:
             result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
             # 处理执行结果
-            final_result = self._process_execution_result(flow, result, state, execution)
+            final_result = self._process_execution_result(
+                flow, result, state, execution, delivery_count=delivery_count
+            )
 
             return final_result
+
+        except (NodeExecutionRetryableError, ServiceDispatchError):
+            # 节点级可重试失败（波次二任务①）/ 幂等命中后重入队 resume 失败
+            # （波次二任务③）：原样上抛给 run() 按不 ack 语义处理。绝不能落
+            # 进下面的通用 except 被包成 RuntimeError（弱化语义）——重试异常
+            # 还不得触发观测回调 finalize（执行还会继续）。
+            raise
 
         except Exception as e:
             logger.error("执行流程出错: %s", e, exc_info=True)
             self._finalize_observers()
             raise RuntimeError(f"执行流程出错: {e}")
 
-    def resume_flow(self, flow_id: str, execution_id: str, resume_type: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
+                    data: Optional[Dict[str, Any]] = None,
+                    delivery_count: Optional[int] = None) -> Dict[str, Any]:
         """
         恢复流程执行。
 
         取得 ``execution_id`` 租约后才推进；另一 worker 已持有租约时抛
         ``ExecutionLeaseError``（RedisFlowWorker 对此**不** XACK，待租约过期后回收）。
+
+        Args:
+            flow_id: 流程ID
+            execution_id: 执行ID
+            resume_type: 恢复类型
+            data: 恢复数据
+            delivery_count: 消息投递次数（可观测；见 _process_execution_result）
         """
         # 加载执行状态。None 仅表示键不存在——Redis 后端的读取瞬断/反序列化
         # 失败现以上抛 ExecutionStateLoadError，由 run() 的重投递路径处理，
@@ -445,10 +865,20 @@ class FlowWorker:
         
         # 获取流程版本
         version = state.flow_version
-        
+
         # 获取流程定义
         flow = self.get_flow_definition(flow_id, version)
-        
+
+        # flow 定义指纹（波次二任务②）：worker 的定义 TTLCache 有 300s 窗口、
+        # console engine_sync 可直接覆盖 Redis 定义——挂起执行 resume 用
+        # latest 版本定义时，若定义自启动后被改过，``_get_next_from_last``
+        # 找不到节点/走错分支且无任何告警。指纹在 lease 内判定（与活
+        # worker 的推进写串行化，防「他人持租约推进中却被误终态化」），
+        # 不一致 → 终态化 error + raise ValueError（poison ack）——意图是
+        # 可观测的终态而不是重投风暴。老状态 flow_hash 为 None → 跳过校验
+        # （零回归）。
+        current_flow_hash = self._compute_flow_hash(flow)
+
         # 解析流程定义
         logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
 
@@ -481,16 +911,46 @@ class FlowWorker:
                     "cancelled_at_resume": True,
                 }
 
+            # flow 定义指纹校验（波次二任务②）在 G1 retry 唤醒**之前**：
+            # 定义被改时执行保持 error（hash 不匹配信息落盘），修复定义后
+            # 仍可再 retry——G1 的「error 态可反复唤醒」语义不被破坏。
+            # 取消是用户意图，已在上方优先放行。写盘走 _persist_state_or_raise
+            # （带本 resume 的 fence 世代），随后 raise FlowHashMismatchError
+            # → run() 按 ValueError poison ack（终态已可观测，重投无意义）。
+            stored_flow_hash = getattr(state, "flow_hash", None)
+            if stored_flow_hash and stored_flow_hash != current_flow_hash:
+                mismatch_msg = (
+                    "flow 定义自启动后已变更，hash 不匹配，执行无法安全续跑 "
+                    f"(execution_id={execution_id}, flow_id={flow_id}, "
+                    f"stored_hash={stored_flow_hash[:12]}..., "
+                    f"current_hash={current_flow_hash[:12]}...)"
+                )
+                logger.error(mismatch_msg)
+                state.status = "error"
+                state.error = {
+                    "message": mismatch_msg,
+                    "stored_flow_hash": stored_flow_hash,
+                    "current_flow_hash": current_flow_hash,
+                }
+                state.end_time = datetime.now().isoformat()
+                self._persist_state_or_raise(execution_id, state, "flow_hash_mismatch")
+                raise FlowHashMismatchError(mismatch_msg)
+
             # G1 retry 唤醒：error → running 翻转并先落盘（观察者/监控立即
             # 可见；若本 worker 接着硬死，行是 running 而非 error——再一轮
             # retry 仍可放行，zombie 判定也不误报「终态」）。checkpoint 原样，
             # saved_context 由下方 run_distributed 携带。
+            # 与任务①组合语义：唤醒即清零节点重试计数键——预算耗尽终态化的
+            # 执行经人工 retry 唤醒后拿全新预算，否则唤醒的执行第一次失败就
+            # 立刻再耗尽，G1 形同虚设。翻转落盘成功后才清零（落盘失败抛
+            # StatePersistError 走重投，唤醒未生效不清预算）。
             if retry_wakeup:
                 state.status = "running"
                 state.error = None
                 state.end_time = None
                 self._persist_state_or_raise(execution_id, state, "retry_wakeup")
-                logger.info("执行 %s error 态经 retry 放行，从断点步进", execution_id)
+                self._reset_node_retry_counter(execution_id)
+                logger.info("执行 %s error 态经 retry 放行（重试计数已清零），从断点步进", execution_id)
 
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
             execution = FlowExecution(
@@ -519,24 +979,49 @@ class FlowWorker:
                 execution,
                 lease_execution_id=execution_id,
                 lease_holder=lease_value,
+                delivery_count=delivery_count,
             )
 
             return final_result
 
         except ExecutionLeaseError:
             raise
-        except (StatePersistError, ServiceDispatchError):
+        except (StatePersistError, ServiceDispatchError, NodeExecutionRetryableError):
             # 落盘/派发失败：执行状态保持原样（is_end 前失败 → 仍 running，
             # 挂起派发失败 → 仍 suspended），消息不 ack 走 at-least-once 重投，
             # 下轮从 checkpoint / 挂起节点重入。绝不落 error 终态——重投消息
             # 会命中上方 already_terminal 短路被 ack，执行永久卡死。
+            # NodeExecutionRetryableError（波次二任务①）同理：节点失败未
+            # 终态化，重投后从 checkpoint 重跑失败节点；finally 释放租约，
+            # 重投消息可重新取得租约。
+            raise
+        except FlowHashMismatchError:
+            # flow 定义指纹不匹配（波次二任务②）：执行已在 raise 前终态化
+            # error（可观测终态），原样上抛给 run() 按 ValueError poison
+            # ack——重投只会命中 already_terminal 短路，终态化已完成，无意义。
+            # 不落进下面的通用 except 二次终态化/包 RuntimeError。
             raise
         except Exception as e:
             logger.error("恢复流程执行出错: %s", e, exc_info=True)
 
+            # 节点级有界重试（波次二任务①）：同 _process_execution_result，
+            # 瞬态节点失败不终态化、消息等重投；否则现状终态化 error。
+            retry_exc = self._node_failure_retry_decision(
+                e, execution_id, delivery_count
+            )
+            if retry_exc is not None:
+                raise retry_exc from e
+
             # 更新执行状态为错误
             state.status = "error"
-            state.error = {"message": str(e)}
+            retries = max(0, self._read_node_retry_counter(execution_id) - 1)
+            if retries > 0:
+                state.error = {
+                    "message": f"节点执行失败（重试 {retries} 次后仍失败）: {e}",
+                    "node_retries": retries,
+                }
+            else:
+                state.error = {"message": str(e)}
             state.end_time = datetime.now().isoformat()
 
             self._persist_state_or_raise(execution_id, state, "resume_error_handler")
@@ -558,6 +1043,7 @@ class FlowWorker:
         execution: Optional[FlowExecution] = None,
         lease_execution_id: Optional[str] = None,
         lease_holder: Optional[str] = None,
+        delivery_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         处理流程执行结果
@@ -569,6 +1055,8 @@ class FlowWorker:
             execution: 贯穿本执行全过程的 FlowExecution (复用以保留回调);
                 为 None 时按需创建, 仅供向后兼容的简单调用场景使用
             lease_execution_id / lease_holder: resume 租约续期参数
+            delivery_count: 消息投递次数（可观测/日志用；节点重试预算判定
+                用重试计数键，见 ``_record_node_retry``）
 
         Returns:
             Dict[str, Any]: 最终的执行结果
@@ -651,6 +1139,9 @@ class FlowWorker:
 
                     context = result.get("context", context)
                     steps_since_persist += 1
+                    # 重试计数按「当前节点的连续失败」计（组合语义）：任一
+                    # 节点成功推进即清零——不同节点的失败不共享预算。
+                    self._reset_node_retry_counter(execution_id)
 
                     is_end = result.get("is_end", False)
                     is_suspend = result.get("is_suspend", False)
@@ -676,9 +1167,26 @@ class FlowWorker:
                     raise
                 except Exception as e:
                     logger.error("流程执行出错: %s", e, exc_info=True)
+                    # 节点级有界重试（波次二任务①）：瞬态节点失败不终态化，
+                    # 抛重试异常让消息走 at-least-once 重投，从 checkpoint
+                    # 重跑失败节点；预算耗尽/判据不符/回滚开关 → 现状终态化。
+                    retry_exc = self._node_failure_retry_decision(
+                        e, execution_id, delivery_count
+                    )
+                    if retry_exc is not None:
+                        raise retry_exc from e
                     state.status = "error"
                     state.context = context
-                    state.error = {"message": str(e)}
+                    retries = max(
+                        0, self._read_node_retry_counter(execution_id) - 1
+                    )
+                    if retries > 0:
+                        state.error = {
+                            "message": f"节点执行失败（重试 {retries} 次后仍失败）: {e}",
+                            "node_retries": retries,
+                        }
+                    else:
+                        state.error = {"message": str(e)}
                     state.end_time = datetime.now().isoformat()
                     self._persist_state_or_raise(execution_id, state, "error_state")
                     break
@@ -918,6 +1426,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "死信守卫读执行状态失败（保守跳过死信）: %s: %s", execution_id, exc
                 )
                 return False
+            retry_count = self._read_node_retry_counter(execution_id)
         finally:
             reset_current_tenant(token)
 
@@ -942,6 +1451,40 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 getattr(task, "message_id", "?"),
             )
             return False
+
+        # 节点重试预算耗尽后备判据（波次二任务①）：达限消息在队列层被就地
+        # 死信、不经过处理函数；此刻执行非终态、租约已空且重试计数已达预算
+        # ——说明这是节点反复失败的搁浅（含「预算耗尽判定后、终态化写盘前
+        # worker 崩溃」窗口），终态化 error 后放行死信。**不**重入队：重入队
+        # delivery 归 1 → 再耗尽 → 再重入队 = 无限循环。终态化写盘失败 →
+        # 保守跳过死信（消息留 pending，下轮再处置）。
+        if retry_count >= self._node_retry_budget():
+            logger.error(
+                "执行 %s 非终态但节点重试计数已达预算（%s/%s），终态化 error "
+                "后放行死信，不再重入队: %s",
+                execution_id, retry_count, self._node_retry_budget(),
+                getattr(task, "message_id", "?"),
+            )
+            state.status = "error"
+            state.error = {
+                "message": (
+                    f"节点执行失败：重试预算耗尽（{retry_count} 次），"
+                    "执行无法继续推进"
+                ),
+                "node_retries": retry_count,
+            }
+            state.end_time = datetime.now().isoformat()
+            try:
+                self._persist_state_or_raise(
+                    execution_id, state, "dlq_guard_node_retry_exhausted"
+                )
+            except Exception as exc:  # noqa: BLE001 — 写盘失败不丢消息
+                logger.warning(
+                    "死信守卫终态化失败（保守跳过死信）: %s: %s", execution_id, exc
+                )
+                return False
+            return True
+
         try:
             enqueue_task(self.redis_client, self.queue_name, dict(body))
             logger.warning(
@@ -1076,7 +1619,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 execution_id,
             )
 
-    def _dispatch_task(self, message_data: Dict[str, Any]) -> None:
+    def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None) -> None:
         # 租户上下文：消息携带 tenant_id（缺省 = default，兼容旧生产方）；
         # 存储路由包装器/日志 handler/租约据此选租户 namespace。
         token = set_current_tenant(message_data.get("tenant_id"))
@@ -1088,6 +1631,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     message_data.get("params"),
                     message_data.get("version"),
                     execution_id=message_data.get("execution_id"),
+                    dedup_key=message_data.get("dedup_key"),
+                    delivery_count=delivery_count,
                 )
             elif message_type == "resume":
                 self.resume_flow(
@@ -1095,6 +1640,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     message_data.get("execution_id"),
                     message_data.get("resume_type"),
                     message_data.get("data"),
+                    delivery_count=delivery_count,
                 )
             else:
                 raise ValueError(f"unknown task type: {message_type!r}")
@@ -1144,7 +1690,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
                 acked = False
                 try:
-                    self._dispatch_task(task.body)
+                    self._dispatch_task(task.body, delivery_count=task.delivery_count)
                     queue.ack(task.message_id)
                     acked = True
                 except ExecutionLeaseError as exc:
@@ -1153,6 +1699,20 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     logger.warning(
                         "任务 %s 未取得 execution lease，留在 pending: %s",
                         task.message_id,
+                        exc,
+                    )
+                except NodeExecutionRetryableError as exc:
+                    # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
+                    # 步 checkpoint，不 ack、不计 poison、留 pending 等回收——
+                    # 重投间隔=claim_min_idle_ms（默认 60s），下轮 resume 从
+                    # checkpoint 重跑失败节点。预算（重试计数键）已在处理函数
+                    # 内判定，耗尽时已在处理函数内终态化 error，不会走到这里
+                    # 无限重投。
+                    queue.note_failed()
+                    logger.warning(
+                        "任务 %s 节点执行失败待重投 (delivery=%s): %s",
+                        task.message_id,
+                        task.delivery_count,
                         exc,
                     )
                 except ValueError as exc:

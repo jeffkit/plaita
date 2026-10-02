@@ -43,12 +43,76 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
 worker 的执行；调大到超过最长步骤耗时，可减少 `lease_conflicts` 噪音。
 
 **死信守卫**：超过 `--max-deliveries` 的消息进 DLQ 前，先查消息体
-`execution_id` 的 resume 租约（键 `{ns}:execution:lease:{id}`，`ns` 按消息体
-`tenant_id` 路由：default/空 = `plaita`，其余 = `plaita:{tenant_id}`）——租约
-仍在（活 worker 正处理长步骤）则跳过死信、消息留 pending；start 任务入队时
-还没有 `execution_id`，直接放行；租约查询失败同样保守跳过。
+`execution_id` 的执行状态与 resume 租约（键 `{ns}:execution:lease:{id}`，`ns` 按消息体
+`tenant_id` 路由：default/空 = `plaita`，其余 = `plaita:{tenant_id}`）——
+执行已终态直接放行；租约仍在（活 worker 正处理长步骤）则跳过死信、消息留
+pending；执行仍非终态但**节点重试计数已达预算**（见下节）则终态化 error 后
+放行（不再重入队——重入队会让 delivery 归 1 再耗尽，无限循环）；租约/状态
+查询失败同样保守跳过；非终态且租约空（持有者已死）重入队一份 delivery 归 1
+的恢复消息后放行。
 
 部署步骤与故障手册见 [运维 Runbook](ops-runbook.md)；副作用设计见 [幂等 Resume](idempotent-resume.md)。
+
+## 节点级有界重试（2026-10 二波） {#节点级有界重试}
+
+分布式路径上**节点执行失败**（LLM/HTTP 网络抖一次）不再直接废掉整个执行：
+
+- **判别**：`run_distributed` 把异常归一化为 `FlowErrorException`（原始异常在
+  `__cause__`）。链中出现 `NodeExecutionError`（节点执行异常）→ 可重试；
+  链中出现超时（`NodeTimeoutError`/`FlowTimeoutError`）或取消
+  （`FlowCancelledException`）、或协议/图错误（`ResumeError` 等）→ 维持现状
+  终态化 error。超时不重试是刻意的：确定性信号重试=再烧一次全款。
+- **载体**：at-least-once 消息重投本身。重试时执行**不终态化**（磁盘 state
+  停在最后成功步 checkpoint——失败节点不写 context），消息不 ack 留 pending，
+  `claim_min_idle_ms`（默认 60s）后被回收重投，resume 从 checkpoint 自然重跑
+  失败节点。`run()` 对重试异常仿照 `ExecutionLeaseError`：不 ack、不计 poison。
+- **预算**：重试计数键 `{ns}:execution:noderetry:{id}`（INCR + 滑动 7 天 EX，
+  租户路由与租约键同规则），默认预算 = `--max-deliveries`（5）。耗尽 → 终态化
+  error（`error.node_retries` 记录重试次数），消息走 DLQ。刻意**不**用消息
+  `delivery_count` 判预算：回收路径上报的是 XCLAIM 前的投递数（少计 1），且
+  达限消息在队列层就地死信、不进处理函数——按它判预算永不触发。
+- **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）。
+- **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
+  失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
+
+## 运行中改定义（flow 定义指纹，2026-10 二波） {#运行中改定义}
+
+worker 的流程定义 TTLCache 有 300s 窗口、console engine_sync 可直接覆盖 Redis
+定义——挂起执行 resume 用 latest 版本定义时，若定义自启动后被改，图遍历会
+找不到节点/走错分支且无告警。现版语义：
+
+- `start_flow` 对**实际加载执行的 Flow** 计算指纹
+  （sha256 of `model_dump(mode="json")` + sort_keys 规范化 JSON）写入
+  `ExecutionState.flow_hash`；
+- `resume_flow` 取得租约后比对：不一致 → 终态化 error（message 写明「flow
+  定义自启动后已变更，hash 不匹配，执行无法安全续跑」，附前后指纹）+ 消息
+  poison ack——**故意选可观测的终态而不是重投风暴**（定义被改是确定性不一致，
+  重投 N 次结果相同）；
+- 老状态 `flow_hash` 为 None（旧版本 worker 写入）→ 跳过校验，零回归；
+- 在租约内判定是为了与活 worker 的推进写串行化：不会把他人正持有租约推进中
+  的执行误终态化。
+
+**运维含义**：改定义前应确认没有 running/suspended 的在途执行（console 按
+flow_id 查询非终态执行）；确需强升时接受在途执行被终态化 error、由上游重提。
+
+## start 幂等键 dedup_key（2026-10 二波） {#start-幂等键}
+
+start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_id 从头重跑，
+首节点副作用双份。现版支持调用方显式声明幂等键：
+
+- 消息体可选 `dedup_key`（console BFF `POST /executions` 请求体 additive 字段
+  同名透传）：worker 在**首节点执行之前**以 `SET NX EX 7d` 原子认领
+  `{ns}:start-dedup:{key}`（execution_id 在 `FlowExecution` 构造时即生成，
+  可在 `run_distributed` 前读取）；
+- 命中 → 读映射的执行状态，**绝不二次 start**：已终态 → 返回 already 形状；
+  running（崩溃/重试搁浅）→ 重入队一份 resume 消息接续执行再 ack start；
+  suspended → 只返回现状形状（挂起执行自有 delay/approval 的 resume 链路）；
+- 孤儿映射（认领后首次执行从未落盘，如 crash 在 claim 与 save 之间）→ 释放
+  后重新认领、按新启动继续（首节点可能重跑——首节点须幂等仍是既有约定）；
+- **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
+  不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
+  为重复启动而永不执行。键按租户隔离，7 天过期。
+
 
 ## 职责
 
@@ -110,10 +174,11 @@ flowchart TD
 |------|------|
 | `execution_id` | 执行 ID |
 | `flow_id` / `flow_version` | 所属流程与版本 |
+| `flow_hash` | 启动时 Flow 定义指纹（可选；老状态为 None，resume 时比对防运行中改定义，见上） |
 | `context` | 执行上下文（即 Checkpoint） |
 | `status` | `running` / `suspended` / `completed` / `error` |
 | `start_time` / `last_update_time` / `end_time` | 时间戳（ISO 字符串） |
-| `error` | 错误详情（status=error 时） |
+| `error` | 错误详情（status=error 时；节点重试耗尽的 error 附 `node_retries`） |
 | `invoker` | 发起方标识 |
 
 ## 存储后端

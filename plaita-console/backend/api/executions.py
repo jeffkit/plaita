@@ -61,6 +61,13 @@ class StartFlowRequest(BaseModel):
     flow_id: str = Field(..., description="流程 ID")
     version: Optional[str] = Field(None, description="流程版本")
     params: Dict[str, Any] = Field(default_factory=dict, description="输入参数")
+    dedup_key: Optional[str] = Field(
+        None,
+        description=(
+            "可选 start 幂等键：worker 对同键 start 消息收敛（重投/双开"
+            "不再二次新建执行）。键按租户隔离，7 天过期；不传则行为不变"
+        ),
+    )
 
 
 class ResumeFlowRequest(BaseModel):
@@ -527,7 +534,11 @@ async def start_execution(
         "tenant_id": tenant_scope(http_request, required=True),
         "timestamp": datetime.now().isoformat()
     }
-
+    # start 幂等键 additive 透传（波次二任务③）：仅显式提供时进入消息体，
+    # 旧客户端消息形状零变化。与 G1 预铸 execution_id 并存：同一条消息
+    # 既带预铸 id（提交方即刻可轮询）又可选带幂等键（重投收敛）。
+    if request.dedup_key:
+        message["dedup_key"] = request.dedup_key
     # 写入任务队列 Stream（FlowWorker 消费组消费）
     _enqueue(message, redis)
 

@@ -87,8 +87,9 @@ def _make_worker_with_slow_task(storage, started, proceed):
     )
     worker._get_task_queue = lambda: queue
 
-    def slow_dispatch(message_data):
+    def slow_dispatch(message_data, delivery_count=None):
         # 模拟在途执行正卡在 LLM 调用/存储写入之间
+        # （delivery_count：波次二任务① 起 run() 会透传消息投递次数）
         started.set()
         assert proceed.wait(timeout=10), "测试放行信号超时"
         # 任务完整推进到终态并落盘

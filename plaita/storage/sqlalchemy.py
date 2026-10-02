@@ -39,6 +39,8 @@ class ExecutionStateModel(Base):
     flow_id = Column(String(100), nullable=True, index=True)
     flow_name = Column(String(100), nullable=True)
     flow_version = Column(String(50), nullable=True)
+    # 波次二任务②：启动时 Flow 定义指纹（sha256）；老行缺列值 → None → resume 跳过校验
+    flow_hash = Column(String(64), nullable=True)
     context = Column(JSON, nullable=False)
     status = Column(String(50), nullable=False, index=True)
     start_time = Column(String(50), nullable=True)
@@ -152,6 +154,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                     'flow_id': model.flow_id,
                     'flow_name': model.flow_name,
                     'flow_version': model.flow_version,
+                    'flow_hash': model.flow_hash,
                     'context': model.context,
                     'status': model.status,
                     'start_time': model.start_time,
