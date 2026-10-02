@@ -76,8 +76,25 @@ jobs:
 
       # 拆步诊断：停滞只知「卡在 gate 大步内」，拆成 4 相位让 steps API
       # 暴露卡点阶段（ci-gate.sh 支持相位参数；本地四相位全绿）
-      - name: CI gate [1/4] pytest + coverage
-        run: bash scripts/ci-gate.sh pytest
+      # 分块 pytest：GH 容器作业下存在多处「subprocess/进程组演练误伤作业
+      # 进程树」的 137 位点（18%→39% 已见两处），单进程长跑必然踩雷。切块
+      # 串跑=块间进程隔离，单块损坏不污染其余块；coverage append 合并。
+      - name: CI gate [1a/6] pytest integration + e2e
+        run: |
+          python -m pytest tests/integration tests/e2e \
+            --cov=plaita --cov-report= --timeout=150 --timeout-method=thread -x -q
+      - name: CI gate [1b/6] pytest unit A-F
+        run: |
+          ls tests/unit/test_*.py | sort | awk 'NR % 3 == 0' | tr '\n' '\0' | xargs -0 \
+            python -m pytest --cov=plaita --cov-append --cov-report= --timeout=150 --timeout-method=thread -x -q
+      - name: CI gate [1c/6] pytest unit G-Q
+        run: |
+          ls tests/unit/test_*.py | sort | awk 'NR % 3 == 1' | tr '\n' '\0' | xargs -0 \
+            python -m pytest --cov=plaita --cov-append --cov-report= --timeout=150 --timeout-method=thread -x -q
+      - name: CI gate [1d/6] pytest unit R-Z
+        run: |
+          ls tests/unit/test_*.py | sort | awk 'NR % 3 == 2' | tr '\n' '\0' | xargs -0 \
+            python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 --timeout-method=thread -x -q
       - name: CI gate [2/4] import layering
         run: bash scripts/ci-gate.sh layering
       - name: CI gate [3/4] wheel contents
