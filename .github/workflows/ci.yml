@@ -94,7 +94,7 @@ jobs:
       - name: CI gate [1d/6] pytest unit R-Z
         run: |
           ls tests/unit/test_*.py | sort | awk 'NR % 3 == 2' | tr '\n' '\0' | xargs -0 \
-            python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 --timeout-method=thread -x -q
+            python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 --timeout-method=thread -v -x -q
       - name: CI gate [2/4] import layering
         run: bash scripts/ci-gate.sh layering
       - name: CI gate [3/4] wheel contents
