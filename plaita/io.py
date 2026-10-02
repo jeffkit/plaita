@@ -28,13 +28,15 @@ def get_value(content, *keys, default=None):
     return default
 
 
+# 历史注记（勿写进 docstring——pydantic 会把 docstring 当模型 description
+# 透出到编排台字段帮助文案）：值域约束（min/max/maxLength/choices/validators/ref）
+# 曾被解析但 ``match`` 从不读取，已移除；运行时只消费下列字段。
 class Property(BaseModel):
     """描述一个数据槽的类型 schema。
 
-    只保留运行时真正消费的字段：``data_type`` + 嵌套结构（``children`` /
-    ``item_type``）+ 元信息（``name`` / ``label`` / ``desc`` / ``is_required`` /
-    ``default_value``）。值域约束（min/max/maxLength/choices/validators/ref）
-    历史上曾被解析但 ``match`` 从不读取，已移除以免"声明了却不生效"误导用户。
+    字段：``data_type``（必填，如 string/integer/object）；嵌套结构 ``children`` /
+    ``item_type``；元信息 ``name`` / ``label`` / ``desc`` / ``is_required`` /
+    ``default_value``。
     """
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
