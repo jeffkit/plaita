@@ -88,8 +88,14 @@ def main():
         # RedisQueueService 只接受 event_bus 和 retry_config
         service = service_class(event_bus=event_bus)
     elif args.service_type in ('http_callback_service', 'approval_service'):
-        # 这些服务接受 event_bus 和 service_config
-        service = service_class(event_bus=event_bus, service_config=service_config)
+        # 两者构造器已对齐基类 (event_bus, service_config, redis_client)
+        # （Track C 统一过）——必须接 redis_client：审批/回调记录跨实例共享
+        # 与 resume 事件直发频道都依赖它，缺了整体回退进程内存（Track P2）。
+        service = service_class(
+            event_bus=event_bus,
+            service_config=service_config,
+            redis_client=redis_client,
+        )
     else:
         # 默认尝试通用初始化
         service = service_class(event_bus=event_bus)

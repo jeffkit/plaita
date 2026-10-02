@@ -2,8 +2,11 @@
 服务管理器
 负责管理所有外延服务的生命周期和任务分发
 """
+import inspect
 import threading
 from typing import Any, Dict, List, Optional, Type
+
+from redis import Redis
 
 from .base_service import BaseExtendedService
 from .delay_service import DelayService
@@ -21,14 +24,23 @@ class ServiceManager:
     负责管理所有外延服务的生命周期和任务分发
     """
     
-    def __init__(self, event_bus: EventBus):
+    def __init__(self, event_bus: EventBus, redis_client: Optional[Redis] = None):
         """
         初始化服务管理器
-        
+
         Args:
             event_bus: 事件总线实例
+            redis_client: 同步 Redis 客户端，透传给支持它的服务类（Track P2
+                任务1）：approval/http_callback 的记录跨实例共享与 resume
+                事件直发频道、delay 的排程 ZSET 都依赖它——缺了就整体回退
+                进程内存（多实例部署等于第一波持久化没生效）。仅当服务类
+                __init__ 声明 ``redis_client`` 参数时才传入（签名探测，
+                flow_worker._get_task_queue 的 dead_letter_guard 先例），
+                ``RedisQueueService(event_bus, retry_config)`` 等旧签名与
+                自定义三参服务不受影响。
         """
         self.event_bus = event_bus
+        self.redis_client = redis_client
         self.services: Dict[str, BaseExtendedService] = {}
         self.service_classes: Dict[str, Type[BaseExtendedService]] = {
             "delay": DelayService,
@@ -43,7 +55,7 @@ class ServiceManager:
     def register_service_class(self, service_type: str, service_class: Type[BaseExtendedService]):
         """
         注册服务类
-        
+
         Args:
             service_type: 服务类型
             service_class: 服务类
@@ -51,6 +63,21 @@ class ServiceManager:
         with self._lock:
             self.service_classes[service_type] = service_class
             logger.info("注册服务类: %s -> %s", service_type, service_class.__name__)
+
+    def _construct_service(self, service_class: Type[BaseExtendedService],
+                           service_config: Dict[str, Any]) -> BaseExtendedService:
+        """构造服务实例：第二位恒为 service_config（历史契约），redis_client
+        仅在服务类声明该参数时以关键字传入——签名探测保持对自定义两参/三参
+        服务的向后兼容（RedisQueueService(event_bus, retry_config) 不收
+        redis_client，误传会 TypeError）。
+        """
+        kwargs: Dict[str, Any] = {}
+        if (
+            "redis_client"
+            in inspect.signature(service_class.__init__).parameters
+        ):
+            kwargs["redis_client"] = self.redis_client
+        return service_class(self.event_bus, service_config, **kwargs)
     
     def start_all_services(self, service_configs: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
         """
@@ -74,9 +101,9 @@ class ServiceManager:
                 try:
                     # 获取服务配置
                     config = service_configs.get(service_type, {})
-                    
-                    # 创建服务实例
-                    service = service_class(self.event_bus, config)
+
+                    # 创建服务实例（redis_client 经签名探测接线）
+                    service = self._construct_service(service_class, config)
                     
                     # 启动服务
                     if service.start_service():
@@ -212,8 +239,8 @@ class ServiceManager:
                 
                 service_class = self.service_classes[service_type]
                 config = service_config or {}
-                
-                new_service = service_class(self.event_bus, config)
+
+                new_service = self._construct_service(service_class, config)
                 
                 if new_service.start_service():
                     self.services[service_type] = new_service
