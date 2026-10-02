@@ -53,7 +53,8 @@ export interface FlowEditorState {
   onConnect: OnConnect
   addNode: (node: Node) => void
   updateNodeData: (id: string, data: Partial<Record<string, unknown>>) => void
-  removeNode: (id: string) => void
+  /** 删除节点；返回是否真的删除（容器子节点受守卫保护时为 false） */
+  removeNode: (id: string) => boolean
   setSelected: (id: string | null) => void
   markDirty: () => void
   enterSubgraph: (nodeId: string, kind: 'child_flow' | 'branch', branchIndex?: number) => void
@@ -424,7 +425,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
     // 收拢/保存后节点会「复活」。删除子流程节点请进入子图编辑（写回落 IR）
     // 或收拢容器后在对应层操作；画布已设 deletable:false，这里兜底所有入口
     const td = s.nodes.find((n) => n.id === id)?.data as FlowNodeData | undefined
-    if (td?.isContainerChild) return
+    if (td?.isContainerChild) return false
     set({
       nodes: s.nodes.filter((n) => n.id !== id),
       edges: s.edges.filter((e) => e.source !== id && e.target !== id),
@@ -432,6 +433,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       dirty: true,
       ...pushHist(s),
     })
+    return true
   },
 
   setSelected: (id) => set({ selectedNodeId: id }),
