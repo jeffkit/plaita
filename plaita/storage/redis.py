@@ -20,6 +20,21 @@ def _require_redis():
         )
 
 
+class ExecutionStateLoadError(RuntimeError):
+    """执行状态**读取失败**（Redis 瞬断/超时或数据损坏无法反序列化）。
+
+    与「键不存在 → load_execution_state 返回 None」严格区分：调用方
+    （FlowWorker.run）对前者不 ack、走重投递/DLQ 路径，对后者才做
+    poison ack。历史上两类情况都被吞成 None，Redis 抖动一次 = 挂起
+    执行的 resume 消息被当毒丸丢弃，永久失去恢复机会（ReviewFix D1）。
+
+    注：语义上属于存储层公共契约，理想位置是 plaita/storage/base.py；
+    本次修复受改动文件白名单约束先定义在 Redis 后端模块，后续可上移。
+    （刻意不继承 ValueError——FlowWorker.run 把 ValueError 当畸形消息
+    poison ack，继承它会让瞬态错误仍被丢弃。）
+    """
+
+
 class RedisExecutionStorage(ExecutionStorage):
     """
     基于Redis的状态存储实现
@@ -82,17 +97,28 @@ class RedisExecutionStorage(ExecutionStorage):
             return False
     
     def load_execution_state(self, execution_id: str) -> Optional[ExecutionState]:
-        """加载流程执行状态"""
+        """加载流程执行状态。
+
+        键不存在 → 返回 None；读取/反序列化失败 → 抛 ``ExecutionStateLoadError``
+        （ReviewFix D1：瞬态错误不得吞成 None——那会让 worker 把 resume 消息
+        当毒丸 ack，挂起执行永久失去恢复机会）。
+        """
         key = self.get_namespace_key('execution', execution_id)
         try:
             data = self.client.get(key)
-            if not data:
-                return None
+        except Exception as e:
+            raise ExecutionStateLoadError(
+                f"读取执行状态失败（可能是 Redis 瞬断）: {execution_id}: {e}"
+            ) from e
+        if not data:
+            return None
+        try:
             state_dict = self.deserialize_state(data)
             return ExecutionState.model_validate(state_dict)
         except Exception as e:
-            logger.error("Failed to load execution state: %s", e)
-            return None
+            raise ExecutionStateLoadError(
+                f"执行状态反序列化失败（数据损坏）: {execution_id}: {e}"
+            ) from e
     
     def delete_execution_state(self, execution_id: str) -> bool:
         """删除流程执行状态"""

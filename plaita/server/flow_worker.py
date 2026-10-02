@@ -15,6 +15,7 @@ from plaita.event.core import EventBus
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.storage.base import ExecutionState, ExecutionStorage, FlowStorage
+from plaita.storage.redis import ExecutionStateLoadError
 from plaita.logger import logger
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
@@ -240,16 +241,12 @@ class FlowWorker:
         取得 ``execution_id`` 租约后才推进；另一 worker 已持有租约时抛
         ``ExecutionLeaseError``（RedisFlowWorker 对此**不** XACK，待租约过期后回收）。
         """
-        # 加载执行状态
+        # 加载执行状态。None 仅表示键不存在——Redis 后端的读取瞬断/反序列化
+        # 失败现以上抛 ExecutionStateLoadError，由 run() 的重投递路径处理，
+        # 不再被吞成 None 触发 poison ack（ReviewFix D1）。
         state = self.execution_storage.load_execution_state(execution_id)
         if not state:
-            # load 为 None 有两种可能：键不存在，或 context 损坏反序列化失败
-            # （storage 层吞成 None 并已打 error 日志）——报错要覆盖两种情况，
-            # 否则"记录明明在"的场景被误导排障（2026-09 升级演练 P2）。
-            error_msg = (
-                f"找不到执行状态（或状态损坏无法解析）: {execution_id}；"
-                "若 Redis 中确有该键，查看 storage 日志中的反序列化错误"
-            )
+            error_msg = f"找不到执行状态: {execution_id}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         
@@ -703,6 +700,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     queue.note_poison()
                     acked = True
                 except Exception as exc:
+                    # 兜底重投递路径（at-least-once）：不 ack，等超时回收。
+                    # 刻意放在 except ValueError 之后——存储层抛出的
+                    # ExecutionStateLoadError（读取瞬断/状态损坏，ReviewFix D1）
+                    # 由此处理：消息留在 pending 重投，超过 max_deliveries 才
+                    # 进 DLQ；绝不能像 ValueError 一样被当畸形消息 poison ack，
+                    # 否则 Redis 抖动一次 = 挂起执行永久失去恢复机会。
                     queue.note_failed()
                     if task.delivery_count >= queue.max_deliveries:
                         queue.dead_letter(
@@ -768,6 +771,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         return status
 
 # 新增命令行入口
+
+
+def _request_graceful_stop(worker: "RedisFlowWorker", signum: int) -> None:
+    """信号处理器入口：只请求优雅停机，绝不立即退出进程（ReviewFix D3）。
+
+    旧实现在 handler 里 ``sys.exit(0)``——SystemExit 会在 ``_dispatch_task``
+    的任意字节码边界抛出（可能正卡在 LLM 调用/存储写入之间），在途任务当场
+    腰斩、消息未 ack，退化为 crash 式重投；与控制通道停止命令的 drain 语义
+    （``_on_stop_command`` 只置位、等当前任务做完）不一致。现在 handler 只调
+    ``worker.stop()`` 置位，由 ``run()`` 主循环在任务边界自然退出——read 已切
+    成 ≤1s 分片，空转停机延迟上限 ≈1s；强制退出兜底交给 systemd/K8s 的
+    SIGKILL 超时。
+    """
+    logger.info("收到信号 %s，请求优雅停机（当前任务完成后退出）...", signum)
+    worker.stop()
 
 
 from plaita.server.factory import create_storage_component, create_event_bus  # noqa: F401
@@ -954,11 +972,11 @@ def main():
             read_block_ms=args.read_block_ms,
         )
         
-        # 注册信号处理器以支持优雅关闭
+        # 注册信号处理器以支持优雅关闭。只置位、由 run() 主循环在任务边界
+        # 自然退出；不再 sys.exit 腰斩在途任务（ReviewFix D3，语义见
+        # _request_graceful_stop）。
         def signal_handler(signum, frame):
-            logger.info("收到信号 %s，正在关闭...", signum)
-            worker.stop()
-            sys.exit(0)
+            _request_graceful_stop(worker, signum)
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)

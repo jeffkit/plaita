@@ -23,6 +23,14 @@ from plaita.server.tenant_context import (
 # 获取logger
 logger = logging.getLogger("plaita.server.event_filter")
 
+# 执行终态集合（ReviewFix D2）。必须与 flow_worker.resume_flow 的终态短路
+# 集合（completed / error / cancelled）对齐：cancelled 曾被本文件 GC 漏掉——
+# console 取消执行后，残留订阅在 TTL（约 7 天）内每个匹配事件都会入队一条
+# 注定在 worker 侧被终态短路丢弃的 resume，持续制造无效任务。
+# 理想做法是抽成跨文件共享常量（如放 plaita.storage.base 或独立常量模块，
+# flow_worker 一并引用）；受本次修复文件白名单约束先就地定义，后续可上移。
+TERMINAL_EXECUTION_STATUSES = ("completed", "error", "cancelled")
+
 
 class EventFilter:
     """
@@ -121,7 +129,7 @@ class EventFilter:
             # resume；检测到终态直接注销订阅、跳过入队。没有这步 GC，残留
             # 键只能等 7 天 TTL。
             state_status = getattr(state, "status", "") or ""
-            if state_status in ("completed", "error"):
+            if state_status in TERMINAL_EXECUTION_STATUSES:
                 for subscription in subscriptions:
                     try:
                         await self.subscription_storage.unregister_subscription(
