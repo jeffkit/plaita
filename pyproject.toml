@@ -50,6 +50,8 @@ yaml = ["PyYAML>=6.0"]
 langfuse = ["langfuse>=4.0"]
 dev = [
     "pytest",
+    # wave2 JSON 后端主路径：让 CI 门禁跑 orjson 分支而非纯 stdlib 回退
+    "orjson",
     "pytest-asyncio",
     "pytest-cov",
     "mutmut>=3.6",
