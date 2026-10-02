@@ -260,23 +260,38 @@ class TestErrorNormalization(unittest.IsolatedAsyncioTestCase):
         cb.on_flow_end.assert_called_once()
 
     async def test_finish_normal_flow_execution_exception_propagates(self):
-        """Lines 41-42: FlowExecutionException passes through untouched."""
+        """Lines 41-42: FlowExecutionException passes through untouched.
+
+        [clean C1-4, 2026-10] 语义更新（原断言钉「on_flow_end 不发」）：
+        旧注释声称 FEE 的 raise site 自行发 on_flow_end，但全仓 on_flow_end
+        只在 _error_normalization 出现，raise site 从未发过——eager 路径
+        FEE 的生命周期回调整个缺失。现在 finish_normal 在透传前补发
+        on_flow_end，error 带异常自身的 {code, message}，exception 原样
+        透传；异常继续向上抛（传播语义不变）。
+        """
         from plaita.core.errors import FlowExecutionException
 
         class MyFlowExc(FlowExecutionException):
-            pass
+            code = -777
 
         async def failing_coro():
-            raise MyFlowExc("flow exc")
+            raise MyFlowExc(-777, "flow exc")
 
         flow = MagicMock()
         cb = MagicMock()
         cb.on_flow_end = MagicMock()
 
-        with self.assertRaises(MyFlowExc):
+        with self.assertRaises(MyFlowExc) as cm:
             await finish_normal(failing_coro(), flow, cb)
-        # on_flow_end should NOT be called for FlowExecutionException
-        cb.on_flow_end.assert_not_called()
+        # [clean C1-4] FEE 也必须发 on_flow_end，且 error 可区分（code 透传）
+        cb.on_flow_end.assert_called_once()
+        args, kwargs = cb.on_flow_end.call_args
+        self.assertIs(args[1], None)  # result=None
+        self.assertEqual(args[2]["code"], -777)
+        self.assertEqual(args[2]["message"], "flow exc")
+        # exception 原样透传（kwargs 传参），传播语义不变
+        self.assertIs(kwargs.get("exception"), cm.exception)
+
 
     async def test_finish_normal_success_calls_on_flow_end(self):
         """Line 48: successful completion calls on_flow_end."""
@@ -306,18 +321,28 @@ class TestErrorNormalization(unittest.IsolatedAsyncioTestCase):
         self.assertIn("code", call_kwargs[1].get("error", call_kwargs[0][2] if len(call_kwargs[0]) > 2 else {}))
 
     def test_emit_flow_end_on_close_flow_exc_calls_result_none(self):
-        """Line 77: FlowExecutionException → result=None callback."""
+        """Line 77: FlowExecutionException → result=None callback.
+
+        [clean C1-4, 2026-10] 语义更新（原断言钉「回调收到 result=None 且无
+        error」）：lazy 分支历史上把 FEE 抹成 result=None / error=None，宿主
+        无法从回调区分失败与正常结束。result=None 语义保留，但 error 现在带
+        异常自身的 {code, message}。
+        """
         from plaita.core.errors import FlowExecutionException
 
         flow = MagicMock()
         cb = MagicMock()
         cb.on_flow_end = MagicMock()
 
-        exc = FlowExecutionException("flow exc")
+        exc = FlowExecutionException(-777, "flow exc")
         emit_flow_end_on_close(flow, exc, cb)
 
-        cb.on_flow_end.assert_called_once_with(flow, result=None)
-
+        cb.on_flow_end.assert_called_once()
+        args, kwargs = cb.on_flow_end.call_args
+        self.assertIs(args[1], None)  # result 仍为 None
+        self.assertEqual(args[2]["code"], -777)
+        self.assertEqual(args[2]["message"], "flow exc")
+        self.assertIs(kwargs.get("exception"), exc)
     def test_emit_flow_end_on_close_no_exc_calls_result_none(self):
         """Line 77: None exception → result=None callback."""
         flow = MagicMock()

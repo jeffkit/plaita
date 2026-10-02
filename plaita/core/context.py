@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from plaita.core import types
 from plaita.core.expression import ExpressionEvaluator
-from plaita.core.state import CheckpointState
+from plaita.core.state import CheckpointState, _LazyRootSnapshot
 
 if TYPE_CHECKING:
     from plaita.node.basic import Node
@@ -297,10 +297,20 @@ class ExecutionContext(_SystemStateAccessors):
         # deepcopy，非热路径。
         global_context = (copy.deepcopy(flow.global_context) if flow.global_context else {})
         global_context.update({"flow_id": flow.flow_id})
-        # $PARENT is a plain-dict snapshot (checkpoint-safe; not a live state).
+        # $PARENT is a snapshot (checkpoint-safe; not a live state)。
+        # C1-2（2026-10 评审修复包 C1）：历史上 ``dict(parent.context)`` 是浅
+        # 拷贝——``$PARENT.NODE`` 与父 live ``$NODE`` 是同一对象，双向写穿
+        # （子流程写 $PARENT 污染父运行态；父继续 update_node_result 让子侧
+        # "冻结"快照漂移）。
+        # 惰性按根键快照（_LazyRootSnapshot）：子流程 setup 在热路径上
+        # （while/for 每轮一次），全量深快照会重演 loop.py ML1 修掉的
+        # 「每轮全量 deepcopy」回归；父执行在 InlineFlow 子流程存续期被
+        # 引擎阻塞，按根键首读物化与 setup 时全量快照语义等价，从未读取的
+        # 根键零成本。落盘/恢复经 to_checkpoint_dict / from_checkpoint_dict
+        # 完全物化，惰性对象不出进程。
         self._state.setup_flow(
             input_value=_coerce_input_value(args, kwargs),
-            parent_context=dict(self.parent.context) if self.parent else {},
+            parent_context=_LazyRootSnapshot(self.parent.context) if self.parent else {},
             global_context=global_context,
             flow_id=flow.flow_id,
             env=env,

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from plaita.dsl.codeflow._common import (
     _COLLECTION_CALL_NAMES,
+    _NS_PREFIX,
     _CodeflowError,
     _CompileCtx,
     _annotate_source,
@@ -348,6 +349,33 @@ def _compile_for(
     return node_id
 
 
+def _references_assign_name(expr: ast.expr, name: str) -> bool:
+    """赋值右侧是否引用了正在赋值的变量名（自引用检测，C1-1）。
+
+    codeflow 禁止同名重复赋值（每个赋值是一个节点），故 RHS 里出现的裸
+    ``name`` 只能解析成本赋值节点自己（``$NODE.<name>``）——编译期放行的话
+    运行期必然 ``NoneType`` 参与运算炸掉。覆盖：
+
+    - 裸名 ``x``（含三元 ``x = x if ... else ...``、嵌套调用/字面量内）；
+    - 显式 ``NODE.x``（赋值节点 id 即变量名，同为自引用）。
+
+    保留命名空间（INPUT/NODE/GLOBAL/...，见 ``_NS_PREFIX``）不作裸名检测——
+    它们在 ``_resolve_name`` 里先于 ``ctx.names`` 解析，赋值同名变量不会让
+    RHS 自指（如 ``NODE = NODE.x`` 写 ``$NODE.NODE``，读的是 x 节点，非环形）。
+    """
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Name) and node.id == name and name not in _NS_PREFIX:
+            return True
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == name
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "NODE"
+        ):
+            return True
+    return False
+
+
 def _compile_assign(
     head: ast.Assign, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
@@ -356,6 +384,13 @@ def _compile_assign(
     name = head.targets[0].id
     value = head.value
 
+    # C1-1：自引用在编译期显式拦截。检测先于名字登记（登记本身不受影响，
+    # 后续语句仍能解析该名字）；三元/嵌套形态经 ast.walk 全量覆盖。
+    if _references_assign_name(value, name):
+        raise _CodeflowError(
+            f"变量 {name!r} 的赋值右侧引用了它自己：自引用赋值请引入中间变量，"
+            "或用 REDUCE 做聚合", head)
+
     # 先登记名字映射（不预 claim，避免与 _compile_node_call 的 auto_id 冲突），
     # 这样后续语句引用 name 时能解析成 $NODE.<name>
     ctx.names[name] = f"$NODE.{name}"
@@ -363,6 +398,16 @@ def _compile_assign(
     after = _compile_block(rest, ctx, succ)
     if after is None:
         raise _CodeflowError(f"赋值 {name} 之后悬空：请补 return 或后续语句", head)
+
+    # C1-1：同名重复赋值此前落到 ctx.claim 的「节点 id 重复」文案，对赋值
+    # 场景有误导（变量名即节点 id，重复的其实是赋值本身）。注意 rest 先于
+    # 本赋值编译：重复赋值时后一条的节点已先 claim 了该名字，在这里统一按
+    # 赋值语义报错（节点调用路径 x = HTTP(...) 同样被此检查覆盖）。
+    if name in ctx._claimed:
+        raise _CodeflowError(
+            f"变量 {name!r} 被多次赋值：codeflow 每个赋值是一个节点，变量名即"
+            "节点 id，同一 id 只能出现一次。请换用新变量名，或把赋值收拢到"
+            "单一节点/分支里", head)
 
     if isinstance(value, ast.Call) and (
         _node_call_kind(value.func) is not None
