@@ -77,7 +77,7 @@ jobs:
       # 拆步诊断：停滞只知「卡在 gate 大步内」，拆成 4 相位让 steps API
       # 暴露卡点阶段（ci-gate.sh 支持相位参数；本地四相位全绿）
       - name: CI gate [1/4] pytest + coverage
-        run: bash scripts/ci-gate.sh pytest
+        run: bash scripts/ci-gate.sh pytest -v  # 临时：137 定位（点名死前测试）
       - name: CI gate [2/4] import layering
         run: bash scripts/ci-gate.sh layering
       - name: CI gate [3/4] wheel contents

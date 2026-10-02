@@ -11,6 +11,7 @@ FAIL=0
 # 相位选择：./ci-gate.sh [pytest|layering|wheel|size]——CI 拆步调用（停滞时
 # steps API 暴露卡点阶段）；无参跑全量（本地用法不变）
 PHASE="${1:-all}"
+EXTRA_ARGS="${2:-}"
 run_phase() { [ "$PHASE" = "all" ] || [ "$PHASE" = "$1" ]; }
 
 echo "========================================"
@@ -31,7 +32,7 @@ if python -m pytest tests/ \
     --cov=plaita \
     --cov-report=term-missing \
     --cov-fail-under="$COVERAGE_THRESHOLD" \
-    $TIMEOUT_ARGS \
+    $TIMEOUT_ARGS $EXTRA_ARGS \
     -x -q; then
     echo "  ✓ All tests passed with coverage >= ${COVERAGE_THRESHOLD}%"
 else
