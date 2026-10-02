@@ -128,8 +128,9 @@ class TestCodeNodeOptInPreserved:
                                             "next": "e"},
                                            {"type": "end", "id": "e"}]}
             )
-        # opt-in 后能解析
-        register_code_node()
+        # opt-in 后能解析（显式弱后端：本测试钉注册解耦语义，不依赖
+        # Docker daemon——容器 CI 无 docker，默认 docker 后端会拒注册）
+        register_code_node(default_backend="subprocess")
         try:
             flow = Flow.model_validate(
                 {"flow_id": "x", "nodes": [{"type": "start", "id": "s", "next": "c"},
