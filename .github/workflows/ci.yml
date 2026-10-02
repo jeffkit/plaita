@@ -38,14 +38,19 @@ jobs:
       matrix:
         # 3.12/3.13 为 2026-09 版本矩阵评审补充：本机验证一直在 3.13、CI 只测
         # 3.10，中间版本从未被任何环境覆盖
-        # 单腿消元实验：验证 matrix 并发是否为停滞触发器（结论后恢复三腿）
-        python-version: ["3.12"]
-    # 钉 ubuntu-24.04：2026-10-01 起 ubuntu-latest 镜像漂移导致回归门 pytest
-    # 步三腿同步停滞（35min 超时，纯 main 可复现），钉版本隔离镜像变量。
+        python-version: ["3.13"]
     runs-on: ubuntu-24.04
+    # 容器隔离绕行（2026-10-01）：runner 宿主环境层面停滞（四轮消元：
+    # matrix/cache/label/测试本身均排除——纯 main 可复现、本地 mac+linux
+    # 断网全量 70-102s 绿、日志 blob 从未上传）。把门禁整体搬进
+    # python:3.13 容器（本地 docker 同构环境实测全绿 102s）。
+    container:
+      image: python:3.13
     env:
       PYTHONUNBUFFERED: "1"
     steps:
+      - name: Install git (checkout 依赖)
+        run: apt-get update -q && apt-get install -yq git && git --version
       - uses: actions/checkout@v6
 
       - name: Set up Python
