@@ -354,14 +354,23 @@ class FlowExecution:
         """
         self._begin_run()
         try:
-            return _drive_strategy(
-                self._prepare_strategy(flow, lazy, args, kwargs),
-                lazy=lazy, sync=True,
-                finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-                on_lazy_finally=lambda exc: (
-                    _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
-                ),
-            )
+            try:
+                return _drive_strategy(
+                    self._prepare_strategy(flow, lazy, args, kwargs),
+                    lazy=lazy, sync=True,
+                    finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+                    on_lazy_finally=lambda exc: (
+                        _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
+                    ),
+                )
+            except BaseException:
+                # review-fix B3: lazy 模式下 generator 交出前抛错（典型是
+                # _prepare_strategy 校验失败）时 on_lazy_finally 尚未注册，
+                # 不复位 _running 会永久毒化实例——下次 run 报 "already
+                # running" 伪装真实死因。交出之后由 on_lazy_finally 复位。
+                if lazy:
+                    self._running = False
+                raise
         finally:
             if not lazy:
                 self._running = False
@@ -370,14 +379,21 @@ class FlowExecution:
         """Async execution — canonical path."""
         self._begin_run()
         try:
-            driven = _drive_strategy(
-                self._prepare_strategy(flow, lazy, args, kwargs),
-                lazy=lazy, sync=False,
-                finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
-                on_lazy_finally=lambda exc: (
-                    _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
-                ),
-            )
+            try:
+                driven = _drive_strategy(
+                    self._prepare_strategy(flow, lazy, args, kwargs),
+                    lazy=lazy, sync=False,
+                    finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+                    on_lazy_finally=lambda exc: (
+                        _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
+                    ),
+                )
+            except BaseException:
+                # review-fix B3: 同 run_compatible——lazy 交出 generator 前
+                # 抛错必须复位 _running，否则实例永久毒化。
+                if lazy:
+                    self._running = False
+                raise
             if lazy:
                 return driven
             return await driven
@@ -447,21 +463,30 @@ class FlowExecution:
 
         Prefer this over the ``FlowExecution.run`` classmethod when you need
         to advance a distributed flow node-by-node without losing callbacks.
+
+        「复用同一实例」指跨步骤**顺序**复用（每步调用返回后再调下一步）；
+        并发重叠调用同一实例仍然禁止——review-fix B4 起套用与
+        ``run_compatible`` 相同的 ``_begin_run`` 非重入守卫（每步调用期间
+        持有，返回即释放，顺序复用零额外成本）。
         """
-        self._ensure_flow_resolved(flow)
-        coro = self._strategies[ExecutionMode.DISTRIBUTED.value].execute(
-            flow, self._ctx, self._runner, self.callback_manager, params, timeout,
-            saved_context=saved_context, resume_type=resume_type, resume_data=resume_data,
-        )
-        # 分布式每步独立 loop：步内同包 flow-scoped HTTP session（复用窗口=本步）
-        coro = _flow_session_scoped(coro)
-        # 历史上 run_distributed 把任何异常（含具体的 FlowExecutionException 子类）
-        # 归一化为 FLOW_ERROR / -500 作为分布式对外契约；此处保留该契约，
-        # 具体子类仅用于内部抛点与 normal 模式（_finish_normal 让其透传）。
+        self._begin_run()
         try:
-            return _run_async_sync(coro)
-        except Exception as e:
-            _raise_distributed_error(e, flow, self.callback_manager)
+            self._ensure_flow_resolved(flow)
+            coro = self._strategies[ExecutionMode.DISTRIBUTED.value].execute(
+                flow, self._ctx, self._runner, self.callback_manager, params, timeout,
+                saved_context=saved_context, resume_type=resume_type, resume_data=resume_data,
+            )
+            # 分布式每步独立 loop：步内同包 flow-scoped HTTP session（复用窗口=本步）
+            coro = _flow_session_scoped(coro)
+            # 历史上 run_distributed 把任何异常（含具体的 FlowExecutionException 子类）
+            # 归一化为 FLOW_ERROR / -500 作为分布式对外契约；此处保留该契约，
+            # 具体子类仅用于内部抛点与 normal 模式（_finish_normal 让其透传）。
+            try:
+                return _run_async_sync(coro)
+            except Exception as e:
+                _raise_distributed_error(e, flow, self.callback_manager)
+        finally:
+            self._running = False
 
     def _run_distributed(self, flow, params=None, timeout=None, context=None,
                          resume_type="continue", resume_data=None, **options):

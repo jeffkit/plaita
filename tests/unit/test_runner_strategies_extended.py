@@ -341,13 +341,17 @@ class TestGeneratorStrategy(unittest.IsolatedAsyncioTestCase):
                 pass
 
     async def test_not_reached_end_yields_end_output(self):
-        """Lines 183-186: when next_node becomes None but not via end node, yields end output."""
+        """Lines 183-186: when next_node becomes None but not via end node, yields end output.
+
+        review-fix B1 后缺 next 的非 End 节点默认抛错；这里用
+        errorHandler.strategy=continue 走遗留逃生口，仍压到合成 end 输出路径。
+        """
         ctx = ExecutionContext()
         cb = MagicMock()
         cb.on_node_start = MagicMock()
         cb.on_node_end = MagicMock()
 
-        node = _OkNode(id="n1", name="n1")
+        node = _OkNode(id="n1", name="n1", error_handler={"strategy": "continue"})
         flow = MagicMock()
         flow.start_node = node
         flow.is_end_node.return_value = False  # NOT the end node

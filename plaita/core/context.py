@@ -8,6 +8,7 @@ and expression evaluation delegation.
 
 from __future__ import annotations
 
+import copy
 import os
 import uuid
 import logging
@@ -271,9 +272,16 @@ class ExecutionContext(_SystemStateAccessors):
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         """Populate $INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV and sync expose_env."""
         flow_allowlist = list(getattr(flow, "expose_env", None) or [])
-        if flow_allowlist != self.expose_env:
-            self.expose_env = flow_allowlist
-        global_context = (flow.global_context.copy() if flow.global_context else {})
+        # review-fix B3（伴生）: 先验证新 allowlist 再提交——否则非法 allowlist
+        # （如 ["*"]）在此处抛错时 expose_env 已被污染，同一实例下次 run 的
+        # clean() 立刻用脏值再次爆炸，把「prepare 抛错」放大成「实例报废」。
+        env = _safe_environment(flow_allowlist)
+        self.expose_env = flow_allowlist
+        # review-fix B2: 必须 deepcopy——浅 copy 的话 run 内节点写 $GLOBAL 嵌套
+        # 值（如 $GLOBAL.cfg.timeout = 30）会穿透进 Flow 定义本体，同一 Flow
+        # 实例的下一次 run 继承脏值（跨 run 状态泄漏）。每次 run 仅此一次
+        # deepcopy，非热路径。
+        global_context = (copy.deepcopy(flow.global_context) if flow.global_context else {})
         global_context.update({"flow_id": flow.flow_id})
         # $PARENT is a plain-dict snapshot (checkpoint-safe; not a live state).
         self._state.setup_flow(
@@ -281,7 +289,7 @@ class ExecutionContext(_SystemStateAccessors):
             parent_context=dict(self.parent.context) if self.parent else {},
             global_context=global_context,
             flow_id=flow.flow_id,
-            env=_safe_environment(self.expose_env),
+            env=env,
         )
 
     def evaluate(self, value: Any) -> Any:
