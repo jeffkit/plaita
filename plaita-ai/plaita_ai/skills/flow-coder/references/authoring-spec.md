@@ -140,6 +140,37 @@ flow = flow_from_source(src)
 
 > **`F.*` 扩展现状**：注册自定义表达式函数目前**没有公开 API**（mediaflow 用 `ExpressionParser._registry.register` 私有口，见其 `expressions.py`，脆弱）。新业务仓优先用 CODE 节点 / 业务节点替代；确需 `F.*` 时集中在一个 `expressions.py` 并注释私有 API 风险。
 
+### 5.2 沙箱执行（agentrun + workspace，coding 场景）
+
+`agentrun` 节点声明 `workspace` 字段（`.plaita/sandboxes.json` 里的名字，**infra
+注册表，flow 只按名引用**）即把执行面关进沙箱：agent 的工具调用（bash/测试）在
+隔离环境执行，控制面（checkpoint/EventBus）留宿主；数据进出只经 git
+（clone 进 / push 出）。
+
+```python
+plan = AGENTRUN(agent=INPUT.agent, workspace="main",
+                prompt=F.concat("阅读仓库并修复 issue：", INPUT.issue))
+fix  = AGENTRUN(agent=INPUT.agent, workspace="main",       # 同 workspace 串行接力
+                prompt=F.concat("按计划修复并跑通测试：", NODE.plan.text))
+```
+
+作者约束（编译期不拦，运行期才炸的坑）：
+
+- `workspace` 与 `repo` **互斥**（workspace=沙箱 / repo=宿主直跑）；
+- `workspace` 支持表达式（fan-out 写 `"task-{% $LOOP-INDEX %}"`），**求值为空
+  即硬失败**——`$NODE` 缺键会静默 None，空名会让所有迭代共享同一沙箱；
+- 未注册名 fail-closed；**spec 表达式必须确定性**（禁 `$F.now()`），否则按名
+  重派生的断点续跑不成立；
+- 同一 workspace 禁止出现在并行分支（workspace 级租约会在运行期快速失败）；
+- 沙箱产物在**沙箱内 push**（出活约定 + 挂起时自动 wip 留档），宿主侧
+  `git_publish` 指向遗留 checkout 会被运行期警告（绊线）；
+- 大文件内容/diff 不进 prompt 上下文——留在 git 里，用路径/commit 引用
+  （checkpoint 对全量上下文逐步重序列化，成本随步数二次方增长）。
+
+driver 选型（注册表 `driver` 字段）：`docker`（现役）/ `krunvm`（本地 microVM
+实验档）/ `ssh`（远端 VM 实验档，定义需 host/user/identity 等）——flow 写法
+不感知 driver。全貌见 plaita-nodes `docs/sandbox-drivers-design.md`。
+
 ## 6. 业务 flow 项目结构模板
 
 mediaflow 验证过的结构，新业务仓照抄：
