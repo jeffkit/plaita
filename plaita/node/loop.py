@@ -1,8 +1,9 @@
 import asyncio
 import json
 import logging
+import re
 from copy import deepcopy
-from typing import Annotated, Any, ClassVar, Dict, List, Optional, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 from pydantic import Field, model_validator
 
@@ -51,6 +52,112 @@ def _coerce_collection(value: Any) -> List[Any]:
     return list(value)
 
 
+# ---------------------------------------------------------------------------
+# 循环条件求值上下文（ML1 热路径修复）
+# ---------------------------------------------------------------------------
+_UNSET = object()  # 哨兵：「未提供 result」（区别于 result=None 的合法值）
+
+# 历史：Loop/While 每轮 ``deepcopy(execution.context)`` 评条件 —— 生产上下文
+# 携带全部上游节点输出（AGENTRUN 大文本），千次迭代 = 千次全量深拷贝（实测
+# 500 轮 × ~0.9MB 上下文 ≈ 13.5s，96% 墙钟时间在 deepcopy）。
+#
+# 现策略：顶层浅拷贝 + 注入 LOOP-* 键；再把「条件文本静态引用到的根键」的值
+# 逐个 deepcopy 替换。条件求值对 context 只读（expression_parser 的求值 thunk
+# 只做 ``context[root_key]`` 读；历史上的线程栈 _push_frame 已不在热路径），
+# 未引用的根共享读零成本。被引用的根保持与全量 deepcopy 等价的写隔离——
+# 表达式引擎有 ``$F.set`` / ``$F.pop`` / ``$F.clear`` 等 mutate 函数（见
+# core/expression.py，has_side_effects=True），条件引用它们时只能改到副本，
+# 不污染原 context（契约钉在 tests/unit/test_loop.py::TestLoopConditionIsolation）。
+
+# prefix -> 编译好的根 token 正则（express_prefix 可配置，按前缀缓存）
+_ROOT_TOKEN_PATTERNS: Dict[str, "re.Pattern"] = {}
+
+
+def _root_token_pattern(prefix: str) -> "re.Pattern":
+    """匹配表达式中「根键 token」的正则。
+
+    文法对齐 expression_parser._build_grammar 的 root 规则：
+    ``root = prefix + Optional(name_token)``，``name_token = alphanums + "_-$"``。
+    ``$F.`` 是函数命名空间不是上下文根，负前瞻排除（``$FLOW``/``$FOO`` 不受影响）。
+    """
+    pattern = _ROOT_TOKEN_PATTERNS.get(prefix)
+    if pattern is None:
+        pattern = re.compile(re.escape(prefix) + r"(?!F\.)[\w\-$]*")
+        _ROOT_TOKEN_PATTERNS[prefix] = pattern
+    return pattern
+
+
+def _collect_condition_strings(value: Any, out: List[str]) -> None:
+    """递归收集条件树里的所有字符串。
+
+    镜像 evaluate 的递归形状：list/tuple 逐元素、dict 只走 value（表达式引擎
+    对 dict 也是 ``{key: eval(val)}``，键不参与求值）。非字符串叶子（int/bool/
+    None 等）被 evaluate 原样返回，无根引用。
+    """
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, Condition):
+        _collect_condition_strings(value.field, out)
+        _collect_condition_strings(value.value, out)
+    elif isinstance(value, ConditionGroup):
+        for cond in value.conditions:
+            _collect_condition_strings(cond, out)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _collect_condition_strings(v, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _collect_condition_strings(v, out)
+
+
+def _isolated_root_keys(condition: Any, pfx: str) -> Tuple[str, ...]:
+    """静态扫描条件，返回条件求值可能触碰的顶层上下文键。
+
+    安全性关键在「绝不漏扫」：表达式文法里根键只能是字面 ``prefix+name`` token
+    （无动态拼根、thunk 只捕获结构），所以任何引用路径都会出现在条件文本里；
+    字符串字面量里恰好长得像根 token 会被多拷（无害，只是多做一次深拷贝）。
+    """
+    strings: List[str] = []
+    _collect_condition_strings(condition, strings)
+    pattern = _root_token_pattern(pfx)
+    keys: List[str] = []
+    for s in strings:
+        for token in pattern.findall(s):
+            if token == f"{pfx}FLOW":  # $FLOW 是 $FLOW_ID 的文法别名
+                token = f"{pfx}FLOW_ID"
+            if token and token not in keys:
+                keys.append(token)
+    return tuple(keys)
+
+
+def _condition_context(
+    execution,
+    condition: Any,
+    *,
+    item: Any,
+    index: int,
+    result: Any = _UNSET,
+) -> Dict[str, Any]:
+    """构造循环条件求值用的上下文。
+
+    顶层浅拷贝 + 注入 LOOP-ITEM/LOOP-INDEX（Loop 另注入 LOOP-RESULT）；
+    随后仅对条件引用到的根键做 deepcopy 替换（写隔离），其余键与
+    execution.context 共享对象（只读）。
+    """
+    pfx = execution.express_prefix
+    loop_ctx = dict(execution.context)
+    loop_ctx[f"{pfx}LOOP-ITEM"] = item
+    loop_ctx[f"{pfx}LOOP-INDEX"] = index
+    if result is not _UNSET:
+        loop_ctx[f"{pfx}LOOP-RESULT"] = result
+    for key in _isolated_root_keys(condition, pfx):
+        try:
+            loop_ctx[key] = deepcopy(loop_ctx[key])
+        except KeyError:
+            pass  # 条件引用了上下文中不存在的根：与全量 deepcopy 一样缺席，求值期按原语义报 KeyError
+    return loop_ctx
+
+
 class BaseCollectionNode(InlineFlow):
     """Shared base for all collection-processing nodes.
 
@@ -97,41 +204,35 @@ class Loop(BaseCollectionNode):
 
     def execute(self, execution):
         collection = self._eval_collection(execution)
-        results = []
-        pfx = execution.express_prefix
+        # ML2: 输出语义是「最后一次迭代的结果」（空集合为 None），不再保留
+        # 全部迭代结果列表——大集合场景避免内存无谓翻倍。
+        last_result = None
         index = 0
         for item in collection:
             item_execution = execution.get_child_execution()
-            result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
-            results.append(result)
-            if self.condition:
-                loop_ctx = deepcopy(execution.context)
-                loop_ctx[f"{pfx}LOOP-ITEM"] = item
-                loop_ctx[f"{pfx}LOOP-INDEX"] = index
-                loop_ctx[f"{pfx}LOOP-RESULT"] = result
-                if not self.condition.match(loop_ctx, pfx):
-                    break
+            last_result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
+            if self.condition and not self.condition.match(
+                _condition_context(execution, self.condition, item=item, index=index, result=last_result),
+                execution.express_prefix,
+            ):
+                break
             index += 1
-        return results[-1] if len(results) > 0 else None
+        return last_result
 
     async def arun(self, execution):
         collection = self._eval_collection(execution)
-        results = []
-        pfx = execution.express_prefix
+        last_result = None
         index = 0
         for item in collection:
             item_execution = execution.get_child_execution()
-            result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
-            results.append(result)
-            if self.condition:
-                loop_ctx = deepcopy(execution.context)
-                loop_ctx[f"{pfx}LOOP-ITEM"] = item
-                loop_ctx[f"{pfx}LOOP-INDEX"] = index
-                loop_ctx[f"{pfx}LOOP-RESULT"] = result
-                if not self.condition.match(loop_ctx, pfx):
-                    break
+            last_result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
+            if self.condition and not self.condition.match(
+                _condition_context(execution, self.condition, item=item, index=index, result=last_result),
+                execution.express_prefix,
+            ):
+                break
             index += 1
-        return results[-1] if len(results) > 0 else None
+        return last_result
 
 
 class Map(BaseCollectionNode):
@@ -382,11 +483,9 @@ class While(InlineFlow):
         """condition 为 None 时不循环（仅执行一轮）；否则条件满足才继续。"""
         if self.condition is None:
             return index == 0
-        loop_ctx = deepcopy(execution.context)
-        pfx = execution.express_prefix
-        loop_ctx[f"{pfx}LOOP-ITEM"] = result
-        loop_ctx[f"{pfx}LOOP-INDEX"] = index
-        return bool(self.condition.match(loop_ctx, pfx))
+        # While 语义不注入 LOOP-RESULT（条件可引用 $LOOP-ITEM / $LOOP-INDEX）
+        loop_ctx = _condition_context(execution, self.condition, item=result, index=index)
+        return bool(self.condition.match(loop_ctx, execution.express_prefix))
 
     def execute(self, execution):
         index = 0
