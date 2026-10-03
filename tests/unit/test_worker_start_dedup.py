@@ -342,6 +342,9 @@ class TestConsoleBFF:
         """BFF StartFlowRequest additive 字段：缺省 None（旧客户端零变化）。"""
         pytest.importorskip("fastapi")
         pytest.importorskip("pydantic")
+        # api.executions 链上 import sse_starlette（console backend 依赖，
+        # 不在 plaita dev extras 内——无此包的环境优雅跳过）
+        pytest.importorskip("sse_starlette")
         import sys
         from pathlib import Path
 
