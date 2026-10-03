@@ -2543,7 +2543,7 @@ class TestDetermineCurrentNodeArgPrecision(unittest.IsolatedAsyncioTestCase):
         # No last_node_id → calls _start_new_flow
 
         captured_ctx = []
-        async def mock_start_new_flow(flow, context, runner, cb):
+        async def mock_start_new_flow(flow, context, runner, cb, max_timeout_ms=None):
             captured_ctx.append(context)
             return (None, {}, None)
 

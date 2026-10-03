@@ -263,7 +263,8 @@ class DistributedStrategy:
                             node=suspended_node,
                         )
 
-        current_node, result, branch = await self._determine_current_node(flow, context, runner, callback_manager)
+        current_node, result, branch = await self._determine_current_node(
+            flow, context, runner, callback_manager, max_timeout_ms=timeout_ms)
 
         if not current_node:
             result = context.get_state(f"{pfx}{context.express_node_name}", {})
@@ -271,11 +272,11 @@ class DistributedStrategy:
 
         return await self._execute_current_node(flow, context, runner, callback_manager, current_node)
 
-    async def _determine_current_node(self, flow, context, runner, callback_manager):
+    async def _determine_current_node(self, flow, context, runner, callback_manager, max_timeout_ms=None):
         last_node_id = context.last_node_id
         if last_node_id:
             return self._get_next_from_last(flow, context, last_node_id)
-        return await self._start_new_flow(flow, context, runner, callback_manager)
+        return await self._start_new_flow(flow, context, runner, callback_manager, max_timeout_ms)
 
     def _get_next_from_last(self, flow, context, last_node_id):
         pfx = context.express_prefix
@@ -298,12 +299,13 @@ class DistributedStrategy:
                 _handle_missing_next(current_node)
         return next_node, result, branch
 
-    async def _start_new_flow(self, flow, context, runner, callback_manager):
+    async def _start_new_flow(self, flow, context, runner, callback_manager, max_timeout_ms=None):
         start_node = flow.start_node
         if not start_node:
             return None, None, None
 
-        result, branch = await runner.run_node(flow, start_node, callback_manager=callback_manager)
+        result, branch = await runner.run_node(
+            flow, start_node, callback_manager=callback_manager, max_timeout_ms=max_timeout_ms)
 
         # flow.next_node already handles both branching and non-branching nodes;
         # no need to replicate the "if start_node.next" guard here.
@@ -317,8 +319,9 @@ class DistributedStrategy:
                 _handle_missing_next(start_node)
         return current_node, result, branch
 
-    async def _execute_current_node(self, flow, context, runner, callback_manager, current_node):
-        result, branch = await runner.run_node(flow, current_node, callback_manager=callback_manager)
+    async def _execute_current_node(self, flow, context, runner, callback_manager, current_node, max_timeout_ms=None):
+        result, branch = await runner.run_node(
+            flow, current_node, callback_manager=callback_manager, max_timeout_ms=max_timeout_ms)
 
         if flow.is_end_node(current_node):
             return _create_end_output(current_node, result, context.to_dict(), execution_id=context.execution_id)
