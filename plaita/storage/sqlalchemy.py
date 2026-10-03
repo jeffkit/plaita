@@ -41,6 +41,11 @@ class ExecutionStateModel(Base):
     flow_version = Column(String(50), nullable=True)
     # 波次二任务②：启动时 Flow 定义指纹（sha256）；老行缺列值 → None → resume 跳过校验
     flow_hash = Column(String(64), nullable=True)
+    # 2026-10-03：ExecutionState 携带租户（路由存储按它选 namespace）——此前
+    # 列缺失导致 INSERT 路径 `**state_dict` 对未知字段直接 TypeError。存量库
+    # 需手工 `ALTER TABLE execution_states ADD COLUMN tenant_id VARCHAR(100)`
+    # （create_all 不补列；本后端 experimental）。
+    tenant_id = Column(String(100), nullable=True)
     context = Column(JSON, nullable=False)
     status = Column(String(50), nullable=False, index=True)
     start_time = Column(String(50), nullable=True)
@@ -112,19 +117,25 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                 result = await session.execute(query)
                 existing = result.scalar_one_or_none()
                 
-                # 准备数据
+                # 准备数据：过滤到模型已知列——ExecutionState 的字段集与表的
+                # 列集不逐一对齐（tenant_id 曾因此 INSERT 必炸 TypeError），
+                # 显式 `execution_id=` + `**state_dict` 还会重复传参。两条路径
+                # 都用列名过滤，未知字段显式丢弃而不是靠 setattr 撞运气。
                 state_dict = state.model_dump() if hasattr(state, 'model_dump') else state
-                
+                column_keys = set(ExecutionStateModel.__table__.columns.keys())
+                row_data = {k: v for k, v in state_dict.items() if k in column_keys}
+
                 if existing:
                     # 更新现有记录
-                    for key, value in state_dict.items():
+                    for key, value in row_data.items():
                         setattr(existing, key, value)
                     existing.updated_at = datetime.now()
                 else:
-                    # 创建新记录
+                    # 创建新记录（execution_id 已显式传入，从行数据里摘除防重复传参）
+                    row_data.pop("execution_id", None)
                     model = ExecutionStateModel(
                         execution_id=execution_id,
-                        **state_dict
+                        **row_data
                     )
                     session.add(model)
                 
@@ -155,6 +166,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                     'flow_name': model.flow_name,
                     'flow_version': model.flow_version,
                     'flow_hash': model.flow_hash,
+                    'tenant_id': model.tenant_id,
                     'context': model.context,
                     'status': model.status,
                     'start_time': model.start_time,

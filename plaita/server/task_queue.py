@@ -397,7 +397,15 @@ class RedisStreamTaskQueue:
             if not claimed:
                 continue
             mid, fields = claimed[0]
-            # XCLAIM increments delivery count; use pending's count + 1 as best effort
+            # delivery_count 语义（2026-10-03 澄清，勿「顺手修」成 +1）：
+            # `deliveries` = XCLAIM 前的 times_delivered（已完成派发次数），
+            # 本次 XCLAIM 是第 deliveries+1 次投递，故这里上报的是
+            # 「即将进行的这次处理」的**前一次**序号——看似差一，但两侧
+            # `>= max_deliveries` 死信检查（本函数与 FlowWorker.run 兜底）
+            # 净值恰为「max_deliveries 次处理后死信」，与「最大投递次数」
+            # 契约一致。改成 +1 会让死信提前一轮（5 次变 4 次）。该值仅作
+            # 阈值判据与可观测透传（FlowWorker 节点重试预算另用 Redis 计数
+            # 键，不依赖它），报告展示时理解为 attempt-1 即可。
             task = self._task_from_fields(
                 _decode(mid), fields, delivery_count=max(deliveries, 1)
             )
