@@ -783,6 +783,23 @@ class FlowWorker:
             )
             self._persist_state_or_raise(execution_id, state, "start")
 
+            # start 入口取消检查点（与 resume 入口对称）：BFF cancel 可发生在
+            # 「已入队、未消费」窗口，更关键的是 start 消息 at-least-once 重投
+            # 时（在途失败→未 ack→重投）同 id 重跑整条 flow——不查标志则
+            # 已取消意图永远等不到步界（E2E drill 3 实证：超时 flow 空转
+            # N×900s）。命中即终态化，不再执行。
+            if self._cancel_requested(execution_id):
+                state.status = "cancelled"
+                state.end_time = datetime.now().isoformat()
+                self._persist_state_or_raise(execution_id, state, "cancelled_at_start_entry")
+                self._finalize_observers()
+                logger.info("执行 %s 在 start 入口命中取消标志，终态化", execution_id)
+                return {
+                    "execution_id": execution_id,
+                    "status": "cancelled",
+                    "cancelled_at_start": True,
+                }
+
             # 执行流程，获取初始结果
             result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 

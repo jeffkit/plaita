@@ -308,3 +308,23 @@ class TestTerminalShortCircuitMatrix:
             }
             result = worker.resume_flow("f1", "exec-1", "retry")
         assert storage.load_execution_state("exec-1").status == "completed"
+
+
+class TestStartEntryCancelCheckpoint:
+    """start 入口取消检查点：BFF cancel 落在「已入队未消费」窗口 / 重投递场景。"""
+
+    def test_cancel_flag_at_start_entry_terminalizes_without_run(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(WORKER_TEST_FLOW)
+        worker = _make_worker(fake, storage, flow_storage)
+        fake.set("plaita:execution:cancel:exec-9", "ts", ex=7 * 86400)
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            worker.start_flow("f1", {}, execution_id="exec-9")
+        inst.run_distributed.assert_not_called()  # 未推进（构造无害，在检查点之前）
+        state = storage.load_execution_state("exec-9")
+        assert state.status == "cancelled"
