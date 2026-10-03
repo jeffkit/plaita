@@ -357,6 +357,12 @@ class TestSqlalchemySubscriptionTenantColumn(unittest.TestCase):
 
         async def _test():
             engine = create_async_engine("sqlite+aiosqlite://")
+            # 订阅存储无自动建表（events 侧的 create_tables opt-in 不覆盖
+            # subscriptions 表）——测试自建，否则首个写操作即 no such table
+            from plaita.event.sqlalchemy import Base
+
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
             storage = SqlalchemyEventSubscriptionStorage(engine)
             sub = EventSubscription(
                 event_type="approval", correlation_id="exec-sq-1", tenant_id="acme",
