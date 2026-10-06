@@ -36,6 +36,13 @@
 8. **重复投递的 resume 任务幂等短路**：终态执行的 resume 原样返回，不再把
    completed/error 改写。`redis publish` 的 dict/str 形式支持 `correlation_id`
    关键字（EventFilter 的 correlation 匹配此前无法通过该形式设置）。
+9. **subprocess 沙箱地址空间上限默认关闭**：`PLAITA_SANDBOX_MEMORY_MB` 默认值
+   从 256 改为 **0（不限制）**。RLIMIT_AS 卡的是虚拟地址而非 RSS，Linux 上
+   256MB 让 node/pnpm 类命令启动即 V8 OOM（V8 启动期预留远超 256MB 虚拟地址），
+   失败只剩截断崩溃栈；macOS 不强制 RLIMIT_AS，故本地部署从未暴露。
+   - 变更前：默认 256MB，Linux 上 node/npm/pnpm 系代码节点、setup、gate 全部不可用。
+   - 迁移：无需动作。确有需要（纯 Python 小脚本、多租户防护）才显式设
+     `PLAITA_SANDBOX_MEMORY_MB=<MB>`；node 系命令请保持 0。
 
 ### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
 

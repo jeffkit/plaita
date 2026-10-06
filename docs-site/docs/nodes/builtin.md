@@ -224,6 +224,11 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 
 `language` 为 `js` 或 `python`，代码需定义一个 `run` 函数，`input` 作为参数传入。
 
+`default_backend="subprocess"` 时子进程受 `PLAITA_SANDBOX_TIMEOUT`（秒，默认 10）约束。
+地址空间上限 `PLAITA_SANDBOX_MEMORY_MB`（MB）**默认 `0` = 不限制**：非 0 值在 Linux 上经
+`RLIMIT_AS` 真实生效，会卡住 node/npm/pnpm 系命令的启动（V8 启动期预留 GB 级虚拟地址，
+表现为截断的崩溃栈）——这类命令请保持 `0`。
+
 ```json
 {
     "type": "code",

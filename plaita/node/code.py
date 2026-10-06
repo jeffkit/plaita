@@ -18,12 +18,13 @@ Python backend selection is controlled by ``CodeNode.sandbox_backend``:
 ``"subprocess"``
     Spawns a fresh Python interpreter for every invocation.  The child
     inherits the host's file system and network access, but is bounded by
-    configurable CPU-time and wall-clock timeouts, and a memory soft limit
-    on Linux.  Safer than ``"restricted"`` against code that bypasses
-    RestrictedPython's AST guards, but does **not** block network or file I/O.
-    Input/output is serialised as JSON; only JSON-serialisable types are
-    supported.  Environment variables: ``PLAITA_SANDBOX_TIMEOUT`` (seconds,
-    default 10), ``PLAITA_SANDBOX_MEMORY_MB`` (MB, default 256).
+    configurable CPU-time and wall-clock timeouts, and an **optional**
+    address-space limit on Linux.  Safer than ``"restricted"`` against code
+    that bypasses RestrictedPython's AST guards, but does **not** block
+    network or file I/O.  Input/output is serialised as JSON; only
+    JSON-serialisable types are supported.  Environment variables:
+    ``PLAITA_SANDBOX_TIMEOUT`` (seconds, default 10),
+    ``PLAITA_SANDBOX_MEMORY_MB`` (MB, default ``0`` = unlimited).
 
 ``"docker"``
     Runs the script inside a one-shot Docker container with
@@ -117,7 +118,12 @@ LANGUAGE_PYTHON = "python"
 
 # subprocess backend
 SANDBOX_SUBPROCESS_TIMEOUT: int = int(os.environ.get("PLAITA_SANDBOX_TIMEOUT", "10"))
-SANDBOX_SUBPROCESS_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_MEMORY_MB", "256"))
+# RLIMIT_AS 上限（MB）。默认 0 = 不限制（与 macOS 上的历史实际行为一致）。
+# 2026-10-06 事故：默认 256 在 Linux 上真实生效，node/pnpm 类命令启动即 V8 OOM
+# （V8 启动期预留远超 256MB 的地址空间，RLIMIT_AS 卡的是虚拟地址而非 RSS），
+# 输出只剩截断崩溃栈；macOS 不强制 RLIMIT_AS，故本地部署从未暴露。设 >0 才
+# 启用限制——小内存纯 Python 脚本场景可显式收紧，node 系命令请保持 0。
+SANDBOX_SUBPROCESS_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_MEMORY_MB", "0"))
 
 # subprocess 后端的子进程环境变量白名单（2026-09 安全评审 P1）：
 # 历史上子进程继承宿主全量 os.environ。需要额外变量时往 SUBPROCESS_ENV_EXTRA
@@ -473,7 +479,9 @@ def run_python_subprocess(code, input_value, cancel_event=None):
     The child process is bounded by:
 
     * wall-clock timeout (``PLAITA_SANDBOX_TIMEOUT`` env var, default 10 s)
-    * soft memory limit on Linux (``PLAITA_SANDBOX_MEMORY_MB``, default 256 MB)
+    * **optional** address-space limit on Linux (``PLAITA_SANDBOX_MEMORY_MB``
+      env var; default ``0`` = unlimited — a non-zero value applies
+      ``RLIMIT_AS`` and will kill node/pnpm-based commands at startup)
     * optional cooperative cancellation (``cancel_event`` — the code node's
       execution cancel flag; when set mid-run the whole process tree is
       killed and a RuntimeError raised)

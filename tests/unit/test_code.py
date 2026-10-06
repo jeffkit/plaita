@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import unittest
 
 import pytest
@@ -300,6 +303,35 @@ def run(b):
             "import math\ndef run(a):\n    return math.ceil(a)", 3.1
         )
         self.assertEqual(result, 4)
+
+    # 2026-10-06 RLIMIT_AS 事故回归（Linux 实测暴露，macOS 不强制故长期隐形）：
+    # 默认 256MB 地址空间上限让 node/pnpm 类 setup/gate 启动即 V8 OOM（V8 启动期
+    # 预留远超 256MB 虚拟地址，RLIMIT_AS 卡的是虚拟地址而非 RSS），失败输出只剩
+    # 截断崩溃栈。默认改为 0（不限制），与 macOS 上的历史实际行为一致。
+    def test_default_memory_limit_is_unlimited_when_env_unset(self):
+        """未设 PLAITA_SANDBOX_MEMORY_MB 时模块默认值为 0（不限制）。"""
+        env = {k: v for k, v in os.environ.items()
+               if k != "PLAITA_SANDBOX_MEMORY_MB"}
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "from plaita.node.code import SANDBOX_SUBPROCESS_MEMORY_MB as m;"
+             "print(m)"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "0")
+
+    def test_subprocess_can_reserve_large_address_space(self):
+        """子进程可预留 1GB 虚拟地址（node/V8 型启动工作负载的等价回归）。"""
+        result = run_python_subprocess(
+            "import mmap\n\n"
+            "def run(a):\n"
+            "    m = mmap.mmap(-1, 1024 * 1024 * 1024)\n"
+            "    m.close()\n"
+            "    return 'ok'",
+            None,
+        )
+        self.assertEqual(result, "ok")
 
     def test_subprocess_list_input(self):
         """subprocess backend handles list input via JSON serialization."""
