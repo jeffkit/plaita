@@ -111,6 +111,13 @@ const NAV_COLLAPSED_KEY = 'plaita-nav-collapsed'
 // basename 跟随子路径部署探测（services/api.ts 的 SUB_PATH），根路径部署为 '/'
 const router = createBrowserRouter(
   [
+  // /login 显式路由（2026-10-06）：未认证时根路径已条件渲染 <Login>，但
+  // logout 的 window.location.assign('/login') 与用户直接访问 /login 都会
+  // 落到本路由——此前未定义 → React Router 默认 404 错误页。
+  {
+    path: '/login',
+    element: <Login onSuccess={() => window.location.assign('/')} />,
+  },
   {
     path: '/',
     element: <Layout />,
