@@ -89,3 +89,59 @@ def test_affinity_disable_switch(monkeypatch):
         w._dispatch_task({"type": "start", "flow_id": "f",
                           "params": {"repo": "/nonexistent/xyz"}})
     assert not isinstance(ei.value, TaskNotForThisWorker)
+
+
+class TestAffinityHandover:
+    """交接：不亲和任务 ack 原条 + 重入队新副本（delivery 归 1），不死信。
+
+    回归 2026-10-06 双机实测缺陷：只「留 pending」会被对端反复 XCLAIM 虚增
+    delivery，5 轮触顶 → 误死信。
+    """
+
+    def _worker_with_redis(self):
+        import fakeredis
+        w = RedisFlowWorker.__new__(RedisFlowWorker)
+        w.redis_client = fakeredis.FakeRedis(decode_responses=True)
+        w.queue_name = "q:test"
+        return w
+
+    class _FakeQueue:
+        def __init__(self):
+            self.acked = []
+            self.conflicts = 0
+        def ack(self, mid):
+            self.acked.append(mid)
+        def note_lease_conflict(self):
+            self.conflicts += 1
+
+    def test_handover_acks_and_reenqueues(self):
+        w = self._worker_with_redis()
+        q = self._FakeQueue()
+        body = {"type": "start", "flow_id": "f",
+                "params": {"repo": "/nonexistent/xyz"}}
+        task = type("T", (), {"message_id": "1-0", "body": body})()
+        w._handover_non_affine(task, q, RuntimeError("no affinity"))
+        assert q.acked == ["1-0"], "原条应被 ack（移出 PEL，防对端再抢）"
+        assert w.redis_client.xlen("q:test") == 1, "应重入队恰好一份新副本"
+
+    def test_handover_is_idempotent_no_pingpong(self):
+        """同一消息二次让出 → 命中标记，改为留 pending（不再重入队）。"""
+        w = self._worker_with_redis()
+        q = self._FakeQueue()
+        body = {"type": "start", "flow_id": "f",
+                "params": {"repo": "/nonexistent/xyz"}}
+        task = type("T", (), {"message_id": "1-0", "body": body})()
+        w._handover_non_affine(task, q, RuntimeError("x"))
+        assert w.redis_client.xlen("q:test") == 1
+        # 第二次（模拟新副本又被本机抢到）
+        task2 = type("T", (), {"message_id": "2-0", "body": body})()
+        w._handover_non_affine(task2, q, RuntimeError("x"))
+        assert w.redis_client.xlen("q:test") == 1, "第二次不应再重入队（防 ping-pong）"
+        assert q.acked == ["1-0"], "第二次不再 ack"
+
+    def test_handover_without_body_leaves_pending(self):
+        w = self._worker_with_redis()
+        q = self._FakeQueue()
+        task = type("T", (), {"message_id": "1-0", "body": None})()
+        w._handover_non_affine(task, q, RuntimeError("x"))
+        assert q.acked == [] and w.redis_client.xlen("q:test") == 0

@@ -231,9 +231,15 @@ class FlowHashMismatchError(ValueError):
 class TaskNotForThisWorker(RuntimeError):
     """任务与本机不亲和（repo/run_dir 指向别的机器的绝对路径）。
 
-    消费入口抛出——run() 的处理分支**不 ack**、消息留 pending，由队列在
-    claim_min_idle_ms 后回收给持有该路径的 worker。绝不终态化、绝不死信：
+    消费入口抛出——由 run() 的专门分支**交接**（见 _handover_non_affine）：
+    ack 原消息 + 重入队一份同体新副本（delivery 归 1）。不终态化、不死信：
     任务本身没毛病，只是不该在本机跑。
+
+    为何要「重入队」而非「留 pending」：留 pending 的消息会被对端 worker
+    按 claim_min_idle_ms 反复 XCLAIM，而 XCLAIM 每次让 Redis 的
+    deliveries +1——两 worker 环境下 60s 一轮，5 轮即触顶 max_deliveries
+    → 误死信（2026-10-06 双机实测：非亲和任务被让出 5 次后进 DLQ）。
+    重入队新副本把计数清零，交接无损耗。
     """
 
 
@@ -1965,6 +1971,42 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 return f"{field}={path} 在本机不存在（本机无此仓路径）"
         return None
 
+    def _handover_non_affine(self, task: Any, queue: Any, exc: Exception) -> None:
+        """把不亲和的 task 交接给其他 worker：ack 原条 + 重入队同体新副本。
+
+        重入队而非留 pending 的原因见 TaskNotForThisWorker docstring（留
+        pending 会被对端反复 XCLAIM 虚增 delivery → 误死信）。
+
+        **防 ping-pong**：新副本有极小概率又被本机抢到（竞争）。用一个短
+        TTL 的「本机刚让过此消息」标记抑制——命中则改成留 pending（让对端
+        按正常 reclaim 拿），避免两机无限交接。标记按 body 指纹（消息体
+        无稳定 id 可用时应退化为整体序列化）。
+        """
+        body = getattr(task, "body", None)
+        if not isinstance(body, dict):
+            # 拿不到消息体：退化为留 pending（对端 reclaim）
+            logger.info("任务 %s 不亲和但无体可交接，留 pending: %s",
+                        getattr(task, "message_id", "?"), exc)
+            return
+        try:
+            import hashlib as _hl
+            key = "plaita:affinity:handover:" + _hl.sha1(
+                json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest()
+            # 若本机刚让过这条（标记在）→ 说明可能 ping-pong，改为留 pending
+            if self.redis_client.exists(key):
+                logger.info("任务 %s 不亲和（本机刚让过），留 pending 交对端 reclaim: %s",
+                            getattr(task, "message_id", "?"), exc)
+                return
+            self.redis_client.set(key, "1", ex=30)
+            # 先 ack 原条（移出 PEL、防对端再抢），再重入队新副本
+            queue.ack(getattr(task, "message_id"))
+            enqueue_task(self.redis_client, self.queue_name, dict(body))
+            logger.info("任务 %s 与本机不亲和，已交接（ack+重入队）给其他 worker: %s",
+                        getattr(task, "message_id", "?"), exc)
+        except Exception as e:  # noqa: BLE001 — 交接失败退化为留 pending（绝不丢消息）
+            logger.warning("不亲和任务交接失败（退化为留 pending）: %s: %s", e, exc)
+
     def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None) -> None:
         # 机器亲和性闸（路线二首版，2026-10-06 多机验证）：任务参数里的 repo/
         # run_dir 是**派发方所在机器**的绝对路径。本机不具备该路径 = 跑不了，
@@ -2055,15 +2097,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     queue.ack(task.message_id)
                     acked = True
                 except TaskNotForThisWorker as exc:
-                    # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：不 ack、
-                    # 留 pending，由队列回收给持有该路径的 worker。绝不终态化/
-                    # 死信——任务本身没毛病，只是不该在本机跑。
+                    # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：**交接**
+                    # 给其他 worker——ack 原消息 + 重入队新副本（delivery 归 1）。
+                    # 不能只「留 pending」：对端会按 claim_min_idle_ms 反复 XCLAIM，
+                    # 每次让 deliveries +1，两 worker 下 5 轮即触顶 → 误死信
+                    # （2026-10-06 双机实测）。交接无损耗，且新副本仍会回到
+                    # 共享队列由亲和的 worker 领走。
                     queue.note_lease_conflict()  # 复用「让给别人」计数口径
-                    logger.info(
-                        "任务 %s 与本机不亲和，留在 pending 交给其他 worker: %s",
-                        task.message_id,
-                        exc,
-                    )
+                    self._handover_non_affine(task, queue, exc)
                 except ExecutionLeaseError as exc:
                     # 另一 worker 持有 resume 租约：不 ack，待租约过期后 reclaim
                     queue.note_lease_conflict()
