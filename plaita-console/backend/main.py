@@ -95,6 +95,30 @@ async def lifespan(app: FastAPI):
         logger.error(f"FlowStore 初始化失败: {e}")
         raise
 
+    # 引擎存储漂移兜底（尽力而为，不阻断启动）：把 PG 里全部已发布定义
+    # 回填/对齐到「本进程所连的 Redis」——补齐「历史版本从未重跑发布」的缺口
+    # （console 从 SQLite 迁到 PG 后 Redis 为空，worker 报「找不到流程定义」）。
+    #
+    # 边界（务必知悉）：本钩子只解决 console 与 worker **同机同 Redis** 的场景。
+    # 二者可能不在同一台机器、不共享 Redis——此时本钩子无效，须由运维在 worker
+    # 所在机器上用同样的 REDIS_URL 跑
+    # plaita-console/scripts/sync_published_to_engine.py 对齐。见 engine_sync 模块
+    # docstring 的「边界」段。失败仅 warning。
+    if not local_mode and redis_client is not None:
+        try:
+            try:
+                from .services import engine_sync
+            except ImportError:
+                from services import engine_sync  # type: ignore
+            stats = engine_sync.sync_all_published_to_engine(
+                redis_client, app.state.store)
+            logger.info(
+                "启动同步：已发布流程回填引擎存储 → written=%s skipped=%s errors=%s",
+                stats.get("written"), stats.get("skipped"), stats.get("errors"),
+            )
+        except Exception as e:  # noqa: BLE001 — 兜底同步不得阻断启动
+            logger.warning("启动同步已发布流程到引擎存储失败（忽略，不阻断启动）: %s", e)
+
     # HMAC 重放保护：本地档（Redis 不可达）直接配进程内存档；集群档配 Redis
     # nonce store（enable_replay_protection 内部会 ping 一次，连不上同样降级
     # 并 warning，避免启动日志虚报 "multi-worker safe"）。

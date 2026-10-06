@@ -76,6 +76,41 @@ def _dt_to_iso(value: Any) -> str:
         return str(value)
 
 
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """判断 IntegrityError 是否为**唯一约束冲突**（而非主键冲突等其它完整性错误）。
+
+    背景：迁移到 PostgreSQL 后若自增序列未重置（``setval`` 漏做），首次 INSERT
+    会撞**主键**唯一约束。旧代码把任何 IntegrityError 都翻译成「已存在」，
+    把「序列没推进」这种基础设施故障误报为「数据已存在」——误导排查。
+    此处按驱动错误标识区分：
+
+    - psycopg/psycopg2（PG）：SQLSTATE 23505 = unique_violation；
+    - sqlite3：异常文本含 ``UNIQUE constraint failed``。
+
+    无法判定的情形保守返回 False（保留原始错误信息，宁可信息多不可误导）。
+    """
+    orig = getattr(exc, "orig", None)
+    # psycopg / psycopg2：有 sqlstate 属性
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if sqlstate is not None:
+        if str(sqlstate) != "23505":
+            return False
+        # PG 把**主键冲突**与**唯一约束冲突**都报成 23505，必须再按约束名区分：
+        #   - 主键约束名由 PG 自动命名为 ``<table>_pkey``（或自定义名含 pkey 语义）；
+        #   - 业务唯一约束在本模型里显式命名（如 ``uq_tenant_flow`` / ``uq_tenant_flow_version``）。
+        # 主键冲突 = 基础设施故障（典型：迁移后序列未 setval），不是「数据已存在」。
+        constraint = None
+        diag = getattr(orig, "diag", None)
+        if diag is not None:
+            constraint = getattr(diag, "constraint_name", None)
+        if constraint:
+            return not str(constraint).endswith("_pkey")
+        return True
+    # sqlite3 及兜底：看异常文本
+    text_ = str(orig or exc).lower()
+    return "unique constraint failed" in text_
+
+
 class VersionConflictError(ValueError):
     """草稿乐观锁冲突：base_updated_at 与服务端不一致（C5-1）。
 
@@ -245,7 +280,13 @@ class FlowStore:
                 session.commit()
             except IntegrityError as e:
                 session.rollback()
-                raise ValueError(f"流程已存在: {flow_id}") from e
+                # 唯一约束冲突才是「已存在」；其它 IntegrityError（如序列未重置
+                # 导致的主键冲突）保留原始信息，避免误导排查。
+                if _is_unique_violation(e):
+                    raise ValueError(f"流程已存在: {flow_id}") from e
+                raise ValueError(
+                    f"创建流程 {flow_id} 失败（数据库完整性错误）: {e.orig or e}"
+                ) from e
             session.refresh(record)
             return record
 

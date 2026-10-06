@@ -198,10 +198,15 @@ class TestRetryableClassification:
         assert state.status == "error"
 
     def test_cancelled_not_retried(self):
-        """取消（__cause__=FlowCancelledException）是执行级意图，不重试。"""
+        """取消（__cause__=FlowCancelledException）是执行级意图，不重试。
+
+        波次③起终态为 ``cancelled``（取消点前 checkpoint），而非 ``error``——
+        取消是控制面意图不是失败；步内取消终态化语义见 ``resume_flow`` 的
+        ``_chain_has_cancellation`` 分支。
+        """
         outcome, state = self._resume_with_failure(_wrapped(FlowCancelledException()))
         assert not isinstance(outcome, NodeExecutionRetryableError)
-        assert state.status == "error"
+        assert state.status == "cancelled"
 
     def test_plain_exception_without_cause_still_terminalizes(self):
         """无 __cause__ 链的裸异常（如引擎管线自身错误）维持现状终态化。"""

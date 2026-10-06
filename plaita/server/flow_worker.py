@@ -70,6 +70,12 @@ def _cancel_checkpoint_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_CANCEL_CHECKPOINT")
 
 
+def _cancel_interrupt_disabled() -> bool:
+    """波次③回滚开关（步内中断半边）：PLAITA_DISABLE_CANCEL_INTERRUPT=1 时
+    不启动取消监听线程——回到「只在步界检查取消标志键」的现状语义。"""
+    return _env_switch("PLAITA_DISABLE_CANCEL_INTERRUPT")
+
+
 def _fencing_disabled() -> bool:
     """波次②回滚开关（fencing 半边）：PLAITA_DISABLE_FENCING=1 时退回 SET NX acquire。"""
     return _env_switch("PLAITA_DISABLE_FENCING")
@@ -84,6 +90,44 @@ def _node_retry_disabled() -> bool:
     """波次二任务①回滚开关：PLAITA_DISABLE_NODE_RETRY=1 时节点失败直接终态化
     error（完全回到波次前行为）。"""
     return _env_switch("PLAITA_DISABLE_NODE_RETRY")
+
+
+# 允许的 code 沙箱后端。默认 subprocess：无需 docker daemon，适合 keeper/console
+# 拉起的 worker（生产流程只在 code 节点里跑确定性胶水代码，非用户任意代码）。
+# 多租户对外部署应改 docker 并收紧 allowed_backends。
+_CODE_ALLOWED_BACKENDS = ("subprocess", "docker", "unsafe")
+
+
+def _code_backend_for_worker() -> str:
+    """worker 启动时 CodeNode 的沙箱后端（PLAITA_CODE_BACKEND，默认 subprocess）。"""
+    raw = os.environ.get("PLAITA_CODE_BACKEND", "").strip()
+    return raw or "subprocess"
+
+
+def _code_node_enabled() -> bool:
+    """PLAITA_DISABLE_CODE_NODE=1 时不注册 CodeNode（含 code 节点的流程会被丢弃）。"""
+    return not _env_switch("PLAITA_DISABLE_CODE_NODE")
+
+
+def _register_code_node_for_worker() -> None:
+    """为 worker 注册 CodeNode（生产流程如 self-improve-v2 含 code 节点）。
+
+    默认注册表自 0.4.0 起不含 CodeNode（执行任意用户代码须显式 opt-in），worker
+    不注册则整单被丢弃（unRecognized node type: code）。后端不可用（如选 docker
+    但无 daemon）时**降级到 subprocess 并告警**，不让整机起不来。
+    """
+    from plaita.node import register_code_node
+
+    backend = _code_backend_for_worker()
+    try:
+        register_code_node(default_backend=backend, allowed_backends=list(_CODE_ALLOWED_BACKENDS))
+        logger.info("CodeNode 已注册（sandbox_backend=%s）", backend)
+        return
+    except RuntimeError as e:  # 多为 docker daemon 不可用
+        logger.warning("CodeNode 注册失败（backend=%s）：%s —— 降级 subprocess 重试", backend, e)
+    register_code_node(default_backend="subprocess", allowed_backends=list(_CODE_ALLOWED_BACKENDS))
+    logger.info("CodeNode 已注册（sandbox_backend=subprocess，降级）")
+
 
 
 # 节点级重试判据沿 __cause__ 链回溯的最大深度。分布式归一化链固定一层
@@ -119,6 +163,27 @@ def _is_retryable_node_failure(exc: BaseException) -> bool:
         if isinstance(cause, NodeExecutionError):
             return True
         cause = cause.__cause__
+        depth += 1
+    return False
+
+
+def _chain_has_cancellation(exc: BaseException) -> bool:
+    """异常链（含自身）中是否含执行级取消 ``FlowCancelledException``。
+
+    波次③：取消监听在节点执行期置位 ``cancel_requested`` 后，引擎在**下一个
+    节点入口**抛 ``FlowCancelledException``；distributed 策略把它归一化为
+    ``FlowErrorException`` 并把原始异常挂在 ``__cause__``（_error_normalization）。
+    步循环的通用 ``except`` 需要据此把终态写成 ``cancelled`` 而非 ``error``。
+
+    取消优先于一切其他判定：链中一旦出现取消即整链定性为取消（即便更深处
+    还有被 abort 包装的节点异常）。
+    """
+    node: Optional[BaseException] = exc
+    depth = 0
+    while node is not None and depth <= _NODE_RETRY_CHAIN_MAX_DEPTH + 1:
+        if isinstance(node, FlowCancelledException):
+            return True
+        node = node.__cause__
         depth += 1
     return False
 
@@ -229,6 +294,13 @@ class FlowWorker:
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
         self.lease_ttl_seconds = lease_ttl_seconds
+        # 取消监听（波次③：步内可中断）：基类先建好登记表与停止位，内存 worker
+        # 不启动线程（_cancel_requested 无 redis 客户端时恒为 False，登记为空转）。
+        self._cancel_watch_lock = threading.Lock()
+        self._cancel_watch: Dict[str, Tuple[Any, str]] = {}
+        self._cancel_thread: Optional[threading.Thread] = None
+        self._cancel_stop = threading.Event()
+        self._cancel_poll_seconds: Optional[float] = None
 
     # ---- 节点级有界重试（波次二任务①）----
 
@@ -382,6 +454,109 @@ class FlowWorker:
                 "取消标志检查失败（视为未取消，下个步界重试）: %s: %s", execution_id, e
             )
             return False
+
+    # ---- 取消监听（波次③：步内可中断）----
+    #
+    # 现状缺口：取消标志键只在**步界**（start/resume 入口、步循环顶）被检查，
+    # 一个节点一旦跑起来就打断不了——agentrun 默认 timeout_secs=1800，取消后
+    # 最多白等 30 分钟。本监听线程在**节点执行期间**轮询同一标志键，命中即
+    # ``execution.cancel()``（同时置位 cancel_event/cancel_requested）：
+    #   - code 沙箱等待循环（code._popen_wait_cancellable）当场 killpg 进程树；
+    #   - 引擎在**下一个节点入口**抛 FlowCancelledException 拒绝继续；
+    #   - 若节点自身协作（agentrun 等）消费 cancel_event，则连在途进程一起中止。
+    # 语义与 §3.3 一致：默认软中断，协作节点即时击杀。
+    #
+    # 基类持有登记表/停止位与轮询逻辑（start/resume/步循环都在基类）；线程
+    # 启动由 RedisFlowWorker.run() 触发——无 redis 客户端的内存 worker 登记
+    # 为空转（``_cancel_requested`` 恒 False），永不误中。
+
+    def _register_cancel_watch(self, execution_id: str, execution: Any) -> None:
+        """登记活跃执行：取消监听线程据此轮询标志键并中止在途节点。"""
+        with self._cancel_watch_lock:
+            self._cancel_watch[execution_id] = (execution, current_tenant())
+
+    def _unregister_cancel_watch(self, execution_id: str) -> None:
+        with self._cancel_watch_lock:
+            self._cancel_watch.pop(execution_id, None)
+
+    def _cancel_poll_interval(self) -> float:
+        if self._cancel_poll_seconds is not None:
+            return max(0.05, float(self._cancel_poll_seconds))
+        return 1.0
+
+    def _start_cancel_watcher(self) -> None:
+        """启动取消监听线程（RedisFlowWorker.run() 调用）。
+
+        ``PLAITA_DISABLE_CANCEL_INTERRUPT=1``（波次③回滚开关）不启动——回到
+        「只在步界检查取消标志键」的现状语义。无 redis 客户端（内存 worker）
+        不启动（无标志键可读）。
+        """
+        if _cancel_interrupt_disabled():
+            logger.info("取消监听已禁用（PLAITA_DISABLE_CANCEL_INTERRUPT=1）")
+            return
+        if getattr(self, "redis_client", None) is None:
+            return
+        if self._cancel_thread is not None and self._cancel_thread.is_alive():
+            return
+        self._cancel_stop.clear()
+        self._cancel_thread = threading.Thread(
+            target=self._cancel_watch_loop,
+            name="plaita-cancel-watcher",
+            daemon=True,
+        )
+        self._cancel_thread.start()
+
+    def _stop_cancel_watcher(self) -> None:
+        self._cancel_stop.set()
+        watcher = self._cancel_thread
+        if (
+            watcher is not None
+            and watcher is not threading.current_thread()
+            and watcher.is_alive()
+        ):
+            watcher.join(timeout=2.0)
+        self._cancel_thread = None
+
+    def _cancel_watch_loop(self) -> None:
+        interval = self._cancel_poll_interval()
+        logger.info("取消监听已启动（轮询间隔 %.2fs）", interval)
+        # 首次立即轮询一次，再按间隔等待——缩短「进入长跑节点」到「被中止」
+        # 的最坏延迟（最长 ≈ interval + 一次 Redis 往返）。
+        self._cancel_poll_safely()
+        while not self._cancel_stop.wait(interval):
+            self._cancel_poll_safely()
+
+    def _cancel_poll_safely(self) -> None:
+        try:
+            self._cancel_poll_once()
+        except Exception:  # noqa: BLE001 — 监听线程自身绝不能带崩 worker
+            logger.error("取消监听周期异常", exc_info=True)
+
+    def _cancel_poll_once(self) -> None:
+        """对全部活跃执行轮询一次取消标志键，命中即中止在途执行。"""
+        with self._cancel_watch_lock:
+            entries = list(self._cancel_watch.items())
+        for execution_id, (execution, tenant_id) in entries:
+            token = set_current_tenant(tenant_id)
+            try:
+                requested = self._cancel_requested(execution_id)
+            finally:
+                reset_current_tenant(token)
+            if not requested:
+                continue
+            # 命中：撤登记（幂等——重复轮询不再对同一执行重复 cancel），
+            # 调 execution.cancel() 置位双 Event，在途协作节点当场收手。
+            self._unregister_cancel_watch(execution_id)
+            cancel = getattr(execution, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:  # noqa: BLE001 — cancel 失败仍有步界兜底
+                    logger.warning(
+                        "取消监听调 execution.cancel() 失败: %s",
+                        execution_id, exc_info=True,
+                    )
+            logger.info("取消监听命中标志键，已请求中止在途节点: %s", execution_id)
 
     # ---- 租约看门狗挂钩（波次②；基类 no-op，RedisFlowWorker 覆写）----
 
@@ -801,14 +976,21 @@ class FlowWorker:
                 }
 
             # 执行流程，获取初始结果
-            result = execution.run_distributed(flow, params=params, execution_id=execution_id)
+            # 取消监听（波次③）：start 路径无租约，登记整个推进窗口——取消
+            # 标志键命中即在途节点被 execution.cancel() 中止（code 沙箱当场
+            # killpg；协作节点如 agentrun 消费 cancel_event 收手）。
+            self._register_cancel_watch(execution_id, execution)
+            try:
+                result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
-            # 处理执行结果
-            final_result = self._process_execution_result(
-                flow, result, state, execution, delivery_count=delivery_count
-            )
+                # 处理执行结果
+                final_result = self._process_execution_result(
+                    flow, result, state, execution, delivery_count=delivery_count
+                )
 
-            return final_result
+                return final_result
+            finally:
+                self._unregister_cancel_watch(execution_id)
 
         except (NodeExecutionRetryableError, ServiceDispatchError):
             # 节点级可重试失败（波次二任务①）/ 幂等命中后重入队 resume 失败
@@ -819,6 +1001,22 @@ class FlowWorker:
 
         except Exception as e:
             logger.error("执行流程出错: %s", e, exc_info=True)
+            # 波次③步内取消：start 路径（无租约）首个节点在途命中取消监听 →
+            # 引擎自 run_distributed 归一化抛出（挂 __cause__）或协作节点自杀
+            # 抛普通异常。两条判据任一命中即终态化 cancelled，绝不包成
+            # RuntimeError 让执行停在 running（取消是控制面意图）。
+            if (
+                _chain_has_cancellation(e) or self._cancel_requested(execution_id)
+            ) and "state" in locals() and state is not None:
+                state.status = "cancelled"
+                state.end_time = datetime.now().isoformat()
+                self._persist_state_or_raise(execution_id, state, "cancelled_in_start_node")
+                self._finalize_observers()
+                logger.info(
+                    "执行 %s 在 start 首节点执行期响应取消，终态化 cancelled",
+                    execution_id,
+                )
+                return {"execution_id": execution_id, "status": "cancelled"}
             self._finalize_observers()
             raise RuntimeError(f"执行流程出错: {e}")
 
@@ -979,6 +1177,9 @@ class FlowWorker:
             # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
             # 被 XCLAIM 抢占双跑
             self._register_lease_watch(execution_id, lease_value, execution)
+            # 登记取消监听（波次③）：命中标志键即中止在途节点（与租约登记
+            # 同窗口；finally 一并撤销）
+            self._register_cancel_watch(execution_id, execution)
 
             # 直接使用 run_distributed 恢复执行
             result = execution.run_distributed(
@@ -1021,6 +1222,22 @@ class FlowWorker:
         except Exception as e:
             logger.error("恢复流程执行出错: %s", e, exc_info=True)
 
+            # 波次③步内取消：被恢复的节点在途命中取消监听 → 引擎抛
+            # FlowCancelledException（归一化后挂 __cause__）或协作节点自杀抛
+            # 普通异常。两条判据任一命中即终态化 cancelled，绝不写 error。
+            if _chain_has_cancellation(e) or self._cancel_requested(execution_id):
+                state.status = "cancelled"
+                state.end_time = datetime.now().isoformat()
+                self._persist_state_or_raise(execution_id, state, "cancelled_in_node")
+                self._finalize_observers()
+                logger.info(
+                    "执行 %s 在恢复节点执行期响应取消，终态化 cancelled", execution_id
+                )
+                return {
+                    "execution_id": execution_id,
+                    "status": "cancelled",
+                }
+
             # 节点级有界重试（波次二任务①）：同 _process_execution_result，
             # 瞬态节点失败不终态化、消息等重投；否则现状终态化 error。
             retry_exc = self._node_failure_retry_decision(
@@ -1047,6 +1264,7 @@ class FlowWorker:
             raise RuntimeError(f"恢复流程执行出错: {e}")
         finally:
             self._unregister_lease_watch(execution_id, lease_value)
+            self._unregister_cancel_watch(execution_id)
             if fence_token_reset is not None:
                 reset_current_fence_token(fence_token_reset)
             # release 对整个租约 value 串 compare（fencing 档 = {holder}:{gen}）
@@ -1184,6 +1402,27 @@ class FlowWorker:
                     raise
                 except Exception as e:
                     logger.error("流程执行出错: %s", e, exc_info=True)
+                    # 波次③步内取消：两条判据任一命中即终态化 cancelled（= 取消
+                    # 点前 checkpoint），绝不写 error：
+                    #   ① 异常链含 FlowCancelledException（引擎在下一节点入口
+                    #      抛出的执行级取消）；
+                    #   ② 取消标志键命中——协作节点（如 agentrun）收到
+                    #      cancel_event 后自杀抛出普通异常，异常类型无取消
+                    #      特征，但控制面意图键仍在，以键为准最稳。
+                    # 放行前做失租检查：与步界取消分支同规则（看门狗已判死
+                    # 则不写状态，让接管者来写）。
+                    if _chain_has_cancellation(e) or self._cancel_requested(execution_id):
+                        self._raise_if_lease_lost(lease_execution_id)
+                        state.status = "cancelled"
+                        state.context = context
+                        state.end_time = datetime.now().isoformat()
+                        self._persist_state_or_raise(execution_id, state, "cancelled_in_node")
+                        self._finalize_observers()
+                        logger.info(
+                            "执行 %s 在节点执行期响应取消（取消监听命中），终态化 cancelled",
+                            execution_id,
+                        )
+                        break
                     # 节点级有界重试（波次二任务①）：瞬态节点失败不终态化，
                     # 抛重试异常让消息走 at-least-once 重投，从 checkpoint
                     # 重跑失败节点；预算耗尽/判据不符/回滚开关 → 现状终态化。
@@ -1303,6 +1542,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         dlq_key: Optional[str] = None,
         read_block_ms: int = 1_000,
         watchdog_interval_seconds: Optional[float] = None,
+        cancel_poll_seconds: Optional[float] = None,
     ):
         redis_client = redis_client or Redis.from_url(redis_url)
         super().__init__(
@@ -1341,6 +1581,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # execution_id -> (lease_value, execution, tenant_id)
         self._lease_watch: Dict[str, tuple] = {}
         self._lease_lost: Set[str] = set()
+
+        # 取消监听（波次③ §3.3 步内中断）：登记活跃 (execution_id →
+        # FlowExecution/租户)，每 cancel_poll_seconds（默认 1s）轮询取消标志键，
+        # 命中即 execution.cancel() 中止在途节点。登记表/停止位已在基类建好，
+        # 此处只接轮询间隔旋钮（单测可缩短）。
+        if cancel_poll_seconds is not None:
+            self._cancel_poll_seconds = cancel_poll_seconds
         
         # 服务注册
         self._enable_registry = enable_registry
@@ -1677,6 +1924,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         # 租约看门狗（波次②）：持租约执行每 TTL/3 续租，防长步被 XCLAIM 抢占
         self._start_lease_watchdog()
+        # 取消监听（波次③）：轮询取消标志键，命中即中止在途节点
+        self._start_cancel_watcher()
 
         # 注册服务
         if self._enable_registry:
@@ -1777,6 +2026,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         # 停止租约看门狗（波次②）
         self._stop_lease_watchdog()
+
+        # 停止取消监听（波次③）
+        self._stop_cancel_watcher()
 
         # 停止控制监听
         if self._enable_registry:
@@ -1943,16 +2195,17 @@ def main():
             mod = importlib.import_module(mod_path)
             register = getattr(mod, "register_all") or getattr(mod, "register")
             register()
-            try:
-                from plaita.node import register_code_node
-
-                register_code_node(default_backend="subprocess")
-            except ImportError:
-                pass
             logger.info("已加载外部节点模块: %s", mod_path)
         except Exception as e:
             logger.error("外部节点模块加载失败 %s: %s", mod_path, e, exc_info=True)
             raise SystemExit(f"外部节点模块加载失败: {mod_path}")
+
+    # CodeNode 按需注册：0.4.0 起移出默认注册表（其执行任意用户代码，需显式 opt-in）。
+    # 生产流程（如 self-improve-v2）含 code 节点，worker 必须注册否则整单被丢弃
+    # （「unRecognized node type: code」）。后端由 PLAITA_CODE_BACKEND 选择，默认
+    # subprocess（无需 docker daemon）；声明值非法/不可用时降级并告警，不让整机退出。
+    if _code_node_enabled():
+        _register_code_node_for_worker()
     
     # 处理注册开关
     enable_registry = args.enable_registry and not args.no_registry
