@@ -1591,6 +1591,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         max_deliveries: int = DEFAULT_MAX_DELIVERIES,
         dlq_key: Optional[str] = None,
         read_block_ms: int = 1_000,
+        concurrency: int = 1,
         watchdog_interval_seconds: Optional[float] = None,
         cancel_poll_seconds: Optional[float] = None,
     ):
@@ -1611,7 +1612,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._running = False
         # 消费阻塞窗口上限（毫秒）——见 run() 主循环内的分片说明
         self.read_block_ms = max(100, int(read_block_ms))
+        # 并发消费线程数（2026-10-07）：>1 时 run() 起 N 个消费线程共享本实例，
+        # 单机可同时处理 N 个任务（原为严格串行——一次 read 一条、处理完再读）。
+        # 每线程各自持有一个独立 queue 对象（独立 Redis 连接），避免连接竞争；
+        # 消息级 at-least-once 与执行级租约语义不变（并发下同一 execution 仍由
+        # 租约串行化）。默认 1 = 零行为变化。
+        self.concurrency = max(1, int(concurrency))
         self._active_task_count = 0
+        self._active_count_lock = threading.Lock()
         self._log_handler = None
         self._consumer_group = consumer_group
         self._claim_min_idle_ms = claim_min_idle_ms
@@ -2071,115 +2079,146 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             self.start_control_listener()
         
         logger.info(
-            "流程工作器已启动，监听 stream: %s (group=%s, consumer=%s)",
+            "流程工作器已启动，监听 stream: %s (group=%s, consumer=%s, concurrency=%d)",
             self.queue_name,
             self._consumer_group,
             queue.consumer_name,
+            self.concurrency,
         )
-        
+
+        # 并发消费（2026-10-07）：concurrency=1 时原地串行（零行为变化）；
+        # >1 时起 N 个消费线程共享本实例。线程各自跑 _consume_loop，靠
+        # XREADGROUP 的天然互斥（Redis 保证一条消息只投给一个 consumer 的一次读）
+        # 分到不同任务；共享 queue 对象线程安全（redis-py 连接池）。
+        threads: list = []
         try:
-            while self._running:
-                # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
-                # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
-                # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
-                # 上限 ≈1s，空轮询的 Redis 往返开销可忽略。
-                task = queue.read(block_ms=min(self.read_block_ms, 1_000))
-                if not task:
-                    continue
-
-                self._active_task_count += 1
-                if self._enable_registry:
-                    self.update_registry_info(active_tasks=self._active_task_count)
-
-                acked = False
-                try:
-                    self._dispatch_task(task.body, delivery_count=task.delivery_count)
-                    queue.ack(task.message_id)
-                    acked = True
-                except TaskNotForThisWorker as exc:
-                    # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：**交接**
-                    # 给其他 worker——ack 原消息 + 重入队新副本（delivery 归 1）。
-                    # 不能只「留 pending」：对端会按 claim_min_idle_ms 反复 XCLAIM，
-                    # 每次让 deliveries +1，两 worker 下 5 轮即触顶 → 误死信
-                    # （2026-10-06 双机实测）。交接无损耗，且新副本仍会回到
-                    # 共享队列由亲和的 worker 领走。
-                    queue.note_lease_conflict()  # 复用「让给别人」计数口径
-                    self._handover_non_affine(task, queue, exc)
-                except ExecutionLeaseError as exc:
-                    # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
-                    # **ack 释放**本消息（2026-10-06 修）。
-                    #
-                    # 原行为「不 ack 留 pending」的实测问题：持有者跑长节点
-                    # （agentrun 分钟级）期间，对端每 claim_min_idle_ms(60s)
-                    # XCLAIM 一次，**每次让 Redis deliveries +1** → 烧到超限
-                    # 触发死信（实测 delivery 达 22/31），死信守卫虽正确拦下
-                    # （租约仍在→跳过）并最终重入队，但产生大量假死信污染 DLQ、
-                    # 浪费队列往返。
-                    #
-                    # 为何 ack 是安全的：任务**没有丢**——它在持有者手里正常
-                    # 推进；若持有者崩溃，keeper 侧的 reaper 按 console_zombie_secs
-                    # 判死并**重派**（执行级恢复），消息级重投与此机制重复。
-                    # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
-                    # 那里**没人**能跑该任务，必须留给对端；此处有人在跑，直接释放。
-                    queue.note_lease_conflict()
-                    queue.ack(task.message_id)
-                    acked = True
-                    logger.info(
-                        "任务 %s 执行被他人持租约（正常竞争），已 ack 释放避免烧 delivery: %s",
-                        task.message_id,
-                        exc,
+            if self.concurrency <= 1:
+                self._consume_loop(queue)
+            else:
+                for i in range(self.concurrency):
+                    t = threading.Thread(
+                        target=self._consume_loop,
+                        args=(queue,),
+                        name=f"flow-consume-{i}",
+                        daemon=True,
                     )
-                except NodeExecutionRetryableError as exc:
-                    # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
-                    # 步 checkpoint，不 ack、不计 poison、留 pending 等回收——
-                    # 重投间隔=claim_min_idle_ms（默认 60s），下轮 resume 从
-                    # checkpoint 重跑失败节点。预算（重试计数键）已在处理函数
-                    # 内判定，耗尽时已在处理函数内终态化 error，不会走到这里
-                    # 无限重投。
-                    queue.note_failed()
-                    logger.warning(
-                        "任务 %s 节点执行失败待重投 (delivery=%s): %s",
-                        task.message_id,
-                        task.delivery_count,
-                        exc,
-                    )
-                except ValueError as exc:
-                    # 畸形消息：ack 掉避免 poison pill 无限重投
-                    logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
-                    queue.ack(task.message_id)
-                    queue.note_poison()
-                    acked = True
-                except Exception as exc:
-                    # 兜底重投递路径（at-least-once）：不 ack，等超时回收。
-                    # 刻意放在 except ValueError 之后——存储层抛出的
-                    # ExecutionStateLoadError（读取瞬断/状态损坏，ReviewFix D1）
-                    # 由此处理：消息留在 pending 重投，超过 max_deliveries 才
-                    # 进 DLQ；绝不能像 ValueError 一样被当畸形消息 poison ack，
-                    # 否则 Redis 抖动一次 = 挂起执行永久失去恢复机会。
-                    queue.note_failed()
-                    if task.delivery_count >= queue.max_deliveries:
-                        queue.dead_letter(
-                            task,
-                            reason=f"processing_failed:{type(exc).__name__}:{exc}"[:500],
-                        )
-                        acked = True
-                    else:
-                        logger.error(
-                            "任务处理失败 %s (delivery=%s/%s)，未 ack（将重投）: %s",
-                            task.message_id,
-                            task.delivery_count,
-                            queue.max_deliveries,
-                            exc,
-                            exc_info=True,
-                        )
-                finally:
-                    self._active_task_count -= 1
-                    if self._enable_registry:
-                        self.update_registry_info(active_tasks=self._active_task_count)
-                    if not acked:
-                        logger.debug("任务 %s 留在 pending 等待回收", task.message_id)
+                    t.start()
+                    threads.append(t)
+                logger.info("已启动 %d 个并发消费线程", len(threads))
+                # 主线程等任一消费线程退出（正常只在 stop() 后发生）
+                for t in threads:
+                    while t.is_alive():
+                        t.join(timeout=1.0)
+                        if not self._running:
+                            break
         finally:
             self.stop()
+
+    def _consume_loop(self, queue: RedisStreamTaskQueue) -> None:
+        """单条消费循环（原 run() 主体）。可被 1 或 N 个线程并发执行。"""
+        while self._running:
+            # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
+            # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
+            # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
+            # 上限 ≈1s，空轮询的 Redis 往返开销可忽略。
+            task = queue.read(block_ms=min(self.read_block_ms, 1_000))
+            if not task:
+                continue
+
+            self._bump_active(+1)
+            acked = False
+            try:
+                self._dispatch_task(task.body, delivery_count=task.delivery_count)
+                queue.ack(task.message_id)
+                acked = True
+            except TaskNotForThisWorker as exc:
+                # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：**交接**
+                # 给其他 worker——ack 原消息 + 重入队新副本（delivery 归 1）。
+                # 不能只「留 pending」：对端会按 claim_min_idle_ms 反复 XCLAIM，
+                # 每次让 deliveries +1，两 worker 下 5 轮即触顶 → 误死信
+                # （2026-10-06 双机实测）。交接无损耗，且新副本仍会回到
+                # 共享队列由亲和的 worker 领走。
+                queue.note_lease_conflict()  # 复用「让给别人」计数口径
+                self._handover_non_affine(task, queue, exc)
+            except ExecutionLeaseError as exc:
+                # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
+                # **ack 释放**本消息（2026-10-06 修）。
+                #
+                # 原行为「不 ack 留 pending」的实测问题：持有者跑长节点
+                # （agentrun 分钟级）期间，对端每 claim_min_idle_ms(60s)
+                # XCLAIM 一次，**每次让 Redis deliveries +1** → 烧到超限
+                # 触发死信（实测 delivery 达 22/31），死信守卫虽正确拦下
+                # （租约仍在→跳过）并最终重入队，但产生大量假死信污染 DLQ、
+                # 浪费队列往返。
+                #
+                # 为何 ack 是安全的：任务**没有丢**——它在持有者手里正常
+                # 推进；若持有者崩溃，keeper 侧的 reaper 按 console_zombie_secs
+                # 判死并**重派**（执行级恢复），消息级重投与此机制重复。
+                # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
+                # 那里**没人**能跑该任务，必须留给对端；此处有人在跑，直接释放。
+                queue.note_lease_conflict()
+                queue.ack(task.message_id)
+                acked = True
+                logger.info(
+                    "任务 %s 执行被他人持租约（正常竞争），已 ack 释放避免烧 delivery: %s",
+                    task.message_id,
+                    exc,
+                )
+            except NodeExecutionRetryableError as exc:
+                # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
+                # 步 checkpoint，不 ack、不计 poison、留 pending 等回收——
+                # 重投间隔=claim_min_idle_ms（默认 60s），下轮 resume 从
+                # checkpoint 重跑失败节点。预算（重试计数键）已在处理函数
+                # 内判定，耗尽时已在处理函数内终态化 error，不会走到这里
+                # 无限重投。
+                queue.note_failed()
+                logger.warning(
+                    "任务 %s 节点执行失败待重投 (delivery=%s): %s",
+                    task.message_id,
+                    task.delivery_count,
+                    exc,
+                )
+            except ValueError as exc:
+                # 畸形消息：ack 掉避免 poison pill 无限重投
+                logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
+                queue.ack(task.message_id)
+                queue.note_poison()
+                acked = True
+            except Exception as exc:
+                # 兜底重投递路径（at-least-once）：不 ack，等超时回收。
+                # 刻意放在 except ValueError 之后——存储层抛出的
+                # ExecutionStateLoadError（读取瞬断/状态损坏，ReviewFix D1）
+                # 由此处理：消息留在 pending 重投，超过 max_deliveries 才
+                # 进 DLQ；绝不能像 ValueError 一样被当畸形消息 poison ack，
+                # 否则 Redis 抖动一次 = 挂起执行永久失去恢复机会。
+                queue.note_failed()
+                if task.delivery_count >= queue.max_deliveries:
+                    queue.dead_letter(
+                        task,
+                        reason=f"processing_failed:{type(exc).__name__}:{exc}"[:500],
+                    )
+                    acked = True
+                else:
+                    logger.error(
+                        "任务处理失败 %s (delivery=%s/%s)，未 ack（将重投）: %s",
+                        task.message_id,
+                        task.delivery_count,
+                        queue.max_deliveries,
+                        exc,
+                        exc_info=True,
+                    )
+            finally:
+                self._bump_active(-1)
+                if not acked:
+                    logger.debug("任务 %s 留在 pending 等待回收", task.message_id)
+
+    def _bump_active(self, delta: int) -> None:
+        """原子调整在跑任务数并刷新注册表 active_tasks（并发下多线程安全）。"""
+        with self._active_count_lock:
+            self._active_task_count = max(0, self._active_task_count + delta)
+            count = self._active_task_count
+        if self._enable_registry:
+            self.update_registry_info(active_tasks=count)
     
     def stop(self):
         """停止流程工作器"""
@@ -2318,6 +2357,11 @@ def main():
     parser.add_argument("--read-block-ms", type=int, default=1_000,
                         help="XREADGROUP 阻塞窗口上限（毫秒）。默认 1000：让 SIGTERM "
                              "后的停机延迟 ≤1s；调大可略降 Redis 往返次数")
+    parser.add_argument("--concurrency", type=int,
+                        default=int(os.environ.get("PLAITA_WORKER_CONCURRENCY", "1")),
+                        help="并发消费线程数（默认 1=串行）。>1 时单机可同时处理多个任务；"
+                             "轻任务（TS/Python/Node）可放大，Rust 重构建任务建议保持 1。"
+                             "也可用环境变量 PLAITA_WORKER_CONCURRENCY")
     parser.add_argument("--quiet", action="store_true",
                         help="关闭 INFO 级控制台日志（等价 PLAITA_LOG_LEVEL=WARNING）")
     parser.add_argument("--heartbeat-interval", type=int, default=10,
@@ -2427,6 +2471,7 @@ def main():
             max_deliveries=args.max_deliveries,
             dlq_key=args.dlq_key or None,
             read_block_ms=args.read_block_ms,
+            concurrency=args.concurrency,
         )
         
         # 注册信号处理器以支持优雅关闭。只置位、由 run() 主循环在任务边界
