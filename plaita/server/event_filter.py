@@ -33,6 +33,10 @@ logger = logging.getLogger("plaita.server.event_filter")
 # flow_worker 一并引用）；受本次修复文件白名单约束先就地定义，后续可上移。
 TERMINAL_EXECUTION_STATUSES = ("completed", "error", "cancelled")
 
+# 任务队列默认名（与 flow_worker 默认一致）。实际取值经 _resolve_queue_name
+# 解析：CLI 参数 > PLAITA_QUEUE_NAME/QUEUE_NAME env > 本默认值。
+DEFAULT_QUEUE_NAME = "plaita:flow:queue"
+
 
 class EventFilter:
     """
@@ -406,11 +410,24 @@ class EventFilter:
             subscription_storage=subscription_storage,
             redis_client=redis_client,
             event_bus=event_bus,
-            queue_name=queue_name or "plaita:flow:queue"
+            queue_name=queue_name or os.environ.get(
+                "PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", DEFAULT_QUEUE_NAME)
+            )
         )
 
 
 from plaita.server.factory import create_storage_component, create_event_bus  # noqa: F401
+
+
+def _resolve_queue_name(cli_value: Optional[str]) -> str:
+    """队列名解析：CLI 参数 > PLAITA_QUEUE_NAME/QUEUE_NAME env > 默认值。
+
+    与 ``flow_worker.py`` 的既有做法一致。cluster_config.yaml 给本进程配的
+    是 ``PLAITA_QUEUE_NAME`` 环境变量，此前只认 CLI 参数导致该配置失效。
+    """
+    if cli_value and cli_value != DEFAULT_QUEUE_NAME:
+        return cli_value
+    return os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", DEFAULT_QUEUE_NAME))
 
 
 async def main_async(args):
@@ -454,16 +471,17 @@ async def main_async(args):
             logger.info("已创建事件订阅存储: %s类型", args.subscription_storage_type)
         
         # 创建事件过滤器
+        queue_name = _resolve_queue_name(args.queue_name)
         event_filter = EventFilter.create_event_filter(
             execution_storage=execution_storage,
             subscription_storage=subscription_storage,
             event_bus=event_bus,
             redis_url=args.redis_url,
-            queue_name=args.queue_name
+            queue_name=queue_name
         )
         
         # 启动事件过滤器
-        logger.info("事件过滤器启动中，队列名称: %s", args.queue_name)
+        logger.info("事件过滤器启动中，队列名称: %s", queue_name)
         await event_filter.start(event_type=args.event_type)
         
     except Exception as e:
@@ -478,8 +496,9 @@ def main():
     parser.add_argument("--redis-url",
                         default=os.environ.get("PLAITA_REDIS_URL", "redis://localhost:6379/0"),
                         help="Redis 连接地址（默认取 PLAITA_REDIS_URL，与 flow_worker 一致）")
-    parser.add_argument("--queue-name", default="plaita:flow:queue",
-                      help="Redis队列名称")
+    parser.add_argument("--queue-name",
+                      default=os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", DEFAULT_QUEUE_NAME)),
+                      help="Redis队列名称（默认取 PLAITA_QUEUE_NAME/QUEUE_NAME，与 flow_worker 一致）")
     
     # 数据库参数
     parser.add_argument("--database-url", default="sqlite:///flow.db",

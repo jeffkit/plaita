@@ -16,6 +16,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -84,18 +85,23 @@ class FlowRecord(Base):
 
 
 class FlowVersion(Base):
-    """流程版本（租户内 flow_id + version 唯一；草稿/发布状态机）"""
+    """流程版本（租户内 flow_id + version 唯一；草稿/发布状态机）
+
+    外键为**复合外键** ``(tenant_id, flow_id) -> flows(tenant_id, flow_id)``：
+
+    - ``flow_id`` 按设计是「租户内唯一」（见 ``flows.uq_tenant_flow``），
+      不同租户可同名；单列外键会跨租户串数据，且 PostgreSQL 因
+      ``flows.flow_id`` 无单列唯一约束而**拒绝建表**
+      （``InvalidForeignKey: no unique constraint matching given keys``）。
+    - 复合外键命中 ``flows`` 已有的 ``uq_tenant_flow`` 唯一约束，既满足 PG
+      要求，语义上也把版本锚定到「同租户的同名 flow」。
+    """
 
     __tablename__ = "flow_versions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(String(64), nullable=False, default="", index=True)
-    flow_id = Column(
-        String(128),
-        ForeignKey("flows.flow_id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    flow_id = Column(String(128), nullable=False, index=True)
     version = Column(String(64), nullable=False)
     status = Column(String(16), nullable=False, default="draft")  # draft | published
     definition = Column(Text, nullable=False, default="")
@@ -106,6 +112,12 @@ class FlowVersion(Base):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "flow_id", "version", name="uq_tenant_flow_version"),
+        ForeignKeyConstraint(
+            ["tenant_id", "flow_id"],
+            ["flows.tenant_id", "flows.flow_id"],
+            ondelete="CASCADE",
+            name="fk_flow_versions_flow",
+        ),
     )
 
 

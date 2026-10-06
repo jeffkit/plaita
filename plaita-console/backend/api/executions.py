@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import os
 import secrets
 import uuid
 from datetime import datetime
@@ -79,8 +80,17 @@ class ResumeFlowRequest(BaseModel):
 
 # ============ 工具函数 ============
 
-# 任务队列 Stream 名（与 FlowWorker 的 PLAITA_QUEUE_NAME 默认值一致）
-TASK_QUEUE_NAME = "plaita:flow:queue"
+# 任务队列 Stream 名默认值（与 FlowWorker 的 PLAITA_QUEUE_NAME 默认值一致）。
+# 实际取值在使用点经 PLAITA_CONSOLE_TASK_QUEUE 覆盖，便于新旧并行验证时把
+# console 派发到独立队列——不得在模块导入时求值，否则无法被测试/运行时覆盖。
+DEFAULT_TASK_QUEUE_NAME = "plaita:flow:queue"
+# 兼容别名：schedules 等模块按此名导入（缺省队列名；实际派发请用 _task_queue_name）
+TASK_QUEUE_NAME = DEFAULT_TASK_QUEUE_NAME
+
+
+def _task_queue_name() -> str:
+    """解析派发队列名：env ``PLAITA_CONSOLE_TASK_QUEUE`` > 默认值。"""
+    return os.getenv("PLAITA_CONSOLE_TASK_QUEUE", DEFAULT_TASK_QUEUE_NAME)
 
 try:
     from plaita.server.task_queue import enqueue_task
@@ -152,7 +162,7 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
     历史上这里误用 rpush（list 类型），与 Stream 同 key 类型冲突，
     消息永远到不了 worker。统一走 XADD。
     """
-    return enqueue_task(redis, TASK_QUEUE_NAME, message)
+    return enqueue_task(redis, _task_queue_name(), message)
 
 
 # ---- 集群档租户键助手 ----

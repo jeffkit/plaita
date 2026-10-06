@@ -982,6 +982,16 @@ def create_all() -> None:
 
 
 def _sqlite_columns(conn, table: str) -> list[str]:
+    """读取 SQLite 表的列名（PRAGMA table_info）。
+
+    仅 SQLite：PRAGMA 为 SQLite 专有语法，在 PostgreSQL 等后端会抛
+    ``ProgrammingError: syntax error at or near "PRAGMA"``（console 启动即崩）。
+    非 sqlite 后端（或引擎未初始化）直接返回 ``[]``——全部调用点均以
+    ``if not cols: continue`` / ``if cols and ...`` 形式处理空结果，语义等价于
+    「本后端无此 SQLite 迁移内容，跳过」。一处守卫覆盖所有调用点。
+    """
+    if _engine is None or _engine.url.get_backend_name() != "sqlite":
+        return []
     from sqlalchemy import text as _text
 
     return [r[1] for r in conn.execute(_text(f"PRAGMA table_info({table})")).fetchall()]
@@ -1044,9 +1054,14 @@ def ensure_tenant_bootstrap() -> None:
     - 各租户域表中 tenant_id='' 的存量行归入 default；
     - 无任何 membership 的非平台管理员补 membership(default, users.role)；
     - 首次引导（tenants 表为空）时，既有全局 admin 提升为 platform_admin。
+
+    仅 SQLite：整段是 SQLite 存量库的收编/迁移逻辑，依赖 ``_sqlite_columns``
+    （PRAGMA 专有）；PostgreSQL 等后端是全新库、无存量需迁移，直接 return。
     """
     if _engine is None:
         raise RuntimeError("引擎未初始化，请先调用 init_engine()")
+    if _engine.url.get_backend_name() != "sqlite":
+        return
     with _SessionLocal() as session:  # type: Session
         first_boot = session.query(Tenant).count() == 0
         if first_boot:
@@ -1088,8 +1103,13 @@ def ensure_tenant_bootstrap() -> None:
 
 
 def _migrate_sqlite_columns() -> None:
-    """轻量迁移：旧 SQLite 库补新增列（仅 ADD COLUMN，保守策略）。"""
-    if _engine is None:
+    """轻量迁移：旧 SQLite 库补新增列（仅 ADD COLUMN，保守策略）。
+
+    仅 SQLite：函数体用 ``PRAGMA table_info``（SQLite 专有），在 PostgreSQL
+    等后端会语法报错导致启动即崩——非 sqlite 直接 return（与
+    ``_migrate_tenant_schema`` 同款守卫）。
+    """
+    if _engine is None or _engine.url.get_backend_name() != "sqlite":
         return
     from sqlalchemy import text as _text
 
