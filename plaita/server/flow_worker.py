@@ -86,6 +86,12 @@ def _watchdog_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_LEASE_WATCHDOG")
 
 
+def _affinity_disabled() -> bool:
+    """机器亲和闸回滚开关：PLAITA_DISABLE_AFFINITY=1 时不做路径检查
+    （回到「领到就跑」的现状；单机/同构环境本就不需要本闸）。"""
+    return _env_switch("PLAITA_DISABLE_AFFINITY")
+
+
 def _node_retry_disabled() -> bool:
     """波次二任务①回滚开关：PLAITA_DISABLE_NODE_RETRY=1 时节点失败直接终态化
     error（完全回到波次前行为）。"""
@@ -219,6 +225,15 @@ class FlowHashMismatchError(ValueError):
     用独立子类而非裸 ValueError——resume 的通用 except 需要区分「指纹
     不匹配（已终态化，原样上抛）」与「引擎内部其他 ValueError（维持现状
     终态化路径）」。
+    """
+
+
+class TaskNotForThisWorker(RuntimeError):
+    """任务与本机不亲和（repo/run_dir 指向别的机器的绝对路径）。
+
+    消费入口抛出——run() 的处理分支**不 ack**、消息留 pending，由队列在
+    claim_min_idle_ms 后回收给持有该路径的 worker。绝不终态化、绝不死信：
+    任务本身没毛病，只是不该在本机跑。
     """
 
 
@@ -1912,7 +1927,58 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 execution_id,
             )
 
+    def _detect_affinity_mismatch(self, message_data: Dict[str, Any]) -> Optional[str]:
+        """任务的 repo/run_dir 是否指向本机不存在的路径（机器亲和判定）。
+
+        返回 None = 亲和（可跑）；返回字符串 = 不亲和的原因（供日志）。
+        判据：消息 params（或顶层）里的 repo / run_dir 是绝对路径且本机
+        **不存在** → 不亲和。只查 start 类消息（resume 任务路径已由首次
+        start 验过，且 resume 可能不带完整 params）。
+
+        宽松原则：拿不到路径、相对路径、路径存在 → 一律判亲和（不拦）。
+        宁可多跑一次失败，不可误拦本机该跑的任务。
+        """
+        if str(message_data.get("type") or "start") not in ("start", ""):
+            return None
+        params = message_data.get("params")
+        if not isinstance(params, dict):
+            return None
+        for field in ("repo", "run_dir"):
+            raw = params.get(field)
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            path = raw.strip()
+            if not path.startswith("/"):
+                continue  # 相对路径/标识符：无法判定，放过
+            # run_dir 首次运行时尚未建（<repo>/.flowcast/runs/<run_id>），
+            # 故判它的**仓根**（run_dir 上溯到 .flowcast 的父目录）是否存在。
+            # 找不到 .flowcast 段则退回查 run_dir 自身（保守）。
+            probe = path
+            if field == "run_dir":
+                head = path
+                while head and head != "/":
+                    if os.path.basename(head) == ".flowcast":
+                        probe = os.path.dirname(head)
+                        break
+                    head = os.path.dirname(head)
+            if not os.path.exists(probe):
+                return f"{field}={path} 在本机不存在（本机无此仓路径）"
+        return None
+
     def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None) -> None:
+        # 机器亲和性闸（路线二首版，2026-10-06 多机验证）：任务参数里的 repo/
+        # run_dir 是**派发方所在机器**的绝对路径。本机不具备该路径 = 跑不了，
+        # 应让给有它的 worker（或等它出现）。不拦的话本机抢到就跑 → 秒失败
+        # → 烧 delivery 配额 → 死信（plaita#41 双机实证）。抛
+        # TaskNotForThisWorker（下方 except 分支不 ack、留 pending，由队列
+        # 回收交给别的 consumer）。
+        # 回滚/放行：PLAITA_DISABLE_AFFINITY=1，或消息无 repo 参数（不自带
+        # 路径的任务不受影响）。
+        if not _affinity_disabled():
+            missing = self._detect_affinity_mismatch(message_data)
+            if missing is not None:
+                raise TaskNotForThisWorker(missing)
+
         # 租户上下文：消息携带 tenant_id（缺省 = default，兼容旧生产方）；
         # 存储路由包装器/日志 handler/租约据此选租户 namespace。
         token = set_current_tenant(message_data.get("tenant_id"))
@@ -1988,6 +2054,16 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     self._dispatch_task(task.body, delivery_count=task.delivery_count)
                     queue.ack(task.message_id)
                     acked = True
+                except TaskNotForThisWorker as exc:
+                    # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：不 ack、
+                    # 留 pending，由队列回收给持有该路径的 worker。绝不终态化/
+                    # 死信——任务本身没毛病，只是不该在本机跑。
+                    queue.note_lease_conflict()  # 复用「让给别人」计数口径
+                    logger.info(
+                        "任务 %s 与本机不亲和，留在 pending 交给其他 worker: %s",
+                        task.message_id,
+                        exc,
+                    )
                 except ExecutionLeaseError as exc:
                     # 另一 worker 持有 resume 租约：不 ack，待租约过期后 reclaim
                     queue.note_lease_conflict()
