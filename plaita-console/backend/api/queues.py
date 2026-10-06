@@ -59,6 +59,7 @@ def get_redis(request: Request) -> Redis:
 
 KNOWN_QUEUES = [
     "plaita:flow:queue",           # 流程任务队列
+    "plaita:flow:queue:v2",        # 流程任务队列 v2（FlowWorker 实消费流）
     "plaita:delay:queue",          # 延迟任务队列
     "plaita:redis_queue:*",        # Redis 队列服务
     "plaita:kafka_queue:*",        # Kafka 队列服务

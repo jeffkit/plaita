@@ -30,6 +30,7 @@ import {
   Workflow,
   Boxes,
   Clock,
+  Cpu,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
@@ -41,6 +42,7 @@ import Executions from './pages/Executions'
 import ExecutionDetail from './pages/ExecutionDetail'
 import Logs from './pages/Logs'
 import Queues from './pages/Queues'
+import Workers from './pages/Workers'
 import Cluster from './pages/Cluster'
 import Events from './pages/Events'
 import Flows from './pages/Flows'
@@ -89,6 +91,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: '/events', icon: <Zap size={16} />, label: '事件管理' },
       { to: '/logs', icon: <ScrollText size={16} />, label: '日志查看' },
       { to: '/queues', icon: <Inbox size={16} />, label: '任务队列' },
+      { to: '/workers', icon: <Cpu size={16} />, label: 'Worker 效能' },
       { to: '/topology', icon: <GitBranch size={16} />, label: '服务拓扑' },
       { to: '/audit', icon: <ScrollText size={16} />, label: '审计' },
     ],
@@ -130,6 +133,7 @@ const router = createBrowserRouter(
       { path: 'events', element: <Events /> },
       { path: 'logs', element: <Logs /> },
       { path: 'queues', element: <Queues /> },
+      { path: 'workers', element: <Workers /> },
       { path: 'flows', element: <Flows /> },
       { path: 'schedules', element: <Schedules /> },
       { path: 'flows/:flowId/edit', element: <FlowEditor /> },
