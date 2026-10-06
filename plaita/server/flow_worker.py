@@ -976,27 +976,56 @@ class FlowWorker:
                 }
 
             # 执行流程，获取初始结果
-            # 取消监听（波次③）：start 路径无租约，登记整个推进窗口——取消
-            # 标志键命中即在途节点被 execution.cancel() 中止（code 沙箱当场
-            # killpg；协作节点如 agentrun 消费 cancel_event 收手）。
+            # 租约（A′，2026-10-06）：start 路径此前**不持租约**——resume 有、
+            # start 无。三后果实证（plaita#41 多机验证）：
+            # ①多 worker 抢到同一 start 消息时无闸可拦，双方同时跑同 id（双跑）；
+            # ②死信守卫按「租约是否被持有」判活，start 执行恒"租约空"→ 长步
+            #   误判持有者已死 → 误死信 + 重入队，长任务被反复打断；
+            # ③抢占者白烧 5 次 delivery 配额。
+            # 对齐 resume：acquire → 看门狗续租 → finally 释放。acquire 失败
+            # 即抛 ExecutionLeaseError（run() 走不 ack/重投语义），抢占者礼貌退出。
+            holder = new_holder_token(prefix="start")
+            lease_value, fence_token = self._acquire_lease(execution_id, holder)
+            if lease_value is None:
+                raise ExecutionLeaseError(
+                    f"execution {execution_id} is leased by another worker; "
+                    "refuse concurrent start"
+                )
+            fence_token_reset = None
+            if fence_token is not None:
+                fence_token_reset = set_current_fence_token(fence_token)
+
+            # 取消监听（波次③）：登记整个推进窗口——取消标志键命中即在途节点被
+            # execution.cancel() 中止（code 沙箱当场 killpg；协作节点如 agentrun
+            # 消费 cancel_event 收手）。租约看门狗同窗口。
             self._register_cancel_watch(execution_id, execution)
+            self._register_lease_watch(execution_id, lease_value, execution)
             try:
                 result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
                 # 处理执行结果
                 final_result = self._process_execution_result(
-                    flow, result, state, execution, delivery_count=delivery_count
+                    flow, result, state, execution, delivery_count=delivery_count,
+                    lease_execution_id=execution_id,
                 )
 
                 return final_result
             finally:
                 self._unregister_cancel_watch(execution_id)
+                self._unregister_lease_watch(execution_id, lease_value)
+                if fence_token_reset is not None:
+                    reset_current_fence_token(fence_token_reset)
+                # release 对整个租约 value 串 compare（fencing 档 = {holder}:{gen}）
+                self.execution_lease.release(execution_id, lease_value)
 
-        except (NodeExecutionRetryableError, ServiceDispatchError):
+        except (NodeExecutionRetryableError, ServiceDispatchError, ExecutionLeaseError):
             # 节点级可重试失败（波次二任务①）/ 幂等命中后重入队 resume 失败
-            # （波次二任务③）：原样上抛给 run() 按不 ack 语义处理。绝不能落
-            # 进下面的通用 except 被包成 RuntimeError（弱化语义）——重试异常
-            # 还不得触发观测回调 finalize（执行还会继续）。
+            # （波次二任务③）/ **租约被他人持有**（A′，2026-10-06）：原样上抛给
+            # run() 按不 ack 语义处理——ExecutionLeaseError 尤其关键：run() 的
+            # `except ExecutionLeaseError` 分支据此 note_lease_conflict 并把消息
+            # 留在 pending 等租约过期后 reclaim；若被下方通用 except 包成
+            # RuntimeError，run() 会误 ack 消息 → 抢占者把别人的活执行 ack 掉，
+            # 且真实持有者崩溃后无人 reclaim（执行永久失联）。绝不能包。
             raise
 
         except Exception as e:
