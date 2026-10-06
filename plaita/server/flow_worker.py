@@ -2106,10 +2106,26 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     queue.note_lease_conflict()  # 复用「让给别人」计数口径
                     self._handover_non_affine(task, queue, exc)
                 except ExecutionLeaseError as exc:
-                    # 另一 worker 持有 resume 租约：不 ack，待租约过期后 reclaim
+                    # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
+                    # **ack 释放**本消息（2026-10-06 修）。
+                    #
+                    # 原行为「不 ack 留 pending」的实测问题：持有者跑长节点
+                    # （agentrun 分钟级）期间，对端每 claim_min_idle_ms(60s)
+                    # XCLAIM 一次，**每次让 Redis deliveries +1** → 烧到超限
+                    # 触发死信（实测 delivery 达 22/31），死信守卫虽正确拦下
+                    # （租约仍在→跳过）并最终重入队，但产生大量假死信污染 DLQ、
+                    # 浪费队列往返。
+                    #
+                    # 为何 ack 是安全的：任务**没有丢**——它在持有者手里正常
+                    # 推进；若持有者崩溃，keeper 侧的 reaper 按 console_zombie_secs
+                    # 判死并**重派**（执行级恢复），消息级重投与此机制重复。
+                    # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
+                    # 那里**没人**能跑该任务，必须留给对端；此处有人在跑，直接释放。
                     queue.note_lease_conflict()
-                    logger.warning(
-                        "任务 %s 未取得 execution lease，留在 pending: %s",
+                    queue.ack(task.message_id)
+                    acked = True
+                    logger.info(
+                        "任务 %s 执行被他人持租约（正常竞争），已 ack 释放避免烧 delivery: %s",
                         task.message_id,
                         exc,
                     )
