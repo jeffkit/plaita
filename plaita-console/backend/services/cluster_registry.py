@@ -268,7 +268,8 @@ class ClusterRegistry:
         cluster_id: str,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        redis_url: Optional[str] = None
+        redis_url: Optional[str] = None,
+        config_path: Optional[str] = None
     ) -> ClusterInfo:
         """更新集群信息"""
         if cluster_id not in self._clusters:
@@ -282,6 +283,10 @@ class ClusterRegistry:
             info.description = description
         if redis_url is not None:
             info.redis_url = redis_url
+        # config_path 此前不可更新：仓库整体迁移后旧路径永久失效，
+        # registry 无法自我修复，只能让 /cluster/* 一直 500（10-06 事故）。
+        if config_path is not None:
+            info.config_path = config_path
         
         self._save_registry()
         return info

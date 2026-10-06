@@ -2243,21 +2243,21 @@ export default function Cluster() {
   })
 
   // 获取服务类型
-  const { data: serviceTypesData, isLoading: isLoadingTypes } = useQuery({
+  const { data: serviceTypesData, isLoading: isLoadingTypes, error: typesError } = useQuery({
     queryKey: ['serviceTypes'],
     queryFn: api.getServiceTypes,
     refetchInterval: 5000,
   })
 
   // 获取托管实例
-  const { data: instancesData, isLoading: isLoadingInstances } = useQuery({
+  const { data: instancesData, isLoading: isLoadingInstances, error: instancesError } = useQuery({
     queryKey: ['managedInstances'],
     queryFn: () => api.getManagedInstances(),
     refetchInterval: 3000,
   })
 
   // 获取基础设施服务
-  const { data: infraData, isLoading: isLoadingInfra } = useQuery({
+  const { data: infraData, isLoading: isLoadingInfra, error: infraError } = useQuery({
     queryKey: ['infrastructure'],
     queryFn: api.getInfrastructure,
     refetchInterval: 30000, // 30秒刷新一次
@@ -2367,10 +2367,47 @@ export default function Cluster() {
     removeMutation.mutate(instanceId)
   }
 
-  if (isLoadingTypes || isLoadingInstances) {
+  // 只在「首次加载且尚无错误」时占位。若请求失败仍返回 spinner，
+  // 页面会因 refetchInterval 反复重试而永远闪烁且没有任何诊断信息
+  // ——这正是 10-06 tcloud_gz 集群页的表现（后端 /cluster/* 全量 500）。
+  if ((isLoadingTypes && !typesError) || (isLoadingInstances && !instancesError)) {
     return (
       <div className="flex items-center justify-center h-full">
         <RefreshCw className="w-8 h-8 text-plaita-400 animate-spin" />
+      </div>
+    )
+  }
+
+  const loadError = typesError || instancesError
+  if (loadError && !serviceTypesData && !instancesData) {
+    return (
+      <div className="p-6">
+        <div className="bg-dark-800 rounded-lg border border-status-error/40 p-6 max-w-2xl">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-status-error shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <h2 className="font-medium text-ink-primary mb-1">集群数据加载失败</h2>
+              <p className="text-sm text-dark-300 mb-3 break-all">
+                {(loadError as Error).message}
+              </p>
+              <p className="text-caption text-ink-muted mb-4">
+                常见原因：集群配置文件路径失效（仓库/家目录迁移后 registry 里仍是旧路径），
+                或 console 后端未就绪。可先在服务器上核对 <code>~/.plaita-console/clusters/registry.yaml</code>
+                的 <code>config_path</code> 是否指向现存文件。
+              </p>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  queryClient.invalidateQueries({ queryKey: ['serviceTypes'] })
+                  queryClient.invalidateQueries({ queryKey: ['managedInstances'] })
+                }}
+              >
+                <RefreshCw size={14} />
+                重试
+              </Button>
+            </div>
+          </div>
+        </div>
       </div>
     )
   }
@@ -2604,9 +2641,19 @@ export default function Cluster() {
             </div>
           </div>
 
-          {isLoadingInfra ? (
+          {isLoadingInfra && !infraError ? (
             <div className="flex items-center justify-center h-48">
               <RefreshCw className="w-8 h-8 text-plaita-400 animate-spin" />
+            </div>
+          ) : infraError && !infraData ? (
+            <div className="bg-dark-800 rounded-lg border border-status-error/40 p-4 flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-status-error shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-sm text-ink-primary mb-1">基础设施列表加载失败</p>
+                <p className="text-caption text-dark-300 break-all">
+                  {(infraError as Error).message}
+                </p>
+              </div>
             </div>
           ) : infraData && infraData.infrastructure.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

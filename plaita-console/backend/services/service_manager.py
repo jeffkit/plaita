@@ -7,6 +7,7 @@
 - docker: Docker 容器
 """
 import asyncio
+import logging
 import os
 import signal
 import subprocess
@@ -22,6 +23,8 @@ from pydantic import BaseModel, Field
 
 # 项目根目录（支持通过环境变量覆盖，用于 Docker 环境）
 PROJECT_ROOT = Path(os.environ.get("PLAITA_PROJECT_ROOT", str(Path(__file__).parent.parent.parent.parent)))
+
+_log = logging.getLogger(__name__)
 
 
 class ServiceConfig(BaseModel):
@@ -395,6 +398,45 @@ class ServiceManager:
         self._process_launcher = ProcessLauncher()
         self._docker_launcher = DockerLauncher()
     
+    def _fallback_config_path(self) -> Optional[Path]:
+        """找一个可用的等价集群配置。
+
+        仓库或家目录整体迁移后（10-06 tcloud_gz 迁移即此例），cluster registry
+        里落着的旧 config_path 会失效；此时回退到当前 checkout 里的同名配置，
+        而不是让 /cluster/* 端点全量 500。
+        """
+        candidates: List[Path] = [
+            Path(PROJECT_ROOT) / "plaita-console" / "cluster_config.yaml",
+            Path.home() / ".plaita-console" / "clusters" / "default" / "cluster_config.yaml",
+        ]
+        # 旧路径的 basename 在新 checkout 里通常还在，按文件名再兜一层
+        if PROJECT_ROOT.is_dir():
+            candidates.extend(PROJECT_ROOT.glob(f"**/{Path(self.config_path).name}"))
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    def _persist_config_path(self, new_path: str) -> None:
+        """把自愈后的路径写回 cluster registry，避免每次请求都走一遍回退。"""
+        try:
+            from .cluster_registry import get_cluster_registry
+        except ImportError:
+            return
+        try:
+            registry = get_cluster_registry()
+            active = registry.get_active_cluster()
+            if active and Path(active.config_path) == Path(new_path):
+                return
+            if active:
+                registry.update_cluster(active.id, config_path=new_path)
+                _log.info("已把集群 %s 的 config_path 更新为 %s", active.id, new_path)
+        except Exception as e:
+            _log.warning("回写集群 config_path 失败（不影响本次加载）: %s", e)
+
     def load_config(self, config_path: Optional[str] = None) -> ClusterConfig:
         """加载配置文件"""
         if config_path:
@@ -403,7 +445,13 @@ class ServiceManager:
         config_file = Path(self.config_path)
         
         if not config_file.exists():
-            raise FileNotFoundError(f"配置文件不存在: {self.config_path}")
+            fallback = self._fallback_config_path()
+            if fallback is None:
+                raise FileNotFoundError(f"配置文件不存在: {self.config_path}")
+            _log.warning("集群配置路径失效 %s，回退到 %s", self.config_path, fallback)
+            self.config_path = str(fallback)
+            config_file = fallback
+            self._persist_config_path(str(fallback))
         
         with open(config_file, 'r', encoding='utf-8') as f:
             raw_config = yaml.safe_load(f)
