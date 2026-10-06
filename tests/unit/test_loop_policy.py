@@ -44,10 +44,20 @@ FAKE_UVLOOP = textwrap.dedent("""
 """)
 
 
-def _run_probe(env_extra: dict, with_fake_uvloop: bool) -> str:
+def _run_probe(env_extra: dict, with_fake_uvloop: bool,
+               block_real_uvloop: bool = False) -> str:
     env = os.environ.copy()
     env.update(env_extra)
     env["PYTHONPATH"] = str(_REPO_ROOT)
+    if block_real_uvloop and not with_fake_uvloop:
+        # 「模块缺失」用例的环境隔离：若解释器里真装了 uvloop（远端 worker venv
+        # 有 uvloop 0.23.0，本机 venv 没有），不隔离则 import 成功、policy 被
+        # 真替换 → 断言 asyncio.unix_events 必失败（环境敏感红）。注入同名桩，
+        # import 即抛 ImportError，稳定模拟「未安装」，与是否真装无关。
+        tmp = tempfile.mkdtemp(prefix="block-uvloop-")
+        (Path(tmp) / "uvloop.py").write_text(
+            "raise ImportError('uvloop blocked for test')\n", encoding="utf-8")
+        env["PYTHONPATH"] = f"{tmp}{os.pathsep}{_REPO_ROOT}"
     if with_fake_uvloop:
         tmp = tempfile.mkdtemp(prefix="fake-uvloop-")
         (Path(tmp) / "uvloop.py").write_text(FAKE_UVLOOP, encoding="utf-8")
@@ -61,11 +71,15 @@ def _run_probe(env_extra: dict, with_fake_uvloop: bool) -> str:
 
 class TestLoopPolicy(TestCase):
     def test_default_policy_without_env(self):
-        self.assertEqual(_run_probe({}, with_fake_uvloop=False), "asyncio.unix_events")
+        self.assertEqual(
+            _run_probe({}, with_fake_uvloop=False, block_real_uvloop=True),
+            "asyncio.unix_events")
 
     def test_unknown_env_ignored(self):
-        self.assertEqual(_run_probe({"PLAITA_LOOP": "bogus"}, with_fake_uvloop=False),
-                         "asyncio.unix_events")
+        self.assertEqual(
+            _run_probe({"PLAITA_LOOP": "bogus"}, with_fake_uvloop=False,
+                       block_real_uvloop=True),
+            "asyncio.unix_events")
 
     def test_uvloop_env_installs_policy(self):
         """env 命中 + 假模块：policy 被替换（新 loop 来自假模块）。"""
@@ -73,9 +87,15 @@ class TestLoopPolicy(TestCase):
                                            with_fake_uvloop=True))
 
     def test_uvloop_env_without_module_is_noop(self):
-        """env 命中但模块缺失：import 不炸、行为不变。"""
-        self.assertEqual(_run_probe({"PLAITA_LOOP": "uvloop"}, with_fake_uvloop=False),
-                         "asyncio.unix_events")
+        """env 命中但模块缺失：import 不炸、行为不变。
+
+        隔离真实 uvloop（block_real_uvloop）——否则本用例在装了 uvloop 的解释器
+        （如 worker venv）里会因真模块可导入而 policy 被替换，环境敏感失败。
+        """
+        self.assertEqual(
+            _run_probe({"PLAITA_LOOP": "uvloop"}, with_fake_uvloop=False,
+                       block_real_uvloop=True),
+            "asyncio.unix_events")
         # 未知值同理忽略，已在 test_unknown_env_ignored 覆盖
 
 
