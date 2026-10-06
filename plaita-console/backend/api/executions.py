@@ -193,11 +193,18 @@ def _is_mechanism_key(key: str) -> bool:
     fence 世代键（plaita:execution:fence:{id}，波次②）存裸整数计数器——
     混进列表会被 Lua cjson 投影当 summary 索引而 500（2026-10-02 e2e 实证：
     worker 开始持租约后审批/触发类轮询全 500）。
+
+    同类第三次（2026-10-06）：`plaita:execution:noderetry:{id}`（节点级重试
+    计数，波次二任务①）也是**裸整数**，同样混进 `plaita:execution:*` 投影 →
+    `summary.get` 对 int 调用即 500（远端 console 实测：列表 API 全崩，
+    AttributeError: 'int' object has no attribute 'get'）。同前缀机制键必须
+    逐一排除——新增此类键时同步登记本条。
     """
     return (
         ":execution:lease:" in key
         or ":execution:fence:" in key
         or ":execution:cancel:" in key
+        or ":execution:noderetry:" in key
         or key.endswith(":dlq")
     )
 
