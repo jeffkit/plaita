@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -148,14 +149,24 @@ class _LocalTraceCallback(FlowCallback):
                 "input": _safe(getattr(node, "input", None)),
                 "output": None,
                 "status": "running",
+                # 节点级耗时：起止时间戳（与 worker 侧 NodeTimingCallback 同构，
+                # 由 flow_store._timings_from_nodes 折算成 node_timings）
+                "started_at": _now(),
+                "started_ms": int(time.time() * 1000),
             }
         )
         self._flush()
 
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:
+        ended_ms = int(time.time() * 1000)
         for entry in reversed(self._nodes):
             if entry["id"] == node.id and entry["status"] == "running":
                 entry["output"] = _safe(result)
+                entry["ended_at"] = _now()
+                entry["ended_ms"] = ended_ms
+                started_ms = entry.get("started_ms")
+                if isinstance(started_ms, int):
+                    entry["duration_ms"] = max(0, ended_ms - started_ms)
                 if error or exception:
                     entry["status"] = "error"
                     entry["error"] = str(error or exception)

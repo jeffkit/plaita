@@ -45,6 +45,9 @@ class ExecutionInfo(BaseModel):
     # 本地单机模式专有：节点级 trace 与最终输出（集群模式为 None）
     nodes: Optional[List[Dict[str, Any]]] = Field(None, description="节点级执行 trace（本地模式）")
     output: Optional[Any] = Field(None, description="流程输出（本地模式）")
+    # 节点级耗时：集群模式由 worker 的 NodeTimingCallback 写入执行状态，
+    # 本地模式由回调采集的 trace 时间戳折算；老状态/未采集时为 None
+    node_timings: Optional[Dict[str, Any]] = Field(None, description="节点级耗时")
     # Langfuse 观测深链（启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
     langfuse_trace_url: Optional[str] = Field(None, description="Langfuse trace 页面 URL")
 

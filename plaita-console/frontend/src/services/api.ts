@@ -170,6 +170,21 @@ export interface ServiceTopology {
   timestamp: string
 }
 
+/** 节点级耗时（worker 的 NodeTimingCallback 与本地 trace 折算同构） */
+export interface NodeTiming {
+  started_at?: string
+  ended_at?: string
+  /** epoch 毫秒：算相对偏移用，避免与流程 start_time 的时区基准不一致 */
+  started_ms?: number
+  ended_ms?: number
+  /** 最后一次执行的耗时 */
+  duration_ms?: number
+  /** 同一节点被访问多次（循环/重试）时的累计耗时 */
+  total_duration_ms?: number
+  attempts?: number
+  failed?: boolean
+}
+
 export interface ExecutionInfo {
   execution_id: string
   flow_id: string
@@ -184,6 +199,8 @@ export interface ExecutionInfo {
   // 本地单机模式专有：节点级 trace 与最终输出
   nodes?: Array<{ id: string; type: string; name?: string; input?: unknown; output?: unknown; status: string; error?: string }> | null
   output?: unknown
+  /** 节点级耗时（node_id → 耗时）；老状态/未采集时为 null */
+  node_timings?: Record<string, NodeTiming> | null
   // Langfuse 观测深链（后端启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
   langfuse_trace_url?: string | null
 }
