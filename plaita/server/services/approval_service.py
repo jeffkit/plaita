@@ -14,7 +14,7 @@ import time
 import uuid
 from typing import Any, Dict, List
 
-from .base_service import BaseExtendedService
+from .base_service import BaseExtendedService, ResumeEventPublishError
 from ...logger import logger
 
 # 审批记录 TTL：7 天自清理（与仓内事件/订阅键 TTL 惯例一致）。
@@ -211,7 +211,13 @@ class ApprovalService(BaseExtendedService):
             )
 
             # 触发事件
-            await self.trigger_event(task_config.get("event_type"), event_data)
+            try:
+                await self.trigger_event(task_config.get("event_type"), event_data)
+            except ResumeEventPublishError:
+                # 发布失败：内存态即存储，上面的追加必须回滚——否则审批人
+                # 重试被判「已经审批过」，执行永久失联（#35 同病）。
+                approval_record["approvals"].pop()
+                raise
 
             # 更新状态并从待审批列表移除
             approval_record["status"] = final_decision
@@ -275,7 +281,10 @@ class ApprovalService(BaseExtendedService):
             final_decision = self._check_approval_result(approval_record)
 
             if final_decision:
-                # 审批完成，触发事件（trigger_event 自吞异常，不会留下半提交态）
+                # 审批完成，触发事件。publish 失败上抛（不再吞成日志）：此刻
+                # 记录尚未回写/删除，异常出到 submit_approval_decision 返回
+                # error，审批人重试即可再走一遍——历史实现自吞异常后照样
+                # 删记录，执行永久失联。
                 event_data = self._build_completed_event_data(
                     task_config, approval_id, final_decision,
                     approval_record["approvals"],

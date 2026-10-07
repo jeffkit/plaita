@@ -60,6 +60,21 @@ class HttpCallbackService(BaseExtendedService):
     def _record_key(self, path: str) -> str:
         return f"{self._record_prefix}{path}"
 
+    def _restore_claim(self, path: str, raw) -> None:
+        """触发失败后回写被原子认领删掉的注册记录（允许外部重试）。
+
+        回写失败（Redis 仍不可用）只告警：此时回调已丢，注册也未恢复——
+        与「不回写」同结局，但尽力链路上多一次挽回机会。
+        """
+        try:
+            self._redis_client.set(
+                self._record_key(path), raw, ex=CALLBACK_RECORD_TTL_SECONDS
+            )
+        except Exception as e:  # noqa: BLE001 — 回写失败不掩盖原始触发异常
+            logger.error(
+                "回调注册回写失败（外部重试将得到未注册）: %s", e, exc_info=True
+            )
+
     def get_service_type(self) -> str:
         """获取服务类型"""
         return "http_callback"
@@ -148,7 +163,6 @@ class HttpCallbackService(BaseExtendedService):
         try:
             if self._use_redis:
                 # 原子认领（Lua GET+DEL）：恰一实例处理该回调，防多实例双触发。
-                # 认领先行于触发——trigger_event 自吞异常不会失败重投，无丢失窗。
                 raw = self._redis_client.eval(
                     _CLAIM_CALLBACK_LUA, 1, self._record_key(path)
                 )
@@ -175,7 +189,15 @@ class HttpCallbackService(BaseExtendedService):
             }
 
             # 触发事件
-            await self.trigger_event(task_config.get("event_type"), event_data)
+            try:
+                await self.trigger_event(task_config.get("event_type"), event_data)
+            except Exception:
+                # 认领已原子删掉注册记录（Lua DEL）：触发失败不回写，外部
+                # 重试只会拿到「回调路径未注册」——回调永久丢失（历史实现
+                # 是 publish 吞异常报成功，同病）。回写让重试能再次认领触发。
+                if self._use_redis:
+                    self._restore_claim(path, raw)
+                raise
 
             # 移除已处理的回调（Redis 模式在认领时已原子删除）
             if not self._use_redis:

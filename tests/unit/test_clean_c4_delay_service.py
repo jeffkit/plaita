@@ -60,8 +60,10 @@ class DelayServiceTestBase(unittest.TestCase):
         for svc in self.services:
             svc.shutdown(timeout=1)
 
-    def make_service(self):
-        svc = DelayService(self.bus, self.config, redis_client=self.redis)
+    def make_service(self, **overrides):
+        config = dict(self.config)
+        config.update(overrides)
+        svc = DelayService(self.bus, config, redis_client=self.redis)
         self.services.append(svc)
         return svc
 
@@ -135,7 +137,11 @@ class TestScheduledTrigger(DelayServiceTestBase):
             self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0))
 
     def test_handled_failure_consumes_task(self):
-        """handle_task 返回 False（处理过但失败，已触发错误事件）：按既有语义消费掉。"""
+        """handle_task 返回 False（处理过但失败，已触发错误事件）：按既有语义消费掉。
+
+        与 #35 的边界：**异常**路径不出排程（下轮重试），显式 False 视为
+        「已处置」（错误事件已发出），照旧 ZREM。
+        """
         svc = self.make_service()
         with patch.object(DelayService, "handle_task", new_callable=AsyncMock) as ht:
             ht.return_value = False
@@ -143,6 +149,118 @@ class TestScheduledTrigger(DelayServiceTestBase):
             self.assertTrue(svc.start_service())
             self.assertTrue(_wait_until(lambda: ht.await_count >= 1))
             self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0))
+
+
+class TestTriggerFailureRetry(DelayServiceTestBase):
+    """#35：到期触发的最后一跳失败不得出排程。
+
+    历史实现：base_service.publish_resume_event 吞掉发布异常 → handle_task
+    正常返回 → finally 一律 ZREM——失败与成功出队路径完全相同。Redis 抖动
+    瞬间 = publish 没送达 + 任务已出排程，挂起执行的唯一唤醒凭据消失。
+    现：异常路径留排程态退避重试，超限转显式死信键。
+    """
+
+    def test_publish_failure_keeps_task_and_next_round_retries(self):
+        """验收：publish 抛异常 → 任务仍在 ZSET；恢复后下轮重试成功出排程。"""
+        svc = self.make_service(
+            trigger_retry_backoff_seconds=0.05, max_trigger_attempts=50
+        )
+        attempts = []
+
+        def broken_publish(*args, **kwargs):
+            attempts.append(args)
+            raise ConnectionError("redis 瞬断")
+
+        with patch.object(self.redis, "publish", side_effect=broken_publish):
+            self.redis.rpush(self.queue_key, json.dumps(_task(delay_ms=1)))
+            self.assertTrue(svc.start_service())
+            self.assertTrue(
+                _wait_until(lambda: len(attempts) >= 2), "触发失败后未被下一轮重试"
+            )
+            self.assertEqual(
+                self.redis.zcard(self.scheduled_key),
+                1,
+                "触发失败的任务被 ZREM 出排程——唤醒凭据丢失",
+            )
+            member = self.redis.zrange(self.scheduled_key, 0, -1)[0]
+            self.assertEqual(json.loads(member)["execution_id"], "e1")
+            # 重试计数随失败递增（系统性可发现，而不只剩日志）。计数在每次
+            # 失败处理里 +1，断言区间而非等值——计数线程可能正差一次未落。
+            count = int(self.redis.hget(svc.retry_key, member) or 0)
+            self.assertGreaterEqual(count, 1, "重试计数未登记")
+            self.assertLessEqual(count, len(attempts))
+
+        # Redis 恢复：退避到期后重试成功、任务出排程、计数清理
+        self.assertTrue(
+            _wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0),
+            "Redis 恢复后重试未成功（任务卡在排程态）",
+        )
+        self.assertEqual(self.redis.hlen(svc.retry_key), 0, "重试计数未随出排程清理")
+        self.assertEqual(self.redis.hlen(svc.dead_letter_key), 0, "不该有死信")
+
+    def test_retry_exhausted_moves_task_to_dead_letter(self):
+        """重试超限：移出排程 ZSET，登记显式死信键（原因/次数/执行 ID）。"""
+        svc = self.make_service(
+            trigger_retry_backoff_seconds=0.02, max_trigger_attempts=3
+        )
+        with patch.object(
+            self.redis, "publish", side_effect=ConnectionError("redis 瞬断")
+        ):
+            self.redis.rpush(self.queue_key, json.dumps(_task(delay_ms=1)))
+            self.assertTrue(svc.start_service())
+            self.assertTrue(
+                _wait_until(lambda: self.redis.hlen(svc.dead_letter_key) == 1),
+                "重试超限未转死信",
+            )
+            self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0))
+            payload = json.loads(list(self.redis.hvals(svc.dead_letter_key))[0])
+            self.assertEqual(payload["attempts"], 3)
+            self.assertEqual(payload["execution_id"], "e1")
+            self.assertIn("瞬断", payload["last_error"])
+            self.assertEqual(self.redis.hlen(svc.retry_key), 0, "死信后重试计数未清")
+
+        info = svc.get_pending_tasks_info()
+        self.assertEqual(info["dead_letter_count"], 1, "死信未对外暴露（无系统性信号）")
+        self.assertEqual(info["dead_letter_key"], svc.dead_letter_key)
+
+    def test_handle_task_exception_keeps_task_for_retry(self):
+        """非 publish 的异常同样不出排程：重试成功后才 ZREM。"""
+        svc = self.make_service(
+            trigger_retry_backoff_seconds=0.05, max_trigger_attempts=50
+        )
+        calls = []
+
+        async def boom(cfg):
+            calls.append(cfg)
+            raise RuntimeError("boom")
+
+        with patch.object(DelayService, "handle_task", side_effect=boom):
+            self.redis.rpush(self.queue_key, json.dumps(_task(delay_ms=1)))
+            self.assertTrue(svc.start_service())
+            self.assertTrue(_wait_until(lambda: len(calls) >= 2), "异常路径未重试")
+            self.assertEqual(self.redis.zcard(self.scheduled_key), 1)
+
+        # 恢复后真实 handle_task 走完 → ZREM
+        self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0))
+
+    def test_shutdown_interrupt_still_leaves_task_in_zset(self):
+        """shutdown 中断不触发重试登记（既有语义：留待下次启动）。"""
+        svc = self.make_service()
+        release = __import__("threading").Event()
+
+        async def slow_handle(cfg):
+            release.wait(timeout=5)
+            return False
+
+        with patch.object(DelayService, "handle_task", side_effect=slow_handle):
+            self.redis.rpush(self.queue_key, json.dumps(_task(delay_ms=1)))
+            self.assertTrue(svc.start_service())
+            self.assertTrue(_wait_until(lambda: svc.get_active_task_count() == 1))
+            svc._shutdown_event.set()
+            release.set()
+            self.assertTrue(_wait_until(lambda: svc.get_active_task_count() == 0))
+            self.assertEqual(self.redis.zcard(self.scheduled_key), 1)
+            self.assertEqual(self.redis.hlen(svc.dead_letter_key), 0)
 
 
 class TestCrashRecovery(DelayServiceTestBase):
