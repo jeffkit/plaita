@@ -68,10 +68,10 @@ export default function Flows() {
           <thead>
             <tr>
               <Th>flow_id</Th>
-              <Th>描述</Th>
-              <Th>作者</Th>
-              <Th>更新时间</Th>
-              <Th className="text-right">操作</Th>
+              <Th className="w-full">描述</Th>
+              <Th className="whitespace-nowrap">作者</Th>
+              <Th className="whitespace-nowrap">更新时间</Th>
+              <Th className="text-right whitespace-nowrap">操作</Th>
             </tr>
           </thead>
           <tbody>
@@ -84,13 +84,23 @@ export default function Flows() {
             )}
             {flows.map((f) => (
               <Tr key={f.flow_id}>
-                <TdData className="text-ink-primary">{f.flow_id}</TdData>
-                <Td>{f.desc || '-'}</Td>
-                <Td>{f.author || '-'}</Td>
-                <TdData className="text-ink-muted">
+                <TdData className="text-ink-primary whitespace-nowrap">
+                  <span className="block max-w-[220px] truncate" title={f.flow_id}>
+                    {f.flow_id}
+                  </span>
+                </TdData>
+                <Td className="break-words" title={f.desc || undefined}>
+                  {f.desc || '-'}
+                </Td>
+                <Td className="whitespace-nowrap">
+                  <span className="block max-w-[160px] truncate" title={f.author || undefined}>
+                    {f.author || '-'}
+                  </span>
+                </Td>
+                <TdData className="text-ink-muted whitespace-nowrap">
                   {f.updated_at ? new Date(f.updated_at).toLocaleString() : '-'}
                 </TdData>
-                <Td className="text-right">
+                <Td className="text-right whitespace-nowrap">
                   <button
                     onClick={() => navigate(`/flows/${f.flow_id}/edit`)}
                     className="text-plaita-400 hover:text-plaita-300 transition-colors mr-3"
