@@ -196,6 +196,32 @@ class ResumeEventPersistenceTest(unittest.TestCase):
 
         self.assertEqual(self.redis_client.keys("plaita:event:*"), [])
 
+    def test_publish_failure_propagates(self):
+        """直发失败上抛（不再吞）：调用方据此保留排程重试。
+
+        这是「挂起执行最后一跳」的唤醒凭据——吞掉会让 DelayService 以为
+        触发成功而 ZREM 出排程，挂起执行永久失醒。
+        """
+        with unittest.mock.patch.object(
+            self.redis_client, "publish", side_effect=RuntimeError("redis down")
+        ):
+            with self.assertRaises(RuntimeError):
+                run(self.service.publish_resume_event(
+                    "approval", {"execution_id": "exec-r1"},
+                ))
+
+    def test_memory_bus_publish_failure_propagates(self):
+        """无 redis 回退路径同样上抛（event_bus.publish 失败不吞）。"""
+        bus = InMemoryEventBus()
+        service = ApprovalService(bus, {}, redis_client=None)
+        with unittest.mock.patch.object(
+            bus, "publish", new_callable=AsyncMock, side_effect=RuntimeError("bus down")
+        ):
+            with self.assertRaises(RuntimeError):
+                run(service.publish_resume_event(
+                    "approval", {"execution_id": "exec-r1"},
+                ))
+
 
 if __name__ == "__main__":
     unittest.main()

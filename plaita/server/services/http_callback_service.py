@@ -148,7 +148,9 @@ class HttpCallbackService(BaseExtendedService):
         try:
             if self._use_redis:
                 # 原子认领（Lua GET+DEL）：恰一实例处理该回调，防多实例双触发。
-                # 认领先行于触发——trigger_event 自吞异常不会失败重投，无丢失窗。
+                # 认领即删——resume 发布失败（publish_resume_event 上抛）会转成
+                # 错误响应而非静默假成功；注册已被认领消费，调用方重试得到
+                # 「未注册」，须按回调源侧重投/运维巡检处置。
                 raw = self._redis_client.eval(
                     _CLAIM_CALLBACK_LUA, 1, self._record_key(path)
                 )

@@ -275,7 +275,9 @@ class ApprovalService(BaseExtendedService):
             final_decision = self._check_approval_result(approval_record)
 
             if final_decision:
-                # 审批完成，触发事件（trigger_event 自吞异常，不会留下半提交态）
+                # 审批完成，触发事件；publish_resume_event 失败上抛（resume
+                # 最后一跳不吞）——此刻本地记录未回写、Redis 记录未删除，
+                # 调用方可重试重放，不会留下半提交态。
                 event_data = self._build_completed_event_data(
                     task_config, approval_id, final_decision,
                     approval_record["approvals"],

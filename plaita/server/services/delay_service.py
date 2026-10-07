@@ -17,6 +17,12 @@ C4-2 改造（2026-10）：历史实现 BLPOP 出队即提交线程池、handle_
 - 到期轮询：ZSET 中 score<=now 的任务才提交线程池，处理走完才 ZREM
   （at-least-once：崩溃后任务仍在 ZSET，重启后被下一周期捡起；
   shutdown 中断的任务同样留在 ZSET 等待下次启动恢复）。
+
+2026-10 最后一跳修复：历史实现无论 handle_task 返回什么都 ZREM——触发阶段
+恰逢 Redis 抖动时 publish_resume_event 的异常被上游吞成「成功」，任务已出
+排程、挂起执行的唯一唤醒凭据消失（对比任务队列本体的 at-least-once + DLQ，
+这一跳退化成 fire-once）。现成功才 ZREM；失败保留在 ZSET 并计数+退避重排，
+超限搬进显式死信键（``{scheduled}:deadletter``）不再静默消失。
 """
 import asyncio
 import json
@@ -32,6 +38,14 @@ DELAY_POLL_INTERVAL_SECONDS = 0.5
 # 每周期搬运/提交的最大条数（防单周期阻塞过久）。
 DELAY_CONVEY_BATCH = 200
 DELAY_DUE_BATCH = 50
+# 最后一跳失败重试：触发失败的任务不出排程，退避重排后重试；超限转死信。
+# 默认值与 service_config 可覆盖（max_retries / retry_backoff_seconds）。
+DELAY_MAX_RETRIES = 5
+DELAY_RETRY_BACKOFF_SECONDS = 5.0
+# 退避上限（指数退避封顶，防超限前无限拉长）。
+DELAY_RETRY_MAX_BACKOFF_SECONDS = 300.0
+# 死信键保留条数（无消费者，纯记录；超限 LTRIM 防无限增长）。
+DELAY_DLQ_MAX_LEN = 1000
 
 
 class DelayService(BaseExtendedService):
@@ -57,6 +71,17 @@ class DelayService(BaseExtendedService):
         # list 键仍是生产者契约（flow_worker RPUSH），ZSET 是本服务内部的
         # 崩溃可恢复排程态。
         self.scheduled_key = f"{self.queue_key}:scheduled"
+        # 最后一跳失败重试态：每 member 一个重试计数（Redis hash）+ 死信 list。
+        self.retry_key = f"{self.scheduled_key}:retries"
+        self.dlq_key = f"{self.scheduled_key}:deadletter"
+        self._max_retries = int(
+            (service_config or {}).get("max_retries", DELAY_MAX_RETRIES)
+        )
+        self._retry_backoff_seconds = float(
+            (service_config or {}).get(
+                "retry_backoff_seconds", DELAY_RETRY_BACKOFF_SECONDS
+            )
+        )
         self._poll_interval = float(
             (service_config or {}).get("poll_interval", DELAY_POLL_INTERVAL_SECONDS)
         )
@@ -222,43 +247,117 @@ class DelayService(BaseExtendedService):
         logger.info("到期延迟任务已提交: node_id=%s", task_config.get("node_id"))
 
     def _run_scheduled_task(self, member: str, task_config: Dict[str, Any]) -> None:
-        """线程池内执行到期任务；处理走完才 ZREM（at-least-once）。"""
+        """线程池内执行到期任务；成功才 ZREM，失败保留重试（at-least-once）。
+
+        历史缺陷：无论 handle_task 返回什么都在 finally 里 ZREM——触发阶段
+        Redis 抖动导致 publish 失败（被上游吞成「成功」）的任务直接出排程，
+        挂起执行永久失醒。现成功才出排程；失败留 ZSET 退避重试，超限转死信。
+        """
         task_id = self._generate_task_id(task_config)
         self.active_tasks.add(task_id)
+        succeeded = False
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                result = loop.run_until_complete(self.handle_task(task_config))
+                succeeded = bool(loop.run_until_complete(self.handle_task(task_config)))
             finally:
                 try:
                     loop.close()
                 except Exception:
                     logger.warning("event loop close failed during task cleanup", exc_info=True)
-            logger.info("延迟任务 %s 执行完成: %s", task_id, result)
+            logger.info("延迟任务 %s 执行完成: %s", task_id, succeeded)
         except Exception as e:
             logger.error("延迟任务 %s 执行失败: %s", task_id, e, exc_info=True)
             self._handle_task_error(task_config, e)
         finally:
             self.active_tasks.discard(task_id)
-            if self.is_shutdown_requested():
-                # shutdown 中断的任务留在 ZSET，下次启动由到期轮询捡起。
-                with self._inflight_lock:
-                    self._inflight.discard(member)
-            else:
+            if succeeded:
                 self._finalize_scheduled(member)
+            elif self.is_shutdown_requested():
+                # shutdown 中断的任务留在 ZSET，下次启动由到期轮询捡起。
+                self._release_inflight(member)
+            else:
+                self._schedule_retry(member)
+
+    def _retry_backoff_ms(self, attempts: int) -> int:
+        """第 attempts 次失败后的退避毫秒（指数退避，封顶）。"""
+        delay = self._retry_backoff_seconds * (2 ** (attempts - 1))
+        return int(min(delay, DELAY_RETRY_MAX_BACKOFF_SECONDS) * 1000)
+
+    def _schedule_retry(self, member: str) -> None:
+        """触发失败：不 ZREM，计数+退避重排；超限转显式死信键。
+
+        唯一唤醒凭据是 ZSET 里的这条 member——失败时它必须留下，否则挂起
+        执行永久失醒（这正是历史缺陷）。退避重排（ZADD 改 score 到未来）
+        避免 Redis 抖动期热轮询；重试次数超 ``max_retries`` 搬进死信键，
+        不再静默消失（有键可系统巡检，见 ``dlq_key``）。
+        """
+        try:
+            attempts = int(self._redis_client.hincrby(self.retry_key, member, 1))
+        except Exception as e:
+            # 计数不可用（Redis 故障）：保守留在 ZSET 下轮立即重试，不丢任务。
+            logger.error(
+                "延迟任务重试计数失败（保留在排程待下轮重试）: %s", e, exc_info=True
+            )
+            self._release_inflight(member)
+            return
+        if attempts > self._max_retries:
+            self._dead_letter(member, attempts)
+            return
+        next_at_ms = int(time.time() * 1000) + self._retry_backoff_ms(attempts)
+        try:
+            self._redis_client.zadd(self.scheduled_key, {member: next_at_ms})
+        except Exception as e:
+            logger.error(
+                "延迟任务退避重排失败（ZSET 原条目仍在，下轮重试）: %s", e, exc_info=True
+            )
+        self._release_inflight(member)
+
+    def _dead_letter(self, member: str, attempts: int) -> None:
+        """重试超限：搬进显式死信键并从排程/计数移除（不再静默消失）。"""
+        envelope = {
+            "member": member,
+            "attempts": attempts,
+            "reason": "resume_publish_failed_max_retries",
+            "dead_lettered_at": int(time.time() * 1000),
+        }
+        try:
+            pipe = self._redis_client.pipeline()
+            pipe.lpush(self.dlq_key, json.dumps(envelope, ensure_ascii=False))
+            pipe.ltrim(self.dlq_key, 0, DELAY_DLQ_MAX_LEN - 1)
+            pipe.zrem(self.scheduled_key, member)
+            pipe.hdel(self.retry_key, member)
+            pipe.execute()
+        except Exception as e:
+            # 死信登记失败：保守留在 ZSET（下轮会再尝试登记，最终收敛）。
+            logger.error("延迟任务死信登记失败（保留在排程待下轮）: %s", e, exc_info=True)
+            self._release_inflight(member)
+            return
+        logger.error(
+            "延迟任务重试超限转死信: attempts=%s → %s (member=%.200s)",
+            attempts, self.dlq_key, member,
+        )
+        self._release_inflight(member)
+
+    def _release_inflight(self, member: str) -> None:
+        """从 in-flight 集合移除（处理收尾必经：失败路径也要能下轮重试）。"""
+        with self._inflight_lock:
+            self._inflight.discard(member)
 
     def _finalize_scheduled(self, member: str) -> None:
-        """任务处理走完：ZREM 出排程态并清 in-flight。
+        """任务处理成功：ZREM 出排程态并清重试计数/in-flight。
 
         ZREM 失败只导致下次重复触发一次（事件侧 EventFilter 去重幂等）。
         """
         try:
-            self._redis_client.zrem(self.scheduled_key, member)
+            pipe = self._redis_client.pipeline()
+            pipe.zrem(self.scheduled_key, member)
+            pipe.hdel(self.retry_key, member)
+            pipe.execute()
         except Exception as e:
             logger.error("延迟任务完成登记失败: %s", e)
-        with self._inflight_lock:
-            self._inflight.discard(member)
+        self._release_inflight(member)
 
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """触发事件：带 correlation_id（=execution_id），EventFilter 才能关联到挂起执行。
@@ -397,17 +496,24 @@ class DelayService(BaseExtendedService):
             Dict[str, Any]: 任务信息
         """
         scheduled_count = 0
+        retrying_count = 0
+        dead_letter_count = 0
         try:
             if self._redis_client is not None and hasattr(self._redis_client, "zcard"):
                 scheduled_count = int(self._redis_client.zcard(self.scheduled_key) or 0)
+                retrying_count = int(self._redis_client.hlen(self.retry_key) or 0)
+                dead_letter_count = int(self._redis_client.llen(self.dlq_key) or 0)
         except Exception as e:
             logger.debug("zcard(%s) failed: %s", self.scheduled_key, e)
         return {
             "service_type": self.get_service_type(),
             "active_task_count": self.get_active_task_count(),
             "scheduled_task_count": scheduled_count,
+            "retrying_task_count": retrying_count,
+            "dead_letter_count": dead_letter_count,
             "queue_key": self.queue_key,
             "scheduled_key": self.scheduled_key,
+            "dlq_key": self.dlq_key,
             "is_running": self.is_running,
             "max_workers": self.get_max_workers()
         } 

@@ -370,6 +370,12 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         直发不经 RedisEventBus.publish、不落事件存储，故直发前按
         RedisEventStorage 键格式尽力落盘（_persist_resume_event_best_effort，
         fail-open）——EventReconciler 的回扫兜底才能覆盖 Pub/Sub 丢通知窗口。
+
+        发布失败**上抛**（不再自吞）：这是「挂起执行最后一跳」的唤醒凭据，
+        吞掉会让调用方以为成功。调用方据此决定处置——DelayService 失败时
+        不 ZREM、留排程 ZSET 下轮重试（见 delay_service._run_scheduled_task）；
+        审批/回调把它转成错误响应而非静默成功。落盘仍是 fail-open（仅 warning），
+        它只是补偿链路，不改变主链路的成败判定。
         """
         event = Event(
             event_type=event_type,
@@ -396,8 +402,9 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 event_type,
                 event.correlation_id,
             )
-        except Exception as e:  # noqa: BLE001 — 发布失败只告警，不打断任务主流程
+        except Exception as e:  # noqa: BLE001 — 记录后上抛，由调用方决定重试/保留排程
             logger.error("触发 resume 事件失败: %s", e, exc_info=True)
+            raise
     
     def get_active_task_count(self) -> int:
         """

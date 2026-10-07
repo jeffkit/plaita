@@ -52,6 +52,13 @@ flowchart LR
 
 按 `service_config.delay_ms` 设定定时器，到点发布 `delay_trigger` 事件。适合"X 分钟后继续"的场景。
 
+排程态落在 Redis ZSET（`{queue}:scheduled`，member=任务 JSON，score=触发时间戳 ms），
+**成功触发才 `ZREM`**：触发阶段 `publish` 失败时任务不出排程（挂起执行的唤醒凭据不丢），
+按 `retry_backoff_seconds`（指数退避，上限 300s）重排后重试，重试计数超 `max_retries`
+（默认 5）搬进显式死信键 `{queue}:scheduled:deadletter`（不再静默消失）。
+`get_pending_tasks_info()` 暴露 `retrying_task_count` / `dead_letter_count` /
+`dlq_key` 供巡检。对比任务队列本体的 at-least-once + DLQ，这一跳此前是 fire-once。
+
 ### RedisQueueService / KafkaQueueService
 
 阻塞监听对应队列，消息到达后包装成事件发布。适合"等某条消息到达再继续"。

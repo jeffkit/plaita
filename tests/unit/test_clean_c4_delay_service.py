@@ -60,8 +60,9 @@ class DelayServiceTestBase(unittest.TestCase):
         for svc in self.services:
             svc.shutdown(timeout=1)
 
-    def make_service(self):
-        svc = DelayService(self.bus, self.config, redis_client=self.redis)
+    def make_service(self, **config_overrides):
+        config = {**self.config, **config_overrides}
+        svc = DelayService(self.bus, config, redis_client=self.redis)
         self.services.append(svc)
         return svc
 
@@ -134,15 +135,80 @@ class TestScheduledTrigger(DelayServiceTestBase):
             release.set()
             self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0))
 
-    def test_handled_failure_consumes_task(self):
-        """handle_task 返回 False（处理过但失败，已触发错误事件）：按既有语义消费掉。"""
-        svc = self.make_service()
+    def test_handled_failure_keeps_task_for_retry(self):
+        """handle_task 返回 False（触发失败）：不 ZREM，留 ZSET 待退避重试。
+
+        历史行为是「失败也按已完成消费掉出 ZSET」——这正是最后一跳退化成
+        fire-once 的根因：publish 失败被吞、任务已出排程，挂起执行永久失醒。
+        """
+        svc = self.make_service(retry_backoff_seconds=60)
         with patch.object(DelayService, "handle_task", new_callable=AsyncMock) as ht:
             ht.return_value = False
             self.redis.rpush(self.queue_key, json.dumps(_task(delay_ms=1)))
             self.assertTrue(svc.start_service())
             self.assertTrue(_wait_until(lambda: ht.await_count >= 1))
-            self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0))
+            self.assertTrue(
+                _wait_until(lambda: svc.get_pending_tasks_info()["retrying_task_count"] == 1),
+                "触发失败未计入重试（退避重排）",
+            )
+            # 失败后仍留在排程 ZSET（唯一唤醒凭据不丢）
+            self.assertEqual(self.redis.zcard(self.scheduled_key), 1)
+
+
+class TestLastHopRetry(DelayServiceTestBase):
+    """验收：触发瞬间 publish 失败 → 不 ZREM、下轮重试成功；超限转死信。"""
+
+    def _flaky_publish(self, fail_times):
+        calls = {"n": 0}
+
+        async def _publish(event_type, event_data):
+            calls["n"] += 1
+            if calls["n"] <= fail_times:
+                raise RuntimeError("redis down")
+
+        return _publish, calls
+
+    def test_publish_failure_keeps_task_and_retries(self):
+        """mock publish 抛异常：任务仍在 ZSET；下轮重试成功后 ZREM。"""
+        svc = self.make_service(retry_backoff_seconds=0.2, max_retries=3)
+        flaky, calls = self._flaky_publish(fail_times=1)
+        raw = json.dumps(_task(delay_ms=1))
+        with patch.object(DelayService, "publish_resume_event", side_effect=flaky):
+            self.redis.rpush(self.queue_key, raw)
+            self.assertTrue(svc.start_service())
+            self.assertTrue(
+                _wait_until(lambda: self.redis.hget(svc.retry_key, raw) == "1"),
+                "首次触发失败未计入重试",
+            )
+            self.assertEqual(
+                self.redis.zcard(self.scheduled_key), 1, "触发失败被误 ZREM 出排程"
+            )
+            self.assertIsNotNone(self.redis.zscore(self.scheduled_key, raw))
+            # 退避后下轮：publish 成功 → handle_task 返回 True → ZREM
+            self.assertTrue(
+                _wait_until(lambda: self.redis.zcard(self.scheduled_key) == 0),
+                "下轮重试未成功消费",
+            )
+        self.assertGreaterEqual(calls["n"], 2)
+
+    def test_retry_exhaustion_moves_to_dead_letter(self):
+        """publish 持续失败：超 max_retries 后转显式死信键，不再滞留排程。"""
+        svc = self.make_service(retry_backoff_seconds=0.05, max_retries=2)
+        flaky, _calls = self._flaky_publish(fail_times=10)
+        raw = json.dumps(_task(delay_ms=1))
+        with patch.object(DelayService, "publish_resume_event", side_effect=flaky):
+            self.redis.rpush(self.queue_key, raw)
+            self.assertTrue(svc.start_service())
+            self.assertTrue(
+                _wait_until(lambda: self.redis.llen(svc.dlq_key) == 1, timeout=8),
+                "重试超限未转死信",
+            )
+            self.assertEqual(self.redis.zcard(self.scheduled_key), 0)
+            self.assertEqual(self.redis.hlen(svc.retry_key), 0)
+            envelope = json.loads(self.redis.lindex(svc.dlq_key, 0))
+            self.assertEqual(envelope["attempts"], 3)
+            self.assertEqual(envelope["member"], raw)
+            self.assertIn("reason", envelope)
 
 
 class TestCrashRecovery(DelayServiceTestBase):
