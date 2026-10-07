@@ -100,6 +100,32 @@ redis-cli KEYS 'plaita:execution:lease:*'
 
 **读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
 
+## 僵尸执行巡检 {#僵尸执行巡检}
+
+worker 崩溃后 pending 里的 start 任务重投会**另起全新执行**重跑，旧行永久停在
+`running`。例行巡检用 `scripts/reap_zombie_executions.py` 把超期未更新的
+running 行标记为 error(`orphaned`)，供监控/人工复核：
+
+```bash
+python scripts/reap_zombie_executions.py \
+    --redis-url "$PLAITA_REDIS_URL" --idle-minutes 60 [--dry-run]
+```
+
+多租户按命名空间隔离，非 default 租户需对每个 `plaita:{tenant}` 各跑一次
+（`--namespace plaita:{tenant}`）。
+
+**判据不能只看 `last_update_time`**：执行状态在单节点执行期间无心跳（只有
+`PERSIST_EVERY_N_STEPS` 步界才写回），一个 3 小时的长节点其时间戳可以陈旧 3
+小时而执行完全健康（租约正被看门狗每 40s 续）。故有两道闸（2026-10 修复）：
+
+| 闸 | 作用 |
+|----|------|
+| 租约键 `{ns}:execution:lease:{id}` 存在 → 跳过 | 活 worker 正推进长步骤，绝不标记 |
+| 落盘走条件写（状态键与巡检读到的原始串一致才写） | 活 worker 的步界写插在巡检读之后时放弃落盘——否则它的 running/completed 会被 error 覆写（监控先见 error 又翻回 completed），按 error 驱动补偿的 keeper 还会触发真·双跑 |
+
+先对齐 `--dry-run` 输出与 console 执行详情再实跑；`--idle-minutes` 须大于业务
+最长单节点耗时。
+
 ## 故障手册
 
 | 现象 | 可能原因 | 动作 |

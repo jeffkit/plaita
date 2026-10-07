@@ -406,13 +406,13 @@ class TestT2StepExceedsTtl:
         worker_a._start_lease_watchdog()
         try:
             step_started = threading.Event()
-            takeover_done = threading.Event()
+            attempts_done = threading.Event()
             step_calls = {"n": 0}
 
             def long_step(flow, **kwargs):
-                # 第一步长跑：等全部接管尝试落定（由接管线程显式收尾）且至少
-                # 跑满 1.5s（> 无看门狗时的安全窗口），看门狗每 0.2s 续租；
-                # 第二步立即终态，保证推进循环退出。
+                # 第一步长跑：等全部接管尝试落定（由接管线程 finally 显式收尾，
+                # 30s 兜底）且至少跑满 1.5s（> 无看门狗时的安全窗口），看门狗每
+                # 0.2s 续租；第二步立即终态，保证推进循环退出。
                 # 不用固定墙钟 + 固定尝试次数：单次接管尝试约 0.23s，8 次
                 # 约 1.8s > 1.5s，最后一次尝试会落到 A 释放租约**之后**而合法
                 # 抢到租约——环境越慢越必现的假红。
@@ -427,7 +427,7 @@ class TestT2StepExceedsTtl:
                     }
                 step_started.set()
                 deadline = time.monotonic() + 1.5
-                takeover_done.wait(timeout=10.0)
+                attempts_done.wait(timeout=30.0)
                 while time.monotonic() < deadline:
                     time.sleep(0.05)
                 return {
@@ -444,7 +444,8 @@ class TestT2StepExceedsTtl:
                 # 之前，把「持租约期间拒绝接管」测成裸抢锁竞速）
                 step_started.wait(timeout=10.0)
                 try:
-                    # A 的步进行中反复尝试接管
+                    # A 的步进行中反复尝试接管；finally 收步 → 全部尝试都
+                    # 落在 A 持租约的窗口内
                     for _ in range(8):
                         time.sleep(0.15)
                         try:
@@ -455,7 +456,7 @@ class TestT2StepExceedsTtl:
                         except Exception as exc:  # noqa: BLE001
                             takeover_errors.append(f"{type(exc).__name__}: {exc}")
                 finally:
-                    takeover_done.set()
+                    attempts_done.set()
 
             with patch("plaita.server.flow_worker.FlowExecution") as FE:
                 inst = MagicMock()
@@ -467,7 +468,8 @@ class TestT2StepExceedsTtl:
                 th.join(timeout=10)
 
             # B 的所有接管尝试都被拒
-            assert takeover_errors and all(e == "refused" for e in takeover_errors)
+            assert len(takeover_errors) == 8, takeover_errors
+            assert all(e == "refused" for e in takeover_errors), takeover_errors
             # A 长步全程续租，正常推进到终态（未被自爆、状态未被拒绝写）
             assert result["is_end"] is True
             assert storage.load_execution_state("exec-1").status == "completed"
