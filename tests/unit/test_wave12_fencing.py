@@ -20,6 +20,8 @@ import pytest
 
 pytest.importorskip("fakeredis")
 pytest.importorskip("lupa")
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
 
 import fakeredis
 

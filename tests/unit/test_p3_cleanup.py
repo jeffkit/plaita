@@ -8,6 +8,8 @@ import importlib
 import inspect
 import unittest
 
+import pytest
+
 
 class TestShimRemoved(unittest.TestCase):
     def test_plaita_flow_shim_is_gone(self):
@@ -18,6 +20,9 @@ class TestShimRemoved(unittest.TestCase):
 
 class TestFlowWorkerUsesCorePath(unittest.TestCase):
     def test_flow_worker_imports_from_core_not_shim(self):
+        pytest.importorskip("cachetools")
+        pytest.importorskip("redis")
+
         from plaita.server import flow_worker
 
         src = inspect.getsource(flow_worker)

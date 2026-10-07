@@ -2,6 +2,9 @@
 import os
 import pytest
 
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
+
 
 def test_register_code_node_for_worker_enables_code(monkeypatch):
     from plaita.server import flow_worker as fw

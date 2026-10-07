@@ -22,6 +22,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pydantic import ValidationError
 
 from plaita import Flow, FlowExecution, Node, NodeRegistry
@@ -732,6 +733,7 @@ class TestR4SecurityHardening(unittest.TestCase):
 
     def test_redis_client_recreated_across_event_loops(self):
         """P0-1：worker 每步新循环——缓存的 aioredis 客户端必须按循环重建。"""
+        pytest.importorskip("redis")
         import asyncio
 
         import plaita.event.redis as redis_mod

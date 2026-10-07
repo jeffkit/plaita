@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
+
 
 class TestFlowWorkerReliabilityConstants(unittest.TestCase):
     def test_persist_every_n_steps_is_documented_default(self):

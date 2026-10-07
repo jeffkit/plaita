@@ -128,6 +128,44 @@
 +# 或 memory（单测 / 本地）
 ```
 
+### Storage（experimental sqlalchemy）：DDL 迁移由手工 `ALTER TABLE` 改为版本化脚本
+
+**变更前**：`SqlalchemyExecutionStorage` 建表走 `Base.metadata.create_all`——只建
+缺失的表、**不补列**。存量库新增列（如 `execution_states.flow_hash` /
+`tenant_id`）靠注释指引手工 `ALTER TABLE`；漏做则 INSERT 路径 `**state_dict`
+展开对未知列直接 `TypeError` → save 返回 False。
+
+**变更后**：`plaita/storage/sqlalchemy.py` 落地最小版本化迁移
+（`SCHEMA_MIGRATIONS` + `schema_migrations` 表）。存储初始化 `create_all` 后
+按版本序应用未执行的迁移，对已有列 no-op（幂等）。**无需人工 DDL**；
+新建库与存量库路径统一。此机制仅覆盖该 experimental 后端，不影响 memory/redis。
+
+### Storage：redis 执行列表新增 `{ns}:execution:index` ZSET
+
+**变更前**：`RedisExecutionStorage.list_executions` 用 `scan_iter` 全命名空间扫键，
+再逐键 `GET` + 完整 `model_validate`（含整个 context），排序分页在 Python 内存做。
+
+**变更后**：save/delete 同步维护 `{ns}:execution:index` ZSET
+（score=`start_time` epoch、member=`execution_id`；fenced 的 CAS Lua 内一并 ZADD）。
+列表分页下推 `ZRANGE`/`ZREVRANGE`，只反序列化本页。存量库首次列表时懒回填
+（一次性，置 `{ns}:execution:index:ready` 标记）。新增同前缀机制键
+（`execution:index` / `execution:index:ready`）——console 列表路径已登记排除。
+
+`list_executions` 签名与返回结构不变，但有两处调用方可见的变化：
+
+- **默认排序确定化**：原先是 `scan_iter` 的任意顺序，现在恒为 `start_time`
+  升序（`order_by` 语义不变）。
+- **默认 `limit=100` 只覆盖最旧的 100 条**：需要遍历全部执行必须翻页
+  （`scripts/reap_zombie_executions.py` 已改为翻页）。
+
+**滚动升级窗口（运维须知）**：`{ns}:execution:index:ready` 由首个列表调用置位且
+永不过期，回填只覆盖置位**之前**写入的执行。置位之后由**尚未升级**的 worker
+（仍走裸 `SET`、不 ZADD）写入的执行没有索引成员，也不在回填范围内——它们会
+一直从 `list_executions`（console 列表）缺席，直到该 worker 升级。状态键本身
+完好，`load_execution_state` / resume 不受影响；需要刷新列表的话，升级完成后删掉
+`{ns}:execution:index:ready` 触发一次全量回填即可（execution_id 未被索引的键会
+被重新扫描收录）。
+
 ### Event：`HAS_SQLALCHEMY` 与 `__all__` 条件修复
 
 **变更前**：SQLAlchemy 符号是否进入 `plaita.event.__all__` 错误地绑定 `HAS_REDIS`。

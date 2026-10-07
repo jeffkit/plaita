@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Union
 import uuid
 
 from sqlalchemy import Column, String, Text, Integer, DateTime, JSON, Index, ForeignKey, select, func
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -14,6 +15,47 @@ from ..logger import logger
 from .base import ExecutionStorage, ExecutionState, FlowStorage
 
 Base = declarative_base()
+
+
+# ── 最小版本化 DDL 迁移 ──────────────────────────────────────────────
+# 本后端无 Alembic；``Base.metadata.create_all`` 只建缺失的表、不补列——
+# 存量库的列变更此前只能靠注释指引手工 ``ALTER TABLE``（见
+# ExecutionStateModel.tenant_id 注释）。这里落地最小机制：
+# ``schema_migrations`` 表记录已应用版本，``SCHEMA_MIGRATIONS`` 按版本序执行。
+# 新建库上 create_all 已建好列，各迁移对已有列 no-op（幂等）。
+def _migration_1_execution_states_tenant_and_flow_hash(conn) -> None:
+    """补 ``execution_states`` 的 flow_hash / tenant_id（老库缺列）。"""
+    columns = {c["name"] for c in sa_inspect(conn).get_columns("execution_states")}
+    if "flow_hash" not in columns:
+        conn.execute(text("ALTER TABLE execution_states ADD COLUMN flow_hash VARCHAR(64)"))
+    if "tenant_id" not in columns:
+        conn.execute(text("ALTER TABLE execution_states ADD COLUMN tenant_id VARCHAR(100)"))
+
+
+SCHEMA_MIGRATIONS = (
+    (1, "execution_states_tenant_and_flow_hash", _migration_1_execution_states_tenant_and_flow_hash),
+)
+
+
+def apply_schema_migrations(conn) -> None:
+    """在同步 Connection 上按版本序应用 ``SCHEMA_MIGRATIONS``（幂等）。"""
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version INTEGER PRIMARY KEY, "
+        "name VARCHAR(200) NOT NULL, "
+        "applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    ))
+    applied = {row[0] for row in conn.execute(text("SELECT version FROM schema_migrations"))}
+    for version, name, migrate in SCHEMA_MIGRATIONS:
+        if version in applied:
+            continue
+        migrate(conn)
+        conn.execute(
+            text("INSERT INTO schema_migrations (version, name) VALUES (:version, :name)"),
+            {"version": version, "name": name},
+        )
+        logger.info("SQLAlchemy存储: 已应用迁移 v%d %s", version, name)
+
 
 class FlowDefinition(Base):
     """流程定义表"""
@@ -43,8 +85,7 @@ class ExecutionStateModel(Base):
     flow_hash = Column(String(64), nullable=True)
     # 2026-10-03：ExecutionState 携带租户（路由存储按它选 namespace）——此前
     # 列缺失导致 INSERT 路径 `**state_dict` 对未知字段直接 TypeError。存量库
-    # 需手工 `ALTER TABLE execution_states ADD COLUMN tenant_id VARCHAR(100)`
-    # （create_all 不补列；本后端 experimental）。
+    # 由 ``SCHEMA_MIGRATIONS`` v1 自动补列（create_all 不补列；本后端 experimental）。
     tenant_id = Column(String(100), nullable=True)
     context = Column(JSON, nullable=False)
     status = Column(String(50), nullable=False, index=True)
@@ -98,7 +139,8 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
         async def create_all():
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-        
+                await conn.run_sync(apply_schema_migrations)
+
         try:
             asyncio.run(create_all())
             logger.info("SQLAlchemy存储: 表结构创建成功")
@@ -246,6 +288,8 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                         'flow_id': model.flow_id,
                         'flow_name': model.flow_name,
                         'flow_version': model.flow_version,
+                        'flow_hash': model.flow_hash,
+                        'tenant_id': model.tenant_id,
                         'context': model.context,
                         'status': model.status,
                         'start_time': model.start_time,
@@ -255,7 +299,7 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                         'invoker': model.invoker
                     }
                     states.append(ExecutionState(**state_dict))
-                
+
                 return states
                 
         except Exception as e:
@@ -302,7 +346,8 @@ class SqlalchemyFlowStorage(FlowStorage):
         async def create_all():
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-        
+                await conn.run_sync(apply_schema_migrations)
+
         try:
             asyncio.run(create_all())
             logger.info("SQLAlchemy存储: 表结构创建成功")

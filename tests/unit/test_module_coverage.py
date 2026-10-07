@@ -11,6 +11,8 @@ import json
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # plaita/__init__.py
@@ -24,8 +26,8 @@ class TestPlaitaInit(unittest.TestCase):
 
     def test_check_extra_available_module_present(self):
         """Line 44-46: known extra whose probe module is installed → True."""
-        # 'redis' extra probes 'redis'; may or may not be installed.
-        # Use 'http' extra which probes 'requests' (always available).
+        # 'http' extra 的探测模块是 requests + aiohttp 两个，缺任一即抛错。
+        pytest.importorskip("aiohttp")
         from plaita import _check_extra_available
         result = _check_extra_available("http")
         self.assertTrue(result)

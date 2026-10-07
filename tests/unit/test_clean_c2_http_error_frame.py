@@ -161,6 +161,9 @@ class TestErrorFrameCarriesResponseSummary(unittest.TestCase):
         self.assertIsNone(_summarize_error_frame_response(None))
 
     def test_summarize_helper_serializes_dict_body(self):
+        # 紧凑分隔符是 orjson 的输出；缺 fast extra 时回退 stdlib json（带空格），
+        # 该断言只在 orjson 可用时有意义。
+        pytest.importorskip("orjson")
         from plaita.node.http import HttpNodeResponse
         resp = HttpNodeResponse(status=200, status_text="OK",
                                 headers={"a": "b"}, data={"k": "v"})

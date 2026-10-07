@@ -45,6 +45,8 @@ try:
 
     _JSON_LOADS = orjson.loads
 except ImportError:  # pragma: no cover - fast extra 未装
+    orjson = None
+
     def _json_dumps_bytes(obj) -> bytes:
         return json.dumps(obj).encode("utf-8")
 

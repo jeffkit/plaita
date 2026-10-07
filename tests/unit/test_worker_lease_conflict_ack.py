@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from plaita.server.execution_lease import ExecutionLeaseError
-from plaita.server.flow_worker import RedisFlowWorker
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
+
+from plaita.server.execution_lease import ExecutionLeaseError  # noqa: E402
+from plaita.server.flow_worker import RedisFlowWorker  # noqa: E402
 
 
 class _FakeQueue:

@@ -2569,7 +2569,7 @@ class TestDetermineCurrentNodeArgPrecision(unittest.IsolatedAsyncioTestCase):
         ctx = ExecutionContext()
 
         captured_cbs = []
-        async def mock_start_new_flow(flow, context, runner, callback_manager):
+        async def mock_start_new_flow(flow, context, runner, callback_manager, max_timeout_ms=None):
             captured_cbs.append(callback_manager)
             return (None, {}, None)
 

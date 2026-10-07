@@ -16,7 +16,9 @@ import sys
 
 import pytest
 
-from plaita.server.event_filter import EventFilter, _resolve_queue_name
+pytest.importorskip("redis")
+
+from plaita.server.event_filter import EventFilter, _resolve_queue_name  # noqa: E402
 
 
 def _noop_args(**overrides):

@@ -29,6 +29,8 @@ from .base import ExecutionState, ExecutionStorage
 from .redis import (
     TERMINAL_EXECUTION_STATUSES,
     RedisExecutionStorage,
+    execution_index_key,
+    execution_start_time_score,
     execution_state_ttl_seconds,
 )
 
@@ -39,9 +41,13 @@ except ImportError:  # pragma: no cover — 极端打包环境退化为 RuntimeE
 
 
 # 单段 Lua：fence 世代匹配才允许写执行状态。
-# KEYS[1]=状态键, KEYS[2]=fence 键, ARGV[1]=序列化状态, ARGV[2]=期望世代,
-# ARGV[3]=TTL 秒（0=不带 EX；非终态传 0 保持无过期现状）。
+# KEYS[1]=状态键, KEYS[2]=fence 键, KEYS[3]=执行列表索引 ZSET,
+# ARGV[1]=序列化状态, ARGV[2]=期望世代, ARGV[3]=TTL 秒（0=不带 EX），
+# ARGV[4]=索引 score（start_time epoch），ARGV[5]=索引 member（execution_id）。
 # 返回 1=写入成功；0=世代不符（键缺失也算不符）。
+# 索引必须在脚本内同步维护：本路径绕过 RedisExecutionStorage.save_execution_state
+# 直接 SET 状态键，不在此 ZADD 则索引成员会滞后（列表长期显示过期 status，
+# 这正是当初否决「save 时维护索引」的顾虑）。
 _FENCED_SAVE_LUA = """
 local ttl = tonumber(ARGV[3]) or 0
 if redis.call('get', KEYS[2]) == ARGV[2] then
@@ -50,6 +56,7 @@ if redis.call('get', KEYS[2]) == ARGV[2] then
   else
     redis.call('set', KEYS[1], ARGV[1])
   end
+  redis.call('zadd', KEYS[3], ARGV[4], ARGV[5])
   return 1
 else
   return 0
@@ -122,12 +129,15 @@ class FencedExecutionStorage(ExecutionStorage):
             )
             result = client.eval(
                 _FENCED_SAVE_LUA,
-                2,
+                3,
                 state_key,
                 fence_key,
+                execution_index_key(namespace),
                 serialized,
                 str(int(generation)),
                 str(int(ttl)),
+                str(execution_start_time_score(state)),
+                execution_id,
             )
         except Exception as e:
             logger.error("Fenced save execution state %s failed: %s", execution_id, e)

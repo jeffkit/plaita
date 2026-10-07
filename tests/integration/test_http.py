@@ -6,6 +6,8 @@ import socketserver
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from plaita.node.http import (
     HTTP, 
     HttpResponse, 
@@ -753,6 +755,7 @@ class TestHTTPNodeRealEndToEnd(unittest.TestCase):
 
     def test_real_get_request_succeeds(self):
         """真实 GET 全链路：表达式 URL 求值 → 请求 → 响应写入 $NODE.<id>.*。"""
+        pytest.importorskip("aiohttp")
         flow = Flow.from_string(self._http_node_flow(f"http://127.0.0.1:{self.port}/api/ping"))
         result = flow.run()
         # 无 output 的 http 节点返回 response.data 本身
@@ -770,6 +773,7 @@ class TestHTTPNodeRealEndToEnd(unittest.TestCase):
         """405 响应属于"正常响应"而非节点失败：http 节点只对传输层错误抛错
         （连接拒绝/超时等，见 test_real_request_error_uses_error_handler_default）。
         流程照常推进到 End。"""
+        pytest.importorskip("aiohttp")
         flow = Flow.from_string(json.dumps({
             "flow_id": "real_http_405",
             "nodes": [

@@ -3,7 +3,9 @@
 背景（同类第三次）：
 - 2026-10-02 `:execution:fence:`（裸整数）→ 列表 500；
 - 2026-10-06 `:execution:noderetry:`（裸整数）→ 远端 console 列表 API 全崩
-  （AttributeError: 'int' object has no attribute 'get'）。
+  （AttributeError: 'int' object has no attribute 'get'）；
+- 2026-10-07 `:execution:index`（ZSET）/ `:execution:index:ready`（裸字符串
+  "1"）→ #40 存储面索引，ready 标记同样会被当 summary dict 崩。
 
 本测试把「哪些 key 必须排除」钉死，新增同类键时在此登记。
 """
@@ -34,6 +36,8 @@ def test_mechanism_keys_are_excluded():
     assert f("plaita:execution:fence:abc")
     assert f("plaita:execution:cancel:abc")
     assert f("plaita:execution:noderetry:abc")   # ← 2026-10-06 补
+    assert f("plaita:execution:index")           # ← 2026-10-07 补（#40）
+    assert f("plaita:execution:index:ready")     # ← 同上（裸字符串 "1"）
     assert f("plaita:flow:queue:v2:dlq")
 
 

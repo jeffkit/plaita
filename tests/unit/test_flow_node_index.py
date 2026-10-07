@@ -6,11 +6,12 @@
   推断"已删除 (多个孤儿节点时返回顺序依赖 nodes 数组顺序, 行为不稳定);
 - find_node_by_id 命中返回节点, 未命中抛错。
 
-性能要求: 对大流程反复 find_node_by_id 应为 O(1); 这里用一个 1000 节点流程
-验证 1000 次查找在合理时间内完成, 并校验索引存在且与 nodes 一致。
+性能要求: 索引只构建一次——大流程上反复 find_node_by_id 复用同一份 dict, 不再
+按 id 线性扫描 nodes; 这里用一个 1000 节点流程校验 1000 次查找结果正确且索引
+对象全程不变。（失效指纹每次调用重算——原地改 id 必须被索引感知, 见
+``test_flow_mutations`` 的 ``test_sig_includes_id_changes``。）
 """
 
-import time
 import unittest
 
 from plaita.core.flow import Flow
@@ -69,15 +70,22 @@ class TestFlowNodeIndex(unittest.TestCase):
         with self.assertRaises(FlowStartMissingError):
             _ = flow.start_node
 
-    def test_find_node_by_id_o1_for_large_flow(self):
+    def test_find_node_by_id_reuses_index_for_large_flow(self):
+        """大流程反复查找复用同一份索引（B5 契约: 不做按 id 的线性扫描）。
+
+        不设墙钟阈值：``_ensure_index`` 的失效指纹每次调用都要重算
+        ``tuple(n.id for n in nodes)``，命中缓存也是 O(n)——原地改 id 必须被
+        索引感知（见 test_flow_mutations 的 test_sig_includes_id_changes）。
+        因此这里钉"索引对象在查找前后不变"，跑 coverage 插桩也不假红。
+        """
         flow = _linear_flow(1000)
-        t0 = time.monotonic()
+        idx = flow._ensure_index()
+
         for n in flow.nodes:
-            _ = flow.find_node_by_id(n.id)
-        elapsed = time.monotonic() - t0
-        # O(1) 索引: 1000 次查找应远低于 1.0s; 线性扫描的 O(n^2) 会高得多。
-        # 阈值设 1.0s 以兼容 coverage 插桩带来的额外开销 (原始运行 < 0.01s)。
-        self.assertLess(elapsed, 1.0, f"find_node_by_id 似乎未走索引: {elapsed:.3f}s")
+            self.assertIs(flow.find_node_by_id(n.id), n)
+
+        self.assertIs(flow._node_index, idx, "find_node_by_id 重建了索引")
+        self.assertEqual(len(idx), len(flow.nodes))
 
     def test_index_rebuilds_when_node_id_mutated_in_place(self):
         # 2026-07: 旧实现的 ``len == len`` 失效判断在 "节点 id 被原地改字符串"

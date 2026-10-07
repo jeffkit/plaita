@@ -21,6 +21,7 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 |------|------------------|----------|
 | 流程定义 / 注册表 | `plaita:flow:*`、`plaita:flow_list`、`plaita:flow_versions:*` | `plaita:{tenant}:flow:*` 等 |
 | 执行状态 | `plaita:execution:{id}` | `plaita:{tenant}:execution:{id}` |
+| 执行列表索引 | `plaita:execution:index`（ZSET，`:ready` 为回填标记） | `plaita:{tenant}:execution:index`（+`:ready`） |
 | resume lease | `plaita:execution:lease:{id}` | `plaita:{tenant}:execution:lease:{id}` |
 | 任务队列 | `plaita:flow:queue`（平台共享，消息内带 `tenant_id`） | 同左 |
 

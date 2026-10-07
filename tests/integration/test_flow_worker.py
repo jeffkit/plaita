@@ -14,6 +14,7 @@ import time
 import pytest
 
 pytest.importorskip("redis")
+pytest.importorskip("fakeredis")
 
 import redis
 import argparse

@@ -199,12 +199,18 @@ def _is_mechanism_key(key: str) -> bool:
     `summary.get` 对 int 调用即 500（远端 console 实测：列表 API 全崩，
     AttributeError: 'int' object has no attribute 'get'）。同前缀机制键必须
     逐一排除——新增此类键时同步登记本条。
+
+    同类第四次（2026-10-07）：`plaita:execution:index`（执行列表索引 ZSET，
+    见 plaita/storage/redis.py）与 `{...}:execution:index:ready`（回填标记，
+    值为裸字符串 "1"）。ZSET 键 GET 抛 WRONGTYPE 尚可被兜底吞掉，但 ready
+    标记是字符串 "1" → json.loads 得 int → `summary.get` 即 500，必须排除。
     """
     return (
         ":execution:lease:" in key
         or ":execution:fence:" in key
         or ":execution:cancel:" in key
         or ":execution:noderetry:" in key
+        or ":execution:index" in key
         or key.endswith(":dlq")
     )
 

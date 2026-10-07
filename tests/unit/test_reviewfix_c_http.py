@@ -17,6 +17,8 @@ import http.server
 import threading
 import unittest
 
+import pytest
+
 from plaita.node.http import (
     HttpExecutor,
     URLPolicyError,
@@ -132,6 +134,7 @@ class TestCrossOriginRedirectStripsCredentials(unittest.TestCase):
         self.assertEqual(got.get("X-Keep"), "yes")
 
     def test_async_cross_origin_strips_credential_headers(self):
+        pytest.importorskip("aiohttp")
         rsp, err = self._async_run("/start")
         self.assertIsNone(err)
         got = self.received["/steal"]
@@ -141,6 +144,7 @@ class TestCrossOriginRedirectStripsCredentials(unittest.TestCase):
         self.assertEqual(got.get("X-Keep"), "yes")
 
     def test_async_same_origin_keeps_headers(self):
+        pytest.importorskip("aiohttp")
         rsp, err = self._async_run("/samesite")
         self.assertIsNone(err)
         got = self.received["/final"]

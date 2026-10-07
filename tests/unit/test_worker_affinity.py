@@ -14,8 +14,11 @@ import tempfile
 
 import pytest
 
-from plaita.server.flow_worker import RedisFlowWorker, TaskNotForThisWorker
-from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
+pytest.importorskip("cachetools")
+pytest.importorskip("redis")
+
+from plaita.server.flow_worker import RedisFlowWorker, TaskNotForThisWorker  # noqa: E402
+from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage  # noqa: E402
 
 
 def _worker():

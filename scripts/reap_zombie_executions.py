@@ -32,7 +32,18 @@ def main() -> int:
     args = parser.parse_args()
 
     storage = RedisExecutionStorage(redis_url=args.redis_url, namespace=args.namespace)
-    executions = storage.list_executions()
+    # list_executions 默认按 start_time 升序取前 100 条（索引化后排序确定化）——
+    # 不翻页就永远只巡检最旧的 100 个执行，新僵尸漏掉。
+    # 停条件用「空页」而非「短页」：短页不该被当成数据结束的判据（一旦列表侧
+    # 因任何原因返回短页，巡检会静默截断成 no-op）。
+    executions = []
+    offset = 0
+    while True:
+        page = storage.list_executions(limit=100, offset=offset)
+        if not page:
+            break
+        executions.extend(page)
+        offset += len(page)
     cutoff = datetime.now() - timedelta(minutes=args.idle_minutes)
 
     reaped = 0

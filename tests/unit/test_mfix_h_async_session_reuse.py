@@ -29,13 +29,17 @@ import unittest
 from unittest import TestCase
 from unittest.mock import patch
 
-import plaita.node.http as http_mod
-from plaita.core.http_session import (
+import pytest
+
+pytest.importorskip("aiohttp")
+
+import plaita.node.http as http_mod  # noqa: E402
+from plaita.core.http_session import (  # noqa: E402
     close_flow_session,
     get_flow_session,
     open_flow_session,
 )
-from plaita.node.http import HttpExecutor
+from plaita.node.http import HttpExecutor  # noqa: E402
 
 
 def _make_server():
