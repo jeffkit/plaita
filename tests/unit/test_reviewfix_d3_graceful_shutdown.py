@@ -106,11 +106,20 @@ def _make_worker_with_slow_task(storage, started, proceed):
 
 
 def test_signal_stop_only_requests_graceful_stop(monkeypatch=None):
-    """_request_graceful_stop 只调 worker.stop() 置位，不抛 SystemExit。"""
+    """_request_graceful_stop 只**请求** drain（不抛 SystemExit、不停进程）。
+
+    D3 原始契约（不腰斩在途任务）不变；2026-10 无损升级把它细化为：
+    信号 → request_drain（不再领新任务 + 注册表标 draining），退出交给
+    主循环在任务边界收尾，另有有界 drain 定时器兜底。
+    """
+    drain_calls = []
     stop_calls = []
 
     class FakeWorker:
         _running = True
+
+        def request_drain(self, reason=""):
+            drain_calls.append(reason)
 
         def stop(self):
             stop_calls.append(1)
@@ -121,8 +130,9 @@ def test_signal_stop_only_requests_graceful_stop(monkeypatch=None):
     _request_graceful_stop(fake, signal.SIGTERM)
     _request_graceful_stop(fake, signal.SIGINT)
 
-    assert len(stop_calls) == 2
-    assert fake._running is False
+    assert len(drain_calls) == 2, "信号处理必须请求 drain"
+    assert stop_calls == [], "信号处理不得直接停机（否则会腰斩在途任务）"
+    assert fake._running is True, "信号处理只置位，进程由主循环收尾"
 
 
 def test_sigterm_during_inflight_task_drains_to_terminal_state():
@@ -139,7 +149,8 @@ def test_sigterm_during_inflight_task_drains_to_terminal_state():
 
     # 模拟 SIGTERM 到达（等价 signal_handler 的调用路径）
     _request_graceful_stop(worker, signal.SIGTERM)
-    assert worker._running is False, "信号处理后应已请求停机"
+    assert worker.draining is True, "信号处理后应进入 draining（不再领新任务）"
+    assert worker._running is True, "draining 期间进程仍在跑，等在途任务收尾"
 
     # 放行在途任务 → 它必须完整跑完而不是被 SystemExit 打断
     proceed.set()

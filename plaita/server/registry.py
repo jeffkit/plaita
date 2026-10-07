@@ -37,7 +37,7 @@ class ServiceInfo:
             instance_id: 实例唯一标识
             service_type: 服务类型
             host: 主机地址
-            status: 状态 (starting, running, stopping, stopped)
+            status: 状态 (starting, running, draining, stopping, stopped)
             start_time: 启动时间
             metadata: 配置信息
             active_tasks: 当前处理的任务数
@@ -497,13 +497,15 @@ class RegistryMixin:
     def update_registry_info(
         self,
         active_tasks: Optional[int] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        status: Optional[str] = None
     ):
-        """更新注册信息"""
+        """更新注册信息（status 用于 draining 等生命周期状态，None = 不改）"""
         if self._registry:
             self._registry.update_service_info(
                 active_tasks=active_tasks,
-                metadata=metadata
+                metadata=metadata,
+                status=status,
             )
     
     @property

@@ -40,6 +40,89 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
+| `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
+
+## 无损升级（rolling upgrade）
+
+分层的准确结论，先记住边界：
+
+| 层 | 能否无损 | 关键约束 |
+|---|---|---|
+| 前端静态产物 | ✅ | 资源按内容哈希发布并保留上一版；API 只增不删 |
+| Console API（无状态） | ✅ | 滚动重启即可；SSE 掉线有票据 + 轮询回落，不丢数据 |
+| Worker 池 | 🟡 状态/消息无损、不双跑；**节点副作用可能重放** | 单步可能跑几十分钟，drain 有界 → 超时那一步会被重放，业务节点须幂等 |
+| 执行状态 / 消息格式 | 🟡 只增字段可以；**改语义必须 bump `schema_version`** | 混跑窗口内旧消费者对新语义必须拒收 |
+| Console DB | 🟡 expand → backfill → 切读 → contract | 尚无迁移框架，见「已知缺口」 |
+
+### 发布顺序（重要）
+
+1. **先升消费者，再升生产者**：`schema_version` 只在新语义上线时 bump；旧 worker 拒收「比自己新」的消息（进 DLQ + 告警），所以 producer（console BFF / 调度服务）必须后升。
+2. **Console API 先升**（只增不删），确保新旧前端都能用；前端静态资源后发。
+3. **Worker 灰度**：先起新版本实例与旧实例**同 consumer group 混跑**，观察 `lease_conflicts` / `reclaimed` / `dead_lettered` 无异常后，再逐个 drain 旧实例。
+4. 每台 worker 的停机动作是 `draining`，不是 kill（见下）。
+
+### Worker 停机：draining 语义
+
+信号（SIGTERM/SIGINT）与控制通道 stop 命令都只**请求** drain，绝不立即退出：
+
+1. 注册表状态置 `draining`（`GET /api/services` 可见 `flow_worker` 的 status），编排/就绪探针据此摘流量；
+2. 消费循环在**任务边界**退出：在途任务完整跑完并 ack；
+3. 等待有界：超过 `PLAITA_WORKER_DRAIN_TIMEOUT`（默认 30s）仍有在途任务 → 放弃当前步并退出。**该消息不 ack**，留在 pending，由其他 worker 经 XCLAIM 从**步界检查点**续跑（那一步会重放）；
+4. 退出前把注册表状态置 `stopping` 再注销。
+
+K8s/systemd 侧对齐（否则 drain 会被 SIGKILL 提前打断）：
+
+```yaml
+terminationGracePeriodSeconds: 90   # > PLAITA_WORKER_DRAIN_TIMEOUT，留出收尾余量
+# 就绪探针：注册表 status != draining（或进程内 status 命令）
+# preStop：调控制通道 stop（graceful=true），或直接 SIGTERM（handler 已是 drain 语义）
+# 部署策略：maxUnavailable: 0（worker 池禁止并发减容）
+```
+
+> 单步可能长达数十分钟（如 HITL gate 3300s）。**不要把 grace 调到超过最长步**——正确做法是接受「drain 超时 → 该步重放」，并让业务节点幂等（at-least-once 契约）。
+
+### flow_hash 兼容门（引擎升级最容易误伤的一处）
+
+`ExecutionState.flow_hash` = 实际加载的 Flow 的规范化 JSON 指纹，resume 时比对，防止「运行中改定义 → 续跑走错分支」。但**引擎升级可能改变指纹算法口径**，于是历史挂起执行会被判成「定义变更」。判定表：
+
+| 存的算法标记 | 指纹是否相同 | 行为 |
+|---|---|---|
+| 相同 | 相同 | 正常续跑 |
+| 相同 | 不同 | **拒绝**（定义确实变了）——同算法下 `allow_flow_hash_change` 也不放行 |
+| 不同 | **相同** | 直接续跑并刷新标记（定义没变，只是升级换了算法标签） |
+| 不同 | 不同 | 报 `flow_hash_mismatch`（`upgrade_suspected: true`），需**显式放行** |
+| 缺失（老状态） | 任意 | 按同算法保守处理 |
+
+显式放行（仅用于确认「流程定义没变 / 可接受」）：
+
+```bash
+curl -X POST "$CONSOLE/api/executions/$EXEC_ID/resume" \
+  -H 'Content-Type: application/json' \
+  -d '{"resume_type":"continue","data":{"allow_flow_hash_change":true}}'
+```
+
+放行会打 WARNING 并把新指纹写回状态，留审计痕迹。**同算法下哈希不同时该开关无效**——那种情况必须改回定义或新建执行。
+
+### 兼容纪律（写进 review checklist）
+
+- `ExecutionState` **只增字段**，新字段必须有缺省值；读取方必须按「None = 没有这个能力」处理（见 `tests/unit/test_upgrade_compat.py`）。
+- 任务消息只增字段；**改语义必须 bump `TASK_SCHEMA_VERSION`**（`plaita/server/task_queue.py`）。入队一律用 `enqueue_task()`，别直接 `XADD`（否则丢信封）。
+- Console API 响应只增不删；前端资源内容哈希 + 保留上一版。
+- DB 变更走 expand → backfill → 切读 → contract，禁止一步到位改列语义。
+
+### 升级验收清单
+
+1. 消息不丢：终态落盘或进 DLQ（`dlq_length` 增量可解释）；
+2. 同一执行不双写：无 `lease_conflicts` 引发的双终态；
+3. 状态可跨版本读：新旧 worker 混跑期间无「状态解析失败」；
+4. 升级窗口 Console API 无 5xx；
+5. 明确承认并接受：drain 超时的那一步会重放（业务节点幂等或带去重键）。
+
+### 已知缺口（本 runbook 尚未覆盖）
+
+- **本地单机模式**（无 Redis，进程内线程执行）：进程重启后在跑的本地执行没有对账机制，会停在 `running`；需要人工清理或用挂起 checkpoint 重新 resume。
+- Console flow store **没有迁移框架**（无 alembic），DB 变更加须靠人工 expand/contract。
+- `engine_version` 目前只做观测（跨 minor resume 打 WARNING），未做硬门。
 
 ## List → Stream 迁移（升级必做）
 
