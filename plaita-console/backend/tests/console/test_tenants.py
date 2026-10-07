@@ -439,3 +439,41 @@ def test_reenable_tenant_restores_pinned_session(client):
     client.post("/api/tenants/acme/status", json={"status": "active"}, headers=headers)
     # 未换 token、未重新登录
     assert client.get("/api/flows", headers=_auth(frank["token"])).status_code == 200
+
+
+def test_disabled_tenant_blocks_contract_secret(client, monkeypatch):
+    """契约 HMAC 面是另一条鉴权路径（不走 require_auth）：租户停用即 403。
+
+    平台全局密钥不受影响（平台身份）；重新启用后同一密钥立即恢复。
+    """
+    info = _login(client, "root", "root-password-1")
+    headers = _auth(info["token"])
+    created = client.post("/api/tenants", json={"id": "acme"}, headers=headers).json()
+    users_svc.add_member(flow_store.get_flow_store(), "acme", "root", "editor")
+    _publish_flow(client, headers, "acme-flow", tenant_header="acme")
+
+    url = "/api/flowVersion/semver/detail"
+    sig = _sig(created["contract_secret_key"], created["contract_secret_id"])
+    assert client.post(url, headers={"authorization": sig},
+                       data={"flowId": "acme-flow", "version": "1.0.0"}).json()["code"] == 0
+
+    assert client.post("/api/tenants/acme/status", json={"status": "disabled"},
+                       headers=headers).status_code == 200
+
+    r = client.post(url, headers={"authorization": sig},
+                    data={"flowId": "acme-flow", "version": "1.0.0"})
+    assert r.status_code == 403, r.text
+
+    # 平台全局密钥（tenant_id=None）不受租户停用闸影响
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_ID", "global-id")
+    monkeypatch.setenv("PLAITA_CONSOLE_SECRET_KEY", "global-key")
+    r = client.post(url, headers={"authorization": _sig("global-key", "global-id")},
+                    data={"flowId": "acme-flow", "version": "1.0.0"})
+    assert r.status_code == 200 and r.json()["code"] == 0, r.text
+
+    # 重新启用：密钥未轮换，立即可用
+    assert client.post("/api/tenants/acme/status", json={"status": "active"},
+                       headers=headers).status_code == 200
+    r = client.post(url, headers={"authorization": sig},
+                    data={"flowId": "acme-flow", "version": "1.0.0"})
+    assert r.status_code == 200 and r.json()["code"] == 0, r.text

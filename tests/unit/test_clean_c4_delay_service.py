@@ -113,7 +113,9 @@ class TestScheduledTrigger(DelayServiceTestBase):
                 )
             self.assertTrue(svc.start_service())
             self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 10))
-            self.assertEqual(self.redis.llen(self.queue_key), 0)
+            # 搬运两段式（先 ZADD 后 LREM）：zcard==10 可能落在两条管道之间，
+            # list 排空是随后的必然态，须同样轮询等待。
+            self.assertTrue(_wait_until(lambda: self.redis.llen(self.queue_key) == 0))
             time.sleep(0.3)
             self.assertEqual(svc.get_active_task_count(), 0)
 
@@ -272,7 +274,7 @@ class TestCrashRecovery(DelayServiceTestBase):
         self.assertTrue(svc1.start_service())
         # 任务已搬进 ZSET（list 清空），未到期
         self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 1))
-        self.assertEqual(self.redis.llen(self.queue_key), 0)
+        self.assertTrue(_wait_until(lambda: self.redis.llen(self.queue_key) == 0))
         # 模拟崩溃：进程直接消失，ZSET 遗留（不清理）
         svc1._shutdown_event.set()
         svc1.stop_service()
