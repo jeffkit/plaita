@@ -26,12 +26,29 @@ export interface FlowNodeMeta {
   elseNext?: string
   /** switch/case 分支后继 */
   branches: FlowBranch[]
+  /** 定义里的静态配置字段（已剔除连接键、id/type 与子流程体） */
+  fields: Record<string, unknown>
+  /** childFlow 子流程节点数（0 = 非容器节点） */
+  subflowNodes: number
 }
 
 /** @flow 编译器为分支/跳转合成的内部路由节点（``_n1`` 系） */
 export function isRoutingNodeId(id: string): boolean {
   return /^_n\d+$/.test(id)
 }
+
+/** 连接/元信息键：不属于「配置」字段（连接由边表达，子流程体单独计数） */
+const NON_CONFIG_KEYS = new Set([
+  'id',
+  'type',
+  'name',
+  'desc',
+  'next',
+  'else_next',
+  'branches',
+  'childFlow',
+  'source_line',
+])
 
 /** 从版本定义里取顶层节点元信息（跳过容器子流程等无 id 项） */
 export function extractFlowNodes(definition: Record<string, unknown> | null | undefined): FlowNodeMeta[] {
@@ -49,6 +66,12 @@ export function extractFlowNodes(definition: Record<string, unknown> | null | un
         next: b.next,
       })
     }
+    const fields: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(n)) {
+      if (NON_CONFIG_KEYS.has(k)) continue
+      fields[k] = v
+    }
+    const child = n.childFlow as { nodes?: unknown[] } | undefined
     out.push({
       id,
       type: typeof n.type === 'string' ? n.type : 'unknown',
@@ -58,6 +81,8 @@ export function extractFlowNodes(definition: Record<string, unknown> | null | un
       next: typeof n.next === 'string' ? n.next : undefined,
       elseNext: typeof n.else_next === 'string' ? n.else_next : undefined,
       branches,
+      fields,
+      subflowNodes: Array.isArray(child?.nodes) ? child.nodes.length : 0,
     })
   }
   return out
