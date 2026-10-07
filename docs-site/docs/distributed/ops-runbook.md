@@ -37,10 +37,14 @@ FlowWorker）是独立进程、只连 Redis，故 console 改状态时把状态�
 - `fire_schedule`（cron 循环 + console 立即触发）：停用租户不入队；
 - `FlowWorker._dispatch_task`：停用租户的 `start` / `resume` 跳过（消息 ack 丢弃）。
 
+console 侧另有两处闸（直接查库，不依赖 Redis 键）：会话面 `auth.require_auth`
+对钉死在停用租户的非平台管理员请求 403（`/api/auth/*` 自操作与平台管理员放行）；
+契约 HMAC 面 `POST /api/flowVersion/semver/detail` 命中已停用租户的租户密钥
+返回 403（全局平台密钥不受影响）。
+
 读取缺失 / Redis 抖动一律视为**未停用**（fail-open）——停用闸是加严措施，不应
-把全部租户的运行面拦死。停用即时生效（无需等会话过期）；console 侧会话
-（`resolve_session`/auth 403）与本地调度直接查库，不依赖本条。重新启用后
-同一会话立即恢复，无需重新登录。
+把全部租户的运行面拦死。停用即时生效（无需等会话过期）；重新启用后同一会话
+与同一契约密钥立即恢复，无需重新登录/轮换密钥。
 
 ## 环境变量速查
 
