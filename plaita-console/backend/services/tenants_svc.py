@@ -82,7 +82,7 @@ def create_tenant(store, tenant_id: str, name: str = "") -> Dict[str, Any]:
         return result
 
 
-def set_tenant_status(store, tenant_id: str, status: str) -> None:
+def set_tenant_status(store, tenant_id: str, status: str, redis_client=None) -> None:
     if status not in ("active", "disabled"):
         raise TenantError(f"非法状态: {status}")
     with store._session_local() as session:
@@ -91,6 +91,12 @@ def set_tenant_status(store, tenant_id: str, status: str) -> None:
             raise TenantError(f"租户不存在: {tenant_id}")
         row.status = status
         session.commit()
+    # 跨进程停用闸（plaita#27）：调度服务 / worker 只连 Redis，读不到本库；
+    # 把状态发布过去，使其入队/派发前能感知停用。console 侧（会话/本地调度）
+    # 直接查本库，不依赖这一步。
+    from plaita.tenant_status import publish_tenant_status
+
+    publish_tenant_status(redis_client, tenant_id, status)
 
 
 def rotate_contract_secret(store, tenant_id: str) -> Dict[str, str]:

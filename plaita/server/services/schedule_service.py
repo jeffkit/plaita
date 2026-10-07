@@ -29,6 +29,7 @@ from croniter import croniter
 from redis import Redis
 
 from ...logger import logger
+from ...tenant_status import is_tenant_disabled
 from .base_service import BaseExtendedService
 
 # 与 console 后端共享的 Redis 视图键（console/api/schedules.py 同款常量）
@@ -75,16 +76,22 @@ def fire_schedule(
     （trigger_kind="manual"）复用，保证消息形状单一来源。
 
     Returns:
-        Stream message id；入队失败返回 None。
+        Stream message id；入队失败或租户已停用返回 None。
     """
     schedule_id = schedule["schedule_id"]
+    tenant_id = schedule.get("tenant_id") or "default"
+    # 租户停用闸（plaita#27）：停用租户的 cron/手动触发不再入队。
+    # 状态由 console 发布到 Redis（is_tenant_disabled，缺失=未停用）。
+    if is_tenant_disabled(redis_client, tenant_id):
+        logger.warning("租户 %s 已停用，跳过调度 %s 入队", tenant_id, schedule_id)
+        return None
     now = datetime.now()
     now_ms = int(now.timestamp() * 1000)
 
     message: Dict[str, Any] = {
         "type": "start",
         # 调度定义归属租户（console 写入 HASH 值）；缺省视为 default（兼容旧值）
-        "tenant_id": schedule.get("tenant_id") or "default",
+        "tenant_id": tenant_id,
         "flow_id": schedule["flow_id"],
         "params": schedule.get("params") or {},
         "timestamp": now.isoformat(),

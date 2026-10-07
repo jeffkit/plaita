@@ -79,7 +79,10 @@ def set_status(tenant_id: str, req: TenantStatusRequest, request: Request,
                identity: Dict = Depends(require_auth)):
     _platform_admin(identity)
     try:
-        tenants_svc.set_tenant_status(get_flow_store(), tenant_id, req.status)
+        tenants_svc.set_tenant_status(
+            get_flow_store(), tenant_id, req.status,
+            redis_client=getattr(request.app.state, "redis", None),
+        )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _audit(request, "tenant.set_status", tenant_id, {"status": req.status})
