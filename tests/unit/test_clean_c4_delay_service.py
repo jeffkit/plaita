@@ -111,7 +111,12 @@ class TestScheduledTrigger(DelayServiceTestBase):
                 )
             self.assertTrue(svc.start_service())
             self.assertTrue(_wait_until(lambda: self.redis.zcard(self.scheduled_key) == 10))
-            self.assertEqual(self.redis.llen(self.queue_key), 0)
+            # 搬运是两段式（先 ZADD 全量、再 LREM 全量）：ZSET 满不等于 list
+            # 已清空。立即断言会在两次 pipeline.execute 之间抢跑，偶发假红。
+            self.assertTrue(
+                _wait_until(lambda: self.redis.llen(self.queue_key) == 0),
+                "搬运未把 list 清空",
+            )
             time.sleep(0.3)
             self.assertEqual(svc.get_active_task_count(), 0)
 

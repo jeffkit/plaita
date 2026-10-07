@@ -67,6 +67,8 @@ from typing import Any, ClassVar, FrozenSet, Optional
 
 from pydantic import model_validator
 
+from plaita import subprocess_env as _env
+
 from .basic import Node
 
 logger = logging.getLogger(__name__)
@@ -125,13 +127,13 @@ SANDBOX_SUBPROCESS_TIMEOUT: int = int(os.environ.get("PLAITA_SANDBOX_TIMEOUT", "
 # 启用限制——小内存纯 Python 脚本场景可显式收紧，node 系命令请保持 0。
 SANDBOX_SUBPROCESS_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_MEMORY_MB", "0"))
 
-# subprocess 后端的子进程环境变量白名单（2026-09 安全评审 P1）：
-# 历史上子进程继承宿主全量 os.environ。需要额外变量时往 SUBPROCESS_ENV_EXTRA
-# 里加（模块级，启动脚本里设置），或直接改这个白名单。
-SUBPROCESS_ENV_ALLOWLIST: FrozenSet[str] = frozenset({
-    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING",
-})
-SUBPROCESS_ENV_EXTRA: dict = {}
+# subprocess 后端的子进程环境变量白名单（2026-09 安全评审 P1）：历史上子进程
+# 继承宿主全量 os.environ。实现已抽到公共层 ``plaita.subprocess_env``（gate /
+# capture / agent 直跑等 plaita-nodes 节点共用），这里 re-export 保持既有导入点
+# 零改动；需要额外变量时改 ``SUBPROCESS_ENV_EXTRA``（同一 dict 对象）或调用点传
+# ``extra=``。
+SUBPROCESS_ENV_ALLOWLIST = _env.SUBPROCESS_ENV_ALLOWLIST
+SUBPROCESS_ENV_EXTRA = _env.SUBPROCESS_ENV_EXTRA
 
 # docker backend
 SANDBOX_DOCKER_IMAGE: str = os.environ.get("PLAITA_SANDBOX_DOCKER_IMAGE", "python:3.12-slim")
@@ -508,12 +510,7 @@ def run_python_subprocess(code, input_value, cancel_event=None):
     # 环境变量白名单重建（2026-09 安全评审 P1）：历史实现未传 env=，子进程
     # 拿到宿主全量 os.environ——生产环境里等于把 API key/云凭证交给沙箱内
     # 代码。白名单外可用 SUBPROCESS_ENV_EXTRA 按需补充。
-    child_env = {
-        key: os.environ[key]
-        for key in sorted(SUBPROCESS_ENV_ALLOWLIST)
-        if key in os.environ
-    }
-    child_env.update(SUBPROCESS_ENV_EXTRA)
+    child_env = _env.build_subprocess_env()
     proc = subprocess.Popen(
         [sys.executable, "-c", runner],
         stdin=subprocess.PIPE,

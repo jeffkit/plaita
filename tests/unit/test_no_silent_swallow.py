@@ -36,9 +36,16 @@ ALLOWED_SILENT = {
     # 直接抛错。异常细节不影响「进程组已被杀」这一主结果。
     # 2026-10-06 RLIMIT_AS 默认关闭（模块/函数 docstring 与配置注释插入）后整体下移 6：
     # 419→425, 450→456, 458→464；原 414 一条是与 425 同处的陈旧重复项，随更新删除。
-    ("node/code.py", 425),
-    ("node/code.py", 456),
-    ("node/code.py", 464),
+    # 2026-10-07 env 白名单抽到 plaita.subprocess_env（顶层 import 插入）后再下移 2：
+    # 425→427, 456→458, 464→466，位点未变。
+    ("node/code.py", 427),
+    ("node/code.py", 458),
+    ("node/code.py", 466),
+    # 2026-10-07 沙箱生命周期回调条件装配：plaita-nodes 是可选依赖，缺装 / 无沙箱
+    # 注册表 / 装配失败都返回 None（非沙箱部署零行为变化），异常细节不影响主流程。
+    ("server/flow_worker.py", 781),
+    ("server/flow_worker.py", 786),
+    ("server/flow_worker.py", 792),
 }
 
 

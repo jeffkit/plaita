@@ -135,6 +135,28 @@ class SafeNode(Node):
         assert isinstance(result, str), "result must be str"
 ```
 
+## 执行外部命令（子进程安全）
+
+节点里 spawn 子进程（跑门禁命令、捕获 CLI 输出、起 agent CLI）时，**不要**把宿主
+`os.environ` 直接交给子进程：worker 进程的环境里有平台凭据（`PLAITA_CREDENTIALS_KEY`、
+DB/Redis 连接串、provider token），全量透传等于把凭据交出去。用公共层
+`plaita.subprocess_env` 按白名单重建：
+
+```python
+import subprocess
+from plaita.subprocess_env import build_subprocess_env, clip_output
+
+proc = subprocess.Popen(cmd, env=build_subprocess_env(extra={"RECURSIVE_BIN": "recursive"}))
+stdout = proc.stdout.read().decode()
+return {"stdout": clip_output(stdout, 4000)}   # 超长输出头尾保留，别把全量塞进状态
+```
+
+- `build_subprocess_env(extra=...)` 只放行 `SUBPROCESS_ENV_ALLOWLIST`（`PATH`/`HOME`/
+  `TMPDIR`/locale 等）里的宿主变量，再叠加模块级 `SUBPROCESS_ENV_EXTRA` 与调用点 `extra`。
+- 子进程确实需要的凭证/旋钮，走 `extra` 显式声明——白名单即安全边界。
+- `clip_output(text, cap)` 超阈值时保留头 1/4 + 尾 3/4 并标注省略量（诊断信息在尾部）。
+  节点输出会进 checkpoint / 事件流，无截断的大输出对低权限 viewer 也是泄露面。
+
 ## 最佳实践
 
 1. **用 `execution.evaluate` 处理表达式**，不要假设字段值是字面量。
