@@ -37,6 +37,7 @@ from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
 from plaita.server.log_handler import setup_redis_logging
+from plaita.server.node_timings import NodeTimingCallback
 from plaita.server.task_queue import (
     DEFAULT_CLAIM_MIN_IDLE_MS,
     DEFAULT_CONSUMER_GROUP,
@@ -328,6 +329,10 @@ class FlowWorker:
         self.flow_storage = flow_storage
         self.event_bus = event_bus
         self.callback_handlers = list(callback_handlers) if callback_handlers else []
+        # 节点耗时采集：**按执行**一个采集器（并发处理多个执行时不串场），只监听
+        # on_node_start/on_node_end；落盘时由 _persist_state_or_raise 写入
+        # ExecutionState.node_timings。
+        self._node_timings: Dict[str, NodeTimingCallback] = {}
         # 初始化流程定义缓存，使用TTL缓存
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
@@ -654,6 +659,7 @@ class FlowWorker:
         注意：fenced 世代失配是 storage 层 raise ``ExecutionLeaseError``、
         不经本方法的 False 路径——既有失租链路不受影响。
         """
+        self._collect_node_timings(execution_id, state)
         saved = self.execution_storage.save_execution_state(execution_id, state)
         if not saved:
             logger.error(
@@ -666,6 +672,33 @@ class FlowWorker:
                 f"保存执行状态失败 ({phase}): execution_id={execution_id}, "
                 f"status={getattr(state, 'status', '?')}"
             )
+
+    def _handlers_for(self, execution_id: str) -> list:
+        """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器。
+
+        采集器**按执行**新建并登记，避免同一 worker 并发处理多个执行时耗时串场；
+        登记表在终态落盘后回收（见 ``_collect_node_timings``）。
+        """
+        timing = NodeTimingCallback()
+        self._node_timings[execution_id] = timing
+        return [*self.callback_handlers, timing]
+
+    def _collect_node_timings(self, execution_id: str, state: ExecutionState) -> None:
+        """把本次执行的节点耗时并进状态（在**唯一的落盘收口**上做，覆盖 start/步进/
+        挂起/终态所有路径）。
+
+        - 与状态里已有的 ``node_timings`` **合并**而不是覆盖：resume 可能发生在
+          另一个进程，旧节点的时间不能被新进程的采集器抹掉；
+        - 终态落盘后回收采集器，避免长跑 worker 泄漏。
+        """
+        timing = self._node_timings.get(execution_id)
+        if timing is None:
+            return
+        merged = dict(state.node_timings or {})
+        merged.update(timing.snapshot())
+        state.node_timings = merged
+        if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+            self._node_timings.pop(execution_id, None)
     
     def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
         """
@@ -941,20 +974,21 @@ class FlowWorker:
         logger.info("开始执行流程: %s, 版本: %s", flow_id, version or '最新版本')
         
         try:
-            # 创建流程执行器并执行流程
-            # 复用同一个 FlowExecution 贯穿所有分布式步骤, 保留用户回调
-            execution = FlowExecution(
-                event_bus=self.event_bus,
-                callback_handlers=self.callback_handlers,
-            )
-            execution.mode = ExecutionMode.DISTRIBUTED
-            self._bind_observers(execution)
-
             # P0 可见性修复（keeper 迁移设计稿 §5.5 清单①，43828aa）：
             # execution_id 优先吃 BFF 预铸（随消息透传，提交方即刻可轮询），
             # 否则就地铸造；行 id 与 result.execution_id 天然一致。异常遗留
             # 的 running 行是 zombie，交 reaper/心跳年龄判定处置。
+            # 位置前移到执行器构造之前：节点耗时采集器按执行登记，需要 id 已定。
             execution_id = execution_id or uuid.uuid4().hex
+
+            # 创建流程执行器并执行流程
+            # 复用同一个 FlowExecution 贯穿所有分布式步骤, 保留用户回调
+            execution = FlowExecution(
+                event_bus=self.event_bus,
+                callback_handlers=self._handlers_for(execution_id),
+            )
+            execution.mode = ExecutionMode.DISTRIBUTED
+            self._bind_observers(execution)
 
             # start 幂等键（波次二任务③，与 G1 预铸 id 组合）：在先行落行
             # 之前认领，映射值=预铸或就地铸造的 execution_id——重投/双开
@@ -1237,7 +1271,7 @@ class FlowWorker:
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
             execution = FlowExecution(
                 event_bus=self.event_bus,
-                callback_handlers=self.callback_handlers,
+                callback_handlers=self._handlers_for(execution_id),
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
@@ -1386,7 +1420,7 @@ class FlowWorker:
         if execution is None:
             execution = FlowExecution(
                 event_bus=self.event_bus,
-                callback_handlers=self.callback_handlers,
+                callback_handlers=self._handlers_for(execution_id),
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
