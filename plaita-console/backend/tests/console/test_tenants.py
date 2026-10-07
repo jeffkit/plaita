@@ -379,3 +379,63 @@ def test_legacy_db_migration_backfills_default_tenant(tmp_path):
     with pytest.raises(ValueError):
         store.create_flow("legacy-flow", tenant_id="default")
     store.create_flow("legacy-flow", tenant_id="acme")
+
+
+# ---- 停用租户的运行面闸（plaita#27） ----
+
+def test_disabled_tenant_blocks_issued_session(client):
+    """停用租户的已签发会话：数据面 403；会话不解除，切走即恢复。"""
+    store = flow_store.get_flow_store()
+    users_svc.create_user(store, "erin", "erin-password-1", "editor")
+    users_svc.add_member(store, "default", "erin", "editor")
+    info = _login(client, "root", "root-password-1")
+    headers = _auth(info["token"])
+    client.post("/api/tenants", json={"id": "acme"}, headers=headers)
+    users_svc.add_member(store, "acme", "erin", "editor")
+
+    erin = _login(client, "erin", "erin-password-1")
+    assert client.post("/api/auth/switch-tenant", json={"tenant_id": "acme"},
+                       headers=_auth(erin["token"])).status_code == 200
+    assert client.get("/api/flows", headers=_auth(erin["token"])).status_code == 200
+
+    # 停用租户
+    assert client.post("/api/tenants/acme/status", json={"status": "disabled"},
+                       headers=headers).status_code == 200
+
+    # 已签发会话的数据面调用被 403（无需等 7 天会话过期）
+    assert client.get("/api/flows", headers=_auth(erin["token"])).status_code == 403
+    # 自操作端点放行：可切走停用租户，切回活跃租户即恢复访问
+    assert client.get("/api/auth/me", headers=_auth(erin["token"])).status_code == 200
+    assert client.post("/api/auth/switch-tenant", json={"tenant_id": "default"},
+                       headers=_auth(erin["token"])).status_code == 200
+    assert client.get("/api/flows", headers=_auth(erin["token"])).status_code == 200
+
+    # 平台管理员不受停用闸影响（需能管理/重新启用租户）
+    assert client.get("/api/tenants", headers=headers).status_code == 200
+
+    # 重新启用后即可切回
+    assert client.post("/api/tenants/acme/status", json={"status": "active"},
+                       headers=headers).status_code == 200
+    assert client.post("/api/auth/switch-tenant", json={"tenant_id": "acme"},
+                       headers=_auth(erin["token"])).status_code == 200
+    assert client.get("/api/flows", headers=_auth(erin["token"])).status_code == 200
+
+
+def test_reenable_tenant_restores_pinned_session(client):
+    """停用闸是实时判定而非吊销会话：重新启用后同一 token 立即恢复。"""
+    store = flow_store.get_flow_store()
+    users_svc.create_user(store, "frank", "frank-password-1", "editor")
+    info = _login(client, "root", "root-password-1")
+    headers = _auth(info["token"])
+    client.post("/api/tenants", json={"id": "acme"}, headers=headers)
+    users_svc.add_member(store, "acme", "frank", "editor")
+
+    frank = _login(client, "frank", "frank-password-1")
+    assert frank["active_tenant"] == "acme"
+
+    client.post("/api/tenants/acme/status", json={"status": "disabled"}, headers=headers)
+    assert client.get("/api/flows", headers=_auth(frank["token"])).status_code == 403
+
+    client.post("/api/tenants/acme/status", json={"status": "active"}, headers=headers)
+    # 未换 token、未重新登录
+    assert client.get("/api/flows", headers=_auth(frank["token"])).status_code == 200

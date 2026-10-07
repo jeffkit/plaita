@@ -27,6 +27,21 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 
 兼容规则：消息缺 `tenant_id` 视为 default；default 租户沿用历史键前缀，新旧版本混跑时 default 流量不受影响，非 default 租户需 console 与 worker 双侧升级。
 
+### 租户停用闸（plaita#27）
+
+租户状态权威源在 console 的关系库（`tenants.status`）。运行面（调度服务 /
+FlowWorker）是独立进程、只连 Redis，故 console 改状态时把状态写入
+`plaita:tenant_status`（HASH：tenant_id → `active`/`disabled`），server 侧在
+**入队 / 派发**前读取：
+
+- `fire_schedule`（cron 循环 + console 立即触发）：停用租户不入队；
+- `FlowWorker._dispatch_task`：停用租户的 `start` / `resume` 跳过（消息 ack 丢弃）。
+
+读取缺失 / Redis 抖动一律视为**未停用**（fail-open）——停用闸是加严措施，不应
+把全部租户的运行面拦死。停用即时生效（无需等会话过期）；console 侧会话
+（`resolve_session`/auth 403）与本地调度直接查库，不依赖本条。重新启用后
+同一会话立即恢复，无需重新登录。
+
 ## 环境变量速查
 
 | 变量 | 默认 | 含义 |

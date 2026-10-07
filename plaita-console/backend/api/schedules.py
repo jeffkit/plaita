@@ -59,8 +59,10 @@ from .executions import get_redis_or_none, TASK_QUEUE_NAME
 
 try:
     from ..auth import tenant_scope
+    from ..services import users_svc
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from auth import tenant_scope  # type: ignore
+    from services import users_svc  # type: ignore
 
 router = APIRouter()
 
@@ -118,6 +120,13 @@ def _get_schedule(redis: Redis, schedule_id: str) -> dict:
 
 def _save_schedule(redis: Redis, schedule: dict) -> None:
     redis.hset(SCHEDULES_KEY, key=schedule["schedule_id"], value=json.dumps(schedule, ensure_ascii=False))
+
+
+def _ensure_tenant_active(schedule: dict) -> None:
+    """停用租户的调度不可触发（立即触发与 cron 走同一闸，plaita#27）。"""
+    tenant_id = schedule.get("tenant_id") or "default"
+    if users_svc.tenant_is_disabled(flow_store.get_flow_store(), tenant_id):
+        raise HTTPException(status_code=403, detail=f"租户 {tenant_id} 已停用，调度不可触发")
 
 
 def _view(schedule: dict) -> dict:
@@ -322,12 +331,14 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant_scope(request))
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+        _ensure_tenant_active(schedule)
         execution_id = local.trigger_now(store, schedule)
         if execution_id is None:
             raise HTTPException(status_code=502, detail="触发失败，请查看 console 日志")
         return {"success": True, "execution_id": execution_id}
 
     schedule = _get_schedule(redis, schedule_id)
+    _ensure_tenant_active(schedule)
     # 与手动「启动流程」同源：写任务队列 Stream
     msg_id = fire_schedule(redis, schedule, TASK_QUEUE_NAME, trigger_kind="manual")
     if msg_id is None:

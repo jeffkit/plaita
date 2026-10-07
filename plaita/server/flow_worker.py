@@ -33,6 +33,7 @@ from plaita.storage.fenced import (
 )
 from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STATUSES
 from plaita.logger import logger
+from plaita.tenant_status import is_tenant_disabled
 from plaita.usage import UsageCollector
 from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
@@ -2097,6 +2098,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             logger.warning("不亲和任务交接失败（退化为留 pending）: %s: %s", e, exc)
 
     def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None) -> None:
+        # 租户停用闸（plaita#27）：停用租户的 start/resume 一律不执行（正常
+        # 返回 = 上层 ack，消息被丢弃而非滞留 pending）。状态由 console 发布
+        # 到 Redis（见 plaita.tenant_status；缺失/读失败=未停用，fail-open）。
+        # 放在最前：停用租户的任务无需再走亲和交接（对端同样会丢弃）。
+        tenant_id = message_data.get("tenant_id")
+        # getattr：部分测试用 __new__ 直接构造 worker（无 redis_client）→ 无法
+        # 判定，按未停用放行（fail-open）。
+        if is_tenant_disabled(getattr(self, "redis_client", None), tenant_id):
+            logger.warning(
+                "租户 %s 已停用，跳过任务派发（type=%s flow=%s execution=%s）",
+                tenant_id or "default", message_data.get("type"),
+                message_data.get("flow_id"), message_data.get("execution_id"),
+            )
+            return
+
         # 机器亲和性闸（路线二首版，2026-10-06 多机验证）：任务参数里的 repo/
         # run_dir 是**派发方所在机器**的绝对路径。本机不具备该路径 = 跑不了，
         # 应让给有它的 worker（或等它出现）。不拦的话本机抢到就跑 → 秒失败
