@@ -173,3 +173,24 @@ def test_resume_rejects_non_suspended(app: FastAPI, client: TestClient):
                     json={"resume_type": "event", "data": {}})
     assert r.status_code == 400
     assert "挂起" in r.json()["detail"]
+
+
+def test_local_run_reports_node_timings(app: FastAPI, client: TestClient):
+    """节点级耗时：本地模式从回调采集的起止时间戳折算，经 API 透出。
+
+    执行详情页的「每个节点耗时」依赖这个字段；未执行节点不应出现在耗时表里。
+    """
+    examples_svc.seed_example_flows()
+    r = client.post("/api/executions", json={"flow_id": "hello-plaita"})
+    assert r.status_code == 200
+    body = _wait_completed(client, r.json()["execution_id"])
+
+    timings = body.get("node_timings")
+    assert timings, "本地执行应答必须带 node_timings"
+    for node in body["nodes"]:
+        entry = timings.get(node["id"])
+        assert entry is not None, f"{node['id']} 缺少耗时记录"
+        assert entry["duration_ms"] >= 0
+        assert entry["ended_ms"] >= entry["started_ms"]
+        assert entry["attempts"] == 1
+    assert set(timings) == {n["id"] for n in body["nodes"]}

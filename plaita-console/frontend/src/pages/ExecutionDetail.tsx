@@ -19,7 +19,7 @@ import {
   User,
   CalendarClock,
 } from 'lucide-react'
-import { api, API_BASE, authHeaders, ExecutionInfo } from '../services/api'
+import { api, API_BASE, authHeaders, ExecutionInfo, type NodeTiming } from '../services/api'
 import { Button, Card, StatusBadge, JsonViewer, jsonSummary, cn } from '../components/ui'
 import { useFlowDefinition } from '../hooks/useFlowDefinition'
 import { nodeOutgoing, type FlowNodeMeta } from '../components/flow/flowDefinition'
@@ -357,6 +357,9 @@ export default function ExecutionDetail() {
             flowNodes={flowDef.nodes}
             defLoading={flowDef.isLoading}
             defError={flowDef.errorMessage}
+            timings={execution.node_timings}
+            executionStart={execution.start_time}
+            executionEnd={execution.end_time}
           />
         </div>
 
@@ -595,12 +598,71 @@ function NodeTimeline({
   flowNodes,
   defLoading,
   defError,
+  timings,
+  executionStart,
+  executionEnd,
 }: {
   details: ExecutedNodeDetail[]
   flowNodes: FlowNodeMeta[]
   defLoading: boolean
   defError: string | null
+  /** 节点级耗时（node_id → 耗时） */
+  timings?: Record<string, NodeTiming> | null
+  executionStart?: string
+  executionEnd?: string
 }) {
+  const [filter, setFilter] = useState('')
+
+  const timingOf = (id: string): NodeTiming | undefined => timings?.[id]
+  const nodeMs = (id: string): number | null => {
+    const t = timingOf(id)
+    return t?.total_duration_ms ?? t?.duration_ms ?? null
+  }
+
+  // 瀑布图基准：以**首个节点的开始**为 0（epoch 毫秒，跨进程/时区都不会错位）
+  const timedIds = details.map((d) => d.id).filter((id) => timingOf(id)?.started_ms != null)
+  const spanStart = timedIds.length
+    ? Math.min(...timedIds.map((id) => timingOf(id)!.started_ms as number))
+    : 0
+  const spanEnd = timedIds.length
+    ? Math.max(...timedIds.map((id) => (timingOf(id)!.ended_ms ?? timingOf(id)!.started_ms) as number))
+    : 0
+  const span = Math.max(0, spanEnd - spanStart)
+
+  const sumNodeMs = details.reduce((acc, d) => acc + (nodeMs(d.id) ?? 0), 0)
+  const execMs = (() => {
+    if (!executionStart) return null
+    const start = new Date(executionStart).getTime()
+    const end = executionEnd ? new Date(executionEnd).getTime() : Date.now()
+    return Number.isFinite(start) ? Math.max(0, end - start) : null
+  })()
+  const slowestId = details.reduce<string | null>((acc, d) => {
+    if (nodeMs(d.id) === null) return acc
+    if (acc === null) return d.id
+    return (nodeMs(d.id) ?? 0) > (nodeMs(acc) ?? 0) ? d.id : acc
+  }, null)
+
+  /** 节点间空隙：上一个节点结束到本节点开始之间的时间（挂起等待/调度开销）。
+   *  只在前后两节点都有时间戳时才算，避免拿缺时间戳的节点硬凑。 */
+  const gapMs = (id: string): number | null => {
+    const idx = details.findIndex((d) => d.id === id)
+    if (idx <= 0) return null
+    const cur = timingOf(id)
+    const prev = timingOf(details[idx - 1].id)
+    if (cur?.started_ms == null || prev?.ended_ms == null) return null
+    const gap = cur.started_ms - prev.ended_ms
+    return gap > 20 ? gap : null
+  }
+  const maxGapMs = details.reduce((acc, d) => Math.max(acc, gapMs(d.id) ?? 0), 0)
+
+  const query = filter.trim().toLowerCase()
+  const visible = query
+    ? details.filter((d) =>
+        [d.id, d.meta?.name, d.meta?.type, d.meta?.desc].some(
+          (v) => v && String(v).toLowerCase().includes(query)
+        )
+      )
+    : details
   // 没有 $NODE：不假装有数据，直接说明并从定义给参照
   if (details.length === 0) {
     return (
@@ -631,25 +693,72 @@ function NodeTimeline({
 
   return (
     <Card className="overflow-hidden">
-      <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3 flex-wrap">
-        <h3 className="text-section text-ink-primary">节点时间线</h3>
-        <span className="text-data-sm text-ink-muted tabular-nums">
-          已执行 {realCount}
-          {routingCount > 0 && ` · 内部路由 ${routingCount}`}
-          {flowNodes.length > 0 && ` · 未执行 ${notExecuted.length}`}
-          <span className="text-ink-faint"> · 展开看输入/配置/输出/后继</span>
-          {defLoading && <span className="text-ink-faint"> · 流程定义加载中…</span>}
-        </span>
+      <div className="px-4 py-3 border-b border-line space-y-2">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <h3 className="text-section text-ink-primary">节点时间线</h3>
+          <div className="flex items-center gap-2">
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="筛选节点…"
+              className="input py-1 text-data-sm w-40"
+            />
+            <span className="text-data-sm text-ink-muted tabular-nums whitespace-nowrap">
+              已执行 {realCount}
+              {routingCount > 0 && ` · 内部路由 ${routingCount}`}
+              {flowNodes.length > 0 && ` · 未执行 ${notExecuted.length}`}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-caption text-ink-muted">
+          {sumNodeMs > 0 ? (
+            <>
+              <span>
+                节点耗时合计 <span className="text-ink-primary tabular-nums">{formatDuration(sumNodeMs)}</span>
+              </span>
+              {execMs !== null && execMs > 0 && (
+                <span>
+                  占流程总耗时{' '}
+                  <span className="text-ink-primary tabular-nums">{formatPercent(sumNodeMs, execMs)}</span>
+                  <span className="text-ink-faint">（总 {formatDuration(execMs)}）</span>
+                </span>
+              )}
+              {slowestId && (
+                <span>
+                  最慢{' '}
+                  <span className="text-status-warning">
+                    {details.find((d) => d.id === slowestId)?.meta?.name ?? slowestId}{' '}
+                    <span className="tabular-nums">{formatDuration(nodeMs(slowestId) ?? 0)}</span>
+                  </span>
+                </span>
+              )}
+              {maxGapMs > 100 && (
+                <span title="节点之间的时间：挂起等待 / 调度与持久化开销，不计入任何节点的耗时">
+                  最大节点间等待{' '}
+                  <span className="text-ink-primary tabular-nums">{formatDuration(maxGapMs)}</span>
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="text-ink-faint">
+              本次执行没有节点级耗时（老版本 worker 记录的状态，或采集器未挂载）
+            </span>
+          )}
+          {query && <span className="text-ink-faint">筛选命中 {visible.length}/{details.length}</span>}
+          <span className="text-ink-faint">展开看耗时明细与输入/配置/输出/后继</span>
+          {defLoading && <span className="text-ink-faint">流程定义加载中…</span>}
+        </div>
       </div>
       <div className="divide-y divide-line">
-        {details.map((d, i) => {
+        {visible.map((d) => {
           const { kind, text } = jsonSummary(d.output)
           const jumpTarget = d.isRouting && typeof d.output === 'string' ? d.output : null
           const typeLabel = d.meta?.type ?? (d.isRouting ? 'route' : 'unknown')
           const name = d.meta?.name ?? d.id
           const successors = d.meta ? nodeOutgoing(d.meta) : []
           // 实际走向 = 执行顺序里的下一个节点；用它高亮被选中的分支
-          const takenNextId = details[i + 1]?.id
+          const execIndex = details.findIndex((x) => x.id === d.id)
+          const takenNextId = execIndex >= 0 ? details[execIndex + 1]?.id : undefined
           return (
             <details key={d.id} className="group px-4 py-2.5">
               <summary className="flex items-center gap-2.5 cursor-pointer select-none list-none">
@@ -673,7 +782,42 @@ function NodeTimeline({
                 <span className={cn('rounded px-1.5 py-0.5 text-[10px] shrink-0', STATUS_CHIP[d.status])}>
                   {STATUS_LABEL[d.status]}
                 </span>
+                {timingOf(d.id)?.failed && (
+                  <span className="rounded px-1.5 py-0.5 text-[10px] shrink-0 bg-status-error-dim text-status-error">
+                    节点失败
+                  </span>
+                )}
+                {slowestId === d.id && (
+                  <span className="rounded px-1.5 py-0.5 text-[10px] shrink-0 bg-status-warning-dim text-status-warning">
+                    最慢
+                  </span>
+                )}
                 <span className="ml-auto flex items-center gap-2 min-w-0">
+                  {timingOf(d.id)?.duration_ms != null && (
+                    <span className="flex items-center gap-1.5 shrink-0" title="节点耗时（含相对时间轴的位置）">
+                      <span className="text-caption tabular-nums text-ink-secondary w-12 text-right">
+                        {formatDuration(timingOf(d.id)!.duration_ms)}
+                      </span>
+                      {span > 0 && (
+                        <span className="relative h-1.5 w-20 rounded-full bg-inset overflow-hidden">
+                          <span
+                            className={cn(
+                              'absolute h-full rounded-full',
+                              timingOf(d.id)!.failed
+                                ? 'bg-status-error/80'
+                                : slowestId === d.id
+                                  ? 'bg-status-warning/80'
+                                  : 'bg-plaita-500/70'
+                            )}
+                            style={{
+                              left: `${Math.min(100, (((timingOf(d.id)!.started_ms ?? spanStart) - spanStart) / span) * 100)}%`,
+                              width: `${Math.max(1.5, (((timingOf(d.id)!.ended_ms ?? 0) - (timingOf(d.id)!.started_ms ?? spanStart)) / span) * 100)}%`,
+                            }}
+                          />
+                        </span>
+                      )}
+                    </span>
+                  )}
                   <span className="text-caption text-ink-faint font-mono shrink-0">{kind}</span>
                   <span className="text-caption text-ink-muted truncate max-w-[320px]" title={jumpTarget ? `→ ${jumpTarget}` : text}>
                     {jumpTarget ? `→ ${jumpTarget}` : text}
@@ -687,6 +831,51 @@ function NodeTimeline({
                     分支/跳转合成节点：本节点未产生业务输出，随后进入{' '}
                     <span className="font-mono text-ink-secondary">{jumpTarget}</span>
                   </p>
+                )}
+                {timingOf(d.id)?.duration_ms != null && (
+                  <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-caption text-ink-muted">
+                    <span>
+                      耗时{' '}
+                      <span className="text-ink-primary tabular-nums">
+                        {formatDuration(timingOf(d.id)!.duration_ms)}
+                      </span>
+                    </span>
+                    {timingOf(d.id)!.started_ms != null && (
+                      <span>
+                        开始{' '}
+                        <span className="tabular-nums">
+                          +{formatDuration((timingOf(d.id)!.started_ms as number) - spanStart)}
+                        </span>
+                      </span>
+                    )}
+                    {timingOf(d.id)!.ended_ms != null && (
+                      <span>
+                        结束{' '}
+                        <span className="tabular-nums">
+                          +{formatDuration((timingOf(d.id)!.ended_ms as number) - spanStart)}
+                        </span>
+                      </span>
+                    )}
+                    {gapMs(d.id) !== null && (
+                      <span title="上一个节点结束 → 本节点开始之间的时间（挂起等待/调度），不属于任何节点的耗时">
+                        衔接等待 <span className="tabular-nums">{formatDuration(gapMs(d.id))}</span>
+                      </span>
+                    )}
+                    {(timingOf(d.id)!.attempts ?? 1) > 1 && (
+                      <span className="text-status-warning">
+                        执行 {timingOf(d.id)!.attempts} 次 · 合计{' '}
+                        <span className="tabular-nums">{formatDuration(timingOf(d.id)!.total_duration_ms)}</span>
+                      </span>
+                    )}
+                    {execMs !== null && execMs > 0 && (
+                      <span>
+                        占流程 <span className="tabular-nums">{formatPercent(timingOf(d.id)!.duration_ms as number, execMs)}</span>
+                      </span>
+                    )}
+                    {timingOf(d.id)!.started_at && (
+                      <span className="text-ink-faint font-mono">{timingOf(d.id)!.started_at}</span>
+                    )}
+                  </div>
                 )}
                 {successors.length > 0 && (
                   <div className="flex items-center gap-2 flex-wrap text-caption">
@@ -753,6 +942,7 @@ function NodeIO({ detail }: { detail: ExecutedNodeDetail }) {
       <IOSection
         title="输入"
         hint={hasTraceInput ? '含本地模式采集的真实入参' : '按流程定义表达式解析（$NODE.x / $INPUT.y）'}
+        size={detail.inputs.length > 0 ? formatBytes(jsonBytes(detail.inputs.map((i) => i.value))) : undefined}
       >
         {detail.inputs.length === 0 ? (
           <p className="text-caption text-ink-faint">该节点未引用上游数据，也不是流程入口。</p>
@@ -764,6 +954,9 @@ function NodeIO({ detail }: { detail: ExecutedNodeDetail }) {
                   <span className="font-mono text-caption text-ink-secondary">{inp.label}</span>
                   {!inp.present && <span className="text-caption text-status-warning">未执行/无值</span>}
                   {inp.kind === 'upstream' && <span className="text-caption text-ink-faint">推断</span>}
+                  <span className="text-[10px] text-ink-faint tabular-nums">
+                    {formatBytes(jsonBytes(inp.value))}
+                  </span>
                 </div>
                 <JsonViewer
                   value={inp.value}
@@ -778,11 +971,15 @@ function NodeIO({ detail }: { detail: ExecutedNodeDetail }) {
         )}
       </IOSection>
       {detail.config && (
-        <IOSection title="配置" hint="流程定义里的静态字段">
+        <IOSection title="配置" hint="流程定义里的静态字段" size={formatBytes(jsonBytes(detail.config))}>
           <JsonViewer value={detail.config} toolbar={false} defaultExpandDepth={2} maxHeightClass="max-h-56" />
         </IOSection>
       )}
-      <IOSection title="输出" hint={detail.hasOutput ? '$NODE 记录' : undefined}>
+      <IOSection
+        title="输出"
+        hint={detail.hasOutput ? '$NODE 记录' : undefined}
+        size={detail.hasOutput ? formatBytes(jsonBytes(detail.output)) : undefined}
+      >
         {detail.hasOutput ? (
           <JsonViewer
             value={detail.output}
@@ -802,10 +999,13 @@ function NodeIO({ detail }: { detail: ExecutedNodeDetail }) {
 function IOSection({
   title,
   hint,
+  size,
   children,
 }: {
   title: string
   hint?: string
+  /** 体量标签（如 "1.2 KB"），帮助识别异常大的 payload */
+  size?: string
   children: React.ReactNode
 }) {
   return (
@@ -813,10 +1013,49 @@ function IOSection({
       <div className="flex items-center gap-2 mb-1.5 flex-wrap">
         <h4 className="text-caption font-medium text-ink-secondary">{title}</h4>
         {hint && <span className="text-[10px] text-ink-faint">{hint}</span>}
+        {size && <span className="text-[10px] text-ink-faint tabular-nums">· {size}</span>}
       </div>
       {children}
     </div>
   )
+}
+
+/** 占比：不足 1% 也如实显示「<1%」，不用 0% 误导 */
+function formatPercent(part: number, whole: number): string {
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return '-'
+  const ratio = part / whole
+  if (ratio > 0 && ratio < 0.01) return '<1%'
+  return `${Math.round(ratio * 100)}%`
+}
+
+/** 毫秒 → 人读耗时 */
+function formatDuration(ms?: number | null): string {
+  if (ms === undefined || ms === null || !Number.isFinite(ms)) return '-'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)}s`
+  const minutes = Math.floor(ms / 60_000)
+  const seconds = Math.round((ms % 60_000) / 1000)
+  if (minutes < 60) return `${minutes}m${seconds ? ` ${seconds}s` : ''}`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** JSON 体量（UTF-8 字节）：用于发现异常大的输入/输出 */
+function jsonBytes(value: unknown): number | null {
+  if (value === undefined) return null
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    if (text === undefined) return null
+    return new TextEncoder().encode(text).length
+  } catch {
+    return null
+  }
+}
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return '-'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`
 }
 
 // 计算持续时间

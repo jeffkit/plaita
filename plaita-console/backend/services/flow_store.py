@@ -910,6 +910,7 @@ def finish_local_execution(
 
 
 def _local_row_to_dict(row: LocalExecution) -> dict:
+    nodes = _loads_or_none(row.nodes_json) or []
     return {
         "execution_id": row.execution_id,
         "tenant_id": getattr(row, "tenant_id", "") or "",
@@ -922,10 +923,40 @@ def _local_row_to_dict(row: LocalExecution) -> dict:
         "context": _loads_or_none(getattr(row, "context_json", None)),
         "error": _loads_or_none(row.error_json),
         "invoker": row.invoker,
-        "nodes": _loads_or_none(row.nodes_json) or [],
+        "nodes": nodes,
         "input": _loads_or_none(row.input_json) or {},
         "output": _loads_or_none(row.output_json),
+        # 与 worker 侧 NodeTimingCallback 同构的节点耗时视图，前端只认这一份
+        "node_timings": _timings_from_nodes(nodes) or None,
     }
+
+
+def _timings_from_nodes(nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """把本地模式 trace 的起止时间戳折算成 ``node_timings``（node_id → 耗时）。
+
+    同一节点循环/重试多次时：``duration_ms`` 取最后一次，``attempts`` 计数，
+    ``total_duration_ms`` 累计——与集群模式采集器同一语义，前端无需分支处理。
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for entry in nodes:
+        if not isinstance(entry, dict):
+            continue
+        node_id = entry.get("id")
+        duration = entry.get("duration_ms")
+        if not node_id or not isinstance(duration, int):
+            continue
+        prev = out.get(node_id) or {}
+        out[node_id] = {
+            "started_at": entry.get("started_at"),
+            "ended_at": entry.get("ended_at"),
+            "started_ms": entry.get("started_ms"),
+            "ended_ms": entry.get("ended_ms"),
+            "duration_ms": duration,
+            "total_duration_ms": int(prev.get("total_duration_ms", 0)) + duration,
+            "attempts": int(prev.get("attempts", 0)) + 1,
+            "failed": entry.get("status") == "error",
+        }
+    return out
 
 
 def _loads_or_none(text: Optional[str]) -> Any:
