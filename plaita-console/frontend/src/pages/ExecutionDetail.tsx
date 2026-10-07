@@ -21,8 +21,8 @@ import {
 } from 'lucide-react'
 import { api, API_BASE, authHeaders, ExecutionInfo, type NodeTiming } from '../services/api'
 import { Button, Card, StatusBadge, JsonViewer, jsonSummary, cn } from '../components/ui'
-import { useFlowDefinition } from '../hooks/useFlowDefinition'
-import { nodeOutgoing, type FlowNodeMeta } from '../components/flow/flowDefinition'
+import { useFlowDefinition, type FlowDefinitionState } from '../hooks/useFlowDefinition'
+import { nodeOutgoing } from '../components/flow/flowDefinition'
 import { STATUS_CHIP, STATUS_DOT, STATUS_LABEL } from '../components/flow/nodeStatusStyles'
 import { buildNodeDetails, type ExecutedNodeDetail } from '../components/flow/executionNodes'
 
@@ -162,8 +162,15 @@ export default function ExecutionDetail() {
     },
   })
 
-  // 流程定义：流程图与节点时间线共用一次查询（版本号缺失时取最新已发布版本）
-  const flowDef = useFlowDefinition(execution?.flow_id, execution?.flow_version)
+  // 本次执行实际跑过的节点 id：版本号缺失时用它去匹配「到底跑的是哪个版本」，
+  // 否则会拿最新已发布版本对照，节点对不上就全成了 unknown。
+  const executedNodeIds = useMemo(() => {
+    const nodeMap = execution?.context?.$NODE
+    return nodeMap && typeof nodeMap === 'object' ? Object.keys(nodeMap as Record<string, unknown>) : []
+  }, [execution?.context])
+
+  // 流程定义：节点时间线用它的名称/类型/配置做对照
+  const flowDef = useFlowDefinition(execution?.flow_id, execution?.flow_version, executedNodeIds)
 
   // 节点详情：执行序、状态、输入来源（按定义表达式解析）、配置、输出。
   // 覆盖全部定义节点（未执行的也有详情），画布点选任何节点都不会「什么也没有」。
@@ -354,9 +361,7 @@ export default function ExecutionDetail() {
           {/* 节点时间线：执行先后 + 每节点的输入/配置/输出/后继 */}
           <NodeTimeline
             details={executedDetails}
-            flowNodes={flowDef.nodes}
-            defLoading={flowDef.isLoading}
-            defError={flowDef.errorMessage}
+            defState={flowDef}
             timings={execution.node_timings}
             executionStart={execution.start_time}
             executionEnd={execution.end_time}
@@ -595,22 +600,22 @@ function Fact({
 // - 与流程定义对照补上节点类型/名称，并标注「内部路由节点」与「未执行节点」。
 function NodeTimeline({
   details,
-  flowNodes,
-  defLoading,
-  defError,
+  defState,
   timings,
   executionStart,
   executionEnd,
 }: {
   details: ExecutedNodeDetail[]
-  flowNodes: FlowNodeMeta[]
-  defLoading: boolean
-  defError: string | null
+  /** 流程定义状态：节点类型/名称/配置的来源，以及版本匹配情况 */
+  defState: FlowDefinitionState
   /** 节点级耗时（node_id → 耗时） */
   timings?: Record<string, NodeTiming> | null
   executionStart?: string
   executionEnd?: string
 }) {
+  const flowNodes = defState.nodes
+  const defLoading = defState.isLoading
+  const defError = defState.errorMessage
   const [filter, setFilter] = useState('')
 
   const timingOf = (id: string): NodeTiming | undefined => timings?.[id]
@@ -693,6 +698,18 @@ function NodeTimeline({
 
   return (
     <Card className="overflow-hidden">
+      {(defError || defState.versionSource === 'matched' || defState.missingIds.length > 0) && (
+        <div className="px-4 py-1.5 text-caption bg-status-warning-dim text-status-warning border-b border-line">
+          {defError
+            ? `流程定义不可用（${defError}），节点类型/名称无法对照`
+            : defState.versionSource === 'matched'
+              ? `执行记录没有版本号，已按节点 id 匹配到 v${defState.resolvedVersion ?? '?'} 对照` +
+                (defState.missingIds.length > 0
+                  ? `；仍有 ${defState.missingIds.length} 个节点不在该版本（${defState.missingIds.slice(0, 4).join('、')}${defState.missingIds.length > 4 ? '…' : ''}），已标为「未在定义中」`
+                  : '（全部节点命中）')
+              : `${defState.missingIds.length} 个节点不在 v${defState.resolvedVersion ?? '?'} 里（执行期间定义可能被改，或节点由运行时合成），已标为「未在定义中」`}
+        </div>
+      )}
       <div className="px-4 py-3 border-b border-line space-y-2">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <h3 className="text-section text-ink-primary">节点时间线</h3>
@@ -753,7 +770,15 @@ function NodeTimeline({
         {visible.map((d) => {
           const { kind, text } = jsonSummary(d.output)
           const jumpTarget = d.isRouting && typeof d.output === 'string' ? d.output : null
-          const typeLabel = d.meta?.type ?? (d.isRouting ? 'route' : 'unknown')
+          // 类型标签要能解释成因，不能只丢一个 unknown：
+          // - 定义里有类型 → 直接显示
+          // - 定义里没写 type → 未标注类型
+          // - 定义里根本没有这个 id → 未在定义中（版本不一致/运行时合成）
+          const typeLabel = d.isRouting
+            ? '内部路由'
+            : d.meta
+              ? (d.meta.type && d.meta.type !== 'unknown' ? d.meta.type : '未标注类型')
+              : '未在定义中'
           const name = d.meta?.name ?? d.id
           const successors = d.meta ? nodeOutgoing(d.meta) : []
           // 实际走向 = 执行顺序里的下一个节点；用它高亮被选中的分支
@@ -775,9 +800,16 @@ function NodeTimeline({
                     'rounded px-1.5 py-0.5 text-[10px] font-mono shrink-0',
                     d.isRouting ? 'bg-inset text-ink-muted' : 'bg-inset text-ink-secondary'
                   )}
-                  title={d.meta?.desc}
+                  title={
+                    d.meta?.desc ??
+                    (d.isRouting
+                      ? '编译器为分支/跳转合成的内部路由节点'
+                      : d.meta
+                        ? '流程定义里该节点没有写 type'
+                        : '该节点 id 不在对照的流程定义版本里：多为执行版本与对照版本不一致，或节点由运行时合成')
+                  }
                 >
-                  {d.isRouting ? '内部路由' : typeLabel}
+                  {typeLabel}
                 </span>
                 <span className={cn('rounded px-1.5 py-0.5 text-[10px] shrink-0', STATUS_CHIP[d.status])}>
                   {STATUS_LABEL[d.status]}
