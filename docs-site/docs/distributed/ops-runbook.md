@@ -41,6 +41,7 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
+| `PLAITA_CONSOLE_RECONCILE_ORPHANS` | `suspend` | 本地模式启动对账口径：`suspend` / `fail` / `off` |
 
 ## 无损升级（rolling upgrade）
 
@@ -118,10 +119,48 @@ curl -X POST "$CONSOLE/api/executions/$EXEC_ID/resume" \
 4. 升级窗口 Console API 无 5xx；
 5. 明确承认并接受：drain 超时的那一步会重放（业务节点幂等或带去重键）。
 
+### Console DB 迁移（alembic）
+
+flow store（flows / flow_versions / local_executions / users…）的 schema 现在由
+alembic 版本化，引导收敛在 `services/schema_migrations.py`，启动时幂等执行：
+
+| 库的状态 | 引导动作 |
+|---|---|
+| 空库 | `create_all` 建全量 schema → 认领基线 `0001_baseline` |
+| 存量库（有业务表、无 `alembic_version`） | 先按历史语义对齐（补缺失表/旧列），再**认领基线**（不重放 DDL） |
+| 已有版本记录 | `upgrade head` |
+
+要点：
+
+- **存量库无损**：认领基线不动业务数据（已在真实旧库上验证数据行数不变）。
+- 迁移目标 = **应用真正在用的引擎**（`services/schema_migrations` 通过
+  `config.attributes["engine"]` 传入）。这点很关键：早期实现只读
+  `get_settings().db_url`，结果是「stamp 表面成功、真实库永远没有版本记录」。
+- 新增变更写独立 revision（`migrations/versions/`），遵循 expand → backfill →
+  切读 → contract，禁止一步改列语义；`downgrade` 必须写并在测试库里跑过。
+- alembic 缺失时退回旧的 `create_all` 路径并打 WARNING（最小安装仍可启动，
+  但 schema 无版本记录）。
+
+### 本地单机模式的启动对账（无队列时的「僵尸执行」）
+
+本地模式没有 Redis 队列：执行由进程内线程推进。**console 重启后，重启前
+`running` 的执行会失去唯一执行线程而永远卡住**（集群模式靠 pending 重投，
+本地模式没有等价物）。现在启动时对账，口径由 env 决定：
+
+| `PLAITA_CONSOLE_RECONCILE_ORPHANS` | 行为 |
+|---|---|
+| `suspend`（默认） | 置 `suspended` 并写入原因——执行在每个步界都落过 checkpoint，可人工恢复（不自动续跑：本地模式没有 at-least-once 保障，自动续跑等于无声重放副作用） |
+| `fail` | 置 `failed` + 结束时间（宁可显式失败也不留可恢复态） |
+| `off` | 不对账（仅排查期使用） |
+
+只处理 `running`，条件更新（CAS）避免与执行线程并发完成打架；结果写入
+`GET /health` 的 `reconcile` 字段，启动日志同时告警。
+
 ### 已知缺口（本 runbook 尚未覆盖）
 
-- **本地单机模式**（无 Redis，进程内线程执行）：进程重启后在跑的本地执行没有对账机制，会停在 `running`；需要人工清理或用挂起 checkpoint 重新 resume。
-- Console flow store **没有迁移框架**（无 alembic），DB 变更加须靠人工 expand/contract。
+- **回滚演练**：alembic 的 `downgrade` 路径尚无测试覆盖（当前只有基线版本）。
+- ~~Console flow store 没有迁移框架~~ → 已引入 alembic（见下「Console DB 迁移」），
+  但**回滚（downgrade）尚未验证**，且当前只有基线版本，真实变更仍需按 expand/contract 写。
 - `engine_version` 目前只做观测（跨 minor resume 打 WARNING），未做硬门。
 
 ## List → Stream 迁移（升级必做）

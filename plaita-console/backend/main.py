@@ -83,6 +83,16 @@ async def lifespan(app: FastAPI):
             except ImportError:
                 from services import examples as examples_svc  # type: ignore
             examples_svc.seed_example_flows(tenant_id="default")
+            # 本地模式没有队列重投：重启前 running 的执行会失去执行线程，
+            # 启动时对账成「可处置状态」（默认 suspended + 原因），否则永远卡 running
+            try:
+                from .services import reconcile as reconcile_svc
+            except ImportError:
+                from services import reconcile as reconcile_svc  # type: ignore
+            try:
+                app.state.reconcile_summary = reconcile_svc.reconcile_orphan_local_executions()
+            except Exception as exc:  # noqa: BLE001 — 对账失败不得阻断启动
+                logger.warning("本地执行对账失败（不阻断启动）: %s", exc)
         try:
             from .services import users_svc, local_scheduler
         except ImportError:
@@ -257,8 +267,16 @@ def create_app() -> FastAPI:
     
     @app.get("/health", tags=["health"])
     async def health():
-        """健康检查端点"""
-        return {"status": "healthy"}
+        """健康检查端点。
+
+        本地模式附带启动对账摘要（``reconcile``）：重启后有僵尸执行被处置时，
+        编排/运维不必翻日志就能看到。
+        """
+        body = {"status": "healthy", "local_mode": bool(getattr(app.state, "local_mode", False))}
+        summary = getattr(app.state, "reconcile_summary", None)
+        if summary:
+            body["reconcile"] = summary
+        return body
 
     # --- 打包发布模式：后端直接托管前端构建产物（pip 安装后无需 Node 环境）---
     # webDist 由 scripts/build_package.sh 从 frontend/dist 填充；仓库开发模式

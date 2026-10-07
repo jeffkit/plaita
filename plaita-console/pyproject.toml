@@ -18,6 +18,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "sse-starlette>=1.8.0",
     "sqlalchemy>=2.0.0",
+    # schema 迁移（services/schema_migrations.py）——版本化替代散落的补列脚本
+    "alembic>=1.13.0",
     "httpx>=0.25.0",
     "croniter>=2.0.0",
     "pydantic-ai-slim[anthropic]>=2.36",

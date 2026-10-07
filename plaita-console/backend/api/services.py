@@ -20,7 +20,13 @@ class ServiceInfo(BaseModel):
     instance_id: str = Field(..., description="实例唯一标识")
     service_type: str = Field(..., description="服务类型")
     host: str = Field(..., description="主机地址")
-    status: str = Field(..., description="状态 (starting, running, stopping, stopped)")
+    status: str = Field(
+        ...,
+        description=(
+            "状态：starting / running / draining（优雅下线中，不再领新任务）/ "
+            "stopping / stopped"
+        ),
+    )
     start_time: Optional[str] = Field(None, description="启动时间")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="配置信息")
     active_tasks: int = Field(default=0, description="当前处理的任务数")

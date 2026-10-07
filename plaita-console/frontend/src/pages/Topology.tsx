@@ -80,12 +80,15 @@ function TopologyInner() {
     const resourceNodes = topo.nodes.filter((n) => n.service_type === 'resource')
 
     // ---- 服务组节点 ----
-    const groups = new Map<string, { ids: string[]; running: number }>()
+    // draining（无损升级中「不再领新任务、等收尾」）单独计数：这类实例仍活着，
+    // 但**不该算作可继续接流量的健康实例**，混进 running 会让运维误判可以继续灰度。
+    const groups = new Map<string, { ids: string[]; running: number; draining: number }>()
     const idToGroup = new Map<string, string>()
     for (const n of serviceNodes) {
-      const g = groups.get(n.service_type) || { ids: [], running: 0 }
+      const g = groups.get(n.service_type) || { ids: [], running: 0, draining: 0 }
       g.ids.push(n.instance_id)
       if (n.status === 'running') g.running += 1
+      if (n.status === 'draining') g.draining += 1
       groups.set(n.service_type, g)
       idToGroup.set(n.instance_id, n.service_type)
     }
@@ -94,7 +97,7 @@ function TopologyInner() {
     for (const [svcType, g] of groups) {
       const style = nodeStyles[svcType] || nodeStyles.resource
       const display = SERVICE_DISPLAY[svcType] || svcType
-      const live = g.running > 0
+      const live = g.running > 0 || g.draining > 0
       const chips = g.ids.slice(0, 3).map((id) => id.slice(0, 14))
       // 确定性网格布点：不能交给 dagre/symmetricLayout——未测量节点无尺寸会退化成全 (0,0)
       nodes.push({
@@ -113,6 +116,14 @@ function TopologyInner() {
                 >
                   {g.running}/{g.ids.length}
                 </span>
+                {g.draining > 0 && (
+                  <span
+                    className="rounded px-1.5 py-0.5 text-[10px] bg-status-warning-dim text-status-warning"
+                    title="正在优雅下线（不再领新任务、等在途任务收尾）——升级/缩容进行中"
+                  >
+                    下线中 {g.draining}
+                  </span>
+                )}
               </div>
               <div className="mt-1.5 space-y-0.5">
                 {chips.map((c) => (

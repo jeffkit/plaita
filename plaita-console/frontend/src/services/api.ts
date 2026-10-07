@@ -139,6 +139,7 @@ export interface ServiceInfo {
   instance_id: string
   service_type: string
   host: string
+  /** starting / running / draining（优雅下线中，不再领新任务）/ stopping / stopped */
   status: string
   start_time?: string
   metadata: Record<string, unknown>

@@ -1035,12 +1035,29 @@ _TENANT_REBUILD_TABLES = (
 
 
 def init_engine(db_url: str) -> Engine:
-    """创建/替换全局引擎并建表。返回引擎实例。"""
+    """创建/替换全局引擎并对齐 schema。返回引擎实例。
+
+    schema 对齐统一交给 alembic 引导（services/schema_migrations）：
+    空库 create_all + 认领基线；存量库（无 alembic_version）认领基线不重放；
+    已有版本记录则 upgrade head。这样「升级到哪个 schema」有版本可查、可回滚，
+    不再依赖散落的一次性补列脚本。
+    """
     global _engine, _SessionLocal
     _engine = create_engine(db_url, future=True)
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
-    create_all()
-    logger.info("FlowStore 引擎已初始化: %s", db_url)
+    try:
+        from . import schema_migrations
+    except ImportError:  # 平铺布局（cwd=backend）运行时
+        import schema_migrations  # type: ignore
+    try:
+        _engine.schema_summary = schema_migrations.run_migrations(_engine, db_url)
+    except Exception as exc:  # noqa: BLE001 — 见下：仅在 alembic 缺失时降级
+        # alembic 是 console 的依赖；缺失（如最小安装/测试桩）时退回旧的
+        # create_all 路径，保证「装不全也能启动」，但明确告警提示 schema 无版本记录。
+        logger.warning("alembic 迁移不可用（%s），回退 create_all（schema 将无版本记录）", exc)
+        create_all()
+        _engine.schema_summary = {"action": "create_all-fallback", "error": str(exc)}
+    logger.info("FlowStore 引擎已初始化: %s（schema=%s）", db_url, _engine.schema_summary)
     return _engine
 
 
