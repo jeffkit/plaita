@@ -33,6 +33,7 @@ from plaita.storage.fenced import (
 )
 from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STATUSES
 from plaita.logger import logger
+from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
 from plaita.server.log_handler import setup_redis_logging
@@ -152,6 +153,10 @@ def _register_code_node_for_worker() -> None:
 # 节点级重试判据沿 __cause__ 链回溯的最大深度。分布式归一化链固定一层
 # （FlowErrorException → NodeExecutionError），多留几层防御双重包装。
 _NODE_RETRY_CHAIN_MAX_DEPTH = 5
+
+# 队列残留回收（#43）兜底间隔：worker 启动时扫一次，之后每 N 秒一次
+# （best-effort，见 RedisStreamTaskQueue.sweep_acked_residue）。
+DEFAULT_RESIDUE_SWEEP_INTERVAL_SECONDS = 300.0
 
 
 # flow 定义指纹的**算法标记**：只有算法口径本身变化（model_dump 行为、字段规范化）
@@ -405,6 +410,7 @@ class FlowWorker:
         self._draining = threading.Event()
         self._drain_timer: Optional[threading.Timer] = None
         self._drain_started_at: Optional[float] = None
+        # 注意：_draining 在 _drain_event 里惰性兜底，__new__ 构造的骨架 worker 也安全
         # 初始化流程定义缓存，使用TTL缓存
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
@@ -1778,6 +1784,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         concurrency: int = 1,
         watchdog_interval_seconds: Optional[float] = None,
         cancel_poll_seconds: Optional[float] = None,
+        residue_sweep_interval_seconds: Optional[float] = None,
     ):
         redis_client = redis_client or Redis.from_url(redis_url)
         super().__init__(
@@ -1830,6 +1837,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 此处只接轮询间隔旋钮（单测可缩短）。
         if cancel_poll_seconds is not None:
             self._cancel_poll_seconds = cancel_poll_seconds
+
+        # 队列残留回收（#43）：启动时扫一次 + 每 residue_sweep_interval_seconds
+        # 兜底一次，清掉「已 ack 未 XDEL」的 Stream 残留条目（它们只增不减地
+        # 计入 XLEN，让运维把队列读数读成假阳性）。非阻塞锁保证并发消费下
+        # 同一时刻只有一个扫描在跑（幂等，重复扫描只是浪费一次往返）。
+        self._residue_sweep_interval_seconds = (
+            DEFAULT_RESIDUE_SWEEP_INTERVAL_SECONDS
+            if residue_sweep_interval_seconds is None
+            else float(residue_sweep_interval_seconds)
+        )
+        self._last_residue_sweep: Optional[float] = None
+        self._residue_sweep_lock = threading.Lock()
         
         # 服务注册
         self._enable_registry = enable_registry
@@ -2261,6 +2280,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         queue = self._get_task_queue()
         queue.ensure_group()
 
+        # 队列残留回收（#43）：启动时先扫一次，之后由消费循环按间隔兜底
+        self._sweep_residue_if_due(queue)
+
         # 租约看门狗（波次②）：持租约执行每 TTL/3 续租，防长步被 XCLAIM 抢占
         self._start_lease_watchdog()
         # 取消监听（波次③）：轮询取消标志键，命中即中止在途节点
@@ -2308,13 +2330,41 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         finally:
             self.stop()
 
+    def _sweep_residue_if_due(self, queue: RedisStreamTaskQueue) -> None:
+        """按间隔兜底回收「已 ack 未 XDEL」的队列残留条目（#43）。
+
+        与消费循环同线程执行，只在到期时（`_last_residue_sweep` 为空 = 启动
+        后第一次）扫一轮；并发消费下多线程共享实例，非阻塞锁保证不并发扫。
+        队列类已实现 `sweep_acked_residue` 才调用（并行合入期向后兼容——注入/
+        子类化的旧队列没有该方法，AttributeError 会炸掉消费线程）。
+        """
+        interval = self._residue_sweep_interval_seconds
+        if interval <= 0:
+            return
+        sweep = getattr(queue, "sweep_acked_residue", None)
+        if not callable(sweep):
+            return
+        now = time.monotonic()
+        last = self._last_residue_sweep
+        if last is not None and now - last < interval:
+            return
+        if not self._residue_sweep_lock.acquire(blocking=False):
+            return
+        try:
+            self._last_residue_sweep = time.monotonic()
+            sweep()
+        finally:
+            self._residue_sweep_lock.release()
+
     def _consume_loop(self, queue: RedisStreamTaskQueue) -> None:
         """单条消费循环（原 run() 主体）。可被 1 或 N 个线程并发执行。
 
-        ``draining`` 后不再领新任务：循环条件的检查发生在**任务边界**，所以
-        在途任务会跑完（这是优雅停机的语义），随后各消费线程自然退出。
+        ``draining``（无损升级）后不再领新任务：循环条件的检查发生在**任务边界**，
+        所以在途任务会跑完，随后各消费线程自然退出；残留 sweep 也一并停——
+        它属于「领任务」的配套动作，draining 期间不该再触发。
         """
-        while self._running and not self._draining.is_set():
+        while self._running and not self._drain_event.is_set():
+            self._sweep_residue_if_due(queue)
             # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
             # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
             # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
@@ -2419,8 +2469,22 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             self.update_registry_info(active_tasks=count)
     
     @property
+    def _drain_event(self) -> threading.Event:
+        """draining 标志（惰性创建）。
+
+        某些路径会以 ``__new__`` 构造「骨架 worker」（例如只测消费循环调度的单测），
+        不走 ``__init__``。把状态做成惰性属性后，这些路径同样安全——否则会在
+        循环条件里直接 AttributeError。
+        """
+        event = self.__dict__.get("_draining")
+        if event is None:
+            event = threading.Event()
+            self.__dict__["_draining"] = event
+        return event
+
+    @property
     def draining(self) -> bool:
-        return self._draining.is_set()
+        return self._drain_event.is_set()
 
     def request_drain(self, reason: str = "manual") -> None:
         """进入 draining：不再领新任务、注册表标 draining，并启动**有界**等待。
@@ -2431,9 +2495,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         续跑。代价是那一步会重放，业务节点须幂等（at-least-once 契约）。
         """
         with self._active_count_lock:
-            if self._draining.is_set():
+            if self._drain_event.is_set():
                 return
-            self._draining.set()
+            self._drain_event.set()
             self._drain_started_at = time.time()
         if self._enable_registry:
             # 注册表可见：编排/K8s 就绪探针据此把这台从流量里摘掉
@@ -2455,7 +2519,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
     def _force_stop_after_drain(self, timeout: float = 0.0) -> None:
         """drain 超时兜底：放弃当前步并让 run() 收尾退出（消息不 ack）。"""
-        if not self._draining.is_set():
+        if not self._drain_event.is_set():
             return
         active = self._active_task_count
         if active <= 0:
@@ -2487,10 +2551,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         if self._drain_timer is not None:
             self._drain_timer.cancel()
             self._drain_timer = None
-        if self._running and not self._draining.is_set():
+        if self._running and not self._drain_event.is_set():
             # 直接 stop（非 drain 路径）也保证「先摘流量再退出」
             with self._active_count_lock:
-                self._draining.set()
+                self._drain_event.set()
                 self._drain_started_at = self._drain_started_at or time.time()
             if self._enable_registry:
                 self.update_registry_info(status="draining")
@@ -2535,10 +2599,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """响应状态查询命令"""
         status = {
             "status": (
-                "draining" if self._draining.is_set()
+                "draining" if self._drain_event.is_set()
                 else ("running" if self._running else "stopped")
             ),
-            "draining": self._draining.is_set(),
+            "draining": self._drain_event.is_set(),
             "active_tasks": self._active_task_count,
             "queue_name": self.queue_name,
             "consumer_group": self._consumer_group,
@@ -2659,6 +2723,11 @@ def main():
     args = parser.parse_args()
     if args.quiet:
         logging.getLogger().setLevel(logging.WARNING)
+
+    # writefile 写入 jail（plaita#39）：writefile 节点默认任意路径可写，而部署入口
+    # 此前从不设置 PLAITA_NODES_WORKSPACE_ROOT——机制在节点侧，门在运营侧缺省开着。
+    # worker 启动即注入（未显式配置则 fail-closed 推导默认根）。
+    apply_writefile_jail("flow-worker")
 
     callback_handlers = []
     if args.langfuse or os.environ.get("PLAITA_WORKER_LANGFUSE") == "1":

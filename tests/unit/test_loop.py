@@ -1,12 +1,16 @@
 from unittest import TestCase
 import json
+import threading
+import time
 import unittest
+from typing import ClassVar
 
 from plaita.core import types
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution
 from plaita.io import Property
 from plaita.node import End, Start, decide
+from plaita.node.basic import Node
 from plaita.node.loop import Filter, Find, Loop, Map
 from plaita.node.code import CodeNode
 
@@ -14,6 +18,43 @@ user = Property(
     data_type=types.OBJECT,
     children={"name": Property(data_type=types.STRING, is_required=True), "age": Property(data_type=types.INTEGER)},
 )
+
+
+class _ConcurrencyProbe:
+    """并发宽度探针：记录「同时在跑」的峰值。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.peak = 0
+
+    def reset(self) -> None:
+        with self._lock:
+            self.active = 0
+            self.peak = 0
+
+    def hold(self, seconds: float) -> None:
+        with self._lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            time.sleep(seconds)
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+MAP_PROBE = _ConcurrencyProbe()
+
+
+class _MapProbeNode(Node):
+    """探针节点：进出各记一次，peak 即 Map 实际并发宽度。"""
+
+    node_type: ClassVar[str] = "map-probe"
+
+    def execute(self, execution=None):
+        MAP_PROBE.hold(0.05)
+        return "ok"
 
 
 class LoopTestCase(TestCase):
@@ -205,6 +246,22 @@ class MapTestCase(TestCase):
             ],
         )
 
+        # 并发宽度探针用的子流程（test_map_max_concurrent）：节点进出记录同时在跑的数量
+        self.probe_child_flow = Flow(
+            flow_id="child-map-probe",
+            version="1",
+            runtime="python",
+            input_type=Property(
+                data_type=types.OBJECT, children={"item": user, "index": Property(data_type=types.INTEGER)}
+            ),
+            output_type=Property(data_type=types.STRING),
+            nodes=[
+                Start(id="child-start", next="probe"),
+                _MapProbeNode(id="probe", next="end"),
+                End(id="end", **{"resultType": "success", "output": "ok"}),
+            ],
+        )
+
     def create_flow(self, type_defs, collection):
         flow = Flow(
             flow_id="map",
@@ -344,70 +401,58 @@ class MapTestCase(TestCase):
         # 并发执行时间应该显著小于顺序执行时间
         self.assertLess(concurrent_time, sequential_time / 2)
 
+    def _max_concurrent_flow(self, max_concurrent: int, child_flow: Flow) -> Flow:
+        flow = Flow(
+            flow_id=f"map-max-concurrent-{max_concurrent}",
+            version="1",
+            runtime="python",
+            input_type=Property(data_type=types.OBJECT),
+            output_type=Property(data_type=types.STRING),
+        )
+        flow.nodes = [
+            Start(id="start", next="map"),
+            Map(
+                id="map",
+                item_type=None,
+                flow=flow,
+                collection="$INPUT.items",
+                child_flow=child_flow,
+                next="end",
+                concurrent=True,
+                max_concurrent=max_concurrent,
+            ),
+            End(id="end", **{"resultType": "success", "output": "$NODE.map"}, flow=flow),
+        ]
+        return flow
+
     def test_map_max_concurrent(self):
-        # 准备测试数据 - 10个元素
+        """max_concurrent 真的把并发宽度卡在指定值上。
+
+        旧版靠墙钟计时断言「4 并发的耗时约为 2 并发的一半」：10 项 / mc=2 是 5 批、
+        /mc=4 是 3 批，比值本就该是 3/5 而非 1/2；且单批耗时随宿主机负载在
+        0.11~0.26s 抖动（实测），紧的计时断言在共享机器上不可复现（本仓 CI/本地
+        反复假红）。改为直接观测同时在跑的子流程数峰值：语义等价，且确定性。
+        """
         test_data = [{"name": f"user{i}", "age": 20 + i} for i in range(10)]
-        import time
-        # 创建 max_concurrent=2 的并发流程（理论约0.5秒）
-        concurrent_flow_2 = Flow(
-            flow_id="map-max-concurrent-2",
-            version="1",
-            runtime="python",
-            input_type=Property(data_type=types.OBJECT),
-            output_type=user,
-        )
-        concurrent_flow_2.nodes = [
-            Start(id="start", next="map"),
-            Map(
-                id="map",
-                item_type=None,
-                flow=concurrent_flow_2,
-                collection="$INPUT.items",
-                child_flow=self.slow_child_flow,
-                next="end",
-                concurrent=True,
-                max_concurrent=2,
-            ),
-            End(id="end", **{"resultType": "success", "output": "$NODE.map"}, flow=concurrent_flow_2),
-        ]
-        start_2 = time.time()
-        result_2 = concurrent_flow_2.run({"items": test_data})
-        time_2 = time.time() - start_2
+        for max_concurrent in (2, 4):
+            MAP_PROBE.reset()
+            flow = self._max_concurrent_flow(max_concurrent, self.probe_child_flow)
 
-        # 创建 max_concurrent=4 的并发流程（理论约0.25秒）
-        concurrent_flow_4 = Flow(
-            flow_id="map-max-concurrent-4",
-            version="1",
-            runtime="python",
-            input_type=Property(data_type=types.OBJECT),
-            output_type=user,
-        )
-        concurrent_flow_4.nodes = [
-            Start(id="start", next="map"),
-            Map(
-                id="map",
-                item_type=None,
-                flow=concurrent_flow_4,
-                collection="$INPUT.items",
-                child_flow=self.slow_child_flow,
-                next="end",
-                concurrent=True,
-                max_concurrent=4,
-            ),
-            End(id="end", **{"resultType": "success", "output": "$NODE.map"}, flow=concurrent_flow_4),
-        ]
-        start_4 = time.time()
-        result_4 = concurrent_flow_4.run({"items": test_data})
-        time_4 = time.time() - start_4
+            start = time.time()
+            result = flow.run({"items": test_data})
+            elapsed = time.time() - start
 
-        # 验证结果相同
-        self.assertEqual(result_2, result_4)
+            # 结果与并发宽度无关
+            self.assertEqual(["ok"] * len(test_data), result)
+            # 并发宽度生效：峰值既不能高于 max_concurrent（semaphore 失效），
+            # 也不能低于它（降级串行 / 共享池饥饿）
+            self.assertEqual(
+                max_concurrent,
+                MAP_PROBE.peak,
+                f"max_concurrent={max_concurrent} 实测并发峰值 {MAP_PROBE.peak}",
+            )
+            print(f"Max concurrent={max_concurrent} execution time: {elapsed:.2f}s, peak={MAP_PROBE.peak}")
 
-        print(f"Max concurrent=2 execution time: {time_2:.2f}s")
-        print(f"Max concurrent=4 execution time: {time_4:.2f}s")
-
-        self.assertLess(time_4, time_2)
-        self.assertAlmostEqual(time_4, time_2 / 2, delta=0.15)
 
 class FilterTestCase(TestCase):
     def setUp(self) -> None:

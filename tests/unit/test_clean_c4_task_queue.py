@@ -78,19 +78,28 @@ class TestDeadLetterTrim(unittest.TestCase):
         self.redis = fakeredis.FakeRedis(decode_responses=True)
         self.stream = "plaita:flow:queue:c4-1-dlq"
 
-    def _make_task(self, q: RedisStreamTaskQueue, body: dict):
-        q.enqueue(body)
-        task = q.read(block_ms=100)
-        self.assertIsNotNone(task)
-        return task
+    def _dead_letter_all(self, q: RedisStreamTaskQueue, flow_ids, reason_prefix: str):
+        """批量入队后按序读+死信每条（返回 None，断言 xlen 由调用方做）。
+
+        必须先批量入队再逐条读+死信：源 Stream 若在两次入队之间被 ack 的
+        XDEL 清空，fakeredis(2.36) 的 XADD 自增 id 基准取自 ``_ids[-1]`` 而
+        不是 Redis 的 last-generated-id（model/_stream.py add()），同毫秒内
+        的下一条 XADD 会**复用已投递过的 id**，XREADGROUP ">" 再也读不到它
+        → read() 返回 None。真 Redis 的 last_id 不因 XDEL 回退，无此问题。
+        """
+        for flow_id in flow_ids:
+            q.enqueue({"type": "start", "flow_id": flow_id})
+        for i, flow_id in enumerate(flow_ids):
+            task = q.read(block_ms=100)
+            self.assertIsNotNone(task)
+            self.assertEqual(task.body["flow_id"], flow_id)
+            q.dead_letter(task, reason=f"{reason_prefix}-{i}")
 
     def test_dlq_trimmed_to_max_len_keeps_newest(self):
         q = RedisStreamTaskQueue(
             self.redis, self.stream, group_name="g", consumer_name="c1", dlq_max_len=3
         )
-        for i in range(5):
-            task = self._make_task(q, {"type": "start", "flow_id": f"poison-{i}"})
-            q.dead_letter(task, reason=f"test-{i}")
+        self._dead_letter_all(q, [f"poison-{i}" for i in range(5)], reason_prefix="test")
         self.assertEqual(self.redis.xlen(q.dlq_key), 3)
         # 保留的是最近 3 条（poison-2/3/4）
         entries = self.redis.xrange(q.dlq_key)
@@ -101,9 +110,7 @@ class TestDeadLetterTrim(unittest.TestCase):
         q = RedisStreamTaskQueue(
             self.redis, self.stream, group_name="g", consumer_name="c1", dlq_max_len=10
         )
-        for i in range(3):
-            task = self._make_task(q, {"type": "start", "flow_id": f"p{i}"})
-            q.dead_letter(task, reason="t")
+        self._dead_letter_all(q, [f"p{i}" for i in range(3)], reason_prefix="t")
         self.assertEqual(self.redis.xlen(q.dlq_key), 3)
 
     def test_dlq_max_len_from_env(self):

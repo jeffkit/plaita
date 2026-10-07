@@ -11,6 +11,8 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
 
+from plaita.writefile_jail import apply_writefile_jail
+
 # 支持多种运行方式的导入
 try:
     from .config import get_settings
@@ -186,6 +188,10 @@ def _load_external_node_modules() -> None:
 
 if os.environ.get("PLAITA_CONSOLE_NODE_MODULES"):
     _load_external_node_modules()
+
+# writefile 写入 jail（plaita#39）：console 进程内也会跑流程（dry-run 试跑、
+# 本地单机模式的 local_executor），与 worker 同属部署入口，须同样注入。
+apply_writefile_jail("console")
 
 
 def create_app() -> FastAPI:

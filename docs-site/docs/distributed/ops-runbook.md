@@ -40,8 +40,31 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
+| `PLAITA_NODES_WORKSPACE_ROOT` | 由 worker 推导（见下） | `writefile` 节点的写入根（jail） |
+| `PLAITA_ALLOW_UNRESTRICTED_WRITES` | unset | `=1` 关闭 writefile jail（仅单机信任部署） |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
 | `PLAITA_CONSOLE_RECONCILE_ORPHANS` | `suspend` | 本地模式启动对账口径：`suspend` / `fail` / `off` |
+
+## writefile 写入 jail（2026-10 起默认开启） {#writefile-写入-jail}
+
+`writefile` 节点（`plaita-nodes`）以 `PLAITA_NODES_WORKSPACE_ROOT` 为写入根：
+设置后绝对路径与 `../` 穿越都必须落在该根内，否则报 `escapes workspace_root`
+拒绝写入；**未设置时保持历史行为——任意路径可写**。能提交流程 JSON 的人因此
+一度可写 `/etc/cron.d/...`、worker 自身代码或配置（持久化 RCE 原语）。
+
+worker / console 启动时注入该变量（`plaita/writefile_jail.py`），次序：
+
+1. 显式 `PLAITA_NODES_WORKSPACE_ROOT` → 原样使用（运营者配置优先）；
+2. `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` → 显式放行任意路径（**仅单机信任部署**）；
+3. 都没有 → fail-closed 推导默认根：`PLAITA_PROJECT_ROOT` → worker 工作目录 →
+   家目录（`/` 不构成边界，逐级后退）。
+
+生效值启动日志可见（`writefile 写入 jail: …`）。**多租户 / 不受信流程部署请显式
+配置第 1 条**，把根收敛到业务仓或沙箱目录；`PLAITA_PROJECT_ROOT` 已设的部署
+（console 拉起的 worker、Docker 镜像）默认即落在部署根内，无需额外配置。
+
+jail 是**进程级**的：worker 一次启动一个根，不能按执行/租户分别设根（`--concurrency`
+下多任务共享同一根）。跨租户写不同目录的部署请给每租户独立 worker。
 
 ## 无损升级（rolling upgrade）
 
@@ -186,7 +209,7 @@ python scripts/drain_list_queue_to_stream.py \
 远程 status（若开 registry）返回的 `queue` 字段含：
 
 - `stream_length` / `pending` / `dlq_length`
-- 计数：`acked` / `reclaimed` / `dead_lettered` / `lease_conflicts` / `failed`
+- 计数：`acked` / `reclaimed` / `dead_lettered` / `lease_conflicts` / `failed` / `residue_swept`
 
 也可以 Redis：
 
@@ -197,11 +220,40 @@ redis-cli XLEN plaita:flow:queue:dlq
 redis-cli KEYS 'plaita:execution:lease:*'
 ```
 
+**读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
+
+## 僵尸执行巡检 {#僵尸执行巡检}
+
+worker 崩溃后 pending 里的 start 任务重投会**另起全新执行**重跑，旧行永久停在
+`running`。例行巡检用 `scripts/reap_zombie_executions.py` 把超期未更新的
+running 行标记为 error(`orphaned`)，供监控/人工复核：
+
+```bash
+python scripts/reap_zombie_executions.py \
+    --redis-url "$PLAITA_REDIS_URL" --idle-minutes 60 [--dry-run]
+```
+
+多租户按命名空间隔离，非 default 租户需对每个 `plaita:{tenant}` 各跑一次
+（`--namespace plaita:{tenant}`）。
+
+**判据不能只看 `last_update_time`**：执行状态在单节点执行期间无心跳（只有
+`PERSIST_EVERY_N_STEPS` 步界才写回），一个 3 小时的长节点其时间戳可以陈旧 3
+小时而执行完全健康（租约正被看门狗每 40s 续）。故有两道闸（2026-10 修复）：
+
+| 闸 | 作用 |
+|----|------|
+| 租约键 `{ns}:execution:lease:{id}` 存在 → 跳过 | 活 worker 正推进长步骤，绝不标记 |
+| 落盘走条件写（状态键与巡检读到的原始串一致才写） | 活 worker 的步界写插在巡检读之后时放弃落盘——否则它的 running/completed 会被 error 覆写（监控先见 error 又翻回 completed），按 error 驱动补偿的 keeper 还会触发真·双跑 |
+
+先对齐 `--dry-run` 输出与 console 执行详情再实跑；`--idle-minutes` 须大于业务
+最长单节点耗时。
+
 ## 故障手册
 
 | 现象 | 可能原因 | 动作 |
 |------|----------|------|
 | 任务不消费 | group/stream 键不一致；Worker 未起 | 核对 `--queue-name` / group；看 Worker 日志 |
+| `XLEN>0` 但 `XPENDING`/`lag` 为 0 | 已 `XACK` 未 `XDEL` 的残留条目（XACK 与 XDEL 之间进程被杀），**不是**真积压 | worker 启动时与每 300s 兜底回收（`residue_swept`）；`XRANGE` 看 payload 的 `execution_id`，console 实查为终态即可确认无活干 |
 | pending 堆积 | 处理失败反复 reclaim；lease 冲突 | 查日志；调大 lease TTL；看 DLQ |
 | DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)） |
 | 反复重投，日志刷「保存执行状态失败 (…)」 | Redis 写路径瞬断/序列化失败——落盘失败已不再静默 ack（2026-10 评审修复） | 查 Redis `INFO`/延迟日志；恢复后 pending 自动重投收敛，勿人工 ack |
