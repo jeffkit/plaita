@@ -1,6 +1,6 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-09-30  
+> 最后更新：2026-10-07  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 
 | 文档路径 | 代码路径模式 | 同步触发条件 |
@@ -27,6 +27,8 @@
 | `.github/workflows/ci.yml` | `scripts/ci-gate.sh`, `pyproject.toml` `[tool.coverage.*]` | CI 门禁步骤或覆盖率阈值变更 |
 | `plaita-console/backend/auth.py` / `config.py` / `main.py` | `plaita-console/backend/**`, `plaita-console/frontend/src/services/api.ts` | 管理面 Admin API Key、契约 HMAC fail-closed、dry-run 危险节点闸门；Admin/Contract OpenAPI 分面与 README |
 | `plaita-console/README.md` | `plaita-console/backend/main.py`, `plaita-console/backend/api/**` | API 分面说明、鉴权表、Swagger tag |
+| `docs-site/docs/guide/console.md`（凭据）/ `docs-site/docs/distributed/ops-runbook.md`（多租户键空间） | `plaita/credentials.py`, `plaita-console/backend/services/{credentials_svc,local_executor,service_manager}.py` | 凭据文件按租户命名 / `current_tenant()` 路由、密钥来源、导出与引擎读取的路径契约变更 |
+| `docs-site/docs/architecture/execution-engine.md`（同步/异步桥接·环境态传递）/ `docs-site/docs/distributed/ops-runbook.md`（租户凭据链路） | `plaita/env_context.py`, `plaita/core/{runner,parallel_executor,async_utils}.py`, `plaita/node/concurrent.py` | 环境态跨执行体（线程 / 子进程）传播：注册项范围、快照格式、`snapshot_env` / `run_with_env` / `bind_env` 语义 |
 | （DSL IR）`plaita/dsl/ir_validate.py` | `plaita/dsl/**`, `plaita-ai/plaita_ai/flow_runner.py` | 共享拓扑校验、`flow_from_source` / `compile_flow` 编译门、registry 静默失败策略 |
 | （codeflow 包）`plaita/dsl/codeflow/` | `plaita/dsl/codeflow/{_common,_expr,_nodes,_stmt,_source,_emit,_compiler}.py` | `@flow` 编译器拆分、公开 API re-export、私有符号兼容导出；`_emit.py` 为 IR→源码反向发射器（`emit_source`，与 `code-dsl.md#emit_source` 同步） |
 | （Event 去重 / factory）`plaita/event/{memory,redis,sqlalchemy}.py`, `plaita/server/factory.py` | `plaita/event/**`, `plaita/server/factory.py` | handler 成功后再 mark；db 后端 `database_url→engine` |

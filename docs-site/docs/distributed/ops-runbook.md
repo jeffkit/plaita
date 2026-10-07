@@ -27,6 +27,34 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 
 兼容规则：消息缺 `tenant_id` 视为 default；default 租户沿用历史键前缀，新旧版本混跑时 default 流量不受影响，非 default 租户需 console 与 worker 双侧升级。
 
+### 租户凭据文件路由（plaita#24）
+
+凭据不进 Redis，是 Fernet 加密文件。文件按租户分区，命名由 console 导出侧
+（`services/credentials_svc.credentials_file`）与引擎侧（`plaita.credentials`）
+按同一规则推导：
+
+| 租户 | 文件路径 |
+|------|----------|
+| default / 空 | `PLAITA_CREDENTIALS_FILE`（默认 `.plaita-credentials.json`） |
+| 其他租户 | 同目录旁文件 `<stem>.<tenant_id><suffix>`，例：`.plaita-credentials.acme.json` |
+
+引擎每次 `get_credential` 按 `current_tenant()` 选文件（`FlowWorker` 每处理一条
+任务消息前 set、处理完 reset）。租户文件缺失即报「凭据不存在」——**不回落**
+default 文件，避免跨租户串用；报错里的「可用」清单也只列本租户凭据名。Fernet
+密钥（`PLAITA_CREDENTIALS_KEY` / `PLAITA_CREDENTIALS_KEY_FILE`）仍是全租户共用
+一把，console 拉起的 worker 自动带上。
+
+排障：
+
+- 非 default 租户报「凭据不存在（可用: 无）」→ 先确认 console 已导出该租户旁文件
+  （保存凭据时自动导出）；多机 / 容器部署要把凭据文件所在目录挂给 worker，只放
+  default 文件不够。
+- 租户上下文要穿过节点执行线程才生效：同步节点池、`Parallel` / `Map(concurrent)`
+  分支池、进程模式分支、惰性模式驱动线程都携带调用方的**环境态快照**
+  （`plaita.env_context`，白名单：租户 + 本地档凭据文件覆盖），进入方在只含快照
+  的全新 context 里执行。自研执行路径若把节点搬到线程 / 子进程里跑，同样要处理
+  这条链（`snapshot_env()` / `run_with_env()` / `bind_env()`）。
+
 ### 租户停用闸（plaita#27）
 
 租户状态权威源在 console 的关系库（`tenants.status`）。运行面（调度服务 /

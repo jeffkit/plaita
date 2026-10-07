@@ -1,4 +1,4 @@
-"""多租户上下文（顶层模块，无仓内依赖）。
+"""多租户上下文（顶层模块，仅依赖标准库与同层的 ``plaita.env_context``）。
 
 历史沿革：本模块的 ContextVar 与 namespace 纯函数原本定义在
 ``plaita.server.tenant_context``。但租户标识需要在**挂起时**就写进事件
@@ -23,16 +23,24 @@ reset（``_dispatch_task``）；租户路由存储包装器据此选择（并按
 底层 RedisStorage 实例。挂起侧（core/strategies._subscribe_event）据此把
 租户写进事件订阅，超时恢复路径（event_filter._on_subscription_timeout）
 再从订阅取回。
+
+节点执行离开驱动线程（同步节点池 / 分支池 / 进程池）时租户经
+:mod:`plaita.env_context` 的显式快照传播——节点内 ``current_tenant()`` 因此
+与驱动侧一致，凭据解析不会错读 default 租户的文件。
 """
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from typing import Optional
 
+from plaita.env_context import register_contextvar
+
 DEFAULT_TENANT_ID = "default"
 LEGACY_NAMESPACE = "plaita"
 
 _tenant_ctx: ContextVar[str] = ContextVar("plaita_tenant", default=DEFAULT_TENANT_ID)
+# 租户要穿过节点执行线程 / 分支池 / 进程池（见 plaita.env_context）。
+register_contextvar(_tenant_ctx)
 
 
 def tenant_namespace(tenant_id: Optional[str]) -> str:

@@ -96,8 +96,15 @@ python -m plaita_console              # 或使用 plaita-console 命令
 明文。保存后自动导出加密文件供引擎节点运行时解密；console 拉起的
 flow_worker 自动带上密钥环境。
 
+导出文件按租户分区：default 租户写 `PLAITA_CREDENTIALS_FILE`（默认
+`.plaita-credentials.json`），其余租户写同目录旁文件
+`.plaita-credentials.{tenant}.json`。引擎侧（`plaita.credentials`）每次取凭据
+按当前执行租户选文件，非 default 租户读不到 default 文件——租户隔离在运行面
+真实生效。多机 / 容器部署要把凭据文件所在目录（含各租户旁文件）挂给 worker。
+
 密钥来源：`PLAITA_CREDENTIALS_KEY` 环境变量，或自动生成于 DB 同目录的
-`.plaita-credentials.key`。多机部署请统一注入同一密钥。
+`.plaita-credentials.key`。多机部署请统一注入同一密钥；密钥全租户共用一把，
+租户间隔离靠的是**文件分区**而非独立密钥。
 
 ## 主要能力
 

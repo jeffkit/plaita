@@ -28,6 +28,7 @@ from plaita.core.callback import FlowCallback
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
 from plaita.core.strategies import ExecutionMode
+from plaita.env_context import register_contextvar
 from plaita.usage import UsageCollector
 
 try:
@@ -87,6 +88,9 @@ def _finalize_cancelled(execution_id: str, context: Optional[Dict[str, Any]]) ->
 _tenant_credentials_file: contextvars.ContextVar = contextvars.ContextVar(
     "plaita_console_tenant_credentials_file", default=None
 )
+# 节点执行会离开本执行线程（同步节点池 / Parallel 分支池 / 进程池）：把覆盖
+# 注册进环境态快照，节点侧的凭据解析才能看到它（见 plaita.env_context）。
+register_contextvar(_tenant_credentials_file)
 
 
 def _patch_runtime_credentials() -> None:
@@ -96,7 +100,11 @@ def _patch_runtime_credentials() -> None:
         return
     _orig = _pc.credentials_file
 
-    def _tenant_aware_credentials_file():
+    def _tenant_aware_credentials_file(tenant_id=None):
+        # 显式传租户时不看 ContextVar——与被包装函数（plaita.credentials）
+        # 的签名/语义保持一致，否则带参调用会 TypeError。
+        if tenant_id is not None:
+            return _orig(tenant_id)
         override = _tenant_credentials_file.get()
         if override:
             return Path(override)

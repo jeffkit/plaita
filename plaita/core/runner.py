@@ -31,6 +31,7 @@ from plaita.core.errors import (
     NodeExecutionError,
     NodeTimeoutError,
 )
+from plaita.env_context import bind_env
 
 if TYPE_CHECKING:
     from plaita.core.context import ExecutionContext
@@ -206,6 +207,17 @@ def _node_pool_bound(fn):
     return _wrapped
 
 
+def _context_bound(fn, *args):
+    """把 ``fn(*args)`` 绑成"携带调用方环境态快照"的无参可调用对象。
+
+    节点可能被投到共享节点池或超时裸线程，两者都自带空 context：不带环境态的
+    话节点读到的全是缺省值——非 default 租户的凭据解析（``plaita.credentials``
+    按 ``current_tenant()`` 选文件）会错读 default 租户凭据文件。快照在
+    **调用本函数的线程**取（见 ``plaita.env_context``），故须在提交侧调用。
+    """
+    return bind_env(fn, *args)
+
+
 class NodeRunner:
     """Handles single-node execution with timeout, retry, and error handling."""
 
@@ -355,16 +367,18 @@ class NodeRunner:
             # 见 _NODE_POOL_TLS 说明）。
             if getattr(_NODE_POOL_TLS, "in_node_pool", False):
                 return node.run(exec_ctx)
+            # 调用方环境态随节点下沉：非 default 租户的凭据解析靠它选文件。
             return await loop.run_in_executor(
-                _get_sync_node_pool(), _node_pool_bound(node.run), exec_ctx,
+                _get_sync_node_pool(), _context_bound(_node_pool_bound(node.run), exec_ctx),
             )
 
         cancel_event = getattr(exec_ctx, "cancel_event", None)
         fut: asyncio.Future = loop.create_future()
+        _run = _context_bound(node.run, exec_ctx)
 
         def _target() -> None:
             try:
-                result = node.run(exec_ctx)
+                result = _run()
                 if not loop.is_closed() and not fut.done():
                     loop.call_soon_threadsafe(fut.set_result, result)
             except Exception as exc:  # noqa: BLE001

@@ -94,6 +94,15 @@ return result
 
 - **异步节点**（`async_node=True` 或有 `arun` 协程）：`asyncio.wait_for(node.arun(ctx), timeout)`
 - **同步节点**：跑在 daemon 线程上，经 `loop.create_future()` + `call_soon_threadsafe` 桥接结果；超时时 set `cancel_event` 并放弃线程（不 join，保持事件循环自由）
+- **环境态传递**：跨执行体（同步节点池 / 超时 daemon 线程 / `Parallel`·`Map` 分支池 /
+  进程池 / 惰性模式驱动线程）一律走 `plaita.env_context` 的**显式快照**：提交侧取
+  注册项（当前是租户 + console 本地档凭据文件覆盖）的值，进入方在**只含该快照的
+  全新 context** 里执行。租户 `current_tenant()` 靠这条链到达节点内的凭据解析——
+  断链时节点会按缺省租户读凭据文件（跨租户串用）。
+  不用 `contextvars.copy_context()` 整份复制：那会把与执行体绑定的 contextvar
+  （flow 级共享 `aiohttp.ClientSession`，绑定父 flow 的 event loop）带进分支线程，
+  分支复用即撞 aiohttp 跨 loop 硬约束、分支收尾还会关掉父 flow 的 session。
+  同一 loop 内的 fan-out（`asyncio.gather`、协程模式分支）不经该机制，天然继承。
 
 ## 超时合并
 

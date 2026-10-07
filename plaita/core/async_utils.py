@@ -23,6 +23,8 @@ import asyncio
 import logging
 import threading
 
+from plaita.env_context import bind_env, run_with_env, snapshot_env
+
 logger = logging.getLogger("plaita.core.async_utils")
 
 
@@ -46,8 +48,10 @@ def run_async_from_sync(coro):
         # A hard-coded wall-clock cap here would silently override all user-configured
         # timeouts and cause mysterious failures for any flow that runs longer than
         # the arbitrary constant.
+        # 环境态（租户 / console 凭据文件覆盖）随协程进线程——新线程自带空
+        # context，不带过去的话协程内读到缺省值（见 plaita.env_context）。
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+            return pool.submit(run_with_env, snapshot_env(), asyncio.run, coro).result()
     return asyncio.run(coro)
 
 
@@ -197,7 +201,9 @@ def async_gen_to_sync(agen):
                     logger.debug("async gen aclose failed in worker thread", exc_info=True)
                 loop.close()
 
-        worker = threading.Thread(target=_drive, daemon=True)
+        # 驱动线程自带空 context：环境态（租户 / 凭据文件覆盖）显式带过去，
+        # 否则惰性模式下的节点按缺省租户解析凭据（见 plaita.env_context）。
+        worker = threading.Thread(target=bind_env(_drive), daemon=True)
         worker.start()
         try:
             while True:

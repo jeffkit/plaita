@@ -34,6 +34,8 @@ from multiprocessing import Lock as ProcessLock
 from threading import Lock, Semaphore
 from typing import Any, Callable, List, Optional, Protocol, runtime_checkable
 
+from plaita.env_context import run_with_env, snapshot_env
+
 logger = logging.getLogger(__name__)
 
 THREAD = "thread"
@@ -187,6 +189,16 @@ class _BaseExecutor:
         self._max_workers = max_workers
         self._sem = Semaphore(max_workers) if max_workers else None
 
+    def _spawn(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """把一个任务投到底层池，并让其携带调用方环境态快照执行。
+
+        线程池 worker 自带空 context、进程池 worker 是另一个解释器，任务不显式
+        带上租户（``plaita.credentials`` 按 ``current_tenant()`` 选凭据文件）就会
+        按缺省租户读。快照在**提交侧**取——见 ``plaita.env_context``（那里也说明
+        了为什么不整份复制 context）。
+        """
+        return self._pool.submit(run_with_env, snapshot_env(), fn, *args, **kwargs)
+
     def _wrap(self, fn: Callable[..., Any]) -> Callable[..., Any]:
         """用 semaphore 限制并发在 ``max_workers`` 以内。
 
@@ -214,14 +226,14 @@ class _BaseExecutor:
         for item in items:
             if self._sem is not None:
                 self._sem.acquire()
-            futures.append(self._pool.submit(wrapped, item))
+            futures.append(self._spawn(wrapped, item))
         return [f.result() for f in futures]
 
     def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         wrapped = self._wrap(fn)
         if self._sem is not None:
             self._sem.acquire()
-        return self._pool.submit(wrapped, *args, **kwargs)
+        return self._spawn(wrapped, *args, **kwargs)
 
     @staticmethod
     def wait(futures) -> Any:
@@ -278,6 +290,10 @@ class ProcessParallelExecutor(_BaseExecutor):
     ``supports_cancel_propagation=False``: ``ExecutionContext.__getstate__`` 弹掉
     不可 pickle 的 ``cancel_event``, 子进程拿到全新未触发的 Event, 父进程的
     超时/取消**不会跨进程传播**。需要响应取消的分支应改用 thread 模式。
+
+    环境态（ContextVar 不跨进程）经 ``_BaseExecutor._spawn`` 的显式快照传入：
+    子进程在只含该快照的全新 context 里执行分支。这是取消之外唯一跨进程传递
+    的环境态。
     """
 
     def __init__(

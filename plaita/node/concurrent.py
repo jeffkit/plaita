@@ -15,6 +15,7 @@ from plaita.core.parallel_executor import (
     in_plaita_pool_thread,
     make_executor,
 )
+from plaita.env_context import bind_env
 from plaita.node import Node
 from plaita.node.decide import Branch
 from plaita.core.strategies import ExecutionMode
@@ -443,7 +444,7 @@ class Parallel(Node):
 
         - coroutine 模式：用 ``asyncio.gather`` 真并发执行所有 join 分支。
         - thread / process 模式：保持语义兼容，每个分支在线程中执行，
-          通过 ``asyncio.to_thread`` 避免阻塞事件循环。
+          通过 ``loop.run_in_executor`` 避免阻塞事件循环。
         """
         branches_to_execute = self.match_condition_branches(execution)
         join_branches, background_branches = self._split_branches(branches_to_execute)
@@ -474,9 +475,14 @@ class Parallel(Node):
             pairs = await asyncio.gather(*(_join(b) for b in join_branches))
             return {name: result for name, result in pairs}
         else:
-            # thread / process: delegate to sync pool_execute in a thread
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self.pool_execute, self.mode, execution)
+            # thread / process: delegate to sync pool_execute in a thread。
+            # 中间线程自带空 context：环境态（租户等）显式带过去，分支内节点才能
+            # 按租户解析凭据。不用 asyncio.to_thread —— 它整份复制 context，会把
+            # loop 绑定的 flow http session 带进分支线程（见 plaita.env_context）。
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, bind_env(self.pool_execute, self.mode, execution),
+            )
 
     def match_condition_branches(self, execution):
         """根据条件匹配需要执行的分支"""
