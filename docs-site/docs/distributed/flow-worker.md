@@ -189,6 +189,7 @@ flowchart TD
 | `start_time` / `last_update_time` / `end_time` | 时间戳（ISO 字符串） |
 | `error` | 错误详情（status=error 时；节点重试耗尽的 error 附 `node_retries`） |
 | `invoker` | 发起方标识 |
+| `node_timings` | 节点级耗时（可选）：`node_id → {started_at, ended_at, started_ms, ended_ms, duration_ms, total_duration_ms, attempts, failed}`。由 worker 按执行挂载的 `NodeTimingCallback` 采集、在落盘收口处写入；同节点多次执行（循环/重试）时 `duration_ms` 取最后一次、`total_duration_ms` 累计、`attempts` 计数。**老状态/宿主未挂采集器时为 `None`**，读取方必须按缺省处理。 |
 
 ## 存储后端
 

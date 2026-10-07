@@ -41,6 +41,14 @@ class ExecutionState(BaseModel):
     end_time: Optional[str] = None
     error: Optional[Dict[str, Any]] = None
     invoker: Optional[str] = None
+    node_timings: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "节点级耗时（node_id → {started_at, ended_at, started_ms, ended_ms, "
+            "duration_ms, total_duration_ms, attempts, failed}）。None = 老状态或宿主"
+            "未挂 NodeTimingCallback——读取方必须按缺省处理，不得假定存在。"
+        ),
+    )
 
 class ExecutionStorage(ABC):
     """
