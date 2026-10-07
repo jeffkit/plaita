@@ -395,8 +395,15 @@ class TestLoopLastResultSemantics(unittest.TestCase):
 
 class TestLargeContextPerformanceSmoke(unittest.TestCase):
     """300 轮 While × ~1MB 上下文：修复后 ~0.2s；若回归为逐轮全量 deepcopy
-    则 ≈8s（本机实测 27ms/copy）。阈值 5s 对两侧都留足余量。
+    则 ≈8s（本机实测 27ms/copy）。
+
+    阈值 6.5s：原为 5.0s，但实测正常态在负载下可到 4.9–5.9s（2026-10-07
+    管线门禁实红 5.94s），与回归态 8s+ 之间余量不足——5.0s 会把「机器忙」
+    误判成「逐轮 deepcopy 回归」。抬到 6.5s 后两侧各留 ~1.5s：正常态即便
+    满载也不越线，真回归（8s+）仍稳定捕获。
     """
+
+    THRESHOLD_SECS = 6.5
 
     def test_while_large_context_condition_stays_fast(self):
         blob = [{"agent_run": "x" * 400, "trace": list(range(120))} for _ in range(1000)]
@@ -420,8 +427,9 @@ class TestLargeContextPerformanceSmoke(unittest.TestCase):
         wall = time.perf_counter() - t0
         self.assertEqual(result, 299)
         self.assertLess(
-            wall, 5.0,
-            f"300 轮 × ~1MB 上下文循环耗时 {wall:.2f}s —— 疑似回归为逐轮全量 deepcopy",
+            wall, self.THRESHOLD_SECS,
+            f"300 轮 × ~1MB 上下文循环耗时 {wall:.2f}s（阈值 {self.THRESHOLD_SECS}s）"
+            f" —— 疑似回归为逐轮全量 deepcopy（回归态 ≈8s）",
         )
 
 
