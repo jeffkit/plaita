@@ -752,14 +752,45 @@ class FlowWorker:
             )
 
     def _handlers_for(self, execution_id: str) -> list:
-        """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器。
+        """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器
+        （+ 沙箱生命周期回收，条件装配）。
 
         采集器**按执行**新建并登记，避免同一 worker 并发处理多个执行时耗时串场；
         登记表在终态落盘后回收（见 ``_collect_node_timings``）。
+
+        沙箱回收（2026-10-07）：存在沙箱注册表时挂 `SandboxLifecycleCallback`
+        —**flow 结束/挂起/异常三条路径都精确释放实例**，不再干等 AGS 侧 timeout
+        兜底（AGS 无闲置自动处置，"总寿命"比实际需要长得多）。plaita-nodes 为
+        可选依赖，缺装/无注册表时静默跳过（非沙箱部署零行为变化）。
         """
         timing = NodeTimingCallback()
         self._node_timings[execution_id] = timing
-        return [*self.callback_handlers, timing]
+        handlers = [*self.callback_handlers, timing]
+        sandbox_cb = self._sandbox_lifecycle_handler()
+        if sandbox_cb is not None:
+            handlers.append(sandbox_cb)
+        return handlers
+
+    @staticmethod
+    def _sandbox_lifecycle_handler():
+        """惰性装配沙箱生命周期回调；未装 plaita-nodes 或无沙箱注册表 → None。"""
+        if os.environ.get("PLAITA_SANDBOX_LIFECYCLE", "1") == "0":
+            return None
+        try:
+            from plaita_nodes.lifecycle import SandboxLifecycleCallback
+        except Exception:  # noqa: BLE001 — 可选依赖/导入差异都跳过
+            return None
+        try:
+            from plaita_nodes import sandbox as _sb
+            specs = _sb.load_sandboxes()
+        except Exception:  # noqa: BLE001 — 无注册表=非沙箱部署
+            return None
+        if not specs:
+            return None
+        try:
+            return SandboxLifecycleCallback(sandboxes=specs)
+        except Exception:  # noqa: BLE001 — 装配失败绝不拖累执行
+            return None
 
     def _collect_node_timings(self, execution_id: str, state: ExecutionState) -> None:
         """把本次执行的节点耗时并进状态（在**唯一的落盘收口**上做，覆盖 start/步进/
