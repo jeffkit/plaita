@@ -18,13 +18,11 @@ import {
   Workflow,
   User,
   CalendarClock,
-  MousePointerClick,
 } from 'lucide-react'
 import { api, API_BASE, authHeaders, ExecutionInfo } from '../services/api'
-import FlowViewer from '../components/FlowViewer'
 import { Button, Card, StatusBadge, JsonViewer, jsonSummary, cn } from '../components/ui'
 import { useFlowDefinition } from '../hooks/useFlowDefinition'
-import type { FlowNodeMeta } from '../components/flow/flowDefinition'
+import { nodeOutgoing, type FlowNodeMeta } from '../components/flow/flowDefinition'
 import { STATUS_CHIP, STATUS_DOT, STATUS_LABEL } from '../components/flow/nodeStatusStyles'
 import { buildNodeDetails, type ExecutedNodeDetail } from '../components/flow/executionNodes'
 
@@ -180,12 +178,6 @@ export default function ExecutionDetail() {
     [execution?.context, execution?.status, execution?.nodes, flowDef.nodes]
   )
   const executedDetails = useMemo(() => nodeDetails.filter((d) => d.executed), [nodeDetails])
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const selectedDetail = nodeDetails.find((n) => n.id === selectedNodeId) ?? null
-  const inspectNode = useCallback((id: string) => {
-    setSelectedNodeId(id)
-    document.getElementById('flow-viz-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }, [])
 
   if (isLoading) {
     return (
@@ -342,32 +334,8 @@ export default function ExecutionDetail() {
       })()}
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 items-start">
-        {/* 主列：流程图 + 节点时间线（主要阅读动线，给足宽度） */}
+        {/* 主列：节点时间线（执行详情的主要阅读动线，含每节点的输入/配置/输出/后继） */}
         <div className="xl:col-span-2 space-y-5">
-          {/* 流程可视化：画布 + 右侧节点详情（点击节点即看输入/配置/输出） */}
-          {execution.context && (
-            <Card className="overflow-hidden" id="flow-viz-card">
-              <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3">
-                <h3 className="text-section text-ink-primary">流程可视化</h3>
-                <span className="text-[11px] text-ink-faint">按 $NODE 痕迹着色 · 点击节点看输入/输出</span>
-              </div>
-              <div className="flex flex-col xl:flex-row xl:h-[26rem]">
-                <div className="flex-1 min-w-0 h-[22rem] xl:h-auto">
-                  <FlowViewer
-                    context={execution.context}
-                    status={execution.status}
-                    flowDef={flowDef}
-                    selectedNodeId={selectedNodeId}
-                    onSelectNode={setSelectedNodeId}
-                  />
-                </div>
-                <div className="w-full xl:w-[21rem] shrink-0 border-t xl:border-t-0 xl:border-l border-line overflow-auto max-h-[26rem]">
-                  <NodeInspector detail={selectedDetail} />
-                </div>
-              </div>
-            </Card>
-          )}
-
           {/* 本地单机模式：真实节点级 trace（回调采集，含输入/输出） */}
           {execution.nodes && execution.nodes.length > 0 && (
             <Card className="overflow-hidden">
@@ -383,14 +351,12 @@ export default function ExecutionDetail() {
             </Card>
           )}
 
-          {/* 节点时间线：执行先后 + 每节点的输入/配置/输出 */}
+          {/* 节点时间线：执行先后 + 每节点的输入/配置/输出/后继 */}
           <NodeTimeline
             details={executedDetails}
             flowNodes={flowDef.nodes}
             defLoading={flowDef.isLoading}
             defError={flowDef.errorMessage}
-            onInspect={inspectNode}
-            selectedNodeId={selectedNodeId}
           />
         </div>
 
@@ -629,15 +595,11 @@ function NodeTimeline({
   flowNodes,
   defLoading,
   defError,
-  onInspect,
-  selectedNodeId,
 }: {
   details: ExecutedNodeDetail[]
   flowNodes: FlowNodeMeta[]
   defLoading: boolean
   defError: string | null
-  onInspect: (id: string) => void
-  selectedNodeId: string | null
 }) {
   // 没有 $NODE：不假装有数据，直接说明并从定义给参照
   if (details.length === 0) {
@@ -652,7 +614,7 @@ function NodeTimeline({
             {defLoading
               ? '正在加载流程定义…'
               : flowNodes.length > 0
-                ? `流程定义共 ${flowNodes.length} 个节点，可对照上方「流程可视化」查看声明顺序。`
+                ? `流程定义共 ${flowNodes.length} 个节点，但本次执行没有节点级痕迹，无法还原先后与输入输出。`
                 : defError
                   ? `流程定义也不可用（${defError}）。`
                   : '流程定义不可用。'}
@@ -675,21 +637,21 @@ function NodeTimeline({
           已执行 {realCount}
           {routingCount > 0 && ` · 内部路由 ${routingCount}`}
           {flowNodes.length > 0 && ` · 未执行 ${notExecuted.length}`}
+          <span className="text-ink-faint"> · 展开看输入/配置/输出/后继</span>
+          {defLoading && <span className="text-ink-faint"> · 流程定义加载中…</span>}
         </span>
       </div>
       <div className="divide-y divide-line">
-        {details.map((d) => {
+        {details.map((d, i) => {
           const { kind, text } = jsonSummary(d.output)
           const jumpTarget = d.isRouting && typeof d.output === 'string' ? d.output : null
           const typeLabel = d.meta?.type ?? (d.isRouting ? 'route' : 'unknown')
           const name = d.meta?.name ?? d.id
-          const selected = selectedNodeId === d.id
+          const successors = d.meta ? nodeOutgoing(d.meta) : []
+          // 实际走向 = 执行顺序里的下一个节点；用它高亮被选中的分支
+          const takenNextId = details[i + 1]?.id
           return (
-            <details
-              key={`${d.id}-${selected ? 'sel' : 'x'}`}
-              open={selected || undefined}
-              className="group px-4 py-2.5"
-            >
+            <details key={d.id} className="group px-4 py-2.5">
               <summary className="flex items-center gap-2.5 cursor-pointer select-none list-none">
                 <span className="font-mono text-data-sm text-ink-faint tabular-nums w-6 text-right shrink-0">
                   {d.order}
@@ -718,7 +680,7 @@ function NodeTimeline({
                   </span>
                 </span>
               </summary>
-              <div className="mt-3 ml-8 space-y-3">
+              <div className="mt-3 ml-8 space-y-3.5">
                 {d.meta?.desc && <p className="text-caption text-ink-faint">{d.meta.desc}</p>}
                 {jumpTarget && (
                   <p className="text-caption text-ink-muted">
@@ -726,13 +688,31 @@ function NodeTimeline({
                     <span className="font-mono text-ink-secondary">{jumpTarget}</span>
                   </p>
                 )}
+                {successors.length > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap text-caption">
+                    <span className="text-ink-faint shrink-0">
+                      {successors.length > 1 ? '分支走向' : '后继'}
+                    </span>
+                    {successors.map((s) => {
+                      const taken = !!takenNextId && s.target === takenNextId
+                      const targetName = flowNodes.find((n) => n.id === s.target)?.name ?? s.target
+                      return (
+                        <span
+                          key={`${s.label ?? ''}-${s.target}`}
+                          className={cn(
+                            'rounded px-1.5 py-0.5 font-mono',
+                            taken ? 'bg-status-success-dim text-status-success' : 'bg-inset text-ink-muted'
+                          )}
+                        >
+                          {s.label ? `${s.label} → ` : '→ '}
+                          {targetName}
+                          {taken && ' · 实际走向'}
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
                 <NodeIO detail={d} />
-                <button
-                  onClick={() => onInspect(d.id)}
-                  className="text-caption text-plaita-400 hover:text-plaita-300"
-                >
-                  在流程图中查看该节点 →
-                </button>
               </div>
             </details>
           )
@@ -835,50 +815,6 @@ function IOSection({
         {hint && <span className="text-[10px] text-ink-faint">{hint}</span>}
       </div>
       {children}
-    </div>
-  )
-}
-
-/** 画布右侧的节点详情面板：没选中时给操作指引，选中后展示输入/配置/输出 */
-function NodeInspector({ detail }: { detail: ExecutedNodeDetail | null }) {
-  if (!detail) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-1.5 px-6 py-10 text-center text-ink-muted">
-        <MousePointerClick size={18} className="text-ink-faint mb-1" />
-        <p className="text-data-sm">点击画布中的节点</p>
-        <p className="text-caption text-ink-faint">查看它的输入来源、定义配置与执行输出</p>
-      </div>
-    )
-  }
-  return (
-    <div className="p-4 space-y-3">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', STATUS_DOT[detail.status])} />
-            <span className="text-data-sm text-ink-primary font-medium truncate">
-              {detail.meta?.name ?? detail.id}
-            </span>
-          </div>
-          <p className="font-mono text-caption text-ink-faint truncate mt-0.5">{detail.id}</p>
-        </div>
-        <span className={cn('rounded px-1.5 py-0.5 text-[10px] shrink-0', STATUS_CHIP[detail.status])}>
-          {STATUS_LABEL[detail.status]}
-        </span>
-      </div>
-      <div className="flex items-center gap-2 flex-wrap text-caption text-ink-muted">
-        <span className="rounded bg-inset px-1.5 py-0.5 font-mono">
-          {detail.meta?.type ?? (detail.isRouting ? '内部路由' : 'unknown')}
-        </span>
-        {detail.executed ? (
-          <span className="tabular-nums">第 {detail.order} 个执行</span>
-        ) : (
-          <span className="text-ink-faint">本次未跑到</span>
-        )}
-        {detail.subflowNodes > 0 && <span>子流程 {detail.subflowNodes} 节点</span>}
-      </div>
-      {detail.meta?.desc && <p className="text-caption text-ink-faint">{detail.meta.desc}</p>}
-      <NodeIO detail={detail} />
     </div>
   )
 }
