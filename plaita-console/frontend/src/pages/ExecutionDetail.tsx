@@ -21,7 +21,11 @@ import {
 } from 'lucide-react'
 import { api, API_BASE, authHeaders, ExecutionInfo } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
-import { Button, Card, StatusBadge } from '../components/ui'
+import { Button, Card, StatusBadge, JsonViewer, jsonSummary, cn } from '../components/ui'
+import { useFlowDefinition } from '../hooks/useFlowDefinition'
+import { isRoutingNodeId, type FlowNodeMeta } from '../components/flow/flowDefinition'
+import { STATUS_CHIP, STATUS_DOT, STATUS_LABEL } from '../components/flow/nodeStatusStyles'
+import type { NodeStatus } from '../components/flow/nodeTypes'
 
 type ResumeType = 'continue' | 'event' | 'timeout' | 'cancel'
 
@@ -158,6 +162,9 @@ export default function ExecutionDetail() {
       setShowResumeDialog(false)
     },
   })
+
+  // 流程定义：流程图与节点时间线共用一次查询（版本号缺失时取最新已发布版本）
+  const flowDef = useFlowDefinition(execution?.flow_id, execution?.flow_version)
 
   if (isLoading) {
     return (
@@ -349,10 +356,8 @@ export default function ExecutionDetail() {
               <div className="px-4 py-3 border-b border-line">
                 <h3 className="text-section text-ink-primary">流程输出</h3>
               </div>
-              <div className="p-4 bg-inset max-h-72 overflow-auto">
-                <pre className="text-data-sm font-mono text-green-300/90 whitespace-pre-wrap break-all">
-                  {JSON.stringify(execution.output, null, 2)}
-                </pre>
+              <div className="p-4">
+                <JsonViewer value={execution.output} rootName="output" defaultExpandDepth={1} maxHeightClass="max-h-72" />
               </div>
             </Card>
           )}
@@ -389,34 +394,45 @@ export default function ExecutionDetail() {
           )}
 
           {/* 节点时间线：从上下文里还原每个节点的执行痕迹，替代整包 JSON dump */}
-          <NodeTimeline context={execution.context} />
+          <NodeTimeline
+            context={execution.context}
+            status={execution.status}
+            flowNodes={flowDef.nodes}
+            defLoading={flowDef.isLoading}
+            defError={flowDef.errorMessage}
+          />
 
-          {/* 执行上下文 */}
+          {/* 执行上下文：树形折叠 + 语法高亮，替代整块 <pre> */}
           <Card className="overflow-hidden">
-            <div className="px-4 py-3 border-b border-line">
+            <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3">
               <h3 className="text-section text-ink-primary">执行上下文</h3>
+              <span className="text-[11px] text-ink-faint">
+                $INPUT / $NODE / $GLOBAL 等引擎变量
+              </span>
             </div>
-            <div className="p-4 bg-inset max-h-96 overflow-auto">
-              <pre className="text-data-sm font-mono text-ink-secondary whitespace-pre-wrap">
-                {execution.context
-                  ? JSON.stringify(execution.context, null, 2)
-                  : '无上下文数据'}
-              </pre>
+            <div className="p-4">
+              <JsonViewer
+                value={execution.context}
+                rootName="context"
+                defaultExpandDepth={1}
+                maxHeightClass="max-h-[32rem]"
+                emptyText="无上下文数据"
+              />
             </div>
           </Card>
 
           {/* 流程可视化 */}
           {execution.context && (
             <Card className="overflow-hidden">
-              <div className="px-4 py-3 border-b border-line">
+              <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3">
                 <h3 className="text-section text-ink-primary">流程可视化</h3>
+                <span className="text-[11px] text-ink-faint">节点状态按 $NODE 执行痕迹着色</span>
               </div>
-              <div className="h-96">
+              <div className="h-[26rem]">
                 <FlowViewer
-                  flowId={execution.flow_id}
-                  version={execution.flow_version}
                   context={execution.context}
                   status={execution.status}
+                  flowDef={flowDef}
                 />
               </div>
             </Card>
@@ -584,6 +600,27 @@ function StatusCard({ execution }: { execution: ExecutionInfo }) {
       border: 'border-status-error/30',
       label: '错误',
     },
+    failed: {
+      icon: <AlertCircle size={30} />,
+      color: 'text-status-error',
+      bg: 'bg-status-error-dim',
+      border: 'border-status-error/30',
+      label: '失败',
+    },
+    cancelled: {
+      icon: <XCircle size={30} />,
+      color: 'text-status-cancelled',
+      bg: 'bg-inset',
+      border: 'border-line',
+      label: '已取消',
+    },
+    pending: {
+      icon: <Clock size={30} />,
+      color: 'text-status-pending',
+      bg: 'bg-inset',
+      border: 'border-line',
+      label: '等待中',
+    },
   }
 
   const config = statusConfig[execution.status as keyof typeof statusConfig] || {
@@ -635,80 +672,156 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-// 节点时间线：兼容两种 context 形态——
-// 分布式运行态 ``$NODE``（dict: node_id → 节点结果）与历史 ``nodes`` 数组；
-// 每个节点可展开看原始 in/out，错误节点标红。
-function NodeTimeline({ context }: { context?: Record<string, unknown> }) {
-  interface TimelineEntry {
-    id: string
-    raw: Record<string, unknown>
-  }
-  const entries: TimelineEntry[] = []
-  const nodeMap = context?.$NODE as Record<string, unknown> | undefined
-  if (nodeMap && typeof nodeMap === 'object') {
-    for (const [id, result] of Object.entries(nodeMap)) {
-      entries.push({
-        id,
-        raw: (result && typeof result === 'object' ? result : {}) as Record<string, unknown>,
-      })
+// 节点时间线：从执行上下文还原节点级的执行先后与结果。
+//
+// 数据来源是引擎写入的 ``$NODE``（node_id → 节点返回值，键顺序即执行顺序）：
+// - 旧实现把非对象返回值统一强转成 ``{}``，于是 ``null`` / 字符串节点展开后
+//   只剩一个「大括号」——这里按真实类型展示，空值显式说明；
+// - 折叠态直接给类型 + 一行摘要，不必逐条展开才有信息；
+// - 与流程定义对照补上节点类型/名称，并标注「内部路由节点」与「未执行节点」。
+function NodeTimeline({
+  context,
+  status,
+  flowNodes,
+  defLoading,
+  defError,
+}: {
+  context?: Record<string, unknown>
+  status: string
+  flowNodes: FlowNodeMeta[]
+  defLoading: boolean
+  defError: string | null
+}) {
+  const nodeMap =
+    context?.$NODE && typeof context.$NODE === 'object'
+      ? (context.$NODE as Record<string, unknown>)
+      : null
+  const resultIds = nodeMap ? Object.keys(nodeMap) : []
+  const metaById = new Map(flowNodes.map((n) => [n.id, n]))
+  const lastNodeId =
+    (typeof context?.$LAST_NODE === 'string' ? (context.$LAST_NODE as string) : undefined) ??
+    resultIds[resultIds.length - 1]
+  const isFailed = status === 'error' || status === 'failed'
+  const executed = new Set(resultIds)
+
+  const rowStatus = (id: string): NodeStatus => {
+    if (isFailed && id === lastNodeId) return 'error'
+    if (id === lastNodeId) {
+      if (status === 'running') return 'current'
+      if (status === 'suspended') return 'suspended'
     }
+    return 'executed'
   }
-  const nodeList = (context?.nodes as Array<Record<string, unknown>>) || []
-  nodeList.forEach((node, index) => {
-    entries.push({ id: String(node.id ?? `node-${index}`), raw: node })
-  })
-  if (entries.length === 0) return null
+
+  // 没有 $NODE：不假装有数据，直接说明并从定义给参照
+  if (resultIds.length === 0) {
+    return (
+      <Card className="overflow-hidden">
+        <div className="px-4 py-3 border-b border-line">
+          <h3 className="text-section text-ink-primary">节点时间线</h3>
+        </div>
+        <div className="p-4 text-data-sm text-ink-muted space-y-1.5">
+          <p>本次执行没有留下节点级结果：执行上下文里没有 <span className="font-mono">$NODE</span> 记录。</p>
+          <p className="text-caption text-ink-faint">
+            {defLoading
+              ? '正在加载流程定义…'
+              : flowNodes.length > 0
+                ? `流程定义共 ${flowNodes.length} 个节点，可在下方「流程可视化」按声明顺序查看。`
+                : defError
+                  ? `流程定义也不可用（${defError}）。`
+                  : '流程定义不可用。'}
+          </p>
+        </div>
+      </Card>
+    )
+  }
+
+  const routingCount = resultIds.filter((id) => isRoutingNodeId(id) && !metaById.has(id)).length
+  const realCount = resultIds.length - routingCount
+  const notExecuted = flowNodes.filter((n) => !executed.has(n.id))
 
   return (
     <Card className="overflow-hidden">
-      <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+      <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3 flex-wrap">
         <h3 className="text-section text-ink-primary">节点时间线</h3>
-        <span className="text-data-sm text-ink-muted tabular-nums">{entries.length} 个节点</span>
+        <span className="text-data-sm text-ink-muted tabular-nums">
+          已执行 {realCount}
+          {routingCount > 0 && ` · 内部路由 ${routingCount}`}
+          {flowNodes.length > 0 && ` · 未执行 ${notExecuted.length}`}
+        </span>
       </div>
       <div className="divide-y divide-line">
-        {entries.map((entry, index) => {
-          const raw = entry.raw
-          const type = String(raw.type ?? raw.node_subtype ?? '')
-          const name = typeof raw.name === 'string' && raw.name ? raw.name : entry.id
-          const status = typeof raw.status === 'string' ? raw.status : ''
-          const errorText =
-            typeof raw.error === 'string'
-              ? raw.error
-              : raw.error != null
-                ? JSON.stringify(raw.error)
-                : ''
-          const hasError = !!errorText
-          const rest = { ...raw }
-          delete (rest as Record<string, unknown>).error
+        {resultIds.map((id, index) => {
+          const value = nodeMap ? nodeMap[id] : undefined
+          const meta = metaById.get(id)
+          const routing = isRoutingNodeId(id) && !meta
+          const st = routing ? 'executed' : rowStatus(id)
+          const { kind, text } = jsonSummary(value)
+          const jumpTarget = routing && typeof value === 'string' ? value : null
+          const typeLabel = meta?.type ?? (routing ? 'route' : 'unknown')
+          const name = meta?.name ?? id
           return (
-            <details key={`${entry.id}-${index}`} className="group px-4 py-2.5">
+            <details key={`${id}-${index}`} className="group px-4 py-2.5">
               <summary className="flex items-center gap-2.5 cursor-pointer select-none list-none">
                 <span className="font-mono text-data-sm text-ink-faint tabular-nums w-6 text-right shrink-0">
                   {index + 1}
                 </span>
-                <span className="font-mono text-data-sm text-ink-primary truncate">{name}</span>
-                {type && <span className="text-caption text-ink-faint shrink-0">{type}</span>}
-                {status && <StatusBadge status={status} />}
-                {hasError && (
-                  <span className="ml-auto text-caption text-status-error truncate max-w-[50%]">
-                    {errorText.split('\n')[0]}
-                  </span>
+                <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', STATUS_DOT[st])} />
+                <span className="text-data-sm text-ink-primary truncate">{name}</span>
+                {name !== id && (
+                  <span className="font-mono text-caption text-ink-faint truncate shrink-0">{id}</span>
                 )}
+                <span
+                  className={cn(
+                    'rounded px-1.5 py-0.5 text-[10px] font-mono shrink-0',
+                    routing ? 'bg-inset text-ink-muted' : 'bg-inset text-ink-secondary'
+                  )}
+                  title={meta?.desc}
+                >
+                  {routing ? '内部路由' : typeLabel}
+                </span>
+                <span className={cn('rounded px-1.5 py-0.5 text-[10px] shrink-0', STATUS_CHIP[st])}>
+                  {STATUS_LABEL[st]}
+                </span>
+                <span className="ml-auto flex items-center gap-2 min-w-0">
+                  <span className="text-caption text-ink-faint font-mono shrink-0">{kind}</span>
+                  <span className="text-caption text-ink-muted truncate max-w-[320px]" title={jumpTarget ? `→ ${jumpTarget}` : text}>
+                    {jumpTarget ? `→ ${jumpTarget}` : text}
+                  </span>
+                </span>
               </summary>
               <div className="mt-2 ml-8">
-                {hasError && (
-                  <pre className="mb-2 text-data-sm text-status-error whitespace-pre-wrap font-mono bg-status-error-dim rounded-md p-2.5">
-                    {errorText}
-                  </pre>
+                {meta?.desc && <p className="text-caption text-ink-faint mb-1.5">{meta.desc}</p>}
+                {jumpTarget && (
+                  <p className="text-caption text-ink-muted mb-1.5">
+                    分支/跳转合成节点：本节点未产生业务输出，随后进入{' '}
+                    <span className="font-mono text-ink-secondary">{jumpTarget}</span>
+                  </p>
                 )}
-                <pre className="text-data-sm font-mono text-ink-faint whitespace-pre-wrap max-h-52 overflow-auto bg-inset rounded-md p-2.5">
-                  {JSON.stringify(rest, null, 2)}
-                </pre>
+                <JsonViewer value={value} toolbar={false} defaultExpandDepth={2} maxHeightClass="max-h-72" emptyText="该节点没有返回值（null）" />
               </div>
             </details>
           )
         })}
       </div>
+      {notExecuted.length > 0 && (
+        <div className="px-4 py-2.5 border-t border-line flex items-start gap-2 flex-wrap">
+          <span className="text-caption text-ink-faint shrink-0 pt-0.5">
+            未执行节点（{notExecuted.length}）
+          </span>
+          <div className="flex items-center gap-1 flex-wrap">
+            {notExecuted.map((n) => (
+              <span
+                key={n.id}
+                className="rounded px-1.5 py-0.5 text-[11px] font-mono bg-inset text-ink-faint"
+                title={n.desc}
+              >
+                {n.name ?? n.id}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </Card>
   )
 }
@@ -753,18 +866,14 @@ function NodeTraceRow({ node }: { node: NonNullable<ExecutionInfo['nodes']>[numb
         <div className="px-3 pb-2 space-y-1.5">
           {node.input !== undefined && node.input !== null && (
             <div>
-              <p className="text-ink-faint mb-0.5">input</p>
-              <pre className="bg-inset rounded p-2 font-mono text-[11px] text-ink-secondary whitespace-pre-wrap break-all max-h-48 overflow-auto">
-                {JSON.stringify(node.input, null, 2)}
-              </pre>
+              <p className="text-ink-faint mb-1">input</p>
+              <JsonViewer value={node.input} toolbar={false} defaultExpandDepth={2} maxHeightClass="max-h-48" />
             </div>
           )}
           {node.output !== undefined && node.output !== null && (
             <div>
-              <p className="text-ink-faint mb-0.5">output</p>
-              <pre className="bg-inset rounded p-2 font-mono text-[11px] text-ink-secondary whitespace-pre-wrap break-all max-h-48 overflow-auto">
-                {JSON.stringify(node.output, null, 2)}
-              </pre>
+              <p className="text-ink-faint mb-1">output</p>
+              <JsonViewer value={node.output} toolbar={false} defaultExpandDepth={2} maxHeightClass="max-h-48" />
             </div>
           )}
           {node.error && <p className="text-status-error">{node.error}</p>}

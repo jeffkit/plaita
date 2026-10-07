@@ -1,224 +1,264 @@
 import { useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import {
-  ReactFlow,
-  Node,
-  Edge,
-  Background,
-  Controls,
-  MarkerType,
-} from '@xyflow/react'
+import { ReactFlow, Node, Edge, Background, Controls, MarkerType } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { api } from '../services/api'
+import { ArrowRight, Loader2 } from 'lucide-react'
 import { renderNodeLabel, type NodeStatus } from './flow/nodeTypes'
-import { EDGE_COLOR, EDGE_TYPE } from './flow/flowLayout'
-import { symmetricLayout } from './flow/symmetricLayout'
+import { EDGE_COLOR, EDGE_TYPE, NODE_WIDTH } from './flow/flowLayout'
 import { jsonToFlow } from './flow/flowConverter'
+import { definitionOrder, isRoutingNodeId, nodeOutgoing } from './flow/flowDefinition'
+import { STATUS_CHIP } from './flow/nodeStatusStyles'
+import type { FlowDefinitionState } from '../hooks/useFlowDefinition'
+import { cn } from './ui'
 
 interface FlowViewerProps {
-  /** 流程 ID：提供时优先用真实定义建图（分支/并行不会被画错） */
-  flowId?: string
-  /** 执行所用的流程版本；缺省时取最新已发布版本 */
-  version?: string
   context: Record<string, unknown>
   status: string
+  /** 流程定义状态（与节点时间线共用同一次查询） */
+  flowDef: FlowDefinitionState
 }
 
-export default function FlowViewer({ flowId, version, context, status }: FlowViewerProps) {
-  // 真实定义：从存储的版本定义 + 布局还原结构；context 只负责上色
-  const defQuery = useQuery({
-    queryKey: ['viewer-version', flowId, version],
-    queryFn: async () => {
-      if (version) return api.getVersion(flowId!, version)
-      const detail = await api.getFlow(flowId!)
-      const versions = (detail.versions || []) as Array<{ version: string; status?: string }>
-      const best = versions.find((v) => v.status === 'published') || versions[versions.length - 1]
-      if (!best) throw new Error('流程暂无任何版本')
-      return api.getVersion(flowId!, best.version)
-    },
-    enabled: !!flowId,
-    retry: false,
-    staleTime: 60_000,
+/** 已执行边（两端都已跑过）：成功色，与执行态节点呼应 */
+const EXECUTED_EDGE_COLOR = 'rgb(var(--c-status-success))'
+const ERROR_EDGE_COLOR = 'rgb(var(--c-status-error))'
+
+/**
+ * 环绕式布局（只读视图专用）。
+ *
+ * 编辑器/`symmetricLayout` 是「一层一行」的纵向展开：线性流程 13 个节点会摊成
+ * 1600px 高的细长一列，塞进卡片后被 fitView 缩成一条线。执行详情页的空间是
+ * 「宽而矮」，所以这里按执行顺序横向铺开、满一行换行（蛇形），既连贯又可用。
+ * 流程定义自带 layout 坐标时不动它（尊重编辑器里的人工排布）。
+ */
+function wrapLayout(nodes: Node[], orderIds: string[], perColumn: number): Node[] {
+  const order = orderIds.length > 0 ? orderIds : nodes.map((n) => n.id)
+  const index = new Map(order.map((id, i) => [id, i]))
+  let next = order.length
+  for (const n of nodes) if (!index.has(n.id)) index.set(n.id, next++)
+
+  const rows = Math.max(2, Math.min(perColumn, Math.ceil(Math.sqrt(order.length + 1))))
+  return nodes.map((n) => {
+    const i = index.get(n.id) ?? 0
+    const col = Math.floor(i / rows)
+    const raw = i % rows
+    const row = col % 2 === 0 ? raw : rows - 1 - raw // 蛇形折返，减少长跨行连线
+    return { ...n, position: { x: col * (NODE_WIDTH + 90), y: row * 104 } }
   })
+}
 
-  const fromDefinition = useMemo<{ nodes: Node[]; edges: Edge[] } | null>(() => {
-    if (!flowId || !defQuery.data) return null
-    try {
-      const def = JSON.parse(defQuery.data.definition || '{}') as Record<string, unknown>
-      const layout = JSON.parse(defQuery.data.layout || '{}') as Record<string, { x: number; y: number }>
-      const { nodes, edges } = jsonToFlow(def, layout)
-      if (nodes.length === 0) return null
-      // 画布坐标优先（layout 缺失时对称布局兜底）；jsonToFlow 产出的是编辑器
-      // 专用节点类型 plaitaNode，这里没有注册表，统一落到默认节点 + label 渲染
-      const positioned = nodes.some((n) => layout[n.id])
-        ? (nodes as Node[])
-        : symmetricLayout(nodes as Node[], edges as Edge[], 'TB')
-      const colored = positioned.map((n) => {
-        const d = n.data as Record<string, unknown>
-        return {
-          ...n,
-          type: 'default',
-          data: {
-            ...d,
-            label: renderNodeLabel({
-              type: String(d.type ?? ''),
-              name: String(d.name ?? d.type ?? n.id),
-              status: getNodeStatus(String(n.id), context, status),
-              desc: d.desc ? String(d.desc) : undefined,
-              sourceLine: typeof d.source_line === 'number' ? d.source_line : undefined,
-            }),
-          },
-        }
-      })
-      return { nodes: colored, edges: edges as Edge[] }
-    } catch {
-      return null
+export default function FlowViewer({ context, status, flowDef }: FlowViewerProps) {
+  const isFailed = status === 'error' || status === 'failed'
+
+  const view = useMemo(() => {
+    /** $NODE 的键顺序 = 真实执行先后（引擎按执行顺序写入） */
+    const nodeMap = context.$NODE
+    const resultIds =
+      nodeMap && typeof nodeMap === 'object' ? Object.keys(nodeMap as Record<string, unknown>) : []
+    const executed = new Set(resultIds)
+    const lastNodeId =
+      (typeof context.$LAST_NODE === 'string' ? (context.$LAST_NODE as string) : undefined) ??
+      resultIds[resultIds.length - 1]
+
+    const statusFor = (id: string): NodeStatus => {
+      if (isFailed && id === lastNodeId) return 'error'
+      if (executed.has(id)) {
+        if (status === 'suspended' && id === lastNodeId) return 'suspended'
+        if (status === 'running' && id === lastNodeId) return 'current'
+        return 'executed'
+      }
+      return 'pending'
     }
-  }, [flowId, defQuery.data, context, status])
 
-  // 兜底：无流程 ID / 定义加载失败 / 解析失败 → 退回旧的 context 推导
-  const fallback = useMemo(() => extractFlowStructure(context, status), [context, status])
-  const { nodes, edges } = fromDefinition ?? fallback
+    const metaById = new Map(flowDef.nodes.map((n) => [n.id, n]))
 
-  if (nodes.length === 0) {
+    const labelFor = (id: string, raw: Record<string, unknown> | undefined): Node => {
+      const meta = metaById.get(id)
+      const type = String(raw?.type ?? meta?.type ?? (isRoutingNodeId(id) ? 'route' : 'unknown'))
+      const name = String(raw?.name ?? meta?.name ?? id)
+      return {
+        id,
+        type: 'default',
+        position: { x: 0, y: 0 },
+        style: { background: 'transparent', border: 'none' },
+        data: {
+          label: renderNodeLabel({
+            type,
+            name,
+            status: statusFor(id),
+            desc: meta?.desc,
+            sourceLine: meta?.sourceLine ?? (typeof raw?.source_line === 'number' ? raw.source_line : undefined),
+            fields: (raw?.fields as Record<string, unknown> | undefined) ?? undefined,
+            next: (raw?.next as string | undefined) ?? meta?.next,
+            elseNext: (raw?.elseNext as string | undefined) ?? meta?.elseNext,
+            branchTargets:
+              meta && meta.branches.length
+                ? Object.fromEntries(meta.branches.map((b) => [b.name, b.next]))
+                : undefined,
+          }),
+        },
+      }
+    }
+
+    const makeEdge = (source: string, target: string, label?: string): Edge => {
+      const failedEdge = isFailed && target === lastNodeId
+      const done = executed.has(source) && executed.has(target)
+      const color = failedEdge ? ERROR_EDGE_COLOR : done ? EXECUTED_EDGE_COLOR : EDGE_COLOR
+      return {
+        id: `ve-${source}-${target}${label ? `-${label}` : ''}`,
+        source,
+        target,
+        // 只读视图没有编辑器节点的具名 handle（'true'/'false'/分支名）：
+        // 沿用它会让 xyflow 找不到 handle 而**静默丢弃**这条边——这正是
+        // 执行页「有节点、无连线」的根因。
+        type: EDGE_TYPE,
+        label,
+        labelStyle: { fill: 'rgb(var(--c-ink-secondary))', fontSize: 10, fontFamily: 'ui-monospace, monospace' },
+        labelBgStyle: { fill: 'rgb(var(--c-surface))' },
+        labelBgPadding: [3, 1] as [number, number],
+        labelBgBorderRadius: 3,
+        markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
+        style: { stroke: color, strokeWidth: failedEdge || done ? 1.6 : 1.2 },
+      }
+    }
+
+    // 路径 A：有真实定义 → 节点沿用定义转换（容器/嵌套不画错），边自建（带分支标签、无失效 handle）
+    if (flowDef.definition && flowDef.nodes.length > 0) {
+      try {
+        const { nodes } = jsonToFlow(flowDef.definition, flowDef.layout)
+        const known = new Set(flowDef.nodes.map((n) => n.id))
+        const nodesOut = nodes
+          .filter((n) => known.has(n.id))
+          .map((n) => ({ ...labelFor(n.id, n.data as Record<string, unknown>), position: n.position }))
+        if (nodesOut.length > 0) {
+          const edgesOut: Edge[] = []
+          for (const src of flowDef.nodes) {
+            for (const out of nodeOutgoing(src)) {
+              if (known.has(out.target)) edgesOut.push(makeEdge(src.id, out.target, out.label))
+            }
+          }
+          const orderIds = resultIds.length > 0 ? resultIds : definitionOrder(flowDef.nodes)
+          const hasSavedLayout = Object.keys(flowDef.layout).length > 0
+          return {
+            nodes: hasSavedLayout ? nodesOut : wrapLayout(nodesOut, orderIds, 4),
+            edges: edgesOut,
+            orderIds,
+            orderFromTrace: resultIds.length > 0,
+            statusFor,
+          }
+        }
+      } catch {
+        /* 落到路径 B */
+      }
+    }
+
+    // 路径 B：无定义（404 / 解析失败 / 尚未返回）→ 按真实执行顺序线性还原，先看清先后
+    const orderIds = resultIds.length > 0 ? resultIds : []
+    const fallbackNodes = orderIds.map((id) => labelFor(id, undefined))
+    const fallbackEdges = orderIds.slice(1).map((id, i) => makeEdge(orderIds[i], id))
+    return {
+      nodes: wrapLayout(fallbackNodes, orderIds, 4),
+      edges: fallbackEdges,
+      orderIds,
+      orderFromTrace: orderIds.length > 0,
+      statusFor,
+    }
+  }, [context, status, flowDef, isFailed])
+
+  const executedCount =
+    flowDef.nodes.length > 0
+      ? flowDef.nodes.filter((n) => view.statusFor(n.id) === 'executed' || view.statusFor(n.id) === 'error').length
+      : view.orderIds.length
+  const pendingCount = flowDef.nodes.length > 0 ? flowDef.nodes.length - executedCount : 0
+
+  if (view.nodes.length === 0 && flowDef.isLoading) {
     return (
-      <div className="flex items-center justify-center h-full text-ink-muted">
-        无法解析流程结构
+      <div className="h-full flex items-center justify-center gap-2 text-ink-muted text-data-sm">
+        <Loader2 size={14} className="animate-spin" />
+        流程定义加载中…
+      </div>
+    )
+  }
+
+  if (view.nodes.length === 0) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-1 text-ink-muted text-data-sm px-6 text-center">
+        <span>无法还原流程结构</span>
+        <span className="text-caption text-ink-faint">
+          {flowDef.errorMessage
+            ? `流程定义不可用：${flowDef.errorMessage}`
+            : '执行上下文里没有 $NODE 记录，且流程定义不可用'}
+        </span>
       </div>
     )
   }
 
   return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      fitView
-      attributionPosition="bottom-left"
-      nodesDraggable={false}
-      nodesConnectable={false}
-      elementsSelectable={false}
-    >
-      <Background color="rgb(var(--c-dark-500))" gap={20} />
-      <Controls showInteractive={false} />
-    </ReactFlow>
+    <div className="h-full flex flex-col">
+      {/* 执行顺序 + 图例：回答「这些节点是什么顺序、跑到哪了」 */}
+      <div className="px-4 py-2 border-b border-line flex items-start gap-3 text-caption flex-wrap">
+        <span className="text-ink-muted shrink-0 pt-0.5">
+          {view.orderFromTrace ? '执行顺序' : '声明顺序'}
+          {!view.orderFromTrace && <span className="text-ink-faint">（无执行痕迹）</span>}
+          {flowDef.isLoading && (
+            <span className="text-ink-faint inline-flex items-center gap-1 ml-1.5">
+              <Loader2 size={10} className="animate-spin" />
+              定义加载中
+            </span>
+          )}
+        </span>
+        <div className="flex items-center gap-1 flex-wrap max-h-20 overflow-auto flex-1 min-w-[200px]">
+          {view.orderIds.map((id, i) => (
+            <span key={id} className="flex items-center gap-1">
+              {i > 0 && <ArrowRight size={10} className="text-ink-faint shrink-0" />}
+              <span
+                className={cn(
+                  'rounded px-1.5 py-0.5 font-mono text-[11px] whitespace-nowrap',
+                  STATUS_CHIP[view.statusFor(id)]
+                )}
+                title={id}
+              >
+                {i + 1} {id}
+              </span>
+            </span>
+          ))}
+        </div>
+        <div className="flex items-center gap-2.5 shrink-0 text-ink-muted pt-0.5">
+          <Legend dot="bg-status-success" label={`已执行 ${executedCount}`} />
+          {pendingCount > 0 && <Legend dot="bg-status-pending" label={`未执行 ${pendingCount}`} />}
+          {isFailed && <Legend dot="bg-status-error" label="错误节点" />}
+        </div>
+      </div>
+
+      {flowDef.errorMessage && (
+        <div className="px-4 py-1.5 text-caption text-status-warning bg-status-warning-dim border-b border-line">
+          流程定义不可用（{flowDef.errorMessage}），已按执行顺序回退展示
+        </div>
+      )}
+
+      <div className="flex-1 min-h-0">
+        <ReactFlow
+          nodes={view.nodes}
+          edges={view.edges}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          minZoom={0.2}
+          attributionPosition="bottom-left"
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+        >
+          <Background color="rgb(var(--c-dark-500))" gap={20} />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </div>
+    </div>
   )
 }
 
-// 执行状态上色：错误/挂起/当前节点优先，其次 executed_nodes 集合
-function getNodeStatus(
-  nodeId: string,
-  context: Record<string, unknown>,
-  executionStatus: string
-): NodeStatus {
-  const currentNodeId = context.current_node_id as string | undefined
-  const executedNodes = (context.executed_nodes as string[]) || []
-  const suspendedAt = context.suspended_at as string | undefined
-
-  if (executionStatus === 'error' && nodeId === currentNodeId) {
-    return 'error'
-  }
-  if (suspendedAt && nodeId === suspendedAt) {
-    return 'suspended'
-  }
-  if (nodeId === currentNodeId) {
-    return 'current'
-  }
-  if (executedNodes.includes(nodeId)) {
-    return 'executed'
-  }
-  return 'pending'
-}
-
-// 从执行上下文提取流程结构（兜底路径：按先后执行次序连线）
-function extractFlowStructure(
-  context: Record<string, unknown>,
-  executionStatus: string
-): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = []
-  const edges: Edge[] = []
-
-  const flowNodes = (context.nodes as Array<Record<string, unknown>>) || []
-  const currentNodeId = context.current_node_id as string
-
-  if (flowNodes.length === 0) {
-    if (currentNodeId) {
-      nodes.push(createFlowNode({
-        id: currentNodeId,
-        type: 'unknown',
-        name: currentNodeId,
-        x: 200,
-        y: 200,
-        status: getNodeStatus(currentNodeId, context, executionStatus),
-      }))
-    }
-    return { nodes, edges }
-  }
-
-  // 执行轨迹按顺序连线（语义：先后执行次序）；坐标用 dagre 单向布局，
-  // 替代旧的三列网格，保持与编辑器一致的纵向展开。
-  flowNodes.forEach((node, index) => {
-    const nodeId = (node.id as string) || `node-${index}`
-    const nodeType = (node.type as string) || 'unknown'
-    const nodeName = (node.name as string) || nodeId
-
-    nodes.push(
-      createFlowNode({
-        id: nodeId,
-        type: nodeType,
-        name: nodeName,
-        x: 0,
-        y: 0,
-        status: getNodeStatus(nodeId, context, executionStatus),
-        desc: node.desc ? String(node.desc) : undefined,
-        sourceLine: typeof node.source_line === 'number' ? node.source_line : undefined,
-      })
-    )
-
-    if (index > 0) {
-      const prevNode = flowNodes[index - 1]
-      const prevNodeId = (prevNode.id as string) || `node-${index - 1}`
-      edges.push({
-        id: `edge-${prevNodeId}-${nodeId}`,
-        source: prevNodeId,
-        target: nodeId,
-        type: EDGE_TYPE,
-        style: { stroke: EDGE_COLOR },
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          color: EDGE_COLOR,
-        },
-      })
-    }
-  })
-
-  return { nodes: symmetricLayout(nodes, edges, 'TB'), edges }
-}
-
-function createFlowNode({
-  id,
-  type,
-  name,
-  x,
-  y,
-  status,
-  desc,
-  sourceLine,
-}: {
-  id: string
-  type: string
-  name: string
-  x: number
-  y: number
-  status: NodeStatus
-  desc?: string
-  sourceLine?: number
-}): Node {
-  return {
-    id,
-    position: { x, y },
-    data: {
-      label: renderNodeLabel({ type, name, status, desc, sourceLine }),
-    },
-    style: { background: 'transparent', border: 'none' },
-  }
+function Legend({ dot, label }: { dot: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span className={cn('w-1.5 h-1.5 rounded-full', dot)} />
+      <span>{label}</span>
+    </span>
+  )
 }
