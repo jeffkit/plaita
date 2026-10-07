@@ -241,6 +241,11 @@ flowchart TD
   （需 `pip install plaita[langfuse]`，凭据走 `LANGFUSE_*` 环境变量）。trace id =
   运行时 execution_id（随 checkpoint 持久化，跨进程 resume 续写同一 trace）；
   依赖缺失或 SDK 初始化失败只告警降级，不影响执行。
+- **token 用量归集（2026-10，默认开）**：worker 按执行实例归集 llm / agentrun
+  节点输出的 token 用量，终态/挂起随 `ExecutionState.usage` 落盘
+  （`{"total": {...}, "nodes": {...}}`）——不启用 Langfuse 也有成本可见性。
+  resume 以已落盘用量为基线继续累加。见
+  [回调 · 用量归集](../guide/callbacks.md#usage-collector)。
 - **writefile 写入 jail（2026-10）**：worker 启动即注入 `writefile` 节点的
   `PLAITA_NODES_WORKSPACE_ROOT`（未显式配置则 fail-closed 推导默认根，`/` 不算
   边界）；显式放行任意路径用 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1`（仅单机信任

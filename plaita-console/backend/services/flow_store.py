@@ -925,6 +925,8 @@ def _local_row_to_dict(row: LocalExecution) -> dict:
         "nodes": _loads_or_none(row.nodes_json) or [],
         "input": _loads_or_none(row.input_json) or {},
         "output": _loads_or_none(row.output_json),
+        # token 用量归集（issue #37）；老行缺列/无用量 → None
+        "usage": _loads_or_none(getattr(row, "usage_json", None)),
     }
 
 
@@ -1155,7 +1157,11 @@ def _migrate_sqlite_columns() -> None:
     from sqlalchemy import text as _text
 
     wanted = {
-        "local_executions": {"context_json": "TEXT NOT NULL DEFAULT 'null'"},
+        "local_executions": {
+            "context_json": "TEXT NOT NULL DEFAULT 'null'",
+            # issue #37：token 用量归集列
+            "usage_json": "TEXT NOT NULL DEFAULT 'null'",
+        },
         # C5-1 乐观并发：旧库补 updated_at 列（新库由 create_all 按追加列后的
         # 映射表直接建出；此处 PRAGMA 判缺再补，幂等）
         "flow_versions": {"updated_at": "DATETIME"},

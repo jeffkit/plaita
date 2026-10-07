@@ -124,6 +124,8 @@ _LAZY_EXPORTS = {
     "nodes": "plaita.node",
     "NodeRegistry": "plaita.node",
     "get_default_registry": "plaita.node",
+    # 用量归集（纯 FlowCallback，无 extra 依赖；未启用 Langfuse 时的用量可见性）
+    "UsageCollector": "plaita.usage",
 }
 
 # For optional-feature names: once the required extra is confirmed available,

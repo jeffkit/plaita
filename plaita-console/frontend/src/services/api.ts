@@ -170,6 +170,12 @@ export interface ServiceTopology {
   timestamp: string
 }
 
+// token 用量（issue #37）：键为 input/output/total[/input_cached/...]
+export interface TokenUsage {
+  total: Record<string, number>
+  nodes: Record<string, Record<string, number>>
+}
+
 export interface ExecutionInfo {
   execution_id: string
   flow_id: string
@@ -184,6 +190,8 @@ export interface ExecutionInfo {
   // 本地单机模式专有：节点级 trace 与最终输出
   nodes?: Array<{ id: string; type: string; name?: string; input?: unknown; output?: unknown; status: string; error?: string }> | null
   output?: unknown
+  // token 用量归集（per-node + run 汇总）；无用量/老数据为 null/undefined
+  usage?: TokenUsage | null
   // Langfuse 观测深链（后端启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
   langfuse_trace_url?: string | null
 }

@@ -30,4 +30,5 @@
 | （codeflow 包）`plaita/dsl/codeflow/` | `plaita/dsl/codeflow/{_common,_expr,_nodes,_stmt,_source,_emit,_compiler}.py` | `@flow` 编译器拆分、公开 API re-export、私有符号兼容导出；`_emit.py` 为 IR→源码反向发射器（`emit_source`，与 `code-dsl.md#emit_source` 同步） |
 | （Event 去重 / factory）`plaita/event/{memory,redis,sqlalchemy}.py`, `plaita/server/factory.py` | `plaita/event/**`, `plaita/server/factory.py` | handler 成功后再 mark；db 后端 `database_url→engine` |
 | `MIGRATION.md`（Storage db 下架） | `plaita/server/factory.py`, `plaita/server/flow_worker.py`, `plaita/server/event_filter.py`, `plaita/storage/sqlalchemy.py`, `plaita/event/__init__.py`, `tests/unit/test_storage_contract.py` | execution/flow 的 `db` 公开路径开关；同步 ABC 契约；`HAS_SQLALCHEMY` |
+| `docs-site/docs/guide/callbacks.md` | `plaita/core/callback.py`, `plaita/obs.py`, `plaita/usage.py` | 回调生命周期钩子；Langfuse 适配（trace id 解析链、宿主收尾）；token 用量归集（`UsageCollector` → `ExecutionState.usage`） |
 | （节点窄接口）`plaita/core/node_context.py` | `plaita/node/basic.py`, `plaita/core/executor.py` | `NodeExecutionContext` Protocol |
