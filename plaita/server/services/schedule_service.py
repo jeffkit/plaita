@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional
 from croniter import croniter
 from redis import Redis
 
+from plaita.server.task_queue import enqueue_task
+
 from ...logger import logger
 from .base_service import BaseExtendedService
 
@@ -99,8 +101,8 @@ def fire_schedule(
         message["version"] = version
 
     try:
-        msg_id = redis_client.xadd(queue_name, {"payload": json.dumps(message, ensure_ascii=False)})
-        msg_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+        # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
+        msg_id = enqueue_task(redis_client, queue_name, message)
         enqueue_ok = True
     except Exception as e:
         logger.error("调度 %s 入队失败: %s", schedule_id, e, exc_info=True)

@@ -33,6 +33,23 @@ class ExecutionState(BaseModel):
     flow_name: Optional[str] = None
     flow_version: Optional[str] = None
     flow_hash: Optional[str] = None
+    flow_hash_algo: Optional[str] = Field(
+        None,
+        description=(
+            "flow_hash 所用算法的标记（如 flow-dump-json-sortkeys-v1）。resume 时据此"
+            "分级判定：算法相同→严格比对；算法不同但哈希相同→定义未变（升级导致标签"
+            "变化）直接续跑；算法不同且哈希不同→需显式 override 才续跑。None = 老状态，"
+            "按当前算法保守处理。"
+        ),
+    )
+    engine_version: Optional[str] = Field(
+        None,
+        description=(
+            "创建该执行的引擎版本（plaita.__version__）。resume 时仅用于观测：跨 minor "
+            "续跑会打 WARNING，不作为硬门（硬门由 flow_hash 承担）。不随 resume 覆写，"
+            "保留「创建者版本」语义。"
+        ),
+    )
     tenant_id: Optional[str] = None
     context: Dict[str, Any]
     status: str = Field(default="running")

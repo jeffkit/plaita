@@ -18,6 +18,12 @@ PAYLOAD_FIELD = "payload"
 DEFAULT_CLAIM_MIN_IDLE_MS = 60_000
 DEFAULT_MAX_DELIVERIES = 5
 DEFAULT_DLQ_SUFFIX = ":dlq"
+
+# 消息信封版本：**语义**版本的唯一入口。字段只增不改语义时不 bump；
+# 一旦改了同名字段的含义/必需性，必须 bump，让仍按旧语义解析的消费者
+# 明确拒收（进 DLQ）而不是「猜着跑」。缺该字段 = v1（历史消息）。
+TASK_SCHEMA_VERSION = 1
+SCHEMA_FIELD = "schema_version"
 # C4-1：DLQ 保留条数。DLQ 是纯记录流（无消费者），不裁剪会无限增长；
 # 每次入队后 XTRIM 保留最近 N 条。env 可调（PLAITA_DLQ_MAX_LEN）。
 DEFAULT_DLQ_MAX_LEN = 1000
@@ -44,10 +50,24 @@ class StreamTask:
     message_id: str
     body: Dict[str, Any]
     delivery_count: int = 1
+    # 消息信封版本（缺失/非法 → v1）。消费者据此拒收「比自己新」的语义
+    schema_version: int = TASK_SCHEMA_VERSION
 
 
 def _decode(value: Union[str, bytes]) -> str:
     return value.decode() if isinstance(value, bytes) else value
+
+
+def _schema_version_from_fields(fields: Dict[Any, Any]) -> int:
+    """信封版本解析：缺失（历史消息）→ v1；非法值 → v1 + 告警（不因信封坏掉吞消息）。"""
+    raw = fields.get(SCHEMA_FIELD, fields.get(SCHEMA_FIELD.encode()))
+    if raw is None:
+        return TASK_SCHEMA_VERSION
+    try:
+        return int(_decode(raw))
+    except (TypeError, ValueError):
+        logger.warning("任务信封 schema_version=%r 无法解析，按 v%d 处理", raw, TASK_SCHEMA_VERSION)
+        return TASK_SCHEMA_VERSION
 
 
 def _payload_from_fields(fields: Dict[Any, Any]) -> str:
@@ -58,10 +78,17 @@ def _payload_from_fields(fields: Dict[Any, Any]) -> str:
 
 
 def enqueue_task(redis_client, stream_key: str, task: Dict[str, Any]) -> str:
-    """Append a start/resume task. Creates the stream if needed."""
+    """Append a start/resume task. Creates the stream if needed.
+
+    信封带 ``schema_version``（与 payload 分离：payload 是领域消息，信封是
+    传输契约）。旧消费者忽略未知字段；新消费者对「比自己新」的版本拒收。
+    """
     msg_id = redis_client.xadd(
         stream_key,
-        {PAYLOAD_FIELD: json.dumps(task, ensure_ascii=False)},
+        {
+            PAYLOAD_FIELD: json.dumps(task, ensure_ascii=False),
+            SCHEMA_FIELD: str(TASK_SCHEMA_VERSION),
+        },
     )
     return _decode(msg_id)
 
@@ -85,7 +112,11 @@ class RedisStreamTaskQueue:
         dlq_key: Optional[str] = None,
         dlq_max_len: Optional[int] = None,
         dead_letter_guard: Optional[Callable[[StreamTask], bool]] = None,
+        max_schema_version: Optional[int] = TASK_SCHEMA_VERSION,
     ):
+        # 拒收「比自己新」的消息（进 DLQ）是**默认**行为：语义不兼容时宁可显式
+        # 死信+告警，也不要按旧语义猜着跑。None 关闭校验（仅供测试/特殊场景）。
+        self.max_schema_version = max_schema_version
         self.redis = redis_client
         self.stream_key = stream_key
         self.group_name = group_name
@@ -174,6 +205,18 @@ class RedisStreamTaskQueue:
             # 否则异常炸穿 run() 主循环，worker 启动数秒后即退出。
             return None
         task = self._parse_read_response(resp, delivery_count=1)
+        if task is not None and self.max_schema_version is not None and task.schema_version > self.max_schema_version:
+            # 语义上无法理解的更新消息：拒收并留证据（DLQ 含 message_id/payload），
+            # 绝不按旧语义硬跑——升级期「先升消费者再升生产者」的兜底防线。
+            self._metrics["schema_rejected"] = self._metrics.get("schema_rejected", 0) + 1
+            self.dead_letter(
+                task,
+                reason=(
+                    f"unsupported schema_version={task.schema_version} "
+                    f"(this build understands <= {self.max_schema_version})"
+                ),
+            )
+            return None
         if task is not None and task.delivery_count >= self.max_deliveries:
             if self._guard_allows_dead_letter(task):
                 self.dead_letter(task, reason=f"max_deliveries={self.max_deliveries}")
@@ -328,7 +371,10 @@ class RedisStreamTaskQueue:
         if not isinstance(body, dict):
             raise ValueError("task payload must be a JSON object")
         return StreamTask(
-            message_id=message_id, body=body, delivery_count=delivery_count
+            message_id=message_id,
+            body=body,
+            delivery_count=delivery_count,
+            schema_version=_schema_version_from_fields(fields),
         )
 
     def _pending_delivery_count(self, message_id: str) -> int:

@@ -184,6 +184,8 @@ flowchart TD
 | `execution_id` | 执行 ID |
 | `flow_id` / `flow_version` | 所属流程与版本 |
 | `flow_hash` | 启动时 Flow 定义指纹（可选；老状态为 None，resume 时比对防运行中改定义，见上） |
+| `flow_hash_algo` | 指纹算法标记（可选）。resume 时**分级**判定：算法同→严格比对；算法不同但指纹相同→直接续跑并刷新标记；算法不同且指纹不同→需显式 `allow_flow_hash_change` 放行。见 ops-runbook「flow_hash 兼容门」 |
+| `engine_version` | 创建该执行的引擎版本（`plaita.__version__`，可选）。仅观测：跨 minor resume 打 WARNING，不拦截；不随 resume 覆写（保留「创建者版本」语义） |
 | `context` | 执行上下文（即 Checkpoint） |
 | `status` | `running` / `suspended` / `completed` / `error` |
 | `start_time` / `last_update_time` / `end_time` | 时间戳（ISO 字符串） |

@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import threading
+import time
 import uuid
 from typing import Dict, Any, Optional, Set, Tuple
 
@@ -151,6 +152,78 @@ def _register_code_node_for_worker() -> None:
 # 节点级重试判据沿 __cause__ 链回溯的最大深度。分布式归一化链固定一层
 # （FlowErrorException → NodeExecutionError），多留几层防御双重包装。
 _NODE_RETRY_CHAIN_MAX_DEPTH = 5
+
+
+# flow 定义指纹的**算法标记**：只有算法口径本身变化（model_dump 行为、字段规范化）
+# 才 bump。resume 时据它分级判定——算法不同但哈希相同说明定义没变（升级导致标签
+# 变化），可直接续跑；算法不同且哈希也不同才需要人工显式裁决。
+FLOW_HASH_ALGO = "flow-dump-json-sortkeys-v1"
+
+# resume 显式裁决键：允许在指纹变化时继续续跑（升级导致算法口径变化后的补救入口）。
+# 必须由调用方在 resume data 里显式传入，且会打 WARNING + 把新指纹写回状态。
+ALLOW_FLOW_HASH_CHANGE_KEY = "allow_flow_hash_change"
+
+# 优雅停机时等待在途任务的上限（秒）；超时则放弃当前步并退出——消息不 ack，
+# 由其他 worker 经 XCLAIM 从**步界检查点**续跑（该步会重放，业务节点须幂等）。
+DEFAULT_WORKER_DRAIN_TIMEOUT = 30.0
+
+
+def _drain_timeout_from_env() -> float:
+    raw = (os.environ.get("PLAITA_WORKER_DRAIN_TIMEOUT") or "").strip()
+    if not raw:
+        return DEFAULT_WORKER_DRAIN_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "PLAITA_WORKER_DRAIN_TIMEOUT=%r 非法，回退默认 %ss", raw, DEFAULT_WORKER_DRAIN_TIMEOUT
+        )
+        return DEFAULT_WORKER_DRAIN_TIMEOUT
+    return max(0.0, value)
+
+
+def classify_flow_hash_change(
+    *,
+    stored_hash: Optional[str],
+    current_hash: str,
+    stored_algo: Optional[str],
+    current_algo: str,
+    allow_change: bool,
+) -> str:
+    """resume 时 flow 指纹变化的判定表（纯函数，便于测试与复用）。
+
+    返回：
+    - ``no_guard``  ：老状态没有指纹，跳过校验（存量语义）
+    - ``match``     ：指纹相同、算法标签也相同
+    - ``refresh``   ：指纹相同但算法标签升级——定义确实没变，续跑并刷新标签
+    - ``accepted``  ：指纹不同 + 算法标签不同 + 调用方显式放行（升级后的补救入口）
+    - ``mismatch``  ：其余指纹不同——按定义变更处理，拒绝续跑并给可执行的提示
+    """
+    if not stored_hash:
+        return "no_guard"
+    if stored_hash == current_hash:
+        return "match" if stored_algo == current_algo else "refresh"
+    algo_changed = bool(stored_algo) and stored_algo != current_algo
+    if algo_changed and allow_change:
+        return "accepted"
+    return "mismatch"
+
+
+def _major_minor(version: str) -> str:
+    """取 major.minor（'0.6.1' → '0.6'）；非法值原样返回，免得比较时抛错。"""
+    parts = str(version).split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else str(version)
+
+
+def _engine_version() -> str:
+    """当前引擎版本（只用于观测：记录「谁创建了这个执行」）。"""
+    try:
+        from plaita import __version__
+
+        return __version__
+    except Exception:  # noqa: BLE001 — 版本信息拿不到不能影响执行
+        logger.debug("读取引擎版本失败，按 unknown 记录", exc_info=True)
+        return "unknown"
 
 
 def _is_retryable_node_failure(exc: BaseException) -> bool:
@@ -327,6 +400,11 @@ class FlowWorker:
         # on_node_start/on_node_end；落盘时由 _persist_state_or_raise 写入
         # ExecutionState.node_timings。
         self._node_timings: Dict[str, NodeTimingCallback] = {}
+        # 优雅停机（无损升级）：draining = 不再领新任务、等 in-flight 收尾；
+        # 超时由 _force_stop_after_drain 兜底退出（消息留 pending 待接管）。
+        self._draining = threading.Event()
+        self._drain_timer: Optional[threading.Timer] = None
+        self._drain_started_at: Optional[float] = None
         # 初始化流程定义缓存，使用TTL缓存
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
@@ -1016,6 +1094,8 @@ class FlowWorker:
                 flow_id=flow_id,
                 flow_version=version,
                 flow_hash=self._compute_flow_hash(flow),
+                flow_hash_algo=FLOW_HASH_ALGO,
+                engine_version=_engine_version(),
                 tenant_id=current_tenant(),
                 context={},
                 status="running",
@@ -1228,23 +1308,82 @@ class FlowWorker:
             # （带本 resume 的 fence 世代），随后 raise FlowHashMismatchError
             # → run() 按 ValueError poison ack（终态已可观测，重投无意义）。
             stored_flow_hash = getattr(state, "flow_hash", None)
-            if stored_flow_hash and stored_flow_hash != current_flow_hash:
-                mismatch_msg = (
-                    "flow 定义自启动后已变更，hash 不匹配，执行无法安全续跑 "
-                    f"(execution_id={execution_id}, flow_id={flow_id}, "
-                    f"stored_hash={stored_flow_hash[:12]}..., "
-                    f"current_hash={current_flow_hash[:12]}...)"
+            stored_algo = getattr(state, "flow_hash_algo", None)
+            algo_changed = bool(stored_algo) and stored_algo != FLOW_HASH_ALGO
+            allow_hash_change = bool(
+                isinstance(data, dict) and data.get(ALLOW_FLOW_HASH_CHANGE_KEY)
+            )
+            hash_decision = classify_flow_hash_change(
+                stored_hash=stored_flow_hash,
+                current_hash=current_flow_hash,
+                stored_algo=stored_algo,
+                current_algo=FLOW_HASH_ALGO,
+                allow_change=allow_hash_change,
+            )
+            if hash_decision in ("mismatch", "accepted"):
+                if hash_decision == "accepted":
+                    # 升级后的人工裁决入口：显式承认「换算法/换定义」并续跑，
+                    # 必须留痕（WARNING + 状态里刷新指纹），不静默放行。
+                    logger.warning(
+                        "执行 %s 的 flow 指纹变化被显式放行续跑（%s）：stored=%s(%s) current=%s(%s)",
+                        execution_id,
+                        ALLOW_FLOW_HASH_CHANGE_KEY,
+                        stored_flow_hash[:12],
+                        stored_algo or "unknown",
+                        current_flow_hash[:12],
+                        FLOW_HASH_ALGO,
+                    )
+                    state.flow_hash = current_flow_hash
+                    state.flow_hash_algo = FLOW_HASH_ALGO
+                    self._persist_state_or_raise(execution_id, state, "flow_hash_change_accepted")
+                else:
+                    mismatch_msg = (
+                        "flow 定义自启动后已变更，hash 不匹配，执行无法安全续跑 "
+                        f"(execution_id={execution_id}, flow_id={flow_id}, "
+                        f"stored_hash={stored_flow_hash[:12]}..., "
+                        f"current_hash={current_flow_hash[:12]}..., "
+                        f"stored_algo={stored_algo or 'unknown'}, current_algo={FLOW_HASH_ALGO})"
+                    )
+                    logger.error(mismatch_msg)
+                    state.status = "error"
+                    state.error = {
+                        "message": mismatch_msg,
+                        "stored_flow_hash": stored_flow_hash,
+                        "current_flow_hash": current_flow_hash,
+                        "stored_flow_hash_algo": stored_algo,
+                        "current_flow_hash_algo": FLOW_HASH_ALGO,
+                        # 升级疑似（算法标记变了且哈希也不同）：给运维明确下一步，
+                        # 而不是只丢一句「hash 不匹配」。
+                        "upgrade_suspected": algo_changed,
+                        "hint": (
+                            "引擎升级可能改变指纹算法；确认流程定义未变且可接受后，"
+                            f"在 resume data 里带 {ALLOW_FLOW_HASH_CHANGE_KEY}: true 显式放行"
+                        ) if algo_changed else None,
+                    }
+                    state.end_time = datetime.now().isoformat()
+                    self._persist_state_or_raise(execution_id, state, "flow_hash_mismatch")
+                    raise FlowHashMismatchError(mismatch_msg)
+            elif hash_decision == "refresh":
+                # 哈希相同 → 定义确实没变，只是算法标记变了（引擎升级）：续跑并刷新标记
+                logger.info(
+                    "执行 %s 的 flow 指纹一致但算法标记升级（%s → %s），续跑并刷新标记",
+                    execution_id,
+                    stored_algo,
+                    FLOW_HASH_ALGO,
                 )
-                logger.error(mismatch_msg)
-                state.status = "error"
-                state.error = {
-                    "message": mismatch_msg,
-                    "stored_flow_hash": stored_flow_hash,
-                    "current_flow_hash": current_flow_hash,
-                }
-                state.end_time = datetime.now().isoformat()
-                self._persist_state_or_raise(execution_id, state, "flow_hash_mismatch")
-                raise FlowHashMismatchError(mismatch_msg)
+                state.flow_hash_algo = FLOW_HASH_ALGO
+
+            # 引擎版本跨 minor：只告警不拦截（硬门由 flow_hash 承担，这里给可观测性）
+            stored_engine = getattr(state, "engine_version", None)
+            current_engine = _engine_version()
+            if stored_engine and _major_minor(stored_engine) != _major_minor(current_engine):
+                logger.warning(
+                    "执行 %s 由引擎 %s 创建，当前 %s：跨 minor 续跑，"
+                    "若流程行为与预期不符请复核定义与节点实现",
+                    execution_id,
+                    stored_engine,
+                    current_engine,
+                )
 
             # G1 retry 唤醒：error → running 翻转并先落盘（观察者/监控立即
             # 可见；若本 worker 接着硬死，行是 running 而非 error——再一轮
@@ -2170,8 +2309,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             self.stop()
 
     def _consume_loop(self, queue: RedisStreamTaskQueue) -> None:
-        """单条消费循环（原 run() 主体）。可被 1 或 N 个线程并发执行。"""
-        while self._running:
+        """单条消费循环（原 run() 主体）。可被 1 或 N 个线程并发执行。
+
+        ``draining`` 后不再领新任务：循环条件的检查发生在**任务边界**，所以
+        在途任务会跑完（这是优雅停机的语义），随后各消费线程自然退出。
+        """
+        while self._running and not self._draining.is_set():
             # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
             # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
             # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
@@ -2275,8 +2418,82 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         if self._enable_registry:
             self.update_registry_info(active_tasks=count)
     
+    @property
+    def draining(self) -> bool:
+        return self._draining.is_set()
+
+    def request_drain(self, reason: str = "manual") -> None:
+        """进入 draining：不再领新任务、注册表标 draining，并启动**有界**等待。
+
+        有界是关键：单个节点步可能跑几十分钟（如 HITL gate），等它做完等于把
+        停机窗口拉到不可接受。超时后 ``_force_stop_after_drain`` 放弃当前步并
+        退出——消息不 ack，留在 pending 由其他 worker 经 XCLAIM 从**步界检查点**
+        续跑。代价是那一步会重放，业务节点须幂等（at-least-once 契约）。
+        """
+        with self._active_count_lock:
+            if self._draining.is_set():
+                return
+            self._draining.set()
+            self._drain_started_at = time.time()
+        if self._enable_registry:
+            # 注册表可见：编排/K8s 就绪探针据此把这台从流量里摘掉
+            self.update_registry_info(status="draining")
+        timeout = _drain_timeout_from_env()
+        logger.info(
+            "worker 进入 draining（%s）：不再领新任务，等待 %d 个在途任务收尾（上限 %.0fs）",
+            reason,
+            self._active_task_count,
+            timeout,
+        )
+        if timeout <= 0:
+            self._force_stop_after_drain(timeout)
+            return
+        timer = threading.Timer(timeout, self._force_stop_after_drain, args=(timeout,))
+        timer.daemon = True
+        self._drain_timer = timer
+        timer.start()
+
+    def _force_stop_after_drain(self, timeout: float = 0.0) -> None:
+        """drain 超时兜底：放弃当前步并让 run() 收尾退出（消息不 ack）。"""
+        if not self._draining.is_set():
+            return
+        active = self._active_task_count
+        if active <= 0:
+            return
+        logger.warning(
+            "drain 超时（%.0fs）仍有 %d 个任务在跑：放弃当前步并退出；"
+            "这些消息不 ack，将由其他 worker XCLAIM 后从步界检查点续跑（该步会重放）",
+            timeout,
+            active,
+        )
+        self._running = False
+
+    def wait_for_idle(self, timeout: Optional[float] = None) -> bool:
+        """等所有在途任务结束；超时返回 False（调用方决定是否强退）。"""
+        deadline = None if timeout is None else time.time() + max(0.0, timeout)
+        while self._active_task_count > 0:
+            if deadline is not None and time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
     def stop(self):
-        """停止流程工作器"""
+        """停止流程工作器。
+
+        顺序对无损升级很重要：先 draining（摘流量：注册表标 draining + 停止
+        领新任务）→ 等 in-flight 收尾（有界）→ 再注销服务。反过来的话，注销
+        之后仍可能领到任务，编排会看到「已下线但仍消费」的矛盾状态。
+        """
+        if self._drain_timer is not None:
+            self._drain_timer.cancel()
+            self._drain_timer = None
+        if self._running and not self._draining.is_set():
+            # 直接 stop（非 drain 路径）也保证「先摘流量再退出」
+            with self._active_count_lock:
+                self._draining.set()
+                self._drain_started_at = self._drain_started_at or time.time()
+            if self._enable_registry:
+                self.update_registry_info(status="draining")
         logger.info("正在停止流程工作器...")
         self._running = False
 
@@ -2290,8 +2507,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         if self._enable_registry:
             self.stop_control_listener()
         
-        # 注销服务
+        # 注销服务（先标 stopping：编排侧能看到「正在下线」而非突然消失）
         if self._enable_registry:
+            self.update_registry_info(status="stopping")
             self.unregister_service()
         
         # 关闭日志处理器
@@ -2301,14 +2519,26 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         logger.info("流程工作器已停止")
     
     def _on_stop_command(self, graceful: bool):
-        """响应停止命令"""
+        """响应停止命令。
+
+        优雅路径走 ``request_drain``：不再领新任务、等 in-flight 收尾，
+        超时由 drain 定时器兜底退出；非优雅路径直接 ``stop()``（尽快退出，
+        消息留 pending 待接管）。
+        """
         logger.info("收到远程停止命令，优雅停止: %s", graceful)
-        self.stop()
+        if graceful:
+            self.request_drain("remote stop command")
+        else:
+            self.stop()
     
     def _on_status_command(self) -> Dict[str, Any]:
         """响应状态查询命令"""
         status = {
-            "status": "running" if self._running else "stopped",
+            "status": (
+                "draining" if self._draining.is_set()
+                else ("running" if self._running else "stopped")
+            ),
+            "draining": self._draining.is_set(),
             "active_tasks": self._active_task_count,
             "queue_name": self.queue_name,
             "consumer_group": self._consumer_group,
@@ -2335,7 +2565,7 @@ def _request_graceful_stop(worker: "RedisFlowWorker", signum: int) -> None:
     SIGKILL 超时。
     """
     logger.info("收到信号 %s，请求优雅停机（当前任务完成后退出）...", signum)
-    worker.stop()
+    worker.request_drain(f"signal {signum}")
 
 
 from plaita.server.factory import create_storage_component, create_event_bus  # noqa: F401
