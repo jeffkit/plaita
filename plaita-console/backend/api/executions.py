@@ -45,6 +45,10 @@ class ExecutionInfo(BaseModel):
     # 本地单机模式专有：节点级 trace 与最终输出（集群模式为 None）
     nodes: Optional[List[Dict[str, Any]]] = Field(None, description="节点级执行 trace（本地模式）")
     output: Optional[Any] = Field(None, description="流程输出（本地模式）")
+    # token 用量归集（issue #37）：{"total": {...}, "nodes": {"<id>": {...}}}。
+    # 集群模式来自 ExecutionState.usage（引擎侧 UsageCollector），本地模式来自
+    # local_executions.usage_json。无用量/老数据为 None。
+    usage: Optional[Dict[str, Any]] = Field(None, description="token 用量归集（per-node + run 汇总）")
     # Langfuse 观测深链（启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
     langfuse_trace_url: Optional[str] = Field(None, description="Langfuse trace 页面 URL")
 

@@ -426,8 +426,8 @@ class TestSqlalchemyListFieldsAndMigration(unittest.TestCase):
                         self._text("SELECT version FROM schema_migrations")
                     )
                 ]
-            assert {"flow_hash", "tenant_id"} <= cols
-            assert versions == [1]
+            assert {"flow_hash", "tenant_id", "usage"} <= cols
+            assert versions == [1, 2]
             # 迁移后 INSERT 路径可用（老库此前 INSERT 必炸）
             ok = await storage.save_execution_state("e1", _state(start_time=None))
             assert ok is True
@@ -446,7 +446,7 @@ class TestSqlalchemyListFieldsAndMigration(unittest.TestCase):
                         self._text("SELECT version FROM schema_migrations")
                     )
                 ]
-            assert versions == [1]
+            assert versions == [1, 2]
 
         self._run(_check())
 
