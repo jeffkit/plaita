@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -6,10 +6,7 @@ import {
   Play,
   Square,
   RefreshCw,
-  Clock,
   AlertCircle,
-  CheckCircle,
-  PauseCircle,
   Loader2,
   X,
   Zap,
@@ -18,14 +15,18 @@ import {
   ChevronRight,
   Radio,
   ExternalLink,
+  Workflow,
+  User,
+  CalendarClock,
+  MousePointerClick,
 } from 'lucide-react'
 import { api, API_BASE, authHeaders, ExecutionInfo } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
 import { Button, Card, StatusBadge, JsonViewer, jsonSummary, cn } from '../components/ui'
 import { useFlowDefinition } from '../hooks/useFlowDefinition'
-import { isRoutingNodeId, type FlowNodeMeta } from '../components/flow/flowDefinition'
+import type { FlowNodeMeta } from '../components/flow/flowDefinition'
 import { STATUS_CHIP, STATUS_DOT, STATUS_LABEL } from '../components/flow/nodeStatusStyles'
-import type { NodeStatus } from '../components/flow/nodeTypes'
+import { buildNodeDetails, type ExecutedNodeDetail } from '../components/flow/executionNodes'
 
 type ResumeType = 'continue' | 'event' | 'timeout' | 'cancel'
 
@@ -166,6 +167,26 @@ export default function ExecutionDetail() {
   // 流程定义：流程图与节点时间线共用一次查询（版本号缺失时取最新已发布版本）
   const flowDef = useFlowDefinition(execution?.flow_id, execution?.flow_version)
 
+  // 节点详情：执行序、状态、输入来源（按定义表达式解析）、配置、输出。
+  // 覆盖全部定义节点（未执行的也有详情），画布点选任何节点都不会「什么也没有」。
+  const nodeDetails = useMemo(
+    () =>
+      buildNodeDetails({
+        context: execution?.context,
+        status: execution?.status ?? '',
+        flowNodes: flowDef.nodes,
+        traces: execution?.nodes,
+      }),
+    [execution?.context, execution?.status, execution?.nodes, flowDef.nodes]
+  )
+  const executedDetails = useMemo(() => nodeDetails.filter((d) => d.executed), [nodeDetails])
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const selectedDetail = nodeDetails.find((n) => n.id === selectedNodeId) ?? null
+  const inspectNode = useCallback((id: string) => {
+    setSelectedNodeId(id)
+    document.getElementById('flow-viz-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -285,98 +306,67 @@ export default function ExecutionDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* 左侧：基本信息 */}
-        <div className="lg:col-span-1 space-y-6">
-          {/* 状态卡片 */}
-          <StatusCard execution={execution} />
+      {/* 紧凑信息条：状态 + 流程/版本/调用者/时间/耗时/ID 一行读完。
+          取代原来占版面 1/3 却只放四行字的「状态卡 + 时间信息」两张大卡 */}
+      <MetaBar
+        execution={execution}
+        onOpenFlow={() =>
+          navigate(
+            `/flows/${execution.flow_id}/edit${execution.flow_version ? `?version=${encodeURIComponent(execution.flow_version)}` : ''}`
+          )
+        }
+      />
 
-          {/* 时间信息 */}
-          <InfoCard title="时间信息">
-            <InfoRow
-              label="开始时间"
-              value={
-                execution.start_time
-                  ? new Date(execution.start_time).toLocaleString()
-                  : '-'
-              }
-            />
-            <InfoRow
-              label="更新时间"
-              value={
-                execution.last_update_time
-                  ? new Date(execution.last_update_time).toLocaleString()
-                  : '-'
-              }
-            />
-            <InfoRow
-              label="结束时间"
-              value={
-                execution.end_time
-                  ? new Date(execution.end_time).toLocaleString()
-                  : '-'
-              }
-            />
-            <InfoRow
-              label="持续时间"
-              value={calculateDuration(execution.start_time, execution.end_time)}
-            />
-          </InfoCard>
+      {/* 错误信息：人话优先，原始详情折叠（全宽，失败时最该先看到） */}
+      {execution.error && (() => {
+        const { message, details } = parseExecutionError(execution.error)
+        return (
+          <div className="bg-status-error-dim border border-status-error/30 rounded-xl p-4">
+            <h3 className="text-section text-status-error mb-2 flex items-center gap-2">
+              <AlertCircle size={15} />
+              错误信息
+            </h3>
+            <p className="text-body text-status-error whitespace-pre-wrap break-all">{message}</p>
+            {details && (
+              <details className="mt-2.5">
+                <summary className="text-caption text-status-error/70 cursor-pointer select-none">
+                  原始错误数据
+                </summary>
+                <pre className="mt-2 text-data-sm text-status-error whitespace-pre-wrap font-mono opacity-90 max-h-60 overflow-auto">
+                  {details}
+                </pre>
+              </details>
+            )}
+          </div>
+        )
+      })()}
 
-          {/* 错误信息：人话优先，原始详情折叠 */}
-          {execution.error && (() => {
-            const { message, details } = parseExecutionError(execution.error)
-            return (
-              <div className="bg-status-error-dim border border-status-error/30 rounded-xl p-4">
-                <h3 className="text-section text-status-error mb-2 flex items-center gap-2">
-                  <AlertCircle size={15} />
-                  错误信息
-                </h3>
-                <p className="text-body text-status-error whitespace-pre-wrap break-all">{message}</p>
-                {details && (
-                  <details className="mt-2.5">
-                    <summary className="text-caption text-status-error/70 cursor-pointer select-none">
-                      原始错误数据
-                    </summary>
-                    <pre className="mt-2 text-data-sm text-status-error whitespace-pre-wrap font-mono opacity-90 max-h-60 overflow-auto">
-                      {details}
-                    </pre>
-                  </details>
-                )}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 items-start">
+        {/* 主列：流程图 + 节点时间线（主要阅读动线，给足宽度） */}
+        <div className="xl:col-span-2 space-y-5">
+          {/* 流程可视化：画布 + 右侧节点详情（点击节点即看输入/配置/输出） */}
+          {execution.context && (
+            <Card className="overflow-hidden" id="flow-viz-card">
+              <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3">
+                <h3 className="text-section text-ink-primary">流程可视化</h3>
+                <span className="text-[11px] text-ink-faint">按 $NODE 痕迹着色 · 点击节点看输入/输出</span>
               </div>
-            )
-          })()}
-        </div>
-
-        {/* 右侧：上下文和流程图 */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* 流程输出（本地模式） */}
-          {execution.output !== undefined && execution.output !== null && (
-            <Card className="overflow-hidden">
-              <div className="px-4 py-3 border-b border-line">
-                <h3 className="text-section text-ink-primary">流程输出</h3>
-              </div>
-              <div className="p-4">
-                <JsonViewer value={execution.output} rootName="output" defaultExpandDepth={1} maxHeightClass="max-h-72" />
+              <div className="flex flex-col xl:flex-row xl:h-[26rem]">
+                <div className="flex-1 min-w-0 h-[22rem] xl:h-auto">
+                  <FlowViewer
+                    context={execution.context}
+                    status={execution.status}
+                    flowDef={flowDef}
+                    selectedNodeId={selectedNodeId}
+                    onSelectNode={setSelectedNodeId}
+                  />
+                </div>
+                <div className="w-full xl:w-[21rem] shrink-0 border-t xl:border-t-0 xl:border-l border-line overflow-auto max-h-[26rem]">
+                  <NodeInspector detail={selectedDetail} />
+                </div>
               </div>
             </Card>
           )}
-
-          {/* 流程信息：flow_id 可点回编辑器，接上「失败 → 改流程」的断点 */}
-          <InfoCard title="流程信息">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-caption text-ink-muted shrink-0">流程 ID</span>
-              <button
-                onClick={() => navigate(`/flows/${execution.flow_id}/edit${execution.flow_version ? `?version=${encodeURIComponent(execution.flow_version)}` : ''}`)}
-                className="font-mono text-data-sm text-plaita-400 hover:underline truncate"
-                title="在编辑器中打开该流程"
-              >
-                {execution.flow_id}
-              </button>
-            </div>
-            <InfoRow label="版本" value={execution.flow_version || '最新'} />
-            <InfoRow label="调用者" value={execution.invoker || '-'} />
-          </InfoCard>
 
           {/* 本地单机模式：真实节点级 trace（回调采集，含输入/输出） */}
           {execution.nodes && execution.nodes.length > 0 && (
@@ -393,14 +383,30 @@ export default function ExecutionDetail() {
             </Card>
           )}
 
-          {/* 节点时间线：从上下文里还原每个节点的执行痕迹，替代整包 JSON dump */}
+          {/* 节点时间线：执行先后 + 每节点的输入/配置/输出 */}
           <NodeTimeline
-            context={execution.context}
-            status={execution.status}
+            details={executedDetails}
             flowNodes={flowDef.nodes}
             defLoading={flowDef.isLoading}
             defError={flowDef.errorMessage}
+            onInspect={inspectNode}
+            selectedNodeId={selectedNodeId}
           />
+        </div>
+
+        {/* 侧列：流程输出 + 执行上下文（参考型信息，长页面滚动时保持可见） */}
+        <div className="xl:col-span-1 space-y-5 xl:sticky xl:top-6">
+          {/* 流程输出（本地模式） */}
+          {execution.output !== undefined && execution.output !== null && (
+            <Card className="overflow-hidden">
+              <div className="px-4 py-3 border-b border-line">
+                <h3 className="text-section text-ink-primary">流程输出</h3>
+              </div>
+              <div className="p-4">
+                <JsonViewer value={execution.output} rootName="output" defaultExpandDepth={1} maxHeightClass="max-h-72" />
+              </div>
+            </Card>
+          )}
 
           {/* 执行上下文：树形折叠 + 语法高亮，替代整块 <pre> */}
           <Card className="overflow-hidden">
@@ -420,23 +426,6 @@ export default function ExecutionDetail() {
               />
             </div>
           </Card>
-
-          {/* 流程可视化 */}
-          {execution.context && (
-            <Card className="overflow-hidden">
-              <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3">
-                <h3 className="text-section text-ink-primary">流程可视化</h3>
-                <span className="text-[11px] text-ink-faint">节点状态按 $NODE 执行痕迹着色</span>
-              </div>
-              <div className="h-[26rem]">
-                <FlowViewer
-                  context={execution.context}
-                  status={execution.status}
-                  flowDef={flowDef}
-                />
-              </div>
-            </Card>
-          )}
         </div>
       </div>
 
@@ -569,106 +558,62 @@ function ResumeDialog({
   )
 }
 
-// 状态卡片：语义状态色（DESIGN.md §2.5）
-function StatusCard({ execution }: { execution: ExecutionInfo }) {
-  const statusConfig = {
-    running: {
-      icon: <Loader2 className="animate-spin" size={30} />,
-      color: 'text-status-running',
-      bg: 'bg-status-running-dim',
-      border: 'border-status-running/30',
-      label: '运行中',
-    },
-    completed: {
-      icon: <CheckCircle size={30} />,
-      color: 'text-status-success',
-      bg: 'bg-status-success-dim',
-      border: 'border-status-success/30',
-      label: '已完成',
-    },
-    suspended: {
-      icon: <PauseCircle size={30} />,
-      color: 'text-status-warning',
-      bg: 'bg-status-warning-dim',
-      border: 'border-status-warning/30',
-      label: '已暂停',
-    },
-    error: {
-      icon: <AlertCircle size={30} />,
-      color: 'text-status-error',
-      bg: 'bg-status-error-dim',
-      border: 'border-status-error/30',
-      label: '错误',
-    },
-    failed: {
-      icon: <AlertCircle size={30} />,
-      color: 'text-status-error',
-      bg: 'bg-status-error-dim',
-      border: 'border-status-error/30',
-      label: '失败',
-    },
-    cancelled: {
-      icon: <XCircle size={30} />,
-      color: 'text-status-cancelled',
-      bg: 'bg-inset',
-      border: 'border-line',
-      label: '已取消',
-    },
-    pending: {
-      icon: <Clock size={30} />,
-      color: 'text-status-pending',
-      bg: 'bg-inset',
-      border: 'border-line',
-      label: '等待中',
-    },
-  }
-
-  const config = statusConfig[execution.status as keyof typeof statusConfig] || {
-    icon: <Clock size={30} />,
-    color: 'text-ink-muted',
-    bg: 'bg-inset',
-    border: 'border-line',
-    label: execution.status,
-  }
-
+// 紧凑信息条：状态与关键事实一行读完。
+// 取代原来「状态卡 + 时间信息 + 流程信息」三张占 1/3 版面、只放不到十行字的卡片。
+function MetaBar({ execution, onOpenFlow }: { execution: ExecutionInfo; onOpenFlow: () => void }) {
+  const fmt = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
   return (
-    <Card className={`p-5 ${config.bg} ${config.border}`}>
-      <div className="flex items-center gap-4">
-        <div className={config.color}>{config.icon}</div>
-        <div>
-          <p className="text-micro uppercase text-ink-muted">当前状态</p>
-          <p className={`text-2xl font-bold font-sans ${config.color}`}>{config.label}</p>
-        </div>
+    <Card className="px-4 py-3">
+      <div className="flex items-center gap-x-5 gap-y-2 flex-wrap">
+        <StatusBadge status={execution.status} className="text-body px-2.5 py-1" />
+        <Fact icon={<Workflow size={12} />} label="流程">
+          <button
+            onClick={onOpenFlow}
+            className="font-mono text-plaita-400 hover:underline truncate max-w-[16rem]"
+            title="在编辑器中打开该流程"
+          >
+            {execution.flow_id}
+          </button>
+          <span className="text-ink-faint text-caption">
+            @{execution.flow_version || 'latest'}
+          </span>
+        </Fact>
+        <Fact icon={<User size={12} />} label="调用者">
+          {execution.invoker || '-'}
+        </Fact>
+        <Fact icon={<CalendarClock size={12} />} label="开始">
+          {fmt(execution.start_time)}
+        </Fact>
+        <Fact label="结束">{fmt(execution.end_time)}</Fact>
+        <Fact icon={<Timer size={12} />} label="耗时">
+          <span className="tabular-nums">{calculateDuration(execution.start_time, execution.end_time)}</span>
+        </Fact>
+        <Fact label="更新">{fmt(execution.last_update_time)}</Fact>
       </div>
     </Card>
   )
 }
 
-// 信息卡片
-function InfoCard({
-  title,
+/** 信息条里的「标签 + 值」单元：标签小而静，值可交互 */
+function Fact({
+  icon,
+  label,
   children,
 }: {
-  title: string
+  icon?: React.ReactNode
+  label: string
   children: React.ReactNode
 }) {
   return (
-    <Card className="overflow-hidden">
-      <div className="px-4 py-3 border-b border-line">
-        <h3 className="text-section text-ink-primary">{title}</h3>
-      </div>
-      <div className="p-4 space-y-3">{children}</div>
-    </Card>
-  )
-}
-
-// 信息行
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-caption text-ink-muted shrink-0">{label}</span>
-      <span className="font-mono text-data-sm text-ink-primary truncate">{value}</span>
-    </div>
+    <span className="flex items-center gap-1.5 min-w-0">
+      <span className="flex items-center gap-1 text-caption text-ink-muted shrink-0">
+        {icon}
+        {label}
+      </span>
+      <span className="flex items-center gap-1 text-data-sm text-ink-primary min-w-0 truncate">
+        {children}
+      </span>
+    </span>
   )
 }
 
@@ -680,41 +625,22 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 // - 折叠态直接给类型 + 一行摘要，不必逐条展开才有信息；
 // - 与流程定义对照补上节点类型/名称，并标注「内部路由节点」与「未执行节点」。
 function NodeTimeline({
-  context,
-  status,
+  details,
   flowNodes,
   defLoading,
   defError,
+  onInspect,
+  selectedNodeId,
 }: {
-  context?: Record<string, unknown>
-  status: string
+  details: ExecutedNodeDetail[]
   flowNodes: FlowNodeMeta[]
   defLoading: boolean
   defError: string | null
+  onInspect: (id: string) => void
+  selectedNodeId: string | null
 }) {
-  const nodeMap =
-    context?.$NODE && typeof context.$NODE === 'object'
-      ? (context.$NODE as Record<string, unknown>)
-      : null
-  const resultIds = nodeMap ? Object.keys(nodeMap) : []
-  const metaById = new Map(flowNodes.map((n) => [n.id, n]))
-  const lastNodeId =
-    (typeof context?.$LAST_NODE === 'string' ? (context.$LAST_NODE as string) : undefined) ??
-    resultIds[resultIds.length - 1]
-  const isFailed = status === 'error' || status === 'failed'
-  const executed = new Set(resultIds)
-
-  const rowStatus = (id: string): NodeStatus => {
-    if (isFailed && id === lastNodeId) return 'error'
-    if (id === lastNodeId) {
-      if (status === 'running') return 'current'
-      if (status === 'suspended') return 'suspended'
-    }
-    return 'executed'
-  }
-
   // 没有 $NODE：不假装有数据，直接说明并从定义给参照
-  if (resultIds.length === 0) {
+  if (details.length === 0) {
     return (
       <Card className="overflow-hidden">
         <div className="px-4 py-3 border-b border-line">
@@ -726,7 +652,7 @@ function NodeTimeline({
             {defLoading
               ? '正在加载流程定义…'
               : flowNodes.length > 0
-                ? `流程定义共 ${flowNodes.length} 个节点，可在下方「流程可视化」按声明顺序查看。`
+                ? `流程定义共 ${flowNodes.length} 个节点，可对照上方「流程可视化」查看声明顺序。`
                 : defError
                   ? `流程定义也不可用（${defError}）。`
                   : '流程定义不可用。'}
@@ -736,9 +662,10 @@ function NodeTimeline({
     )
   }
 
-  const routingCount = resultIds.filter((id) => isRoutingNodeId(id) && !metaById.has(id)).length
-  const realCount = resultIds.length - routingCount
-  const notExecuted = flowNodes.filter((n) => !executed.has(n.id))
+  const routingCount = details.filter((d) => d.isRouting).length
+  const realCount = details.length - routingCount
+  const executedIds = new Set(details.map((d) => d.id))
+  const notExecuted = flowNodes.filter((n) => !executedIds.has(n.id))
 
   return (
     <Card className="overflow-hidden">
@@ -751,37 +678,38 @@ function NodeTimeline({
         </span>
       </div>
       <div className="divide-y divide-line">
-        {resultIds.map((id, index) => {
-          const value = nodeMap ? nodeMap[id] : undefined
-          const meta = metaById.get(id)
-          const routing = isRoutingNodeId(id) && !meta
-          const st = routing ? 'executed' : rowStatus(id)
-          const { kind, text } = jsonSummary(value)
-          const jumpTarget = routing && typeof value === 'string' ? value : null
-          const typeLabel = meta?.type ?? (routing ? 'route' : 'unknown')
-          const name = meta?.name ?? id
+        {details.map((d) => {
+          const { kind, text } = jsonSummary(d.output)
+          const jumpTarget = d.isRouting && typeof d.output === 'string' ? d.output : null
+          const typeLabel = d.meta?.type ?? (d.isRouting ? 'route' : 'unknown')
+          const name = d.meta?.name ?? d.id
+          const selected = selectedNodeId === d.id
           return (
-            <details key={`${id}-${index}`} className="group px-4 py-2.5">
+            <details
+              key={`${d.id}-${selected ? 'sel' : 'x'}`}
+              open={selected || undefined}
+              className="group px-4 py-2.5"
+            >
               <summary className="flex items-center gap-2.5 cursor-pointer select-none list-none">
                 <span className="font-mono text-data-sm text-ink-faint tabular-nums w-6 text-right shrink-0">
-                  {index + 1}
+                  {d.order}
                 </span>
-                <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', STATUS_DOT[st])} />
+                <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', STATUS_DOT[d.status])} />
                 <span className="text-data-sm text-ink-primary truncate">{name}</span>
-                {name !== id && (
-                  <span className="font-mono text-caption text-ink-faint truncate shrink-0">{id}</span>
+                {name !== d.id && (
+                  <span className="font-mono text-caption text-ink-faint truncate shrink-0">{d.id}</span>
                 )}
                 <span
                   className={cn(
                     'rounded px-1.5 py-0.5 text-[10px] font-mono shrink-0',
-                    routing ? 'bg-inset text-ink-muted' : 'bg-inset text-ink-secondary'
+                    d.isRouting ? 'bg-inset text-ink-muted' : 'bg-inset text-ink-secondary'
                   )}
-                  title={meta?.desc}
+                  title={d.meta?.desc}
                 >
-                  {routing ? '内部路由' : typeLabel}
+                  {d.isRouting ? '内部路由' : typeLabel}
                 </span>
-                <span className={cn('rounded px-1.5 py-0.5 text-[10px] shrink-0', STATUS_CHIP[st])}>
-                  {STATUS_LABEL[st]}
+                <span className={cn('rounded px-1.5 py-0.5 text-[10px] shrink-0', STATUS_CHIP[d.status])}>
+                  {STATUS_LABEL[d.status]}
                 </span>
                 <span className="ml-auto flex items-center gap-2 min-w-0">
                   <span className="text-caption text-ink-faint font-mono shrink-0">{kind}</span>
@@ -790,15 +718,21 @@ function NodeTimeline({
                   </span>
                 </span>
               </summary>
-              <div className="mt-2 ml-8">
-                {meta?.desc && <p className="text-caption text-ink-faint mb-1.5">{meta.desc}</p>}
+              <div className="mt-3 ml-8 space-y-3">
+                {d.meta?.desc && <p className="text-caption text-ink-faint">{d.meta.desc}</p>}
                 {jumpTarget && (
-                  <p className="text-caption text-ink-muted mb-1.5">
+                  <p className="text-caption text-ink-muted">
                     分支/跳转合成节点：本节点未产生业务输出，随后进入{' '}
                     <span className="font-mono text-ink-secondary">{jumpTarget}</span>
                   </p>
                 )}
-                <JsonViewer value={value} toolbar={false} defaultExpandDepth={2} maxHeightClass="max-h-72" emptyText="该节点没有返回值（null）" />
+                <NodeIO detail={d} />
+                <button
+                  onClick={() => onInspect(d.id)}
+                  className="text-caption text-plaita-400 hover:text-plaita-300"
+                >
+                  在流程图中查看该节点 →
+                </button>
               </div>
             </details>
           )
@@ -823,6 +757,129 @@ function NodeTimeline({
         </div>
       )}
     </Card>
+  )
+}
+
+/**
+ * 节点输入/配置/输出三段式（时间线展开区与画布右侧详情面板共用）。
+ *
+ * 「输入」必须讲清来源：引擎不持久化解析后的入参，这里按可信度标注——
+ * 本地模式回调采集的真实入参 > 定义表达式引用的 $NODE.x/$INPUT.y > 上游返回值（推断）。
+ */
+function NodeIO({ detail }: { detail: ExecutedNodeDetail }) {
+  const hasTraceInput = detail.inputs.some((i) => i.kind === 'trace')
+  return (
+    <div className="space-y-3.5">
+      <IOSection
+        title="输入"
+        hint={hasTraceInput ? '含本地模式采集的真实入参' : '按流程定义表达式解析（$NODE.x / $INPUT.y）'}
+      >
+        {detail.inputs.length === 0 ? (
+          <p className="text-caption text-ink-faint">该节点未引用上游数据，也不是流程入口。</p>
+        ) : (
+          <div className="space-y-2.5">
+            {detail.inputs.map((inp) => (
+              <div key={inp.label}>
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <span className="font-mono text-caption text-ink-secondary">{inp.label}</span>
+                  {!inp.present && <span className="text-caption text-status-warning">未执行/无值</span>}
+                  {inp.kind === 'upstream' && <span className="text-caption text-ink-faint">推断</span>}
+                </div>
+                <JsonViewer
+                  value={inp.value}
+                  toolbar={false}
+                  defaultExpandDepth={2}
+                  maxHeightClass="max-h-52"
+                  emptyText="null（本次执行没有值）"
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </IOSection>
+      {detail.config && (
+        <IOSection title="配置" hint="流程定义里的静态字段">
+          <JsonViewer value={detail.config} toolbar={false} defaultExpandDepth={2} maxHeightClass="max-h-56" />
+        </IOSection>
+      )}
+      <IOSection title="输出" hint={detail.hasOutput ? '$NODE 记录' : undefined}>
+        {detail.hasOutput ? (
+          <JsonViewer
+            value={detail.output}
+            toolbar={false}
+            defaultExpandDepth={2}
+            maxHeightClass="max-h-64"
+            emptyText="该节点没有返回值（null）"
+          />
+        ) : (
+          <p className="text-caption text-ink-faint">本次执行没有该节点的记录。</p>
+        )}
+      </IOSection>
+    </div>
+  )
+}
+
+function IOSection({
+  title,
+  hint,
+  children,
+}: {
+  title: string
+  hint?: string
+  children: React.ReactNode
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+        <h4 className="text-caption font-medium text-ink-secondary">{title}</h4>
+        {hint && <span className="text-[10px] text-ink-faint">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+/** 画布右侧的节点详情面板：没选中时给操作指引，选中后展示输入/配置/输出 */
+function NodeInspector({ detail }: { detail: ExecutedNodeDetail | null }) {
+  if (!detail) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-1.5 px-6 py-10 text-center text-ink-muted">
+        <MousePointerClick size={18} className="text-ink-faint mb-1" />
+        <p className="text-data-sm">点击画布中的节点</p>
+        <p className="text-caption text-ink-faint">查看它的输入来源、定义配置与执行输出</p>
+      </div>
+    )
+  }
+  return (
+    <div className="p-4 space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', STATUS_DOT[detail.status])} />
+            <span className="text-data-sm text-ink-primary font-medium truncate">
+              {detail.meta?.name ?? detail.id}
+            </span>
+          </div>
+          <p className="font-mono text-caption text-ink-faint truncate mt-0.5">{detail.id}</p>
+        </div>
+        <span className={cn('rounded px-1.5 py-0.5 text-[10px] shrink-0', STATUS_CHIP[detail.status])}>
+          {STATUS_LABEL[detail.status]}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap text-caption text-ink-muted">
+        <span className="rounded bg-inset px-1.5 py-0.5 font-mono">
+          {detail.meta?.type ?? (detail.isRouting ? '内部路由' : 'unknown')}
+        </span>
+        {detail.executed ? (
+          <span className="tabular-nums">第 {detail.order} 个执行</span>
+        ) : (
+          <span className="text-ink-faint">本次未跑到</span>
+        )}
+        {detail.subflowNodes > 0 && <span>子流程 {detail.subflowNodes} 节点</span>}
+      </div>
+      {detail.meta?.desc && <p className="text-caption text-ink-faint">{detail.meta.desc}</p>}
+      <NodeIO detail={detail} />
+    </div>
   )
 }
 
