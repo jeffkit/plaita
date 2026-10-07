@@ -405,12 +405,17 @@ class TestT2StepExceedsTtl:
         )
         worker_a._start_lease_watchdog()
         try:
-            step_done = threading.Event()
+            step_started = threading.Event()
+            takeover_done = threading.Event()
             step_calls = {"n": 0}
 
             def long_step(flow, **kwargs):
-                # 第一步长跑 1.5s（> 无看门狗时的安全窗口），看门狗每 0.2s 续租；
-                # 第二步立即终态，保证推进循环退出
+                # 第一步长跑：等全部接管尝试落定（由接管线程显式收尾）且至少
+                # 跑满 1.5s（> 无看门狗时的安全窗口），看门狗每 0.2s 续租；
+                # 第二步立即终态，保证推进循环退出。
+                # 不用固定墙钟 + 固定尝试次数：单次接管尝试约 0.23s，8 次
+                # 约 1.8s > 1.5s，最后一次尝试会落到 A 释放租约**之后**而合法
+                # 抢到租约——环境越慢越必现的假红。
                 step_calls["n"] += 1
                 if step_calls["n"] > 1:
                     return {
@@ -420,10 +425,11 @@ class TestT2StepExceedsTtl:
                         "context": {"step": 2},
                         "result": "done",
                     }
+                step_started.set()
                 deadline = time.monotonic() + 1.5
+                takeover_done.wait(timeout=10.0)
                 while time.monotonic() < deadline:
-                    if step_done.wait(0.05):
-                        break
+                    time.sleep(0.05)
                 return {
                     "execution_id": "exec-1",
                     "is_end": False,
@@ -434,16 +440,22 @@ class TestT2StepExceedsTtl:
             takeover_errors = []
 
             def try_takeover():
-                # A 的步进行中反复尝试接管
-                for _ in range(8):
-                    time.sleep(0.15)
-                    try:
-                        worker_b.resume_flow("f1", "exec-1", "continue")
-                        takeover_errors.append(None)  # 不应发生
-                    except ExecutionLeaseError:
-                        takeover_errors.append("refused")
-                    except Exception as exc:  # noqa: BLE001
-                        takeover_errors.append(f"{type(exc).__name__}: {exc}")
+                # 等 A 真持租约再开始（否则首次尝试可能抢在 A 的 acquire
+                # 之前，把「持租约期间拒绝接管」测成裸抢锁竞速）
+                step_started.wait(timeout=10.0)
+                try:
+                    # A 的步进行中反复尝试接管
+                    for _ in range(8):
+                        time.sleep(0.15)
+                        try:
+                            worker_b.resume_flow("f1", "exec-1", "continue")
+                            takeover_errors.append(None)  # 不应发生
+                        except ExecutionLeaseError:
+                            takeover_errors.append("refused")
+                        except Exception as exc:  # noqa: BLE001
+                            takeover_errors.append(f"{type(exc).__name__}: {exc}")
+                finally:
+                    takeover_done.set()
 
             with patch("plaita.server.flow_worker.FlowExecution") as FE:
                 inst = MagicMock()
@@ -452,7 +464,6 @@ class TestT2StepExceedsTtl:
                 th = threading.Thread(target=try_takeover)
                 th.start()
                 result = worker_a.resume_flow("f1", "exec-1", "continue")
-                step_done.set()
                 th.join(timeout=10)
 
             # B 的所有接管尝试都被拒

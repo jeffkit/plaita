@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import threading
+import time
 import uuid
 from typing import Dict, Any, Optional, Set, Tuple
 
@@ -150,6 +151,10 @@ def _register_code_node_for_worker() -> None:
 # 节点级重试判据沿 __cause__ 链回溯的最大深度。分布式归一化链固定一层
 # （FlowErrorException → NodeExecutionError），多留几层防御双重包装。
 _NODE_RETRY_CHAIN_MAX_DEPTH = 5
+
+# 队列残留回收（#43）兜底间隔：worker 启动时扫一次，之后每 N 秒一次
+# （best-effort，见 RedisStreamTaskQueue.sweep_acked_residue）。
+DEFAULT_RESIDUE_SWEEP_INTERVAL_SECONDS = 300.0
 
 
 def _is_retryable_node_failure(exc: BaseException) -> bool:
@@ -1605,6 +1610,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         concurrency: int = 1,
         watchdog_interval_seconds: Optional[float] = None,
         cancel_poll_seconds: Optional[float] = None,
+        residue_sweep_interval_seconds: Optional[float] = None,
     ):
         redis_client = redis_client or Redis.from_url(redis_url)
         super().__init__(
@@ -1657,6 +1663,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 此处只接轮询间隔旋钮（单测可缩短）。
         if cancel_poll_seconds is not None:
             self._cancel_poll_seconds = cancel_poll_seconds
+
+        # 队列残留回收（#43）：启动时扫一次 + 每 residue_sweep_interval_seconds
+        # 兜底一次，清掉「已 ack 未 XDEL」的 Stream 残留条目（它们只增不减地
+        # 计入 XLEN，让运维把队列读数读成假阳性）。非阻塞锁保证并发消费下
+        # 同一时刻只有一个扫描在跑（幂等，重复扫描只是浪费一次往返）。
+        self._residue_sweep_interval_seconds = (
+            DEFAULT_RESIDUE_SWEEP_INTERVAL_SECONDS
+            if residue_sweep_interval_seconds is None
+            else float(residue_sweep_interval_seconds)
+        )
+        self._last_residue_sweep: Optional[float] = None
+        self._residue_sweep_lock = threading.Lock()
         
         # 服务注册
         self._enable_registry = enable_registry
@@ -2088,6 +2106,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         queue = self._get_task_queue()
         queue.ensure_group()
 
+        # 队列残留回收（#43）：启动时先扫一次，之后由消费循环按间隔兜底
+        self._sweep_residue_if_due(queue)
+
         # 租约看门狗（波次②）：持租约执行每 TTL/3 续租，防长步被 XCLAIM 抢占
         self._start_lease_watchdog()
         # 取消监听（波次③）：轮询取消标志键，命中即中止在途节点
@@ -2135,9 +2156,36 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         finally:
             self.stop()
 
+    def _sweep_residue_if_due(self, queue: RedisStreamTaskQueue) -> None:
+        """按间隔兜底回收「已 ack 未 XDEL」的队列残留条目（#43）。
+
+        与消费循环同线程执行，只在到期时（`_last_residue_sweep` 为空 = 启动
+        后第一次）扫一轮；并发消费下多线程共享实例，非阻塞锁保证不并发扫。
+        队列类已实现 `sweep_acked_residue` 才调用（并行合入期向后兼容——注入/
+        子类化的旧队列没有该方法，AttributeError 会炸掉消费线程）。
+        """
+        interval = self._residue_sweep_interval_seconds
+        if interval <= 0:
+            return
+        sweep = getattr(queue, "sweep_acked_residue", None)
+        if not callable(sweep):
+            return
+        now = time.monotonic()
+        last = self._last_residue_sweep
+        if last is not None and now - last < interval:
+            return
+        if not self._residue_sweep_lock.acquire(blocking=False):
+            return
+        try:
+            self._last_residue_sweep = time.monotonic()
+            sweep()
+        finally:
+            self._residue_sweep_lock.release()
+
     def _consume_loop(self, queue: RedisStreamTaskQueue) -> None:
         """单条消费循环（原 run() 主体）。可被 1 或 N 个线程并发执行。"""
         while self._running:
+            self._sweep_residue_if_due(queue)
             # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
             # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
             # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟

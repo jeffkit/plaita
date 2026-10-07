@@ -35,6 +35,9 @@ def _dlq_max_len_from_env() -> int:
 # redis 瞬断（DNS 解析失败/连接拒绝）后的重试退避：退避完返回 None 让主循环
 # 继续轮询，Redis 恢复后下一次 read 自动重连恢复消费。模块常量便于测试归零。
 RECONNECT_BACKOFF_SECONDS = 1.0
+# 队列残留回收（#43）：单轮 sweep 扫描/删除的条目数上限。批量有界 ⇒ 单次
+# Redis 往返有界（sweep 跑在消费线程里）；剩余残留下轮继续回收。
+DEFAULT_RESIDUE_SWEEP_BATCH = 256
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,7 @@ class RedisStreamTaskQueue:
             "poison_acked": 0,
             "failed": 0,
             "dlq_guard_skipped": 0,
+            "residue_swept": 0,
         }
 
     def ensure_group(self) -> None:
@@ -200,6 +204,81 @@ class RedisStreamTaskQueue:
                     message_id,
                     exc,
                 )
+
+    def _group_last_delivered_id(self) -> Optional[str]:
+        """本消费组的 ``last-delivered-id``（组不存在/读不到则 None）。"""
+        for group in self.redis.xinfo_groups(self.stream_key):
+            if not isinstance(group, dict):
+                continue
+            if _decode(group.get("name")) == self.group_name:
+                return _decode(group.get("last-delivered-id"))
+        return None
+
+    def sweep_acked_residue(self, batch_size: int = DEFAULT_RESIDUE_SWEEP_BATCH) -> int:
+        """兜底回收「已 ack 未 XDEL」的残留条目（#43），返回删除条数。
+
+        ack() 的 XDEL 是 best-effort：XACK 与 XDEL 之间进程被杀就留下已确认
+        却未删除的条目（XDEL 全仓库只出现在 ack() 与本方法，故残留只可能来自
+        这个窗口——跳过一次 ack 的条目留在 PEL 里是 pending，本方法不碰）
+        ——只增不减地计入 XLEN，把运维的「积压」读数读成假阳性（2026-10-07
+        实测误判）。本方法把这些条目按 ack() 同样的语义幂等回收，判据两条
+        同时成立才删：
+
+        - id ≤ 消费组 ``last-delivered-id``：已交付；大于它的条目尚未投递，
+          是**合法积压**，必须保留；
+        - 不在本组 PEL 中：已确认；pending（已交付未 ack）条目语义不变，
+          绝不删（读不到 PEL 时本轮整体跳过——宁留残留不误删）。
+
+        与 ack() 同一假设：每 Stream 只挂一个消费组。best-effort：任何
+        Redis 失败只记 debug 并返回 0，不得影响消费主循环。单轮只扫 id 最小的
+        ``batch_size`` 条：窗口里全是 pending 时本轮删 0 条，等它们被 ack 后
+        的下轮继续收敛（收敛速率 = batch_size / 扫描间隔）。
+        """
+        batch_size = max(1, int(batch_size))
+        try:
+            last_delivered = self._group_last_delivered_id()
+            if not last_delivered:
+                return 0
+            entries = self.redis.xrange(
+                self.stream_key, min="-", max=last_delivered, count=batch_size
+            )
+        except Exception as exc:
+            logger.debug("残留回收扫描失败（best-effort，忽略）: %s", exc)
+            return 0
+        if not entries:
+            return 0
+        ids = [_decode(entry[0]) for entry in entries]
+        try:
+            pending = self.redis.xpending_range(
+                self.stream_key,
+                self.group_name,
+                min=ids[0],
+                max=ids[-1],
+                count=batch_size,
+            )
+        except Exception as exc:
+            logger.debug("残留回收读 PEL 失败（本轮跳过）: %s", exc)
+            return 0
+        pending_ids = {
+            _decode(entry.get("message_id") if isinstance(entry, dict) else entry[0])
+            for entry in pending or []
+        }
+        victims = [mid for mid in ids if mid not in pending_ids]
+        if not victims:
+            return 0
+        try:
+            deleted = int(self.redis.xdel(self.stream_key, *victims) or 0)
+        except Exception as exc:
+            logger.debug("残留回收 XDEL 失败（下轮重试）: %s", exc)
+            return 0
+        self._metrics["residue_swept"] += deleted
+        if deleted:
+            logger.info(
+                "队列残留回收：XDEL %d 条已 ack 未删条目（%s）",
+                deleted,
+                self.stream_key,
+            )
+        return deleted
 
     def _guard_allows_dead_letter(self, task: StreamTask) -> bool:
         """dead_letter 决策前的守卫闸门（Track B 任务1）。
