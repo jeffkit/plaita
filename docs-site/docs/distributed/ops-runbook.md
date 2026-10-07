@@ -111,6 +111,9 @@ redis-cli XLEN plaita:flow:queue
 redis-cli XPENDING plaita:flow:queue plaita-workers
 redis-cli XLEN plaita:flow:queue:dlq
 redis-cli KEYS 'plaita:execution:lease:*'
+# 外延服务：delay 的排程/重试计数/死信（触发失败不再静默出排程，见 services.md）
+redis-cli ZCARD plaita:delay:queue:scheduled
+redis-cli HGETALL plaita:delay:queue:scheduled:dlq
 ```
 
 **读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
@@ -151,6 +154,7 @@ python scripts/reap_zombie_executions.py \
 | DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)） |
 | 反复重投，日志刷「保存执行状态失败 (…)」 | Redis 写路径瞬断/序列化失败——落盘失败已不再静默 ack（2026-10 评审修复） | 查 Redis `INFO`/延迟日志；恢复后 pending 自动重投收敛，勿人工 ack |
 | 反复重投，日志刷「挂起任务投递失败」 | 挂起服务队列 `plaita:{subtype}:queue` rpush 失败；suspended 已保留等重派 | 查对应外延服务（DelayService 等）与其队列长度；恢复后重投自动重派 |
+| 日志刷「延迟任务触发失败，…ms 后重试」/ 排程 ZSET 不降 | 到期瞬间 `publish` 失败（Redis 抖动）；任务按退避重试，**不**出排程 | 查 Redis 健康；恢复后自动重试成功。超限条数看 `HGETALL plaita:delay:queue:scheduled:dlq`（含失败原因/次数），修因后人工回灌 `plaita:delay:queue` |
 | 双 resume | 旧版本无 lease | 升级到含 lease 的版本；查 lease key |
 | 挂起永不恢复 | EventBus 与 subscription 不同 Redis；`--no-event-bus` | Worker/Filter 同总线；去掉 no-event-bus |
 

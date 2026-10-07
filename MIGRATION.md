@@ -60,6 +60,22 @@
   run_dir 不在默认根内），设 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` 回到历史
   行为——该开关只该用于单机信任环境。
 
+### resume 事件发布失败上抛（2026-10，plaita#35）
+
+`BaseExtendedService.publish_resume_event` 在直发频道/总线发布失败时**抛
+`ResumeEventPublishError`**，不再只 `logger.error` 吞掉（落盘兜底
+`_persist_resume_event_best_effort` 失败仍是 warning，行为不变）。
+
+- 变更前：发布失败被吞，调用方按成功处理——delay 到期任务照旧 ZREM 出排程，
+  挂起执行的唯一唤醒凭据随 Redis 抖动一起消失（永久失醒，且无计数/日志键可发现）。
+- 变更后：delay 任务触发失败留排程态退避重试（上限 `max_trigger_attempts`，
+  默认 5），超限进死信键 `<queue>:scheduled:dlq`；approval 决策在发布成功后才
+  落盘/删记录；http_callback 触发失败回写被原子认领的注册记录。
+- 迁移：自定义外延服务若 `trigger_event` 委托到 `publish_resume_event`，需自行
+  处理该异常（典型：不删调度态、留待重试）。依赖"发布失败静默返回"的调用方要
+  改为捕获 `ResumeEventPublishError`。副作用：发布实际已送达但客户端报错时会
+  重复投递一次（at-least-once，执行终态短路 + 租约串行兜住）。
+
 ### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
 
 本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程
