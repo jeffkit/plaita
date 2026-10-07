@@ -17,6 +17,8 @@
 - 会话用户钉死在其活跃租户（login/switch-tenant 决定），request.state.tenant_id
 - 平台管理员 / API-Key 可带 ``X-Tenant-ID`` 头指定租户；不带则 tenant_id=None
   （平台全量视角：读跨租户，写需明确租户——由 auth.tenant_scope(required=True) 把关）
+- 活跃租户被停用（status != active）时，非平台管理员的请求整体 403
+  （``/api/auth/*`` 自操作除外，见 require_auth）——停用即时生效，无需等会话过期
 
 本地开发未配置任何鉴权且无用户时：首次启动会引导生成 admin 用户，
 登录后走会话；ALLOW_INSECURE_ADMIN 仍可完全跳过（仅限本机）。
@@ -81,6 +83,19 @@ def require_auth(request: Request) -> Dict[str, Any]:
         source = "session"
         tenant_id = resolved.get("tenant_id")
         platform_admin = bool(resolved.get("platform_admin"))
+        # 租户停用闸（plaita#27）：会话钉死的活跃租户被停用即整体拒绝——
+        # 否则已签发的 7 天会话在停用后仍全权读写该租户数据。平台管理员
+        # 与 /api/auth/* 自操作（me/logout/switch-tenant）放行：前者是跨租户
+        # 运营身份、后者是用户切走停用租户的唯一出口。
+        if (
+            resolved.get("tenant_disabled")
+            and not platform_admin
+            and not request.url.path.startswith("/api/auth/")
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="当前租户已停用，请联系平台管理员或切换至其他租户",
+            )
     elif settings.allow_insecure_admin:
         actor, role, source = "insecure", "admin", "insecure"
         platform_admin = True

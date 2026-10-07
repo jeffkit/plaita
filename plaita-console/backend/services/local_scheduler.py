@@ -28,9 +28,14 @@ except ImportError:  # 兼容不同安装布局
     )
 
 try:
-    from ..models.flow import LocalSchedule, LocalScheduleFire
+    from ..models.flow import DEFAULT_TENANT_ID, LocalSchedule, LocalScheduleFire, Tenant
 except ImportError:
-    from models.flow import LocalSchedule, LocalScheduleFire  # type: ignore
+    from models.flow import (  # type: ignore
+        DEFAULT_TENANT_ID,
+        LocalSchedule,
+        LocalScheduleFire,
+        Tenant,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +237,10 @@ def _scan_once(store) -> int:
     for schedule in list_schedules(store):
         if not schedule.get("enabled"):
             continue
+        # 租户停用闸（plaita#27）：停用租户的调度不再触发（本地档等价于
+        # 集群档 fire_schedule 的闸；这里直接查库，无需 Redis）。
+        if _tenant_disabled(store, schedule.get("tenant_id")):
+            continue
         nxt = schedule.get("next_run_at") or ""
         if not nxt:
             continue
@@ -256,3 +265,11 @@ def _scan_once(store) -> int:
                 row.updated_at = datetime.utcnow()
                 session.commit()
     return fired
+
+
+def _tenant_disabled(store, tenant_id: Optional[str]) -> bool:
+    """租户已停用（缺行视为未停用；缺省 tenant_id 视为 default）。"""
+    tid = tenant_id or DEFAULT_TENANT_ID
+    with store._session_local() as session:
+        row = session.scalars(select(Tenant).where(Tenant.id == tid)).first()
+        return row is not None and row.status != "active"
