@@ -52,6 +52,28 @@ flowchart LR
 
 按 `service_config.delay_ms` 设定定时器，到点发布 `delay_trigger` 事件。适合"X 分钟后继续"的场景。
 
+### 触发瞬间的 at-least-once（#35）
+
+外延服务的触发是挂起执行的**最后一跳**：`publish` 失败且被吞掉，挂起执行就
+永久失醒（事件存储里没有可回扫的事件，Pub/Sub 也没有通知）。故
+`publish_resume_event` 失败**上抛**，由调用方决定重试：
+
+- **delay**：任务在排程 ZSET（`<queue>:scheduled`）里等到期，处理**走完**才
+  出排程；`publish` 失败时任务留在排程态并按指数退避重试
+  （`service_config.trigger_retry_backoff_seconds`，默认 1s 起、上限 60s；
+  重试计数记在 `<queue>:scheduled:retry`），超过
+  `service_config.max_trigger_attempts`（默认 5）次后移入死信键
+  `<queue>:scheduled:dlq`（HASH：任务 JSON → 失败原因/次数/执行 ID，7 天 TTL）。
+  `DelayService.get_pending_tasks_info()` 返回 `dead_letter_count` /
+  `dead_letter_key`，死信可巡检、可人工重投。
+- **approval**：决策在**发布成功之后**才回写记录/删除，发布失败时记录原样保留，
+  审批人重试即可再走一遍；
+- **http_callback**：回调注册是原子认领（Lua GET+DEL），触发失败会**回写**被
+  认领删掉的注册记录，外部重试可再次认领触发。
+
+代价：`publish` 实际已送达但客户端报错时会重复投递一次（at-least-once），由
+执行终态短路 + resume 租约串行兜住——丢唤醒比重复投递严重得多。
+
 ### RedisQueueService / KafkaQueueService
 
 阻塞监听对应队列，消息到达后包装成事件发布。适合"等某条消息到达再继续"。

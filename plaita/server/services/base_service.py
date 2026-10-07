@@ -24,6 +24,15 @@ RESUME_EVENT_STORAGE_PREFIX = "plaita:event:"
 RESUME_EVENT_TTL_SECONDS = 7 * 86400
 
 
+class ResumeEventPublishError(RuntimeError):
+    """resume 事件发布失败（挂起执行的「最后一跳」投递失败）。
+
+    ``publish_resume_event`` 在直发频道/总线发布失败时抛出（落盘兜底失败
+    仍只 warning，不在此列）。调用方据此决定是否重试：DelayService 到期任务
+    据此保留排程态重试，而不是把失败当成功出队——唤醒凭据一旦出队就没了。
+    """
+
+
 class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
     """
     外延服务基础类
@@ -370,6 +379,11 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         直发不经 RedisEventBus.publish、不落事件存储，故直发前按
         RedisEventStorage 键格式尽力落盘（_persist_resume_event_best_effort，
         fail-open）——EventReconciler 的回扫兜底才能覆盖 Pub/Sub 丢通知窗口。
+
+        发布失败**上抛** ``ResumeEventPublishError``（历史实现只 logger.error
+        吞掉，调用方无法区分「已唤醒」与「没唤醒」——到期任务因此按成功出队，
+        挂起执行永久失醒）。落盘兜底失败仍只 warning：它不送达事件，上抛
+        只会把「回扫补偿缺失」误报成「投递失败」。
         """
         event = Event(
             event_type=event_type,
@@ -396,8 +410,12 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 event_type,
                 event.correlation_id,
             )
-        except Exception as e:  # noqa: BLE001 — 发布失败只告警，不打断任务主流程
+        except Exception as e:  # noqa: BLE001 — 上抛给调用方决定重试（见 docstring）
             logger.error("触发 resume 事件失败: %s", e, exc_info=True)
+            raise ResumeEventPublishError(
+                f"resume 事件发布失败（{event_type}, "
+                f"correlation_id={event.correlation_id}）: {e}"
+            ) from e
     
     def get_active_task_count(self) -> int:
         """

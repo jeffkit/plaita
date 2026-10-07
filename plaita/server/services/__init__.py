@@ -3,7 +3,7 @@
 为扩展节点提供外延服务支持
 """
 
-from .base_service import BaseExtendedService
+from .base_service import BaseExtendedService, ResumeEventPublishError
 from .delay_service import DelayService
 from .redis_queue_service import RedisQueueService
 from .kafka_queue_service import KafkaQueueService
@@ -13,6 +13,7 @@ from .service_manager import ServiceManager
 
 __all__ = [
     'BaseExtendedService',
+    'ResumeEventPublishError',
     'DelayService',
     'RedisQueueService',
     'KafkaQueueService', 
