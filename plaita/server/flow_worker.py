@@ -92,6 +92,17 @@ def _affinity_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_AFFINITY")
 
 
+def _deny_repos() -> set:
+    """本机拒跑仓名单（2026-10-07）：PLAITA_WORKER_DENY_REPOS=<仓名,仓名…>。
+
+    用途：把 Rust 重仓（cargo 冷构建）挡在小容量 worker 之外——2 核远端
+    跑 cargo 会饱和/超时（实测 load 3.59/2 核），重仓留给大容量 worker。
+    命中 → 复用既有「不亲和 → 交接」路径（对端接力；无人接则留 pending
+    等 reclaim）。空 = 不拒（默认零行为变化）。"""
+    raw = os.environ.get("PLAITA_WORKER_DENY_REPOS", "")
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
 def _node_retry_disabled() -> bool:
     """波次二任务①回滚开关：PLAITA_DISABLE_NODE_RETRY=1 时节点失败直接终态化
     error（完全回到波次前行为）。"""
@@ -1977,6 +1988,16 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     head = os.path.dirname(head)
             if not os.path.exists(probe):
                 return f"{field}={path} 在本机不存在（本机无此仓路径）"
+        # 按仓拒跑名单（2026-10-07）：与路径亲和独立——路径在本机存在（大仓有
+        # 软链、双机都能解析）时仍可按仓名拒收，把重仓挡在小容量机器外。
+        deny = _deny_repos()
+        if deny:
+            raw_repo = params.get("repo")
+            if isinstance(raw_repo, str) and raw_repo.strip():
+                name = os.path.basename(raw_repo.strip().rstrip("/"))
+                if name in deny:
+                    return (f"repo={name} 在拒跑名单（PLAITA_WORKER_DENY_REPOS）"
+                            "——重仓留给大容量 worker")
         return None
 
     def _handover_non_affine(self, task: Any, queue: Any, exc: Exception) -> None:

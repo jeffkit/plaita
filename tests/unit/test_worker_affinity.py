@@ -148,3 +148,48 @@ class TestAffinityHandover:
         task = type("T", (), {"message_id": "1-0", "body": None})()
         w._handover_non_affine(task, q, RuntimeError("x"))
         assert q.acked == [] and w.redis_client.xlen("q:test") == 0
+
+
+# ── 按仓拒跑名单（2026-10-07）：PLAITA_WORKER_DENY_REPOS ──
+
+
+def test_deny_repo_blocks_even_when_path_exists(monkeypatch):
+    """路径在本机存在（大仓软链双机可解析）时仍可按仓名拒收——重仓留给
+    大容量 worker（2 核远端跑 cargo 饱和，实测 load 3.59）。"""
+    w = _worker()
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "recursive")
+        os.makedirs(repo)
+        monkeypatch.setenv("PLAITA_WORKER_DENY_REPOS", "recursive, ilink-hub")
+        reason = w._detect_affinity_mismatch(
+            {"type": "start", "params": {"repo": repo}})
+        assert reason is not None and "拒跑名单" in reason
+        # 不在名单的仓照常亲和
+        other = os.path.join(d, "plaita")
+        os.makedirs(other)
+        assert w._detect_affinity_mismatch(
+            {"type": "start", "params": {"repo": other}}) is None
+
+
+def test_deny_repo_empty_is_noop(monkeypatch):
+    """空名单 = 不拒（默认零行为变化）。"""
+    w = _worker()
+    monkeypatch.delenv("PLAITA_WORKER_DENY_REPOS", raising=False)
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "recursive")
+        os.makedirs(repo)
+        assert w._detect_affinity_mismatch(
+            {"type": "start", "params": {"repo": repo}}) is None
+
+
+def test_deny_repo_matches_basename_only(monkeypatch):
+    """按仓名（basename）匹配，路径前缀不同不影响；resume 消息不查（同亲和闸口径）。"""
+    w = _worker()
+    monkeypatch.setenv("PLAITA_WORKER_DENY_REPOS", "recursive")
+    with tempfile.TemporaryDirectory() as d:
+        repo = os.path.join(d, "some", "other", "recursive")
+        os.makedirs(repo)
+        assert w._detect_affinity_mismatch(
+            {"type": "start", "params": {"repo": repo}}) is not None
+        assert w._detect_affinity_mismatch(
+            {"type": "resume", "params": {"repo": repo}}) is None
