@@ -28,3 +28,21 @@ export const STATUS_LABEL: Record<NodeStatus, string> = {
   pending: '未执行',
   idle: '未执行',
 }
+
+/**
+ * 由执行状态 + ``$NODE``/``$LAST_NODE`` 推出单个节点的状态。
+ * 流程图、时间线、节点详情三处共用，避免各自维护一套判断。
+ */
+export function computeNodeStatus(
+  id: string,
+  opts: { status: string; lastNodeId?: string; executed: Set<string> }
+): NodeStatus {
+  const { status, lastNodeId, executed } = opts
+  if ((status === 'error' || status === 'failed') && id === lastNodeId) return 'error'
+  if (executed.has(id)) {
+    if (status === 'suspended' && id === lastNodeId) return 'suspended'
+    if (status === 'running' && id === lastNodeId) return 'current'
+    return 'executed'
+  }
+  return 'pending'
+}

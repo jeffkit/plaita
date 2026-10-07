@@ -6,7 +6,7 @@ import { renderNodeLabel, type NodeStatus } from './flow/nodeTypes'
 import { EDGE_COLOR, EDGE_TYPE, NODE_WIDTH } from './flow/flowLayout'
 import { jsonToFlow } from './flow/flowConverter'
 import { definitionOrder, isRoutingNodeId, nodeOutgoing } from './flow/flowDefinition'
-import { STATUS_CHIP } from './flow/nodeStatusStyles'
+import { computeNodeStatus, STATUS_CHIP } from './flow/nodeStatusStyles'
 import type { FlowDefinitionState } from '../hooks/useFlowDefinition'
 import { cn } from './ui'
 
@@ -15,6 +15,9 @@ interface FlowViewerProps {
   status: string
   /** 流程定义状态（与节点时间线共用同一次查询） */
   flowDef: FlowDefinitionState
+  /** 当前选中节点（点击画布节点后由父级持有，用于联动详情面板） */
+  selectedNodeId?: string | null
+  onSelectNode?: (id: string | null) => void
 }
 
 /** 已执行边（两端都已跑过）：成功色，与执行态节点呼应 */
@@ -45,7 +48,13 @@ function wrapLayout(nodes: Node[], orderIds: string[], perColumn: number): Node[
   })
 }
 
-export default function FlowViewer({ context, status, flowDef }: FlowViewerProps) {
+export default function FlowViewer({
+  context,
+  status,
+  flowDef,
+  selectedNodeId,
+  onSelectNode,
+}: FlowViewerProps) {
   const isFailed = status === 'error' || status === 'failed'
 
   const view = useMemo(() => {
@@ -58,15 +67,8 @@ export default function FlowViewer({ context, status, flowDef }: FlowViewerProps
       (typeof context.$LAST_NODE === 'string' ? (context.$LAST_NODE as string) : undefined) ??
       resultIds[resultIds.length - 1]
 
-    const statusFor = (id: string): NodeStatus => {
-      if (isFailed && id === lastNodeId) return 'error'
-      if (executed.has(id)) {
-        if (status === 'suspended' && id === lastNodeId) return 'suspended'
-        if (status === 'running' && id === lastNodeId) return 'current'
-        return 'executed'
-      }
-      return 'pending'
-    }
+    const statusFor = (id: string): NodeStatus =>
+      computeNodeStatus(id, { status, lastNodeId, executed })
 
     const metaById = new Map(flowDef.nodes.map((n) => [n.id, n]))
 
@@ -79,6 +81,7 @@ export default function FlowViewer({ context, status, flowDef }: FlowViewerProps
         type: 'default',
         position: { x: 0, y: 0 },
         style: { background: 'transparent', border: 'none' },
+        className: selectedNodeId === id ? 'rounded-lg ring-2 ring-plaita-400/80' : undefined,
         data: {
           label: renderNodeLabel({
             type,
@@ -161,7 +164,7 @@ export default function FlowViewer({ context, status, flowDef }: FlowViewerProps
       orderFromTrace: orderIds.length > 0,
       statusFor,
     }
-  }, [context, status, flowDef, isFailed])
+  }, [context, status, flowDef, isFailed, selectedNodeId])
 
   const executedCount =
     flowDef.nodes.length > 0
@@ -225,6 +228,7 @@ export default function FlowViewer({ context, status, flowDef }: FlowViewerProps
           <Legend dot="bg-status-success" label={`已执行 ${executedCount}`} />
           {pendingCount > 0 && <Legend dot="bg-status-pending" label={`未执行 ${pendingCount}`} />}
           {isFailed && <Legend dot="bg-status-error" label="错误节点" />}
+          <span className="text-ink-faint">· 点击节点查看输入/配置/输出</span>
         </div>
       </div>
 
@@ -244,7 +248,9 @@ export default function FlowViewer({ context, status, flowDef }: FlowViewerProps
           attributionPosition="bottom-left"
           nodesDraggable={false}
           nodesConnectable={false}
-          elementsSelectable={false}
+          nodesFocusable={false}
+          onNodeClick={(_, node) => onSelectNode?.(node.id)}
+          onPaneClick={() => onSelectNode?.(null)}
         >
           <Background color="rgb(var(--c-dark-500))" gap={20} />
           <Controls showInteractive={false} />
