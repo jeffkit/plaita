@@ -33,6 +33,7 @@ from plaita.storage.fenced import (
 )
 from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STATUSES
 from plaita.logger import logger
+from plaita.usage import UsageCollector
 from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
@@ -209,6 +210,17 @@ def _chain_has_cancellation(exc: BaseException) -> bool:
         node = node.__cause__
         depth += 1
     return False
+
+
+def _apply_usage(state: ExecutionState, collector: Optional[UsageCollector]) -> None:
+    """把归集到的 token 用量写入待落盘状态（issue #37）。
+
+    collector 为 None（老调用路径）→ 不动 state.usage；归集为空 → None
+    （零字段，与历史行为一致）。每次落盘前调用，用量随 checkpoint 累积，
+    resume 后由宿主 seed 续算。
+    """
+    if collector is not None:
+        state.usage = collector.summary()
 
 
 class StatePersistError(RuntimeError):
@@ -939,13 +951,18 @@ class FlowWorker:
         
         
         logger.info("开始执行流程: %s, 版本: %s", flow_id, version or '最新版本')
-        
+
+        usage_collector: Optional[UsageCollector] = None
         try:
             # 创建流程执行器并执行流程
             # 复用同一个 FlowExecution 贯穿所有分布式步骤, 保留用户回调
+            # 用量归集器按执行实例新建（走 execution 私有 handler 列表，不进
+            # 共享的 self.callback_handlers——worker 并发消费 >1 时共享回调
+            # 实例会把并发执行的用量串在一起）。
+            usage_collector = UsageCollector()
             execution = FlowExecution(
                 event_bus=self.event_bus,
-                callback_handlers=self.callback_handlers,
+                callback_handlers=[*self.callback_handlers, usage_collector],
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
@@ -1044,7 +1061,7 @@ class FlowWorker:
                 # 处理执行结果
                 final_result = self._process_execution_result(
                     flow, result, state, execution, delivery_count=delivery_count,
-                    lease_execution_id=execution_id,
+                    lease_execution_id=execution_id, usage_collector=usage_collector,
                 )
 
                 return final_result
@@ -1077,6 +1094,7 @@ class FlowWorker:
             ) and "state" in locals() and state is not None:
                 state.status = "cancelled"
                 state.end_time = datetime.now().isoformat()
+                _apply_usage(state, usage_collector)
                 self._persist_state_or_raise(execution_id, state, "cancelled_in_start_node")
                 self._finalize_observers()
                 logger.info(
@@ -1177,6 +1195,10 @@ class FlowWorker:
             # 世代号，FencedExecutionStorage 据此 CAS；finally 复位。
             fence_token_reset = set_current_fence_token(fence_token)
 
+        # 归集器在 try 内才真正建（见下）；此处先置 None，让 try 内任何早于
+        # 其赋值的异常路径（如 _cancel_requested 读 Redis 失败）也能安全收尾。
+        usage_collector: Optional[UsageCollector] = None
+
         try:
             # XCLAIM 恢复路径取消检查点（设计稿 §3.1）：crash 后 cancel 消息
             # 或任一 resume 消息被重投，若取消标志在（控制面对运行中执行写的
@@ -1235,9 +1257,13 @@ class FlowWorker:
                 logger.info("执行 %s error 态经 retry 放行（重试计数已清零），从断点步进", execution_id)
 
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
+            # 用量归集器按执行实例新建，并用已落盘用量打底：挂起前的步骤用量
+            # 在 state.usage，不 seed 则 resume 后 summary 只剩本次进程的增量。
+            usage_collector = UsageCollector()
+            usage_collector.seed(getattr(state, "usage", None))
             execution = FlowExecution(
                 event_bus=self.event_bus,
-                callback_handlers=self.callback_handlers,
+                callback_handlers=[*self.callback_handlers, usage_collector],
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
@@ -1265,6 +1291,7 @@ class FlowWorker:
                 lease_execution_id=execution_id,
                 lease_holder=lease_value,
                 delivery_count=delivery_count,
+                usage_collector=usage_collector,
             )
 
             return final_result
@@ -1295,6 +1322,7 @@ class FlowWorker:
             if _chain_has_cancellation(e) or self._cancel_requested(execution_id):
                 state.status = "cancelled"
                 state.end_time = datetime.now().isoformat()
+                _apply_usage(state, usage_collector)
                 self._persist_state_or_raise(execution_id, state, "cancelled_in_node")
                 self._finalize_observers()
                 logger.info(
@@ -1325,6 +1353,7 @@ class FlowWorker:
                 state.error = {"message": str(e)}
             state.end_time = datetime.now().isoformat()
 
+            _apply_usage(state, usage_collector)
             self._persist_state_or_raise(execution_id, state, "resume_error_handler")
             self._finalize_observers()
 
@@ -1346,6 +1375,7 @@ class FlowWorker:
         lease_execution_id: Optional[str] = None,
         lease_holder: Optional[str] = None,
         delivery_count: Optional[int] = None,
+        usage_collector: Optional[UsageCollector] = None,
     ) -> Dict[str, Any]:
         """
         处理流程执行结果
@@ -1359,6 +1389,8 @@ class FlowWorker:
             lease_execution_id / lease_holder: resume 租约续期参数
             delivery_count: 消息投递次数（可观测/日志用；节点重试预算判定
                 用重试计数键，见 ``_record_node_retry``）
+            usage_collector: 本次执行的 token 用量归集器；每次落盘前把
+                累计用量写入 ``state.usage``（None = 不动该字段）
 
         Returns:
             Dict[str, Any]: 最终的执行结果
@@ -1384,9 +1416,12 @@ class FlowWorker:
         context = result.get("context")
 
         if execution is None:
+            handlers = list(self.callback_handlers)
+            if usage_collector is not None:
+                handlers.append(usage_collector)
             execution = FlowExecution(
                 event_bus=self.event_bus,
-                callback_handlers=self.callback_handlers,
+                callback_handlers=handlers,
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
@@ -1404,6 +1439,7 @@ class FlowWorker:
                 state.status = "completed"
                 state.context = context
                 state.end_time = datetime.now().isoformat()
+                _apply_usage(state, usage_collector)
                 self._persist_state_or_raise(execution_id, state, "completed")
                 self._finalize_observers()
                 break
@@ -1411,6 +1447,7 @@ class FlowWorker:
                 self._raise_if_lease_lost(lease_execution_id)
                 state.status = "suspended"
                 state.context = context
+                _apply_usage(state, usage_collector)
                 self._persist_state_or_raise(execution_id, state, "suspended")
                 self._dispatch_service_task(result, context, execution_id)
                 break
@@ -1426,6 +1463,7 @@ class FlowWorker:
                     state.status = "cancelled"
                     state.context = context
                     state.end_time = datetime.now().isoformat()
+                    _apply_usage(state, usage_collector)
                     self._persist_state_or_raise(execution_id, state, "cancelled")
                     self._finalize_observers()
                     logger.info("执行 %s 已在步界响应取消（标志键命中），终态化", execution_id)
@@ -1456,6 +1494,7 @@ class FlowWorker:
                         self._raise_if_lease_lost(lease_execution_id)
                         state.context = context
                         state.last_update_time = datetime.now().isoformat()
+                        _apply_usage(state, usage_collector)
                         self._persist_state_or_raise(execution_id, state, "step_persist")
                         steps_since_persist = 0
                         logger.info("流程步骤执行完成，继续下一步: %s", execution_id)
@@ -1483,6 +1522,7 @@ class FlowWorker:
                         state.status = "cancelled"
                         state.context = context
                         state.end_time = datetime.now().isoformat()
+                        _apply_usage(state, usage_collector)
                         self._persist_state_or_raise(execution_id, state, "cancelled_in_node")
                         self._finalize_observers()
                         logger.info(
@@ -1511,6 +1551,7 @@ class FlowWorker:
                     else:
                         state.error = {"message": str(e)}
                     state.end_time = datetime.now().isoformat()
+                    _apply_usage(state, usage_collector)
                     self._persist_state_or_raise(execution_id, state, "error_state")
                     break
 

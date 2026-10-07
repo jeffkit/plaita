@@ -28,6 +28,7 @@ from plaita.core.callback import FlowCallback
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
 from plaita.core.strategies import ExecutionMode
+from plaita.usage import UsageCollector
 
 try:
     from . import flow_store as fs
@@ -118,10 +119,19 @@ class _LocalTraceCallback(FlowCallback):
     天然保留首次注入的 ID，无需再设）。
     """
 
-    def __init__(self, execution_id: str, initial_nodes: Optional[List[Dict[str, Any]]] = None):
+    def __init__(
+        self,
+        execution_id: str,
+        initial_nodes: Optional[List[Dict[str, Any]]] = None,
+        initial_usage: Optional[Dict[str, Any]] = None,
+    ):
         self._execution_id = execution_id
         self._nodes: List[Dict[str, Any]] = initial_nodes or []
         self._execution: Optional[FlowExecution] = None
+        # token 用量归集（issue #37）：与 nodes_json 同一批回写。resume 时用
+        # 已落盘用量打底，挂起前步骤的用量不丢。
+        self._usage = UsageCollector()
+        self._usage.seed(initial_usage)
 
     def bind_execution(self, execution: FlowExecution) -> None:
         self._execution = execution
@@ -136,7 +146,9 @@ class _LocalTraceCallback(FlowCallback):
 
     def _flush(self) -> None:
         fs.update_local_execution(
-            self._execution_id, nodes_json=json.dumps(self._nodes, ensure_ascii=False)
+            self._execution_id,
+            nodes_json=json.dumps(self._nodes, ensure_ascii=False),
+            usage_json=json.dumps(self._usage.summary(), ensure_ascii=False),
         )
 
     def on_node_start(self, flow, node, **kwargs) -> None:
@@ -162,6 +174,7 @@ class _LocalTraceCallback(FlowCallback):
                 else:
                     entry["status"] = "success"
                 break
+        self._usage.on_node_end(flow, node, result, error, exception)
         self._flush()
 
 
@@ -267,6 +280,7 @@ def resume_local_execution(
                store, execution_id, row["flow_id"], row["flow_version"], definition,
                {}, {"context": context, "resume_type": resume_type, "data": data},
                initial_nodes=row.get("nodes") or [],
+               initial_usage=row.get("usage"),
                tenant_id=row.get("tenant_id") or "")
     except RuntimeError:
         # 同执行 ID 的线程仍存活：回滚状态并拒绝，避免双线程写同一执行记录。
@@ -331,6 +345,7 @@ def _run_flow(
     params: Dict[str, Any],
     resume: Optional[Dict[str, Any]],
     initial_nodes: Optional[List[Dict[str, Any]]] = None,
+    initial_usage: Optional[Dict[str, Any]] = None,
     tenant_id: str = "",
 ) -> None:
     """分布式策略驱动循环（与集群档 FlowWorker._process_execution_result 对齐）。"""
@@ -354,7 +369,9 @@ def _run_flow(
         flow = Flow.model_validate(definition)
         # _LocalTraceCallback 必须在前：它把 $EXECUTION_ID 覆写为 console 的
         # execution_id，随后的 LangfuseCallback 读到的 trace id 与控制台记录一致。
-        trace_callback = _LocalTraceCallback(execution_id, initial_nodes=initial_nodes)
+        trace_callback = _LocalTraceCallback(
+            execution_id, initial_nodes=initial_nodes, initial_usage=initial_usage
+        )
         handlers: List[FlowCallback] = [trace_callback]
         langfuse_callback = _build_langfuse_callback()
         if langfuse_callback is not None:

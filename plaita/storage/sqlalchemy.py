@@ -32,8 +32,16 @@ def _migration_1_execution_states_tenant_and_flow_hash(conn) -> None:
         conn.execute(text("ALTER TABLE execution_states ADD COLUMN tenant_id VARCHAR(100)"))
 
 
+def _migration_2_execution_states_usage(conn) -> None:
+    """补 ``execution_states`` 的 usage（issue #37：用量归集）。"""
+    columns = {c["name"] for c in sa_inspect(conn).get_columns("execution_states")}
+    if "usage" not in columns:
+        conn.execute(text("ALTER TABLE execution_states ADD COLUMN usage JSON"))
+
+
 SCHEMA_MIGRATIONS = (
     (1, "execution_states_tenant_and_flow_hash", _migration_1_execution_states_tenant_and_flow_hash),
+    (2, "execution_states_usage", _migration_2_execution_states_usage),
 )
 
 
@@ -94,6 +102,8 @@ class ExecutionStateModel(Base):
     end_time = Column(String(50), nullable=True)
     error = Column(JSON, nullable=True)
     invoker = Column(String(100), nullable=True)
+    # issue #37：执行用量归集（{"total": {...}, "nodes": {...}}）；老行缺列值 → None
+    usage = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -215,7 +225,8 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                     'last_update_time': model.last_update_time,
                     'end_time': model.end_time,
                     'error': model.error,
-                    'invoker': model.invoker
+                    'invoker': model.invoker,
+                    'usage': model.usage
                 }
                 
                 return ExecutionState(**state_dict)
@@ -296,7 +307,8 @@ class SqlalchemyExecutionStorage(ExecutionStorage):
                         'last_update_time': model.last_update_time,
                         'end_time': model.end_time,
                         'error': model.error,
-                        'invoker': model.invoker
+                        'invoker': model.invoker,
+                        'usage': model.usage
                     }
                     states.append(ExecutionState(**state_dict))
 

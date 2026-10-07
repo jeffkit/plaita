@@ -182,6 +182,33 @@
 `{ns}:execution:index:ready` 触发一次全量回填即可（execution_id 未被索引的键会
 被重新扫描收录）。
 
+### 观测：token 用量归集写入执行状态（新增字段，非破坏）
+
+**变更前**：token 用量唯一去处是 Langfuse 链路（`LangfuseCallback` 把 llm /
+agentrun 节点输出的 `usage` 交给 Langfuse 服务端聚合）。plaita 自己的存储不落
+任何用量——未启用 Langfuse 的部署里成本完全不可见。
+
+**变更后**：新增 `plaita.usage.UsageCollector`（纯 `FlowCallback`，无 extra
+依赖），`FlowWorker` 按执行实例归集用量并在终态 / 挂起落盘：
+
+- `ExecutionState.usage`（`plaita/storage/base.py`）：
+  `{"total": {...}, "nodes": {"<node_id>": {...}}}`，键为 `input` / `output` /
+  `total`（输出里带 `input_cached` 等时一并保留）。无用量为 `None`——
+  老状态 / 无 llm 节点的执行零变化。
+- `plaita/storage/sqlalchemy.py`：`execution_states` 新增 `usage` 列，由
+  `SCHEMA_MIGRATIONS` v2 自动补列（存量库无需人工 DDL）。
+- console 本地档：`local_executions` 新增 `usage_json` 列（SQLite 启动时自动
+  补列），执行详情 `GET /api/executions/{id}` 返回 `usage` 字段（集群档来自
+  worker 写入的 `ExecutionState.usage`）。
+
+**Resume 语义**：挂起时用量随 checkpoint 落盘，resume 以之为基线继续累加
+（同一节点重复执行累加，跨挂起不丢）。归集器按执行实例新建，worker 并发
+消费 >1 时不共享实例，无串号。
+
+**迁移动作**：无需代码改动（字段可选、老数据 `None`）。唯一注意点：
+`ExecutionState.model_dump()` 现在多一个 `usage` 键——直接断言状态字典**完全
+相等**的自定义检查需同步。
+
 ### Event：`HAS_SQLALCHEMY` 与 `__all__` 条件修复
 
 **变更前**：SQLAlchemy 符号是否进入 `plaita.event.__all__` 错误地绑定 `HAS_REDIS`。

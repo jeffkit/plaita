@@ -148,6 +148,32 @@ resume 续写）。FlowWorker 与 console 的内建接线已内置 finalize。
 `on_node_end(error=...)` / `on_flow_end(error=...)` 的 ERROR 标记契约保留，供未来内核补发
 或自定义节点手动触发。适配器内部任何异常都吞掉记 warning，不影响流程执行。
 
+## 用量归集（`plaita.usage.UsageCollector`） {#usage-collector}
+
+Langfuse 链路把 token 用量交给 Langfuse 服务端聚合；**未启用 Langfuse 的部署**
+由 `UsageCollector` 在引擎侧归集，run 终态写入 `ExecutionState.usage`。它只依赖
+`FlowCallback`，无任何 extra 依赖，与 `LangfuseCallback` 读同一份节点输出：
+
+- 节点结果为 dict 且含 `usage`（llm / agentrun 节点输出契约）→
+  经 `plaita.obs.map_openai_usage` 规范化为 `{input, output, total, ...}` 后归入该节点；
+- 节点结果无自身 `usage` 但含 `observations`（agentrun `details=true`）→
+  累加各 observation 的 `usage`。两者**互斥**（节点自身 usage 已是聚合值，不重复计数）。
+
+```python
+from plaita import FlowExecution, UsageCollector
+
+collector = UsageCollector()
+execution = FlowExecution(callback_handlers=[collector])
+execution.run_compatible(flow, False)
+print(collector.summary())
+# {"total": {"input": 10, "output": 5, "total": 15},
+#  "nodes": {"llm": {"input": 10, "output": 5, "total": 15}}}
+```
+
+`summary()` 无用量时返回 `None`。Distributed 跨进程 resume 时，宿主先以已落盘的
+`state.usage` 调 `collector.seed(state.usage)` 打底再续跑，挂起前的用量不丢——
+`FlowWorker` 与 console 本地执行器的内建接线即此模式，业务侧无需手工接线。
+
 ## 下一步
 
 - [调试](debugging.md) —— 回调 + Generator 模式构建调试器
