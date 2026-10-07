@@ -88,40 +88,6 @@ export function extractFlowNodes(definition: Record<string, unknown> | null | un
   return out
 }
 
-/**
- * 定义声明的遍历顺序：从 start（或缺入度节点）沿 next/else/branches 广度优先。
- * 用于在缺少执行痕迹时，仍能给出「流程本来的先后」。
- */
-export function definitionOrder(nodes: FlowNodeMeta[]): string[] {
-  if (nodes.length === 0) return []
-  const byId = new Map(nodes.map((n) => [n.id, n]))
-  const pointed = new Set<string>()
-  for (const n of nodes) {
-    if (n.next) pointed.add(n.next)
-    if (n.elseNext) pointed.add(n.elseNext)
-    for (const b of n.branches) pointed.add(b.next)
-  }
-  const entryId = byId.has('start') ? 'start' : nodes.find((n) => !pointed.has(n.id))?.id ?? nodes[0].id
-
-  const seen = new Set<string>()
-  const order: string[] = []
-  const queue: string[] = [entryId]
-  while (queue.length > 0) {
-    const id = queue.shift() as string
-    if (seen.has(id)) continue
-    seen.add(id)
-    order.push(id)
-    const n = byId.get(id)
-    if (!n) continue
-    const succ = [n.next, n.elseNext, ...n.branches.map((b) => b.next)].filter(
-      (t): t is string => !!t && !seen.has(t)
-    )
-    queue.push(...succ)
-  }
-  for (const n of nodes) if (!seen.has(n.id)) order.push(n.id)
-  return order
-}
-
 /** 节点在定义中的出边（含分支标签）：线性 next 不打标签，分支才有 */
 export function nodeOutgoing(
   node: FlowNodeMeta
