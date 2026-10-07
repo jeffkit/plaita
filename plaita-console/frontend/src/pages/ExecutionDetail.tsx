@@ -19,7 +19,7 @@ import {
   Radio,
   ExternalLink,
 } from 'lucide-react'
-import { api, API_BASE, authHeaders, ExecutionInfo } from '../services/api'
+import { api, API_BASE, authHeaders, ExecutionInfo, TokenUsage } from '../services/api'
 import FlowViewer from '../components/FlowViewer'
 import { Button, Card, StatusBadge } from '../components/ui'
 
@@ -373,6 +373,9 @@ export default function ExecutionDetail() {
             <InfoRow label="调用者" value={execution.invoker || '-'} />
           </InfoCard>
 
+          {/* token 用量（issue #37）：run 汇总 + per-node 明细 */}
+          <UsageCard usage={execution.usage} />
+
           {/* 本地单机模式：真实节点级 trace（回调采集，含输入/输出） */}
           {execution.nodes && execution.nodes.length > 0 && (
             <Card className="overflow-hidden">
@@ -554,6 +557,56 @@ function ResumeDialog({
 }
 
 // 状态卡片：语义状态色（DESIGN.md §2.5）
+// token 用量归集（issue #37）：run 级汇总 + per-node 明细。未启用 Langfuse
+// 的部署里这是唯一的用量可见入口——此前用量只在 Langfuse 服务端聚合。
+function UsageCard({ usage }: { usage?: TokenUsage | null }) {
+  const total = usage?.total
+  if (!usage || !total || Object.keys(total).length === 0) return null
+  const nodes = usage.nodes ? Object.entries(usage.nodes) : []
+  return (
+    <Card className="overflow-hidden">
+      <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+        <h3 className="text-section text-ink-primary">Token 用量</h3>
+        <span className="text-[11px] text-ink-faint">引擎侧归集</span>
+      </div>
+      <div className="p-4 space-y-3">
+        <div className="flex flex-wrap gap-x-8 gap-y-2">
+          <UsageMetric label="输入" value={total.input} />
+          <UsageMetric label="输出" value={total.output} />
+          <UsageMetric label="合计" value={total.total} />
+        </div>
+        {nodes.length > 0 && (
+          <div className="space-y-1 pt-1 border-t border-line">
+            {nodes.map(([nodeId, entry]) => (
+              <div key={nodeId} className="flex items-center justify-between gap-3 pt-1 text-data-sm">
+                <span className="font-mono text-ink-secondary truncate" title={nodeId}>
+                  {nodeId}
+                </span>
+                <span className="font-mono text-ink-muted shrink-0" title="输入 / 输出">
+                  {formatTokens(entry.input)} / {formatTokens(entry.output)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+function UsageMetric({ label, value }: { label: string; value?: number }) {
+  return (
+    <div>
+      <div className="text-caption text-ink-muted">{label}</div>
+      <div className="font-mono text-body font-semibold text-ink-primary">{formatTokens(value)}</div>
+    </div>
+  )
+}
+
+function formatTokens(value?: number): string {
+  return typeof value === 'number' ? value.toLocaleString() : '-'
+}
+
 function StatusCard({ execution }: { execution: ExecutionInfo }) {
   const statusConfig = {
     running: {

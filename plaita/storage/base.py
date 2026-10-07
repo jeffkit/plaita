@@ -27,6 +27,10 @@ class ExecutionState(BaseModel):
         end_time: 流程结束时间，ISO格式字符串
         error: 错误信息，当status为error时存储错误详情
         invoker: 调用者，标识发起流程的实体
+        usage: token 用量归集（可选，引擎侧由 UsageCollector 采集）：
+            ``{"total": {...}, "nodes": {"<node_id>": {...}}}``，无用量时
+            None（老状态/无 llm 节点，零回归）。此前用量只存在于
+            Langfuse 链路，未启用观测的部署完全不可见（issue #37）。
     """
     execution_id: str
     flow_id: Optional[str] = None
@@ -41,6 +45,7 @@ class ExecutionState(BaseModel):
     end_time: Optional[str] = None
     error: Optional[Dict[str, Any]] = None
     invoker: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
 
 class ExecutionStorage(ABC):
     """
