@@ -184,10 +184,13 @@ def _resolve_role(session, user: User, tenant_id: Optional[str]) -> Optional[str
 
 
 def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
-    """token -> {username, role, tenant_id, platform_admin}；无效/过期返回 None。
+    """token -> {username, role, tenant_id, platform_admin, tenant_disabled}；
+    无效/过期返回 None。
 
     - 角色实时取自 tenant_members（改角色即时生效）
     - active_tenant 的成员资格已失效时自动清空（回退平台/遗留视角）
+    - active_tenant 已停用时置 ``tenant_disabled=True``（调用方——auth——
+      据此返回 403；会话本身不解除，停用闸是实时判定，重新启用即恢复）
     """
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with store._session_local() as session:
@@ -213,12 +216,31 @@ def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
             active_tenant = None
             role = _resolve_role(session, user, None)
             session.commit()
+        tenant_disabled = False
+        if active_tenant:
+            tenant = session.scalars(
+                select(Tenant).where(Tenant.id == active_tenant)
+            ).first()
+            tenant_disabled = tenant is not None and tenant.status != "active"
         return {
             "username": row.username,
             "role": role,
             "tenant_id": active_tenant,
             "platform_admin": bool(user.platform_admin),
+            "tenant_disabled": tenant_disabled,
         }
+
+
+def tenant_is_disabled(store, tenant_id: str) -> bool:
+    """租户已停用（row 缺失视为未停用——与 Redis 侧 fail-open 语义一致）。
+
+    运行面闸用：本地调度、立即触发。会话侧闸见 resolve_session。
+    """
+    if not tenant_id:
+        return False
+    with store._session_local() as session:
+        row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
+        return row is not None and row.status != "active"
 
 
 def switch_tenant(store, token: str, tenant_id: str) -> Optional[Dict[str, Any]]:

@@ -158,6 +158,31 @@ def test_disabled_schedule_not_fired(env):
     assert client.get(f"/api/schedules/{sid}/history").json()["total"] == 0
 
 
+def test_disabled_tenant_schedule_not_fired(env):
+    """租户停用后，其到期调度即使 enabled 也不触发（plaita#27）。"""
+    from sqlalchemy import select
+    from models.flow import Tenant
+
+    client, store = client_of(env), store_of(env)
+    with store._session_local() as session:
+        row = session.scalars(select(Tenant).where(Tenant.id == "default")).first()
+        if row is None:
+            session.add(Tenant(id="default", name="默认租户", status="disabled"))
+        else:
+            row.status = "disabled"
+        session.commit()
+
+    sid = client.post("/api/schedules", json={
+        "name": "停用租户", "flow_id": "hello", "cron": _mk_cron_every_minute(),
+    }).json()["schedule_id"]
+    _force_due(store, sid)
+
+    assert sched._scan_once(store) == 0
+    assert client.get(f"/api/schedules/{sid}/history").json()["total"] == 0
+    # 手动触发同样被拒（403）
+    assert client.post(f"/api/schedules/{sid}/trigger").status_code == 403
+
+
 def test_manual_trigger_runs_in_process(env):
     client, store = client_of(env), store_of(env)
     r = client.post("/api/schedules", json={

@@ -195,3 +195,32 @@ class TestClusterScheduleTenant:
         assert msg_id is not None
         msgs = _queued_messages(env)
         assert msgs and msgs[-1]["tenant_id"] == "acme"
+
+    def test_fire_schedule_skips_disabled_tenant(self, env):
+        """停用租户的调度不入队；其他租户不受影响（plaita#27）。"""
+        from plaita.server.services.schedule_service import fire_schedule
+        from plaita.tenant_status import publish_tenant_status
+
+        publish_tenant_status(env, "acme", "disabled")
+        schedule = {
+            "schedule_id": "s1", "name": "n", "flow_id": "f",
+            "cron": "* * * * *", "params": {}, "tenant_id": "acme",
+        }
+        assert fire_schedule(env, schedule, "plaita:flow:queue") is None
+        assert _queued_messages(env) == []
+
+        schedule["schedule_id"], schedule["tenant_id"] = "s2", "other"
+        assert fire_schedule(env, schedule, "plaita:flow:queue") is not None
+        assert [m["tenant_id"] for m in _queued_messages(env)] == ["other"]
+
+
+def test_set_tenant_status_publishes_to_redis(env):
+    """console 改租户状态时把状态发布到 Redis，供调度服务/worker 跨进程读取。"""
+    from services import tenants_svc
+
+    store = flow_store.get_flow_store()
+    tenants_svc.create_tenant(store, "acme")
+    tenants_svc.set_tenant_status(store, "acme", "disabled", redis_client=env)
+    assert env.hget("plaita:tenant_status", "acme") == "disabled"
+    tenants_svc.set_tenant_status(store, "acme", "active", redis_client=env)
+    assert env.hget("plaita:tenant_status", "acme") == "active"
