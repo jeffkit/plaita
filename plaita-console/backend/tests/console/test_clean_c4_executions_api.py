@@ -555,6 +555,61 @@ class TestAsyncPubsubStream:
 
         anyio.run(scenario)
 
+    def test_timeline_payloads_get_their_own_sse_event_name(self):
+        """回归：时间线载荷不得占用 ``update``。
+
+        详情页的 ``update`` 监听把载荷整体写进 execution query cache
+        （ExecutionDetail.tsx）：时间线载荷没有 ExecutionInfo 的
+        flow_id/context/nodes/status 字段，走 ``update`` 会把已渲染的执行信息
+        与停止/恢复控件清空；终态执行每次连接都会重放，必触发。
+        """
+        assert executions_api._sse_event_name(
+            {"execution_id": "e1", "flow_id": "f", "status": "running"}
+        ) == "update"
+        for event in sorted(executions_api.TIMELINE_EVENT_TYPES):
+            assert executions_api._sse_event_name({"event": event}) == "timeline"
+        # 非对象载荷（外部直发/坏 JSON）保持 update 的历史语义
+        assert executions_api._sse_event_name(None) == "update"
+
+    def test_real_recorder_events_arrive_as_timeline(self, stream_env):
+        """跨仓契约回归：worker **真实采集器**写的事件走 ``timeline``，不占 ``update``。
+
+        事件类型表两端共用（``plaita.server.execution_events.TIMELINE_EVENT_TYPES``）
+        ——若 worker 侧新增/改名事件类型而 console 的分流表没跟上，载荷就会落进
+        ``update``，把详情页整体刷成时间线（ExecutionDetail.tsx 按 update 直接
+        setQueryData）。这里跑真采集器 + 真 SSE 生成器，钉住该契约。
+        """
+        import anyio
+        from types import SimpleNamespace
+
+        from plaita.server.execution_events import ExecutionEventRecorder
+
+        redis, app, _client = stream_env
+        channel = "plaita:execution:events:e1"
+        node = SimpleNamespace(id="a", name="节点A")
+        recorder = ExecutionEventRecorder(redis, "e1")
+        recorder.on_node_start(None, node)  # 连接前发生 → 只能靠重放段送达
+
+        async def scenario():
+            request = _FakeRequest(app.state)
+            gen = executions_api._execution_event_stream(
+                request, {"execution_id": "e1"}, channel
+            )
+            assert (await gen.__anext__())["event"] == "initial_state"
+            replayed = await gen.__anext__()
+            assert replayed["event"] == "timeline"
+            assert json.loads(replayed["data"])["node_id"] == "a"
+
+            await asyncio.sleep(0.15)  # fakeredis 订阅落定
+            consumer = asyncio.create_task(gen.__anext__())
+            recorder.on_node_end(None, node)  # 连接后发生 → 实时段
+            live = await asyncio.wait_for(consumer, timeout=5)
+            assert live["event"] == "timeline"
+            assert json.loads(live["data"])["event"] == "node_end"
+            await gen.aclose()
+
+        anyio.run(scenario)
+
     def test_event_loop_not_blocked_while_stream_pending(self, stream_env):
         """核心回归：SSE 消费挂在 get_message 等待上时事件循环不被阻塞。
 
@@ -608,6 +663,83 @@ class TestAsyncPubsubStream:
             redis.publish("plaita:execution:events:e1", json.dumps({"n": 2}))
             update = await asyncio.wait_for(consumer, timeout=5)
             assert json.loads(update["data"])["n"] == 2
+            await gen.aclose()
+
+        anyio.run(scenario)
+
+    def test_replay_then_live_deduped_by_stream_id(self, stream_env):
+        """双段：连接时 XRANGE 重放已落盘事件，再接 Pub/Sub 实时段。
+
+        历史行为只订阅 pubsub：worker 起跑后（或在断线/刷新期间）发生的事件
+        全部丢失。重放窗口内到达的实时副本带 ``stream_id``，按它去重——既不丢
+        历史也不重发。
+        """
+        import anyio
+
+        redis, app, _client = stream_env
+        channel = "plaita:execution:events:e1"
+        # 与生产一致：载荷里的 stream_id 就是条目 id（worker 侧 XADD 返回值）
+        for entry_id, node_id in (("1-1", "a"), ("1-2", "b")):
+            redis.xadd(channel, {"data": json.dumps(
+                {"event": "node_end", "node_id": node_id, "stream_id": entry_id}
+            )}, id=entry_id)
+
+        async def scenario():
+            request = _FakeRequest(app.state)
+            gen = executions_api._execution_event_stream(
+                request, {"execution_id": "e1"}, channel
+            )
+            assert (await gen.__anext__())["event"] == "initial_state"
+            replayed_msgs = [await gen.__anext__() for _ in range(2)]
+            assert [json.loads(m["data"])["node_id"] for m in replayed_msgs] == ["a", "b"]
+            # 时间线事件单开一路：不占状态快照的 update（见 _sse_event_name）
+            assert [m["event"] for m in replayed_msgs] == ["timeline", "timeline"]
+
+            await asyncio.sleep(0.15)  # fakeredis 订阅落定
+            consumer = asyncio.create_task(gen.__anext__())
+            # 1-2 已在重放段发过（重复），1-3 是新的
+            redis.publish(channel, json.dumps(
+                {"event": "node_end", "node_id": "b", "stream_id": "1-2"}
+            ))
+            redis.publish(channel, json.dumps(
+                {"event": "node_start", "node_id": "c", "stream_id": "1-3"}
+            ))
+            live = await asyncio.wait_for(consumer, timeout=5)
+            payload = json.loads(live["data"])
+            assert payload["node_id"] == "c", f"重放段已发过的条目被重复推送: {payload}"
+            assert live["event"] == "timeline"
+            await gen.aclose()
+
+        anyio.run(scenario)
+
+    def test_replay_failure_does_not_kill_stream(self, stream_env):
+        """重放段失败（无 XRANGE 的客户端替身）→ 退回「只有实时段」的历史行为。"""
+        import anyio
+        from types import SimpleNamespace
+
+        redis, app, _client = stream_env
+
+        class NoStreamClient:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def pubsub(self):
+                return self._inner.pubsub()
+
+        async def scenario():
+            state = SimpleNamespace(
+                execution_sse_aioredis=NoStreamClient(app.state.execution_sse_aioredis)
+            )
+            request = _FakeRequest(state)
+            gen = executions_api._execution_event_stream(
+                request, {"execution_id": "e1"}, "plaita:execution:events:e1"
+            )
+            assert (await gen.__anext__())["event"] == "initial_state"
+            await asyncio.sleep(0.15)
+            consumer = asyncio.create_task(gen.__anext__())
+            redis.publish("plaita:execution:events:e1", json.dumps({"n": 9}))
+            update = await asyncio.wait_for(consumer, timeout=5)
+            assert json.loads(update["data"])["n"] == 9
             await gen.aclose()
 
         anyio.run(scenario)

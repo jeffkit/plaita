@@ -51,6 +51,22 @@ def _node_loc_suffix(node) -> str:
     return f" (源码第 {sl} 行)" if sl is not None else ""
 
 
+def _callback_error_payload(e: BaseException) -> dict:
+    """观测回调的 error 载荷：与内核 error dict 同形状（``code`` / ``message``）。
+
+    内核异常子类自带 ``code``/``message``（``FlowExecutionException`` /
+    ``NodeException``），裸异常（ValueError 等）落到 -500，与 resume 失败路径
+    （strategies ``_handle_resume``）的载荷一致。
+    """
+    code = getattr(e, "code", None)
+    try:
+        code = int(code) if code is not None else -500
+    except (TypeError, ValueError):
+        code = -500
+    message = getattr(e, "message", None) or str(e)
+    return {"code": code, "message": message}
+
+
 def _coerce_strategy(value) -> ErrorStrategy:
     """容忍 ErrorStrategy enum / 字符串 / Mock / None, 一律归一为 enum。
 
@@ -223,13 +239,26 @@ class NodeRunner:
     ) -> Tuple[Any, Optional[str]]:
         """Execute a node and return (result, branch).
 
-        Triggers callback_manager.on_node_start/on_node_end.
+        Triggers callback_manager.on_node_start/on_node_end. ``on_node_end``
+        在**成功与失败两条路径**都发（失败时带 error/exception 后原样重抛）：
+        历史上只有成功路径发，观测侧只见 start 不见 end —— 失败节点的
+        span 永远 open、耗时永远缺失。
+
         Updates context with last_node_id, last_branch, and node result.
         """
         if callback_manager:
             callback_manager.on_node_start(flow, node)
 
-        result = await self._execute_with_retry(flow, node, max_timeout_ms)
+        try:
+            result = await self._execute_with_retry(flow, node, max_timeout_ms)
+        except BaseException as e:  # noqa: BLE001 — 含取消/超时，全部只加观测后原样重抛
+            # 载荷就地构造（不触碰 context/结果）——异常穿透语义零变化，
+            # 回调自身异常由 CallbackManager 逐 handler 兜底吞掉。
+            if callback_manager:
+                callback_manager.on_node_end(
+                    flow, node, None, _callback_error_payload(e), exception=e
+                )
+            raise
 
         self.context.last_node_id = node.id
         logger.debug("result: %s", result)

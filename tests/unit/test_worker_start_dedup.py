@@ -205,6 +205,10 @@ class TestDedupHit:
         inst.run_distributed.assert_not_called()
         # 组合语义（G1 先行落行）：命中在落新行**之前**返回，不产生新执行行
         assert storage.load_execution_state("exec-2") is None
+        # 该路径不落盘 → 等不到终态收口：按 exec-2 登记的两个采集器就地回收
+        # （否则每次幂等命中都在 worker 内存里留一份永不释放的记录）
+        assert "exec-2" not in worker._event_recorders
+        assert "exec-2" not in worker._node_timings
 
     def test_hit_running_reenqueues_resume_and_never_restarts(self):
         """命中 + 非终态 running（崩溃/重试搁浅）→ 重入队 resume 接续，
@@ -316,25 +320,29 @@ class TestDedupHit:
 
 class TestDispatchPassthrough:
     def test_dispatch_task_passes_dedup_key(self):
-        """消息体 dedup_key 透传进 start_flow。"""
+        """消息体 dedup_key / 入队 timestamp 透传进 start_flow。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         worker = _redis_worker(fake)
         seen = {}
-        original = worker.start_flow
 
         def spy(flow_id, params, version=None, execution_id=None,
-                dedup_key=None, delivery_count=None):
+                dedup_key=None, delivery_count=None, queued_at=None):
             seen["dedup_key"] = dedup_key
             seen["execution_id"] = execution_id
+            seen["queued_at"] = queued_at
             return {"is_end": True}
 
         worker.start_flow = spy
         worker._dispatch_task(
-            {"type": "start", "flow_id": "f1", "params": {}, "dedup_key": "abc"},
+            {
+                "type": "start", "flow_id": "f1", "params": {},
+                "dedup_key": "abc", "timestamp": "2026-10-07T10:00:00",
+            },
             delivery_count=1,
         )
         assert seen["dedup_key"] == "abc"
         assert seen["execution_id"] is None  # 消息未带预铸 id
+        assert seen["queued_at"] == "2026-10-07T10:00:00"  # 排队时长算据
 
 
 class TestConsoleBFF:

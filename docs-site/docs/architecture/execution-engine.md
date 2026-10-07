@@ -85,7 +85,11 @@ return result
 1. `callback_manager.on_node_start`
 2. `_execute_with_retry`：按 `retryTimes` 重试，每次按 `min(节点timeout, 剩余预算)` 设超时
 3. 成功：写 `LAST_NODE` / `BRANCH` / `$NODE[id]`，`on_node_end`，返回 `(result, branch)`
-4. 异常分支处理：
+4. 失败：`on_node_end(result=None, error={code, message}, exception=e)` 后**原样重抛**。
+   **成功与失败两条路径都发** `on_node_end`——否则观测侧只见 start 不见 end，
+   失败节点的 span 永远 open、耗时永远缺失（历史行为，2026-10-07 修正）。
+   回调自身抛异常由 `CallbackManager` 逐 handler 吞掉，不影响重抛的原始异常。
+5. 异常分支处理：
     - `FlowResultError` → 包装为 `FlowExecutionException(ERROR_RESULT)`
     - `TimeoutError` → 走 `timeoutHandler`（abort 抛异常 / continue 返 None / continue_with 返默认值）
     - 其它异常 → 重试耗尽后走 `errorHandler`（abort/continue/continue_with）

@@ -5,9 +5,9 @@ langfuse SDK 从不真装：fake 模块注入 ``sys.modules["langfuse"]``，
 则完全绕开 SDK。断言面是"发给 Langfuse 的对象形状"（SDK v4 API：
 create_trace_id / start_observation / OTel 根属性）。
 
-错误语义与内核对齐（runner 只在成功路径发 on_node_end）：abort 策略下
-错误节点与整条 run 的回调都不再发——span 级 ERROR 标记只在直调
-on_node_end(error=...) 时生效，契约保留给未来内核补发 / 手动触发场景。
+错误语义与内核对齐：runner 在**成功与失败两条路径**都发 on_node_end——
+abort 策略下错误节点 span 收口并标 ERROR；但 NodeExecutionError 原样穿透
+不触发 on_flow_end，run 级（根 span）仍由宿主收尾（Langfuse TTL 兜底）。
 """
 from __future__ import annotations
 
@@ -285,10 +285,10 @@ class TestRealFlowIntegration(unittest.TestCase):
         seed = self.recorder.trace_id_seeds[0]
         self.assertTrue(seed.startswith("obs-flow-"))
 
-    def test_abort_leaves_trace_open(self):
-        """abort 策略（内核现状）：错误节点与整条 run 的回调都不再发——
-        on_node_end 只走成功路径，NodeExecutionError 直接穿透不触发
-        on_flow_end。span 保持 open，由宿主收尾（Langfuse TTL 兜底）。"""
+    def test_abort_closes_failed_span_with_error(self):
+        """abort 策略：内核在失败路径补发 on_node_end(error/exception)——
+        失败节点 span 收口并标 ERROR（不再永远 open 等 TTL 兜底）。
+        NodeExecutionError 仍原样穿透，on_flow_end 依旧不发（run 级由宿主收尾）。"""
         flow_json = {
             "flow_id": "obs-boom",
             "inputType": {"dataType": "object"},
@@ -302,7 +302,12 @@ class TestRealFlowIntegration(unittest.TestCase):
             _run(flow_json, self.cb, _registry(BoomNode))
         spans = {o.name: o for o in self.recorder.observations if o.kind == "span"}
         self.assertIn("boom", spans)
-        self.assertFalse(spans["boom"].ended)
+        boom = spans["boom"]
+        self.assertTrue(boom.ended)
+        self.assertTrue(
+            any(u.get("level") == "ERROR" for u in boom.updates),
+            f"失败 span 未标 ERROR: {boom.updates}",
+        )
 
     def test_content_clip(self):
         big_node = type("BigNode", (Node,), {

@@ -182,6 +182,85 @@ class TestNodeRunnerBasics(unittest.IsolatedAsyncioTestCase):
         cbm.on_node_end.assert_called_once()
 
 
+class TestNodeRunnerFailureCallbacks(unittest.IsolatedAsyncioTestCase):
+    """失败路径也发 on_node_end（带 error/exception），异常照旧穿透。
+
+    历史行为：失败节点只有 on_node_start，观测侧（Langfuse span / 节点耗时
+    采集器）永远等不到收口——失败节点的时间与错因在时间线上缺失。
+    """
+
+    async def test_abort_failure_emits_error_then_reraises(self):
+        ctx = ExecutionContext()
+        ctx.clean()
+        runner = NodeRunner(ctx)
+        cbm = MagicMock()
+        with self.assertRaises(FlowExecutionException) as caught:
+            await runner.run_node(FakeFlow(), ErrorNode(id="e1"), callback_manager=cbm)
+
+        cbm.on_node_start.assert_called_once()
+        cbm.on_node_end.assert_called_once()
+        args, kwargs = cbm.on_node_end.call_args
+        self.assertIsNone(args[2])  # result
+        # 载荷与抛出的异常同源（code/message 取自异常本身）
+        self.assertEqual(args[3]["code"], caught.exception.code)
+        self.assertEqual(args[3]["message"], caught.exception.message)
+        self.assertIn("node failed", args[3]["message"])
+        self.assertIs(kwargs["exception"], caught.exception)
+
+    async def test_timeout_emits_error_payload(self):
+        ctx = ExecutionContext()
+        ctx.clean()
+        runner = NodeRunner(ctx)
+        cbm = MagicMock()
+        with self.assertRaises(FlowExecutionException):
+            await runner.run_node(
+                FakeFlow(), SlowNode(id="slow1", delay=5.0),
+                max_timeout_ms=100, callback_manager=cbm,
+            )
+        args, _kwargs = cbm.on_node_end.call_args
+        self.assertEqual(args[3]["code"], -1)  # NodeTimeoutError
+        self.assertIn("timeout", args[3]["message"].lower())
+
+    async def test_continue_strategy_still_reports_success(self):
+        """continue 策略吞掉的错误仍是 on_node_end(result=None)：内核语义未变。"""
+        ctx = ExecutionContext()
+        ctx.clean()
+        runner = NodeRunner(ctx)
+
+        class ContinueNode(Node):
+            node_type: ClassVar[str] = "cont"
+            error_handler: RecoverableErrorHandler = Field(
+                default_factory=lambda: RecoverableErrorHandler(strategy="continue")
+            )
+
+            def execute(self, execution=None):
+                raise RuntimeError("swallowed")
+
+        cbm = MagicMock()
+        await runner.run_node(FakeFlow(), ContinueNode(id="c1"), callback_manager=cbm)
+        args, kwargs = cbm.on_node_end.call_args
+        self.assertIsNone(args[2])
+        self.assertIsNone(kwargs.get("error"))
+        self.assertIsNone(kwargs.get("exception"))
+
+    async def test_raising_callback_does_not_mask_node_error(self):
+        from plaita.core.callback import CallbackManager, FlowCallback
+
+        class ExplodingCallback(FlowCallback):
+            def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs):
+                raise RuntimeError("callback blew up")
+
+        ctx = ExecutionContext()
+        ctx.clean()
+        runner = NodeRunner(ctx)
+        with self.assertRaises(FlowExecutionException) as caught:
+            await runner.run_node(
+                FakeFlow(), ErrorNode(id="e2"),
+                callback_manager=CallbackManager([ExplodingCallback()]),
+            )
+        self.assertIn("node failed", str(caught.exception))
+
+
 class TestNodeRunnerAsyncSupport(unittest.IsolatedAsyncioTestCase):
     """T040: async node support."""
 

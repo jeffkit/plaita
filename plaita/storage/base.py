@@ -49,6 +49,21 @@ class ExecutionState(BaseModel):
             "未挂 NodeTimingCallback——读取方必须按缺省处理，不得假定存在。"
         ),
     )
+    queued_at: Optional[str] = Field(
+        None,
+        description=(
+            "入队时间（ISO 字符串，取任务消息里的 timestamp）。None = 老消息或非"
+            "队列路径（本地档 / 直接调用 start_flow）。"
+        ),
+    )
+    queue_wait_ms: Optional[int] = Field(
+        None,
+        description=(
+            "排队时长（毫秒）：queued_at → worker 认账开始执行的间隔。None = 无"
+            "queued_at 或时间戳不可解析；跨机时钟回拨时为 0（时间戳带偏移时按"
+            "同一时轴差分，TZ 差异不构成假等待；真实时钟偏斜不补偿）。"
+        ),
+    )
 
 class ExecutionStorage(ABC):
     """

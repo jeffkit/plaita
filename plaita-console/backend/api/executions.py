@@ -48,6 +48,10 @@ class ExecutionInfo(BaseModel):
     # 节点级耗时：集群模式由 worker 的 NodeTimingCallback 写入执行状态，
     # 本地模式由回调采集的 trace 时间戳折算；老状态/未采集时为 None
     node_timings: Optional[Dict[str, Any]] = Field(None, description="节点级耗时")
+    # 排队时长：集群档由 worker 按消息 timestamp 折算（见 ExecutionState），
+    # 本地档为 None
+    queued_at: Optional[str] = Field(None, description="入队时间")
+    queue_wait_ms: Optional[int] = Field(None, description="排队时长（毫秒）")
     # Langfuse 观测深链（启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
     langfuse_trace_url: Optional[str] = Field(None, description="Langfuse trace 页面 URL")
 
@@ -96,6 +100,7 @@ def _task_queue_name() -> str:
     return os.getenv("PLAITA_CONSOLE_TASK_QUEUE", DEFAULT_TASK_QUEUE_NAME)
 
 try:
+    from plaita.server.execution_events import TIMELINE_EVENT_TYPES
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
     from plaita.storage.redis import execution_state_ttl_seconds
@@ -105,6 +110,7 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     _plaita_root = str(_Path(__file__).resolve().parents[3])
     if _plaita_root not in _sys.path:
         _sys.path.insert(0, _plaita_root)
+    from plaita.server.execution_events import TIMELINE_EVENT_TYPES
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
     from plaita.storage.redis import execution_state_ttl_seconds
@@ -558,7 +564,9 @@ async def start_execution(
         "params": request.params,
         "execution_id": execution_id,
         "tenant_id": tenant_scope(http_request, required=True),
-        "timestamp": datetime.now().isoformat()
+        # 带时区偏移：worker 用它算排队时长（ExecutionState.queue_wait_ms），
+        # BFF 与 worker 不在同一时区时 naive 本地时间会算成整小时级假等待
+        "timestamp": datetime.now().astimezone().isoformat()
     }
     # start 幂等键 additive 透传（波次二任务③）：仅显式提供时进入消息体，
     # 旧客户端消息形状零变化。与 G1 预铸 execution_id 并存：同一条消息
@@ -895,8 +903,102 @@ def _execution_stream_async_redis(request: Request):
     return client
 
 
+def _stream_id_key(stream_id) -> Any:
+    """Stream 条目 id（``{ms}-{seq}``）的排序键；不可解析 → None（不参与去重）。"""
+    try:
+        ms, seq = str(stream_id).split("-", 1)
+        return (int(ms), int(seq))
+    except (TypeError, ValueError):
+        return None
+
+
+# 执行时间线事件的 SSE 事件名（与状态快照的 ``update`` 分流）。详情页的
+# ``update`` 监听把载荷**整体**当执行状态写进 execution query cache
+# （ExecutionDetail.tsx），而时间线载荷没有 flow_id/context/nodes/status——
+# 混进 ``update`` 会把已渲染的执行信息与停止/恢复控件清空（含终态执行，
+# Stream 存活期内每次连接都会重放）。前端对未知事件名天然忽略，故时间线
+# 单开一路。
+SSE_EVENT_TIMELINE = "timeline"
+
+
+def _parse_payload(payload: str) -> Optional[Dict[str, Any]]:
+    """SSE 载荷 → dict（事件名与去重都按它判定）；非 JSON 对象 → None。"""
+    try:
+        parsed = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _sse_event_name(parsed: Optional[Dict[str, Any]]) -> str:
+    """载荷 → SSE 事件名：时间线事件走 ``timeline``，其余（状态快照）走 ``update``。
+
+    判别用两端共用的 ``TIMELINE_EVENT_TYPES``（``plaita.server.execution_events``），
+    避免同一份事件类型表在两侧各写一份。
+    """
+    if parsed is not None and parsed.get("event") in TIMELINE_EVENT_TYPES:
+        return SSE_EVENT_TIMELINE
+    return "update"
+
+
+def _payload_stream_id(parsed: Optional[Dict[str, Any]]) -> Optional[str]:
+    """从事件载荷里取来源 Stream 条目 id（去重用）；无该字段 → None。
+
+    worker 侧的 Pub/Sub 副本带 ``stream_id``（``plaita.server.execution_events``）；
+    外部直发频道的裸载荷没有它，退化为「一律转发」。
+    """
+    stream_id = parsed.get("stream_id") if parsed is not None else None
+    return str(stream_id) if stream_id else None
+
+
+async def _replay_execution_events(client, key: str) -> List[tuple]:
+    """重放已落盘的时间线（``XRANGE key - +``）→ ``[(stream_id, payload_json)]``。
+
+    客户端无 XRANGE（测试替身）/Stream 不存在/redis 抖动 → 空表：重放是
+    增强段，失败不得终结 SSE（退回「只有实时段」的历史行为）。
+    """
+    xrange = getattr(client, "xrange", None)
+    if xrange is None:
+        return []
+    try:
+        entries = await xrange(key)
+    except Exception as exc:
+        logger.warning("SSE 时间线重放失败 %s: %s", key, exc)
+        return []
+
+    replayed: List[tuple] = []
+    for entry in entries or []:
+        try:
+            stream_id, fields = entry
+        except (TypeError, ValueError):
+            continue
+        if isinstance(stream_id, bytes):
+            stream_id = stream_id.decode("utf-8", "replace")
+        payload = None
+        if isinstance(fields, dict):
+            for field in ("data", b"data"):
+                if field in fields:
+                    payload = fields[field]
+                    break
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8", "replace")
+        if payload is None:
+            continue
+        replayed.append((str(stream_id), payload))
+    return replayed
+
+
 async def _execution_event_stream(request: Request, data: Dict[str, Any], channel: str):
     """集群档 SSE 事件流（redis.asyncio pubsub，非阻塞消费）。
+
+    **双段**：worker 把节点事件同时写进 ``channel`` 同名的 Redis Stream 与
+    Pub/Sub。连接建立时先 XRANGE 重放已落盘的历史事件（断线/刷新/重连不再
+    丢连接前发生的事件），之后消费 Pub/Sub 实时段。订阅先于重放建立——
+    重放窗口内到达的实时消息由 redis-py 缓冲，重放后按 ``stream_id`` 去重，
+    既不丢也不重。
+
+    **事件名分流**：时间线事件推成 ``timeline``，状态快照仍是 ``update``
+    （判别见 ``_sse_event_name``，两路载荷形状互斥）。
 
     模块级工厂便于直接单测（starlette 1.7 TestClient 会等响应整体完成，
     无法承载无限 SSE 流）；异常不终结流，finally 必关 pubsub。
@@ -904,7 +1006,8 @@ async def _execution_event_stream(request: Request, data: Dict[str, Any], channe
     pubsub = None
     try:
         try:
-            pubsub = _execution_stream_async_redis(request).pubsub()
+            client = _execution_stream_async_redis(request)
+            pubsub = client.pubsub()
             await pubsub.subscribe(channel)
         except Exception as exc:
             logger.warning("SSE 订阅失败 %s: %s", channel, exc)
@@ -921,7 +1024,15 @@ async def _execution_event_stream(request: Request, data: Dict[str, Any], channe
                 "data": json.dumps(data, ensure_ascii=False, default=str),
             }
 
-        # 持续监听事件
+        # 第一段：重放已落盘的时间线（无 Stream / redis 抖动 → 空表，不终结流）
+        replayed = await _replay_execution_events(client, channel)
+        last_stream_id = None
+        for stream_id, payload in replayed:
+            yield {"event": _sse_event_name(_parse_payload(payload)), "data": payload}
+        if replayed:
+            last_stream_id = replayed[-1][0]
+
+        # 第二段：持续监听实时事件
         while True:
             try:
                 message = await pubsub.get_message(
@@ -939,7 +1050,16 @@ async def _execution_event_stream(request: Request, data: Dict[str, Any], channe
                 if isinstance(payload, bytes):
                     payload = payload.decode("utf-8", "replace")
                 if payload is not None:
-                    yield {"event": "update", "data": payload}
+                    parsed = _parse_payload(payload)
+                    stream_id = _payload_stream_id(parsed)
+                    if stream_id is not None:
+                        # 重放段已发过的条目不再重复推（订阅早于重放的代价）
+                        sid_key = _stream_id_key(stream_id)
+                        last_key = _stream_id_key(last_stream_id)
+                        if sid_key is not None and last_key is not None and sid_key <= last_key:
+                            continue
+                        last_stream_id = stream_id
+                    yield {"event": _sse_event_name(parsed), "data": payload}
 
             # 检查客户端是否断开
             if await request.is_disconnected():

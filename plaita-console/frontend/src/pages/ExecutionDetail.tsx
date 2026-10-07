@@ -57,6 +57,8 @@ function useExecutionSSE(
         } catch { /* ignore parse errors */ }
       })
 
+      // update 只承载执行状态快照（后端 _sse_event_name）：节点时间线事件走
+      // timeline 事件名，其载荷没有 ExecutionInfo 字段，混进来会清空本页数据。
       evtSource.addEventListener('update', (e) => {
         try {
           const data = JSON.parse(e.data)

@@ -191,6 +191,36 @@ flowchart TD
 | `error` | 错误详情（status=error 时；节点重试耗尽的 error 附 `node_retries`） |
 | `invoker` | 发起方标识 |
 | `node_timings` | 节点级耗时（可选）：`node_id → {started_at, ended_at, started_ms, ended_ms, duration_ms, total_duration_ms, attempts, failed}`。由 worker 按执行挂载的 `NodeTimingCallback` 采集、在落盘收口处写入；同节点多次执行（循环/重试）时 `duration_ms` 取最后一次、`total_duration_ms` 累计、`attempts` 计数。**老状态/宿主未挂采集器时为 `None`**，读取方必须按缺省处理。 |
+| `queued_at` | 入队时间（可选；取任务消息里的 `timestamp`，BFF 入队时写入，**带时区偏移**）。本地档/直调 `start_flow`/老消息为 `None`。 |
+| `queue_wait_ms` | 排队时长（毫秒）：`queued_at → worker 认账开始执行` 的间隔。`None` = 无 `queued_at` 或时间戳不可解析；跨机时钟回拨取 0。入队侧时间戳带偏移 → 与 worker 侧按同一时轴差分，**跨时区不构成假等待**；只写本地时间的老消息按读取方时区解释。真实时钟偏斜不补偿（正偏斜与「真的排了很久队」无从区分）。 |
+
+## 执行事件时间线（per-execution Redis Stream）
+
+`node_timings` 只在**落盘时刻**快照，长跑执行中途看不到进度；节点维度的时间线
+过去只有 Langfuse（失败节点还缺失）。集群档 worker 因此额外挂一个
+`ExecutionEventRecorder`（`plaita.server.execution_events`），把节点生命周期事件
+实时写进 per-execution 时间线：
+
+| 项 | 值 |
+|---|---|
+| Stream key / Pub/Sub 频道 | `plaita:execution:events:{execution_id}`（同名，控制台 `DEL` 一把清；键名不带租户命名空间——控制台订阅前已按租户校验执行归属） |
+| 记录字段 | Stream 条目：`{data: <JSON>}`，JSON 为 `{event, execution_id, ts, ts_ms, ...}`；Pub/Sub 实时副本同一份 JSON **加** `stream_id`（本次 XADD 的条目 id，供 SSE 去重） |
+| 事件类型 | `flow_start`（含 `queued_at` / `queue_wait_ms`）、`node_start`、`node_end`（含 `duration_ms` / `status`（`success`/`error`）/ `error`） |
+| 边界 | `MAXLEN ~ 1000`；每次追加刷新 `EXPIRE`（默认 7 天）——终态执行无人删除这条 Stream |
+| 写成本 | 每个节点事件 3 次**同步** redis 往返（XADD / EXPIRE / PUBLISH，worker 事件循环上）：与 worker 既有同步 redis 用法一致，但节点边界会带上这段延迟 |
+
+**写失败只告警**：redis 抖动不阻断流程（观测旁路）；基类 `FlowWorker` 无 redis
+客户端 → 不挂采集器，内存 worker/单测零行为变化。
+
+**控制台 SSE 双段消费**：连接时先 `XRANGE` 重放已落盘事件，再接 Pub/Sub 实时段
+（订阅先于重放建立，实时副本带 `stream_id` 按它去重）——断线/刷新不再丢连接前
+发生的事件。见 `plaita-console/backend/api/executions.py`。
+
+事件名分流：时间线事件推成 SSE 事件 **`timeline`**，`update` 只承载执行状态快照
+（详情页按 `update` **整体**刷新 execution——时间线载荷没有 `flow_id`/`context`/
+`nodes`/`status` 字段，混进 `update` 会把页面已渲染的执行信息与停止/恢复控件
+清空；终态执行 Stream 存活期内每次连接都会重放，必触发）。判别用两端共用的
+`TIMELINE_EVENT_TYPES`，不在 console 侧另抄一份事件类型表。
 
 ## 存储后端
 

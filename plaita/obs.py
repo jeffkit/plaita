@@ -33,12 +33,12 @@ hex trace id——同一种子在任意进程派生同一 trace id。语义 id �
 适配器自身按"观测旁路"约束构建：任何内部异常都吞掉并记 warning，
 绝不影响流程执行（CallbackManager 本身也有一层兜底）。
 
-**错误语义与内核对齐（重要）**：内核只在节点**成功**路径发
-``on_node_end``；abort 策略的节点失败以 ``NodeExecutionError`` 直接穿透、
-**不触发** ``on_flow_end``——此时 trace/span 保持 open，由宿主收尾
+**错误语义与内核对齐（重要）**：内核在节点**成功与失败两条路径**都发
+``on_node_end``（失败时带 error/exception，随后异常原样穿透）——abort 策略
+的失败节点 span 因此收口并标 ERROR。但 ``NodeExecutionError`` 穿透时
+**不触发** ``on_flow_end``：run 级（根 span）仍保持 open，由宿主收尾
 （Langfuse 侧 TTL 兜底）。span/trace 级 ERROR 标记经
-``on_node_end(error=...)`` / ``on_flow_end(error=...)`` 契约保留，供
-未来内核补发错误回调或自定义节点手动触发。
+``on_node_end(error=...)`` / ``on_flow_end(error=...)`` 契约表达。
 """
 from __future__ import annotations
 

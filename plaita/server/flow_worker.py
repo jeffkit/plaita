@@ -38,6 +38,7 @@ from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
 from plaita.server.log_handler import setup_redis_logging
 from plaita.server.node_timings import NodeTimingCallback
+from plaita.server.execution_events import ExecutionEventRecorder, queue_wait_ms
 from plaita.server.task_queue import (
     DEFAULT_CLAIM_MIN_IDLE_MS,
     DEFAULT_CONSUMER_GROUP,
@@ -333,6 +334,9 @@ class FlowWorker:
         # on_node_start/on_node_end；落盘时由 _persist_state_or_raise 写入
         # ExecutionState.node_timings。
         self._node_timings: Dict[str, NodeTimingCallback] = {}
+        # 执行事件时间线：同样按执行一个采集器（写 per-execution Redis Stream +
+        # 实时频道）。基类无 redis 客户端 → 不登记（内存 worker/单测零影响）。
+        self._event_recorders: Dict[str, ExecutionEventRecorder] = {}
         # 初始化流程定义缓存，使用TTL缓存
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
@@ -660,6 +664,9 @@ class FlowWorker:
         不经本方法的 False 路径——既有失租链路不受影响。
         """
         self._collect_node_timings(execution_id, state)
+        if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+            # 时间线采集器同窗口回收（终态后没有新事件，防长跑 worker 泄漏）
+            self._event_recorders.pop(execution_id, None)
         saved = self.execution_storage.save_execution_state(execution_id, state)
         if not saved:
             logger.error(
@@ -674,14 +681,42 @@ class FlowWorker:
             )
 
     def _handlers_for(self, execution_id: str) -> list:
-        """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器。
+        """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器 + 事件时间线。
 
         采集器**按执行**新建并登记，避免同一 worker 并发处理多个执行时耗时串场；
-        登记表在终态落盘后回收（见 ``_collect_node_timings``）。
+        两个登记表都在终态落盘后回收（见 ``_persist_state_or_raise`` /
+        ``_collect_node_timings``），start 幂等命中那条**不落盘就返回**的路径
+        在 ``start_flow`` 里就地回收（否则这两个登记表永远留在 worker 内存里）。
         """
         timing = NodeTimingCallback()
         self._node_timings[execution_id] = timing
-        return [*self.callback_handlers, timing]
+        handlers = [*self.callback_handlers, timing]
+        recorder = self._make_event_recorder(execution_id)
+        if recorder is not None:
+            self._event_recorders[execution_id] = recorder
+            handlers.append(recorder)
+        return handlers
+
+    def _make_event_recorder(self, execution_id: str) -> Optional[ExecutionEventRecorder]:
+        """事件时间线采集器工厂；基类（内存 worker / 单测）无 redis 客户端 → None。
+
+        需要 redis 的是 **Stream + Pub/Sub 同频道双写**（见
+        ``plaita.server.execution_events``），故只有 RedisFlowWorker 重写本方法。
+        """
+        return None
+
+    def _record_flow_start(
+        self, execution_id: str, *, queued_at: Optional[str], state: ExecutionState
+    ) -> None:
+        """时间线首条：worker 认账（排队时长随行落盘，见 ``ExecutionState.queue_wait_ms``）。"""
+        recorder = self._event_recorders.get(execution_id)
+        if recorder is None:
+            return
+        recorder.record_flow_start(
+            queued_at=queued_at,
+            queue_wait_ms=state.queue_wait_ms,
+            started_at=state.start_time,
+        )
 
     def _collect_node_timings(self, execution_id: str, state: ExecutionState) -> None:
         """把本次执行的节点耗时并进状态（在**唯一的落盘收口**上做，覆盖 start/步进/
@@ -949,7 +984,8 @@ class FlowWorker:
     def start_flow(self, flow_id: str, params: Dict[str, Any], version: Optional[str] = None,
                    execution_id: Optional[str] = None,
                    dedup_key: Optional[str] = None,
-                   delivery_count: Optional[int] = None) -> Dict[str, Any]:
+                   delivery_count: Optional[int] = None,
+                   queued_at: Optional[str] = None) -> Dict[str, Any]:
         """
         启动流程执行
 
@@ -962,6 +998,9 @@ class FlowWorker:
             dedup_key: 可选 start 幂等键（消息重投/双开收敛；未提供则行为
                 与存量完全一致，见 ``_claim_start_dedup``）
             delivery_count: 消息投递次数（可观测；见 _process_execution_result）
+            queued_at: 入队时间（消息 ``timestamp``，BFF 入队时写入）。据此算出
+                排队时长落进 ``ExecutionState.queue_wait_ms`` 与事件时间线首条；
+                老消息无该字段 → None，零回归
 
         Returns:
             Dict[str, Any]: 流程执行结果
@@ -999,6 +1038,10 @@ class FlowWorker:
             if dedup_action == "hit":
                 hit_result = self._handle_start_dedup_hit(flow_id, mapped_execution_id)
                 if hit_result is not None:
+                    # 命中即返回：本 execution_id 不再落任何状态，_handlers_for
+                    # 登记的两个采集器等不到终态收口，就地回收
+                    self._node_timings.pop(execution_id, None)
+                    self._event_recorders.pop(execution_id, None)
                     return hit_result
                 # 孤儿映射（首次执行从未落盘）：释放后重新认领，让本次启动
                 # 继续受保护；并发后来者抢先认领则放弃设防（存量语义）
@@ -1017,6 +1060,7 @@ class FlowWorker:
             # 查得到此行、cancel 有锚。flow_hash：对实际加载执行的 Flow 计算
             # 指纹（波次二任务②）随行落盘——resume 时与当前定义比对，防运行
             # 中改定义后续跑走错分支。
+            start_time = datetime.now().isoformat()
             state = ExecutionState(
                 execution_id=execution_id,
                 flow_id=flow_id,
@@ -1025,10 +1069,13 @@ class FlowWorker:
                 tenant_id=current_tenant(),
                 context={},
                 status="running",
-                start_time=datetime.now().isoformat(),
+                start_time=start_time,
+                queued_at=queued_at,
+                queue_wait_ms=queue_wait_ms(queued_at, start_time),
                 invoker="worker"
             )
             self._persist_state_or_raise(execution_id, state, "start")
+            self._record_flow_start(execution_id, queued_at=queued_at, state=state)
 
             # start 入口取消检查点（与 resume 入口对称）：BFF cancel 可发生在
             # 「已入队、未消费」窗口，更关键的是 start 消息 at-least-once 重投
@@ -1751,6 +1798,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             return self._service_info.instance_id
         return f"worker-{os.getpid()}"
 
+    def _make_event_recorder(self, execution_id: str) -> Optional[ExecutionEventRecorder]:
+        """集群档：时间线写 redis（Stream 持久 + Pub/Sub 实时，见 execution_events）。"""
+        return ExecutionEventRecorder(self.redis_client, execution_id)
+
     def _get_task_queue(self) -> RedisStreamTaskQueue:
         if self._task_queue is None:
             kwargs: Dict[str, Any] = dict(
@@ -2116,6 +2167,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     execution_id=message_data.get("execution_id"),
                     dedup_key=message_data.get("dedup_key"),
                     delivery_count=delivery_count,
+                    # 入队时间由生产方（BFF）写在消息里：worker 据此算排队时长
+                    # （历史消息无此字段 → None，零回归）
+                    queued_at=message_data.get("timestamp"),
                 )
             elif message_type == "resume":
                 self.resume_flow(

@@ -5,6 +5,7 @@
 """
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,9 @@ class TestStartReturnsExecutionId:
         assert msg["type"] == "start"
         assert msg["execution_id"] == eid
         assert msg["params"] == {"x": 1}
+        # timestamp 带时区偏移：worker 的排队时长（queue_wait_ms）按它差分，
+        # BFF 与 worker 不同时区时 naive 本地时间会算成整小时级假等待
+        assert datetime.fromisoformat(msg["timestamp"]).tzinfo is not None
 
     def test_start_ids_are_unique(self, env):
         client = _client(env)
