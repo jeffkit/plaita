@@ -33,6 +33,7 @@ from plaita.storage.fenced import (
 )
 from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STATUSES
 from plaita.logger import logger
+from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
 from plaita.server.log_handler import setup_redis_logging
@@ -2443,6 +2444,11 @@ def main():
     args = parser.parse_args()
     if args.quiet:
         logging.getLogger().setLevel(logging.WARNING)
+
+    # writefile 写入 jail（plaita#39）：writefile 节点默认任意路径可写，而部署入口
+    # 此前从不设置 PLAITA_NODES_WORKSPACE_ROOT——机制在节点侧，门在运营侧缺省开着。
+    # worker 启动即注入（未显式配置则 fail-closed 推导默认根）。
+    apply_writefile_jail("flow-worker")
 
     callback_handlers = []
     if args.langfuse or os.environ.get("PLAITA_WORKER_LANGFUSE") == "1":

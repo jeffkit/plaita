@@ -44,6 +44,22 @@
    - 迁移：无需动作。确有需要（纯 Python 小脚本、多租户防护）才显式设
      `PLAITA_SANDBOX_MEMORY_MB=<MB>`；node 系命令请保持 0。
 
+### writefile 写入 jail 默认开启（2026-10）
+
+**部署入口注入 `PLAITA_NODES_WORKSPACE_ROOT`**（plaita#39）：`writefile` 节点
+（plaita-nodes）的路径 jail 此前**默认关闭**，且 worker / console 启动代码从不
+设置该变量——能提交流程 JSON 的人（或被注入的表达式求值结果）可写 worker 进程
+可写的任意路径（含绝对路径与 `../` 穿越），是持久化 RCE 原语。worker / console
+启动时现在注入该变量，未显式配置则 fail-closed 推导默认根
+（`PLAITA_PROJECT_ROOT` → worker 工作目录 → 家目录；`/` 不构成边界）。
+
+- 变更前：不设即任意路径可写；只有节点级 `workspace_root` 或运营者手工设环境
+  变量才受约束。
+- 迁移：多租户 / 不受信流程部署显式配置 `PLAITA_NODES_WORKSPACE_ROOT`（收敛到
+  业务仓或沙箱目录）。单机信任部署若流程需写默认根之外的绝对路径（如自迭代
+  run_dir 不在默认根内），设 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` 回到历史
+  行为——该开关只该用于单机信任环境。
+
 ### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
 
 本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程

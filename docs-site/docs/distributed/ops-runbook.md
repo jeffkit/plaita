@@ -40,6 +40,29 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
+| `PLAITA_NODES_WORKSPACE_ROOT` | 由 worker 推导（见下） | `writefile` 节点的写入根（jail） |
+| `PLAITA_ALLOW_UNRESTRICTED_WRITES` | unset | `=1` 关闭 writefile jail（仅单机信任部署） |
+
+## writefile 写入 jail（2026-10 起默认开启） {#writefile-写入-jail}
+
+`writefile` 节点（`plaita-nodes`）以 `PLAITA_NODES_WORKSPACE_ROOT` 为写入根：
+设置后绝对路径与 `../` 穿越都必须落在该根内，否则报 `escapes workspace_root`
+拒绝写入；**未设置时保持历史行为——任意路径可写**。能提交流程 JSON 的人因此
+一度可写 `/etc/cron.d/...`、worker 自身代码或配置（持久化 RCE 原语）。
+
+worker / console 启动时注入该变量（`plaita/writefile_jail.py`），次序：
+
+1. 显式 `PLAITA_NODES_WORKSPACE_ROOT` → 原样使用（运营者配置优先）；
+2. `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` → 显式放行任意路径（**仅单机信任部署**）；
+3. 都没有 → fail-closed 推导默认根：`PLAITA_PROJECT_ROOT` → worker 工作目录 →
+   家目录（`/` 不构成边界，逐级后退）。
+
+生效值启动日志可见（`writefile 写入 jail: …`）。**多租户 / 不受信流程部署请显式
+配置第 1 条**，把根收敛到业务仓或沙箱目录；`PLAITA_PROJECT_ROOT` 已设的部署
+（console 拉起的 worker、Docker 镜像）默认即落在部署根内，无需额外配置。
+
+jail 是**进程级**的：worker 一次启动一个根，不能按执行/租户分别设根（`--concurrency`
+下多任务共享同一根）。跨租户写不同目录的部署请给每租户独立 worker。
 
 ## List → Stream 迁移（升级必做）
 

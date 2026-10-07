@@ -67,6 +67,8 @@ services:
       PLAITA_NODE_MODULES: plaita_nodes,plaita_flows.nodes
       PLAITA_NODE_PATH: /Users/kong/projects/infra4agent/mediaflow:/Users/kong/projects/infra4agent/plaita-nodes/src:/Users/kong/projects/infra4agent/agentproc/sdk/python/src
       PLAITA_PYTHON: /Users/kong/projects/infra4agent/mediaflow/.runtime/venv/bin/python
+      # writefile 写入 jail（plaita#39）：flow 只能在业务仓根内写文件
+      PLAITA_NODES_WORKSPACE_ROOT: /Users/kong/projects/infra4agent
       PLAITA_QUEUE_NAME: plaita:flow:queue
       PLAITA_REDIS_URL: ${redis.url}
     max_instances: 10

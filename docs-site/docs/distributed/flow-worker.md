@@ -241,6 +241,10 @@ flowchart TD
   （需 `pip install plaita[langfuse]`，凭据走 `LANGFUSE_*` 环境变量）。trace id =
   运行时 execution_id（随 checkpoint 持久化，跨进程 resume 续写同一 trace）；
   依赖缺失或 SDK 初始化失败只告警降级，不影响执行。
+- **writefile 写入 jail（2026-10）**：worker 启动即注入 `writefile` 节点的
+  `PLAITA_NODES_WORKSPACE_ROOT`（未显式配置则 fail-closed 推导默认根，`/` 不算
+  边界）；显式放行任意路径用 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1`（仅单机信任
+  部署）。见 [运维 Runbook · writefile 写入 jail](ops-runbook.md#writefile-写入-jail)。
 - **event_filter** 的 `--redis-url` 默认取 `PLAITA_REDIS_URL` 环境变量（与
   flow_worker 一致）。
 - **残留订阅 GC**：EventFilter 匹配到已终态（completed/error）执行的订阅时，
