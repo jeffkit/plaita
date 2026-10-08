@@ -35,6 +35,17 @@ class _Clock:
 
 
 class TestNodeTimingCallback:
+    def test_is_a_full_flow_callback(self):
+        """必须继承 FlowCallback：分发器对每个钩子逐个 getattr，缺一个就打一条
+        「Error in on_flow_xxx callback ... has no attribute」告警（每个 flow 两条，
+        2026-10-08 实测纯噪声）。"""
+        from plaita.core.callback import FlowCallback
+
+        assert issubclass(NodeTimingCallback, FlowCallback)
+        cb = NodeTimingCallback()
+        for hook in ("on_flow_start", "on_flow_end", "on_flow_suspend", "on_flow_resume"):
+            getattr(cb, hook)(None)          # 基类 no-op，不得抛 AttributeError
+
     def test_records_duration_and_epoch_ms(self):
         clock = _Clock()
         cb = NodeTimingCallback(clock=clock)

@@ -23,6 +23,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from plaita.core.callback import FlowCallback
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +32,14 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts).isoformat()
 
 
-class NodeTimingCallback:
+class NodeTimingCallback(FlowCallback):
+    """采集节点开始/结束时间；``snapshot()`` 返回可直接序列化的字典。
+
+    必须继承 ``FlowCallback``：回调分发器对每个 handler 逐个 getattr 所有钩子，
+    缺钩子会打「Error in on_flow_xxx callback: ... has no attribute ...」告警
+    （2026-10-08 实测：每个 flow 两条，纯噪声）——基类提供全套 no-op，
+    只覆写关心的钩子即不会再触发。
+    """
     """采集节点开始/结束时间；``snapshot()`` 返回可直接序列化的字典。"""
 
     def __init__(self, clock=time.time) -> None:
