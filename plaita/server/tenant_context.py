@@ -165,3 +165,7 @@ class TenantRoutingExecutionLease:
 
     def renew(self, execution_id: str, holder: str, ttl_seconds: int) -> bool:
         return self._lease().renew(execution_id, holder, ttl_seconds)
+
+    def get_holder(self, execution_id: str) -> Optional[str]:
+        """读当前租约值（#50 持有者存活核算），按租户路由键前缀。"""
+        return self._lease().get_holder(execution_id)

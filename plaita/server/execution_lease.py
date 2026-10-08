@@ -62,6 +62,31 @@ class ExecutionLeaseError(RuntimeError):
     """Raised when resume cannot acquire or keep the execution lease."""
 
 
+# 持有者 token 里嵌入 instance id 的前缀白名单（#50）：只有这几类持有者
+# 才可能是本 worker 进程写的租约，反解才有「查注册表核存活」的意义。
+_HOLDER_LIVENESS_PREFIXES = ("start", "resume", "worker")
+
+
+def holder_instance_id(lease_value: Optional[str]) -> Optional[str]:
+    """从租约值反解持有者的服务注册表 instance id（#50 存活核算）。
+
+    租约值是 ``{holder}``（普通档）或 ``{holder}:{gen}``（fencing 档）；
+    新格式 holder 为 ``{prefix}:{instance_id}:{uuid}``（见
+    ``new_holder_token``）。旧格式（``{prefix}:{uuid}``）与一切无法识别的
+    形状返回 None——调用方按「存活未知」处理，保持既有语义。末段纯数字
+    的 3 段值是旧格式 holder + fencing 世代，同样判 None（instance id 为
+    ``{hostname}-{uuid8}``，不会是纯数字）。
+    """
+    if not lease_value:
+        return None
+    parts = lease_value.split(":")
+    if len(parts) not in (3, 4) or parts[0] not in _HOLDER_LIVENESS_PREFIXES:
+        return None
+    if len(parts) == 3 and parts[2].isdigit():
+        return None
+    return parts[1] or None
+
+
 class ExecutionLease(Protocol):
     def try_acquire(self, execution_id: str, holder: str, ttl_seconds: int) -> bool: ...
 
@@ -148,6 +173,10 @@ class RedisExecutionLease:
         result = self.redis.eval(_RENEW_LUA, 1, key, holder, str(ttl_seconds))
         return bool(result)
 
+    def get_holder(self, execution_id: str) -> Optional[str]:
+        """读当前租约值（无人持有时 None）——持有者存活核算的只读探查。"""
+        return _decode(self.redis.get(self._key(execution_id)))
+
 
 class NullExecutionLease:
     """No-op lease for memory / single-process FlowWorker tests."""
@@ -161,6 +190,18 @@ class NullExecutionLease:
     def renew(self, execution_id: str, holder: str, ttl_seconds: int) -> bool:
         return True
 
+    def get_holder(self, execution_id: str) -> Optional[str]:
+        return None
 
-def new_holder_token(prefix: str = "worker") -> str:
+
+def new_holder_token(prefix: str = "worker", instance_id: Optional[str] = None) -> str:
+    """生成租约持有者 token。
+
+    传 ``instance_id``（#50）时嵌入服务注册表实例 id，形状变为
+    ``{prefix}:{instance_id}:{uuid}``——其他 worker 可从租约值反解持有者
+    并查注册表核实其在册与否，区分「活持有者」与「持有者死后残留的
+    TTL 尾巴」。缺省保持历史形状 ``{prefix}:{uuid}``。
+    """
+    if instance_id:
+        return f"{prefix}:{instance_id}:{uuid.uuid4().hex[:16]}"
     return f"{prefix}:{uuid.uuid4().hex[:16]}"

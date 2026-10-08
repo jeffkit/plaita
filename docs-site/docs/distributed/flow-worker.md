@@ -31,11 +31,15 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
 「仍在处理中」的消息就对其他 consumer 的 XCLAIM 回收可见——回收本身不是
 故障，双跑由执行租约拦截（**start 与 resume 同一套租约**，#23）：
 
-1. start：`start_flow` 在落 running 行**之前** acquire，持有整个处理窗口；
-   resume：`resume_flow` 在推进前 acquire。重派/并发消息的持有者拿不到
-   租约 → `ExecutionLeaseError`，消息被 **ack 释放**（持租约的活 worker 在
-   正常推进，重投载体已无意义；2026-10-06 修，避免对端每 60s XCLAIM 烧
-   delivery 到死信）；
+1. 抢到消息的 worker resume 时拿不到租约 → `ExecutionLeaseError`。冲突分支
+   **先核实持有者存活再决定 ack**（#50，2026-10-08）：租约值嵌有持有者的
+   注册表 instance id，回收方查 `plaita:registry:flow_worker:{instance}`——
+   在册（活持有者，正常竞争）→ **ack 释放**（否则对端每 `claim_min_idle_ms`
+   XCLAIM 一次烧一次 delivery，超限即假死信）；**不在册**（持有者已死、
+   租约键是 ≤TTL 的尾巴）→ **不 ack** 留 pending，等租约过期后下一轮回收
+   从 checkpoint 续跑（代价 ≤TTL+60s，远小于 zombie reap）。信号缺失
+   （旧格式租约 / `--no-registry` / Redis 瞬断）按「存活未知」退化 ack；
+   `PLAITA_DISABLE_HOLDER_LIVENESS=1` 整体旁路回到无条件 ack；
 2. 持租约的活 worker 由看门狗每 lease TTL/3（默认 120s → 40s）续租，步骤
    执行期间租约不会过期——XCLAIM 真正接手的只有已死 worker 的消息；
 3. 退化路径：`PLAITA_DISABLE_LEASE_WATCHDOG=1` 且单步超过 lease TTL 时，
