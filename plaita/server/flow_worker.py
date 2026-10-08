@@ -417,6 +417,10 @@ class FlowWorker:
         # on_node_start/on_node_end；落盘时由 _persist_state_or_raise 写入
         # ExecutionState.node_timings。
         self._node_timings: Dict[str, NodeTimingCallback] = {}
+        # 沙箱生命周期回调：**按执行**缓存（同一执行的多个 step 必须复用同一个
+        # 实例，否则 agent 节点在早先 step 产生的 workspace 快照到 flow 结束那一步
+        # 已经丢了）；终态落盘时按持久化上下文释放并回收（_release_sandboxes）。
+        self._sandbox_callbacks: Dict[str, Any] = {}
         # 优雅停机（无损升级）：draining = 不再领新任务、等 in-flight 收尾；
         # 超时由 _force_stop_after_drain 兜底退出（消息留 pending 待接管）。
         self._draining = threading.Event()
@@ -750,6 +754,9 @@ class FlowWorker:
         不经本方法的 False 路径——既有失租链路不受影响。
         """
         self._collect_node_timings(execution_id, state)
+        # 沙箱回收挂在同一收口（覆盖 start/步进/挂起/终态所有路径）：
+        # 非终态是 no-op，终态按上下文快照释放实例
+        self._release_sandboxes(execution_id, state)
         saved = self.execution_storage.save_execution_state(execution_id, state)
         if not saved:
             logger.error(
@@ -778,10 +785,58 @@ class FlowWorker:
         timing = NodeTimingCallback()
         self._node_timings[execution_id] = timing
         handlers = [*self.callback_handlers, timing]
-        sandbox_cb = self._sandbox_lifecycle_handler()
+        sandbox_cb = self._sandbox_lifecycle_for(execution_id)
         if sandbox_cb is not None:
             handlers.append(sandbox_cb)
         return handlers
+
+    def _sandbox_lifecycle_for(self, execution_id: str):
+        """按执行取沙箱生命周期回调（缓存复用）。
+
+        ⚠️ 分布式步进下**每步都会新建 handlers 列表**——若每步都造一个新回调，
+        它只在当步收集快照，到 flow 结束那一步早已空空如也，终态释放静默失效
+        （2026-10-08 实测：plaita#22 跑完 24 分钟后沙箱仍 running、日志零条
+        ``sandbox lifecycle``）。因此同一执行必须复用同一实例。
+        """
+        cb = self._sandbox_callbacks.get(execution_id)
+        if cb is None:
+            cb = self._sandbox_lifecycle_handler()
+            if cb is not None:
+                self._sandbox_callbacks[execution_id] = cb
+        return cb
+
+    def _release_sandboxes(self, execution_id: str, state: ExecutionState) -> None:
+        """终态落盘时释放本执行用过的沙箱实例（跨 step/跨进程都成立）。
+
+        快照来源=**持久化上下文**的 ``$NODE.*.workspace``（
+        ``collect_workspace_snapshots``）——进程内累积在分布式路径不可靠（见
+        ``_sandbox_lifecycle_for``）。成功（completed）→ kill 不留现场；失败/取消
+        → pause 保现场（可恢复）。best-effort：任何异常只告警，绝不拖累落盘。
+        """
+        if getattr(state, "status", "") not in TERMINAL_EXECUTION_STATUSES:
+            return
+        cb = self._sandbox_lifecycle_for(execution_id)
+        self._sandbox_callbacks.pop(execution_id, None)
+        if cb is None:
+            return
+        try:
+            from plaita_nodes.sandbox import collect_workspace_snapshots
+        except Exception:  # noqa: BLE001 — 可选依赖
+            return
+        try:
+            snaps = collect_workspace_snapshots(getattr(state, "context", None) or {})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("沙箱快照收集失败（忽略）: %s", exc)
+            return
+        if not snaps:
+            return
+        keep = getattr(state, "status", "") != "completed"   # 失败/取消→保现场
+        try:
+            results = cb.drain(snaps, phase="terminal", keep_data=keep)
+            if results:
+                logger.info("终态沙箱释放 %s: %s", execution_id, results)
+        except Exception as exc:  # noqa: BLE001 — 回收失败由 AGS TTL 兜底
+            logger.warning("终态沙箱释放失败（忽略）: %s", exc)
 
     @staticmethod
     def _sandbox_lifecycle_handler():
