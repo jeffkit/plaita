@@ -116,6 +116,7 @@ class RedisStreamTaskQueue:
         dlq_max_len: Optional[int] = None,
         dead_letter_guard: Optional[Callable[[StreamTask], bool]] = None,
         max_schema_version: Optional[int] = TASK_SCHEMA_VERSION,
+        on_dead_letter: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         # 拒收「比自己新」的消息（进 DLQ）是**默认**行为：语义不兼容时宁可显式
         # 死信+告警，也不要按旧语义猜着跑。None 关闭校验（仅供测试/特殊场景）。
@@ -139,6 +140,10 @@ class RedisStreamTaskQueue:
         # 决策前调用：True=允许死信；False 或抛异常=跳过（消息留 pending）。
         # None（默认）恒放行——存量行为零变化。
         self.dead_letter_guard = dead_letter_guard
+        # #26 告警钩子：死信只 logger.error 时值守全靠人刷日志。钩子在**入队
+        # 之后**调用（事件已持久化，钩子失败不回滚死信语义），且 best-effort
+        # ——WebhookAlerter.send 是非阻塞入队，绝不反压消费主循环。
+        self.on_dead_letter = on_dead_letter
         self._metrics = {
             "enqueued": 0,
             "acked": 0,
@@ -385,6 +390,22 @@ class RedisStreamTaskQueue:
             _decode(dlq_id),
             reason,
         )
+        # #26：死信事件外发（webhook 等）。best-effort——钩子抛错只记 warning，
+        # 死信本身已落 DLQ，不得因告警通道故障影响 at-least-once 语义。
+        if self.on_dead_letter is not None:
+            try:
+                self.on_dead_letter({
+                    "event": "dead_letter",
+                    "queue": self.stream_key,
+                    "dlq_key": self.dlq_key,
+                    "dlq_id": _decode(dlq_id),
+                    "message_id": task.message_id,
+                    "delivery_count": task.delivery_count,
+                    "reason": reason,
+                    "ts": time.time(),
+                })
+            except Exception as exc:  # noqa: BLE001 - 告警旁路
+                logger.warning("dead_letter 告警钩子失败: %s", exc)
         return _decode(dlq_id)
 
     def note_lease_conflict(self) -> None:

@@ -213,3 +213,48 @@ class TestConditionalWrite:
         assert reaper.orphan_execution(
             storage, "e-gone", cutoff, 60, log=lambda _m: None
         ) is False
+
+
+class TestReapAlert:
+    """#26 告警钩子：真处置后逐条回调（dry-run 不告警）。"""
+
+    def _reap_with_alert(self, storage, collected, dry_run=False):
+        return reaper.reap(
+            storage, idle_minutes=60, dry_run=dry_run, now=NOW,
+            log=lambda _m: None, alert=collected.append,
+        )
+
+    def test_alert_fires_for_reaped_executions(self):
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        storage = _storage(fake)
+        _seed(storage, "e-dead")
+        collected = []
+
+        assert self._reap_with_alert(storage, collected) == (1, 1)
+        assert [s.execution_id for s in collected] == ["e-dead"]
+
+    def test_dry_run_does_not_alert(self):
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        storage = _storage(fake)
+        _seed(storage, "e-dead")
+        collected = []
+
+        assert self._reap_with_alert(storage, collected, dry_run=True) == (1, 1)
+        assert collected == []
+
+    def test_alert_exception_does_not_abort_reap(self):
+        """告警通道故障只是旁路：处置结果已落盘，巡检必须继续跑完。"""
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        storage = _storage(fake)
+        _seed(storage, "e-dead")
+        _seed(storage, "e-dead-2")
+
+        def boom(_state):
+            raise RuntimeError("webhook 挂了")
+
+        handled, found = reaper.reap(
+            storage, idle_minutes=60, now=NOW, log=lambda _m: None, alert=boom
+        )
+        assert (handled, found) == (2, 2)
+        assert storage.load_execution_state("e-dead").status == "error"
+        assert storage.load_execution_state("e-dead-2").status == "error"

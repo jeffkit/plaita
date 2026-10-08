@@ -29,7 +29,9 @@ running 执行标记为 error（orphaned），供监控/人工复核。
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -175,8 +177,13 @@ def reap(
     dry_run: bool = False,
     now: Optional[datetime] = None,
     log: Callable[[str], None] = print,
+    alert: Optional[Callable[[ExecutionState], None]] = None,
 ) -> Tuple[int, int]:
-    """巡检并处置僵尸执行，返回 (处置数 / dry-run 拟处置数, 超期 running 数)。"""
+    """巡检并处置僵尸执行，返回 (处置数 / dry-run 拟处置数, 超期 running 数)。
+
+    ``alert``（#26）在**真处置成功**后逐条回调（dry-run 不告警）；回调自身
+    抛错不得影响巡检推进——告警只是旁路，处置结果已经落盘。
+    """
     client = storage.client
     namespace = storage.namespace
     cutoff = (now or datetime.now()) - timedelta(minutes=idle_minutes)
@@ -197,6 +204,11 @@ def reap(
             handled += 1
         elif orphan_execution(storage, listed.execution_id, cutoff, idle_minutes, log):
             handled += 1
+            if alert is not None:
+                try:
+                    alert(listed)
+                except Exception as e:  # noqa: BLE001 - 告警旁路不得影响巡检
+                    log(f"  ! 告警发送失败: {e}")
     return handled, found
 
 
@@ -207,10 +219,37 @@ def main() -> int:
     parser.add_argument("--idle-minutes", type=int, default=60,
                         help="running 且 last_update_time 早于 N 分钟视为僵尸")
     parser.add_argument("--dry-run", action="store_true", help="只列出，不改动")
+    parser.add_argument("--alert-webhook", default=os.environ.get("PLAITA_ALERT_WEBHOOK", ""),
+                        help="处置僵尸后 JSON POST 的告警 webhook（#26）；"
+                             "默认跟随 PLAITA_ALERT_WEBHOOK")
     args = parser.parse_args()
 
     storage = build_storage(args.redis_url, args.namespace)
-    handled, found = reap(storage, idle_minutes=args.idle_minutes, dry_run=args.dry_run)
+
+    alerter = None
+    send_alert = None
+    if args.alert_webhook:
+        from plaita.server.alerts import WebhookAlerter
+
+        alerter = WebhookAlerter(args.alert_webhook)
+
+        def send_alert(state: ExecutionState) -> None:
+            alerter.send({
+                "event": "zombie_reaped",
+                "execution_id": state.execution_id,
+                "flow_id": state.flow_id,
+                "last_update_time": state.last_update_time,
+                "idle_minutes": args.idle_minutes,
+                "namespace": args.namespace,
+                "reason": ORPHAN_REASON,
+                "ts": time.time(),
+            })
+
+    handled, found = reap(
+        storage, idle_minutes=args.idle_minutes, dry_run=args.dry_run, alert=send_alert
+    )
+    if alerter is not None:
+        alerter.close()
 
     action = "would reap" if args.dry_run else "reaped"
     print(f"{action}: {handled} of {found} zombie execution(s)")

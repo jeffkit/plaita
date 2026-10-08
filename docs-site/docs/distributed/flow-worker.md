@@ -254,6 +254,12 @@ flowchart TD
   落在白名单外即**解析期拒绝**——否则流程作者可逐节点把后端降级为 `unsafe`
   （进程内 raw `exec`，宿主任意代码执行）。见
   [运维 Runbook · code 沙箱后端白名单](ops-runbook.md#code-沙箱后端白名单)。
+- **指标与告警（plaita#26）**：`PLAITA_METRICS_PORT`（或 `--metrics-port`）> 0 时
+  本进程起 Prometheus `/metrics` 抓取端，导出队列 `stream_length`/`pending`/
+  `dlq_length`、全部进程内计数器与 worker 存活/心跳；死信经
+  `RedisStreamTaskQueue(on_dead_letter=...)` 钩子外发，`PLAITA_ALERT_WEBHOOK`
+  配置后即为 JSON POST（有界队列 + 后台线程，best-effort，不反压消费）。见
+  [运维 Runbook · 指标与告警](ops-runbook.md#指标与告警)。
 - **event_filter** 的 `--redis-url` 默认取 `PLAITA_REDIS_URL` 环境变量（与
   flow_worker 一致）。
 - **残留订阅 GC**：EventFilter 匹配到已终态（completed/error）执行的订阅时，

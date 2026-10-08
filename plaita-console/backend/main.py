@@ -21,6 +21,7 @@ try:
     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
     from .api import tenants
     from .api import supervisor
+    from .api import metrics as metrics_api
     from .services import flow_store, signature, users_svc
     from .api import auth_users
 except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该走到这里
@@ -33,6 +34,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
     from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
     from api import tenants  # type: ignore
     from api import supervisor  # type: ignore
+    from api import metrics as metrics_api  # type: ignore
     from services import flow_store, signature, users_svc  # type: ignore
     from api import auth_users  # type: ignore
 
@@ -270,6 +272,7 @@ def create_app() -> FastAPI:
     _mount_admin(credential_templates.router, "credential_templates")
     _mount_admin(audit.router, "audit")
     _mount_admin(tenants.router, "tenants")
+    _mount_admin(metrics_api.router, "metrics")
 
     # --- 契约面（独立 HMAC，不加 admin 依赖）---
     _mount_contract(flow_version.router, "flow_version")

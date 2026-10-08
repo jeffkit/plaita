@@ -135,6 +135,17 @@ class _ObserverWorker:
         with self._cond:
             self._pending += 1
 
+    def stats(self) -> Dict[str, int]:
+        """观测队列运行态（#26：丢弃此前只有进程内计数，运维看不到）。
+
+        ``dropped`` 是**累计观测损失**——>0 说明采集侧跟不上，trace 有缺口。
+        """
+        return {
+            "pending": self._pending,
+            "dropped": self._dropped,
+            "queue_size": self._queue.maxsize,
+        }
+
     def drain(self) -> bool:
         """等待队列清空（含已 submit 的边界事件）；超时仅告警不抛。
 
@@ -587,3 +598,13 @@ class LangfuseCallback(FlowCallback):
         """冲刷（挂起场景用；root 保持 open 供 resume 续写）。终态请用
         :meth:`finalize`。"""
         self._flush()
+
+    def observer_stats(self) -> Optional[Dict[str, Any]]:
+        """后台观测队列统计（#26）；``background=False`` 时无队列 → None。
+
+        ``dropped`` 是累计丢弃的观测事件数——宿主可据此上报指标/告警，
+        不再只能靠日志里每百条一次的那行 warning。
+        """
+        if self._worker is None:
+            return None
+        return self._worker.stats()

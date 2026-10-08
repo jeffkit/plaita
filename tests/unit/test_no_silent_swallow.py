@@ -45,9 +45,17 @@ ALLOWED_SILENT = {
     # 注册表 / 装配失败都返回 None（非沙箱部署零行为变化），异常细节不影响主流程。
     # plaita#22 沙箱白名单接线（`_code_allowed_backends_for_worker` 插入）后整体下移 12：
     # 781→793, 786→798, 792→804，位点未变。
-    ("server/flow_worker.py", 793),
-    ("server/flow_worker.py", 798),
-    ("server/flow_worker.py", 804),
+    # 后续 shift：8cd9563/cbcdd38（暂停沙箱清扫 / 沙箱生命周期回调）与 #26 指标告警
+    # 接线（顶层 import + env helper + metrics/alert 方法插入）累积下移，2026-10-08
+    # 校准到 902/926/931/937——四个位点（可选依赖导入 / 生命周期装配 / 注册表加载）
+    # 语义未变；另补 `collect_workspace_snapshots` 导入失败一条（此前漏登记）。
+    # 再 shift：`_paused_sweeper` 的 e2b 预导入从「准备」try 里拆成独立 best-effort
+    # 分支（缺 e2b 不再等于「不清扫」，见该函数 docstring）后整体下移 5：
+    # 902→907, 926→931, 931→936, 937→942，位点未变。
+    ("server/flow_worker.py", 907),
+    ("server/flow_worker.py", 931),
+    ("server/flow_worker.py", 936),
+    ("server/flow_worker.py", 942),
 }
 
 

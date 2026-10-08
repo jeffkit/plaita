@@ -673,6 +673,32 @@ class TestBackgroundDispatch(unittest.TestCase):
         self.assertEqual(len(spans), 1)
         self.assertEqual(cb._open_spans, {})  # 重置发生在在途事件之后
 
+    def test_observer_stats_surfaces_dropped(self):
+        """#26：丢弃此前只有进程内计数——observer_stats 让宿主可上报/告警。"""
+        from plaita.obs import _ObserverWorker
+        import threading
+
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder, background=False)
+        self.assertIsNone(cb.observer_stats())  # 无后台队列
+
+        w = _ObserverWorker(queue_size=1, drain_timeout=0.5)
+        cb._worker = w
+        stats = cb.observer_stats()
+        self.assertEqual(stats, {"pending": 0, "dropped": 0, "queue_size": 1})
+
+        release = threading.Event()
+        w.submit(release.wait)
+        deadline = __import__("time").monotonic() + 2.0
+        while not (w._pending == 1 and w._queue.qsize() == 0) \
+                and __import__("time").monotonic() < deadline:
+            __import__("time").sleep(0.001)
+        w.submit(lambda: None)   # 入队
+        w.submit(lambda: None)   # 队满 → 丢弃
+        self.assertEqual(cb.observer_stats()["dropped"], 1)
+        release.set()
+        w.drain()
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

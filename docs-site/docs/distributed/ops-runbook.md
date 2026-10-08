@@ -39,6 +39,9 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_LEASE_TTL_SECONDS` | `120` | resume 租约 TTL |
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
+| `PLAITA_METRICS_PORT` | unset | worker 的 Prometheus 抓取端端口（unset/`0` = 不启动） |
+| `PLAITA_METRICS_HOST` | `0.0.0.0` | worker `/metrics` 监听地址 |
+| `PLAITA_ALERT_WEBHOOK` | unset | 死信/僵尸巡检事件的 JSON POST 出口 |
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
 | `PLAITA_NODES_WORKSPACE_ROOT` | 由 worker 推导（见下） | `writefile` 节点的写入根（jail） |
 | `PLAITA_ALLOW_UNRESTRICTED_WRITES` | unset | `=1` 关闭 writefile jail（仅单机信任部署） |
@@ -254,6 +257,43 @@ redis-cli KEYS 'plaita:execution:lease:*'
 
 **读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
 
+## 指标与告警（plaita#26） {#指标与告警}
+
+在此之前死信产生、队列积压、worker 全灭、观测丢弃**全是静默的**——没有指标
+端点、没有告警出口，值守只能靠人刷日志。现在两条出口：
+
+### `/metrics`（Prometheus 文本）
+
+| 端点 | 覆盖 | 鉴权 |
+|------|------|------|
+| worker `http://<host>:<PLAITA_METRICS_PORT>/metrics` | 本进程队列 `stream_length`/`pending`/`dlq_length` + 全部进程内计数器 + worker 存活/活跃任务数/draining/心跳时间戳 | 无（运维网内网面，勿暴露公网） |
+| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数 | 管理面 `X-Admin-API-Key` |
+
+`plaita_workers_registered_total` 归零 = worker 全灭。启动：
+
+```bash
+PLAITA_METRICS_PORT=9100 python -m plaita.server.flow_worker \
+    --redis-url "$PLAITA_REDIS_URL"          # 或 --metrics-port 9100
+```
+
+观测队列丢弃（Langfuse `background=True`）经 `LangfuseCallback.observer_stats()`
+读 `dropped`，宿主可自行转成指标/告警。
+
+### 告警 webhook
+
+设置 `PLAITA_ALERT_WEBHOOK` 后，死信（`dead_letter`）与僵尸巡检处置
+（`zombie_reaped`）事件以 JSON POST 发出：
+
+```json
+{"event": "dead_letter", "queue": "plaita:flow:queue:v2",
+ "dlq_key": "plaita:flow:queue:v2:dlq", "message_id": "1699-0",
+ "reason": "max_deliveries=5", "delivery_count": 5, "ts": 1699999999.5}
+```
+
+发送是**有界队列 + 后台线程**的 best-effort 旁路：webhook 端慢/挂不会反压队列
+消费，队列满或投递失败只计数（worker `/metrics` 的
+`plaita_alert_webhook_{sent,failed,dropped}_total` 可见）。
+
 ## 僵尸执行巡检 {#僵尸执行巡检}
 
 worker 崩溃后 pending 里的 start 任务重投会**另起全新执行**重跑，旧行永久停在
@@ -262,8 +302,13 @@ running 行标记为 error(`orphaned`)，供监控/人工复核：
 
 ```bash
 python scripts/reap_zombie_executions.py \
-    --redis-url "$PLAITA_REDIS_URL" --idle-minutes 60 [--dry-run]
+    --redis-url "$PLAITA_REDIS_URL" --idle-minutes 60 [--dry-run] \
+    [--alert-webhook "$PLAITA_ALERT_WEBHOOK"]
 ```
+
+`--alert-webhook`（缺省跟随 `PLAITA_ALERT_WEBHOOK`）在**真处置成功**后逐条
+POST `{"event": "zombie_reaped", ...}`；dry-run 不告警，告警通道故障不影响
+巡检推进（事件已落盘）。
 
 多租户按命名空间隔离，非 default 租户需对每个 `plaita:{tenant}` 各跑一次
 （`--namespace plaita:{tenant}`）。

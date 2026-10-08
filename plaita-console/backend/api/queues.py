@@ -40,6 +40,30 @@ class QueueDetailResponse(BaseModel):
     tasks: List[QueueTask]
 
 
+class DlqEntry(BaseModel):
+    """一条死信（DLQ 条目 payload 的信封字段）"""
+    dlq_id: str = Field(..., description="DLQ Stream 条目 id")
+    reason: str = Field(default="", description="死信原因")
+    source_stream: str = Field(default="", description="原队列 Stream")
+    source_id: str = Field(default="", description="原消息 id")
+    delivery_count: Optional[int] = Field(default=None, description="投递次数")
+    dead_lettered_at: Optional[float] = Field(default=None, description="死信 Unix 时间戳")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="原始任务负载")
+
+
+class DlqStream(BaseModel):
+    """单个 DLQ Stream 概览"""
+    name: str
+    length: int
+    entries: List[DlqEntry]
+
+
+class DlqListResponse(BaseModel):
+    """DLQ 列表响应"""
+    streams: List[DlqStream]
+    total: int
+
+
 # ============ 工具函数 ============
 
 def get_redis(request: Request) -> Redis:
@@ -57,12 +81,25 @@ def get_redis(request: Request) -> Redis:
 
 # ============ 已知队列列表 ============
 
+# 注意：DLQ（死信）键此前不在本表——队列页永远看不到死信堆积（#26），
+# 只能靠 redis-cli 才能发现。`<queue>:dlq` 由 task_queue.dlq_stream_key 生成。
 KNOWN_QUEUES = [
     "plaita:flow:queue",           # 流程任务队列
     "plaita:flow:queue:v2",        # 流程任务队列 v2（FlowWorker 实消费流）
+    "plaita:flow:queue:dlq",       # 上述队列的死信 Stream
+    "plaita:flow:queue:v2:dlq",    # v2 队列的死信 Stream
     "plaita:delay:queue",          # 延迟任务队列
     "plaita:redis_queue:*",        # Redis 队列服务
     "plaita:kafka_queue:*",        # Kafka 队列服务
+]
+
+DLQ_SUFFIX = ":dlq"
+
+# 显式登记的死信键：DLQ 是纯记录流，只在有死信时才被创建——空 DLQ 也保留
+# 零值行，页面才不缺行（否则「看不到」与「没有死信」无从区分）。
+KNOWN_DLQ_KEYS = [
+    "plaita:flow:queue:dlq",
+    "plaita:flow:queue:v2:dlq",
 ]
 
 
@@ -100,13 +137,13 @@ async def list_queues(
             queues.append(QueueInfo(
                 name=pattern,
                 length=0,
-                queue_type="stream" if pattern == "plaita:flow:queue" else "list",
+                queue_type="stream" if _is_stream_key(pattern) else "list",
             ))
             continue
         for key in keys:
             key_str = key if isinstance(key, str) else key.decode()
             length = _queue_length(key_str)
-            if length > 0 or key_str == "plaita:flow:queue":
+            if length > 0 or _is_stream_key(key_str):
                 queues.append(QueueInfo(
                     name=key_str,
                     length=length,
@@ -117,6 +154,66 @@ async def list_queues(
         queues=queues,
         total=len(queues)
     )
+
+
+def _is_stream_key(key: str) -> bool:
+    """已知的 Stream 键永远保留零值行——含 DLQ（#26）。"""
+    return key in ("plaita:flow:queue", "plaita:flow:queue:v2") or key.endswith(DLQ_SUFFIX)
+
+
+@router.get("/queues/dlq", response_model=DlqListResponse)
+async def list_dlq(
+    count: int = 20,
+    redis: Redis = Depends(get_redis)
+):
+    """死信总览（#26）：每个 DLQ Stream 的堆积量与最近若干条死信。
+
+    死信此前只有 worker 的 logger.error——值守看不到堆积，DLQ 被 XTRIM
+    裁掉旧条目也无人知晓。本端点把 DLQ 拉进看板。
+
+    - **count**: 每个 DLQ Stream 返回的最近条目数（默认 20）
+    """
+    count = max(0, min(int(count), 200))
+    names = set(KNOWN_DLQ_KEYS)
+    for key in redis.keys(f"*{DLQ_SUFFIX}"):
+        names.add(key if isinstance(key, str) else key.decode())
+
+    streams = []
+    for name in sorted(names):
+        if redis.type(name) != "stream":
+            streams.append(DlqStream(name=name, length=0, entries=[]))
+            continue
+        length = redis.xlen(name)
+        entries: List[DlqEntry] = []
+        if count:
+            # 取最近 count 条：XREVRANGE 从尾部倒序拿，再翻回时间正序
+            for msg_id, fields in reversed(redis.xrevrange(name, max="+", min="-", count=count)):
+                if isinstance(msg_id, bytes):
+                    msg_id = msg_id.decode()
+                envelope: Dict[str, Any] = {}
+                for k, v in fields.items():
+                    k_str = k.decode() if isinstance(k, bytes) else k
+                    if k_str == "payload":
+                        raw = v.decode() if isinstance(v, bytes) else v
+                        try:
+                            envelope = json.loads(raw)
+                        except Exception:
+                            envelope = {"raw": str(raw)}
+                        break
+                if not isinstance(envelope, dict):
+                    envelope = {"raw": envelope}
+                entries.append(DlqEntry(
+                    dlq_id=msg_id,
+                    reason=str(envelope.get("reason", "")),
+                    source_stream=str(envelope.get("source_stream", "")),
+                    source_id=str(envelope.get("source_id", "")),
+                    delivery_count=envelope.get("delivery_count"),
+                    dead_lettered_at=envelope.get("dead_lettered_at"),
+                    payload=envelope.get("payload") or {},
+                ))
+        streams.append(DlqStream(name=name, length=length, entries=entries))
+
+    return DlqListResponse(streams=streams, total=len(streams))
 
 
 @router.get("/queues/{queue_name:path}", response_model=QueueDetailResponse)

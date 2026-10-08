@@ -170,7 +170,9 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | `/api/executions` | GET | 获取执行列表 |
 | `/api/executions` | POST | 启动新执行 |
 | `/api/executions/{id}` | DELETE | 取消执行 |
-| `/api/queues` | GET | 获取队列状态 |
+| `/api/queues` | GET | 获取队列状态（含死信 DLQ 键） |
+| `/api/queues/dlq` | GET | 死信总览：各 DLQ Stream 堆积量与最近条目（`?count=`） |
+| `/api/metrics` | GET | 集群 Prometheus 文本：队列积压 / DLQ 堆积 / 存活 worker 数 |
 | `/api/logs` | GET | 获取日志 |
 | `/api/logs/stream` | GET (SSE) | 实时日志流 |
 | `/api/flows` | GET / POST | 流程列表 / 新建流程 |

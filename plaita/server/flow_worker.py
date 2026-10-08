@@ -36,6 +36,14 @@ from plaita.logger import logger
 from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 from plaita.server.control import ControlMixin, ControlListener
+from plaita.server.alerts import WebhookAlerter
+from plaita.server.metrics import (
+    Metric,
+    MetricsHttpServer,
+    collect_queue_metrics,
+    collect_worker_metrics,
+    render_prometheus,
+)
 from plaita.server.log_handler import setup_redis_logging
 from plaita.server.node_timings import NodeTimingCallback
 from plaita.server.task_queue import (
@@ -95,6 +103,26 @@ def _affinity_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_AFFINITY")
 
 
+def _metrics_port_from_env() -> int:
+    """``/metrics`` 抓取端端口（#26）；未配置 / 非法 = 0 = 不启动。"""
+    raw = (os.environ.get("PLAITA_METRICS_PORT") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("PLAITA_METRICS_PORT=%r 非法，已禁用 /metrics 端点", raw)
+        return 0
+
+
+def _metrics_host_from_env() -> str:
+    return (os.environ.get("PLAITA_METRICS_HOST") or "").strip() or "0.0.0.0"
+
+
+def _alert_webhook_from_env() -> Optional[str]:
+    return (os.environ.get("PLAITA_ALERT_WEBHOOK") or "").strip() or None
+
+
 def _paused_sweeper(max_age_secs: int = 6 * 3600):
     """准备「暂停沙箱清扫」：**全部 import 在主线程完成**，返回无 import 的闭包。
 
@@ -107,8 +135,9 @@ def _paused_sweeper(max_age_secs: int = 6 * 3600):
     _preserve_scene），没人续跑的暂停实例会累积占实例配额（AGS ~20；暂停不计
     计算力费，但配额满会让新建失败）。
 
-    返回 ``None`` 表示无需/不可清扫（未装 plaita-nodes、无注册表、无 ags driver、
-    缺 e2b）；任何异常只告警，绝不拦启动。
+    返回 ``None`` 表示无需/不可清扫（未装 plaita-nodes、无注册表、无 ags driver）。
+    e2b 预导入是尽力而为的加速项，失败不算「不可清扫」——缺装时照常交出闭包，
+    由驱动内部再导入时自报错并吞掉；任何异常只告警，绝不拦启动。
     """
     try:
         from plaita_nodes import sandbox as _sb
@@ -118,10 +147,14 @@ def _paused_sweeper(max_age_secs: int = 6 * 3600):
         drv = _sb.get_driver("ags")
         if drv is None or not hasattr(drv, "sweep_paused"):
             return None
-        import e2b_code_interpreter  # noqa: F401 — 预导入（sweep 内部再取时已缓存）
     except Exception as exc:  # noqa: BLE001 — 清扫失败不影响启动
         logger.warning("沙箱清扫准备失败（忽略）：%s", exc)
         return None
+
+    try:
+        import e2b_code_interpreter  # noqa: F401 — 预导入（sweep 内部再取时已缓存）
+    except Exception as exc:  # noqa: BLE001 — 缺装只退化为驱动内部导入
+        logger.warning("e2b 预导入失败（忽略，清扫仍会尝试）：%s", exc)
 
     def _run() -> list:
         try:
@@ -1933,6 +1966,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         watchdog_interval_seconds: Optional[float] = None,
         cancel_poll_seconds: Optional[float] = None,
         residue_sweep_interval_seconds: Optional[float] = None,
+        metrics_port: Optional[int] = None,
+        metrics_host: Optional[str] = None,
+        alert_webhook: Optional[str] = None,
     ):
         redis_client = redis_client or Redis.from_url(redis_url)
         super().__init__(
@@ -1966,6 +2002,19 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._max_deliveries = max_deliveries
         self._dlq_key = dlq_key
         self._task_queue: Optional[RedisStreamTaskQueue] = None
+
+        # #26 观测导出：``/metrics`` 抓取端（0 = 不启动）与死信告警 webhook。
+        # 队列计数器（enqueued/acked/dead_lettered…）是**进程内**状态，只有
+        # worker 自己持有——console 无法代它导出，故端点必须跑在本进程里。
+        self._metrics_port = (
+            _metrics_port_from_env() if metrics_port is None else max(0, int(metrics_port))
+        )
+        self._metrics_host = metrics_host or _metrics_host_from_env()
+        self._metrics_server: Optional[MetricsHttpServer] = None
+        self._alert_webhook = (
+            alert_webhook if alert_webhook is not None else _alert_webhook_from_env()
+        )
+        self._alerter: Optional[WebhookAlerter] = None
 
         # 租约看门狗（波次② §4.1）：登记活跃 (execution_id → 租约值串/
         # FlowExecution/租户)，每 watchdog_interval_seconds（默认 TTL/3）
@@ -2056,8 +2105,20 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 in inspect.signature(RedisStreamTaskQueue.__init__).parameters
             ):
                 kwargs["dead_letter_guard"] = self._dead_letter_guard
+            # #26 死信告警接线：同样按签名探测向后兼容（并行合入期的旧队列类
+            # 不收该参数）。
+            if (
+                "on_dead_letter"
+                in inspect.signature(RedisStreamTaskQueue.__init__).parameters
+            ):
+                kwargs["on_dead_letter"] = self._on_dead_letter
             self._task_queue = RedisStreamTaskQueue(self.redis_client, self.queue_name, **kwargs)
         return self._task_queue
+
+    def _on_dead_letter(self, event: Dict[str, Any]) -> None:
+        """死信事件出口：未配置 webhook 时空操作（只保留原始 error 日志）。"""
+        if self._alerter is not None:
+            self._alerter.send(event)
 
     def _dead_letter_guard(self, task: StreamTask) -> bool:
         """死信守卫（Track B 契约）：True=允许死信；False/抛异常=跳过。
@@ -2441,7 +2502,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             self.register_service()
             # 启动控制监听
             self.start_control_listener()
-        
+
+        # #26 观测导出：/metrics 抓取端 + 死信告警 webhook（未配置 = 无操作）
+        self._start_metrics_server()
+        self._start_alerting()
+
         logger.info(
             "流程工作器已启动，监听 stream: %s (group=%s, consumer=%s, concurrency=%d)",
             self.queue_name,
@@ -2715,6 +2780,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 停止取消监听（波次③）
         self._stop_cancel_watcher()
 
+        # 停止 #26 观测导出（抓取端线程 + 告警 webhook 后台线程）
+        self._stop_metrics_server()
+        self._stop_alerting()
+
         # 停止控制监听
         if self._enable_registry:
             self.stop_control_listener()
@@ -2761,6 +2830,83 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         except Exception as exc:
             status["queue_error"] = str(exc)
         return status
+
+    # ---------------------------------------------------------- #26 观测导出
+
+    def metrics_text(self) -> str:
+        """Prometheus 文本快照（``/metrics`` 每次抓取时调用）。
+
+        队列 stats 读失败（Redis 瞬断）不整单 500：退化为只报 worker 自身
+        指标——抓不到队列读数本身也是信号，不该让整张看板空白。
+        """
+        try:
+            stats = self._get_task_queue().stats()
+        except Exception as exc:
+            logger.warning("读取队列 stats 失败（/metrics 仅返回 worker 指标）: %s", exc)
+            stats = {"stream_key": self.queue_name}
+        metrics = collect_queue_metrics(stats)
+        service_info = getattr(self, "_service_info", None)
+        heartbeat = None
+        if service_info is not None and service_info.last_heartbeat:
+            try:
+                heartbeat = datetime.fromisoformat(service_info.last_heartbeat).timestamp()
+            except ValueError:
+                heartbeat = None
+        metrics.extend(collect_worker_metrics(
+            active_tasks=self._active_task_count,
+            draining=self._drain_event.is_set(),
+            running=self._running,
+            heartbeat_timestamp=heartbeat,
+            instance=self._resolve_consumer_name(),
+            registered=service_info is not None,
+        ))
+        if self._alerter is not None:
+            alert_stats = self._alerter.stats()
+            for key, help_text in (
+                ("sent", "已成功投递的告警数"),
+                ("failed", "投递失败的告警数"),
+                ("dropped", "告警队列满而丢弃的事件数"),
+                ("pending", "告警队列中待投递的事件数"),
+            ):
+                metrics.append(Metric(
+                    f"alert_webhook_{key}_total" if key != "pending" else "alert_webhook_pending",
+                    alert_stats[key],
+                    {},
+                    "counter" if key != "pending" else "gauge",
+                    help_text,
+                ))
+        return render_prometheus(metrics)
+
+    def _start_metrics_server(self) -> None:
+        """按配置起 ``/metrics`` 抓取端（未配置端口 = 无操作）。"""
+        if self._metrics_port <= 0 or self._metrics_server is not None:
+            return
+        try:
+            self._metrics_server = MetricsHttpServer(
+                self.metrics_text, host=self._metrics_host, port=self._metrics_port
+            )
+            self._metrics_server.start()
+        except Exception as exc:  # noqa: BLE001 - 端口占用等不得拖垮 worker 启动
+            self._metrics_server = None
+            logger.error("启动 /metrics 抓取端失败（端口 %s）: %s", self._metrics_port, exc)
+
+    def _stop_metrics_server(self) -> None:
+        if self._metrics_server is not None:
+            server, self._metrics_server = self._metrics_server, None
+            server.stop()
+
+    # ------------------------------------------------------------------ 告警
+
+    def _start_alerting(self) -> None:
+        """配置了 webhook 才建 alerter（未配置 = 死信只走日志，存量行为）。"""
+        if self._alert_webhook and self._alerter is None:
+            self._alerter = WebhookAlerter(self._alert_webhook)
+            logger.info("死信告警 webhook 已启用: %s", self._alert_webhook)
+
+    def _stop_alerting(self) -> None:
+        if self._alerter is not None:
+            alerter, self._alerter = self._alerter, None
+            alerter.close()
 
 # 新增命令行入口
 
@@ -2863,6 +3009,14 @@ def main():
                         help="关闭 INFO 级控制台日志（等价 PLAITA_LOG_LEVEL=WARNING）")
     parser.add_argument("--heartbeat-interval", type=int, default=10,
                       help="心跳间隔(秒)")
+    parser.add_argument("--metrics-port", type=int,
+                      default=_metrics_port_from_env(),
+                      help="Prometheus /metrics 抓取端端口（默认跟随 PLAITA_METRICS_PORT；"
+                           "0 = 不启动）。暴露 stream/pending/dlq/计数器/心跳")
+    parser.add_argument("--metrics-host", default=_metrics_host_from_env(),
+                      help="/metrics 抓取端监听地址（默认 0.0.0.0 或 PLAITA_METRICS_HOST）")
+    parser.add_argument("--alert-webhook", default=_alert_webhook_from_env(),
+                      help="死信告警 webhook URL（JSON POST）；默认跟随 PLAITA_ALERT_WEBHOOK")
     parser.add_argument("--langfuse", action="store_true", default=None,
                         help="启用 Langfuse 观测（需 pip install plaita[langfuse]；"
                              "凭据走 LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST 环境变量）。"
@@ -2982,6 +3136,9 @@ def main():
             dlq_key=args.dlq_key or None,
             read_block_ms=args.read_block_ms,
             concurrency=args.concurrency,
+            metrics_port=args.metrics_port,
+            metrics_host=args.metrics_host,
+            alert_webhook=args.alert_webhook or None,
         )
         
         # 注册信号处理器以支持优雅关闭。只置位、由 run() 主循环在任务边界
