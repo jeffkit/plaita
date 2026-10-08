@@ -13,14 +13,14 @@
 | 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **1**） | 连续推进每步写盘；崩溃不丢步进进度 |
 | 挂起 / 结束 / 出错 | **立即** `save_execution_state`；返回 False（Redis 后端吞异常的失败形态）即抛 `StatePersistError`，消息**不** ack 走重投 | 落盘失败不再静默成僵尸执行（2026-10 评审修复；start 路径此前已检查，其余调用点统一收口 `_persist_state_or_raise`） |
 | 挂起服务任务派发 | `rpush` 到 `plaita:{subtype}:queue` 失败（有 redis 时）抛 `ServiceDispatchError`；suspended 状态保留、消息重投后重新执行挂起节点再派发 | 重投会重复注册订阅——EventFilter 终态 GC 只回收终态，孤儿订阅留到 TTL 过期（可接受） |
-| 并发 resume | Redis `SET NX EX` lease（`plaita.server.execution_lease`） | 同一 `execution_id` 最多一个 resume；抢租约失败的任务**不** XACK，待 TTL 过期后 reclaim |
+| 并发 start / resume | Redis `SET NX EX` lease（`plaita.server.execution_lease`） | 同一 `execution_id` 最多一个推进者——start 与 resume 同一套租约：start 从落 running 行前 acquire、处理结束 finally 释放，因此长任务的 start 消息被 XCLAIM 重派后，重派者拿不到租约、消息被 ack 释放（#23）。抢租约失败的任务**不**烧 delivery（ack 释放） |
 | 控制面 | Registry / Control / Log / Queue / EventFilter 硬绑 Redis | 换 EventBus 后端 ≠ 换部署拓扑 |
 
 选型含义：
 
 - 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受**重复投递**（幂等 resume）的场景。
 - 不适合：把「恰好一次」「自动故障转移」「金融级幂等」当默认承诺的场景——副作用仍须幂等。
-- **崩溃恢复的如实语义（2026-09 实测）**：worker 崩溃后 pending 里的 start 任务被重投时，会**创建全新执行从头重跑**（新 execution_id，即从首节点起全部节点重跑——**首节点必须幂等**）——每步落盘的 checkpoint 不会被 start 任务消费；旧执行会停留在 `running` 状态，需要运维侧用 [`scripts/reap_zombie_executions.py`](ops-runbook.md#僵尸执行巡检) 巡检清理（租约在则跳过、条件写落盘——单看 `last_update_time` 会误杀长节点）。resume 任务的重投是安全的：终态执行会被幂等短路（原样返回，不再推进，也不会被改写状态）。
+- **崩溃恢复的如实语义（2026-10 更新，#23）**：worker 崩溃后 pending 里的 start 任务被重投时，会**创建全新执行从头重跑**（新 execution_id，即从首节点起全部节点重跑——**首节点必须幂等**）——每步落盘的 checkpoint 不会被 start 任务消费；旧执行会停留在 `running` 状态，需要运维侧用 [`scripts/reap_zombie_executions.py`](ops-runbook.md#僵尸执行巡检) 巡检清理（租约在则跳过、条件写落盘——单看 `last_update_time` 会误杀长节点）。**存活持有者不会被重派双跑**：start 消息被 XCLAIM 重派后，重派者因租约被原持有者持有而拿不到租约、消息被 ack 释放（#23）；只有持有者真死（租约过期）后重投才会从头重跑。resume 任务的重投是安全的：终态执行会被幂等短路（原样返回，不再推进，也不会被改写状态）。
 
 CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）、`--max-deliveries`（默认 5）、`--dlq-key`。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容）。
 
@@ -29,10 +29,13 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
 一条任务从被 `XREADGROUP` 读到 `XACK` 前一直留在 consumer group 的 pending
 列表。**单个步骤**执行超过 `--claim-min-idle-ms`（默认 60000ms）后，这条
 「仍在处理中」的消息就对其他 consumer 的 XCLAIM 回收可见——回收本身不是
-故障，双跑由 resume 租约拦截：
+故障，双跑由执行租约拦截（**start 与 resume 同一套租约**，#23）：
 
-1. 抢到消息的 worker resume 时拿不到租约 → `ExecutionLeaseError`，消息
-   **不 ack** 留在 pending（计一次 `lease_conflicts`）；
+1. start：`start_flow` 在落 running 行**之前** acquire，持有整个处理窗口；
+   resume：`resume_flow` 在推进前 acquire。重派/并发消息的持有者拿不到
+   租约 → `ExecutionLeaseError`，消息被 **ack 释放**（持租约的活 worker 在
+   正常推进，重投载体已无意义；2026-10-06 修，避免对端每 60s XCLAIM 烧
+   delivery 到死信）；
 2. 持租约的活 worker 由看门狗每 lease TTL/3（默认 120s → 40s）续租，步骤
    执行期间租约不会过期——XCLAIM 真正接手的只有已死 worker 的消息；
 3. 退化路径：`PLAITA_DISABLE_LEASE_WATCHDOG=1` 且单步超过 lease TTL 时，
@@ -42,6 +45,10 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
 
 因此调小 `claim_min_idle_ms` 只加快「死 worker 消息」的回收，不会中断活
 worker 的执行；调大到超过最长步骤耗时，可减少 `lease_conflicts` 噪音。
+**对 start 同样成立**：无租约时代的「数小时 run 消费 60s 后被空闲 worker
+重派、整条 flow 从头双跑」已被租约窗口根除（#23）；持有者死亡后重派消息
+照常取得租约接管——start 的接管点是从头重跑（checkpoint 由后续 resume
+消费），租约只保证「同一时刻至多一个推进者」。
 
 **死信守卫**：超过 `--max-deliveries` 的消息进 DLQ 前，先查消息体
 `execution_id` 的执行状态与 resume 租约（键 `{ns}:execution:lease:{id}`，`ns` 按消息体
@@ -119,9 +126,14 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   释放后重新认领、按新启动继续（首节点可能重跑——首节点须幂等仍是既有约定）；
   G1 先行落行后该窗口已收窄到极小；命中 running 的重入队 resume 对
   context={} 的先行行同样正确（无 last_node_id → 从首节点步进）；
+  重入队的 resume 若与原 start 持有者并发，由执行租约串行化（#23）；
 - **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
   不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
   为重复启动而永不执行。键按租户隔离，7 天过期。
+- **调度服务是唯一的自动加键方**（#23）：`fire_schedule`（cron 循环与 console
+  「立即触发」共用）以确定性键 `sched:{schedule_id}:{触发时点秒}` 入队——
+  同一次到期的消息重派/重投收敛到同一 execution，不产生平行执行；下一次
+  cron 到期时间戳不同，不会被误吞。手动 `POST /executions` 仍不自动加键。
 
 
 ## 职责

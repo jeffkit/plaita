@@ -1148,7 +1148,10 @@ class FlowWorker:
                 "error": getattr(state, "error", None),
             }
         if status == "running":
-            # 崩溃/重试搁浅的 start：重入队 resume 接续执行（lease 保证串行）
+            # 崩溃/重试搁浅的 start：重入队 resume 接续执行。若原 start 持有者
+            # 仍在推进，重入队的 resume 会被执行租约拦下（ExecutionLeaseError，
+            # run() 对该分支 ack 释放）；持有者已死则租约过期后由重入队的
+            # resume 从 checkpoint 接管——两条路都不产生并发推进（#23）。
             redis_client = getattr(self, "redis_client", None)
             queue_name = getattr(self, "queue_name", None)
             if redis_client is not None and queue_name:
@@ -1228,6 +1231,12 @@ class FlowWorker:
         """
         启动流程执行
 
+        全程持有 ``execution_id`` 执行租约（先行落 running 行之前取得，处理
+        结束 finally 释放）：队列按 ``claim_min_idle_ms``（默认 60s）把长任务
+        的 pending 消息 XCLAIM 重派给空闲 worker——无租约的 start 在多 worker
+        池下跑超过 60s 必被重派双跑（#23）。另一 worker 已持租约（消息重派/
+        并发投递）时抛 ``ExecutionLeaseError``，本消息不 ack 留待处理。
+
         Args:
             flow_id: 流程ID
             params: 流程输入参数
@@ -1305,7 +1314,6 @@ class FlowWorker:
                 start_time=datetime.now().isoformat(),
                 invoker="worker"
             )
-            self._persist_state_or_raise(execution_id, state, "start")
 
             # start 入口取消检查点（与 resume 入口对称）：BFF cancel 可发生在
             # 「已入队、未消费」窗口，更关键的是 start 消息 at-least-once 重投
@@ -1324,15 +1332,18 @@ class FlowWorker:
                     "cancelled_at_start": True,
                 }
 
-            # 执行流程，获取初始结果
-            # 租约（A′，2026-10-06）：start 路径此前**不持租约**——resume 有、
-            # start 无。三后果实证（plaita#41 多机验证）：
+            # 租约（#23 扩展 A′）：**在落 running 行之前 acquire**，持有整个
+            # start 处理窗口。A′（2026-10-06）只把租约对齐到 run_distributed
+            # 之前，仍在先行落行**之后**——「落行 → acquire」间可被别的 worker
+            # 抢先 XCLAIM 同一 start 消息（>claim_min_idle_ms 即可），抢占者
+            # 先 acquire 成租约，原持有者 acquire 失败礼貌退出，但其 running
+            # 行已被抢占者覆写。移动到落行前同时消除 A′ 的三个后果：
             # ①多 worker 抢到同一 start 消息时无闸可拦，双方同时跑同 id（双跑）；
             # ②死信守卫按「租约是否被持有」判活，start 执行恒"租约空"→ 长步
             #   误判持有者已死 → 误死信 + 重入队，长任务被反复打断；
             # ③抢占者白烧 5 次 delivery 配额。
-            # 对齐 resume：acquire → 看门狗续租 → finally 释放。acquire 失败
-            # 即抛 ExecutionLeaseError（run() 走不 ack/重投语义），抢占者礼貌退出。
+            # acquire 失败即抛 ExecutionLeaseError（run() 走不 ack/重投语义），
+            # 抢占者礼貌退出；原持有者凭租约独占，重派者无法落行。
             holder = new_holder_token(prefix="start")
             lease_value, fence_token = self._acquire_lease(execution_id, holder)
             if lease_value is None:
@@ -1343,6 +1354,10 @@ class FlowWorker:
             fence_token_reset = None
             if fence_token is not None:
                 fence_token_reset = set_current_fence_token(fence_token)
+
+            # 落 running 行（持租约窗口内）：与本执行此后所有写同 fence 世代，
+            # 不会被后续接管者的 fenced CAS 拒绝序列排斥。
+            self._persist_state_or_raise(execution_id, state, "start")
 
             # 取消监听（波次③）：登记整个推进窗口——取消标志键命中即在途节点被
             # execution.cancel() 中止（code 沙箱当场 killpg；协作节点如 agentrun
@@ -1369,8 +1384,9 @@ class FlowWorker:
 
         except (NodeExecutionRetryableError, ServiceDispatchError, ExecutionLeaseError):
             # 节点级可重试失败（波次二任务①）/ 幂等命中后重入队 resume 失败
-            # （波次二任务③）/ **租约被他人持有**（A′，2026-10-06）：原样上抛给
-            # run() 按不 ack 语义处理——ExecutionLeaseError 尤其关键：run() 的
+            # （波次二任务③）/ **租约被他人持有**（A′ + #23，租约覆盖整个
+            # start 窗口含先行落行）：原样上抛给 run() 按不 ack 语义处理——
+            # ExecutionLeaseError 尤其关键：run() 的
             # `except ExecutionLeaseError` 分支据此 note_lease_conflict 并把消息
             # 留在 pending 等租约过期后 reclaim；若被下方通用 except 包成
             # RuntimeError，run() 会误 ack 消息 → 抢占者把别人的活执行 ack 掉，
@@ -1379,7 +1395,7 @@ class FlowWorker:
 
         except Exception as e:
             logger.error("执行流程出错: %s", e, exc_info=True)
-            # 波次③步内取消：start 路径（无租约）首个节点在途命中取消监听 →
+            # 波次③步内取消：start 路径首个节点在途命中取消监听 →
             # 引擎自 run_distributed 归一化抛出（挂 __cause__）或协作节点自杀
             # 抛普通异常。两条判据任一命中即终态化 cancelled，绝不包成
             # RuntimeError 让执行停在 running（取消是控制面意图）。

@@ -99,6 +99,16 @@ def fire_schedule(
     version = schedule.get("version")
     if version:
         message["version"] = version
+    # 确定性幂等键（#23）：start 消息此前无 execution_id 也无 dedup_key，
+    # 消息被 XCLAIM 重派后 worker 就地铸造新 id——同一逻辑 run 出现两个平行
+    # 执行、整条 flow 从头双跑。键 = schedule_id + 触发时点（epoch 秒）：
+    # 同一次到期的重投/重派消息收敛到同一 execution；下一次 cron 到期时间戳
+    # 必然不同，不会误吞后续周期（worker 侧 SET NX EX 7d 认领，见
+    # FlowWorker._claim_start_dedup）。时间戳取秒级：cron 语义最小粒度是分钟，
+    # 秒级已足够区分两次到期，且对时钟小幅回拨容忍。
+    message["dedup_key"] = "sched:{schedule_id}:{fired_at}".format(
+        schedule_id=schedule_id, fired_at=now_ms // 1000
+    )
 
     try:
         # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
@@ -114,6 +124,7 @@ def fire_schedule(
         "trigger_kind": trigger_kind,
         "flow_id": schedule["flow_id"],
         "version": schedule.get("version") or "",
+        "dedup_key": message["dedup_key"],
         "enqueue": "ok" if enqueue_ok else "failed",
         "msg_id": msg_id or "",
     }
