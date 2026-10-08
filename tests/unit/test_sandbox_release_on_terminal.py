@@ -85,6 +85,36 @@ class TestTerminalSandboxRelease:
         second = worker._sandbox_lifecycle_for("e1")
         assert first is second is fake
 
+    def test_startup_sweep_is_best_effort_and_only_own(self, monkeypatch):
+        """启动清扫：只清自家超龄暂停实例；未装/无注册表/异常都静默不拦启动。"""
+        from plaita.server import flow_worker as fw
+        import plaita_nodes.sandbox as pns
+
+        # 无沙箱注册表 → 不做任何事
+        monkeypatch.setattr(pns, "load_sandboxes", lambda repo=None: {})
+        assert fw.sweep_paused_sandboxes() == []
+
+        # 有注册表 + 有 ags driver → 用 driver 的 sweep_paused（超龄阈值透传）
+        calls = {}
+
+        class _FakeDriver:
+            def sweep_paused(self, max_age_secs=0):
+                calls["age"] = max_age_secs
+                return ["swept-1"]
+
+        monkeypatch.setattr(pns, "load_sandboxes", lambda repo=None: {"ags": object()})
+        monkeypatch.setattr(pns, "get_driver", lambda name: _FakeDriver())
+        assert fw.sweep_paused_sandboxes(max_age_secs=123) == ["swept-1"]
+        assert calls["age"] == 123
+
+        # driver 抛错 → 吞掉返回空（绝不拦启动）
+        class _Boom:
+            def sweep_paused(self, max_age_secs=0):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(pns, "get_driver", lambda name: _Boom())
+        assert fw.sweep_paused_sandboxes() == []
+
     def test_no_snapshots_in_context_is_silent(self, monkeypatch):
         fake = _FakeLifecycle()
         worker = _worker(monkeypatch, fake)

@@ -95,6 +95,31 @@ def _affinity_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_AFFINITY")
 
 
+def sweep_paused_sandboxes(max_age_secs: int = 6 * 3600) -> list:
+    """启动一次性清扫：回收超龄仍 PAUSED 的自家沙箱实例（配额安全带）。
+
+    为什么：失败/取消路径改为一律 pause 保现场后（sandbox_agent._preserve_scene），
+    没人续跑的暂停实例会累积并占实例配额（AGS ~20；暂停不计计算力费，但配额满会让
+    新建失败）。plaita-nodes 为可选依赖：未装/无注册表/无 ags driver 时静默返回空；
+    任何异常只告警——清扫失败绝不能影响 worker 启动。
+    """
+    try:
+        from plaita_nodes import sandbox as _sb
+        if not _sb.load_sandboxes():
+            return []
+        import plaita_nodes.sandbox_ags  # noqa: F401 — import 即注册 ags driver
+        drv = _sb.get_driver("ags")
+        if drv is None or not hasattr(drv, "sweep_paused"):
+            return []
+        killed = drv.sweep_paused(max_age_secs=max_age_secs)
+        if killed:
+            logger.info("启动清扫：回收超龄暂停沙箱 %d 个：%s", len(killed), killed)
+        return killed
+    except Exception as exc:  # noqa: BLE001 — 清扫失败不影响启动
+        logger.warning("启动清扫沙箱失败（忽略）：%s", exc)
+        return []
+
+
 def _deny_repos() -> set:
     """本机拒跑仓名单（2026-10-07）：PLAITA_WORKER_DENY_REPOS=<仓名,仓名…>。
 
@@ -2865,7 +2890,11 @@ def main():
     # 后端白名单由 PLAITA_SANDBOX_ALLOWED_BACKENDS 配置（见 _register_code_node_for_worker）。
     if _code_node_enabled():
         _register_code_node_for_worker()
-    
+
+    # 沙箱暂停实例清扫（启动一次性、后台线程，见 sweep_paused_sandboxes 的说明）
+    threading.Thread(target=sweep_paused_sandboxes, name="sandbox-sweep",
+                     daemon=True).start()
+
     # 处理注册开关
     enable_registry = args.enable_registry and not args.no_registry
     
