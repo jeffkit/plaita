@@ -140,6 +140,8 @@ flow = flow_from_source(src)
 
 > **逐节点 `sandbox_backend` 会被运营者白名单拦下**：worker / console 启动时按 `PLAITA_SANDBOX_ALLOWED_BACKENDS`（未配置 → `docker` ∪ 生效默认后端）施加白名单，流程 JSON 声明的后端（含 `CODE(..., sandbox_backend="unsafe")`）落在白名单外是**解析期报错**——不要在业务 flow 里声明后端档位，确需弱后端请让运营者显式放行（见运维 Runbook「code 沙箱后端白名单」）。
 
+> **`language="js"` 默认被拒**（plaita#29）：语言白名单默认只放行 `python`，js 节点在**解析期**报错（`language='js' is not allowed by the operator`）。js 此前绕开整个档位体系（无隔离/无超时/无取消），故改为运营者经 `PLAITA_SANDBOX_ALLOWED_LANGUAGES=python,js` 显式放行；放行后 js 仍按 `sandbox_backend` 走档位（`restricted` 没有 js 实现）。业务 flow 的轻逻辑一律写 python，不要用 js。
+
 > **`F.*` 扩展现状**：注册自定义表达式函数目前**没有公开 API**（mediaflow 用 `ExpressionParser._registry.register` 私有口，见其 `expressions.py`，脆弱）。新业务仓优先用 CODE 节点 / 业务节点替代；确需 `F.*` 时集中在一个 `expressions.py` 并注释私有 API 风险。
 
 ### 5.2 沙箱执行（agentrun + workspace，coding 场景）

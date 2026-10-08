@@ -60,6 +60,35 @@
   run_dir 不在默认根内），设 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` 回到历史
   行为——该开关只该用于单机信任环境。
 
+### js 语言接入沙箱档位体系 + 语言白名单默认只放行 python（plaita#29）
+
+`language: "js"` 此前**完全绕开**沙箱档位：`Runners` 命中即走 PyExecJS（subprocess
+拉起外部 JS 引擎，CommonJS `require` 可用），无 timeout、无 cancel，而
+`sandbox_backend` / `allowed_backends` / `_PYTHON_BACKENDS` 全部只作用于 Python。
+运营者配了 `allowed_backends=("docker",)`，流程作者写一行 `language: "js"` 仍能在
+宿主上执行任意代码（可读 worker 全量 env），死循环 JS 还会挂死 worker 步骤。
+
+- 变更前：js 忽略 `sandbox_backend`，一律 PyExecJS 裸跑。
+- 变更后（两层）：
+  1. **语言白名单默认 fail-closed**：`register_code_node(allowed_languages=...)`
+     默认 `("python",)`，js 节点在**解析期**被拒
+     （`language='js' is not allowed by the operator`）。worker / console 经
+     `PLAITA_SANDBOX_ALLOWED_LANGUAGES`（逗号/冒号/空白分隔，未配置 → 只 python）
+     配置，放行 js 时启动日志打 WARNING。
+  2. **js 按 `sandbox_backend` 走档位表**：`docker`（`node:20-alpine` 容器，
+     `--network none` / 只读 FS / 资源与 pids 上限）/ `subprocess`
+     （`node -e`，10s 墙钟 + env 白名单 + 超时或取消时整组击杀）/ `unsafe`
+     （历史 PyExecJS，无隔离无超时）。`restricted` 没有 js 实现，声明它会在解析期
+     报错（不静默降级）。可用 `PLAITA_SANDBOX_DOCKER_NODE_IMAGE` /
+     `PLAITA_SANDBOX_NODE_BIN` 指向内网镜像或自定义 node。
+- 迁移：含 js 节点的部署显式放行——`PLAITA_SANDBOX_ALLOWED_LANGUAGES=python,js`
+  （并确保生效后端有 node：docker 需预拉 `PLAITA_SANDBOX_DOCKER_NODE_IMAGE`，
+  subprocess 需 PATH 上有 node）。不需要 js 的部署保持默认即可。库调用方自己接线时用
+  `register_code_node(allowed_languages=(...))`，或经
+  `plaita.node.resolve_sandbox_allowed_languages()` 取同一口径。同时
+  `register_runner()` 不再能替换内置语言 `python` / `js`（会抛 `ValueError`）——
+  内置语言必须走档位表；自定义语言不受语言白名单约束。
+
 ### code 沙箱后端白名单在生产入口默认开启（plaita#22）
 
 `CodeNode.sandbox_backend` 由**流程 JSON** 逐节点声明，而流程 JSON 来自流程作者：

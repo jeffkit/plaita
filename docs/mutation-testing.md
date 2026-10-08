@@ -1195,6 +1195,10 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 9. ~~`dsl/codeflow/_stmt.py`~~ → **95.2%**（§2.27；剩 24 等价/边界）
 10. **扩面（可选）**：`codeflow/_source.py`
 11. **基建**：recheck 须在 `mutants/` 内用 `tests/...` 路径（§2.20）
+12. **待重跑**：`node/code.py`（§阶段二基线 100% / 369 是 plaita#29 之前的
+    口径）——#29 新增 js 的 subprocess/docker 档位、语言白名单与共享容器层，
+    新增变异点由 `tests/unit/test_issue29_js_sandbox.py` 覆盖（含 mock 断言
+    与 node 可用时的真跑），下次单模块重跑时按 §7.2 更新基线表分数。
 
 ### 7.4 硬约束（违反则分数不可信）
 

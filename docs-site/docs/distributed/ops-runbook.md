@@ -101,6 +101,39 @@ PLAITA_SANDBOX_ALLOWED_BACKENDS=docker PLAITA_CODE_BACKEND=docker \
 未显式配置时的默认档已经挡住 `unsafe` 与 `restricted`；`subprocess` 只在它是生效
 默认后端时可用（worker 默认档即如此）。
 
+## code 语言白名单（plaita#29 起默认只放行 python） {#code-语言白名单}
+
+`language: "js"` 曾**完全绕开**上面那套档位：js 一律走 PyExecJS（subprocess 拉起外部
+JS 引擎，CommonJS `require` 可用），既不看 `sandbox_backend`，也没有超时/取消——
+后端白名单只拦 Python。运营者把后端收敛到 `docker` 也拦不住一行 `language: "js"`。
+
+现在语言与后端是两个独立维度，且语言默认 **fail-closed**：
+
+1. **语言白名单**：worker / console 经 `PLAITA_SANDBOX_ALLOWED_LANGUAGES`
+   （逗号 / 冒号 / 空白分隔的语言名）配置，未配置 → 只放行 `python`；`python`
+   （`CodeNode` 的默认语言）始终保留。白名单外的语言在**解析期**被拒
+   （`language='js' is not allowed by the operator`）。放行 `js` 时启动日志打 WARNING。
+2. **语言 × 后端档位**：放行 js 后它同样受 `PLAITA_SANDBOX_ALLOWED_BACKENDS` 约束，
+   且 `restricted` 没有 js 实现（RestrictedPython 是 Python 专用 AST 沙箱），
+   声明的后端无该语言实现时解析期报错，**不静默降级**。
+
+js 各档位对应：`docker` 跑 `PLAITA_SANDBOX_DOCKER_NODE_IMAGE`（默认 `node:20-alpine`，
+`--network none` / 只读 FS / 资源与 pids 上限，与 Python 容器同一套加固参数）；
+`subprocess` 跑 `node -e`（`PLAITA_SANDBOX_NODE_BIN`，默认 `node`，受
+`PLAITA_SANDBOX_TIMEOUT` 约束，超时/取消整组击杀 + env 白名单）；`unsafe` 是历史
+PyExecJS 裸跑（无隔离、无超时）。
+
+```bash
+# 需要 js 节点的部署：显式放行 + 预拉 node 镜像（离线环境把镜像指到内网）
+PLAITA_SANDBOX_ALLOWED_LANGUAGES=python,js \
+PLAITA_SANDBOX_DOCKER_NODE_IMAGE=registry.internal/node:20-alpine \
+  python -m plaita.server.flow_worker --redis-url redis://localhost:6379/0
+```
+
+不需要 js 的部署保持默认即可（js 节点在解析期被拒，是预期行为）。库调用方自己接线时
+用 `register_code_node(allowed_languages=(...))`，或经
+`plaita.node.resolve_sandbox_allowed_languages()` 取同一口径。
+
 ## 无损升级（rolling upgrade）
 
 分层的准确结论，先记住边界：

@@ -213,6 +213,18 @@ def _code_allowed_backends_for_worker(backend: str) -> list:
     return list(resolve_sandbox_allowed_backends(backend, "flow-worker"))
 
 
+def _code_allowed_languages_for_worker() -> list:
+    """worker 生效的语言白名单（plaita#29）。
+
+    默认只放行 ``python``：``language: "js"`` 的历史实现（PyExecJS）绕开整个
+    ``sandbox_backend`` 档位体系（无隔离/无超时/无取消），放行 js 须经
+    ``PLAITA_SANDBOX_ALLOWED_LANGUAGES`` 显式配置。
+    """
+    from plaita.node import resolve_sandbox_allowed_languages
+
+    return list(resolve_sandbox_allowed_languages("flow-worker"))
+
+
 def _code_node_enabled() -> bool:
     """PLAITA_DISABLE_CODE_NODE=1 时不注册 CodeNode（含 code 节点的流程会被丢弃）。"""
     return not _env_switch("PLAITA_DISABLE_CODE_NODE")
@@ -227,20 +239,24 @@ def _register_code_node_for_worker() -> None:
 
     白名单由 ``_code_allowed_backends_for_worker`` 解析（plaita#22）：未显式配置
     ``PLAITA_SANDBOX_ALLOWED_BACKENDS`` 时默认只放行 ``docker`` ∪ 生效后端，流程
-    JSON 逐节点覆盖成 ``"unsafe"`` 在解析期被拒。
+    JSON 逐节点覆盖成 ``"unsafe"`` 在解析期被拒。语言白名单由
+    ``_code_allowed_languages_for_worker`` 解析（plaita#29）：默认只放行
+    ``python``，``language: "js"`` 在解析期被拒。
     """
     from plaita.node import register_code_node
 
     backend = _code_backend_for_worker()
     try:
         register_code_node(default_backend=backend,
-                           allowed_backends=_code_allowed_backends_for_worker(backend))
+                           allowed_backends=_code_allowed_backends_for_worker(backend),
+                           allowed_languages=_code_allowed_languages_for_worker())
         logger.info("CodeNode 已注册（sandbox_backend=%s）", backend)
         return
     except RuntimeError as e:  # 多为 docker daemon 不可用
         logger.warning("CodeNode 注册失败（backend=%s）：%s —— 降级 subprocess 重试", backend, e)
     register_code_node(default_backend="subprocess",
-                       allowed_backends=_code_allowed_backends_for_worker("subprocess"))
+                       allowed_backends=_code_allowed_backends_for_worker("subprocess"),
+                       allowed_languages=_code_allowed_languages_for_worker())
     logger.info("CodeNode 已注册（sandbox_backend=subprocess，降级）")
 
 

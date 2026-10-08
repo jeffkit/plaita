@@ -42,6 +42,33 @@ Python backend selection is controlled by ``CodeNode.sandbox_backend``:
     builtins and any importable module are available.  Only use this when you
     fully trust the flow authors.
 
+JavaScript (``language: "js"``)
+-------------------------------
+``sandbox_backend`` selects the JS isolation level exactly like it does for
+Python, but the implementations differ (``restricted`` has **no** JS
+counterpart — RestrictedPython is Python-only):
+
+``"docker"`` (default)
+    Runs the script inside a one-shot container of
+    ``PLAITA_SANDBOX_DOCKER_NODE_IMAGE`` (default ``node:20-alpine``) with the
+    same hardening flags as the Python backend.
+
+``"subprocess"``
+    Spawns ``node -e <wrapped script>`` (``PLAITA_SANDBOX_NODE_BIN``, default
+    ``node``) with the environment allowlist, a wall-clock timeout
+    (``PLAITA_SANDBOX_TIMEOUT``) and process-group kill on timeout/cancel.
+
+``"unsafe"``
+    Historical PyExecJS path: an external engine is driven through the
+    ``execjs`` package.  **No timeout, no cancellation, no isolation.** Only
+    for fully trusted authors.
+
+Historically ``language: "js"`` ignored ``sandbox_backend`` entirely and always
+took the PyExecJS path — a per-node one-line bypass of the whole tier system
+(2026-10 安全评审).  JS is now gated twice: operators must opt in via
+``register_code_node(allowed_languages=(...))`` (default ``("python",)``), and
+the declared backend must have a JS implementation.
+
 All backends are transparently switchable via the ``sandbox_backend`` flow
 JSON field; no other code changes are required when upgrading the isolation
 level.
@@ -145,6 +172,11 @@ SANDBOX_DOCKER_CPUS: str = os.environ.get("PLAITA_SANDBOX_DOCKER_CPUS", "0.5")
 # 代码写非 /tmp 路径会失败——这是预期约束而非 bug。
 SANDBOX_DOCKER_USER: str = os.environ.get("PLAITA_SANDBOX_DOCKER_USER", "")
 
+# JS (node) runner: 宿主侧 node 可执行文件 + docker 侧 node 镜像。
+SANDBOX_NODE_BIN: str = os.environ.get("PLAITA_SANDBOX_NODE_BIN", "node")
+SANDBOX_DOCKER_NODE_IMAGE: str = os.environ.get(
+    "PLAITA_SANDBOX_DOCKER_NODE_IMAGE", "node:20-alpine")
+
 # Modules that restricted sandboxed code is allowed to import.
 #
 # 安全边界声明（2026-09 安全评审）：restricted 后端**只防误用，不防恶意作者**。
@@ -165,6 +197,15 @@ SANDBOX_SAFE_MODULES: FrozenSet[str] = frozenset([
 # 白名单内即**解析期硬失败**——没有这个约束，流程作者可以把运营者选定的
 # 默认后端逐节点覆盖成 "unsafe"（宿主任意代码执行）。
 _ALLOWED_SANDBOX_BACKENDS: Optional[FrozenSet[str]] = None
+
+# 语言白名单（2026-10 安全评审 P1，plaita#29）。默认只放行 python：
+# ``js`` 的历史实现（PyExecJS，见 run_js）**完全绕开沙箱档位**——无隔离/无超时/
+# 无取消，白名单只作用于 Python。运营者经
+# ``register_code_node(allowed_languages=(...))`` 显式放行 ``"js"`` 后才可提交 js
+# 节点；放行后 js 同样按 ``sandbox_backend`` 走档位表（无 js 实现的后端拒绝）。
+# 自定义语言（``register_runner`` 注册，运营者自己的进程内代码）不受此白名单约束。
+DEFAULT_SANDBOX_ALLOWED_LANGUAGES: tuple = (LANGUAGE_PYTHON,)
+_ALLOWED_LANGUAGES: FrozenSet[str] = frozenset(DEFAULT_SANDBOX_ALLOWED_LANGUAGES)
 
 # ---------------------------------------------------------------------------
 # Runner script template shared by subprocess and docker backends
@@ -236,6 +277,46 @@ def _decode_runner_output(raw: str, stderr: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# JS runner template shared by the subprocess and docker backends
+# ---------------------------------------------------------------------------
+
+# 用户代码（须定义 ``function run(input)``）嵌在模板顶部（模块级作用域），随后是
+# 读 stdin、调用 run、写 JSON 信封的固定尾巴——同一个 eval 作用域内函数声明提升，
+# 故尾巴能直接引用用户定义的 run。
+_JS_RUNNER_TEMPLATE = textwrap.dedent("""\
+    // ---- user code -------------------------------------------------------
+    __USER_CODE__
+    // ---- run -------------------------------------------------------------
+    try {
+      var _input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+      var _result = run(_input);
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        result: _result === undefined ? null : _result,
+      }));
+    } catch (_e) {
+      process.stdout.write(JSON.stringify({
+        ok: false,
+        type: (_e && _e.name) || "Error",
+        error: String(_e && _e.message ? _e.message : _e),
+      }));
+    }
+""")
+
+# 脚本经环境变量传进 node（而非 argv）：base64 后不进进程表，宿主 ``ps`` /
+# 容器 ``docker inspect`` 都看不到用户代码。docker 与 subprocess 后端共用。
+_JS_SCRIPT_ENV = "_PLAITA_SCRIPT"
+_JS_BOOTSTRAP = (
+    f"eval(Buffer.from(process.env.{_JS_SCRIPT_ENV},'base64').toString('utf8'))"
+)
+
+
+def _build_js_runner_script(user_code: str) -> str:
+    """Embed *user_code* at column-0 of the JS runner template."""
+    return _JS_RUNNER_TEMPLATE.replace(_PLACEHOLDER_CODE, user_code)
+
+
+# ---------------------------------------------------------------------------
 # JS runner
 # ---------------------------------------------------------------------------
 
@@ -248,6 +329,15 @@ def _require_execjs():
 
 
 def run_js(code, input_value):
+    """Execute JS *code* through PyExecJS — the ``"unsafe"`` backend only.
+
+    .. warning::
+        **No** isolation, **no** timeout, **no** cancellation: the external JS
+        engine runs until it returns, with CommonJS ``require`` available and
+        the host's full environment.  Flow authors cannot reach this path
+        without an operator opt-in (language whitelist + backend whitelist);
+        prefer :func:`run_js_docker` or :func:`run_js_subprocess`.
+    """
     _require_execjs()
     context = execjs.compile(code)
     return context.call(JS_FUNC_NAME, input_value)
@@ -539,74 +629,9 @@ def run_python_subprocess(code, input_value, cancel_event=None):
 # Python runner — Docker sandbox
 # ---------------------------------------------------------------------------
 
-def run_python_docker(code, input_value):
-    """Execute *code* inside a one-shot Docker container.
-
-    Isolation guarantees:
-
-    * ``--network none`` — no outbound network access
-    * ``--read-only`` — container file system is read-only (``/tmp`` writable)
-    * ``--memory`` / ``--cpus`` — resource caps
-    * Container is destroyed immediately after execution (``--rm``)
-
-    Requires Docker (or a compatible daemon) to be installed and running.
-    Configure via environment variables:
-
-    * ``PLAITA_SANDBOX_DOCKER_IMAGE`` (default ``python:3.12-slim``)
-    * ``PLAITA_SANDBOX_DOCKER_TIMEOUT`` (seconds, default 30)
-    * ``PLAITA_SANDBOX_DOCKER_MEMORY_MB`` (MB, default 128)
-    * ``PLAITA_SANDBOX_DOCKER_CPUS`` (default ``"0.5"``)
-
-    Input and output are serialised as JSON.
-
-    Implementation note
-    -------------------
-    The runner script is base64-encoded and passed via the ``_PLAITA_SCRIPT``
-    environment variable.  The container entry-point is a one-liner that decodes
-    and ``exec``s it; JSON input arrives via stdin.  This avoids both the
-    ``python -`` pipe-conflict and volume-mount issues (e.g. colima's sshfs only
-    exposes the home directory, so ``/var/folders`` temp files are inaccessible
-    inside the VM).
-    """
-def run_python_docker(code, input_value, cancel_event=None):
-    """Execute *code* inside a one-shot Docker container.
-
-    Isolation guarantees:
-
-    * ``--network none`` — no outbound network access
-    * ``--read-only`` — container file system is read-only (``/tmp`` writable)
-    * ``--memory`` / ``--cpus`` — resource caps
-    * Container is destroyed immediately after execution (``--rm``)
-
-    Requires Docker (or a compatible daemon) to be installed and running.
-    Configure via environment variables:
-
-    * ``PLAITA_SANDBOX_DOCKER_IMAGE`` (default ``python:3.12-slim``)
-    * ``PLAITA_SANDBOX_DOCKER_TIMEOUT`` (seconds, default 30)
-    * ``PLAITA_SANDBOX_DOCKER_MEMORY_MB`` (MB, default 128)
-    * ``PLAITA_SANDBOX_DOCKER_CPUS`` (default ``"0.5"``)
-
-    Input and output are serialised as JSON.
-
-    Implementation note
-    -------------------
-    The runner script is base64-encoded and passed via the ``_PLAITA_SCRIPT``
-    environment variable.  The container entry-point is a one-liner that decodes
-    and ``exec``s it; JSON input arrives via stdin.  This avoids both the
-    ``python -`` pipe-conflict and volume-mount issues (e.g. colima's sshfs only
-    exposes the home directory, so ``/var/folders`` temp files are inaccessible
-    inside the VM).
-
-    Timeout/cancel (2026-09-30): the container gets a unique ``--name``; the
-    wait loop kills the whole ``docker run`` client process group and runs a
-    best-effort ``docker rm -f`` so the container does not outlive the call.
-    """
-    runner = _build_runner_script(code, mem_bytes=0)  # resource limits via Docker flags
-    runner_b64 = base64.b64encode(runner.encode()).decode()
-    container_name = f"plaita-sbx-{uuid.uuid4().hex[:12]}"
-
-    cmd = [
-        "docker", "run",
+def _docker_hardening_flags() -> list:
+    """两种语言共用的容器加固参数（网络 / FS / 资源 / 能力收敛）。"""
+    return [
         "--rm",
         "--network", "none",
         "--read-only",
@@ -620,14 +645,17 @@ def run_python_docker(code, input_value, cancel_event=None):
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         *(["--user", SANDBOX_DOCKER_USER] if SANDBOX_DOCKER_USER else []),
-        "--name", container_name,
-        "-i",
-        "-e", f"_PLAITA_SCRIPT={runner_b64}",
-        SANDBOX_DOCKER_IMAGE,
-        "python", "-c",
-        "import sys,base64,os; exec(base64.b64decode(os.environ['_PLAITA_SCRIPT']).decode())",
     ]
 
+
+def _run_docker_container(container_name, cmd, timeout, cancel_event,
+                          input_value, what) -> Any:
+    """跑一次性容器并解出 runner 的 JSON 信封（python / js docker 后端共用）。
+
+    超时或取消：``_popen_wait_cancellable`` 先 killpg 掉 ``docker run`` 客户端进程组，
+    这里再 best-effort ``docker rm -f`` —— ``--rm`` 只在容器正常退出时生效，客户端被
+    强杀后容器会残活。
+    """
     try:
         proc = subprocess.Popen(
             cmd,
@@ -644,8 +672,7 @@ def run_python_docker(code, input_value, cancel_event=None):
         ) from exc
     try:
         out, err = _popen_wait_cancellable(
-            proc, SANDBOX_DOCKER_TIMEOUT, cancel_event,
-            "Docker sandbox", json.dumps(input_value).encode())
+            proc, timeout, cancel_event, what, json.dumps(input_value).encode())
     except RuntimeError:
         # 客户端进程组已杀；容器本体归 dockerd 管，--rm 只在容器正常退出时
         # 生效——强杀客户端后必须显式 rm，否则容器残活。
@@ -685,10 +712,155 @@ def run_python_docker(code, input_value, cancel_event=None):
     return _decode_runner_output(stdout, stderr)
 
 
+def run_python_docker(code, input_value, cancel_event=None):
+    """Execute *code* inside a one-shot Docker container.
+
+    Isolation guarantees:
+
+    * ``--network none`` — no outbound network access
+    * ``--read-only`` — container file system is read-only (``/tmp`` writable)
+    * ``--memory`` / ``--cpus`` — resource caps
+    * Container is destroyed immediately after execution (``--rm``)
+
+    Requires Docker (or a compatible daemon) to be installed and running.
+    Configure via environment variables:
+
+    * ``PLAITA_SANDBOX_DOCKER_IMAGE`` (default ``python:3.12-slim``)
+    * ``PLAITA_SANDBOX_DOCKER_TIMEOUT`` (seconds, default 30)
+    * ``PLAITA_SANDBOX_DOCKER_MEMORY_MB`` (MB, default 128)
+    * ``PLAITA_SANDBOX_DOCKER_CPUS`` (default ``"0.5"``)
+
+    Input and output are serialised as JSON.
+
+    Implementation note
+    -------------------
+    The runner script is base64-encoded and passed via the ``_PLAITA_SCRIPT``
+    environment variable.  The container entry-point is a one-liner that decodes
+    and ``exec``s it; JSON input arrives via stdin.  This avoids both the
+    ``python -`` pipe-conflict and volume-mount issues (e.g. colima's sshfs only
+    exposes the home directory, so ``/var/folders`` temp files are inaccessible
+    inside the VM).
+
+    Timeout/cancel (2026-09-30): the container gets a unique ``--name``; the
+    wait loop kills the whole ``docker run`` client process group and runs a
+    best-effort ``docker rm -f`` so the container does not outlive the call.
+    """
+    runner = _build_runner_script(code, mem_bytes=0)  # resource limits via Docker flags
+    runner_b64 = base64.b64encode(runner.encode()).decode()
+    container_name = f"plaita-sbx-{uuid.uuid4().hex[:12]}"
+
+    cmd = [
+        "docker", "run",
+        *_docker_hardening_flags(),
+        "--name", container_name,
+        "-i",
+        "-e", f"_PLAITA_SCRIPT={runner_b64}",
+        SANDBOX_DOCKER_IMAGE,
+        "python", "-c",
+        "import sys,base64,os; exec(base64.b64decode(os.environ['_PLAITA_SCRIPT']).decode())",
+    ]
+
+    return _run_docker_container(
+        container_name, cmd, SANDBOX_DOCKER_TIMEOUT, cancel_event,
+        input_value, "Docker sandbox")
+
+
+# ---------------------------------------------------------------------------
+# JS runner — subprocess sandbox
+# ---------------------------------------------------------------------------
+
+def run_js_subprocess(code, input_value, cancel_event=None):
+    """Execute JS *code* in a fresh ``node`` subprocess sandboxed like Python's.
+
+    Bounds (identical shape to :func:`run_python_subprocess`):
+
+    * wall-clock timeout (``PLAITA_SANDBOX_TIMEOUT``, default 10 s)
+    * cooperative cancellation (``cancel_event``) — timeout and cancel both
+      SIGKILL the whole process group (``start_new_session=True``), so a
+      runaway JS loop cannot hang the worker step (2026-10 安全评审 P1：此前的
+      PyExecJS 路径既无超时也无取消)
+    * environment allowlist (``plaita.subprocess_env``) instead of the host's
+      full ``os.environ``
+
+    The script itself is passed base64-encoded via ``_PLAITA_SCRIPT`` rather
+    than argv, so user code does not show up in the host process table.
+
+    File system and network access are **not** restricted — use the ``"docker"``
+    backend for that.
+    """
+    script_b64 = base64.b64encode(_build_js_runner_script(code).encode()).decode()
+    child_env = _env.build_subprocess_env(extra={_JS_SCRIPT_ENV: script_b64})
+    try:
+        proc = subprocess.Popen(
+            [SANDBOX_NODE_BIN, "-e", _JS_BOOTSTRAP],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=child_env,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Node.js executable {SANDBOX_NODE_BIN!r} not found "
+            "(PLAITA_SANDBOX_NODE_BIN). language='js' with "
+            "sandbox_backend='subprocess' needs Node.js on PATH; use "
+            "sandbox_backend='docker' or 'unsafe' instead."
+        ) from exc
+    out, err = _popen_wait_cancellable(
+        proc, SANDBOX_SUBPROCESS_TIMEOUT, cancel_event,
+        "JS subprocess sandbox", json.dumps(input_value).encode())
+
+    stdout = out.decode(errors="replace") if out else ""
+    stderr = err.decode(errors="replace") if err else ""
+
+    if proc.returncode != 0 and not stdout.strip():
+        raise RuntimeError(
+            f"JS subprocess exited with code {proc.returncode}. "
+            f"Stderr: {stderr[:500] or '(empty)'}"
+        )
+
+    return _decode_runner_output(stdout, stderr)
+
+
+# ---------------------------------------------------------------------------
+# JS runner — Docker sandbox
+# ---------------------------------------------------------------------------
+
+def run_js_docker(code, input_value, cancel_event=None):
+    """Execute JS *code* inside a one-shot container of a Node image.
+
+    Isolation is the same as :func:`run_python_docker` (``--network none``,
+    ``--read-only``, memory/CPU/pids caps, ``--cap-drop ALL``,
+    ``no-new-privileges``); only the image and entrypoint differ
+    (``PLAITA_SANDBOX_DOCKER_NODE_IMAGE``, default ``node:20-alpine``).
+    The container is removed on exit, and timeouts/cancels kill the ``docker
+    run`` client process group plus a best-effort ``docker rm -f``.
+    """
+    script_b64 = base64.b64encode(_build_js_runner_script(code).encode()).decode()
+    container_name = f"plaita-js-sbx-{uuid.uuid4().hex[:12]}"
+
+    cmd = [
+        "docker", "run",
+        *_docker_hardening_flags(),
+        "--name", container_name,
+        "-i",
+        "-e", f"{_JS_SCRIPT_ENV}={script_b64}",
+        SANDBOX_DOCKER_NODE_IMAGE,
+        "node", "-e", _JS_BOOTSTRAP,
+    ]
+
+    return _run_docker_container(
+        container_name, cmd, SANDBOX_DOCKER_TIMEOUT, cancel_event,
+        input_value, "JS docker sandbox")
+
+
 # ---------------------------------------------------------------------------
 # Runner registry
 # ---------------------------------------------------------------------------
 
+# 自定义语言 runner（``register_runner``）——运营者在宿主进程内注册的代码。
+# 内置语言（python / js）不走这里：它们按 ``_BACKENDS`` 的语言×档位表执行，
+# 否则流程作者声明的 ``sandbox_backend`` 会被绕过（2026-10 安全评审 P1）。
 Runners = {LANGUAGE_JS: run_js, LANGUAGE_PYTHON: run_python}
 
 _PYTHON_BACKENDS = {
@@ -698,10 +870,49 @@ _PYTHON_BACKENDS = {
     "unsafe": run_python,
 }
 
+# JS 无 ``restricted`` 档：RestrictedPython 是 Python 专用 AST 沙箱，没有 JS 对应
+# 实现——静默降级（例如 js 声明 restricted 却跑宿主 execjs）正是本单要堵的洞，
+# 故该档位在解析期直接拒绝。
+_JS_BACKENDS = {
+    "subprocess": run_js_subprocess,
+    "docker": run_js_docker,
+    "unsafe": run_js,
+}
+
+_BACKENDS = {
+    LANGUAGE_PYTHON: _PYTHON_BACKENDS,
+    LANGUAGE_JS: _JS_BACKENDS,
+}
+
+_BUILTIN_LANGUAGES = frozenset(_BACKENDS)
+
 
 def register_runner(language, runner):
-    """Register a custom language runner (or replace an existing one)."""
+    """Register a custom language runner.
+
+    自定义语言（如 ``"ruby"``）不受 ``allowed_languages`` 约束——runner 是运营者
+    自己写进进程的代码，不是流程作者提供的。内置语言 ``"python"`` / ``"js"`` 不能
+    这样替换：它们必须走 ``sandbox_backend`` 档位表，注册会抛 ``ValueError``。
+    """
+    if language in _BUILTIN_LANGUAGES:
+        raise ValueError(
+            f"{language!r} is a built-in language and cannot be replaced by "
+            "register_runner; choose the isolation level per node via "
+            "sandbox_backend instead."
+        )
     Runners[language] = runner
+
+
+def _check_language_allowed(language: str) -> None:
+    """语言白名单硬校验（``register_code_node(allowed_languages=...)``）。"""
+    if language not in _ALLOWED_LANGUAGES:
+        raise ValueError(
+            f"language={language!r} is not allowed by the operator. "
+            f"Allowed languages: {sorted(_ALLOWED_LANGUAGES)}. "
+            "JavaScript execution must be enabled explicitly via "
+            "register_code_node(allowed_languages=(...)) (deployments can set it "
+            "from PLAITA_SANDBOX_ALLOWED_LANGUAGES); it cannot be enabled per flow."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -714,21 +925,23 @@ class CodeNode(Node):
     Fields
     ------
     language : str
-        ``"python"`` (default) or ``"js"``.
+        ``"python"`` (default) or ``"js"``.  ``"js"`` must be enabled by the
+        operator via ``register_code_node(allowed_languages=...)``.
     code : str
         Source code.  Python: must define a ``run(input)`` function.
         JS: must define a ``run`` function.
     input : Any
         Passed as the single argument to ``run``.  Supports flow expressions.
     sandbox_backend : Optional[str]
-        Python-only isolation level。``None`` 时取模块级默认
+        Isolation level, applied to both languages。``None`` 时取模块级默认
         (``_DEFAULT_SANDBOX_BACKEND``, 0.5.0 起 ``"docker"``; 由
         ``register_code_node(default_backend=...)`` 在启动期设定)。
 
         * ``"docker"`` (默认) — Docker 容器, 网络+FS 隔离。
-        * ``"restricted"`` — RestrictedPython in-process 沙箱 (AST 级, 有绕过向量)。
-        * ``"subprocess"`` — fresh Python process, 资源受限。
-        * ``"unsafe"`` — raw ``exec``, 无沙箱。
+        * ``"restricted"`` — RestrictedPython in-process 沙箱 (AST 级, 有绕过向量;
+          **仅 python**, js 声明它会在解析期报错)。
+        * ``"subprocess"`` — fresh process (python exec / node), 资源+时间受限。
+        * ``"unsafe"`` — raw ``exec`` / PyExecJS, 无沙箱、无超时。
 
     .. warning::
         ``CodeNode`` executes arbitrary user-supplied code.  It is **not**
@@ -761,8 +974,22 @@ class CodeNode(Node):
                 "and cannot be overridden per flow."
             )
         if data.get("language") is None:
-            data["language"] = "python"
-        if data["language"] == "python":
+            data["language"] = LANGUAGE_PYTHON
+        language = data["language"]
+        # 字面量内置语言：语言白名单 + 「该语言有没有这个档位」都在解析期判定。
+        # 动态 language 表达式（``"$INPUT.language"``）解析期拿不到值，留到
+        # execute 期同一套校验兜底。未知字面量语言不在此拦（可能是
+        # register_runner 注册的自定义语言，只有 execute 期知道）。
+        if (isinstance(language, str) and not language.startswith("$")
+                and language in _BACKENDS):
+            _check_language_allowed(language)
+            if data["sandbox_backend"] not in _BACKENDS[language]:
+                raise ValueError(
+                    f"sandbox_backend={data['sandbox_backend']!r} has no "
+                    f"{language!r} implementation. Supported backends for "
+                    f"language {language!r}: {sorted(_BACKENDS[language])}."
+                )
+        if language == LANGUAGE_PYTHON:
             if not data.get("code"):
                 raise ValueError("Python code is required when language is python")
             try:
@@ -784,12 +1011,15 @@ class CodeNode(Node):
         code = execution.evaluate(self.code)
         input_value = execution.evaluate(self.input)
 
-        if language == LANGUAGE_PYTHON:
-            backend_fn = _PYTHON_BACKENDS.get(self.sandbox_backend)
+        backends = _BACKENDS.get(language)
+        if backends is not None:
+            # 动态 language 表达式的兜底：白名单与档位在此才可判定。
+            _check_language_allowed(language)
+            backend_fn = backends.get(self.sandbox_backend)
             if backend_fn is None:
                 raise ValueError(
-                    f"Unknown sandbox_backend={self.sandbox_backend!r}. "
-                    f"Supported: {list(_PYTHON_BACKENDS)}"
+                    f"Unknown sandbox_backend={self.sandbox_backend!r} for "
+                    f"language={language!r}. Supported: {sorted(backends)}"
                 )
             if self.sandbox_backend in ("subprocess", "docker"):
                 # 协作式取消：cancel_event 置位时子进程树整组击杀（2026-09-30）

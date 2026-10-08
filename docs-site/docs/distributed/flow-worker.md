@@ -254,6 +254,11 @@ flowchart TD
   落在白名单外即**解析期拒绝**——否则流程作者可逐节点把后端降级为 `unsafe`
   （进程内 raw `exec`，宿主任意代码执行）。见
   [运维 Runbook · code 沙箱后端白名单](ops-runbook.md#code-沙箱后端白名单)。
+- **code 语言白名单（plaita#29）**：worker 同时施加语言白名单
+  （`PLAITA_SANDBOX_ALLOWED_LANGUAGES`，未配置则只放行 `python`）。`language: "js"`
+  此前绕开整个档位体系（无隔离 / 无超时 / 无取消），故改为须显式放行；放行后 js 仍受
+  后端白名单与「语言×档位」约束（`restricted` 没有 js 实现）。见
+  [运维 Runbook · code 语言白名单](ops-runbook.md#code-语言白名单)。
 - **指标与告警（plaita#26）**：`PLAITA_METRICS_PORT`（或 `--metrics-port`）> 0 时
   本进程起 Prometheus `/metrics` 抓取端，导出队列 `stream_length`/`pending`/
   `dlq_length`、全部进程内计数器与 worker 存活/心跳；死信经

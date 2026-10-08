@@ -337,6 +337,10 @@ nodes = _RegistryDictProxy(_default_registry)
 # ``DEFAULT_SANDBOX_ALLOWED_BACKENDS``。
 SANDBOX_ALLOWED_BACKENDS_ENV = "PLAITA_SANDBOX_ALLOWED_BACKENDS"
 
+# 语言白名单 env（plaita#29）。未设置 = 只放行 python（``js`` 的历史实现绕开整个
+# 沙箱档位体系，放行必须是运营者的显式决定）。
+SANDBOX_ALLOWED_LANGUAGES_ENV = "PLAITA_SANDBOX_ALLOWED_LANGUAGES"
+
 # 未显式配置时的默认白名单：只留容器级隔离。"subprocess" 不隔离网络与文件系统，
 # "unsafe" 是进程内 raw ``exec``——流程作者逐节点声明它等于拿到 worker/console
 # 进程的任意代码执行（含宿主凭据）。
@@ -392,9 +396,53 @@ def resolve_sandbox_allowed_backends(default_backend: Optional[str] = None,
     return allowed
 
 
+def resolve_sandbox_allowed_languages(component: str = "runtime") -> tuple:
+    """解析部署入口生效的 **语言** 白名单（plaita#29）。
+
+    ``js`` 的历史实现（PyExecJS）完全绕开 ``sandbox_backend`` 档位——无隔离 / 无
+    超时 / 无取消，且后端白名单只作用于 Python：流程作者写一行 ``language: "js"``
+    即拿到宿主任意代码执行 + 读 worker 全量 env。故语言默认**fail-closed**：只放行
+    ``python``，放行 js 必须是运营者的显式决定。
+
+    次序：显式 :data:`SANDBOX_ALLOWED_LANGUAGES_ENV`（逗号/冒号/空白分隔）→ 未设则
+    ``code.DEFAULT_SANDBOX_ALLOWED_LANGUAGES``；``python``（CodeNode 的默认语言）
+    始终保留——与后端解析同理，默认值必须自身可用，否则不带 ``language`` 的流程
+    会被自己的白名单拦下。
+
+    结果交给 ``register_code_node(allowed_languages=...)``：硬拦载体是模块级
+    ``code._ALLOWED_LANGUAGES``，``CodeNode`` 解析期据此拒绝 js 节点。
+    """
+    from . import code as _code_module
+
+    raw = os.environ.get(SANDBOX_ALLOWED_LANGUAGES_ENV, "").strip()
+    if raw:
+        configured = [lang.strip() for lang in re.split(r"[,;:\s]+", raw) if lang.strip()]
+        invalid = [lang for lang in configured
+                   if lang not in _code_module._BUILTIN_LANGUAGES]
+        if invalid:
+            raise ValueError(
+                f"{SANDBOX_ALLOWED_LANGUAGES_ENV}: unknown language(s) {invalid}; "
+                f"supported: {sorted(_code_module._BUILTIN_LANGUAGES)}"
+            )
+    else:
+        configured = list(_code_module.DEFAULT_SANDBOX_ALLOWED_LANGUAGES)
+
+    allowed = tuple(sorted(set(configured) | {_code_module.LANGUAGE_PYTHON}))
+    if _code_module.LANGUAGE_JS in allowed:
+        _logger.warning(
+            "[%s] 语言白名单放行 'js'（来源 %s）：js 节点将按运营者配置的 "
+            "sandbox_backend 档位执行（默认 docker 需拉取 node 镜像）。", component,
+            SANDBOX_ALLOWED_LANGUAGES_ENV if raw else "默认值",
+        )
+    else:
+        _logger.info("[%s] 语言白名单: %s（未放行 'js'）", component, list(allowed))
+    return allowed
+
+
 def register_code_node(registry: Optional[NodeRegistry] = None,
                        default_backend: Optional[str] = None,
-                       allowed_backends: Optional[list] = None) -> None:
+                       allowed_backends: Optional[list] = None,
+                       allowed_languages: Optional[list] = None) -> None:
     """Register :class:`CodeNode` for use in flows.
 
     ``CodeNode`` executes **arbitrary user-supplied code** (Python ``exec``
@@ -423,6 +471,17 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
             三种降级路径——装 Docker / ``default_backend="subprocess"`` /
             ``default_backend="unsafe"``。不允许静默降级到 ``"restricted"`` (其 AST
             沙箱有已知绕过向量, 不该作为"对用户透明"的兜底)。
+        allowed_languages: 语言白名单（2026-10 安全评审 P1，plaita#29）。默认
+            ``("python",)``——``js`` 的历史实现（PyExecJS）完全绕开档位体系（无隔离 /
+            无超时 / 无取消），流程作者写一行 ``language: "js"`` 即可执行宿主任意
+            代码并读 worker 全量 env。放行 js 是运营者的显式决定，且放行后 js 仍按
+            ``sandbox_backend`` 走档位表（``restricted`` 没有 js 实现，解析期拒绝）::
+
+                register_code_node(allowed_backends=("docker",),
+                                   allowed_languages=("python", "js"))
+
+            生产部署入口应经 :func:`resolve_sandbox_allowed_languages` 取值（读
+            ``PLAITA_SANDBOX_ALLOWED_LANGUAGES``，默认 ``(python,)``）。
 
     Example::
 
@@ -433,7 +492,9 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
     .. warning::
         Only call this if you trust all flow definitions that will be executed
         in this process. A ``CodeNode`` in a flow JSON allows any code the flow
-        author chooses to run; ``"unsafe"`` 后端连文件系统/网络访问都不限制。
+        author chooses to run; ``"unsafe"`` 后端连文件系统/网络访问都不限制
+        （python ``exec`` 与 js PyExecJS 都没有超时/取消），js 语言还须
+        ``allowed_languages`` 显式放行。
     """
     from . import code as _code_module
     effective = default_backend if default_backend is not None else _code_module._DEFAULT_SANDBOX_BACKEND
@@ -458,6 +519,15 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
                 f"supported: {sorted(_code_module._PYTHON_BACKENDS)}"
             )
         _code_module._ALLOWED_SANDBOX_BACKENDS = frozenset(allowed_backends)
+    if allowed_languages is not None:
+        invalid = [lang for lang in allowed_languages
+                   if lang not in _code_module._BUILTIN_LANGUAGES]
+        if invalid:
+            raise ValueError(
+                f"register_code_node: unknown language(s) {invalid}; "
+                f"supported: {sorted(_code_module._BUILTIN_LANGUAGES)}"
+            )
+        _code_module._ALLOWED_LANGUAGES = frozenset(allowed_languages)
     target = registry if registry is not None else get_default_registry()
     target.register(CodeNode)
 

@@ -178,7 +178,7 @@ plaita 默认注册的全部内置节点。`type` 即流程 JSON 中 `type` 字�
 
 ## code
 
-执行用户代码，需 `code` extra（JS 用 PyExecJS）。`language` 为 `js` 或 `python`，代码需定义 `run` 函数，`input` 作为参数传入。
+执行用户代码，需 `code` extra。`language` 为 `python`（默认）或 `js`，代码需定义 `run` 函数，`input` 作为参数传入；`language: "js"` 默认被语言白名单拒绝（plaita#29：须运营者经 `PLAITA_SANDBOX_ALLOWED_LANGUAGES=python,js` 放行，放行后仍按 `sandbox_backend` 走档位），业务 flow 一律写 python。
 
 ```json
 {

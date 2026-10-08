@@ -181,12 +181,17 @@ def _load_external_node_modules() -> None:
             # 白名单（plaita#22）：未显式配置 PLAITA_SANDBOX_ALLOWED_BACKENDS 时默认
             # 只放行 docker ∪ 生效后端——console 进程内同样会跑流程（dry-run 试跑、
             # 本地单机模式的 local_executor），流程 JSON 不得逐节点降级到 "unsafe"。
+            # 语言白名单（plaita#29）：默认只放行 python；放行 js 须显式配置
+            # PLAITA_SANDBOX_ALLOWED_LANGUAGES（js 历史实现绕开整个档位体系）。
             try:
                 from plaita.node import (register_code_node,
-                                         resolve_sandbox_allowed_backends)
+                                         resolve_sandbox_allowed_backends,
+                                         resolve_sandbox_allowed_languages)
                 register_code_node(
                     allowed_backends=list(
-                        resolve_sandbox_allowed_backends(component="console")))
+                        resolve_sandbox_allowed_backends(component="console")),
+                    allowed_languages=list(
+                        resolve_sandbox_allowed_languages(component="console")))
             except ImportError:
                 pass
             logging.getLogger("backend.main").info("已加载外部节点模块: %s", mod_path)

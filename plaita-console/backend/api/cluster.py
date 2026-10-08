@@ -882,14 +882,19 @@ async def run_quick_test(request: QuickTestRequest):
             
             # CODE 节点自 0.4.0 起移出默认注册表——快速测试的 simple/distributed/
             # event 模板都含 code 节点，不注册则全部失败。后端白名单（plaita#22）与
-            # console 启动档同源：流程 JSON 不得逐节点降级到 "unsafe"。
+            # console 启动档同源：流程 JSON 不得逐节点降级到 "unsafe"。语言白名单
+            # （plaita#29）默认只放行 python，放行 js 须显式配置
+            # PLAITA_SANDBOX_ALLOWED_LANGUAGES。
             try:
                 from plaita.node import (register_code_node,
-                                         resolve_sandbox_allowed_backends)
+                                         resolve_sandbox_allowed_backends,
+                                         resolve_sandbox_allowed_languages)
                 register_code_node(
                     default_backend="subprocess",
                     allowed_backends=list(
-                        resolve_sandbox_allowed_backends("subprocess", "console")))
+                        resolve_sandbox_allowed_backends("subprocess", "console")),
+                    allowed_languages=list(
+                        resolve_sandbox_allowed_languages("console")))
             except ImportError:
                 pass
 

@@ -38,9 +38,12 @@ ALLOWED_SILENT = {
     # 419→425, 450→456, 458→464；原 414 一条是与 425 同处的陈旧重复项，随更新删除。
     # 2026-10-07 env 白名单抽到 plaita.subprocess_env（顶层 import 插入）后再下移 2：
     # 425→427, 456→458, 464→466，位点未变。
-    ("node/code.py", 427),
-    ("node/code.py", 458),
-    ("node/code.py", 466),
+    # plaita#29（js 接入档位体系 / 语言白名单：docstring 段、模块常量与 JS runner
+    # 模板段插入）后再整体下移 81：427→508, 458→539, 466→547；随后 `run_js` 补
+    # unsafe 档 docstring（+9）到 517/548/556，位点未变。
+    ("node/code.py", 517),
+    ("node/code.py", 548),
+    ("node/code.py", 556),
     # 2026-10-07 沙箱生命周期回调条件装配：plaita-nodes 是可选依赖，缺装 / 无沙箱
     # 注册表 / 装配失败都返回 None（非沙箱部署零行为变化），异常细节不影响主流程。
     # plaita#22 沙箱白名单接线（`_code_allowed_backends_for_worker` 插入）后整体下移 12：
@@ -52,10 +55,12 @@ ALLOWED_SILENT = {
     # 再 shift：`_paused_sweeper` 的 e2b 预导入从「准备」try 里拆成独立 best-effort
     # 分支（缺 e2b 不再等于「不清扫」，见该函数 docstring）后整体下移 5：
     # 902→907, 926→931, 931→936, 937→942，位点未变。
-    ("server/flow_worker.py", 907),
-    ("server/flow_worker.py", 931),
-    ("server/flow_worker.py", 936),
-    ("server/flow_worker.py", 942),
+    # plaita#29（worker 入口补 `_code_allowed_languages_for_worker` 接线）后再下移 16：
+    # 907→923, 931→947, 936→952, 942→958，位点未变。
+    ("server/flow_worker.py", 923),
+    ("server/flow_worker.py", 947),
+    ("server/flow_worker.py", 952),
+    ("server/flow_worker.py", 958),
 }
 
 

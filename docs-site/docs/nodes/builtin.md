@@ -235,6 +235,17 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 
 `language` 为 `js` 或 `python`，代码需定义一个 `run` 函数，`input` 作为参数传入。
 
+**`language: "js"` 默认被拒**（plaita#29）：js 的历史实现（PyExecJS）绕开整个档位体系
+（无隔离 / 无超时 / 无取消），因此语言白名单默认只放行 `python`。放行须运营者显式配置
+`PLAITA_SANDBOX_ALLOWED_LANGUAGES=python,js`（库调用方用
+`register_code_node(allowed_languages=(...))`，或经
+`plaita.node.resolve_sandbox_allowed_languages()`）；放行后 js 同样按 `sandbox_backend`
+走档位：`docker` 跑 `PLAITA_SANDBOX_DOCKER_NODE_IMAGE`（默认 `node:20-alpine`）容器，
+`subprocess` 跑 `node -e`（`PLAITA_SANDBOX_NODE_BIN`，默认 `node`；10s 墙钟 + 超时/取消
+整组击杀），`unsafe` 仍是裸 PyExecJS。`restricted` 只有 Python 实现，js 声明它会在解析期
+报错。详见
+[运维 Runbook · code 语言白名单](../distributed/ops-runbook.md#code-语言白名单)。
+
 `default_backend="subprocess"` 时子进程受 `PLAITA_SANDBOX_TIMEOUT`（秒，默认 10）约束。
 地址空间上限 `PLAITA_SANDBOX_MEMORY_MB`（MB）**默认 `0` = 不限制**：非 0 值在 Linux 上经
 `RLIMIT_AS` 真实生效，会卡住 node/npm/pnpm 系命令的启动（V8 启动期预留 GB 级虚拟地址，

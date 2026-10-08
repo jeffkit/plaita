@@ -72,11 +72,15 @@ class CodeNodeTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._saved_backend = _code_module._DEFAULT_SANDBOX_BACKEND
-        register_code_node(default_backend="restricted")
+        cls._saved_languages = _code_module._ALLOWED_LANGUAGES
+        # js 默认被语言白名单拒绝（plaita#29）: 本模块模拟"运营者显式放行 js"的部署。
+        register_code_node(default_backend="restricted",
+                           allowed_languages=("python", "js"))
 
     @classmethod
     def tearDownClass(cls):
         _code_module._DEFAULT_SANDBOX_BACKEND = cls._saved_backend
+        _code_module._ALLOWED_LANGUAGES = cls._saved_languages
         get_default_registry().unregister("code")
 
     def test_run_python(self):
@@ -121,7 +125,7 @@ def run(b):
             ),
         )
 
-    def create_flow(self):
+    def create_flow(self, sandbox_backend=None):
         flow = Flow(
             flow_id="code-run",
             version="1",
@@ -145,6 +149,7 @@ def run(b):
                 language="$INPUT.language",
                 code="$INPUT.code",
                 input="$INPUT.input",
+                **({"sandbox_backend": sandbox_backend} if sandbox_backend else {}),
                 next="end",
             ),
             End(id="end", flow=flow, **{"resultType": "success", "output": "$NODE.code-run"}),
@@ -154,9 +159,10 @@ def run(b):
 
     @unittest.skipUnless(_JS_READY, "no available JavaScript runtime (execjs present but node/js engine missing)")
     def test_set(self):
+        # js 无 restricted 档（plaita#29）: 显式声明 js 支持的档位。
         self.assertEqual(
             5,
-            self.create_flow().run(
+            self.create_flow(sandbox_backend="unsafe").run(
                 language="js",
                 code="function run(a) { return a - 1; }; ",
                 input="6",
@@ -165,7 +171,7 @@ def run(b):
 
         self.assertEqual(
             5,
-            self.create_flow().run(
+            self.create_flow(sandbox_backend="unsafe").run(
                 language="js",
                 code="function run(a) { return a + 2; }; ",
                 input=3,
