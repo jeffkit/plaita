@@ -95,29 +95,54 @@ def _affinity_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_AFFINITY")
 
 
-def sweep_paused_sandboxes(max_age_secs: int = 6 * 3600) -> list:
-    """启动一次性清扫：回收超龄仍 PAUSED 的自家沙箱实例（配额安全带）。
+def _paused_sweeper(max_age_secs: int = 6 * 3600):
+    """准备「暂停沙箱清扫」：**全部 import 在主线程完成**，返回无 import 的闭包。
 
-    为什么：失败/取消路径改为一律 pause 保现场后（sandbox_agent._preserve_scene），
-    没人续跑的暂停实例会累积并占实例配额（AGS ~20；暂停不计计算力费，但配额满会让
-    新建失败）。plaita-nodes 为可选依赖：未装/无注册表/无 ags driver 时静默返回空；
-    任何异常只告警——清扫失败绝不能影响 worker 启动。
+    ⚠️ 为什么死磕 import 位置：线程内 import 与主线程的懒加载 import 并发时会撞
+    import 锁——2026-10-08 实测本机 worker 启动即整体卡死（栈停在 e2b/httpx 导入链，
+    进程 0% CPU、零日志、连不上 Redis），根因就是清扫线程里那句
+    ``from e2b_code_interpreter import ...``。预导入之后线程内只做网络调用。
+
+    为什么需要这条清扫：失败/取消改为一律 pause 保现场后（sandbox_agent.
+    _preserve_scene），没人续跑的暂停实例会累积占实例配额（AGS ~20；暂停不计
+    计算力费，但配额满会让新建失败）。
+
+    返回 ``None`` 表示无需/不可清扫（未装 plaita-nodes、无注册表、无 ags driver、
+    缺 e2b）；任何异常只告警，绝不拦启动。
     """
     try:
         from plaita_nodes import sandbox as _sb
         if not _sb.load_sandboxes():
-            return []
+            return None
         import plaita_nodes.sandbox_ags  # noqa: F401 — import 即注册 ags driver
         drv = _sb.get_driver("ags")
         if drv is None or not hasattr(drv, "sweep_paused"):
-            return []
-        killed = drv.sweep_paused(max_age_secs=max_age_secs)
-        if killed:
-            logger.info("启动清扫：回收超龄暂停沙箱 %d 个：%s", len(killed), killed)
-        return killed
+            return None
+        import e2b_code_interpreter  # noqa: F401 — 预导入（sweep 内部再取时已缓存）
     except Exception as exc:  # noqa: BLE001 — 清扫失败不影响启动
-        logger.warning("启动清扫沙箱失败（忽略）：%s", exc)
-        return []
+        logger.warning("沙箱清扫准备失败（忽略）：%s", exc)
+        return None
+
+    def _run() -> list:
+        try:
+            killed = drv.sweep_paused(max_age_secs=max_age_secs)
+            if killed:
+                logger.info("启动清扫：回收超龄暂停沙箱 %d 个：%s", len(killed), killed)
+            return killed
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("启动清扫沙箱失败（忽略）：%s", exc)
+            return []
+
+    return _run
+
+
+def sweep_paused_sandboxes(max_age_secs: int = 6 * 3600) -> list:
+    """同步执行一次暂停清扫（测试/手工调用用）。
+
+    worker 启动路径请用 ``_paused_sweeper()`` + 后台线程（import 前置到主线程）。
+    """
+    run = _paused_sweeper(max_age_secs)
+    return run() if run is not None else []
 
 
 def _deny_repos() -> set:
@@ -2891,9 +2916,12 @@ def main():
     if _code_node_enabled():
         _register_code_node_for_worker()
 
-    # 沙箱暂停实例清扫（启动一次性、后台线程，见 sweep_paused_sandboxes 的说明）
-    threading.Thread(target=sweep_paused_sandboxes, name="sandbox-sweep",
-                     daemon=True).start()
+    # 沙箱暂停实例清扫（启动一次性、后台线程）：**import 已在主线程完成**
+    # （`_paused_sweeper`）——线程内 import 会与主线程懒加载撞 import 锁并整体卡死
+    # （2026-10-08 实测）。线程内只做网络调用。
+    _sweeper = _paused_sweeper()
+    if _sweeper is not None:
+        threading.Thread(target=_sweeper, name="sandbox-sweep", daemon=True).start()
 
     # 处理注册开关
     enable_registry = args.enable_registry and not args.no_registry
