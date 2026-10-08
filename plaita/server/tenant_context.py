@@ -21,12 +21,15 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from plaita.tenant_context import (  # noqa: F401 — 兼容 re-export
+    DISABLED_TENANTS_KEY,
     DEFAULT_TENANT_ID,
     LEGACY_NAMESPACE,
     _tenant_ctx,
     current_tenant,
+    is_tenant_disabled,
     reset_current_tenant,
     set_current_tenant,
+    set_tenant_disabled,
     tenant_namespace,
 )
 
@@ -34,6 +37,7 @@ from ..storage.base import ExecutionStorage, FlowStorage
 from ..storage.redis import RedisExecutionStorage, RedisFlowStorage
 
 __all__ = [
+    "DISABLED_TENANTS_KEY",
     "DEFAULT_TENANT_ID",
     "LEGACY_NAMESPACE",
     "TenantRoutingExecutionLease",
@@ -41,8 +45,10 @@ __all__ = [
     "TenantRoutingFlowStorage",
     "_tenant_ctx",
     "current_tenant",
+    "is_tenant_disabled",
     "reset_current_tenant",
     "set_current_tenant",
+    "set_tenant_disabled",
     "tenant_namespace",
 ]
 

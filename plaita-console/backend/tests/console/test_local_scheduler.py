@@ -178,6 +178,45 @@ def test_manual_trigger_runs_in_process(env):
     assert hist[0]["trigger_kind"] == "manual"
 
 
+def test_disabled_tenant_schedule_not_fired(env):
+    """停用租户（#27）：调度置 paused，手工 enable 也不执行；重新启用即恢复。"""
+    store = store_of(env)
+    from services import tenants_svc
+
+    tenants_svc.create_tenant(store, "acme")
+    store.ensure_flow("hello", tenant_id="acme")
+    store.save_flow_definition("hello", "1.0.0", GOOD_DEF, status="draft", tenant_id="acme")
+    store.publish_version("hello", "1.0.0", tenant_id="acme")
+    sched.create_schedule(store, {
+        "schedule_id": "sched-acme", "tenant_id": "acme", "name": "acme 定时",
+        "flow_id": "hello", "version": "1.0.0", "cron": _mk_cron_every_second(),
+        "params": {}, "enabled": True, "created_by": "t", "next_run_at": "0",
+    })
+
+    tenants_svc.set_tenant_status(store, "acme", "disabled")
+
+    # 停用即置 paused（next_run_at 清空）
+    paused = sched.get_schedule(store, "sched-acme")
+    assert paused["enabled"] is False and paused["next_run_at"] == ""
+
+    # 停用后手工 enable + 到期 → 仍不执行（租户闸兜底），触发记录为空
+    sched.update_schedule(store, "sched-acme",
+                          {**paused, "enabled": True, "next_run_at": "0"}, tenant_id="acme")
+    _force_due(store, "sched-acme")
+    time.sleep(6)  # 覆盖内置循环至少一轮 5s 扫描
+    assert sched.fire_history(store, "sched-acme", 10) == []
+    assert sched.trigger_now(store, sched.get_schedule(store, "sched-acme")) is None
+
+    # 重新启用 → 同一调度（到期）恢复执行
+    tenants_svc.set_tenant_status(store, "acme", "active")
+    deadline = time.time() + 15
+    fired = []
+    while time.time() < deadline and not fired:
+        time.sleep(0.5)
+        fired = [h for h in sched.fire_history(store, "sched-acme", 10) if h["status"] == "fired"]
+    assert fired, "重新启用后调度仍未触发"
+
+
 def test_execution_logs_captured_and_queryable(env):
     client, store = client_of(env), store_of(env)
     r = client.post("/api/executions", json={"flow_id": "hello"})

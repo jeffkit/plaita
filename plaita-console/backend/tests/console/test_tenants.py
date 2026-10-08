@@ -244,6 +244,54 @@ def test_switch_tenant_session_flow(client):
     assert bob2["active_tenant"] == "default"
 
 
+# ---- 停用租户的运行面闸（#27） ----
+
+def test_disabled_tenant_blocks_issued_session(client):
+    """停用后已签发会话立即 403；会话不删，重新启用即恢复。"""
+    store = flow_store.get_flow_store()
+    users_svc.create_user(store, "carol", "carol-password-1", "viewer")
+    root = _login(client, "root", "root-password-1")
+    headers = _auth(root["token"])
+    client.post("/api/tenants", json={"id": "acme"}, headers=headers)
+    users_svc.add_member(store, "acme", "carol", "editor")
+
+    carol = _login(client, "carol", "carol-password-1")
+    assert carol["active_tenant"] == "acme"
+    assert client.get("/api/flows", headers=_auth(carol["token"])).status_code == 200
+
+    r = client.post("/api/tenants/acme/status", json={"status": "disabled"}, headers=headers)
+    assert r.status_code == 200, r.text
+
+    # 403（而非 401）：会话没被撤销，是每次解析实时判租户状态
+    r = client.get("/api/flows", headers=_auth(carol["token"]))
+    assert r.status_code == 403, r.text
+    # 会话自操作例外放行：否则用户切不走、也登不出
+    assert client.get("/api/auth/me", headers=_auth(carol["token"])).status_code == 200
+
+    # 重新启用 → 同一 token 即刻恢复（停用不是吊销）
+    client.post("/api/tenants/acme/status", json={"status": "active"}, headers=headers)
+    assert client.get("/api/flows", headers=_auth(carol["token"])).status_code == 200
+
+
+def test_platform_admin_session_not_blocked_by_own_disabled_tenant(client):
+    """平台管理员会话不受租户闸限制——否则没人能重新启用该租户。"""
+    store = flow_store.get_flow_store()
+    root = _login(client, "root", "root-password-1")
+    headers = _auth(root["token"])
+    client.post("/api/tenants", json={"id": "acme"}, headers=headers)
+    users_svc.add_member(store, "acme", "root", "admin")
+    switch = client.post("/api/auth/switch-tenant", json={"tenant_id": "acme"},
+                         headers=headers)
+    assert switch.status_code == 200 and switch.json()["tenant_id"] == "acme"
+    # 内部裁决位不外透（switch-tenant 复用 resolve_session）
+    assert "tenant_disabled" not in switch.json()
+
+    assert client.post("/api/tenants/acme/status", json={"status": "disabled"},
+                       headers=headers).status_code == 200
+    # 会话仍钉在停用租户上，但平台管理面照常可用（能改回来）
+    assert client.get("/api/tenants", headers=headers).status_code == 200
+
+
 # ---- X-Tenant-ID 权限规则 ----
 
 def test_x_tenant_header_rules(client):

@@ -184,10 +184,15 @@ def _resolve_role(session, user: User, tenant_id: Optional[str]) -> Optional[str
 
 
 def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
-    """token -> {username, role, tenant_id, platform_admin}；无效/过期返回 None。
+    """token -> {username, role, tenant_id, platform_admin, tenant_disabled}；
+    无效/过期返回 None。
 
     - 角色实时取自 tenant_members（改角色即时生效）
     - active_tenant 的成员资格已失效时自动清空（回退平台/遗留视角）
+    - active_tenant 已停用时置 ``tenant_disabled=True``（#27）：7 天会话不因
+      停用被删（删了只剩 401，重新启用也换不回原会话），而是每次解析实时
+      判状态，由调用方（auth）拒绝访问。平台管理员的会话不受限——否则其
+      会话若钉在停用租户上，就再没人能重新启用该租户了。
     """
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with store._session_local() as session:
@@ -218,6 +223,11 @@ def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
             "role": role,
             "tenant_id": active_tenant,
             "platform_admin": bool(user.platform_admin),
+            "tenant_disabled": bool(
+                active_tenant
+                and not user.platform_admin
+                and _tenant_disabled(session, active_tenant)
+            ),
         }
 
 
@@ -241,8 +251,20 @@ def switch_tenant(store, token: str, tenant_id: str) -> Optional[Dict[str, Any]]
 
 
 def _session_context(store, token: str) -> Optional[Dict[str, Any]]:
-    """token 明文 -> 登录态上下文（复用 resolve_session，供切换后返回）。"""
-    return resolve_session(store, token)
+    """token 明文 -> 登录态上下文（复用 resolve_session，供切换后返回）。
+
+    ``tenant_disabled`` 是鉴权层用的内部裁决位，不进对外响应结构。
+    """
+    context = resolve_session(store, token)
+    if context is not None:
+        context.pop("tenant_disabled", None)
+    return context
+
+
+def _tenant_disabled(session, tenant_id: str) -> bool:
+    """租户行是否存在且停用（行缺失视为未接入该闸，放行——同 runtime 口径）。"""
+    row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
+    return row is not None and row.status != "active"
 
 
 def _is_member(session, username: str, tenant_id: str) -> bool:

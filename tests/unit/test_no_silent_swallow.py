@@ -45,9 +45,15 @@ ALLOWED_SILENT = {
     # 注册表 / 装配失败都返回 None（非沙箱部署零行为变化），异常细节不影响主流程。
     # plaita#22 沙箱白名单接线（`_code_allowed_backends_for_worker` 插入）后整体下移 12：
     # 781→793, 786→798, 792→804，位点未变。
-    ("server/flow_worker.py", 793),
-    ("server/flow_worker.py", 798),
-    ("server/flow_worker.py", 804),
+    # 2026-10-08 沙箱清扫 import 前置到主线程 + 启动清扫超龄沙箱（同批新增
+    # `_sandbox_terminal_*` / 清扫码块）后整体下移：793→899, 798→904, 804→910；
+    # 同批新增位点 875（终态快照 import，缺 plaita-nodes 即无快照可收）。
+    # 清扫预导入降级为告警（`_paused_sweeper` 内层 try 插入 5 行）后再整体下移 5：
+    # 875→880, 899→904, 904→909, 910→915，位点未变。
+    ("server/flow_worker.py", 880),
+    ("server/flow_worker.py", 904),
+    ("server/flow_worker.py", 909),
+    ("server/flow_worker.py", 915),
 }
 
 

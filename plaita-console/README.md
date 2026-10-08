@@ -21,6 +21,7 @@ Plaita 流程引擎可视化管理控制台
 - **隔离**：流程/版本/执行/调度/凭据/自定义节点/属性类型/Copilot 会话/审计/部署记录全部携带 `tenant_id`，查询按会话租户过滤，跨租户访问即 not-found。存量库首次多租户启动时自动迁移：建 `default` 租户、回填数据、legacy admin 提升为平台管理员。
 - **租户内唯一**：`flow_id`、凭据名、自定义节点 type、属性类型名的唯一性均为租户内唯一（同名流程可共存于不同租户）。
 - **契约密钥**：每个租户一组 `contract_secret_id/contract_secret_key`（租户管理页创建/轮换，明文仅显示一次），只能拉取本租户已发布流程；全局 `PLAITA_CONSOLE_SECRET_ID/SECRET_KEY` 仍可用（平台上下文，可拉任意租户），存量集成不破坏。
+- **停用租户（#27）**：`POST /api/tenants/{id}/status` 置 `disabled` 是**运行面**动作，不只是改一行状态——已签发会话立即 403（会话不撤销，重新启用即恢复；`/api/auth/*` 会话自操作仍放行，让用户能切走/登出；平台管理员与 API-Key 为平台级身份，不受限）；该租户调度立即置 paused（重新启用**不**自动恢复，需显式 enable）；租户 ID 发布到 Redis 停用集合 `plaita:tenants:disabled`，集群档 FlowWorker 据此丢弃该租户的 start/resume 任务、调度服务据此不再入队——挂起执行停在挂起态，重新启用后经 `POST /api/executions/{id}/resume` 重新驱动。
 - **多租户边界（如实说明）**：集群档的租户数据（流程定义、执行状态、resume 租约）按键 namespace 隔离（`plaita:{tenant}:*`，default 租户保持历史前缀 `plaita:*` 以兼容存量数据），任务消息携带 `tenant_id`（缺省视为 default），引擎日志/调度值/订阅内嵌租户字段供 console 过滤。仍保持平台级共享的：任务队列 Stream（机制通道，租户在消息内）、事件总线存储与 pubsub（跨租户事件总线，订阅按租户过滤）、服务注册/控制通道。本地档凭据按租户导出到旁文件（`.plaita-credentials.<tenant>.json`），default 租户沿用历史文件路径。
 - **滚动升级兼容**：消息缺 `tenant_id` 按 default 处理；default 租户流量走历史键前缀——旧 worker + 新 console（或反向）混跑时 default 租户不受影响，非 default 租户需双侧升级。
 

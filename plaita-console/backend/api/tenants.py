@@ -79,7 +79,11 @@ def set_status(tenant_id: str, req: TenantStatusRequest, request: Request,
                identity: Dict = Depends(require_auth)):
     _platform_admin(identity)
     try:
-        tenants_svc.set_tenant_status(get_flow_store(), tenant_id, req.status)
+        # Redis 客户端（集群档）传入：停用要一并把闸下到运行面（#27）
+        tenants_svc.set_tenant_status(
+            get_flow_store(), tenant_id, req.status,
+            redis_client=getattr(request.app.state, "redis", None),
+        )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _audit(request, "tenant.set_status", tenant_id, {"status": req.status})
@@ -101,7 +105,10 @@ def rotate_secret(tenant_id: str, request: Request, identity: Dict = Depends(req
 def delete_tenant(tenant_id: str, request: Request, identity: Dict = Depends(require_auth)):
     _platform_admin(identity)
     try:
-        deleted = tenants_svc.delete_tenant(get_flow_store(), tenant_id)
+        deleted = tenants_svc.delete_tenant(
+            get_flow_store(), tenant_id,
+            redis_client=getattr(request.app.state, "redis", None),
+        )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=409, detail=str(e))
     if not deleted:

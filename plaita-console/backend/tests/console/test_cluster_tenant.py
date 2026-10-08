@@ -21,6 +21,7 @@ from api import schedules as schedules_api  # noqa: E402
 from auth import require_auth  # noqa: E402
 from services import flow_store  # noqa: E402
 from services import engine_sync  # noqa: E402
+from services import tenants_svc  # noqa: E402
 
 ADMIN_KEY = "cluster-admin-key"
 
@@ -195,3 +196,59 @@ class TestClusterScheduleTenant:
         assert msg_id is not None
         msgs = _queued_messages(env)
         assert msgs and msgs[-1]["tenant_id"] == "acme"
+
+    def test_disabled_tenant_schedule_not_enqueued(self, env):
+        """停用租户（#27）：调度定义置 paused，cron 与「立即触发」都不入队。"""
+        from plaita.server.services.schedule_service import fire_schedule
+
+        store = flow_store.get_flow_store()
+        tenants_svc.create_tenant(store, "acme")
+        for sid, tenant in (("s-acme", "acme"), ("s-def", None)):
+            body = {"schedule_id": sid, "name": sid, "flow_id": "f",
+                    "cron": "* * * * *", "params": {}, "enabled": True}
+            if tenant:
+                body["tenant_id"] = tenant
+            env.hset("plaita:schedules", key=sid, value=json.dumps(body))
+
+        tenants_svc.set_tenant_status(store, "acme", "disabled", redis_client=env)
+
+        # 停用即落闸：状态发到 Redis，该租户调度置 paused（别的租户不动）
+        from plaita.tenant_context import is_tenant_disabled
+        assert is_tenant_disabled(env, "acme") is True
+        assert json.loads(env.hget("plaita:schedules", "s-acme"))["enabled"] is False
+        assert json.loads(env.hget("plaita:schedules", "s-def"))["enabled"] is True
+
+        # cron 入队路径：跳过（即使有人把调度重新 enable 也不放行）
+        acme_schedule = json.loads(env.hget("plaita:schedules", "s-acme"))
+        acme_schedule["enabled"] = True
+        assert fire_schedule(env, acme_schedule, "plaita:flow:queue") is None
+        assert env.xlen("plaita:flow:queue") == 0
+
+        # 「立即触发」路径：403 之外的 502（入队被拒），default 租户照常
+        client = _client(env)
+        assert client.post("/api/schedules/s-acme/trigger",
+                           headers=_headers("acme")).status_code == 502
+        assert client.post("/api/schedules/s-def/trigger",
+                           headers=_headers()).status_code == 200
+        assert env.xlen("plaita:flow:queue") == 1
+
+
+class TestTenantStatusPublish:
+    def test_startup_sync_realigns_disabled_tenants(self, env):
+        """Redis 被清空/换实例后，启动对齐把停用状态从权威库灌回（不脆的安全边界）。"""
+        from plaita.tenant_context import DISABLED_TENANTS_KEY, is_tenant_disabled
+
+        store = flow_store.get_flow_store()
+        tenants_svc.create_tenant(store, "acme")
+        tenants_svc.set_tenant_status(store, "acme", "disabled", redis_client=env)
+        env.delete(DISABLED_TENANTS_KEY)  # 模拟 Redis 数据丢失
+        assert is_tenant_disabled(env, "acme") is False
+
+        assert tenants_svc.sync_tenant_status_to_redis(store, env) == 1
+        assert is_tenant_disabled(env, "acme") is True
+        assert is_tenant_disabled(env, "default") is False
+
+        # 重新启用后撤销标记，且对齐不再把它算作停用
+        tenants_svc.set_tenant_status(store, "acme", "active", redis_client=env)
+        assert is_tenant_disabled(env, "acme") is False
+        assert tenants_svc.sync_tenant_status_to_redis(store, env) == 0

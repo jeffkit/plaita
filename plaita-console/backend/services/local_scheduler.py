@@ -144,6 +144,35 @@ def delete_schedule(store, schedule_id: str,
 
 # ---- 触发 ----
 
+def _tenant_disabled(store, tenant_id: Optional[str]) -> bool:
+    """租户停用闸（#27）：本地档调度不进执行（同集群档 fire_schedule 的闸）。"""
+    try:
+        from . import tenants_svc
+    except ImportError:
+        from services import tenants_svc  # type: ignore
+    return tenants_svc.is_tenant_disabled(store, tenant_id)
+
+
+def disable_tenant_schedules(store, tenant_id: str) -> int:
+    """停用某租户的全部调度（enabled=False + 清空 next_run_at），返回条数。
+
+    console 停用租户时调用（#27）；重新启用租户不自动恢复，由管理员显式 enable。
+    """
+    with store._session_local() as session:
+        rows = session.scalars(
+            select(LocalSchedule).where(
+                LocalSchedule.tenant_id == tenant_id,
+                LocalSchedule.enabled.is_(True),
+            )
+        ).all()
+        for row in rows:
+            row.enabled = False
+            row.next_run_at = ""
+            row.updated_at = datetime.utcnow()
+        session.commit()
+        return len(rows)
+
+
 def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optional[str]:
     """触发一次调度：本地档直接进程内执行（不入队），记录触发历史。"""
     from . import local_executor
@@ -164,6 +193,14 @@ def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optiona
 
 
 def trigger_now(store, schedule: Dict[str, Any]) -> Optional[str]:
+    """手动触发一次（租户闸：停用租户不执行，返回 None → 调用方回 502）。"""
+    tenant_id = schedule.get("tenant_id") or ""
+    if _tenant_disabled(store, tenant_id):
+        logger.warning(
+            "租户 %s 已停用，调度 %s 手动触发被拒",
+            tenant_id or "default", schedule.get("schedule_id"),
+        )
+        return None
     return fire(store, schedule, trigger_kind="manual")
 
 
@@ -226,11 +263,17 @@ def _loop(store) -> None:
 
 
 def _scan_once(store) -> int:
-    """扫一遍到期调度并触发。返回触发数量。"""
+    """扫一遍到期调度并触发。返回触发数量。
+
+    租户闸（#27）：停用租户的调度直接跳过（静默——停用时已把其调度置 paused，
+    此处兜的是「停用后又被手工 enable」；每 5s 打一条日志只会成噪音）。
+    """
     now_ms = time.time() * 1000
     fired = 0
     for schedule in list_schedules(store):
         if not schedule.get("enabled"):
+            continue
+        if _tenant_disabled(store, schedule.get("tenant_id") or ""):
             continue
         nxt = schedule.get("next_run_at") or ""
         if not nxt:

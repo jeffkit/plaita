@@ -29,6 +29,7 @@ from croniter import croniter
 from redis import Redis
 
 from plaita.server.task_queue import enqueue_task
+from plaita.tenant_context import is_tenant_disabled
 
 from ...logger import logger
 from .base_service import BaseExtendedService
@@ -76,17 +77,28 @@ def fire_schedule(
     供调度服务循环（trigger_kind="cron"）与 console「立即触发」
     （trigger_kind="manual"）复用，保证消息形状单一来源。
 
+    租户闸（#27）：停用租户的调度**不入队**（console 在停用时把租户 ID 发布到
+    Redis 集合，见 ``plaita.tenant_context``）。这是 cron 与「立即触发」两条
+    入队路径的唯一收口，两者都过本函数。
+
     Returns:
-        Stream message id；入队失败返回 None。
+        Stream message id；停用租户跳过或入队失败返回 None。
     """
     schedule_id = schedule["schedule_id"]
+    tenant_id = schedule.get("tenant_id") or "default"
+    if is_tenant_disabled(redis_client, tenant_id):
+        logger.warning(
+            "租户 %s 已停用，调度 %s（%s）跳过不入队",
+            tenant_id, schedule.get("name", schedule_id), trigger_kind,
+        )
+        return None
     now = datetime.now()
     now_ms = int(now.timestamp() * 1000)
 
     message: Dict[str, Any] = {
         "type": "start",
         # 调度定义归属租户（console 写入 HASH 值）；缺省视为 default（兼容旧值）
-        "tenant_id": schedule.get("tenant_id") or "default",
+        "tenant_id": tenant_id,
         "flow_id": schedule["flow_id"],
         "params": schedule.get("params") or {},
         "timestamp": now.isoformat(),
@@ -165,6 +177,31 @@ def list_schedules(redis_client: Redis) -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             logger.warning("忽略无法解析的调度定义: %r", value)
     return out
+
+
+def disable_tenant_schedules(redis_client: Redis, tenant_id: str) -> int:
+    """停用某租户的全部调度（enabled=False + 清空 next_run_at），返回条数。
+
+    console 停用租户时调用（#27）——让「停用」在调度列表上可见（paused），
+    不依赖 runtime 的租户闸；重新启用租户**不**自动恢复这些调度，由管理员
+    显式 enable（停用是显式动作，恢复也该是）。
+    """
+    changed = 0
+    for schedule in list_schedules(redis_client):
+        if (schedule.get("tenant_id") or "default") != tenant_id:
+            continue
+        if not schedule.get("enabled"):
+            continue
+        schedule["enabled"] = False
+        schedule["next_run_at"] = ""
+        schedule["updated_at"] = datetime.now().isoformat()
+        redis_client.hset(
+            SCHEDULES_KEY,
+            key=schedule["schedule_id"],
+            value=json.dumps(schedule, ensure_ascii=False),
+        )
+        changed += 1
+    return changed
 
 
 # ---------- 服务 ----------

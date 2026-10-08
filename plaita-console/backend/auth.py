@@ -13,6 +13,10 @@
 - admin 专属前缀：/api/users、/api/audit、/api/credentials、/api/cluster、/api/tenants
 - 生产环境（PLAITA_CONSOLE_ENV=prod）的 DELETE：admin
 
+租户停用（#27）：
+- 活跃租户已停用的会话一律 403（/api/auth/* 会话自操作例外，让用户能切走/
+  登出）；平台管理员与 API-Key 属平台级身份，不受该闸限制
+
 租户上下文（多租户）：
 - 会话用户钉死在其活跃租户（login/switch-tenant 决定），request.state.tenant_id
 - 平台管理员 / API-Key 可带 ``X-Tenant-ID`` 头指定租户；不带则 tenant_id=None
@@ -81,6 +85,15 @@ def require_auth(request: Request) -> Dict[str, Any]:
         source = "session"
         tenant_id = resolved.get("tenant_id")
         platform_admin = bool(resolved.get("platform_admin"))
+        # 租户闸（#27）：停用租户的已签发会话拒绝访问（403），不停用时不删
+        # 会话——重新启用后原会话即刻恢复。/api/auth/* 是会话自操作
+        # （me/logout/switch-tenant），例外放行：否则用户被困在停用租户上，
+        # 既切不走也登不出。
+        if resolved.get("tenant_disabled") and not request.url.path.startswith("/api/auth/"):
+            raise HTTPException(
+                status_code=403,
+                detail=f"租户 {tenant_id} 已停用，请联系平台管理员",
+            )
     elif settings.allow_insecure_admin:
         actor, role, source = "insecure", "admin", "insecure"
         platform_admin = True

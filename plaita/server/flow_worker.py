@@ -57,6 +57,7 @@ from plaita.server.execution_lease import (
 from plaita.server.tenant_context import (
     TenantRoutingExecutionLease,
     current_tenant,
+    is_tenant_disabled,
     reset_current_tenant,
     set_current_tenant,
     tenant_namespace,
@@ -107,18 +108,23 @@ def _paused_sweeper(max_age_secs: int = 6 * 3600):
     _preserve_scene），没人续跑的暂停实例会累积占实例配额（AGS ~20；暂停不计
     计算力费，但配额满会让新建失败）。
 
-    返回 ``None`` 表示无需/不可清扫（未装 plaita-nodes、无注册表、无 ags driver、
-    缺 e2b）；任何异常只告警，绝不拦启动。
+    返回 ``None`` 表示无需/不可清扫（未装 plaita-nodes、无注册表、无 ags driver）；
+    预导入（driver 模块 / e2b）失败只告警降级，绝不拦启动——可选依赖缺失不能把整条
+    配额安全带静默关死（缺 driver 模块时 ``get_driver`` 自然取不到 driver）。
     """
     try:
         from plaita_nodes import sandbox as _sb
         if not _sb.load_sandboxes():
             return None
-        import plaita_nodes.sandbox_ags  # noqa: F401 — import 即注册 ags driver
+        # 预导入都在主线程做（见上文事故），且都只降级为告警。
+        try:
+            import plaita_nodes.sandbox_ags  # noqa: F401 — import 即注册 ags driver
+            import e2b_code_interpreter  # noqa: F401 — 预导入（sweep 内部再取时已缓存）
+        except Exception as exc:  # noqa: BLE001 — 可选依赖缺失只降级
+            logger.warning("沙箱清扫预导入失败（忽略）：%s", exc)
         drv = _sb.get_driver("ags")
         if drv is None or not hasattr(drv, "sweep_paused"):
             return None
-        import e2b_code_interpreter  # noqa: F401 — 预导入（sweep 内部再取时已缓存）
     except Exception as exc:  # noqa: BLE001 — 清扫失败不影响启动
         logger.warning("沙箱清扫准备失败（忽略）：%s", exc)
         return None
@@ -2389,6 +2395,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             missing = self._detect_affinity_mismatch(message_data)
             if missing is not None:
                 raise TaskNotForThisWorker(missing)
+
+        # 租户闸（#27）：停用租户的任务**不再推进**——含 start 与 resume
+        # （恢复挂起执行）。停用状态由 console 发布到 Redis 集合
+        # （plaita.tenant_context）；键缺席 = 无停用租户（存量部署行为不变）。
+        # 丢弃并 ack（返回即由消费循环 ack）：留 pending 会被反复 XCLAIM
+        # 虚增 delivery，超限时经死信守卫重入队 → 假死信污染 DLQ；执行状态
+        # 本身留在存储里，租户重新启用后由 console 的 resume 重新驱动。
+        # 骨架实例（单测以 __new__ 构造，无 redis_client）放行。
+        tenant_id = message_data.get("tenant_id")
+        if is_tenant_disabled(getattr(self, "redis_client", None), tenant_id):
+            logger.warning(
+                "租户 %s 已停用，丢弃任务 %s（不再推进；重新启用后请手动 resume）",
+                tenant_id or "default", message_data.get("type"),
+            )
+            return
 
         # 租户上下文：消息携带 tenant_id（缺省 = default，兼容旧生产方）；
         # 存储路由包装器/日志 handler/租约据此选租户 namespace。

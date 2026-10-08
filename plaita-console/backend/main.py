@@ -117,6 +117,18 @@ async def lifespan(app: FastAPI):
     # plaita-console/scripts/sync_published_to_engine.py 对齐。见 engine_sync 模块
     # docstring 的「边界」段。失败仅 warning。
     if not local_mode and redis_client is not None:
+        # 停用租户对齐（#27）：Redis 停用集合是运行面唯一的租户状态副本，
+        # 被清空/换实例后必须能从权威库（tenants 表）重新灌回，否则停用失效
+        try:
+            try:
+                from .services import tenants_svc
+            except ImportError:
+                from services import tenants_svc  # type: ignore
+            disabled = tenants_svc.sync_tenant_status_to_redis(app.state.store, redis_client)
+            if disabled:
+                logger.info("启动同步：%d 个停用租户已对齐到 Redis", disabled)
+        except Exception as e:  # noqa: BLE001 — 兜底同步不得阻断启动
+            logger.warning("停用租户状态对齐失败（忽略，不阻断启动）: %s", e)
         try:
             try:
                 from .services import engine_sync

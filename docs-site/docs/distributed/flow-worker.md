@@ -15,6 +15,7 @@
 | 挂起服务任务派发 | `rpush` 到 `plaita:{subtype}:queue` 失败（有 redis 时）抛 `ServiceDispatchError`；suspended 状态保留、消息重投后重新执行挂起节点再派发 | 重投会重复注册订阅——EventFilter 终态 GC 只回收终态，孤儿订阅留到 TTL 过期（可接受） |
 | 并发 resume | Redis `SET NX EX` lease（`plaita.server.execution_lease`） | 同一 `execution_id` 最多一个 resume；抢租约失败的任务**不** XACK，待 TTL 过期后 reclaim |
 | 控制面 | Registry / Control / Log / Queue / EventFilter 硬绑 Redis | 换 EventBus 后端 ≠ 换部署拓扑 |
+| 停用租户闸（#27） | console 把停用租户 ID 发布到 Redis 集合 `plaita:tenants:disabled`（平台机制键，不按租户分区）；worker 在 `_dispatch_task` 派发前查一次，命中即**直接返回**（由消费循环 ack，丢而不留 pending） | 停用租户的 start/resume 都不再推进：留 pending 会反复 XCLAIM 虚增 delivery、超限时经死信守卫重入队 → 假死信污染 DLQ，故选择丢弃；执行状态仍在存储里，租户重新启用后由 console `POST /api/executions/{id}/resume` 重新驱动。集合缺席 = 无租户停用（未接入该闸的部署行为不变）；无 Redis client 的骨架实例放行 |
 
 选型含义：
 
