@@ -115,7 +115,11 @@ class ProcessLauncher(ServiceLauncher):
         process_env["PLAITA_INSTANCE_ID"] = instance_id
         process_env["PYTHONPATH"] = str(PROJECT_ROOT)
 
-        # 凭据文件/密钥透传：worker 节点运行时经 plaita.credentials 解密读取
+        # 凭据文件/密钥透传：worker 节点运行时经 plaita.credentials 解密读取。
+        # 注入的是 default 租户基础文件；非 default 租户的 flow 由 worker 在
+        # 消费任务时按消息体 tenant_id（plaita.tenant_context）原生路由到旁
+        # 文件 .plaita-credentials.{tenant}.json——凭据路由在引擎侧，不在
+        # 拉起环境里逐租户重复注入。
         try:
             from . import credentials_svc
         except ImportError:

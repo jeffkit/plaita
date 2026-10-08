@@ -5,6 +5,13 @@
 ``PLAITA_CREDENTIALS_KEY`` 为 Fernet 密钥（未设时尝试同级 ``.plaita-credentials.key``
 文件）。加密/解密依赖 ``cryptography``（``pip install plaita[credentials]``）。
 
+多租户：解析时读租户上下文（``plaita.tenant_context.current_tenant``，与
+分布式存储/日志同源）——非 default 租户读旁文件
+``<stem>.<tenant_id><suffix>``（console 凭据页按租户导出的同一命名），
+default/空租户沿用历史文件（零行为变化）。租户隔离由文件路径保证：
+非 default 租户只看得见自己旁文件里的凭据，default 文件对它不可见；
+报错信息只列**当前租户文件内**的凭据名，不泄露其他租户的存在。
+
 节点内用法::
 
     from plaita.credentials import get_credential
@@ -24,10 +31,25 @@ class CredentialError(RuntimeError):
 
 DEFAULT_FILE = ".plaita-credentials.json"
 DEFAULT_KEY_FILE = ".plaita-credentials.key"
+DEFAULT_TENANT_ID = "default"
+
+
+def tenant_credentials_file(tenant_id: Optional[str], base: Optional[Path] = None) -> Path:
+    """租户 → 凭据文件路径。default/空 = 基础文件（历史兼容），
+    其余租户 = 旁文件 ``<stem>.<tenant_id><suffix>``（与 console 导出同规则）。"""
+    if base is None:
+        base = Path(os.environ.get("PLAITA_CREDENTIALS_FILE", DEFAULT_FILE))
+    tid = tenant_id or DEFAULT_TENANT_ID
+    if tid == DEFAULT_TENANT_ID:
+        return base
+    return base.with_name(f"{base.stem}.{tid}{base.suffix}")
 
 
 def credentials_file() -> Path:
-    return Path(os.environ.get("PLAITA_CREDENTIALS_FILE", DEFAULT_FILE))
+    """当前租户上下文对应的凭据文件（节点运行时经这里路由）。"""
+    from plaita.tenant_context import current_tenant
+
+    return tenant_credentials_file(current_tenant())
 
 
 def _load_key() -> bytes:
@@ -61,8 +83,10 @@ def get_credential(name: str) -> Dict[str, Any]:
     data = _read_store()
     entry = data.get(name)
     if entry is None:
+        # 只列当前租户文件内的名字——跨租户文件互不可见，报错不得泄露
+        # 其他租户配置了哪些凭据。
         known = ", ".join(sorted(data)) or "（无）"
-        raise CredentialError(f"凭据 {name!r} 不存在（可用: {known}）。请在编排台「凭据」页创建")
+        raise CredentialError(f"凭据 {name!r} 不存在（当前租户可用: {known}）。请在编排台「凭据」页创建")
     token = entry.get("data") if isinstance(entry, dict) else entry
     if token is None:
         raise CredentialError(f"凭据 {name!r} 内容为空")

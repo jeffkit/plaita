@@ -41,14 +41,24 @@ def run(input):
 """
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+def _wait_gone(pid: int, seconds: float = 5.0) -> bool:
+    """等被杀的孙进程不再运行。本沙箱（无 init 的 PID namespace）里 SIGKILL
+    后的孙进程无人收尸，永远停留在 Z (zombie)——os.kill(pid, 0) 对 zombie
+    也成功，恰好误报「幸存」。Z 状态即判定已死：killpg 的被测行为是「信号
+    送达且不再执行」，收尸归属不是断言对象。"""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                stat = f.read().decode(errors="replace")
+            # comm 可含空格/括号：状态字段取右括号之后的第一个
+            state = stat.rsplit(")", 1)[1].split()[0]
+            if state == "Z":
+                return True
+        except (OSError, IndexError):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def test_timeout_kills_whole_tree(tmp_path, monkeypatch):
@@ -57,11 +67,7 @@ def test_timeout_kills_whole_tree(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="timed out .*process tree killed"):
         run_python_subprocess(SLEEPER, {"pidfile": str(pidfile)})
     pid = int(pidfile.read_text())
-    # 给内核一点时间收尸（SIGKILL 后 zombie 由我们的 communicate 回收）
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and _pid_alive(pid):
-        time.sleep(0.1)
-    assert not _pid_alive(pid), f"grandchild {pid} survived the sandbox timeout"
+    assert _wait_gone(pid), f"grandchild {pid} survived the sandbox timeout"
 
 
 def test_cancel_event_kills_whole_tree(tmp_path, monkeypatch):
@@ -76,10 +82,7 @@ def test_cancel_event_kills_whole_tree(tmp_path, monkeypatch):
     finally:
         timer.cancel()
     pid = int(pidfile.read_text())
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and _pid_alive(pid):
-        time.sleep(0.1)
-    assert not _pid_alive(pid), f"grandchild {pid} survived cancel"
+    assert _wait_gone(pid), f"grandchild {pid} survived cancel"
 
 
 def test_normal_run_unaffected():

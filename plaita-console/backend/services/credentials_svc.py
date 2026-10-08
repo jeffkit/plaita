@@ -46,7 +46,11 @@ def credentials_key_file() -> Path:
 
 def credentials_file(tenant_id: str = DEFAULT_TENANT_ID) -> Path:
     """凭据导出文件路径：default 租户沿用历史文件（兼容既有引擎读取），
-    其余租户写旁文件 ``<stem>.<tenant_id><suffix>``，实现租户隔离。"""
+    其余租户写旁文件 ``<stem>.<tenant_id><suffix>``。
+
+    旁文件由引擎侧 plaita.credentials 按租户上下文（plaita.tenant_context，
+    worker 消费任务时从消息体 tenant_id set）读取同一命名——多租户 flow 在
+    worker 上解析凭据时取到的是自己租户的文件，default 文件对它不可见。"""
     base = Path(os.environ.get("PLAITA_CREDENTIALS_FILE", Path.cwd() / ".plaita-credentials.json"))
     if tenant_id == DEFAULT_TENANT_ID:
         return base

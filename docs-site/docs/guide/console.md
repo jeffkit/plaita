@@ -99,6 +99,13 @@ flow_worker 自动带上密钥环境。
 密钥来源：`PLAITA_CREDENTIALS_KEY` 环境变量，或自动生成于 DB 同目录的
 `.plaita-credentials.key`。多机部署请统一注入同一密钥。
 
+**多租户隔离**：凭据按租户落库与导出——default 租户沿用历史文件
+`.plaita-credentials.json`，其余租户各写旁文件
+`.plaita-credentials.{tenant_id}.json`。引擎侧 `plaita.credentials`
+按租户上下文路由（worker 消费任务时从消息体 `tenant_id` set，本地档由
+执行线程 set）：非 default 租户的 flow 只能解析到自己旁文件里的凭据，
+default 文件对它不可见，凭据缺失的报错也只列当前租户文件内的名字。
+
 ## 主要能力
 
 - **流程编排**：拖拽画布 + 节点面板；节点配置面板由节点 schema 自动生成表单

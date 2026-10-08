@@ -14,7 +14,6 @@ SQLite（local_executions.context_json）。
 """
 from __future__ import annotations
 
-import contextvars
 import json
 import logging
 import os
@@ -22,7 +21,6 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from plaita.core.callback import FlowCallback
@@ -80,33 +78,10 @@ def _finalize_cancelled(execution_id: str, context: Optional[Dict[str, Any]]) ->
     logger.info("本地执行 %s 已取消（步界收口）", execution_id)
 
 # ---- 租户感知的凭据文件解析 ----
-# plaita 运行时每次 get_credential 都从 PLAITA_CREDENTIALS_FILE 环境变量解析
-# 路径（进程全局）；本地档多租户并发执行时不能改 env（跨租户串文件）。
-# 这里用 ContextVar 按执行线程注入租户专属凭据文件：只在包装函数内生效，
-# 未设置时与原行为完全一致。
-_tenant_credentials_file: contextvars.ContextVar = contextvars.ContextVar(
-    "plaita_console_tenant_credentials_file", default=None
-)
-
-
-def _patch_runtime_credentials() -> None:
-    import plaita.credentials as _pc
-
-    if getattr(_pc, "_console_tenant_patched", False):
-        return
-    _orig = _pc.credentials_file
-
-    def _tenant_aware_credentials_file():
-        override = _tenant_credentials_file.get()
-        if override:
-            return Path(override)
-        return _orig()
-
-    _pc.credentials_file = _tenant_aware_credentials_file
-    _pc._console_tenant_patched = True  # type: ignore[attr-defined]
-
-
-_patch_runtime_credentials()
+# 引擎 plaita.credentials 原生按租户上下文路由凭据文件（default = 基础文件，
+# 其余租户 = 旁文件 .plaita-credentials.{tenant}.json）。本地档执行线程把
+# 执行租户 set 进引擎租户上下文（_run_flow 内），与集群档 worker 同一路由
+# 机制，无需再对运行时打补丁。
 
 
 class _LocalTraceCallback(FlowCallback):
@@ -348,14 +323,20 @@ def _run_flow(
     handler = _ThreadLogHandler(execution_id, threading.get_ident(), tenant_id)
     root = logging.getLogger()
     root.addHandler(handler)
-    # 本线程内节点解析凭据时按租户路由凭据文件（见 _patch_runtime_credentials）
     try:
         from . import credentials_svc as _creds
     except ImportError:
         import credentials_svc as _creds  # type: ignore
-    tenant_token = _tenant_credentials_file.set(
-        str(_creds.credentials_file(tenant_id or _creds.DEFAULT_TENANT_ID))
-    )
+    # 本地档线程在 console 进程内，与 worker 不同源（无消息体 tenant_id）；
+    # 把执行租户 set 进引擎租户上下文——credentials 据此路由到租户专属凭据
+    # 文件（default = 基础文件，其余 = 旁文件），与集群档 worker 同一机制。
+    engine_tenant_token = None
+    try:
+        from plaita.tenant_context import reset_current_tenant, set_current_tenant
+
+        engine_tenant_token = set_current_tenant(tenant_id or _creds.DEFAULT_TENANT_ID)
+    except Exception:  # noqa: BLE001 — 引擎侧上下文不可用不阻塞本地执行
+        pass
     langfuse_callback = None
     try:
         logger.info(
@@ -458,7 +439,13 @@ def _run_flow(
             root.removeHandler(handler)
         except Exception:  # noqa: BLE001
             pass
-        _tenant_credentials_file.reset(tenant_token)
+        if engine_tenant_token is not None:
+            try:
+                from plaita.tenant_context import reset_current_tenant
+
+                reset_current_tenant(engine_tenant_token)
+            except Exception:  # noqa: BLE001
+                pass
         with _lock:
             _threads.pop(execution_id, None)
         _pop_cancel_event(execution_id)
