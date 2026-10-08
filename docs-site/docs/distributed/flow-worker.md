@@ -248,6 +248,12 @@ flowchart TD
   `PLAITA_NODES_WORKSPACE_ROOT`（未显式配置则 fail-closed 推导默认根，`/` 不算
   边界）；显式放行任意路径用 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1`（仅单机信任
   部署）。见 [运维 Runbook · writefile 写入 jail](ops-runbook.md#writefile-写入-jail)。
+- **code 沙箱后端白名单（plaita#22）**：worker 注册 `code` 节点时施加后端白名单
+  （`PLAITA_SANDBOX_ALLOWED_BACKENDS`，未配置则 `docker` ∪ 生效后端；生效后端取
+  `PLAITA_CODE_BACKEND`，默认 `subprocess`）。流程 JSON 声明的 `sandbox_backend`
+  落在白名单外即**解析期拒绝**——否则流程作者可逐节点把后端降级为 `unsafe`
+  （进程内 raw `exec`，宿主任意代码执行）。见
+  [运维 Runbook · code 沙箱后端白名单](ops-runbook.md#code-沙箱后端白名单)。
 - **event_filter** 的 `--redis-url` 默认取 `PLAITA_REDIS_URL` 环境变量（与
   flow_worker 一致）。
 - **残留订阅 GC**：EventFilter 匹配到已终态（completed/error）执行的订阅时，

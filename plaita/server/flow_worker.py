@@ -112,16 +112,22 @@ def _node_retry_disabled() -> bool:
     return _env_switch("PLAITA_DISABLE_NODE_RETRY")
 
 
-# 允许的 code 沙箱后端。默认 subprocess：无需 docker daemon，适合 keeper/console
-# 拉起的 worker（生产流程只在 code 节点里跑确定性胶水代码，非用户任意代码）。
-# 多租户对外部署应改 docker 并收紧 allowed_backends。
-_CODE_ALLOWED_BACKENDS = ("subprocess", "docker", "unsafe")
-
-
 def _code_backend_for_worker() -> str:
     """worker 启动时 CodeNode 的沙箱后端（PLAITA_CODE_BACKEND，默认 subprocess）。"""
     raw = os.environ.get("PLAITA_CODE_BACKEND", "").strip()
     return raw or "subprocess"
+
+
+def _code_allowed_backends_for_worker(backend: str) -> list:
+    """worker 生效的沙箱后端白名单（plaita#22）。
+
+    ``PLAITA_SANDBOX_ALLOWED_BACKENDS`` 未配置时默认 ``(docker,)`` 并入生效后端，
+    即流程 JSON 不得逐节点降级到 ``"unsafe"``（进程内 raw exec）——未接线前该白名单
+    机制只存在于注释里，任意租户写一行 ``sandbox_backend: "unsafe"`` 即宿主 RCE。
+    """
+    from plaita.node import resolve_sandbox_allowed_backends
+
+    return list(resolve_sandbox_allowed_backends(backend, "flow-worker"))
 
 
 def _code_node_enabled() -> bool:
@@ -135,17 +141,23 @@ def _register_code_node_for_worker() -> None:
     默认注册表自 0.4.0 起不含 CodeNode（执行任意用户代码须显式 opt-in），worker
     不注册则整单被丢弃（unRecognized node type: code）。后端不可用（如选 docker
     但无 daemon）时**降级到 subprocess 并告警**，不让整机起不来。
+
+    白名单由 ``_code_allowed_backends_for_worker`` 解析（plaita#22）：未显式配置
+    ``PLAITA_SANDBOX_ALLOWED_BACKENDS`` 时默认只放行 ``docker`` ∪ 生效后端，流程
+    JSON 逐节点覆盖成 ``"unsafe"`` 在解析期被拒。
     """
     from plaita.node import register_code_node
 
     backend = _code_backend_for_worker()
     try:
-        register_code_node(default_backend=backend, allowed_backends=list(_CODE_ALLOWED_BACKENDS))
+        register_code_node(default_backend=backend,
+                           allowed_backends=_code_allowed_backends_for_worker(backend))
         logger.info("CodeNode 已注册（sandbox_backend=%s）", backend)
         return
     except RuntimeError as e:  # 多为 docker daemon 不可用
         logger.warning("CodeNode 注册失败（backend=%s）：%s —— 降级 subprocess 重试", backend, e)
-    register_code_node(default_backend="subprocess", allowed_backends=list(_CODE_ALLOWED_BACKENDS))
+    register_code_node(default_backend="subprocess",
+                       allowed_backends=_code_allowed_backends_for_worker("subprocess"))
     logger.info("CodeNode 已注册（sandbox_backend=subprocess，降级）")
 
 
@@ -2795,6 +2807,7 @@ def main():
     # 生产流程（如 self-improve-v2）含 code 节点，worker 必须注册否则整单被丢弃
     # （「unRecognized node type: code」）。后端由 PLAITA_CODE_BACKEND 选择，默认
     # subprocess（无需 docker daemon）；声明值非法/不可用时降级并告警，不让整机退出。
+    # 后端白名单由 PLAITA_SANDBOX_ALLOWED_BACKENDS 配置（见 _register_code_node_for_worker）。
     if _code_node_enabled():
         _register_code_node_for_worker()
     

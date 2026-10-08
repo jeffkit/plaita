@@ -41,6 +41,9 @@
       register_code_node()  # 默认 docker 沙箱；无 Docker 时传 default_backend="subprocess"|"unsafe"|"restricted"
       ```
 
+      后端白名单（防流程 JSON 逐节点降级到 `unsafe`）见
+      [code 沙箱后端白名单](../distributed/ops-runbook.md#code-沙箱后端白名单)。
+
     - **`calculate`** / **`redis`**（需 `redis` extra）：存在于源码但不在 `_BUILTIN_NODES`，自行 `register`。
 
 ## start / end
@@ -221,6 +224,14 @@
 from plaita.node import register_code_node
 register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 ```
+
+流程 JSON 里的 `sandbox_backend` 是**逐节点可覆盖**的：不设白名单时，流程作者写
+`"sandbox_backend": "unsafe"` 就能在宿主进程内 raw `exec` 任意代码。生产部署入口
+（worker / console）因此默认施加白名单：`PLAITA_SANDBOX_ALLOWED_BACKENDS`（未配置
+→ `docker`）∪ 生效默认后端，白名单外的后端在**解析期**即被拒绝。库调用方自己接线
+时用 `register_code_node(allowed_backends=(...))`，或经
+`plaita.node.resolve_sandbox_allowed_backends()` 取同一口径。详见
+[运维 Runbook · code 沙箱后端白名单](../distributed/ops-runbook.md#code-沙箱后端白名单)。
 
 `language` 为 `js` 或 `python`，代码需定义一个 `run` 函数，`input` 作为参数传入。
 

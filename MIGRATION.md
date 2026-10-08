@@ -60,6 +60,26 @@
   run_dir 不在默认根内），设 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` 回到历史
   行为——该开关只该用于单机信任环境。
 
+### code 沙箱后端白名单在生产入口默认开启（plaita#22）
+
+`CodeNode.sandbox_backend` 由**流程 JSON** 逐节点声明，而流程 JSON 来自流程作者：
+不设白名单时，作者写一行 `"sandbox_backend": "unsafe"` 就能在 worker / console
+进程内 raw `exec` 任意代码（可读 `PLAITA_CREDENTIALS_KEY`、Redis/DB 凭据）。
+机制（`register_code_node(allowed_backends=...)` + 解析期硬拦）2026-09 评审就
+已落地，但 worker / console 两个部署入口都不传——防线只存在于注释里。
+
+- 变更前：生效白名单为 `None` = 不限制；`unsafe` / `restricted` / `subprocess`
+  均可被流程作者逐节点选中。
+- 变更后：worker / console 启动时按 `PLAITA_SANDBOX_ALLOWED_BACKENDS`（未配置则
+  `docker`）∪ 生效默认后端（worker 的 `PLAITA_CODE_BACKEND`，默认 `subprocess`；
+  console 默认 `docker`）施加白名单，白名单外的 `sandbox_backend` 在**解析期**
+  被拒（`sandbox_backend=... is not allowed by the operator`）。白名单含 `unsafe`
+  时启动日志打 CRITICAL，未显式配置时打 WARNING。
+- 迁移：含以 `unsafe` / `restricted` 为生效后端的部署需显式放行——
+  `PLAITA_SANDBOX_ALLOWED_BACKENDS=unsafe`（仅单机信任环境）或改用
+  `PLAITA_CODE_BACKEND=docker`。多租户部署保持默认（`docker`）即可。
+  详见 [运维 Runbook · code 沙箱后端白名单](docs-site/docs/distributed/ops-runbook.md#code-沙箱后端白名单)。
+
 ### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
 
 本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程

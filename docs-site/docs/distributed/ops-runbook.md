@@ -42,6 +42,8 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
 | `PLAITA_NODES_WORKSPACE_ROOT` | 由 worker 推导（见下） | `writefile` 节点的写入根（jail） |
 | `PLAITA_ALLOW_UNRESTRICTED_WRITES` | unset | `=1` 关闭 writefile jail（仅单机信任部署） |
+| `PLAITA_CODE_BACKEND` | `subprocess` | worker 注册 `code` 节点时生效的沙箱后端 |
+| `PLAITA_SANDBOX_ALLOWED_BACKENDS` | `docker` ∪ 生效后端 | `code` 节点后端白名单（见下） |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
 | `PLAITA_CONSOLE_RECONCILE_ORPHANS` | `suspend` | 本地模式启动对账口径：`suspend` / `fail` / `off` |
 
@@ -65,6 +67,36 @@ worker / console 启动时注入该变量（`plaita/writefile_jail.py`），次�
 
 jail 是**进程级**的：worker 一次启动一个根，不能按执行/租户分别设根（`--concurrency`
 下多任务共享同一根）。跨租户写不同目录的部署请给每租户独立 worker。
+
+## code 沙箱后端白名单（plaita#22 起默认开启） {#code-沙箱后端白名单}
+
+`code` 节点（`CodeNode`）的隔离强度由流程 JSON 里的 `sandbox_backend` 逐节点声明：
+`docker`（容器级）/ `restricted`（AST 级，有已知绕过向量）/ `subprocess`（进程级，
+**不隔离网络与文件系统**）/ `unsafe`（进程内 raw `exec`，任意模块、宿主凭据可读）。
+
+流程 JSON 由流程作者提供，因而 `sandbox_backend` 是**不可信输入**：没有白名单，
+作者写一行 `"sandbox_backend": "unsafe"` 就能在 worker/console 进程内执行任意代码。
+
+worker / console 启动时经 `register_code_node(allowed_backends=...)` 施加白名单
+（`plaita/node/__init__.py::resolve_sandbox_allowed_backends`），解析期即拒绝白名单
+外的后端——**不是执行期才生效**。生效集合：
+
+1. 显式 `PLAITA_SANDBOX_ALLOWED_BACKENDS`（逗号 / 冒号 / 空白分隔的后端名）；
+2. 未设 → 默认 `docker`；
+3. 再并入**生效的默认后端**（worker 看 `PLAITA_CODE_BACKEND`，默认 `subprocess`；
+   console 默认 `docker`）——运营者选定的默认后端必须自身可用，否则不带
+   `sandbox_backend` 的流程会被自己的白名单拦下。
+
+启动日志可见生效集合；白名单含 `unsafe` 时打 **CRITICAL**（宿主任意代码执行），
+未显式配置时打 WARNING。多租户 / 不受信流程部署请显式配置第 1 条，例如：
+
+```bash
+PLAITA_SANDBOX_ALLOWED_BACKENDS=docker PLAITA_CODE_BACKEND=docker \
+  python -m plaita.server.flow_worker --redis-url redis://localhost:6379/0
+```
+
+未显式配置时的默认档已经挡住 `unsafe` 与 `restricted`；`subprocess` 只在它是生效
+默认后端时可用（worker 默认档即如此）。
 
 ## 无损升级（rolling upgrade）
 

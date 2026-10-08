@@ -13,6 +13,8 @@ Backward-compatible helpers (``node_register``, ``parse_node``) emit
 from __future__ import annotations
 
 import logging
+import os
+import re
 import warnings
 from importlib.metadata import entry_points
 from typing import Dict, List, Optional, Type
@@ -330,6 +332,65 @@ nodes = _RegistryDictProxy(_default_registry)
 # CodeNode opt-in helper
 # ---------------------------------------------------------------------------
 
+# 沙箱后端白名单 env（plaita#22）。worker / console 启动时据此解析传给
+# ``register_code_node(allowed_backends=...)`` 的取值；未设置则用
+# ``DEFAULT_SANDBOX_ALLOWED_BACKENDS``。
+SANDBOX_ALLOWED_BACKENDS_ENV = "PLAITA_SANDBOX_ALLOWED_BACKENDS"
+
+# 未显式配置时的默认白名单：只留容器级隔离。"subprocess" 不隔离网络与文件系统，
+# "unsafe" 是进程内 raw ``exec``——流程作者逐节点声明它等于拿到 worker/console
+# 进程的任意代码执行（含宿主凭据）。
+DEFAULT_SANDBOX_ALLOWED_BACKENDS: tuple = ("docker",)
+
+
+def resolve_sandbox_allowed_backends(default_backend: Optional[str] = None,
+                                     component: str = "runtime") -> tuple:
+    """解析部署入口生效的沙箱后端白名单（plaita#22）。
+
+    次序：显式 ``PLAITA_SANDBOX_ALLOWED_BACKENDS``（逗号/冒号/空白分隔的后端名）
+    → 未设则 ``DEFAULT_SANDBOX_ALLOWED_BACKENDS``；再并入生效的默认后端
+    （``default_backend`` 或模块默认）——运营者选定的默认后端必须自身可用，否则
+    不带 ``sandbox_backend`` 的流程会被自己的白名单拦下。
+
+    结果交给 ``register_code_node(allowed_backends=...)``：硬拦载体是模块级
+    ``code._ALLOWED_SANDBOX_BACKENDS``，``CodeNode`` 解析期据此拒绝流程 JSON 里的
+    逐节点降级。``unsafe`` 进白名单打 CRITICAL（宿主任意代码执行）；白名单未显式
+    配置时打 WARNING 说明当前档位。
+    """
+    from . import code as _code_module
+
+    raw = os.environ.get(SANDBOX_ALLOWED_BACKENDS_ENV, "").strip()
+    if raw:
+        configured = [b.strip() for b in re.split(r"[,;:\s]+", raw) if b.strip()]
+        invalid = [b for b in configured if b not in _code_module._PYTHON_BACKENDS]
+        if invalid:
+            raise ValueError(
+                f"{SANDBOX_ALLOWED_BACKENDS_ENV}: unknown sandbox backend(s) "
+                f"{invalid}; supported: {sorted(_code_module._PYTHON_BACKENDS)}"
+            )
+    else:
+        configured = list(DEFAULT_SANDBOX_ALLOWED_BACKENDS)
+
+    effective = default_backend or _code_module._DEFAULT_SANDBOX_BACKEND
+    allowed = tuple(sorted(set(configured) | {effective}))
+
+    if "unsafe" in allowed:
+        _logger.critical(
+            "[%s] 沙箱后端白名单包含 'unsafe'：流程作者可逐节点声明 "
+            "sandbox_backend='unsafe' 在 %s 进程内 raw exec 任意代码（可读宿主"
+            "凭据）。仅限完全信任流程作者的部署。", component, component,
+        )
+    elif not raw:
+        _logger.warning(
+            "[%s] %s 未配置，沙箱后端白名单取默认 %s ∪ 生效默认后端 %r = %s；"
+            "流程 JSON 里声明的更弱后端（如 'unsafe'）将被解析期拒绝。",
+            component, SANDBOX_ALLOWED_BACKENDS_ENV,
+            list(DEFAULT_SANDBOX_ALLOWED_BACKENDS), effective, list(allowed),
+        )
+    else:
+        _logger.info("[%s] 沙箱后端白名单: %s", component, list(allowed))
+    return allowed
+
 
 def register_code_node(registry: Optional[NodeRegistry] = None,
                        default_backend: Optional[str] = None,
@@ -352,6 +413,10 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
 
                 register_code_node(default_backend="docker",
                                    allowed_backends=("docker",))
+
+            生产部署入口应经 :func:`resolve_sandbox_allowed_backends` 取值（读
+            ``PLAITA_SANDBOX_ALLOWED_BACKENDS``，默认 ``(docker,)``），而不是自己
+            拼元组——见 ``plaita/server/flow_worker.py`` 与 console ``main.py``。
 
             **安全 gate**: 若生效后端 (``default_backend`` 或模块默认) 为 ``"docker"``
             但当前环境 docker daemon 不可用, **拒绝注册**并抛 ``RuntimeError``, 指明

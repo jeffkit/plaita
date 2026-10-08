@@ -43,9 +43,11 @@ ALLOWED_SILENT = {
     ("node/code.py", 466),
     # 2026-10-07 沙箱生命周期回调条件装配：plaita-nodes 是可选依赖，缺装 / 无沙箱
     # 注册表 / 装配失败都返回 None（非沙箱部署零行为变化），异常细节不影响主流程。
-    ("server/flow_worker.py", 781),
-    ("server/flow_worker.py", 786),
-    ("server/flow_worker.py", 792),
+    # plaita#22 沙箱白名单接线（`_code_allowed_backends_for_worker` 插入）后整体下移 12：
+    # 781→793, 786→798, 792→804，位点未变。
+    ("server/flow_worker.py", 793),
+    ("server/flow_worker.py", 798),
+    ("server/flow_worker.py", 804),
 }
 
 

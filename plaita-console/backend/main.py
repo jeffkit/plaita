@@ -175,10 +175,16 @@ def _load_external_node_modules() -> None:
             mod = importlib.import_module(mod_path)
             register = getattr(mod, "register_all") or getattr(mod, "register")
             register()
-            # CODE 节点 opt-in（与 plaita-nodes 的 agentrun/capture 等保持一致）
+            # CODE 节点 opt-in（与 plaita-nodes 的 agentrun/capture 等保持一致）。
+            # 白名单（plaita#22）：未显式配置 PLAITA_SANDBOX_ALLOWED_BACKENDS 时默认
+            # 只放行 docker ∪ 生效后端——console 进程内同样会跑流程（dry-run 试跑、
+            # 本地单机模式的 local_executor），流程 JSON 不得逐节点降级到 "unsafe"。
             try:
-                from plaita.node import register_code_node
-                register_code_node()
+                from plaita.node import (register_code_node,
+                                         resolve_sandbox_allowed_backends)
+                register_code_node(
+                    allowed_backends=list(
+                        resolve_sandbox_allowed_backends(component="console")))
             except ImportError:
                 pass
             logging.getLogger("backend.main").info("已加载外部节点模块: %s", mod_path)

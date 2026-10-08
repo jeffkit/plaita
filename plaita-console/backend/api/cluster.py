@@ -881,10 +881,15 @@ async def run_quick_test(request: QuickTestRequest):
             from plaita.node import nodes as node_registry, node_register
             
             # CODE 节点自 0.4.0 起移出默认注册表——快速测试的 simple/distributed/
-            # event 模板都含 code 节点，不注册则全部失败
+            # event 模板都含 code 节点，不注册则全部失败。后端白名单（plaita#22）与
+            # console 启动档同源：流程 JSON 不得逐节点降级到 "unsafe"。
             try:
-                from plaita.node import register_code_node
-                register_code_node(default_backend="subprocess")
+                from plaita.node import (register_code_node,
+                                         resolve_sandbox_allowed_backends)
+                register_code_node(
+                    default_backend="subprocess",
+                    allowed_backends=list(
+                        resolve_sandbox_allowed_backends("subprocess", "console")))
             except ImportError:
                 pass
 
