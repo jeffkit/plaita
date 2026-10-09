@@ -60,6 +60,7 @@ from plaita.server.execution_lease import (
     ExecutionLeaseError,
     NullExecutionLease,
     RedisExecutionLease,
+    holder_instance_id,
     new_holder_token,
 )
 from plaita.server.tenant_context import (
@@ -95,6 +96,12 @@ def _fencing_disabled() -> bool:
 def _watchdog_disabled() -> bool:
     """波次②回滚开关（看门狗半边）：PLAITA_DISABLE_LEASE_WATCHDOG=1 时不启动续租线程。"""
     return _env_switch("PLAITA_DISABLE_LEASE_WATCHDOG")
+
+
+def _holder_liveness_disabled() -> bool:
+    """#50 回滚开关：PLAITA_DISABLE_HOLDER_LIVENESS=1 时租约冲突分支不做
+    持有者存活核算——无条件回到「ack 释放」（2026-10-06 语义）。"""
+    return _env_switch("PLAITA_DISABLE_HOLDER_LIVENESS")
 
 
 def _affinity_disabled() -> bool:
@@ -1347,9 +1354,13 @@ class FlowWorker:
             # ②死信守卫按「租约是否被持有」判活，start 执行恒"租约空"→ 长步
             #   误判持有者已死 → 误死信 + 重入队，长任务被反复打断；
             # ③抢占者白烧 5 次 delivery 配额。
-            # acquire 失败即抛 ExecutionLeaseError（run() 走不 ack/重投语义），
-            # 抢占者礼貌退出；原持有者凭租约独占，重派者无法落行。
-            holder = new_holder_token(prefix="start")
+            # 对齐 resume：acquire → 看门狗续租 → finally 释放。acquire 失败
+            # 即抛 ExecutionLeaseError（run() 走不 ack/重投语义），抢占者礼貌退出。
+            # holder 嵌入注册表 instance id（#50）：其他 worker 在租约冲突时
+            # 可反解持有者并核其在册与否，区分「活持有者」与「死后 TTL 尾巴」。
+            holder = new_holder_token(
+                prefix="start", instance_id=getattr(self, "instance_id", None)
+            )
             lease_value, fence_token = self._acquire_lease(execution_id, holder)
             if lease_value is None:
                 raise ExecutionLeaseError(
@@ -1496,7 +1507,10 @@ class FlowWorker:
         # 解析流程定义
         logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
 
-        holder = new_holder_token(prefix="resume")
+        # holder 嵌入注册表 instance id（#50），语义同 start 路径。
+        holder = new_holder_token(
+            prefix="resume", instance_id=getattr(self, "instance_id", None)
+        )
         lease_value, fence_token = self._acquire_lease(execution_id, holder)
         if lease_value is None:
             raise ExecutionLeaseError(
@@ -2438,6 +2452,63 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                             "——重仓留给大容量 worker")
         return None
 
+    def _lease_conflict_ack_safe(self, body: Any) -> bool:
+        """ExecutionLeaseError 时 ack 是否安全（#50 加固）。
+
+        「租约冲突 ack 释放」（2026-10-06 修）的前提是**有人在跑**：租约被
+        持有 = 持有者正常推进，ack 只释放重复载体。但租约键在持有者进程
+        死后仍可存活 ≤TTL（看门狗最后一次续期的尾巴，120s）——维护窗重启
+        /崩溃后的这段窗口里，另一 worker 按 claim_min_idle（60s）回收重投
+        消息，命中该分支把**非终态执行唯一的重投载体** ack 掉：执行停在
+        running，恢复退化成 zombie reap（plaita#50 双机两例实证）。
+
+        判据：从租约值反解持有者 instance id（``new_holder_token`` 嵌入）
+        → 查服务注册表在册与否。注册表心跳 10s / TTL 30s，持有者死后
+        ≤30s 消失，早于 60s 的首次回收——在册 = 活持有者，ack 安全；
+        不在册 = TTL 尾巴，ack 会吞掉重试载体。
+
+        拿不到任何信号（旧格式租约 / 未启用注册表 / Redis 瞬断）一律按
+        「存活未知」返回 True 保持 ack——宁可回到 zombie reap 兜底，不
+        回归 2026-10-06 修掉的假死信风暴（对端每 60s XCLAIM 烧 delivery）。
+        回滚开关 PLAITA_DISABLE_HOLDER_LIVENESS=1 整体旁路（回到无条件 ack）。
+        """
+        if _holder_liveness_disabled():
+            return True
+        if not (isinstance(body, dict) and body.get("execution_id")):
+            return True
+        if not getattr(self, "_enable_registry", False):
+            return True
+        token = set_current_tenant(body.get("tenant_id"))
+        try:
+            try:
+                lease_value = self.execution_lease.get_holder(body["execution_id"])
+            except Exception as exc:  # noqa: BLE001 — 瞬断按存活未知处理
+                logger.debug("租约持有者存活核算读租约失败（按存活未知）: %s", exc)
+                return True
+        finally:
+            reset_current_tenant(token)
+        instance = holder_instance_id(lease_value)
+        if not instance:
+            return True
+        registry_key = (
+            f"{ServiceRegistry.REGISTRY_PREFIX}:{self.SERVICE_TYPE}:{instance}"
+        )
+        try:
+            registered = bool(self.redis_client.exists(registry_key))
+        except Exception as exc:  # noqa: BLE001 — 瞬断按存活未知处理
+            logger.debug("租约持有者存活核算查注册表失败（按存活未知）: %s", exc)
+            return True
+        if registered:
+            return True
+        logger.warning(
+            "执行 %s 租约持有者 %s 已不在服务注册表（持有者已死、租约处 ≤%ss "
+            "TTL 尾巴）——不 ack，留 pending 等租约过期后 reclaim 续跑 (#50)",
+            body.get("execution_id"),
+            instance,
+            getattr(self, "lease_ttl_seconds", "?"),
+        )
+        return False
+
     def _handover_non_affine(self, task: Any, queue: Any, exc: Exception) -> None:
         """把不亲和的 task 交接给其他 worker：ack 原条 + 重入队同体新副本。
 
@@ -2675,7 +2746,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 self._handover_non_affine(task, queue, exc)
             except ExecutionLeaseError as exc:
                 # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
-                # **ack 释放**本消息（2026-10-06 修）。
+                # 持有者**活着**时 ack 释放本消息（2026-10-06 修）。
                 #
                 # 原行为「不 ack 留 pending」的实测问题：持有者跑长节点
                 # （agentrun 分钟级）期间，对端每 claim_min_idle_ms(60s)
@@ -2684,19 +2755,34 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 # （租约仍在→跳过）并最终重入队，但产生大量假死信污染 DLQ、
                 # 浪费队列往返。
                 #
-                # 为何 ack 是安全的：任务**没有丢**——它在持有者手里正常
-                # 推进；若持有者崩溃，keeper 侧的 reaper 按 console_zombie_secs
-                # 判死并**重派**（执行级恢复），消息级重投与此机制重复。
+                # 为何 ack 对活持有者是安全的：任务**没有丢**——它在持有者
+                # 手里正常推进。但「租约在」≠「持有者在」：持有者进程死后
+                # 租约键还有 ≤TTL 的尾巴（#50 双机实证：维护窗 SIGTERM 杀
+                # 持有者 → 节点失败重试的重投消息在 60s 被对端回收 → 命中
+                # 本分支被 ack → 非终态执行唯一重投载体被吞，执行停 running
+                # 退化成 2h zombie reap）。故 ack 前先经
+                # ``_lease_conflict_ack_safe`` 核实持有者仍在注册表：
+                # 在册（活持有者）→ ack；不在册（TTL 尾巴）→ 不 ack 留
+                # pending，等租约过期后下一轮 reclaim 正常取得租约从
+                # checkpoint 续跑（代价 ≤TTL+60s，远小于 2h reap）。
                 # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
-                # 那里**没人**能跑该任务，必须留给对端；此处有人在跑，直接释放。
-                queue.note_lease_conflict()
-                queue.ack(task.message_id)
-                acked = True
-                logger.info(
-                    "任务 %s 执行被他人持租约（正常竞争），已 ack 释放避免烧 delivery: %s",
-                    task.message_id,
-                    exc,
-                )
+                # 那里**没人**能跑该任务，必须留给对端。
+                if self._lease_conflict_ack_safe(task.body):
+                    queue.note_lease_conflict()
+                    queue.ack(task.message_id)
+                    acked = True
+                    logger.info(
+                        "任务 %s 执行被他人持租约（持有者在册，正常竞争），已 ack 释放避免烧 delivery: %s",
+                        task.message_id,
+                        exc,
+                    )
+                else:
+                    queue.note_lease_conflict()
+                    logger.warning(
+                        "任务 %s 租约持有者已死，消息留 pending 等租约过期后重投，防重试载体被吞 (#50): %s",
+                        task.message_id,
+                        exc,
+                    )
             except NodeExecutionRetryableError as exc:
                 # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
                 # 步 checkpoint，不 ack、不计 poison、留 pending 等回收——
