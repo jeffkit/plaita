@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import importlib
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -51,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--code-backend", default=None, metavar="BACKEND",
                    help="注册 CODE 节点并设默认沙箱后端（常用 subprocess；"
                         "不传则不注册 CODE）")
+    b.add_argument("--embed-source", action="store_true",
+                   help="把 @flow 源码原文写进产物 metadata.source（console"
+                        " 源码页签/「查看权威源码」跳转的数据源，与 mediaflow"
+                        " publish_console 注入等效）")
     b.add_argument("--check", action="store_true",
                    help="不落盘；校验现有产物与重编译结果逐字节一致")
     return parser
@@ -69,7 +74,7 @@ def _apply_registration(spec: str) -> None:
         fn()
 
 
-def _load_ir(args: argparse.Namespace):
+def _load_ir(args: argparse.Namespace, source_text: str):
     """按 CLI 参数装配 registry 并编译源码 → IR dict（编译前过校验硬门）。"""
     from plaita.dsl.codeflow import compile_source
     from plaita.dsl.ir_validate import DEFAULT_RULES, validate_flow_ir
@@ -80,11 +85,16 @@ def _load_ir(args: argparse.Namespace):
     if args.code_backend:
         from plaita.node import register_code_node
 
-        register_code_node(default_backend=args.code_backend)
+        # plaita#22：生产入口必须显式传 allowed_backends=...，否则流程 JSON 可逐节点
+        # 降级到 unsafe（编译期白名单形同虚设）。CLI 侧白名单来源与 worker 一致：
+        # PLAITA_SANDBOX_ALLOWED_BACKENDS（未配置 → 仅放行指定后端本身）。
+        _allowed = os.environ.get("PLAITA_SANDBOX_ALLOWED_BACKENDS", "").strip()
+        _backends = (tuple(b.strip() for b in _allowed.split(",") if b.strip())
+                     or (args.code_backend,))
+        register_code_node(default_backend=args.code_backend, allowed_backends=_backends)
     get_default_registry()  # 触发 entry_points 懒发现（注册过的都数进来）
 
-    source_path = Path(args.source)
-    ir = compile_source(source_path.read_text(encoding="utf-8"), args.flow_id)
+    ir = compile_source(source_text, args.flow_id)
     validate_flow_ir(ir, rules=DEFAULT_RULES)
     return ir
 
@@ -92,6 +102,7 @@ def _load_ir(args: argparse.Namespace):
 def _cmd_build(args: argparse.Namespace) -> int:
     from plaita.dsl.codeflow._canonical import (
         count_nodes,
+        embed_source,
         serialize_canonical,
         to_canonical,
     )
@@ -100,8 +111,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if not source_path.is_file():
         sys.stderr.write(f"plaita build: 源码不存在: {source_path}\n")
         return 2
-    ir = _load_ir(args)
+    source_text = source_path.read_text(encoding="utf-8")
+    ir = _load_ir(args, source_text)
     doc = ir if args.format == "ir" else to_canonical(ir)
+    if args.embed_source:
+        # @flow 源码原文随产物发布（console 源码页签 / 节点→源码行跳转的数据源）
+        embed_source(doc, source_text)
     text = serialize_canonical(doc)
 
     out_path = (Path(args.out) if args.out
