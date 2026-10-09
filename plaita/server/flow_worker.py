@@ -619,6 +619,45 @@ class FlowWorker:
     # 重试计数键 TTL：7 天自清理（与取消标志键同款「带 TTL 意图键」模式）。
     NODE_RETRY_COUNTER_TTL_SECONDS = 7 * 86400
 
+    # G1 唤醒上限（plaita#73 补丁）：同一执行最多被 `resume_type=retry` 唤醒
+    # 这么多次，防「唤醒→重置预算→再耗尽→再唤醒」无限循环。默认 2（人工救
+    # 一次 + 自动救一次足够；再多说明该失败是确定性的，救不回来）。
+    G1_MAX_WAKEUPS = 2
+    G1_WAKEUP_COUNTER_TTL_SECONDS = 7 * 86400
+
+    def _g1_wakeup_key(self, execution_id: str) -> str:
+        """G1 唤醒计数键：``{ns}:execution:g1wakeups:{id}``（租户路由同上）。"""
+        return f"{tenant_namespace(current_tenant())}:execution:g1wakeups:{execution_id}"
+
+    def _read_g1_wakeup_count(self, execution_id: str) -> int:
+        """读 G1 唤醒计数；无 redis / 键不存在 / 异常 → 0（放行，保守）。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "get"):
+            return 0
+        try:
+            raw = redis_client.get(self._g1_wakeup_key(execution_id))
+            return int(raw) if raw is not None else 0
+        except Exception:  # noqa: BLE001 — 读失败按 0（不阻断人工救援）
+            return 0
+
+    def _g1_wakeup_budget_exhausted(self, execution_id: str) -> bool:
+        """唤醒是否已达上限——达限即拒绝（执行保持 error 终态）。"""
+        return self._read_g1_wakeup_count(execution_id) >= self.G1_MAX_WAKEUPS
+
+    def _record_g1_wakeup(self, execution_id: str) -> None:
+        """记一次 G1 唤醒（INCR + 7d TTL）。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "incr"):
+            return
+        try:
+            key = self._g1_wakeup_key(execution_id)
+            pipe = redis_client.pipeline(transaction=True)
+            pipe.incr(key)
+            pipe.expire(key, self.G1_WAKEUP_COUNTER_TTL_SECONDS)
+            pipe.execute()
+        except Exception as e:  # noqa: BLE001 — 计数失败不阻断唤醒（人工救援优先）
+            logger.warning("G1 唤醒计数失败（忽略）: %s: %s", execution_id, e)
+
     def _node_retry_budget(self) -> int:
         """节点重试预算：沿用队列 max_deliveries 语义（默认 5）。
 
@@ -1541,6 +1580,27 @@ class FlowWorker:
         state_status = getattr(state, "status", "") or ""
         retry_wakeup = state_status == "error" and \
             ResumeType.coerce(resume_type) is ResumeType.RETRY
+        if retry_wakeup and self._g1_wakeup_budget_exhausted(execution_id):
+            # G1 唤醒**有界**（plaita#73 补丁，2026-10-10 实证）：
+            # 每次唤醒都会清零节点重试预算（下方 retry_wakeup 分支），于是
+            # 「唤醒 → 重置预算 → 跑 5 次 → 又终态化 → 再唤醒」可以无限循环。
+            # 实测某执行 07:20/07:21/07:23 连续被唤醒、每轮烧 5 次 impl；
+            # 调用方是 inflight-watch 的自动 resume（flow 侧 `resume_type=retry`，
+            # 每 15 分钟一轮，账本「同 exec 只 resume 一次」挡不住跨轮重复）。
+            # 达上限即拒绝唤醒、保持 error 终态（幂等返回，不抛异常——
+            # 抛异常会让调用方以为失败并重试）。
+            logger.error(
+                "执行 %s G1 唤醒次数达上限（%s/%s），拒绝再次唤醒——"
+                "error 终态保留，避免「唤醒重置预算」无限循环",
+                execution_id, self._read_g1_wakeup_count(execution_id),
+                self.G1_MAX_WAKEUPS,
+            )
+            return {
+                "execution_id": execution_id,
+                "status": state_status,
+                "already_terminal": True,
+                "g1_wakeups_exhausted": True,
+            }
         if state_status in ("completed", "error", "cancelled") and not retry_wakeup:
             logger.info(
                 "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
@@ -1724,6 +1784,10 @@ class FlowWorker:
                 state.end_time = None
                 self._persist_state_or_raise(execution_id, state, "retry_wakeup")
                 self._reset_node_retry_counter(execution_id)
+                # 记一次唤醒（plaita#73 补丁）：唤醒会重置节点预算，必须计数
+                # 才能让「唤醒→重置→耗尽→再唤醒」收敛。达上限的拒绝在上方
+                # 入口处（`_g1_wakeup_budget_exhausted`）。
+                self._record_g1_wakeup(execution_id)
                 logger.info("执行 %s error 态经 retry 放行（重试计数已清零），从断点步进", execution_id)
 
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
