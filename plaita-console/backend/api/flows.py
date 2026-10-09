@@ -6,6 +6,7 @@
 - GET    /api/flows/{flow_id}                  流程详情 + 版本列表
 - DELETE /api/flows/{flow_id}                  删除流程及其全部版本
 - GET    /api/flows/{flow_id}/versions/{ver}   取某版本定义（含 layout）
+- GET    /api/flows/{flow_id}/versions/{ver}/source   codeflow 源码视图（权威 / emit_source 反编译兜底）
 - PUT    /api/flows/{flow_id}/versions/{ver}   保存草稿（Flow.model_validate 强校验）
 - DELETE /api/flows/{flow_id}/versions/{ver}   删除版本
 - POST   /api/flows/{flow_id}/publish          发布版本（draft → published）
@@ -250,6 +251,40 @@ def get_version(flow_id: str, version: str, request: Request = None):
         created_by=out.created_by,
         updated_at=out.updated_at.isoformat() if out.updated_at else None,
     )
+
+
+@router.get("/flows/{flow_id}/versions/{version}/source")
+def get_version_source(flow_id: str, version: str, request: Request = None):
+    """版本的 codeflow 源码视图（源码面板 @flow 页签数据源）。
+
+    优先 ``definition.metadata.source``——``plaita build --embed-source`` /
+    mediaflow publish_console 注入的**仓内权威源码**，行号与节点 source_line
+    对应，可跳转；缺失时 ``emit_source`` **反编译兜底**——语义等效但非权威：
+    注释与原始 id 不可恢复，行号不对应任何仓内文件，前端据此标注并停用
+    行号跳转（见 SourceViewPanel / NodeConfigDrawer 的 sourceKind 分支）。
+    """
+    tenant = tenant_scope(request) if request is not None else None
+    out = _store().get_version(flow_id, version, tenant_id=tenant)
+    if out is None:
+        raise HTTPException(status_code=404, detail=f"版本不存在: {flow_id}@{version}")
+    try:
+        defn = json.loads(out.definition or "{}")
+    except ValueError:
+        defn = None
+    if isinstance(defn, dict):
+        md = defn.get("metadata")
+        if isinstance(md, dict) and isinstance(md.get("source"), str) and md["source"].strip():
+            return {"source_kind": "authoritative", "source": md["source"]}
+        if defn.get("nodes"):
+            try:
+                from plaita.dsl.codeflow import emit_source
+
+                return {"source_kind": "decompiled", "source": emit_source(defn)}
+            except Exception as e:  # noqa: BLE001 — 不可表达的构造如实回原因
+                return {"source_kind": "unavailable", "source": None,
+                        "reason": f"emit_source 失败: {e}"}
+    return {"source_kind": "unavailable", "source": None,
+            "reason": "定义缺失或不可解析"}
 
 
 @router.put("/flows/{flow_id}/versions/{version}", response_model=VersionView)

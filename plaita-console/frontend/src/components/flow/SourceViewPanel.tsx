@@ -8,6 +8,10 @@ interface SourceViewPanelProps {
   flow: Record<string, unknown>
   /** 权威 @flow 源码（flow 定义的 metadata.source）；缺省时不显示 @flow 页签。 */
   source?: string
+  /** 源码来源：authoritative=仓内权威源码（行号可与节点 source_line 对应）；
+   *  decompiled=后端 emit_source 反编译兜底——语义等效但**非权威**：无注释、
+   *  id/行号不对应仓内文件，行号跳转停用；缺省按 authoritative 处理。 */
+  sourceKind?: 'authoritative' | 'decompiled' | null
   /** 需要高亮并滚动到的源码行（1-based）；滚动定位完成后回调 onHighlightDone。 */
   highlightLine?: number | null
   onHighlightDone?: () => void
@@ -20,7 +24,7 @@ interface SourceViewPanelProps {
  * 发布链路写入），追加「@flow」页签——按行号展示，支持外部按 source_line
  * 高亮定位（画布节点 → 源码行回溯）。
  */
-export default function SourceViewPanel({ flow, source, highlightLine, onHighlightDone, onClose }: SourceViewPanelProps) {
+export default function SourceViewPanel({ flow, source, sourceKind = 'authoritative', highlightLine, onHighlightDone, onClose }: SourceViewPanelProps) {
   const [format, setFormat] = useState<Format>(source ? 'flow' : 'yaml')
   const [copied, setCopied] = useState(false)
   const highlightRef = useRef<HTMLSpanElement | null>(null)
@@ -67,6 +71,14 @@ export default function SourceViewPanel({ flow, source, highlightLine, onHighlig
         <h3 className="font-semibold text-dark-100">源码</h3>
         <button onClick={onClose} className="text-dark-400 hover:text-dark-100">✕</button>
       </div>
+
+      {sourceKind === 'decompiled' && (
+        <p className="mb-3 px-2 py-1.5 rounded bg-amber-500/10 border border-amber-500/30 text-[11px] leading-relaxed text-amber-300">
+          反编译等效源码（由定义经 emit_source 重构）：非仓内权威源码——无注释、
+          id/行号不对应原文件，节点行号跳转停用。权威源码请看仓库里的 .py（发布时
+          用 <code>plaita build --embed-source</code> 可内嵌）。
+        </p>
+      )}
 
       <div className="flex items-center gap-2 mb-3">
         <div className="inline-flex rounded border border-dark-700 overflow-hidden text-xs">

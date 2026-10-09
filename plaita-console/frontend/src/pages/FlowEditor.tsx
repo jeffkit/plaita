@@ -176,12 +176,17 @@ export default function FlowEditor() {
   // 原定义的 metadata（含 @flow 源码）：保存/发布时透传，源码面板读取
   const metadataRef = useRef<Record<string, unknown> | undefined>(undefined)
   const [flowSource, setFlowSource] = useState('')
+  // 源码视图数据来源：authoritative=metadata.source（仓内权威，行号可跳）；
+  // decompiled=后端 emit_source 反编译兜底（画布 flow / 存量 JSON 无内嵌源码）
+  const [sourceKind, setSourceKind] = useState<'authoritative' | 'decompiled' | null>(null)
   // 节点详情「查看源码」跳转：高亮行
   const [sourceHighlight, setSourceHighlight] = useState<number | null>(null)
 
   // 初始化画布
   useEffect(() => {
     if (!flowId) return
+    // 反编译兜底的竞态防护：版本切换/卸载后，迟到的响应不得回写画布状态
+    let sourceFetchCancelled: (() => void) | null = null
     if (versionParam && versionQuery.data) {
       try {
         const def = JSON.parse(versionQuery.data.definition || '{}') as Record<string, unknown>
@@ -195,7 +200,22 @@ export default function FlowEditor() {
         metadataRef.current = defMeta
         const src = defMeta && typeof defMeta.source === 'string' ? defMeta.source : ''
         setFlowSource(src)
-        useFlowEditor.setState({ hasFlowSource: !!src, sourceLineRequest: null })
+        setSourceKind(src ? 'authoritative' : null)
+        useFlowEditor.setState({ hasFlowSource: !!src, sourceKind: src ? 'authoritative' : null, sourceLineRequest: null })
+        if (!src) {
+          // 无内嵌源码（画布 flow / 存量 JSON）：后端 emit_source 反编译兜底。
+          // 失败（不可表达的构造）保持无页签；竞态用 cancelled 防旧版本回写。
+          let cancelled = false
+          api.getFlowVersionSource(flowId, versionParam).then((res) => {
+            if (cancelled) return
+            if (res.source_kind === 'decompiled' && res.source) {
+              setFlowSource(res.source)
+              setSourceKind('decompiled')
+              useFlowEditor.setState({ hasFlowSource: true, sourceKind: 'decompiled' })
+            }
+          }).catch(() => { /* 反编译不可用：如实不显示 @flow 页签 */ })
+          sourceFetchCancelled = () => { cancelled = true }
+        }
         setGraph(ns as Node[], es as Edge[])
         setDesc((def.desc as string) || '')
         setInputType(def.inputType ?? { dataType: 'object' })
@@ -248,6 +268,8 @@ export default function FlowEditor() {
       setVersion('0.0.1')
       setFlowContext(flowId, '0.0.1', { flow_id: flowId, version: '0.0.1' })
     }
+    // 反编译兜底请求的取消：版本切换/卸载后迟到的响应不得回写画布状态
+    return () => { sourceFetchCancelled?.() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowId, versionParam, versionQuery.data, flowQuery.data])
 
@@ -811,7 +833,8 @@ export default function FlowEditor() {
             <SourceViewPanel
               flow={sourceFlow}
               source={flowSource || undefined}
-              highlightLine={sourceHighlight}
+              sourceKind={sourceKind}
+              highlightLine={sourceKind === 'authoritative' ? sourceHighlight : null}
               onHighlightDone={() => setSourceHighlight(null)}
               onClose={() => {
                 setShowSource(false)

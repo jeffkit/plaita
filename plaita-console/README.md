@@ -178,6 +178,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | `/api/flows` | GET / POST | 流程列表 / 新建流程 |
 | `/api/flows/{id}` | GET / DELETE | 流程详情（含版本列表）/ 删除流程 |
 | `/api/flows/{id}/versions/{ver}` | GET / PUT / DELETE | 取版本 / 保存草稿（Flow 强校验）/ 删除版本 |
+| `/api/flows/{id}/versions/{ver}/source` | GET | codeflow 源码视图：metadata.source（权威）优先，缺失时 emit_source 反编译兜底（source_kind 标注 authoritative/decompiled/unavailable） |
 | `/api/flows/{id}/publish` | POST | 发布指定版本（draft → published） |
 | `/api/flows/dry-run` | POST | 同步试跑 Flow JSON，返回节点级结果 |
 | `/api/nodes` | GET / POST | 节点描述列表 / 注册自定义节点 |

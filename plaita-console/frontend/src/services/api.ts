@@ -648,6 +648,15 @@ export const api = {
     return request(`/flows/${flowId}/versions/${version}`)
   },
 
+  /** 版本的 codeflow 源码视图：authoritative=metadata.source（仓内权威）；
+   *  decompiled=emit_source 反编译兜底（等效非权威，行号不对应原文件）。 */
+  async getFlowVersionSource(
+    flowId: string,
+    version: string,
+  ): Promise<{ source_kind: 'authoritative' | 'decompiled' | 'unavailable'; source: string | null; reason?: string }> {
+    return request(`/flows/${flowId}/versions/${version}/source`)
+  },
+
   async saveVersion(
     flowId: string,
     version: string,

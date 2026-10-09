@@ -33,6 +33,10 @@ export interface FlowEditorState {
   subgraphWarning: string | null
   /** 当前 flow 定义是否带 @flow 源码（metadata.source）——节点详情「查看源码」按钮的开关 */
   hasFlowSource: boolean
+  /** 源码面板数据来源：authoritative=仓内权威源码（可按行跳转）；
+   *  decompiled=emit_source 反编译兜底（等效非权威，行号跳转停用）；
+   *  null=无源码视图 */
+  sourceKind: 'authoritative' | 'decompiled' | null
   /** 节点详情发起的「跳源码第 N 行」请求；FlowEditor 消费后置回 null */
   sourceLineRequest: number | null
   /** 撤销/重做栈（2026-10 表单评审）：画布与表单编辑历史；载入版本时清空 */
@@ -219,6 +223,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
   graphStack: [],
   subgraphWarning: null,
   hasFlowSource: false,
+  sourceKind: null,
   sourceLineRequest: null,
   past: [],
   future: [],
@@ -567,6 +572,7 @@ export const useFlowEditor = create<FlowEditorState>((set, get) => ({
       graphStack: [],
       subgraphWarning: null,
       hasFlowSource: false,
+      sourceKind: null,
       sourceLineRequest: null,
       past: [],
       future: [],

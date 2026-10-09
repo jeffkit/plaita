@@ -59,6 +59,8 @@ export default function NodeConfigDrawer() {
   const updateNodeData = useFlowEditor((s) => s.updateNodeData)
   const removeNode = useFlowEditor((s) => s.removeNode)
   const enterSubgraph = useFlowEditor((s) => s.enterSubgraph)
+  // 行号跳转只对仓内权威源码有意义（decompiled=反编译近似，行号不对应原文件）
+  const sourceKind = useFlowEditor((s) => s.sourceKind)
   const allNodes = useFlowEditor((s) => s.nodes)
   const allEdges = useFlowEditor((s) => s.edges)
   // C5-3 拖拽静默快照：upstream 反向遍历/变量目录只依赖静默 300ms 后的
@@ -312,7 +314,7 @@ export default function NodeConfigDrawer() {
       {d.desc && (
         <p className="px-4 pt-1.5 text-caption text-ink-muted truncate" title={d.desc}>{d.desc}</p>
       )}
-      {hasFlowSource && nodeSourceLine != null && (
+      {hasFlowSource && sourceKind === 'authoritative' && nodeSourceLine != null && (
         <button
           onClick={() => useFlowEditor.setState({ sourceLineRequest: nodeSourceLine })}
           className="mx-4 mt-1.5 self-start text-caption text-plaita-400 hover:text-plaita-300"
