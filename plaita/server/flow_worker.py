@@ -457,6 +457,33 @@ class FlowHashMismatchError(ValueError):
     """
 
 
+class NodeFailureTerminalizedError(ValueError):
+    """节点失败已**终态化 error**（非瞬态/预算耗尽）——消息必须 poison ack。
+
+    为什么要有这个独立异常（plaita#73，2026-10-10 实证）：
+
+    终态化路径原本抛裸 ``RuntimeError``。``RuntimeError`` **不是**
+    ``ValueError``，于是一路落到 ``run()`` 的兜底 ``except Exception``
+    ——那条分支**不 ack**、留 pending 等超时回收 ⇒ 消息被反复重投 ⇒
+    ``resume_flow`` 见 ``status=error`` 只放行 ``resume_type=retry`` ⇒
+    再次撞同一确定性失败 ⇒ 再次终态化 + 再次 ``RuntimeError``……
+    **状态早已 error，消息却永远在转**（实测某日同一执行重投 598 次、
+    沙箱实例持续占位 5.66 实例小时）。
+
+    更糟的是这条路径**不碰重试计数键**：``INCR`` 位于
+    ``_node_failure_retry_decision`` 内、在 ``_is_retryable_node_failure``
+    判据**之后**，确定性失败（``exited 1`` / ``AgsError: sync_in`` /
+    超时）直接 ``return None`` ⇒ 计数键恒为 1（实测全库 74 个键**全为 1**）
+    ⇒ 「预算耗尽」分支从未触发，重投**无界**。
+
+    语义与既有的 ``FlowHashMismatchError`` 同族：**raise 前状态已终态化**，
+    run() 按 ``ValueError`` poison ack（终态已可观测，重投只会命中
+    ``already_terminal`` 短路，纯属浪费）。刻意用独立子类而非裸
+    ``ValueError``，以便 resume 的通用 except 区分「已终态化」与
+    「引擎内部其他 ValueError（维持现状终态化路径）」。
+    """
+
+
 class TaskNotForThisWorker(RuntimeError):
     """任务与本机不亲和（repo/run_dir 指向别的机器的绝对路径）。
 
@@ -1811,7 +1838,13 @@ class FlowWorker:
             self._persist_state_or_raise(execution_id, state, "resume_error_handler")
             self._finalize_observers()
 
-            raise RuntimeError(f"恢复流程执行出错: {e}")
+            # plaita#73：终态化**已完成**，必须 poison ack 终止重投循环。
+            # 原先抛裸 RuntimeError → 落到 run() 兜底 except → 不 ack → 重投
+            # → status=error 只放行 retry → 再撞同一确定性失败 → 无限循环
+            # （且全程不碰重试计数键，预算永不耗尽）。
+            raise NodeFailureTerminalizedError(
+                f"恢复流程执行出错（已终态化 error，消息 poison ack）: {e}"
+            )
         finally:
             self._unregister_lease_watch(execution_id, lease_value)
             self._unregister_cancel_watch(execution_id)

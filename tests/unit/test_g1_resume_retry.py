@@ -18,7 +18,7 @@ import fakeredis
 from plaita.core.errors import ResumeError, ResumeType
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
-from plaita.server.flow_worker import RedisFlowWorker
+from plaita.server.flow_worker import NodeFailureTerminalizedError, RedisFlowWorker
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 
@@ -292,7 +292,9 @@ class TestTerminalShortCircuitMatrix:
             inst = MagicMock()
             FE.return_value = inst
             inst.run_distributed.side_effect = RuntimeError("crash again")
-            with pytest.raises(RuntimeError):
+            # 终态化后的信号是 ValueError 族（poison ack，plaita#73）；
+            # 关键性质不变：状态归位 error，**人工 retry 仍可放行**（见下）。
+            with pytest.raises(NodeFailureTerminalizedError):
                 worker.resume_flow("f1", "exec-1", "retry")
 
         state = storage.load_execution_state("exec-1")

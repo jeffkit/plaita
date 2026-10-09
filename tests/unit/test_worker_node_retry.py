@@ -56,6 +56,7 @@ from plaita.core.errors import (
 from plaita.server.flow_worker import (
     FlowWorker,
     NodeExecutionRetryableError,
+    NodeFailureTerminalizedError,
     RedisFlowWorker,
 )
 from plaita.server.task_queue import StreamTask
@@ -325,7 +326,7 @@ class TestRetryBudget:
             inst = MagicMock()
             FE.return_value = inst
             inst.run_distributed.side_effect = self._failure()
-            with pytest.raises(RuntimeError) as ei:
+            with pytest.raises(NodeFailureTerminalizedError) as ei:
                 worker.resume_flow("f1", "exec-1", "continue")
         assert not isinstance(ei.value, NodeExecutionRetryableError)
         state = storage.load_execution_state("exec-1")
@@ -374,7 +375,7 @@ class TestRollbackSwitch:
             inst = MagicMock()
             FE.return_value = inst
             inst.run_distributed.side_effect = self._failure()
-            with pytest.raises(RuntimeError) as ei:
+            with pytest.raises(NodeFailureTerminalizedError) as ei:
                 worker.resume_flow("f1", "exec-1", "continue")
         assert not isinstance(ei.value, NodeExecutionRetryableError)
         assert storage.load_execution_state("exec-1").status == "error"
