@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import importlib
-import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -83,15 +82,15 @@ def _load_ir(args: argparse.Namespace, source_text: str):
     for spec in args.register:
         _apply_registration(spec)
     if args.code_backend:
-        from plaita.node import register_code_node
+        from plaita.node import register_code_node, resolve_sandbox_allowed_backends
 
         # plaita#22：生产入口必须显式传 allowed_backends=...，否则流程 JSON 可逐节点
-        # 降级到 unsafe（编译期白名单形同虚设）。CLI 侧白名单来源与 worker 一致：
-        # PLAITA_SANDBOX_ALLOWED_BACKENDS（未配置 → 仅放行指定后端本身）。
-        _allowed = os.environ.get("PLAITA_SANDBOX_ALLOWED_BACKENDS", "").strip()
-        _backends = (tuple(b.strip() for b in _allowed.split(",") if b.strip())
-                     or (args.code_backend,))
-        register_code_node(default_backend=args.code_backend, allowed_backends=_backends)
+        # 降级到 unsafe（编译期白名单形同虚设）。白名单来源走与 worker / console
+        # 同一权威 resolver（plaita#115）：分隔符口径（逗号/冒号/空白）、非法后端
+        # 校验、未配置时的默认档与 CRITICAL/WARNING 告警都以它为准，勿在此手拼。
+        _backends = resolve_sandbox_allowed_backends(args.code_backend, "cli")
+        register_code_node(default_backend=args.code_backend,
+                           allowed_backends=list(_backends))
     get_default_registry()  # 触发 entry_points 懒发现（注册过的都数进来）
 
     ir = compile_source(source_text, args.flow_id)
@@ -112,7 +111,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
         sys.stderr.write(f"plaita build: 源码不存在: {source_path}\n")
         return 2
     source_text = source_path.read_text(encoding="utf-8")
-    ir = _load_ir(args, source_text)
+    try:
+        ir = _load_ir(args, source_text)
+    except ValueError as exc:
+        # plaita#115：配置/源码错误给一行可读输出（rc=2），不裸 traceback——
+        # 兜底不替代口径统一，白名单校验仍以 resolver / register 为准。
+        sys.stderr.write(f"plaita build: {exc}\n")
+        return 2
     doc = ir if args.format == "ir" else to_canonical(ir)
     if args.embed_source:
         # @flow 源码原文随产物发布（console 源码页签 / 节点→源码行跳转的数据源）

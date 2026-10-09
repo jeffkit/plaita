@@ -2,12 +2,14 @@
 
 钉：默认产物路径、--check 三态（一致/落后/缺产物）、--format ir 与 canonical
 的形态差异（child_flow vs childFlow）、--register 声明式节点注册、裸调用
-打印版本。
+打印版本；--code-backend 白名单走权威 resolver（plaita#115：env 分隔符
+空白/冒号/分号与逗号同口径、未配置取默认档、非法后端一行报错 rc=2）。
 """
 
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -46,6 +48,35 @@ class TestCliBuild(unittest.TestCase):
         src = self.dir / name
         src.write_text(text, encoding="utf-8")
         return src
+
+    def _set_env(self, name: str, value):
+        """设/清 env 并在用例结束后恢复原值（防跨用例污染）。"""
+        old = os.environ.get(name)
+
+        def _restore():
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+
+        self.addCleanup(_restore)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+    def _restore_sandbox_globals(self):
+        """``register_code_node`` 会改写 code 模块级白名单/默认档，跑完恢复。"""
+        import plaita.node.code as code_mod
+
+        saved_allowed = code_mod._ALLOWED_SANDBOX_BACKENDS
+        saved_default = code_mod._DEFAULT_SANDBOX_BACKEND
+
+        def _restore():
+            code_mod._ALLOWED_SANDBOX_BACKENDS = saved_allowed
+            code_mod._DEFAULT_SANDBOX_BACKEND = saved_default
+
+        self.addCleanup(_restore)
 
     def test_build_default_out_path_and_summary(self):
         src = self._write_source("hello_flow.py", _FLOW_SRC)
@@ -149,6 +180,54 @@ class TestCliBuild(unittest.TestCase):
             rc = main(["build", str(self.dir / "nope.py")])
         self.assertEqual(rc, 2)
         self.assertIn("源码不存在", err.getvalue())
+
+    def test_code_backend_env_separators_match_resolver(self):
+        """plaita#115：env 空白/冒号/分号写法与逗号同解析（权威 resolver 口径）。"""
+        self._restore_sandbox_globals()
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        artifacts = []
+        for i, env_value in enumerate(("docker subprocess", "docker:subprocess",
+                                       "docker;subprocess", "docker,subprocess")):
+            self._set_env("PLAITA_SANDBOX_ALLOWED_BACKENDS", env_value)
+            out_path = self.dir / f"sep_{i}.json"
+            rc = main(["build", str(src), "--code-backend", "subprocess",
+                       "-o", str(out_path)])
+            self.assertEqual(rc, 0, f"env={env_value!r} 应与 worker/console 同口径")
+            self.assertTrue(out_path.is_file())
+            artifacts.append(out_path.read_text(encoding="utf-8"))
+        # 验收：非逗号写法与逗号写法产物逐字节一致
+        self.assertEqual(len(set(artifacts)), 1)
+
+    def test_code_backend_env_unset_uses_resolver_default(self):
+        """plaita#115：env 未配置 → 默认档 (docker,) ∪ 生效后端，与 worker 同源。"""
+        import plaita.node.code as code_mod
+
+        self._restore_sandbox_globals()
+        self._set_env("PLAITA_SANDBOX_ALLOWED_BACKENDS", None)
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "unset.json"
+        rc = main(["build", str(src), "--code-backend", "subprocess",
+                   "-o", str(out_path)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(code_mod._ALLOWED_SANDBOX_BACKENDS,
+                         frozenset({"docker", "subprocess"}))
+
+    def test_code_backend_env_invalid_backend_clean_error(self):
+        """plaita#115：env 含非法后端 → rc=2 一行报错，文案来自 resolver 口径。"""
+        self._restore_sandbox_globals()
+        self._set_env("PLAITA_SANDBOX_ALLOWED_BACKENDS", "docker bogus")
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "bad.json"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = main(["build", str(src), "--code-backend", "subprocess",
+                       "-o", str(out_path)])
+        self.assertEqual(rc, 2)
+        self.assertIn("PLAITA_SANDBOX_ALLOWED_BACKENDS", err.getvalue())
+        self.assertIn("unknown sandbox backend", err.getvalue())
+        self.assertNotIn("register_code_node:", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertFalse(out_path.exists())
 
     def test_bare_invocation_prints_version(self):
         out, err = io.StringIO(), io.StringIO()
