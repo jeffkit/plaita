@@ -28,7 +28,7 @@
 | 仓内静态定义 | `@flow` 装饰器 | 函数必须定义在**模块级**（`inspect.getsource` 限制），局部函数编译不了 |
 | 运行期生成 / AI 生成 | `flow_from_source(src)` | 无源文件依赖；源码内可含多个 `@childflow` + 一个主 `@flow` |
 | 只校验不执行 | `compile_source(src)` / `compile_func(fn, id)` | 返回 IR dict，供审计/回放 |
-| 编译落盘（产物 JSON） | `python -m plaita build <源码.py> -o <产物>.json` | canonical=console 正典形态（默认，字节稳定；`--format ir` 回退直出 IR）；`--register plaita_nodes` 显式注册业务节点、`--code-backend subprocess` 注册 CODE 节点、`--check` 供 CI 钉「产物落后源码」。大仓子仓的 flow 编译脚本应调它而非自带样板（recursive `compile_v2.py` / issue-keeper `build_flows.py` 即薄壳范例，2026-10-09 收敛） |
+| 编译落盘（产物 JSON） | `python -m plaita build <源码.py> -o <产物>.json` | canonical=console 正典形态（默认，字节稳定；`--format ir` 回退直出 IR）；`--register plaita_nodes` 显式注册业务节点、`--code-backend subprocess` 注册 CODE 节点、`--check` 供 CI 钉「产物落后源码」、`--embed-source` 把 @flow 源码写进 `metadata.source`（console 源码页签/跳转数据源，等效 mediaflow publish_console 注入）。大仓子仓的 flow 编译脚本应调它而非自带样板（recursive `compile_v2.py` / issue-keeper `build_flows.py` 即薄壳范例，2026-10-09 收敛） |
 
 - `input_type` / `output_type` **已废弃且被忽略**：`$INPUT` 恒为 dict，不要声明。
 - **运行入口分两层，别混**：

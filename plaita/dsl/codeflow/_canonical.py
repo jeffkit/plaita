@@ -93,6 +93,23 @@ def serialize_canonical(doc: Dict[str, Any]) -> str:
     return json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
 
 
+def embed_source(doc: Dict[str, Any], source: str) -> Dict[str, Any]:
+    """把 @flow 源码原文写进 definition 的 ``metadata``（原地修改并返回）。
+
+    这是 console 源码页签 / 「查看权威源码」跳转的数据源（前端读
+    ``definition.metadata.source``）。与 mediaflow ``publish_console.py``
+    的发布时注入等效——统一入口提供此能力后，各仓编译落盘即自带，无需
+    在发布链路里各写一遍。已声明的 metadata 字段保留，``source`` /
+    ``source_format`` 覆盖；源码原文即文件内容，天然字节稳定。
+    """
+    meta = doc.get("metadata")
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    meta["source"] = source
+    meta["source_format"] = "plaita@flow"
+    doc["metadata"] = meta
+    return doc
+
+
 def count_nodes(doc: Dict[str, Any]) -> int:
     """统计文档里的节点总数（含 childFlow / parallel 分支子图，供 CLI 摘要）。"""
     total = 0

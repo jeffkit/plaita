@@ -42,6 +42,7 @@ from plaita.dsl.codeflow._compiler import (  # noqa: F401
 from plaita.dsl.codeflow._canonical import (  # noqa: F401
     canonical_node,
     count_nodes,
+    embed_source,
     serialize_canonical,
     to_canonical,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "to_canonical",
     "canonical_node",
     "serialize_canonical",
+    "embed_source",
     "count_nodes",
     "EmitError",
     "HTTP",

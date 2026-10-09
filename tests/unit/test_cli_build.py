@@ -111,6 +111,38 @@ class TestCliBuild(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(fake_nodes.CALLS), before + 1)
 
+    def test_embed_source_writes_metadata(self):
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "embed.json"
+        rc = main(["build", str(src), "-o", str(out_path), "--embed-source"])
+        self.assertEqual(rc, 0)
+        doc = json.loads(out_path.read_text(encoding="utf-8"))
+        md = doc["metadata"]
+        self.assertEqual(md["source"], _FLOW_SRC)
+        self.assertEqual(md["source_format"], "plaita@flow")
+        # --check 与嵌入源码兼容：重编译同字节
+        self.assertEqual(main(
+            ["build", str(src), "-o", str(out_path), "--embed-source",
+             "--check"]), 0)
+
+    def test_no_embed_by_default(self):
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "plain.json"
+        self.assertEqual(main(["build", str(src), "-o", str(out_path)]), 0)
+        doc = json.loads(out_path.read_text(encoding="utf-8"))
+        self.assertNotIn("metadata", doc)
+
+    def test_embed_source_merges_declared_metadata(self):
+        src = self._write_source(
+            "meta_flow.py",
+            '@flow(metadata={"team": "keeper"})\ndef m(INPUT):\n    return 1\n')
+        out_path = self.dir / "meta.json"
+        self.assertEqual(main(
+            ["build", str(src), "-o", str(out_path), "--embed-source"]), 0)
+        md = json.loads(out_path.read_text(encoding="utf-8"))["metadata"]
+        self.assertEqual(md["team"], "keeper")
+        self.assertEqual(md["source_format"], "plaita@flow")
+
     def test_missing_source_is_exit_2(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
