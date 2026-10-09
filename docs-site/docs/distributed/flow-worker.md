@@ -20,7 +20,19 @@
 
 - 适合：审批回调、HTTP 回调、延迟唤醒等「挂起等待外部事件」、可接受**重复投递**（幂等 resume）的场景。
 - 不适合：把「恰好一次」「自动故障转移」「金融级幂等」当默认承诺的场景——副作用仍须幂等。
-- **崩溃恢复的如实语义（2026-10 更新，#23）**：worker 崩溃后 pending 里的 start 任务被重投时，会**创建全新执行从头重跑**（新 execution_id，即从首节点起全部节点重跑——**首节点必须幂等**）——每步落盘的 checkpoint 不会被 start 任务消费；旧执行会停留在 `running` 状态，需要运维侧用 [`scripts/reap_zombie_executions.py`](ops-runbook.md#僵尸执行巡检) 巡检清理（租约在则跳过、条件写落盘——单看 `last_update_time` 会误杀长节点）。**存活持有者不会被重派双跑**：start 消息被 XCLAIM 重派后，重派者因租约被原持有者持有而拿不到租约、消息被 ack 释放（#23）；只有持有者真死（租约过期）后重投才会从头重跑。resume 任务的重投是安全的：终态执行会被幂等短路（原样返回，不再推进，也不会被改写状态）。
+- **崩溃恢复的如实语义（2026-10 更新，#23/#91）**：worker 崩溃后 pending 里的
+  start 任务被重投时：盘上**还没有**该执行行（首节点前即崩）→ 仍按全新执行
+  从头重跑（**首节点必须幂等**）；盘上**已有行** → start_flow 行级守卫按行
+  状态分流（plaita#91）：非终态 → resume 从 checkpoint 续跑（不再 context={}
+  覆写 checkpoint 后从首节点整条重放——旧行为会重烧已完成节点副作用）；终态 →
+  幂等回报；suspended → 回报现状。旧执行停留在 `running` 的搁浅场景因此多一条
+  自愈路径（下一条重投消息从 checkpoint 接管），仍可用
+  [`scripts/reap_zombie_executions.py`](ops-runbook.md#僵尸执行巡检) 巡检兜底
+  （租约在则跳过、条件写落盘——单看 `last_update_time` 会误杀长节点）。
+  **存活持有者不会被重派双跑**：start 消息被 XCLAIM 重派后，重派者因租约被原
+  持有者持有而拿不到租约、消息被 ack 释放（#23；行级守卫的 resume 委托同样被
+  租约拦下，run() 按租约冲突处理）。resume 任务的重投是安全的：终态执行会被
+  幂等短路（原样返回，不再推进，也不会被改写状态）。
 
 CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）、`--max-deliveries`（默认 5）、`--dlq-key`。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容）。
 
@@ -76,7 +88,12 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   终态化 error。超时不重试是刻意的：确定性信号重试=再烧一次全款。
 - **载体**：at-least-once 消息重投本身。重试时执行**不终态化**（磁盘 state
   停在最后成功步 checkpoint——失败节点不写 context），run() **显式重投**同体新副本（先入队再 ack；
-  `claim_min_idle_ms`（默认 60s）后被回收重投，resume 从 checkpoint 自然重跑
+  重投前按已放行次数**指数退避**：`base·2^(attempt-1)`，基值
+  `PLAITA_NODE_RETRY_BACKOFF_BASE_MS`（默认 500ms）、单次上限
+  `PLAITA_NODE_RETRY_BACKOFF_MAX_MS`（默认 10s）、设 0 关闭——显式重投是
+  即时 XADD，没有旧 pending 回收路径的 `claim_min_idle_ms` 天然间隔，不退避
+  则预算毫秒级烧光、瞬态故障等不到恢复（plaita#91）。睡眠期间消息仍在 PEL、
+  执行租约已释放，中途崩溃由 reclaim 兜底）。resume 从 checkpoint 自然重跑
   失败节点。重投路径不依赖 pending 回收：消息可能已被竞争者的 `ExecutionLeaseError`
   分支 ack 释放，只留 pending 会导致重投永不发生（2026-10-09 plaita#52 实证）。
   重投失败（Redis 抖动）才退化为不 ack 留 pending；两种情况都不计 poison。
@@ -91,9 +108,14 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零计数键，人工
   唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持 error
   （修复定义后仍可再 retry）。
-- **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）。
+- **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）；
+  `PLAITA_NODE_RETRY_BACKOFF_BASE_MS=0` 只关退避（重投仍发生，无间隔）。
 - **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
   失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
+  重投/重派回到 worker 的 start 载体若命中**已有执行行**，start_flow 的行级
+  守卫（plaita#91）分流：终态 → 幂等回报不重跑；suspended → 回报现状不抢跑；
+  其余非终态 → 委托 resume 从 checkpoint 续跑——不再「context={} 覆写
+  checkpoint 后从首节点整条重放」。行不存在（真·首次启动）才走全新启动。
 
 ## 运行中改定义（flow 定义指纹，2026-10 二波） {#运行中改定义}
 

@@ -57,10 +57,12 @@ ALLOWED_SILENT = {
     # 902→907, 926→931, 931→936, 937→942，位点未变。
     # plaita#29（worker 入口补 `_code_allowed_languages_for_worker` 接线）后再下移 16：
     # 907→923, 931→947, 936→952, 942→958，位点未变。
-    ("server/flow_worker.py", 923),
-    ("server/flow_worker.py", 947),
-    ("server/flow_worker.py", 952),
-    ("server/flow_worker.py", 958),
+    # plaita#91（worker 补 `_env_int` + 重投退避常量/方法，均在四个位点之前）后
+    # 再整体下移 83：923→1006, 947→1030, 952→1035, 958→1041，位点未变。
+    ("server/flow_worker.py", 1006),
+    ("server/flow_worker.py", 1030),
+    ("server/flow_worker.py", 1035),
+    ("server/flow_worker.py", 1041),
 }
 
 

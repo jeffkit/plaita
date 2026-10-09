@@ -77,6 +77,21 @@ def _env_switch(name: str) -> bool:
     return os.environ.get(name, "").strip() == "1"
 
 
+def _env_int(name: str, default: int) -> int:
+    """读整数环境变量（每次调用读取，便于测试注入）；缺失/非法 → default。
+
+    负值按 default 处理（退避配置里负数无意义，宁用默认也不让它变 0 破坏
+    语义——0 由调用方自行定义为「关闭退避」）。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return default if value < 0 else value
+
+
 def _cancel_checkpoint_disabled() -> bool:
     """波次①回滚开关：PLAITA_DISABLE_CANCEL_CHECKPOINT=1 时 worker 不查取消标志键。"""
     return _env_switch("PLAITA_DISABLE_CANCEL_CHECKPOINT")
@@ -465,6 +480,11 @@ class NodeExecutionRetryableError(RuntimeError):
     既不重试也不终态、卡在 running 58 分钟。现改为显式重投；仅当重投本身
     失败（Redis 抖动等）才退化为留 pending 交 reclaim。
 
+    plaita#91 补充：显式重投是即时 XADD，没有 reclaim 路径的
+    claim_min_idle_ms 天然间隔——run() 在调用 ``_requeue_retryable_failure``
+    **之前**按已放行次数做指数退避（``_sleep_node_retry_backoff``），否则
+    重投副本被立即消费、失败、再重投，预算毫秒级烧光，瞬态故障等不到恢复。
+
     刻意**不是** ValueError 子类（同 StatePersistError 的理由）：ValueError
     会被 run() 当畸形消息 poison ack。
 
@@ -567,6 +587,52 @@ class FlowWorker:
         except (TypeError, ValueError):
             return DEFAULT_MAX_DELIVERIES
 
+    # 重投退避（plaita#91）：显式重投是即时 XADD，没有旧「留 pending 等
+    # reclaim」路径的 claim_min_idle_ms 间隔——不退避时预算毫秒级烧光。
+    # 基值 0.5s、指数 ×2、单次上限 10s：默认预算 5 时各次重投间隔
+    # 0.5/1/2/4s（合计 ~7.5s），瞬态故障窗口（网络抖动/对端重启，秒级）
+    # 有了真实的恢复机会；单次 ≤10s 同时守住停机时延（睡眠按 50ms 切片
+    # 查 _running，stop()/drain 不被拖住）。
+    NODE_RETRY_BACKOFF_BASE_MS = 500
+    NODE_RETRY_BACKOFF_MAX_MS = 10_000
+    _NODE_RETRY_BACKOFF_SLICE_SECONDS = 0.05
+
+    def _node_retry_backoff_seconds(self, attempt: int) -> float:
+        """第 ``attempt`` 次重投前的退避秒数：``base·2^(attempt-1)`` 封顶。
+
+        - ``PLAITA_NODE_RETRY_BACKOFF_BASE_MS=0`` 关闭退避（回到 2026-10-09
+          显式重投初版的即时重投语义，回滚开关）；
+        - ``PLAITA_NODE_RETRY_BACKOFF_MAX_MS`` 调单次上限（默认 10s）；
+        - attempt ≤ 0（异常未带次数，理论不可达）按 1 处理。
+        """
+        base_ms = _env_int(
+            "PLAITA_NODE_RETRY_BACKOFF_BASE_MS", self.NODE_RETRY_BACKOFF_BASE_MS
+        )
+        if base_ms <= 0:
+            return 0.0
+        max_ms = _env_int(
+            "PLAITA_NODE_RETRY_BACKOFF_MAX_MS", self.NODE_RETRY_BACKOFF_MAX_MS
+        )
+        effective_attempt = attempt if attempt and attempt > 0 else 1
+        delay_ms = min(base_ms * (2 ** (effective_attempt - 1)), max_ms)
+        return delay_ms / 1000.0
+
+    def _sleep_node_retry_backoff(self, attempt: int) -> float:
+        """重投前退避睡眠，返回实际睡了的秒数（0 = 退避关闭）。
+
+        切片睡眠、每片查 ``_running``：stop()/drain 请求在 50ms 内被看见，
+        退出循环放弃剩余退避——此刻消息尚未重投也尚未 ack，仍在 PEL，由
+        reclaim 按 ``claim_min_idle_ms`` 兜底，at-least-once 语义不变。
+        """
+        remaining = self._node_retry_backoff_seconds(attempt)
+        slept = 0.0
+        while remaining > 0 and getattr(self, "_running", True):
+            slice_seconds = min(self._NODE_RETRY_BACKOFF_SLICE_SECONDS, remaining)
+            time.sleep(slice_seconds)
+            slept += slice_seconds
+            remaining -= slice_seconds
+        return slept
+
     def _retry_counter_key(self, execution_id: str) -> str:
         """节点重试计数键：``{ns}:execution:noderetry:{id}``（租户路由，与租约键同规则）。"""
         return f"{tenant_namespace(current_tenant())}:execution:noderetry:{execution_id}"
@@ -662,8 +728,13 @@ class FlowWorker:
             return None
         logger.warning(
             "执行 %s 节点执行失败，不终态化等待消息重投后重跑失败节点"
-            "（第 %s/%s 次重试，重投间隔=claim_min_idle_ms）: %s",
-            execution_id, attempt, self._node_retry_budget(), exc,
+            "（第 %s/%s 次重试，重投前指数退避，基值"
+            " PLAITA_NODE_RETRY_BACKOFF_BASE_MS=%sms）: %s",
+            execution_id, attempt, self._node_retry_budget(),
+            _env_int(
+                "PLAITA_NODE_RETRY_BACKOFF_BASE_MS", self.NODE_RETRY_BACKOFF_BASE_MS
+            ),
+            exc,
         )
         return NodeExecutionRetryableError(
             f"节点执行失败（可重试，第 {attempt}/{self._node_retry_budget()} 次重试，"
@@ -1309,6 +1380,53 @@ class FlowWorker:
                             dedup_key,
                         )
 
+            # start 载体的行级守卫（plaita#91）：at-least-once 下重投/重派回
+            # 到 worker 的是**同体 start 副本**，而重投路径（#52 修复的显式
+            # 重投、#23 的 XCLAIM 重派）都不改消息体——dedup_key 未提供或已
+            # 过期（7 天）时，幂等键拦不住它。历史行为是按全新执行处理：
+            # 新建 context={} 的 state 落盘**覆写盘上 checkpoint**，再从首
+            # 节点整条重放——已完成节点的副作用重烧；且重放轮里总有节点成功
+            # 推进 → 节点重试计数被清零（另一缺陷 #73），预算永不耗尽，执行
+            # 以 ~3ms/轮 空转。故先查盘上是否已有本 id 的执行行，按行状态分
+            # 流：终态 → 幂等回报；suspended → 回报现状不抢跑；其余非终态 →
+            # 改走 resume 语义从 checkpoint 续跑。生产方（console/调度）对每
+            # 个逻辑 start 都新铸 execution_id，行存在只能说明是同一逻辑
+            # start 的重投/重派，分流不会误伤新启动。
+            existing_state = self.execution_storage.load_execution_state(execution_id)
+            if existing_state is not None:
+                existing_status = getattr(existing_state, "status", "") or ""
+                if existing_status in TERMINAL_EXECUTION_STATUSES:
+                    logger.info(
+                        "start 载体重投命中已终态执行 %s (%s)，幂等回报不重跑",
+                        execution_id, existing_status,
+                    )
+                    return {
+                        "execution_id": execution_id,
+                        "status": existing_status,
+                        "already_terminal": True,
+                        "result": getattr(existing_state, "result", None),
+                        "error": getattr(existing_state, "error", None),
+                    }
+                if existing_status == "suspended":
+                    # 挂起在等外延事件/人工 resume，start 载体绝不抢跑推进
+                    logger.info(
+                        "start 载体重投命中挂起执行 %s，回报现状不推进",
+                        execution_id,
+                    )
+                    return {"execution_id": execution_id, "status": existing_status}
+                # 非终态非挂起（running 等）：resume 语义接管——从 checkpoint
+                # 续跑失败节点，不再 context={} 整条重放。原持有者仍在推进时
+                # resume_flow 抛 ExecutionLeaseError，run() 按租约冲突处理
+                # （持有者在册 → ack 释放），与 dedup-hit 的 resume 重入队
+                # 两条路收敛到同一语义。
+                logger.info(
+                    "start 载体重投命中在途执行 %s (%s)，改走 resume 从 checkpoint 续跑",
+                    execution_id, existing_status,
+                )
+                return self.resume_flow(
+                    flow_id, execution_id, "continue", delivery_count=delivery_count
+                )
+
             # 先落 running 行再执行（P0 可见性）：首节点期间 /api/executions
             # 查得到此行、cancel 有锚。flow_hash：对实际加载执行的 Flow 计算
             # 指纹（波次二任务②）随行落盘——resume 时与当前定义比对，防运行
@@ -1398,15 +1516,24 @@ class FlowWorker:
                 # release 对整个租约 value 串 compare（fencing 档 = {holder}:{gen}）
                 self.execution_lease.release(execution_id, lease_value)
 
-        except (NodeExecutionRetryableError, ServiceDispatchError, ExecutionLeaseError):
+        except (
+            NodeExecutionRetryableError,
+            ServiceDispatchError,
+            ExecutionLeaseError,
+            ExecutionStateLoadError,
+        ):
             # 节点级可重试失败（波次二任务①）/ 幂等命中后重入队 resume 失败
             # （波次二任务③）/ **租约被他人持有**（A′ + #23，租约覆盖整个
-            # start 窗口含先行落行）：原样上抛给 run() 按不 ack 语义处理——
+            # start 窗口含先行落行）/ **行级守卫读状态瞬断**（plaita#91，
+            # 与 resume_flow 同语义）：原样上抛给 run() 按不 ack 语义处理——
             # ExecutionLeaseError 尤其关键：run() 的
             # `except ExecutionLeaseError` 分支据此 note_lease_conflict 并把消息
             # 留在 pending 等租约过期后 reclaim；若被下方通用 except 包成
             # RuntimeError，run() 会误 ack 消息 → 抢占者把别人的活执行 ack 掉，
             # 且真实持有者崩溃后无人 reclaim（执行永久失联）。绝不能包。
+            # ExecutionStateLoadError 同理不能包成 RuntimeError 后被误 ack：
+            # 读状态瞬断时盘上可能有在途行，此刻按全新执行重跑 = 覆写 checkpoint，
+            # 留 pending 重投让守卫重读才是对的。
             raise
 
         except Exception as e:
@@ -2785,17 +2912,22 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     )
             except NodeExecutionRetryableError as exc:
                 # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
-                # 步 checkpoint，不 ack、不计 poison、留 pending 等回收——
-                # 重投间隔=claim_min_idle_ms（默认 60s），下轮 resume 从
-                # checkpoint 重跑失败节点。预算（重试计数键）已在处理函数
-                # 内判定，耗尽时已在处理函数内终态化 error，不会走到这里
-                # 无限重投。
+                # 步 checkpoint，不 ack、不计 poison。预算（重试计数键）
+                # 已在处理函数内判定，耗尽时已在处理函数内终态化 error，
+                # 不会走到这里无限重投。
                 queue.note_failed()
                 # 2026-10-09 修复（plaita#52 真因）：**显式重投**，不再把
                 # 重投的成败押在「消息仍在 PEL」上——同执行可能已被竞争者的
                 # ExecutionLeaseError 分支 ack 释放（"避免烧 delivery"），
                 # 此时 reclaim 无条目可回收，重投永不发生而执行又不终态化，
                 # 结果卡在 running 直到 zombie 线/人工 resume（实测 58 分钟）。
+                # plaita#91：显式重投是即时 XADD，没有 reclaim 路径的
+                # claim_min_idle_ms 天然间隔——不退避则重投副本被立即消费、
+                # 再失败、再重投，预算毫秒级烧光（实测相邻尝试 ~1ms，与
+                # claim_min_idle_ms 无关）。重投前按已放行次数指数退避；
+                # 睡眠期间消息仍在 PEL、执行租约已由 start/resume 的
+                # finally 释放，中途崩溃由 reclaim 兜底，at-least-once 不变。
+                self._sleep_node_retry_backoff(getattr(exc, "attempt", 0) or 1)
                 if self._requeue_retryable_failure(task, queue):
                     acked = True
                     logger.warning(
