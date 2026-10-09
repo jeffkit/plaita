@@ -36,13 +36,17 @@ def apply_approval(execution_id: str, decision_id: str, approved: bool):
 
 ```python
 state = storage.load_execution_state(execution_id)
-if state.status in ("completed", "error"):
+if state.status in ("completed", "error", "cancelled"):
     return  # 幂等：已终态则忽略重复 resume
+if state.status == "suspended" and resume_type in ("continue", "retry"):
+    return  # 幂等（#33）：挂起执行只认 event/cancel/timeout 决议，
+    # continue/retry 不携带推进语义，worker 侧同样短路
 if state.status != "suspended":
     log.warning("unexpected status=%s", state.status)
 ```
 
-`FlowWorker.resume_flow` 本身会加载状态；自定义入口应同样校验。
+`FlowWorker.resume_flow` 本身会加载状态（终态幂等短路 + 挂起 continue/retry
+幂等短路）；自定义入口应同样校验。
 
 ### 4. 外部写操作使用幂等 API
 

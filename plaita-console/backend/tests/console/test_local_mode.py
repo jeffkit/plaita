@@ -175,6 +175,35 @@ def test_resume_rejects_non_suspended(app: FastAPI, client: TestClient):
     assert "挂起" in r.json()["detail"]
 
 
+def test_resume_suspended_rejects_continue_and_retry(app: FastAPI, client: TestClient):
+    """#33 对齐 worker 契约：挂起执行上 continue/retry 不携带推进语义，
+    本地档直接 400 拒绝（而不是让执行线程把守卫失败落成 failed 终态）。"""
+    store = flow_store.get_flow_store()
+    store.ensure_flow("approval-demo-33", tenant_id="default")
+    store.save_flow_definition(
+        "approval-demo-33", "1.0.0", APPROVAL_DEF, status="draft", tenant_id="default")
+    store.publish_version("approval-demo-33", "1.0.0", tenant_id="default")
+
+    r = client.post("/api/executions", json={"flow_id": "approval-demo-33"})
+    eid = r.json()["execution_id"]
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        body = client.get(f"/api/executions/{eid}").json()
+        if body["status"] == "suspended":
+            break
+        time.sleep(0.2)
+    assert body["status"] == "suspended", body
+
+    for resume_type in ("continue", "retry"):
+        r = client.post(f"/api/executions/{eid}/resume",
+                        json={"resume_type": resume_type})
+        assert r.status_code == 400, (resume_type, r.status_code)
+        assert resume_type in r.json()["detail"]
+    # 执行未被扰动
+    body = client.get(f"/api/executions/{eid}").json()
+    assert body["status"] == "suspended"
+
+
 def test_local_run_reports_node_timings(app: FastAPI, client: TestClient):
     """节点级耗时：本地模式从回调采集的起止时间戳折算，经 API 透出。
 

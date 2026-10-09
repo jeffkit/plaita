@@ -72,8 +72,12 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 - **判别**：`run_distributed` 把异常归一化为 `FlowErrorException`（原始异常在
   `__cause__`）。链中出现 `NodeExecutionError`（节点执行异常）→ 可重试；
   链中出现超时（`NodeTimeoutError`/`FlowTimeoutError`）或取消
-  （`FlowCancelledException`）、或协议/图错误（`ResumeError` 等）→ 维持现状
-  终态化 error。超时不重试是刻意的：确定性信号重试=再烧一次全款。
+  （`FlowCancelledException`）→ 维持现状终态化 error；协议/图错误中的
+  `ResumeError`（挂起守卫类恢复协议错误，#33）→ **不终态化**：执行保持原状
+  并抛 `ResumeProtocolError`，run() 对其 ack（重投只会重复命中同一守卫——
+  把挂起执行终态化成 error 会永久切断 event/cancel/timeout 的唤醒路径）；
+  其余图错误（`NodeNotFoundError` 等）→ 维持现状终态化 error。
+  超时不重试是刻意的：确定性信号重试=再烧一次全款。
 - **载体**：at-least-once 消息重投本身。重试时执行**不终态化**（磁盘 state
   停在最后成功步 checkpoint——失败节点不写 context），run() **显式重投**同体新副本（先入队再 ack；
   `claim_min_idle_ms`（默认 60s）后被回收重投，resume 从 checkpoint 自然重跑
@@ -91,6 +95,19 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零计数键，人工
   唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持 error
   （修复定义后仍可再 retry）。
+
+## 挂起执行的 continue/retry 幂等短路（#33） {#挂起执行的-continue-retry-幂等短路}
+
+suspended 执行收到 `resume_type=continue`（挂起双写窗口 crash 后重投的原消息/
+start 重派竞速/运维误发）或 `retry` 时，策略层 pending 守卫必拒（continue 不允许
+绕过挂起节点）。resume_flow 在**租约之前**幂等短路：返回
+`already_suspended=True`，不推进、不改状态、不取租约——挂起执行只能被真正的
+决议路径（`event`/`cancel`/`timeout`）唤醒。此前的行为是守卫 ResumeError 被通用
+except 终态化成 error，一次重复投递就把可恢复的挂起执行永久打封（终态短路从此
+拒绝一切 resume 类型，retry 也不可入，死局）。兜底路径（绕过入口短路的竞态窗口）
+由 `ResumeProtocolError` 豁免承接：守卫类 `ResumeError` 不终态化，执行保持原状，
+消息 ack。
+
 - **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）。
 - **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
   失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。

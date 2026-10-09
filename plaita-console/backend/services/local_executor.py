@@ -232,6 +232,14 @@ def resume_local_execution(
         return False
     if row["status"] != "suspended":
         raise ValueError(f"仅挂起状态可恢复: 当前 {row['status']}")
+    # #33 对齐 worker 契约：挂起执行只认 event/cancel/timeout 决议——
+    # continue/retry 不携带推进语义（策略层 pending 守卫必拒），本地档
+    # 同样拒绝而不是让执行线程把失败落成 failed 终态。
+    if resume_type in ("continue", "retry"):
+        raise ValueError(
+            f"挂起执行不接受 resume_type={resume_type}（会被挂起节点守卫拒绝），"
+            "请用 event/cancel/timeout 决议挂起节点"
+        )
 
     definition = _load_definition(store, row["flow_id"], row["flow_version"],
                                   tenant_id=row.get("tenant_id") or None)

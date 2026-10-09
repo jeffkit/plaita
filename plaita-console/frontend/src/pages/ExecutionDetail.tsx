@@ -12,7 +12,6 @@ import {
   Zap,
   Timer,
   XCircle,
-  ChevronRight,
   Radio,
   ExternalLink,
   Workflow,
@@ -26,7 +25,7 @@ import { nodeOutgoing } from '../components/flow/flowDefinition'
 import { STATUS_CHIP, STATUS_DOT, STATUS_LABEL } from '../components/flow/nodeStatusStyles'
 import { buildNodeDetails, type ExecutedNodeDetail } from '../components/flow/executionNodes'
 
-type ResumeType = 'continue' | 'event' | 'timeout' | 'cancel'
+type ResumeType = 'continue' | 'retry' | 'event' | 'timeout' | 'cancel'
 
 function useExecutionSSE(
   executionId: string | undefined,
@@ -316,7 +315,18 @@ export default function ExecutionDetail() {
         }
       />
 
-      {/* 错误信息：人话优先，原始详情折叠（全宽，失败时最该先看到） */}
+      {/* 错误信息：人话优先，原始详情折叠（全宽，失败时最该先看到）。
+          error 态才附重试入口（G1：error+retry 从断点步进重跑失败节点）；
+          挂起执行的 service 错误（如订阅快照里的 error_message）不能重试
+          ——retry 会被 worker 的挂起幂等短路拒绝（#33）。 */}
+      {execution.error && execution.status === 'error' && (
+        <div className="flex justify-end -mb-3 relative z-10">
+          <Button variant="secondary" size="sm" onClick={() => resumeMutation.mutate({ resume_type: 'retry' })} disabled={resumeMutation.isPending}>
+            <Play size={13} />
+            {resumeMutation.isPending ? '重试中…' : '从断点重试'}
+          </Button>
+        </div>
+      )}
       {execution.error && (() => {
         const { message, details } = parseExecutionError(execution.error)
         return (
@@ -403,7 +413,7 @@ export default function ExecutionDetail() {
         </div>
       </div>
 
-      {showResumeDialog && (
+      {showResumeDialog && execution.status === 'suspended' && (
         <ResumeDialog
           onResume={(resumeType, data) => resumeMutation.mutate({ resume_type: resumeType, data })}
           onClose={() => setShowResumeDialog(false)}
@@ -423,12 +433,15 @@ function ResumeDialog({
   onClose: () => void
   isPending: boolean
 }) {
-  const [resumeType, setResumeType] = useState<ResumeType>('continue')
+  const [resumeType, setResumeType] = useState<ResumeType>('event')
   const [eventData, setEventData] = useState('{\n  \n}')
   const [jsonError, setJsonError] = useState('')
 
   const resumeOptions: { type: ResumeType; icon: React.ReactNode; label: string; desc: string }[] = [
-    { type: 'continue', icon: <ChevronRight size={18} />, label: '继续执行', desc: '从挂起点继续执行流程' },
+    // continue 只对非挂起推进有意义；挂起执行上它会被 worker 幂等短路（#33），
+    // 事件类节点请用 event/timeout/cancel 决议。故意不提供 retry：
+    // retry 的对象是 error 态断点（详情页错误卡片有专门入口），挂起态选它
+    // 同样只会被短路。
     { type: 'event', icon: <Zap size={18} />, label: '事件触发', desc: '通过事件数据恢复挂起的 EventNode' },
     { type: 'timeout', icon: <Timer size={18} />, label: '超时恢复', desc: '以超时方式恢复挂起节点' },
     { type: 'cancel', icon: <XCircle size={18} />, label: '取消节点', desc: '取消当前挂起的节点并继续' },

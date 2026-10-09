@@ -92,7 +92,19 @@ class TestResumeFlowLease(unittest.TestCase):
             lease_ttl_seconds=60,
         )
 
-        # A holds lease while B tries resume
+        # A holds lease while B tries resume。
+        # 状态用 running：suspended + continue 在 #33 起走挂起幂等短路
+        # （租约之前直接返回），测不到租约竞争。
+        self.execution_storage.save_execution_state(
+            "exec-1",
+            ExecutionState(
+                execution_id="exec-1",
+                flow_id="f1",
+                flow_version="1",
+                context={"$LAST_NODE": "start", "$NODE": {}},
+                status="running",
+            ),
+        )
         self.assertTrue(lease.try_acquire("exec-1", "holder-a", 60))
         with self.assertRaises(ExecutionLeaseError):
             worker_b.resume_flow("f1", "exec-1", "continue")

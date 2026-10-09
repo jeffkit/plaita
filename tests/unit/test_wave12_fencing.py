@@ -61,6 +61,13 @@ STATE = dict(
     status="suspended",
 )
 
+# running 态状态：resume+continue 走完整租约路径（#33 起 suspended+continue
+# 在租约之前就被挂起幂等短路，测不到租约/fencing 语义）。
+STATE_RUNNING = dict(
+    STATE,
+    status="running",
+)
+
 
 def _make_worker(fake_redis, storage=None, flow_storage=None, **kwargs):
     kwargs.setdefault("lease_ttl_seconds", 60)
@@ -293,7 +300,7 @@ class TestT1ConcurrentResume:
         storage = MemoryExecutionStorage()
         flow_storage = MemoryFlowStorage()
         flow_storage.save_flow(TEST_FLOW)
-        storage.save_execution_state("exec-1", ExecutionState(**STATE))
+        storage.save_execution_state("exec-1", ExecutionState(**STATE_RUNNING))
 
         lease = RedisExecutionLease(fake)
         worker_a = _make_worker(fake, storage, flow_storage, execution_lease=lease)
@@ -332,14 +339,14 @@ class TestT1ConcurrentResume:
         assert int(pending) == 1  # 消息留 pending，待租约过期回收
         assert queue.stats()["lease_conflicts"] == 1
         # 状态未被 B 改写
-        assert storage.load_execution_state("exec-1").status == "suspended"
+        assert storage.load_execution_state("exec-1").status == "running"
 
     def test_t1_fenced_acquire_refuses_concurrent_resume(self):
         fake = fakeredis.FakeRedis(decode_responses=True)
         storage = MemoryExecutionStorage()
         flow_storage = MemoryFlowStorage()
         flow_storage.save_flow(TEST_FLOW)
-        storage.save_execution_state("exec-1", ExecutionState(**STATE))
+        storage.save_execution_state("exec-1", ExecutionState(**STATE_RUNNING))
 
         lease = RedisExecutionLease(fake)
         worker_b = _make_worker(fake, storage, flow_storage, execution_lease=lease)
@@ -356,7 +363,7 @@ class TestT2StepExceedsTtl:
         storage = MemoryExecutionStorage()
         flow_storage = MemoryFlowStorage()
         flow_storage.save_flow(TEST_FLOW)
-        storage.save_execution_state("exec-1", ExecutionState(**STATE))
+        storage.save_execution_state("exec-1", ExecutionState(**STATE_RUNNING))
         lease = RedisExecutionLease(fake)
         worker_a = _make_worker(
             fake, storage, flow_storage, execution_lease=lease, lease_ttl_seconds=1
@@ -379,7 +386,7 @@ class TestT2StepExceedsTtl:
                 worker_a.resume_flow("f1", "exec-1", "continue")
 
         # A 自爆：状态非 error、未被改写
-        assert storage.load_execution_state("exec-1").status == "suspended"
+        assert storage.load_execution_state("exec-1").status == "running"
         # B 可接管（世代递增 = fencing 新纪元）
         gen = lease.try_acquire_fenced("exec-1", "worker-b", 60)
         assert gen is not None
@@ -390,7 +397,7 @@ class TestT2StepExceedsTtl:
         storage = MemoryExecutionStorage()
         flow_storage = MemoryFlowStorage()
         flow_storage.save_flow(TEST_FLOW)
-        storage.save_execution_state("exec-1", ExecutionState(**STATE))
+        storage.save_execution_state("exec-1", ExecutionState(**STATE_RUNNING))
         lease = RedisExecutionLease(fake)
         worker_a = _make_worker(
             fake,

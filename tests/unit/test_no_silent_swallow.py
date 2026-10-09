@@ -57,10 +57,12 @@ ALLOWED_SILENT = {
     # 902→907, 926→931, 931→936, 937→942，位点未变。
     # plaita#29（worker 入口补 `_code_allowed_languages_for_worker` 接线）后再下移 16：
     # 907→923, 931→947, 936→952, 942→958，位点未变。
-    ("server/flow_worker.py", 923),
-    ("server/flow_worker.py", 947),
-    ("server/flow_worker.py", 952),
-    ("server/flow_worker.py", 958),
+    # plaita#33（挂起幂等短路 + ResumeProtocolError）整体再下移 49：
+    # 923→972, 947→996, 952→1001, 958→1007，位点未变。
+    ("server/flow_worker.py", 972),
+    ("server/flow_worker.py", 996),
+    ("server/flow_worker.py", 1001),
+    ("server/flow_worker.py", 1007),
 }
 
 

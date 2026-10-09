@@ -87,7 +87,9 @@ def _redis_worker(fake, storage=None, flow_storage=None) -> RedisFlowWorker:
     )
 
 
-def _state(execution_id="exec-1", status="suspended", **kwargs) -> ExecutionState:
+def _state(execution_id="exec-1", status="running", **kwargs) -> ExecutionState:
+    # running 默认态：resume+continue 走完整校验/推进路径（#33 起 suspended+
+    # continue 在校验之前被挂起幂等短路，测不到指纹校验）。
     return ExecutionState(
         execution_id=execution_id,
         flow_id="f1",

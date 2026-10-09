@@ -23,6 +23,7 @@ from plaita.core.errors import (
     FlowTimeoutError,
     NodeExecutionError,
     NodeTimeoutError,
+    ResumeError,
 )
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
@@ -402,6 +403,26 @@ def _chain_has_cancellation(exc: BaseException) -> bool:
     return False
 
 
+def _chain_has_resume_protocol_error(exc: BaseException) -> bool:
+    """异常链（含自身）中是否含 ``ResumeError``（恢复协议/挂起守卫类错误）。
+
+    #33 配套：``run_distributed`` 把策略层 ResumeError 归一化为
+    ``FlowErrorException`` 且原异常挂 ``__cause__``，worker 通用 except 因此
+    需要「豁免」判据——挂起节点上的 continue/retry 守卫 ResumeError 描述的是
+    **调用方协议错误**（消息类型与执行状态不匹配），不是执行自身失败；
+    执行应保持原状（suspended）让真正的决议路径（event/cancel/timeout）进来，
+    而不是被终态化成不可逆的 error。
+    """
+    node: Optional[BaseException] = exc
+    depth = 0
+    while node is not None and depth <= _NODE_RETRY_CHAIN_MAX_DEPTH + 1:
+        if isinstance(node, ResumeError):
+            return True
+        node = node.__cause__
+        depth += 1
+    return False
+
+
 class StatePersistError(RuntimeError):
     """执行状态落盘失败（``save_execution_state`` 返回 False）。
 
@@ -449,6 +470,22 @@ class TaskNotForThisWorker(RuntimeError):
     → 误死信（2026-10-06 双机实测：非亲和任务被让出 5 次后进 DLQ）。
     重入队新副本把计数清零，交接无损耗。
     """
+
+
+class ResumeProtocolError(RuntimeError):
+    """resume 协议错误（#33）：执行状态与 resume_type 不匹配，执行保持原状。
+
+    挂起守卫类 ``ResumeError``（continue/retry 试图绕过 pending 挂起节点）
+    经 ``_chain_has_resume_protocol_error`` 判出后，resume_flow 不终态化、
+    把执行留在原状态（suspended/running），以本异常上抛。run() 主循环按
+    「消费失败」处理：消息走 ack（执行状态原样可查、事件订阅仍在，真正的
+    决议路径 event/cancel/timeout 随时可入），重投只会重复命中同一守卫，
+    无意义。刻意**不是** ValueError 子类（防 poison ack 语义误伤）。
+    """
+
+    def __init__(self, message: str, execution_id: Optional[str] = None):
+        super().__init__(message)
+        self.execution_id = execution_id
 
 
 class NodeExecutionRetryableError(RuntimeError):
@@ -1134,7 +1171,8 @@ class FlowWorker:
           ServiceDispatchError 让消息重投再来；
         - 非终态 suspended → 只返回现状形状不重入队：挂起执行自有
           delay/approval 服务的 resume 链路，重入队 continue 会被
-          ``_handle_resume`` 的 pending 校验拒绝（ResumeError）。
+          ``_handle_resume`` 的 pending 校验拒绝（ResumeError）；#33 起
+          resume_flow 对 suspended+continue 直接幂等短路，重入队更是无谓。
         """
         if not mapped_execution_id:
             return None
@@ -1487,7 +1525,29 @@ class FlowWorker:
                 "result": getattr(state, "result", None),
                 "error": getattr(state, "error", None),
             }
-        
+
+        # 挂起幂等短路（#33）：suspended 执行收到 resume_type=continue ——策略层
+        # 的 pending 守卫必抛 ResumeError（continue 不允许绕过挂起节点），历史上
+        # 这条路会被下方通用 except 终态化成 error：一次重复投递把本可等
+        # 事件/审批/延迟恢复的执行永久打封（连 resume_type=event 都被终态短路
+        # 拒绝，retry 也救不回）。continue 对挂起执行不携带任何推进语义——
+        # checkpoint 未变、事件订阅仍在，正确动作是幂等跳过（ack 消息，状态
+        # 原样保留），等真正的决议路径（event/cancel/timeout）来唤醒。
+        # resume_type=retry 对挂起执行同样过不了策略层守卫，一并短路——
+        # retry 的对象是 error 态断点，不是挂起节点。
+        if state_status == "suspended" and ResumeType.coerce(resume_type) in (
+            ResumeType.CONTINUE, ResumeType.RETRY,
+        ):
+            logger.info(
+                "执行 %s 处于 suspended（挂起节点待事件决议），resume_type=%s "
+                "不携带推进语义，幂等跳过", execution_id, resume_type,
+            )
+            return {
+                "execution_id": execution_id,
+                "status": state_status,
+                "already_suspended": True,
+            }
+
         # 获取流程版本
         version = state.flow_version
 
@@ -1709,6 +1769,24 @@ class FlowWorker:
                     "execution_id": execution_id,
                     "status": "cancelled",
                 }
+
+            # 挂起守卫豁免（#33）：ResumeError 是恢复协议错误（continue/retry
+            # 试图绕过 pending 挂起节点等），不是执行自身失败。终态化 error 会
+            # 把本可被 event/cancel/timeout 唤醒的挂起执行永久打封（终态短路
+            # 从此拒绝一切 resume 类型，死局）。豁免为「保持原状 + 上抛」：
+            # suspended 执行保持 suspended，消息被 ack（重投也只会再次命中
+            # 同一守卫，重投无意义）；running 执行保持 checkpoint 现状。
+            if _chain_has_resume_protocol_error(e):
+                logger.warning(
+                    "执行 %s (status=%s) 收到与挂起状态不匹配的 resume 请求，"
+                    "协议错误不终态化，执行保持原状: %s",
+                    execution_id, getattr(state, "status", "?"), e,
+                )
+                self._finalize_observers()
+                raise ResumeProtocolError(
+                    f"resume 协议错误（执行保持原状 status={getattr(state, 'status', '?')}）: {e}",
+                    execution_id=execution_id,
+                ) from e
 
             # 节点级有界重试（波次二任务①）：同 _process_execution_result，
             # 瞬态节点失败不终态化、消息等重投；否则现状终态化 error。
@@ -2811,6 +2889,20 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         task.delivery_count,
                         exc,
                     )
+            except ResumeProtocolError as exc:
+                # resume 协议错误（#33）：执行状态与 resume_type 不匹配（如
+                # continue 打在挂起执行上）。执行**未**终态化、保持原状——
+                # 错误已可观测（状态行/日志），消息重投只会重复命中同一守卫
+                # 且烧 delivery，ack 掉。非终态执行不需要重投载体：决议路径
+                # （event/cancel/timeout resume）各有独立消息。
+                queue.ack(task.message_id)
+                queue.note_poison()
+                acked = True
+                logger.warning(
+                    "任务 %s resume 协议错误（执行保持原状不终态化）: %s",
+                    task.message_id,
+                    exc,
+                )
             except ValueError as exc:
                 # 畸形消息：ack 掉避免 poison pill 无限重投
                 logger.error("丢弃无效任务 %s: %s", task.message_id, exc)

@@ -172,12 +172,17 @@ class TestRetryableClassification:
         assert state.end_time is None
         assert state.context == CHECKPOINT_CONTEXT
 
-    def test_protocol_error_resume_still_terminalizes(self):
-        """协议错误（__cause__=ResumeError）维持现状：终态化 error。"""
+    def test_protocol_error_keeps_state_and_raises(self):
+        """协议错误（__cause__=ResumeError）不终态化：执行保持原状 + 抛
+        ResumeProtocolError（#33——挂起守卫类 ResumeError 终态化会把可被
+        event/cancel/timeout 唤醒的执行永久打封）。"""
         outcome, state = self._resume_with_failure(_wrapped(ResumeError("not pending")))
         assert not isinstance(outcome, NodeExecutionRetryableError)
-        assert isinstance(outcome, RuntimeError)
-        assert state.status == "error"
+        from plaita.server.flow_worker import ResumeProtocolError
+
+        assert isinstance(outcome, ResumeProtocolError)
+        assert state.status == "running"
+        assert state.end_time is None
 
     def test_graph_error_still_terminalizes(self):
         """图结构错误（__cause__=NodeNotFoundError）维持现状：终态化 error。"""
