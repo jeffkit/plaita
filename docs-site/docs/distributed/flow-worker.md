@@ -71,9 +71,11 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   （`FlowCancelledException`）、或协议/图错误（`ResumeError` 等）→ 维持现状
   终态化 error。超时不重试是刻意的：确定性信号重试=再烧一次全款。
 - **载体**：at-least-once 消息重投本身。重试时执行**不终态化**（磁盘 state
-  停在最后成功步 checkpoint——失败节点不写 context），消息不 ack 留 pending，
+  停在最后成功步 checkpoint——失败节点不写 context），run() **显式重投**同体新副本（先入队再 ack；
   `claim_min_idle_ms`（默认 60s）后被回收重投，resume 从 checkpoint 自然重跑
-  失败节点。`run()` 对重试异常仿照 `ExecutionLeaseError`：不 ack、不计 poison。
+  失败节点。重投路径不依赖 pending 回收：消息可能已被竞争者的 `ExecutionLeaseError`
+  分支 ack 释放，只留 pending 会导致重投永不发生（2026-10-09 plaita#52 实证）。
+  重投失败（Redis 抖动）才退化为不 ack 留 pending；两种情况都不计 poison。
 - **预算**：重试计数键 `{ns}:execution:noderetry:{id}`（INCR + 滑动 7 天 EX，
   租户路由与租约键同规则），默认预算 = `--max-deliveries`（5）。耗尽 → 终态化
   error（`error.node_retries` 记录重试次数），消息走 DLQ。刻意**不**用消息

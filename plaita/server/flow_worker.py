@@ -449,9 +449,14 @@ class NodeExecutionRetryableError(RuntimeError):
 
     节点异常经 ``_is_retryable_node_failure`` 判为瞬态且重试预算未耗尽时，
     处理函数跳过终态化改抛本异常——磁盘 state 停在最后成功步 checkpoint，
-    ``run()`` 对本异常仿照 ``ExecutionLeaseError`` 处理：不 ack、不计
-    poison、留 pending，消息被回收（间隔=claim_min_idle_ms，默认 60s）后
-    resume 自然重跑失败节点。
+    ``run()`` 据此**显式重投**一份同体新副本（``_requeue_retryable_failure``：
+    先入队、后 ack 原条），新副本 resume 时从 checkpoint 重跑失败节点。
+
+    2026-10-09 变更（plaita#52 真因）：此前是「不 ack、留 pending 等
+    claim_min_idle_ms 回收」。该语义在**消息已被竞争者 ack 释放**时不成立
+    （ExecutionLeaseError 分支为避免烧 delivery 会显式 ack），实测导致执行
+    既不重试也不终态、卡在 running 58 分钟。现改为显式重投；仅当重投本身
+    失败（Redis 抖动等）才退化为留 pending 交 reclaim。
 
     刻意**不是** ValueError 子类（同 StatePersistError 的理由）：ValueError
     会被 run() 当畸形消息 poison ack。
@@ -2469,6 +2474,41 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         except Exception as e:  # noqa: BLE001 — 交接失败退化为留 pending（绝不丢消息）
             logger.warning("不亲和任务交接失败（退化为留 pending）: %s: %s", e, exc)
 
+    def _requeue_retryable_failure(self, task: Any, queue: Any) -> bool:
+        """节点可重试失败：**显式重投**一份同体新副本（ack 原条）。
+
+        为什么不能只依赖「不 ack 留 pending」的回收语义（2026-10-09 实证，
+        执行 030ef793981743f6a9c217187022bb38 / plaita#28 卡 58 分钟）：
+
+        - 同一执行的消息可能已被**竞争者的 ExecutionLeaseError 分支 ack 掉**
+          （该分支为「避免烧 delivery」显式 ack，见 run() 内注释）；
+        - 此时消息不在 PEL 里，reclaim/XCLAIM 无从回收 → 依赖它的重投
+          **永不发生**；而处理函数又刻意不终态化 → 执行既不重试也不落终态，
+          一直挂在 running，只能等 keeper 的 zombie 线（默认 2h）或人工 resume。
+
+        新副本 delivery 归 1（`enqueue_task` 语义），节点重试预算由独立计数键
+        约束，因此不会无限重投。顺序为**先入队、后 ack**：中间崩溃只会产生
+        重复投递（租约机制天然去重），绝不会丢消息。
+
+        返回 True=已重投并 ack；False=退化为留 pending（由 reclaim 回收）。
+        """
+        body = getattr(task, "body", None)
+        mid = getattr(task, "message_id", "?")
+        if not isinstance(body, dict):
+            logger.info("任务 %s 可重试失败但无体可重投，留 pending 交 reclaim", mid)
+            return False
+        try:
+            queue.enqueue(dict(body))
+        except Exception as e:  # noqa: BLE001 — 重投失败退化为 reclaim（绝不丢消息）
+            logger.warning("任务 %s 显式重投失败（退化为留 pending 回收）: %s", mid, e)
+            return False
+        try:
+            queue.ack(mid)
+        except Exception as e:  # noqa: BLE001 — ack 失败=重复投递，不致命
+            logger.warning("任务 %s 重投后 ack 失败（将产生重复投递，租约去重）: %s", mid, e)
+            return True
+        return True
+
     def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None) -> None:
         # 机器亲和性闸（路线二首版，2026-10-06 多机验证）：任务参数里的 repo/
         # run_dir 是**派发方所在机器**的绝对路径。本机不具备该路径 = 跑不了，
@@ -2665,12 +2705,26 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 # 内判定，耗尽时已在处理函数内终态化 error，不会走到这里
                 # 无限重投。
                 queue.note_failed()
-                logger.warning(
-                    "任务 %s 节点执行失败待重投 (delivery=%s): %s",
-                    task.message_id,
-                    task.delivery_count,
-                    exc,
-                )
+                # 2026-10-09 修复（plaita#52 真因）：**显式重投**，不再把
+                # 重投的成败押在「消息仍在 PEL」上——同执行可能已被竞争者的
+                # ExecutionLeaseError 分支 ack 释放（"避免烧 delivery"），
+                # 此时 reclaim 无条目可回收，重投永不发生而执行又不终态化，
+                # 结果卡在 running 直到 zombie 线/人工 resume（实测 58 分钟）。
+                if self._requeue_retryable_failure(task, queue):
+                    acked = True
+                    logger.warning(
+                        "任务 %s 节点执行失败：已显式重投同体新副本（原 delivery=%s）: %s",
+                        task.message_id,
+                        task.delivery_count,
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "任务 %s 节点执行失败待重投 (delivery=%s): %s",
+                        task.message_id,
+                        task.delivery_count,
+                        exc,
+                    )
             except ValueError as exc:
                 # 畸形消息：ack 掉避免 poison pill 无限重投
                 logger.error("丢弃无效任务 %s: %s", task.message_id, exc)

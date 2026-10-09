@@ -12,10 +12,12 @@
   runner.py:143 raise）；链中出现超时（``NodeTimeoutError``/``FlowTimeoutError``）
   或取消（``FlowCancelledException``）→ 不重试（确定性信号重试=再烧全款，
   对齐 v3 宿主 D4 决策）；协议/图错误（``ResumeError`` 等）→ 不重试。
-- 重试载体 = at-least-once 消息重投本身：节点异常时**不终态化**（磁盘 state
+- 重试载体 = at-least-once 消息重投：节点异常时**不终态化**（磁盘 state
   停在最后成功步的 checkpoint——strategies.py ``_execute_current_node`` 的
-  ``runner.run_node`` 抛出时 context 未变）、不 ack，消息被回收（间隔
-  = claim_min_idle_ms，默认 60s）后 resume 自然重跑失败节点。
+  ``runner.run_node`` 抛出时 context 未变），run() **显式重投**同体新副本
+  （2026-10-09 起；此前是留 pending 等 reclaim，见 plaita#52）。
+- ``run()`` 对新异常的处理：显式重投成功即 ack 原条；重投失败才退化为
+  不 ack 留 pending，均不计 poison。
 - 预算 = Redis 重试计数键 ``{ns}:execution:noderetry:{id}``（INCR+EX 7d）。
   **不**用消息 delivery_count 判预算：核实发现 `_reclaim_one` 上报的是
   XCLAIM **前**的 times_delivered（task_queue.py:402，与其自身注释
@@ -572,3 +574,72 @@ class TestGuardBackstop:
 
         assert worker._dead_letter_guard(self._task()) is False
         assert fake.xlen("test:worker-node-retry") == 0
+
+
+# ---------- 显式重投（2026-10-09 修复，plaita#52 真因） ----------
+
+
+class TestExplicitRequeueOnRetryableFailure:
+    """节点可重试失败必须**显式重投**，不能只押注「消息仍在 PEL 等 reclaim」。
+
+    实证（执行 030ef793981743f6a9c217187022bb38 / plaita#28）：同执行的消息
+    已被竞争者的 ExecutionLeaseError 分支 ack 释放（"避免烧 delivery"），
+    10:19:56 worker 判定「不终态化等待消息重投」，此后 **58 分钟无任何重投**，
+    执行既不重试也不落终态 → 只能等 keeper 的 zombie 线（2h）或人工 resume。
+    """
+
+    def _worker(self):
+        from plaita.server.flow_worker import RedisFlowWorker
+
+        class _W:
+            # run() 的消费循环与该方法同在 RedisFlowWorker 上
+            _requeue_retryable_failure = RedisFlowWorker._requeue_retryable_failure
+
+        return _W()
+
+    def _task(self, body=None, mid="1-0"):
+        return MagicMock(message_id=mid, body=body if body is not None else
+                         {"type": "resume", "flow_id": "f1", "execution_id": "exec-1"},
+                         delivery_count=1)
+
+    def test_requeue_enqueues_then_acks(self):
+        w = self._worker()
+        q = MagicMock()
+        task = self._task()
+        assert w._requeue_retryable_failure(task, q) is True
+        q.enqueue.assert_called_once_with(task.body)
+        q.ack.assert_called_once_with("1-0")
+
+    def test_enqueue_happens_before_ack(self):
+        """先入队、后 ack：中间崩溃只重复投递（租约去重），绝不丢消息。"""
+        w = self._worker()
+        calls = []
+        q = MagicMock()
+        q.enqueue.side_effect = lambda body: calls.append(("enqueue", body))
+        q.ack.side_effect = lambda mid: calls.append(("ack", mid))
+        w._requeue_retryable_failure(self._task(), q)
+        assert [c[0] for c in calls] == ["enqueue", "ack"]
+
+    def test_enqueue_failure_falls_back_to_pending(self):
+        """重投失败 → 不 ack（留 pending 交 reclaim），返回值 False。"""
+        w = self._worker()
+        q = MagicMock()
+        q.enqueue.side_effect = RuntimeError("redis down")
+        assert w._requeue_retryable_failure(self._task(), q) is False
+        q.ack.assert_not_called()
+
+    def test_no_body_falls_back_to_pending(self):
+        w = self._worker()
+        q = MagicMock()
+        task = MagicMock(message_id="2-0", body=None)
+        assert w._requeue_retryable_failure(task, q) is False
+        q.enqueue.assert_not_called()
+        q.ack.assert_not_called()
+
+    def test_ack_failure_still_reports_requeued(self):
+        """ack 失败=重复投递（租约去重），重投本身已成功 → 仍返回 True。"""
+        w = self._worker()
+        q = MagicMock()
+        q.ack.side_effect = RuntimeError("redis blip")
+        assert w._requeue_retryable_failure(self._task(), q) is True
+        q.enqueue.assert_called_once()
