@@ -109,6 +109,7 @@ class EventReconciler:
             return 0
 
         replayed = 0
+        failed: list = []
         for event in events:
             try:
                 # handle_event 内部 SET NX 去重键保证：Pub/Sub 推送已处理的
@@ -116,17 +117,40 @@ class EventReconciler:
                 await self.event_filter.handle_event(event)
                 replayed += 1
             except Exception as e:  # noqa: BLE001 — 单事件失败不拖累其余
+                failed.append(event)
                 logger.warning(
-                    "事件回扫: 回放事件 %s 失败（跳过）: %s", event.event_id, e,
-                    exc_info=True,
+                    "事件回扫: 回放事件 %s 失败（留在窗口内下轮重试）: %s",
+                    event.event_id, e, exc_info=True,
                 )
-        # 游标推进到窗口上界（回放幂等可容忍边界事件下轮重扫；若因个别
-        # 失败不推进，同一窗口会被无限重扫）。写失败只多扫不漏扫。
-        self._save_cursor(window_end)
+        # 游标语义（plaita#85）：只推进到「已确定消费完毕」的位点，绝不能
+        # 无条件推到窗口上界——单轮只消费 batch_size 条，越界推进会把同窗口
+        # 剩余事件连同本轮回放失败的事件一起永久跳过：
+        # - 有失败 → 回退到最早失败事件的时间戳（含）：失败者下轮重试；
+        #   已成功的被重扫到也无害（去重键幂等）。宁多扫不漏扫。
+        # - 无失败且整批短于 batch_size → 窗口已扫净，才推到窗口上界。
+        # - 无失败且整批打满 batch_size → 推到本批最晚时间戳（含，下轮重扫
+        #   到它由去重键兜住），剩余事件下轮继续——batch_size 只是限流，
+        #   不是窗口边界。
+        # 整批全部失败（游标原地不动）fail-stop：宁可整窗重扫，不漏事件；
+        # 打 error 让卡死可见。
+        if failed:
+            cursor = min(float(e.timestamp) for e in failed)
+            if replayed == 0:
+                logger.error(
+                    "事件回扫: 窗口 (%.0f, %.0f] 本轮 %d 条全部回放失败，"
+                    "游标停在 %.0f（整窗将重扫）",
+                    window_start, window_end, len(events), cursor,
+                )
+        elif len(events) < self.batch_size:
+            cursor = window_end
+        else:
+            cursor = max(float(e.timestamp) for e in events)
+        # 写失败只多扫不漏扫。
+        self._save_cursor(cursor)
         if events:
             logger.info(
-                "事件回扫: 窗口 (%.0f, %.0f] 扫到 %d 条事件，回放 %d 条",
-                window_start, window_end, len(events), replayed,
+                "事件回扫: 窗口 (%.0f, %.0f] 扫到 %d 条事件，回放 %d 条，游标→%.0f",
+                window_start, window_end, len(events), replayed, cursor,
             )
         return replayed
 

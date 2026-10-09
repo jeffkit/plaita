@@ -254,6 +254,125 @@ class TestReconcileResumesMissedEvents(ReconcileTestBase):
         self.assertEqual(replayed, 0)
 
 
+class TestReconcileCursorSemantics(ReconcileTestBase):
+    """游标推进语义（plaita#85）：单轮只消费 batch_size 条时，游标绝不越过
+    未消费的事件——修复前游标无条件推到窗口上界，窗口内超过 batch_size 的
+    事件（以及本轮回放失败的事件）被永久跳过。"""
+
+    def _seed_window(self, n, base_ts=None):
+        """n 个挂起执行 + n 条只落存储的事件（时间戳递增、间隔 1s）。"""
+        base_ts = base_ts if base_ts is not None else time.time() - 100
+        for i in range(n):
+            exec_id = f"exec-c{i}"
+            self._setup_pending(execution_id=exec_id)
+            self._store_event_directly(
+                execution_id=exec_id, timestamp=base_ts + i
+            )
+        return base_ts
+
+    def test_full_batch_keeps_remaining_events_in_window(self):
+        """窗口内事件数 > batch_size：分多轮全部补到，不因游标越界而漏扫。
+
+        修复前：首轮扫 2 条后游标直推窗口上界，余下 3 条永失（只回放 2 条）。
+        注：scan_once 返回值含边界重扫的去重命中，故以队列里的 resume 任务
+        （每执行恰好一条）为准断言。
+        """
+        self._seed_window(5)
+        reconciler = self._make_reconciler(batch_size=2)
+
+        for _ in range(6):
+            run(reconciler.scan_once())
+
+        tasks = _stream_payloads(self.redis_client, self.QUEUE)
+        self.assertEqual(
+            len(tasks), 5, f"应恰好 5 条 resume（去重后），实际 {len(tasks)} 条"
+        )
+        execs = {t["execution_id"] for t in tasks}
+        self.assertEqual(execs, {f"exec-c{i}" for i in range(5)},
+                         "窗口内事件未全部补偿成 resume（游标越界漏扫）")
+
+    def test_cursor_advances_to_batch_tail_not_window_end(self):
+        """打满 batch_size 的批次：游标推到本批最晚时间戳，而非窗口上界。"""
+        base_ts = self._seed_window(5)
+        reconciler = self._make_reconciler(batch_size=2)
+        run(reconciler.scan_once())
+
+        raw = self.redis_client.get(EventReconciler.CURSOR_KEY)
+        self.assertIsNotNone(raw)
+        cursor = float(raw)
+        self.assertAlmostEqual(cursor, base_ts + 1, delta=0.5,
+                               msg="游标未推到本批（前 2 条）最晚时间戳")
+        self.assertLess(cursor, base_ts + 2,
+                        "游标越过本批落在未消费事件之后（越界推进）")
+
+    def test_failed_replay_retried_next_round(self):
+        """本轮回放失败的事件：游标停在失败位点，下轮重试成功。
+
+        修复前：单事件失败被跳过后游标照推窗口上界，失败者永无重试。
+        """
+        base_ts = self._seed_window(3)
+        target_ts = base_ts + 1  # 中间那条（失败位点早于同批后继成功者）
+
+        stored = {}
+
+        async def _collect():
+            for ev in await self.event_storage.list_events(limit=100):
+                stored[ev.event_id] = ev.timestamp
+
+        run(_collect())
+        target_id = next(
+            (eid for eid, ts in stored.items() if abs(ts - target_ts) < 0.5),
+            None,
+        )
+        self.assertIsNotNone(target_id)
+
+        original = self.event_filter.handle_event
+
+        async def _flaky(event):
+            if event.event_id == target_id:
+                raise RuntimeError("transient replay failure")
+            return await original(event)
+
+        self.event_filter.handle_event = _flaky
+        reconciler = self._make_reconciler(batch_size=10)
+        first = run(reconciler.scan_once())
+        self.assertEqual(first, 2, "失败未隔离，拖累同批其余事件")
+
+        # 第二轮：游标停在失败位点，失败者被重试并成功
+        self.event_filter.handle_event = original
+        second = run(reconciler.scan_once())
+        self.assertGreaterEqual(second, 1, "失败事件未被下轮重试")
+        execs = {t["execution_id"] for t in _stream_payloads(
+            self.redis_client, self.QUEUE)}
+        self.assertEqual(execs, {"exec-c0", "exec-c1", "exec-c2"})
+
+    def test_all_failed_cursor_stalls(self):
+        """整批全部回放失败：游标停在失败位点不越过（fail-stop），下轮整窗重试。"""
+        base_ts = self._seed_window(2)
+
+        async def _always_fail(event):
+            raise RuntimeError("downstream down")
+
+        self.event_filter.handle_event = _always_fail
+        reconciler = self._make_reconciler(batch_size=10)
+        self.assertEqual(run(reconciler.scan_once()), 0)
+
+        raw = self.redis_client.get(EventReconciler.CURSOR_KEY)
+        self.assertLessEqual(float(raw), base_ts + 1,
+                             "整批失败后游标仍越过失败窗口推进")
+
+        # 下游恢复：游标停在失败位点 ⇒ 两条都在窗口内被重试成功
+        self.event_filter.handle_event = (
+            lambda event: self.event_filter.__class__.handle_event(
+                self.event_filter, event)
+        )
+        run(reconciler.scan_once())
+        execs = {t["execution_id"] for t in _stream_payloads(
+            self.redis_client, self.QUEUE)}
+        self.assertEqual(execs, {"exec-c0", "exec-c1"},
+                         "整批失败后事件未被下轮重试（fail-stop 失效）")
+
+
 class TestReconcileLifecycle(ReconcileTestBase):
     def test_filter_start_mounts_and_stop_unmounts(self):
         """回扫器随 EventFilter.start/stop 同生命周期。"""
