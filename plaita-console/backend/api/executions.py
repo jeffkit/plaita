@@ -213,6 +213,12 @@ def _is_mechanism_key(key: str) -> bool:
         or ":execution:fence:" in key
         or ":execution:cancel:" in key
         or ":execution:noderetry:" in key
+        # 同类第五次（2026-10-10，值守侧引入）：`:execution:g1wakeups:{id}`
+        # （G1 唤醒计数，plaita#73 补丁）同样是**裸整数**——漏登记即复现本函数
+        # docstring 记录的「列表 API 全崩」（实测 `AttributeError: 'int' object
+        # has no attribute 'get'`，`GET /api/executions` 500）。
+        # **新增此类机制键必须同步登记本条**（本函数 docstring 已列四次先例）。
+        or ":execution:g1wakeups:" in key
         or ":execution:index" in key
         or key.endswith(":dlq")
     )
