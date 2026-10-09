@@ -39,6 +39,12 @@ from plaita.dsl.codeflow._compiler import (  # noqa: F401
     flow,
     flow_from_source,
 )
+from plaita.dsl.codeflow._canonical import (  # noqa: F401
+    canonical_node,
+    count_nodes,
+    serialize_canonical,
+    to_canonical,
+)
 from plaita.dsl.codeflow._emit import EmitError, emit_source  # noqa: F401
 
 __all__ = [
@@ -48,6 +54,10 @@ __all__ = [
     "compile_source",
     "compile_func",
     "emit_source",
+    "to_canonical",
+    "canonical_node",
+    "serialize_canonical",
+    "count_nodes",
     "EmitError",
     "HTTP",
     "CODE",

@@ -88,6 +88,9 @@ Homepage = "https://jeffkit.github.io/plaita/"
 Repository = "https://github.com/jeffkit/plaita"
 Documentation = "https://jeffkit.github.io/plaita/"
 
+[project.scripts]
+plaita = "plaita.cli:main"
+
 [project.entry-points."plaita.nodes"]
 delay = "plaita.server.nodes.delay_node:DelayNode"
 redis_queue = "plaita.server.nodes.redis_queue_node:RedisQueueNode"
