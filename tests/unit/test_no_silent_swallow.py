@@ -59,10 +59,79 @@ ALLOWED_SILENT = {
     # 907→923, 931→947, 936→952, 942→958，位点未变。
     # plaita#33（挂起幂等短路 + ResumeProtocolError）整体再下移 49：
     # 923→972, 947→996, 952→1001, 958→1007，位点未变。
-    ("server/flow_worker.py", 972),
-    ("server/flow_worker.py", 996),
-    ("server/flow_worker.py", 1001),
-    ("server/flow_worker.py", 1007),
+    ("server/flow_worker.py", 1039),
+    ("server/flow_worker.py", 1063),
+    ("server/flow_worker.py", 1068),
+    ("server/flow_worker.py", 1074),
+}
+
+
+def _handler_fingerprint(source: str, lineno: int) -> str:
+    """静默 except 的**行号无关**指纹：该 handler 的 try 体首行 + handler + body。
+
+    为什么需要它：ALLOWED_SILENT 历史上是**纯行号**清单，任何在该文件上方插入
+    代码的改动都会让全部登记位点集体下移，门禁随即误报「新增静默吞咽」——
+    2026-10-09/10 两天内因此反复校准（+12/+16/+49/+27/+66/+67… 全日志可见）。
+    指纹让登记**跟随代码本身**，不再随行号漂移。
+
+    取 try 体首行是因为「except Exception: return None」这类样板在文件里重复
+    出现（仅 handler+body 会撞车），带上它守护的调用才唯一。
+    """
+    lines = source.split("\n")
+    if lineno - 1 >= len(lines):
+        return ""
+
+    def _norm(idx: int) -> str:
+        return lines[idx].split("#", 1)[0].strip() if 0 <= idx < len(lines) else ""
+
+    head_indent = len(lines[lineno - 1]) - len(lines[lineno - 1].lstrip())
+    # try 体首行：向上找最近的 "try:"，取其后第一条同缩进语句
+    try_idx = None
+    k = lineno - 2
+    while k >= 0:
+        st = _norm(k)
+        if st == "try:" and (len(lines[k]) - len(lines[k].lstrip())) == head_indent:
+            try_idx = k
+            break
+        if st and (len(lines[k]) - len(lines[k].lstrip())) < head_indent:
+            break
+        k -= 1
+    guard = ""
+    if try_idx is not None:
+        j = try_idx + 1
+        while j < lineno - 1:
+            if _norm(j):
+                guard = _norm(j)
+                break
+            j += 1
+    parts = [guard, _norm(lineno - 1)]
+    j = lineno
+    while j < len(lines):
+        if not _norm(j):
+            j += 1
+            continue
+        if (len(lines[j]) - len(lines[j].lstrip())) <= head_indent:
+            break
+        parts.append(_norm(j))
+        j += 1
+    return " | ".join(p for p in parts if p)
+
+
+def _allowed_fingerprints() -> set[str]:
+    """ALLOWED_SILENT_FINGERPRINTS：显式登记的行号无关指纹。"""
+    return set(globals().get("ALLOWED_SILENT_FINGERPRINTS") or ())
+
+
+# ── 行号无关登记（新通道）────────────────────────────────────────────────
+# 上面 ALLOWED_SILENT 是历史行号清单（保留兼容）；**新登记请用指纹**，
+# 这样在文件上方插入代码时不会再集体漂移（见 _handler_fingerprint）。
+ALLOWED_SILENT_FINGERPRINTS = {
+    # flow_worker 沙箱装配三处 best-effort（plaita-nodes 为可选依赖：
+    # 缺装 / 无注册表 / 装配失败都返回 None，非沙箱部署零行为变化）
+    "from plaita_nodes.sandbox import collect_workspace_snapshots | except Exception: | return",
+    "from plaita_nodes.lifecycle import SandboxLifecycleCallback | except Exception: | return None",
+    "from plaita_nodes import sandbox as _sb | except Exception: | return None",
+    "return SandboxLifecycleCallback(sandboxes=specs) | except Exception: | return None",
 }
 
 
@@ -144,10 +213,23 @@ def test_silent_except_blocks_are_whitelisted():
         for lineno, rel in _collect_silent_except(path):
             all_silent.append((rel, lineno))
 
-    unlisted = [
-        (rel, lineno) for (rel, lineno) in all_silent
-        if (rel, lineno) not in ALLOWED_SILENT
-    ]
+    # 双通道：行号（历史登记）**或**行号无关指纹（新增登记）命中即放行。
+    # 指纹让门禁不再因上方插入代码而误报（见 _handler_fingerprint docstring）。
+    fps = _allowed_fingerprints()
+    fp_cache: dict[str, str] = {}
+    unlisted = []
+    for rel, lineno in all_silent:
+        if (rel, lineno) in ALLOWED_SILENT:
+            continue
+        if fp_cache.get(rel) is None:
+            try:
+                fp_cache[rel] = (PLAITA_DIR / rel).read_text(encoding="utf-8")
+            except OSError:
+                fp_cache[rel] = ""
+        fp = _handler_fingerprint(fp_cache[rel], lineno)
+        if fp and fp in fps:
+            continue
+        unlisted.append((rel, lineno))
     if unlisted:
         pytest.fail(
             "Found silent except blocks (no raise / no logging) not in ALLOWED_SILENT:\n"

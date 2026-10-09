@@ -637,7 +637,8 @@ class FlowWorker:
         try:
             raw = redis_client.get(self._g1_wakeup_key(execution_id))
             return int(raw) if raw is not None else 0
-        except Exception:  # noqa: BLE001 — 读失败按 0（不阻断人工救援）
+        except Exception as e:  # noqa: BLE001 — 读失败按 0（不阻断人工救援）
+            logger.warning("G1 唤醒计数读取失败（按 0 放行）: %s: %s", execution_id, e)
             return 0
 
     def _g1_wakeup_budget_exhausted(self, execution_id: str) -> bool:
