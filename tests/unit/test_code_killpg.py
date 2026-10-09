@@ -42,6 +42,14 @@ def run(input):
 
 
 def _pid_alive(pid: int) -> bool:
+    # Z（zombie）= SIGKILL 已命中、等待收尸——本沙箱 PID1 不 wait 孤儿，
+    # Z 永久留存；被测契约是「树被杀干净」（Z 不能再执行代码），不是
+    # 「init 收了尸」（收尸是 init 的职责，沙箱无法跨会话代劳）。
+    try:
+        stat_text = open(f"/proc/{pid}/stat").read()
+        return stat_text.rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, ValueError, IndexError):
+        pass  # 非 Linux（无 /proc）或进程已消失 → 走 os.kill 探测
     try:
         os.kill(pid, 0)
         return True
