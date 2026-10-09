@@ -378,6 +378,32 @@ def test_contract_per_tenant_secret_and_global_compat(client, monkeypatch):
     assert r.json()["code"] == 0
 
 
+def test_disabled_tenant_contract_pull_rejected(client):
+    """停用租户（#27）：租户契约密钥拉取已发布流程也被拒（code 4）；
+    平台全局密钥不受限；重新启用即恢复。"""
+    info = _login(client, "root", "root-password-1")
+    headers = _auth(info["token"])
+    created = client.post("/api/tenants", json={"id": "acme"}, headers=headers).json()
+    users_svc.add_member(flow_store.get_flow_store(), "acme", "root", "editor")
+    _publish_flow(client, headers, "acme-flow", tenant_header="acme")
+
+    url = "/api/flowVersion/semver/detail"
+    sig = _sig(created["contract_secret_key"], created["contract_secret_id"])
+    assert client.post(url, headers={"authorization": sig},
+                       data={"flowId": "acme-flow", "version": "1.0.0"}).json()["code"] == 0
+
+    assert client.post("/api/tenants/acme/status", json={"status": "disabled"},
+                       headers=headers).status_code == 200
+    r = client.post(url, headers={"authorization": sig},
+                    data={"flowId": "acme-flow", "version": "1.0.0"})
+    assert r.status_code == 200 and r.json()["code"] == 4, r.text
+
+    # 重新启用 → 同一密钥即刻恢复
+    client.post("/api/tenants/acme/status", json={"status": "active"}, headers=headers)
+    assert client.post(url, headers={"authorization": sig},
+                       data={"flowId": "acme-flow", "version": "1.0.0"}).json()["code"] == 0
+
+
 # ---- 存量库迁移 ----
 
 def test_legacy_db_migration_backfills_default_tenant(tmp_path):

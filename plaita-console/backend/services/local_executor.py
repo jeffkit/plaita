@@ -205,6 +205,20 @@ def _load_definition(
     return definition
 
 
+def _tenant_disabled(store: "FlowStore", tenant_id: Optional[str]) -> bool:
+    """停用租户闸（#27）：本地档的 start/resume 与集群档 worker 同口径。
+
+    集群档由 FlowWorker 在 `_dispatch_task` 把闸（Redis 停用集合）；本地档
+    没有 worker，执行就在 console 进程内，闸必须落在本地执行器入口。
+    权威库即本 SQLite（tenants 表），与 tenants_svc.is_tenant_disabled 同源。
+    """
+    try:
+        from . import tenants_svc
+    except ImportError:  # 平铺布局（cwd=backend）运行时
+        import tenants_svc  # type: ignore
+    return tenants_svc.is_tenant_disabled(store, tenant_id or "")
+
+
 def start_local_execution(
     store: FlowStore,
     flow_id: str,
@@ -214,6 +228,8 @@ def start_local_execution(
     tenant_id: str = "",
 ) -> Dict[str, Any]:
     """以本地模式启动流程：同步建档 + 后台线程以分布式策略执行。"""
+    if _tenant_disabled(store, tenant_id):
+        raise ValueError(f"租户 {tenant_id or 'default'} 已停用，禁止启动执行")
     version = version or _latest_published(store, flow_id, tenant_id)
     if version is None:
         raise ValueError(f"流程 {flow_id} 没有已发布版本，请先在编排页发布")
@@ -254,6 +270,15 @@ def resume_local_execution(
     """恢复挂起的执行：从 SQLite checkpoint 继续（分布式策略）。"""
     row = fs.get_local_execution(execution_id, tenant_id=tenant_id)
     if row is None:
+        return False
+    # 闸在 row 定位后：以执行自身归属租户为准（与消息携带 tenant_id 的
+    # worker 闸同口径），而非仅调用方当前租户上下文。返回 False（而非抛）
+    # 与「执行不存在」同形，API 层映射 404/400。
+    if _tenant_disabled(store, row.get("tenant_id") or tenant_id):
+        logger.warning(
+            "租户 %s 已停用，拒绝恢复执行 %s",
+            row.get("tenant_id") or "default", execution_id,
+        )
         return False
     if row["status"] != "suspended":
         raise ValueError(f"仅挂起状态可恢复: 当前 {row['status']}")

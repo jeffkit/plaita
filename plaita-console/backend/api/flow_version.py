@@ -9,7 +9,7 @@ POST /api/flowVersion/semver/detail
   - 平台密钥（兼容）：命中全局 PLAITA_CONSOLE_SECRET_ID/SECRET_KEY
     → 平台上下文，可拉取任意租户已发布流程（存量集成不破坏）
 - 响应：{ code, message, data: { flow: "<Flow JSON string>" } }
-  - code 为 0 表示成功；非零表示业务错误（flow 不存在/未发布）
+  - code 为 0 表示成功；非零表示业务错误（flow 不存在/未发布/租户已停用）
   - 鉴权失败返回 HTTP 401
 """
 from typing import Optional
@@ -75,6 +75,17 @@ async def flow_version_detail(request: Request):
 
     authorization = request.headers.get("authorization", "")
     _, tenant_id = _resolve_caller(authorization)
+
+    # 停用租户闸（#27）：租户密钥拉取路径在租户停用后与已签发会话同口径拒绝
+    #（code 4，HTTP 仍 200 与既有业务错误信封一致；租户重新启用即恢复）。
+    # 平台密钥（tenant_id=None）为平台级身份，不受限。
+    if tenant_id is not None:
+        try:
+            tenant = tenants_svc.get_tenant(flow_store.get_flow_store(), tenant_id)
+        except LookupError:
+            tenant = None
+        if tenant is not None and tenant.get("status") != "active":
+            return _envelope(4, f"租户 {tenant_id} 已停用，暂停流程拉取")
 
     form = await request.form()
     flow_id = form.get("flowId")
