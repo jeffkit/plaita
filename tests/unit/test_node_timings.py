@@ -98,6 +98,59 @@ class TestNodeTimingCallback:
         snap["a"]["duration_ms"] = 999
         assert cb.snapshot()["a"]["duration_ms"] != 999
 
+    # ── 在跑节点必须可见（2026-10-10 沙箱误杀事故回归）────────────────────
+
+    def test_snapshot_exposes_running_node_without_ended_at(self):
+        """在跑节点也要进 snapshot，且形态是「有 started_at、无 ended_at」。
+
+        事故（plaita#27/#31/#55/#32/#62）：``sandbox_agent`` 节点（impl）在 AGS
+        沙箱里跑 35 分钟，期间宿主侧只调用了 ``on_node_start``——旧 ``snapshot()``
+        只回 ``_timings``，于是 node_timings 里**看不到这个在跑节点**。keeper 的
+        活性判据①（有 started 无 ended = 活证据）因此永不命中，落到判据③
+        「末节点截止时间停滞超 1800s」→ 把健康 run 判死 cancel。
+
+        本测试就是那条判据的宿主侧契约：在跑 = ``ended_at`` 为空字符串。
+        """
+        clock = _Clock()
+        cb = NodeTimingCallback(clock=clock)
+        cb.on_node_start(None, _Node("done"))
+        clock.tick(2)
+        cb.on_node_end(None, _Node("done"))
+        clock.tick(30)
+        cb.on_node_start(None, _Node("impl"))     # 沙箱节点开跑，不结束
+
+        snap = cb.snapshot()
+        assert "impl" in snap, "在跑节点必须在 node_timings 里可见（否则 keeper 会误杀）"
+        impl = snap["impl"]
+        assert impl["started_at"], "在跑节点必须有 started_at"
+        assert not impl["ended_at"], "在跑节点的 ended_at 必须为空（= 活证据）"
+        assert impl["ended_ms"] is None, "不得为在跑节点编造结束时间"
+
+    def test_running_node_does_not_clobber_completed_record(self):
+        """同一节点重跑：已完成记录优先，不被在跑态覆盖。"""
+        clock = _Clock()
+        cb = NodeTimingCallback(clock=clock)
+        cb.on_node_start(None, _Node("a"))
+        clock.tick(1)
+        cb.on_node_end(None, _Node("a"))
+        cb.on_node_start(None, _Node("a"))        # 第二轮在跑
+        entry = cb.snapshot()["a"]
+        assert entry["ended_at"], "已完成的节点不应因新一轮 start 而退回在跑态"
+
+    def test_snapshot_running_entry_matches_keeper_predicate(self):
+        """与 keeper ``worker_alive`` 判据① 的实际读法对齐（防两侧口径漂移）。
+
+        keeper 读法（issue-keeper ``console_exec.worker_alive``）：
+            if not v.get("started_at") or v.get("ended_at"): continue
+            return True          # 有 started、无 ended → 活
+        """
+        cb = NodeTimingCallback(clock=_Clock())
+        cb.on_node_start(None, _Node("impl"))
+        snap = cb.snapshot()
+        live = [nid for nid, v in snap.items()
+                if v.get("started_at") and not v.get("ended_at")]
+        assert live == ["impl"], "keeper 判据① 必须能从 snapshot 里认出在跑节点"
+
 
 class TestExecutionStateCarriesTimings:
     def test_defaults_to_none_for_old_states(self):

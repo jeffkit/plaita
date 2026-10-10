@@ -95,8 +95,38 @@ class NodeTimingCallback(FlowCallback):
         self._timings[node_id] = entry
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:
-        """当前已采集的节点耗时（浅拷贝，可直接落盘）。"""
-        return {node_id: dict(entry) for node_id, entry in self._timings.items()}
+        """当前已采集的节点耗时（浅拷贝，可直接落盘）。
+
+        **在跑节点也要落盘**（2026-10-10，plaita#27/#31/#55/#32/#62 误杀事故）：
+        原先只返回 ``_timings``（仅在 ``on_node_end`` 写入），于是**正在执行的
+        节点在 ``node_timings`` 里完全不可见**。keeper 侧的活性判据
+        （``console_exec.worker_alive`` 判据① 「有 started 无 ended 的节点 =
+        活证据」）因此永远看不到它——沙箱 ``sandbox_agent`` 节点（impl）跑
+        35 分钟期间，宿主侧 ``node_timings`` 停在最后一个已完成节点上，
+        keeper 判「末节点 ended_at 停滞超 1800s」→ **把健康 run 判死并 cancel**。
+
+        实测事故：execution 7c1f513f/31e74058/26e861d5 的产出分别在
+        10:19:18/10:19:15/09:28 落盘，而 keeper 在 10:19:15/10:19:23/10:03
+        判死——**落盘与误杀同一秒**；worktree 里躺着完整的 +250 行实现。
+
+        这里为 ``_open`` 里的在跑节点补一条 ``ended_at=""`` 的条目：语义与
+        keeper 判据约定一致（有 ``started_at``、无 ``ended_at`` = 在跑 =
+        活证据），且**不编造** ``ended_at``/``duration_ms``。
+        已完成节点仍以 ``_timings`` 为准（同一节点重跑时结束记录覆盖在跑记录）。
+        """
+        out = {node_id: dict(entry) for node_id, entry in self._timings.items()}
+        for node_id, started in self._open.items():
+            if node_id in out:
+                continue        # 已有终态记录（重跑场景）：以完成记录为准
+            out[node_id] = {
+                "started_at": _iso(started),
+                "ended_at": "",   # 空 = 仍在跑（keeper 活性判据依赖此形态）
+                "started_ms": int(started * 1000),
+                "ended_ms": None,
+                "attempts": 1,
+                "failed": False,
+            }
+        return out
 
     def reset(self) -> None:
         self._open.clear()
