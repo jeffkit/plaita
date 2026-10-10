@@ -207,12 +207,30 @@ def _is_mechanism_key(key: str) -> bool:
     见 plaita/storage/redis.py）与 `{...}:execution:index:ready`（回填标记，
     值为裸字符串 "1"）。ZSET 键 GET 抛 WRONGTYPE 尚可被兜底吞掉，但 ready
     标记是字符串 "1" → json.loads 得 int → `summary.get` 即 500，必须排除。
+
+    同类第七次（2026-10-10，plaita#123）：`noderetry` 键**新增了节点维度
+    子键** `{ns}:execution:noderetry:{id}:{node_id}`（修复「计数按执行维度
+    却被成功推进清零 ⇒ 预算永不耗尽 ⇒ 无限重投」的根因）。值同样是裸整数，
+    但前缀判定 `":execution:noderetry:" in key` 是**子串**匹配，子键天然
+    命中，无需再加分支——此处留痕说明该前缀的覆盖面已包含子键形态，改动
+    键名/前缀时须同步核对（`test_console_mechanism_keys.py` 的自动防线扫
+    worker 源码里的 `:execution:<name>:{` 形态，键名不变则防线照常覆盖）。
+
+    同类第八次（2026-10-10，同批）：`{ns}:execution:noderefetch:{id}`
+    （plaita#123 兜底总重试上限，**裸整数**）——这是**新前缀**，不是
+    `noderetry` 的子串，必须单独登记（自动防线扫
+    `:execution:noderefetch:{` 已覆盖）。
     """
     return (
         ":execution:lease:" in key
         or ":execution:fence:" in key
         or ":execution:cancel:" in key
+        # 子串匹配：`noderetry:{id}`（旧执行维度）与 `noderetry:{id}:{node}`
+        # （#123 起的节点维度子键）一并排除。
         or ":execution:noderetry:" in key
+        # 兜底总重试计数（#123 评审建议，同类第八次）：独立前缀——防键空间
+        # 漂移导致无界重投的兜底计数器，值与 noderetry 同为裸整数。
+        or ":execution:noderefetch:" in key
         # 同类第五次（2026-10-10，值守侧引入）：`:execution:g1wakeups:{id}`
         # （G1 唤醒计数，plaita#73 补丁）同样是**裸整数**——漏登记即复现本函数
         # docstring 记录的「列表 API 全崩」（实测 `AttributeError: 'int' object

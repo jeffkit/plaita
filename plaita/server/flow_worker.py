@@ -478,6 +478,39 @@ def _chain_has_resume_guard_error(exc: BaseException) -> bool:
     return False
 
 
+def _node_id_from_chain(exc: BaseException) -> Optional[str]:
+    """从异常链取**失败节点 id**（plaita#123：计数键按节点隔离的前提）。
+
+    主来源是 ``NodeExecutionError.node``——runner.py:144 在节点 abort 时
+    构造并带上 ``node``（Flow Node 对象），经 ``_error_normalization``
+    归一化后原异常挂在 ``__cause__``。取 ``node.id``（退化取 ``node.name``）；
+    历史/测试调用方也传过裸节点 id 字符串（``NodeExecutionError(msg, node="a")``），
+    一并识别——否则计数会静默退化成执行维度、又回到 #123 的整执行清零形态。
+
+    为何不用 checkpoint 的 ``$LAST_NODE``：失败节点**不写 context**
+    （runner.run_node 成功后才 ``update_node_result``/``last_node_id``），
+    所以 ``$LAST_NODE`` 指向的是**上一个成功节点**，拿它当失败节点会张冠
+    李戴——恰好在「前序节点成功 + 当前节点失败」的事故形态上把计数记到
+    错误的键上。链中没有 NodeExecutionError（即非可重试失败）时返回 None，
+    调用方退化为执行维度键（保守，不比修复前差）。
+    """
+    node: Optional[BaseException] = exc
+    depth = 0
+    while node is not None and depth <= _NODE_RETRY_CHAIN_MAX_DEPTH + 1:
+        if isinstance(node, NodeExecutionError):
+            target = getattr(node, "node", None)
+            if isinstance(target, str) and target:
+                return target
+            for attr in ("id", "name"):
+                value = getattr(target, attr, None)
+                if isinstance(value, str) and value:
+                    return value
+            return None
+        node = node.__cause__
+        depth += 1
+    return None
+
+
 class StatePersistError(RuntimeError):
     """执行状态落盘失败（``save_execution_state`` 返回 False）。
 
@@ -707,6 +740,60 @@ class FlowWorker:
     DETERMINISTIC_FAILURE_MAX = 12
     DETERMINISTIC_FAILURE_TTL_SECONDS = 7 * 86400
 
+    # 兜底上限（plaita#123 评审建议，2026-10-10）：**不看键名、只看次数**。
+    # 节点维度预算（noderetry:{id}:{node}）与执行维度预算都可能因「键空间
+    # 变化」而失效——例如 flow 里节点数很多、节点 id 每轮漂移（动态 id /
+    # 定义被改），或将来又把 execution_id 引回键里却漏了某条路径。该计数
+    # **不含 node_id、不含任何会漂移的段**，只按 execution_id 累计「本执行
+    # 一共放行过多少次节点重试」，达上限即终态化 error——保证任何键空间
+    # 异常都不会再退化成「无限重投」。
+    #
+    # 取值远大于单节点预算 × 合理节点数（默认 5 × 20 = 100），只在
+    # 「预算机制整体失效」时才兜住；正常执行永远碰不到。
+    NODE_RETRY_TOTAL_MAX = 100
+    NODE_RETRY_TOTAL_TTL_SECONDS = 7 * 86400
+
+    def _node_retry_total_key(self, execution_id: str) -> str:
+        """兜底总重试计数键：``{ns}:execution:noderefetch:{id}``。
+
+        刻意**不叫** ``noderetry:*``：那个前缀是「按节点预算」的语义空间
+        （console 的 ``_is_mechanism_key`` 按子串排除，混进去会让运维误读
+        为节点预算键）；独立前缀也让「预算」与「兜底」在 redis 里一眼可分。
+        """
+        return f"{tenant_namespace(current_tenant())}:execution:noderefetch:{execution_id}"
+
+    def _record_node_retry_total(self, execution_id: str) -> int:
+        """自增兜底总重试计数（INCR + 7d TTL），返回自增后的值。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "incr"):
+            return 1
+        try:
+            key = self._node_retry_total_key(execution_id)
+            pipe = redis_client.pipeline(transaction=True)
+            pipe.incr(key)
+            pipe.expire(key, self.NODE_RETRY_TOTAL_TTL_SECONDS)
+            return int(pipe.execute()[0])
+        except Exception as e:  # noqa: BLE001 — 计数失败按 1（不阻断现状语义）
+            logger.warning("兜底总重试计数自增失败（按 1）: %s: %s", execution_id, e)
+            return 1
+
+    def _node_retry_total_exhausted(self, execution_id: str) -> bool:
+        """该执行是否已达兜底总重试上限。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "get"):
+            return False
+        try:
+            raw = redis_client.get(self._node_retry_total_key(execution_id))
+        except Exception as e:  # noqa: BLE001 — 读失败按未达限（保守，不误杀）
+            logger.warning("兜底总重试计数读取失败（按未达限）: %s: %s", execution_id, e)
+            return False
+        if raw is None:
+            return False
+        try:
+            return int(raw) >= self.NODE_RETRY_TOTAL_MAX
+        except (TypeError, ValueError):
+            return False
+
     def _deterministic_failure_key(self, execution_id: str) -> str:
         """确定性失败计数键：``{ns}:execution:nofail:{id}``（租户路由同上）。"""
         return f"{tenant_namespace(current_tenant())}:execution:nofail:{execution_id}"
@@ -806,17 +893,48 @@ class FlowWorker:
         except (TypeError, ValueError):
             return DEFAULT_MAX_DELIVERIES
 
-    def _retry_counter_key(self, execution_id: str) -> str:
-        """节点重试计数键：``{ns}:execution:noderetry:{id}``（租户路由，与租约键同规则）。"""
-        return f"{tenant_namespace(current_tenant())}:execution:noderetry:{execution_id}"
+    def _retry_counter_key(self, execution_id: str, node_id: Optional[str] = None) -> str:
+        """节点重试计数键：``{ns}:execution:noderetry:{id}:{node}``（租户路由同租约键）。
 
-    def _read_node_retry_counter(self, execution_id: str) -> int:
+        **按节点维度隔离**（plaita#123 真因，2026-10-10）：键的粒度必须与它
+        声称的语义一致——「当前节点的**连续**失败次数」。此前键只含
+        execution_id（执行维度），而成功推进时按注释「任一节点成功推进即清零」
+        清掉整执行的键 ⇒ 在「前序节点稳定成功 + 某节点稳定失败」的 flow 上
+        每轮重投都被前序节点的成功清零，计数永远到不了预算 ⇒ 永不终态化 ⇒
+        无限重投（实测 keeper-watch 累积 667 个悬停 running 执行）。
+
+        ``node_id`` 为 None/空（无法定位失败节点时）退回**执行维度**旧键形态
+        ——保守但安全：语义退化为「本执行累计已放行重试次数」，绝不会比修复
+        前更差（修复前就是这个行为）。
+
+        **退化契约（显式声明）**：取不到 node_id 时退回执行维度键
+        ``noderetry:{id}``（无节点后缀）。触发条件：异常链中没有
+        ``NodeExecutionError``、或它的 ``node`` 既非 id 字符串也无 ``id``/
+        ``name``（见 ``_node_id_from_chain``）。此时：
+          * 预算判定仍在**该退化键**上计数，不会静默变成「永不耗尽」；
+          * 但如果该执行**同时**存在按节点的键，两者是**互相独立**的计数，
+            退化键不参与节点键的预算（可能多给该节点若干次重试）；
+          * 宁可多给预算也不误杀——「取不到 id」本身是观测缺陷，不应升级成
+            把可恢复的执行提前终态化。
+
+        **存量旧键影响声明**：旧扁平键（``noderetry:{id}``，无节点维度）**不被
+        新逻辑读取**——新节点键名字不同（带 ``:{node}``），故在途执行升级后
+        其旧键归零、相当于**白送 5 次重试预算**。这是刻意的取舍：不迁移旧键
+        （靠 7 天 TTL 自然过期）、不读旧键（避免旧语义污染新语义），代价是
+        升级瞬间在途执行多拿一轮预算，收益是语义干净、零迁移风险。
+        """
+        base = f"{tenant_namespace(current_tenant())}:execution:noderetry:{execution_id}"
+        return f"{base}:{node_id}" if node_id else base
+
+    def _read_node_retry_counter(
+        self, execution_id: str, node_id: Optional[str] = None
+    ) -> int:
         """读重试计数；无 redis 客户端 / 键不存在 / 读取异常 → 0（按未重试过）。"""
         redis_client = getattr(self, "redis_client", None)
         if redis_client is None or not hasattr(redis_client, "get"):
             return 0
         try:
-            raw = redis_client.get(self._retry_counter_key(execution_id))
+            raw = redis_client.get(self._retry_counter_key(execution_id, node_id))
         except Exception as e:  # noqa: BLE001 — 瞬断按 0 处理（保守放行死信重入队）
             logger.warning("读取节点重试计数失败（按 0 处理）: %s: %s", execution_id, e)
             return 0
@@ -827,7 +945,40 @@ class FlowWorker:
         except (TypeError, ValueError):
             return 0
 
-    def _record_node_retry(self, execution_id: str) -> int:
+    def _max_node_retry_counter(self, execution_id: str) -> int:
+        """该执行下**所有节点**重试计数的最大值（plaita#123 起键按节点隔离）。
+
+        死信守卫用（见 ``_dead_letter_guard``）：它按「消息在某执行上被反复
+        重投」判死信，而预算键现在按节点分片——任一节点达预算即说明该执行
+        已经搁浅，取 max 与守卫的原始意图一致。读不到任何键 → 0。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "get"):
+            return 0
+        base = self._retry_counter_key(execution_id)
+        keys = [base]
+        scan = getattr(redis_client, "scan_iter", None)
+        if callable(scan):
+            try:
+                keys.extend(list(scan(match=f"{base}:*")))
+            except Exception as e:  # noqa: BLE001 — 扫描失败退化为单键读
+                logger.warning("扫描节点重试计数键失败（按单键读）: %s: %s", execution_id, e)
+        best = 0
+        for key in keys:
+            try:
+                raw = redis_client.get(key)
+            except Exception as e:  # noqa: BLE001 — 瞬断按 0 处理（保守放行死信重入队）
+                logger.warning("读取节点重试计数失败（按 0 处理）: %s: %s", execution_id, e)
+                continue
+            if raw is None:
+                continue
+            try:
+                best = max(best, int(raw))
+            except (TypeError, ValueError):
+                continue
+        return best
+
+    def _record_node_retry(self, execution_id: str, node_id: Optional[str] = None) -> int:
         """重试放行前自增计数键（INCR + 滑动 7 天 EX），返回自增后的值。
 
         预算判定**不**用消息 delivery_count：核实发现队列在 reclaim 路径
@@ -836,7 +987,8 @@ class FlowWorker:
         死信、根本不会进 handler（task_queue.py:404）——按 delivery_count
         判预算永远不会触发，只会造成「死信守卫重入队 → delivery 归 1 →
         再耗尽 → 再重入队」的无限循环。计数键在 worker 侧自增，语义是
-        「本执行累计已放行的节点重试次数」，预算耗尽即终态化。
+        「**该节点**累计已放行的重试次数」（键含 node_id，见
+        ``_retry_counter_key``），预算耗尽即终态化。
 
         无 redis 客户端（内存 worker / 单测）→ 返回 1 不设上限：预算由
         调用方/重投机制兜底（直连调用没有 run() 循环，异常直接冒给调用方）。
@@ -844,7 +996,7 @@ class FlowWorker:
         redis_client = getattr(self, "redis_client", None)
         if redis_client is None or not hasattr(redis_client, "incr"):
             return 1
-        key = self._retry_counter_key(execution_id)
+        key = self._retry_counter_key(execution_id, node_id)
         try:
             pipe = redis_client.pipeline(transaction=True)
             pipe.incr(key)
@@ -854,30 +1006,57 @@ class FlowWorker:
             logger.warning("节点重试计数自增失败（按 1 处理）: %s: %s", execution_id, e)
             return 1
 
-    def _reset_node_retry_counter(self, execution_id: str) -> None:
+    def _reset_node_retry_counter(
+        self, execution_id: str, node_id: Optional[str] = None
+    ) -> None:
         """清零节点重试计数键（DEL；键不存在为幂等 no-op）。
 
         两个调用时机（rebase 组合语义，2026-10 二波 vs G1 43828aa）：
 
-        - G1 retry 唤醒放行时：预算耗尽终态化的执行经人工 retry 唤醒后拿
-          全新预算——否则唤醒的执行第一次失败就立刻再耗尽，G1 形同虚设；
-        - 任一节点成功推进后：计数语义是「当前节点的**连续**失败次数」，
-          不同节点的失败不共享预算——节点 A 抖一次花掉的预算不应让之后
-          节点 B 的第一次失败就少一次重试机会。
+        - G1 retry 唤醒放行时（``node_id=None``）：预算耗尽终态化的执行经人工
+          retry 唤醒后拿全新预算——否则唤醒的执行第一次失败就立刻再耗尽，
+          G1 形同虚设。唤醒是**执行级**意图 ⇒ 清**全部**节点计数（``node_id``
+          缺省键 + 该执行下所有 ``{id}:*`` 子键，见 ``_delete_node_retry_keys``）；
+        - 节点成功推进后（**必须传 node_id**）：计数语义是「当前节点的**连续**
+          失败次数」，不同节点的失败不共享预算——节点 A 抖一次花掉的预算不应
+          让之后节点 B 的第一次失败就少一次重试机会。**只清该节点**的计数，
+          不得波及他节点（plaita#123：此前清整个执行 ⇒ 前序节点每轮成功都把
+          失败节点的计数抹平 ⇒ 预算永不耗尽 ⇒ 无限重投）。
         """
         redis_client = getattr(self, "redis_client", None)
         if redis_client is None or not hasattr(redis_client, "delete"):
             return
         try:
-            redis_client.delete(self._retry_counter_key(execution_id))
+            self._delete_node_retry_keys(redis_client, execution_id, node_id)
         except Exception as e:  # noqa: BLE001 — 清零失败无害（下次失败继续累计）
             logger.warning("节点重试计数清零失败（忽略）: %s: %s", execution_id, e)
+
+    def _delete_node_retry_keys(
+        self, redis_client: Any, execution_id: str, node_id: Optional[str]
+    ) -> None:
+        """删除计数键：给 node_id → 精确 DEL 该节点的键；不给 → DEL 该执行的**全部**
+        节点计数键（缺省执行维度键 + ``{id}:*`` 子键，供 G1 唤醒清预算）。
+
+        G1 唤醒的「清全部」用 SCAN 而非 ``KEYS``：worker 与生产执行共用实例，
+        阻塞式 ``KEYS`` 会拖停整个 Redis。SCAN 不可用（受限代理/桩客户端）时
+        退化为「逐个已知形态 + 缺省键」的精确删除，宁可少清也不阻塞。
+        """
+        base = self._retry_counter_key(execution_id)
+        if node_id:
+            redis_client.delete(self._retry_counter_key(execution_id, node_id))
+            return
+        targets = [base]
+        scan = getattr(redis_client, "scan_iter", None)
+        if callable(scan):
+            targets.extend(list(scan(match=f"{base}:*")))
+        redis_client.delete(*targets)
 
     def _node_failure_retry_decision(
         self,
         exc: Exception,
         execution_id: str,
         delivery_count: Optional[int],
+        node_id: Optional[str] = None,
     ) -> Optional[NodeExecutionRetryableError]:
         """节点失败重试决策：返回 NodeExecutionRetryableError（调用方 raise，
         状态不终态化）或 None（按现状终态化 error）。
@@ -885,6 +1064,10 @@ class FlowWorker:
         - 回滚开关 / 判据不符 → None（现状）；
         - 重试计数达预算 → None（现状终态化；error 里带重试次数供观测）；
         - 其余 → 计数自增后返回重试异常。
+
+        ``node_id`` = 失败节点 id（plaita#123）：计数键按节点隔离的前提。
+        调用方拿不到时传 None，计数退化为执行维度（保守，不比修复前差）。
+        传入时也用于日志，让运维一眼看出「哪个节点在反复失败」。
         """
         if _node_retry_disabled():
             return None
@@ -916,17 +1099,31 @@ class FlowWorker:
                     execution_id, n, self.DETERMINISTIC_FAILURE_MAX, exc,
                 )
             return None
-        attempt = self._record_node_retry(execution_id)
+        attempt = self._record_node_retry(execution_id, node_id)
         if attempt >= self._node_retry_budget():
             logger.error(
-                "执行 %s 节点重试预算耗尽（%s/%s），终态化 error: %s",
-                execution_id, attempt, self._node_retry_budget(), exc,
+                "执行 %s 节点 %s 重试预算耗尽（%s/%s），终态化 error: %s",
+                execution_id, node_id or "?", attempt, self._node_retry_budget(), exc,
+            )
+            return None
+        # 兜底上限（plaita#123 评审建议）：**不看键名、只看次数**。节点维度
+        # 预算依赖「键里的节点段稳定」，任何键空间漂移（节点 id 动态变化、
+        # 定义被改、未来又把 execution_id 引回键）都会让单节点预算失效而
+        # 退化成无界重投。该计数只按 execution_id 累计，达上限即终态化——
+        # 保证「预算机制整体失效」时仍有界。放在节点预算判定**之后**：
+        # 正常执行永远碰不到，只在异常形态下兜住。
+        total = self._record_node_retry_total(execution_id)
+        if total >= self.NODE_RETRY_TOTAL_MAX:
+            logger.error(
+                "执行 %s 节点重试达**兜底总上限**（%s/%s，节点 %s）——判定键空间"
+                "异常/预算机制失效，终态化 error 防止无界重投: %s",
+                execution_id, total, self.NODE_RETRY_TOTAL_MAX, node_id or "?", exc,
             )
             return None
         logger.warning(
-            "执行 %s 节点执行失败，不终态化等待消息重投后重跑失败节点"
+            "执行 %s 节点 %s 执行失败，不终态化等待消息重投后重跑失败节点"
             "（第 %s/%s 次重试，重投间隔=claim_min_idle_ms）: %s",
-            execution_id, attempt, self._node_retry_budget(), exc,
+            execution_id, node_id or "?", attempt, self._node_retry_budget(), exc,
         )
         return NodeExecutionRetryableError(
             f"节点执行失败（可重试，第 {attempt}/{self._node_retry_budget()} 次重试，"
@@ -2005,6 +2202,8 @@ class FlowWorker:
             # 执行经人工 retry 唤醒后拿全新预算，否则唤醒的执行第一次失败就
             # 立刻再耗尽，G1 形同虚设。翻转落盘成功后才清零（落盘失败抛
             # StatePersistError 走重投，唤醒未生效不清预算）。
+            # 不传 node_id ⇒ 清**该执行下所有节点**的计数键（plaita#123 起键按
+            # 节点隔离，唤醒是执行级意图，必须整体重来）。
             if retry_wakeup:
                 state.status = "running"
                 state.error = None
@@ -2034,11 +2233,19 @@ class FlowWorker:
             self._register_cancel_watch(execution_id, execution)
 
             # 直接使用 run_distributed 恢复执行
+            # ``execution_id`` 必须显式透传（plaita#123 配套）：不传时引擎侧
+            # 的 execution_id 与 worker 脱钩——resume 走 ``context.context =
+            # saved_context`` 整体替换 checkpoint，若 checkpoint 缺
+            # ``$EXECUTION_ID``（resume 常见），引擎 execution_id 为空串 ⇒
+            # ``result.execution_id`` 回空、且重试计数键退化成
+            # ``noderetry::{node}``（无执行 id），运维无法从键反查执行。
+            # start 路径（本文件 ``start_flow``）早已是同款正确范式。
             result = execution.run_distributed(
                 flow,
                 saved_context=state.context,
                 resume_type=resume_type,
                 resume_data=data,
+                execution_id=execution_id,
             )
 
             # 处理执行结果
@@ -2118,15 +2325,20 @@ class FlowWorker:
 
             # 节点级有界重试（波次二任务①）：同 _process_execution_result，
             # 瞬态节点失败不终态化、消息等重投；否则现状终态化 error。
+            # 失败节点 id 取自异常链（plaita#123：计数键按节点隔离）；取不到
+            # 时计数退化为执行维度，终态化 error 里也就没有按节点的次数。
+            failed_node = _node_id_from_chain(e)
             retry_exc = self._node_failure_retry_decision(
-                e, execution_id, delivery_count
+                e, execution_id, delivery_count, failed_node
             )
             if retry_exc is not None:
                 raise retry_exc from e
 
             # 更新执行状态为错误
             state.status = "error"
-            retries = max(0, self._read_node_retry_counter(execution_id) - 1)
+            retries = max(
+                0, self._read_node_retry_counter(execution_id, failed_node) - 1
+            )
             if retries > 0:
                 state.error = {
                     "message": f"节点执行失败（重试 {retries} 次后仍失败）: {e}",
@@ -2134,6 +2346,8 @@ class FlowWorker:
                 }
             else:
                 state.error = {"message": str(e)}
+            if failed_node:
+                state.error["failed_node"] = failed_node
             state.end_time = datetime.now().isoformat()
 
             self._persist_state_or_raise(execution_id, state, "resume_error_handler")
@@ -2250,17 +2464,33 @@ class FlowWorker:
                 state.status = "running"
                 try:
                     self._renew_lease_if_held(lease_execution_id, lease_holder)
+                    # ``execution_id`` 显式透传（plaita#123 配套，同 resume 路径）：
+                    # 本函数内该变量取自「被加载记录的 execution_id」且整个步进
+                    # 循环内**不变**，把引擎 execution_id 钉死到它上面，重试计数
+                    # 键的 execution_id 段才不会退化成空串。
                     result = execution.run_distributed(
                         flow,
                         saved_context=context,
                         resume_type="continue",
+                        execution_id=execution_id,
                     )
 
                     context = result.get("context", context)
                     steps_since_persist += 1
-                    # 重试计数按「当前节点的连续失败」计（组合语义）：任一
-                    # 节点成功推进即清零——不同节点的失败不共享预算。
-                    self._reset_node_retry_counter(execution_id)
+                    # 重试计数按「当前节点的连续失败」计（组合语义）：**刚成功
+                    # 推进的那个节点**清零——不同节点的失败不共享预算（节点 A
+                    # 抖一次花掉的预算不应让之后节点 B 的第一次失败就少一次机会）。
+                    # 只清这一个节点（plaita#123 真因）：此前清掉整个执行的计数，
+                    # 在「前序节点稳定成功 + 某节点稳定失败」的 flow 上，前序
+                    # 节点每轮成功都把失败节点的计数抹平 ⇒ 永远到不了预算 ⇒
+                    # 永不终态化 ⇒ 无限重投（实测 2026-10-10 13:0x 本机
+                    # Redis db1：keeper-watch 累积 667 个悬停 running 执行）。
+                    # 成功节点 id 取自本次步进返回的 result.id
+                    # （distributed 每步执行**一个**节点，_create_lazy_output /
+                    # _create_end_output 都带 id）；取不到则退化为执行维度键。
+                    self._reset_node_retry_counter(
+                        execution_id, result.get("id")
+                    )
                     # 确定性失败计数同款「连续」语义：推进过就不是「同一位置
                     # 反复撞墙」，长寿命执行跨节点的偶发确定性失败不应累计判死。
                     self._reset_deterministic_failure_counter(execution_id)
@@ -2313,15 +2543,17 @@ class FlowWorker:
                     # 节点级有界重试（波次二任务①）：瞬态节点失败不终态化，
                     # 抛重试异常让消息走 at-least-once 重投，从 checkpoint
                     # 重跑失败节点；预算耗尽/判据不符/回滚开关 → 现状终态化。
+                    # 失败节点 id 取自异常链（plaita#123：计数键按节点隔离）。
+                    failed_node = _node_id_from_chain(e)
                     retry_exc = self._node_failure_retry_decision(
-                        e, execution_id, delivery_count
+                        e, execution_id, delivery_count, failed_node
                     )
                     if retry_exc is not None:
                         raise retry_exc from e
                     state.status = "error"
                     state.context = context
                     retries = max(
-                        0, self._read_node_retry_counter(execution_id) - 1
+                        0, self._read_node_retry_counter(execution_id, failed_node) - 1
                     )
                     if retries > 0:
                         state.error = {
@@ -2330,6 +2562,8 @@ class FlowWorker:
                         }
                     else:
                         state.error = {"message": str(e)}
+                    if failed_node:
+                        state.error["failed_node"] = failed_node
                     state.end_time = datetime.now().isoformat()
                     self._persist_state_or_raise(execution_id, state, "error_state")
                     break
@@ -2642,7 +2876,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "死信守卫读执行状态失败（保守跳过死信）: %s: %s", execution_id, exc
                 )
                 return False
-            retry_count = self._read_node_retry_counter(execution_id)
+            retry_count = self._max_node_retry_counter(execution_id)
         finally:
             reset_current_tenant(token)
 
@@ -2674,11 +2908,19 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # worker 崩溃」窗口），终态化 error 后放行死信。**不**重入队：重入队
         # delivery 归 1 → 再耗尽 → 再重入队 = 无限循环。终态化写盘失败 →
         # 保守跳过死信（消息留 pending，下轮再处置）。
-        if retry_count >= self._node_retry_budget():
+        # 计数取**该执行下所有节点键的最大值**（plaita#123 起键按节点隔离，
+        # 守卫看不到「是哪个节点」——任一节点达预算即该执行搁浅，与守卫原
+        # 意图一致）。
+        # 兜底总上限（#123 评审建议）也在此生效：键空间漂移（节点 id 变化等）
+        # 会让单节点预算失效，此时靠「不看键名、只看次数」的总计数兜住——
+        # 守卫是消息层的最后一道闸，不能只有会失效的那一条判据。
+        total_exhausted = self._node_retry_total_exhausted(execution_id)
+        if retry_count >= self._node_retry_budget() or total_exhausted:
             logger.error(
-                "执行 %s 非终态但节点重试计数已达预算（%s/%s），终态化 error "
+                "执行 %s 非终态但节点重试计数已达预算（%s/%s）%s，终态化 error "
                 "后放行死信，不再重入队: %s",
                 execution_id, retry_count, self._node_retry_budget(),
+                "或已达兜底总上限" if total_exhausted else "",
                 getattr(task, "message_id", "?"),
             )
             state.status = "error"

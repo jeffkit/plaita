@@ -18,7 +18,10 @@
   （2026-10-09 起；此前是留 pending 等 reclaim，见 plaita#52）。
 - ``run()`` 对新异常的处理：显式重投成功即 ack 原条；重投失败才退化为
   不 ack 留 pending，均不计 poison。
-- 预算 = Redis 重试计数键 ``{ns}:execution:noderetry:{id}``（INCR+EX 7d）。
+- 预算 = Redis 重试计数键 ``{ns}:execution:noderetry:{id}:{node_id}``
+  （INCR+EX 7d；**按节点维度隔离**，plaita#123——此前只含 execution_id，
+  而成功推进会清零整个执行 ⇒ 「前序节点稳成功 + 某节点稳失败」的 flow
+  预算永不耗尽 ⇒ 无限重投）。
   **不**用消息 delivery_count 判预算：核实发现 `_reclaim_one` 上报的是
   XCLAIM **前**的 times_delivered（task_queue.py:402，与其自身注释
   "count + 1" 相悖）、fresh 读取恒报 1，且达限消息在队列层就地死信、
@@ -321,7 +324,11 @@ class TestRetryBudget:
         return _node_failure_exc(ConnectionError("blip"))
 
     def test_retry_counter_key_written_with_ttl(self):
-        """重试放行时写计数键 {ns}:execution:noderetry:{id}，带 TTL（7 天窗口）。"""
+        """重试放行时写计数键 {ns}:execution:noderetry:{id}:{node_id}，带 TTL。
+
+        键带**节点维度**（plaita#123）：夹具的失败异常是
+        ``NodeExecutionError(node="a")`` ⇒ 计数落在 ``…:exec-1:a``。
+        """
         worker, storage, fake = _resume_worker_with_running_exec()
         with patch("plaita.server.flow_worker.FlowExecution") as FE:
             inst = MagicMock()
@@ -329,17 +336,19 @@ class TestRetryBudget:
             inst.run_distributed.side_effect = self._failure()
             with pytest.raises(NodeExecutionRetryableError):
                 worker.resume_flow("f1", "exec-1", "continue")
-        assert fake.get("plaita:execution:noderetry:exec-1") == "1"
-        assert 0 < fake.ttl("plaita:execution:noderetry:exec-1") <= 7 * 86400
+        assert fake.get("plaita:execution:noderetry:exec-1:a") == "1"
+        assert 0 < fake.ttl("plaita:execution:noderetry:exec-1:a") <= 7 * 86400
 
     def test_budget_exhaustion_terminalizes_with_retry_note(self):
         """计数达预算 → 处理函数内终态化 error（现状行为），不再重试放行。
 
         这一条与死信守卫协同闭环：终态化后消息重投命中 already_terminal 被
         ack / 队列层死信时守卫见终态放行，不存在无限重试循环。
+
+        键按节点维度（plaita#123）⇒ 预置 ``…:exec-1:a``（夹具失败节点 a）。
         """
         worker, storage, fake = _resume_worker_with_running_exec()
-        fake.set("plaita:execution:noderetry:exec-1", "4")  # 已重试 4 次
+        fake.set("plaita:execution:noderetry:exec-1:a", "4")  # 已重试 4 次
         with patch("plaita.server.flow_worker.FlowExecution") as FE:
             inst = MagicMock()
             FE.return_value = inst
@@ -351,9 +360,10 @@ class TestRetryBudget:
         assert state.status == "error"
         assert "重试" in state.error["message"]
         assert state.error.get("node_retries") == 4
+        assert state.error.get("failed_node") == "a"
 
     def test_tenant_routed_counter_key(self):
-        """计数键按租户 namespace 路由（与租约键同规则）。"""
+        """计数键按租户 namespace 路由（与租约键同规则，含节点维度）。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         worker, storage, _ = _resume_worker_with_running_exec(fake)
         storage.save_execution_state(
@@ -374,8 +384,8 @@ class TestRetryBudget:
                 from plaita.server.tenant_context import reset_current_tenant
 
                 reset_current_tenant(token)
-        assert fake.get("plaita:acme:execution:noderetry:exec-t") == "1"
-        assert fake.get("plaita:execution:noderetry:exec-t") is None
+        assert fake.get("plaita:acme:execution:noderetry:exec-t:a") == "1"
+        assert fake.get("plaita:execution:noderetry:exec-t:a") is None
 
 
 # ---------- 回滚开关 ----------
@@ -553,14 +563,18 @@ class TestGuardBackstop:
         """消息在队列层被就地死信（delivery 达限不进 handler）时执行仍非终态、
         且重试计数已达预算 → 守卫终态化 error 后放行，**不**重入队（否则
         delivery 归 1 再耗尽再重入队 = 无限循环）。覆盖「预算耗尽判定后、
-        终态化写盘前 worker 崩溃」的窗口。"""
+        终态化写盘前 worker 崩溃」的窗口。
+
+        计数键按节点维度（plaita#123）⇒ 守卫按「该执行下所有节点键的最大值」
+        判定，这里预置某节点的键即代表「有节点烧穿了预算」。
+        """
         fake = fakeredis.FakeRedis(decode_responses=True)
         storage = MemoryExecutionStorage()
         flow_storage = MemoryFlowStorage()
         flow_storage.save_flow(TEST_FLOW)
         worker = _redis_worker(fake, storage, flow_storage)
         storage.save_execution_state("exec-1", _state(status="running"))
-        fake.set("plaita:execution:noderetry:exec-1", "5")
+        fake.set("plaita:execution:noderetry:exec-1:a", "5")
 
         assert worker._dead_letter_guard(self._task()) is True
         assert fake.xlen("test:worker-node-retry") == 0  # 未重入队
@@ -576,7 +590,7 @@ class TestGuardBackstop:
         flow_storage.save_flow(TEST_FLOW)
         worker = _redis_worker(fake, storage, flow_storage)
         storage.save_execution_state("exec-1", _state(status="running"))
-        fake.set("plaita:execution:noderetry:exec-1", "2")
+        fake.set("plaita:execution:noderetry:exec-1:a", "2")
 
         assert worker._dead_letter_guard(self._task()) is True
         assert fake.xlen("test:worker-node-retry") == 1
@@ -594,7 +608,7 @@ class TestGuardBackstop:
         storage = FalseSaveStorage()
         worker = _redis_worker(fake, storage)
         storage.save_execution_state("exec-1", _state(status="running"))
-        fake.set("plaita:execution:noderetry:exec-1", "5")
+        fake.set("plaita:execution:noderetry:exec-1:a", "5")
 
         assert worker._dead_letter_guard(self._task()) is False
         assert fake.xlen("test:worker-node-retry") == 0

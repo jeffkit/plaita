@@ -36,6 +36,9 @@ def test_mechanism_keys_are_excluded():
     assert f("plaita:execution:fence:abc")
     assert f("plaita:execution:cancel:abc")
     assert f("plaita:execution:noderetry:abc")   # ← 2026-10-06 补
+    # #123（2026-10-10）：节点维度子键与兜底总上限键（新前缀，须单独登记）
+    assert f("plaita:execution:noderetry:abc:watch")
+    assert f("plaita:execution:noderefetch:abc")
     assert f("plaita:execution:g1wakeups:abc")   # ← 2026-10-10 补（#73 补丁，值守引入）
     assert f("plaita:execution:index")           # ← 2026-10-07 补（#40）
     assert f("plaita:execution:index:ready")     # ← 同上（裸字符串 "1"）

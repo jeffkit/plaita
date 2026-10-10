@@ -218,6 +218,21 @@ class DistributedStrategy:
 
         if saved_context:
             context.context = saved_context
+            # 恢复路径也要认预铸的 execution_id（plaita#123 配套）：上面
+            # ``context.context = saved_context`` 是**整体替换** checkpoint
+            # （``CheckpointState.from_checkpoint_dict``），若 checkpoint 缺
+            # ``$EXECUTION_ID``（resume 场景常见），引擎 execution_id 会退化成
+            # 空串——``result.execution_id`` 回空、worker 侧重试计数键
+            # （``noderetry:{execution_id}:{node}``）的 execution_id 段也随之为空，
+            # 运维无法从键反查执行。此前 ``execution_id`` 只在 fresh-start 分支
+            # 经 ``clean()`` 生效，恢复分支把它整个丢弃。
+            # 语义：调用方显式给出时才覆盖（不回写 checkpoint，仅钉住本步的
+            # 执行身份）；不给出则保持 checkpoint 原值，零回归。
+            seeded_execution_id = options.get("execution_id")
+            if seeded_execution_id:
+                context.set_state(
+                    f"{context.express_prefix}EXECUTION_ID", seeded_execution_id
+                )
         else:
             context.clean(execution_id=options.get("execution_id"))
             context.setup_flow(flow, (), params or {})

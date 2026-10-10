@@ -6,7 +6,9 @@ rebase 组合（2026-10 二波 P1 × keeper 迁移 G1）两条互补机制必须
   翻 running 落盘、error 清空、从断点步进；
 - **任务① = 节点失败的自动有界重试**：``__cause__`` 链含 NodeExecutionError
   时不终态化、消息重投重跑失败节点，预算=重试计数键
-  ``{ns}:execution:noderetry:{id}``。
+  ``{ns}:execution:noderetry:{id}:{node_id}``（**按节点维度隔离**，
+  plaita#123——此前只含 execution_id，而成功推进清零整个执行 ⇒
+  「前序节点稳成功 + 某节点稳失败」的 flow 预算永不耗尽 ⇒ 无限重投）。
 
 组合契约（本文件钉住）：
 
@@ -54,7 +56,8 @@ FLOW_DEF = {
     ],
 }
 
-COUNTER_KEY = "plaita:execution:noderetry:exec-1"
+COUNTER_KEY = "plaita:execution:noderetry:exec-1:a"
+LEGACY_COUNTER_KEY = "plaita:execution:noderetry:exec-1"
 
 
 def _node_failure_exc() -> FlowErrorException:
@@ -150,7 +153,11 @@ class TestRetryWakeupClearsCounter:
         storage = MemoryExecutionStorage()
         worker = _make_worker(fake, storage, _flow_storage())
         storage.save_execution_state("exec-1", _state(status="error"))
-        fake.set(COUNTER_KEY, "5")  # 预算（5）耗尽时的遗留计数
+        fake.set(COUNTER_KEY, "5")  # 预算（5）耗尽时的遗留计数（节点 a）
+        # 另造两个键，验证唤醒清的是**该执行下所有节点**的键（#123 起键按节点隔离）：
+        # 另一个节点 + 存量旧键（无节点维度）。
+        fake.set("plaita:execution:noderetry:exec-1:other", "3")
+        fake.set(LEGACY_COUNTER_KEY, "2")
         return fake, storage, worker
 
     def test_wakeup_deletes_counter_and_next_failure_gets_fresh_budget(self):
@@ -159,6 +166,8 @@ class TestRetryWakeupClearsCounter:
 
         判据对比：若唤醒未清零，本次失败 INCR→6 ≥ 5 → 预算耗尽 → RuntimeError
         终态化（G1 形同虚设）；清零生效 → INCR→1 → 可重试且标注「第 1/5」。
+
+        唤醒是**执行级**意图 ⇒ 必须清掉该执行下**所有**节点的键（含存量旧键）。
         """
         fake, storage, worker = self._error_worker_with_exhausted_counter()
 
@@ -171,6 +180,12 @@ class TestRetryWakeupClearsCounter:
 
         assert "第 1/5" in str(ei.value)  # 全新预算（未清零会是预算耗尽 RuntimeError）
         assert fake.get(COUNTER_KEY) == "1"
+        assert fake.get("plaita:execution:noderetry:exec-1:other") is None, (
+            "唤醒必须清该执行下**所有节点**的计数键（不只是失败节点）"
+        )
+        assert fake.get(LEGACY_COUNTER_KEY) is None, (
+            "存量旧键（无节点维度）也应被唤醒一并清掉，避免遗留脏数据"
+        )
         # G1 唤醒翻转生效且自动重试未终态化：行停在 running，可继续重投/再 retry
         state = storage.load_execution_state("exec-1")
         assert state.status == "running"
@@ -201,8 +216,11 @@ class TestRetryWakeupClearsCounter:
 
 class TestCounterResetsOnSuccessfulAdvance:
     def test_fail_then_success_then_fail_counts_per_node(self):
-        """显式三步：a 失败（计数1）→ a 成功（清零）→ b 失败（重新计数1），
-        计数键在成功步进后被 DEL。"""
+        """显式三步：a 失败（计数 a=1）→ a 成功（**只**清 a）→ a 再失败
+        （重新从 1 计），证明成功步进确实清零、且新预算是满的。
+
+        键按节点维度（plaita#123）⇒ 断言落在 ``…:exec-1:a``。
+        """
         fake = fakeredis.FakeRedis(decode_responses=True)
         worker = _make_worker(fake, MemoryExecutionStorage(), _flow_storage())
         state = _state(status="running")
@@ -211,10 +229,10 @@ class TestCounterResetsOnSuccessfulAdvance:
         seq = [
             # 步1：节点 a 失败（自动重试路径，计数 0→1）
             _node_failure_exc(),
-            # 步2（重投后重跑）：a 成功，推进到 b —— 成功步进清零计数
-            {"execution_id": "exec-1", "is_end": False, "is_suspend": False,
+            # 步2（重投后重跑）：a 成功推进 —— 成功步进清 a 的计数
+            {"execution_id": "exec-1", "id": "a", "is_end": False, "is_suspend": False,
              "context": {"$LAST_NODE": "a", "$NODE": {"start": {}, "a": {}}}},
-            # 步3：节点 b 失败 —— 应重新从 1 计（节点独立预算）
+            # 步3：节点 a 再次失败 —— 应重新从 1 计（预算已清零）
             _node_failure_exc(),
         ]
 
@@ -233,15 +251,66 @@ class TestCounterResetsOnSuccessfulAdvance:
             )
         assert fake.get(COUNTER_KEY) == "1"
 
-        # 第二次调用（模拟消息重投后重新处理）：步2 成功 → 计数清零；
+        # 第二次调用（模拟消息重投后重新处理）：步2 成功 → a 的计数清零；
         # 步3 失败 → 计数重新 =1，仍是可重试异常（而非 2→逼近耗尽）
-        with patch.object(worker, "_read_node_retry_counter", return_value=1):
-            with pytest.raises(NodeExecutionRetryableError) as ei:
+        with pytest.raises(NodeExecutionRetryableError) as ei:
+            worker._process_execution_result(
+                _flow(), _initial_result(), state, execution
+            )
+        assert "第 1/" in str(ei.value)  # 全新预算：第 1 次重试
+        assert fake.get(COUNTER_KEY) == "1"
+
+    def test_success_of_other_node_does_not_clear_failing_node(self):
+        """★ plaita#123 核心语义：**他节点**成功不得清掉失败节点的计数。
+
+        序列：a 失败（计数 a=1）→ **b 成功推进**（b 的键被清，a 的保持）
+        → a 再失败 ⇒ a 的计数必须是 **2**（累积），而不是被 b 的成功抹回 1。
+        修复前：成功推进清**整个执行** ⇒ 永远是 1 ⇒ 预算永不耗尽 ⇒ 无限重投。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _make_worker(fake, MemoryExecutionStorage(), _flow_storage())
+        state = _state(status="running")
+        execution = MagicMock()
+
+        seq = [
+            _node_failure_exc(),  # a 失败 → a=1
+            # b 成功推进（他节点成功）——只应清 b 的键，不得碰 a
+            {"execution_id": "exec-1", "id": "b", "is_end": False, "is_suspend": False,
+             "context": {"$LAST_NODE": "b", "$NODE": {"start": {}, "a": {}, "b": {}}}},
+            _node_failure_exc(),  # a 再失败 → a 应为 2
+            # b 又成功推进
+            {"execution_id": "exec-1", "id": "b", "is_end": False, "is_suspend": False,
+             "context": {"$LAST_NODE": "b", "$NODE": {"start": {}, "a": {}, "b": {}}}},
+            _node_failure_exc(),  # a 再失败 → a 应为 3
+        ]
+
+        def scripted(flow, **kwargs):
+            outcome = seq.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        execution.run_distributed.side_effect = scripted
+
+        attempts = []
+        for _ in range(3):
+            try:
                 worker._process_execution_result(
                     _flow(), _initial_result(), state, execution
                 )
-        assert "第 1/" in str(ei.value)  # 全新预算：第 1 次重试
-        assert fake.get(COUNTER_KEY) == "1"
+            except NodeExecutionRetryableError as e:
+                attempts.append(e.attempt)
+                continue
+            break
+
+        assert attempts == [1, 2, 3], (
+            f"a 的连续失败计数必须累积（[1, 2, 3]），实际 {attempts}——"
+            f"被 b 的成功清零即 #123 的无限重投形态"
+        )
+        assert fake.get(COUNTER_KEY) == "3"
+        assert fake.get("plaita:execution:noderetry:exec-1:b") is None, (
+            "b 成功推进应对 b 的键做幂等清零（不存在则 no-op）"
+        )
 
 
 # ---------- 4：指纹校验在 retry 唤醒之前 ----------

@@ -133,17 +133,32 @@ python -m plaita.server.flow_worker \
   失败节点。重投路径不依赖 pending 回收：消息可能已被竞争者的 `ExecutionLeaseError`
   分支 ack 释放，只留 pending 会导致重投永不发生（2026-10-09 plaita#52 实证）。
   重投失败（Redis 抖动）才退化为不 ack 留 pending；两种情况都不计 poison。
-- **预算**：重试计数键 `{ns}:execution:noderetry:{id}`（INCR + 滑动 7 天 EX，
-  租户路由与租约键同规则），默认预算 = `--max-deliveries`（5）。耗尽 → 终态化
-  error（`error.node_retries` 记录重试次数），消息走 DLQ。刻意**不**用消息
-  `delivery_count` 判预算：回收路径上报的是 XCLAIM 前的投递数（少计 1），且
-  达限消息在队列层就地死信、不进处理函数——按它判预算永不触发。
-  计数语义是「当前节点的**连续**失败次数」：任一节点成功推进即清零，不同
-  节点的失败不共享预算。
+- **预算**：重试计数键 `{ns}:execution:noderetry:{id}:{node_id}`（INCR + 滑动
+  7 天 EX，租户路由与租约键同规则），默认预算 = `--max-deliveries`（5）。耗尽 →
+  终态化 error（`error.node_retries` 记录重试次数、`error.failed_node` 记录失败
+  节点 id），消息走 DLQ。刻意**不**用消息 `delivery_count` 判预算：回收路径上报
+  的是 XCLAIM 前的投递数（少计 1），且达限消息在队列层就地死信、不进处理函数
+  ——按它判预算永不触发。
+  计数语义是「当前节点的**连续**失败次数」，**键也必须按节点维度隔离**
+  （plaita#123 真因，2026-10-10）：此前键只含 `execution_id`（执行维度），而成功
+  推进时把**整个执行**的计数清零 ⇒ 在「前序节点稳定成功 + 某节点稳定失败」的
+  flow 上，前序节点每轮成功都把失败节点的计数抹平 ⇒ 永远到不了预算 ⇒ 永不终态化
+  ⇒ **无限重投**（实测 `keeper-watch` 累积 667 个悬停 `running` 执行，最老 40 小时）。
+  现版：键带失败节点 id（取自异常链 `NodeExecutionError.node`，**不能**用 checkpoint
+  的 `$LAST_NODE`——失败节点不写 context，那是上一个成功节点），成功推进**只清该
+  节点**的键。取不到节点 id 时退化为执行维度键（保守，不比修复前差）。
+  存量扁平旧键（无节点维度）不迁移、不被新逻辑读取，靠 7 天 TTL 过期；代价是
+  升级瞬间在途执行多拿一轮预算。
+- **兜底总上限**（plaita#123 评审建议）：`{ns}:execution:noderefetch:{id}`
+  （INCR + 7 天 EX，**不含任何会漂移的段**）——只按 `execution_id` 累计「本执行
+  一共放行过多少次节点重试」，达 `NODE_RETRY_TOTAL_MAX`（默认 100）即终态化 error。
+  节点维度预算依赖「键里的节点段稳定」，任何键空间漂移（节点 id 动态变化、定义被改）
+  都会让单节点预算失效而退回无界重投；该计数**不看键名、只看次数**，是「预算机制
+  整体失效」时的最后一道闸。正常执行永远碰不到（100 ≫ 单节点预算 5 × 合理节点数）。
 - **与 G1 retry 唤醒的组合**（43828aa）：预算耗尽终态化的执行仍可经人工
-  `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零节点重试计数键，
-  人工唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持 error
-  （修复定义后仍可再 retry）。
+  `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零该执行下**所有节点**
+  的计数键，人工唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持
+  error（修复定义后仍可再 retry）。
 - **唤醒/失败次数是有界的（plaita#73，2026-10-10）**：只清预算不限次数的循环是
   自毁的（`唤醒 → 清零预算 → 跑 5 次 → 又终态化 → 再唤醒`，实测某执行一天被
   唤醒 5 轮、每轮烧 5 次沙箱）。两道**上限**都落在 `FlowWorker` 类常量上，
@@ -158,9 +173,25 @@ python -m plaita.server.flow_worker \
     即清零，跨节点的偶发失败不会累计判死；G1 唤醒**不**清零（否则永不收敛）；
   - 人工解封：确认失败原因已修好后 `DEL` 对应计数键再 retry——键名与步骤见
     [运维 Runbook · 唤醒预算达限](ops-runbook.md#唤醒预算达限plaita73)。
-- **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）。
-- **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
-  失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
+- **引擎 execution_id 必须与 worker 一致**（plaita#123 配套）：worker 的 resume
+  与步进两处 `run_distributed` 显式传 `execution_id=execution_id`。不传时引擎侧
+  execution_id 与 worker 脱钩——恢复分支走 `context.context = saved_context` 整体
+  替换 checkpoint，若 checkpoint 缺 `$EXECUTION_ID`（resume 常见），引擎
+  execution_id 退化为**空串** ⇒ `result.execution_id` 回空、重试计数键沦为空 id
+  （运维无法从键反查执行）。注意这**不会**导致无限重投：旧代码
+  `_node_failure_retry_decision` 对空串直接 `return None`（连键都不写、直接终态化），
+  属可观测性缺陷而非重投根因——**重投根因见下方「节点维度预算」**。
+- **节点维度预算**（plaita#123 真因，2026-10-10）：计数键
+  `{ns}:execution:noderetry:{id}:{node}` 按**节点**隔离，成功推进只清**该节点**
+  的键。此前键只含 execution_id（执行维度），而成功推进清**整个执行**的键 ⇒ 在
+  「前序节点稳定成功 + 某节点稳定失败」的 flow 上，**同一轮内**前序节点成功先清零、
+  失败节点随后 INCR 归 1（`strategies.py`：*"Execute one node per call"*，一次调用
+  只推进一个节点），计数永远到不了预算 ⇒ 永不终态化 ⇒ **无限重投**
+  （实测 2026-10-10 13:0x 本机 Redis db1：`keeper-watch` 累积 667 个悬停
+  `running` 执行、最老 40 小时；**该数字为当时快照、随时间增长，勿当常量；
+  复现需在同期环境用 `SCAN plaita:execution:*` 采集**）。
+  另设兜底总上限 `{ns}:execution:noderefetch:{id}`（`NODE_RETRY_TOTAL_MAX`，默认
+  100），**不看键名只看次数**，防未来任何键空间漂移再次退化为无界重投。
 
 ## 挂起执行的 continue/retry 幂等短路（#33） {#挂起执行的-continue-retry-幂等短路}
 
