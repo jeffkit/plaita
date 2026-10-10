@@ -219,6 +219,11 @@ def _is_mechanism_key(key: str) -> bool:
         # has no attribute 'get'`，`GET /api/executions` 500）。
         # **新增此类机制键必须同步登记本条**（本函数 docstring 已列四次先例）。
         or ":execution:g1wakeups:" in key
+        # 同类第六次（2026-10-10，同批）：`:execution:nofail:{id}`
+        # （确定性失败计数，plaita#73 遗留层）同样是**裸整数**。
+        # 教训：新增机制键**必须**同步登记；`test_console_mechanism_keys.py`
+        # 的自动防线会扫 worker 源码，漏登记即 CI 红。
+        or ":execution:nofail:" in key
         or ":execution:index" in key
         or key.endswith(":dlq")
     )

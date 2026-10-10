@@ -625,6 +625,50 @@ class FlowWorker:
     G1_MAX_WAKEUPS = 2
     G1_WAKEUP_COUNTER_TTL_SECONDS = 7 * 86400
 
+    # 确定性失败累计上限（plaita#73 遗留层，2026-10-10）：`exited 1` /
+    # `AgsError` / 超时 / 协议错等**不可重试**的失败也要有界。此前它们完全不
+    # 进计数器（全库 noderetry 键 74/74 恒为 1 即此故），唯一收敛机制是消息层
+    # 重投、而消息层无次数概念 ⇒ 同一执行被重投数百次、沙箱持续占位。
+    # 达上限即判「不可救」，与可达上限分开记账（noderetry 是可重试预算，语义不同）。
+    DETERMINISTIC_FAILURE_MAX = 12
+    DETERMINISTIC_FAILURE_TTL_SECONDS = 7 * 86400
+
+    def _deterministic_failure_key(self, execution_id: str) -> str:
+        """确定性失败计数键：``{ns}:execution:nofail:{id}``（租户路由同上）。"""
+        return f"{tenant_namespace(current_tenant())}:execution:nofail:{execution_id}"
+
+    def _read_deterministic_failure_count(self, execution_id: str) -> int:
+        """读确定性失败计数；无 redis / 键缺失 / 异常 → 0（放行，保守）。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "get"):
+            return 0
+        try:
+            raw = redis_client.get(self._deterministic_failure_key(execution_id))
+            return int(raw) if raw is not None else 0
+        except Exception as e:  # noqa: BLE001 — 读失败按 0（不误判不可救）
+            logger.warning("确定性失败计数读取失败（按 0）: %s: %s", execution_id, e)
+            return 0
+
+    def _record_deterministic_failure(self, execution_id: str) -> int:
+        """自增确定性失败计数（INCR + 7d TTL），返回自增后的值。"""
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "incr"):
+            return 1
+        try:
+            key = self._deterministic_failure_key(execution_id)
+            pipe = redis_client.pipeline(transaction=True)
+            pipe.incr(key)
+            pipe.expire(key, self.DETERMINISTIC_FAILURE_TTL_SECONDS)
+            return int(pipe.execute()[0])
+        except Exception as e:  # noqa: BLE001 — 计数失败按 1（不阻断现状语义）
+            logger.warning("确定性失败计数自增失败（按 1）: %s: %s", execution_id, e)
+            return 1
+
+    def _deterministic_failure_exhausted(self, execution_id: str) -> bool:
+        """该执行是否已判「确定性失败不可救」（达上限）。"""
+        return (self._read_deterministic_failure_count(execution_id)
+                >= self.DETERMINISTIC_FAILURE_MAX)
+
     def _g1_wakeup_key(self, execution_id: str) -> str:
         """G1 唤醒计数键：``{ns}:execution:g1wakeups:{id}``（租户路由同上）。"""
         return f"{tenant_namespace(current_tenant())}:execution:g1wakeups:{execution_id}"
@@ -756,6 +800,30 @@ class FlowWorker:
         if not isinstance(execution_id, str) or not execution_id:
             return None
         if not _is_retryable_node_failure(exc):
+            # 确定性失败（`exited 1` / `AgsError: sync_in` / 超时 / 协议错）：
+            # 不重试，但仍要**记账**（plaita#73 遗留层，2026-10-10 实证）。
+            #
+            # 此前直接 return None ⇒ 这些失败**完全不进任何计数器**（实测全库
+            # `noderetry` 键 74/74 恒为 1），于是它们唯一的收敛机制只剩「消息层
+            # 重投」，而消息层没有次数概念 ⇒ 同一执行可被重投数百次、沙箱实例
+            # 持续占位（实测 5 小时烧 5.66 实例小时、产出 0）。
+            #
+            # 这里用**独立**计数键（`nofail`）而不是 noderetry：noderetry 的语义
+            # 是「可重试预算」（会被 G1 唤醒/PROGRESS 清零），塞进确定性失败会污染
+            # 该语义。确定性失败**只增不减**，达上限即判该执行不可救、触发终态化 +
+            # 后续重投一律短路（见 `_deterministic_failure_exhausted`）。
+            n = self._record_deterministic_failure(execution_id)
+            if n >= self.DETERMINISTIC_FAILURE_MAX:
+                logger.error(
+                    "执行 %s 确定性失败累计达上限（%s/%s）——判定不可救，终态化 error"
+                    "（后续重投将短路，不再空转）: %s",
+                    execution_id, n, self.DETERMINISTIC_FAILURE_MAX, exc,
+                )
+            else:
+                logger.warning(
+                    "执行 %s 确定性失败（不重试）第 %s/%s 次: %s",
+                    execution_id, n, self.DETERMINISTIC_FAILURE_MAX, exc,
+                )
             return None
         attempt = self._record_node_retry(execution_id)
         if attempt >= self._node_retry_budget():
@@ -1602,13 +1670,30 @@ class FlowWorker:
                 "already_terminal": True,
                 "g1_wakeups_exhausted": True,
             }
+        if self._deterministic_failure_exhausted(execution_id) and \
+                ResumeType.coerce(resume_type) is ResumeType.RETRY:
+            # 确定性失败已达上限（plaita#73 遗留层）：该执行的失败是**确定性**的
+            # （`exited 1` / `sync_in` / 超时…），重跑只会再烧一次全额成本。
+            # 与 G1 上限同理返回幂等结果、不抛异常（抛异常会让调用方当失败重试），
+            # 让消息层重投在此短路、不再空转沙箱。
+            logger.error(
+                "执行 %s 确定性失败已判不可救（%s/%s），拒绝唤醒重跑——"
+                "error 终态保留",
+                execution_id, self._read_deterministic_failure_count(execution_id),
+                self.DETERMINISTIC_FAILURE_MAX,
+            )
+            return {
+                "execution_id": execution_id,
+                "status": state_status,
+                "already_terminal": True,
+                "deterministic_failure_exhausted": True,
+            }
         if state_status in ("completed", "error", "cancelled") and not retry_wakeup:
             logger.info(
                 "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
             )
             return {
-                "execution_id": execution_id,
-                "status": state_status,
+                "execution_id": execution_id,                "status": state_status,
                 "already_terminal": True,
                 "result": getattr(state, "result", None),
                 "error": getattr(state, "error", None),
