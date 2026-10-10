@@ -9,7 +9,9 @@ OpenAI-compatible chat endpoint configured via environment:
     PLAITA_AI_JUDGE_API_KEY
 
 Unconfigured → ``judge_output`` returns ``None`` and the case is excluded
-from pass-rate averages instead of silently guessing.
+from pass-rate averages instead of silently guessing. A configured-but-broken
+judge (transport / HTTP / bad reply envelope) returns a verdict stamped
+``unavailable=True`` so callers can drop the case instead of scoring it 0.
 """
 
 from __future__ import annotations
@@ -24,8 +26,16 @@ _TIMEOUT_S = 60.0
 
 
 def judge_configured(env: Optional[Dict[str, str]] = None) -> bool:
+    """True only when URL, model and API key are all set.
+
+    Half-configured (no key) means every request would be rejected — treat it
+    as unconfigured so the case is skipped instead of scored 0.
+    """
     env = dict(os.environ if env is None else env)
-    return bool(env.get("PLAITA_AI_JUDGE_BASE_URL") and env.get("PLAITA_AI_JUDGE_MODEL"))
+    return all(
+        (env.get(name) or "").strip()
+        for name in ("PLAITA_AI_JUDGE_BASE_URL", "PLAITA_AI_JUDGE_MODEL", "PLAITA_AI_JUDGE_API_KEY")
+    )
 
 
 def judge_output(
@@ -36,13 +46,16 @@ def judge_output(
 ) -> Optional[Dict[str, Any]]:
     """Judge one output against a rubric; None when the judge is unconfigured.
 
-    Returns {"ok": bool, "score": 0..1, "reason": str}.
+    Returns {"ok": bool, "score": 0..1, "reason": str} on a real verdict, or
+    {"ok": False, "score": 0.0, "unavailable": True, ...} when the judge could
+    not be reached — the two must not be confused, since only the former is a
+    judgment about the output.
     """
     env = dict(os.environ if env is None else env)
+    if not judge_configured(env):
+        return None
     base_url = (env.get("PLAITA_AI_JUDGE_BASE_URL") or "").rstrip("/")
     model = env.get("PLAITA_AI_JUDGE_MODEL")
-    if not (base_url and model):
-        return None
 
     system = (
         "You are an evaluation judge for a workflow output. "
@@ -68,7 +81,12 @@ def judge_output(
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
     except Exception:  # judge unavailability must never fail the eval run
-        return {"ok": False, "score": 0.0, "reason": "judge endpoint unavailable"}
+        return {
+            "ok": False,
+            "score": 0.0,
+            "unavailable": True,
+            "reason": "judge endpoint unavailable",
+        }
 
     try:
         verdict = json.loads(content)

@@ -237,7 +237,11 @@ result = sup.run_loop("my-flow", load_dataset("evals/my-flow/"))
 
 评测集是纯 JSON（可进 git）：单文件 `{"cases": [...]}` 或目录（`_*.json` 为元数据不当作用例），
 每个 case `{"id", "input", "expect"}`；expect 支持 `contains` / `equals_path` /
-`not_empty` / `judge`（LLM 评审，未配置 judge 时该维度跳过而非瞎猜）。
+`not_empty` / `judge`（LLM 评审：URL / MODEL / API_KEY 三者齐全才算配置；未配置或调用失败
+时该用例整体跳过、不进均值，`EvalReport["judge_unavailable_cases"]` 计数，且该轮评测不产出
+promote 票——不可用的裁判不等于否决）。Supervisor 缓存 baseline 报告，但**不缓存** judge
+不可达的那份：缓存只在改进时刷新、而「不可比」的 baseline 永远无法改进，缓存它会把一次瞬时
+故障钉死成整个会话都无法 promote——故障恢复后下一轮会重新评测 baseline。
 
 ## 场景 5：金丝雀 / 影子切分（0.3.0）
 
