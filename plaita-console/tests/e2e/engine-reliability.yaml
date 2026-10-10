@@ -9,7 +9,10 @@ service: redis   # exec 默认容器路由到 redis（redis-cli 断言 DLQ/注�
 # 不再走「内核守卫拒绝 → 终态化 error」，而是 worker 入口**幂等短路**——挂起
 # 节点在等事件决议、continue 不携带推进语义，故消息 ack、执行保持 suspended
 # （终态化会把本可被 event/cancel/timeout 唤醒的执行永久打封；策略层守卫只是
-# 兜住绕过入口短路的竞态窗口，见 flow_worker.ResumeProtocolError）。
+# 兜住绕过入口短路的竞态窗口，见 flow_worker.ResumeProtocolError）。同请求在
+# 本地（SQLite）档返回 400（resume_local_execution 直连引擎、先验拒绝）——
+# 两个档的调用面反馈**有意不同**：cluster 档必须放行 at-least-once 重投的原
+# 消息，不能靠「先读状态再拒绝」把重投挡在队列外。
 # 终态幂等短路另用**真 error 执行**验证：缺 next 的非 End 节点（图错误，
 # 确定性失败，一次投递即终态）——不再拿 continue 打进 error 态。
 

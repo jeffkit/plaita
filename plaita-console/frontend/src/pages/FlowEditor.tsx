@@ -237,7 +237,10 @@ export default function FlowEditor() {
         baseVersionRef.current = { version: '', updatedAt: null }
         metadataRef.current = undefined
         setFlowSource('')
-        useFlowEditor.setState({ hasFlowSource: false, sourceLineRequest: null })
+        // sourceKind 必须与 source 一起清：否则残留的 authoritative/decompiled
+        // 会描述一个已经不存在的来源（源码页签按旧来源渲染）
+        setSourceKind(null)
+        useFlowEditor.setState({ hasFlowSource: false, sourceKind: null, sourceLineRequest: null })
         setGraph([], [])
         setMsg(`版本定义解析失败：${(e as Error).message}`)
       }

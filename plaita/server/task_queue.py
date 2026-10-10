@@ -115,6 +115,7 @@ class RedisStreamTaskQueue:
         dlq_key: Optional[str] = None,
         dlq_max_len: Optional[int] = None,
         dead_letter_guard: Optional[Callable[[StreamTask], bool]] = None,
+        claim_guard: Optional[Callable[[StreamTask], bool]] = None,
         max_schema_version: Optional[int] = TASK_SCHEMA_VERSION,
         on_dead_letter: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
@@ -140,6 +141,15 @@ class RedisStreamTaskQueue:
         # 决策前调用：True=允许死信；False 或抛异常=跳过（消息留 pending）。
         # None（默认）恒放行——存量行为零变化。
         self.dead_letter_guard = dead_letter_guard
+        # #47 抢单守卫：**XCLAIM 之前**的最后一道闸。reclaim 只看 idle，不看
+        # 该消息对应的执行是否仍被活 worker 持有——XCLAIM 会让 Redis 的
+        # times_delivered 每次 +1，于是「执行还在跑（租约健在）、消息却被同伴
+        # 每 60s 抢一次」把 delivery 预算烧在纯采样上，触顶即「死信 → 重入队
+        # 新副本 → 再烧 5 次 → 再死信」循环（实测 6.4min 一轮，DLQ 被同一执行
+        # 刷屏）。守卫在 XCLAIM 前判：True=可抢；False/抛异常=跳过该条（不
+        # XCLAIM、不计投递次数、不刷新 idle），继续扫下一条 pending。
+        # None（默认）恒放行——存量行为零变化。
+        self.claim_guard = claim_guard
         # #26 告警钩子：死信只 logger.error 时值守全靠人刷日志。钩子在**入队
         # 之后**调用（事件已持久化，钩子失败不回滚死信语义），且 best-effort
         # ——WebhookAlerter.send 是非阻塞入队，绝不反压消费主循环。
@@ -151,8 +161,10 @@ class RedisStreamTaskQueue:
             "dead_lettered": 0,
             "lease_conflicts": 0,
             "poison_acked": 0,
+            "resume_protocol_acked": 0,
             "failed": 0,
             "dlq_guard_skipped": 0,
+            "claim_guard_skipped": 0,
             "residue_swept": 0,
         }
 
@@ -328,6 +340,69 @@ class RedisStreamTaskQueue:
             )
         return deleted
 
+    def _claim_guard_allows(self, task: StreamTask) -> bool:
+        """XCLAIM 之前的抢单守卫（#47）：True=可抢；False/异常=跳过本条。
+
+        与 ``_guard_allows_dead_letter`` 的分工：那条管「投递次数已超限时是否
+        死信」，这条管「要不要 XCLAIM 本条」。顺序上必须在 XCLAIM **之前**
+        —— XCLAIM 自己就让 Redis 的 ``times_delivered`` +1，先抢再判等于把
+        长任务的投递预算烧在「抢了又被驳回」的往返上（#47 实测：执行租约
+        健在、对应的队列消息却被同伴每 60s 抢一次，5 轮触顶 → 死信 → 重入队
+        新副本 → 再烧 5 次 → 再死信，6.4min 一轮，DLQ 被同一执行刷屏）。
+
+        拒绝 = 跳过该条并继续扫下一条 pending：不 XCLAIM、不 ack、不刷新
+        idle（``XPENDING`` 的 idle 单调增长，读数不再被反复归零）。
+        默认无守卫（None）恒 True——存量行为零变化。
+        """
+        guard = self.claim_guard
+        if guard is None:
+            return True
+        try:
+            allowed = bool(guard(task))
+        except Exception as exc:
+            self._metrics["claim_guard_skipped"] += 1
+            logger.warning(
+                "claim_guard raised for %s (delivery_count=%s); skip claim, "
+                "message stays pending: %s",
+                task.message_id,
+                task.delivery_count,
+                exc,
+            )
+            return False
+        if not allowed:
+            self._metrics["claim_guard_skipped"] += 1
+            # 拒绝在「持有者活着跑长步」时是常态（每个 claim 周期一次），
+            # 故只记 debug；死信被拒才是异常（那条走 warning）。
+            logger.debug(
+                "claim_guard refused %s; skip claim (message stays pending)",
+                task.message_id,
+            )
+        return allowed
+
+    def _preview_pending_task(self, message_id: str, deliveries: int) -> Optional[StreamTask]:
+        """抢单前按 id 读回消息体（XRANGE），构造候选任务。
+
+        读不到（已 ack/XDEL）或体畸形（非 JSON object）→ None：调用方按
+        「无判据」处理，照旧交给 XCLAIM 走存量路径（畸形消息由消费侧
+        poison ack 兜底，不在这里提前炸）。
+        """
+        try:
+            entries = self.redis.xrange(
+                self.stream_key, min=message_id, max=message_id, count=1
+            )
+        except Exception as exc:
+            logger.debug("reclaim preview xrange failed for %s: %s", message_id, exc)
+            return None
+        if not entries:
+            return None
+        entry_id, fields = entries[0]
+        try:
+            return self._task_from_fields(
+                _decode(entry_id), fields, delivery_count=max(deliveries, 1)
+            )
+        except (TypeError, ValueError):
+            return None
+
     def _guard_allows_dead_letter(self, task: StreamTask) -> bool:
         """dead_letter 决策前的守卫闸门（Track B 任务1）。
 
@@ -413,6 +488,12 @@ class RedisStreamTaskQueue:
 
     def note_poison(self) -> None:
         self._metrics["poison_acked"] += 1
+
+    def note_resume_protocol(self) -> None:
+        """resume 协议错误（#33）ack 计数：消息本身是良构的，只是与执行状态
+        对不上（挂起执行收到 continue 等），与「畸形消息丢弃」口径不同——
+        混进 ``poison_acked`` 会让值守把正常重投误读成消息格式事故。"""
+        self._metrics["resume_protocol_acked"] += 1
 
     def note_failed(self) -> None:
         self._metrics["failed"] += 1
@@ -507,6 +588,19 @@ class RedisStreamTaskQueue:
         处置都继续扫下一条 pending。处置必须在同一轮扫描内完成而不能交给
         调用方重扫：XCLAIM 会把条目 idle 归零，``claim_min_idle_ms`` 极小时
         （如单测的 1ms）下一轮扫描会立刻再抢到同一条目，外层循环空转。
+
+        超限条目（``times_delivered >= max_deliveries``）**不受 idle 门槛
+        约束**：它已经没有下一次正常派发可言（谁派发它都只会走死信），没有
+        「被打断的在跑投递」需要保护，而收容越早、孤儿执行的恢复副本重生越
+        早。故对超限条目把 XCLAIM 的 ``min_idle_time`` 压到 0（刚被别人
+        XCLAIM 过的条目 idle 为 0，按 ``claim_min_idle_ms`` 会被 Redis 自己
+        拒掉，收容将永远等不到）。危险侧仍由两道闸把关：``claim_guard``
+        （租约健在 → 不抢，见 #47）挡在 XCLAIM 之前，``dead_letter_guard``
+        挡在死信之前。
+
+        ``claim_guard``（#47）在 XCLAIM **之前**判：拒绝则本条原样跳过
+        （不抢、不计数、不刷新 idle），继续扫下一条——仅在候选条目确实
+        idle 超阈时才读消息体，正常（无 pending 超阈）路径零额外往返。
         """
         try:
             pending = self.redis.xpending_range(
@@ -530,14 +624,19 @@ class RedisStreamTaskQueue:
             else:
                 msg_id, _consumer, idle, deliveries = entry[0], entry[1], entry[2], entry[3]
                 deliveries = int(deliveries or 1)
-            if idle < self.claim_min_idle_ms:
+            over_limit = deliveries >= self.max_deliveries
+            if not over_limit and idle < self.claim_min_idle_ms:
                 continue
             msg_id_str = _decode(msg_id)
+            if self.claim_guard is not None:
+                candidate = self._preview_pending_task(msg_id_str, deliveries)
+                if candidate is not None and not self._claim_guard_allows(candidate):
+                    continue
             claimed = self.redis.xclaim(
                 self.stream_key,
                 self.group_name,
                 self.consumer_name,
-                min_idle_time=self.claim_min_idle_ms,
+                min_idle_time=0 if over_limit else self.claim_min_idle_ms,
                 message_ids=[msg_id_str],
             )
             if not claimed:

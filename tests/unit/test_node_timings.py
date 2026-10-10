@@ -6,6 +6,7 @@ worker 是否真的把它写进了 ExecutionState.node_timings。
 """
 
 import threading
+import time
 
 import pytest
 
@@ -223,6 +224,23 @@ class TestWorkerPersistsTimings:
         assert state.node_timings is None
 
 
+def _progress_worker(storage) -> RedisFlowWorker:
+    """``_publish_node_progress`` 挂在 RedisFlowWorker（与看门狗同层），
+    构造参数与 tests/unit/test_wave12_cancellation.py 的工厂保持一致。"""
+    import fakeredis
+
+    return RedisFlowWorker(
+        redis_url="redis://localhost:6379/15",
+        queue_name="test:node-timings-progress",
+        execution_storage=storage,
+        flow_storage=MemoryFlowStorage(),
+        redis_client=fakeredis.FakeRedis(decode_responses=True),
+        lease_ttl_seconds=60,
+        enable_registry=False,
+        enable_redis_logging=False,
+    )
+
+
 class TestWatchdogPublishesRunningNode:
     """长节点（沙箱 sandbox_agent）期间的活性心跳——2026-10-10 五单误杀事故回归。
 
@@ -233,21 +251,7 @@ class TestWatchdogPublishesRunningNode:
     修复：看门狗续租成功后顺带发布在跑节点进度。
     """
 
-    def _worker(self, storage):
-        """``_publish_node_progress`` 挂在 RedisFlowWorker（与看门狗同层），
-        构造参数与 tests/unit/test_wave12_cancellation.py 的工厂保持一致。"""
-        import fakeredis
-
-        return RedisFlowWorker(
-            redis_url="redis://localhost:6379/15",
-            queue_name="test:node-timings-progress",
-            execution_storage=storage,
-            flow_storage=MemoryFlowStorage(),
-            redis_client=fakeredis.FakeRedis(decode_responses=True),
-            lease_ttl_seconds=60,
-            enable_registry=False,
-            enable_redis_logging=False,
-        )
+    _worker = staticmethod(_progress_worker)
 
     def _running_state(self, storage, execution_id="exec-long"):
         state = ExecutionState(
@@ -327,6 +331,88 @@ class TestWatchdogPublishesRunningNode:
     def test_publish_is_noop_without_timing_collector(self):
         worker = self._worker(MemoryExecutionStorage())
         worker._publish_node_progress("nonexistent")   # 不得抛
+
+    def test_publish_ignores_false_save_result(self):
+        """后端吞异常的失败形态（``save_execution_state`` 返回 False）：
+        心跳是观测路径，只告警、不抛、不编造成功。"""
+
+        class _FalseSaveStorage(MemoryExecutionStorage):
+            def save_execution_state(self, execution_id, state):
+                return False
+
+        storage = _FalseSaveStorage()
+        worker = self._worker(storage)
+        eid = "exec-false-save"
+        MemoryExecutionStorage.save_execution_state(storage, eid, ExecutionState(
+            execution_id=eid, flow_id="f1", flow_version="1",
+            status="running", context={},
+        ))
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        worker._publish_node_progress(eid)      # 不得抛
+
+        assert storage.load_execution_state(eid).node_timings is None
+
+
+class TestHeartbeatLockWaitIsBounded:
+    """心跳等状态写锁**有界**（2026-10-10 评审）。
+
+    ``_persist_state_or_raise`` 把 ``_state_write_lock`` 一路持到沙箱回收
+    （``_release_sandboxes``）结束，而看门狗是**串行**过本机所有活跃执行的一条
+    线程——无界等锁会让一次慢回收把**所有**执行的续租一起拖住，续租预算只有
+    TTL（默认 ~120s），拖过即失租双跑。心跳只是观测，跳过一周期无害。
+    """
+
+    _worker = staticmethod(_progress_worker)
+
+    def test_publish_skips_instead_of_blocking_on_held_lock(self):
+        storage = MemoryExecutionStorage()
+        worker = self._worker(storage)
+        eid = "exec-lock-held"
+        state = ExecutionState(
+            execution_id=eid, flow_id="f1", flow_version="1",
+            status="running", context={},
+        )
+        storage.save_execution_state(eid, state)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        # 另一线程持锁（模拟推进写正在做沙箱回收）：RLock 可重入，必须换线程
+        lock = worker._state_write_lock(eid)
+        held = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            lock.acquire()
+            held.set()
+            release.wait(10)
+            lock.release()
+
+        holder_thread = threading.Thread(target=holder, daemon=True)
+        holder_thread.start()
+        assert held.wait(5), "持锁线程未就绪"
+
+        from plaita.server.flow_worker import HEARTBEAT_LOCK_TIMEOUT_SECONDS
+
+        try:
+            started = time.monotonic()
+            worker._publish_node_progress(eid)
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            holder_thread.join(timeout=5)
+
+        assert elapsed < HEARTBEAT_LOCK_TIMEOUT_SECONDS + 5, (
+            f"心跳必须放弃等锁而不是无限阻塞，实测 {elapsed:.2f}s"
+        )
+        assert storage.load_execution_state(eid).node_timings is None, (
+            "等不到锁的这一周期必须整跳（不得半写）"
+        )
+
+        # 锁释放后的下一周期照常发布（跳过是暂时的，不是把锁弄坏）
+        worker._publish_node_progress(eid)
+        assert "impl" in (storage.load_execution_state(eid).node_timings or {})
 
 
 class _GatedStorage(MemoryExecutionStorage):

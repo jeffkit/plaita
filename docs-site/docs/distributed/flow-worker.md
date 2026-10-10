@@ -66,6 +66,45 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 查询失败同样保守跳过；非终态且租约空（持有者已死）重入队一份 delivery 归 1
 的恢复消息后放行。
 
+## 回收前的租约闸（#47） {#回收前的租约闸}
+
+**问题（2026-10-10 实测）**：pending 消息的回收此前只看 idle，不看这条消息
+对应的执行是否仍被活 worker 持有；而 `XCLAIM` 每次让 Redis 的
+`times_delivered` +1——「执行正在跑长节点（租约健在）、消息却被同伴每
+`claim_min_idle_ms`（默认 60s）抢一次」把投递预算烧在**纯采样**上：5 轮触顶
+即队列层死信 + 重入队新副本，新副本再烧 5 次。实测同一 `start` 任务以
+≈6.4min 为周期刷 `plaita:flow:queue:dlq`（`reason=max_deliveries=5`，三条的
+`source_id` 互为链条），而其对应执行的租约此刻仍健在（`status=running`）
+——DLQ 被无意义条目淹没、XLEN 虚增、`XPENDING` 的 idle 被反复归零。
+
+**判据**：`RedisStreamTaskQueue` 在 **XCLAIM 之前**先过 `claim_guard`：拒绝则
+该条原样跳过（不抢、不 ack、不刷新 idle，`XPENDING` 的 idle 单调增长），继续
+扫下一条 pending（不阻塞同批健康消息）。`FlowWorker` 接的判据只有一条——
+**租约键存在就不抢**：
+
+- 租约在（活 worker 正推进）：抢走也会被 `ExecutionLeaseError` 驳回
+  （#23/#50），纯损耗；持有者刚死、租约还剩 ≤TTL 尾巴时同样跳过，等过期后
+  下一轮 reclaim 自然接管（#50 已明确这段尾巴不作数）；
+- 租约空：放行。此处**不**读执行状态去猜「还在排队」——「排队中」与「持有者
+  已死」在租约缺失下不可区分，而两者的正确动作都是抢回来重派（start/resume
+  自身幂等、租约串行化）；扣住消息反而会把孤儿执行的恢复路径切断；
+- 租约查询失败（Redis 瞬断）：本轮跳过——抢单可延迟，判据不可信时不烧投递
+  次数。
+
+**超限条目不等 idle 窗口**：`times_delivered >= max_deliveries` 的条目不再受
+`claim_min_idle_ms` 门槛约束（XCLAIM 的 `min-idle-time` 压到 0）——它已经没有
+下一次正常派发可言（谁派发都只会走死信），没有「被打断的在跑投递」需要保护，
+早一轮收容也让孤儿执行的恢复副本早一轮重生。危险侧仍由上述两道闸把关：租约
+健在则抢单闸在 XCLAIM 之前就拦下（#47 的原始病症正是这类条目被反复抢），
+`dead_letter_guard` 再挡在死信之前。
+
+**判据分工**：抢单闸管「要不要 XCLAIM 这条」，死信守卫管「投递次数真超限后
+收容进 DLQ 还是留 pending」——两者都以租约/执行状态为准（与 reaper 的
+「60m idle + 租约门」同一族判据）。抢单闸把「投递次数」还原成**真实派发
+次数**后，走到死信判据的消息基本只代表真超限，不再是被 idle 扫描刷出来的
+假次数。观测：`claim_guard_skipped`（`/metrics` 的
+`plaita_queue_claim_guard_skipped_total` 与 `queue_stats()` 均可见）。
+
 部署步骤与故障手册见 [运维 Runbook](ops-runbook.md)；副作用设计见 [幂等 Resume](idempotent-resume.md)。
 
 ## claim 前的本机盘预检（#49） {#claim-前的本机盘预检}
@@ -173,7 +212,24 @@ except 终态化成 error，一次重复投递就把可恢复的挂起执行永�
 拒绝一切 resume 类型，retry 也不可入，死局）。兜底路径（绕过入口短路的竞态窗口）
 由 `ResumeProtocolError` 豁免承接：**只有策略层守卫 `ResumeGuardError`** 不终态化、
 执行保持原状、消息 ack（豁免面刻意窄，见上节「判别」——节点 `resume()` 自身抛错
-仍终态化 error）。
+仍终态化 error）。豁免覆盖**两个**守卫位点：`resume_flow` 的通用 except（策略层
+守卫在发起 `run_distributed` 时就抛）与步循环 `_process_execution_result` 的通用
+except（守卫在步循环里才抛：`resume_type=event` 的载荷为空/无效时节点仍 pending，
+循环随后一律以 `continue` 推进即命中守卫；2026-10-10 评审实证这条路径会把挂起
+执行写成 error 终态，一次「没带数据的 event」就封死 event/cancel/timeout 决议）。
+
+计数独立（`plaita_queue_resume_protocol_acked_total`，`queue_stats()` 的
+`resume_protocol_acked`）：消息本身良构，并进 `queue_poison_acked_total`
+（「畸形消息丢弃数」）会让值守把正常重投误读成消息格式事故。
+
+**调用面反馈**（有意不同，勿当 bug）：cluster 档 `POST /api/executions/{id}/resume`
+对挂起执行 + `continue`/`retry` 返回 **200 "resuming"**，实际是 worker 侧的幂等
+短路（不推进、不改状态）——HTTP 层必须放行 at-least-once 重投的原消息，不能靠
+「先读状态再拒绝」把重投挡在队列外；本地（SQLite）档同一请求返回 **400**（
+`resume_local_execution` 直连引擎，短路语义由它自己给出，见
+`plaita-console/backend/services/local_executor.py`）。契约由
+`plaita-console/tests/e2e/engine-reliability.yaml` 钉住（200 + 状态仍 suspended +
+event 仍可决议）。
 
 ## 在跑节点心跳与 keeper 活性判据 {#在跑节点心跳}
 
@@ -208,6 +264,15 @@ except 终态化成 error，一次重复投递就把可恢复的挂起执行永�
 > 「open node **且** `last_update_time` 在 N×心跳周期内（建议 N=2~3）」，再叠加
 > 租约键 / worker 注册表在册与否兜底；否则僵尸 run 既不进 reap 路径、也没人
 > 收尾。
+>
+> **落地位置在仓外（未完成，必须跟踪）**：判据①的实现在 issue-keeper 仓的
+> `console_exec.worker_alive`，本仓改不动它——本次只提供心跳数据（`node_timings`
+> 里的在跑节点 + 新鲜 `last_update_time`）。年龄界需在 keeper 仓单独开单落地。
+> 两个已知残留（本仓有意不给「暂停中的已跑完节点」造新鲜证据）：判据①看见的
+> 只对**首次执行的长节点**成立——`snapshot()` /
+> `_publish_node_progress` 合并语义不覆盖已 `ended_at` 的节点（重跑同一节点时
+> `ended_at` 停在旧值），这类执行仍靠判据③ + 租约/注册表兜底；即 ≥1800s 误杀
+> 窗口只是收窄、未清零。
 
 ## 运行中改定义（flow 定义指纹，2026-10 二波） {#运行中改定义}
 

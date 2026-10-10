@@ -18,6 +18,8 @@ checkpoint 里的合法挂起状态永远无法决议（retry 也救不回：ret
 验收口径（工单原文）：构造 suspended 执行，投 continue 消息，断言状态仍
 suspended 且后续 event 唤醒可成功。
 """
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -321,10 +323,133 @@ class TestRunLoopAcksProtocolError:
             context=checkpoint,
         ))
 
-        outcome = self._consume(worker, {
+        queue = RedisStreamTaskQueue(
+            worker.redis_client, "test:issue33-suspended", consumer_name="w1")
+        queue.ensure_group()
+        enqueue_task(worker.redis_client, "test:issue33-suspended", {
             "type": "resume", "flow_id": "f1", "execution_id": eid,
             "resume_type": "continue", "tenant_id": "default",
         })
-        assert outcome == "acked-poison"
+        task = queue.read(block_ms=100)
+        assert task is not None
+        try:
+            worker._dispatch_task(task.body, delivery_count=task.delivery_count)
+            queue.ack(task.message_id)
+            raise AssertionError("守卫错误必须抛出 ResumeProtocolError")
+        except ResumeProtocolError:
+            queue.ack(task.message_id)
+            queue.note_resume_protocol()
+
+        stats = queue.stats()
+        assert stats["resume_protocol_acked"] == 1
+        # 不并进 poison 口径：消息良构，只是与执行状态对不上
+        assert stats["poison_acked"] == 0
         # 状态原样，等 event/cancel/timeout 决议
         assert storage.load_execution_state(eid).status == "running"
+
+
+class TestStepLoopGuardErrorKeepsSuspended:
+    """#33 补漏（2026-10-10 评审）：**步循环**里的守卫同样不得终态化。
+
+    用户可达触发面：``POST /executions/{id}/resume {"resume_type":"event"}``
+    不带 ``data``（``data`` 可选；console 恢复对话框默认提交 ``{}`` 解析出的
+    ``{}``）——EventNode 收到空载荷 = 没事件、节点仍 pending，紧接着步循环用
+    ``resume_type="continue"`` 推进即命中策略层守卫。此前该路径在
+    ``_process_execution_result`` 里把执行写成 error 终态：终态短路随即拒绝
+    event/cancel/timeout，一次「没带数据的 event」就永久封死本可恢复的挂起
+    执行（消息还被 ack，连重投都没有）。修复后：磁盘行保持 suspended、
+    消息 ack（run() 的 ResumeProtocolError 分支），真决议仍可唤醒跑完。
+    """
+
+    def _consume_one_round(self, worker, body):
+        """真消费循环跑一轮：返回 (queue, 是否已 ack)。"""
+        queue = worker._get_task_queue()
+        queue.ensure_group()
+        enqueue_task(worker.redis_client, worker.queue_name, body)
+        worker._running = True
+        consumer = threading.Thread(
+            target=worker._consume_loop, args=(queue,), daemon=True,
+        )
+        consumer.start()
+        try:
+            deadline = time.time() + 20
+            while time.time() < deadline and queue.stats()["pending"] != 0:
+                time.sleep(0.05)
+            acked = queue.stats()["pending"] == 0
+        finally:
+            worker._running = False
+            consumer.join(timeout=10)
+        return queue, acked
+
+    def _suspended_execution(self, worker, storage) -> str:
+        _, _, checkpoint = _real_suspended_execution()
+        eid = checkpoint.get("$EXECUTION_ID") or "exec-1"
+        storage.save_execution_state(eid, ExecutionState(
+            execution_id=eid, flow_id="f1", flow_version="1", status="suspended",
+            context=checkpoint,
+        ))
+        return eid
+
+    def test_empty_event_payload_keeps_suspended_and_acks(self):
+        worker, storage = _redis_worker()
+        eid = self._suspended_execution(worker, storage)
+
+        queue, acked = self._consume_one_round(worker, {
+            "type": "resume", "flow_id": "f1", "execution_id": eid,
+            "resume_type": "event", "tenant_id": "default",
+        })
+
+        assert acked, "协议错误消息必须 ack（重投只会重复命中同一守卫）"
+        state = storage.load_execution_state(eid)
+        assert state.status == "suspended", "挂起执行不得被终态化成 error"
+        assert state.error is None
+        assert state.end_time is None
+        assert queue.stats()["resume_protocol_acked"] == 1
+        assert queue.stats()["poison_acked"] == 0
+
+    def test_real_event_can_still_resolve_after_empty_payload(self):
+        """验收口径：空载荷 event 之后，真正的 event 决议仍能跑完。"""
+        worker, storage = _redis_worker()
+        eid = self._suspended_execution(worker, storage)
+
+        self._consume_one_round(worker, {
+            "type": "resume", "flow_id": "f1", "execution_id": eid,
+            "resume_type": "event", "tenant_id": "default",
+        })
+
+        result = worker.resume_flow("f1", eid, "event", data={"approved": True})
+
+        assert result.get("is_end") is True
+        assert storage.load_execution_state(eid).status == "completed"
+
+    def test_bare_resume_error_in_step_loop_still_terminalizes(self):
+        """豁免面必须**窄**：步循环里的裸 ``ResumeError``（节点 ``resume()``
+        抛错，如事件数据畸形）仍终态化 error——否则真失败会静默成一个
+        「无 error 记录、永远等不到决议」的哑执行。"""
+        worker, storage = _redis_worker()
+        eid = self._suspended_execution(worker, storage)
+
+        inner = ValueError("bad event payload")
+        resume_err = ResumeError(str(inner))
+        resume_err.__cause__ = inner
+        wrapped = FlowErrorException(f"恢复执行出错: {inner}")
+        wrapped.__cause__ = resume_err
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            # 第一次（resume_flow 里的 event 恢复）不推进，第二次（步循环的
+            # continue 推进）才抛节点 resume 失败——即步循环分支。
+            inst.run_distributed.side_effect = [
+                {"execution_id": eid, "context": {}, "is_end": False,
+                 "is_suspend": False},
+                wrapped,
+            ]
+            worker.resume_flow("f1", eid, "event", data={"approved": True})
+            assert inst.run_distributed.call_count == 2, (
+                "第二次调用（步循环的 continue 推进）才抛——本用例打的就是该分支"
+            )
+
+        state = storage.load_execution_state(eid)
+        assert state.status == "error", "节点 resume() 自身失败必须终态化"
+        assert "bad event payload" in state.error["message"]

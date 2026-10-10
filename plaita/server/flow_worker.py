@@ -332,6 +332,12 @@ DEFAULT_WORKER_DRAIN_TIMEOUT = 30.0
 # 重探一次，盘回线即自动恢复领取（无需重启）。
 DEFAULT_DISK_GUARD_POLL_SECONDS = 15.0
 
+# 在跑节点心跳（`_publish_node_progress`）等 ``_state_write_lock`` 的上限（秒）：
+# 该锁可能被 `_persist_state_or_raise` 持有整段沙箱回收期，而看门狗线程串行过
+# 本机所有活跃执行——无界等锁会拖住**所有**执行的续租（预算仅 TTL）。心跳是
+# 观测路径，跳过一周期无害。
+HEARTBEAT_LOCK_TIMEOUT_SECONDS = 1.0
+
 # __new__ 构造的骨架 worker（不经 __init__）惰性补建状态写锁登记表时的守卫锁。
 _STATE_WRITE_LOCKS_INIT_GUARD = threading.Lock()
 
@@ -559,8 +565,11 @@ class ResumeProtocolError(RuntimeError):
 
     策略层守卫 ``ResumeGuardError``（continue/retry 试图绕过 pending 挂起节点、
     resume 打在无挂起/非挂起 checkpoint 上）经 ``_chain_has_resume_guard_error``
-    判出后，resume_flow 不终态化、把执行留在原状态（suspended/running），
-    以本异常上抛。**裸 ``ResumeError`` 不在豁免面内**（节点 ``resume()`` 自身
+    判出后，不终态化、把执行留在原状态（suspended/running），以本异常上抛。
+    **两个**判出位点：resume_flow 的通用 except（守卫在发起 run_distributed 时
+    就抛）与步循环 ``_process_execution_result`` 的通用 except（守卫在步循环
+    里抛，如空载荷的 event resume 没推进节点、循环改用 continue 推进）。
+    **裸 ``ResumeError`` 不在豁免面内**（节点 ``resume()`` 自身
     抛错是执行失败，走终态化 error 的现状路径，见该判据 docstring）。
     run() 主循环按
     「消费失败」处理：消息走 ack（执行状态原样可查、事件订阅仍在，真正的
@@ -2071,6 +2080,12 @@ class FlowWorker:
             # ack——重投只会命中 already_terminal 短路，终态化已完成，无意义。
             # 不落进下面的通用 except 二次终态化/包 RuntimeError。
             raise
+        except ResumeProtocolError:
+            # 协议错误（#33）由**步循环**（`_process_execution_result`）判出：
+            # 那里已告警、已收尾观察者、未落盘（磁盘行保持原状）。原样上抛给
+            # run() 按 ack 语义处理，不落进下面的通用 except 二次包裹
+            # （会重复告警/重复收尾观察者）。
+            raise
         except Exception as e:
             logger.error("恢复流程执行出错: %s", e, exc_info=True)
 
@@ -2310,6 +2325,32 @@ class FlowWorker:
                             execution_id,
                         )
                         break
+                    # 挂起守卫豁免（#33）：本循环的推进一律是
+                    # ``resume_type="continue"``，若 checkpoint 仍停在挂起节点
+                    # （如 ``resume_type=event`` 载荷为空、节点没被推进），
+                    # run_distributed 必以策略层守卫 ``ResumeGuardError`` 失败。
+                    # 与 resume_flow 的通用 except 同款窄判据：这类错误是调用方
+                    # 协议与执行状态不匹配，不是执行自身失败——终态化 error 会把
+                    # 本可被 event/cancel/timeout 唤醒的挂起执行永久打封（终态
+                    # 短路从此拒绝一切 resume 类型，死局；2026-10-10 评审实证：
+                    # console 恢复对话框默认提交 ``{}`` 就是这条触发器）。
+                    # 豁免 = 保持原状 + 上抛：本函数**不落盘**即磁盘行仍是
+                    # suspended（唯一的写盘点是下面终态化分支与 is_end/is_suspend
+                    # 分支），run() 对 ResumeProtocolError ack（重投只会重复命中
+                    # 同一守卫，烧 delivery 无意义；真正的决议路径各有独立消息）。
+                    # 判据刻意**窄**：裸 ``ResumeError``（节点 resume() 自身抛错）
+                    # 不豁免，仍走下面的现状终态化 error。
+                    if _chain_has_resume_guard_error(e):
+                        logger.warning(
+                            "执行 %s 步循环收到与挂起状态不匹配的 resume 请求，"
+                            "协议错误不终态化，磁盘状态保持原状: %s",
+                            execution_id, e,
+                        )
+                        self._finalize_observers()
+                        raise ResumeProtocolError(
+                            f"resume 协议错误（步循环守卫拒绝，执行状态保持原状）: {e}",
+                            execution_id=execution_id,
+                        ) from e
                     # 节点级有界重试（波次二任务①）：瞬态节点失败不终态化，
                     # 抛重试异常让消息走 at-least-once 重投，从 checkpoint
                     # 重跑失败节点；预算耗尽/判据不符/回滚开关 → 现状终态化。
@@ -2587,6 +2628,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 in inspect.signature(RedisStreamTaskQueue.__init__).parameters
             ):
                 kwargs["dead_letter_guard"] = self._dead_letter_guard
+            # #47 抢单守卫接线：同样按签名探测向后兼容（并行合入期的旧队列类
+            # 不收该参数）。
+            if (
+                "claim_guard"
+                in inspect.signature(RedisStreamTaskQueue.__init__).parameters
+            ):
+                kwargs["claim_guard"] = self._claim_guard
             # #26 死信告警接线：同样按签名探测向后兼容（并行合入期的旧队列类
             # 不收该参数）。
             if (
@@ -2601,6 +2649,57 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """死信事件出口：未配置 webhook 时空操作（只保留原始 error 日志）。"""
         if self._alerter is not None:
             self._alerter.send(event)
+
+    def _claim_guard(self, task: StreamTask) -> bool:
+        """抢单守卫（#47）：reclaim 前查执行租约——持有者活着就不抢。
+
+        ``RedisStreamTaskQueue._reclaim_one`` 只看 idle 判「这条 pending 该被
+        回收了」，不看它对应的执行是否仍被活 worker 持有；而 XCLAIM 会让
+        ``times_delivered`` 每次 +1。于是「执行正在跑长节点（租约健在）、消息
+        却被同伴每 ``claim_min_idle_ms`` 抢一次」把投递预算烧在纯采样上：5 轮
+        触顶 → 队列层死信 + 重入队新副本 → 新副本再烧 5 次 → 再死信
+        （实测 6.4min 一轮，同一 `start` 任务把 DLQ 刷屏、XLEN 虚增）。本条
+        把「投递次数」还原为**真实派发次数**：租约还在 ⇒ 持有者正常推进，
+        抢走也会被 ``ExecutionLeaseError`` 驳回（#23/#50），纯损耗。
+
+        判据只有一条「租约键存在」，**不**读执行状态：租约是「此刻有人在推进」
+        的直接证据；缺失时无法区分「排队中」与「持有者已死」，而这两者的正确
+        动作都是**抢回来重派**（start/resume 自身幂等、租约串行化），故放行
+        ——绝不因猜「还在排队」而扣住消息（那会把孤儿执行的恢复路径切断）。
+        持有者刚死、租约还剩 ≤TTL 尾巴时同样跳过：此刻抢回来只会撞租约
+        （#50 的 ``_lease_conflict_ack_safe`` 已明确这段尾巴不作数），等过期
+        后下一轮 reclaim 自然接管。
+
+        租户路由与 ``_dead_letter_guard`` 同规则（守卫在 ``_dispatch_task``
+        之外运行，持消息体 ``tenant_id``）：``{ns}:execution:lease:{id}``，
+        ns = ``plaita``（default/空租户）或 ``plaita:{tenant_id}``。
+
+        查询失败（Redis 瞬断）→ False（跳过本轮，消息留 pending）：抢单是
+        可延迟的，宁可下轮再抢，不在判据不可信时烧投递次数。
+        """
+        body = getattr(task, "body", None)
+        if not isinstance(body, dict):
+            return True
+        execution_id = body.get("execution_id")
+        if not execution_id:
+            # 无 execution_id 的消息（如 schedule 派发的裸 start）无租约可查，
+            # 按存量语义正常回收重派。
+            return True
+        lease_key = (
+            f"{tenant_namespace(body.get('tenant_id'))}:execution:lease:{execution_id}"
+        )
+        try:
+            if self.redis_client.exists(lease_key):
+                logger.debug(
+                    "抢单跳过：执行 %s 租约仍在（活 worker 处理中），消息留 pending: %s",
+                    execution_id,
+                    getattr(task, "message_id", "?"),
+                )
+                return False
+        except Exception as exc:  # noqa: BLE001 — 瞬断按「本轮不抢」处理
+            logger.debug("抢单守卫查询租约失败（本轮跳过）: %s: %s", lease_key, exc)
+            return False
+        return True
 
     def _dead_letter_guard(self, task: StreamTask) -> bool:
         """死信守卫（Track B 契约）：True=允许死信；False/抛异常=跳过。
@@ -2618,6 +2717,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         - 非终态 + 租约空（持有者已死）→ **重新入队一份同体消息**（delivery
           归 1，恢复路径重生）后放行原消息死信。并发守卫双入队无害：两条
           新消息被 resume 租约串行化，第二条命中 already_terminal 短路。
+
+        与 ``_claim_guard``（#47）的分工：抢单守卫在 XCLAIM **之前**拦住
+        「持有者活着却被同伴采样」的那部分虚增，所以走到本判据的超限消息
+        已经基本只代表**真实派发**耗尽（而非被 idle 扫描刷出来的假次数）；
+        本条则决定那条真超限消息该「收容进 DLQ + 重生副本」还是「留 pending」。
+        两者判据同源（租约 + 执行状态），见 docs-site distributed/flow-worker.md
+        「回收前的租约闸」。
 
         租户路由：状态存储经 ContextVar 路由、租约键手工拼装，两者都用
         消息体 ``tenant_id``（守卫在 run() 主循环内 ``_dispatch_task`` 之外
@@ -2841,6 +2947,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         失败**只告警不抛**：这是观测路径，绝不能因落盘失败而打断正在跑的
         节点（真正的落盘失败仍由 ``_persist_state_or_raise`` 在节点边界负责）。
+
+        **取锁有界**（2026-10-10 评审）：``_persist_state_or_raise`` 会把
+        ``_state_write_lock`` 一路持到沙箱回收结束（``_release_sandboxes``），
+        而看门狗线程是**串行**过本机所有活跃执行的一条线程——无界等锁会让一次
+        慢回收把**所有**执行的续租一起拖住，而续租预算只有 TTL（默认 ~120s），
+        拖过 TTL 即失租双跑。心跳只是观测，跳过一周期的代价（下一个周期
+        ``interval`` 后再发）远小于拖住续租的代价。
         """
         timing = self._node_timings.get(execution_id)
         if timing is None:
@@ -2852,7 +2965,16 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             set_current_fence_token(fence_token) if fence_token is not None else None
         )
         try:
-            with self._state_write_lock(execution_id):
+            lock = self._state_write_lock(execution_id)
+            if not lock.acquire(timeout=HEARTBEAT_LOCK_TIMEOUT_SECONDS):
+                logger.info(
+                    "在跑节点进度发布跳过（状态写锁被推进/回收写占用 >%.1fs，"
+                    "不阻塞续租）: %s",
+                    HEARTBEAT_LOCK_TIMEOUT_SECONDS,
+                    execution_id,
+                )
+                return
+            try:
                 state = self.execution_storage.load_execution_state(execution_id)
                 if state is None:
                     return
@@ -2863,7 +2985,15 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 merged.update(timing.snapshot())
                 state.node_timings = merged
                 state.last_update_time = datetime.now().isoformat()
-                self.execution_storage.save_execution_state(execution_id, state)
+                if not self.execution_storage.save_execution_state(execution_id, state):
+                    # 后端吞异常的失败形态（如 Redis 瞬断）：心跳本来就是
+                    # best-effort，告警即可——绝不能抛，否则会打断正在跑的节点。
+                    logger.warning(
+                        "在跑节点进度落盘返回 False（本次心跳丢失，下一周期重试）: %s",
+                        execution_id,
+                    )
+            finally:
+                lock.release()
         except ExecutionLeaseError:
             # fenced 世代不符 = 租约已被接管者夺走（本进程的心跳不再可信），
             # 不是观测路径的「落盘失败」：下周期 renew 会失败并走失租链路。
@@ -3405,8 +3535,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 # 错误已可观测（状态行/日志），消息重投只会重复命中同一守卫
                 # 且烧 delivery，ack 掉。非终态执行不需要重投载体：决议路径
                 # （event/cancel/timeout resume）各有独立消息。
+                # 计独立计数器（不并进 poison_acked）：消息本身良构，把它算成
+                # 「畸形消息丢弃」会让值守误判成格式事故。
                 queue.ack(task.message_id)
-                queue.note_poison()
+                queue.note_resume_protocol()
                 acked = True
                 logger.warning(
                     "任务 %s resume 协议错误（执行保持原状不终态化）: %s",

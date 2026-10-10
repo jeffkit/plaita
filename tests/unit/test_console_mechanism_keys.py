@@ -66,9 +66,14 @@ def test_no_unregistered_bare_int_keys_from_worker():
         pytest.skip("worker 源码不在本检出")
 
     text = worker.read_text(encoding="utf-8")
-    # 形如 f"{ns}:execution:xxx:{id}" 的键名（取 :execution: 与 :{ 之间的段）
-    names = set(re.findall(r":execution:([a-z_]+):\{", text))
+    # 形如 f"{ns}:execution:xxx:{id}" 的键名（取 :execution: 与 :{ 之间的段）。
+    # 字符集必须含数字：2026-10-10 评审发现 `[a-z_]+` 匹配不到 `g1wakeups`
+    # ——正是催生本用例的那个键，自动防线恰好漏掉它、只剩硬编码断言兜底。
+    names = set(re.findall(r":execution:([a-z0-9_]+):\{", text))
     assert names, "未从 worker 源码解析出任何机制键（正则失效？）"
+    assert "g1wakeups" in names, (
+        f"正则漏解析了 g1wakeups（自动防线必须有牙齿），实际解析出: {sorted(names)}"
+    )
 
     f = get_is_mechanism_key()
     missing = [n for n in sorted(names)
