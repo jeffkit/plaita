@@ -226,6 +226,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | `PLAITA_CONSOLE_SECRET_ID` | _空_ | 对外契约 HMAC secret-id（**空则 `/api/flowVersion` 返回 503**，不再接受空串签名） |
 | `PLAITA_CONSOLE_SECRET_KEY` | _空_ | 对外契约 HMAC secret-key |
 | `PLAITA_CONSOLE_LANGFUSE` | `auto` | Langfuse 观测（[plaita.obs](../README.MD#可观测性plaitaobs)）：`auto`=配了 `LANGFUSE_PUBLIC_KEY` 即开；`true` 强制开；`false` 强制关。trace id = 执行实例 ID；缺 `plaita[langfuse]` 依赖自动降级为不观测（集群档对应 worker 的 `--langfuse` / `PLAITA_WORKER_LANGFUSE=1`）。另需 `LANGFUSE_PROJECT_ID`（如 proj-plaita-local）——执行详情页的「Langfuse」深链依赖它计算 trace URL |
+| `PLAITA_CONSOLE_MIN_WORKER_VERSION` | _空_ | 最低 worker 引擎版本（如 `0.6.1`）。worker 注册元数据带 `plaita_version`（`plaita.__version__`），低于本值**或未上报版本**的实例在 `/api/services` 返回 `version_alert`、Worker 效能页标黄——混部舰队（`PLAITA_PYTHON` 指向不同 venv / 滚动升级收尾）用它确认旧 worker 已清干净；空 = 只展示不告警。**覆盖面 = 在注册表里注册过的实例**（`flow_worker` 默认 `enable_registry`，版本随注册与心跳上报）：`ServiceManager` 拉起的「托管实例卡」只是控制台对自己那支进程的账，控制台无从得知 `PLAITA_PYTHON` 那个 venv 里装的是哪版 plaita，故该卡既不展示版本也不告警——同一 worker 的注册卡带着版本 |
 
 前端管理面请求会自动带 `X-Admin-API-Key`：优先读 `localStorage.plaita_admin_api_key`，其次 `VITE_PLAITA_ADMIN_API_KEY`。
 

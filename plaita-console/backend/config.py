@@ -67,6 +67,15 @@ class Settings(BaseModel):
         description="recursive 服务 X-API-Key（对应其 RECURSIVE_API_KEYS）",
     )
 
+    # 最低可接受的 plaita worker 引擎版本（#36）：worker 在注册/心跳 metadata 里
+    # 上报 `plaita_version`（flow_worker.py 的 init_registry），低于此值即在服务页
+    # 告警——console 可用 PLAITA_PYTHON 给 worker 指定别的 venv，混部时新旧 worker
+    # 此前完全不可辨识。空 = 只展示不告警。
+    min_worker_version: str = Field(
+        default="",
+        description="最低可接受的 plaita worker 版本；空=不告警（PLAITA_CONSOLE_MIN_WORKER_VERSION）",
+    )
+
     class Config:
         env_prefix = "PLAITA_CONSOLE_"
 
@@ -90,4 +99,5 @@ def get_settings() -> Settings:
         copilot_brain=os.getenv("PLAITA_CONSOLE_COPILOT_BRAIN", "flow_agent"),
         recursive_agui_url=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_URL", ""),
         recursive_agui_api_key=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_API_KEY", ""),
+        min_worker_version=os.getenv("PLAITA_CONSOLE_MIN_WORKER_VERSION", ""),
     )

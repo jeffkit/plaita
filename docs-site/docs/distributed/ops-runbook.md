@@ -175,17 +175,37 @@ terminationGracePeriodSeconds: 90   # > PLAITA_WORKER_DRAIN_TIMEOUT，留出收�
 
 ### flow_hash 兼容门（引擎升级最容易误伤的一处）
 
-`ExecutionState.flow_hash` = 实际加载的 Flow 的规范化 JSON 指纹，resume 时比对，防止「运行中改定义 → 续跑走错分支」。但**引擎升级可能改变指纹算法口径**，于是历史挂起执行会被判成「定义变更」。判定表：
+`ExecutionState.flow_hash` = **原始存储定义 JSON**（`Flow.model_validate` 之前）
+的规范化指纹，resume 时比对，防止「运行中改定义 → 续跑走错分支」。#36 起指纹
+不再算在解析后的 `model_dump` 上——引擎/节点包/pydantic 版本变化不改同一份
+存储定义的指纹，**解读代码的演进本身不再让在途 run 失配**。判定表：
 
 | 存的算法标记 | 指纹是否相同 | 行为 |
 |---|---|---|
-| 相同 | 相同 | 正常续跑 |
-| 相同 | 不同 | **拒绝**（定义确实变了）——同算法下 `allow_flow_hash_change` 也不放行 |
+| 相同（当前口径） | 相同 | 正常续跑 |
+| 相同（当前口径） | 不同 | **拒绝**（定义确实变了）——同口径下 `allow_flow_hash_change` 也不放行 |
 | 不同 | **相同** | 直接续跑并刷新标记（定义没变，只是升级换了算法标签） |
-| 不同 | 不同 | 报 `flow_hash_mismatch`（`upgrade_suspected: true`），需**显式放行** |
-| 缺失（老状态） | 任意 | 按同算法保守处理 |
+| 旧口径（v1）/ 缺失 | 不同 | **一次性重基线**放行（WARNING + `plaita_resume_guard_total{decision="rebaseline"}`）——跨口径比大小得不出「定义变没变」的结论，据此终态化就是滚升窗口的在途批量误杀（#36） |
+| 未知标记 | 不同 | 报 `flow_hash_mismatch`（`upgrade_suspected: true`），需**显式放行** |
+| 缺失（老状态无 `flow_hash`） | 任意 | 跳过校验 |
 
-显式放行（仅用于确认「流程定义没变 / 可接受」）：
+指纹失配的 error 带机器可读的 `category`（判据是**口径标记**，不是
+`engine_version`——v2 指纹算在原始定义上、与引擎版本无关）：
+
+- `flow_definition_changed`：口径标记相同而指纹不同 → 定义确实被改，按定义
+  处置。此时 `upgrade_suspected: false`，提示明说 `allow_flow_hash_change`
+  对同口径失配无效（照它放行会撞回同一条错误）。`stored_engine_version` /
+  `current_engine_version` 仍照记，作混部的**佐证**而非成因；
+- `engine_version_drift`：口径标记不同（写入该状态的构建用了别的口径）→
+  `upgrade_suspected: true`，先怀疑混部（滚升未收尾 / `PLAITA_PYTHON` 指向
+  未同步 venv），对照 worker 服务页的 `plaita_version` 与
+  `PLAITA_CONSOLE_MIN_WORKER_VERSION` 告警再下结论，确认后按下方「显式放行」。
+
+worker `/metrics` 的 `plaita_resume_guard_total{decision,category}` 按裁决与成因
+分档计数（`mismatch` / `rebaseline` / `refresh` / `accepted`），值守按档告警：
+一批 `rebaseline` 是升级过渡（预期），一批 `mismatch` 才是定义被改。
+
+显式放行（仅用于确认「流程定义没变 / 可接受」，如遇到未知口径标记）：
 
 ```bash
 curl -X POST "$CONSOLE/api/executions/$EXEC_ID/resume" \
@@ -193,7 +213,11 @@ curl -X POST "$CONSOLE/api/executions/$EXEC_ID/resume" \
   -d '{"resume_type":"continue","data":{"allow_flow_hash_change":true}}'
 ```
 
-放行会打 WARNING 并把新指纹写回状态，留审计痕迹。**同算法下哈希不同时该开关无效**——那种情况必须改回定义或新建执行。
+放行会打 WARNING 并把新指纹写回状态，留审计痕迹。**同口径下哈希不同时该开关
+无效**——那种情况必须改回定义或新建执行。
+
+**灰度纪律**：先 drain 旧 worker 再上新的。反向（旧 worker resume 新 worker
+写下的状态）旧代码仍按旧口径判失配，本轮修复改不了已部署的旧版本。
 
 ### 兼容纪律（写进 review checklist）
 

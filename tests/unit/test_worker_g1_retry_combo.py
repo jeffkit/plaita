@@ -35,6 +35,7 @@ import fakeredis
 
 from plaita.core.errors import FlowErrorException, NodeExecutionError
 from plaita.server.flow_worker import (
+    FLOW_HASH_ALGO,
     FlowHashMismatchError,
     NodeExecutionRetryableError,
     RedisFlowWorker,
@@ -257,6 +258,7 @@ class TestHashCheckBeforeRetryWakeup:
         worker = _make_worker(fake, storage, flow_storage)
         state = _state(status="error")
         state.flow_hash = "0" * 64  # 与当前定义不符
+        state.flow_hash_algo = FLOW_HASH_ALGO  # 同口径才判「定义真被改」（#36）
         storage.save_execution_state("exec-1", state)
 
         with pytest.raises(FlowHashMismatchError):
@@ -267,7 +269,7 @@ class TestHashCheckBeforeRetryWakeup:
         assert "hash 不匹配" in saved.error["message"]
 
         # 修复「定义」（这里直接把状态指纹对齐）后再 retry → 正常唤醒推进
-        saved.flow_hash = worker._compute_flow_hash(_flow())
+        saved.flow_hash = worker._compute_flow_hash(worker.get_flow_definition_raw("f1", "1"))
         storage.save_execution_state("exec-1", saved)
         with patch("plaita.server.flow_worker.FlowExecution") as FE:
             inst = MagicMock()

@@ -36,18 +36,22 @@ class ExecutionState(BaseModel):
     flow_hash_algo: Optional[str] = Field(
         None,
         description=(
-            "flow_hash 所用算法的标记（如 flow-dump-json-sortkeys-v1）。resume 时据此"
-            "分级判定：算法相同→严格比对；算法不同但哈希相同→定义未变（升级导致标签"
-            "变化）直接续跑；算法不同且哈希不同→需显式 override 才续跑。None = 老状态，"
-            "按当前算法保守处理。"
+            "flow_hash 所用算法口径的标记（当前为 flow-raw-json-sortkeys-v2 = 原始存储"
+            "定义 JSON；flow-dump-json-sortkeys-v1/None = #36 前的解析后 dump 口径）。"
+            "resume 时据此分级判定：同口径→严格比对；异口径但哈希相同→定义未变（升级"
+            "换了标签）直接续跑；异口径且哈希不同→跨口径不可比，一次性重基线放行"
+            "（#36）；未知标记 + 哈希不同→需显式 override 才续跑。"
         ),
     )
     engine_version: Optional[str] = Field(
         None,
         description=(
-            "创建该执行的引擎版本（plaita.__version__）。resume 时仅用于观测：跨 minor "
-            "续跑会打 WARNING，不作为硬门（硬门由 flow_hash 承担）。不随 resume 覆写，"
-            "保留「创建者版本」语义。"
+            "创建该执行的引擎版本（plaita.__version__）。resume 时用于观测与成因区分："
+            "跨 minor 续跑会打 WARNING，不作为硬门（硬门由 flow_hash 承担）；指纹失配"
+            "时原样记进 error（stored_engine_version / current_engine_version）作佐证"
+            "——error.category 由 flow_hash_algo 是否变化决定（v2 指纹与引擎版本无关，"
+            "engine_version_drift = 口径标记不同的失配）。"
+            "不随 resume 覆写，保留「创建者版本」语义。"
         ),
     )
     tenant_id: Optional[str] = None

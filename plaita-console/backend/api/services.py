@@ -4,11 +4,16 @@
 """
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from redis import Redis
+
+try:
+    from ..config import get_settings
+except ImportError:
+    from config import get_settings  # type: ignore
 
 router = APIRouter()
 
@@ -31,6 +36,16 @@ class ServiceInfo(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="配置信息")
     active_tasks: int = Field(default=0, description="当前处理的任务数")
     last_heartbeat: Optional[str] = Field(None, description="最后心跳时间")
+    # #36：worker 注册 metadata 里的 plaita_version 不会自动提到顶层，须显式派生
+    # （_annotate_worker_version）——混部舰队（滚升窗口 / PLAITA_PYTHON 指向未同步
+    # venv）下这是辨识新旧 worker 的唯一信号。
+    plaita_version: Optional[str] = Field(
+        None, description="worker 上报的 plaita 引擎版本；未上报（老构建）为 None"
+    )
+    version_alert: Optional[str] = Field(
+        None,
+        description="引擎版本低于 PLAITA_CONSOLE_MIN_WORKER_VERSION（或未上报）时的告警文案",
+    )
 
 
 class ServiceListResponse(BaseModel):
@@ -85,11 +100,64 @@ def get_redis(request: Request) -> Redis:
     return request.app.state.redis
 
 
+def _version_tuple(text: Any) -> Optional[Tuple[int, ...]]:
+    """``"0.6.1"`` / ``"v0.6.1"`` → ``(0, 6, 1)``；不可解析 → None。
+
+    手写而不引 ``packaging``（console 未声明该依赖）：逐段取前导数字，遇到
+    没有前导数字的段即停，故 ``"0.7.0rc1"`` → ``(0, 7, 0)``、``"dev"`` → None。
+    """
+    if not isinstance(text, str):
+        return None
+    parts: List[int] = []
+    for segment in text.strip().lstrip("v").split("."):
+        digits = ""
+        for ch in segment:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else None
+
+
+def _annotate_worker_version(info: ServiceInfo) -> ServiceInfo:
+    """补 worker 引擎版本与最低版本告警（#36）；非 worker 服务原样返回。
+
+    版本来自注册 metadata ``plaita_version``；下限来自
+    ``PLAITA_CONSOLE_MIN_WORKER_VERSION``（空 = 只展示不告警）。**未上报版本**
+    也要告警：配了下限就说明旧实例必须清干净，而「未上报」只可能是比上报功能
+    更老的构建。任一侧版本串不可解析 → 不告警（宁可漏报不误报）。
+    """
+    if info.service_type != "flow_worker":
+        return info
+    raw = (info.metadata or {}).get("plaita_version")
+    # 注册表内容是 worker 写的（半信任）：非字符串值归一，别让它把整张服务卡炸掉
+    info.plaita_version = str(raw).strip() or None if raw else None
+
+    minimum = (get_settings().min_worker_version or "").strip()
+    if not minimum:
+        return info
+    if info.plaita_version is None:
+        info.version_alert = f"worker 未上报引擎版本（早于版本上报的构建），低于最低要求 {minimum}"
+        return info
+    reported = _version_tuple(info.plaita_version)
+    floor = _version_tuple(minimum)
+    if reported is None or floor is None:
+        return info
+    width = max(len(reported), len(floor))
+    reported += (0,) * (width - len(reported))
+    floor += (0,) * (width - len(floor))
+    if reported < floor:
+        info.version_alert = f"plaita {info.plaita_version} 低于最低要求 {minimum}"
+    return info
+
+
 def parse_service_data(data: str) -> Optional[ServiceInfo]:
     """解析服务数据"""
     try:
         info = json.loads(data)
-        return ServiceInfo(**info)
+        return _annotate_worker_version(ServiceInfo(**info))
     except Exception:
         return None
 

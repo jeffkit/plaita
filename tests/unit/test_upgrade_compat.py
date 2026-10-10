@@ -16,6 +16,7 @@ pytest.importorskip("cachetools")
 from plaita.server.flow_worker import (
     ALLOW_FLOW_HASH_CHANGE_KEY,
     FLOW_HASH_ALGO,
+    LEGACY_FLOW_HASH_ALGO,
     classify_flow_hash_change,
 )
 from plaita.server.task_queue import (
@@ -132,13 +133,27 @@ class TestFlowHashDecision:
             == "mismatch"
         )
 
-    def test_legacy_state_without_algo_is_conservative(self):
-        """老状态没有算法标记：按当前算法保守处理（不因 override 放行）。"""
+    def test_legacy_state_without_algo_is_rebaselined(self):
+        """老状态没有算法标记 = 旧口径（dump 版）指纹，与当前口径不可互比：
+        按一次性重基线放行，绝不据此终态化在途执行（#36）。"""
         assert (
             classify_flow_hash_change(
                 stored_hash="a", current_hash="b", stored_algo=None, current_algo=FLOW_HASH_ALGO, allow_change=True
             )
-            == "mismatch"
+            == "rebaseline"
+        )
+
+    def test_legacy_algo_label_is_rebaselined(self):
+        """0.6.2+ 的 dump 版标记同属不可互比口径（#36）。"""
+        assert (
+            classify_flow_hash_change(
+                stored_hash="a",
+                current_hash="b",
+                stored_algo=LEGACY_FLOW_HASH_ALGO,
+                current_algo=FLOW_HASH_ALGO,
+                allow_change=False,
+            )
+            == "rebaseline"
         )
 
     def test_override_key_name_is_stable(self):

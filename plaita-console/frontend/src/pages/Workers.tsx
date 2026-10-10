@@ -111,6 +111,14 @@ export default function Workers() {
             const qname = String(
               (w.metadata as Record<string, unknown>)?.queue_name ?? '—',
             )
+            // 引擎版本（#36）：混部舰队下辨识新旧 worker 的唯一信号。
+            // 托管实例卡（console 自己拉起的进程）不显示版本——控制台不知道
+            // PLAITA_PYTHON 那个 venv 里装的是哪版 plaita，同一 worker 的注册卡
+            // 才是版本来源（见 PLAITA_CONSOLE_MIN_WORKER_VERSION 说明）。
+            const managedByConsole =
+              (w.metadata as Record<string, unknown>)?.managed_by === 'console'
+            const engineVersion = w.plaita_version || (managedByConsole ? null : '未上报版本')
+            const versionAlert = w.version_alert || null
             return (
               <Card key={w.instance_id} className="p-4">
                 <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -135,11 +143,27 @@ export default function Workers() {
                         />
                         {busy ? `忙 · ${w.active_tasks}` : '闲'}
                       </span>
+                      {/* 引擎版本：低于最低版本（或未上报）时转告警配色（#36）；
+                          托管实例卡无版本可显示（注册卡才是来源）→ 不渲染 */}
+                      {(engineVersion || versionAlert) && (
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-md border border-line text-caption font-mono ${
+                            versionAlert
+                              ? 'text-status-warning bg-status-warning-dim'
+                              : 'text-ink-muted'
+                          }`}
+                        >
+                          plaita {engineVersion}
+                        </span>
+                      )}
                     </div>
                     <p className="mt-1.5 text-caption text-ink-muted break-all">
                       主机 <span className="font-mono">{w.host}</span> · 队列{' '}
                       <span className="font-mono">{qname}</span>
                     </p>
+                    {versionAlert && (
+                      <p className="mt-0.5 text-caption text-status-warning">{versionAlert}</p>
+                    )}
                     {w.start_time && (
                       <p className="mt-0.5 text-caption text-ink-faint">
                         启动于 {new Date(w.start_time).toLocaleString()}

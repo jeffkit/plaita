@@ -145,6 +145,10 @@ export interface ServiceInfo {
   metadata: Record<string, unknown>
   active_tasks: number
   last_heartbeat?: string
+  /** worker 上报的 plaita 引擎版本（#36）；老构建未上报时为 null */
+  plaita_version?: string | null
+  /** 引擎版本低于 PLAITA_CONSOLE_MIN_WORKER_VERSION（或未上报）时的告警文案 */
+  version_alert?: string | null
 }
 
 export interface ServiceListResponse {

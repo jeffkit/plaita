@@ -8,7 +8,7 @@ import signal
 import threading
 import time
 import uuid
-from typing import Dict, Any, Optional, Set, Tuple
+from typing import Dict, Any, Mapping, NamedTuple, Optional, Set, Tuple
 
 import argparse
 import importlib
@@ -278,10 +278,26 @@ _NODE_RETRY_CHAIN_MAX_DEPTH = 5
 DEFAULT_RESIDUE_SWEEP_INTERVAL_SECONDS = 300.0
 
 
-# flow 定义指纹的**算法标记**：只有算法口径本身变化（model_dump 行为、字段规范化）
+# flow 定义指纹的**算法标记**：只有算法口径本身变化（指纹输入的取法、字段规范化）
 # 才 bump。resume 时据它分级判定——算法不同但哈希相同说明定义没变（升级导致标签
 # 变化），可直接续跑；算法不同且哈希也不同才需要人工显式裁决。
-FLOW_HASH_ALGO = "flow-dump-json-sortkeys-v1"
+#
+# v2（#36）：指纹输入从「`Flow.model_validate` 之后的 `model_dump`」换成**原始存储
+# 定义 JSON**。旧口径把引擎的序列化字段集当成定义的一部分——引擎任一次给 Node/
+# Flow 增删序列化字段（哪怕带默认值）、pydantic 升版都会让同一份存储定义算出不同
+# 指纹，混部舰队（滚动升级窗口 / console 用 PLAITA_PYTHON 指向未同步的 venv）下
+# 在途 run 被批量终态化。原始 JSON 与模型演进无关，天然稳定。
+FLOW_HASH_ALGO = "flow-raw-json-sortkeys-v2"
+
+# 旧口径的算法标记（`model_dump(mode="json")`）。仅用于识别**存量状态**：这类状态的
+# 指纹与 v2 不可互比（同一定义必然算出不同哈希），resume 时按一次性重基线处理，
+# 不当作「定义已变更」（见 classify_flow_hash_change 的 rebaseline）。
+LEGACY_FLOW_HASH_ALGO = "flow-dump-json-sortkeys-v1"
+
+# 与当前口径**不可互比**、但已确认由旧口径产生的标记集合。None = 早于算法标记字段
+# 的构建（0.6.1 及更早）写下的状态——那时 flow_hash 只有 dump 一种口径，故 None 与
+# LEGACY_FLOW_HASH_ALGO 同义。
+INCOMPARABLE_FLOW_HASH_ALGOS = (None, LEGACY_FLOW_HASH_ALGO)
 
 # resume 显式裁决键：允许在指纹变化时继续续跑（升级导致算法口径变化后的补救入口）。
 # 必须由调用方在 resume data 里显式传入，且会打 WARNING + 把新指纹写回状态。
@@ -290,6 +306,13 @@ ALLOW_FLOW_HASH_CHANGE_KEY = "allow_flow_hash_change"
 # 优雅停机时等待在途任务的上限（秒）；超时则放弃当前步并退出——消息不 ack，
 # 由其他 worker 经 XCLAIM 从**步界检查点**续跑（该步会重放，业务节点须幂等）。
 DEFAULT_WORKER_DRAIN_TIMEOUT = 30.0
+
+
+class _CachedDefinition(NamedTuple):
+    """一条定义缓存登记：解析后的 ``Flow`` + **原始存储定义**（指纹基准，见 #36）。"""
+
+    flow: Flow
+    raw: Mapping[str, Any]
 
 
 def _drain_timeout_from_env() -> float:
@@ -320,6 +343,9 @@ def classify_flow_hash_change(
     - ``no_guard``  ：老状态没有指纹，跳过校验（存量语义）
     - ``match``     ：指纹相同、算法标签也相同
     - ``refresh``   ：指纹相同但算法标签升级——定义确实没变，续跑并刷新标签
+    - ``rebaseline``：指纹由**旧口径**算得，与当前口径不可互比（#36）——跨口径比大小
+      得不出「定义变没变」的结论，故按一次性重基线放行（WARNING + 指标留痕），
+      绝不据此终态化在途执行
     - ``accepted``  ：指纹不同 + 算法标签不同 + 调用方显式放行（升级后的补救入口）
     - ``mismatch``  ：其余指纹不同——按定义变更处理，拒绝续跑并给可执行的提示
     """
@@ -327,6 +353,8 @@ def classify_flow_hash_change(
         return "no_guard"
     if stored_hash == current_hash:
         return "match" if stored_algo == current_algo else "refresh"
+    if stored_algo in INCOMPARABLE_FLOW_HASH_ALGOS:
+        return "rebaseline"
     algo_changed = bool(stored_algo) and stored_algo != current_algo
     if algo_changed and allow_change:
         return "accepted"
@@ -602,8 +630,14 @@ class FlowWorker:
         self._drain_timer: Optional[threading.Timer] = None
         self._drain_started_at: Optional[float] = None
         # 注意：_draining 在 _drain_event 里惰性兜底，__new__ 构造的骨架 worker 也安全
-        # 初始化流程定义缓存，使用TTL缓存
+        # 初始化流程定义缓存，使用TTL缓存（值 = _CachedDefinition：解析结果与原始定义
+        # 同条目，见 _load_flow_definition）
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
+        # resume 指纹兼容门的裁决计数（#36 观测面）：键 = (裁决, 成因)。导出为
+        # plaita_resume_guard_total{decision,category}——混部舰队下「引擎换了」与
+        # 「定义真被改」在指标上可区分，不必逐条翻 error message。
+        self._resume_guard_counts: Dict[Tuple[str, str], int] = {}
+        self._resume_guard_lock = threading.Lock()
         self.execution_lease = execution_lease or NullExecutionLease()
         self.lease_ttl_seconds = lease_ttl_seconds
         # 取消监听（波次③：步内可中断）：基类先建好登记表与停止位，内存 worker
@@ -1159,32 +1193,38 @@ class FlowWorker:
         if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
             self._node_timings.pop(execution_id, None)
     
-    def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
-        """
-        获取流程定义，支持按ID和版本获取
-        
-        Args:
-            flow_id: 流程ID
-            version: 流程版本，如果不指定则获取最新版本
-            
+    @staticmethod
+    def _definition_cache_key(flow_id: str, version: Optional[str]) -> str:
+        """定义缓存键（含租户段：同名流程可共存于不同租户 namespace）。"""
+        return f"{current_tenant()}:{flow_id}:{version or 'latest'}"
+
+    def _load_flow_definition(
+        self, flow_id: str, version: Optional[str] = None
+    ) -> Tuple[Flow, Dict[str, Any]]:
+        """取「解析后 ``Flow`` + ``Flow.model_validate`` 之前的原始存储定义」。
+
+        两者同键成对缓存：指纹必须算在**原始定义**上（#36），若原始定义与解析
+        结果分属两个缓存，任一侧被 TTL 挤掉都会让指纹口径静默降级。
+
         Returns:
-            Dict[str, Any]: 流程定义
-            
+            ``(Flow, 原始存储定义 dict)``——命中的永远是成对的两个，不会出现
+            「Flow 在缓存里但原始定义被挤掉」导致的指纹口径静默降级。
+
         Raises:
             ValueError: 如果找不到流程定义或版本不匹配
         """
-        # 生成缓存键（含租户段：同名流程可共存于不同租户 namespace）
-        cache_key = f"{current_tenant()}:{flow_id}:{version or 'latest'}"
-        
+        cache_key = self._definition_cache_key(flow_id, version)
+
         # 尝试从缓存获取
-        if cache_key in self.flow_definition_cache:
+        cached = self.flow_definition_cache.get(cache_key)
+        if cached is not None:
             logger.info("从缓存获取流程定义: %s", cache_key)
-            return self.flow_definition_cache[cache_key]
-        
+            return cached.flow, cached.raw
+
         # 缓存未命中，从存储获取
         logger.info("从存储获取流程定义: %s, 版本: %s", flow_id, version or 'latest')
         flow_definition = self.flow_storage.get_flow(flow_id, version)
-        
+
         if not flow_definition:
             # Delegate diagnostic details to the storage layer via an optional
             # diagnose() method — FlowWorker must not peek at storage internals
@@ -1207,27 +1247,105 @@ class FlowWorker:
             error_msg = f"解析流程定义失败: {e}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        
-        self.flow_definition_cache[cache_key] = flow
-        
-        return flow
-    
-    # ---- flow 定义指纹（波次二任务②）----
 
-    def _compute_flow_hash(self, flow: Flow) -> str:
-        """对实际加载执行的 Flow 计算稳定指纹（sha256 of 规范化 JSON dump）。
+        self.flow_definition_cache[cache_key] = _CachedDefinition(flow, flow_definition)
 
-        用 ``model_dump(mode="json")`` + ``sort_keys`` 保证跨进程确定性（同一
-        pydantic 版本下字段序稳定，sort_keys 再兜底 dict 序）。指纹在 start
-        时写入 ExecutionState.flow_hash，resume 时不一致即拒绝续跑。
+        return flow, flow_definition
+
+    def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
         """
+        获取流程定义，支持按ID和版本获取
+
+        Args:
+            flow_id: 流程ID
+            version: 流程版本，如果不指定则获取最新版本
+
+        Returns:
+            Dict[str, Any]: 流程定义
+
+        Raises:
+            ValueError: 如果找不到流程定义或版本不匹配
+        """
+        return self._load_flow_definition(flow_id, version)[0]
+
+    def get_flow_definition_raw(
+        self, flow_id: str, version: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """取存储层的原始流程定义（``Flow.model_validate`` 之前的 dict）。
+
+        指纹口径的基准（#36）：与引擎的模型演进无关，同一份存储定义在任何
+        plaita/pydantic 版本下算出同一指纹。
+        """
+        return self._load_flow_definition(flow_id, version)[1]
+
+    # ---- flow 定义指纹（波次二任务②，#36 改口径）----
+
+    def _compute_flow_hash(self, definition: "Flow | Mapping[str, Any]") -> str:
+        """flow 定义指纹（sha256 of 规范化 JSON）。
+
+        - **原始存储定义**（``Mapping``，``Flow.model_validate`` 之前）：正式口径
+          （``FLOW_HASH_ALGO``）。引擎给 Flow/Node 增删序列化字段、pydantic 升版
+          都不改存储 JSON，故不漂移；定义内容真的被改（改图、改参数、改版本号、
+          显式写出/删除 legacy 键）仍然改指纹——反过来说，「同一份存储定义在任何
+          引擎版本下同哈希」正是 resume 守卫要的语义。
+        - 已解析的 ``Flow``：退回旧口径（``model_dump(mode="json")``），只用于
+          拿不到原始定义的注入路径（子类/单测覆写了 ``get_flow_definition``）；
+          两种口径不可互比，调用方须按 ``_definition_fingerprint`` 给出的算法
+          标记落盘。
+        """
+        payload_source = (
+            definition.model_dump(mode="json")
+            if isinstance(definition, Flow)
+            else definition
+        )
         payload = json.dumps(
-            flow.model_dump(mode="json"),
+            payload_source,
             sort_keys=True,
             ensure_ascii=False,
             default=str,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _definition_fingerprint(
+        self, flow_id: str, version: Optional[str], flow: Flow
+    ) -> Tuple[str, str]:
+        """``(指纹, 算法标记)``：按原始存储定义算（正式口径），拿不到则退回旧口径。
+
+        原始定义不可得的唯一场景是``get_flow_definition``被覆写（子类/单测注入
+        ``Flow``）——此时退回 dump 口径并**按旧标记落盘**，让 resume 侧的判定表
+        知道「这个哈希与正式口径不可比」，而不是静默按新标记冒充。
+        """
+        try:
+            raw = self.get_flow_definition_raw(flow_id, version)
+        except ValueError:
+            raw = None
+        if raw is None:
+            logger.warning(
+                "定义 %s@%s 的原始存储定义不可得（调用方注入了 Flow），指纹退回"
+                "解析后 dump 口径（%s）——与 %s 不可互比",
+                flow_id,
+                version or "latest",
+                LEGACY_FLOW_HASH_ALGO,
+                FLOW_HASH_ALGO,
+            )
+            return self._compute_flow_hash(flow), LEGACY_FLOW_HASH_ALGO
+        return self._compute_flow_hash(raw), FLOW_HASH_ALGO
+
+    def _record_resume_guard(self, decision: str, category: str) -> None:
+        """记一次 resume 指纹兼容门裁决（导出于 ``/metrics``，见 metrics_text）。
+
+        ``category`` 把「定义真被改」（同口径失配 → flow_definition_changed）与
+        「状态由别的口径/构建写下」（口径标记不同 → engine_version_drift，疑似
+        混部）/「指纹由旧口径算得」（legacy_algo）分开——混部舰队下整批终态化在
+        指标上一眼可辨，不必逐条读 message。
+        """
+        counts = getattr(self, "_resume_guard_counts", None)
+        lock = getattr(self, "_resume_guard_lock", None)
+        if counts is None or lock is None:  # __new__ 构造的骨架 worker（测试）无此字段
+            return
+        key = (str(decision), str(category))
+        with lock:
+            counts[key] = counts.get(key, 0) + 1
 
     # ---- start 幂等键（波次二任务③）----
 
@@ -1483,15 +1601,18 @@ class FlowWorker:
                         )
 
             # 先落 running 行再执行（P0 可见性）：首节点期间 /api/executions
-            # 查得到此行、cancel 有锚。flow_hash：对实际加载执行的 Flow 计算
-            # 指纹（波次二任务②）随行落盘——resume 时与当前定义比对，防运行
-            # 中改定义后续跑走错分支。
+            # 查得到此行、cancel 有锚。flow_hash：对**原始存储定义**计算指纹
+            # （波次二任务②/#36 口径）随行落盘——resume 时与当前定义比对，防
+            # 运行中改定义后续跑走错分支；原始 JSON 与模型演进无关，故引擎/
+            # pydantic 版本漂移本身不改指纹。engine_version：写下本行的引擎
+            # 版本，resume 用它区分「解读代码换了」与「定义真被改」。
+            flow_hash, flow_hash_algo = self._definition_fingerprint(flow_id, version, flow)
             state = ExecutionState(
                 execution_id=execution_id,
                 flow_id=flow_id,
                 flow_version=version,
-                flow_hash=self._compute_flow_hash(flow),
-                flow_hash_algo=FLOW_HASH_ALGO,
+                flow_hash=flow_hash,
+                flow_hash_algo=flow_hash_algo,
                 engine_version=_engine_version(),
                 tenant_id=current_tenant(),
                 context={},
@@ -1727,15 +1848,21 @@ class FlowWorker:
         # 获取流程定义
         flow = self.get_flow_definition(flow_id, version)
 
-        # flow 定义指纹（波次二任务②）：worker 的定义 TTLCache 有 300s 窗口、
-        # console engine_sync 可直接覆盖 Redis 定义——挂起执行 resume 用
+        # flow 定义指纹（波次二任务②/#36）：worker 的定义 TTLCache 有 300s
+        # 窗口、console engine_sync 可直接覆盖 Redis 定义——挂起执行 resume 用
         # latest 版本定义时，若定义自启动后被改过，``_get_next_from_last``
-        # 找不到节点/走错分支且无任何告警。指纹在 lease 内判定（与活
-        # worker 的推进写串行化，防「他人持租约推进中却被误终态化」），
-        # 不一致 → 终态化 error + raise ValueError（poison ack）——意图是
-        # 可观测的终态而不是重投风暴。老状态 flow_hash 为 None → 跳过校验
-        # （零回归）。
-        current_flow_hash = self._compute_flow_hash(flow)
+        # 找不到节点/走错分支且无任何告警。指纹在 lease 内判定（与活 worker
+        # 的推进写串行化，防「他人持租约推进中却被误终态化」），不一致 →
+        # 终态化 error + raise ValueError（poison ack）——意图是可观测的终态
+        # 而不是重投风暴。老状态 flow_hash 为 None → 跳过校验（零回归）。
+        #
+        # 指纹算在**原始存储定义**上（#36）：引擎/节点包/pydantic 版本变化不改
+        # 同一份定义的指纹，故失配只剩「定义真被改」一种解释——混部舰队不再被
+        # 解读代码的升级批量终态化（旧口径算的是解析后 model_dump，见
+        # LEGACY_FLOW_HASH_ALGO）。
+        current_flow_hash, current_algo = self._definition_fingerprint(
+            flow_id, version, flow
+        )
 
         # 解析流程定义
         logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
@@ -1772,7 +1899,7 @@ class FlowWorker:
                     "cancelled_at_resume": True,
                 }
 
-            # flow 定义指纹校验（波次二任务②）在 G1 retry 唤醒**之前**：
+            # flow 定义指纹校验（波次二任务②/#36）在 G1 retry 唤醒**之前**：
             # 定义被改时执行保持 error（hash 不匹配信息落盘），修复定义后
             # 仍可再 retry——G1 的「error 态可反复唤醒」语义不被破坏。
             # 取消是用户意图，已在上方优先放行。写盘走 _persist_state_or_raise
@@ -1780,7 +1907,16 @@ class FlowWorker:
             # → run() 按 ValueError poison ack（终态已可观测，重投无意义）。
             stored_flow_hash = getattr(state, "flow_hash", None)
             stored_algo = getattr(state, "flow_hash_algo", None)
-            algo_changed = bool(stored_algo) and stored_algo != FLOW_HASH_ALGO
+            stored_engine = getattr(state, "engine_version", None)
+            current_engine = _engine_version()
+            # 成因区分（#36）：**口径标记**是否变化才是成因的判据。v2 指纹算在
+            # 原始存储定义上，与引擎版本无关——同口径下哈希不同只能是定义真被
+            # 改；口径标记不同才说明该状态由别的构建/口径写下（混部舰队、滚升
+            # 窗口、console 用 PLAITA_PYTHON 指向未同步 venv）。engine_version
+            # 的漂移只作佐证记进 error（stored/current_engine_version），不当作
+            # 成因——它永不随 resume 覆写，按它分类会把此后每一次失配都永久
+            # 归到「混部」，把值班视线从真正的定义变更上引开。
+            algo_changed = bool(stored_algo) and stored_algo != current_algo
             allow_hash_change = bool(
                 isinstance(data, dict) and data.get(ALLOW_FLOW_HASH_CHANGE_KEY)
             )
@@ -1788,11 +1924,30 @@ class FlowWorker:
                 stored_hash=stored_flow_hash,
                 current_hash=current_flow_hash,
                 stored_algo=stored_algo,
-                current_algo=FLOW_HASH_ALGO,
+                current_algo=current_algo,
                 allow_change=allow_hash_change,
             )
-            if hash_decision in ("mismatch", "accepted"):
-                if hash_decision == "accepted":
+            if hash_decision in ("mismatch", "accepted", "rebaseline"):
+                if hash_decision == "rebaseline":
+                    # 存量状态（旧口径指纹）：跨口径比大小得不出「定义变没变」的
+                    # 结论，据此终态化就是 #36 报的批量误杀。一次性重基线到当前
+                    # 口径 + 留痕（WARNING + 指标），执行继续推进。
+                    logger.warning(
+                        "执行 %s 的 flow 指纹由旧口径算得（%s → %s，引擎 %s → %s），"
+                        "跨口径不可比，按一次性重基线放行: stored=%s... current=%s...",
+                        execution_id,
+                        stored_algo or "unknown",
+                        current_algo,
+                        stored_engine or "unknown",
+                        current_engine,
+                        stored_flow_hash[:12],
+                        current_flow_hash[:12],
+                    )
+                    state.flow_hash = current_flow_hash
+                    state.flow_hash_algo = current_algo
+                    self._persist_state_or_raise(execution_id, state, "flow_hash_rebaseline")
+                    self._record_resume_guard("rebaseline", "legacy_algo")
+                elif hash_decision == "accepted":
                     # 升级后的人工裁决入口：显式承认「换算法/换定义」并续跑，
                     # 必须留痕（WARNING + 状态里刷新指纹），不静默放行。
                     logger.warning(
@@ -1802,37 +1957,66 @@ class FlowWorker:
                         stored_flow_hash[:12],
                         stored_algo or "unknown",
                         current_flow_hash[:12],
-                        FLOW_HASH_ALGO,
+                        current_algo,
                     )
                     state.flow_hash = current_flow_hash
-                    state.flow_hash_algo = FLOW_HASH_ALGO
+                    state.flow_hash_algo = current_algo
                     self._persist_state_or_raise(execution_id, state, "flow_hash_change_accepted")
+                    self._record_resume_guard(
+                        "accepted",
+                        "engine_version_drift" if algo_changed else "flow_definition_changed",
+                    )
                 else:
+                    # 口径标记不同 = 该状态由别的构建/口径写下（混部/滚升窗口），
+                    # 其指纹与当前口径不可比，只能靠显式放行裁决；口径相同而哈希
+                    # 不同 = 存储定义确实变了，开关对这类失配**无效**（判定表见
+                    # classify_flow_hash_change）。两者都终态化——重投 N 次结果
+                    # 相同，只会制造 DLQ 噪音。
+                    mismatch_category = (
+                        "engine_version_drift" if algo_changed else "flow_definition_changed"
+                    )
                     mismatch_msg = (
                         "flow 定义自启动后已变更，hash 不匹配，执行无法安全续跑 "
                         f"(execution_id={execution_id}, flow_id={flow_id}, "
                         f"stored_hash={stored_flow_hash[:12]}..., "
                         f"current_hash={current_flow_hash[:12]}..., "
-                        f"stored_algo={stored_algo or 'unknown'}, current_algo={FLOW_HASH_ALGO})"
+                        f"stored_algo={stored_algo or 'unknown'}, current_algo={current_algo}, "
+                        f"stored_engine={stored_engine or 'unknown'}, "
+                        f"current_engine={current_engine})"
                     )
                     logger.error(mismatch_msg)
                     state.status = "error"
                     state.error = {
                         "message": mismatch_msg,
+                        # 机器可读成因（#36）：flow_definition_changed /
+                        # engine_version_drift（= 口径标记不同，疑似混部）
+                        "category": mismatch_category,
                         "stored_flow_hash": stored_flow_hash,
                         "current_flow_hash": current_flow_hash,
                         "stored_flow_hash_algo": stored_algo,
-                        "current_flow_hash_algo": FLOW_HASH_ALGO,
-                        # 升级疑似（算法标记变了且哈希也不同）：给运维明确下一步，
-                        # 而不是只丢一句「hash 不匹配」。
+                        "current_flow_hash_algo": current_algo,
+                        "stored_engine_version": stored_engine,
+                        "current_engine_version": current_engine,
+                        # 升级疑似（口径标记变了）：给运维明确下一步，而不是只丢
+                        # 一句「hash 不匹配」。提示必须**可执行**——同口径失配下
+                        # allow_flow_hash_change 不放行（classify 的 accepted 只
+                        # 认口径变化），提示若指向它就等于让值班照做后撞回同一条
+                        # 错误。
                         "upgrade_suspected": algo_changed,
                         "hint": (
-                            "引擎升级可能改变指纹算法；确认流程定义未变且可接受后，"
-                            f"在 resume data 里带 {ALLOW_FLOW_HASH_CHANGE_KEY}: true 显式放行"
-                        ) if algo_changed else None,
+                            f"该状态由不同指纹口径的构建写下（{stored_algo} → "
+                            f"{current_algo}），疑似混部/滚升未收尾；确认流程定义未变"
+                            f"且可接受后，在 resume data 里带 {ALLOW_FLOW_HASH_CHANGE_KEY}"
+                            ": true 显式放行"
+                        ) if algo_changed else (
+                            "同口径下指纹不同 = 流程定义自启动后已被改动：必须改回定义或"
+                            f"新建执行；{ALLOW_FLOW_HASH_CHANGE_KEY} 只对口径标记不同的"
+                            "失配生效，同口径下无效"
+                        ),
                     }
                     state.end_time = datetime.now().isoformat()
                     self._persist_state_or_raise(execution_id, state, "flow_hash_mismatch")
+                    self._record_resume_guard("mismatch", mismatch_category)
                     raise FlowHashMismatchError(mismatch_msg)
             elif hash_decision == "refresh":
                 # 哈希相同 → 定义确实没变，只是算法标记变了（引擎升级）：续跑并刷新标记
@@ -1840,13 +2024,12 @@ class FlowWorker:
                     "执行 %s 的 flow 指纹一致但算法标记升级（%s → %s），续跑并刷新标记",
                     execution_id,
                     stored_algo,
-                    FLOW_HASH_ALGO,
+                    current_algo,
                 )
-                state.flow_hash_algo = FLOW_HASH_ALGO
+                state.flow_hash_algo = current_algo
+                self._record_resume_guard("refresh", "fingerprint_algo_upgraded")
 
             # 引擎版本跨 minor：只告警不拦截（硬门由 flow_hash 承担，这里给可观测性）
-            stored_engine = getattr(state, "engine_version", None)
-            current_engine = _engine_version()
             if stored_engine and _major_minor(stored_engine) != _major_minor(current_engine):
                 logger.warning(
                     "执行 %s 由引擎 %s 创建，当前 %s：跨 minor 续跑，"
@@ -2369,7 +2552,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "queue_name": queue_name,
                     "redis_url": redis_url,
                     "cache_size": cache_size,
-                    "cache_ttl": cache_ttl
+                    "cache_ttl": cache_ttl,
+                    # 引擎版本（#36）：console 可用 PLAITA_PYTHON 给 worker 指定
+                    # 业务 venv 解释器，混部舰队里 worker 跑的未必是 console 那套
+                    # plaita——此前注册元数据只有队列/缓存项，新旧 worker 在服务页
+                    # 长得一模一样，滚升窗口的旧实例完全不可观测。ServiceInfo 被
+                    # 心跳线程反复序列化，故注册与每次心跳都带版本。
+                    "plaita_version": _engine_version(),
                 },
                 ttl=registry_ttl,
                 heartbeat_interval=heartbeat_interval
@@ -3322,6 +3511,26 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "counter" if key != "pending" else "gauge",
                     help_text,
                 ))
+        # resume 指纹兼容门裁决数（#36）：与执行状态里的 error.category 同源，供
+        # 混部舰队告警（「一批 mismatch」vs「一批 rebaseline」含义完全不同）。
+        # 快照必须在同一把锁下取：`_record_resume_guard` 从消费线程写、本方法从
+        # /metrics 的 handler 线程读，直接迭代会命中「dictionary changed size
+        # during iteration」→ 抓取端返回空 500。
+        guard_counts = getattr(self, "_resume_guard_counts", None)
+        guard_lock = getattr(self, "_resume_guard_lock", None)
+        # 骨架 worker（__new__ 构造，测试）无这两个字段
+        guard_snapshot: Tuple[Tuple[Tuple[str, str], int], ...] = ()
+        if guard_counts is not None and guard_lock is not None:
+            with guard_lock:
+                guard_snapshot = tuple(sorted(guard_counts.items()))
+        for (decision, category), value in guard_snapshot:
+            metrics.append(Metric(
+                "resume_guard_total",
+                value,
+                {"decision": decision, "category": category},
+                "counter",
+                "resume 的 flow 指纹兼容门裁决数（按裁决/成因分档）",
+            ))
         return render_prometheus(metrics)
 
     def _start_metrics_server(self) -> None:

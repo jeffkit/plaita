@@ -112,25 +112,44 @@ except 终态化成 error，一次重复投递就把可恢复的挂起执行永�
 - **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
   失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
 
-## 运行中改定义（flow 定义指纹，2026-10 二波） {#运行中改定义}
+## 运行中改定义（flow 定义指纹，2026-10 二波 / #36 改口径） {#运行中改定义}
 
 worker 的流程定义 TTLCache 有 300s 窗口、console engine_sync 可直接覆盖 Redis
 定义——挂起执行 resume 用 latest 版本定义时，若定义自启动后被改，图遍历会
 找不到节点/走错分支且无告警。现版语义：
 
-- `start_flow` 对**实际加载执行的 Flow** 计算指纹
-  （sha256 of `model_dump(mode="json")` + sort_keys 规范化 JSON）写入
-  `ExecutionState.flow_hash`；
-- `resume_flow` 取得租约后比对：不一致 → 终态化 error（message 写明「flow
-  定义自启动后已变更，hash 不匹配，执行无法安全续跑」，附前后指纹）+ 消息
-  poison ack——**故意选可观测的终态而不是重投风暴**（定义被改是确定性不一致，
-  重投 N 次结果相同）；
+- `start_flow` 对**原始存储定义 JSON**（`Flow.model_validate` 之前的 dict，
+  即 `flow_storage.get_flow()` 的返回值）计算指纹（sha256 + sort_keys 规范化）
+  写入 `ExecutionState.flow_hash`，口径标记 `flow_hash_algo`
+  = `flow-raw-json-sortkeys-v2`；
+- **为什么不是解析后的 `model_dump`**（#36）：那样算等于把引擎的序列化字段集
+  当成定义的一部分——引擎任一次给 Node/Flow 增删序列化字段（哪怕带默认值）、
+  pydantic 升版，都会让同一份存储定义算出不同指纹。混部舰队（滚动升级窗口、
+  console 用 `PLAITA_PYTHON` 指向未同步的 venv）下这是在途 run 被**批量**终态化
+  的来源：定义没被改，改的是解读代码；
+- `resume_flow` 取得租约后比对，判定表见
+  [运维 Runbook · flow_hash 兼容门](ops-runbook.md#flow_hash-兼容门引擎升级最容易误伤的一处)。
+  同口径不一致 → 终态化 error（message 写明「flow 定义自启动后已变更，hash
+  不匹配，执行无法安全续跑」，附前后指纹 + `category`）+ 消息 poison ack——
+  **故意选可观测的终态而不是重投风暴**（定义被改是确定性不一致，重投 N 次
+  结果相同）；
+- **存量状态**（`flow_hash_algo` 缺失或为旧标记 `flow-dump-json-sortkeys-v1`）
+  的指纹与当前口径**不可互比**——跨口径比大小得不出「定义变没变」的结论，故
+  一次性重基线放行（WARNING + `plaita_resume_guard_total{decision="rebaseline"}`），
+  不据此终态化；
 - 老状态 `flow_hash` 为 None（旧版本 worker 写入）→ 跳过校验，零回归；
 - 在租约内判定是为了与活 worker 的推进写串行化：不会把他人正持有租约推进中
   的执行误终态化。
 
 **运维含义**：改定义前应确认没有 running/suspended 的在途执行（console 按
 flow_id 查询非终态执行）；确需强升时接受在途执行被终态化 error、由上游重提。
+「一批指纹失配」先看 `error.category`（见状态模型表）——判据是**口径标记**：
+`flow_definition_changed` 才是定义真被改（必须改回定义或新建执行，
+`allow_flow_hash_change` 对它无效）；`engine_version_drift` 表示状态由别的
+口径标记写下（先怀疑混部：滚升未收尾 / `PLAITA_PYTHON` 指向未同步 venv，
+对照服务页的 `plaita_version` 再下结论）。**灰度/滚升期间建议先 drain 旧
+worker 再上新的**：反过来（旧 worker resume 新 worker 写下的状态）旧代码仍会
+按旧口径判失配并终态化，本轮修复无法改变已被部署的旧版本行为。
 
 ## start 幂等键 dedup_key（2026-10 二波） {#start-幂等键}
 
@@ -219,9 +238,9 @@ flowchart TD
 |------|------|
 | `execution_id` | 执行 ID |
 | `flow_id` / `flow_version` | 所属流程与版本 |
-| `flow_hash` | 启动时 Flow 定义指纹（可选；老状态为 None，resume 时比对防运行中改定义，见上） |
-| `flow_hash_algo` | 指纹算法标记（可选）。resume 时**分级**判定：算法同→严格比对；算法不同但指纹相同→直接续跑并刷新标记；算法不同且指纹不同→需显式 `allow_flow_hash_change` 放行。见 ops-runbook「flow_hash 兼容门」 |
-| `engine_version` | 创建该执行的引擎版本（`plaita.__version__`，可选）。仅观测：跨 minor resume 打 WARNING，不拦截；不随 resume 覆写（保留「创建者版本」语义） |
+| `flow_hash` | 启动时**原始存储定义 JSON** 的指纹（可选；老状态为 None，resume 时比对防运行中改定义，见上） |
+| `flow_hash_algo` | 指纹口径标记（可选）。`flow-raw-json-sortkeys-v2` = 当前（原始定义 JSON），`flow-dump-json-sortkeys-v1`/缺失 = 存量（解析后 dump）。resume 时**分级**判定：同口径→严格比对；异口径但指纹相同→直接续跑并刷新标记；**异口径且指纹不同→跨口径不可比，一次性重基线放行**（#36）；未知标记 + 指纹不同→需显式 `allow_flow_hash_change` 放行。见 ops-runbook「flow_hash 兼容门」 |
+| `engine_version` | 创建该执行的引擎版本（`plaita.__version__`，可选）。仅观测：跨 minor resume 打 WARNING，不拦截；不随 resume 覆写（保留「创建者版本」语义）。指纹失配时原样记进 `error.stored_engine_version` / `current_engine_version` 作**佐证**——`error.category` 由 `flow_hash_algo` 是否变化决定（v2 指纹与引擎版本无关） |
 | `context` | 执行上下文（即 Checkpoint） |
 | `status` | `running` / `suspended` / `completed` / `error` |
 | `start_time` / `last_update_time` / `end_time` | 时间戳（ISO 字符串） |

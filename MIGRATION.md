@@ -89,6 +89,41 @@
   `register_runner()` 不再能替换内置语言 `python` / `js`（会抛 `ValueError`）——
   内置语言必须走档位表；自定义语言不受语言白名单约束。
 
+### flow 定义指纹改算「原始存储定义」（plaita#36）
+
+`ExecutionState.flow_hash` 的输入从「`Flow.model_validate` 之后的
+`model_dump(mode="json")`」改为**存储层原始定义 JSON**（`flow_storage.get_flow()`
+的返回值），算法标记 `flow_hash_algo` 由 `flow-dump-json-sortkeys-v1` 升为
+`flow-raw-json-sortkeys-v2`。
+
+- 变更原因：旧口径把引擎的序列化字段集当成定义的一部分——引擎任一次给
+  Node/Flow 增删序列化字段（哪怕带默认值）、pydantic 升版，都会让**同一份
+  存储定义**算出不同指纹。混部舰队（滚动升级窗口、console 用
+  `PLAITA_PYTHON` 指向未同步的 venv）下，旧 worker start 写 hash A、新 worker
+  resume 算出 hash B → 在途 run 被**批量**终态化为 error，而文档给的处置
+  「修复定义后 retry」对此无效（定义没被改，改的是解读代码）。
+- 变更后：同一份存储定义在任何 plaita/pydantic 版本下同指纹；同口径下失配
+  = 定义真被改（仍终态化 error）；**存量状态**（`flow_hash_algo` 缺失或为
+  `flow-dump-json-sortkeys-v1`）与当前口径**不可互比** → 一次性重基线放行
+  （WARNING + `plaita_resume_guard_total{decision="rebaseline"}`），不再据此
+  终态化。指纹失配的 error 新增 `category`（判据是**口径标记**：相同 →
+  `flow_definition_changed`，不同 → `engine_version_drift`）与
+  `stored_engine_version`/`current_engine_version`（佐证）；`hint` 与判定表
+  一致——同口径失配下明说 `allow_flow_hash_change` 无效（定义必须改回或新建
+  执行），口径标记不同的失配才给「可显式放行」的下一步。
+- 迁移：无需改代码。可观测面建议同步：
+  - worker 注册元数据新增 `plaita_version`（`plaita.__version__`），console
+    服务页展示并在低于 `PLAITA_CONSOLE_MIN_WORKER_VERSION` 时告警——配置该
+    变量即可让滚升收尾期的旧 worker 无处藏身。覆盖面是**注册表里注册过的
+    实例**（`flow_worker` 默认自注册）：console `ServiceManager` 拉起的托管
+    实例卡不含版本（控制台不知道 `PLAITA_PYTHON` 那个 venv 装的是哪版）；
+  - 值守按 `plaita_resume_guard_total{decision,category}` 分档：一批
+    `rebaseline` 是本次升级的预期过渡，一批 `mismatch` 才是定义被改。
+- 灰度纪律：先 drain 旧 worker 再上新版本。反向（旧 worker resume 新 worker
+  写下的状态）旧代码仍按旧口径判失配并终态化——这是已部署旧版本的行为，
+  本次修复无法改变。详见
+  [运维 Runbook · flow_hash 兼容门](docs-site/docs/distributed/ops-runbook.md#flow_hash-兼容门引擎升级最容易误伤的一处)。
+
 ### code 沙箱后端白名单在生产入口默认开启（plaita#22）
 
 `CodeNode.sandbox_backend` 由**流程 JSON** 逐节点声明，而流程 JSON 来自流程作者：
