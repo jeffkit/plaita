@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from plaita_ai.console_client import (
@@ -99,3 +100,68 @@ def test_error_carries_status_and_detail():
 
 def test_terminal_statuses():
     assert TERMINAL_STATUSES == frozenset({"completed", "failed", "error", "cancelled"})
+
+
+def _capturing_client(**config_overrides):
+    """Client whose transport records (method, path, x-tenant-id) per request."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("x-tenant-id")))
+        return httpx.Response(200, json={})
+
+    config_kwargs = {"admin_api_key": "test-key"}
+    config_kwargs.update(config_overrides)
+    client = ConsoleClient(
+        ConsoleConfig(base_url="http://fake", **config_kwargs),
+        transport=httpx.MockTransport(handler),
+    )
+    return client, seen
+
+
+def test_tenant_id_header_on_read_and_write():
+    client, seen = _capturing_client(tenant_id="acme")
+    client.get_flow("demo")
+    client.save_version("demo", "1.0.1", "{}")
+    assert seen == [
+        ("GET", "/api/flows/demo", "acme"),
+        ("PUT", "/api/flows/demo/versions/1.0.1", "acme"),
+    ]
+
+
+def test_no_tenant_header_when_unset():
+    client, seen = _capturing_client()
+    client.get_flow("demo")
+    client.save_version("demo", "1.0.1", "{}")
+    assert [tenant for _, _, tenant in seen] == [None, None]
+
+
+def test_session_auth_never_sends_tenant_header():
+    """会话路径钉死活跃租户；带 X-Tenant-ID 会被 console 403。"""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, request.headers.get("x-tenant-id")))
+        if request.url.path == "/api/auth/login":
+            return httpx.Response(200, json={"token": "sess-1"})
+        return httpx.Response(200, json={})
+
+    client = ConsoleClient(
+        ConsoleConfig(
+            base_url="http://fake",
+            username="sup",
+            password="pw",
+            tenant_id="acme",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    client.get_flow("demo")
+    assert calls == [("/api/auth/login", None), ("/api/flows/demo", None)]
+
+
+def test_from_env_reads_tenant_id():
+    config = ConsoleConfig.from_env(
+        {"PLAITA_CONSOLE_URL": "http://console", "PLAITA_CONSOLE_TENANT_ID": "acme"}
+    )
+    assert config.tenant_id == "acme"
+    assert ConsoleConfig.from_env({"PLAITA_CONSOLE_URL": "http://console"}).tenant_id is None

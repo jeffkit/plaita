@@ -208,6 +208,36 @@ def test_same_flow_id_allowed_across_tenants(client):
     assert r.status_code == 409
 
 
+def test_api_key_tenant_header_scopes_read_and_write(client):
+    """#61 契约：API-Key + X-Tenant-ID 时读限定该租户、写落该租户。
+
+    plaita-ai 的 ConsoleClient 依赖这条：不带租户头时读是跨租户并集、写回退
+    default，同一 flow_id 的读写会分叉到不同租户。
+    """
+    store = flow_store.get_flow_store()
+    tenants_svc.create_tenant(store, "acme", "Acme Inc")
+    store.create_flow("default-flow", tenant_id="default")
+    store.create_flow("acme-flow", tenant_id="acme")
+
+    headers = {"X-Admin-API-Key": ADMIN_KEY, "X-Tenant-ID": "acme"}
+    flows = client.get("/api/flows", headers=headers).json()["flows"]
+    assert {f["flow_id"] for f in flows} == {"acme-flow"}
+    assert all(f["tenant_id"] == "acme" for f in flows)
+
+    # 仅存在于 acme 的 flow：带租户头写版本 200，而非落 default 后的 404
+    r = client.put("/api/flows/acme-flow/versions/1.0.0",
+                   json={"definition": GOOD_DEF, "created_by": "plaita-ai"},
+                   headers=headers)
+    assert r.status_code == 200, r.text
+    assert store.get_version("acme-flow", "1.0.0", tenant_id="acme") is not None
+
+    # 反证：不带租户头 → 平台级写回退 default → 404（修复前的落点）
+    r = client.put("/api/flows/acme-flow/versions/1.0.1",
+                   json={"definition": GOOD_DEF},
+                   headers={"X-Admin-API-Key": ADMIN_KEY})
+    assert r.status_code == 404
+
+
 # ---- 会话租户切换 ----
 
 def test_switch_tenant_session_flow(client):

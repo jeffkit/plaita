@@ -40,6 +40,9 @@ class ConsoleConfig:
     username: Optional[str] = None
     password: Optional[str] = None
     timeout_s: float = 30.0
+    #: 多租户 console 的目标租户。空 = 平台全量视角读、写回退 default
+    #: （console ``tenant_scope`` 契约）；仅在 API-Key 路径下随请求发出。
+    tenant_id: Optional[str] = None
 
     @classmethod
     def from_env(cls, env: Optional[Dict[str, str]] = None) -> "ConsoleConfig":
@@ -57,6 +60,7 @@ class ConsoleConfig:
             username=env.get("PLAITA_CONSOLE_USERNAME") or None,
             password=env.get("PLAITA_CONSOLE_PASSWORD") or None,
             timeout_s=float(env.get("PLAITA_CONSOLE_TIMEOUT_S", "30")),
+            tenant_id=env.get("PLAITA_CONSOLE_TENANT_ID") or None,
         )
 
 
@@ -76,7 +80,12 @@ class ConsoleClient:
 
     def _auth_headers(self) -> Dict[str, str]:
         if self.config.admin_api_key:
-            return {"X-Admin-API-Key": self.config.admin_api_key}
+            headers = {"X-Admin-API-Key": self.config.admin_api_key}
+            # X-Tenant-ID 只对平台级凭证生效；会话用户带它会被 console 403
+            # （auth.py 钉死活跃租户），故 Authorization 路径不加。
+            if self.config.tenant_id:
+                headers["X-Tenant-ID"] = self.config.tenant_id
+            return headers
         if not self._session_token:
             self.login()
         return {"Authorization": f"Bearer {self._session_token}"}

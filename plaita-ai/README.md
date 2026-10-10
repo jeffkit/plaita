@@ -197,6 +197,8 @@ promotion ticket，由人执行发布；这是整个形态的安全底座。
 ```bash
 export PLAITA_CONSOLE_URL=http://127.0.0.1:8000     # console 地址
 export PLAITA_CONSOLE_ADMIN_API_KEY=...             # 机器首选；或 USERNAME/PASSWORD
+# 多租户 console：读写都落到该租户；不设则读跨租户全量、写回退 default
+export PLAITA_CONSOLE_TENANT_ID=acme
 # 可选：LLM 提案者 / 评测 judge（OpenAI 兼容端点）
 export PLAITA_AI_PROPOSER_BASE_URL=... PLAITA_AI_PROPOSER_MODEL=... PLAITA_AI_PROPOSER_API_KEY=...
 # 提案走 CoDeFlow：LLM 返回完整 @flow 源码（编译校验后转 IR 入库），
