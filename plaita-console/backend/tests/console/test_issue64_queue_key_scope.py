@@ -162,6 +162,40 @@ class TestTenantFilter:
         assert len(body["tasks"]) == 2
 
 
+def _seed_dlq(redis, tenant, flow_id="f1", key="plaita:flow:queue:dlq"):
+    """worker 侧 dead_letter 的信封形态（task_queue.dead_letter）。"""
+    return redis.xadd(key, {"payload": json.dumps({
+        "reason": "processing_failed:RuntimeError:boom",
+        "source_stream": "plaita:flow:queue",
+        "source_id": "1-0",
+        "delivery_count": 5,
+        "dead_lettered_at": 1699999999.5,
+        "payload": {"type": "start", "flow_id": flow_id, "tenant_id": tenant},
+    })})
+
+
+class TestDlqTenantFilter:
+    """同一范围问题（#64 只收口了单键端点）：``GET /api/queues/dlq`` 此前把
+    **全租户**的死信 payload 端给任何登录用户。"""
+
+    def test_viewer_only_sees_own_tenant_dlq_entries(self, env):
+        client, redis = env
+        _seed_dlq(redis, "default", flow_id="victim-flow")
+        _seed_dlq(redis, "acme", flow_id="mine")
+        body = client.get("/api/queues/dlq", headers=_viewer_headers(client)).json()
+        stream = next(s for s in body["streams"] if s["name"] == "plaita:flow:queue:dlq")
+        assert stream["length"] == 2, "XLEN 是共享 Stream 的物理量，不按租户拆分"
+        assert [e["payload"]["flow_id"] for e in stream["entries"]] == ["mine"]
+
+    def test_platform_view_sees_all_dlq_entries(self, env):
+        client, redis = env
+        _seed_dlq(redis, "default")
+        _seed_dlq(redis, "acme")
+        body = client.get("/api/queues/dlq", headers=_admin_headers()).json()
+        stream = next(s for s in body["streams"] if s["name"] == "plaita:flow:queue:dlq")
+        assert len(stream["entries"]) == 2
+
+
 class TestCountBounds:
     def test_count_capped_at_200(self, env):
         client, redis = env

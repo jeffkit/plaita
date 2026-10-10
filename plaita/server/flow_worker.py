@@ -16,12 +16,14 @@ import sys
 
 from cachetools import TTLCache
 from redis import Redis
+from redis.exceptions import RedisError
 from plaita.core.errors import ResumeType
 from plaita.event.core import EventBus
 from plaita.core.errors import (
     FlowCancelledException,
     FlowTimeoutError,
     NodeExecutionError,
+    NodeResumeError,
     NodeTimeoutError,
     ResumeError,
 )
@@ -51,6 +53,7 @@ from plaita.server.task_queue import (
     DEFAULT_CLAIM_MIN_IDLE_MS,
     DEFAULT_CONSUMER_GROUP,
     DEFAULT_MAX_DELIVERIES,
+    RECONNECT_BACKOFF_SECONDS,
     RedisStreamTaskQueue,
     StreamTask,
     enqueue_task,
@@ -404,7 +407,7 @@ def _chain_has_cancellation(exc: BaseException) -> bool:
 
 
 def _chain_has_resume_protocol_error(exc: BaseException) -> bool:
-    """异常链（含自身）中是否含 ``ResumeError``（恢复协议/挂起守卫类错误）。
+    """异常链（含自身）中是否含**协议类** ``ResumeError``（恢复协议/挂起守卫）。
 
     #33 配套：``run_distributed`` 把策略层 ResumeError 归一化为
     ``FlowErrorException`` 且原异常挂 ``__cause__``，worker 通用 except 因此
@@ -412,11 +415,16 @@ def _chain_has_resume_protocol_error(exc: BaseException) -> bool:
     **调用方协议错误**（消息类型与执行状态不匹配），不是执行自身失败；
     执行应保持原状（suspended）让真正的决议路径（event/cancel/timeout）进来，
     而不是被终态化成不可逆的 error。
+
+    ``NodeResumeError`` 是**例外**：它是 ``current_node.resume(...)`` 自身抛错
+    被策略层包装的形态（plaita/core/strategies.py ``_handle_resume``），属执行
+    侧真实失败——豁免终态化会让状态永远停在 suspended、``error`` 为空，失败
+    无从观测。故只认裸 ``ResumeError``。
     """
     node: Optional[BaseException] = exc
     depth = 0
     while node is not None and depth <= _NODE_RETRY_CHAIN_MAX_DEPTH + 1:
-        if isinstance(node, ResumeError):
+        if isinstance(node, ResumeError) and not isinstance(node, NodeResumeError):
             return True
         node = node.__cause__
         depth += 1
@@ -596,6 +604,10 @@ class FlowWorker:
         # 实例，否则 agent 节点在早先 step 产生的 workspace 快照到 flow 结束那一步
         # 已经丢了）；终态落盘时按持久化上下文释放并回收（_release_sandboxes）。
         self._sandbox_callbacks: Dict[str, Any] = {}
+        # 状态文档写锁：处理线程（_persist_state_or_raise）与看门狗线程
+        # （_publish_node_progress，RedisFlowWorker）是同一文档的两个写者，
+        # 无锁时「先读后写」的一方会把另一方的新文档盖回旧值（评审 #4）。
+        self._state_write_lock = threading.Lock()
         # 优雅停机（无损升级）：draining = 不再领新任务、等 in-flight 收尾；
         # 超时由 _force_stop_after_drain 兜底退出（消息留 pending 待接管）。
         self._draining = threading.Event()
@@ -1003,9 +1015,17 @@ class FlowWorker:
         return (holder if acquired else None), None
 
     def _register_lease_watch(
-        self, execution_id: str, lease_value: str, execution: Any
+        self,
+        execution_id: str,
+        lease_value: str,
+        execution: Any,
+        fence_token: Optional[int] = None,
     ) -> None:
-        """登记活跃执行供看门狗续租（基类 no-op）。"""
+        """登记活跃执行供看门狗续租（基类 no-op）。
+
+        ``fence_token`` = 取得租约时的世代号（未启用 fencing 时为 None），
+        看门狗发布在跑节点进度时据此带世代写盘（见 ``_publish_node_progress``）。
+        """
 
     def _unregister_lease_watch(self, execution_id: str, lease_value: str) -> None:
         """注销看门狗登记（基类 no-op）。"""
@@ -1035,12 +1055,16 @@ class FlowWorker:
 
         注意：fenced 世代失配是 storage 层 raise ``ExecutionLeaseError``、
         不经本方法的 False 路径——既有失租链路不受影响。
+
+        写盘段持有 ``_state_write_lock``：与看门狗的 ``_publish_node_progress``
+        串行（见该方法的「第二写者」说明），否则两写者交错会丢更新。
         """
         self._collect_node_timings(execution_id, state)
         # 沙箱回收挂在同一收口（覆盖 start/步进/挂起/终态所有路径）：
         # 非终态是 no-op，终态按上下文快照释放实例
         self._release_sandboxes(execution_id, state)
-        saved = self.execution_storage.save_execution_state(execution_id, state)
+        with self._state_write_lock:
+            saved = self.execution_storage.save_execution_state(execution_id, state)
         if not saved:
             logger.error(
                 "保存执行状态失败 (%s): execution_id=%s, status=%s——消息将不 ack 等待重投",
@@ -1148,15 +1172,25 @@ class FlowWorker:
 
         - 与状态里已有的 ``node_timings`` **合并**而不是覆盖：resume 可能发生在
           另一个进程，旧节点的时间不能被新进程的采集器抹掉；
+        - 异常终态（error/cancelled）先收口在跑条目再合并（见下）；
         - 终态落盘后回收采集器，避免长跑 worker 泄漏。
         """
         timing = self._node_timings.get(execution_id)
         if timing is None:
             return
+        status = getattr(state, "status", "") or ""
+        terminal = status in TERMINAL_EXECUTION_STATUSES
+        if terminal:
+            # 内核只在**成功**路径调 on_node_end：异常结束（抛错/超时/取消）的
+            # 节点会以 ``ended_at=""`` 的「在跑」形态留在采集器里，被 snapshot
+            # 带进**终态**状态 → keeper 的活性判据①（有 started 无 ended =
+            # 活证据）永久命中，真正挂死的执行再也无法回收（误杀修复的镜像
+            # 问题）。终态落盘前收口：在跑条目按「已结束 + 失败」落成终态记录。
+            timing.close_open(failed=status != "completed")
         merged = dict(state.node_timings or {})
         merged.update(timing.snapshot())
         state.node_timings = merged
-        if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+        if terminal:
             self._node_timings.pop(execution_id, None)
     
     def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
@@ -1552,7 +1586,7 @@ class FlowWorker:
             # execution.cancel() 中止（code 沙箱当场 killpg；协作节点如 agentrun
             # 消费 cancel_event 收手）。租约看门狗同窗口。
             self._register_cancel_watch(execution_id, execution)
-            self._register_lease_watch(execution_id, lease_value, execution)
+            self._register_lease_watch(execution_id, lease_value, execution, fence_token)
             try:
                 result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
@@ -1693,7 +1727,8 @@ class FlowWorker:
                 "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
             )
             return {
-                "execution_id": execution_id,                "status": state_status,
+                "execution_id": execution_id,
+                "status": state_status,
                 "already_terminal": True,
                 "result": getattr(state, "result", None),
                 "error": getattr(state, "error", None),
@@ -1884,8 +1919,8 @@ class FlowWorker:
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
             # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
-            # 被 XCLAIM 抢占双跑
-            self._register_lease_watch(execution_id, lease_value, execution)
+            # 被 XCLAIM 抢占双跑（fence_token 一并登记，见 _register_lease_watch）
+            self._register_lease_watch(execution_id, lease_value, execution, fence_token)
             # 登记取消监听（波次③）：命中标志键即中止在途节点（与租约登记
             # 同窗口；finally 一并撤销）
             self._register_cancel_watch(execution_id, execution)
@@ -2336,7 +2371,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop = threading.Event()
         self._lease_watch_lock = threading.Lock()
-        # execution_id -> (lease_value, execution, tenant_id)
+        # execution_id -> (lease_value, execution, tenant_id, fence_token)
         self._lease_watch: Dict[str, tuple] = {}
         self._lease_lost: Set[str] = set()
 
@@ -2549,9 +2584,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     # ---- 租约看门狗（波次② §4.1）----
 
     def _register_lease_watch(
-        self, execution_id: str, lease_value: str, execution: Any
+        self,
+        execution_id: str,
+        lease_value: str,
+        execution: Any,
+        fence_token: Optional[int] = None,
     ) -> None:
-        """登记活跃执行：看门狗据此续租；失租鸭子调 execution.cancel()。"""
+        """登记活跃执行：看门狗据此续租；失租鸭子调 execution.cancel()。
+
+        ``fence_token`` 一并登记——看门狗线程不是持租约的处理线程，
+        发布在跑节点进度时需显式带上本世代才能走 fenced CAS
+        （见 ``_publish_node_progress``）。
+        """
         with self._lease_watch_lock:
             # 同一执行的新租约（重投 resume 重入）清除陈旧失租标记
             self._lease_lost.discard(execution_id)
@@ -2559,6 +2603,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 lease_value,
                 execution,
                 current_tenant(),
+                fence_token,
             )
 
     def _unregister_lease_watch(self, execution_id: str, lease_value: str) -> None:
@@ -2622,7 +2667,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             except Exception:  # noqa: BLE001 — 看门狗自身绝不能带崩 worker
                 logger.error("租约看门狗周期异常", exc_info=True)
 
-    def _publish_node_progress(self, execution_id: str) -> None:
+    def _publish_node_progress(
+        self, execution_id: str, fence_token: Optional[int] = None
+    ) -> None:
         """把**在跑节点**的进度发布到执行状态（长节点期间的活性心跳）。
 
         为什么需要（2026-10-10，plaita#27/#31/#55/#32/#62 五单误杀事故）：
@@ -2644,30 +2691,52 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         不推进流程、不改 context，只把采集器的当前快照并进 ``node_timings``
         与 ``last_update_time``，让宿主侧「看得见沙箱里在跑」。
 
+        **第二写者的收敛（2026-10-10 评审 #4）**：本方法是执行状态文档的
+        第二个写者（第一个是持租约的处理线程）。原实现「load → merge → save」
+        与处理线程的步界/终止落盘无共享锁：落盘若发生在读之后，会把新文档整体
+        盖回旧值（丢一步 checkpoint，或把 completed 翻回 running）。两条约束：
+
+        - 写盘段持 ``_state_write_lock``，与 ``_persist_state_or_raise`` 串行；
+        - 快照与状态里已有的条目**完全相同**时直接跳过写盘——长节点期间
+          ``_open`` 条目的 ``started_at`` 不变，一次写入已让 keeper 判据①
+          看得见在跑节点，随后每 40s 重写整份文档只会放大丢更新窗口。
+        另按调用方给出的 fence 世代写盘（fencing 档下 CAS 生效；无世代=
+        未持租约的旧路径，行为不变）。
+
         失败**只告警不抛**：这是观测路径，绝不能因落盘失败而打断正在跑的
         节点（真正的落盘失败仍由 ``_persist_state_or_raise`` 在节点边界负责）。
         """
         timing = self._node_timings.get(execution_id)
         if timing is None:
             return
+        fence_reset = None
         try:
-            state = self.execution_storage.load_execution_state(execution_id)
-            if state is None:
-                return
-            if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
-                return
-            # 与 _collect_node_timings 同款合并语义：不抹掉别的进程写下的旧节点
-            merged = dict(state.node_timings or {})
-            merged.update(timing.snapshot())
-            state.node_timings = merged
-            state.last_update_time = datetime.now().isoformat()
-            self.execution_storage.save_execution_state(execution_id, state)
+            with self._state_write_lock:
+                state = self.execution_storage.load_execution_state(execution_id)
+                if state is None:
+                    return
+                if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+                    return
+                # 与 _collect_node_timings 同款合并语义：不抹掉别的进程写下的旧节点
+                merged = dict(state.node_timings or {})
+                snapshot = timing.snapshot()
+                if all(merged.get(node_id) == entry for node_id, entry in snapshot.items()):
+                    return       # 快照无变化：心跳已生效，不再重写整份文档
+                merged.update(snapshot)
+                state.node_timings = merged
+                state.last_update_time = datetime.now().isoformat()
+                if fence_token is not None:
+                    fence_reset = set_current_fence_token(fence_token)
+                self.execution_storage.save_execution_state(execution_id, state)
         except Exception:  # noqa: BLE001 — 观测路径不得影响执行
             logger.warning(
                 "在跑节点进度发布失败（忽略，节点边界仍会落盘）: %s",
                 execution_id,
                 exc_info=True,
             )
+        finally:
+            if fence_reset is not None:
+                reset_current_fence_token(fence_reset)
 
     def _watchdog_renew_once(self) -> None:
         """对全部活跃执行续租一轮；renew 失败（Lua compare 不符 = 已被他人
@@ -2678,27 +2747,35 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         续租成功后**顺带发布在跑节点进度**（见 ``_publish_node_progress``）：
         让 keeper 的活性判据能看见沙箱长节点，避免 >1800s 误判 zombie 误杀。
+        发布必须在**登记租户的作用域内**执行——状态存储是
+        ``TenantRoutingExecutionStorage``（按 ``current_tenant()`` 选
+        ``{ns}:execution:{id}`` 桶），放在 ``reset_current_tenant`` 之后
+        会让非 default 租户的心跳写进 default 桶（等于修复静默失效，
+        且 id 碰撞时会跨租户写别人的状态键）。
         """
         with self._lease_watch_lock:
             entries = list(self._lease_watch.items())
-        for execution_id, (lease_value, execution, tenant_id) in entries:
+        for execution_id, (lease_value, execution, tenant_id, fence_token) in entries:
             token = set_current_tenant(tenant_id)
             try:
-                renewed = self.execution_lease.renew(
-                    execution_id, lease_value, self.lease_ttl_seconds
-                )
-            except Exception as exc:  # noqa: BLE001 — 瞬断不判死
-                logger.warning(
-                    "看门狗 renew 异常（下周期重试）: %s: %s", execution_id, exc
-                )
-                continue
+                try:
+                    renewed = self.execution_lease.renew(
+                        execution_id, lease_value, self.lease_ttl_seconds
+                    )
+                except Exception as exc:  # noqa: BLE001 — 瞬断不判死
+                    logger.warning(
+                        "看门狗 renew 异常（下周期重试）: %s: %s", execution_id, exc
+                    )
+                    continue
+                if renewed:
+                    # 租约确认在手 → 发布在跑节点进度（长节点期间的唯一心跳，
+                    # 见 _publish_node_progress：防 keeper 把沙箱长节点误判 zombie）。
+                    # 带登记的本世代 fence_token：看门狗线程不是持租约的处理
+                    # 线程，ContextVar 里没有世代，不带就是无 CAS 的裸写。
+                    self._publish_node_progress(execution_id, fence_token)
+                    continue
             finally:
                 reset_current_tenant(token)
-            if renewed:
-                # 租约确认在手 → 发布在跑节点进度（长节点期间的唯一心跳，
-                # 见 _publish_node_progress：防 keeper 把沙箱长节点误判 zombie）
-                self._publish_node_progress(execution_id)
-                continue
             with self._lease_watch_lock:
                 self._lease_lost.add(execution_id)
                 self._lease_watch.pop(execution_id, None)
@@ -2979,11 +3056,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         threads: list = []
         try:
             if self.concurrency <= 1:
-                self._consume_loop(queue)
+                self._consume_forever(queue)
             else:
                 for i in range(self.concurrency):
                     t = threading.Thread(
-                        target=self._consume_loop,
+                        target=self._consume_forever,
                         args=(queue,),
                         name=f"flow-consume-{i}",
                         daemon=True,
@@ -3025,6 +3102,36 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             sweep()
         finally:
             self._residue_sweep_lock.release()
+
+    def _consume_forever(self, queue: RedisStreamTaskQueue) -> None:
+        """消费循环的**进程级**兜底（#48）：Redis 故障绝不退出 worker 进程。
+
+        ``_consume_loop`` 内部的 except 只覆盖「任务处理」那一段；队列调用
+        （``queue.read``/``ack``/``dead_letter``/``_handover_non_affine``——
+        含 except 分支里再调的那几个）一旦抛读超时/连接重置，异常会直接穿出
+        整个循环。2026-10-07 两次实测崩溃（异常链止于 ``xgroup_create`` 的
+        ``redis.exceptions.TimeoutError: Timeout reading from socket``）就是这样
+        终止 worker 进程的：launchd 拉起新实例又 XCLAIM 存量 PEL，引发交接
+        重入队风暴，且在跑的 run 监视随之中断。
+
+        这里在最外层兜住 Redis 客户端错误（含 socket 层）：记 error + 退避 +
+        重新进入循环。在途消息不 ack（留 pending，at-least-once 语义不变）。
+        """
+        while self._running and not self._drain_event.is_set():
+            try:
+                self._consume_loop(queue)
+            except (RedisError, OSError) as exc:
+                logger.error(
+                    "Redis 故障中断消费循环，退避 %.1fs 后继续（进程不退出）: %s",
+                    RECONNECT_BACKOFF_SECONDS,
+                    exc,
+                    exc_info=True,
+                )
+                # 退避等 drain 事件（而非 sleep）：SIGTERM / 远程 stop 在退避
+                # 期间立即生效，停机延迟不退化（≤1s 边界，与 read 分片同口径）。
+                self._drain_event.wait(RECONNECT_BACKOFF_SECONDS)
+            else:
+                return
 
     def _consume_loop(self, queue: RedisStreamTaskQueue) -> None:
         """单条消费循环（原 run() 主体）。可被 1 或 N 个线程并发执行。
@@ -3132,7 +3239,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 # 且烧 delivery，ack 掉。非终态执行不需要重投载体：决议路径
                 # （event/cancel/timeout resume）各有独立消息。
                 queue.ack(task.message_id)
-                queue.note_poison()
+                # 独立计数：消息本体合法（畸形消息才记 poison，见 note_poison）
+                queue.note_protocol_error()
                 acked = True
                 logger.warning(
                     "任务 %s resume 协议错误（执行保持原状不终态化）: %s",

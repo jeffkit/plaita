@@ -10,6 +10,7 @@
 |------|----------|------|
 | 任务队列（`RedisFlowWorker`） | Redis **Stream** + consumer group；成功 `XACK`，否则 pending 可回收；超 `--max-deliveries` 进 DLQ | **at-least-once**（需 Redis 5+）。业务侧应幂等；毒丸进 `<queue>:dlq` |
 | 队列残留回收（#43） | `XACK` 与 best-effort `XDEL` 之间进程被杀会留下「已 ack 未删」条目（`XDEL` 只出现在 `ack()`，残留只可能来自这个窗口）；worker 启动时扫一次 + 每 300s（`residue_sweep_interval_seconds`）best-effort `XDEL`，单轮上限 256 条，只删 id ≤ 消费组 `last-delivered-id` **且不在本组 PEL 中**的条目 | `XLEN` 不再被已终结条目长期污染（否则读成假「有积压」，2026-10-07 实测误判）；残留按每轮 ≤256 条 / 300s 逐轮收敛（如 1 万条约需数小时），期间 `XPENDING`/`lag` 仍如实反映真实积压；未投递积压与 pending 语义不变 |
+| Redis 瞬态故障（#48） | 读超时（`redis.exceptions.TimeoutError`，在 redis-py 8.x 与 `ConnectionError` **互不继承**）/ 连接重置 / socket 层错误都**不**退出进程：`read()` 吞瞬态家族（warning + 退避 1s + 返回 None）、`ensure_group()` 对瞬态只记 warning（协议/权限错误仍上抛）、消费循环最外层 `_consume_forever` 再兜住 `ack`/`dead_letter` 等路径的同类异常（记 error + 退避 + 继续） | Redis 抖动不再自杀重启（此前读超时炸穿 `run()` → `main()` 的 `sys.exit(1)`，launchd 拉起后 XCLAIM 存量触发交接重入队风暴）；在途消息不 ack，仍留 pending 走 at-least-once 重投；`SIGTERM`/远程 stop 在退避期间立即生效（退避用 drain 事件 wait，不退化成「等满 backoff」） |
 | 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **1**） | 连续推进每步写盘；崩溃不丢步进进度 |
 | 挂起 / 结束 / 出错 | **立即** `save_execution_state`；返回 False（Redis 后端吞异常的失败形态）即抛 `StatePersistError`，消息**不** ack 走重投 | 落盘失败不再静默成僵尸执行（2026-10 评审修复；start 路径此前已检查，其余调用点统一收口 `_persist_state_or_raise`） |
 | 挂起服务任务派发 | `rpush` 到 `plaita:{subtype}:queue` 失败（有 redis 时）抛 `ServiceDispatchError`；suspended 状态保留、消息重投后重新执行挂起节点再派发 | 重投会重复注册订阅——EventFilter 终态 GC 只回收终态，孤儿订阅留到 TTL 过期（可接受） |
@@ -78,6 +79,12 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   把挂起执行终态化成 error 会永久切断 event/cancel/timeout 的唤醒路径）；
   其余图错误（`NodeNotFoundError` 等）→ 维持现状终态化 error。
   超时不重试是刻意的：确定性信号重试=再烧一次全款。
+  **例外**：`NodeResumeError`（`Node.resume()` 实现自身抛错，被策略层
+  `_handle_resume` 包装）属执行侧失败，**按节点失败处理**——不豁免终态化，
+  否则状态永远停在 suspended 且 `error` 为空，失败无从观测。
+  协议错误消息走独立计数 `queue_protocol_errors_total`，**不**计入
+  `queue_poison_acked_total`（后者口径是「畸形消息丢弃」，混入会让
+  告警阈值失真）。
 - **载体**：at-least-once 消息重投本身。重试时执行**不终态化**（磁盘 state
   停在最后成功步 checkpoint——失败节点不写 context），run() **显式重投**同体新副本（先入队再 ack；
   `claim_min_idle_ms`（默认 60s）后被回收重投，resume 从 checkpoint 自然重跑
@@ -95,6 +102,25 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零计数键，人工
   唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持 error
   （修复定义后仍可再 retry）。
+- **确定性失败上限**（`DETERMINISTIC_FAILURE_MAX = 12`，#73 遗留层）：**不可
+  重试**的失败（`exited 1` / `AgsError: sync_in` / 超时 / 协议错）不走上面的
+  重试预算，但同样要收敛——单独记账于计数键
+  `{ns}:execution:nofail:{id}`（INCR + 7 天 TTL，只增不减）。此前这些失败完全
+  不进任何计数器，唯一收敛机制只剩消息层重投（无次数概念）⇒ 同一执行被重投
+  数百次、沙箱持续占位。达上限即判「不可救」：终态化 error，且后续一切
+  `resume_type=retry` **被幂等拒绝**。
+- **G1 唤醒上限**（`G1_MAX_WAKEUPS = 2`）：每次 `resume_type=retry` 唤醒都会
+  清零节点重试预算，于是「唤醒 → 重置预算 → 再耗尽 → 再唤醒」可以无限循环
+  （实测某执行 3 分钟内被连续唤醒、每轮烧 5 次 impl）。计数键
+  `{ns}:execution:g1wakeups:{id}`（INCR + 7 天 TTL），达上限即拒绝唤醒、保持
+  error 终态。
+- **两个上限的拒答形态**：`resume_flow` **幂等返回**（不抛异常——抛异常会让
+  自动 resume 的调用方当成失败继续重试）：`already_terminal=True` 外加
+  `g1_wakeups_exhausted` / `deterministic_failure_exhausted` 标记；消息层重投
+  在此短路。**无 env 逃生门**：计数键只能等 7 天 TTL 自动过期，运维要「立刻再
+  跑一次」就新建执行（或直接删该计数键）。控制台「从断点重试」按钮此时**没有
+  终态变化可显示**（入队接口照样 200），页面会给出「若状态保持 error 说明已达
+  上限」的提示文字，值守须知这是预期的拒答而非按钮失灵。
 
 ## 挂起执行的 continue/retry 幂等短路（#33） {#挂起执行的-continue-retry-幂等短路}
 
@@ -227,7 +253,7 @@ flowchart TD
 | `start_time` / `last_update_time` / `end_time` | 时间戳（ISO 字符串） |
 | `error` | 错误详情（status=error 时；节点重试耗尽的 error 附 `node_retries`） |
 | `invoker` | 发起方标识 |
-| `node_timings` | 节点级耗时（可选）：`node_id → {started_at, ended_at, started_ms, ended_ms, duration_ms, total_duration_ms, attempts, failed}`。由 worker 按执行挂载的 `NodeTimingCallback` 采集、在落盘收口处写入；同节点多次执行（循环/重试）时 `duration_ms` 取最后一次、`total_duration_ms` 累计、`attempts` 计数。**老状态/宿主未挂采集器时为 `None`**，读取方必须按缺省处理。 |
+| `node_timings` | 节点级耗时（可选）：`node_id → {started_at, ended_at, started_ms, ended_ms, duration_ms, total_duration_ms, attempts, failed}`。由 worker 按执行挂载的 `NodeTimingCallback` 采集、在落盘收口处写入；同节点多次执行（循环/重试）时 `duration_ms` 取最后一次、`total_duration_ms` 累计、`attempts` 计数。**老状态/宿主未挂采集器时为 `None`**，读取方必须按缺省处理。**在跑形态**：长节点（`sandbox_agent` 等）执行期间由租约看门狗按 TTL/3 周期顺带发布（发布与处理线程的步界/终止落盘共用一把写锁；**快照无变化时直接跳过写盘**——`started_at` 在节点跑完前是常量，一次发布已足够让读取方看见在跑节点），条目只有 `started_at` / `started_ms`（`ended_at` 为空字符串、**无** `duration_ms`）——这是宿主侧「节点还活着」的活性证据，读取方不得把缺 `ended_at` 当异常或已完成。**「在跑」只在节点确实在跑时成立**：内核只在成功路径回调 `on_node_end`，故 worker 在 **error/cancelled 终态落盘前**把异常结束（抛错/超时/取消）的节点收口为终态记录（补 `ended_at`/`duration_ms`、`failed=true`）——终态文档里不会残留 `ended_at=""` 的条目，否则「活证据」判据会永久命中，真正挂死的执行再也无法被回收 |
 
 ## 存储后端
 

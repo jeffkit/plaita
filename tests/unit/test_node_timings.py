@@ -10,7 +10,8 @@ import pytest
 pytest.importorskip("cachetools")
 pytest.importorskip("fakeredis")
 
-from unittest.mock import MagicMock
+import fakeredis
+from unittest.mock import MagicMock, patch
 
 from plaita.event.memory import InMemoryEventBus
 from plaita.server.flow_worker import FlowWorker, RedisFlowWorker
@@ -154,6 +155,44 @@ class TestNodeTimingCallback:
                 if v.get("started_at") and not v.get("ended_at")]
         assert live == ["impl"], "keeper 判据① 必须能从 snapshot 里认出在跑节点"
 
+    # ── 异常结束必须收口（判据① 的镜像：挂死执行不能被"在跑"条目永久豁免）──
+
+    def test_close_open_turns_running_entry_into_failed_terminal_record(self):
+        """内核只在成功路径调 on_node_end：异常节点必须由 close_open 收口。
+
+        否则 ``ended_at=""`` 会永久留在终态文档里，keeper 判据① 永远命中
+        → 真正挂死的执行再也无法回收（与误杀同源的镜像问题）。
+        """
+        clock = _Clock()
+        cb = NodeTimingCallback(clock=clock)
+        cb.on_node_start(None, _Node("boom"))     # 节点开跑
+        clock.tick(2)
+        cb.close_open(failed=True)                # 内核抛错/超时/取消 → 宿主收口
+
+        entry = cb.snapshot()["boom"]
+        assert entry["ended_at"], "异常结束的节点必须有结束时间（不得留作在跑）"
+        assert entry["ended_ms"] is not None
+        assert entry["duration_ms"] == 2000
+        assert entry["failed"] is True
+        live = [nid for nid, v in cb.snapshot().items()
+                if v.get("started_at") and not v.get("ended_at")]
+        assert live == [], "收口后不得再让 keeper 判据① 读到活证据"
+
+    def test_close_open_marks_completed_entries_not_failed(self):
+        """completed 终态下的在跑条目同样收口（正常不该有，防文档残留），但不标失败。"""
+        cb = NodeTimingCallback(clock=_Clock())
+        cb.on_node_start(None, _Node("x"))
+        cb.close_open(failed=False)
+        assert cb.snapshot()["x"]["failed"] is False
+
+    def test_close_open_is_noop_without_running_nodes(self):
+        cb = NodeTimingCallback(clock=_Clock())
+        cb.on_node_start(None, _Node("a"))
+        cb.on_node_end(None, _Node("a"))
+        before = cb.snapshot()
+        cb.close_open(failed=True)
+        assert cb.snapshot() == before, "无在跑节点时收口不得改写既有记录"
+
 
 class TestExecutionStateCarriesTimings:
     def test_defaults_to_none_for_old_states(self):
@@ -219,6 +258,54 @@ class TestWorkerPersistsTimings:
         state = ExecutionState(execution_id="ghost", context={})
         worker._collect_node_timings("ghost", state)
         assert state.node_timings is None
+
+    def test_abnormal_terminal_persist_closes_running_entry(self):
+        """异常终态落盘必须收口在跑条目——否则判据① 永久命中，挂死执行无法回收。
+
+        复现（2026-10-10 评审）：suspended 执行经 event 唤醒 → 下一节点超时 →
+        terminal error。内核只在成功路径调 on_node_end，超时节点永远留在
+        ``_open``，被 snapshot 原样带进终态文档：
+
+            {"wait": {…ended_at:"…"}, "boom": {"started_at": "…", "ended_at": ""}}
+        """
+        worker = FlowWorker(
+            execution_storage=MemoryExecutionStorage(),
+            flow_storage=MemoryFlowStorage(),
+            event_bus=InMemoryEventBus(),
+        )
+        eid = "exec-abnormal"
+        timing = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid] = timing
+        timing.on_node_start(None, _Node("wait"))
+        timing.on_node_end(None, _Node("wait"))
+        timing.on_node_start(None, _Node("boom"))     # 超时/抛错：on_node_end 永不到达
+
+        state = ExecutionState(execution_id=eid, context={}, status="error")
+        worker._collect_node_timings(eid, state)
+
+        timings = state.node_timings
+        assert timings["boom"]["ended_at"], "终态文档里不得留「在跑」条目"
+        assert timings["boom"]["failed"] is True
+        live = [nid for nid, v in timings.items()
+                if v.get("started_at") and not v.get("ended_at")]
+        assert live == [], "keeper 判据① 不得再从终态文档读到活证据"
+        assert eid not in worker._node_timings, "终态后仍须回收采集器"
+
+    def test_completed_persist_closes_open_entry_without_failed_flag(self):
+        worker = FlowWorker(
+            execution_storage=MemoryExecutionStorage(),
+            flow_storage=MemoryFlowStorage(),
+            event_bus=InMemoryEventBus(),
+        )
+        eid = "exec-ok"
+        timing = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid] = timing
+        timing.on_node_start(None, _Node("x"))
+
+        state = ExecutionState(execution_id=eid, context={}, status="completed")
+        worker._collect_node_timings(eid, state)
+        assert state.node_timings["x"]["ended_at"]
+        assert state.node_timings["x"]["failed"] is False
 
 
 class TestWatchdogPublishesRunningNode:
@@ -312,6 +399,82 @@ class TestWatchdogPublishesRunningNode:
 
         assert storage.load_execution_state(eid).node_timings is None
 
+    # ── 第二写者的收敛（2026-10-10 评审 #4）────────────────────────────────
+
+    def _save_counter(self, storage, worker):
+        """包一层 save：计数并记录调用时是否持有状态写锁。"""
+        calls = []
+        orig = storage.save_execution_state
+
+        def spy(execution_id, state):
+            calls.append(worker._state_write_lock.locked())
+            return orig(execution_id, state)
+
+        storage.save_execution_state = spy
+        return calls
+
+    def test_publish_skips_write_when_snapshot_unchanged(self):
+        """快照无变化 → 不再重写整份文档（长节点期间 started_at 恒定）。
+
+        每次 TTL/3 重写一次整份状态是「丢更新窗口」的放大器：第二次发布若
+        照写，落后的 load 副本就会把处理线程刚落的步界 checkpoint 盖回去。
+        """
+        storage = MemoryExecutionStorage()
+        worker = self._worker(storage)
+        eid = "exec-norepeat"
+        self._running_state(storage, eid)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        worker._publish_node_progress(eid)          # 首次：把在跑节点发布出去
+        calls = self._save_counter(storage, worker)
+        worker._publish_node_progress(eid)          # 同一快照：必须跳过写盘
+        assert calls == [], "快照未变仍重写整份状态（丢更新窗口放大器）"
+
+    def test_state_writers_hold_the_shared_write_lock(self):
+        """处理线程落盘与看门狗发布必须持同一把锁（否则读-写交错丢更新）。"""
+        storage = MemoryExecutionStorage()
+        worker = self._worker(storage)
+        eid = "exec-lock"
+        self._running_state(storage, eid)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        calls = self._save_counter(storage, worker)
+        worker._publish_node_progress(eid)
+        worker._persist_state_or_raise(eid, storage.load_execution_state(eid), "probe")
+        assert calls == [True, True], "两个写者的 save 都必须在 _state_write_lock 内"
+
+    def test_watchdog_publishes_with_registered_fence_token(self):
+        """看门狗线程没有处理线程的 ContextVar：世代必须随登记传递。
+
+        不带世代 = ``FencedExecutionStorage`` 退化成无 CAS 的裸写；带了则
+        失租（世代被别人接管）时写盘被 storage 拒绝。
+        """
+        from plaita.storage import fenced as fenced_mod
+
+        storage = MemoryExecutionStorage()
+        worker = self._worker(storage)
+        eid = "exec-fence"
+        self._running_state(storage, eid)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+        worker._register_lease_watch(eid, "holder:7", MagicMock(), 7)
+
+        seen = []
+        orig = storage.save_execution_state
+
+        def spy(execution_id, state):
+            seen.append(fenced_mod.current_fence_token())
+            return orig(execution_id, state)
+
+        storage.save_execution_state = spy
+        with patch.object(worker.execution_lease, "renew", return_value=True):
+            worker._watchdog_renew_once()
+
+        assert seen == [7], "看门狗发布必须带登记的本世代 fence token"
+        assert fenced_mod.current_fence_token() is None, "世代不得泄漏到看门狗下一周期"
+
     def test_publish_never_raises_on_storage_failure(self):
         """观测路径：落盘炸了也不能打断正在跑的节点。"""
         storage = MagicMock()
@@ -325,3 +488,52 @@ class TestWatchdogPublishesRunningNode:
     def test_publish_is_noop_without_timing_collector(self):
         worker = self._worker(MemoryExecutionStorage())
         worker._publish_node_progress("nonexistent")   # 不得抛
+
+    def test_watchdog_publishes_within_registered_tenant_scope(self):
+        """非 default 租户：心跳必须落进**本租户**的状态桶。
+
+        看门狗的发布一度写在 ``reset_current_tenant`` 之后 → 跑在 default
+        租户下，而状态存储是 ``TenantRoutingExecutionStorage``（按
+        ``current_tenant()`` 路由）⇒ 非 default 租户的长节点心跳静默丢失
+        （keeper 依旧误杀），且 id 碰撞时会跨租户写别人的状态键。
+        """
+        from plaita.server.tenant_context import (
+            TenantRoutingExecutionStorage,
+            reset_current_tenant,
+            set_current_tenant,
+        )
+
+        storage = TenantRoutingExecutionStorage(
+            client=fakeredis.FakeRedis(decode_responses=True)
+        )
+        worker = self._worker(storage)
+        eid = "exec-tenant"
+        token = set_current_tenant("acme")
+        try:
+            self._running_state(storage, eid)
+            worker._register_lease_watch(eid, "holder:1", MagicMock())
+        finally:
+            reset_current_tenant(token)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        with patch.object(worker.execution_lease, "renew", return_value=True):
+            worker._watchdog_renew_once()
+
+        token = set_current_tenant("acme")
+        try:
+            state = storage.load_execution_state(eid)
+        finally:
+            reset_current_tenant(token)
+        assert state is not None, "本租户状态桶必须可读"
+        assert "impl" in (state.node_timings or {}), (
+            "非 default 租户的在跑节点必须落进本租户桶（否则 keeper 误杀复发）"
+        )
+        assert not (state.node_timings or {})["impl"]["ended_at"]
+
+        token = set_current_tenant("default")
+        try:
+            default_state = storage.load_execution_state(eid)
+        finally:
+            reset_current_tenant(token)
+        assert default_state is None, "心跳不得写进 default 桶（跨租户写）"

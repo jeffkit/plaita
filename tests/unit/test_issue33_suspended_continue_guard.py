@@ -28,10 +28,14 @@ pytest.importorskip("redis")
 
 import fakeredis
 
-from plaita.core.errors import FlowErrorException, ResumeError
+from plaita.core.errors import FlowErrorException, NodeResumeError, ResumeError
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
-from plaita.server.flow_worker import RedisFlowWorker, ResumeProtocolError
+from plaita.server.flow_worker import (
+    NodeFailureTerminalizedError,
+    RedisFlowWorker,
+    ResumeProtocolError,
+)
 from plaita.server.task_queue import RedisStreamTaskQueue, enqueue_task
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
@@ -218,6 +222,54 @@ class TestResumeProtocolErrorExemption:
         assert issubclass(ResumeProtocolError, RuntimeError)
 
 
+class TestNodeResumeFailureIsNotProtocolError:
+    """节点 ``resume()`` 自身抛错 ≠ 调用方协议错误。
+
+    策略层把 ``current_node.resume(...)`` 的**任意**异常包装成 ``ResumeError``
+    （plaita/core/strategies.py ``_handle_resume``）。若与挂起守卫的协议错误
+    同等待遇，节点 resume 崩溃会既不终态化也不留 ``state.error``——执行永远
+    停在 suspended，失败无从观测。故包装点用 ``NodeResumeError`` 子类标注
+    「执行侧失败」，仍走终态化 error。
+    """
+
+    def test_node_resume_error_terminalizes_with_evidence(self):
+        worker, storage = _redis_worker()
+        _, _, checkpoint = _real_suspended_execution()
+        storage.save_execution_state("exec-1", ExecutionState(
+            execution_id="exec-1", flow_id="f1", flow_version="1",
+            status="suspended", context=checkpoint,
+        ))
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            # run_distributed 归一化形态：FlowErrorException(__cause__=NodeResumeError)
+            wrapped = FlowErrorException("node resume boom")
+            wrapped.__cause__ = NodeResumeError("node resume boom")
+            inst.run_distributed.side_effect = wrapped
+
+            with pytest.raises(NodeFailureTerminalizedError):
+                worker.resume_flow("f1", "exec-1", "event", {"approved": True})
+
+        state = storage.load_execution_state("exec-1")
+        assert state.status == "error", "节点 resume 崩溃必须终态化 error"
+        assert state.error and "boom" in state.error["message"], (
+            "失败证据必须落进 state.error（此前为空，失败不可观测）"
+        )
+
+    def test_classifier_excludes_node_resume_error(self):
+        """判据直测：链上只有 NodeResumeError → 不算协议错误。"""
+        from plaita.server.flow_worker import _chain_has_resume_protocol_error
+
+        wrapped = FlowErrorException("x")
+        wrapped.__cause__ = NodeResumeError("x")
+        assert _chain_has_resume_protocol_error(wrapped) is False
+
+        guard = FlowErrorException("y")
+        guard.__cause__ = ResumeError("pending guard")
+        assert _chain_has_resume_protocol_error(guard) is True
+
+
 class TestRunLoopAcksProtocolError:
     """run() 主循环：ResumeProtocolError → ack（重投只会重复命中守卫）。"""
 
@@ -233,10 +285,11 @@ class TestRunLoopAcksProtocolError:
             queue.ack(task.message_id)
             return "acked"
         except ResumeProtocolError:
-            # run() 现路径（except ResumeProtocolError 分支）：ack + note_poison
+            # run() 现路径（except ResumeProtocolError 分支）：
+            # ack + note_protocol_error（消息合法，不计 poison）
             queue.ack(task.message_id)
-            queue.note_poison()
-            return "acked-poison"
+            queue.note_protocol_error()
+            return "acked-protocol"
         except Exception as e:  # noqa: BLE001
             return f"raised:{type(e).__name__}"
 
@@ -273,6 +326,47 @@ class TestRunLoopAcksProtocolError:
             "type": "resume", "flow_id": "f1", "execution_id": eid,
             "resume_type": "continue", "tenant_id": "default",
         })
-        assert outcome == "acked-poison"
+        assert outcome == "acked-protocol"
         # 状态原样，等 event/cancel/timeout 决议
         assert storage.load_execution_state(eid).status == "running"
+
+    def test_run_loop_counts_protocol_error_not_poison(self):
+        """真实 run() 主循环：协议错误计入独立计数，**不**进 poison 口径。
+
+        协议错误的消息本体合法（只是与执行状态不匹配），混进 ``poison_acked``
+        会让「畸形消息丢弃」的告警阈值失真。
+        """
+        worker, storage = _redis_worker()
+        _, _, checkpoint = _real_suspended_execution()
+        eid = checkpoint.get("$EXECUTION_ID")
+        storage.save_execution_state(eid, ExecutionState(
+            execution_id=eid, flow_id="f1", flow_version="1", status="running",
+            context=checkpoint,
+        ))
+
+        queue = RedisStreamTaskQueue(
+            worker.redis_client, "test:issue33-protocol-metrics", consumer_name="w1")
+        queue.ensure_group()
+        enqueue_task(worker.redis_client, "test:issue33-protocol-metrics", {
+            "type": "resume", "flow_id": "f1", "execution_id": eid,
+            "resume_type": "continue", "tenant_id": "default",
+        })
+        task = queue.read(block_ms=100)
+        assert task is not None
+
+        served = []
+
+        def scripted_read(block_ms=0):
+            if not served:
+                served.append(1)
+                return task
+            worker._running = False       # 一轮之后停掉消费循环
+            return None
+
+        worker._get_task_queue = lambda: queue
+        with patch.object(queue, "read", side_effect=scripted_read):
+            worker.run()
+
+        stats = queue.stats()
+        assert stats["protocol_errors"] == 1
+        assert stats["poison_acked"] == 0, "协议错误不得计入畸形消息口径"

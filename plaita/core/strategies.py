@@ -26,6 +26,7 @@ from plaita.core.errors import (
     FlowExecutionException,
     FlowStartMissingError,
     FlowTimeoutError,
+    NodeResumeError,
     ResumeError,
     ResumeType,
 )
@@ -386,7 +387,11 @@ class DistributedStrategy:
             error = {"code": -500, "message": str(e)}
             callback_manager.on_node_end(flow, current_node, None, error, exception=e)
             logger.error("Error during resume: %s", e)
-            resume_err = ResumeError(str(e), node=current_node)
+            # NodeResumeError 而非裸 ResumeError：这是**节点 resume 实现自身
+            # 抛错**（执行侧失败），宿主须按节点失败终态化 error 保留证据；
+            # 裸 ResumeError 专指恢复协议错误（挂起守卫/无挂起节点等），
+            # 宿主豁免终态化、保持执行原状等 event/cancel/timeout 决议。
+            resume_err = NodeResumeError(str(e), node=current_node)
             resume_err.source_line = getattr(current_node, "source_line", None)
             raise resume_err from e
 

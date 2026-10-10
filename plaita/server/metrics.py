@@ -41,6 +41,7 @@ QUEUE_COUNTERS: Tuple[Tuple[str, str, str], ...] = (
     ("dead_lettered", "queue_dead_lettered_total", "本进程死信总数"),
     ("lease_conflicts", "queue_lease_conflicts_total", "本进程租约冲突数"),
     ("poison_acked", "queue_poison_acked_total", "本进程畸形消息丢弃数"),
+    ("protocol_errors", "queue_protocol_errors_total", "本进程 resume 协议错误数（消息合法、与执行状态不匹配）"),
     ("failed", "queue_failed_total", "本进程处理失败数"),
     ("dlq_guard_skipped", "queue_dlq_guard_skipped_total", "守卫拒绝死信、消息留 pending 数"),
     ("residue_swept", "queue_residue_swept_total", "本进程回收的已 ack 未删残留数"),

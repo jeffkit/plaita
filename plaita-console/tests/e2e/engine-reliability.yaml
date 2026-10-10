@@ -1,13 +1,20 @@
 name: 引擎可靠性
 sequential: true
-service: redis   # exec 默认容器路由到 redis（redis-cli 断言 DLQ/注册表）
+service: redis   # exec 默认容器路由到 redis（redis-cli 断言注册表）
 
-# 多实例消费、终态幂等、DLQ 收容、事件订阅负例。
-# 拓扑前置：e2e.yaml 双 flow-worker（消费组分摊）+ PLAITA_MAX_DELIVERIES=1 /
-# PLAITA_CLAIM_MIN_IDLE_MS=3000（DLQ 用例秒级出结果）。
-# 语义注记：resume_type=continue 打在 approval 挂起执行上会被内核拒绝
-# （ResumeError——continue 不允许绕过 pending 的挂起节点）→ 状态翻 error →
-# 任务经失败分支进 DLQ（max_deliveries=1 即首败收容）。
+# 多实例消费、挂起幂等短路、终态幂等、事件订阅。拓扑前置：e2e.yaml 双 flow-worker
+# （消费组分摊）。
+#
+# 语义注记（plaita#33 起的内核契约）：resume_type=continue / retry 打在**挂起**
+# 执行上是**幂等 no-op**——两者都不携带推进语义（挂起节点等的是 event/cancel/
+# timeout），入口直接短路返回 already_suspended：消息被 ack、状态原样保持
+# suspended（旧行为把它终态化成不可恢复的 error，一次重复投递就把可唤醒的挂起
+# 打成死局）。真正的推进路径是 resume_type=event，本 suite 用它把挂起执行推进到
+# completed。
+#
+# DLQ 收容不在此 suite：需要激进 reclaim/max_deliveries 旋钮，放在共享消费组上会
+# 抢兄弟 worker 处理中的任务（实测冷启动任务超 3s 即被回收误进 DLQ），该场景由
+# e2e-chaos-dlq.sh 的独立清道夫 worker 承担。
 
 cases:
   - name: "创建可靠性测试审批流程"
@@ -87,7 +94,12 @@ cases:
       body:
         status: "suspended"
 
-  - name: "continue 恢复挂起审批 → 内核拒绝（终态 error，不得绕过挂起节点）"
+  # ── #33：挂起执行上的 continue / retry 是幂等 no-op ────────────────────────
+  # 两者都不允许绕过 pending 挂起节点，内核短路返回 already_suspended：消息被
+  # ack、状态**保持 suspended**（绝不翻 error）。旧契约「内核拒绝 → 终态 error」
+  # 已随 #33 废弃。
+
+  - name: "continue 打在挂起执行上 → 幂等跳过（请求受理，不报错）"
     request:
       method: POST
       url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
@@ -98,7 +110,69 @@ cases:
     expect:
       status: 200
 
-  - name: "执行终态 error（轮询）"
+  # 等消费组确实把消息消费掉后再看状态，避免「还没被消费所以仍是 suspended」
+  # 这种假通过。
+  - name: "等待 continue 消息被消费（短路路径的 ack）"
+    exec:
+      command: sh -c 'sleep 5; echo consumed'
+    expect:
+      output:
+        contains: "consumed"
+
+  - name: "状态仍是 suspended（continue 不得终态化，执行仍可唤醒）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
+    expect:
+      status: 200
+      body:
+        status: "suspended"
+
+  - name: "retry 打在挂起执行上 → 同样幂等跳过（retry 只对 error 态断点有效）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "retry"
+    expect:
+      status: 200
+
+  - name: "等待 retry 消息被消费"
+    exec:
+      command: sh -c 'sleep 5; echo consumed'
+    expect:
+      output:
+        contains: "consumed"
+
+  - name: "状态仍是 suspended（retry 同样不得就地重跑挂起节点）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
+    expect:
+      status: 200
+      body:
+        status: "suspended"
+
+  # ── 真正的唤醒路径：event 决议 → 续跑至 completed ──────────────────────────
+
+  - name: "event 决议恢复挂起审批（console resume 路径）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "event"
+        data:
+          decision: "approved"
+          approver: "e2e_user"
+          comment: "e2e reliability approve"
+    expect:
+      status: 200
+
+  - name: "审批流程续跑至完成（轮询）"
     request:
       method: GET
       url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
@@ -108,13 +182,11 @@ cases:
     expect:
       status: 200
       body:
-        status: "error"
+        status: "completed"
 
-  # DLQ 收容断言不放在共享组 suite 里：需要激进 reclaim/max_deliveries 旋钮，
-  # 旋钮在共享消费组上会抢兄弟 worker 处理中的任务（实测冷启动任务超 3s 即被
-  # 回收误进 DLQ）。该场景由 e2e-chaos-dlq.sh 的独立清道夫 worker 承担。
+  # ── 终态幂等：已完成执行上的重复 resume 不改变终态 ─────────────────────────
 
-  - name: "对 error 终态重复 resume → 幂等跳过（状态保持 error）"
+  - name: "对 completed 终态重复 resume → 幂等跳过"
     request:
       method: POST
       url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
@@ -134,7 +206,7 @@ cases:
     expect:
       status: 200
       body:
-        status: "error"
+        status: "completed"
 
   - name: "双 worker 注册可见（redis 注册表恰 2 个 flow_worker 实例）"
     exec:
@@ -148,4 +220,4 @@ teardown:
     request:
       method: DELETE
       url: http://localhost:18080/api/flows/e2e-rel-flow
-    ignoreError: true
+      ignoreError: true

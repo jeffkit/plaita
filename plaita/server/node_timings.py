@@ -68,6 +68,35 @@ class NodeTimingCallback(FlowCallback):
         except Exception:  # noqa: BLE001
             logger.warning("节点耗时采集 on_node_end 失败: %r", node, exc_info=True)
 
+    def close_open(self, *, failed: bool = True) -> None:
+        """把仍在跑的节点按「已异常结束」收口（宿主在**异常终态落盘前**调用）。
+
+        内核只在**成功**路径调 ``on_node_end``（``runner.run_node`` 里它排在
+        ``_execute_with_retry`` 之后；节点抛错/超时/取消时那一行根本走不到）。
+        于是异常节点的 id 永远留在 ``_open`` 里，``snapshot()`` 会把一条
+        ``ended_at=""`` 的「在跑」记录带进**终态**执行状态：keeper 的活性
+        判据①（有 started、无 ended = 活证据）从此**永远命中**，真正挂死的
+        执行再也无法被回收——正是误杀修复的镜像问题。
+
+        复现（2026-10-10）：suspended 执行经 event 唤醒 → 下一节点超时 →
+        terminal error，而状态里躺着 ``boom: {started_at: …, ended_at: ""}``，
+        终态落盘与 ``_collect_node_timings`` 的合并都改不掉它。
+
+        异常终态（error/cancelled）落盘前调用：把 ``_open`` 逐条按「已结束 +
+        失败」写进 ``_timings`` 并清空，终态文档里不再有「在跑」条目。
+        """
+        ended = self._clock()
+        for node_id, started in list(self._open.items()):
+            self._record(
+                node_id,
+                started,
+                ended,
+                max(0, int((ended - started) * 1000)),
+                error=None,
+                failed=failed,
+            )
+        self._open.clear()
+
     def _record(
         self,
         node_id: str,
@@ -75,6 +104,7 @@ class NodeTimingCallback(FlowCallback):
         ended: float,
         duration_ms: Optional[int],
         error: Any,
+        failed: Optional[bool] = None,
     ) -> None:
         prev = self._timings.get(node_id)
         attempts = int(prev.get("attempts", 0)) + 1 if prev else 1
@@ -87,7 +117,7 @@ class NodeTimingCallback(FlowCallback):
             "started_ms": int(started * 1000),
             "ended_ms": int(ended * 1000),
             "attempts": attempts,
-            "failed": bool(error),
+            "failed": bool(error) if failed is None else bool(failed),
         }
         if duration_ms is not None:
             entry["duration_ms"] = duration_ms
@@ -113,6 +143,10 @@ class NodeTimingCallback(FlowCallback):
         keeper 判据约定一致（有 ``started_at``、无 ``ended_at`` = 在跑 =
         活证据），且**不编造** ``ended_at``/``duration_ms``。
         已完成节点仍以 ``_timings`` 为准（同一节点重跑时结束记录覆盖在跑记录）。
+
+        「在跑」形态因此**只在节点确实在跑时**成立：异常结束（抛错/超时/
+        取消）的节点由宿主在终态落盘前经 :meth:`close_open` 收口，绝不把
+        ``ended_at=""`` 留在终态文档里（否则判据①永久命中 → 挂死执行无法回收）。
         """
         out = {node_id: dict(entry) for node_id, entry in self._timings.items()}
         for node_id, started in self._open.items():

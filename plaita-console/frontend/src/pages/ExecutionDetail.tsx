@@ -130,6 +130,7 @@ export default function ExecutionDetail() {
   const [showResumeDialog, setShowResumeDialog] = useState(false)
   const [useSSE, setUseSSE] = useState(true)
   const [sseLost, setSseLost] = useState(false)
+  const [resumeNotice, setResumeNotice] = useState('')
 
   const handleSSELoss = useCallback(() => {
     setUseSSE(false)
@@ -155,10 +156,19 @@ export default function ExecutionDetail() {
   const resumeMutation = useMutation({
     mutationFn: (params: { resume_type: string; data?: Record<string, unknown> }) =>
       api.resumeExecution(executionId!, params),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['execution', executionId] })
       setShowResumeDialog(false)
+      // 唤醒上限（G1_MAX_WAKEUPS / DETERMINISTIC_FAILURE_MAX）命中时 worker 侧
+      // **幂等拒绝**（already_terminal），入队接口照样 200——不给提示等于按钮
+      // 静默失效。error 态执行才提示（挂起/取消等恢复路径不受上限约束）。
+      setResumeNotice(
+        variables.resume_type === 'retry' && execution?.status === 'error'
+          ? '恢复请求已入队。若状态保持 error，说明已达唤醒/确定性失败上限（计数 7 天后自动过期），需新建执行重跑。'
+          : ''
+      )
     },
+    onError: (e) => setResumeNotice(`恢复请求未受理：${(e as Error).message}`),
   })
 
   // 本次执行实际跑过的节点 id：版本号缺失时用它去匹配「到底跑的是哪个版本」，
@@ -320,11 +330,14 @@ export default function ExecutionDetail() {
           挂起执行的 service 错误（如订阅快照里的 error_message）不能重试
           ——retry 会被 worker 的挂起幂等短路拒绝（#33）。 */}
       {execution.error && execution.status === 'error' && (
-        <div className="flex justify-end -mb-3 relative z-10">
+        <div className="flex flex-col items-end gap-1 -mb-3 relative z-10">
           <Button variant="secondary" size="sm" onClick={() => resumeMutation.mutate({ resume_type: 'retry' })} disabled={resumeMutation.isPending}>
             <Play size={13} />
             {resumeMutation.isPending ? '重试中…' : '从断点重试'}
           </Button>
+          {resumeNotice && (
+            <p className="text-caption text-ink-muted max-w-xl text-right">{resumeNotice}</p>
+          )}
         </div>
       )}
       {execution.error && (() => {

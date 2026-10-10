@@ -46,23 +46,10 @@ ALLOWED_SILENT = {
     ("node/code.py", 556),
     # 2026-10-07 沙箱生命周期回调条件装配：plaita-nodes 是可选依赖，缺装 / 无沙箱
     # 注册表 / 装配失败都返回 None（非沙箱部署零行为变化），异常细节不影响主流程。
-    # plaita#22 沙箱白名单接线（`_code_allowed_backends_for_worker` 插入）后整体下移 12：
-    # 781→793, 786→798, 792→804，位点未变。
-    # 后续 shift：8cd9563/cbcdd38（暂停沙箱清扫 / 沙箱生命周期回调）与 #26 指标告警
-    # 接线（顶层 import + env helper + metrics/alert 方法插入）累积下移，2026-10-08
-    # 校准到 902/926/931/937——四个位点（可选依赖导入 / 生命周期装配 / 注册表加载）
-    # 语义未变；另补 `collect_workspace_snapshots` 导入失败一条（此前漏登记）。
-    # 再 shift：`_paused_sweeper` 的 e2b 预导入从「准备」try 里拆成独立 best-effort
-    # 分支（缺 e2b 不再等于「不清扫」，见该函数 docstring）后整体下移 5：
-    # 902→907, 926→931, 931→936, 937→942，位点未变。
-    # plaita#29（worker 入口补 `_code_allowed_languages_for_worker` 接线）后再下移 16：
-    # 907→923, 931→947, 936→952, 942→958，位点未变。
-    # plaita#33（挂起幂等短路 + ResumeProtocolError）整体再下移 49：
-    # 923→972, 947→996, 952→1001, 958→1007，位点未变。
-    ("server/flow_worker.py", 1039),
-    ("server/flow_worker.py", 1063),
-    ("server/flow_worker.py", 1068),
-    ("server/flow_worker.py", 1074),
+    # 这四处（可选依赖导入 / 生命周期装配 / 注册表加载 / collect_workspace_snapshots
+    # 导入失败）2026-10-09 起改由行号无关指纹通道登记（见
+    # ALLOWED_SILENT_FINGERPRINTS）——行号条目随每次上方插入集体漂移、很快就指向
+    # docstring 变成死登记（2026-10-10 评审 #6），不再保留。
 }
 
 

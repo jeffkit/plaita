@@ -193,6 +193,7 @@ def _is_stream_key(key: str) -> bool:
 
 @router.get("/queues/dlq", response_model=DlqListResponse)
 async def list_dlq(
+    request: Request,
     count: int = 20,
     redis: Redis = Depends(get_redis)
 ):
@@ -201,9 +202,15 @@ async def list_dlq(
     死信此前只有 worker 的 logger.error——值守看不到堆积，DLQ 被 XTRIM
     裁掉旧条目也无人知晓。本端点把 DLQ 拉进看板。
 
+    与单键端点同口径（#64）：有租户上下文时按死信封套里 ``payload.tenant_id``
+    过滤（缺省视为 default），平台全量视角不过滤。``length`` 仍是 Stream
+    原始长度（XLEN 是共享队列的物理量，不按租户拆分），故过滤后
+    ``entries`` 可能少于 ``length``。
+
     - **count**: 每个 DLQ Stream 返回的最近条目数（默认 20）
     """
     count = max(0, min(int(count), 200))
+    tenant = tenant_scope(request)
     names = set(KNOWN_DLQ_KEYS)
     for key in redis.keys(f"*{DLQ_SUFFIX}"):
         names.add(key if isinstance(key, str) else key.decode())
@@ -232,6 +239,9 @@ async def list_dlq(
                         break
                 if not isinstance(envelope, dict):
                     envelope = {"raw": envelope}
+                payload = envelope.get("payload") or {}
+                if not _owned_by_tenant(payload, tenant):
+                    continue
                 entries.append(DlqEntry(
                     dlq_id=msg_id,
                     reason=str(envelope.get("reason", "")),
@@ -239,7 +249,7 @@ async def list_dlq(
                     source_id=str(envelope.get("source_id", "")),
                     delivery_count=envelope.get("delivery_count"),
                     dead_lettered_at=envelope.get("dead_lettered_at"),
-                    payload=envelope.get("payload") or {},
+                    payload=payload,
                 ))
         streams.append(DlqStream(name=name, length=length, entries=entries))
 

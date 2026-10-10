@@ -208,6 +208,19 @@ class ResumeError(FlowExecutionException):
         super().__init__(self.code, message, self.error_type, node)
 
 
+class NodeResumeError(ResumeError):
+    """节点的 ``resume()`` **自身抛错**（区别于调用方协议错误）。
+
+    ``DistributedStrategy._handle_resume`` 把 ``current_node.resume(...)`` 期间的
+    **任意**异常统一包装成 ``ResumeError`` 上抛，于是「节点 resume 实现崩了」
+    与「恢复协议不匹配（无挂起节点 / 非 EventNode / 状态非 pending /
+    resume_type 不支持 / continue 试图绕过挂起节点）」在类型上不可分——宿主
+    侧据此把前者当协议错误豁免、执行停在 suspended 且 ``error`` 为空，真实
+    失败无从观测。本子类标注「执行侧失败」：按节点失败处理、终态化 error；
+    裸 ``ResumeError`` 仍然表示协议错误（执行保持原状等决议路径）。
+    """
+
+
 class ErrorStrategy(Enum):
     """
     错误处理策略

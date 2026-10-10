@@ -190,10 +190,18 @@ terminationGracePeriodSeconds: 90   # > PLAITA_WORKER_DRAIN_TIMEOUT，留出收�
 ```bash
 curl -X POST "$CONSOLE/api/executions/$EXEC_ID/resume" \
   -H 'Content-Type: application/json' \
-  -d '{"resume_type":"continue","data":{"allow_flow_hash_change":true}}'
+  -d '{"resume_type":"event","data":{"allow_flow_hash_change":true}}'
 ```
 
 放行会打 WARNING 并把新指纹写回状态，留审计痕迹。**同算法下哈希不同时该开关无效**——那种情况必须改回定义或新建执行。
+
+> ⚠️ 不能用 `resume_type="continue"`（或 `"retry"`）做这件事：挂起执行收到
+> `continue`/`retry` 是**幂等 no-op**（plaita#33——两种类型都不携带推进语义，
+> 内核直接短路返回 `already_suspended`，消息被 ack），哈希门根本不会执行，
+> 指纹永远刷不新、状态也不报错，看起来「请求 200 但什么都没发生」。
+> 判定表里的场景要求恢复类型能过挂起守卫——`event` / `cancel` / `timeout`
+> 都走同一条哈希门，其中 `event` 是「确认定义没变、继续推进」的常规选择
+> （若挂起节点需要决议数据，`data` 一并带上该节点期望的事件字段）。
 
 ### 兼容纪律（写进 review checklist）
 
@@ -368,6 +376,7 @@ POST `{"event": "zombie_reaped", ...}`；dry-run 不告警，告警通道故障�
 | DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)） |
 | 反复重投，日志刷「保存执行状态失败 (…)」 | Redis 写路径瞬断/序列化失败——落盘失败已不再静默 ack（2026-10 评审修复） | 查 Redis `INFO`/延迟日志；恢复后 pending 自动重投收敛，勿人工 ack |
 | 反复重投，日志刷「挂起任务投递失败」 | 挂起服务队列 `plaita:{subtype}:queue` rpush 失败；suspended 已保留等重派 | 查对应外延服务（DelayService 等）与其队列长度；恢复后重投自动重派 |
+| 日志刷「Redis 读失败（瞬态，退避 1.0s 后继续轮询）」/「Redis 故障中断消费循环」 | Redis 抖动（读超时/连接重置）——worker **不**再退出进程（#48），退避后自动重连恢复 | 无需动作（勿因这些行重启 worker）；持续刷则查 Redis `INFO`/延迟/连接数；恢复后消费自动继续，pending 消息不丢 |
 | 双 resume | 旧版本无 lease | 升级到含 lease 的版本；查 lease key |
 | 挂起永不恢复 | EventBus 与 subscription 不同 Redis；`--no-event-bus` | Worker/Filter 同总线；去掉 no-event-bus |
 

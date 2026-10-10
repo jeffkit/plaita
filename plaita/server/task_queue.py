@@ -8,10 +8,31 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Union
 
+from redis.exceptions import AuthenticationError as RedisAuthenticationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 logger = logging.getLogger("plaita.server.task_queue")
+
+# #48：可容忍的 Redis 瞬态故障。redis-py 8.x 里 ``TimeoutError`` 与
+# ``ConnectionError`` 是 ``RedisError`` 下**互不继承**的兄弟分支（本机实测
+# ``issubclass(TimeoutError, ConnectionError) is False``）——只吞 ConnectionError
+# 接不住「读超时」，异常从 ``ensure_group``/``xclaim`` 一路炸穿 run() 主循环
+# （2026-10-07 两次 worker 进程退出）。socket 层错误（``socket.timeout`` = 内建
+# TimeoutError、ConnectionResetError 等都是 OSError 子类）也可能不经包装直接
+# 穿出连接池。协议类错误（ResponseError，含 BUSYGROUP）、**权限错误**
+# （``AuthenticationError``——redis-py 8.x 把它挂在 ``ConnectionError`` 下，会
+# 被本元组误吞；密码/ACL 配错于是退化成每秒一条 warning 的永久空转而非快速
+# 失败，见 ``_is_fatal_redis_config_error``）**不在**此列。
+TRANSIENT_REDIS_ERRORS = (RedisConnectionError, RedisTimeoutError, OSError)
+
+
+# 「非瞬态」的 Redis 权限错误：即便落在 TRANSIENT_REDIS_ERRORS 的类型范围
+# （``AuthenticationError`` 是 ``ConnectionError`` 子类）也必须上抛。
+def _is_fatal_redis_config_error(exc: BaseException) -> bool:
+    """权限/配置类错误：重试无解，必须快速失败（不得被瞬态容忍吞掉）。"""
+    return isinstance(exc, RedisAuthenticationError)
+
 
 DEFAULT_CONSUMER_GROUP = "plaita-workers"
 PAYLOAD_FIELD = "payload"
@@ -151,18 +172,43 @@ class RedisStreamTaskQueue:
             "dead_lettered": 0,
             "lease_conflicts": 0,
             "poison_acked": 0,
+            "protocol_errors": 0,
             "failed": 0,
             "dlq_guard_skipped": 0,
             "residue_swept": 0,
         }
 
     def ensure_group(self) -> None:
+        """确保消费组存在；Redis 瞬态故障不上抛（#48）。
+
+        本方法在消费主循环的每一轮都被调用（``_read_once`` 第一行），是
+        「读超时炸穿 run()」的必经之路——2026-10-07 两次 worker 进程退出的
+        异常链都止于这里的 ``xgroup_create``（``TimeoutError: Timeout reading
+        from socket``）。故分三层：
+
+        - ``BUSYGROUP``：组已存在，正常态，忽略；
+        - 连接/超时/socket 类（``TRANSIENT_REDIS_ERRORS``）：只记 warning 并
+          返回，由上层轮询重试（Redis 恢复后下一轮自然建组）；
+        - 其余（协议/权限等 ``ResponseError``）：照旧上抛——配置问题重试无解，
+          静默会让 worker 拿着「组不存在」的状态空转。``AuthenticationError``
+          同理（它虽挂在 ``ConnectionError`` 下，却被
+          ``_is_fatal_redis_config_error`` 一并放行）。
+        """
         try:
             self.redis.xgroup_create(
                 self.stream_key,
                 self.group_name,
                 id="0",
                 mkstream=True,
+            )
+        except TRANSIENT_REDIS_ERRORS as exc:
+            if _is_fatal_redis_config_error(exc):
+                raise
+            logger.warning(
+                "Redis 瞬态故障，消费组确保失败（%s, group=%s），将继续轮询重试: %s",
+                self.stream_key,
+                self.group_name,
+                exc,
             )
         except Exception as exc:
             if "BUSYGROUP" not in str(exc):
@@ -181,11 +227,22 @@ class RedisStreamTaskQueue:
         """
         try:
             return self._read_once(block_ms)
-        except RedisConnectionError:
-            # 瞬断（DNS 解析失败/连接拒绝）不得炸穿 run() 主循环——2026-09 的
-            # 修复只容忍了 BLOCK 到期的 TimeoutError，漏了这一支：容器网络抖动
-            # /Redis 重启窗口内 worker 直接退出（e2e-chaos-redis.sh 实测复现）。
-            # 退避后返回 None 继续轮询，Redis 恢复后自动重连恢复消费。
+        except TRANSIENT_REDIS_ERRORS as exc:
+            # 瞬断（DNS 解析失败/连接拒绝）+ 读超时都不得炸穿 run() 主循环。
+            # 2026-09 的修复只容忍了 ``RedisConnectionError``，接不住超时——
+            # redis-py 8.x 里 TimeoutError 与 ConnectionError 互不继承（见
+            # ``TRANSIENT_REDIS_ERRORS``），且 ``ensure_group``/``xclaim`` 的
+            # 异常绕开了 ``xreadgroup`` 那一支（2026-10-07 worker 进程退出实测）。
+            # 退避后返回 None 继续轮询，Redis 恢复后自动重连恢复消费；消息不
+            # ack（留 pending），at-least-once 语义不变。权限错误不是瞬态
+            # （见 ``_is_fatal_redis_config_error``）→ 上抛快速失败。
+            if _is_fatal_redis_config_error(exc):
+                raise
+            logger.warning(
+                "Redis 读失败（瞬态，退避 %.1fs 后继续轮询）: %s",
+                RECONNECT_BACKOFF_SECONDS,
+                exc,
+            )
             time.sleep(RECONNECT_BACKOFF_SECONDS)
             return None
 
@@ -413,6 +470,15 @@ class RedisStreamTaskQueue:
 
     def note_poison(self) -> None:
         self._metrics["poison_acked"] += 1
+
+    def note_protocol_error(self) -> None:
+        """resume 协议错误计数（**不是**畸形消息）。
+
+        协议错误的消息本体合法（只是与执行状态不匹配，如 continue 打在挂起
+        执行上），执行保持原状可查；把它记进 ``poison_acked`` 会污染「畸形
+        消息丢弃」的口径与告警阈值。
+        """
+        self._metrics["protocol_errors"] += 1
 
     def note_failed(self) -> None:
         self._metrics["failed"] += 1
