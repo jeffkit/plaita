@@ -2010,12 +2010,19 @@ class FlowWorker:
                 "already_terminal": True,
                 "g1_wakeups_exhausted": True,
             }
-        if self._deterministic_failure_exhausted(execution_id) and \
-                ResumeType.coerce(resume_type) is ResumeType.RETRY:
+        if retry_wakeup and self._deterministic_failure_exhausted(execution_id):
             # 确定性失败已达上限（plaita#73 遗留层）：该执行的失败是**确定性**的
             # （`exited 1` / `sync_in` / 超时…），重跑只会再烧一次全额成本。
             # 与 G1 上限同理返回幂等结果、不抛异常（抛异常会让调用方当失败重试），
             # 让消息层重投在此短路、不再空转沙箱。
+            #
+            # **必须与 ``retry_wakeup``（status=error）绑定**（plaita#53）：计数
+            # 键寿命长于状态行（终态化写盘失败/状态被回滚都可能留下
+            # 「running + 计数达限」的组合），而本分支返回的
+            # ``already_terminal`` 是**谎报终态 + 一行不推进**——对 running 执行
+            # 就是这个工单里的「resume 假受理」：API 返回已受理、node_timings /
+            # last_update_time 双双不动、无 error 无告警。running 执行没有
+            # 「失败节点」可重跑，retry 的语义就是断点续跑，必须真实重派。
             logger.error(
                 "执行 %s 确定性失败已判不可救（%s/%s），拒绝唤醒重跑——"
                 "error 终态保留",
@@ -2061,6 +2068,18 @@ class FlowWorker:
                 "status": state_status,
                 "already_suspended": True,
             }
+
+        if state_status == "running" and ResumeType.coerce(resume_type) is ResumeType.RETRY:
+            # running 执行没有失败节点可重跑（plaita#53 验收 2）：retry 在此的
+            # 语义 = 从 checkpoint 派发后继节点（与 continue 同路），**必须真实
+            # 重派**——禁止「受理后无动作」。显式留痕，值守从日志即可区分
+            # 「真的推进了」与「白等」（租约被他人持有等不生效情形另见 run()
+            # 的租约冲突日志）。
+            logger.warning(
+                "执行 %s 处于 running，resume_type=retry 按「从断点续跑」处理"
+                "（running 执行无失败节点可重跑），本次将从 checkpoint 派发后继节点",
+                execution_id,
+            )
 
         # 获取流程版本
         version = state.flow_version
@@ -3609,6 +3628,23 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         task.message_id,
                         exc,
                     )
+                    body = task.body if isinstance(task.body, dict) else {}
+                    if body.get("type") == "resume":
+                        # plaita#53：resume 被 ack 丢弃 = **本次救援未生效**。上面
+                        # 那句 INFO 只说「消息已释放」，调用方（BFF/值守）看到的仍
+                        # 是「恢复请求已加入队列」而执行一行没推进——即工单里的
+                        # 「假受理」：值守无法区分「已救活」与「白等」。所以这里
+                        # 必须补一句显式的「未生效」+ 可判别的下一步。
+                        logger.warning(
+                            "任务 %s 是 resume（execution=%s, resume_type=%s），但推进租约"
+                            "被在册 worker 持有，本消息已 ack 丢弃——**本次 resume 未生效**"
+                            "（不产生任何节点活动）。若该执行的 node_timings / "
+                            "last_update_time 长时间不动，说明持有者已卡住：反复 resume 无效，"
+                            "需人工 cancel 后按需重开",
+                            task.message_id,
+                            body.get("execution_id"),
+                            body.get("resume_type"),
+                        )
                 else:
                     queue.note_lease_conflict()
                     logger.warning(

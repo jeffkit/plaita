@@ -166,7 +166,8 @@ python -m plaita.server.flow_worker \
   唤醒 5 轮、每轮烧 5 次沙箱）。两道**上限**都落在 `FlowWorker` 类常量上，
   达限时 `resume_flow` 对 `retry` **幂等拒绝**（返回 `already_terminal=True` +
   `g1_wakeups_exhausted` / `deterministic_failure_exhausted`，不抛异常、不改
-  状态），消息层重投随之短路：
+  状态），消息层重投随之短路（**仅对 `error` 态执行**，见下节
+  [running 执行的 retry](#running-执行的-retry)）：
   - `{ns}:execution:g1wakeups:{id}`（`G1_MAX_WAKEUPS`，默认 2）：同一执行被
     `retry` 唤醒的次数。**人工与自动共用这个额度**——达限后运维点「从断点重试」
     不再生效（BFF 会返回 409 并给出要删的键，见 ops-runbook）；
@@ -207,6 +208,35 @@ except 终态化成 error，一次重复投递就把可恢复的挂起执行永�
 由 `ResumeProtocolError` 豁免承接：**只有策略层守卫 `ResumeGuardError`** 不终态化、
 执行保持原状、消息 ack（豁免面刻意窄，见上节「判别」——节点 `resume()` 自身抛错
 仍终态化 error）。
+
+## running 执行的 retry 与分支未命中终态化（#53） {#running-执行的-retry}
+
+工单背景：值守实测两例条件假分支后执行停 `running` 88 分钟（无 error、无终态），
+且对 `running` 执行 `POST /resume {"resume_type":"retry"}` 返回「已加入队列」却
+一行不推进（`node_timings` / `last_update_time` 双双不动）= **假受理**。
+
+- **分支未命中必须显式失败，绝不悬死 `running`**：`if`/`switch` 全部分支未命中
+  且无 default 时，`plaita/core/strategies.py` 的 `_get_next_from_last`
+  （distributed）与 `_advance_one`（normal/generator）抛
+  `FlowExecutionException` → worker 把执行终态化为 `error`（error 里点名节点 id），
+  不再带着 `$NODE` 中间态静默收尾、也不停在 `running`。`if` 无 else 的两种形态都
+  被这一道拦下：`else_next=""`（分支未命中）与 `else_next="false"`（if 节点的
+  占位默认值指向不存在的节点 → `NodeNotFoundError`）。唯一逃生口是节点显式
+  `errorHandler.strategy=continue`（降级为 warning + `$NODE` 收尾，与 0.5.x 历史
+  行为一致）。**升级核对**：线上 worker 必须含该防御——不含该防御的版本上，条件
+  假分支无后继就是「不派发 / 不落终态 / 永久 `running`」（工单「未证实」项）。
+- **`running` + `retry` = 断点续派**：`running` 执行没有「失败节点」可重跑，
+  `retry` 与 `continue` 同路，从 checkpoint 派发后继节点，并留一行 WARNING
+  说明「按从断点续跑处理」。两道唤醒预算幂等拒绝（`g1wakeups` / `nofail`）
+  **只对 `status=error` 生效**（plaita#53）：计数键寿命长于状态行（终态化写盘
+  失败、状态被回滚等都会留下「running + 计数达限」的组合），若把 `running`
+  也按「已终态」拒绝，返回的 `already_terminal=True` 就是**谎报终态 + 一行不
+  推进**——即工单里的假受理。
+- **resume 被丢弃必须可见**：执行推进租约被**在册** worker 持有时，resume 消息
+  按既有语义 ack 释放（#50/#52：留 pending 会烧 delivery 并产生假死信），但会
+  额外打 WARNING「**本次 resume 未生效**（不产生任何节点活动）」并给出下一步
+  （确认卡死后人工 cancel 再按需重开）——值守据此区分「已救活」与「白等」。
+  每次点「从断点重试」都返回 200 却毫无推进时，先 grep 这行日志。
 
 ## 在跑节点心跳与 keeper 活性判据 {#在跑节点心跳}
 

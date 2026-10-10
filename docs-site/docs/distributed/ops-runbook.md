@@ -455,6 +455,9 @@ redis-cli DEL plaita:execution:nofail:<execution_id>
   因此「同一位置反复撞墙」最多烧 12 次全款即停，别把 12 当固定值——它是
   `DETERMINISTIC_FAILURE_MAX`，调它请同步 console 的判据（同源常量）；
 - 上限是**保护**：达限即停 ≠ 执行不可救，人工确认修复后删键即可继续。
+- **两道拒绝只对 `error` 态生效**（plaita#53）：`running` 执行的 `retry` 是
+  「从断点续派」（与 `continue` 同路），即使计数键达限也照常派发——计数键寿命
+  长于状态行，按「已终态」拒绝会得到「返回已受理、一行不推进」的假受理。
 
 ## 故障手册
 
@@ -468,6 +471,7 @@ redis-cli DEL plaita:execution:nofail:<execution_id>
 | 反复重投，日志刷「挂起任务投递失败」 | 挂起服务队列 `plaita:{subtype}:queue` rpush 失败；suspended 已保留等重派 | 查对应外延服务（DelayService 等）与其队列长度；恢复后重投自动重派 |
 | 双 resume | 旧版本无 lease | 升级到含 lease 的版本；查 lease key |
 | `error` 执行点「从断点重试」无反应 / API 返 409 | `retry` 唤醒预算达限（`g1wakeups` 或 `nofail`） | 见 [唤醒预算达限](#唤醒预算达限plaita73)：修根因 → `DEL` 计数键 → 重试 |
+| `running` 执行点「从断点重试」返回 200 却毫无推进（`node_timings`/`last_update_time` 不动） | ① 推进租约被**在册** worker 持有 → resume 消息按既有语义 ack 丢弃（worker 日志有「**本次 resume 未生效**」）；② 条件节点/switch 分支未命中且线上引擎**不含** `strategies.py` 的未命中防御 → 不派发、不落终态，执行永久 `running` | ① 确认持有者已卡死则人工 cancel 后按需重开，反复 retry 无效；② grep worker 日志的 `matched no branch` / `has no 'next'` 确认引擎版本——升级到含该防御的版本后同图会落 `error` 终态（plaita#53，见 [FlowWorker · running 执行的 retry](flow-worker.md#running-执行的-retry)） |
 | 挂起永不恢复 | EventBus 与 subscription 不同 Redis；`--no-event-bus` | Worker/Filter 同总线；去掉 no-event-bus |
 
 ## 与可靠性文档的关系
