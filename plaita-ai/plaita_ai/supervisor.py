@@ -464,30 +464,43 @@ class Supervisor:
     # -- pieces ------------------------------------------------------------
 
     def baseline(self, flow_id: str, dataset: Dataset) -> Dict[str, Any]:
-        """Evaluate the published version once and cache it for the session."""
+        """Evaluate the published version and cache it for the session.
+
+        A baseline judged while the judge was unreachable is deliberately *not*
+        cached: the cache is only refreshed on an improvement and a
+        judge-unavailable baseline suppresses improvement, so caching it would
+        make ``judge_blind`` sticky for the whole session — one transient
+        outage during the first evaluation would block every later iteration.
+        Re-evaluating costs one extra baseline run per iteration, and only
+        while the session is already unable to promote.
+        """
         cache_key = f"{flow_id}:{dataset.source}"
-        if cache_key not in self._baselines:
-            try:
-                detail = self.client.get_flow(flow_id)
-            except ConsoleClientError as exc:
-                if exc.status == 404:
-                    raise ConsoleClientError(f"flow {flow_id!r} not found in the console") from exc
-                raise
-            versions = list(detail.get("versions") or [])
-            published = published_version(versions) or latest_version(versions)
-            if not published:
-                raise ConsoleClientError(
-                    f"flow {flow_id!r} has no versions to baseline against"
-                )
-            self._baselines[cache_key] = evaluate(
-                self.client,
-                flow_id,
-                published,
-                dataset,
-                mode=self.policy.eval_mode,
-                timeout_s=self.policy.eval_timeout_s,
+        cached = self._baselines.get(cache_key)
+        if cached is not None and not int(cached.get("judge_unavailable_cases") or 0):
+            return cached
+        try:
+            detail = self.client.get_flow(flow_id)
+        except ConsoleClientError as exc:
+            if exc.status == 404:
+                raise ConsoleClientError(f"flow {flow_id!r} not found in the console") from exc
+            raise
+        versions = list(detail.get("versions") or [])
+        published = published_version(versions) or latest_version(versions)
+        if not published:
+            raise ConsoleClientError(
+                f"flow {flow_id!r} has no versions to baseline against"
             )
-        return self._baselines[cache_key]
+        report = evaluate(
+            self.client,
+            flow_id,
+            published,
+            dataset,
+            mode=self.policy.eval_mode,
+            timeout_s=self.policy.eval_timeout_s,
+        )
+        if not int(report.get("judge_unavailable_cases") or 0):
+            self._baselines[cache_key] = report
+        return report
 
     def iterate(self, flow_id: str, dataset: Dataset) -> Dict[str, Any]:
         """One full iteration; returns a JSON-able IterationResult dict."""
@@ -560,9 +573,18 @@ class Supervisor:
 
         base_avg = baseline.get("avg_score")
         cand_avg = candidate.get("avg_score")
+        judge_unavailable = {
+            "baseline": int(baseline.get("judge_unavailable_cases") or 0),
+            "candidate": int(candidate.get("judge_unavailable_cases") or 0),
+        }
+        result["judge_unavailable_cases"] = judge_unavailable
+        # A judge that was unreachable makes the two averages incomparable:
+        # the "improvement" may just be the outage ending. Never promote on it.
+        judge_blind = bool(judge_unavailable["baseline"] or judge_unavailable["candidate"])
         failed_hard = cand_avg is None  # whole eval crashed → counts as a failure
         improved = (
             not failed_hard
+            and not judge_blind
             and base_avg is not None
             and cand_avg is not None
             and cand_avg >= base_avg + policy.min_improvement
@@ -577,6 +599,12 @@ class Supervisor:
             return result
         else:
             result["status"] = "no_improvement"
+            if judge_blind:
+                result["reason"] = (
+                    "judge unavailable on "
+                    f"{judge_unavailable['baseline']} baseline / "
+                    f"{judge_unavailable['candidate']} candidate case(s) — scores not comparable"
+                )
             return result
 
         # Promote gate.

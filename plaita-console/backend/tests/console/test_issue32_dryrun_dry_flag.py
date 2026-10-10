@@ -170,6 +170,10 @@ def test_branch_flow_declaring_dry_run_false_cannot_rearm_side_effects(tmp_path,
             {
                 "type": "parallel",
                 "id": "p",
+                # join_branches 缺省为空 = 后台 fire-and-forget 分支，主流程不等它
+                # 就跑完——探针节点可能尚未 emit on_node_start，断言变成竞态。显式
+                # join 才能确定性地观察到分支内部执行。
+                "join_branches": ["b1"],
                 "branches": [
                     {"name": "b1", "flow": {
                         "globalContext": {"dry_run": False},

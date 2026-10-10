@@ -191,7 +191,7 @@ function CopilotInner({
   useCopilotAction({
     name: 'dry_run',
     description:
-      '对当前画布流程做真实试跑（引擎执行），返回每个节点状态与错误——用于自检修改后的流程是否可执行',
+      '对当前画布流程做 dry-run 试跑（引擎执行，注入 dry_run=true：声明该旗标的业务节点走假执行分支、不产生真实副作用），返回每个节点状态与错误——用于自检修改后的流程是否可执行',
     parameters: [
       { name: 'input', type: 'object', description: '流程入参（$INPUT）', required: false },
     ],

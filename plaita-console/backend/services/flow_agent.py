@@ -1,7 +1,7 @@
 """轻量编排 Agent（BrainRunner 默认实现，M2）。
 
 专为编排 Copilot 定制的窄域 agent：理解意图 → 修改 flow IR → 用本地工具
-（引擎强校验 / 真实试跑）自检 → 输出 ```plaita-flow 代码块供前端应用。
+（引擎强校验 / dry-run 试跑）自检 → 输出 ```plaita-flow 代码块供前端应用。
 
 与 recursive/claude CLI 大脑的分工：
 - flow_agent（本模块）：日常编辑/生成——快、token 省、行为可控、无需 CLI；
@@ -106,7 +106,10 @@ def get_flow_agent():
 
         @agent.tool_plain
         def dry_run_flow(flow_json: str, flow_input: str = "{}") -> str:
-            """真实试跑 flow（引擎执行），返回每个节点状态与错误。
+            """dry-run 试跑 flow（引擎执行 + 注入 globalContext.dry_run=true），
+            返回每个节点状态与错误。声明该旗标的业务节点（gate / capture /
+            agentrun 等）走假执行分支，不产生真实副作用，故结果只能证明流程
+            「结构可执行」，不代表真实业务行为。
             flow_input 为流程入参 JSON（$INPUT），不确定时传 {}。"""
             try:
                 out = dryrun_svc.dry_run(flow_json, json.loads(flow_input or "{}"))

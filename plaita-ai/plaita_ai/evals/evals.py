@@ -104,6 +104,11 @@ def _get_path(payload: Any, dotted: str) -> Any:
     return current
 
 
+def _judge_unavailable(result: Dict[str, Any]) -> bool:
+    judge = result.get("judge")
+    return isinstance(judge, dict) and bool(judge.get("unavailable"))
+
+
 def assert_score(case: Case, output: Any) -> Dict[str, Any]:
     """Score one output against a case's expect block.
 
@@ -142,6 +147,11 @@ def assert_score(case: Case, output: Any) -> Dict[str, Any]:
         verdict = judge_output(str(expect["judge"]), case.input, output)
         if verdict is None:
             result["judge"] = "skipped"  # judge not configured — excluded from averages
+        elif verdict.get("unavailable"):
+            # judge unreachable: not a verdict about the output, so keep the
+            # content score out of the average rather than folding in a 0.0.
+            result["judge"] = verdict
+            result["reasons"].append(str(verdict.get("reason", "judge endpoint unavailable")))
         else:
             result["judge"] = verdict
             result["score"] = round((score + float(verdict["score"])) / 2.0, 4)
@@ -213,7 +223,8 @@ def evaluate(
             entry["reasons"] = ["console error"]
         results.append(entry)
 
-    scored = [r for r in results if r.get("judge") != "skipped"]
+    judge_unavailable = [r["id"] for r in results if _judge_unavailable(r)]
+    scored = [r for r in results if r.get("judge") != "skipped" and not _judge_unavailable(r)]
     pass_rate = (sum(1 for r in scored if r.get("ok")) / len(scored)) if scored else None
     avg_score = (
         round(sum(float(r.get("score") or 0.0) for r in scored) / len(scored), 4) if scored else None
@@ -227,6 +238,8 @@ def evaluate(
         "cases": results,
         "pass_rate": pass_rate,
         "avg_score": avg_score,
+        # 对账节:judge 不可达的用例既非通过也非否决,已排除出均值,单列计数
+        "judge_unavailable_cases": len(judge_unavailable),
         # 对账节:观测关闭/ dry-run 模式为空列表(execution 模式逐 case 深链)
         "langfuse_traces": traces,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -251,7 +264,13 @@ def compare(base: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
             "candidate_ok": c.get("ok"),
             "delta": delta,
         }
+        blind = _judge_unavailable(b) or _judge_unavailable(c)
+        if blind:
+            # One side had no usable judge → ok/score deltas are not evidence.
+            row["judge_unavailable"] = True
         case_rows.append(row)
+        if blind:
+            continue
         if b.get("ok") and not c.get("ok"):
             regressions.append(case_id)
         elif c.get("ok") and not b.get("ok"):
