@@ -2622,12 +2622,62 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             except Exception:  # noqa: BLE001 — 看门狗自身绝不能带崩 worker
                 logger.error("租约看门狗周期异常", exc_info=True)
 
+    def _publish_node_progress(self, execution_id: str) -> None:
+        """把**在跑节点**的进度发布到执行状态（长节点期间的活性心跳）。
+
+        为什么需要（2026-10-10，plaita#27/#31/#55/#32/#62 五单误杀事故）：
+        执行状态的落盘只发生在**节点边界**（``_persist_state_or_raise`` 的
+        step_persist / 终态等路径）。而 ``sandbox_agent`` 节点（impl）是**单个
+        长节点**——实测在 AGS 沙箱里跑 35 分钟，期间**一次落盘都不发生**：
+
+        - ``runner._execute_node`` 在节点开跑**前**调 ``on_node_start``，
+          于是采集器 ``_open['impl']`` 一直存在；
+        - 但 ``snapshot()`` 只在 ``_collect_node_timings``（= 落盘收口）里被调；
+        - ⇒ ``node_timings`` 永远停在进入 impl 前的最后一次落盘。
+
+        keeper 的 ``console_exec.worker_alive`` 判据① 是「有 started_at、无
+        ended_at 的节点 = 活证据」；它在长节点期间**读不到这个节点**，于是
+        落到判据③「末节点 ended_at 停滞超 1800s」→ **把健康 run 判死 cancel**。
+        铁证：产出落盘与误杀同一秒（#27 产 10:19:18 / 判 10:19:15）。
+
+        这里复用看门狗周期（默认 TTL/3 ≈ 40s）做一次**只读合并 + 落盘**：
+        不推进流程、不改 context，只把采集器的当前快照并进 ``node_timings``
+        与 ``last_update_time``，让宿主侧「看得见沙箱里在跑」。
+
+        失败**只告警不抛**：这是观测路径，绝不能因落盘失败而打断正在跑的
+        节点（真正的落盘失败仍由 ``_persist_state_or_raise`` 在节点边界负责）。
+        """
+        timing = self._node_timings.get(execution_id)
+        if timing is None:
+            return
+        try:
+            state = self.execution_storage.load_execution_state(execution_id)
+            if state is None:
+                return
+            if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+                return
+            # 与 _collect_node_timings 同款合并语义：不抹掉别的进程写下的旧节点
+            merged = dict(state.node_timings or {})
+            merged.update(timing.snapshot())
+            state.node_timings = merged
+            state.last_update_time = datetime.now().isoformat()
+            self.execution_storage.save_execution_state(execution_id, state)
+        except Exception:  # noqa: BLE001 — 观测路径不得影响执行
+            logger.warning(
+                "在跑节点进度发布失败（忽略，节点边界仍会落盘）: %s",
+                execution_id,
+                exc_info=True,
+            )
+
     def _watchdog_renew_once(self) -> None:
         """对全部活跃执行续租一轮；renew 失败（Lua compare 不符 = 已被他人
         持有/过期）→ 标记 lease_lost + 鸭子调 execution.cancel() 中止当前步
         （引擎 cancel() 为波次③实现，缺席时跳过——失租兜底是步界
         _renew_lease_if_held / persist 前失租检查抛 ExecutionLeaseError 且
         不写状态，消息不 ack）。Redis 瞬断（renew 抛异常）不判死，下周期重试。
+
+        续租成功后**顺带发布在跑节点进度**（见 ``_publish_node_progress``）：
+        让 keeper 的活性判据能看见沙箱长节点，避免 >1800s 误判 zombie 误杀。
         """
         with self._lease_watch_lock:
             entries = list(self._lease_watch.items())
@@ -2645,6 +2695,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             finally:
                 reset_current_tenant(token)
             if renewed:
+                # 租约确认在手 → 发布在跑节点进度（长节点期间的唯一心跳，
+                # 见 _publish_node_progress：防 keeper 把沙箱长节点误判 zombie）
+                self._publish_node_progress(execution_id)
                 continue
             with self._lease_watch_lock:
                 self._lease_lost.add(execution_id)

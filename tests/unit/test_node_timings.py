@@ -8,9 +8,12 @@ worker 是否真的把它写进了 ExecutionState.node_timings。
 import pytest
 
 pytest.importorskip("cachetools")
+pytest.importorskip("fakeredis")
+
+from unittest.mock import MagicMock
 
 from plaita.event.memory import InMemoryEventBus
-from plaita.server.flow_worker import FlowWorker
+from plaita.server.flow_worker import FlowWorker, RedisFlowWorker
 from plaita.server.node_timings import NodeTimingCallback
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
@@ -216,3 +219,109 @@ class TestWorkerPersistsTimings:
         state = ExecutionState(execution_id="ghost", context={})
         worker._collect_node_timings("ghost", state)
         assert state.node_timings is None
+
+
+class TestWatchdogPublishesRunningNode:
+    """长节点（沙箱 sandbox_agent）期间的活性心跳——2026-10-10 五单误杀事故回归。
+
+    事故链：落盘只发生在**节点边界**，而 impl 是单个 35 分钟长节点 →
+    期间 snapshot() 从不被调用 → node_timings 停在进入 impl 前 →
+    keeper 判据①（有 started 无 ended = 活证据）读不到 → 判据③判死 cancel。
+
+    修复：看门狗续租成功后顺带发布在跑节点进度。
+    """
+
+    def _worker(self, storage):
+        """``_publish_node_progress`` 挂在 RedisFlowWorker（与看门狗同层），
+        构造参数与 tests/unit/test_wave12_cancellation.py 的工厂保持一致。"""
+        import fakeredis
+
+        return RedisFlowWorker(
+            redis_url="redis://localhost:6379/15",
+            queue_name="test:node-timings-progress",
+            execution_storage=storage,
+            flow_storage=MemoryFlowStorage(),
+            redis_client=fakeredis.FakeRedis(decode_responses=True),
+            lease_ttl_seconds=60,
+            enable_registry=False,
+            enable_redis_logging=False,
+        )
+
+    def _running_state(self, storage, execution_id="exec-long"):
+        state = ExecutionState(
+            execution_id=execution_id,
+            flow_id="f1",
+            flow_version="1",
+            status="running",
+            context={},
+            last_update_time="2020-01-01T00:00:00",
+        )
+        storage.save_execution_state(execution_id, state)
+        return state
+
+    def test_running_node_is_published_during_long_node(self):
+        """在跑节点必须被写进执行状态，且 last_update_time 被刷新。"""
+        storage = MemoryExecutionStorage()
+        worker = self._worker(storage)
+        eid = "exec-long"
+        self._running_state(storage, eid)
+        # 模拟：节点已开跑（on_node_start 已触发），但尚未结束
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        worker._publish_node_progress(eid)
+
+        state = storage.load_execution_state(eid)
+        assert state is not None
+        timings = state.node_timings or {}
+        assert "impl" in timings, "在跑节点必须落盘（否则 keeper 看不见、会误杀）"
+        assert timings["impl"]["started_at"]
+        assert not timings["impl"]["ended_at"], "在跑节点 ended_at 必须为空"
+        assert state.last_update_time != "2020-01-01T00:00:00", "last_update_time 必须刷新"
+
+    def test_publish_merges_and_keeps_existing_nodes(self):
+        """合并语义：不得抹掉状态里已有的旧节点记录。"""
+        storage = MemoryExecutionStorage()
+        worker = self._worker(storage)
+        eid = "exec-merge"
+        state = self._running_state(storage, eid)
+        state.node_timings = {"gates": {"started_at": "2020-01-01T00:00:00",
+                                        "ended_at": "2020-01-01T00:00:01"}}
+        storage.save_execution_state(eid, state)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        worker._publish_node_progress(eid)
+
+        timings = storage.load_execution_state(eid).node_timings
+        assert "gates" in timings, "已有节点记录不能被抹掉"
+        assert "impl" in timings
+
+    def test_publish_skips_terminal_execution(self):
+        """已终态的执行不再发布进度（避免把终态状态改回 running 语义）。"""
+        storage = MemoryExecutionStorage()
+        worker = self._worker(storage)
+        eid = "exec-done"
+        state = self._running_state(storage, eid)
+        state.status = "completed"
+        storage.save_execution_state(eid, state)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+
+        worker._publish_node_progress(eid)
+
+        assert storage.load_execution_state(eid).node_timings is None
+
+    def test_publish_never_raises_on_storage_failure(self):
+        """观测路径：落盘炸了也不能打断正在跑的节点。"""
+        storage = MagicMock()
+        storage.load_execution_state.side_effect = RuntimeError("boom")
+        worker = self._worker(storage)
+        eid = "exec-boom"
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+        worker._publish_node_progress(eid)      # 不得抛
+
+    def test_publish_is_noop_without_timing_collector(self):
+        worker = self._worker(MemoryExecutionStorage())
+        worker._publish_node_progress("nonexistent")   # 不得抛
