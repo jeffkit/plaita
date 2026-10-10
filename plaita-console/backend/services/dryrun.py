@@ -5,7 +5,21 @@ dry-run 服务：实例化 Flow 并同步执行，收集节点级结果。
 按节点聚合 input(配置)/output(执行结果)/status，并维护主/子流程层级
 （``depth`` / ``flow_path`` / ``flow_id``，供试跑面板做子图缩进）。
 
-安全闸门：拒绝含 code / 可执行脚本类危险节点的 flow，避免 console backend 进程 RCE。
+安全闸门（两层）：
+
+1. 名黑名单：拒绝含 code / 可执行脚本类危险节点的 flow——这些节点无 dry_run
+   契约，只能整体拒跑。
+2. dry-run 全局旗标：注入 ``globalContext.dry_run=True``，并在执行器读点
+   ``get_global_variable`` 上钉死（``_DryRunExecution``）。业务节点（经
+   ``PLAITA_CONSOLE_NODE_MODULES`` 注册的 gate / capture / agentrun / llm /
+   email / webhooks / database / git_publish 等）按契约读
+   ``execution.get_global_variable("dry_run", False)``，为真即跳过真实副作用
+   （子进程 / 出网 / agent CLI）。名黑名单只能枚举内置类型，拦不住动态注册的
+   业务节点——这一层才是它们不真正执行的关键。
+   仅注入 globalContext 不够：子流程自带 ``globalContext.dry_run=false`` 时，
+   子级 context 优先读自己的 $GLOBAL（缺失才回退父级），副作用会被重新打开；
+   读点钉死随 ``get_child_execution`` 下发到 inline child / parallel 分支 /
+   loop 每轮，流程声明层无从绕过。
 """
 import logging
 import threading
@@ -29,6 +43,35 @@ _BLOCKED_NODE_TYPES: Set[str] = {
     "javascript",
     "js",
 }
+
+# dry-run 全局旗标键。业务节点的 dry_run 契约：``execution.get_global_variable(
+# "dry_run", False)`` 为真即跳过真实副作用（plaita-nodes 的 gate / capture /
+# agentrun 均如此）。置位后它们不再在 console 进程内 spawn 子进程 / 出网。
+_DRY_RUN_FLAG = "dry_run"
+
+
+class _DryRunExecution(FlowExecution):
+    """试跑专用执行器：dry_run 旗标在唯一读点上恒真，流程无从自解。
+
+    ``get_global_variable`` 是业务节点 dry-run 契约的读点（plaita-nodes 全部
+    带副作用节点均以 ``execution.get_global_variable("dry_run", False)`` 判定）。
+    只在 ``globalContext`` 里写值是不够的——子流程自带 ``dry_run=false`` 会覆盖
+    父级注入；这里把读点钉死，任何嵌套层级的声明都改不回去。
+
+    ``get_child_execution`` 必须同构覆写（基类实现硬编码 ``FlowExecution``）：
+    inline child / parallel 分支 / loop 每轮的子执行都经它产出，子级于是同样是
+    本类实例。
+    """
+
+    def get_global_variable(self, key: str, default: Any = None) -> Any:
+        if key == _DRY_RUN_FLAG:
+            return True
+        return super().get_global_variable(key, default)
+
+    def get_child_execution(self):
+        child = _DryRunExecution(self, callback_manager=self.callback_manager.child())
+        child.mode = self.mode
+        return child
 
 
 class _FlowCtx:
@@ -319,9 +362,17 @@ def dry_run(
     except Exception as e:
         return {"result": None, "nodes": [], "error": f"Flow 校验失败: {e}"}
 
+    # 安全闸门第 2 层（2026-10 评审 P1）：名黑名单只能拦内置 code/python/js，
+    # 拦不住经 PLAITA_CONSOLE_NODE_MODULES 注册的业务节点。统一把
+    # globalContext.dry_run 置真，让按契约自守的业务节点（gate / capture /
+    # agentrun）跳过真实执行；流程显式声明 dry_run=false 也强制覆盖——试跑
+    # 语义下不得有副作用。注入覆盖读 $GLOBAL 状态的一侧（表达式 / 状态直读），
+    # 业务节点读点一侧由 _DryRunExecution 钉死（子流程声明无从绕过）。
+    flow.global_context = {**(flow.global_context or {}), _DRY_RUN_FLAG: True}
+
     collector = _CollectingCallback()
     try:
-        result = FlowExecution().run(
+        result = _DryRunExecution.run(
             flow,
             params=input_data or {},
             callback_handlers=[collector],

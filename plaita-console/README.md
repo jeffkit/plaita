@@ -229,7 +229,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 
 前端管理面请求会自动带 `X-Admin-API-Key`：优先读 `localStorage.plaita_admin_api_key`，其次 `VITE_PLAITA_ADMIN_API_KEY`。
 
-`POST /api/flows/dry-run` **拒绝**含 `code` / `python` / `javascript` 等危险节点的流程，防止 console 进程 RCE。
+`POST /api/flows/dry-run` 有两层安全闸门：(1) **拒绝**含 `code` / `python` / `javascript` 等危险节点的流程；(2) 试跑前统一注入 `globalContext.dry_run=True`，并在执行器读点 `get_global_variable("dry_run")` 上钉死（试跑专用 `_DryRunExecution`，随子执行下发——流程声明 `dry_run=false` 也改不回去）——经 `PLAITA_CONSOLE_NODE_MODULES` 注册的业务节点（gate / capture / agentrun / llm / email / webhooks / database / git_publish 等）据此跳过真实副作用（子进程 / 出网 / agent CLI），名黑名单枚举不到它们。二者共同防止 console 进程 RCE。
 
 ## 开发指南
 
