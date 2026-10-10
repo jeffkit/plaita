@@ -9,6 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from redis import Redis
 
+try:
+    from ..auth import tenant_scope
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from auth import tenant_scope  # type: ignore
+
 router = APIRouter()
 
 
@@ -101,6 +106,31 @@ KNOWN_DLQ_KEYS = [
     "plaita:flow:queue:dlq",
     "plaita:flow:queue:v2:dlq",
 ]
+
+# 单键读取的资源范围：只放行 KNOWN_QUEUES 登记的字面键，或登记通配项的
+# 前缀（`plaita:redis_queue:*` → `plaita:redis_queue:`）。否则任意键名都可
+# 被当 Redis 键读取（#64）。
+_ALLOWED_QUEUE_PREFIXES = tuple(
+    p[:-1] for p in KNOWN_QUEUES if p.endswith("*")
+)
+_ALLOWED_QUEUE_KEYS = frozenset(p for p in KNOWN_QUEUES if not p.endswith("*"))
+
+
+def _queue_key_allowed(queue_name: str) -> bool:
+    return queue_name in _ALLOWED_QUEUE_KEYS or queue_name.startswith(
+        _ALLOWED_QUEUE_PREFIXES
+    )
+
+
+def _owned_by_tenant(data: Any, tenant: Optional[str]) -> bool:
+    """消息归属：无租户上下文（平台全量视角）一律放行；有则按消息体
+    ``tenant_id`` 过滤，缺省视为 default。无法判归属的非 dict 消息在有租户
+    上下文时一律不返回。"""
+    if tenant is None:
+        return True
+    if not isinstance(data, dict):
+        return False
+    return (data.get("tenant_id") or "default") == tenant
 
 
 # ============ API 端点 ============
@@ -218,6 +248,7 @@ async def list_dlq(
 
 @router.get("/queues/{queue_name:path}", response_model=QueueDetailResponse)
 async def get_queue(
+    request: Request,
     queue_name: str,
     start: int = 0,
     count: int = 20,
@@ -225,11 +256,19 @@ async def get_queue(
 ):
     """
     获取队列详情
-    
-    - **queue_name**: 队列名称
-    - **start**: 起始索引
-    - **count**: 获取数量
+
+    - **queue_name**: 队列名称（须为已登记的 plaita 队列键）
+    - **start**: 起始索引（非负）
+    - **count**: 获取数量（上限 200）
     """
+    # 资源范围：不登记的键一律 404（不泄露键是否存在）
+    if not _queue_key_allowed(queue_name):
+        raise HTTPException(status_code=404, detail="队列不存在")
+    if start < 0:
+        raise HTTPException(status_code=422, detail="start 不能为负数")
+    count = max(0, min(int(count), 200))
+    tenant = tenant_scope(request)
+
     key_type = redis.type(queue_name)
     if isinstance(key_type, bytes):
         key_type = key_type.decode()
@@ -252,6 +291,8 @@ async def get_queue(
                 data = json.loads(payload)
             except Exception:
                 data = {"raw": str(payload)}
+            if not _owned_by_tenant(data, tenant):
+                continue
             data = {"_msg_id": msg_id, **data}
             tasks.append(QueueTask(index=i, data=data))
     elif key_type == "list":
@@ -263,6 +304,8 @@ async def get_queue(
                 data = json.loads(item_str)
             except Exception:
                 data = {"raw": str(item)}
+            if not _owned_by_tenant(data, tenant):
+                continue
             tasks.append(QueueTask(
                 index=start + i,
                 data=data
