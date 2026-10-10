@@ -36,8 +36,17 @@ def test_lease_conflict_acks_message():
     assert "queue.ack(task.message_id)" in src, "冲突分支缺 ack"
     assert "被他人持租约" in src, "冲突分支注释/日志缺失"
     # 且 acked=True 必须设置（统计正确性）
-    idx = src.find("被他人持租约")
-    seg = src[max(0, idx-600):idx+200]
+    #
+    # 定位用**日志调用行**（`logger.xxx` 里带该文案）而非裸字符串：2026-10-10
+    # 起 `finally` 里也有注释提到「他人持租约」，裸 find 会先命中注释，
+    # seg 里自然没有 `acked = True` ⇒ 门禁误报。
+    import re as _re
+
+    m = _re.search(
+        r"logger\.(?:info|warning|error)\([^)]*被他人持租约", src, _re.S
+    )
+    assert m, "未找到冲突分支的日志调用"
+    seg = src[max(0, m.start() - 900):m.start() + 200]
     assert "acked = True" in seg, "ack 后未置 acked=True"
 
 

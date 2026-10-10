@@ -584,3 +584,63 @@ class TestHeartbeatDecoupledFromLease:
 
         worker._publish_orphan_progress()
         assert "exec-live" in worker._lease_orphan_watch, "仍在跑的执行必须继续发心跳"
+
+
+class TestLeaseReleaseNotExecutionEnd:
+    """释放租约 ≠ 执行已结束（2026-10-10 二波，生产实证 exec 339c3262）。
+
+    ack 释放路径（「执行被他人持租约」）会让消息处理走到 `finally`，但该
+    execution 对象**仍在沙箱里推进长节点**：
+
+        19:20:31  复用沙箱，在跑 impl      ← 健康干活
+        19:21:25  「他人持持租约」ack 释放  ⇒ finally 释放租约
+        之后      心跳停 80 分钟（4797s）   ⇒ keeper 判 zombie 收尸
+
+    旧行为：`finally` 无条件 `release()`，且登记已被 unregister 摘除、
+    从不经过 renew 失败分支 ⇒ **没有任何组件再发布它的进度** ⇒ 健康 run 必死。
+    """
+
+    def test_still_advancing_when_execution_alive(self):
+        """执行对象未请求取消 ⇒ 视为仍在推进（不可直接释放）。"""
+        from unittest.mock import MagicMock
+
+        worker = _fake_worker_for_watchdog()
+        ex = MagicMock()
+        ex.cancel_requested = False
+        assert worker._execution_still_advancing(ex) is True
+
+    def test_not_advancing_when_cancel_requested(self):
+        """已请求取消 ⇒ 可释放（执行确实要停）。"""
+        from unittest.mock import MagicMock
+
+        worker = _fake_worker_for_watchdog()
+        ex = MagicMock()
+        ex.cancel_requested = True
+        assert worker._execution_still_advancing(ex) is False
+
+    def test_still_advancing_is_conservative_on_error(self):
+        """取不到活性信号 ⇒ 保守判「仍在推进」（宁可多观测，不放走健康 run）。"""
+        from unittest.mock import MagicMock
+
+        worker = _fake_worker_for_watchdog()
+        ex = MagicMock()
+        type(ex).cancel_requested = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        assert worker._execution_still_advancing(ex) is True
+
+    def test_register_orphan_marks_lost_and_keeps_publishing(self):
+        """转入 orphan 集合后：标记失租 + 后续轮次继续发布心跳。"""
+        from unittest.mock import MagicMock
+
+        worker = _fake_worker_for_watchdog()
+        published = []
+        worker._publish_node_progress = lambda eid, **kw: published.append(eid)
+        ex = MagicMock()
+
+        worker._register_lease_orphan("exec-alive", ex, "default", 1)
+        assert "exec-alive" in worker._lease_orphan_watch
+        assert "exec-alive" in worker._lease_lost, "须标记失租，否则会被误摘除"
+
+        worker._publish_orphan_progress()
+        assert published, "转入 orphan 后必须继续发布心跳（否则 1800s 后被判死）"

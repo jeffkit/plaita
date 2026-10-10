@@ -1310,6 +1310,24 @@ class FlowWorker:
     def _unregister_lease_watch(self, execution_id: str, lease_value: str) -> None:
         """注销看门狗登记（基类 no-op）。"""
 
+    def _execution_still_advancing(self, execution: Any) -> bool:
+        """该执行对象是否仍在推进（基类默认：保守判「是」）。
+
+        基类无租约机制，无法也不该判定活性；保守返回 True 只影响
+        「是否把执行转入 orphan 观测」，而基类的 `_register_lease_orphan`
+        是 no-op，故行为与改动前等价（不会误放走健康 run）。
+        """
+        return True
+
+    def _register_lease_orphan(
+        self,
+        execution_id: str,
+        execution: Any,
+        tenant_id: Optional[str] = None,
+        fence_token: Optional[int] = None,
+    ) -> None:
+        """转入失租后观测集合（基类 no-op：无租约机制即无此需要）。"""
+
     def _raise_if_lease_lost(self, execution_id: Optional[str]) -> None:
         """看门狗已标记失租则抛 ExecutionLeaseError（基类 no-op）。"""
 
@@ -1893,6 +1911,11 @@ class FlowWorker:
             self._register_lease_watch(
                 execution_id, lease_value, execution, fence_token=fence_token
             )
+            # 标记「本次处理是否正常跑完」：只有正常跑完才说明该 execution
+            # 这一轮真的结束了；从 run_distributed 里抛异常（尤其
+            # ExecutionLeaseError 的 ack 释放路径）时执行对象可能仍在推进，
+            # 见 finally 里的条件释放。
+            completed_normally = False
             try:
                 result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
@@ -1902,6 +1925,7 @@ class FlowWorker:
                     lease_execution_id=execution_id,
                 )
 
+                completed_normally = True
                 return final_result
             finally:
                 self._unregister_cancel_watch(execution_id)
@@ -1909,7 +1933,27 @@ class FlowWorker:
                 if fence_token_reset is not None:
                     reset_current_fence_token(fence_token_reset)
                 # release 对整个租约 value 串 compare（fencing 档 = {holder}:{gen}）
-                self.execution_lease.release(execution_id, lease_value)
+                #
+                # ⚠️ **释放租约 ≠ 执行已结束**（2026-10-10 二波，生产实证）：
+                # 「执行被他人持租约 → ack 释放」这条路径让本消息处理走到
+                # finally，但**该 execution 对象仍在沙箱里推进长节点**
+                # （实测 exec 339c3262：19:20:31 复用沙箱跑 impl，19:21:25 因
+                # 「他人持租约」被 ack 释放 ⇒ 此后心跳停 80 分钟 ⇒ keeper 判
+                # zombie 收尸）。一旦 release，「无租约」成事实：看门狗登记已被
+                # 上面 unregister 摘除，也从未走过 renew 失败分支 ⇒ **没有任何
+                # 组件再发布它的进度** ⇒ 健康 run 必然被判死。
+                #
+                # 因此：**仅当执行确已停止推进时才真正 release**；否则交给
+                # `_lease_orphan_watch` 继续观测（只发心跳，不续租、不重复
+                # cancel），由它在该执行结束或重新登记时摘除。
+                if not completed_normally and self._execution_still_advancing(execution):
+                    # tenant 由上下文取（该作用域无 tenant_id 形参，见上方
+                    # `tenant_id=current_tenant()` 的同款用法）。
+                    self._register_lease_orphan(
+                        execution_id, execution, current_tenant(), fence_token
+                    )
+                else:
+                    self.execution_lease.release(execution_id, lease_value)
 
         except (NodeExecutionRetryableError, ServiceDispatchError, ExecutionLeaseError):
             # 节点级可重试失败（波次二任务①）/ 幂等命中后重入队 resume 失败
@@ -3229,6 +3273,51 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 execution_id,
             )
         self._publish_orphan_progress()
+
+    def _execution_still_advancing(self, execution: Any) -> bool:
+        """该执行对象是否仍在推进（= 释放租约前必须判定的活性）。
+
+        用于 `finally` 里的条件释放：ack 释放路径会走到 finally，但执行
+        对象可能仍在沙箱里跑长节点（见该处注释的生产实证）。判据取**保守
+        方向**——只有能确证「已停止」才返回 False（允许 release）：
+
+        - 执行对象缺失 / 无 `cancel_requested` 也无法判定 → 视为**在推进**
+          （宁可多观测一轮，不可放走一个健康 run）；
+        - `cancel_requested` 为真 → 已被要求停止，可释放；
+        - 取不到任何信号时一律返回 True。
+
+        注意：本判定**不查 Redis 状态**。状态可能滞后，而这里要回答的是
+        「这个内存里的执行对象还会不会继续干活」，状态字段答不了。
+        """
+        if execution is None:
+            return False
+        try:
+            if getattr(execution, "cancel_requested", False):
+                return False
+        except Exception:  # noqa: BLE001 — 判定不出就当仍在推进
+            return True
+        return True
+
+    def _register_lease_orphan(
+        self,
+        execution_id: str,
+        execution: Any,
+        tenant_id: Optional[str] = None,
+        fence_token: Optional[int] = None,
+    ) -> None:
+        """把「租约已释放但执行仍在跑」的执行转入持续观测集合。
+
+        与 `_watchdog_renew_once` 失租分支同款语义（见 `_publish_orphan_progress`）：
+        只发布进度心跳，不续租、不重复 cancel。存在的唯一理由是——
+        释放租约不等于执行结束，停止发布心跳会让 keeper 把健康 run 判死。
+        """
+        with self._lease_watch_lock:
+            self._lease_orphan_watch[execution_id] = (
+                execution, tenant_id, fence_token
+            )
+            # 该执行已不再持有租约，但仍在跑：标记为失租态，避免
+            # `_publish_orphan_progress` 误当「已结束」而摘除。
+            self._lease_lost.add(execution_id)
 
     def _publish_orphan_progress(self) -> None:
         """对**失租后仍在跑**的执行发布进度心跳，已不在活跃表的则摘除。

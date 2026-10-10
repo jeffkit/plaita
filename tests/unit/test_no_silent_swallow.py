@@ -134,6 +134,10 @@ ALLOWED_SILENT_FINGERPRINTS = {
     "from plaita_nodes.lifecycle import SandboxLifecycleCallback | except Exception: | return None",
     "from plaita_nodes import sandbox as _sb | except Exception: | return None",
     "return SandboxLifecycleCallback(sandboxes=specs) | except Exception: | return None",
+    # 释放租约前的活性判定（2026-10-10 二波）：取不到 `cancel_requested`
+    # 时**保守判「仍在推进」**（返回 True），以免把一个还在沙箱里跑长节点的
+    # 执行直接 release 掉租约、任其被 keeper 判死。宁可多观测一轮。
+    'if getattr(execution, "cancel_requested", False): | except Exception: | return True',
 }
 
 
