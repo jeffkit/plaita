@@ -42,12 +42,29 @@ def run(input):
 
 
 def _pid_alive(pid: int) -> bool:
+    """进程是否**还在运行**。
+
+    不能只看 ``os.kill(pid, 0)``：在无 init 收尸的 PID namespace（本流水线
+    沙箱）里，SIGKILL 后的孙进程无人 wait，永远停在 Z (zombie)——``kill(pid, 0)``
+    对 zombie 同样成功，恰好把「已死透」误报成「幸存」。有 /proc 时按 state
+    字段复核：Z 即判定已死（killpg 的被测行为是「信号送达且不再执行」，收尸
+    归属不是断言对象）。无 /proc 的平台（macOS）回退到原判据。
+    """
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
+        return True
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            stat = f.read().decode(errors="replace")
+    except OSError:
+        return True  # 无 /proc：维持原判据（信号可达 = 存活）
+    # comm 可含空格/括号：状态字段取右括号之后的第一个
+    try:
+        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    except IndexError:
         return True
 
 
