@@ -20,11 +20,9 @@ PLAITA_DIR = Path(__file__).resolve().parents[2] / "plaita"
 # 这些是预期的 fallback 分支 (如 JSON 解析失败回退到原始文本、版本号排序
 # 失败回退到任意版本), 不记录异常是合理的。
 ALLOWED_SILENT = {
-    # 2026-10-02 行号随敏感头剥离 helper 插入下移（423→446, 485→511），位点未变；
-    # 后随清理批次 C2-1（HttpRequestInfo 快照 + 错误帧摘要 helper 插入）再下移（446→510, 511→587），位点未变；
-    # 后随 orjson 缺失分支补 ``orjson = None``（模块属性对齐 aiohttp/requests 写法）再下移（510→512, 587→589），位点未变
-    ("node/http.py", 512),   # response.json() 失败回退到 response.text (sync path)
-    ("node/http.py", 589),   # json.loads() 失败回退到原始文本 (async aiohttp path)
+    # node/http.py 的两处 JSON 回退已改登记为行号无关指纹（见下方
+    # ALLOWED_SILENT_FINGERPRINTS）——plaita#31 的 SSRF 加固在文件上方插入
+    # 大量 helper，行号登记会集体漂移。
     ("storage/memory.py", 138),  # 版本号非纯数字排序失败, 回退到任意版本
     # 2026-10-02 行号随 TERMINAL_EXECUTION_STATUSES 常量插入下移（105→113），位点未变；
     # 后随波次④（订阅超时 checker 宿主）的 import 与 EventFilter 构造参数插入再下移（113→127），位点未变；
@@ -128,6 +126,10 @@ def _allowed_fingerprints() -> set[str]:
 # 上面 ALLOWED_SILENT 是历史行号清单（保留兼容）；**新登记请用指纹**，
 # 这样在文件上方插入代码时不会再集体漂移（见 _handler_fingerprint）。
 ALLOWED_SILENT_FINGERPRINTS = {
+    # HTTP 节点 JSON 解析失败回退到原始文本（sync/async 各一）：预期分支，
+    # 不记日志是合理的。
+    "res = _loads_lenient(data) | except Exception: | res = data",
+    "res = _loads_lenient(text) | except Exception: | res = text",
     # flow_worker 沙箱装配三处 best-effort（plaita-nodes 为可选依赖：
     # 缺装 / 无注册表 / 装配失败都返回 None，非沙箱部署零行为变化）
     "from plaita_nodes.sandbox import collect_workspace_snapshots | except Exception: | return",

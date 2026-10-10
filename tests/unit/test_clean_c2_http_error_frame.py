@@ -7,9 +7,10 @@ HttpNodeErrorInfo 被直接丢弃；async 连接类错误归 1003 而同步同�
    ``response``（status/statusText/headers/body 的事件安全摘要——凭据头脱敏、
    body 截断）与 ``details``（完整 HttpNodeErrorInfo）；NodeException 本体的
    code/message 契约不变（core 层零侵入）。
-2. sync/async 一致性：连接类错误（目标端口无监听）在两条路径同归
-   1002(DO_REQUEST)，async 错误帧带请求快照（method/url）；URLPolicyError
-   分类对齐；4xx/5xx 一律按成功结果返回的设计选择不变。
+2. sync/async 一致性：连接类错误（目标端口无监听）与 **body 读取阶段的传输类
+   失败**（截断 body）在两条路径同归 1002(DO_REQUEST)，async 错误帧带请求快照
+   （method/url）；超限（ResponseTooLargeError）两条路径同归 1003 且带响应快照；
+   URLPolicyError 分类对齐；4xx/5xx 一律按成功结果返回的设计选择不变。
 
 全程本地（127.0.0.1 / 无监听端口 / mock 响应对象），零外网请求。
 """
@@ -19,9 +20,11 @@ from __future__ import annotations
 import asyncio
 import http.server
 import json
+import os
 import socket
 import threading
 import unittest
+from unittest.mock import patch
 
 import pytest
 
@@ -265,6 +268,136 @@ class TestSyncAsyncErrorCodeParity(unittest.TestCase):
         self.assertEqual(exc.code, DO_REQUEST)
         # sync 路径请求快照是 requests.PreparedRequest（async 才是 HttpRequestInfo）
         self.assertIsNotNone(exc.details.request)
+
+
+def _start_truncated_body_server(declared=100, sent=b'{"partial"'):
+    """声明 Content-Length 大于实发字节后关连接：读 body 阶段的传输类失败。"""
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(declared))
+            self.end_headers()
+            self.wfile.write(sent)
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, *args):  # 静音
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _start_big_body_server(body=b"x" * 128):
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # 静音
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class TestBodyReadFailureParity(unittest.TestCase):
+    """body 读取阶段的传输类失败（截断）sync/async 同码 1002。
+
+    stream=True 把 body 读取从 ``Session.send`` 挪到了节点自己的第二个 try；
+    若该分支仍带 raw_response，sync 会归 1003 而 async 归 1002——本类钉住同码。
+    """
+
+    def setUp(self):
+        self.server = _start_truncated_body_server()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/x"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def _sync_error(self):
+        node = _make_node(self.url, request_timeout=2.0)
+        with self.assertRaises(NodeException) as ctx:
+            node.run({})
+        return ctx.exception
+
+    def _async_error(self):
+        node = _make_node(self.url, request_timeout=2.0)
+
+        async def go():
+            await node.arun({})
+
+        with self.assertRaises(NodeException) as ctx:
+            asyncio.run(go())
+        return ctx.exception
+
+    def test_sync_truncated_body_is_do_request(self):
+        self.assertEqual(self._sync_error().code, DO_REQUEST)
+
+    def test_async_truncated_body_is_do_request(self):
+        self.assertEqual(self._async_error().code, DO_REQUEST)
+
+    def test_sync_and_async_same_code(self):
+        self.assertEqual(self._sync_error().code, self._async_error().code)
+
+    def test_sync_truncated_body_frame_carries_request_no_response(self):
+        exc = self._sync_error()
+        self.assertIsInstance(exc.details, HttpNodeErrorInfo)
+        self.assertIsNotNone(exc.details.request)
+        self.assertIsNone(exc.response)
+
+
+class TestResponseTooLargeParity(unittest.TestCase):
+    """超限（ResponseTooLargeError）两条路径同归 1003 且错误帧带响应快照。
+
+    与传输类读取失败（1002）是刻意的分界：超限是节点级策略拒绝，响应本身
+    完好、状态/头可读；传输失败没有可用的响应。
+    """
+
+    def setUp(self):
+        self.server = _start_big_body_server()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/big"
+        self._env = patch.dict(os.environ, {"PLAITA_HTTP_MAX_RESPONSE_BYTES": "16"})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_sync_over_cap_is_node_exec_with_response(self):
+        node = _make_node(self.url, request_timeout=2.0)
+        with self.assertRaises(NodeException) as ctx:
+            node.run({})
+        exc = ctx.exception
+        self.assertEqual(exc.code, NODE_EXEC)
+        self.assertEqual(exc.details.response.status, 200)
+        self.assertIsNotNone(exc.response)
+
+    def test_async_over_cap_is_node_exec_with_response(self):
+        node = _make_node(self.url, request_timeout=2.0)
+
+        async def go():
+            await node.arun({})
+
+        with self.assertRaises(NodeException) as ctx:
+            asyncio.run(go())
+        exc = ctx.exception
+        self.assertEqual(exc.code, NODE_EXEC)
+        self.assertEqual(exc.details.response.status, 200)
+        self.assertIsNotNone(exc.response)
 
 
 class TestHttpErrorStatusDesignUnchanged(unittest.TestCase):

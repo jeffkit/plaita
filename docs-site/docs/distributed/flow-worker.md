@@ -449,6 +449,11 @@ flowchart TD
   才写得出去，见 [plaita#51](ops-runbook.md#jail-默认根不取引擎自身-checkout)）；
   显式放行任意路径用 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1`（仅单机信任
   部署）。见 [运维 Runbook · writefile 写入 jail](ops-runbook.md#writefile-写入-jail)。
+- **HTTP 节点 SSRF 防护（plaita#31）**：`PLAITA_HTTP_BLOCK_PRIVATE=1` 让运营者强制
+  所有 `http` 节点屏蔽回环/内网/链路本地目标（节点声明的 `blockPrivateNetworks`
+  只能更严不能更松）；策略激活时建连解析经同一策略校验并只连校验过的 IP（关闭 DNS
+  rebinding TOCTOU）。响应体默认上限 10MiB（`PLAITA_HTTP_MAX_RESPONSE_BYTES`）。
+  见 [运维 Runbook · HTTP 节点 SSRF 防护](ops-runbook.md#http-ssrf-hardening)。
 - **code 沙箱后端白名单（plaita#22）**：worker 注册 `code` 节点时施加后端白名单
   （`PLAITA_SANDBOX_ALLOWED_BACKENDS`，未配置则 `docker` ∪ 生效后端；生效后端取
   `PLAITA_CODE_BACKEND`，默认 `subprocess`）。流程 JSON 声明的 `sandbox_backend`

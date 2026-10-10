@@ -154,9 +154,8 @@ class TestCookieIsolationDefaultBlocked(TestCase):
         )
 
     def test_set_cookie_not_leaked_via_redirect_hop(self):
-        # unrestricted 自动跟随：requests 的 resolve_redirects 会把 session jar
-        # 合并进下一跳（prepared_request._cookies.update(self.cookies)）——
-        # 默认阻断下 jar 恒空，重定向逐跳也必须干净。
+        # 重定向逐跳也不得带出 jar 里的 cookie（requests 的 resolve_redirects
+        # 会把 session jar 合并进下一跳）——默认阻断下 jar 恒空，逐个跳都干净。
         _executor(f"{self.base}/setcookie").handle_request({})
         _executor(f"{self.base}/redir").handle_request({})
         self.assertEqual(len(get_shared_sync_session().cookies), 0)
