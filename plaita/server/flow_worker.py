@@ -2765,6 +2765,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # execution_id -> (lease_value, execution, tenant_id)
         self._lease_watch: Dict[str, tuple] = {}
         self._lease_lost: Set[str] = set()
+        # 失租后仍在跑的执行：只发布进度心跳，不续租、不重复 cancel。
+        # 存在的原因见 `_watchdog_renew_once`：租约被别的消息处理释放后，
+        # 执行对象仍会在沙箱里正常推进（实测 6caf8289），若停止发布心跳，
+        # keeper 会按「末节点停滞 >1800s」判死一个健康 run。
+        self._lease_orphan_watch: Dict[str, tuple] = {}
 
         # 取消监听（波次③ §3.3 步内中断）：登记活跃 (execution_id →
         # FlowExecution/租户)，每 cancel_poll_seconds（默认 1s）轮询取消标志键，
@@ -3154,8 +3159,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         _renew_lease_if_held / persist 前失租检查抛 ExecutionLeaseError 且
         不写状态，消息不 ack）。Redis 瞬断（renew 抛异常）不判死，下周期重试。
 
-        续租成功后**顺带发布在跑节点进度**（见 ``_publish_node_progress``）：
-        让 keeper 的活性判据能看见沙箱长节点，避免 >1800s 误判 zombie 误杀。
+        **进度发布与续租解耦**（2026-10-10 根治「为什么总靠抢救」）：
+        此前发布写在 ``if renewed:`` 分支内 ⇒ **无租约 = 不发心跳**。而
+        「无租约但仍在跑」正是生产常见形态——`#50` 的租约冲突 ack 会让
+        重投载体消失、租约不再续，**但执行进程继续在沙箱里正常推进**。
+        实测（exec 6caf8289）：17:49 被 ack 后仍于 18:45/18:47 正常完步，
+        却因 17:49 起无租约 ⇒ 心跳停 ⇒ node_timings 永久停在 17:44:56
+        ⇒ keeper 见「末节点停滞 >1800s」⇒ **判死一个正在干活的 run**，
+        产出只能靠值守抢救。
+
+        现在：**只要登记在册且租约未判失效，就发布进度**（发布本身是只读
+        观测，不依赖租约；租约只用于竞争仲裁）。renew 失败的当轮仍会发布
+        一次——在此之后该执行被摘出登记表（失租兜底路径不受影响）。
         """
         with self._lease_watch_lock:
             entries = list(self._lease_watch.items())
@@ -3173,17 +3188,31 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             finally:
                 reset_current_tenant(token)
             if renewed:
-                # 租约确认在手 → 发布在跑节点进度（长节点期间的唯一心跳，
-                # 见 _publish_node_progress：防 keeper 把沙箱长节点误判 zombie）。
-                # 带上租户与 fence 世代：看门狗线程没有本执行的上下文，不带就
-                # 会写错 namespace、绕开 fenced CAS。
+                # 租约确认在手 → 发布在跑节点进度（带租户与 fence 世代：
+                # 看门狗线程没有本执行的上下文，不带会写错 namespace、
+                # 绕开 fenced CAS）。
                 self._publish_node_progress(
                     execution_id, fence_token=fence_token, tenant_id=tenant_id
                 )
                 continue
+            # 失租：**先发布一次进度**（该执行可能仍在跑，见 docstring），
+            # 再走既有失租兜底（标记 lease_lost + 请求中止 + 摘出登记表）。
+            # 不发布会让 keeper 在「租约已丢但 impl 仍在推进」的长窗口里
+            # 把健康 run 判成 zombie。
+            self._publish_node_progress(
+                execution_id, fence_token=fence_token, tenant_id=tenant_id
+            )
+            # 摘出登记表后本方法不再遍历它 ⇒ 后续轮次不再续租、**也不再发布**。
+            # 但执行对象仍在跑（实测 6caf8289 失租后仍于 18:45/18:47 正常完步），
+            # 若就此停止发布，keeper 仍会在 1800s 后判死一个健康 run。
+            # 因此把它转交给**失租后的持续观测**集合：只发布进度、不续租、
+            # 不重复 cancel，直到该执行离开活跃表（终态/被取消）。
             with self._lease_watch_lock:
                 self._lease_lost.add(execution_id)
                 self._lease_watch.pop(execution_id, None)
+                self._lease_orphan_watch[execution_id] = (
+                    execution, tenant_id, fence_token
+                )
             cancel = getattr(execution, "cancel", None)
             if callable(cancel):
                 try:
@@ -3199,6 +3228,47 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 "并请求中止当前步；消息将在步界以 ExecutionLeaseError 退出不 ack",
                 execution_id,
             )
+        self._publish_orphan_progress()
+
+    def _publish_orphan_progress(self) -> None:
+        """对**失租后仍在跑**的执行发布进度心跳，已不在活跃表的则摘除。
+
+        为什么需要（2026-10-10 根治「为什么总靠抢救」）：
+        `_watchdog_renew_once` 在续租失败时把执行摘出 `_lease_watch`，此后
+        不再遍历它。但「租约已丢、执行仍在推进」是生产常见形态——租约会被
+        **另一个消息处理的 finally** 释放（`_process` 的 finally 无条件
+        `release`），而原执行对象还在沙箱里跑长节点。实测 exec `6caf8289`：
+        17:49 租约被释放 → 18:45/18:47 仍正常完步 → 18:51 因「末节点停滞
+        >1800s」被 keeper 判死（**一个健康 run**），产出只能靠值守抢救。
+
+        本方法只做**只读观测**：不续租、不 cancel、不改执行状态。执行离开
+        活跃表（终态/被取消/对象消失）即摘除，不会长期驻留。
+
+        ``_publish_node_progress`` 自身对「非 running / 无采集器 / 查询失败」
+        都是 no-op 或只告警，因此这里无需再判状态。
+        """
+        with self._lease_watch_lock:
+            orphans = list(self._lease_orphan_watch.items())
+        if not orphans:
+            return
+        for execution_id, (_execution, tenant_id, fence_token) in orphans:
+            token = set_current_tenant(tenant_id)
+            try:
+                self._publish_node_progress(
+                    execution_id, fence_token=fence_token, tenant_id=tenant_id
+                )
+            finally:
+                reset_current_tenant(token)
+            # 已不在活跃执行表 ⇒ 它已结束（终态/取消/被回收），摘除即可。
+            # 用 `_lease_watch` 是否重新登记它作为「仍在本 worker 跑」的信号：
+            # 重新登记（换了新租约）时由正常路径接管，这里也摘除以免重复发布。
+            with self._lease_watch_lock:
+                still_active = execution_id in self._lease_watch
+                if not still_active and execution_id not in self._lease_lost:
+                    self._lease_orphan_watch.pop(execution_id, None)
+                elif still_active:
+                    # 已被新租约重新登记 ⇒ 交回正常路径
+                    self._lease_orphan_watch.pop(execution_id, None)
 
     def _detect_affinity_mismatch(self, message_data: Dict[str, Any]) -> Optional[str]:
         """任务的 repo/run_dir 是否指向本机不存在的路径（机器亲和判定）。

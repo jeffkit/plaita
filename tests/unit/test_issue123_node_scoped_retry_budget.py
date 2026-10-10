@@ -490,3 +490,97 @@ class TestFallbackTotalRetryCap:
         assert worker._dead_letter_guard(task) is True
         assert storage.load_execution_state(EXEC).status == "running"
         assert fake.xlen("test:issue123-node-scope") == 1  # 已重入队
+
+
+def _fake_worker_for_watchdog():
+    """构造一个带**真实**锁与集合的最小 worker（不经 __init__ 的重依赖）。
+
+    只用于看门狗/心跳这类纯逻辑单测：`_lease_watch_lock` 必须是真 Lock，
+    否则 `with` 语句在 MagicMock 上行为失真，测不出真实摘除逻辑。
+    """
+    import threading
+
+    from plaita.server.flow_worker import RedisFlowWorker
+
+    worker = RedisFlowWorker.__new__(RedisFlowWorker)
+    worker._lease_watch_lock = threading.Lock()
+    worker._lease_watch = {}
+    worker._lease_lost = set()
+    worker._lease_orphan_watch = {}
+    worker._publish_node_progress = lambda eid, **kw: None
+    return worker
+
+
+class TestHeartbeatDecoupledFromLease:
+    """心跳发布必须与续租解耦（2026-10-10 「为什么总靠抢救」根因回归）。
+
+    生产实证（exec 6caf8289）：
+      17:44:50 起跑进 impl
+      17:49:23 租约被**另一个消息处理的 finally** 释放（#50 租约冲突 ack）
+      18:45:03 / 18:47:03 执行**仍在正常完步**（它不知道租约已丢）
+      18:51:46 keeper 见「末节点 ended_at 停滞 >1800s」→ 判死【健康 run】
+
+    旧行为：`if renewed: _publish_node_progress(...)` —— 无租约即不发心跳
+    ⇒ node_timings 永久停在进 impl 前 ⇒ keeper 必然判死。
+    """
+
+    def test_publish_is_called_even_when_renew_fails(self):
+        """renew 失败时也必须发布一次进度（旧代码只在 renewed 分支发布）。"""
+        from unittest.mock import MagicMock, patch
+
+        worker = MagicMock()
+        published = []
+        worker._publish_node_progress = lambda eid, **kw: published.append(eid)
+        worker._lease_watch = {"exec-x": ("holder:1", MagicMock(), "default", 1)}
+        worker._lease_orphan_watch = {}
+        worker._lease_lost = set()
+        worker.execution_lease = MagicMock()
+        worker.execution_lease.renew.return_value = False      # ← 续租失败
+        worker.lease_ttl_seconds = 120
+
+        RedisFlowWorker._watchdog_renew_once(worker)
+
+        assert published, "续租失败时仍必须发布进度（否则 keeper 会判死健康 run）"
+
+    def test_orphan_watch_keeps_publishing_after_lease_lost(self):
+        """失租后转入 orphan 集合，后续轮次**继续**发布（旧代码摘除即停）。"""
+        from unittest.mock import MagicMock
+
+        worker = _fake_worker_for_watchdog()
+        published = []
+        worker._publish_node_progress = lambda eid, **kw: published.append(eid)
+        worker._lease_watch = {"exec-x": ("holder:1", MagicMock(), "default", 1)}
+        worker.execution_lease = MagicMock()
+        worker.execution_lease.renew.return_value = False   # 续租恒失败
+        worker.lease_ttl_seconds = 120
+
+        worker._watchdog_renew_once()      # 第 1 轮：失租
+        assert "exec-x" in worker._lease_orphan_watch, "失租后应转入 orphan 观测集"
+        n1 = len(published)
+
+        worker._watchdog_renew_once()      # 第 2 轮：仍应发布
+        assert len(published) > n1, "失租后后续轮次仍须发布（否则 1800s 后仍被判死）"
+
+    def test_orphan_dropped_when_no_longer_lost(self):
+        """执行已结束（不在 lease_lost）⇒ 摘除，不长期驻留。
+
+        注：用真实实例而非 MagicMock —— `_lease_watch_lock` 是 threading.Lock，
+        MagicMock 会把它变成不可用的 mock，`with` 语句行为失真。
+        """
+        worker = _fake_worker_for_watchdog()
+        worker._lease_watch = {}
+        worker._lease_orphan_watch = {"exec-gone": (object(), "default", 1)}
+        worker._lease_lost = set()                         # ← 已不在失租集合
+
+        worker._publish_orphan_progress()
+        assert "exec-gone" not in worker._lease_orphan_watch, "已结束的执行应被摘除"
+
+    def test_orphan_kept_while_still_lost(self):
+        """仍在失租集合 ⇒ 保留（这正是「失租后仍健康在跑」的窗口）。"""
+        worker = _fake_worker_for_watchdog()
+        worker._lease_watch = {}
+        worker._lease_orphan_watch = {"exec-live": (object(), "default", 1)}
+        worker._lease_lost = {"exec-live"}
+
+        worker._publish_orphan_progress()
+        assert "exec-live" in worker._lease_orphan_watch, "仍在跑的执行必须继续发心跳"
