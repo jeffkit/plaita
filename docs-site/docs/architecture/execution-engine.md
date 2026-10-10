@@ -94,6 +94,7 @@ return result
 
 - **异步节点**（`async_node=True` 或有 `arun` 协程）：`asyncio.wait_for(node.arun(ctx), timeout)`
 - **同步节点**：跑在 daemon 线程上，经 `loop.create_future()` + `call_soon_threadsafe` 桥接结果；超时时 set `cancel_event` 并放弃线程（不 join，保持事件循环自由）
+- **上下文继承**：两条同步路径（无超时=共享池 `run_in_executor`；有超时=裸 daemon 线程）都在调用方 context 的**副本**里跑节点（`contextvars.copy_context`）——ContextVar 不跨线程继承，少了这层副本，节点线程里的租户上下文会退回默认值（plaita#58：非 default 租户的凭据节点读到 default 凭据文件）；池内嵌套调用的内联快路径本就在同线程，无需包装
 
 ## 超时合并
 

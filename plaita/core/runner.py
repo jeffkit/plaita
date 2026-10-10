@@ -9,6 +9,7 @@ cooperative cancellation via threading.Event.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import logging
 import os
@@ -348,15 +349,21 @@ class NodeRunner:
         """
         exec_ctx = self.node_execution or self.context
         loop = asyncio.get_running_loop()
+        # 调度上下文（租户 ContextVar 等）只活在当前线程：ContextVar 不随
+        # 新线程继承，节点线程里读到的会是默认值——非 default 租户的节点
+        # 因此串到 default 凭据文件（plaita#58）。快照当前 context，让下面
+        # 两条跨线程路径都在它的副本里跑。
+        node_ctx = contextvars.copy_context()
 
         if timeout_ms is None:
             # 无超时：直接在共享池中执行并 await——不参与超时遗弃语义，
             # 也就无需裸线程。已在池 worker 上的嵌套调用内联执行（防池饿死，
-            # 见 _NODE_POOL_TLS 说明）。
+            # 见 _NODE_POOL_TLS 说明）——同线程，context 本就在。
             if getattr(_NODE_POOL_TLS, "in_node_pool", False):
                 return node.run(exec_ctx)
             return await loop.run_in_executor(
-                _get_sync_node_pool(), _node_pool_bound(node.run), exec_ctx,
+                _get_sync_node_pool(),
+                functools.partial(node_ctx.run, _node_pool_bound(node.run), exec_ctx),
             )
 
         cancel_event = getattr(exec_ctx, "cancel_event", None)
@@ -372,7 +379,7 @@ class NodeRunner:
                     loop.call_soon_threadsafe(fut.set_exception, exc)
 
         threading.Thread(
-            target=_target,
+            target=functools.partial(node_ctx.run, _target),
             daemon=True,
             name=f"plaita-sync-{getattr(node, 'id', 'node')}",
         ).start()

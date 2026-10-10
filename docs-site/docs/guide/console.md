@@ -103,8 +103,10 @@ flow_worker 自动带上密钥环境。
 `.plaita-credentials.json`，其余租户各写旁文件
 `.plaita-credentials.{tenant_id}.json`。引擎侧 `plaita.credentials`
 按租户上下文路由（worker 消费任务时从消息体 `tenant_id` set，本地档由
-执行线程 set）：非 default 租户的 flow 只能解析到自己旁文件里的凭据，
-default 文件对它不可见，凭据缺失的报错也只列当前租户文件内的名字。
+执行线程 set；该上下文由 `core/runner` 随 context 副本带进节点执行线程，
+故节点内解析到的租户与调度线程同源）：非 default 租户的 flow 只能解析到
+自己旁文件里的凭据，default 文件对它不可见，凭据缺失的报错也只列当前
+租户文件内的名字。
 
 ## 主要能力
 
