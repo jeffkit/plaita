@@ -143,7 +143,9 @@ python -m plaita.server.flow_worker \
   （plaita#123 真因，2026-10-10）：此前键只含 `execution_id`（执行维度），而成功
   推进时把**整个执行**的计数清零 ⇒ 在「前序节点稳定成功 + 某节点稳定失败」的
   flow 上，前序节点每轮成功都把失败节点的计数抹平 ⇒ 永远到不了预算 ⇒ 永不终态化
-  ⇒ **无限重投**（实测 `keeper-watch` 累积 667 个悬停 `running` 执行，最老 40 小时）。
+  ⇒ **无限重投**（实测 2026-10-10 13:0x 本机 Redis db1：`keeper-watch` 累积
+  667 个悬停 `running` 执行、最老 40 小时。**该数字为当时快照、随时间增长，
+  勿当常量；复现需在同期环境用 `SCAN plaita:execution:*` 采集**）。
   现版：键带失败节点 id（取自异常链 `NodeExecutionError.node`，**不能**用 checkpoint
   的 `$LAST_NODE`——失败节点不写 context，那是上一个成功节点），成功推进**只清该
   节点**的键。取不到节点 id 时退化为执行维度键（保守，不比修复前差）。

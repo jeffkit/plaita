@@ -12,19 +12,50 @@
 而 `_process_execution_result` 的步进成功分支在每个节点推进后调
 `_reset_node_retry_counter(execution_id)`，把**整个执行**的计数 DEL 掉。
 注释却声称语义是「当前节点的**连续**失败次数，不同节点不共享预算」——
-键粒度与声称语义不匹配，于是：
+键粒度与声称语义不匹配。
+
+**机制（2026-10-10 独立验收员用真实引擎重放确认，勿照抄早期误述）**：
+`strategies.py` docstring 是 *"Execute one node per call"* —— 一次
+`run_distributed` **只推进一个节点**。所以**不是**「跨轮被前序节点抹平」，
+而是 **同一轮内**：
 
 ```
-轮 N：  facts/triage 成功 → DEL noderetry
-        watch       失败 → noderetry = 1
-重投：  facts/triage 成功 → 又 DEL
-        watch       失败 → noderetry = 1     ← 永远到不了预算 5
+同一轮消息处理中：
+  facts/triage 成功 → DEL noderetry（清整个执行）
+  watch       失败 → INCR → 1
+下一轮重投：三步重演 ⇒ 又多一条「第 1/5」
 ```
 
-⇒ 预算永不耗尽 ⇒ 永不终态化 ⇒ **无限重投**。实证：`keeper-watch`
-（facts/triage 稳成功、watch 因 GLM 429 稳失败）累积 **667 个**卡在
-`running` 的悬停执行，最老 40 小时；对照全库 `noderetry=5` 的 39 个执行
+验收员按旧代码顺序重放 102 轮得 `[1,1,1,1,…]` 全 1，精确复现生产日志的
+**「第 1/5」×102、「第 5/5」×0**。
+
+⇒ 预算永不耗尽 ⇒ 永不终态化 ⇒ **无限重投**。
+
+**实证（数字均为 2026-10-10 本机 Redis db1 快照，随时间变化，勿当常量）**：
+`keeper-watch`（facts/triage 稳成功、watch 因 GLM 429 稳失败）累积 **667 个**
+卡在 `running` 的悬停执行、最老 40 小时；对照全库 `noderetry=5` 的 39 个执行
 全部正确终态化 `error`（证明「耗尽即终态化」本身没坏，坏的是计数到不了耗尽）。
+采集命令：`SCAN plaita:execution:*` + 逐键读 `status`/`node_timings`。
+
+## 反转验证（可复现步骤，**勿用 `git stash`**）
+
+实现与测试**都已在提交内** ⇒ `git stash` 是 **no-op**，照做会拿到假的
+「全绿」（静默无操作 + 测试本就绿）。正确做法：回退实现文件、**保留本测试**：
+
+```bash
+git checkout <pre-fix-sha> -- plaita/server/flow_worker.py \
+    plaita/core/strategies.py plaita-console/backend/api/executions.py
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+  .venv/bin/python -m pytest tests/unit/test_issue123_node_scoped_retry_budget.py -q
+# 期望：17 failed, 1 passed
+#  （含 assert [1,1,1,1,1,1] == [1,2,3,4]、status 停在 running）
+git checkout <fix-sha> -- plaita/server/flow_worker.py \
+    plaita/core/strategies.py plaita-console/backend/api/executions.py
+# 期望：21 passed（连同 test_issue123_execution_id_pinning.py）
+```
+
+注：`test_issue123_execution_id_pinning.py` 在反转态是 collection ImportError
+（旧实现无 `_node_id_from_chain`），**不计入** 17。
 
 ## 修复契约
 
