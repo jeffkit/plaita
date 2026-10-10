@@ -1,3 +1,4 @@
+import asyncio
 import ipaddress
 import json
 import logging
@@ -13,7 +14,10 @@ from pydantic import ConfigDict, Field, model_validator
 from plaita.node.basic import Node
 from plaita.core.errors import NodeException
 from plaita.core.http_session import (
+    _BlockAllCookies,
     _new_oneshot_session,
+    _sync_cookies_enabled,
+    _sync_session_cls,
     get_flow_session,
     get_shared_sync_session,
 )
@@ -197,6 +201,43 @@ class URLPolicyError(Exception):
     """请求 URL 违反节点的 allowedHosts/deniedHosts/blockPrivateNetworks 策略。"""
 
 
+class ResponseTooLargeError(Exception):
+    """响应体超过 ``maxResponseBytes`` 上限（防内网端点拖回 GB 级响应撑爆 worker）。"""
+
+
+# ---------------------------------------------------------------------------
+# 运营者级 HTTP 策略（2026-10 安全评审 P1，plaita#31）
+# ---------------------------------------------------------------------------
+# 节点级 blockPrivateNetworks 默认 False（与历史行为一致）；多租户部署需要一道
+# **运营者级**硬门——与 code 沙箱后端白名单同构：env 置位后节点声明只能更严、
+# 不能更松（effective = 节点声明 OR 运营者开关）。节点在请求期直接读 env，
+# 部署入口无需再注入调用点。
+HTTP_BLOCK_PRIVATE_ENV = "PLAITA_HTTP_BLOCK_PRIVATE"
+
+# 响应体字节上限。历史实现 ``response.text`` 全量读入内存：内网高速端点 30s 内
+# 可拖回 GB 级响应，且会进 ``$NODE.<id>.RESPONSE`` 状态与 checkpoint。默认
+# 10MiB；需要更大 body 的部署显式调大。
+HTTP_MAX_RESPONSE_BYTES_ENV = "PLAITA_HTTP_MAX_RESPONSE_BYTES"
+DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+
+
+def operator_block_private() -> bool:
+    """运营者是否强制屏蔽私网目标（``PLAITA_HTTP_BLOCK_PRIVATE=1``）。"""
+    return os.environ.get(HTTP_BLOCK_PRIVATE_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def http_max_response_bytes() -> int:
+    """响应体字节上限（``PLAITA_HTTP_MAX_RESPONSE_BYTES``，默认 10MiB）。"""
+    raw = os.environ.get(HTTP_MAX_RESPONSE_BYTES_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_RESPONSE_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_RESPONSE_BYTES
+    return value if value > 0 else DEFAULT_MAX_RESPONSE_BYTES
+
+
 # ---------------------------------------------------------------------------
 # 策略校验用的 DNS 解析缓存（2026-10 BFF 热路径评审）
 # ---------------------------------------------------------------------------
@@ -263,6 +304,63 @@ def _ip_matches_networks(ip: str, networks) -> bool:
     return False
 
 
+def _host_entry_matches(entry: str, host: str, resolved_ips: Optional[list]) -> bool:
+    """单个 allowed/denied 条目是否命中 host（精确 / ``*.suffix`` / CIDR）。"""
+    entry = entry.strip().lower()
+    if not entry:
+        return False
+    if "/" in entry:  # CIDR
+        try:
+            return resolved_ips is not None and any(
+                _ip_matches_networks(ip, [entry]) for ip in resolved_ips
+            )
+        except ValueError:
+            return False
+    if entry.startswith("*."):
+        return host == entry[2:] or host.endswith("." + entry[2:])
+    return host == entry
+
+
+def _validate_host_target(
+    hostname: str,
+    resolved_ips: Optional[list],
+    allowed_hosts: Optional[List[str]],
+    denied_hosts: Optional[List[str]],
+    block_private_networks: bool,
+    url_for_msg: str,
+) -> None:
+    """按节点策略校验 host + 已解析地址，违反即抛 :class:`URLPolicyError`。
+
+    :func:`_host_allowed`（请求前校验）与连接期策略（DNS pinning，
+    :class:`_PolicyResolver` / ``_PinnedHTTPAdapter``）共用这一份判定——
+    校验与建连同源，攻击者权威 DNS 无法先答公网过校验、连接时答内网穿透。
+    """
+    if denied_hosts:
+        for entry in denied_hosts:
+            if _host_entry_matches(entry, hostname, resolved_ips):
+                raise URLPolicyError(
+                    f"URL host {hostname!r} matches denied_hosts entry {entry!r}: {url_for_msg}"
+                )
+
+    if allowed_hosts:
+        if not any(_host_entry_matches(entry, hostname, resolved_ips) for entry in allowed_hosts):
+            raise URLPolicyError(
+                f"URL host {hostname!r} is not in allowed_hosts {list(allowed_hosts)}: {url_for_msg}"
+            )
+
+    if block_private_networks:
+        if resolved_ips is None:
+            raise URLPolicyError(
+                f"Cannot resolve {hostname!r} to verify block_private_networks policy: {url_for_msg}"
+            )
+        for ip in resolved_ips:
+            if _ip_matches_networks(ip, _PRIVATE_NETWORKS):
+                raise URLPolicyError(
+                    f"URL host {hostname!r} resolves to private/special address {ip} "
+                    f"(block_private_networks=true): {url_for_msg}"
+                )
+
+
 def _host_allowed(
     url: str,
     allowed_hosts: Optional[List[str]],
@@ -289,71 +387,97 @@ def _host_allowed(
         raise URLPolicyError(f"URL has no hostname: {url!r}")
     hostname = hostname.lower().strip("[]")
 
-    def _match(entry: str, host: str, resolved_ips: Optional[list]) -> bool:
-        entry = entry.strip().lower()
-        if not entry:
-            return False
-        if "/" in entry:  # CIDR
-            try:
-                return resolved_ips is not None and any(
-                    _ip_matches_networks(ip, [entry]) for ip in resolved_ips
-                )
-            except ValueError:
-                return False
-        if entry.startswith("*."):
-            return host == entry[2:] or host.endswith("." + entry[2:])
-        return host == entry
-
     resolved_ips: Optional[list] = None
     if denied_hosts or block_private_networks:
         resolved_ips = (resolver or _resolve_host)(
             hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
         )
 
-    if denied_hosts:
-        for entry in denied_hosts:
-            if _match(entry, hostname, resolved_ips):
-                raise URLPolicyError(
-                    f"URL host {hostname!r} matches denied_hosts entry {entry!r}: {url!r}"
-                )
-
-    if allowed_hosts:
-        if not any(_match(entry, hostname, resolved_ips) for entry in allowed_hosts):
-            raise URLPolicyError(
-                f"URL host {hostname!r} is not in allowed_hosts {list(allowed_hosts)}: {url!r}"
-            )
-
-    if block_private_networks:
-        if resolved_ips is None:
-            raise URLPolicyError(
-                f"Cannot resolve {hostname!r} to verify block_private_networks policy: {url!r}"
-            )
-        for ip in resolved_ips:
-            if _ip_matches_networks(ip, _PRIVATE_NETWORKS):
-                raise URLPolicyError(
-                    f"URL host {hostname!r} resolves to private/special address {ip} "
-                    f"(block_private_networks=true): {url!r}"
-                )
+    _validate_host_target(hostname, resolved_ips, allowed_hosts, denied_hosts,
+                          block_private_networks, url)
 
 
 # 凭据类请求头：跨源重定向时必须剥离（2026-10 评审 C1：restricted 逐跳手动
 # 跟随原先原样透传全部头，Authorization/Cookie 会泄漏给重定向目标）。
-# 语义对齐 RFC 7231 §9.4 与浏览器/requests 的 rebuild_auth——同源（host
-# 未变）重定向保留全部头。
+# 「跨源」判定对齐 requests.Session.should_strip_auth：host 变化，或同 host 的
+# scheme / port 变化（https→http、:443→:8443 都算——旧实现只比 hostname，
+# 会把 Authorization 明文转发到另一个 origin）；唯一例外是同 host 的
+# http:80 → https:443（requests 的历史兼容行为，且是升级不是降级）。
 _SENSITIVE_REDIRECT_HEADERS = frozenset({
     "authorization", "cookie", "cookie2",
     "proxy-authorization", "proxy-authenticate", "www-authenticate",
 })
 
+_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
+
+
+def _redirect_changes_origin(from_url: str, to_url: str) -> bool:
+    """重定向是否跨源（判定对齐 ``requests.Session.should_strip_auth``）。"""
+    old = urlparse(from_url)
+    new = urlparse(to_url)
+    if old.hostname != new.hostname:
+        return True
+    if (old.scheme == "http" and old.port in (80, None)
+            and new.scheme == "https" and new.port in (443, None)):
+        return False
+    changed_port = old.port != new.port
+    changed_scheme = old.scheme != new.scheme
+    default_port = (_DEFAULT_SCHEME_PORTS.get(old.scheme), None)
+    if not changed_scheme and old.port in default_port and new.port in default_port:
+        return False
+    return changed_port or changed_scheme
+
 
 def _strip_sensitive_headers(headers: Dict[str, str], from_url: str, to_url: str) -> Dict[str, str]:
-    """重定向跨源（host 变化）时剥离凭据类头；同源原样返回。"""
-    if urlparse(from_url).hostname == urlparse(to_url).hostname:
+    """重定向跨源（host / scheme / port 任一变化）时剥离凭据类头；同源原样返回。"""
+    if not _redirect_changes_origin(from_url, to_url):
         return headers
     return {
         k: v for k, v in headers.items()
         if k.lower() not in _SENSITIVE_REDIRECT_HEADERS
     }
+
+
+def _redirect_method(status_code: int, method: str) -> str:
+    """重定向后的方法（判定对齐 ``requests.Session.rebuild_method``）。
+
+    303/302：非 HEAD 转 GET；301：**仅** POST 转 GET——PUT/PATCH/DELETE/OPTIONS
+    保留方法（旧实现对全部 301 都转 GET，偏离 requests）；307/308 保留。
+    """
+    upper = method.upper()
+    if status_code == 303 and upper != "HEAD":
+        return "GET"
+    if status_code == 302 and upper != "HEAD":
+        return "GET"
+    if status_code == 301 and upper == "POST":
+        return "GET"
+    return method
+
+
+def _redirect_request(response, request, next_url: str):
+    """构造重定向下一跳的 ``PreparedRequest``（语义对齐 requests.resolve_redirects）。
+
+    方法规则见 :func:`_redirect_method`；307/308 保留 body，其余（301/302/303）
+    丢弃 body 与 ``content-type``/``transfer-encoding``（requests 的
+    ``purged_headers``）。``host``/``content-length`` 恒剥离（由 prepare() 重算），
+    跨源再剥离凭据头。
+    """
+    method = _redirect_method(response.status_code, request.method)
+    body = request.body
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length")
+    }
+    if response.status_code not in (307, 308):
+        body = None
+        headers = {
+            k: v for k, v in headers.items()
+            if k.lower() not in ("content-type", "transfer-encoding")
+        }
+    headers = _strip_sensitive_headers(headers, response.url or request.url, next_url)
+    return requests.Request(
+        method=method, url=next_url, headers=headers, data=body,
+    ).prepare()
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +526,187 @@ def _summarize_error_frame_response(response: Optional["HttpNodeResponse"]) -> O
     }
 
 
+# ---------------------------------------------------------------------------
+# 连接期 DNS pinning（2026-10 安全评审 P1，plaita#31）
+# ---------------------------------------------------------------------------
+# 校验与建连两次独立解析是 DNS rebinding TOCTOU 的根因：历史上 _check_policy
+# 解析一次、HTTP 客户端连接池再解析一次，攻击者权威 DNS 先答公网 IP 过校验、
+# 连接时改答 127.0.0.1/169.254.169.254 即穿透。下面两条路径把**用于建连的
+# 解析**本身交给同一份策略判定，并只连通过校验的地址——校验与连接同源。
+#
+# 策略激活时不再复用共享连接池（pinning 是逐 host 的建连行为，且共享池里的
+# 连接可能来自不同策略的请求）；属安全换性能的取舍。
+
+if aiohttp is not None:
+    from aiohttp.abc import AbstractResolver
+
+    class _PolicyResolver(AbstractResolver):
+        """aiohttp 建连解析器：解析 + 策略校验 + 只返回校验过的地址。
+
+        connector 实际连到本 resolver 返回的地址，恶意域名无法在「校验解析」
+        与「建连解析」之间切换答案。策略异常（:class:`URLPolicyError`）直接
+        抛出，连接不会建立。
+        """
+
+        def __init__(self, executor: "HttpExecutor"):
+            self._executor = executor
+
+        async def resolve(self, host: str, port: int = 0,
+                          family: int = socket.AF_INET) -> list:
+            loop = asyncio.get_running_loop()
+            ips = await loop.run_in_executor(
+                None, self._executor._resolve_and_validate, host, port or 0,
+            )
+            results = []
+            for ip in ips:
+                fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+                if family not in (socket.AF_UNSPEC, fam):
+                    continue
+                results.append({
+                    "hostname": host, "host": ip, "port": port or 0,
+                    "family": fam, "proto": socket.IPPROTO_TCP, "flags": 0,
+                })
+            if not results:
+                raise OSError(f"no usable address for {host!r}")
+            return results
+
+        async def close(self) -> None:
+            return None
+else:  # pragma: no cover - http extra 未装
+    _PolicyResolver = None
+
+
+_PINNED_ADAPTER_CLS = None
+
+
+def _pinned_adapter_cls():
+    """惰性构建（并缓存）pinning 版 ``requests`` adapter 类。
+
+    urllib3 的 ``HTTPConnection.host`` 同时用于 Host 头 / TLS SNI（socket 目标
+    由 ``_dns_host`` 派生）；因此只在 ``_new_conn`` 建立 socket 的瞬间临时把
+    ``host`` 切成策略校验过的 IP，建连后立即还原——连接对象对上层仍是域名，
+    pinning 只作用于 socket 目标（``host`` 在 urllib3 1.26+/2.x 是写 ``_dns_host``
+    的属性，1.25 是普通属性，两种布局都成立）。
+    """
+    global _PINNED_ADAPTER_CLS
+    if _PINNED_ADAPTER_CLS is not None:
+        return _PINNED_ADAPTER_CLS
+
+    from requests.adapters import DEFAULT_POOLBLOCK, HTTPAdapter
+    from urllib3 import PoolManager
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+    from urllib3.exceptions import HTTPError
+
+    class _PinnedConnectionMixin:
+        def __init__(self, *args, _pinned_resolver, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._pinned_resolver = _pinned_resolver
+
+        def _new_conn(self):
+            # _resolve_and_validate 对空解析结果直接抛 URLPolicyError，故 ips 非空。
+            ips = self._pinned_resolver(self.host, self.port)
+            # urllib3 ≥2 的 ``host`` getter 会剥掉 FQDN 末尾的点；还原时要拿回
+            # 原始值（``_dns_host``），否则重连后 Host/SNI 上的尾点被静默丢掉。
+            original = getattr(self, "_dns_host", self.host)
+            last_error = None
+            try:
+                # 与 create_connection 一样逐地址回退（默认解析器会试完全部
+                # A/AAAA 记录）；只试第一个会让单地址故障变成连接失败。
+                for ip in ips:
+                    self.host = ip
+                    try:
+                        return super()._new_conn()
+                    except HTTPError as e:
+                        last_error = e
+            finally:
+                self.host = original
+            raise last_error
+
+    class _PinnedHTTPConnection(_PinnedConnectionMixin, HTTPConnection):
+        pass
+
+    class _PinnedHTTPSConnection(_PinnedConnectionMixin, HTTPSConnection):
+        pass
+
+    class _PinnedHTTPConnectionPool(HTTPConnectionPool):
+        ConnectionCls = _PinnedHTTPConnection
+
+    class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
+        ConnectionCls = _PinnedHTTPSConnection
+
+    class _PinnedPoolManager(PoolManager):
+        def __init__(self, *args, _pinned_resolver=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._pinned_resolver = _pinned_resolver
+            self.pool_classes_by_scheme = {
+                **self.pool_classes_by_scheme,
+                "http": _PinnedHTTPConnectionPool,
+                "https": _PinnedHTTPSConnectionPool,
+            }
+
+        def _new_pool(self, scheme, host, port, request_context=None):
+            # pinning resolver 不能进 connection_pool_kw（会进 PoolKey 的
+            # 命名元组构造而报 unexpected keyword）；在建池时注入 conn_kw。
+            if request_context is None:
+                request_context = self.connection_pool_kw.copy()
+            request_context = {**request_context, "_pinned_resolver": self._pinned_resolver}
+            return super()._new_pool(scheme, host, port, request_context)
+
+    class _PinnedHTTPAdapter(HTTPAdapter):
+        def __init__(self, pinned_resolver=None, **kwargs):
+            self._pinned_resolver = pinned_resolver
+            super().__init__(**kwargs)
+
+        def init_poolmanager(self, connections, maxsize, block=DEFAULT_POOLBLOCK, **pool_kwargs):
+            self._pool_connections = connections
+            self._pool_maxsize = maxsize
+            self._pool_block = block
+            self.poolmanager = _PinnedPoolManager(
+                num_pools=connections, maxsize=maxsize, block=block,
+                _pinned_resolver=self._pinned_resolver, **pool_kwargs,
+            )
+
+    _PINNED_ADAPTER_CLS = _PinnedHTTPAdapter
+    return _PINNED_ADAPTER_CLS
+
+
+def _read_capped_requests_body(response, max_bytes: int) -> bytes:
+    """流式读取 requests 响应体，超过 max_bytes 抛 :class:`ResponseTooLargeError`。"""
+    chunks: List[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise ResponseTooLargeError(
+                f"HTTP response body exceeds maxResponseBytes={max_bytes}; "
+                f"raise {HTTP_MAX_RESPONSE_BYTES_ENV} to allow larger bodies"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _read_capped_async_body(content, max_bytes: int) -> bytes:
+    """流式读取 aiohttp 响应体，超过 max_bytes 抛 :class:`ResponseTooLargeError`。
+
+    ``content.read(n)`` 允许返回少于 n 的非 EOF 分片（缓冲未喂满），必须循环到
+    空分片；单次 ``read(max+1)`` 会把大 body 误当读完并静默截断。
+    """
+    chunks: List[bytes] = []
+    total = 0
+    async for chunk in content.iter_chunked(65536):
+        total += len(chunk)
+        if total > max_bytes:
+            raise ResponseTooLargeError(
+                f"HTTP response body exceeds maxResponseBytes={max_bytes}; "
+                f"raise {HTTP_MAX_RESPONSE_BYTES_ENV} to allow larger bodies"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class HttpExecutor:
     """HTTP执行器"""
     def __init__(self, url, method, query, body, headers, addressing, delegate,
@@ -418,8 +723,9 @@ class HttpExecutor:
         self.addressing = addressing
         self.delegate = delegate
         self.c = None
-        # 访问策略（2026-09 安全评审 P1-1）。restrictions_active 时重定向改为
-        # 逐跳校验后手动跟随，防止 302 把请求带进被禁网段。
+        # 访问策略（2026-09 安全评审 P1-1）。两条路径都手动逐跳跟随：restricted
+        # 下每跳复检策略，防止 302 把请求带进被禁网段；默认路径下不读中间跳
+        # body，防止敌意 302 绕过响应体上限。上限同为 max_redirects。
         self.request_timeout = request_timeout
         self.allowed_hosts = allowed_hosts
         self.denied_hosts = denied_hosts
@@ -427,12 +733,53 @@ class HttpExecutor:
         self.max_redirects = max_redirects
 
     @property
+    def _effective_block_private(self) -> bool:
+        """节点声明 OR 运营者开关（节点只能更严，不能更松）。"""
+        return self.block_private_networks or operator_block_private()
+
+    @property
+    def max_response_bytes(self) -> int:
+        return http_max_response_bytes()
+
+    @property
     def _restrictions_active(self) -> bool:
-        return bool(self.allowed_hosts or self.denied_hosts or self.block_private_networks)
+        return bool(self.allowed_hosts or self.denied_hosts or self._effective_block_private)
 
     def _check_policy(self, url: str) -> None:
         _host_allowed(url, self.allowed_hosts, self.denied_hosts,
-                      self.block_private_networks, resolver=_cached_resolve_host)
+                      self._effective_block_private, resolver=_cached_resolve_host)
+
+    def _resolve_and_validate(self, hostname: str, port: int) -> List[str]:
+        """解析 hostname 并按策略校验，返回可连接的地址（连接期 pinning 入口）。"""
+        ips = _cached_resolve_host(hostname, port)
+        if not ips:
+            raise URLPolicyError(
+                f"Cannot resolve {hostname!r} to enforce HTTP policy"
+            )
+        _validate_host_target(hostname, ips, self.allowed_hosts, self.denied_hosts,
+                              self._effective_block_private,
+                              f"//{hostname}:{port}")
+        return ips
+
+    def _new_policy_sync_session(self):
+        """restricted 同步请求专用 session：pinning adapter + 每请求独立。
+
+        不走进程级共享 session——pinning 是逐 host 的建连行为，且共享池的连接
+        可能来自不同策略的请求。restricted 是安全敏感少数派，冷路径每请求一次
+        握手可接受。
+        """
+        session = _sync_session_cls()()
+        # 代理环境变量会让 ``Session.send`` 经 resolve_proxies 把请求交给
+        # ProxyManager：连接目标是代理、解析与建连都发生在代理侧，连接期
+        # pinning 被整体旁路（egress 走代理的部署恰是 SSRF 最要紧的场景）。
+        # 与 aiohttp 侧共享 session 一样钉死 trust_env=False。
+        session.trust_env = False
+        adapter = _pinned_adapter_cls()(pinned_resolver=self._resolve_and_validate)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        if not _sync_cookies_enabled():
+            session.cookies.set_policy(_BlockAllCookies())
+        return session
 
     def _build_request_params(self):
         """Compute (url, headers, data) shared between sync and async paths."""
@@ -456,70 +803,95 @@ class HttpExecutor:
         """处理HTTP请求（同步）"""
         if requests is None:
             _require_http()
-        if self.c is None:
-            # 进程级共享连接池 session（fork 后重建、cookie 默认阻断）——
-            # 冷路径（仅 Parallel sync 分支桥走到），见 plaita.core.http_session。
-            self.c = get_shared_sync_session()
 
         request = self.new_request(ctx)
         if request is None:
             return None, Exception("Failed to create request")
 
+        restricted = self._restrictions_active
+        if restricted:
+            # 策略激活：pinning 是逐 host 的建连行为，共享池里的连接可能来自
+            # 不同策略的请求——改用具 pinning adapter 的专用 session。
+            session = self._new_policy_sync_session()
+        else:
+            if self.c is None:
+                # 进程级共享连接池 session（fork 后重建、cookie 默认阻断）——
+                # 冷路径（仅 Parallel sync 分支桥走到），见 plaita.core.http_session。
+                self.c = get_shared_sync_session()
+            session = self.c
+
         try:
-            if self._restrictions_active:
-                self._check_policy(request.url)
-            # restricted 时首跳必须禁自动重定向：requests 的 resolve_redirects
-            # 会在 send 内部跟完 302，下面的逐跳策略校验就全部失效
-            # （2026-10 评审发现的现状 bug，非本次共享 session 引入）。
-            response = self.c.send(request, timeout=self.request_timeout,
-                                   allow_redirects=not self._restrictions_active)
-            if self._restrictions_active:
-                # 逐跳校验的重定向：默认自动跟随会让 302 把请求带进被禁网段
+            try:
+                if restricted:
+                    self._check_policy(request.url)
+                # 手动逐跳跟随重定向（两条路径同一形状）：
+                # * restricted：requests 的自动跟随在 send 内部完成，逐跳策略校验失效；
+                # * 默认路径：resolve_redirects 对每个 3xx 都 ``resp.content`` 读尽整段
+                #   body（无上限）——敌意 302 可绕过响应体上限把任意大 body 读进内存。
+                # 上限统一为 maxRedirects（此前默认路径走 requests 的 30）；
+                # stream=True：响应体按上限流式读，避免 GB 级 body 全量进内存。
+                response = session.send(request, timeout=self.request_timeout,
+                                        allow_redirects=False, stream=True)
                 hops = 0
                 while response.is_redirect and hops < self.max_redirects:
                     next_url = urljoin(response.url, response.headers.get("Location", ""))
-                    self._check_policy(next_url)
-                    method = self.method
-                    if response.status_code in (301, 302, 303) and method.upper() != "HEAD":
-                        method = "GET"
-                    # 跨源重定向剥离凭据类头（host/content-length 恒剥离）
-                    hop_headers = _strip_sensitive_headers(
-                        request.headers, response.url, next_url)
-                    request = requests.Request(
-                        method=method, url=next_url,
-                        headers={k: v for k, v in hop_headers.items()
-                                 if k.lower() not in ("host", "content-length")},
-                    ).prepare()
-                    response = self.c.send(request, timeout=self.request_timeout, allow_redirects=False)
+                    next_request = _redirect_request(response, request, next_url)
+                    response.close()  # stream=True：中间跳必须显式释放连接（不读 body）
+                    # 先切快照再校验：策略拒绝时错误帧带的是将要尝试的下一跳
+                    # （与 async 路径一致）。
+                    request = next_request
+                    if restricted:
+                        self._check_policy(next_url)
+                    response = session.send(request, timeout=self.request_timeout,
+                                            allow_redirects=False, stream=True)
                     hops += 1
                 if response.is_redirect:
+                    response.close()
                     return HttpResponse(raw_request=request), Exception(
                         f"Too many redirects (> {self.max_redirects})"
                     )
-        except URLPolicyError as e:
-            return HttpResponse(raw_request=request), e
-        except Exception as e:
-            return HttpResponse(raw_request=request), e
-        
-        try:
-            data = response.text
-            res = None
+            except URLPolicyError as e:
+                return HttpResponse(raw_request=request), e
+            except Exception as e:
+                return HttpResponse(raw_request=request), e
+
             try:
-                # 与 async 路径同构：显式解析而非 response.json()——后者经
-                # json.loads(**kwargs) 不接受自定义 loads，且字符集判定
-                # response.text 已完成。
-                res = _loads_lenient(data)
-            except Exception:
-                # JSON 解析失败时回退到原始文本——预期分支, 不必记日志。
-                res = data
-                
-            return HttpResponse(
-                raw_request=request,
-                raw_response=response,
-                res=res
-            ), None
-        except Exception as e:
-            return HttpResponse(raw_request=request, raw_response=response), e
+                response._content = _read_capped_requests_body(
+                    response, self.max_response_bytes)
+                data = response.text
+                res = None
+                try:
+                    # 与 async 路径同构：显式解析而非 response.json()——后者经
+                    # json.loads(**kwargs) 不接受自定义 loads，且字符集判定
+                    # response.text 已完成。
+                    res = _loads_lenient(data)
+                except Exception:
+                    # JSON 解析失败时回退到原始文本——预期分支, 不必记日志。
+                    res = data
+
+                return HttpResponse(
+                    raw_request=request,
+                    raw_response=response,
+                    res=res
+                ), None
+            except ResponseTooLargeError as e:
+                # 超限：body 未读尽，显式释放连接，别把未消费的连接留在池里
+                # （getattr 兼容单测里的极简响应桩）。带响应快照 → 与 async
+                # 超限分支同归 1003（节点级策略错误，非发送失败）。
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
+                return HttpResponse(raw_request=request, raw_response=response), e
+            except Exception as e:
+                # 传输类读取失败（截断 / 连接重置 / 解码失败）：不带响应快照 →
+                # send_request_fail() 成立，与 async 泛化分支同归 1002。
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
+                return HttpResponse(raw_request=request), e
+        finally:
+            if restricted:
+                session.close()
 
     async def handle_request_async(self, ctx):
         """处理HTTP请求（异步，使用 aiohttp）。
@@ -531,11 +903,19 @@ class HttpExecutor:
         2026-10 起 session 复用策略：flow 驱动层（``core.async_utils``）为
         每次 flow run 开一个共享 ``ClientSession``（contextvar 传递，确定性
         关闭），本方法优先复用；脱离 flow 驱动的直接调用退回一次性会话。
+
+        策略激活（restricted）时不复用共享 session，改用带
+        :class:`_PolicyResolver` 的专用 connector：建连解析本身经策略校验并只
+        连校验过的 IP，关闭 DNS rebinding TOCTOU 窗口。
         """
         if aiohttp is None:
             _require_http()
 
         url, headers, data = self._build_request_params()
+
+        if self._restrictions_active:
+            async with _new_oneshot_session(resolver=_PolicyResolver(self)) as policy_session:
+                return await self._send_async(policy_session, url, headers, data)
 
         session = get_flow_session()
         if session is None or session.closed:
@@ -544,7 +924,12 @@ class HttpExecutor:
         return await self._send_async(session, url, headers, data)
 
     async def _send_async(self, session, url, headers, data):
-        """在给定 session 上执行请求（含 restricted 时的逐跳重定向校验）。
+        """在给定 session 上执行请求（两条路径都逐跳手动跟随；restricted 时每跳复检策略）。
+
+        aiohttp 自己的自动跟随与同步路径（requests）语义不同：301/302 的非 POST
+        方法它会**保留 body**（requests 丢弃），重定向上限也是它自己的 10——
+        逐跳手动跟随让 sync/async 同规则、同上限、同错误文案，且中间跳 body
+        一样不读。
 
         错误分支一律携带 ``HttpRequestInfo`` 快照（C2-1）：与同步路径
         ``handle_request`` 的 ``HttpResponse(raw_request=request)`` 对齐，让
@@ -556,34 +941,58 @@ class HttpExecutor:
             if self._restrictions_active:
                 self._check_policy(url)
             timeout = aiohttp.ClientTimeout(total=self.request_timeout)
-            follow = not self._restrictions_active
-            current_url, current_method = url, self.method
-            for hop in range(self.max_redirects + 1):
+            current_url, current_method, current_data = url, self.method, data
+            for _hop in range(self.max_redirects + 1):
                 async with session.request(
                     method=current_method,
                     url=current_url,
                     headers=headers,
-                    data=data if hop == 0 else None,
+                    data=current_data,
                     timeout=timeout,
-                    allow_redirects=follow,
+                    allow_redirects=False,
                 ) as response:
-                    if response.status in (301, 302, 303, 307, 308) and not follow:
-                        next_url = urljoin(str(response.url), response.headers.get("Location", ""))
-                        self._check_policy(next_url)
-                        current_method = self.method
-                        if response.status in (301, 302, 303) and current_method.upper() != "HEAD":
-                            current_method = "GET"
+                    location = response.headers.get("Location")
+                    # 无 Location 的 3xx 不算重定向（对齐 requests 的
+                    # ``Response.is_redirect``），按普通响应返回。
+                    if location and response.status in (301, 302, 303, 307, 308):
+                        next_url = urljoin(str(response.url), location)
+                        current_method = _redirect_method(response.status, current_method)
+                        # 307/308 保留方法**与 body**（与 sync 的 _redirect_request
+                        # 同规则）；其余跳丢弃 body。
+                        if response.status not in (307, 308):
+                            current_data = None
                         # 跨源重定向剥离凭据类头（后续跳沿用裁剪后的头）
                         headers = _strip_sensitive_headers(
                             headers, str(response.url), next_url)
                         current_url = next_url
-                        # 快照跟随实际尝试的下一跳（错误帧里带真实 url/headers）
+                        # 快照跟随实际尝试的下一跳（错误帧里带真实 url/headers；
+                        # 与 sync 一致——策略拒绝时也是这一跳）
                         raw_request = HttpRequestInfo(
                             method=current_method, url=current_url,
-                            headers=headers, body=None,
+                            headers=headers, body=current_data,
                         )
+                        if self._restrictions_active:
+                            self._check_policy(next_url)
                         continue
-                    text = await response.text()
+                    try:
+                        raw_body = await _read_capped_async_body(
+                            response.content, self.max_response_bytes)
+                    except ResponseTooLargeError as e:
+                        # 携带响应快照：与 sync 路径同归 1003（非发送失败），
+                        # 且错误帧能带出实际状态/头。
+                        raw_resp = _AiohttpResponseWrapper(
+                            status_code=response.status,
+                            reason=response.reason,
+                            headers=dict(response.headers),
+                            body=None,
+                        )
+                        return HttpResponse(raw_request=raw_request,
+                                            raw_response=raw_resp), e
+                    # get_encoding() 对无 charset 的 body 依赖已读内容判定；
+                    # 把流式读满上限的结果回填，复用其 charset 判定（同
+                    # response.text() 的内部路径）。
+                    response._body = raw_body
+                    text = raw_body.decode(response.get_encoding())
                     try:
                         res = _loads_lenient(text)
                     except Exception:
@@ -652,6 +1061,8 @@ class HTTP(Node):
     # ---- 访问策略（2026-09 安全评审 P1-1：SSRF 防护）----
     # 默认行为与历史完全一致（无限制、30s 超时）；多租户部署应设置
     # allowedHosts 或 blockPrivateNetworks=true，并按需收紧 requestTimeout。
+    # 运营者级强制（PLAITA_HTTP_BLOCK_PRIVATE=1）与响应体上限
+    # （PLAITA_HTTP_MAX_RESPONSE_BYTES）见模块顶部常量。
     request_timeout: float = Field(
         30.0, alias="requestTimeout",
         description="单次请求（含重定向每一跳）超时秒数",
@@ -666,11 +1077,12 @@ class HTTP(Node):
     )
     block_private_networks: bool = Field(
         False, alias="blockPrivateNetworks",
-        description="解析目标并对每个地址拒绝回环/内网/链路本地等私网段（多租户建议开启）",
+        description="解析目标并对每个地址拒绝回环/内网/链路本地等私网段（多租户建议开启；"
+                    "PLAITA_HTTP_BLOCK_PRIVATE=1 时运营者强制开启，节点声明只能更严）",
     )
     max_redirects: int = Field(
         5, alias="maxRedirects",
-        description="重定向跟随上限（策略激活时逐跳复检）",
+        description="重定向跟随上限（sync/async 同口径；策略激活时每跳复检）",
     )
 
     # validator 消费的 camelCase 遗留键（content_type 字段无 alias）

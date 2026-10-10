@@ -45,6 +45,8 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | 允许 factory 创建 db EventBus/subscription |
 | `PLAITA_NODES_WORKSPACE_ROOT` | 由 worker 推导（见下） | `writefile` 节点的写入根（jail） |
 | `PLAITA_ALLOW_UNRESTRICTED_WRITES` | unset | `=1` 关闭 writefile jail（仅单机信任部署） |
+| `PLAITA_HTTP_BLOCK_PRIVATE` | unset | `=1` 强制所有 `http` 节点屏蔽回环/内网/链路本地目标（见下） |
+| `PLAITA_HTTP_MAX_RESPONSE_BYTES` | `10485760` | `http` 节点响应体字节上限，超限报错 |
 | `PLAITA_CODE_BACKEND` | `subprocess` | worker 注册 `code` 节点时生效的沙箱后端 |
 | `PLAITA_SANDBOX_ALLOWED_BACKENDS` | `docker` ∪ 生效后端 | `code` 节点后端白名单（见下） |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
@@ -133,6 +135,41 @@ PLAITA_SANDBOX_DOCKER_NODE_IMAGE=registry.internal/node:20-alpine \
 不需要 js 的部署保持默认即可（js 节点在解析期被拒，是预期行为）。库调用方自己接线时
 用 `register_code_node(allowed_languages=(...))`，或经
 `plaita.node.resolve_sandbox_allowed_languages()` 取同一口径。
+
+## HTTP 节点 SSRF 防护（plaita#31） {#http-ssrf-hardening}
+
+`http` 节点支持节点级 `allowedHosts` / `deniedHosts` / `blockPrivateNetworks`，
+但 `blockPrivateNetworks` 默认 `False`，节点级策略又由流程作者（半信任主体）声明。
+`PLAITA_HTTP_BLOCK_PRIVATE=1` 提供**运营者级**强制：置位后所有 `http` 节点生效
+`blockPrivateNetworks`，节点声明只能更严、不能更松（effective = 节点声明 OR 运营者
+开关）。该 env 由节点在请求期直接读取，deploy 入口无需额外注入；默认不设，保持
+历史行为——**多租户 / 不受信流程部署请显式置位**：
+
+```bash
+PLAITA_HTTP_BLOCK_PRIVATE=1 \
+  python -m plaita.server.flow_worker --redis-url redis://localhost:6379/0
+```
+
+策略激活（任一策略存在或运营者开关置位）时：
+
+- **建连解析即校验 + 只连校验过的 IP**：校验与连接用同一份解析与判定，连接只指向
+  通过校验的地址（aiohttp 自定义 resolver / requests 自定义 connector），堵住 DNS
+  rebinding（预检答公网、连接时答内网）的 TOCTOU 绕过。Host 头与 TLS SNI 仍是
+  原域名，证书校验不受影响。
+- **忽略代理环境变量**：策略激活的同步请求与 aiohttp 侧一样钉死 `trust_env=False`。
+  经 `HTTP_PROXY`/`HTTPS_PROXY` 的连接，目标解析与建连都发生在代理侧，节点侧
+  pinning 无从生效——egress 依赖代理的部署请改用直连或在代理侧做同等校验。
+- **不再复用 flow 作用域共享 `ClientSession`**：改用带 pinning resolver 的专用
+  连接（安全换性能）；未激活策略的请求照常复用共享会话。
+
+**响应体上限**：`response.text` 已改为流式读 + 字节上限，默认 **10MiB**
+（`PLAITA_HTTP_MAX_RESPONSE_BYTES` 可调）——超限抛错，避免内网高速端点 30s 内拖回
+GB 级响应撑爆 worker（还会进 `$NODE.<id>.RESPONSE` 状态与 checkpoint）。重定向不再
+复用自动跟随（自动跟随会无条件读尽每个 3xx 的 body，绕过上限）：sync/async 都是
+节点逐跳手动跟随、中间跳 body 直接丢弃不读。重定向上限统一为
+节点 `maxRedirects`（默认 5，同步/异步同口径；此前默认路径用 requests 的 30 /
+aiohttp 的 10，见 [MIGRATION](https://github.com/jeffkit/plaita/blob/main/MIGRATION.md)）。
+确需更大 body 的部署显式调大该值。
 
 ## 无损升级（rolling upgrade）
 

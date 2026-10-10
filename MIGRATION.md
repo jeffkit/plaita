@@ -8,6 +8,67 @@
 
 ## Unreleased（0.5.x）
 
+### HTTP 节点 SSRF 加固（plaita#31）
+
+HTTP 节点的 `allowedHosts` / `deniedHosts` / `blockPrivateNetworks` 此前**只有
+节点级**开关且 `blockPrivateNetworks` 默认 `False`——多租户部署没有任何运营者级
+强制；开了策略也能被 DNS rebinding 绕过（校验解析、连接池再独立解析一次）；响应
+体 `response.text` 全量读入内存。本次三处加固：
+
+1. **运营者级开关 `PLAITA_HTTP_BLOCK_PRIVATE=1`**：置位后所有 HTTP 节点强制
+   `blockPrivateNetworks`（effective = 节点声明 OR 运营者开关）——节点声明只能
+   更严，不能更松。默认不设，保持历史行为；**多租户 / 不受信流程部署请显式置位**。
+2. **DNS pinning**：策略激活时「建连解析本身」经同一份策略判定，且只连接校验过的
+   IP（aiohttp 自定义 resolver / requests 自定义 connector），校验与连接同源，
+   攻击者权威 DNS 无法先答公网过校验、连接时答 `127.0.0.1` / `169.254.169.254`
+   穿透。Host 头与 TLS SNI 仍是原域名。
+3. **响应体字节上限**：默认 **10MiB**（`PLAITA_HTTP_MAX_RESPONSE_BYTES` 可调），
+   超限抛错而非把 GB 级 body 读进内存 / `$NODE.<id>.RESPONSE` 状态 / checkpoint。
+
+- 变更前：默认无限制；`response.text` 全量读；策略易被 rebinding 绕过。
+- 迁移：默认仅新增 10MiB 响应上限——确需更大 body 的部署显式调大
+  `PLAITA_HTTP_MAX_RESPONSE_BYTES`。多租户部署显式设
+  `PLAITA_HTTP_BLOCK_PRIVATE=1`。策略激活的请求不再复用 flow 作用域共享
+  `ClientSession`（改用带 pinning resolver 的连接），属安全换性能的取舍。
+
+复审补丁（2026-10 独立评审，同一组加固的收敛）：
+
+- **重定向不再复用客户端自动跟随**：四条路径组合（sync/async × 策略激活/默认）
+  统一在节点侧逐跳手动跟随（中间跳 body 直接丢弃不读）——requests 自动跟随会在
+  `resolve_redirects` 里无条件读尽每个 3xx 的 body（无上限），敌意 302 可绕过
+  10MiB 上限。逐跳规则逐条对齐 requests
+  （`rebuild_method` / `should_strip_auth` / `purged_headers`）：
+
+  | 情况 | 语义 |
+  |------|------|
+  | 302 / 303 | 非 HEAD 转 GET，丢弃 body 与 `Content-Type`/`Transfer-Encoding` |
+  | 301 | **仅 POST** 转 GET；PUT/PATCH/DELETE/OPTIONS 保留方法，但同样丢弃 body（requests 行为） |
+  | 307 / 308 | 保留**方法与 body**（sync/async 一致） |
+  | 无 `Location` 的 3xx | 不算重定向，按普通响应返回（requests `is_redirect` 口径） |
+  | 跨源（host 变化，或同 host 的 scheme/port 变化） | 剥离 `Authorization`/`Cookie`/`Proxy-Authorization` 等凭据头 |
+
+  跨源的判定是 requests 的 `should_strip_auth` 口径：同 host 的 `https→http`、
+  `:443→:8443`、`非默认端口→默认端口` 都算跨源（唯一例外是 `http:80 → https:443`
+  的同 host 升级）；此前只比 hostname，会把凭据明文转发到另一个 origin。
+
+  **与自动跟随不等价的行为变化**（需读写两侧对齐的部署注意）：
+
+  * **重定向上限统一为节点 `maxRedirects`（默认 5）**，sync/async 同口径、同文案
+    `Too many redirects (> N)`。此前默认路径用 requests 的 30（同步）/ aiohttp 的
+    10 且规则不同（异步对 301/302 的非 POST 方法会保留 body），而 `maxRedirects`
+    只在策略激活时生效——同步默认路径被静默收紧到 5 且与异步不一致。需要更长
+    链条的流程显式调大 `maxRedirects`。
+  * 不再填充 `response.history`。
+  * 不再把 session cookie jar 合并进重定向跳（`PLAITA_HTTP_COOKIES=1` 时可见差异）。
+  * 中间跳的 3xx body 不再被读取（自动跟随会读尽）。
+- **策略激活的同步请求忽略代理环境变量**（`trust_env=False`，与 aiohttp 侧共享
+  session 一致）：`HTTP_PROXY`/`HTTPS_PROXY` 不再把 restricted 请求交给代理——
+  经代理时目标解析与建连都在代理侧，节点侧建连 pinning 无从生效。egress 依赖代理
+  的部署请改为直连，或在代理侧做同等校验。
+- **body 读取阶段失败的错误码对齐**：截断 / 连接重置 / 解码失败等传输类失败
+  sync/async 同归 **1002**（`DO_REQUEST`，错误帧带请求快照、无响应）；响应体超限
+  （`ResponseTooLargeError`）两条路径同归 **1003**（`NODE_EXEC`，错误帧带响应快照）。
+
 ### 安全与分布式加固（2026-09 R4 定向深潜轮）
 
 安全专项（威胁模型：能写流程 JSON 的人是半信任主体）：

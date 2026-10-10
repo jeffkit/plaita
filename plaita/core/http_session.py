@@ -109,17 +109,22 @@ def get_flow_session() -> Optional[Any]:
     return _flow_session_var.get()
 
 
-def _new_oneshot_session():
+def _new_oneshot_session(resolver=None):
     """Fallback one-shot session for node calls outside a flow scope.
 
     Direct ``HTTP.arun`` invocations (unit tests, embedding without the
     flow driver) have no scope; they get a throwaway session with the same
     cookie/trust_env defaults as the shared one.
+
+    ``resolver`` 可传自定义 :class:`aiohttp.abc.AbstractResolver`——HTTP 节点在
+    访问策略激活时用它把**建连解析**交给策略校验并只连校验过的 IP（见
+    ``plaita/node/http.py::_PolicyResolver``）；缺省沿用 aiohttp 默认解析器。
     """
     import aiohttp
 
     jar = None if _cookies_enabled() else aiohttp.DummyCookieJar()
-    return aiohttp.ClientSession(trust_env=False, cookie_jar=jar)
+    connector = aiohttp.TCPConnector(limit=_connector_limit(), resolver=resolver)
+    return aiohttp.ClientSession(connector=connector, trust_env=False, cookie_jar=jar)
 
 
 # --- sync (requests) shared session -----------------------------------------
@@ -156,6 +161,34 @@ def _sync_cookies_enabled() -> bool:
     return _cookies_enabled()
 
 
+_SYNC_SESSION_CLS: Optional[Any] = None
+
+
+def _sync_session_cls():
+    """Lazily build (and cache) the ``requests.Session`` subclass used for sync nodes.
+
+    Only one difference from ``requests.Session``: ``Session.send`` with
+    ``allow_redirects=False`` still calls ``resolve_redirects(yield_requests=True)``
+    to populate ``Response.next()``, and that generator does ``resp.content`` on the
+    3xx before yielding — an **unbounded** read of every redirect-hop body. plaita
+    follows redirects hop-by-hop itself (see ``plaita.node.http``) and never uses
+    ``Response.next()``, so the prefetch is short-circuited; otherwise a hostile
+    3xx bypasses the response byte cap.
+    """
+    global _SYNC_SESSION_CLS
+    if _SYNC_SESSION_CLS is None:
+        import requests
+
+        class _NoPrefetchRedirectSession(requests.Session):
+            def resolve_redirects(self, resp, req, **kwargs):
+                if kwargs.get("yield_requests"):
+                    return
+                yield from super().resolve_redirects(resp, req, **kwargs)
+
+        _SYNC_SESSION_CLS = _NoPrefetchRedirectSession
+    return _SYNC_SESSION_CLS
+
+
 def get_shared_sync_session():
     """Process-wide ``requests.Session`` with connection pooling.
 
@@ -163,13 +196,12 @@ def get_shared_sync_session():
     parent's sockets — same hazard as the sync node pool's PID guard).
     """
     global _sync_session, _sync_session_pid
-    import requests
     from requests.adapters import HTTPAdapter
 
     pid = os.getpid()
     with _sync_session_lock:
         if _sync_session is None or _sync_session_pid != pid:
-            session = requests.Session()
+            session = _sync_session_cls()()
             adapter = HTTPAdapter(pool_connections=16, pool_maxsize=64)
             session.mount("http://", adapter)
             session.mount("https://", adapter)

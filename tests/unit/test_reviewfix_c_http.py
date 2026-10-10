@@ -6,9 +6,10 @@
    allowedHosts/deniedHosts/blockPrivateNetworks 禁止的目标时必须被逐跳
    校验拦下（该修复已随 7c631a2 的 BFF 热路径合并入库，这里补的是
    端到端行为断言：被禁目标的一次真实请求都不该发生）；
-2. restricted 逐跳手动跟随重定向时，跨源（host 变化）必须剥离
-   Authorization/Cookie 等凭据类头（RFC 7231 §9.4 语义），同源保留——
-   本次修复的泄漏点，sync/async 两条路径各一份断言。
+2. restricted 逐跳手动跟随重定向时，跨源必须剥离 Authorization/Cookie 等
+   凭据类头（RFC 7231 §9.4 语义），同源保留——本次修复的泄漏点，
+   sync/async 两条路径各一份断言；跨源判定按 requests.should_strip_auth
+   （host 变化，或同 host 的 scheme/端口变化；http:80 → https:443 例外）。
 
 全程本地 http.server（127.0.0.1 / localhost 双主机名构造跨源），零外网请求。
 """
@@ -176,13 +177,28 @@ class TestStripSensitiveHeadersHelper(unittest.TestCase):
                                      "http://a.example.com/y"),
             headers)
 
-    def test_scheme_or_port_change_still_same_host(self):
-        """判定维度是 host（与 requests rebuild_auth 一致）：换 scheme/端口不剥离。"""
+    def test_scheme_upgrade_on_default_ports_keeps_headers(self):
+        """host 不变 + http:80 → https:443：保留（requests should_strip_auth 的历史例外）。"""
         headers = {"Authorization": "x"}
         self.assertEqual(
             _strip_sensitive_headers(headers, "http://a.example.com:80/x",
                                      "https://a.example.com:443/y"),
             headers)
+
+    def test_scheme_or_port_change_strips(self):
+        """同 host 换 scheme / 端口算跨源（对齐 requests.should_strip_auth）。
+
+        ``https:443 → http:8443`` 正是凭据明文转发到另一个 origin 的场景。
+        """
+        headers = {"Authorization": "x"}
+        self.assertEqual(
+            _strip_sensitive_headers(headers, "https://a.example.com:443/x",
+                                     "http://a.example.com:8443/y"),
+            {})
+        self.assertEqual(
+            _strip_sensitive_headers(headers, "http://a.example.com:8080/x",
+                                     "http://a.example.com/y"),
+            {})
 
 
 if __name__ == "__main__":  # pragma: no cover

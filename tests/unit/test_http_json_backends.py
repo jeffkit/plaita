@@ -87,14 +87,17 @@ class TestExecutorUsesBackends(TestCase):
         self.assertEqual(json.loads(data), {"k": "v"})
 
     def test_sync_response_json_uses_lenient_loads(self):
-        """sync 路径 response.json(loads=_loads_lenient)：NaN 响应不退化为文本。"""
+        """sync 路径 _loads_lenient(response.text)：NaN 响应不退化为文本。"""
         executor = self._executor()
+        body = '{"a": NaN}'
         fake_response = type("R", (), {
             "is_redirect": False,
             "status_code": 200,
             "url": "http://127.0.0.1:1/x",
-            "text": '{"a": NaN}',
+            "text": body,
             "headers": {},
+            "iter_content": lambda self, chunk_size=65536: [body.encode("utf-8")],
+            "close": lambda self: None,
             "json": lambda self, **kw: kw["loads"](self.text),
         })()
         session = __import__("plaita.core.http_session",

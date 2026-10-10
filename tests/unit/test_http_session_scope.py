@@ -6,8 +6,9 @@
    作用域结束时确定性关闭；
 2. cookie 默认阻断（跨 flow/租户泄漏防护）：async DummyCookieJar +
    sync _BlockAllCookies；fork 后共享 sync session 重建；
-3. restricted 路径首跳禁自动重定向（现状 bug 回归：requests 自动跟随
-   会让逐跳 SSRF 校验失效）；
+3. 首跳禁自动重定向（两条路径同一形状）：restricted 时 requests 的自动跟随
+   会让逐跳 SSRF 校验失效；默认路径时自动跟随会对每个 3xx 读尽 hop body
+   （绕过响应体上限）——统一手动逐跳；
 4. 策略 DNS 缓存：命中、失败不缓存、TTL=0 直通、_host_allowed 保持纯函数。
 """
 
@@ -146,7 +147,7 @@ class TestSyncSharedSession(TestCase):
 
 
 class TestRestrictedRedirectFirstHop(TestCase):
-    """现状 bug 回归：restricted 首跳必须 allow_redirects=False。"""
+    """现状 bug 回归：首跳必须 allow_redirects=False（两条路径都手动逐跳）。"""
 
     def setUp(self):
         clear_shared_sync_session()
@@ -175,7 +176,8 @@ class TestRestrictedRedirectFirstHop(TestCase):
             "restricted 首跳若允许自动重定向，逐跳策略校验形同虚设",
         )
 
-    def test_unrestricted_first_hop_keeps_auto_redirect(self):
+    def test_unrestricted_first_hop_also_disables_auto_redirect(self):
+        """默认路径同样手动逐跳（requests 自动跟随会对每个 3xx 读尽 hop body）。"""
         executor = HttpExecutor(url="http://127.0.0.1:1/a", method="GET", query=None,
                                 body=None, headers=None, addressing=None, delegate=None)
         session = get_shared_sync_session()
@@ -187,7 +189,10 @@ class TestRestrictedRedirectFirstHop(TestCase):
         with patch.object(type(session), "send", return_value=fake_response) as mock_send:
             executor.handle_request(None)
         _, kwargs = mock_send.call_args
-        self.assertTrue(kwargs.get("allow_redirects", True))
+        self.assertFalse(
+            kwargs.get("allow_redirects", True),
+            "自动跟随会在 send 内部读尽 3xx 的 body，绕过响应体上限",
+        )
 
 
 class TestPolicyDNSCache(TestCase):

@@ -280,6 +280,22 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 }
 ```
 
+访问策略（SSRF 防护）：`requestTimeout`（默认 30s）、`allowedHosts` / `deniedHosts`
+（精确域名 / `*.suffix` / CIDR）、`blockPrivateNetworks`（拒绝回环/内网/链路本地等
+私网段）、`maxRedirects`（默认 5，**同步与异步同口径**，超限报 `Too many redirects`）。
+重定向**不使用客户端自动跟随**（sync/async 同一形状）：节点逐跳手动跟随——策略激活
+时每跳复检、跨源剥离凭据头、中间跳 body 丢弃不读；方法改写与跨源剥离规则对齐
+`requests`（301 仅把 POST 转 GET，302/303 非 HEAD 转 GET，307/308 保留方法与 body；
+同 host 换 scheme/端口也算跨源）。
+策略激活的请求建连解析经同一策略校验并只连校验过的 IP（关闭 DNS rebinding TOCTOU），
+并且**忽略 `HTTP_PROXY` 等代理环境变量**（经代理的连接由代理侧解析，pinning 无从
+生效）。运营者级强制见
+[运维 Runbook](../distributed/ops-runbook.md#http-ssrf-hardening)
+（`PLAITA_HTTP_BLOCK_PRIVATE=1` 后节点声明只能更严不能更松）。
+
+响应体默认上限 **10MiB**（`PLAITA_HTTP_MAX_RESPONSE_BYTES` 可调），超限报错——
+流式读，不会把超大 body 读进内存/状态；重定向中间跳的 body 也在上限之内（不读）。
+
 ## event
 
 事件节点，用于断点续执。`async_node=True`，在 Distributed 模式下执行后挂起，等待外部事件到达恢复。详见 [断点续执](../distributed/checkpoint.md)。
