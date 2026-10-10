@@ -57,6 +57,17 @@ worker 的执行；调大到超过最长步骤耗时，可减少 `lease_conflict
 照常取得租约接管——start 的接管点是从头重跑（checkpoint 由后续 resume
 消费），租约只保证「同一时刻至多一个推进者」。
 
+**回收闸门（plaita#47，2026-10-10）**：XCLAIM 之前先按消息体查一次租约
+（键同上）——租约存在（活持有者处理中，或持有者刚死 ≤TTL 的尾巴）→ **跳过
+该条**：不 XCLAIM、不递增 `times_delivered`、idle 不归零（`XPENDING` 读数
+稳定），消息留 pending 等其终态后自然被回收（终态执行的消息会被
+`already_terminal` 短路 ack）。**超限条目的死信去留也在 XCLAIM 之前判定**：
+死信守卫拒绝（如「租约仍在」「重入队冷却中」）就**不碰它**——抢回来只会把
+idle 归零、把投递数继续推高（实测队列饱和时同一 start 任务每周期被 XCLAIM
+一次、`times_delivered` 虚增到顶、XPENDING 反复刷新）。真孤儿（持有者
+kill -9、租约过期）与「排队中」因此彻底分开：前者照常被回收接管，后者
+静静等槽。
+
 **死信守卫**：超过 `--max-deliveries` 的消息进 DLQ 前，先查消息体
 `execution_id` 的执行状态与 resume 租约（键 `{ns}:execution:lease:{id}`，`ns` 按消息体
 `tenant_id` 路由：default/空 = `plaita`，其余 = `plaita:{tenant_id}`）——
@@ -64,7 +75,13 @@ worker 的执行；调大到超过最长步骤耗时，可减少 `lease_conflict
 pending；执行仍非终态但**节点重试计数已达预算**（见下节）则终态化 error 后
 放行（不再重入队——重入队会让 delivery 归 1 再耗尽，无限循环）；租约/状态
 查询失败同样保守跳过；非终态且租约空（持有者已死）重入队一份 delivery 归 1
-的恢复消息后放行。
+的恢复消息后放行，**但同执行每 `DLQ_REQUEUE_COOLDOWN_SECONDS`（默认 1800s，
+`FlowWorker` 类常量）只重生一次**（标记键 `{ns}:execution:dlq_requeue:{id}`，
+TTL=冷却窗）——否则「重入队 → 新副本又被回收烧满 → 再重入队」会自发成链
+（2026-10-10 实测周期 ≈6.4min、DLQ 三条 `source_id` 成链、`XLEN` 15→25）。
+冷却窗内的命中只跳过死信、消息留 pending（恢复副本仍在），窗外照常重入队，
+**真孤儿恢复路径不被切断**；冷却窗（1800s）刻意小于 reaper 的 60m 孤儿线
+（搁浅执行在终态化前仍拿得到 2 次恢复机会）。
 
 部署步骤与故障手册见 [运维 Runbook](ops-runbook.md)；副作用设计见 [幂等 Resume](idempotent-resume.md)。
 

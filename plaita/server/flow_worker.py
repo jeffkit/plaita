@@ -725,6 +725,16 @@ class FlowWorker:
     G1_MAX_WAKEUPS = 2
     G1_WAKEUP_COUNTER_TTL_SECONDS = 7 * 86400
 
+    # 恢复副本重入队冷却（plaita#47，2026-10-10）：死信守卫的「非终态 + 租约空」
+    # 分支每命中一次就重入队一份 delivery 归 1 的新副本——队列饱和时（排队 >
+    # max_deliveries × claim 周期 ≈ 5min）新副本同样被回收烧满 → 再重入队，
+    # 形成「死信→重入队→再死信」链条（实测周期 6.4min、DLQ 三条 source_id
+    # 成链、XLEN 15→25），DLQ 被无意义条目淹没。冷却窗内同一执行只重入队一次：
+    # 窗外的重入队（真孤儿、长故障恢复）不受影响，恢复路径不切断。
+    # 取值权衡：≥ 烧满一轮的时间（默认 5min，链不再滚雪球）；< reaper 的
+    # 60m 孤儿线（搁浅执行在终态化前仍拿得到 2 次恢复机会）。
+    DLQ_REQUEUE_COOLDOWN_SECONDS = 1800
+
     # 确定性失败**连续**次数上限（plaita#73 遗留层，2026-10-10）：`exited 1` /
     # `AgsError` / 超时 / 协议错等**不可重试**的失败也要有界。此前它们完全不
     # 进计数器（2026-10-10 本机 Redis db1 快照：全库 noderetry 键 74/74 恒为 1
@@ -2824,6 +2834,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 in inspect.signature(RedisStreamTaskQueue.__init__).parameters
             ):
                 kwargs["dead_letter_guard"] = self._dead_letter_guard
+            # #47 回收闸门接线：同样按签名探测向后兼容（旧队列类不认该参数）。
+            if (
+                "claim_guard"
+                in inspect.signature(RedisStreamTaskQueue.__init__).parameters
+            ):
+                kwargs["claim_guard"] = self._claim_guard
             # #26 死信告警接线：同样按签名探测向后兼容（并行合入期的旧队列类
             # 不收该参数）。
             if (
@@ -2838,6 +2854,65 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """死信事件出口：未配置 webhook 时空操作（只保留原始 error 日志）。"""
         if self._alerter is not None:
             self._alerter.send(event)
+
+    def _claim_guard(self, task: StreamTask) -> bool:
+        """回收闸门（#47）：True=可被 XCLAIM 重投；False=跳过（消息留 pending）。
+
+        与 ``_dead_letter_guard`` 的分工：那条管「消息超限了要不要死信」，
+        本条管「这条 pending 现在该不该被抢」。原来 ``_reclaim_one`` 只按
+        idle 判空闲，不看消息对应的执行**是否还有活持有者**：长步骤（或排队
+        中的恢复副本）的 pending 每 ``claim_min_idle_ms`` 被同伴 XCLAIM 一次
+        ——每次抢都把 delivery_count 递增、把 idle 归零，触顶后即便死信守卫
+        正确拦下，被拦条目仍每轮被抢（假死信链条 + XPENDING idle 反复刷新 +
+        日志刷屏）。租约活着时这条消息根本不需要被回收。
+
+        判据与边界：
+
+        - 非 dict 体 / 无 ``execution_id``（老格式消息）：无从判定 → 放行，
+          存量回收路径零变化；
+        - 租约键 ``{ns}:execution:lease:{id}`` 存在 → 跳过。租约键在持有者
+          死后仍有 ≤TTL 的尾巴（#50 实证），这段窗口内跳过意味着**接管延迟
+          ≤TTL**（默认 120s，看门狗 TTL/3 续租）——远小于「每 claim 周期抢
+          一次烧 delivery」的代价，且租约过期后下一轮回收照常接管；
+        - 租约键不存在（或执行已终态、状态缺失）→ 放行：终态执行的挂尾消息
+          要能被回收后经 already_terminal 短路 ack 清出队列，真孤儿要能被
+          回收后重投接管；
+        - 查租约失败（Redis 瞬断）→ 跳过：抢回来大概率只是再撞一次冲突，
+          且瞬断窗口误抢活持有者的消息代价更高（双跑风险 + 烧 delivery）。
+
+        租约键按消息体 ``tenant_id`` 路由（与死信守卫同规则，守卫在
+        ``_dispatch_task`` 之外被调用，ContextVar 已复位）。
+        """
+        body = getattr(task, "body", None)
+        if not isinstance(body, dict):
+            return True
+        execution_id = body.get("execution_id")
+        if not execution_id:
+            return True
+        lease_key = (
+            f"{tenant_namespace(body.get('tenant_id'))}:execution:lease:{execution_id}"
+        )
+        try:
+            lease_held = bool(self.redis_client.exists(lease_key))
+        except Exception as exc:  # noqa: BLE001 — 瞬断按「不放行」处理（不抢）
+            logger.warning(
+                "回收前查租约失败（保守跳过该条，消息留 pending）: %s: %s",
+                lease_key,
+                exc,
+            )
+            return False
+        if lease_held:
+            # 刻意 debug 级：这条判据每个消费周期都会命中（长步骤跑几小时就
+            # 刷几小时），warning 会把日志淹掉。可观测性交给
+            # ``claim_guard_skipped`` 计数与 XPENDING 读数。
+            logger.debug(
+                "回收跳过：执行 %s 租约仍在（活持有者处理中/租约 TTL 尾巴），"
+                "消息留 pending 等其终态: %s",
+                execution_id,
+                getattr(task, "message_id", "?"),
+            )
+            return False
+        return True
 
     def _dead_letter_guard(self, task: StreamTask) -> bool:
         """死信守卫（Track B 契约）：True=允许死信；False/抛异常=跳过。
@@ -2855,6 +2930,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         - 非终态 + 租约空（持有者已死）→ **重新入队一份同体消息**（delivery
           归 1，恢复路径重生）后放行原消息死信。并发守卫双入队无害：两条
           新消息被 resume 租约串行化，第二条命中 already_terminal 短路。
+          重入队受冷却闸约束（#47，`_dlq_requeue_allowed`）：同一执行每
+          `DLQ_REQUEUE_COOLDOWN_SECONDS` 只重生一次，否则「重入队 → 新副本
+          又被回收烧满 → 再重入队」会自发成链（DLQ 污染 + 队列 churn）。
 
         租户路由：状态存储经 ContextVar 路由、租约键手工拼装，两者都用
         消息体 ``tenant_id``（守卫在 run() 主循环内 ``_dispatch_task`` 之外
@@ -2946,6 +3024,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 return False
             return True
 
+        # #47 冷却闸：同一执行的恢复副本**每冷却窗只重入队一次**。没有它，
+        # 「重入队 → 新副本又被回收烧满 → 再重入队」会自发成链（排队中的
+        # 长任务被反复冲洗，DLQ 被无意义条目污染、XLEN 虚增）。冷却窗内的
+        # 命中只跳过死信（消息留 pending，本轮不新增副本），窗外照常重入队
+        # ——真孤儿/长故障恢复路径不被切断。
+        if not self._dlq_requeue_allowed(execution_id, namespace):
+            logger.warning(
+                "执行 %s 非终态且租约已空，但 %ss 内已重入队过恢复副本"
+                "（#47 冷却，防「死信→重入队」成链）：跳过死信，消息留 pending: %s",
+                execution_id,
+                self.DLQ_REQUEUE_COOLDOWN_SECONDS,
+                getattr(task, "message_id", "?"),
+            )
+            return False
+
         try:
             enqueue_task(self.redis_client, self.queue_name, dict(body))
             logger.warning(
@@ -2960,6 +3053,28 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
             return False
         return True
+
+    def _dlq_requeue_allowed(self, execution_id: str, namespace: str) -> bool:
+        """恢复副本重入队冷却闸（#47）：True=本执行本轮可重入队恢复副本。
+
+        标记键 ``{ns}:execution:dlq_requeue:{id}``（值=时间戳，TTL=冷却窗，
+        自清理）以 SET NX 抢占：抢到=本窗内首次重入队，放行；已被占=本窗内
+        已重入队过，跳过（消息留 pending 不死信）。与 console 的
+        ``_is_mechanism_key`` 同步登记：该键与执行状态同前缀、值非状态 dict，
+        漏登会让 ``GET /api/executions`` 500（见 `test_console_mechanism_keys.py`）。
+
+        标记写失败（Redis 瞬断）→ 返回 False 保守跳过死信：抢不到闸门宁可
+        留 pending（下一轮再判），也不要在不可判时期放任链条继续滚。
+        """
+        key = f"{namespace}:execution:dlq_requeue:{execution_id}"
+        try:
+            granted = self.redis_client.set(
+                key, str(time.time()), ex=self.DLQ_REQUEUE_COOLDOWN_SECONDS, nx=True
+            )
+        except Exception as exc:  # noqa: BLE001 — 瞬断按「不放行」处理
+            logger.warning("重入队冷却闸失败（保守跳过死信）: %s: %s", key, exc)
+            return False
+        return bool(granted)
 
     # ---- 租约看门狗（波次② §4.1）----
 

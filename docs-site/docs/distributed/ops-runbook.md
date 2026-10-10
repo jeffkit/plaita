@@ -317,7 +317,9 @@ python scripts/drain_list_queue_to_stream.py \
 远程 status（若开 registry）返回的 `queue` 字段含：
 
 - `stream_length` / `pending` / `dlq_length`
-- 计数：`acked` / `reclaimed` / `dead_lettered` / `lease_conflicts` / `failed` / `residue_swept`
+- 计数：`acked` / `reclaimed` / `dead_lettered` / `lease_conflicts` / `failed` / `residue_swept` /
+  `dlq_guard_skipped` / `claim_guard_skipped`（后两者 = 守卫/回收闸门拦下、消息留 pending 的次数，
+  见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)）
 
 也可以 Redis：
 
@@ -445,8 +447,8 @@ redis-cli DEL plaita:execution:nofail:<execution_id>
 |------|----------|------|
 | 任务不消费 | group/stream 键不一致；Worker 未起 | 核对 `--queue-name` / group；看 Worker 日志 |
 | `XLEN>0` 但 `XPENDING`/`lag` 为 0 | 已 `XACK` 未 `XDEL` 的残留条目（XACK 与 XDEL 之间进程被杀），**不是**真积压 | worker 启动时与每 300s 兜底回收（`residue_swept`）；`XRANGE` 看 payload 的 `execution_id`，console 实查为终态即可确认无活干 |
-| pending 堆积 | 处理失败反复 reclaim；lease 冲突 | 查日志；调大 lease TTL；看 DLQ |
-| DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)） |
+| pending 堆积 | 处理失败反复 reclaim；lease 冲突；队列饱和下消息排队等槽 | 查日志；调大 lease TTL；看 DLQ。**注意**：租约活着的执行消息不再被 XCLAIM（回收闸门 #47），`pending` 里久留但 `times_delivered` 不涨 = 正常排队，不是故障 |
+| DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)）。**同一执行最多每 30min 产生一份「重入队恢复副本」型死信**（`DLQ_REQUEUE_COOLDOWN_SECONDS`，#47）——超出此速率说明有别的来源，别当成冷却没生效 |
 | 反复重投，日志刷「保存执行状态失败 (…)」 | Redis 写路径瞬断/序列化失败——落盘失败已不再静默 ack（2026-10 评审修复） | 查 Redis `INFO`/延迟日志；恢复后 pending 自动重投收敛，勿人工 ack |
 | 反复重投，日志刷「挂起任务投递失败」 | 挂起服务队列 `plaita:{subtype}:queue` rpush 失败；suspended 已保留等重派 | 查对应外延服务（DelayService 等）与其队列长度；恢复后重投自动重派 |
 | 双 resume | 旧版本无 lease | 升级到含 lease 的版本；查 lease key |

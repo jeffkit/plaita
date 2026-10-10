@@ -220,6 +220,11 @@ def _is_mechanism_key(key: str) -> bool:
     （plaita#123 兜底总重试上限，**裸整数**）——这是**新前缀**，不是
     `noderetry` 的子串，必须单独登记（自动防线扫
     `:execution:noderefetch:{` 已覆盖）。
+
+    同类第九次（2026-10-10，plaita#47）：`{ns}:execution:dlq_requeue:{id}`
+    （死信守卫恢复副本重入队冷却标记，值为时间戳字符串）——同样会被
+    `plaita:execution:*` 前缀扫到，漏登记即 `json.loads("1759…")` 得 int →
+    `summary.get` 500（自动防线扫 `:execution:dlq_requeue:{` 已覆盖）。
     """
     return (
         ":execution:lease:" in key
@@ -242,6 +247,8 @@ def _is_mechanism_key(key: str) -> bool:
         # 教训：新增机制键**必须**同步登记；`test_console_mechanism_keys.py`
         # 的自动防线会扫 worker 源码，漏登记即 CI 红。
         or ":execution:nofail:" in key
+        # 同类第九次（plaita#47）：恢复副本重入队冷却标记（值=时间戳字符串）。
+        or ":execution:dlq_requeue:" in key
         or ":execution:index" in key
         or key.endswith(":dlq")
     )

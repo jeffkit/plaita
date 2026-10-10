@@ -265,9 +265,15 @@ class TestDeadLetterGuard(unittest.TestCase):
         )
         self.assertEqual(entries, [], "死信后原消息应被 ack")
 
-    def test_guard_refusal_increments_delivery_count_but_never_dead_letters(self):
-        """副作用取证：守卫拒绝期间每次 read 重抢使 delivery_count 递增，
-        但只要守卫持续拒绝就永不死信（递增有界于时间，不在单次 read 内自旋）。"""
+    def test_guard_refusal_freezes_delivery_count_and_never_dead_letters(self):
+        """守卫拒绝期间不 XCLAIM、不死信（#47：拒绝条目连抢都不抢）。
+
+        基线行为是「每次 read 重抢一次 ⇒ delivery_count 递增（有界于时间）」，
+        2026-10-10 实测这就是队列 churn 的一半来源（触顶条目每 claim 周期被
+        XCLAIM 一次，idle 归零刷新、计数继续涨、日志刷屏）：守卫拒绝说明
+        这条按守卫语义就该留 pending 等终态，抢它没有任何处置收益。现行为
+        ——判据在 XCLAIM **之前**，投递数与 idle 都不动。
+        """
         mid = self._make_overdelivered_pending(deliveries=3, max_deliveries=3)
         q = self._read_queue(dead_letter_guard=lambda task: False)
         for _ in range(3):
@@ -277,10 +283,13 @@ class TestDeadLetterGuard(unittest.TestCase):
             self.stream, self.group, min=mid, max=mid, count=1
         )
         self.assertEqual(len(pending), 1)
-        self.assertGreater(
-            int(pending[0]["times_delivered"]), 3, "每次重抢递增（副作用，见回报评估）"
+        self.assertEqual(
+            int(pending[0]["times_delivered"]), 3, "拒绝期间不得再烧投递数"
         )
         self.assertEqual(self.redis.xlen(q.dlq_key), 0, "拒绝期间永不死信")
+        self.assertEqual(
+            q.stats()["dlq_guard_skipped"], 3, "每轮都判定一次（判定本身不产生副作用）"
+        )
 
 
 class TestRedisFlowWorkerDispatch(unittest.TestCase):

@@ -13,6 +13,12 @@
 # 终态（suspended/running）——派发失败不该把执行误终态化，它就是重投要救的
 # 那个执行。
 #
+# #47 之后（2026-10-10）：守卫给「重入队恢复副本」加了冷却闸
+# （``FlowWorker.DLQ_REQUEUE_COOLDOWN_SECONDS``，标记键
+# ``{ns}:execution:dlq_requeue:{id}``）——本场景**首个**烧满周期照旧重入队 +
+# 死信（断言①不变），但同执行在冷却窗内不再产生第二份副本/第二条死信（防
+# 「死信 → 重入队 → 再死信」成链刷爆 DLQ）。故断言只看 ``XLEN >= 1``，不数条数。
+#
 # 为什么换载体：旧载体是「挂起执行上投 resume_type=continue」，其语义已改为
 # worker 入口**幂等短路**（消息 ack + 状态保持 suspended，见 #33）——既不终态化
 # 也不留 pending，跑不出任何 DLQ；确定性节点失败（#73）同理，现在是 poison ack

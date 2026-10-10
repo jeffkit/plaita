@@ -40,6 +40,7 @@ def test_mechanism_keys_are_excluded():
     assert f("plaita:execution:noderetry:abc:watch")
     assert f("plaita:execution:noderefetch:abc")
     assert f("plaita:execution:g1wakeups:abc")   # ← 2026-10-10 补（#73 补丁，值守引入）
+    assert f("plaita:execution:dlq_requeue:abc")  # ← 2026-10-10 补（#47 恢复副本重入队冷却）
     assert f("plaita:execution:index")           # ← 2026-10-07 补（#40）
     assert f("plaita:execution:index:ready")     # ← 同上（裸字符串 "1"）
     assert f("plaita:flow:queue:v2:dlq")
