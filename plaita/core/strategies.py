@@ -27,6 +27,7 @@ from plaita.core.errors import (
     FlowStartMissingError,
     FlowTimeoutError,
     ResumeError,
+    ResumeGuardError,
     ResumeType,
 )
 from plaita.core.runner import NodeRunner
@@ -234,7 +235,7 @@ class DistributedStrategy:
             # 直接开跑全新流程——掩盖故障（R6 fuzz B2）。显式给出非 continue
             # 的 resume 意图却没有可恢复状态，应当报错（retry 同理：它只能
             # 唤醒已存在的 error 执行，不能凭空开新跑）。
-            raise ResumeError(
+            raise ResumeGuardError(
                 f"resume_type={resume_type.value!r} requires a saved_context, "
                 "but none was provided; the execution cannot be resumed. To start "
                 "a fresh run, omit resume_type (or pass resume_type='continue')."
@@ -256,7 +257,7 @@ class DistributedStrategy:
                     prev_state = node_results.get(last_node_id) if isinstance(node_results, dict) else None
                     status = prev_state.get("status", "") if isinstance(prev_state, dict) else ""
                     if status == "pending":
-                        raise ResumeError(
+                        raise ResumeGuardError(
                             f"Execution is suspended at EventNode {last_node_id!r} (status=pending); "
                             "resume_type='continue'/'retry' would silently skip it. "
                             "Use resume_type='event'/'cancel'/'timeout' to resolve the event first.",
@@ -354,17 +355,17 @@ class DistributedStrategy:
 
         last_node_id = context.last_node_id
         if not last_node_id:
-            raise ResumeError("No suspended node found for resume")
+            raise ResumeGuardError("No suspended node found for resume")
 
         current_node = flow.find_node_by_id(last_node_id)
         # 用 is_suspending 标志判定, 而非 isinstance(EventNode): core 层不反向依赖
         # node 插件层; 保留 "is not an EventNode" 文案以兼容历史测试断言。
         if not current_node.is_suspending:
-            raise ResumeError(f"Node {current_node.id} is not an EventNode", node=current_node)
+            raise ResumeGuardError(f"Node {current_node.id} is not an EventNode", node=current_node)
         node_results = context.get_state(f"{pfx}{context.express_node_name}", {})
         prev_state = node_results.get(last_node_id, {})
         if prev_state.get("status", "") != "pending":
-            raise ResumeError(
+            raise ResumeGuardError(
                 f"EventNode {current_node.id} is not in pending status: {prev_state.get('status', '')}",
                 node=current_node,
             )

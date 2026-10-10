@@ -110,6 +110,7 @@ _LAZY_EXPORTS = {
     "NodeTimeoutError": "plaita.core.errors",
     "ErrorResultException": "plaita.core.errors",
     "ResumeError": "plaita.core.errors",
+    "ResumeGuardError": "plaita.core.errors",
     "ResumeType": "plaita.core.errors",
     # plaita.core.callback
     "FlowCallback": "plaita.core.callback",

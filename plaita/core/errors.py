@@ -208,6 +208,27 @@ class ResumeError(FlowExecutionException):
         super().__init__(self.code, message, self.error_type, node)
 
 
+class ResumeGuardError(ResumeError):
+    """恢复**守卫**：恢复请求与执行状态不匹配（策略层在分发到节点
+    ``resume()`` **之前**就拒绝），执行应保持原状而不是被终态化。
+
+    与基类的分工（worker 侧 ``_chain_has_resume_guard_error`` 靠本类型区分）：
+
+    - **本类（守卫）**：continue/retry 试图绕过 pending 挂起节点、resume 打在
+      无挂起节点 / 非挂起节点的 checkpoint 上。这类请求不携带推进语义，且几乎
+      都来自 at-least-once 重投与竞速（重复投递的 event resume 打在已推进的
+      checkpoint 上同族）——执行保持 suspended 等真正的决议路径
+      （event/cancel/timeout），终态化成 error 会把可恢复的挂起执行永久打封
+      （连 event 都被终态短路拒绝，plaita#33）。
+    - **其余 ``ResumeError``**（含 ``strategies._handle_resume`` 把
+      ``current_node.resume()`` 抛出的异常包成的那个）：是**执行自身失败**，
+      由 worker 现状路径终态化 error（可观测、可人工 retry），不得静默保持原状。
+    """
+
+    def __init__(self, message: str, node=None):
+        super().__init__(message, node)
+
+
 class ErrorStrategy(Enum):
     """
     错误处理策略

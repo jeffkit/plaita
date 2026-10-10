@@ -175,6 +175,28 @@ class TestCountBounds:
         ).json()
         assert len(body["tasks"]) <= 200
 
+    def test_count_zero_does_not_500(self, env):
+        """count=0：redis-py 的 ``XRANGE ... COUNT 0`` 客户端直接抛 DataError。
+
+        端点此前把它变成 500（stream 键历史上没有任何下限闸）。上限收紧到 200
+        的同时把下限夹到 1——调用方拿到的是「最多 1 条」而不是服务端错误。
+        """
+        client, redis = env
+        _seed_stream(redis, tenant="acme")
+        r = client.get(
+            "/api/queues/plaita:flow:queue?count=0", headers=_viewer_headers(client)
+        )
+        assert r.status_code == 200, r.text
+        assert len(r.json()["tasks"]) <= 1
+
+    def test_count_negative_does_not_500(self, env):
+        client, redis = env
+        _seed_stream(redis, tenant="acme")
+        r = client.get(
+            "/api/queues/plaita:flow:queue?count=-3", headers=_viewer_headers(client)
+        )
+        assert r.status_code == 200, r.text
+
     def test_negative_start_rejected(self, env):
         client, redis = env
         redis.rpush("plaita:delay:queue", json.dumps({"tenant_id": "acme"}))

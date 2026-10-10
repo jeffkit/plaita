@@ -35,7 +35,7 @@
 | 15 | **event_filter 是独立部署进程** | 「事件→匹配订阅→回投恢复任务」由 `python -m plaita.server.event_filter` 承担，部署文档列为按需扩容项——不跑它，delay/approval 挂起后事件永远无人消费。E2E 已纳入 services 容器 |
 | 16 | **approval_service 状态在进程内存** | 审批实例存 `pending_approvals` dict，无外部可观测状态——E2E 断言不了消费侧（要可观测得改引擎代码） |
 | 17 | **集群档启动执行的契约** | `POST /api/executions` 不校验 flow 存在（XADD 完事），响应里**没有 execution_id**（worker 侧才生成）——拿执行 ID 要按 flow_id 过滤列表轮询 `executions.0.execution_id` |
-| 18 | **resume_type=continue 对挂起节点被内核拒绝** | 防止绕过 pending 事件静默推进（R6 fuzz 修复）。审批/delay 恢复必须 `resume_type: "event"`（console resume 端点）或事件发布（correlation_id=execution_id）——两条恢复通道都要有回归 |
+| 18 | **resume_type=continue/retry 对挂起执行不推进** | 防止绕过 pending 事件静默推进（R6 fuzz 修复 + #33 收口）。策略层守卫仍拒绝（`ResumeGuardError`），但 worker **入口先幂等短路**：消息 ack、执行保持 suspended（不再终态化成 error——那会把可恢复执行永久打封）。审批/delay 恢复必须 `resume_type: "event"`（console resume 端点）或事件发布（correlation_id=execution_id）——两条恢复通道都要有回归 |
 | 19 | **console lifespan 连不上 Redis 会静默降级本地模式** | 不报错、照常 healthy，但集群档断言全翻车（503）。容器 CMD 必须先等 Redis 端口可连再起 uvicorn（argusai 的 healthcheck 是 HTTP 型，表达不了「Redis 就绪」） |
 | 20 | **dry-run pinned 的 result 语义** | pinned 命中后 `result` 变成 `{节点id: 输出}` 字典而非端节点输出值。断言按 `result: {end: 42}` 写 |
 

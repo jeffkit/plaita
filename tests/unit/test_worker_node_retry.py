@@ -52,6 +52,7 @@ from plaita.core.errors import (
     NodeNotFoundError,
     NodeTimeoutError,
     ResumeError,
+    ResumeGuardError,
 )
 from plaita.server.flow_worker import (
     FlowWorker,
@@ -173,17 +174,34 @@ class TestRetryableClassification:
         assert state.end_time is None
         assert state.context == CHECKPOINT_CONTEXT
 
-    def test_protocol_error_keeps_state_and_raises(self):
-        """协议错误（__cause__=ResumeError）不终态化：执行保持原状 + 抛
-        ResumeProtocolError（#33——挂起守卫类 ResumeError 终态化会把可被
-        event/cancel/timeout 唤醒的执行永久打封）。"""
-        outcome, state = self._resume_with_failure(_wrapped(ResumeError("not pending")))
+    def test_resume_guard_error_keeps_state_and_raises(self):
+        """恢复**守卫**（__cause__=``ResumeGuardError``）不终态化：执行保持原状 +
+        抛 ResumeProtocolError（#33——守卫类终态化会把可被 event/cancel/timeout
+        唤醒的执行永久打封）。"""
+        outcome, state = self._resume_with_failure(
+            _wrapped(ResumeGuardError("not pending"))
+        )
         assert not isinstance(outcome, NodeExecutionRetryableError)
         from plaita.server.flow_worker import ResumeProtocolError
 
         assert isinstance(outcome, ResumeProtocolError)
         assert state.status == "running"
         assert state.end_time is None
+
+    def test_bare_resume_error_still_terminalizes(self):
+        """豁免面刻意窄：**裸** ``ResumeError`` 不是守卫。
+
+        ``strategies._handle_resume`` 把 ``current_node.resume()`` 抛出的任何
+        异常都包成裸 ``ResumeError``（事件数据畸形等）——那是执行自身失败，
+        静默保持原状会变成「无 error 记录、永远等不到决议」的哑执行。
+        """
+        outcome, state = self._resume_with_failure(
+            _wrapped(ResumeError("resume blew up"))
+        )
+        assert not isinstance(outcome, NodeExecutionRetryableError)
+        assert state.status == "error"
+        assert state.error and "resume blew up" in state.error["message"]
+        assert state.end_time
 
     def test_graph_error_still_terminalizes(self):
         """图结构错误（__cause__=NodeNotFoundError）维持现状：终态化 error。"""

@@ -174,7 +174,7 @@ cases:
       body:
         status: "suspended"
 
-  - name: "console resume 审批通过（resume_type=event，continue 会被内核拒绝）"
+  - name: "console resume 审批通过（resume_type=event；continue/retry 对挂起执行只做入口幂等跳过、不携带推进语义）"
     request:
       method: POST
       url: "http://localhost:18080/api/executions/{{runtime.approval_exec_id}}/resume"

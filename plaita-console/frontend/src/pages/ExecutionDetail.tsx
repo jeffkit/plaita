@@ -130,6 +130,9 @@ export default function ExecutionDetail() {
   const [showResumeDialog, setShowResumeDialog] = useState(false)
   const [useSSE, setUseSSE] = useState(true)
   const [sseLost, setSseLost] = useState(false)
+  // resume 请求的失败信息：BFF 对「唤醒预算已用尽」返回 409（worker 会幂等
+  // 拒绝唤醒，重试是哑弹）——必须显式告诉操作者，否则按钮看着「受理了」。
+  const [resumeError, setResumeError] = useState<string | null>(null)
 
   const handleSSELoss = useCallback(() => {
     setUseSSE(false)
@@ -157,8 +160,10 @@ export default function ExecutionDetail() {
       api.resumeExecution(executionId!, params),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['execution', executionId] })
+      setResumeError(null)
       setShowResumeDialog(false)
     },
+    onError: (e: Error) => setResumeError(e.message),
   })
 
   // 本次执行实际跑过的节点 id：版本号缺失时用它去匹配「到底跑的是哪个版本」，
@@ -320,11 +325,19 @@ export default function ExecutionDetail() {
           挂起执行的 service 错误（如订阅快照里的 error_message）不能重试
           ——retry 会被 worker 的挂起幂等短路拒绝（#33）。 */}
       {execution.error && execution.status === 'error' && (
-        <div className="flex justify-end -mb-3 relative z-10">
-          <Button variant="secondary" size="sm" onClick={() => resumeMutation.mutate({ resume_type: 'retry' })} disabled={resumeMutation.isPending}>
+        <div className="flex flex-col items-end gap-1.5 -mb-3 relative z-10">
+          <Button variant="secondary" size="sm" onClick={() => { setResumeError(null); resumeMutation.mutate({ resume_type: 'retry' }) }} disabled={resumeMutation.isPending}>
             <Play size={13} />
             {resumeMutation.isPending ? '重试中…' : '从断点重试'}
           </Button>
+          {/* worker 对 retry 有有界唤醒（唤醒次数/连续确定性失败达上限即幂等
+              拒绝），BFF 据此返回 409——不显示出来，按钮就是静默哑弹。 */}
+          {resumeError && (
+            <p className="text-caption text-status-error flex items-center gap-1 max-w-[80ch] text-right">
+              <AlertCircle size={12} className="shrink-0" />
+              {resumeError}
+            </p>
+          )}
         </div>
       )}
       {execution.error && (() => {

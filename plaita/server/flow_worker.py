@@ -8,6 +8,7 @@ import signal
 import threading
 import time
 import uuid
+import weakref
 from typing import Dict, Any, Optional, Set, Tuple
 
 import argparse
@@ -23,7 +24,7 @@ from plaita.core.errors import (
     FlowTimeoutError,
     NodeExecutionError,
     NodeTimeoutError,
-    ResumeError,
+    ResumeGuardError,
 )
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
@@ -197,6 +198,42 @@ def _deny_repos() -> set:
     return {x.strip() for x in raw.split(",") if x.strip()}
 
 
+def _min_free_disk_gib_from_env() -> float:
+    """claim 前本机盘守线（GiB；#49）：PLAITA_WORKER_MIN_FREE_DISK_GIB。
+
+    未配置 / 非法 = 0 = 关闭预检（默认零行为变化，与 ``_deny_repos`` 同口径）。
+    部署侧应与 flow 内 preflight 节点的同款阈值对齐（recursive 侧为
+    ``RECURSIVE_MIN_FREE_DISK_GIB``，默认 20），否则仍会「worker 放行领取 →
+    flow preflight 才判盘不足」白跑一轮。"""
+    raw = (os.environ.get("PLAITA_WORKER_MIN_FREE_DISK_GIB") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("PLAITA_WORKER_MIN_FREE_DISK_GIB=%r 非法，盘预检按关闭处理", raw)
+        return 0.0
+
+
+def _disk_guard_path_from_env() -> str:
+    """盘预检路径（PLAITA_WORKER_DISK_GUARD_PATH），默认当前工作目录。"""
+    return (os.environ.get("PLAITA_WORKER_DISK_GUARD_PATH") or "").strip() or "."
+
+
+def _free_disk_gib(path: str) -> Optional[float]:
+    """``path`` 所在文件系统的可用盘（GiB）；探测失败返回 None。
+
+    ``AttributeError``：无 ``os.statvfs`` 的平台（Windows）——预检不可用按
+    「放行」处理（与探针自身的其余失败一致），不得把 AttributeError 冒到
+    消费循环（预检开关默认关，但开了也不该炸掉 worker）。
+    """
+    try:
+        st = os.statvfs(path)
+    except (OSError, AttributeError):
+        return None
+    return (st.f_bavail * st.f_frsize) / float(1024 ** 3)
+
+
 def _node_retry_disabled() -> bool:
     """波次二任务①回滚开关：PLAITA_DISABLE_NODE_RETRY=1 时节点失败直接终态化
     error（完全回到波次前行为）。"""
@@ -290,6 +327,13 @@ ALLOW_FLOW_HASH_CHANGE_KEY = "allow_flow_hash_change"
 # 优雅停机时等待在途任务的上限（秒）；超时则放弃当前步并退出——消息不 ack，
 # 由其他 worker 经 XCLAIM 从**步界检查点**续跑（该步会重放，业务节点须幂等）。
 DEFAULT_WORKER_DRAIN_TIMEOUT = 30.0
+
+# 盘预检拦下领取时的空转轮询间隔（秒；#49）：低盘期不 XREADGROUP，按该间隔
+# 重探一次，盘回线即自动恢复领取（无需重启）。
+DEFAULT_DISK_GUARD_POLL_SECONDS = 15.0
+
+# __new__ 构造的骨架 worker（不经 __init__）惰性补建状态写锁登记表时的守卫锁。
+_STATE_WRITE_LOCKS_INIT_GUARD = threading.Lock()
 
 
 def _drain_timeout_from_env() -> float:
@@ -403,20 +447,31 @@ def _chain_has_cancellation(exc: BaseException) -> bool:
     return False
 
 
-def _chain_has_resume_protocol_error(exc: BaseException) -> bool:
-    """异常链（含自身）中是否含 ``ResumeError``（恢复协议/挂起守卫类错误）。
+def _chain_has_resume_guard_error(exc: BaseException) -> bool:
+    """异常链（含自身）中是否含**恢复守卫** ``ResumeGuardError``。
 
-    #33 配套：``run_distributed`` 把策略层 ResumeError 归一化为
-    ``FlowErrorException`` 且原异常挂 ``__cause__``，worker 通用 except 因此
-    需要「豁免」判据——挂起节点上的 continue/retry 守卫 ResumeError 描述的是
-    **调用方协议错误**（消息类型与执行状态不匹配），不是执行自身失败；
-    执行应保持原状（suspended）让真正的决议路径（event/cancel/timeout）进来，
-    而不是被终态化成不可逆的 error。
+    #33 配套：``run_distributed`` 把策略层异常归一化为 ``FlowErrorException``
+    且原异常挂 ``__cause__``，worker 通用 except 因此需要「豁免」判据。
+
+    豁免面**刻意很窄**——只认 ``ResumeGuardError``（策略层**分发到
+    ``current_node.resume()`` 之前**的守卫：continue/retry 想绕过 pending 挂起
+    节点、resume 打在无挂起节点/非挂起节点的 checkpoint 上）。这类 ResumeError
+    描述的是**调用方协议与执行状态不匹配**：消息类型与执行状态对不上时必须
+    保持原状（挂起执行等 event/cancel/timeout 决议），终态化 error 会把它永久
+    打封（#33）；且它天然由 at-least-once 重投/竞速产生（重复投递的 event
+    resume 打在已推进的 checkpoint 上也是同族），终态化会误杀健康执行。
+
+    **不**豁免裸 ``ResumeError``：``plaita/core/strategies.py`` 的
+    ``_handle_resume`` 把 ``current_node.resume()`` 抛出的**任何**异常包成
+    ``ResumeError``（事件数据畸形 / 节点恢复逻辑失败…）——那是执行自身失败，
+    静默保持原状只会变成一个「无 error 记录、永远等不到决议」的哑执行；
+    交给下面的现状路径（可重试判据 → 终态化 error + poison ack）才可观测、
+    可人工 retry。
     """
     node: Optional[BaseException] = exc
     depth = 0
     while node is not None and depth <= _NODE_RETRY_CHAIN_MAX_DEPTH + 1:
-        if isinstance(node, ResumeError):
+        if isinstance(node, ResumeGuardError):
             return True
         node = node.__cause__
         depth += 1
@@ -502,9 +557,12 @@ class TaskNotForThisWorker(RuntimeError):
 class ResumeProtocolError(RuntimeError):
     """resume 协议错误（#33）：执行状态与 resume_type 不匹配，执行保持原状。
 
-    挂起守卫类 ``ResumeError``（continue/retry 试图绕过 pending 挂起节点）
-    经 ``_chain_has_resume_protocol_error`` 判出后，resume_flow 不终态化、
-    把执行留在原状态（suspended/running），以本异常上抛。run() 主循环按
+    策略层守卫 ``ResumeGuardError``（continue/retry 试图绕过 pending 挂起节点、
+    resume 打在无挂起/非挂起 checkpoint 上）经 ``_chain_has_resume_guard_error``
+    判出后，resume_flow 不终态化、把执行留在原状态（suspended/running），
+    以本异常上抛。**裸 ``ResumeError`` 不在豁免面内**（节点 ``resume()`` 自身
+    抛错是执行失败，走终态化 error 的现状路径，见该判据 docstring）。
+    run() 主循环按
     「消费失败」处理：消息走 ack（执行状态原样可查、事件订阅仍在，真正的
     决议路径 event/cancel/timeout 随时可入），重投只会重复命中同一守卫，
     无意义。刻意**不是** ValueError 子类（防 poison ack 语义误伤）。
@@ -592,6 +650,15 @@ class FlowWorker:
         # on_node_start/on_node_end；落盘时由 _persist_state_or_raise 写入
         # ExecutionState.node_timings。
         self._node_timings: Dict[str, NodeTimingCallback] = {}
+        # 执行状态写的**每执行互斥锁**（见 _state_write_lock）：同一 execution_id
+        # 的所有状态写（推进路径 _persist_state_or_raise ↔ 看门狗心跳
+        # _publish_node_progress）必须串行，否则心跳的「读-改-写」会把并发终态写
+        # 整行回滚（2026-10-10 评审复现：completed 被改成 running + 旧 checkpoint）。
+        # WeakValueDictionary：没有线程再持有该锁时自动回收（长跑 worker 不泄漏）。
+        self._state_write_locks: "weakref.WeakValueDictionary[str, threading.RLock]" = (
+            weakref.WeakValueDictionary()
+        )
+        self._state_write_locks_guard = threading.Lock()
         # 沙箱生命周期回调：**按执行**缓存（同一执行的多个 step 必须复用同一个
         # 实例，否则 agent 节点在早先 step 产生的 workspace 快照到 flow 结束那一步
         # 已经丢了）；终态落盘时按持久化上下文释放并回收（_release_sandboxes）。
@@ -625,11 +692,18 @@ class FlowWorker:
     G1_MAX_WAKEUPS = 2
     G1_WAKEUP_COUNTER_TTL_SECONDS = 7 * 86400
 
-    # 确定性失败累计上限（plaita#73 遗留层，2026-10-10）：`exited 1` /
+    # 确定性失败**连续**次数上限（plaita#73 遗留层，2026-10-10）：`exited 1` /
     # `AgsError` / 超时 / 协议错等**不可重试**的失败也要有界。此前它们完全不
     # 进计数器（全库 noderetry 键 74/74 恒为 1 即此故），唯一收敛机制是消息层
     # 重投、而消息层无次数概念 ⇒ 同一执行被重投数百次、沙箱持续占位。
     # 达上限即判「不可救」，与可达上限分开记账（noderetry 是可重试预算，语义不同）。
+    #
+    # 计数语义是「**连续**失败」：任一节点成功推进即清零（见
+    # `_reset_deterministic_failure_counter` 的调用点）。只增不减时，一个跑了几天、
+    # 在**不同**节点各撞过一次确定性失败的长寿命执行会被累计判死——那远没到
+    # 「该放弃」的程度（2026-10-10 评审）；连续 12 次才等于「同一位置反复撞墙」。
+    # 刻意**不**在 G1 retry 唤醒时清零（那是收不上来的自毁循环：唤醒→清零→再撞
+    # →再唤醒，见 G1_MAX_WAKEUPS 的来历）。
     DETERMINISTIC_FAILURE_MAX = 12
     DETERMINISTIC_FAILURE_TTL_SECONDS = 7 * 86400
 
@@ -665,9 +739,26 @@ class FlowWorker:
             return 1
 
     def _deterministic_failure_exhausted(self, execution_id: str) -> bool:
-        """该执行是否已判「确定性失败不可救」（达上限）。"""
+        """该执行是否已判「确定性失败不可救」（连续失败达上限）。"""
         return (self._read_deterministic_failure_count(execution_id)
                 >= self.DETERMINISTIC_FAILURE_MAX)
+
+    def _reset_deterministic_failure_counter(self, execution_id: str) -> None:
+        """清零确定性失败计数（DEL；键不存在为幂等 no-op）。
+
+        调用时机只有一处：**任一节点成功推进**（与
+        ``_reset_node_retry_counter`` 同一个收口）——计数语义是「连续失败」，
+        推进过就说明不是「同一位置反复撞墙」，长寿命执行的跨节点偶发失败不应
+        累计判死。G1 retry 唤醒时**不**清零（否则「唤醒→清零→再撞→再唤醒」
+        永不收敛）。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "delete"):
+            return
+        try:
+            redis_client.delete(self._deterministic_failure_key(execution_id))
+        except Exception as e:  # noqa: BLE001 — 清零失败无害（下次失败继续累计）
+            logger.warning("确定性失败计数清零失败（忽略）: %s: %s", execution_id, e)
 
     def _g1_wakeup_key(self, execution_id: str) -> str:
         """G1 唤醒计数键：``{ns}:execution:g1wakeups:{id}``（租户路由同上）。"""
@@ -1003,9 +1094,18 @@ class FlowWorker:
         return (holder if acquired else None), None
 
     def _register_lease_watch(
-        self, execution_id: str, lease_value: str, execution: Any
+        self,
+        execution_id: str,
+        lease_value: str,
+        execution: Any,
+        fence_token: Optional[int] = None,
     ) -> None:
-        """登记活跃执行供看门狗续租（基类 no-op）。"""
+        """登记活跃执行供看门狗续租（基类 no-op）。
+
+        ``fence_token`` 与租户一起供心跳（``_publish_node_progress``）使用：
+        看门狗线程没有本执行的 ContextVar，不带就会写错 namespace 并绕开
+        世代 CAS（见 RedisFlowWorker 的同名覆写）。
+        """
 
     def _unregister_lease_watch(self, execution_id: str, lease_value: str) -> None:
         """注销看门狗登记（基类 no-op）。"""
@@ -1023,6 +1123,39 @@ class FlowWorker:
                 f"lost lease for execution {lease_execution_id}; aborting resume"
             )
 
+    def _state_write_lock(self, execution_id: str) -> "threading.RLock":
+        """取本执行的**状态写互斥锁**（同 id 恒返回同一把；RLock 可重入）。
+
+        为什么需要：同一 execution_id 有两个写者——推进线程的
+        ``_persist_state_or_raise``（终态/步进/挂起/错误态）与看门狗线程的
+        ``_publish_node_progress``（长节点期间的心跳）。心跳是「load → 合并
+        node_timings → save」，**整行写回**：若它读到的是终态化**之前**的行，
+        然后把终态写覆盖掉，就得到一个「status=running + 旧 checkpoint + 新
+        last_update_time」的假活僵尸——既不会被 keeper 回收（open node + 新鲜
+        last_update_time 恰是它的「活着」判据），后续 resume 还会从旧 checkpoint
+        重放节点副作用（消息已被 ack，没有写者会再回来修）。两处都持本锁即把
+        「读-改-写」与终态写串行化。
+
+        实现要点：``WeakValueDictionary`` —— 只有正在写/正在排队的线程持有强引用，
+        写完即自动回收，长跑 worker 不随执行数泄漏；取锁/建锁在 guard 锁内完成，
+        保证两个线程拿到的是**同一个**锁对象（否则互斥不成立）。__new__ 构造的
+        骨架 worker 没有 ``__init__`` 里的登记表，这里惰性补齐。
+        """
+        locks = self.__dict__.get("_state_write_locks")
+        guard = self.__dict__.get("_state_write_locks_guard")
+        if locks is None or guard is None:
+            with _STATE_WRITE_LOCKS_INIT_GUARD:
+                locks = self.__dict__.setdefault(
+                    "_state_write_locks", weakref.WeakValueDictionary()
+                )
+                guard = self.__dict__.setdefault("_state_write_locks_guard", threading.Lock())
+        with guard:
+            lock = locks.get(execution_id)
+            if lock is None:
+                lock = threading.RLock()
+                locks[execution_id] = lock
+            return lock
+
     def _persist_state_or_raise(self, execution_id: str, state: ExecutionState, phase: str) -> None:
         """落盘执行状态并检查返回值：False → 抛 ``StatePersistError``。
 
@@ -1035,12 +1168,17 @@ class FlowWorker:
 
         注意：fenced 世代失配是 storage 层 raise ``ExecutionLeaseError``、
         不经本方法的 False 路径——既有失租链路不受影响。
+
+        全程持**每执行互斥锁**（``_state_write_lock``）：与本执行的看门狗心跳
+        （``_publish_node_progress``）串行，否则心跳的「读-改-写」会把这里的
+        终态/步进写整行回滚（2026-10-10 评审复现）。
         """
-        self._collect_node_timings(execution_id, state)
-        # 沙箱回收挂在同一收口（覆盖 start/步进/挂起/终态所有路径）：
-        # 非终态是 no-op，终态按上下文快照释放实例
-        self._release_sandboxes(execution_id, state)
-        saved = self.execution_storage.save_execution_state(execution_id, state)
+        with self._state_write_lock(execution_id):
+            self._collect_node_timings(execution_id, state)
+            # 沙箱回收挂在同一收口（覆盖 start/步进/挂起/终态所有路径）：
+            # 非终态是 no-op，终态按上下文快照释放实例
+            self._release_sandboxes(execution_id, state)
+            saved = self.execution_storage.save_execution_state(execution_id, state)
         if not saved:
             logger.error(
                 "保存执行状态失败 (%s): execution_id=%s, status=%s——消息将不 ack 等待重投",
@@ -1552,7 +1690,9 @@ class FlowWorker:
             # execution.cancel() 中止（code 沙箱当场 killpg；协作节点如 agentrun
             # 消费 cancel_event 收手）。租约看门狗同窗口。
             self._register_cancel_watch(execution_id, execution)
-            self._register_lease_watch(execution_id, lease_value, execution)
+            self._register_lease_watch(
+                execution_id, lease_value, execution, fence_token=fence_token
+            )
             try:
                 result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
@@ -1693,7 +1833,8 @@ class FlowWorker:
                 "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
             )
             return {
-                "execution_id": execution_id,                "status": state_status,
+                "execution_id": execution_id,
+                "status": state_status,
                 "already_terminal": True,
                 "result": getattr(state, "result", None),
                 "error": getattr(state, "error", None),
@@ -1884,8 +2025,10 @@ class FlowWorker:
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
             # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
-            # 被 XCLAIM 抢占双跑
-            self._register_lease_watch(execution_id, lease_value, execution)
+            # 被 XCLAIM 抢占双跑（fence 世代随登记带上，心跳写要过世代 CAS）
+            self._register_lease_watch(
+                execution_id, lease_value, execution, fence_token=fence_token
+            )
             # 登记取消监听（波次③）：命中标志键即中止在途节点（与租约登记
             # 同窗口；finally 一并撤销）
             self._register_cancel_watch(execution_id, execution)
@@ -1947,13 +2090,21 @@ class FlowWorker:
                     "status": "cancelled",
                 }
 
-            # 挂起守卫豁免（#33）：ResumeError 是恢复协议错误（continue/retry
-            # 试图绕过 pending 挂起节点等），不是执行自身失败。终态化 error 会
-            # 把本可被 event/cancel/timeout 唤醒的挂起执行永久打封（终态短路
-            # 从此拒绝一切 resume 类型，死局）。豁免为「保持原状 + 上抛」：
-            # suspended 执行保持 suspended，消息被 ack（重投也只会再次命中
-            # 同一守卫，重投无意义）；running 执行保持 checkpoint 现状。
-            if _chain_has_resume_protocol_error(e):
+            # 挂起守卫豁免（#33）：**只**豁免策略层守卫 ``ResumeGuardError``
+            # （continue/retry 试图绕过 pending 挂起节点、resume 打在无挂起/
+            # 非挂起 checkpoint 上）——那是调用方协议与执行状态不匹配，不是
+            # 执行自身失败。终态化 error 会把本可被 event/cancel/timeout 唤醒的
+            # 挂起执行永久打封（终态短路从此拒绝一切 resume 类型，死局），且这类
+            # 错误天然由 at-least-once 重投产生（重复投递的 event resume 打在已
+            # 推进的 checkpoint 上同族），终态化会误杀健康执行。
+            # 豁免为「保持原状 + 上抛」：suspended 执行保持 suspended，消息被
+            # ack（重投也只会再次命中同一守卫，重投无意义）；running 执行保持
+            # checkpoint 现状。
+            # 裸 ``ResumeError``（节点 ``resume()`` 抛错被策略层包的那个，
+            # 如事件数据畸形）**不豁免**：静默保持原状 = 无 error 记录、永远等
+            # 不到决议的哑执行；交给下方现状路径（可重试判据 → 终态化 error）
+            # 才可观测、可人工 retry。
+            if _chain_has_resume_guard_error(e):
                 logger.warning(
                     "执行 %s (status=%s) 收到与挂起状态不匹配的 resume 请求，"
                     "协议错误不终态化，执行保持原状: %s",
@@ -2110,6 +2261,9 @@ class FlowWorker:
                     # 重试计数按「当前节点的连续失败」计（组合语义）：任一
                     # 节点成功推进即清零——不同节点的失败不共享预算。
                     self._reset_node_retry_counter(execution_id)
+                    # 确定性失败计数同款「连续」语义：推进过就不是「同一位置
+                    # 反复撞墙」，长寿命执行跨节点的偶发确定性失败不应累计判死。
+                    self._reset_deterministic_failure_counter(execution_id)
 
                     is_end = result.get("is_end", False)
                     is_suspend = result.get("is_suspend", False)
@@ -2275,6 +2429,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         dlq_key: Optional[str] = None,
         read_block_ms: int = 1_000,
         concurrency: int = 1,
+        min_free_disk_gib: Optional[float] = None,
+        disk_guard_path: Optional[str] = None,
+        disk_guard_poll_seconds: float = DEFAULT_DISK_GUARD_POLL_SECONDS,
         watchdog_interval_seconds: Optional[float] = None,
         cancel_poll_seconds: Optional[float] = None,
         residue_sweep_interval_seconds: Optional[float] = None,
@@ -2305,6 +2462,19 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 消息级 at-least-once 与执行级租约语义不变（并发下同一 execution 仍由
         # 租约串行化）。默认 1 = 零行为变化。
         self.concurrency = max(1, int(concurrency))
+        # claim 前本机盘预检（#49）：多 worker 池下，低盘机器的 flow preflight
+        # 要等「领到手」才判盘不足 → retry-later 白跑一轮（实测一夜 11 次），
+        # 且把瞬时低盘放大成数小时退避停机；健康 worker 全程闲置。阈值 >0 时，
+        # 本机可用盘低于它就不 XREADGROUP（空转按 disk_guard_poll_seconds
+        # 重探，盘回线自动恢复，无需重启）。默认 0 = 关闭 = 零行为变化。
+        self._min_free_disk_gib = (
+            _min_free_disk_gib_from_env()
+            if min_free_disk_gib is None
+            else max(0.0, float(min_free_disk_gib))
+        )
+        self._disk_guard_path = disk_guard_path or _disk_guard_path_from_env()
+        self._disk_guard_poll_seconds = max(0.1, float(disk_guard_poll_seconds))
+        self._disk_guard_active = False
         self._active_task_count = 0
         self._active_count_lock = threading.Lock()
         self._log_handler = None
@@ -2549,9 +2719,19 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     # ---- 租约看门狗（波次② §4.1）----
 
     def _register_lease_watch(
-        self, execution_id: str, lease_value: str, execution: Any
+        self,
+        execution_id: str,
+        lease_value: str,
+        execution: Any,
+        fence_token: Optional[int] = None,
     ) -> None:
-        """登记活跃执行：看门狗据此续租；失租鸭子调 execution.cancel()。"""
+        """登记活跃执行：看门狗据此续租；失租鸭子调 execution.cancel()。
+
+        ``fence_token``/租户一并登记：心跳（``_publish_node_progress``）在
+        **看门狗线程**里跑，那里既没有本执行的 fence 世代 ContextVar 也没有
+        租户上下文——不带上就会退化成「默认租户 + 无 CAS 的裸写」（跨进程写错
+        namespace，且绕开 fenced 世代门）。
+        """
         with self._lease_watch_lock:
             # 同一执行的新租约（重投 resume 重入）清除陈旧失租标记
             self._lease_lost.discard(execution_id)
@@ -2559,6 +2739,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 lease_value,
                 execution,
                 current_tenant(),
+                fence_token,
             )
 
     def _unregister_lease_watch(self, execution_id: str, lease_value: str) -> None:
@@ -2622,7 +2803,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             except Exception:  # noqa: BLE001 — 看门狗自身绝不能带崩 worker
                 logger.error("租约看门狗周期异常", exc_info=True)
 
-    def _publish_node_progress(self, execution_id: str) -> None:
+    def _publish_node_progress(
+        self,
+        execution_id: str,
+        fence_token: Optional[int] = None,
+        tenant_id: Optional[str] = None,
+    ) -> None:
         """把**在跑节点**的进度发布到执行状态（长节点期间的活性心跳）。
 
         为什么需要（2026-10-10，plaita#27/#31/#55/#32/#62 五单误杀事故）：
@@ -2640,9 +2826,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         落到判据③「末节点 ended_at 停滞超 1800s」→ **把健康 run 判死 cancel**。
         铁证：产出落盘与误杀同一秒（#27 产 10:19:18 / 判 10:19:15）。
 
-        这里复用看门狗周期（默认 TTL/3 ≈ 40s）做一次**只读合并 + 落盘**：
+        这里复用看门狗周期（默认 TTL/3 ≈ 40s）做一次**合并 + 落盘**：
         不推进流程、不改 context，只把采集器的当前快照并进 ``node_timings``
         与 ``last_update_time``，让宿主侧「看得见沙箱里在跑」。
+
+        与并发写者的关系（2026-10-10 评审修，**本函数是全局第二类写者**）：
+        整行写回必须与推进路径的 ``_persist_state_or_raise`` 串行——同进程内持
+        ``_state_write_lock``（读也在锁内：读在锁外则「读-改-写」窗口里插进终态
+        写，本函数会把终态整行回滚成 running + 旧 checkpoint 的假活僵尸）；
+        跨进程由 fencing 承接（``fence_token``/``tenant_id`` 由租约登记处带上，
+        此前看门狗线程的 ContextVar 是 None → 退化**无 CAS** 的裸写、绕开世代门，
+        且默认租户会写错 namespace）。另外任务在租约期内才登记在
+        ``_lease_watch``，失租/终态后看门狗不再调本函数。
 
         失败**只告警不抛**：这是观测路径，绝不能因落盘失败而打断正在跑的
         节点（真正的落盘失败仍由 ``_persist_state_or_raise`` 在节点边界负责）。
@@ -2650,24 +2845,43 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         timing = self._node_timings.get(execution_id)
         if timing is None:
             return
+        tenant_scope = (
+            set_current_tenant(tenant_id) if tenant_id is not None else None
+        )
+        fence_scope = (
+            set_current_fence_token(fence_token) if fence_token is not None else None
+        )
         try:
-            state = self.execution_storage.load_execution_state(execution_id)
-            if state is None:
-                return
-            if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
-                return
-            # 与 _collect_node_timings 同款合并语义：不抹掉别的进程写下的旧节点
-            merged = dict(state.node_timings or {})
-            merged.update(timing.snapshot())
-            state.node_timings = merged
-            state.last_update_time = datetime.now().isoformat()
-            self.execution_storage.save_execution_state(execution_id, state)
+            with self._state_write_lock(execution_id):
+                state = self.execution_storage.load_execution_state(execution_id)
+                if state is None:
+                    return
+                if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+                    return
+                # 与 _collect_node_timings 同款合并语义：不抹掉别的进程写下的旧节点
+                merged = dict(state.node_timings or {})
+                merged.update(timing.snapshot())
+                state.node_timings = merged
+                state.last_update_time = datetime.now().isoformat()
+                self.execution_storage.save_execution_state(execution_id, state)
+        except ExecutionLeaseError:
+            # fenced 世代不符 = 租约已被接管者夺走（本进程的心跳不再可信），
+            # 不是观测路径的「落盘失败」：下周期 renew 会失败并走失租链路。
+            logger.info(
+                "在跑节点进度发布被 fencing 拒绝（租约已被接管，停止心跳）: %s",
+                execution_id,
+            )
         except Exception:  # noqa: BLE001 — 观测路径不得影响执行
             logger.warning(
                 "在跑节点进度发布失败（忽略，节点边界仍会落盘）: %s",
                 execution_id,
                 exc_info=True,
             )
+        finally:
+            if fence_scope is not None:
+                reset_current_fence_token(fence_scope)
+            if tenant_scope is not None:
+                reset_current_tenant(tenant_scope)
 
     def _watchdog_renew_once(self) -> None:
         """对全部活跃执行续租一轮；renew 失败（Lua compare 不符 = 已被他人
@@ -2681,7 +2895,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """
         with self._lease_watch_lock:
             entries = list(self._lease_watch.items())
-        for execution_id, (lease_value, execution, tenant_id) in entries:
+        for execution_id, (lease_value, execution, tenant_id, fence_token) in entries:
             token = set_current_tenant(tenant_id)
             try:
                 renewed = self.execution_lease.renew(
@@ -2696,8 +2910,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 reset_current_tenant(token)
             if renewed:
                 # 租约确认在手 → 发布在跑节点进度（长节点期间的唯一心跳，
-                # 见 _publish_node_progress：防 keeper 把沙箱长节点误判 zombie）
-                self._publish_node_progress(execution_id)
+                # 见 _publish_node_progress：防 keeper 把沙箱长节点误判 zombie）。
+                # 带上租户与 fence 世代：看门狗线程没有本执行的上下文，不带就
+                # 会写错 namespace、绕开 fenced CAS。
+                self._publish_node_progress(
+                    execution_id, fence_token=fence_token, tenant_id=tenant_id
+                )
                 continue
             with self._lease_watch_lock:
                 self._lease_lost.add(execution_id)
@@ -3026,6 +3244,57 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         finally:
             self._residue_sweep_lock.release()
 
+    def _disk_guard_blocks_claim(self) -> bool:
+        """claim 前的本机盘预检（#49）：True = 本机盘低于守线，本轮不领任务。
+
+        阈值 ``0``（默认）恒 False，零行为变化——与 ``TaskNotForThisWorker``
+        那类「领到再让」不同，本闸在 ``XREADGROUP`` **之前**生效：低盘机器
+        根本不产生 claim，也就不烧 delivery、不产生 retry-later 回评。
+
+        探测失败（路径不存在 / 无权限）一律放行：宁可能白跑一次，不可因
+        预检自身故障让整池 worker 停摆。状态迁移只打一次日志（进入低盘
+        与盘回线各一条），避免空转期刷屏。
+        """
+        min_free = getattr(self, "_min_free_disk_gib", 0.0) or 0.0
+        if min_free <= 0:
+            return False
+        path = getattr(self, "_disk_guard_path", ".") or "."
+        free = _free_disk_gib(path)
+        if free is None:
+            return False
+        active = bool(self.__dict__.get("_disk_guard_active"))
+        if free >= min_free:
+            if active:
+                logger.info(
+                    "本机可用盘恢复 %.1fGiB ≥ 守线 %.1fGiB（%s），恢复领取任务",
+                    free, min_free, path,
+                )
+                self.__dict__["_disk_guard_active"] = False
+            return False
+        if not active:
+            logger.warning(
+                "本机可用盘 %.1fGiB < 守线 %.1fGiB（%s）：暂停领取任务，"
+                "盘回线自动恢复（不产生 claim，也不烧任务 delivery）",
+                free, min_free, path,
+            )
+            self.__dict__["_disk_guard_active"] = True
+        return True
+
+    def _wait_disk_guard(self) -> None:
+        """低盘期空转等待：按 ``_disk_guard_poll_seconds`` 休眠后重探。
+
+        切小片休眠以便 ``stop()`` / ``request_drain()`` 能及时中断（低盘
+        worker 停机不该再等一个完整轮询周期）。
+        """
+        deadline = time.monotonic() + getattr(
+            self, "_disk_guard_poll_seconds", DEFAULT_DISK_GUARD_POLL_SECONDS
+        )
+        while self._running and not self._drain_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.2, remaining))
+
     def _consume_loop(self, queue: RedisStreamTaskQueue) -> None:
         """单条消费循环（原 run() 主体）。可被 1 或 N 个线程并发执行。
 
@@ -3034,6 +3303,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         它属于「领任务」的配套动作，draining 期间不该再触发。
         """
         while self._running and not self._drain_event.is_set():
+            # 盘预检（#49）在 sweep 之前：低盘期本进程不做任何与领取相关的
+            # 动作（残留 sweep 由池内其他健康 worker 承担），空转等盘回线。
+            if self._disk_guard_blocks_claim():
+                self._wait_disk_guard()
+                continue
             self._sweep_residue_if_due(queue)
             # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
             # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
@@ -3507,6 +3781,14 @@ def main():
                              "也可用环境变量 PLAITA_WORKER_CONCURRENCY")
     parser.add_argument("--quiet", action="store_true",
                         help="关闭 INFO 级控制台日志（等价 PLAITA_LOG_LEVEL=WARNING）")
+    parser.add_argument("--min-free-disk-gib", type=float,
+                        default=_min_free_disk_gib_from_env(),
+                        help="claim 前的本机可用盘守线（GiB）：低于它就不领任务，"
+                             "空转重探、盘回线自动恢复（不产生白跑 claim）。"
+                             "默认 0=关闭；跟随 PLAITA_WORKER_MIN_FREE_DISK_GIB，"
+                             "应与 flow 内 preflight 节点的阈值对齐")
+    parser.add_argument("--disk-guard-path", default=_disk_guard_path_from_env(),
+                        help="盘预检路径（默认当前工作目录或 PLAITA_WORKER_DISK_GUARD_PATH）")
     parser.add_argument("--heartbeat-interval", type=int, default=10,
                       help="心跳间隔(秒)")
     parser.add_argument("--metrics-port", type=int,
@@ -3636,6 +3918,8 @@ def main():
             dlq_key=args.dlq_key or None,
             read_block_ms=args.read_block_ms,
             concurrency=args.concurrency,
+            min_free_disk_gib=args.min_free_disk_gib,
+            disk_guard_path=args.disk_guard_path,
             metrics_port=args.metrics_port,
             metrics_host=args.metrics_host,
             alert_webhook=args.alert_webhook or None,

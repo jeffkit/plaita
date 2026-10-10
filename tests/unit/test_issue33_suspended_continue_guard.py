@@ -10,9 +10,10 @@ checkpoint 里的合法挂起状态永远无法决议（retry 也救不回：ret
 修复契约：
 - resume_flow 入口：suspended + continue/retry → 幂等短路返回
   （already_suspended=True），不取租约、不推进、状态原样；
-- 兜底（绕过入口短路的路径，如构造/竞态窗口）：策略层守卫的 ResumeError
-  经 _chain_has_resume_protocol_error 判出 → 不终态化，抛 ResumeProtocolError，
-  run() 对其 ack（重投只会重复命中同一守卫，烧 delivery 无意义）。
+- 兜底（绕过入口短路的路径，如构造/竞态窗口）：策略层守卫 ResumeGuardError
+  经 _chain_has_resume_guard_error 判出 → 不终态化，抛 ResumeProtocolError，
+  run() 对其 ack（重投只会重复命中同一守卫，烧 delivery 无意义）；
+  裸 ResumeError（节点 resume() 抛错）**不**豁免，仍终态化 error。
 
 验收口径（工单原文）：构造 suspended 执行，投 continue 消息，断言状态仍
 suspended 且后续 event 唤醒可成功。
@@ -28,10 +29,14 @@ pytest.importorskip("redis")
 
 import fakeredis
 
-from plaita.core.errors import FlowErrorException, ResumeError
+from plaita.core.errors import FlowErrorException, ResumeError, ResumeGuardError
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
-from plaita.server.flow_worker import RedisFlowWorker, ResumeProtocolError
+from plaita.server.flow_worker import (
+    NodeFailureTerminalizedError,
+    RedisFlowWorker,
+    ResumeProtocolError,
+)
 from plaita.server.task_queue import RedisStreamTaskQueue, enqueue_task
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
@@ -166,7 +171,7 @@ class TestSuspendedIdempotentShortCircuit:
 
 
 class TestResumeProtocolErrorExemption:
-    """兜底：守卫类 ResumeError 不终态化（绕过入口短路的路径）。"""
+    """兜底：策略层**守卫**（``ResumeGuardError``）不终态化（绕过入口短路的路径）。"""
 
     def test_guard_resume_error_keeps_state_and_raises_protocol_error(self):
         worker, storage = _redis_worker()
@@ -181,9 +186,9 @@ class TestResumeProtocolErrorExemption:
         with patch("plaita.server.flow_worker.FlowExecution") as FE:
             inst = MagicMock()
             FE.return_value = inst
-            # run_distributed 归一化形态：FlowErrorException(__cause__=ResumeError)
+            # run_distributed 归一化形态：FlowErrorException(__cause__=守卫)
             wrapped = FlowErrorException("pending guard hit")
-            wrapped.__cause__ = ResumeError(
+            wrapped.__cause__ = ResumeGuardError(
                 "Execution is suspended at EventNode 'wait' (status=pending)")
             inst.run_distributed.side_effect = wrapped
 
@@ -216,6 +221,53 @@ class TestResumeProtocolErrorExemption:
         """刻意非 ValueError 子类：防 run() 的 poison ack 分支误吞语义。"""
         assert not issubclass(ResumeProtocolError, ValueError)
         assert issubclass(ResumeProtocolError, RuntimeError)
+
+    def test_guard_error_is_a_resume_error_subclass(self):
+        """守卫用**子类**区分（不是新异常族）：既有 ``except ResumeError`` 不受影响。"""
+        assert issubclass(ResumeGuardError, ResumeError)
+
+
+class TestNodeResumeFailureStillTerminalizes:
+    """豁免面必须窄：**节点 ``resume()`` 抛错**不是守卫，不得静默保持原状。
+
+    2026-10-10 评审：``_chain_has_resume_protocol_error``（现
+    ``_chain_has_resume_guard_error``）原判据认**任何**
+    ``ResumeError``，于是 ``strategies._handle_resume`` 把 ``current_node.resume()``
+    的异常包成的那个（事件数据畸形 / 节点恢复逻辑炸）也被吞成「挂起 + ack、
+    无 error 记录、永无决议」的哑执行。现在只有 ``ResumeGuardError`` 豁免，
+    其余 ResumeError 走现状终态化 error（可观测、可人工 retry）。
+    """
+
+    def _run_with_engine_error(self, cause: BaseException):
+        worker, storage = _redis_worker()
+        _, _, checkpoint = _real_suspended_execution()
+        storage.save_execution_state("exec-1", ExecutionState(
+            execution_id="exec-1", flow_id="f1", status="running",
+            context=checkpoint,
+        ))
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            # strategies._handle_resume 的真实形态：
+            # ResumeError(str(e), node=...) 带 __cause__ 上抛，被 run_distributed
+            # 归一化成 FlowErrorException(__cause__=ResumeError(__cause__=e))
+            inner = cause
+            resume_err = ResumeError(f"{inner}")
+            resume_err.__cause__ = inner
+            wrapped = FlowErrorException(f"恢复执行出错: {inner}")
+            wrapped.__cause__ = resume_err
+            inst.run_distributed.side_effect = wrapped
+
+            with pytest.raises(NodeFailureTerminalizedError):
+                worker.resume_flow("f1", "exec-1", "event", data={"approved": True})
+        return storage.load_execution_state("exec-1")
+
+    def test_malformed_event_data_terminalizes_with_error_recorded(self):
+        state = self._run_with_engine_error(ValueError("bad event payload"))
+
+        assert state.status == "error", "节点 resume 失败必须终态化（不得静默保持原状）"
+        assert state.error and "bad event payload" in state.error["message"]
+        assert state.end_time, "终态必须带 end_time"
 
 
 class TestRunLoopAcksProtocolError:

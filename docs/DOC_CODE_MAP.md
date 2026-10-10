@@ -1,6 +1,6 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-09-30  
+> 最后更新：2026-10-10  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 
 | 文档路径 | 代码路径模式 | 同步触发条件 |
@@ -13,6 +13,7 @@
 | `docs-site/docs/architecture/state-management.md` | `plaita/core/context.py`, `plaita/core/state.py` | Checkpoint / EventBus 解析 / `$ENV` / 取消语义变更 |
 | `docs-site/docs/distributed/event-system.md` | `plaita/event/**`, `plaita/node/event_node.py`, `plaita/server/event_filter.py`, `plaita/server/flow_worker.py` | EventBus API、后端、默认总线；EventFilter 与 worker 共享 subscription storage；FlowWorker 默认启用 bus；订阅匹配 vs handler fnmatch |
 | `docs-site/docs/distributed/flow-worker.md` / `ops-runbook.md` / `idempotent-resume.md` / `index.md` / `guide/execution-modes.md` / `docs/event-ARCHITECTURE.md` | `plaita/server/flow_worker.py`, `plaita/server/task_queue.py`, `plaita/server/metrics.py`, `plaita/server/alerts.py`, `plaita/server/execution_lease.py`, `plaita/server/event_filter.py`, `plaita/server/factory.py`, `plaita/writefile_jail.py`, `scripts/drain_list_queue_to_stream.py`, `scripts/reap_zombie_executions.py` | 可靠性边界；Stream/DLQ；指标/告警出口（`/metrics`、webhook）；lease；experimental db 门闩；writefile 写入 jail 部署默认；运维/幂等文档 |
+| `plaita-console/tests/e2e/**` / `plaita-console/scripts/e2e-chaos-*.sh` | `plaita/server/flow_worker.py`, `plaita/server/task_queue.py`（ack / 重投 / 死信守卫 / 幂等短路语义）, `plaita-console/backend/api/executions.py`（resume 闸门） | **CI 钉住的契约面**：终态/幂等/重投/DLQ/挂起派发语义一变，E2E 套件与混沌脚本必须同 diff 同步（2026-10-10 评审：continue 语义翻转漏改 E2E 产物致 PR CI 红） |
 | `docs-site/docs/ai/tools.md` | `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py`, `plaita-ai/examples/tools/**`, `plaita-ai/tests/test_tool_sources.py`, `plaita-ai/tests/test_langchain_tools.py` | ToolNode 桥接、BaseToolSource（HTTP/SQL/Vector/Native）、YAML bundle、ToolContext、addressing、LangChain 适配、PLAITA_TOOLS |
 | `docs-site/docs/nodes/custom.md` / `scenarios/agent-orchestration.md` | `examples/agent/**`, `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py` | 自定义 Node vs 数据源工具叙事；examples 教学 ToolNode 与 plaita-ai 工具层区分 |
 | `docs-site/docs/nodes/custom.md`（执行外部命令 / 子进程安全） | `plaita/subprocess_env.py`, `plaita/node/code.py` | 子进程 env 白名单公共层 API（`build_subprocess_env` / `clip_output`）、allowlist/extra 合并语义变更 |

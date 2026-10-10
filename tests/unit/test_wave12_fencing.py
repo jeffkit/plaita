@@ -31,6 +31,7 @@ from plaita.server.execution_lease import (
     RedisExecutionLease,
 )
 from plaita.server.flow_worker import RedisFlowWorker
+from plaita.server.node_timings import NodeTimingCallback
 from plaita.storage.base import ExecutionState
 from plaita.storage.fenced import (
     FencedExecutionStorage,
@@ -483,3 +484,86 @@ class TestT2StepExceedsTtl:
             worker_a._stop_lease_watchdog()
         finally:
             worker_a._stop_lease_watchdog()
+
+
+class _HeartbeatNode:
+    """心跳用例的最小节点桩（只被 NodeTimingCallback 读 id）。"""
+
+    def __init__(self, node_id: str):
+        self.id = node_id
+
+
+class TestHeartbeatRespectsFence:
+    """看门狗心跳（长节点期间的活性写）必须过 fencing 世代门。
+
+    2026-10-10 评审：心跳跑在**看门狗线程**里，那里没有本执行的 fence 世代
+    ContextVar（``current_fence_token() is None``）——不带世代就退化成
+    ``FencedExecutionStorage`` 的裸写分支，**完全绕开世代 CAS**：租约已被新
+    世代接管时，旧 worker 的心跳仍能把新世代的执行状态整行改写。
+    """
+
+    def _worker(self, fake) -> RedisFlowWorker:
+        return RedisFlowWorker(
+            redis_url="redis://localhost:6379/15",
+            queue_name="test:wave12-heartbeat-fence",
+            execution_storage=FencedExecutionStorage(
+                RedisExecutionStorage(client=fake)
+            ),
+            flow_storage=MemoryFlowStorage(),
+            redis_client=fake,
+            execution_lease=RedisExecutionLease(fake),
+            lease_ttl_seconds=60,
+            enable_registry=False,
+            enable_redis_logging=False,
+        )
+
+    def _seed_running_row(self, fake, execution_id: str, generation: int) -> None:
+        fenced = FencedExecutionStorage(RedisExecutionStorage(client=fake))
+        token = set_current_fence_token(generation)
+        try:
+            assert fenced.save_execution_state(
+                execution_id, ExecutionState(**{**STATE_RUNNING, "execution_id": execution_id})
+            ) is True
+        finally:
+            reset_current_fence_token(token)
+
+    def _worker_with_open_node(self, fake, execution_id: str) -> RedisFlowWorker:
+        worker = self._worker(fake)
+        worker._node_timings[execution_id] = NodeTimingCallback()
+        worker._node_timings[execution_id].on_node_start(None, _HeartbeatNode("impl"))
+        return worker
+
+    def test_stale_generation_heartbeat_cannot_write(self):
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        lease = RedisExecutionLease(fake)
+        gen1 = lease.try_acquire_fenced("exec-1", "h1", 60)
+        assert gen1 is not None
+        self._seed_running_row(fake, "exec-1", gen1)
+
+        worker = self._worker_with_open_node(fake, "exec-1")
+        worker._publish_node_progress("exec-1", fence_token=gen1, tenant_id="default")
+        written = fake.get("plaita:execution:exec-1")
+        assert written, "同世代的正常心跳必须落盘"
+
+        # 新世代接管（旧 worker 已失租，心跳不再有写权）
+        fake.delete("plaita:execution:lease:exec-1")
+        assert lease.try_acquire_fenced("exec-1", "h2", 60) == gen1 + 1
+
+        worker._publish_node_progress("exec-1", fence_token=gen1, tenant_id="default")
+
+        assert fake.get("plaita:execution:exec-1") == written, (
+            "旧世代的心跳必须被世代 CAS 拒绝（不得改写新世代的行）"
+        )
+
+    def test_same_generation_heartbeat_writes(self):
+        """同世代（正常长节点窗口）的心跳照常落盘——修复不得把功能关掉。"""
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        lease = RedisExecutionLease(fake)
+        gen = lease.try_acquire_fenced("exec-1", "h1", 60)
+        self._seed_running_row(fake, "exec-1", gen)
+
+        worker = self._worker_with_open_node(fake, "exec-1")
+        worker._publish_node_progress("exec-1", fence_token=gen, tenant_id="default")
+
+        raw = fake.get("plaita:execution:exec-1")
+        assert "impl" in raw, "在跑节点必须写进状态（keeper 活性判据的输入）"

@@ -29,6 +29,7 @@ __all__ = [
     "NodeTimeoutError",
     "ErrorResultException",
     "ResumeError",
+    "ResumeGuardError",
     "ResumeType",
 ]
 

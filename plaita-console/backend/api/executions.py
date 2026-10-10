@@ -240,6 +240,68 @@ def _execution_id_from_key(key: str) -> str:
     return key.split(":execution:", 1)[1]
 
 
+# ---- 唤醒预算闸（plaita#73）：把 worker 的「幂等拒绝唤醒」变成用户可见的 409 ----
+#
+# worker 对 `resume_type=retry` 有**有界唤醒**语义：G1 唤醒达上限（默认 2）或
+# 确定性失败连续达上限（默认 12）时，`resume_flow` 幂等返回
+# `already_terminal=True` + `g1_wakeups_exhausted` / `deterministic_failure_exhausted`
+# ——**不抛异常、不改状态**，只在 worker 日志里留一行。BFF 此前照常返回
+# 「已受理」，操作台的「从断点重试」于是变成静默哑弹（点了没反应、也没报错）。
+# 这里按 worker 同源的阈值（直接取 FlowWorker 的类常量，避免两份口径漂移）
+# 在入队前先判一次：达限即 409 并把「人工解封动作」写进 detail。
+def _retry_budget_block(
+    redis: Redis, tenant: Optional[str], execution_id: str
+) -> Optional[Dict[str, Any]]:
+    """返回阻塞重试的 detail（达限时）或 None（可重试）。
+
+    注意只读两个计数器键、不写：重置预算的动作留给运维（删键即恢复，见
+    docs-site/docs/distributed/ops-runbook.md 的机制键表）。
+    """
+    try:
+        from plaita.server.flow_worker import FlowWorker
+    except ImportError:  # pragma: no cover — console 独立部署缺 worker 依赖
+        return None
+    namespace = tenant_namespace(tenant)
+
+    def _counter(suffix: str) -> int:
+        raw = redis.get(f"{namespace}:execution:{suffix}:{execution_id}")
+        try:
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    g1 = _counter("g1wakeups")
+    if g1 >= FlowWorker.G1_MAX_WAKEUPS:
+        key = f"{namespace}:execution:g1wakeups:{execution_id}"
+        return {
+            "message": (
+                f"该执行的 retry 唤醒次数已达上限（{g1}/{FlowWorker.G1_MAX_WAKEUPS}），"
+                "worker 会幂等拒绝唤醒（error 终态保留），重试不会再触发重跑。"
+                f"确认失败原因已修复后，删计数键 {key} 再重试。"
+            ),
+            "reason": "g1_wakeups_exhausted",
+            "counter_key": key,
+            "count": g1,
+            "limit": FlowWorker.G1_MAX_WAKEUPS,
+        }
+    nofail = _counter("nofail")
+    if nofail >= FlowWorker.DETERMINISTIC_FAILURE_MAX:
+        key = f"{namespace}:execution:nofail:{execution_id}"
+        return {
+            "message": (
+                "该执行的确定性失败已连续达上限"
+                f"（{nofail}/{FlowWorker.DETERMINISTIC_FAILURE_MAX}），worker 判定"
+                "「不可救」并幂等拒绝唤醒（error 终态保留），重试不会再触发重跑。"
+                f"确认失败原因已修复后，删计数键 {key} 再重试。"
+            ),
+            "reason": "deterministic_failure_exhausted",
+            "counter_key": key,
+            "count": nofail,
+            "limit": FlowWorker.DETERMINISTIC_FAILURE_MAX,
+        }
+    return None
+
+
 # ---- C4-3：列表路径服务端投影 ----
 # 历史：SCAN 出全部状态键后逐键 GET 完整 JSON（含全部 context）并 json.loads，
 # 内存排序分页——执行量大时网络/内存/延迟全线劣化。
@@ -764,6 +826,13 @@ async def resume_execution(
         flow_id = data.get("flow_id")
     except Exception:
         raise HTTPException(status_code=500, detail="数据解析失败")
+
+    # 唤醒预算闸（plaita#73）：error 态执行 + retry 才可能被 worker 幂等拒绝
+    # （挂起/运行中执行另有幂等短路语义，与此闸无关）。达限即 409，不静默入队。
+    if request.resume_type == "retry" and (data.get("status") or "") == "error":
+        block = _retry_budget_block(redis, resume_tenant, execution_id)
+        if block is not None:
+            raise HTTPException(status_code=409, detail=block)
 
     # 发送恢复消息
     message = {

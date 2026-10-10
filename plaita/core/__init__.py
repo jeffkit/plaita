@@ -29,6 +29,7 @@ from plaita.core.errors import (
     NodeTimeoutError,
     RecoverableErrorHandler,
     ResumeError,
+    ResumeGuardError,
     ResumeType,
 )
 from plaita.core.types import (
@@ -108,6 +109,7 @@ __all__ = [
     "NodeTimeoutError",
     "ErrorResultException",
     "ResumeError",
+    "ResumeGuardError",
     "ResumeType",
     "ErrorStrategy",
     "ErrorHandler",

@@ -259,14 +259,18 @@ async def get_queue(
 
     - **queue_name**: 队列名称（须为已登记的 plaita 队列键）
     - **start**: 起始索引（非负）
-    - **count**: 获取数量（上限 200）
+    - **count**: 获取数量（1..200；上限外夹紧到边界）
     """
     # 资源范围：不登记的键一律 404（不泄露键是否存在）
     if not _queue_key_allowed(queue_name):
         raise HTTPException(status_code=404, detail="队列不存在")
     if start < 0:
         raise HTTPException(status_code=422, detail="start 不能为负数")
-    count = max(0, min(int(count), 200))
+    # 下限 1 而非 0：`count=0` 会让 redis-py 的 `xrange`/`lrange` 客户端直接抛
+    # `DataError: value is not an integer or out of range`（`XRANGE ... COUNT 0`
+    # 不合法）——端点 500。此前 0 也没被拦（stream 键从未设过上限），#64 收紧
+    # 时顺手把两端都夹紧，调用方拿不到 500。
+    count = max(1, min(int(count), 200))
     tenant = tenant_scope(request)
 
     key_type = redis.type(queue_name)

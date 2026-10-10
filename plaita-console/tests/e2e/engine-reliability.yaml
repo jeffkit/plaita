@@ -5,9 +5,13 @@ service: redis   # exec 默认容器路由到 redis（redis-cli 断言 DLQ/注�
 # 多实例消费、终态幂等、DLQ 收容、事件订阅负例。
 # 拓扑前置：e2e.yaml 双 flow-worker（消费组分摊）+ PLAITA_MAX_DELIVERIES=1 /
 # PLAITA_CLAIM_MIN_IDLE_MS=3000（DLQ 用例秒级出结果）。
-# 语义注记：resume_type=continue 打在 approval 挂起执行上会被内核拒绝
-# （ResumeError——continue 不允许绕过 pending 的挂起节点）→ 状态翻 error →
-# 任务经失败分支进 DLQ（max_deliveries=1 即首败收容）。
+# 语义注记（#33，2026-10-10）：resume_type=continue/retry 打在**挂起**执行上
+# 不再走「内核守卫拒绝 → 终态化 error」，而是 worker 入口**幂等短路**——挂起
+# 节点在等事件决议、continue 不携带推进语义，故消息 ack、执行保持 suspended
+# （终态化会把本可被 event/cancel/timeout 唤醒的执行永久打封；策略层守卫只是
+# 兜住绕过入口短路的竞态窗口，见 flow_worker.ResumeProtocolError）。
+# 终态幂等短路另用**真 error 执行**验证：缺 next 的非 End 节点（图错误，
+# 确定性失败，一次投递即终态）——不再拿 continue 打进 error 态。
 
 cases:
   - name: "创建可靠性测试审批流程"
@@ -87,7 +91,11 @@ cases:
       body:
         status: "suspended"
 
-  - name: "continue 恢复挂起审批 → 内核拒绝（终态 error，不得绕过挂起节点）"
+  # === continue 打在挂起执行上：入口幂等短路（#33）===
+  # 正例：请求被受理但**不推进**——挂起节点待事件决议，continue 不携带推进
+  # 语义。旧行为（守卫 ResumeError → 终态化 error）会把执行永久打封，此处
+  # 正是回归的痛点：短路后必须仍能用 event 决议（下方用例）。
+  - name: "continue 恢复挂起审批 → 幂等跳过（不得终态化、不得绕过挂起节点）"
     request:
       method: POST
       url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
@@ -98,7 +106,33 @@ cases:
     expect:
       status: 200
 
-  - name: "执行终态 error（轮询）"
+  - name: "continue 被幂等跳过后状态仍为 suspended（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
+    retry:
+      maxAttempts: 5
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "suspended"
+
+  - name: "挂起执行仍可被审批事件决议（continue 短路不得封死恢复路径）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "event"
+        data:
+          decision: "approved"
+          approver: "e2e_user"
+    expect:
+      status: 200
+
+  - name: "审批续跑至完成（轮询）"
     request:
       method: GET
       url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
@@ -108,13 +142,9 @@ cases:
     expect:
       status: 200
       body:
-        status: "error"
+        status: "completed"
 
-  # DLQ 收容断言不放在共享组 suite 里：需要激进 reclaim/max_deliveries 旋钮，
-  # 旋钮在共享消费组上会抢兄弟 worker 处理中的任务（实测冷启动任务超 3s 即被
-  # 回收误进 DLQ）。该场景由 e2e-chaos-dlq.sh 的独立清道夫 worker 承担。
-
-  - name: "对 error 终态重复 resume → 幂等跳过（状态保持 error）"
+  - name: "对 completed 终态重复 resume → 幂等跳过（状态保持 completed）"
     request:
       method: POST
       url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}/resume"
@@ -127,10 +157,118 @@ cases:
     expect:
       status: 200
 
-  - name: "终态未被重复 resume 改写"
+  - name: "终态未被重复 resume 改写（completed）"
     request:
       method: GET
       url: "http://localhost:18080/api/executions/{{runtime.rel_exec_id}}"
+    expect:
+      status: 200
+      body:
+        status: "completed"
+
+  # === 真 error 终态：图错误（缺 next 的非 End 节点）确定性失败 ===
+  # 该失败既不重试也不重投（链中无 NodeExecutionError → 非瞬态；resume 路径
+  # 终态化后抛 NodeFailureTerminalizedError → poison ack），故一次投递即终态，
+  # 是终态幂等短路最稳的「落地 error 态」载体（不依赖外部服务/网络）。
+  - name: "创建图错误流程（缺 next 的非 End 节点）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-rel-err-flow"
+        author: "e2e"
+        desc: "reliability suite: deterministic graph error"
+    expect:
+      status: 200
+
+  - name: "保存并发布（图错误流程）"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-rel-err-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-rel-err-flow","name":"E2E Rel Err","nodes":[{"id":"start","type":"start","next":"orphan"},{"id":"orphan","type":"assignment","output":"never-wired"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+
+  - name: "发布（图错误流程）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-rel-err-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
+  - name: "启动图错误流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-rel-err-flow"
+        version: "1.0.0"
+        params: {}
+    expect:
+      status: 200
+      body:
+        status: "queued"
+
+  - name: "图错误执行出现（轮询取 ID）"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?flow_id=e2e-rel-err-flow
+    retry:
+      maxAttempts: 15
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        total: { gte: 1 }
+    save:
+      err_exec_id: "executions.0.execution_id"
+
+  - name: "执行终态 error（轮询）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.err_exec_id}}"
+    retry:
+      maxAttempts: 20
+      delay: 1s
+    expect:
+      status: 200
+      body:
+        status: "error"
+
+  # DLQ 收容断言不放在共享组 suite 里：需要激进 reclaim/max_deliveries 旋钮，
+  # 旋钮在共享消费组上会抢兄弟 worker 处理中的任务（实测冷启动任务超 3s 即被
+  # 回收误进 DLQ）。该场景由 e2e-chaos-dlq.sh 的独立清道夫 worker 承担
+  # （载体为「挂起派发持续失败」——确定性节点失败 #73 起是 poison ack，不进 DLQ）。
+
+  - name: "对 error 终态重复 resume → 幂等跳过（状态保持 error）"
+    request:
+      method: POST
+      url: "http://localhost:18080/api/executions/{{runtime.err_exec_id}}/resume"
+      headers:
+        Content-Type: application/json
+      body:
+        resume_type: "event"
+        data:
+          decision: "approved"
+    expect:
+      status: 200
+
+  - name: "终态未被重复 resume 改写（error）"
+    request:
+      method: GET
+      url: "http://localhost:18080/api/executions/{{runtime.err_exec_id}}"
     expect:
       status: 200
       body:
@@ -148,4 +286,10 @@ teardown:
     request:
       method: DELETE
       url: http://localhost:18080/api/flows/e2e-rel-flow
+    ignoreError: true
+
+  - name: "清理: 删除图错误流程（容错）"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-rel-err-flow
     ignoreError: true

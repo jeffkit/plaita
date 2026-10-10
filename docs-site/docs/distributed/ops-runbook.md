@@ -23,7 +23,15 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | 执行状态 | `plaita:execution:{id}` | `plaita:{tenant}:execution:{id}` |
 | 执行列表索引 | `plaita:execution:index`（ZSET，`:ready` 为回填标记） | `plaita:{tenant}:execution:index`（+`:ready`） |
 | resume lease | `plaita:execution:lease:{id}` | `plaita:{tenant}:execution:lease:{id}` |
+| 节点重试计数（可重试预算） | `plaita:execution:noderetry:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:noderetry:{id}` |
+| G1 唤醒计数（`retry` 次数上限） | `plaita:execution:g1wakeups:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:g1wakeups:{id}` |
+| 确定性失败计数（连续失败上限） | `plaita:execution:nofail:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:nofail:{id}` |
 | 任务队列 | `plaita:flow:queue`（平台共享，消息内带 `tenant_id`） | 同左 |
+
+> 这些**机制键**（lease / fence / cancel / noderetry / g1wakeups / nofail）都是裸
+> 整数或非执行状态载荷，console 的列表/详情路径按前缀逐个排除
+> （`_is_mechanism_key`）——新增同类键必须同步登记，否则 `GET /api/executions`
+> 对 int 调 `.get()` 直接 500（历史已发生四次）。
 
 兼容规则：消息缺 `tenant_id` 视为 default；default 租户沿用历史键前缀，新旧版本混跑时 default 流量不受影响，非 default 租户需 console 与 worker 双侧升级。
 
@@ -48,7 +56,36 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | `PLAITA_CODE_BACKEND` | `subprocess` | worker 注册 `code` 节点时生效的沙箱后端 |
 | `PLAITA_SANDBOX_ALLOWED_BACKENDS` | `docker` ∪ 生效后端 | `code` 节点后端白名单（见下） |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
+| `PLAITA_WORKER_MIN_FREE_DISK_GIB` | unset（= 关闭） | claim 前的本机盘守线（GiB，#49）：低于它就不领任务、空转重探、盘回线自动恢复。应与 flow 内 preflight 节点的阈值对齐（见下） |
+| `PLAITA_WORKER_DISK_GUARD_PATH` | `.`（worker 工作目录） | 盘预检路径（`os.statvfs` 的探测点）；须落在「跑流程会写满」的那个卷上 |
 | `PLAITA_CONSOLE_RECONCILE_ORPHANS` | `suspend` | 本地模式启动对账口径：`suspend` / `fail` / `off` |
+
+## 按宿主资源路由（低盘机不抢单，#49） {#按宿主资源路由}
+
+**症状**：多 worker 池下，低盘机器反复「抢单白跑」——先领到任务，flow 的
+preflight 节点（跑在领取宿主上）才判 `os.statvfs(repo)` 不足 → `retry-later`；
+富盘机器同时刻空闲（`XLEN=0`）。2026-10-08 一夜实测 11+ 次（`runs.jsonl` 全是
+`stage=preflight`、`disk 15.6–16.3GiB < min`），且 keeper 的 retry-later 退避
+升档把瞬时低盘放大成 ≈6h 停机（`retry_later_streak` 6–7）。
+
+**处置**：给每个 worker 配 claim 前的本机盘预检，阈值与 flow 侧 preflight 对齐：
+
+```bash
+export PLAITA_WORKER_MIN_FREE_DISK_GIB=20      # recursive 侧 RECURSIVE_MIN_FREE_DISK_GIB 默认 20
+export PLAITA_WORKER_DISK_GUARD_PATH=/home/ubuntu/repo   # 流程真正写入的卷
+```
+
+- 低盘 worker 期间**零 claim**（不 XREADGROUP、不 XCLAIM、不烧 delivery、不写
+  retry-later 回评），任务由池内富盘 worker 领走；
+- 盘回线**自动恢复领取**，无需重启 worker；
+- 阈值 0/unset = 关闭（存量行为）；探测失败放行（预检故障不停摆整池）；
+- 与 `PLAITA_WORKER_DENY_REPOS`（按**仓**拒跑）互补：一个按宿主盘量，一个
+  按仓体量，两者都走「不领/让给别人」路径，性质都是**本地准入闸**，不是
+  调度器——真正的按资源路由（按 worker 心跳上报盘/负载分发）仍是缺口
+  （见 [已知缺口](#已知缺口)）。
+
+运维侧还应核对退避口径：`retry-later` 对「宿主资源类」原因（disk/负载）不
+应升档，或盘回线时重置这类挂账的退避，否则白跑修好了、挂账仍要等 6h。
 
 ## writefile 写入 jail（2026-10 起默认开启） {#writefile-写入-jail}
 
@@ -247,12 +284,15 @@ alembic 版本化，引导收敛在 `services/schema_migrations.py`，启动时�
 只处理 `running`，条件更新（CAS）避免与执行线程并发完成打架；结果写入
 `GET /health` 的 `reconcile` 字段，启动日志同时告警。
 
-### 已知缺口（本 runbook 尚未覆盖）
+### 已知缺口（本 runbook 尚未覆盖） {#已知缺口}
 
 - **回滚演练**：alembic 的 `downgrade` 路径尚无测试覆盖（当前只有基线版本）。
 - ~~Console flow store 没有迁移框架~~ → 已引入 alembic（见下「Console DB 迁移」），
   但**回滚（downgrade）尚未验证**，且当前只有基线版本，真实变更仍需按 expand/contract 写。
 - `engine_version` 目前只做观测（跨 minor resume 打 WARNING），未做硬门。
+- **按资源的任务路由**：worker 侧只有本地准入闸（`PLAITA_WORKER_MIN_FREE_DISK_GIB`
+  盘守线、`PLAITA_WORKER_DENY_REPOS` 按仓拒跑），没有「dispatcher 按 worker
+  上报的盘/负载选投递对象」——后者需要心跳携带资源画像，尚未实现（#49 可选修法）。
 
 ## List → Stream 迁移（升级必做）
 
@@ -358,6 +398,47 @@ POST `{"event": "zombie_reaped", ...}`；dry-run 不告警，告警通道故障�
 先对齐 `--dry-run` 输出与 console 执行详情再实跑；`--idle-minutes` 须大于业务
 最长单节点耗时。
 
+## 唤醒预算达限（plaita#73） {#唤醒预算达限plaita73}
+
+**症状**：error 态执行点 console 详情页的「从断点重试」没反应（旧版 BFF 返回
+「已受理」而 worker 静默拒绝）；worker 日志里反复出现
+
+```
+执行 <id> G1 唤醒次数达上限（2/2），拒绝再次唤醒——error 终态保留，避免「唤醒重置预算」无限循环
+执行 <id> 确定性失败已判不可救（12/12），拒绝唤醒重跑——error 终态保留
+```
+
+**为什么有上限**：`resume_type=retry` 会清零节点重试预算（设计意图：人工唤醒后拿
+全新预算），只清不限次数就成自毁循环——`唤醒 → 清零预算 → 跑满预算 → 又终态化 →
+再唤醒`（2026-10-10 实测某执行一天被唤醒 5 轮、每轮烧 5 次沙箱；这条链的调用方
+是 keeper/inflight-watch 的**自动** `retry`）。两道闸都以 `FlowWorker` 类常量为准：
+
+| 计数键（default 租户；其他租户加 `plaita:{tenant}:` 前缀） | 阈值 | 语义 |
+|------|------|------|
+| `plaita:execution:g1wakeups:{id}` | `G1_MAX_WAKEUPS` = 2 | 该执行被 `retry` 唤醒的次数（**人工与自动共用额度**） |
+| `plaita:execution:nofail:{id}` | `DETERMINISTIC_FAILURE_MAX` = 12 | **连续**确定性失败次数（`exited 1`/`sync_in`/超时…）；任一节点成功推进即清零，G1 唤醒**不**清零 |
+
+**处置**（人工解封 = 重置预算，只在确认失败原因已修复后做）：
+
+```bash
+# 1) 先看计数与执行状态
+redis-cli GET plaita:execution:g1wakeups:<execution_id>
+redis-cli GET plaita:execution:nofail:<execution_id>
+redis-cli GET plaita:execution:<execution_id>     # status / error 内容
+
+# 2) 修复根因（配额、沙箱、定义…）后删计数键，再点「从断点重试」/ 发 retry 消息
+redis-cli DEL plaita:execution:g1wakeups:<execution_id>
+redis-cli DEL plaita:execution:nofail:<execution_id>
+```
+
+- BFF 侧的 resume 端点对 `error + retry` 会先读这两个键，达限即返 **409**
+  （detail 里带 `reason` / `counter_key` / 解封提示），不再静默入队——操作台把
+  该 message 直接显示在「从断点重试」按钮下方；
+- 计数键带 7 天 TTL，不会永久占位；`nofail` 的清零**只**发生在节点成功推进时，
+  因此「同一位置反复撞墙」最多烧 12 次全款即停，别把 12 当固定值——它是
+  `DETERMINISTIC_FAILURE_MAX`，调它请同步 console 的判据（同源常量）；
+- 上限是**保护**：达限即停 ≠ 执行不可救，人工确认修复后删键即可继续。
+
 ## 故障手册
 
 | 现象 | 可能原因 | 动作 |
@@ -369,6 +450,7 @@ POST `{"event": "zombie_reaped", ...}`；dry-run 不告警，告警通道故障�
 | 反复重投，日志刷「保存执行状态失败 (…)」 | Redis 写路径瞬断/序列化失败——落盘失败已不再静默 ack（2026-10 评审修复） | 查 Redis `INFO`/延迟日志；恢复后 pending 自动重投收敛，勿人工 ack |
 | 反复重投，日志刷「挂起任务投递失败」 | 挂起服务队列 `plaita:{subtype}:queue` rpush 失败；suspended 已保留等重派 | 查对应外延服务（DelayService 等）与其队列长度；恢复后重投自动重派 |
 | 双 resume | 旧版本无 lease | 升级到含 lease 的版本；查 lease key |
+| `error` 执行点「从断点重试」无反应 / API 返 409 | `retry` 唤醒预算达限（`g1wakeups` 或 `nofail`） | 见 [唤醒预算达限](#唤醒预算达限plaita73)：修根因 → `DEL` 计数键 → 重试 |
 | 挂起永不恢复 | EventBus 与 subscription 不同 Redis；`--no-event-bus` | Worker/Filter 同总线；去掉 no-event-bus |
 
 ## 与可靠性文档的关系

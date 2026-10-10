@@ -59,10 +59,12 @@ ALLOWED_SILENT = {
     # 907→923, 931→947, 936→952, 942→958，位点未变。
     # plaita#33（挂起幂等短路 + ResumeProtocolError）整体再下移 49：
     # 923→972, 947→996, 952→1001, 958→1007，位点未变。
-    ("server/flow_worker.py", 1039),
-    ("server/flow_worker.py", 1063),
-    ("server/flow_worker.py", 1068),
-    ("server/flow_worker.py", 1074),
+    #
+    # 2026-10-10 评审：这四条**行号**早已过期（真实位点在 1142/1166/1171/1177，
+    # 后被 #73/心跳/状态写锁等改动再推到 1231/1255/1260/1266），过期条目只会
+    # 「看着绿」——将来恰好落在旧行号上的**新**静默 except 会被它蒙混过关。
+    # 四条已改走行号无关的 ALLOWED_SILENT_FINGERPRINTS（下面按指纹登记），
+    # 行号清单不再登记 flow_worker.py。
 }
 
 

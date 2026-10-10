@@ -5,6 +5,8 @@
 worker 是否真的把它写进了 ExecutionState.node_timings。
 """
 
+import threading
+
 import pytest
 
 pytest.importorskip("cachetools")
@@ -325,3 +327,202 @@ class TestWatchdogPublishesRunningNode:
     def test_publish_is_noop_without_timing_collector(self):
         worker = self._worker(MemoryExecutionStorage())
         worker._publish_node_progress("nonexistent")   # 不得抛
+
+
+class _GatedStorage(MemoryExecutionStorage):
+    """心跳线程 load 时踩一脚刹车：把「读-改-写」窗口拉长成可观测。
+
+    评审复现手法就是这个窗口——让终态写落在心跳的 load 与 save 之间。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.in_load = threading.Event()
+        self.release = threading.Event()
+
+    def load_execution_state(self, execution_id):
+        state = super().load_execution_state(execution_id)
+        if threading.current_thread().name == "heartbeat":
+            self.in_load.set()
+            self.release.wait(5)
+        return state
+
+
+class TestHeartbeatSerializesWithStateWrites:
+    """心跳与推进写是同一行执行状态的**两个写者**，必须串行。
+
+    2026-10-10 评审 blocker：``_publish_node_progress`` 是「load → 合并
+    node_timings → save」的**整行写回**，而消费线程可以在它的 load 与 save
+    之间落终态写——终态被整行回滚成 running + **旧 checkpoint** + 新
+    ``last_update_time``：既不会被 keeper 回收（open node + 新鲜
+    last_update_time 恰是它的「活着」判据），后续 resume 还会从旧 checkpoint
+    重放节点副作用（消息已 ack，没有写者会再回来修）。
+    """
+
+    def _worker(self, storage):
+        return TestWatchdogPublishesRunningNode()._worker(storage)
+
+    def _running_with_open_node(self, storage, eid="exec-race"):
+        TestWatchdogPublishesRunningNode()._running_state(storage, eid)
+        worker = self._worker(storage)
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings[eid].on_node_start(None, _Node("impl"))
+        return worker
+
+    def test_terminal_write_is_not_rolled_back_by_heartbeat(self):
+        storage = _GatedStorage()
+        worker = self._running_with_open_node(storage)
+        eid = "exec-race"
+
+        heartbeat = threading.Thread(
+            target=worker._publish_node_progress, args=(eid,), name="heartbeat"
+        )
+        heartbeat.start()
+        assert storage.in_load.wait(5), "心跳没有进入 load（测试编排失效）"
+
+        terminal_done = threading.Event()
+
+        def consume_thread_terminal_write():
+            state = storage.load_execution_state(eid)
+            state.status = "completed"
+            state.context = {"$NODE": {"impl": {"status": "success"}}}
+            state.end_time = "2026-10-10T00:00:00"
+            worker._persist_state_or_raise(eid, state, "completed")
+            terminal_done.set()
+
+        writer = threading.Thread(
+            target=consume_thread_terminal_write, name="consume"
+        )
+        writer.start()
+        assert not terminal_done.wait(0.3), (
+            "终态写与心跳未串行：心跳会在终态写之后落盘，把 completed + "
+            "checkpoint 整行回滚（假活僵尸 + 断点回退）"
+        )
+        storage.release.set()
+        heartbeat.join(5)
+        writer.join(5)
+        assert not heartbeat.is_alive() and not writer.is_alive()
+
+        final = storage.load_execution_state(eid)
+        assert final.status == "completed", "心跳不得把终态写回滚"
+        assert final.context == {"$NODE": {"impl": {"status": "success"}}}, (
+            "心跳不得把 checkpoint 回滚成旧值"
+        )
+        assert final.end_time == "2026-10-10T00:00:00"
+
+    def test_terminal_row_skipped_even_if_heartbeat_runs_after(self):
+        """心跳排在终态写之后：读到终态即收手（不刷 last_update_time）。"""
+        storage = MemoryExecutionStorage()
+        worker = self._running_with_open_node(storage)
+        eid = "exec-race"
+
+        state = storage.load_execution_state(eid)
+        state.status = "completed"
+        state.end_time = "2026-10-10T00:00:00"
+        state.last_update_time = "2026-10-10T00:00:00"
+        storage.save_execution_state(eid, state)
+
+        worker._publish_node_progress(eid)
+
+        final = storage.load_execution_state(eid)
+        assert final.status == "completed"
+        assert final.last_update_time == "2026-10-10T00:00:00"
+        assert final.node_timings is None, "终态行不得被心跳补上在跑节点"
+
+
+class TestHeartbeatCarriesWatchContext:
+    """看门狗线程没有本执行的租户/fence 世代上下文，心跳必须显式带上。
+
+    不带 ⇒ 默认租户 namespace（多租户下读不到行、心跳整条失效）+ 无世代 CAS
+    的裸写（跨进程绕开 fencing 世代门）。
+    """
+
+    def test_publish_applies_and_restores_fence_token(self):
+        from plaita.storage.fenced import current_fence_token
+
+        seen = []
+
+        class _Capturing(MemoryExecutionStorage):
+            def save_execution_state(self, execution_id, state):
+                seen.append(current_fence_token())
+                return super().save_execution_state(execution_id, state)
+
+        storage = _Capturing()
+        worker = TestHeartbeatSerializesWithStateWrites()._running_with_open_node(storage)
+        seen.clear()   # 只关心心跳那一次写
+
+        worker._publish_node_progress("exec-race", fence_token=7)
+
+        assert seen == [7], "心跳写必须带 fence 世代（否则绕开 fenced CAS）"
+        assert current_fence_token() is None, "心跳结束后必须复位世代（线程复用）"
+
+    def test_tenant_scoped_execution_is_reachable_from_watchdog(self):
+        """多租户：心跳必须落在执行所属租户的 namespace。
+
+        看门狗线程的 ContextVar 是 default；`TenantRoutingExecutionStorage`
+        按它选后端——不带 ``tenant_id`` 时非 default 租户的执行**读都读不到**，
+        心跳整条失效（keeper 照样误杀长节点）。
+        """
+        pytest.importorskip("lupa")
+        import fakeredis
+
+        from plaita.server.tenant_context import (
+            TenantRoutingExecutionStorage,
+            reset_current_tenant,
+            set_current_tenant,
+        )
+
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        storage = TenantRoutingExecutionStorage(client=fake)
+        token = set_current_tenant("acme")
+        try:
+            storage.save_execution_state(
+                "exec-t",
+                ExecutionState(
+                    execution_id="exec-t", flow_id="f1", status="running",
+                    context={}, last_update_time="2020-01-01T00:00:00",
+                ),
+            )
+        finally:
+            reset_current_tenant(token)
+
+        worker = RedisFlowWorker(
+            redis_url="redis://localhost:6379/15",
+            queue_name="test:node-timings-tenant",
+            execution_storage=storage,
+            flow_storage=MemoryFlowStorage(),
+            redis_client=fake,
+            lease_ttl_seconds=60,
+            enable_registry=False,
+            enable_redis_logging=False,
+        )
+        worker._node_timings["exec-t"] = NodeTimingCallback(clock=_Clock())
+        worker._node_timings["exec-t"].on_node_start(None, _Node("impl"))
+
+        # 看门狗线程的 ContextVar 是 default → 必须显式带租户
+        worker._publish_node_progress("exec-t", tenant_id="acme")
+
+        raw = fake.get("plaita:acme:execution:exec-t")
+        assert raw and "impl" in raw, "心跳必须写进执行所属租户的 namespace"
+
+    def test_watchdog_passes_fence_token_and_tenant(self):
+        """续租成功后调心跳时，登记进 `_lease_watch` 的世代/租户原样传入。"""
+        from plaita.server.execution_lease import NullExecutionLease
+
+        storage = MemoryExecutionStorage()
+        worker = TestHeartbeatSerializesWithStateWrites()._running_with_open_node(storage)
+        # RedisFlowWorker 默认租约是 Redis 实现（这里没有真的 acquire 过），
+        # 换 Null 实现让 renew 返回 True —— 本用例只钉「传参」这一件事。
+        worker.execution_lease = NullExecutionLease()
+        worker._register_lease_watch(
+            "exec-race", "holder:3", MagicMock(), fence_token=3
+        )
+        calls = []
+
+        def _fake_publish(execution_id, **kwargs):
+            calls.append((execution_id, kwargs))
+
+        worker._publish_node_progress = _fake_publish  # type: ignore[assignment]
+        worker._watchdog_renew_once()
+
+        assert calls == [("exec-race", {"fence_token": 3, "tenant_id": "default"})]

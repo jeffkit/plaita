@@ -10,6 +10,7 @@
 |------|----------|------|
 | 任务队列（`RedisFlowWorker`） | Redis **Stream** + consumer group；成功 `XACK`，否则 pending 可回收；超 `--max-deliveries` 进 DLQ | **at-least-once**（需 Redis 5+）。业务侧应幂等；毒丸进 `<queue>:dlq` |
 | 队列残留回收（#43） | `XACK` 与 best-effort `XDEL` 之间进程被杀会留下「已 ack 未删」条目（`XDEL` 只出现在 `ack()`，残留只可能来自这个窗口）；worker 启动时扫一次 + 每 300s（`residue_sweep_interval_seconds`）best-effort `XDEL`，单轮上限 256 条，只删 id ≤ 消费组 `last-delivered-id` **且不在本组 PEL 中**的条目 | `XLEN` 不再被已终结条目长期污染（否则读成假「有积压」，2026-10-07 实测误判）；残留按每轮 ≤256 条 / 300s 逐轮收敛（如 1 万条约需数小时），期间 `XPENDING`/`lag` 仍如实反映真实积压；未投递积压与 pending 语义不变 |
+| claim 前的本机盘预检（#49） | `--min-free-disk-gib` / `PLAITA_WORKER_MIN_FREE_DISK_GIB` > 0 时，消费循环在 `XREADGROUP` **之前**查 `--disk-guard-path`（默认当前工作目录）的可用盘；低于守线就不领任务，按 15s 空转重探（`stop()`/draining 可即时打断），盘回线自动恢复领取；默认 0 = 关闭 | 多 worker 池下低盘机器不再「抢单白跑」（flow preflight 判盘不足 → `retry-later`，实测一夜 11 次）：低盘机零 claim、不烧 delivery、不产生 retry-later 回评，任务留给富盘 worker；退避升档不再把瞬时低盘放大成数小时停机。探测失败（路径不存在）放行——预检自身故障不得停摆整池 |
 | 中间态落盘 | `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 **1**） | 连续推进每步写盘；崩溃不丢步进进度 |
 | 挂起 / 结束 / 出错 | **立即** `save_execution_state`；返回 False（Redis 后端吞异常的失败形态）即抛 `StatePersistError`，消息**不** ack 走重投 | 落盘失败不再静默成僵尸执行（2026-10 评审修复；start 路径此前已检查，其余调用点统一收口 `_persist_state_or_raise`） |
 | 挂起服务任务派发 | `rpush` 到 `plaita:{subtype}:queue` 失败（有 redis 时）抛 `ServiceDispatchError`；suspended 状态保留、消息重投后重新执行挂起节点再派发 | 重投会重复注册订阅——EventFilter 终态 GC 只回收终态，孤儿订阅留到 TTL 过期（可接受） |
@@ -41,7 +42,9 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
    （旧格式租约 / `--no-registry` / Redis 瞬断）按「存活未知」退化 ack；
    `PLAITA_DISABLE_HOLDER_LIVENESS=1` 整体旁路回到无条件 ack；
 2. 持租约的活 worker 由看门狗每 lease TTL/3（默认 120s → 40s）续租，步骤
-   执行期间租约不会过期——XCLAIM 真正接手的只有已死 worker 的消息；
+   执行期间租约不会过期——XCLAIM 真正接手的只有已死 worker 的消息；续租成功
+   时顺带把**在跑节点**的进度写进 `node_timings`（长节点期间唯一的活性心跳，
+   见下节「在跑节点心跳」）；
 3. 退化路径：`PLAITA_DISABLE_LEASE_WATCHDOG=1` 且单步超过 lease TTL 时，
    租约可能在步骤中途过期、接管者拿到更新的 fence 世代——旧 worker 的
    下一次落盘被 fencing CAS 拒绝、步界续租失败自爆（均 `ExecutionLeaseError`
@@ -65,6 +68,42 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 
 部署步骤与故障手册见 [运维 Runbook](ops-runbook.md)；副作用设计见 [幂等 Resume](idempotent-resume.md)。
 
+## claim 前的本机盘预检（#49） {#claim-前的本机盘预检}
+
+**问题（2026-10-08 实测）**：多 worker 池里，「本机盘够不够」这件事此前只有
+**flow 内部**的 preflight 节点在管（跑在领取任务的宿主上：`os.statvfs(repo)`
+→ `free_gib < 阈值` → 返回 `retry-later`）。而 worker 是「谁先 `XREADGROUP`
+谁拿走」，于是一夜出现 11 次连续白跑：低盘机先抢到任务 → flow preflight 判
+盘不足 → `retry-later` 回评 + 重排；同时刻富盘机完全空闲（队列 `XLEN=0`）。
+更糟的是 keeper 的 retry-later 退避会升档——瞬时低盘被放大成 ≈6h 停机。
+
+**修法**：把「盘够不够」的判断提到 **claim 之前**，由 worker 自己做：
+
+```bash
+python -m plaita.server.flow_worker \
+  --min-free-disk-gib 20 \          # 或 PLAITA_WORKER_MIN_FREE_DISK_GIB=20
+  --disk-guard-path /home/user/repo # 或 PLAITA_WORKER_DISK_GUARD_PATH（默认 .）
+```
+
+语义与边界：
+
+- 阈值 **0（默认）= 关闭**，与 `PLAITA_WORKER_DENY_REPOS` 同口径——存量部署
+  零行为变化，是否启用由运营侧显式配置；
+- 低于守线时**根本不发** `XREADGROUP`（也不 XCLAIM 回收别人的 pending）：
+  不产生 claim、不烧 delivery、不写 `retry-later` 回评，任务自然落到池内
+  富盘 worker 手里；
+- 空转重探默认 15s（`disk_guard_poll_seconds`），休眠切成 ≤0.2s 小片，
+  `SIGTERM`/`request_drain()` 可即时打断；**盘回线自动恢复领取，无需重启**；
+- **预检路径要与 flow 内 preflight 节点的判据对齐**（recursive 侧为
+  `RECURSIVE_MIN_FREE_DISK_GIB`，默认 20）：worker 侧阈值低于 flow 侧时仍会
+  白跑一轮，worker 侧高于 flow 侧则会过早停领（池内可能整体闲置）；
+- 探测失败（路径不存在 / 无权限）**放行**：预检自身故障不得让整池停摆，
+  宁可回到「可能白跑一次」的旧行为；
+- 该闸只管**领取**：已在跑（或本进程 pending 里）的任务照常跑完/重投，
+  draining、租约、死信守卫等语义一律不变。
+
+配套的运营动作见 [运维 Runbook · 按宿主资源路由](ops-runbook.md#按宿主资源路由)。
+
 ## 节点级有界重试（2026-10 二波） {#节点级有界重试}
 
 分布式路径上**节点执行失败**（LLM/HTTP 网络抖一次）不再直接废掉整个执行：
@@ -72,11 +111,21 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 - **判别**：`run_distributed` 把异常归一化为 `FlowErrorException`（原始异常在
   `__cause__`）。链中出现 `NodeExecutionError`（节点执行异常）→ 可重试；
   链中出现超时（`NodeTimeoutError`/`FlowTimeoutError`）或取消
-  （`FlowCancelledException`）→ 维持现状终态化 error；协议/图错误中的
-  `ResumeError`（挂起守卫类恢复协议错误，#33）→ **不终态化**：执行保持原状
-  并抛 `ResumeProtocolError`，run() 对其 ack（重投只会重复命中同一守卫——
-  把挂起执行终态化成 error 会永久切断 event/cancel/timeout 的唤醒路径）；
-  其余图错误（`NodeNotFoundError` 等）→ 维持现状终态化 error。
+  （`FlowCancelledException`）→ 维持现状终态化 error；
+  **恢复守卫类** `ResumeGuardError`——策略层在**分发到节点 `resume()` 之前**
+  逐个标记出来的那几个位点（continue/retry 想绕过 pending 挂起节点、resume 打在
+  无挂起/非挂起 checkpoint 上、给出非 continue 的 resume 意图却没有 checkpoint），
+  语义是「调用方协议与执行状态不匹配」而非「执行失败」（#33）→ **不终态化**：
+  执行保持原状并抛 `ResumeProtocolError`，run() 对其 ack（重投只会重复命中同一
+  守卫。这类错误天然由 at-least-once 重投产生——重复投递的 `event` resume 打在
+  已推进的 checkpoint 上同族——把挂起执行终态化成 error 会永久切断
+  event/cancel/timeout 的唤醒路径）。**裸 `ResumeError` 不在豁免面内**（含未标记的
+  `Unsupported resume type for EventNode`）：
+  `strategies._handle_resume` 把 `current_node.resume()` 抛出的任何异常
+  （事件数据畸形、节点恢复逻辑失败…）包成的 `ResumeError` 是**执行自身失败**，
+  静默保持原状只会变成一个「无 error 记录、永远等不到决议」的哑执行——它走
+  下面的现状路径（可重试判据 → 终态化 error + poison ack），可观测、可人工
+  retry；其余图错误（`NodeNotFoundError` 等）→ 维持现状终态化 error。
   超时不重试是刻意的：确定性信号重试=再烧一次全款。
 - **载体**：at-least-once 消息重投本身。重试时执行**不终态化**（磁盘 state
   停在最后成功步 checkpoint——失败节点不写 context），run() **显式重投**同体新副本（先入队再 ack；
@@ -92,9 +141,26 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
   计数语义是「当前节点的**连续**失败次数」：任一节点成功推进即清零，不同
   节点的失败不共享预算。
 - **与 G1 retry 唤醒的组合**（43828aa）：预算耗尽终态化的执行仍可经人工
-  `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零计数键，人工
-  唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持 error
+  `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零节点重试计数键，
+  人工唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持 error
   （修复定义后仍可再 retry）。
+- **唤醒/失败次数是有界的（plaita#73，2026-10-10）**：只清预算不限次数的循环是
+  自毁的（`唤醒 → 清零预算 → 跑 5 次 → 又终态化 → 再唤醒`，实测某执行一天被
+  唤醒 5 轮、每轮烧 5 次沙箱）。两道**上限**都落在 `FlowWorker` 类常量上，
+  达限时 `resume_flow` 对 `retry` **幂等拒绝**（返回 `already_terminal=True` +
+  `g1_wakeups_exhausted` / `deterministic_failure_exhausted`，不抛异常、不改
+  状态），消息层重投随之短路：
+  - `{ns}:execution:g1wakeups:{id}`（`G1_MAX_WAKEUPS`，默认 2）：同一执行被
+    `retry` 唤醒的次数。**人工与自动共用这个额度**——达限后运维点「从断点重试」
+    不再生效（BFF 会返回 409 并给出要删的键，见 ops-runbook）；
+  - `{ns}:execution:nofail:{id}`（`DETERMINISTIC_FAILURE_MAX`，默认 12）：
+    **连续**确定性失败次数（`exited 1` / `sync_in` / 超时…）。任一节点成功推进
+    即清零，跨节点的偶发失败不会累计判死；G1 唤醒**不**清零（否则永不收敛）；
+  - 人工解封：确认失败原因已修好后 `DEL` 对应计数键再 retry——键名与步骤见
+    [运维 Runbook · 唤醒预算达限](ops-runbook.md#唤醒预算达限plaita73)。
+- **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）。
+- **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
+  失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
 
 ## 挂起执行的 continue/retry 幂等短路（#33） {#挂起执行的-continue-retry-幂等短路}
 
@@ -105,12 +171,43 @@ start 重派竞速/运维误发）或 `retry` 时，策略层 pending 守卫必�
 决议路径（`event`/`cancel`/`timeout`）唤醒。此前的行为是守卫 ResumeError 被通用
 except 终态化成 error，一次重复投递就把可恢复的挂起执行永久打封（终态短路从此
 拒绝一切 resume 类型，retry 也不可入，死局）。兜底路径（绕过入口短路的竞态窗口）
-由 `ResumeProtocolError` 豁免承接：守卫类 `ResumeError` 不终态化，执行保持原状，
-消息 ack。
+由 `ResumeProtocolError` 豁免承接：**只有策略层守卫 `ResumeGuardError`** 不终态化、
+执行保持原状、消息 ack（豁免面刻意窄，见上节「判别」——节点 `resume()` 自身抛错
+仍终态化 error）。
 
-- **回滚**：`PLAITA_DISABLE_NODE_RETRY=1` 完全回到旧行为（一次失败即终态）。
-- **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
-  失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
+## 在跑节点心跳与 keeper 活性判据 {#在跑节点心跳}
+
+执行状态的落盘只发生在**节点边界**（`_persist_state_or_raise` 的 step_persist /
+终态等路径），而 `sandbox_agent` 这类**单个长节点**（实测 35 分钟）期间一次落盘
+都不发生 → `node_timings` 停在进入该节点之前。keeper 的活性判据①「有
+`started_at`、无 `ended_at` 的节点 = 活证据」于是读不到它，落到判据③「末节点
+`ended_at` 停滞超 1800s」→ 健康 run 被误判 zombie 并 cancel（2026-10-10
+#27/#31/#32/#55/#62 五单事故）。
+
+修法：看门狗续租成功后顺带落一次在跑节点进度（`_publish_node_progress`，默认
+周期 = lease TTL/3 ≈ 40s）——只合并 `node_timings`（在跑节点写
+`ended_at: ""`）并刷新 `last_update_time`，**不推进流程、不改 context**。
+写侧的两道约束（2026-10-10 评审）：
+
+- **与推进写串行**：心跳是「load → 合并 → save」的**整行写回**，与推进线程的
+  `_persist_state_or_raise` 是同一条状态行上的两个写者。若终态写落在心跳的
+  load 与 save 之间，心跳会把它整行回滚成 `running` + 旧 checkpoint + 新
+  `last_update_time`——既不会被 keeper 回收（open node + 新鲜
+  `last_update_time` 正是它的「活着」判据），后续 resume 还会从旧 checkpoint
+  重放节点副作用。两者现持**同一把每执行互斥锁**（`_state_write_lock`）。
+- **跨进程过 fencing**：心跳跑在**看门狗线程**里，那里没有本执行的 fence 世代
+  ContextVar、也没有租户上下文——不带就会（a）写错租户 namespace（多租户下
+  心跳整条失效）、（b）退化成 `FencedExecutionStorage` 的裸写分支、**绕开世代
+  CAS**（租约已被新世代接管时旧心跳仍能改写新世代的行）。现在 fence 世代与租户
+  随租约登记一起带上，世代不符即拒绝写（`ExecutionLeaseError`，日志留痕）。
+
+> **keeper 侧必须给判据①配年龄界**：心跳把在跑节点写进 `node_timings` 后，
+> 「open node」既可能是活 worker（每 ~40s 刷新一次 `last_update_time`），也可能是
+> **被杀的 worker 留下的最后一份心跳**——单看「有 `started_at`、无 `ended_at`」
+> 会把后者永远读成「活着」（keeper 判据① 原样没有年龄上限）。读法应为
+> 「open node **且** `last_update_time` 在 N×心跳周期内（建议 N=2~3）」，再叠加
+> 租约键 / worker 注册表在册与否兜底；否则僵尸 run 既不进 reap 路径、也没人
+> 收尾。
 
 ## 运行中改定义（flow 定义指纹，2026-10 二波） {#运行中改定义}
 
@@ -274,6 +371,10 @@ flowchart TD
   信号中断，窗口越大停机延迟越长；默认值保证停机延迟 ≲1s。
 - **CLI 日志**：`python -m plaita.server.flow_worker` 默认输出 INFO 级控制台
   日志（`PLAITA_LOG_LEVEL` 可调，`--quiet` 关闭）。
+- **本机盘守线（#49）**：`--min-free-disk-gib`（或 `PLAITA_WORKER_MIN_FREE_DISK_GIB`）
+  > 0 时，claim 前先查 `--disk-guard-path`（或 `PLAITA_WORKER_DISK_GUARD_PATH`，
+  默认工作目录）的可用盘，低于守线就不领任务。默认 0 = 关闭；
+  详见 [claim 前的本机盘预检](#claim-前的本机盘预检)。
 - **Langfuse 观测**：`--langfuse`（或 `PLAITA_WORKER_LANGFUSE=1`）启用
   [LangfuseCallback](../guide/callbacks.md#集成-langfuse-plaita-obs-langfusecallback)
   （需 `pip install plaita[langfuse]`，凭据走 `LANGFUSE_*` 环境变量）。trace id =
