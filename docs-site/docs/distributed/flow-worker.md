@@ -415,7 +415,9 @@ flowchart TD
   依赖缺失或 SDK 初始化失败只告警降级，不影响执行。
 - **writefile 写入 jail（2026-10）**：worker 启动即注入 `writefile` 节点的
   `PLAITA_NODES_WORKSPACE_ROOT`（未显式配置则 fail-closed 推导默认根，`/` 不算
-  边界）；显式放行任意路径用 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1`（仅单机信任
+  边界；候选落在引擎自身 checkout 内则上溯到其父目录 = 部署根，跨仓 run 的产物
+  才写得出去，见 [plaita#51](ops-runbook.md#jail-默认根不取引擎自身-checkout)）；
+  显式放行任意路径用 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1`（仅单机信任
   部署）。见 [运维 Runbook · writefile 写入 jail](ops-runbook.md#writefile-写入-jail)。
 - **code 沙箱后端白名单（plaita#22）**：worker 注册 `code` 节点时施加后端白名单
   （`PLAITA_SANDBOX_ALLOWED_BACKENDS`，未配置则 `docker` ∪ 生效后端；生效后端取

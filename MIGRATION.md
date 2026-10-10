@@ -60,6 +60,23 @@
   run_dir 不在默认根内），设 `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` 回到历史
   行为——该开关只该用于单机信任环境。
 
+### writefile jail 默认根不再取引擎自身 checkout（2026-10，plaita#51）
+
+默认根推导多一步**归一**（`plaita/writefile_jail.py`）：候选目录若落在引擎自身
+的 checkout 内（含其子目录），改用该 checkout 的**父目录**——worker / console
+常从自己的 plaita clone 启动，把 clone 当写入根会让**跨仓** run 写不出产物（目标
+仓是它的兄弟目录）。
+
+- 变更前：Mac worker `cwd=<...>/infra4agent/plaita` → jail 根 = 该 clone；自迭代
+  flow 写目标仓 `run_dir` 的 `land-failure.log` 直接 `escapes workspace_root`，
+  节点确定性失败、重投耗尽后 failed-preserved，冲突现场丢失（VM worker
+  `cwd=/home/ubuntu` 覆盖 `/home/ubuntu/projects/...`，故只在 Mac 侧暴露）。
+- 变更后：默认根 = `<...>/infra4agent`（该 clone 的父目录 = 部署根），与 docker
+  档 `PLAITA_PROJECT_ROOT=/app` 同一层级语义；同仓 run（run_dir 在 clone 内）本
+  就在父目录内，不受影响；`/etc/...` 与 `../` 逃逸仍被拒。
+- 迁移：无需动作。要**更窄**的根（如只放业务仓）仍用显式
+  `PLAITA_NODES_WORKSPACE_ROOT`——显式配置原样使用，不做归一。
+
 ### js 语言接入沙箱档位体系 + 语言白名单默认只放行 python（plaita#29）
 
 `language: "js"` 此前**完全绕开**沙箱档位：`Runners` 命中即走 PyExecJS（subprocess

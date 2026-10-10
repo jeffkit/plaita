@@ -99,7 +99,8 @@ worker / console 启动时注入该变量（`plaita/writefile_jail.py`），次�
 1. 显式 `PLAITA_NODES_WORKSPACE_ROOT` → 原样使用（运营者配置优先）；
 2. `PLAITA_ALLOW_UNRESTRICTED_WRITES=1` → 显式放行任意路径（**仅单机信任部署**）；
 3. 都没有 → fail-closed 推导默认根：`PLAITA_PROJECT_ROOT` → worker 工作目录 →
-   家目录（`/` 不构成边界，逐级后退）。
+   家目录（`/` 不构成边界，逐级后退）。候选目录若落在**引擎自身 checkout** 内
+   （含其子目录）→ 先上溯到该 checkout 的父目录（部署根），见下。
 
 生效值启动日志可见（`writefile 写入 jail: …`）。**多租户 / 不受信流程部署请显式
 配置第 1 条**，把根收敛到业务仓或沙箱目录；`PLAITA_PROJECT_ROOT` 已设的部署
@@ -107,6 +108,22 @@ worker / console 启动时注入该变量（`plaita/writefile_jail.py`），次�
 
 jail 是**进程级**的：worker 一次启动一个根，不能按执行/租户分别设根（`--concurrency`
 下多任务共享同一根）。跨租户写不同目录的部署请给每租户独立 worker。
+
+### 默认根不取引擎自身 checkout（plaita#51） {#jail-默认根不取引擎自身-checkout}
+
+worker / console 常常就从自己的 plaita clone 启动（Mac 开发机：`cwd` =
+`.../infra4agent/plaita`）。此时第 3 条的「工作目录」候选就是引擎源码目录，拿它当
+写入根会让**跨仓** run 的产物写不出去：目标仓是它的兄弟目录（`.../infra4agent/
+agentproc/.flowcast/runs/.../land-failure.log`），WRITEFILE 一律报
+`escapes workspace_root` → 节点确定性失败（同仓 run 的 run_dir 在 clone 内，故只在
+跨仓失败路径暴露）。
+
+现在落到 checkout 内的候选会先上溯到**父目录**——正是运营者语义里的部署根（docker
+档 `PLAITA_PROJECT_ROOT=/app`、运维档手工配的 `.../infra4agent` 都是这一层），也是
+VM worker 的实际效果（`cwd=/home/ubuntu` 覆盖 `/home/ubuntu/projects/...`）。上溯
+只走一层，且 `/` 仍不构成边界；显式 `PLAITA_NODES_WORKSPACE_ROOT` 原样使用、不做
+归一，要更窄的根（如只放业务仓）就显式配它。worker 的 `cwd` 不在引擎 clone 内、
+又想覆盖多个兄弟仓时，另有 `PLAITA_PROJECT_ROOT=<部署根>`（推导第一候选）可指。
 
 ## code 沙箱后端白名单（plaita#22 起默认开启） {#code-沙箱后端白名单}
 
