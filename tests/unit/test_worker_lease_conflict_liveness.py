@@ -241,3 +241,33 @@ def test_consume_loop_gates_ack_on_liveness():
     # ack 只能发生在闸放行的分支内
     idx = src.find("_lease_conflict_ack_safe(task.body)")
     assert "queue.ack(task.message_id)" in src[idx:idx + 400]
+
+
+def test_draining_holder_conflict_keeps_message_reclaimable_by_peer():
+    """端到端契约（Redis 层）：draining 持有者的租约冲突 → 不 ack → 消息仍在
+    PEL → 同组 peer 经 XAUTOCLAIM 可回收并续跑（2026-10-11 drain 丢消息修复）。
+
+    claim_min_idle 在此用 0 代替（真实为 60s，见 claim_min_idle_ms）；断言的是
+    「未被 ack 即可被回收」这一前提。
+    """
+    stream, group = "plaita:flow:queue:test", "plaita-workers"
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    redis.set(
+        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
+        '{"instance_id": "%s", "status": "draining"}' % INSTANCE,
+        ex=30,
+    )
+    redis.xgroup_create(stream, group, id="0", mkstream=True)
+    redis.xadd(stream, {"data": '{"type": "resume", "execution_id": "exec-1"}'})
+    _, msgs = redis.xreadgroup(group, INSTANCE, {stream: ">"}, count=1)[0]
+    msg_id = msgs[0][0]
+
+    # 持有者 drain 中：不 ack（与 worker 分支一致）
+    assert _worker(redis)._lease_conflict_ack_safe(_body()) is False
+    assert redis.xpending(stream, group)["pending"] == 1
+
+    # 同组 peer 回收（claim_min_idle=0 仅为单测）
+    _next, claimed, _deleted = redis.xautoclaim(
+        stream, group, "peer-consumer", min_idle_time=0, start_id="0-0")
+    assert [m[0] for m in claimed] == [msg_id]
