@@ -111,8 +111,9 @@ def execute(self, execution):
 | `auto_escalation` / `escalation_timeout_hours` / `escalation_approvers` | 自动升级配置 |
 | `form_fields` | 审批表单字段 |
 | `allow_comments` / `require_comments` | 审批意见开关 |
+| `subscription_timeout` | 订阅超时秒数（继承自事件节点）。审批等待方是人，**缺省 24 小时**：无人审批时落 `timeout` 终态，而不是永久 `suspended`；显式传 `null` 退回无限等待 |
 
-`ApprovalNode` 恢复事件固定为 `approval_decision`；`generate_service_config` 产出审批实例 id、审批人、表单、通知配置等供 `ApprovalService` 使用。详见 [审批流场景](../scenarios/approval-flow.md)。
+`ApprovalNode` 恢复事件固定为 `approval_decision`；`generate_service_config` 产出审批实例 id、审批人、表单、通知配置等供 `ApprovalService` 使用。`ApprovalService` 消费 worker 派发的 `plaita:approval:queue`，为每个审批落一条 `plaita:approval:pending:{id}` 记录（7 天 TTL）——控制面据此列出待办审批，决策经 `submit_approval_decision` 提交。详见 [审批流场景](../scenarios/approval-flow.md)。
 
 ## 在流程中使用
 

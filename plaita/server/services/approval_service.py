@@ -8,14 +8,31 @@ Track C 任务2（2026-10 分布式可靠性修复）：审批记录历史上存
 每审批 SET NX 锁串行化（execution_lease / event_filter 的既有原子原语
 风格），同一审批人跨实例重复提交被原子拦住。无 redis_client（单测/内存
 模式）回退进程内 dict，对外方法返回形状不变。
+
+#56（2026-10-10）：``start_service`` 历史上只置 ``is_running = True``——
+worker 挂起时 RPUSH 进 ``plaita:approval:queue`` 的任务（见
+``flow_worker._dispatch_service_task``）无人读，审批记录永不创建，审批
+节点永久 suspended 且无订阅超时兜底。现按 DelayService 的轮询骨架常驻
+消费该队列（不用 BLPOP：出队即内存持有、崩溃即丢，见 #11）。
 """
+import asyncio
 import json
+import threading
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .base_service import BaseExtendedService
 from ...logger import logger
+
+# 队列消费周期（秒）。service_config.poll_interval 可覆盖。
+APPROVAL_POLL_INTERVAL_SECONDS = 0.5
+# 每周期最多处理条数（防单周期阻塞过久）。
+APPROVAL_CONSUME_BATCH = 50
+# worker 派发键：与 flow_worker._dispatch_service_task 的
+# ``f"plaita:{subtype}:queue"``（subtype=审批节点 generate_service_config 的
+# "type"="approval"）契约耦合，改名必须两端同步。
+APPROVAL_DEFAULT_QUEUE_KEY = "plaita:approval:queue"
 
 # 审批记录 TTL：7 天自清理（与仓内事件/订阅键 TTL 惯例一致）。
 APPROVAL_RECORD_TTL_SECONDS = 7 * 86400
@@ -59,6 +76,18 @@ class ApprovalService(BaseExtendedService):
         self._lock_prefix = (service_config or {}).get(
             "approval_lock_prefix", "plaita:approval:lock:"
         )
+        self.queue_key = (service_config or {}).get(
+            "approval_queue", APPROVAL_DEFAULT_QUEUE_KEY
+        )
+        self._poll_interval = float(
+            (service_config or {}).get("poll_interval", APPROVAL_POLL_INTERVAL_SECONDS)
+        )
+        self._consumer_thread: Optional[threading.Thread] = None
+        # 停止信号：stop_service 唤醒阻塞中的消费线程，不必等满一个轮询周期。
+        self._stop_event = threading.Event()
+        # in-flight 去重（进程内）：已提交但尚未出队的任务不重复提交。
+        self._inflight: set = set()
+        self._inflight_lock = threading.Lock()
 
     @property
     def _use_redis(self) -> bool:
@@ -87,19 +116,38 @@ class ApprovalService(BaseExtendedService):
         await self.publish_resume_event(event_type, event_data)
 
     def start_service(self) -> bool:
-        """启动审批服务"""
+        """启动审批服务（含 ``plaita:approval:queue`` 消费线程）"""
         try:
             self.is_running = True
-            logger.info("审批服务已启动")
+            # 消费 worker 派发的审批任务：无消费线程时任务堆在队列里，审批
+            # 记录永不创建、执行永久 suspended（#56）。list 原语缺一不可。
+            if self._redis_client is None or not hasattr(self._redis_client, "lrange"):
+                logger.warning("审批服务无 redis 客户端，队列消费不启动")
+                return True
+            self._stop_event.clear()
+            self._consumer_thread = threading.Thread(
+                target=self._consume_queue,
+                name="approval-service-consumer",
+                daemon=True,
+            )
+            self._consumer_thread.start()
+            logger.info("审批服务已启动（消费队列: %s）", self.queue_key)
             return True
         except Exception as e:  # noqa: BLE001 — 启动失败只告警不扩散
             logger.error("启动审批服务失败: %s", e, exc_info=True)
             return False
 
     def stop_service(self) -> bool:
-        """停止审批服务"""
+        """停止审批服务（等待消费线程退出，不留残余线程）"""
         try:
             self.is_running = False
+            self._stop_event.set()
+            thread = self._consumer_thread
+            if thread is not None:
+                thread.join(timeout=self._poll_interval + 1.0)
+                if thread.is_alive():
+                    logger.warning("审批队列消费线程未在停机窗口内退出: %s", self.queue_key)
+                self._consumer_thread = None
             # 只清进程内存回退态；Redis 记录是跨实例共享的持久态，停机不清
             # （带 TTL 自清理），否则重启/停机即全丢、兄弟实例也被拖垮。
             self.pending_approvals.clear()
@@ -108,6 +156,101 @@ class ApprovalService(BaseExtendedService):
         except Exception as e:  # noqa: BLE001 — 停止失败只告警不扩散
             logger.error("停止审批服务失败: %s", e, exc_info=True)
             return False
+
+    def _consume_queue(self) -> None:
+        """消费循环：周期轮询 ``plaita:approval:queue``（同 DelayService 骨架）。
+
+        不用 BLPOP：出队即内存持有、进程崩溃即丢（#11），审批会永久 suspended；
+        这里改用「LRANGE 批量读 + 处理走完才 LREM」，崩溃/重投只会重复消费
+        一次，由 ``_run_dispatched_task`` 的存在性检查挡掉覆盖。
+        """
+        while self.is_running and not self.is_shutdown_requested():
+            try:
+                self._consume_batch()
+            except Exception as e:  # noqa: BLE001 — 单轮失败不杀消费线程
+                logger.error("审批队列轮询失败: %s", e, exc_info=True)
+            self._stop_event.wait(timeout=self._poll_interval)
+
+    def _consume_batch(self) -> None:
+        raw_items = self._redis_client.lrange(
+            self.queue_key, 0, APPROVAL_CONSUME_BATCH - 1
+        )
+        for raw in raw_items or []:
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            task_config = self._parse_dispatched_task(raw)
+            if task_config is None:
+                self._finalize_consumed(raw)
+                continue
+            with self._inflight_lock:
+                if raw in self._inflight:
+                    continue
+                self._inflight.add(raw)
+            self.thread_pool.submit(self._run_dispatched_task, raw, task_config)
+
+    def _parse_dispatched_task(self, raw: str) -> Optional[Dict[str, Any]]:
+        """解析派发任务；坏条目返回 None（调用方就地出队，不无限重读）。"""
+        try:
+            task_config = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.error("审批任务配置非法（丢弃）: %r", raw[:200])
+            return None
+        if not isinstance(task_config, dict) or not self.validate_task_config(task_config):
+            logger.error("审批任务配置校验失败（丢弃）: %r", raw[:200])
+            return None
+        return task_config
+
+    def _run_dispatched_task(self, raw: str, task_config: Dict[str, Any]) -> None:
+        """线程池内执行派发任务；处理走完才出队（at-least-once）。"""
+        task_id = self._generate_task_id(task_config)
+        self.active_tasks.add(task_id)
+        try:
+            approval_id = task_config.get("approval_id")
+            duplicate = False
+            if self._use_redis and approval_id:
+                try:
+                    duplicate = bool(self._redis_client.get(self._record_key(approval_id)))
+                except Exception as e:  # noqa: BLE001 — 查询失败按不存在处理
+                    logger.warning("审批记录查询失败（按不存在处理）: %s", e)
+            if duplicate:
+                # 队列是 at-least-once：崩溃/重投会重复投递同一条。记录已在
+                # 说明审批已创建，重放不能重建记录（会清掉已落的审批决策）。
+                logger.info("审批任务已存在（重复投递，跳过重建）: %s", approval_id)
+                return
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(self.handle_task(task_config))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    logger.warning("event loop close failed during task cleanup", exc_info=True)
+            logger.info("审批任务 %s 执行完成: %s", task_id, result)
+        except Exception as e:  # noqa: BLE001 — 单任务失败不杀消费线程
+            logger.error("审批任务 %s 执行失败: %s", task_id, e, exc_info=True)
+            self._handle_task_error(task_config, e)
+        finally:
+            self.active_tasks.discard(task_id)
+            if self.is_shutdown_requested():
+                # 停机中断的任务留在队列，下次启动由消费线程重新读取。
+                with self._inflight_lock:
+                    self._inflight.discard(raw)
+            else:
+                self._finalize_consumed(raw)
+
+    def _finalize_consumed(self, raw: str) -> None:
+        """任务处理走完：LREM 出队并清 in-flight。
+
+        LREM 失败只导致下轮重复消费一次——``_run_dispatched_task`` 的存在性
+        检查会让重放不覆盖已落记录的审批。
+        """
+        try:
+            self._redis_client.lrem(self.queue_key, 1, raw)
+        except Exception as e:  # noqa: BLE001 — 出队失败下轮重试
+            logger.error("审批任务出队失败: %s", e)
+        with self._inflight_lock:
+            self._inflight.discard(raw)
 
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
         """处理审批任务创建"""

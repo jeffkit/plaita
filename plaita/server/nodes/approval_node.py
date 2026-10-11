@@ -4,10 +4,17 @@
 """
 import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
+
+# 无人审批的兜底终态：审批节点不设订阅超时则永久 suspended（控制面/指标都
+# 无从发现——#56 的另一半）。缺省 24h 后由 event_filter 的
+# SubscriptionTimeoutChecker 触发 resume_type=timeout，节点落 timeout 状态
+# （escalation_timeout_hours 的缺省值同量级）。
+# 显式传 subscription_timeout=null 可退回无限等待。
+APPROVAL_DEFAULT_SUBSCRIPTION_TIMEOUT_SECONDS = 24 * 3600
 
 
 class ApprovalNode(BaseExtendedNode):
@@ -38,6 +45,16 @@ class ApprovalNode(BaseExtendedNode):
     auto_escalation: bool = Field(default=False, description="是否自动升级")
     escalation_timeout_hours: int = Field(default=24, description="升级超时时间（小时）")
     escalation_approvers: List[str] = Field(default_factory=list, description="升级审批人列表")
+
+    # 订阅超时（秒）：覆盖父字段的 None 缺省——审批等待方是人，无人审批时
+    # 必须落可观测终态（timeout）而非永久 suspended（#56 兜底）。别名/约束
+    # 与父字段一致（codeflow 编译器与 console 表单发 camelCase）。
+    subscription_timeout: Optional[float] = Field(
+        default=APPROVAL_DEFAULT_SUBSCRIPTION_TIMEOUT_SECONDS,
+        gt=0,
+        validation_alias=AliasChoices("subscription_timeout", "subscriptionTimeout"),
+        description="订阅超时秒数：无人审批超过该时长则落 timeout 状态；缺省 24 小时，显式 null 为无限等待",
+    )
 
     # 表单配置
     form_fields: List[Dict[str, Any]] = Field(default_factory=list, description="审批表单字段")

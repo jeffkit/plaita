@@ -34,17 +34,22 @@ flowchart LR
     N["扩展节点<br/>(delay/approval/...)"] -->|挂起 + service_config| FW["FlowWorker"]
     FW -->|保存 context| ES["ExecutionStorage"]
     FW -->|注册订阅| EB["EventBus"]
-    SM["ServiceManager"] -->|读 service_config| SC["服务任务"]
+    FW -->|RPUSH| Q["plaita:{type}:queue"]
+    Q -->|消费| SC["外延服务"]
     SC -->|到点/收到消息/审批通过| EB
     EB -->|publish 事件| FW
     FW -->|resume| N
 ```
 
 1. 流程跑到扩展节点 → 生成 `service_config` → 挂起、存 context、订阅事件
-2. `ServiceManager` 拿到 `service_config`，交给对应服务
-3. 服务监听外部触发源（定时器/队列/HTTP/审批系统）
+2. `FlowWorker` 把 `service_config` 当任务 RPUSH 到 `plaita:{type}:queue`（`type` 取节点产出的服务类型，如 `plaita:approval:queue`）
+3. 配对服务**消费该队列**并建立挂起所需的状态（审批记录 / 回调注册 / 排程），随后监听外部触发源（定时器/队列/HTTP/审批系统）
 4. 触发条件满足 → `publish` 一个 `correlation_id=execution_id` 的事件
 5. `FlowWorker` 收到事件 → `run_distributed(resume_type="event", resume_data)` 恢复
+
+!!! warning "派发队列必须有消费方"
+
+    消费 `plaita:{type}:queue` 是各服务自己的职责：`DelayService` 与 `ApprovalService` 起了常驻消费线程，`http_callback` / `redis_queue` / `kafka_queue` 的派发队列目前没有消费方（依赖它们的扩展节点在集群档上会一直挂起）。新增挂起类节点时务必同时确认队列有人读。
 
 ## 各服务职责
 
@@ -63,6 +68,8 @@ flowchart LR
 ### ApprovalService
 
 对接审批系统：通知审批人、收集决策；满足 `approval_strategy`（any/all/majority）后发布 `approval_decision` 事件，`event_data` 含审批结果与意见。支持自动升级（`auto_escalation`）。
+
+它常驻消费 `plaita:approval:queue`（worker 挂起时派发的审批任务），为每个审批落一条 `plaita:approval:pending:{id}` 记录（7 天 TTL，跨实例共享）；处理走完才出队，重放不会覆盖已落记录的审批决策。
 
 ## 启动入口
 
