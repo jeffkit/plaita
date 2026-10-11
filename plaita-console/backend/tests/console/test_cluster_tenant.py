@@ -195,3 +195,32 @@ class TestClusterScheduleTenant:
         assert msg_id is not None
         msgs = _queued_messages(env)
         assert msgs and msgs[-1]["tenant_id"] == "acme"
+
+    def test_fire_schedule_skips_disabled_tenant(self, env):
+        from plaita.server.services.schedule_service import fire_schedule
+        from plaita.server.tenant_status import publish_tenant_status
+
+        schedule = {
+            "schedule_id": "s1", "name": "n", "flow_id": "f",
+            "cron": "* * * * *", "params": {}, "tenant_id": "acme",
+        }
+        publish_tenant_status(env, "acme", "disabled")
+        assert fire_schedule(env, schedule, "plaita:flow:queue") is None
+        assert _queued_messages(env) == []
+
+        publish_tenant_status(env, "acme", "active")
+        assert fire_schedule(env, schedule, "plaita:flow:queue") is not None
+        assert len(_queued_messages(env)) == 1
+
+    def test_manual_trigger_rejected_for_disabled_tenant(self, env):
+        from plaita.server.tenant_status import publish_tenant_status
+
+        env.hset("plaita:schedules", "s-acme", json.dumps({
+            "schedule_id": "s-acme", "name": "acme调度", "flow_id": "f",
+            "cron": "* * * * *", "enabled": True, "tenant_id": "acme",
+        }))
+        publish_tenant_status(env, "acme", "disabled")
+        client = _client(env)
+        r = client.post("/api/schedules/s-acme/trigger", headers=_headers("acme"))
+        assert r.status_code == 403, r.text
+        assert _queued_messages(env) == []

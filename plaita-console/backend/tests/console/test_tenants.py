@@ -274,6 +274,78 @@ def test_switch_tenant_session_flow(client):
     assert bob2["active_tenant"] == "default"
 
 
+# ---- 停用租户对运行面生效（#27） ----
+
+def test_disabled_tenant_blocks_issued_session(client):
+    """停用租户后其已签发会话立即 403；重新启用后恢复；平台管理员不受限。"""
+    store = flow_store.get_flow_store()
+    users_svc.create_user(store, "dave", "dave-password-1", "editor")
+    root = _login(client, "root", "root-password-1")
+    root_h = _auth(root["token"])
+    client.post("/api/tenants", json={"id": "acme"}, headers=root_h)
+    users_svc.add_member(store, "acme", "dave", "editor")
+
+    dave = _login(client, "dave", "dave-password-1")
+    assert dave["active_tenant"] == "acme"
+    dave_h = _auth(dave["token"])
+    assert client.get("/api/flows", headers=dave_h).status_code == 200
+
+    r = client.post("/api/tenants/acme/status", json={"status": "disabled"},
+                    headers=root_h)
+    assert r.status_code == 200, r.text
+
+    # 已签发会话（未重新登录）立即被拦
+    assert client.get("/api/flows", headers=dave_h).status_code == 403
+    assert client.get("/api/auth/me", headers=dave_h).status_code == 403
+
+    # 平台管理员不受限，否则无法把租户重新启用
+    assert client.get("/api/flows", headers=root_h).status_code == 200
+    assert client.post("/api/tenants/acme/status", json={"status": "active"},
+                       headers=root_h).status_code == 200
+
+    # 重新启用后旧会话恢复
+    assert client.get("/api/flows", headers=dave_h).status_code == 200
+
+
+def test_login_prefers_active_tenant_over_disabled(client):
+    """多租户用户登录时若首个成员租户已停用，应钉到其活跃租户（避免自锁）。"""
+    store = flow_store.get_flow_store()
+    users_svc.create_user(store, "erin", "erin-password-1", "viewer")
+    root = _login(client, "root", "root-password-1")
+    root_h = _auth(root["token"])
+    client.post("/api/tenants", json={"id": "acme"}, headers=root_h)
+    users_svc.add_member(store, "acme", "erin", "viewer")
+    users_svc.add_member(store, "default", "erin", "viewer")
+    client.post("/api/tenants/acme/status", json={"status": "disabled"}, headers=root_h)
+
+    erin = _login(client, "erin", "erin-password-1")
+    assert erin["active_tenant"] == "default"
+    assert client.get("/api/flows", headers=_auth(erin["token"])).status_code == 200
+
+
+def test_disable_tenant_stops_its_local_schedules(client):
+    from services import local_scheduler
+
+    store = flow_store.get_flow_store()
+    root = _login(client, "root", "root-password-1")
+    root_h = _auth(root["token"])
+    client.post("/api/tenants", json={"id": "acme"}, headers=root_h)
+    store.create_flow("acme-flow", tenant_id="acme")
+    local_scheduler.create_schedule(store, {
+        "schedule_id": "sched-acme", "tenant_id": "acme", "name": "n",
+        "flow_id": "acme-flow", "cron": "* * * * *", "params": {}, "enabled": True,
+        "next_run_at": "1",
+    })
+    sched = local_scheduler.get_schedule(store, "sched-acme")
+    assert sched["enabled"] is True
+
+    client.post("/api/tenants/acme/status", json={"status": "disabled"}, headers=root_h)
+    sched = local_scheduler.get_schedule(store, "sched-acme")
+    assert sched["enabled"] is False and sched["next_run_at"] == ""
+    # 即便被手动调用，触发闸也拦下
+    assert local_scheduler.fire(store, sched) is None
+
+
 # ---- X-Tenant-ID 权限规则 ----
 
 def test_x_tenant_header_rules(client):

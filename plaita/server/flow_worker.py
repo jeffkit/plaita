@@ -72,6 +72,7 @@ from plaita.server.tenant_context import (
     set_current_tenant,
     tenant_namespace,
 )
+from plaita.server.tenant_status import tenant_is_active
 
 
 def _env_switch(name: str) -> bool:
@@ -3536,6 +3537,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         return True
 
     def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None) -> None:
+        # 租户状态闸（plaita#27）：停用租户的 start/resume 一律不执行。消息已
+        # 入队才停用（或挂起执行的 resume 来自 delay/approval/event 服务）时，
+        # 若照跑则「停用」对运行面是 no-op。此处直接返回 = 消费循环 ack 丢弃
+        # （留 pending 会被反复 XCLAIM 重投，无意义）。状态读 Redis 短视图，
+        # 缺失/无客户端 = active（fail-open，见 tenant_status 模块）。
+        if not tenant_is_active(getattr(self, "redis_client", None), message_data.get("tenant_id")):
+            logger.warning(
+                "租户 %s 已停用，丢弃任务 %s（flow=%s execution=%s）",
+                message_data.get("tenant_id") or "default",
+                message_data.get("type"),
+                message_data.get("flow_id"),
+                message_data.get("execution_id"),
+            )
+            return
+
         # 机器亲和性闸（路线二首版，2026-10-06 多机验证）：任务参数里的 repo/
         # run_dir 是**派发方所在机器**的绝对路径。本机不具备该路径 = 跑不了，
         # 应让给有它的 worker（或等它出现）。不拦的话本机抢到就跑 → 秒失败

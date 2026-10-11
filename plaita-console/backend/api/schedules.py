@@ -107,6 +107,21 @@ def _get_local(request: Request):
     return None
 
 
+def _tenant_is_active(request: Request, tenant_id: Optional[str]) -> bool:
+    """租户状态闸（#27）：停用租户的调度不允许手动触发。"""
+    if (local := _get_local(request)) is not None:
+        try:
+            from ..services import users_svc
+        except ImportError:
+            from services import users_svc  # type: ignore
+        return users_svc.tenant_is_active(flow_store.get_flow_store(), tenant_id)
+    try:
+        from plaita.server.tenant_status import tenant_is_active
+    except ImportError:
+        return True
+    return tenant_is_active(getattr(request.app.state, "redis", None), tenant_id)
+
+
 def _get_schedule(redis: Redis, schedule_id: str) -> dict:
     raw = redis.hget(SCHEDULES_KEY, schedule_id)
     if raw is None:
@@ -322,12 +337,16 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant_scope(request))
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+        if not _tenant_is_active(request, schedule.get("tenant_id")):
+            raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
         execution_id = local.trigger_now(store, schedule)
         if execution_id is None:
             raise HTTPException(status_code=502, detail="触发失败，请查看 console 日志")
         return {"success": True, "execution_id": execution_id}
 
     schedule = _get_schedule(redis, schedule_id)
+    if not _tenant_is_active(request, schedule.get("tenant_id")):
+        raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
     # 与手动「启动流程」同源：写任务队列 Stream
     msg_id = fire_schedule(redis, schedule, TASK_QUEUE_NAME, trigger_kind="manual")
     if msg_id is None:

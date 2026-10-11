@@ -73,7 +73,11 @@ def require_auth(request: Request) -> Dict[str, Any]:
         actor, role, source = "api-key", "admin", "api-key"
         platform_admin = True
     elif token:
-        resolved = users_svc.resolve_session(request.app.state.store, token)
+        try:
+            resolved = users_svc.resolve_session(request.app.state.store, token)
+        except users_svc.TenantDisabledError:
+            # 活跃租户被停用（#27）：会话本身有效，是租户不可用 → 403
+            raise HTTPException(status_code=403, detail="租户已停用，会话不可用")
         if resolved is None:
             raise HTTPException(status_code=401, detail="会话无效或已过期，请重新登录")
         actor = resolved["username"]
