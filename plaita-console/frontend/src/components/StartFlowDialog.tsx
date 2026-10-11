@@ -73,6 +73,8 @@ export default function StartFlowDialog({ isOpen, onClose }: StartFlowDialogProp
     setVersion('')
     setParamsJson('{\n  \n}')
     setStartedFlowId('')
+    // 组件常驻挂载（Executions 无条件渲染），不复位 mutation 会让「启动流程」永远停在成功态
+    startMutation.reset()
   }
 
   const handleClose = () => {
