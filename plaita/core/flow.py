@@ -183,8 +183,14 @@ class Flow(BaseModel):
             try:
                 from plaita.dsl.ir_validate import validate_flow_ir
 
+                # model_dump() 不含类级 node_type（它是 ClassVar，不是字段），
+                # 直接 dump 会让 validator 找不到 type=start，对所有 flow 误报。
+                # 这里显式补回 type，保证校验的是真实结构而非序列化伪影。
                 validate_flow_ir(
-                    {"nodes": [n.model_dump() for n in resolved if isinstance(n, Node)]},
+                    {"nodes": [
+                        {**n.model_dump(), "type": type(n).node_type}
+                        for n in resolved if isinstance(n, Node)
+                    ]},
                     recursive=True,
                 )
             except Exception as e:
