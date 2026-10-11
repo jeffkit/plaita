@@ -77,6 +77,17 @@ quickstart 三件套最小集 / dev 全功能六服务 / prod 全家桶 + 上限
 创建后到集群管理页「一键启动基础服务」即可开跑；业务节点包接线
 （PLAITA_NODE_PATH/MODULES）按需手工补充。
 
+## 切换集群 = 搬数据面（plaita#65）
+
+切换集群会把 console 数据面整体重绑到目标集群的 Redis：编排投递、队列、
+事件、日志、指标与 SSE 事件流都换到新集群，管理面读数（`/cluster/*`）同样
+以活动集群的 `cluster_config.yaml` 为准。目标 Redis 连不上时切换被拒（502），
+注册表活动指针不动——不会出现「页面显示集群 B、实际读写的还是 A」。
+
+Redis 地址的权威来源是活动集群配置文件的 `redis.url`；`redis://localhost:6379/0`
+与 `127.0.0.1` 视为模板占位，让位给 console 的 `PLAITA_CONSOLE_REDIS_URL`
+（Docker 部署里 redis 在另一个容器）。重启后 console 仍按注册表的活动集群连接。
+
 ## 与配置的对应关系
 
 | 你想改的 | 改哪里 |

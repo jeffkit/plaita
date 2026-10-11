@@ -335,6 +335,24 @@ class ClusterRegistry:
         except Exception:
             return None
     
+    def data_plane_redis_url(self, cluster_id: Optional[str] = None) -> Optional[str]:
+        """集群（缺省为活动集群）数据面该连的 Redis URL。
+
+        与 ``ServiceManager.load_config`` 同一约定（plaita#65）：集群配置文件的
+        ``redis.url`` 是权威，localhost / 127.0.0.1 占位让位
+        ``PLAITA_CONSOLE_REDIS_URL``，配置文件没给 URL 时退到注册表元数据。
+        """
+        info = self.get_cluster(cluster_id) if cluster_id else self.get_active_cluster()
+        if info is None:
+            return None
+        try:
+            from .service_manager import config_redis_url, effective_redis_url
+        except ImportError:
+            from service_manager import config_redis_url, effective_redis_url  # type: ignore
+        return effective_redis_url(
+            config_redis_url(self.get_cluster_config(info.id)), info.redis_url
+        )
+
     def save_cluster_config(self, cluster_id: str, config: dict) -> bool:
         """保存集群配置（写入前校验 process 白名单）。"""
         info = self._clusters.get(cluster_id)

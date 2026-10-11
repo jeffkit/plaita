@@ -2,9 +2,10 @@
 集群管理 API
 提供服务启动、停止、配置等接口
 """
+import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
@@ -12,7 +13,9 @@ try:
         get_service_manager,
         ServiceConfig,
         ManagedInstance,
-        InfrastructureConfig
+        InfrastructureConfig,
+        config_redis_url,
+        effective_redis_url,
     )
 except ImportError:
     import sys
@@ -22,7 +25,9 @@ except ImportError:
         get_service_manager,
         ServiceConfig,
         ManagedInstance,
-        InfrastructureConfig
+        InfrastructureConfig,
+        config_redis_url,
+        effective_redis_url,
     )
 
 router = APIRouter()
@@ -1454,22 +1459,90 @@ async def delete_cluster(cluster_id: str):
     return {"success": True, "message": f"集群 {cluster_id} 已删除"}
 
 
+def _connect_redis_or_502(redis_url: str):
+    """建 console 数据面客户端；连不上抛 502（调用方据此放弃切换）。"""
+    try:
+        from ..main import connect_redis
+    except ImportError:  # 平铺布局（cwd=backend）运行时
+        from main import connect_redis  # type: ignore
+
+    try:
+        return connect_redis(redis_url)
+    except Exception as e:  # noqa: BLE001 — 目标集群不可达：显式拒绝而非静默错位
+        raise HTTPException(
+            status_code=502,
+            detail=f"无法连接集群 Redis（{redis_url}）: {e}",
+        ) from e
+
+
+async def _rebind_data_plane(app: FastAPI, redis_url: Optional[str]) -> None:
+    """把 console 数据面绑到活动集群的 Redis（``app.state.redis``）。
+
+    不重连的后果（plaita#65）：页面显示已切到集群 B，而编排/队列/事件/日志/
+    指标与 SSE 仍读写集群 A 那套 Redis——任务投错集群且无任何报错。
+
+    - 同一 URL 是 no-op（不重连、不换客户端对象）
+    - 目标 Redis 不可达抛 502：调用方据此放弃切换，不留「注册表说 B、数据面连 A」
+    - SSE 的 ``redis.asyncio`` 客户端按 URL 惰性重建，旧客户端在此关掉（不泄漏连接池）
+    """
+    if not redis_url:
+        raise HTTPException(
+            status_code=502,
+            detail="集群未配置 Redis URL，也未设置 PLAITA_CONSOLE_REDIS_URL",
+        )
+
+    if (redis_url == getattr(app.state, "redis_url", None)
+            and getattr(app.state, "redis", None) is not None):
+        return
+
+    client = _connect_redis_or_502(redis_url)
+
+    old_client = getattr(app.state, "redis", None)
+    old_sse = getattr(app.state, "execution_sse_aioredis", None)
+    app.state.redis = client
+    app.state.redis_url = redis_url
+    # 数据面既然连上了集群 Redis，就不该再走本地单机模式的进程内执行分支
+    app.state.local_mode = False
+    app.state.execution_sse_aioredis = None
+    if old_client is not None:
+        old_client.close()
+    if old_sse is not None:
+        closer = getattr(old_sse, "aclose", None) or getattr(old_sse, "close", None)
+        try:
+            if closer is not None:
+                await closer()
+        except Exception as e:  # noqa: BLE001 — 关旧客户端失败不该拦住重绑
+            logging.getLogger(__name__).warning("关闭旧 SSE Redis 客户端失败: %s", e)
+
+
 @router.post("/clusters/switch", response_model=ClusterInfoResponse)
-async def switch_cluster(request: SwitchClusterRequest):
+async def switch_cluster(payload: SwitchClusterRequest, request: Request):
     """
     切换到指定集群
-    
-    注意：切换集群会重新加载 ServiceManager 配置
+
+    切换包含三件事：console 数据面重绑到该集群的 Redis、注册表活动指针更新、
+    ServiceManager 配置重载（服务管理面读数同样以集群配置为准）。
     """
     registry = get_cluster_registry()
-    
-    try:
-        cluster = registry.switch_cluster(request.cluster_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    
+
+    target = registry.get_cluster(payload.cluster_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"集群 {payload.cluster_id} 不存在")
+
+    # 先验证目标 Redis 可达再落元数据：连不上就不切换（元数据与数据面不错位）。
+    # URL 取集群配置文件的 redis.url（权威），localhost 占位让位 env——只认注册表
+    # 元数据会把 Docker 部署的默认集群（元数据写死 localhost）判成不可达。
+    await _rebind_data_plane(
+        request.app, registry.data_plane_redis_url(payload.cluster_id)
+    )
+
+    cluster = registry.switch_cluster(payload.cluster_id)
+
     # 重新初始化 ServiceManager
-    from ..services.service_manager import reset_service_manager
+    try:
+        from ..services.service_manager import reset_service_manager
+    except ImportError:  # 平铺布局（cwd=backend）运行时
+        from services.service_manager import reset_service_manager  # type: ignore
     reset_service_manager()
     
     return ClusterInfoResponse(
@@ -1501,9 +1574,14 @@ async def get_cluster_config_detail(cluster_id: str):
 
 
 @router.put("/clusters/{cluster_id}/config")
-async def save_cluster_config_detail(cluster_id: str, request: SaveClusterConfigRequest):
+async def save_cluster_config_detail(
+    cluster_id: str, payload: SaveClusterConfigRequest, request: Request
+):
     """
     保存集群配置（写入前校验 process 白名单，拒绝任意 command 注入）
+
+    活动集群的配置文件就是两个平面的 Redis 真相源（管理面读它、数据面也以它
+    为准），所以改它等于改数据面：写入落盘后一并重绑。
     """
     registry = get_cluster_registry()
 
@@ -1512,19 +1590,34 @@ async def save_cluster_config_detail(cluster_id: str, request: SaveClusterConfig
     except ImportError:
         from services.process_allowlist import ProcessConfigError
 
+    active = registry.get_active_cluster()
+    is_active_cluster = active is not None and active.id == cluster_id
+    rebind_target = None
+    if is_active_cluster:
+        rebind_target = effective_redis_url(
+            config_redis_url(payload.config), active.redis_url
+        )
+        # 先探活再落盘：连不上就整体拒绝，不留「配置文件说 B、数据面连 A」
+        if (rebind_target
+                and rebind_target != getattr(request.app.state, "redis_url", None)):
+            _connect_redis_or_502(rebind_target).close()
+
     try:
-        success = registry.save_cluster_config(cluster_id, request.config)
+        success = registry.save_cluster_config(cluster_id, payload.config)
     except ProcessConfigError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     if not success:
         raise HTTPException(status_code=400, detail=f"无法保存集群 {cluster_id} 的配置")
-    
-    # 如果是当前活动集群，重新加载 ServiceManager
-    active = registry.get_active_cluster()
-    if active and active.id == cluster_id:
-        from ..services.service_manager import reset_service_manager
+
+    # 如果是当前活动集群，重新加载 ServiceManager（管理面）并重绑数据面
+    if is_active_cluster:
+        await _rebind_data_plane(request.app, rebind_target)
+        try:
+            from ..services.service_manager import reset_service_manager
+        except ImportError:  # 平铺布局（cwd=backend）运行时
+            from services.service_manager import reset_service_manager  # type: ignore
         reset_service_manager()
-    
+
     return {"success": True, "message": "配置已保存"}
 

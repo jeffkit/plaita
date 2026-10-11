@@ -27,6 +27,49 @@ PROJECT_ROOT = Path(os.environ.get("PLAITA_PROJECT_ROOT", str(Path(__file__).par
 _log = logging.getLogger(__name__)
 
 
+def _is_concrete_redis_url(url: Any) -> bool:
+    """集群配置是否给出了「非占位」的 Redis URL。
+
+    localhost / 127.0.0.1 是模板留的占位（Docker 里 console 容器与 redis 容器
+    不同主机），不算具体地址——只有具体地址才是集群的权威配置。
+    """
+    if not url:
+        return False
+    text = str(url)
+    return "localhost" not in text and "127.0.0.1" not in text
+
+
+def config_redis_url(config: Optional[Dict[str, Any]]) -> Optional[str]:
+    """取集群配置字典里的 ``redis.url``（无则 None）。"""
+    if not isinstance(config, dict):
+        return None
+    redis_config = config.get("redis")
+    if not isinstance(redis_config, dict):
+        return None
+    url = redis_config.get("url")
+    return str(url) if url else None
+
+
+def effective_redis_url(
+    config_url: Optional[str], registry_url: Optional[str] = None
+) -> Optional[str]:
+    """集群数据面该连的 Redis URL——与 ``load_config`` 同一约定（plaita#65）。
+
+    集群配置文件的 ``redis.url`` 是权威；localhost / 127.0.0.1 只是模板占位
+    （Docker 里 console 容器与 redis 容器不同主机），占位时让位给
+    ``PLAITA_CONSOLE_REDIS_URL``；配置文件没给 URL 时才退到注册表元数据。
+    """
+    if _is_concrete_redis_url(config_url):
+        return str(config_url)
+    env_redis_url = os.environ.get("PLAITA_CONSOLE_REDIS_URL")
+    if env_redis_url:
+        return env_redis_url
+    for url in (config_url, registry_url):
+        if url:
+            return str(url)
+    return None
+
+
 class ServiceConfig(BaseModel):
     """服务配置"""
     service_type: str
@@ -486,9 +529,12 @@ class ServiceManager:
             storage_config = InternalComponentConfig(**raw_config["storage"])
         
         redis_config = raw_config.get("redis", {})
-        # 允许环境变量覆盖 Redis URL（Docker 环境中 redis 服务地址不同）
+        # 集群配置的 redis.url 是权威（plaita#65）：切到别的集群后管理面读数
+        # （/cluster/service-types 等）必须跟着集群走，不能再被 console 数据面
+        # 的 env 无条件拉回旧集群。env 只在集群未给出 url、或给的是 localhost
+        # 占位时兜底（Docker 环境集群配置留的 localhost 须让位）。
         env_redis_url = os.environ.get("PLAITA_CONSOLE_REDIS_URL")
-        if env_redis_url:
+        if env_redis_url and not _is_concrete_redis_url(redis_config.get("url")):
             redis_config["url"] = env_redis_url
         
         self.config = ClusterConfig(

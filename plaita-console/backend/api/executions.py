@@ -994,7 +994,10 @@ def _execution_stream_async_redis(request: Request):
             from config import get_settings  # type: ignore
         import redis.asyncio as aioredis
 
-        client = aioredis.from_url(get_settings().redis_url, decode_responses=True)
+        # 活动集群的 Redis 优先于 env（plaita#65）：切换集群会更新
+        # app.state.redis_url 并清掉本缓存，直接读 env 会继续连旧集群。
+        url = getattr(request.app.state, "redis_url", None) or get_settings().redis_url
+        client = aioredis.from_url(url, decode_responses=True)
         request.app.state.execution_sse_aioredis = client
     return client
 

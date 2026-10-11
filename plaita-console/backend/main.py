@@ -6,6 +6,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,29 +50,78 @@ logger = logging.getLogger(__name__)
 redis_client: Redis = None
 
 
+# 建连超时：默认 None 时遇到黑洞主机要等 OS SYN 重试窗口（~2 分钟），而启动
+# 与集群切换都走这条路径（切换还是单 worker 的事件循环）。
+REDIS_CONNECT_TIMEOUT_SECONDS = 2.0
+
+
+def connect_redis(url: str) -> Redis:
+    """按 URL 建 console 数据面同步客户端（decode_responses）并 ping 验证可达。
+
+    不可达时抛异常——lifespan 据此进本地单机模式，集群切换
+    （``api/cluster.py:switch_cluster``）据此拒绝把数据面绑到连不上的 Redis。
+    """
+    client = Redis.from_url(
+        url,
+        decode_responses=True,
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+    )
+    client.ping()
+    return client
+
+
+def _active_cluster_redis_url() -> Optional[str]:
+    """注册表里活动集群数据面的 Redis URL（读不到注册表时 None）。
+
+    plaita#65：切换集群改的是注册表活动指针，重启后数据面必须还跟着它走，
+    否则「页面显示集群 B、实际读写的还是 A」的错位在重启后重现。
+    """
+    try:
+        from .services.cluster_registry import get_cluster_registry
+    except ImportError:  # 平铺布局（cwd=backend）运行时
+        from services.cluster_registry import get_cluster_registry  # type: ignore
+    try:
+        return get_cluster_registry().data_plane_redis_url()
+    except Exception as e:  # noqa: BLE001 — 注册表不可读不该阻断启动
+        logger.warning("读取活动集群 Redis URL 失败（退回环境变量）: %s", e)
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global redis_client
-    
+
     settings = get_settings()
-    
-    # 启动时连接 Redis；不可达则进入本地单机模式（不阻断启动）
-    local_mode = False
-    try:
-        redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
-        redis_client.ping()
-        logger.info(f"连接 Redis: {settings.redis_url}")
+
+    # 启动时连接 Redis；不可达则进入本地单机模式（不阻断启动）。
+    # app.state.redis_url 是「数据面当前连的是哪套 Redis」的真相源，集群切换
+    # 会把两者一起改（见 switch_cluster）。连接顺序：活动集群（注册表/集群配置
+    # 文件，与切换同约定）→ env（settings.redis_url，旧行为兜底）。
+    candidates = [u for u in (_active_cluster_redis_url(), settings.redis_url) if u]
+    local_mode = True
+    error: Optional[Exception] = None
+    for url in dict.fromkeys(candidates):
+        try:
+            redis_client = connect_redis(url)
+        except Exception as e:  # noqa: BLE001 — 逐个候选尝试，全失败才进本地档
+            error = e
+            logger.warning("Redis 不可达（%s）: %s", url, e)
+            continue
+        logger.info(f"连接 Redis: {url}")
         app.state.redis = redis_client
-    except Exception as e:
+        app.state.redis_url = url
+        local_mode = False
+        break
+    if local_mode:
         redis_client = None
         app.state.redis = None
-        local_mode = True
+        app.state.redis_url = None
         logger.warning(
             "Redis 不可达（%s）——进入本地单机模式：流程在本进程内执行，"
             "执行历史存 SQLite；集群/事件/队列功能不可用。"
             "启动 Redis 并重启可恢复完整能力。",
-            e,
+            error,
         )
     app.state.local_mode = local_mode
 
@@ -164,9 +214,11 @@ async def lifespan(app: FastAPI):
 
     yield
     
-    # 关闭时断开 Redis 连接
+    # 关闭时断开 Redis 连接（关当前绑定：集群切换后 redis_client 全局已过时）
     logger.info("关闭 Redis 连接")
-    redis_client.close()
+    current = getattr(app.state, "redis", None)
+    if current is not None:
+        current.close()
 
 
 def _load_external_node_modules() -> None:

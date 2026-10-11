@@ -177,6 +177,7 @@ export default function ClusterSwitcher({ collapsed = false, placement = 'bottom
   const navigate = useNavigate()
   const [isOpen, setIsOpen] = useState(false)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
+  const [switchError, setSwitchError] = useState('')
   const dropdownRef = useRef<HTMLDivElement>(null)
   const queryClient = useQueryClient()
 
@@ -191,12 +192,18 @@ export default function ClusterSwitcher({ collapsed = false, placement = 'bottom
   const switchMutation = useMutation({
     mutationFn: api.switchCluster,
     onSuccess: () => {
+      setSwitchError('')
       queryClient.invalidateQueries({ queryKey: ['clusters'] })
       queryClient.invalidateQueries({ queryKey: ['cluster-info'] })
       queryClient.invalidateQueries({ queryKey: ['service-types'] })
       queryClient.invalidateQueries({ queryKey: ['managed-instances'] })
       queryClient.invalidateQueries({ queryKey: ['topology'] })
       setIsOpen(false)
+    },
+    // 切换会被后端拒绝（目标集群 Redis 不可达 → 502）：必须显式提示，
+    // 否则点一下毫无反应、集群看着还在原处，用户不知道发生了什么
+    onError: (err: Error) => {
+      setSwitchError(err.message)
     }
   })
 
@@ -267,6 +274,12 @@ export default function ClusterSwitcher({ collapsed = false, placement = 'bottom
                           max-h-[300px] overflow-y-auto ${
                             placement === 'top' ? 'top-full mt-2' : 'bottom-full mb-2'
                           } ${collapsed ? 'w-60' : 'right-0 w-64'}`}>
+            {/* 切换失败提示（保留下拉：用户需要看到原因再决定下一步） */}
+            {switchError && (
+              <div className="m-1 p-2 rounded bg-red-500/20 text-red-400 text-xs break-words">
+                {switchError}
+              </div>
+            )}
             {/* 集群列表 */}
             <div className="p-1">
               {clusters.map((cluster) => (
