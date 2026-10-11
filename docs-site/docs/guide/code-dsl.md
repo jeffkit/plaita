@@ -357,6 +357,7 @@ flow = flow_from_source(src)   # 迁移后走同一执行入口
 - **语义等价而非逐字节等价**：`compile_source(emit_source(ir))` 与 `ir` 在「剥派生注解（name/desc/source_line）+ 非语义 id 规范化」口径下相等。变量名 id 与显式 `id=` 钉住的 id 恒定；if/return 的派生 id、无名节点 `_n{n}` 计数 id 由重编译时的语句形态决定，可能变化。
 - **不可表达构造抛 `EmitError`**（不产出错误代码）：`switch`/`bool` 合成节点（builder 专属）、非 object `inputType`、空真分支或两分支同址的 if、无法结构化的任意图。
 - IR 里以 `$` 开头的字符串一律按表达式逆映射；原始字面量恰以 `$` 开头的场景编译期已丢失区分，属已知边界。
+- **事件节点的键名两套都收**：event 节点按 `eventType`（编译器自产 IR，优先）→ `event_type`（存量 JSON flow 的权威键名）回退读取，过滤器同理 `eventFilter` → `event_filter`；两种写法的同一份 IR emit 出同一份源码。
 - 验收测试口径见 `tests/unit/test_codeflow_emit.py`（round-trip 语料 + 手写 JSON IR + 负面路径）。
 
 ### Agent 编排：把 `flow_from_source` 当输出沙箱

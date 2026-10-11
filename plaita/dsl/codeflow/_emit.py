@@ -484,9 +484,11 @@ class _BodyEmitter:
         return f"CODE({', '.join(kwargs)})"
 
     def _call_event(self, node: Dict[str, Any]) -> str:
-        kwargs = [f"type={_invert_value(node.get('eventType'), self.ns)}"]
-        if node.get("eventFilter") is not None:
-            kwargs.append(f"filter={_invert_value(node['eventFilter'], self.ns)}")
+        etype = node.get("eventType", node.get("event_type"))
+        kwargs = [f"type={_invert_value(etype, self.ns)}"]
+        efilter = node.get("eventFilter", node.get("event_filter"))
+        if efilter is not None:
+            kwargs.append(f"filter={_invert_value(efilter, self.ns)}")
         kwargs.extend(self._common_kwargs(node))
         return f"EVENT({', '.join(kwargs)})"
 

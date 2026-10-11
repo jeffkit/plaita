@@ -343,6 +343,24 @@ class TestEventNode(unittest.TestCase):
         self.assertEqual(ev["type"], "event")
         self.assertEqual(ev["eventType"], "user.login")
 
+    def test_flow_to_sexpr_reads_snake_case_event_type(self):
+        """存量 JSON flow 的 snake_case ``event_type`` 须被反编译器读到。
+
+        只认 ``eventType`` 时会产出 ``:type nil``，随后 ``compile_sexpr`` 必抛
+        「event 需要 :type」——sexpr 链路上同一份 JSON 同样死路。
+        """
+        ir = {
+            "runtime": "python", "flow_id": "ev", "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "wait"},
+                {"type": "event", "id": "wait", "event_type": "$INPUT.kind", "next": "done"},
+                {"type": "end", "id": "done", "output": "ok", "resultType": "success"},
+            ],
+        }
+        src = flow_to_sexpr(ir)
+        self.assertIn(":type $INPUT.kind", src)
+        compile_sexpr(src)
+
     def test_event_missing_type_raises(self):
         """Line 685-686: missing :type raises SyntaxError."""
         src = """

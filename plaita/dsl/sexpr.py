@@ -933,7 +933,7 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "event":
-        parts.append(f":type {_expr_to_src(n.get('eventType'))}")
+        parts.append(f":type {_expr_to_src(n.get('eventType', n.get('event_type')))}")
     if n.get("errorHandler") is not None:
         eh = n["errorHandler"]
         ep = ["on-error", eh.get("strategy", "abort")]

@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Set
 
 from plaita import Node
@@ -504,6 +506,43 @@ def test_emit_from_handwritten_json_ir():
     left = _canonicalize(hand_ir)
     right = _canonicalize(rebuilt)
     assert left == right
+
+
+_EVENT_FIXTURE = Path(__file__).resolve().parents[1] / "integration" / "server" / "test_flow.json"
+
+
+def test_emit_consumes_snake_case_event_keys():
+    """存量 JSON flow 的事件节点用引擎权威的 snake_case 键（event_type/event_filter）。
+
+    emit 只认 camelCase 时会产出 ``EVENT(type=None)``、``event_filter`` 静默消失，
+    随后 round-trip 编译必抛「EVENT 需要 type」——JSON→@flow 迁移在事件节点上是死路。
+    """
+    with _EVENT_FIXTURE.open(encoding="utf-8") as fh:
+        ir = json.load(fh)
+    emitted = emit_source(ir)
+    assert "EVENT(type=INPUT.event_type, filter={'source': 'test'})" in emitted
+    assert "type=None" not in emitted
+    compile_source(emitted)
+
+
+def test_emit_camel_and_snake_event_keys_converge():
+    """两种键名（编译器自产 camelCase / 存量 snake_case）emit 出同一份源码。"""
+    snake_ir = {
+        "runtime": "python", "flow_id": "ev", "inputType": {"dataType": "object"},
+        "nodes": [
+            {"type": "start", "id": "start", "next": "wait"},
+            {"type": "event", "id": "wait", "event_type": "$INPUT.kind",
+             "event_filter": {"source": "test"}, "next": "done"},
+            {"type": "end", "id": "done", "output": "ok", "resultType": "success"},
+        ],
+    }
+    camel_ir = copy.deepcopy(snake_ir)
+    node = camel_ir["nodes"][1]
+    node["eventType"] = node.pop("event_type")
+    node["eventFilter"] = node.pop("event_filter")
+    emitted = emit_source(snake_ir)
+    assert "EVENT(type=INPUT.kind, filter={'source': 'test'})" in emitted
+    assert emit_source(camel_ir) == emitted
 
 
 # ---------------------------------------------------------------------------
