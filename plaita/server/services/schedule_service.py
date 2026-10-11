@@ -31,6 +31,7 @@ from redis import Redis
 from plaita.server.task_queue import enqueue_task
 
 from ...logger import logger
+from ..tenant_status import tenant_is_active
 from .base_service import BaseExtendedService
 
 # 与 console 后端共享的 Redis 视图键（console/api/schedules.py 同款常量）
@@ -80,6 +81,11 @@ def fire_schedule(
         Stream message id；入队失败返回 None。
     """
     schedule_id = schedule["schedule_id"]
+    # 租户状态闸（plaita#27）：停用租户的调度不再入队。状态来自 console 发布
+    # 的 Redis 短视图；缺失/无记录 = active（fail-open，见 tenant_status 模块）。
+    if not tenant_is_active(redis_client, schedule.get("tenant_id")):
+        logger.info("租户 %s 已停用，跳过调度 %s 派发", schedule.get("tenant_id"), schedule_id)
+        return None
     now = datetime.now()
     now_ms = int(now.timestamp() * 1000)
 

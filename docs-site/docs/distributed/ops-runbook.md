@@ -24,8 +24,23 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | 执行列表索引 | `plaita:execution:index`（ZSET，`:ready` 为回填标记） | `plaita:{tenant}:execution:index`（+`:ready`） |
 | resume lease | `plaita:execution:lease:{id}` | `plaita:{tenant}:execution:lease:{id}` |
 | 任务队列 | `plaita:flow:queue`（平台共享，消息内带 `tenant_id`） | 同左 |
+| 租户状态闸（#27） | `plaita:tenant_status`（HASH：`tenant_id -> active\|disabled`，平台机制键） | 同左 |
 
 兼容规则：消息缺 `tenant_id` 视为 default；default 租户沿用历史键前缀，新旧版本混跑时 default 流量不受影响，非 default 租户需 console 与 worker 双侧升级。
+
+### 停用租户的跨进程生效（#27） {#停用租户的跨进程生效27}
+
+console 在租户启停时把状态写入 `plaita:tenant_status`（并启动时以权威库回填），
+worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用租户：
+
+- **缺失记录 = active**（fail-open）：升级前未发布状态的既有部署不会全租户停摆；
+  也容忍「console 与 worker 不共享 Redis」的运维缺口——此时闸门不生效，需在
+  worker 侧 Redis 上自行 `HSET plaita:tenant_status <tenant> disabled`
+  （与 `sync_published_to_engine.py` 同款边界）。
+- 手动排查：`redis-cli HGETALL plaita:tenant_status`；恢复漏发布可重启 console
+  （启动回填）或手工 `HSET`。
+- console 侧另有实时闸：停用后该租户已签发会话的 API 调用返回 **403**，且其调度
+  被置为 `enabled=false`。
 
 ## 环境变量速查
 

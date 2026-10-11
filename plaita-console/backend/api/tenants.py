@@ -47,6 +47,11 @@ def _platform_admin(identity: Dict) -> None:
         raise HTTPException(status_code=403, detail="仅平台管理员可管理租户")
 
 
+def _redis(request: Request):
+    """集群档的 Redis 客户端（本地单机档为 None）。"""
+    return getattr(request.app.state, "redis", None)
+
+
 @router.get("/tenants")
 def list_tenants(identity: Dict = Depends(require_auth)):
     _platform_admin(identity)
@@ -79,7 +84,9 @@ def set_status(tenant_id: str, req: TenantStatusRequest, request: Request,
                identity: Dict = Depends(require_auth)):
     _platform_admin(identity)
     try:
-        tenants_svc.set_tenant_status(get_flow_store(), tenant_id, req.status)
+        tenants_svc.set_tenant_status(
+            get_flow_store(), tenant_id, req.status, redis_client=_redis(request)
+        )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _audit(request, "tenant.set_status", tenant_id, {"status": req.status})
@@ -101,7 +108,9 @@ def rotate_secret(tenant_id: str, request: Request, identity: Dict = Depends(req
 def delete_tenant(tenant_id: str, request: Request, identity: Dict = Depends(require_auth)):
     _platform_admin(identity)
     try:
-        deleted = tenants_svc.delete_tenant(get_flow_store(), tenant_id)
+        deleted = tenants_svc.delete_tenant(
+            get_flow_store(), tenant_id, redis_client=_redis(request)
+        )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=409, detail=str(e))
     if not deleted:

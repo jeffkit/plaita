@@ -6,16 +6,23 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import secrets
+from datetime import datetime
 from typing import Any, Dict, List
 
 from sqlalchemy import select
 
 try:
-    from ..models.flow import FlowRecord, Tenant, TenantMember
+    from ..models.flow import DEFAULT_TENANT_ID, FlowRecord, Tenant, TenantMember
 except ImportError:
-    from models.flow import FlowRecord, Tenant, TenantMember  # type: ignore
+    from models.flow import (  # type: ignore
+        DEFAULT_TENANT_ID,
+        FlowRecord,
+        Tenant,
+        TenantMember,
+    )
 
 from . import users_svc
 
@@ -82,7 +89,13 @@ def create_tenant(store, tenant_id: str, name: str = "") -> Dict[str, Any]:
         return result
 
 
-def set_tenant_status(store, tenant_id: str, status: str) -> None:
+def set_tenant_status(store, tenant_id: str, status: str, redis_client=None) -> None:
+    """启用/停用租户（#27：停用必须对运行面生效，不能只改 SQLite 行）。
+
+    - 停用：同步停掉该租户的调度（本地 + 集群档）；其已签发会话由
+      ``users_svc.resolve_session`` 的租户状态闸按请求实时拦下（403）
+    - 状态写入 Redis 短视图，供 worker/调度服务（可能在别的进程）跨进程拦截
+    """
     if status not in ("active", "disabled"):
         raise TenantError(f"非法状态: {status}")
     with store._session_local() as session:
@@ -91,6 +104,72 @@ def set_tenant_status(store, tenant_id: str, status: str) -> None:
             raise TenantError(f"租户不存在: {tenant_id}")
         row.status = status
         session.commit()
+    if status == "disabled":
+        _disable_tenant_schedules(store, tenant_id, redis_client)
+    _publish_status(redis_client, tenant_id, status)
+
+
+def _disable_tenant_schedules(store, tenant_id: str, redis_client) -> None:
+    """停用租户时同步停掉其调度（本地 SQLite 档 + 集群 Redis HASH 档）。"""
+    try:
+        from . import local_scheduler
+    except ImportError:
+        local_scheduler = None  # type: ignore
+    if local_scheduler is not None:
+        for s in local_scheduler.list_schedules(store):
+            if (s.get("tenant_id") or DEFAULT_TENANT_ID) != tenant_id:
+                continue
+            if not s.get("enabled"):
+                continue
+            s["enabled"] = False
+            s["next_run_at"] = ""
+            local_scheduler.update_schedule(store, s["schedule_id"], s)
+
+    if redis_client is None:
+        return
+    try:
+        from plaita.server.services.schedule_service import SCHEDULES_KEY, list_schedules
+    except ImportError:
+        return
+    for s in list_schedules(redis_client):
+        if (s.get("tenant_id") or DEFAULT_TENANT_ID) != tenant_id:
+            continue
+        if not s.get("enabled"):
+            continue
+        s["enabled"] = False
+        s["next_run_at"] = ""
+        s["updated_at"] = datetime.now().isoformat()
+        redis_client.hset(
+            SCHEDULES_KEY,
+            key=s["schedule_id"],
+            value=json.dumps(s, ensure_ascii=False),
+        )
+
+
+def _publish_status(redis_client, tenant_id: str, status: str) -> None:
+    if redis_client is None:
+        return
+    try:
+        from plaita.server.tenant_status import publish_tenant_status
+    except ImportError:
+        return
+    publish_tenant_status(redis_client, tenant_id, status)
+
+
+def publish_all_tenant_status(redis_client, store) -> None:
+    """启动兜底：把权威库里的全部租户状态回填到 Redis 短视图。
+
+    补齐「console 停机期间改过状态 / Redis 被清空」的漂移——否则 worker 侧
+    只有 console 运行时改动的状态可见。失败静默（不阻断启动）。
+    """
+    if redis_client is None:
+        return
+    try:
+        from plaita.server.tenant_status import publish_tenant_status
+    except ImportError:
+        return
+    for t in list_tenants(store):
+        publish_tenant_status(redis_client, t["id"], t["status"])
 
 
 def rotate_contract_secret(store, tenant_id: str) -> Dict[str, str]:
@@ -110,7 +189,7 @@ def rotate_contract_secret(store, tenant_id: str) -> Dict[str, str]:
         }
 
 
-def delete_tenant(store, tenant_id: str) -> bool:
+def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
     with store._session_local() as session:
         row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
         if row is None:
@@ -128,6 +207,13 @@ def delete_tenant(store, tenant_id: str) -> bool:
             session.delete(m)
         session.delete(row)
         session.commit()
+    if redis_client is not None:
+        try:
+            from plaita.server.tenant_status import clear_tenant_status
+        except ImportError:
+            clear_tenant_status = None  # type: ignore
+        if clear_tenant_status is not None:
+            clear_tenant_status(redis_client, tenant_id)
     return True
 
 

@@ -133,6 +133,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001 — 兜底同步不得阻断启动
             logger.warning("启动同步已发布流程到引擎存储失败（忽略，不阻断启动）: %s", e)
 
+        # 租户状态回填（#27）：console 停机期间改过状态 / Redis 被清空时，
+        # worker 侧的租户状态闸只有这份短视图可读——启动时以权威库为准对齐
+        try:
+            try:
+                from .services import tenants_svc
+            except ImportError:
+                from services import tenants_svc  # type: ignore
+            tenants_svc.publish_all_tenant_status(redis_client, app.state.store)
+        except Exception as e:  # noqa: BLE001 — 不得阻断启动
+            logger.warning("租户状态回填失败（忽略，不阻断启动）: %s", e)
+
     # HMAC 重放保护：本地档（Redis 不可达）直接配进程内存档；集群档配 Redis
     # nonce store（enable_replay_protection 内部会 ping 一次，连不上同样降级
     # 并 warning，避免启动日志虚报 "multi-worker safe"）。

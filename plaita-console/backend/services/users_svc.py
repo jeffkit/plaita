@@ -41,6 +41,10 @@ class UserError(ValueError):
     """用户/租户管理操作非法（信息面向管理员展示）。"""
 
 
+class TenantDisabledError(Exception):
+    """会话的活跃租户已停用（#27）——鉴权层据此返回 403，而非按无效会话 401。"""
+
+
 # ---- 密码 ----
 
 def hash_password(password: str) -> str:
@@ -139,7 +143,17 @@ def login(store, username: str, password: str) -> Optional[Dict[str, Any]]:
         if row is None or row.disabled or not verify_password(password, row.password_hash):
             return None
         memberships = _memberships_of(session, row.username)
-        active_tenant = memberships[0]["tenant_id"] if memberships else None
+        # 优先钉到一个未停用租户（#27）：唯一成员租户被停用时用户本就会被闸门
+        # 拦下；但多租户用户若被钉到已停用的第一个成员关系，会连 switch-tenant
+        # （需先过鉴权）都调不动——优先活跃租户避免这种自锁。
+        active_tenant = next(
+            (
+                m["tenant_id"]
+                for m in memberships
+                if _tenant_active(session, m["tenant_id"])
+            ),
+            memberships[0]["tenant_id"] if memberships else None,
+        )
         token = uuid.uuid4().hex + secrets.token_hex(16)
         expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
         session.add(
@@ -183,11 +197,29 @@ def _resolve_role(session, user: User, tenant_id: Optional[str]) -> Optional[str
     return user.role
 
 
+def _tenant_active(session, tenant_id: Optional[str]) -> bool:
+    """租户是否可运行（行缺失视为活跃，兼容引导/存量）。"""
+    if not tenant_id:
+        return True
+    row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
+    return row is None or row.status == "active"
+
+
+def tenant_is_active(store, tenant_id: Optional[str]) -> bool:
+    """供 console 侧（本地调度、触发 API）判断租户是否已停用。"""
+    if not tenant_id:
+        return True
+    with store._session_local() as session:
+        return _tenant_active(session, tenant_id)
+
+
 def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
     """token -> {username, role, tenant_id, platform_admin}；无效/过期返回 None。
 
     - 角色实时取自 tenant_members（改角色即时生效）
     - active_tenant 的成员资格已失效时自动清空（回退平台/遗留视角）
+    - active_tenant 已停用且非平台管理员 → 抛 TenantDisabledError（#27，鉴权层
+      转 403）；平台管理员不受限，否则无法把租户重新启用
     """
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with store._session_local() as session:
@@ -213,6 +245,13 @@ def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
             active_tenant = None
             role = _resolve_role(session, user, None)
             session.commit()
+        if (
+            active_tenant
+            and not user.platform_admin
+            and not _tenant_active(session, active_tenant)
+        ):
+            # 租户已停用：已签发会话立即失效（不落库、不改行，鉴权层转 403）
+            raise TenantDisabledError(f"租户已停用: {active_tenant}")
         return {
             "username": row.username,
             "role": role,

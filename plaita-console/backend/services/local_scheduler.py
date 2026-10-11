@@ -144,9 +144,25 @@ def delete_schedule(store, schedule_id: str,
 
 # ---- 触发 ----
 
+def _tenant_active(store, tenant_id: Optional[str]) -> bool:
+    try:
+        from . import users_svc
+    except ImportError:
+        from services import users_svc  # type: ignore
+    return users_svc.tenant_is_active(store, tenant_id)
+
+
 def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optional[str]:
     """触发一次调度：本地档直接进程内执行（不入队），记录触发历史。"""
     from . import local_executor
+
+    # 租户状态闸（#27）：停用租户的调度不再触发（与集群档 fire_schedule 同源）
+    if not _tenant_active(store, schedule.get("tenant_id")):
+        logger.info(
+            "租户 %s 已停用，跳过本地调度 %s",
+            schedule.get("tenant_id"), schedule.get("schedule_id"),
+        )
+        return None
 
     try:
         info = local_executor.start_local_execution(
