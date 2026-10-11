@@ -48,7 +48,7 @@ from plaita.server.metrics import (
     render_prometheus,
 )
 from plaita.server.log_handler import setup_redis_logging
-from plaita.server.node_timings import NodeTimingCallback
+from plaita.server.node_timings import NodeTimingCallback, close_stale_entries
 from plaita.server.task_queue import (
     DEFAULT_CLAIM_MIN_IDLE_MS,
     DEFAULT_CONSUMER_GROUP,
@@ -416,15 +416,21 @@ def _chain_has_resume_protocol_error(exc: BaseException) -> bool:
     执行应保持原状（suspended）让真正的决议路径（event/cancel/timeout）进来，
     而不是被终态化成不可逆的 error。
 
-    ``NodeResumeError`` 是**例外**：它是 ``current_node.resume(...)`` 自身抛错
-    被策略层包装的形态（plaita/core/strategies.py ``_handle_resume``），属执行
+    ``NodeResumeError`` 是**决定性例外**：它是 ``current_node.resume(...)`` 自身
+    抛错被策略层包装的形态（plaita/core/strategies.py ``_handle_resume``），属执行
     侧真实失败——豁免终态化会让状态永远停在 suspended、``error`` 为空，失败
-    无从观测。故只认裸 ``ResumeError``。
+    无从观测。故链上**一旦出现** ``NodeResumeError`` 即判「非协议错误」并立即
+    返回：它是包装点（``raise resume_err from e``）留下的标记，标记下方的
+    ``__cause__`` 是节点自己抛的异常——若节点 ``resume()`` 抛的恰是裸
+    ``ResumeError``（节点实现里再走一次引擎 resume 路径），继续下行就会把
+    这个标记当成协议错误，回到「不终态化、error 为空」的死角。
     """
     node: Optional[BaseException] = exc
     depth = 0
     while node is not None and depth <= _NODE_RETRY_CHAIN_MAX_DEPTH + 1:
-        if isinstance(node, ResumeError) and not isinstance(node, NodeResumeError):
+        if isinstance(node, NodeResumeError):
+            return False
+        if isinstance(node, ResumeError):
             return True
         node = node.__cause__
         depth += 1
@@ -1172,14 +1178,23 @@ class FlowWorker:
 
         - 与状态里已有的 ``node_timings`` **合并**而不是覆盖：resume 可能发生在
           另一个进程，旧节点的时间不能被新进程的采集器抹掉；
-        - 异常终态（error/cancelled）先收口在跑条目再合并（见下）；
+        - 异常终态（error/cancelled）先收口在跑条目再合并，合并结果再扫一遍
+          跨进程残留的空 ``ended_at``（见下）；**没有本进程采集器**时同一轮
+          扫除也要做——resume 入口的两条终态落盘发生在挂采集器之前；
         - 终态落盘后回收采集器，避免长跑 worker 泄漏。
         """
-        timing = self._node_timings.get(execution_id)
-        if timing is None:
-            return
         status = getattr(state, "status", "") or ""
         terminal = status in TERMINAL_EXECUTION_STATUSES
+        timing = self._node_timings.get(execution_id)
+        if timing is None:
+            # 本进程没有采集器（``resume_flow`` 的 ``cancelled_at_resume_entry`` /
+            # ``flow_hash_mismatch`` 终态落盘早于 ``_handlers_for`` 挂采集器）：
+            # ``_open`` 无从收口，但**已落盘**的跨进程残留（死进程经看门狗心跳
+            # 写下的 ``ended_at=""``）必须扫掉，否则终态文档永久满足 keeper
+            # 判据①——正是 :func:`close_stale_entries` 要挡的那个死角。
+            if terminal and state.node_timings:
+                close_stale_entries(state.node_timings, failed=status != "completed")
+            return
         if terminal:
             # 内核只在**成功**路径调 on_node_end：异常结束（抛错/超时/取消）的
             # 节点会以 ``ended_at=""`` 的「在跑」形态留在采集器里，被 snapshot
@@ -1189,6 +1204,12 @@ class FlowWorker:
             timing.close_open(failed=status != "completed")
         merged = dict(state.node_timings or {})
         merged.update(timing.snapshot())
+        if terminal:
+            # 收口只覆盖本进程采集器；旧文档里还可能躺着**别的写者**留下的
+            # 在跑条目（看门狗心跳写盘后进程死掉 / resume 在别处发生），它在
+            # 合并中被原样带进终态文档，判据① 照样永久命中。故合并结果再扫
+            # 一遍，终态文档里不留任何空 ``ended_at``。
+            timing.close_stale(merged, failed=status != "completed")
         state.node_timings = merged
         if terminal:
             self._node_timings.pop(execution_id, None)
@@ -2703,6 +2724,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         另按调用方给出的 fence 世代写盘（fencing 档下 CAS 生效；无世代=
         未持租约的旧路径，行为不变）。
 
+        **跳过的副作用（2026-10-11 评审）**：``last_update_time`` 因此**不再
+        随心跳推进**——长节点期间它只在首次发布时刷一次，之后一直陈旧到节点
+        边界。以时间戳为判活依据的读取方（``scripts/reap_zombie_executions.py``
+        的 ``--idle-minutes``、keeper 判据③）会看到「几个小时没更新」的假象：
+        前者由租约键闸挡住、后者由 ``node_timings`` 的在跑条目挡住——**判活
+        必须以租约键/在跑条目（有 ``started_at`` 无 ``ended_at``）为准，不得
+        只看 ``last_update_time``**。
+
         失败**只告警不抛**：这是观测路径，绝不能因落盘失败而打断正在跑的
         节点（真正的落盘失败仍由 ``_persist_state_or_raise`` 在节点边界负责）。
         """
@@ -3116,6 +3145,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         这里在最外层兜住 Redis 客户端错误（含 socket 层）：记 error + 退避 +
         重新进入循环。在途消息不 ack（留 pending，at-least-once 语义不变）。
+
+        **含权限/配置错误**（2026-10-11 评审）：``AuthenticationError`` 是
+        ``ConnectionError`` 子类、故也在 ``RedisError`` 之内，本兜底一并吞下。
+        于是队列层「权限错误上抛快速失败」（``_is_fatal_redis_config_error``）
+        只在**启动期**那次 ``ensure_group`` 生效（未进循环 → 上抛到 ``main()``
+        → ``sys.exit(1)``）；运行期密码/ACL 失效退化成每秒一条 error 日志的
+        有界轮询，而不是重启进程（重启也修不好配置，且会打断在跑的 run 监视）。
         """
         while self._running and not self._drain_event.is_set():
             try:

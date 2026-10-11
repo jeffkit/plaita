@@ -432,8 +432,14 @@ class TestDistributedStrategyResume(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Unsupported resume type", str(cm.exception))
 
     async def test_resume_exception_path(self):
-        """Lines 298-304: exception during node.resume() raises ResumeError."""
-        from plaita.core.errors import ResumeError
+        """Lines 298-304: exception during node.resume() raises NodeResumeError.
+
+        必须是**子类** NodeResumeError（而非父类 ResumeError）：宿主据此把
+        「节点 resume 实现自身抛错」与「恢复协议错误」分开——前者终态化 error
+        保留证据，后者豁免终态化、等 event/cancel/timeout 决议。断言父类会让
+        两者不可分（core 侧退回裸 ResumeError 的变异体将存活）。
+        """
+        from plaita.core.errors import NodeResumeError, ResumeError
 
         node = MagicMock()
         node.id = "n1"
@@ -452,8 +458,9 @@ class TestDistributedStrategyResume(unittest.IsolatedAsyncioTestCase):
         cb.on_node_resume = MagicMock()
         cb.on_node_end = MagicMock()
 
-        with self.assertRaises(ResumeError) as cm:
+        with self.assertRaises(NodeResumeError) as cm:
             await self._run_resume(ctx, flow, runner, cb, resume_type="event")
+        self.assertIsInstance(cm.exception, ResumeError, "协议错误父类型仍须成立")
         self.assertIn("resume boom", str(cm.exception))
 
 

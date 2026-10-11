@@ -355,8 +355,11 @@ POST `{"event": "zombie_reaped", ...}`；dry-run 不告警，告警通道故障�
 （`--namespace plaita:{tenant}`）。
 
 **判据不能只看 `last_update_time`**：执行状态在单节点执行期间无心跳（只有
-`PERSIST_EVERY_N_STEPS` 步界才写回），一个 3 小时的长节点其时间戳可以陈旧 3
-小时而执行完全健康（租约正被看门狗每 40s 续）。故有两道闸（2026-10 修复）：
+`PERSIST_EVERY_N_STEPS` 步界才写回；长节点的在跑心跳由看门狗播报，但**快照
+无变化时跳过写盘**，故 `last_update_time` 在长节点期间同样不推进），一个 3
+小时的长节点其时间戳可以陈旧 3 小时而执行完全健康（租约正被看门狗每 40s
+续）。判活以**租约键**或 `node_timings` 里的**在跑条目**（有 `started_at`
+无 `ended_at`）为准。故有两道闸（2026-10 修复）：
 
 | 闸 | 作用 |
 |----|------|
@@ -373,7 +376,7 @@ POST `{"event": "zombie_reaped", ...}`；dry-run 不告警，告警通道故障�
 | 任务不消费 | group/stream 键不一致；Worker 未起 | 核对 `--queue-name` / group；看 Worker 日志 |
 | `XLEN>0` 但 `XPENDING`/`lag` 为 0 | 已 `XACK` 未 `XDEL` 的残留条目（XACK 与 XDEL 之间进程被杀），**不是**真积压 | worker 启动时与每 300s 兜底回收（`residue_swept`）；`XRANGE` 看 payload 的 `execution_id`，console 实查为终态即可确认无活干 |
 | pending 堆积 | 处理失败反复 reclaim；lease 冲突 | 查日志；调大 lease TTL；看 DLQ |
-| DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)） |
+| DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)）。`reason` 前缀 `invalid_payload:` = 载荷解不开的畸形消息（非法 JSON / 非对象 / 坏字节），**在队列层就地死信**（#48 审计）：`payload.raw_fields` 是原始字段，坏消息只丢这一条、消费循环不停 |
 | 反复重投，日志刷「保存执行状态失败 (…)」 | Redis 写路径瞬断/序列化失败——落盘失败已不再静默 ack（2026-10 评审修复） | 查 Redis `INFO`/延迟日志；恢复后 pending 自动重投收敛，勿人工 ack |
 | 反复重投，日志刷「挂起任务投递失败」 | 挂起服务队列 `plaita:{subtype}:queue` rpush 失败；suspended 已保留等重派 | 查对应外延服务（DelayService 等）与其队列长度；恢复后重投自动重派 |
 | 日志刷「Redis 读失败（瞬态，退避 1.0s 后继续轮询）」/「Redis 故障中断消费循环」 | Redis 抖动（读超时/连接重置）——worker **不**再退出进程（#48），退避后自动重连恢复 | 无需动作（勿因这些行重启 worker）；持续刷则查 Redis `INFO`/延迟/连接数；恢复后消费自动继续，pending 消息不丢 |

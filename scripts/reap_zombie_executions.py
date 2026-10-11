@@ -4,11 +4,12 @@ worker 崩溃后，pending 里的 start 任务重投会创建**全新执行**重
 旧执行永久停留在 `running` 状态且无人认领。本脚本把"超时未更新"的
 running 执行标记为 error（orphaned），供监控/人工复核。
 
-判据不能只看 last_update_time：执行状态在**单节点执行期间无心跳**——只有
-`PERSIST_EVERY_N_STEPS` 步界才写回 last_update_time，start / retry_wakeup
-也不更新；一个 3 小时的 AGENTRUN 长节点，其 last_update_time 可以陈旧 3
-小时而执行完全健康（resume 租约正被看门狗每 40s 续）。故叠加两道闸
-（2026-10 修复）：
+判据不能只看 last_update_time：执行状态在**单节点执行期间几乎没有心跳**——
+只有 `PERSIST_EVERY_N_STEPS` 步界才写回 last_update_time，且在跑节点的心跳
+快照无变化时**跳过写盘**（长节点期间该字段因此同样不推进）；start /
+retry_wakeup 也不更新；一个 3 小时的 AGENTRUN 长节点，其 last_update_time
+可以陈旧 3 小时而执行完全健康（resume 租约正被看门狗每 40s 续）。故叠加两道
+闸（2026-10 修复）：
 
 1. 租约键 ``{ns}:execution:lease:{id}`` 存在 → 活 worker 正推进长步骤，跳过；
 2. 落盘走条件写（状态键与巡检读到的原始串一致才写）→ 活 worker 的步界写若

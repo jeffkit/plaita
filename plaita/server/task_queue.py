@@ -82,6 +82,18 @@ def _decode(value: Union[str, bytes]) -> str:
     return value.decode() if isinstance(value, bytes) else value
 
 
+def _text(value: Any) -> str:
+    """流字段 → str，非法字节用 ``replace`` 兜底。
+
+    仅用于畸形消息的 DLQ 取证：载荷本身就是「解不开的字节」（``_decode`` 严格
+    解码抛 ``UnicodeDecodeError``，这也是畸形消息的一种形态），取证路径再抛一次
+    就等于把「一条坏消息终止 worker」原样留着（见 ``_parse_or_poison``）。
+    """
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value if isinstance(value, str) else str(value)
+
+
 def _schema_version_from_fields(fields: Dict[Any, Any]) -> int:
     """信封版本解析：缺失（历史消息）→ v1；非法值 → v1 + 告警（不因信封坏掉吞消息）。"""
     raw = fields.get(SCHEMA_FIELD, fields.get(SCHEMA_FIELD.encode()))
@@ -193,6 +205,12 @@ class RedisStreamTaskQueue:
           静默会让 worker 拿着「组不存在」的状态空转。``AuthenticationError``
           同理（它虽挂在 ``ConnectionError`` 下，却被
           ``_is_fatal_redis_config_error`` 一并放行）。
+
+        注意「上抛」只是**本层**契约，不等于进程退出：只有启动期（``run()``
+        在消费循环之前那次 ``ensure_group``）才会一路到 ``main()`` 的
+        ``sys.exit(1)``；循环内的调用有 ``_consume_forever`` 兜住
+        （``AuthenticationError ⊂ RedisError``）——密码/ACL 配错在循环里退化成
+        有界退避空转 + 周期 error 日志，**不**重启进程。
         """
         try:
             self.redis.xgroup_create(
@@ -235,7 +253,8 @@ class RedisStreamTaskQueue:
             # 异常绕开了 ``xreadgroup`` 那一支（2026-10-07 worker 进程退出实测）。
             # 退避后返回 None 继续轮询，Redis 恢复后自动重连恢复消费；消息不
             # ack（留 pending），at-least-once 语义不变。权限错误不是瞬态
-            # （见 ``_is_fatal_redis_config_error``）→ 上抛快速失败。
+            # （见 ``_is_fatal_redis_config_error``）→ 本层上抛；是否退出进程
+            # 由调用方决定（启动期退出，消费循环级有兜底）。
             if _is_fatal_redis_config_error(exc):
                 raise
             logger.warning(
@@ -524,7 +543,43 @@ class RedisStreamTaskQueue:
         if not messages:
             return None
         msg_id, fields = messages[0]
-        return self._task_from_fields(_decode(msg_id), fields, delivery_count)
+        return self._parse_or_poison(_decode(msg_id), fields, delivery_count)
+
+    def _parse_or_poison(
+        self, message_id: str, fields: Dict[Any, Any], delivery_count: int
+    ) -> Optional[StreamTask]:
+        """解析任务；**畸形消息**（载荷解不开）就地进 DLQ 并返回 ``None``（不抛）。
+
+        #48 建议 4 的审计结论（``_task_from_fields`` 段）：解析失败抛的
+        ``ValueError`` 此前从 ``_read_once``（XREADGROUP 路径）与 ``_reclaim_one``
+        （XCLAIM 路径）原样穿出，而这两条路径**都**在 ``read()`` 的瞬态兜底与
+        ``_consume_forever`` 的 ``(RedisError, OSError)`` 之外——一条 payload
+        非法的消息足以让异常直达 ``run()`` → ``main()`` → ``sys.exit(1)``
+        （实测 worker 退出；消息仍留 pending，拉起后每轮 reclaim 再撞一次 =
+        重启风暴）。语义与 ``_consume_loop`` 的 ``except ValueError``（「畸形
+        消息：ack 掉避免 poison pill 无限重投」）一致，收口在队列层。
+
+        死信**不经** ``dead_letter_guard``：守卫判据是执行状态/租约，而畸形
+        消息没有可解析的 ``execution_id``，任何 worker 都处理不了它——让守卫
+        拒绝只会让这条消息每轮重复解析失败、日志无界刷屏。原始字段随 DLQ
+        信封落库供取证，``poison_acked`` 照记。DLQ 写入本身失败仍会抛出
+        （瞬态由 ``read()``/``_consume_forever`` 兜住，消息保持 pending）。
+        """
+        try:
+            return self._task_from_fields(message_id, fields, delivery_count)
+        except ValueError as exc:
+            raw = {_text(k): _text(v) for k, v in (fields or {}).items()}
+            self._metrics["poison_acked"] += 1
+            logger.error("畸形任务消息 %s 载荷不可解析，转 DLQ: %s", message_id, exc)
+            self.dead_letter(
+                StreamTask(
+                    message_id=message_id,
+                    body={"raw_fields": raw},
+                    delivery_count=max(1, int(delivery_count or 1)),
+                ),
+                reason=f"invalid_payload:{type(exc).__name__}:{exc}"[:500],
+            )
+            return None
 
     def _task_from_fields(
         self, message_id: str, fields: Dict[Any, Any], delivery_count: int
@@ -618,9 +673,11 @@ class RedisStreamTaskQueue:
             # 契约一致。改成 +1 会让死信提前一轮（5 次变 4 次）。该值仅作
             # 阈值判据与可观测透传（FlowWorker 节点重试预算另用 Redis 计数
             # 键，不依赖它），报告展示时理解为 attempt-1 即可。
-            task = self._task_from_fields(
+            task = self._parse_or_poison(
                 _decode(mid), fields, delivery_count=max(deliveries, 1)
             )
+            if task is None:
+                continue       # 畸形消息已在 _parse_or_poison 里就地死信
             if task.delivery_count >= self.max_deliveries:
                 if self._guard_allows_dead_letter(task):
                     self.dead_letter(

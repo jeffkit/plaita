@@ -307,6 +307,136 @@ class TestWorkerPersistsTimings:
         assert state.node_timings["x"]["ended_at"]
         assert state.node_timings["x"]["failed"] is False
 
+    def test_terminal_persist_sweeps_stale_open_entry_from_other_writer(self):
+        """终态收口必须覆盖**已落盘**的「在跑」条目（跨进程残留）。
+
+        2026-10-11 评审复现：采集器 ``_open`` 里没有这个节点——它是**别的
+        写者**（看门狗心跳写盘后进程死掉 / resume 发生在另一进程）留下的
+        ``ended_at=""`` 条目，合并时被原样带进终态文档，keeper 判据① 照样
+        永久命中。合并结果再扫一遍即消除。
+        """
+        worker = FlowWorker(
+            execution_storage=MemoryExecutionStorage(),
+            flow_storage=MemoryFlowStorage(),
+            event_bus=InMemoryEventBus(),
+        )
+        eid = "exec-stale"
+        worker._node_timings[eid] = NodeTimingCallback(clock=_Clock())
+        stale = {"started_at": "1970-01-01T00:16:39", "ended_at": "",
+                 "started_ms": 999_000, "ended_ms": None,
+                 "attempts": 1, "failed": False}
+        state = ExecutionState(
+            execution_id=eid, context={}, status="error",
+            node_timings={"impl": dict(stale)},
+        )
+        worker._collect_node_timings(eid, state)
+
+        entry = state.node_timings["impl"]
+        assert entry["ended_at"], "跨进程残留的在跑条目也必须收口"
+        assert entry["failed"] is True
+        assert entry["duration_ms"] == 1_000
+        live = [nid for nid, v in state.node_timings.items()
+                if v.get("started_at") and not v.get("ended_at")]
+        assert live == [], "keeper 判据① 不得再从终态文档读到活证据"
+
+    def test_terminal_persist_without_collector_sweeps_stale_open_entry(self):
+        """**没有本进程采集器**的终态落盘同样要收口跨进程残留（2026-10-11 评审阻断项）。
+
+        ``resume_flow`` 的两条入口终态（``cancelled_at_resume_entry`` /
+        ``flow_hash_mismatch``）落在 ``_handlers_for`` 挂采集器**之前**，
+        ``_node_timings`` 里没有该执行——原实现早退，跨进程残留（死进程经
+        看门狗心跳写下的 ``ended_at=""``）被原样留在终态文档里，keeper 判据①
+        永久命中。正是本机制存在的场景：worker 死于长节点 → 另一 worker 取消
+        或定义变更把它终态化。
+        """
+        worker = FlowWorker(
+            execution_storage=MemoryExecutionStorage(),
+            flow_storage=MemoryFlowStorage(),
+            event_bus=InMemoryEventBus(),
+        )
+        eid = "exec-no-collector"
+        stale = {"started_at": "1970-01-01T00:16:39", "ended_at": "",
+                 "started_ms": 999_000, "ended_ms": None,
+                 "attempts": 1, "failed": False}
+        state = ExecutionState(
+            execution_id=eid, context={}, status="cancelled",
+            node_timings={"impl": dict(stale)},
+        )
+        worker._collect_node_timings(eid, state)
+
+        entry = state.node_timings["impl"]
+        assert entry["ended_at"], "无采集器时也必须收口已落盘的在跑条目"
+        assert entry["failed"] is True
+        assert entry["duration_ms"] > 0
+        live = [nid for nid, v in state.node_timings.items()
+                if v.get("started_at") and not v.get("ended_at")]
+        assert live == [], "keeper 判据① 不得再从终态文档读到活证据"
+
+    def test_non_terminal_persist_without_collector_keeps_running_entry(self):
+        """非终态 + 无采集器：在跑条目是**活证据**，不得被扫掉。"""
+        worker = FlowWorker(
+            execution_storage=MemoryExecutionStorage(),
+            flow_storage=MemoryFlowStorage(),
+            event_bus=InMemoryEventBus(),
+        )
+        stale = {"started_at": "1970-01-01T00:16:39", "ended_at": "",
+                 "started_ms": 999_000, "ended_ms": None,
+                 "attempts": 1, "failed": False}
+        state = ExecutionState(
+            execution_id="exec-running", context={}, status="running",
+            node_timings={"impl": dict(stale)},
+        )
+        worker._collect_node_timings("exec-running", state)
+        assert state.node_timings["impl"]["ended_at"] == ""
+
+    def test_resume_entry_terminal_persist_closes_stale_open_entry(self):
+        """端到端：resume 入口命中取消标志 → 终态文档不得残留「在跑」条目。
+
+        模拟评审复现场景：worker 死于长节点（看门狗已发布 ``impl`` 在跑条目），
+        另一个 worker 在 resume 入口看到取消标志直接终态化 cancelled。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        execution_storage = MemoryExecutionStorage()
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(self._flow())
+        worker = RedisFlowWorker(
+            redis_url="redis://localhost:6379/15",
+            queue_name="test:node-timings-resume-entry",
+            execution_storage=execution_storage,
+            flow_storage=flow_storage,
+            redis_client=fake,
+            lease_ttl_seconds=60,
+            enable_registry=False,
+            enable_redis_logging=False,
+        )
+        eid = "exec-resume-entry"
+        stale = {"started_at": "1970-01-01T00:16:39", "ended_at": "",
+                 "started_ms": 999_000, "ended_ms": None,
+                 "attempts": 1, "failed": False}
+        execution_storage.save_execution_state(
+            eid,
+            ExecutionState(
+                execution_id=eid,
+                flow_id="timing-flow",
+                flow_version="1.0.0",
+                status="running",
+                context={"$LAST_NODE": "start"},
+                node_timings={"impl": dict(stale)},
+            ),
+        )
+        fake.set(f"plaita:execution:cancel:{eid}", "ts", ex=7 * 86400)
+
+        result = worker.resume_flow("timing-flow", eid, "continue")
+
+        assert result["status"] == "cancelled"
+        assert result["cancelled_at_resume"] is True
+        timings = execution_storage.load_execution_state(eid).node_timings
+        assert timings["impl"]["ended_at"], "终态文档里不得留「在跑」条目"
+        assert timings["impl"]["failed"] is True
+        live = [nid for nid, v in timings.items()
+                if v.get("started_at") and not v.get("ended_at")]
+        assert live == [], "keeper 判据① 不得再从终态文档读到活证据"
+
 
 class TestWatchdogPublishesRunningNode:
     """长节点（沙箱 sandbox_agent）期间的活性心跳——2026-10-10 五单误杀事故回归。

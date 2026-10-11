@@ -32,6 +32,37 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts).isoformat()
 
 
+def close_stale_entries(
+    entries: Dict[str, Dict[str, Any]], *, failed: bool = True, clock=time.time
+) -> None:
+    """就地收口**已落盘**的「在跑」条目（``ended_at`` 为空）——跨进程残留。
+
+    模块级函数（不依赖 :class:`NodeTimingCallback` 实例）：宿主在**没有本进程
+    采集器**的路径上也要收口——``resume_flow`` 的两条入口终态
+    （``cancelled_at_resume_entry`` / ``flow_hash_mismatch``）发生在
+    ``_handlers_for`` 安装采集器**之前**，此时跨进程残留（看门狗心跳写盘后
+    进程死掉 / resume 发生在别处）的 ``ended_at=""`` 条目会被原样留在终态
+    文档里，keeper 判据①（有 ``started_at``、无 ``ended_at`` = 活证据）永久
+    命中，真正挂死的执行再也无法回收。
+
+    逐条补 ``ended_at``（按开始时刻算 ``duration_ms`` 并累进
+    ``total_duration_ms``），``failed`` 取「终态是否为异常」。
+    """
+    ended = clock()
+    ended_ms = int(ended * 1000)
+    for entry in entries.values():
+        if entry.get("ended_at"):
+            continue
+        entry["ended_at"] = _iso(ended)
+        entry["ended_ms"] = ended_ms
+        started_ms = entry.get("started_ms")
+        if isinstance(started_ms, int):
+            duration = max(0, ended_ms - started_ms)
+            entry["duration_ms"] = duration
+            entry["total_duration_ms"] = int(entry.get("total_duration_ms") or 0) + duration
+        entry["failed"] = bool(failed)
+
+
 class NodeTimingCallback(FlowCallback):
     """采集节点开始/结束时间；``snapshot()`` 返回可直接序列化的字典。
 
@@ -84,6 +115,8 @@ class NodeTimingCallback(FlowCallback):
 
         异常终态（error/cancelled）落盘前调用：把 ``_open`` 逐条按「已结束 +
         失败」写进 ``_timings`` 并清空，终态文档里不再有「在跑」条目。
+
+        只管**本进程**采集器里的条目；跨进程残留见 :func:`close_stale_entries`。
         """
         ended = self._clock()
         for node_id, started in list(self._open.items()):
@@ -96,6 +129,10 @@ class NodeTimingCallback(FlowCallback):
                 failed=failed,
             )
         self._open.clear()
+
+    def close_stale(self, entries: Dict[str, Dict[str, Any]], *, failed: bool = True) -> None:
+        """收口跨进程残留（用本采集器时钟）。语义见模块级 :func:`close_stale_entries`。"""
+        close_stale_entries(entries, failed=failed, clock=self._clock)
 
     def _record(
         self,
@@ -145,8 +182,10 @@ class NodeTimingCallback(FlowCallback):
         已完成节点仍以 ``_timings`` 为准（同一节点重跑时结束记录覆盖在跑记录）。
 
         「在跑」形态因此**只在节点确实在跑时**成立：异常结束（抛错/超时/
-        取消）的节点由宿主在终态落盘前经 :meth:`close_open` 收口，绝不把
-        ``ended_at=""`` 留在终态文档里（否则判据①永久命中 → 挂死执行无法回收）。
+        取消）的节点由宿主在终态落盘前经 :meth:`close_open` 收口，
+        跨进程残留的空 ``ended_at`` 条目经 :func:`close_stale_entries` 收口，
+        绝不把 ``ended_at=""`` 留在终态文档里（否则判据①永久命中 →
+        挂死执行无法回收）。
         """
         out = {node_id: dict(entry) for node_id, entry in self._timings.items()}
         for node_id, started in self._open.items():

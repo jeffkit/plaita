@@ -257,6 +257,37 @@ class TestNodeResumeFailureIsNotProtocolError:
             "失败证据必须落进 state.error（此前为空，失败不可观测）"
         )
 
+    def test_nested_resume_error_under_marker_still_terminalizes(self):
+        """``NodeResumeError`` 之下挂着裸 ``ResumeError`` 时仍须终态化。
+
+        链：``FlowErrorException → NodeResumeError → ResumeError``（节点
+        ``resume()`` 内部再走引擎 resume 路径 → 挂起守卫抛裸 ResumeError）。
+        若判据继续下行到最内层，执行会被当成协议错误：消息 ack、状态停在
+        suspended、``error`` 为空——正是本类要杀的「失败无从观测」。
+        """
+        worker, storage = _redis_worker()
+        _, _, checkpoint = _real_suspended_execution()
+        storage.save_execution_state("exec-1", ExecutionState(
+            execution_id="exec-1", flow_id="f1", flow_version="1",
+            status="suspended", context=checkpoint,
+        ))
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            marker = NodeResumeError("node resume boom")
+            marker.__cause__ = ResumeError("No suspended node found")
+            wrapped = FlowErrorException("node resume boom")
+            wrapped.__cause__ = marker
+            inst.run_distributed.side_effect = wrapped
+
+            with pytest.raises(NodeFailureTerminalizedError):
+                worker.resume_flow("f1", "exec-1", "event", {"approved": True})
+
+        state = storage.load_execution_state("exec-1")
+        assert state.status == "error"
+        assert state.error and "boom" in state.error["message"]
+
     def test_classifier_excludes_node_resume_error(self):
         """判据直测：链上只有 NodeResumeError → 不算协议错误。"""
         from plaita.server.flow_worker import _chain_has_resume_protocol_error
@@ -268,6 +299,30 @@ class TestNodeResumeFailureIsNotProtocolError:
         guard = FlowErrorException("y")
         guard.__cause__ = ResumeError("pending guard")
         assert _chain_has_resume_protocol_error(guard) is True
+
+    def test_classifier_stops_at_node_resume_marker(self):
+        """标记是决定性的：NodeResumeError 之下的裸 ResumeError 不得翻转判定。
+
+        ``_handle_resume`` 是 ``raise resume_err from e``——``__cause__`` 是节点
+        自己抛的异常。节点 ``resume()`` 里若再走一次引擎 resume 路径（嵌套
+        distributed resume，其挂起守卫抛裸 ``ResumeError``），链就是
+        ``FlowErrorException → NodeResumeError → ResumeError``；继续下行会把这个
+        执行侧失败重新判成协议错误 → 消息 ack、执行永远停在 suspended 且
+        ``error`` 为空（2026-10-11 评审复现）。
+        """
+        from plaita.server.flow_worker import _chain_has_resume_protocol_error
+
+        marker = NodeResumeError("node resume boom")
+        marker.__cause__ = ResumeError("No suspended node found")
+        top = FlowErrorException("wrapped")
+        top.__cause__ = marker
+        assert _chain_has_resume_protocol_error(top) is False
+
+        marker2 = NodeResumeError("boom")
+        marker2.__cause__ = ValueError("inner")
+        top2 = FlowErrorException("wrapped")
+        top2.__cause__ = marker2
+        assert _chain_has_resume_protocol_error(top2) is False
 
 
 class TestRunLoopAcksProtocolError:

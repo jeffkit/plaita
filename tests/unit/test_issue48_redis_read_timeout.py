@@ -16,6 +16,7 @@ launchd 拉起后 XCLAIM 存量 PEL 触发交接重入队风暴。
    继续，绝不退出进程（含 except 分支里 ``ack``/``dead_letter`` 再抛的路径）。
 """
 
+import json
 import logging
 import socket
 import threading
@@ -359,3 +360,239 @@ class TestRunSurvivesRedisTimeout:
                 fw.main()
 
         assert excinfo.value.code == 1
+
+
+class TestMalformedPayloadDoesNotKillConsumeLoop:
+    """#48 建议 4 的审计落地：``_task_from_fields`` 段同样会炸穿 run() 主循环。
+
+    解析失败抛的 ``ValueError`` 从 XREADGROUP（``_read_once``）与 XCLAIM
+    （``_reclaim_one``）两条路径原样穿出 ``read()``——而 read() 只兜瞬态 Redis
+    错误、``_consume_forever`` 只兜 ``(RedisError, OSError)``，异常直达 ``run()``
+    → ``main()`` → ``sys.exit(1)``：**一条 payload 非法的消息终止 worker 进程**，
+    且消息仍留 pending，拉起后每轮 reclaim 再撞一次（重启风暴）。
+
+    修复语义 = ``_consume_loop`` 既有 poison 分支的同款意图（「畸形消息：ack 掉
+    避免 poison pill 无限重投」），收口在队列层：就地进 DLQ（原始字段随信封
+    落库取证）+ ack + 计数，绝不抛出。
+
+    反证：把 ``_parse_or_poison`` 退回 ``_task_from_fields``（实测
+    ``RedisStreamTaskQueue._parse_or_poison = RedisStreamTaskQueue._task_from_fields``），
+    ``read()`` 立即抛 ``ValueError``，本组用例变红。
+    """
+
+    def _queue(self, redis, stream):
+        queue = RedisStreamTaskQueue(redis, stream, group_name="g48", consumer_name="c1")
+        queue.ensure_group()
+        return queue
+
+    def test_read_dead_letters_malformed_payload_from_xreadgroup(self, caplog):
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        queue = self._queue(redis, "test:issue48:bad-json")
+        msg_id = redis.xadd(queue.stream_key, {"payload": "{not json"})
+
+        with caplog.at_level(logging.ERROR, logger=QUEUE_LOGGER):
+            assert queue.read(block_ms=10) is None, "毒丸不得从 read() 抛出"
+
+        assert redis.xpending(queue.stream_key, "g48")["pending"] == 0, "毒丸已 ack（不再占 PEL）"
+        assert queue.stats()["poison_acked"] == 1
+        envelope = json.loads(redis.xrange(queue.dlq_key)[0][1]["payload"])
+        assert envelope["source_id"] == msg_id
+        assert "invalid_payload" in envelope["reason"]
+        assert envelope["payload"]["raw_fields"]["payload"] == "{not json", "原始字段必须留证"
+        assert any("转 DLQ" in r.getMessage() for r in caplog.records), "不得静默丢弃"
+
+    def test_read_dead_letters_non_object_payload_from_reclaim(self):
+        """XCLAIM 路径同款：合法 JSON 但非对象（``[]``）也是畸形消息。"""
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        queue = self._queue(redis, "test:issue48:bad-reclaim")
+        queue.claim_min_idle_ms = 0
+        msg_id = redis.xadd(queue.stream_key, {"payload": "[]"})
+        redis.xreadgroup(
+            groupname="g48", consumername="other", streams={queue.stream_key: ">"}, count=1
+        )
+
+        assert queue.read(block_ms=10) is None
+        assert redis.xpending(queue.stream_key, "g48")["pending"] == 0
+        envelope = json.loads(redis.xrange(queue.dlq_key)[0][1]["payload"])
+        assert envelope["source_id"] == msg_id
+        assert "must be a JSON object" in envelope["reason"]
+
+    def test_undecodable_payload_bytes_dead_lettered_not_raising(self):
+        """载荷本身是坏字节（严格解码抛 ``UnicodeDecodeError``，同属 ValueError）：
+        取证路径必须用 ``replace`` 兜底，否则死信这一步又炸一次。"""
+        redis = fakeredis.FakeRedis(decode_responses=False)
+        queue = self._queue(redis, "test:issue48:bad-bytes")
+        redis.xadd(queue.stream_key, {b"payload": b"\xff\xfe{"})
+
+        assert queue.read(block_ms=10) is None
+        envelope = json.loads(redis.xrange(queue.dlq_key)[0][1][b"payload"])
+        assert "invalid_payload" in envelope["reason"]
+
+    def test_worker_keeps_consuming_after_malformed_payload(self, caplog):
+        """进程级：毒丸之后队列里的正常消息照常消费（不退出、不卡死）。"""
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        worker = _worker(redis_client=redis)
+        worker._running = True
+        queue = RedisStreamTaskQueue(
+            redis,
+            "test:issue48:poison-then-good",
+            group_name=worker._consumer_group,
+            consumer_name="c1",
+        )
+        queue.ensure_group()
+        redis.xadd(queue.stream_key, {"payload": "{not json", "schema_version": "1"})
+        enqueue_task(redis, queue.stream_key, {"type": "start", "flow_id": "after-poison"})
+
+        dispatched = []
+
+        def _dispatch(body, delivery_count=None):
+            dispatched.append(body)
+            worker._running = False       # 消费到正常消息即停循环
+
+        worker._dispatch_task = _dispatch
+        # 安全网：修复若退化（重新抛出或卡在毒丸上）则 3s 后退出循环，让断言失败
+        # 而不是让整个测试进程挂死。
+        stopper = threading.Timer(3.0, lambda: setattr(worker, "_running", False))
+        stopper.start()
+        try:
+            with patch(f"plaita.server.flow_worker.{BACKOFF}", 0), \
+                 caplog.at_level(logging.ERROR):
+                worker._consume_forever(queue)
+        finally:
+            stopper.cancel()
+
+        assert dispatched == [{"type": "start", "flow_id": "after-poison"}]
+        assert redis.xlen(queue.dlq_key) == 1, "毒丸进 DLQ 而不是留在 PEL 里反复解析失败"
+
+
+class _HealingRedisMethod:
+    """把 ``client.<method>`` 的前 ``failures`` 次调用换成抛 ``exc``，之后透传。
+
+    模拟「Redis 抖动若干轮后恢复」：注入点选在 #48 崩溃链上的那三个队列调用
+    （``xgroup_create`` / ``xreadgroup`` / ``xclaim``）。因为要按调用次数递减，
+    这里用可调用对象换掉绑定方法（而不是 ``side_effect`` 列表——透传时仍需
+    真实的 fakeredis 行为，才能验证「恢复后正常消费」）。
+    """
+
+    def __init__(self, client, method: str, exc: BaseException, failures: int = 2):
+        self._real = getattr(client, method)
+        self._exc = exc
+        self._remaining = failures
+        self.calls = 0
+        setattr(client, method, self)
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise self._exc
+        return self._real(*args, **kwargs)
+
+
+class TestWorkerSurvivesTransientWithRealQueue:
+    """组成态（真实队列 + 真实消费循环）：#48 验收 1/2 的注入矩阵。
+
+    队列层用例（``TestQueueSwallowsTransientReadErrors``）用的是真实队列，
+    worker 层用例（``TestConsumeForeverSurvivesRedisFailures``）用的是 stub
+    队列——两者各自成立不等于拼起来成立。这里把注入打在最贴近现场的位置：
+    ``run()`` → ``_consume_loop`` → ``queue.read()`` → 崩溃链上的三个 Redis
+    调用（2026-10-07 两次实测的异常链止于 ``xgroup_create`` 的
+    ``TimeoutError: Timeout reading from socket``）。
+
+    断言三件事：进程不退出（不抛）、留下 warning、Redis 恢复后照常消费；
+    外加边界——读失败期间消息既不 ack 也不丢。
+    """
+
+    REAL_QUEUE_OPS = ["xgroup_create", "xreadgroup", "xclaim"]
+
+    @pytest.mark.parametrize("method", REAL_QUEUE_OPS)
+    @pytest.mark.parametrize("make_exc", TRANSIENT_CASES)
+    def test_worker_keeps_consuming_and_recovers(self, method, make_exc, caplog):
+        exc = make_exc()
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        worker = _worker(redis_client=redis)
+        worker._running = True
+        queue = RedisStreamTaskQueue(
+            redis,
+            "test:issue48:real-queue-recovery",
+            group_name=worker._consumer_group,
+            consumer_name="c1",
+            claim_min_idle_ms=0,       # 逼出 reclaim 路径（xclaim）
+        )
+        queue.ensure_group()
+        task_body = {"type": "start", "flow_id": "after-blip"}
+        enqueue_task(redis, queue.stream_key, dict(task_body))
+        if method == "xclaim":
+            # 先让别的 consumer 领走 = 进本组 PEL，reclaim 才会走到 xclaim
+            redis.xreadgroup(
+                groupname=queue.group_name,
+                consumername="other",
+                streams={queue.stream_key: ">"},
+                count=1,
+            )
+        flaky = _HealingRedisMethod(redis, method, exc, failures=2)
+
+        dispatched = []
+
+        def _dispatch(body, delivery_count=None):
+            dispatched.append(body)
+            worker._running = False    # 消费到任务即停循环
+
+        worker._dispatch_task = _dispatch
+        # 安全网：修复若退化（异常穿出或卡住）则 3s 后退出循环，让断言失败
+        # 而不是让整个测试进程挂死。
+        stopper = threading.Timer(3.0, lambda: setattr(worker, "_running", False))
+        stopper.start()
+        try:
+            with patch(f"plaita.server.flow_worker.{BACKOFF}", 0), \
+                 patch(f"plaita.server.task_queue.{BACKOFF}", 0), \
+                 caplog.at_level(logging.WARNING):
+                worker._consume_forever(queue)   # 不抛 = 进程不退出
+        finally:
+            stopper.cancel()
+
+        # ``xgroup_create`` 只被调一次就够了（建组失败不阻塞同轮 xreadgroup），
+        # 另两个注入点则要跨轮重试——故下限取 1。
+        assert flaky.calls >= 1, "注入点没被触达（没打到崩溃链上，用例失效）"
+        assert dispatched == [task_body], "Redis 恢复后必须继续正常消费"
+        assert redis.xpending(queue.stream_key, queue.group_name)["pending"] == 0, \
+            "恢复后正常处置（不是把消息留在 PEL 里反复撞）"
+        if method == "xreadgroup" and isinstance(exc, RedisTimeoutError):
+            # 既有约定（#48 边界）：BLOCK 到期的 redis TimeoutError 属常态空轮询，
+            # 静默返回 None，不为每一轮空转刷 warning。
+            return
+        assert any(
+            "Redis" in r.getMessage() and r.levelno >= logging.WARNING
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_task_stays_pending_when_read_keeps_failing(self):
+        """边界：读失败期间不 ack，消息留 pending（at-least-once 语义不变）。"""
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        worker = _worker(redis_client=redis)
+        worker._running = True
+        queue = RedisStreamTaskQueue(
+            redis,
+            "test:issue48:real-queue-outage",
+            group_name=worker._consumer_group,
+            consumer_name="c1",
+        )
+        queue.ensure_group()
+        enqueue_task(redis, queue.stream_key, {"type": "start", "flow_id": "kept"})
+        # 一直失败（failures 极大）：整段停机期间一条都读不到
+        _HealingRedisMethod(redis, "xreadgroup", RedisConnectionError("down"), failures=10_000)
+
+        def _stop():
+            worker._running = False
+
+        stopper = threading.Timer(0.2, _stop)
+        stopper.start()
+        try:
+            with patch(f"plaita.server.flow_worker.{BACKOFF}", 0), \
+                 patch(f"plaita.server.task_queue.{BACKOFF}", 0):
+                worker._consume_forever(queue)
+        finally:
+            stopper.cancel()
+
+        assert redis.xlen(queue.stream_key) == 1, "消息仍在流里（既没被 ack 也没丢）"
+        assert redis.xpending(queue.stream_key, queue.group_name)["pending"] == 0
