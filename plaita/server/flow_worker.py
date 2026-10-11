@@ -3508,6 +3508,20 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             logger.debug("租约持有者存活核算查注册表失败（按存活未知）: %s", exc)
             return True
         if registered:
+            # 持有者在册但处于 draining（优雅停机中）：它**不保证**会收尾——
+            # _force_stop_after_drain 超时即放弃当前步退出。此时若 ack 释放
+            # 消息，执行唯一的重投载体就没了（2026-10-11 维护窗：Mac 重启时
+            # 4 个在途执行全部停 running、PEL=0，见 plaita#52 同族）。
+            # 故 draining 持有者不算「安全 ack」，消息留 pending，等租约过期后
+            # 由 reclaim 续跑。读注册表失败/无 status 字段 → 保持原语义（ack）。
+            if self._registry_entry_draining(registry_key):
+                logger.warning(
+                    "执行 %s 租约持有者 %s 处于 draining（停机中，不保证收尾）"
+                    "——不 ack，留 pending 等租约过期后 reclaim 续跑",
+                    body.get("execution_id"),
+                    instance,
+                )
+                return False
             return True
         logger.warning(
             "执行 %s 租约持有者 %s 已不在服务注册表（持有者已死、租约处 ≤%ss "
@@ -3517,6 +3531,25 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             getattr(self, "lease_ttl_seconds", "?"),
         )
         return False
+
+    def _registry_entry_draining(self, registry_key: str) -> bool:
+        """注册表条目的 status 是否为 ``draining``（优雅停机中的持有者）。
+
+        读失败 / 值非 JSON / 无 status 字段 → False（不改变既有 ack 语义）。
+        """
+        try:
+            raw = self.redis_client.get(registry_key)
+        except Exception as exc:  # noqa: BLE001 — 瞬断按「非 draining」处理
+            logger.debug("读注册表条目失败（按非 draining 处理）: %s", exc)
+            return False
+        if not raw:
+            return False
+        try:
+            data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 — 非 JSON 值按非 draining 处理
+            logger.debug("注册表条目非 JSON（按非 draining 处理）: %s", exc)
+            return False
+        return isinstance(data, dict) and data.get("status") == "draining"
 
     def _affinity_handover_key(self, body: Dict[str, Any]) -> str:
         """交接计数键：按 **execution_id** 维度（全局稳定，见下）。

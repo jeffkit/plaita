@@ -71,6 +71,46 @@ def test_live_holder_lease_conflict_is_ack_safe():
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
+def test_draining_holder_lease_conflict_is_not_ack_safe():
+    """持有者在册但 draining（停机中）→ ack 不安全（2026-10-11 Mac 重启丢任务）。
+
+    draining 持有者可能在 drain 超时后被放弃；若此时 ack 释放了消息，执行
+    失去唯一重投载体，停在 running。必须留 pending。
+    """
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    redis.set(
+        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
+        '{"instance_id": "%s", "status": "draining"}' % INSTANCE,
+        ex=30,
+    )
+    assert _worker(redis)._lease_conflict_ack_safe(_body()) is False
+
+
+def test_running_holder_with_status_field_is_ack_safe():
+    """持有者在册且 status=running → 仍 ack 安全（只有 draining 才收紧）。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    redis.set(
+        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
+        '{"instance_id": "%s", "status": "running"}' % INSTANCE,
+        ex=30,
+    )
+    assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
+
+
+def test_draining_entry_unparseable_defaults_to_ack():
+    """注册表值非法 JSON → 无法判 draining → 保持原语义（ack）。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    redis.set(
+        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
+        "not-json",
+        ex=30,
+    )
+    assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
+
+
 def test_registry_entry_expired_after_death_is_not_ack_safe():
     """注册表 TTL（30s）先于 60s 首次回收消失：键过期即判死。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
