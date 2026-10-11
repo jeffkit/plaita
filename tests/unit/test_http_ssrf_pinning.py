@@ -987,6 +987,20 @@ def _make_test_ca(tmp_path, domain="pinned.invalid"):
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        # OpenSSL 3.6 起对 CA 证书的强制要求（2026-10-11 本机 3.6.4 实测）：
+        # 缺 SubjectKeyIdentifier → `Missing Authority Key Identifier`
+        # 缺 KeyUsage            → `CA cert does not include key usage extension`
+        # 两者都会让 TestPinnedHTTPS 的 sync/async 用例必然失败。
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            critical=False)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False, content_commitment=False,
+                key_encipherment=False, data_encipherment=False,
+                key_agreement=False, key_cert_sign=True, crl_sign=True,
+                encipher_only=False, decipher_only=False),
+            critical=True)
         .sign(ca_key, hashes.SHA256())
     )
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -999,6 +1013,13 @@ def _make_test_ca(tmp_path, domain="pinned.invalid"):
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(domain)]), critical=False)
+        # 叶证书需 SKI + AKI（见上方 CA 处注释）
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+            critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False)
         .sign(ca_key, hashes.SHA256())
     )
     ca_path = tmp_path / "ca.pem"
