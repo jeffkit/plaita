@@ -59,10 +59,13 @@ ALLOWED_SILENT = {
     # 907→923, 931→947, 936→952, 942→958，位点未变。
     # plaita#33（挂起幂等短路 + ResumeProtocolError）整体再下移 49：
     # 923→972, 947→996, 952→1001, 958→1007，位点未变。
-    ("server/flow_worker.py", 972),
-    ("server/flow_worker.py", 996),
-    ("server/flow_worker.py", 1001),
-    ("server/flow_worker.py", 1007),
+    # plaita#34（步内取消中断：`_register_cancel_watch` / `_start_cancel_watcher` /
+    # `_cancel_poll_once` 与 start/resume 路径登记插入，全在 972 之上）后整体再下移 27：
+    # 972→999, 996→1023, 1001→1028, 1007→1034，位点未变。
+    ("server/flow_worker.py", 999),
+    ("server/flow_worker.py", 1023),
+    ("server/flow_worker.py", 1028),
+    ("server/flow_worker.py", 1034),
 }
 
 
