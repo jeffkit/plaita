@@ -16,6 +16,12 @@ C3-3：RedisEventSubscriptionStorage.mark_event_processed 历史上 get→set �
 双双返回 True，同一事件可重复 resume。修复后改 SET NX 去重键（参照
 server/event_filter.py 的既有 SET NX 模式）：跨进程/并发重复 mark 仅首次生效。
 
+C3-4：回写订阅数据键（``data:{sid}``）必须保留 ``store_subscription`` 建立的
+TTL。历史上 mark_event_processed / find_unprocessed_matching_subscriptions 的
+``set`` 无 ex 也无 keepttl——Redis 覆盖写丢弃既有 TTL，data 键从 7 天过期变成
+永久（ttl = -1），被 timeout checker 每 10s 的全量 SCAN 永久扫到。修复后两处
+回写带 ``keepttl=True``。
+
 Redis 相关测试用 fakeredis（共享 FakeServer）模拟，全程无需真实实例。
 """
 
@@ -319,6 +325,53 @@ class TestSubscriptionMarkDedupAtomic(unittest.IsolatedAsyncioTestCase):
             await storage.batch_mark_processed(sid, ["evt-1"])
             subscription = await storage.get_subscription(sid)
             self.assertEqual(subscription.processed_events, {"evt-1", "evt-2"})
+
+
+# ────────────────────────────── C3-4 ──────────────────────────────
+
+class TestSubscriptionDataTTLKept(unittest.IsolatedAsyncioTestCase):
+    """订阅数据键回写保留 store_subscription 建立的 TTL（keepttl）。"""
+
+    KEY_PREFIX = "plaita:subscription:"
+    TTL = 100
+
+    def _storage(self) -> RedisEventSubscriptionStorage:
+        return RedisEventSubscriptionStorage(
+            "redis://localhost:6379/9", key_prefix=self.KEY_PREFIX, ttl=self.TTL)
+
+    async def test_mark_processed_keeps_data_ttl(self):
+        storage = self._storage()
+        with _patch_from_url():
+            subscription = EventSubscription(event_type="e.order", correlation_id="c-1")
+            sid = await storage.store_subscription(subscription)
+            key = f"{self.KEY_PREFIX}data:{sid}"
+            self.assertEqual(await storage.redis.ttl(key), self.TTL)
+
+            self.assertTrue(await storage.mark_event_processed(sid, "evt-1"))
+            self.assertEqual(await storage.redis.ttl(key), self.TTL)
+            # 去重键仍带完整 TTL（未受影响）
+            self.assertEqual(
+                await storage.redis.ttl(f"{self.KEY_PREFIX}processed:{sid}:evt-1"),
+                self.TTL,
+            )
+            # 重复 mark 不再回写，TTL 自然也不变
+            self.assertFalse(await storage.mark_event_processed(sid, "evt-1"))
+            self.assertEqual(await storage.redis.ttl(key), self.TTL)
+
+    async def test_find_unprocessed_matching_keeps_data_ttl(self):
+        storage = self._storage()
+        with _patch_from_url():
+            subscription = EventSubscription(event_type="e.order", correlation_id="c-1")
+            sid = await storage.store_subscription(subscription)
+            key = f"{self.KEY_PREFIX}data:{sid}"
+            with patch.object(
+                RedisEventSubscriptionStorage, "find_matching_subscriptions",
+                return_value=[subscription],
+            ):
+                matched = await storage.find_unprocessed_matching_subscriptions(
+                    Event(event_type="e.order", data={}, correlation_id="c-1"))
+            self.assertEqual([s.subscription_id for s in matched], [sid])
+            self.assertEqual(await storage.redis.ttl(key), self.TTL)
 
 
 if __name__ == "__main__":

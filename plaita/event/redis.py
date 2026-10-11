@@ -457,10 +457,12 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         if not is_new:
             return False
 
-        # 同步订阅数据（best-effort 读侧视图；并发写仍可能互相覆盖，不影响判重）
+        # 同步订阅数据（best-effort 读侧视图；并发写仍可能互相覆盖，不影响判重）。
+        # keepttl=True：不能抹掉 store_subscription 建立的 7 天过期时间，否则
+        # 泄漏的挂起订阅键永不过期，被 timeout checker 每 10s 全量 SCAN 永久扫到。
         subscription.mark_event_processed(event_id)
         subscription_key = f"{self.key_prefix}data:{subscription_id}"
-        await self.redis.set(subscription_key, subscription.model_dump_json())
+        await self.redis.set(subscription_key, subscription.model_dump_json(), keepttl=True)
 
         return True
     
@@ -504,7 +506,7 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
                     
                     # 准备更新
                     subscription_key = f"{self.key_prefix}data:{subscription.subscription_id}"
-                    pipe.set(subscription_key, subscription.model_dump_json())
+                    pipe.set(subscription_key, subscription.model_dump_json(), keepttl=True)
                     
                     result.append(subscription)
             
