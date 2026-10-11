@@ -290,7 +290,13 @@ class TestAffinityHandover:
         assert state.end_time
 
     def test_handover_cap_exceeded_does_not_overwrite_terminal_state(self):
-        """达上限时若执行**已终态**（幽灵执行/人工 cancel）⇒ 不覆写状态。"""
+        """达上限时若执行**已终态** ⇒ 不覆写状态，且**ack 消费**该死信。
+
+        ack 的理由（2026-10-11 生产实测补强）：执行已终态 ⇒ 该消息**永远不可能**
+        再被处理，留在 PEL 只会被对端每 `claim_min_idle_ms`(60s) 反复 XCLAIM
+        （实测 count 5→6→7→8 递增、日志持续刷），是「有界但不停」的噪声。
+        ack 是有损的，但**仅对已终态消息**使用 ⇒ 不会丢任何活工作。
+        """
         from plaita.storage.base import ExecutionState
         from plaita.storage.memory import MemoryExecutionStorage
 
@@ -306,8 +312,9 @@ class TestAffinityHandover:
         w.redis_client.set(w._affinity_handover_key(body), "99")
         task = type("T", (), {"message_id": "9-0", "body": body})()
         w._handover_non_affine(task, q, RuntimeError("x"))
-        assert q.acked == [] and w.redis_client.xlen("q:test") == 0
-        assert storage.load_execution_state("exec-done").status == "completed"
+        assert q.acked == ["9-0"], "已终态 ⇒ ack 消费死信（终止 PEL 自旋）"
+        assert w.redis_client.xlen("q:test") == 0, "且不再重投"
+        assert storage.load_execution_state("exec-done").status == "completed", "不覆写状态"
 
     def test_handover_exhausted_without_execution_id_leaves_pending(self):
         """无 execution_id（老消息/畸形消息）达上限 ⇒ 留 pending，绝不丢消息。"""

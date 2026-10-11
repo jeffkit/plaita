@@ -3653,7 +3653,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 "执行 %s 交接达上限（%s 次）且已是终态 %s——不再交接: %s",
                 execution_id, count, state.status, exc,
             )
-            return True
+            # 已是终态 ⇒ 该消息**永远不可能**再被处理，留在 PEL 只会被对端每
+            # `claim_min_idle_ms`(60s) 反复 XCLAIM（实测 count 5→6→7→8 递增），
+            # 形成「有界但不停」的低频噪声。故此处返回 `"ack"` 让调用方**消费掉**
+            # 这条死信（ack 是有损的，仅对**已终态**消息使用——不会丢任何活工作）。
+            return "ack"
         state.status = "error"
         state.error = {
             "message": (
@@ -3736,7 +3740,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 # ——它 7 天不过期，故对端 reclaim 绕回来时本机仍读到 count > 上限、
                 # 永不再产副本（详见 _terminalize_handover_exhausted 说明；
                 # 注意 start 路径**没有**「已终态即短路」的判据）。
-                if self._terminalize_handover_exhausted(body, count, exc):
+                verdict = self._terminalize_handover_exhausted(body, count, exc)
+                if verdict == "ack":
+                    # 执行**已是终态** ⇒ 该消息永远不可能再被处理。ack 消费掉它，
+                    # 否则它会留在 PEL 被对端每 `claim_min_idle_ms`(60s) 反复
+                    # XCLAIM（实测 count 5→6→7→8 递增）——「有界但不停」的噪声。
+                    # 仅对**已终态**消息 ack（有损操作），不会丢任何活工作。
+                    queue.ack(getattr(task, "message_id"))
+                    logger.error(
+                        "任务 %s 交接达上限（%s/%s）且执行已终态——已 ack 消费该"
+                        "死信，终止自旋: %s",
+                        getattr(task, "message_id", "?"), count,
+                        self.AFFINITY_HANDOVER_MAX, exc,
+                    )
+                    return
+                if verdict:
                     return
                 # 无 execution_id 可终态化（老消息/畸形消息）：退化为留 pending，
                 # 绝不丢消息（对端 reclaim 或死信守卫兜底）。
