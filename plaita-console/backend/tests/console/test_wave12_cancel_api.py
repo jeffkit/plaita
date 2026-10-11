@@ -177,6 +177,50 @@ def test_tenant_scoped_cancel_writes_tenant_namespace_flag(env):
     assert redis.get("plaita:execution:cancel:exec-t") is None
 
 
+def test_running_cancel_broadcasts_to_lease_holder(env):
+    """#34：运行中执行取消时向租约持有者直推 cancel_execution（标志键仍落盘）。"""
+    redis = env
+    client = _client(redis)
+    _put_execution(redis, "exec-push", "running")
+    # 租约值新格式（#50）：{prefix}:{instance_id}:{uuid}
+    redis.set("plaita:execution:lease:exec-push", "resume:worker-abc:deadbeef")
+
+    # pub/sub 无订阅者即丢消息——必须先订阅再触发取消
+    ctl = redis.pubsub()
+    ctl.subscribe("plaita:control:worker-abc")
+    ctl.get_message(timeout=1)  # 订阅确认
+
+    r = client.post("/api/executions/exec-push/cancel", headers=_headers())
+    assert r.status_code == 200
+    assert redis.get("plaita:execution:cancel:exec-push") is not None
+
+    msg = None
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        m = ctl.get_message(timeout=0.2)
+        if m and m.get("type") == "message":
+            payload = m["data"]
+            if isinstance(payload, bytes):
+                payload = payload.decode()
+            msg = json.loads(payload)
+            break
+    assert msg is not None, "未收到 cancel_execution 控制指令"
+    assert msg["command"] == "cancel_execution"
+    assert msg["execution_id"] == "exec-push"
+
+
+def test_running_cancel_without_resolvable_holder_still_writes_flag(env):
+    """旧格式/缺失租约无法反解持有者：推送降级，标志键兜底不抛。"""
+    redis = env
+    client = _client(redis)
+    _put_execution(redis, "exec-nolease", "running")
+
+    r = client.post("/api/executions/exec-nolease/cancel", headers=_headers())
+    assert r.status_code == 200
+    assert redis.get("plaita:execution:cancel:exec-nolease") is not None
+
+
+
 def test_delete_execution_also_clears_cancel_flag(env):
     redis = env
     client = _client(redis)

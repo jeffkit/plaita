@@ -98,6 +98,8 @@ def _task_queue_name() -> str:
 try:
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
+    from plaita.server.execution_lease import holder_instance_id
+    from plaita.server.control import ControlListener
     from plaita.storage.redis import execution_state_ttl_seconds
 except ImportError:  # 平铺布局（cwd=backend）运行时
     import sys as _sys
@@ -107,6 +109,8 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         _sys.path.insert(0, _plaita_root)
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
+    from plaita.server.execution_lease import holder_instance_id
+    from plaita.server.control import ControlListener
     from plaita.storage.redis import execution_state_ttl_seconds
 
 try:
@@ -188,6 +192,44 @@ def _cancel_key(tenant: Optional[str], execution_id: str) -> str:
     本键后终态化。带 TTL 自清理。
     """
     return f"{tenant_namespace(tenant)}:execution:cancel:{execution_id}"
+
+
+# worker 控制通道前缀：单一来源（跨进程 wire 契约，勿本地复制字面量）。
+CONTROL_CHANNEL_PREFIX = ControlListener.CONTROL_CHANNEL_PREFIX
+
+
+def _publish_cancel_to_lease_holder(
+    redis: Redis, tenant: Optional[str], execution_id: str
+) -> None:
+    """向持有该执行租约的 worker 直推 ``cancel_execution`` 指令（best-effort，#34）。
+
+    从租约值反解持有者实例 id（``holder_instance_id``），再投到该实例的控制通道
+    ——worker 收到即 ``execution.cancel()``，在途协作节点/沙箱进程立即收手，不必
+    等取消标志键的下一个轮询周期。一切失败（租约缺失/旧格式无法反解/推送异常）
+    静默降级：取消标志键已是兜底真相源，推送只是加速。推送不设开关：worker 侧
+    的 `PLAITA_DISABLE_CANCEL_INTERRUPT=1`（波次③回滚）会整体忽略本指令，BFF
+    无从得知对端 env，故这里无条件推送。
+    """
+    try:
+        lease_key = f"{tenant_namespace(tenant)}:execution:lease:{execution_id}"
+        lease_value = redis.get(lease_key)
+        if isinstance(lease_value, bytes):
+            lease_value = lease_value.decode()
+        instance_id = holder_instance_id(lease_value)
+        if not instance_id:
+            return
+        redis.publish(
+            f"{CONTROL_CHANNEL_PREFIX}:{instance_id}",
+            json.dumps(
+                {
+                    "command": "cancel_execution",
+                    "execution_id": execution_id,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ),
+        )
+    except Exception as e:  # noqa: BLE001 — 推送失败仍由标志键轮询兜底
+        logger.warning("cancel_execution 指令推送失败（标志键兜底）: %s: %s", execution_id, e)
 
 
 def _is_mechanism_key(key: str) -> bool:
@@ -657,6 +699,9 @@ async def cancel_execution(
             datetime.now().isoformat(),
             ex=CANCEL_FLAG_TTL_SECONDS,
         )
+        # 快速路径（#34）：向租约持有者直推 cancel_execution，在途节点即时中止；
+        # 推送丢失/反解失败时上面的标志键仍是兜底真相源（worker 轮询命中）。
+        _publish_cancel_to_lease_holder(redis, tenant, execution_id)
 
     _audit(request, "execution.cancel", execution_id)
     return {

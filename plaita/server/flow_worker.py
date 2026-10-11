@@ -36,7 +36,7 @@ from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STA
 from plaita.logger import logger
 from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
-from plaita.server.control import ControlMixin, ControlListener
+from plaita.server.control import ControlCommand, ControlMixin, ControlListener
 from plaita.server.alerts import WebhookAlerter
 from plaita.server.metrics import (
     Metric,
@@ -85,7 +85,8 @@ def _cancel_checkpoint_disabled() -> bool:
 
 def _cancel_interrupt_disabled() -> bool:
     """波次③回滚开关（步内中断半边）：PLAITA_DISABLE_CANCEL_INTERRUPT=1 时
-    不启动取消监听线程——回到「只在步界检查取消标志键」的现状语义。"""
+    不启动取消监听线程、也忽略控制通道 ``cancel_execution`` 指令——步内中断
+    两条入口一起关，回到「只在步界检查取消标志键」的现状语义。"""
     return _env_switch("PLAITA_DISABLE_CANCEL_INTERRUPT")
 
 
@@ -858,17 +859,24 @@ class FlowWorker:
                 continue
             # 命中：撤登记（幂等——重复轮询不再对同一执行重复 cancel），
             # 调 execution.cancel() 置位双 Event，在途协作节点当场收手。
-            self._unregister_cancel_watch(execution_id)
-            cancel = getattr(execution, "cancel", None)
-            if callable(cancel):
-                try:
-                    cancel()
-                except Exception:  # noqa: BLE001 — cancel 失败仍有步界兜底
-                    logger.warning(
-                        "取消监听调 execution.cancel() 失败: %s",
-                        execution_id, exc_info=True,
-                    )
-            logger.info("取消监听命中标志键，已请求中止在途节点: %s", execution_id)
+            self._abort_active_execution(execution_id, execution, "取消监听命中标志键")
+
+    def _abort_active_execution(self, execution_id: str, execution: Any, reason: str) -> None:
+        """撤登记并调 ``execution.cancel()`` 中止在途节点（幂等）。
+
+        取消监听（轮询标志键）与控制通道 ``cancel_execution`` 指令共用同一收敛
+        动作；撤登记保证重复触发不再对同一执行重复 cancel。
+        """
+        self._unregister_cancel_watch(execution_id)
+        cancel = getattr(execution, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 — cancel 失败仍有步界兜底
+                logger.warning(
+                    "%s：调 execution.cancel() 失败: %s", reason, execution_id, exc_info=True
+                )
+        logger.info("%s，已请求中止在途节点: %s", reason, execution_id)
 
     # ---- 租约看门狗挂钩（波次②；基类 no-op，RedisFlowWorker 覆写）----
 
@@ -2230,6 +2238,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 redis_client=self.redis_client,
                 instance_id=self._service_info.instance_id if self._service_info else "unknown"
             )
+
+            # 取消传播快速路径（#34）：控制面直推 cancel_execution 给租约持有者，
+            # 命中即在途 execution.cancel()；标志键轮询仍是兜底真相源。
+            self._control_listener.register_handler(
+                "cancel_execution", self._on_cancel_execution_command
+            )
         
         # Redis 日志处理器
         self._enable_redis_logging = enable_redis_logging
@@ -3108,7 +3122,37 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             self.request_drain("remote stop command")
         else:
             self.stop()
-    
+
+    def _on_cancel_execution_command(self, command: ControlCommand) -> None:
+        """控制通道自定义指令 ``cancel_execution``：即时取消在途执行（#34）。
+
+        BFF 取消运行中执行时，除写取消标志键（轮询兜底的真相源）外，还向租约
+        持有者 worker 直推本指令——命中本机活跃登记即 ``execution.cancel()``
+        （在途协作节点/沙箱进程即刻中止），不必等下一个轮询周期。目标不在本机
+        登记表时静默忽略：租约可能在别的 worker，或该执行已结束。
+
+        ``PLAITA_DISABLE_CANCEL_INTERRUPT=1``（波次③回滚开关）下整条指令忽略
+        ——与不启动取消监听线程同义：步内中断全关，只留步界检查点。
+        """
+        execution_id = (command.extra or {}).get("execution_id")
+        if not execution_id:
+            logger.warning("cancel_execution 指令缺少 execution_id，忽略")
+            return
+        if _cancel_interrupt_disabled():
+            logger.info(
+                "cancel_execution 指令已忽略（PLAITA_DISABLE_CANCEL_INTERRUPT=1）: %s",
+                execution_id,
+            )
+            return
+        with self._cancel_watch_lock:
+            entry = self._cancel_watch.get(execution_id)
+        if entry is None:
+            logger.info("cancel_execution 指令目标不在本 worker 活跃登记: %s", execution_id)
+            return
+        self._abort_active_execution(
+            execution_id, entry[0], "控制通道 cancel_execution 指令"
+        )
+
     def _on_status_command(self) -> Dict[str, Any]:
         """响应状态查询命令"""
         status = {

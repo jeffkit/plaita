@@ -10,11 +10,13 @@
 - T-in-2  端到端：真实 worker 步循环 + 真实 code 沙箱节点（``sleep``）——
   并发写取消标志键 → 节点在**远小于自身超时**的时间内被 killpg 中止，
   执行终态化为 ``cancelled``；
-- T-in-3  回滚开关 ``PLAITA_DISABLE_CANCEL_INTERRUPT=1`` 不启动监听线程；
+- T-in-3  回滚开关 ``PLAITA_DISABLE_CANCEL_INTERRUPT=1`` 不启动监听线程，
+  也忽略控制通道 ``cancel_execution`` 指令；
 - T-in-4  协作节点（agentrun）把 ``execution.cancel_event`` 透传给 agentproc
   ``RunOptions``（用 mock 断言，不真跑 agent CLI）；
 - T-in-5  无 redis 客户端的内存 worker 登记为空转、``_cancel_poll_once`` no-op。
 """
+import json
 import time
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +30,7 @@ pytest.importorskip("redis")
 import fakeredis
 
 from plaita.core.executor import FlowExecution
+from plaita.server.control import ControlCommand
 from plaita.server.flow_worker import FlowWorker, RedisFlowWorker
 from plaita.server.tenant_context import reset_current_tenant, set_current_tenant
 from plaita.storage.base import ExecutionState
@@ -87,13 +90,13 @@ _CANCEL_KEY = "plaita:execution:cancel:exec-in-1"
 
 def _make_worker(fake_redis, storage=None, flow_storage=None, **kwargs):
     kwargs.setdefault("lease_ttl_seconds", 60)
+    kwargs.setdefault("enable_registry", False)
     return RedisFlowWorker(
         redis_url="redis://localhost:6379/15",
         queue_name="test:wave3-in-node",
         execution_storage=storage if storage is not None else MemoryExecutionStorage(),
         flow_storage=flow_storage if flow_storage is not None else MemoryFlowStorage(),
         redis_client=fake_redis,
-        enable_registry=False,
         enable_redis_logging=False,
         **kwargs,
     )
@@ -176,13 +179,99 @@ class TestCancelWatcherUnit:
         assert execution.cancel.call_count == 1
 
 
+class TestControlChannelCancel:
+    """控制通道 cancel_execution 指令（#34）：向租约持有者即时取消在途执行。"""
+
+    def test_handler_registered_with_control_listener(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _make_worker(fake, enable_registry=True)
+        assert worker._control_listener is not None
+        assert "cancel_execution" in worker._control_listener._handlers
+
+    def test_control_listener_dispatches_cancel_command(self):
+        """命令名 wiring：控制通道收到 cancel_execution → 活跃执行被 cancel。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _make_worker(fake, enable_registry=True)
+        execution = MagicMock()
+        worker._register_cancel_watch("exec-ctl", execution)
+
+        worker._control_listener._handle_message(
+            json.dumps({"command": "cancel_execution", "execution_id": "exec-ctl"})
+        )
+        assert execution.cancel.call_count == 1
+        assert "exec-ctl" not in worker._cancel_watch
+
+    def test_command_cancels_registered_execution(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _make_worker(fake)
+        execution = MagicMock()
+        worker._register_cancel_watch("exec-cmd", execution)
+
+        worker._on_cancel_execution_command(
+            ControlCommand.from_dict(
+                {"command": "cancel_execution", "execution_id": "exec-cmd"}
+            )
+        )
+        assert execution.cancel.call_count == 1
+        # 撤登记（幂等）：重复指令不再对同一执行重复 cancel
+        assert "exec-cmd" not in worker._cancel_watch
+        worker._on_cancel_execution_command(
+            ControlCommand.from_dict(
+                {"command": "cancel_execution", "execution_id": "exec-cmd"}
+            )
+        )
+        assert execution.cancel.call_count == 1
+
+    def test_command_ignored_when_interrupt_switch_set(self, monkeypatch):
+        """波次③回滚开关同时关掉控制通道快速路径（不然回滚契约被静默破坏）。"""
+        monkeypatch.setenv("PLAITA_DISABLE_CANCEL_INTERRUPT", "1")
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _make_worker(fake)
+        execution = MagicMock()
+        worker._register_cancel_watch("exec-switch", execution)
+
+        worker._on_cancel_execution_command(
+            ControlCommand.from_dict(
+                {"command": "cancel_execution", "execution_id": "exec-switch"}
+            )
+        )
+        execution.cancel.assert_not_called()
+        assert "exec-switch" in worker._cancel_watch
+
+    def test_command_for_unregistered_execution_is_noop(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _make_worker(fake)
+        other = MagicMock()
+        worker._register_cancel_watch("exec-other", other)
+
+        worker._on_cancel_execution_command(
+            ControlCommand.from_dict(
+                {"command": "cancel_execution", "execution_id": "exec-missing"}
+            )
+        )
+        other.cancel.assert_not_called()
+        assert "exec-other" in worker._cancel_watch
+
+    def test_command_without_execution_id_is_noop(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _make_worker(fake)
+        # 缺 execution_id：忽略且不抛
+        worker._on_cancel_execution_command(
+            ControlCommand.from_dict({"command": "cancel_execution"})
+        )
+
+
 class TestInNodeCancelEndToEnd:
     """端到端：真实 worker 步循环 + 真实 code 沙箱长跑节点。"""
 
     def test_long_running_code_node_is_killed_far_before_its_timeout(self, monkeypatch):
         # subprocess 沙箱墙钟放到 60s——若取消不生效，测试会挂 60s 才超时；
         # 取消生效则应在几秒内被 killpg 中止。
-        monkeypatch.setenv("PLAITA_SANDBOX_TIMEOUT", "60")
+        # 墙钟是 import 期常量（plaita/node/code.py:149）：环境变量对已 import 的
+        # 模块无效，只能 patch 模块常量。
+        from plaita.node import code as code_mod
+
+        monkeypatch.setattr(code_mod, "SANDBOX_SUBPROCESS_TIMEOUT", 60)
 
         fake = fakeredis.FakeRedis(decode_responses=True)
         storage = MemoryExecutionStorage()
@@ -221,6 +310,65 @@ class TestInNodeCancelEndToEnd:
         state = storage.load_execution_state("exec-in-1")
         assert state.status == "cancelled", f"期望 cancelled，实际 {state.status}"
         assert state.end_time is not None
+        # 租约正确释放（finally）
+        assert fake.get("plaita:execution:lease:exec-in-1") is None
+
+    def test_control_command_kills_in_flight_node(self, monkeypatch):
+        """#34 端到端：控制通道直推 ``cancel_execution`` 接通在途节点击杀。
+
+        只启动控制监听、**不启动标志键轮询线程**——所以「节点在自身 60s 超时
+        前被中止」只可能来自控制指令（BFF 同款：写标志键兜底 + 直推指令）。
+        沙箱墙钟是 import 期常量（``plaita/node/code.py:149``）：``PLAITA_SANDBOX_TIMEOUT``
+        环境变量对本测试无效（autouse fixture 已 import 该模块），patch 模块常量
+        才能让「60s vs <5s」具备判别力（真实默认 10s < 20s，阈值必须压到默认以下）。
+        """
+        from plaita.node import code as code_mod
+
+        monkeypatch.setattr(code_mod, "SANDBOX_SUBPROCESS_TIMEOUT", 60)
+
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(_LONG_RUNNING_FLOW)
+        _save_running_state(storage)
+
+        worker = _make_worker(fake, storage, flow_storage, enable_registry=True)
+        worker.start_control_listener()
+        channel = f"plaita:control:{worker._service_info.instance_id}"
+        try:
+            import json
+            import threading
+            from datetime import datetime
+
+            def _push_command():
+                time.sleep(2.0)  # 等节点确实进入 sleep
+                # BFF 同款两件套：标志键（兜底真相源，终态化据此判 cancelled）
+                # + 控制指令（快速路径，当场击杀进程组）
+                fake.set(_CANCEL_KEY, "ts", ex=7 * 86400)
+                fake.publish(
+                    channel,
+                    json.dumps({
+                        "command": "cancel_execution",
+                        "execution_id": "exec-in-1",
+                        "timestamp": datetime.now().isoformat(),
+                    }),
+                )
+
+            t = threading.Thread(target=_push_command, daemon=True)
+            t.start()
+
+            start = time.monotonic()
+            worker.resume_flow("f-cancel", "exec-in-1", "continue")
+            elapsed = time.monotonic() - start
+            t.join(timeout=2)
+        finally:
+            worker.stop_control_listener()
+
+        assert elapsed < 5, f"控制指令未在途中断，耗 {elapsed:.1f}s（节点超时 60s）"
+        state = storage.load_execution_state("exec-in-1")
+        assert state.status == "cancelled", f"期望 cancelled，实际 {state.status}"
+        assert state.end_time is not None
+        assert "exec-in-1" not in worker._cancel_watch
         # 租约正确释放（finally）
         assert fake.get("plaita:execution:lease:exec-in-1") is None
 

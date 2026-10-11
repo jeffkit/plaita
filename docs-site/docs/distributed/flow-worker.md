@@ -112,6 +112,35 @@ except 终态化成 error，一次重复投递就把可恢复的挂起执行永�
 - **边界**：重试覆盖的是「消息处理中步进失败」；start 消息的首节点（尚未落盘）
   失败本就走 RuntimeError → 重投 → 从头重跑（见可靠性边界的崩溃恢复语义）。
 
+## 运行中执行的取消（波次①/③ + #34） {#运行中执行的取消}
+
+控制面对**运行中**执行只表达意图、不写状态：`POST /executions/{id}/cancel` 落取消
+标志键 `{ns}:execution:cancel:{id}`（7 天 TTL 自清理）并保留 `resume_type=cancel`
+消息（worker 全灭后的死人开关），**不再直写** `status=cancelled`——推进中的 worker
+每步会把内存 state 覆写回 running，直写等于覆写战争起点。挂起执行的取消保持旧路径
+（直写 cancelled + 入队，EventNode 的 `on_cancel` 不续跑到 end）；终态执行幂等忽略。
+
+worker 侧三条消费路径都收敛到同一个动作 `execution.cancel()`（同时置位执行级
+`cancel_requested` 与节点级 `cancel_event`）：
+
+- **步界检查点**：start/resume 入口与步循环顶 `EXISTS` 标志键，命中即终态化
+  `cancelled`（context = 取消点前一步 checkpoint）。回滚开关
+  `PLAITA_DISABLE_CANCEL_CHECKPOINT=1`。
+- **取消监听线程（波次③）**：对活跃执行（持租约推进窗口）每 `cancel_poll_seconds`
+  （默认 1s）轮询同一标志键，命中当即中止在途节点——code 沙箱等待循环 killpg
+  进程树，协作节点（agentrun 经 agentproc）消费 `cancel_event` 分级击杀进程组，
+  不再白等满 `timeout_secs`。回滚开关 `PLAITA_DISABLE_CANCEL_INTERRUPT=1`。
+- **控制通道指令（#34）**：BFF 从租约值反解持有者 instance id，向
+  `plaita:control:{instance_id}` 直推 `cancel_execution`；worker（注册表档）注册的
+  handler 命中本机活跃登记即 `execution.cancel()`，省掉一个轮询周期的延迟。目标不在
+  本机登记表（租约已换手/执行已结束）时静默忽略。同一回滚开关
+  `PLAITA_DISABLE_CANCEL_INTERRUPT=1` 下本指令整体忽略——步内中断两条入口
+  （监听线程 + 控制通道）一起关，只留步界检查点。
+
+取消标志键始终是**兜底真相源**：指令丢失、worker 重启、租约换手后仍由步界检查点
+消费。终态化判据同时看「异常链含 `FlowCancelledException`」与「标志键仍命中」——
+协作节点自杀抛的是普通异常，类型上无取消特征，以键为准最稳。
+
 ## 运行中改定义（flow 定义指纹，2026-10 二波） {#运行中改定义}
 
 worker 的流程定义 TTLCache 有 300s 窗口、console engine_sync 可直接覆盖 Redis

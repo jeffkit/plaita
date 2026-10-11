@@ -59,10 +59,16 @@ ALLOWED_SILENT = {
     # 907→923, 931→947, 936→952, 942→958，位点未变。
     # plaita#33（挂起幂等短路 + ResumeProtocolError）整体再下移 49：
     # 923→972, 947→996, 952→1001, 958→1007，位点未变。
-    ("server/flow_worker.py", 972),
-    ("server/flow_worker.py", 996),
-    ("server/flow_worker.py", 1001),
+    # plaita#34（取消监听收敛到 `_abort_active_execution` + 控制通道
+    # cancel_execution 接线）后再整体下移 34：
+    # 972→1006, 996→1030, 1001→1035, 1007→1041，位点未变。
+    # #34 复审（控制通道快速路径补波次③回滚开关）在 `_cancel_interrupt_disabled`
+    # docstring 加 1 行后再整体下移 1：1006→1007, 1030→1031, 1035→1036,
+    # 1041→1042，位点未变。
     ("server/flow_worker.py", 1007),
+    ("server/flow_worker.py", 1031),
+    ("server/flow_worker.py", 1036),
+    ("server/flow_worker.py", 1042),
 }
 
 
