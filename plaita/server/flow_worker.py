@@ -585,6 +585,12 @@ class TaskNotForThisWorker(RuntimeError):
     deliveries +1——两 worker 环境下 60s 一轮，5 轮即触顶 max_deliveries
     → 误死信（2026-10-06 双机实测：非亲和任务被让出 5 次后进 DLQ）。
     重入队新副本把计数清零，交接无损耗。
+
+    **但有界**（2026-10-11 无限交接风暴）：重入队使 `times_delivered` 恒为 1
+    ⇒ `max_deliveries` 永不触发 ⇒ 若判据不可满足，交接**没有**终止条件。
+    故交接次数由 worker 侧按 `execution_id` 计数约束（`AFFINITY_HANDOVER_MAX`），
+    达上限即**终态化 error**（可观测），不再交接——见
+    `_handover_non_affine` / `_terminalize_handover_exhausted`。
     """
 
 
@@ -754,6 +760,24 @@ class FlowWorker:
     # 「预算机制整体失效」时才兜住；正常执行永远碰不到。
     NODE_RETRY_TOTAL_MAX = 100
     NODE_RETRY_TOTAL_TTL_SECONDS = 7 * 86400
+
+    # 不亲和交接的**有界上限**（2026-10-11 无限交接风暴，plaita#68 等）。
+    #
+    # 事故机制：`aa74ab6` 的宿主归属判据对**每台** worker 都成立（`runs/` 两边
+    # 都在、run 目录两边都没建）⇒ 交接永远无法让判据变为满足；而每次交接都是
+    # `ack` 原条 + `enqueue_task` **新 msg id** ⇒ `times_delivered` 恒为 1 ⇒
+    # 队列层 `max_deliveries=5`（`task_queue.py`）**永不触发** ⇒ 无界自锁
+    # （实测双机各 2600+ 次、持续 ≥85 分钟，日志 26 MB）。
+    #
+    # 因此「同一执行被交接几次」必须由 worker 侧**独立计数**约束，且达上限即
+    # **终态化**（不是留 pending——留 pending 的消息仍会在 `claim_min_idle_ms`
+    # =60s 后被对端 `XCLAIM` 抢回，实测 2356 次留 pending 全部被回收，是无限
+    # reclaim 循环，不是界）。
+    AFFINITY_HANDOVER_MAX = 3
+    # 计数键 TTL 必须**远长于**回收周期（claim_min_idle_ms=60s）：TTL 短于回收
+    # 周期时计数会在一圈交接回来前过期，重置为 1 ⇒ 又是无界（旧实现的 30s
+    # 布尔标记即如此：60s > 30s）。取 7 天与其余计数键同款（自清理）。
+    AFFINITY_HANDOVER_TTL_SECONDS = 7 * 86400
 
     def _node_retry_total_key(self, execution_id: str) -> str:
         """兜底总重试计数键：``{ns}:execution:noderefetch:{id}``。
@@ -2936,7 +2960,15 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             return True
         execution_id = body.get("execution_id")
         if not execution_id:
-            # start 任务入队时还没有 execution_id，无执行可保护。
+            # 消息体没有 execution_id ⇒ 无执行可保护（放行死信）。
+            # 更正（2026-10-11）：此处旧注释写「start 任务入队时还没有
+            # execution_id」**与生产现实不符**——console 在**提交时就铸造**
+            # execution_id 并随消息透传（`executions.py`），实测生产在途消息
+            # 的 body 全部带 execution_id。该陈旧注释曾被误引为「start 消息
+            # 无 execution_id ⇒ 按执行维度计数必然恒为 1」的错误依据；实际上
+            # 新副本**原样重投同一 body**（`enqueue_task(..., dict(body))`），
+            # execution_id 不变，是可用的稳定计数维度。此处保留早退仅作为
+            # 「无 id 的老消息/畸形消息」的兜底。
             return True
 
         token = set_current_tenant(body.get("tenant_id"))
@@ -3394,22 +3426,24 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         probe = os.path.dirname(head)
                         break
                     head = os.path.dirname(head)
-                # ── 宿主归属补判（2026-10-11，plaita#62/#63/#65 根因）──────────
-                # 只查「仓根」不够：双机间有 `/Users/kong/projects → /home/ubuntu/
-                # projects` 软链，**仓根两边都能解析**，于是亲和判定放行；但
-                # `<repo>/.flowcast/runs/<run_id>` 是**建它的那台机器本地**的，
-                # 对端根本没有 ⇒ 对端领到后 `sync_in` 必失败
-                # （`宿主临时索引 add 失败: cannot change to ... No such file`），
-                # 实测 VM 侧单条执行刷 45 次。
-                # 补判：**run 目录已存在但本机看不到** ⇒ 该 run 属别的宿主，让给它。
-                # 注意只在「对端可见的同名仓根存在」时才可能走到这里；run_dir 首次
-                # 运行时两边都不存在（新 run），此时不拦（留给派发方本机领取）。
-                if os.path.isdir(os.path.dirname(path)):
-                    if not os.path.exists(path):
-                        # run 的父目录（runs/）在 = 该仓确实在跑 run，但本 run 目录
-                        # 不在 ⇒ 属于别的宿主
-                        return (f"run_dir={path} 的父目录存在而本 run 目录不存在"
-                                "（run 属别的宿主）")
+                # ── 已删除的「宿主归属补判」（2026-10-11 事故，勿再加回）──────
+                # `aa74ab6` 曾在此加过 `isdir(dirname(path)) and not exists(path)
+                # ⇒ 判不亲和（run 属别的宿主）`。该判据**不可满足且必然自锁**：
+                #   1. keeper 只**预告** run_dir、不创建它（`issue_keeper/keeper.py`
+                #      拼路径后直接 `start_execution`，中间无 `mkdir`），目录由执行
+                #      期才建 ⇒ 对「尚未开跑的 run」，`runs/` 在**两台机器都**存在而
+                #      `run_dir` 在**两台机器都不存在**，于是**每台** worker（含单机）
+                #      都判「不亲和」；
+                #   2. 目录只能由「被放行者」创建，而放行又要求目录已存在 ⇒ 鸡生蛋；
+                #      交接**不产生目录** ⇒ 判据永远无法被满足；
+                #   3. 叠加 `_handover_non_affine` 每次 `enqueue_task` 铸**新 msg id**
+                #      ⇒ `times_delivered` 恒为 1 ⇒ `max_deliveries=5` 永不触发 ⇒
+                #      **无界自锁**（实测双机各 2600+ 次交接、持续 ≥85 分钟）。
+                # 根本原因：「目录不存在」**无法**区分「属别的宿主」与「还没建」，
+                # 且经 `/Users/kong/projects → /home/ubuntu/projects` 软链后两边解析
+                # 到同一条路径 ⇒ 宿主归属信号在本层**根本不可得**。归属应由派发侧
+                # 注入字段表达（见 `docs/` 规划），不在 worker 侧用目录反推。
+                # 故此处**退回**「查仓根是否存在」的原判据（：3396 之前的 probe）。
                 if not os.path.exists(probe):
                     return f"{field}={path} 在本机不存在（本机无此仓路径）"
                 continue
@@ -3484,16 +3518,194 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         )
         return False
 
+    def _affinity_handover_key(self, body: Dict[str, Any]) -> str:
+        """交接计数键：按 **execution_id** 维度（全局稳定，见下）。
+
+        为什么是 `execution_id` 而不是 body 指纹/`run_dir`：
+
+        - 新副本**原样重投同一 body**（`enqueue_task(..., dict(body))`），
+          `execution_id` 不变 ⇒ 能跨「新 msg id」连续累计，正是旧实现缺的维度；
+        - `run_dir` 是 keeper 的私有约定，不是 plaita 协议字段；
+        - body 指纹在带 `delivery_count`/临时字段时可能漂移，退化为键空间爆炸。
+
+        退化契约：body **无** `execution_id`（老消息/畸形消息）时退回 body 指纹
+        ——与旧实现同款键，仍**足以**抑制同副本立刻回弹（TTL 由 30s 提到 7 天）；
+        此时计数只在「同 body」内有效，不同 body 的同一任务不会被合并计数。
+        """
+        execution_id = body.get("execution_id")
+        if isinstance(execution_id, str) and execution_id.strip():
+            return (f"{tenant_namespace(current_tenant())}"
+                    f":execution:affinityhandover:{execution_id.strip()}")
+        import hashlib as _hl
+        digest = _hl.sha1(
+            json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        return f"plaita:affinity:handover:{digest}"
+
+    def _record_affinity_handover(self, key: str) -> Optional[int]:
+        """自增交接计数（INCR + TTL），返回自增后的值（含本次）。
+
+        TTL 取 `AFFINITY_HANDOVER_TTL_SECONDS`（7 天）——**必须远长于**回收
+        周期 `claim_min_idle_ms`(60s)：TTL 短于回收周期时计数会在同一任务绕
+        一圈回来前过期 ⇒ 计数重置为 1 ⇒ 「有界」形同虚设（旧实现 30s 布尔标记
+        即此病：60s > 30s，抑制间歇失效、事故时约 47% 未命中）。
+
+        **返回 None = 计数不可用**（区别于「计数=1」）。调用方**必须**把
+        None 当「界已失效 ⇒ 不再交接」处理——见 `_handover_non_affine`。
+
+        为什么这里**必须 fail-closed**（2026-10-11 验收者指出的部署阻断级洞）：
+        本计数是自锁场景下**唯一的**天然终止条件（`max_deliveries` 因「新副本
+        delivery 恒为 1」够不着）。计数一旦失效而仍按「未知 = 1」放行，界就
+        等于不存在 ⇒ 无界风暴原样复发。实测（修复前）：`pipeline()` 抛错时
+        **500 次交接 / 500 份副本**、键被写成非整数（`WRONGTYPE` 键污染）时
+        **50/50 无界**。
+
+        ⚠️ **与本仓 `noderetry` 的同款 `return 1` 形似而实不同**：那里
+        `return 1` 只是「少拦一次重试」，另有总上限/终态等兜底；这里计数是
+        **唯一**终止条件 ⇒ 「保守不误杀」在此恰是**危险方向**。故本方法
+        与其他计数助手**刻意不一致**，勿为「统一风格」改回 `return 1`。
+
+        无 redis 客户端（内存 worker / 直连单测）→ 同样返回 None（fail-closed）。
+        **生产可达性已核实（2026-10-11 验收要求）**：`RedisFlowWorker.__init__`
+        的 `redis_client = redis_client or Redis.from_url(redis_url)` 保证实例
+        恒有真客户端，`run()` 消费循环也只能经该实例进入 ⇒ 本分支在生产
+        **不可达**，只有 `__new__` 骨架 / 内存 worker / 直连单测会走到。仍按
+        fail-closed 处理是**纵深防御**：即便将来有人绕开 `__init__`，也不会
+        静默退化成无界。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "incr"):
+            logger.error(
+                "本机无可用 redis 客户端，交接计数不可用——"
+                "界已失效，本次**不再交接**（退化为留 pending）: %s", key,
+            )
+            return None
+        try:
+            pipe = redis_client.pipeline(transaction=True)
+            pipe.incr(key)
+            pipe.expire(key, self.AFFINITY_HANDOVER_TTL_SECONDS)
+            return int(pipe.execute()[0])
+        except Exception as e:  # noqa: BLE001 — ★ fail-closed：界失效 ⇒ 不交接
+            logger.error(
+                "交接计数自增失败（含 WRONGTYPE 键污染/瞬断）——**界已失效，"
+                "本机不再交接**（退化为留 pending，等对端 reclaim 或运维介入）: "
+                "%s: %s", key, e,
+            )
+            return None
+
+    def _terminalize_handover_exhausted(
+        self, body: Dict[str, Any], count: int, exc: Exception
+    ) -> bool:
+        """交接达上限：把执行**终态化 error**（可观测），返回是否已终态化。
+
+        为什么是「终态化」而不是「留 pending」（裁决见 review-verdict §A3）：
+
+        - 「留 pending」**不是界**：消息留在 PEL 里，`claim_min_idle_ms`(60s)
+          后被对端 `XCLAIM` 抢回（实测 2356 次留 pending 全部被回收，风暴持续
+          85+ 分钟）⇒ 只是把「无限交接」换成「无限 reclaim」，两者都无终止条件；
+        - 终态化的**真实收口机制**（已逐条核对源码，勿想当然）：
+          1. **计数键是终止的真正承担者**：达上限后本机**不 ack、不重投**，
+             且计数键 TTL(7 天) 远长于回收周期 ⇒ 消息即便被对端 reclaim 绕回，
+             本机读到的计数仍 > 上限 ⇒ **永远不再产新副本**。对端首次收到时
+             计数从 1 起算、同样有界 ⇒ 总交接次数上界 ≈ 上限 × 机器数；
+          2. **但不要声称「对端 reclaim 后会被终态短路」**——那是 **resume**
+             路径的语义（`resume_flow` 的 `state_status in ("completed",
+             "error","cancelled")` 分支），**start 路径没有**这条判据：核对
+             `start_flow` 确认 `status="running"` 行是**无条件重写**的，入口
+             只查**取消标志**（`_cancel_requested`），不查终态状态；
+          3. 故**兜底边界**如实为：那条绕回的消息最多被对端再消费一次
+             （届时按宽松原则能跑就跑，跑不起来是**有界**的一次失败），
+             此后不再产生副本。**「次数有上界」即「有界」，本修复正是把
+             无界自旋收敛为有界**——它不保证任务不再被执行；
+          4. 死信守卫（`_dead_letter_guard`）见终态 → 放行死信，不再重入队。
+        - 可观测：error 里带 `affinity_handovers`/`affinity_reason`，运维与
+          console 一眼看出「没有任何宿主能跑该任务」，而非静默空转。
+
+        ⚠️ **边界声明**：真正消除误判需派发侧注入权威归属字段
+        （`target_worker`）——那是独立改动，且需先定义「哪个 repo 归哪台」。
+
+        终态化前先读状态：**已经终态**（人工已 cancel / 已被别的路径终态化）
+        不覆写，直接按「无需再交接」处理。读不到状态（None/异常）时降级为
+        **不写盘**但返回 True —— 达上限即**不再重投**是安全方向（宁可让 keeper
+        的宽限线接手，也不再产副本）。
+        """
+        execution_id = body.get("execution_id")
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            return False  # 无执行 id：无从终态化，退化为留 pending（由调用方处理）
+        execution_id = execution_id.strip()
+        try:
+            state = self.execution_storage.load_execution_state(execution_id)
+        except Exception as e:  # noqa: BLE001 — 读失败不覆写状态，但仍停止重投
+            logger.error(
+                "执行 %s 交接达上限但读执行状态失败——不再重投（留 pending 待"
+                "运维介入），不覆写状态: %s", execution_id, e,
+            )
+            return True
+        if state is None:
+            logger.error(
+                "执行 %s 交接达上限（%s 次）但执行状态不存在（可能已被 console "
+                "清理/从未创建）——不再重投，留 pending 待运维介入: %s",
+                execution_id, count, exc,
+            )
+            return True
+        if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+            logger.error(
+                "执行 %s 交接达上限（%s 次）且已是终态 %s——不再交接: %s",
+                execution_id, count, state.status, exc,
+            )
+            return True
+        state.status = "error"
+        state.error = {
+            "message": (
+                f"任务在 {count} 次 worker 间交接后仍不亲和：没有任何 worker "
+                f"能认领该任务（repo/run_dir 路径在全部宿主上都不可用）。"
+                f"最后一次不亲和原因：{exc}"
+            ),
+            "type": "AffinityHandoverExhausted",
+            "affinity_handovers": count,
+            "affinity_reason": str(exc),
+        }
+        state.end_time = datetime.now().isoformat()
+        try:
+            self._persist_state_or_raise(
+                execution_id, state, "affinity_handover_exhausted"
+            )
+        except Exception as e:  # noqa: BLE001 — 写盘失败不丢消息，但仍不重投
+            logger.error(
+                "执行 %s 交接达上限但终态化落盘失败——不再重投（留 pending 待"
+                "运维介入）: %s", execution_id, e,
+            )
+            return True
+        logger.error(
+            "执行 %s 交接达上限（%s/%s）——判定「无宿主可跑」，已终态化 error，"
+            "不再交接（终止自旋）。最后一次不亲和原因: %s",
+            execution_id, count, self.AFFINITY_HANDOVER_MAX, exc,
+        )
+        return True
+
     def _handover_non_affine(self, task: Any, queue: Any, exc: Exception) -> None:
         """把不亲和的 task 交接给其他 worker：ack 原条 + 重入队同体新副本。
 
         重入队而非留 pending 的原因见 TaskNotForThisWorker docstring（留
         pending 会被对端反复 XCLAIM 虚增 delivery → 误死信）。
 
-        **防 ping-pong**：新副本有极小概率又被本机抢到（竞争）。用一个短
-        TTL 的「本机刚让过此消息」标记抑制——命中则改成留 pending（让对端
-        按正常 reclaim 拿），避免两机无限交接。标记按 body 指纹（消息体
-        无稳定 id 可用时应退化为整体序列化）。
+        **有界性**（2026-10-11 无限交接风暴后的硬约束）：交接次数按
+        `execution_id` 计数（`INCR` + 7 天 TTL），达 `AFFINITY_HANDOVER_MAX`
+        即**终态化 error**、不再 ack/重投——见 `_terminalize_handover_exhausted`
+        的裁决说明（「留 pending」不是界）。
+
+        **旧实现的病**（勿改回布尔标记）：`SET key 1 EX 30` + `EXISTS`——
+        标记 TTL 30s 短于回收周期 60s，抑制间歇失效；且判据不可满足时
+        交接永无终止条件，而每次 `enqueue_task` 铸新 msg id 使
+        `times_delivered` 恒为 1、`max_deliveries` 永不触发 ⇒ 无界自旋。
+
+        **fail-closed 契约**（2026-10-11 验收者指出的部署阻断级洞）：计数
+        不可用（`_record_affinity_handover` 返回 `None`：redis 瞬断 /
+        `WRONGTYPE` 键污染 / 无 redis 客户端）时**不再交接**，退化为留
+        pending（不 ack、不重投、绝不丢消息）。**不得**把「计数不可用」当成
+        「计数 = 1」——本计数是自锁场景下唯一的终止条件，按 1 放行即等于
+        无界（实测 500 次交接 / 500 份副本）。此处**不**终态化：计数失效是
+        本机基础设施故障，不是「该执行无宿主可跑」，误终态化会判死可跑任务。
         """
         body = getattr(task, "body", None)
         if not isinstance(body, dict):
@@ -3502,21 +3714,48 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         getattr(task, "message_id", "?"), exc)
             return
         try:
-            import hashlib as _hl
-            key = "plaita:affinity:handover:" + _hl.sha1(
-                json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
-            ).hexdigest()
-            # 若本机刚让过这条（标记在）→ 说明可能 ping-pong，改为留 pending
-            if self.redis_client.exists(key):
-                logger.info("任务 %s 不亲和（本机刚让过），留 pending 交对端 reclaim: %s",
-                            getattr(task, "message_id", "?"), exc)
+            key = self._affinity_handover_key(body)
+            count = self._record_affinity_handover(key)
+            if count is None:
+                # ★ fail-closed（2026-10-11 验收者的部署阻断级洞）：计数不可用
+                # ⇒ **界不可用** ⇒ 绝不能按「未知 = 1」放行（那等于无界）。
+                # 与「拿不到 body」同款退化为留 pending：不 ack、不重投，
+                # **绝不丢消息**（消息留在 PEL，由对端 reclaim 或运维介入）。
+                # 注意：此处**不**终态化——计数失效是**本机基础设施故障**，
+                # 不是「该执行无宿主可跑」；误终态化会把可跑的任务判死。
+                logger.error(
+                    "任务 %s 的交接计数不可用（界已失效）——本机不再交接，"
+                    "退化为留 pending（绝不丢消息；请查 redis 瞬断/键污染）: %s",
+                    getattr(task, "message_id", "?"), exc,
+                )
                 return
-            self.redis_client.set(key, "1", ex=30)
+            if count > self.AFFINITY_HANDOVER_MAX:
+                # 达上限：**不 ack、不重投**——ack 会移出 PEL 让消息凭空消失，
+                # 重投会让自旋继续。留 pending + 终态化 error：终态化的作用是
+                # **可观测**（运维立刻看见「无宿主可跑」），而**终止自旋靠计数键**
+                # ——它 7 天不过期，故对端 reclaim 绕回来时本机仍读到 count > 上限、
+                # 永不再产副本（详见 _terminalize_handover_exhausted 说明；
+                # 注意 start 路径**没有**「已终态即短路」的判据）。
+                if self._terminalize_handover_exhausted(body, count, exc):
+                    return
+                # 无 execution_id 可终态化（老消息/畸形消息）：退化为留 pending，
+                # 绝不丢消息（对端 reclaim 或死信守卫兜底）。
+                logger.error(
+                    "任务 %s 交接达上限（%s/%s）但无 execution_id 可终态化——"
+                    "不再交接，留 pending 待运维介入: %s",
+                    getattr(task, "message_id", "?"), count,
+                    self.AFFINITY_HANDOVER_MAX, exc,
+                )
+                return
             # 先 ack 原条（移出 PEL、防对端再抢），再重入队新副本
             queue.ack(getattr(task, "message_id"))
             enqueue_task(self.redis_client, self.queue_name, dict(body))
-            logger.info("任务 %s 与本机不亲和，已交接（ack+重入队）给其他 worker: %s",
-                        getattr(task, "message_id", "?"), exc)
+            logger.info(
+                "任务 %s 与本机不亲和，已交接（ack+重入队）给其他 worker"
+                "（第 %s/%s 次）: %s",
+                getattr(task, "message_id", "?"), count,
+                self.AFFINITY_HANDOVER_MAX, exc,
+            )
         except Exception as e:  # noqa: BLE001 — 交接失败退化为留 pending（绝不丢消息）
             logger.warning("不亲和任务交接失败（退化为留 pending）: %s: %s", e, exc)
 
@@ -3788,6 +4027,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 # 每次让 deliveries +1，两 worker 下 5 轮即触顶 → 误死信
                 # （2026-10-06 双机实测）。交接无损耗，且新副本仍会回到
                 # 共享队列由亲和的 worker 领走。
+                # **有界**：交接次数按 execution_id 计数（AFFINITY_HANDOVER_MAX），
+                # 达上限即终态化 error——否则「重入队使 delivery 恒为 1」会让
+                # 交接永无终止条件（2026-10-11 无限交接风暴，见
+                # _handover_non_affine 与 _terminalize_handover_exhausted）。
                 queue.note_lease_conflict()  # 复用「让给别人」计数口径
                 self._handover_non_affine(task, queue, exc)
             except ExecutionLeaseError as exc:

@@ -42,6 +42,10 @@ def test_mechanism_keys_are_excluded():
     assert f("plaita:execution:g1wakeups:abc")   # ← 2026-10-10 补（#73 补丁，值守引入）
     assert f("plaita:execution:index")           # ← 2026-10-07 补（#40）
     assert f("plaita:execution:index:ready")     # ← 同上（裸字符串 "1"）
+    # 2026-10-11 补：不亲和交接计数（无限交接风暴修复）——裸整数，且**首次**把
+    # 交接计数从 `plaita:affinity:handover:*`（不在投影面）挪到执行维度 ⇒ 新增排除。
+    assert f("plaita:execution:affinityhandover:abc")
+    assert f("plaita:tenant-a:execution:affinityhandover:abc")
     assert f("plaita:flow:queue:v2:dlq")
 
 

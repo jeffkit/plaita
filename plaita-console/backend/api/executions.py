@@ -242,6 +242,12 @@ def _is_mechanism_key(key: str) -> bool:
         # 教训：新增机制键**必须**同步登记；`test_console_mechanism_keys.py`
         # 的自动防线会扫 worker 源码，漏登记即 CI 红。
         or ":execution:nofail:" in key
+        # 同类第九次（2026-10-11，无限交接风暴修复）：`:execution:affinityhandover:{id}`
+        # （不亲和交接计数，取代旧的 `plaita:affinity:handover:<指纹>` 布尔标记）
+        # 同样是**裸整数**。旧前缀 `affinity:handover` 不在 `execution:` 段下、天然
+        # 不参与列表投影；新键改到执行维度后**落进了投影面**，故必须排除，否则
+        # `json.loads` 得 int → `summary.get` 即 500（与 noderetry/g1wakeups 同病）。
+        or ":execution:affinityhandover:" in key
         or ":execution:index" in key
         or key.endswith(":dlq")
     )
