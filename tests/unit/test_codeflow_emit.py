@@ -17,7 +17,8 @@ import re
 from typing import Any, Dict, List, Set
 
 from plaita import Node
-from plaita.dsl.codeflow import EmitError, compile_source, emit_source
+from plaita.dsl.builder import cond
+from plaita.dsl.codeflow import EmitError, compile_source, emit_source, flow_from_source
 from plaita.node import NodeRegistry, get_default_registry
 from typing import Any as _Any, ClassVar, Optional
 
@@ -213,6 +214,60 @@ def ops(INPUT):
             return "ok"
     return "blocked"
 ''')
+
+
+def test_roundtrip_literal_eq_true_stays_equality():
+    """源码字面 ``x == True`` 的 IR（``eq``/``True``）必须逆映射回 ``== True``。
+
+    历史缺陷（#74）：``eq``+``True`` 被无条件当成 ``not x`` 的遗留形态还原成
+    ``not x``，分支静默反转。现行编译器的 ``not x`` 产物是 ``falsy``（由 falsy
+    分支单独接管），``eq``+``True`` 只来自字面相等比较。
+    """
+    src = '''
+@flow("flag_check")
+def flag_check(INPUT):
+    if INPUT.flag == True:
+        return "TAKEN_TRUE_BRANCH"
+    else:
+        return "TAKEN_FALSE_BRANCH"
+'''
+    emitted = assert_roundtrip(src)
+    assert "INPUT.flag == True" in emitted
+    assert "not INPUT.flag" not in emitted
+
+
+def test_emit_literal_eq_true_preserves_runtime_branches():
+    src = '''
+@flow("flag_check_rt")
+def flag_check_rt(INPUT):
+    if INPUT.flag == True:
+        return "TAKEN_TRUE_BRANCH"
+    else:
+        return "TAKEN_FALSE_BRANCH"
+'''
+    original = flow_from_source(src)
+    roundtrip = flow_from_source(emit_source(compile_source(src)))
+    assert original.run({"flag": True}) == roundtrip.run({"flag": True}) == "TAKEN_TRUE_BRANCH"
+    assert original.run({"flag": False}) == roundtrip.run({"flag": False}) == "TAKEN_FALSE_BRANCH"
+
+
+def test_emit_builder_eq_true_condition_stays_equality():
+    """builder ``cond(field, "==", True)`` 直达同一形态，同样按比较还原。"""
+    ir = {
+        "runtime": "python", "flow_id": "builder_eq_true", "inputType": {"dataType": "object"},
+        "nodes": [
+            {"type": "start", "id": "start", "next": "c"},
+            {"type": "if", "id": "c", "condition": cond("$INPUT.ok", "==", True),
+             "next": "b", "else_next": "e"},
+            {"type": "assignment", "id": "b", "output": "yes", "next": "e"},
+            {"type": "end", "id": "e", "output": "no", "resultType": "success"},
+        ],
+    }
+    emitted = emit_source(ir)
+    assert "INPUT.ok == True" in emitted
+    rebuilt = compile_source(emitted)
+    conds = [n["condition"] for n in rebuilt["nodes"] if n["type"] == "if"]
+    assert conds == [{"field": "$INPUT.ok", "operator": "eq", "value": True}]
 
 
 def test_roundtrip_arithmetic_and_builtins():
