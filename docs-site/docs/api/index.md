@@ -29,8 +29,8 @@
 
 | 符号 | 模块 | extra |
 |------|------|-------|
-| `FlowWorker` / `ManagementAPI` | `plaita.server.*` | `server` |
-| `RedisStorage` | `plaita.storage.redis` | `redis` |
+| `FlowWorker` | `plaita.server.flow_worker` | `server` |
+| `RedisExecutionStorage` / `RedisFlowStorage` | `plaita.storage.redis` | `redis` |
 | `RedisEventBus` | `plaita.event.redis` | `redis` |
 | `CodeNode` | `plaita.node.code` | `code` |
 | `HTTP` | `plaita.node.http` | `http` |

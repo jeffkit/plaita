@@ -73,8 +73,8 @@ def _check_extra_available(extra_name: str) -> bool:
 # without the corresponding extras installed. Consumed by __getattr__ below.
 _FEATURE_EXTRAS_MAP = {
     "FlowWorker": "server",
-    "ManagementAPI": "server",
-    "RedisStorage": "redis",
+    "RedisExecutionStorage": "redis",
+    "RedisFlowStorage": "redis",
     "RedisEventBus": "redis",
     "CodeNode": "code",
     "HTTP": "http",
@@ -129,11 +129,13 @@ _LAZY_EXPORTS = {
 
 # For optional-feature names: once the required extra is confirmed available,
 # the name lives in this canonical module. ``HTTP`` (not ``HTTPNode``) is the
-# real class name exported by ``plaita.node.http``.
+# real class name exported by ``plaita.node.http``. Each key must therefore be a
+# symbol that actually exists there——``getattr`` 取不到即抛 AttributeError
+# （守卫见 tests/unit/test_module_coverage.py::TestLazyExportTables）。
 _EXTRA_EXPORTS = {
     "FlowWorker": "plaita.server.flow_worker",
-    "ManagementAPI": "plaita.server.control",
-    "RedisStorage": "plaita.storage.redis",
+    "RedisExecutionStorage": "plaita.storage.redis",
+    "RedisFlowStorage": "plaita.storage.redis",
     "RedisEventBus": "plaita.event.redis",
     "CodeNode": "plaita.node.code",
     "HTTP": "plaita.node.http",

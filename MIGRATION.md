@@ -91,7 +91,7 @@ HTTP 节点的 `allowedHosts` / `deniedHosts` / `blockPrivateNetworks` 此前**�
 
 分布式专项（Redis 全链路实测）：
 
-7. **RedisEventBus/RedisStorage 客户端按事件循环重建**：worker 每个分布式步骤
+7. **RedisEventBus/RedisExecutionStorage 客户端按事件循环重建**：worker 每个分布式步骤
    跑在新建的 asyncio 循环里，缓存的 aioredis 连接跨循环失效——含 event 节点的
    流程约每两次挂起即失败一次并丢单。修复后按循环重建（外部注入的客户端不接管）。
 8. **重复投递的 resume 任务幂等短路**：终态执行的 resume 原样返回，不再把

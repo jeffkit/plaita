@@ -95,6 +95,50 @@ class TestPlaitaInit(unittest.TestCase):
         self.assertIn("types", names)
 
 
+class TestLazyExportTables(unittest.TestCase):
+    """#62: 顶层 lazy 导出表禁止声明目标模块里不存在的名字。
+
+    两张表（``_FEATURE_EXTRAS_MAP`` / ``_EXTRA_EXPORTS``）此前各自为政地收录了
+    ``ManagementAPI`` 与 ``RedisStorage``——两个目标模块都没有这两个符号，
+    解析路径 ``getattr(module, name)`` 直接抛错，文档却仍在教。
+    """
+
+    def test_feature_and_extra_tables_agree_on_names(self):
+        """同一批名字必须在两张表里成对出现。"""
+        import plaita
+        self.assertEqual(set(plaita._FEATURE_EXTRAS_MAP), set(plaita._EXTRA_EXPORTS))
+
+    def test_extra_exports_exist_in_canonical_module(self):
+        """每个 feature-gated 名字都必须是目标模块里的真实符号。"""
+        import importlib
+        import plaita
+        for name, module_path in plaita._EXTRA_EXPORTS.items():
+            try:
+                module = importlib.import_module(module_path)
+            except ImportError:
+                # 缺 extra 时目标模块自身不可导入——由装齐 extra 的门禁覆盖。
+                continue
+            self.assertTrue(
+                hasattr(module, name),
+                f"{module_path} 没有 {name}：{plaita._FEATURE_EXTRAS_MAP[name]} "
+                f"extra 的顶层 lazy 导出是悬空的",
+            )
+
+    def test_extra_exports_resolve_from_top_level(self):
+        """extra 装齐时 ``getattr(plaita, name)`` 必须取到规范模块里的同一个对象。"""
+        import importlib
+        import plaita
+        for name, extra in plaita._FEATURE_EXTRAS_MAP.items():
+            try:
+                plaita._check_extra_available(extra)
+            except ImportError:
+                # extra 未装：顶层访问本就该抛可操作的 ImportError。
+                continue
+            plaita.__dict__.pop(name, None)  # 清缓存，强制走 __getattr__
+            canonical = importlib.import_module(plaita._EXTRA_EXPORTS[name])
+            self.assertIs(getattr(plaita, name), getattr(canonical, name))
+
+
 # ---------------------------------------------------------------------------
 # plaita/core/__init__.py
 # ---------------------------------------------------------------------------

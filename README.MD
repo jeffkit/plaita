@@ -98,7 +98,7 @@ for step in flow.debug(input_key="value"):
 
 ### Distributed — 断点续执
 
-**无需 Redis，纯内存版即可体验（仅用于本地调试与单元测试；生产部署请改用 `RedisEventBus` + `RedisStorage`，`InMemoryEventBus` 进程重启即丢失所有挂起状态）：**
+**无需 Redis，纯内存版即可体验（仅用于本地调试与单元测试；生产部署请改用 `RedisEventBus` + `RedisExecutionStorage`，`InMemoryEventBus` 进程重启即丢失所有挂起状态）：**
 
 ```python
 from plaita import Flow, FlowExecution
@@ -124,7 +124,7 @@ if step["is_suspend"]:
         )
 ```
 
-生产部署时换成 `RedisEventBus` 和 `RedisStorage`，代码逻辑不变。
+生产部署时换成 `RedisEventBus` 和 `RedisExecutionStorage`，代码逻辑不变。
 
 ---
 

@@ -8,40 +8,55 @@ class TestRedisInstall:
     """Verify redis extras install and storage import works."""
 
     def test_redis_storage_import(self):
-        """Redis extras: plaita.storage.redis should be importable."""
-        try:
-            from plaita.storage.redis import RedisStorage
-            assert RedisStorage is not None
-        except ImportError as e:
-            if "redis" in str(e).lower():
-                pytest.skip("Redis extras not installed")
-            raise
+        """plaita.storage.redis 必须导出两个真实存储类。
+
+        不设 extra 守卫：``redis`` 是惰性可选依赖，本模块缺 extra 时也能导入——
+        符号名写错必须直接失败，不能被「extra 未装」的 skip 吞掉（#62）。
+        """
+        from plaita.storage.redis import RedisExecutionStorage, RedisFlowStorage
+
+        assert RedisExecutionStorage is not None
+        assert RedisFlowStorage is not None
+
+    def test_top_level_storage_exports(self):
+        """顶层 lazy 导出表指向真实类（#62：曾声明不存在的 RedisStorage）。"""
+        pytest.importorskip("redis")
+        from plaita import RedisExecutionStorage, RedisFlowStorage
+        from plaita.storage.redis import (
+            RedisExecutionStorage as CanonicalExecution,
+            RedisFlowStorage as CanonicalFlow,
+        )
+
+        assert RedisExecutionStorage is CanonicalExecution
+        assert RedisFlowStorage is CanonicalFlow
 
     def test_redis_storage_instantiation(self):
-        """RedisStorage can be instantiated (connection deferred)."""
-        try:
-            from plaita.storage.redis import RedisStorage
-        except ImportError:
-            pytest.skip("Redis extras not installed")
+        """存储类可构造（注入 fakeredis 客户端，不连真 Redis）。"""
+        fakeredis = pytest.importorskip("fakeredis")
+        pytest.importorskip("redis")
+        from plaita.storage.redis import RedisExecutionStorage
 
-        try:
-            storage = RedisStorage.__new__(RedisStorage)
-            assert storage is not None
-        except Exception:
-            pytest.skip("RedisStorage requires additional setup")
+        storage = RedisExecutionStorage(
+            client=fakeredis.FakeStrictRedis(decode_responses=True),
+            namespace="plaita-e2e",
+        )
+        assert storage.namespace == "plaita-e2e"
 
     def test_fakeredis_round_trip(self):
-        """Storage round-trip with fakeredis if available."""
-        try:
-            import fakeredis
-            from plaita.storage.redis import RedisStorage
-        except ImportError:
-            pytest.skip("fakeredis or redis extras not installed")
+        """fakeredis 后端执行状态存/取往返。"""
+        fakeredis = pytest.importorskip("fakeredis")
+        pytest.importorskip("redis")
+        from plaita.storage.base import ExecutionState
+        from plaita.storage.redis import RedisExecutionStorage
 
-        try:
-            r = fakeredis.FakeRedis()
-            r.set("plaita-e2e-test", "round-trip-ok")
-            val = r.get("plaita-e2e-test")
-            assert val == b"round-trip-ok"
-        except Exception as e:
-            pytest.skip(f"fakeredis test failed: {e}")
+        storage = RedisExecutionStorage(
+            client=fakeredis.FakeStrictRedis(decode_responses=True),
+            namespace="plaita-e2e",
+        )
+        state = ExecutionState(execution_id="exec-e2e", context={"key": "value"})
+        assert storage.save_execution_state("exec-e2e", state) is True
+
+        loaded = storage.load_execution_state("exec-e2e")
+        assert loaded is not None
+        assert loaded.execution_id == "exec-e2e"
+        assert loaded.context == {"key": "value"}
