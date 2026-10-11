@@ -193,3 +193,50 @@ def test_deny_repo_matches_basename_only(monkeypatch):
             {"type": "start", "params": {"repo": repo}}) is not None
         assert w._detect_affinity_mismatch(
             {"type": "resume", "params": {"repo": repo}}) is None
+
+
+class TestRunDirHostOwnership:
+    """run_dir 的**宿主归属**补判（2026-10-11，plaita#62/#63/#65 根因）。
+
+    双机间有 `/Users/kong/projects → /home/ubuntu/projects` 软链 ⇒ **仓根两边
+    都能解析**，原判据（只查仓根）予以放行；但 `<repo>/.flowcast/runs/<run_id>`
+    是**建它的那台机器本地**的，对端没有 ⇒ 对端领到后 `sync_in` 必失败：
+
+        AgsError: 宿主临时索引 add 失败：fatal: cannot change to
+        '<repo>/.flowcast/runs/<run_id>/worktree': No such file or directory
+
+    实测单条执行在 VM 侧刷 45 次该报错，且与 Mac 侧的正常推进**并发**（同一
+    execution 被两台 worker 同时处理）。本组用例钉死三态。
+    """
+
+    def _w(self):
+        return RedisFlowWorker.__new__(RedisFlowWorker)
+
+    def test_missing_run_dir_rejected_when_runs_exists(self, tmp_path):
+        """runs/ 存在而本 run 目录不存在 ⇒ 属别的宿主 ⇒ 拒领。"""
+        base = tmp_path / "repo"
+        (base / ".flowcast" / "runs" / "other-run").mkdir(parents=True)
+        msg = {"type": "start", "params": {
+            "repo": str(base),
+            "run_dir": str(base / ".flowcast" / "runs" / "NOT-MINE")}}
+        reason = self._w()._detect_affinity_mismatch(msg)
+        assert reason is not None, "本 run 目录不在本机，应判不亲和（拒领）"
+        assert "别的宿主" in reason
+
+    def test_own_run_dir_accepted(self, tmp_path):
+        """本 run 目录已存在 ⇒ 是本机的 ⇒ 放行。"""
+        base = tmp_path / "repo"
+        (base / ".flowcast" / "runs" / "MINE").mkdir(parents=True)
+        msg = {"type": "start", "params": {
+            "repo": str(base),
+            "run_dir": str(base / ".flowcast" / "runs" / "MINE")}}
+        assert self._w()._detect_affinity_mismatch(msg) is None
+
+    def test_brand_new_run_accepted(self, tmp_path):
+        """全新 run（runs/ 尚不存在）⇒ 不拦，留给派发方本机领取。"""
+        base = tmp_path / "repo"
+        (base / ".flowcast").mkdir(parents=True)
+        msg = {"type": "start", "params": {
+            "repo": str(base),
+            "run_dir": str(base / ".flowcast" / "runs" / "BRAND-NEW")}}
+        assert self._w()._detect_affinity_mismatch(msg) is None

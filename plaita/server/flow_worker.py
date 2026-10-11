@@ -3394,6 +3394,25 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         probe = os.path.dirname(head)
                         break
                     head = os.path.dirname(head)
+                # ── 宿主归属补判（2026-10-11，plaita#62/#63/#65 根因）──────────
+                # 只查「仓根」不够：双机间有 `/Users/kong/projects → /home/ubuntu/
+                # projects` 软链，**仓根两边都能解析**，于是亲和判定放行；但
+                # `<repo>/.flowcast/runs/<run_id>` 是**建它的那台机器本地**的，
+                # 对端根本没有 ⇒ 对端领到后 `sync_in` 必失败
+                # （`宿主临时索引 add 失败: cannot change to ... No such file`），
+                # 实测 VM 侧单条执行刷 45 次。
+                # 补判：**run 目录已存在但本机看不到** ⇒ 该 run 属别的宿主，让给它。
+                # 注意只在「对端可见的同名仓根存在」时才可能走到这里；run_dir 首次
+                # 运行时两边都不存在（新 run），此时不拦（留给派发方本机领取）。
+                if os.path.isdir(os.path.dirname(path)):
+                    if not os.path.exists(path):
+                        # run 的父目录（runs/）在 = 该仓确实在跑 run，但本 run 目录
+                        # 不在 ⇒ 属于别的宿主
+                        return (f"run_dir={path} 的父目录存在而本 run 目录不存在"
+                                "（run 属别的宿主）")
+                if not os.path.exists(probe):
+                    return f"{field}={path} 在本机不存在（本机无此仓路径）"
+                continue
             if not os.path.exists(probe):
                 return f"{field}={path} 在本机不存在（本机无此仓路径）"
         # 按仓拒跑名单（2026-10-07）：与路径亲和独立——路径在本机存在（大仓有
