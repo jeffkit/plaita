@@ -1,4 +1,28 @@
+# docs-site 构建依赖。
+#
+# ⚠ 这里必须保留**上界**：本文件历史上只有下界（>=），于是 pymdown-extensions
+# 随 mkdocs-material 自由漂到 12.2，与 mkdocstrings 1.0.6 不兼容，导致
+# `Deploy docs` 从 2026-10-10T14:25:51Z 起**连续 19 次失败**（约 46 小时，100% 红），
+# 文档站停止发布，且掩盖了真正的新文档破坏。见 jeffkit/plaita#126。
+#
+# 冲突形态（CI 实况，Python 3.10）：
+#   File ".../mkdocstrings/_internal/handlers/rendering.py", line 85, in __init__
+#     super().__init__(**{name: opt for name, opt in config.items() if name in self._highlight_config_keys})
+#   TypeError: Highlight.__init__() missing 1 required positional argument: 'md'
+#
+# 版本对照（同一次构建的成败边界）：
+#   mkdocstrings 1.0.6 + pymdown-extensions 12.1 → ✅ success（2026-10-10 最后一次绿）
+#   mkdocstrings 1.0.6 + pymdown-extensions 12.2 → ❌ failure（此后的每一次）
+#
+# 注意：**该不兼容是 Python 版本相关的** —— 在 Python 3.13 上 pip 会解析到
+# mkdocstrings 1.0.7，与 pymdown-extensions 12.2 可以共存（本地实测 build 通过）；
+# 但 CI 用的是 Python 3.10，解析到的是 1.0.6（3.10 上暂无兼容 12.2 的 mkdocstrings），
+# 所以**不要因为"本地能过"就移除下面的上界**。
+#
+# 解除条件：当 mkdocstrings 在 **Python 3.10** 上出现与 pymdown-extensions 12.2+
+# 兼容的版本时，可把两者作为**一对**同时升级并更新本注释。
 mkdocs>=1.6.0
 mkdocs-material>=9.5.0
 mkdocstrings[python]>=0.26.0
+pymdown-extensions<12.2
 mkdocs-mermaid2-plugin>=1.1.0
