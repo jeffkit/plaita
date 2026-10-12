@@ -11,7 +11,7 @@
 | `$INPUT` | 输入参数 | `setup_flow` 时根据 `input_type` 填入 |
 | `$NODE` | `{node_id: result}`，结果**按值**入库 | 每个节点执行后由 `NodeRunner.update_node_result` 累加 |
 | `$GLOBAL` | 全局变量 | `setup_flow` 时从 `flow.global_context` 拷贝并注入 `flow_id` |
-| `$PARENT` | 父流程上下文 | `setup_flow` 时填 `parent.context`（无父则为 `{}`） |
+| `$PARENT` | 父流程上下文的**冻结快照**（子执行创建那一刻） | `setup_flow` 时填入；快照在子 `ExecutionContext` 构造时取好（plaita#72） |
 | `$ENV` | 环境变量 | `clean` 时从 `os.environ` 拷贝并过滤敏感前缀 |
 | `$LAST_NODE` | 最近执行的节点 id | 每节点执行后写入，供 Distributed 续跑 |
 | `$BRANCH` | 最近分支命中 | 分支节点写入 |
@@ -90,6 +90,14 @@ ExecutionContext.from_dict(data, **kwargs)
 `state._snapshot_value` **按值**物化 dict/list/tuple 容器：返回值与 live state 不共享嵌套容器，`$NODE.<node>`
 是私有快照——节点结果写入后再被后续步骤 / 调用方变异都不会写穿，历史节点结果也不会继续增长
 （`output: "$NODE"` 把整表写回自身时，`$NODE['a'] is $NODE` 不再成立）。
+
+**`$PARENT` 的冻结时点（#72）**：子执行拿到的是「子 `ExecutionContext` 构造那一刻」的父状态快照——
+顶层键集与各根键的值对象在构造时钉住（一次 O(根键数) 的浅拷），**每个根键的深物化仍推迟到子侧首读**
+（`_LazyRootSnapshot`，避免 while/for 每轮全量深拷贝的热路径回归）。这一点对 `Parallel` 的
+fire-and-forget 后台分支是必需的：后台分支不阻塞父，父会在分支提交之后继续推进并写 `$NODE`，
+若到首读才从 live 父状态取值，分支就读到父的"未来态"（非确定性）。因此 `Parallel` 在 submit 之前
+（父线程）就创建后台分支的子执行。边界：构造时只浅拷顶层，父在**首读之前**对某个根键值做
+**原地嵌套写**仍可能透出——引擎自身的写路径（`update_node_result` / `setup_flow`）都是换对象而非原地改。
 
 物化自 2026-10 起是**显式栈迭代**（数据深度与 Python 递归深度解耦，2500 层嵌套值不再 `RecursionError`），
 两条降级语义显式可见：

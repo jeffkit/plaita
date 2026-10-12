@@ -177,17 +177,23 @@ class _LazyRootSnapshot(Mapping):
     """按顶层根键**惰性物化**的快照视图（``$PARENT`` 专用，C1-2 折中设计）。
 
     动机：``$PARENT`` 必须是真快照（C1-2：浅拷贝让子流程与父运行态双向写
-    穿），但子流程setup 发生在热路径上——while/for 每轮一次，全量深快照会
+    穿），但子流程 setup 发生在热路径上——while/for 每轮一次，全量深快照会
     重新引入 loop.py ML1 修掉的「千次迭代 = 千次全量深拷贝」回归（实证：
-    300 轮 × ~1MB 上下文 7.7s > 5.0s 上限）。惰性方案：包装 live 源，顶层
-    键集在构造时固定，**每个根键在首次读取时**才做深快照并缓存；从未被读
-    的根键零成本。
+    300 轮 × ~1MB 上下文 7.7s > 5.0s 上限）。惰性方案：构造时钉住**顶层键集
+    与各根键当时的值对象**（一次 O(根键数) 的浅拷，与上下文总大小无关），
+    **每个根键在首次读取时**才做深快照并缓存；从未被读的根键零成本。
 
-    冻结语义为何成立：子流程经 ``InlineFlow`` 同步执行，父执行在其存续期
-    内被引擎阻塞（非重入守卫），父状态不会变化——「首读时物化」与「setup
-    时全量快照」等价。跨进程边界（checkpoint 落盘/恢复）走
-    ``to_checkpoint_dict`` / ``from_checkpoint_dict``，经 ``_snapshot_value``
-    完全物化为 plain dict，惰性对象不出进程。
+    冻结语义（plaita#72 修正）：历史实现把 **live 源**存进来，只在首读时才
+    ``self._source[key]``——「首读时物化」只有在父执行于子执行存续期内被阻塞
+    时才等价于「构造时快照」。``InlineFlow`` 满足该前提，``Parallel`` 的
+    fire-and-forget 后台分支**不满足**：父在分支提交后立刻继续推进并写
+    ``$NODE``，后台分支稍后的首读会把父的"未来态"读进"快照"（非确定性）。
+    现在构造时就浅拷顶层映射，构造后父对根键的新增/替换（``update_node_result``
+    是 copy-on-write，换的是新 dict）对快照不可见；深物化仍按首读惰性。
+
+    跨进程边界（checkpoint 落盘/恢复）走 ``to_checkpoint_dict`` /
+    ``from_checkpoint_dict``，经 ``_snapshot_value`` 完全物化为 plain dict，
+    惰性对象不出进程。
 
     兼容面：表达式引擎 ``_get_attr`` 按「有 ``__getitem__`` + ``get``」识别
     dict-like，``Mapping`` 天然满足；``__eq__``/``__repr__``/``__deepcopy__``
@@ -197,7 +203,9 @@ class _LazyRootSnapshot(Mapping):
     __slots__ = ("_source", "_cache")
 
     def __init__(self, source: Any) -> None:
-        self._source = source
+        # 顶层浅拷：键集与「构造这一刻的根键值对象」一并钉住（#72）。值本身
+        # 不在构造时深物化，首读路径与热路径成本不变。
+        self._source = dict(source)
         self._cache: Dict[Any, Any] = {}
 
     def __getitem__(self, key: Any) -> Any:

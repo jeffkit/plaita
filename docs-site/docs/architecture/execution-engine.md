@@ -100,6 +100,10 @@ return result
 
 `_merge_timeout` 把"流程 `timeout`"与"调用方 `timeout`"取更严者；节点执行时再与"节点自身 `timeout`"取更严。任一为空表示"无限制"。
 
+distributed 入口同样合并与解析（`run_distributed`，plaita#71）：流程 `timeout` / 实例 `timeout` / 调用期 `timeout` 三者经 `_parse_timeout` 归一后取严，再作为 `max_timeout_ms` 传给策略；`DistributedStrategy` 每一步（`_start_new_flow` 与 `_execute_current_node`）都把这个预算交给节点执行——历史实现只在首步的 start 节点传该形参，第 2 步起丢失，且从不读 `flow.timeout`，流程级超时在 worker/console 的生产路径上形同虚设。
+
+逐步调用之间**不累计**：每个 `run_distributed` 调用是新预算（引擎不把已耗时长写进 checkpoint）。需要"整个流程累计不超过 X"的调用方请自行从 checkpoint 恢复剩余量——`docs-site/docs/guide/error-handling.md` 的流程级口径在 distributed 上是**每步上限**。
+
 超时串解析（`_parse_timeout`，数字毫秒或 ISO 8601 时长）带 LRU memo——
 同一 timeout 串每进程只解析一次；非法串不被缓存、每次照常抛 `ValueError`。
 

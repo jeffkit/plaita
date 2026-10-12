@@ -286,7 +286,11 @@ class DistributedStrategy:
             result = context.get_state(f"{pfx}{context.express_node_name}", {})
             return _create_end_output(None, result, context.to_dict(), execution_id=context.execution_id)
 
-        return await self._execute_current_node(flow, context, runner, callback_manager, current_node)
+        # plaita#71：第 6 参（``max_timeout_ms``）不能丢——历史实现从第 2 步起
+        # 不再把流程级/调用期预算下传，节点超时预算归零（只有首步的
+        # ``_start_new_flow`` 收到），流程级超时在 distributed 逐步路径上形同虚设。
+        return await self._execute_current_node(
+            flow, context, runner, callback_manager, current_node, max_timeout_ms=timeout_ms)
 
     async def _determine_current_node(self, flow, context, runner, callback_manager, max_timeout_ms=None):
         last_node_id = context.last_node_id

@@ -31,12 +31,14 @@
 | `$GLOBAL.key` | 全局上下文变量（含 `flow_id`） | `None` |
 | `$FLOW_ID` | 当前流程的 `flow_id` | — |
 | `$FLOW` | `$FLOW_ID` 的别名（0.5.x 起，历史写法 `$FLOW` 会 KeyError 崩） | — |
-| `$PARENT.x` | 父流程上下文（子流程中可用） | `None` |
+| `$PARENT.x` | 父流程上下文（子流程中可用；**子执行创建时**冻结的快照，见下） | `None` |
 | `$ENV.key` | 环境变量（须在 `exposeEnv` 白名单内，见下文） | `None`（未声明时另有解析期 warning） |
 
 缺省口径统一为"缺键返回 `None`"；例外有二：整个根不存在（如上下文尚未建立 `$NODE` 状态）时保留 `KeyError`——那通常意味着流程逻辑错误，静默反而危险；字段名以 `_` 开头时按下文「属性遍历与下划线名」抛 `ValueError`。
 
-支持的命名空间由 `ExecutionContext` 维护：`INPUT` / `NODE` / `GLOBAL` / `PARENT` / `ENV`。命名空间名本身可通过 `express_input_name` 等参数自定义。
+支持的命名空间由 `ExecutionContext` 维护：`INPUT` / `NODE` / `GLOBAL` / `PARENT` / `ENV`。命名空间名本身可通过 `express_input_name` 等参数自定义；子执行（`child` 内联子逻辑 / `parallel` 分支 / `map`·`filter`·`find`·`reduce`·`loop` 迭代体）**继承父执行的命名空间配置**（plaita#106）——父级自定义名后，子流程表达式用同一套名字寻址即可。
+
+`$PARENT` 是**子执行创建那一刻**的父状态快照（plaita#72）：`Parallel` 未列入 `joinBranches` 的后台分支不阻塞父流程，父在分支提交之后写入的 `$NODE` 条目不会出现在该分支的 `$PARENT` 里（未创建时按缺省口径求值为 `None`）。需要子流程看到新结果时，请用 `joinBranches`（父会等分支）或在分支内显式传参。
 
 !!! warning "$ENV 采用 allowlist 模型：不声明就读不到"
 

@@ -81,6 +81,107 @@ def _reentry_error() -> FlowExecutionException:
     )
 
 
+def _inherited_express(parent) -> Dict[str, Any]:
+    """子执行要继承的父级 ``express_*`` 命名空间配置（plaita#106）。
+
+    子执行是新实例 + 新 ``ExecutionContext``，六个命名空间参数各有默认值，
+    不透传就静默回默认——父级经 ``FlowExecution.run(options=...)`` 自定义命名
+    空间后，子流程（``child`` 内联 / ``parallel`` 分支 / ``map`` 迭代体）按自
+    定义名寻址会硬 ``KeyError: '$PARAMS' not found``。与
+    ``ExecutionContext.child()`` 的同型复制对齐。
+    """
+    if parent is None:
+        return {}
+    return {k: getattr(parent, k) for k in (
+        "express_prefix", "express_input_name", "express_parent_name",
+        "express_node_name", "express_global_name",
+        "express_environment_variable",
+    )}
+
+
+def _validated_timeout_ms(value, source: str) -> Optional[int]:
+    """distributed 入口的 timeout 输入校验 + 归一（plaita#139）。
+
+    与 ``NodeRunner._parse_timeout`` 的关键区别是**拒绝静默降级**：
+    ``_parse_timeout`` 对非 str/number 的类型返回 ``None``（= 无限额），而
+    distributed 契约要求非法输入要么响亮失败、要么按最严预算执行。#71 的
+    merge 若直接照搬宽容口径，``timeout=[1,2]`` / ``dict`` 这类非法类型会
+    从改动前的 ``FlowErrorException(TypeError)`` 退化成**静默无限额**。
+
+    规则：``None``/空串 → 无限额；``bool``/非负 ``int``/``float`` → 毫秒；
+    数字串/ISO 8601 时长串 → 毫秒；其余（含负数、list/dict/任意对象、
+    非法串）抛 ``ValueError``，消息带违规值与来源，由 ``run_distributed``
+    归一成 distributed 契约的 ``FlowErrorException``。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, (int, float)):
+        if value < 0:
+            raise ValueError(
+                f"Invalid timeout {value!r} from {source}: must be a non-negative "
+                f"number of milliseconds or an ISO 8601 duration string"
+            )
+        return NodeRunner._parse_timeout(value)  # 0 仍按既有语义=无限额
+    if isinstance(value, str):
+        if not value:
+            return None
+        try:
+            return NodeRunner._parse_timeout(value)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid timeout {value!r} from {source}: use milliseconds as a "
+                f"plain number (e.g. '300') or an ISO 8601 duration (e.g. 'PT0.3S')"
+            ) from e
+    raise ValueError(
+        f"Invalid timeout {value!r} from {source}: expected milliseconds as a "
+        f"number (e.g. 300) or an ISO 8601 duration string (e.g. 'PT0.3S'); "
+        f"got {type(value).__name__}"
+    )
+
+
+def _distributed_timeout_ms(flow, instance_timeout, call_timeout) -> Optional[int]:
+    """distributed 入口的流程级超时合并/解析（plaita#71；校验见 #139）。
+
+    与 ``_prepare_strategy`` 对齐：``flow.timeout`` / 实例 ``timeout`` / 调用期
+    ``timeout`` 归一后取更严（更小）者。历史实现把调用期原始值直送策略，既不
+    解析也不合并——``flow.timeout`` 在 worker/console 的唯一生产路径上完全失效；
+    调用方照文档传 ISO 时长时，裸字符串还会在首节点炸成与真因无关的
+    ``TypeError: unsupported operand type(s) for -: 'str' and 'int'``。
+    """
+    parsed_values = [
+        parsed for parsed in (
+            _validated_timeout_ms(getattr(flow, "timeout", None), "flow.timeout"),
+            _validated_timeout_ms(instance_timeout, "execution.timeout"),
+            _validated_timeout_ms(call_timeout, "run_distributed(timeout=...)"),
+        ) if parsed is not None
+    ]
+    return min(parsed_values) if parsed_values else None
+
+
+def _distributed_timeout_or_raise(flow, instance_timeout, call_timeout, callback_manager):
+    """校验 + 合并 distributed 入口 timeout；畸形输入归一成 FlowErrorException。
+
+    plaita#139：畸形 timeout（非法类型/负值/非法串）必须走 distributed 的单一
+    错误契约——在进入策略之前就把校验异常归一成 ``FlowErrorException``，既不
+    让裸 ``ValueError`` 逃逸，也不静默降级成"无限额"。
+    """
+    try:
+        return _distributed_timeout_ms(flow, instance_timeout, call_timeout)
+    except (ValueError, TypeError) as e:
+        _raise_distributed_error(e, flow, callback_manager)
+
+
+def _merge_timeout_ms(a_ms, b_ms):
+    """取两个毫秒预算里更严（更小）的非空者；都为空表示无限制。"""
+    if a_ms is None:
+        return b_ms
+    if b_ms is None:
+        return a_ms
+    return min(a_ms, b_ms)
+
+
 class FlowExecution(CompatRunMixin):
     """Thin facade composing ExecutionContext, NodeRunner, and strategies.
 
@@ -110,7 +211,10 @@ class FlowExecution(CompatRunMixin):
         # 后会在执行前对含 dict 节点的 flow 兜底解析一次，支持"用一个隔离
         # registry 跑某个 flow"的场景而不依赖进程级单例。
         self._registry = registry
-        self._ctx = ExecutionContext(parent=parent._ctx if parent else None, event_bus=event_bus)
+        self._ctx = ExecutionContext(
+            parent=parent._ctx if parent else None, event_bus=event_bus,
+            **_inherited_express(parent),
+        )
         # 非重入守卫: FlowExecution 的 $INPUT/$NODE/LAST_NODE 全是实例级状态,
         # 两个线程同时对同一实例 run 会互相踩状态（静默结果串扰）。子流程走
         # get_child_execution() 的新实例, 不受影响。
@@ -407,13 +511,8 @@ class FlowExecution(CompatRunMixin):
         tb = NodeRunner._parse_timeout(b)
         return FlowExecution._merge_timeout_ms(ta, tb)
 
-    @staticmethod
-    def _merge_timeout_ms(a_ms, b_ms):
-        if a_ms is None:
-            return b_ms
-        if b_ms is None:
-            return a_ms
-        return min(a_ms, b_ms)
+    # 纯函数（无 self）；模块级实现，类属性保留给既有调用方与测试。
+    _merge_timeout_ms = staticmethod(_merge_timeout_ms)
 
     def run_distributed(
         self,
@@ -443,6 +542,8 @@ class FlowExecution(CompatRunMixin):
         self._begin_run()
         try:
             self._ensure_flow_resolved(flow)
+            timeout = _distributed_timeout_or_raise(
+                flow, self.timeout, timeout, self.callback_manager)
             # 种子仅在调用方显式给出时透传——不带新 kwarg 地保持既有
             # execute 签名兼容（DistributedStrategy 经 **options 消化）。
             seed = {"execution_id": execution_id} if execution_id else {}

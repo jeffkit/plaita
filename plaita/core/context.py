@@ -216,6 +216,16 @@ class ExecutionContext(_SystemStateAccessors):
         self.express_node_name = express_node_name
         self.express_global_name = express_global_name
         self.express_environment_variable = express_environment_variable
+        # plaita#72：子上下文在**构造这一刻**钉住父状态快照。历史实现把 live 父
+        # 状态留到 ``setup_flow`` 才包一层 ``_LazyRootSnapshot``，而真正的物化又
+        # 推迟到子侧首读——只有「父在子执行存续期内被阻塞」时才等价于快照。
+        # ``Parallel`` 的 fire-and-forget 后台分支不阻塞父：父在分支提交后继续
+        # 推进并写 ``$NODE``，分支稍后的首读会读进父的"未来态"。构造期快照把
+        # 时点前移到「子执行创建」，配合 ``concurrent._execute_background_branches``
+        # 在 submit 前创建子执行，即得分支创建时冻结。
+        self._parent_snapshot = (
+            _LazyRootSnapshot(parent.context) if parent is not None else None
+        )
         self._state = CheckpointState(**self._state_kwargs())
         self._state[f"{express_prefix}EXECUTION_ID"] = uuid.uuid4().hex
         self._evaluator = evaluator or ExpressionEvaluator()
@@ -284,6 +294,9 @@ class ExecutionContext(_SystemStateAccessors):
             self.cancel_event = threading.Event()
         if not getattr(self, "cancel_requested", None):
             self.cancel_requested = threading.Event()
+        # plaita#72：旧序列化体（进程池在滚动升级/跨版本 pickle 的窗口）里没有
+        # _parent_snapshot，缺省补 None——setup_flow 只在父存在时消费它。
+        self.__dict__.setdefault("_parent_snapshot", None)
 
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         """Populate $INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV and sync expose_env."""
@@ -306,13 +319,14 @@ class ExecutionContext(_SystemStateAccessors):
         # "冻结"快照漂移）。
         # 惰性按根键快照（_LazyRootSnapshot）：子流程 setup 在热路径上
         # （while/for 每轮一次），全量深快照会重演 loop.py ML1 修掉的
-        # 「每轮全量 deepcopy」回归；父执行在 InlineFlow 子流程存续期被
-        # 引擎阻塞，按根键首读物化与 setup 时全量快照语义等价，从未读取的
-        # 根键零成本。落盘/恢复经 to_checkpoint_dict / from_checkpoint_dict
-        # 完全物化，惰性对象不出进程。
+        # 「每轮全量 deepcopy」回归；从未读取的根键零成本。落盘/恢复经
+        # to_checkpoint_dict / from_checkpoint_dict 完全物化，惰性对象不出进程。
+        # plaita#72：快照在**子上下文构造时**就取好（``_parent_snapshot``），
+        # 这里只消费——setup 时点晚于子执行创建，后台分支（父不阻塞）会在
+        # 两者之间读到父的"未来态"。
         self._state.setup_flow(
             input_value=_coerce_input_value(args, kwargs),
-            parent_context=_LazyRootSnapshot(self.parent.context) if self.parent else {},
+            parent_context=self._parent_snapshot if self.parent else {},
             global_context=global_context,
             flow_id=flow.flow_id,
             env=env,

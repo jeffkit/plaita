@@ -35,8 +35,13 @@ from plaita.node.loop import Loop, While
 # flow 构造辅助
 # ---------------------------------------------------------------------------
 
-def _index_child_flow() -> Flow:
-    """子流程：返回 $INPUT.index（当前轮次）。"""
+def _index_child_flow(prefix: str = "$") -> Flow:
+    """子流程：返回 {prefix}INPUT.index（当前轮次）。
+
+    ``prefix`` 必须与父执行的 ``express_prefix`` 一致（plaita#106）：子执行现在
+    继承父级的命名空间配置，硬编码 ``$`` 的表达式在自定义前缀下不会求值（按字面
+    字符串返回）。本 helper 的默认 ``$`` 仅供默认前缀场景使用。
+    """
     return Flow(
         flow_id="child", version="1", runtime="python",
         input_type=Property(
@@ -49,7 +54,7 @@ def _index_child_flow() -> Flow:
         output_type=Property(data_type=types.INTEGER),
         nodes=[
             Start(id="s", next="e"),
-            End(id="e", resultType="success", output="$INPUT.index"),
+            End(id="e", resultType="success", output=f"{prefix}INPUT.index"),
         ],
     )
 
@@ -98,7 +103,7 @@ def _while_flow(condition, max_iterations=100, prefix: str = "$"):
         input_type=Property(data_type=types.OBJECT),
         nodes=[
             Start(id="start", next="w"),
-            While(id="w", child_flow=_index_child_flow(),
+            While(id="w", child_flow=_index_child_flow(prefix),
                   condition=condition, max_iterations=max_iterations, next="end"),
             End(id="end", resultType="success", output=f"{prefix}NODE.w"),
         ],

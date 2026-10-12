@@ -24,6 +24,39 @@ from plaita.logger import logger
 from plaita.node import End, Node, Start
 
 
+def _resolve_cycle(adjacency: Dict[str, List[str]], root: str) -> List[str]:
+    """从 ``root`` 出发做迭代 DFS，返回一条真环路径（``[a, b, a]``）或 ``[]``。
+
+    plaita#105：原实现把「节点被访问过」当成环的判据（``if cur in visited:
+    has_cycle = True``），任何**汇聚点**（入度 > 1）都会二次入栈而被误报——合法
+    菱形 DAG、两条分支共用同一 End 每次解析都打「will loop forever」级告警。
+    这里改为只认**回边**（当前 DFS 路径上的祖先），并顺带还原环上节点 id 供
+    作者定位。
+
+    ``adjacency`` 只含 start 可达节点（可达性口径与本函数调用点一致）。
+    """
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: Dict[str, int] = {root: GRAY}
+    frames: List[tuple] = [(root, iter(adjacency.get(root, ())))]
+    while frames:
+        node, targets = frames[-1]
+        nxt = next(targets, None)
+        if nxt is None:
+            color[node] = BLACK
+            frames.pop()
+            continue
+        state = color.get(nxt, WHITE)
+        if state == GRAY:
+            start_idx = next(
+                i for i, (frame_node, _) in enumerate(frames) if frame_node == nxt
+            )
+            return [frame_node for frame_node, _ in frames[start_idx:]] + [nxt]
+        if state == WHITE:
+            color[nxt] = GRAY
+            frames.append((nxt, iter(adjacency.get(nxt, ()))))
+    return []
+
+
 class Flow(BaseModel):
     """流程定义
 
@@ -219,39 +252,38 @@ class Flow(BaseModel):
                     self.flow_id, e,
                 )
 
-        # 环检测（R6 fuzz B3）：next/branches 成环且无 flow 级 timeout 时
-        # Normal 模式永久挂起，解析期零提示。O(n) BFS 从 start 出发，
-        # 回边即环。仅告警——显式 loop/while 有自己的迭代上限。
+        # 环检测（R6 fuzz B3；plaita#105 修正判据）：next/branches 成环且无 flow
+        # 级 timeout 时 Normal 模式永久挂起，解析期应有提示。判据是**回边**（当前
+        # DFS 路径上的祖先），不是「被访问过」——后者把任何汇聚点（合法菱形 DAG、
+        # 两分支共用同一 End）都误报成死循环。仅告警（显式 loop/while 有自己的
+        # 迭代上限），且只在**没有 flow 级 timeout** 时告警：设了超时就不再是
+        # 「will loop forever」，这正是文案给出的处置办法。
+        # 可达性口径不变：只检测 start 可达的子图（不可达子图的真环仍不报，见
+        # plaita#105 的「边界」——那属于行为扩张，由维护者定夺）。
         if any(isinstance(n, Node) for n in resolved):
             start = self.start_node
             id_to_node = {n.id: n for n in resolved if isinstance(n, Node) and n.id}
-            visited: set = set()
-            stack = [start.id] if start is not None and start.id else []
-            has_cycle = False
-            while stack:
-                cur = stack.pop()
-                if cur in visited:
-                    has_cycle = True
-                    continue
-                visited.add(cur)
-                node_obj = id_to_node.get(cur)
+            adjacency: Dict[str, List[str]] = {}
+            for node_id, node_obj in id_to_node.items():
                 targets: List[str] = []
-                if node_obj is not None:
-                    if node_obj.next and isinstance(node_obj.next, str):
-                        targets.append(node_obj.next)
-                    for b in getattr(node_obj, "branches", None) or []:
-                        nxt = getattr(b, "next", None)
-                        if isinstance(nxt, str):
-                            targets.append(nxt)
-                for t in targets:
-                    if t in id_to_node:
-                        stack.append(t)
-            if has_cycle:
+                if node_obj.next and isinstance(node_obj.next, str):
+                    targets.append(node_obj.next)
+                for b in getattr(node_obj, "branches", None) or []:
+                    nxt = getattr(b, "next", None)
+                    if isinstance(nxt, str):
+                        targets.append(nxt)
+                adjacency[node_id] = [t for t in targets if t in id_to_node]
+            cycle = (
+                _resolve_cycle(adjacency, start.id)
+                if start is not None and start.id in adjacency else []
+            )
+            if cycle and not self.timeout:
                 logger.warning(
-                    "flow %s contains a cycle in next/branches; without a flow-level "
-                    "timeout a Normal run will loop forever. If intentional, set "
-                    "flow timeout or use loop/while nodes with iteration limits.",
-                    self.flow_id,
+                    "flow %s contains a cycle in next/branches: %s; without a "
+                    "flow-level timeout a Normal run will loop forever. If "
+                    "intentional, set flow timeout or use loop/while nodes with "
+                    "iteration limits.",
+                    self.flow_id, " -> ".join(cycle),
                 )
 
         # 构建期校验：JSON 直载路径历史上从不执行 node.validate()，builder 路径

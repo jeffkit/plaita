@@ -158,7 +158,7 @@ class Parallel(Node):
             return execution.evaluate(input_key)
         return execution.evaluate(pb.input)
 
-    def exec_branch(self, pb: ParallelBranch, execution):
+    def exec_branch(self, pb: ParallelBranch, execution, branch_execution=None):
         """执行并行节点的分支flow
 
         异常不在此处吞咽——交由调用方（``_process_future_result`` / coroutine 路径）
@@ -167,8 +167,13 @@ class Parallel(Node):
 
         分支输入解析（含无 input 时继承父 $INPUT 的兜底）见
         ``_resolve_branch_input``——sync/async 共用同一实现。
+
+        ``branch_execution``：后台分支由 ``_execute_background_branches`` 在
+        **父线程、submit 之前**创建并传入（plaita#72：子执行创建即钉住 ``$PARENT``
+        快照）；join / 内联路径不传，就地创建。
         """
-        branch_execution = execution.get_child_execution()
+        if branch_execution is None:
+            branch_execution = execution.get_child_execution()
         lazy = execution.mode == ExecutionMode.GENERATOR
         input_value = self._resolve_branch_input(pb, execution)
         rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
@@ -276,7 +281,11 @@ class Parallel(Node):
         state = _get_bg_state(execution)
         errors = state["errors"]
         for branch in background_branches:
-            fut = executor.submit(self.exec_branch, branch, execution)
+            # plaita#72：子执行必须在**父线程、submit 之前**创建——创建即钉住
+            # ``$PARENT`` 快照。后台分支不阻塞父流程，若留到分支线程里创建
+            # （首读更晚），分支读到的会是父在提交之后写入的"未来态"。
+            branch_execution = execution.get_child_execution()
+            fut = executor.submit(self.exec_branch, branch, execution, branch_execution)
             state["futures"].append(fut)
             fut.add_done_callback(
                 self._make_background_done_callback(branch, errors, state)
@@ -426,13 +435,17 @@ class Parallel(Node):
 
         return results
 
-    async def exec_branch_async(self, pb: "ParallelBranch", execution):
+    async def exec_branch_async(self, pb: "ParallelBranch", execution, branch_execution=None):
         """异步执行单个并行分支。
 
         分支输入解析与 sync ``exec_branch`` 完全共用（``_resolve_branch_input``，
         含无 input 时继承父 $INPUT 的兜底）——同一 flow sync/async 同结果。
+
+        ``branch_execution`` 同 sync 侧：异步后台分支由调用方在调度前创建并传入，
+        让 ``$PARENT`` 快照钉在分支创建时（plaita#72）。
         """
-        branch_execution = execution.get_child_execution()
+        if branch_execution is None:
+            branch_execution = execution.get_child_execution()
         input_value = self._resolve_branch_input(pb, execution)
         rs = await branch_execution.arun_compatible(pb.flow, False, input_value)
         logger.debug("async branch %s executed: %s", pb.name, rs)
@@ -450,14 +463,17 @@ class Parallel(Node):
 
         if self.mode == COROUTINE:
             # background branches: fire-and-forget as asyncio tasks
-            async def _bg(branch):
+            async def _bg(branch, branch_execution):
                 try:
-                    await self.exec_branch_async(branch, execution)
+                    await self.exec_branch_async(branch, execution, branch_execution)
                 except Exception as exc:
                     logger.warning("async background branch %r raised: %s", branch.name, exc, exc_info=True)
 
             for branch in background_branches:
-                asyncio.ensure_future(_bg(branch))
+                # plaita#72：与 sync 侧同因——后台分支不阻塞父协程，子执行必须
+                # 在调度前创建（创建即钉住 $PARENT 快照），不能留给任务首读。
+                branch_execution = execution.get_child_execution()
+                asyncio.ensure_future(_bg(branch, branch_execution))
 
             # join branches: truly concurrent via gather
             async def _join(branch):
