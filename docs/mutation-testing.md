@@ -1,5 +1,5 @@
 # 变异测试（Mutation Testing）基线与流程
-> **最后更新**：2026-10-01（§2.5 expression_parser 重写为 thunk 编译缓存版后重跑单模块基线：**100%（433/433，recheck 后）**；2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%）
+> **最后更新**：2026-10-12（#108：`plaita/dsl/builder.py` 的 `_TERMINAL_TYPES` 改动经可运行变异集合 hash 比对确认为**变异中性**；同时标注该模块 876/877 的历史数字在现工具链下**不可复现、待按 §7.2 重扫**——详见 §2.8「后续变更（基线待复核）」。2026-10-01 记录：§2.5 expression_parser 重写为 thunk 编译缓存版后重跑单模块基线：**100%（433/433，recheck 后）**；2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（2026-10 重写后重跑 433/433，见 §2.5 末节）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -140,7 +140,7 @@
 | `plaita/core/expression_parser.py` | **100%** | 313/313 | 0 | ✅ 已强化（见 §2.5） |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
 | `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
-| `plaita/dsl/builder.py` | **99.9%** | 876/877 | 1 | ✅ 已强化（见 §2.8） |
+| `plaita/dsl/builder.py` | ~~99.9%~~ **待重扫** | 876/877（口径不可复现） | 1 | ⚠ 见 §2.8「后续变更」（2026-10-12 #108：改动为变异中性；该数字待按 §7.2 重扫回填） |
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | **100%** | 90/90 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 84.4%/14 survived 为 mutmut in-process cache 污染假低分 |
 | `plaita/node/__init__.py` | **100%** | 112/112 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 83.9%/18 survived 为 mutmut in-process cache 污染假低分 |
@@ -306,6 +306,26 @@ mutmut 直接跑结果：880 killed + 156 timeout + 6 survived = 1042。
 ### 残余 survived（1 个，等效变异）
 
 - **`to_json__mutmut_3`**：`ensure_ascii=None` — CPython json 模块将 `None` 视为假值，行为与 `ensure_ascii=False` 完全等效 → 等效变异，任何测试均无法区分。
+
+### 后续变更（基线待复核）
+
+- **2026-10-12（jeffkit/plaita#108）**：`LinearBuilder` 自动串接修复——把 `event` 移出模块级
+  `_TERMINAL_TYPES`（`{"end", "event"}` → `{"end"}`），使其回到 `_auto_chain` 默认分支参与顺序
+  串接；`end` 仍是唯一真终端。**本次改动对变异分数中性**，依据与口径如下（独立验收者复核过）：
+  - **机制（更正）**：mutmut 3.8 **会**为模块级语句生成变异（例如 `_TERMINAL_TYPES = {"end"}`
+    会得到 `=> None` 变异；本文件模块级原始变异 47 个、覆盖过滤后 11 个）。真正让它们不进入
+    **可运行**变异集的是 `mutmut/file_mutation.py::group_by_top_level_node`——它丢弃
+    `contained_by_top_level_function is None` 的变异。故准确说法是"**模块级常量改动不产生可运行
+    变异点**"，而不是"不产生变异点"。
+  - **可复现证据**（`git archive` 纯净树，mutmut 3.8.0，对基线 `ae33c01` 与本次提交各跑一遍）：
+    用 `create_mutations` + `group_by_top_level_node` 生成 `plaita/dsl/builder.py` 的可运行
+    （grouped）变异集合，两者 **hash 完全相同**（`c7587f96a6a7e3e1`，各 **975** 个）⇒ 本次改动
+    **不新增、不减少**可运行变异点。
+  - ⚠ **上表 `plaita/dsl/builder.py` 的 99.9%（876/877）在本工具链与现有测试集下无法复现**
+    （绝对计数高度依赖"覆盖采集用哪套测试 + 是否按覆盖过滤"这一未记录口径；本文件历史上出现过
+    302 / 877 / 1042 等多个互不一致的口径）。**在按 §7.2 重扫回填之前，请勿用 99.9% 判断本模块
+    的测试强度**，也不要与其他模块的分数横向比较。
+  - 本模块现存的既有漏测（例如把 `input_type` 整体置 `None` 而无断言）属历史问题，与 #108 无关。
 
 ## 2.7 executor.py 强化（2026-07-06，90.7%）
 

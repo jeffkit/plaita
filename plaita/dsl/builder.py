@@ -717,8 +717,12 @@ def child_flow(
 
 # 这些节点类型的 next 是「真分支目标」而非「顺序下一个」，不参与自动串接
 _BRANCH_SKIP_AUTO_NEXT = {"if", "switch", "case"}
-# 终端节点：没有 next
-_TERMINAL_TYPES = {"end", "event"}
+# 终端节点：没有 next。只有 end 是真正的终端——event 虽然在运行期会挂起
+# 等待事件，但 resume 之后引擎仍按 next 续跑（见 core/strategies.py 的
+# flow.next_node），所以它必须参与顺序串接，否则 event 之后声明的节点
+# 永远接不上，构建期直接报「不可达」。event 作为末节点收尾依旧合法：
+# _auto_chain 的 `i + 1 < len(nodes)` 保护会让它保持 next=None。
+_TERMINAL_TYPES = {"end"}
 
 
 class LinearBuilder:

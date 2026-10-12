@@ -384,6 +384,48 @@ class TestLinearBuilder(unittest.TestCase):
         flow = Flow.from_string(b.to_yaml())
         self.assertEqual(flow.run(age=20), "成年")
 
+    # -- #108: event 不是终端节点，必须参与 auto-chain --------------------
+
+    def test_event_participates_in_auto_chain(self):
+        """event 之后声明的 end 必须被串上：event.next == "done"，构建不抛异常。"""
+        b = (
+            linear("ev")
+            .start()
+            .event(event_type="approval")
+            .end("done", output="x")
+        )
+        data = b.to_dict()
+        event_node = next(n for n in data["nodes"] if n["type"] == "event")
+        self.assertEqual(event_node.get("next"), "done")
+
+        # 构建期不再报「done 从 start 不可达」
+        flow = b.build()
+        built_event = flow.find_node_by_id(event_node["id"])
+        self.assertEqual(built_event.next, "done")
+
+    def test_event_as_last_node_keeps_no_next(self):
+        """反向：event 收尾合法，仍无 next（不得臆造后继）。"""
+        b = linear("t").start().event(event_type="e")
+        data = b.to_dict()
+        event_node = next(n for n in data["nodes"] if n["type"] == "event")
+        self.assertIsNone(event_node.get("next"))
+
+        flow = b.build()
+        self.assertIsNone(flow.find_node_by_id(event_node["id"]).next)
+
+    def test_event_explicit_next_is_preserved(self):
+        """回归：显式给 event 的 next 不被自动串接覆盖（既有 flow 行为不变）。"""
+        b = (
+            linear("ev_explicit")
+            .start()
+            .event(event_type="e", next="done")
+            .end("done", output="ok")
+        )
+        data = b.to_dict()
+        event_node = next(n for n in data["nodes"] if n["type"] == "event")
+        self.assertEqual(event_node["next"], "done")
+        self.assertIsNotNone(b.build())
+
 
 class TestBuilderMutation(unittest.TestCase):
     """Tests for FlowBuilder mutation methods: remove_node / update_node / reroute / from_dict."""
