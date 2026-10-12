@@ -257,6 +257,10 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
                 "get probe failed for %s root %r: %s", type(obj).__name__, root_key, exc,
             )
     if hasattr(obj, "__dict__"):
+        # 兜底分支，与 _get_attr 的 getattr 分支对齐（属性风格的自定义上下文）。
+        # 真实容器（dict / CheckpointState 这类带前缀存储键的映射）都走上面两条；
+        # 根键一律带前缀（`$INPUT`），普通 dataclass / Pydantic 模型上恒为假，
+        # 因此这条实际只在显式 setattr(obj, "$INPUT", …) 的容器上成立。
         return hasattr(obj, root_key)
     return False
 
@@ -524,9 +528,10 @@ class ExpressionParser:
                     # 为 context 求值，所以只要它引用的任一上下文根在当前父容器里
                     # 不存在，它就不是"嵌套表达式字符串"而是数据文本（LLM/agent
                     # 输出原文、文件内容、prompt 回显）——原样返回，既不抛归因错误
-                    # 的 KeyError，也不静默改写（"{% $F.eq(1,1) %}" -> "True"）。
-                    # 不引用任何根键的串（如 "{% $F.concat('a','b') %}"）保持历史
-                    # 语义继续递归。
+                    # 的 KeyError，也不静默改写（如引用了只在流程根上下文里存在的
+                    # 根键的串）。不引用任何根键的串（如 "{% $F.concat('a','b') %}"）
+                    # 保持历史语义继续递归；"无根引用且无字面量"的模板因此仍会被
+                    # 求值（#104 验收②的残留项，交由显式 opt-in：jeffkit/plaita#130）。
                     missing_roots = [
                         root for root in _scan_root_refs(parser.prefix, attr)
                         if not _container_has_root(container, root)
@@ -548,12 +553,21 @@ class ExpressionParser:
                             # 更深一层才失败的串）仍会抛 KeyError——必须说明错误
                             # 发生在**嵌套求值**里、parent 容器缺键，而不是流程根
                             # 上下文缺键（#104 ①）。
+                            # 只捕获 KeyError：表达式内部（如 $F.* 参数类型不符）
+                            # 抛出的 TypeError 是真错误，不能被改写成"父容器缺键"。
+                            # 极端的"__contains__ 为真但不可下标"容器会漏出 TypeError，
+                            # 真实容器（dict / CheckpointState）都可下标，视为不可达。
                             preview = attr if len(attr) < 120 else attr[:117] + "..."
+                            # 用异常原文（args[0]）而不是 str(exc)：KeyError.__str__
+                            # 会对消息再 repr 一次，嵌进来会多一层引号。
+                            original = exc.args[0] if exc.args else exc
+                            # 保留 from None：原文已带上游错误，链式化会把整条递归
+                            # 求值 traceback 重复打印一遍（与顶层缺键 KeyError 一致）。
                             raise KeyError(
                                 f"解析 {field_path} 时，字段值是一段嵌套表达式字符串 "
                                 f"{preview!r}：嵌套字符串以**持有它的父容器**为 context "
                                 f"求值（不是流程根上下文），而该父容器里缺少它引用的"
-                                f"根键。原始错误：{exc}。若这个字段是数据文本"
+                                f"根键。原始错误：{original}。若这个字段是数据文本"
                                 f"（LLM/agent 输出原文、文件内容、prompt 回显），"
                                 f"它不应被当作表达式求值。"
                             ) from None

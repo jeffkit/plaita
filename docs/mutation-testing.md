@@ -1,5 +1,5 @@
 # 变异测试（Mutation Testing）基线与流程
-> **最后更新**：2026-10-12（§2.5 末节：plaita#104 后单模块重跑 —— 681 变异，初筛 480 killed，独立 recheck 后 **558/681 = 81.9%**；**#104 新增/改动代码 0 个非等价 survived**，123 个 true survived 全部落在 #104 之前就存在的分支，且可由"companion 测试集不含 flow 级用例/未断言 DEBUG 日志"解释。
+> **最后更新**：2026-10-12（§2.5 末节：plaita#104 后单模块重跑 —— 681 变异，初筛 480 killed，独立 recheck 后 **558/681 = 81.9%**；**#104 新增/改动代码 0 个非等价 survived**，123 个 true survived = **121 个旧代码分支 + 2 个本 PR 新增代码的等价变异**，旧代码部分可由"companion 测试集不含 flow 级用例/未断言 DEBUG 日志"解释。
 > 同时（#107 后重跑 `state.py` / `errors.py` 单模块基线，见 §2.12.1 / §2.19.1：
 > `state.py` **95.8%（318/332，独立复核后）**，14 survived 全部是改动前就存在的、本次未触碰的位点；
 > `errors.py` **82.5%（80/97）**，17 survived 同理。两模块旧的 99.1% / 100% 在现工具链下**不复现**，
@@ -14,8 +14,8 @@
 > §2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py`：**2026-10-12（plaita#104）复扫为 558/681 = 81.9%**（123 true
-> survived 全在 #104 之前的代码；#104 新增代码 0 非等价 survived）。2026-10 的
-> 100%（433/433、449/449）是更窄覆盖口径下的历史记录，见 §2.5 末节；
+> survived = 121 个旧代码分支 + 2 个本 PR 新增代码的等价变异；#104 新增代码 0 个非等价
+> survived）。2026-10 的 100%（433/433、449/449）是更窄覆盖口径下的历史记录，见 §2.5 末节；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
 > `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
 > `state.py` 2026-10-12 复测 **95.8%**（318/332，见 §2.12.1；旧记录 99.1%（213/215）见 §2.12）；
@@ -152,7 +152,7 @@
 | 模块 | 得分 | 变异点 | survived | 备注 |
 |---|---|---|---|---|
 | `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
-| `plaita/core/expression_parser.py` | **81.9%** | 558/681 | 123 | ⚠️ 2026-10-12 重跑（plaita#104，见 §2.5 末节）：#104 新增代码 0 非等价 survived；123 个 true survived 全在旧代码（DEBUG 日志文案/文法特性等，companion 测试集口径）；旧记录 313/313、433/433、449/449 |
+| `plaita/core/expression_parser.py` | **81.9%** | 558/681 | 123 | ⚠️ 2026-10-12 重跑（plaita#104，见 §2.5 末节）：#104 新增代码 0 非等价 survived；123 个 true survived = 121 个旧代码分支（DEBUG 日志文案/文法特性等，companion 测试集口径）+ 2 个本 PR 新增代码的等价变异；旧记录 313/313、433/433、449/449 |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
 | `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
 | `plaita/dsl/builder.py` | ~~99.9%~~ **待重扫** | 876/877（口径不可复现） | 1 | ⚠ 见 §2.8「后续变更」（2026-10-12 #108：改动为变异中性；该数字待按 §7.2 重扫回填） |
@@ -273,16 +273,20 @@ survived。）
 - `_scan_root_refs__mutmut_1`：`len(text) <= 4096` → `< 4096`——只影响是否走
   `lru_cache`，返回值不变。
 
-**123 个 true survived 全部落在 #104 之前就存在的分支**（16 个函数，按数量：
-`_build_grammar` 27、`_compile_function_call` 18、`_compile_variable` 15、
-`_warn_suspicious_literal` 14、`_annotate_parse_error` 11、
+**123 个 true survived = 121 个旧代码分支 + 2 个本 PR 新增代码的等价变异**。旧代码的
+121 个分布在 14 个函数（按数量：`_build_grammar` 27、`_compile_function_call` 18、
+`_compile_variable` 15、`_warn_suspicious_literal` 14、`_annotate_parse_error` 11、
 `_warn_unmatched_template` 10、`_lookup_and_store` 7、`_eval_boolean` 5、
 `_eval_non_string` 4、`_compile_template` 4、`_eval` 2、`_get_attr` 2、
-`_eval_prefix` 1、`_cached_compile` 1、两个等价项）。两类成因已定位：
+`_eval_prefix` 1、`_cached_compile` 1）。两类成因已定位：
 
 1. **companion 测试集不含 flow 级用例**：例如 `pp.Keyword("null")` 系列变异在
-   上表 15 个文件里 survived，但手工注入该变异后 `tests/unit` 全量套件立刻
-   红（`test_codeflow_while.py` 的端到端 flow 用了 `null` 字面量）。即这些不是
+   上表 15 个文件里 survived，但手工注入该变异后 `test_codeflow_while.py` 立刻
+   红（**实测**）——注意该文件里**没有**字面量 `null`：它的 flow 源码写 Python
+   `None`，由 codeflow 编译器 `_render_arg` 渲染成 `null` 再交给表达式引擎；
+   反过来，真正含字面量 `null` 的 `test_codeflow_extended.py` /
+   `test_codeflow_canonical.py` / `test_coverage_sweep.py` /
+   `test_sexpr_mutations.py` 单独跑注入后**仍全绿**（已实测）。即这些不是
    "假 survived"，而是**测试集口径比历史记录更宽/更窄的产物**。
 2. **未断言 DEBUG/WARNING 文案**：`_compile_function_call` 的
    `logger.debug("parse_function: func_name=%s, args=%s", ...)`、

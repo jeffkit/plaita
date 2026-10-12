@@ -9,6 +9,7 @@ plaita#104 追加：即使 attr 确实是表达式/模板形态，递归也只�
 **全部存在于持有它的父容器**里时才发生（方案 A）；否则它是数据文本，原样返回。
 """
 import logging
+from collections import defaultdict
 
 import pytest
 
@@ -50,25 +51,38 @@ def test_data_text_referencing_root_absent_from_parent_returned_raw():
     assert parser.evaluate("$INPUT.secret", context) == "S3CRET"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "#104 验收②（纯 $F 模板不被二次求值）与回归清单「test_template_like_attr_still_parsed "
-        "必须继续通过」互斥：两条用例结构完全同形（$NODE.<id>.<field>，attr 是单个 {% $F... %} "
-        "模板、不引用任何根键），方案 A 的根键扫描对二者给出同一结论。上游裁定前保持 xfail。"
-    ),
-    strict=False,
+_AC2_XFAIL_REASON = (
+    "#104 AC#2 vs the mandated regression: the root scan returns the same empty set for "
+    "{% $F.eq(1,1) %} and {% $F.concat('hello ', 'world') %} (neither references a root), so "
+    "plan A evaluates both. The two inputs are NOT identical, though — container key "
+    "'text' vs 'greeting', and the eq(1,1) body carries no string literal while "
+    "concat('hello ', 'world') does — and discriminating heuristics do exist (field-name "
+    "data-sink; no-literal/no-root template). They were not adopted because they trade a loud "
+    "failure for a silent non-evaluation ({% $F.uuid() %} / {% $F.now() %} would stop "
+    "evaluating) — see jeffkit/plaita#130 for the explicit opt-in."
 )
-def test_pure_function_template_attr_not_reevaluated():
-    """#104 验收②：不引用根键的 `{% $F.eq(1,1) %}` 数据文本不应被二次求值。
 
-    ⚠ 已知冲突：本用例要求「不引用根键 ⇒ 不求值」，而 `test_template_like_attr_still_parsed`
-    要求「不引用根键 ⇒ 求值」（{% $F.concat('hello ', 'world') %} → 'hello world'）。
-    二者只差被调用的函数名，无法用任何只依赖 (attr, 父容器) 的规则区分。本仓选择
-    保回归清单 + issue 明确推荐的方案 A，故本断言保持 xfail（见 #104 交付报告）。
+
+def test_pure_function_template_attr_not_reevaluated():
+    """#104 验收②——**残留项，未修复**（交由 jeffkit/plaita#130 的显式 opt-in）。
+
+    事实：方案 A 的根键扫描对 `{% $F.eq(1,1) %}`（本例）与回归用例的
+    `{% $F.concat('hello ', 'world') %}` 都返回空集（两者都不引用任何根键），
+    所以方案 A 下两者都会递归求值。两例的**输入确实不同**（容器键 `text` vs
+    `greeting`；模板体有无引号字面量），理论上存在判别信号，但独立验收决定不采用
+    基于字段名 / 字面量的启发式——那会把"静默改写"换成"静默不求值"
+    （`{% $F.uuid() %}` 这类合法模板会悄悄不再求值），并可能把业务字段名硬编码进
+    核心解析器。
+
+    因此本用例在**冲突断言处** xfail（而不是用模块级 xfail 装饰器，避免未来别处的
+    失败被静默吞掉）：一旦 #130 落地本用例自动转绿；求值抛别的异常会在断言处真红。
     """
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"llm": {"text": "{% $F.eq(1,1) %}"}}}
-    assert parser.evaluate("$NODE.llm.text", context) != "True"
+    got = parser.evaluate("$NODE.llm.text", context)
+    if got == "True":
+        pytest.xfail(_AC2_XFAIL_REASON)
+    assert got != "True"
 
 
 # --- 根键扫描的判据（避免把 $F 等非根引用/字面量误判为根键）-----------------
@@ -129,8 +143,26 @@ def test_nested_keyerror_blames_the_nested_field_not_the_flow_root():
     assert "$NODE.llm.text" in message
     assert "父容器" in message
     assert "'$CUSTOM' not found in expression context" in message
+    # 原始错误按原文嵌入，不再被 KeyError.__str__ 再 repr 一层（多一层引号）
+    assert '原始错误："' not in message
     # 短字段值原样进摘要（不截断）
     assert repr("{% $CUSTOM.thing %}") in message
+
+
+def test_defaultdict_parent_is_not_mutated_and_data_is_returned_raw():
+    """`defaultdict` 父容器：门只做 `in` 探测，不触发 `[]` 的自动建键。
+
+    基线（无条件递归）会执行 `container["$INPUT"]`，在 `defaultdict(dict)` 上**顺手创建**
+    `$INPUT` 并让模板求出 `'None'`；方案 A 改为原文返回，父容器保持原样。这是"从抛错改为
+    按数据返回"之外的可见行为变化（已写入 MIGRATION.md）。
+    """
+    container: defaultdict = defaultdict(dict)
+    container["text"] = "{% $INPUT.secret %}"
+    parser = ExpressionParser.for_prefix("$")
+    assert parser.evaluate("$NODE.llm.text", {"$NODE": {"llm": container}}) == (
+        "{% $INPUT.secret %}"
+    )
+    assert "$INPUT" not in container          # 无副作用：不再自动建键
 
 
 @pytest.mark.parametrize("total_len", [19, 120, 200])
