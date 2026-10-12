@@ -34,7 +34,7 @@
 | `$PARENT.x` | 父流程上下文（子流程中可用） | `None` |
 | `$ENV.key` | 环境变量（须在 `exposeEnv` 白名单内，见下文） | `None`（未声明时另有解析期 warning） |
 
-缺省口径统一为"缺键返回 `None`"；唯一的例外是整个根不存在（如上下文尚未建立 `$NODE` 状态）时保留 `KeyError`——那通常意味着流程逻辑错误，静默反而危险。
+缺省口径统一为"缺键返回 `None`"；例外有二：整个根不存在（如上下文尚未建立 `$NODE` 状态）时保留 `KeyError`——那通常意味着流程逻辑错误，静默反而危险；字段名以 `_` 开头时按下文「属性遍历与下划线名」抛 `ValueError`。
 
 支持的命名空间由 `ExecutionContext` 维护：`INPUT` / `NODE` / `GLOBAL` / `PARENT` / `ENV`。命名空间名本身可通过 `express_input_name` 等参数自定义。
 
@@ -67,6 +67,33 @@ $NODE.list.0           # 列表第 0 项
 $NODE.list[0]          # 等价写法
 $NODE.list[-1]         # 末项
 ```
+
+### 属性遍历与下划线名（安全限制）
+
+字段段读的是**数据**：`dict` / 映射按**键**取，其它对象按**属性**取。下划线名在
+**属性读取**上被拒绝，并且是**硬报错**（不是返回 `None`）：
+
+| 表达式 | 结果 |
+|--------|------|
+| `$NODE.obj.text` | `"hello"`（公开属性） |
+| `$NODE.obj.__class__` | **`ValueError`**：`'__class__'` 不是允许的字段名 |
+| `$NODE.obj._private` | **`ValueError`** |
+| `$NODE.d._foo`（`d` 是 dict） | 键 `_foo` 的值——**键**不受限 |
+| `$NODE._n2`（自动生成的节点 id） | 该节点结果——**键**不受限 |
+| `$NODE.__class__`（`$NODE` 是 dict） | **`ValueError`**（dunder 键同样拒绝） |
+
+规则：
+
+* **属性读取**：任何 `_` 开头的段名一律拒绝；
+* **映射取值**：单下划线键保持可读（`{"_foo": …}`、builder 自动生成的 `_n2` 节点 id）；
+  `__` 开头的键拒绝——它不是合法数据键，静默 `None` 只会掩盖越权尝试；
+* 拒绝是**硬错误**：抛 `ValueError`（消息点名该段并说明原因），在 `end` 节点的
+  `output` 等路径上表现为节点错误。不要指望"被挡住 → 得到 `None`"。
+
+原因：`$NODE.<节点>.__class__.__init__.__globals__.os.environ` 这类链在节点返回
+dataclass / pydantic / 普通实例时能读出执行进程的全部环境变量，绕开 `$ENV` 的
+`exposeEnv` allowlist（见下文）。数组索引、公开属性、`dict` 键、`{% … %}` 插值与
+`$NODE.raw.…` 都不受影响。迁移说明见[迁移指南](../reference/migration-guide.md)。
 
 ### 取数据原文：`$NODE.raw.<节点>…`
 
