@@ -25,6 +25,10 @@ Evaluation semantics are preserved bit-for-bit against the battle-tested
   references actually exists in that parent object (#104, plan A).  Otherwise
   the value is data text (LLM/agent output, file content, prompt echo) and is
   returned unchanged instead of being evaluated and silently rewritten.
+* ``$NODE.raw.<node>[.<path>...]`` bypasses that re-evaluation entirely and
+  returns the stored value verbatim — strings are never evaluated at any depth
+  (#130, the explicit opt-in for data text).  ``$NODE.<node>...`` keeps the
+  semantics described above, unchanged.
 * index segments (``[n]`` / ``.n``) index directly without recursion
 * unknown functions fall back to the ``"undefined"`` sentinel
 * ``{% ... %}`` only fires when the inner expression starts with the prefix
@@ -274,6 +278,46 @@ def _render_path(root_key: str, walked: List[Tuple[str, Any, str]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# ``$NODE.raw.<node>[.<path>...]`` — explicit verbatim accessor (plaita#130)
+# ---------------------------------------------------------------------------
+# ``$NODE.<node>.<field>`` keeps the historical semantics: a string value that
+# looks like an expression/template may be re-evaluated with its parent
+# container as context (#104 plan A narrows that, it does not remove it).  Data
+# text that a node produced (LLM output, document content, prompt echo) can
+# therefore still be silently rewritten — ``"{% $F.eq(1, 1) %}"`` -> ``"True"``.
+# The accessor makes "return the stored value, do not evaluate it" **explicit**:
+# with the ``raw`` modifier no string is re-evaluated at any depth (the #104
+# root scan is bypassed too).  Non-string values are returned exactly as the
+# non-``raw`` path returns them.
+#
+# Name-collision rule (deterministic, backwards compatible): the first segment
+# after ``$NODE`` is the modifier **only when** the ``$NODE`` container has no
+# node/key with that id **and** the segment after it is a field name (the node
+# id).  A flow with a node literally named ``raw`` therefore keeps
+# ``$NODE.raw.<path>`` meaning *that node* — an existing flow never silently
+# changes meaning.  Such a flow cannot use the accessor (there is no spelling
+# left that could mean it); the collision is reported once per distinct path
+# string with a WARNING.
+_RAW_MODIFIER = "raw"
+_warned_raw_collisions: "set[str]" = set()
+
+
+def _warn_raw_accessor_collision(path: str) -> None:
+    if path in _warned_raw_collisions:
+        return
+    if len(_warned_raw_collisions) > 512:
+        _warned_raw_collisions.clear()
+    _warned_raw_collisions.add(path)
+    logger.warning(
+        "expression %s: the segment after $NODE is 'raw', but this flow also has a "
+        "node/key with id 'raw' — it is resolved as that node (backwards "
+        "compatibility), so the verbatim '$NODE.raw.<id>...' accessor (#130) is NOT "
+        "available in this flow; rename the node to use the accessor.",
+        path,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Per-call context — legacy thread-local frame stack
 # ---------------------------------------------------------------------------
 # The evaluation hot path no longer uses these: thunks receive the frame
@@ -507,7 +551,22 @@ class ExpressionParser:
                     f"Available roots (with {parser.prefix!r} prefix): "
                     "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
                 ) from None
-            for position, (kind, target, raw) in enumerate(segments):
+            # ``$NODE.raw.<node>...`` — explicit verbatim accessor (#130).  The
+            # decision is made here (not at compile time) because it depends on
+            # the runtime ``$NODE`` container: the modifier only applies when no
+            # node/key named ``raw`` exists and a node id follows.  See
+            # ``_RAW_MODIFIER`` above for the collision rule.
+            raw_mode = False
+            effective_segments = segments
+            if (root_key == f"{parser.prefix}NODE" and len(segments) >= 2
+                    and segments[0][0] == "field" and segments[0][2] == _RAW_MODIFIER
+                    and segments[1][0] == "field"):
+                if _container_has_root(obj, _RAW_MODIFIER):
+                    _warn_raw_accessor_collision(_render_path(root_key, segments))
+                else:
+                    raw_mode = True
+                    effective_segments = segments[1:]
+            for position, (kind, target, raw) in enumerate(effective_segments):
                 if kind == "index":
                     obj = obj[target]
                     continue
@@ -522,7 +581,8 @@ class ExpressionParser:
                 # 求值——这是"嵌套表达式字符串"的历史语义。任意普通字符串（可能含
                 # [tag]、引号、换行等元字符）不再二次解析，否则节点输出一旦被下游
                 # $NODE 路径引用就会因内容触发误解析（如 "[promo] ..." 被当列表）。
-                if (isinstance(attr, str)
+                # ``raw`` 模式下整条路径都不递归：字符串原样返回（#130）。
+                if (not raw_mode and isinstance(attr, str)
                         and (attr.startswith(prefix) or "{%" in attr)):
                     # 方案 A（#104）：递归前先扫根键。嵌套串以**持有它的父容器**
                     # 为 context 求值，所以只要它引用的任一上下文根在当前父容器里
@@ -531,12 +591,12 @@ class ExpressionParser:
                     # 的 KeyError，也不静默改写（如引用了只在流程根上下文里存在的
                     # 根键的串）。不引用任何根键的串（如 "{% $F.concat('a','b') %}"）
                     # 保持历史语义继续递归；"无根引用且无字面量"的模板因此仍会被
-                    # 求值（#104 验收②的残留项，交由显式 opt-in：jeffkit/plaita#130）。
+                    # 求值——要拿到原文请走显式 `$NODE.raw.<id>...`（#130）。
                     missing_roots = [
                         root for root in _scan_root_refs(parser.prefix, attr)
                         if not _container_has_root(container, root)
                     ]
-                    field_path = _render_path(root_key, segments[:position + 1])
+                    field_path = _render_path(root_key, effective_segments[:position + 1])
                     if missing_roots:
                         logger.debug(
                             "nested expression string in %s references root(s) %s missing "

@@ -7,6 +7,9 @@
 
 plaita#104 追加：即使 attr 确实是表达式/模板形态，递归也只在它引用的上下文根
 **全部存在于持有它的父容器**里时才发生（方案 A）；否则它是数据文本，原样返回。
+
+plaita#130 追加：`$NODE.raw.<node>[.<path>...]` 是显式 opt-in——整条路径上的字符串
+一律不求值、原样取回；`$NODE.<node>...` 的上述语义不变。
 """
 import logging
 from collections import defaultdict
@@ -51,38 +54,22 @@ def test_data_text_referencing_root_absent_from_parent_returned_raw():
     assert parser.evaluate("$INPUT.secret", context) == "S3CRET"
 
 
-_AC2_XFAIL_REASON = (
-    "#104 AC#2 vs the mandated regression: the root scan returns the same empty set for "
-    "{% $F.eq(1,1) %} and {% $F.concat('hello ', 'world') %} (neither references a root), so "
-    "plan A evaluates both. The two inputs are NOT identical, though — container key "
-    "'text' vs 'greeting', and the eq(1,1) body carries no string literal while "
-    "concat('hello ', 'world') does — and discriminating heuristics do exist (field-name "
-    "data-sink; no-literal/no-root template). They were not adopted because they trade a loud "
-    "failure for a silent non-evaluation ({% $F.uuid() %} / {% $F.now() %} would stop "
-    "evaluating) — see jeffkit/plaita#130 for the explicit opt-in."
-)
-
-
 def test_pure_function_template_attr_not_reevaluated():
-    """#104 验收②——**残留项，未修复**（交由 jeffkit/plaita#130 的显式 opt-in）。
+    """#104 验收②（jeffkit/plaita#130 以显式 opt-in 落地）：非 raw 路径仍求值。
 
     事实：方案 A 的根键扫描对 `{% $F.eq(1,1) %}`（本例）与回归用例的
     `{% $F.concat('hello ', 'world') %}` 都返回空集（两者都不引用任何根键），
-    所以方案 A 下两者都会递归求值。两例的**输入确实不同**（容器键 `text` vs
-    `greeting`；模板体有无引号字面量），理论上存在判别信号，但独立验收决定不采用
-    基于字段名 / 字面量的启发式——那会把"静默改写"换成"静默不求值"
-    （`{% $F.uuid() %}` 这类合法模板会悄悄不再求值），并可能把业务字段名硬编码进
-    核心解析器。
-
-    因此本用例在**冲突断言处** xfail（而不是用模块级 xfail 装饰器，避免未来别处的
-    失败被静默吞掉）：一旦 #130 落地本用例自动转绿；求值抛别的异常会在断言处真红。
+    所以非 raw 路径**继续按历史语义求值**——这也是 `raw` 访问器存在的理由。
+    本版仍不采用基于字段名 / 字面量的启发式（那会把"静默改写"换成"静默不求值"，
+    `{% $F.uuid() %}` 这类合法模板会悄悄不再求值），而是新增显式访问器
+    `$NODE.raw.<node>[.<path>...]`：整条路径上的字符串一律不求值、原样取回。
     """
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"llm": {"text": "{% $F.eq(1,1) %}"}}}
-    got = parser.evaluate("$NODE.llm.text", context)
-    if got == "True":
-        pytest.xfail(_AC2_XFAIL_REASON)
-    assert got != "True"
+    # 显式 opt-in：原文取回——与模板形态、有无字面量、字段名无关
+    assert parser.evaluate("$NODE.raw.llm.text", context) == "{% $F.eq(1,1) %}"
+    # 非 raw 路径语义不变（文档化的静默求值仍在）
+    assert parser.evaluate("$NODE.llm.text", context) == "True"
 
 
 # --- 根键扫描的判据（避免把 $F 等非根引用/字面量误判为根键）-----------------
