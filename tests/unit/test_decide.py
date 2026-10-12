@@ -1,4 +1,5 @@
 from unittest import TestCase
+from unittest.mock import MagicMock
 
 import plaita.core.errors as plaita_errors
 from plaita.core.flow import Flow
@@ -337,6 +338,124 @@ class AssignmentTestCase(TestCase):
         )
         self.assertEqual("KongJie", flow.run({"flag": True}))
         self.assertEqual("nobody", flow.run({"flag": False}))
+
+
+class AssignmentSourceValidationTestCase(TestCase):
+    """plaita#111：``validate()`` 第二个断言 ``len(...) >= 0`` 恒真，
+    「必须有 output」从未生效——缺 output 时构建期静默放行、运行期
+    ``execute()`` 落入 ``else: return None`` 静默产出 None。
+    """
+
+    @staticmethod
+    def _prop(data_type=types.STRING):
+        return Property(data_type=data_type)
+
+    # ---- 构建期：非法配置必须报错（ValueError，带节点 id） ----
+
+    def test_missing_output_and_upstream_raises_at_validate(self):
+        node = Assignment(id="assign-missing", output_type=self._prop())
+        with self.assertRaises(ValueError) as ctx:
+            node.validate()
+        # 只钉「承重信息」：节点 id + 两类来源字段名。不逐字匹配整段文案——独立验收用
+        # 「只改文案、不改行为」的手工变异证明过精确整段断言属**过拟合**（行为没变也红）。
+        msg = str(ctx.exception)
+        self.assertIn("'assign-missing'", msg)
+        self.assertIn("output", msg)
+        self.assertIn("upstream_output", msg)
+
+    def test_missing_output_type_raises_at_validate(self):
+        # 第一处断言同样换成显式 ValueError（python -O 下 assert 会整体消失）
+        node = Assignment(id="assign-no-type", output="x")
+        with self.assertRaises(ValueError) as ctx:
+            node.validate()
+        msg = str(ctx.exception)
+        self.assertIn("'assign-no-type'", msg)
+        self.assertIn("output_type", msg)
+
+    # ---- 合法配置不得被误伤 ----
+
+    def test_falsy_literal_output_passes_validation(self):
+        # 假值字面量是 ``is not None`` 的合法 output，绝不能被真值判断当成缺失
+        for value, dtype in ((0, types.INTEGER), (False, types.BOOL), ("", types.STRING)):
+            with self.subTest(value=value):
+                node = Assignment(id="assign-falsy", output_type=self._prop(dtype), output=value)
+                node.validate()  # 不得抛错
+
+    def test_falsy_literal_output_executes(self):
+        # 走 `self.output is not None` 分支，值原样返回（不因假值被吞成 None）。
+        # 注意 "" 用 types.ANY：``output_type=string`` + 空串会撞下面那条**既有**怪癖。
+        for value, dtype in ((0, types.INTEGER), (False, types.BOOL), ("", types.ANY)):
+            with self.subTest(value=value):
+                node = Assignment(id="assign-falsy", output_type=self._prop(dtype), output=value)
+                execution = MagicMock()
+                execution.evaluate.return_value = value
+                self.assertEqual(node.execute(execution), value)
+                # evaluate 必须收到 output 字面量本身（杀死「把 value 置 None」类变异）
+                execution.evaluate.assert_called_once_with(value)
+
+    def test_empty_string_with_string_type_is_a_preexisting_quirk(self):
+        """记录性断言：``output=""`` + ``output_type=string`` 会被类型检查拒绝。
+
+        根因是 ``plaita/io.py`` 的 string 判定写成 ``isinstance(obj, str) and obj``
+        ——空串被当假值。**基线（ae33c01）与本补丁行为一致**，属既有语义而非 #111 引入；
+        上面那条假值用例因此对 ``""`` 用 ``types.ANY``。钉住它，免得日后被误判成回归。
+        """
+        node = Assignment(id="assign-empty-str",
+                          output_type=self._prop(types.STRING), output="")
+        execution = MagicMock()
+        execution.evaluate.return_value = ""
+        with self.assertRaises(ValueError) as ctx:
+            node.execute(execution)
+        self.assertIn("output_type", str(ctx.exception))
+
+    def test_upstream_output_only_passes_validation(self):
+        node = Assignment(
+            id="assign-upstream",
+            output_type=self._prop(),
+            upstream_output=[{"upstream": "u", "value": "$NODE.u"}],
+        )
+        node.validate()  # 不得抛错
+
+    def test_single_upstream_output_branch_unchanged(self):
+        node = Assignment(
+            id="asg-1up",
+            output_type=self._prop(),
+            upstream_output=[{"upstream": "u", "value": "$NODE.u"}],
+        )
+        execution = MagicMock()
+        execution.evaluate.return_value = "X"
+        self.assertEqual(node.execute(execution), "X")
+        # value 必须是 upstream_output[0]["value"]（杀死「置 None」类变异）
+        execution.evaluate.assert_called_once_with("$NODE.u")
+
+    def test_multi_upstream_output_selects_last_node(self):
+        node = Assignment(
+            id="asg-2up",
+            output_type=self._prop(),
+            upstream_output=[
+                {"upstream": "u1", "value": "$NODE.u1"},
+                {"upstream": "u2", "value": "$NODE.u2"},
+            ],
+        )
+        execution = MagicMock()
+        execution.state.last_node_id = "u2"
+        execution.evaluate.return_value = "B"
+        self.assertEqual(node.execute(execution), "B")
+        execution.evaluate.assert_called_once_with("$NODE.u2")
+
+    # ---- 运行期：保留历史兼容行为（本 issue 明确允许的 fallback 选择） ----
+
+    def test_execute_missing_both_sources_still_returns_none_for_compat(self):
+        """构建期已由 validate() 拦下；运行期暂保留 ``return None``。
+
+        plaita#111 的修复方向③（运行期改抛错）会把无 output 的 assignment 从
+        「静默 None」变成硬失败——实测撞红 3 个既有用例，且仓内 7+ 个测试文件
+        用无 output 的 assignment 仅做「推进节点」用途。按 issue「若担心兼容性，
+        至少保证构建期可见」取最小修法，运行期语义**不变**；本用例把这一选择
+        钉住：日后若决定改成抛错，这里会红，逼迫有意识地同步改动。
+        """
+        node = Assignment(id="assign-runtime", output_type=self._prop())
+        self.assertIsNone(node.execute(MagicMock()))
 
 
 # ---------------------------------------------------------------------------
