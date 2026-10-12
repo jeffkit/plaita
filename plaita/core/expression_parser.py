@@ -21,7 +21,10 @@ Evaluation semantics are preserved bit-for-bit against the battle-tested
 * root variable lookup raises ``KeyError`` for a missing context key
 * intermediate field accesses recurse through ``evaluate`` with the **parent
   object** as the context (so nested expression strings resolve against the
-  parent, not the root)
+  parent, not the root) — but only when every context root the nested string
+  references actually exists in that parent object (#104, plan A).  Otherwise
+  the value is data text (LLM/agent output, file content, prompt echo) and is
+  returned unchanged instead of being evaluated and silently rewritten.
 * index segments (``[n]`` / ``.n``) index directly without recursion
 * unknown functions fall back to the ``"undefined"`` sentinel
 * ``{% ... %}`` only fires when the inner expression starts with the prefix
@@ -50,9 +53,11 @@ path passes the frame explicitly.
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from functools import lru_cache
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import pyparsing as pp
 
@@ -76,7 +81,7 @@ Thunk = Callable[[Frame], Any]
 
 # 可疑字面量特征（2026-09 LLM 作者模拟 P0-1）：Jinja 双花括号 / Python f-string /
 # await 调用 / 裸函数调用——这些字符串几乎从不是合法的 plaita 表达式意图
-_SUSPICIOUS_LITERAL = __import__("re").compile(
+_SUSPICIOUS_LITERAL = re.compile(
     r"\{\{|\}\}|\bf['\"]|\bawait\b|[A-Za-z_]\w*\([^)]*\$")
 _warned_literals: "set[str]" = set()
 
@@ -158,6 +163,110 @@ def _get_attr(obj: Any, path: str) -> Any:
     if hasattr(obj, "__dict__"):
         return getattr(obj, path, None)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Nested-expression root scan (plaita#104, plan A)
+# ---------------------------------------------------------------------------
+# A string attribute value used to be re-evaluated unconditionally with the
+# *parent container* as context.  When the value is really data text (LLM/agent
+# output, file content, prompt echo) that contains a ``{% ... %}`` fragment, the
+# implicit recursion either raised a misleading ``KeyError`` (the referenced root
+# exists at the flow root, not in the parent container) or silently rewrote the
+# text (``"{% $F.eq(1, 1) %}"`` -> ``"True"``).
+#
+# Plan A narrows the recursion: scan the string for context roots and recurse
+# only when *all* of them exist in the parent container.  The scan is a plain
+# regex over the raw text — the grammar is not re-run (the recursion decision
+# happens before evaluation, and a full parse would cost as much as evaluating).
+
+# The documented context roots.  Anything else after the prefix — ``$F`` (the
+# function namespace), ``$FOO`` or an arbitrary storage key such as
+# ``$INPUT-x`` — is deliberately NOT treated as a root reference, so a nested
+# string never gets misjudged because of an unrelated ``$`` token.
+_ROOT_REF_NAMES: FrozenSet[str] = frozenset(
+    {"INPUT", "NODE", "PARENT", "GLOBAL", "ENV", "FLOW_ID"}
+)
+# ``$FLOW`` is the documented alias of ``$FLOW_ID`` (see _compile_variable).
+_ROOT_REF_ALIASES = {"FLOW": "FLOW_ID"}
+# Quoted string literals are data, never root references: ``'$INPUT'`` inside
+# ``$F.concat('$INPUT', $NODE.x)`` is a constant, not a context lookup.
+_QUOTED_SPAN_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
+# Same memory discipline as the compile LRUs: only short strings are memoized,
+# long data text is scanned uncached so it cannot be pinned by this cache.
+_MAX_SCAN_CACHE_LEN = 4096
+_MISSING = object()
+
+
+def _scan_root_refs_impl(prefix: str, text: str) -> FrozenSet[str]:
+    """Return the resolved context roots (``{prefix}NAME``) *text* references."""
+    if not text:
+        return frozenset()
+    # Strip quoted literals first so their content cannot be mistaken for a
+    # reference (offsets are irrelevant afterwards — only matches matter).
+    stripped = _QUOTED_SPAN_RE.sub(" ", text)
+    # ``[A-Za-z0-9_$-]*`` munches maximally, matching the grammar's
+    # ``name_token``: ``$INPUT-x`` is the root ``$INPUT-x`` (unknown -> no
+    # reference), not ``$INPUT`` followed by literal text.
+    token_re = re.compile(re.escape(prefix) + r"([A-Za-z0-9_$-]*)")
+    found = set()
+    for match in token_re.finditer(stripped):
+        name = match.group(1)
+        if not name:
+            continue            # a bare ``$`` root — nothing scannable
+        if match.start() > 0 and stripped[match.start() - 1] == ".":
+            # Field-name position (``$PARENT.$INPUT.name``): the second segment
+            # is the literal key ``$INPUT`` on the parent context, not a root.
+            continue
+        resolved = _ROOT_REF_ALIASES.get(name, name)
+        if resolved in _ROOT_REF_NAMES:
+            found.add(prefix + resolved)
+    return frozenset(found)
+
+
+@lru_cache(maxsize=256)
+def _scan_root_refs_cached(prefix: str, text: str) -> FrozenSet[str]:
+    return _scan_root_refs_impl(prefix, text)
+
+
+def _scan_root_refs(prefix: str, text: str) -> FrozenSet[str]:
+    if len(text) <= _MAX_SCAN_CACHE_LEN:
+        return _scan_root_refs_cached(prefix, text)
+    return _scan_root_refs_impl(prefix, text)
+
+
+def _container_has_root(obj: Any, root_key: str) -> bool:
+    """Would ``obj[root_key]`` (the nested thunk's root lookup) succeed?"""
+    if isinstance(obj, dict):
+        return root_key in obj
+    if hasattr(obj, "__contains__"):
+        try:
+            return root_key in obj
+        except Exception as exc:  # noqa: BLE001 — exotic containers must not break eval
+            # 探针失败按"该容器没有这个根键"继续往下试（保守：宁可把数据文本原样
+            # 返回，也不让它带着误导性的归因去递归求值）；留痕便于排查自定义上下文。
+            logger.debug(
+                "contains probe failed for %s root %r: %s", type(obj).__name__, root_key, exc,
+            )
+    get = getattr(obj, "get", None)
+    if callable(get):
+        try:
+            return get(root_key, _MISSING) is not _MISSING
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "get probe failed for %s root %r: %s", type(obj).__name__, root_key, exc,
+            )
+    if hasattr(obj, "__dict__"):
+        return hasattr(obj, root_key)
+    return False
+
+
+def _render_path(root_key: str, walked: List[Tuple[str, Any, str]]) -> str:
+    """Render the variable path walked so far (``$NODE.llm.text``)."""
+    parts = [root_key]
+    for kind, target, raw in walked:
+        parts.append(f"[{target}]" if kind == "index" else f".{raw}")
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +503,7 @@ class ExpressionParser:
                     f"Available roots (with {parser.prefix!r} prefix): "
                     "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
                 ) from None
-            for kind, target, raw in segments:
+            for position, (kind, target, raw) in enumerate(segments):
                 if kind == "index":
                     obj = obj[target]
                     continue
@@ -403,14 +512,51 @@ class ExpressionParser:
                     logger.debug(
                         "expression references missing input key %r; evaluating to None", raw,
                     )
-                attr = _get_attr(obj, target)
+                container = obj
+                attr = _get_attr(container, target)
                 # 仅当字符串属性值本身是表达式（$ 前缀变量 / {% %} 模板）时才递归
                 # 求值——这是"嵌套表达式字符串"的历史语义。任意普通字符串（可能含
                 # [tag]、引号、换行等元字符）不再二次解析，否则节点输出一旦被下游
                 # $NODE 路径引用就会因内容触发误解析（如 "[promo] ..." 被当列表）。
                 if (isinstance(attr, str)
                         and (attr.startswith(prefix) or "{%" in attr)):
-                    obj = parser.evaluate(attr, obj, registry)
+                    # 方案 A（#104）：递归前先扫根键。嵌套串以**持有它的父容器**
+                    # 为 context 求值，所以只要它引用的任一上下文根在当前父容器里
+                    # 不存在，它就不是"嵌套表达式字符串"而是数据文本（LLM/agent
+                    # 输出原文、文件内容、prompt 回显）——原样返回，既不抛归因错误
+                    # 的 KeyError，也不静默改写（"{% $F.eq(1,1) %}" -> "True"）。
+                    # 不引用任何根键的串（如 "{% $F.concat('a','b') %}"）保持历史
+                    # 语义继续递归。
+                    missing_roots = [
+                        root for root in _scan_root_refs(parser.prefix, attr)
+                        if not _container_has_root(container, root)
+                    ]
+                    field_path = _render_path(root_key, segments[:position + 1])
+                    if missing_roots:
+                        logger.debug(
+                            "nested expression string in %s references root(s) %s missing "
+                            "from its parent container; returned AS-IS as data text",
+                            field_path,
+                            ", ".join(sorted(missing_roots)),
+                        )
+                        obj = attr
+                    else:
+                        try:
+                            obj = parser.evaluate(attr, container, registry)
+                        except KeyError as exc:
+                            # 兜底归因：扫描没识别出的引用（如未知根 $INPUT-x、
+                            # 更深一层才失败的串）仍会抛 KeyError——必须说明错误
+                            # 发生在**嵌套求值**里、parent 容器缺键，而不是流程根
+                            # 上下文缺键（#104 ①）。
+                            preview = attr if len(attr) < 120 else attr[:117] + "..."
+                            raise KeyError(
+                                f"解析 {field_path} 时，字段值是一段嵌套表达式字符串 "
+                                f"{preview!r}：嵌套字符串以**持有它的父容器**为 context "
+                                f"求值（不是流程根上下文），而该父容器里缺少它引用的"
+                                f"根键。原始错误：{exc}。若这个字段是数据文本"
+                                f"（LLM/agent 输出原文、文件内容、prompt 回显），"
+                                f"它不应被当作表达式求值。"
+                            ) from None
                 else:
                     obj = attr
             return obj

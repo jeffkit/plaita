@@ -1,5 +1,6 @@
 # 变异测试（Mutation Testing）基线与流程
-> **最后更新**：2026-10-12（#107 后重跑 `state.py` / `errors.py` 单模块基线，见 §2.12.1 / §2.19.1：
+> **最后更新**：2026-10-12（§2.5 末节：plaita#104 后单模块重跑 —— 681 变异，初筛 480 killed，独立 recheck 后 **558/681 = 81.9%**；**#104 新增/改动代码 0 个非等价 survived**，123 个 true survived 全部落在 #104 之前就存在的分支，且可由"companion 测试集不含 flow 级用例/未断言 DEBUG 日志"解释。
+> 同时（#107 后重跑 `state.py` / `errors.py` 单模块基线，见 §2.12.1 / §2.19.1：
 > `state.py` **95.8%（318/332，独立复核后）**，14 survived 全部是改动前就存在的、本次未触碰的位点；
 > `errors.py` **82.5%（80/97）**，17 survived 同理。两模块旧的 99.1% / 100% 在现工具链下**不复现**，
 > 但**归因不同、勿混为一谈**：`errors.py` 的差距包含「§2.19 当时用**裸 `timeout` 复核**」——本机 macOS 无
@@ -12,7 +13,9 @@
 > 2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；
 > §2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
-> `expression_parser.py` 已补强至 **100%**（2026-10 重写后重跑 433/433，见 §2.5 末节）；
+> `expression_parser.py`：**2026-10-12（plaita#104）复扫为 558/681 = 81.9%**（123 true
+> survived 全在 #104 之前的代码；#104 新增代码 0 非等价 survived）。2026-10 的
+> 100%（433/433、449/449）是更窄覆盖口径下的历史记录，见 §2.5 末节；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
 > `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
 > `state.py` 2026-10-12 复测 **95.8%**（318/332，见 §2.12.1；旧记录 99.1%（213/215）见 §2.12）；
@@ -149,7 +152,7 @@
 | 模块 | 得分 | 变异点 | survived | 备注 |
 |---|---|---|---|---|
 | `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
-| `plaita/core/expression_parser.py` | **100%** | 313/313 | 0 | ✅ 已强化（见 §2.5） |
+| `plaita/core/expression_parser.py` | **81.9%** | 558/681 | 123 | ⚠️ 2026-10-12 重跑（plaita#104，见 §2.5 末节）：#104 新增代码 0 非等价 survived；123 个 true survived 全在旧代码（DEBUG 日志文案/文法特性等，companion 测试集口径）；旧记录 313/313、433/433、449/449 |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
 | `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
 | `plaita/dsl/builder.py` | ~~99.9%~~ **待重扫** | 876/877（口径不可复现） | 1 | ⚠ 见 §2.8「后续变更」（2026-10-12 #108：改动为变异中性；该数字待按 §7.2 重扫回填） |
@@ -234,6 +237,63 @@ mutmut（临时收窄 `only_mutate`）均为同一形态：
 不可信」在重写后的代码上同样成立，流程照 §7 执行即可。
 缓存行为本身的护栏（跨 context 串扰 / 嵌套递归命中 / 并发命中 / 长串二级
 LRU 有界 / 失败不缓存）由 `test_expression_cache.py` 提供，变异依赖它杀灭。
+
+### 2026-10-12 plaita#104 后的单模块重跑（真实分 81.9%，非等价缺口全在旧代码）
+
+`plaita#104` 改了 `_compile_variable` 的「嵌套表达式字符串」递归门（方案 A：先扫
+根键，只有引用的根键全部存在于持有字段的父容器里才递归），新增
+`_scan_root_refs*` / `_container_has_root` / `_render_path`。按 §7.2 单模块重跑
+（`only_mutate` 收窄为 `plaita/core/expression_parser.py`），**测试集比历史记录更宽**：
+
+```
+tests/unit/test_evaluate.py test_io_mutations.py test_expression.py
+test_expression_golden.py test_expression_cache.py test_expression_parser_mutations.py
+test_expression_parser_names.py test_expression_parser_path_recursion.py
+test_expression_parser_root_scan.py test_reviewfix_a_strings.py
+test_reviewfix_a_template_warn.py test_reviewfix_a_parse_diag.py
+test_reviewfix_a_truthy_cond.py test_context.py test_coverage_sweep.py
+```
+
+（`scripts/recheck_mutants.sh` 的 TESTS 常量早已过期——plaita#124——故未用它；
+在 `mutants/` 内用 `MUTANT_UNDER_TEST=<id> python -m pytest -x -q -p no:randomly <上表>`
+逐点复刻其机制。工具链有效性已双向验证：手工把 `pp.Keyword("null")` 改成
+`"XXnullXX"` 后整套单测确实红；未被断言的 DEBUG 文案变异在独立进程里稳定
+survived。）
+
+| 阶段 | 数字 |
+|---|---|
+| `mutmut run` 初筛（覆盖率口径生成） | 681 变异：480 killed / 201 非 killed / **0 timeout** |
+| 独立进程 recheck（201 个非 killed） | 76 个假阳 → **125 true survived** ⇒ 556/681 = **81.6%** |
+| 复核后补 2 条断言（下列） | `_compile_variable__mutmut_73`、`__mutmut_83` → killed ⇒ 558/681 = **81.9%**，**123 true survived** |
+
+**#104 新增/改动代码：0 个非等价 survived**。新代码只剩 2 个等价变异：
+
+- `_scan_root_refs_impl__mutmut_7`：`_QUOTED_SPAN_RE.sub(" ", text)` →
+  `sub("XX XX", text)`——替换串本身只被当作"非 `$` 填充"，结果完全相同；
+- `_scan_root_refs__mutmut_1`：`len(text) <= 4096` → `< 4096`——只影响是否走
+  `lru_cache`，返回值不变。
+
+**123 个 true survived 全部落在 #104 之前就存在的分支**（16 个函数，按数量：
+`_build_grammar` 27、`_compile_function_call` 18、`_compile_variable` 15、
+`_warn_suspicious_literal` 14、`_annotate_parse_error` 11、
+`_warn_unmatched_template` 10、`_lookup_and_store` 7、`_eval_boolean` 5、
+`_eval_non_string` 4、`_compile_template` 4、`_eval` 2、`_get_attr` 2、
+`_eval_prefix` 1、`_cached_compile` 1、两个等价项）。两类成因已定位：
+
+1. **companion 测试集不含 flow 级用例**：例如 `pp.Keyword("null")` 系列变异在
+   上表 15 个文件里 survived，但手工注入该变异后 `tests/unit` 全量套件立刻
+   红（`test_codeflow_while.py` 的端到端 flow 用了 `null` 字面量）。即这些不是
+   "假 survived"，而是**测试集口径比历史记录更宽/更窄的产物**。
+2. **未断言 DEBUG/WARNING 文案**：`_compile_function_call` 的
+   `logger.debug("parse_function: func_name=%s, args=%s", ...)`、
+   `_compile_variable` 的 INPUT 缺键 debug、`_warn_*` / `_annotate_parse_error`
+   的文案变异——现有测试只覆盖 warning 的部分子串，参数被改 `None` 或文案被
+   改写时不红。
+
+**结论**：模块历史表里的 100%（313/313、433/433、449/449）对应 2026-10 之前的
+代码 + 更窄的覆盖口径，**在 HEAD 上不可复现**；本表已按 2026-10-12 的真实复扫
+更新。要回到 100% 需要单独一轮"日志文案 + flow 级用例纳入 recheck 测试集"的
+补测，与 #104 无关，不在本 PR 范围内。
 
 ## 2.6 concurrent.py 强化（2026-07-06，100%）
 
