@@ -351,6 +351,12 @@ tests/unit/test_context.py tests/unit/test_coverage_sweep.py
 | `mutmut run` 初筛（覆盖率口径生成） | 734 变异：531 killed / 203 非 killed / **0 timeout** |
 | 独立进程 recheck（203 个非 killed） | 80 个假阳 → **123 true survived** ⇒ 611/734 = **83.2%** |
 
+> **口径提醒**：上表"初筛"是**单次测量**。同一份代码、同一选择集重复跑 `mutmut run`，
+> 初筛 killed / 非 killed 会因 mutmut worker 长时复用而抖动——本轮实测两个读数：
+> 531/203 与 521/213（变异总数恒为 **734**、timeout 恒为 **0**）。可信的是独立
+> recheck 后的 **123 true survived ⇒ 611/734 = 83.2%**；上表的 80 个假阳也只属于
+> 531/203 那次读数。（这正是 §1/§3「初筛不可信、必须独立 recheck」的又一实例。）
+
 **#130 新增代码：0 个非等价的真 survived，只剩 2 个等价变异**：
 
 - `_compile_variable__mutmut_29`（`raw_mode = False` → `None`）：**等价**——`raw_mode`
@@ -374,7 +380,10 @@ tests/unit/test_context.py tests/unit/test_coverage_sweep.py
 - 新增白盒用例 `test_collision_dedupe_reset_threshold_is_exact`：`monkeypatch` 预置
   512 个不同路径，断言恰好 512 条时**不清零**（`> 512` → `>= 512` 会让已记路径二次
   告警 ⇒ 红）、第 514 次调用时**必须清零**（`> 513` 会让集合无界增长 ⇒ 红）⇒ 2 个
-  阈值变异 killed。
+  阈值变异 killed。这 2 个 id 另用独立进程复核（`mutants/` 内 `MUTANT_UNDER_TEST=<id>`
+  跑同一 16 文件集，先跑未变异树自检 rc=0）：`__mutmut_2` rc=1，红在
+  `assert 2 == 1`（第 512 条即清零，`p0` 二次告警）；`__mutmut_3` rc=1，红在
+  `assert 2 == 3`（第 513 条不清零，`p0` 仍被去重）。
 
 因此本模块**新增代码已无非等价幸存者**；`_warn_suspicious_literal`（14 survived）/
 `_warn_unmatched_template`（10 survived）里同形的阈值变异仍未处理——那是既有代码的
