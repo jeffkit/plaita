@@ -293,11 +293,19 @@ def _render_path(root_key: str, walked: List[Tuple[str, Any, str]]) -> str:
 # Name-collision rule (deterministic, backwards compatible): the first segment
 # after ``$NODE`` is the modifier **only when** the ``$NODE`` container has no
 # node/key with that id **and** the segment after it is a field name (the node
-# id).  A flow with a node literally named ``raw`` therefore keeps
-# ``$NODE.raw.<path>`` meaning *that node* — an existing flow never silently
-# changes meaning.  Such a flow cannot use the accessor (there is no spelling
-# left that could mean it); the collision is reported once per distinct path
-# string with a WARNING.
+# id).  Once a node literally named ``raw`` has produced a value, ``$NODE.raw.
+# <path>`` means *that node* again — an existing flow never silently changes
+# meaning — and the collision is reported once per distinct path string with a
+# WARNING.  Such a flow cannot use the accessor (there is no spelling left that
+# could mean it).  The decision is necessarily per-call: while the declaring
+# node has not produced yet, the container has no ``raw`` key, so the same
+# expression resolves as the accessor and emits no warning.  That runtime window
+# is documented in MIGRATION.md and pinned by
+# ``tests/unit/test_expression_parser_raw_accessor.py``.
+#
+# ``_warned_raw_collisions`` uses the same process-level, lock-free,
+# 512-entry-cleared dedupe idiom as ``_warned_literals`` /
+# ``_warned_unmatched_templates``.
 _RAW_MODIFIER = "raw"
 _warned_raw_collisions: "set[str]" = set()
 

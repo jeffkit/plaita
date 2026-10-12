@@ -82,12 +82,17 @@ def test_raw_propagates_through_deep_path():
 def test_raw_bypasses_recursion_at_intermediate_segments():
     """中间段是"父容器兜得住"的嵌套表达式时，默认路径会递归后继续走；raw 不递归。
 
-    `$NODE.a.ref` 的父容器自带 `$INPUT`，所以方案 A 允许递归：`.t` 作用在求值
-    结果 `{"t": "deep"}` 上。raw 模式下 `ref` 仍是字符串，`.t` 自然取不到。
+    `$NODE.a.ref` 的父容器自带 `$INPUT`，所以方案 A 允许递归：中间段 `ref` 本身
+    就被求值成 `{"t": "deep"}`，`.t` 再作用其上。raw 模式下 `ref` 仍是原串——
+    判别力来自 `$NODE.raw.a.ref`（base 上为 `None`），而不是 `.t` 的 `None`。
     """
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"a": {"ref": "$INPUT.sub", "$INPUT": {"sub": {"t": "deep"}}}}}
+    # 非 raw：中间段被求值
+    assert parser.evaluate("$NODE.a.ref", context) == {"t": "deep"}
     assert parser.evaluate("$NODE.a.ref.t", context) == "deep"
+    # raw：中间段不求值 ⇒ 取回原串；`.t` 自然取不到
+    assert parser.evaluate("$NODE.raw.a.ref", context) == "$INPUT.sub"
     assert parser.evaluate("$NODE.raw.a.ref.t", context) is None
 
 
@@ -206,6 +211,58 @@ def test_no_collision_warning_when_no_node_named_raw(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="plaita"):
         assert parser.evaluate("$NODE.raw.llm.text", context) == TEMPLATE
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_runtime_window_node_raw_declared_but_not_yet_produced(monkeypatch, caplog):
+    """运行期窗口（显式文档化行为）：flow 声明了节点 `raw`、但它还没产出时，`$NODE`
+    容器里没有该键，同一表达式按**访问器**解析（取原文、无 WARNING）；节点产出后
+    翻转为节点语义（+1 条 once-per-string WARNING）。
+
+    修饰符判定必须发生在运行期（要看当次 `$NODE` 容器），因此这个窗口是规则的
+    必然结果而非暗坑——它不会改变既有流程的结果（两态在 base 上都是 `None`）。
+    """
+    monkeypatch.setattr(expression_parser, "_warned_raw_collisions", set())
+    parser = ExpressionParser.for_prefix("$")
+    declared_not_produced = {"$NODE": {"other": {"text": TEMPLATE}}}
+    with caplog.at_level(logging.WARNING, logger="plaita"):
+        # 窗口内：访问器语义——取原文，且不误报冲突
+        assert parser.evaluate("$NODE.raw.other.text", declared_not_produced) == TEMPLATE
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+        caplog.clear()
+        # 节点 `raw` 产出后：同一表达式变节点语义（`text` 被求值）+ 1 条 WARNING
+        produced = {
+            "$NODE": {
+                "raw": {"other": {"text": TEMPLATE}},
+                "other": {"text": TEMPLATE},
+            }
+        }
+        assert parser.evaluate("$NODE.raw.other.text", produced) == "True"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("expression $NODE.raw.other.text: ")
+
+
+def test_collision_dedupe_reset_threshold_is_exact(monkeypatch, caplog):
+    """进程级去重集合的 512 阈值：白盒锁定 `len(_warned_raw_collisions) > 512`。
+
+    与 `_warn_suspicious_literal` / `_warn_unmatched_template` 同形（>512 清零 +
+    同串去重），但那两处的阈值从未被断言，`> 512` → `>= 512` / `> 513` 两个**非等价**
+    变异因此长期幸存。这里显式锁边界：恰好 512 个已记路径时**不得**清零（否则记过的
+    路径会二次告警），第 514 次调用时**必须**清零（否则集合无界增长）。
+
+    白盒用例用 monkeypatch 换掉进程级集合，测完自动还原，不污染同进程其它用例。
+    """
+    monkeypatch.setattr(
+        expression_parser, "_warned_raw_collisions", {f"p{i}" for i in range(512)}
+    )
+    with caplog.at_level(logging.WARNING, logger="plaita"):
+        expression_parser._warn_raw_accessor_collision("Q")
+        expression_parser._warn_raw_accessor_collision("p0")
+        # 恰好 512 条时不清零：`p0` 仍被去重 ⇒ 只有 `Q` 一条
+        assert len(caplog.records) == 1
+        expression_parser._warn_raw_accessor_collision("R")   # 513 > 512 ⇒ 清零
+        expression_parser._warn_raw_accessor_collision("p0")  # 清零后不再被去重
+        assert len(caplog.records) == 3
 
 
 # --- 其他根与原样语义 -------------------------------------------------------
