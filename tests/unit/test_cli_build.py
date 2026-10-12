@@ -67,6 +67,80 @@ class TestCliBuild(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(out_path.is_file())
 
+    def test_build_out_equals_source_refused(self):
+        """产物路径与源码解析后相同（含 /./ 与 sub/../ 写法）时拒绝落盘，源码逐字节不变。"""
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        before = src.read_bytes()
+        sub = self.dir / "sub"
+        sub.mkdir()
+        # 注意：/./ 与 sub/.. 必须留在**字符串**里，Path 会就地折叠它们
+        spellings = [
+            str(src),
+            f"{self.dir}/./{src.name}",
+            str(sub / ".." / src.name),
+        ]
+        for spelling in spellings:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = main(["build", spelling, "-o", spelling])
+            self.assertEqual(rc, 2, f"{spelling}: {err.getvalue()}")
+            self.assertIn("拒绝覆盖权威源码", err.getvalue())
+            self.assertEqual(src.read_bytes(), before, "源码内容不得被产物覆盖")
+            self.assertEqual(err.getvalue().count("拒绝覆盖权威源码"), 1)
+
+    def test_build_out_symlink_to_source_refused(self):
+        """符号链接指向源码时同样拦下（resolve() 归一）。"""
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        link = self.dir / "alias.py"
+        try:
+            link.symlink_to(src)
+        except (OSError, NotImplementedError):
+            self.skipTest("本平台不支持符号链接")
+        before = src.read_bytes()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = main(["build", str(src), "-o", str(link)])
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("拒绝覆盖权威源码", err.getvalue())
+        self.assertEqual(src.read_bytes(), before)
+
+    def test_build_o_creates_missing_parent(self):
+        """-o 的父目录缺失按需创建（不再抛裸 FileNotFoundError）。"""
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "custom" / "h.flow.json"
+        self.assertFalse(out_path.parent.exists())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = main(["build", str(src), "-o", str(out_path)])
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertTrue(out_path.is_file())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertEqual(json.loads(out_path.read_text(encoding="utf-8"))["flow_id"], "hello")
+
+    def test_build_atomic_write_keeps_old_artifact_on_failure(self):
+        """原子落盘：替换步骤失败时旧产物逐字节完好，且不留临时文件。
+
+        用 mock 让 ``os.replace`` 失败来模拟落盘中段崩溃；若实现退化成
+        ``write_text`` 直写，本用例会因「没有失败」而变红（有鉴别力）。
+        """
+        from unittest import mock
+
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "custom" / "h.flow.json"
+        self.assertEqual(main(["build", str(src), "-o", str(out_path)]), 0)
+        previous = out_path.read_text(encoding="utf-8")
+
+        # 改动源码 ⇒ 重编译产物必然与旧产物不同
+        src.write_text(_FLOW_SRC.replace("hi ", "hey "), encoding="utf-8")
+        with mock.patch("plaita.cli.os.replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                main(["build", str(src), "-o", str(out_path)])
+
+        self.assertEqual(out_path.read_text(encoding="utf-8"), previous,
+                         "替换失败后旧产物必须保持完整（不得半截/被截断）")
+        residue = [p.name for p in out_path.parent.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(residue, [], "失败后不得留下临时文件")
+
     def test_check_in_sync_and_stale_and_missing(self):
         src = self._write_source("hello_flow.py", _FLOW_SRC)
         self.assertEqual(main(["build", str(src)]), 0)

@@ -364,7 +364,7 @@ class SwitchLegacy(Switch):
                 name=case["id"],
                 condition=Condition(field=values.get("target"), operator=CONDITION_OP_EQ, value=case["value"]),
                 priority=0,
-                label=case["name"],
+                label=case.get("name"),
                 next=case["id"],
                 is_default=False,
             )

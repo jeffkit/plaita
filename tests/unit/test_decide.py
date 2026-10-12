@@ -2,6 +2,7 @@ from unittest import TestCase
 
 import plaita.core.errors as plaita_errors
 from plaita.core.flow import Flow
+from plaita.dsl import validate_flow_ir
 from plaita.core import types
 from plaita.io import Property
 from plaita.node import End, Start
@@ -500,3 +501,49 @@ class TestSwitchExecuteLogging(TestCase):
             any("default branches def, next_def" in m for m in cm.output),
             f"expected default-branch log not found in {cm.output}",
         )
+
+class CaseWithoutNameTestCase(TestCase):
+    """#112：``case`` 的 ``name`` 是可选展示名，缺失时不得裸 KeyError。"""
+
+    def test_case_without_name_constructs_and_label_is_none(self):
+        node = SwitchLegacy(
+            id="c", target="$INPUT.k", cases=[{"id": "a", "value": 1}], default="e")
+        self.assertEqual("a", node.branches[0].name)
+        self.assertEqual("a", node.branches[0].next)
+        self.assertIsNone(node.branches[0].label,
+                          "缺 name 时 label 为 None（Branch.label 本就 Optional）")
+        self.assertTrue(node.branches[-1].is_default)
+        # 有 name 时必须原样透传到 label（钉住取值点，防「读了别的键」仍绿）
+        named = SwitchLegacy(
+            id="c", target="$INPUT.k", cases=[{"id": "a", "name": "甲", "value": 1}], default="e")
+        self.assertEqual("甲", named.branches[0].label)
+
+    def test_case_without_name_passes_ir_validate_and_model_validate(self):
+        ir = {
+            "flow_id": "case_no_name",
+            "version": "1.0",
+            "runtime": "python",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "c"},
+                {"type": "case", "id": "c", "target": "$INPUT.k", "default": "e",
+                 "cases": [{"id": "a", "value": 1}]},
+                # case 分支的 next 恒为 case 的 id ⇒ 必须有同名节点承接
+                {"type": "end", "id": "a", "resultType": "success"},
+                {"type": "end", "id": "e", "resultType": "success"},
+            ],
+        }
+        validate_flow_ir(ir)                      # 修复前：KeyError('name')
+        flow = Flow.model_validate(ir)            # 修复前：KeyError('name')
+        self.assertEqual("a", flow.nodes[1].branches[0].name)
+
+    def test_case_missing_id_or_value_still_value_error(self):
+        with self.assertRaises(ValueError) as cm:
+            SwitchLegacy(id="c", target="$INPUT.k", cases=[{"value": 1}], default="e")
+        msg = str(cm.exception)
+        self.assertIn("cases[0]", msg)
+        self.assertIn("'id'", msg)
+        with self.assertRaises(ValueError) as cm2:
+            SwitchLegacy(id="c", target="$INPUT.k", cases=[{"id": "a"}], default="e")
+        msg2 = str(cm2.exception)
+        self.assertIn("cases[0]", msg2)
+        self.assertIn("'value'", msg2)

@@ -19,6 +19,10 @@ recursive ``.dev/flows/compile_v2.py`` 等）：
   与 ``flow_from_source`` / console 发布链同一校验口径。
 - **--check**：不落盘，校验现有产物与重编译结果逐字节一致（CI 防产物
   落后源码）；不一致时输出统一 diff 前 80 行。
+- **产物路径防护**：产物路径与源码解析后相同（含 ``./x.py``、``sub/../x.py``、
+  符号链接写法）时**拒绝落盘**并以退出码 2 报告——``@flow`` 源码是审查主体
+  （见 ``plaita/dsl/codeflow/_canonical.py`` 背景），产物不得覆盖它；``-o``
+  的父目录缺失会按需创建，落盘走「同目录临时文件 + ``os.replace``」原子替换。
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ import argparse
 import difflib
 import importlib
 import os
+import secrets
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -121,6 +126,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     out_path = (Path(args.out) if args.out
                 else source_path.with_suffix(".plaita.json"))
+
+    # 产物路径防护：@flow 源码是审查主体（见 dsl/codeflow/_canonical.py 背景），
+    # 产物绝不能写到源码头上。resolve() 而非 Path.__eq__，以覆盖 ./x.py、
+    # sub/../x.py、符号链接等写法（R5 差分评审）。
+    if out_path.resolve() == source_path.resolve():
+        sys.stderr.write(
+            f"plaita build: 产物路径与源码相同，拒绝覆盖权威源码: {out_path}\n")
+        return 2
+
     if args.check:
         if not out_path.is_file():
             sys.stderr.write(
@@ -140,7 +154,25 @@ def _cmd_build(args: argparse.Namespace) -> int:
               f"（{count_nodes(doc)} nodes, {len(text)} bytes）")
         return 0
 
-    out_path.write_text(text, encoding="utf-8")
+    # 父目录缺失（-o dist/flows/x.json）是常规用法，按需创建而非让
+    # FileNotFoundError 直穿（与「源码不存在」同为参数问题的两种表现）。
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # 原子落盘：同目录临时文件 + os.replace，避免半截产物。用 os.open 的 mode
+    # 参数（内核套用进程 umask，与 write_text 同语义）而非 mkstemp —— 后者固定
+    # 0600，且此处不宜用 os.umask() 临时改全局（线程不安全）。
+    tmp_path = out_path.parent / (
+        f".{out_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp_path, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     print(f"compiled -> {out_path}（format={args.format}, "
           f"{count_nodes(doc)} nodes, {len(text)} bytes）")
     return 0
