@@ -33,9 +33,12 @@ Evaluation semantics are preserved bit-for-bit against the battle-tested
 * field segments never resolve Python-internal names: a ``_``-prefixed
   *attribute* read (``$NODE.n1.__class__``) raises ``ValueError`` instead of
   traversing to ``__globals__`` / process environment, and ``__``-prefixed
-  *mapping keys* are rejected too.  Single-underscore keys stay readable
-  (``$NODE._n2`` node ids, a ``dict`` with a ``_foo`` key) — see the
-  attribute-traversal gate below and plaita#55.
+  *path segments* into a mapping are rejected too.  Single-underscore keys stay
+  readable (``$NODE._n2`` node ids, a ``dict`` with a ``_foo`` key), and a dunder
+  key stays readable through the explicit ``$F.get`` / ``$F.keys`` mapping
+  helpers.  Only the ``_`` prefix is gated — public-attribute traversal is **not**
+  sandboxed (``$NODE.h.os.environ`` for a node-returning object with a public
+  ``os`` attribute); see the attribute-traversal gate below and MIGRATION.md #55.
 * unknown functions fall back to the ``"undefined"`` sentinel
 * ``{% ... %}`` only fires when the inner expression starts with the prefix
 
@@ -175,10 +178,22 @@ def _lookup_function(registry: Optional[Any], func_name: str) -> Optional[Callab
 # * **Mapping path** (``dict`` / ``__getitem__`` + ``get``): the segment is a
 #   **key**, not an attribute, so a single-underscore key stays readable —
 #   ``$NODE._n2`` (builder-generated node ids) and flows that deliberately store
-#   ``_foo`` keys keep working.  ``__``-prefixed (dunder) names are rejected on
-#   this path too: they are never a legitimate data key, and evaluating them to
-#   ``None`` reproduces exactly the "looks like it is blocked" illusion that
-#   makes an unguarded traversal hard to notice.
+#   ``_foo`` keys keep working.  ``__``-prefixed (dunder) *path segments* are
+#   rejected on this path too: in the path form a dunder segment cannot be told
+#   apart from an attribute-traversal attempt, and evaluating it to ``None``
+#   reproduces exactly the "looks like it is blocked" illusion that makes an
+#   unguarded traversal hard to notice.  The key itself stays ordinary data: the
+#   explicit mapping helpers (``$F.get`` / ``$F.getDictValue`` / ``$F.keys`` …)
+#   still read/see it — that asymmetry is documented in MIGRATION.md (#55).
+#
+# **Scope (do not over-read this gate).** Only the ``_`` *prefix* is gated.  Public
+# attribute traversal is NOT sandboxed: a node that returns an object with a
+# public attribute pointing at a module (``SimpleNamespace(os=os)``) is still
+# traversable — ``$NODE.h.os.environ`` evaluates to the live process environment.
+# That is the trusted-authoring boundary this issue's Boundary section keeps
+# ("no whole-engine sandboxing"); the fix removes the *reflection* path to Python
+# internals, it does not turn node return values into untrusted data.  Node
+# plugins must therefore not return objects that expose sensitive modules.
 #
 # Rejection is a hard ``ValueError`` (the exception type the issue selects and
 # the one this layer already raises — ``ExpressionRegistry``): a silent ``None``
@@ -187,24 +202,30 @@ def _lookup_function(registry: Optional[Any], func_name: str) -> Optional[Callab
 _RESERVED_FIELD_PREFIX = "_"
 _RESERVED_DUNDER_PREFIX = "__"
 
+# Exact wording is pinned by tests/unit/test_issue55_attr_traversal.py (runtime
+# message == the string quoted in MIGRATION.md and the expression guide).
+_REJECTION_TEMPLATE = (
+    "expression field name {path!r} is not allowed in an expression path: names "
+    "starting with '_' are reserved for Python internals (for example __class__ / "
+    "__globals__ / __init__), so the attribute form reaches process state and "
+    "bypasses the $ENV allowlist, which is an opt-in exposure list and not a "
+    "sandbox. Only this prefix is gated: public attributes of node-returned "
+    "objects stay readable by design (MIGRATION.md #55)."
+)
+
 
 def _reject_reserved_field(path: str) -> None:
     """Raise ``ValueError`` for a rejected traversal segment (plaita#55)."""
-    raise ValueError(
-        f"expression field name {path!r} is not allowed: names starting with "
-        f"{_RESERVED_FIELD_PREFIX!r} are reserved for Python internals (for example "
-        "__class__ / __globals__ / __init__) and cannot be read through expression "
-        "attribute traversal — that path reaches process state and bypasses the "
-        "$ENV allowlist. Use a public attribute name, or store the value under a "
-        "dict key."
-    )
+    raise ValueError(_REJECTION_TEMPLATE.format(path=path))
 
 
 def _mapping_get(obj: Any, path: str) -> Any:
     """Read *path* as a **key** of a mapping-like *obj* (data path).
 
-    Dunder names are rejected (plaita#55) — see the gate comment above; other
-    ``_``-prefixed keys stay readable because they are keys, not attributes.
+    Dunder *path segments* are rejected (plaita#55) — see the gate comment above;
+    other ``_``-prefixed keys stay readable because they are keys, not
+    attributes.  The key remains readable through the explicit ``$F.*`` mapping
+    helpers, which do not go through this resolver.
     """
     if path.startswith(_RESERVED_DUNDER_PREFIX):
         _reject_reserved_field(path)
@@ -224,8 +245,9 @@ def _get_attr(obj: Any, path: str) -> Any:
 
     Both paths are gated against Python-internal names (plaita#55): the
     ``getattr`` fallback rejects every ``_``-prefixed name, the mapping path
-    rejects ``__``-prefixed keys.  Rejection raises ``ValueError`` — never a
-    silent ``None``.  See the gate comment above for the rationale.
+    rejects ``__``-prefixed path segments (the key itself stays readable through
+    the ``$F.*`` mapping helpers).  Rejection raises ``ValueError`` — never a
+    silent ``None``.  See the gate comment above for the rationale and scope.
     """
     if isinstance(obj, dict):
         return _mapping_get(obj, path)

@@ -13,13 +13,24 @@
    ——硬报错，不返回 ``None``（返回 ``None`` 会把越权尝试伪装成"键不存在"）；
 2. **映射路径**（``dict`` / ``__getitem__`` + ``get``）：段名是**键**不是属性，
    单下划线键保持可读（``$NODE._n2`` 这类 builder 生成的节点 id、刻意存
-   ``_foo`` 键的 dict）；``__`` 开头的键（dunder）同样拒绝——它对任何流程都
-   不是合法数据键，静默 ``None`` 只会再造一个"看起来被挡住了"的假象。
+   ``_foo`` 键的 dict）；``__`` 开头的**路径段**同样拒绝——路径形态无法与属性
+   遍历尝试区分，静默 ``None`` 只会再造一个"看起来被挡住了"的假象。该键本身仍是
+   普通数据：显式映射辅助 ``$F.get`` / ``$F.getDictValue`` / ``$F.keys`` 照旧可读
+   （**刻意的不对称**，见下方 ``test_dunder_key_asymmetry_...`` 与 MIGRATION.md）。
 
 异常类型取 ``ValueError``：issue 明确建议，且表达式层已有同类
-（``ExpressionRegistry.register``）。消息只点名被拒段名与原因，不回显对象。
+（``ExpressionRegistry.register``）。消息只点名被拒段名与原因，不回显对象，且
+**不作安全承诺**（只覆盖 ``_`` 前缀；公有属性遍历不在本闸门范围内）。
+
+已知边界（**不是缺陷**，独立验收一轮要求显式文档化）：
+
+* 公有属性链不受限：节点返回值若把一个模块挂在**公有**属性上，
+  ``$NODE.h.os.environ`` 仍可读到进程环境——本单只关闭"反射到 Python 内部
+  属性"这条路，不做整体沙箱化（issue Boundary）；节点插件不应返回暴露敏感
+  模块的对象。
 """
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -31,6 +42,18 @@ from plaita.core.errors import NodeExecutionError
 from plaita.core.expression_parser import ExpressionParser, _get_attr
 from plaita.core.flow import Flow
 from plaita.core.state import CheckpointState
+
+# 运行时错误文案的**逐字**副本：代码/文档/测试三处必须一致（独立验收第 4 条）。
+# 该常量刻意手写而非 import，改动代码文案时本测试必须随之失败。
+ISSUE55_MESSAGE = (
+    "expression field name '__class__' is not allowed in an expression path: names "
+    "starting with '_' are reserved for Python internals (for example __class__ / "
+    "__globals__ / __init__), so the attribute form reaches process state and "
+    "bypasses the $ENV allowlist, which is an opt-in exposure list and not a "
+    "sandbox. Only this prefix is gated: public attributes of node-returned "
+    "objects stay readable by design (MIGRATION.md #55)."
+)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # issue 点名的枚举面：dunder / 私有名，逐个在第一、第二段位置尝试。
 DUNDERS = [
@@ -197,11 +220,43 @@ def test_private_key_stays_readable_on_mapping_path(parser):
 
 
 def test_dunder_key_on_mapping_path_is_rejected_not_silent(parser):
-    """dict 里的 dunder 键同样拒绝——返回 None 会再造"看起来被挡住"的假象。"""
+    """dict 里的 dunder **路径段**同样拒绝——返回 None 会再造"看起来被挡住"的假象。"""
     ctx = {"$NODE": {"d": {"__class__": "not-an-attribute"}}}
     with pytest.raises(ValueError) as excinfo:
         parser.evaluate("$NODE.d.__class__", ctx)
     assert "'__class__'" in str(excinfo.value)
+
+
+def test_dunder_key_asymmetry_with_mapping_helpers_is_pinned(parser):
+    """刻意的不对称（独立验收第 3 条）：路径形态拒绝，`$F.*` 映射辅助仍可读该键。
+
+    理由：映射辅助回取的是"该 key 下存的数据值"，键不是属性、也不产生反射；路径
+    形态的拒绝只针对 `$NODE.d.__class__` 这种无法与属性遍历区分的写法。本单
+    Boundary 明确不改 `$F.*` 注册表——所以把不对称变成**显式行为**而不是偶然行为。
+    """
+    ctx = {"$NODE": {"d": {"__class__": "data-value", "x": 1}}}
+    with pytest.raises(ValueError, match="__class__"):
+        parser.evaluate("$NODE.d.__class__", ctx)
+    # 显式映射辅助：键仍是普通数据
+    assert parser.evaluate("$F.get($NODE.d, '__class__')", ctx) == "data-value"
+    assert parser.evaluate("$F.getDictValue($NODE.d, '__class__')", ctx) == "data-value"
+    assert list(parser.evaluate("$F.keys($NODE.d)", ctx)) == ["__class__", "x"]
+
+
+def test_public_attribute_traversal_is_not_sandboxed(parser):
+    """**已文档化的限制**（独立验收第 1 条）：公有属性链不受本闸门约束。
+
+    节点返回的对象若把模块挂在公有属性上，`$NODE.h.os.environ` 仍可读到进程环境。
+    这不是本单缺陷：issue 的 Boundary 明确"不做整体沙箱化"，修复只关闭"反射到
+    Python 内部属性"这条路（`__class__` / `__globals__`）。节点插件不应返回暴露
+    敏感模块的对象——文档（MIGRATION.md / 表达式指南）已按此表述。
+    """
+    import os
+
+    ctx = {"$NODE": {"h": SimpleNamespace(os=os)}}
+    assert parser.evaluate("$NODE.h.os.environ", ctx) is os.environ
+    with pytest.raises(ValueError, match="__class__"):
+        parser.evaluate("$NODE.h.os.__class__", ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -420,3 +475,66 @@ def test_env_allowlist_semantics_unchanged(monkeypatch):
         ],
     })
     assert exposed.run({}) == "sk-DUMMY-SECRET-123"
+
+
+# ---------------------------------------------------------------------------
+# 文案一致性（独立验收第 4 条）与 io.get_attr 的准确边界（第 2 条）
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_message_is_exact():
+    """运行时文案逐字等于本文件常量（改动文案必须同步测试）。
+
+    刻意只断言**代码侧**文案：本测试在 mutmut 的 `mutants/` 副本里也会执行
+    （companion 测试集成员），那里没有仓库文档，文档一致性由下一个测试负责。
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _get_attr(Payload(), "__class__")
+    assert str(excinfo.value) == ISSUE55_MESSAGE
+
+
+def test_docs_quote_runtime_message_verbatim():
+    """MIGRATION.md 与表达式指南必须**逐字**引用同一串（独立验收第 4 条）。
+
+    mutmut 的 `mutants/` 副本只包含 `plaita/` + `tests/` + `pyproject.toml`，
+    文档不在其中 ⇒ 该环境跳过（否则变异初筛基线就跑不起来）。
+    """
+    targets = [REPO_ROOT / "MIGRATION.md", REPO_ROOT / "docs-site/docs/guide/expressions.md"]
+    missing = [str(p) for p in targets if not p.exists()]
+    if missing:
+        pytest.skip(f"文档不在当前树内（mutants/ 副本）：{missing}")
+    for path in targets:
+        text = path.read_text(encoding="utf-8")
+        assert ISSUE55_MESSAGE in text, f"{path.name} 未逐字引用运行时文案（#55 独立验收第 4 条）"
+
+
+def test_rejection_message_makes_no_sandbox_promise():
+    """错误文案不得把"改用公有属性"写成安全承诺（独立验收第 1 条）。"""
+    with pytest.raises(ValueError) as excinfo:
+        _get_attr(Plain(), "__class__")
+    message = str(excinfo.value)
+    assert "Only this prefix is gated" in message
+    assert "stay readable by design" in message
+    assert "Use a public attribute name" not in message
+
+
+def test_legacy_io_get_attr_is_reachable_but_not_an_expression_door():
+    """``plaita.io.get_attr`` 可达但**不构成逃逸面**（独立验收第 2 条）。
+
+    ``dict`` **子类**实例有 ``__dict__``，所以 ``getattr`` 分支确实会跑、也确实能
+    取到 ``__class__``；它不可利用的理由是**值的去向**：唯一调用链是
+    ``_match_object`` → ``match()``（assignment 的 output_type 校验 / child 的
+    input_property 断言 / ir_validate 的 IR 校验），返回值只被当**布尔**消费，没有
+    任何路径回流到表达式求值或流程数据。本单 Boundary 是表达式属性遍历，故不在
+    ``io.get_attr`` 加闸门（详见该函数上方注释）。
+    """
+    from plaita.io import Property, get_attr, match, types
+
+    class _DictSub(dict):
+        pass
+
+    obj = _DictSub({"x": 1})
+    assert get_attr(obj, "__class__") is _DictSub        # 可达（dict 子类有 __dict__）
+    verdict = match(Property(data_type=types.STRING), get_attr(obj, "__class__"))
+    assert verdict is False                              # 只作布尔判定消费
+

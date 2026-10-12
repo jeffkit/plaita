@@ -1,5 +1,5 @@
 # 变异测试（Mutation Testing）基线与流程
-> **最后更新**：2026-10-12（§2.5 末节：plaita#55 后单模块重跑 —— 744 变异，初筛 533 killed / 211 非 killed / 0 timeout，独立进程 recheck 后 **622/744 = 83.6%**（122 个 true survived = 117 个旧代码分支 + 2 个 #104 等价 + 2 个 #130 等价 + 1 个 #55 等价）；**#55 新增/改动代码 0 个非等价的真 survived**，`_get_attr` 本轮 0 survived（#130 轮为 2）。上一轮：plaita#130 后单模块重跑（含独立验收补测）—— 734 变异，初筛 531 killed，独立 recheck 后 **611/734 = 83.2%**；**#130 新增/改动代码只剩 2 个等价变异、0 个非等价的真 survived**，123 个 true survived = **119 个旧代码分支 + 2 个 #104 新增代码的等价变异 + 2 个 #130 新增代码的等价变异**，旧代码部分可由"companion 测试集不含 flow 级用例/未断言 DEBUG 文案"解释；上一轮 #104 为 558/681 = 81.9%，两轮都在 §2.5 末两节。
+> **最后更新**：2026-10-12（§2.5 末节：plaita#55 后单模块重跑 —— 745 变异，初筛 534 killed / 211 非 killed / 0 timeout，独立进程 recheck 后 **623/745 = 83.6%**（122 个 true survived = 117 个旧代码分支 + 2 个 #104 等价 + 2 个 #130 等价 + 1 个 #55 等价）；**#55 新增/改动代码 0 个非等价的真 survived**，`_get_attr` 本轮 0 survived（#130 轮为 2）。上一轮：plaita#130 后单模块重跑（含独立验收补测）—— 734 变异，初筛 531 killed，独立 recheck 后 **611/734 = 83.2%**；**#130 新增/改动代码只剩 2 个等价变异、0 个非等价的真 survived**，123 个 true survived = **119 个旧代码分支 + 2 个 #104 新增代码的等价变异 + 2 个 #130 新增代码的等价变异**，旧代码部分可由"companion 测试集不含 flow 级用例/未断言 DEBUG 文案"解释；上一轮 #104 为 558/681 = 81.9%，两轮都在 §2.5 末两节。
 > 同时（#107 后重跑 `state.py` / `errors.py` 单模块基线，见 §2.12.1 / §2.19.1：
 > `state.py` **95.8%（318/332，独立复核后）**，14 survived 全部是改动前就存在的、本次未触碰的位点；
 > `errors.py` **82.5%（80/97）**，17 survived 同理。两模块旧的 99.1% / 100% 在现工具链下**不复现**，
@@ -13,9 +13,12 @@
 > 2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；
 > §2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
-> `expression_parser.py`：**2026-10-12（plaita#130）复扫为 611/734 = 83.2%**（123 true
+> `expression_parser.py`：**2026-10-13（plaita#55 独立验收后复跑）为 623/745 = 83.6%**
+> （122 true survived = 117 个旧代码分支 + 2 个 #104 新增代码的等价变异 + 2 个 #130
+> 新增代码的等价变异 + 1 个 #55 新增代码的等价变异；#55 新增代码 0 个非等价的真
+> survived）。上一轮 **2026-10-12（plaita#130）复扫为 611/734 = 83.2%**（123 true
 > survived = 119 个旧代码分支 + 2 个 #104 新增代码的等价变异 + 2 个 #130 新增代码的
-> 等价变异；#130 新增代码 0 个非等价的真 survived）。上一轮 #104 为
+> 等价变异；#130 新增代码 0 个非等价的真 survived）。再上一轮 #104 为
 > 558/681 = 81.9%（123 true survived = 121 旧代码 + 2 等价）。2026-10 的 100%（433/433、
 > 449/449）是更窄覆盖口径下的历史记录，两轮复扫细节均见 §2.5 末节；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
@@ -176,7 +179,7 @@
 | 模块 | 得分 | 变异点 | survived | 备注 |
 |---|---|---|---|---|
 | `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
-| `plaita/core/expression_parser.py` | **83.6%** | 622/744 | 122 | ⚠️ 2026-10-12 重跑（plaita#55，见 §2.5 末节）：#55 新增代码 0 个非等价的真 survived（只剩 1 个等价变异）；122 = 117 个旧代码分支（DEBUG 日志文案/文法特性等，companion 测试集口径）+ 2 个 #104 新增代码的等价变异 + 2 个 #130 新增代码的等价变异 + 1 个 #55 新增代码的等价变异；`_get_attr` 本轮 34/34 killed（#130 轮有 2 个 survived）；上一轮 #130 为 611/734 = 83.2%（123 survived），#104 为 558/681 = 81.9%（123 survived）；旧记录 313/313、433/433、449/449 |
+| `plaita/core/expression_parser.py` | **83.6%** | 623/745 | 122 | ⚠️ 2026-10-12 重跑（plaita#55，见 §2.5 末节）：#55 新增代码 0 个非等价的真 survived（只剩 1 个等价变异）；122 = 117 个旧代码分支（DEBUG 日志文案/文法特性等，companion 测试集口径）+ 2 个 #104 新增代码的等价变异 + 2 个 #130 新增代码的等价变异 + 1 个 #55 新增代码的等价变异；`_get_attr` 本轮 34/34 killed（#130 轮有 2 个 survived）；上一轮 #130 为 611/734 = 83.2%（123 survived），#104 为 558/681 = 81.9%（123 survived）；旧记录 313/313、433/433、449/449 |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
 | `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
 | `plaita/dsl/builder.py` | ~~99.9%~~ **84.1%** | 914（766 killed / 145 survived / 3 timeout） | 145 | ⚠️ **2026-10-12 按 §7.2 重扫回填**（见 §2.8 末节）：旧 876/877 = 99.9% 在现工具链下**不可复现**（口径 + 覆盖都不同）；**#108 的改动本身确为变异中性**（可运行变异集合 hash 相同），但该模块的真实分是 **84.1%**，缺口主要在 `_auto_chain`(24) / `FlowBuilder.from_dict`(21) / `_linear`(16) / `_error_handler`(10) |
@@ -400,15 +403,25 @@ rc=0 ⇒ survived、124/126/127 ⇒ error（本轮 0 个）、其余 ⇒ killed�
 
 `plaita#55`（P0 安全）在 `_get_attr` 的属性遍历路径上加了闸门：`_` 开头的段名在
 **属性读取**上一律抛 `ValueError`（不再返回 `None`），映射路径只拒绝 `__` 开头的
-**键**（单下划线键保持可读，`$NODE._n2` 这类自动生成的节点 id 不受影响）。改动新增
-`_reject_reserved_field` / `_mapping_get` 两个模块级函数并重写了 `_get_attr` 的分支。
-按 §7.2 单模块重跑（`only_mutate` 收窄为 `plaita/core/expression_parser.py`）。
+**路径段**（单下划线键保持可读，`$NODE._n2` 这类自动生成的节点 id 不受影响；该键
+经 `$F.get` / `$F.keys` 等显式映射辅助仍可读——刻意的不对称，见 MIGRATION.md #55）。
+改动新增 `_reject_reserved_field` / `_mapping_get` 两个模块级函数、一条逐字错误文案
+常量 `_REJECTION_TEMPLATE`，并重写了 `_get_attr` 的分支。按 §7.2 单模块重跑
+（`only_mutate` 收窄为 `plaita/core/expression_parser.py`）。
 
 **测试集口径**（`pytest_add_cli_args_test_selection`）= 上一节 16 个**文件** + 新增
 1 个**文件** `tests/unit/test_issue55_attr_traversal.py` ⇒ **共 17 个文件**；该新文件
-**78 个用例 / 25 个测试函数**（含 issue 原文 repro 的端到端用例、19 个 dunder/私有名
-× 多个段位置的枚举矩阵、以及 dict `_` 键 / `$NODE._n2` 等阳性对照）。逐文件清单
-（复核命令即用这 17 条路径）：
+**84 个用例 / 31 个测试函数**（含 issue 原文 repro 的端到端用例、19 个 dunder/私有名
+× 多个段位置的枚举矩阵、`$F.*` 映射辅助与路径形态的**不对称**钉子、
+**公有属性遍历不受限**的已文档化边界、以及 dict `_` 键 / `$NODE._n2` 等阳性对照）。
+
+> 口径提醒（2026-10-13，独立验收后复跑）：新文件里有一条断言"仓库文档逐字引用运行时
+> 文案"的测试——mutmut 的 `mutants/` 副本只含 `plaita/` + `tests/` + `pyproject.toml`，
+> 文档不在其中，故该测试在 `mutants/` 内**自动 skip**（这正是 companion 测试集的硬
+> 约束：不得依赖 `plaita/`+`tests/` 之外的文件，否则 `mutmut run` 的基线自检直接红）。
+> 代码侧文案仍由同文件里不 skip 的逐字断言钉住。
+
+逐文件清单（复核命令即用这 17 条路径）：
 
 ```
 tests/unit/test_evaluate.py tests/unit/test_io_mutations.py
@@ -424,8 +437,8 @@ tests/unit/test_issue55_attr_traversal.py
 
 | 阶段 | 数字 |
 |---|---|
-| `mutmut run` 初筛（覆盖率口径生成） | 744 变异：533 killed / 211 非 killed / **0 timeout** |
-| 独立进程 recheck（211 个非 killed；pass 1 六路并行） | 89 个假阳 → **122 true survived** ⇒ 622/744 = **83.6%** |
+| `mutmut run` 初筛（覆盖率口径生成） | 745 变异：534 killed / 211 非 killed / **0 timeout** |
+| 独立进程 recheck（211 个非 killed；pass 1 六路并行） | 89 个假阳 → **122 true survived** ⇒ 623/745 = **83.6%** |
 | 顺序复核（pass 2：122 个 true survived 逐个单进程重跑） | **122/122 复现 survived**，0 killed / 0 error |
 
 **#55 新增/改动代码：0 个非等价的真 survived，只剩 1 个等价变异**：
@@ -435,7 +448,7 @@ tests/unit/test_issue55_attr_traversal.py
   的省略默认值就是 `None`，两种写法对一切符合 Mapping 约定的容器返回值相同；只有
   自定义 `get` 使用非 `None` 默认值的非约定容器才可区分，那属于调用方容器自身的偏差。
   与 §2.5 对 `_get_attr__mutmut_3` 的历史判定同形（同一行代码本轮移入 `_mapping_get`）。
-- 另两个闸门函数的变异全貌：`_reject_reserved_field` **1/1 killed**（段名/文案断言），
+- 另两个闸门函数的变异全貌：`_reject_reserved_field` **2/2 killed**（段名/逐字文案断言），
   `_mapping_get` **5 个里 4 killed**，`_get_attr` **34/34 killed**（该函数在 #130 轮
   有 2 个 true survived，本轮为 0）。
 

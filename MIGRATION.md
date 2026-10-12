@@ -22,12 +22,15 @@
   "键不存在"，正是本次修复要消除的假象；
 - **映射路径**（`dict` / 带 `get` 的映射）：字段段是**键**不是属性，单下划线键
   保持可读（`$NODE._n2` 这类自动生成的节点 id、`{"_foo": …}` 数据键都不受影响）；
-  `__` 开头的键同样拒绝——它对任何流程都不是合法数据键，静默 `None` 同样会制造
-  "看起来被挡住了"的假象。
+  `__` 开头的**路径段**（`$NODE.d.__class__`）同样拒绝——路径形态无法与属性遍历
+  尝试区分，静默 `None` 同样会制造"看起来被挡住了"的假象。**该键本身仍是普通
+  数据**：显式映射辅助 `$F.get($NODE.d, '__class__')` / `$F.getDictValue` /
+  `$F.keys` 照旧可读（见下方「刻意的不对称」）。
 
 - **受影响**：任何用 `$…._x` / `$…. __x__` 读**对象属性**的表达式（此前得到私有
-  值或静默 `None`）现在抛错。节点插件返回值里的 `_` 前缀字段若需被流程引用，请
-  改公开名，或把值放进 dict（dict 的 `_` 前缀键不受影响）。
+  值或静默 `None`）现在抛错；`$…. __x__` 这种**路径段**写法也抛错。节点插件返回值
+  里的 `_` 前缀字段若需被流程引用，请改公开名，或把值放进 dict（dict 的 `_` 前缀键
+  不受影响）。
 - **不受影响**：公开属性、`dict` 键（含 `_` 前缀）、`[n]` / `.n` 索引、`{% … %}`
   插值、`$NODE.raw.…`（`raw` 只关掉字符串二次求值，不关掉本闸门）、
   `$PARENT.$INPUT.name` 这类段名带 `$` 的写法、`$F.*` 注册表，以及
@@ -35,9 +38,37 @@
 - **异常类型**：`ValueError`——表达式层既有类型（`ExpressionRegistry` 同类型），
   **没有新增公共异常类**。在实测的 `end` 节点 `output` 路径上表现为节点错误
   `NodeExecutionError`（`__cause__` 为该 `ValueError`，消息含被拒段名）。
+  运行时文案（**逐字**，测试与表达式指南引用同一串）：
+
+      expression field name '__class__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Only this prefix is gated: public attributes of node-returned objects stay readable by design (MIGRATION.md #55).
+
 - **为何不在编译期拦截**：字段段的容器类型只有运行期才知道（`$NODE._n2` 是 dict
   键、`$NODE.<obj>._x` 才是属性），因此闸门放在运行期唯一收口点，而非 `dot_field`
   文法动作——否则会误伤 dict 键与自动生成的节点 id。
+- **刻意的不对称（映射辅助不受限）**：`$NODE.d.__class__` 抛错，但
+  `$F.get($NODE.d, '__class__')` / `$F.getDictValue($NODE.d, '__class__')` 仍返回该键
+  的数据值，`$F.keys($NODE.d)` 也仍列出它。理由：映射辅助回取的是"该 key 下存的
+  **数据值**"——键不是属性、不产生任何反射语义；路径形态的拒绝只针对
+  `$NODE.d.<name>` 这种与属性遍历无法区分的写法（它会静默 `None`，制造"看起来
+  拦住了"的假象）。本单 Boundary 明确不改 `$F.*` 注册表，该不对称由
+  `tests/unit/test_issue55_attr_traversal.py::test_dunder_key_asymmetry_with_mapping_helpers_is_pinned`
+  钉为显式行为。
+
+**已知边界（不是缺陷；本单只保留 `_` 前缀，不做整体沙箱化）**：
+
+- **公有属性遍历不受限**。节点返回值若把模块挂在**公有**属性上，公有链照旧可读：
+  `{"$NODE": {"h": SimpleNamespace(os=os)}}` 下 `$NODE.h.os.environ` 求值结果就是
+  活的 `os.environ`（实测可继续取到具体变量值）。它不是本单要关闭的"反射到 Python
+  内部属性"路径，且 issue 的 Boundary 明确不做整体沙箱化 ⇒
+  **节点插件不应返回把敏感模块/对象挂在公有属性上的返回值**（`os` / `sys` /
+  连接串对象等）；这是作者侧的信任边界，不是表达式引擎能保证的事。
+- **`$ENV` 的 `exposeEnv` 是"显式暴露"清单，不是沙箱**。本单修的是绕过它的**反射
+  路径**（`__class__` → `__globals__` → 进程环境）；它不承诺"表达式拿不到进程信息"
+  ——上面那条公有属性链就是反例。
+- **`plaita.io.get_attr`（Property 匹配用）不在本闸门内**。它对 `dict` **子类**
+  实例确实会走 `getattr`（子类实例有 `__dict__`），但返回值只被 `match()` 当
+  **布尔**消费、不回流表达式求值，因此不构成逃逸面；详见该函数上方注释。
+
 
 ### http 节点：`$NODE.<http_id>` 由**裸响应体**变为**结果结构**（plaita#129）
 

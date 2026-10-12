@@ -203,8 +203,23 @@ def register_function(name, func):
 
 
 def get_attr(obj, path):
-    # Note: used by Property matching (``_match_object``), not by the
-    # expression evaluator. Kept here as a structural helper.
+    # Note: used by Property matching (``_match_object``), not by the expression
+    # evaluator. Kept here as a structural helper.
+    #
+    # plaita#55 boundary note (accurate wording — see the delivery report): this
+    # function IS reachable with arbitrary names, including ``__class__``: a
+    # ``dict`` *subclass* instance has a ``__dict__``, so ``hasattr(obj,
+    # "__dict__")`` wins over the ``isinstance(obj, dict)`` branch and the bare
+    # ``getattr`` runs.  It is nevertheless **not** a reflection-escape surface,
+    # because the value never returns to expression evaluation or flow data: the
+    # only caller chain is ``_match_object`` → ``match()``
+    # (``plaita/node/assignment.py`` output-type check, ``plaita/node/child.py``
+    # input-property asserts, ``plaita/dsl/ir_validate.py`` IR validation), where
+    # the returned value is consumed as a **boolean** by ``match``.  No gate is
+    # added here on purpose: this is Property-schema matching, outside the
+    # issue's fix scope, and raising on ``_``-prefixed property child names
+    # would turn a validation-time ``False`` into an exception for object inputs
+    # (dataclass / pydantic) — a behaviour change the issue's Boundary excludes.
     if re.search(r"\[\d+\]", path):  # 判断路径是否有数组索引
         key, index = re.findall(r"([^\[\]]+)", path)
         if isinstance(obj, dict):

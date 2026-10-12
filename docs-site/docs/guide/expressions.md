@@ -80,20 +80,45 @@ $NODE.list[-1]         # 末项
 | `$NODE.obj._private` | **`ValueError`** |
 | `$NODE.d._foo`（`d` 是 dict） | 键 `_foo` 的值——**键**不受限 |
 | `$NODE._n2`（自动生成的节点 id） | 该节点结果——**键**不受限 |
-| `$NODE.__class__`（`$NODE` 是 dict） | **`ValueError`**（dunder 键同样拒绝） |
+| `$NODE.d.__class__`（`d` 是 dict） | **`ValueError`**（dunder **路径段**同样拒绝） |
+| `$F.get($NODE.d, '__class__')` | 该键的**数据值**——显式映射辅助不受限（见下） |
 
 规则：
 
 * **属性读取**：任何 `_` 开头的段名一律拒绝；
-* **映射取值**：单下划线键保持可读（`{"_foo": …}`、builder 自动生成的 `_n2` 节点 id）；
-  `__` 开头的键拒绝——它不是合法数据键，静默 `None` 只会掩盖越权尝试；
+* **路径段取值**：单下划线键保持可读（`{"_foo": …}`、builder 自动生成的 `_n2` 节点 id）；
+  `__` 开头的**路径段**（`$NODE.d.__class__`）拒绝——路径形态无法与属性遍历尝试区分，
+  静默 `None` 只会掩盖越权尝试；
 * 拒绝是**硬错误**：抛 `ValueError`（消息点名该段并说明原因），在 `end` 节点的
   `output` 等路径上表现为节点错误。不要指望"被挡住 → 得到 `None`"。
+
+**刻意的不对称（映射辅助不受限）**：`$NODE.d.__class__` 抛错，但
+`$F.get($NODE.d, '__class__')` / `$F.getDictValue($NODE.d, '__class__')` 仍返回该键的
+**数据值**，`$F.keys($NODE.d)` 也仍列出它。映射辅助只是"按键取数据"——键不是属性、
+不产生反射语义；路径形态的拒绝针对的是与属性遍历无法区分、且会静默 `None` 的写法。
 
 原因：`$NODE.<节点>.__class__.__init__.__globals__.os.environ` 这类链在节点返回
 dataclass / pydantic / 普通实例时能读出执行进程的全部环境变量，绕开 `$ENV` 的
 `exposeEnv` allowlist（见下文）。数组索引、公开属性、`dict` 键、`{% … %}` 插值与
 `$NODE.raw.…` 都不受影响。迁移说明见[迁移指南](../reference/migration-guide.md)。
+
+运行时错误文案（**逐字**，与代码、迁移指南一致）：
+
+```
+expression field name '__class__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Only this prefix is gated: public attributes of node-returned objects stay readable by design (MIGRATION.md #55).
+```
+
+!!! warning "已知边界：本限制只覆盖 `_` 前缀，不是整体沙箱"
+
+    只保留 `_` 前缀名，**公有属性遍历不受限**。节点返回值若把模块挂在**公有**属性
+    上，公有链照旧可读——例如节点返回 `SimpleNamespace(os=os)` 时，
+    `$NODE.h.os.environ` 就是活的 `os.environ`（可继续取到具体变量值）。这不是缺陷，
+    而是本限制声明的范围：它关闭的是"反射到 Python 内部属性"（`__class__` →
+    `__globals__`）这条路，**不把节点返回值变成不可信数据**。
+
+    因此：`exposeEnv` 是"显式暴露"清单而非沙箱；**节点插件不应返回把敏感模块 /
+    对象挂在公有属性上的返回值**（`os` / `sys` / 连接串对象等）。这是作者侧的信任
+    边界。详见[迁移指南](../reference/migration-guide.md) 的 #55 条目。
 
 ### 取数据原文：`$NODE.raw.<节点>…`
 
