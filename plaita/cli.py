@@ -14,9 +14,15 @@ recursive ``.dev/flows/compile_v2.py`` 等）：
   行号（装饰器/import 模式的「相对 getsource 段」偏移问题不存在）。
 - **显式注册业务节点**：``--register plaita_nodes``（默认调模块的
   ``register_all()``）或 ``--register pkg.mod:func``；不依赖 pip dist-info
-  entry-points 的新鲜度。``--code-backend subprocess`` 注册 CODE 节点沙箱档。
-- **编译即校验**：产物落盘前过 ``validate_flow_ir``（DEFAULT_RULES）硬门，
-  与 ``flow_from_source`` / console 发布链同一校验口径。
+  entry-points 的新鲜度。``--code-backend subprocess`` 注册 CODE 节点沙箱档，
+  其白名单**经 ``resolve_sandbox_allowed_backends`` 取值**（读
+  ``PLAITA_SANDBOX_ALLOWED_BACKENDS``，逗号/冒号/分号/空白分隔），与 worker /
+  console 同一口径；非法后端名与 ``unsafe`` 进白名单的告警都由该解析器给出。
+- **编译即校验**：产物落盘前过 ``build_flow``（``validate_flow_ir`` →
+  ``Flow.model_validate``，DEFAULT_RULES）硬门——与 ``flow_from_source`` /
+  console 发布链**同一实现**。node-model 级约束（#22 沙箱后端白名单、#29 语言
+  白名单）只在 ``Flow.model_validate`` 里跑，所以这一门不能省；``--format`` 的
+  选择不改变校验深度。
 - **--check**：不落盘，校验现有产物与重编译结果逐字节一致（CI 防产物
   落后源码）；不一致时输出统一 diff 前 80 行。
 - **产物路径防护**：产物路径与源码解析后相同（含 ``./x.py``、``sub/../x.py``、
@@ -82,25 +88,32 @@ def _apply_registration(spec: str) -> None:
 def _load_ir(args: argparse.Namespace, source_text: str):
     """按 CLI 参数装配 registry 并编译源码 → IR dict（编译前过校验硬门）。"""
     from plaita.dsl.codeflow import compile_source
-    from plaita.dsl.ir_validate import DEFAULT_RULES, validate_flow_ir
-    from plaita.node import get_default_registry
+    from plaita.dsl.ir_validate import DEFAULT_RULES, build_flow
+    from plaita.node import (
+        get_default_registry,
+        register_code_node,
+        resolve_sandbox_allowed_backends,
+    )
 
     for spec in args.register:
         _apply_registration(spec)
     if args.code_backend:
-        from plaita.node import register_code_node
-
         # plaita#22：生产入口必须显式传 allowed_backends=...，否则流程 JSON 可逐节点
-        # 降级到 unsafe（编译期白名单形同虚设）。CLI 侧白名单来源与 worker 一致：
-        # PLAITA_SANDBOX_ALLOWED_BACKENDS（未配置 → 仅放行指定后端本身）。
-        _allowed = os.environ.get("PLAITA_SANDBOX_ALLOWED_BACKENDS", "").strip()
-        _backends = (tuple(b.strip() for b in _allowed.split(",") if b.strip())
-                     or (args.code_backend,))
-        register_code_node(default_backend=args.code_backend, allowed_backends=_backends)
+        # 降级到 unsafe（编译期白名单形同虚设）。plaita#115：白名单**口径必须与
+        # worker / console 同源** —— 用权威解析器（它按逗号/冒号/分号/空白切分、
+        # 校验非法后端名、并对 unsafe 进白名单打 CRITICAL），不要在此手拼分隔符。
+        _backends = resolve_sandbox_allowed_backends(args.code_backend, "cli")
+        register_code_node(default_backend=args.code_backend,
+                           allowed_backends=list(_backends))
     get_default_registry()  # 触发 entry_points 懒发现（注册过的都数进来）
 
     ir = compile_source(source_text, args.flow_id)
-    validate_flow_ir(ir, rules=DEFAULT_RULES)
+    # plaita#114：落盘门必须与 `flow_from_source` / console 发布链**同门**。
+    # `validate_flow_ir` 只做 IR 拓扑规则；node-model 级约束（#22 沙箱后端白名单、
+    # #29 语言白名单）挂在 `CodeNode` 的 before-validator 上，只有
+    # `Flow.model_validate` 会跑它们。`build_flow` 即「validate_flow_ir →
+    # Flow.model_validate」单入口，与 `flow_from_source` 同一实现。
+    build_flow(ir, rules=DEFAULT_RULES)
     return ir
 
 
@@ -186,7 +199,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(plaita_version())
         return 0
     if args.command == "build":
-        return _cmd_build(args)
+        try:
+            return _cmd_build(args)
+        except ValueError as exc:
+            # 参数 / 白名单 / 模型校验类错误都表现为 ValueError（pydantic 的
+            # ValidationError 继承自 ValueError）：给可读信息 + rc=2（参数错档），
+            # 不向用户抛裸 traceback。plaita#115 要求非法后端名的错误信息来自
+            # 权威解析器口径（含 PLAITA_SANDBOX_ALLOWED_BACKENDS 字样）。
+            sys.stderr.write(f"plaita build: {exc}\n")
+            return 2
     parser.error(f"未知子命令 {args.command!r}")
     return 2
 

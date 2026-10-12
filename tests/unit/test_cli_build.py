@@ -8,10 +8,13 @@
 import contextlib
 import io
 import json
+import os
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from plaita.cli import main
 
@@ -234,3 +237,133 @@ class TestCliBuild(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+_CODE_PLAIN_SRC = '''
+def hello(INPUT):
+    a = 1
+    return a
+'''
+
+_CODE_UNSAFE_SRC = '''
+def hello(INPUT):
+    a = CODE(code="print(1)", lang="python", sandbox_backend="unsafe")
+    return a
+'''
+
+_CODE_JS_SRC = '''
+def hello(INPUT):
+    a = CODE(code="print(1)", lang="js")
+    return a
+'''
+
+
+class TestCliSandboxAllowlist(unittest.TestCase):
+    """plaita#114/#115：CLI 的白名单口径与落盘门必须与 worker/console 同源。
+
+    #115：白名单曾自己按逗号切分 env，空白/冒号/分号写法被当成一个后端名（未捕获
+    ValueError）；#114：落盘门只过 ``validate_flow_ir``，node-model 级约束（沙箱
+    后端 / 语言白名单）整段空转，``sandbox_backend="unsafe"`` 的产物照样 rc=0 落盘。
+    """
+
+    def setUp(self):
+        import plaita.node.code as code_mod
+
+        self._mod = code_mod
+        self._saved = (
+            code_mod._ALLOWED_SANDBOX_BACKENDS,
+            code_mod._DEFAULT_SANDBOX_BACKEND,
+            getattr(code_mod, "_ALLOWED_LANGUAGES", None),
+        )
+        self._tmp = tempfile.TemporaryDirectory(prefix="plaita-cli-sandbox-")
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        for key in ("PLAITA_SANDBOX_ALLOWED_BACKENDS",
+                    "PLAITA_SANDBOX_ALLOWED_LANGUAGES",
+                    "PLAITA_CODE_BACKEND"):
+            os.environ.pop(key, None)
+            self.addCleanup(os.environ.pop, key, None)
+
+    def tearDown(self):
+        (self._mod._ALLOWED_SANDBOX_BACKENDS,
+         self._mod._DEFAULT_SANDBOX_BACKEND,
+         saved_langs) = self._saved
+        if saved_langs is not None:
+            self._mod._ALLOWED_LANGUAGES = saved_langs
+
+    def _write(self, text: str, name: str) -> Path:
+        path = self.dir / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_code_backend_env_separators_accepted_and_byte_identical(self):
+        """逗号/空白/冒号/分号四种分隔写法都要 rc=0，且产物逐字节一致（#115）。"""
+        src = self._write(_CODE_PLAIN_SRC, "hello.py")
+        artifacts = []
+        for spelling in ("docker,subprocess", "docker subprocess",
+                         "docker:subprocess", "docker;subprocess"):
+            out = self.dir / f"out_{re.sub(r'[^a-z]', '_', spelling)}.json"
+            with mock.patch.dict(
+                    os.environ, {"PLAITA_SANDBOX_ALLOWED_BACKENDS": spelling}, clear=False):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc = main(["build", str(src), "--code-backend", "subprocess",
+                               "-o", str(out)])
+            self.assertEqual(rc, 0, f"{spelling}: {err.getvalue()}")
+            self.assertTrue(out.is_file(), spelling)
+            json.loads(out.read_text(encoding="utf-8"))
+            artifacts.append(out.read_bytes())
+        self.assertEqual(len(set(artifacts)), 1, "四种分隔写法必须产出逐字节一致的产物")
+
+    def test_code_backend_env_invalid_name_reports_resolver_wording(self):
+        """非法后端名要来自权威解析器口径，而不是 register_code_node 的报错（#115）。"""
+        src = self._write(_CODE_PLAIN_SRC, "hello.py")
+        with mock.patch.dict(
+                os.environ, {"PLAITA_SANDBOX_ALLOWED_BACKENDS": "docker bogus"}, clear=False):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = main(["build", str(src), "--code-backend", "subprocess",
+                           "-o", str(self.dir / "o.json")])
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("PLAITA_SANDBOX_ALLOWED_BACKENDS", err.getvalue())
+        self.assertNotIn("register_code_node: unknown sandbox backend", err.getvalue())
+
+    def test_build_rejects_sandbox_backend_outside_allowlist(self):
+        """白名单外的 sandbox_backend 必须被拒且不落盘（#114）；两种 format 同深。"""
+        src = self._write(_CODE_UNSAFE_SRC, "unsafe_flow.py")
+        for extra in ([], ["--format", "ir"]):
+            tag = "ir" if extra else "canonical"
+            out = self.dir / f"unsafe_{tag}.json"
+            with mock.patch.dict(
+                    os.environ, {"PLAITA_SANDBOX_ALLOWED_BACKENDS": "subprocess"}, clear=False):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc = main(["build", str(src), "--code-backend", "subprocess",
+                               "-o", str(out)] + extra)
+            self.assertNotEqual(rc, 0, f"{tag}: 白名单外的 sandbox_backend 必须被拒")
+            self.assertFalse(out.exists(), f"{tag}: 拒绝时不得落盘")
+            self.assertIn("not allowed by the operator", err.getvalue(), tag)
+
+    def test_build_rejects_language_outside_allowlist(self):
+        """语言白名单同断言（#114 验收 3）：js + 白名单 python ⇒ 拒。"""
+        src = self._write(_CODE_JS_SRC, "js_flow.py")
+        out = self.dir / "js.json"
+        with mock.patch.dict(
+                os.environ, {"PLAITA_SANDBOX_ALLOWED_LANGUAGES": "python"}, clear=False):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = main(["build", str(src), "--code-backend", "subprocess", "-o", str(out)])
+        self.assertNotEqual(rc, 0, err.getvalue())
+        self.assertFalse(out.exists())
+        self.assertIn("not allowed by the operator", err.getvalue())
+
+    def test_build_accepts_allowlisted_backend_and_artifact_validates(self):
+        """反向用例（防误伤）：白名单内、源码不声明 sandbox_backend ⇒ rc=0 且产物可过模型校验。"""
+        from plaita.core.flow import Flow
+
+        src = self._write(_CODE_PLAIN_SRC, "hello.py")
+        out = self.dir / "ok.json"
+        with mock.patch.dict(
+                os.environ, {"PLAITA_SANDBOX_ALLOWED_BACKENDS": "subprocess"}, clear=False):
+            self.assertEqual(
+                main(["build", str(src), "--code-backend", "subprocess", "-o", str(out)]), 0)
+        Flow.model_validate(json.loads(out.read_text(encoding="utf-8")))

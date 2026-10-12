@@ -139,3 +139,33 @@ def test_production_entry_points_pass_allowed_backends():
     )
     not_wired = [p for p in ENTRY_FILES if p not in seen_files]
     assert not not_wired, f"部署入口未注册 CodeNode：{[str(p) for p in not_wired]}"
+
+
+def test_cli_build_really_enforces_backend_allowlist(sandbox_globals, tmp_path, monkeypatch):
+    """接线**真的生效**：跑一次 `plaita build`，白名单外的产物必须被拦（plaita#114）。
+
+    上面的 AST 守卫只能证明"入口传了 ``allowed_backends=``"，证明不了它挡得住东西：
+    CLI 曾只过 ``validate_flow_ir``（IR 拓扑），而沙箱/语言白名单挂在 ``CodeNode``
+    的 before-validator 上——只有 ``Flow.model_validate`` 会跑，于是
+    ``sandbox_backend="unsafe"`` 的产物以 rc=0 落盘、``--check`` 还当它"已同步"。
+    """
+    import contextlib
+    import io
+
+    from plaita.cli import main
+
+    monkeypatch.setenv("PLAITA_SANDBOX_ALLOWED_BACKENDS", "subprocess")
+    src = tmp_path / "unsafe_flow.py"
+    src.write_text(
+        'def hello(INPUT):\n'
+        '    a = CODE(code="print(1)", lang="python", sandbox_backend="unsafe")\n'
+        '    return a\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.json"
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = main(["build", str(src), "--code-backend", "subprocess", "-o", str(out)])
+    assert rc != 0, "白名单外的 sandbox_backend 必须让 build 失败"
+    assert not out.exists(), "被拒时不得落盘"
+    assert "not allowed by the operator" in err.getvalue()
