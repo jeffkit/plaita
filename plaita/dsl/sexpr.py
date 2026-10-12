@@ -727,7 +727,11 @@ def _c_event(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     _common_fields(kw, spec, ctx)
     flt = _opt(kw, "filter", "event-filter", "eventFilter")
     if flt is not None:
-        spec["eventFilter"] = flt
+        # #136：必须经 `_value()` 编译，否则 `(dict :a 1)` 会**原样保留为列表**
+        # `['dict','a',1]`：发射时走 list 分支（丢冒号）⇒ 再解析仍是 list
+        # ⇒ 模型校验把它压成 `{}` ⇒ **事件静默失去过滤条件、不再按条件触发**。
+        # 其它关键字（如 `:headers`）走的是 `_value` 路径，故本处属遗漏。
+        spec["eventFilter"] = _value(flt)
     return spec
 
 

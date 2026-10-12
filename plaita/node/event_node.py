@@ -39,7 +39,16 @@ class EventNode(Node):
     event_type: str = Field(
         validation_alias=AliasChoices("event_type", "eventType"),
         description="订阅的事件类型：须与事件发布方的 type 一致（支持 $ 表达式）")
-    event_filter: Dict[str, Any] = Field(default_factory=dict, description="事件过滤器：按点路径匹配事件负载字段，如 {\"data.status\": \"ok\"}")
+    # #136：AliasChoices 与 event_type / subscription_timeout **同理由**
+    #（codeflow 编译器、console 表单、sexpr 发射都用 camelCase `eventFilter`）。
+    # 此前该字段**漏了别名**，于是 camelCase 被 pydantic 静默忽略、落回默认 `{}`
+    # ⇒ **事件静默失去过滤条件、不再按条件触发**（比丢字段更危险：它照常触发）。
+    # 实测：`{"eventFilter": {"a": 1}}` 经 Flow.model_validate 后 event_filter == {}，
+    # 而紧邻的 eventType / subscriptionTimeout 都正常——属遗漏，不是设计。
+    event_filter: Dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("event_filter", "eventFilter"),
+        description="事件过滤器：按点路径匹配事件负载字段，如 {\"data.status\": \"ok\"}")
     # 订阅超时（秒）：挂起等待事件的 最长时限，超时后由 event_filter 进程的
     # SubscriptionTimeoutChecker 触发 resume_type=timeout，节点落 timeout 状态。
     # None = 无限等待（默认，与历史行为完全一致——未配置该字段的存量流程零变化）。

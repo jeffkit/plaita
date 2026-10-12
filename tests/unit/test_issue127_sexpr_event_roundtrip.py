@@ -180,3 +180,69 @@ class TestKeywordOrderingBeforeNext:
         ev = [n for n in back["nodes"] if n.get("id") == "ev"][0]
         assert ev["next"] == "e"
         assert ev["eventFilter"] == "$INPUT.x"
+
+
+class TestEventFilterValuePreserved:
+    """plaita#136：`:filter` 的**值**也必须保真（不只是位置）。
+
+    交付方在 `#136` 的复测里指出、我独立定位到**两个叠加缺陷**：
+
+    1. `_c_event` 存 `:filter` 时**没过 `_value()`** ⇒ `(dict :a 1)` 原样留成列表
+       `['dict','a',1]` ⇒ 发射走 list 分支（**丢冒号**）⇒ 再解析仍是 list；
+    2. `EventNode.event_filter` **漏了 camelCase 别名**（紧邻的 `event_type` /
+       `subscription_timeout` 都有 `AliasChoices`）⇒ pydantic 静默忽略
+       `eventFilter`、落回默认 `{}`。
+
+    合并后果：**事件静默失去过滤条件、不再按条件触发**（比丢字段危险——它照常触发）。
+    """
+
+    SRC = ('(flow f (start :id s -> ev) '
+           '(event :id ev :type t :filter (dict :a 1) -> e) (end :id e))')
+
+    def test_dict_literal_compiles_to_dict(self):
+        """缺陷 1：`(dict :a 1)` 必须编译成 dict，而不是留着 list。"""
+        ir = compile_sexpr(self.SRC)
+        ev = [n for n in ir["nodes"] if n.get("id") == "ev"][0]
+        assert ev["eventFilter"] == {"a": 1}, f"应是 dict，实得 {ev['eventFilter']!r}"
+
+    def test_emitted_with_colons(self):
+        """发射必须带冒号（`(dict :a 1)`），否则再解析仍是 list。"""
+        text = flow_to_sexpr(compile_sexpr(self.SRC))
+        assert "(dict :a 1)" in text, f"dict 字面量丢了冒号：{text}"
+
+    def test_survives_model_validation(self):
+        """缺陷 2：经 `Flow.model_validate` 后 filter 不得变成 `{}`。"""
+        from plaita.core.flow import Flow
+
+        node = [x for x in Flow.model_validate(compile_sexpr(self.SRC)).nodes
+                if getattr(x, "id", None) == "ev"][0]
+        assert node.event_filter == {"a": 1}, (
+            f"过滤条件在模型校验后被丢弃：{node.event_filter!r} ⇒ 事件将不再按条件触发"
+        )
+        assert node.next == "e"
+
+    def test_camelcase_alias_accepted(self):
+        """`eventFilter`（camelCase）必须被接受——codeflow/console 都发这种。"""
+        from plaita.core.flow import Flow
+
+        ir = {"flow_id": "f", "runtime": "python", "nodes": [
+            {"id": "s", "type": "start", "next": "ev"},
+            {"id": "ev", "type": "event", "eventType": "t",
+             "eventFilter": {"a": 1}, "next": "e"},
+            {"id": "e", "type": "end", "resultType": "success"},
+        ]}
+        node = [x for x in Flow.model_validate(ir).nodes if getattr(x, "id", None) == "ev"][0]
+        assert node.event_filter == {"a": 1}
+
+    def test_snake_case_still_accepted(self):
+        """snake_case 也必须继续可用（存量 JSON flow 用这个）。"""
+        from plaita.core.flow import Flow
+
+        ir = {"flow_id": "f", "runtime": "python", "nodes": [
+            {"id": "s", "type": "start", "next": "ev"},
+            {"id": "ev", "type": "event", "event_type": "t",
+             "event_filter": {"b": 2}, "next": "e"},
+            {"id": "e", "type": "end", "resultType": "success"},
+        ]}
+        node = [x for x in Flow.model_validate(ir).nodes if getattr(x, "id", None) == "ev"][0]
+        assert node.event_filter == {"b": 2}
