@@ -5,6 +5,7 @@ import ast
 
 import pytest
 
+from plaita.dsl.codeflow import _stmt as _stmt_mod
 from plaita.dsl.codeflow._common import _CodeflowError, _CompileCtx
 from plaita.dsl.codeflow._stmt import (
     _compile_assign,
@@ -487,3 +488,193 @@ class TestCompileExprStmtMutations:
         msg = str(exc.value)
         assert "表达式语句之后悬空" in msg
         assert "第 ?" not in msg
+
+
+# ---------------------------------------------------------------------------
+# end(...) 终止语句（#76：resultType=error/nop 与 error 载荷的源码表达）
+# ---------------------------------------------------------------------------
+
+class TestCompileEndCallMutations:
+    def test_end_error_result_type_and_payload(self):
+        ctx = _ctx()
+        entry = _compile_block(
+            _stmts('end(result_type="error", error={"code": 4001, "message": "bad"})'),
+            ctx, None)
+        end = ctx.nodes[-1]
+        assert entry == end["id"]
+        assert end["type"] == "end"
+        assert end["resultType"] == "error"
+        assert end["error"] == {"code": 4001, "message": "bad"}
+        assert end["output"] is None
+        assert end.get("source_line") == 7
+        assert "end" in end["desc"]
+        assert "第 7 行" in end["desc"]
+
+    def test_end_keyword_output_defaults_to_success(self):
+        ctx = _ctx()
+        _compile_block(_stmts('end(output="yes")'), ctx, None)
+        end = ctx.nodes[-1]
+        assert end["output"] == "yes"
+        assert end["resultType"] == "success"
+        assert "error" not in end
+        assert end["id"] == "ret_yes"
+        assert "end" in end["name"]
+
+    def test_end_positional_output_and_nop(self):
+        ctx = _ctx()
+        _compile_block(_stmts('end("no", result_type="nop")'), ctx, None)
+        end = ctx.nodes[-1]
+        assert end["output"] == "no"
+        assert end["resultType"] == "nop"
+        assert end["id"] == "ret_no"
+
+    def test_end_expression_output_is_compiled(self):
+        ctx = _ctx()
+        _compile_block(_stmts("end(output=INPUT.x)"), ctx, None)
+        end = ctx.nodes[-1]
+        assert end["output"] == "$INPUT.x"
+        assert end["id"] == "ret_x"
+
+    def test_end_without_output_uses_auto_id(self):
+        ctx = _ctx()
+        _compile_block(_stmts('end(result_type="nop")'), ctx, None)
+        end = ctx.nodes[-1]
+        assert end["output"] is None
+        assert end["resultType"] == "nop"
+        assert end["id"] == "_n1"
+        assert "name" not in end
+
+    def test_end_error_payload_with_dollar_strings_stays_literal(self):
+        """error 是纯数据：含字面 ``$`` 的字符串/键名原样保留，不参与表达式编译。"""
+        ctx = _ctx()
+        _compile_block(
+            _stmts('end(result_type="error", error={"message": "$100 fee missing", '
+                   '"hint": "x$y", "$ref": "x"})'), ctx, None)
+        assert ctx.nodes[-1]["error"] == {
+            "message": "$100 fee missing", "hint": "x$y", "$ref": "x"}
+
+    def test_end_rejects_non_literal_error_payload(self):
+        """error 里出现表达式（如 INPUT.msg）→ 编译期硬错，不静默当表达式编译。"""
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(
+                _stmts('end(result_type="error", error={"message": INPUT.msg})'),
+                _ctx(), None)
+        assert str(exc.value) == (
+            "[codeflow] 第 7 行: end(...) 的 error 必须是字面数据"
+            "（dict/str/num/bool/None，不参与表达式编译）")
+
+    def test_end_unreachable_statement_message_and_lineno(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts('end(result_type="nop")\nreturn INPUT.x'), _ctx(), None)
+        # 精确锁定报错原文：node 参数丢了会退化成「第 ? 行」，字面量被改写会换词。
+        assert str(exc.value) == "[codeflow] 第 8 行: end(...) 之后还有不可达语句"
+
+    def test_end_rejects_star_unpack(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts("end(**kw)"), _ctx(), None)
+        assert str(exc.value) == "[codeflow] 第 7 行: end(...) 不支持 ** 解包"
+
+    def test_end_rejects_unknown_kwarg(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts("end(resultType=\"error\")"), _ctx(), None)
+        assert str(exc.value) == (
+            "[codeflow] 第 7 行: end(...) 不支持的参数 'resultType'"
+            "（可用：output/result_type/error）")
+
+    def test_end_rejects_duplicate_kwarg(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts('end(result_type="error", result_type="nop")'), _ctx(), None)
+        assert str(exc.value) == "[codeflow] 第 7 行: end(...) 重复的参数 'result_type'"
+
+    def test_end_rejects_two_positional_args(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts('end("a", "b")'), _ctx(), None)
+        assert str(exc.value) == "[codeflow] 第 7 行: end(...) 最多一个位置参数（output）"
+
+    def test_end_rejects_positional_and_keyword_output(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts('end("a", output="b")'), _ctx(), None)
+        assert str(exc.value) == (
+            "[codeflow] 第 7 行: end(...) 的 output 不能同时给位置参数与关键字参数")
+
+    def test_end_rejects_non_string_result_type(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts("end(result_type=1)"), _ctx(), None)
+        assert str(exc.value) == "[codeflow] 第 7 行: end(...) 的 result_type 必须是字符串字面量"
+
+    def test_end_rejects_out_of_domain_result_type(self):
+        """取值域硬校验：bogus 不能被编译成 IR 再由发动机静默降级成 success。"""
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts('end(result_type="bogus")'), _ctx(), None)
+        assert str(exc.value) == (
+            "[codeflow] 第 7 行: end(...) 的 result_type 取值必须是 success/error/nop 之一"
+            "（发动机口径，大小写敏感），得到 'bogus'")
+
+    def test_end_rejects_case_variant_result_type(self):
+        """大小写口径按发动机（小写敏感）——任何大小写变体都不在域内，不得静默降级。
+
+        覆盖三个域值的常见大小写变体：若取值域被"顺手放宽"（如追加大写化变体），
+        对应用例会变绿 ⇒ 该项变异被杀。
+        """
+        for value in ("ERROR", "Success", "Error", "NOP", "Nop", "sUcCeSs"):
+            with pytest.raises(_CodeflowError) as exc:
+                _compile_block(_stmts(f'end(result_type="{value}")'), _ctx(), None)
+            msg = str(exc.value)
+            assert "大小写敏感" in msg
+            assert f"'{value}'" in msg
+
+    def test_end_accepts_every_domain_result_type(self):
+        for value in ("success", "error", "nop"):
+            ctx = _ctx()
+            _compile_block(_stmts(f'end(result_type="{value}")'), ctx, None)
+            assert ctx.nodes[-1]["resultType"] == value
+
+    def test_end_rejects_non_dict_error(self):
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts('end(result_type="error", error="boom")'), _ctx(), None)
+        assert str(exc.value) == "[codeflow] 第 7 行: end(...) 的 error 必须是 dict 字面量"
+
+    def test_end_variable_output_uses_ctx(self):
+        """output 里的局部变量走 ctx.names——钉住 ctx 确实传进了 _compile_expr。"""
+        ctx = _ctx()
+        _compile_block(
+            _stmts('r = INPUT.x\nend(output=r, result_type="error", '
+                   'error={"message": "boom"})'),
+            ctx, None)
+        end = ctx.nodes[-1]
+        assert end["output"] == "$NODE.r"
+        assert end["error"] == {"message": "boom"}
+
+    def test_end_long_output_desc_truncated_at_60(self):
+        """desc 用 60 字上限截断（与 return 分支同口径）——短文本测不出上限差异。"""
+        ctx = _ctx()
+        long_expr = "a" * 80
+        _compile_block(_stmts(f'end(output="{long_expr}", result_type="error")'), ctx, None)
+        assert len(ctx.nodes[-1]["desc"]) == 60
+
+
+class TestIsEndCallMutations:
+    def test_end_call_statement_recognised(self):
+        assert _stmt_mod._is_end_call(_stmt('end(result_type="nop")')) is True
+
+    def test_non_expr_statement_not_end_call(self):
+        assert _stmt_mod._is_end_call(_stmt("return INPUT.x")) is False
+
+    def test_value_less_statement_not_end_call(self):
+        # ``pass`` 没有 .value——丢了 isinstance(stmt, ast.Expr) 判定会 AttributeError。
+        assert _stmt_mod._is_end_call(_stmt("pass")) is False
+
+    def test_non_call_expr_not_end_call(self):
+        assert _stmt_mod._is_end_call(_stmt("INPUT.x")) is False
+
+    def test_attribute_call_not_end_call(self):
+        assert _stmt_mod._is_end_call(_stmt("other.end()")) is False
+
+    def test_other_node_call_not_end_call(self):
+        assert _stmt_mod._is_end_call(_stmt('EVENT(type="x")')) is False
+
+    def test_attribute_end_call_goes_normal_path(self):
+        # ``other.end()`` 不是终止语句：走普通表达式语句路径（无法编译即报错）。
+        with pytest.raises(_CodeflowError) as exc:
+            _compile_block(_stmts("other.end()\nreturn INPUT.x"), _ctx(), None)
+        assert "不支持的调用" in str(exc.value)

@@ -15,11 +15,21 @@ id 在 round-trip 后可能变化（变量名 id、显式 ``id=`` 钉住的 id �
 合成节点（builder 专属）、空真分支或两分支同址的 if、非 object 的
 ``inputType``。IR 里以 ``$`` 开头的字符串一律按表达式逆映射——原始字面量
 恰以 ``$`` 开头的场景编译期已丢失区分，属已知边界。
+
+**非 success 结束出口**：``resultType`` 为 ``error``/``nop``（或带 ``error``
+载荷）的 end 节点发射为 ``end(...)`` 终止语句，而不是 ``return``——``return``
+在重编译时被硬编码回 ``resultType="success"``，会静默把失败出口洗成成功
+（#76）。``end(output=..., result_type=..., error=...)`` 是 ``@flow`` 的一等
+终止语句，由 ``_stmt._compile_end_call`` 还原回 end 节点。
 """
 from __future__ import annotations
 
+import ast
+import json
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from plaita.dsl.codeflow._common import _END_RESULT_TYPES
 
 __all__ = ["EmitError", "emit_source"]
 
@@ -27,6 +37,10 @@ _AUTO_ID_RE = re.compile(r"_n\d+")
 
 # 由 _BodyEmitter 专属分支处理的类型；出现在节点调用位置即不可表达
 _UNEMITTABLE_TYPES = {"switch", "bool", "start"}
+
+# 发动机 ErrorHandler 接受的 strategy 取值（`continue-with` 是规范枚举值，
+# `continue_with` 是 DSL/历史拼写；两者发动机都收并归一到 continue-with）。
+_ERROR_HANDLER_STRATEGIES = ("abort", "continue", "continue_with", "continue-with")
 
 
 class EmitError(ValueError):
@@ -157,6 +171,25 @@ def _invert_value(v: Any, ns: List[Tuple[str, str]] = _BASE_NS) -> str:
     return repr(v)
 
 
+def _invert_literal(v: Any) -> str:
+    """IR 字面数据 → Python 字面量源码（**不走**表达式逆映射）。
+
+    ``end`` 的 ``error`` 载荷是纯数据：引擎 ``End.execute`` 直接
+    ``self.error.get(...)``，从不求值。因此含字面 ``$`` 的字符串（如
+    ``"$100 fee missing"``、键名 ``"$ref"``）必须原样保留，按表达式反相会
+    直接 ``EmitError``（无法逆映射）或把数据错当表达式。渲染后用
+    ``ast.literal_eval`` 回读校验，不能逐字节还原的载荷拒绝发射。
+    """
+    text = repr(v)
+    try:
+        parsed = ast.literal_eval(text)
+    except (ValueError, SyntaxError) as exc:
+        raise EmitError(f"end 的 error 载荷不是可反解析的 Python 字面量：{v!r}") from exc
+    if type(parsed) is not type(v) or parsed != v:
+        raise EmitError(f"end 的 error 载荷无法逐字节还原为 Python 字面量：{v!r}")
+    return text
+
+
 _CMP_PY: Dict[str, str] = {
     "gt": ">", "gte": ">=", "lt": "<", "lte": "<=",
     "eq": "==", "ne": "!=", "in": "in", "notIn": "not in",
@@ -202,7 +235,19 @@ class _ChildCollector:
     def __init__(self) -> None:
         self.entries: List[Tuple[str, Dict[str, Any]]] = []
 
-    def register(self, child_ir: Dict[str, Any]) -> str:
+    def register(self, child_ir: Any) -> str:
+        if isinstance(child_ir, str):
+            # 发动机 `FlowNode.setup_child_flow` / `ParallelBranch.setup_flow` 都接受
+            # JSON 字符串（`Flow.model_validate_json`）——按同一口径解析，解析失败
+            # 才报 EmitError（此前直接把 str 交给 dict 接口 ⇒ 裸 AttributeError）。
+            try:
+                child_ir = json.loads(child_ir)
+            except ValueError as exc:
+                raise EmitError("子流程 childFlow/flow 是字符串但不是合法 JSON") from exc
+        if not isinstance(child_ir, dict):
+            raise EmitError(
+                "子流程 childFlow/flow 不是 dict 或 JSON 字符串"
+                f"（得到 {type(child_ir).__name__}）")
         for name, ir in self.entries:
             if ir is child_ir:
                 return name
@@ -296,6 +341,37 @@ class _BodyEmitter:
 
     def _emit_return(self, node: Dict[str, Any]) -> str:
         output = node.get("output")
+        # 发动机 `End.setup_end` 两个键都收（`resultType` / `result_type`，前者
+        # 优先）——存量 JSON flow（如 tests/integration/server/test_flow.json）与
+        # `End(...).model_dump()` 出的是 snake 键，只读 camel 会把 error/nop 出口
+        # 静默洗成 success。
+        result_type = node.get("resultType") or node.get("result_type")
+        # 发动机口径（`End.setup_end`）：取值不在 success/error/nop 内的一律
+        # 按 success 处理（非字符串 1/True、未知字面量 'failure'、空串同理）。
+        # 发射器据此归一，保证产出源码永远能被 `compile_source` 吃回去——直接发
+        # `result_type=1` / `'failure'` 会被 `_compile_end_call` 的取值域校验拒绝。
+        if result_type not in _END_RESULT_TYPES:
+            result_type = "success"
+        error = node.get("error")
+        if result_type != "success" or error is not None:
+            # #76：`return` 只能表达 success 出口，resultType=error/nop 与 error
+            # 载荷都在此静默丢失（重编译把每个 return 硬编码回 success）。改用
+            # `end(...)` 终止语句（与引擎 End 节点同名的一等出口）承载它们，由
+            # `_stmt._compile_end_call` 还原 resultType/error。
+            kwargs: List[str] = []
+            if output is not None:
+                kwargs.append(f"output={_invert_value(output, self.ns)}")
+            if result_type != "success":
+                kwargs.append(f"result_type={result_type!r}")
+            if error is not None:
+                if not isinstance(error, dict):
+                    raise EmitError(
+                        f"end 节点 {node.get('id')!r} 的 error 载荷不是 dict，"
+                        "无法发射为可重编译源码")
+                # #76：error 是纯数据（引擎 `End.execute` 从不求值）——按字面量
+                # 发射，含字面 `$` 的字符串/键名原样保留，不再过表达式逆映射。
+                kwargs.append(f"error={_invert_literal(error)}")
+            return f"end({', '.join(kwargs)})"
         if output is None:
             return "return"
         return f"return {_invert_value(output, self.ns)}"
@@ -431,7 +507,15 @@ class _BodyEmitter:
     # -- 节点调用 -----------------------------------------------------------
 
     def _emit_error_handler(self, eh: Dict[str, Any]) -> str:
-        kwargs = [f"strategy={eh['strategy']!r}"]
+        # 发动机 `ErrorHandler` 的 strategy 缺省/None 都归一为 abort（`{"retryTimes": 2}`
+        # 是发动机接受的形状）；缺键不得抛裸 KeyError，取值域外的 strategy 由发动机
+        # 拒绝（ValidationError），这里给同口径的 EmitError 而不是产出不可重编译源码。
+        strategy = eh.get("strategy") or "abort"
+        if strategy not in _ERROR_HANDLER_STRATEGIES:
+            raise EmitError(
+                f"errorHandler 的 strategy {strategy!r} 不可表达为 @flow 源码"
+                f"（可用：{'/'.join(_ERROR_HANDLER_STRATEGIES)}）")
+        kwargs = [f"strategy={strategy!r}"]
         if eh.get("retryTimes") is not None:
             kwargs.append(f"retry_times={eh['retryTimes']}")
         if eh.get("defaultValue") is not None:
@@ -446,8 +530,18 @@ class _BodyEmitter:
         kwargs: List[str] = []
         if spec.get("timeout") is not None:
             kwargs.append(f"timeout={_invert_value(spec['timeout'], self.ns)}")
-        if spec.get("errorHandler") is not None:
-            kwargs.append(f"on_error={self._emit_error_handler(spec['errorHandler'])}")
+        # 发动机 `Node.setup_error_handler` 两个键都收（errorHandler / error_handler，
+        # 前者优先）；只读 camel 会把 snake 存盘 flow 的错误策略静默丢掉。
+        error_handler = spec.get("errorHandler") or spec.get("error_handler")
+        # 判定口径必须与发动机一致：`basic.py` 用**真值**判定（`if cfg:`），
+        # `{}` / `[]` / `""` 一律当没配（退回默认 handler）。用 `is not None`
+        # 会让 `{}` 走进取值路径并在 `eh['strategy']` 上抛裸 KeyError。
+        if error_handler:
+            if not isinstance(error_handler, dict):
+                raise EmitError(
+                    f"节点 {spec.get('id')!r} 的 errorHandler 不是 dict，"
+                    "无法发射为可重编译源码")
+            kwargs.append(f"on_error={self._emit_error_handler(error_handler)}")
         return kwargs
 
     def _emit_node_call(self, node: Dict[str, Any]) -> List[str]:
@@ -493,7 +587,10 @@ class _BodyEmitter:
         return f"EVENT({', '.join(kwargs)})"
 
     def _call_child_ref(self, node: Dict[str, Any], placeholder: str) -> str:
-        child_name = self.childflows.register(node.get("childFlow") or {})
+        # 发动机 `FlowNode.setup_child_flow` 两个键都收（childFlow / child_flow）；
+        # 编译器自产 camel、存量 JSON flow 用 snake，只读一边会丢整个子图。
+        child_ir = node.get("childFlow") or node.get("child_flow") or {}
+        child_name = self.childflows.register(child_ir)
         kwargs: List[str] = []
         if node.get("input") is not None:
             kwargs.append(f"input={_invert_value(node['input'], self.ns)}")

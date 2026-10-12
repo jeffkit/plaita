@@ -120,6 +120,12 @@ _BUILTIN_HANDLED_TYPES = {
     "start", "end", "if", "assignment", "switch", "bool",
 }
 
+# end 节点的 resultType 取值域。与引擎 plaita/node/end.py 的
+# END_TYPE_NORMAL / END_TYPE_ERROR / END_TYPE_NOP 一致：发动机按**小写字面量**
+# 归一（大小写变体与其它值一律降级成 success，见 End.setup_end），发射与编译
+# 两侧共用同一口径，别自创。
+_END_RESULT_TYPES = ("success", "error", "nop")
+
 
 def _is_upper_ident(name: str) -> bool:
     """全大写 ASCII 标识符（字母/数字/下划线，至少含一个字母）。

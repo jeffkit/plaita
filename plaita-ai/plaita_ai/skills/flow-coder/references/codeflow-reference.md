@@ -93,6 +93,25 @@ def greet(INPUT):
 
 赋值生成 `assignment` 节点，后续用变量名引用其输出。**赋值后必须接 return 或后续语句**，否则报"赋值后悬空"。
 
+### end(...)：error / nop 结束出口
+
+`return` 恒定产生 `resultType="success"` 的 end 节点。要以业务错误结束或静默结束时，用 `end(...)` 终止语句——与 `return` 同级（之后语句不可达），可显式声明 `result_type` 与 `error` 载荷：
+
+```python
+@flow("create_user")
+def create_user(INPUT):
+    if INPUT.age >= 18:
+        return "ok"
+    end(result_type="error", error={"code": 4001, "message": "参数非法"})
+# run(age=17) -> 抛 FlowExecutionException(error_type=ERROR_RESULT)
+```
+
+- 参数：`output=`（可选，也可作唯一位置参数）、`result_type=`（`"success"` 默认 / `"error"` / `"nop"`，须为字符串字面量）、`error=`（dict 字面量，习惯写 `{"code": ..., "message": ...}`）。
+- `result_type=` 取值域是小写 `success`/`error`/`nop`（发动机口径，大小写敏感）：`"bogus"`、`"ERROR"` 等域外值**编译期硬错**，不会被静默降级成 `success`。
+- `error=` 是**纯字面数据**，引擎从不求值（`End.execute` 直接 `self.error.get(...)`）：含字面 `$` 的字符串/键名（如 `{"message": "$100 fee missing"}`、`{"$ref": "x"}`）原样保留、不参与表达式编译，也**不参与 `$NODE`/`$F` 引用扫描**（载荷里写 `"$NODE.e"` 只是文本）；写表达式（如 `{"message": INPUT.msg}`）编译期报错。
+- `end(...)` 只是语句形态，**无需 import**（函数体从不被当 Python 执行）；`result_type="nop"` 时流程静默结束并丢弃 `output`。
+- `emit_source` 对 `resultType` 非 `success` 或带 `error` 载荷的 end 节点即发射该形态——这是失败出口能活过 IR→源码 round-trip 的通道。发动机对 `resultType`/`result_type`、`errorHandler`/`error_handler`、`childFlow`/`child_flow`、`eventType`/`event_type`、`eventFilter`/`event_filter` 都是**双键都收**（camel 优先、snake 兜底），emit 同口径读取，snake 存盘 flow 不会丢这些字段。
+
 ### while / for-head WHILE（条件循环）
 
 ```python

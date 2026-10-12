@@ -150,6 +150,34 @@ def bad_topo(INPUT):
             )
 
 
+class TestEndErrorPayloadNotScanned(unittest.TestCase):
+    """end 的 ``error`` 是纯字面数据（引擎从不求值）——载荷里的 ``$NODE`` 不是引用。"""
+
+    def _ir(self, payload):
+        return {
+            "runtime": "python", "flow_id": "errdata",
+            "inputType": {"dataType": "object"},
+            "nodes": [
+                {"type": "start", "id": "start", "next": "e"},
+                {"type": "end", "id": "e", "output": "x", "resultType": "error",
+                 "error": payload},
+            ],
+        }
+
+    def test_payload_may_reference_any_node_id(self):
+        # end 自身 id、未知 id、未知 $F 函数：在数据载荷里都不构成引用，
+        # 不应触发悬空引用校验（emit→compile 会把 end id 重命名为语义 slug）。
+        for payload in ({"m": "$NODE.e.output"}, {"m": "$NODE.ghost"},
+                        {"m": "$F.no_such_func($INPUT.x)"}):
+            validate_flow_ir(self._ir(payload))
+
+    def test_payload_does_not_hide_real_dangling_refs(self):
+        ir = self._ir({"m": "$NODE.e"})
+        ir["nodes"][1]["output"] = "$NODE.ghost"  # 真正的悬空引用仍在 output 上
+        with self.assertRaises(FlowIRValidationError):
+            validate_flow_ir(ir)
+
+
 class TestSexprUsesSharedValidate(unittest.TestCase):
     def test_if_without_else_fails(self):
         src = """

@@ -80,6 +80,7 @@ def bad(INPUT):
 
 - **if/while 条件节点**：id = 条件语义 slug，如 `INPUT.score >= 90` → `score_ge_90`（字段名 + 运算符转写，ASCII 小写，超长截 24）；同 slug 冲突自动加 `_2.._5` 后缀；无 ASCII 语义（纯中文条件）回退 `_n{n}`。
 - **return（end 节点）**：id = `ret_` + 返回表达式 slug（如 `ret_a`）；dict 字面量 return 无语义可取，保留 `_n{n}`，但 `name` 会兜底。
+- **`end(...)` 终止语句**：同样按 `ret_` + output 表达式 slug 命名 id，`name`/`desc` 以 `end` 起头。`return` 恒定产出 `resultType="success"`，**error / nop 出口必须写 `end(result_type="error"|"nop", error={...})`**（见 §4）。
 - 同时写入 `name`（短标签，如 `INPUT.score >= 90?`）与 `desc`（`if INPUT.score >= 90（第 4 行）`）——console 画布第二行显示、悬停可见；`source_line` 依旧逐节点回标，发布链路把 `metadata.source`（@flow 源码原文）一并带上后，画布可「节点 → 源码行」跳转（参照 mediaflow `publish_console.py`）。
 - **含义**：运行期报错、dry-run 面板、执行记录里的节点名直接可读（`if_score_ge_90 出错了 (源码第 4 行)`）。作者侧唯一要做的：**让条件里的字段名可读**（`INPUT.score` 而非 `INPUT.v1`）。
 
@@ -91,6 +92,7 @@ def bad(INPUT):
 ## 4. 错误处理与 dry-run
 
 - 错误策略统一 `on_error=ErrorHandler(strategy, default=...)`：可容忍步骤用 `continue_with` + `default` 兜底（如 `{"data": None}`），关键步骤保持默认 abort；运行期错误会回标源码行（`NodeExecutionError.source_line`）。
+- **业务失败出口用 `end(result_type="error", error={"code": ..., "message": ...})`**：`return` 只能表达 success 出口，写 `return` 的失败分支会被下游当作正常结束（引擎抛 `FlowResultError` → 外层 `FlowExecutionException(error_type=ERROR_RESULT)`）；静默结束用 `end(result_type="nop")`。`result_type` 取值域是小写 `success`/`error`/`nop`（大小写敏感，域外值编译期硬错、不会静默降级）；`error` 是**纯字面数据**（引擎从不求值），写表达式（如 `{"message": INPUT.msg}`）会编译期报错，也**不参与 `$NODE`/`$F` 引用扫描**（载荷里写 `"$NODE.<id>"` 只是文本、不会判悬空）。语法见 `codeflow-reference.md` §4「end(...)：error / nop 结束出口」。
 - **dry-run 双通道**：
   - 分支/流程级判断用 `$INPUT.dry_run`（业务入口把 flag 注入 input）；
   - 节点内部语义（跳过外呼、返回 fake）一律认 `globalContext.dry_run`——plaita-nodes 所有有副作用的节点都已尊重它：dry 下**不解析凭据、不连网**，返回带 `dry_run` 标记的 fake 结果（`writefile` 例外，照常写以便检查产物）。

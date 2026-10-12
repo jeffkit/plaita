@@ -305,11 +305,15 @@ _FUNC_REF_RE = re.compile(r"(?<![A-Za-z0-9_.$])\$F\.([A-Za-z0-9_]+)\s*\(")
 # - ``code``：CODE 节点源码是 Python/JS，不是 plaita 表达式；
 # - ``childFlow``/``child_flow``/``flow``：嵌套子图是独立作用域，随递归按
 #   各自 graph.ids 单独校验——留在父节点扫描里会把子图引用错记到父图头上；
+# - ``error``：end 的失败载荷是**纯字面数据**（引擎 ``End.execute`` 直接
+#   ``self.error.get(...)``，从不求值），里面的 "$NODE.x" 只是文本，扫它会把
+#   正常流程判成悬空引用（典型：载荷引用 end 自身 id，而 end 的 id 在
+#   emit→compile 后由语义 slug 重命名）；
 # - ``desc``/``name`` 等文档/结构字段：散文里的 "$NODE.foo" 不是引用。
 _UNSCANNED_KEYS = frozenset({
     "code", "desc", "description", "name", "title", "label", "node_name",
     "id", "type", "next", "else_next", "elseNext", "default", "flow_id",
-    "flowId", "source_line", "language",
+    "flowId", "source_line", "language", "error",
     "childFlow", "child_flow", "flow",
 })
 

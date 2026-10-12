@@ -124,6 +124,35 @@ greet.run(name="alice")   # -> "hi ALICE"
 # name = $F.upper($INPUT.name);  return = $F.concat("hi ", $NODE.name)
 ```
 
+### `end(...)`：error / nop 结束出口 { #end-statement }
+
+`return` 恒定产出 `resultType="success"` 的 end 节点。要以业务错误结束（引擎抛
+`FlowResultError`，外层得到 `FlowExecutionException(error_type=ERROR_RESULT)`）或
+静默结束（`nop`）时，用 `end(...)` 终止语句——与 `return` 同级（之后语句不可达），
+差别是能显式声明 `result_type` 与 `error` 载荷：
+
+```python
+@flow("create_user")
+def create_user(INPUT):
+    if INPUT.age >= 18:
+        return "ok"
+    end(result_type="error", error={"code": 4001, "message": "参数非法"})
+
+create_user.run(age=17)   # -> 抛 FlowExecutionException(error_type=ERROR_RESULT)
+```
+
+- 参数：`output=`（可选，也可作唯一位置参数）、`result_type=`（`"success"` 默认 /
+  `"error"` / `"nop"`，须为字符串字面量）、`error=`（dict 字面量，习惯写
+  `{"code": ..., "message": ...}`）。
+- `result_type=` 的**取值域是小写 `success`/`error`/`nop`**（发动机口径，大小写敏感）：
+  `"bogus"`、`"ERROR"` 等域外值**编译期硬错**，不会被静默降级成 `success`。
+- `error=` 是**纯字面数据**，引擎从不求值它（`End.execute` 直接 `self.error.get(...)`）：
+  含字面 `$` 的字符串/键名（如 `{"message": "$100 fee missing"}`、`{"$ref": "x"}`）
+  原样保留、不参与表达式编译；写成表达式（如 `{"message": INPUT.msg}`）会在编译期报错。
+  它也**不参与 `$NODE`/`$F` 引用扫描**——载荷里写 `"$NODE.e"` 只是文本，不会被判悬空引用。
+- `end(...)` 是语句形态而非占位符，**无需 import**（`@flow` 函数体只被静态解析、
+  从不执行）；`result_type="nop"` 时流程静默结束并丢弃 `output`。
+
 ### 集合节点
 
 `map` / `filter` / `find` / `loop` 用 `for x in MAP(...)` 语法，子流程直接写在函数体里：
@@ -358,6 +387,10 @@ flow = flow_from_source(src)   # 迁移后走同一执行入口
 - **不可表达构造抛 `EmitError`**（不产出错误代码）：`switch`/`bool` 合成节点（builder 专属）、非 object `inputType`、空真分支或两分支同址的 if、无法结构化的任意图。
 - IR 里以 `$` 开头的字符串一律按表达式逆映射；原始字面量恰以 `$` 开头的场景编译期已丢失区分，属已知边界。
 - **事件节点的键名两套都收**：event 节点按 `eventType`（编译器自产 IR，优先）→ `event_type`（存量 JSON flow 的权威键名）回退读取，过滤器同理 `eventFilter` → `event_filter`；两种写法的同一份 IR emit 出同一份源码。
+- **非 success 结束出口发射为 `end(...)` 终止语句**：`resultType` 为 `error`/`nop`（或带 `error` 载荷）的 end 节点不能用 `return` 表达——`return` 在重编译时被还原成 `resultType="success"`，会静默把失败出口洗成成功。emit 改发上文「`end(...)`」一节的一等终止语句，`resultType` 与 `error` 载荷原样活过 round-trip。
+- **非取值域的 `resultType` 先按发动机口径归一**：不在 `success`/`error`/`nop` 内的值（非字符串 `1`/`True`、未知字面量、大小写变体、空串）在引擎 `End.setup_end` 里都会被降级成 `success`；emit 据此归一后再发射（发射器永不产出自己吃不回去的 `result_type=`），保证「发射器输出永远可重编译」。
+- **发动机双键都收（camel 优先、snake 兜底）**：`resultType`/`result_type`、`errorHandler`/`error_handler`、`childFlow`/`child_flow`、`eventType`/`event_type`、`eventFilter`/`event_filter` 在引擎侧是同一字段的两种拼写（`End.setup_end`、`Node.setup_error_handler`、`FlowNode.setup_child_flow` 都按 `camel or snake` 读取）。发射器按同一口径读取，**只读一边会让 snake 存盘 flow（如 `tests/integration/server/test_flow.json`）的失败出口/错误策略/内联子图静默丢失**。
+- **错误策略按发动机的*真值*判定**：`errorHandler`/`error_handler` 为 `{}`/`[]`/`""`（假值）时等同"没配"（退回默认 handler），`{'retryTimes': 2}` 合法（`strategy` 默认 `abort`），真值但非 dict 或域外 `strategy`（如 `"bogus"`）直接 `EmitError`（不产出不可重编译源码、也不抛裸 `KeyError`/`TypeError`）。`childFlow`/`child_flow` 传 **JSON 字符串**时按发动机口径解析（非法 JSON 才报 `EmitError`）。
 - 验收测试口径见 `tests/unit/test_codeflow_emit.py`（round-trip 语料 + 手写 JSON IR + 负面路径）。
 
 ### Agent 编排：把 `flow_from_source` 当输出沙箱

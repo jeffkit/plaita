@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import ast
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from plaita.dsl.codeflow._common import (
     _COLLECTION_CALL_NAMES,
+    _END_RESULT_TYPES,
     _NS_PREFIX,
     _CodeflowError,
     _CompileCtx,
@@ -65,6 +66,9 @@ def _compile_block(
     if isinstance(head, ast.For):
         return _compile_for(head, ctx, succ, rest)
 
+    if isinstance(head, ast.Expr) and _is_end_call(head):
+        return _compile_end_call(head, ctx, rest)
+
     if isinstance(head, ast.Assign):
         return _compile_assign(head, ctx, succ, rest)
 
@@ -75,6 +79,98 @@ def _compile_block(
         return _compile_block(rest, ctx, succ)
 
     raise _CodeflowError(f"不支持的语句 {type(head).__name__}", head)
+
+
+# `end(...)` 终止语句的参数表（#76：return 只能表达 success 出口）。
+_END_CALL_NAME = "end"
+_END_CALL_KWARGS = ("output", "result_type", "error")
+
+
+def _is_end_call(stmt: ast.stmt) -> bool:
+    """``end(...)`` 语句形态判定（与 ``EVENT(...)`` 等节点调用同一语句位）。"""
+    value = stmt.value if isinstance(stmt, ast.Expr) else None
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == _END_CALL_NAME
+    )
+
+
+def _compile_end_call(head: ast.Expr, ctx: _CompileCtx, rest: List[ast.stmt]) -> str:
+    """编译 ``end(output=..., result_type=..., error=...)`` 为 end 节点。
+
+    与 ``return`` 同为块终止语句（之后语句不可达），区别是能显式表达
+    ``resultType``（``error``/``nop``）与 ``error`` 载荷——``return`` 恒定产出
+    ``success``，失败出口会在 round-trip 中被静默洗成成功（#76）。
+    """
+    call = cast(ast.Call, head.value)
+    kwargs: Dict[str, ast.expr] = {}
+    for kw in call.keywords:
+        if kw.arg is None:
+            raise _CodeflowError("end(...) 不支持 ** 解包", kw.value)
+        if kw.arg not in _END_CALL_KWARGS:
+            raise _CodeflowError(
+                f"end(...) 不支持的参数 {kw.arg!r}（可用：output/result_type/error）", kw.value)
+        if kw.arg in kwargs:
+            raise _CodeflowError(f"end(...) 重复的参数 {kw.arg!r}", kw.value)
+        kwargs[kw.arg] = kw.value
+
+    if len(call.args) > 1:
+        raise _CodeflowError("end(...) 最多一个位置参数（output）", head)
+    output_node: Optional[ast.expr] = kwargs.get("output")
+    if output_node is not None and call.args:
+        raise _CodeflowError("end(...) 的 output 不能同时给位置参数与关键字参数", head)
+    if output_node is None and call.args:
+        output_node = call.args[0]
+    output = _compile_expr(output_node, ctx) if output_node is not None else None
+
+    rt_node = kwargs.get("result_type")
+    result_type: Any = "success"
+    if rt_node is not None:
+        if not (isinstance(rt_node, ast.Constant) and isinstance(rt_node.value, str)):
+            raise _CodeflowError("end(...) 的 result_type 必须是字符串字面量", rt_node)
+        result_type = rt_node.value
+        # 取值域硬校验：发动机 End.setup_end 只认小写 success/error/nop，其它值
+        # （含大小写变体）会被**静默降级成 success**——正是 #76 要消灭的静默降级，
+        # 不能让手写/LLM 源码从新入口重新引入。
+        if result_type not in _END_RESULT_TYPES:
+            raise _CodeflowError(
+                "end(...) 的 result_type 取值必须是 success/error/nop 之一"
+                f"（发动机口径，大小写敏感），得到 {result_type!r}", rt_node)
+
+    error_node = kwargs.get("error")
+    error: Optional[Dict[str, Any]] = None
+    if error_node is not None:
+        # #76：error 是纯数据（引擎 `End.execute` 直接 self.error.get(...)，
+        # 从不求值）——按字面数据解析，不走表达式编译。含字面 `$` 的字符串
+        # （如 {"message": "$100 fee missing"}）与键名（如 {"$ref": "x"}）原样保留。
+        try:
+            literal = ast.literal_eval(error_node)
+        except (ValueError, SyntaxError) as exc:
+            raise _CodeflowError(
+                "end(...) 的 error 必须是字面数据（dict/str/num/bool/None，"
+                "不参与表达式编译）", error_node) from exc
+        if not isinstance(literal, dict):
+            raise _CodeflowError("end(...) 的 error 必须是 dict 字面量", error_node)
+        error = literal
+
+    # 与 return 同一套语义化 id/标签约定：ret_<返回表达式 slug>。
+    ret_slug = _cond_slug(output_node)
+    end_id = ctx.semantic_id(f"ret_{ret_slug}" if ret_slug else None)
+    expr_text = ast.unparse(output_node) if output_node is not None else ""
+    end_node: Dict[str, Any] = {
+        "type": "end", "id": end_id, "output": output, "resultType": result_type,
+    }
+    if error is not None:
+        end_node["error"] = error
+    if expr_text:
+        end_node["name"] = _human_label(f"end {expr_text}")
+    end_node["desc"] = _human_label(f"end {expr_text}（第 {head.lineno} 行）", 60)
+    _annotate_source(end_node, head)
+    ctx.nodes.append(end_node)
+    if rest:
+        raise _CodeflowError("end(...) 之后还有不可达语句", rest[0])
+    return end_id
 
 
 def _compile_if(
@@ -126,7 +222,10 @@ _WHILE_BODY_VARS: Dict[str, str] = {"item": "$INPUT.item", "rounds": "$INPUT.ind
 
 def _while_cond(test: ast.expr, ctx: _CompileCtx) -> Dict[str, Any]:
     """编译 while 条件：``item``→$LOOP-ITEM、``rounds``→$LOOP-INDEX，外层名按父侧引用。"""
-    cond_ctx = _CompileCtx(module_globals=ctx.module_globals)
+    # #77：子作用域必须继承 childflows 注册表，否则体内 CHILD/PARALLEL/REFERENCE
+    # 解析 @childflow 名字时必然落空（源码字符串模式 module_globals 为空）。
+    cond_ctx = _CompileCtx(
+        module_globals=ctx.module_globals, childflows=ctx.childflows)
     cond_ctx.names = {**ctx.names, **_WHILE_COND_VARS}
     return _compile_condition(test, cond_ctx)
 
@@ -134,8 +233,11 @@ def _while_cond(test: ast.expr, ctx: _CompileCtx) -> Dict[str, Any]:
 def _while_child_flow(body: List[ast.stmt], ctx: _CompileCtx) -> Dict[str, Any]:
     """编译 while 循环体为子流程。体外层赋值名自动映射 $PARENT.NODE.<名>。"""
     parent_names = {name: "$PARENT." + ref[1:] for name, ref in ctx.names.items()}
+    # #77：同 _while_cond——子作用域漏传 childflows 会让体内 CHILD(...) 误报
+    # 「不是 @childflow 装饰的子流程」，而同一句移出循环体即可编译。
     child_ctx = _CompileCtx(
-        loop_vars={**parent_names, **_WHILE_BODY_VARS}, module_globals=ctx.module_globals)
+        loop_vars={**parent_names, **_WHILE_BODY_VARS}, module_globals=ctx.module_globals,
+        childflows=ctx.childflows)
     child_entry = _compile_block(list(body), child_ctx, succ=None)
     if child_entry is None:
         raise _CodeflowError(
@@ -298,8 +400,12 @@ def _compile_for(
     # ctx.names 里的名字"（顺序编译保证它们都在集合节点之前赋值，快照必有值）。
     # loop_vars 放在合并后侧：循环目标名遮蔽外层同名（与 Python 遮蔽规则一致）。
     parent_names = {name: "$PARENT." + ref[1:] for name, ref in ctx.names.items()}
+    # #77：集合体子作用域同样必须继承 childflows 注册表——漏传会让 MAP/FILTER/
+    # FIND/LOOP/REDUCE 体内的 CHILD/PARALLEL/REFERENCE 误报「不是 @childflow
+    # 装饰的子流程」，而同一句移出循环体即可编译。
     child_ctx = _CompileCtx(
-        loop_vars={**parent_names, **loop_vars}, module_globals=ctx.module_globals)
+        loop_vars={**parent_names, **loop_vars}, module_globals=ctx.module_globals,
+        childflows=ctx.childflows)
     child_entry = _compile_block(list(head.body), child_ctx, succ=None)  # 子流程体必须自行 return
     if child_entry is None:
         raise _CodeflowError("循环体为空或全部悬空：请补 return", head.body[0] if head.body else head)
