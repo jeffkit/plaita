@@ -30,6 +30,12 @@ Evaluation semantics are preserved bit-for-bit against the battle-tested
   (#130, the explicit opt-in for data text).  ``$NODE.<node>...`` keeps the
   semantics described above, unchanged.
 * index segments (``[n]`` / ``.n``) index directly without recursion
+* field segments never resolve Python-internal names: a ``_``-prefixed
+  *attribute* read (``$NODE.n1.__class__``) raises ``ValueError`` instead of
+  traversing to ``__globals__`` / process environment, and ``__``-prefixed
+  *mapping keys* are rejected too.  Single-underscore keys stay readable
+  (``$NODE._n2`` node ids, a ``dict`` with a ``_foo`` key) — see the
+  attribute-traversal gate below and plaita#55.
 * unknown functions fall back to the ``"undefined"`` sentinel
 * ``{% ... %}`` only fires when the inner expression starts with the prefix
 
@@ -149,6 +155,62 @@ def _lookup_function(registry: Optional[Any], func_name: str) -> Optional[Callab
     return registry.get(func_name)
 
 
+# ---------------------------------------------------------------------------
+# Attribute-traversal gate (plaita#55, security)
+# ---------------------------------------------------------------------------
+# Every non-index segment used to be handed to ``_get_attr``, whose fallback is
+# a bare ``getattr(obj, path, None)`` with no underscore filter — while
+# ``name_token`` makes ``_`` a legal segment character.  A node whose ``execute``
+# returns a dataclass / Pydantic model / plain instance therefore made
+# ``$NODE.n1.__class__.__init__.__globals__.os.environ`` a syntactically legal
+# expression that dumps the worker process environment; the ``$ENV`` expose
+# allowlist (``plaita.core.context._safe_environment``) is not on that path.
+#
+# The gate is applied at the single point where a caller-supplied segment is
+# turned into a Python attribute (``_get_attr``), with two tiers because the two
+# resolution paths mean different things:
+#
+# * **Attribute path** (``getattr`` fallback): *every* ``_``-prefixed name is
+#   rejected — a Python-internal name is never flow data.
+# * **Mapping path** (``dict`` / ``__getitem__`` + ``get``): the segment is a
+#   **key**, not an attribute, so a single-underscore key stays readable —
+#   ``$NODE._n2`` (builder-generated node ids) and flows that deliberately store
+#   ``_foo`` keys keep working.  ``__``-prefixed (dunder) names are rejected on
+#   this path too: they are never a legitimate data key, and evaluating them to
+#   ``None`` reproduces exactly the "looks like it is blocked" illusion that
+#   makes an unguarded traversal hard to notice.
+#
+# Rejection is a hard ``ValueError`` (the exception type the issue selects and
+# the one this layer already raises — ``ExpressionRegistry``): a silent ``None``
+# is indistinguishable from a missing key, which is the failure mode #55 calls
+# out.  Nothing about the object is echoed in the message.
+_RESERVED_FIELD_PREFIX = "_"
+_RESERVED_DUNDER_PREFIX = "__"
+
+
+def _reject_reserved_field(path: str) -> None:
+    """Raise ``ValueError`` for a rejected traversal segment (plaita#55)."""
+    raise ValueError(
+        f"expression field name {path!r} is not allowed: names starting with "
+        f"{_RESERVED_FIELD_PREFIX!r} are reserved for Python internals (for example "
+        "__class__ / __globals__ / __init__) and cannot be read through expression "
+        "attribute traversal — that path reaches process state and bypasses the "
+        "$ENV allowlist. Use a public attribute name, or store the value under a "
+        "dict key."
+    )
+
+
+def _mapping_get(obj: Any, path: str) -> Any:
+    """Read *path* as a **key** of a mapping-like *obj* (data path).
+
+    Dunder names are rejected (plaita#55) — see the gate comment above; other
+    ``_``-prefixed keys stay readable because they are keys, not attributes.
+    """
+    if path.startswith(_RESERVED_DUNDER_PREFIX):
+        _reject_reserved_field(path)
+    return obj.get(path, None)
+
+
 def _get_attr(obj: Any, path: str) -> Any:
     """Read *path* off *obj* — mirrors the non-bracket branch of the old
     ``plaita.io.get_attr``.
@@ -159,11 +221,18 @@ def _get_attr(obj: Any, path: str) -> Any:
     ``$INPUT`` is a storage key, not a Python attribute). Only objects that
     are neither dict-like fall back to ``getattr`` — this covers plain
     attribute access on user data classes / Pydantic models passed as input.
+
+    Both paths are gated against Python-internal names (plaita#55): the
+    ``getattr`` fallback rejects every ``_``-prefixed name, the mapping path
+    rejects ``__``-prefixed keys.  Rejection raises ``ValueError`` — never a
+    silent ``None``.  See the gate comment above for the rationale.
     """
     if isinstance(obj, dict):
-        return obj.get(path, None)
+        return _mapping_get(obj, path)
     if hasattr(obj, "__getitem__") and hasattr(obj, "get"):
-        return obj.get(path, None)
+        return _mapping_get(obj, path)
+    if path.startswith(_RESERVED_FIELD_PREFIX):
+        _reject_reserved_field(path)
     if hasattr(obj, "__dict__"):
         return getattr(obj, path, None)
     return None
