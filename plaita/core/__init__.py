@@ -31,6 +31,7 @@ from plaita.core.errors import (
     ResumeError,
     ResumeGuardError,
     ResumeType,
+    StateSnapshotError,
 )
 from plaita.core.types import (
     ANY,

@@ -30,6 +30,7 @@ __all__ = [
     "ErrorResultException",
     "ResumeError",
     "ResumeGuardError",
+    "StateSnapshotError",
     "ResumeType",
 ]
 

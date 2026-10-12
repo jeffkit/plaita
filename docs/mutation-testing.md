@@ -1,20 +1,32 @@
 # 变异测试（Mutation Testing）基线与流程
-> **最后更新**：2026-10-12（#108：`plaita/dsl/builder.py` 的 `_TERMINAL_TYPES` 改动经可运行变异集合 hash 比对确认为**变异中性**；同时标注该模块 876/877 的历史数字在现工具链下**不可复现、待按 §7.2 重扫**——详见 §2.8「后续变更（基线待复核）」。2026-10-01 记录：§2.5 expression_parser 重写为 thunk 编译缓存版后重跑单模块基线：**100%（433/433，recheck 后）**；2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；§2.24 sexpr 100%；§2.22 _common 95.2%）
+> **最后更新**：2026-10-12（#107 后重跑 `state.py` / `errors.py` 单模块基线，见 §2.12.1 / §2.19.1：
+> `state.py` **95.8%（318/332，独立复核后）**，14 survived 全部是改动前就存在的、本次未触碰的位点；
+> `errors.py` **82.5%（80/97）**，17 survived 同理。两模块旧的 99.1% / 100% 在现工具链下**不复现**，
+> 但**归因不同、勿混为一谈**：`errors.py` 的差距包含「§2.19 当时用**裸 `timeout` 复核**」——本机 macOS 无
+> GNU `timeout` 时 rc=127 会被判成 killed（伪造 killed/满分），另叠加 mutmut 3.8.0 的属性赋值变异
+> （**该条未独立复核**，仅计数自洽）；`state.py` 的 99.1% 与 `timeout` **无关**，来自 mutmut 版本与
+> 配套测试集的口径差异（§2.12.1 的「改动前同测试集减新测试」对照含混淆变量、本环境不可复现）。
+> 同时（#108）：`plaita/dsl/builder.py` 的 `_TERMINAL_TYPES` 改动经可运行变异集合 hash 比对确认为**变异中性**；
+> 该模块 876/877 的历史数字在现工具链下**不可复现、待按 §7.2 重扫**——详见 §2.8「后续变更（基线待复核）」。
+> 2026-10-01 记录：§2.5 expression_parser 重写为 thunk 编译缓存版后重跑单模块基线：**100%（433/433，recheck 后）**；
+> 2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；
+> §2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
 > `expression_parser.py` 已补强至 **100%**（2026-10 重写后重跑 433/433，见 §2.5 末节）；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
 > `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
-> `state.py` 已补强至 **99.1%**（213/215，见 §2.12）；
+> `state.py` 2026-10-12 复测 **95.8%**（318/332，见 §2.12.1；旧记录 99.1%（213/215）见 §2.12）；
 > `storage/base.py` 已强化至 **100%**（16/16，见 §2.15）；
 > `storage/memory.py` 已接入至 **95.8%**（91/95，见 §2.14）；
 > `event_node.py` 已接入至 **94.9%**（187/197，见 §2.13）；
 > `io.py` 已补强至 **97.4%**（259/266，见 §2.11）；
 > `event/core.py` 已接入至 **91.7%**（99/108，见 §2.14）；
-> `errors.py` / `node/__init__.py` / `flow.py` recheck 真实 **100%**（见 §2.19）；
+> `errors.py` 2026-10-12 复测 **82.5%**（80/97，见 §2.19.1；旧记录 100%（90/90）见 §2.19）；
+> `node/__init__.py` / `flow.py` recheck 真实 **100%**（见 §2.19）；
 > `event/memory.py` recheck 真实 **100%**（416/416，见 §2.21；原 94% 为 async 假低分）；
 > `executor.py` 补强至 **98.1%**（201/205，见 §2.20；剩 4 等价）；
 > `strategies.py` recheck 确认 **88%**（46/52，6 全等价/边界，见 §2.16）。
-> 工具：[mutmut](https://github.com/boxed/mutmut) 3.x。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
+> 工具：[mutmut](https://github.com/boxed/mutmut) 3.x（本次复跑为 3.8.0）。配置见 `pyproject.toml` 的 `[tool.mutmut]`。
 
 > **⚠️ 覆盖范围声明（2026-07，诚实评估）**
 > 变异测试分两阶段：
@@ -142,7 +154,7 @@
 | `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
 | `plaita/dsl/builder.py` | ~~99.9%~~ **待重扫** | 876/877（口径不可复现） | 1 | ⚠ 见 §2.8「后续变更」（2026-10-12 #108：改动为变异中性；该数字待按 §7.2 重扫回填） |
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
-| `plaita/core/errors.py` | **100%** | 90/90 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 84.4%/14 survived 为 mutmut in-process cache 污染假低分 |
+| `plaita/core/errors.py` | ~~100%~~ **已作废** | 90/90（旧口径） | 0 | ⚠️ **见 §2.19.1**：现口径 **82.5%（80/97）**。旧「recheck」用的是裸 `timeout`，本机 macOS 无 GNU `timeout` ⇒ rc=127 被判 killed（伪造满分）；另叠加 mutmut 3.8.0 的属性赋值变异 |
 | `plaita/node/__init__.py` | **100%** | 112/112 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 83.9%/18 survived 为 mutmut in-process cache 污染假低分 |
 | `plaita/event/memory.py` | **100%** | 416/416 | 0 | ✅ recheck 确认真实 100%（见 §2.21）；原 94%/25 survived 为 async 假低分 |
 | `plaita/core/strategies.py` | **88%** | 46/52 | 6 | ✅ recheck 确认（见 §2.16）；6 survived 全等价/边界，不硬杀 |
@@ -552,6 +564,50 @@ IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥
   `"express_prefix"`。由于 EXPRESS_PREFIX 的在场性本就由 `_present` 跟踪，通用分支
   `key in self._present` 已正确处理，特殊分支冗余——变异行为与原代码一致。
 
+### 2.12.1 #107 后重跑（2026-10-12，mutmut 3.8.0）
+
+#107 把 `_snapshot_value` 从朴素递归改为显式栈物化（环截断 + 深度上限 + 本仓
+`StateSnapshotError`），并让 `update_node_result` 按值入库。改后按 §7.2 单模块重跑：
+
+```bash
+# only_mutate = ["plaita/core/state.py"]
+# pytest_add_cli_args_test_selection = [test_state, test_state_mutations,
+#   test_checkpoint_resume, test_context, test_clean_c1_state,
+#   test_issue107_state_selfref]
+rm -rf mutants .mutmut-cache && mutmut run
+# 全部非 killed 逐点独立进程复核（rc=0 才算真 survived），见下方「工具坑」
+```
+
+| 轮次 | 变异点 | killed | 真实 survived | **score** |
+|---|---|---|---|---|
+| 改动前（origin/main，同工具/同测试集减新测试） | 256 | 242 | 14 | **94.5%** |
+| #107 改动后 | 332 | 318 | 14 | **95.8%** |
+
+> ⚠️ 上表「改动前」一行是**自述对照**且含**混淆变量**：两次跑的配套测试集不同（「减新测试」），
+> 故 256/332 与 14/14 逐一相同**不能**单独证明「14 个 survived 全是既有位点」；独立验收者在本
+> 环境无法复现该对照（无 mutmut / 无 `mutants/`）。可信的部分是：新增 76 个变异点全部 killed，
+> 且 14 个 survived 的**位点清单**经逐点阅读确认落在本次未触碰的函数上。
+
+- #107 新增 **76 个变异点**（`_snapshot_path` / `_snapshot_items` / `_snapshot_container` /
+  `_snapshot_value` / `update_node_result`），**全部 killed**（0 新增 survived）；
+- 14 个 survived 在改动前后**逐一相同**，且全部落在本次未触碰的位点：
+  - `_field_to_key` / `_key_to_field` 路由缓存 10 个（`route = None`、`cached = None`、
+    比较符翻转、`_route_cache_field = None` 等）：多数仅缓存命中率差异（等价），
+    但 `route = None` 会让缓存键恒为 `None`、prefix 变更后可能返回陈旧映射——
+    属**既有断言缺口**（无 prefix 变更后再路由的测试），非本单引入；
+  - `__contains__._4/_5` 2 个（§2.12 已判等价）；
+  - `_LazyRootSnapshot.__eq__` 2 个（`and → or`）：现有断言只覆盖「等长且等值」的对，
+    未覆盖「等长但值不同」，故存活。
+- 未在本次修复中补测这些既有位点（避免 #107 scope creep），仅留档。
+
+**工具坑（重要）**：本机 macOS 无 GNU `timeout`，`scripts/recheck_mutants.sh` 与
+`scripts/run_full_mutation_sweep.sh` 的复核段用的是裸 `timeout 30/60 …`，缺命令时
+shell 以 **rc=127** 退出，会被复核逻辑一律判成 `killed`——本次第一遍复核就是这样得到
+虚假的「22/22 killed」，改用 subprocess timeout 自建驱动后才拿到真实的 14 survived。
+复核工具链有效性自证：`MUTANT_UNDER_TEST=<不存在的 id>` → rc=0（survived 判定可达）；
+已知变异点（`x__snapshot_container__mutmut_42`，`continue → break`）→ rc=1（killed 判定可达），
+且该点随后由新增测试 `test_siblings_after_cycle_are_still_copied` 真正杀灭。
+
 ## 2.13 event_node.py 接入（2026-07-08，94.9%）
 
 `plaita/node/event_node.py` 从阶段二基线的 **0%（0/80）** 提升至 **94.9%（187/197）**。
@@ -580,7 +636,7 @@ IndexError、`match` 全类型（STRING 非空、INTEGER `type(a) is int` 排斥
 
 | 模块 | 接入前 | 接入后 | killed/total | survived | 备注 |
 |---|---|---|---|---|---|
-| `core/errors.py` | 13% | **100%** | 90/90 | 0 | test_errors_mutations（64 项，同步）；recheck §2.19 确认 14 survived 全为 cache 污染假阳性 |
+| `core/errors.py` | 13% | ~~100%~~ **已作废** | 90/90（旧口径） | 0 | ⚠️ 见 §2.19.1（现 82.5% = 80/97）；旧 recheck 受裸 `timeout` rc=127 伪造影响 |
 | `event/core.py` | 5% | **91.7%** | 99/108 | 9 | test_event_core_mutations（54 项，异步；recheck round2 有超时兜底） |
 | `storage/memory.py` | 0% | **95.8%** | 91/95 | 4 | test_storage_mutations（27 项，同步） |
 | `node/__init__.py` | 7% | **100%** | 112/112 | 0 | test_node_registry_mutations（63 项，同步）；recheck §2.19 确认 18 survived 全为 cache 污染假阳性 |
@@ -935,6 +991,38 @@ server、client、demo 等）整体行覆盖 **≈ 80.5%**，909 个单元测试
 用独立子进程重跑则每次 import 全新，变异生效，均被杀灭。
 
 不需要补充任何测试用例。
+
+### 2.19.1 ⚠️ 2026-10-12 复测：errors.py 的 100% 不复现（mutmut 3.8.0 + 无 GNU `timeout` 环境）
+
+#107 在 `plaita/core/errors.py` 只新增了一个 docstring-only 的异常类
+（`StateSnapshotError`，无赋值/字面量 → **0 个变异点**；`mutmut results` 中不含该名）。
+按 §7.2 对 errors.py 重跑单模块门禁（同 §2.19 的测试集 + `test_issue107_state_selfref.py`）：
+
+| 轮次 | 变异点 | killed | 真实 survived | **score** |
+|---|---|---|---|---|
+| 改动前（origin/main，同工具/同测试集减新测试） | 97 | 80 | 17 | **82.5%** |
+| #107 改动后 | 97 | 80 | 17 | **82.5%** |
+
+两组 survived **逐一相同**，即 17 个全部是既有位点（与 #107 无关）：
+
+- 3 个 `no tests`：覆盖不到的 `__init__` 行（`mutate_only_covered_lines=true` 之外）；
+- 14 个 survived：`NodeException/NodeNotFoundError/NodeExecutionError/FlowTimeoutError/
+  FlowCancelledException/ErrorResultException/ResumeError.__init__` 的属性赋值与默认值
+  （如 `self.code = code → None`、`FlowCancelledException` 默认 message 字面量）、
+  `ResumeType.coerce._3`、`ErrorHandler.handle._2.._7`（`message = ... → None`）。
+
+差异原因（两条，均未改动源码）：
+
+1. mutmut **3.8.0** 会生成 `self.attr = <expr> → None` 一类「属性赋值」变异（旧版本没有），
+   而现有 errors 测试对 `e.code`/默认 message 无精确断言。
+   ⚠️ **本条未独立复核**：本环境无 mutmut 安装、无 `mutants/`/`.mutmut-cache`（`git archive` 不含），
+   只有计数自洽（90 → 97，+7；errors.py 有 9 处 `self.X = `）支持该归因，**未经实跑验证**；
+2. §2.19 的复核命令是 `timeout 60 python -m pytest …`——**本机 macOS 无 GNU `timeout`**，
+   rc=127 会被复核逻辑判成 killed，从而虚高成 100%。本次改用 subprocess timeout
+   驱动复核（见 §2.12.1「工具坑」），并做了 killed/survived 两个方向的可达性自证。
+
+结论：**#107 未引入任何 errors.py 变异点或 survived**；17 个既有位点是后续
+`test_errors_mutations.py` 补精确断言的候选队列（不在本单范围）。
 
 ---
 

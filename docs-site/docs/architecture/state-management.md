@@ -9,7 +9,7 @@
 | 键 | 含义 | 写入时机 |
 |----|------|---------|
 | `$INPUT` | 输入参数 | `setup_flow` 时根据 `input_type` 填入 |
-| `$NODE` | `{node_id: result}` | 每个节点执行后由 `NodeRunner.update_node_result` 累加 |
+| `$NODE` | `{node_id: result}`，结果**按值**入库 | 每个节点执行后由 `NodeRunner.update_node_result` 累加 |
 | `$GLOBAL` | 全局变量 | `setup_flow` 时从 `flow.global_context` 拷贝并注入 `flow_id` |
 | `$PARENT` | 父流程上下文 | `setup_flow` 时填 `parent.context`（无父则为 `{}`） |
 | `$ENV` | 环境变量 | `clean` 时从 `os.environ` 拷贝并过滤敏感前缀 |
@@ -83,6 +83,29 @@ ExecutionContext.from_dict(data, **kwargs)
 ```
 
 `to_dict()` 会顺带跑 `validate_checkpoint` 漂移扫描——节点经 `set_state` 写的"看起来是 system key 但不在 `CheckpointSchema`"的字段会 warning，让新加 magic key 在 review/日志被发现。
+
+### 值语义与自引用（#107）
+
+存储出口（`to_checkpoint_dict` / `from_checkpoint_dict` / `$PARENT` 快照）与 `update_node_result` 都经
+`state._snapshot_value` **按值**物化 dict/list/tuple 容器：返回值与 live state 不共享嵌套容器，`$NODE.<node>`
+是私有快照——节点结果写入后再被后续步骤 / 调用方变异都不会写穿，历史节点结果也不会继续增长
+（`output: "$NODE"` 把整表写回自身时，`$NODE['a'] is $NODE` 不再成立）。
+
+物化自 2026-10 起是**显式栈迭代**（数据深度与 Python 递归深度解耦，2500 层嵌套值不再 `RecursionError`），
+两条降级语义显式可见：
+
+- **容器环**（自引用值，如 `$INPUT` 传入 `d["self"] = d`）：命中当前 DFS 路径上已出现的容器时，按
+  `<recursive: path>` 占位符**截断**——自引用快照无法 JSON 序列化，占位符把损坏点钉在快照出口而不是
+  宿主序列化那一跳；
+- **深度上限**：容器深度 ≤ `state._SNAPSHOT_MAX_DEPTH + 1`（即 **10001 层**）可物化，
+  **10002 层**起抛 `StateSnapshotError`（`plaita.core.errors`，`FlowExecutionException` 子类，
+  消息含深度与容器路径；注意消息里的 `depth` 报的是**父帧深度**，比越界容器层数少 1）。
+  normal 模式原样透传该异常，distributed 模式按既有契约归一化为 `FlowErrorException`，但深度/路径文案保留。
+  该上限只约束**深度**：物化无 memo，共享 DAG（同一子对象被多处引用）仍按引用次数指数展开，
+  不要依赖它给 CPU/内存设界（详见 `plaita/core/state.py` 的同名注释）。
+
+因此**不要**把整表根（`$NODE`、`$GLOBAL`…）当 assignment 的 `output`——文档只承认 `$NODE.<node>` 形态；
+引擎现在不再被这种写法炸栈，但写回自身的值快照对流程语义毫无用处。
 
 分布式模式下，把 `to_dict()` 的结果存入 `ExecutionStorage`，下次 `run_distributed(saved_context=...)` 时恢复。
 

@@ -36,6 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from .errors import StateSnapshotError
+
 
 # Sentinel for "field has not been set / key is absent". Distinct from ``None``
 # because a checkpoint value may legitimately be ``None`` (e.g. ``$INPUT: null``)
@@ -43,23 +45,128 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 _UNSET = object()
 
 
+# 快照出口的环与深度保护（plaita#107）。
+#
+# 历史实现是无 memo、无环检测、无深度上限的朴素递归：任何被回指的容器
+# （实测触发路径 ``output: "$NODE"`` —— 整个状态表被写回自身）让它沿环递归到
+# Python 栈顶，generator 裸 ``RecursionError``、distributed 被
+# ``_error_normalization.raise_distributed_error`` 归一化成误导性的
+# ``FlowErrorException("maximum recursion depth exceeded")``（节点 id / 路径全不可见）；
+# 即使无环，深嵌套值（实测 2500 层）也会在 checkpoint 出口撞同一个坑。
+#
+# 现在改为**显式栈迭代物化**：数据深度不再消耗 Python 递归帧，2500 层与 50 层同价。
+# 两条降级语义都显式可见，绝不静默产出损坏结构：
+#   * 环 —— 命中「当前 DFS 路径上已出现的容器」时按 ``<recursive: path>`` 占位符
+#     截断。自引用快照无法 JSON 序列化，若原样保留，checkpoint 会在宿主序列化
+#     那一跳才崩且现场没有任何路径信息；占位符把损坏点钉在快照出口。
+#   * 深度 —— 仍设防御性上限 ``_SNAPSHOT_MAX_DEPTH``，超限抛
+#     :class:`~plaita.core.errors.StateSnapshotError`（消息含深度与路径）。上限存在的
+#     意义是防「无界深层嵌套」这一类病态结构，不是防 Python 栈——递归限制已与数据
+#     深度无关，故取足以覆盖真实 payload 的 1 万层（issue 实测 2500 层的 4x）。
+#     **不要**把它当作 CPU/内存边界：本次物化没有 memo，共享 DAG（同一子对象被多处
+#     引用）仍按引用次数指数展开（实测 depth=18 约 43 万容器 / 0.43s，再深即耗尽），
+#     与该上限无关；此性质在改动前同样存在，本单不承诺 CPU/内存有界。
+_SNAPSHOT_MAX_DEPTH = 10_000
+# 环占位符：字符串是 JSON 可表达的，落盘/emit 不会二次炸。
+_SNAPSHOT_CYCLE_MARK = "<recursive: {path}>"
+# 路径渲染的截断长度（超限路径本身可达上万段，整段回显会淹没日志）。
+_SNAPSHOT_PATH_HEAD = 4
+_SNAPSHOT_PATH_TAIL = 2
+_SNAPSHOT_DONE = object()
+
+
+def _snapshot_path(frames: List[tuple], key: Any) -> str:
+    """把迭代栈还原成 ``$['a'][0]['b']`` 形态的容器路径（错误/占位符专用）。
+
+    只在检测到环或超深时调用，热路径零成本；超长路径按头 ``_SNAPSHOT_PATH_HEAD`` /
+    尾 ``_SNAPSHOT_PATH_TAIL`` 段截断，中间以 ``'...'`` 标记。
+    """
+    segments = [frame[3] for frame in frames[1:]]
+    segments.append(key)
+    if len(segments) > _SNAPSHOT_PATH_HEAD + _SNAPSHOT_PATH_TAIL + 1:
+        segments = (
+            segments[:_SNAPSHOT_PATH_HEAD] + ["..."] + segments[-_SNAPSHOT_PATH_TAIL:]
+        )
+    return "$" + "".join(f"[{segment!r}]" for segment in segments)
+
+
+def _snapshot_items(value: Any):
+    """dict → ``iter(items())``；list/tuple → ``enumerate``（键即下标）。"""
+    if isinstance(value, dict):
+        return iter(value.items())
+    return enumerate(value)
+
+
+def _snapshot_container(root: Any) -> Any:
+    """显式栈物化 ``root``（dict/list/tuple），环截断、超深抛 ``StateSnapshotError``。
+
+    栈本身就是当前 DFS 路径：``seen_ids`` 只收在场祖先（出栈即移除），所以
+    「同一个子容器被两个兄弟键共享」这类 DAG 不会被误判成环，仍按值各拷一份。
+    """
+    root_copy = {} if isinstance(root, dict) else [None] * len(root)
+    # frame: (src, dst, items_iter, key_in_parent)，root 无父键。栈即当前 DFS 路径，
+    # 元组而非 list：每层一个，热路径上这是每容器一次的分配。
+    frames: List[tuple] = [(root, root_copy, _snapshot_items(root), None)]
+    seen_ids = {id(root)}
+    tuple_fixups = []  # (parent_dst, key, list_dst)：tuple 不可变，出栈后回填
+    while frames:
+        frame = frames[-1]
+        item = next(frame[2], _SNAPSHOT_DONE)
+        if item is _SNAPSHOT_DONE:
+            seen_ids.discard(id(frame[0]))
+            frames.pop()
+            continue
+        key, child = item
+        dst = frame[1]
+        if isinstance(child, _LazyRootSnapshot):
+            dst[key] = child.materialize()
+            continue
+        if isinstance(child, (dict, list, tuple)):
+            depth = len(frames)
+            if depth > _SNAPSHOT_MAX_DEPTH:
+                raise StateSnapshotError(message=(
+                    f"state snapshot depth {depth} exceeds limit {_SNAPSHOT_MAX_DEPTH} "
+                    f"at path {_snapshot_path(frames, key)}"
+                ))
+            if id(child) in seen_ids:
+                dst[key] = _SNAPSHOT_CYCLE_MARK.format(path=_snapshot_path(frames, key))
+                continue
+            child_copy = {} if isinstance(child, dict) else [None] * len(child)
+            dst[key] = child_copy
+            if isinstance(child, tuple):
+                tuple_fixups.append((dst, key, child_copy))
+            seen_ids.add(id(child))
+            frames.append((child, child_copy, _snapshot_items(child), key))
+            continue
+        if isinstance(child, (set, frozenset)):
+            # 集合元素必可哈希（不可变），浅重建即快照
+            dst[key] = child.copy()
+            continue
+        dst[key] = child
+    for parent_dst, key, child_copy in reversed(tuple_fixups):
+        parent_dst[key] = tuple(child_copy)
+    if isinstance(root, tuple):
+        return tuple(root_copy)
+    return root_copy
+
+
 def _snapshot_value(value: Any) -> Any:
-    """递归物化 dict/list/tuple 容器为私有快照（C1-2，2026-10 评审修复包 C1）。
+    """物化 dict/list/tuple 容器为私有快照（C1-2，2026-10 评审修复包 C1；#107 加固）。
 
     历史上 checkpoint/context 出口（``to_checkpoint_dict``、``$PARENT`` 快照）
     是浅拷贝——``$NODE`` 等嵌套容器按引用共享，消费方（分布式宿主异步序列化、
     子流程 ``$PARENT``）拿到的是 live 别名：写穿透回运行态、后续执行让已"落盘"
     的数据漂移。快照只在容器边界重建；JSON 不可表达的非容器对象（与历史行为
     一致）仍按引用共享——它们本就无法进入 checkpoint 序列化。
+
+    #107 起改由 :func:`_snapshot_container` 显式栈物化：不再有 Python 递归深度
+    限制（深嵌套值不再 ``RecursionError``），容器环按 ``<recursive: path>``
+    占位符显式截断，超过 ``_SNAPSHOT_MAX_DEPTH`` 抛 ``StateSnapshotError``。
     """
-    if isinstance(value, dict):
-        return {k: _snapshot_value(v) for k, v in value.items()}
     if isinstance(value, _LazyRootSnapshot):
         return value.materialize()
-    if isinstance(value, list):
-        return [_snapshot_value(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_snapshot_value(v) for v in value)
+    if isinstance(value, (dict, list, tuple)):
+        return _snapshot_container(value)
     if isinstance(value, (set, frozenset)):
         # 集合元素必可哈希（不可变），浅重建即快照
         return value.copy()
@@ -413,11 +520,15 @@ class CheckpointState(BaseModel):
         Lossless inverse of ``from_checkpoint_dict``: only keys that have been
         set are emitted, preserving the exact key set of the source checkpoint.
 
-        C1-2（2026-10 评审修复包 C1）：值经 ``_snapshot_value`` 递归物化——
-        返回值与 live state 不再共享嵌套容器，消费方（checkpoint 落盘、
-        分布式每步 emit 的 context、子流程 ``$PARENT``）变异/继续执行都不会
-        写穿或漂移。此边界每次调用 O(状态总量)；分布式每步一次，与宿主侧
-        序列化同量级（见 tests/unit/test_clean_c1_state.py 的计时基线）。
+        C1-2（2026-10 评审修复包 C1）：值经 ``_snapshot_value`` 物化——返回值与
+        live state 不再共享嵌套容器，消费方（checkpoint 落盘、分布式每步 emit
+        的 context、子流程 ``$PARENT``）变异/继续执行都不会写穿或漂移。此边界
+        每次调用 O(状态总量)；分布式每步一次，与宿主侧序列化同量级
+        （见 tests/unit/test_clean_c1_state.py 的计时基线）。
+
+        #107：物化改为显式栈迭代（数据深度与 Python 递归深度解耦，深嵌套值不再
+        ``RecursionError``），容器环按 ``<recursive: path>`` 占位符显式截断，
+        超 ``_SNAPSHOT_MAX_DEPTH`` 抛 ``StateSnapshotError``（消息含深度与路径）。
         """
         return {k: _snapshot_value(self[k]) for k in self}
 
@@ -514,8 +625,22 @@ class CheckpointState(BaseModel):
         self[f"{p}{self.env_name}"] = env
 
     def update_node_result(self, node_id: str, result: Any) -> None:
-        """Record a node's result under ``$NODE`` (creating the map if absent)."""
+        """Record a node's result under ``$NODE`` (creating the map if absent).
+
+        #107：**按值入库**。历史实现 ``node_results = self.get(key, {})`` 拿到的是
+        ``$NODE`` 的 live dict，再原地写入 ``result``（同样按引用）——两个方向都
+        暴露别名：
+
+        * ``output: "$NODE"`` 把整表写回自身 ⇒ 自引用容器，快照出口沿环递归炸栈
+          （generator/distributed 每步都要 ``to_checkpoint_dict``）；
+        * 更隐蔽的是后续步骤原地改写「已记录」的历史结果（``$NODE['a'] is $NODE``
+          为 True，``b`` 步之后 ``a`` 的条目凭空多出 ``b`` 键）。
+
+        现在整表先浅拷一层（打断 live 绑定）、结果经 ``_snapshot_value`` 深物化
+        （与 checkpoint 出口同一语义：环截断/超深抛 ``StateSnapshotError``），
+        ``$NODE.<node>`` 因此是**私有快照**，不随执行漂移。
+        """
         key = f"{self.prefix}{self.node_name}"
-        node_results = self.get(key, {})
-        node_results[node_id] = result
+        node_results = dict(self.get(key, {}))
+        node_results[node_id] = _snapshot_value(result)
         self[key] = node_results

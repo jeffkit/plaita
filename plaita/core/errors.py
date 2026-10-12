@@ -229,6 +229,19 @@ class ResumeGuardError(ResumeError):
         super().__init__(message, node)
 
 
+class StateSnapshotError(FlowExecutionException):
+    """状态快照出口无法安全物化（plaita#107）。
+
+    ``CheckpointState.to_checkpoint_dict`` / ``update_node_result`` 的出口走
+    ``plaita.core.state._snapshot_value``：它现在是显式栈的迭代物化，Python
+    递归深度与数据深度解耦，容器环按占位符安全截断。唯一仍会抛出的情形是
+    数据深度超过防御性上限——此时抛本异常而不是让 ``RecursionError`` 穿透到
+    分布式归一化层（后者会把真实原因抹成误导性的
+    ``FlowErrorException("maximum recursion depth exceeded")``）。消息携带
+    超限深度与容器路径，normal 模式原样透传、distributed 归一化后仍保留该文本。
+    """
+
+
 class ErrorStrategy(Enum):
     """
     错误处理策略

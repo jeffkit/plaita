@@ -111,6 +111,7 @@ _LAZY_EXPORTS = {
     "ErrorResultException": "plaita.core.errors",
     "ResumeError": "plaita.core.errors",
     "ResumeGuardError": "plaita.core.errors",
+    "StateSnapshotError": "plaita.core.errors",
     "ResumeType": "plaita.core.errors",
     # plaita.core.callback
     "FlowCallback": "plaita.core.callback",
