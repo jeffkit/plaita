@@ -226,6 +226,17 @@ pytest_add_cli_args = [
 # 并行模式只跑对应模块的「纯同步」测试; async 测试不纳入 (见上方说明)。
 # async/distributed 模块 (executor/runner/concurrent) 的变异测试用
 # scripts/run_mutation_baseline.sh 逐变异点独立进程跑, 见 docs §5。
+#
+# ⚠ #125：本列表**按 §7 收窄 `only_mutate` 到单文件时也必须同步收窄**。
+# `pytest_add_cli_args_test_selection` 优先于 `pytest_add_cli_args`，mutmut 用它逐
+# 变异点跑测试。若只改 `only_mutate` 而不改本列表，跑 `decide.py` 时实际执行的是
+# **event/codeflow 的测试**，与该模块无关 ⇒ 分数被配置压得**假低**。
+# 实测（decide.py，同一代码同一 mutmut，只换本设置）：
+#   保持 event/codeflow(现状) → 133 变异 / 98 killed / 35 survived = **73.7%**
+#   换成 test_decide.py        → 147 变异 / 138 killed / 9 survived = **93.9%**
+#   差额 **19.5 个百分点**，极易被误读成"该模块测试很弱"。
+# 收窄流程见 docs/mutation-testing.md §7.2；各模块对应的测试见
+# `scripts/mutation-module-tests.sh`。
 pytest_add_cli_args_test_selection = [
   "tests/unit/test_event_memory_unit.py",
   "tests/unit/test_event_core.py",

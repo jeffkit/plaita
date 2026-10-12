@@ -97,7 +97,29 @@
 | `plaita/core/callback.py` | 100% | 118 | 118 | 0 | **100%** |
 | `plaita/core/expression.py` | 100% | 575 | 575 | 0 | **100%** |
 | `plaita/node/calculate.py` | 96% | 79 | 78 | 1 | **98.7%** |
-| `plaita/node/decide.py` | 92% | 107 | 107 | 0 | **100%** |
+| `plaita/node/decide.py` | ~~92% / 107 / 107 / 0 / 100%~~ | 147 | 138 | 9 | **93.9%** ⚠️ |
+
+> ⚠️ **`decide.py` 一行已于 2026-10-12 按现口径重测（plaita#125）**：旧记录
+> `107/107 = 100%` 在现工具链下**不可复现**，实测为 **147 变异 / 138 killed /
+> 9 true survived = 93.9%**（9 个 survivor 经独立进程复核确认**为真**，非 mutmut
+> worker 复用假阳性：`x_resolve_branch_target__mutmut_3/6/9`、
+> `xǁSwitchǁvalidate__mutmut_1/2`、`xǁSwitchǁexecute__mutmut_8/9/22/34`）。
+> 成因有二，**勿混为一谈**：① 变异点总数从 107 变为 147（mutmut 版本 / 口径差异）；
+> ② 见下方「配置陷阱」——只改 `only_mutate` 而不改
+> `pytest_add_cli_args_test_selection`，会**再**压低 19.5 个百分点。
+>
+> **配置陷阱（plaita#125，实测）**：`pytest_add_cli_args_test_selection` **优先于**
+> `pytest_add_cli_args`。按 §7 收窄 `only_mutate` 到 `decide.py` 时，若不同步收窄该
+> 列表，实际执行的是 **event/codeflow 的测试**（与 decide 无关）：
+>
+> | test_selection | mutants | killed | survived | score |
+> |---|---|---|---|---|
+> | 保持 event/codeflow（错误） | 133 | 98 | 35 | **73.7%** |
+> | 换成 `test_decide.py`（正确） | 147 | 138 | 9 | **93.9%** |
+>
+> ⇒ 差额 **19.5 个百分点纯由配置造成**，极易被误读成"该模块测试很弱"。
+> 用 `bash scripts/mutation-module-tests.sh [模块名]` 查对应测试集合，
+> `--snippet <模块名>` 可直接生成可粘贴的 toml 片段。
 
 > 关键发现：**expression 与 calculate 的初筛 mutation score 仅 ~20%**——尽管行覆盖
 > 96–100%，测试对逻辑变更的捕获力很弱。`expression.py` 575 个变异点里大量存活，
