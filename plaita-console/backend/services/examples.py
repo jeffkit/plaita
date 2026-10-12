@@ -67,7 +67,7 @@ LIST_MAP = {
 }
 
 HTTP_ECHO = {
-    "desc": "HTTP 调用示例：请求公共 API 并把响应透传为流程输出（需外网）。",
+    "desc": "HTTP 调用示例：请求公共 API 并把响应体透传为流程输出（需外网）。",
     "definition": {
         "nodes": [
             {"type": "start", "id": "start", "next": "fetch"},
@@ -78,7 +78,10 @@ HTTP_ECHO = {
                 "url": "https://httpbin.org/json",
                 "next": "end",
             },
-            {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.fetch"},
+            # plaita#129：`$NODE.<http_id>` 现在是**该节点的结果结构**
+            # （{data, status, statusText, headers}），不再是裸响应体。
+            # 只要响应体本身请取 `.data`；整份响应取 `$NODE.fetch`。
+            {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.fetch.data"},
         ]
     },
 }

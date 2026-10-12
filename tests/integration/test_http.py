@@ -614,15 +614,21 @@ class TestHTTPNodeAdditional(unittest.TestCase):
             
             # 验证结果
             self.assertEqual(result, "bar")
-            
-            # 验证上下文设置（公开 API set_state，键为 $NODE.<id>.<KEY>）
-            execution.set_state.assert_any_call("$NODE.http_ctx.RESPONSE", {
-                "data": {"foo": "bar"},
-                "status": 200,
-                "statusText": "OK",
-                "headers": mock_response.headers
-            })
-            execution.set_state.assert_any_call("$NODE.http_ctx.STATUS", 200)
+
+            # plaita#129：历史在这里断言 `execution.set_state("$NODE.http_ctx.RESPONSE", …)`
+            # 被**调用过**——但 mock execution 不会让该键真的可寻址，于是"调用过"与
+            # "读得到"之间的鸿沟长期无人发现（本单的掩盖机制）。
+            #
+            # 现在改为断言**真实可达性**：把该节点记进真实 ExecutionContext，
+            # 再用文档承诺的表达式求值。
+            from plaita.core.context import ExecutionContext
+
+            real_ctx = ExecutionContext()
+            real_ctx.update_node_result(http_node, result)
+            entry = real_ctx.evaluate(f"$NODE.{http_node.id}")
+            self.assertEqual(entry["status"], 200)
+            self.assertEqual(entry["headers"], dict(mock_response.headers))
+            self.assertEqual(entry["data"], "bar")
     
     @patch('plaita.node.http.HTTP.new_executor')
     def test_delegate_method(self, mock_new_executor):
@@ -754,12 +760,41 @@ class TestHTTPNodeRealEndToEnd(unittest.TestCase):
         })
 
     def test_real_get_request_succeeds(self):
-        """真实 GET 全链路：表达式 URL 求值 → 请求 → 响应写入 $NODE.<id>.*。"""
+        """真实 GET 全链路：表达式 URL 求值 → 请求 → 响应写入 ``$NODE.<id>.*``。
+
+        plaita#129：这里把原先**一条断言兼职两件事**拆开，因为
+        ``$NODE.<id>`` 现在是**该节点的结果结构**（``{data, status, statusText,
+        headers}``），而节点的**返回值**仍是响应体。原断言
+        ``End(output="$NODE.fetch") == 裸 body`` 与本 docstring 自述的
+        "响应写入 ``$NODE.<id>.*``" 互相矛盾——它当年绿，只是因为
+        ``$NODE.fetch`` 恰好是裸 body。
+
+        本用例守**字段可达**；返回值契约由
+        ``test_real_get_request_node_return_value_is_the_body`` 守。
+        """
         pytest.importorskip("aiohttp")
         flow = Flow.from_string(self._http_node_flow(f"http://127.0.0.1:{self.port}/api/ping"))
         result = flow.run()
-        # 无 output 的 http 节点返回 response.data 本身
-        self.assertEqual(result, {"hello": "world", "path": "/api/ping"})
+        # 结果结构里的 data 才是响应体
+        self.assertEqual(result["data"], {"hello": "world", "path": "/api/ping"})
+        self.assertEqual(result["status"], 200)
+        self.assertIn("Content-Type", result["headers"])
+
+    def test_real_get_request_node_return_value_is_the_body(self):
+        """plaita#129 返回值契约：节点**返回值**仍是 ``response.data``，未被结构体取代。
+
+        经 ``$NODE.fetch.data`` 观察**不能**证明这一点（那是存储形态）；
+        这里直接观察节点的 execute 返回。
+        """
+        pytest.importorskip("requests")
+        from plaita.core.context import ExecutionContext
+        from plaita.node.http import HTTP
+
+        ctx = ExecutionContext()
+        node = HTTP(id="fetch", url=f"http://127.0.0.1:{self.port}/api/ping", method="GET")
+        returned = node.execute(ctx)
+        # 无 output 表达式 ⇒ 返回值就是 response.data 本身
+        self.assertEqual(returned, {"hello": "world", "path": "/api/ping"})
 
     def test_real_request_error_uses_error_handler_default(self):
         """不可路由端口 → errorHandler continue_with 的 defaultValue 生效。"""

@@ -8,6 +8,27 @@
 
 ## Unreleased（0.5.x）
 
+### http 节点：`$NODE.<http_id>` 由**裸响应体**变为**结果结构**（plaita#129）
+
+`http` 节点历史上把响应上下文用 `set_state("$NODE.<id>.RESPONSE", …)` 写入，但状态层
+是**扁平键**存储，而表达式寻址 `$NODE.<id>.RESPONSE` 走**嵌套路径** ⇒ 文档承诺的字段
+引用**永远取不到**（静默 `None`，或根不存在时抛误导性的 `KeyError: '$NODE' not found`）。
+实测也证明：不存在「`$NODE.<id>` 是裸响应体 **且** `$NODE.<id>.data` 能解析」的设计——
+点路径要求 `$NODE.<id>` 是字典。
+
+- **变更**：`$NODE.<http_id>` 现在是该节点的**结果结构**
+  `{data, status, statusText, headers}`（字段名以
+  `docs-site/docs/nodes/builtin.md` 的承诺为准），而**不再是裸响应体**。
+- **取响应体**：改用 **`$NODE.<http_id>.data`**（文档原本承诺的写法）。
+  取状态码用 `.status`，响应头用 `.headers`。
+- **只影响直接读整节点的地方**：形如 `End(output="$NODE.fetch")` 的引用，从"得到响应体"
+  变为"得到上述结构"。**节点自身的返回值不变**——无 `output` 时仍返回响应体本身，
+  设了 `output` 表达式时仍是该表达式求值结果（next 链路与节点级消费不受影响）。
+- **`data` 的语义**：恒为该节点的**值**。设了 `output` 表达式时，`data` 是表达式结果，
+  原始响应体另存于 **`$NODE.<http_id>.body`**（避免同一个键既指节点值又指原始 body）。
+- **涉及面**：console 的 `http-echo` 示例（会 seed 进用户工作区）已同步改为
+  `$NODE.fetch.data`。
+
 ### 表达式：引用了父容器缺失根键的 `$NODE.<节点>.<字段>` 数据文本不再被二次求值（plaita#104）
 
 求值变量路径的中段字段时，历史上会把字符串属性值无条件当表达式、并以**持有它的

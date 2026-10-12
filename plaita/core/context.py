@@ -339,6 +339,47 @@ class ExecutionContext(_SystemStateAccessors):
         return default
 
     def update_node_result(self, node, result: Any) -> None:
+        # #129：`$NODE.<id>` 持有**该节点的结果**。节点可以选择用一份「结果结构」
+        # 承载自己的输出字段（http 节点即如此：data/status/headers），
+        # 由 `node_result_payload()` 提供。
+        #
+        # 关键：这只影响**写进 `$NODE.<id>` 的那份数据**，**节点返回值本身不变**
+        # （next 链路与 `End(output="$NODE.<id>")` 之外的消费方仍拿到原值）。
+        # 历史实现用扁平 `set_state("$NODE.<id>.X", …)` 写上下文，而表达式寻址走
+        # 嵌套路径 ⇒ 文档承诺的 `$NODE.<id>.<FIELD>` 永远取不到（#129）。
+        payload = None
+        getter = getattr(node, "node_result_payload", None)
+        if callable(getter):
+            try:
+                payload = getter()
+            except Exception as e:
+                # 附加字段（如 http 响应上下文）不该让**结果记录**失败——
+                # 降级为"只记返回值"，但必须留下痕迹而不是静默吞掉。
+                logger.warning(
+                    "node %s: node_result_payload() failed, recording bare result only: %s",
+                    getattr(node, "id", "?"), e,
+                )
+                payload = None
+        if isinstance(payload, dict) and payload:
+            # #129：结果结构 = 节点声明的字段（data/status/statusText/headers）。
+            #
+            # ⚠ `data` 这个键**必须承载节点自己的值**，不能无脑用 payload 里的原始
+            # 响应体覆盖它：http 节点在设了 `output` 表达式时，返回值是
+            # `evaluate(output)` 而**不是**原始 body（实测 output='999' ⇒ 返回 999，
+            # 但原始 body 是 {'hello':'world'}）。若让 payload 覆盖 `data`，
+            # 同一个键就会"有时指节点值、有时指原始 HTTP body"——这是隐蔽的语义分歧。
+            #
+            # 因此：先铺 payload，再用节点返回值**覆盖** `data`（作者显式 output 优先）。
+            # 需要原始 body 的场景（极少）可读 `$NODE.<id>.body`。
+            stored = dict(payload)
+            raw_body = stored.get("data")
+            stored["data"] = result
+            if raw_body is not None and raw_body is not result:
+                # 节点值与原始 body 不同时（如设了 output 表达式），把原始 body
+                # 另存一个明确的名字，避免信息丢失。
+                stored.setdefault("body", raw_body)
+            self._state.update_node_result(node.id, stored)
+            return
         self._state.update_node_result(node.id, result)
 
     @property

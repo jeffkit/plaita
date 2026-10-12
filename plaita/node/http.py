@@ -1135,19 +1135,37 @@ class HTTP(Node):
             RESPONSE_HEADERS_KEY: dict(http_rsp.raw_response.headers),
         }
         if execution:
-            # 响应上下文经公开 API 写入 $NODE.<id>.*，下游可引用
-            # （$NODE.<id>.RESPONSE / .HEADERS / .STATUS）。历史方法
-            # set_node_context 在运行时里从未存在，真实请求一到响应处理
-            # 就 AttributeError——集成测试全用带该方法的 mock execution，
-            # 掩盖了这条主路径。
-            prefix = getattr(execution, "express_prefix", "$") or "$"
-            node_prefix = f"{prefix}NODE.{self.id}."
-            execution.set_state(f"{node_prefix}{RESPONSE_CTX_KEY}", response)
-            execution.set_state(f"{node_prefix}{HEADER_CTX_KEY}", dict(http_rsp.raw_response.headers))
-            execution.set_state(f"{node_prefix}{STATUS_CTX_KEY}", http_rsp.raw_response.status_code)
+            # #129：响应上下文改为写进**本节点自己的结果**（见 node_result_payload），
+            # 由 `update_node_result` 落进 `$NODE.<id>`。
+            #
+            # 历史实现是 `execution.set_state(f"{prefix}NODE.{self.id}.RESPONSE", …)`，
+            # 而 `ExecutionContext.set_state` 当时是**扁平写入**（`self._state[key] = value`），
+            # 于是状态表里躺的是字面量键 `"$NODE.<id>.RESPONSE"`；表达式寻址
+            # `$NODE.<id>.RESPONSE` 走的是嵌套路径 ⇒ **永远解析不到**
+            # （实测静默 None / 误导性 `KeyError: '$NODE' not found`）。
+            # 集成测试用带 `set_node_context` 的 mock execution，且只断言 set_state
+            # **被调用过**，从未对真实 context 求值过文档里的表达式，故长期掩盖。
+            #
+            # 现在按「$NODE.<id> 持有该节点的结果」语义落盘：结果即响应结构，
+            # 字段名以**文档承诺**的 data/status/headers 为权威（builtin.md:267）。
+            self._response_context = dict(response)
         if self.output is None:
             return response[RESPONSE_DATA_KEY]
         return execution.evaluate(self.output)
+
+    def node_result_payload(self):
+        """#129：本节点结果里承载的响应上下文字段。
+
+        未发起过请求时返回 ``None``（不改变既有结果形状）。供 sync/async 两条
+        结果处理路径调用，使 ``$NODE.<id>.data`` / ``.status`` / ``.headers``
+        真正可寻址——这三个名字是 ``docs-site/docs/nodes/builtin.md`` 承诺的，
+        也是 ``docs-site/docs/guide/expressions.md:29`` 所描述的
+        ``$NODE.<id>.field`` 形态。
+
+        注意：这里返回的是**响应结构本身**（含 data/status/statusText/headers），
+        不含大写别名——避免"两套名字都看起来能用"（#129 病根）。
+        """
+        return getattr(self, "_response_context", None)
 
     def execute(self, execution):
         """执行HTTP请求（同步）"""
