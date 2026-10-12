@@ -126,6 +126,26 @@ class Flow(BaseModel):
 
         return warn_unknown_keys(cls, data)
 
+    @model_validator(mode="after")
+    def _validate_node_instances(self):
+        """#128：让**直接构造** ``Flow(nodes=[...])`` 也跑一次构建期节点校验。
+
+        `resolve_nodes()` 只在 ``model_validate`` / ``model_validate_json`` 里被显式
+        调用；直接构造 ``Flow(...)`` 时它**从不执行**，于是"传 ``Node`` 实例"这条主路径
+        （builder / @flow 前端 / 大量既有测试）上，坏配置连 warning 都没有。
+
+        这里只对**已经是 ``Node`` 实例**的节点补跑校验——dict 形态的节点留给
+        ``resolve_nodes()`（它解析完会自己校验一次），避免重复告警。
+        """
+        try:
+            instances = [n for n in (self.nodes or []) if isinstance(n, Node)]
+            if instances:
+                self.validate_nodes(instances)
+        except Exception as e:  # 校验本身绝不能让构造失败（与既有降级策略一致）
+            logger.warning("flow %s construction-time node validation failed: %s",
+                           getattr(self, "flow_id", "?"), e)
+        return self
+
     @classmethod
     def model_validate(cls, data, *, registry=None, **kwargs):
         """Parse + validate a Flow, then resolve node dicts into ``Node`` 子类。
@@ -238,7 +258,20 @@ class Flow(BaseModel):
         # 却会（如 Switch 无 branches 直接抛错）——同一类配置错误一条路响一条路哑。
         # 这里以 warning 降级执行（存量 JSON 流程可能带有 builder 才会拦的配置），
         # 致命的运行期问题仍由调度层兜底（如分支未命中硬失败）。
-        for node in resolved:
+        self.validate_nodes(resolved)
+
+    def validate_nodes(self, nodes=None) -> None:
+        """对已解析的节点跑构建期 ``node.validate()``（warning 降级，不阻断）。
+
+        #128：`resolve_nodes()` 是唯一执行该校验的地方，而**直接构造 ``Flow(...)``
+        从不调用它**（只有 ``model_validate`` / ``model_validate_json`` 会显式调一次）。
+        于是"传 ``Node`` 实例"这条主路径（builder / @flow 前端 / 大量既有测试）
+        坏配置**连 warning 都没有**，比传 dict 那条路更哑——与 ``resolve_nodes``
+        注释里声称要修的"一条路响一条路哑"恰好同构。
+
+        抽出本方法，使两条构造路径可以共用同一实现（见 ``_validate_node_instances``）。
+        """
+        for node in (self.nodes if nodes is None else nodes) or []:
             if isinstance(node, Node):
                 try:
                     node.validate()
