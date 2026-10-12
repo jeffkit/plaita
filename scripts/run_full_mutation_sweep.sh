@@ -15,6 +15,45 @@
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
+# ---- jeffkit/plaita#124 缺陷 3：集中解析超时原语。macOS 无 GNU `timeout`（也没有
+# ---- `gtimeout`），裸 `timeout` 会以 rc=127 退出；本脚本把 rc!=0 一律当 killed，
+# ---- 于是**复核安全网被静默关闭且给出满分**。这里改为：优先 timeout/gtimeout，
+# ---- 都没有就用纯 Python 超时（subprocess timeout），并在缺失时明确告知。
+if command -v timeout >/dev/null 2>&1; then
+    MUT_TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    MUT_TIMEOUT_BIN="gtimeout"
+else
+    MUT_TIMEOUT_BIN=""
+    echo "[warn] 本机没有 timeout/gtimeout（macOS 默认如此），改用纯 Python 超时回退。" >&2
+fi
+MUT_PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# 跑一个变异点：$1=变异点名 $2=超时秒数 $3...=pytest 参数
+# rc: 0=可能 survived；124=超时；其余=被测试杀死；127 不再可能出现（回退路径正常）。
+_run_mutant_pytest() {
+    local m="$1" tmo="$2"; shift 2
+    if [[ -n "$MUT_TIMEOUT_BIN" ]]; then
+        MUTANT_UNDER_TEST="$m" "$MUT_TIMEOUT_BIN" "$tmo" \
+            "$MUT_PYTHON_BIN" -m pytest -x -q -p no:randomly --tb=no --no-header "$@" \
+            < /dev/null > /dev/null 2>&1
+        return $?
+    fi
+    MUTANT_UNDER_TEST="$m" "$MUT_PYTHON_BIN" - "$MUT_PYTHON_BIN" "$tmo" "$@" <<'PYEOF'
+import os, subprocess, sys
+py, tmo, args = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
+try:
+    raise SystemExit(subprocess.run(
+        [py, "-m", "pytest", "-x", "-q", "-p", "no:randomly",
+         "--tb=no", "--no-header", *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=tmo).returncode)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+PYEOF
+}
+
 # 解析参数 — 支持旧式 positional 及新式 --from-idx / --to-idx
 START_FROM=""
 FROM_IDX=""
@@ -168,7 +207,7 @@ recheck_all_mutations() {
   n_names=$(echo "$names" | grep -c . || true)
   echo "  Rechecking ${n_names} mutant(s)…  (quick: ${first_test})"
 
-  local t_killed=0 t_survived=0
+  local t_killed=0 t_survived=0 t_error=0
 
   pushd mutants > /dev/null 2>&1 || { echo 0 > "$RECHECK_TMPFILE"; return 0; }
   while IFS= read -r m; do
@@ -178,12 +217,17 @@ recheck_all_mutations() {
     # 注意: 用 rc=0 + || rc=$? 避免 set -e 在测试失败时提前退出
     # 每个 mutant 最多 60s，防止 async 测试（如 wait_for_event_timeout）挂死
     rc=0
-    MUTANT_UNDER_TEST="$m" timeout 60 python -m pytest -x -q -p no:randomly \
-        --tb=no --no-header "$first_test" \
-        < /dev/null > /dev/null 2>&1 || rc=$?
+    _run_mutant_pytest "$m" 60 "$first_test" || rc=$?
+
+    if [[ $rc -eq 124 || $rc -eq 126 || $rc -eq 127 ]]; then
+      # #124：没能真正执行 —— 绝不能算 killed（那会伪造满分）
+      t_error=$((t_error+1))
+      echo "  ERROR(rc=$rc): $m"
+      continue
+    fi
 
     if [[ $rc -ne 0 ]]; then
-      # 第一轮就被杀死（含 timeout 退出码 124），无需继续
+      # 真正被测试杀死，无需继续
       t_killed=$((t_killed+1))
       continue
     fi
@@ -191,12 +235,13 @@ recheck_all_mutations() {
     # ── 第二轮：跑全部测试文件确认是否真的 survived ───────────────────
     if [[ "$valid_tests" != "$first_test" ]]; then
       rc=0
-      MUTANT_UNDER_TEST="$m" timeout 120 python -m pytest -x -q -p no:randomly \
-          --tb=no --no-header $valid_tests \
-          < /dev/null > /dev/null 2>&1 || rc=$?
+      _run_mutant_pytest "$m" 120 $valid_tests || rc=$?
     fi
 
-    if [[ $rc -eq 0 ]]; then
+    if [[ $rc -eq 124 || $rc -eq 126 || $rc -eq 127 ]]; then
+      t_error=$((t_error+1))
+      echo "  ERROR(rc=$rc): $m"
+    elif [[ $rc -eq 0 ]]; then
       t_survived=$((t_survived+1))
       echo "  SURVIVED: $m"
     else
@@ -205,7 +250,10 @@ recheck_all_mutations() {
   done <<< "$names"
   popd > /dev/null 2>&1
 
-  echo "  recheck done: ${n_names} total | killed=${t_killed} survived=${t_survived}"
+  echo "  recheck done: ${n_names} total | killed=${t_killed} survived=${t_survived} error=${t_error}"
+  if [[ $t_error -gt 0 ]]; then
+    echo "  [warn] ${t_error} 个变异点未真正执行，本轮结论不完整（#124）。" >&2
+  fi
   echo "$t_survived" > "$RECHECK_TMPFILE"
 }
 

@@ -672,6 +672,19 @@ shell 以 **rc=127** 退出，会被复核逻辑一律判成 `killed`——本�
 已知变异点（`x__snapshot_container__mutmut_42`，`continue → break`）→ rc=1（killed 判定可达），
 且该点随后由新增测试 `test_siblings_after_cycle_are_still_copied` 真正杀灭。
 
+> **该缺陷已于 plaita#124 修复**（本轮）：上述"裸 `timeout` 伪造满分"、`$VAR` 紧跟全角标点导致的
+> bash 3.2 `unbound variable`、以及 `TESTS` 里两个不存在的路径（`tests/test_calculate.py` /
+> `tests/test_decide.py`，实为 `tests/unit/…`）三处一并修掉。现在：
+> - 超时原语集中在 `scripts/lib/mutation_recheck_common.sh`（`timeout` → `gtimeout` →
+>   **纯 Python `subprocess` 超时回退**，缺命令不再静默继续）；
+> - 退出码三态分类：`0 → survived`、**`124/126/127 → error`（绝不算 killed）**、其余 → killed；
+>   出现 `error` 时脚本**非零退出**并在报告里单列计数，避免"跑不起来"被当成满分；
+> - 开跑前先校验 `TESTS` 路径全部存在，否则**中止**（不再让 pytest collection error 混进 killed）；
+>   并对**未变异树**跑一遍同一测试集合做自检，自检失败即中止（结论不可信）；
+> - 无匹配变异点分支改用 `${WHAT}`，在 macOS bash 3.2 下正常打印消息并 `exit 1`。
+> 同一缺陷也存在于 `recheck_async_utils.sh` / `recheck_codeflow_expr.sh` / `recheck_sexpr.sh`
+> （issue 未提及，本轮一并修），三者改为 `source` 上述公共库。
+
 ## 2.13 event_node.py 接入（2026-07-08，94.9%）
 
 `plaita/node/event_node.py` 从阶段二基线的 **0%（0/80）** 提升至 **94.9%（187/197）**。
