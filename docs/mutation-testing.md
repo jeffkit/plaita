@@ -177,7 +177,7 @@
 | `plaita/core/expression_parser.py` | **81.9%** | 558/681 | 123 | ⚠️ 2026-10-12 重跑（plaita#104，见 §2.5 末节）：#104 新增代码 0 非等价 survived；123 个 true survived = 121 个旧代码分支（DEBUG 日志文案/文法特性等，companion 测试集口径）+ 2 个本 PR 新增代码的等价变异；旧记录 313/313、433/433、449/449 |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
 | `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
-| `plaita/dsl/builder.py` | ~~99.9%~~ **待重扫** | 876/877（口径不可复现） | 1 | ⚠ 见 §2.8「后续变更」（2026-10-12 #108：改动为变异中性；该数字待按 §7.2 重扫回填） |
+| `plaita/dsl/builder.py` | ~~99.9%~~ **84.1%** | 914（766 killed / 145 survived / 3 timeout） | 145 | ⚠️ **2026-10-12 按 §7.2 重扫回填**（见 §2.8 末节）：旧 876/877 = 99.9% 在现工具链下**不可复现**（口径 + 覆盖都不同）；**#108 的改动本身确为变异中性**（可运行变异集合 hash 相同），但该模块的真实分是 **84.1%**，缺口主要在 `_auto_chain`(24) / `FlowBuilder.from_dict`(21) / `_linear`(16) / `_error_handler`(10) |
 | `plaita/node/loop.py` | **99.3%** | 300/302 | 2 | ✅ 已强化（见 §2.9） |
 | `plaita/core/errors.py` | ~~100%~~ **已作废** | 90/90（旧口径） | 0 | ⚠️ **见 §2.19.1**：现口径 **82.5%（80/97）**。旧「recheck」用的是裸 `timeout`，本机 macOS 无 GNU `timeout` ⇒ rc=127 被判 killed（伪造满分）；另叠加 mutmut 3.8.0 的属性赋值变异 |
 | `plaita/node/__init__.py` | **100%** | 112/112 | 0 | ✅ recheck 确认真实 100%（见 §2.19）；原 83.9%/18 survived 为 mutmut in-process cache 污染假低分 |
@@ -424,6 +424,56 @@ mutmut 直接跑结果：880 killed + 156 timeout + 6 survived = 1042。
     302 / 877 / 1042 等多个互不一致的口径）。**在按 §7.2 重扫回填之前，请勿用 99.9% 判断本模块
     的测试强度**，也不要与其他模块的分数横向比较。
   - 本模块现存的既有漏测（例如把 `input_type` 整体置 `None` 而无断言）属历史问题，与 #108 无关。
+
+### 2026-10-12 重扫回填：真实分 **84.1%**（914 变异）
+
+按 §7.2 收窄 `only_mutate = ["plaita/dsl/builder.py"]` 并按 #125 同步把
+`pytest_add_cli_args_test_selection` 换成该模块的两个测试文件
+（用 `bash scripts/mutation-module-tests.sh --snippet builder` 得到），
+`rm -rf mutants .mutmut-cache && mutmut run`（mutmut 3.8.0）：
+
+| 指标 | 数值 |
+|---|---|
+| 变异点总数 | **914** |
+| killed | **766** |
+| survived（真实存活） | **145** |
+| timeout | **3** |
+| **Mutation score** | **84.1%**（766/(766+145)） |
+
+> **口径说明**：总分按 `killed/(killed+survived)` 计（timeout 不计入分母，与
+> `scripts/recheck_mutants.sh` 一致）；若把 timeout 也算进分母为 83.8%。
+
+**3 个 timeout 已逐个查明，全部是"真死循环"而非慢测试** —— 它们都落在
+`LinearBuilder._auto_id` 的 `while True` 循环里，各自移除了循环的退出条件：
+
+| 变异点 | 改动 | 后果 |
+|---|---|---|
+| `_auto_id__mutmut_2` | `self._counter += 1` → `= 1` | `_n1` 已被占用时**永不退出** |
+| `_auto_id__mutmut_5` | `candidate = f"_n{...}"` → `= None` | 同上 |
+| `_auto_id__mutmut_6` | `if candidate not in self._claimed` → `in` | 同上 |
+
+⇒ 它们是**等价于"无限循环"的坏变异**，被正确判为 `timeout` 而非 `survived`；
+按 §7 的"timeout 必须独立复核"要求，我以独立进程 + 自身超时复核过，
+确认**会挂死**（复核进程需外部超时终止）。
+
+**145 个真实存活的分布**（Top）：
+
+| 函数 | survived |
+|---|---|
+| `LinearBuilder._auto_chain` | 24 |
+| `FlowBuilder.from_dict` | 21 |
+| `_linear` | 16 |
+| `_error_handler` | 10 |
+| `LinearBuilder.parallel` / `.end` / `FlowBuilder.to_dict` / `_parallel` / `_end` | 各 7 |
+
+⇒ **旧值 99.9% 与实际相差 15.8 个百分点**。成因与 `errors.py` 的"伪造满分"**不同根**：
+这里没有 rc=127 注入（本次用的是独立 subprocess 超时驱动），差异来自
+**口径（覆盖采集用哪套测试 / 是否按覆盖过滤）**——历史记录里出现过 302 / 877 / 1042
+三个互不一致的总数，而本次是"只变异本文件 + 只跑本模块测试"的**可复现口径**。
+
+**⚠ 因此：不要用 99.9% 判断本模块的测试强度**，也不要与其他模块横向比较；
+本表已回填为 84.1%。**补测这 145 个存活点位应另开单**（不属 #108，
+本次只做"按 §7.2 重扫回填"，不改测试）。
 
 ## 2.7 executor.py 强化（2026-07-06，90.7%）
 
