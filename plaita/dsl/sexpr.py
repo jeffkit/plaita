@@ -934,22 +934,23 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             parts.append(f"-> {n['next']}")
     elif t == "event":
         parts.append(f":type {_expr_to_src(n.get('eventType', n.get('event_type')))}")
-        # #127：event 也必须发射后继，否则 `sexpr → IR → sexpr` **静默丢 `event.next`**。
-        # 解析侧（`_c_event` → `_common_fields`）**是会读 `-> next` 的**，属发射侧单边
-        # 缺失：解析支持、发射不支持 ⇒ 往返丢数据，无告警无异常。
-        # 实测：往返后 event 的 `next` 变为 None ⇒ 运行期 `Node 'ev' (event) has no
-        # 'next'`，或配 errorHandler 后退化成"告警并提前结束"（都不是作者本意）。
-        # #108 修好 LinearBuilder 的 event 串接后，"带 next 的 event"经推荐路径即可产生，
-        # 遂把这条长期潜伏的缺口从"不可达"变为"可触达"。
-        if n.get("next") is not None:
-            parts.append(f"-> {n['next']}")
-        # #127（同根第二处）：`eventFilter` 同样只在解析侧存在——`_c_event` 读
+        # #127（同根第二处）：`eventFilter` 只在解析侧存在过——`_c_event` 读
         # `:filter` / `:event-filter` / `:eventFilter` 三个别名并写入 `eventFilter`，
-        # 而发射侧原本一个字都不写 ⇒ 往返同样**静默丢过滤条件**。
-        # 后果比丢 next 更隐蔽：事件仍会触发，只是**不再按条件过滤**（不该触发的也触发）。
+        # 而发射侧原本一个字都不写 ⇒ 往返**静默丢过滤条件**。
+        # 后果比丢 next 更隐蔽：事件仍会触发，只是**不再按条件过滤**。
+        #
+        # ⚠ 顺序要紧（2026-10-13 由交付方在 #136 核查中指出，我复现确认）：
+        # `-> next` **终止**关键字列表，放在它之后的 `:filter` 会退化成**位置参数**。
+        # 我最初的 #127 修复把 filter 放在 next 之后 ⇒ 字符串 filter 侥幸幸存
+        # （`$INPUT.x`），但 **dict filter 在 `Flow.model_validate` 后变成 None**
+        # （实测：发射出 `… -> e :filter (dict a 1)`，校验后 eventFilter 消失）。
+        # 因此**所有关键字必须排在 `-> next` 之前**。
         ev_filter = n.get("eventFilter", n.get("event_filter"))
         if ev_filter is not None:
             parts.append(f":filter {_expr_to_src(ev_filter)}")
+        # `-> next` 必须**最后**发（它终止关键字列表）
+        if n.get("next") is not None:
+            parts.append(f"-> {n['next']}")
     if n.get("errorHandler") is not None:
         eh = n["errorHandler"]
         ep = ["on-error", eh.get("strategy", "abort")]

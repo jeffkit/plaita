@@ -122,3 +122,61 @@ class TestPreExistingCodeQuirkIsSeparate:
         """本单关心的那一半：`code` 的 next 是幸存的（issue 里给的 control）。"""
         ir, back, _ = _roundtrip(self.SRC)
         assert _node(back, "code1")["next"] == "e"
+
+
+class TestKeywordOrderingBeforeNext:
+    """`-> next` **终止关键字列表**，所以所有关键字必须排在它之前。
+
+    plaita#136 的核查中发现（交付方指出，我复现确认）：我最初的 #127 修复把
+    `:filter` 追加在 `-> next` **之后**，于是它退化成**位置参数**。
+    字符串 filter 侥幸幸存，但**关键字语义已坏**——这也是 `#136` 里
+    `errorHandler` 被 `output` 吞掉（`output = ['on-error','abort','retry',2]`）的同一机制。
+
+    本测试钉住发射顺序：`:filter` **必须**出现在 `-> next` 之前。
+    """
+
+    def test_filter_emitted_before_arrow(self):
+        ir = compile_sexpr(
+            '(flow f (start :id s -> ev) '
+            '(event :id ev :type approval :filter $INPUT.x -> e) (end :id e))'
+        )
+        text = flow_to_sexpr(ir)
+        # 只在 **event 子串**内比较顺序——整串里第一个 "-> e" 属于 start 节点。
+        ev_part = text[text.index("(event"):]
+        ev_part = ev_part[: ev_part.index(")") + 1]
+        assert ":filter" in ev_part and "-> e" in ev_part, f"event 子串异常：{ev_part}"
+        assert ev_part.index(":filter") < ev_part.index("-> e"), (
+            f"`:filter` 必须排在 `-> next` 之前（后者终止关键字列表）：{ev_part}"
+        )
+
+    def test_no_keyword_after_arrow_for_any_node_type(self):
+        """通用护栏：任何节点的 `-> x` 之后都不得再出现 `:keyword`。"""
+        import re
+
+        srcs = [
+            '(flow f (start :id s -> ev) (event :id ev :type approval :filter $INPUT.x -> e) (end :id e))',
+            '(flow f (start :id s -> h) (http :id h :method GET :url "http://x" -> e) (end :id e))',
+            '(flow f (start :id s -> a) (assign :id a "1" -> e) (end :id e))',
+        ]
+        for src in srcs:
+            text = flow_to_sexpr(compile_sexpr(src))
+            # 逐节点检查：取每个 "(type " 起的括号段，段内 `-> x` 之后不得再有 `:kw`
+            for seg in re.findall(r"\((?:start|end|event|http|assignment|code)\b[^()]*\)", text):
+                m = re.search(r"-> \S+", seg)
+                if not m:
+                    continue
+                after = seg[m.end():]
+                assert not after.lstrip().startswith(":"), (
+                    f"`->` 之后出现了关键字（会被当位置参数吞掉）：{seg}"
+                )
+
+    def test_next_still_survives_with_filter_present(self):
+        """顺序修正后，next 与 filter 必须**同时**保真。"""
+        ir = compile_sexpr(
+            '(flow f (start :id s -> ev) '
+            '(event :id ev :type approval :filter $INPUT.x -> e) (end :id e))'
+        )
+        back = compile_sexpr(flow_to_sexpr(ir))
+        ev = [n for n in back["nodes"] if n.get("id") == "ev"][0]
+        assert ev["next"] == "e"
+        assert ev["eventFilter"] == "$INPUT.x"
