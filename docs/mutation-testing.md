@@ -1,5 +1,5 @@
 # 变异测试（Mutation Testing）基线与流程
-> **最后更新**：2026-10-12（§2.5 末节：plaita#104 后单模块重跑 —— 681 变异，初筛 480 killed，独立 recheck 后 **558/681 = 81.9%**；**#104 新增/改动代码 0 个非等价 survived**，123 个 true survived = **121 个旧代码分支 + 2 个本 PR 新增代码的等价变异**，旧代码部分可由"companion 测试集不含 flow 级用例/未断言 DEBUG 日志"解释。
+> **最后更新**：2026-10-12（§2.5 末节：plaita#130 后单模块重跑 —— 734 变异，初筛 519 killed，独立 recheck 后 **609/734 = 83.0%**；**#130 新增/改动代码 0 个非等价的真 survived**（2 个等价变异 + 2 个 dedupe 阈值边界），125 个 true survived = **119 个旧代码分支 + 2 个 #104 新增代码的等价变异 + 4 个 #130 新增代码（2 等价 + 2 阈值）**，旧代码部分可由"companion 测试集不含 flow 级用例/未断言 DEBUG 文案"解释；上一轮 #104 为 558/681 = 81.9%，两轮都在 §2.5 末两节。
 > 同时（#107 后重跑 `state.py` / `errors.py` 单模块基线，见 §2.12.1 / §2.19.1：
 > `state.py` **95.8%（318/332，独立复核后）**，14 survived 全部是改动前就存在的、本次未触碰的位点；
 > `errors.py` **82.5%（80/97）**，17 survived 同理。两模块旧的 99.1% / 100% 在现工具链下**不复现**，
@@ -13,9 +13,11 @@
 > 2026-07-10 记录：§2.27 _stmt 95.2%；§2.26 _nodes 89.8%；§2.23 _expr 99.2%；§2.25 async_utils 89.3%；
 > §2.24 sexpr 100%；§2.22 _common 95.2%）
 > 状态：第一阶段基线（7 个高分模块）+ 第二阶段全量扫描（17 个模块）均已完成；
-> `expression_parser.py`：**2026-10-12（plaita#104）复扫为 558/681 = 81.9%**（123 true
-> survived = 121 个旧代码分支 + 2 个本 PR 新增代码的等价变异；#104 新增代码 0 个非等价
-> survived）。2026-10 的 100%（433/433、449/449）是更窄覆盖口径下的历史记录，见 §2.5 末节；
+> `expression_parser.py`：**2026-10-12（plaita#130）复扫为 609/734 = 83.0%**（125 true
+> survived = 119 个旧代码分支 + 2 个 #104 新增代码的等价变异 + 4 个 #130 新增代码的
+> 2 等价 + 2 dedupe 阈值边界；#130 新增代码 0 个非等价的真 survived）。上一轮 #104 为
+> 558/681 = 81.9%（123 true survived = 121 旧代码 + 2 等价）。2026-10 的 100%（433/433、
+> 449/449）是更窄覆盖口径下的历史记录，两轮复扫细节均见 §2.5 末节；
 > `concurrent.py` 已补强至 **100%**（289/289，recheck 确认）；
 > `loop.py` 已补强至 **99.3%**（300/302，见 §2.9）；
 > `state.py` 2026-10-12 复测 **95.8%**（318/332，见 §2.12.1；旧记录 99.1%（213/215）见 §2.12）；
@@ -174,7 +176,7 @@
 | 模块 | 得分 | 变异点 | survived | 备注 |
 |---|---|---|---|---|
 | `plaita/node/code.py` | **100%** | 369/369 | 0 | ✅ 完美 |
-| `plaita/core/expression_parser.py` | **81.9%** | 558/681 | 123 | ⚠️ 2026-10-12 重跑（plaita#104，见 §2.5 末节）：#104 新增代码 0 非等价 survived；123 个 true survived = 121 个旧代码分支（DEBUG 日志文案/文法特性等，companion 测试集口径）+ 2 个本 PR 新增代码的等价变异；旧记录 313/313、433/433、449/449 |
+| `plaita/core/expression_parser.py` | **83.0%** | 609/734 | 125 | ⚠️ 2026-10-12 重跑（plaita#130，见 §2.5 末节）：#130 新增代码 0 个非等价的真 survived（2 等价 + 2 dedupe 阈值边界）；125 = 119 个旧代码分支（DEBUG 日志文案/文法特性等，companion 测试集口径）+ 2 个 #104 新增代码的等价变异 + 4 个 #130 新增代码；上一轮 #104 为 558/681 = 81.9%（123 survived）；旧记录 313/313、433/433、449/449 |
 | `plaita/node/concurrent.py` | **100%** | 289/289 | 0 | ✅ 已强化（见 §2.6） |
 | `plaita/core/executor.py` | **98.1%** | 201/205 | 4 | ✅ resume 透传补强（见 §2.20）；剩 4 等价 |
 | `plaita/dsl/builder.py` | ~~99.9%~~ **84.1%** | 914（766 killed / 145 survived / 3 timeout） | 145 | ⚠️ **2026-10-12 按 §7.2 重扫回填**（见 §2.8 末节）：旧 876/877 = 99.9% 在现工具链下**不可复现**（口径 + 覆盖都不同）；**#108 的改动本身确为变异中性**（可运行变异集合 hash 相同），但该模块的真实分是 **84.1%**，缺口主要在 `_auto_chain`(24) / `FlowBuilder.from_dict`(21) / `_linear`(16) / `_error_handler`(10) |
@@ -320,6 +322,47 @@ survived。）
 代码 + 更窄的覆盖口径，**在 HEAD 上不可复现**；本表已按 2026-10-12 的真实复扫
 更新。要回到 100% 需要单独一轮"日志文案 + flow 级用例纳入 recheck 测试集"的
 补测，与 #104 无关，不在本 PR 范围内。
+
+### 2026-10-12 plaita#130 后的单模块重跑（真实分 83.0%）
+
+`plaita#130` 在 `_compile_variable` 的 thunk 里加了 `$NODE.raw.<节点>[.<路径>…]`
+显式取原文分支，并新增 `_RAW_MODIFIER` / `_warn_raw_accessor_collision` /
+`_warned_raw_collisions`。按 §7.2 单模块重跑（`only_mutate` 收窄为
+`plaita/core/expression_parser.py`），测试集 = 上一节 15 个文件 +
+`tests/unit/test_expression_parser_raw_accessor.py`（新增，16 个）。
+
+| 阶段 | 数字 |
+|---|---|
+| `mutmut run` 初筛（覆盖率口径生成） | 734 变异：519 killed / 215 非 killed / **0 timeout** |
+| 独立进程 recheck（215 个非 killed） | 90 个假阳 → **125 true survived** ⇒ 609/734 = **83.0%** |
+
+**#130 新增代码：0 个非等价的真 survived，只有 2 个等价变异 + 2 个 dedupe 阈值边界**：
+
+- `_compile_variable__mutmut_29`（`raw_mode = False` → `None`）：**等价**——`raw_mode`
+  只出现在 `not raw_mode` 里，`not None` 与 `not False` 同值；
+- `_compile_variable__mutmut_39`（`segments[0][0] == "field"` →
+  `segments[1][0] == "field"`）：**等价**——同一条件里的 `segments[0][2] == "raw"`
+  已蕴含首段是 field（索引段的第三槽是数字串，永不为 `raw`），被替换掉的判断冗余；
+- `_warn_raw_accessor_collision__mutmut_2` / `__mutmut_3`（`len(_warned_raw_collisions) > 512`
+  → `>= 512` / `> 513`）：**dedupe 缓存重置阈值边界**，只在"同一进程里出现 512 个以上
+  不同冲突路径串"时才可观察（会让 WARNING 提前/延后重复一次）。不是严格等价，但属于
+  私有缓存哨兵、与 `_warn_suspicious_literal`（14 survived）/ `_warn_unmatched_template`
+  （10 survived）里同形的未杀变异同类，本轮不为它写"戳私有集合"的测试。
+
+**125 true survived = 119 个旧代码分支 + 2 个 #104 新增代码的等价变异 +
+4 个 #130 新增代码的（2 等价 + 2 阈值边界）**。旧代码 121 → 119 是因为 #130 新增的
+`$NODE.raw…` 用例顺带杀掉了 2 个 `_compile_variable` 旧变异点。旧代码成因仍与上一节
+相同（companion 测试集不含 flow 级用例 / 未断言 DEBUG-WARNING 文案）。本轮新增断言
+`test_node_named_raw_wins_and_warns_once_per_string` 对**新** WARNING 做了全文案断言
+（与 #104 对其新增 DEBUG 轨迹的做法一致），因此 `_warn_raw_accessor_collision` 的
+2 个文案变异（`XX` 前缀/后缀、`$NODE`→`$node`）均被独立 recheck 判 killed。
+
+recheck 机制与上一节相同：**未用** `scripts/recheck_mutants.sh`（其 TESTS 常量不含
+表达式解析器测试文件），而是在 `mutants/` 内用
+`MUTANT_UNDER_TEST=<id> python -m pytest -x -q -p no:randomly <上表 16 个文件>`
+逐点跑（超时由 Python `subprocess.run(timeout=120)` 强制，不用裸 `timeout`），
+rc=0 ⇒ survived、124/126/127 ⇒ error（本轮 0 个）、其余 ⇒ killed；并先对未变异树
+跑同一集合自检（rc=0）。
 
 ## 2.6 concurrent.py 强化（2026-07-06，100%）
 
