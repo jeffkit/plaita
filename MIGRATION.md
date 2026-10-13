@@ -8,6 +8,49 @@
 
 ## Unreleased（0.5.x）
 
+### DSL：`@childflow("<text>")` 的位置实参由 `desc` 变成子流程 `flow_id`（plaita#145）
+
+`childflow()` 此前签名是 `childflow(desc=None)`，位置实参只能是说明文字；现在
+与 `@flow("<id>")` 对齐为 `childflow(flow_id=None, *, desc=None)`——**位置实参是
+子流程 id，`desc` 改为纯关键字参数**。存量代码若把说明文字写成位置实参，
+升级后它会被当成 `flow_id`（不再进 IR 的 `desc`），且**语义会变**：子流程的
+`$FLOW_ID` / `$GLOBAL.flow_id` 从"回落到父流程 id"变成该文字。
+
+- **受影响**：`@childflow("说明文字")` 这类**位置实参**写法。实测差异
+  （base = 本改动前）：
+  - 真实装饰器路径：base 写入 IR `desc="说明文字"`、`flow_id=None`；现在写入
+    `flow_id="说明文字"`、无 `desc`。
+  - 源码字符串路径（`flow_from_source` / `compile_source`）：base **两者都不写**
+    （`_extract_deco_opts` 取到位置实参后丢弃，`desc` 与 `flow_id` 都是 `None`）；
+    现在写入 `flow_id="说明文字"`——即从"静默丢弃"变为"生效"，子流程的
+    `$FLOW_ID` 因此从父 id 变成该文字。
+- **不受影响**：`@childflow()` / `@childflow(desc="说明")` / `@childflow(desc=…)`
+  完全不变（行为逐字一致；历史上 `desc` 只有关键字一种写法能可靠工作，本次只是
+  把"位置实参"这个空位让给 `flow_id`）。
+- **迁移**：把位置实参改成关键字，并（可选）补一个 id：
+
+      # 旧（升级后 "计算折扣" 会变成子流程 id，不再进 desc）
+      @childflow("计算折扣")
+      def discount(INPUT): ...
+
+      # 新：说明回关键字；需要子流程标识时再给位置 id
+      @childflow(desc="计算折扣")
+      def discount(INPUT): ...
+
+      # 或者两者都要
+      @childflow("discount", desc="计算折扣")
+      def discount(INPUT): ...
+
+- **顺带提醒（不是 break，是新能力）**：`flow_id` **不参与节点寻址**（引擎只在
+  告警文案里引用它），但**会被写进执行上下文**（`plaita/core/context.py:314` →
+  `$GLOBAL.flow_id`；`context.py:331` / `plaita/core/state.py:632` → `$FLOW_ID`，
+  别名 `$FLOW`）。因此**显式给 id 会改变子流程内 `$FLOW_ID` 的取值**：不给
+  （或旧写法）时它经父上下文回落得到父流程 id，给了就是该 id——按 `$FLOW_ID`
+  分支的表达式会走到不同分支。不给 id **不回落函数名**（内联子流程没有可用
+  函数名，回落会让同名子流程撞 id）；非 `str` 位置实参（如 `@childflow(123)`）
+  编译期抛 `_CodeflowError`。详见
+  `plaita-ai/plaita_ai/skills/flow-coder/references/authoring-spec.md` §2.7。
+
 ### 表达式：字段段不再能遍历 Python 内部属性（下划线名硬报错，plaita#55）
 
 `$ROOT.field.field…` 的字段段此前无条件交给 `_get_attr` 的 `getattr` 回退（没有

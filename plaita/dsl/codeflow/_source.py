@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import textwrap
 import warnings
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from plaita.core.flow import Flow
 from plaita.dsl.codeflow._common import (
@@ -55,6 +56,68 @@ def _default_input_type() -> Dict[str, str]:
     return {"dataType": "object"}
 
 
+def _iter_child_scopes(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """一个节点内嵌的子流程作用域：``childFlow`` / ``child_flow`` / ``branches[].flow``。
+
+    ``childFlow`` 可能是 JSON 字符串（发动机 ``Flow.model_validate_json`` 口径），
+    这里按同一口径解析；解析失败就当没有（发射器另有 EmitError 兜底）。
+    """
+    scopes: List[Dict[str, Any]] = []
+    for key in ("childFlow", "child_flow"):
+        inner = node.get(key)
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner)
+            except ValueError:
+                inner = None
+        if isinstance(inner, dict):
+            scopes.append(inner)
+    for branch in node.get("branches") or []:
+        if isinstance(branch, dict) and isinstance(branch.get("flow"), dict):
+            scopes.append(branch["flow"])
+    return scopes
+
+
+def _warn_duplicate_child_flow_ids(ir: Dict[str, Any]) -> None:
+    """同一份文档里两个**不同**子流程声明了同一个 ``flow_id`` 时告警（#145）。
+
+    ``flow_id`` 不参与节点寻址/查找（但会写进执行上下文，``$FLOW_ID`` 可见），
+    重复不影响执行，但排障时无法区分是哪一份子流程；
+    而"不给 id 就不回落函数名"的理由正是避免同名撞 id ⇒ 显式撞 id 至少要可见。
+    只告警不报错（存量 flow 不因此中断）。
+
+    **按对象身份去重**：同一份子流程被父流程多处引用时，父 IR 里嵌的是同一个
+    dict 对象（实测 ``nodes[i]["childFlow"] is nodes[j]["childFlow"]``），属合法
+    复用而非重复声明，不得告警。
+    """
+    seen: Dict[Any, Dict[str, Any]] = {}
+    visited: Set[int] = set()
+
+    def walk(scope: Dict[str, Any]) -> None:
+        for node in scope.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            for child in _iter_child_scopes(node):
+                if id(child) in visited:
+                    continue
+                visited.add(id(child))
+                flow_id = child.get("flow_id")
+                if flow_id is not None:
+                    if flow_id in seen:
+                        warnings.warn(
+                            f"内联子流程 flow_id 重复: {flow_id!r} 被多个不同的子流程"
+                            "声明使用；flow_id 不参与节点寻址/查找（但会写进执行上下文，$FLOW_ID 可见），重复不影响"
+                            "执行，但排障时无法区分——请改用唯一 id，或全部省略。",
+                            UserWarning,
+                            stacklevel=3,
+                        )
+                    else:
+                        seen[flow_id] = child
+                walk(child)
+
+    walk(ir)
+
+
 def _compile_fdef(
     fdef: ast.FunctionDef,
     flow_id: Optional[str],
@@ -90,17 +153,37 @@ def _compile_fdef(
     if md is not None:
         data["metadata"] = md
     data["nodes"] = ctx.nodes
+    # 主流程是唯一能看到全部内嵌子流程的装配点（装饰器与 compile_source 两条
+    # 入口都汇到这里），重名检测放这里可同时覆盖两条路径（#145）。
+    _warn_duplicate_child_flow_ids(data)
     return data
 
 
 def _compile_childflow_fdef(
     fdef: ast.FunctionDef,
-    opts: Dict[str, Any],
+    flow_id: Optional[str] = None,
+    opts: Optional[Dict[str, Any]] = None,
     module_globals: Optional[Dict[str, Any]] = None,
     childflows: Optional[Dict[str, Dict[str, Any]]] = None,
     known_node_types: Optional[set] = None,
 ) -> Dict[str, Any]:
-    """编译一个 ``@childflow`` FunctionDef 到子流程 IR dict。"""
+    """编译一个 ``@childflow`` FunctionDef 到子流程 IR dict。
+
+    ``flow_id`` 来自 ``@childflow("<id>")`` 的位置参数。它**不参与节点寻址 /
+    查找**（``flow.py`` 里四处引用全在 ``logger.warning`` 里），但**会写进执行
+    上下文**（``context.py:314`` → ``$GLOBAL.flow_id``；``context.py:331`` /
+    ``state.py:632`` → ``$FLOW_ID``，别名 ``$FLOW``），所以子流程内的表达式
+    **能读到它**。不给就是 ``None``——**不回落函数名**（内联子流程没有函数名
+    可用，回落会让两个同名子流程撞 id）；此时 ``_resolve_expression_string``
+    的父上下文回落（``context.py:137-148``）让 ``$FLOW_ID`` 取到**父流程**的 id。
+    """
+    if flow_id is not None and not isinstance(flow_id, str):
+        raise _CodeflowError(
+            "@childflow 的位置参数是子流程 flow_id，必须是 str，"
+            f"得到 {type(flow_id).__name__}: {flow_id!r}",
+            fdef,
+        )
+    opts = opts or {}
     ctx = _CompileCtx(
         module_globals=module_globals or {},
         childflows=childflows or {},
@@ -111,7 +194,10 @@ def _compile_childflow_fdef(
         raise _CodeflowError("子流程函数体为空", fdef)
     start_id = ctx.auto_id("start")
     ctx.nodes.insert(0, {"type": "start", "id": start_id, "next": entry})
-    data: Dict[str, Any] = {"runtime": "python", "nodes": ctx.nodes}
+    data: Dict[str, Any] = {"runtime": "python"}
+    if flow_id is not None:
+        data["flow_id"] = flow_id
+    data["nodes"] = ctx.nodes
     _warn_deprecated_type_opts(opts)
     data["inputType"] = _default_input_type()
     if opts.get("desc") is not None:
@@ -165,17 +251,28 @@ def flow(
 
 
 def childflow(
+    flow_id: Optional[str] = None,
+    *,
     desc: Optional[str] = None,
 ) -> Callable[[Callable], "_ChildFlowMarker"]:
     """``@childflow`` 装饰一个子流程函数，供 ``CHILD/REFERENCE/PARALLEL`` 引用。
 
     编译产物挂在 ``.__codeflow_ir__`` 上，被父流程编译时取出嵌入。
+
+    签名与 ``@flow`` 对齐：位置参数是子流程的 ``flow_id``，``desc`` 是纯关键字
+    参数（``@childflow("cf")`` / ``@childflow(desc="…")`` / ``@childflow("cf", desc="…")``
+    / ``@childflow()`` 均合法）。``flow_id`` **不参与节点寻址**，但**会写进执行
+    上下文**（``$FLOW_ID`` / ``$GLOBAL.flow_id``），子流程内的表达式能读到它；
+    不给即 ``None``，**不回落函数名**（此时 ``$FLOW_ID`` 经父上下文回落取到父
+    flow 的 id）。详见 ``_compile_childflow_fdef`` 与
+    ``plaita-ai/.../references/authoring-spec.md`` §2.7。
     """
 
     def decorator(func: Callable) -> _ChildFlowMarker:
         fdef = _func_ast(func)
         data = _compile_childflow_fdef(
             fdef,
+            flow_id,
             {"desc": desc},
             module_globals=getattr(func, "__globals__", {}),
         )
@@ -274,8 +371,9 @@ def compile_source(src: str, flow_id: Optional[str] = None, **opts: Any) -> Dict
         deco_names = [n for n in (_deco_name(d) for d in stmt.decorator_list) if n]
         if "childflow" in deco_names:
             cf_deco = next(d for d in stmt.decorator_list if _deco_name(d) == "childflow")
-            _, cf_opts = _extract_deco_opts(cf_deco)
-            childflows[stmt.name] = _compile_childflow_fdef(stmt, cf_opts, childflows=childflows)
+            cf_flow_id, cf_opts = _extract_deco_opts(cf_deco)
+            childflows[stmt.name] = _compile_childflow_fdef(
+                stmt, cf_flow_id, cf_opts, childflows=childflows)
             continue
         if "flow" in deco_names:
             flow_deco_candidates.append(stmt)

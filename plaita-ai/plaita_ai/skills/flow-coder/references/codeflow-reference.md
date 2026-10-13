@@ -200,6 +200,29 @@ def double_via_child(INPUT):
 - `CHILD` 的 `input` 恒为 dict（`$INPUT` 已不支持数组形态）。
 - 运行期生成时，源码里可含**多个 `@childflow` + 一个 `@flow` 主函数**，`flow_from_source` 自动收集子流程注册表，主流程用 `flow=<name>` 引用。有多个候选主流程时用 `flow_from_source(src, flow_id="bar")` 指定。
 
+### 6.1 `@childflow` 的位置参数是子流程 `flow_id`
+
+与 `@flow("<flow_id>")` 同形制：位置参数是 id，`desc` 是**纯关键字**参数（位置串永远是 id，不会被当成 `desc`）：
+
+```python
+@childflow("cf")                 # 位置 id -> 子流程 IR flow_id == "cf"
+@childflow(desc="说明")           # 只有说明 -> flow_id is None
+@childflow("cf", desc="说明")     # 两者
+@childflow()                     # 匿名 -> flow_id is None
+```
+
+- **不参与节点寻址 / 查找**：`plaita/core/flow.py` 里 `flow_id` 的引用全在日志与元数据路径上——**5 处 `logger.warning` 调用**（`flow.py:178/250/281/311/343`，消息里用到 `flow_id`：结构性拓扑检查、`next`/`branches` 环检测（`"flow %s contains a cycle ..."`）、节点构建期校验、`$ENV` 未覆盖告警）、已废弃的 `Flow.id` 访问器、IR 键归一化。它不是路由键，也不是跨流程引用名（引用用源码函数名 `flow=<name>`）。
+- **但它会被写进执行上下文，所以是可观测的（不是"零影响"）**：`plaita/core/context.py:314` → `$GLOBAL.flow_id`；`context.py:331` / `plaita/core/state.py:632` → `$FLOW_ID`（别名 `$FLOW`）。子流程内的表达式读得到**子流程自己**的 id。
+  - **不给 id ⇒ `flow_id is None`，不回落函数名**：内联子流程没有可用的函数名，回落会让同名子流程撞 id。
+  - 此时子作用域的 `$FLOW_ID` 求值为 `None`，`_resolve_expression_string`（`context.py:137-148`）**回落到父上下文** ⇒ 取到**父流程**的 id。实测（同一份源码，子 `end` 的 output 写 `$FLOW_ID`）：`@childflow("cf")` → `'cf'`，裸 `@childflow` → `'parent'`。**给不给 id 会改变 `$FLOW_ID`/`$GLOBAL.flow_id`，按它分支的表达式会走不同分支。**
+  - 另一处引用（`core/strategies.py:580` 把 `flow.flow_id` 放进事件订阅参数，`server/event_filter.py:175` 与 `state.flow_id` 比较）**内联子流程走不到**：实测同一 event 节点放进带 id 的子流程里不产生订阅（按 `lazy` 选 Normal/Generator，不进入 `_subscribe_event`）⇒ 不构成额外可观测面。
+- `emit_source` → `compile_source` 往返保真：`@childflow("cf")` 发射为 `@childflow('cf')`，重编译后子流程 IR 的 `flow_id` 与 `Flow` 对象上的 `child_flow.flow_id` 都仍是 `"cf"`（#145）。
+- **id 只按类型把关**：任何 `str` 都收（含 `""` / 纯空白，原样写入并往返）；**非 `str`**（如 `@childflow(123)`）编译期抛 `_CodeflowError`（`[codeflow] 第 N 行: @childflow 的位置参数是子流程 flow_id，必须是 str，…`），不静默退化。
+- **重名只告警不报错**：同一文档里两个**不同**子流程撞 `flow_id` ⇒ `UserWarning`；同一子流程被父流程多处引用（共享同一 IR 对象）不告警。
+- **源码字符串路径只认位置实参**：`compile_source` / `flow_from_source` 只读 `args[0]`，`@childflow(flow_id="cf")`、`@childflow("a", "b")` 的关键字/第二个位置实参被静默忽略（与 `@flow(flow_id=…)` 的既有约定一致）；真实装饰器才按 Python 语义生效。
+- 存量 JSON 产物里的非 `str` `flow_id`（如 `5`）按 `str()` 归一发射（`@childflow('5')`），保证"发射器输出永远可重编译"（#76）。
+- **已知边界（#145 之外，base 同样存在）**：`emit_source` 逆映射不了 `$FLOW_ID`（`_emit._BASE_NS` 没这个根），带 `$FLOW_ID` 的 flow 发射时抛 `EmitError: 无法逆映射表达式 '$FLOW_ID'`；`$GLOBAL.flow_id` 不受影响。
+
 ## 7. HTTP + 错误处理
 
 ```python
@@ -343,7 +366,7 @@ print(flow.run(name="alice"))   # -> "hi ALICE"
 | `plaita.dsl.codeflow.compile_source(src, ...)` | 源码字符串 → IR dict（不构建，用于校验/审计） |
 | `plaita.dsl.codeflow.compile_func(fn, flow_id)` | Python 函数 → IR dict（不构建） |
 | `plaita.dsl.codeflow.flow(flow_id, ...)` | 装饰器：Python 函数 → `Flow`（需模块级源文件） |
-| `plaita.dsl.codeflow.childflow(...)` | 装饰器：子流程函数 |
+| `plaita.dsl.codeflow.childflow(flow_id, *, desc=...)` | 装饰器：子流程函数（`flow_id` 可省；会写进执行上下文，见 §6.1） |
 | 占位符 | `HTTP CODE EVENT MAP FILTER FIND LOOP REDUCE WHILE CHILD REFERENCE PARALLEL` + 自定义节点（`node_type` 大写，如 `LLM`/`RETRIEVE`/`TOOL`，须已注册） |
 | 命名空间 | `F INPUT NODE GLOBAL PARENT ENV` |
 | 错误处理 | `ErrorHandler(...)` |

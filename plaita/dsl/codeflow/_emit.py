@@ -652,9 +652,16 @@ def _emit_childflow_blocks(name: str, child_ir: Dict[str, Any]) -> List[str]:
     blocks: List[str] = []
     for inner_name, inner_ir in collector.entries:
         blocks.extend(_emit_childflow_blocks(inner_name, inner_ir))
-    deco = "@childflow"
+    deco_args: List[str] = []
+    if child_ir.get("flow_id") is not None:
+        # 位置参数 = 子流程 flow_id；缺失即匿名子流程，不回落函数名——`child_N`
+        # 是发射器的产物名，不是声明处的身份。非 str 的 JSON-IR id 按 ``str()``
+        # 归一，否则会发射出 ``@childflow(5)`` 这种自己吃不回去的源码
+        # （#76 不变量：发射器输出永远可重编译）。
+        deco_args.append(repr(str(child_ir["flow_id"])))
     if child_ir.get("desc") is not None:
-        deco = f"@childflow(desc={child_ir['desc']!r})"
+        deco_args.append(f"desc={child_ir['desc']!r}")
+    deco = "@childflow" if not deco_args else f"@childflow({', '.join(deco_args)})"
     lines = [deco, f"def {name}(INPUT):"]
     lines.extend(f"    {ln}" for ln in body)
     blocks.append("\n".join(lines))

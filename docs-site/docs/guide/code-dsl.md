@@ -221,6 +221,20 @@ double_via_child.run(payload=21)   # -> 42
 
 > `CHILD` 的 `input` 要与子流程的输入形态匹配：`$INPUT` 恒为 dict，`input` 就传 dict。
 
+`@childflow` 与 `@flow` 同形制：**位置参数是子流程的 `flow_id`**，`desc` 是纯关键字参数（位置串永远是 id，不会被当成 `desc`）：
+
+```python
+@childflow("cf")                 # 位置 id -> 子流程 IR flow_id == "cf"
+@childflow(desc="说明")           # 只有说明 -> flow_id is None（历史写法，行为不变）
+@childflow("cf", desc="说明")     # 两者
+@childflow()                     # 匿名 -> flow_id is None
+```
+
+> **`flow_id` 不参与节点寻址 / 查找**：`plaita/core/flow.py` 里它的引用全在日志与元数据路径上（5 处 `logger.warning`：`flow.py:178/250/281/311/343`，以及已废弃的 `Flow.id` 访问器与 IR 键归一化）。它不是路由键，也不是跨流程引用名（引用用源码函数名 `flow=<name>`）。
+> **但它会被写进执行上下文，因此是可观测的**：`plaita/core/context.py:314` → `$GLOBAL.flow_id`；`context.py:331` / `state.py:632` → `$FLOW_ID`（别名 `$FLOW`）。实测（子 `end` 的 output 写 `$FLOW_ID`）：`@childflow("cf")` 得到 `'cf'`；**裸 `@childflow` 得到父流程的 id**（子作用域为 `None`，`context.py:137-148` 回落到父上下文）——所以**给不给 id 会改变 `$FLOW_ID` 的值，按它分支的表达式会走不同分支**。
+> 不给 id 就是 `None`，**不回落函数名**——内联子流程没有可用函数名，回落会让同名子流程撞 id。
+> `emit_source` → `compile_source` 往返保真这个值（#145）；id **只按类型把关**（任何 `str` 都收，含 `""`/纯空白；非 str 如 `@childflow(123)` 编译期抛 `_CodeflowError`）；同一文档内两个**不同**子流程撞 id 只发 `UserWarning`（同一子流程被多处引用不告警）。源码字符串路径只认位置实参（`flow_id=` / 第二个位置实参被忽略）。
+
 ### 编译期校验
 
 `@flow` 在构建 `Flow` 前做静态分析，报行号：
@@ -352,6 +366,7 @@ flow.run(payload=21)           # -> 42
 - 源码里可含多个函数：`@childflow` 装饰的子流程会被收集进注册表，供主流程用 `flow=<name>` 引用（不需要真正执行装饰器）。
 - 主流程是 `@flow` 装饰的函数，或唯一一个非 childflow 函数；有多个候选时用 `flow_from_source(src, flow_id="bar")` 指定。
 - `@flow("id", desc=...)` 装饰器参数会被自动提取；显式传给 `flow_from_source` 的同名参数覆盖装饰器值。
+- `@childflow("<id>")` 的位置参数（子流程 `flow_id`）同样会被提取并写进子流程 IR；不给即 `flow_id is None`，不回落函数名（此时 `$FLOW_ID` 回落到父 id）。见 [子流程 @childflow + CHILD](#子流程-childflow--child)。
 - `input_type` / `output_type` 参数**已废弃且被忽略**：`$INPUT` 恒为 `run()` 传入的 dict，无需声明。源码里若仍写了（如 AI 生成的旧式代码），编译期会发 `DeprecationWarning` 并忽略。
 - `compile_source(src)` 只编译成 IR dict 不构建，便于审查/序列化。
 
@@ -384,6 +399,7 @@ flow = flow_from_source(src)   # 迁移后走同一执行入口
 语义保证与边界：
 
 - **语义等价而非逐字节等价**：`compile_source(emit_source(ir))` 与 `ir` 在「剥派生注解（name/desc/source_line）+ 非语义 id 规范化」口径下相等。变量名 id 与显式 `id=` 钉住的 id 恒定；if/return 的派生 id、无名节点 `_n{n}` 计数 id 由重编译时的语句形态决定，可能变化。
+- **子流程 `flow_id` 保真**：内联子图带 `flow_id` 时发射为位置参数 `@childflow('<id>')`（非 str 值按 `str()` 归一，保证发射产物可再编译），重编译后回到同一个 `flow_id`；不带则不发射 id（保持匿名，不拿 `child_N` 产物名回填）。`flow_id` 不参与节点寻址（`flow.py` 的引用全在 warning 里），但会写进执行上下文（`$FLOW_ID` / `$GLOBAL.flow_id`）——详见上文「子流程 @childflow + CHILD」。
 - **不可表达构造抛 `EmitError`**（不产出错误代码）：`switch`/`bool` 合成节点（builder 专属）、非 object `inputType`、空真分支或两分支同址的 if、无法结构化的任意图。
 - IR 里以 `$` 开头的字符串一律按表达式逆映射；原始字面量恰以 `$` 开头的场景编译期已丢失区分，属已知边界。
 - **事件节点的键名两套都收**：event 节点按 `eventType`（编译器自产 IR，优先）→ `event_type`（存量 JSON flow 的权威键名）回退读取，过滤器同理 `eventFilter` → `event_filter`；两种写法的同一份 IR emit 出同一份源码。
@@ -576,7 +592,7 @@ print(flow_to_sexpr(d))   # 回到可读的 S-expr
 | `plaita.dsl.codeflow.flow(flow_id, ...)` | 装饰器：Python 函数 → `Flow`（需模块级源文件） |
 | `plaita.dsl.codeflow.flow_from_source(src, ...)` | 源码字符串 → `Flow`（运行期生成，无源文件依赖） |
 | `plaita.dsl.codeflow.compile_source(src, ...)` | 源码字符串 → IR dict（不构建） |
-| `plaita.dsl.codeflow.childflow(...)` | 装饰器：子流程函数 |
+| `plaita.dsl.codeflow.childflow(flow_id, *, desc=...)` | 装饰器：子流程函数（`flow_id` 可省；会写进执行上下文，见 §子流程 @childflow + CHILD） |
 | `plaita.dsl.codeflow.compile_func(fn, flow_id)` | Python 函数 → IR dict（不构建） |
 | `plaita.dsl.codeflow.HTTP / CODE / EVENT / MAP / FILTER / FIND / LOOP / REDUCE / CHILD / REFERENCE / PARALLEL` | 内置节点调用占位符 |
 | 自定义节点占位符 | `node_type` 大写（如 `LLM`/`RETRIEVE`/`TOOL`），须先 `get_default_registry().register(NodeSubclass)` |

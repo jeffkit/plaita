@@ -84,6 +84,30 @@ def bad(INPUT):
 - 同时写入 `name`（短标签，如 `INPUT.score >= 90?`）与 `desc`（`if INPUT.score >= 90（第 4 行）`）——console 画布第二行显示、悬停可见；`source_line` 依旧逐节点回标，发布链路把 `metadata.source`（@flow 源码原文）一并带上后，画布可「节点 → 源码行」跳转（参照 mediaflow `publish_console.py`）。
 - **含义**：运行期报错、dry-run 面板、执行记录里的节点名直接可读（`if_score_ge_90 出错了 (源码第 4 行)`）。作者侧唯一要做的：**让条件里的字段名可读**（`INPUT.score` 而非 `INPUT.v1`）。
 
+### 2.7 `@childflow("<id>")`：声明处给内联子流程一个标识
+
+`@childflow` 与 `@flow` 同形制：**位置参数是 `flow_id`**，`desc` 是纯关键字参数。
+
+```python
+@childflow("cf")                 # 位置 id
+@childflow(desc="说明")           # 只有说明（与历史上唯一写法完全兼容）
+@childflow("cf", desc="说明")     # 两者
+@childflow()                     # 匿名
+```
+
+- **不参与节点寻址 / 查找**。`plaita/core/flow.py` 里 `flow_id` 的引用全在**日志与元数据路径**上：**5 处 `logger.warning` 调用**（`flow.py:178/250/281/311/343`，其消息里使用了 `flow_id`——结构性拓扑检查、`next`/`branches` 环检测、节点构建期校验、`$ENV` 未覆盖告警）、已废弃的 `Flow.id` 访问器（`:101-107`）与 IR 键归一化（`:118-122`）；**不要**把它当路由键、节点寻址键或跨流程引用名（引用子流程用的是源码里的函数名 `flow=<name>`）。
+- **但它会被写进执行上下文，因此是可观测的——不是"零影响"**（#145 评审实测纠正）：
+  - `plaita/core/context.py:314` → `$GLOBAL.flow_id`；`plaita/core/context.py:331`（写入 `plaita/core/state.py:632`）→ `$FLOW_ID`，别名 `$FLOW`。子流程内的表达式因此读得到**子流程自己**的 id。
+  - **不给 id 时是 `None`，而 `_resolve_expression_string`（`plaita/core/context.py:137-148`）在子作用域求值为 `None` 时会回落到父上下文** ⇒ 同一个 `$FLOW_ID` 取到**父流程的 id**（父流程默认 id = 函数名）。
+  - 净效果（实测，同一份源码，子 `end` 的 output 写 `$FLOW_ID`）：`@childflow("cf")` → `'cf'`；裸 `@childflow` → `'parent'`。**所以"给不给 id"会实打实改变 `$FLOW_ID` / `$GLOBAL.flow_id` 的取值——按它分支的表达式会走到不同分支。** 回归钉子：`tests/unit/test_codeflow_childflow_flow_id.py::TestFlowIdIsObservable`。
+  - 代码里另有一处引用（`plaita/core/strategies.py:580` 把 `flow.flow_id` 放进事件订阅参数，`plaita/server/event_filter.py:175` 用它与 `state.flow_id` 比较），但**内联子流程走不到这条路径**：实测把同一个 event 节点放进带 id 的子流程里**根本不产生订阅**（子执行按 `lazy` 选择 Normal/Generator，不进入 `_subscribe_event`）⇒ **不构成额外的可观测面**，此处仅为记录。
+- **不给 id 就是 `None`，不回落函数名**。内联子流程没有可用的函数名（被嵌入父流程 IR），回落会让两个同名子流程撞 id；宁可保持匿名（代价见上：`$FLOW_ID` 回落成父 id）。
+- **原样写进 IR，往返保真**：`@childflow("cf")` 的 id 写进子流程 IR 的 `flow_id`，`emit_source` → `compile_source` 往返不丢（#145）——存量 JSON 产物转源码再转回来不会丢身份。
+- **id 闸门只按类型把关**：任何 `str` 都收，包括 `""` 与纯空白（原样写入、原样往返）；**非 `str`**（如 `@childflow(123)`）编译期抛 `_CodeflowError` 并报行号。不做非空 / 去空白校验。
+- **重名只告警不报错**：同一份文档里两个**不同**子流程声明了同一个 `flow_id` 时发 `UserWarning`；**同一子流程被父流程多处引用不告警**（那是共享同一份 IR 的合法复用）。`flow_id` 重复不影响执行（它只是标识），但排障时无法区分是哪一份。
+- **源码字符串路径只认位置实参**：`flow_from_source` / `compile_source` 只读 `args[0]`，`@childflow(flow_id="cf")` 或 `@childflow("a", "b")` 里的关键字 / 第二个位置实参会被**静默忽略**（与既有 `@flow(flow_id=…)` 的约定一致）；真实装饰器 `childflow(...)` 才按 Python 语义生效。
+- 存量 JSON 产物里的非 `str` `flow_id`（如 `5`）由发射器按 `str()` 归一（`@childflow('5')`），保证"发射器输出永远可重编译"（#76）。
+
 ## 3. prompt 工程约束
 
 - **大段 prompt 不进 flow 图**（ADR 决议）：静态头部、指令模板在业务粘接节点（或 CODE 节点）里预拼成完整字符串；flow 图里 `{% ... %}` 只引用预拼串与少量表达式，保证图可读、可审计。
