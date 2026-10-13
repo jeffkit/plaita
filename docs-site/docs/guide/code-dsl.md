@@ -481,6 +481,7 @@ flow.run(age=15)   # -> "未成年"
 | `(list ...)` | list 字面量 |
 | `:child (childflow ...)` | 集合节点内联子流程 |
 | `(childflow :flow-id "cf" ...)` | 内联子流程**自身**的 `flow_id`（plaita#149）；不写则保持缺失，不凭空造名 |
+| `(parallel :id p :mode thread :join-branches (b1 b2) :is-conditional true (pbranch b1 :flow (childflow ...) [:input <expr>] [:when <cond>]) ... -> <next>)` | parallel 节点：`(pbranch ...)` 是**位置参数**，可重复（plaita#150，见下） |
 | `:id <name>` | 显式节点 id（被分支/`$NODE` 引用时需要） |
 
 不写 `:id` 时自动分配 `_n1`/`_n2`/…；`end`/`assignment` 支持把第一个位置参数当 id（`(end adult :output "成年")`）。
@@ -748,6 +749,97 @@ Pinned by `TestDictKeySpellingRoundTrip` in `tests/unit/test_sexpr.py`: a 24-key
 corpus × 4 dict carriers (including the issue-named `:error` path), the
 spelling boundary, base byte-identity, fail-closed, the two #147 hazard cases,
 and a class-level "every emission re-parses" guard.
+
+### Node-type coverage: writer ⊇ reader (plaita#150)
+
+The reader's node dispatch (`_NODE_COMPILERS`) and the writer
+(`_node_to_src`) are two independent type sets. If the reader grows a type the
+writer has never handled, **nothing turns red** -- the node *type* can still
+round-trip while everything inside the node is dropped. Before #150 a
+`parallel` node emitted as the hollow shell `(parallel :id p)`: the
+`pbranch` children, `:join-branches`, `:is-conditional`, `:mode` and `-> next`
+all vanished, the recompiled graph was disconnected, and no error was raised.
+This is the same rule #76 / #136 / #147 / #148 established (the emitter must
+not produce source that is not a faithful program), sharpened: here the
+unfaithful source *does* re-parse, which is why a type-level check missed it.
+
+`parallel` / `pbranch` are now emitted in full:
+
+| IR field | Emitted form |
+|----------|--------------|
+| `branches[]` (positional) | `(pbranch <name> :flow (childflow …) [:input <expr>] [:when <cond>])` |
+| `mode` | `:mode thread` (omitted when absent; `thread` is the model default) |
+| `joinBranches` | `:join-branches (b1 b2)` (uniform list spelling, so the empty join set is `:join-branches ()`) |
+| `isConditional` | `:is-conditional true` (only when truthy -- the reader sets `True` for any truthy value, so `false` would be a lie) |
+| `next` | `-> <next>` (last, like every other node) |
+
+The `(pbranch …)` forms are **positional arguments** -- `_c_parallel` rejects
+any positional that is not one -- so every `:kw value` pair precedes them, and
+`-> next` stays last. Pinned by
+`TestNodeTypeRoundTripCorpus::test_parallel_node_survives_with_all_of_its_parts`.
+
+The same all-fields audit (populate every field the reader can read for a type,
+then round-trip) found seven more writer-side omissions for node types the
+writer *did* claim to handle. All are declared model fields whose loss changed
+IR (and for `priority`, runtime behaviour):
+
+| Node | Field | Emitted form | Why it matters |
+|------|-------|--------------|----------------|
+| `switch` | node-level `next` | `-> <next>` | successor lost |
+| `switch` branch | `priority` | `:priority 2` (only when present) | `Switch.execute` matches branches in priority order -- dropping it changes which branch wins |
+| `case` match | `name` | `:name "m1"` | otherwise re-read as `str(value)` |
+| `assignment` | `outputType` | `:output-type string` | declared output type lost |
+| `map` | `maxConcurrent` | `:max-concurrent 3` (only when present) | concurrency cap lost |
+| `code` | `input` | `:input <expr>` (only when present) | node input lost |
+| `http` | `input` | `:input <expr>` (only when present) | node input lost |
+| `end` | node-level `next` | `-> <next>` | successor lost |
+
+Two deliberate "do not invent bytes" convergences keep the pre-#150 emissions
+byte-identical: `case`'s `:name` is emitted **only when it differs from the
+reader's default** (`str(value)` -- `_c_match` derives the name from the
+positional value when `:name` is absent), and every other new token only
+appears when the IR actually carries the field. Measured over every
+`(flow …)` string literal in `tests/unit/**` (171 compilable): `shared=171,
+unchanged=152, changed=19` -- the 19 are exactly the entries whose base
+emission dropped a field or was a hollow `parallel`, with zero unrelated byte
+drift.
+
+!!! note "The issue's "21 reader types" are 18 dispatch keys + 3 non-nodes"
+
+    #150 reported "the reader accepts 21 types". That count came from including
+    three keys that are **not node types** and have no `_NODE_COMPILERS` entry:
+    `flow` (the top-level `(flow <id> …)` form name, enforced by
+    `_compile_flow`), `runtime` (a **child-flow IR field**, hard-coded by
+    `_compile_childflow` as `{"runtime": "python"}`) and `flow_id` (a flow-level
+    **field name**, read as a positional argument, see the #147/#149 sections).
+    The real dispatch table has **18 keys = 17 node implementations + 1 spelling
+    alias** (`assign` and `assignment` both point at `_c_assignment`). Pinned by
+    `TestWriterNodeTypeSymmetry::test_issue_150_count_is_18_reader_keys_plus_3_non_nodes`.
+
+The structural guard the maintainer asked for is
+`TestWriterNodeTypeSymmetry`: it parses `sexpr.py` with `ast`, collects the
+`_NODE_COMPILERS` literal and the `t == "x"` / `t in (…)` discriminants of
+`_node_to_src`, groups the reader by **handler implementation** (so the
+`assign`/`assignment` alias is not mistaken for an uncovered type) and asserts
+**writer ⊇ reader**. A future reader-side type that the writer does not emit
+turns it red immediately. It also asserts the reverse (the writer never emits a
+type the reader rejects), pins the discriminant (`t = n.get("type")`) so the
+guard cannot silently no-op, and carries an explicit -- currently **empty** --
+exemption table (`_WRITER_NODE_TYPE_EXCLUSIONS`) so an intentional omission has
+to be written down with a reason.
+
+!!! warning "Residuals (measured, deliberately out of scope here)"
+
+    - **Value-side `_expr_to_src` lossiness** is unchanged: a numeric-looking
+      *string* value such as `(code :code "1")` still re-reads as the int `1`
+      (the round-trip corpus therefore uses `"return 1"`). A branch/match
+      **name** colliding with an atom literal (`nil`/`true`/`1.5`) shares this
+      residual; the `case` writer sidesteps it by using `_string_to_src`, the
+      `switch` branch-name spelling is left exactly as base for byte-identity.
+    - The reader-side `_value()` gap for `:metadata` / `:global-context`
+      recorded in the #147 section above is untouched.
+    - `parallel` branches outside `joinBranches` (fire-and-forget) have no
+      separate IR spelling; that is the reader's shape, not a writer gap.
 
 ### 静态校验与可逆
 

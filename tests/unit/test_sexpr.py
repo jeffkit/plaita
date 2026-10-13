@@ -666,11 +666,15 @@ _DICT_CARRIERS = (
 _BARE_KEY_RE = re.compile(r'[^\s()";]+')
 
 #: 每种节点类型一条源壳：类级不变量「任何 ``flow_to_sexpr`` 输出都必须能再解析」
-#: 的语料。``parallel`` / ``code`` 存在**既有**写侧覆盖缺口（见下方断言注释），
-#: 它们同样必须能再解析。
+#: 的语料。#150 后**每个 reader 支持的节点类型**都在此列（含别名 ``assign``），
+#: 且 ``parallel`` 带分支/join/conditional/next——base 曾把它发成空壳
+#: ``(parallel :id p)``，而空壳**恰好仍能再解析**，所以这条不变量此前对它无感，
+#: 真正的守卫是 ``TestWriterNodeTypeSymmetry`` 与 ``TestNodeTypeRoundTripCorpus``。
 _NODE_CORPUS_SRC = (
     "(flow g (start :id s -> e) (end :id e :output x))",
     '(flow g (start :id s -> a) (assignment :id a "$INPUT.x" -> e)'
+    ' (end :id e :output "$NODE.a"))',
+    '(flow g (start :id s -> a) (assign :id a "$INPUT.x" -> e)'
     ' (end :id e :output "$NODE.a"))',
     '(flow g (start :id s -> i) (if :id i (cond "$INPUT.age" >= 18) -> a :else b)'
     " (end :id a :output y) (end :id b :output n))",
@@ -699,8 +703,10 @@ _NODE_CORPUS_SRC = (
     '(flow g (start :id s -> c) (reference :id c :input "$INPUT.x"'
     ' :child (childflow :flow-id "cf" (start :id cs -> ce)'
     ' (end :id ce :output "$INPUT.item")) -> e) (end :id e :output x))',
-    '(flow g (start :id s -> p) (parallel :id p (pbranch "b1"'
-    " :flow (childflow (start :id cs -> ce) (end :id ce :output 1))))"
+    '(flow g (start :id s -> p) (parallel :id p :mode thread :join-branches (b1)'
+    ' :is-conditional true'
+    ' (pbranch "b1" :flow (childflow (start :id cs -> ce) (end :id ce :output 1))'
+    ' :input "$INPUT.x" :when (cond "$INPUT.x" eq 1)) -> e)'
     " (end :id e :output x))",
     '(flow g (start :id s -> cd) (code :id cd :lang python :code "1" -> e)'
     " (end :id e :output x))",
@@ -850,6 +856,373 @@ class TestDictKeySpellingRoundTrip(unittest.TestCase):
             _function_node(tree, "_compile_dict_literal"))
             if isinstance(n, ast.Name)}
         self.assertIn("_dict_entry_key", reader_names)
+
+
+# ---------------------------------------------------------------------------
+# #150: 写侧节点类型覆盖——结构性对称守卫 + 逐类型往返 + base 字节不变
+# ---------------------------------------------------------------------------
+#
+# 病根不是"漏了 `parallel`"，而是**写侧的类型集合可以悄悄落后于读侧**：读侧
+# `_NODE_COMPILERS` 加了类型、写侧 `_node_to_src` 忘了发，没有任何东西会因此
+# 变红——节点**类型**甚至还能"往返"（base 把 parallel 发成 `(parallel :id p)`，
+# 它仍能再解析），损失发生在节点**内部**。故下面直接从源码 AST 抽两侧的类型
+# 集合做包含断言，而不是逐类型写死预期。
+
+#: issue #150 正文列出的 21 个"reader 接受的类型"。逐条核对代码后：其中 18 个
+#: 是 ``_NODE_COMPILERS`` 的 key，另 3 个**根本不是节点类型**，读侧没有它们的
+#: dispatch 分支——单列于此，以免再把计数报成 21：
+#:
+#: - ``flow``：**顶层 form 名**。``_compile_flow`` 只接受 ``(flow <id> …)``
+#:   （``str(form[0]) != "flow"`` 直接报错），是文档结构不是节点；
+#: - ``runtime``：**子流程 IR 字段**。``_compile_childflow`` 写死
+#:   ``data = {"runtime": "python"}``，从不是可读的 form 头；
+#: - ``flow_id``：**flow 级字段名**（``#149`` 定下的子流程 id 拼写），出现在
+#:   ``_FLOW_LEVEL_FIELDS`` / ``_compile_flow``，由位置参数读入，不是节点类型。
+_NON_NODE_READER_KEYS = frozenset({"flow", "flow_id", "runtime"})
+
+#: issue #150 正文的 21 项原文，用于钉住"18 个 reader key + 3 个非节点键"的分解。
+_ISSUE_150_READER_TYPES = frozenset((
+    "assign", "assignment", "case", "child", "code", "end", "event", "filter",
+    "find", "flow", "flow_id", "http", "if", "loop", "map", "parallel",
+    "reduce", "reference", "runtime", "start", "switch",
+))
+
+#: 写侧豁免表：reader 的某个节点实现若**故意**不由 ``_node_to_src`` 发射，必须
+#: 在此登记并写明理由，否则 :meth:`TestWriterNodeTypeSymmetry
+#: .test_writer_dispatch_covers_every_reader_node_implementation` 判红。
+#: 当前为**空**——18 个 reader key（17 个实现，``assign`` 是 ``assignment`` 的
+#: 拼写别名）现在全部有写侧分支；空表本身也有断言
+#: (:meth:`…test_no_undocumented_writer_exclusions`)，避免豁免被悄悄加进来。
+_WRITER_NODE_TYPE_EXCLUSIONS = {}
+
+
+def _reader_node_compilers():
+    """AST 抽取 ``_NODE_COMPILERS`` 的 ``{节点类型: handler 源码}`` 映射。"""
+    tree = ast.parse(_sexpr_module_source())
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "_NODE_COMPILERS"):
+            return {k.value: ast.unparse(v)
+                    for k, v in zip(node.value.keys, node.value.values)}
+    raise AssertionError("未在 sexpr.py 中找到 _NODE_COMPILERS 字面量")
+
+
+def _writer_node_types():
+    """AST 抽取 ``_node_to_src`` 里以 ``t`` 为判别式发射的类型集合。
+
+    只认 ``t == "x"`` / ``t in ("x", …)``：``left`` 必须是 ``Name("t")``。
+    这样 ``n["resultType"] != "success"`` 之类的字段比较不会被误收。
+    """
+    fn = _function_node(ast.parse(_sexpr_module_source()), "_node_to_src")
+    out = set()
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Compare) and len(node.ops) == 1
+                and isinstance(node.left, ast.Name) and node.left.id == "t"):
+            continue
+        op, other = node.ops[0], node.comparators[0]
+        if isinstance(op, ast.Eq) and isinstance(other, ast.Constant):
+            if isinstance(other.value, str):
+                out.add(other.value)
+        elif isinstance(op, ast.In) and isinstance(other, (ast.Tuple, ast.List)):
+            for elt in other.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    out.add(elt.value)
+    return out
+
+
+class TestWriterNodeTypeSymmetry(unittest.TestCase):
+    """#150 验收 2：写侧类型集合 ⊇ 读侧 ``_NODE_COMPILERS`` 的实现集合。
+
+    读侧按 **handler 实现**分组：``assign`` / ``assignment`` 指向同一个
+    ``_c_assignment``，属**拼写别名**而非两个节点类型，因此只要实现被覆盖即可。
+    """
+
+    def test_writer_dispatch_covers_every_reader_node_implementation(self):
+        reader = _reader_node_compilers()
+        writer = _writer_node_types()
+        groups = {}
+        for ntype, handler in reader.items():
+            groups.setdefault(handler, set()).add(ntype)
+        uncovered = {
+            "/".join(sorted(g)): reader[next(iter(g))]
+            for g in groups.values()
+            if not (g & writer) and not (g & set(_WRITER_NODE_TYPE_EXCLUSIONS))
+        }
+        self.assertEqual(
+            uncovered, {},
+            f"读侧接受、写侧 _node_to_src 不发射的节点实现: {uncovered}")
+
+    def test_reader_alias_groups_are_only_assign_assignment(self):
+        """别名只允许 ``assign``/``assignment`` 这一组（即只允许同实现拼写）。"""
+        reader = _reader_node_compilers()
+        groups = {}
+        for ntype, handler in reader.items():
+            groups.setdefault(handler, set()).add(ntype)
+        aliases = {tuple(sorted(g)) for g in groups.values() if len(g) > 1}
+        self.assertEqual(aliases, {("assign", "assignment")})
+        self.assertEqual(len(groups), 17, "reader 节点实现数应为 17")
+
+    def test_writer_emits_no_node_type_the_reader_rejects(self):
+        """反向：写侧不得发射读侧不认识的类型（防单方面扩写侧）。"""
+        extra = _writer_node_types() - set(_reader_node_compilers())
+        self.assertEqual(extra, set(), f"写侧发射了读侧不接受的类型: {sorted(extra)}")
+
+    def test_issue_150_count_is_18_reader_keys_plus_3_non_nodes(self):
+        reader = set(_reader_node_compilers())
+        self.assertEqual(reader | _NON_NODE_READER_KEYS, _ISSUE_150_READER_TYPES)
+        self.assertEqual(reader & _NON_NODE_READER_KEYS, set())
+        self.assertEqual(len(reader), 18)
+        self.assertEqual(len(_ISSUE_150_READER_TYPES), 21)
+
+    def test_no_undocumented_writer_exclusions(self):
+        self.assertEqual(_WRITER_NODE_TYPE_EXCLUSIONS, {})
+
+    def test_guard_reads_the_real_discriminant(self):
+        """守卫靠 ``t`` 找判别式；钉住 ``t`` 确实来自 ``n["type"]``，否则空转。"""
+        fn = _function_node(ast.parse(_sexpr_module_source()), "_node_to_src")
+        self.assertEqual(ast.unparse(fn.body[0]), "t = n.get('type')")
+        self.assertIn("parallel", _writer_node_types())
+
+
+#: 往返语料里内联子流程的统一壳（带 flow-id/type/desc，顺带覆盖 #147 的字段）。
+_RT_CHILD = ('(childflow :flow-id cf :input-type object :desc 子 :output-type string'
+             ' (start -> ce) (end ce :output 1))')
+
+#: #150 验收 3 的往返语料：**每个 reader 节点实现**一条，且把该类型读侧能读的
+#: 字段**全部填满**——最小可编译形状恰好会漏掉"节点内部丢字段"（base 上
+#: parallel 就是空壳）。值一律选用 ``_expr_to_src`` 能忠实回读的拼写：数字样
+#: **字符串**值（``(code :code "1"`` → ``1`` → int）是 #150 边界外的既有
+#: ``_expr_to_src`` 残留，故 ``code`` 行用 ``"return 1"``；该残留另有独测钉住。
+_NODE_TYPE_ROUNDTRIP_CORPUS = (
+    ("start", '(flow g :input-type object (start :id n0 :timeout 5 -> n1)'
+              ' (end :id n1 :output 1))'),
+    ("end", '(flow g :input-type object (start :id n0 -> e)'
+            ' (end :id e :timeout 5 :output 1 :result-type error'
+            ' :error (dict :code 4) -> zz) (end :id zz :output 9))'),
+    ("assignment", '(flow g :input-type object (start :id n0 -> a)'
+                   ' (assignment :id a 1 :output-type object :timeout 5 -> e)'
+                   ' (end :id e :output 9))'),
+    ("if", '(flow g :input-type object (start :id n0 -> i)'
+           ' (if :id i (cond "$INPUT.x" eq 1) -> e :else a :timeout 5)'
+           ' (end :id e :output 9))'),
+    ("switch", '(flow g :input-type object (start :id n0 -> sw)'
+               ' (switch :id sw :timeout 5 (branch b1 -> e'
+               ' :when (cond "$INPUT.x" eq 1) :priority 2)'
+               ' (branch b2 -> e :default true) -> e) (end :id e :output 9))'),
+    ("case", '(flow g :input-type object (start :id n0 -> c)'
+             ' (case :id c :target "$INPUT.x" :timeout 5 (match 1 e :name m1)'
+             ' :default e) (end :id e :output 9))'),
+    ("loop", '(flow g :input-type object (start :id n0 -> l)'
+             ' (loop :id l :collection "$INPUT.xs" :child %s'
+             ' :when (cond "$INPUT.i" eq 1) :timeout 5 -> e)'
+             ' (end :id e :output 9))' % _RT_CHILD),
+    ("map", '(flow g :input-type object (start :id n0 -> m)'
+            ' (map :id m :collection "$INPUT.xs" :child %s :concurrent true'
+            ' :max-concurrent 3 :timeout 5 -> e) (end :id e :output 9))' % _RT_CHILD),
+    ("filter", '(flow g :input-type object (start :id n0 -> f)'
+               ' (filter :id f :collection "$INPUT.xs" :child %s :timeout 5 -> e)'
+               ' (end :id e :output 9))' % _RT_CHILD),
+    ("find", '(flow g :input-type object (start :id n0 -> fd)'
+             ' (find :id fd :collection "$INPUT.xs" :child %s :timeout 5 -> e)'
+             ' (end :id e :output 9))' % _RT_CHILD),
+    ("reduce", '(flow g :input-type object (start :id n0 -> r)'
+               ' (reduce :id r :collection "$INPUT.xs" :child %s :initial 0'
+               ' :timeout 5 -> e) (end :id e :output 9))' % _RT_CHILD),
+    ("child", '(flow g :input-type object (start :id n0 -> ch)'
+              ' (child :id ch :input "$INPUT.x" :child %s :timeout 5 -> e)'
+              ' (end :id e :output 9))' % _RT_CHILD),
+    ("reference", '(flow g :input-type object (start :id n0 -> rf)'
+                  ' (reference :id rf :input "$INPUT.x" :child %s :timeout 5 -> e)'
+                  ' (end :id e :output 9))' % _RT_CHILD),
+    ("parallel", '(flow g :input-type object (start :id n0 -> p)'
+                 ' (parallel :id p :mode thread :join-branches (b1 b2)'
+                 ' :is-conditional true :timeout 5'
+                 ' (pbranch b1 :flow %s :input "$INPUT.x"'
+                 ' :when (cond "$INPUT.x" eq 1)) (pbranch b2 :flow %s) -> e)'
+                 ' (end :id e :output 9))' % (_RT_CHILD, _RT_CHILD)),
+    ("code", '(flow g :input-type object (start :id n0 -> cd)'
+             ' (code :id cd :lang python :code "return 1" :input "$INPUT.x"'
+             ' :timeout 5 -> e) (end :id e :output 9))'),
+    ("http", '(flow g :input-type object (start :id n0 -> h)'
+             ' (http :id h :method POST :url "http://x" :headers (dict :a 1)'
+             ' :body "b" :input "$INPUT.x" :timeout 5 -> e)'
+             ' (end :id e :output 9))'),
+    ("event", '(flow g :input-type object (start :id n0 -> ev)'
+              ' (event :id ev :type tick :filter (dict :a 1) :timeout 5 -> e)'
+              ' (end :id e :output 9))'),
+)
+
+
+class TestNodeTypeRoundTripCorpus(unittest.TestCase):
+    """#150 验收 3：每个 reader 节点类型 emit → re-read → **整树 IR 相等**。"""
+
+    def test_corpus_covers_every_reader_node_implementation(self):
+        reader = _reader_node_compilers()
+        groups = {}
+        for ntype, handler in reader.items():
+            groups.setdefault(handler, set()).add(ntype)
+        labels = {label for label, _ in _NODE_TYPE_ROUNDTRIP_CORPUS}
+        uncovered = sorted("/".join(sorted(g)) for g in groups.values()
+                           if not (g & labels))
+        self.assertEqual(uncovered, [], f"语料未覆盖的 reader 节点实现: {uncovered}")
+
+    def test_all_fields_populated_corpus_round_trips(self):
+        for label, src in _NODE_TYPE_ROUNDTRIP_CORPUS:
+            with self.subTest(node_type=label):
+                ir = compile_sexpr(src)
+                emitted = flow_to_sexpr(ir)
+                # (a) #76 类级不变量：发射结果必须能再解析
+                sexpr_mod.read_forms(emitted)
+                # (b) 整树相等（含节点内所有字段）
+                back = compile_sexpr(emitted)
+                self.assertEqual(_norm_ir(back), _norm_ir(ir), emitted)
+
+    def test_parallel_node_survives_with_all_of_its_parts(self):
+        """#150 的点名形状：base 发 `(parallel :id p)`，分支/汇合/条件/后继全丢。"""
+        src = dict(_NODE_TYPE_ROUNDTRIP_CORPUS)["parallel"]
+        emitted = flow_to_sexpr(compile_sexpr(src))
+        for token in ("(pbranch b1 ", "(pbranch b2 ",
+                      ":join-branches (b1 b2)", ":is-conditional true",
+                      ":mode thread", ":input $INPUT.x",
+                      ":when (cond $INPUT.x eq 1)", "-> e)"):
+            self.assertIn(token, emitted)
+        par = next(n for n in compile_sexpr(emitted)["nodes"]
+                   if n["type"] == "parallel")
+        self.assertEqual([b["name"] for b in par["branches"]], ["b1", "b2"])
+        self.assertEqual(par["joinBranches"], ["b1", "b2"])
+        self.assertTrue(par["isConditional"])
+        self.assertEqual(par["mode"], "thread")
+        self.assertEqual(par["next"], "e")
+        self.assertEqual(par["branches"][0]["input"], "$INPUT.x")
+        self.assertIn("condition", par["branches"][0])
+
+
+class TestNodeTypeWriterByteIdentity(unittest.TestCase):
+    """#150 验收 4：base **已发射正确**的形状必须逐字节不变。
+
+    期望值取自 base ``0ce8549`` 上的实测发射（``git archive`` 导出、断言 import
+    路径）；下面每个形状在 base 上都不含本单新增的字段，故必须逐字节相等。
+    """
+
+    _BASE_BYTE_IDENTICAL = (
+        ("plain",
+         "(flow g (start :id s -> e) (end :id e :output x))",
+         "(flow g (start :id s -> e) (end :id e :output x))"),
+        ("assignment-no-output-type",
+         '(flow g (start :id s -> a) (assignment :id a "$INPUT.x" -> e)'
+         ' (end :id e :output "$NODE.a"))',
+         '(flow g (start :id s -> a) (assignment :id a $INPUT.x -> e)'
+         ' (end :id e :output $NODE.a))'),
+        ("switch-no-priority",
+         '(flow g (start :id s -> sw) (switch :id sw (branch b1 -> e'
+         ' :when (cond "$INPUT.x" == 1))) (end :id e :output x))',
+         '(flow g (start :id s -> sw) (switch :id sw (branch b1 -> e'
+         ' :when (cond $INPUT.x eq 1))) (end :id e :output x))'),
+        ("case-default-name",
+         '(flow g (start :id s -> c) (case :id c :target "$INPUT.x" (match 1 e))'
+         " (end :id e :output x))",
+         '(flow g (start :id s -> c) (case :id c :target $INPUT.x (match 1 e))'
+         " (end :id e :output x))"),
+        ("map-no-max-concurrent",
+         '(flow g (start :id s -> m) (map :id m :collection "$INPUT.xs"'
+         ' :concurrent true :child (childflow (start :id cs -> ce)'
+         ' (end :id ce :output 1)) -> e) (end :id e :output x))',
+         '(flow g (start :id s -> m) (map :id m :collection $INPUT.xs'
+         ' :child (childflow (start :id cs -> ce) (end :id ce :output 1))'
+         ' :concurrent true -> e) (end :id e :output x))'),
+        ("child-input-not-affected",
+         '(flow g (start :id s -> c) (child :id c :input "$INPUT.x"'
+         ' :child (childflow (start :id cs -> ce) (end :id ce :output 1)) -> e)'
+         " (end :id e :output x))",
+         '(flow g (start :id s -> c) (child :id c :input $INPUT.x'
+         ' :child (childflow (start :id cs -> ce) (end :id ce :output 1)) -> e)'
+         " (end :id e :output x))"),
+    )
+
+    def test_base_correct_shapes_stay_byte_identical(self):
+        for label, src, expected in self._BASE_BYTE_IDENTICAL:
+            with self.subTest(shape=label):
+                self.assertEqual(flow_to_sexpr(compile_sexpr(src)), expected)
+
+    def test_previously_dropped_fields_are_now_emitted(self):
+        """逐条钉住 base 静默丢弃、本单补发的字段。
+
+        每行给的是**同一份 src 在 base ``0ce8549`` 上的实测发射**（``git archive``
+        导出、断言 import 路径）：它既不含新 token，其回读 IR 也不等于 src 的 IR
+        ——这正是"base 丢字段"的双重证据，也让本断言具备区分力（不是自证）。
+        """
+        cases = (
+            ("parallel", ":input $INPUT.x",
+             "(flow g (start :id s -> p) (parallel :id p) (end :id e :output x))",
+             '(flow g (start :id s -> p) (parallel :id p :mode thread'
+             ' :join-branches (b1 b2) :is-conditional true'
+             ' (pbranch b1 :flow (childflow (start :id cs -> ce)'
+             ' (end :id ce :output 1)) :input "$INPUT.x"'
+             ' :when (cond "$INPUT.x" eq 1))'
+             ' (pbranch b2 :flow (childflow (start :id cs -> ce)'
+             ' (end :id ce :output 2))) -> e) (end :id e :output x))'),
+            ("switch.branch.priority", ":priority 2",
+             "(flow g (start :id s -> sw) (switch :id sw (branch b1 -> e"
+             " :when (cond $INPUT.x eq 1)) (branch b2 -> e :default true))"
+             " (end :id e :output x))",
+             '(flow g (start :id s -> sw) (switch :id sw (branch b1 -> e'
+             ' :when (cond "$INPUT.x" == 1) :priority 2)'
+             ' (branch b2 -> e :default true)) (end :id e :output x))'),
+            ("switch.next", "-> x",
+             "(flow g (start :id s -> sw) (switch :id sw (branch b1 -> e"
+             " :when (cond $INPUT.x eq 1))) (end :id e :output x)"
+             " (end :id x :output y))",
+             '(flow g (start :id s -> sw) (switch :id sw (branch b1 -> e'
+             ' :when (cond "$INPUT.x" == 1)) -> x) (end :id e :output x)'
+             ' (end :id x :output y))'),
+            ("case.name", ':name "m1"',
+             "(flow g (start :id s -> c) (case :id c :target $INPUT.x"
+             " (match 1 e) :default e) (end :id e :output x))",
+             '(flow g (start :id s -> c) (case :id c :target "$INPUT.x"'
+             ' (match 1 e :name m1) :default e) (end :id e :output x))'),
+            ("assignment.outputType", ":output-type string",
+             "(flow g (start :id s -> a) (assignment :id a $INPUT.x -> e)"
+             " (end :id e :output x))",
+             '(flow g (start :id s -> a) (assignment :id a "$INPUT.x"'
+             ' :output-type string -> e) (end :id e :output x))'),
+            ("map.maxConcurrent", ":max-concurrent 3",
+             "(flow g (start :id s -> m) (map :id m :collection $INPUT.xs"
+             " :child (childflow (start :id cs -> ce) (end :id ce :output 1))"
+             " :concurrent true -> e) (end :id e :output x))",
+             '(flow g (start :id s -> m) (map :id m :collection "$INPUT.xs"'
+             ' :concurrent true :max-concurrent 3 :child (childflow'
+             ' (start :id cs -> ce) (end :id ce :output 1)) -> e)'
+             " (end :id e :output x))"),
+            ("code.input", ":input $INPUT.x",
+             '(flow g (start :id s -> c) (code :id c :lang python'
+             ' :code "return 1" -> e) (end :id e :output x))',
+             '(flow g (start :id s -> c) (code :id c :lang python'
+             ' :code "return 1" :input "$INPUT.x" -> e)'
+             " (end :id e :output x))"),
+            ("http.input", ":input $INPUT.x",
+             '(flow g (start :id s -> h) (http :id h :method GET'
+             ' :url http://x -> e) (end :id e :output x))',
+             '(flow g (start :id s -> h) (http :id h :method GET'
+             ' :url "http://x" :input "$INPUT.x" -> e) (end :id e :output x))'),
+            ("end.next", "-> x",
+             "(flow g (start :id s -> e) (end :id e :output 1)"
+             " (end :id x :output 2))",
+             '(flow g (start :id s -> e) (end :id e :output 1 -> x)'
+             " (end :id x :output 2))"),
+        )
+        for label, new_token, base_emission, src in cases:
+            with self.subTest(field=label):
+                emitted = flow_to_sexpr(compile_sexpr(src))
+                # 新字段确实进了发射文本与回读 IR
+                self.assertIn(new_token, emitted)
+                self.assertEqual(_norm_ir(compile_sexpr(emitted)),
+                                 _norm_ir(compile_sexpr(src)), emitted)
+                # base 的实测发射缺这个字段，且其回读 IR 与真实 IR 不等
+                self.assertNotIn(new_token, base_emission)
+                self.assertNotEqual(_norm_ir(compile_sexpr(base_emission)),
+                                    _norm_ir(compile_sexpr(src)),
+                                    f"{label}: base 发射的回读 IR 竟然等价")
 
 
 if __name__ == "__main__":

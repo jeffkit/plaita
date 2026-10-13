@@ -1070,8 +1070,17 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # `is not None` test rather than truthiness.
         if n.get("error") is not None:
             parts.append(f":error {_expr_to_src(n['error'])}")
+        # #150: `_common_fields` reads `:next` for *every* node, `end` included;
+        # this arm was the one place it was not written back.
+        if n.get("next") is not None:
+            parts.append(f"-> {n['next']}")
     elif t == "assignment":
         parts.append(_expr_to_src(n.get("output")))
+        # #150: `_c_assignment` reads `:output-type` and the field is declared on
+        # `Assignment.output_type`; the writer dropped it (unlike `:output-type`
+        # on the root flow, which #147 made emit).
+        if n.get("outputType") is not None:
+            parts.append(f":output-type {_type_to_src(n['outputType'])}")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "if":
@@ -1081,15 +1090,39 @@ def _node_to_src(n: Dict[str, Any]) -> str:
     elif t == "switch":
         for b in n.get("branches", []):
             bp = ["branch", b.get("name"), f"-> {b.get('next')}"]
+            # #150: `_c_branch` reads `:priority`, and `Branch.priority` decides
+            # the match order in `Switch.execute` (sorted desc) -- dropping it
+            # silently changes which branch wins. Emitted only when present, so
+            # branches without one keep the base bytes.
+            if b.get("priority") is not None:
+                bp.append(f":priority {b['priority']}")
             if b.get("condition") is not None:
                 bp.append(f":when {_cond_to_src(b['condition'])}")
             if b.get("isDefault"):
                 bp.append(":default true")
             parts.append("(" + " ".join(str(x) for x in bp) + ")")
+        # #150: the switch node's own successor (read by `_common_fields`) was
+        # the second omission in this arm.
+        if n.get("next") is not None:
+            parts.append(f"-> {n['next']}")
     elif t == "case":
         parts.append(f":target {_expr_to_src(n.get('target'))}")
         for c in n.get("cases", []):
-            parts.append(f"(match {_expr_to_src(c.get('value'))} {c.get('id')})")
+            # #150: `_c_match` accepts `:name` and stores ``cases[i]["name"]``
+            # (surfaced downstream as the branch `label`). It also *defaults*
+            # that name to ``str(pos[0])`` -- for the overwhelming majority of
+            # matches the IR name therefore already equals ``str(value)``, and
+            # omitting `:name` re-reads to exactly the same value. Emitting it
+            # only when it differs keeps every such match byte-identical to base
+            # (measured: 0 unrelated corpus changes) while making a genuinely
+            # custom name survive. The name goes through `_string_to_src` for the
+            # same reason `:flow-id` does: it is a label, not an expression, so a
+            # numeric-looking name (`"01"`) must not collapse to an int.
+            head = f"(match {_expr_to_src(c.get('value'))} {c.get('id')}"
+            cname = c.get("name")
+            if cname is not None and str(cname) != str(c.get("value")):
+                head += f" :name {_string_to_src(str(cname))}"
+            parts.append(head + ")")
         if n.get("default") is not None:
             parts.append(f":default {n['default']}")
     elif t in ("loop", "map", "filter", "find", "reduce"):
@@ -1099,6 +1132,12 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             parts.append(f":when {_cond_to_src(n['condition'])}")
         if t == "map" and n.get("concurrent"):
             parts.append(":concurrent true")
+        # #150: `_c_map` reads `:max-concurrent`; `Map.max_concurrent` is a
+        # declared field. Only meaningful alongside `:concurrent` (the reader
+        # sets it inside that guard), which is exactly how the reader produces
+        # it, so the round-trip is faithful.
+        if t == "map" and n.get("maxConcurrent") is not None:
+            parts.append(f":max-concurrent {n['maxConcurrent']}")
         if t == "reduce" and n.get("initial") is not None:
             parts.append(f":initial {_expr_to_src(n['initial'])}")
         if n.get("next") is not None:
@@ -1108,6 +1147,40 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         parts.append(f":child ({_flow_inner_to_src(n.get('childFlow'))})")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
+    elif t == "parallel":
+        # #150: the reader (`_c_parallel` / `_c_pbranch`) has always accepted the
+        # whole parallel node, while the writer emitted **none** of it -- a
+        # parallel node round-tripped to the hollow shell `(parallel :id p)`.
+        # Branches, the join set, the conditional flag and the successor all
+        # vanished and the recompiled graph was no longer connected. Note for
+        # greppers: the `for b in n.get("branches", [])` in the `switch` arm
+        # above is *switch*'s; this arm is the only place `pbranch` is written.
+        #
+        # Keyword order: every `:kw value` is emitted before the `(pbranch …)`
+        # positionals so that `_split_args` (flat scan) reads them as keywords;
+        # `-> next` stays last, exactly as in the other arms.
+        if n.get("mode") is not None:
+            parts.append(f":mode {n['mode']}")
+        if n.get("joinBranches") is not None:
+            # The reader accepts a single name or a list; the list spelling is
+            # used uniformly so it round-trips for any cardinality (including
+            # the empty join set, `:join-branches ()`).
+            parts.append(f":join-branches {_expr_to_src(list(n['joinBranches']))}")
+        if n.get("isConditional"):
+            # Truthy-only, like the reader's `if _opt(...): spec[...] = True`:
+            # `False` is not an IR value the reader can produce, and emitting
+            # `:is-conditional false` would still set the flag to True.
+            parts.append(":is-conditional true")
+        for b in n.get("branches", []):
+            bp = ["pbranch", _expr_to_src(b.get("name")),
+                  f":flow ({_flow_inner_to_src(b.get('flow'))})"]
+            if b.get("input") is not None:
+                bp.append(f":input {_expr_to_src(b['input'])}")
+            if b.get("condition") is not None:
+                bp.append(f":when {_cond_to_src(b['condition'])}")
+            parts.append("(" + " ".join(str(x) for x in bp) + ")")
+        if n.get("next") is not None:
+            parts.append(f"-> {n['next']}")
     elif t == "http":
         parts.append(f":method {n.get('method')}")
         parts.append(f":url {_expr_to_src(n.get('url'))}")
@@ -1115,11 +1188,17 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             parts.append(f":headers {_expr_to_src(n['headers'])}")
         if n.get("body") is not None:
             parts.append(f":body {_expr_to_src(n['body'])}")
+        # #150: `_c_http` reads `:input` into `HTTP.input`; the writer dropped it.
+        if n.get("input") is not None:
+            parts.append(f":input {_expr_to_src(n['input'])}")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "code":
         parts.append(f":lang {n.get('language')}")
         parts.append(f":code {_expr_to_src(n.get('code'))}")
+        # #150: `_c_code` reads `:input` into `CodeNode.input`; dropped before.
+        if n.get("input") is not None:
+            parts.append(f":input {_expr_to_src(n['input'])}")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "event":
