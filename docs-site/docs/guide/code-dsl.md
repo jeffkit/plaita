@@ -472,7 +472,9 @@ flow.run(age=15)   # -> "未成年"
 | `(flow <id> :input-type ... :desc ... <节点>...)` | 顶层 flow 定义 |
 | `(start -> <id>)` | start 节点，`->` 即 `next` |
 | `(if :id <id> (cond ...) -> <then> :else <else>)` | if 节点，`->` 是真分支，`:else` 是假分支 |
-| `(end <id> :output <expr>)` | end 节点；`resultType` 默认 `success` |
+| `(end <id> :output <expr> :result-type error :error (dict :code 4001 :message bad))` | end node; `resultType` defaults to `success`, `error` carries the error-exit payload (malformed dict literals here now raise -- see the note below) |
+| `:timeout <dur>` | per-node timeout, accepted by every node type in the sexpr node table (17 types; see the scope note below), e.g. `PT30S` |
+| `:on-error (on-error <strategy> ...)` | per-node error handler, accepted by the same 17 node types |
 | `(cond <field> <op> <value>)` | 单条件，op 支持 `>=` `==` `!=` `in` … |
 | `(and <cond>...)` / `(or ...)` / `(not <cond>)` | 条件组 / 取反 |
 | `(dict :k v ...)` / `(dict (k v)...)` | dict 字面量（headers/body 用） |
@@ -533,6 +535,88 @@ src = """
 ```
 
 > `http` 节点需要 `pip install plaita[http]`。
+
+### Emitted syntax of `flow_to_sexpr` (plaita#136)
+
+`flow_to_sexpr(ir)` is the inverse of `compile_sexpr`. For the flat node types
+(`start`, `assignment`/`assign`, `event`, `http`, `code`, the collection nodes,
+`child`/`reference`) it emits, in this order:
+
+1. the node type and `:id <id>`;
+2. the **common keywords** -- `:timeout` and `:on-error` (only when the IR
+   carries them);
+3. the node-specific keyword arguments and positional forms;
+4. `-> <next>`, with every keyword before it.
+
+**Keyword position is not what makes a field readable.** `_split_args` scans
+the whole flat argument list, so a flat `:kw value` pair is recognised on
+*either* side of `-> <next>`: `(assignment :id a 1 -> e :timeout 5)` yields
+`timeout == 5`, and `(event :id ev :type t -> e :filter (dict :a 1))` yields
+`eventFilter == {'a': 1}`. What is *not* a keyword is a **nested list form**
+written outside a keyword slot -- that is collected as a positional argument.
+The pre-#136 corruption came from exactly that: the handler was written as a
+trailing `(on-error abort :retry 2)`, which the reader took as the node's
+`output` (`output == ['on-error', 'abort', 'retry', 2]`, `retryTimes` reset to
+`0`; on `assignment` it raised "assign only accepts one output expression").
+The emitter keeps keywords before the arrow for stability -- it is the shape
+maintainer `7d0add9` established for `event`'s `:filter` -- not because the
+reader requires it. Pinned by
+`TestKeywordOrderingGuard::test_flat_keyword_after_arrow_is_still_read` and
+`::test_nested_form_outside_keyword_slot_is_not_a_keyword`.
+
+`if` and `switch` are the exception, by their own grammar: their branch
+keywords are emitted **after** the arrow, e.g.
+`(if :id i (cond "$INPUT.age" >= 18) -> adult :else minor)` and
+`(branch b -> end_b :when (cond "$INPUT.type" == "B"))`. That is the shape the
+reader accepts; pinned by
+`TestKeywordOrderingGuard::test_if_and_switch_branch_keywords_follow_arrow`
+(the generic guard regex in the maintainer's own test only covers
+`start|end|event|http|assignment|code`, so it never sees these two).
+
+| IR field | Emitted form | Applies to |
+|----------|--------------|------------|
+| `timeout` | `:timeout PT30S` | the sexpr node table (17 node types, see scope note below) |
+| `errorHandler` | `:on-error (on-error <strategy> [:retry N] [:default V] [:code N] [:msg S])` | the sexpr node table (17 node types) |
+| `resultType` | `:result-type error` / `:result-type nop` (omitted when `success`) | `end` |
+| `error` | `:error (dict :code 4001 :message bad)` (any dict literal; `{}` becomes `:error (dict)`) | `end` |
+
+The error handler is emitted as the **value** of the `:on-error` keyword, never
+as a trailing positional form (see above).
+
+!!! note "Scope: which node types `:timeout` / `:on-error` cover"
+
+    "Every node type" means the **17 node types in the sexpr node table**:
+    `start`, `end`, `assignment` (spelled `assign` or `assignment`), `if`,
+    `switch`, `case`, `loop`, `map`, `filter`, `find`, `reduce`, `child`,
+    `reference`, `parallel`, `code`, `http`, `event`. Model node types with no
+    sexpr compiler -- `mock` (tracked separately as
+    [#146](https://github.com/jeffkit/plaita/issues/146)), `while`, `ignore`,
+    and the non-registry `calculate` / `redis` -- are out of scope: the writer
+    cannot emit those nodes at all, so `:timeout` never appears for them.
+
+!!! warning "Behaviour change: malformed dict literals in `:error` now raise"
+
+    The `end` node's `:error` value goes through the same `_value()`
+    dict-literal compiler as `:headers` / `:body` / `:filter`. A **malformed**
+    dict literal in that slot used to be accepted silently and wrapped into a
+    garbage message string; it now raises a clear `SyntaxError`:
+
+    | Source | Before #136 | After #136 |
+    |--------|-------------|------------|
+    | `(end e :error (dict :code))` | `error == {"message": "['dict', 'code']"}` | `SyntaxError: dict 关键字 :code 后缺少值` |
+    | `(end e :error (dict :code 1 :dangling))` | `error == {"message": "['dict', 'code', 1, 'dangling']"}` | `SyntaxError: dict 关键字 :dangling 后缺少值` |
+
+    Only the `:error` slot changed: `:headers` / `:body` / `:filter` already
+    behaved this way.
+
+```python
+# A complete error exit, exactly as emitted:
+#   (end :id bad :output no :result-type error :error (dict :code 4001 :message bad))
+#
+# A node with a timeout and a retrying error handler, exactly as emitted:
+#   (http :id h :method GET :url http://x :timeout PT5S
+#         :on-error (on-error continue_with :retry 2 :default fallback) -> e)
+```
 
 ### 静态校验与可逆
 

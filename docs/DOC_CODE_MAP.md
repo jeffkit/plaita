@@ -1,12 +1,12 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-10-12  
+> 最后更新：2026-10-13  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 >
 > **范围说明**：本表是**定向索引**，不是 `docs-site/` 的全量清单——只登记"改了对应代码
 > 就**必须**回看"的文档。因此未列出的页面通常意味着"尚无强绑定"，而非"不需要维护"。
-> 例外提醒：`docs-site/docs/guide/` 下目前仅 `execution-modes.md` 与 `expressions.md`
-> 有映射行；其余 guide 页面（`flow-definition` / `yaml-and-dsl` / `code-dsl` /
+> 例外提醒：`docs-site/docs/guide/` 下目前仅 `execution-modes.md`、`expressions.md` 与
+> `code-dsl.md` 有映射行；其余 guide 页面（`flow-definition` / `yaml-and-dsl` /
 > `error-handling` / `debugging` 等）**尚未建立代码绑定**，改相关代码时请人工判断
 > （若某页形成了稳定绑定，按本表格式补行即可）。
 
@@ -17,6 +17,7 @@
 | `AGENTS.md` / `CLAUDE.md` | — | 仓库导航、质量门禁、变异测试入口约束变更 |
 | `docs-site/docs/architecture/layering.md` | `plaita/core/**`, `plaita/event/**`, `plaita/storage/**`, `plaita/server/**`, `tests/integration/test_layering.py` | 分层规则、默认 EventBus 解析方式、允许/禁止的 import 方向变更 |
 | `docs-site/docs/guide/expressions.md` | `plaita/core/expression_parser.py`, `plaita/core/context.py`（`$NODE`/`$INPUT`/`$GLOBAL`/`$PARENT`/`$ENV` 根表与访问器）, `plaita/io.py`（`$F.*` 内置函数表） | **新增/变更表达式语法或访问器**（如 `$NODE.raw.<id>…`）、**某个根或属性求值语义的变化**（如"数据文本是否被二次求值"、#55 的属性遍历下划线名限制）、**用户可见的报错措辞变化**（如 `KeyError: '$X' not found` 的归因文案、#55 的 `ValueError: expression field name '__class__' is not allowed in an expression path`） |
+| `docs-site/docs/guide/code-dsl.md`（`### Emitted syntax of flow_to_sexpr`） | `plaita/dsl/sexpr.py` | The S-expr reader/writer grammar documented on this page: the per-node emitted forms (`:error <dict literal>` on `end`, `:timeout`, `:on-error (on-error …)`), the **measured** keyword-position rule (a flat `:kw value` is read on either side of `-> next`; only a nested list form in a positional slot is not a keyword; `if`/`switch` branch keywords follow the arrow by grammar), the malformed-dict-literal tightening in `:error`, the 17-node scope note, and `flow_to_sexpr` / `compile_sexpr` reversibility. The `@flow` half of the page is covered by the `plaita/dsl/codeflow/**` row above. |
 | `docs-site/docs/architecture/execution-engine.md` | `plaita/core/executor.py`, `plaita/core/strategies.py`, `plaita/core/runner.py` | 执行模式、facade/strategy 拆分、公共运行入口变更；**订阅失败禁止挂起**；SC-003 软/硬预算 |
 | `docs-site/docs/architecture/state-management.md` | `plaita/core/context.py`, `plaita/core/state.py` | Checkpoint / EventBus 解析 / `$ENV` / 取消语义变更 |
 | `docs-site/docs/distributed/event-system.md` | `plaita/event/**`, `plaita/node/event_node.py`, `plaita/server/event_filter.py`, `plaita/server/flow_worker.py` | EventBus API、后端、默认总线；EventFilter 与 worker 共享 subscription storage；FlowWorker 默认启用 bus；订阅匹配 vs handler fnmatch |

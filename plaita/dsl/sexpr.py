@@ -487,7 +487,13 @@ def _c_end(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
         spec["output"] = _value(output)
     rt = _opt(kw, "result-type", "resultType")
     spec["resultType"] = str(rt) if rt is not None else "success"
-    error = _opt(kw, "error")
+    # #136 (same root, item 1): `:error` must go through `_value()`. Without it
+    # the `(dict :code 4001 :message bad)` literal emitted by the writer stays
+    # a raw list and is then wrapped by the else-branch below as
+    # `{"message": "[dict, ':code', 4001, ...]"}` -- both the error code and the
+    # message are corrupted by a round-trip. `_value()` is the very path that
+    # `:headers` / `:filter` already take.
+    error = _value(_opt(kw, "error"))
     if error is not None:
         spec["error"] = error if isinstance(error, dict) else {"message": str(error)}
     return spec
@@ -870,12 +876,77 @@ def _cond_to_src(c: Any) -> str:
     return _expr_to_src(c)
 
 
+def _error_handler_to_src(eh: Dict[str, Any]) -> str:
+    """Emit ``errorHandler`` as the nested form ``(on-error <strategy> ...)``.
+
+    #136 (same root, item 3): it must be emitted as the **value** of
+    ``:on-error``, not as a trailing positional argument of the node. A
+    positional argument is swallowed by the reader as ``output``:
+
+        (end :id n :output x (on-error abort :retry 2))
+        -> output = ['on-error', 'abort', 'retry', 2], retry_times reset to 0
+
+    The fields mirror the keys ``_compile_error_handler`` accepts, so the whole
+    ``errorHandler`` payload round-trips losslessly (including ``errorCode`` /
+    ``errorMessage``, which the writer used to drop silently as well).
+    """
+    ep = ["on-error", str(eh.get("strategy", "abort"))]
+    if "retryTimes" in eh:
+        ep.append(f":retry {eh['retryTimes']}")
+    if "defaultValue" in eh:
+        ep.append(f":default {_expr_to_src(eh['defaultValue'])}")
+    if "errorCode" in eh:
+        ep.append(f":code {eh['errorCode']}")
+    if "errorMessage" in eh:
+        ep.append(f":msg {_expr_to_src(eh['errorMessage'])}")
+    return "(" + " ".join(ep) + ")"
+
+
+def _common_kw_to_src(n: Dict[str, Any]) -> List[str]:
+    """Emit the node-level common keywords (``:timeout`` / ``:on-error``).
+
+    #136 (same root, item 2): the reader (``_common_fields``) has always read
+    both fields for **every** node type, while the writer emitted neither --
+    so a round-trip silently dropped ``timeout`` and corrupted the handler.
+
+    Position: emitted right after ``:id`` and before any ``-> next``.
+
+    Measured correction (2026-10-13, adversarial review): keyword position is
+    **not** what makes a field readable. ``_split_args`` scans the whole flat
+    argument list, so a flat ``:kw value`` pair is recognised on either side of
+    ``-> next`` -- ``(assignment :id a 1 -> e :timeout 5)`` yields
+    ``timeout == 5`` and ``(event :id ev :type t -> e :filter (dict :a 1))``
+    yields ``eventFilter == {'a': 1}``, on the base tree and here alike. What
+    actually degrades into a positional argument is a **nested list form**
+    written outside a keyword slot: the old trailing
+    ``(on-error abort :retry 2)`` was collected as the node's ``output`` (and on
+    ``assignment`` it raised "assign only accepts one output expression").
+
+    Emitting the common keywords before the arrow is therefore *not required
+    for correctness*; it is kept because it is stable, because it matches the
+    "keywords before the successor" shape ``7d0add9`` established for
+    ``event``'s ``:filter``, and so this emitter does not depend on the
+    reader's flat scan.
+    """
+    out: List[str] = []
+    timeout = n.get("timeout")
+    if timeout is not None:
+        out.append(f":timeout {_expr_to_src(timeout)}")
+    eh = n.get("errorHandler")
+    if eh is not None:
+        out.append(f":on-error {_error_handler_to_src(eh)}")
+    return out
+
+
 def _node_to_src(n: Dict[str, Any]) -> str:
     t = n.get("type")
     parts: List[str] = [t]
     nid = n.get("id")
     if nid is not None:
         parts.append(f":id {nid}")
+    # Common keywords right after `:id` (see `_common_kw_to_src` for why this
+    # is a shape/robustness choice rather than a reader requirement).
+    parts.extend(_common_kw_to_src(n))
     if t == "start":
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
@@ -884,6 +955,16 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             parts.append(f":output {_expr_to_src(n['output'])}")
         if n.get("resultType") and n["resultType"] != "success":
             parts.append(f":result-type {n['resultType']}")
+        # #136 (item 1 of this patch, the issue itself): `error` used to exist
+        # only on the reader side (`_c_end` reads `:error`) while the writer
+        # never emitted it -> after a round-trip the payload is gone and the
+        # terminal state changes from `ErrorResultException`
+        # (error_result/4001) to `NodeExecutionError` (node_error/-9527).
+        # An empty dict `{}` is data too (`End.execute` uses it to tell "error
+        # exit without a code" apart from "no error exit at all"), hence the
+        # `is not None` test rather than truthiness.
+        if n.get("error") is not None:
+            parts.append(f":error {_expr_to_src(n['error'])}")
     elif t == "assignment":
         parts.append(_expr_to_src(n.get("output")))
         if n.get("next") is not None:
@@ -955,14 +1036,6 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # `-> next` 必须**最后**发（它终止关键字列表）
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
-    if n.get("errorHandler") is not None:
-        eh = n["errorHandler"]
-        ep = ["on-error", eh.get("strategy", "abort")]
-        if "retryTimes" in eh:
-            ep.append(f":retry {eh['retryTimes']}")
-        if "defaultValue" in eh:
-            ep.append(f":default {_expr_to_src(eh['defaultValue'])}")
-        parts.append("(" + " ".join(str(x) for x in ep) + ")")
     return "(" + " ".join(str(x) for x in parts) + ")"
 
 
