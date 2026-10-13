@@ -30,15 +30,29 @@ class HttpCallbackNode(BaseExtendedNode):
     callback_method: Literal["GET", "POST", "PUT", "DELETE"] = Field(default="POST", description="回调 HTTP 方法")
     callback_timeout_minutes: int = Field(default=60, description="回调超时时间（分钟）")
 
-    # 安全配置
-    require_auth: bool = Field(default=True, description="是否需要认证")
+    # 安全配置（#113：默认 True 不再是空头支票——auth_config 由
+    # HttpCallbackService.handle_callback_request 在认领注册记录前消费）
+    require_auth: bool = Field(
+        default=True,
+        description=(
+            "是否需要认证。开启后由 HttpCallbackService.handle_callback_request 在认领注册记录前校验："
+            "token→Authorization: Bearer；basic→Authorization: Basic；"
+            "signature→X-Plaita-Timestamp + X-Plaita-Signature（HMAC-SHA256，±300 秒时间窗）。"
+            "注意：仓内尚无把回调接到 HTTP 路由的实现，校验目前只在该 Python 入口生效"
+        ),
+    )
     # 历史上未知 auth_type 静默产出无凭证配置，Literal 使其在解析期报错
-    auth_type: Literal["token", "basic", "signature"] = Field(default="token", description="认证类型: token / basic / signature")
-    auth_token: Optional[str] = Field(default=None, description="认证令牌")
+    auth_type: Literal["token", "basic", "signature"] = Field(
+        default="token", description="认证类型: token / basic / signature（消费侧按此分支校验）"
+    )
+    auth_token: Optional[str] = Field(
+        default=None,
+        description="认证令牌：token=令牌值 / basic=用户名 / signature=HMAC secret；留空时现场生成",
+    )
 
-    # 请求验证配置
-    validate_headers: Dict[str, str] = Field(default_factory=dict, description="需要验证的请求头")
-    validate_params: Dict[str, str] = Field(default_factory=dict, description="需要验证的请求参数")
+    # 请求验证配置（#113 遗留：validation_config 生成并落库，消费侧尚未校验）
+    validate_headers: Dict[str, str] = Field(default_factory=dict, description="需要验证的请求头（当前未接线，消费侧不校验）")
+    validate_params: Dict[str, str] = Field(default_factory=dict, description="需要验证的请求参数（当前未接线，消费侧不校验）")
 
     # 响应配置
     success_response: Dict[str, Any] = Field(default_factory=lambda: {"status": "success"}, description="成功响应内容")

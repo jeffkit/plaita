@@ -63,7 +63,20 @@ flowchart LR
 
 ### HttpCallbackService
 
-暴露 HTTP 端点接收外部回调，把回调 body 作为 `event_data` 发布。适合"等第三方异步通知"。
+注册回调路径（Redis 键 `plaita:http_callback:registered:{path}`，7 天 TTL，跨实例共享）
+并在回调到达时**先校验注册记录里的 `auth_config`、再原子认领**，把回调 body 作为
+`event_data` 发布。适合"等第三方异步通知"。
+
+未授权请求返回 error 且**不消费**注册记录（认领是 `GET`+`DEL` 一体，先认领会把一次
+未授权请求变成挂起执行永久失醒）；认证已配置时「凭据不对」与「路径未注册」是**同一条**
+响应，不构成 path-existence oracle（免认证注册记录是已文档化的边界）；凭据载体见
+[扩展节点 § http_callback](extended-nodes.md#http_callback)。
+
+!!! warning "尚未暴露 HTTP 端点"
+
+    唯一入口是进程内的 `handle_callback_request(path, request_data, headers)`；
+    集群档拉起的 `python -m plaita.server.services http_callback_service` 只是空转，
+    且其任务队列 `plaita:http_callback:queue` 无消费方（见上文派发队列警告）。
 
 ### ApprovalService
 

@@ -68,7 +68,19 @@ def execute(self, execution):
 
 ## http_callback
 
-等待外部系统回调一个 URL，回调到达后恢复。`HttpCallbackService` 暴露 HTTP 端点接收回调，转成事件。
+等待外部系统回调一个 URL，回调到达后恢复。
+
+!!! warning "HTTP 路由尚未接线（#113 事实）"
+
+    `HttpCallbackService` **没有**暴露 HTTP 端点：仓内唯一入口是
+    `HttpCallbackService.handle_callback_request(path, request_data, headers)`
+    （`plaita/server/services/http_callback_service.py`），调用点只有测试与
+    `examples/server_demo`（进程内模拟）。console 集群档虽然把
+    `http_callback_service` 登记为可拉起进程（`python -m plaita.server.services
+    http_callback_service`），但该进程既不监听端口也不消费队列
+    （`plaita/server/services/__main__.py` 启动后空转），其任务队列
+    `plaita:http_callback:queue` 全仓无读取方——分布式档下回调记录不会被创建，
+    节点会一直挂起。
 
 ```json
 {
@@ -80,6 +92,47 @@ def execute(self, execution):
 ```
 
 主要字段：`callback_path`（为空自动生成）/ `callback_method`（默认 `POST`）/ `callback_timeout_minutes`（默认 60）及认证相关 `require_auth` / `auth_type` / `auth_token` 等；`event_type` 固定为 `http_callback`。
+
+### 认证：`auth_config` 在认领前被消费（#113）
+
+节点生成的 `auth_config`（`require_auth=True` 时含 token / basic / signature
+完整凭据）随 `service_config` 落库到回调注册记录；消费侧在**原子认领之前**
+校验它（`_verify_callback_auth`）：
+
+| `auth_type` | 凭据载体 | 校验方式 |
+|-------------|----------|----------|
+| `token` | `Authorization: Bearer <token>` | `hmac.compare_digest` 常数时间比对 |
+| `basic` | `Authorization: Basic base64(username:password)` | 用户名与口令各做常数时间比对 |
+| `signature` | `X-Plaita-Timestamp` + `X-Plaita-Signature` | HMAC-SHA256 覆盖 `<unix 秒>.<规范 JSON body>`（`sort_keys=True` + 紧凑分隔符），时间窗 ±300 秒防重放 |
+
+- 校验**必须先于**认领：注册记录的认领是 Redis `GET`+`DEL` 一体（Lua），
+  先认领后校验会让一次未授权请求删掉注册记录，把挂起执行变成永久失醒。
+  被拒绝的请求不消费记录，注册仍然有效。
+- `auth_config` 缺失/为空 → 视为该记录未声明认证（兼容历史注册记录与手写
+  `task_config`）；声明了认证但 `type` 未知/缺失 → 拒绝（fail closed）。
+- **未认证响应统一（Q5）**：认证已配置时，「凭据缺失 / 错误 / 签名过期」、
+  「路径未注册」、以及认领竞态中的败方返回**同一条**响应
+  `{"status": "error", "message": "回调路径未注册"}`（`CALLBACK_FAILURE_MESSAGE`）
+  —— 未认证的调用方无法据此判断某个回调路径是否存在（两条不同的 message 就是
+  path-existence oracle）。凭据失败细节只写服务日志，鉴权通过后才回成功响应。
+- **边界（无法关闭，且非认证 oracle）**：注册记录未声明 `auth_config`
+  （`require_auth=False` 或历史/手写 `task_config`）时本服务不校验，任何调用方
+  都能触发该路径，其响应与「未知路径」的 error 不同。这是**部署事实**（该回调
+  按契约本就不需要认证），不是「凭据是否正确」的推断通道；本服务不隐藏
+  「哪些路径被注册为免认证」。
+- 签名头名与规范原文是本实现在 Python 入口定义的契约；接入 HTTP 层时需按此
+  透传，尚无第二方实现。
+
+!!! note "`require_auth` 默认值：待 owner 裁定"
+
+    `require_auth` 目前默认 `True`，且仓内没有把生成凭据交付给回调方的通道
+    （回调路径由节点生成、凭据只落在注册记录里）——默认开启时回调事实上不可达
+    （fail closed，不会误放行）。保持 `True` + fail closed，还是把公共默认翻成
+    `False`，属于契约变更，**待 owner 裁定**。本页描述的是当前实现，不代表默认
+    值已定。
+
+`validate_headers` / `validate_params`（`validation_config`）当前**未接线**：
+生成并落库，但消费侧不校验（与 #113 同类问题，另行决定接线或移除）。
 
 ## approval
 

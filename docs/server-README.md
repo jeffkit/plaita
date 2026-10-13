@@ -138,8 +138,16 @@ callback_node = HttpCallbackNode(
 - `callback_path`: 回调路径（可自动生成）
 - `callback_method`: HTTP方法
 - `callback_timeout_minutes`: 回调超时时间
-- `require_auth`: 是否需要认证
+- `require_auth`: 是否需要认证（默认 `True`）。开启时节点生成的 `auth_config` 由
+  `HttpCallbackService.handle_callback_request` 在**原子认领注册记录之前**校验：
+  `token`→`Authorization: Bearer <token>`；`basic`→`Authorization: Basic base64(user:pass)`；
+  `signature`→`X-Plaita-Timestamp` + `X-Plaita-Signature`（HMAC-SHA256 覆盖
+  `<unix 秒>.<规范 JSON body>`，±300 秒时间窗）。校验失败返回 error 且不消费注册记录
 - `auth_type`: 认证类型 (token, basic, signature)
+- `validate_headers` / `validate_params`: 请求头/参数校验（**当前未接线**，生成并落库但消费侧不校验）
+- ⚠️ 仓内**尚无把回调接到 HTTP 路由的实现**，`http_callback_service` 进程不监听端口、
+  `plaita:http_callback:queue` 也没有消费方；上述校验目前只在该 Python 入口生效。
+  `require_auth` 默认值是否翻成 `False` 待 owner 裁定（#113）
 
 ### 5. 审批节点 (ApprovalNode)
 

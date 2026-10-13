@@ -27,6 +27,7 @@
 | `docs-site/docs/nodes/custom.md` / `scenarios/agent-orchestration.md` | `examples/agent/**`, `plaita-ai/plaita_ai/tools/**`, `plaita-ai/plaita_ai/agent/fot/tools.py` | 自定义 Node vs 数据源工具叙事；examples 教学 ToolNode 与 plaita-ai 工具层区分 |
 | `docs-site/docs/nodes/custom.md`（执行外部命令 / 子进程安全） | `plaita/subprocess_env.py`, `plaita/node/code.py` | 子进程 env 白名单公共层 API（`build_subprocess_env` / `clip_output`）、allowlist/extra 合并语义变更 |
 | `docs-site/docs/nodes/builtin.md` / `api/node.md` | `plaita/node/__init__.py`, `plaita/node/code.py`, `plaita/node/http.py` | 默认注册表成员、`register_code_node`、CodeNode 沙箱默认、HTTP 访问策略与响应体上限 |
+| `docs-site/docs/distributed/extended-nodes.md` / `services.md` / `docs/server-README.md` | `plaita/server/nodes/http_callback_node.py`, `plaita/server/services/http_callback_service.py` | http_callback 的认证契约（`require_auth` / `auth_config` 的生成与消费、三种 `auth_type` 的凭据载体与签名原文、校验必须先于原子认领、fail-closed 语义）、回调 HTTP 路由与 `plaita:http_callback:queue` 消费现状、`validation_config` 是否接线、`require_auth` 默认值裁定（#113） |
 | `docs-site/docs/reference/migration-guide.md` / `nodes/migration.md` | `plaita/__init__.py`, `MIGRATION.md` | `plaita.flow` 删除、shim 退役、0.5.0 break 清单 |
 | `docs-site/docs/ai/mcp.md` | `plaita-ai/plaita_ai/mcp/**`, `plaita-ai/plaita_ai/cli/main.py`, `plaita-ai/plaita_ai/tools/bootstrap.py` | MCP 工具列表、插件加载、PLAITA_TOOLS/RESOURCES、`tools validate\|list` |
 | `docs-site/docs/ai/fot-agent.md` / `ai/react-agent.md` | `plaita-ai/plaita_ai/agent/**` | Agent 构造参数、工具注册与双用途语义 |
