@@ -44,7 +44,16 @@ from typing import Any, Dict, List, Tuple, Union
 
 from plaita.core.flow import Flow
 
-__all__ = ["parse_sexpr", "compile_sexpr", "flow_to_sexpr"]
+__all__ = ["parse_sexpr", "compile_sexpr", "flow_to_sexpr", "SexprEmitError"]
+
+
+class SexprEmitError(ValueError):
+    """发射侧拒绝写出「读不回来」的源码（#76/#148 原则）。
+
+    ``flow_to_sexpr`` 只应在能保证 ``compile_sexpr`` 忠实还原时才产出文本；
+    遇到确实无法表达的 IR 形状（见 ``_dict_entry_to_src`` 的 dict 键边界），
+    它**在产出任何文本之前**抛本异常，而不是写出会被静默改形的源码。
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +117,11 @@ _TOKEN_RE = re.compile(
 
 _NUM_RE = re.compile(r"^-?\d+\.\d+$")
 _INT_RE = re.compile(r"^-?\d+$")
+
+#: 读侧**裸原子**接受的字符集（与 ``_TOKEN_RE`` 的 ``atom`` 分支同源）。发射侧
+#: 用它判断一个字符串能否裸写：``_expr_to_src`` 对**值**用它，``_dict_entry_to_src``
+#: 对**键**用它。两处共用同一常量，避免两条"什么算安全原子"的规则漂移。
+_BARE_ATOM_RE = re.compile(r'[^\s()";]+')
 
 
 def _tokenize(src: str) -> List[Tuple[str, str]]:
@@ -276,6 +290,25 @@ def _value(x: Any) -> Any:
     return x
 
 
+def _dict_entry_key(x: Any) -> Any:
+    """读 ``(key value)`` 元组条目里的 **key**（``_dict_entry_to_src`` 的读侧配对件）。
+
+    #148：写侧对「不能裸写成 ``:key``」的键改用**元组条目** ``("a b" 1)``；本函数
+    是那条拼写的读侧真源——引号字符串经 ``_decode_string`` 原样还原，``true`` /
+    ``1`` / ``nil`` 等标量也按字面量还原，故写侧发射的键能逐字回到 IR。
+
+    为什么不让元组键继续走通用 ``_value()``：``_value`` 会把 ``(dict …)`` /
+    ``(list …)`` 这类**复合**形状编译成不可哈希的 dict/list，随后在 ``out[...]``
+    处炸出 ``TypeError``。dict 键的合法域是字符串与标量，这里显式收紧并给出
+    **具名** ``SyntaxError``，与写侧的 fail-closed 边界（``SexprEmitError``）对齐。
+    """
+    if isinstance(x, str):  # 含 Symbol/Keyword（str 子类）
+        return str(x)
+    if x is None or isinstance(x, bool) or isinstance(x, int) or isinstance(x, float):
+        return x
+    raise SyntaxError(f"dict 键必须是字符串或标量，得到 {x!r}")
+
+
 def _compile_dict_literal(args: List[Any]) -> Dict[Any, Any]:
     """``(dict ...)`` 字面量：支持 ``:key value`` 与 ``(key value)`` 两种条目。"""
     out: Dict[Any, Any] = {}
@@ -289,7 +322,7 @@ def _compile_dict_literal(args: List[Any]) -> Dict[Any, Any]:
             i += 2
             continue
         if isinstance(a, list) and len(a) == 2:
-            out[_value(a[0])] = _value(a[1])
+            out[_dict_entry_key(a[0])] = _value(a[1])
             i += 1
             continue
         raise SyntaxError(f"dict 条目必须是 :key value 或 (key value)，得到 {a!r}")
@@ -871,7 +904,7 @@ def _expr_to_src(x: Any) -> str:
         if x == "":
             return '""'
         # 表达式（$开头）或纯标识符/字面量字符串都原样输出；含空格/特殊则加引号
-        if re.fullmatch(r"[^\s()\";]+", x):
+        if _BARE_ATOM_RE.fullmatch(x):
             return x
         return _string_to_src(x)
     if isinstance(x, bool):
@@ -887,11 +920,54 @@ def _expr_to_src(x: Any) -> str:
     return str(x)
 
 
+def _scalar_dict_key_to_src(k: Any) -> str:
+    """非 ``str`` 键的裸标量拼写；不能忠实回读的标量在此 fail closed。
+
+    - ``True`` / ``False`` → ``true`` / ``false``，``None`` → ``nil``：读侧
+      ``_dict_entry_key`` 经 ``_value``-等价规则还原为同名标量；
+    - ``int`` → 十进制（``str(k)`` 恒匹配读侧 ``_INT_RE``）；
+    - ``float`` → 仅当 ``str(k)`` 匹配读侧 ``_NUM_RE``（``1e20`` / ``inf`` /
+      ``nan`` 会落成 ``Symbol``，类型被改，故拒绝）。
+    """
+    if isinstance(k, bool):
+        return "true" if k else "false"
+    if k is None:
+        return "nil"
+    if isinstance(k, int):
+        return str(k)
+    if isinstance(k, float) and _NUM_RE.match(str(k)):
+        return str(k)
+    raise SexprEmitError(
+        f"dict 键 {k!r}（类型 {type(k).__name__}）无法发射成可忠实回读的源码；"
+        "可表达的键是 str 与有限标量 (bool/int/十进制 float/None)"
+    )
+
+
+def _dict_entry_to_src(k: Any, v: Any) -> str:
+    """发射一条 ``(dict …)`` 条目——**键**的拼写是 #148 的核心。
+
+    写侧两条拼写，与读侧 ``_compile_dict_literal`` / ``_dict_entry_key`` 一一配对：
+
+    - **裸关键字** ``:k v``：仅当 ``k`` 是非空 ``str`` 且字符全在裸原子集内
+      （无空白 / ``()`` / ``"`` / ``;``）时使用。此时读侧 ``_atom`` 把 ``:k``
+      取成 ``Keyword(k)``，``str()`` 后逐字还原——**base 已正确的简单键保持逐字节
+      不变**（既有语料零改动）。
+    - **元组条目** ``("k" v)``：其余键（空格 / 引号 / 括号 / 分号 / 空串 / 数字样
+      ``"1"`` / ``nil`` 等）一律走 ``_string_to_src`` 恒加引号；读侧
+      ``_dict_entry_key`` 解出精确字符串。**不能**沿用 ``_expr_to_src`` 的裸原子
+      约定——那会把键 ``1`` 读成 ``int``、``nil`` 读成 ``None``、``:x`` 读成 ``x``。
+    """
+    vsrc = _expr_to_src(v)
+    if isinstance(k, str):
+        if k and _BARE_ATOM_RE.fullmatch(k):
+            return f":{k} {vsrc}"
+        return f"({_string_to_src(k)} {vsrc})"
+    return f"({_scalar_dict_key_to_src(k)} {vsrc})"
+
+
 def _dict_to_sexpr(d: Dict[str, Any]) -> str:
     # 没有结构的 dict 用 :kv 对表示；目前仅用于 headers/globalContext 等
-    items = []
-    for k, v in d.items():
-        items.append(f":{k} {_expr_to_src(v)}")
+    items = [_dict_entry_to_src(k, v) for k, v in d.items()]
     return "(dict " + " ".join(items) + ")" if items else "(dict)"
 
 
@@ -1068,21 +1144,88 @@ def _node_to_src(n: Dict[str, Any]) -> str:
     return "(" + " ".join(str(x) for x in parts) + ")"
 
 
+# ---------------------------------------------------------------------------
+# flow 级字段：读得到就必须发得出（#147）
+# ---------------------------------------------------------------------------
+#
+# 读侧 ``_compile_flow`` / ``_compile_childflow`` 接受的 flow 级关键字，
+# 到写侧规范拼写的映射（列表顺序即发射顺序）。这两张表是**写侧唯一真源**：
+# ``flow_to_sexpr`` / ``_flow_inner_to_src`` 都经由 ``_flow_level_fields_to_src``
+# 消费它们，``tests/unit/test_sexpr.py`` 的 ``TestFlowLevelFieldSymmetry`` 再用
+# AST 反向核对读侧 ``_opt(kw, …)`` 的拼写集合，防止将来读侧单方面扩面而写侧
+# 静默漏发（#147 的病根，也正是 #136 在节点层的同一形状）。
+
+#: 顶层 ``(flow …)`` 的 flow 级字段。``flow_id`` 不在此表内——它是位置参数。
+_FLOW_LEVEL_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("inputType", "input-type"),
+    ("outputType", "output-type"),
+    ("desc", "desc"),
+    ("version", "version"),
+    ("author", "author"),
+    ("timeout", "timeout"),
+    ("globalContext", "global-context"),
+    ("metadata", "metadata"),
+)
+
+#: 内联子流程 ``(childflow …)`` 的 flow 级字段。``flow-id`` 是子流程自身的 id
+#: （``:id`` 已被节点占用，#149），只在子流程层出现。
+_CHILD_FLOW_LEVEL_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("flow_id", "flow-id"),
+    ("inputType", "input-type"),
+    ("outputType", "output-type"),
+    ("desc", "desc"),
+)
+
+#: 读侧按 ``str`` 解释、发射时必须**恒加引号**的字段。
+#:
+#: ``_expr_to_src`` 的裸原子约定对字符串有损：``"1.2"`` 会被重读成 ``float``、
+#: ``"true"`` 成 ``bool``、``"nil"`` 成 ``None``。#149 已为标识符 ``:flow-id``
+#: 定下"一律走 ``_string_to_src``"这条规则，``version``/``author`` 同属
+#: ``Optional[str]`` 字段（且 ``:version "1.2"`` 正是 #147 报的取值），沿用同一
+#: 规则，否则本单要求的"往返相等"对这两个字段不成立。
+#: ``desc`` 不在表内：它自 base 起就由 ``_expr_to_src`` 发射且对常规文本正确，
+#: 本单只补"子流程 desc 漏发"，不改动 root desc 的既有字节；统一引号约定
+#: （数字样文本 ``"1.2"`` 的 desc 同样会失真）属单独变更。
+_QUOTED_FLOW_FIELDS = frozenset({"flow_id", "version", "author"})
+
+
+def _type_to_src(t: Any) -> Any:
+    """``{"dataType": "object"}`` → ``object``：读侧 ``_type_spec`` 的逆。
+
+    保持 base 的既有拼写（裸 ``dataType``，非 dict 原样透出）；dict 里
+    ``dataType`` 之外的键读侧不表达，故不发射。
+    """
+    return t.get("dataType", "object") if isinstance(t, dict) else t
+
+
+def _flow_field_to_src(ir_key: str, value: Any) -> str:
+    if ir_key in ("inputType", "outputType"):
+        return _type_to_src(value)
+    if ir_key in _QUOTED_FLOW_FIELDS:
+        return _string_to_src(str(value))
+    return _expr_to_src(value)
+
+
+def _flow_level_fields_to_src(data: Dict[str, Any], fields: Any) -> List[str]:
+    """把 ``fields`` 表里"IR 里存在且非 None"的字段发射成 ``:key value`` 片段。
+
+    ``None`` 一律跳过：缺席字段不得长出 ``:field nil``，也不得凭空造值——这是
+    ``_opt`` 读侧的精确逆（读侧 ``is not None`` 才写入 IR）。
+    """
+    return [
+        f":{sexpr_key} {_flow_field_to_src(ir_key, data[ir_key])}"
+        for ir_key, sexpr_key in fields
+        if data.get(ir_key) is not None
+    ]
+
+
 def _flow_inner_to_src(d: Dict[str, Any]) -> str:
     parts: List[str] = ["childflow"]
-    # #149: emit the nested child flow's own id, mirroring `(flow <id> ...)`.
-    # Only when present: a child without an id must not grow `:flow-id nil`,
-    # which the reader would treat as absent anyway but which would still break
-    # the "no-id child emits byte-identical source" regression.
-    # Always quoted (`:flow-id "cf"`): the value is an identifier, and the bare
-    # form would read `nil`/`true`/`:x` back as a different atom (see
-    # `_string_to_src`), so a round-trip must not depend on the id's spelling.
-    flow_id = d.get("flow_id")
-    if flow_id is not None:
-        parts.append(f":flow-id {_string_to_src(str(flow_id))}")
-    if d.get("inputType") is not None:
-        it = d["inputType"]
-        parts.append(f":input-type {it.get('dataType', 'object') if isinstance(it, dict) else it}")
+    # #147: every flow-level field `_compile_childflow` reads (desc / outputType /
+    # inputType / flow-id) is emitted, in the same order the reader accepts them.
+    # Absent fields emit nothing, so a child carrying none of them is byte-identical
+    # to base (the #149 "no-id child" regression still holds).
+    parts.extend(_flow_level_fields_to_src(d, _CHILD_FLOW_LEVEL_FIELDS))
     for n in d.get("nodes", []):
         parts.append(_node_to_src(n))
     return " ".join(parts)
@@ -1091,11 +1234,10 @@ def _flow_inner_to_src(d: Dict[str, Any]) -> str:
 def flow_to_sexpr(data: Dict[str, Any]) -> str:
     """把 Flow IR dict 反编译成 S-expr 源码（可逆，用于审查/互转）。"""
     parts: List[str] = ["flow", str(data.get("flow_id") or "flow")]
-    if data.get("inputType") is not None:
-        it = data["inputType"]
-        parts.append(f":input-type {it.get('dataType', 'object') if isinstance(it, dict) else it}")
-    if data.get("desc"):
-        parts.append(f":desc {_expr_to_src(data['desc'])}")
+    # #147: previously only `inputType` (and, via a truthiness check, `desc`) were
+    # emitted; `outputType`/`version`/`author`/`timeout`/`globalContext`/`metadata`
+    # were read into the IR and then silently dropped on a round-trip.
+    parts.extend(_flow_level_fields_to_src(data, _FLOW_LEVEL_FIELDS))
     for n in data.get("nodes", []):
         parts.append(_node_to_src(n))
     return "(" + " ".join(parts) + ")"

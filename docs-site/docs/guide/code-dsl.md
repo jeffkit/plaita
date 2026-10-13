@@ -477,7 +477,7 @@ flow.run(age=15)   # -> "未成年"
 | `:on-error (on-error <strategy> ...)` | per-node error handler, accepted by the same 17 node types |
 | `(cond <field> <op> <value>)` | 单条件，op 支持 `>=` `==` `!=` `in` … |
 | `(and <cond>...)` / `(or ...)` / `(not <cond>)` | 条件组 / 取反 |
-| `(dict :k v ...)` / `(dict (k v)...)` | dict 字面量（headers/body 用） |
+| `(dict :k v ...)` / `(dict ("k" v) ...)` | dict 字面量（headers/body 用）；键不能裸写成 `:k` 时由发射侧改走恒引号元组（plaita#148，见下） |
 | `(list ...)` | list 字面量 |
 | `:child (childflow ...)` | 集合节点内联子流程 |
 | `(childflow :flow-id "cf" ...)` | 内联子流程**自身**的 `flow_id`（plaita#149）；不写则保持缺失，不凭空造名 |
@@ -652,6 +652,102 @@ as a trailing positional form (see above).
 #   (http :id h :method GET :url http://x :timeout PT5S
 #         :on-error (on-error continue_with :retry 2 :default fallback) -> e)
 ```
+
+### Flow-level fields of `(flow …)` / `(childflow …)` (plaita#147)
+
+`compile_sexpr` reads flow-level fields above the node level; `flow_to_sexpr`
+must emit every one of them, or a source round-trip silently drops it. Before
+#147 the root writer emitted only `inputType` and `desc`, and the child writer
+only `flow_id` (#149) and `inputType`.
+
+| IR field | Emitted form | Where |
+|----------|--------------|-------|
+| `inputType` | `:input-type object` (the bare `dataType`; the inverse of `_type_spec`) | root + child |
+| `outputType` | `:output-type string` | root + child |
+| `desc` | `:desc <text>` | root + child |
+| `version` | `:version "1.2"` (**always quoted**) | root |
+| `author` | `:author "me"` (**always quoted**) | root |
+| `timeout` | `:timeout 30` | root |
+| `globalContext` | `:global-context (dict …)` | root |
+| `metadata` | `:metadata (dict …)` | root |
+| `flow_id` (nested) | `:flow-id "cf"` (**always quoted**; omitted when the child has no id) | child |
+
+The reader's accepted spellings (its `_opt(kw, …)` names) and the writer's
+emitted spellings are kept in lock-step by two tables in `sexpr.py`
+(`_FLOW_LEVEL_FIELDS`, `_CHILD_FLOW_LEVEL_FIELDS`), pinned by the structural
+test `TestFlowLevelFieldSymmetry`: a future reader-side field that the writer
+does not emit turns that test red immediately.
+
+Field order follows the reader: `input-type`, `output-type`, `desc`, `version`,
+`author`, `timeout`, `global-context`, `metadata` (children: `flow-id` first,
+then the same subset). A field whose IR value is `None`/absent emits **nothing**
+-- never `:field nil` -- and a flow/child carrying none of them is byte-identical
+to its pre-#147 emission (pinned by
+`TestFlowLevelFieldsRoundTrip::test_absent_root_fields_emit_nothing_and_are_byte_identical_to_base`
+and `::test_absent_child_fields_emit_nothing_and_are_byte_identical_to_base`).
+
+`version` and `author` are `str`-typed in the IR and go through the same
+always-quoted helper as `:flow-id` (`_string_to_src`): the bare-atom form would
+read `"1.2"` back as a `float`, `"true"` as a `bool`, `"nil"` as `None`. `desc`
+keeps the pre-#147 `_expr_to_src` spelling (`:desc hello`), so its bytes are
+unchanged.
+
+!!! note "Reader-side gap (not part of #147's writer scope)"
+
+    `_compile_flow` does **not** run `:metadata` / `:global-context` through
+    `_value()`, so `(dict :env "prod")` lands in the IR as the raw list
+    `["dict", "env", "prod"]` rather than `{"env": "prod"}`. The writer emits
+    that list (which is why the round-trip is stable), but `parse_sexpr` on a
+    flow that carries either field still fails `Flow` validation
+    (`metadata` / `global_context` are `dict`-typed). Fixing that needs the
+    reader to apply `_value()`, which is tracked separately from this writer
+    delivery.
+
+### Dict keys in `(dict …)` (plaita#148)
+
+`flow_to_sexpr` must never emit source that cannot be read back (the invariant
+established for #76). A dict **key** is the sharp edge: before #148 the writer
+always emitted the bare keyword form `:key`, so a key containing a space, `(`,
+`)`, `"` or `;` produced text the reader rejects (`SyntaxError`) or silently
+misreads (`{"a b": 1}` → `(dict :a b 1)` → `["dict", "a", "b", 1]`).
+
+The writer now picks one of two spellings, paired one-to-one with the reader's
+`_compile_dict_literal`:
+
+| Key | Emitted spelling | Reader |
+|-----|------------------|--------|
+| non-empty `str` whose characters are all in the bare-atom set (no whitespace, `()`, `"`, `;`) | `:key value` | `:key` entry → `Keyword(key)` |
+| every other key (space, parens, `"`, `;`, empty string, `"1"` / `"nil"` / `"true"` …) | `("key" value)` (tuple entry, **always quoted**) | `(key value)` entry → `_dict_entry_key` → `_decode_string` |
+
+The bare form is byte-identical to the pre-#148 emission for keys that were
+already correct, so no existing corpus changes. The quoted form must **not** use
+`_expr_to_src`'s bare-atom shortcut: a bare key `1` would read back as `int`,
+`nil` as `None`, `:x` as `x`.
+
+Non-`str` scalar keys (`bool` / `int` / decimal `float` / `None`) are emitted as
+tuple entries too (`(1 v)`, `(nil v)`, `(true v)`) and round-trip with their type
+intact. Keys that cannot be represented faithfully — compound keys (tuple /
+frozenset / bytes / …) and floats whose `str()` is not a reader number literal
+(`inf`, `nan`, `1e20`) — make `flow_to_sexpr` raise the named `SexprEmitError`
+**before** any text is produced, rather than write corrupted source. The reader
+matches this boundary: a compound tuple key raises a named `SyntaxError`
+("dict 键必须是字符串或标量").
+
+!!! note "Interaction with #147's `metadata` / `global-context` reader gap"
+
+    The reader does not run `_value()` over `:metadata` / `:global-context`
+    (see the note in the #147 section above). For dict-origin metadata, #148
+    therefore guarantees the weaker — but honest — property: the emitted source
+    re-parses without error and the key survives as a **single** element
+    (`{'q"x': 1}` → `(dict ("q\"x" 1))` → `["dict", ["q\"x", 1]]`, no longer a
+    lexical error; `{"a b": 1}` → `["dict", ["a b", 1]]`, no longer split into
+    `["dict", "a", "b", 1]`). Recovering the full `dict` there still needs the
+    reader-side `_value()` fix tracked with #147.
+
+Pinned by `TestDictKeySpellingRoundTrip` in `tests/unit/test_sexpr.py`: a 24-key
+corpus × 4 dict carriers (including the issue-named `:error` path), the
+spelling boundary, base byte-identity, fail-closed, the two #147 hazard cases,
+and a class-level "every emission re-parses" guard.
 
 ### 静态校验与可逆
 
