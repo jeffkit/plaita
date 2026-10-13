@@ -97,6 +97,42 @@ def test_affinity_disable_switch(monkeypatch):
     assert not isinstance(ei.value, TaskNotForThisWorker)
 
 
+def _real_redis_or_skip():
+    """`test_spin_terminates_in_simulated_two_host_loop` 专用：**真实 Redis**。
+
+    为什么不能用 fakeredis（2026-10-13 实测）：
+    该用例依赖「**循环反复 read 到新副本**」这条语义，而 **fakeredis 2.36.2 的
+    consumer-group 游标有缺陷** —— ack 原条 + 入队新副本后，group 的
+    `last-delivered-id` 落后于流中最新 id，但 fakeredis 报 `lag: 0`，
+    于是 `read('>')` 认为"无新消息"返回 `None`，循环**第一轮就 break**
+    ⇒ `rounds` 恒为 0~1 ⇒ `assert rounds <= 上限` **永远平凡通过**，
+    **这条守卫实际上没有在看护任何东西**（`#86` 是 P1 且未修）。
+
+    真实 redis-server 下同一段流程正常（实测：第二次 read 仍能取到，
+    `pending=1`）。本机 `redis-server` 可用（v8.0.2）。
+
+    取真实实例：优先 `PLAITA_TEST_REDIS_URL`，否则试 `127.0.0.1:6379/15`；
+    都不可用则 **skip 并说明**（绝不静默退回 fakeredis —— 那等于假装有守卫）。
+    """
+    import os
+    import redis as _redis
+
+    url = os.environ.get("PLAITA_TEST_REDIS_URL", "redis://127.0.0.1:6379/15")
+    try:
+        c = _redis.Redis.from_url(url, decode_responses=True,
+                                  socket_connect_timeout=2)
+        c.ping()
+    except Exception as exc:  # noqa: BLE001
+        import pytest
+        pytest.skip(
+            f"需要真实 Redis 才能验证交接循环有界性（fakeredis 游标有缺陷，"
+            f"会让该断言平凡通过）：{url} 不可达（{exc}）。"
+            f"起一个：redis-server --port 6379 或设 PLAITA_TEST_REDIS_URL"
+        )
+    c.flushdb()
+    return c
+
+
 def _full_worker(redis_client, storage):
     """**真构造**的 worker（有 __init__ 的全部登记表）。
 
@@ -525,12 +561,11 @@ class TestAffinityHandover:
         刻意**不删**计数键、不 stub 时间：收敛靠的正是「TTL 远长于回收周期」
         （见 test_handover_counter_key_carries_ttl）。
         """
-        import fakeredis
         from plaita.server.task_queue import RedisStreamTaskQueue
         from plaita.storage.base import ExecutionState
         from plaita.storage.memory import MemoryExecutionStorage
 
-        shared = fakeredis.FakeRedis(decode_responses=True)
+        shared = _real_redis_or_skip()
         storage = MemoryExecutionStorage()
         storage.save_execution_state("exec-spin", ExecutionState(
             execution_id="exec-spin", flow_id="f", status="running", context={},
