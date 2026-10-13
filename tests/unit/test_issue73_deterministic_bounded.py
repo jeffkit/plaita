@@ -236,3 +236,96 @@ class TestExhaustedShortCircuitsRetryWakeup:
         seg = seg[: seg.index("if state_status in (")]
         assert "raise" not in seg, "短路必须是幂等返回，抛异常会让调用方当失败重试"
         assert "already_terminal" in seg
+
+
+def _sync_in_exc() -> FlowErrorException:
+    """plaita-nodes#15 的真实症状形态：`AgsError: sync_in` fail-closed。
+
+    生产形态（`sandbox_ags.sync_in` 检测到宿主漂移时抛）：
+    `AgsError: sync_in fail-closed：宿主存在沙箱未知的改动…`
+    经 `run_distributed` 归一化为 `FlowErrorException`，原始异常挂 `__cause__`。
+    """
+    return FlowErrorException(
+        "执行节点impl出错了: AgsError: sync_in fail-closed："
+        "宿主存在沙箱未知的改动，拒绝叠加"
+    )
+
+
+class TestSyncInDriftIsBounded:
+    """plaita-nodes#15 条件 2：**漂移 → 反复重放**必须**有界**。
+
+    #15 的验收是「或」关系：`sync_in` **自愈**，或**在有界次数内 fail-closed**。
+    本仓（plaita）承担的是**后者**：确定性失败计数达 `DETERMINISTIC_FAILURE_MAX`
+    即终态化 + 后续重投短路 —— 这正是「原来会重放 181 次」的反面。
+
+    为什么这条落在 plaita 而不是 plaita-nodes：
+    「**有界**」是**控制面**的保证（重试/终态化都在这里）；
+    plaita-nodes 侧只负责「漂移时**确定性**失败」（`test_sync_in_fail_closed_on_host_drift`）。
+    放错侧会写成一个测不到真东西的用例。
+    """
+
+    def test_sync_in_failure_is_counted_as_deterministic(self):
+        """`AgsError: sync_in` 必须进确定性失败计数（不是可重试预算）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        w = _make_worker(fake)
+        assert w._node_failure_retry_decision(_sync_in_exc(), "exec-1", 1) is None
+        assert fake.get(NOFAIL_KEY) == "1", "sync_in 漂移失败未记账"
+        assert fake.get(NODERETRY_KEY) is None, (
+            "sync_in 漂移是**确定性**失败，不得写 noderetry（可重试预算）"
+        )
+
+    def test_sync_in_replay_is_bounded_then_exhausted(self):
+        """复现原始症状：**反复重放**同一漂移失败 ⇒ 到上限即短路（有界）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        w = _make_worker(fake)
+        limit = w.DETERMINISTIC_FAILURE_MAX
+
+        # 1..limit-1 次：仍未耗尽，允许继续（返回 None = 不在此处终态化）
+        for i in range(1, limit):
+            assert w._node_failure_retry_decision(_sync_in_exc(), "exec-1", 1) is None, (
+                f"第 {i} 次漂移失败不应提前终态化"
+            )
+            assert int(fake.get(NOFAIL_KEY)) == i
+
+        # 第 limit 次：达上限
+        w._node_failure_retry_decision(_sync_in_exc(), "exec-1", 1)
+        assert int(fake.get(NOFAIL_KEY)) == limit
+
+        # **界成立**：此后 predicate 判定为已耗尽 ⇒ 后续重投短路
+        assert w._deterministic_failure_exhausted("exec-1") is True, (
+            f"累计 {limit} 次仍未判耗尽 —— 「有界」不成立（原症状可无限重放）"
+        )
+
+    def test_bound_is_pinned_to_a_sane_absolute_value(self):
+        """**绝对上限**也要钉住 —— 否则「把常量调大」就能悄悄放松界。
+
+        为什么需要这条（我实测发现）：上面几个用例都是**按 `DETERMINISTIC_FAILURE_MAX`
+        缩放**的（跑 `limit` 次即应耗尽）⇒ 把常量从 12 改成 100000，
+        它们**依然全绿**（负向对照实测：3 passed）。
+        ⇒ 那种写法只能证明"界自洽"，**不能证明"界够紧"**。
+        这里用**字面量**钉住，任何调大都必须显式改这条断言（= 一次有意识的决策）。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        w = _make_worker(fake)
+        assert w.DETERMINISTIC_FAILURE_MAX == 12, (
+            "确定性失败上限被改动 —— 这条钉子是有意写死的："
+            "#15/#120 的「有界」承诺依赖它足够小（原症状是重放 181 次）；"
+            "若确需调大，请连同本断言一起改，并在 commit 里说明理由"
+        )
+        assert w.NODE_RETRY_TOTAL_MAX == 100, "节点重试总预算同样钉住"
+
+    def test_bound_equals_declared_max(self):
+        """界与常量自洽（缩放式用例）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        w = _make_worker(fake)
+        for _ in range(w.DETERMINISTIC_FAILURE_MAX):
+            w._node_failure_retry_decision(_sync_in_exc(), "exec-1", 1)
+        assert w._deterministic_failure_exhausted("exec-1") is True
+        # 少一次则不应耗尽（界是精确的，不是"差不多"）
+        fake2 = fakeredis.FakeRedis(decode_responses=True)
+        w2 = _make_worker(fake2)
+        for _ in range(w2.DETERMINISTIC_FAILURE_MAX - 1):
+            w2._node_failure_retry_decision(_sync_in_exc(), "exec-1", 1)
+        assert w2._deterministic_failure_exhausted("exec-1") is False, (
+            "少一次就判耗尽 ⇒ 界不精确"
+        )
