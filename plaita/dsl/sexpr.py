@@ -28,6 +28,13 @@ plaita.dsl.sexpr — S-表达式前端（**experimental**）。
     flow.run(age=20)  # -> "成年"
 
 也可只编译到 IR dict：``compile_sexpr(src)``。
+
+内联子流程（``(child ... :child (childflow ...))`` / ``map`` / ``loop`` 等）的
+自身 id 用 ``:flow-id`` 给出——``:id`` 已被节点自身占用，故不复用；不给则
+``flow_id`` 保持缺失（**不凭空造名**），发射侧同样不写该键（#149）::
+
+    (child :id c :input "$INPUT.x"
+      :child (childflow :flow-id "cf" (start -> e) (end e :output "$INPUT")))
 """
 
 from __future__ import annotations
@@ -399,6 +406,13 @@ def _compile_childflow(form: Any) -> Dict[str, Any]:
     pos, kw = _split_args(form[1:])
     body = pos  # 子流程体由节点 form 组成
     data: Dict[str, Any] = {"runtime": "python"}
+    # #149: a nested child flow's own id. The maintainer fixed the spelling as
+    # ``:flow-id`` (``:id`` is already the node's own id; ``:flow_id``/``:flowId``
+    # stay unclaimed on purpose so the decision is not quietly widened). Only
+    # written when given — ``None`` must stay absent, never become ``"None"``.
+    flow_id = _opt(kw, "flow-id")
+    if flow_id is not None:
+        data["flow_id"] = str(flow_id)
     input_type = _opt(kw, "input-type", "inputType")
     if input_type is not None:
         data["inputType"] = _type_spec(input_type)
@@ -837,6 +851,21 @@ def parse_sexpr(src: str) -> Flow:
 # 反向：IR dict -> sexpr（可逆，便于互转与审查）
 # ---------------------------------------------------------------------------
 
+def _string_to_src(s: str) -> str:
+    """把一个字符串发射成 sexpr **字符串字面量**（总是加引号）。
+
+    转义规则与读侧 ``_STRING_ESCAPES`` / ``_decode_string`` 配对：反斜杠与双引号
+    转义，其余字符（含 unicode、换行）原样留在引号内——词法正则
+    ``"(?:\\\\.|[^"\\\\])*"`` 接受引号内的裸换行，读回不丢。
+
+    ``_expr_to_src`` 只在"裸原子不安全"时走这里；``:flow-id`` 的值是**标识符**
+    而非表达式，裸写会把 ``nil``/``true``/``:x`` 这类值读成语义不同的原子
+    （实测 ``nil`` 变 None、``true`` 变 ``True``、``:x`` 变 ``x``），故它**总是**
+    走这里。
+    """
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _expr_to_src(x: Any) -> str:
     if isinstance(x, str):
         if x == "":
@@ -844,7 +873,7 @@ def _expr_to_src(x: Any) -> str:
         # 表达式（$开头）或纯标识符/字面量字符串都原样输出；含空格/特殊则加引号
         if re.fullmatch(r"[^\s()\";]+", x):
             return x
-        return '"' + x.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return _string_to_src(x)
     if isinstance(x, bool):
         return "true" if x else "false"
     if isinstance(x, (int, float)):
@@ -1041,6 +1070,16 @@ def _node_to_src(n: Dict[str, Any]) -> str:
 
 def _flow_inner_to_src(d: Dict[str, Any]) -> str:
     parts: List[str] = ["childflow"]
+    # #149: emit the nested child flow's own id, mirroring `(flow <id> ...)`.
+    # Only when present: a child without an id must not grow `:flow-id nil`,
+    # which the reader would treat as absent anyway but which would still break
+    # the "no-id child emits byte-identical source" regression.
+    # Always quoted (`:flow-id "cf"`): the value is an identifier, and the bare
+    # form would read `nil`/`true`/`:x` back as a different atom (see
+    # `_string_to_src`), so a round-trip must not depend on the id's spelling.
+    flow_id = d.get("flow_id")
+    if flow_id is not None:
+        parts.append(f":flow-id {_string_to_src(str(flow_id))}")
     if d.get("inputType") is not None:
         it = d["inputType"]
         parts.append(f":input-type {it.get('dataType', 'object') if isinstance(it, dict) else it}")

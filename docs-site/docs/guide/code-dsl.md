@@ -480,6 +480,7 @@ flow.run(age=15)   # -> "未成年"
 | `(dict :k v ...)` / `(dict (k v)...)` | dict 字面量（headers/body 用） |
 | `(list ...)` | list 字面量 |
 | `:child (childflow ...)` | 集合节点内联子流程 |
+| `(childflow :flow-id "cf" ...)` | 内联子流程**自身**的 `flow_id`（plaita#149）；不写则保持缺失，不凭空造名 |
 | `:id <name>` | 显式节点 id（被分支/`$NODE` 引用时需要） |
 
 不写 `:id` 时自动分配 `_n1`/`_n2`/…；`end`/`assignment` 支持把第一个位置参数当 id（`(end adult :output "成年")`）。
@@ -501,6 +502,28 @@ src = """
 """
 parse_sexpr(src).run(numbers=[1, 2, 3, 4])  # -> [2, 4, 6, 8]
 ```
+
+内联子流程**自身**的 id 用 `:flow-id` 给出（plaita#149）。`(child :id c ...)` 里的
+`:id` 已被节点自身占用，故不复用；`:flow-id` 与 `:result-type` / `:event-filter`
+同为连字符风格，落在 `(childflow ...)` 形内。它对应 IR 里的
+`childFlow.flow_id`，即 codeflow 路径 `@childflow("cf")` 位置参数的同一语义：
+
+```python
+src = """
+(flow with_child_id :input-type object
+  (start -> c)
+  (child :id c :input "$INPUT.payload"
+    :child (childflow :flow-id "cf" :input-type object
+      (start -> ce)
+      (end ce :output "$INPUT.item"))
+    -> end)
+  (end end :output "$NODE.c"))
+"""
+```
+
+判据是**双向**的：`compile_sexpr` 读 `:flow-id` 写进子图 IR，`flow_to_sexpr`
+在子图 `flow_id` 非空时发射该键。与 codeflow 路径一致，**不给就不发射、保持缺失**
+（`flow_id is None`，**不凭空造名**；也不会发射成 `:flow-id nil`）。
 
 ### switch / case
 
@@ -579,6 +602,18 @@ reader accepts; pinned by
 | `errorHandler` | `:on-error (on-error <strategy> [:retry N] [:default V] [:code N] [:msg S])` | the sexpr node table (17 node types) |
 | `resultType` | `:result-type error` / `:result-type nop` (omitted when `success`) | `end` |
 | `error` | `:error (dict :code 4001 :message bad)` (any dict literal; `{}` becomes `:error (dict)`) | `end` |
+| `flow_id` (nested) | `:flow-id "cf"` (always quoted; omitted entirely when the child has no id) | inline `childFlow` (`(childflow ...)`) |
+
+The nested `childFlow.flow_id` (plaita#149) is emitted right after the
+`childflow` head, before `:input-type`, and only when non-`None`: a child
+without an id must keep emitting the same bytes as before #149 (verified by
+`TestSexprChildFlowId::test_no_id_emission_is_byte_identical_to_shapeless_child`
+and `::test_no_id_is_absent_on_write_and_roundtrip`). The id is **always
+quoted** (`:flow-id "cf"`, not `:flow-id cf`): the value is an identifier, and
+the bare form would read `nil` / `true` / `:x` back as a *different* atom
+(`nil` → `None`, `true` → `True`, `:x` → `x`), breaking the round-trip
+depending on the id's spelling. The reader accepts both spellings
+(`:flow-id "cf"` and `:flow-id cf`).
 
 The error handler is emitted as the **value** of the `:on-error` keyword, never
 as a trailing positional form (see above).
