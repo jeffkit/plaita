@@ -1131,6 +1131,23 @@ class TestContextAndTotality(unittest.TestCase):
                 self.assertNotIn("Pr0d2024x", str(node), shape)
                 node = node.__context__
 
+    def test_context_would_leak_without_the_clearing_wrapper(self):
+        """R3 的 red-then-green 对照：**没有**包装层时 ``__context__`` 带明文。
+
+        端口值恰好等于口令的形态：``urlsplit`` 的 ``ValueError`` 文案里就是那个口令。
+        直接调实现体 ``_parse_redis_url_checked``（= r4 的行为）时 ``__context__``
+        挂着它；走生产包装层 ``_parse_redis_url`` 时被摘成 ``None``。
+        """
+        url = "redis://user:Pr0d2024x@host:Pr0d2024x"
+        with self.assertRaises(RedisUrlError) as raw:
+            factory._parse_redis_url_checked(url)
+        self.assertIsNotNone(raw.exception.__context__, "对照组成立的前提")
+        self.assertIn("Pr0d2024x", str(raw.exception.__context__))
+
+        with self.assertRaises(RedisUrlError) as wrapped:
+            _parse_redis_url(url)
+        self.assertIsNone(wrapped.exception.__context__)
+
     def test_every_source_sanitized_cause_site_is_covered(self):
         """防漂移：源码里 ``from _sanitized_cause(`` 的站点数 == 本测试的触发数。"""
         import pathlib
