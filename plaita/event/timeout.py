@@ -1,5 +1,17 @@
 """
 独立的订阅超时检查功能
+
+#153/R1 的公开入口是 :class:`TimeoutCallbackError`：``from plaita.event import
+TimeoutCallbackError``（本模块仍是实现处；``plaita/event/__init__.py`` 负责再导出）。
+
+**已知边界（本单不修，勿当成已修）**：
+
+* **回调抛 ``BaseException`` 仍会中断本轮**：``KeyboardInterrupt`` / ``SystemExit``
+  不被本模块的 ``except Exception`` 捕获，因此会跳过本轮剩余回调与后续订阅。
+  这是**刻意**不 catch（进程级信号不应被聚合成「某订阅的回调失败」）；base 修订
+  ``b46f78e`` 行为完全相同——既有边界，非本单引入。
+* **没有 per-callback 超时预算**：本模块**不**使用 ``asyncio.wait_for`` / ``timeout=``，
+  一个 await 永不返回的回调会把同轮其余回调与后续订阅永久挂住。收敛需另开单。
 """
 import asyncio
 import logging

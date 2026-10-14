@@ -14,7 +14,7 @@ from .memory import (
 )
 from ..node.event_node import EventNode
 from .utils import normalize_event
-from .timeout import SubscriptionTimeoutChecker
+from .timeout import SubscriptionTimeoutChecker, TimeoutCallbackError
 
 # 导入Redis实现
 try:
@@ -75,7 +75,7 @@ __all__ = [
     'EventNotFoundError',
     'EventStorageError',
     'EventTimeoutError',
-    'FlowEventHandler',
+    'TimeoutCallbackError',
     'InMemoryEventBus',
     'MemoryEventStorage',
     'InMemoryEventSubscriptionStorage',

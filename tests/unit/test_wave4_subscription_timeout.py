@@ -554,3 +554,90 @@ class TestTimeoutResumeConsumer:
             flow, mode=ExecutionMode.DISTRIBUTED, context=r3["context"], event_bus=mock_bus,
         )
         assert r4["id"] == "task2"
+
+
+# ─── 5. 公开入口契约：TimeoutCallbackError（#153/R1） ─────────
+
+
+class TestTimeoutCallbackErrorPublicEntry:
+    """#153/R1：聚合异常必须从 `plaita.event` 公开可达，且 `__all__` 不得挂空名。
+
+    这一组是**契约钉子**（不是实现钉子）：调用方按 flow-worker.md 写
+    ``from plaita.event import TimeoutCallbackError`` 必须成立；文档承诺的公开形状
+    （``failures`` / ``subscription_ids`` / ``__cause__``）必须逐项对得上。
+    """
+
+    def test_public_import_path_is_the_same_class(self):
+        """(a) 公开路径可导入，且与实现处是同一个类（不是影子副本）。"""
+        from plaita.event import TimeoutCallbackError as Public
+
+        assert Public is TimeoutCallbackError, "公开入口与 plaita.event.timeout 不是同一个类"
+
+    def test_every_name_in_dunder_all_exists_and_star_import_works(self):
+        """(b) `__all__` 全量清扫：每个名字都真的在模块上，star-import 真跑通。
+
+        本仓出过「`__all__` 挂了不存在的名字 ⇒ `from ... import *` 直接
+        AttributeError」的事故；下面两步（hasattr 清扫 + star-import 实跑）是这个
+        bug 类的通用钉子——`__all__` 里任何空名都会立刻变红。
+        """
+        import plaita.event as event_pkg
+
+        missing = [n for n in event_pkg.__all__ if not hasattr(event_pkg, n)]
+        assert missing == [], f"plaita.event.__all__ 挂了不存在的名字: {missing}"
+
+        namespace: dict = {}
+        exec("from plaita.event import *", namespace)  # noqa: S102 — 被测行为本身
+        not_exported = [n for n in event_pkg.__all__ if n not in namespace]
+        assert not_exported == [], f"star-import 未导出: {not_exported}"
+        assert "TimeoutCallbackError" in namespace
+
+    def test_aggregate_public_shape_matches_documented_contract(self):
+        """(c) 用**真实一轮 checker** 复核公开形状（不靠构造自证）。
+
+        文档承诺：``.failures`` 是 ``(subscription_id, 原始异常)`` 序列、
+        ``.subscription_ids`` 与之逐项对应、``__cause__`` 是**第一个**原始异常。
+        同一订阅挂两个回调 ⇒ 一轮里两条失败，形状与顺序一起被钉住。
+        """
+        sub = EventSubscription(
+            subscription_id="sub-public-shape",
+            event_type="approval",
+            correlation_id="exec-public-shape",
+            timeout=1.0,
+            created_at=time.time() - 60.0,
+        )
+
+        class _OneSubStorage:
+            async def list_subscriptions(self):
+                return [sub]
+
+        first = ConnectionError("first outage")
+        second = ValueError("second outage")
+        seen = []
+
+        async def _bad(_sub):
+            seen.append(len(seen))
+            raise (first if len(seen) == 1 else second)
+
+        checker = SubscriptionTimeoutChecker(_OneSubStorage(), check_interval=0.01)
+        checker.register_timeout_callback(_bad)
+        checker.register_timeout_callback(_bad)   # 同一轮两个回调 ⇒ 两条失败
+
+        raised = None
+        try:
+            run(checker._check_timeouts())
+        except Exception as e:  # noqa: BLE001 — 本轮失败由末尾聚合上抛承载
+            raised = e
+
+        assert isinstance(raised, TimeoutCallbackError), f"未聚合上抛: {raised!r}"
+        assert seen == [0, 1], "同一轮两个回调没有都跑到（断言空转）"
+
+        failures = list(raised.failures)
+        assert [type(exc) for _sid, exc in failures] == [ConnectionError, ValueError]
+        assert [sid for sid, _exc in failures] == [sub.subscription_id] * 2
+        assert list(raised.subscription_ids) == [sub.subscription_id] * 2, (
+            ".subscription_ids 必须与 .failures 的订阅 id 逐项对应"
+        )
+        assert raised.__cause__ is failures[0][1], (
+            "__cause__ 必须是第一个原始异常（不是聚合异常自身、也不是 None）"
+        )
+        assert raised.__cause__ is first

@@ -509,3 +509,27 @@ flowchart TD
 | `last_rejected` | 本轮失败事件数（每轮重置） |
 | 异常 | 上抛给 `_run_loop`（记 ERROR 后下一轮重试，回扫循环不终止） |
 | 超时回调（同单 #153/R1） | `SubscriptionTimeoutChecker._check_timeouts` 对单个回调失败**只记账不中断本轮**（同轮其余回调与后续订阅照常跑），整轮末尾聚合上抛 `TimeoutCallbackError`（携带 `failures` / `subscription_ids`，原始异常为 `__cause__`）——失败仍对 `_check_loop` 可观察，且不饿死同轮其它订阅 |
+
+`TimeoutCallbackError` 的**公开入口**是 `plaita.event`（实现处 `plaita.event.timeout` 是内部路径）：
+
+```python
+from plaita.event import TimeoutCallbackError   # 公开入口
+```
+
+**R1 的两条已知边界（本单未修，勿当成已修）**：
+
+- **T1 — 回调抛 `BaseException` 仍中断本轮、饿死其余回调**：`KeyboardInterrupt` /
+  `SystemExit` 不被本链路的 `except Exception` 捕获，因此会跳过本轮剩余回调与后续
+  订阅。这是**刻意**不 catch（进程级信号不应被聚合成「某订阅的回调失败」）。
+  **base 修订 `b46f78e` 行为完全相同**——既有边界，非本单引入；本单**不修**，
+  也不为此加 `except BaseException`。
+- **T2 — 回调永不返回仍饿死同轮其余回调**：本单**没有**引入 per-callback 超时预算
+  （无 `asyncio.wait_for` / `timeout=`），一个 await 永不结束的回调会把同轮后续回调
+  与后续订阅**永久挂住**。要收敛须另开单设计超时预算，本单**不修**。
+
+**r5 变动性质的如实说明（verifier C2/C3）**：`plaita/server/event_reconcile.py` 在
+r5（`fc8fccf`）里的改动是 **docstring/注释 + 钉子测试**，**零可执行变更**；
+`plaita/server/log_handler.py` 的**失败回灌行 `pending = entries[start:]`（决定「只回灌
+未提交批次」的那一行）未被 r5 改动**——r5 对该文件其余部位只是 `list` → `deque` 的
+**语义等价机械适配**（代码注释已声明「丢弃方向/计数/分批提交语义**零变化**」）。即
+C2/C3 是**措辞更正 + 测试**，**不是**行为修复；上表的行为契约由 r4 的执行代码承担。
