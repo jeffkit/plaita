@@ -1,0 +1,12 @@
+{
+  "name": "88-r8-no-at-token-stops-at-question",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "            extended = end\n            while extended < n and text[extended] not in \"&#\":\n                extended += 1\n            # r2/r5 的单字符尾（``?db=Pr0d:x@y`` → ``?db=Pr0d:***@y``）不在延长\n            # 范围里——值 token 可证良性时保持原样。\n            if not _query_segment_is_provably_benign(text[colon_at + 1 : extended]):\n                end = extended",
+  "new": "            extended = end",
+  "rationale": "没有 `@` 的凭据 token 也要掩到值 token 末尾（r8 要求 2）：关掉后 `?u=X:Ccyy??99xaxzx` 只掩到 `?`，`??99xaxzx` 留在 query 上。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r8_non_authority_default_deny_rule_table"
+  ],
+  "issue": "88"
+}

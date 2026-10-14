@@ -26,7 +26,18 @@
   ``urlsplit`` 与 ``_parse_redis_url`` 交叉核对）报出的口令，任何 ≥3 前缀/后缀
   与所有 ≥3 子串都不得出现在五个渲染面上。**自洽不蕴含完备**——r6 的
   ``_passwords`` 与 ``_mask_url`` 完全自洽，仍然泄露后缀 ``Ccc``。
+* **r8：机制对分隔符闭合 + 非 authority 值位置 default-deny**。第五次复发
+  （``redis://user:AA@BB@SuperSecretTail@host:6379/0?u=X:AA@BB@SuperSecretTail``）
+  的根因是「每个分隔符只切第一个出现位置」+「非 authority 跨度停在最后一个
+  ``@``」。现在 ``_secret_forms`` 是**不动点闭包**（``_delimiter_pieces`` 切每个
+  出现位置，片段重新入队；闭合性质见其 docstring）；``_span_at`` /
+  ``_no_at_colon_spans`` 在非 authority 位置**掩到值 token 末尾**（``&``/``#``/
+  串尾），裸 query 名/取值/path 段/fragment 按 ``_query_segment_is_provably_benign``
+  / ``_token_is_provably_benign`` 默认拒绝；调用点点名的字面量与跨度进**同一趟**
+  渲染（``_mask_url(..., literals=...)``）。**完备性 = 对分隔符的闭包 + 每个可能
+  承载凭据的非 authority 值位置都被覆盖**。
 """
+import functools
 import logging
 import os
 from typing import NamedTuple, Optional
@@ -66,11 +77,31 @@ _AUTHORITY_DELIMITERS = "/?#"
 #: 口令里写了 ``/?#&`` 就整条落空（字段内没有 ``@`` 时回退全串）。
 _FIELD_DELIMITERS = "/?#&"
 
-#: 口令内部的分隔符：结构层会把口令按这些字符切开（userinfo 的 ``:``/``@``、
-#: query 的 ``?``/``&``/``=``、path 的 ``/``、fragment 的 ``#``）。切开后的头/尾截
-#: 都是同一个口令的书写形态，都要重洗——``redis://user:Pw?Tail@host`` 的 query
-#: 字段里出现的是 ``Tail``。
-_SECRET_SPLITTERS = (":", "@", "?", "#", "&", "=")
+#: 口令内部的分隔符（**闭包的分隔符集**）：结构层会把口令按这些字符切开——
+#: userinfo 的 ``:``/``@``、query 的 ``?``/``&``/``=``、path 的 ``/``、
+#: fragment 的 ``#``、``%`` 转义的分界、以及空白。切开后的头/尾截、以及**每一
+#: 个出现位置**切出来的片段都是同一个口令的书写形态，都要重洗——
+#: ``redis://user:Pw?Tail@host`` 的 query 字段里出现的是 ``Tail``，
+#: ``ByCAa/x9xczyz://9b9bz1`` 在 path 里按 ``/`` 分段出现。
+#:
+#: r8 更正 r4-r7：``/``、``%`` 与空白此前**不在**这个集合里，于是
+#: ``_secret_forms`` 永远切不出 path 段级/转义级的片段（r8 实测的
+#: ``/x9xczyz:`` 残余）。
+_SECRET_SPLITTERS = (
+    ":",
+    "@",
+    "?",
+    "#",
+    "&",
+    "=",
+    "/",
+    "%",
+    " ",
+    "\t",
+    "\n",
+    "\r",
+    "\xa0",
+)
 
 #: percent-escape 的十六进制字母大小写两种拼法都要认（``%2F`` / ``%2f``）。
 _HEX_LOWER = str.maketrans("ABCDEF", "abcdef")
@@ -141,6 +172,64 @@ class _CredentialSpan(NamedTuple):
     start: int
     mask_from: int
     stop: int
+    #: r8：这条跨度来自**非 authority 值位置的 default-deny**（未声明 query 名 /
+    #: 裸取值 / 裸 path 段 / fragment），不是「凭据形态」本身。它的重洗形态里
+    #: 子 3 字符的片段（``?u=…`` 的 1 字符名字、``=`` 切出的残片）不参与重洗——
+    #: 满足不了 ≥3 的完备性判据，误伤面却很大（实测会把 userinfo 的 ``u`` 洗成
+    #: ``redis://***ser:***@…``）。凭据跨度（``_at_colon_spans`` 等）的短片段照旧
+    #: 参与（r6 已验证的 ``redis:/u@u:p/w@/0@x`` → ``redis:/***@***:***@x``）。
+    default_deny: bool = False
+
+
+def _value_token_stop(text: str, origin: int) -> int:
+    """``origin`` 起**值 token** 的末尾：下一个字段分隔符 ``&``/``#``/``/`` 或串尾。
+
+    authority **之外**没有 host——query 值 / path 段 / fragment 的「值」以字段
+    分隔符收边（``?u=X:AA@BB@Tail&v=1`` 的第一个值 token 是 ``X:AA@BB@Tail``）。
+    """
+    stop = len(text)
+    for ch in "&#/":
+        idx = text.find(ch, origin)
+        if idx != -1 and idx < stop:
+            stop = idx
+    return stop
+
+
+def _residual_tail_is_benign(text: str, at: int) -> bool:
+    """非 authority 位置里配对 ``@`` **之后的残余尾巴**可证良性吗（r8 限定项）。
+
+    ``@`` + 1 个字符只有 2 个字符，短于完备性判据的下限（≥3）——不可能承载口令
+    片段；而 r2 契约（``?db=Acct:***@x``）与 r4 已验证的 keep 形态
+    （``?ref=a@b``、``?db=1@2``、``host:6379/0@x``、``host/@x``）用的**正是**
+    单字符尾，所以它们逐字不变。
+
+    长于 1 个字符的尾巴一律按凭据处理（default-deny）：
+    ``?u=X:AA@BB@SuperSecretTail`` 的 ``SuperSecretTail`` 正是 r8 的规则级反例
+    ——它既不在任何 ``[mask_from, stop)`` 区间里、也不在 needle 集里。判据不看
+    字符是不是数字（``?u=X:AA@BB@2`` 与 ``…@x`` 同类），只看「能否承载 ≥3 片段」
+    这一个完备性事实，不引入新的形态白名单。
+    """
+    return _value_token_stop(text, at + 1) - (at + 1) <= 1
+
+
+def _tail_is_credential_material(
+    text: str, colon_at: int, sep: int, auth_start: int, auth_stop: int
+) -> bool:
+    """非 authority 冒号之后的尾巴是**凭据材料**（而不是 authority 的 host）吗。
+
+    ``@`` 之后是 host 的两种情形不适用本轮的「掩到值 token 末尾」：
+    ``redis:/user:pw@host``（单斜杠笔误）与 ``user:pw@host:6379``（完全没有
+    scheme）——它们的冒号虽然落在首个 ``/?#`` 之后（``_span_at`` 的区域判据只能
+    看到 ``redis:`` 之后那个 ``/``），但 r5 的粗档按「``@`` 之后是 host」处理，
+    是逐字已验证的 keep。判据因此要求**作证**：冒号之前有 query/fragment 分隔符
+    （``?``/``#``），或者输入有字面 ``://`` 且冒号确实在 authority 之外。
+    """
+    if "?" in text[:colon_at] or "#" in text[:colon_at]:
+        return True
+    # ``auth_start < auth_stop``：authority **非空**。``redis:///user:pw@host``
+    # 的 authority 是空的（多写了一个斜杠），r3/r5 已验证它按 ``@`` 之后是 host
+    # 处理（``redis:///user:***@host``）——那截不能吞。
+    return sep != -1 and auth_start < auth_stop and colon_at >= auth_stop
 
 
 def _span_at(text: str, colon_at: int) -> int:
@@ -149,11 +238,14 @@ def _span_at(text: str, colon_at: int) -> int:
     * **authority 里**（``://`` 之后到首个 ``/?#``）：口令段止于首个 ``/``
       （r5 的 ``_PATH_DELIMITERS``）。``redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1@x``
       的 userinfo ``@`` 因此不会越权吃掉 query 里的凭据（r5 R2），而
-      ``redis://user:?@00bbb0?  @host`` 里口令自己的 ``@``/``?`` 也不会把它
+      ``redis://user:?@00bbb0?  @host`` 里口令自己的 ``@``/``?`` 也不会把它
       截成空口令；
     * **authority 之外**（query / path / fragment）：取该冒号之后**最后**一个
       ``@``（r5 ``_global_credential_span`` 的语义）——``?db=Acct:b0@ /@x`` 的
-      口令跨 ``@``/``/``，取首个 ``/`` 会把它截断。
+      口令跨 ``@``/``/``，取首个 ``/`` 会把它截断。**r8：不再停在那个 ``@``**
+      ——配对 ``@`` 之后的尾巴若长于 1 个字符（``_residual_tail_is_benign``），
+      口令段一直掩到**值 token 末尾**：authority 之外没有 host，``@`` 之后的文本
+      同样是凭据材料（``?u=X:AA@BB@SuperSecretTail`` → ``?u=X:***``）。
 
     两种情况都在「段内没有 ``@``」或「段内那个 ``@`` 让口令为空」时回退到
     「该冒号之后**最后**一个 ``@``」：口令里写了 ``/`` 的畸形态
@@ -167,7 +259,17 @@ def _span_at(text: str, colon_at: int) -> int:
         at = text.rfind("@", colon_at, _delimiter_stop(text, colon_at, "/"))
         if at != -1 and at > colon_at + 1:
             return at
-    return text.rfind("@", colon_at)
+        return text.rfind("@", colon_at)
+    at = text.rfind("@", colon_at)
+    if (
+        at != -1
+        and _tail_is_credential_material(
+            text, colon_at, sep, auth_start, auth_stop
+        )
+        and not _residual_tail_is_benign(text, at)
+    ):
+        return _value_token_stop(text, at + 1)
+    return at
 
 
 def _scheme_colon_at(text: str) -> int:
@@ -325,12 +427,32 @@ def _no_at_colon_spans(text: str) -> tuple:
     n = len(text)
     sep = text.find("://")
     scan_from = sep + 3 if sep != -1 else 0
+    auth_stop = _delimiter_stop(text, scan_from, _AUTHORITY_DELIMITERS)
     for colon_at in _candidate_colons(text, scan_from):
         end = colon_at + 1
+        port_stop = False
         while end < n and text[end] not in "?#&@":
             if text[end] == ":" and _is_port_colon(text, end, -1):
+                port_stop = True
                 break
             end += 1
+        # r8：**非 authority 的值 token** 不在 ``?``/``@`` 收边——query 取值里的
+        # ``?`` 是取值的一部分（``?u=X:Ccyy%%BBCa0xb??99xaxzx`` 的 ``??99xaxzx``
+        # 在 r7 上原样回显）。掩到值 token 末尾（``&``/``#``/串尾），与
+        # ``_span_at`` 的尾巴规则同一条。端口形截断（``127.0.0.1:679``）不受影响。
+        if (
+            not port_stop
+            and sep != -1
+            and scan_from < auth_stop
+            and colon_at >= auth_stop
+        ):
+            extended = end
+            while extended < n and text[extended] not in "&#":
+                extended += 1
+            # r2/r5 的单字符尾（``?db=Pr0d:x@y`` → ``?db=Pr0d:***@y``）不在延长
+            # 范围里——值 token 可证良性时保持原样。
+            if not _query_segment_is_provably_benign(text[colon_at + 1 : extended]):
+                end = extended
         if end == colon_at + 1:
             continue  # 空 token（``http://`` 里的 ``http:``）不是凭据
         start = colon_at
@@ -458,6 +580,202 @@ def _no_scheme_coarse_span(text: str, at_spans: tuple) -> tuple:
     return (_CredentialSpan(0, start, anchor),)
 
 
+def _is_declared_query_name(name: str) -> bool:
+    """这个 query 名是**声明过的**（`db` / redis-py 的 ``_QUERY_PARAMS``）吗。
+
+    r8 的 default-deny 只对**没有声明过**的名字生效：名字是攻击者可控文本
+    （r7 的未知名 WARNING 已经这么处理），而 ``socket_timeout`` /
+    ``max_connections`` 这些是诊断必需的固定词。``_QUERY_PARAMS`` 定义在文件
+    后半部，故这里按调用期解析而不是模块期常量。
+    """
+    return name == "db" or name in _QUERY_PARAMS
+
+
+def _token_is_provably_benign(token: str) -> bool:
+    """非 authority 的**裸 token** 可证良性吗（r8 的 default-deny 判据）。
+
+    良性只有两种，都不依赖「我以为它不是口令」：
+
+    * 空 token；
+    * 纯 ASCII 十进制（``/0``、``?db=2``、``?socket_timeout=5`` 这类编号/数值）；
+    * 含凭据分隔符 ``:`` / ``@`` 的 token——它们由 ``_at_colon_spans`` /
+      ``_no_at_colon_spans`` / ``_bare_at_token_spans`` 三条跨度腿**精确**处理，
+      r2/r4 的 keep 形态（``?ref=a@b``、``?db=1@2``、``?x=1:2@y``、
+      ``host:6379/0@x``）正是这些。
+
+    其余一律按凭据处理：**裸 token 与口令在文本上不可区分**
+    （``?socket_timeout=Pr0d2024x``、``?Pr0d2024x=1``、``redis://host/0/Pr0d2024x``
+    在 r7 上原样返回，零覆盖）。``%`` 编码的取值也算裸 token
+    （``?socket_timeout=%40Pr0d2024x``）。
+    """
+    if not token:
+        return True
+    if token.isascii() and token.isdigit():
+        return True
+    return ":" in token or "@" in token
+
+
+def _query_segment_is_provably_benign(segment: str) -> bool:
+    """query 段（名字 / 取值 / fragment）可证良性吗——**紧**判据。
+
+    与 ``_token_is_provably_benign``（path 段用的松判据）的差别只在含 ``@`` 的段：
+    query 里没有 host，``@`` 之后的文本同样是凭据材料，所以要求**最后一个 ``@``
+    的尾巴短到承载不了 ≥3 片段**（``_residual_tail_is_benign``）才算良性。
+
+    r2/r4 已验证的 keep 形态正好都是单字符尾（``?ref=a@b``、``?db=1@2``、
+    ``?x=1:2@y``、``?u=X:Y@x``、``?db=Acct:***@x``、``?user:***@x``），逐字不变；
+    ``?aa1??9zAC@@y0bbyCb=1`` / ``?u=AA@BB@SuperSecretTail`` 这类长尾段整段掩。
+    """
+    if not segment:
+        return True
+    if segment.isascii() and segment.isdigit():
+        return True
+    if "@" in segment:
+        # 尾巴量到**段末**（不是下一个字段分隔符）：query/fragment 里没有 host，
+        # ``@`` 之后的文本即便以 ``/``/``:`` 开头也仍是凭据材料（r8 实测
+        # ``?ybAbbabzAZ09@:/?#…`` 的 ``@:/`` 用「到下一个 /」量是 1 字符 ⇒ 漏判）。
+        if len(segment) - (segment.rfind("@") + 1) <= 1:
+            return True
+        # r5 B 契约（``redis://user?Tr0ub4dor@host:6379/0`` → 只掩 ``Tr0ub4dor``）：
+        # **恰好一个** ``@`` 且尾巴是 host 形时保留 ``@host…``。两个及以上的 ``@``
+        # 已经证明这段是凭据材料（``?u=AA@BB@SuperSecretTail``）⇒ 整段掩。
+        return (
+            segment.count("@") == 1
+            and _host_like_tail(segment[segment.rfind("@") + 1 :])
+        )
+    return ":" in segment
+
+
+def _host_like_tail(tail: str) -> bool:
+    """``@`` 之后那截是 r5 B 契约里的 ``host[:port][/path]`` 形吗。
+
+    ``redis://user#Tr0ub4dor@host:6379/0``（``:`` 写成 ``#``）的 ``@`` 之后是
+    host——r5 已验证只掩 ``Tr0ub4dor``、保留 ``@host:6379/0``。**fragment** 的
+    default-deny 因此对「``@`` + host 形尾巴」保持这个形态；其余（``@:/?#% \t…``
+    这类含 query 分隔符的尾巴）整段掩。query 段不用本判据——那里没有 host，
+    ``@`` 之后的文本一律按凭据处理（``?u=AA@BB@SuperSecretTail`` 整段掩）。
+    """
+    if not tail:
+        return True
+    i, n = 0, len(tail)
+    while i < n and (tail[i].isalnum() or tail[i] in ".-_[]"):
+        i += 1
+    if i == 0:
+        return False
+    if i < n and tail[i] == ":":
+        i += 1
+        start = i
+        while i < n and tail[i].isdigit():
+            i += 1
+        if i == start:
+            return False
+    if i == n:
+        return True
+    return tail[i] == "/"
+
+
+def _fragment_is_provably_benign(fragment: str) -> bool:
+    """fragment 文本可证良性吗（r8）。
+
+    r7 的 fragment 只在**具名拒绝**的回显里被字面抹掉，``_mask_url`` 本身对它
+    零覆盖：``?{secret}#…`` 这类形状（口令里带 ``#``）会让 ``#`` 之后的文本落在
+    另一个字段里原样回显。判据：不可证良性的一律**整段掩**；唯一例外是 r5 B 的
+    ``@`` + ``host[:port][/path]`` 契约（逐字已验证）。
+    """
+    if not fragment or (fragment.isascii() and fragment.isdigit()):
+        return True
+    # r8：fragment 里**没有 host 可读**——只有 r5 B 的「``@`` + host 形尾巴」例外
+    # （``#Tr0ub4dor@host:6379/0``）。``#% \t…z11xz://ba1c`` 这类含 ``:`` 的
+    # fragment 一律整段掩，否则 ``:`` 之前那截会原样回显。
+    if "@" in fragment:
+        return _host_like_tail(fragment[fragment.rfind("@") + 1 :])
+    return False
+
+
+def _query_pair_spans(query_start: int, query_stop: int, text: str) -> tuple:
+    """query 里**未声明名字 / 裸取值**的 default-deny 跨度（r8）。
+
+    逐个 ``&`` 段处理（与 ``parse_qs`` 的分段一致）：名字不在
+    ``_DECLARED_QUERY_NAMES`` 且不含 ``:``/``@`` ⇒ 掩名字；取值不良性 ⇒ 掩取值。
+    ``socket_timeout=Pr0d2024x`` 因此是 ``socket_timeout=***``（名字保留给诊断），
+    ``Pr0d2024x=1`` 整段变 ``***``（名字就是攻击者可控文本）。带 ``:``/``@`` 的段
+    交给跨度腿——``?ref=a@b`` / ``?u=X:Y@x`` 这些 r2/r4 已验证形态逐字不变。
+    """
+    spans = []
+    i = query_start
+    while i <= query_stop:
+        amp = text.find("&", i)
+        end = query_stop if amp == -1 or amp > query_stop else amp
+        eq = text.find("=", i, end)
+        name = text[i : end if eq == -1 else eq]
+        if _is_declared_query_name(name):
+            # 名字是声明过的固定词（诊断必需）：只对**不可证良性的取值** default-deny。
+            if eq != -1 and not _query_segment_is_provably_benign(text[eq + 1 : end]):
+                spans.append(_CredentialSpan(eq + 1, eq + 1, end, True))
+        elif not _query_segment_is_provably_benign(text[i:end]):
+            # 未声明且整段不可证良性：名字与取值都不可证（``?Pr0d2024x=1`` 的名字
+            # 就是攻击者可控文本）⇒ 整段掩。r2/r4 的 keep 形态（单字符尾）逐字不变。
+            spans.append(_CredentialSpan(i, i, end, True))
+        if amp == -1 or amp >= query_stop:
+            break
+        i = amp + 1
+    return tuple(spans)
+
+
+def _path_segment_spans(path_start: int, path_stop: int, text: str) -> tuple:
+    """path 段（redis/rediss 的 db 位与额外段）的 default-deny 跨度（r8）。
+
+    ``redis://host:6379/0/Pr0d2024x`` 的 ``Pr0d2024x`` 在 r7 上原样返回（零覆盖），
+    而 ``#159`` 的整个前提就是「秘密在 path」。规则与 query 取值同一条：段不良性
+    就整段掩。**空 authority**（``redis:///user:pw@host``）与 **unix socket 路径**
+    不走这条——前者的 ``@`` 之后是 host（r5 粗档的已验证形态），后者本来就不是
+    db/凭据位。
+    """
+    spans = []
+    i = path_start
+    while i <= path_stop:
+        slash = text.find("/", i)
+        end = path_stop if slash == -1 or slash > path_stop else slash
+        if not _token_is_provably_benign(text[i:end]):
+            spans.append(_CredentialSpan(i, i, end, True))
+        if slash == -1 or slash >= path_stop:
+            break
+        i = slash + 1
+    return tuple(spans)
+
+
+def _non_authority_default_deny_spans(text: str) -> tuple:
+    """非 authority **值位置**的 default-deny（r8 要求 2 的结构性一片）。
+
+    只处理「确实在 authority 之外」的位置：有字面 ``://`` **且** authority 非空
+    （``auth_start < auth_stop``）。``redis:/user:pw@host``（单斜杠）与
+    ``redis:///user:pw@host``（空 authority）不是值位置，交给 r5 的粗档。unix://
+    的 path 是 socket 路径，不参与。
+    """
+    sep = text.find("://")
+    if sep == -1:
+        return ()
+    auth_start = sep + 3
+    auth_stop = _delimiter_stop(text, auth_start, _AUTHORITY_DELIMITERS)
+    if auth_start >= auth_stop:
+        return ()
+    scheme = text[:sep]
+    query_at = text.find("?", auth_stop)
+    frag_at = text.find("#", auth_stop)
+    spans = []
+    path_stop = min(
+        [x for x in (query_at, frag_at, len(text)) if x != -1]
+    )
+    if scheme != "unix":
+        spans.extend(_path_segment_spans(auth_stop + 1, path_stop, text))
+    if query_at != -1 and (frag_at == -1 or query_at < frag_at):
+        query_stop = frag_at if frag_at != -1 else len(text)
+        spans.extend(_query_pair_spans(query_at + 1, query_stop, text))
+    if frag_at != -1 and not _fragment_is_provably_benign(text[frag_at + 1 :]):
+        spans.append(_CredentialSpan(frag_at + 1, frag_at + 1, len(text), True))
+    return tuple(spans)
+
+
 def _credential_spans(text: str) -> tuple:
     """**枚举 ``text`` 里每一个凭据候选跨度**（r6 的结构性要求，唯一入口）。
 
@@ -479,14 +797,19 @@ def _credential_spans(text: str) -> tuple:
     """
     at_spans = _at_colon_spans(text)
     no_at_spans = _no_at_colon_spans(text)
+    default_deny = _non_authority_default_deny_spans(text)
     coarse = _no_scheme_coarse_span(text, at_spans)
     failed = _authority_fail_closed_span(text) if not (at_spans or coarse) else ()
     bare = _bare_at_token_spans(
-        text, _covered_at(text, at_spans + no_at_spans + coarse + failed)
+        text,
+        _covered_at(
+            text,
+            at_spans + no_at_spans + default_deny + coarse + failed,
+        ),
     )
     return tuple(
         sorted(
-            at_spans + no_at_spans + coarse + failed + bare,
+            at_spans + no_at_spans + default_deny + coarse + failed + bare,
             key=lambda span: (span.mask_from, span.stop),
         )
     )
@@ -507,6 +830,7 @@ def _lower_hex(encoded: str) -> str:
     return "".join(out)
 
 
+@functools.lru_cache(maxsize=65536)
 def _quoted_forms(text: str) -> frozenset:
     """``quote(text, safe="")`` 的大小写两种拼法；孤立代理字符按**字节**渲染。
 
@@ -515,7 +839,7 @@ def _quoted_forms(text: str) -> frozenset:
     ``UnicodeEncodeError``。兜底分两种，都以**字节**为准：
 
     * ``surrogateescape`` 能编回的（``U+DC80``-``U+DCFF``）：拿到的是**原始字节**，
-      于是 ``_quoted_forms('\udcff')`` = ``%FF``——这正是 on-the-wire 形态
+      于是 ``_quoted_forms('\\udcff')`` = ``%FF``——这正是 on-the-wire 形态
       （r6 更正 r5 的注释：r5 一律走 ``surrogatepass``，得到的是 WTF-8 字节
       ``%ED%B3%BF``，与线上的 ``%FF`` **不同**）；
     * 编不回的孤立代理（``U+D800`` 之类，不是 ``surrogateescape`` 的产物）：
@@ -535,6 +859,15 @@ def _quoted_forms(text: str) -> frozenset:
     return frozenset({encoded, _lower_hex(encoded)})
 
 
+def _percent_decoded(text: str) -> str:
+    """``unquote(text)`` 的**不抛**版本（含 ``%`` 的孤立代理串会触发 utf-8 编码失败）。"""
+    try:
+        return unquote(text)
+    except UnicodeError:  # pragma: no cover - 兜底分支，行为与 _encoding_forms 一致
+        return text
+
+
+@functools.lru_cache(maxsize=65536)
 def _encoding_forms(secret: str) -> frozenset:
     """一个字符串的三种书写形态：原文 / percent-decoded / percent-encoded。
 
@@ -542,10 +875,7 @@ def _encoding_forms(secret: str) -> frozenset:
     ``_parse_redis_url`` 的每个拒绝分支上，抛出去就是启动期硬崩（#158 实测）。
     """
     forms = {secret}
-    try:
-        decoded = unquote(secret)
-    except UnicodeError:  # 含 ``%`` 的孤立代理串：``unquote`` 的 utf-8 编码失败
-        decoded = secret
+    decoded = _percent_decoded(secret)
     if decoded:
         forms.add(decoded)
         forms |= _quoted_forms(decoded)
@@ -554,52 +884,130 @@ def _encoding_forms(secret: str) -> frozenset:
     return frozenset(forms)
 
 
+@functools.lru_cache(maxsize=65536)
+def _delimiter_pieces(text: str) -> tuple:
+    """``text`` 在 ``_SECRET_SPLITTERS`` **每一个**出现位置上的头/尾截。
+
+    r7 只取每个分隔符的**第一个**出现位置（``variant.find(sep)``），于是
+    ``AA@BB@SuperSecretTail`` 只切出 ``AA`` 与 ``BB@SuperSecretTail``——
+    第二个 ``@`` 之后的 ``SuperSecretTail`` 永远不是 needle（r8 的规则级反例）。
+    这里把**每一个**出现位置都切开（含中间片段：对 ``a?b?c`` 切两次得到
+    ``a``/``b?c`` 与 ``a?b``/``c``，闭包迭代后再得 ``b``、``c``）。
+    """
+    out = []
+    for sep in _SECRET_SPLITTERS:
+        start = 0
+        while True:
+            cut = text.find(sep, start)
+            if cut == -1:
+                break
+            for piece in (text[:cut], text[cut + 1 :]):
+                # 纯分隔符的片段（``@@@A`` 切出的 ``@``/``@@``）也进**形态集**——
+                # 闭包性质要求「所有子形态都在」。它们是结构本身，**重洗层**不拿
+                # 它们当 needle（见 ``_render_redacted``），否则结构性 ``@`` 会被
+                # 抹成 ``redis://******host…``。
+                if piece:
+                    out.append(piece)
+            start = cut + 1
+    return tuple(out)
+
+
 def _secret_forms(secret: str) -> tuple:
-    """一个口令候选的**所有书写形态**（原文 / percent-decoded / percent-encoded）。
+    """一个口令候选的**所有书写形态**——对分隔符集**闭合**（r8）。
 
     兜底重洗（见 ``_mask_url``）要认出「同一个口令换个写法又出现在 query/path
     里」——``?socket_timeout=@Pr0d2024x`` 与 ``?socket_timeout=%40Pr0d2024x``
     都必须能被洗掉。按长度降序返回：长形态先替换，避免短形态把长形态切碎。
 
+    **闭合性质（r8 的结构性要求）**：返回值对 ``_SECRET_SPLITTERS`` **闭合**——
+    对任意返回的形态 ``f``、任意分隔符 ``sep``、``f`` 里 ``sep`` 的**每一个**
+    出现位置 ``k``，``f[:k]`` 与 ``f[k+1:]`` 也都在返回值里；且 ``f`` 的
+    percent-decoded 形态同样在（并对它继续按分隔符切）。r6/r7 的实现是「每个
+    分隔符只切**第一次**」的单趟生成器，于是 ``AA@BB@SuperSecretTail`` 的
+    ``SuperSecretTail`` 既不在任何跨度里、也不在 needle 集里——同一缺陷类第五次
+    复发。这里是**不动点**迭代（工作队列），不是再补几条模板：
+
+    * 每个串的**编码形态**（原文 / percent-decoded / percent-encoded）入队；
+    * 每个串在**每个**分隔符的**每个**出现位置上的头/尾截入队，片段继续切；
+    * 编码输出的串**不再展开编码**（``quote`` 对 ``%`` 会 ``%25``→``%2525``
+      无限自增）；编码输出不含裸分隔符（``: @ ? # & =`` 全被 ``quote`` 转义），
+      故这一支不损失覆盖、也不破坏闭合性。
+
+    终止性：入队串最多入 ``forms`` 一次，编码只对「非编码输出」展开，切分只会
+    变短——整条链有限。结果按 ``secret`` 缓存（``_secret_forms_cached``）。
+
     结构定位若多吞了一段（畸形态里口令本身含 ``/``/``@``：候选 ``/:p/w``、
-    ``u@u:a\nb``），真正的口令往往是**第一个** ``:``/``@`` 之后那截——把它连同
-    它的编码形态一起纳入（只多洗、不少洗）。
+    ``u@u:a\nb``），真正的口令往往是**第一个** ``:``/``@`` 之后那截——闭包把它
+    连同它的编码形态一起纳入（只多洗、不少洗）。
 
     r6 再补一版「剥掉空白」的：``urlsplit`` 解析前会做 WHATWG 归一化，把 URL 里的
     ``\t``/``\n``/``\r`` 直接删掉，于是底层异常文案里的口令是无空白版本——
     ``redis://user:0Cxya1B\tAxCaaC/x@host`` 的 ``Port could not be cast …`` 里是
     ``0Cxya1BAxCaaC``。少了这一版，``\t`` 后面的尾巴会以 ≥3 字符后缀活下来。
     """
+    cached = _secret_forms_cached(secret)
+    return cached
+
+
+@functools.lru_cache(maxsize=1024)
+def _secret_forms_cached(secret: str) -> tuple:
+    """``_secret_forms`` 的**进程内缓存**（r8）。
+
+    一条 URL 上 ``_mask_url`` / ``_passwords`` / ``_safe_reason`` 会对**同一个**
+    跨度文本反复求形态集（一条 URL 上 5-10 次），闭包（含编码形态）每次 1ms 级。
+    缓存把每形状的形态计算量压回一次。键是跨度文本本身，故缓存值不含任何全局状态。
+    """
     if not secret:
         return ()
-    forms = set(_encoding_forms(secret))
-    variants = [secret]
+    forms: set = set()
+    #: 工作队列项 = ``(串, 是否还允许展开它的派生形态)``。**派生**=percent
+    #: 编码/解码 + ``unicode_escape``；派生输出只再参与「按分隔符切」，不再派生
+    #: （``quote`` 对 ``%`` 会 ``%25``→``%2525``、``unicode_escape`` 对 ``\`` 会
+    #: 翻倍，都会无限自增）。``queued`` 去重：同一串只入队一次。
+    work = [(secret, True)]
+    queued = {secret}
     stripped = secret.replace("\t", "").replace("\n", "").replace("\r", "")
     if stripped != secret:
-        variants.append(stripped)
-    # ``parts.port`` 的报错文案是 ``%r``——非 ASCII 与 ``\t`` 在里面是**转义写法**
-    # （``Super\xa0Secret`` → ``'Super\\xa0Secret'``）。这一版同样要洗，否则
-    # ``\xa0`` 之前的前缀会以 ≥3 字符前缀的形式活下来。
-    # ``unicode_escape`` 对孤立代理字符走 backslashreplace（``\udcff``），不抛。
-    escaped = secret.encode("unicode_escape").decode("ascii")
-    if escaped != secret:
-        variants.append(escaped)
-    for variant in variants:
-        for sep in _SECRET_SPLITTERS:
-            cut = variant.find(sep)
-            if cut != -1:
-                # 尾截（r4：畸形态里真口令往往是首个分隔符之后那截）
-                forms |= _encoding_forms(variant[cut + 1 :])
-                # 头截（r6：口令本身含 ':' 且**用户名 == 口令**时
-                # ``redis://Pw:Pw@host`` 的用户 token 段会留下口令的头部）
-                forms |= _encoding_forms(variant[:cut])
-        if variant is not secret:
-            forms |= _encoding_forms(variant)
+        work.append((stripped, True))
+        queued.add(stripped)
+
+    def _push(value: str, expand: bool) -> None:
+        if value and value not in queued:
+            queued.add(value)
+            work.append((value, expand))
+
+    while work:
+        cur, expand = work.pop()
+        if not cur or cur in forms:
+            continue
+        forms.add(cur)
+        if expand:
+            decoded = _percent_decoded(cur)
+            if decoded and decoded != cur:
+                # 解码形态本身继续可派生：``%0a`` 解成真换行后，``int()`` 文案里
+                # 出现的是它的转义写法 ``\n``（r8 实测的规则级残余）。
+                _push(decoded, True)
+            for variant in _quoted_forms(cur):
+                if variant != cur:
+                    _push(variant, False)
+            try:
+                escaped = cur.encode("unicode_escape").decode("ascii")
+            except UnicodeError:  # pragma: no cover - unicode_escape 不抛
+                escaped = cur
+            # ``parts.port`` / ``int()`` 的报错文案是 ``%r``——非 ASCII 与
+            # ``\t``/``\n`` 在里面是**转义写法**（``Super\xa0Secret`` →
+            # ``'Super\\xa0Secret'``）。这一版同样要洗，否则 ``\xa0`` 之前的前缀
+            # 会以 ≥3 字符前缀的形式活下来。
+            # ``unicode_escape`` 对孤立代理字符走 backslashreplace（``\\udcff``），不抛。
+            if escaped != cur:
+                _push(escaped, False)
+        for piece in _delimiter_pieces(cur):
+            _push(piece, expand)
     forms.discard("")
     return tuple(sorted(forms, key=len, reverse=True))
 
 
-def _protected_regions(text: str) -> tuple:
+def _protected_regions(text: str, spans: tuple = ()) -> tuple:
     """**重洗**不碰的结构性区间：scheme（``scheme://``）与 authority 的 host。
 
     它们是诊断信息，也可能恰好是口令的子串——口令 ``redis`` + host
@@ -623,27 +1031,79 @@ def _protected_regions(text: str) -> tuple:
         if start < sep:
             regions.append((start, sep + 3))
     at = text.rfind("@", auth_start, _delimiter_stop(text, auth_start, "/"))
+    if at == -1:
+        # 口令里写了 ``/`` 的畸形态（``redis://user:pässwörd/h@host``）：首个 ``/``
+        # 落在口令内部，上面那条判据取不到 ``@``。真正的主机分隔符是**最后一个
+        # 凭据跨度的 stop**（r8 实测：漏保护 host 会让 `_secret_forms` 切出的
+        # ``h`` 把主机名洗成 ``***ost``）。
+        stops = [
+            span.stop
+            for span in spans
+            if span.stop > auth_start and text[span.stop : span.stop + 1] == "@"
+        ]
+        if stops:
+            at = max(stops)
     host_start = at + 1 if at != -1 else auth_start
     regions.append((host_start, _delimiter_stop(text, host_start, "/?#")))
     return tuple(regions)
 
 
-def _render_redacted(text: str, spans: tuple, forms: tuple) -> str:
+def _literal_ranges(text: str, literals: tuple) -> tuple:
+    """``literals`` 在 ``text`` 里的**全部**出现区间（各出现一次算一个区间）。
+
+    r8：调用点已知的默认拒绝文本（非法 query 取值 / 未知名 / 裸 fragment）不再
+    先做 ``str.replace`` 再掩码——那会把凭据**切碎**，掩码层随后认不出残余
+    （``redis://user:xCb0B??AxB#xcC@host…`` 的 fragment 消息留下 ``??AxB``）。
+    这些字面量改为进**同一趟**掩码（``_render_redacted`` 的 ``m`` 态），位置在
+    **原文**上算，掩码与重洗因此对同一个文本一致。
+    """
+    ranges = []
+    for literal in literals:
+        if not literal:
+            continue
+        start = text.find(literal)
+        while start != -1:
+            ranges.append((start, start + len(literal)))
+            start = text.find(literal, start + 1)
+    return tuple(ranges)
+
+
+def _is_structural_form(form: str) -> bool:
+    """形态**只由分隔符组成**（``@``、``@@``、``?#``）⇒ 是结构本身，不是凭据材料。
+
+    ``_secret_forms`` 的闭包会产出这类片段（``@@@A`` 切出 ``@``/``@@``）——留在
+    形态集里是闭包性质的要求，但渲染层拿它当 needle 会把结构性 ``@`` 抹掉。
+    """
+    return all(ch in _SECRET_SPLITTERS for ch in form)
+
+
+def _render_redacted(
+    text: str, spans: tuple, forms: tuple, extra_masks: tuple = ()
+) -> str:
     """单趟渲染：保护区间原样、凭据候选段 ``***``、其余按 ``forms`` 重洗。
 
     ``spans`` 是 ``_credential_spans`` 的**全部**跨度，不是第一个——R1
     （``redis://user:pa55word://x@host``）与 R2
     （``redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1@x``）的每一条跨度都会
     被掩，所以「口令自己的 ``://`` 把扫描起点推到尾巴」与「只看第一个候选冒号」
-    两个漏点在结构上没有立足点。三态优先序：掩码 > 保护 > 重洗。
+    两个漏点在结构上没有立足点。``extra_masks`` 是调用点点名要抹的字面量区间
+    （``_literal_ranges``），与跨度同处 ``m`` 态。三态优先序：掩码 > 保护 > 重洗。
     """
     n = len(text)
+    #: r8：闭包把形态集推到上千条（``@ : / ? # %`` + 空白全在分隔符集里），
+    #: 逐条对每个可重洗段做 ``in``/``replace`` 是 O(|forms| × |text|)。先在**整条
+    #: 原文**上过一遍 C 层 ``in``，留下真的出现过的形态（通常 1-3 条），重洗段
+    #: 只对这几条做替换——语义不变（不出现的形态替换是恒等）。
+    present = tuple(form for form in forms if form in text)
     kind = bytearray(b"s" * n)  # s=可重洗 / p=结构性保护 / m=必掩
-    for start, stop in _protected_regions(text):
+    for start, stop in _protected_regions(text, spans):
         for i in range(start, min(stop, n)):
             kind[i] = ord("p")
     for span in spans:
         for i in range(span.mask_from, min(span.stop, n)):
+            kind[i] = ord("m")
+    for start, stop in extra_masks:
+        for i in range(start, min(stop, n)):
             kind[i] = ord("m")
     out = []
     i = 0
@@ -658,7 +1118,13 @@ def _render_redacted(text: str, spans: tuple, forms: tuple) -> str:
             out.append(_REDACTED)
         else:
             segment = text[i:j]
-            for form in forms:
+            for form in present:
+                # 纯分隔符形态是**结构本身**（``@@@A`` 的 ``@``/``@@``），不是
+                # 凭据材料——拿它当 needle 会把结构抹掉（``redis://@@@A@host``
+                # → ``redis://******host``）。形态集照旧包含它（闭包性质），
+                # 只是渲染层不施加。
+                if _is_structural_form(form):
+                    continue
                 if form in segment:
                     segment = segment.replace(form, _REDACTED)
             out.append(segment)
@@ -681,15 +1147,24 @@ def _redaction_forms(text: str, spans: tuple) -> tuple:
     """
     forms = set()
     for span in spans:
-        forms.update(_secret_forms(text[span.mask_from : span.stop]))
+        pieces = [text[span.mask_from : span.stop]]
         cut = _delimiter_stop(text, span.mask_from, _AUTHORITY_DELIMITERS)
         if span.mask_from < cut < span.stop:
-            forms.update(_secret_forms(text[span.mask_from:cut]))
+            pieces.append(text[span.mask_from:cut])
+        for piece in pieces:
+            if not piece:
+                continue
+            piece_forms = _secret_forms(piece)
+            if span.default_deny:
+                # default-deny 跨度不是「凭据形态」本身：它切出的子 3 字符片段
+                # （``?u=…`` 的 1 字符名字）不参与重洗（见 ``_CredentialSpan``）。
+                piece_forms = tuple(form for form in piece_forms if len(form) >= 3)
+            forms.update(piece_forms)
     forms.discard("")
     return tuple(sorted(forms, key=len, reverse=True))
 
 
-def _mask_url(value: object) -> str:
+def _mask_url(value: object, *, literals: tuple = ()) -> str:
     """把 URL 渲染成可安全写进异常/日志的形态：口令一律 ``***``。
 
     ``redis://user:sup3rsecret@host:6379/0`` → ``redis://user:***@host:6379/0``。
@@ -716,6 +1191,12 @@ def _mask_url(value: object) -> str:
       ``?socket_timeout=PwX``、``/PwX``、``?<口令>=1`` 里都活不下来；scheme 与 host
       是结构性诊断信息，且可能是口令的子串（口令 ``redis`` + host
       ``redis.example.com``），无差别全局替换只会给假红。
+    * **默认拒绝层（r8）**：``literals=`` 是调用点**点名**要抹的字面量（非法
+      query 取值 / 未知名 / 裸 fragment）。它们与跨度进**同一趟**渲染
+      （``_literal_ranges`` → ``m`` 态），位置在**原文**上计算——r7 的
+      「先 ``str.replace`` 再 ``_mask_url``」会把凭据切碎，掩码层随后认不出
+      残余（``redis://user:xCb0B??AxB#xcC@host…`` 的 fragment 消息留下 ``??AxB``，
+      ``?u=X:AA@BB@SuperSecretTail`` 的 WARNING 留下 ``?0xzzAC?…`` 型尾巴）。
     * **total**（r5 A）：任意 ``str``（含 ``os.environ`` 的 surrogateescape 孤立代理
       字符）都不抛。
 
@@ -734,6 +1215,9 @@ def _mask_url(value: object) -> str:
     分叉——r5 的 R1（``_passwords`` 取到 ``pa55word`` 而 ``_mask_url`` 掩不住）与
     R2（``_mask_url`` 掩了、``_passwords`` 取不到）都是这条不变量的违反。
 
+    ``literals`` 是**关键字**参数（默认 ``()``），``_mask_url(x)`` 的单参调用
+    逐字不变——``#158``/``#159`` 按名字 import 这个函数，签名只增不减。
+
     **但自洽不蕴含完备（r7 的验收方向）**：r6 的 ``_mask_url`` 与 ``_passwords``
     完全自洽，输出 ``redis://***@@***@@Ccc:***@host:6379/0`` 里仍然留着口令后缀
     ``Ccc``——因为「没有跨度覆盖的用户段尾巴」两头都不在枚举里。判据因此换成
@@ -748,9 +1232,12 @@ def _mask_url(value: object) -> str:
         return f"<{type(value).__name__}>"
 
     spans = _credential_spans(value)
-    if not spans:
+    extra_masks = _literal_ranges(value, literals)
+    if not spans and not extra_masks:
         return value
-    return _render_redacted(value, spans, _redaction_forms(value, spans))
+    return _render_redacted(
+        value, spans, _redaction_forms(value, spans), extra_masks
+    )
 
 
 def _passwords(text: str) -> tuple:
@@ -781,20 +1268,6 @@ def _raw_query_names(query_text: str) -> tuple:
     return tuple(names)
 
 
-def _scrub_literal(text: str, literals: tuple) -> str:
-    """把**显式给定**的字面量从 ``text`` 里抹成 ``***``（default-deny，r7）。
-
-    ``_scrub`` 只洗「已识别为口令」的形态；``?db=<非法值>`` / ``?<未知名>=1``
-    这类文本**不是**口令候选，识别不出来，于是被原样回显到拒绝消息与 WARNING 里。
-    这里把「调用点自己知道的那段攻击者可控文本」点名抹掉——同时保留参数名
-    （``db`` / ``socket_timeout`` / 消息里的固定措辞）以便诊断。
-    """
-    for literal in literals:
-        if literal:
-            text = text.replace(literal, _REDACTED)
-    return text
-
-
 def _safe_reason(exc: BaseException, text: str, extra: tuple = ()) -> str:
     """底层异常的**安全**渲染（只用在嵌套 cause 的位置）。
 
@@ -802,12 +1275,10 @@ def _safe_reason(exc: BaseException, text: str, extra: tuple = ()) -> str:
     先抹掉口令的所有书写形态与 ``extra``（调用点已知的非法取值），再掩码裸 URL，
     然后才允许进入消息/traceback。
     """
-    reason = _scrub_literal(str(exc), extra)
-    for secret in _passwords(text):
-        reason = reason.replace(secret, _REDACTED)
-    # 先洗口令字面量、再掩 URL：反过来的话 ``could not convert ...: 'p@ssword'``
-    # 会被 _mask_url 从中间切开（``...float:***@ssword'``），留下 ≥3 后缀。
-    return _mask_url(reason)
+    # r8：字面量与口令形态**一起**进**同一趟**掩码。先 ``str.replace`` 再掩码会把
+    # 凭据切碎（``...float:'p@ssword'`` 被切成 ``...float:***@ssword'``），留下的
+    # ≥3 后缀掩码层再也认不出来；同一趟里 ``m`` 态覆盖原文，不存在中间态。
+    return _mask_url(str(exc), literals=tuple(extra) + _passwords(text))
 
 
 def _scrub(value: object, text: str) -> str:
@@ -935,7 +1406,7 @@ def _coerce_query_value(key: str, value: str, text: str) -> object:
         raise RedisUrlError(
             f"Redis URL 的 query 参数 {_scrub(key, text)!r} 取值非法: "
             f"{_safe_reason(exc, text, literals)}"
-            f"（URL={_mask_url(_scrub_literal(text, literals))!r}）"
+            f"（URL={_mask_url(text, literals=literals)!r}）"
         ) from _sanitized_cause(exc, text, literals)
 
 
@@ -981,7 +1452,7 @@ def _parse_query_options(query: dict, text: str) -> dict:
         logger.warning(
             "Redis URL 含 redis-py 未定义的 query 参数 %s，已按 parse_url 语义忽略: %s",
             [_REDACTED for _ in unknown],
-            _mask_url(_scrub_literal(text, raw_unknown or tuple(unknown))),
+            _mask_url(text, literals=raw_unknown or tuple(unknown)),
         )
     return options
 
@@ -1009,7 +1480,7 @@ def _redis_db_from_url(
             literals = tuple(_encoding_forms(db_query))
             raise RedisUrlError(
                 f"Redis URL 的 db 查询参数不是整数: {_REDACTED!r}"
-                f"（URL={_mask_url(_scrub_literal(text, literals))!r}）"
+                f"（URL={_mask_url(text, literals=literals)!r}）"
             ) from _sanitized_cause(exc, text, literals)
     elif path is None or path in ("", "/"):
         db = 0
@@ -1019,7 +1490,7 @@ def _redis_db_from_url(
         literals = tuple(_encoding_forms(path))
         raise RedisUrlError(
             f"Redis URL 的路径必须是数据库编号（形如 /0）: {_REDACTED!r}"
-            f"（URL={_mask_url(_scrub_literal(text, literals))!r}）"
+            f"（URL={_mask_url(text, literals=literals)!r}）"
         )
     if db < 0:
         raise RedisUrlError(f"Redis URL 的数据库编号不能为负: {db}（URL={shown!r}）")
@@ -1100,7 +1571,7 @@ def _parse_redis_url_checked(redis_url: Optional[str] = None) -> RedisTarget:
         raw_fragment = text[text.find("#") :]
         raise RedisUrlError(
             f"Redis URL 不支持 fragment: "
-            f"{_mask_url(_scrub_literal(text, (raw_fragment, raw_fragment[1:])) if raw_fragment else text)!r}"
+            f"{_mask_url(text, literals=(raw_fragment, raw_fragment[1:]))!r}"
             f"（凭据里的 '#' 请写成 %23）"
         )
     query = parse_qs(parts.query, keep_blank_values=True)

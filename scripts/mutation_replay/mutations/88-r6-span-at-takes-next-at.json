@@ -2,9 +2,9 @@
   "name": "88-r6-span-at-takes-next-at",
   "concern": "#88-P0",
   "file": "plaita/server/factory.py",
-  "old": "    sep = text.find(\"://\")\n    auth_start = sep + 3 if sep != -1 else 0\n    auth_stop = _delimiter_stop(text, auth_start, _AUTHORITY_DELIMITERS)\n    if colon_at < auth_stop:\n        at = text.rfind(\"@\", colon_at, _delimiter_stop(text, colon_at, \"/\"))\n        if at != -1 and at > colon_at + 1:\n            return at\n    return text.rfind(\"@\", colon_at)\n",
-  "new": "    return text.find(\"@\", colon_at)  # r6 变异：只取紧随其后的 '@'\n",
-  "rationale": "把配对规则退回「紧随其后的 '@'」：口令里含 '@' 的 r3 形态（redis://user:@Pr0d2024x@redis.internal:0）被切成空口令，前缀活下来。",
+  "old": "    sep = text.find(\"://\")\n    auth_start = sep + 3 if sep != -1 else 0\n    auth_stop = _delimiter_stop(text, auth_start, _AUTHORITY_DELIMITERS)\n    if colon_at < auth_stop:\n        at = text.rfind(\"@\", colon_at, _delimiter_stop(text, colon_at, \"/\"))\n        if at != -1 and at > colon_at + 1:\n            return at\n        return text.rfind(\"@\", colon_at)\n    at = text.rfind(\"@\", colon_at)\n    if (\n        at != -1\n        and _tail_is_credential_material(\n            text, colon_at, sep, auth_start, auth_stop\n        )\n        and not _residual_tail_is_benign(text, at)\n    ):\n        return _value_token_stop(text, at + 1)\n    return at",
+  "new": "    return text.find(\"@\", colon_at)  # r6 变异：只取紧随其后的 '@'",
+  "rationale": "`_span_at` 只取紧随冒号之后的 `@`（r8 重写定义：新增了非 authority 的值 token 尾巴腿）。",
   "expect_fail": [
     "tests/unit/test_redis_url_parse.py::TestRefusalMessagesNeverLeakCredentials::test_mask_helper_itself"
   ],

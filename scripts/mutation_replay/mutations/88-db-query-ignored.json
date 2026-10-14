@@ -2,9 +2,9 @@
   "name": "88-db-query-ignored",
   "concern": "#88-P0",
   "file": "plaita/server/factory.py",
-  "old": "    if db_query:\n        try:\n            db = int(db_query)\n        except ValueError as exc:\n            # r7 默认拒绝：非法取值本身是攻击者可控文本，消息/`__cause__`/回显的\n            # URL 都不带上它（保留参数名 ``db`` 与固定措辞，诊断仍能定位到\n            # 「db 查询参数」）。\n            literals = tuple(_encoding_forms(db_query))\n            raise RedisUrlError(\n                f\"Redis URL 的 db 查询参数不是整数: {_REDACTED!r}\"\n                f\"（URL={_mask_url(_scrub_literal(text, literals))!r}）\"\n            ) from _sanitized_cause(exc, text, literals)",
+  "old": "    if db_query:\n        try:\n            db = int(db_query)\n        except ValueError as exc:\n            # r7 默认拒绝：非法取值本身是攻击者可控文本，消息/`__cause__`/回显的\n            # URL 都不带上它（保留参数名 ``db`` 与固定措辞，诊断仍能定位到\n            # 「db 查询参数」）。\n            literals = tuple(_encoding_forms(db_query))\n            raise RedisUrlError(\n                f\"Redis URL 的 db 查询参数不是整数: {_REDACTED!r}\"\n                f\"（URL={_mask_url(text, literals=literals)!r}）\"\n            ) from _sanitized_cause(exc, text, literals)",
   "new": "    if db_query:\n        db = 0",
-  "rationale": "r2 契约：`?db=N` 必须可解析（与 Redis.from_url 同序）。该变异把 db 查询参数当不存在，存储侧连到错误的库。",
+  "rationale": "r2 契约：`?db=N` 必须可解析（与 Redis.from_url 同序）。该变异把 db 查询参数当不存在，存储侧连到错误的库。r8 重写定义：站点已改为同一趟渲染。",
   "expect_fail": [
     "tests/unit/test_redis_url_parse.py::TestParseAcceptedShapes::test_db_query_beats_path"
   ],

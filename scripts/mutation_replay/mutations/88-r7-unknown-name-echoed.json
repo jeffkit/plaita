@@ -2,9 +2,9 @@
   "name": "88-r7-unknown-name-echoed",
   "concern": "#88-P0",
   "file": "plaita/server/factory.py",
-  "old": "        logger.warning(\n            \"Redis URL 含 redis-py 未定义的 query 参数 %s，已按 parse_url 语义忽略: %s\",\n            [_REDACTED for _ in unknown],\n            _mask_url(_scrub_literal(text, raw_unknown or tuple(unknown))),\n        )",
+  "old": "        logger.warning(\n            \"Redis URL 含 redis-py 未定义的 query 参数 %s，已按 parse_url 语义忽略: %s\",\n            [_REDACTED for _ in unknown],\n            _mask_url(text, literals=raw_unknown or tuple(unknown)),\n        )",
   "new": "        logger.warning(\n            \"Redis URL 含 redis-py 未定义的 query 参数 %s，已按 parse_url 语义忽略: %s\",\n            sorted(unknown),\n            _mask_url(text),\n        )",
-  "rationale": "退回 r6 的未知名回显：`?Pr0d2024x=1` 的名字同时出现在警告的参数列表与回显的 URL 里。",
+  "rationale": "退回 r6 的未知名回显：`?Pr0d2024x=1` 的名字同时出现在警告的参数列表里。r8 重写定义：`literals=` 已并入同一趟渲染。",
   "expect_fail": [
     "tests/unit/test_redis_url_parse.py::TestLiteralGroundedRows::test_literal_grounded_rows_never_leak"
   ],

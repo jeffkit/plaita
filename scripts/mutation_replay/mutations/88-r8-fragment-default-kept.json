@@ -1,0 +1,12 @@
+{
+  "name": "88-r8-fragment-default-kept",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    if frag_at != -1 and not _fragment_is_provably_benign(text[frag_at + 1 :]):\n        spans.append(_CredentialSpan(frag_at + 1, frag_at + 1, len(text)))",
+  "new": "    if False:\n        spans.append(_CredentialSpan(frag_at + 1, frag_at + 1, len(text)))",
+  "rationale": "fragment 整段掩的腿（r8 要求 2）：关掉后 `redis://host:6379/0#Pr0d2024x` 原样返回。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r8_non_authority_default_deny_rule_table"
+  ],
+  "issue": "88"
+}

@@ -290,6 +290,132 @@ r6 的 `_passwords(s) != () ⟹ _mask_url(s)` 不含那些形态 **与** `_mask_
 **迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态；
 仅写用户名不写口令的 URL 也会显示成 `***@host`。
 
+### r8：掩码机制改为**对分隔符闭合** + 非 authority 值位置 default-deny（plaita#88 第五次复发）
+
+r7 的「oracle 接地的完备性」判据本身是对的，但**机制**还开着一个口子：同一缺陷类
+第五次复发（r3 只认 authority → r4 单斜杠 → r5 `rfind("://")` 锚点 → r6 漏用户名
+token → r7 漏非 authority 尾巴）。规则级反例：
+
+```
+redis://user:AA@BB@SuperSecretTail@host:6379/0?u=X:AA@BB@SuperSecretTail
+  三个 oracle（redis.connections.parse_url / urlsplit / _parse_redis_url）都报
+  AA@BB@SuperSecretTail；r5 == r6 == r7 输出
+  redis://user:***@host:6379/0?u=X:***@SuperSecretTail
+  ⇒ 105 个 ≥3 子串 × 3 oracle = 315 个非豁免片段存活（最长 16 字符）
+```
+
+**根因（结构）**：`_secret_forms` 只按每个分隔符的**第一个**出现位置切头/尾；
+`_span_at` 的非 authority 分支停在**最后一个 `@`**。于是口令第二个 `@` 之后的尾巴
+既不在任何 `[mask_from, stop)` 区间里、也不在 needle 集里。**r8 不再加模板，改闭合**：
+
+1. **分隔符闭包**（`_secret_forms` / `_delimiter_pieces`）：对分隔符集的**每一个**
+   出现位置切头/尾，并把每个片段**重新入队**到不动点；分隔符集补上了此前缺的
+   `/`、`%` 与空白（`_SECRET_SPLITTERS`）。闭合性质：对任意返回形态 `f`、任意分隔符
+   `sep`、`f` 里 `sep` 的任意出现位置 `k`，**非空**的 `f[:k]` 与 `f[k+1:]` 都仍在
+   形态集里（`test_secret_forms_closed_under_resplitting`，逐形态断言）。
+   纯分隔符片段（`@@@A` 切出的 `@`/`@@`）仍在形态集里（闭包要求），但**渲染层**
+   不拿它们当 needle（`_is_structural_form`），否则结构性 `@` 会被抹成 `******`。
+2. **非 authority 值位置 default-deny**（`_span_at`、`_no_at_colon_spans`、
+   `_query_pair_spans`、`_path_segment_spans`、fragment 分支）：authority 之外**没有
+   host**——query 值 / path 段 / fragment 里 `@` 之后的文本同样是凭据材料。判据：
+   配对 `@` 之后的尾巴**长于 1 个字符**就掩到**值 token 末尾**（`&`/`#`/串尾；
+   `_value_token_stop`）。单字符尾（`@x`/`@y`/`@b`）是 r2/r4 已验证的 keep，逐字不变；
+   未声明 query 名、裸取值、裸 path 段一律按凭据处理（`?socket_timeout=<secret>`、
+   `?<secret>=1`、`redis://host/0/<secret>` 在 r7 上 `_mask_url` **原样返回、零覆盖**）。
+   query/fragment 段用**紧**判据（尾巴量到段末；`@` 之后即便以 `/`/`:` 开头也算凭据），
+   path 段用松判据（r5 B 的 `#Tr0ub4dor@host:6379/0` 形态逐字保留）。
+3. **默认拒绝字面量与掩码进同一趟**（`_mask_url(value, *, literals=())` +
+   `_literal_ranges`，删除 `_scrub_literal`）：r7 的「先 `str.replace` 再 `_mask_url`」
+   会把凭据**切碎**再掩，残余认不出来（`redis://user:xCb0B??AxB#xcC@host…` 的 fragment
+   消息留下 `??AxB`；`?u=X:AA@BB@SuperSecretTail` 的未知名 WARNING 留下
+   `?0xzzAC?…` 型尾巴）。字面量现在与跨度一样在**原文**上算区间、进同一个 `m` 态，
+   没有中间态。`literals` 是**关键字**参数（默认 `()`）：`_mask_url(x)` 单参调用逐字
+   不变，`#158`/`#159` 按名字 import 这个函数因此不受影响。
+
+**完备性陈述（升级版）**：完备性 = **对分隔符的闭包**（形态集对 `:`/`@`/`?`/`#`/
+`&`/`=`/`/`/`%`/空白闭合）**加上**「每一个可能承载凭据的非 authority 值位置都被
+覆盖」（不可证良性即整值/整段掩）。oracle 接地的判据不变：口令的任何 ≥3 前缀/后缀
+与**所有** ≥3 子串都不出现在五个渲染面（`_mask_url` / `str` / `repr` /
+`traceback` / 真 `logger.error(…, exc_info=True)`）与 `__cause__` 替身上。
+
+**语料与记账（r8 要求 1b/2a/3）**：
+- 槽位 13 → **24**（新增 11 个 r8 家族槽：query 值/path 段/fragment 逐字出现、
+  `?db=`/`?u=`/`?socket_timeout=` 三种位置、`Acct:`/`X:` 前缀、凭据两次且**不带**
+  收尾 `@x`），每个槽仍用**同一个全字母表**（并补上多字节 `ä`/`中` 与
+  surrogateescape 字节 `\udcff`）。
+- **多种子扫掠**：20 个种子（含验证者用过的 **119** 与 **20261015**）× 480 形状，
+  逐槽断言「oracle 接地或字面接地」并有「**未断言形状数 == 0**」断言；
+  主语料 9000 形状在种子 88 上跑全子串判据。逐槽断言表（n / oracle / literal /
+  needles / 结构性豁免 / 数字豁免 / 泄露 / 未断言）在 `-s` 下打印。
+- **r8 家族覆盖**：`_R8_FAMILIES` 的 5 个家族（query-value-verbatim /
+  query-value-prefixed / credential-twice-no-closing-at / fragment-verbatim /
+  path-verbatim）各自断言「≥1 条 oracle 接地样本」。
+
+**豁免面（要求 3）：从「碰巧在白名单里」改成「位置级可证结构性」**。
+`_neutralize` 把**结构 token 的出现**替换成等长占位符，然后才查 needle——
+`@Za` / `@@9` 这类「分隔符 + host 前缀」的跨界撞车不再被误判为泄露，
+而 `Acc` 落在可证用户名 `Acct:` 里的整条豁免也不再发生（真漏若共享该子串仍会红）。
+验证者的 **seed 119** 反例 `redis://user:aCab@@acC010@@acayaaa/x@host` 因此被证明是
+**instrument 假红**：三个 oracle 都报 `aCab@@acC010@`，r7 输出
+`redis://user:***@acayaaa/***@host` 里唯一「存活」的 needle 是 `@ac`——它是跨度的
+`@` + host 前缀 `acayaaa`（`_preserved_literals` 有 `acayaaa`，没有 `@ac`）。
+该 shape 已作为**固定回归行**（`test_r8_seed_119_structural_collision_regression`）；
+真漏（`@SuperSecretTail`：`SuperSecretTail` 不是任何结构 token）照旧红。
+`_INTERPRETER_WORDING` 另收解释器/本项目固定措辞（`base 10:` 含 `10:`、
+scheme 列表含 `://`、链式异常样板句），逐条计数。
+
+**已登记的已知边界（r8 起有断言、计数公布、断言不增长）**：
+1. `slash-in-password`（数字打头 + `/`：`redis://user:1900/x@host`）与
+   `host:port/db` 局部同形，r4 已验证的端口判据按 keep 取——前缀留在消息面；
+2. **纯数字 needle**（`?db=Acct:090@x` 原样保留 = r4 的 `?db=1@2` 契约）；
+3. 未声明 query **名**里 `:` 之前那截按 r5 C 的 user-token 契约保留
+   （`?u=X:Secret1` → `?u=X:***` 逐字已验证）——该槽的字面 needle 因此用固定的
+   裸未知名 `Pr0d2024x`；
+4. query 值里 `?`/`#`/`/` 造成的**跨字段**溢出（r7 已知边界第 6 条的剩余部分）
+   只在 oracle 说不出话、且没有任何凭据跨度可重洗时成立。
+这四条都在 `_R8_KNOWN_BOUNDARY_LEAKS` 里按槽登记上限，测试断言**不超过**上限。
+
+**顺带修的 portability 缺陷（同文件）**：`_quoted_forms` 的 docstring 里写了字面
+`'\udcff'`——非 raw docstring 会把它解析成**真的孤立代理字符**，CPython **3.13**
+在**编译期**就把它编码成 UTF-8，于是 `import plaita.server.factory` 直接
+`UnicodeEncodeError: 'utf-8' codec can't encode character '\udcff' …`
+（实测 **3.13.15**；3.11/3.12 不报，故 `6a9cdba8` 起潜伏）。r8 把源码里的裸代理
+转义改成转义写法，并加了一条**版本无关**回归
+（`TestSourcePortability`：源文本无裸代理转义 + 源文件可 `compile`）。
+
+**精度处置**：重洗层不再施加**子 3 字符**的 needle（`?u=…` 的 1 字符名字、
+`=` 切出的残片）——它们满足不了完备性判据（≥3），误伤面却很大（实测会把
+userinfo 的 `u` 洗成 `redis://***ser:***@…`）。掩码段本身仍覆盖短口令，`_passwords`
+仍返回它们（消息字段的 `_scrub` 用得到）。
+
+**精度代价（本轮明确登记，不牺牲安全）**：`redis://@@host` → `redis://******host`、
+`redis://@:pw@host` → `redis://******host`（r5/r6 是 `redis://@:***@host`）——
+闭包把 `@@`/`@` 当结构形态在**重洗层**跳过，但掩码段仍是整段 `***`。
+
+**导入契约**：`_mask_url` / `_parse_redis_url` / `RedisUrlError` / `RedisTarget`
+**不改名**；`_mask_url` 只**新增**关键字参数 `literals=`（`#158`/`#159` 按名字 import
+它，单参调用逐字不变）。掩码契约的调用方在别处按名字 import，删除/改名会立刻炸。
+
+**变异**：定义总数 42 → **48**（新增 6 条 r8 单腿：闭包不动点、非 authority 尾巴、
+path 裸 token default-deny、query 段 default-deny、fragment default-deny、no-at 值
+token 延长；另有 6 条既有定义随 `_scrub_literal` 并入 `_mask_url` 的重写——
+`88-cause-object-keeps-raw-exception`、`88-db-query-ignored`、`88-fragment-accepted`、
+`88-r7-db-value-echoed`、`88-r7-unknown-name-echoed`、
+`88-whole-parser-reverted-to-original-regex`，其中最后一条的 `old` 是整段解析体）。
+计数见提交信息与本次报告。
+
+**r8 的相对读数（本单自带生成器，seed 20261015 / 6000 形状 / 5 个模板 A/F/G/H/I，
+逐模板 1200；与 committed instrument 同一套豁免规则）**见提交信息与本轮报告；
+要点：模板 A（`user==pw`）r7 已 21/31 → r8 **0/0**；F/G/H/I（凭据逐字作为
+query 值 / path 段 / fragment / 两次且无收尾 `@x`）r7 的 155/160、41/47、21/25、
+154/160 → r8 **0/0**。
+
+**运行时**：`tests/unit/test_redis_url_parse.py` 从 r7 的约 12s 升到约 10 分钟——
+24 槽 × 9000 形状的全子串判据 + 20 种子扫掠 + 闭包（形态集中位数 32、长口令可达
+数千）都在这里。生产路径不受影响（一条普通 URL 的 `_mask_url` 仍是亚毫秒级）；
+`_secret_forms_cached` / `_delimiter_pieces` / `_encoding_forms` / `_quoted_forms`
+都带进程内 LRU。
+
 ### DSL：`@childflow("<text>")` 的位置实参由 `desc` 变成子流程 `flow_id`（plaita#145）
 
 `childflow()` 此前签名是 `childflow(desc=None)`，位置实参只能是说明文字；现在

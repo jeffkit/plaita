@@ -509,9 +509,19 @@ def _exception_messages(traceback_text: str) -> str:
     可能恰好包含口令的 3 字子串（``Secret1`` → ``ret``）；路径/代码不是泄露面，
     真正的泄露面是异常消息与 ``from exc`` 的嵌套 cause 文案。
     """
+    #: 解释器**固定样板**：链式异常的过渡句与 ``NoneType: None``。它们不是被测
+    #: 文本，却含 `` ab``/``the `` 这类 ≥3 片段——r8 实测 `The above exception was
+    #: the direct cause …` 的 `` ab`` 会与口令 ``… ab…`` 偶然重合（假红）。
+    boilerplate = (
+        "The above exception was the direct cause of the following exception:",
+        "During handling of the above exception, another exception occurred:",
+        "NoneType: None",
+    )
     out = []
     for line in traceback_text.splitlines():
         if '  File "' in line or line == "Traceback (most recent call last):":
+            continue
+        if line.strip() in boilerplate:
             continue
         if line[:1] in (" ", "\t"):
             continue  # 源码摘录 / caret 行
@@ -860,7 +870,9 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
         text = "redis://user:sup3rsecret@host:6379/0?db=x"
         embedded = factory._safe_reason(ValueError(f"bad value in {text}"), text)
         self.assertNotIn(SECRET, embedded)
-        self.assertIn("redis://user:***@host:6379/0?db=x", embedded)
+        # r8 声明的期望改写：声明过的参数名保留（诊断），**裸取值** default-deny
+        # ——r7 时 ``?db=x`` 原样回显；r8 起非法取值一律 ``***``（要求 2a）。
+        self.assertIn("redis://user:***@host:6379/0?db=***", embedded)
         # 只带口令字面量（没带整条 URL）也要抹掉
         bare = factory._safe_reason(ValueError(f"bad password {SECRET}"), text)
         self.assertNotIn(SECRET, bare)
@@ -1238,13 +1250,29 @@ class TestLiteralGroundedRows(unittest.TestCase):
 
 
 #: r7 生成式语料的字符集：`@ : / ? # %` + 空白 + 普通字符（requirements 明文）。
-_FUZZ_ALPHABET = "abzAZ09@:/?#% \t\u00a0"
+#: r8 补上**多字节**（`\u00e4`/`\u4e2d`）与 **surrogateescape 字节**
+#: （`\udcff`，`os.environ` 对非 UTF-8 字节的解码产物）：requirements 明确要求
+#: 新家族的口令含这两类字符（`_quoted_forms` 的字节分支因此被逐槽覆盖）。
+_FUZZ_ALPHABET = "abzAZ09@:/?#% \t\u00a0\u00e4\u4e2d\udcff"
 #: 段长 ≥3 的片段拼接头——保证 `_secret_forms` 拆出的每一截都 ≥3 字符，
 #: 这样逐形态断言不会退化成 1 字符碰撞（口令本身仍含 `@ : / ? # %` 与空白）。
 _FUZZ_PARTS = "abcABCxyz019"
 #: **每个**候选槽都必须在这一组结构性字符上至少被覆盖一次（逐槽断言，见
 #: `TestOracleGroundedCompleteness::test_corpus_per_slot_counts_and_alphabet`）。
-_FUZZ_REQUIRED_CHARS = ("@", ":", "/", "?", "#", "%", " ", "\t", "\u00a0")
+_FUZZ_REQUIRED_CHARS = (
+    "@",
+    ":",
+    "/",
+    "?",
+    "#",
+    "%",
+    " ",
+    "\t",
+    "\u00a0",
+    "\u00e4",
+    "\u4e2d",
+    "\udcff",
+)
 
 
 def _fuzz_secret(rnd) -> str:
@@ -1304,7 +1332,59 @@ _SLOTS = [
     ("single-slash", "literal", lambda s: f"redis:/user:{s}@host"),
     ("slash-in-password", "oracle", lambda s: f"redis://user:{s}/x@host"),
     ("multi-span", "literal", lambda s: f"redis://user:{s}@host:6379/0?db=Acct:{s}@x"),
+    # --- r8 家族（要求 3）：任务指定的 `redis://{U}:{S}@host:6379/{db}?{k}={v}`，
+    #     凭据**逐字**作为非 authority 位置的值；`v = S`（不带任何收尾 `@x`）。
+    #     这些槽全部 `oracle` 接地（凭据同时写在 authority ⇒ 三个 oracle 都报得出
+    #     口令），断言由 `_oracle_passwords` 选 needle——**不是**注入文本。
+    ("r8-query-verbatim", "oracle", lambda s: f"redis://user:{s}@host:6379/0?u={s}"),
+    ("r8-query-db-verbatim", "oracle", lambda s: f"redis://user:{s}@host:6379/0?db={s}"),
+    (
+        "r8-query-socket-verbatim",
+        "oracle",
+        lambda s: f"redis://user:{s}@host:6379/0?socket_timeout={s}",
+    ),
+    ("r8-query-prefixed", "oracle", lambda s: f"redis://user:{s}@host:6379/0?u=X:{s}"),
+    (
+        "r8-query-db-prefixed",
+        "oracle",
+        lambda s: f"redis://user:{s}@host:6379/0?db=Acct:{s}",
+    ),
+    (
+        "r8-query-twice-noclose",
+        "oracle",
+        lambda s: f"redis://user:{s}@host:6379/0?u={s}&v={s}",
+    ),
+    (
+        "r8-query-twice-prefixed",
+        "oracle",
+        lambda s: f"redis://user:{s}@host:6379/0?db=Acct:{s}&v={s}",
+    ),
+    ("r8-fragment-verbatim", "oracle", lambda s: f"redis://user:{s}@host:6379/0#{s}"),
+    (
+        "r8-fragment-prefixed",
+        "oracle",
+        lambda s: f"redis://user:{s}@host:6379/0#X:{s}",
+    ),
+    ("r8-path-verbatim", "oracle", lambda s: f"redis://user:{s}@host:6379/{s}"),
+    ("r8-path-prefixed", "oracle", lambda s: f"redis://user:{s}@host:6379/X:{s}@y"),
 ]
+
+#: r8 家族的**槽位分组**（要求 3）：每个家族至少要有 1 条 **oracle 接地**样本
+#: （`TestMaskerGenerativeProperty::test_r8_families_have_oracle_grounded_samples`）。
+_R8_FAMILIES = {
+    "query-value-verbatim": (
+        "r8-query-verbatim",
+        "r8-query-db-verbatim",
+        "r8-query-socket-verbatim",
+    ),
+    "query-value-prefixed": ("r8-query-prefixed", "r8-query-db-prefixed"),
+    "credential-twice-no-closing-at": (
+        "r8-query-twice-noclose",
+        "r8-query-twice-prefixed",
+    ),
+    "fragment-verbatim": ("r8-fragment-verbatim", "r8-fragment-prefixed"),
+    "path-verbatim": ("r8-path-verbatim", "r8-path-prefixed"),
+}
 
 
 def _slot_corpus(rnd, count: int) -> list:
@@ -1423,6 +1503,24 @@ def _oracle_passwords(url) -> dict:
     return found
 
 
+#: 解释器/标准库/本项目的**固定措辞**（不是被测文本，也不是攻击者可控文本）。
+#: ``int()`` 的 ``invalid literal for int() with base 10:`` 含 ``10:``、``float()``
+#: 的 ``could not convert string to float:`` 含 ``… t s…``——与口令片段偶然重合时
+#: 是结构撞车（r8 实测 ``a10::BaBzxac`` 的 ``10:`` 落在 ``base 10:`` 里）。它们与
+#: URL 结构 token 一样是**可证非凭据**文本，故一并进中和表；逐条命中都被计数。
+_INTERPRETER_WORDING = (
+    "invalid literal for int() with base 10:",
+    "could not convert string to float:",
+    "The above exception was the direct cause of the following exception:",
+    "During handling of the above exception, another exception occurred:",
+    "NoneType: None",
+    # 本项目**固定**的拒绝文案：scheme 列表里就含 ``://``（口令里写 ``://`` 时
+    # needle ``://`` 会与它撞车）。
+    "只支持 redis:// / rediss:// / unix://",
+    "（scheme 必须小写，缺 scheme 或 http:// 之类都不是 Redis URL）",
+)
+
+
 def _preserved_literals(url: str, authority_span_tokens: bool = False) -> tuple:
     """掩码契约里**有意保留**的结构文本（r7 完备性判据的限定项）。
 
@@ -1444,6 +1542,9 @@ def _preserved_literals(url: str, authority_span_tokens: bool = False) -> tuple:
 
     这个集合只在完备性/字面判据里用作「偶然重合」的豁免，且豁免数被逐次计数
     （``test_oracle_grounded_no_substring_survives`` 断言它远小于总 needle 数）。
+    r8 起豁免是**位置级**的（``_neutralize`` 只抹这些 token 的**出现**），不是
+    needle 级的全局白名单——``@Za`` 那类跨界撞车因此不再被误判为泄露，而真漏
+    （needle 落在非结构文本里）照样红。末尾还并入 ``_INTERPRETER_WORDING``。
     """
     out = []
     sep = url.find("://")
@@ -1466,6 +1567,11 @@ def _preserved_literals(url: str, authority_span_tokens: bool = False) -> tuple:
         out.append(userinfo[: colon + 1])  # 可证用户名 + ':'
     if at != -1:
         out.append(url[at + 1 : stop])  # host[:port]
+    elif ":" not in url[auth:stop]:
+        # 没有 ``@`` 时 authority 整段就是 host（``_protected_regions`` 也把它当
+        # 保护面）。带 ``:`` 的 netloc 可能是凭据 token（``user:Tr0ub4dor127…``），
+        # 不整段豁免——那会把真漏变成假绿。
+        out.append(url[auth:stop])
     for span in factory._credential_spans(url):
         # 默认只收**authority 之外**（query/path/fragment）跨度的用户 token：它们是
         # r2 契约的保留面（``?db=Pr0d:***@y`` 的 ``Pr0d``，实测 ``Accba0`` 与
@@ -1483,7 +1589,7 @@ def _preserved_literals(url: str, authority_span_tokens: bool = False) -> tuple:
             # authority 跨度保留的是 ``url[auth_start:mask_from]``（``_render_redacted``
             # 只掩 ``[mask_from, stop)``）——合格化不变量把这一整截也算保留面。
             out.append(url[auth : span.mask_from])
-    return tuple(token for token in out if token)
+    return tuple(token for token in out if token) + _INTERPRETER_WORDING
 
 
 def _literal_needles(secret: str, suffix_only: bool = False) -> set:
@@ -1516,6 +1622,45 @@ def _unknown_param_warning(url: str) -> str:
     return _exception_messages("\n".join(lines))
 
 
+def _neutralize(text: str, tokens: tuple) -> str:
+    """把结构 token 的**出现**替换成等长占位符（r8 的位置感知豁免）。
+
+    r7 的 ``any(needle in token for token in preserved)`` 是**整条 needle 级**的
+    全局豁免：``@Za``（跨度的 ``@`` + host 前缀 ``Za``）不在任何 token 里，于是
+    结构撞车被当成泄露（假红，验证者在自己的语料上据此给出 seed 119 的
+    `redis://user:aCab@@acC010@@acayaaa/x@host` → needle `@ac`）；而 ``Acc``（落在
+    可证用户名 ``Acct:`` 里）会被整条豁免，真漏若恰好共享该子串就看不见（假绿）。
+    中和是**位置级**的：只有真正落在结构 token 内的字符被抹掉，跨界 needle 只要
+    还有非结构字符在，就仍然算泄露。
+    """
+    for token in tokens:
+        if token:
+            text = text.replace(token, "\x00" * len(token))
+    return text
+
+
+def _neutral_faces(faces: dict, tokens: tuple) -> dict:
+    """每个渲染面中和后的版本（每形状算一次，不是每 needle 一次）。"""
+    return {face: _neutralize(text, tokens) for face, text in faces.items()}
+
+
+def _leak_report(needles, faces: dict, tokens: tuple):
+    """``(泄露清单, 结构性豁免数, 检查数)``——needle 在**中和后**还出现才算泄露。"""
+    neutral = _neutral_faces(faces, tokens)
+    leaks, excused, checked = [], 0, 0
+    for needle in needles:
+        checked += 1
+        raw_hits = [face for face, text in faces.items() if needle in text]
+        if not raw_hits:
+            continue
+        hit = [face for face, text in neutral.items() if needle in text]
+        if hit:
+            leaks.append((needle, hit))
+        else:
+            excused += 1  # 只落在结构 token 里（位置感知的豁免）
+    return leaks, excused, checked
+
+
 def _literal_leaks(secret, faces, preserved, suffix_only=False):
     """注入文本的字面 needle 在渲染面上的存活清单（豁免两类**已知边界**）。
 
@@ -1525,14 +1670,14 @@ def _literal_leaks(secret, faces, preserved, suffix_only=False):
        同形，按 r4 已验证的端口判据是 keep（MIGRATION 已知边界第 3/4 条同族）。
     """
     hits = []
-    for needle in _literal_needles(secret, suffix_only=suffix_only):
-        if needle[:1].isdigit():
-            continue  # 数字打头 = 与 host:port/db 局部同形（MIGRATION 已知边界第 3 条）
-        if any(needle in token for token in preserved):
-            continue
-        for face, text in faces.items():
-            if needle in text:
-                hits.append((needle, face))
+    needles = [
+        needle
+        for needle in _literal_needles(secret, suffix_only=suffix_only)
+        if not needle[:1].isdigit()  # 数字打头 = 与 host:port/db 局部同形
+    ]
+    for needle, faces_hit in _leak_report(needles, faces, preserved)[0]:
+        for face in faces_hit:
+            hits.append((needle, face))
     return hits
 
 
@@ -1697,7 +1842,9 @@ class TestEnumerateAllSpans(unittest.TestCase):
         的 needle 用**全字母表**语料（r6 的语料把这个槽的 `@` 删掉了）。
         """
         rnd = random.Random(88)
-        corpus = _slot_corpus(rnd, 2600)
+        # 24 个槽（r7 是 13 个）后，同样的 2600 只能给 literal/suffix 槽 ~1050 个
+        # 样本；放大到 4600 让下限断言（>=1700）保持原值不变。
+        corpus = _slot_corpus(rnd, 4600)
         checked = 0
         for slot, kind, secret, url in corpus:
             passwords = _passwords(url)
@@ -1785,6 +1932,124 @@ def _cached_faces(url: str) -> dict:
     return _FACES_CACHE[url]
 
 
+#: r8 多种子扫掠（要求 1b）：**≥20 个**种子，含验证者用过的 119 与 20261015。
+#: 单个种子（r7 的 88）会让「某槽拿不到接地样本」悄悄溜过——构造性证伪正是这么来的。
+_R8_SWEEP_SEEDS = (
+    88,
+    119,
+    20261015,
+    1,
+    2,
+    3,
+    5,
+    7,
+    11,
+    13,
+    17,
+    19,
+    23,
+    29,
+    31,
+    37,
+    41,
+    43,
+    47,
+    53,
+)
+_R8_SWEEP_SHAPES = 480
+
+
+#: 逐槽的**字面 needle**：默认是注入文本（写 URL 的人知道口令写在哪）。例外是
+#: 注入文本**按契约出现在保留面**的槽——``userinfo-user`` 的注入文本是**用户名**
+#: （r7 已定型：可证用户名保留），用它当 needle 是假红；那里的字面 needle 用模板里
+#: 真正会当口令的那一段（``pw0``）。oracle 说得出话时仍以 oracle 为准。
+_SLOT_LITERAL = {
+    "userinfo-user": lambda _secret: "pw0",
+    # 注入文本是 query **名**：名字是攻击者可控文本，但 r7/r8 的契约把它当
+    # 「用户 token」处理（``?u=X:Secret1`` → ``?u=X:***`` 逐字已验证），故名字里
+    # ``:`` 之前那截按契约保留。可断言的部分是**裸未知名**——用 r7 LITERAL_GROUNDED
+    # 的那一行 ``?Pr0d2024x=1`` 作固定字面 needle（掩码面与 WARNING 面都不许原样出现）。
+    "query-name": lambda _secret: "Pr0d2024x",
+}
+
+
+#: **已登记的已知边界**（r5/r6/r7 同形，MIGRATION 逐条写过）：这些槽的注入文本会
+#: 落进 r4 已验证的 keep 形态，字面 needle 必然命中——**计数照实公布、断言不增长**，
+#: 而不是把槽从语料里删掉（r6 的失效模式）。oracle 接地的那部分仍必须是 0。
+#:   * ``slash-in-password``：数字打头的口令 + ``/``（``redis://user:1900/x@host``）
+#:     与 ``host:port/db`` 局部同形，端口判据按 r4 已验证的 keep 取「端口」。
+_R8_KNOWN_BOUNDARY_LEAKS = {
+    "slash-in-password": 8,
+}
+
+
+def _corpus_assertion_table(rows, all_substrings: bool = True) -> dict:
+    """**逐槽断言记账**（要求 2a）：n / oracle 接地 / 字面接地 / needle / 豁免 / 泄露。
+
+    每个形状都必须有断言：oracle 说得出话就用 oracle 口令当 needle，说不出话
+    （``parse_url`` 在端口/db cast 失败处抛）就退回**注入文本**——写 URL 的人知道
+    口令写在哪。``unasserted`` 必须是 0：r7 的 692 个 ``query-value-no-at`` 形状
+    一个断言都没有，而那个槽正是上一轮 P0 家族 ``?socket_timeout=<secret>`` 的位置。
+    """
+    per_slot: dict = {}
+    for slot, _kind, secret, url in rows:
+        entry = per_slot.setdefault(
+            slot,
+            {
+                "n": 0,
+                "oracle": 0,
+                "literal": 0,
+                "needles": 0,
+                "excused": 0,
+                "digits": 0,
+                "leaks": 0,
+                "unasserted": 0,
+            },
+        )
+        entry["n"] += 1
+        faces = _cached_faces(url)
+        tokens = _preserved_literals(url)
+        passwords = _oracle_passwords(url)
+        if passwords:
+            entry["oracle"] += 1
+            sources = list(passwords.values())
+        else:
+            entry["literal"] += 1
+            sources = [_SLOT_LITERAL.get(slot, lambda value: value)(secret)]
+        needles = set()
+        for source in sources:
+            needles |= _fuzz_needles(source, all_substrings=all_substrings)
+        if not needles:
+            entry["unasserted"] += 1
+            continue
+        # r4 已验证的 keep：纯数字 token 与 ``host:port`` / ``?db=1@2`` 局部同形
+        # （``?db=Acct:090@x`` 原样保留是**契约**）。``_literal_leaks`` 早有这条过滤，
+        # 这里保持一致；被过滤掉的 needle 单独计数（``digits``）。
+        digits = {n for n in needles if n.isascii() and n.isdigit()}
+        needles -= digits
+        entry["digits"] += len(digits)
+        if not needles:
+            continue  # 该形状的 needle 全是纯数字 ⇒ 按 r4 契约豁免，但仍算已断言
+        leaks, excused, checked = _leak_report(needles, faces, tokens)
+        entry["needles"] += checked
+        entry["excused"] += excused
+        entry["leaks"] += len(leaks)
+    return per_slot
+
+
+def _print_assertion_table(per_slot: dict, tag: str) -> None:
+    print(
+        f"[{tag}] slot                        n  oracle literal  needles excused digits leaks unasserted"
+    )
+    for name in sorted(per_slot):
+        e = per_slot[name]
+        print(
+            f"[{tag}] {name:24s} {e['n']:5d} {e['oracle']:6d} {e['literal']:7d} "
+            f"{e['needles']:8d} {e['excused']:7d} {e['digits']:6d} {e['leaks']:5d} "
+            f"{e['unasserted']:10d}"
+        )
+
+
 class TestMaskerGenerativeProperty(unittest.TestCase):
     """r7 生成式性质测试：验收判据从「自洽」改为「**完备**」，needle 由 oracle 选。
 
@@ -1800,33 +2065,26 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
     MIN_SHAPES = 9000
 
     def test_generated_secret_in_every_candidate_position_never_leaks(self):
-        """注入文本回退网：候选槽注入的口令，五个面 + 日志上都不许有 ≥3 片段。
+        """**每个槽都有断言**（r8 要求 2a）：oracle 说不出话就用注入文本接地。
 
-        （oracle 接地的那条在
-        ``test_oracle_grounded_prefix_suffix_never_leaks``；这条覆盖 oracle 说
-        不出话的槽——query 名/值、path、无 scheme、单斜杠——它们由「写 URL 的人
-        知道口令在哪」的字面接地兜。）
+        r7 这条只覆盖非 ``oracle`` 槽，于是 ``query-value-no-at``（692 形状）与
+        oracle 沉默的那一半形状**一个断言都没有**——而 ``query-value-no-at`` 正是
+        上一轮 P0 家族 ``?socket_timeout=<secret>`` 的位置。r8 起 needle 一律是
+        「oracle 口令 ∪ 注入文本（oracle 说不出话时）」，逐槽断言数在
+        ``test_corpus_assertion_table_has_no_unasserted_shape`` 里记账。
         """
-        shapes = 0
-        for slot, kind, secret, url in _cached_corpus(self.MIN_SHAPES):
-            if kind == "oracle":
-                continue
-            shapes += 1
-            if kind in ("literal", "suffix"):
-                faces = _cached_faces(url)
-            else:  # message：只查未知名 WARNING 面（要求 7）
-                warning = _unknown_param_warning(url)
-                if not warning:
-                    continue
-                faces = {"unknown-param-warning": warning}
-            for needle, face in _literal_leaks(
-                secret,
-                faces,
-                _preserved_literals(url),
-                suffix_only=kind == "suffix",
-            ):
-                self.fail(f"{slot}/{face}/{needle} 泄露 URL={url!r}")
-        self.assertGreaterEqual(shapes, self.MIN_SHAPES * 7 // 10, "候选槽样本太少")
+        table = _corpus_assertion_table(_cached_corpus(self.MIN_SHAPES))
+        _print_assertion_table(table, "r8-assert")
+        total_needles = sum(e["needles"] for e in table.values())
+        unasserted = sum(e["unasserted"] for e in table.values())
+        self.assertEqual(unasserted, 0, "有形状完全没有断言")
+        for name, entry in table.items():
+            self.assertLessEqual(
+                entry["leaks"],
+                _R8_KNOWN_BOUNDARY_LEAKS.get(name, 0),
+                f"{name}: 泄露超过登记的已知边界 {entry}",
+            )
+        self.assertGreaterEqual(total_needles, 200000, "断言总数太少（覆盖被收窄）")
 
     def test_oracle_grounded_prefix_suffix_never_leaks(self):
         """**主验收（r7）**：oracle 报出的口令，任何 ≥3 前缀/后缀都不在任何面上。
@@ -1841,20 +2099,19 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
             if not passwords:
                 continue
             grounded += 1
-            preserved = _preserved_literals(url)
+            tokens = _preserved_literals(url)
             faces = _cached_faces(url)
             for name, password in passwords.items():
-                for needle in _fuzz_needles(password):
-                    needles_total += 1
-                    if any(needle in token for token in preserved):
-                        excused += 1
-                        continue
-                    for face, text in faces.items():
-                        if needle in text:
-                            self.fail(
-                                f"{slot}/{name}/{face}: oracle 口令片段 {needle!r} "
-                                f"（口令 {password!r}）活了下来 URL={url!r}"
-                            )
+                needles = _fuzz_needles(password)
+                leaks, excused_here, checked = _leak_report(needles, faces, tokens)
+                needles_total += checked
+                excused += excused_here
+                if leaks:
+                    needle, hit = leaks[0]
+                    self.fail(
+                        f"{slot}/{name}/{hit[0]}: oracle 口令片段 {needle!r} "
+                        f"（口令 {password!r}）活了下来 URL={url!r}"
+                    )
         self.assertGreaterEqual(grounded, 2000, "oracle 接地的形状太少")
         self.assertLess(
             excused, needles_total // 10, "豁免比例过高——完备性被削弱了"
@@ -1875,20 +2132,19 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
             if not passwords:
                 continue
             grounded += 1
-            preserved = _preserved_literals(url)
+            tokens = _preserved_literals(url)
             faces = _cached_faces(url)
             for name, password in passwords.items():
-                for needle in _fuzz_needles(password, all_substrings=True):
-                    needles_total += 1
-                    if any(needle in token for token in preserved):
-                        excused += 1
-                        continue
-                    for face, text in faces.items():
-                        if needle in text:
-                            self.fail(
-                                f"{slot}/{name}/{face}: 完备性违反 {needle!r} "
-                                f"（口令 {password!r}）URL={url!r}"
-                            )
+                needles = _fuzz_needles(password, all_substrings=True)
+                leaks, excused_here, checked = _leak_report(needles, faces, tokens)
+                needles_total += checked
+                excused += excused_here
+                if leaks:
+                    needle, hit = leaks[0]
+                    self.fail(
+                        f"{slot}/{name}/{hit[0]}: 完备性违反 {needle!r} "
+                        f"（口令 {password!r}）URL={url!r}"
+                    )
         self.assertGreaterEqual(grounded, 2000)
         self.assertLess(
             excused, needles_total // 10, "豁免比例过高——完备性被削弱了"
@@ -1966,6 +2222,209 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
         )
         self.assertGreaterEqual(per_slot["user==pw"]["oracle"], base // 3)
         self.assertGreaterEqual(per_slot["fragment"]["oracle"], base)
+
+
+    #: r8 的**非 authority default-deny** 规则表（要求 2a）：三种必须接地/字面的
+    #: 位置——``?socket_timeout=<secret>``（声明过的参数 + 裸取值）、
+    #: ``?<secret>=1``（未声明名字）、裸 path ``/0/<secret>``。它们在 r7 上
+    #: ``_mask_url`` **原样返回**（零覆盖）。右侧是 r8 的整值/整段掩码。
+    R8_DEFAULT_DENY_ROWS = {
+        "redis://host:6379/0?socket_timeout=Pr0d2024x": (
+            "redis://host:6379/0?socket_timeout=***"
+        ),
+        "redis://host:6379/0?foo=Pr0d2024x": "redis://host:6379/0?***",
+        "redis://host:6379/0?Pr0d2024x=1": "redis://host:6379/0?***",
+        "redis://host:6379/0/Pr0d2024x": "redis://host:6379/0/***",
+        "redis://host:6379/Pr0d2024x": "redis://host:6379/***",
+        "redis://host:6379/0#Pr0d2024x": "redis://host:6379/0#***",
+        "redis://host:6379/0?db=Pr0d2024x": "redis://host:6379/0?db=***",
+        # r8：query 段没有 host，``@`` 之后的长尾也是凭据材料 ⇒ 整段掩
+        "redis://host:6379/0?u=X:AA@BB@SuperSecretTail": "redis://host:6379/0?***",
+        "redis://host:6379/0?u=AA@BB@SuperSecretTail": "redis://host:6379/0?***",
+        # path / fragment 位置同一条：掩到值 token 末尾；单字符尾仍是 r2/r5 的 keep
+        "redis://host:6379/X:AA@BB@SuperSecretTail": "redis://host:6379/X:***",
+        "redis://host:6379/X:Y@x": "redis://host:6379/X:***@x",
+        "redis://host:6379/0#X:AA@BB@SuperSecretTail": "redis://host:6379/0#X:***",
+        # r8：值 token 不可证良性 ⇒ 整值掩。键名里的 ``b`` 仍被 userinfo 跨度
+        # （``a@b@Pr0d2024x``）切出的 1 字符形态重洗成 ``d***``——与 r7 同形
+        # （r6 已验证的 ``redis:/u@u:p/w@/0@x`` 也依赖这种短形态重洗）。
+        "redis://host:6379/0?db=Acct:a@b@Pr0d2024x": "redis://host:6379/0?d***=***",
+    }
+
+    #: r4 已验证的 **keep** 形态（要求 6：逐字不变）——default-deny 只对**没有**
+    #: 凭据分隔符的裸 token 生效，带 ``@``/``:`` 的段由三条跨度腿精确处理。
+    R8_KEEP_ROWS = (
+        "redis://host:6379/0@x",
+        "redis://host/0?ref=a@b",
+        "redis://host:6379/0?db=1@2",
+        "redis://host/0?x=1:2@y",
+        "redis://host/@x",
+        "redis://host:6379/0?socket_timeout=5",
+        "redis://host:6379/0?db=2",
+        "unix:///tmp/plaita-redis.sock?db=1",
+    )
+
+    def test_r8_non_authority_default_deny_rule_table(self):
+        """r8 要求 2：非 authority 值位置**默认拒绝**；r4 的 keep 逐字不变。"""
+        for url, want in self.R8_DEFAULT_DENY_ROWS.items():
+            self.assertEqual(_mask_url(url), want, url)
+            self.assertNotIn("Pr0d2024x", _mask_url(url), url)
+            self.assertNotIn("SuperSecretTail", _mask_url(url), url)
+        for keep in self.R8_KEEP_ROWS:
+            self.assertEqual(_mask_url(keep), keep, keep)
+
+    def test_r8_rejection_branches_never_echo_plaintext(self):
+        """r8 要求 2b：早/晚期拒绝分支（scheme / 端口 / 缺主机 / 端口 0 / IPv6）
+        只许回显**已掩形**——P0 家族同时踩到它们时，五个面与 ``__cause__`` 都不许
+        带明文。前提是 ``_mask_url`` 自己已对 query 值/path 段 default-deny。
+        """
+        rows = [
+            ("scheme", "http://host:6379/0?socket_timeout=Pr0d2024x", "Pr0d2024x"),
+            ("scheme-db", "http://host:6379/0?db=Pr0d2024x", "Pr0d2024x"),
+            ("port", "redis://user:pw@host:notaport?db=Pr0d2024x", "Pr0d2024x"),
+            ("port-value", "redis://user:pw@host:notaport?u=X:Pr0d2024x", "Pr0d2024x"),
+            ("ipv6", "redis://user:pw@[::1:6379/0?db=Pr0d2024x", "Pr0d2024x"),
+            ("port-zero", "redis://user:pw@host:0?db=Pr0d2024x", "Pr0d2024x"),
+        ]
+        for shape, url, secret in rows:
+            masked = _mask_url(url)
+            self.assertNotIn(secret, masked, f"{shape}: _mask_url 回显明文")
+            faces = _shape_faces(url)
+            tokens = _preserved_literals(url)
+            leaks, _excused, _checked = _leak_report(
+                _fuzz_needles(secret, all_substrings=True), faces, tokens
+            )
+            self.assertEqual(leaks, [], f"{shape}: {leaks[:3]} URL={url!r}")
+
+    def test_r8_seed_119_structural_collision_regression(self):
+        """验证者 seed 119 的规则级 shape（要求 1a）。
+
+        ``redis://user:aCab@@acC010@@acayaaa/x@host``：三个 oracle 报
+        ``aCab@@acC010@``，r7 的**全局豁免**把 needle ``@ac`` 判成泄露——可
+        ``@ac`` 是**跨度的 ``@`` + host 前缀 ``acayaaa``**，是典型的结构撞车
+        （与验证者第 3 条里的 ``@Za``/``@@9`` 同类）。位置感知的中和只抹结构 token
+        的**出现**，所以这条在 r7 与 r8 上都不再是「泄露」，而真漏（如
+        ``@SuperSecretTail``：``SuperSecretTail`` 不是任何结构 token）照样红。
+        """
+        url = "redis://user:aCab@@acC010@@acayaaa/x@host"
+        self.assertEqual(_mask_url(url), "redis://user:***@acayaaa/***@host")
+        for oracle in _ORACLE_NAMES:
+            password = _oracle_password_of(url, oracle)
+            if password is not None:
+                self.assertEqual(password, "aCab@@acC010@", oracle)
+        faces = _shape_faces(url)
+        tokens = _preserved_literals(url)
+        # 未中和时 ``@ac`` 会命中（r7 的假红），中和后不再命中
+        self.assertIn("acayaaa", tokens)
+        self.assertIn("@ac", faces["_mask_url"])
+        leaks, excused, checked = _leak_report(
+            _fuzz_needles("aCab@@acC010@", all_substrings=True), faces, tokens
+        )
+        self.assertEqual(leaks, [], f"结构撞车被误判: {leaks}")
+        self.assertGreaterEqual(excused, 1, "``@ac`` 没被位置感知豁免")
+        self.assertGreaterEqual(checked, 10)
+
+    def test_secret_forms_closed_under_resplitting(self):
+        """**闭合性质**（要求 1）：对语料里每个形态、每个分隔符、每个出现位置，
+        头/尾截都还在形态集里。r6/r7 的「每个分隔符只切第一次」正是第五次复发的
+        结构根因（``AA@BB@SuperSecretTail`` 的 ``SuperSecretTail`` 不在形态集里）。
+        """
+        checked = 0
+        for _slot, _kind, secret, _url in _cached_corpus(2400):
+            forms = set(factory._secret_forms(secret))
+            for form in forms:
+                for separator in factory._SECRET_SPLITTERS:
+                    if separator not in form:
+                        continue
+                    start = 0
+                    while True:
+                        cut = form.find(separator, start)
+                        if cut == -1:
+                            break
+                        head, tail = form[:cut], form[cut + 1 :]
+                        # 空片段不算形态（形态集不含空串，空串也不是 needle）
+                        if head:
+                            self.assertIn(
+                                head, forms, f"{secret!r}/{form!r}: 缺头部 {head!r}"
+                            )
+                        if tail:
+                            self.assertIn(
+                                tail, forms, f"{secret!r}/{form!r}: 缺尾部 {tail!r}"
+                            )
+                        start = cut + 1
+                checked += 1
+        self.assertGreaterEqual(checked, 20000, "形态数太少")
+
+    def test_r8_families_have_oracle_grounded_samples(self):
+        """**每个家族**至少 1 条 oracle 接地样本（要求 3），并逐槽打印计数。"""
+        rows = _cached_corpus(self.MIN_SHAPES)
+        per_slot = _corpus_assertion_table(rows)
+        _print_assertion_table(per_slot, "r8-grounded")
+        for family, slots in _R8_FAMILIES.items():
+            grounded = sum(per_slot[name]["oracle"] for name in slots)
+            self.assertGreaterEqual(grounded, 1, f"家族 {family} 没有 oracle 接地样本")
+        for name in [n for n, _k, _b in _SLOTS]:
+            self.assertEqual(per_slot[name]["unasserted"], 0, f"{name}: 有形状没断言")
+            self.assertLessEqual(
+                per_slot[name]["leaks"],
+                _R8_KNOWN_BOUNDARY_LEAKS.get(name, 0),
+                f"{name}: 泄露超过登记的已知边界",
+            )
+
+    def test_corpus_assertion_table_has_no_unasserted_shape(self):
+        """多种子扫掠（要求 1b）+ 逐槽断言表（要求 2a）：未断言形状数 **== 0**。
+
+        种子含验证者的 119 与 20261015——单种子（r7 的 88）正是构造性证伪能溜过的
+        原因。needle 用 ≥3 前缀/后缀（比全子串便宜，全子串那条在主语料上跑）。
+        """
+        total = {"unasserted": 0, "leaks": 0, "needles": 0}
+        for seed in _R8_SWEEP_SEEDS:
+            rows = _slot_corpus(random.Random(seed), _R8_SWEEP_SHAPES)
+            per_slot = _corpus_assertion_table(rows, all_substrings=False)
+            unasserted = sum(e["unasserted"] for e in per_slot.values())
+            leaks = sum(e["leaks"] for e in per_slot.values())
+            self.assertEqual(unasserted, 0, f"seed {seed}: 有形状没断言")
+            for name, entry in per_slot.items():
+                self.assertLessEqual(
+                    entry["leaks"],
+                    _R8_KNOWN_BOUNDARY_LEAKS.get(name, 0),
+                    f"seed {seed}/{name}: 泄露超过登记的已知边界",
+                )
+            for name, entry in per_slot.items():
+                self.assertGreaterEqual(entry["n"], 1, f"seed {seed}/{name}: 槽丢了")
+            if seed in (119, 20261015):
+                _print_assertion_table(per_slot, f"r8-seed{seed}")
+            total["unasserted"] += unasserted
+            total["leaks"] += leaks
+            total["needles"] += sum(e["needles"] for e in per_slot.values())
+        self.assertGreaterEqual(total["needles"], 100000, "扫掠断言总数太少")
+
+
+class TestSourcePortability(unittest.TestCase):
+    """r8 顺带修的 portability 缺陷：docstring 里的孤立代理转义。
+
+    ``plaita/server/factory.py`` 的 ``_quoted_forms`` docstring 里写了字面
+    ``'\\udcff'``——非 raw docstring 会把 ``\\udcff`` 解析成**真的孤立代理
+    字符**，CPython **3.13** 在编译期就把它编码成 UTF-8，于是
+    ``UnicodeEncodeError: 'utf-8' codec can't encode character …``
+    （实测 3.13.15：``import plaita.server.factory`` 直接失败；3.11/3.12 不报）。
+    这条回归是**版本无关**的：它断言源文本里没有这种转义 + 源文件可 ``compile``。
+    """
+
+    def test_factory_source_compiles_and_has_no_surrogate_escapes(self):
+        import pathlib
+        import re
+
+        path = pathlib.Path(factory.__file__)
+        source = path.read_text(encoding="utf-8")
+        offenders = [
+            (source.count("\n", 0, match.start()) + 1, match.group(0))
+            # ``(?<!\\)``：不把已经转义过的 ``\\udcff`` 也算进来
+            for match in re.finditer(r"(?<!\\)\\u[dD][0-9a-fA-F]{3}", source)
+            if 0xD800 <= int(match.group(0)[2:], 16) <= 0xDFFF
+        ]
+        self.assertEqual(offenders, [], f"孤立代理转义会打崩 3.13 的 compile(): {offenders}")
+        compile(source, str(path), "exec")
 
 
 class TestContextAndTotality(unittest.TestCase):
