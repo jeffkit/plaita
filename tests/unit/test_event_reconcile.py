@@ -359,3 +359,69 @@ class TestReconcileLifecycle(ReconcileTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
+    """plaita#87：入队失败必须归还去重键，否则该事件的 resume 永久丢失。
+
+    规则：``handle_event`` / ``_on_subscription_timeout`` 中「占去重键 → 入队」
+    两步，入队抛错时**删除刚占的键**再上抛（成功路径保持键，多实例 NX 去重不变）。
+    """
+
+    def test_failed_enqueue_releases_dedup_key_and_replay_enqueues(self):
+        self._setup_pending()
+        event = self._store_event_directly()
+
+        real_xadd = self.redis_client.xadd
+
+        def broken_xadd(*args, **kwargs):
+            raise ConnectionError("simulated transient Redis outage")
+
+        self.redis_client.xadd = broken_xadd
+        try:
+            run(self.event_filter.handle_event(event))  # 异常被最外层吞成日志
+        finally:
+            self.redis_client.xadd = real_xadd
+
+        # 失败后：去重键不得残留（否则重放被 NX 挡掉），stream 为空
+        assert self.redis_client.keys("plaita:event_filter:dedup:*") == []
+        assert _stream_payloads(self.redis_client, self.QUEUE) == []
+
+        # Redis 恢复后重放同一事件 → 真正入队一条 resume
+        run(self.event_filter.handle_event(event))
+        tasks = _stream_payloads(self.redis_client, self.QUEUE)
+        assert len(tasks) == 1
+        assert tasks[0]["type"] == "resume"
+        assert tasks[0]["execution_id"] == "exec-r1"
+        # 反向断言：成功入队仍保留去重键（多实例幂等语义不变）
+        assert len(self.redis_client.keys("plaita:event_filter:dedup:*")) == 1
+
+    def test_failed_timeout_enqueue_releases_dedup_key(self):
+        """超时链路同款：#87 的第二条入队路径。"""
+        self._setup_pending()
+        subs = run(self.subscription_storage.list_subscriptions())
+        subscription = subs[0]
+
+        real_xadd = self.redis_client.xadd
+
+        def broken_xadd(*args, **kwargs):
+            raise ConnectionError("simulated transient Redis outage")
+
+        self.redis_client.xadd = broken_xadd
+        try:
+            # 修复后失败**上抛**（生产由 timeout.py 的回调包装记日志），
+            # 关键是键已归还，下一次 checker 轮次能真正入队。
+            with pytest.raises(ConnectionError):
+                run(self.event_filter._on_subscription_timeout(subscription))
+        finally:
+            self.redis_client.xadd = real_xadd
+
+        assert self.redis_client.keys("plaita:event_filter:timeout:*") == []
+        assert _stream_payloads(self.redis_client, self.QUEUE) == []
+
+        run(self.event_filter._on_subscription_timeout(subscription))
+        tasks = _stream_payloads(self.redis_client, self.QUEUE)
+        assert len(tasks) == 1
+        assert tasks[0]["type"] == "resume"
+        assert tasks[0]["resume_type"] == "timeout"
+        assert len(self.redis_client.keys("plaita:event_filter:timeout:*")) == 1
