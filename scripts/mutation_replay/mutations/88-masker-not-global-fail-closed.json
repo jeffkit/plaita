@@ -7,6 +7,7 @@
   "rationale": "退回 r3 的「只在字面 '://' 之后找 userinfo」：no-scheme 的粗档被关掉，redis:/user:911/z@host（细档被端口判据吃掉）与 redis:/u@u:p/w@/0@x 这类形态_mask_url 原样返回或只掩尾巴（plaita#88 r4 Finding 1 P0）。",
   "expect_fail": [
     "tests/unit/test_redis_url_parse.py::TestLiteralGroundedRows::test_literal_grounded_rows_never_leak",
+    "tests/unit/test_redis_url_parse.py::TestLiteralGroundedRows::test_literal_grounded_never_returns_input_verbatim",
     "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_global_fail_closed_never_returns_input_verbatim"
   ],
   "issue": "88"

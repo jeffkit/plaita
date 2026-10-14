@@ -6,7 +6,8 @@
   "new": "            out.append(text[i:j])  # r4：不做兜底重洗",
   "rationale": "关掉兜底重洗层（r8 重写定义：重洗循环现在先按 `present` 预筛并跳过纯分隔符形态）。",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_residual_repeat_in_query_or_path_is_redacted"
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_global_fail_closed_rule_table",
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r8_non_authority_default_deny_rule_table"
   ],
   "issue": "88"
 }

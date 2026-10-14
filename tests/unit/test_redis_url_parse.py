@@ -2241,6 +2241,12 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
         # r8：query 段没有 host，``@`` 之后的长尾也是凭据材料 ⇒ 整段掩
         "redis://host:6379/0?u=X:AA@BB@SuperSecretTail": "redis://host:6379/0?***",
         "redis://host:6379/0?u=AA@BB@SuperSecretTail": "redis://host:6379/0?***",
+        # 单 `@` + host 形尾巴按 r5 B 留给跨度腿 ⇒ 这两行分别钉「掩到值 token 末尾」
+        # 的两条腿（`_span_at` 的非 authority 分支 / `_no_at_token` 的值延长）
+        "redis://user:CC@9C@host:6379/0?u=X:CC@9C": (
+            "redis://user:***@host:6379/0?u=X:***"
+        ),
+        "redis://host:6379/0?u=X:Ccyy??99xaxzx": "redis://host:6379/0?u=X:***",
         # path / fragment 位置同一条：掩到值 token 末尾；单字符尾仍是 r2/r5 的 keep
         "redis://host:6379/X:AA@BB@SuperSecretTail": "redis://host:6379/X:***",
         "redis://host:6379/X:Y@x": "redis://host:6379/X:***@x",

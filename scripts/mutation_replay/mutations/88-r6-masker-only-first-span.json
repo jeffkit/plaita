@@ -7,7 +7,7 @@
   "rationale": "只掩第一条跨度（r5 的「只看第一个候选」缺陷；r8 重写定义：枚举里新增了 default_deny 腿）。",
   "expect_fail": [
     "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_enumerate_all_spans_rule_table",
-    "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_consistency_invariant_on_fuzz_corpus"
+    "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_enumerate_all_spans_never_returns_input_verbatim"
   ],
   "issue": "88"
 }
