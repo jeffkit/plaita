@@ -52,8 +52,37 @@ r5 追加（``#158`` 验收交回）：``_mask_url`` 必须是 **total**（任�
 含 ``os.environ`` surrogateescape 的孤立代理字符）；``@`` 前没有凭据冒号时也要
 fail-closed（``:`` 被写成 ``/``/``?``/``#``）；没有 ``@`` 的凭据样 token 同样要洗。
 
+r7（P0）：**验收判据换向**——从「自洽」改成「**完备**」，且 needle 由**独立
+oracle** 选。r6 的性质测试拿**注入的文本**当 needle，而它的 ``user==pw`` 槽用
+``safe_token(allow_at=False, allow_colon=False)`` 把 `@`/`:` 从字母表里删掉了——
+6000 行语料里那 545 个形状**没有一个含 `@`**，于是语料自己选出来的 needle 里
+不含 ``Ccc`` 这类后缀，洞一直看不见：
+
+* ``redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0`` 的三个 oracle（``parse_url``
+  / ``urlsplit`` / ``_parse_redis_url``）都报 ``zB0@@cB9cB@@Ccc``；r6 输出
+  ``redis://***@@***@@Ccc:***@host:6379/0``（后缀 ``Ccc`` 活下来）。根因是
+  ``_VALUE_DELIMITERS`` 含 ``@``，``_at_colon_spans`` 的 ``start`` 退到用户段
+  最后一个 ``@`` 之后，那个 token 没有任何跨度覆盖；r7 改成「authority 里候选
+  冒号**之前还有 `@`** ⇒ 用户/口令分界**不可证** ⇒ 整段 userinfo fail-closed」
+  （见 ``_userinfo_split_is_provable``），不是给 ``user==pw`` 加特例。
+* 验收（主）：oracle 报出的口令，任何 ≥3 **前缀/后缀**（``test_oracle_grounded_
+  prefix_suffix_never_leaks``）与所有 ≥3 **子串**（``test_oracle_grounded_no_
+  substring_survives``）都不在五个渲染面上。**自洽不蕴含完备**——r6 的
+  ``_passwords`` 与 ``_mask_url`` 完全自洽，仍然泄露后缀。
+* 不变量**合格化**：``_passwords(s) != () ⟹ _mask_url(s)`` 不含其中任何形态
+  ——**除了**与有意保留的结构 token（scheme / 可证用户名 / host / port / db /
+  非 authority 跨度的用户 token）偶然重合的那些（验证者的 432 个反例全是这一类，
+  如 ``redis://user:Q7w:9:6379@host:6379/0`` 的 ``6379`` 与 host 端口）。
+* 语料**逐槽全字母表**：13 个候选槽（userinfo user / password、``user==pw``、
+  query 值 / 名、无 `@` 的 `?u=X:`、path、fragment、no-scheme、single-slash、
+  empty-user、multi-span、slash-in-password）**每一个**都用同一个全字母表口令；
+  ``test_corpus_per_slot_counts_and_alphabet`` 把逐槽样本数与字母表覆盖钉住，
+  任何「为让语料变绿而收窄字母表」都会红。
+* 三处**默认拒绝**（同单，不是新工作）：``?db=<非法值>``、``?<未知名>=1``、
+  fragment / 非法 query 取值的回显都被抹成 ``***``（保留参数名与固定措辞）。
+
 四个渲染面（``str`` / ``repr`` / ``traceback.format_exception`` / 真实
-``logger.error(..., exc_info=True)``）都有断言。
+``logger.error(..., exc_info=True)``）都有断言；``__cause__`` 替身另算一面。
 """
 from __future__ import annotations
 
@@ -61,6 +90,7 @@ import logging
 import random
 import traceback
 import unittest
+from urllib.parse import unquote, urlsplit
 
 from redis import Redis
 from redis.connection import parse_url
@@ -202,16 +232,19 @@ LEAK_SHAPES = [
 #: r4 Finding 1：验证者的五个形态 × **≥3 字符口令**（verbatim 那组口令只有 2 字符，
 #: 走不到 ≥3 前缀/后缀 needle 方法）。这组必须有 ``://`` 之外的锚定能力。
 GLOBAL_FAIL_CLOSED_URLS = [
-    "redis:/user:Pr0d2024x@host",
-    "redis:/user:Pr0d2024x@host:6379/0",
-    "REDIS:/user:Pr0d2024x@host",
-    "rediss:/:Pr0d2024x@host:6380/0",
-    "user:Pr0d2024x@redis://host",
-    "user:Pr0d2024x@rediss://host:6380/0",
-    "user:Pr0d2024x@host:6379",
+    ("redis:/user:Pr0d2024x@host", "Pr0d2024x"),
+    ("redis:/user:Pr0d2024x@host:6379/0", "Pr0d2024x"),
+    ("REDIS:/user:Pr0d2024x@host", "Pr0d2024x"),
+    ("rediss:/:Pr0d2024x@host:6380/0", "Pr0d2024x"),
+    ("user:Pr0d2024x@redis://host", "Pr0d2024x"),
+    ("user:Pr0d2024x@rediss://host:6380/0", "Pr0d2024x"),
+    ("user:Pr0d2024x@host:6379", "Pr0d2024x"),
     # 空 authority 多写一个斜杠 / 口令含 '/' 的畸形态（r2 掩了、r3 漏了）
-    "redis:///user:Pr0d2024x@host",
-    "redis:/u@u:p/word@host:0/p/word",
+    ("redis:///user:Pr0d2024x@host", "Pr0d2024x"),
+    ("redis:/u@u:p/word@host:0/p/word", "p/word"),
+    # r6 的 no-scheme 粗档：细档被端口判据吃掉（``user:911/`` 与 ``host:port/db``
+    # 局部同形），靠粗档整段 fail-closed。r7 把它作为粗档的杀手留下来。
+    ("redis:/user:911/z@host", "911"),
 ]
 
 #: r4 Finding 1 兜底层：口令在 userinfo 之外又被写了一遍（原文 / 编码 / path）。
@@ -414,6 +447,22 @@ LITERAL_GROUNDED = [
         "911",
         "literal",
         "r5-leak（细档被端口判据吃掉、粗档被关掉时原样留下 911）",
+    ),
+    # --- r7：非法取值 / 未知名是攻击者可控文本，消息与日志默认拒绝（不再回显）。
+    #     这两行在 r5/r6 上是**红**的（消息/警告原样回显），修完变绿。 ---
+    (
+        "r7 illegal db query value must not be echoed",
+        "redis://host:6379/0?db=Pr0d2024x",
+        "Pr0d2024x",
+        "message-field",
+        "r5/r6-leak（'db 查询参数不是整数' 原样回显取值）",
+    ),
+    (
+        "r7 unknown query name must not be echoed",
+        "redis://host:6379/0?Pr0d2024x=1",
+        "Pr0d2024x",
+        "message-field",
+        "r5/r6-leak（未知名 WARNING + 回显的 URL 原样带名字）",
     ),
 ]
 
@@ -666,9 +715,14 @@ class TestMalformedIsNamedRefusal(unittest.TestCase):
             with self.subTest(shape=shape, url=url):
                 with self.assertRaises(RedisUrlError) as ctx:
                     _parse_redis_url(url)
-                # 诊断仍要可用：消息里必须能认出是哪条 URL——但只允许**掩码**形态。
-                # （r1 这里写的是 assertIn(url, ...)，等于把「原样回显口令」钉成契约。）
-                self.assertIn(_mask_url(url), str(ctx.exception))
+                # 诊断仍要可用：消息里必须能认出 scheme。r1 这里写的是
+                # ``assertIn(url, ...)``（把原样回显钉成契约），r2-r6 改成
+                # ``_mask_url(url)`` 逐字出现；r7 起非法取值/未知名/fragment 也一并
+                # 抹掉（默认拒绝），所以改成断言 scheme 仍可辨认 + 掩码存在。
+                if isinstance(url, str):
+                    self.assertIn(url.split(":", 1)[0] + ":", str(ctx.exception))
+                if isinstance(url, str) and "@" in url:
+                    self.assertIn(_REDACTED, str(ctx.exception))
 
     def test_empty_target_raises(self):
         """#88 验收：``redis://`` 空目标抛异常而非返回默认值。"""
@@ -734,8 +788,12 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
                             needle, text, f"{shape}/{kind}: 口令片段 {needle!r} 泄露"
                         )
                 self.assertNotIn(secret, traceback_text, f"{shape}: traceback 泄露口令")
-            # 只掩码、不删光：诊断仍能认出是哪条 URL
-            self.assertIn(_mask_url(url), str(exc), f"{shape}: 掩码形态丢失")
+            # 只掩码、不删光：scheme 仍可辨认、掩码存在（r7 起非法取值/未知名/
+            # fragment 也被抹掉，不再断言「掩码后的整条 URL 逐字出现」）。
+            if isinstance(url, str):
+                self.assertIn(
+                    url.split(":", 1)[0] + ":", str(exc), f"{shape}: scheme 丢了"
+                )
             self.assertIn(_REDACTED, str(exc), f"{shape}: 缺少掩码")
 
     def test_mask_helper_itself(self):
@@ -812,14 +870,24 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
         self.assertNotIn("@Pr0d2024x", scrubbed)
 
     def test_unknown_query_param_warning_is_masked(self):
-        """未知 query 只警告不判死——警告本身也是日志，同样不许带口令。"""
+        """未知 query 只警告不判死——警告本身也是日志，口令与**未知名**都不许出现。
+
+        r7 更正：r2-r6 这里断言 ``"foo" in line``（未知名保留）；按本单的
+        default-deny，未知名是攻击者可控文本，连同回显的 URL 一起抹掉，只保留
+        「有几个未知名」与参数名 ``db`` 之类**固定**措辞。
+        """
         with self.assertLogs("plaita.server.factory", level="WARNING") as logs:
             target = _parse_redis_url("redis://user:sup3rsecret@host:6379/0?foo=bar")
         self.assertEqual((target.host, target.port), ("host", 6379))
-        self.assertTrue(any("foo" in line for line in logs.output))
         for line in logs.output:
             self.assertNotIn(SECRET, line)
+            self.assertNotIn("foo", line, "未知名被回显（r7 默认拒绝）")
             self.assertIn("redis://user:***@host:6379/0", line)
+            self.assertIn(_REDACTED, line)
+        # 已知参数名仍要可诊断（固定措辞 + 名字，不因 default-deny 一起被抹）
+        with self.assertRaises(RedisUrlError) as ctx:
+            _parse_redis_url("redis://host:6379/0?socket_timeout=abc")
+        self.assertIn("socket_timeout", str(ctx.exception))
 
 
 class TestMaskerCannotLeakByConstruction(unittest.TestCase):
@@ -854,25 +922,23 @@ class TestMaskerCannotLeakByConstruction(unittest.TestCase):
             self.assertEqual(_mask_url(url), want, url)
 
     def test_global_fail_closed_never_returns_input_verbatim(self):
-        for url in GLOBAL_FAIL_CLOSED_URLS:
+        for url, secret in GLOBAL_FAIL_CLOSED_URLS:
             masked = _mask_url(url)
             self.assertNotEqual(masked, url, url)
-            self.assertNotIn("Pr0d2024x", masked, url)
-            self.assertNotIn("p/word", masked, url)
-            for needle in _partial_needles("Pr0d2024x") | _partial_needles("p/word"):
+            self.assertNotIn(secret, masked, url)
+            for needle in _partial_needles(secret):
                 self.assertNotIn(needle, masked, f"{url}: {needle!r}")
 
     def test_global_fail_closed_message_surfaces(self):
-        for url in GLOBAL_FAIL_CLOSED_URLS:
+        for url, secret in GLOBAL_FAIL_CLOSED_URLS:
             with self.assertRaises(RedisUrlError) as ctx:
                 _parse_redis_url(url)
             exc = ctx.exception
             self.assertIn(_mask_url(url), str(exc), url)
             for kind, text in _surfaces(exc).items():
-                for secret in ("Pr0d2024x", "p/word"):
-                    self.assertNotIn(secret, text, f"{url}/{kind}")
-                    for needle in _partial_needles(secret):
-                        self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
+                self.assertNotIn(secret, text, f"{url}/{kind}")
+                for needle in _partial_needles(secret):
+                    self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
 
     def test_residual_repeat_in_query_or_path_is_redacted(self):
         for url in RESIDUAL_REPEAT_URLS:
@@ -883,7 +949,8 @@ class TestMaskerCannotLeakByConstruction(unittest.TestCase):
             with self.assertRaises(RedisUrlError) as ctx:
                 _parse_redis_url(url)
             exc = ctx.exception
-            self.assertIn(masked, str(exc), url)
+            # r7：db 取值非法时 URL 回显里那截也被抹掉，故只断言 scheme 可辨。
+            self.assertIn("redis:", str(exc), url)
             for kind, text in _surfaces(exc).items():
                 for needle in _partial_needles("Pr0d2024x"):
                     self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
@@ -898,7 +965,8 @@ class TestMaskerCannotLeakByConstruction(unittest.TestCase):
         # 链仍在（诊断价值），但底层文案换成了洗过的同类型替身
         self.assertIsNotNone(exc.__cause__, "cause 链不该被丢掉")
         self.assertIn("socket_timeout", chain)
-        self.assertIn(_mask_url(url), str(exc))
+        # r7：非法取值也被抹掉（消息里的 URL 回显不再逐字等于 _mask_url(url)）
+        self.assertNotIn("Pr0d2024x", str(exc))
         for text in (chain, str(exc.__cause__), repr(exc.__cause__)):
             for needle in ("@Pr0d2024x", "%40Pr0d2024x", "Pr0d2024x"):
                 self.assertNotIn(needle, text, f"cause 链泄露 {needle!r}")
@@ -1021,7 +1089,9 @@ class TestSlashInPasswordAndResidualSpans(unittest.TestCase):
         with self.assertRaises(RedisUrlError) as ctx:
             _parse_redis_url(url)
         exc = ctx.exception
-        self.assertIn(masked, str(exc))
+        # r7：未知名/非法取值在消息与回显的 URL 里都抹掉（``db=***``）。
+        self.assertIn(_REDACTED, str(exc))
+        self.assertNotIn("Pr0d2024x", str(exc))
         for kind, text in _surfaces(exc).items():
             self.assertNotIn("Pr0d2024x", text, f"{kind}: 口令原文泄露")
             for needle in _partial_needles("Pr0d2024x"):
@@ -1078,11 +1148,20 @@ class TestLiteralGroundedRows(unittest.TestCase):
         有的行是**具名拒绝**（端口/db cast 失败、fragment），有的是**警告后忽略**
         （未知 query 名）——两条路径都是日志面，都要查。
         """
-        for shape, url, literal, _grounding, _why in LITERAL_GROUNDED:
+        for shape, url, literal, grounding, _why in LITERAL_GROUNDED:
             masked = _mask_url(url)
-            self.assertNotIn(literal, masked, f"{shape}: _mask_url 泄露")
-            for needle in _partial_needles(literal):
-                self.assertNotIn(needle, masked, f"{shape}: {needle!r} 泄露")
+            if grounding != "message-field":
+                # ``message-field`` 行不是凭据候选（掩码器按契约原样返回 URL）——
+                # 它们的泄露面只有**消息/日志**，见下。
+                self.assertNotIn(literal, masked, f"{shape}: _mask_url 泄露")
+                for needle in _partial_needles(literal):
+                    self.assertNotIn(needle, masked, f"{shape}: {needle!r} 泄露")
+                if "://" in url:
+                    # scheme 是**结构**、必须保留：r5 的 ``rfind("://")`` 锚点会把
+                    # 口令自己的 ``://`` 当 scheme 边界，掩码后连 ``://`` 都没了
+                    # （``redis://user:pa55word://x@host`` → ``redis:***@host``）。
+                    # 这条断言正是 r6-scheme-anchor-is-last 这个单腿变异的杀手。
+                    self.assertIn("://", masked, f"{shape}: scheme 分隔符被掩掉了")
 
             box: dict = {}
 
@@ -1095,7 +1174,10 @@ class TestLiteralGroundedRows(unittest.TestCase):
             log_lines = _capture_log_lines(_run)
             exc = box.get("exc")
             if isinstance(exc, RedisUrlError):
-                self.assertIn(masked, str(exc), f"{shape}: 掩码形态丢失")
+                # r7：非法取值/未知名/fragment 在回显的 URL 里也被抹掉，所以不再
+                # 断言「掩码后的整条 URL 逐字出现」；scheme 可辨 + 掩码存在即可。
+                self.assertIn("redis:", str(exc), f"{shape}: scheme 丢了")
+                self.assertIn(_REDACTED, str(exc), f"{shape}: 掩码丢了")
                 for kind, text in _surfaces(exc).items():
                     self.assertNotIn(literal, text, f"{shape}/{kind}: 口令原文泄露")
                     for needle in _partial_needles(literal):
@@ -1115,8 +1197,14 @@ class TestLiteralGroundedRows(unittest.TestCase):
                     self.assertNotIn(needle, line, f"{shape}/log/{needle}")
 
     def test_literal_grounded_never_returns_input_verbatim(self):
-        """red-then-green：这些行在 r4（``2f660c6``）上 ``_mask_url`` 原样返回。"""
-        for shape, url, literal, _grounding, why in LITERAL_GROUNDED:
+        """red-then-green：这些行在 r4（``2f660c6``）上 ``_mask_url`` 原样返回。
+
+        ``message-field`` 行除外：它们不是凭据候选，掩码器**按契约**原样返回
+        （泄露面是消息/日志，见 ``test_literal_grounded_rows_never_leak``）。
+        """
+        for shape, url, literal, grounding, why in LITERAL_GROUNDED:
+            if grounding == "message-field":
+                continue
             masked = _mask_url(url)
             self.assertNotEqual(masked, url, f"{shape}: 原样返回（r4 的红行）")
             self.assertNotIn(literal, masked, f"{shape}: {why}")
@@ -1140,61 +1228,42 @@ class TestLiteralGroundedRows(unittest.TestCase):
     def test_grounding_tag_is_declared(self):
         """每一行都必须显式声明接地方式（``literal`` / ``parse_url+literal``）。"""
         tags = {row[3] for row in LITERAL_GROUNDED}
-        self.assertEqual(tags, {"literal", "parse_url+literal"})
+        self.assertEqual(tags, {"literal", "parse_url+literal", "message-field"})
         for shape, url, literal, grounding, why in LITERAL_GROUNDED:
-            self.assertTrue(grounding in {"literal", "parse_url+literal"}, shape)
+            self.assertTrue(
+                grounding in {"literal", "parse_url+literal", "message-field"}, shape
+            )
             self.assertTrue(literal, f"{shape}: 字面 needle 不能为空")
             self.assertTrue(url and why, shape)
 
 
-#: r6 生成式性质测试的字符集：`@ : / ? # %` + 空白 + 普通字符（requirements 明文）。
+#: r7 生成式语料的字符集：`@ : / ? # %` + 空白 + 普通字符（requirements 明文）。
 _FUZZ_ALPHABET = "abzAZ09@:/?#% \t\u00a0"
 #: 段长 ≥3 的片段拼接头——保证 `_secret_forms` 拆出的每一截都 ≥3 字符，
-#: 这样一致性不变量的逐形态断言不会退化成 1 字符碰撞（口令本身仍含
-#: `@ : / ? # %` 与空白）。
+#: 这样逐形态断言不会退化成 1 字符碰撞（口令本身仍含 `@ : / ? # %` 与空白）。
 _FUZZ_PARTS = "abcABCxyz019"
+#: **每个**候选槽都必须在这一组结构性字符上至少被覆盖一次（逐槽断言，见
+#: `TestOracleGroundedCompleteness::test_corpus_per_slot_counts_and_alphabet`）。
+_FUZZ_REQUIRED_CHARS = ("@", ":", "/", "?", "#", "%", " ", "\t", "\u00a0")
 
 
-def _fuzz_secret(
-    rnd, allow_at: bool = True, allow_colon: bool = True, safe_token: bool = False
-) -> str:
-    """随机口令：1-3 个 ≥3 字符片段 + `@ : / ? # %` 空白分隔符拼成。
+def _fuzz_secret(rnd) -> str:
+    """随机口令：1-3 个 ≥3 字符片段 + `_FUZZ_ALPHABET`/`://`/`@@` 等分隔符拼成。
 
-    ``allow_at=False`` / ``allow_colon=False`` 用在「注入的文本必须整段落在一个
-    槽里」的形状上：
-
-    * ``redis://user:{s}/x@host``——口令段以首个 ``/`` 为界，口令里的 ``@`` 会
-      变成 userinfo 分隔符；
-    * ``redis://{s}:{s}@host``——用户名与口令同一个值，口令里的 ``:`` 会再切出
-      候选冒号。
-
-    这两处超出掩码契约的「文本跑到别的结构位上」，不属于候选位置。
+    r7 起**没有** ``allow_at`` / ``allow_colon`` / ``safe_token`` 这类开关——r6 的
+    `user==pw` 槽用 ``safe_token(allow_at=False, allow_colon=False)`` 把 `@`/`:`
+    从字母表里删掉，于是 6000 行语料里那 545 个形状**没有一个含 `@`**，而 r6 的
+    规则级反例恰好只在这个组合里出现。删字母表就是删覆盖：槽位形状由 `_SLOTS`
+    决定，口令一律用**同一个全字母表**。
     """
     parts = [
         "".join(rnd.choice(_FUZZ_PARTS) for _ in range(rnd.randrange(3, 8)))
         for _ in range(rnd.randrange(1, 4))
     ]
-    alphabet = _FUZZ_ALPHABET
-    if not allow_at:
-        alphabet = alphabet.replace("@", "")
-    if not allow_colon:
-        alphabet = alphabet.replace(":", "")
-    if safe_token:
-        # 无 '@' 的凭据 token 以 `?#&@` 收尾（r5 C / r4 的 token 层），所以注入
-        # 到那个槽的口令不能含这些字符；开头也不能是数字（`X:911` 与
-        # `host:port` 局部同形，属 r4 已验证的端口 keep）。
-        body = "".join(parts)
-        if body[:1].isdigit():
-            body = "t" + body
-        return body + rnd.choice(["", "%", " ", "\t", "\u00a0"])
-    if not allow_at:
-        # 无 '@' 的候选段里，**数字打头 + '/'** 与 ``host:port/db`` 局部同形
-        # （r4 已验证的端口 keep 形态），不属于本测试的候选位置。
-        parts[0] = parts[0].lstrip("0123456789") or parts[0]
     separators = [
         s
-        for s in (alphabet, alphabet, "://", "::", "@@", "%%", "??")
-        if all((ch in alphabet or ch.isalnum()) for ch in s)
+        for s in (_FUZZ_ALPHABET, _FUZZ_ALPHABET, "://", "::", "@@", "%%", "??")
+        if all((ch in _FUZZ_ALPHABET or ch.isalnum()) for ch in s)
     ]
     out = []
     for i, part in enumerate(parts):
@@ -1204,38 +1273,52 @@ def _fuzz_secret(
     return "".join(out)
 
 
-def _fuzz_shapes(rnd) -> list:
-    """两个口令 × 11 个**候选位置**形状（userinfo / query / path / fragment / 无 '@'）。
+#: r7 的候选槽：``(名字, 断言种类, builder(secret) -> url)``。
+#:
+#: 断言种类（**不是**字母表收窄，三者都用全字母表口令）：
+#:
+#: * ``oracle``——只按 **oracle 报出的口令**断言（用户名位是合法保留面，拿注入
+#:   文本当 needle 会假红）；
+#: * ``literal``——该槽**构造上**就是凭据候选位置，额外按注入文本的 ≥3 前缀/后缀
+#:   断言；
+#: * ``suffix``——同 ``literal``，但只查**后缀**：``user==pw`` 槽的注入文本同时
+#:   写在「用户名位」，口令里带 `?`/`#`/`/` 时 netloc 在那里截断，注入文本的
+#:   **前缀**正好是掩码契约要保留的用户名（``redis://19zab::cbAC0??…@host`` 的
+#:   ``19zab``）。前缀因此是假红，后缀才是泄露面——r6 的洞正是后缀 ``Ccc``。
+#: * ``message``——该槽不是凭据候选（掩码器按契约原样返回 URL），但按本单的
+#:   default-deny 也不许在日志/消息里回显（见 `_parse_query_options`）。
+#:
+#: ``slash-in-password`` / ``query-value-no-at`` / ``path`` 这类「注入文本会溢出到非凭据位置」的槽在
+#: r7 只做 oracle 断言：见 MIGRATION.md 的 r7 已知边界第 6/7 条。
+_SLOTS = [
+    ("userinfo-user", "oracle", lambda s: f"redis://{s}:pw0@host:6379/0"),
+    ("userinfo-password", "literal", lambda s: f"redis://user:{s}@host:6379/0"),
+    ("user==pw", "suffix", lambda s: f"redis://{s}:{s}@host:6379/0"),
+    ("empty-user", "literal", lambda s: f"redis://:{s}@host"),
+    ("query-value", "literal", lambda s: f"redis://host:6379/0?db=Acct:{s}@x"),
+    ("query-name", "message", lambda s: f"redis://host:6379/0?{s}=1"),
+    ("query-value-no-at", "oracle", lambda s: f"redis://host:6379/0?u=X:{s}"),
+    ("path", "literal", lambda s: f"redis://host/0/X:{s}@y"),
+    ("fragment", "literal", lambda s: f"redis://user:pwd0@host:6379/0#X:{s}@y"),
+    ("no-scheme", "literal", lambda s: f"user:{s}@host:6379"),
+    ("single-slash", "literal", lambda s: f"redis:/user:{s}@host"),
+    ("slash-in-password", "oracle", lambda s: f"redis://user:{s}/x@host"),
+    ("multi-span", "literal", lambda s: f"redis://user:{s}@host:6379/0?db=Acct:{s}@x"),
+]
 
-    「候选位置」= **构造上**就是凭据候选的位置：显式 `user:`/`Acct:`/`X:` 冒号与
-    显式 `@` 之间的口令段，或 r5 C 的无 `@` 凭据 token 段。掩码器的契约只覆盖
-    候选跨度——`?db=<没有冒号的普通值>` 不构成候选（边界见 MIGRATION.md）。
+
+def _slot_corpus(rnd, count: int) -> list:
+    """``count`` 个 ``(slot, secret, url)``——每个形状一个新口令、**全字母表**。
+
+    槽位轮转（``i % len(_SLOTS)``）：每个槽拿到 ``count // len(_SLOTS)`` 个样本，
+    于是「某个槽偷偷换了字母表」会立刻反映在该槽的字母表覆盖断言上。
     """
-    s = _fuzz_secret(rnd)                       # 任意字符（含 '@' / ':'）
-    plain = _fuzz_secret(rnd, allow_at=False)   # 不含 '@'：以首个 '/' 定界的槽
-    token = _fuzz_secret(rnd, allow_at=False, allow_colon=False, safe_token=True)
-    t = _fuzz_secret(rnd)                       # 第二个独立口令：多跨度
-    return [
-        (s, f"redis://user:{s}@host:6379/0"),
-        (s, f"redis://:{s}@host"),
-        (plain, f"redis://user:{plain}/x@host"),
-        (s, f"redis://host:6379/0?db=Acct:{s}@x"),
-        (s, f"redis://host:6379/0?u=X:{s}@x"),
-        (s, f"redis://host/0/X:{s}@y"),
-        (s, f"redis://user:pwd0@host:6379/0#X:{s}@y"),
-        (token, f"redis://host:6379/0?u=X:{token}"),
-        (token, f"redis://{token}:{token}@host:6379/0"),
-        (s, f"redis:/user:{s}@host"),
-        (token, f"redis://user:{token}@host:6379/0?db=Acct:{t}@x"),
-    ]
-
-
-def _fuzz_corpus(rnd, count: int) -> list:
-    """``count`` 个 (secret, url) 形状——每个形状都是**一个新随机口令**。"""
     rows = []
-    while len(rows) < count:
-        rows.extend(_fuzz_shapes(rnd))
-    return rows[:count]
+    for i in range(count):
+        name, kind, build = _SLOTS[i % len(_SLOTS)]
+        secret = _fuzz_secret(rnd)
+        rows.append((name, kind, secret, build(secret)))
+    return rows
 
 
 def _logged_error_for(url: str) -> str:
@@ -1281,13 +1364,202 @@ def _all_five_faces(url: str) -> dict:
     return faces
 
 
-def _fuzz_needles(secret: str) -> set:
-    """口令原文 + 所有长度 ≥3 的前缀/后缀（r6 性质测试的断言集）。"""
+def _fuzz_needles(secret: str, all_substrings: bool = False) -> set:
+    """口令的 needle 集：原文 + 所有长度 ≥3 的**前缀/后缀**（r6 的定义）。
+
+    ``all_substrings=True`` 时改取**所有**长度 ≥3 的子串（r7 的完备性方向，
+    要求 3）——它严格强于前缀/后缀，r6 的 `@@Ccc` 型泄露两种都抓得到。
+    """
     out = {secret}
     for length in range(3, len(secret) + 1):
-        out.add(secret[:length])
-        out.add(secret[-length:])
+        if all_substrings:
+            for i in range(0, len(secret) - length + 1):
+                out.add(secret[i : i + length])
+        else:
+            out.add(secret[:length])
+            out.add(secret[-length:])
     return out
+
+
+#: 三个**独立 oracle** 的名字：redis-py 的 `parse_url`（队列侧真正拿去连的）、
+#: `urlsplit`（WHATWG/标准库）、本仓的 `_parse_redis_url`（存储侧）。
+_ORACLE_NAMES = ("redis-py", "urlsplit", "project")
+
+
+def _oracle_password_of(url, name: str):
+    """某个 oracle 报出的口令（没有/解析不了 → ``None``）。
+
+    * ``redis-py``：``redis.connection.parse_url(url)["password"]``——这是**队列侧**
+      真正会拿去连的口令，也是本 instrument 的主接地；
+    * ``urlsplit``：标准库 netloc 的 userinfo 口令，先 ``unquote`` 成
+      redis-py 的同一种写法（否则 ``%40`` 会与 ``@`` 差一个形态）；
+    * ``project``：本仓 ``_parse_redis_url(url).password``。
+    """
+    if name == "redis-py":
+        try:
+            value = parse_url(url).get("password")
+        except Exception:  # noqa: BLE001 - 解析失败 = 这个 oracle 说不出话
+            return None
+    elif name == "urlsplit":
+        try:
+            value = unquote(urlsplit(url).password or "")
+        except Exception:  # noqa: BLE001
+            return None
+    else:
+        try:
+            value = _parse_redis_url(url).password
+        except Exception:  # noqa: BLE001
+            return None
+    return value if isinstance(value, str) and value else None
+
+
+def _oracle_passwords(url) -> dict:
+    """``{oracle 名: 口令}``——只含真的报出了非空口令的 oracle。"""
+    found = {}
+    for name in _ORACLE_NAMES:
+        value = _oracle_password_of(url, name)
+        if value is not None:
+            found[name] = value
+    return found
+
+
+def _preserved_literals(url: str, authority_span_tokens: bool = False) -> tuple:
+    """掩码契约里**有意保留**的结构文本（r7 完备性判据的限定项）。
+
+    掩码**不许**把口令的任何 ≥3 片段留在输出里；但下面这些位置是契约明确保留的
+    诊断信息，一段口令子串与它们**偶然重合**不算泄露（与
+    ``test_password_substring_of_scheme_or_host_is_not_a_false_red`` 同一类）：
+
+    * scheme（``redis://``）；
+    * **可证的**用户名——userinfo 里首个 ``:`` 之前没有 ``@`` 时，``urlsplit``
+      的语义是「用户名 = userinfo 里首个 ``:`` 之前那段」，掩码器按契约保留它
+      （``redis://user:***@host``）。携带 ``@`` 的 username 位不可证，r7 整段
+      fail-closed，因此**不**进这个集合（否则 r6 的 ``@@Ccc`` 会被当成「用户名」
+      而放过）；
+    * ``host[:port]``（authority 里最后一个 ``@`` 之后、首个 ``/?#`` 之前）；
+    * 每个**凭据候选跨度**的用户 token（``_CredentialSpan.start..mask_from``）——
+      ``?db=Acct:***@x`` 的 ``Acct:`` 与 ``redis://user:***@host`` 的 ``user:``
+      同属「按契约保留」。口令 ``Accba0`` 与它共享 3 字前缀 ``Acc`` 是**偶然
+      重合**，不是泄露（r7 实测：没有这一项，完备性判据会产生这类假红）。
+
+    这个集合只在完备性/字面判据里用作「偶然重合」的豁免，且豁免数被逐次计数
+    （``test_oracle_grounded_no_substring_survives`` 断言它远小于总 needle 数）。
+    """
+    out = []
+    sep = url.find("://")
+    auth = sep + 3 if sep != -1 else 0
+    if sep != -1:
+        start = sep
+        while start > 0 and (url[start - 1].isalnum() or url[start - 1] in "+-."):
+            start -= 1
+        if start < sep:
+            out.append(url[start : sep + 3])
+    stop = len(url)
+    for ch in "/?#":
+        idx = url.find(ch, auth)
+        if idx != -1 and idx < stop:
+            stop = idx
+    at = url.rfind("@", auth, stop)
+    userinfo = url[auth:at] if at != -1 else ""
+    colon = userinfo.find(":")
+    if colon > 0 and "@" not in userinfo[:colon]:
+        out.append(userinfo[: colon + 1])  # 可证用户名 + ':'
+    if at != -1:
+        out.append(url[at + 1 : stop])  # host[:port]
+    for span in factory._credential_spans(url):
+        # 默认只收**authority 之外**（query/path/fragment）跨度的用户 token：它们是
+        # r2 契约的保留面（``?db=Pr0d:***@y`` 的 ``Pr0d``，实测 ``Accba0`` 与
+        # ``Acct:`` 共享 ``Acc`` 属偶然重合）。authority 里的跨度默认**不**作为
+        # 豁免来源——r7 的 fail-closed 恰恰是「authority 里用户/口令分界不可证时
+        # 整段抹掉」，把它的 ``[start, mask_from)`` 当保留面会让 r6 的 ``@@Ccc``
+        # 被豁免。``authority_span_tokens=True`` 只给**合格化不变量**用（那里问的
+        # 是「掩的 == 洗的」这一自洽性，不是完备性）。
+        if span.start < stop and not authority_span_tokens:
+            continue
+        token = url[span.start : span.mask_from]
+        if token:
+            out.append(token)
+        if authority_span_tokens:
+            # authority 跨度保留的是 ``url[auth_start:mask_from]``（``_render_redacted``
+            # 只掩 ``[mask_from, stop)``）——合格化不变量把这一整截也算保留面。
+            out.append(url[auth : span.mask_from])
+    return tuple(token for token in out if token)
+
+
+def _literal_needles(secret: str, suffix_only: bool = False) -> set:
+    """注入文本的字面 needle 集（``suffix_only`` 时只取原文 + ≥3 后缀）。"""
+    if not suffix_only:
+        return _fuzz_needles(secret)
+    return {secret} | {secret[-length:] for length in range(3, len(secret) + 1)}
+
+
+def _unknown_param_warning(url: str) -> str:
+    """``_parse_query_options`` 的「未定义 query 参数」WARNING 行（r7 default-deny 面）。
+
+    这是**未知名**唯一会被回显的通道（要求 7）：未知参数只警告不判死，警告本身
+    也是日志。其余把 query 名当口令注入的形状（含 ``#``/``?`` 时 URL 变 fragment，
+    由 fragment 拒绝分支回显）不是本单的断言面——见 MIGRATION.md r7 已知边界。
+    """
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            _parse_redis_url(url)
+        except Exception as exc:  # noqa: BLE001
+            box["exc"] = exc
+
+    lines = [
+        line
+        for line in _capture_log_lines(_run)
+        if "未定义的 query 参数" in line
+    ]
+    return _exception_messages("\n".join(lines))
+
+
+def _literal_leaks(secret, faces, preserved, suffix_only=False):
+    """注入文本的字面 needle 在渲染面上的存活清单（豁免两类**已知边界**）。
+
+    1. 与 ``preserved`` 里结构文本**偶然重合**的子串（r7 实测：``?db=Acct:***@x``
+       的 ``Acct:`` 与口令 ``Accba0`` 共享 ``Acc``）；
+    2. **纯数字** needle：``?db=Acct:019@x`` 的 ``:019@`` 与 ``host:port`` 局部
+       同形，按 r4 已验证的端口判据是 keep（MIGRATION 已知边界第 3/4 条同族）。
+    """
+    hits = []
+    for needle in _literal_needles(secret, suffix_only=suffix_only):
+        if needle[:1].isdigit():
+            continue  # 数字打头 = 与 host:port/db 局部同形（MIGRATION 已知边界第 3 条）
+        if any(needle in token for token in preserved):
+            continue
+        for face, text in faces.items():
+            if needle in text:
+                hits.append((needle, face))
+    return hits
+
+
+def _cause_faces(exc: BaseException) -> dict:
+    """``__cause__`` 替身（``from exc`` 的独立渲染面）的 str/repr。"""
+    cause = getattr(exc, "__cause__", None)
+    if cause is None:
+        return {}
+    return {"cause-str": str(cause), "cause-repr": repr(cause)}
+
+
+def _shape_faces(url: str) -> dict:
+    """``_all_five_faces(url)`` + ``__cause__`` 的 str/repr（若存在）。"""
+    faces = _all_five_faces(url)
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            _parse_redis_url(url)
+        except Exception as exc:  # noqa: BLE001
+            box["exc"] = exc
+
+    _capture_log_lines(_run)
+    exc = box.get("exc")
+    if exc is not None:
+        faces.update(_cause_faces(exc))
+    return faces
 
 
 class TestEnumerateAllSpans(unittest.TestCase):
@@ -1344,6 +1616,49 @@ class TestEnumerateAllSpans(unittest.TestCase):
                     self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
             self.assertNotIn(secret, _logged_error_for(url), url)
 
+    def test_r7_authority_userinfo_ambiguity_rule_table(self):
+        """r7 规则级反例：authority 里候选冒号**之前还有 `@`** ⇒ 整段 userinfo fail-closed。
+
+        ``redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0`` 的三个 oracle
+        （``parse_url`` / ``urlsplit`` / ``_parse_redis_url``）都报
+        ``zB0@@cB9cB@@Ccc``；r6 只把候选冒号**之后**那截当口令，用户段里
+        **最后一个 `@` 之后**的 ``Ccc`` 没有任何跨度覆盖，输出因此是
+        ``redis://***@@***@@Ccc:***@host:6379/0``——同一缺陷类的第四次复发。
+        r7 的判据是结构性的：分界不可证 ⇒ 整段 userinfo 一个字符都不留。
+        """
+        expected = {
+            "redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0": (
+                "redis://***@host:6379/0"
+            ),
+            "redis://Q7w@E4r@T5y:Q7w@E4r@T5y@host:6379/0": "redis://***@host:6379/0",
+            # 分界**可证**（候选冒号之前没有 `@`）的形态逐字不变
+            "redis://user:p@ssword@redis.internal:0": (
+                "redis://user:***@redis.internal:0"
+            ),
+            "redis://user:@Pr0d2024x@redis.internal:0": (
+                "redis://user:***@redis.internal:0"
+            ),
+            "redis://user:Super Secret@redis.internal:0": (
+                "redis://user:***@redis.internal:0"
+            ),
+        }
+        for url, want in expected.items():
+            self.assertEqual(_mask_url(url), want, url)
+        for url, secret in (
+            (
+                "redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0",
+                "zB0@@cB9cB@@Ccc",
+            ),
+            ("redis://Q7w@E4r@T5y:Q7w@E4r@T5y@host:6379/0", "Q7w@E4r@T5y"),
+        ):
+            for oracle in _ORACLE_NAMES:
+                self.assertEqual(
+                    _oracle_password_of(url, oracle), secret, f"{url}/{oracle}"
+                )
+            for kind, text in _all_five_faces(url).items():
+                for needle in _fuzz_needles(secret):
+                    self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
+
     def test_mask_and_passwords_share_one_enumeration(self):
         """``_mask_url`` 与 ``_passwords`` 都只经 ``_credential_spans``。
 
@@ -1364,33 +1679,67 @@ class TestEnumerateAllSpans(unittest.TestCase):
             self.assertIn("_redaction_forms(", body, f"{name} 没走同一套 needle")
 
     def test_consistency_invariant_on_fuzz_corpus(self):
-        """r6 一致性不变量：``_passwords`` 与 ``_mask_url`` 不可能分叉。
+        """r7：**合格化**的一致性不变量 + **完备性**（主验收）一起钉。
 
-        * ``_passwords(s) != ()`` ⟹ ``_mask_url(s)`` 不含其中任何形态、且 ``!= s``；
-        * 反之 ``_mask_url(s) != s`` ⟹ ``_passwords(s) != ()``
-          （没识别出口令就不许改串）。
+        不变量（合格化版本——r6 的无限定说法是**假**的：验证者给出 432 个反例，
+        全是「口令形态与**有意保留的结构 token** 撞车」，例如
+        ``redis://user:Q7w:9:6379@host:6379/0`` 的 ``_passwords`` 含 ``6379`` 而
+        host 端口 ``6379`` 本来就该留下）：
 
-        语料的口令由 ≥3 字符片段拼成，所以每一个形态都 ≥3 字符（1 字符形态与
-        scheme/host 的子串碰撞属于「假红」，见
-        ``test_password_substring_of_scheme_or_host_is_not_a_false_red``）。
+        * ``_passwords(s) != ()`` ⟹ ``_mask_url(s)`` 不含其中任何**不是**
+          scheme/host/port/db/可证用户名 子串的形态、且 ``!= s``；
+        * 反之 ``_mask_url(s) != s`` ⟹ ``_passwords(s) != ()``。
+
+        **完备性（主）**：每一个注入到凭据候选槽的口令，其任何 ≥3 前缀/后缀都不
+        能出现在五个渲染面上。自洽（「我掩的 == 我洗的」）**不蕴含**完备——r6 的
+        `_passwords` 与 `_mask_url` 完全自洽，仍然把 ``@@Ccc`` 留在了
+        ``redis://***@@***@@Ccc:***@host`` 里。所以这里两条都断言，且完备性那条
+        的 needle 用**全字母表**语料（r6 的语料把这个槽的 `@` 删掉了）。
         """
         rnd = random.Random(88)
-        corpus = _fuzz_corpus(rnd, 1500)
-        checked_with_password = 0
-        for secret, url in corpus:
+        corpus = _slot_corpus(rnd, 2600)
+        checked = 0
+        for slot, kind, secret, url in corpus:
             passwords = _passwords(url)
             masked = _mask_url(url)
-            self.assertTrue(passwords, f"{url}: 一个候选跨度都没认出来")
-            self.assertNotEqual(masked, url, f"{url}: 识别出口令却原样返回")
+            preserved = _preserved_literals(url, authority_span_tokens=True)
             for form in passwords:
                 if len(form) < 3:
                     # 口令里带 `?`/`#`/`/` 时 `_secret_forms` 会切出 1-2 字符的
                     # 残片（`/?`、`0`）；它们仍参与重洗，但逐形态断言会把
                     # scheme/host 的偶然子串算成假红（见 false-red 用例）。
                     continue
-                self.assertNotIn(form, masked, f"{url}: 形态 {form!r} 活了下来")
-            checked_with_password += 1
-        self.assertEqual(checked_with_password, 1500)
+                if any(form in token or token in form for token in preserved):
+                    continue  # 与有意保留的结构 token 撞车（合格化的那一半）
+                self.assertNotIn(form, masked, f"{slot}/{url}: 形态 {form!r} 活了下来")
+            if kind == "literal":
+                checked += 1
+                self.assertNotEqual(masked, url, f"{slot}/{url}: 候选槽却原样返回")
+                faces = _cached_faces(url)
+            elif kind == "suffix":
+                checked += 1
+                self.assertNotEqual(masked, url, f"{slot}/{url}: 候选槽却原样返回")
+                faces = _cached_faces(url)
+            elif kind == "message":
+                # 该槽不是凭据候选 ⇒ `_mask_url` 按契约原样返回（掩码器不负责
+                # 认 query 名）；但按本单的 default-deny，未知名 WARNING 里也不许
+                # 回显（要求 7）。警告没发出（URL 先撞上 fragment 等分支）的形状
+                # 不计入，计入数在下限断言里。
+                warning = _unknown_param_warning(url)
+                if not warning:
+                    continue
+                checked += 1
+                faces = {"unknown-param-warning": warning}
+            else:
+                continue
+            for needle, face in _literal_leaks(
+                secret,
+                faces,
+                preserved,
+                suffix_only=kind == "suffix",
+            ):
+                self.fail(f"{slot}/{face}/{needle} 泄露 URL={url!r}")
+        self.assertGreaterEqual(checked, 1700, "候选槽样本太少")
 
     def test_converse_holds_on_clean_and_malformed_shapes(self):
         """反向：``_mask_url(s) != s`` ⟺ 至少识别出一条口令形态。"""
@@ -1407,7 +1756,8 @@ class TestEnumerateAllSpans(unittest.TestCase):
             "redis://host:6379/0?db=1@2",
             "redis://host/0?x=1:2@y",
             "redis://host/@x",
-        ] + [url for _secret, url in _fuzz_corpus(rnd, 500)]
+        ]
+        rows += [url for _slot, kind, _s, url in _slot_corpus(rnd, 520) if kind == "literal"]
         for url in rows:
             masked = _mask_url(url)
             passwords = _passwords(url)
@@ -1418,53 +1768,204 @@ class TestEnumerateAllSpans(unittest.TestCase):
             )
 
 
-class TestMaskerGenerativeProperty(unittest.TestCase):
-    """r6 生成式性质测试：**取代形态表的角色**（表只留作回归清单）。
+#: r7 语料（含逐面渲染结果）的**进程内缓存**：多个断言共用同一批形状，运行时不翻倍。
+_CORPUS_CACHE: dict = {}
+_FACES_CACHE: dict = {}
 
-    形态表的角色是「枚举我以为的危险形状」——而 r3/r4/r5 三次漏掉的都是表里
-    **没有**的形状（表由人写，人的想象力就是上界）。这里改成：往**每一个候选
-    位置**注入随机口令，对每个形状断言口令原文与**所有 ≥3 字符前缀/后缀**都不在
-    五个渲染面上。形状数是采样出来的（见下方 ``self.assertGreaterEqual`` 的
-    下界），不是枚举出来的。
+
+def _cached_corpus(size: int) -> list:
+    if size not in _CORPUS_CACHE:
+        _CORPUS_CACHE[size] = _slot_corpus(random.Random(88), size)
+    return _CORPUS_CACHE[size]
+
+
+def _cached_faces(url: str) -> dict:
+    if url not in _FACES_CACHE:
+        _FACES_CACHE[url] = _shape_faces(url)
+    return _FACES_CACHE[url]
+
+
+class TestMaskerGenerativeProperty(unittest.TestCase):
+    """r7 生成式性质测试：验收判据从「自洽」改为「**完备**」，needle 由 oracle 选。
+
+    r6 的性质测试拿**注入的文本**当 needle——可 r6 的 `user==pw` 槽用的是
+    ``safe_token(allow_at=False, allow_colon=False)``，字母表里 `@`/`:` 被删掉，
+    于是语料自己选出来的 needle 里**不含** `Ccc` 这类后缀，洞就一直看不见。
+    r7 反过来：口令由**独立 oracle**（`redis.connection.parse_url`，并用
+    `urlsplit` 与 `_parse_redis_url` 交叉核对）报出，断言它的任何 ≥3 前缀/后缀
+    与**所有** ≥3 子串都不出现在五个渲染面（+ `__cause__` 的 str/repr）上。
     """
 
-    #: 形状数下界（数千级；实测耗时见 MIGRATION.md 记录的命令）
-    MIN_SHAPES = 3000
+    #: 形状数（远超 r6 的 3000；语料是全字母表，实测耗时见 MIGRATION.md）
+    MIN_SHAPES = 9000
 
     def test_generated_secret_in_every_candidate_position_never_leaks(self):
-        rnd = random.Random(88)
+        """注入文本回退网：候选槽注入的口令，五个面 + 日志上都不许有 ≥3 片段。
+
+        （oracle 接地的那条在
+        ``test_oracle_grounded_prefix_suffix_never_leaks``；这条覆盖 oracle 说
+        不出话的槽——query 名/值、path、无 scheme、单斜杠——它们由「写 URL 的人
+        知道口令在哪」的字面接地兜。）
+        """
         shapes = 0
-        for secret, url in _fuzz_corpus(rnd, self.MIN_SHAPES):
+        for slot, kind, secret, url in _cached_corpus(self.MIN_SHAPES):
+            if kind == "oracle":
+                continue
             shapes += 1
-            needles = _fuzz_needles(secret)
-            for kind, text in _all_five_faces(url).items():
-                for needle in needles:
-                    if needle in text:
-                        self.fail(
-                            f"{kind} 泄露 {needle!r}（口令 {secret!r}）URL={url!r}"
-                        )
-        self.assertGreaterEqual(shapes, self.MIN_SHAPES)
+            if kind in ("literal", "suffix"):
+                faces = _cached_faces(url)
+            else:  # message：只查未知名 WARNING 面（要求 7）
+                warning = _unknown_param_warning(url)
+                if not warning:
+                    continue
+                faces = {"unknown-param-warning": warning}
+            for needle, face in _literal_leaks(
+                secret,
+                faces,
+                _preserved_literals(url),
+                suffix_only=kind == "suffix",
+            ):
+                self.fail(f"{slot}/{face}/{needle} 泄露 URL={url!r}")
+        self.assertGreaterEqual(shapes, self.MIN_SHAPES * 7 // 10, "候选槽样本太少")
+
+    def test_oracle_grounded_prefix_suffix_never_leaks(self):
+        """**主验收（r7）**：oracle 报出的口令，任何 ≥3 前缀/后缀都不在任何面上。
+
+        needle 来自 oracle 而不是注入文本——这才是能抓住 r6 那个洞的 instrument：
+        ``redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0`` 的三个 oracle 都报
+        ``zB0@@cB9cB@@Ccc``，r6 的输出里留着后缀 ``Ccc``。
+        """
+        grounded = needles_total = excused = 0
+        for slot, _kind, _secret, url in _cached_corpus(self.MIN_SHAPES):
+            passwords = _oracle_passwords(url)
+            if not passwords:
+                continue
+            grounded += 1
+            preserved = _preserved_literals(url)
+            faces = _cached_faces(url)
+            for name, password in passwords.items():
+                for needle in _fuzz_needles(password):
+                    needles_total += 1
+                    if any(needle in token for token in preserved):
+                        excused += 1
+                        continue
+                    for face, text in faces.items():
+                        if needle in text:
+                            self.fail(
+                                f"{slot}/{name}/{face}: oracle 口令片段 {needle!r} "
+                                f"（口令 {password!r}）活了下来 URL={url!r}"
+                            )
+        self.assertGreaterEqual(grounded, 2000, "oracle 接地的形状太少")
+        self.assertLess(
+            excused, needles_total // 10, "豁免比例过高——完备性被削弱了"
+        )
+
+    def test_oracle_grounded_no_substring_survives(self):
+        """**完备性（r7，要求 3）**：oracle 口令的**所有** ≥3 子串都不许活下来。
+
+        比前缀/后缀严格（r6 的 ``@@Ccc`` 型泄露两种都抓，前缀/后缀只抓后缀那一半）。
+        唯一的限定项是 ``_preserved_literals``——与**有意保留**的
+        scheme/可证用户名/host/db 文本偶然重合的子串不算泄露（否则
+        ``redis://bAByC::01yC:pw0@host`` 的 ``yC:`` 会被误报：它落在保留的用户名
+        ``bAByC:`` 里）。豁免数被计数并断言远小于总 needle 数，收窄不可能悄悄发生。
+        """
+        grounded = needles_total = excused = 0
+        for slot, _kind, _secret, url in _cached_corpus(self.MIN_SHAPES):
+            passwords = _oracle_passwords(url)
+            if not passwords:
+                continue
+            grounded += 1
+            preserved = _preserved_literals(url)
+            faces = _cached_faces(url)
+            for name, password in passwords.items():
+                for needle in _fuzz_needles(password, all_substrings=True):
+                    needles_total += 1
+                    if any(needle in token for token in preserved):
+                        excused += 1
+                        continue
+                    for face, text in faces.items():
+                        if needle in text:
+                            self.fail(
+                                f"{slot}/{name}/{face}: 完备性违反 {needle!r} "
+                                f"（口令 {password!r}）URL={url!r}"
+                            )
+        self.assertGreaterEqual(grounded, 2000)
+        self.assertLess(
+            excused, needles_total // 10, "豁免比例过高——完备性被削弱了"
+        )
+
+    def test_oracle_cross_check_agrees(self):
+        """三个 oracle 互相交叉核对：能同时报出口令时必须**逐字相同**。"""
+        agreed = 0
+        for _slot, _kind, _secret, url in _cached_corpus(2600):
+            passwords = _oracle_passwords(url)
+            if len(passwords) < 2:
+                continue
+            self.assertEqual(
+                len(set(passwords.values())),
+                1,
+                f"{url}: oracle 口径不一致 {passwords}",
+            )
+            agreed += 1
+        self.assertGreater(agreed, 500)
 
     def test_generated_corpus_actually_exercises_the_enumeration(self):
         """防退化：语料必须真的覆盖五类候选（userinfo/query/path/fragment/无 '@'）。"""
-        rnd = random.Random(4242)
-        rows = _fuzz_corpus(rnd, 1600)
-        spans_per_shape = [len(factory._credential_spans(url)) for _s, url in rows]
-        self.assertGreaterEqual(min(spans_per_shape), 1, "有形状一个跨度都没有")
+        rows = _cached_corpus(1600)
+        spans_per_shape = [len(factory._credential_spans(url)) for _s, _k, _x, url in rows]
+        with_spans = sum(1 for n in spans_per_shape if n >= 1)
+        self.assertGreaterEqual(
+            with_spans, len(rows) * 9 // 10, "认不出跨度的形状太多了"
+        )
         self.assertGreaterEqual(max(spans_per_shape), 2, "语料里没有多跨度形状")
+        urls = [url for _s, _k, _x, url in rows]
+        secrets = [s for _s, _k, s, _u in rows]
         # 无 '@' 的候选（r5 C）也要在语料里
-        self.assertTrue(
-            any("@" not in url for _s, url in rows), "语料里没有无 '@' 的形状"
-        )
+        self.assertTrue(any("@" not in url for url in urls), "语料里没有无 '@' 的形状")
         # 含 '://' 的口令也要在语料里（r5 R1）
-        self.assertTrue(
-            any("://" in s for s, _u in rows), "语料里没有含 '://' 的口令"
-        )
+        self.assertTrue(any("://" in s for s in secrets), "语料里没有含 '://' 的口令")
         # 含 '@' / ':' / '/' / '?' / '#' / '%' / 空白的口令都要在语料里
-        for ch in ("@", ":", "/", "?", "#", "%", " ", "\t", "\u00a0"):
+        for ch in _FUZZ_REQUIRED_CHARS:
             self.assertTrue(
-                any(ch in s for s, _u in rows), f"语料里没有含 {ch!r} 的口令"
+                any(ch in s for s in secrets), f"语料里没有含 {ch!r} 的口令"
             )
+
+    def test_corpus_per_slot_counts_and_alphabet(self):
+        """**逐槽**记账（要求 2）：样本数 + 全字母表覆盖 + oracle 接地数。
+
+        任何「为让语料变绿而收窄某个槽的字母表」都会在这里红——r6 那个
+        ``user==pw`` 槽（``safe_token(allow_at=False, allow_colon=False)``）会在
+        `@`/`:` 两列上直接暴露。计数同时打出来（``-s`` 可见），便于把「某槽被
+        静默删掉」也变成可核查的事实。
+        """
+        rows = _cached_corpus(self.MIN_SHAPES)
+        per_slot: dict = {}
+        for slot, kind, secret, url in rows:
+            entry = per_slot.setdefault(
+                slot, {"kind": kind, "n": 0, "oracle": 0, "alphabet": set()}
+            )
+            entry["n"] += 1
+            entry["alphabet"] |= set(secret)
+            if _oracle_passwords(url):
+                entry["oracle"] += 1
+        self.assertEqual(set(per_slot), {name for name, _k, _b in _SLOTS})
+        base, extra = divmod(self.MIN_SHAPES, len(_SLOTS))
+        expected = {name: base + (1 if i < extra else 0) for i, (name, _k, _b) in enumerate(_SLOTS)}
+        for name, _kind, _build in _SLOTS:
+            entry = per_slot[name]
+            self.assertEqual(entry["n"], expected[name], f"{name}: 样本数变了")
+            missing = [c for c in _FUZZ_REQUIRED_CHARS if c not in entry["alphabet"]]
+            self.assertEqual(missing, [], f"{name}: 字母表缺 {missing!r}（被收窄了）")
+            print(
+                f"[r7-corpus] {name:18s} kind={entry['kind']:8s} "
+                f"n={entry['n']:5d} oracle_grounded={entry['oracle']:5d}"
+            )
+        # oracle 说得出话的槽必须有接地样本；说不出话的槽也必须在册（不许删）。
+        self.assertGreaterEqual(
+            per_slot["userinfo-password"]["oracle"], base // 3
+        )
+        self.assertGreaterEqual(per_slot["user==pw"]["oracle"], base // 3)
+        self.assertGreaterEqual(per_slot["fragment"]["oracle"], base)
 
 
 class TestContextAndTotality(unittest.TestCase):

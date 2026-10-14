@@ -215,6 +215,78 @@ r4 的兜底按 userinfo 有无分档、r5 拿 `rfind("://")` 当锚点且只看
   该 sink 归 `#158`，在本 diff 之外；本单只保证 `plaita/server/factory.py` 渲染的文案
   与 `__cause__`/`__context__` 链不泄。
 
+### r7：掩码的验收判据从「自洽」改成「完备」（oracle 接地）
+
+r6 的 `_passwords(s) != () ⟹ _mask_url(s)` 不含那些形态 **与** `_mask_url(s) != s`
+两条都成立（`_passwords` 与 `_mask_url` 共用 `_credential_spans` 一个枚举），可它仍然
+泄露。独立验证者给出的规则级反例（本单第四次同类复发）：
+
+| 形态 | 三个 oracle 报出的口令 | r5 | r6（泄露） | r7 |
+|---|---|---|---|---|
+| `redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0` | `zB0@@cB9cB@@Ccc` | `redis://***:***@host:6379/0` | `redis://***@@***@@Ccc:***@host:6379/0` | `redis://***@host:6379/0` |
+| `redis://Q7w@E4r@T5y:Q7w@E4r@T5y@host:6379/0` | `Q7w@E4r@T5y` | `redis://***:***@host:6379/0` | `redis://***@***@T5y:***@host:6379/0` | `redis://***@host:6379/0` |
+
+（三个 oracle = `redis.connection.parse_url`（队列侧真正拿去连的）、
+`urllib.parse.urlsplit`、本仓 `_parse_redis_url`，三者逐字一致。）
+
+- **根因（结构）**：`_VALUE_DELIMITERS` 含 `@`，`_at_colon_spans` 的 `start` 从候选
+  冒号往左退到用户段**最后一个 `@`** 就停，于是那个 `@` 之后的 token（`Ccc`）既不在
+  任何 `[mask_from, stop)` 区间里、也不在 `_secret_forms` 的形态集里（它只按**第一个**
+  分隔符切头/尾截）——两头都不覆盖。**r7 的处置不是加特例**：新增
+  `_userinfo_split_is_provable`——authority 里候选冒号**之前还有 `@`** ⇒ 用户/口令分界
+  **不可证** ⇒ 整段 userinfo fail-closed（`[auth_start, 配对 @)` 全掩）。
+  `user==pw`、口令含 `@ : / ? # %` 与空白的**任何**形态都走这一条路。分界**可证**的
+  形态逐字不变（`redis://user:p@ssword@redis.internal:0` → `redis://user:***@redis.internal:0`）。
+- **验收判据换成完备性（oracle 接地）**：性质测试的 needle **不再来自注入文本**，而是
+  来自 oracle 报出的口令——对每个形状断言它的任何 **≥3 前缀/后缀**（主判据）与**所有
+  ≥3 子串**（更严）都不出现在五个渲染面（`_mask_url` / `str` / `repr` / `traceback`
+  / 真 `logger.error(…, exc_info=True)`）与 `__cause__` 替身上。
+  `TestMaskerGenerativeProperty` 的语料 9000 个形状、13 个候选槽、**每个槽同一个全
+  字母表**；运行时见 `pytest -k TestMaskerGenerativeProperty`（约 8s，含五次渲染面）。
+  **自洽不蕴含完备**——r6 就是反例，所以两条判据都留，完备性是主验收。
+- **不变量合格化**：无限定版本是**假**的。验证者的 432 个反例全是「口令形态与**有意
+  保留的结构 token** 撞车」，例如 `redis://user:Q7w:9:6379@host:6379/0` 的 `_passwords`
+  含 `6379` 而 host 端口 `6379` 本来就该留下。现在的陈述是：
+  `_passwords(s) != ()` ⟹ `_mask_url(s)` 不含其中任何形态（**与 scheme / 可证用户名 /
+  host / port / db / 非 authority 跨度的用户 token 偶然重合的除外**）、且 `!= s`；
+  反之 `_mask_url(s) != s` ⟹ `_passwords(s) != ()`。
+- **语料逐槽记账**：r6 的 6000 行语料里 `user==pw` 槽用
+  `safe_token(allow_at=False, allow_colon=False)`，545 个形状**没有一个含 `@`**——洞正是
+  被这个字母表收窄藏住的。r7 删掉全部 `allow_at` / `allow_colon` / `safe_token` 开关，
+  13 个候选槽（userinfo user / password、`user==pw`、query 值 / 名、无 `@` 的 `?u=X:`、
+  path、fragment、no-scheme、single-slash、empty-user、multi-span、slash-in-password）
+  **每个**都用全字母表；`test_corpus_per_slot_counts_and_alphabet` 逐槽断言样本数与
+  `@ : / ? # % ` + `\t` + `\xa0` 的覆盖，任何收窄都会红。
+- **三处默认拒绝（同单，不是新工作）**：`?db=<非法值>`、`?<未知名>=1`、fragment /
+  非法 query 取值的**回显**原本原样带攻击者可控文本（r5/r6 同形）。现在消息字段、
+  回显的 URL 与 `__cause__` 里都抹成 `***`（保留参数名 `db` / `socket_timeout` 与固定
+  措辞）。对应 `LITERAL_GROUNDED` 新增两行（`grounding="message-field"`），它们在
+  r5/r6 上是红的。
+- **已知边界（r7 语料暴露、r5/r6 同形、不在本单的修复范围）**：
+  1. `?db=<没有冒号的普通值>`；2. `?<没有冒号的查询名>=1`；3. `?u=X:911/bzx`（数字
+  打头 + `/` 与 `host:port/db` 局部同形）；4. `?db=S3cr3t/1:2` 尾部的 `:digits`；
+  **5.** r6 列表漏掉的第 5 条——authority 用户段里**最后一个 `@` 之后的 token**
+  （`redis://zB0@@…@@Ccc:…` 的 `Ccc`）——**r7 已修**，见上；
+  **6.** 注入文本含 `#` 时尾部落在 fragment 里（`redis://user:CcAax??axzA@@x00/x@host`
+  的 `x00`、`redis://host/0/X:0190??…@y` 的 `0190??`）：这截不在任何凭据跨度内，
+  掩码器按契约保留，**r5 同样泄露**（不是 r7 回归），故 `slash-in-password` /
+  `query-value-no-at` / `path` 三个槽在 r7 只做 oracle 断言（逐槽计数可见其
+  `oracle_grounded`，`oracle_grounded=0` 的槽即「oracle 说不出话」的槽）。
+- **计数更正（r6 报告/提交信息）**：r6 随掩码改动重写的 r5 变异定义是 **7** 条（不是
+  6 条）：`88-credentials-fall-back-to-verbatim`、`88-masker-gives-up-without-userinfo-colon`、
+  `88-masker-not-global-fail-closed`、`88-masker-not-total-on-surrogates`、
+  `88-masker-reverted-to-r2-regex`、`88-masker-skips-residual-redaction`、
+  `88-passwords-skip-no-at-token`；随改动变化的变异文件共 **14** 个（7 重写 + 7 新增），
+  不是 13。
+- **r7 变异**：定义总数 42（31 条由普通 `FAILED` 行杀死、11 条只由 `SUBFAILED(` 行
+  杀死，与 r6 的 28 + 11 相比只是分母变大）。新增 3 条单腿：`88-r7-userinfo-split-always-provable`
+  （关掉分界可证性 → `Ccc` 重新泄露，2 条 `FAILED`）、`88-r7-db-value-echoed`、
+  `88-r7-unknown-name-echoed`（各 1 条 `FAILED`）。r6 三条**夸大**的 `expect_fail`
+  已修正——它们的声明杀手现在真的会红：`88-r6-scheme-anchor-is-last`（新断言「scheme
+  分隔符 `://` 必须保留」）、`88-r6-masker-only-first-span`（`test_consistency_invariant_on_fuzz_corpus`
+  现在同时钉合格化不变量与完备性）、`88-masker-not-global-fail-closed`
+  （`GLOBAL_FAIL_CLOSED_URLS` 改成 `(url, secret)` 并补 `redis:/user:911/z@host`）。
+
 **迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态；
 仅写用户名不写口令的 URL 也会显示成 `***@host`。
 

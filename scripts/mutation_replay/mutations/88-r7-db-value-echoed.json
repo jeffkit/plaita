@@ -1,0 +1,12 @@
+{
+  "name": "88-r7-db-value-echoed",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "            raise RedisUrlError(\n                f\"Redis URL 的 db 查询参数不是整数: {_REDACTED!r}\"\n                f\"（URL={_mask_url(_scrub_literal(text, literals))!r}）\"\n            ) from _sanitized_cause(exc, text, literals)",
+  "new": "            raise RedisUrlError(\n                f\"Redis URL 的 db 查询参数不是整数: {_scrub(db_query, text)!r}\"\n                f\"（URL={_mask_url(text)!r}）\"\n            ) from _sanitized_cause(exc, text, literals)",
+  "rationale": "退回 r6 的非法取值回显：`?db=Pr0d2024x` 的取值同时出现在消息字段与回显的 URL 里（default-deny 之前的形态）。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestLiteralGroundedRows::test_literal_grounded_rows_never_leak"
+  ],
+  "issue": "88"
+}
