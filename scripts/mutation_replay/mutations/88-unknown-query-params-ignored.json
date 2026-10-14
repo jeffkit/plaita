@@ -1,0 +1,12 @@
+{
+  "name": "88-unknown-query-params-ignored",
+  "concern": "#88-F",
+  "file": "plaita/server/factory.py",
+  "old": "    query = parse_qs(parts.query, keep_blank_values=True)\n    unknown = sorted(set(query) - {\"db\"})\n    if unknown:\n        raise RedisUrlError(\n            f\"Redis URL 含不支持的 query 参数 {unknown}: {text!r}；\"\n            f\"存储侧只认 db（连接池/超时/TLS 证书等参数不在 plaita#88 范围内）。\"\n            f\"静默忽略它们会让存储与队列配置分叉。\"\n        )\n",
+  "new": "    query = parse_qs(parts.query, keep_blank_values=True)\n",
+  "rationale": "query 参数被静默忽略：队列按 from_url 生效、存储不生效 ⇒ 两套连接参数",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+  ],
+  "issue": "88"
+}

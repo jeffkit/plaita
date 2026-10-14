@@ -1,0 +1,12 @@
+{
+  "name": "88-username-dropped",
+  "concern": "#88-M",
+  "file": "plaita/server/factory.py",
+  "old": "    username = unquote(parts.username) if parts.username else None\n",
+  "new": "    username = None\n",
+  "rationale": "ACL 用户名丢失 ⇒ 退回 default 用户或错身份连接",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestParseAcceptedShapes::test_username_and_password_userinfo"
+  ],
+  "issue": "88"
+}

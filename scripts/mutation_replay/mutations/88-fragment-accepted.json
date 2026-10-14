@@ -1,0 +1,12 @@
+{
+  "name": "88-fragment-accepted",
+  "concern": "#88-E",
+  "file": "plaita/server/factory.py",
+  "old": "    if parts.fragment:\n        raise RedisUrlError(\n            f\"Redis URL 不支持 fragment: {text!r}（凭据里的 '#' 请写成 %23）\"\n        )\n",
+  "new": "",
+  "rationale": "fragment 被静默丢弃（凭据里的裸 # 会截断 URL）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+  ],
+  "issue": "88"
+}

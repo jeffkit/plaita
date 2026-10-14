@@ -1,0 +1,12 @@
+{
+  "name": "88-client-kwargs-drops-unix-path",
+  "concern": "#88-S",
+  "file": "plaita/server/factory.py",
+  "old": "            kwargs[\"unix_socket_path\"] = self.unix_socket_path\n",
+  "new": "            kwargs[\"unix_socket_path\"] = None\n",
+  "rationale": "unix_socket_path 不传给客户端 ⇒ 存储改用 TCP 默认端点",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestFactoryCallerBehaviour::test_storage_and_queue_end_up_on_same_endpoint"
+  ],
+  "issue": "88"
+}

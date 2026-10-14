@@ -1,0 +1,12 @@
+{
+  "name": "88-error-message-drops-url",
+  "concern": "#88-U",
+  "file": "plaita/server/factory.py",
+  "old": "        raise RedisUrlError(\n            f\"redis_url 必须是字符串，收到 {type(raw).__name__}: {raw!r}\"\n        )\n",
+  "new": "        raise RedisUrlError(\"redis_url 必须是字符串\")\n",
+  "rationale": "报错不再带上 URL/类型 ⇒ 运维无法定位是哪条配置错了",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_bytes_input_is_named_refusal"
+  ],
+  "issue": "88"
+}

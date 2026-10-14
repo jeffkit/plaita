@@ -1,0 +1,12 @@
+{
+  "name": "88-port-zero-allowed",
+  "concern": "#88-L",
+  "file": "plaita/server/factory.py",
+  "old": "    if port == 0:\n        raise RedisUrlError(f\"Redis URL 的端口不能为 0: {text!r}\")\n",
+  "new": "",
+  "rationale": "端口 0（不可用端点）被放过",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+  ],
+  "issue": "88"
+}

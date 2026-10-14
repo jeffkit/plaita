@@ -1,0 +1,12 @@
+{
+  "name": "88-uppercase-scheme-accepted",
+  "concern": "#88-B",
+  "file": "plaita/server/factory.py",
+  "old": "    if scheme_token != scheme_token.lower() or scheme_token not in _REDIS_SCHEMES:\n",
+  "new": "    if scheme_token.lower() not in _REDIS_SCHEMES:\n",
+  "rationale": "REDIS:// 被放过：存储能建，队列 Redis.from_url 仍拒绝 ⇒ 同一 URL 两种结局",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+  ],
+  "issue": "88"
+}

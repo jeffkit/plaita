@@ -1,0 +1,12 @@
+{
+  "name": "88-default-port-dropped",
+  "concern": "#88-K",
+  "file": "plaita/server/factory.py",
+  "old": "    if port is None:\n        port = 6379\n",
+  "new": "",
+  "rationale": "省略端口的合法 URL 不再补 6379 ⇒ 解析结果 port=None",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestParseAcceptedShapes::test_omitted_port_and_db_default"
+  ],
+  "issue": "88"
+}

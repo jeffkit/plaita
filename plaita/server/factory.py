@@ -6,30 +6,169 @@
 ``PLAITA_ALLOW_EXPERIMENTAL_DB=1`` 才可创建（且 execution/flow 的 db 仍因 sync/async
 契约断裂而被拒绝）。
 """
-import os
-import re
 import logging
+import os
+from typing import NamedTuple, Optional
+from urllib.parse import parse_qs, unquote, urlsplit
 
 logger = logging.getLogger("plaita.server.factory")
 
 _EXPERIMENTAL_DB_ENV = "PLAITA_ALLOW_EXPERIMENTAL_DB"
 
+#: 「未配置 Redis」时的文档化默认端点（CLI/env 默认值同此，见 flow_worker /
+#: event_filter 的 ``--redis-url``）。**只有**「没配」走它；「配错了」不走。
+DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
-def _parse_redis_url(redis_url: str):
-    """解析 Redis URL 为连接参数"""
-    host, port, db, password = "localhost", 6379, 0, None
-    if redis_url:
+#: 支持的 scheme——与队列/事件总线侧 ``redis.Redis.from_url`` 的白名单一致。
+#: 解析器必须与之一致，否则同一个 URL 在「存储」与「队列」之间再次分叉
+#: （plaita#88 的根因正是存储侧另有一套解析）。
+_REDIS_SCHEMES = ("redis", "rediss", "unix")
+
+
+class RedisUrlError(ValueError):
+    """Redis URL 具名失败：畸形/不支持的 URL 抛它，绝不静默回落 localhost。
+
+    继承 ``ValueError`` 以贴合「坏配置」的既有语义；关键区别是**带上 URL 与
+    原因**，且在建立任何连接之前抛出（fail-closed，启动期一次性暴露）。
+    """
+
+
+class RedisTarget(NamedTuple):
+    """``_parse_redis_url`` 的解析结果：存储侧连接参数的唯一来源。"""
+
+    host: Optional[str]
+    port: int
+    db: int
+    password: Optional[str]
+    username: Optional[str]
+    scheme: str
+    unix_socket_path: Optional[str] = None
+
+    @property
+    def ssl(self) -> bool:
+        """``rediss://`` → TLS。历史缺陷把 TLS 目标改写成明文 localhost。"""
+        return self.scheme == "rediss"
+
+    def client_kwargs(self) -> dict:
+        """``redis.Redis(...)`` 连接参数（与队列 ``Redis.from_url`` 同端点）。"""
+        kwargs: dict = {"db": self.db}
+        if self.username is not None:
+            kwargs["username"] = self.username
+        if self.password is not None:
+            kwargs["password"] = self.password
+        if self.unix_socket_path is not None:
+            kwargs["unix_socket_path"] = self.unix_socket_path
+            return kwargs
+        kwargs["host"] = self.host
+        kwargs["port"] = self.port
+        if self.ssl:
+            kwargs["ssl"] = True
+        return kwargs
+
+
+def _redis_db_from_url(path: Optional[str], db_query: Optional[str], text: str) -> int:
+    """URL 路径/``db`` 查询参数 → 数据库编号（非法即具名失败）。
+
+    ``db`` 查询参数优先于路径（与 ``Redis.from_url`` 同序）；``/`` 与空路径
+    都表示默认 db 0。``path=None`` 用于 ``unix://``——socket 路径不是 db，
+    此时 db 只认查询参数（缺省 0）。
+    """
+    if db_query:
         try:
-            pattern = r'redis://(:(.*?)@)?(.*?):(.*?)(/(\d+))?$'
-            match = re.match(pattern, redis_url)
-            if match:
-                password = match.group(2) or None
-                host = match.group(3) or host
-                port = int(match.group(4)) if match.group(4) else port
-                db = int(match.group(6)) if match.group(6) else db
-        except Exception as e:
-            logger.warning("解析Redis URL失败: %s, 使用默认连接参数", e)
-    return host, port, db, password
+            db = int(db_query)
+        except ValueError as exc:
+            raise RedisUrlError(
+                f"Redis URL 的 db 查询参数不是整数: {db_query!r}（URL={text!r}）"
+            ) from exc
+    elif path is None or path in ("", "/"):
+        db = 0
+    elif path.startswith("/") and path[1:].isascii() and path[1:].isdigit():
+        db = int(path[1:])
+    else:
+        raise RedisUrlError(
+            f"Redis URL 的路径必须是数据库编号（形如 /0）: {path!r}（URL={text!r}）"
+        )
+    if db < 0:
+        raise RedisUrlError(f"Redis URL 的数据库编号不能为负: {db}（URL={text!r}）")
+    return db
+
+
+def _parse_redis_url(redis_url: Optional[str] = None) -> RedisTarget:
+    """解析 Redis URL 为连接目标（host/port/db/username/password/scheme）。
+
+    契约（plaita#88）：
+
+    * **未配置**（``None`` / 空串 / 纯空白）→ 文档化默认
+      ``DEFAULT_REDIS_URL``（``redis://localhost:6379/0``）。「没配 Redis」不是
+      错误，保持既有行为。
+    * **合法 URL** → 完整解析，且结果与队列侧 ``Redis.from_url`` 同端点：
+      ``redis://`` / ``rediss://``（``ssl=True``）/ ``unix://``；端口可省略
+      （默认 6379）、db 可省略（默认 0）；``user:pass@`` 的用户名不再被当成
+      host、密码不再丢失；凭据按 percent-encoding 解码；IPv6 字面量
+      ``redis://[::1]:6379/0`` 正确取主机。
+    * **畸形/不支持** → 抛 ``RedisUrlError``（带 URL 与原因，命名到具体形态）。
+      绝不静默回落 localhost——那正是本缺陷：同一进程连两个 Redis。
+    """
+    raw = "" if redis_url is None else redis_url
+    if not isinstance(raw, str):
+        raise RedisUrlError(
+            f"redis_url 必须是字符串，收到 {type(raw).__name__}: {raw!r}"
+        )
+    text = raw.strip()
+    if not text:
+        # 显式声明的回退（未配置）：不能把「没配」变成硬错误（#99/#95 先例）。
+        return RedisTarget("localhost", 6379, 0, None, None, "redis")
+
+    scheme_token = text.split("://", 1)[0] if "://" in text else ""
+    if scheme_token != scheme_token.lower() or scheme_token not in _REDIS_SCHEMES:
+        supported = " / ".join(f"{s}://" for s in _REDIS_SCHEMES)
+        raise RedisUrlError(
+            f"不支持的 Redis URL: {text!r}；只支持 {supported}"
+            f"（scheme 必须小写，缺 scheme 或 http:// 之类都不是 Redis URL）"
+        )
+
+    try:
+        parts = urlsplit(text)
+    except ValueError as exc:  # 非法 IPv6 字面量等
+        raise RedisUrlError(f"Redis URL 非法（{exc}）: {text!r}") from exc
+
+    if parts.fragment:
+        raise RedisUrlError(
+            f"Redis URL 不支持 fragment: {text!r}（凭据里的 '#' 请写成 %23）"
+        )
+    query = parse_qs(parts.query, keep_blank_values=True)
+    unknown = sorted(set(query) - {"db"})
+    if unknown:
+        raise RedisUrlError(
+            f"Redis URL 含不支持的 query 参数 {unknown}: {text!r}；"
+            f"存储侧只认 db（连接池/超时/TLS 证书等参数不在 plaita#88 范围内）。"
+            f"静默忽略它们会让存储与队列配置分叉。"
+        )
+    db_query = query.get("db", [None])[0]
+    username = unquote(parts.username) if parts.username else None
+    password = unquote(parts.password) if parts.password else None
+
+    if scheme_token == "unix":
+        socket_path = unquote(parts.path) if parts.path else None
+        if not socket_path:
+            raise RedisUrlError(f"unix:// URL 缺少 socket 路径: {text!r}")
+        db = _redis_db_from_url(None, db_query, text)
+        return RedisTarget(None, 0, db, password, username, "unix", socket_path)
+
+    try:
+        host = unquote(parts.hostname) if parts.hostname else None
+        port = parts.port
+    except ValueError as exc:  # 端口非整数 / 端口越界
+        raise RedisUrlError(f"Redis URL 非法（{exc}）: {text!r}") from exc
+
+    if not host:
+        raise RedisUrlError(f"Redis URL 缺少主机名: {text!r}")
+    if port is None:
+        port = 6379
+    if port == 0:
+        raise RedisUrlError(f"Redis URL 的端口不能为 0: {text!r}")
+    db = _redis_db_from_url(parts.path, db_query, text)
+    return RedisTarget(host, port, db, password, username, scheme_token)
 
 
 def _create_async_engine(database_url: str):
@@ -87,11 +226,14 @@ def create_storage_component(storage_type, component_type, **kwargs):
             return InMemoryEventSubscriptionStorage()
 
     elif storage_type == "redis":
-        redis_url = kwargs.get("redis_url", "redis://localhost:6379/0")
+        redis_url = kwargs.get("redis_url", DEFAULT_REDIS_URL)
 
         if component_type in ("execution", "flow"):
-            host, port, db, password = _parse_redis_url(redis_url)
-            conn = dict(host=host, port=port, db=db, password=password)
+            # #88：解析在建立连接之前完成；畸形/不支持的 URL 在这里抛
+            # RedisUrlError（具名、可操作），不再静默回落 localhost:6379/0
+            # ——那会让存储与队列/事件总线连到两个 Redis。
+            target = _parse_redis_url(redis_url)
+            conn = target.client_kwargs()
             # 多租户路由包装器：按 ContextVar 租户选择 namespace
             # （default → 历史 plaita 前缀；其余 plaita:{tenant}）
             if kwargs.get("tenant_routing"):

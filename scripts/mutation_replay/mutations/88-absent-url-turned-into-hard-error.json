@@ -1,0 +1,12 @@
+{
+  "name": "88-absent-url-turned-into-hard-error",
+  "concern": "#88-C",
+  "file": "plaita/server/factory.py",
+  "old": "    if not text:\n        # 显式声明的回退（未配置）：不能把「没配」变成硬错误（#99/#95 先例）。\n        return RedisTarget(\"localhost\", 6379, 0, None, None, \"redis\")\n",
+  "new": "    if not text:\n        raise RedisUrlError(\"redis_url 未配置\")\n",
+  "rationale": "把「没配 Redis」当硬错误 —— 会打断未配置 redis 的既有部署（#99/#95 边界）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestAbsentUsesDocumentedDefault::test_none_empty_and_whitespace"
+  ],
+  "issue": "88"
+}

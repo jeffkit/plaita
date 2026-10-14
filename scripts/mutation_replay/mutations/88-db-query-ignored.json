@@ -1,0 +1,12 @@
+{
+  "name": "88-db-query-ignored",
+  "concern": "#88-G",
+  "file": "plaita/server/factory.py",
+  "old": "    if db_query:\n        try:\n            db = int(db_query)\n        except ValueError as exc:\n            raise RedisUrlError(\n                f\"Redis URL 的 db 查询参数不是整数: {db_query!r}（URL={text!r}）\"\n            ) from exc\n",
+  "new": "    if db_query:\n        db = 0\n",
+  "rationale": "db 查询参数被吞成 0 ⇒ redis://host:6379/0?db=2 落到 db 0（状态写错库）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestParseAcceptedShapes::test_db_query_beats_path"
+  ],
+  "issue": "88"
+}

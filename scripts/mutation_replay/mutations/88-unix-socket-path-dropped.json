@@ -1,0 +1,12 @@
+{
+  "name": "88-unix-socket-path-dropped",
+  "concern": "#88-P",
+  "file": "plaita/server/factory.py",
+  "old": "        socket_path = unquote(parts.path) if parts.path else None\n",
+  "new": "        socket_path = None\n",
+  "rationale": "unix:// 合法 URL 被当成缺 socket 路径 ⇒ 具名拒绝合法配置",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestParseAcceptedShapes::test_unix_socket_path"
+  ],
+  "issue": "88"
+}
