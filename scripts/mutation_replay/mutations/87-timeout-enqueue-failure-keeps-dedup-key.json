@@ -1,0 +1,12 @@
+{
+  "name": "87-timeout-enqueue-failure-keeps-dedup-key",
+  "issue": "87",
+  "concern": "规则子句2：超时链路入队失败必须释放 timeout dedup 键",
+  "file": "plaita/server/event_filter.py",
+  "old": "        try:\n            enqueue_task(self.redis_client, self.queue_name, resume_task)\n        except Exception:\n            self._release_dedup_key(dedup_key)\n",
+  "new": "        try:\n            enqueue_task(self.redis_client, self.queue_name, resume_task)\n        except Exception:\n            pass\n",
+  "rationale": "回到缺陷形态：超时链路入队失败不释放键 ⇒ 订阅超时唤醒同样静默丢失",
+  "expect_fail": [
+    "tests/unit/test_event_reconcile.py::TestEnqueueFailureReleasesDedupKey::test_failed_timeout_enqueue_releases_dedup_key"
+  ]
+}
