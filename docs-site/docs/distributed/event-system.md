@@ -178,13 +178,16 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
      方向与完备性口径（下一位评审可据此查漏）：**「close 任务完成后会被唤醒的人」
      里若含本实例登记的在飞分发任务，就必然构成 task-wait cycle**——因为该分发
      任务能恢复，前提正是 close 任务先完成。遍历不依赖 contextvars。
-     **代价**只与当前任务自己的唤醒锥有关，与在飞分发条数无关（合法外部关停
-     实测访问 O(1) 节点：600 个在飞分发 + 外部 close ⇒ `visited=1`）。
+     **代价**只与当前任务自己的唤醒锥有关，与在飞分发条数无关：合法外部关停
+     （哪怕同时有 600 个在飞分发）的访问数是 O(1)——
+     `test_600_inflight_external_close_still_allowed` 断言 `visited < 16` 并
+     实测 `visited == 1`（探针见交付记录；该断言是提交内可跑的命令）。
      **预算 fail-closed**：唤醒锥在 `_DISPATCH_GRAPH_MAX_NODES = 512` 个节点的
      预算内**未闭合**时，`close()` 抛第二条具名 `RuntimeError`
      （`_SELF_CLOSE_BUDGET_REFUSAL`，文案含预算与已访问节点数），
-     **绝不把「证明不出来」当成「允许」**（r4 的「节点上限用满即当作未命中」正是
-     该缺陷家族第四次复发：pads=1500 时 12 个危险形状 12 个漏检）。
+     **绝不把「证明不出来」当成「允许」**——r4 会把超预算形状漏检（放行），
+     r5 由 `test_over_budget_chain_is_named_budget_refusal` 钉住；把预算分支改回
+     `clean` 的变异 `m109-r5-redis-budget-fail-open` 即被该用例杀死。
   `close()` 命中 marker / 遍历口径任一即抛 `_SELF_CLOSE_REFUSAL`（具名
   `RuntimeError`，含可执行出口：在 handler 外关停），命中预算则抛
   `_SELF_CLOSE_BUDGET_REFUSAL`；**两条都发生在任何关停副作用之前**
@@ -237,11 +240,13 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
      `Event._waiters` / `Queue._getters` / `Condition._waiters`）；遍历只认
      **事件循环自己的唤醒机制**（`_callbacks` + asyncio 的唤醒队列属性），不认
      「作者用其它同步原语自行耦合同一循环」的形状。
-  2. **唤醒锥预算**（r5 fail-closed 的声明边界）：`close()` 的唤醒锥在 512 节点内
-     **枚举不完**时按「无法证明安全」具名拒绝（`_SELF_CLOSE_BUDGET_REFUSAL`，报出
-     预算）。合法外部关停只访问 O(1) 节点（600 在飞实测 `visited=1`），因此这条
-     边界不会命中合法形状；只有「故意把完成回调链拉到 512 层以上」的病态/对抗形状
-     才会撞上——撞上也是**拒绝**（fail-closed），不是放行。
+  2. **唤醒锥预算**（r5 fail-closed 的声明边界）：`close()` 的唤醒锥在
+     `_DISPATCH_GRAPH_MAX_NODES = 512` 节点内**枚举不完**时按「无法证明安全」具名
+     拒绝（`_SELF_CLOSE_BUDGET_REFUSAL`，报出预算）。合法外部关停的唤醒锥为 O(1)
+     （`test_600_inflight_external_close_still_allowed`），因此这条边界不会命中合法
+     形状；只有「故意把完成回调链拉到 512 层以上」的病态/对抗形状才会撞上——
+     撞上也是**拒绝**（fail-closed），不是放行
+     （`test_over_budget_chain_is_named_budget_refusal`）。
   3. **线程 / executor**：marker 不跨线程；**有在飞分发**时由跨循环围栏具名拒绝，
      **无在飞分发时不拦**。
   4. **两处保守过度拒绝**（r3 验收者 F3：无 task-wait cycle 也被拒；今天无生产
