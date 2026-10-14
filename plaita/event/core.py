@@ -37,10 +37,11 @@ class EventSubscription(BaseModel):
     subscription_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     # #110/F1：空 event_type 非法——"" 在 matches_event 里 falsy 即通配，而
     # memory/sqlalchemy 的 list 过滤是严格 !=，三后端会对「空类型订阅」分叉。
-    # r2 只有 ``min_length=1``（pydantic 默认英文串、且与 EventNode 的具名原因
-    # 不对称）。现由下面**唯一的**具名 validator 承担（同时拒绝纯空白；
+    # r2 只有 ``min_length=1``（pydantic 默认英文串）。现由本类自己的具名
+    # validator 承担（**与 ``EventNode`` 的是两个 validator**：共享前缀
+    # ``event_type 不能为空：``，正文不同；不写成「同一条原因」）。
     # 一个子句一个变异，避免 min_length + validator 双层导致「去掉任一层仍拒绝」
-    # 的不可判死变异）。
+    # 的不可判死变异。
     event_type: str
     filter_condition: Optional[Dict[str, Any]] = None
     correlation_id: Optional[str] = None
@@ -60,12 +61,12 @@ class EventSubscription(BaseModel):
     @field_validator("event_type", mode="before")
     @classmethod
     def _event_type_must_be_non_empty(cls, value: Any) -> Any:
-        """#110/F1：空 event_type 非法，与 ``EventNode`` **同一具名中文原因**。
+        """#110/F1：空 event_type 非法。
 
-        r2 只给 ``EventNode`` 写了具名 validator，``EventSubscription`` 仅
-        ``min_length=1``（pydantic 默认英文串），「两端都具名」属过度声明。
-        这里补齐对称：存储写入口（``store_subscription``）与内存构造入口都拿到
-        同一条可执行提示。
+        口径（r3 验收者第 2 处过度声明修正）：与 ``EventNode`` 的 validator
+        **共享前缀** ``event_type 不能为空：``，但**正文不同**（这里说「订阅必须…」，
+        ``EventNode`` 说「event 节点必须…」）——不是「同一条具名中文原因」。
+        存储写入口（``store_subscription``）与内存构造入口都拿到本类的可执行提示。
         """
         if isinstance(value, str) and not value.strip():
             raise ValueError(

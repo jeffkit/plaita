@@ -3,12 +3,12 @@
   "issue": "109",
   "concern": "F4",
   "file": "plaita/event/redis.py",
-  "rationale": "守卫退回 r2 的 current-in-_pending_tasks ⇒ 嵌套/盾牌形状再触发 task-wait cycle（RecursionError）",
+  "rationale": "守卫退回 r2 的 current-in-_pending_tasks ⇒ 嵌套/盾牌/空 context 形状再触发 task-wait cycle（RecursionError）",
   "expect_fail": [
     "tests/unit/test_issue109_110_r3_parity.py::Test109NestedSelfCloseGuard::test_nested_awaited_task_close_is_named_refusal",
     "tests/unit/test_issue109_110_r3_parity.py::Test109NestedSelfCloseGuard::test_two_level_nesting_close_is_named_refusal",
     "tests/unit/test_issue109_110_r3_parity.py::Test109NestedSelfCloseGuard::test_shield_close_is_named_refusal"
   ],
-  "old": "        if (current is not None and current in self._pending_tasks) or _IN_DISPATCH_BUS.get() is self:",
+  "old": "        if (\n            (current is not None and current in self._pending_tasks)\n            or _IN_DISPATCH_BUS.get() is self\n            or self._caller_inside_dispatch_graph(current)\n        ):",
   "new": "        if current is not None and current in self._pending_tasks:"
 }

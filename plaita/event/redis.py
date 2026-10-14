@@ -3,6 +3,7 @@
 """
 import asyncio
 import contextvars
+import functools
 import json
 import logging
 import time
@@ -21,13 +22,109 @@ DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0
 # #109/F4：「本 coroutine 位于**某个总线实例**的分发任务图内」标记（值是总线自身）。
 # ``asyncio.create_task`` / ``ensure_future``（含 ``asyncio.shield``）都会复制
 # 调用方的 context，因此 handler 里 await / create_task / shield 出的子任务——
-# 无论嵌套多少层——都继承该标记。``close()`` 据此拒绝「从当前分发的任务图内部
-# 发起关停」：这类关停会让 drain 等待自己的祖先（task-wait cycle），超时后
-# ``Task.cancel`` 沿 ``_fut_waiter`` 递归 ⇒ RecursionError + 任务永久悬置
+# 只要没有显式换 context——都继承该标记。``close()`` 据此拒绝「从当前分发的
+# 任务图内部发起关停」：这类关停会让 drain 等待自己的祖先（task-wait cycle），
+# 超时后 ``Task.cancel`` 沿 ``_fut_waiter`` 递归 ⇒ RecursionError + 任务永久悬置
 # （验收者 V2 形状；r2 的 ``current in _pending_tasks`` 只挡得住直接调用）。
 # 存总线实例而不是布尔：多总线同进程时，A 的 handler 关停 B 不应被误拒。
+#
+# **声明的作用域（r3/F1）**：marker 由 contextvars 承载，因此**不继承**到
+#   * 显式换 context 的任务（``loop.create_task(coro, context=contextvars.Context())``）；
+#   * 别的线程/executor（``threading.Thread`` / ``run_in_executor`` 各自独立 context）。
+# 这两类由下面的「等待图兜底」与 ``close()`` 的跨循环围栏分别处理，标记本身
+# 不是全集。见 docs-site/docs/distributed/event-system.md 的 T1/T2 表述。
 _IN_DISPATCH_BUS: contextvars.ContextVar = contextvars.ContextVar(
     "plaita_redis_in_dispatch_bus", default=None)
+
+# #109/F1：等待图兜底的最大节点数（防御性上界；正常任务图只有个位数节点）。
+_DISPATCH_GRAPH_MAX_NODES = 512
+
+
+def _callback_future_refs(handle: Any):
+    """枚举一个 ``Future._callbacks`` 表项所引用的 Future（3.11 起表项是
+    ``(callback, context)`` 元组，更早/实现差异下是带 ``_callback`` 的 Handle）。
+
+    ``F`` 的回调引用 ``N`` ⇒ ``F`` 完成会通知 ``N`` ⇒ ``N`` 依赖 ``F``。
+    可执行闭包、``functools.partial`` 参数、绑定方法的 ``__self__`` 都查一遍。
+    """
+    if isinstance(handle, tuple):
+        callback = handle[0] if handle else None
+    else:
+        callback = getattr(handle, "_callback", None)
+    refs = []
+    for cell in getattr(callback, "__closure__", None) or ():
+        try:
+            value = cell.cell_contents
+        except ValueError:  # 尚未赋值的 cell
+            continue
+        if isinstance(value, asyncio.Future):
+            refs.append(value)
+    if isinstance(callback, functools.partial):
+        candidates = list(callback.args) + list((callback.keywords or {}).values())
+    else:
+        candidates = list(getattr(handle, "_args", None) or ())
+        candidates.append(getattr(callback, "__self__", None))
+    for value in candidates:
+        if isinstance(value, asyncio.Future):
+            refs.append(value)
+    return refs
+
+
+def _waits_for(root: "asyncio.Future", target: "asyncio.Future") -> bool:
+    """``root`` 是否经 asyncio 的等待图**直接或间接地**要等 ``target`` 完成。
+
+    覆盖三类等待边（不依赖调用方 context）：
+      * ``_fut_waiter``：``await task`` 的挂起点；
+      * ``_children``：``asyncio.gather`` 的子任务；
+      * 完成回调的引用（``_release_waiter`` / ``shield`` 的 inner / partial 参数）：
+        ``asyncio.wait`` / ``wait_for`` 等经回调唤醒的等待。
+
+    三者合起来即「asyncio 里能形成 task-wait cycle 的等待边」——F1 的显式空
+    context 形状绕过了 ContextVar，但仍逃不出这些边。向上有界：节点数封顶
+    ``_DISPATCH_GRAPH_MAX_NODES``，访问集合去环。
+    """
+    if root is target:
+        return True
+    nodes: Dict[int, "asyncio.Future"] = {}
+    # 节点集合必须包含**所有** task：等待边既可能由 ``_fut_waiter`` 前向给出，
+    # 也可能由「F 的完成回调唤醒 N」反向给出，而 F 未必在 root 的前向闭包里
+    # （``asyncio.wait`` 把 ``_on_completion`` 注册在子任务上，子任务不在
+    # root._fut_waiter 链上）。因此先把 all_tasks() 收进来供回调扫描。
+    stack = [root] + [t for t in asyncio.all_tasks() if isinstance(t, asyncio.Future)]
+    while stack and len(nodes) < _DISPATCH_GRAPH_MAX_NODES:
+        node = stack.pop()
+        if id(node) in nodes:
+            continue
+        nodes[id(node)] = node
+        nxt = getattr(node, "_fut_waiter", None)
+        if isinstance(nxt, asyncio.Future):
+            stack.append(nxt)
+        for child in list(getattr(node, "_children", None) or ()):
+            if isinstance(child, asyncio.Future):
+                stack.append(child)
+    # 反向通知表：谁（F）完成时会唤醒 node
+    notifiers: Dict[int, list] = {}
+    for node in nodes.values():
+        for handle in list(getattr(node, "_callbacks", None) or ()):
+            for ref in _callback_future_refs(handle):
+                notifiers.setdefault(id(ref), []).append(node)
+    seen = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node is target:
+            return True
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        nxt = getattr(node, "_fut_waiter", None)
+        if isinstance(nxt, asyncio.Future):
+            stack.append(nxt)
+        for child in list(getattr(node, "_children", None) or ()):
+            if isinstance(child, asyncio.Future):
+                stack.append(child)
+        stack.extend(notifiers.get(id(node), ()))
+    return False
 
 # 临时修改sys.path以避免本地文件冲突
 original_path = list(sys.path)
@@ -1282,7 +1379,7 @@ class RedisEventBus(EventBus):
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
         """处理事件并记录结果；成功后才 mark 去重。"""
-        _IN_DISPATCH_BUS.set(self)   # #109/F4：本总线的任务图内标记（子任务继承）
+        _IN_DISPATCH_BUS.set(self)   # #109/F4：本总线的任务图内标记（copy context 的子任务继承）
         try:
             await handler(event)
             await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
@@ -1299,7 +1396,7 @@ class RedisEventBus(EventBus):
     async def _process_with_retry(self, handler: EventHandler, event: Event, 
                                 handler_id: str, retry_policy: RetryPolicy) -> None:
         """带重试机制的事件处理；成功后才 mark 去重。"""
-        _IN_DISPATCH_BUS.set(self)   # #109/F4：本总线的任务图内标记（子任务继承）
+        _IN_DISPATCH_BUS.set(self)   # #109/F4：本总线的任务图内标记（copy context 的子任务继承）
         retries = 0
         delay = retry_policy.initial_delay
         
@@ -1328,6 +1425,23 @@ class RedisEventBus(EventBus):
                 delay = min(delay * retry_policy.backoff_factor, retry_policy.max_delay)
                 await asyncio.sleep(delay)
     
+    def _caller_inside_dispatch_graph(self, current: "asyncio.Task") -> bool:
+        """``current`` 是否正被本实例某个在飞分发任务（经等待图）等待（#109/F1）。
+
+        不依赖 contextvars：显式 ``context=Context()`` 起的 close 任务仍与
+        ``_process_event`` 处在同一张等待图里（``_process_event`` 在 await 它），
+        因此逃不掉这个检查。外部关停（监听循环 / CLI 收尾 / 别的总线）不在任何
+        分发任务的等待图下游，不受影响。
+        """
+        if current is None:
+            return False
+        for task in list(self._pending_tasks):
+            if task.done() or task is current:
+                continue
+            if _waits_for(task, current):
+                return True
+        return False
+
     async def close(self):
         """关闭所有子组件的 Redis 连接。
 
@@ -1338,8 +1452,29 @@ class RedisEventBus(EventBus):
         处理本身（先等后取消），也不引入队列/并发上限。
         """
         current = asyncio.current_task()
-        if (current is not None and current in self._pending_tasks) or _IN_DISPATCH_BUS.get() is self:
-            # #109（验收者补的两个形状）：
+        running_loop = asyncio.get_running_loop()
+        foreign = [
+            task for task in self._pending_tasks
+            if not task.done() and task.get_loop() is not running_loop
+        ]
+        if foreign:
+            # #109/F2：线程 / executor 不继承 contextvars（marker 不跨线程），但
+            # 「另一个事件循环里关停仍有在飞分发的总线」同样是未声明路径：该
+            # 循环里的 drain 看不到别的循环的任务、跨循环 aclose 还会抛
+            # "Event loop is closed"。有在飞分发时具名拒绝，且在**任何关停副作用
+            # 之前**（``_closing`` 保持 False）。无在飞分发时不拦（无分发可丢）。
+            raise RuntimeError(
+                "RedisEventBus.close() 不能在另一个事件循环（线程/executor）内调用："
+                f"本实例仍有 {len(foreign)} 个在飞分发任务属于另一个事件循环。"
+                "请在该总线所属的事件循环里关停；"
+                "如需跨线程请求关停，请用 loop.call_soon_threadsafe 投递。"
+            )
+        if (
+            (current is not None and current in self._pending_tasks)
+            or _IN_DISPATCH_BUS.get() is self
+            or self._caller_inside_dispatch_graph(current)
+        ):
+            # #109（验收者补的形状 + r3/F1）：
             # ① 直接形状：handler 内调用 close() ⇒ ``current`` 就是被登记的分发任务，
             #    会把**自身**纳入 drain —— 等满超时后自 cancel，再 await gather(含自身)
             #    触发 RecursionError + "Task was destroyed"。
@@ -1348,8 +1483,11 @@ class RedisEventBus(EventBus):
             #    drain 等的是自己的祖先（``_process_event``），``asyncio.wait`` 超时后
             #    cancel 沿 ``_fut_waiter`` 走回环 ⇒ 进程级 RecursionError，且
             #    close() 返回后 ``_pending_tasks`` 仍非空、任务永久悬置。
-            # ``_IN_DISPATCH_BUS`` 由分发任务设置、被 await/create_task/shield 出的子任务
-            # 继承（contextvars），①②两种形状与任意层嵌套都在此具名拒绝，给出可执行出口。
+            # ③ F1 形状：handler 用 ``context=contextvars.Context()`` 换掉 context ⇒
+            #    ``_IN_DISPATCH_BUS`` 不再继承，但 close 任务仍在 ``_process_event``
+            #    的等待图下游（``_fut_waiter`` / gather ``_children`` / 完成回调），
+            #    由 ``_caller_inside_dispatch_graph`` 兜底具名拒绝。
+            # ①②③ 都在此具名拒绝，给出可执行出口；拒绝发生在任何关停副作用之前。
             raise RuntimeError(
                 "RedisEventBus.close() 不能从它自己的分发 handler 内调用："
                 "该任务会把自身纳入 drain 并导致自取消/gather 递归。"

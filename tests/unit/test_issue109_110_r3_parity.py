@@ -18,6 +18,7 @@
 """
 
 import asyncio
+import contextvars
 import logging
 import tempfile
 import unittest
@@ -269,6 +270,328 @@ class Test109NestedSelfCloseGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live, [])
 
 
+class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
+    """r3 验收者 F1/F2/F3：显式空 context、线程/executor、两处保守过度拒绝。
+
+    - F1（``context=contextvars.Context()`` 换掉 context ⇒ 不继承 marker）与
+      F2（线程 / executor 各自独立 context ⇒ marker 不跨线程）**能修则修**：
+      F1 由 ``_waits_for`` 等待图兜底兜住（不依赖 contextvars）；F2 由
+      「有在飞分发时跨事件循环 close 具名拒绝」兜住。拒绝都发生在**任何关停
+      副作用之前**（``_closing`` 保持 ``False``）。
+    - F3 两处（``call_soon`` 分离的 close、分发结束后才关停的 detached 任务）
+      是**保守过度拒绝**：没有 task-wait cycle 也被拒。本文件把它当**声明**钉住，
+      不修——修掉它会削弱已确认的 spawned-not-awaited（S6）拒绝，且今天无生产
+      调用方。见 docs-site/docs/distributed/event-system.md 的 T1/T2 表述。
+    """
+
+    async def _settle(self):
+        for _ in range(300):
+            live = [t for t in asyncio.all_tasks()
+                    if t is not asyncio.current_task() and not t.done()]
+            if not live:
+                return []
+            await asyncio.sleep(0.01)
+        return [t.get_coro().__qualname__ for t in asyncio.all_tasks()
+                if t is not asyncio.current_task() and not t.done()]
+
+    def _assert_named_refusal(self, refusal_list, bus, live, *, context=""):
+        self.assertEqual(len(refusal_list), 1, f"{context}: 未具名拒绝: {refusal_list}")
+        self.assertIsInstance(refusal_list[0], RuntimeError, context)
+        self.assertIn("不能从它自己的分发 handler 内调用",
+                      str(refusal_list[0]), context)
+        self.assertFalse(bus._closing,
+                         f"{context}: 拒绝必须发生在任何关停副作用之前")
+        self.assertEqual(len(bus._pending_tasks), 0, context)
+        self.assertEqual(live, [], f"{context}: close 后仍有悬置任务: {live}")
+
+    async def _run_empty_context_shape(self, kind):
+        """验收者 F1 的原始形状 + 同族的其它 asyncio 等待构造。"""
+        holder, refusal = {}, []
+
+        async def handler(event):
+            ctx = contextvars.Context()          # 显式空 context：绕开 marker
+            loop = asyncio.get_running_loop()
+            bus = holder["bus"]
+            try:
+                if kind == "direct":
+                    await loop.create_task(bus.close(), context=ctx)
+                elif kind == "wait":
+                    task = loop.create_task(bus.close(), context=ctx)
+                    await asyncio.wait({task})
+                    refusal.append(task.exception())
+                elif kind == "gather":
+                    await asyncio.gather(loop.create_task(bus.close(), context=ctx))
+                elif kind == "shield":
+                    await asyncio.shield(loop.create_task(bus.close(), context=ctx))
+                elif kind == "wait_for":
+                    await asyncio.wait_for(
+                        loop.create_task(bus.close(), context=ctx), 2)
+                elif kind == "nested":
+                    async def mid():
+                        await loop.create_task(bus.close(), context=ctx)
+                    await loop.create_task(mid(), context=ctx)
+            except BaseException as e:           # noqa: BLE001 - 断言拒绝类型/文案
+                refusal.append(e)
+
+        bus = _make_bus(handler)
+        holder["bus"] = bus
+        await bus._process_message(
+            _msg(Event(event_type="t.demo", data={})), "h1")
+        live = await self._settle()
+        return bus, refusal, live
+
+    async def test_empty_context_direct_close_is_named_refusal(self):
+        """F1 原形状：``create_task(bus.close(), context=Context())`` 必须具名拒绝。"""
+        bus, refusal, live = await self._run_empty_context_shape("direct")
+        self._assert_named_refusal(refusal, bus, live, context="F1/direct")
+
+    async def test_empty_context_wait_gather_shield_refused(self):
+        """等待图兜底：wait / gather / shield 的空 context 同族构造也拒绝。"""
+        for kind in ("wait", "gather", "shield"):
+            with self.subTest(kind=kind):
+                bus, refusal, live = await self._run_empty_context_shape(kind)
+                self._assert_named_refusal(refusal, bus, live, context=f"F1/{kind}")
+
+    async def test_empty_context_wait_for_and_nested_refused(self):
+        bus, refusal, live = await self._run_empty_context_shape("wait_for")
+        self._assert_named_refusal(refusal, bus, live, context="F1/wait_for")
+        bus, refusal, live = await self._run_empty_context_shape("nested")
+        self._assert_named_refusal(refusal, bus, live, context="F1/nested")
+
+    async def test_empty_context_net_refuses_before_drain_all_kinds(self):
+        """围栏必须发生在副作用之前：进入 ``_drain_pending_tasks`` 即失败。
+
+        drain 被替换为记录器，因此即使围栏失灵也不会 hang——本测试是
+        ``m109-r3-redis-dispatch-graph-net-off`` 与
+        ``m109-r3-redis-net-callback-edges-off`` 两个变异点的**可断言死法**
+        （对六种等待构造都跑一遍）。
+        """
+        for kind in ("direct", "wait", "gather", "shield", "wait_for", "nested"):
+            with self.subTest(kind=kind):
+                holder, refusal, drain_calls = {}, [], []
+
+                async def handler(event, _kind=kind):
+                    ctx = contextvars.Context()
+                    loop = asyncio.get_running_loop()
+                    bus = holder["bus"]
+                    try:
+                        if _kind == "direct":
+                            await loop.create_task(bus.close(), context=ctx)
+                        elif _kind == "wait":
+                            task = loop.create_task(bus.close(), context=ctx)
+                            await asyncio.wait({task})
+                            refusal.append(task.exception())
+                        elif _kind == "gather":
+                            await asyncio.gather(
+                                loop.create_task(bus.close(), context=ctx))
+                        elif _kind == "shield":
+                            await asyncio.shield(
+                                loop.create_task(bus.close(), context=ctx))
+                        elif _kind == "wait_for":
+                            await asyncio.wait_for(
+                                loop.create_task(bus.close(), context=ctx), 2)
+                        elif _kind == "nested":
+                            async def mid():
+                                await loop.create_task(bus.close(), context=ctx)
+                            await loop.create_task(mid(), context=ctx)
+                    except BaseException as e:       # noqa: BLE001
+                        refusal.append(e)
+
+                async def fake_drain(_calls=drain_calls):
+                    _calls.append("drain")
+
+                bus = _make_bus(handler)
+                holder["bus"] = bus
+                with patch.object(bus, "_drain_pending_tasks", new=fake_drain):
+                    await bus._process_message(
+                        _msg(Event(event_type="t.demo", data={})), "h1")
+                    live = await self._settle()
+                self.assertEqual(drain_calls, [],
+                                 f"{kind}: close() 在具名拒绝之前进入了 drain")
+                self._assert_named_refusal(
+                    refusal, bus, live, context=f"F1-net/{kind}")
+
+    async def test_cross_loop_close_with_inflight_is_named_refusal(self):
+        """F2：线程里 ``asyncio.run(bus.close())``，主循环仍有在飞分发 ⇒ 具名拒绝。"""
+        entered, release, outcome = asyncio.Event(), asyncio.Event(), {}
+
+        async def handler(event):
+            entered.set()
+            await release.wait()
+
+        bus = _make_bus(handler)
+        await bus._process_message(
+            _msg(Event(event_type="t.demo", data={})), "h1")
+        await entered.wait()
+
+        def close_in_foreign_loop():
+            try:
+                asyncio.run(bus.close())
+                outcome["result"] = "returned"
+            except BaseException as e:           # noqa: BLE001
+                outcome["result"] = f"{type(e).__name__}: {e}"
+
+        await asyncio.get_running_loop().run_in_executor(
+            None, close_in_foreign_loop)
+        self.assertIn("另一个事件循环", outcome.get("result", ""),
+                      f"跨循环关停未具名拒绝: {outcome}")
+        self.assertFalse(bus._closing,
+                         "跨循环拒绝必须发生在任何关停副作用之前")
+        self.assertEqual(len(bus._pending_tasks), 1,
+                         "拒绝后主循环的在飞分发不得被清掉")
+        release.set()
+        live = await self._settle()
+        self.assertEqual(len(bus._pending_tasks), 0)
+        self.assertEqual(live, [])
+
+    async def test_cross_loop_close_refused_before_drain(self):
+        """跨循环围栏必须在副作用之前：进入 drain 即失败。
+
+        drain 被替换为记录器，因此即使围栏失灵也不会 hang——本测试是
+        ``m109-r3-redis-cross-loop-close-fence-off`` 变异点的**可断言死法**。
+        """
+        entered, release, outcome = asyncio.Event(), asyncio.Event(), {}
+        drain_calls = []
+
+        async def handler(event):
+            entered.set()
+            await release.wait()
+
+        async def fake_drain():
+            drain_calls.append("drain")
+
+        bus = _make_bus(handler)
+        bus._drain_pending_tasks = fake_drain
+        await bus._process_message(
+            _msg(Event(event_type="t.demo", data={})), "h1")
+        await entered.wait()
+
+        def close_in_foreign_loop():
+            try:
+                asyncio.run(bus.close())
+                outcome["result"] = "returned"
+            except BaseException as e:           # noqa: BLE001
+                outcome["result"] = f"{type(e).__name__}: {e}"
+
+        await asyncio.get_running_loop().run_in_executor(
+            None, close_in_foreign_loop)
+        release.set()
+        live = await self._settle()
+        self.assertEqual(drain_calls, [],
+                         "close() 在跨循环具名拒绝之前进入了 drain")
+        self.assertIn("另一个事件循环", outcome.get("result", ""),
+                      f"跨循环关停未具名拒绝: {outcome}")
+        self.assertFalse(bus._closing)
+        self.assertEqual(live, [])
+
+    async def test_call_soon_detached_close_after_dispatch_is_refused_declared(self):
+        """F3(a) 声明：``call_soon`` 分离的 close（无 cycle、pending==0）仍被保守拒绝。"""
+        holder = {}
+
+        async def handler(event):
+            async def late():
+                try:
+                    await holder["bus"].close()
+                    holder["refusal"] = None
+                except BaseException as e:       # noqa: BLE001
+                    holder["refusal"] = e
+            asyncio.get_running_loop().call_soon(
+                lambda: asyncio.ensure_future(late()))
+
+        bus = _make_bus(handler)
+        holder["bus"] = bus
+        await bus._process_message(
+            _msg(Event(event_type="t.demo", data={})), "h1")
+        live = await self._settle()
+        self.assertIsInstance(holder.get("refusal"), RuntimeError,
+                              f"F3(a) 声明漂移: {holder}")
+        self.assertIn("不能从它自己的分发 handler 内调用", str(holder["refusal"]))
+        self.assertFalse(bus._closing)
+        self.assertEqual(live, [])
+
+    async def test_detached_task_after_dispatch_still_refused_declared(self):
+        """F3(b) 声明：分发结束后 detached 任务里的 close 仍带 marker ⇒ 保守拒绝。"""
+        holder = {}
+
+        async def late():
+            await asyncio.sleep(0.2)             # 此时分发早已结束（pending==0）
+            try:
+                await holder["bus"].close()
+                holder["refusal"] = None
+            except BaseException as e:           # noqa: BLE001
+                holder["refusal"] = e
+
+        async def handler(event):
+            asyncio.create_task(late())
+
+        bus = _make_bus(handler)
+        holder["bus"] = bus
+        await bus._process_message(
+            _msg(Event(event_type="t.demo", data={})), "h1")
+        await asyncio.sleep(0.4)
+        live = await self._settle()
+        self.assertIsInstance(holder.get("refusal"), RuntimeError,
+                              f"F3(b) 声明漂移: {holder}")
+        self.assertFalse(bus._closing)
+        self.assertEqual(len(bus._pending_tasks), 0)
+        self.assertEqual(live, [])
+
+    def test_contextvar_name_matches_docs(self):
+        """声明↔实现：ContextVar 名字必须与文档一致（r3 验收者第 1 处过度声明）。"""
+        import plaita.event.redis as redis_module
+        self.assertEqual(redis_module._IN_DISPATCH_BUS.name,
+                         "plaita_redis_in_dispatch_bus")
+
+    async def test_shield_refusal_log_scope_declared(self):
+        """声明↔实现：shield 拒绝**在 handler 内被接住**时不得有 handler 失败日志。
+
+        （r3 验收者第 3 处过度声明：文档曾称该拒绝「经 ``_process_event`` 的
+        handler 失败日志」可见；作者自己的 shield 测试在 handler 内接住，
+        那条日志从未触发。这里把两种口径都钉住。）
+        """
+        holder = {}
+
+        async def caught_handler(event):
+            try:
+                await asyncio.shield(holder["bus"].close())
+            except BaseException:                # noqa: BLE001 - 故意接住
+                pass
+
+        catch = _Catch()
+        logger = logging.getLogger("plaita.event.redis")
+        logger.addHandler(catch)
+        try:
+            bus = _make_bus(caught_handler)
+            holder["bus"] = bus
+            await bus._process_message(
+                _msg(Event(event_type="t.demo", data={})), "h1")
+            live = await self._settle()
+        finally:
+            logger.removeHandler(catch)
+        self.assertEqual(live, [])
+        self.assertEqual(
+            [m for m in catch.lines if "处理事件" in m and "失败" in m], [],
+            f"handler 内接住的 shield 拒绝不得触发 handler 失败日志: {catch.lines}")
+
+        async def uncaught_handler(event):
+            await asyncio.shield(holder["bus"].close())
+
+        catch2 = _Catch()
+        logger.addHandler(catch2)
+        try:
+            bus2 = _make_bus(uncaught_handler)
+            holder["bus"] = bus2
+            await bus2._process_message(
+                _msg(Event(event_type="t.demo", data={})), "h1")
+            live2 = await self._settle()
+        finally:
+            logger.removeHandler(catch2)
+        self.assertEqual(live2, [])
+        self.assertEqual(
+            len([m for m in catch2.lines if "处理事件" in m and "失败" in m]), 1,
+            f"未接住的 shield 拒绝应经 handler 失败日志可见一次: {catch2.lines}")
+
+
 class Test109EventFilterShutdownCapability(unittest.IsolatedAsyncioTestCase):
     """D2：按能力关停，memory/sqlalchemy 无 close() 时不得打假 WARNING。"""
 
@@ -422,7 +745,12 @@ class Test110RegistryServiceTypeParse(unittest.TestCase):
 
 
 class Test110SubscriptionNamedReason(unittest.IsolatedAsyncioTestCase):
-    """D4a：EventSubscription 空类型与 EventNode 同一条具名中文原因。"""
+    """D4a：EventSubscription 空类型给具名中文原因。
+
+    口径修正（r3 验收者第 2 处过度声明）：两处**共享前缀**
+    ``event_type 不能为空：``，但**正文不同**——``EventNode`` 说「event 节点必须…」、
+    ``EventSubscription`` 说「订阅必须…」。它们是**两个** validator，不是「同一条原因」。
+    """
 
     def test_empty_type_names_reason(self):
         from pydantic import ValidationError
@@ -430,6 +758,23 @@ class Test110SubscriptionNamedReason(unittest.IsolatedAsyncioTestCase):
             EventSubscription(event_type="")
         self.assertIn("event_type 不能为空", str(ctx.exception))
         self.assertIn("如需通配请显式写", str(ctx.exception))
+
+    def test_prefix_shared_but_body_differs_from_event_node(self):
+        """钉住「同前缀、不同正文」，防止文档再写成「同一条原因」。"""
+        from pydantic import ValidationError
+        from plaita.node.event_node import EventNode
+
+        with self.assertRaises(ValidationError) as sub_ctx:
+            EventSubscription(event_type="")
+        with self.assertRaises(ValidationError) as node_ctx:
+            EventNode(event_type="")
+        sub_msg, node_msg = str(sub_ctx.exception), str(node_ctx.exception)
+        prefix = "event_type 不能为空："
+        self.assertIn(prefix, sub_msg)
+        self.assertIn(prefix, node_msg)
+        self.assertIn("订阅必须写明要等待的事件类型", sub_msg)
+        self.assertIn("event 节点必须写明要等待的事件类型", node_msg)
+        self.assertNotEqual(sub_msg, node_msg)
 
     def test_whitespace_only_type_rejected(self):
         from pydantic import ValidationError
@@ -504,8 +849,11 @@ class Test110SqlalchemyDirtyRowSkipped(unittest.IsolatedAsyncioTestCase):
 class Test110ModelConstructDivergenceDeclared(unittest.IsolatedAsyncioTestCase):
     """D4b：``model_construct`` 绕过校验后的三后端分叉——按实测计数钉住并声明。
 
-    声明口径（不是「uniform」）：memory 静默排除；Redis 在 correlation 索引命中
-    该行时抛 ``EventError``（loud，无名）；sqlalchemy 跳过并具名点名。
+    声明口径（**不是「uniform」**，也**不是「memory 一律静默排除」**——
+    r3 验收者第 4 处过度声明）：memory 仅在 ``event_type=…`` 这条 list 条件下
+    静默排除（0 命中）；``correlation_id="CID"`` 与全量 SCAN 会**静默返回该行**
+    （1 命中、0 日志）。Redis 在 correlation 索引命中该行时抛 ``EventError``
+    （loud、无名），``event_type=…`` 落空静默空；sqlalchemy 跳过并具名点名。
     本测试只钉住**当前真实行为**，防止分叉被未来改动悄悄改变而不留记录。
     """
 
@@ -523,12 +871,19 @@ class Test110ModelConstructDivergenceDeclared(unittest.IsolatedAsyncioTestCase):
             filter_condition=None, flow_id=None, node_id=None,
             created_at=0.0, timeout=None, tenant_id=None, processed_events=set())
 
-        # memory：静默排除（0 命中，无日志）
+        # memory：event_type 条件静默排除（0 命中）；correlation / 全量**返回该行**
         memory = InMemoryEventBus()
         await memory.subscription_storage.store_subscription(rogue)
         mem_rows = await memory.subscription_storage.list_subscriptions(
             event_type="ok.type")
         self.assertEqual(mem_rows, [])
+        mem_corr = await memory.subscription_storage.list_subscriptions(
+            correlation_id="CID")
+        self.assertEqual([s.subscription_id for s in mem_corr], ["rogue"],
+                         "memory correlation 路径的声明漂移：应为 1 命中、静默返回")
+        mem_all = await memory.subscription_storage.list_subscriptions()
+        self.assertEqual([s.subscription_id for s in mem_all], ["rogue"],
+                         "memory 全量 SCAN 的声明漂移：应为 1 命中、静默返回")
 
         # redis：correlation 索引命中 ⇒ get_subscription 反序列化抛 EventError（loud）
         storage = RedisEventSubscriptionStorage(

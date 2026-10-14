@@ -1,0 +1,12 @@
+{
+  "name": "m109-r3-contextvar-name-drift",
+  "issue": "109",
+  "concern": "F1-doc",
+  "file": "plaita/event/redis.py",
+  "rationale": "ContextVar 名字与文档漂移（r3 验收者第 1 处过度声明）⇒ 声明↔实现断言失配",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_contextvar_name_matches_docs"
+  ],
+  "old": "    \"plaita_redis_in_dispatch_bus\", default=None)",
+  "new": "    \"plaita_redis_in_dispatch\", default=None)  # mutation: 文档名漂移"
+}

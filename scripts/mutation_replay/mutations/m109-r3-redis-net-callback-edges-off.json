@@ -1,0 +1,12 @@
+{
+  "name": "m109-r3-redis-net-callback-edges-off",
+  "issue": "109",
+  "concern": "F1",
+  "file": "plaita/event/redis.py",
+  "rationale": "等待图只看 _fut_waiter 前向边、不扫描回调 / 通知边 ⇒ asyncio.wait 等经回调唤醒的 self-close 漏检，进入 drain",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_empty_context_net_refuses_before_drain_all_kinds"
+  ],
+  "old": "    stack = [root] + [t for t in asyncio.all_tasks() if isinstance(t, asyncio.Future)]",
+  "new": "    stack = [root]  # mutation: 回调 / 通知边不可见"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m110-r3-memory-rogue-correlation-drift",
+  "issue": "110",
+  "concern": "D4b",
+  "file": "plaita/event/memory.py",
+  "rationale": "把 memory 的 correlation 查询改成排除空 event_type ⇒ 「memory correlation 路径静默返回 rogue 行（1 命中）」的声明漂移被抓",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ModelConstructDivergenceDeclared::test_divergence_counts"
+  ],
+  "old": "                if correlation_id and subscription.correlation_id != correlation_id:",
+  "new": "                if correlation_id and (subscription.correlation_id != correlation_id or not subscription.event_type):"
+}

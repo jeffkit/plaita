@@ -1,0 +1,12 @@
+{
+  "name": "m109-r3-redis-cross-loop-close-fence-off",
+  "issue": "109",
+  "concern": "F2",
+  "file": "plaita/event/redis.py",
+  "rationale": "关掉跨事件循环围栏 ⇒ 线程里 asyncio.run(bus.close()) 在有在飞分发时不再具名拒绝",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_cross_loop_close_refused_before_drain"
+  ],
+  "old": "        if foreign:",
+  "new": "        if False:  # mutation: 跨循环围栏关闭"
+}
