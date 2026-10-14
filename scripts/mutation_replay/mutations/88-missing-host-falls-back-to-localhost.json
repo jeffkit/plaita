@@ -2,7 +2,7 @@
   "name": "88-missing-host-falls-back-to-localhost",
   "concern": "#88-J",
   "file": "plaita/server/factory.py",
-  "old": "    if not host:\n        raise RedisUrlError(f\"Redis URL 缺少主机名: {text!r}\")\n",
+  "old": "    if not host:\n        raise RedisUrlError(f\"Redis URL 缺少主机名: {shown!r}\")\n",
   "new": "    if not host:\n        host = \"localhost\"\n",
   "rationale": "redis:// 空目标静默回落 localhost —— 原缺陷的另一条路径",
   "expect_fail": [

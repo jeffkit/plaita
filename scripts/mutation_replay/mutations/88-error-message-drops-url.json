@@ -2,9 +2,9 @@
   "name": "88-error-message-drops-url",
   "concern": "#88-U",
   "file": "plaita/server/factory.py",
-  "old": "        raise RedisUrlError(\n            f\"redis_url 必须是字符串，收到 {type(raw).__name__}: {raw!r}\"\n        )\n",
-  "new": "        raise RedisUrlError(\"redis_url 必须是字符串\")\n",
-  "rationale": "报错不再带上 URL/类型 ⇒ 运维无法定位是哪条配置错了",
+  "old": "    if not isinstance(raw, str):\n        raise RedisUrlError(\n            f\"redis_url 必须是字符串，收到 {type(raw).__name__}: {_mask_url(raw)!r}\"\n        )\n",
+  "new": "    if not isinstance(raw, str):\n        raise RedisUrlError(\"redis_url 必须是字符串\")\n",
+  "rationale": "r2 新契约：消息保留「收到什么类型」的诊断但**绝不回显原值**（原值是掩码的）；该变异把类型诊断也删光 ⇒ 运维无法定位是哪条配置错了",
   "expect_fail": [
     "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_bytes_input_is_named_refusal"
   ],

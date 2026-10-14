@@ -8,13 +8,18 @@ IPv6 字面量等形态被改写成 localhost，而同一进程的队列/事件�
 本文件把「URL 形态 × 入口」的每一格钉成三态之一：
 
 * **解析**（合法 URL → ``RedisTarget``，且与队列 ``Redis.from_url`` 同端点）；
-* **具名拒绝**（畸形/不支持 → ``RedisUrlError``，带 URL 与原因）；
+* **具名拒绝**（畸形/不支持 → ``RedisUrlError``，带原因 + **掩码** URL）；
 * **显式默认**（未配置：``None``/空串/纯空白 → ``DEFAULT_REDIS_URL``，非错误）。
 
 没有第四态：任何形态都不得静默变成 localhost。
+
+r2（P0）：拒绝消息里的 URL 一律经 ``factory._mask_url`` 渲染（密码 ``***``）——
+它会被 ``flow_worker`` / ``event_filter`` 原样写进生产日志；本文件用
+``LEAK_SHAPES`` 表钉死「口令不出现在 ``str``/``repr``/traceback 任何一处」。
 """
 from __future__ import annotations
 
+import traceback
 import unittest
 
 from redis import Redis
@@ -25,6 +30,8 @@ from plaita.server.factory import (
     DEFAULT_REDIS_URL,
     RedisTarget,
     RedisUrlError,
+    _REDACTED,
+    _mask_url,
     _parse_redis_url,
     create_storage_component,
 )
@@ -44,6 +51,12 @@ ACCEPTED = [
     "redis://[::1]:6379/0",
     "rediss://[2001:db8::1]:6380/2",
     "redis://host:6379/0?db=2",
+    # r2：redis-py 认的 query 参数必须能进来（此前一律硬拒绝 ⇒ 生产启动崩）
+    "redis://host:6379/0?socket_timeout=5",
+    "redis://host:6379/0?socket_timeout=5&health_check_interval=30",
+    "rediss://host:6380/0?ssl_min_version=771&health_check_interval=30",
+    # r2：redis-py 不认识的 query 名字也不再判死（见 _parse_query_options）
+    "redis://host:6379/0?foo=bar",
     "unix:///tmp/plaita-redis.sock",
     "unix:///tmp/plaita-redis.sock?db=1",
 ]
@@ -64,10 +77,33 @@ REFUSED = [
     ("bad db path", "redis://host/foo"),
     ("negative db query", "redis://host:6379/0?db=-1"),
     ("non-int db query", "redis://host:6379/0?db=x"),
-    ("unsupported query param", "redis://host:6379/0?socket_timeout=5"),
+    ("invalid query value", "redis://host:6379/0?socket_timeout=abc"),
+    # r2：parse_url 认 timeout，但 AbstractConnection 没有该形参——传下去会连接期炸
+    ("timeout query param", "redis://host:6379/0?timeout=3"),
     ("fragment", "redis://:p#w@host:6379/0"),
     ("fragment after db", "redis://host:6379/0#frag"),
     ("unix without socket path", "unix://"),
+]
+
+#: 带凭据的拒绝形态（plaita#88 r2 P0）：消息会进生产日志，口令一个字都不能出现。
+SECRET = "sup3rsecret"
+LEAK_SHAPES = [
+    ("non-str bytes", b"redis://user:sup3rsecret@host:6379/0"),
+    ("unsupported scheme", "REDIS://user:sup3rsecret@host:6379/0"),
+    ("missing scheme", "user:sup3rsecret@host:6379"),
+    ("wrong scheme", "http://user:sup3rsecret@host:6379/0"),
+    ("bad db query", "redis://user:sup3rsecret@host:6379/0?db=x"),
+    ("negative db query", "redis://user:sup3rsecret@host:6379/0?db=-1"),
+    ("bad db path", "redis://user:sup3rsecret@host:6379/foo"),
+    ("invalid query value", "redis://user:sup3rsecret@host:6379/0?socket_timeout=abc"),
+    ("timeout query param", "redis://user:sup3rsecret@host:6379/0?timeout=3"),
+    ("fragment", "redis://user:sup3rsecret@host:6379/0#frag"),
+    ("invalid IPv6 literal", "redis://user:sup3rsecret@[::1:6379/0"),
+    ("port non-numeric", "redis://user:sup3rsecret@host:notaport"),
+    ("port out of range", "redis://user:sup3rsecret@host:99999"),
+    ("port zero", "redis://user:sup3rsecret@host:0"),
+    ("missing host", "redis://user:sup3rsecret@/3"),
+    ("unix without socket path", "unix://user:sup3rsecret@"),
 ]
 
 
@@ -196,7 +232,9 @@ class TestMalformedIsNamedRefusal(unittest.TestCase):
             with self.subTest(shape=shape, url=url):
                 with self.assertRaises(RedisUrlError) as ctx:
                     _parse_redis_url(url)
-                self.assertIn(url, str(ctx.exception))
+                # 诊断仍要可用：消息里必须能认出是哪条 URL——但只允许**掩码**形态。
+                # （r1 这里写的是 assertIn(url, ...)，等于把「原样回显口令」钉成契约。）
+                self.assertIn(_mask_url(url), str(ctx.exception))
 
     def test_empty_target_raises(self):
         """#88 验收：``redis://`` 空目标抛异常而非返回默认值。"""
@@ -223,6 +261,134 @@ class TestMalformedIsNamedRefusal(unittest.TestCase):
 
     def test_error_is_value_error_subclass(self):
         self.assertTrue(issubclass(RedisUrlError, ValueError))
+
+
+class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
+    """plaita#88 r2 P0：拒绝消息会原样进生产日志，口令一个字都不许出现。
+
+    ``flow_worker.py`` `logger.error("流程工作器启动失败: %s", e)`、
+    ``event_filter.py`` `logger.error("...: %s", e, exc_info=True)`——后者连
+    traceback（含 ``from exc`` 的嵌套 cause）一起落盘，所以三处都要钉。
+    """
+
+    def test_no_refusal_message_contains_the_password(self):
+        for shape, url in LEAK_SHAPES:
+            with self.subTest(shape=shape):
+                with self.assertRaises(RedisUrlError) as ctx:
+                    _parse_redis_url(url)
+                exc = ctx.exception
+                rendered = {
+                    "str": str(exc),
+                    "repr": repr(exc),
+                    "traceback": "".join(
+                        traceback.format_exception(type(exc), exc, exc.__traceback__)
+                    ),
+                }
+                for kind, text in rendered.items():
+                    with self.subTest(shape=shape, kind=kind):
+                        self.assertNotIn(SECRET, text)
+                # 只掩码、不删光：诊断仍能认出是哪条 URL
+                self.assertIn(_mask_url(url), str(exc))
+                self.assertIn(_REDACTED, str(exc))
+
+    def test_mask_helper_itself(self):
+        self.assertEqual(
+            _mask_url("redis://user:sup3rsecret@host:6379/0"),
+            "redis://user:***@host:6379/0",
+        )
+        # 历史畸形：凭据里写了裸 '#'（urlsplit 会把它当 fragment），掩码也不能漏
+        self.assertEqual(
+            _mask_url("redis://:sup3rsecret#x@host:6379/0"),
+            "redis://:***@host:6379/0",
+        )
+        # 没有凭据 → 原样；没有 scheme 的形态也要能掩码
+        self.assertEqual(_mask_url("redis://host:6379/0"), "redis://host:6379/0")
+        self.assertEqual(_mask_url("user:sup3rsecret@host:6379"), "user:***@host:6379")
+
+    def test_unknown_query_param_warning_is_masked(self):
+        """未知 query 只警告不判死——警告本身也是日志，同样不许带口令。"""
+        with self.assertLogs("plaita.server.factory", level="WARNING") as logs:
+            target = _parse_redis_url("redis://user:sup3rsecret@host:6379/0?foo=bar")
+        self.assertEqual((target.host, target.port), ("host", 6379))
+        self.assertTrue(any("foo" in line for line in logs.output))
+        for line in logs.output:
+            self.assertNotIn(SECRET, line)
+            self.assertIn("redis://user:***@host:6379/0", line)
+
+
+class TestQueryOptionsPassThrough(unittest.TestCase):
+    """r2：「redis-py 认的 query 参数」必须真的进客户端 kwargs，不再一律拒绝。"""
+
+    #: 透传后能在存储客户端 ``connection_kwargs()`` 里直接观察到的参数
+    PASSTHROUGH = [
+        ("socket_timeout", "redis://user:pw@host:6379/0?socket_timeout=5"),
+        ("socket_connect_timeout", "redis://host:6379/0?socket_connect_timeout=1.5"),
+        ("socket_keepalive", "redis://host:6379/0?socket_keepalive=true"),
+        ("socket_read_size", "redis://host:6379/0?socket_read_size=32768"),
+        ("health_check_interval", "redis://host:6379/0?health_check_interval=30"),
+        ("protocol", "redis://host:6379/0?protocol=2"),
+        ("legacy_responses", "redis://host:6379/0?legacy_responses=true"),
+        ("retry_on_error", "redis://host:6379/0?retry_on_error=ConnectionError"),
+        ("ssl_min_version", "rediss://host:6380/0?ssl_min_version=771"),
+        ("ssl_check_hostname", "rediss://host:6380/0?ssl_check_hostname=false"),
+        (
+            "ssl_include_verify_flags",
+            "rediss://host:6380/0?ssl_include_verify_flags=VERIFY_X509_PARTIAL_CHAIN",
+        ),
+        (
+            "ssl_exclude_verify_flags",
+            "rediss://host:6380/0?ssl_exclude_verify_flags=VERIFY_X509_STRICT",
+        ),
+    ]
+
+    #: 客户端/Pool 自己消化：值不在 ``connection_kwargs``，但确实生效
+    CONSUMED_ELSEWHERE = [
+        ("max_connections", "redis://host:6379/0?max_connections=10"),
+        ("retry_on_timeout", "redis://host:6379/0?retry_on_timeout=true"),
+    ]
+
+    def _storage_client(self, url: str) -> Redis:
+        storage = create_storage_component(
+            "redis", "execution", tenant_routing=True, redis_url=url
+        )
+        return storage._current_storage().client
+
+    def test_supported_query_params_reach_client_kwargs(self):
+        for param, url in self.PASSTHROUGH:
+            with self.subTest(param=param):
+                kwargs = self._storage_client(url).connection_pool.connection_kwargs
+                queue = Redis.from_url(url).connection_pool.connection_kwargs
+                self.assertIn(param, kwargs)
+                # 与队列侧逐值一致（含 redis-py 的 int/float/bool/VerifyFlags 转换）
+                self.assertEqual(kwargs[param], queue[param])
+
+    def test_consumed_query_params_still_build_a_client(self):
+        for param, url in self.CONSUMED_ELSEWHERE:
+            with self.subTest(param=param):
+                self.assertIsNotNone(self._storage_client(url))
+
+    def test_max_connections_reaches_the_pool(self):
+        client = self._storage_client("redis://host:6379/0?max_connections=10")
+        self.assertEqual(client.connection_pool.max_connections, 10)
+
+    def test_combined_production_url_no_longer_crashes(self):
+        """验证者实测的生产形态：``?socket_timeout=5&health_check_interval=30``。"""
+        target = _parse_redis_url(
+            "redis://user:sup3rsecret@host:6379/0?socket_timeout=5&health_check_interval=30"
+        )
+        self.assertEqual(target.query_options["socket_timeout"], 5.0)
+        self.assertEqual(target.query_options["health_check_interval"], 30)
+
+    def test_unknown_query_param_is_ignored_not_fatal(self):
+        target = _parse_redis_url("redis://host:6379/0?foo=bar")
+        self.assertEqual((target.host, target.port, target.db), ("host", 6379, 0))
+        # 未知名字无法透传（redis.Redis.__init__ 没有 **kwargs），但不判死
+        self.assertNotIn("foo", target.client_kwargs())
+
+    def test_invalid_value_for_known_param_is_still_refused(self):
+        with self.assertRaises(RedisUrlError) as ctx:
+            _parse_redis_url("redis://host:6379/0?ssl_min_version=abc")
+        self.assertIn("ssl_min_version", str(ctx.exception))
 
 
 class TestFactoryCallerBehaviour(unittest.TestCase):

@@ -2,7 +2,7 @@
   "name": "88-port-parse-error-not-named",
   "concern": "#88-V",
   "file": "plaita/server/factory.py",
-  "old": "    try:\n        host = unquote(parts.hostname) if parts.hostname else None\n        port = parts.port\n    except ValueError as exc:  # 端口非整数 / 端口越界\n        raise RedisUrlError(f\"Redis URL 非法（{exc}）: {text!r}\") from exc\n",
+  "old": "    try:\n        host = unquote(parts.hostname) if parts.hostname else None\n        port = parts.port\n    except ValueError as exc:  # 端口非整数 / 端口越界\n        raise RedisUrlError(\n            f\"Redis URL 非法（{_safe_reason(exc, text)}）: {shown!r}\"\n        ) from exc\n",
   "new": "    host = unquote(parts.hostname) if parts.hostname else None\n    port = parts.port\n",
   "rationale": "非法端口抛裸 ValueError（非具名 RedisUrlError），调用方分不清是配置错还是别处错",
   "expect_fail": [

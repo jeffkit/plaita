@@ -8,6 +8,7 @@
 """
 import logging
 import os
+import re
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -24,12 +25,67 @@ DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 #: （plaita#88 的根因正是存储侧另有一套解析）。
 _REDIS_SCHEMES = ("redis", "rediss", "unix")
 
+#: 错误消息/日志里密码的固定掩码——凭据唯一允许出现的形态。
+_REDACTED = "***"
+
+#: URL userinfo（``user:password@``）的识别式。故意**不**用 ``urlsplit``：
+#: 待掩码的恰恰是畸形 URL，``urlsplit`` 对它可能直接抛错（非法 IPv6 字面量），
+#: 掩码自身绝不能失败。字符类允许 '#'/'?'，以覆盖「密码里写了裸 '#'」的形态。
+_USERINFO_RE = re.compile(r"(?P<userinfo>[^/@\s:]*:[^/@\s]*)(?P<at>@)")
+
+
+def _mask_url(value: object) -> str:
+    """把 URL 渲染成可安全写进异常/日志的形态：密码一律 ``***``。
+
+    ``redis://user:sup3rsecret@host:6379/0`` → ``redis://user:***@host:6379/0``。
+    ``_parse_redis_url`` 的**所有**拒绝分支只允许用它渲染原始输入：``RedisUrlError``
+    会被 ``flow_worker`` / ``event_filter`` 的 ``logger.error("...: %s", e)``
+    原样写进生产日志（后者还带 ``exc_info=True``），裸 URL 等于把 Redis 口令落盘。
+    """
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", "replace")
+    if not isinstance(value, str):
+        return f"<{type(value).__name__}>"
+
+    def _repl(match) -> str:
+        userinfo = match.group("userinfo")
+        if ":" not in userinfo:
+            return match.group(0)  # 只有用户名：没有可泄露的密码
+        return f"{userinfo.split(':', 1)[0]}:{_REDACTED}@"
+
+    return _USERINFO_RE.sub(_repl, value, count=1)
+
+
+def _passwords(text: str) -> tuple:
+    """原始 URL 里出现的密码字面量（percent-encoded 原文 + 解码后形态）。"""
+    match = _USERINFO_RE.search(text)
+    if match is None or ":" not in match.group("userinfo"):
+        return ()
+    raw = match.group("userinfo").split(":", 1)[1]
+    if not raw:
+        return ()
+    return tuple({raw, unquote(raw)})
+
+
+def _safe_reason(exc: BaseException, text: str) -> str:
+    """底层异常的**安全**渲染（只用在嵌套 cause 的位置）。
+
+    不假设 ``urlsplit``/``int``/``float`` 的报错文案里没有整条 URL 或口令：
+    先掩码裸 URL、再抹掉密码字面量，然后才允许进入消息/traceback。
+    """
+    reason = _mask_url(str(exc))
+    for secret in _passwords(text):
+        reason = reason.replace(secret, _REDACTED)
+    return reason
+
 
 class RedisUrlError(ValueError):
     """Redis URL 具名失败：畸形/不支持的 URL 抛它，绝不静默回落 localhost。
 
     继承 ``ValueError`` 以贴合「坏配置」的既有语义；关键区别是**带上 URL 与
     原因**，且在建立任何连接之前抛出（fail-closed，启动期一次性暴露）。
+    URL 一律是 ``_mask_url`` 渲染过的形态（密码 ``***``）——本异常会被
+    ``flow_worker`` / ``event_filter`` 直接写进生产日志。
     """
 
 
@@ -43,6 +99,9 @@ class RedisTarget(NamedTuple):
     username: Optional[str]
     scheme: str
     unix_socket_path: Optional[str] = None
+    #: URL query 里 redis-py 认识的连接参数（如 ``socket_timeout``）——原样透传给
+    #: ``redis.Redis(**kwargs)``，保证存储侧与队列侧 ``Redis.from_url`` 同参数。
+    query_options: Optional[dict] = None
 
     @property
     def ssl(self) -> bool:
@@ -56,6 +115,8 @@ class RedisTarget(NamedTuple):
             kwargs["username"] = self.username
         if self.password is not None:
             kwargs["password"] = self.password
+        if self.query_options:
+            kwargs.update(self.query_options)
         if self.unix_socket_path is not None:
             kwargs["unix_socket_path"] = self.unix_socket_path
             return kwargs
@@ -66,19 +127,101 @@ class RedisTarget(NamedTuple):
         return kwargs
 
 
-def _redis_db_from_url(path: Optional[str], db_query: Optional[str], text: str) -> int:
+#: 存储侧**透传**给 ``redis.Redis(**kwargs)`` 的 URL query 参数。名字与队列侧
+#: ``redis.connection.URL_QUERY_ARGUMENT_PARSERS`` 同名（``db`` 单独处理），
+#: 取值也用它自己的解析器转换——同一个 URL 在存储与队列必须得到同一个值。
+_QUERY_PARAMS = frozenset({
+    "health_check_interval",
+    "legacy_responses",
+    "max_connections",
+    "protocol",
+    "retry_on_error",
+    "retry_on_timeout",
+    "socket_connect_timeout",
+    "socket_keepalive",
+    "socket_read_size",
+    "socket_timeout",
+    "ssl_check_hostname",
+    "ssl_exclude_verify_flags",
+    "ssl_include_verify_flags",
+    "ssl_min_version",
+})
+
+#: redis-py 的 ``parse_url`` 认、客户端却**用不了**的参数：``?timeout=3`` 会被塞进
+#: connection_kwargs，而 ``AbstractConnection`` 没有 ``timeout`` 形参——``from_url``
+#: 本身能构造，第一次连接就 ``TypeError``。与其把它传下去变成连接期炸，不如启动期
+#: 具名拒绝并指向 ``socket_timeout``。这是与 ``parse_url`` 之间**唯一**保留的
+#: query 分歧（见 MIGRATION.md）。
+_UNSUPPORTED_QUERY_PARAMS = frozenset({"timeout"})
+
+
+def _coerce_query_value(key: str, value: str, text: str) -> object:
+    """已知 query 参数取值：用 redis-py 的解析器转换，非法即具名拒绝（掩码消息）。"""
+    try:
+        from redis.connection import URL_QUERY_ARGUMENT_PARSERS
+    except ImportError:  # pragma: no cover - 没装 redis 时 storage_type=redis 本就不可用
+        return value
+    parser = URL_QUERY_ARGUMENT_PARSERS.get(key)
+    if parser is None:  # pragma: no cover - _QUERY_PARAMS 与 redis-py 同源，防漂移
+        return value
+    try:
+        return parser(value)
+    except (TypeError, ValueError) as exc:
+        raise RedisUrlError(
+            f"Redis URL 的 query 参数 {key!r} 取值非法: {_safe_reason(exc, text)}"
+            f"（URL={_mask_url(text)!r}）"
+        ) from exc
+
+
+def _parse_query_options(query: dict, text: str) -> dict:
+    """URL query → 客户端 kwargs（与队列侧 ``Redis.from_url`` 对齐）。
+
+    * 已知参数（``_QUERY_PARAMS``）→ 按 redis-py 语义转换后透传；值非法 → 具名拒绝；
+    * ``?timeout=`` → 具名拒绝（见 ``_UNSUPPORTED_QUERY_PARAMS``）；
+    * 其余名字 → **不判死**（``?foo=bar`` 曾让生产启动直接崩）：掩码警告后忽略。
+      它们无法透传——``redis.Redis.__init__`` 没有 ``**kwargs``；而队列侧也只是把未知
+      名字塞进 connection_kwargs、第一次连接同样 ``TypeError``，故「忽略」不比队列侧
+      更差，且不再炸启动。
+    """
+    options: dict = {}
+    unknown = []
+    for key, values in query.items():
+        if key == "db" or not values:
+            continue
+        value = values[0]
+        if key in _UNSUPPORTED_QUERY_PARAMS:
+            raise RedisUrlError(
+                f"Redis URL 的 query 参数 {key!r} 不被 Redis 客户端支持"
+                f"（连接期会 TypeError，请改用 socket_timeout）: {_mask_url(text)}"
+            )
+        if key in _QUERY_PARAMS:
+            options[key] = _coerce_query_value(key, value, text)
+        else:
+            unknown.append(key)
+    if unknown:
+        logger.warning(
+            "Redis URL 含 redis-py 未定义的 query 参数 %s，已按 parse_url 语义忽略: %s",
+            sorted(unknown),
+            _mask_url(text),
+        )
+    return options
+
+
+def _redis_db_from_url(path: Optional[str], db_query: Optional[str], shown: str) -> int:
     """URL 路径/``db`` 查询参数 → 数据库编号（非法即具名失败）。
 
     ``db`` 查询参数优先于路径（与 ``Redis.from_url`` 同序）；``/`` 与空路径
     都表示默认 db 0。``path=None`` 用于 ``unix://``——socket 路径不是 db，
     此时 db 只认查询参数（缺省 0）。
+
+    ``shown`` 必须是 ``_mask_url`` 处理过的 URL——本函数的消息会进生产日志。
     """
     if db_query:
         try:
             db = int(db_query)
         except ValueError as exc:
             raise RedisUrlError(
-                f"Redis URL 的 db 查询参数不是整数: {db_query!r}（URL={text!r}）"
+                f"Redis URL 的 db 查询参数不是整数: {db_query!r}（URL={shown!r}）"
             ) from exc
     elif path is None or path in ("", "/"):
         db = 0
@@ -86,10 +229,10 @@ def _redis_db_from_url(path: Optional[str], db_query: Optional[str], text: str) 
         db = int(path[1:])
     else:
         raise RedisUrlError(
-            f"Redis URL 的路径必须是数据库编号（形如 /0）: {path!r}（URL={text!r}）"
+            f"Redis URL 的路径必须是数据库编号（形如 /0）: {path!r}（URL={shown!r}）"
         )
     if db < 0:
-        raise RedisUrlError(f"Redis URL 的数据库编号不能为负: {db}（URL={text!r}）")
+        raise RedisUrlError(f"Redis URL 的数据库编号不能为负: {db}（URL={shown!r}）")
     return db
 
 
@@ -108,42 +251,46 @@ def _parse_redis_url(redis_url: Optional[str] = None) -> RedisTarget:
       ``redis://[::1]:6379/0`` 正确取主机。
     * **畸形/不支持** → 抛 ``RedisUrlError``（带 URL 与原因，命名到具体形态）。
       绝不静默回落 localhost——那正是本缺陷：同一进程连两个 Redis。
+      消息里的 URL **一律**经 ``_mask_url`` 渲染（密码 ``***``）：它会被
+      ``flow_worker`` / ``event_filter`` 原样写进生产日志。
+    * **query 参数** → redis-py 认识的那些（``socket_timeout`` /
+      ``health_check_interval`` / ``max_connections`` / ``ssl_*`` 等）转换后透传给
+      存储客户端，与队列侧同值；``?timeout=`` 因客户端不接受而具名拒绝；未知名字
+      不再判死（掩码警告后忽略），见 ``_parse_query_options``。
     """
     raw = "" if redis_url is None else redis_url
     if not isinstance(raw, str):
         raise RedisUrlError(
-            f"redis_url 必须是字符串，收到 {type(raw).__name__}: {raw!r}"
+            f"redis_url 必须是字符串，收到 {type(raw).__name__}: {_mask_url(raw)!r}"
         )
     text = raw.strip()
     if not text:
         # 显式声明的回退（未配置）：不能把「没配」变成硬错误（#99/#95 先例）。
         return RedisTarget("localhost", 6379, 0, None, None, "redis")
 
+    shown = _mask_url(text)
     scheme_token = text.split("://", 1)[0] if "://" in text else ""
     if scheme_token != scheme_token.lower() or scheme_token not in _REDIS_SCHEMES:
         supported = " / ".join(f"{s}://" for s in _REDIS_SCHEMES)
         raise RedisUrlError(
-            f"不支持的 Redis URL: {text!r}；只支持 {supported}"
+            f"不支持的 Redis URL: {shown!r}；只支持 {supported}"
             f"（scheme 必须小写，缺 scheme 或 http:// 之类都不是 Redis URL）"
         )
 
     try:
         parts = urlsplit(text)
     except ValueError as exc:  # 非法 IPv6 字面量等
-        raise RedisUrlError(f"Redis URL 非法（{exc}）: {text!r}") from exc
+        raise RedisUrlError(
+            f"Redis URL 非法（{_safe_reason(exc, text)}）: {shown!r}"
+        ) from exc
 
     if parts.fragment:
         raise RedisUrlError(
-            f"Redis URL 不支持 fragment: {text!r}（凭据里的 '#' 请写成 %23）"
+            f"Redis URL 不支持 fragment: {shown!r}（凭据里的 '#' 请写成 %23）"
         )
     query = parse_qs(parts.query, keep_blank_values=True)
-    unknown = sorted(set(query) - {"db"})
-    if unknown:
-        raise RedisUrlError(
-            f"Redis URL 含不支持的 query 参数 {unknown}: {text!r}；"
-            f"存储侧只认 db（连接池/超时/TLS 证书等参数不在 plaita#88 范围内）。"
-            f"静默忽略它们会让存储与队列配置分叉。"
-        )
+    # 空 options 归一成 None：与「未配置」早退分支的 RedisTarget 可逐字段比较。
+    options = _parse_query_options(query, text) or None
     db_query = query.get("db", [None])[0]
     username = unquote(parts.username) if parts.username else None
     password = unquote(parts.password) if parts.password else None
@@ -151,24 +298,28 @@ def _parse_redis_url(redis_url: Optional[str] = None) -> RedisTarget:
     if scheme_token == "unix":
         socket_path = unquote(parts.path) if parts.path else None
         if not socket_path:
-            raise RedisUrlError(f"unix:// URL 缺少 socket 路径: {text!r}")
-        db = _redis_db_from_url(None, db_query, text)
-        return RedisTarget(None, 0, db, password, username, "unix", socket_path)
+            raise RedisUrlError(f"unix:// URL 缺少 socket 路径: {shown!r}")
+        db = _redis_db_from_url(None, db_query, shown)
+        return RedisTarget(
+            None, 0, db, password, username, "unix", socket_path, options
+        )
 
     try:
         host = unquote(parts.hostname) if parts.hostname else None
         port = parts.port
     except ValueError as exc:  # 端口非整数 / 端口越界
-        raise RedisUrlError(f"Redis URL 非法（{exc}）: {text!r}") from exc
+        raise RedisUrlError(
+            f"Redis URL 非法（{_safe_reason(exc, text)}）: {shown!r}"
+        ) from exc
 
     if not host:
-        raise RedisUrlError(f"Redis URL 缺少主机名: {text!r}")
+        raise RedisUrlError(f"Redis URL 缺少主机名: {shown!r}")
     if port is None:
         port = 6379
     if port == 0:
-        raise RedisUrlError(f"Redis URL 的端口不能为 0: {text!r}")
-    db = _redis_db_from_url(parts.path, db_query, text)
-    return RedisTarget(host, port, db, password, username, scheme_token)
+        raise RedisUrlError(f"Redis URL 的端口不能为 0: {shown!r}")
+    db = _redis_db_from_url(parts.path, db_query, shown)
+    return RedisTarget(host, port, db, password, username, scheme_token, None, options)
 
 
 def _create_async_engine(database_url: str):

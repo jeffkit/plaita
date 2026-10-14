@@ -36,6 +36,66 @@ allowlist**；被执行子流程自己声明了非空 `exposeEnv` 时**以声明
   合并），或**父流程不声明** `expose_env`（父级快照为空 ⇒ 整条继承链为空）。
   本单不为此引入哨兵值 / `Optional[None]` 变体来区分"空 vs 未声明"：那会改变
   `Flow(**ir)` 的既有可序列化形状，超出本单 Boundary。
+### Redis URL 解析：畸形形态从「静默回落 localhost」改为具名拒绝（plaita#88）
+
+`plaita/server/factory.py::_parse_redis_url` 此前用手写正则只认
+`redis://[:password@]host:port[/db]`，匹配失败就**静默**返回 `localhost:6379/0`：
+于是 `rediss://`、`user:pass@`、省略端口、IPv6 字面量等都被改写成 localhost，而同一
+进程的队列/事件总线仍按原始 URL 连——存储与队列连到**两个** Redis。现在这些形态
+要么完整解析（与队列侧 `Redis.from_url` 同端点），要么在建立连接前抛
+`RedisUrlError`（fail-closed，启动期一次性暴露）。
+
+**未配置**（`None` / 空串 / 纯空白）仍然走文档化默认 `redis://localhost:6379/0`，
+不是错误——只有「配错了」才拒绝。
+
+#### 旧解析器接受、现在会抛 `RedisUrlError` 的形态
+
+| 形态（密码一律显示为掩码） | 旧行为 | 现在 | 迁移动作 |
+|---|---|---|---|
+| `redis://` | localhost:6379/0 | 拒绝（无目标） | 补全 host，或直接不传 `redis_url`（走默认） |
+| `redis:///3` | localhost:6379/0 | 拒绝（缺主机名） | 写成 `redis://<host>/3` |
+| `REDIS://host:6379/0` | localhost | 拒绝（scheme 必须小写） | 改小写 `redis://` |
+| `http://host:6379` / `host:6379` / `//host:6379` | localhost | 拒绝（不支持/缺 scheme） | 用 `redis://` / `rediss://` / `unix://` |
+| `redis://user:***@host:notaport` | `host` + 默认端口 | 拒绝（端口非整数） | 端口写数字 |
+| `redis://host:99999` | `host:99999` | 拒绝（端口越界 0-65535） | 端口改到合法区间 |
+| `redis://host:0` | `host:0` | 拒绝（端口 0 不是可连端点） | 省略端口（默认 6379）或写真实端口 |
+| `redis://[::1:6379/0` | `host='['` | 拒绝（非法 IPv6 字面量） | 补 `]`：`redis://[::1]:6379/0` |
+| `redis://host/foo` | localhost:6379/0 | 拒绝（路径只能是 db 编号） | 写 `/0`…`/15`，或把参数放 query |
+| `redis://user:***@host:6379/0?db=x` | `user` + db 0 | 拒绝（db 不是整数） | `?db=<int>` |
+| `redis://host:6379/0?db=-1` | localhost | 拒绝（db 不能为负） | 用非负 db |
+| `redis://host:6379/0#frag`、`redis://:***@host:6379/0#frag` | `host` + 默认 db | 拒绝（不支持 fragment） | 凭据里的 `#` 写成 `%23`，其余 `#` 删除 |
+| `unix://` | localhost | 拒绝（缺 socket 路径） | 写 `unix:///path/to/redis.sock` |
+
+#### query 参数：不再一律拒绝
+
+redis-py 认识的连接参数现在会**转换后透传**给存储客户端，值与队列侧
+`Redis.from_url` 一致（同一个 URL 不再有两套连接参数）：
+`db`、`socket_timeout`、`socket_connect_timeout`、`socket_keepalive`、
+`socket_read_size`、`health_check_interval`、`protocol`、`legacy_responses`、
+`retry_on_error`、`retry_on_timeout`、`max_connections`、
+`ssl_check_hostname`、`ssl_min_version`、`ssl_include_verify_flags`、
+`ssl_exclude_verify_flags`。
+
+- `?socket_timeout=5&health_check_interval=30`（生产常见形态）现在**能启动**；
+  取值非法（如 `?socket_timeout=abc`）才具名拒绝。
+- redis-py **不认识**的名字（如 `?foo=bar`）不再判死：记一条掩码 warning 后忽略。
+  它们无法透传（`redis.Redis.__init__` 没有 `**kwargs`）；队列侧也只是把未知名字
+  塞进 `connection_kwargs`、第一次连接同样 `TypeError`，所以「忽略」不比队列侧更差，
+  但不会再炸启动。
+- **仍是与 `parse_url` 的差异**：`?timeout=3` 被具名拒绝。`parse_url` 接受它，但
+  `AbstractConnection` 没有 `timeout` 形参——`Redis.from_url("...?timeout=3")` 能构造
+  客户端、第一次连接就 `TypeError`。请改用 `?socket_timeout=3`。
+- 同样地，以下形态 `parse_url` 也接受、但本解析器仍然拒绝（这是 #88 的修复目标本身，
+  不是遗漏）：空目标 `redis://`、缺主机名 `redis:///3`、端口 0、非法 db 路径
+  `redis://host/foo`、fragment、`unix://` 缺 socket 路径、`?db=-1`。
+
+#### 错误消息里的 URL 一律掩码
+
+`RedisUrlError` 的消息会被 `flow_worker` / `event_filter` 直接写进生产日志
+（后者还带 `exc_info=True`）。所有拒绝分支回显的 URL 现在都经
+`factory._mask_url` 渲染：`redis://user:***@host:6379/0`——密码永不出现，
+用户名保留；`?socket_timeout=abc` 这类底层 cause 也先洗一遍。
+**迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态。
 
 ### DSL：`@childflow("<text>")` 的位置实参由 `desc` 变成子流程 `flow_id`（plaita#145）
 
