@@ -305,56 +305,44 @@ await db_event_bus.publish("user.login", user_id="U123")
 
 ### 6.4 混合后端模式
 
-可以根据需求自由组合不同组件实现：
+可以根据需求自由组合不同组件实现（替换 `event_storage` / `subscription_storage` /
+`processing_tracker` 三个属性即可）：
 
 ```python
+from sqlalchemy.ext.asyncio import create_async_engine
+
 from plaita.event import (
-    RedisEventBus, SqlalchemyEventStorage,
-    RedisEventSubscriptionStorage, SqlalchemyEventProcessingTracker
+    RedisEventBus, SqlalchemyEventStorage, SqlalchemyEventProcessingTracker
 )
 
 # 创建Redis事件总线
 redis_bus = RedisEventBus(redis_url="redis://localhost:6379/0")
+await redis_bus.initialize()
 
-# 创建SQLAlchemy事件存储
-db_storage = SqlalchemyEventStorage(
-    database_url="sqlite+aiosqlite:///events.db",
-    create_tables=True
-)
+# 创建SQLAlchemy事件存储（第一个参数是 SQLAlchemy **异步引擎**，不是 URL）
+engine = create_async_engine("sqlite+aiosqlite:///events.db")
+db_storage = SqlalchemyEventStorage(engine, create_tables=True)
 
-# 初始化组件
-await db_storage.initialize()
+# 建表（方法名是 ensure_tables；create_tables=True 时首次写操作也会惰性建表）
+await db_storage.ensure_tables()
 
-# 配置事件总线使用DB存储
+# 配置事件总线使用DB存储与DB跟踪器
 redis_bus.event_storage = db_storage
+redis_bus.processing_tracker = SqlalchemyEventProcessingTracker(engine)
 
 # 使用配置好的混合事件总线
 await redis_bus.publish("hybrid.event", message="使用混合后端")
 ```
 
-#### 6.4.1 使用MixedEventBus简化混合模式
+#### 6.4.1 `MixedEventBus` 不存在（历史文档臆造，未实现）
 
-更简单的方式是直接使用`MixedEventBus`类：
+早期文档里的 `MixedEventBus(bus_type=..., storage_type=..., subscription_type=...,
+tracker_type=...)` **在代码中并不存在**：`plaita.event` 没有这个类，`bus_type` /
+`storage_type` / `subscription_type` / `tracker_type` 这四个参数也是臆造的
+（`grep -rn MixedEventBus plaita/` 零命中）。
 
-```python
-from plaita.event import MixedEventBus
-
-# 创建混合后端事件总线
-mixed_bus = MixedEventBus(
-    bus_type="redis",           # 选择Redis作为事件总线实现
-    storage_type="db",          # 选择数据库作为事件存储
-    subscription_type="redis",  # 选择Redis作为订阅存储
-    tracker_type="db",          # 选择数据库作为处理跟踪器
-    redis_url="redis://localhost:6379/0",
-    database_url="sqlite+aiosqlite:///events.db"
-)
-
-# 初始化
-await mixed_bus.initialize()
-
-# 使用混合事件总线
-await mixed_bus.publish("mixed.event", data="测试混合模式")
-```
+混合后端**目前唯一**的做法就是上面 §6.4 的手工组合：分别构造各组件，再把
+`event_storage` / `subscription_storage` / `processing_tracker` 属性替换掉。
 
 ## 7. 高级用法
 
@@ -363,9 +351,9 @@ await mixed_bus.publish("mixed.event", data="测试混合模式")
 除了处理器API外，还可以使用较低级别的订阅API：
 
 ```python
-# 注册订阅
+# 注册订阅（注意：形参是单数 event_type，一个订阅一个事件类型）
 subscription_id = await event_bus.register_subscription(
-    event_types=["product.price_changed"],
+    event_type="product.price_changed",
     filter_condition={"category": "electronics"},
     correlation_id="batch-123"
 )
@@ -374,30 +362,69 @@ subscription_id = await event_bus.register_subscription(
 await event_bus.unregister_subscription(subscription_id)
 ```
 
-### 7.2 集成到FlowEventHandler
+### 7.2 在 Flow 中等待事件（`EventNode`）
 
-对于工作流场景，可以使用`FlowEventHandler`：
+事件与工作流的集成**不是**靠某个"Flow 事件处理器"类完成的（历史文档里的
+`FlowEventHandler` 在代码中**不存在**：`plaita.event` 没有这个类，全仓
+`grep -rn FlowEventHandler plaita/` 零命中），而是把 **`EventNode`** 放进 `Flow`：
+节点执行即挂起并订阅事件，事件到达后由 `resume_type="event"` 唤醒。
 
 ```python
-from plaita.event import FlowEventHandler
+from plaita.core.executor import FlowExecution
+from plaita.core.flow import Flow
+from plaita.event import EventNode, InMemoryEventBus
+from plaita.node import End, Start
 
-# 创建Flow事件处理器
-flow_handler = FlowEventHandler(
-    event_bus=event_bus,
-    subscription_storage=event_bus.subscription_storage,
-    flow_runner=async_execute_flow_node
+bus = InMemoryEventBus()
+flow = Flow(
+    flow_id="approval-flow",
+    nodes=[
+        Start(id="start", next="wait"),
+        EventNode(id="wait", event_type="document.approved", next="done",
+                  subscription_timeout=3600),          # 秒；缺省 None = 无限等待
+        End(id="done"),
+    ],
 )
 
-# 启动处理器
-await flow_handler.start()
+# 分布式模式下复用同一个 FlowExecution 实例（回调才能跨步骤保留）
+execution = FlowExecution(event_bus=bus)
 
-# 注册Flow事件
-subscription_id = await flow_handler.register_flow_event(
-    event_types=["document.approved"],
-    flow_id="flow-123",
-    node_id="approval-node"
+# 第 1 步：推进到 EventNode 即挂起（is_suspend=True，节点状态 pending）
+step1 = execution.run_distributed(flow)
+
+# 第 2 步：事件到达 —— 唤醒挂起的节点本身（节点状态 completed）
+step2 = execution.run_distributed(
+    flow,
+    saved_context=step1["context"],
+    resume_type="event",
+    resume_data={"approved": True},
 )
+
+# 第 3 步：从挂起节点之后继续推进
+step3 = execution.run_distributed(flow, saved_context=step2["context"],
+                                  resume_type="continue")
 ```
+
+`EventNode` 的字段（均为可选 camelCase 别名 `eventType` / `eventFilter` /
+`subscriptionTimeout`）：
+
+| 字段 | 语义 |
+|------|------|
+| `event_type` | **必填**。订阅的事件类型，须与事件发布方的 type 精确匹配；支持 `$` 表达式 |
+| `event_filter` | 事件过滤器：按点路径匹配事件负载，如 `{"data.status": "ok"}`；缺省 `{}` |
+| `subscription_timeout` | 订阅超时秒数（须 `> 0`）。超时由 `SubscriptionTimeoutChecker` 触发 `resume_type="timeout"`，节点落 `timeout` 状态；缺省 `None` = 无限等待 |
+
+`resume_type` 的取值：
+
+| `resume_type` | 行为 |
+|---------------|------|
+| `event` | 事件到达：`node.on_event(execution, resume_data)` |
+| `timeout` | 等待超时：`node.on_timeout(execution)` |
+| `cancel` | 取消等待：`node.on_cancel(execution)` |
+| `continue` | 不唤醒，从上次 `LAST_NODE` 之后继续推进下一节点 |
+
+`event` / `timeout` / `cancel` **只恢复挂起节点本身**（该次调用的返回即该节点状态）；
+后续节点要用 `resume_type="continue"` 逐次推进，直到 `is_end`。
 
 ### 7.3 查询事件历史
 
@@ -416,43 +443,39 @@ for record in history:
 
 ### 7.4 混合后端最佳实践
 
-根据应用场景选择最合适的组件组合：
+混合 = 选一个 `EventBus` 实现（决定分发路径与各组件默认值），再把不需要的组件
+替换掉。可替换的三个普通属性：`event_storage`、`subscription_storage`、
+`processing_tracker`。
 
-1. **高并发事件处理 + 持久化存储**
+按场景选择：
+
+1. **高并发事件处理 + 持久化存储**：`RedisEventBus` + 把 `event_storage` 与
+   `processing_tracker` 换成 SQLAlchemy 实现（完整写法见 §6.4）。
+2. **单服务部署 + 集中存储**：`InMemoryEventBus` 处理本地事件 + 把 `event_storage`
+   换成 `RedisEventStorage`，让其他服务能查到事件。
+3. **性能优先 + 分析需求**：事件与订阅都留在 Redis，只把 `processing_tracker`
+   换成 `SqlalchemyEventProcessingTracker`，便于离线分析处理记录：
+
    ```python
-   # 使用Redis事件总线和Redis订阅存储处理高并发事件
-   # 使用DB存储事件数据和处理历史以便于分析和审计
-   mixed_bus = MixedEventBus(
-       bus_type="redis", 
-       storage_type="db",
-       subscription_type="redis", 
-       tracker_type="db"
-   )
+   from sqlalchemy.ext.asyncio import create_async_engine
+
+   from plaita.event import RedisEventBus, SqlalchemyEventProcessingTracker
+
+   engine = create_async_engine("sqlite+aiosqlite:///events.db")
+
+   redis_bus = RedisEventBus(redis_url="redis://localhost:6379/0")
+   await redis_bus.initialize()
+
+   # 事件与订阅留在 Redis，仅处理记录落库
+   redis_bus.processing_tracker = SqlalchemyEventProcessingTracker(engine)
    ```
 
-2. **单服务部署 + 集中存储**
-   ```python
-   # 使用内存事件总线处理本地事件
-   # 使用Redis存储事件，方便其他服务查询
-   mixed_bus = MixedEventBus(
-       bus_type="memory", 
-       storage_type="redis",
-       subscription_type="memory", 
-       tracker_type="redis"
-   )
-   ```
-
-3. **性能优先 + 分析需求**
-   ```python
-   # 所有实时组件使用Redis
-   # 仅跟踪器使用DB，方便后续分析处理记录
-   mixed_bus = MixedEventBus(
-       bus_type="redis", 
-       storage_type="redis",
-       subscription_type="redis", 
-       tracker_type="db"
-   )
-   ```
+> **`MixedEventBus` 不存在（2026-10-14 更正）**：历史文档里的
+> `MixedEventBus(bus_type=..., storage_type=..., subscription_type=...,
+> tracker_type=...)` 类**未实现**（见 §6.4.1）。上面的手工组合就是混合后端唯一
+> 的官方做法。§7.5 的 `--backend mixed --bus-type ... --tracker-type ...` 是
+> 真实的（`examples/event_demo/demo_eventbus.py` 的 CLI 参数），它只是把同样的
+> 组合逻辑包了一层。
 
 ### 7.5 命令行工具使用
 
@@ -546,9 +569,10 @@ A: 混合模式确实会引入不同后端之间的转换开销，但通过合�
 **Q: 如何从单一后端迁移到混合后端？**
 
 A: 系统设计支持平滑迁移：
-1. 先引入MixedEventBus，配置为全部使用原后端
-2. 逐步替换单个组件到新后端
-3. 验证系统稳定性后继续替换其他组件 
+1. 先建好一个 `EventBus`，并把 `event_storage` / `subscription_storage` /
+   `processing_tracker` 三个属性**全部配成原后端**（等价于单后端）
+2. 逐步把单个属性替换成新后端（如先换 `event_storage`，见 §6.4）
+3. 验证系统稳定性后继续替换其他组件
 
 # 使用独立的超时检查器
 
