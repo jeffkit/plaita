@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_r13_parity.py::Test109R13NoWritableEvidenceBit::test_s5_direct_settlement_is_named_tampered_not_silent"
   ],
-  "old": "        if self._teardown_runs == 0 and not round_.tampered:\n            round_.tampered = True\n            self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND\n            self._teardown_task_error = None\n            logger.warning(\"%s（task=%r, future=%r）\",\n                           _TEARDOWN_SETTLEMENT_TAMPERED_LOG, task, future)\n",
-  "new": "        if False:  # mutation: 去掉 tamper 信号（假成功重新变静默）\n            round_.tampered = True\n            self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND\n            self._teardown_task_error = None\n            logger.warning(\"%s（task=%r, future=%r）\",\n                           _TEARDOWN_SETTLEMENT_TAMPERED_LOG, task, future)\n"
+  "old": "        if not judged[0]:\n            judged[0] = True\n            if self._teardown_runs == 0:\n                round_.tampered = True\n                self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND\n                self._teardown_task_error = None\n                logger.warning(\"%s（task=%r, future=%r）\",\n                               _TEARDOWN_SETTLEMENT_TAMPERED_LOG, task, future)\n",
+  "new": "        if not judged[0]:\n            judged[0] = True\n            if False:  # mutation: 去掉 tamper 信号（假成功重新变静默）\n                round_.tampered = True\n                self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND\n                self._teardown_task_error = None\n                logger.warning(\"%s（task=%r, future=%r）\",\n                               _TEARDOWN_SETTLEMENT_TAMPERED_LOG, task, future)\n"
 }

@@ -1,0 +1,12 @@
+{
+  "name": "m109-r14-close-refusal-via-instance",
+  "issue": "109",
+  "concern": "N8-r14-attr-enum",
+  "file": "plaita/event/redis.py",
+  "rationale": "自关停围栏改回实例属性查找 ⇒ 影子可以把它变成「永远返回一个 RuntimeError」，`close()` 的结局被一行工厂代码改掉（不是挂起，但同样是「工厂可写字段/属性影响判决」）。杀死者：r14 的「影子 request_close 不被咨询」用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r14_parity.py::Test109R14CloseCompletionImmune::test_shadowed_request_close_and_refusal_are_never_consulted"
+  ],
+  "old": "        refusal = RedisEventBus._self_close_refusal(self, current)\n",
+  "new": "        refusal = self._self_close_refusal(current)  # mutation: 实例属性查找\n"
+}

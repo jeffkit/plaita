@@ -3,10 +3,10 @@
   "issue": "109",
   "concern": "#109/r8-vacuous",
   "file": "plaita/event/redis.py",
-  "rationale": "幂等分支去掉 shield ⇒ 并发等待者被取消时取消共享 close future",
+  "rationale": "幂等分支去掉引擎自建的保护层、直接 await 共享 close future ⇒ 并发等待者被取消时取消共享 future（r14 起保护层是 `_await_close_future`，不是 `asyncio.shield`）",
   "expect_fail": [
     "tests/unit/test_issue109_110_r8_parity.py::Test109R8VacuousProperties::test_second_waiter_cancellation_does_not_cancel_shared_future"
   ],
-  "old": "            await asyncio.shield(self._close_future)\n            return",
-  "new": "            await self._close_future  # mutation: 去掉 shield\n            return"
+  "old": "            await _await_close_future(accepted)\n            return",
+  "new": "            await accepted  # mutation: 去掉保护层（调用者取消落回共享 close future）\n            return"
 }

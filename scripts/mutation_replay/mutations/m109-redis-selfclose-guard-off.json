@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_event_redis_parity.py::Test109CancelWindowAndSelfClose::test_close_from_own_handler_is_named_refusal"
   ],
-  "old": "        refusal = self._self_close_refusal(current)\n        if refusal is not None:\n            raise refusal",
-  "new": "        refusal = None  # mutation: 自关停围栏整体关闭（r6）"
+  "old": "        refusal = RedisEventBus._self_close_refusal(self, current)\n        if refusal is not None:\n            raise refusal\n",
+  "new": "        refusal = None  # mutation: 自关停围栏整体关闭（r6）\n"
 }

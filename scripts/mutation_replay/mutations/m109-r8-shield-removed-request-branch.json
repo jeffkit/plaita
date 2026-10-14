@@ -3,10 +3,10 @@
   "issue": "109",
   "concern": "#109/r8-vacuous",
   "file": "plaita/event/redis.py",
-  "rationale": "首次受理路径去掉 shield ⇒ 调用者的取消会取消 close future / 打断 teardown",
+  "rationale": "首次受理路径去掉引擎自建的保护层 ⇒ 调用者的取消会取消 close future / 打断 teardown（r14 起保护层是 `_await_close_future`，不是 `asyncio.shield`）",
   "expect_fail": [
     "tests/unit/test_issue109_110_r8_parity.py::Test109R8VacuousProperties::test_caller_cancellation_does_not_cancel_teardown"
   ],
-  "old": "        await asyncio.shield(self.request_close())",
-  "new": "        await self.request_close()  # mutation: 去掉 shield"
+  "old": "        pending = RedisEventBus.request_close(self)\n        await _await_close_future(pending)\n",
+  "new": "        pending = RedisEventBus.request_close(self)\n        await pending  # mutation: 去掉保护层\n"
 }

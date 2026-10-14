@@ -1,0 +1,12 @@
+{
+  "name": "m109-r14-tamper-gate-back-on-round-field",
+  "issue": "109",
+  "concern": "N4-r14-gate",
+  "file": "plaita/event/redis.py",
+  "rationale": "tamper 信号的判定门回到 `round_.tampered`（挂在模块全局 `_TEARDOWN_ROUNDS` 上，工厂一行即可预置）⇒ 伪造它就能抑制 WARNING（N4）。杀死者：r14 的「伪造 round_.tampered 抑制不了 WARNING」用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r14_parity.py::Test109R14TamperSignalBounds::test_n4_forging_round_tampered_cannot_suppress_the_warning"
+  ],
+  "old": "        if not judged[0]:\n            judged[0] = True\n            if self._teardown_runs == 0:\n",
+  "new": "        if self._teardown_runs == 0 and not round_.tampered:\n            round_.tampered = True\n            if True:  # mutation: 判定门回到工厂可预置的 round_.tampered\n"
+}

@@ -313,9 +313,14 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   （凭据只进 `_watch` 的闭包 + 按 `id(task)` 的 `_TEARDOWN_ROUNDS`，后者只服务留档）；
   **看门狗闭包直接捕获本轮 future 本身**（结算对象不再从任何可变字段回读）；
   **判定点把受理时捕获的真 future 钉回 `self._close_future`**（工厂在 spawn 窗口/随后换成
-  诱饵不做数，R-13b）。
+  诱饵不做数，R-13b）。**r14 更正**：r13 的钉回只在「future 仍未结算」分支做了，tampered
+  分支没做 ⇒ 换成 pending 诱饵后**第二次 `close()` 挂起**（N2）；r14 在受理点与判定点都钉
+  回，并把结局**镜像**到诱饵上（见下 r14 小节）。
   **不变量（r13 口径）**：*没有任何一个**工厂能写的字段**会影响判决；判决只由闭包里的
   `future.done()` 决定，且工厂**从它交回的对象上读不到任何一个本轮判据字段**。*
+  **r14 补充**：这条不变量限定在**判决对象与判决输入**上；`self._close_future` 仍决定
+  「哪一次结算被调用方看到」（R-13b），`_teardown_runs` / `round_.tampered` 仍决定 tamper
+  **信号**是否出现/是否误报（R-13c）。
 
   可达性枚举（`coro.cr_frame.f_locals` / `co_freevars`；r13 的入口仍是 `['self']` / `()`）：
 
@@ -327,9 +332,28 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 
   **tamper 信号（r13/A4）**：S5（工厂直接 `self._close_future.set_result(None)`）是
   R-12a 的边界——结算已经发生、无法撤回，r12 只把它写成「假成功、不是挂起」而**没有任何
-  信号**。r13 让它**可见**：受理的 Task 结束时 future 已结算而 `_teardown_runs == 0`
-  ⇒ 具名留档 `kind=teardown-settlement-tampered`（`_teardown_error_kind`）+ 响亮 WARNING。
-  **不是新的安全边界**（留档位是模块/总线状态，进程内对手照样能写），只保证「静默」不再可能。
+  信号**。r13 在「受理的 Task 结束时 future 已结算而 `_teardown_runs == 0`」时留具名
+  `kind=teardown-settlement-tampered`（`_teardown_error_kind`）+ WARNING。
+
+  **r14 更正（N1/N1b/N4/N5，3.10–3.13 实测）——这条信号不是「静默不可能」**，它是
+  **尽力而为的可见性**，确切边界是：
+
+  * **触发条件（四条全满足才有 WARNING）**：①受理的 Task **确实结束**（看门狗是它的 done
+    回调）；②`_teardown_runs == 0`；③本轮**第一次**判定还没发生（r14 的 `judged` 闭包位）；
+    ④闭包里那个真 future 已 done。
+  * **不保证（工厂能让它不出现，且只「不报」不「误报」）**：工厂把 `self._teardown_runs`
+    写成非 0（该字段在 r13 的残差清单里就被列为工厂可写）⇒ 条件②不成立（**N1**：实测
+    `returned / kind_field=None / warnlogs=0`）；工厂交回一个**永不结束**的 Task ⇒ 条件①
+    永不成立（**N1b**：同为零信号，且同时命中 R-1 的长等）。
+  * **不可信（会误报）**：`round_.tampered` 是模块全局 `_TEARDOWN_ROUNDS` 上的普通字段，
+    工厂在**健康**关停（组件全关、`close()` 正常返回）上伪造它 ⇒ `_record_round_outcome`
+    把 `_teardown_error_kind` 记成 `teardown-settlement-tampered`（**N5**）。r14 只把
+    WARNING 的**判定门**从 `round_.tampered` 换成闭包里的 `judged`（伪造 round 字段因此
+    **抑制不了日志**，N4），留档 `kind` 仍读它 ⇒ **kind 既可能被抑制、也可能被伪造**。
+  * **不是新的安全边界**（留档位是模块/总线状态，进程内对手照样能写）。**「让静默不再
+    可能」这个绝对口径已删除**——钉住它的用例：
+    `test_issue109_110_r14_parity.py::Test109R14TamperSignalBounds`（条件成立时恰好一次
+    WARNING / N1 抑制 / N1b 永不触发 / N5 假阳性）。
 
   **S1 形状明示 out of contract（不声称已关闭）**：`sys._getframe` / `task._callbacks` 里
   看门狗的 `cell_contents` / 模块全局，都是进程内对手可达的——那类对手已经能触达本进程的
@@ -369,9 +393,57 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   唯一闸门。**仅剩的动态查找**是 `request_close` 可执行体里那两行（逐字节冻结，见「三处
   口径更正」）；它们只对**通过三道闸**的 Task 执行，因此解析到的一定是 stdlib 本体，
   而且**判定/结算（看门狗）根本不经过那两行**。
-  钉住：`tests/unit/test_issue109_110_r13_parity.py`（21 用例，全部 2 s 有界看门狗；
+  钉住：`tests/unit/test_issue109_110_r13_parity.py`（**22 用例**，`--collect-only` 实测；
+  含一个**同步**用例 `test_uvloop_task_type_is_accepted_if_available`——r13 把计数写成
+  「21」时漏了它；其余全部 2 s 有界看门狗；
   S1–S6 + S7/S8 + eager 判决时机 + tamper 信号 + 登记表清理 + alias/实例影子/TOCTOU/
   有状态 `__getattribute__` + C 函数注册路径 + 合法形状全集含 uvloop）。
+- **r14：`close()` 的完成路径不许经过任何实例属性查找（N8）+ 重钉四条明写的界**：
+  r13 的 `close()` 用 `asyncio.shield(self._close_future)` 等关停完成，而 `shield` 内部对
+  **工厂可达**的那个 future 做**动态查找**（3.10–3.13 源码一致：`asyncio.futures._get_loop`
+  ⇒ `inner.get_loop()`，以及 `inner.add_done_callback(...)`）。工厂只需一行普通实例属性
+  （`self` 就在交给工厂的 coroutine 的 `cr_frame.f_locals` 里）：
+
+  | # | 工厂动作（N8） | r13 结局（3.10–3.13 实测） | r14 结局 |
+  |---|---|---|---|
+  | N8-a | `bus._close_future.add_done_callback = lambda *a, **k: None` | **HANG/TIMEOUT**（真 future 已结算、调用方永远收不到） | `returned`（具名有界） |
+  | N8-b | 影子 `add_done_callback` 抛 `RuntimeError` | `RuntimeError('shadow-add-done-callback')`（与具名结局无关的裸异常） | `returned` |
+  | N8-c | 影子 `get_loop` 返回 `"not-a-loop"` | `AttributeError("'str' object has no attribute 'create_future'")` | `returned` |
+  | N8-d（对照） | 影子 `done` | `returned`（看门狗走 C 函数 ⇒ C 转换在覆盖到的地方有效） | `returned` |
+
+  r14 的做法：`close()` 不再 shield，改 `_await_close_future`——只用 `asyncio.Future`
+  **类上的 C 函数**（`done/result/exception/cancel/set_result/set_exception/add_done_callback`），
+  等一个**本函数局部创建**的 waiter（`waiter` 在 `request_close` 返回之后才创建 ⇒ 工厂在
+  spawn 窗口够不到它）；`shield` 的三条语义逐条保留。其余仍在 `close()` 里的**工厂可达对象
+  属性查找全部枚举并处理**：
+
+  | 查找 | 处理 |
+  |---|---|
+  | `self._close_future.get_loop()` | 改 `asyncio.Future.get_loop(accepted)`（C 函数） |
+  | `asyncio.shield(self._close_future)` / `shield(self.request_close())` | 换 `_await_close_future`（引擎自建 waiter） |
+  | `self.request_close()` / `self._self_close_refusal(...)` | 改 `RedisEventBus.request_close(self)` / `RedisEventBus._self_close_refusal(self, current)`（绕过实例影子；钉住：`test_shadowed_request_close_and_refusal_are_never_consulted`） |
+  | 跨循环围栏里的 `task.done()` / `task.get_loop()`（**在飞分发**任务，不在完成路径上） | 保留：影子最多让围栏 bounded 裸抛或跳过，不能让 future 悬置、也不能改判决（钉住：`test_poisoned_pending_tasks_fence_only_fails_bounded`） |
+  | `self._pending_tasks` / `self._close_future` 本身（工厂可写字段） | R-12a / R-13b / R-13c 已具名，不声称关闭 |
+
+  **N2（第二次 `close()` 挂起）的修法**：受理点（`_bind_round`）与判定点（`_watch_round`）
+  都把受理时捕获的真 future 钉回总线字段，并把真 future 的**结局镜像**到诱饵上（放行已经
+  等在诱饵上的 `close()`）。判据是「字段上那个 future 是不是本引擎受理过的凭据」
+  （`_ACCEPTED_CLOSE_FUTURES` 弱集合）⇒ 失败重试那一轮的凭据绝不被旧一轮的钉回覆盖。
+  实测（四个版本）：spawn 窗口换诱饵 / 受理后 `call_soon` 再换一次 / 诱饵上已经有等待者
+  ——两次 `close()` 都 **bounded**；r13 上第二次 **HANG**（+1 tamper WARNING、`runs=0`、
+  `[0×5]`）。
+
+  **顺带修掉的一处同类判决污染（r14 发现）**：健康关停 + 工厂在 spawn 窗口把
+  `self._close_future` 换成诱饵时，`_teardown` 的 finally 结算的是**诱饵**，
+  真 future 直到判定点才被钉回并结算成 `teardown-never-entered`——组件其实关过、调用方却
+  收到具名失败。受理点钉回后该形状恢复成功（实测：r13 `raised(never-entered)` +
+  `comps=[1,1,2,2,2]`；r14 `returned` + `comps=[1,1,1,1,1]`）。**R-14a**：eager task
+  factory 让 teardown 在 `create_task` 里**同步**跑完（早于受理点钉回），该形状仍是
+  **保守误报**（具名 `teardown-never-entered`、组件关过一次、绝不静默成功）；无法关闭，
+  因为「入口跑没跑」没有不可伪造的信号（`_teardown_runs` 是工厂可写字段，用它就会像 r12 的
+  负控那样压住具名结局）。钉住：`test_issue109_110_r14_parity.py`（**20 用例**，
+  `--collect-only` 在 3.10/3.11/3.12/3.13 上都量到 20；其中 eager 那条在 3.10/3.11 上
+  **skip**，因为那两个运行时没有 `asyncio.eager_task_factory`）。
 - **r12/B：判据不再问**对象自己**（r11 的 `__eq__`/`__func__`/逐次动态访问被替换）**：
   r11 的 `_task_uses_stdlib_methods` 用对象提供的 `__eq__`/`__func__` 做「绑定比较」，
   被两个反例击败：①**实例影子**（`__self__` 指向本任务、无 `__func__`、`__eq__` 恒真的
@@ -418,14 +490,25 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
     `_TEARDOWN_ROUNDS` / 总线字段——这类对手已经能触达本进程的**任意**对象。
     **明示 out of contract、不声称已关闭**；r13 的保证限定为「判决与结算不依赖它们能写的
     任何字段」（判决点只读闭包里的 `future.done()`，结算对象是闭包捕获的真 future）。
-  * **R-13b（改写 `self._close_future`）**：工厂把幂等凭据换成诱饵。判定点会把受理时捕获
-    的真 future 钉回去（`_watch_round`），因此真 future 仍得到具名结局、两次 close 仍
-    **有界**；若工厂在**判定之后**再改总线字段，只影响下一轮 `request_close` 的早返回语义
-    （属 R-13a 的进程内对手面）。
+  * **R-13b（改写 `self._close_future`）**：工厂把幂等凭据换成诱饵。**r14 更正**：r13 只在
+    「future 仍未结算」分支钉回，把字段换成 **pending 诱饵**后第二次 `close()` **挂起**
+    （N2，四个版本实测；第一次 `close()` 仍是返回成功的假成功 +1 tamper WARNING）。r14 在
+    **受理点**（`_bind_round`）与**判定点**（`_watch_round`）都钉回，并把真 future 的结局
+    **镜像**到诱饵上（放行已经等在诱饵上的 `close()`）；判据「字段上那个 future 是不是本
+    引擎受理过的凭据」（`_ACCEPTED_CLOSE_FUTURES` 弱集合）保证失败重试那一轮的凭据不被旧
+    一轮覆盖。实测四版本：spawn 窗口换诱饵 / 受理后 `call_soon` 再换一次 / 诱饵上已经有
+    等待者 ⇒ 两次 `close()` 都 **bounded**。
+  * **R-13c（写 `_teardown_runs` / `round_.tampered` 影响 tamper 信号）**：前者让信号不
+    出现（N1），后者在健康关停上造成假阳性 kind（N5）。r14 只把 WARNING 的判定门移进
+    `_watch` 闭包（`judged`，N4），并**如实声明**信号既不保证也不可信（见上文 r14 更正）。
+  * **R-14a（eager 下受理窗口换凭据 ⇒ 保守误报）**：eager task factory 让 teardown 在
+    `create_task` 里同步跑完，`_teardown` 的 finally 读到的 `self._close_future` 已被换成
+    诱饵 ⇒ 真 future 在判定点被钉回并结算成 `teardown-never-entered`（组件其实关过一次）。
+    **保守误报**（绝不静默成功）；无法关闭：没有不可伪造的「入口跑过」信号。
   * **为什么不引入计时器**：能拿到的最强完成事件就是「受理的 Task 结束」（以及
     「future 已结算」）；比它更弱的只能是自己设超时——那会把「还在关」误报成「关完」，
-    与 r8/G3「失败不伪装成功」的口径冲突。所以 R-1/R-4（以及 R-13a 的完成簿记篡改）这类
-    **真正的长等**被声明为 out of contract，而不是用计时器掩盖。`redis.py` 的
+    与 r8/G3「失败不伪装成功」的口径冲突。所以 R-1/R-4（以及 R-13a 的完成簿记篡改、R-14a）
+    这类**真正的长等/保守误报**被声明为 out of contract，而不是用计时器掩盖。`redis.py` 的
     `request_close` / `_watch_round` / `_spawn_teardown` docstring 与本段同口径
     （不引入 busy-wait、不引入比「任务结束」更弱的计时假设）。
 - **out of contract（r11/D；**r12/C 更正「唯一」**：合成形状；生产路径不使用
@@ -445,7 +528,9 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   释放；只要其中一个永不返回，`close()` 就一直在等。r12 实测（redis 槽位的 `aclose`
   挂起）：2 s 看门狗触发，`(True, PENDING, True, 1)`、`comps=[1, 1, 0, 0, 0]`、
   `_teardown_error_kind=None`、两次 close 都等同一个 PENDING future。
-  `DISPATCH_DRAIN_TIMEOUT_SECONDS`（5.0 s）只界住**在飞分发**那一步，**不界组件释放**。
+  `DISPATCH_DRAIN_TIMEOUT_SECONDS`（5.0 s）界住**两步**——`_drain_pending_tasks` 的「在飞
+  分发」与 `_stop_listeners` 的「等监听任务落地」（`redis.py` 里两处
+  `asyncio.wait(..., timeout=DISPATCH_DRAIN_TIMEOUT_SECONDS)`）；它**不界组件释放**。
   这是**声明的不在契约内**：我们没有权利替用户的组件设超时（超时后强行走下一步会把
   「关了一半」伪装成「关完」）。有界性由组件实现负责。
   ⑤ **工厂篡改完成簿记（R-13a，r13 具名）**：清空/改写 `task._callbacks`、经
@@ -529,10 +614,27 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   r13 自己重锚 **6 个** JSON（上面那 4 个中的 3 个 + `m109-r10-cancel-error-not-cleared`、
   `m109-r11-hostile-task-check-off`、`m109-r12-round-leaks-into-entry-frame`；原因是
   `_bind_round` 增第三形参 `future`、`_TeardownRound` 改构造、`_record_round_outcome` /
-  `_watch_round` / `_accept_spawned_task` 的调用面改成 C 函数），新增 **7** 条 r13 变异
+  `_watch_round` / `_accept_spawned_task` 的调用面改成 C 函数），**新增 8 条** r13 变异
   （tamper 信号 / 闭包 future / 凭据落回任务属性 / 登记表键 / 实例影子闸 /
-  `__getattribute__` 闸 / 看门狗注册走属性查找），总变异数 **51 + 7 = 58**，
-  `old` 全部唯一。
+  `__getattribute__` 闸 / 看门狗注册走属性查找 / **结算走属性查找**），
+  总变异数 **51 + 8 = 59**，`old` 全部唯一。
+  **计数更正（r13 报告是错的）**：这段此前写「新增 **7** 条 r13 变异 … 总变异数
+  **51 + 7 = 58**」——漏了 `m109-r13-settle-future-via-attribute`。命令复算：
+  `ls scripts/mutation_replay/mutations/ | grep -c '^m109-r13'` ⇒ **8**，
+  `ls scripts/mutation_replay/mutations/*.json | wc -l` ⇒ **59**（m109 = 52、m110 = 7）。
+  **r14 的重锚与新增**：r14 重锚 **6 个** JSON——
+  `m109-r8-shield-removed-idempotent-branch` 与 `m109-r8-shield-removed-request-branch`
+  （这两条钉的**语义不变**：「去掉保护层 ⇒ 调用者的取消落到共享 close future 上」，只把锚
+  从 `asyncio.shield` 换成 r14 的引擎自建保护层 `_await_close_future`——它们仍是 N8 修复
+  的**负向对照**，没有被削弱；对应用例 `test_caller_cancellation_does_not_cancel_teardown`
+  与 `test_second_waiter_cancellation_does_not_cancel_shared_future` 原样保留）；外加
+  `m109-r11-never-entered-watchdog-off`、`m109-r13-tamper-signal-off`、
+  `m109-r13-watchdog-reads-bus-field`、`m109-redis-selfclose-guard-off`（`close()` 改走类）。
+  新增 **8 条** r14 变异（waiter 注册走实例属性 / 幂等分支 loop 检查走实例属性 /
+  `request_close` 走实例属性 / `_self_close_refusal` 走实例属性 / 受理点不钉回诱饵 /
+  判定点不钉回诱饵 / 不镜像诱饵 / tamper 判定门回到 `round_.tampered`）；命令复算：
+  `ls scripts/mutation_replay/mutations/*.json | wc -l` ⇒ **67**（m109 = 60、m110 = 7、
+  r13 = 8、r14 = 8），`old` 在目标文件里**全部恰好出现一次**。
   ⑤ **`m109-r11-entry-marker-off` 的删除与替代关系**（r12）：那条变异钉的性质是
   「**留档对要成对清空**」（成功不清空 / 取消不清空 kind 与 error），该性质**由
   `m109-r10-success-keeps-stale-error` 与 `m109-r10-cancel-error-not-cleared` 继续钉住**，

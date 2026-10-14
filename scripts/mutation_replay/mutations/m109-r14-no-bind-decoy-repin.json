@@ -1,0 +1,12 @@
+{
+  "name": "m109-r14-no-bind-decoy-repin",
+  "issue": "109",
+  "concern": "N2-r14-repin",
+  "file": "plaita/event/redis.py",
+  "rationale": "受理点不钉回诱饵 ⇒ 第一次 `close()` 返回后总线字段仍是 pending 诱饵（第二次 `close()` 只能靠判定点的钉回或镜像才有界）。杀死者：r14 的「受理点必须在 close() 返回前钉回」用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r14_parity.py::Test109R14CredentialRepin::test_n2_spawn_decoy_is_repaired_before_close_returns"
+  ],
+  "old": "            if _is_factory_decoy(self._close_future, future):\n                # 工厂在 spawn 窗口（`create_task` 内部）把幂等凭据 ``self._close_future``\n                # 换成了诱饵。受理点**当即**钉回受理时捕获的真 future：此刻不可能有更新的\n                # 受理（本轮还没结算，`request_close` 的早返回分支进不来），所以这次写入不会\n                # 覆盖任何更新的凭据。这样第一次 ``close()`` 返回前总线字段就是真的，第二次\n                # ``close()``/``request_close()`` 不会等一个永不结算的诱饵。\n                logger.warning(\n                    \"事件总线关停：受理窗口内幂等凭据被改写为另一个 future（factory 行为），\"\n                    \"已在受理点钉回受理时捕获的真 future（reason=teardown-credential-repinned）\")\n                self._close_future = future\n",
+  "new": "            if False:  # mutation: 受理点不钉回诱饵\n                pass\n"
+}

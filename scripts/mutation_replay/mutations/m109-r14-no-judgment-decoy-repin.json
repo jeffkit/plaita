@@ -1,0 +1,12 @@
+{
+  "name": "m109-r14-no-judgment-decoy-repin",
+  "issue": "109",
+  "concern": "N2-r14-repin",
+  "file": "plaita/event/redis.py",
+  "rationale": "判定点不钉回诱饵（回到 r13 的 tampered 分支形状）⇒ 受理点钉回之后经 `call_soon`再换的一次诱饵把幂等凭据钉死成永不结算 ⇒ 第二次 `close()` 挂起（N2 本体）。杀死者：r14 的 reseat-after-bind 双 close 用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r14_parity.py::Test109R14CredentialRepin::test_n2_decoy_reseated_after_bind_second_close_is_bounded"
+  ],
+  "old": "            decoy = self._close_future if _is_factory_decoy(\n                self._close_future, future) else None\n            if decoy is not None:\n                # #109 r14/N2：判定点也把受理时捕获的真 future 钉回去（r13 只在「仍未结算」\n                # 分支钉）。诱饵不许把幂等凭据钉死成永不结算 ⇒ 第二次 close() 不再挂起。\n                # 判据是「总线字段上的那个 future 不是本引擎任何一次的受理凭据」——更新的\n                # 那一轮（失败重试）凭据在 `_ACCEPTED_CLOSE_FUTURES` 里，因此晚到的本轮\n                # 判定绝不覆盖它（重试轮不会被这一钉打回旧凭据）。\n                self._close_future = future\n                self._release_decoy_waiters(decoy, future)\n",
+  "new": "            decoy = None  # mutation: 判定点不钉回诱饵\n"
+}

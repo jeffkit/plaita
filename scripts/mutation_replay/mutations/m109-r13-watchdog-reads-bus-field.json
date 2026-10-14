@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_r13_parity.py::Test109R13NoWritableEvidenceBit::test_s4b_watchdog_settles_the_closure_future_not_a_bus_field"
   ],
-  "old": "        def _watch(finished: \"asyncio.Task\") -> None:\n            self._watch_round(finished, round_, future)\n",
-  "new": "        def _watch(finished: \"asyncio.Task\") -> None:\n            # mutation: 判定对象改读总线字段（工厂可经 self 改写）\n            self._watch_round(finished, round_, self._close_future)\n"
+  "old": "        def _watch(finished: \"asyncio.Task\") -> None:\n            self._watch_round(finished, round_, future, judged)\n",
+  "new": "        def _watch(finished: \"asyncio.Task\") -> None:\n            # mutation: 判定对象改读总线字段（工厂可经 self 改写）\n            self._watch_round(finished, round_, self._close_future, judged)\n"
 }

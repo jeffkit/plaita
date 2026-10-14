@@ -1,0 +1,12 @@
+{
+  "name": "m109-r14-close-loop-check-via-instance",
+  "issue": "109",
+  "concern": "N8-r14-getloop",
+  "file": "plaita/event/redis.py",
+  "rationale": "幂等分支的 loop 检查改回实例属性查找 ⇒ 工厂把 `get_loop` 影子成返回字符串，`loop.create_future()` 处逃出 `AttributeError: 'str' object has no attribute 'create_future'`（N8 的第二个变体，与具名结局无关的裸异常）。杀死者：r14 的 `get_loop` 影子用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r14_parity.py::Test109R14CloseCompletionImmune::test_n8_get_loop_shadow_is_bounded"
+  ],
+  "old": "            if asyncio.Future.get_loop(accepted) is not running_loop:",
+  "new": "            if accepted.get_loop() is not running_loop:  # mutation: 实例属性查找"
+}

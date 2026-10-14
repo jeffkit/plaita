@@ -1,0 +1,13 @@
+{
+  "name": "m109-r14-waiter-registers-via-instance",
+  "issue": "109",
+  "concern": "N8-r14-waiter",
+  "file": "plaita/event/redis.py",
+  "rationale": "完成回调注册改回**实例属性查找** ⇒ 工厂给真 close future 塞一个 no-op 影子（`bus._close_future.add_done_callback = lambda *a, **k: None`）就吞掉这次注册，真 future 已被我们结算而调用方永远收不到 ⇒ `close()` 挂起（N8 本体）。杀死者：r14 的 N8 no-op 影子用例 + 结构性用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r14_parity.py::Test109R14CloseCompletionImmune::test_n8_noop_add_done_callback_shadow_is_bounded",
+    "tests/unit/test_issue109_110_r14_parity.py::Test109R14CloseCompletionImmune::test_completion_waiter_uses_only_class_level_c_functions"
+  ],
+  "old": "    asyncio.Future.add_done_callback(future, _forward)\n    await waiter",
+  "new": "    future.add_done_callback(_forward)  # mutation: 回到实例属性查找\n    await waiter"
+}
