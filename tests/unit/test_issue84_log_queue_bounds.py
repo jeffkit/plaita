@@ -4,9 +4,14 @@
 * 入队后 `len(queue) <= max_queue`（默认 `DEFAULT_MAX_QUEUE=10000`）；
 * 全部刷新失败时，`dropped == max(0, emitted - max_queue)`，且每次丢弃都有
   **审计告警**（`DROP_WARN_EVERY` 条聚合一次）；
-* 刷新失败回灌同样受上限约束：`len(queue) <= max_queue`；
+* 队列满时丢的是**最旧**一条（保留最新 `max_queue` 条）——方向由可区分消息
+  同时钉住 `queue[0]` / `queue[-1]`（丢最新会立刻变红，docs 与实现同向）；
 * 审计告警走 `plaita.server.log_handler.audit`（`propagate=False`）⇒ **不得**被
-  本 handler 收进队列（自噬 delta == 0）；
+  本 handler 收进队列（自噬 delta == 0）；且该 logger 的级别**自持**
+  （`WARNING`）⇒ root 抬到 ERROR 也照发，不被 root 级别静默；
+* 刷新失败回灌同样受上限约束：`len(queue) <= max_queue`；
+* 积压恢复**分批** `execute()`：`chunk_size` 条一批，单次命令数 ≤ `2 × chunk_size`，
+  不再一次性构造 2N 条命令（`DEFAULT_CHUNK_SIZE=500`）；
 * 恢复（≤ 上限的正常流量 + 成功刷新）⇒ `queue == 0 且 dropped == 0`（一条不丢）。
 """
 
@@ -47,8 +52,39 @@ class _Pipe:
         return []
 
 
-def _handler(redis, max_queue=RedisStreamHandler.DEFAULT_MAX_QUEUE):
-    h = RedisStreamHandler(redis, "flow_worker", "i1", max_queue=max_queue)
+class _RecordingRedis:
+    """按批记录每次 execute() 提交的命令数（#84 分批提交断言用）。"""
+
+    def __init__(self):
+        self.batches = []
+
+    def pipeline(self):
+        return _RecordingPipe(self)
+
+
+class _RecordingPipe:
+    def __init__(self, client):
+        self.client = client
+        self.n = 0
+
+    def xadd(self, *a, **kw):
+        self.n += 1
+        return self
+
+    def publish(self, *a, **kw):
+        self.n += 1
+        return self
+
+    def execute(self):
+        self.client.batches.append(self.n)
+        return []
+
+
+def _handler(redis, max_queue=RedisStreamHandler.DEFAULT_MAX_QUEUE,
+             chunk_size=RedisStreamHandler.DEFAULT_CHUNK_SIZE,
+             publish_realtime=True):
+    h = RedisStreamHandler(redis, "flow_worker", "i1", max_queue=max_queue,
+                           chunk_size=chunk_size, publish_realtime=publish_realtime)
     h._stop_event.set()                      # 停后台线程，避免与断言竞争
     if h._flush_thread:
         h._flush_thread.join(timeout=3)
@@ -201,3 +237,86 @@ class TestIssue84QueueBounds(unittest.TestCase):
                         self.assertLessEqual(len(h._queue), h.max_queue)
                         self.assertEqual(h.dropped_count, expected_dropped)
         self.assertEqual(cells, 8)
+
+    def test_drop_direction_is_oldest_kept(self):
+        """方向钉死：队列满时丢**最旧**一条，保留最新 `max_queue` 条。
+
+        可区分消息（m0..m4）+ 同时断言 `_queue[0]`（最旧存活）与 `_queue[-1]`
+        （最新一条）：把 `del self._queue[0]` 变异成 `self._queue.pop()`（丢最新）
+        后本用例立刻红——r2 交付里这个方向没有任何断言钉住，docs 说「丢最旧」
+        而测试两个方向都放行。
+        """
+        h = _handler(_FailingRedis(), max_queue=3)
+        for i in range(5):
+            h.emit(_record(f"m{i}"))
+        # 前置对象：3 条在队、2 条被丢、计数可见（非空转）
+        self.assertEqual(len(h._queue), 3)
+        self.assertEqual(h.dropped_count, 2)
+        # 独立谓词：按序 m0..m4、上限 3 ⇒ 保留 {m2,m3,m4}，丢弃 {m0,m1}
+        self.assertEqual([e["message"] for e in h._queue], ["m2", "m3", "m4"])
+        self.assertEqual(h._queue[0]["message"], "m2", "最旧存活的一条不是 m2（丢了最新的？）")
+        self.assertEqual(h._queue[-1]["message"], "m4", "最新一条不在队尾")
+
+    def test_audit_warning_survives_root_level_error(self):
+        """告警不得被 root logger 级别扣为人质（#84 复审新缺陷）。
+
+        `_audit_logger` 级别留 NOTSET 会继承 root：`PLAITA_LOG_LEVEL=ERROR`
+        （已文档化的开关）或嵌入方抬 root 时，`warning(...)` 在**记录创建前**
+        就被判 disabled ⇒ 丢弃完全静默而 `dropped_count` 照涨。
+        """
+        root = logging.getLogger()
+        chain = [logging.getLogger(n)
+                 for n in ("plaita", "plaita.server", "plaita.server.log_handler")]
+        saved_root = root.level
+        saved_chain = [(lg, lg.level) for lg in chain]
+        cap = _AuditCapture()
+        _audit_logger.addHandler(cap)
+        try:
+            for lg in chain:                    # 祖先级别归零 ⇒ 生效级别只看 root
+                lg.setLevel(logging.NOTSET)
+            root.setLevel(logging.ERROR)        # 模拟 PLAITA_LOG_LEVEL=ERROR
+            h = _handler(_FailingRedis(), max_queue=3)
+            for i in range(18):                 # 4..18 共 15 次丢弃
+                h.emit(_record(f"m{i}"))
+            # 框架级前置：告警在本 logger 上确实 enabled（不是"根本没发"）
+            self.assertTrue(_audit_logger.isEnabledFor(logging.WARNING),
+                            "审计 logger 级别仍受 root 牵制")
+        finally:
+            root.setLevel(saved_root)
+            for lg, lvl in saved_chain:
+                lg.setLevel(lvl)
+            _audit_logger.removeHandler(cap)
+        # 对象：15 次丢弃属实，队列顶在上限
+        self.assertEqual(len(h._queue), 3)
+        self.assertEqual(h.dropped_count, 15)
+        self.assertTrue(cap.lines, "root=ERROR 时丢弃审计告警被 root 级别挡掉（静默丢弃）")
+        self.assertTrue(any("丢弃最旧" in line for line in cap.lines), cap.lines[:2])
+
+    def test_pipeline_chunked(self):
+        """子句⑤：积压恢复必须**分批** execute，单次命令数有上限。
+
+        独立谓词：backlog=10000、`chunk_size=500`、（每条 1×xadd + 1×publish）
+        ⇒ 恰好 10000/500 = 20 次 execute，每次 ≤ 2×500 = 1000 条命令；而不是
+        1 次 execute 打回 20000 条（issue 实测的 2N 恢复洪峰）。默认配置另测：
+        默认 chunk 必须把 10000 条积压切成多批且单批 < 2×10000。
+        """
+        chunk = 500
+        r = _RecordingRedis()
+        h = _handler(r, max_queue=10000, chunk_size=chunk)
+        for i in range(10000):
+            h.emit(_record(f"m{i}"))
+        h._flush()
+        # 前置对象：每条恰好进一批（20 批 × 1000 命令 = 20000 条命令）
+        self.assertEqual(len(r.batches), 20, f"execute() 批次数 {r.batches}")
+        self.assertEqual(sum(r.batches), 20000)
+        self.assertLessEqual(max(r.batches), 2 * chunk)
+        self.assertEqual(h.dropped_count, 0)
+
+        # 默认 chunk：行为级钉住「默认不是一次性提交」（常量被改成 ≥ backlog 会红）
+        r2 = _RecordingRedis()
+        h2 = _handler(r2, max_queue=10000)
+        for i in range(10000):
+            h2.emit(_record(f"m{i}"))
+        h2._flush()
+        self.assertGreater(len(r2.batches), 1, "默认配置仍是一次性 2N 条命令洪峰")
+        self.assertLess(max(r2.batches), 20000)

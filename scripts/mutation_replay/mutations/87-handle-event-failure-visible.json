@@ -1,0 +1,12 @@
+{
+  "name": "87-handle-event-failure-visible",
+  "concern": "规则子句3：handle_event 内层 raise 的可见范围（措辞钉死）",
+  "file": "plaita/server/event_filter.py",
+  "old": "        except Exception as e:\n            logger.error(\"处理事件出错: %s\", e, exc_info=True)",
+  "new": "        except Exception as e:\n            logger.error(\"处理事件出错: %s\", e, exc_info=True)\n            raise",
+  "rationale": "把最外层 except 改成再上抛（即「handle_event 会 re-raise」的夸大措辞）⇒ 调用方观察到 ConnectionError",
+  "expect_fail": [
+    "tests/unit/test_event_reconcile.py::TestEnqueueFailureReleasesDedupKey::test_handle_event_failure_is_swallowed_at_method_boundary"
+  ],
+  "issue": "87"
+}

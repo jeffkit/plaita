@@ -215,6 +215,12 @@ class EventFilter:
                     # (event_id, subscription_id) 永久判为已处理，而事件链
                     # 路上没有重放入口。释放后下一次重投/回扫才能真正入队；
                     # 成功的入队仍然保留键，维持多实例并发去重（现状不变）。
+                    #
+                    # 重抛的可见范围（勿夸大）：这里的 raise 只到本方法体内，
+                    # 随即被 handle_event 最外层 except（:239-240）记成一条
+                    # "处理事件出错" ERROR 后吞掉——**调用方观察不到失败**
+                    # （实测 handle_event propagated: []）。可重放性完全来自
+                    # 「释放去重键」，不来自重抛。
                     try:
                         enqueue_task(self.redis_client, self.queue_name, resume_task)
                     except Exception:
@@ -313,6 +319,10 @@ class EventFilter:
 
         # #87：与事件链路同款——超时入队失败释放去重键，让下一次 checker
         # 轮次或重投能真正入队（而不是被自己的 NX 键挡到 TTL 到期）。
+        # 措辞边界：这里的 raise **会**到直接调用方，但生产调用方是
+        # SubscriptionTimeoutChecker 的回调包装（event/timeout.py:81-84），
+        # 它同样把异常记成一条 ERROR 日志——终端用户依旧观察不到失败；
+        # 可重放性同样来自释放去重键。
         try:
             enqueue_task(self.redis_client, self.queue_name, resume_task)
         except Exception:

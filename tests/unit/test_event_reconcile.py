@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import unittest
 from unittest.mock import AsyncMock
@@ -52,6 +53,17 @@ def _stream_payloads(redis_client, stream_key):
             raw = raw.decode()
         tasks.append(json.loads(raw))
     return tasks
+
+
+class _LogCapture(logging.Handler):
+    """挂在指定 logger 上的内存 handler（观察「失败只剩日志」这一形态）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
 
 
 class ReconcileTestBase(unittest.TestCase):
@@ -365,7 +377,14 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
     """plaita#87：入队失败必须归还去重键，否则该事件的 resume 永久丢失。
 
     规则：``handle_event`` / ``_on_subscription_timeout`` 中「占去重键 → 入队」
-    两步，入队抛错时**删除刚占的键**再上抛（成功路径保持键，多实例 NX 去重不变）。
+    两步，入队抛错时**删除刚占的键**（成功路径保持键，多实例 NX 去重不变）。
+
+    重抛的可见范围（措辞钉死，勿夸大）：两条路径的 ``raise`` 只保证「方法体内
+    不被静默吞掉」——``handle_event`` 的最外层 ``except`` 立刻把它记成日志
+    （调用方观察不到，见
+    ``test_handle_event_failure_is_swallowed_at_method_boundary``）；超时链路的
+    上抛到直接调用方后被 ``event/timeout.py:81-84`` 的回调包装记成日志。可重放
+    性来自**释放去重键**，不来自重抛。
     """
 
     def test_failed_enqueue_releases_dedup_key_and_replay_enqueues(self):
@@ -409,8 +428,8 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
 
         self.redis_client.xadd = broken_xadd
         try:
-            # 修复后失败**上抛**（生产由 timeout.py 的回调包装记日志），
-            # 关键是键已归还，下一次 checker 轮次能真正入队。
+            # 失败**上抛到直接调用方**（生产里 timeout.py 的回调包装立即记日志，
+            # 终端用户同样观察不到），关键是键已归还，下一轮 checker 能真正入队。
             with pytest.raises(ConnectionError):
                 run(self.event_filter._on_subscription_timeout(subscription))
         finally:
@@ -425,3 +444,45 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
         assert tasks[0]["type"] == "resume"
         assert tasks[0]["resume_type"] == "timeout"
         assert len(self.redis_client.keys("plaita:event_filter:timeout:*")) == 1
+
+    def test_handle_event_failure_is_swallowed_at_method_boundary(self):
+        """#87 措辞钉死：``handle_event`` 的入队失败**不会**被调用方观察到。
+
+        方法体内的 ``raise`` 随即落入它自己的最外层 ``except Exception``
+        （event_filter.py:239-240）⇒ 调用方只拿到正常返回 + 一条 ERROR 日志。
+        把该 ``except`` 改成再 ``raise``（即"对上抛"的措辞）会立刻让本用例红。
+        """
+        self._setup_pending()
+        event = self._store_event_directly()
+        real_xadd = self.redis_client.xadd
+
+        def broken_xadd(*args, **kwargs):
+            raise ConnectionError("simulated transient Redis outage")
+
+        lg = logging.getLogger("plaita.server.event_filter")
+        prev_level = lg.level
+        cap = _LogCapture()
+        lg.addHandler(cap)
+        self.redis_client.xadd = broken_xadd
+        try:
+            lg.setLevel(logging.DEBUG)          # 保证 ERROR 记录一定被创建
+            # 对象前置：失败真实发生（下面断言键已释放 + stream 空），
+            # 而**没有任何异常逃出** handle_event ⇒ 调用方观察不到失败。
+            try:
+                result = run(self.event_filter.handle_event(event))
+            except Exception as exc:            # 措辞若被改回「对上抛」会到这里
+                self.fail(f"handle_event 把入队失败上抛给调用方: {exc!r}")
+            self.assertIsNone(
+                result,
+                "handle_event 应正常返回（失败被自己的最外层 except 吞掉）",
+            )
+        finally:
+            self.redis_client.xadd = real_xadd
+            lg.removeHandler(cap)
+            lg.setLevel(prev_level)
+
+        assert self.redis_client.keys("plaita:event_filter:dedup:*") == []
+        assert _stream_payloads(self.redis_client, self.QUEUE) == []
+        # 失败唯一的落地形态 = 日志；没有它就成了纯静默
+        self.assertTrue(cap.lines, "失败既不上抛也没有日志（纯静默）")
+        self.assertTrue(any("处理事件出错" in line for line in cap.lines), cap.lines)

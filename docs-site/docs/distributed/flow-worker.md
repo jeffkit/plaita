@@ -486,11 +486,13 @@ flowchart TD
 | 项 | 值 / 语义 |
 |----|-----------|
 | 队列上限 | `RedisStreamHandler.DEFAULT_MAX_QUEUE = 10000`，可由构造参数 `max_queue` 覆盖 |
-| 队列满时 | **丢弃最旧的一条**（`del self._queue[0]`）再入队 —— 保留最新日志 |
+| 队列满时 | **丢弃最旧的一条**（`del self._queue[0]`，即丢弃队列头）再入队 —— 保留最新日志。方向由 `tests/unit/test_issue84_log_queue_bounds.py::test_drop_direction_is_oldest_kept` 用可区分消息同时钉住 `queue[0]`/`queue[-1]`（改成 `pop()` 丢最新会立刻变红）；`setup_redis_logging(..., max_queue=)` 亦可覆盖 |
 | 丢弃计数 | 公开属性 `RedisStreamHandler.dropped_count`（因上限/失败回灌截断累计丢弃条数） |
 | 丢弃告警 | **不静默**：第 1 条与之后每 `DROP_WARN_EVERY = 100` 条聚合一条 warning，含累计条数与 `队列 x/上限` |
-| 刷新失败 | 整批**回灌**，但合并后超出上限的部分**整批丢弃并计数**（回灌受同一上限约束） |
+| 刷新失败 | 只回灌**未成功提交**的部分（本批起；此前各批已 `execute` 成功），合并后超出上限的部分**整批丢弃并计数**（回灌受同一上限约束） |
+| 分批提交 | 每 `DEFAULT_CHUNK_SIZE = 500` 条一次 `pipeline.execute()`（构造参数 `chunk_size` 可覆盖）⇒ 积压恢复时单次提交命令数 ≤ `2 × chunk_size`（每条 1×`xadd` + 1×`publish`），不再一次性构造 2N 条命令的洪峰 |
 | 告警路径 | 走 `plaita.server.log_handler.audit`（`propagate=False` + 自有 stderr handler）⇒ **不会**被本 handler 自己收进队列（避免失败期间告警自噬、队列排不空） |
+| 告警级别 | 该 logger 显式 `setLevel(WARNING)`，**不**继承 root：`PLAITA_LOG_LEVEL=ERROR` 或嵌入方抬 root 时丢弃/回灌告警照发（否则 `warning` 在记录创建前就被判 disabled，静默丢弃而 `dropped_count` 照涨） |
 | 正常流量 | 不丢弃：仅在 `len(queue) >= max_queue` 时丢最旧；成功刷新后队列清空 |
 
 > Stream 侧 `max_len`（默认 `DEFAULT_MAX_LEN = 10000`，`approximate=True`）只约束 Redis 里的

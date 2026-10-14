@@ -1,0 +1,12 @@
+{
+  "name": "84-flush-single-execute",
+  "concern": "规则子句6：积压恢复必须分批 execute（单次 ≤ 2×chunk_size）",
+  "file": "plaita/server/log_handler.py",
+  "old": "        chunk = max(1, int(self.chunk_size))",
+  "new": "        chunk = max(1, len(entries))",
+  "rationale": "取消分批（整批一次提交，不丢条）⇒ 10000 条积压 1 次 execute 构造 20000 条命令（issue 实测的 2N 恢复洪峰）",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_pipeline_chunked"
+  ],
+  "issue": "84"
+}
