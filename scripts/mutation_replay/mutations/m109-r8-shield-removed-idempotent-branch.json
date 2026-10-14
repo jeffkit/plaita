@@ -1,0 +1,12 @@
+{
+  "name": "m109-r8-shield-removed-idempotent-branch",
+  "issue": "109",
+  "concern": "#109/r8-vacuous",
+  "file": "plaita/event/redis.py",
+  "rationale": "幂等分支去掉 shield ⇒ 并发等待者被取消时取消共享 close future",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8VacuousProperties::test_second_waiter_cancellation_does_not_cancel_shared_future"
+  ],
+  "old": "            await asyncio.shield(self._close_future)\n            return",
+  "new": "            await self._close_future  # mutation: 去掉 shield\n            return"
+}

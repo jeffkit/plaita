@@ -1,0 +1,13 @@
+{
+  "name": "m109-r8-spawn-order-legacy",
+  "issue": "109",
+  "concern": "F1",
+  "file": "plaita/event/redis.py",
+  "rationale": "恢复 r7 的赋值顺序（spawn 先于 _close_future）⇒ eager_task_factory 下 close() 挂起",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8F1AssignmentOrder::test_close_future_and_closing_set_before_teardown_spawn",
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8F1AssignmentOrder::test_synchronous_teardown_completion_still_settles_future"
+  ],
+  "old": "        future = loop.create_future()\n        # ---- spawn 之前：teardown 触碰的所有属性先就位（r8/F1）----\n        self._close_future = future\n        self._closing = True\n        self._teardown_task = None          # 占位；同步完成时它就是真实的 None 语义\n        # ---- spawn：eager task factory 下这里可能同步跑完整个 teardown ----\n        teardown_task = self._spawn_teardown(loop)\n        self._teardown_task = teardown_task",
+  "new": "        future = loop.create_future()\n        teardown_task = self._spawn_teardown(loop)\n        self._close_future = future\n        self._closing = True\n        self._teardown_task = teardown_task"
+}

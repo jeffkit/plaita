@@ -1,0 +1,12 @@
+{
+  "name": "m109-r8-loopless-unnamed",
+  "issue": "109",
+  "concern": "G4",
+  "file": "plaita/event/redis.py",
+  "rationale": "无运行循环时裸 re-raise ⇒ 退回 RuntimeError(no running event loop)",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8RequestCloseLoopless::test_request_close_without_running_loop_is_named"
+  ],
+  "old": "            raise RuntimeError(\n                \"RedisEventBus.request_close() 需要运行中的事件循环：\"\n                \"关停请求必须在**总线所属的事件循环**里受理（teardown 任务与 close \"\n                \"future 都绑定该循环）。当前没有 running loop；\"\n                \"请在事件循环内调用，或跨线程用 loop.call_soon_threadsafe 投递。\"\n                \"error_kind=no-running-loop\"\n            ) from exc",
+  "new": "            raise  # mutation: 裸 RuntimeError(no running event loop)"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m109-r8-stop-listeners-before-drain",
+  "issue": "109",
+  "concern": "#109/r8-vacuous",
+  "file": "plaita/event/redis.py",
+  "rationale": "把监听取消挪到 drain 之前（顺序契约回归：生产方先于在飞分发被取消）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8VacuousProperties::test_listeners_cancelled_after_drain_not_before"
+  ],
+  "old": "        await self._drain_pending_tasks()\n        await self._stop_listeners()\n        await self._close_backends()",
+  "new": "        await self._stop_listeners()\n        await self._drain_pending_tasks()\n        await self._close_backends()"
+}

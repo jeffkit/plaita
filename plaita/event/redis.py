@@ -19,6 +19,45 @@ logger = logging.getLogger(__name__)
 # 然后放手让它跑完；登记由任务自己的完成回调回收。监听任务在这一步**之后**才取消。
 DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0
 
+# #109（r8/G3）：teardown **没有完整跑完**（被取消 / 步骤抛异常）时给等待者的具名
+# 错误。r7 的 finally 无条件 `set_result(None)`，于是「supervisor / 批量
+# `all_tasks()` 取消 teardown」被报成**成功**（`comp_closes == [0,0,0,0,0]`），
+# 再加上幂等早返回，总线此后永不释放。现在：未完成 ⇒ future 记具名错误并**清空
+# 幂等凭据**，让后续 `close()` 真正重试。
+# 机器可读 kind 与跨循环 / 自关停拒绝同一家族（`error_kind=`）。
+TEARDOWN_INCOMPLETE_KIND = "teardown-incomplete"
+_TEARDOWN_INCOMPLETE_MESSAGE = (
+    "RedisEventBus 关停未完成：error_kind=" + TEARDOWN_INCOMPLETE_KIND +
+    "——teardown 任务被取消或在步骤中抛异常，五个组件未必都已释放"
+    "（本次关停**不报成功**）。已清空幂等凭据：再次调用 close() 会重新尝试关停；"
+    "若总线仍被使用，请检查上一次关停被谁取消。"
+)
+
+
+def _resolve_closer(target) -> Callable[[], Awaitable[Any]]:
+    """按能力挑关闭方法（#109 r8/G2）：``aclose`` → ``close`` → ``disconnect``。
+
+    redis-py 的 asyncio 客户端在 5.0 才统一成 ``aclose``；4.x 只有 ``close`` /
+    ``disconnect``。这里**不做属性访问的裸 getattr(...) 式调用**：调用方必须在
+    ``_close_one`` 的 try 内解析，否则缺失属性会以 ``AttributeError`` 逃出关停序列。
+    都没有 ⇒ 抛具名 ``AttributeError``，由 ``_close_one`` 记 WARNING。
+    """
+    for name in ("aclose", "close", "disconnect"):
+        closer = getattr(target, name, None)
+        if callable(closer):
+            return closer
+    raise AttributeError(
+        f"{type(target).__name__} 没有可调用的关闭方法（aclose/close/disconnect 均缺失）")
+
+
+def _mark_future_retrieved(future: "asyncio.Future") -> None:
+    """done 回调：把 future 上的异常标记为**已取用**（避免 GC 时的 never-retrieved 日志）。
+
+    不影响真正的 await 者：``Task.__wakeup`` 仍会从 future 取到同一个异常。
+    """
+    if not future.cancelled():
+        future.exception()
+
 # #109/F1/F4 判据内核（具名拒绝文案 + 两层判据）拆到 ``plaita/event/_selfclose_guard.py``（r6，r7 重新定位）：
 # 该模块只依赖 stdlib，因此可在别的 CPython（3.12/3.13 的干净解释器）里按文件加载、
 # 用真实 asyncio 对象驱动（版本表见 scripts/selfclose_109_110_versions.py）。
@@ -1451,7 +1490,7 @@ class RedisEventBus(EventBus):
         return None
 
     def request_close(self) -> "asyncio.Future":
-        """受理关停请求（#109 r7）：**幂等、非阻塞**，返回「关停完成」的同一个 future。
+        """受理关停请求（#109 r7；r8/F1 修赋值顺序）：**幂等、非阻塞**，返回「关停完成」的同一个 future。
 
         这是 r7 的核心：``close()`` 不再由调用者直接执行关停序列，而是
 
@@ -1463,15 +1502,38 @@ class RedisEventBus(EventBus):
              投递的协程，都改不了这一点；
           3. 立即返回 future（非阻塞）。等关停完成就 await 它（``close()`` 的做法），
              想 fire-and-forget 就丢掉——teardown 是独立任务，调用者被取消不连坐。
+
+        **r8/F1（赋值顺序）**：teardown 需要读的每个属性都必须**先落盘再 spawn**。
+        ``loop.set_task_factory(asyncio.eager_task_factory)``（3.12+ 的**公开**
+        配置项）会让 ``create_task`` 同步把 coroutine 跑到第一个挂起点；空闲总线
+        （没有在飞分发、没有监听、后端 close 不 await）会一路跑到 ``_teardown`` 的
+        ``finally``。r7 先 spawn 再赋 ``_close_future``，此时 ``finally`` 读到
+        ``None``，稍后赋值的 future 永不 resolve ⇒ ``await bus.close()`` **永久挂起**。
+        故顺序固定为：``_close_future`` → ``_closing`` → ``_teardown_task`` 占位 →
+        spawn → 回填真实 task 句柄。任何新的「teardown 会读的属性」都必须加在这之前。
         """
         if self._close_future is not None:
             return self._close_future
-        loop = asyncio.get_running_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            # #109 r8/G4：无运行循环不是裸 RuntimeError("no running event loop")，
+            # 而是与跨循环路径同一家族的具名错误（跨循环分支在 close() 里）。
+            raise RuntimeError(
+                "RedisEventBus.request_close() 需要运行中的事件循环："
+                "关停请求必须在**总线所属的事件循环**里受理（teardown 任务与 close "
+                "future 都绑定该循环）。当前没有 running loop；"
+                "请在事件循环内调用，或跨线程用 loop.call_soon_threadsafe 投递。"
+                "error_kind=no-running-loop"
+            ) from exc
         future = loop.create_future()
-        teardown_task = self._spawn_teardown(loop)
+        # ---- spawn 之前：teardown 触碰的所有属性先就位（r8/F1）----
         self._close_future = future
-        self._teardown_task = teardown_task
         self._closing = True
+        self._teardown_task = None          # 占位；同步完成时它就是真实的 None 语义
+        # ---- spawn：eager task factory 下这里可能同步跑完整个 teardown ----
+        teardown_task = self._spawn_teardown(loop)
+        self._teardown_task = teardown_task
         return future
 
     def _spawn_teardown(self, loop: "asyncio.AbstractEventLoop") -> "asyncio.Task":
@@ -1493,22 +1555,51 @@ class RedisEventBus(EventBus):
           1. ``_drain_pending_tasks``：有界等待在飞分发，**不取消**任何任务；
           2. ``_stop_listeners``：**最后**才取消监听任务（此刻已不再产生新分发）；
           3. ``_close_backends``：释放连接/存储。
-        ``_close_future`` 在 finally 里 resolve：即使某步异常/被取消，等待者也不悬置。
+
+        ``_close_future`` 在 finally 里结算（r8/G3）：**完整跑完**才 ``set_result``；
+        被取消 / 步骤抛异常时 ``set_exception``（具名 ``teardown-incomplete``）并清空
+        幂等凭据，等待者看到的不是静默成功（r7 的无条件成功会让「被 supervisor
+        批量取消」伪装成关停成功，且幂等早返回让总线永不释放）。
         """
         self._teardown_runs += 1
+        completed = False
         try:
             await self._teardown_steps()
-        except asyncio.CancelledError:
-            raise
+            completed = True
         finally:
-            future = self._close_future
-            if future is not None and not future.done():
-                future.set_result(None)
+            # 无论正常结束、步骤抛异常还是 CancelledError，等待者都不悬置：
+            # 完成 ⇒ 成功；未完成 ⇒ 具名错误 + 允许重试。
+            if completed:
+                self._settle_close_future(None)
+            else:
+                self._settle_close_future(
+                    RuntimeError(_TEARDOWN_INCOMPLETE_MESSAGE))
 
     async def _teardown_steps(self) -> None:
+        # 顺序即契约（r8/F1(c) 复核）：drain 必须在 stop_listeners **之前**，
+        # eager task factory 下 spawn 处可能同步跑完全部三步，因此这里不许依赖
+        # 「先让出一次事件循环」的任何假设。
         await self._drain_pending_tasks()
         await self._stop_listeners()
         await self._close_backends()
+
+    def _settle_close_future(self, error: Optional[BaseException]) -> None:
+        """结算 close future（幂等）；``error`` 非空时同时清空重试凭据。"""
+        future = self._close_future
+        if future is None or future.done():
+            return
+        if error is None:
+            future.set_result(None)
+            return
+        future.set_exception(error)
+        # 异常必须被**标记为已取用**：`request_close()` 是 fire-and-forget 的公开
+        # 入口，此时可能没有任何人在 await；不标记就会在 GC 时打印
+        # "Future exception was never retrieved"。这**不影响**真正的 await 者——
+        # 它照样从 shield 收到这个异常。
+        future.add_done_callback(_mark_future_retrieved)
+        # 清空幂等凭据：后续 close() 不得对「已失败的本次关停」早返回，而要真正重试。
+        self._close_future = None
+        self._teardown_task = None
 
     async def _stop_listeners(self) -> None:
         """取消监听任务：**逐个** cancel，再统一等落地。
@@ -1517,6 +1608,8 @@ class RedisEventBus(EventBus):
         不 await 在飞分发任务，因此 ``Task.cancel`` 的 ``_fut_waiter`` 链无环。仍然
         逐个 cancel（绝不用 ``gather(...)`` 的 cancel）——CE-2 的 ``RecursionError``
         正是 ``_GatheringFuture.cancel`` 沿「close↔drain↔dispatch」环重入。
+        钉住（r8）：``Test109R8VacuousProperties`` 监听 ``asyncio.gather`` 调用 +
+        顺序记录（监听取消必须发生在 drain 之后）。
         """
         listeners = [t for t in self.listeners if not t.done()]
         self.listeners.clear()
@@ -1532,20 +1625,35 @@ class RedisEventBus(EventBus):
                 logger.warning("事件总线关停：等待监听任务落地时异常: %s", exc)
 
     async def _close_backends(self) -> None:
-        """释放 pubsub / redis / 三个存储；任一失败具名记 WARNING 后继续。"""
+        """释放 pubsub / redis / 三个存储；任一失败具名 WARNING 后继续。
+
+        r8/G2：closer 的**解析**也必须在 ``_close_one`` 的 try 内。redis-py 4.x 的
+        异步客户端没有 ``aclose``（5.0 起才有），``self.pubsub.aclose`` 这种属性访问
+        本身就会抛 ``AttributeError``；解析在 try 外时该异常会逃出 ``_teardown``，
+        而 r7 的 finally 仍把 future resolve 成成功 ⇒ **调用方看到关停成功、五个组件
+        一个都没释放**。现在把对象交给 ``_close_one``，由它按能力探测
+        （``aclose`` → ``close`` → ``disconnect``）。
+        """
         if self.pubsub is not None:
-            await self._close_one("pubsub", self.pubsub.aclose)
+            await self._close_one("pubsub", self.pubsub)
             self.pubsub = None
         if self.redis is not None:
-            await self._close_one("redis", self.redis.aclose)
+            await self._close_one("redis", self.redis)
             self.redis = None
-        await self._close_one("event_storage", self.event_storage.close)
-        await self._close_one("subscription_storage", self.subscription_storage.close)
-        await self._close_one("processing_tracker", self.processing_tracker.close)
+        await self._close_one("event_storage", self.event_storage)
+        await self._close_one("subscription_storage", self.subscription_storage)
+        await self._close_one("processing_tracker", self.processing_tracker)
 
-    async def _close_one(self, label: str, closer) -> None:
+    async def _close_one(self, label: str, target) -> None:
+        """解析并调用 ``target`` 的关闭方法；解析失败/调用失败都具名 WARNING 后继续。
+
+        支持范围（r8/G2）：``aclose``（redis-py ≥5 的 asyncio 客户端 / fakeredis）、
+        ``close``（redis-py 4.x 的 asyncio 客户端与自定义后端）、``disconnect``
+        （redis-py ≥4.2 的 aclose 前身）。三者都没有 ⇒ 具名 ``AttributeError`` 被
+        这里接住并记 WARNING，**不**逃出关停序列。
+        """
         try:
-            await closer()
+            await _resolve_closer(target)()
         except asyncio.CancelledError:
             raise
         except Exception as exc:                 # noqa: BLE001 - 关停请求已受理，不让它炸
@@ -1568,6 +1676,18 @@ class RedisEventBus(EventBus):
           * 判据（``_self_close_refusal``）仍作为**提前、响亮的拒绝**保留（拦最常见的
             handler 内直接关停）；漏判不影响安全性，只让关停更晚。没有在飞分发时判据
             直接放行（修掉验收者报告的过度拒绝）。
+
+        r8 补充：
+
+          * **失败不伪装成功**（G3）：teardown 没完整跑完（被 supervisor / 批量
+            ``all_tasks()`` 取消、或步骤抛异常）时，``close()`` 抛具名
+            ``RuntimeError(error_kind=teardown-incomplete)``，并清空幂等凭据 ⇒ 下一次
+            ``close()`` 真正重试关停，而不是早返回「成功」。
+          * **无运行循环具名拒绝**（G4）：``request_close()`` 在循环外调用给出
+            ``error_kind=no-running-loop``（不再裸
+            ``RuntimeError: no running event loop``）。
+          * **释放按能力探测**（G2）：``aclose`` → ``close`` → ``disconnect``，单个组件
+            解析/调用失败只记具名 WARNING 并继续释放其余组件。
 
         ``close()`` 返回时：``_closing is True``、teardown 恰好跑过一次、监听到期被取消；
         已登记任务里被点名者允许继续跑完（登记由完成回调回收）。
@@ -1598,6 +1718,7 @@ class RedisEventBus(EventBus):
                 f"本实例仍有 {len(foreign)} 个在飞分发任务属于另一个事件循环。"
                 "请在该总线所属的事件循环里关停；"
                 "如需跨线程请求关停，请用 loop.call_soon_threadsafe 投递。"
+                "error_kind=cross-loop-close"
             )
         refusal = self._self_close_refusal(current)
         if refusal is not None:

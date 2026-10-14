@@ -110,6 +110,25 @@ async def _drain_test_tasks():
             if t is not asyncio.current_task() and not t.done()]
 
 
+async def _settle_registry(bus, timeout=3.0):
+    """确定性等 ``_pending_tasks`` 的完成回调落地（r8/F2 修掉的瞬态断言）。
+
+    ``Task.add_done_callback`` 的回调由 ``loop.call_soon`` 排程：任务 ``done()`` 之后、
+    回调执行之前存在一个窗口——``asyncio.all_tasks()`` 已不再列出该任务，而
+    ``_pending_tasks`` 仍持有它。r7 在 handler 里加 ``await asyncio.sleep(0.05)``
+    只是把窗口变小（验收者实测 4/600 fresh-loop、5/3000 single-loop 仍失败）。
+    这里改为等待**可观察的终态**：让出事件循环 tick 直到登记表真的清空，断言因此
+    不再对瞬态取值。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while bus._pending_tasks and loop.time() < deadline:
+        await asyncio.sleep(0)                    # 先把已排程的完成回调放行
+        if bus._pending_tasks:
+            await asyncio.sleep(0.001)
+    return not bus._pending_tasks
+
+
 class Test109NestedSelfCloseGuard(unittest.IsolatedAsyncioTestCase):
     """验收者 V2 形状：task-wait cycle 不得再产生 RecursionError / 悬置任务。"""
 
@@ -119,6 +138,7 @@ class Test109NestedSelfCloseGuard(unittest.IsolatedAsyncioTestCase):
         event = Event(event_type="t.demo", data={})
         await bus._process_message(_msg(event), "h1")
         live = await _drain_test_tasks()
+        await _settle_registry(bus)   # r8/F2：断言前先把登记表的完成回调跑完
         return bus, live
 
     async def test_nested_awaited_task_close_is_named_refusal(self):
@@ -208,6 +228,10 @@ class Test109NestedSelfCloseGuard(unittest.IsolatedAsyncioTestCase):
 
         r7：判据只在确有在飞分发时才有意义，所以 handler 用 ``await asyncio.sleep``
         把分发保持在飞，让 marker 成为该形状的唯一判据。
+
+        r8/F2：``_run_shape`` 现在等待 ``_pending_tasks`` 的完成回调真正落地
+        （``_settle_registry``）后再断言——r7 的 ``sleep(0.05)`` 只是把
+        「任务 ``done()`` 但登记回调未跑」的窗口变小，验收者实测 4/600 仍失败。
         """
         holder = {}
         refusal = []

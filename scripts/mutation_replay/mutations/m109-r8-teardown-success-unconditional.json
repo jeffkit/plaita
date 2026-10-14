@@ -1,0 +1,13 @@
+{
+  "name": "m109-r8-teardown-success-unconditional",
+  "issue": "109",
+  "concern": "G3",
+  "file": "plaita/event/redis.py",
+  "rationale": "teardown 未完成也无条件报成功 ⇒ 被取消的关停伪装成功且永不重试",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8TeardownIncomplete::test_cancelled_teardown_is_reported_and_retryable",
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8TeardownIncomplete::test_teardown_step_error_is_reported_not_success"
+  ],
+  "old": "            if completed:\n                self._settle_close_future(None)\n            else:\n                self._settle_close_future(\n                    RuntimeError(_TEARDOWN_INCOMPLETE_MESSAGE))",
+  "new": "            self._settle_close_future(None)"
+}

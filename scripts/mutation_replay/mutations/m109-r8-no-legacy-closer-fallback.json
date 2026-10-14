@@ -1,0 +1,13 @@
+{
+  "name": "m109-r8-no-legacy-closer-fallback",
+  "issue": "109",
+  "concern": "G2",
+  "file": "plaita/event/redis.py",
+  "rationale": "关闭方法只认 aclose ⇒ redis-py 4.x 后端（无 aclose）不再被回退释放",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8ReleaseByCapability::test_backend_without_aclose_is_released_via_close",
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8ReleaseByCapability::test_backend_with_only_disconnect_is_released"
+  ],
+  "old": "    for name in (\"aclose\", \"close\", \"disconnect\"):",
+  "new": "    for name in (\"aclose\",):  # mutation: 不做 4.x 回退"
+}

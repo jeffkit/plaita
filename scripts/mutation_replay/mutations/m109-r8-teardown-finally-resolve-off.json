@@ -1,0 +1,13 @@
+{
+  "name": "m109-r8-teardown-finally-resolve-off",
+  "issue": "109",
+  "concern": "#109/r8-vacuous",
+  "file": "plaita/event/redis.py",
+  "rationale": "finally 不结算 close future ⇒ 等待者永久悬置（close() 挂死）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8VacuousProperties::test_close_future_is_settled_on_success",
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8TeardownIncomplete::test_cancelled_teardown_is_reported_and_retryable"
+  ],
+  "old": "            if completed:\n                self._settle_close_future(None)\n            else:\n                self._settle_close_future(\n                    RuntimeError(_TEARDOWN_INCOMPLETE_MESSAGE))",
+  "new": "            pass  # mutation: 不结算 close future"
+}

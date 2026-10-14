@@ -133,11 +133,39 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   返回同一个 close future；`close()` 用 `asyncio.shield` 等它 ⇒ teardown **不是
   调用者的 context 后代**，调用者被取消也不打断关停。重复 `close()` 返回同一个
   future（幂等；`_teardown_runs == 1`）。
+- **受理顺序（r8/F1，曾导致挂起）**：`request_close()` **先**落 `_close_future` /
+  `_closing` / `_teardown_task` 占位，**再** `create_task` teardown。
+  `loop.set_task_factory(asyncio.eager_task_factory)`（3.12+ 的**公开**配置项）下
+  `create_task` 会同步把 coroutine 跑到第一个挂起点；空闲总线（无在飞分发、无监听、
+  后端 `close` 不 await）会一路跑到 teardown 的 `finally`。r7 在 spawn **之后**才赋
+  `_close_future`，`finally` 读到 `None`，稍后赋值的 future **永不 resolve** ⇒
+  `await bus.close()` 永久挂起。3.12.14 实测矩阵：eager + 空闲 + 旧顺序 ⇒ `HANG`
+  （`teardown_runs=1, close_future_done=False`，五个后端各关 1 次）；eager + 在飞分发
+  ⇒ 正常（在 drain 的 `asyncio.wait` 处先挂起，侥幸避开）；非 eager 两种都正常。凡是
+  teardown 会读的属性都必须加在 spawn 之前。钉住：
+  `tests/unit/test_issue109_110_r8_parity.py` 的顺序/同步完成用例 + 3.12+ 上真
+  `asyncio.eager_task_factory` 的端到端用例。
 - **teardown 顺序**（P0 是**顺序**的后果，不是检测的后果）：① 有界等待（默认
   `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0`）已登记的在飞分发，**不取消**它们；超时的
   逐个打含 `event_id` / `handler_id` 的 `WARNING`（「未在 N 秒内完成，放手让它跑完并
   记录」），登记由完成回调回收；② **最后**才逐个 `cancel()` 监听任务并等落地；③ 释放
-  pubsub / redis / 存储（单步失败具名 WARNING 后继续）。
+  pubsub / redis / 存储。
+  **释放按能力探测（r8/G2）**：`aclose`（redis-py ≥5 / fakeredis）→ `close`
+  （redis-py 4.x）→ `disconnect`（redis-py ≥4.2），**解析与调用都在同一步的 try 内**，
+  单步失败（含三个方法都缺失）具名 WARNING 后继续释放其余组件。支持范围因此是
+  **redis-py 4.x ~ 8.x**；测试覆盖 `aclose` / 仅 `close` / 仅 `disconnect` / 三者全缺
+  四种形状。r8 前 `_close_backends` 里 `self.pubsub.aclose` 的属性访问在 try **之外**，
+  redis-py 4.5.5（无 `aclose`）下 `AttributeError` 逃出 teardown，调用方却看到成功、
+  五个组件一个都没释放。
+- **失败不伪装成功（r8/G3）**：teardown 没完整跑完（被 supervisor / 批量
+  `all_tasks()` 取消、或步骤抛异常）时，`close()` 抛具名
+  `RuntimeError(error_kind=teardown-incomplete)`，并清空幂等凭据 ⇒ 下一次 `close()`
+  真正重试（`_teardown_runs` 递增），而不是早返回「成功」。r7 的 finally 无条件
+  `set_result(None)`，会把「被取消」报成成功（`comp_closes == [0,0,0,0,0]`）且此后
+  每次 `close()` 都幂等早返回 ⇒ 总线永不释放。
+- **无运行循环具名拒绝（r8/G4）**：循环外调用 `request_close()` 给出
+  `error_kind=no-running-loop`（不再裸 `RuntimeError: no running event loop`）；
+  跨循环拒绝是 `error_kind=cross-loop-close`。
 - 因此 `close()` 返回后不存在「既未处理、也无处理记录」的静默第三态：每个分发要么在
   界内完成，要么**已点名**且允许继续跑完（`_pending_tasks` 里可能仍留有被点名的慢任务）。
 - `close()` 开始后到达的分发被**拒绝并点名**（`_closing` 围栏），不会绕过本次 drain
@@ -146,7 +174,11 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   （`is_event_processed` 的 Redis 往返）处被 `close()` 取消，`CancelledError`
   （BaseException）会被显式捕获、打出含 `event_id` / `handler_id` 的 WARNING 后再
   抛出——不允许「既不完成、也不点名」。
-- **自关停（#109/F1/F4…r7）：`close()` 对任意调用者安全，判据只是提前拒绝。**
+- **自关停（#109/F1/F4…r7）：`close()` 不因调用者是 handler 或其 context 后代而自取消 /
+  递归，判据只是提前拒绝。** 「安全」是本契约列出的**症状表口径**（无自取消、无
+  `RecursionError`、无 destroyed-pending、无 handler 连坐取消），**不等于**任何环境下
+  都必有界返回——r8/F1 修掉的 `eager_task_factory` + 空闲总线挂起就是反例（已修并钉住；
+  见上文「受理顺序」）。下列 r6 反例只说明**判据**不完备：
   r6 把安全性押在两层判据上，被独立验收者两个决定性反例判负（两者**都不再是安全性
   残差**，见 T2）：
   * **CE-1** 两层未知持有者 `Outer(Gate(f))`：L2 的未知持有者扫描只进一层 `__dict__`，
@@ -235,12 +267,16 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 - **T1（本契约覆盖）**：同一事件循环里的关停——受理后停新分发，有界等待已登记的
   在飞分发（最多 `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0` 秒）；超时**不取消**、只打含
   `event_id` / `handler_id` 的 WARNING 并放手让它跑完；监听**最后**取消。
-  **任意**调用者形状都安全（无自取消、无 `RecursionError`、无「Task was destroyed but
-  it is pending」、无 handler 被 `_closing` 连坐取消、总线恰好关停一次）：handler 内
+  **下表列出的**调用者形状都安全（无自取消、无 `RecursionError`、无「Task was destroyed but
+  it is pending」、无 handler 被 `_closing` 连坐取消、总线恰好关停一次），且在**受理顺序
+  正确**的前提下有界返回（r8/F1 修掉了 `eager_task_factory` + 空闲总线下的挂起，该前提由
+  `tests/unit/test_issue109_110_r8_parity.py` 钉住）：handler 内
   `await close()`、handler 后代带 `context=Context()`、两层未知持有者
   `Outer(Gate(f))`、线程 / executor + `run_coroutine_threadsafe` + `wrap_future`、
   CE-2 形状、`__slots__` 持有者、只有 close 任务的 `TaskGroup`、嵌套 `TaskGroup`——
   见 `tests/unit/test_issue109_110_r7_parity.py`（逐形状断言症状）。
+  **「安全」是症状表口径，不是「任意环境 / 任意 task factory 下都必有界」**（r8 前
+  `eager_task_factory` + 空闲总线正是反例）。
   L1（marker / 在飞分发身份）**或** L2（完成唤醒锥）命中的 `close()` **提前**具名
   拒绝，且在任何关停副作用之前；L2 证明不出来（缺属性 / 懒创建 / 未知持有者 / 预算或
   深度耗尽 / 判据内部非具名异常）同样具名拒绝。**判据只在确有在飞分发任务时生效。**
@@ -299,6 +335,20 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   被提前拒绝的分发根本没建任务；**超时被点名的分发会继续跑完**，因此 handler 及其
   自己 `create_task` 的子任务、`asyncio.shield` 包住的**其它** work 片段，可能在
   `close()` 返回后照常产生副作用。本条只保证**不静默**（r7 起还保证**不取消**）。
+  **真实 Redis 实测（r7 验收者复算）**：`close_elapsed≈0.2s`（有界）；straggler 在
+  WARNING 里点名且**不被取消**。两个必须知道的后果：
+  1. **关停后客户端被复活**：straggler 继续跑 handler，handler 里的
+     `mark_event_processed` 会经 `initialize()`；`initialize()` 见到
+     `self.redis is None`（本进程自建客户端已在关停里关掉并被置 `None`）就**重建**
+     客户端——实测 `tracker_redis_resurrected=True` ⇒ `close()` 之后又出现一个
+     **没有人会再关**的连接（本次关停只覆盖关停那一刻存在的实例）。
+  2. **可能重复投递**：若这次迟到的 `mark_event_processed` **失败**，事件不会落去重
+     记录——实测 `marked_on_redis_after_straggler=False` ⇒ 同一事件会**再次投递**
+     （至少一次投递语义的必然面）。
+  **运维动作**：把「超时被点名」当**需要人工确认**的信号处理（WARNING 含 `event_id` /
+  `handler_id`）——确认该事件是否已在本进程处理完、去重记录是否落地；必要时手工补
+  `mark_event_processed`，并检查 redis 客户端/连接是否比关停前多（复活）。在 straggler
+  真正结束前不要直接复用/销毁进程池。
 - GC 压力下任务不被回收（实测）；常规运行（不关停）分发照常跑完。
 
 ## Redis 事件存储 `list_events`（#110 相邻缺陷，r3）
