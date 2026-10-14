@@ -1,0 +1,13 @@
+{
+  "name": "m109-redis-eventstorage-bytes-id",
+  "issue": "109",
+  "concern": "D3-decode",
+  "file": "plaita/event/redis.py",
+  "rationale": "不归一化 zrangebyscore 的 bytes member ⇒ 生产连接（decode_responses=False）下 list_events 两分支全空",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_explicit_type_branch_bytes_safe",
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+  ],
+  "old": "            eid.decode(\"utf-8\") if isinstance(eid, (bytes, bytearray)) else str(eid)",
+  "new": "            eid"
+}

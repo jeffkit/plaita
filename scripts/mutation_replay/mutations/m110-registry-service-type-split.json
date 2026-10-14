@@ -1,0 +1,12 @@
+{
+  "name": "m110-registry-service-type-split",
+  "issue": "110",
+  "concern": "D3-registry",
+  "file": "plaita/server/registry.py",
+  "rationale": "按 split(':')[0] 截断 ⇒ service_type 含 ':' 时 get_service_types 返回截断值",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test110RegistryServiceTypeParse::test_colon_service_type_not_truncated"
+  ],
+  "old": "                service_type = rest.rsplit(\":\", 1)[0] if \":\" in rest else rest",
+  "new": "                service_type = rest.split(\":\")[0]  # mutation: 截断"
+}

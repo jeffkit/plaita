@@ -1,0 +1,14 @@
+{
+  "name": "m109-redis-nested-selfclose-guard-off",
+  "issue": "109",
+  "concern": "F4",
+  "file": "plaita/event/redis.py",
+  "rationale": "守卫退回 r2 的 current-in-_pending_tasks ⇒ 嵌套/盾牌形状再触发 task-wait cycle（RecursionError）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test109NestedSelfCloseGuard::test_nested_awaited_task_close_is_named_refusal",
+    "tests/unit/test_issue109_110_r3_parity.py::Test109NestedSelfCloseGuard::test_two_level_nesting_close_is_named_refusal",
+    "tests/unit/test_issue109_110_r3_parity.py::Test109NestedSelfCloseGuard::test_shield_close_is_named_refusal"
+  ],
+  "old": "        if (current is not None and current in self._pending_tasks) or _IN_DISPATCH_BUS.get() is self:",
+  "new": "        if current is not None and current in self._pending_tasks:"
+}

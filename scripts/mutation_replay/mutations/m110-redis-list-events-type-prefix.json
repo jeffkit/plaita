@@ -1,0 +1,13 @@
+{
+  "name": "m110-redis-list-events-type-prefix",
+  "issue": "110",
+  "concern": "D3-split",
+  "file": "plaita/event/redis.py",
+  "rationale": "全量分支退回 split(':')[-1] ⇒ 含 ':' 的 event_type 被截断、该类型事件静默丢失",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_all_types_branch_keeps_colon_event_type",
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+  ],
+  "old": "                if type_key_str.startswith(type_prefix):\n                    event_type = type_key_str[len(type_prefix):]\n                else:\n                    event_type = type_key_str",
+  "new": "                event_type = type_key_str.split(':')[-1]"
+}

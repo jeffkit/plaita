@@ -1,0 +1,13 @@
+{
+  "name": "m109-event-filter-close-capability",
+  "issue": "109",
+  "concern": "D2",
+  "file": "plaita/server/event_filter.py",
+  "rationale": "不按能力探测 ⇒ memory/sqlalchemy 总线无 close() 时每次关停打假 WARNING（r2 回归）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test109EventFilterShutdownCapability::test_memory_bus_shutdown_logs_no_false_warning",
+    "tests/unit/test_issue109_110_r3_parity.py::Test109EventFilterShutdownCapability::test_main_async_memory_end_to_end_no_false_warning"
+  ],
+  "old": "    if close is None:",
+  "new": "    if False:  # mutation: 无能力探测"
+}
