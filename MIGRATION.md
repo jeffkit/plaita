@@ -154,6 +154,67 @@ r5 补的四条（`#88` 独立验证 FAIL 的规则级反例 + `#158` 交回的�
   `__context__` 的消费者都能读到。解析器现在在异常离开前把 `__context__` 置 `None`
   （`__cause__` 替身链与消息原样保留）。
 
+r6 改的是**结构**，不是再补两个特例（`#88` 独立验证第 3 次同类复发：r3 只锚 authority、
+r4 的兜底按 userinfo 有无分档、r5 拿 `rfind("://")` 当锚点且只看第一个候选冒号）：
+
+- **枚举全部跨度（r6）**：`_credential_spans` 一次枚举**每一个**凭据候选跨度——
+  冒号候选（**非端口**冒号 + 配对 `@`）、没有 `@` 的凭据 token、`@` 前没有候选冒号的
+  fail-closed token、no-scheme 粗档、authority 认不出冒号时的 fail-closed。`_mask_url`
+  把它们的口令段**全部**掩掉，不再存在「the credential span」。r5 的两个规则级反例因此
+  在结构上没有立足点：
+
+  | 反例 | r5（泄露） | r6 |
+  |---|---|---|
+  | 口令含 `://`（R1） | `redis://user:pa55word://***@host` | `redis://user:***@host` |
+  | 有 userinfo 时的第二条跨度（R2） | 消息字段原样带 `'Acct:Secret1@x'` | `'Acct:***@x'` |
+
+  五条 `@` 跨度/三条非 `@` 跨度的**候选边界**（也是本轮的公开契约）：
+
+  * 候选冒号 = depth 0（不在 IPv6 `[...]` 里）+ 非端口冒号（`_is_port_colon`）+
+    不是 scheme 冒号。scheme 冒号取「**第一个** `://` 的冒号」，或没有 `://` 时
+    「串首 `scheme:` 且后面紧跟 `/`」的那个——**不再** `rfind("://")`（R1 的根因）；
+  * 配对 `@`：authority 里取「首个 `/` 之前最后一个 `@`」（R2 的边界），authority 之外
+    取「该冒号之后最后一个 `@`」；段内没有 `@` 或那个 `@` 让口令为空时回退到最后一个
+    `@`（口令含 `/` 的畸形态，只多掩不少掩）；
+  * **端口判据分区域**：authority 里数字段只在 `/` 或串尾结束才算端口（
+    `redis://user:9?0b@host`、`redis://user:9#Z@host` 的 `?`/`#` 是口令字符）；
+    authority 之外维持 r4 已验证的 `/?#@`；
+  * **边界**（本轮已知的、与 HEAD 同形的盲区，不在候选跨度内，故不被本层覆盖）：
+    `?db=<没有冒号的普通值>`、`?<没有冒号的查询名>=1`、`?u=X:911/bzx`（数字打头 + `/`
+    与 `host:port/db` 局部同形）、`?db=S3cr3t/1:2` 尾部的 `:digits`。
+- **内部一致性不变量（r6，新增）**：`_mask_url` 与 `_passwords` **只**经同一个
+  `_credential_spans`（`_redaction_forms` 是它的 needle 版），所以
+  **`_passwords(s) != ()` ⟹ `_mask_url(s)` 不含其中任何形态、且 `_mask_url(s) != s`**；
+  反之 **`_mask_url(s) != s` ⟹ `_passwords(s) != ()`**（没识别出口令就不许改串）。
+  r5 的 R1（`_passwords` 取到 `pa55word` 而 `_mask_url` 掩不住）与 R2
+  （`_mask_url` 掩了、`_passwords` 取不到）都是这条不变量的违反。它由
+  `tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_consistency_invariant_on_fuzz_corpus`
+  钉住。
+- **生成式性质测试取代形态表的角色（r6）**：形态表是「枚举我以为的危险形状」，而
+  r3/r4/r5 三次漏掉的都是表里**没有**的形状。现在
+  `TestMaskerGenerativeProperty::test_generated_secret_in_every_candidate_position_never_leaks`
+  把随机口令（含 `@ : / ? # %`、空白、`://`）注入**每一个候选位置**（userinfo /
+  empty-user / slash-in-password / query 值 / path / fragment / 无 `@` / 多跨度 /
+  用户名==口令 / 单斜杠），对**每个**形状断言口令原文与**所有 ≥3 字符前缀/后缀**都不在
+  五个渲染面（`_mask_url` / `str` / `repr` / `traceback` / 真 `logger.error(…, exc_info=True)`）
+  上。**3000 个形状，实测 0.75s**（`pytest -k TestMaskerGenerativeProperty`）；
+  形态表（`LITERAL_GROUNDED`）保留为回归清单。
+- **`_secret_forms` 补三版书写形态（r6）**：`urlsplit` 解析前会剥掉 URL 里的
+  `\t`/`\n`/`\r`、`parts.port` 的报错文案是 `%r`（非 ASCII 变转义写法），所以除
+  原文/percent-decoded/percent-encoded 之外再补「剥空白」与「`unicode_escape`」两版；
+  并按 `: @ ? # & =` 切开取**头截与尾截**（口令本身含分隔符时，消息字段里出现的是
+  切开后的那一截）。只多洗不少洗。
+- **`_quoted_forms` 的代理字符兜底更正（r6）**：`surrogateescape` 能编回的
+  （`U+DC80`-`U+DCFF`）现在按**原始字节**渲染，`_quoted_forms('\udcff')` = `%FF`
+  （on-the-wire 形态）；只有编不回的孤立代理（`U+D800` 之类）才退回 `surrogatepass`
+  的 WTF-8 字节（`%ED%A0%80`）。r5 的注释把 WTF-8 说成 on-the-wire，是错的（无泄露，
+  但注释不真）。
+- **`#158` 的既存 sink（本轮**不**修，只登记）**：`plaita/server/services/__main__.py:55`
+  的 `logger.info("连接 Redis: %s", redis_url)` 在 INFO 级打印**裸 URL**（含口令）——
+  它在正常的、**合法**配置路径上就会被调用，不属于 `_mask_url` 能覆盖的「拒绝文案」面。
+  该 sink 归 `#158`，在本 diff 之外；本单只保证 `plaita/server/factory.py` 渲染的文案
+  与 `__cause__`/`__context__` 链不泄。
+
 **迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态；
 仅写用户名不写口令的 URL 也会显示成 `***@host`。
 

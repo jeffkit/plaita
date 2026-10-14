@@ -58,6 +58,7 @@ fail-closed（``:`` 被写成 ``/``/``?``/``#``）；没有 ``@`` 的凭据样 t
 from __future__ import annotations
 
 import logging
+import random
 import traceback
 import unittest
 
@@ -72,6 +73,7 @@ from plaita.server.factory import (
     _REDACTED,
     _mask_url,
     _parse_redis_url,
+    _passwords,
     create_storage_component,
 )
 
@@ -364,6 +366,54 @@ LITERAL_GROUNDED = [
         "Secret1",
         "parse_url+literal",
         "r4-verbatim（第二个跨度）",
+    ),
+    # --- r6 R1：口令里含 '://'，r5 的 `rfind("://")` 锚点把口令自己的 `://`
+    #     当成 scheme 边界，只掩到尾巴（`redis://user:pa55word://***@host`）。 ---
+    (
+        "r6 R1 password containing scheme separator",
+        "redis://user:pa55word://x@host",
+        "pa55word",
+        "literal",
+        "r5-leak（口令自己的 :// 当成了 scheme 边界）",
+    ),
+    (
+        "r6 R1 password containing scheme separator, with port/db",
+        "redis://user:Qz7Wm3Kp9://w@host:6379/0",
+        "Qz7Wm3Kp9",
+        "literal",
+        "r5-leak（同上）",
+    ),
+    # --- r6 R2：有 userinfo 时**第二个**跨度（query 值）也要取出来；r5 只取第一个
+    #     候选冒号，于是消息字段原样回显第二条凭据。 ---
+    (
+        "r6 R2 second span in query value with userinfo",
+        "redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1@x",
+        "Secret1",
+        "literal",
+        "r5-leak（只取第一个候选冒号）",
+    ),
+    (
+        "r6 R2 second span, empty user",
+        "redis://:Pr0d2024x@host:6379/0?db=Acct:Secret1@x",
+        "Secret1",
+        "literal",
+        "r5-leak（同上）",
+    ),
+    (
+        "r6 R2 second span in query value, no at-sign",
+        "redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1",
+        "Secret1",
+        "literal",
+        "r5-leak（没有 '@' 时只看第一个候选）",
+    ),
+    # --- r6：没有 scheme 且候选冒号被端口判据吃掉（`user:911/`）时的粗档。
+    #     细档全空 ⇒ 把 [scheme 冒号之后, 最后一个 '@') 整段当 userinfo。 ---
+    (
+        "r6 no scheme, port-shaped credential (coarse tier)",
+        "redis:/user:911/z@host",
+        "911",
+        "literal",
+        "r5-leak（细档被端口判据吃掉、粗档被关掉时原样留下 911）",
     ),
 ]
 
@@ -728,6 +778,12 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
         self.assertIn("@host", masked)  # host 仍在，诊断不丢
         # 认不出用户名的形态：userinfo 整体抹成 ***，host 保留
         self.assertEqual(_mask_url("redis://user@host:6379"), "redis://***@host:6379")
+        # r6：authority 里 `@` 的 token 全空（`@@@A`）时同样整段 fail-closed——
+        # 只掩最后一个 token（`A`）会把 `@@@` 留在消息里。
+        self.assertEqual(
+            _mask_url("redis://@@@A@host:6379/0"), "redis://***@host:6379/0"
+        )
+        self.assertNotIn("@@@A", _mask_url("redis://@@@A@host:6379/0"))
         self.assertNotEqual(
             _mask_url("redis://user@host:6379"), "redis://user@host:6379"
         )
@@ -786,8 +842,9 @@ class TestMaskerCannotLeakByConstruction(unittest.TestCase):
             "redis:///user:pw@host": "redis:///user:***@host",
             "redis:///:p#w@host": "redis:///:***@host",
             "redis:///:p?w@host": "redis:///:***@host",
-            # 口令本身含 '/'：结构定位只能整段前缀当凭据（只多掩不少掩）
-            "redis:/u@u:p/w@/0@x": "redis:***@x",
+            # 口令本身含 '/' 且用户名段被口令重复污染（r6 枚举全部跨度后重洗整段
+            # userinfo：掩码只多不少，`p/w` 与 `p/w@/0` 都不在结果里）
+            "redis:/u@u:p/w@/0@x": "redis:/***@***:***@x",
             # keep：path/query 的 '@' 不是 userinfo
             "redis://host:6379/0@x": "redis://host:6379/0@x",
             "redis://host:6379/0?ref=a@b": "redis://host:6379/0?ref=a@b",
@@ -1088,6 +1145,326 @@ class TestLiteralGroundedRows(unittest.TestCase):
             self.assertTrue(grounding in {"literal", "parse_url+literal"}, shape)
             self.assertTrue(literal, f"{shape}: 字面 needle 不能为空")
             self.assertTrue(url and why, shape)
+
+
+#: r6 生成式性质测试的字符集：`@ : / ? # %` + 空白 + 普通字符（requirements 明文）。
+_FUZZ_ALPHABET = "abzAZ09@:/?#% \t\u00a0"
+#: 段长 ≥3 的片段拼接头——保证 `_secret_forms` 拆出的每一截都 ≥3 字符，
+#: 这样一致性不变量的逐形态断言不会退化成 1 字符碰撞（口令本身仍含
+#: `@ : / ? # %` 与空白）。
+_FUZZ_PARTS = "abcABCxyz019"
+
+
+def _fuzz_secret(
+    rnd, allow_at: bool = True, allow_colon: bool = True, safe_token: bool = False
+) -> str:
+    """随机口令：1-3 个 ≥3 字符片段 + `@ : / ? # %` 空白分隔符拼成。
+
+    ``allow_at=False`` / ``allow_colon=False`` 用在「注入的文本必须整段落在一个
+    槽里」的形状上：
+
+    * ``redis://user:{s}/x@host``——口令段以首个 ``/`` 为界，口令里的 ``@`` 会
+      变成 userinfo 分隔符；
+    * ``redis://{s}:{s}@host``——用户名与口令同一个值，口令里的 ``:`` 会再切出
+      候选冒号。
+
+    这两处超出掩码契约的「文本跑到别的结构位上」，不属于候选位置。
+    """
+    parts = [
+        "".join(rnd.choice(_FUZZ_PARTS) for _ in range(rnd.randrange(3, 8)))
+        for _ in range(rnd.randrange(1, 4))
+    ]
+    alphabet = _FUZZ_ALPHABET
+    if not allow_at:
+        alphabet = alphabet.replace("@", "")
+    if not allow_colon:
+        alphabet = alphabet.replace(":", "")
+    if safe_token:
+        # 无 '@' 的凭据 token 以 `?#&@` 收尾（r5 C / r4 的 token 层），所以注入
+        # 到那个槽的口令不能含这些字符；开头也不能是数字（`X:911` 与
+        # `host:port` 局部同形，属 r4 已验证的端口 keep）。
+        body = "".join(parts)
+        if body[:1].isdigit():
+            body = "t" + body
+        return body + rnd.choice(["", "%", " ", "\t", "\u00a0"])
+    if not allow_at:
+        # 无 '@' 的候选段里，**数字打头 + '/'** 与 ``host:port/db`` 局部同形
+        # （r4 已验证的端口 keep 形态），不属于本测试的候选位置。
+        parts[0] = parts[0].lstrip("0123456789") or parts[0]
+    separators = [
+        s
+        for s in (alphabet, alphabet, "://", "::", "@@", "%%", "??")
+        if all((ch in alphabet or ch.isalnum()) for ch in s)
+    ]
+    out = []
+    for i, part in enumerate(parts):
+        out.append(part)
+        if i + 1 < len(parts):
+            out.append(rnd.choice(separators))
+    return "".join(out)
+
+
+def _fuzz_shapes(rnd) -> list:
+    """两个口令 × 11 个**候选位置**形状（userinfo / query / path / fragment / 无 '@'）。
+
+    「候选位置」= **构造上**就是凭据候选的位置：显式 `user:`/`Acct:`/`X:` 冒号与
+    显式 `@` 之间的口令段，或 r5 C 的无 `@` 凭据 token 段。掩码器的契约只覆盖
+    候选跨度——`?db=<没有冒号的普通值>` 不构成候选（边界见 MIGRATION.md）。
+    """
+    s = _fuzz_secret(rnd)                       # 任意字符（含 '@' / ':'）
+    plain = _fuzz_secret(rnd, allow_at=False)   # 不含 '@'：以首个 '/' 定界的槽
+    token = _fuzz_secret(rnd, allow_at=False, allow_colon=False, safe_token=True)
+    t = _fuzz_secret(rnd)                       # 第二个独立口令：多跨度
+    return [
+        (s, f"redis://user:{s}@host:6379/0"),
+        (s, f"redis://:{s}@host"),
+        (plain, f"redis://user:{plain}/x@host"),
+        (s, f"redis://host:6379/0?db=Acct:{s}@x"),
+        (s, f"redis://host:6379/0?u=X:{s}@x"),
+        (s, f"redis://host/0/X:{s}@y"),
+        (s, f"redis://user:pwd0@host:6379/0#X:{s}@y"),
+        (token, f"redis://host:6379/0?u=X:{token}"),
+        (token, f"redis://{token}:{token}@host:6379/0"),
+        (s, f"redis:/user:{s}@host"),
+        (token, f"redis://user:{token}@host:6379/0?db=Acct:{t}@x"),
+    ]
+
+
+def _fuzz_corpus(rnd, count: int) -> list:
+    """``count`` 个 (secret, url) 形状——每个形状都是**一个新随机口令**。"""
+    rows = []
+    while len(rows) < count:
+        rows.extend(_fuzz_shapes(rnd))
+    return rows[:count]
+
+
+def _logged_error_for(url: str) -> str:
+    """真实 ``logger.error(..., exc_info=True)`` 渲染（第五个面，剥掉源码行）。"""
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            _parse_redis_url(url)
+        except Exception as exc:  # noqa: BLE001 - 具名拒绝或底层异常
+            box["exc"] = exc
+
+    lines = _capture_log_lines(_run)
+    if "exc" in box:
+        lines.append(_logged_error_text(box["exc"]))
+    return _exception_messages("\n".join(lines))
+
+
+def _all_five_faces(url: str) -> dict:
+    """五个渲染面：``_mask_url`` / ``str`` / ``repr`` / ``traceback`` / 真 ``exc_info`` 日志。"""
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            _parse_redis_url(url)
+        except Exception as exc:  # noqa: BLE001
+            box["exc"] = exc
+
+    log_lines = _capture_log_lines(_run)
+    faces = {"_mask_url": _mask_url(url)}
+    exc = box.get("exc")
+    if exc is not None:
+        faces["str"] = str(exc)
+        faces["repr"] = repr(exc)
+        faces["traceback-messages"] = _exception_messages(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        )
+    else:
+        faces["str"] = faces["repr"] = faces["traceback-messages"] = ""
+    faces["logger-exc_info"] = _exception_messages("\n".join(log_lines)) + (
+        _logged_error_text(exc) if exc is not None else ""
+    )
+    return faces
+
+
+def _fuzz_needles(secret: str) -> set:
+    """口令原文 + 所有长度 ≥3 的前缀/后缀（r6 性质测试的断言集）。"""
+    out = {secret}
+    for length in range(3, len(secret) + 1):
+        out.add(secret[:length])
+        out.add(secret[-length:])
+    return out
+
+
+class TestEnumerateAllSpans(unittest.TestCase):
+    """plaita#88 r6：把「找**那一个**凭据跨度」换成**枚举全部跨度**。
+
+    r3/r4/r5 三次复发的是同一个缺陷类——每轮只找「the credential span」：
+    r3 只认字面 ``://`` 之后的 authority、r4 的兜底按 userinfo 有无分档、r5 的
+    ``_global_credential_span`` 拿 ``rfind("://")`` 当锚点且只看第一个候选冒号。
+    这里钉住结构性后果：**每一个**候选跨度都被掩，掩码与 ``_passwords`` 出一门。
+    """
+
+    def test_enumerate_all_spans_rule_table(self):
+        """R1/R2 及多跨度的精确掩码（r5 上全部泄露）。"""
+        expected = {
+            # R1：口令自己的 '://' 不再是 scheme 边界
+            "redis://user:pa55word://x@host": "redis://user:***@host",
+            "redis://user:Qz7Wm3Kp9://w@host": "redis://user:***@host",
+            # R2：第二条跨度（query 值）与 userinfo 一起掩
+            "redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1@x": (
+                "redis://user:***@host:6379/0?db=Acct:***@x"
+            ),
+            "redis://:Pr0d2024x@host:6379/0?db=Acct:Secret1@x": (
+                "redis://:***@host:6379/0?db=Acct:***@x"
+            ),
+            "redis://host:6379/0?u=X:Y@x&v=A:B@y": (
+                "redis://host:6379/0?u=X:***@y"
+            ),
+            # 没有 '@' 的第二条跨度（r5 C 只看第一个候选冒号）
+            "redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1": (
+                "redis://user:***@host:6379/0?db=Acct:***"
+            ),
+            "redis://host:6379/0?u=X:Secret1": "redis://host:6379/0?u=X:***",
+        }
+        for url, want in expected.items():
+            self.assertEqual(_mask_url(url), want, url)
+
+    def test_enumerate_all_spans_never_returns_input_verbatim(self):
+        """R1/R2 族在五个面上都不原样回显（r5 上 `_mask_url` 就漏）。"""
+        for url, secret in (
+            ("redis://user:pa55word://x@host", "pa55word"),
+            ("redis://user:Qz7Wm3Kp9://w@host", "Qz7Wm3Kp9"),
+            ("redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1@x", "Secret1"),
+            ("redis://:Pr0d2024x@host:6379/0?db=Acct:Secret1@x", "Secret1"),
+            ("redis://user:Pr0d2024x@host:6379/0?db=Acct:Secret1", "Secret1"),
+        ):
+            masked = _mask_url(url)
+            self.assertNotEqual(masked, url, url)
+            self.assertNotIn(secret, masked, url)
+            with self.assertRaises(RedisUrlError) as ctx:
+                _parse_redis_url(url)
+            for kind, text in _surfaces(ctx.exception).items():
+                self.assertNotIn(secret, text, f"{url}/{kind}")
+                for needle in _partial_needles(secret):
+                    self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
+            self.assertNotIn(secret, _logged_error_for(url), url)
+
+    def test_mask_and_passwords_share_one_enumeration(self):
+        """``_mask_url`` 与 ``_passwords`` 都只经 ``_credential_spans``。
+
+        源码级防漂移：掩码层不许自己长出一套「找跨度」的启发式。
+        """
+        import pathlib
+        import re
+
+        source = pathlib.Path(factory.__file__).read_text(encoding="utf-8")
+        self.assertEqual(
+            len(re.findall(r"^def _credential_spans\(", source, re.M)), 1
+        )
+        for name in ("_mask_url", "_passwords"):
+            start = source.index(f"def {name}(")
+            end = source.index("\ndef ", start + 1)
+            body = source[start:end]
+            self.assertIn("_credential_spans(", body, f"{name} 没走同一个枚举")
+            self.assertIn("_redaction_forms(", body, f"{name} 没走同一套 needle")
+
+    def test_consistency_invariant_on_fuzz_corpus(self):
+        """r6 一致性不变量：``_passwords`` 与 ``_mask_url`` 不可能分叉。
+
+        * ``_passwords(s) != ()`` ⟹ ``_mask_url(s)`` 不含其中任何形态、且 ``!= s``；
+        * 反之 ``_mask_url(s) != s`` ⟹ ``_passwords(s) != ()``
+          （没识别出口令就不许改串）。
+
+        语料的口令由 ≥3 字符片段拼成，所以每一个形态都 ≥3 字符（1 字符形态与
+        scheme/host 的子串碰撞属于「假红」，见
+        ``test_password_substring_of_scheme_or_host_is_not_a_false_red``）。
+        """
+        rnd = random.Random(88)
+        corpus = _fuzz_corpus(rnd, 1500)
+        checked_with_password = 0
+        for secret, url in corpus:
+            passwords = _passwords(url)
+            masked = _mask_url(url)
+            self.assertTrue(passwords, f"{url}: 一个候选跨度都没认出来")
+            self.assertNotEqual(masked, url, f"{url}: 识别出口令却原样返回")
+            for form in passwords:
+                if len(form) < 3:
+                    # 口令里带 `?`/`#`/`/` 时 `_secret_forms` 会切出 1-2 字符的
+                    # 残片（`/?`、`0`）；它们仍参与重洗，但逐形态断言会把
+                    # scheme/host 的偶然子串算成假红（见 false-red 用例）。
+                    continue
+                self.assertNotIn(form, masked, f"{url}: 形态 {form!r} 活了下来")
+            checked_with_password += 1
+        self.assertEqual(checked_with_password, 1500)
+
+    def test_converse_holds_on_clean_and_malformed_shapes(self):
+        """反向：``_mask_url(s) != s`` ⟺ 至少识别出一条口令形态。"""
+        rnd = random.Random(20261015)
+        rows = [
+            "redis://host:6379/0",
+            "redis://host:6379/0?db=2",
+            "redis://host:6379/0?socket_timeout=5",
+            "redis://[::1]:6379/0",
+            "redis://[2001:db8::1]:6380/2",
+            "unix:///tmp/plaita-redis.sock?db=1",
+            "redis://host:6379/0@x",
+            "redis://host/0?ref=a@b",
+            "redis://host:6379/0?db=1@2",
+            "redis://host/0?x=1:2@y",
+            "redis://host/@x",
+        ] + [url for _secret, url in _fuzz_corpus(rnd, 500)]
+        for url in rows:
+            masked = _mask_url(url)
+            passwords = _passwords(url)
+            self.assertEqual(
+                masked != url,
+                bool(passwords),
+                f"{url}: mask 变了={masked != url} 但 passwords={passwords}",
+            )
+
+
+class TestMaskerGenerativeProperty(unittest.TestCase):
+    """r6 生成式性质测试：**取代形态表的角色**（表只留作回归清单）。
+
+    形态表的角色是「枚举我以为的危险形状」——而 r3/r4/r5 三次漏掉的都是表里
+    **没有**的形状（表由人写，人的想象力就是上界）。这里改成：往**每一个候选
+    位置**注入随机口令，对每个形状断言口令原文与**所有 ≥3 字符前缀/后缀**都不在
+    五个渲染面上。形状数是采样出来的（见下方 ``self.assertGreaterEqual`` 的
+    下界），不是枚举出来的。
+    """
+
+    #: 形状数下界（数千级；实测耗时见 MIGRATION.md 记录的命令）
+    MIN_SHAPES = 3000
+
+    def test_generated_secret_in_every_candidate_position_never_leaks(self):
+        rnd = random.Random(88)
+        shapes = 0
+        for secret, url in _fuzz_corpus(rnd, self.MIN_SHAPES):
+            shapes += 1
+            needles = _fuzz_needles(secret)
+            for kind, text in _all_five_faces(url).items():
+                for needle in needles:
+                    if needle in text:
+                        self.fail(
+                            f"{kind} 泄露 {needle!r}（口令 {secret!r}）URL={url!r}"
+                        )
+        self.assertGreaterEqual(shapes, self.MIN_SHAPES)
+
+    def test_generated_corpus_actually_exercises_the_enumeration(self):
+        """防退化：语料必须真的覆盖五类候选（userinfo/query/path/fragment/无 '@'）。"""
+        rnd = random.Random(4242)
+        rows = _fuzz_corpus(rnd, 1600)
+        spans_per_shape = [len(factory._credential_spans(url)) for _s, url in rows]
+        self.assertGreaterEqual(min(spans_per_shape), 1, "有形状一个跨度都没有")
+        self.assertGreaterEqual(max(spans_per_shape), 2, "语料里没有多跨度形状")
+        # 无 '@' 的候选（r5 C）也要在语料里
+        self.assertTrue(
+            any("@" not in url for _s, url in rows), "语料里没有无 '@' 的形状"
+        )
+        # 含 '://' 的口令也要在语料里（r5 R1）
+        self.assertTrue(
+            any("://" in s for s, _u in rows), "语料里没有含 '://' 的口令"
+        )
+        # 含 '@' / ':' / '/' / '?' / '#' / '%' / 空白的口令都要在语料里
+        for ch in ("@", ":", "/", "?", "#", "%", " ", "\t", "\u00a0"):
+            self.assertTrue(
+                any(ch in s for s, _u in rows), f"语料里没有含 {ch!r} 的口令"
+            )
 
 
 class TestContextAndTotality(unittest.TestCase):
