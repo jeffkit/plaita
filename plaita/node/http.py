@@ -13,6 +13,9 @@ from pydantic import ConfigDict, Field, model_validator
 
 from plaita.node.basic import Node
 from plaita.core.errors import NodeException
+# 策略异常消息的掩码渲染（#158+#159 r2）。url_redaction 只依赖 stdlib 的
+# server.factory，不触发 server extra，也不与 node 层成环。
+from plaita.server.url_redaction import _mask_url_for_log, _mask_webhook_url_for_log
 from plaita.core.http_session import (
     _BlockAllCookies,
     _new_oneshot_session,
@@ -205,6 +208,30 @@ class ResponseTooLargeError(Exception):
     """响应体超过 ``maxResponseBytes`` 上限（防内网端点拖回 GB 级响应撑爆 worker）。"""
 
 
+def _mask_policy_url(url: object) -> str:
+    """策略异常消息里引用请求 URL 的**唯一**渲染路径（``#158``+``#159`` r2）。
+
+    为什么必须在**构造消息时**就掩码：``URLPolicyError`` 不会停在原地——它被
+    ``HTTP.handle_http_node_err`` 用 ``str(err)`` 包成 ``NodeException``，
+    ``core.runner._handle_node_error`` 再折成 ``NodeExecutionError``；这三层
+    异常对象随后被 ``logger.warning(…, e)`` / ``exc_info=True`` /
+    ``traceback.format_exception`` 打印（``core/runner.py``、``server/flow_worker.py``）。
+    在日志调用点掩码太晚——明文已经进了异常对象，且「logger 实参里有没有 URL 名字」
+    这条判据对「异常对象带明文」结构性失明（r2 独立定验的 finding）。
+
+    两类凭据都要抹：HTTP 节点的策略 URL 既可能带 userinfo 口令（``#88`` 的 Redis
+    型，``_mask_url_for_log`` 负责），也可能带 webhook 型 path/query token
+    （``#159``，``_mask_webhook_url_for_log`` 负责）。两个渲染器**串联**即保守
+    形态：先抹 userinfo，再抹每一个 path segment 与整条 query/fragment；任一渲染
+    器失败都退化为 ``UNPRINTABLE_URL``，绝不退回原文，也绝不上抛（调用点在策略
+    拒绝路径上，掩码不许把它炸成另一种异常）。
+
+    保留的诊断价值：``scheme://host[:port]`` 原样留下（路径形状以 ``***`` 保留），
+    足以定位「哪个端点被策略拒绝」。
+    """
+    return _mask_webhook_url_for_log(_mask_url_for_log(url))
+
+
 # ---------------------------------------------------------------------------
 # 运营者级 HTTP 策略（2026-10 安全评审 P1，plaita#31）
 # ---------------------------------------------------------------------------
@@ -327,37 +354,47 @@ def _validate_host_target(
     allowed_hosts: Optional[List[str]],
     denied_hosts: Optional[List[str]],
     block_private_networks: bool,
-    url_for_msg: str,
+    url: str,
 ) -> None:
     """按节点策略校验 host + 已解析地址，违反即抛 :class:`URLPolicyError`。
 
     :func:`_host_allowed`（请求前校验）与连接期策略（DNS pinning，
     :class:`_PolicyResolver` / ``_PinnedHTTPAdapter``）共用这一份判定——
     校验与建连同源，攻击者权威 DNS 无法先答公网过校验、连接时答内网穿透。
+
+    ``url`` 只用于**诊断后缀**，且一律经 :func:`_mask_policy_url` 渲染后才进
+    异常消息：该消息随后会被 ``str(err)`` 包进 ``NodeException`` /
+    ``NodeExecutionError`` 并由 runner/worker 的 ``logger.*(…, e)`` 打印
+    （``#158``+``#159`` r2 的 finding）。连接期调用点传 ``//host:port`` 这类
+    无凭据的合成端点，渲染为 ``UNPRINTABLE_URL`` 也不丢 host（``hostname``
+    本来就在消息里）。
     """
     if denied_hosts:
         for entry in denied_hosts:
             if _host_entry_matches(entry, hostname, resolved_ips):
                 raise URLPolicyError(
-                    f"URL host {hostname!r} matches denied_hosts entry {entry!r}: {url_for_msg}"
+                    f"URL host {hostname!r} matches denied_hosts entry {entry!r}: "
+                    f"{_mask_policy_url(url)}"
                 )
 
     if allowed_hosts:
         if not any(_host_entry_matches(entry, hostname, resolved_ips) for entry in allowed_hosts):
             raise URLPolicyError(
-                f"URL host {hostname!r} is not in allowed_hosts {list(allowed_hosts)}: {url_for_msg}"
+                f"URL host {hostname!r} is not in allowed_hosts {list(allowed_hosts)}: "
+                f"{_mask_policy_url(url)}"
             )
 
     if block_private_networks:
         if resolved_ips is None:
             raise URLPolicyError(
-                f"Cannot resolve {hostname!r} to verify block_private_networks policy: {url_for_msg}"
+                f"Cannot resolve {hostname!r} to verify block_private_networks policy: "
+                f"{_mask_policy_url(url)}"
             )
         for ip in resolved_ips:
             if _ip_matches_networks(ip, _PRIVATE_NETWORKS):
                 raise URLPolicyError(
                     f"URL host {hostname!r} resolves to private/special address {ip} "
-                    f"(block_private_networks=true): {url_for_msg}"
+                    f"(block_private_networks=true): {_mask_policy_url(url)}"
                 )
 
 
@@ -381,10 +418,15 @@ def _host_allowed(
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise URLPolicyError(f"URL scheme {parsed.scheme!r} is not allowed (http/https only): {url!r}")
+        # scheme 单独回显（jeffkit 要的诊断信息）；URL 本体经掩码渲染——它随后会
+        # 随 NodeException/NodeExecutionError 进 runner/worker 的日志。
+        raise URLPolicyError(
+            f"URL scheme {parsed.scheme!r} is not allowed (http/https only): "
+            f"{_mask_policy_url(url)!r}"
+        )
     hostname = parsed.hostname
     if not hostname:
-        raise URLPolicyError(f"URL has no hostname: {url!r}")
+        raise URLPolicyError(f"URL has no hostname: {_mask_policy_url(url)!r}")
     hostname = hostname.lower().strip("[]")
 
     resolved_ips: Optional[list] = None

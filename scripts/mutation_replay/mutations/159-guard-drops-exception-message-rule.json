@@ -1,0 +1,13 @@
+{
+  "name": "159-guard-drops-exception-message-rule",
+  "concern": "#159-r2-P1",
+  "issue": "159",
+  "file": "tests/unit/_url_sink_support.py",
+  "old": "    return [(lineno, name) for lineno, name, masked in refs if not masked]\n",
+  "new": "    return []\n",
+  "rationale": "把守卫第二腿（raise 消息里未掩码的 URL 名）改成永不报告：URL 又只能靠「logger 实参名」判据，异常对象这条链重新隐身——正是 r2 finding 逃过 r1 守卫的根因。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestGuardSeesUrlBearingExceptionMessages::test_guard_reddens_on_raw_url_in_raise_message",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestGuardSeesUrlBearingExceptionMessages::test_probe_policy_raise_reddens_then_greens"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "159-policy-renderer-bypassed",
+  "concern": "#159-r2-P0",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "    return _mask_webhook_url_for_log(_mask_url_for_log(url))\n",
+  "new": "    return url if isinstance(url, str) else str(url)\n",
+  "rationale": "把构造面渲染器换成恒等函数：AST 守卫看不见（``_mask_policy_url(url)`` 在语法上仍是掩码调用），但明文重新进异常消息、五个面全部泄露——动态测试是这条回归的唯一杀手。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestPolicyUrlRenderer::test_keeps_endpoint_and_masks_path_and_query",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestPolicyExceptionNeverCarriesTheSecret::test_success_path_surfaces[denied-hosts]"
+  ]
+}

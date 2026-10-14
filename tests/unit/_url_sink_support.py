@@ -42,6 +42,7 @@ _MASKER_NAMES = frozenset(
         "_mask_webhook_url",
         "_mask_url_for_log",
         "_mask_webhook_url_for_log",
+        "_mask_policy_url",
         "_safe_render",
         "_scrub",
         "_safe_reason",
@@ -175,6 +176,61 @@ def scan_plaita_for_credential_url_logs() -> List[str]:
     for path in sorted(PLAITA_DIR.rglob("*.py")):
         rel = path.relative_to(REPO_ROOT).as_posix()
         for lineno, name in credential_url_log_sites(
+            path.read_text(encoding="utf-8"), filename=str(path)
+        ):
+            offenders.append(f"{rel}:{lineno}: {name}")
+    return offenders
+
+
+# --------------------------------------------------------------------------- #
+# 守卫第二腿：URL 藏进**异常对象**时，名字判据结构性失明（``#159`` r2）
+# --------------------------------------------------------------------------- #
+# 已知会把异常消息送进日志 sink 的家族（``URLPolicyError`` / ``NodeException`` /
+# ``NodeExecutionError`` / ``NodeTimeoutError`` / ``FlowExecutionException`` /
+# ``RedisUrlError`` / 通用 ``RuntimeError``·``ValueError``·``Exception``）：
+# ``core/runner._handle_node_error`` 把 ``e`` 交给 ``logger.warning(…, e)`` 与
+# ``logger.debug(…, exc_info=True)``；``server/flow_worker`` 再打
+# ``NodeExecutionError``；还有 ``traceback.format_exception``。判据本身比这张
+# 家族表更宽——**任何** ``raise`` 只要消息里插了 URL 名就判红。
+
+
+def _raise_message_sites(node: ast.Raise) -> List[Tuple[int, str]]:
+    """``raise`` 消息里**未经掩码**的 URL 名（``raise URLPolicyError(f"…: {url}")``）。
+
+    与 :func:`credential_url_log_sites` 的差别是判据位置：不是 ``logger.*`` 的
+    实参名，而是**异常消息本身**。``URLPolicyError`` 的明文随后被
+    ``HTTP.handle_http_node_err`` 用 ``str(err)`` 折进 ``NodeException``、再由
+    ``runner._handle_node_error`` 折进 ``NodeExecutionError``，最后由
+    ``logger.warning(…, e)`` 打印——只查 logger 实参名对这条链完全看不见
+    （``#159`` r2 的 finding 正是如此隐身）。家族类之外的类只要消息里插了 URL
+    名同样算数：判据是「URL 进了异常消息」这件事，不是异常叫什么。
+    """
+    if not isinstance(node.exc, ast.Call):
+        return []
+    refs: List[Tuple[int, str, bool]] = []
+    for arg in node.exc.args:
+        _collect_url_refs(arg, False, refs)
+    for kw in node.exc.keywords:
+        _collect_url_refs(kw.value, False, refs)
+    return [(lineno, name) for lineno, name, masked in refs if not masked]
+
+
+def exception_message_url_sites(source: str, filename: str = "<memory>") -> List[Tuple[int, str]]:
+    """返回 ``[(lineno, identifier)]``：``raise`` 消息里未掩码的凭据 URL 引用。"""
+    tree = ast.parse(source, filename=filename)
+    sites: List[Tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise):
+            sites.extend(_raise_message_sites(node))
+    return sites
+
+
+def scan_plaita_for_exception_url_messages() -> List[str]:
+    """全 ``plaita/`` 扫描，返回 ``["relpath:lineno: identifier", ...]``。"""
+    offenders: List[str] = []
+    for path in sorted(PLAITA_DIR.rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for lineno, name in exception_message_url_sites(
             path.read_text(encoding="utf-8"), filename=str(path)
         ):
             offenders.append(f"{rel}:{lineno}: {name}")
