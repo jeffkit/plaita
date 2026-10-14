@@ -139,20 +139,68 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `_process_message` 的；若在首个 await（`is_event_processed` 的 Redis 往返）处被
   取消，`CancelledError`（BaseException）会被显式捕获、打出含 `event_id` /
   `handler_id` 的 WARNING 后再抛出——不允许「既不完成、也不点名」。
-- **`close()` 不得从自己的分发 handler 内调用**（F2/验收者补的形状）：那会把自身
-  纳入 drain 并自取消，最终 `RecursionError`。命中时抛具名 `RuntimeError`（含可
-  执行出口：在 handler 外关停）。
+- **`close()` 不得从自己分发的任务图内部调用**（F2 + r3/F4 验收者补的形状）：
+  直接形状（handler 内 `await bus.close()`）与**嵌套形状**——handler
+  `await asyncio.create_task(nested())` / `gather` / `asyncio.shield(bus.close())` /
+  spawned-not-awaited，只要 `nested` 调用 `close()`——都会让 drain 等待自己的祖先
+  （task-wait cycle）：`asyncio.wait` 超时后 `Task.cancel` 沿 `_fut_waiter` 无界
+  递归 ⇒ 进程级 `RecursionError`，且 `close()` 返回后 `_pending_tasks` 仍非空、
+  任务永久悬置（r2 只挡直接形状；验收者 V2 形状实测复现）。实现：分发任务
+  （`_process_event` / `_process_with_retry`）置
+  `contextvars.ContextVar("plaita_redis_in_dispatch")`；`create_task` /
+  `ensure_future`（含 `asyncio.shield`）复制 context，使**任意层**子任务继承。
+  `close()` 见标记即抛**同一条**具名 `RuntimeError`（含可执行出口：在 handler 外
+  关停），且发生在**任何关停副作用之前**（`_closing` 保持 `False`）。
+  `asyncio.shield(bus.close())` 因此从 r2 的「bypass-but-named（drain 超时→取消
+  在飞分发）」收紧为**具名拒绝**（测
+  `Test109NestedSelfCloseGuard::test_shield_close_is_named_refusal`）：该形状的
+  副作用计数从「1 条超时 WARNING + 1 个 handler 被取消」变为「0 关停副作用 +
+  1 条具名拒绝（经 `_process_event` 的 handler 失败日志）」。
+- `EventFilter` CLI 收尾的 `close()` **按能力**调用（`plaita/server/event_filter.py`
+  的 `_close_event_bus`）：`RedisEventBus` 有 `close()`（取消监听 / drain 在飞分发 /
+  释放连接）；`InMemoryEventBus` / `SqlalchemyEventBus` **没有** `close()`
+  （`EventBus` 基类也未声明）——r2 的无条件 `await event_bus.close()` 对
+  `--event-bus-type=memory`（合法 CLI 选项）每次关停都抛 `AttributeError`，被记成
+  **假** WARNING「事件总线关停失败: 'InMemoryEventBus' object has no attribute
+  'close'」。现只在总线**声明**了 `close` 时调用，memory/sqlalchemy 跳过。
+  **声明**：memory 总线的 `_pending_tasks` 收尾排空**不在**本契约内（其
+  `_track_task` 只持引用，无 drain、无点名）——生产 #109 关注的是 Redis 后端；
+  改造 memory 为 drain+点名是独立工作项，不在 r3 范围。
 - `EventFilter` CLI（`plaita/server/event_filter.py:main_async`）在 `finally` 中
-  `await event_bus.close()`；调用方若直接 `asyncio.run` 后不调用 `close()`，
-  在飞分发仍会被 loop 取消——**契约要求调用方 close**。
+  调用上述收尾；调用方若直接 `asyncio.run` 后不调用 `close()`，在飞分发仍会被
+  loop 取消——**契约要求调用方 close**（Redis 后端）。
 
 覆盖边界（不宣称「任何情况都不丢」）：GC 压力下任务不被回收（实测）；常规运行
 （不关停）分发照常跑完；SIGTERM 无信号处理时进程直接结束（`event_filter.py`
 不注册信号处理器），本条不含信号处理；`asyncio.run` 后未调用 `close()` 的路径
 不在契约内。**副作用口径**：契约是「要么完成、要么被点名」，不是「handler 副作用
-必为 0」——被取消/被拒的分发里，handler 自己 `create_task` 的子任务或用
-`asyncio.shield` 包住的片段可能在 `close()` 返回后照常产生副作用；本条只保证
-**不静默**。
+必为 0」——被取消/被拒的分发里，handler 自己 `create_task` 的子任务、或用
+`asyncio.shield` 包住的**其它** work 片段，可能在 `close()` 返回后照常产生副作用；
+守卫拒绝的嵌套形状里，`nested` 子任务也已执行到 `close()` 调用点（此前可能有副作用）
+才被拒。本条只保证**不静默**。
+
+## Redis 事件存储 `list_events`（#110 相邻缺陷，r3）
+
+验收者补的相邻缺陷，都在**生产可达**路径上（生产调用方
+`plaita/server/event_reconcile.py:EventReconciler.scan_once` 调
+`list_events(start_time=…, end_time=…, limit=…)`，**不带** `event_type` ⇒ 必走全量分支）：
+
+- **event_type 截断**：全量分支此前 `type_key.split(':')[-1]`——`order:created` →
+  `created`，重建的 `{prefix}types:created` 落空，该类型事件**静默丢失**。现按
+  已知前缀 `{prefix}types:` 剥离（fakeredis 实测：修前全量只回 `['plain']`，
+  修前 `list_events('order:created')` 显式分支在解码连接下正常）。
+- **bytes event_id（更严重的一半）**：`initialize()` 用 `aioredis.from_url(url)`
+  未带 `decode_responses`（redis-py 默认 `False`）⇒ `zrangebyscore` 返回 **bytes**
+  member，键被拼成 `{prefix}events:b'<id>'`，`mget` 永远落空。**真实 Redis
+  （redis:7-alpine）实测**：生产配置下显式类型分支与全量分支**都返回 `[]`
+  （`list_events` 整体失效）；注入 `decode_responses=True` 客户端后显式分支恢复、
+  全量分支仍丢含 `:` 的类型。现把 member 显式归一化为 `str`，两种连接配置都正确。
+  经生产调用方实测：修复前 `EventReconciler.scan_once()` 回放 **0** 条，修复后
+  **2** 条（`tests/unit/test_issue109_110_r3_parity.py`）。
+- `plaita/server/registry.py:get_service_types` 属同一 `split(':')` 家族
+  （`parts[2]`）：当前所有 `service_type` 都是无冒号常量（`flow_worker`、
+  `*_service`），`instance_id = f"{hostname}-{uuid4()[:8]}"`，故**生产未暴露**；
+  r3 一并按「已知前缀 + 右侧去掉 instance_id」收口并加测试，消除该家族的最后一位。
 
 ## Redis 订阅查询索引与代价界（#110）
 
@@ -165,11 +213,26 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   实测见 `test_correlation_index_cost_is_bounded_by_matches`）。
 - 同条件的 `list_subscriptions(event_type=…, correlation_id=…)` 与
   `list_subscriptions(correlation_id=…)` 返回同一集合。
-- **`event_type` 必须非空**（F1）：`EventNode.event_type` 与
-  `EventSubscription.event_type` 都 `min_length=1`，`EventNode` 另给具名中文原因
-  （空类型会被 `matches_event` 的 falsy 语义当通配，而 memory/sqlalchemy 的 list
-  过滤是严格 `!=`，三后端会对「空类型订阅」分叉；如需通配请显式写 `"*"`）。
-  构造期即 `ValidationError`，作者/编译器与存储写入口都拒。
+- **`event_type` 必须非空**（F1，r3 对称化）：`EventNode` 给具名中文原因 +
+  `min_length=1`；`EventSubscription.event_type` 现由**同一个具名 validator**
+  （`mode="before"`）承担（拒绝 `""` 与纯空白）——r2 只有 `min_length=1`（pydantic
+  默认英文串），「两端都具名」属过度声明，r3 补齐对称。构造期即 `ValidationError`
+  （含「event_type 不能为空…如需通配请显式写 `"*"`」），作者/编译器入口
+  （`EventNode`）与存储写入口（`store_subscription`）都拒。
+- **`model_construct` 绕过校验的分叉——按实测计数声明**（不宣称 uniform）：
+  `EventSubscription.model_construct(event_type="")` 可绕过 pydantic 直接进后端，
+  三后端对该行的行为**不同**（`Test110ModelConstructDivergenceDeclared` 钉住）：
+  memory `list_subscriptions(event_type=…)` **静默排除**（0 命中、0 日志）；
+  Redis 在 `list_subscriptions(correlation_id=…)` 命中该行时 `get_subscription`
+  反序列化抛 **`EventError`（loud、无名）**，而 `list_subscriptions(event_type=…)`
+  走 type 索引落空、**静默空**；sqlalchemy 构造被 `ValidationError` 拦下后
+  **跳过并具名点名**（0 命中）。正常构造入口已拒空类型，此分叉只在显式
+  `model_construct` 后可达。
+- **sqlalchemy 历史脏行**（F1 前的存量数据）：r2 之前 `event_type` 允许空，库里可能
+  躺着空类型行。`list_subscriptions()` **与** `list_subscriptions(correlation_id=…)`
+  此前会在构造 `EventSubscription` 时抛 `ValidationError` 并**丢弃整条查询**
+  （同一批里的合法订阅一起丢）。现 `except ValidationError` **跳过坏行**并打具名
+  WARNING（`id` / `event_type`），其余订阅照常返回（`Test110SqlalchemyDirtyRowSkipped`）。
 - 三后端对齐**只在生产路径** `EventSubscriptionStorage.find_matching_subscriptions`
   成立（`scripts/selfclose_109_110.py` 的 parity 格：`['hit']`）。原始
   `list_subscriptions` 层有一个**已写明**的差异：给了 `correlation_id` 时 Redis 返回
