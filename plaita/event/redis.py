@@ -1697,8 +1697,13 @@ class RedisEventBus(EventBus):
         except BaseException:
             try:
                 coro.close()
-            except Exception:                    # noqa: BLE001 - 已在失败路径上
-                pass
+            except Exception as exc:             # noqa: BLE001 - 已在失败路径上
+                # 不能静默吞咽（tests/unit/test_no_silent_swallow.py 的 P0-2 门禁）：
+                # coroutine 可能已被 eager factory 启动过，close() 这时会抛
+                # "coroutine is being awaited already"——不影响「spawn 失败要回滚」
+                # 这个主结果，但必须留痕。
+                logger.debug(
+                    "事件总线关停：关闭未托管的 teardown coroutine 失败（忽略）: %s", exc)
             raise
 
     def _on_teardown_done(self, task: "asyncio.Task") -> None:
