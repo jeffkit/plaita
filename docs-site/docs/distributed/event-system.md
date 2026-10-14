@@ -602,10 +602,11 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `_on_teardown_done` / `_record_round_outcome` / `_started_teardown_task` /
   `_reject_spawned_task` / `_accept_spawned_task` / `_spawn_teardown` 与两个新模块级助手），
   故那 5 条变异在 r13 上仍**零重锚**。
-  **r14 复算（同一命令、四个版本 + 七个历史 rev + 新 HEAD `1c08c85`）**：仍是
+  **r14 复算（同一命令、四个版本 + 七个历史 rev + 新 HEAD `5295980`）**：仍是
   `2770 B / 47 L`、sha256 `8b38c2bd044c563d4ea83facd4cab2ae62c9181c0309acf6c6cff2b2e83dbe7a`、
   `identical: True`（实测输出：`5f6e308=2770B/47L | 8eaf3f6=2770B/47L | 789e070=2770B/47L |
-  bbf0d2b=2770B/47L | e1b5356=2770B/47L | c5e6a055=2770B/47L | HEAD=2770B/47L`）——r14 同样
+  bbf0d2b=2770B/47L | e1b5356=2770B/47L | c5e6a055=2770B/47L | 1c08c85=2770B/47L |
+  HEAD=2770B/47L`）——r14 同样
   只改 `request_close` 的 **docstring**（可执行体改动都在 `close()` / `_bind_round` /
   `_watch_round` / `_release_decoy_waiters` / `_await_close_future` / `_is_factory_decoy`
   与 `_ACCEPTED_CLOSE_FUTURES`），故那 5 条变异在 r14 上仍**零重锚**（逐条实测见下 ④）。
