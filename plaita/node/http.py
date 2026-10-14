@@ -276,53 +276,172 @@ _RELATIVE_URL_RE = re.compile(
 #: path segment / query / fragment 的掩码占位（与 url_redaction 同一语义）。
 _MASK_PLACEHOLDER = "***"
 
-#: **凭据键 = 值** 的裸串（``#159`` r4）。r3 的清洗器只认「URL 形状」，于是
-#: ``token=K…``、``"x"*100000 + "?access_token=K…"`` 这类**无 scheme、无
-#: ``url:``/``url=`` 标签**的串整段原样穿过（定验残口）。这里补一条**收窄到
-#: 凭据键**的规则：键名像凭据才掩值；键名不像的一律不碰，否则会把
+#: **凭据键 = 值** 的裸串（``#159`` r4 起，r5 重写为线性扫描）。r3 的清洗器只认
+#: 「URL 形状」，于是 ``token=K…``、``"x"*100000 + "?access_token=K…"`` 这类
+#: **无 scheme、无 ``url:``/``url=`` 标签**的串整段原样穿过（定验残口）。这里补一条
+#: **收窄到凭据键**的规则：键名像凭据才掩值；键名不像的一律不碰，否则会把
 #: ``code=1002`` / ``port=8080`` / ``block_private_networks=true`` 这类诊断文本
 #: 一起吃掉（那是不可接受的可用性代价）。
 #:
-#: 键名用**分段**文法而不是「``[\\w.\\-]+`` + 事后判据」：``\\w+`` 会让
-#: ``failed: password=X`` 里最左匹配落在 ``failed`` 上、把真凭据键 ``password``
-#: 吃进 value，``re.sub`` 随后**跳过整个匹配** ⇒ 凭据隐身（r4 实测）。
-#: 分段文法（每段必须由 ``_ - .`` 收尾）让最左匹配**只能是**凭据键本身，
-#: 且 ``monkey`` / ``sortkey`` 这类「字母串里恰好含 key」不命中。
-_KEY_COMPONENT = r"[A-Za-z0-9]+"
-_KEY_SEP = r"[_\-.]"
-#: 整段命中的凭据词（配合 ``re.I``：``accessToken`` / ``APIKEY`` 同样命中的）。
-_CREDENTIAL_KEY_WORDS = (
-    r"token|secret|password|passwd|pwd|signature|credential|apikey|accesskey|"
-    r"privatekey|clientsecret|session|cookie|bearer|key|sig|auth"
+#: **r5 定验反例（FINDING 1）与修法**：r4 的键文法（``_CREDENTIAL_RUN_RE``）要求键名
+#: **直接**跟 ``\s*[=:]\s*["']?``——引号只允许出现在分隔符**之后**，分词又只认
+#: ``_ - .``。于是两个方向同时漏（6 面 × 2 路径实测全部原文穿过）：
+#:
+#: * **引号在键这一侧**：``{"access_token": "K"}`` / ``{'access_token': 'K'}`` /
+#:   ``failed "password"=K`` / ``"token": K`` ⇒ ``keymatch=None``；
+#: * **驼峰/粘连**：``accessToken`` / ``sessionId`` / ``Authorization`` 没有
+#:   ``_ - .`` 分词点 ⇒ 键名判据落空。
+#:
+#: 现在的判据（**线性扫描**，正则整条移除，见 :func:`_credential_run_spans`）：
+#: 扫每一处 ``=`` / ``:``，向左在**有界窗口**里取出紧贴分隔符的键名（剥掉紧贴的
+#: ASCII 空白与引号/括号——**两侧都认**），键名按「非字母数字边界 + 驼峰转折」切成
+#: 分量，**任一分量**命中 :data:`_CREDENTIAL_STEMS` 即算凭据键（复数只认显式列出的
+#: ``credentials``）。
+#: 分量**相等**而非子串包含：``monkey`` / ``sortkey`` 仍不命中（诊断文本保住），
+#: 而 ``x-api-key``（分量 ``key``）/ ``accessToken``（分量 ``token``）命中。
+#:
+#: 键名窗口 :data:`_MAX_KEY_WINDOW` 是**线性代价的关键**：r4 的
+#: ``_CREDENTIAL_RUN_RE`` 有嵌套量词 ``(?:comp sep)*(?:word)(?:sep comp)*`` 紧接一个
+#: 必须出现的 ``[=:]``，在 ``"token_"*n`` 这类「全是分量边界、就是没有分隔符」的串上
+#: **灾难性回溯**——HEAD 实测 n=8000（48 KB）5418 ms、n=30000（180 KB）72095 ms，
+#: 而 r3 的同类输入是 0.05–0.80 ms（FINDING 2，可达：``handle_http_node_err``
+#: 6 KB→84.9 ms / 12 KB→331.2 ms）。扫描器把回看硬性封顶、值跨度扫过即跳过，
+#: 整体 O(n·常数)，无回溯。
+_MAX_KEY_WINDOW = 64
+#: 带引号值的**搜索窗口上界**：窗口内找不到闭引号就掩到窗口末尾（宁可多掩）。
+#: 有了它，每处分隔符的代价都是常数上界，不会出现「每处都 `find` 到串尾」的二次代价。
+_QUOTED_VALUE_WINDOW = 4096
+#: ASCII 空白——与 :data:`_ABSOLUTE_URL_RE` 同一条边界判据（只有 ASCII 空白结束 token）。
+_ASCII_WS = " \t\r\n\f\v"
+#: 键名分量内的字符；其余字符都是分量边界（``=`` / ``:`` / 空白 / 引号 / ``&`` …）。
+_KEY_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
 )
-_CREDENTIAL_RUN_RE = re.compile(
-    r"(?P<prefix>(?<![A-Za-z0-9_.\-])"
-    r"(?P<key>(?:" + _KEY_COMPONENT + _KEY_SEP + r")*"
-    r"(?:" + _CREDENTIAL_KEY_WORDS + r")"
-    r"(?:" + _KEY_SEP + _KEY_COMPONENT + r")*)"
-    r"\s*[=:]\s*[\"']?)"
-    r"(?P<value>[^ \t\r\n\f\v&\"'<>]+)",
-    re.IGNORECASE,
-)
-#: 与 :data:`_CREDENTIAL_RUN_RE` **同一份词表**的独立键名判据（双保险：万一
-#: 上游正则被改松，掩码函数仍会拒掉不像凭据的键）。词的两侧必须是分量边界，
-#: 所以 ``monkey`` / ``sortkey`` 不命中，``x-api-key`` / ``access_token`` 命中。
-_CREDENTIAL_KEY_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])(?:" + _CREDENTIAL_KEY_WORDS + r")(?![A-Za-z0-9])",
-    re.IGNORECASE,
-)
+#: 键名两侧紧贴的闭/开引号与括号（``"access_token":``、``failed "password"=``、
+#: ``{"token":``）。只用于把键名从引号里剥出来判断，**不参与**输出替换。
+_CLOSING_QUOTES = frozenset("\"')]}")
+_VALUE_STOP = frozenset(" \t\r\n\f\v&\"'<>")
+#: ``Authorization: Bearer <secret>``：认证方案词之后的第二个运行段也是凭据。
+_AUTH_SCHEME_WORDS = frozenset({"bearer", "basic", "digest", "token"})
+#: 分量切分：非字母数字边界 **加上驼峰转折**（``accessToken`` ⇒ access｜Token，
+#: ``APIKey`` ⇒ API｜Key）。r4 只认 ``_ - .``，驼峰整段被当成一个分量 ⇒ 判据落空。
+_KEY_SEGMENT_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
+#: 凭据**词干**（分量级：全小写、无分隔符）。分量**相等**才算命中——所以 ``monkey`` /
+#: ``sortkey`` 里的 ``key`` 不算。粘连形式（``accesstoken`` / ``authtoken`` /
+#: ``secretkey`` …）是**显式**的另一组词干：现实里 HTTP header / JSON 字段确实这么写，
+#: 而「任意前缀 + 词干」这种开放规则会把 ``monkey`` / ``sortkey`` 一起吃进来。
+_CREDENTIAL_STEMS = frozenset({
+    "token", "secret", "password", "passwd", "pwd", "signature", "sig",
+    "credential", "credentials", "apikey", "accesskey", "privatekey",
+    "clientsecret", "session", "cookie", "bearer", "key", "auth",
+    "authorization", "accesstoken", "authtoken", "refreshtoken", "idtoken",
+    "bearertoken", "sessionid", "secretkey", "apisecret", "xapikey",
+})
 
 
 def _is_credential_key(key: str) -> bool:
-    """``access_token`` / ``x-api-key`` / ``client_secret`` 命中；``code`` / ``monkey`` 不命中。"""
-    return _CREDENTIAL_KEY_RE.search(key) is not None
+    """键名（可含引号/括号/分隔符）是否凭据键——**分量级**判据。
+
+    ``access_token`` / ``x-api-key`` / ``"client_secret"`` / ``accessToken`` /
+    ``Authorization`` / ``credentials`` 命中；``code`` / ``port`` / ``v`` /
+    ``monkey`` / ``sortkey`` / ``block_private_networks`` / ``keys`` 不命中
+    （诊断文本的主体）。复数只认 :data:`_CREDENTIAL_STEMS` 里**显式列出**的
+    ``credentials``——开放复数规则会把 ``keys=…`` 也吃掉。
+    """
+    for segment in _KEY_SEGMENT_RE.findall(key):
+        if segment.lower() in _CREDENTIAL_STEMS:
+            return True
+    return False
 
 
-def _mask_credential_run(match) -> str:
+def _key_before_separator(text: str, sep_index: int) -> str:
+    """分隔符左侧紧贴的键名（剥掉紧贴的 ASCII 空白与闭引号；越窗即截断）。
+
+    回看距离被 :data:`_MAX_KEY_WINDOW` 封顶——这是「线性」这条性质的落点：
+    ``"=" * n`` 这类分隔符密集的串上，每处 ``=`` 也只做常数次回看。
+    """
+    low = max(0, sep_index - _MAX_KEY_WINDOW)
+    j = sep_index
+    while j > low and text[j - 1] in _ASCII_WS:
+        j -= 1
+    if j > low and text[j - 1] in _CLOSING_QUOTES:
+        j -= 1
+    end = j
+    while j > low and text[j - 1] in _KEY_CHARS:
+        j -= 1
+    return text[j:end]
+
+
+def _credential_run_spans(text: str) -> list:
+    """扫出全部「凭据键 = 值」的**值跨度** ``(v0, v1)``（升序、不重叠）。
+
+    单趟左→右：每处 ``=`` / ``:`` 的回看代价被 :data:`_MAX_KEY_WINDOW` 封顶；值跨度
+    一旦命中就跳到 ``v1`` 继续扫（不回头）⇒ 整体 O(n·常数)、无回溯。已经是占位
+    ``***`` 的值不再产出跨度（掩码的不动点，二次清洗必须逐字不变）。
+    """
+    n = len(text)
+    spans = []
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch != "=" and ch != ":":
+            i += 1
+            continue
+        sep = i
+        i += 1
+        key = _key_before_separator(text, sep)
+        if not key or not _is_credential_key(key):
+            continue
+        k = i
+        while k < n and text[k] in _ASCII_WS:
+            k += 1
+        if k >= n:
+            continue
+        quote = text[k] if text[k] in "\"'" else ""
+        if quote:
+            v0 = k + 1
+            if v0 >= n:
+                continue
+            close = text.find(quote, v0, min(n, v0 + _QUOTED_VALUE_WINDOW))
+            v1 = close if close != -1 else min(n, v0 + _QUOTED_VALUE_WINDOW)
+        else:
+            v0 = k
+            v1 = v0
+            while v1 < n and text[v1] not in _VALUE_STOP:
+                v1 += 1
+            if (
+                v1 < n
+                and text[v1] in _ASCII_WS
+                and text[v0:v1].lower() in _AUTH_SCHEME_WORDS
+            ):
+                # ``Authorization: Bearer <secret>``：方案词后的第二个运行段一起掩
+                w = v1
+                while w < n and text[w] in _ASCII_WS:
+                    w += 1
+                if w < n and text[w] not in _VALUE_STOP:
+                    while w < n and text[w] not in _VALUE_STOP:
+                        w += 1
+                    v1 = w
+        if v1 <= v0 or text[v0:v1] == _MASK_PLACEHOLDER:
+            continue
+        spans.append((v0, v1))
+        i = v1  # v1 > v0 ≥ i-1 ⇒ 不回头
+    return spans
+
+
+def _mask_credential_runs(text: str) -> str:
     """凭据键的**值**换占位，键名与引号原样（看得出抹掉的是哪个键）。"""
-    if not _is_credential_key(match.group("key")):
-        return match.group(0)
-    return match.group("prefix") + _MASK_PLACEHOLDER
+    spans = _credential_run_spans(text)
+    if not spans:
+        return text
+    out = []
+    last = 0
+    for v0, v1 in spans:
+        out.append(text[last:v0])
+        out.append(_MASK_PLACEHOLDER)
+        last = v1
+    out.append(text[last:])
+    return "".join(out)
 
 
 def _mask_relative_url_ref(ref: str) -> str:
@@ -436,20 +555,33 @@ def _plaintext_pieces(payload: str) -> list:
     return [piece for piece in pieces if piece not in _MASK_PLACEHOLDER]
 
 
-def _token_is_canonical(token: str) -> bool:
-    """token 是否已是清洗器的**不动点形态**（幂等要求，r4）。
+def _authority_of(token: str) -> str:
+    """token 里 ``scheme://`` 之后的 authority（到 ``/`` / ``?`` / ``#`` 为止）。"""
+    _, sep, rest = token.partition("://")
+    if not sep:
+        return ""
+    return rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
 
-    只有两种形态允许「渲染成自身」：
+
+def _token_is_canonical(token: str) -> bool:
+    """token 是否已是清洗器的**不动点形态**（幂等要求，r4 起；r5 增第三类）。
+
+    三类形态允许「渲染成自身」：
 
     * ``scheme://authority`` + **已掩码** payload（``/***/***?***``）——这是
       :func:`_mask_policy_url` 的正常输出，二次清洗必须原样留下；
     * ``scheme://[…]:port`` **闭合方括号**端点形态、无 payload——这是
       :func:`_mask_bracketed_absolute_url` 的正常输出（``http://[web,hook]:8443``），
-      同样必须是不动点，否则端点兜底的价值在一次清洗后就没了。
+      同样必须是不动点，否则端点兜底的价值在一次清洗后就没了；
+    * **无 payload 的裸端点** ``scheme://host[:port]``（``http://example.com``、
+      ``http://host:8080``）——``#159`` r5 定验 FINDING 3：r4 把这一类也判成
+      「渲染成自身却什么也没掩」⇒ 退化为常量，于是**无凭据**的 URL 连端点都丢了
+      （``Failed to connect to http://example.com`` → ``Failed to connect to
+      <unprintable-url>``）。渲染器的职责是掩**凭据**，不是擦掉 URL；没有 payload
+      就意味着没有 path/query 可泄，端点本身保留即是正确渲染。
 
-    反之 ``http://[web``（``[`` **未闭合**、无 payload）与 ``http://host``（无
-    payload）都不是不动点形态——它们正是「渲染成自身却什么也没掩」的形态，
-    :func:`_render_is_usable` 据此判不可用、退化为常量（r3 反例 A 的根因）。
+    反之 ``http://[web``（``[`` **未闭合**、无 payload，r3 反例 A 的根因）仍**不是**
+    不动点：凭据可能落在被截断的方括号里，且它的身份替换正是 r4 修掉的那个缺口。
     """
     payload = _original_url_payload(token)
     if payload:
@@ -458,7 +590,11 @@ def _token_is_canonical(token: str) -> bool:
     if not sep or scheme.lower() not in _ENDPOINT_SCHEMES:
         return False
     authority = rest.rpartition("@")[2]
-    return authority.startswith("[") and "]" in authority
+    if not authority:
+        return False
+    if authority.startswith("["):
+        return "]" in authority
+    return True
 
 
 def _leaves_plaintext_payload(token: str, rendered: str) -> bool:
@@ -484,24 +620,30 @@ def _render_is_usable(token: str, rendered: str) -> bool:
     1. 不是 ``str`` 或为空 ⇒ 不可用；
     2. 退化为 :data:`UNPRINTABLE_URL` ⇒ 不可用（由调用方决定是否去下一层兜底）；
     3. **渲染结果本身必须是规范形态**（:func:`_token_is_canonical`）——``scheme://``
-       + 已掩码 payload，或闭合方括号的端点形态。这一条同时排掉两类「换了等于
-       没换」：**恒等替换**（``http://[web`` 方括号未闭合、``http://host`` 无
-       payload，都不是规范形态；前者正是 r3 反例 A 的直接成因）与**掩码没盖住
-       payload**（``http://h/***?t=K`` 的 query 还是明文）。反向地，
-       ``http://host/***/***?***`` / ``http://[web,hook]:8443`` 这类**已经掩码 /
-       已是端点形态**的串是规范形态，必须原样留下：否则 ``_scrub_url_text`` 二次
-       清洗会把它们变成常量，**幂等性**与端点诊断当场失效；
+       + 已掩码 payload、闭合方括号的端点形态，或（r5）**无 payload 的裸端点**。
+       这一条排掉两类「换了等于没换」：**恒等替换但什么都没掩**（``http://[web``
+       方括号未闭合，r3 反例 A 的直接成因）与**掩码没盖住 payload**
+       （``http://h/***?t=K`` 的 query 还是明文）。反向地，
+       ``http://host/***/***?***`` / ``http://[web,hook]:8443`` / ``http://host``
+       这类**已经掩码 / 已是端点形态**的串是规范形态，必须原样留下：否则
+       ``_scrub_url_text`` 二次清洗会把它们变成常量，**幂等性**与端点诊断当场失效
+       （FINDING 3：r4 把 ``http://host`` 也判成不可用是无凭据 URL 的过度拒绝）；
     4. 渲染后的 payload 里不许残留原 payload 的**明文片段**
        （:func:`_leaves_plaintext_payload`）——双保险，直接对着「原始 path/query
-       字节留在输出里」这件事说话。
+       字节留在输出里」这件事说话；
+    5. （r5 加）token 的 authority 带 userinfo 时，渲染结果**不许**再带 ``@``——
+       userinfo 是 ``#88`` 的口令形态，两个渲染器都刻意丢掉它
+       （``http://user:pw@host`` → ``http://host``）。恒等替换的 userinfo
+       （``usable("http://u:p@h", "http://u:p@h")``）因此判不可用。
 
     该守卫对**每一条**渲染路径施加（``_mask_policy_url`` 首选路径与方括号兜底
-    路径），不只守兜底：``_mask_policy_url`` 在 ``http://host``（无
-    path/query/fragment）这类 token 上同样返回输入本身。
+    路径），不只守兜底。
     """
     if not isinstance(rendered, str) or not rendered:
         return False
     if rendered == UNPRINTABLE_URL:
+        return False
+    if "@" in _authority_of(token) and "@" in _authority_of(rendered):
         return False
     if not _token_is_canonical(rendered):
         return False
@@ -541,7 +683,8 @@ def _scrub_url_text(text: object) -> str:
       （见 :data:`_ABSOLUTE_URL_RE`）；
     * ``url: /path?query`` 形态的 scheme-relative 引用按时段掩码；
     * **凭据键 = 值** 的裸串（``token=K…``、``…?access_token=K…``，无 scheme 也
-      无 ``url:`` 标签）由 :data:`_CREDENTIAL_RUN_RE` 掩值。
+      无 ``url:`` 标签）由 :func:`_mask_credential_runs` 掩值（引号在键这一侧、
+      驼峰/粘连键名、JSON 引号值一并覆盖，见 :data:`_MAX_KEY_WINDOW` 上方的判据）。
 
     **判据的诚实边界（r4 明确并钉住）**：本清洗器认的是「URL 形状 **或** 凭据键
     的 ``key=value`` 串」。因此：
@@ -552,8 +695,8 @@ def _scrub_url_text(text: object) -> str:
       ``block_private_networks=true`` / ``v=1``）**刻意原样返回**——它们是诊断
       文本的主体，掩掉等于把「为什么失败」也一起删了；
     * 因此「裸的、键名不像凭据的串」仍在判据之外，这是**设计选择**而非遗漏，
-      由 ``TestCredentialRunIsMasked::test_non_credential_key_value_runs_pass_through``
-      钉住。
+      由 ``TestBareCredentialRunIsMasked::test_non_credential_key_value_runs_pass_through``
+      钉住（该引用的可解析性由 ``TestDocstringReferencesResolve`` 钉住，防漂移）。
 
     **total**（与 ``url_redaction._mask_webhook_url`` 同一判据）：任何输入都返回
     ``str``；清洗过程任何异常退化为 ``UNPRINTABLE_URL``，绝不上抛、绝不回原文；
@@ -575,7 +718,7 @@ def _scrub_url_text(text: object) -> str:
         scrubbed = _RELATIVE_URL_RE.sub(
             lambda m: m.group("prefix") + _mask_relative_url_ref(m.group("ref")), scrubbed,
         )
-        scrubbed = _CREDENTIAL_RUN_RE.sub(_mask_credential_run, scrubbed)
+        scrubbed = _mask_credential_runs(scrubbed)
     except Exception:  # noqa: BLE001 — 清洗失败不得变成新的异常面
         # 同样刻意不回显异常文本：这里正是「把原文抹掉」的那条路径。
         logger.debug("URL 文本清洗失败，退化为安全常量")

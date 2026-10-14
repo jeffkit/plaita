@@ -1,0 +1,14 @@
+{
+  "name": "159-endpoint-less-url-fails-closed",
+  "concern": "#159-r5-P2",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "    if authority.startswith(\"[\"):\n        return \"]\" in authority\n    return True\n",
+  "new": "    if authority.startswith(\"[\"):\n        return \"]\" in authority\n    return False  # mutant: 无 payload 的裸端点退回 r4 的 fail-closed\n",
+  "rationale": "无 payload 的裸端点退回 r4 的判据（「渲染成自身却什么也没掩」⇒ 不可用）⇒ `http://example.com` / `http://host:8080` / `Failed to connect to http://example.com` 再次退化成 `<unprintable-url>`（FINDING 3）。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestCredentialFreeUrlsKeepTheirEndpoint::test_endpoint_survives[bare-host]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestCredentialFreeUrlsKeepTheirEndpoint::test_endpoint_survives[host-port]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestCredentialFreeUrlsKeepTheirEndpoint::test_endpoint_survives[failed-to-connect]"
+  ]
+}

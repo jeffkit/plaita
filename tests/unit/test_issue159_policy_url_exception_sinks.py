@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import traceback
 from contextlib import contextmanager
 
@@ -47,6 +48,7 @@ from plaita.server.url_redaction import UNPRINTABLE_URL
 from tests.unit import _url_sink_support as sink_support
 from tests.unit._url_sink_support import (
     PLAITA_DIR,
+    REPO_ROOT,
     find_needles,
     leak_needles,
     log_record_fields,
@@ -788,7 +790,9 @@ class TestScrubberIsTotalOnHostileBatch:
 #
 # 复现前提（必须写死，否则会得到**假绿**）：节点上**不设任何策略**
 # （``deniedHosts`` / ``blockPrivateNetworks`` / ``allowedHosts`` 全空）。设了策略时
-# ``_check_policy`` 先抛「Failed to parse」——URL 根本没到 aiohttp，泄露面被掩盖。
+# **URL 解析**先抛（r5 更正：不是 ``_check_policy``——它根本没走到），
+# code=1001 ``Failed to parse: Host '[web hook]:8443' contains invalid character ' '``
+# ——URL 根本没到 aiohttp，泄露面被掩盖。
 _R4_SEPARATORS = ("\n", " ", "\t", "\r", '"', "'", "<", ">", "(", ")", "{", "}", ",", ";")
 _R4_ASCII_WS = frozenset(" \t\r\n\f\v")
 _R4_BRACKET_PREFIX = "http://[web{sep}hook]:8443/robot/send?access_token="
@@ -887,7 +891,11 @@ class TestSeparatorMatrixAllSixSurfaces:
 
 
 class TestPolicySetPathCannotShowTheLeak:
-    """复现前提的反面：**设了策略**时 ``_check_policy`` 先抛，泄露面被掩盖。"""
+    """复现前提的反面：**设了策略**时 URL 解析就先炸，泄露面被掩盖。
+
+    r5 更正口径：失败**不在** ``_check_policy``——它连走都没走到。实测
+    code=1001 ``Failed to parse: Host '[web hook]:8443' contains invalid character ' '``。
+    """
 
     def test_policy_rejection_happens_before_aiohttp(self):
         url = _r4_bracketed(" ")
@@ -898,11 +906,13 @@ class TestPolicySetPathCannotShowTheLeak:
         with pytest.raises(NodeException) as excinfo:
             node.execute({})
         text = str(excinfo.value)
-        # 前提：策略路径的文案里根本没有请求 URL（连凭据都不在），所以「needle 没了」
+        # 前提：这条路径的文案里根本没有请求 URL（连凭据都不在），所以「needle 没了」
         # 在这条路径上**不能**作为修复的证据——这正是 r3 假绿的机制。
         assert SECRET not in text
-        assert "10.0.0.0/8" not in text  # 策略条目都没走到（URL 先解析失败）
+        assert "10.0.0.0/8" not in text  # 策略条目都没走到（URL 解析先失败）
         assert "Failed to parse" in text, text
+        assert excinfo.value.code == 1001, excinfo.value.code
+        assert "invalid character" in text, text
 
 
 # --------------------------------------------------------------------------- #
@@ -978,13 +988,23 @@ class TestNoIdentityReplacement:
         assert _scrubber()("boom url='http://[web") == f"boom url='{UNPRINTABLE_URL}"
 
     def test_payload_less_endpoint_fails_closed(self):
-        assert _scrubber()("http://h") == UNPRINTABLE_URL
+        """r3 反例 A（``[`` 未闭合）仍必须退化常量；**无凭据的裸端点**不再退化（r5）。
+
+        FINDING 3：r4 把 ``http://h`` 也判成「渲染成自身却什么也没掩」⇒ 常量，
+        无凭据 URL 连端点都丢了。端点不携带凭据（没有任何 path/query 可泄）时保留
+        才是正确渲染——但**未闭合方括号**永远例外（凭据可能落在被截断的那段里）。
+        """
+        assert _scrubber()("http://[web") == UNPRINTABLE_URL
+        assert _scrubber()("boom url='http://[web") == f"boom url='{UNPRINTABLE_URL}"
+        assert _scrubber()("http://h") == "http://h"
 
     def test_guard_rejects_identity_and_plaintext_tail(self):
         usable = _render_guard()
-        # 恒等 + 非不动点形态 ⇒ 不可用
+        # 恒等 + **非**规范形态 ⇒ 不可用（r3 反例 A：`[` 未闭合，凭据可能被截在里面）
         assert usable("http://[web", "http://[web") is False
-        assert usable("http://h", "http://h") is False
+        # 恒等 + **规范**形态（无 payload 的裸端点）⇒ 可用（r5 FINDING 3）
+        assert usable("http://h", "http://h") is True
+        assert usable("http://host:8080", "http://host:8080") is True
         assert usable("http://h/a?t=K", "http://h/a?t=K") is False
         # 渲染结果里仍留着明文 payload 片段 ⇒ 不可用（B 类尾部泄漏）
         assert usable("http://h/a?t=K", "http://h/***?t=K") is False
@@ -994,6 +1014,9 @@ class TestNoIdentityReplacement:
         assert usable("http://[web,hook]:8443", "http://[web,hook]:8443") is True
         assert usable("http://h", UNPRINTABLE_URL) is False
         assert usable("http://h", "") is False
+        # r5 第 5 条判据：userinfo 是 #88 的口令形态，渲染结果不许再带 `@`
+        assert usable("http://u:p@h", "http://u:p@h") is False
+        assert usable("http://u:p@h", "http://h") is True
 
     def test_guard_rejects_residual_original_payload(self):
         """第 4 条判据单独钉住：原始 path/query 明文留在输出里 ⇒ 不可用。"""
@@ -1118,7 +1141,7 @@ class TestNonHttpBracketSchemesDegradeToConstant:
 
 
 # --------------------------------------------------------------------------- #
-# ⑭ r4：敌对批次（33 条）的六条 totality 性质
+# ⑭ r4：敌对批次（36 条，r5 更正：r4 写的是「33 条」）的六条 totality 性质
 # --------------------------------------------------------------------------- #
 _R4_HOSTILE_TEXTS = [
     ("none", None),
@@ -1161,7 +1184,18 @@ _R4_HOSTILE_TEXTS = [
 
 
 class TestR4HostileBatchSixProperties:
-    """r4：33 条敌对输入 × 六条性质（不抛 / str / 可编码 / 幂等 / 无 needle / 非恒等）。"""
+    """r4：36 条敌对输入 × 六条性质（不抛 / str / 可编码 / 幂等 / 无 needle / 非恒等）。
+
+    条数**不再写死**：`test_batch_counts_match_their_docstrings` 把这里的数字与
+    ``len(_R4_HOSTILE_TEXTS)`` 对表（r4 的 docstring 写「33 条」而实际 36 条）。
+    """
+
+    def test_batch_counts_match_their_docstrings(self):
+        """文档里的条数必须等于列表长度——r5 更正 r4 的「33 条」（实际 36）。"""
+        assert len(_R4_HOSTILE_TEXTS) == 36, len(_R4_HOSTILE_TEXTS)
+        assert len(_HOSTILE_TEXTS) == 21, len(_HOSTILE_TEXTS)
+        assert "36 条" in TestR4HostileBatchSixProperties.__doc__
+        assert "21 " not in TestR4HostileBatchSixProperties.__doc__
 
     def test_never_raises_and_is_str_and_encodable(self):
         scrub = _scrubber()
@@ -1199,7 +1233,7 @@ class TestR4HostileBatchSixProperties:
                 continue
             recognised = bool(
                 http_mod._ABSOLUTE_URL_RE.search(value)
-                or http_mod._CREDENTIAL_RUN_RE.search(value)
+                or _credential_spans()(value)
             )
             if recognised and not http_mod._token_is_canonical(value):
                 assert _scrubber()(value) != value, f"{label}: 认出了形状却一字未改"
@@ -1220,7 +1254,10 @@ class TestNoPolicyPreconditionIsReal:
         assert url in _aiohttp_invalid_url_text(url)
 
     def test_with_policy_the_raw_url_never_reaches_aiohttp(self):
-        """对照：设了策略 ⇒ 提前抛「Failed to parse」⇒ 泄露面被掩盖（r3 假绿机制）。"""
+        """对照：设了策略 ⇒ **URL 解析**提前抛（code=1001 ``Failed to parse``）⇒ 泄露面被掩盖。
+
+        r5 更正：失败点在 URL 解析，**不是** ``_check_policy``。
+        """
         node = HTTP(
             id="http_policy_masks_leak", name="http_policy_masks_leak",
             url=_r4_plain(","), method="GET", blockPrivateNetworks=True,
@@ -1228,3 +1265,353 @@ class TestNoPolicyPreconditionIsReal:
         with pytest.raises(NodeException) as excinfo:
             node.execute({})
         assert SECRET not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# ⑯ r5（FINDING 1）：凭据键文法 —— 引号在**键**这一侧 + 驼峰/粘连键名
+# --------------------------------------------------------------------------- #
+def _credential_spans():
+    """r5 的凭据运行扫描器；在 r4（``4d832348``）上不存在 ⇒ 相关断言必须判红。"""
+    fn = getattr(http_mod, "_credential_run_spans", None)
+    assert fn is not None, (
+        "缺少 plaita/node/http.py::_credential_run_spans——凭据键=值的线性扫描器"
+    )
+    return fn
+
+
+def _is_credential_key():
+    fn = getattr(http_mod, "_is_credential_key", None)
+    assert fn is not None, "缺少 plaita/node/http.py::_is_credential_key"
+    return fn
+
+
+#: r5 判据：**键名分量**（非字母数字边界 + 驼峰转折切分，全小写，允许复数）相等
+#: 于词干集合之一。正例——每一条都在 r4 上实测 ``keymatch=None``（原文穿过）。
+_R5_CREDENTIAL_KEYS = (
+    # (a) 引号在**键**这一侧（r4 只允许引号出现在分隔符**之后**）
+    '"access_token"', "'access_token'", '"token"', "'password'",
+    '"Authorization"', '"apiKey"',
+    # (b) 驼峰 / Pascal / 粘连
+    "accessToken", "sessionId", "secretKey", "authToken", "refreshToken",
+    "idToken", "apiSecret", "bearerToken", "xAccessToken", "APIKey",
+    "apiKey", "Authorization", "credentials", "accesstoken", "authtoken",
+    "secretkey", "sessionid", "xapikey",
+    # 基线（r4 已覆盖，防回归）
+    "access_token", "token", "x-api-key", "x_api_key", "X-Api-Key", "secret",
+    "password", "passwd", "pwd", "sig", "signature", "key", "apikey",
+    "accesskey", "private_key", "session_id", "client_secret", "auth",
+    "x-auth-token", "cookie", "bearer", "credential", "clientsecret",
+)
+#: 负例——**必须**原样穿过（诊断文本的主体；``monkey`` / ``sortkey`` 是 r4 就钉住的
+#: 声明的残口：字母串里恰好含 ``key``）。
+_R5_NON_CREDENTIAL_KEYS = (
+    "code", "port", "v", "monkey", "sortkey", "block_private_networks",
+    "status", "delivery", "host", "retries", "a", "timeout", "url", "id",
+    "tokenizer", "secretary", "passwordless", "keynote", "hockey", "author",
+    "apiname", "sortkeys", "keys", "monkeys", "tokens", "authentic",
+)
+#: (label, 原文模板, **精确**渲染)；``{s}`` 处填 :data:`SECRET`。
+_R5_CREDENTIAL_MATRIX = (
+    ("json-double-quote", '{"access_token": "{s}"}', '{"access_token": "***"}'),
+    ("json-tight", '{"token":"{s}"}', '{"token":"***"}'),
+    ("json-single-quote", "{'access_token': '{s}'}", "{'access_token': '***'}"),
+    ("json-authorization", '{"Authorization":"Bearer {s}"}', '{"Authorization":"***"}'),
+    ("json-quoted-value-with-space", '{"password": "{s} tail"}', '{"password": "***"}'),
+    ("quoted-key-eq", 'failed "password"={s}', 'failed "password"=***'),
+    ("quoted-key-colon", '"token": {s}', '"token": ***'),
+    ("camel-accessToken", "accessToken={s}", "accessToken=***"),
+    ("camel-sessionId", "sessionId={s}", "sessionId=***"),
+    ("camel-secretKey", "secretKey={s}", "secretKey=***"),
+    ("camel-authToken", "authToken={s}", "authToken=***"),
+    ("camel-refreshToken", "refreshToken={s}", "refreshToken=***"),
+    ("camel-idToken", "idToken={s}", "idToken=***"),
+    ("camel-apiSecret", "apiSecret={s}", "apiSecret=***"),
+    ("camel-bearerToken", "bearerToken={s}", "bearerToken=***"),
+    ("camel-xAccessToken", "xAccessToken={s}", "xAccessToken=***"),
+    ("pascal-Authorization", "Authorization={s}", "Authorization=***"),
+    ("plural-credentials", "credentials={s}", "credentials=***"),
+    ("glued-accesstoken", "accesstoken={s}", "accesstoken=***"),
+    ("header-bearer", "Authorization: Bearer {s}", "Authorization: ***"),
+    ("url-plus-kv-mixed",
+     'boom: {"url": "http://h/x", "access_token": "{s}"}',
+     'boom: {"url": "http://h/*** "access_token": "***"}'),
+)
+#: 键名不像凭据的裸 ``key=value``：**逐字**原样返回（r4 钉住的设计选择，r5 保持）。
+_R5_NON_CREDENTIAL_RUNS = (
+    "code=1002", "port=8080", "v=1", "block_private_networks=true",
+    "monkey=1", "sortkey=2", "status=500", "delivery=1", "host=example.com",
+    "retries=3", "a=1,2", "timeout=30", "tokenizer=1", "secretary=1",
+    "passwordless=true", "keynote=1", "hockey=2", "apiname=x",
+)
+
+
+class _EntryRsp:
+    """非空 + ``send_request_fail`` ⇒ 走 ``HTTP_DO_REQUEST_ERROR`` 那条入口。"""
+
+    raw_request = "REQ"
+    raw_response = None
+
+    def empty(self):
+        return False
+
+    def send_request_fail(self):
+        return True
+
+
+def _entry_exception(text: str, path: str):
+    """**真实入口** ``HTTP.handle_http_node_err(RuntimeError(text), rsp)`` 的两个路径。"""
+    node = HTTP(id="http_kv_entry", name="http_kv_entry", url="http://h/x", method="GET")
+    rsp = None if path == "gen" else _EntryRsp()
+    return node, node.handle_http_node_err(RuntimeError(text), rsp)
+
+
+class TestCredentialKeyCriterionR5:
+    """r5 的判据本体：**分量级**词干相等（含驼峰转折与复数），正反两个方向都钉住。"""
+
+    @pytest.mark.parametrize("key", _R5_CREDENTIAL_KEYS)
+    def test_credential_key_forms_are_recognised(self, key):
+        assert _is_credential_key()(key) is True, key
+
+    @pytest.mark.parametrize("key", _R5_NON_CREDENTIAL_KEYS)
+    def test_non_credential_key_forms_stay_benign(self, key):
+        """分量**相等**而不是子串包含：``monkey`` / ``sortkey`` / ``tokenizer`` 不命中。"""
+        assert _is_credential_key()(key) is False, key
+
+    @pytest.mark.parametrize("key", _R5_CREDENTIAL_KEYS)
+    def test_credential_key_forms_are_masked(self, key):
+        assert _scrubber()(f"{key}={SECRET}") == f"{key}=***"
+
+    @pytest.mark.parametrize("text", _R5_NON_CREDENTIAL_RUNS)
+    def test_non_credential_runs_pass_through(self, text):
+        assert _scrubber()(text) == text
+
+
+class TestCredentialKeyMatrixR5:
+    """r5 键矩阵：精确渲染 + 六个面 × 两条真实入口路径。**
+
+    入口路径两条都走 ``HTTP.handle_http_node_err``：``rsp=None``（``1001``）与
+    ``rsp`` 非空且 ``send_request_fail()``（``1002``）——同一个 ``wrap_http_node_err``，
+    两个 code。面是 :func:`_six_surfaces` 的六条（str / repr / traceback /
+    CONTINUE 记录 / abort ``__cause__`` 链 / abort 记录）。
+    """
+
+    @pytest.mark.parametrize(
+        "label,template,expected",
+        _R5_CREDENTIAL_MATRIX,
+        ids=[case[0] for case in _R5_CREDENTIAL_MATRIX],
+    )
+    def test_renderer_exact_string(self, label, template, expected):
+        text = template.replace("{s}", SECRET)
+        rendered = _scrubber()(text)
+        _assert_clean(rendered, f"renderer[{label}]")
+        assert rendered == expected.replace("{s}", SECRET), (
+            f"{label}: 实际={rendered!r} 期望={expected.replace('{s}', SECRET)!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "label,template,expected",
+        _R5_CREDENTIAL_MATRIX,
+        ids=[case[0] for case in _R5_CREDENTIAL_MATRIX],
+    )
+    @pytest.mark.parametrize("path", ("gen", "do"))
+    def test_six_surfaces_through_the_real_entry_point(self, label, template, expected, path):
+        text = template.replace("{s}", SECRET)
+        node, exc = _entry_exception(text, path)
+        surfaces = _six_surfaces(node, exc)
+        assert sorted(surfaces) == [
+            "CONTINUE records", "abort chain", "abort records",
+            "repr(NodeException)", "str(NodeException)", "traceback.format_exception",
+        ]
+        for name, rendered in surfaces.items():
+            _assert_clean(rendered, f"{label}[{path}] {name}")
+
+    @pytest.mark.parametrize("text", _R5_NON_CREDENTIAL_RUNS)
+    @pytest.mark.parametrize("path", ("gen", "do"))
+    def test_benign_diagnostics_survive_the_real_entry_point(self, text, path):
+        """反方向：诊断文本必须**逐字**活下来（不是「没凭据就行」）。"""
+        node, exc = _entry_exception(text, path)
+        assert text in str(exc), f"{text!r} 被吃掉了：{str(exc)!r}"
+        assert "***" not in str(exc), str(exc)
+
+    def test_spans_level_evidence(self):
+        """``keymatch`` 级的证据：每个正例都必须扫出跨度，每个反例必须一个都没有。"""
+        spans = _credential_spans()
+        for key in _R5_CREDENTIAL_KEYS:
+            assert spans(f"{key}={SECRET}"), f"{key}: 没扫出跨度（keymatch=None）"
+        for text in _R5_NON_CREDENTIAL_RUNS:
+            assert spans(text) == [], f"{text}: 不该有跨度"
+
+
+class TestCredentialRunScalingR5:
+    """r5（FINDING 2）：凭据键那一趟必须**线性**，敌对形状不得灾难性回溯。
+
+    r4 的 ``_CREDENTIAL_RUN_RE`` 有嵌套量词、紧接一个必须出现的 ``[=:]``：
+    ``"token_"*n`` 这种「全是分量边界、就是没有分隔符」的串上回溯爆炸。
+    实测（同一台机器，``4d832348``）：n=1000 → 79.8 ms、2000 → 311.8 ms、
+    4000 → 1254.1 ms、8000 → 5251.4 ms、30000 → 73080.1 ms（二次）；
+    r5 扫描器：0.35 / 0.87 / 1.00 / 1.99 / 7.89 ms（线性）。归因也实测过：
+    24 KB 输入上 ``_CREDENTIAL_RUN_RE.search`` 单独 1343 ms，两趟 ``sub`` ≤0.5 ms。
+
+    判据两条一起用（只比值会被小 n 的计时噪声骗，只比绝对值会被机器负载骗）：
+    * **硬上限** 2.0 s/次（r4 在 n=8000 就已经 5.25 s ⇒ 直接判红）；
+    * n → 8n 的增长比 ≤ 20×（线性 ≈8×；下限 0.20 s 吸收常数项与噪声）。
+    """
+
+    _SHAPES = (
+        ("underscore-glued", lambda n: "token_" * n),
+        ("dot-glued", lambda n: "token." * n),
+        ("kv-repeated", lambda n: "access_token=" * n),
+        ("quoted-colon-repeated", lambda n: '"token":' * n),
+    )
+    _SIZES = (1000, 2000, 4000, 8000)
+
+    @pytest.mark.parametrize("label,factory", _SHAPES, ids=[s[0] for s in _SHAPES])
+    def test_adversarial_shapes_grow_at_most_linearly(self, label, factory):
+        import time
+
+        scrub = _scrubber()
+        times = {}
+        for n in self._SIZES:
+            text = factory(n)
+            started = time.monotonic()
+            scrub(text)
+            times[n] = time.monotonic() - started
+            assert times[n] < 2.0, (
+                f"{label} n={n}（{len(text)} 字符）耗时 {times[n]:.3f}s —— "
+                "凭据键那一趟退化成回溯了？"
+            )
+        bound = max(20.0 * times[self._SIZES[0]], 0.20)
+        assert times[self._SIZES[-1]] < bound, (
+            f"{label}: n={self._SIZES[0]} → {times[self._SIZES[0]]:.4f}s，"
+            f"n={self._SIZES[-1]} → {times[self._SIZES[-1]]:.4f}s（上限 {bound:.3f}s）"
+        )
+
+    def test_honest_paths_are_still_masked(self):
+        """性能修法不许把掩码修掉：四条诚实路径仍逐字掩值。"""
+        cases = (
+            (f"token={SECRET}", "token=***"),
+            (f'{{"access_token": "{SECRET}"}}', '{"access_token": "***"}'),
+            (f"Authorization: Bearer {SECRET}", "Authorization: ***"),
+            (f"x-api-key={SECRET}", "x-api-key=***"),
+            (f"login failed: password={SECRET} for user bob",
+             "login failed: password=*** for user bob"),
+        )
+        for text, expected in cases:
+            rendered = _scrubber()(text)
+            _assert_clean(rendered, f"honest[{text!r}]")
+            assert rendered == expected, (text, rendered, expected)
+
+    def test_glued_words_without_a_separator_are_left_alone(self):
+        """``"token_"*n`` 里没有 ``=``/``:`` ⇒ 不是 key=value，逐字返回（r3~r5 同）。"""
+        text = "token_" * 500
+        assert _scrubber()(text) == text
+
+
+# --------------------------------------------------------------------------- #
+# ⑰ r5（FINDING 3）：无凭据的 URL 保留端点，不再退化成常量
+# --------------------------------------------------------------------------- #
+#: (label, 原文, **精确**渲染)。r4（``4d832348``）在这些输入上一律
+#: ``<unprintable-url>``——渲染器的职责是掩**凭据**，不是擦掉 URL。
+_FREE_URL_CASES = (
+    ("bare-host", "http://example.com", "http://example.com"),
+    ("host-port", "http://host:8080", "http://host:8080"),
+    ("https-bare", "https://api.example.com", "https://api.example.com"),
+    ("failed-to-connect", "Failed to connect to http://example.com",
+     "Failed to connect to http://example.com"),
+    ("failed-to-connect-with-path", "Failed to connect to http://example.com/path?q=1",
+     "Failed to connect to http://example.com/***?***"),
+    ("with-path", "http://example.com/path", "http://example.com/***"),
+    ("with-query", "http://example.com/p?q=1", "http://example.com/***?***"),
+    ("userinfo-dropped", "http://user:pw@example.com", "http://example.com"),
+    ("slack-shaped", "https://hooks.slack.com/services/T0/B0", "https://hooks.slack.com/***/***/***"),
+)
+#: **仍然**退化为常量的族（逐条给出理由并钉住）。
+_STILL_CONSTANT = (
+    ("unterminated-bracket", "http://[web"),          # r3 反例 A：凭据可能在被截断的方括号里
+    ("non-http-scheme", "redis://h"),                 # 冻结的 url_redaction._SAFE_SCHEMES
+    ("empty-authority", "http:///path"),              # 没有 host ⇒ 无端点可救
+)
+
+
+class TestCredentialFreeUrlsKeepTheirEndpoint:
+    @pytest.mark.parametrize(
+        "label,text,expected", _FREE_URL_CASES, ids=[c[0] for c in _FREE_URL_CASES]
+    )
+    def test_endpoint_survives(self, label, text, expected):
+        rendered = _scrubber()(text)
+        _assert_clean(rendered, f"free-url[{label}]")
+        assert rendered == expected, f"{label}: 实际={rendered!r} 期望={expected!r}"
+
+    @pytest.mark.parametrize(
+        "label,text", _STILL_CONSTANT, ids=[c[0] for c in _STILL_CONSTANT]
+    )
+    def test_still_degrade_to_the_constant(self, label, text):
+        """必须**仍然**退化常量：逐条给理由（不是笼统地 fail-closed）。"""
+        assert _scrubber()(text) == UNPRINTABLE_URL, label
+
+    def test_endpoints_are_fixed_points(self):
+        for label, text, _expected in _FREE_URL_CASES:
+            once = _scrubber()(text)
+            assert _scrubber()(once) == once, f"{label}: 非幂等（{once!r}）"
+
+    def test_no_credential_bearing_shape_regressed(self):
+        """反方向：掩码不许因为「保留端点」而漏。逐条对着 needle 断言。"""
+        cases = (
+            f"http://user:{SECRET}@example.com",
+            f"http://example.com?access_token={SECRET}",
+            f"http://example.com/robot/send?access_token={SECRET}",
+            f"http://[web,hook]:8443/x?token={SECRET}",
+            f"https://hooks.slack.com/services/T00/B00/{SECRET}",
+            f"http://example.com {{'access_token': '{SECRET}'}}",
+        )
+        for text in cases:
+            rendered = _scrubber()(text)
+            _assert_clean(rendered, f"regression[{text!r}]")
+            assert rendered != text, text
+
+    def test_authority_is_kept_by_contract(self):
+        """诚实边界（**r4 起就存在**，不是 r5 新开的暴露面）：
+
+        ``#88`` 冻结的 ``_mask_url_for_log`` 契约就是「抹 userinfo 口令、**保留** host」，
+        ``url_redaction`` 同样只保留 ``scheme://host[:port]``。因此把凭据**只**写进
+        host 位置的形态在任何带 payload 的 URL 上都早已原样保留（``4d832348`` 实测：
+        ``http://Ks9Qm4Zt/robot/send?access_token=X`` → ``http://Ks9Qm4Zt/***/***?***``）。
+        r5 只把**无 payload** 的那一格从常量改回端点，暴露面**同源同形**、没有扩大；
+        这属于与 ``access_token%3D…`` / 「跨 ASCII 空白被切开的凭据」并列的**已声明残口**。
+        """
+        assert _scrubber()(f"http://{SECRET}/robot/send?access_token=X") == \
+            f"http://{SECRET}/***/***?***"
+
+
+# --------------------------------------------------------------------------- #
+# ⑱ r5（FINDING 4）：文档里的测试引用与条数**不会腐**
+# --------------------------------------------------------------------------- #
+_TEST_REF_RE = re.compile(r"(Test[A-Za-z0-9_]+)::(test_[A-Za-z0-9_]+)")
+
+
+def _http_module_docstring_refs():
+    """``plaita/node/http.py`` 全文（含 docstring）里出现的 ``TestX::test_y`` 引用。"""
+    source = (PLAITA_DIR / "node" / "http.py").read_text(encoding="utf-8")
+    return sorted(set(_TEST_REF_RE.findall(source)))
+
+
+class TestDocstringReferencesResolve:
+    """FINDING 4：``_scrub_url_text`` 的 docstring 曾指向**不存在**的类
+    （``TestCredentialRunIsMasked``，真名 ``TestBareCredentialRunIsMasked``）。
+
+    与其改一次字，不如把「引用可解析」变成检查：``plaita/`` 里任何
+    ``TestX::test_y`` 引用都必须能在 ``tests/unit/test_issue159_*.py`` 里找到。
+    """
+
+    def test_every_reference_resolves(self):
+        corpus = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((REPO_ROOT / "tests" / "unit").glob("test_issue159_*.py"))
+        )
+        refs = _http_module_docstring_refs()
+        assert refs, "没有扫到任何 TestX::test_y 引用（判据失效了？）"
+        missing = [
+            f"{cls}::{name}" for cls, name in refs
+            if f"class {cls}" not in corpus or f"def {name}" not in corpus
+        ]
+        assert missing == [], f"docstring 指向不存在的测试：{missing}"
