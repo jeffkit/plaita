@@ -252,6 +252,8 @@ def _mask_relative_url_ref(ref: str) -> str:
     try:
         parts = urlsplit(ref)
     except Exception:  # noqa: BLE001 — 畸形串退化为常量，绝不回原文
+        # 刻意**不**打印异常文本：它可能带着刚被清洗掉的原文片段。
+        logger.debug("scheme-relative URL 无法解析，退化为安全常量")
         return UNPRINTABLE_URL
     rendered = "/".join(_MASK_PLACEHOLDER if seg else seg for seg in parts.path.split("/"))
     if parts.query:
@@ -281,6 +283,7 @@ def _scrub_url_text(text: object) -> str:
         try:
             text = str(text)
         except Exception:  # noqa: BLE001 — fail-closed
+            logger.debug("异常文本无法字符串化，退化为安全常量")
             return UNPRINTABLE_URL
     try:
         scrubbed = _ABSOLUTE_URL_RE.sub(lambda m: _mask_policy_url(m.group(0)), text)
@@ -288,6 +291,8 @@ def _scrub_url_text(text: object) -> str:
             lambda m: m.group("prefix") + _mask_relative_url_ref(m.group("ref")), scrubbed,
         )
     except Exception:  # noqa: BLE001 — 清洗失败不得变成新的异常面
+        # 同样刻意不回显异常文本：这里正是「把原文抹掉」的那条路径。
+        logger.debug("URL 文本清洗失败，退化为安全常量")
         return UNPRINTABLE_URL
     return scrubbed
 
