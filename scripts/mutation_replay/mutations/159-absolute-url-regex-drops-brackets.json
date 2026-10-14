@@ -1,0 +1,13 @@
+{
+  "name": "159-absolute-url-regex-drops-brackets",
+  "concern": "#159-r3-P0",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]*://[^\\s'\\\"<>(){},;]+\")",
+  "new": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]*://[^\\s'\\\"<>()\\[\\]{},;]+\")",
+  "rationale": "把 r3 放宽的字符类退回 r2 形态（把 `[`/`]` 排除在外）：方括号 authority 的绝对 URL 在 `[` 处截断/落空，`aiohttp` 的 `InvalidUrlClientError`（str() 即裸 URL）整段穿过清洗器——这是 r3 定验的原始反例。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBracketedAuthorityFamilyIsMasked::test_renderer_level_masks_and_keeps_endpoint[bracket-hostname]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBracketedAuthorityFamilyIsMasked::test_aiohttp_surface_end_to_end[bracket-hostname]"
+  ]
+}

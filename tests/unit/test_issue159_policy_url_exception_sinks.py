@@ -27,8 +27,10 @@ r1（``757f04e9``）把六个 ``logger.*`` 直接插值 URL 的记录面收口�
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import traceback
+from contextlib import contextmanager
 
 import pytest
 
@@ -532,3 +534,243 @@ class TestThirdPartyExceptionTextIsScrubbed:
         assert "http://localhost:8080" in rendered
         assert "/callback/" not in rendered, rendered
         assert find_needles(rendered, leak_needles("exec-secret-id")) == [], rendered
+
+
+# --------------------------------------------------------------------------- #
+# ⑦ r3：**方括号 authority** 的绝对 URL（r2 的匹配器在 `[` 处截断 ⇒ 原文穿过）
+# --------------------------------------------------------------------------- #
+# 家族：`aiohttp` 对畸形方括号 URL 抛 ``InvalidUrlClientError``，其 ``__str__`` 就是
+# **裸 URL**，`_send_async` → `handle_http_node_err` → `wrap_http_node_err` 一路
+# ``str(err)`` 转手。r2 的 ``_ABSOLUTE_URL_RE`` 把 ``[``/``]`` 排除在字符类外，
+# 于是匹配截断/落空 ⇒ 请求 URL（含 ``access_token``）原文进 NodeException。
+# IPv4 对照（无方括号）从来都被掩码，用来钉住「这不是笼统的清洗器失效」。
+_BRACKET_FAMILY = [
+    ("bracket-hostname", "http://[webhook.internal]:8443"),
+    ("bracket-loopback-port", "http://[::1]:999999"),
+    ("bracket-empty", "http://[]:8443"),
+    ("bracket-v4-mapped", "http://[::FFFF:127.0.0.1]:999999"),
+    ("ipv4-control", "http://127.0.0.1:999999"),
+]
+
+
+def _family_url(endpoint: str) -> str:
+    return f"{endpoint}/robot/send?access_token={SECRET}"
+
+
+def _family_params():
+    return [
+        pytest.param(name, endpoint, endpoint.split("://", 1)[1], id=name)
+        for name, endpoint in _BRACKET_FAMILY
+    ]
+
+
+def _aiohttp_invalid_url_text(url: str) -> str:
+    """前提探针：``aiohttp`` 对畸形方括号 URL 的异常文本**就是裸 URL**。
+
+    这条前提是 r3 finding 的另一半——如果哪天 aiohttp 不再把 URL 放进 ``str(e)``，
+    下面「诊断端点仍在」的断言会以「前提失效」的形式响，而不是悄悄变绿。
+    """
+    aiohttp = pytest.importorskip("aiohttp")
+
+    async def probe():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url):
+                pass  # pragma: no cover - 到不了这里
+
+    with pytest.raises(Exception) as excinfo:
+        asyncio.run(probe())
+    return str(excinfo.value)
+
+
+class TestBracketedAuthorityFamilyIsMasked:
+    """r3：方括号 authority 全家族 —— 五个面干净 + 端点（host:port）仍可诊断。"""
+
+    @pytest.mark.parametrize("variant,url,diagnostic", _family_params())
+    def test_renderer_level_masks_and_keeps_endpoint(self, variant, url, diagnostic):
+        scrub = _scrubber()
+        full = _family_url(url)
+        for text in (full, f"boom url='{full}'", f"Invalid URL: {full} (caused by X)"):
+            rendered = scrub(text)
+            _assert_clean(rendered, f"scrubber[{variant}]")
+            assert diagnostic in rendered, (
+                f"{variant}: 端点丢了（诊断价值要求 host:port 保留）：{rendered!r}"
+            )
+
+    @pytest.mark.parametrize("variant,url,diagnostic", _family_params())
+    def test_aiohttp_surface_end_to_end(self, variant, url, diagnostic):
+        """真实 ``HTTP.arun`` + 真实 aiohttp：整条链的五个面都不得带 needle。"""
+        full = _family_url(url)
+        # 前提：aiohttp 的 InvalidUrlClientError 文本是裸 URL（否则这条链根本不含 URL）
+        probe_text = _aiohttp_invalid_url_text(full)
+        assert full in probe_text, (
+            f"前提失效：aiohttp 的异常文本不再带裸 URL（{probe_text!r}）——"
+            "本用例的「掩码前后」语义需要重新锚定"
+        )
+
+        node = HTTP(id="http_bracket", name="http_bracket", url=full, method="GET")
+        with pytest.raises(NodeException) as excinfo:
+            asyncio.run(node.arun({}))
+        exc = excinfo.value
+
+        _assert_clean(str(exc), f"{variant} str(NodeException)")
+        _assert_clean(repr(exc), f"{variant} repr(NodeException)")
+        _assert_clean("".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ), f"{variant} traceback")
+        assert diagnostic in str(exc), (
+            f"{variant}: 掩码把端点也吃了（str={str(exc)!r}）"
+        )
+
+        with caplog_continue(node, exc) as records:
+            _assert_clean(_records_text(records), f"{variant} CONTINUE records")
+
+        with caplog_abort(node, exc) as (abort, records):
+            _assert_clean(_chain_text(abort), f"{variant} abort chain")
+            _assert_clean(_records_text(records), f"{variant} abort records")
+
+    def test_userinfo_with_bracketed_authority_is_masked(self):
+        scrub = _scrubber()
+        raw = f"http://user:{SECRET}@[::1]:8080/robot/send?access_token={SECRET}"
+        rendered = scrub(f"boom url='{raw}'")
+        _assert_clean(rendered, "userinfo+bracket")
+        assert "[::1]:8080" in rendered, rendered
+
+    def test_endpoint_fallback_drops_userinfo_of_malformed_bracket(self):
+        """``[bad]`` 不是合法 IPv6 ⇒ `_mask_policy_url` 退化；兜底救端点但丢 userinfo。"""
+        scrub = _scrubber()
+        raw = f"http://user:{SECRET}@[bad]:1/x?access_token={SECRET}"
+        rendered = scrub(raw)
+        _assert_clean(rendered, "malformed bracket + userinfo")
+        assert rendered == "http://[bad]:1", rendered
+
+    def test_non_http_bracket_scheme_still_degrades(self):
+        """scheme 判据与 r2 逐字一致：``redis://`` 的方括号形态仍退化常量。"""
+        assert _scrubber()(f"redis://[::1]:6379/0?token={SECRET}") == UNPRINTABLE_URL
+
+
+@contextmanager
+def caplog_continue(node, exc):
+    """CONTINUE 路径的记录捕获（与 ② 的 ``_handle_node_error`` 用法同源）。"""
+    logger = logging.getLogger("plaita.core.runner")
+    handler = _CaptureHandler()
+    old = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        _handle_node_error(
+            None, node, ErrorHandler(strategy=ErrorStrategy.CONTINUE), exc,
+        )
+        yield handler.records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old)
+
+
+@contextmanager
+def caplog_abort(node, exc):
+    """abort 路径：``NodeExecutionError`` + flow_worker 的 WARNING/ERROR 记录。"""
+    with pytest.raises(NodeExecutionError) as excinfo:
+        _handle_node_error(None, node, None, exc)
+    abort = excinfo.value
+    logger = logging.getLogger("plaita.server.flow_worker")
+    handler = _CaptureHandler()
+    old = logger.level
+    logger.setLevel(logging.WARNING)
+    logger.addHandler(handler)
+    try:
+        logger.warning(
+            "任务 %s 节点执行失败待重投 (delivery=%s): %s", "1-0", 1, abort,
+        )
+        logger.error("任务 %s 节点执行失败: %s", "1-0", abort, exc_info=True)
+        yield abort, handler.records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old)
+
+
+class _CaptureHandler(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.DEBUG)
+        self.records: list = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+# --------------------------------------------------------------------------- #
+# ⑧ r3：`_scrub_url_text` 必须 total（含孤立代理字符的敌对批次）
+# --------------------------------------------------------------------------- #
+_SURROGATE_HIGH = "\ud800"
+_SURROGATE_LOW = "\udcff"
+_URL_WITH_SECRET = f"http://h/robot/send?access_token={SECRET}"
+
+#: hostile 批次：孤立代理字符（surrogateescape 型输入的代表）是核心，外加
+#: ``None`` / 非 UTF-8 bytes / 容器 / 非字符串对象 —— totality 的常见反例面。
+_HOSTILE_TEXTS = [
+    ("none", None),
+    ("empty", ""),
+    ("plain", "nothing to mask"),
+    ("bytes-non-utf8", b"\xff\xfe"),
+    ("int", 123),
+    ("object", object()),
+    ("dict", {"url": _URL_WITH_SECRET}),
+    ("list", [_URL_WITH_SECRET]),
+    ("lone-high", _SURROGATE_HIGH),
+    ("lone-low", _SURROGATE_LOW),
+    ("lone-high-in-text", f"boom {_SURROGATE_HIGH} tail"),
+    ("lone-low-in-text", f"boom {_SURROGATE_LOW} tail"),
+    ("surrogate-then-url", f"{_SURROGATE_HIGH} {_URL_WITH_SECRET}"),
+    ("url-then-surrogate", f"{_URL_WITH_SECRET} {_SURROGATE_HIGH}"),
+    ("surrogate-in-url-path",
+     f"http://h/ro{_SURROGATE_HIGH}bot/send?access_token={SECRET}"),
+    ("surrogate-in-url-host",
+     f"http://ho{_SURROGATE_HIGH}st/robot/send?access_token={SECRET}"),
+    ("surrogate-in-bracketed-url",
+     f"http://[web{_SURROGATE_HIGH}hook]:8443/x?access_token={SECRET}"),
+    ("surrogate-then-needle", f"token={SECRET}{_SURROGATE_HIGH}"),
+    ("lone-surrogate-then-needle", f"{_SURROGATE_HIGH}{SECRET}"),
+    ("requests-text-with-surrogate",
+     f"Max retries exceeded with url: /robot/send?access_token={SECRET}{_SURROGATE_HIGH}"),
+    ("aiohttp-text-with-surrogate",
+     f"500, message='boom', url='{_URL_WITH_SECRET}'{_SURROGATE_LOW}"),
+]
+
+
+class TestScrubberIsTotalOnHostileBatch:
+    """r3：孤立代理字符原样穿过会让下游任何 utf-8 日志 handler 抛异常。"""
+
+    def test_never_raises_and_output_is_str_and_encodable(self):
+        scrub = _scrubber()
+        for label, value in _HOSTILE_TEXTS:
+            rendered = scrub(value)
+            assert isinstance(rendered, str), label
+            try:
+                rendered.encode("utf-8")
+            except UnicodeEncodeError as exc:  # pragma: no cover - 修复前在此响
+                raise AssertionError(
+                    f"{label}: 清洗结果写不进 utf-8 日志（{exc}）：{rendered!r}"
+                ) from exc
+
+    def test_is_idempotent_on_the_batch(self):
+        scrub = _scrubber()
+        for label, value in _HOSTILE_TEXTS:
+            once = scrub(value)
+            assert scrub(once) == once, f"{label}: 非幂等（{once!r}）"
+
+    def test_never_returns_a_credential_bearing_input_verbatim(self):
+        scrub = _scrubber()
+        for label, value in _HOSTILE_TEXTS:
+            rendered = scrub(value)
+            _assert_clean(rendered, f"hostile[{label}]")
+            if isinstance(value, str) and SECRET in value:
+                assert rendered != value, f"{label}: 带凭据的输入被原样返回"
+
+    def test_mask_policy_url_control_on_the_same_batch(self):
+        """对照（定验口径）：``_mask_policy_url`` 在同批次上本就 total/可编码/幂等。"""
+        render = _policy_renderer()
+        for label, value in _HOSTILE_TEXTS:
+            rendered = render(value)
+            assert isinstance(rendered, str), label
+            rendered.encode("utf-8")
+            assert render(rendered) == rendered, f"{label}: 非幂等"
+            _assert_clean(rendered, f"policy[{label}]")

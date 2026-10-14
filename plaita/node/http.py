@@ -240,7 +240,17 @@ def _mask_policy_url(url: object) -> str:
 #: 任意文本里的绝对 URL（``scheme://…``）——第三方 HTTP 客户端会把请求 URL 写进
 #: 自己的异常文本（``requests``：``Max retries exceeded with url: /path?query``；
 #: ``aiohttp``：``url='http://host/path?query'``）。
-_ABSOLUTE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>()\[\]{},;]+")
+#:
+#: ``[`` / ``]`` **不在**排除集里（``#159`` r3）：authority 可以是方括号形态
+#: （``http://[::1]:999999/…``、``http://[webhook.internal]:8443/…``）。旧判据把
+#: 方括号排除在外 ⇒ 匹配在 ``[`` 处截断甚至完全不匹配 ⇒ 原文整段穿过清洗器
+#: （``aiohttp``/``yarl`` 的 ``InvalidURL`` 文本就是**裸 URL**）。放宽后一律走
+#: :func:`_render_absolute_url_ref`；宁可多掩一段（列表 repr 的尾 ``]`` 会被一并
+#: 吃进 path、渲染成 ``…/***]``），也不放原文过去。
+_ABSOLUTE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>(){},;]+")
+#: :func:`_render_absolute_url_ref` 端点兜底只承认的 scheme（与
+#: ``url_redaction._SAFE_SCHEMES`` 同一集合；``redis://`` / ``ftp://`` 仍退化常量）。
+_ENDPOINT_SCHEMES = frozenset({"http", "https"})
 #: ``url:`` / ``url=`` 之后的 scheme-relative 引用（只有 requests 这一族这样写）。
 _RELATIVE_URL_RE = re.compile(r"(?P<prefix>\burl[=:]\s*['\"]?)(?P<ref>/[^\s'\"<>()\[\]{},;]*)")
 #: path segment / query / fragment 的掩码占位（与 url_redaction 同一语义）。
@@ -263,6 +273,55 @@ def _mask_relative_url_ref(ref: str) -> str:
     return rendered
 
 
+def _mask_bracketed_absolute_url(token: str) -> str:
+    """**方括号 authority** 绝对 URL 的端点兜底（``#159`` r3）。
+
+    ``urlsplit`` 把方括号里的内容当 IPv6 字面量校验：``[webhook.internal]`` /
+    ``[]`` 会抛 ``ValueError('… does not appear to be an IPv4 or IPv6 address')``，
+    于是 :func:`_mask_webhook_url` 依契约退化为 ``UNPRINTABLE_URL``——**安全**，但
+    把「哪个端点」也一起丢了（运维看不到被拒/失败的 ``host:port``）。
+
+    兜底只保留 ``scheme://authority``：**丢弃 userinfo**（`#88` 的口令形态）与
+    path/query/fragment 全部。触发面刻意收窄到「authority 是方括号形态却不是合法
+    IPv6 字面量」这一族（``http://[webhook.internal]:8443/…``、``http://[]:8443/…``），
+    且 scheme 仍限 :data:`_ENDPOINT_SCHEMES` —— ``redis://`` / ``ftp://`` 等其余
+    退化行为与 r2 逐字一致。
+
+    与 :func:`_mask_policy_url` 的暴露面**同源**：后者对非方括号 URL 一样原样保留
+    authority（``http://host/***``），所以「保留 authority」不是新增暴露类；且结果
+    必须 UTF-8 可编码（写不进日志就退化常量，纪律同 ``url_redaction``）。
+    """
+    scheme, sep, rest = token.partition("://")
+    if not sep or scheme.lower() not in _ENDPOINT_SCHEMES:
+        return UNPRINTABLE_URL
+    authority = rest.split("/", 1)[0]
+    authority = authority.split("?", 1)[0].split("#", 1)[0]
+    host = authority.rpartition("@")[2]  # 丢 userinfo（#88 的口令形态）
+    if not host.startswith("["):
+        return UNPRINTABLE_URL
+    rendered = f"{scheme.lower()}://{host}"
+    try:
+        rendered.encode("utf-8")
+    except UnicodeEncodeError:
+        # 同上：不回显异常文本（它带着那个写不进日志的字符）。
+        logger.debug("端点兜底结果无法编码为 UTF-8，退化为安全常量")
+        return UNPRINTABLE_URL
+    return rendered
+
+
+def _render_absolute_url_ref(token: str) -> str:
+    """绝对 URL 匹配串 → 掩码形态：:func:`_mask_policy_url` 优先，退化时端点兜底。
+
+    ``_mask_policy_url`` 是策略 URL 的唯一渲染路径（r2 契约），保留它作为**首选**；
+    只有当它退化（``UNPRINTABLE_URL``）时，才看 :func:`_mask_bracketed_absolute_url`
+    能否把端点救回来。两层都救不回来即 ``UNPRINTABLE_URL``——绝不回原文。
+    """
+    rendered = _mask_policy_url(token)
+    if rendered != UNPRINTABLE_URL:
+        return rendered
+    return _mask_bracketed_absolute_url(token)
+
+
 def _scrub_url_text(text: object) -> str:
     """清洗**任意文本**里的 URL 凭据分量（``NodeException`` 消息构造前的最后一道）。
 
@@ -272,12 +331,17 @@ def _scrub_url_text(text: object) -> str:
     ``logger.warning(…, e)`` / ``exc_info=True``。所以清洗必须在**构造消息时**做
     （在下游 logger 处打补丁正是 r1 守卫的盲区形态）。
 
-    * 绝对 URL 走 :func:`_mask_policy_url`（保 ``scheme://host[:port]``，抹 path
-      的每一段与整条 query/fragment；非 http(s) scheme 退化常量）；
+    * 绝对 URL 走 :func:`_render_absolute_url_ref`（首选 :func:`_mask_policy_url`：
+      保 ``scheme://host[:port]``，抹 path 的每一段与整条 query/fragment；非 http(s)
+      scheme 退化常量；方括号 authority 退化时由端点兜底把 ``host[:port]`` 救回）；
     * ``url: /path?query`` 形态的 scheme-relative 引用按时段掩码。
 
-    **total**：任何输入都返回 ``str``；清洗过程任何异常退化为 ``UNPRINTABLE_URL``，
-    绝不上抛、绝不回原文。非字符串输入先 ``str()``（``_coerce`` 失败同样退化）。
+    **total**（与 ``url_redaction._mask_webhook_url`` 同一判据）：任何输入都返回
+    ``str``；清洗过程任何异常退化为 ``UNPRINTABLE_URL``，绝不上抛、绝不回原文；
+    非字符串输入先 ``str()``（``_coerce`` 失败同样退化）；**结果必须 UTF-8 可编码**
+    ——孤立代理字符（``surrogateescape`` 型输入）原样穿过会让下游任何 utf-8 日志
+    handler 抛 ``UnicodeEncodeError``（`#159` r3 定验：旧实现 21 条敌对输入里 3 条
+    穿过且不可编码），故同样退化为 ``UNPRINTABLE_URL``。
     """
     if not isinstance(text, str):
         try:
@@ -286,13 +350,22 @@ def _scrub_url_text(text: object) -> str:
             logger.debug("异常文本无法字符串化，退化为安全常量")
             return UNPRINTABLE_URL
     try:
-        scrubbed = _ABSOLUTE_URL_RE.sub(lambda m: _mask_policy_url(m.group(0)), text)
+        scrubbed = _ABSOLUTE_URL_RE.sub(
+            lambda m: _render_absolute_url_ref(m.group(0)), text,
+        )
         scrubbed = _RELATIVE_URL_RE.sub(
             lambda m: m.group("prefix") + _mask_relative_url_ref(m.group("ref")), scrubbed,
         )
     except Exception:  # noqa: BLE001 — 清洗失败不得变成新的异常面
         # 同样刻意不回显异常文本：这里正是「把原文抹掉」的那条路径。
         logger.debug("URL 文本清洗失败，退化为安全常量")
+        return UNPRINTABLE_URL
+    try:
+        scrubbed.encode("utf-8")
+    except UnicodeEncodeError:
+        # 孤立代理字符（POSIX ``os.environ`` 的 surrogateescape / 第三方文本里的
+        # 半个字符）：任何 utf-8 handler 都会在这里炸 ⇒ 退化常量，绝不原样放出。
+        logger.debug("清洗结果无法编码为 UTF-8，退化为安全常量")
         return UNPRINTABLE_URL
     return scrubbed
 
