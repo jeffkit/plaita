@@ -1,0 +1,12 @@
+{
+  "name": "84-queue-unbounded",
+  "concern": "①入队后有界",
+  "file": "plaita/server/log_handler.py",
+  "old": "                if len(self._queue) >= self.max_queue:",
+  "new": "                if False:",
+  "rationale": "去掉入队上限 ⇒ 队列无界（#84 规则①）",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_queue_is_bounded_and_drops_counted"
+  ],
+  "issue": "84"
+}

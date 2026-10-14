@@ -1,0 +1,12 @@
+{
+  "name": "84-reinjection-unbounded",
+  "concern": "②回灌有界",
+  "file": "plaita/server/log_handler.py",
+  "old": "                overflow = len(merged) - self.max_queue",
+  "new": "                overflow = 0",
+  "rationale": "失败回灌不再截断 ⇒ 队列可越界（#84 规则②）",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_failure_reinjection_is_bounded"
+  ],
+  "issue": "84"
+}
