@@ -1,0 +1,14 @@
+{
+  "name": "69-r11-view-materialisation-trusts-host",
+  "concern": "#69 r11 finding 6：视图物化只允许 C 槽实现（宿主 ABC 视图子类必须具名拒绝）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    if cls not in _ENGINE_VIEW_TYPES:\n        return False\n    return (_resolved_slot_implementation(cls, \"__iter__\") == \"c\"\n            and _resolved_slot_implementation(cls, \"__len__\") == \"c\")\n",
+  "new": "    return True\n",
+  "rationale": "退回 r3/r8 的行为（对任何被分类为 `_VIEW_TYPES` 实例的对象都 `list(value)`）：宿主导出的 `ItemsView`/`KeysView` 子类会进入 `['view.__iter__','view.__len__']` 并把宿主自述内容物化成数据（实测 `$VAR.k == ['LIE']`）。**r13 重锚（第二条）**：r13 让 `$F.keys` 对 `dict` 只走基类 C 描述符 ⇒ 宿主的 `keys()` 零调用、假视图到不了值参，原 `expect_fail` 里的 `test_dsl_value_argument_from_a_host_view_is_named_refused` 已改写成 `test_dsl_keys_never_calls_the_host_view_factory`（通道关闭断言，变异下**仍通过**）—— 从本表移除；其余三条 `_detach_alias` / 精确类型判决照旧杀死本变异。**r12 重锚**：r12 把精确类型闸门（`cls not in _ENGINE_VIEW_TYPES`）放在同一函数体前面，r11 的 `old`（只剩那两行 `_resolved_slot_implementation` 判定）在变异后**仍然**保留闸门 ⇒ 变异存活；`old` 因此扩到整个函数体（闸门 + 两行判定）。语义不变 —— 仍是「任何自称视图的对象都物化」。若不同步重锚，重放器会判该变异**存活**（r12 首轮 `--all --source head` 正是这样暴露的：48/49）。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11ViewMaterialisationIsNarrowed::test_host_view_subclass_is_named_refused_with_zero_hooks",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11ViewMaterialisationIsNarrowed::test_abc_views_are_refused_even_without_an_override",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12ViewMaterialisationNeedsTheRealLayout::test_only_exact_engine_view_types_are_materialisable"
+  ],
+  "issue": "69"
+}

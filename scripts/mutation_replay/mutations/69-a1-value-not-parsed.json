@@ -1,0 +1,13 @@
+{
+  "name": "69-a1-value-not-parsed",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    path = getattr(target, \"_plaita_path\", None)\n    if path is not None:\n        root_key, segments = path",
+  "new": "    path = getattr(target, \"_plaita_path\", None)\n    if path is not None and position == 0:\n        root_key, segments = path",
+  "rationale": "值参位的根路径不做解析（按非路径 thunk 放行）⇒ 写穿通道恢复",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateEveryArgumentPosition::test_live_root_as_value_argument_is_refused_by_position",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_value_argument_cells_all_refuse"
+  ],
+  "issue": "69"
+}

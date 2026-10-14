@@ -1,0 +1,16 @@
+{
+  "name": "69-r10-datetime-reduce-drops-fold",
+  "concern": "#69 r10 回归：datetime 读取器必须保住 PEP 495 fold（__reduce__ protocol 2 不带它）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    built = datetime(*datetime.__reduce__(value)[1])\n    return datetime.replace(built, fold=datetime.fold.__get__(value))\n",
+  "new": "    return datetime(*datetime.__reduce__(value)[1])\n",
+  "rationale": "把 datetime 读取器换回 r9 的 `datetime(*datetime.__reduce__(value)[1])`：protocol 2 的打包字节不含 fold，DST 歧义墙钟时间被**静默**改成 fold=0（America/New_York 2020-11-01 01:30 的 timestamp 从 1604212200.0 变 1604208600.0），而 `type(copy) is datetime` 与 `copy == value` 都仍成立。由 r10 的 fold 判据（正常 FAILED：test_dst_ambiguous_wall_time_keeps_fold_timestamp_and_offset / test_fold_is_carried_for_naive_and_fixed_offset_forms_too / test_dsl_level_fold_survives_the_detach_copy / test_snapshot_path_keeps_fold_for_members_and_keys）与 r9 A 判据里新增的 fold 样本杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10FoldIsValuePreserving::test_dst_ambiguous_wall_time_keeps_fold_timestamp_and_offset",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10FoldIsValuePreserving::test_fold_is_carried_for_naive_and_fixed_offset_forms_too",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10FoldIsValuePreserving::test_dsl_level_fold_survives_the_detach_copy",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10FoldIsValuePreserving::test_snapshot_path_keeps_fold_for_members_and_keys",
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9ScalarNormalisationUsesBaseProtocols::test_every_scalar_subclass_normalises_to_the_exact_base_with_zero_hooks"
+  ],
+  "issue": "69"
+}

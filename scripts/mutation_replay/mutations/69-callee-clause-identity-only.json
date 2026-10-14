@@ -1,0 +1,13 @@
+{
+  "name": "69-callee-clause-identity-only",
+  "concern": "#69 r3 F2",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    if result_class == _RESULT_LIVE:\n        if may_alias is True:\n            raise ValueError(_MUTATOR_LIVE_REFERENCE_TEMPLATE.format(",
+  "new": "    if result_class == _RESULT_LIVE:\n        if True:  # MUTANT: F2 退回只看 callee 身份（不看实参可达性）\n            raise ValueError(_MUTATOR_LIVE_REFERENCE_TEMPLATE.format(",
+  "rationale": "F2 退回只看 callee 身份（不看实参可达性）⇒ $F.get($VAR,'x') 合法用法被误拒",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateCalleeArgumentReach::test_non_root_callee_arguments_are_allowed",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_non_root_callee_cells_are_allowed"
+  ],
+  "issue": "69"
+}

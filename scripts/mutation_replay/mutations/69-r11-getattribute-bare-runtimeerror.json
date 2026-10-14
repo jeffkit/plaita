@@ -1,0 +1,14 @@
+{
+  "name": "69-r11-getattribute-bare-runtimeerror",
+  "concern": "#69 r11 finding 5：宿主 `__getattribute__` 抛异常不得漏裸 RuntimeError",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    try:\n        for base in PERSISTABLE_CONTAINER_TYPES:\n            if isinstance(value, base):\n                return base\n        for base in PERSISTABLE_SCALAR_TYPES:\n            if isinstance(value, base):\n                return base\n    except Exception as exc:                # noqa: BLE001 - 宿主 __getattribute__ 的任意异常\n        raise _EngineCopyRefused(\n            type(value).__name__,\n            f\"its host class raises from __getattribute__ while isinstance() probes \"\n            f\"the persistable data model ({exc})\",\n        ) from exc\n    return None\n",
+  "new": "    for base in PERSISTABLE_CONTAINER_TYPES:\n        if isinstance(value, base):\n            return base\n    for base in PERSISTABLE_SCALAR_TYPES:\n        if isinstance(value, base):\n            return base\n    return None\n",
+  "rationale": "摘掉 `_canonical_persistable_kind` 的具名包装：`isinstance(v, base)` 回落读 `v.__class__`（`tp_getattro` ⇒ 宿主 `__getattribute__`）时重新漏出**裸** `RuntimeError`（r6 起的旧行为，DSL 可达）。由 finding 5 的正常 FAILED 行杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11RaisingGetattributeIsNamed::test_engine_copy_names_the_raising_getattribute",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11RaisingGetattributeIsNamed::test_canonical_kind_names_the_raising_getattribute",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11RaisingGetattributeIsNamed::test_dsl_loop_condition_refusal_is_named_and_writes_nothing"
+  ],
+  "issue": "69"
+}

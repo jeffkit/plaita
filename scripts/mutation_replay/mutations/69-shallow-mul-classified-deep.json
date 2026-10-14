@@ -1,0 +1,14 @@
+{
+  "name": "69-shallow-mul-classified-deep",
+  "concern": "#69 r3 F1",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    \"insert\", \"insertListItem\", \"items\", \"keys\", \"mul\", \"remove\", \"reverse\",",
+  "new": "    \"insert\", \"insertListItem\", \"items\", \"keys\", \"remove\", \"reverse\",",
+  "rationale": "mul 移出浅分类（列表重复同样别名元素）⇒ 值参被误拒（清单覆盖断言）",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestFreshProducerRegistryGuard::test_shallow_class_covers_every_aliasing_container_producer",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateShallowProducerValues::test_every_shallow_producer_value_is_detached",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_shallow_value_cells_are_detached"
+  ],
+  "issue": "69"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "69-gate-fires-on-isolated-copy",
+  "concern": "#69 r4（re-anchor：r4 给隔离副本加了第二道闸，只关 _path_alias_state 那一处已无效）",
+  "file": "plaita/node/loop.py",
+  "old": "    _plaita_isolated_copy = True\n",
+  "new": "    _plaita_isolated_copy = False  # MUTANT: 隔离副本标记关掉 ⇒ 条件里的就地 mutate 被误拒\n",
+  "rationale": "隔离副本标记关掉（两处闸门同时失效）⇒ 循环条件里唯一的合法 in-place 现场被误拒，且条件里未被 deepcopy 的非引用根（活对象）会被身份探测命中",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateAllowsLegitimateTargets::test_loop_condition_keeps_isolated_copy_contract",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_flow_scopes_refuse_and_loop_condition_stays_isolated"
+  ],
+  "issue": "69"
+}

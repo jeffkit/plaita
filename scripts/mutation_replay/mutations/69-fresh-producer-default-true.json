@@ -1,0 +1,14 @@
+{
+  "name": "69-fresh-producer-default-true",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression.py",
+  "old": "        fresh_producer: bool = False,",
+  "new": "        fresh_producer: bool = True,",
+  "rationale": "fresh_producer 默认改成 True（忘记声明 = 放行，失败方向选错侧）",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateUndeclaredProducers::test_custom_registry_producer_requires_declaration",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateUndeclaredProducers::test_live_reference_functions_are_refused",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_declared_producer_is_allowed_and_undeclared_is_refused"
+  ],
+  "issue": "69"
+}

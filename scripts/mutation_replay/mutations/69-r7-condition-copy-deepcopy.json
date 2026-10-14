@@ -1,0 +1,14 @@
+{
+  "name": "69-r7-condition-copy-deepcopy",
+  "concern": "#69 r7 循环条件隔离副本（引擎自有拷贝是唯一入口）",
+  "file": "plaita/node/loop.py",
+  "old": "        try:\n            loop_ctx[key] = deepcopy(value)\n        except _EngineCopyRefused:\n",
+  "new": "        import copy as _mutant_copy\n        try:\n            loop_ctx[key] = _mutant_copy.deepcopy(value)\n        except _EngineCopyRefused:\n",
+  "rationale": "把循环条件的隔离副本换回 `copy.deepcopy` ⇒ 载荷里 `__deepcopy__`/`__copy__` 返回 self 的 dict/list 子类把**活宿主对象**放进每次求值的 freshness 作用域；verifier 的 Finding 1 反例（`Loop(collection=[1], condition=Condition(field=\"$F.set($INPUT.items[0],'k','v')\"))` + `Evil(dict)`）重新出现。r7 的回归测试既钉白盒（副本是引擎现造的 plain 容器）也钉黑盒（活对象/checkpoint 零写穿、copy 钩子零调用）。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r7_uniformity.py::TestIssue69R7LoopConditionCopy::test_evil_dict_in_the_condition_root_detaches_with_zero_write_through",
+    "tests/unit/test_issue69_r7_uniformity.py::TestIssue69R7LoopConditionCopy::test_evil_list_in_the_condition_root_detaches_with_zero_write_through",
+    "tests/unit/test_issue69_r7_uniformity.py::TestIssue69R7LoopConditionCopy::test_condition_isolation_copy_is_a_plain_engine_owned_object"
+  ],
+  "issue": "69"
+}

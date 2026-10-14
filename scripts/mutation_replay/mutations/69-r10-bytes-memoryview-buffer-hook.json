@@ -1,0 +1,13 @@
+{
+  "name": "69-r10-bytes-memoryview-buffer-hook",
+  "concern": "#69 r10：bytes 读取器不得经过 memoryview（3.12+ 宿主 __buffer__ 能劫持它）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    return bytes.__getitem__(value, slice(None))\n",
+  "new": "    return bytes(memoryview(value))\n",
+  "rationale": "把 bytes 读取器换回 r9 的 `bytes(memoryview(value))`：PEP 688（3.12+）起 memoryview() 会调用宿主 Python 级 __buffer__，实测 3.13.15 上 EvilBytes(bytes) 的 __buffer__ 返回 memoryview(b\"SECRET\") 时读数变成 b\"SECRET\"（同为静默数据损坏）。在 3.11 上由 r10 的**结构性**判据杀死（把 builtins.memoryview 换成会炸的替身，读取器必须不依赖它），在 3.12+ 上另有 __buffer__ 钩子判据。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10ScalarFieldPreservation::test_bytes_reader_does_not_depend_on_memoryview",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10ScalarFieldPreservation::test_bytes_reader_is_immune_to_the_pep688_buffer_hook"
+  ],
+  "issue": "69"
+}

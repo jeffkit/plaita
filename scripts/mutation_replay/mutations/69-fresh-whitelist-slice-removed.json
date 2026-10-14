@@ -1,0 +1,15 @@
+{
+  "name": "69-fresh-whitelist-slice-removed",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    \"slice\", \"sort\", \"values\",",
+  "new": "    \"sort\", \"values\",",
+  "rationale": "浅分类去掉 slice ⇒ 合法浅 producer（值参/目标位）被误拒",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateAllowsLegitimateTargets::test_fresh_producers_are_allowed",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateShallowProducerValues::test_shallow_producer_target_is_still_allowed",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_shallow_value_cells_are_detached",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_allow_half_is_asserted_not_just_refusals"
+  ],
+  "issue": "69"
+}

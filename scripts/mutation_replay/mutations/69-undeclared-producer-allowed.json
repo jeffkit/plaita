@@ -1,0 +1,15 @@
+{
+  "name": "69-undeclared-producer-allowed",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    raise ValueError(_MUTATOR_UNDECLARED_PRODUCER_TEMPLATE.format(\n        func=func_name, callee=callee, arg_note=_argument_note(position)))",
+  "new": "    return None  # MUTANT: 未声明 callee 子句关掉（fail-open）\n    raise ValueError(_MUTATOR_UNDECLARED_PRODUCER_TEMPLATE.format(\n        func=func_name, callee=callee, arg_note=_argument_note(position)))",
+  "rationale": "未声明 callee 子句关掉 ⇒ 未声明 producer 放行（fail-open）",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateUndeclaredProducers::test_live_reference_functions_are_refused",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateUndeclaredProducers::test_custom_registry_producer_requires_declaration",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateCalleeArgumentReach::test_undeclared_zero_arg_callee_stays_fail_closed",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_live_reference_and_undeclared_targets_refuse"
+  ],
+  "issue": "69"
+}

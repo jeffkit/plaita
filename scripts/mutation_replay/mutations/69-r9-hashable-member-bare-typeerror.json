@@ -1,0 +1,12 @@
+{
+  "name": "69-r9-hashable-member-bare-typeerror",
+  "concern": "#69 r9 B 归一化后不可哈希的 set 成员必须具名拒绝（不得漏裸 TypeError: unhashable type）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "        _check_hashable_key(copied, item, f\"{kind_name} member\")",
+  "new": "        hash(copied)",
+  "rationale": "去掉成员的可哈希校验（只留裸 `hash(copied)`）：`class HashableDict(dict): __hash__ = …` 做 set 成员被归一化成普通 dict 后，集合重建抛**裸** `TypeError: unhashable type: 'dict'`（DSL 可达：循环条件引用含该集合的 `$INPUT` ⇒ `NodeExecutionError: TypeError: …`，无归因）。由 r9 的 `test_engine_copy_names_the_set_member_and_the_dict_key`（正常 FAILED）杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9HashableMemberIsNamedRefused::test_engine_copy_names_the_set_member_and_the_dict_key"
+  ],
+  "issue": "69"
+}

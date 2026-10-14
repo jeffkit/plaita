@@ -1,0 +1,13 @@
+{
+  "name": "69-r8-engine-copy-spoofed-bare-typeerror",
+  "concern": "#69 r8 G3 假容器（__class__ 伪造）必须具名拒绝",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    try:\n        return reader(value)\n    except TypeError as exc:\n        raise _EngineCopyRefused(",
+  "new": "    try:\n        return reader(value)\n    except AttributeError as exc:\n        raise _EngineCopyRefused(",
+  "rationale": "让基类协议读取器不再捕获 `TypeError` ⇒ `__class__` 被伪造成 dict/list/… 的宿主对象又漏出裸 `TypeError: descriptor ... doesn't apply to ...`（r7 的 G3），DSL 面也不再是具名的 `not part of the persistable data model`。由 `test_detach_alias_maps_the_spoofed_class_to_the_named_dsl_error`（正常 FAILED）与具名拒绝测试杀死。 **r9 重锚**：r9 Finding B 的具名拒绝让裸的 `except TypeError ... raise _EngineCopyRefused(` 在同一文件出现两次，锚点收窄到基类读取器 `_engine_copy_base_read` 的 `return reader(value)` 上下文；语义不变（仍是「读取器不再捕获 TypeError」）。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r8_snapshot_discipline.py::TestIssue69R8SpoofedClassIsNamed::test_detach_alias_maps_the_spoofed_class_to_the_named_dsl_error",
+    "tests/unit/test_issue69_r8_snapshot_discipline.py::TestIssue69R8SpoofedClassIsNamed::test_engine_copy_refuses_every_spoofed_container_kind_by_name"
+  ],
+  "issue": "69"
+}

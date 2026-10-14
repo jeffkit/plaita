@@ -1,0 +1,13 @@
+{
+  "name": "69-r9-snapshot-member-shared",
+  "concern": "#69 r9 C 快照的 set 成员不得按引用共享（归一化 or 具名拒绝）",
+  "file": "plaita/core/state.py",
+  "old": "    return {_snapshot_key_or_member(item, \"set member\") for item in source}",
+  "new": "    return {item for item in source}",
+  "rationale": "把 set 快照的成员归一化去掉（回到 r8 的 `{item for item in source}`）：`__class__` 伪造的宿主对象做集合成员时**按引用**进快照（`el_is_live=True`，无任何错误），宿主子类成员也不会被归一化。由 r9 的 `test_spoofed_class_as_member_or_key_is_named_refused` 与 `test_host_set_subclass_members_are_not_shared`（正常 FAILED）杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9SnapshotKeyAndMemberAliases::test_spoofed_class_as_member_or_key_is_named_refused",
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9SnapshotKeyAndMemberAliases::test_host_set_subclass_members_are_not_shared"
+  ],
+  "issue": "69"
+}

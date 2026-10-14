@@ -8,7 +8,6 @@ and expression evaluation delegation.
 
 from __future__ import annotations
 
-import copy
 import os
 import uuid
 import logging
@@ -17,7 +16,8 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from plaita.core import types
 from plaita.core.expression import ExpressionEvaluator
-from plaita.core.state import CheckpointState, _LazyRootSnapshot
+from plaita.core.expression_parser import freshness_scope, note_fresh_object
+from plaita.core.state import CheckpointState, _LazyRootSnapshot, _snapshot_value
 
 if TYPE_CHECKING:
     from plaita.node.basic import Node
@@ -327,11 +327,15 @@ class ExecutionContext(_SystemStateAccessors):
         # clean() 立刻用脏值再次爆炸，把「prepare 抛错」放大成「实例报废」。
         env = _safe_environment(flow_allowlist)
         self.expose_env = flow_allowlist
-        # review-fix B2: 必须 deepcopy——浅 copy 的话 run 内节点写 $GLOBAL 嵌套
-        # 值（如 $GLOBAL.cfg.timeout = 30）会穿透进 Flow 定义本体，同一 Flow
-        # 实例的下一次 run 继承脏值（跨 run 状态泄漏）。每次 run 仅此一次
-        # deepcopy，非热路径。
-        global_context = (copy.deepcopy(flow.global_context) if flow.global_context else {})
+        # review-fix B2: 必须是**物化边界**的私有快照——浅 copy 的话 run 内节点写
+        # $GLOBAL 嵌套值（如 $GLOBAL.cfg.timeout = 30）会穿透进 Flow 定义本体，
+        # 同一 Flow 实例的下一次 run 继承脏值（跨 run 状态泄漏）。每次 run 仅此
+        # 一次拷贝，非热路径。plaita#69 r7：这里不再用 ``copy.deepcopy``（它会调用
+        # 宿主类的 ``__deepcopy__``，是活对象混进 freshness 作用域的通道），改走
+        # ``_snapshot_value`` —— 与 checkpoint / ``$PARENT`` / 子流程输入**同一个**
+        # 物化边界：容器按结构重建为精确类型（JSON 不可表达的非容器宿主对象按引用
+        # 共享，它们本就进不了 checkpoint；就地改写由 #69 门 default-deny 拒绝）。
+        global_context = _snapshot_value(flow.global_context) if flow.global_context else {}
         global_context.update({"flow_id": flow.flow_id})
         # $PARENT is a snapshot (checkpoint-safe; not a live state)。
         # C1-2（2026-10 评审修复包 C1）：历史上 ``dict(parent.context)`` 是浅
@@ -354,11 +358,24 @@ class ExecutionContext(_SystemStateAccessors):
         )
 
     def evaluate(self, value: Any) -> Any:
-        if isinstance(value, list):
-            return [self.evaluate(item) for item in value]
-        if isinstance(value, dict):
-            return {k: self.evaluate(v) for k, v in value.items()}
-        return self._evaluate_string(value)
+        # plaita#69 r6：**节点字段求值入口**。外层若已有 freshness 作用域（嵌套
+        # 求值 / parser.evaluate 打开的求值），freshness_scope() 共享它；否则在这里
+        # 开、在返回（含异常）时关——"fresh" 因此严格等于"本次求值期间由引擎新建"。
+        # 容器分支递归调用 ``self.evaluate``（而不是私有副本）：作用域是嵌套共享的，
+        # 语义不变，同时保留作用域/物化面清单里 `self.evaluate` 的登记点。
+        with freshness_scope():
+            if isinstance(value, list):
+                # plaita#69 r5：evaluate 对节点字段里的 list/dict **重建容器**——这个
+                # 新容器是引擎新建的（freshness scope 的登记点之一）。只登记外壳：
+                # 元素可能引用活对象（如 {"k": "$INPUT.cfg"}），它们不是新生对象。
+                result = [self.evaluate(item) for item in value]
+                note_fresh_object(result)
+                return result
+            if isinstance(value, dict):
+                result = {k: self.evaluate(v) for k, v in value.items()}
+                note_fresh_object(result)
+                return result
+            return self._evaluate_string(value)
 
     def _evaluate_string(self, value: Any) -> Any:
         return _resolve_expression_string(

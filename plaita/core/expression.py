@@ -54,7 +54,19 @@ class FunctionDescriptor:
         has_side_effects: ``True`` if the function mutates its input.
             Side-effect functions (e.g. pop, set, delete, clear) are **not
             thread-safe** and must not be used in concurrent execution
-            contexts without external synchronisation.
+            contexts without external synchronisation.  Since plaita#69 the
+            evaluator enforces a runtime gate on this flag: **any argument** of
+            such a mutator that is a live ``$INPUT``/``$NODE``/``$GLOBAL``/
+            ``$PARENT``/``$ENV`` path (or an undeclared producer call) is
+            refused with a named error before evaluation; a *shallow* producer
+            result stored as a value argument is detached (deep-copied).
+        fresh_producer: ``True`` if the function always returns a **new**
+            object whose elements cannot alias the caller's data (plaita#69).
+            A declared producer is treated as ``DEEP`` by the gate; the
+            parser's built-in classification (deep / shallow / live-reference)
+            covers the default registry.  The default is ``False`` so a
+            forgotten declaration **blocks** the call instead of silently
+            allowing a write-through.
         description: Optional human-readable description.
     """
 
@@ -62,6 +74,7 @@ class FunctionDescriptor:
     func: Callable
     category: FunctionCategory
     has_side_effects: bool = False
+    fresh_producer: bool = False
     description: str = ""
 
 
@@ -82,6 +95,7 @@ class ExpressionRegistry:
         category: FunctionCategory,
         *,
         has_side_effects: bool = False,
+        fresh_producer: bool = False,
         description: str = "",
         override: bool = False,
     ) -> None:
@@ -92,6 +106,11 @@ class ExpressionRegistry:
             func: The callable to execute.
             category: Classification category.
             has_side_effects: ``True`` if the function mutates its input.
+            fresh_producer: ``True`` if the function always returns a new
+                object **whose elements cannot alias** the caller's data
+                (plaita#69) — i.e. a *deep* producer, not merely a new
+                container.  Defaults to ``False``: an undeclared producer used
+                as any argument of a mutator is refused (fail-closed).
             description: Human-readable description.
             override: If ``True``, overwrite an existing registration with the
                 same name instead of raising ``ValueError``.  Use this for
@@ -112,6 +131,7 @@ class ExpressionRegistry:
             func=func,
             category=category,
             has_side_effects=has_side_effects,
+            fresh_producer=fresh_producer,
             description=description,
         )
 

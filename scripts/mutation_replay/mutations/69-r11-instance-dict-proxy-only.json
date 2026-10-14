@@ -1,0 +1,14 @@
+{
+  "name": "69-r11-instance-dict-proxy-only",
+  "concern": "#69 r11 clause (iii)：必须判**性质**（存储之外的状态），不是 `__dict__` 代理",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    cls = type(value)\n    shadowed, has_dict_slot = _instance_dict_status(cls)\n    if shadowed:\n        return \"shadowed __dict__\"\n    if declared_instance_slots(cls):\n        return \"instance state (__slots__)\"\n    c_descriptors = declared_c_storage_descriptors(cls)\n    if c_descriptors:\n        return (\"instance state (C descriptor \"\n                + \", \".join(f\"{name} on {layer}\" for name, layer in c_descriptors)\n                + \")\")\n    hooks = declares_instance_state_hooks(cls)\n    if hooks:\n        return \"instance state hooks (\" + \", \".join(hooks) + \")\"\n    if not has_dict_slot:\n        return None\n    try:\n        state = object.__getattribute__(value, \"__dict__\")\n    except AttributeError:                  # 竞态兜底：槽在但没有实例字典\n        return None\n    return \"instance state (__dict__)\" if state else None\n",
+  "new": "    cls = type(value)\n    _shadowed, has_dict_slot = _instance_dict_status(cls)\n    if not has_dict_slot:\n        return None\n    try:\n        state = object.__getattribute__(value, \"__dict__\")\n    except AttributeError:\n        return None\n    return \"instance state (__dict__)\" if state else None\n",
+  "rationale": "把 clause (iii) 退回 r10 的**代理**判据（只看实例 `__dict__`）：`class SlotsItemsLiar(dict): __slots__ = (\"_d\",)` 没有实例 `__dict__` ⇒ 判 False ⇒ `_engine_copy`/`_snapshot_value` 静默产出 `{}`、DSL `$F.set($INPUT.cfg,'k','v')` **报成功**（同族 `HidingDict` 的 `@property __dict__` 也判 False）。r11 的 slots/shadowed 判据杀死它（正常 FAILED 行）。**r12 重锚**：clause (iii) 新增第 5 条（C member/getset 描述符），`old` 随之逐字节更新；语义不变 —— 仍是「退回 r10 的 `__dict__` 代理」。若不同步重锚，重放器会以「定义原文出现 0 次」判该变异失败。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_slots_items_liar_is_named_refused_on_both_copy_paths",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_dsl_loop_condition_refusal_is_named_and_writes_nothing",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_control_shapes_still_normalise"
+  ],
+  "issue": "69"
+}

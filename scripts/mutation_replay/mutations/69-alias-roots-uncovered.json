@@ -1,0 +1,14 @@
+{
+  "name": "69-alias-roots-uncovered",
+  "concern": "#69 r4（re-anchor：r3 锚点被 r4 结构重写淘汰）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "        if root_key in persisted:\n            return True\n        return _non_root_key_identity_alias(context, root_key)",
+  "new": "        return root_key in {f\"{prefix}{n}\" for n in _CANONICAL_ROOT_NAMES}  # MUTANT: 别名映射与身份子句一起丢掉，只认规范名\n",
+  "rationale": "r6：目标位改走 `_is_persisted_key_strict`（单键查）后，这个变异对**目标位**不再有区分力（freshness 独立拒）；但**值参位**没有 freshness 兜底，`_path_alias_state` 仍是唯一拒绝依据 ⇒ 值参轴（294 格，含 `$IN`/`$G` 别名）仍由该变异杀红。",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateRefusesPersistedRoots::test_alias_roots_are_covered",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_alias_root_is_refused_with_alias_path",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_value_argument_cells_all_refuse"
+  ],
+  "issue": "69"
+}

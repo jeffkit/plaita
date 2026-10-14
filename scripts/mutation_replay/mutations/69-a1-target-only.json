@@ -1,0 +1,14 @@
+{
+  "name": "69-a1-target-only",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression_parser.py",
+  "old": "                for position, argument in enumerate(arg_thunks):",
+  "new": "                for position, argument in enumerate(arg_thunks[:1]):",
+  "rationale": "A1 退回只查首参 ⇒ 值参位（活根 / 浅 producer 别名）通道恢复",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateEveryArgumentPosition::test_live_root_as_value_argument_is_refused_by_position",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_value_argument_cells_all_refuse",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateShallowProducerValues::test_every_shallow_producer_value_is_detached"
+  ],
+  "issue": "69"
+}

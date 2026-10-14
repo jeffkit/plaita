@@ -1,0 +1,15 @@
+{
+  "name": "69-r8-snapshot-set-copy-method",
+  "concern": "#69 r8 G1 快照路径的单拷贝纪律（set 子类 copy() 钩子）",
+  "file": "plaita/core/state.py",
+  "old": "    return {_snapshot_key_or_member(item, \"set member\") for item in source}",
+  "new": "    return value.copy()",
+  "rationale": "把快照的 set 重建换回宿主方法 `value.copy()` ⇒ 覆写 `copy()` 返回 `self` 的 set 子类让快照**就是活宿主对象**（r7 的 G1 反例：`$GLOBAL.s is <flow 定义里的 set>` 为真），宿主钩子计数器不再为 0。同时被新增的 AST 兄弟守卫 `snapshot_host_protocol_calls` 与钩子/is 身份测试杀死。 **r9 重锚**：r9 Finding C 把该行改成逐成员归一化（`_snapshot_key_or_member`），锚点随实现重锚到同一语义位点（set 快照改回宿主 `value.copy()`）；语义不变（仍是「set 子类 `copy() -> self` 时快照就是活宿主对象」）。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r8_snapshot_discipline.py::TestIssue69R8SnapshotIsAnEngineOwnedRebuild::test_snapshot_value_rebuilds_hooked_subclasses_as_plain_containers",
+    "tests/unit/test_issue69_r8_snapshot_discipline.py::TestIssue69R8SnapshotIsAnEngineOwnedRebuild::test_global_context_path",
+    "tests/unit/test_issue69_r8_snapshot_discipline.py::TestIssue69R8SnapshotIsAnEngineOwnedRebuild::test_checkpoint_paths",
+    "tests/unit/test_issue69_single_copy_point.py::TestIssue69SingleCopyPoint::test_snapshot_path_uses_only_base_class_protocols"
+  ],
+  "issue": "69"
+}

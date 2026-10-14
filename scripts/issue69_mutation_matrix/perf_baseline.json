@@ -1,0 +1,20 @@
+{
+  "reference": "$INPUT.a.b.c",
+  "tolerance": 2.0,
+  "ratios": {
+    "$F.add($INPUT.a.b.c,1)": 1.25,
+    "$F.set($F.json_loads('{\"q\":0}'),'q',1)": 1.1,
+    "$F.set($PROD.v,'k','v')": 2.0,
+    "$F.set($VAR,'k','v')": 1.6
+  },
+  "_doc": [
+    "plaita#69 r6 —— mutator 路径的常量因子预算。",
+    "判据：tests/unit/test_expression_provenance_perf.py::TestExpressionPerfConstantFactorBudget",
+    "把 expr 的单次求值 µs 除以 reference 的单次求值 µs 得到比值；比值 > ratios[expr] * tolerance 即红。",
+    "比值与机器绝对速度无关（分子分母同步缩放），但**同机同负载**下测量（30000 次/轮 × 7 轮取最小）。",
+    "producing 命令（在 checkout 内）：",
+    "  cd <checkout> && PYTHONPATH=. python scripts/issue69_mutation_matrix/bench_expr.py",
+    "基线值 = 该命令在 r6（本提交）上测得比值的上取整（留 ~10-30% 余量），",
+    "tolerance=2.0 进一步放大容许；负控（人为放慢目标位热路径 40µs）必须红。"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "69-r9-scalar-bool-bare-runtimeerror",
+  "concern": "#69 r9 A 伪造 bool 必须具名拒绝（不得触发宿主 __len__ 漏裸 RuntimeError）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    bool: _scalar_base_bool,",
+  "new": "    bool: bool,",
+  "rationale": "把 bool 的归一化换回内建构造器 `bool(value)`：`__class__` 伪造成 `bool` 的宿主对象会触发它的 `__len__` 覆写，漏出**裸 RuntimeError**（r8 的 A 缺陷），DSL 面也不再是具名的 `not part of the persistable data model`。由 r9 的 `test_spoofed_scalars_are_named_refused_not_bare_runtimeerror` 与 `test_spoofed_bool_and_bytes_are_named_at_the_dsl_boundary` 杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9ScalarNormalisationUsesBaseProtocols::test_spoofed_scalars_are_named_refused_not_bare_runtimeerror",
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9ScalarNormalisationUsesBaseProtocols::test_spoofed_bool_and_bytes_are_named_at_the_dsl_boundary"
+  ],
+  "issue": "69"
+}

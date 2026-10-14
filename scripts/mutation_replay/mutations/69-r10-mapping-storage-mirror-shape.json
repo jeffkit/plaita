@@ -1,0 +1,15 @@
+{
+  "name": "69-r10-mapping-storage-mirror-shape",
+  "concern": "#69 r10 D1：dict 子类\"数据在存储之外\"的镜像形状必须具名拒绝（不得静默 {}）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    overrides = dict_storage_protocol_overrides(cls)\n    if any(name in overrides for name in _DICT_STORAGE_IDENTITY_PROTOCOL):\n        return True\n    return instance_state_signal(value) is not None\n",
+  "new": "    return False\n",
+  "rationale": "把 r9-D 的判据退回**只看 MRO 顺序**：ItemsLiar(dict)（数据在 _d、用 Python 覆写 __iter__/__len__）与 DictFirstMapping(dict, Mapping)（Mapping 排在 dict 之后）判 False ⇒ _engine_copy 与 _snapshot_value 都**静默**产出 {}，DSL _run_loop 报成功（r9-D1）。由 r10 的 D1 判据杀死：两条拷贝路径的具名拒绝、DSL 级不再报成功、实例状态过拒代价三条都是正常 FAILED。（r11 重锚：clause (iii) 的末行从 instance_carries_own_state(value) 改成 instance_state_signal(value) is not None，`old` 随之逐字节更新；语义不变 —— 仍是「退回 r9 的 MRO-only 判据」。）",
+  "expect_fail": [
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10MappingStorageProtocol::test_mirror_shapes_are_named_refused_on_both_copy_paths",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10MappingStorageProtocol::test_dsl_loop_condition_refusal_is_named_and_writes_nothing",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10MappingStorageProtocol::test_instance_state_costs_an_over_refusal_and_that_is_declared",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10MappingStorageProtocol::test_only_the_identity_pair_or_instance_state_triggers_the_extension"
+  ],
+  "issue": "69"
+}

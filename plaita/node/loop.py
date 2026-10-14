@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import re
-from copy import deepcopy
 from typing import Annotated, Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 from pydantic import Field, model_validator
@@ -18,8 +17,25 @@ from ..io import Property
 from .basic import Expression
 from .child import InlineFlow
 from .decide import Condition, ConditionGroup
+from plaita.core.expression_parser import (
+    _EngineCopyRefused,
+    _engine_copy,
+    freshness_scope,
+    note_fresh_closure,
+)
+from plaita.core.state import _LazyRootSnapshot, _snapshot_value
 
 _logger = logging.getLogger(__name__)
+
+#: 每个被条件引用的根键的隔离拷贝（plaita#69 r7）。
+#:
+#: **兼容别名**：这个名字历史上是 ``copy.deepcopy``（ML1 性能修复引入）。r7 起它
+#: 指向**唯一**的数据模型拷贝入口 ``_engine_copy`` —— 绝不再调用宿主的
+#: ``__deepcopy__``/``__copy__``（那是 verifier Finding 1 的活对象通道）。保留模块级
+#: 名字是为了让 ML1-C 的性能钉（``tests/unit/test_mfix_l_loop_context.py`` 对
+#: ``loop_mod.deepcopy`` 打 spy）继续生效：它约束的是"未引用的大负载不被拷贝"，
+#: 与实现无关。
+deepcopy = _engine_copy
 
 
 def _coerce_collection(value: Any) -> List[Any]:
@@ -130,6 +146,18 @@ def _isolated_root_keys(condition: Any, pfx: str) -> Tuple[str, ...]:
     return tuple(keys)
 
 
+class _IsolatedConditionContext(dict):
+    """循环条件求值用的隔离上下文（plaita#69 的 mutate 门按这个标记放行）。
+
+    它是 live ``CheckpointState`` 的顶层浅拷贝、被引用的根键已由**引擎自有结构
+    拷贝**（``_engine_copy``）替换 ⇒ 条件里的就地 mutate 只改副本。标记让
+    ``expression_parser`` 的 #69 门**不需要 import loop** 就能区分「隔离副本」与
+    「持久化数据容器」。
+    """
+
+    _plaita_isolated_copy = True
+
+
 def _condition_context(
     execution,
     condition: Any,
@@ -141,20 +169,40 @@ def _condition_context(
     """构造循环条件求值用的上下文。
 
     顶层浅拷贝 + 注入 LOOP-ITEM/LOOP-INDEX（Loop 另注入 LOOP-RESULT）；
-    随后仅对条件引用到的根键做 deepcopy 替换（写隔离），其余键与
+    随后仅对条件引用到的根键做引擎自有结构拷贝替换（写隔离），其余键与
     execution.context 共享对象（只读）。
+
+    plaita#69 r7：拷贝走**唯一**的数据模型拷贝入口 ``_engine_copy``（r6 起
+    ``copy.deepcopy`` 已从数据路径移除——它会调用宿主类的 ``__deepcopy__``，
+    是活对象混进 freshness 作用域的通道）。不可拷贝的根（含真正的非数据模型
+    宿主对象）**保留活引用且不登记** fresh：就地改写因此被 default-deny 具名
+    拒绝（零写穿），只读条件语义不变——fail-closed，比"悄悄共享活对象"安全。
     """
     pfx = execution.express_prefix
-    loop_ctx = dict(execution.context)
+    loop_ctx = _IsolatedConditionContext(execution.context)
     loop_ctx[f"{pfx}LOOP-ITEM"] = item
     loop_ctx[f"{pfx}LOOP-INDEX"] = index
     if result is not _UNSET:
         loop_ctx[f"{pfx}LOOP-RESULT"] = result
     for key in _isolated_root_keys(condition, pfx):
         try:
-            loop_ctx[key] = deepcopy(loop_ctx[key])
+            value = loop_ctx[key]
         except KeyError:
-            pass  # 条件引用了上下文中不存在的根：与全量 deepcopy 一样缺席，求值期按原语义报 KeyError
+            continue  # 条件引用了上下文中不存在的根：与全量 deepcopy 一样缺席，求值期按原语义报 KeyError
+        if isinstance(value, _LazyRootSnapshot):
+            # 引擎自己的惰性 $PARENT 视图：先物化为 plain dict 再拷贝。
+            value = value.materialize()
+        try:
+            loop_ctx[key] = deepcopy(value)
+        except _EngineCopyRefused:
+            # 非数据模型载荷：无法造出私有副本 ⇒ 保留活引用且**不登记**，
+            # 就地改写落到 default-deny（具名拒绝），读仍可用。
+            continue
+        # plaita#69 r5/r7：隔离副本是引擎新建的（_engine_copy 的产出必然是精确
+        # 类型的容器/标量）——登记为 fresh，循环条件里的就地 mutate（owner 钉住的
+        # 唯一合法 in-place 现场）才能通过 default-deny。登记面是精确类型判据，
+        # 因此这里不可能登记到活对象。
+        note_fresh_closure(loop_ctx[key])
     return loop_ctx
 
 
@@ -185,7 +233,16 @@ class BaseCollectionNode(InlineFlow):
         return values
 
     def _eval_collection(self, execution) -> List[Any]:
-        return _coerce_collection(execution.evaluate(self.collection))
+        # plaita#69 r4（结构半边 1）：集合在**边界**物化——集合元素会作为
+        # item/index 带进每个子执行的 ``$INPUT``；集合若取自活根（``$INPUT.items`` /
+        # ``$NODE.x``），元素就是活持久化图里的对象，子流程里任何就地改写都会写穿。
+        # 物化后子流程只拿到私有副本（与 ``update_node_result`` 同口径）。
+        # plaita#69 r7：**不再**在此登记 fresh。r5/r6 的登记调用点在任何求值作用域
+        # 之外，是 no-op（每轮求值的 fresh ≡ 本次求值由引擎新建）；而把整个子执行包进
+        # 一个作用域会让同一次子执行里"求值 A 造出的对象在求值 B 里仍 fresh"（C2 反例）
+        # 重新成立。故删除死登记：子执行对副本的就地改写具名拒绝（零写穿不变）。
+        snapshot = _snapshot_value(execution.evaluate(self.collection))
+        return _coerce_collection(snapshot)
 
 
 class Loop(BaseCollectionNode):
@@ -211,11 +268,19 @@ class Loop(BaseCollectionNode):
         for item in collection:
             item_execution = execution.get_child_execution()
             last_result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
-            if self.condition and not self.condition.match(
-                _condition_context(execution, self.condition, item=item, index=index, result=last_result),
-                execution.express_prefix,
-            ):
-                break
+            if self.condition:
+                # plaita#69 r6：条件求值是**一次**逻辑求值——隔离副本的物化
+                # （`_condition_context` 的 `_engine_copy` + note_fresh_closure）与条件
+                # 自身的 match 必须在同一个 freshness 作用域里，副本才算"本次求值
+                # 由引擎新建"；否则 match 会另开作用域，副本变为非 fresh 而被拒。
+                with freshness_scope():
+                    matched = self.condition.match(
+                        _condition_context(execution, self.condition, item=item,
+                                           index=index, result=last_result),
+                        execution.express_prefix,
+                    )
+                if not matched:
+                    break
             index += 1
         return last_result
 
@@ -226,11 +291,16 @@ class Loop(BaseCollectionNode):
         for item in collection:
             item_execution = execution.get_child_execution()
             last_result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
-            if self.condition and not self.condition.match(
-                _condition_context(execution, self.condition, item=item, index=index, result=last_result),
-                execution.express_prefix,
-            ):
-                break
+            if self.condition:
+                # r6：同 sync 路径——物化副本与条件 match 同属一次逻辑求值。
+                with freshness_scope():
+                    matched = self.condition.match(
+                        _condition_context(execution, self.condition, item=item,
+                                           index=index, result=last_result),
+                        execution.express_prefix,
+                    )
+                if not matched:
+                    break
             index += 1
         return last_result
 
@@ -405,9 +475,23 @@ class Reduce(BaseCollectionNode):
         Field(description="归纳的初始累积值，通常为表达式或字面量（如 0 / \"\"）；未设置时以首元素为初始值"),
     ] = None
 
+    def _eval_initial(self, execution):
+        """``Reduce.initial`` 的边界物化（plaita#69 r5）。
+
+        r4 的结构半边 1 漏了这条：``execution.evaluate(self.initial)`` 的结果**按引用**
+        作为 ``$INPUT[0]`` / ``first`` 交给子执行，活对象（如 ``$INPUT.cfg`` 的某个子对象）
+        因此能进子流程，并在子流程的嵌套表达式串作用域里被就地写穿（verifier X2，
+        写穿发生在随后 KeyError 之前）。物化：子执行只看私有副本。
+
+        plaita#69 r7：**不再**登记 fresh（该调用点在求值作用域之外，r6 起就是 no-op；
+        包住整个子执行会重开 C2 通道）。子执行对副本的就地改写具名拒绝，父活 state 与
+        checkpoint 零写穿。
+        """
+        return _snapshot_value(execution.evaluate(self.initial))
+
     def execute(self, execution):
         collection = self._eval_collection(execution)
-        result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
+        result = self._eval_initial(execution) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
         array_input = self._child_is_array_input()
         for item in items:
@@ -424,7 +508,7 @@ class Reduce(BaseCollectionNode):
 
     async def arun(self, execution):
         collection = self._eval_collection(execution)
-        result = execution.evaluate(self.initial) if self.initial is not None else collection[0]
+        result = self._eval_initial(execution) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
         array_input = self._child_is_array_input()
         for item in items:
@@ -484,8 +568,10 @@ class While(InlineFlow):
         if self.condition is None:
             return index == 0
         # While 语义不注入 LOOP-RESULT（条件可引用 $LOOP-ITEM / $LOOP-INDEX）
-        loop_ctx = _condition_context(execution, self.condition, item=result, index=index)
-        return bool(self.condition.match(loop_ctx, execution.express_prefix))
+        # r6：物化副本与条件 match 同属一次逻辑求值（见 Loop.execute 的同款说明）。
+        with freshness_scope():
+            loop_ctx = _condition_context(execution, self.condition, item=result, index=index)
+            return bool(self.condition.match(loop_ctx, execution.express_prefix))
 
     def execute(self, execution):
         index = 0

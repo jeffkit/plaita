@@ -1,0 +1,14 @@
+{
+  "name": "69-r12-c-storage-cls-layer-not-exempt",
+  "concern": "#69 r12 clause (iii) 第 5 条：声明层就是 cls 自己的 C 类型（精确 defaultdict/OrderedDict）必须豁免",
+  "file": "plaita/core/expression_parser.py",
+  "old": "            if klass is cls and not python_defined:\n",
+  "new": "            if False:\n",
+  "rationale": "#69 r12 clause (iii) 第 5 条：扩展类型**自己**声明的槽必须豁免。r13 把豁免条件改成布局问句 `klass is cls and not _is_python_defined_class(cls)`（heap ∧ ¬immutable）；**r13 重锚**：旧 `old`（`if klass is cls: continue` / r13 首稿的 `and not heap`）在新代码里 0 次，重放器会判锚点陈旧。重锚后语义不变 —— 去掉整条豁免 ⇒ 精确 `defaultdict`/`OrderedDict` 自己 `tp_dict` 里的槽也被算成额外存储 ⇒ 已验证的负控契约被推翻（`defaultdict(int, {'a': 1})` 被误拒、`declared_c_storage_descriptors(defaultdict)` 非空）。由白盒与负控的正常 FAILED 行杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12CStorageDescriptorIsTheProperty::test_the_declaring_layer_being_cls_itself_is_exempt",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12CStorageDescriptorIsTheProperty::test_white_box_predicate_is_mechanically_discriminating",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12CStorageDescriptorIsTheProperty::test_negative_controls_still_normalise"
+  ],
+  "issue": "69"
+}

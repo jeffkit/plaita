@@ -1,0 +1,14 @@
+{
+  "name": "69-freshness-path-plan-off",
+  "concern": "#69 r5 freshness（路径目标位）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "            return _FreshnessPlan(label=rendered, root=root_key)",
+  "new": "            return None  # MUTANT: 路径目标位不做 freshness 校验（只靠 r1–r4 名字/身份层）",
+  "rationale": "路径目标位的 freshness 校验关掉 ⇒ 任意键名/任意深度的活子对象（X1 的嵌套串作用域）重新可写穿",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_x1_verbatim_is_refused_and_writes_nothing",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_every_container_position_refuses",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_host_bound_non_root_key_is_refused_by_provenance"
+  ],
+  "issue": "69"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "69-freshness-registration-off",
+  "concern": "#69 r5 freshness（登记侧）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "def _fresh_note(obj: Any) -> None:\n    \"\"\"Mark *obj* as engine-created **in the active evaluation scope**.\"\"\"\n    scope = _FRESH_SCOPE.get()\n    if scope is None:\n        return                            # outside an evaluation: fail-closed\n    key = id(obj)",
+  "new": "def _fresh_note(obj: Any) -> None:\n    \"\"\"Mark *obj* as engine-created **in the active evaluation scope**.\"\"\"\n    return  # MUTANT: 登记侧关掉 ⇒ 一切目标都证不出 fresh（fail-closed 误拒合法用法）\n    scope = _FRESH_SCOPE.get()\n    if scope is None:\n        return\n    key = id(obj)",
+  "rationale": "freshness 登记侧关掉 ⇒ 引擎新建的容器也不 fresh，合法用法（同一次求值里的 $VAR / producer / 循环条件）被误拒",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_engine_bound_values_are_allowed_by_construction",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_non_root_callee_cells_are_allowed",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateAllowsLegitimateTargets::test_non_root_variable_keeps_in_place_semantics",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateAllowsLegitimateTargets::test_loop_condition_keeps_isolated_copy_contract"
+  ],
+  "issue": "69"
+}

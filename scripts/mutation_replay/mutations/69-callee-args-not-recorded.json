@@ -1,0 +1,13 @@
+{
+  "name": "69-callee-args-not-recorded",
+  "concern": "#69 r3 F2",
+  "file": "plaita/core/expression_parser.py",
+  "old": "        thunk._plaita_args = tuple(arg_thunks)          # plaita#69 r3 F2: callee-arg reach",
+  "new": "        # MUTANT: callee args not recorded (F2 provenance lost)",
+  "rationale": "F2 的实参溯源机制关掉 ⇒ 所有非 DEEP callee 无实参可证 ⇒ fail-closed 误拒合法用法",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateCalleeArgumentReach::test_non_root_callee_arguments_are_allowed",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_non_root_callee_cells_are_allowed"
+  ],
+  "issue": "69"
+}

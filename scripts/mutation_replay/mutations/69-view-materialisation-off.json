@@ -1,0 +1,13 @@
+{
+  "name": "69-view-materialisation-off",
+  "concern": "#69 r3 F1",
+  "file": "plaita/core/expression_parser.py",
+  "old": "_VIEW_TYPES = (KeysView, ValuesView, ItemsView)",
+  "new": "_VIEW_TYPES = ()",
+  "rationale": "dict view 不再物化 ⇒ deepcopy 失败：keys/values/items 值参按 fail-closed 被拒",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateShallowProducerValues::test_every_shallow_producer_value_is_detached",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_shallow_value_cells_are_detached"
+  ],
+  "issue": "69"
+}

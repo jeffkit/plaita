@@ -1,0 +1,15 @@
+{
+  "name": "69-r12-c-storage-descriptor-trusted",
+  "concern": "#69 r12 clause (iii) 第 5 条：非 cls 层声明的 C member/getset 描述符必须算额外存储",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    found: List[Tuple[str, str]] = []\n    python_defined = _is_python_defined_class(cls)\n    for klass in _mro_before_dict(cls):\n        for name, implementation in _class_namespace(klass).items():\n            if name in _SLOT_PLACEHOLDERS:\n                continue\n            if not isinstance(implementation, _C_ON_OBJECT_STORAGE_DESCRIPTOR_TYPES):\n                continue\n            if klass is cls and not python_defined:\n                # 扩展类型自己的 tp_members/tp_getset：是它自己的存储口径，\n                # 负控契约要求照常归一化（旧措辞把这条豁免说成\"C 特性\"，改成布局问句）。\n                continue\n            found.append((name, klass.__name__))\n    return tuple(sorted(set(found)))\n",
+  "new": "    return ()\n",
+  "rationale": "退回 r11 的四条判据（on-object 描述符一条都不看）：`class N_DDLiar(defaultdict)` 把数据全放进 `default_factory` 的 `member_descriptor` 槽，而 `dict.items(v) == {}`、实例 `__dict__` 也是空的 ⇒ 四条旧判据全不命中 ⇒ `_engine_copy({'m': v}) == {'m': {}}`、`_snapshot_value` 同、DSL `$F.set($INPUT.cfg,'k','v')` **报成功**（`raised=None`）而 `cfg` 未变。r13 同理关掉 `HiddenSlotsLiar`（三个隐藏形态）。**r13 重锚**：函数体从「跳过 cls 层」改成「按 heap ∧ ¬immutable 豁免扩展类型自己的槽」，旧 `old` 0 次。由 r12/r13 的正常 FAILED 行杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12CStorageDescriptorIsTheProperty::test_c_member_descriptor_liar_is_named_refused_on_both_copy_paths",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12CStorageDescriptorIsTheProperty::test_c_member_descriptor_getitem_liar_is_named_refused_on_both_copy_paths",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12CStorageDescriptorIsTheProperty::test_dsl_loop_condition_refusal_is_named_and_writes_nothing",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12CStorageDescriptorIsTheProperty::test_benign_defaultdict_subclass_is_the_declared_over_refusal"
+  ],
+  "issue": "69"
+}

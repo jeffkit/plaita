@@ -1,0 +1,12 @@
+{
+  "name": "69-unclassified-new-registration",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression.py",
+  "old": "        (\"getListItem\", _fn_getListItem, \"Get item by index\"),",
+  "new": "        (\"getListItem\", _fn_getListItem, \"Get item by index\"),\n        (\"copyList\", list, \"Copy list (unclassified mutant)\"),",
+  "rationale": "默认注册表新增一个未分类函数 ⇒ 清单守卫测试必须红（+1 即红）",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestFreshProducerRegistryGuard::test_default_registry_is_fully_classified"
+  ],
+  "issue": "69"
+}

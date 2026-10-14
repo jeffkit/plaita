@@ -1,0 +1,13 @@
+{
+  "name": "69-r11-slots-placeholders-are-state",
+  "concern": "#69 r11 clause (iii)：`__slots__ = ()` 与只含 `__dict__`/`__weakref__` 的形态算空",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    return tuple(name for name in names if name not in _SLOT_PLACEHOLDERS)\n",
+  "new": "    return tuple(names)\n",
+  "rationale": "把 `__dict__`/`__weakref__` 占位项也算成额外存储：`WeakrefOnlySlotsDict`/`DictSlotPlaceholderDict`/`BothPlaceholdersDict` 被误拒（`NodeSpec` 是 `__slots__ = ()`，空元组不受影响）。由白盒负控与 normalise 负控的正常 FAILED 行杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_white_box_signal_is_mechanically_discriminating",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_control_shapes_still_normalise"
+  ],
+  "issue": "69"
+}

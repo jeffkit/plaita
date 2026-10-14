@@ -1,0 +1,13 @@
+{
+  "name": "69-r11-metaclass-attribute-protocol-trusted",
+  "concern": "#69 r11 clause (iii)：不得经元类 `__getattribute__` 读 `__mro__`/类命名空间",
+  "file": "plaita/core/expression_parser.py",
+  "old": "def _real_mro(cls: type) -> Tuple[type, ...]:\n    \"\"\"``cls`` 的**真实** MRO（``tp_mro``），不经元类 ``__getattribute__``。\"\"\"\n    return tuple(_REAL_MRO_GETTER.__get__(cls, type(cls)))\n\n\ndef _class_namespace(klass: type) -> Any:\n    \"\"\"``klass`` 的**真实**类命名空间（``tp_dict`` 的 mappingproxy），不经元类钩子。\"\"\"\n    return _REAL_CLASS_DICT_GETTER.__get__(klass, type(klass))\n",
+  "new": "def _real_mro(cls: type) -> Tuple[type, ...]:\n    \"\"\"``cls`` 的**真实** MRO（``tp_mro``），不经元类 ``__getattribute__``。\"\"\"\n    return cls.__mro__\n\n\ndef _class_namespace(klass: type) -> Any:\n    \"\"\"``klass`` 的**真实**类命名空间（``tp_dict`` 的 mappingproxy），不经元类钩子。\"\"\"\n    return vars(klass)\n",
+  "rationale": "把真实 MRO / 类命名空间换回普通属性访问（`cls.__mro__` / `vars(klass)`）：宿主元类可以抛异常（漏**裸** `RuntimeError`）或**说谎**（把 `__mro__` 换成 `(dict, object)`、`__dict__` 换成 `{}`）—— 后者把声明了 `__slots__` 的基类从判据里抹掉，重新静默产出 `{}`（阻塞反例换个通道）。实测 dec5b96 上两种谎话都成立；r11 走 C 描述符 `type.__dict__['__mro__']/['__dict__']` 后都具名拒绝。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_lying_metaclass_cannot_hide_the_slots_base",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_raising_metaclass_does_not_leak_a_bare_runtimeerror"
+  ],
+  "issue": "69"
+}

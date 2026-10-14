@@ -1,0 +1,12 @@
+{
+  "name": "69-r11-snapshot-probe-bare-runtimeerror",
+  "concern": "#69 r11 finding 5：快照路径的 isinstance 探测同样不得漏裸异常",
+  "file": "plaita/core/state.py",
+  "old": "    try:\n        return isinstance(value, classes)\n    except Exception as exc:                # noqa: BLE001 - 宿主 __getattribute__ 的任意异常\n        raise StateSnapshotError(message=(\n            f\"state snapshot cannot probe {type(value).__name__!r}: its host class \"\n            f\"raises from __getattribute__ while isinstance() reads __class__ \"\n            f\"({exc})\")) from exc\n",
+  "new": "    return isinstance(value, classes)\n",
+  "rationale": "摘掉 `state._snapshot_isinstance` 的具名包装：`_snapshot_value(<宿主钩子抛异常的对象>)` 重新漏出**裸** `RuntimeError`（r6 起，DSL 可达）而不是 `StateSnapshotError`。由 finding 5 的正常 FAILED 行杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11RaisingGetattributeIsNamed::test_nested_and_snapshot_paths_name_it_too"
+  ],
+  "issue": "69"
+}

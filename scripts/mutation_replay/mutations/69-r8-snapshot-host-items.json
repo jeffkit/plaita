@@ -1,0 +1,14 @@
+{
+  "name": "69-r8-snapshot-host-items",
+  "concern": "#69 r8 G1 快照路径的单拷贝纪律（宿主 items() 钩子）",
+  "file": "plaita/core/state.py",
+  "old": "        return iter(dict.items(value))",
+  "new": "        return iter(value.items())",
+  "rationale": "把快照的 dict 读取换回宿主方法 `value.items()` ⇒ 覆写 `items()` 的 dict 子类的钩子被真实调用（r7 的 G1 反例之一）；AST 兄弟守卫 `snapshot_host_protocol_calls` 与钩子计数器测试都必须杀它。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r8_snapshot_discipline.py::TestIssue69R8SnapshotIsAnEngineOwnedRebuild::test_snapshot_value_rebuilds_hooked_subclasses_as_plain_containers",
+    "tests/unit/test_issue69_r8_snapshot_discipline.py::TestIssue69R8SnapshotIsAnEngineOwnedRebuild::test_global_context_path",
+    "tests/unit/test_issue69_single_copy_point.py::TestIssue69SingleCopyPoint::test_snapshot_path_uses_only_base_class_protocols"
+  ],
+  "issue": "69"
+}

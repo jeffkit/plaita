@@ -1,0 +1,14 @@
+{
+  "name": "69-r10-datetime-microsecond-dropped",
+  "concern": "#69 r10 字段丢失类：datetime 拷贝必须逐字段保真（不许悄悄清零某个分量）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    return datetime.replace(built, fold=datetime.fold.__get__(value))\n",
+  "new": "    return datetime.replace(built, microsecond=0, fold=datetime.fold.__get__(value))\n",
+  "rationale": "把 fold 补回那一跳顺手清零 microsecond：副本的分量不再与原件逐字段相等（微秒丢成 0）。由 r10 的**全可观察字段**判据杀死（observable_fields 含全部 7 分量 + tzinfo + fold + timestamp/utcoffset/tzname）。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10ScalarFieldPreservation::test_datetime_all_fields_including_fold_and_tzinfo_identity",
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10FoldIsValuePreserving::test_dst_ambiguous_wall_time_keeps_fold_timestamp_and_offset",
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9ScalarNormalisationUsesBaseProtocols::test_every_scalar_subclass_normalises_to_the_exact_base_with_zero_hooks"
+  ],
+  "issue": "69"
+}

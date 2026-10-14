@@ -1,0 +1,611 @@
+{
+  "plaita/core/context.py::ExecutionContext.evaluate::note_fresh_object::pos1::kw[]": {
+    "callee": "note_fresh_object",
+    "file": "plaita/core/context.py",
+    "kind": "fresh-register",
+    "kwargs": "",
+    "line": 351
+  },
+  "plaita/core/context.py::ExecutionContext.evaluate::note_fresh_object::pos1::kw[]::#1": {
+    "callee": "note_fresh_object",
+    "file": "plaita/core/context.py",
+    "kind": "fresh-register",
+    "kwargs": "",
+    "line": 355
+  },
+  "plaita/core/context.py::ExecutionContext.evaluate::self.evaluate::pos1::kw[]": {
+    "callee": "self.evaluate",
+    "file": "plaita/core/context.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 350
+  },
+  "plaita/core/context.py::ExecutionContext.evaluate::self.evaluate::pos1::kw[]::#1": {
+    "callee": "self.evaluate",
+    "file": "plaita/core/context.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 354
+  },
+  "plaita/core/context.py::ExecutionContext.setup_flow::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/core/context.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 317
+  },
+  "plaita/core/context.py::_resolve_expression_string::evaluator.evaluate::pos3::kw[]": {
+    "callee": "evaluator.evaluate",
+    "file": "plaita/core/context.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 144
+  },
+  "plaita/core/context.py::_resolve_expression_string::parent.evaluate::pos1::kw[]": {
+    "callee": "parent.evaluate",
+    "file": "plaita/core/context.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 147
+  },
+  "plaita/core/executor.py::FlowExecution.evaluate::self._ctx.evaluate::pos1::kw[]": {
+    "callee": "self._ctx.evaluate",
+    "file": "plaita/core/executor.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 376
+  },
+  "plaita/core/executor.py::FlowExecution.execute::self.run_compatible::pos2::kw[]": {
+    "callee": "self.run_compatible",
+    "file": "plaita/core/executor.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 468
+  },
+  "plaita/core/expression_parser.py::ExpressionParser._compile_variable.thunk::parser.evaluate::pos3::kw[]": {
+    "callee": "parser.evaluate",
+    "file": "plaita/core/expression_parser.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1806
+  },
+  "plaita/core/expression_parser.py::ExpressionParser.parse_function::self.evaluate::pos3::kw[]": {
+    "callee": "self.evaluate",
+    "file": "plaita/core/expression_parser.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 2089
+  },
+  "plaita/core/expression_parser.py::_detach_alias::note_fresh_closure::pos1::kw[]": {
+    "callee": "note_fresh_closure",
+    "file": "plaita/core/expression_parser.py",
+    "kind": "fresh-register",
+    "kwargs": "",
+    "line": 1210
+  },
+  "plaita/core/expression_parser.py::_note_fresh_result::note_fresh_closure::pos1::kw[]": {
+    "callee": "note_fresh_closure",
+    "file": "plaita/core/expression_parser.py",
+    "kind": "fresh-register",
+    "kwargs": "",
+    "line": 991
+  },
+  "plaita/core/expression_parser.py::_note_fresh_result::note_fresh_object::pos1::kw[]": {
+    "callee": "note_fresh_object",
+    "file": "plaita/core/expression_parser.py",
+    "kind": "fresh-register",
+    "kwargs": "",
+    "line": 995
+  },
+  "plaita/core/flow.py::Flow.arun::Call.arun_compatible::pos3::kw[]": {
+    "callee": "Call.arun_compatible",
+    "file": "plaita/core/flow.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 513
+  },
+  "plaita/core/flow.py::Flow.debug::Call.run_compatible::pos3::kw[]": {
+    "callee": "Call.run_compatible",
+    "file": "plaita/core/flow.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 517
+  },
+  "plaita/core/flow.py::Flow.run::Call.run_compatible::pos3::kw[]": {
+    "callee": "Call.run_compatible",
+    "file": "plaita/core/flow.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 509
+  },
+  "plaita/core/flow.py::parse_and_run::Call.run_compatible::pos3::kw[]": {
+    "callee": "Call.run_compatible",
+    "file": "plaita/core/flow.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 613
+  },
+  "plaita/core/state.py::CheckpointState.from_checkpoint_dict::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/core/state.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 583
+  },
+  "plaita/core/state.py::CheckpointState.to_checkpoint_dict::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/core/state.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 549
+  },
+  "plaita/core/state.py::CheckpointState.update_node_result::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/core/state.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 661
+  },
+  "plaita/core/state.py::_LazyRootSnapshot.__getitem__::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/core/state.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 216
+  },
+  "plaita/io.py::evaluate::Call.evaluate::pos3::kw[]": {
+    "callee": "Call.evaluate",
+    "file": "plaita/io.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 254
+  },
+  "plaita/node/assignment.py::Assignment.execute::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/assignment.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 80
+  },
+  "plaita/node/calculate.py::Function.__call__::evaluate::pos2::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/calculate.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 27
+  },
+  "plaita/node/child.py::InlineFlow.arun::_materialise_child_input::pos1::kw[]": {
+    "callee": "_materialise_child_input",
+    "file": "plaita/node/child.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 81
+  },
+  "plaita/node/child.py::InlineFlow.arun::child_execution.arun_compatible::pos3::kw[]": {
+    "callee": "child_execution.arun_compatible",
+    "file": "plaita/node/child.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 82
+  },
+  "plaita/node/child.py::InlineFlow.arun::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/child.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 81
+  },
+  "plaita/node/child.py::InlineFlow.execute::_materialise_child_input::pos1::kw[]": {
+    "callee": "_materialise_child_input",
+    "file": "plaita/node/child.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 73
+  },
+  "plaita/node/child.py::InlineFlow.execute::child_execution.run_compatible::pos3::kw[]": {
+    "callee": "child_execution.run_compatible",
+    "file": "plaita/node/child.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 74
+  },
+  "plaita/node/child.py::InlineFlow.execute::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/child.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 73
+  },
+  "plaita/node/child.py::ReferenceFlow.arun::_materialise_child_input::pos1::kw[]": {
+    "callee": "_materialise_child_input",
+    "file": "plaita/node/child.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 129
+  },
+  "plaita/node/child.py::ReferenceFlow.arun::child_execution.arun_compatible::pos3::kw[]": {
+    "callee": "child_execution.arun_compatible",
+    "file": "plaita/node/child.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 130
+  },
+  "plaita/node/child.py::ReferenceFlow.arun::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/child.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 129
+  },
+  "plaita/node/child.py::ReferenceFlow.execute::_materialise_child_input::pos1::kw[]": {
+    "callee": "_materialise_child_input",
+    "file": "plaita/node/child.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 121
+  },
+  "plaita/node/child.py::ReferenceFlow.execute::child_execution.run_compatible::pos3::kw[]": {
+    "callee": "child_execution.run_compatible",
+    "file": "plaita/node/child.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 122
+  },
+  "plaita/node/child.py::ReferenceFlow.execute::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/child.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 121
+  },
+  "plaita/node/child.py::_materialise_child_input::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/node/child.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 29
+  },
+  "plaita/node/code.py::CodeNode.execute::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/code.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 1010
+  },
+  "plaita/node/code.py::CodeNode.execute::execution.evaluate::pos1::kw[]::#1": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/code.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 1011
+  },
+  "plaita/node/code.py::CodeNode.execute::execution.evaluate::pos1::kw[]::#2": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/code.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 1012
+  },
+  "plaita/node/concurrent.py::Parallel._resolve_branch_input::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/node/concurrent.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 161
+  },
+  "plaita/node/concurrent.py::Parallel._resolve_branch_input::_snapshot_value::pos1::kw[]::#1": {
+    "callee": "_snapshot_value",
+    "file": "plaita/node/concurrent.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 163
+  },
+  "plaita/node/concurrent.py::Parallel._resolve_branch_input::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/concurrent.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 161
+  },
+  "plaita/node/concurrent.py::Parallel._resolve_branch_input::execution.evaluate::pos1::kw[]::#1": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/concurrent.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 163
+  },
+  "plaita/node/concurrent.py::Parallel.exec_branch::branch_execution.run_compatible::pos3::kw[]": {
+    "callee": "branch_execution.run_compatible",
+    "file": "plaita/node/concurrent.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 190
+  },
+  "plaita/node/concurrent.py::Parallel.exec_branch_async::branch_execution.arun_compatible::pos3::kw[]": {
+    "callee": "branch_execution.arun_compatible",
+    "file": "plaita/node/concurrent.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 461
+  },
+  "plaita/node/decide.py::Condition.match::evaluate::pos3::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/decide.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 67
+  },
+  "plaita/node/decide.py::Condition.match::evaluate::pos3::kw[]::#1": {
+    "callee": "evaluate",
+    "file": "plaita/node/decide.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 77
+  },
+  "plaita/node/end.py::End.execute::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/end.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 65
+  },
+  "plaita/node/event_node.py::EventNode.execute::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/event_node.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 114
+  },
+  "plaita/node/http.py::HTTP._build_response_result::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 1154
+  },
+  "plaita/node/http.py::HTTP.parse_addressing::evaluate::pos2::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1256
+  },
+  "plaita/node/http.py::HTTP.parse_addressing::evaluate::pos2::kw[]::#1": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1262
+  },
+  "plaita/node/http.py::HTTP.parse_body::evaluate::pos2::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1277
+  },
+  "plaita/node/http.py::HTTP.parse_delegate::evaluate::pos2::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1234
+  },
+  "plaita/node/http.py::HTTP.parse_delegate::evaluate::pos2::kw[]::#1": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1240
+  },
+  "plaita/node/http.py::HTTP.parse_header::evaluate::pos2::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1305
+  },
+  "plaita/node/http.py::HTTP.parse_query::evaluate::pos2::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1288
+  },
+  "plaita/node/http.py::HTTP.parse_url::evaluate::pos2::kw[]": {
+    "callee": "evaluate",
+    "file": "plaita/node/http.py",
+    "kind": "explore-scope",
+    "kwargs": "",
+    "line": 1317
+  },
+  "plaita/node/loop.py::BaseCollectionNode._eval_collection::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/node/loop.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 244
+  },
+  "plaita/node/loop.py::BaseCollectionNode._eval_collection::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/loop.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 244
+  },
+  "plaita/node/loop.py::Filter.arun::item_execution.arun_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.arun_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 427
+  },
+  "plaita/node/loop.py::Filter.execute::item_execution.run_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.run_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 417
+  },
+  "plaita/node/loop.py::Find.arun::item_execution.arun_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.arun_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 457
+  },
+  "plaita/node/loop.py::Find.execute::item_execution.run_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.run_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 448
+  },
+  "plaita/node/loop.py::Loop.arun::item_execution.arun_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.arun_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 293
+  },
+  "plaita/node/loop.py::Loop.execute::item_execution.run_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.run_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 270
+  },
+  "plaita/node/loop.py::Map.arun.run_one_async::child.arun_compatible::pos2::kw[index,item]": {
+    "callee": "child.arun_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 384
+  },
+  "plaita/node/loop.py::Map.execute.run_one::child.run_compatible::pos2::kw[index,item]": {
+    "callee": "child.run_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 370
+  },
+  "plaita/node/loop.py::Reduce._eval_initial::_snapshot_value::pos1::kw[]": {
+    "callee": "_snapshot_value",
+    "file": "plaita/node/loop.py",
+    "kind": "materialise",
+    "kwargs": "",
+    "line": 490
+  },
+  "plaita/node/loop.py::Reduce._eval_initial::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/loop.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 490
+  },
+  "plaita/node/loop.py::Reduce.arun::item_execution.arun_compatible::pos2::kw[first,second]": {
+    "callee": "item_execution.arun_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "first,second",
+    "line": 519
+  },
+  "plaita/node/loop.py::Reduce.arun::item_execution.arun_compatible::pos3::kw[]": {
+    "callee": "item_execution.arun_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 517
+  },
+  "plaita/node/loop.py::Reduce.execute::item_execution.run_compatible::pos2::kw[first,second]": {
+    "callee": "item_execution.run_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "first,second",
+    "line": 504
+  },
+  "plaita/node/loop.py::Reduce.execute::item_execution.run_compatible::pos3::kw[]": {
+    "callee": "item_execution.run_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "",
+    "line": 501
+  },
+  "plaita/node/loop.py::While.arun::item_execution.arun_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.arun_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 597
+  },
+  "plaita/node/loop.py::While.execute::item_execution.run_compatible::pos2::kw[index,item]": {
+    "callee": "item_execution.run_compatible",
+    "file": "plaita/node/loop.py",
+    "kind": "child-input",
+    "kwargs": "index,item",
+    "line": 582
+  },
+  "plaita/node/loop.py::_condition_context::note_fresh_closure::pos1::kw[]": {
+    "callee": "note_fresh_closure",
+    "file": "plaita/node/loop.py",
+    "kind": "fresh-register",
+    "kwargs": "",
+    "line": 205
+  },
+  "plaita/node/redis.py::RedisNode.execute::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/redis.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 32
+  },
+  "plaita/node/redis.py::RedisNode.execute::execution.evaluate::pos1::kw[]::#1": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/redis.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 54
+  },
+  "plaita/node/redis.py::RedisNode.execute::execution.evaluate::pos1::kw[]::#2": {
+    "callee": "execution.evaluate",
+    "file": "plaita/node/redis.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 53
+  },
+  "plaita/server/nodes/approval_node.py::ApprovalNode._resolve_value::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/server/nodes/approval_node.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 197
+  },
+  "plaita/server/nodes/delay_node.py::DelayNode._resolve_delay_time::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/server/nodes/delay_node.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 88
+  },
+  "plaita/server/nodes/http_callback_node.py::HttpCallbackNode._resolve_value::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/server/nodes/http_callback_node.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 230
+  },
+  "plaita/server/nodes/kafka_queue_node.py::KafkaQueueNode._resolve_value::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/server/nodes/kafka_queue_node.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 151
+  },
+  "plaita/server/nodes/redis_queue_node.py::RedisQueueNode._resolve_value::execution.evaluate::pos1::kw[]": {
+    "callee": "execution.evaluate",
+    "file": "plaita/server/nodes/redis_queue_node.py",
+    "kind": "state-scope",
+    "kwargs": "",
+    "line": 134
+  }
+}

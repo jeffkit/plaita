@@ -1,0 +1,14 @@
+{
+  "name": "69-shallow-value-detach-off",
+  "concern": "#69 r3 F1",
+  "file": "plaita/core/expression_parser.py",
+  "old": "            return (callee, position, source_path, source_root)",
+  "new": "            return None  # MUTANT: 浅 producer 值不去别名（F1 通道恢复）",
+  "rationale": "F1 核心子句关掉：浅 producer 值存进非根键时不再深拷贝 ⇒ $VAR.k[0] is $INPUT.items[0]",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateEveryArgumentPosition::test_shallow_producer_value_is_detached_not_aliased",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateShallowProducerValues::test_every_shallow_producer_value_is_detached",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_shallow_value_cells_are_detached"
+  ],
+  "issue": "69"
+}

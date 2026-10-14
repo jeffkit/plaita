@@ -1,0 +1,12 @@
+{
+  "name": "69-deep-json-loads-classified-unknown",
+  "concern": "#69 r3 F1",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    \"json_loads\", \"len\", \"length\", \"lower\", \"lstrip\", \"lt\", \"lte\", \"mod\", \"ne\",",
+  "new": "    \"len\", \"length\", \"lower\", \"lstrip\", \"lt\", \"lte\", \"mod\", \"ne\",",
+  "rationale": "深 producer json_loads 未分类 ⇒ 深逃生口被 fail-closed 误拒（深通道闭合的反向锚）",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateEveryArgumentPosition::test_deep_producer_wrapped_root_is_allowed_and_aliases_nothing"
+  ],
+  "issue": "69"
+}

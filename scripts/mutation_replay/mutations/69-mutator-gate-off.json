@@ -1,0 +1,15 @@
+{
+  "name": "69-mutator-gate-off",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    path = getattr(target, \"_plaita_path\", None)\n    if path is not None:\n",
+  "new": "    return None  # MUTANT: 门被关掉 ⇒ 静默放行（断言杀）\n    path = getattr(target, \"_plaita_path\", None)\n    if path is not None:\n",
+  "rationale": "把 #69 的就地 mutate 门改回静默放行：五根写穿恢复，测试必须以断言杀",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateRefusesPersistedRoots::test_every_root_shape_is_refused_by_name",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateUndeclaredProducers::test_live_reference_functions_are_refused",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateUndeclaredProducers::test_custom_registry_producer_requires_declaration",
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateShallowProducerValues::test_every_shallow_producer_value_is_detached"
+  ],
+  "issue": "69"
+}

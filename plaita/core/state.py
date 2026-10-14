@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from .errors import StateSnapshotError
+from .types import PERSISTABLE_SCALAR_TYPES
 
 
 # Sentinel for "field has not been set / key is absent". Distinct from ``None``
@@ -74,6 +75,52 @@ _SNAPSHOT_PATH_HEAD = 4
 _SNAPSHOT_PATH_TAIL = 2
 _SNAPSHOT_DONE = object()
 
+#: r9 Finding C 快速通道：**精确**不可变标量作为 dict 键 / set 成员时无需归一化
+#: （它们已经是数据模型值，且不可变 ⇒ 不是活别名通道）。``tuple``/``frozenset``
+#: 不在此列：它们内部还可能嵌宿主子类对象，必须递归过一遍 ``_engine_copy``。
+_SNAPSHOT_EXACT_KEY_TYPES = frozenset(PERSISTABLE_SCALAR_TYPES)
+
+
+def _snapshot_key_or_member(value: Any, role: str) -> Any:
+    """dict 键 / set 成员：与 :func:`~plaita.core.expression_parser._engine_copy`
+    同一判据 —— 归一化成普通数据模型值，否则**具名**拒绝（r9 Finding B/C）。
+
+    r8 只把**值**路径改成了基类协议重建；键与集合成员仍按引用塞进快照
+    （``key_is_live=True`` / ``el_is_live=True``，无任何错误）：宿主 ``dict`` 子类做
+    **键**、宿主/``__class__`` 伪造对象做**成员**都会以活别名留在快照里。此外
+    ``class HashableDict(dict): __hash__ = ...`` 做成员时会被归一化成普通 ``dict``，
+    重建集合那一跳抛裸 ``TypeError: unhashable type: 'dict'``（DSL 可达）。
+
+    r9 选择 (a)：键/成员走与 ``_engine_copy`` **完全相同**的归一化入口（宿主类被
+    归一化掉、类伪造被具名拒绝），归一化后不可哈希的（例如 ``HashableDict`` →
+    ``dict``）同样具名拒绝（``StateSnapshotError``，带真实类型名）。因此快照里
+    不再有按引用共享的键/成员。唯一仍按引用共享的只剩**非容器宿主对象**
+    （它们不是容器，重建语义不适用；见 :func:`_snapshot_value`）。
+    """
+    if type(value) in _SNAPSHOT_EXACT_KEY_TYPES:
+        return value
+    # 延迟导入：state.py 是 checkpoint 层的轻量依赖，不为此把 pyparsing 拉进
+    # import 图；同时这也是"单一拷贝入口"纪律的复用而非第二条实现。
+    from .expression_parser import _EngineCopyRefused, _engine_copy, unhashable_offender
+
+    try:
+        copied = _engine_copy(value)
+    except _EngineCopyRefused as exc:
+        raise StateSnapshotError(message=(
+            f"state snapshot cannot represent {type(value).__name__!r} as a {role}: "
+            f"{exc}")) from exc
+    try:
+        hash(copied)
+    except TypeError as exc:
+        # r10：嵌套 offender（例如 ``(HashableDict({...}),)`` 做键）要点名**真实**
+        # 宿主类型，而不是外层的 ``'tuple'``；与 ``_engine_copy`` 的具名拒绝同判据。
+        offender_copied, offender_original = unhashable_offender(copied, value)
+        raise StateSnapshotError(message=(
+            f"state snapshot cannot represent {type(offender_original).__name__!r} as a "
+            f"{role}: it normalises to an unhashable {type(offender_copied).__name__} "
+            f"({exc})")) from exc
+    return copied
+
 
 def _snapshot_path(frames: List[tuple], key: Any) -> str:
     """把迭代栈还原成 ``$['a'][0]['b']`` 形态的容器路径（错误/占位符专用）。
@@ -90,11 +137,135 @@ def _snapshot_path(frames: List[tuple], key: Any) -> str:
     return "$" + "".join(f"[{segment!r}]" for segment in segments)
 
 
-def _snapshot_items(value: Any):
-    """dict → ``iter(items())``；list/tuple → ``enumerate``（键即下标）。"""
+#: plaita#69 r8 —— 快照路径的**基类协议白名单**。
+#:
+#: 快照是**引擎自有重建**：只允许通过下面这些 C 基类方法读取宿主容器
+#: （``dict.items(sub)`` / ``list.__iter__(sub)`` / ``tuple.__iter__(sub)`` /
+#: ``set.__iter__(sub)`` / ``frozenset.__iter__(sub)`` / ``<base>.__len__(sub)``）。
+#: 这些描述符直接访问 CPython 的容器存储，**不会**落回子类覆写的 ``items`` /
+#: ``__iter__`` / ``__getitem__`` / ``copy``，因此宿主钩子零调用。
+#:
+#: r7 的实现用 ``value.items()`` / ``enumerate(value)`` / ``value.copy()``：
+#: ``set`` 子类把 ``copy()`` 覆写成 ``return self`` 时，快照**就是活宿主对象**
+#: （r8 G1 的 ``HookSet`` 反例，``$GLOBAL.s is <flow 定义里的 set>``）。
+#: 机械守卫见 ``tests/unit/test_issue69_single_copy_point.py`` 的
+#: ``snapshot_host_protocol_calls``（allow-list 即本元组的基类名）。
+_SNAPSHOT_BASE_PROTOCOLS = (dict, list, tuple, set, frozenset)
+
+
+def _snapshot_rebuild_error(value: Any, kind: str, exc: TypeError) -> "StateSnapshotError":
+    """把基类协议对「假容器」抛出的裸 ``TypeError`` 变成**具名**错误（r8 G3）。
+
+    ``__class__`` 被伪造成 ``dict``/``list``/… 的宿主对象能骗过 ``isinstance``，
+    却过不了 C 描述符的实体检查（``descriptor 'items' for 'dict' objects doesn't
+    apply to a 'Liar' object``）。裸 ``TypeError`` 是不可归因的；这里带上真实
+    ``type(value).__name__`` 与期望的基类名，仍是 fail-closed（不静默共享活对象）。
+    """
+    return StateSnapshotError(message=(
+        f"state snapshot cannot rebuild {type(value).__name__!r} as {kind}: {exc} "
+        f"(host class spoofing __class__? not a real {kind})"))
+
+
+def _snapshot_mapping_outside_storage_error(value: Any,
+                                            path: Optional[str]) -> "StateSnapshotError":
+    """r9 Finding D / r10 Finding D1：``dict`` 子类的自述内容可能不在真实存储里。
+
+    基类 ``dict.items`` 读的是**真实 dict 存储**（对 ``class M(MutableMapping, dict)``
+    恒空），r7 走 ``Mapping.items`` 却能看到数据 —— r7→r8 之间同一形状的读数从
+    ``{'a': 1}`` 变成 ``{}``，即**静默丢数据**。r10 补上镜像形状：``class
+    ItemsLiar(dict)``（数据在 ``_d``、用 Python 覆写映射协议自述）与
+    ``class DictFirstMapping(dict, Mapping)``（``Mapping`` 排在 ``dict`` 之后）——两者
+    连 MRO 判据都过不了，同样静默产出 ``{}``。引擎的两条拷贝路径都把"真实 ``dict``
+    存储"当数据模型，因此这里**具名**拒绝（并点名被覆写的方法）而不是产出空容器。
+    """
+    from .expression_parser import mapping_storage_refusal_detail
+
+    detail = mapping_storage_refusal_detail(value)
+    where = "" if path is None else f" at path {path}"
+    return StateSnapshotError(message=(
+        f"state snapshot cannot represent {type(value).__name__!r}{where}: this dict "
+        f"subclass {detail}, so the base-class rebuild would silently produce an empty "
+        f"dict (the real dict storage is the data model)"))
+
+
+def _snapshot_isinstance(value: Any, classes: Any) -> bool:
+    """``isinstance`` 的**具名**版本（plaita#69 r11 finding 5，零宿主钩子归因）。
+
+    ``isinstance(v, C)`` 在真实类型不命中时会回落去读 ``v.__class__``（经
+    ``tp_getattro`` ⇒ 宿主 ``__getattribute__``）：宿主把它覆写成抛异常时，快照路径会
+    漏出**裸** ``RuntimeError``（r6 起就存在，DSL 可达）而不是具名
+    :class:`StateSnapshotError`。``type(value)`` 读的是 C 的 ``ob_type`` 槽，不经宿主
+    钩子，所以这里仍然安全。（语义与 ``isinstance`` 一致 —— 依旧采信伪造成容器的
+    ``__class__``，好让 C 基类描述符把它具名拒绝。）
+    """
+    try:
+        return isinstance(value, classes)
+    except Exception as exc:                # noqa: BLE001 - 宿主 __getattribute__ 的任意异常
+        raise StateSnapshotError(message=(
+            f"state snapshot cannot probe {type(value).__name__!r}: its host class "
+            f"raises from __getattribute__ while isinstance() reads __class__ "
+            f"({exc})")) from exc
+
+
+def _snapshot_len(value: Any) -> int:
+    """基类 ``__len__``：覆写 ``__len__`` 的容器子类不影响快照的真实长度。"""
     if isinstance(value, dict):
-        return iter(value.items())
-    return enumerate(value)
+        try:
+            return dict.__len__(value)
+        except TypeError as exc:
+            raise _snapshot_rebuild_error(value, "dict", exc) from exc
+    if isinstance(value, tuple):
+        try:
+            return tuple.__len__(value)
+        except TypeError as exc:
+            raise _snapshot_rebuild_error(value, "tuple", exc) from exc
+    try:
+        return list.__len__(value)
+    except TypeError as exc:
+        raise _snapshot_rebuild_error(value, "list", exc) from exc
+
+
+def _snapshot_set(value: Any) -> Any:
+    """用基类 ``__iter__`` 重建**普通** ``set``/``frozenset``（零宿主钩子）。
+
+    r9 Finding B/C：成员逐个过 :func:`_snapshot_key_or_member`（归一化 or 具名拒绝），
+    不再按引用塞进快照。
+    """
+    if isinstance(value, frozenset):
+        try:
+            source = frozenset.__iter__(value)
+        except TypeError as exc:
+            raise _snapshot_rebuild_error(value, "frozenset", exc) from exc
+        members = {_snapshot_key_or_member(item, "frozenset member") for item in source}
+        return frozenset(members)
+    try:
+        source = set.__iter__(value)
+    except TypeError as exc:
+        raise _snapshot_rebuild_error(value, "set", exc) from exc
+    return {_snapshot_key_or_member(item, "set member") for item in source}
+
+
+def _snapshot_items(value: Any):
+    """dict → ``iter(dict.items(sub))``；list/tuple → 基类 ``__iter__`` + enumerate。
+
+    r8 G1：全部走基类协议（见 ``_SNAPSHOT_BASE_PROTOCOLS``）——宿主覆写的
+    ``items`` / ``__iter__`` 一次都不会被调用；假容器在这里转成具名
+    :class:`StateSnapshotError`（r8 G3）。
+    """
+    if isinstance(value, dict):
+        try:
+            return iter(dict.items(value))
+        except TypeError as exc:
+            raise _snapshot_rebuild_error(value, "dict", exc) from exc
+    if isinstance(value, tuple):
+        try:
+            return enumerate(tuple.__iter__(value))
+        except TypeError as exc:
+            raise _snapshot_rebuild_error(value, "tuple", exc) from exc
+    try:
+        return enumerate(list.__iter__(value))
+    except TypeError as exc:
+        raise _snapshot_rebuild_error(value, "list", exc) from exc
 
 
 def _snapshot_container(root: Any) -> Any:
@@ -102,8 +273,28 @@ def _snapshot_container(root: Any) -> Any:
 
     栈本身就是当前 DFS 路径：``seen_ids`` 只收在场祖先（出栈即移除），所以
     「同一个子容器被两个兄弟键共享」这类 DAG 不会被误判成环，仍按值各拷一份。
+
+    r8 G1：所有读取都是**基类协议**调用（``dict.items`` / ``list.__iter__`` /
+    ``tuple.__iter__`` / ``set.__iter__`` / ``frozenset.__iter__`` / 基类
+    ``__len__``），结果一律是现造的 plain ``dict``/``list``/``tuple``/
+    ``set``/``frozenset`` —— 宿主钩子零调用，快照绝不可能是活宿主对象。
+
+    r9 Finding C/D：dict 的**键**与集合的**成员**也逐个归一化（
+    :func:`_snapshot_key_or_member`），归一化不了/归一化后不可哈希的具名拒绝；
+    "又实现 ``Mapping`` 的 ``dict`` 子类"（数据存在 dict 存储之外）具名拒绝，不再
+    静默产出空 ``dict``。r10 Finding D1：判据补上**镜像形状**（``Mapping`` 排在
+    ``dict`` 之后、或纯 ``dict`` 子类用 Python 覆写映射协议自述）—— 见
+    :func:`~plaita.core.expression_parser.reads_mapping_outside_dict_storage`。
     """
-    root_copy = {} if isinstance(root, dict) else [None] * len(root)
+    # 延迟导入：state.py 是 checkpoint 层的轻量依赖，不为此把 pyparsing 拉进 import 图。
+    from .expression_parser import reads_mapping_outside_dict_storage
+
+    if reads_mapping_outside_dict_storage(root):
+        raise _snapshot_mapping_outside_storage_error(root, None)
+    if _snapshot_isinstance(root, dict):
+        root_copy = {}
+    else:
+        root_copy = [None] * _snapshot_len(root)
     # frame: (src, dst, items_iter, key_in_parent)，root 无父键。栈即当前 DFS 路径，
     # 元组而非 list：每层一个，热路径上这是每容器一次的分配。
     frames: List[tuple] = [(root, root_copy, _snapshot_items(root), None)]
@@ -118,10 +309,13 @@ def _snapshot_container(root: Any) -> Any:
             continue
         key, child = item
         dst = frame[1]
-        if isinstance(child, _LazyRootSnapshot):
+        if _snapshot_isinstance(frame[0], dict):
+            # r9 Finding C：dict 的键也必须归一化，否则宿主对象按引用留在快照里。
+            key = _snapshot_key_or_member(key, "dict key")
+        if _snapshot_isinstance(child, _LazyRootSnapshot):
             dst[key] = child.materialize()
             continue
-        if isinstance(child, (dict, list, tuple)):
+        if _snapshot_isinstance(child, (dict, list, tuple)):
             depth = len(frames)
             if depth > _SNAPSHOT_MAX_DEPTH:
                 raise StateSnapshotError(message=(
@@ -131,21 +325,29 @@ def _snapshot_container(root: Any) -> Any:
             if id(child) in seen_ids:
                 dst[key] = _SNAPSHOT_CYCLE_MARK.format(path=_snapshot_path(frames, key))
                 continue
-            child_copy = {} if isinstance(child, dict) else [None] * len(child)
+            if reads_mapping_outside_dict_storage(child):
+                raise _snapshot_mapping_outside_storage_error(
+                    child, _snapshot_path(frames, key))
+            if _snapshot_isinstance(child, dict):
+                child_copy: Any = {}
+            else:
+                child_copy = [None] * _snapshot_len(child)
             dst[key] = child_copy
-            if isinstance(child, tuple):
+            if _snapshot_isinstance(child, tuple):
                 tuple_fixups.append((dst, key, child_copy))
             seen_ids.add(id(child))
             frames.append((child, child_copy, _snapshot_items(child), key))
             continue
-        if isinstance(child, (set, frozenset)):
-            # 集合元素必可哈希（不可变），浅重建即快照
-            dst[key] = child.copy()
+        if _snapshot_isinstance(child, (set, frozenset)):
+            # 集合元素必可哈希（不可变），基类协议浅重建即快照（r8 G1：不再
+            # ``child.copy()`` —— 覆写 ``copy()`` 返回 self 的 set 子类会把活对象
+            # 塞进快照）。
+            dst[key] = _snapshot_set(child)
             continue
         dst[key] = child
     for parent_dst, key, child_copy in reversed(tuple_fixups):
         parent_dst[key] = tuple(child_copy)
-    if isinstance(root, tuple):
+    if _snapshot_isinstance(root, tuple):
         return tuple(root_copy)
     return root_copy
 
@@ -162,14 +364,43 @@ def _snapshot_value(value: Any) -> Any:
     #107 起改由 :func:`_snapshot_container` 显式栈物化：不再有 Python 递归深度
     限制（深嵌套值不再 ``RecursionError``），容器环按 ``<recursive: path>``
     占位符显式截断，超过 ``_SNAPSHOT_MAX_DEPTH`` 抛 ``StateSnapshotError``。
+
+    plaita#69 r8（单拷贝纪律，G1）：本函数与 ``expression_parser._engine_copy``
+    是**同一种**引擎自有重建——**只**通过基类协议读宿主容器
+    （``dict.items(sub)`` / ``list.__iter__(sub)`` / ``tuple.__iter__(sub)`` /
+    ``set.__iter__(sub)`` / ``frozenset.__iter__(sub)`` / 基类 ``__len__``，见
+    ``_SNAPSHOT_BASE_PROTOCOLS``），因此：
+
+    * 宿主覆写的 ``copy`` / ``items`` / ``__iter__`` / ``__getitem__`` **零调用**
+      （r7 的 ``value.items()`` / ``enumerate(value)`` / ``value.copy()`` 会被
+      ``set`` 子类的 ``copy() -> self`` 骗成"快照就是活对象"）；
+    * 结果必然是**现造的普通** ``dict``/``list``/``tuple``/``set``/``frozenset``，
+      子类被归一化掉，快照与活对象 ``is`` 永不相等；
+    * 产出因而满足 freshness 登记面的精确类型判据（``type(x) is …``，见
+      ``expression_parser._is_walkable_container``），
+      ``loop._condition_context`` / ``concurrent`` 的 ``note_fresh_closure``
+      只可能登记到引擎现造的对象；
+    * 唯一按引用共享的是**非容器宿主对象**（它们不是容器，重建语义不适用）；
+      ``__class__`` 被伪造成容器的"假容器"过不了基类描述符，抛具名
+      :class:`StateSnapshotError`（含真实类型名），绝不静默共享（r8 G3）。
+
+    plaita#69 **r9 Finding C 更正**：r8 的这段措辞把例外写成"唯一的例外是非容器宿主
+    对象"，但当时 **dict 的键**与 **set/frozenset 的成员**仍按引用进快照
+    （``key_is_live=True`` / ``el_is_live=True``）—— 宿主 ``dict`` 子类做键、宿主/
+    ``__class__`` 伪造对象做成员时，快照里确实留着活别名。r9 起键/成员也过
+    :func:`_snapshot_key_or_member`（与 ``_engine_copy`` 同一归一化入口，归一化不了
+    或归一化后不可哈希的**具名**拒绝，见 r9 Finding B），所以例外确实只剩非容器
+    宿主对象。另外 r9 Finding D：``class M(MutableMapping, dict)``（数据存在 dict
+    存储之外）具名拒绝，不再静默产出空 ``dict``。
     """
-    if isinstance(value, _LazyRootSnapshot):
+    if _snapshot_isinstance(value, _LazyRootSnapshot):
         return value.materialize()
-    if isinstance(value, (dict, list, tuple)):
+    if _snapshot_isinstance(value, (dict, list, tuple)):
         return _snapshot_container(value)
-    if isinstance(value, (set, frozenset)):
-        # 集合元素必可哈希（不可变），浅重建即快照
-        return value.copy()
+    if _snapshot_isinstance(value, (set, frozenset)):
+        # 集合元素经 _snapshot_key_or_member 归一化（r9 C）：结果必然是普通
+        # set/frozenset，且宿主覆写的 copy()/__iter__ 零调用；假容器 → 具名错误。
+        return _snapshot_set(value)
     return value
 
 
@@ -242,6 +473,14 @@ class _LazyRootSnapshot(Mapping):
         return f"_LazyRootSnapshot({dict(self)!r})"
 
     def __deepcopy__(self, memo: Dict[int, Any]) -> Dict[Any, Any]:
+        # issue69-single-copy: protocol-hook
+        # plaita#69 r7：这是 plaita/ 里**唯一**允许调用 copy 模块的位置，而且它是
+        # 一个**协议钩子**（外部对引擎惰性视图调用 ``copy.deepcopy`` 时的兼容实现），
+        # 不是 DSL 数据路径的拷贝调用点——数据路径一律走
+        # ``expression_parser._engine_copy``（守卫见
+        # tests/unit/test_issue69_single_copy_point.py）。DSL 路径不再 deepcopy 任何
+        # ``_LazyRootSnapshot``：``loop._condition_context`` 先 ``materialize()`` 再
+        # ``_engine_copy``，所以宿主类的 ``__deepcopy__`` 没有入口。
         return {k: copy.deepcopy(self[k], memo) for k in self}
 
 

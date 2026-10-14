@@ -1,0 +1,14 @@
+{
+  "name": "69-root-path-check-off",
+  "concern": "#69 r4（re-anchor：r3 锚点被 r4 结构重写淘汰）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "        if root_key in persisted:\n            return True\n        return _non_root_key_identity_alias(context, root_key)",
+  "new": "        return False  # MUTANT: 活状态的五根路径子句整条关掉 ⇒ 本体/子路径写穿恢复\n",
+  "rationale": "r6：目标位改走 `_is_persisted_key_strict`；活状态的五根子句对**值参位**仍是唯一拒绝依据 ⇒ 值参轴 294 格（含别名根）由该变异杀红。",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateRefusesPersistedRoots::test_every_root_shape_is_refused_by_name",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_persisted_root_cells_all_refuse",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_value_argument_cells_all_refuse"
+  ],
+  "issue": "69"
+}

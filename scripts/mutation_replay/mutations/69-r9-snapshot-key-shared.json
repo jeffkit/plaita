@@ -1,0 +1,13 @@
+{
+  "name": "69-r9-snapshot-key-shared",
+  "concern": "#69 r9 C 快照的 dict 键不得按引用共享（归一化 or 具名拒绝）",
+  "file": "plaita/core/state.py",
+  "old": "            key = _snapshot_key_or_member(key, \"dict key\")",
+  "new": "            key = key",
+  "rationale": "把 dict 键的归一化去掉（回到 r8 的活键直通）：宿主 str 子类 / `__class__` 伪造对象做键时**按引用**进快照（`key_is_live=True`，无错误）。由 r9 的 `test_spoofed_class_as_member_or_key_is_named_refused`（键那一半）与 `test_host_str_subclass_key_is_normalised_not_shared`（正常 FAILED）杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9SnapshotKeyAndMemberAliases::test_spoofed_class_as_member_or_key_is_named_refused",
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9SnapshotKeyAndMemberAliases::test_host_str_subclass_key_is_normalised_not_shared"
+  ],
+  "issue": "69"
+}

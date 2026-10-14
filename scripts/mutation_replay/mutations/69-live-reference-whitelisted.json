@@ -1,0 +1,14 @@
+{
+  "name": "69-live-reference-whitelisted",
+  "concern": "#69 r3",
+  "file": "plaita/core/expression_parser.py",
+  "old": "_SHALLOW_PRODUCER_FUNCTIONS = frozenset({\n    \"add\", \"addListItem\", \"append\", \"extend\", \"getDictKeys\", \"getDictValues\",\n    \"insert\", \"insertListItem\", \"items\", \"keys\", \"mul\", \"remove\", \"reverse\",\n    \"slice\", \"sort\", \"values\",\n})\n\n#: May return one of the arguments' own objects (a live reference).\n_LIVE_REFERENCE_FUNCTIONS = frozenset({\n    \"get\", \"getDictValue\", \"getListItem\", \"ifelse\", \"and\", \"or\",\n})",
+  "new": "_SHALLOW_PRODUCER_FUNCTIONS = frozenset({\n    \"add\", \"addListItem\", \"append\", \"extend\", \"get\", \"getDictKeys\", \"getDictValues\",\n    \"insert\", \"insertListItem\", \"items\", \"keys\", \"mul\", \"remove\", \"reverse\",\n    \"slice\", \"sort\", \"values\",\n})\n\n#: May return one of the arguments' own objects (a live reference).\n_LIVE_REFERENCE_FUNCTIONS = frozenset({\n    \"getDictValue\", \"getListItem\", \"ifelse\", \"and\", \"or\",\n})",
+  "rationale": "把 $F.get 从 live 引用挪进浅分类（仍互斥）⇒ 目标位放行、写穿 $INPUT",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateUndeclaredProducers::test_live_reference_functions_are_refused",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_live_reference_and_undeclared_targets_refuse",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69GeneratedMatrix::test_generated_callee_root_value_cells_refuse"
+  ],
+  "issue": "69"
+}

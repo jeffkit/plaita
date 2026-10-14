@@ -17,6 +17,7 @@ from plaita.core.parallel_executor import (
 )
 from plaita.node import Node
 from plaita.node.decide import Branch
+from plaita.core.state import _snapshot_value
 from plaita.core.strategies import ExecutionMode
 
 # re-export
@@ -155,8 +156,18 @@ class Parallel(Node):
             # @flow DSL 生成的 PARALLEL 分支没有显式 input 字段；继承父流程 INPUT
             # 使子流程能用 INPUT.x 访问父流程的输入（与 @childflow + CHILD 的语义一致）。
             input_key = f"{execution.express_prefix}{execution.express_input_name}"
-            return execution.evaluate(input_key)
-        return execution.evaluate(pb.input)
+            # plaita#69 r4（结构半边 1）：无显式 input 的分支继承父 ``$INPUT``——历史上
+            # 是**同一个活对象**，分支里任何就地改写都直接写穿父运行态。边界物化。
+            snapshot = _snapshot_value(execution.evaluate(input_key))
+        else:
+            snapshot = _snapshot_value(execution.evaluate(pb.input))
+        # plaita#69 r7：**不再**登记 fresh。r5/r6 的 ``note_fresh_closure(snapshot)``
+        # 在任何求值作用域之外（本函数由 exec_branch 调用，父求值早已返回；worker 线程
+        # 里更没有父作用域），r6 起就是 no-op。语义明确为：分支子执行对该私有副本的
+        # 就地改用具名拒绝（default-deny），父运行态与 checkpoint 零写穿。这也纠正了
+        # r6 文档把原因归给"ContextVar 不跨线程"的错误因果——``mode="coroutine"`` 在
+        # MainThread 里同样被拒，根因是调用点不在任何作用域内。
+        return snapshot
 
     def exec_branch(self, pb: ParallelBranch, execution, branch_execution=None):
         """执行并行节点的分支flow

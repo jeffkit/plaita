@@ -1,0 +1,13 @@
+{
+  "name": "69-r10-decimal-exponent-dropped",
+  "concern": "#69 r10 字段丢失类：Decimal 的符号/系数/**指数**都要保真",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    return Decimal(Decimal.__str__(value))\n",
+  "new": "    return Decimal(Decimal.__str__(value).split(\"E\")[0])\n",
+  "rationale": "`Decimal.__str__` 往返本可逐字保住符号/系数/指数；这里把指数部分砍掉（1.5E+3 -> 1.5），值直接变了。由 r10 的 Decimal 字段判据杀死（is_signed + as_tuple（含 exponent）+ str()）。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r10_value_preserving_scalars.py::TestIssue69R10ScalarFieldPreservation::test_decimal_sign_coefficient_exponent_and_str",
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9ScalarNormalisationUsesBaseProtocols::test_every_scalar_subclass_normalises_to_the_exact_base_with_zero_hooks"
+  ],
+  "issue": "69"
+}

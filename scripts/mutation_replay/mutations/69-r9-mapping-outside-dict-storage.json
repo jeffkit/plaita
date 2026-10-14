@@ -1,0 +1,12 @@
+{
+  "name": "69-r9-mapping-outside-dict-storage",
+  "concern": "#69 r9 D `MutableMapping` + `dict` 病态形状必须具名拒绝（不得静默丢数据成 {}）",
+  "file": "plaita/core/state.py",
+  "old": "    if reads_mapping_outside_dict_storage(root):",
+  "new": "    if False:",
+  "rationale": "关掉快照路径对该病态形状的检测（回到 r8 的基类重建直通）：`class M(MutableMapping, dict)`（数据在 `_d`、真实 dict 存储恒空）被静默物化成 `{}` —— r7 的 `{'m': {'a': 1}}` 丢了数据。由 r9 的 `test_snapshot_refuses_the_shape_at_root_and_nested`（正常 FAILED）杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9MappingOutsideDictStorage::test_snapshot_refuses_the_shape_at_root_and_nested"
+  ],
+  "issue": "69"
+}

@@ -219,6 +219,244 @@ plaita 内置 60+ 函数，按类别分布在 `ExpressionRegistry` 中：
 
     `pop` / `set` / `delete` / `clear` 等会就地修改输入。在 `Parallel` 并行或共享上下文的异步场景中使用它们可能造成数据竞争——要么串行化访问，要么先拷贝再修改。
 
+!!! danger "五个持久化根不可就地改写（plaita#69，r6：fresh ≡ **本次求值**由引擎新建）"
+
+    就地改写函数（`pop` `delListItem` `setListItem` `set` `delete` `clear`
+    `setDictValue` `delDictValue` `clearDict`）的**目标位**（arg0）只有在
+    **本次逻辑求值**由引擎新建该对象时才允许；否则抛 `ValueError` 并点名完整路径/根，
+    说明 `provenance could not be proven fresh`。原因：活的持久化对象写进去会被序列化进
+    checkpoint 并在恢复后保留（不是纯函数调用）。
+
+    **"fresh" 的确切含义（r6）**：freshness 存在一个随**最外层求值入口**
+    （`ExpressionParser.evaluate` / `ExecutionContext.evaluate`）建立、
+    `finally` 里丢弃的 `ContextVar` 作用域里；嵌套求值（嵌套表达式串、`parse_function`、
+    容器重建）共享同一作用域。所以 **A 次求值里造出的对象，在 B 次求值里一定不是 fresh**
+    ——包括"引擎物化后写进 `$NODE`/checkpoint，下一次求值再就地写它"这种形状（r5 的实现
+    是模块级、进程内的登记，曾经放行这条路径；verifier 的 C2 反例）。合法的就地改写因此
+    必须把**物化与改写放进同一次求值**，例如
+    `$F.set($F.json_loads('{}'),'k','v')` 或
+    `$F.set($X,'k',$F.json_loads($F.json_dumps($INPUT.cfg)))`。
+
+    **哪些类型能进数据模型（r7）**：值参去别名不再用 `copy.deepcopy`，而是引擎自有的
+    结构拷贝（数据路径上**唯一**的拷贝入口）。**接受**：`dict`/`list`/`tuple`/`set`/
+    `frozenset` 与 `plaita.core.types.native_types` 声明的标量 —— `str`/`bool`/`int`/
+    `float`/`Decimal`/`datetime`/`date`/`None`（另加不可变的 `bytes`/`complex`）。
+    **容器/标量子类会被归一化成普通基类值**：`OrderedDict`/`defaultdict`/`Counter` →
+    `dict`，`namedtuple` → `tuple`，`IntEnum` → `int`，`str`/`int` 子类按值转换；拷贝走
+    **基类协议**，所以子类覆写的 `__deepcopy__`/`__copy__`/`items`/`__iter__`/`__getitem__`
+    **一次都不会被调用**。**仍然拒绝**（fail-closed，具名错误
+    `ValueError: … not part of the persistable data model …` 并点名类型）：真正属于非数据
+    模型的**可变**对象与容器 —— 自定义 `MutableMapping` 实现、`bytearray`、不透明的宿主
+    类实例、dict view（`d.keys()`）等。这样"detached 副本"永远不可能偷偷就是活对象本身。
+    典型地，`$INPUT.amount` 是 `Decimal` 时 `$F.set($F.json_loads('{}'),'k',$F.add($INPUT.amount,1))`
+    **可用**（`number` 类型包含 `Decimal`；r6 曾误拒，r7 修复）。
+
+    **r10 补记（逐字段保真 + "存储之外的自述"）**：① 标量子类的归一化按**全部可观察字段**
+    判等，不是只看 `type`/`==`：`datetime` 子类连 PEP 495 的 `fold` 一起带过 —— DST 歧义
+    墙钟时间（`America/New_York` 2020-11-01 01:30 出现两次）的 `fold=1` 必须得到正确的
+    `timestamp()`/UTC 偏移（EST, 1604212200.0）；r9 曾静默丢成 `fold=0`（EDT,
+    1604208600.0，`==`/`hash()` 都看不出来）。`Decimal` 的符号/系数/指数、`date` 的
+    `year/month/day` 同理逐字段保留。② **数据不在真实 `dict` 存储里**的 `dict` 子类一律
+    **具名拒绝**：MRO 里 `Mapping` 排在 `dict` 之前、或用 Python 覆写 `__iter__`/`__len__`
+    （容器外延声明）、或实例带自己的 `__dict__` 状态（数据放在 `self._d` 这类）—— 这些形状
+    r9 之前会**静默变成空 `dict`**（循环条件副本"成功"但丢数据）。只覆写
+    `items`/`keys`/`values`/`__getitem__` **且没有实例状态**的子类仍按基类存储归一化
+    （r7/r8 契约，宿主覆写零调用）；带实例属性的普通 `dict` 子类会被这条判据**过拒**。
+    **不要用 `dict(...)` 当逃生口（r11 更正，实测）**：`dict(v)` 读的是**真实 dict
+    storage**（即 `real dict storage`，基类 `dict.items`），对"数据在别处"的形状（`ItemsLiar`/`SlotsItemsLiar`/
+    `HidingDict`）恰好返回 `{}` —— **静默给出错误答案**；`dict(v.items())` 反而**采信宿主
+    自述**（真的调用宿主 `items()`），同样不可信。诚实的恢复方式是从**已知良好**的数据
+    重建，或用 `ctx.evaluate` / producer（`register(..., fresh_producer=True)`）按值物化。
+    回归：`TestIssue69R11DictEscapeHatchIsLossy::test_dict_of_a_refused_shape_is_empty`
+    钉住 `dict(<refused shape>) == {}`，防止这条警告腐烂。
+
+    **r11 补记（clause iii 按性质判定）**：数据在**真实 dict 存储之外**的形状一律具名
+    拒绝，判据是**四条机械可判、零宿主钩子**的析取（`instance_state_signal`）：非空实例
+    `__dict__` ∨ MRO 里 `dict` 之前任一层声明非空 `__slots__`（含字符串简写、继承/合并
+    的槽）∨ 遮蔽的 `__dict__`（`@property def __dict__`）∨ 非 C 槽实现的
+    `__getstate__`/`__setstate__`/`__reduce_ex__`。r10 只测 `__dict__` 这一个**代理**，
+    于是 `class SlotsItemsLiar(dict): __slots__ = ("_d",)` 两条拷贝路径都静默产出 `{}`
+    且 DSL 报成功 —— 而只多一个 `__iter__` 的 `SlotsIterLiar` 却被拒（两者只差**数据
+    放在哪**）。判据只用类对象（MRO 与类命名空间经 C 描述符
+    `type.__dict__["__mro__"]` / `["__dict__"]` 读），所以宿主**元类**覆写
+    `__getattribute__` 也进不来（否则它能让判据漏裸异常，或"说谎"抹掉声明了
+    `__slots__` 的基类、重新静默丢数据）。拒绝消息点名触发的信号
+    （`instance state (__slots__)` / `instance state (__dict__)` /
+    `shadowed __dict__` / `instance state hooks (...)`）。
+
+    **r12 补记（第 5 条：C 布局存储 + 视图物化按真实类型）**：r11 的四条判据仍是**代理**
+    的枚举 —— **C 级成员槽**这条通道看不见：
+
+    ```python
+    class N_DDLiar(defaultdict):
+        def __init__(self, d):
+            super().__init__(None)
+            self.default_factory = dict(d)      # member_descriptor 的 C 槽
+        def items(self): return self.default_factory.items()
+    ```
+
+    `defaultdict.default_factory` 是 `defaultdict.__dict__` 里的 `member_descriptor`
+    （CPython 3.9.6 / 3.10.21 / 3.11.16 / 3.12.14 / 3.13.15 实测都是），数据全在 C 槽里时
+    `dict.items(v) == {}`、实例 `__dict__` 也是空的 ⇒ r11 判 False ⇒ 两条拷贝路径静默产出
+    `{}`、DSL 报成功。r12 的 clause (iii) 增加第 5 条：**MRO 里 `dict` 之前、且声明层不是
+    `cls` 自己**的层声明的 C member/getset 描述符 ⇒ 具名拒绝，信号
+    `instance state (C descriptor default_factory on defaultdict)`。**负控照旧**：精确
+    `OrderedDict`/`defaultdict`/`Counter` 与纯 `dict` 子类仍归一化（精确 `defaultdict` 的
+    `default_factory` 由**它自己**的 `tp_members` 声明，属它自己的存储口径）。**过拒面（明说）**：
+    无数据在存储之外的良性 `defaultdict` **子类**（`class BenignDD(defaultdict): pass`）现在
+    也被拒 —— 与"带实例属性/`__slots__` 的 `dict` 子类被过拒"同级代价，取 fail-closed；
+    `OrderedDict`/`Counter` 的子类不受影响（它们的非 `cls` 层只声明被排除的
+    `__dict__`/`__weakref__`）。同轮还收窄视图物化：只有**精确类型**是引擎自产
+    `dict_keys`/`dict_values`/`dict_items`/`odict_*` 的视图才被 `list(...)` 物化，
+    `KeysView.register(LieList)` 这类 **ABC 注册**（宿主可控）与
+    `class V1(KeysView): __iter__ = dict.__iter__`（解析到别人的 C 描述符）一律具名拒绝 ——
+    后者在 r11 会漏**裸** `TypeError`，前者能把 `KeysView.register(LieBytes)` 的
+    `b'LIE'` 物化成 `[76, 73, 69]`（`_engine_copy` 的口径是 `b'LIE'`，值种类被静默改掉）。
+    返回 `['LIE']` 的假视图不再可能被写成数据（**r13 更正**：这句**被反证** —— `$F.keys`
+    从来不是引擎自产视图，它直接问宿主；`class LieKeysPlainList(dict): def keys(self): return
+    ["LIE"]` 在 r12 下仍报成功、`$VAR == {'k': ['LIE']}` 且宿主 `keys()` 被调用。r13 把这条
+    通道关掉，见下方 r13 补记）。
+    **设计之外（明说）**：数据放在**类属性** / **闭包** / **模块级旁表** / **property 或数据
+    描述符**后面时，零钩子静态判定不把这些当"实例状态"。**r13 理由更正**：旧措辞把这四族的
+    原因统一写成"要看见就得调用宿主代码 / 可达性不可判定"，对**类属性**族**不准确** ——
+    `_class_namespace(klass)` 本来就零钩子地扫过每层真实 `tp_dict`，类属性**看得见**；真实
+    理由是"**这个属性是内容，还是常量/缓存/类级默认值？**"**无法仅从类对象判定**，而把任何
+    非 dunder 类属性都当状态会拒绝语言本身（`__module__`/`__qualname__`/`__doc__`、装饰过的
+    方法、类常量）。闭包 / 模块级旁表 / `property`-或-数据描述符三族才确实需要宿主代码或
+    不可判定的可达性判定。这几族**不在**本判据的承诺范围内。
+
+    **r13 补记（clause iii 第 5 条改成布局判据 + 映射辅助读真实存储）**：
+
+    - **布局，不是名字**：r12 的豁免理由是"C 描述符只可能由拥有 C 布局的类型生成，Python
+      类体写不出 `member_descriptor`" —— **假的**。Python 类体的 `__slots__` 就在该类
+      **自己的** `tp_dict` 里生成 `member_descriptor`；r12 的 clause 2 按**名字** `__slots__`
+      找槽、clause 5 又 `if klass is cls: continue`，于是"隐藏声明、保留槽"就能恢复静默
+      `{}`/DSL 报成功：
+
+      ```python
+      class HiddenSlotsLiar(dict):
+          __slots__ = ("_store",)                      # cls 自己的 member_descriptor
+          def __init__(self, d): self._store = dict(d)
+          def items(self): return self._store.items()
+      del HiddenSlotsLiar.__slots__                    # 抹掉名字，槽还在
+      ```
+
+      r13 改成按**每个层命名空间里真实存在的** `member_descriptor`/`getset_descriptor`
+      判定（忽略 `__dict__`/`__weakref__` 占位名）；豁免只有一条：声明层是 `cls` **自己**
+      **且** `cls` 不是 **Python 定义的类**（判据 = `Py_TPFLAGS_HEAPTYPE` ∧
+      ¬`Py_TPFLAGS_IMMUTABLETYPE`，即 `0x200` ∧ ¬`0x100`）。**注意不能只看 heap 位**：
+      CPython 3.12/3.13 的 `collections.defaultdict` **自己就是堆类型**（裸解释器实测
+      `0x20405740`，heap 位置位），只看 heap 会把精确 `defaultdict` 误拒；`IMMUTABLETYPE`
+      位把它（以及 `dict`/`OrderedDict`）与 Python 类区分开（3.9 上该位未启用，而 3.9 的
+      扩展类型都是静态类型 ⇒ 判据退化成"只看 heap"仍正确；引擎进程里该值观测为
+      `0x20485740`，多出的是无关 version-tag 位）。
+      于是 Python 类自己的槽**无论 `__slots__` 名字是否还在**都被看见（信号
+      `instance state (C descriptor _store on HiddenSlotsLiar)`），子类继承到的扩展类型
+      层槽照旧被看见；精确 `defaultdict`/`OrderedDict`/`Counter` 与纯 `dict` 子类照常归一化。
+    - **`$F.keys`/`$F.values`/`$F.items`（含 `getDictKeys`/`getDictValues`）**：参数是 `dict`
+      时改走**基类 C 描述符**（`dict.keys(v)` 等），宿主的 `keys()`/`values()`/`items()`
+      **零调用**；`LieKeysPlainList` 这类"自述 `['LIE']`、数据在真实存储"的形状现在得到
+      **真实存储**（`$VAR == {'k': ['a']}`），假视图到不了值参。普通 `dict` 的行为逐字不变。
+      非 `dict` 的映射无法在不进入宿主代码的前提下读到真实存储 ⇒ **具名拒绝**
+      （`ValueError`，含 `plaita#69`）。
+    - **快照按引用共享的口径更正**：快照只重建 `dict`/`list`/`tuple`/`set`/`frozenset`，
+      其它值按引用共享 —— 其中**包含容器** `types.MappingProxyType` / `collections.ChainMap`
+      / `collections.UserDict` / `os.environ`（旧措辞"非容器宿主对象"是错的）。它们按引用
+      共享是因为重建要猜构造协议；在只读快照路径上安全，且**不是数据通道**：DSL 路径的
+      `_engine_copy` 对这四个**具名拒绝**（不在可持久化数据模型里）。
+
+    **破坏性收紧（r2 起）**：不只是目标位，把活根当**值**传进去同样拒绝 ——
+    `$F.set($VAR,'k',$INPUT)` 会把根对象存进 `$VAR`，之后 `$F.set($VAR.k,'x','y')`
+    就能经别名写穿 `$INPUT`。base 上这些写法静默放行且会写穿，升级后必须显式派生副本。
+
+    **浅 producer 的值参会自动去别名（r3）**：`$F.slice(...)` / `$F.reverse(...)` /
+    `$F.values(...)` 等返回的是**新容器但元素仍指向根**。它们作**目标位**仍然可用
+    （mutator 只改新容器自己的条目）；作**值参**且自身实参触达持久根时，值会先经引擎结构
+    拷贝再存入，因此 `$F.set($VAR,'k',$F.slice($INPUT.items,0,1))` 不再让
+    `$VAR.k[0] is $INPUT.items[0]` 成立，后续就地写也碰不到 `$INPUT`。**标量累加**
+    （`$F.set($VAR,'total',$F.add($INPUT.n,1))`，`n` 为 `int`/`float`/`Decimal`）等合法
+    用法不受影响；`Decimal`/`datetime`/`date` 载荷同样走这条路径（r7 起）。
+
+    **callee 只在自身实参触达根时被拒（r3 + r5 运行时身份校验）**：
+    `$F.get($VAR,'x')` / `$F.ifelse(...)` 这类调用如果实参里没有持久根，作目标或值参都
+    放行**当且仅当运行时身份命中 fresh**（即结果确实来自引擎新建的容器）；只有
+    `$F.get($INPUT,'cfg')` 这种实参触达根（或未声明/未分类的 callee）才 fail-closed 拒绝。
+
+    **仍然允许（由构造证明 fresh）**：**同一次求值里**由引擎物化的非根键
+    （`ctx.evaluate` / producer 的结果，且物化与改写属于同一次求值）的就地改写；循环条件
+    里的改写（`Loop`/`While` 把"条件隔离副本的物化 + `Condition.match`"开成**一次**逻辑
+    求值，改写落在副本上，`$LOOP-ITEM` 也被引擎结构拷贝）—— **前提是条件根的整棵子树都是
+    数据模型值**（`dict`/`list`/`tuple`/`set`/`frozenset` + 可持久化标量）；以及对
+    **新对象**的改写——DEEP producer
+    （`$F.json_loads(...)` / `$F.split(...)` 及纯标量函数）、SHALLOW producer
+    （`$F.slice(...)` / `$F.reverse(...)` / `$F.append(...)` / `$F.extend(...)` /
+    `$F.sort(...)` / `$F.add(...)` / `$F.values(...)` …）以及自定义 registry 里
+    `register(..., fresh_producer=True)` 声明的 producer。
+
+    **循环条件根的过拒（r8 文档化，fail-closed）**：条件根里只要含**任何**非数据模型对象
+    （`bytearray`、不透明宿主类实例、自定义 `Mapping`…），引擎就造不出隔离副本：该根
+    **保留活引用且不登记** fresh，因此**该根内任何就地写都会被具名拒绝 —— 包括同根的兄弟
+    纯数据子树**（例如载荷 `{"items": [{"n": 1}], "blob": bytearray(b"x")}` 下
+    `$F.set($INPUT.cfg,'k','v')` 同样被拒，活对象 0 变化）。这是有意的 fail-closed：宁可
+    按整根拒绝，也不"部分物化"出第二条拷贝实现、把活子对象留在引擎自有容器里。要就地改就
+    **先物化要改的部分**：`ctx.evaluate` / producer /
+    `$F.json_loads($F.json_dumps(<part>))`。
+
+    **r9：这个 JSON 往返逃生口是**有损**的（明说，别当无痛 round-trip）**。
+    `$F.json_dumps` 只认 JSON 原生类型，因此：
+
+    * `Decimal` / `datetime` / `date` / `bytes` / `set`（以及 `frozenset`）**直接抛
+      `TypeError`**：`Object of type Decimal is not JSON serializable` —— 逃生口在这
+      些类型上根本不可用；
+    * `tuple` **静默变成 `list`**（`(1, 2)` → `[1, 2]`）；`dict` 的**非 `str` 键**同样
+      被 JSON 语义改写（键被字符串化）。
+
+    按类型选**正确**的替代，不要用 JSON 往返硬扛：
+
+    * `tuple` / `frozenset`：改用 `ctx.evaluate(<part>)` 或自定义 producer
+      （`register(..., fresh_producer=True)`）—— 它们按值物化，不改形状；
+    * `Decimal` / `datetime` / `date`：先**显式转换**成 JSON 可表达的类型
+      （`str` / `int` / `float`）再往返，或整体改用 `ctx.evaluate` / producer；
+    * `bytes` / `set`：`json_dumps` 无解 —— 用 `ctx.evaluate` / producer，或先显式
+      转成 `str` / `list` 再改。
+
+    回归（防止注记腐烂）：`tests/unit/test_issue69_r9_host_object_loopholes.py`
+    的 `TestIssue69R9EscapeHatchIsLossy` 同时钉住 `tuple`→`list`、五类 `TypeError`
+    与本节文字本身。
+
+    **r6/r7 收紧：边界副本不再是 fresh**。子流程 `$INPUT` / 集合 / `Reduce.initial` /
+    `Parallel` 分支输入的私有副本仍然是**深物化的私有快照**（活根无法按引用进入父流程
+    之外的执行），但它们在**父求值**里造出、在子执行（另一次求值）里使用，因此子执行对
+    副本的就地改写会**具名拒绝**（r5 是"改在副本上、不报错"）。r7 删除了这四处**作用域外**
+    的 `note_fresh_closure` 死登记（r6 起就是 no-op），语义不变。父运行态与 checkpoint 的
+    零写穿性质不变，只是由"拒绝"而不是"改副本"来保证。注意 `Parallel` 分支的拒绝**不是**
+    "`ContextVar` 不跨线程"：`mode="coroutine"` 在 MainThread 里同样被拒，根因是边界调用点
+    不在任何求值作用域内。
+
+    **r5/r6 的破坏性收紧（owner 决策边界）**：**宿主直接绑定**的非持久化键不再按键名
+    放行——`ctx.set_state("$V", {"a": 1}); parser.evaluate("$F.set($V,'k','v')", ctx.context)`
+    会被具名拒绝（来源不可证 fresh）。合法写法是**在同一次求值里**把值交给引擎物化：
+    `$F.set($F.json_loads('{}'), …)` / producer 结果（`$F.json_loads($F.json_dumps(...))`）。
+    注意 `ctx.set_state("$V", ctx.evaluate({"a": 1}))` 已**不再**足够——`ctx.evaluate` 是
+    一次独立求值，它的作用域在返回时就丢弃了（r5 曾放行，r6 拒绝）。同理，数据容器里挂
+    **宿主自造副本**（`copy.deepcopy(...)`）也被拒；同一次求值里引擎物化的副本仍放行。
+    verifier 的 T2-1 变体（`ctx.set_state("$V", ctx.get_state("$INPUT")["deep"])`，活子对象
+    从未被当路径终点交出过）同样被拒且零写穿。
+
+    **容器键名与深度不参与判决（r4 身份探测 + r5/r6 freshness）**：把活根挂在**任意键名**、
+    **任意深度**下都无效——`InlineFlow(input={"$myroot": "$INPUT"})` 里的 `"$INPUT"`
+    作为字典值求值就是活根对象；嵌套串 `$F.set($myroot.cfg,'k','v')` 在 r4 由身份探测
+    具名拒绝，在 r5/r6 由 freshness 独立拒绝（r4 的 27 格容器轴在"零登记"下曾 9 格写穿，
+    r5/r6 在零登记/有登记两套状态下判决一致：18 拒 / 9 放行 / 0 写穿）。
+
+    完整分类矩阵（机械生成：378 目标位 + 294 值参位 + 112 浅值参去别名 + 42 callee 触达
+    + 72 非根 callee + 511×2 producer × position 全表，0 格可制造别名；容器键名轴 27×2
+    + 14 个多位置探针 + **90** 个作用域/物化调用点清单；性能守卫覆盖 mutator 路径并用
+    checked-in 基线抓常量因子回归）：
+    `docs/issue69-mutation-matrix.md`。
+    重算：`PYTHONPATH=. python scripts/issue69_mutation_matrix/table.py` 与
+    `probes.py` / `scope_inventory.py` / `bench_expr.py`。
+
 !!! warning "未注册的函数名求值为 'undefined' 字符串"
 
     `$F` 是作用域注册表：调用未注册（或拼写错）的函数名**不会报错**，而是把整

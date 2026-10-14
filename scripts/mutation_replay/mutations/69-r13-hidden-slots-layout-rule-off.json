@@ -1,0 +1,16 @@
+{
+  "name": "69-r13-hidden-slots-layout-rule-off",
+  "concern": "#69 r13 clause (iii) 第 5 条的豁免必须按**布局**（堆类型 vs 静态 C 类型），不能退回「声明层是 cls 就跳过」",
+  "file": "plaita/core/expression_parser.py",
+  "old": "            if klass is cls and not python_defined:\n",
+  "new": "            if klass is cls:\n",
+  "rationale": "退回 r12 的豁免（`if klass is cls: continue` 的名字/声明层口径）：Python 类**自己** `tp_dict` 里的 `member_descriptor`（`__slots__` 生成）也被跳过 ⇒ 隐藏/清空 `__slots__` 声明名的 `HiddenSlotsLiar`（三个形态）`declared_c_storage_descriptors == ()`、`instance_state_signal is None` ⇒ 两条拷贝路径静默产出 `{}`、DSL 报成功。由 r13 的正常 `FAILED` 行杀死（r12 的 `test_the_declaring_layer_being_cls_itself_is_exempt` 因精确 扩展类型仍豁免而**不**变红，所以 killer 是本轮新增的布局判决）。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r13_layout_and_real_storage.py::TestIssue69R13HiddenSlotsLayoutRule::test_every_hiding_form_is_named_refused_on_both_copy_paths",
+    "tests/unit/test_issue69_r13_layout_and_real_storage.py::TestIssue69R13HiddenSlotsLayoutRule::test_every_hiding_form_refuses_the_dsl_loop_condition_with_zero_hooks",
+    "tests/unit/test_issue69_r13_layout_and_real_storage.py::TestIssue69R13HiddenSlotsLayoutRule::test_the_defining_layer_is_caught_while_subclasses_stay_refused",
+    "tests/unit/test_issue69_r13_layout_and_real_storage.py::TestIssue69R13HiddenSlotsLayoutRule::test_white_box_layout_rule_is_mechanically_discriminating",
+    "tests/unit/test_issue69_r13_layout_and_real_storage.py::TestIssue69R13HiddenSlotsLayoutRule::test_the_heap_flag_reader_resists_a_lying_metaclass"
+  ],
+  "issue": "69"
+}

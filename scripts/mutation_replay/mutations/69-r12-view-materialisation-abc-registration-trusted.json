@@ -1,0 +1,15 @@
+{
+  "name": "69-r12-view-materialisation-abc-registration-trusted",
+  "concern": "#69 r12：视图物化必须按**真实类型**取交集，ABC 注册/别人的布局不算",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    if cls not in _ENGINE_VIEW_TYPES:\n        return False\n    return (_resolved_slot_implementation(cls, \"__iter__\") == \"c\"\n            and _resolved_slot_implementation(cls, \"__len__\") == \"c\")\n",
+  "new": "    return (_resolved_slot_implementation(cls, \"__iter__\") == \"c\"\n            and _resolved_slot_implementation(cls, \"__len__\") == \"c\")\n",
+  "rationale": "退回 r11 的谓词（只看「解析到的实现是 C 描述符**类型**」）：`KeysView.register(LieList)` 让普通 `list` 子类（`list.__iter__`/`list.__len__` 是 C 描述符）被当视图物化（实测拿到 `['LIE']`）；`KeysView.register(LieBytes)` 更尖锐地把 `b'LIE'` 物化成 `[76, 73, 69]`（改变值种类，而 `_engine_copy` 本来给 `b'LIE'`）；`class V1(KeysView): __iter__ = dict.__iter__` 过闸后 `list(v1)` 抛**裸** `TypeError`（消息里没有 `plaita#69`）。由 r12 的正常 FAILED 行杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12ViewMaterialisationNeedsTheRealLayout::test_abc_registered_non_view_type_is_named_refused",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12ViewMaterialisationNeedsTheRealLayout::test_abc_registered_bytes_subclass_cannot_change_the_value_kind",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12ViewMaterialisationNeedsTheRealLayout::test_resolved_c_descriptor_from_another_layout_is_named_refused",
+    "tests/unit/test_issue69_r12_c_storage_and_view_layout.py::TestIssue69R12ViewMaterialisationNeedsTheRealLayout::test_only_exact_engine_view_types_are_materialisable"
+  ],
+  "issue": "69"
+}

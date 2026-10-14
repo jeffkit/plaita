@@ -1,0 +1,12 @@
+{
+  "name": "69-r7-freshness-walkable-isinstance",
+  "concern": "#69 r7 freshness 登记判据（精确类型 vs isinstance）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    return type(value) in _FRESH_WALKABLE\n",
+  "new": "    return isinstance(value, _FRESH_WALKABLE)  # MUTANT: 回到 r6 的 isinstance 判据\n",
+  "rationale": "把登记判据退回 `isinstance` ⇒ `dict`/`list` 子类（覆写 `__deepcopy__`/`__copy__`/`items`/`__iter__` 的宿主类）会被登记成 fresh，作为就地改写目标时放行并改写活宿主对象。r7 用「拷贝器的产出集合 == 登记面的可走集合（同一个元组对象）+ 精确类型」把它钉死：变异体让 `_is_walkable_container(Evil)` 与 `_fresh_has(Evil)` 同时为真。",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_gate.py::TestMutatorGateEngineOwnedCopier::test_copier_and_registrar_share_one_exact_type_predicate"
+  ],
+  "issue": "69"
+}

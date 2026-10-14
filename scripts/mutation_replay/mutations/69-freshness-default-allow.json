@@ -1,0 +1,15 @@
+{
+  "name": "69-freshness-default-allow",
+  "concern": "#69 r5 freshness（default-deny on provenance）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    scope = _FRESH_SCOPE.get()\n    if scope is None:\n        return False\n    return scope.get(id(obj)) is obj",
+  "new": "    return True  # MUTANT: freshness scope defaults to allow（default-deny 反转失效）",
+  "rationale": "freshness 查询恒真 ⇒ 活子对象（X1 的嵌套串作用域 / T2-1 的活根子对象 / 宿主对象）重新可写穿，default-deny 退化成 allow",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_x1_verbatim_is_refused_and_writes_nothing",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_host_bound_non_root_key_is_refused_by_provenance",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_non_persisted_key_uses_the_same_predicate",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R5Provenance::test_probe_table_refuses_or_isolates"
+  ],
+  "issue": "69"
+}

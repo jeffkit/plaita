@@ -1,0 +1,14 @@
+{
+  "name": "69-r4-boundary-materialisation-off",
+  "concern": "#69 r4 结构半边 1（边界去别名）",
+  "file": "plaita/node/child.py",
+  "old": "    return _snapshot_value(value)\n",
+  "new": "    return value  # MUTANT: 子流程 $INPUT 边界不再物化 ⇒ 活根可挂在任意键名下进子流程\n",
+  "rationale": "边界不再物化 ⇒ 活根可按引用进子流程；r6 的行为层零写穿由 freshness 独立保证，所以必须**结构**地钉住去别名（返回值与输入零共享可变对象）。r7 删除了此处作用域外的死登记 `note_fresh_closure`，锚点随之更新到物化本体。",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R4VerifierCounterexample::test_counterexample_cannot_write_through",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R4ChildFlowBoundaryAxis::test_both_halves_isolate_every_cell",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R4ChildFlowBoundaryAxis::test_child_input_boundary_never_aliases_the_parent_object"
+  ],
+  "issue": "69"
+}

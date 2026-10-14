@@ -1,0 +1,14 @@
+{
+  "name": "69-r4-container-identity-probe-off",
+  "concern": "#69 r4 结构半边 2（容器身份探测）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    if _is_live_state(container):\n        return None\n    if getattr(type(container), \"_plaita_isolated_copy\", False):\n        return None\n",
+  "new": "    return None  # MUTANT: 容器身份探测关掉（只剩规范名快速路径）\n    if _is_live_state(container):\n        return None\n    if getattr(type(container), \"_plaita_isolated_copy\", False):\n        return None\n",
+  "rationale": "关掉容器值身份探测 ⇒ 任意键名挂活根重新可绕过（名字白名单重新成为唯一防线）",
+  "expect_fail": [
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R4ContainerKeyAxis::test_key_name_cannot_decide_and_copies_stay_allowed",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R4ChildFlowBoundaryAxis::test_half2_alone_classifies_by_identity_not_by_key_name",
+    "tests/unit/test_issue69_mutation_matrix.py::TestIssue69R4VerifierCounterexample::test_half2_alone_raises_named_refusal"
+  ],
+  "issue": "69"
+}

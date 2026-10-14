@@ -1,0 +1,13 @@
+{
+  "name": "69-r9-scalar-str-host-hooks",
+  "concern": "#69 r9 A 标量归一化只走基类协议（str 子类的宿主 __str__/__repr__ 不得进数据模型）",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    return str.__str__(value)",
+  "new": "    return str(value)",
+  "rationale": "把 str 子类的归一化换回内建构造器 `str(value)`：它落回宿主覆写的 `__str__`/`__repr__`，于是 `__str__` 返回 `'<LiarStr SECRET=TOPSECRET>'` 的 str 子类被**静默**写成数据（DSL 面实测把秘密写进 `$VAR`）。由 r9 的 `test_host_repr_secret_never_becomes_data`（正常 FAILED）与 DSL 面 `test_dsl_value_argument_detach_never_writes_the_host_repr` 杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9ScalarNormalisationUsesBaseProtocols::test_host_repr_secret_never_becomes_data",
+    "tests/unit/test_issue69_r9_host_object_loopholes.py::TestIssue69R9ScalarNormalisationUsesBaseProtocols::test_dsl_value_argument_detach_never_writes_the_host_repr"
+  ],
+  "issue": "69"
+}

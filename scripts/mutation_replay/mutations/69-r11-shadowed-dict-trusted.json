@@ -1,0 +1,13 @@
+{
+  "name": "69-r11-shadowed-dict-trusted",
+  "concern": "#69 r11 clause (iii)：`@property def __dict__` 遮蔽真实实例字典必须算额外状态",
+  "file": "plaita/core/expression_parser.py",
+  "old": "    cls = type(value)\n    shadowed, has_dict_slot = _instance_dict_status(cls)\n    if shadowed:\n        return \"shadowed __dict__\"\n    if declared_instance_slots(cls):\n",
+  "new": "    cls = type(value)\n    shadowed, has_dict_slot = _instance_dict_status(cls)\n    if declared_instance_slots(cls):\n",
+  "rationale": "摘掉遮蔽判据：`HidingDict`（数据在真实实例字典 `_d`，但类型用 property 遮蔽了 `__dict__`）重新判 None ⇒ 两条拷贝路径静默 `{}`、DSL 报成功。由 `test_hiding_dict_is_named_refused_on_both_copy_paths`（正常 FAILED）杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_hiding_dict_is_named_refused_on_both_copy_paths",
+    "tests/unit/test_issue69_r11_instance_state_generalisation.py::TestIssue69R11InstanceStateIsTheProperty::test_every_silent_loss_shape_is_refused_on_both_paths"
+  ],
+  "issue": "69"
+}
