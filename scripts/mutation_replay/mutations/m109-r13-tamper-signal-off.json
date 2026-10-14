@@ -1,0 +1,12 @@
+{
+  "name": "m109-r13-tamper-signal-off",
+  "issue": "109",
+  "concern": "A-r13-tamper",
+  "file": "plaita/event/redis.py",
+  "rationale": "去掉 r13 新增的 tamper 信号 ⇒ 工厂直接结算 self._close_future 重新变成**静默假成功**（r12 的口径：调用方看到 close() 成功、组件一个没关、无具名、无日志）。杀死者：r13 的 S5 用例（断言具名 kind + WARNING 日志）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13NoWritableEvidenceBit::test_s5_direct_settlement_is_named_tampered_not_silent"
+  ],
+  "old": "        if self._teardown_runs == 0 and not round_.tampered:\n            round_.tampered = True\n            self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND\n            self._teardown_task_error = None\n            logger.warning(\"%s（task=%r, future=%r）\",\n                           _TEARDOWN_SETTLEMENT_TAMPERED_LOG, task, future)\n",
+  "new": "        if False:  # mutation: 去掉 tamper 信号（假成功重新变静默）\n            round_.tampered = True\n            self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND\n            self._teardown_task_error = None\n            logger.warning(\"%s（task=%r, future=%r）\",\n                           _TEARDOWN_SETTLEMENT_TAMPERED_LOG, task, future)\n"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m109-r13-settle-future-via-attribute",
+  "issue": "109",
+  "concern": "B-r13-future-c-call",
+  "file": "plaita/event/redis.py",
+  "rationale": "结算 close future 改回**实例属性查找**（done/set_result/set_exception）⇒ 工厂经 ``self._close_future`` 塞一个会抛的影子方法就能让「具名失败」投递不出去（看门狗里 set_exception 抛 ⇒ 真 future 永不结算 ⇒ 两次 close 长等）。杀死者：r13 的 S9 用例（影子 future 方法 + 具名有界）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13NoWritableEvidenceBit::test_s9_future_method_shadows_cannot_block_the_named_settlement"
+  ],
+  "old": "        if future is None or asyncio.Future.done(future):\n            return\n        if error is None:\n            asyncio.Future.set_result(future, None)\n            return\n        asyncio.Future.set_exception(future, error)\n",
+  "new": "        if future is None or future.done():          # mutation: 回到实例属性查找\n            return\n        if error is None:\n            future.set_result(None)\n            return\n        future.set_exception(error)\n"
+}

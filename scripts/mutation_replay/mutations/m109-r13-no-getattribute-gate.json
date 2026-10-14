@@ -1,0 +1,12 @@
+{
+  "name": "m109-r13-no-getattribute-gate",
+  "issue": "109",
+  "concern": "B-r13-getattribute",
+  "file": "plaita/event/redis.py",
+  "rationale": "不查 type(task).__getattribute__ 是否被覆写（r12 的 R-12c 残差）⇒ 有状态覆写可让「判据那次给真方法、request_close 那次抛」，裸抛且不回滚。杀死者：r13 的 stateful 用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13DirectCCalls::test_stateful_getattribute_is_refused_from_the_class_table"
+  ],
+  "old": "        if _overrides_instance_getattribute(spawned):\n            logger.warning(\"事件总线关停：交回的 Task 覆写了 __getattribute__（reason=%s）\",\n                           TEARDOWN_HOSTILE_TASK_REASON)\n            self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)\n",
+  "new": "        # mutation: 不查 __getattribute__ 覆写（r12 的 R-12c 残差）\n"
+}

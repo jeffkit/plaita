@@ -1,0 +1,12 @@
+{
+  "name": "m109-r13-watchdog-registration-via-attribute",
+  "issue": "109",
+  "concern": "B-r13-direct-c",
+  "file": "plaita/event/redis.py",
+  "rationale": "看门狗注册从「类上的 C 函数 asyncio.Task.add_done_callback(task, _watch)」退回「实例属性查找 task.add_done_callback(_watch)」⇒ 实例/类上的别名影子能吞掉注册（r12 的 B 反例本体）。杀死者：r13 直接钉 _bind_round 注册路径的用例（实例塞真 stdlib 别名，注册不得经过它）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13DirectCCalls::test_bind_round_registers_through_the_c_function_not_the_attribute"
+  ],
+  "old": "        ok, _ = _guarded(\"把完成看门狗挂到 teardown 任务上\",\n                         asyncio.Task.add_done_callback, task, _watch)\n",
+  "new": "        ok, _ = _guarded(\"把完成看门狗挂到 teardown 任务上\",\n                         lambda t, cb: t.add_done_callback(cb), task, _watch)\n"
+}

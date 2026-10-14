@@ -3,10 +3,10 @@
   "issue": "109",
   "concern": "F3-pair",
   "file": "plaita/event/redis.py",
-  "rationale": "取消分支只写 kind 不清 error ⇒ _teardown_error_kind='cancelled' 却仍挂着上一轮 ValueError，留档对不一致（r10 item 9）",
+  "rationale": "取消分支只写 kind 不清 error ⇒ _teardown_error_kind='cancelled' 却仍挂着上一轮 ValueError，留档对不一致（r10 item 9）。**r13 重锚**：r13/B 把对 Task 的调用改成 类上的 C 函数（asyncio.Task.cancelled），语义与杀手不变。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r10_parity.py::Test109R10ErrorPairConsistency::test_cancel_clears_previous_error"
   ],
-  "old": "        if task.cancelled():\n            self._teardown_error_kind = \"cancelled\"\n            self._teardown_task_error = None\n            return\n",
-  "new": "        if task.cancelled():\n            self._teardown_error_kind = \"cancelled\"\n            return\n"
+  "old": "        if asyncio.Task.cancelled(task):\n            self._teardown_error_kind = \"cancelled\"\n            self._teardown_task_error = None\n            return\n",
+  "new": "        if asyncio.Task.cancelled(task):\n            self._teardown_error_kind = \"cancelled\"\n            return\n"
 }

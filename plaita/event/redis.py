@@ -9,6 +9,7 @@ import json
 import logging
 import time
 import uuid
+import weakref
 import sys
 import os
 from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Union
@@ -99,38 +100,82 @@ _TEARDOWN_HOSTILE_TASK_MESSAGE = (
     "——把它交给 request_close 使用会裸抛且不回滚。已拒绝受理（并尽力中和那个任务）。"
 )
 
-# 本次受理的**凭据**绑在受理 Task 自己身上（而不是总线的某个字段），因此上一轮的 Task 在
-# 重试之后才回调时，读到的仍是它自己那一轮凭据，不会拿新一轮的状态去判定（#109 r11/A1）。
+# #109（r13/A4）：受理的 Task 已结束、本轮 close future **已经结算**，但本轮 ``_teardown``
+# 一次都没跑（``_teardown_runs`` 仍为 0）——我们自己的关停路径不可能这样结算它 ⇒ 这次结算
+# **不是我们的**（工厂绕过一切路径直接结算了 ``self._close_future``，即 R-12a 的边界）。
+# 后果是**假成功**：调用方看到 ``close()`` 正常返回，五个组件一个都没关。结算已经发生、
+# 无法撤回（future 只能结算一次），所以这里能做的是**让它可见**：具名 kind + 响亮 WARNING，
+# 绝不静默。r12 只在残差里声明了后果，没有任何信号——验收者 S5 因此把「假成功」判成
+# 「无具名错误、无日志」。
 #
-# #109 r12/A（本轮的核）：凭据里**没有**任何「入口已进入」标记。r11 把标记放在交给工厂的
-# coroutine 的 frame 里（holder 参数），而工厂拿到的就是这个 coroutine：
-# ``coro.cr_frame.f_locals`` 在**未启动**时就已包含 ``{'holder': {...}, 'self': ...}``
-# （3.10–3.13 实测；**自由变量也在 f_locals 里**），一行 ``holder["entered"] = True`` 即可
-# 伪造证据。r12 的判据不是标记，而是**事件**：受理的 Task 结束时，本轮 future 是否**仍未**
-# 结算——未结算只可能意味着我们自己的路径（``_teardown`` 的 finally / 驳回）从未结算它。
-# 因此「伪造 reachable 的任何东西」不再有对象可伪造，见 ``_TeardownRound`` / ``_watch_round``。
-_TEARDOWN_ROUND_ATTR = "_plaita_teardown_round"
+# **不是**新的安全边界：留档位是总线/模块级状态，工厂（进程内对手）照样能改；这里只保证
+# 「静默」不再可能。结算判定本身与这些位无关（只读闭包里的 ``future.done()``）。
+TEARDOWN_SETTLEMENT_TAMPERED_KIND = "teardown-settlement-tampered"
+_TEARDOWN_SETTLEMENT_TAMPERED_LOG = (
+    "RedisEventBus 关停：受理的 teardown 任务结束时本轮 close future 已被结算，而本轮 "
+    "_teardown 一次都没跑（_teardown_runs=0）——这次结算**不是**我们的关停路径做的，"
+    "调用方看到的成功是**假成功**（组件一个都没关）。具名 kind="
+    + TEARDOWN_SETTLEMENT_TAMPERED_KIND)
+
+# 本次受理的凭据不再绑在受理 Task 上（#109 r11/A1 由来；**r13/A2 迁出对象**）。
+#
+# r11 把凭据绑在 Task 上、r12 把「受理凭据 + judged + future」一起绑上去。工厂交回的就是
+# 那个 Task：只要它留着句柄，就能 ``getattr(t, _TEARDOWN_ROUND_ATTR)`` 拿到凭据、
+# 改写 ``judged``/``future``（验收者 r12 的 S2/S3/S4：判据被压住 ⇒ 两次 close 永久挂起）。
+# r13 因此**不往 Task 上写任何属性**：凭据只活在 ``_spawn_teardown`` 的闭包里（看门狗
+# ``_watch`` 同时闭包捕获 ``round_`` 与**本轮 future 本身**），另外登记进下面这张表，
+# **只服务留档**。
+#
+# 为什么按 ``id(task)`` 登记是安全的：
+#
+#   * **判定不经这张表**：结算与否只看闭包里的 ``future.done()``；表读不到、被删、被换，
+#     最多让具名留档退化成「不记」，绝不让 future 悬着（不产生挂起）。
+#   * **不续命**：值（``_TeardownRound``）对 Task 只持弱引用，条目不会让 Task 多活一刻；
+#     条目的生命周期恰好是「受理到本次 Task 结束」——由**同一个完成事件**上的
+#     ``_on_teardown_done`` 弹出（它与看门狗是同一个 Task 的两个 done 回调）。
+#   * **id 复用被身份复核挡住**：取值时还要 ``round_.task_ref() is task``。
+#   * 表是**模块全局**，进程内对手（S1 类）可达——但改它没有任何结算后果（见第一条），
+#     和「能读模块全局」这一既有事实同级，不构成新的攻击面。
+#   * 唯一的「不回弹」情形是受理的 Task **永不结束**（R-1，明示 out of contract）：
+#     那时条目留在表里；下一次受理会**自愈**（清掉 ``task_ref() is None`` 的陈旧条目），
+#     所以表的上界是「当前活着的受理 + 永不结束的那几条」。
+_TEARDOWN_ROUNDS: "Dict[int, _TeardownRound]" = {}
 
 
 class _TeardownRound:
-    """一次受理的**唯一**结算凭据（#109 r12/A）。
+    """一次受理的**留档凭据**（#109 r12/A；**r13/A 起既不持 future、也不持 judged**）。
 
-    存活位置：``_spawn_teardown`` 的闭包（看门狗 ``_watch`` 的 ``__closure__``）+
-    ``_TEARDOWN_ROUND_ATTR`` 这个**任务属性**。它**绝不**作为参数或自由变量出现在交给
-    工厂的 coroutine 的 frame 里——因为 ``coro.cr_frame.f_locals`` 会把两者都交出去。
+    存活位置：``_spawn_teardown`` 的闭包（看门狗 ``_watch`` 的 ``__closure__``）——它
+    **同时**捕获本轮 ``future`` 本身——外加 ``_TEARDOWN_ROUNDS`` 这张按 id 弱引用的登记表
+    （只服务留档）。它**绝不**作为参数或自由变量出现在交给工厂的 coroutine 的 frame 里，
+    也**不是**受理 Task 的属性：工厂从它交回的对象上读不到本轮的任何一个判据字段。
 
-    判据不含任何「标记」：``future.done()`` 是「我们自己的路径结算过本轮」的**后果**，
-    不是可写入的证据位。``judged`` 只防重复结算，写在闭包可达的同一个对象上。
+    字段全部是**留档结果位**，不参与结算判定——结算是 ``future.done()`` 的函数
+    （见 ``_watch_round``）。``task_ref`` 是弱引用：登记表与凭据都不许让 Task 多活一刻。
     """
 
-    __slots__ = ("future", "coro", "task", "judged", "never_entered")
+    __slots__ = ("coro", "task_ref", "never_entered", "tampered", "__weakref__")
 
-    def __init__(self, future: "asyncio.Future", coro=None) -> None:
-        self.future = future          # 本轮的 close future（= self._close_future）
-        self.coro = coro              # 交给工厂的那个入口 coroutine
-        self.task = None              # 受理到的那条 Task（供中和/取消用）
-        self.judged = False           # 看门狗/兜底回调只许判定一次
-        self.never_entered = False    # 判定结果：任务结束了而本轮 future 仍未结算
+    def __init__(self, coro=None) -> None:
+        self.coro = coro              # 交给工厂的那个入口 coroutine（未被启动时 close 掉）
+        self.task_ref = None          # weakref.ref(受理 Task)：登记表取值时复核身份
+        self.never_entered = False    # 留档结果：任务结束了而本轮 future 仍未结算
+        self.tampered = False         # 留档结果：future 已结算但本轮 teardown 从未跑
+
+
+def _round_owns(round_: "_TeardownRound", task: "asyncio.Task") -> bool:
+    """登记表取值时的身份复核：``round_`` 确实属于 ``task``（#109 r13/A2）。
+
+    表按 ``id(task)`` 索引，所以必须挡住 id 复用；同时挡住「工厂把 ``task_ref`` 伪造/清掉」
+    的留档层篡改（只影响留档，绝不参与结算判定）。因此这里把**任何**读取异常都当成
+    「不匹配」，绝不让它逃成 done 回调里的未捕获异常。
+    """
+    try:
+        ref = round_.task_ref
+        return ref is not None and ref() is task
+    except BaseException as exc:                 # noqa: BLE001 - 留档层不可信即判不匹配
+        logger.debug("事件总线关停：复核受理凭据身份失败（按不匹配处理）: %r", exc)
+        return False
 
 # ``request_close`` 会落到 spawn 返回值上的**全部**方法（#109 r11/B）。任何一项被 Task
 # 子类覆写，都可能让那一块裸抛——所以 spawn 只交出这几项均为 stdlib 原版的任务
@@ -143,10 +188,12 @@ def _swallow_task_result(task: "asyncio.Task") -> None:
     """done 回调：取用（避免 GC 时 "Task exception was never retrieved"）但**不**传播。
 
     只用于被拒绝受理、正在被中和的任务（#109 r11/A2、B）；纯清理路径，任何失败只留痕。
+    #109 r13/B：对 Task 的两次使用都走**类上的 C 函数**（``asyncio.Task.cancelled/exception``），
+    实例/类属性查找全被绕过——被中和的正是「方法可能被动过」的那类任务。
     """
     try:
-        if not task.cancelled():
-            task.exception()
+        if not asyncio.Task.cancelled(task):
+            asyncio.Task.exception(task)
     except BaseException as exc:                 # noqa: BLE001 - 纯清理路径
         logger.debug("事件总线关停：取用被拒任务的异常失败（忽略）: %r", exc)
 
@@ -162,6 +209,52 @@ def _guarded(what: str, fn: Callable, *args):
     except BaseException as exc:                 # noqa: BLE001 - 调用不可信即判否
         logger.debug("事件总线关停：%s 失败（视为不可信）: %r", what, exc)
         return False, None
+
+
+def _purge_instance_method_shadows(task: "asyncio.Task") -> Optional[str]:
+    """探测并清除工厂在**实例**上塞的那几个方法影子；返回被清掉的名字（无则 ``None``）。
+
+    ``_asyncio.Task`` 用 **managed dict**：``setattr(t, "add_done_callback", ...)`` 成功，
+    但 ``object.__getattribute__(t, "__dict__")`` 与 ``inspect.getattr_static(t, name)``
+    都**看不到**它（3.11/3.13 实测）⇒ r12 的「实例静态表」这道闸对 C Task 是瞎的
+    （验收者 B 的反例：把一个**真** stdlib 绑定方法——``remove_done_callback``——塞进
+    实例属性，判据放行，随后 ``request_close`` 那句 ``teardown_task.add_done_callback(...)``
+    注册了个寂寞 ⇒ 两次 close 永久挂起）。
+
+    ``object.__delattr__`` 是 C 槽的直接调用：它**绕过** ``type(task).__delattr__`` /
+    ``__setattr__`` 覆写，也不需要实例 ``__dict__`` 可见。删成功 ⇔ 实例上确实有影子
+    （删不存在的属性抛 ``AttributeError``）⇒ 探测与清除一次完成。返回值非 ``None`` 时由
+    调用方**具名拒收**（对齐 r11/B 对类级覆写的口径：宁可拒收，不静默改工厂交回的对象）。
+    """
+    for name in _TEARDOWN_USED_TASK_METHODS:
+        try:
+            object.__delattr__(task, name)
+        except AttributeError:
+            continue
+        except BaseException as exc:             # noqa: BLE001 - 不可信即判否
+            logger.debug("事件总线关停：清除实例方法影子 %s 失败（视为不可信）: %r",
+                         name, exc)
+            return name
+        logger.debug("事件总线关停：清除实例方法影子 %s（受理前）", name)
+        return name
+    return None
+
+
+def _overrides_instance_getattribute(task: "asyncio.Task") -> bool:
+    """``type(task).__getattribute__`` 是否被动过（#109 r13/B，关闭 r12 的 R-12c）。
+
+    只查**类表**（``inspect.getattr_static``，不触发任何实例访问）：合法形状
+    （默认 Task / 纯子类 / 带属性 / ``__slots__=()`` / ``__getattr__`` / uvloop 的 task
+    类型）都落在 ``object.__getattribute__`` 上；一旦子类覆写它，实例属性查找就成了
+    「有状态」的，判据无法在两个时刻之间钉住对象——而 ``request_close`` 的可执行体逐字节
+    冻结，里面那两行动态查找不能改造成 C 调用，所以这里必须**结构性拒收**。
+    """
+    ok, on_class = _guarded(
+        f"静态读取 {type(task).__name__}.__getattribute__",
+        inspect.getattr_static, type(task), "__getattribute__")
+    if not ok:
+        return True
+    return on_class is not getattr(object, "__getattribute__", None)
 
 
 def _task_uses_stdlib_methods(task: "asyncio.Task") -> bool:
@@ -189,11 +282,19 @@ def _task_uses_stdlib_methods(task: "asyncio.Task") -> bool:
          **完全相同**（不是 ``==``，也不是鸭子类型），且 ``__self__ is task``
          —— 非标准方法实现、以及把方法绑到别的对象上的 ``__getattribute__`` 在这一步出局。
 
-    任一项证不出 ⇒ 由调用方拒绝受理（具名 + 整体回滚）。**残差（R-12c）**：③ 会真的对
-    ``task`` 取一次属性，若 ``type(task).__getattribute__`` 是**有状态**的（对这次访问给
-    真方法、对 ``request_close`` 稍后那次访问给敌对方法），判据无法在两个时刻之间钉住
-    对象；这类必须靠「静态表 + 类型身份」都通过才可能发生，且只在合成形状（生产路径
-    0 处 ``set_task_factory``）里可达——文档具名列出，不声称已关闭。
+    任一项证不出 ⇒ 由调用方拒绝受理（具名 + 整体回滚）。
+
+    **r13/B 降级说明**：本判据自 r13 起只是**廉价预检**，不再是唯一闸门——它有一个对
+    **C Task 结构性瞎掉**的洞：``_asyncio.Task`` 用 managed dict，``setattr(t, name, ...)``
+    成功，但 ``object.__getattribute__(t, "__dict__")`` 与 ``inspect.getattr_static(t, name)``
+    都看不见它（3.11/3.13 实测），于是 ①实例影子 + ③「类型相同、``__self__`` 是本任务」
+    可以被**另一个真 stdlib 绑定方法**满足（验收者 B 的反例：把
+    ``asyncio.Task.remove_done_callback.__get__(t, type(t))`` 塞进实例属性 ⇒ 判据 True，
+    随后 ``request_close`` 那句 ``teardown_task.add_done_callback(...)`` 注册了个寂寞，
+    两次 close 永久挂起）。r13 因此**不问对象**：``_purge_instance_method_shadows`` 用
+    ``object.__delattr__``（C 槽直调）探测并清除实例影子，``_overrides_instance_getattribute``
+    在类表上拒收有状态 ``__getattribute__``（r12 的 R-12c），引擎对 Task 的每一次操作都走
+    ``asyncio.Task.<C 函数>(task, ...)``。本判据保留，是因为类表这一层它做的对且便宜。
     """
     cls = type(task)
     for name in _TEARDOWN_USED_TASK_METHODS:
@@ -311,9 +412,11 @@ def _mark_future_retrieved(future: "asyncio.Future") -> None:
     """done 回调：把 future 上的异常标记为**已取用**（避免 GC 时的 never-retrieved 日志）。
 
     不影响真正的 await 者：``Task.__wakeup`` 仍会从 future 取到同一个异常。
+    #109 r13/B：close future 对工厂可达（``self._close_future``），所以这里也走
+    ``asyncio.Future`` 上的 C 函数——实例影子不得影响「谁结算、谁来取用」。
     """
-    if not future.cancelled():
-        future.exception()
+    if not asyncio.Future.cancelled(future):
+        asyncio.Future.exception(future)
 
 
 def _create_owner_task(loop: "asyncio.AbstractEventLoop", coro, context) -> "asyncio.Task":
@@ -1884,10 +1987,36 @@ class RedisEventBus(EventBus):
         若从未启动则一并 ``close()``，避免 "was never awaited"）。判据是「任务结束」这一
         事件：没有 busy-wait，也没有比它更弱的计时假设。返回时已 done/cancelled 的 Task
         走同一条同步判据（r11/A3）。合法包装协程（``async def wrap(): await <我们的 coro>``）
-        真的跑了入口 ⇒ ``_teardown`` 结算 future ⇒ 照常完成。**不变量**：本轮结算凭据
-        （``_TeardownRound``）只活在 ``_spawn_teardown`` 的闭包与任务属性里，**不在**
-        coroutine 的 frame 里——因此伪造 frame 可达的**任何**对象都不再能改变判定。
-        残差见下（② 之后的 R-12a/R-12b）。
+        真的跑了入口 ⇒ ``_teardown`` 结算 future ⇒ 照常完成。
+
+        **为什么不引入计时器（r12/C 起；r13 与 docs 同口径）**：能拿到的最强完成事件就是
+        「受理的 Task 结束」（以及「future 已结算」）；比它更弱的只能是自己设超时——那会把
+        「还在关」误报成「关完」，与 r8/G3「失败不伪装成功」直接冲突。因此 R-1（工厂交回的
+        Task 永不结束）、R-4（**组件自己的** ``aclose``/``close`` 永不返回，与工厂无关）与
+        r13 的 R-13a（工厂篡改完成簿记 / 闭包 cell，进程内对手）都被**声明为 out of
+        contract**，而不是用计时器掩盖。``DISPATCH_DRAIN_TIMEOUT_SECONDS`` 只界住「在飞
+        分发」那一步，**不界**组件释放、也不界「任务结束」这一事件。
+
+        **r13/A（把 r12 的「不可伪造」补成真的：凭据整条移出对象）**：r12 的不变量写的是
+        「凭据只活在闭包与**任务属性**里」，可 r12 自己又把 ``_TeardownRound``（含
+        ``judged`` 与 ``future``）``setattr`` 到了**工厂交回的那个 Task** 上——工厂留着
+        句柄就能 ``getattr(t, ATTR)`` 拿到并改写它。验收者 r12 的四个反例因此全部成立：
+        **S1** 栈帧窃取（``sys._getframe`` 到 ``_spawn_teardown`` 的活帧取 ``round_``）、
+        **S2** 任务属性窃取（工厂留着返回的 Task，``loop.call_soon`` 里 ``getattr(t, ATTR)``）、
+        **S3** 敌对 ``__setattr__``（引擎自己把凭据递给它）、**S4** 把 ``round_.future``
+        换成诱饵（看门狗结算诱饵、真 future 永远悬着）——全部以
+        ``(True, PENDING, True, 0)``、``[0×5]``、``runs=0`` 收场，与 r11 症状逐位相同。
+        r13 因此：**删掉 ``judged``**（幂等只看 ``future.done()``）、**不再往 Task 上写任何
+        属性**（凭据只进 ``_watch`` 的闭包 + 按 id 弱引用的 ``_TEARDOWN_ROUNDS``，后者只
+        服务留档）、**看门狗闭包直接捕获本轮 future 本身**（结算对象不再从任何可变字段
+        回读）、**判定点把受理时捕获的真 future 钉回 ``self._close_future``**（工厂在 spawn
+        窗口/随后换成诱饵不做数）。不变量因此改成：*没有任何一个**工厂能写的字段**会影响
+        判决；判决只由闭包里的 ``future.done()`` 决定，且工厂**从它交回的对象上读不到任何
+        一个本轮判据字段**。* **S1 形状明示为 out of contract、不声称已关闭**：
+        ``sys._getframe`` / ``task._callbacks`` 里看门狗的 ``cell_contents`` / 模块全局等
+        进程内对手可达的一切——那类对手已经能触达本进程的任意对象，语言内无法防御。r13
+        **不**声称「没有可写证据位可达」，只声称「无论谁怎么写，判决路径与结算对象都不依赖
+        那些位」。见下方「r13 具名残差」。
 
         **r11/A2、B（不是我们的 Task 一律拒收）；r12/B（判据不再问对象自己）**：跨事件
         循环建出来的 Task（close future 属于本循环，在别的循环上结算既非线程安全也永远
@@ -1907,6 +2036,21 @@ class RedisEventBus(EventBus):
         ``_accept_spawned_task`` 自用的 ``get_loop`` 在**类表与实例表**上都**就是**
         stdlib 本体，且真绑定出来的对象类型与原版一致、绑在本任务上，任务绑在本循环上」。
 
+        **r13/B（不再问对象；对 Task 的每次操作都走类上的 C 函数）**：r12 的「实例静态表」
+        对 ``_asyncio.Task`` 结构性瞎掉——它用 managed dict，``setattr(t, name, ...)`` 成功，
+        但 ``object.__getattribute__(t, "__dict__")`` 与 ``inspect.getattr_static(t, name)``
+        都看不见（3.11/3.13 实测）。验收者的决定性反例：把**另一个真 stdlib 绑定方法**
+        （``asyncio.Task.remove_done_callback.__get__(t, type(t))``）塞进实例属性 ⇒ 类型相同、
+        ``__self__`` 是本任务 ⇒ 判据放行 ⇒ ``_bind_round`` 的 ``task.add_done_callback``
+        注册了个寂寞、``request_close`` 那句同样如此 ⇒ **两次 close 都永久挂起**。
+        r13 的做法：**引擎对受理 Task 的每一次操作都改成类上的 C 函数调用**
+        （``asyncio.Task.add_done_callback(task, cb)`` / ``get_loop`` / ``done`` /
+        ``cancelled`` / ``exception`` / ``cancel`` / ``get_coro``），实例与类属性查找全被
+        绕过；再加两道闸——``_overrides_instance_getattribute``（类表拒收有状态
+        ``__getattribute__``）与 ``_purge_instance_method_shadows``（``object.__delattr__``
+        探测并清除实例影子，命中即具名拒收）。``_task_uses_stdlib_methods`` 因此**降级**为
+        廉价预检（类表那层它做得对且便宜），不再是唯一闸门。
+
         **out of contract（合成形状；生产路径不使用 ``set_task_factory``，实测
         仓库内 0 处调用）**：①交回的真 Task 既不跑我们的 coroutine、又**永不结束** ⇒
         没有任何完成事件可依，close future 会一直等到那个任务结束（**长等的形状之一**，
@@ -1921,18 +2065,42 @@ class RedisEventBus(EventBus):
           * **R-12a（`self` 可达）**：入口必须跑总线代码，``self`` 因此**必然**在
             ``coro.cr_frame.f_locals`` 里。工厂可以绕过一切判据、直接结算
             ``self._close_future``（或改写 ``_teardown_runs`` / 留档）。后果是**假成功**
-            （组件一个没关、调用方却看到 ``close()`` 返回），**不是挂起**——因为结算判定
-            不再依赖任何可写证据位。无法关闭：``request_close`` 的可执行体逐字节冻结，
-            ``self._close_future`` 必须是返回给调用方的那个真 future（见 docs「不变量与
-            残差」）。**边界**：伪造一个 frame 可达的对象不再有任何效果。
+            （组件一个没关、调用方却看到 ``close()`` 返回）。**r12 在这一点上写错了**：
+            它声称「不是挂起，因为结算判定不再依赖任何可写证据位」——验收者 r12 证明
+            「不是挂起」只对 r12 的那**一条**攻击成立（直接结算），而 S1–S4（窃取
+            ``judged`` / ``round_.future``）照样**挂起**，因为它们改写的是 r12 自己放在
+            可达处的「证据位」。r13 的更正：**不再声称这件事**；改为在假成功上留一个
+            **可见信号**——受理的 Task 结束时 future 已结算而 ``_teardown_runs == 0`` ⇒
+            具名 ``kind=teardown-settlement-tampered`` + 响亮 WARNING（结算只能发生一次、
+            无法撤回，所以能做的是让静默不再可能）。无法关闭：``request_close`` 的可执行体
+            逐字节冻结，``self._close_future`` 必须是返回给调用方的那个真 future
+            （见 docs「不变量与残差」）。**r13 之后**：伪造一个 frame 可达的**本轮判据
+            字段**已无对象（凭据不落在 Task/总线判据上），S1 形状降级为 R-13a（明示
+            out of contract）。
           * **R-12b（句柄槽）**：``self._teardown_entry_task`` 同属 `self`，可被伪造成
             一个别的 Task；但 ``_started_teardown_task`` 要求它**确实托管着我们的 coro**
             或**已结束且 coro 已回收**，伪造「永不结束的任务」不再能被收养（否则会命中
             R-1）。伪造一个「已结束的无关 Task」只是让它走一遍 R-1/never-entered 判定。
           * **R-12c（有状态 ``__getattribute__``）**：r12/B 的 ③ 需要真取一次属性；若
             ``type(task).__getattribute__`` 对**这一次**给真方法、对 ``request_close``
-            稍后那次给敌对方法，判据无法在两个时刻之间钉住对象。这类必须先通过静态表 +
-            类型身份两道闸，且只在合成形状里可达；文档具名列出，不声称已关闭。
+            稍后那次给敌对方法，判据无法在两个时刻之间钉住对象。**r13/B 已关闭**：
+            ``_overrides_instance_getattribute`` 在**类表**上（不触发任何实例访问）拒收
+            任何覆写 ``__getattribute__`` 的子类，而 ``request_close`` 冻结点之后也不再
+            依赖实例属性查找（引擎自己的每次操作都走 C 函数）。验收者 r12 的复现形状在
+            r13 上被拒（`calls == 0`）。
+
+        **r13 具名残差（与 r12 的 R-12a/R-12b 并存）**：
+
+          * **R-13a（S1 类：进程内对手）**：``sys._getframe`` 走到 ``_spawn_teardown`` 的
+            活帧、或从 ``task._callbacks`` 取到 ``_watch`` 再写 ``cell_contents``、
+            或直接 import 本模块改 ``_TEARDOWN_ROUNDS`` / 总线字段——这类对手已经能触达
+            本进程的任意对象。**明示 out of contract、不声称已关闭**；r13 的保证限定为
+            「判决与结算不依赖它们能写的任何字段」（判决点只读闭包里的 ``future.done()``，
+            判定要结算的对象是闭包捕获的真 future）。
+          * **R-13b（改写 ``self._close_future``）**：工厂把幂等凭据换成诱饵。判定点会把
+            受理时捕获的真 future 钉回去（``_watch_round``），因此真 future 仍得到具名
+            结局、close 仍**有界**；但若工厂在**判定之后**再改总线字段，它只影响下一轮
+            ``request_close`` 的早返回语义（属 R-13a 的进程内对手面）。
         """
         if self._close_future is not None:
             return self._close_future
@@ -2003,6 +2171,11 @@ class RedisEventBus(EventBus):
         r12 的判据因此不是任何可写对象，而是**事件**「受理的 Task 结束时，本轮的 future
         **仍未**结算」——只有我们自己的路径会结算它，见 ``_watch_round``。入口只做它该做
         的事：跑 ``_teardown``；跑没跑过，由 future 结算与否**呈现**，而不是由它自己声明。
+
+        #109 r13/A：入口**依旧**无参、无标记、不结算；判定点（``_watch_round``）只读闭包
+        里捕获的**真 future**，凭据 ``_TeardownRound`` 也不再是 Task 属性——所以「入口
+        frame 里有什么」不再是攻击面（frame 里仍然只有 ``self``，那是 R-12a/R-13a 的
+        进程内对手面，明示 out of contract）。
         """
         self._teardown_entry_task = asyncio.current_task()
         await self._teardown()
@@ -2024,14 +2197,15 @@ class RedisEventBus(EventBus):
         （那会命中 R-1 的长等）。
         """
         for live in asyncio.all_tasks():
-            if live.get_coro() is coro:
+            if asyncio.Task.get_coro(live) is coro:
                 return live
         candidate = self._teardown_entry_task
         if not isinstance(candidate, asyncio.Task):
             return None
         try:
-            owns_ours = candidate.get_coro() is coro
-            finished = candidate.done() and candidate.get_coro() is None
+            owns_ours = asyncio.Task.get_coro(candidate) is coro
+            finished = (asyncio.Task.done(candidate)
+                        and asyncio.Task.get_coro(candidate) is None)
         except BaseException as exc:             # noqa: BLE001 - 候选不可信即弃用
             logger.debug("事件总线关停：读取候选 teardown 句柄失败（弃用）: %r", exc)
             return None
@@ -2069,35 +2243,45 @@ class RedisEventBus(EventBus):
         if state == "CORO_CREATED":
             self._close_unstarted_coro(coro)
 
-    def _bind_round(self, task: "asyncio.Task",
-                    round_: "_TeardownRound") -> "asyncio.Task":
-        """把本轮凭据绑到要交出去的 Task 上，并挂上**闭包看门狗**（#109 r11/A1；r12/A）。
+    def _bind_round(self, task: "asyncio.Task", round_: "_TeardownRound",
+                    future: "asyncio.Future") -> "asyncio.Task":
+        """登记本轮凭据并挂上**闭包看门狗**（#109 r11/A1；r12/A；**r13/A 重写**）。
 
-        绑在**任务自己**身上而不是总线字段：上一轮的 Task 在重试之后才回调时，读到的仍是
-        它自己那一轮的凭据，绝不会拿新一轮的去判定。绑定失败（``__setattr__`` /
-        ``__getattribute__`` 被覆写）意味着这个 Task 不可跟踪 ⇒ 当场拒绝受理，由
-        ``request_close`` 的既有 except 整体回滚——绝不交出一个「跑没跑过都不知道」的句柄。
+        r13 与 r12 的三处不同，正对验收者 r12 的三个反例：
 
-        #109 r12/A：看门狗 ``_watch`` 是在**这里**（也就是 ``_spawn_teardown`` 里）挂上去
-        的，它的 ``__closure__`` 持有 ``round_``——这是「本轮结算凭据」唯一不落在
-        coroutine frame 里的存活位置（cell 只能读、不能被改写）。挂在 ``request_close``
-        之前的顺序保证：非 eager 路径上看门狗**先于** ``request_close`` 的
-        ``_on_teardown_done`` 回调执行，因此判定权在我们手里。
+          1. **不再往 Task 上写任何东西**（S2/S3）：凭据只进 ``_watch`` 的闭包与
+             ``_TEARDOWN_ROUNDS``（id → 弱引用，只服务留档）。工厂留着它交回的 Task，
+             ``getattr(t, ATTR)`` 也读不到本轮凭据。
+          2. **看门狗闭包捕获 ``future`` 本身**（S4）：判定与结算只用闭包里的这个对象，
+             绝不再从某个可变字段（round / 总线）回读——把字段换成诱饵也改不了结算对象。
+          3. **挂回调走类上的 C 函数**（B）：``asyncio.Task.add_done_callback(task, _watch)``，
+             实例与类属性查找全被绕过，``t.add_done_callback = <别的 stdlib 方法>`` 无效。
+
+        ``future`` 在返回时**已经 done** 时当场判定（eager 同步路径：判决必须早于
+        ``request_close`` 返回，r11/A3 口径）。看门狗在这里（也就是 ``_spawn_teardown``
+        里）挂上、早于 ``request_close`` 的 ``_on_teardown_done``，因此判定权在我们手里。
         """
-        def _watch(finished: "asyncio.Task") -> None:
-            self._watch_round(finished, round_)
+        round_.task_ref = weakref.ref(task)
+        # 自愈：若某个条目的 Task 已经消失而 ``_on_teardown_done`` 从未跑到（例如
+        # 测试/宿主进程在 teardown 落地前就关了循环），顺手清掉——表只保留活着的受理。
+        for stale in [k for k, v in _TEARDOWN_ROUNDS.items()
+                      if v.task_ref is None or v.task_ref() is None]:
+            _TEARDOWN_ROUNDS.pop(stale, None)
+        _TEARDOWN_ROUNDS[id(task)] = round_
 
-        try:
-            setattr(task, _TEARDOWN_ROUND_ATTR, round_)
-            if getattr(task, _TEARDOWN_ROUND_ATTR, None) is not round_:
-                raise RuntimeError("回读到的本轮凭据不是刚写进去的那个")
-            task.add_done_callback(_watch)
-        except BaseException as exc:             # noqa: BLE001 - 不可跟踪即拒收
+        def _watch(finished: "asyncio.Task") -> None:
+            self._watch_round(finished, round_, future)
+
+        ok, _ = _guarded("把完成看门狗挂到 teardown 任务上",
+                         asyncio.Task.add_done_callback, task, _watch)
+        if not ok:
+            _TEARDOWN_ROUNDS.pop(id(task), None)
             raise RuntimeError(
-                "RedisEventBus 关停：无法把本轮受理凭据/看门狗绑到 teardown 任务上"
-                f"（{type(task).__name__} 的 __setattr__/__getattribute__ 不可信）: {exc!r}"
-            ) from exc
-        round_.task = task
+                "RedisEventBus 关停：无法把本轮受理看门狗挂到 teardown 任务上"
+                f"（{type(task).__name__} 不是可用的 stdlib Task）")
+        if asyncio.Task.done(task):
+            # eager 同步跑完 / 工厂交回已完成的 Task：判决当场落地（r11/A3）。
+            self._watch_round(task, round_, future)
         return task
 
     def _reject_spawned_task(self, task: "asyncio.Task", coro, reason: str) -> "NoReturn":
@@ -2114,17 +2298,18 @@ class RedisEventBus(EventBus):
             reason, type(task).__name__)
         message = (_TEARDOWN_FOREIGN_LOOP_MESSAGE if reason == TEARDOWN_FOREIGN_LOOP_REASON
                    else _TEARDOWN_HOSTILE_TASK_MESSAGE)
+        # #109 r13/B：中和动作一律用类上的 C 函数（被拒的正是方法可能被动过的对象）。
         try:
-            owns_ours = task.get_coro() is coro
+            owns_ours = asyncio.Task.get_coro(task) is coro
         except BaseException as exc:             # noqa: BLE001 - 纯中和路径
             logger.debug("事件总线关停：读取被拒任务持有的 coroutine 失败（忽略）: %r", exc)
             owns_ours = False
         try:
-            task.add_done_callback(_swallow_task_result)
+            asyncio.Task.add_done_callback(task, _swallow_task_result)
         except BaseException as exc:             # noqa: BLE001 - 纯中和路径
             logger.debug("事件总线关停：给被拒任务挂取用回调失败（忽略）: %r", exc)
         try:
-            task.cancel()
+            asyncio.Task.cancel(task)
         except BaseException as exc:             # noqa: BLE001 - 纯中和路径
             logger.debug("事件总线关停：取消被拒任务失败（忽略）: %r", exc)
         if not owns_ours:
@@ -2133,15 +2318,33 @@ class RedisEventBus(EventBus):
 
     def _accept_spawned_task(self, loop: "asyncio.AbstractEventLoop",
                              spawned: "asyncio.Task", coro) -> "asyncio.Task":
-        """校验工厂交回的真 Task 是否可以安全收养（#109 r11/A2、B）。
+        """校验工厂交回的真 Task 是否可以安全收养（#109 r11/A2、B；**r13/B 加两道闸**）。
 
-        两条硬条件：①它的循环必须是**我们**的（否则 close future 永远等不到结算）；
-        ②``request_close`` 要用的那几个方法必须是 stdlib 原版（否则裸抛且不回滚）。
+        硬条件：
+
+          ①``type(task).__getattribute__`` 必须是 object 的原版（类表判据）——否则实例属性
+            查找有状态，而 ``request_close`` 冻结的可执行体里那两行动态查找无法改成 C 调用；
+          ②实例上不得有 ``add_done_callback`` / ``done`` / ``cancelled`` / ``exception`` /
+            ``get_loop`` 的影子（``object.__delattr__`` 探测，C Task 的 managed dict 对
+            ``getattr_static`` 不可见）；
+          ③``_task_uses_stdlib_methods``（类表 + 绑定类型身份，廉价预检）；
+          ④它的循环必须是**我们**的（否则 close future 永远等不到结算）。
+
         任一条不满足 ⇒ 具名拒绝 + 尽力中和，由 ``request_close`` 的 except 整体回滚。
         """
+        if _overrides_instance_getattribute(spawned):
+            logger.warning("事件总线关停：交回的 Task 覆写了 __getattribute__（reason=%s）",
+                           TEARDOWN_HOSTILE_TASK_REASON)
+            self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)
+        shadowed = _purge_instance_method_shadows(spawned)
+        if shadowed is not None:
+            logger.warning("事件总线关停：交回的 Task 有实例方法影子 %s（reason=%s）",
+                           shadowed, TEARDOWN_HOSTILE_TASK_REASON)
+            self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)
         if not _task_uses_stdlib_methods(spawned):
             self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)
-        ok, spawned_loop = _guarded("读取被收养任务的 loop", spawned.get_loop)
+        # #109 r13/B：走 C 函数（``asyncio.Task.get_loop``），不再走实例属性查找。
+        ok, spawned_loop = _guarded("读取被收养任务的 loop", asyncio.Task.get_loop, spawned)
         if not ok:
             self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)
         if spawned_loop is not loop:
@@ -2160,8 +2363,8 @@ class RedisEventBus(EventBus):
 
         四种 factory 行为：
 
-          * **正常返回 Task**：先过 ``_accept_spawned_task``（同循环 + 方法未覆写），再绑
-            上本次受理的标记。
+          * **正常返回 Task**：先过 ``_accept_spawned_task``（``__getattribute__`` 未覆写 +
+            实例无方法影子 + 同循环 + 方法未覆写），再登记本轮凭据、挂闭包看门狗。
           * **返回非 Task**（已完成的 ``Future`` / 裸 awaitable / coroutine）：它跟踪不了，
             close future 会永远悬着、coroutine 还会 "was never awaited"。若 coroutine
             已被启动则收养那个真任务；否则**绕开工厂**用 ``asyncio.Task`` 接管它
@@ -2174,15 +2377,25 @@ class RedisEventBus(EventBus):
           * **交回「不是我们的」Task**（#109 r11）：真 ``asyncio.Task`` 但①建在**另一个**
             事件循环上，或②覆写了 ``request_close`` 要用的 stdlib 方法 —— 拒绝受理
             （具名 reason 写在 ``__cause__``，整体回滚）并尽力中和它。**只**接受「方法未被
-            动过 + 同循环」的 Task；被收养的 Task 结束时若入口标记未置位，由
-            ``_on_teardown_done`` 具名结算 ``teardown-never-entered``，绝不悬着。
+            动过 + 同循环」的 Task；被收养的 Task 结束时若本轮 future 仍未结算，由闭包
+            看门狗具名结算 ``teardown-never-entered``，绝不悬着。
 
         契约之外（**out of contract**，见类文档的残差清单）：交回的真 Task 既不跑我们的
         coroutine、又**永不结束**时，没有任何完成事件可依，close future 会一直等到那个任务
-        结束为止（这是唯一仍可能长等的合成形状；生产路径不使用 ``set_task_factory``）。
+        结束为止（生产路径不使用 ``set_task_factory``）。
+
+        **r13/C 口径更正**：r11/r12 把这写成「**唯一**仍可能长等的合成形状」，是**错的**——
+        验收者 r12 的 S1（栈帧窃取）、S2（任务属性窃取）、S3（敌对 ``__setattr__``）、
+        S4（把凭据里的 future 换成诱饵）都是**额外的**合成长等形状，且都源自「受理凭据
+        放在工厂交回的对象/其可达处」。r13 删掉那条通道后 S2/S3/S4 不再长等；「任务永不
+        结束」（R-1）与「工厂篡改完成簿记 / 闭包 cell」（r13 具名 out of contract）仍可能长等。
         """
-        # 本轮凭据：只进闭包 + 任务属性，**绝不**进 coro 的 frame（r12/A）。
-        round_ = _TeardownRound(self._close_future)
+        # 本轮真 future：在**工厂可能跑起来之前**捕获（工厂可以改写 self._close_future，
+        # 但那改不了闭包/登记里的这个对象）。
+        future = self._close_future
+        # 本轮凭据：只进闭包 + 按 id 弱引用的登记表，**绝不**进 coro 的 frame、也**绝不**
+        # 成为受理 Task 的属性（r13/A：工厂从它交回的对象上读不到任何判据字段）。
+        round_ = _TeardownRound()
         self._teardown_entry_task = None      # eager 路径的句柄槽；入口第一行才写
         coro = self._teardown_entry()
         round_.coro = coro
@@ -2195,83 +2408,80 @@ class RedisEventBus(EventBus):
                 logger.debug(
                     "事件总线关停：spawn 抛异常但 teardown 任务已存在，改为收养: %r", owner)
                 return self._bind_round(
-                    self._accept_spawned_task(loop, owner, coro), round_)
+                    self._accept_spawned_task(loop, owner, coro), round_, future)
             self._close_unstarted_coro(coro)
             raise
         if isinstance(spawned, asyncio.Task):
             return self._bind_round(
-                self._accept_spawned_task(loop, spawned, coro), round_)
+                self._accept_spawned_task(loop, spawned, coro), round_, future)
         owner = self._started_teardown_task(coro)
         if owner is not None:
             logger.debug(
                 "事件总线关停：工厂返回 %r 而非 Task，收养已启动的 teardown 任务", type(spawned))
             return self._bind_round(
-                self._accept_spawned_task(loop, owner, coro), round_)
+                self._accept_spawned_task(loop, owner, coro), round_, future)
         logger.debug(
             "事件总线关停：工厂返回 %r 而非 Task，绕开工厂直接接管 teardown coroutine",
             type(spawned))
-        return self._bind_round(_own_task_directly(loop, coro, context), round_)
+        return self._bind_round(
+            _own_task_directly(loop, coro, context), round_, future)
 
     def _on_teardown_done(self, task: "asyncio.Task") -> None:
-        """teardown 任务的 done 回调（``request_close`` 挂的那个）：兜底判定 + 留档。
+        """teardown 任务的 done 回调（``request_close`` 挂的那个）：**只取用/留档，不判定**。
 
         r9/Finding 3 的职责（**取用** Task 异常，防 GC 时
         "Task exception was never retrieved"）与 r10 的成对留档（取消 ⇒
         ``('cancelled', None)``；异常 ⇒ ``(type(exc).__name__, exc)``；正常完成 ⇒
         ``(None, None)``）都保留。
 
-        #109 r12/A：**判定权不在这里**。``_spawn_teardown`` 已经给同一个 Task 挂了闭包
-        看门狗 ``_watch``（``_bind_round`` 里，先挂先跑），它持有本轮 ``_TeardownRound``
-        并负责**结算判定**。本方法负责另一半：**取用 Task 异常 + 按本轮判定结果成对留档**
-        （``_record_round_outcome``）。两半的分工是有意的——「异常必须被取用」这条 r9/Finding 3
-        的保证仍然**只能**由 ``request_close`` 挂的这个回调兑现（看门狗不碰 ``task``），
+        #109 r12/A：判定权在闭包看门狗 ``_watch``（``_bind_round`` 里经 C 函数先挂、先跑）。
+        #109 r13/A：本方法**不再兜底判定**，也不再问 Task 要凭据——凭据从
+        ``_TEARDOWN_ROUNDS``（id → 弱引用）取，并按 ``round_.never_entered`` /
+        ``round_.tampered`` 成对改写留档。分工是有意的：「异常必须被取用」这条 r9/Finding 3
+        的保证仍然**只**由 ``request_close`` 挂的这个回调兑现（看门狗不碰 ``task``），
         因此 `m109-r9-teardown-task-exception-unretrieved` 这条变异仍在同一处被杀死。
 
-        两种时机本方法都会被调用：
-
-          * 非 eager：看门狗先跑（结算 + 置 ``never_entered``），本方法随后取用/留档；
-          * ``request_close`` 在 spawn 返回时发现 ``teardown_task.done()``（eager 同步跑完 /
-            工厂交回已完成的 Task），同步调用本方法——此时看门狗的回调只被 ``call_soon``
-            排队，尚未执行（先按任务结局留档，看门狗随后把 ``never_entered`` 的具名 kind
-            顶上去）。
-
-        于是「读不到凭据」也不会改变结论：读不到就只取用异常。r11 的入口标记判据
-        （``holder['entered']``）连同它可被工厂经 ``coro.cr_frame.f_locals`` 伪造的通道
-        一并删除——见 ``_teardown_entry`` / ``_watch_round``。
+        「读不到凭据」不改变结论：读不到就只取用异常——**判定不依赖这张表**，所以表被删被换
+        也绝不挂起（见 ``_watch_round``）。
         """
-        ok, round_ = _guarded("读取本轮受理凭据", getattr, task,
-                              _TEARDOWN_ROUND_ATTR, None)
-        if not ok or not isinstance(round_, _TeardownRound):
-            # 没有凭据（被拒/回滚路径）：只取用异常，防 never retrieved。
+        round_ = _TEARDOWN_ROUNDS.pop(id(task), None)
+        if round_ is None or not _round_owns(round_, task):
+            # 没有凭据 / 身份不符（id 复用、工厂删表或伪造 task_ref、被拒/回滚路径、
+            # 同一 Task 的第二次回调——第一次已经 pop 过）：只取用异常，防 never retrieved。
             self._retrieve_task_exception(task)
             return
-        if not round_.judged:
-            # 同步路径（返回时已 done/cancelled）：判决必须**当场**落地——r11/A3 口径，
-            # 状态元组在 ``request_close`` 返回前就已结算并清空凭据。
-            self._watch_round(task, round_)
         self._record_round_outcome(task, round_)
 
     @staticmethod
     def _retrieve_task_exception(task: "asyncio.Task") -> None:
-        """取用 ``task`` 的异常（不传播、不覆盖留档）；纯清理路径，失败只留痕。"""
+        """取用 ``task`` 的异常（不传播、不覆盖留档）；纯清理路径，失败只留痕。
+
+        #109 r13/B：两次使用都走 ``asyncio.Task`` 上的 C 函数。
+        """
         try:
-            if not task.cancelled():
-                task.exception()
+            if not asyncio.Task.cancelled(task):
+                asyncio.Task.exception(task)
         except BaseException as exc:             # noqa: BLE001 - 纯清理路径
             logger.debug("事件总线关停：取用 teardown 任务异常失败（忽略）: %r", exc)
 
     def _record_round_outcome(self, task: "asyncio.Task",
                               round_: "_TeardownRound") -> None:
-        """取用 Task 异常并按本轮判定成对留档（#109 r9/Finding 3 + r10 item 9 + r12/A）。
+        """取用 Task 异常并按本轮判定成对留档（#109 r9/Finding 3 + r10 item 9 + r12/A + r13/A4）。
 
-        ``round_.never_entered`` 由看门狗在「任务结束了而本轮 future 仍未结算」时置位；
-        它一旦为真，留档对固定为 ``(teardown-never-entered, <task 的异常或 None>)``——
-        即使先到的同步回调已经写过 ``cancelled``/``None``（eager 路径），最终口径仍一致。
+        看门狗留下的两个**留档结果位**决定口径：
+
+          * ``round_.never_entered``：留档对固定为 ``(teardown-never-entered, <异常或 None>)``
+            ——即使先到的同步回调已经写过 ``cancelled``/``None``（eager 路径），最终口径一致。
+          * ``round_.tampered``：本轮 teardown 从未跑而 future 已被结算（工厂直接结算，
+            R-12a）⇒ 留档对固定为 ``(teardown-settlement-tampered, <异常或 None>)``。
+            这条是 r13 **新增的可见性**：r12 的假成功是静默的。
+
+        #109 r13/B：对 ``task`` 的使用全部走 C 函数。
         """
         exception = None
-        if not task.cancelled():
+        if not asyncio.Task.cancelled(task):
             try:
-                exception = task.exception()
+                exception = asyncio.Task.exception(task)
             except BaseException as exc:         # noqa: BLE001 - 取不到就当无异常
                 logger.debug("事件总线关停：读取 teardown 任务异常失败: %r", exc)
                 exception = None
@@ -2279,7 +2489,11 @@ class RedisEventBus(EventBus):
             self._teardown_error_kind = TEARDOWN_NEVER_ENTERED_KIND
             self._teardown_task_error = exception
             return
-        if task.cancelled():
+        if round_.tampered:
+            self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND
+            self._teardown_task_error = exception
+            return
+        if asyncio.Task.cancelled(task):
             self._teardown_error_kind = "cancelled"
             self._teardown_task_error = None
             return
@@ -2291,40 +2505,64 @@ class RedisEventBus(EventBus):
         self._teardown_task_error = None
         self._teardown_error_kind = None
 
-    def _watch_round(self, task: "asyncio.Task",
-                     round_: "_TeardownRound") -> None:
-        """受理的 Task 结束时判定本轮（#109 r12/A：**判据是事件，不是标记**）。
+    def _watch_round(self, task: "asyncio.Task", round_: "_TeardownRound",
+                     future: "asyncio.Future") -> None:
+        """受理的 Task 结束时判定本轮（#109 r12/A：判据是事件；**r13/A：判据只读闭包 future**）。
 
-        判据只有一条：**任务结束的那一刻，本轮的 ``future`` 是否仍未结算**。
+        判据只有一条，且只读**闭包捕获的** ``future``（不看 round、不看 Task、不看总线字段）：
 
-          * **仍未结算** ⇒ 我们自己的路径（``_teardown`` 的 ``finally`` / 驳回）从未结算
-            它 ⇒ 受理的 Task 没有跑我们的入口（包着别的 coroutine、返回前被 cancel、
-            或我们的 coroutine 被别处驱动）。具名结算
-            ``error_kind=teardown-never-entered``（``_teardown_runs`` 如实保持 0），
-            入口 coroutine 若从未启动则 ``close()`` 掉（防 "was never awaited"），并把
-            ``round_.never_entered`` 置位给 ``_record_round_outcome`` 定口径。
-          * **已结算** ⇒ 结论已由我们自己的路径给出（成功 / ``teardown-incomplete``）：
-            不做任何事（留档由 ``_on_teardown_done`` → ``_record_round_outcome`` 成对改写）。
+          * **仍未结算** ⇒ 我们自己的路径（``_teardown`` 的 finally / 本方法）从未结算它 ⇒
+            受理的 Task 没有跑我们的入口（包着别的 coroutine、返回前被 cancel、或我们的
+            coroutine 被别处驱动）。具名结算 ``error_kind=teardown-never-entered``
+            （``_teardown_runs`` 如实保持 0），入口 coroutine 若从未启动则 ``close()`` 掉
+            （防 "was never awaited"），并把 ``round_.never_entered`` 置位给留档定口径。
+          * **已结算** ⇒ 再分两种：
+              - 我们自己的路径结算的（本方法刚在同步路径上结算过 ⇒ ``never_entered`` 已置位；
+                或本轮 ``_teardown`` 跑过 ⇒ ``_teardown_runs != 0``）：不做任何事；
+              - 都不是 ⇒ **结算不是我们的**：工厂绕过一切路径直接结算了 future（R-12a）。
+                置 ``round_.tampered``、留档具名 ``teardown-settlement-tampered`` +
+                响亮 WARNING——结算已发生、无法撤回，但**假成功绝不静默**（r13/A4）。
 
-        本方法**不碰** ``task`` 的异常：取用/留档的职责留在 ``_on_teardown_done``，
-        这样「不给 teardown Task 挂取用回调」仍然是一条能被杀死的变异（r9/Finding 3）。
+        **幂等来自 ``future.done()`` 本身**：本方法可能在 ``_bind_round`` 的同步路径与
+        ``call_soon`` 排队的回调上各跑一次，第二次看到的 future 一定已 done，settle 分支
+        不再进入（``_settle_future`` 也自带 done 守卫）。**没有** ``judged`` 这类
+        「已判定」位。
 
-        ``round_`` 只从 ``_watch`` 的 ``__closure__`` 与本方法参数进来；它**不在**交给
-        工厂的 coroutine 的 frame 里，所以工厂伪造 ``cr_frame.f_locals`` 里的任何东西都
-        不再能改变这里的判定（r11 的 ``entered`` 正相反）。结算用 ``round_.future``
-        （本受理那一轮的 future），因此上一轮的晚到回调不会误伤重试那一轮。
+        本方法**不碰** ``task`` 的异常（取用/留档留在 ``_on_teardown_done``），这样
+        「不给 teardown Task 挂取用回调」仍是一条能被杀死的变异（r9/Finding 3）。
+        ``round_`` 与 ``future`` 只从 ``_watch`` 的 ``__closure__`` 进来；``future`` 是
+        受理时捕获的那个真对象，上一轮晚到的回调只结算它自己那一轮，改任何字段/总线状态
+        都改不了结算对象（S4）。
+
+        **out of contract（S1 类）**：进程内对手可以 ``sys._getframe`` 走到
+        ``_spawn_teardown`` 的活帧、或从 ``task._callbacks`` 取到 ``_watch`` 再改
+        ``cell_contents``——那时它已经能触达本进程的任意对象（模块全局、总线、future 本身），
+        这类**无法关闭**，声明为不在契约内（见类文档）。
         """
-        if round_.judged:
-            return
-        round_.judged = True
-        if not round_.future.done():
+        if not asyncio.Future.done(future):
+            if self._close_future is not future:
+                # 工厂在 spawn 窗口/随后把幂等凭据换成了诱饵（R-13b）：受理时落盘的真 future
+                # 才是本轮凭据，这里钉回去，后面的结算与清理才不会落到诱饵上。
+                self._close_future = future
             round_.never_entered = True
             self._settle_future(
-                round_.future, RuntimeError(_TEARDOWN_NEVER_ENTERED_MESSAGE))
+                future, RuntimeError(_TEARDOWN_NEVER_ENTERED_MESSAGE))
             self._teardown_error_kind = TEARDOWN_NEVER_ENTERED_KIND
             logger.warning(
                 "事件总线关停：受理的 teardown 任务结束时本轮 future 仍未结算 ⇒ 入口从未"
                 "执行，具名失败 %s（task=%r）", TEARDOWN_NEVER_ENTERED_KIND, task)
+            self._close_entry_coro_if_unstarted(round_.coro)
+            return
+        if round_.never_entered:
+            return
+        if self._teardown_runs == 0 and not round_.tampered:
+            round_.tampered = True
+            self._teardown_error_kind = TEARDOWN_SETTLEMENT_TAMPERED_KIND
+            self._teardown_task_error = None
+            logger.warning("%s（task=%r, future=%r）",
+                           _TEARDOWN_SETTLEMENT_TAMPERED_LOG, task, future)
+            # ``runs == 0`` 说明入口一次都没被 step 过（``_teardown`` 第一行就自增计数）
+            # ⇒ 从未启动的入口 coroutine 一并 close，避免 "was never awaited"。
             self._close_entry_coro_if_unstarted(round_.coro)
 
     async def _teardown(self) -> None:
@@ -2370,21 +2608,27 @@ class RedisEventBus(EventBus):
                        error: Optional[BaseException]) -> None:
         """结算**指定**的 close future（#109 r11/A1：晚到的回调只许结算它自己那一轮）。
 
-        与 ``_settle_close_future`` 的差别只在「谁的 future」：受理标记绑在任务上，晚到的
-        回调带的是**上一轮**的 future，绝不能拿 ``self._close_future``（可能是重试那一轮）
-        去顶包。清理幂等凭据只在 ``future`` 恰好是当前凭据时发生。
+        与 ``_settle_close_future`` 的差别只在「谁的 future」：本轮凭据只认闭包/登记里
+        捕获的那个，晚到的回调带的也一定是**它自己那一轮**的 future，绝不会拿
+        ``self._close_future``（可能是重试那一轮）去顶包。清理幂等凭据只在 ``future``
+        恰好是当前凭据时发生。
+
+        #109 r13/B：close future 对工厂**可达**（``self._close_future``），所以这里对它的
+        四次操作全部走 ``asyncio.Future`` 上的 C 函数（``done`` / ``set_result`` /
+        ``set_exception`` / ``add_done_callback``）——实例影子既不能截住结算，也不能让
+        「具名失败」投递失败（否则会退化成挂起）。
         """
-        if future is None or future.done():
+        if future is None or asyncio.Future.done(future):
             return
         if error is None:
-            future.set_result(None)
+            asyncio.Future.set_result(future, None)
             return
-        future.set_exception(error)
+        asyncio.Future.set_exception(future, error)
         # 异常必须被**标记为已取用**：`request_close()` 是 fire-and-forget 的公开
         # 入口，此时可能没有任何人在 await；不标记就会在 GC 时打印
         # "Future exception was never retrieved"。这**不影响**真正的 await 者——
         # 它照样从 shield 收到这个异常。
-        future.add_done_callback(_mark_future_retrieved)
+        asyncio.Future.add_done_callback(future, _mark_future_retrieved)
         # 清空幂等凭据：后续 close() 不得对「已失败的本次关停」早返回，而要真正重试。
         # 只在 future 就是当前凭据时清——晚到的上一轮回调不许把重试那一轮的凭据清掉。
         if self._close_future is future:

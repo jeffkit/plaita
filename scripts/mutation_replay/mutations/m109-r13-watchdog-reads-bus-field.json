@@ -1,0 +1,12 @@
+{
+  "name": "m109-r13-watchdog-reads-bus-field",
+  "issue": "109",
+  "concern": "A-r13-closure-future",
+  "file": "plaita/event/redis.py",
+  "rationale": "看门狗改从**总线字段** self._close_future 取判定/结算对象（回到 r12 的「从可变处回读」）⇒ 工厂只要在受理之后把该字段换成诱饵，结算就打到诱饵、真 close future 永远悬着（验收者 r12 的 S4 同族）。杀死者：r13 的 S4b 用例（诱饵 + call_soon 再改一次）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13NoWritableEvidenceBit::test_s4b_watchdog_settles_the_closure_future_not_a_bus_field"
+  ],
+  "old": "        def _watch(finished: \"asyncio.Task\") -> None:\n            self._watch_round(finished, round_, future)\n",
+  "new": "        def _watch(finished: \"asyncio.Task\") -> None:\n            # mutation: 判定对象改读总线字段（工厂可经 self 改写）\n            self._watch_round(finished, round_, self._close_future)\n"
+}

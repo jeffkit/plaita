@@ -3,11 +3,11 @@
   "issue": "109",
   "concern": "F1-truth",
   "file": "plaita/event/redis.py",
-  "rationale": "spawn 抛异常时不做「已启动就收养」⇒ 回滚成未受理：非 eager 留下无人取用的孤儿 Task（cannot reuse already awaited coroutine）、eager 组件已关掉却 _closing=False、第二次 close() 双关三个存储（r9 判负项）。r11 重锚过 _bind_acceptance/_accept_spawned_task；**r12 再锚**：holder→_TeardownRound、_started_teardown_task 不再收 holder。",
+  "rationale": "spawn 抛异常时不做「已启动就收养」⇒ 回滚成未受理：非 eager 留下无人取用的孤儿 Task（cannot reuse already awaited coroutine）、eager 组件已关掉却 _closing=False、第二次 close() 双关三个存储（r9 判负项）。r11 重锚过 _bind_acceptance/_accept_spawned_task；r12 再锚：holder→_TeardownRound、_started_teardown_task 不再收 holder。**r13 三锚**：_bind_round 增加第三形参 future（闭包结算对象）。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r10_parity.py::Test109R10AdoptStartedTeardown::test_non_eager_create_then_raise_is_adopted_no_orphan",
     "tests/unit/test_issue109_110_r10_parity.py::Test109R10AdoptStartedTeardown::test_eager_then_raise_is_adopted_no_double_close"
   ],
-  "old": "        except BaseException:\n            owner = self._started_teardown_task(coro)\n            if owner is not None:\n                logger.debug(\n                    \"事件总线关停：spawn 抛异常但 teardown 任务已存在，改为收养: %r\", owner)\n                return self._bind_round(\n                    self._accept_spawned_task(loop, owner, coro), round_)\n            self._close_unstarted_coro(coro)\n            raise\n",
+  "old": "        except BaseException:\n            owner = self._started_teardown_task(coro)\n            if owner is not None:\n                logger.debug(\n                    \"事件总线关停：spawn 抛异常但 teardown 任务已存在，改为收养: %r\", owner)\n                return self._bind_round(\n                    self._accept_spawned_task(loop, owner, coro), round_, future)\n            self._close_unstarted_coro(coro)\n            raise\n",
   "new": "        except BaseException:\n            self._close_unstarted_coro(coro)\n            raise\n"
 }

@@ -1,0 +1,12 @@
+{
+  "name": "m109-r13-no-instance-shadow-purge",
+  "issue": "109",
+  "concern": "B-r13-shadow",
+  "file": "plaita/event/redis.py",
+  "rationale": "不做实例方法影子探测（C Task 的 managed dict 对 getattr_static 不可见）⇒ 工厂在实例上塞一个**真** stdlib 别名（remove_done_callback）就能让 request_close 的注册变成 no-op（验收者 B 的决定性反例）。杀死者：r13 的 alias 用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13DirectCCalls::test_remove_done_callback_alias_is_refused_named"
+  ],
+  "old": "        shadowed = _purge_instance_method_shadows(spawned)\n        if shadowed is not None:\n            logger.warning(\"事件总线关停：交回的 Task 有实例方法影子 %s（reason=%s）\",\n                           shadowed, TEARDOWN_HOSTILE_TASK_REASON)\n            self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)\n",
+  "new": "        # mutation: 不做实例方法影子探测（对 C Task 结构性瞎）\n"
+}

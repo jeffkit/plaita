@@ -1,0 +1,12 @@
+{
+  "name": "m109-r13-registry-key-never-matches",
+  "issue": "109",
+  "concern": "A-r13-registry",
+  "file": "plaita/event/redis.py",
+  "rationale": "把登记表的键从 id(task) 改成 id(round_) ⇒ _on_teardown_done 永远查不到本轮凭据：**判定/结算不受影响**（仍具名、仍有界），但 r10 的成对留档（cancelled / 异常 kind）全部丢失。杀死者：r10 的取消留档用例。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r10_parity.py::Test109R10ErrorPairConsistency::test_cancel_clears_previous_error"
+  ],
+  "old": "        _TEARDOWN_ROUNDS[id(task)] = round_\n",
+  "new": "        _TEARDOWN_ROUNDS[id(round_)] = round_   # mutation: 键错 ⇒ 回调查不到\n"
+}

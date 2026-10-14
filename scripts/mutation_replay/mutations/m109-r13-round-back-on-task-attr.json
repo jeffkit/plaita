@@ -1,0 +1,13 @@
+{
+  "name": "m109-r13-round-back-on-task-attr",
+  "issue": "109",
+  "concern": "A-r13-task-attr",
+  "file": "plaita/event/redis.py",
+  "rationale": "把本轮凭据重新 setattr 到**工厂交回的 Task** 上（r12 的形状）⇒ 工厂留着句柄就能 getattr(t, \"_plaita_teardown_round\") 拿到并改写判据/留档（验收者 S2/S3 的通道）。杀死者：r13 的结构性用例（受理 Task 上不许有该属性）与 S2 用例（工厂读回 None）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13NoWritableEvidenceBit::test_round_is_not_a_task_attribute_and_has_no_settlement_fields",
+    "tests/unit/test_issue109_110_r13_parity.py::Test109R13NoWritableEvidenceBit::test_s2_task_attribute_channel_is_gone"
+  ],
+  "old": "        _TEARDOWN_ROUNDS[id(task)] = round_\n",
+  "new": "        _TEARDOWN_ROUNDS[id(task)] = round_\n        setattr(task, \"_plaita_teardown_round\", round_)   # mutation: 凭据落回工厂可读处\n"
+}

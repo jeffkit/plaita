@@ -3,11 +3,11 @@
   "issue": "109",
   "concern": "A-r12-forge",
   "file": "plaita/event/redis.py",
-  "rationale": "把本轮结算凭据 _TeardownRound 塞进交给工厂的 coroutine 的闭包（自由变量）⇒ coro.cr_frame.f_locals 里重新出现 round_（未启动即可读，3.10–3.13 实测自由变量也在 f_locals）：这正是 r11 holder[\"entered\"] 被一行伪造的通道。r12 的 frame 枚举/凭据不可达断言必须判红。",
+  "rationale": "把本轮凭据 _TeardownRound 塞进交给工厂的 coroutine 的闭包（自由变量）⇒ coro.cr_frame.f_locals 里重新出现 round_（未启动即可读，3.10–3.13 实测自由变量也在 f_locals）：这正是 r11 holder[\"entered\"] 被一行伪造的通道。r13 的 frame 枚举/凭据不可达断言必须判红。**r13 重锚**：_TeardownRound 不再收 future 形参（字段改为 coro/task_ref/never_entered/tampered）。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r12_parity.py::Test109R12ForgeChannelIsGone::test_forging_every_reachable_object_is_named_not_hung",
     "tests/unit/test_issue109_110_r12_parity.py::Test109R12ForgeChannelIsGone::test_round_credential_is_not_reachable_from_the_frame"
   ],
-  "old": "        round_ = _TeardownRound(self._close_future)\n        self._teardown_entry_task = None      # eager 路径的句柄槽；入口第一行才写\n        coro = self._teardown_entry()\n",
-  "new": "        round_ = _TeardownRound(self._close_future)\n        self._teardown_entry_task = None      # eager 路径的句柄槽；入口第一行才写\n\n        async def _teardown_entry():          # mutation: 本轮凭据漏进 coro 的闭包/frame\n            self._teardown_entry_task = asyncio.current_task()\n            round_.task = asyncio.current_task()\n            await self._teardown()\n\n        coro = _teardown_entry()\n"
+  "old": "        round_ = _TeardownRound()\n        self._teardown_entry_task = None      # eager 路径的句柄槽；入口第一行才写\n        coro = self._teardown_entry()\n",
+  "new": "        round_ = _TeardownRound()\n        self._teardown_entry_task = None      # eager 路径的句柄槽；入口第一行才写\n\n        async def _teardown_entry():          # mutation: 本轮凭据漏进 coro 的闭包/frame\n            self._teardown_entry_task = asyncio.current_task()\n            round_.coro = asyncio.current_task()\n            await self._teardown()\n\n        coro = _teardown_entry()\n"
 }
