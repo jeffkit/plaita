@@ -477,3 +477,21 @@ flowchart TD
 - **残留订阅 GC**：EventFilter 匹配到已终态（completed/error）执行的订阅时，
   就地注销该订阅而不是入队注定失败的 resume——error 路径泄漏的订阅不再
   需要等 7 天 TTL。
+
+### Redis 日志 handler 的客户端队列上限（plaita#84）
+
+`RedisStreamHandler`（`enable_redis_logging=True` 时默认挂载）把日志先放进**客户端队列**
+再批量写 Redis Stream。该队列是**有界**的，边界与 Stream 侧的 `max_len` **无关**：
+
+| 项 | 值 / 语义 |
+|----|-----------|
+| 队列上限 | `RedisStreamHandler.DEFAULT_MAX_QUEUE = 10000`，可由构造参数 `max_queue` 覆盖 |
+| 队列满时 | **丢弃最旧的一条**（`del self._queue[0]`）再入队 —— 保留最新日志 |
+| 丢弃计数 | 公开属性 `RedisStreamHandler.dropped_count`（因上限/失败回灌截断累计丢弃条数） |
+| 丢弃告警 | **不静默**：第 1 条与之后每 `DROP_WARN_EVERY = 100` 条聚合一条 warning，含累计条数与 `队列 x/上限` |
+| 刷新失败 | 整批**回灌**，但合并后超出上限的部分**整批丢弃并计数**（回灌受同一上限约束） |
+| 告警路径 | 走 `plaita.server.log_handler.audit`（`propagate=False` + 自有 stderr handler）⇒ **不会**被本 handler 自己收进队列（避免失败期间告警自噬、队列排不空） |
+| 正常流量 | 不丢弃：仅在 `len(queue) >= max_queue` 时丢最旧；成功刷新后队列清空 |
+
+> Stream 侧 `max_len`（默认 `DEFAULT_MAX_LEN = 10000`，`approximate=True`）只约束 Redis 里的
+> Stream 长度，**不**约束 worker 进程内存；进程内存由上面的客户端队列上限约束。
