@@ -31,8 +31,8 @@ listener 未取消、未进 ``_drain_pending_tasks``）：
 
 import asyncio
 import contextvars
-import logging
 import os
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -45,13 +45,14 @@ import fakeredis
 import fakeredis.aioredis
 
 import plaita.event._selfclose_guard as guard_mod
-import plaita.event.redis as redis_mod
 from plaita.event.core import Event, EventSubscription
 from plaita.event.redis import (
     RedisEventBus,
     RedisEventSubscriptionStorage,
     _DISPATCH_GRAPH_MAX_NODES,
+    _SELF_CLOSE_BUDGET_REFUSAL,
     _SELF_CLOSE_REFUSAL,
+    _SELF_CLOSE_UNSUPPORTED_REFUSAL,
     _WAKE_GRAPH_INCOMPLETE_REFUSAL,
     _close_graph_verdict,
 )
@@ -233,15 +234,14 @@ class Test109R6VerifierCounterexamples(unittest.IsolatedAsyncioTestCase):
         assert _INCOMPLETE_MARK in str(err), f"未知持有者应 fail-closed: {err}"
 
     async def test_as_completed_pinned_on_running_cpython(self):
-        """``as_completed`` 形状：本仓库运行时 3.11 由 Queue 中介边证明出 in_graph；
+        """``as_completed`` 形状：本仓库运行时 3.11/3.12 由 Queue 中介边证明出 in_graph；
         3.13 的 ``_AsCompletedIterator``（未知持有者持 ``_done`` Queue）由 fail-closed
         拦下（见 scripts/selfclose_109_110_versions.py 的跨版本实测）。两者都是具名拒绝。
         """
         err = await self._assert_shape_refused("as_completed")
-        if hasattr(asyncio.as_completed([asyncio.get_running_loop().create_future()]),
-                   "__aiter__"):
-            # 3.13+：_AsCompletedIterator 是未知持有者 ⇒ incomplete
-            pass
+        if sys.version_info >= (3, 13):
+            assert _INCOMPLETE_MARK in str(err), \
+                f"3.13 的 _AsCompletedIterator 应走未知持有者 fail-closed: {err}"
         else:
             assert _SELF_CLOSE_MARK in str(err), \
                 f"3.11/3.12 的 as_completed 应经 Queue._getters 证明出图内: {err}"
@@ -582,6 +582,17 @@ class Test109R6HonestBoundary(unittest.IsolatedAsyncioTestCase):
         gate.f.cancel()
         assert verdict == "clean", (
             "若这里变成拒绝，说明 R1 已被覆盖——请同步更新文档的残差 R1 段与用例名")
+
+    async def test_refusal_messages_state_capability_boundary(self):
+        """要求：拒绝文案的 rationale 里要写明判据**不能**证明什么（不宣称完备）。"""
+        for label, msg in (
+                ("self-close", _SELF_CLOSE_REFUSAL),
+                ("budget", _SELF_CLOSE_BUDGET_REFUSAL),
+                ("incomplete", _WAKE_GRAPH_INCOMPLETE_REFUSAL),
+                ("unsupported-runtime", _SELF_CLOSE_UNSUPPORTED_REFUSAL)):
+            assert "不宣称完备" in msg, (label, msg)
+            assert "best-effort" in msg, (label, msg)
+            assert "R1" in msg, (label, msg)
 
 
 @unittest.skipUnless(_REAL_REDIS_URL,

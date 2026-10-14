@@ -93,30 +93,41 @@ _WAKE_EXPAND_DEPTH = 12
 IN_DISPATCH_BUS: contextvars.ContextVar = contextvars.ContextVar(
     "plaita_redis_in_dispatch_bus", default=None)
 
+# 每条拒绝文案都带上的**能力边界**（要求：拒绝文案里说明判据不能证明什么）。
+# 不宣称完备：围栏只认 asyncio 自己的唤醒机制；由「在 dispatch 之外创建、却被某个
+# 分发 handler 等待」的 close 任务发起、且唤醒边不走 asyncio 簿记的形状，不在判据内
+# （文档的声明残差 R1）。
+_BEST_EFFORT_CLAUSE = (
+    "【能力边界】本围栏只认 asyncio 自己的唤醒机制（Future._callbacks 与 asyncio 的"
+    "唤醒簿记属性），是 best-effort，不宣称完备：close 若由**在 dispatch 之外创建**、"
+    "却被某个分发 handler 等待的任务发起，且那条唤醒边不走 asyncio 簿记"
+    "（例如藏在 __slots__ 对象或作者自建调度里），本判据覆盖不到（声明残差 R1）。"
+)
+
 SELF_CLOSE_REFUSAL = (
     "RedisEventBus.close() 不能从它自己的分发 handler 内调用："
     "该任务会把自身纳入 drain 并导致自取消/gather 递归。"
     "请在 handler 之外（监听循环/CLI 收尾）关停；"
     "如需在 handler 内请求关停，请先 return 再由外部调用。"
-)
+) + _BEST_EFFORT_CLAUSE
 SELF_CLOSE_BUDGET_REFUSAL = (
     "RedisEventBus.close() 拒绝执行：无法证明它不在自己的分发图内——"
     "等待图在 {budget} 个节点的证明预算内未闭合（已访问 {visited} 个节点仍有待展开）。"
     "按 fail-closed 口径具名拒绝，未产生任何关停副作用。"
     "请在 handler 之外（监听循环/CLI 收尾）关停，或缩小 handler 内的等待构造规模。"
-)
+) + _BEST_EFFORT_CLAUSE
 WAKE_GRAPH_INCOMPLETE_REFUSAL = (
     "RedisEventBus.close() 拒绝执行：error_kind=" + WAKE_GRAPH_INCOMPLETE_KIND +
     "——完成唤醒锥无法证明安全（{reason}）。"
     "按 fail-closed 口径具名拒绝（缺属性/懒创建/未知持有者都不静默放行），"
     "未产生任何关停副作用。请在 handler 之外（监听循环/CLI 收尾）关停。"
-)
+) + _BEST_EFFORT_CLAUSE
 UNSUPPORTED_RUNTIME_REFUSAL = (
     "RedisEventBus.close() 拒绝执行：error_kind=wake-graph-incomplete——"
     "本 CPython 的 asyncio 唤醒簿记属性自检未通过（{detail}）。"
     "当前运行时不支持该自关停围栏：按 fail-closed 口径，本进程内 close() 一律具名拒绝，"
     "未产生任何关停副作用。请在有支持的 CPython 上运行，或升级本模块的期望属性表。"
-)
+) + _BEST_EFFORT_CLAUSE
 
 # 供测试注入「模拟未来 Python 改名」的额外期望属性：{kind_name: (attr, ...)}。
 # 生产恒为空；注入后首次 close() 的自检必然失败 ⇒ 全拒（fail-closed）。

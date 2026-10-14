@@ -185,10 +185,12 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `close()` 命中 L1 或在飞分发任务即抛 `_SELF_CLOSE_REFUSAL`；命中 fail-closed 情形抛
   `_WAKE_GRAPH_INCOMPLETE_REFUSAL`；命中预算抛 `_SELF_CLOSE_BUDGET_REFUSAL`；自检未过抛
   `_SELF_CLOSE_UNSUPPORTED_RUNTIME_REFUSAL`。**四条都在任何关停副作用之前**
-  （`_closing` 保持 `False`、listener 不取消、不进 `_drain_pending_tasks`），且都不再
-  让调用方 teardown 悬置：验收者反例在 r4/r5 会让 `asyncio.run` 的收尾无法完成（外部
-  看门狗 SIGKILL/137），r6 拒绝后 `asyncio.run` 正常返回
-  （`Test109R6AsyncioRunTeardown`）。`asyncio.shield(bus.close())` 自 r5 起从
+  （`_closing` 保持 `False`、listener 不取消、不进 `_drain_pending_tasks`）。拒绝后
+  `asyncio.run` 正常返回（`Test109R6AsyncioRunTeardown`）。**r5 的对照实测**：同一
+  反例在 r5 上 guard 判 `('clean', 1)` 且进入 drain（`_closing=True`、listener 已取消）；
+  验收者在完整总线上实测 70 s 仍被外部看门狗 SIGKILL/137，本仓 stub 复现里它被 5 s
+  drain 超时取消——两种结局都证明 r5 **不拒绝**。
+  `asyncio.shield(bus.close())` 自 r5 起从
   「bypass-but-named」收紧为**具名拒绝**。**日志口径修正**（r3 验收者第 3 处过度声明）：
   该拒绝只有在**未被 handler 接住**时才经 `_process_event` 打 1 条 handler 失败日志；
   handler 内接住时为 0 条——两种口径都由
