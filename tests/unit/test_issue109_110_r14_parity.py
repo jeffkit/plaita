@@ -208,6 +208,32 @@ class Test109R14CloseCompletionImmune(unittest.IsolatedAsyncioTestCase):
         """对照：影子 ``done`` 无害（看门狗走 C 函数）——C 转换在它覆盖到的地方有效。"""
         await self._assert_named_and_bounded("done")
 
+    async def test_cancelled_shared_future_reaches_the_waiter_as_cancelled(self):
+        """``shield`` 语义②：被等的 future 被**取消** ⇒ 等待者收到 ``CancelledError``。
+
+        r14 的 waiter 自己实现这条语义（真 future 被取消 ⇒ 取消本地 waiter，不是挂起、
+        也不是把取消吞成成功）。
+        """
+        bus, comps = _make_bus()
+
+        class _Never:
+            async def aclose(self):
+                await asyncio.Event().wait()
+
+        bus.pubsub = _Never()
+        closer = asyncio.create_task(bus.close())
+        await settle()
+        shared = bus._close_future
+        self.assertIsNotNone(shared)
+        self.assertFalse(asyncio.Future.done(shared), "teardown 应仍挂在组件释放上")
+        asyncio.Future.cancel(shared)
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(closer, WATCHDOG)
+        self.assertTrue(asyncio.Future.cancelled(shared))
+        # 收尾：取消仍挂着的 teardown（组件永不返回 ⇒ R-4，明示 out of contract）。
+        asyncio.Task.cancel(bus._teardown_task)
+        await settle()
+
     async def test_completion_waiter_uses_only_class_level_c_functions(self):
         """结构性：``close()`` / waiter 的**可执行体**里不许再有对凭据的实例属性查找或 shield。"""
         close_src = _executable_source(RedisEventBus.close)

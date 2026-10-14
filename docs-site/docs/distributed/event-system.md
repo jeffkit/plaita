@@ -130,7 +130,9 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 
 - **`close()` 是总体、非阻塞、幂等的关停请求**（r7）：受理时同步置 `_closing`
   （拒绝新分发），在**总线构造 context**（`_owner_context`）里创建 teardown 任务，
-  返回同一个 close future；`close()` 用 `asyncio.shield` 等它 ⇒ teardown **不是
+  返回同一个 close future；`close()` 用**引擎自建的 waiter**（`_await_close_future`，
+  r14/N8 起取代 `asyncio.shield`——语义不变，但不再对那个工厂可达的 future 做任何属性
+  查找）等它 ⇒ teardown **不是
   调用者的 context 后代**，调用者被取消也不打断关停。重复 `close()` 返回同一个
   future（幂等；`_teardown_runs == 1`）。
 - **受理顺序（r8/F1，曾导致挂起）**：`request_close()` **先**落 `_close_future` /
@@ -406,7 +408,7 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 
   | # | 工厂动作（N8） | r13 结局（3.10–3.13 实测） | r14 结局 |
   |---|---|---|---|
-  | N8-a | `bus._close_future.add_done_callback = lambda *a, **k: None` | **HANG/TIMEOUT**（真 future 已结算、调用方永远收不到） | `returned`（具名有界） |
+  | N8-a | `bus._close_future.add_done_callback = lambda *a, **k: None` | **HANG/TIMEOUT**（真 future 已结算、调用方永远收不到） | `returned`（有界；组件关一次） |
   | N8-b | 影子 `add_done_callback` 抛 `RuntimeError` | `RuntimeError('shadow-add-done-callback')`（与具名结局无关的裸异常） | `returned` |
   | N8-c | 影子 `get_loop` 返回 `"not-a-loop"` | `AttributeError("'str' object has no attribute 'create_future'")` | `returned` |
   | N8-d（对照） | 影子 `done` | `returned`（看门狗走 C 函数 ⇒ C 转换在覆盖到的地方有效） | `returned` |
@@ -441,8 +443,8 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   factory 让 teardown 在 `create_task` 里**同步**跑完（早于受理点钉回），该形状仍是
   **保守误报**（具名 `teardown-never-entered`、组件关过一次、绝不静默成功）；无法关闭，
   因为「入口跑没跑」没有不可伪造的信号（`_teardown_runs` 是工厂可写字段，用它就会像 r12 的
-  负控那样压住具名结局）。钉住：`test_issue109_110_r14_parity.py`（**20 用例**，
-  `--collect-only` 在 3.10/3.11/3.12/3.13 上都量到 20；其中 eager 那条在 3.10/3.11 上
+  负控那样压住具名结局）。钉住：`test_issue109_110_r14_parity.py`（**21 用例**，
+  `--collect-only` 在 3.10/3.11/3.12/3.13 上都量到 21；其中 eager 那条在 3.10/3.11 上
   **skip**，因为那两个运行时没有 `asyncio.eager_task_factory`）。
 - **r12/B：判据不再问**对象自己**（r11 的 `__eq__`/`__func__`/逐次动态访问被替换）**：
   r11 的 `_task_uses_stdlib_methods` 用对象提供的 `__eq__`/`__func__` 做「绑定比较」，
@@ -517,7 +519,8 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   close future 会一直等到那个任务结束——**工厂侧**的长等（R-1）。
   r11 把它写成「**唯一**仍可能长等的形状」是**错的**：除下面的 R-4 之外，r12 的 S1–S4
   （受理凭据落在工厂可达处，见上 r13/A）也是**额外的**合成长等形状；r13 删掉那条通道后
-  S2/S3/S4 不再长等，①与⑤仍在。
+  S2/S3/S4 不再长等，①与⑤仍在；r14 补 R-14a（eager 下受理窗口换凭据 ⇒ **保守误报**，
+  不是长等）与 R-13c（tamper 信号可抑制/可伪造）。
   ② 我们的 coroutine 被别处驱动、而交回的 Task 又不跑它 ⇒ 按①的完成判据具名失败；
   若别处随后真的跑完 teardown，组件是关掉的、调用方却已看到 `teardown-never-entered`（R-2）；
   ③ 覆写 `cancel` / `__setattr__` / `__getattribute__` 等**未纳入检查**的钩子 ⇒
@@ -538,6 +541,9 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   模块全局 `_TEARDOWN_ROUNDS` ⇒ 完成事件不可得（close 长等）或留档口径失真。
   与①同类：**工厂侧**把完成事件拿走；进程内对手可达，语言内无法防御（r13 只保证
   「判决与结算不依赖它们能写的任何字段」）。声明为 out of contract，不用计时器掩盖。
+  ⑥ **工厂改写幂等凭据 `self._close_future`（R-13b，r14 收口）**：r13 上换 pending 诱饵
+  会让第二次 `close()` 长等；r14 在受理点/判定点钉回 + 把结局镜像到诱饵 ⇒ 四版本实测
+  两次 `close()` 都**有界**，这条从「长等」降级为「已收口」。
 
   **等待的有界性逐段列清**（`close()` 的等待只由这几段构成）：
 
@@ -550,7 +556,7 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   | ④ 工厂交回的 Task 永不结束 | **无界（R-1）** | 只有「任务结束」这一事件可依 |
   | ⑤ 工厂篡改完成簿记 / 闭包 cell | **无界（R-13a）** | 完成事件被拿走；进程内对手，语言内不可防 |
 
-- **r10 报告的口径更正（r11/C 起；r12/C、r13/C 续补；命令可复现）**：
+- **r10 报告的口径更正（r11/C 起；r12/C、r13/C、r14/C 续补；命令可复现）**：
   ① 「`request_close` 可执行体 **2070 B**」不可复现（验收方在不同切片下量到
   2722 / 2362 / 2711 / 1486 B）。改为**方法定义**的数字：`request_close` 去掉 docstring
   后的可执行体在 `5f6e308`(r9) → `8eaf3f6` → `789e070` → `bbf0d2b` → `e1b5356` → `HEAD`
@@ -596,6 +602,13 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `_on_teardown_done` / `_record_round_outcome` / `_started_teardown_task` /
   `_reject_spawned_task` / `_accept_spawned_task` / `_spawn_teardown` 与两个新模块级助手），
   故那 5 条变异在 r13 上仍**零重锚**。
+  **r14 复算（同一命令、四个版本 + 七个历史 rev + 新 HEAD `1c08c85`）**：仍是
+  `2770 B / 47 L`、sha256 `8b38c2bd044c563d4ea83facd4cab2ae62c9181c0309acf6c6cff2b2e83dbe7a`、
+  `identical: True`（实测输出：`5f6e308=2770B/47L | 8eaf3f6=2770B/47L | 789e070=2770B/47L |
+  bbf0d2b=2770B/47L | e1b5356=2770B/47L | c5e6a055=2770B/47L | HEAD=2770B/47L`）——r14 同样
+  只改 `request_close` 的 **docstring**（可执行体改动都在 `close()` / `_bind_round` /
+  `_watch_round` / `_release_decoy_waiters` / `_await_close_future` / `_is_factory_decoy`
+  与 `_ACCEPTED_CLOSE_FUTURES`），故那 5 条变异在 r14 上仍**零重锚**（逐条实测见下 ④）。
   ② r10 报告的 (A) 行声称「收养的场景 `_teardown_task is None`」**是错的**：收养瞬间它
   是**真的在飞 Task**（状态元组第三元素 ≠ `None`；上面 `(True, PENDING, True, 0)`
   就是那个瞬间，修后由 `teardown-never-entered` 结算）。r11 用例
