@@ -1,0 +1,13 @@
+{
+  "name": "158-registry-metadata-keeps-raw-redis-url",
+  "concern": "#158-P0",
+  "issue": "158",
+  "file": "plaita/server/flow_worker.py",
+  "old": "                    **_redis_registry_metadata(redis_url),\n",
+  "new": "                    \"redis_url\": redis_url,\n",
+  "rationale": "注册元数据重新放原始连接串：口令随 registry SETEX 持久化进 plaita:registry:flow_worker:<instance_id>（#158 的 sink 2 原始缺陷）。",
+  "expect_fail": [
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestRegistryMetadataHidesPassword::test_registry_metadata_carries_no_password",
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestRegistryLiveReadbackUsesProductionHelper::test_readback_equals_production_helper_output_and_has_no_password"
+  ]
+}

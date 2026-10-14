@@ -73,6 +73,12 @@ from plaita.server.tenant_context import (
     tenant_namespace,
 )
 from plaita.server.tenant_status import tenant_is_active
+# plaita#158 / #159：两个持久面（INFO/WARNING 日志、注册元数据）里的 URL 一律经
+# ``url_redaction`` 渲染——它**复用** #88 的 ``factory._mask_url``（不另起一套掩码，
+# 那正是 #88 的根因形态），并加一层「掩码失败 ⇒ 安全常量、绝不抛」的 fail-closed。
+# ``RedisUrlError`` / ``_parse_redis_url`` 仍直接来自 #88 的 factory（唯一解析路径）。
+from plaita.server.factory import RedisUrlError, _parse_redis_url
+from plaita.server.url_redaction import _mask_url_for_log, _mask_webhook_url_for_log
 
 
 def _env_switch(name: str) -> bool:
@@ -131,6 +137,42 @@ def _metrics_host_from_env() -> str:
 
 def _alert_webhook_from_env() -> Optional[str]:
     return (os.environ.get("PLAITA_ALERT_WEBHOOK") or "").strip() or None
+
+
+def _redis_registry_metadata(redis_url: object) -> Dict[str, Any]:
+    """注册元数据里的 Redis 端点：**掩码 URL + host/port/db**，绝不含口令。
+
+    plaita#158：``RedisFlowWorker`` 的注册元数据会被 ``ServiceRegistry.register``
+    原样 ``SETEX`` 进 ``plaita:registry:flow_worker:<instance_id>``——即**持久化**到
+    Redis 里。修复前这里放原始连接串，口令随注册键留存（TTL 到期前，任何能读注册键
+    的进程/控制面都能读到）。
+
+    端点三件套走 ``_parse_redis_url``（#88 确立的唯一解析路径），不另写解析——否则
+    又是「同一个 URL 两套解析」。URL 畸形时降级为「只带掩码 URL」并记日志，**不让
+    注册路径抛**：真正的拒绝发生在 ``create_storage_component`` 的连接前解析。
+
+    两条**不得违反**的性质（plaita#158 r1 定验）：
+
+    * ``_mask_url_for_log`` 保证掩码失败退化为安全常量、绝不抛（r1 的
+      ``UnicodeEncodeError`` 曾让 ``RedisFlowWorker.__init__`` 直接炸）；
+    * 兜底分支**不打印异常文本**——那可能是任意异常（``UnicodeEncodeError`` 的
+      ``str()`` 就带着口令里的那个字符），而 ``RedisUrlError``（#88 契约：消息已
+      掩码）才允许回显。
+    """
+    metadata: Dict[str, Any] = {"redis_url": _mask_url_for_log(redis_url)}
+    try:
+        target = _parse_redis_url(redis_url)
+    except RedisUrlError as exc:
+        logger.warning("注册元数据无法解析 Redis 端点，仅登记掩码 URL: %s", exc)
+        return metadata
+    except Exception:  # noqa: BLE001 — 注册路径绝不为「端点解析」抛
+        logger.warning("注册元数据无法解析 Redis 端点，仅登记掩码 URL")
+        return metadata
+    unix_socket = target.unix_socket_path
+    metadata["redis_host"] = unix_socket if unix_socket else target.host
+    metadata["redis_port"] = None if unix_socket else target.port
+    metadata["redis_db"] = target.db
+    return metadata
 
 
 def _paused_sweeper(max_age_secs: int = 6 * 3600):
@@ -2902,9 +2944,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 service_type=self.SERVICE_TYPE,
                 metadata={
                     "queue_name": queue_name,
-                    "redis_url": redis_url,
+                    # plaita#158：本字典会被 registry.register() 原样 ``SETEX`` **持久化**
+                    # 进 ``plaita:registry:flow_worker:<instance_id>``——注册键名与
+                    # metadata 键语义不变（仍是 ``redis_url``），只有它的**值**是掩码
+                    # 形态，另加 host/port/db 三件套保住运维诊断价值。
+                    **_redis_registry_metadata(redis_url),
                     "cache_size": cache_size,
-                    "cache_ttl": cache_ttl
+                    "cache_ttl": cache_ttl,
                 },
                 ttl=registry_ttl,
                 heartbeat_interval=heartbeat_interval
@@ -4483,7 +4529,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """配置了 webhook 才建 alerter（未配置 = 死信只走日志，存量行为）。"""
         if self._alert_webhook and self._alerter is None:
             self._alerter = WebhookAlerter(self._alert_webhook)
-            logger.info("死信告警 webhook 已启用: %s", self._alert_webhook)
+            # plaita#159：webhook 的凭据就在 path/query 里（Slack/飞书/钉钉/企微），
+            # 所以「能不能读这行日志」等价于「能不能往该 webhook 投任意内容」。
+            # ``self._alert_webhook`` 本体仍持原文（要 POST），只有渲染进日志的这一份
+            # 被抹成 scheme://host + 占位。
+            logger.info(
+                "死信告警 webhook 已启用: %s",
+                _mask_webhook_url_for_log(self._alert_webhook),
+            )
 
     def _stop_alerting(self) -> None:
         if self._alerter is not None:

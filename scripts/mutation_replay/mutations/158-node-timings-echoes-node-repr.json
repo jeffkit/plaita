@@ -1,0 +1,12 @@
+{
+  "name": "158-node-timings-echoes-node-repr",
+  "concern": "#158-P1",
+  "issue": "158",
+  "file": "plaita/server/node_timings.py",
+  "old": "            logger.warning(\"节点耗时采集 on_node_start 失败: %s\", _node_label(node), exc_info=True)\n",
+  "new": "            logger.warning(\"节点耗时采集 on_node_start 失败: %r\", node, exc_info=True)\n",
+  "rationale": "告警退回 %r 回显 pydantic 节点对象：RedisNode.target 就是带口令的 Redis URL，观测告警把口令写进 WARNING（#158 的 sink 3）。",
+  "expect_fail": [
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestNodeTimingAlertsNeverEchoNodeRepr::test_warning_records_never_carry_the_password"
+  ]
+}

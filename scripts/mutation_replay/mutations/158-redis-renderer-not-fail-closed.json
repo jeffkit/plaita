@@ -1,0 +1,14 @@
+{
+  "name": "158-redis-renderer-not-fail-closed",
+  "concern": "#158-P0",
+  "issue": "158",
+  "file": "plaita/server/url_redaction.py",
+  "old": "    return _safe_render(url, _mask_url)\n",
+  "new": "    return _mask_url(url)\n",
+  "rationale": "去掉 Redis 侧的总兜底：掩码器一旦抛（历史上非 UTF-8 口令的 UnicodeEncodeError），调用点就跟着炸——r1 定验 FAIL (a) 的形态。",
+  "expect_fail": [
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestNonUtf8PasswordNeverBreaksCallers::test_renderer_failure_degrades_to_safe_constant_not_raw_url",
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestNonUtf8PasswordNeverBreaksCallers::test_registry_metadata_failure_degrades_to_safe_constant",
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestNonUtf8PasswordNeverBreaksCallers::test_failure_never_breaks_the_startup_log_path"
+  ]
+}

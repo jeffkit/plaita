@@ -18,6 +18,11 @@ import queue
 import threading
 from typing import Any, Callable, Dict, Optional
 
+# plaita#159：webhook 的**凭据在 path/query 里**（Slack/飞书/钉钉/企微），
+# ``factory._mask_url`` 只抹 userinfo 口令、保留 path——对 webhook 不够。
+# ``self.url`` 本体仍持原文（要 POST），只有渲染进日志的那一份走掩码。
+from .url_redaction import _mask_webhook_url_for_log
+
 logger = logging.getLogger("plaita.server.alerts")
 
 DEFAULT_WEBHOOK_TIMEOUT = 5.0
@@ -82,7 +87,7 @@ class WebhookAlerter:
                 logger.warning(
                     "告警 webhook 队列已满，事件丢弃 (total=%d, url=%s)",
                     self._dropped,
-                    self.url,
+                    _mask_webhook_url_for_log(self.url),
                 )
             return False
         with self._cond:
@@ -136,7 +141,11 @@ class WebhookAlerter:
                     self._sent += 1
                 except Exception as exc:  # noqa: BLE001 - 告警失败不得影响主流程
                     self._failed += 1
-                    logger.warning("告警 webhook 发送失败 url=%s: %s", self.url, exc)
+                    logger.warning(
+                        "告警 webhook 发送失败 url=%s: %s",
+                        _mask_webhook_url_for_log(self.url),
+                        exc,
+                    )
             finally:
                 with self._cond:
                     self._pending -= 1

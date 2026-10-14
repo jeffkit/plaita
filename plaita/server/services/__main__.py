@@ -18,6 +18,10 @@ from redis import Redis
 
 from ...logger import logger
 from ...event.redis import RedisEventBus
+# plaita#158：连接串只允许以掩码形态（口令 ``***``）进日志。复用 #88 的
+# ``factory._mask_url``（**不**另起一套掩码——#88 的根因正是同一个 URL 有两套渲染），
+# 外面那层 ``_mask_url_for_log`` 保证掩码失败也不炸启动/停机路径。
+from ..url_redaction import _mask_url_for_log
 from .delay_service import DelayService
 from .schedule_service import ScheduleService
 from .redis_queue_service import RedisQueueService
@@ -52,7 +56,8 @@ def main():
     
     # 连接 Redis
     redis_url = args.redis_url
-    logger.info("连接 Redis: %s", redis_url)
+    # plaita#158：口令不得进 INFO 日志（落盘 + 日志聚合 + docker logs）。
+    logger.info("连接 Redis: %s", _mask_url_for_log(redis_url))
     
     redis_client = Redis.from_url(redis_url)
     
