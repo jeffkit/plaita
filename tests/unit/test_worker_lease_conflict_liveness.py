@@ -195,6 +195,49 @@ def test_holder_instance_id_rejects_unrecognized_shapes():
     assert holder_instance_id("other:a:b:c") is None
 
 
+# plaita#155：旧格式守卫与 new_holder_token 的末段形状相撞——
+# ``uuid.uuid4().hex[:16]`` 恰好全为十进制数字时（``P=(10/16)^15≈1/1153``；
+# uuid4 把版本半字节钉在 '4'），``parts[2].isdigit()`` 为真、被当成
+# ``{prefix}:{uuid}:{gen}`` 旧格式吞掉 ⇒ 概率性假红（首跑红/重跑绿）。
+# 下面两条把该边界**确定性钉死**：全数字末段必须按新格式反解，真实旧格式
+# （短十进制世代号）仍必须返回 None。
+ALL_DECIMAL_UUID16 = "1111111111111111"
+
+
+def test_holder_instance_id_all_decimal_hex_suffix_is_new_format():
+    """#155 回归输入：16 位全数字末段是新格式 uuid，不得被旧格式守卫吞掉。"""
+    tok = f"resume:{INSTANCE}:{ALL_DECIMAL_UUID16}"
+    assert holder_instance_id(tok) == INSTANCE
+    # fencing 档（holder + 世代）同款边界
+    assert holder_instance_id(f"{tok}:42") == INSTANCE
+    # 报告原文里的字面量（等同上面 INSTANCE 的取值）
+    assert holder_instance_id("resume:vm-a-1a2b3c4d:1111111111111111") == INSTANCE
+    # 三个白名单前缀都要能反解
+    for prefix in ("start", "resume", "worker"):
+        assert holder_instance_id(f"{prefix}:{INSTANCE}:{ALL_DECIMAL_UUID16}") == INSTANCE
+
+
+def test_holder_instance_id_genuine_legacy_numeric_generation_is_none():
+    """真实旧格式（末段是来自 Redis INCR 的短十进制世代号）仍返回 None。"""
+    for gen in ("0", "1", "7", "42", "999999", "123456789012345"):
+        assert holder_instance_id(f"resume:{UUID16}:{gen}") is None
+    # 边界：16 位是**新格式**末段的定长，故 16 位纯数字按新格式反解（现实里
+    # 的世代号要 10^15 次 INCR 才够长，不可达）；16 位以上仍按旧格式。
+    assert holder_instance_id(f"resume:{UUID16}:1234567890123456") == UUID16
+    assert holder_instance_id(f"resume:{UUID16}:12345678901234567") is None
+
+
+def test_new_holder_token_suffix_is_fixed_length_hex():
+    """#155 不变量：新格式末段定长 16 位 hex（新旧形状唯一的区分依据）。"""
+    for prefix in ("start", "resume", "worker"):
+        for instance_id in (None, INSTANCE):
+            tok = new_holder_token(prefix=prefix, instance_id=instance_id)
+            suffix = tok.rsplit(":", 1)[1]
+            assert len(suffix) == 16
+            int(suffix, 16)  # 必须是 hex
+            assert holder_instance_id(tok) == instance_id
+
+
 def test_start_flow_holder_carries_instance_id():
     """start 路径的 holder 嵌入注册表 instance id（租约值可反解持有者）。"""
     pytest.importorskip("cachetools")
