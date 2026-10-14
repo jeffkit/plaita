@@ -79,6 +79,21 @@ class ResumeFlowRequest(BaseModel):
     resume_type: str = Field(
         ..., description="恢复类型: continue, retry(error 态断点重跑), cancel, timeout, event")
     data: Optional[Dict[str, Any]] = Field(None, description="恢复数据")
+    # plaita#157：手动 resume 的调度入参通道。此前该请求体**没有** params
+    # 字段，人工/值守用 continue 抢在 pending start 被 reclaim 之前时，调度
+    # 时下发的 params 永远到不了 `$INPUT`（worker 侧 #122 已修好 start→resume
+    # 转换路径的丢参，这条是**另一条路由上"从来传不了"**的同类面）。
+    # 语义与 #122 一致：只在盘上 checkpoint 为空（假值 saved_context）时被
+    # 引擎用来重新 `setup_flow`；checkpoint 非空（正常续跑）时忽略。
+    params: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "可选调度入参（#157）：仅在盘上 checkpoint 为空（如手动 continue "
+            "抢在 pending start 被 reclaim 之前）时绑定 `$INPUT`；不传或空 "
+            "dict 不落 `params` 键（与 #122 的 resume 载体形状一致），"
+            "checkpoint 非空时忽略"
+        ),
+    )
 
 
 # ============ 工具函数 ============
@@ -820,6 +835,9 @@ async def resume_execution(
     - **execution_id**: 执行 ID
     - **resume_type**: 恢复类型
     - **data**: 恢复数据
+    - **params**: 可选调度入参（#157）。只在盘上 checkpoint 为空时绑定
+      `$INPUT`（手动 continue 抢在 pending start 被 reclaim 之前的窗口）；
+      不传/空则不落 `params` 键，checkpoint 非空时忽略。
     """
     # 本地单机模式：从 SQLite checkpoint 继续（分布式策略）
     if (local := get_local_executor(http_request)) is not None:
@@ -868,6 +886,12 @@ async def resume_execution(
         "data": request.data,
         "timestamp": datetime.now().isoformat()
     }
+    # plaita#157：把请求体里的调度入参透传进 resume 载体。空/未传**不落键**
+    # ——与 #122（start 幂等命中转出的 resume 载体）逐字同形：worker 侧
+    # `_dispatch_task` 读的是 `message_data.get("params")`，缺键即 None，
+    # 存量消息与既有调用方零变化。
+    if isinstance(request.params, dict) and request.params:
+        message["params"] = dict(request.params)
 
     _enqueue(message, redis)
 

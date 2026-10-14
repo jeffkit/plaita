@@ -171,6 +171,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | `/api/executions` | GET | 获取执行列表 |
 | `/api/executions` | POST | 启动新执行 |
 | `/api/executions/{id}` | DELETE | 取消执行 |
+| `/api/executions/{id}/resume` | POST | 恢复执行（`resume_type`=continue/retry/cancel/timeout/event，可选 `data`）；可选 `params`（#157）：**只在盘上 checkpoint 为空时**绑定 `$INPUT`（手动 continue 抢在 pending start 被 reclaim 之前的窗口），不传/空不落 `params` 键（与 #122 载体形状一致），checkpoint 非空时忽略 |
 | `/api/queues` | GET | 获取队列状态（含死信 DLQ 键） |
 | `/api/queues/dlq` | GET | 死信总览：各 DLQ Stream 堆积量与最近条目（`?count=`） |
 | `/api/metrics` | GET | 集群 Prometheus 文本：队列积压 / DLQ 堆积 / 存活 worker 数 |

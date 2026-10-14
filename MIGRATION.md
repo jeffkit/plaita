@@ -8,6 +8,34 @@
 
 ## Unreleased（0.5.x）
 
+### 控制台 resume 请求体新增可选 `params`（plaita#157）
+
+**口径（contract）**：管理面 `POST /api/executions/{execution_id}/resume`
+的请求体新增**可选**字段 `params`（object）。它与 `data` 并列，但语义不同：
+`data` 是挂起节点的决议数据（event/cancel/timeout 用），`params` 是**调度入参**
+——只在盘上 checkpoint 为空（假值）时由引擎用于重新绑定 `$INPUT`
+（`DistributedStrategy.execute` 的 `setup_flow(flow, (), params or {})` 分支）。
+典型窗口是「人工/值守 `continue` 抢在 pending start 被 worker reclaim 之前」：
+此前该请求体**没有** params 字段，调度 params 永远到不了 `$INPUT`，end 节点读
+`$INPUT.<字段>` 一律回落流程默认值（只调参数不改代码的止损手段在这条手动路径
+上静默失效）；#122 修的是 start→resume 转换路径的同类丢参，本条是**另一条路由**
+（不是"丢了"，是"从来传不了"）。
+
+- **受影响**：`resume_type=continue`（或 `retry`）打在**盘上 checkpoint 为空**的
+  执行上、且请求体带了非空 `params` 的调用。此前请求体里的 `params` 被 pydantic
+  静默丢弃、`$INPUT` 绑成 `{}`；现在它进入 resume 载体并绑定 `$INPUT`。
+- **不受影响**：不带 `params` / `params={}` / `params=null` 的调用——resume 载体
+  **不新增** `params` 键，与 #122 的载体形状逐字一致（存量消息与既有调用方零变化）；
+  checkpoint 非空（正常续跑：suspend 后 event/timeout/cancel 决议、error 后 retry）
+  时 `params` **不参与**，一律以盘上 context 为准。
+- **不受影响（本地单机档）**：`resume_local_execution` 只接受 `suspended` 行，
+  对 running 行的 `continue`/`retry` 直接 **400**（`仅挂起状态可恢复`）——本地档
+  本就不存在这条静默路径；`params` 字段在本地分支被忽略（不做本地档透传）。
+- **迁移**：无需改代码（纯增量字段）。若你的 keeper/值守脚本此前想用
+  「手动 continue + 新参数」止血，现在可以在请求体里带 `params`；
+  控制台前端**暂不提供**该输入框（ResumeDialog 故意不提供 `continue` 选项，
+  见 `frontend/src/pages/ExecutionDetail.tsx`）——参数化手动 continue 走 API。
+
 ### 子执行继承父级 `$ENV` 白名单（plaita#141）
 
 **口径（contract）**：子执行（`child` 内联子逻辑 / `parallel` 分支 /
