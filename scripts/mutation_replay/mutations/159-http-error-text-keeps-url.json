@@ -1,0 +1,13 @@
+{
+  "name": "159-http-error-text-keeps-url",
+  "concern": "#159-r2-P0",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "        message = _scrub_url_text(message)\n        error_info = None\n",
+  "new": "        error_info = None\n",
+  "rationale": "去掉 NodeException 消息构造处的 URL 文本清洗：requests/aiohttp 异常文本里的 `url: /path?query` 整段进异常对象，再经 runner/worker 的 logger.warning(…, e) 打印——第三方异常文本这条族重新泄露。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestThirdPartyExceptionTextIsScrubbed::test_connection_failure_end_to_end[execute]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestThirdPartyExceptionTextIsScrubbed::test_wrap_http_node_err_scrubs_the_message"
+  ]
+}

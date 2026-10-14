@@ -1,0 +1,12 @@
+{
+  "name": "159-record-dict-not-asserted",
+  "concern": "#159-r2-P1",
+  "issue": "159",
+  "file": "tests/unit/_url_sink_support.py",
+  "old": "        for key, value in vars(record).items():\n            if key in _LOGRECORD_STANDARD_ATTRS:\n                continue\n            chunks.append(f\"{key}={value!r}\")\n    return \"\\n\".join(chunks)\n",
+  "new": "    return \"\\n\".join(chunks)\n",
+  "rationale": "断言助手退回只拼 msg/args/getMessage：`logger.info(..., extra={\"hook\": URL})` 时密钥只落在 record.__dict__，结构化日志/JSON shipper 的真实泄露面漏判（定验实测 msg 干净、args 干净的形态）。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLogRecordDictSurface::test_extra_key_is_asserted_even_when_msg_and_args_are_clean"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "159-guard-drops-inline-logger",
+  "concern": "#159-r2-P1",
+  "issue": "159",
+  "file": "tests/unit/_url_sink_support.py",
+  "old": "    inner = node.func.value\n    base = _dotted(inner.func) if isinstance(inner, ast.Call) else _dotted(inner)\n    if not base:\n        return False\n    return base.lower().endswith((\"log\", \"logger\"))\n",
+  "new": "    dotted = _dotted(node.func)\n    base = dotted.rsplit(\".\", 1)[0] if dotted else \"\"\n    return base.lower().endswith((\"log\", \"logger\"))\n",
+  "rationale": "退回旧判据：`logging.getLogger(__name__).info(...)` 恒漏（func 是 Call 的属性时 rsplit 得到非空的 \"info\"，回退分支是死代码）——定验实测这条形态在原判据下返回 []。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestGuardCoversTheVerifiedMissFamily::test_guard_sees_inline_getlogger",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestGuardCoversTheVerifiedMissFamily::test_probe_inline_getlogger_from_real_source_reddens_then_greens"
+  ]
+}

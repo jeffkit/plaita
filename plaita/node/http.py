@@ -3,11 +3,12 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import urljoin, urlparse, urlsplit, urlencode
 import io
 from pydantic import ConfigDict, Field, model_validator
 
@@ -15,7 +16,11 @@ from plaita.node.basic import Node
 from plaita.core.errors import NodeException
 # 策略异常消息的掩码渲染（#158+#159 r2）。url_redaction 只依赖 stdlib 的
 # server.factory，不触发 server extra，也不与 node 层成环。
-from plaita.server.url_redaction import _mask_url_for_log, _mask_webhook_url_for_log
+from plaita.server.url_redaction import (
+    UNPRINTABLE_URL,
+    _mask_url_for_log,
+    _mask_webhook_url_for_log,
+)
 from plaita.core.http_session import (
     _BlockAllCookies,
     _new_oneshot_session,
@@ -230,6 +235,61 @@ def _mask_policy_url(url: object) -> str:
     足以定位「哪个端点被策略拒绝」。
     """
     return _mask_webhook_url_for_log(_mask_url_for_log(url))
+
+
+#: 任意文本里的绝对 URL（``scheme://…``）——第三方 HTTP 客户端会把请求 URL 写进
+#: 自己的异常文本（``requests``：``Max retries exceeded with url: /path?query``；
+#: ``aiohttp``：``url='http://host/path?query'``）。
+_ABSOLUTE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>()\[\]{},;]+")
+#: ``url:`` / ``url=`` 之后的 scheme-relative 引用（只有 requests 这一族这样写）。
+_RELATIVE_URL_RE = re.compile(r"(?P<prefix>\burl[=:]\s*['\"]?)(?P<ref>/[^\s'\"<>()\[\]{},;]*)")
+#: path segment / query / fragment 的掩码占位（与 url_redaction 同一语义）。
+_MASK_PLACEHOLDER = "***"
+
+
+def _mask_relative_url_ref(ref: str) -> str:
+    """scheme-relative 引用（``/a/b?token=x``）：每个非空 segment 与整条 query 换 ``***``。"""
+    try:
+        parts = urlsplit(ref)
+    except Exception:  # noqa: BLE001 — 畸形串退化为常量，绝不回原文
+        return UNPRINTABLE_URL
+    rendered = "/".join(_MASK_PLACEHOLDER if seg else seg for seg in parts.path.split("/"))
+    if parts.query:
+        rendered += f"?{_MASK_PLACEHOLDER}"
+    if parts.fragment:
+        rendered += f"#{_MASK_PLACEHOLDER}"
+    return rendered
+
+
+def _scrub_url_text(text: object) -> str:
+    """清洗**任意文本**里的 URL 凭据分量（``NodeException`` 消息构造前的最后一道）。
+
+    ``requests`` / ``aiohttp`` 把请求 URL 放进自己的异常文本，
+    ``handle_http_node_err`` 只是 ``str(err)`` 转手——URL 不是 plaita 拼的，但一样
+    会随 ``NodeException`` / ``NodeExecutionError`` 进 runner/worker 的
+    ``logger.warning(…, e)`` / ``exc_info=True``。所以清洗必须在**构造消息时**做
+    （在下游 logger 处打补丁正是 r1 守卫的盲区形态）。
+
+    * 绝对 URL 走 :func:`_mask_policy_url`（保 ``scheme://host[:port]``，抹 path
+      的每一段与整条 query/fragment；非 http(s) scheme 退化常量）；
+    * ``url: /path?query`` 形态的 scheme-relative 引用按时段掩码。
+
+    **total**：任何输入都返回 ``str``；清洗过程任何异常退化为 ``UNPRINTABLE_URL``，
+    绝不上抛、绝不回原文。非字符串输入先 ``str()``（``_coerce`` 失败同样退化）。
+    """
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except Exception:  # noqa: BLE001 — fail-closed
+            return UNPRINTABLE_URL
+    try:
+        scrubbed = _ABSOLUTE_URL_RE.sub(lambda m: _mask_policy_url(m.group(0)), text)
+        scrubbed = _RELATIVE_URL_RE.sub(
+            lambda m: m.group("prefix") + _mask_relative_url_ref(m.group("ref")), scrubbed,
+        )
+    except Exception:  # noqa: BLE001 — 清洗失败不得变成新的异常面
+        return UNPRINTABLE_URL
+    return scrubbed
 
 
 # ---------------------------------------------------------------------------
@@ -1319,7 +1379,7 @@ class HTTP(Node):
             body = evaluate(self.body, ctx)
             return body
         except Exception as e:
-            raise Exception(f"Failed to parse body: {str(e)}")
+            raise Exception(f"Failed to parse body: {_scrub_url_text(str(e))}")
     
     def parse_query(self, ctx):
         """解析查询参数"""
@@ -1332,7 +1392,7 @@ class HTTP(Node):
                 return query
             return None
         except Exception as e:
-            raise Exception(f"Failed to parse query: {str(e)}")
+            raise Exception(f"Failed to parse query: {_scrub_url_text(str(e))}")
     
     def parse_header(self, ctx):
         """解析请求头"""
@@ -1351,7 +1411,7 @@ class HTTP(Node):
                         headers[key] = value
             return headers
         except Exception as e:
-            raise Exception(f"Failed to parse headers: {str(e)}")
+            raise Exception(f"Failed to parse headers: {_scrub_url_text(str(e))}")
     
     def parse_url(self, ctx):
         """解析URL"""
@@ -1359,7 +1419,7 @@ class HTTP(Node):
             url_value = evaluate(self.url, ctx)
             return str(url_value)
         except Exception as e:
-            raise Exception(f"Failed to parse URL: {str(e)}")
+            raise Exception(f"Failed to parse URL: {_scrub_url_text(str(e))}")
     
     def handle_http_node_err(self, err, http_rsp):
         """处理HTTP节点错误"""
@@ -1385,7 +1445,13 @@ class HTTP(Node):
         - ``exc.details``  — 完整 ``HttpNodeErrorInfo``（结构化 request/response）
         - ``exc.response`` — 事件安全的 dict 摘要（status/statusText/headers/
           body），headers 凭据类脱敏、body 截断（``_summarize_error_frame_response``）
+
+        ``#158``+``#159`` r2：``message`` 是**唯一**的异常消息构造点，先过
+        :func:`_scrub_url_text`——第三方客户端（requests/aiohttp）把请求 URL 写进
+        自己的异常文本，``handle_http_node_err`` 的 ``str(err)`` 会把它整段转手；
+        清洗必须在进 ``NodeException`` 之前（下游 logger 打补丁是盲区形态）。
         """
+        message = _scrub_url_text(message)
         error_info = None
 
         if rsp and not rsp.empty():

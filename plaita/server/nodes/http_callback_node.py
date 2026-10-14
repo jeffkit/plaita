@@ -8,6 +8,9 @@ from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
+# 回调 URL 进日志前经掩码渲染（#159 r2：守卫把 ``full_url`` 族纳入判据后，这处
+# INFO 是仓内唯一被点名的 ``full_url`` 记录点）。``config`` 本体仍持原文。
+from ..url_redaction import _mask_webhook_url_for_log
 
 
 class HttpCallbackNode(BaseExtendedNode):
@@ -111,7 +114,11 @@ class HttpCallbackNode(BaseExtendedNode):
             "retry_config": self.get_default_retry_config()
         }
         
-        logger.info("HTTP回调节点 [%s] 配置: 回调URL=%s", self.id, config['callback_config']['full_url'])
+        logger.info(
+            "HTTP回调节点 [%s] 配置: 回调URL=%s",
+            self.id,
+            _mask_webhook_url_for_log(config['callback_config']['full_url']),
+        )
         
         return config
     

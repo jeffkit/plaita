@@ -315,3 +315,220 @@ class TestGuardSeesUrlBearingExceptionMessages:
             "_mask_policy_url（或 url_redaction 的渲染器）渲染后再抛：\n  "
             + "\n  ".join(offenders)
         )
+
+
+# --------------------------------------------------------------------------- #
+# ④ 守卫覆盖面：定验实测的 MISS 族（别名 / getattr / get / full_url 族 /
+#    inline getLogger / 异常 notes）
+# --------------------------------------------------------------------------- #
+def _log_sites(source: str, filename: str = "<memory>"):
+    fn = getattr(sink_support, "credential_url_log_sites", None)
+    assert fn is not None, "守卫缺少 credential_url_log_sites"
+    return fn(source, filename)
+
+
+class TestGuardCoversTheVerifiedMissFamily:
+    def test_guard_sees_inline_getlogger(self):
+        """定验真发现：``logging.getLogger(__name__).info(...)`` 在旧判据下恒漏。
+
+        旧 ``_is_log_call`` 对「func 是 Call 的属性」只拿得到方法名 ``"info"``，
+        ``rsplit('.',1)[0]`` 得到非空 ``"info"`` ⇒ 回退分支是死代码 ⇒ 恒返回 False。
+        """
+        assert _log_sites(
+            'logging.getLogger(__name__).info("连接 Redis: %s", redis_url)\n'
+        ) == [(1, "redis_url")]
+        assert _log_sites(
+            'logging.getLogger("plaita.x").warning("hook=%s", self._alert_webhook)\n'
+        )
+
+    def test_probe_inline_getlogger_from_real_source_reddens_then_greens(self, tmp_path):
+        """探针由**真实源文件**（``server/log_handler.py`` 的 inline 调用）改一处生成。"""
+        source_path = PLAITA_DIR / "server" / "log_handler.py"
+        real_source = source_path.read_text(encoding="utf-8")
+        fixed_line = 'logging.getLogger(__name__).warning("日志刷新失败: %s", e)'
+        assert fixed_line in real_source, "前提失效：log_handler.py 里没有该 inline 调用"
+
+        # 真实源本身干净（e 不是 URL 名）
+        assert _log_sites(real_source, filename=str(source_path)) == []
+        # 只把 e 换成 URL 名 ⇒ 守卫必须看见 inline 形态
+        probe = tmp_path / "probe_log_handler.py"
+        probe.write_text(
+            real_source.replace(fixed_line, fixed_line.replace(", e)", ", redis_url)"), 1),
+            encoding="utf-8",
+        )
+        assert _log_sites(probe.read_text(encoding="utf-8"), filename=str(probe)), (
+            "守卫对 inline `logging.getLogger(...)` 形态失明"
+        )
+
+    def test_guard_sees_url_family_names_and_getattr_get(self):
+        for source in (
+            'logger.info("u=%s", full_url)\n',
+            'logger.info("u=%s", callback_url)\n',
+            'logger.info("u=%s", base_url)\n',
+            "logger.info(\"u=%s\", cfg['full_url'])\n",
+            'logger.info("u=%s", getattr(cfg, "url"))\n',
+            'logger.info("u=%s", cfg.get("url"))\n',
+        ):
+            assert _log_sites(source), source
+
+    def test_guard_sees_local_aliases(self):
+        for source in (
+            'u = redis_url\nlogger.info("u=%s", u)\n',
+            'u = redis_url\nw = u\nlogger.info("w=%s", w)\n',
+            'u = self.url\nlogger.warning("u=%s", u)\n',
+        ):
+            assert _log_sites(source), source
+
+    def test_guard_does_not_taint_through_arbitrary_expressions(self):
+        """别名只认**纯复制**：``x = f(redis_url)`` 不把 x 判成 URL（否则全树误红）。"""
+        assert _log_sites('x = f(redis_url)\nlogger.info("x=%s", x)\n') == []
+
+    def test_guard_sees_exception_notes(self):
+        """``exc.add_note(url)`` 的 notes 由 traceback 打印，同样是输出面。"""
+        assert _exception_message_sites("exc.add_note(redis_url)\n") == [(1, "redis_url")]
+
+    def test_capability_boundaries_are_documented_not_silent(self):
+        """判据能力边界（定验实测 MISS，刻意不判；docstring 有声明）。"""
+        doc = sink_support.credential_url_log_sites.__doc__ or ""
+        assert "能力边界" in doc
+        for boundary in ("adapter.info", "stream.write", "print"):
+            assert boundary in doc, boundary
+        # 边界形态确实判不了（不是「碰巧干净」）
+        assert _log_sites('adapter.info("u=%s", redis_url)\n') == []
+        assert _log_sites('stream.write(str(redis_url))\n') == []
+
+
+# --------------------------------------------------------------------------- #
+# ⑤ 记录级 ``record.__dict__``：结构化日志/JSON shipper 的真实泄露面
+# --------------------------------------------------------------------------- #
+class TestLogRecordDictSurface:
+    def test_extra_key_is_asserted_even_when_msg_and_args_are_clean(self):
+        record = logging.LogRecord(
+            "plaita.test", logging.INFO, __file__, 1, "endpoint configured", (), None
+        )
+        record.hook = URL  # 等价于 logger.info(..., extra={"hook": URL})
+        # msg/args/getMessage 三面确实干净 —— 只看它们会 100% 漏判
+        assert URL not in str(record.msg)
+        assert URL not in repr(record.args)
+        assert URL not in record.getMessage()
+        # log_record_fields 覆盖 __dict__ ⇒ 判红
+        assert find_needles(log_record_fields([record]), NEEDLES), (
+            "log_record_fields 没有覆盖 record.__dict__（extra= 注入的密钥漏判）"
+        )
+
+    def test_standard_attrs_do_not_false_positive(self):
+        record = logging.LogRecord(
+            "plaita.test", logging.INFO, __file__, 1, "hello %s", ("world",), None
+        )
+        assert find_needles(log_record_fields([record]), NEEDLES) == []
+
+
+# --------------------------------------------------------------------------- #
+# ⑥ 第三方异常文本：requests/aiohttp 把请求 URL 写进自己的异常
+# --------------------------------------------------------------------------- #
+def _scrubber():
+    fn = getattr(http_mod, "_scrub_url_text", None)
+    assert fn is not None, "缺少 plaita/node/http.py::_scrub_url_text（第三方异常文本清洗）"
+    return fn
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class TestThirdPartyExceptionTextIsScrubbed:
+    def test_scrubber_masks_absolute_and_relative_refs(self):
+        scrub = _scrubber()
+        samples = (
+            f"Max retries exceeded with url: /robot/send?access_token={SECRET} (Caused by X)",
+            f"500, message='boom', url='http://h/robot/send?access_token={SECRET}'",
+            f"boom for url: https://hooks.slack.com/services/T00/B00/{SECRET}",
+            f"bad url: http://user:{SECRET}@h/x",
+        )
+        for sample in samples:
+            _assert_clean(scrub(sample), "scrubber")
+
+    def test_scrubber_keeps_host_and_is_total(self):
+        scrub = _scrubber()
+        rendered = scrub(f"Max retries exceeded with url: /robot/send?access_token={SECRET}")
+        assert "/***/***?***" in rendered
+        for value in (None, b"\xff\xfe", "", object(), 123, "nothing to mask"):
+            assert isinstance(scrub(value), str)
+
+    def test_wrap_http_node_err_scrubs_the_message(self):
+        node = HTTP(id="http_wrap", name="http_wrap", url=URL, method="GET")
+        exc = node.wrap_http_node_err(
+            1002,
+            f"Max retries exceeded with url: /robot/send?access_token={SECRET}",
+            None,
+        )
+        assert isinstance(exc, NodeException)
+        _assert_clean(str(exc), "wrap_http_node_err")
+
+    @pytest.mark.parametrize("surface_path", ["execute", "arun"])
+    def test_connection_failure_end_to_end(self, surface_path):
+        """真实网络失败（本地无监听端口）：requests/aiohttp 文本不得带 token。"""
+        if surface_path == "execute":
+            pytest.importorskip("requests")
+        else:
+            pytest.importorskip("aiohttp")
+        port = _free_port()
+        url = f"http://127.0.0.1:{port}/robot/send?access_token={SECRET}"
+        node = HTTP(id="http_third", name="http_third", url=url, method="GET")
+        with pytest.raises(NodeException) as excinfo:
+            if surface_path == "execute":
+                node.execute({})
+            else:
+                import asyncio
+
+                asyncio.run(node.arun({}))
+        exc = excinfo.value
+        _assert_clean(str(exc), f"{surface_path} str(NodeException)")
+        _assert_clean(repr(exc), f"{surface_path} repr(NodeException)")
+        _assert_clean("".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ), f"{surface_path} traceback")
+        assert str(port) in str(exc)  # 诊断价值：host:port 仍在
+
+    def test_third_party_error_through_runner_sinks(self, caplog):
+        pytest.importorskip("requests")
+        port = _free_port()
+        url = f"http://127.0.0.1:{port}/robot/send?access_token={SECRET}"
+        node = HTTP(id="http_third", name="http_third", url=url, method="GET")
+        with pytest.raises(NodeException) as excinfo:
+            node.execute({})
+        exc = excinfo.value
+
+        with caplog.at_level(logging.DEBUG, logger="plaita.core.runner"):
+            _handle_node_error(
+                None, node, ErrorHandler(strategy=ErrorStrategy.CONTINUE), exc,
+            )
+        _assert_clean(_records_text(caplog.records), "third-party CONTINUE records")
+        _assert_clean(caplog.text, "third-party CONTINUE caplog.text")
+
+        with pytest.raises(NodeExecutionError) as excinfo2:
+            _handle_node_error(None, node, None, exc)
+        _assert_clean(_chain_text(excinfo2.value), "third-party NodeExecutionError chain")
+
+    def test_callback_node_log_line_is_masked(self, caplog):
+        """守卫把 ``full_url`` 族纳入判据后点名的唯一生产记录点（#159 r2 修）。"""
+        from plaita.server.nodes.http_callback_node import HttpCallbackNode
+
+        node = HttpCallbackNode(id="cb1", name="cb1")
+        execution = type("Ctx", (), {
+            "execution_id": "exec-secret-id",
+            "state": type("S", (), {"flow_id": "flow-secret-id"})(),
+        })()
+        with caplog.at_level(logging.INFO, logger="plaita"):
+            config = node.generate_service_config(execution)
+        # 返回值（POST/注册用）仍是原文
+        assert config["callback_config"]["full_url"].endswith("/exec-secret-id")
+        # 记录面已掩码：端点保留，path segment 全是 ***
+        rendered = _records_text(caplog.records)
+        assert "http://localhost:8080" in rendered
+        assert "/callback/" not in rendered, rendered
+        assert find_needles(rendered, leak_needles("exec-secret-id")) == [], rendered
