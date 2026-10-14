@@ -246,7 +246,9 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   （`teardown-foreign-loop` / `teardown-hostile-task-methods`）写在异常的 `__cause__`，
   并尽力中和那个被拒任务（挂取用回调 + `cancel()`）。于是 `request_close` 对返回值的
   **使用**对任意 factory 行为仍然不会失败——但保证方式从 r10 的「类型是 Task」升级为
-  **结构性检查**：「四个被使用的方法都是 stdlib 原版，且任务绑在本循环上」。
+  **结构性检查**：「`request_close` 用到的四个方法（`add_done_callback` / `done` /
+  `cancelled` / `exception`）以及 `_accept_spawned_task` 自用的 `get_loop` 都是 stdlib
+  原版，且任务绑在本循环上」。
   钉住：`tests/unit/test_issue109_110_r11_parity.py`（15 用例，全部 2 s 有界看门狗；
   断言具名结局 + 精确状态元组/组件关闭次数 + 无孤儿 / 无 `never awaited` /
   无 `never retrieved` / 无双关；另含 r10 五行回归与 `_spawn_teardown` 返回契约）。

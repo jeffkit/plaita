@@ -11,6 +11,6 @@
     "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_cancelled_and_done_task_is_named",
     "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_cancelled_before_return_midflight_is_named"
   ],
-  "old": "        try:\n            holder = getattr(task, _TEARDOWN_ACCEPTANCE_ATTR, None)\n        except BaseException:                    # noqa: BLE001 - 纯查表\n            holder = None\n        if isinstance(holder, dict) and not holder.get(\"entered\"):\n            self._on_teardown_never_entered(task, holder)\n            return\n        if task.cancelled():\n",
+  "old": "        ok, holder = _guarded(\"读取受理标记\", getattr, task,\n                              _TEARDOWN_ACCEPTANCE_ATTR, None)\n        if not ok:\n            holder = None\n        if isinstance(holder, dict) and not holder.get(\"entered\"):\n            self._on_teardown_never_entered(task, holder)\n            return\n        if task.cancelled():\n",
   "new": "        if task.cancelled():\n"
 }

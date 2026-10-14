@@ -112,6 +112,19 @@ def _swallow_task_result(task: "asyncio.Task") -> None:
         logger.debug("事件总线关停：取用被拒任务的异常失败（忽略）: %r", exc)
 
 
+def _guarded(what: str, fn: Callable, *args):
+    """调用 ``fn(*args)``；失败返回 ``(False, None)`` 并 **debug 留痕**（#109 r11/B）。
+
+    P0-2 门禁不允许静默吞咽异常，所以这里必须留下一行日志；判据只关心「这次访问是否
+    可信」，异常细节不影响结论（访问不可信 ⇒ 判否 ⇒ 拒收受理）。
+    """
+    try:
+        return True, fn(*args)
+    except BaseException as exc:                 # noqa: BLE001 - 调用不可信即判否
+        logger.debug("事件总线关停：%s 失败（视为不可信）: %r", what, exc)
+        return False, None
+
+
 def _task_uses_stdlib_methods(task: "asyncio.Task") -> bool:
     """``request_close`` 会用到的那几个方法在 ``task`` 上是不是 **stdlib 原版**（#109 r11/B）。
 
@@ -124,37 +137,31 @@ def _task_uses_stdlib_methods(task: "asyncio.Task") -> bool:
     ``__dict__``（3.11–3.13 实测），所以「实例级影子属性」用**绑定比较**而不是字典查表
     来证：把类上的 stdlib 方法绑到本任务上，必须与实例访问到的那个相等。
     """
+    cls = type(task)
     for name in _TEARDOWN_USED_TASK_METHODS:
         baseline = getattr(asyncio.Task, name, None)
         if baseline is None or not callable(baseline):
             return False
-        try:
-            on_class = getattr(type(task), name)
-        except BaseException:                    # noqa: BLE001 - 访问即不可信
+        ok, on_class = _guarded(f"读取 {cls.__name__}.{name}", getattr, cls, name)
+        if not ok:
             return False
         if (on_class is not baseline
                 and getattr(on_class, "__func__", on_class) is not baseline):
             return False
-        try:
-            bound = getattr(task, name)
-        except BaseException:                    # noqa: BLE001 - 访问即不可信
-            return False
-        if not callable(bound):
+        ok, bound = _guarded(f"读取实例的 {name}", getattr, task, name)
+        if not ok or not callable(bound):
             return False
         if getattr(bound, "__self__", None) is not task:
             return False
         func = getattr(bound, "__func__", None)
         if func is not None and func is not baseline:
             return False
-        try:
-            baseline_bound = baseline.__get__(task, type(task))
-        except BaseException:                    # noqa: BLE001 - 访问即不可信
+        ok, baseline_bound = _guarded(
+            f"绑定 asyncio.Task.{name}", baseline.__get__, task, cls)
+        if not ok:
             return False
-        try:
-            same = bound == baseline_bound
-        except BaseException:                    # noqa: BLE001 - 访问即不可信
-            return False
-        if not same:
+        ok, same = _guarded(f"比较实例的 {name}", lambda: bound == baseline_bound)
+        if not ok or not same:
             return False
     return True
 
@@ -1814,8 +1821,10 @@ class RedisEventBus(EventBus):
         ``_spawn_teardown`` 具名拒绝：reason 写在异常的 ``__cause__``，由本节既有 except
         统一回滚（``error_kind=teardown-spawn-failed``），并尽力中和那个被拒的任务。
         于是下面 ``add_done_callback`` / ``done()`` 对返回值的**使用**对任意 factory 行为
-        仍然不会失败——但保证方式从 r10 的「类型是 Task」升级为**结构性检查**：「四个被
-        使用的方法都是 stdlib 原版，且任务绑在本循环上」。
+        仍然不会失败——但保证方式从 r10 的「类型是 Task」升级为**结构性检查**：「本节
+        用到的四个方法（``add_done_callback`` / ``done`` / ``cancelled`` / ``exception``）
+        以及 ``_accept_spawned_task`` 自用的 ``get_loop`` 都是 stdlib 原版，且任务绑在本
+        循环上」。
 
         **out of contract（合成形状；生产路径不使用 ``set_task_factory``，实测
         仓库内 0 处调用）**：①交回的真 Task 既不跑我们的 coroutine、又**永不结束** ⇒
@@ -2001,10 +2010,8 @@ class RedisEventBus(EventBus):
         """
         if not _task_uses_stdlib_methods(spawned):
             self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)
-        spawned_loop = None
-        try:
-            spawned_loop = spawned.get_loop()
-        except BaseException:                    # noqa: BLE001 - 访问即不可信
+        ok, spawned_loop = _guarded("读取被收养任务的 loop", spawned.get_loop)
+        if not ok:
             self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)
         if spawned_loop is not loop:
             self._reject_spawned_task(spawned, coro, TEARDOWN_FOREIGN_LOOP_REASON)
@@ -2101,9 +2108,9 @@ class RedisEventBus(EventBus):
         （``async def wrap(): await <我们的 coro>``）跑到入口那一行即置位，因此照常走下面
         三条分支——判据是「入口有没有跑」，不是「coro 是不是同一个对象」。
         """
-        try:
-            holder = getattr(task, _TEARDOWN_ACCEPTANCE_ATTR, None)
-        except BaseException:                    # noqa: BLE001 - 纯查表
+        ok, holder = _guarded("读取受理标记", getattr, task,
+                              _TEARDOWN_ACCEPTANCE_ATTR, None)
+        if not ok:
             holder = None
         if isinstance(holder, dict) and not holder.get("entered"):
             self._on_teardown_never_entered(task, holder)
