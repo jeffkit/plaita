@@ -774,3 +774,457 @@ class TestScrubberIsTotalOnHostileBatch:
             rendered.encode("utf-8")
             assert render(rendered) == rendered, f"{label}: 非幂等"
             _assert_clean(rendered, f"policy[{label}]")
+
+
+# --------------------------------------------------------------------------- #
+# ⑨ r4：定验反例的**分隔符矩阵** —— 14 字符 × {方括号, 非方括号} × 六个面
+# --------------------------------------------------------------------------- #
+# r3 声称「方括号 authority 不再原样穿过」，被 r4 定验直接证伪：
+#
+# * ``_ABSOLUTE_URL_RE`` 把 ``, ; ( ) " ' < > { }`` 排除在字符类外 ⇒ 匹配在分隔符
+#   处截断，而 ``re.sub`` **只替换匹配片段**，尾巴（含 ``access_token=``）原样留下；
+# * token 截断在 ``[`` 之后时 ``_mask_bracketed_absolute_url("http://[web")`` 返回
+#   **输入本身** ⇒ 替换是恒等 ⇒ 整条带凭据的 URL 逐字穿过。
+#
+# 复现前提（必须写死，否则会得到**假绿**）：节点上**不设任何策略**
+# （``deniedHosts`` / ``blockPrivateNetworks`` / ``allowedHosts`` 全空）。设了策略时
+# ``_check_policy`` 先抛「Failed to parse」——URL 根本没到 aiohttp，泄露面被掩盖。
+_R4_SEPARATORS = ("\n", " ", "\t", "\r", '"', "'", "<", ">", "(", ")", "{", "}", ",", ";")
+_R4_ASCII_WS = frozenset(" \t\r\n\f\v")
+_R4_BRACKET_PREFIX = "http://[web{sep}hook]:8443/robot/send?access_token="
+_R4_PLAIN_PREFIX = "http://127.0.0.1:999999/robot/send?a=1{sep}2&access_token="
+
+
+def _r4_bracketed(sep: str) -> str:
+    return _R4_BRACKET_PREFIX.format(sep=sep) + SECRET
+
+
+def _r4_plain(sep: str) -> str:
+    return _R4_PLAIN_PREFIX.format(sep=sep) + SECRET
+
+
+def _r4_params():
+    return [
+        pytest.param(shape, sep, factory, id=f"{shape}-{ord(sep):04X}")
+        for shape, factory in (("bracketed", _r4_bracketed), ("nonbracketed", _r4_plain))
+        for sep in _R4_SEPARATORS
+    ]
+
+
+def _r4_expected(shape: str, sep: str) -> str:
+    """定验口径的**精确字符串**：分隔符留在 token 内 ⇔ 整段被掩码。
+
+    ASCII 空白是刻意保留的 token 边界：URL 在那里本来就不再是一个 URL（aiohttp 也
+    拒收），因此掩码覆盖不到尾巴——尾巴里的凭据交给「凭据键=值」那条规则收拾，
+    非凭据部分（``hook]:8443/robot/send``）原样留下（诊断价值）。
+    """
+    if shape == "bracketed":
+        if sep in _R4_ASCII_WS:
+            return f"{UNPRINTABLE_URL}{sep}hook]:8443/robot/send?access_token=***"
+        return f"http://[web{sep}hook]:8443"
+    if sep in _R4_ASCII_WS:
+        return f"http://127.0.0.1:999999/***/***?***{sep}2&access_token=***"
+    return "http://127.0.0.1:999999/***/***?***"
+
+
+def _six_surfaces(node, exc):
+    """一条链上的六个输出面（r4 口径）：3 个异常本体面 + CONTINUE + abort 两路记录。"""
+    surfaces = {
+        "str(NodeException)": str(exc),
+        "repr(NodeException)": repr(exc),
+        "traceback.format_exception": "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ),
+    }
+    with caplog_continue(node, exc) as records:
+        surfaces["CONTINUE records"] = _records_text(records)
+    with caplog_abort(node, exc) as (abort, records):
+        surfaces["abort chain"] = _chain_text(abort)
+        surfaces["abort records"] = _records_text(records)
+    return surfaces
+
+
+class TestSeparatorMatrixAllSixSurfaces:
+    """r4：14 个分隔符 × 2 种 authority 形状 —— 渲染器精确形态 + 六个面无机密。"""
+
+    @pytest.mark.parametrize("shape,sep,factory", _r4_params())
+    def test_renderer_level_exact_string(self, shape, sep, factory):
+        url = factory(sep)
+        rendered = _scrubber()(url)
+        _assert_clean(rendered, f"scrubber[{shape}/{sep!r}]")
+        assert rendered != url, f"{shape}/{sep!r}: 恒等替换（原文穿过）：{rendered!r}"
+        assert rendered == _r4_expected(shape, sep), (
+            f"{shape}/{sep!r}: 分隔符没有留在 token 内 / 掩码形态不符\n"
+            f"  实际={rendered!r}\n  期望={_r4_expected(shape, sep)!r}"
+        )
+
+    @pytest.mark.parametrize("shape,sep,factory", _r4_params())
+    def test_aiohttp_precondition_the_text_is_the_bare_url(self, shape, sep, factory):
+        """前提探针：``InvalidUrlClientError`` 的文本**就是**这条裸 URL。
+
+        前提失效（aiohttp 不再把 URL 写进异常文本）时以显式断言响，而不是悄悄变绿。
+        """
+        url = factory(sep)
+        probe_text = _aiohttp_invalid_url_text(url)
+        assert url in probe_text, (
+            f"前提失效：aiohttp 文本不再带裸 URL（{probe_text!r}）"
+        )
+
+    @pytest.mark.parametrize("shape,sep,factory", _r4_params())
+    def test_six_surfaces_end_to_end(self, shape, sep, factory):
+        """真实 ``HTTP.arun``（**无策略约束**）+ 真实 ``_handle_node_error`` 两路。"""
+        url = factory(sep)
+        node = HTTP(id="http_sep", name="http_sep", url=url, method="GET")
+        with pytest.raises(NodeException) as excinfo:
+            asyncio.run(node.arun({}))
+        surfaces = _six_surfaces(node, excinfo.value)
+        assert sorted(surfaces) == [
+            "CONTINUE records", "abort chain", "abort records",
+            "repr(NodeException)", "str(NodeException)", "traceback.format_exception",
+        ]
+        for label, text in surfaces.items():
+            _assert_clean(text, f"{shape}/{sep!r} {label}")
+
+
+class TestPolicySetPathCannotShowTheLeak:
+    """复现前提的反面：**设了策略**时 ``_check_policy`` 先抛，泄露面被掩盖。"""
+
+    def test_policy_rejection_happens_before_aiohttp(self):
+        url = _r4_bracketed(" ")
+        node = HTTP(
+            id="http_policy_first", name="http_policy_first", url=url, method="GET",
+            deniedHosts=["10.0.0.0/8"],
+        )
+        with pytest.raises(NodeException) as excinfo:
+            node.execute({})
+        text = str(excinfo.value)
+        # 前提：策略路径的文案里根本没有请求 URL（连凭据都不在），所以「needle 没了」
+        # 在这条路径上**不能**作为修复的证据——这正是 r3 假绿的机制。
+        assert SECRET not in text
+        assert "10.0.0.0/8" not in text  # 策略条目都没走到（URL 先解析失败）
+        assert "Failed to parse" in text, text
+
+
+# --------------------------------------------------------------------------- #
+# ⑩ r4：边界只认 ASCII 空白（Unicode 空格不再截断 token）
+# --------------------------------------------------------------------------- #
+_ASCII_WHITESPACE = [
+    ("space", " "), ("tab", "\t"), ("cr", "\r"), ("lf", "\n"), ("ff", "\f"), ("vt", "\v"),
+]
+_UNICODE_WHITESPACE = [
+    ("NBSP", "\u00a0"), ("NARROW-NBSP", "\u202f"), ("THIN", "\u2009"), ("HAIR", "\u200a"),
+    ("IDEOGRAPHIC", "\u3000"), ("EM-SPACE", "\u2003"), ("EN-QUAD", "\u2000"),
+    ("OGHAM", "\u1680"), ("NEL", "\u0085"), ("LS", "\u2028"), ("PS", "\u2029"),
+]
+
+
+class TestAsciiOnlyTokenBoundary:
+    def test_boundary_class_is_ascii_only(self):
+        """结构钉子：边界类里不许再出现 ``\\s``（``str`` 下它是 Unicode 感知的）。"""
+        pattern = http_mod._ABSOLUTE_URL_RE.pattern
+        assert "\\s" not in pattern, pattern
+        assert "[^ \\t\\r\\n\\f\\v]" in pattern, pattern
+
+    @pytest.mark.parametrize("name,space", _UNICODE_WHITESPACE, ids=lambda v: v if isinstance(v, str) else "")
+    def test_unicode_spaces_do_not_end_the_token(self, name, space):
+        url = f"http://h/x{space}?t={SECRET}"
+        rendered = _scrubber()(url)
+        _assert_clean(rendered, f"unicode-space[{name}]")
+        assert rendered == "http://h/***?***", (
+            f"{name}（U+{ord(space):04X}）截断了 token，尾巴原样留下：{rendered!r}"
+        )
+
+    @pytest.mark.parametrize("name,space", _UNICODE_WHITESPACE, ids=lambda v: v if isinstance(v, str) else "")
+    def test_unicode_space_tail_is_not_verbatim(self, name, space):
+        url = f"http://h/x{space}?t={SECRET}"
+        assert _scrubber()(url) != url
+
+    @pytest.mark.parametrize("name,space", _ASCII_WHITESPACE, ids=lambda v: v if isinstance(v, str) else "")
+    def test_ascii_whitespace_is_the_boundary(self, name, space):
+        """ASCII 空白**仍然**是边界（刻意）——凭据由「凭据键=值」规则兜住。"""
+        url = f"http://h/x{space}?access_token={SECRET}"
+        rendered = _scrubber()(url)
+        _assert_clean(rendered, f"ascii-ws[{name}]")
+        assert rendered == f"http://h/***{space}?access_token=***", rendered
+
+    @pytest.mark.parametrize("name,space", _ASCII_WHITESPACE, ids=lambda v: v if isinstance(v, str) else "")
+    def test_ascii_whitespace_tail_with_non_credential_key_is_out_of_criterion(self, name, space):
+        """诚实边界（钉住）：空白截断后的尾巴若用**非凭据键**（``t=``），仍会留下。
+
+        ASCII 空白是刻意保留的边界（URL 在那里本来就不再是一个 URL），尾巴里的
+        ``t=K`` 既不是 URL 形状、键名也不像凭据 ⇒ 判据之外，**原样返回**。这是
+        设计选择：把任意 ``key=value`` 都掩掉会连 ``code=1002`` 一起删。
+        真实 webhook 形态用的是 ``access_token`` / ``key`` / ``token``（见上一条）。
+        """
+        url = f"http://h/x{space}?t={SECRET}"
+        assert _scrubber()(url) == f"http://h/***{space}?t={SECRET}"
+
+
+# --------------------------------------------------------------------------- #
+# ⑪ r4：绝不恒等替换（恒等 ⇒ 常量），但已掩码形态必须是不动点
+# --------------------------------------------------------------------------- #
+def _render_guard():
+    fn = getattr(http_mod, "_render_is_usable", None)
+    assert fn is not None, (
+        "缺少 plaita/node/http.py::_render_is_usable——「绝不恒等替换」总守卫"
+    )
+    return fn
+
+
+class TestNoIdentityReplacement:
+    def test_truncated_bracket_token_fails_closed(self):
+        """r3 定验的直接成因：``http://[web`` 曾被原样返回（恒等替换）。"""
+        assert _scrubber()("http://[web") == UNPRINTABLE_URL
+        assert _scrubber()("boom url='http://[web") == f"boom url='{UNPRINTABLE_URL}"
+
+    def test_payload_less_endpoint_fails_closed(self):
+        assert _scrubber()("http://h") == UNPRINTABLE_URL
+
+    def test_guard_rejects_identity_and_plaintext_tail(self):
+        usable = _render_guard()
+        # 恒等 + 非不动点形态 ⇒ 不可用
+        assert usable("http://[web", "http://[web") is False
+        assert usable("http://h", "http://h") is False
+        assert usable("http://h/a?t=K", "http://h/a?t=K") is False
+        # 渲染结果里仍留着明文 payload 片段 ⇒ 不可用（B 类尾部泄漏）
+        assert usable("http://h/a?t=K", "http://h/***?t=K") is False
+        # 正常掩码 / 幂等不动点 ⇒ 可用
+        assert usable("http://h/a?t=K", "http://h/***?***") is True
+        assert usable("http://h/***/***?***", "http://h/***/***?***") is True
+        assert usable("http://[web,hook]:8443", "http://[web,hook]:8443") is True
+        assert usable("http://h", UNPRINTABLE_URL) is False
+        assert usable("http://h", "") is False
+
+    def test_guard_rejects_residual_original_payload(self):
+        """第 4 条判据单独钉住：原始 path/query 明文留在输出里 ⇒ 不可用。"""
+        leaves = getattr(http_mod, "_leaves_plaintext_payload", None)
+        assert leaves is not None, (
+            "缺少 plaita/node/http.py::_leaves_plaintext_payload"
+            "（原始 path/query 残留判据）"
+        )
+        assert leaves("http://h/a?t=K", "http://h/***?t=K") is True
+        assert leaves("http://h/a?t=K", "http://h/***?***") is False
+        assert leaves("http://[web,hook]:8443/x?t=K", "http://[web,hook]:8443") is False
+        assert leaves("http://h/robot/robot", "http://h/***/***") is False
+
+    @pytest.mark.parametrize("shape,sep,factory", _r4_params())
+    def test_recognised_shape_is_never_returned_verbatim(self, shape, sep, factory):
+        url = factory(sep)
+        assert _scrubber()(url) != url
+
+    def test_already_masked_forms_are_fixed_points(self):
+        """恒等守卫不许把**已经掩码过**的串再降级成常量（幂等性）。"""
+        for text in (
+            "http://h/***/***?***",
+            "http://[::1]:999999/***/***?***",
+            "http://[web,hook]:8443",
+            "http://[webhook.internal]:8443",
+            UNPRINTABLE_URL,
+            "Max retries exceeded with url: /***/***?***",
+        ):
+            once = _scrubber()(text)
+            assert _scrubber()(once) == once, f"非幂等：{text!r} -> {once!r}"
+
+
+# --------------------------------------------------------------------------- #
+# ⑫ r4：裸的「凭据键=值」运行（无 scheme、无 url: 标签）也掩
+# --------------------------------------------------------------------------- #
+_CREDENTIAL_KEYS = (
+    "access_token", "token", "secret", "password", "passwd", "pwd", "key", "sig",
+    "auth", "signature", "x-api-key", "client_secret", "apiKey", "accessKey",
+    "session", "cookie", "bearer", "credential", "private_key",
+)
+_NON_CREDENTIAL_RUNS = (
+    "code=1002", "port=8080", "block_private_networks=true", "v=1", "a=1,2",
+    "status=500", "delivery=1", "host=example.com", "monkey=1", "sortkey=2",
+    "retries=3",
+)
+
+
+class TestBareCredentialRunIsMasked:
+    """r3 的残口：``token=K…`` / 100k 前缀 + ``?access_token=K…`` 曾被原样返回。"""
+
+    def test_bare_token_run_is_masked(self):
+        assert _scrubber()(f"token={SECRET}") == "token=***"
+
+    def test_huge_prefix_with_query_token_is_masked(self):
+        rendered = _scrubber()("x" * 100000 + f"?access_token={SECRET}")
+        _assert_clean(rendered, "100k+access_token")
+        assert rendered.endswith("?access_token=***")
+        assert rendered.startswith("x" * 100000)
+
+    def test_huge_input_is_scrubbed_in_linear_time(self):
+        """性能钉子：``_ABSOLUTE_URL_RE`` 的 scheme 体必须**有界**。
+
+        不加界时 ``[A-Za-z0-9+.\\-]*`` 在「100k 字母数字串」上退化成 O(n²) 回溯
+        （r4 实测 5318 ms；加界后 4.6 ms）。这不是洁癖：定验的敌对批次里就有
+        「100k 串 + ``?access_token=``」，掩码是日志/停机路径上的同步调用。
+        """
+        import time
+
+        for text in ("x" * 100000 + f"?access_token={SECRET}", "x" * 100000 + "://"):
+            started = time.monotonic()
+            _scrubber()(text)
+            elapsed = time.monotonic() - started
+            assert elapsed < 3.0, f"100k 输入耗时 {elapsed:.2f}s（scheme 界丢了？）"
+
+    def test_prose_credential_kv_is_masked(self):
+        rendered = _scrubber()(f"login failed: password={SECRET} for user bob")
+        _assert_clean(rendered, "prose password=")
+        assert rendered == "login failed: password=*** for user bob"
+
+    @pytest.mark.parametrize("key", _CREDENTIAL_KEYS)
+    def test_credential_keys_are_masked(self, key):
+        assert _scrubber()(f"{key}={SECRET}") == f"{key}=***"
+
+    @pytest.mark.parametrize("text", _NON_CREDENTIAL_RUNS)
+    def test_non_credential_key_value_runs_pass_through(self, text):
+        """诚实边界（钉住）：键名不像凭据的裸 ``key=value`` **刻意**原样返回。
+
+        它们是诊断文本的主体（``code=1002`` / ``port=8080``）。掩掉等于把「为什么
+        失败」也一起删了——这是设计选择，不是遗漏。
+        """
+        assert _scrubber()(text) == text
+
+
+# --------------------------------------------------------------------------- #
+# ⑬ r4：非 http(s) 方括号 URL 的常量退化族（r3 文档在此处说错，r4 更正）
+# --------------------------------------------------------------------------- #
+class TestNonHttpBracketSchemesDegradeToConstant:
+    """r3 文档称「``redis://`` / ``ftp://`` 与 r2 逐字一致」——**假的**。
+
+    r2 的字符类把 ``[``/``]`` 排除在外，这些串根本不匹配 ⇒ ``re.sub`` 一动不动 ⇒
+    **原文逐字穿过**。r4 收进方括号后它们走到端点兜底，被 scheme 判据拦下，退化为
+    常量。这里的断言同时钉住新行为与「不再逐字穿过」。
+    """
+
+    @pytest.mark.parametrize("url", [
+        "redis://[::1]:6379/0",
+        "redis://[::1]:6379/0?token=" + SECRET,
+        "ftp://[::1]:21/x",
+        "ws://[::1]:9/x",
+        "wss://[::1]:9/x",
+        "redis://user:pw@[::1]:6379/0",
+        "amqp://[::1]:5672/vhost",
+    ])
+    def test_degrade_to_constant_and_never_verbatim(self, url):
+        rendered = _scrubber()(url)
+        assert rendered == UNPRINTABLE_URL, rendered
+        assert rendered != url
+
+    def test_http_bracket_endpoint_diagnostic_survives(self):
+        assert _scrubber()("http://[::1]:1/x") == "http://[::1]:1/***"
+        assert _scrubber()("http://[webhook.internal]:8443") == "http://[webhook.internal]:8443"
+
+
+# --------------------------------------------------------------------------- #
+# ⑭ r4：敌对批次（33 条）的六条 totality 性质
+# --------------------------------------------------------------------------- #
+_R4_HOSTILE_TEXTS = [
+    ("none", None),
+    ("empty", ""),
+    ("bytes-non-utf8", b"\xff\xfe"),
+    ("int", 123),
+    ("object", object()),
+    ("dict-with-url", {"url": _URL_WITH_SECRET}),
+    ("list-with-url", [_URL_WITH_SECRET, _URL_WITH_SECRET]),
+    ("lone-high-surrogate", "\ud800"),
+    ("lone-low-surrogate", "\udcff"),
+    ("surrogate-in-url-path", f"http://h/ro\ud800bot/send?access_token={SECRET}"),
+    ("surrogate-in-bracket-url", f"http://[web\ud800hook]:8443/x?access_token={SECRET}"),
+    ("bare-token-run", f"token={SECRET}"),
+    ("bare-access-token-run", f"?access_token={SECRET}"),
+    ("huge-prefix-token", "x" * 100000 + f"?access_token={SECRET}"),
+    ("nbsp-boundary", f"http://h/x\u00a0?t={SECRET}"),
+    ("ideographic-boundary", f"http://h/x\u3000?t={SECRET}"),
+    ("bracket-space", f"http://[web hook]:8443/robot/send?access_token={SECRET}"),
+    ("bracket-truncated", "http://[web"),
+    ("bracket-unterminated-with-secret", f"http://[web/robot/send?access_token={SECRET}"),
+    ("nonhttp-bracket", f"redis://[::1]:6379/0?token={SECRET}"),
+    ("csv-query", f"https://oapi.dingtalk.com/robot/send?ids=1,2&access_token={SECRET}"),
+    ("semicolon-path", f"http://[::1]:999999/robot;v=1/send?access_token={SECRET}"),
+    ("paren-query", f"http://[::FFFF:127.0.0.1]:999999/robot/send?x=(1)&access_token={SECRET}"),
+    ("requests-text", f"Max retries exceeded with url: /robot/send?access_token={SECRET}"),
+    ("aiohttp-text", f"InvalidUrlClientError: http://[web,hook]:8443/robot/send?access_token={SECRET}"),
+    ("json-ish", f'{{"hook": "https://hooks.slack.com/services/T00/B00/{SECRET}"}}'),
+    ("already-masked", "http://h/***/***?***"),
+    ("endpoint-only", "http://[webhook.internal]:8443"),
+    ("constant", UNPRINTABLE_URL),
+    ("prose", "nothing to mask here"),
+    ("credential-prose", f"login failed: password={SECRET} for user bob"),
+    ("quoted-url", f"url='http://h/x?access_token={SECRET}'"),
+    ("multi-url", f"a http://h1/x?t=token={SECRET} b http://h2/y?access_token={SECRET} c"),
+    ("control-chars", f"http://h/x\x01\x02?t={SECRET}"),
+    ("percent-encoded", f"http://h/a%20b?access_token%3D{SECRET}"),
+    ("versionish", f"https://h/v1/x?api_key={SECRET}&v=2"),
+]
+
+
+class TestR4HostileBatchSixProperties:
+    """r4：33 条敌对输入 × 六条性质（不抛 / str / 可编码 / 幂等 / 无 needle / 非恒等）。"""
+
+    def test_never_raises_and_is_str_and_encodable(self):
+        scrub = _scrubber()
+        for label, value in _R4_HOSTILE_TEXTS:
+            rendered = scrub(value)
+            assert isinstance(rendered, str), label
+            try:
+                rendered.encode("utf-8")
+            except UnicodeEncodeError as exc:  # pragma: no cover - 修复前在此响
+                raise AssertionError(
+                    f"{label}: 写不进 utf-8 日志（{exc}）：{rendered!r}"
+                ) from exc
+
+    def test_is_idempotent(self):
+        scrub = _scrubber()
+        for label, value in _R4_HOSTILE_TEXTS:
+            once = scrub(value)
+            assert scrub(once) == once, f"{label}: 非幂等（{once!r} → {scrub(once)!r}）"
+
+    def test_never_carries_a_needle(self):
+        scrub = _scrubber()
+        for label, value in _R4_HOSTILE_TEXTS:
+            _assert_clean(scrub(value), f"hostile[{label}]")
+
+    def test_never_returns_a_credential_bearing_input_verbatim(self):
+        scrub = _scrubber()
+        for label, value in _R4_HOSTILE_TEXTS:
+            if isinstance(value, str) and SECRET in value:
+                assert scrub(value) != value, f"{label}: 带凭据的输入被原样返回"
+
+    def test_recognised_shape_is_never_a_verbatim_pass_through(self):
+        """认出形状 ⇒ 必须改；唯一例外是**已经是**规范掩码/端点形态的串（不动点）。"""
+        for label, value in _R4_HOSTILE_TEXTS:
+            if not isinstance(value, str):
+                continue
+            recognised = bool(
+                http_mod._ABSOLUTE_URL_RE.search(value)
+                or http_mod._CREDENTIAL_RUN_RE.search(value)
+            )
+            if recognised and not http_mod._token_is_canonical(value):
+                assert _scrubber()(value) != value, f"{label}: 认出了形状却一字未改"
+
+
+# --------------------------------------------------------------------------- #
+# ⑮ r4：前置探针 —— 无策略约束这条链**真的**会把裸 URL 交给 aiohttp
+# --------------------------------------------------------------------------- #
+class TestNoPolicyPreconditionIsReal:
+    def test_default_node_has_no_policy_constraints(self):
+        node = HTTP(id="http_defaults", name="http_defaults", url=_r4_plain(","), method="GET")
+        assert node.allowed_hosts in (None, [])
+        assert node.denied_hosts in (None, [])
+        assert node.block_private_networks is False
+
+    def test_raw_url_reaches_aiohttp_text(self):
+        url = _r4_plain(",")
+        assert url in _aiohttp_invalid_url_text(url)
+
+    def test_with_policy_the_raw_url_never_reaches_aiohttp(self):
+        """对照：设了策略 ⇒ 提前抛「Failed to parse」⇒ 泄露面被掩盖（r3 假绿机制）。"""
+        node = HTTP(
+            id="http_policy_masks_leak", name="http_policy_masks_leak",
+            url=_r4_plain(","), method="GET", blockPrivateNetworks=True,
+        )
+        with pytest.raises(NodeException) as excinfo:
+            node.execute({})
+        assert SECRET not in str(excinfo.value)

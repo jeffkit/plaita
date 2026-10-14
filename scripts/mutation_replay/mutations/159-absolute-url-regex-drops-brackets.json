@@ -1,13 +1,14 @@
 {
   "name": "159-absolute-url-regex-drops-brackets",
-  "concern": "#159-r3-P0",
+  "concern": "#159-r4-P0",
   "issue": "159",
   "file": "plaita/node/http.py",
-  "old": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]*://[^\\s'\\\"<>(){},;]+\")",
-  "new": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]*://[^\\s'\\\"<>()\\[\\]{},;]+\")",
-  "rationale": "把 r3 放宽的字符类退回 r2 形态（把 `[`/`]` 排除在外）：方括号 authority 的绝对 URL 在 `[` 处截断/落空，`aiohttp` 的 `InvalidUrlClientError`（str() 即裸 URL）整段穿过清洗器——这是 r3 定验的原始反例。",
+  "old": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^ \\t\\r\\n\\f\\v]+\")",
+  "new": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^ \\t\\r\\n\\f\\v\\[\\]]+\")",
+  "rationale": "退回「方括号不在字符类里」的形态：`[` 处匹配落空 ⇒ 方括号 authority 的裸 URL 整段穿过清洗器。r4 把该变异 re-base 到新的 ASCII-空白边界正则上（旧的 r3 正则已不存在）；杀手改成 r4 的**精确字符串**行——r4 新加的「凭据键=值」规则会把 `access_token=` 的值单独掩掉，纯 needle 判据不再足以杀它。",
   "expect_fail": [
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBracketedAuthorityFamilyIsMasked::test_renderer_level_masks_and_keeps_endpoint[bracket-hostname]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBracketedAuthorityFamilyIsMasked::test_aiohttp_surface_end_to_end[bracket-hostname]"
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestSeparatorMatrixAllSixSurfaces::test_renderer_level_exact_string[bracketed-0020]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestSeparatorMatrixAllSixSurfaces::test_renderer_level_exact_string[bracketed-002C]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestSeparatorMatrixAllSixSurfaces::test_renderer_level_exact_string[bracketed-003B]"
   ]
 }

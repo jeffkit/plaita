@@ -241,24 +241,97 @@ def _mask_policy_url(url: object) -> str:
 #: 自己的异常文本（``requests``：``Max retries exceeded with url: /path?query``；
 #: ``aiohttp``：``url='http://host/path?query'``）。
 #:
-#: ``[`` / ``]`` **不在**排除集里（``#159`` r3）：authority 可以是方括号形态
-#: （``http://[::1]:999999/…``、``http://[webhook.internal]:8443/…``）。旧判据把
-#: 方括号排除在外 ⇒ 匹配在 ``[`` 处截断甚至完全不匹配 ⇒ 原文整段穿过清洗器
-#: （``aiohttp``/``yarl`` 的 ``InvalidURL`` 文本就是**裸 URL**）。放宽后一律走
-#: :func:`_render_absolute_url_ref`；宁可多掩一段（列表 repr 的尾 ``]`` 会被一并
-#: 吃进 path、渲染成 ``…/***]``），也不放原文过去。
-_ABSOLUTE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>(){},;]+")
+#: **token 边界 = 只认 ASCII 空白**（``[ \t\r\n\f\v]``），且**只**是 ASCII 空白。
+#: 这是 ``#159`` r4 定验反例的正面修法，两条缺一不可：
+#:
+#: * 旧判据写 ``\s``——对 ``str`` 它是 **Unicode 感知**的，NBSP（``\u00a0``）、
+#:   窄空格（``\u202f``）、表意空格（``\u3000``）都会「结束」token ⇒
+#:   ``http://h/x\u00a0?t=<secret>`` 被切成 ``http://h/x`` + **带凭据的尾巴**；
+#: * 旧判据把 ``, ; ( ) " ' < > { }`` 排除在字符类外——它们**合法地出现在 URL
+#:   内部**（``?ids=1,2``、``/robot;v=1``、CSV 型 path）⇒ 匹配在那里截断，而
+#:   ``re.sub`` 只替换匹配片段，**匹配之后的尾巴原样留在输出里**，凭据从尾部漏出。
+#:
+#: 代价（刻意选定的方向）：一旦认出 scheme 就一路吃到下一个 ASCII 空白，散文里
+#: URL 后紧跟的 ``,`` / ``;`` / 引号会被一并吃进 path/query 掩码掉——**宁可多掩**。
+#: ``[`` / ``]`` 也**不在**排除集里（``#159`` r3）：authority 可以是方括号形态
+#: （``http://[::1]:999999/…``、``http://[webhook.internal]:8443/…``），旧判据把
+#: 它们排除在外 ⇒ 匹配在 ``[`` 处截断甚至完全不匹配 ⇒ 原文整段穿过清洗器
+#: （``aiohttp``/``yarl`` 的 ``InvalidURL`` 文本就是**裸 URL**）。
+#:
+#: ``{0,31}`` 是 **scheme 体长上限**，纯粹为**线性代价**：不加界时
+#: ``[A-Za-z0-9+.\\-]*`` 在「100k 字母数字串（无论后面跟不跟 ``://``）」上退化成
+#: O(n²) 回溯——r4 实测 100k 输入 **5318 ms**，加界后 **4.6 ms**（同一台机器，同一
+#: 输入）。注意这个上界**不会**放过凭据：匹配总是从 ``://`` 之前的最后一个合法
+#: scheme 起点开始、并一路吃到下一个 ASCII 空白，所以「超长 scheme」只让前导几个
+#: 字符留在原文，凭据所在的那一段仍整段进掩码。
+_ABSOLUTE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^ \t\r\n\f\v]+")
 #: :func:`_render_absolute_url_ref` 端点兜底只承认的 scheme（与
-#: ``url_redaction._SAFE_SCHEMES`` 同一集合；``redis://`` / ``ftp://`` 仍退化常量）。
+#: ``url_redaction._SAFE_SCHEMES`` 同一集合；``redis://`` / ``ftp://`` 退化常量）。
 _ENDPOINT_SCHEMES = frozenset({"http", "https"})
 #: ``url:`` / ``url=`` 之后的 scheme-relative 引用（只有 requests 这一族这样写）。
-_RELATIVE_URL_RE = re.compile(r"(?P<prefix>\burl[=:]\s*['\"]?)(?P<ref>/[^\s'\"<>()\[\]{},;]*)")
+#: 边界与 :data:`_ABSOLUTE_URL_RE` 同源：ASCII 空白才结束，分隔符留在引用内。
+_RELATIVE_URL_RE = re.compile(
+    r"(?P<prefix>\burl[=:][ \t\r\n\f\v]*['\"]?)(?P<ref>/[^ \t\r\n\f\v]*)"
+)
 #: path segment / query / fragment 的掩码占位（与 url_redaction 同一语义）。
 _MASK_PLACEHOLDER = "***"
 
+#: **凭据键 = 值** 的裸串（``#159`` r4）。r3 的清洗器只认「URL 形状」，于是
+#: ``token=K…``、``"x"*100000 + "?access_token=K…"`` 这类**无 scheme、无
+#: ``url:``/``url=`` 标签**的串整段原样穿过（定验残口）。这里补一条**收窄到
+#: 凭据键**的规则：键名像凭据才掩值；键名不像的一律不碰，否则会把
+#: ``code=1002`` / ``port=8080`` / ``block_private_networks=true`` 这类诊断文本
+#: 一起吃掉（那是不可接受的可用性代价）。
+#:
+#: 键名用**分段**文法而不是「``[\\w.\\-]+`` + 事后判据」：``\\w+`` 会让
+#: ``failed: password=X`` 里最左匹配落在 ``failed`` 上、把真凭据键 ``password``
+#: 吃进 value，``re.sub`` 随后**跳过整个匹配** ⇒ 凭据隐身（r4 实测）。
+#: 分段文法（每段必须由 ``_ - .`` 收尾）让最左匹配**只能是**凭据键本身，
+#: 且 ``monkey`` / ``sortkey`` 这类「字母串里恰好含 key」不命中。
+_KEY_COMPONENT = r"[A-Za-z0-9]+"
+_KEY_SEP = r"[_\-.]"
+#: 整段命中的凭据词（配合 ``re.I``：``accessToken`` / ``APIKEY`` 同样命中的）。
+_CREDENTIAL_KEY_WORDS = (
+    r"token|secret|password|passwd|pwd|signature|credential|apikey|accesskey|"
+    r"privatekey|clientsecret|session|cookie|bearer|key|sig|auth"
+)
+_CREDENTIAL_RUN_RE = re.compile(
+    r"(?P<prefix>(?<![A-Za-z0-9_.\-])"
+    r"(?P<key>(?:" + _KEY_COMPONENT + _KEY_SEP + r")*"
+    r"(?:" + _CREDENTIAL_KEY_WORDS + r")"
+    r"(?:" + _KEY_SEP + _KEY_COMPONENT + r")*)"
+    r"\s*[=:]\s*[\"']?)"
+    r"(?P<value>[^ \t\r\n\f\v&\"'<>]+)",
+    re.IGNORECASE,
+)
+#: 与 :data:`_CREDENTIAL_RUN_RE` **同一份词表**的独立键名判据（双保险：万一
+#: 上游正则被改松，掩码函数仍会拒掉不像凭据的键）。词的两侧必须是分量边界，
+#: 所以 ``monkey`` / ``sortkey`` 不命中，``x-api-key`` / ``access_token`` 命中。
+_CREDENTIAL_KEY_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:" + _CREDENTIAL_KEY_WORDS + r")(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _is_credential_key(key: str) -> bool:
+    """``access_token`` / ``x-api-key`` / ``client_secret`` 命中；``code`` / ``monkey`` 不命中。"""
+    return _CREDENTIAL_KEY_RE.search(key) is not None
+
+
+def _mask_credential_run(match) -> str:
+    """凭据键的**值**换占位，键名与引号原样（看得出抹掉的是哪个键）。"""
+    if not _is_credential_key(match.group("key")):
+        return match.group(0)
+    return match.group("prefix") + _MASK_PLACEHOLDER
+
 
 def _mask_relative_url_ref(ref: str) -> str:
-    """scheme-relative 引用（``/a/b?token=x``）：每个非空 segment 与整条 query 换 ``***``。"""
+    """scheme-relative 引用（``/a/b?token=x``）：每个非空 segment 与整条 query 换 ``***``。
+
+    与绝对 URL 同一条「绝不恒等替换」守卫（r4）：渲染结果与入参**恒等**时，只有
+    已经是掩码形态（``/***/***?***``）才算合法的幂等不动点，否则退化为
+    :data:`UNPRINTABLE_URL`。
+    """
     try:
         parts = urlsplit(ref)
     except Exception:  # noqa: BLE001 — 畸形串退化为常量，绝不回原文
@@ -270,11 +343,14 @@ def _mask_relative_url_ref(ref: str) -> str:
         rendered += f"?{_MASK_PLACEHOLDER}"
     if parts.fragment:
         rendered += f"#{_MASK_PLACEHOLDER}"
+    if rendered == ref and not _payload_is_fully_masked(ref):
+        logger.debug("scheme-relative 引用渲染为恒等且非掩码形态，退化为安全常量")
+        return UNPRINTABLE_URL
     return rendered
 
 
 def _mask_bracketed_absolute_url(token: str) -> str:
-    """**方括号 authority** 绝对 URL 的端点兜底（``#159`` r3）。
+    """**方括号 authority** 绝对 URL 的端点兜底（``#159`` r3，r4 校正文档）。
 
     ``urlsplit`` 把方括号里的内容当 IPv6 字面量校验：``[webhook.internal]`` /
     ``[]`` 会抛 ``ValueError('… does not appear to be an IPv4 or IPv6 address')``，
@@ -284,12 +360,23 @@ def _mask_bracketed_absolute_url(token: str) -> str:
     兜底只保留 ``scheme://authority``：**丢弃 userinfo**（`#88` 的口令形态）与
     path/query/fragment 全部。触发面刻意收窄到「authority 是方括号形态却不是合法
     IPv6 字面量」这一族（``http://[webhook.internal]:8443/…``、``http://[]:8443/…``），
-    且 scheme 仍限 :data:`_ENDPOINT_SCHEMES` —— ``redis://`` / ``ftp://`` 等其余
-    退化行为与 r2 逐字一致。
+    且 scheme 仍限 :data:`_ENDPOINT_SCHEMES`。
+
+    **非 http(s) 方括号 URL 的真实行为（r4 更正，r3 的文档在此处说错了）**：
+    ``redis://[::1]:6379/0`` / ``ftp://[bad]:1/x`` / ``ws://…`` 现在返回
+    :data:`UNPRINTABLE_URL` 常量，**不是**「与 r2 逐字一致」——r2 的
+    ``_ABSOLUTE_URL_RE`` 把 ``[``/``]`` 排除在字符类外，这些串**根本不匹配**，
+    于是 `re.sub` 一动不动、**原文逐字穿过**（既非端点、也非常量）。r4 把方括号
+    收进字符类后它们才走到这里，被 scheme 判据拦下退化为常量。
+
+    这个交换是**刻意的 fail-closed**：代价是「一个合法的非 http(s) 方括号 URL
+    丢掉全部端点诊断（只剩常量）」，收益是「r2 那种原文穿过的形态结构性消失」。
+    可诊断性与不可泄漏冲突时，本单一律选后者。
 
     与 :func:`_mask_policy_url` 的暴露面**同源**：后者对非方括号 URL 一样原样保留
     authority（``http://host/***``），所以「保留 authority」不是新增暴露类；且结果
     必须 UTF-8 可编码（写不进日志就退化常量，纪律同 ``url_redaction``）。
+    本函数**不保证**非恒等——恒等守卫由 :func:`_render_absolute_url_ref` 统一施加。
     """
     scheme, sep, rest = token.partition("://")
     if not sep or scheme.lower() not in _ENDPOINT_SCHEMES:
@@ -309,17 +396,133 @@ def _mask_bracketed_absolute_url(token: str) -> str:
     return rendered
 
 
+def _original_url_payload(token: str) -> str:
+    """token 里 ``scheme://authority`` **之后**的 path/query/fragment（无则 ``""``）。"""
+    _, sep, rest = token.partition("://")
+    if not sep:
+        return ""
+    cut = len(rest)
+    for marker in "/?#":
+        pos = rest.find(marker)
+        if pos != -1:
+            cut = min(cut, pos)
+    return rest[cut:]
+
+
+#: 「已经是掩码形态」的 payload：只由 ``/`` 结构分隔符与 ``***`` 占位组成
+#: （``/***/***?***``、``/?***``、``#***``、``/``、``?***``）。用来把
+#: **幂等不动点**与**恒等替换**区分开：前者没有明文可泄，后者正是 r3 反例 A。
+_MASKED_PAYLOAD_RE = re.compile(r"^(?:/(?:\*\*\*)?)*(?:\?\*\*\*)?(?:#\*\*\*)?$")
+
+
+def _payload_is_fully_masked(payload: str) -> bool:
+    """payload 是否已只剩 ``***`` 占位与结构分隔符（非空）。"""
+    return bool(payload) and _MASKED_PAYLOAD_RE.fullmatch(payload) is not None
+
+
+def _plaintext_pieces(payload: str) -> list:
+    """payload 里的**明文片段**：path 的每个非空 segment + query + fragment。
+
+    占位 ``***`` 本身（及其任意子串，如 path segment 恰为 ``*``）不算明文——
+    那是清洗器的输出词汇，不是原文。
+    """
+    body, _, frag = payload.partition("#")
+    path, _, query = body.partition("?")
+    pieces = [seg for seg in path.split("/") if seg]
+    if query:
+        pieces.append(query)
+    if frag:
+        pieces.append(frag)
+    return [piece for piece in pieces if piece not in _MASK_PLACEHOLDER]
+
+
+def _token_is_canonical(token: str) -> bool:
+    """token 是否已是清洗器的**不动点形态**（幂等要求，r4）。
+
+    只有两种形态允许「渲染成自身」：
+
+    * ``scheme://authority`` + **已掩码** payload（``/***/***?***``）——这是
+      :func:`_mask_policy_url` 的正常输出，二次清洗必须原样留下；
+    * ``scheme://[…]:port`` **闭合方括号**端点形态、无 payload——这是
+      :func:`_mask_bracketed_absolute_url` 的正常输出（``http://[web,hook]:8443``），
+      同样必须是不动点，否则端点兜底的价值在一次清洗后就没了。
+
+    反之 ``http://[web``（``[`` **未闭合**、无 payload）与 ``http://host``（无
+    payload）都不是不动点形态——它们正是「渲染成自身却什么也没掩」的形态，
+    :func:`_render_is_usable` 据此判不可用、退化为常量（r3 反例 A 的根因）。
+    """
+    payload = _original_url_payload(token)
+    if payload:
+        return _payload_is_fully_masked(payload)
+    scheme, sep, rest = token.partition("://")
+    if not sep or scheme.lower() not in _ENDPOINT_SCHEMES:
+        return False
+    authority = rest.rpartition("@")[2]
+    return authority.startswith("[") and "]" in authority
+
+
+def _leaves_plaintext_payload(token: str, rendered: str) -> bool:
+    """渲染后的 payload 里是否还留着原 token payload 的明文片段（B 类尾部泄漏）。
+
+    与「渲染结果必须是规范形态」（:func:`_token_is_canonical`）是**两个方向**的同一
+    件事：规范形态要求 payload 只剩 ``***``，这里再按**原 token 的片段**逐个回查，
+    直接回答「原始 path/query 字节有没有留在输出里」。两层都留着是刻意的
+    defense-in-depth——``re.sub`` 只替换匹配片段，尾部残留正是 r2/r3 的 B 类。
+    """
+    rendered_payload = _original_url_payload(rendered)
+    return any(
+        piece in rendered_payload
+        for piece in _plaintext_pieces(_original_url_payload(token))
+    )
+
+
+def _render_is_usable(token: str, rendered: str) -> bool:
+    """渲染结果能否**替代**原 token（``#159`` r4 的「绝不恒等 / 绝不残留原文」总守卫）。
+
+    判据逐条：
+
+    1. 不是 ``str`` 或为空 ⇒ 不可用；
+    2. 退化为 :data:`UNPRINTABLE_URL` ⇒ 不可用（由调用方决定是否去下一层兜底）；
+    3. **渲染结果本身必须是规范形态**（:func:`_token_is_canonical`）——``scheme://``
+       + 已掩码 payload，或闭合方括号的端点形态。这一条同时排掉两类「换了等于
+       没换」：**恒等替换**（``http://[web`` 方括号未闭合、``http://host`` 无
+       payload，都不是规范形态；前者正是 r3 反例 A 的直接成因）与**掩码没盖住
+       payload**（``http://h/***?t=K`` 的 query 还是明文）。反向地，
+       ``http://host/***/***?***`` / ``http://[web,hook]:8443`` 这类**已经掩码 /
+       已是端点形态**的串是规范形态，必须原样留下：否则 ``_scrub_url_text`` 二次
+       清洗会把它们变成常量，**幂等性**与端点诊断当场失效；
+    4. 渲染后的 payload 里不许残留原 payload 的**明文片段**
+       （:func:`_leaves_plaintext_payload`）——双保险，直接对着「原始 path/query
+       字节留在输出里」这件事说话。
+
+    该守卫对**每一条**渲染路径施加（``_mask_policy_url`` 首选路径与方括号兜底
+    路径），不只守兜底：``_mask_policy_url`` 在 ``http://host``（无
+    path/query/fragment）这类 token 上同样返回输入本身。
+    """
+    if not isinstance(rendered, str) or not rendered:
+        return False
+    if rendered == UNPRINTABLE_URL:
+        return False
+    if not _token_is_canonical(rendered):
+        return False
+    return not _leaves_plaintext_payload(token, rendered)
+
+
 def _render_absolute_url_ref(token: str) -> str:
     """绝对 URL 匹配串 → 掩码形态：:func:`_mask_policy_url` 优先，退化时端点兜底。
 
     ``_mask_policy_url`` 是策略 URL 的唯一渲染路径（r2 契约），保留它作为**首选**；
-    只有当它退化（``UNPRINTABLE_URL``）时，才看 :func:`_mask_bracketed_absolute_url`
-    能否把端点救回来。两层都救不回来即 ``UNPRINTABLE_URL``——绝不回原文。
+    只有当它**不可用**（:func:`_render_is_usable` 为假：退化常量 / 恒等替换 / 尾部
+    仍带明文 payload）时，才看 :func:`_mask_bracketed_absolute_url` 能否把端点救回来。
+    两层都不可用即 :data:`UNPRINTABLE_URL`——绝不回原文、绝不恒等替换。
     """
-    rendered = _mask_policy_url(token)
-    if rendered != UNPRINTABLE_URL:
-        return rendered
-    return _mask_bracketed_absolute_url(token)
+    primary = _mask_policy_url(token)
+    if _render_is_usable(token, primary):
+        return primary
+    fallback = _mask_bracketed_absolute_url(token)
+    if _render_is_usable(token, fallback):
+        return fallback
+    return UNPRINTABLE_URL
 
 
 def _scrub_url_text(text: object) -> str:
@@ -334,7 +537,23 @@ def _scrub_url_text(text: object) -> str:
     * 绝对 URL 走 :func:`_render_absolute_url_ref`（首选 :func:`_mask_policy_url`：
       保 ``scheme://host[:port]``，抹 path 的每一段与整条 query/fragment；非 http(s)
       scheme 退化常量；方括号 authority 退化时由端点兜底把 ``host[:port]`` 救回）；
-    * ``url: /path?query`` 形态的 scheme-relative 引用按时段掩码。
+      token 边界**只认 ASCII 空白**，且 ``, ; ( ) " ' < > { }`` 一律留在 token 里
+      （见 :data:`_ABSOLUTE_URL_RE`）；
+    * ``url: /path?query`` 形态的 scheme-relative 引用按时段掩码；
+    * **凭据键 = 值** 的裸串（``token=K…``、``…?access_token=K…``，无 scheme 也
+      无 ``url:`` 标签）由 :data:`_CREDENTIAL_RUN_RE` 掩值。
+
+    **判据的诚实边界（r4 明确并钉住）**：本清洗器认的是「URL 形状 **或** 凭据键
+    的 ``key=value`` 串」。因此：
+
+    * ``token=K…`` / ``access_token=K…`` 这类**无 scheme 的凭据运行**现在**也**被
+      掩掉（r3 的残口之一，r4 关闭）；
+    * 键名不像凭据的裸 ``key=value``（``code=1002`` / ``port=8080`` /
+      ``block_private_networks=true`` / ``v=1``）**刻意原样返回**——它们是诊断
+      文本的主体，掩掉等于把「为什么失败」也一起删了；
+    * 因此「裸的、键名不像凭据的串」仍在判据之外，这是**设计选择**而非遗漏，
+      由 ``TestCredentialRunIsMasked::test_non_credential_key_value_runs_pass_through``
+      钉住。
 
     **total**（与 ``url_redaction._mask_webhook_url`` 同一判据）：任何输入都返回
     ``str``；清洗过程任何异常退化为 ``UNPRINTABLE_URL``，绝不上抛、绝不回原文；
@@ -356,6 +575,7 @@ def _scrub_url_text(text: object) -> str:
         scrubbed = _RELATIVE_URL_RE.sub(
             lambda m: m.group("prefix") + _mask_relative_url_ref(m.group("ref")), scrubbed,
         )
+        scrubbed = _CREDENTIAL_RUN_RE.sub(_mask_credential_run, scrubbed)
     except Exception:  # noqa: BLE001 — 清洗失败不得变成新的异常面
         # 同样刻意不回显异常文本：这里正是「把原文抹掉」的那条路径。
         logger.debug("URL 文本清洗失败，退化为安全常量")

@@ -21,6 +21,18 @@
 > `_render_absolute_url_ref` / `_mask_bracketed_absolute_url` 与
 > `tests/unit/test_issue159_policy_url_exception_sinks.py` 的第 ⑦/⑧ 节。下面两条残口
 > 与 r3 无关，状态不变。
+>
+> **r4 更正（2026-10-15，同一合并轮）**：上面 r3 那句「方括号 authority 整段穿过已关闭」
+> **不成立**，是本文件与 `_mask_bracketed_absolute_url` docstring 的**事实错误**，r4 撤回：
+> r3 的 `_ABSOLUTE_URL_RE` 把 `, ; ( ) " ' < > { }` 排除在字符类外，匹配在这些分隔符处
+> **截断**，而 `re.sub` 只替换匹配片段 ⇒ 尾巴（含 `access_token=`）原样留下；截断恰好落在
+> `[` 之后时 `_mask_bracketed_absolute_url("http://[web")` 返回**输入本身** ⇒ 替换是**恒等**
+> ⇒ 整条带凭据的 URL 逐字穿过（无策略约束的节点上实测 6 面 × 2 路全泄）。r4 的正面修法：
+> token 边界 = **只认 ASCII 空白**、分隔符留在 token 内、渲染结果必须是**规范形态**否则
+> 退化为常量、并补一趟「凭据键=值」规则。另：r3 称 `redis://` / `ftp://` 与 r2「逐字一致」
+> 也是错的——r2 的字符类不含方括号，这些串**不匹配**因而**原文穿过**；r4 收进方括号后它们
+> 才走到 scheme 判据、退化为常量（刻意的 fail-closed，代价是丢掉端点诊断）。
+> 细节与矩阵见 `tests/unit/test_issue159_policy_url_exception_sinks.py` 第 ⑨–⑮ 节。
 
 ## 草案 A（跨单项）：`exc.details` / `HttpNodeErrorInfo.request` 持原始 URL
 
