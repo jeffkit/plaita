@@ -2,9 +2,6 @@
 基于Redis的事件总线和存储实现
 """
 import asyncio
-import collections
-import contextvars
-import functools
 import json
 import logging
 import time
@@ -20,199 +17,21 @@ logger = logging.getLogger(__name__)
 # 不存在既未处理、也无记录的第三态」，不是「无限等待 handler 跑完」。
 DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0
 
-# #109/F1：具名拒绝文案。两条都必须出现在任何关停副作用（``_closing`` / cancel
-# listener / drain）**之前**；第二条是 fail-closed 的「证明不出来就拒绝」。
-_SELF_CLOSE_REFUSAL = (
-    "RedisEventBus.close() 不能从它自己的分发 handler 内调用："
-    "该任务会把自身纳入 drain 并导致自取消/gather 递归。"
-    "请在 handler 之外（监听循环/CLI 收尾）关停；"
-    "如需在 handler 内请求关停，请先 return 再由外部调用。"
+# #109/F1/F4 判据内核（具名拒绝文案 + 两层判据）拆到 ``plaita/event/_selfclose_guard.py``（r6）：该模块只依赖
+# stdlib，因此可在别的 CPython（3.12/3.13 的干净解释器）里按文件加载、用真实 asyncio
+# 对象驱动（版本表见 scripts/selfclose_109_110_versions.py）。两层判据（dispatch
+# lineage + fail-closed 完成唤醒锥）、stdlib 自检、诚实边界都写在该模块 docstring。
+from ._selfclose_guard import (          # noqa: E402
+    DISPATCH_GRAPH_MAX_NODES as _DISPATCH_GRAPH_MAX_NODES,
+    IN_DISPATCH_BUS as _IN_DISPATCH_BUS,
+    SELF_CLOSE_BUDGET_REFUSAL as _SELF_CLOSE_BUDGET_REFUSAL,
+    SELF_CLOSE_REFUSAL as _SELF_CLOSE_REFUSAL,
+    UNSUPPORTED_RUNTIME_REFUSAL as _SELF_CLOSE_UNSUPPORTED_REFUSAL,
+    WAKE_GRAPH_INCOMPLETE_REFUSAL as _WAKE_GRAPH_INCOMPLETE_REFUSAL,
+    WakeGraphIncomplete,                 # noqa: F401  （测试/repl 用）
+    close_graph_verdict as _close_graph_verdict,
+    ensure_self_test as _ensure_wake_selftest,
 )
-_SELF_CLOSE_BUDGET_REFUSAL = (
-    "RedisEventBus.close() 拒绝执行：无法证明它不在自己的分发图内——"
-    "等待图在 {budget} 个节点的证明预算内未闭合（已访问 {visited} 个节点仍有待展开）。"
-    "按 fail-closed 口径具名拒绝，未产生任何关停副作用。"
-    "请在 handler 之外（监听循环/CLI 收尾）关停，或缩小 handler 内的等待构造规模。"
-)
-
-# #109/F4：「本 coroutine 位于**某个总线实例**的分发任务图内」标记（值是总线自身）。
-# ``asyncio.create_task`` / ``ensure_future``（含 ``asyncio.shield``）都会复制
-# 调用方的 context，因此 handler 里 await / create_task / shield 出的子任务——
-# 只要没有显式换 context——都继承该标记。``close()`` 据此拒绝「从当前分发的
-# 任务图内部发起关停」：这类关停会让 drain 等待自己的祖先（task-wait cycle），
-# 超时后 ``Task.cancel`` 沿 ``_fut_waiter`` 递归 ⇒ RecursionError + 任务永久悬置
-# （验收者 V2 形状；r2 的 ``current in _pending_tasks`` 只挡得住直接调用）。
-# 存总线实例而不是布尔：多总线同进程时，A 的 handler 关停 B 不应被误拒。
-#
-# **声明的作用域（r3/F1）**：marker 由 contextvars 承载，因此**不继承**到
-#   * 显式换 context 的任务（``loop.create_task(coro, context=contextvars.Context())``）；
-#   * 别的线程/executor（``threading.Thread`` / ``run_in_executor`` 各自独立 context）。
-# 这两类由下面的**完成唤醒边遍历**（r5 口径）与 ``close()`` 的跨循环围栏分别处理，
-# 标记本身不是全集。见 docs-site/docs/distributed/event-system.md 的 T1/T2 表述。
-_IN_DISPATCH_BUS: contextvars.ContextVar = contextvars.ContextVar(
-    "plaita_redis_in_dispatch_bus", default=None)
-
-# #109/F1：等待图证明预算（节点数）。**fail-closed**：预算内不能闭合 ⇒ 具名拒绝
-# （点名「图太大、无法证明安全」并报出预算），绝不退化成「允许」。本缺陷家族第四次
-# 复发（contextvar-only → 等待图 → 完成回调引用 → 完成回调中介边 + 节点上限 fail-open）
-# 的结论是：**不再枚举回调写法**，遍历口径改由「事件循环到底会唤醒谁」定义，且
-# 证明不完 ⇒ 拒绝。见 docs-site/docs/distributed/event-system.md 的 T1/T2；
-# F1 矩阵在 tests/unit/test_issue109_110_r3_parity.py（X1/X2/X3 新边族）与
-# tests/unit/test_issue109_110_r5_parity.py（近/超预算格 + 允许半边）。
-_DISPATCH_GRAPH_MAX_NODES = 512
-
-# 「事件循环真的会用来自动唤醒等待者」的簿记属性（asyncio 标准库对这些队列的命名
-# 是统一的，遍历据此下钻，而不是猜闭包形状）：
-#   ``Queue._getters`` / ``Queue._putters``：等待者 Future 的 deque（``_wakeup_next``
-#       逐个 ``set_result``）；
-#   ``Event._waiters`` / ``Condition._waiters`` / ``Semaphore._waiters`` /
-#       ``Lock._waiters``：同上（Condition 表项是 ``(future, lock)`` 元组，由容器展开）；
-#   ``TaskGroup._on_completed_fut``：``__aexit__`` 实际 await 的 future，由
-#       ``_on_task_done``（绑定方法，``__self__`` 是 group）``set_result``；
-#   ``TaskGroup._tasks``：组内子任务集合。
-_WAKE_BOOKKEEPING_ATTRS = (
-    "_getters", "_putters", "_waiters", "_on_completed_fut", "_tasks",
-)
-# 对象展开深度（partial → func → __self__ → 容器 → 安全阀）。
-_WAKE_EXPAND_DEPTH = 6
-
-
-def _iter_wake_futures(obj: Any, depth: int = _WAKE_EXPAND_DEPTH,
-                       _seen: Optional[Set[int]] = None, containers: bool = True):
-    """从一个「回调/簿记引用到的对象」里枚举出它牵动的 Future/Task。
-
-    口径是**事件循环的唤醒机制**，不是闭包写法清单：
-      * Future/Task：本身即节点；
-      * ``functools.partial``：``func`` / ``args`` / ``keywords`` 递归（含嵌套 partial）；
-      * 绑定方法：``__self__``——``asyncio`` 把被等待 future 的唤醒回调登记为
-        ``Task.__wakeup``（``__self__`` 就是那个 Task），也把
-        ``TaskGroup._on_task_done`` 登记在子任务上（``__self__`` 是 group）；
-      * 可执行函数：``__closure__`` 的 cell（回调里 ``ensure_future(notify())`` 时，
-        真正去唤醒等待者的是 ``notify`` 的闭包状态）；
-      * 容器（list/tuple/set/dict/deque，仅当 ``containers=True``）：递归展开元素
-        （Condition 的 ``(future, lock)`` 表项）；
-      * 其它对象：只沿 ``_WAKE_BOOKKEEPING_ATTRS`` 下钻。**不扫 ``__dict__``**：
-        handler 闭包里的总线对象会经 ``_track_task`` 的完成回调把全部在飞任务拖进来，
-        那会把合法的外部关停误判成图内关停（把允许半边打坏）。
-
-    ``containers=False`` 只用于**闭包 cell 的直接内容**（回调的 cell，以及被引用函数
-    自己的 cell）：那里的容器常常是 asyncio 的兄弟簿记（``asyncio.wait`` /
-    ``as_completed`` 的 ``todo`` 集合同时装着 close 任务与全部被等待者），展开它既不是
-    真实唤醒边，又会让唤醒锥被兄弟数量撑爆。真正的唤醒目标要么是 cell 里的 Future
-    本身（``waiter``），要么是 cell 里的 asyncio 原语（``Queue`` / ``Event`` /
-    ``Condition``），后者的 ``_getters`` / ``_waiters`` 由 ``_WAKE_BOOKKEEPING_ATTRS``
-    分支展开（该分支始终 ``containers=True``）；``partial`` 的 args/keywords 是显式
-    传参（``partial(_set, waiter)``），同样始终展开。
-    """
-    if isinstance(obj, asyncio.Future):
-        yield obj
-        return
-    if depth <= 0 or obj is None:
-        return
-    if _seen is None:
-        _seen = set()
-    if id(obj) in _seen:                          # 去环（函数闭包可自引用）
-        return
-    _seen.add(id(obj))
-    if isinstance(obj, functools.partial):
-        yield from _iter_wake_futures(obj.func, depth - 1, _seen, containers=True)
-        for arg in obj.args:
-            yield from _iter_wake_futures(arg, depth - 1, _seen, containers=True)
-        for value in (obj.keywords or {}).values():
-            yield from _iter_wake_futures(value, depth - 1, _seen, containers=True)
-        return
-    if containers and isinstance(obj, (list, tuple, set, frozenset, dict, collections.deque)):
-        items = obj.values() if isinstance(obj, dict) else obj
-        for item in items:
-            yield from _iter_wake_futures(item, depth - 1, _seen, containers=True)
-        return
-    if isinstance(obj, (str, bytes, bytearray, int, float, bool)):
-        return
-    own = getattr(obj, "__self__", None)          # 绑定方法 / classmethod
-    if own is not None and not isinstance(own, type):
-        yield from _iter_wake_futures(own, depth - 1, _seen, containers=True)
-    for cell in getattr(obj, "__closure__", None) or ():   # 函数闭包状态
-        try:
-            value = cell.cell_contents
-        except ValueError:
-            continue
-        yield from _iter_wake_futures(value, depth - 1, _seen, containers=False)
-    for attr in _WAKE_BOOKKEEPING_ATTRS:
-        holder = getattr(obj, attr, None)
-        if holder is not None:
-            yield from _iter_wake_futures(holder, depth - 1, _seen, containers=True)
-
-
-def _callback_wake_targets(handle: Any):
-    """一个 ``Future._callbacks`` 表项会让**哪些** Future/Task 因该 future 完成而获得进展。
-
-    方向（这就是遍历的方向定义）：future ``F`` 的回调引用 ``X`` ⇒ ``F`` 完成会唤醒
-    ``X`` ⇒ **``X`` 依赖 ``F``**；``Task.__wakeup`` 的被引用者就是等在 ``F`` 上的任务。
-    3.11 起表项是 ``(callback, context)``；更早/实现差异下是带 ``_callback`` 的 Handle。
-    """
-    if isinstance(handle, tuple):
-        callback = handle[0] if handle else None
-    else:
-        callback = getattr(handle, "_callback", None)
-    # (值, 是否展开容器)：回调的闭包 cell 直接内容不展开容器（兄弟簿记），
-    # callback 本身与 Handle._args 是显式引用（partial 实参等），照常展开。
-    refs = []
-    for cell in getattr(callback, "__closure__", None) or ():
-        try:
-            refs.append((cell.cell_contents, False))
-        except ValueError:                        # 尚未赋值的 cell
-            continue
-    if callback is not None:
-        refs.append((callback, True))             # partial / 绑定方法由展开器解包
-    for arg in getattr(handle, "_args", None) or ():
-        refs.append((arg, True))
-    seen: Set[int] = set()
-    for ref, containers in refs:
-        for fut in _iter_wake_futures(ref, containers=containers):
-            if id(fut) not in seen:
-                seen.add(id(fut))
-                yield fut
-
-
-def _close_graph_verdict(root: "asyncio.Future",
-                         pending: Any,
-                         budget: int = _DISPATCH_GRAPH_MAX_NODES):
-    """``root``（正在执行 close() 的任务）是否位于 ``pending``（在飞分发任务）的等待图内。
-
-    从 ``root`` 出发只沿「完成唤醒边」可达：``node._callbacks`` 的每个表项 →
-    ``_callback_wake_targets``。命中 ``pending`` 中的任务 ⇒ close 会把自己纳入 drain
-    （task-wait cycle）。这条口径**不依赖调用方 context**，因此显式空 context 也逃不掉；
-    也不依赖「所有任务」集合做反向索引，代价只与本任务自己的唤醒锥有关——合法外部
-    关停（哪怕同时有 600 个在飞分发）只访问 O(1) 个节点，不会碰到预算。
-
-    返回 ``(verdict, visited)``：
-      * ``"in_graph"``：命中在飞分发任务（具名拒绝）；
-      * ``"clean"``：预算内在**完全枚举完**且未命中（可放行）；
-      * ``"budget"``：预算耗尽仍有待展开节点 ⇒ **无法证明安全**，同样具名拒绝
-        （fail-closed；「证明不出来」绝不等于「允许」）。
-    """
-    if root is None:
-        return "clean", 0
-    visited: Set[int] = set()
-    stack = [root]
-    count = 0
-    while stack:
-        if count >= budget:
-            return "budget", count
-        node = stack.pop()
-        if id(node) in visited:
-            continue
-        visited.add(id(node))
-        count += 1
-        if node in pending:
-            return "in_graph", count
-        for handle in list(getattr(node, "_callbacks", None) or ()):
-            for fut in _callback_wake_targets(handle):
-                if fut in pending:
-                    return "in_graph", count + 1
-                if id(fut) not in visited:
-                    stack.append(fut)
-    return "clean", count
 
 # 临时修改sys.path以避免本地文件冲突
 original_path = list(sys.path)
@@ -1539,17 +1358,58 @@ class RedisEventBus(EventBus):
                 delay = min(delay * retry_policy.backoff_factor, retry_policy.max_delay)
                 await asyncio.sleep(delay)
     
-    def _close_graph_probe(self):
-        """(#109/F1) ``(verdict, visited)``：本 close 调用是否在自己的分发等待图内。
+    def _self_close_refusal(self, current) -> Optional[RuntimeError]:
+        """(#109/F1/F4, r6) 关停前判据：返回要抛的具名 ``RuntimeError``，或 None=放行。
 
-        ``verdict`` ∈ ``{"in_graph", "clean", "budget"}``，口径见模块级
-        ``_close_graph_verdict``：从**当前任务**出发沿「完成唤醒边」
-        （``Future._callbacks`` → 绑定方法 ``__self__`` / ``functools.partial`` /
-        ``Queue._getters`` 等 asyncio 自身唤醒队列）可达，命中在飞分发任务即
-        ``in_graph``；预算内枚举不完即 ``budget``（fail-closed，同样拒绝）。
-        只测当前任务自己的唤醒锥，因此与在飞分发数量无关（合法外部关停恒 O(1) 节点）。
+        两层（细节与诚实边界见 ``plaita/event/_selfclose_guard.py`` 的模块 docstring）：
+
+        L1 **dispatch lineage**：``current`` 就是本实例登记的在飞分发任务，或当前
+           context 的 ``IN_DISPATCH_BUS`` 标记就是本总线（handler 内 / handler
+           ``create_task`` 出的后代任务——context 复制传递）。**不点名任何私有属性**。
+           handler 显式换 ``context=Context()`` 时 L1 失灵，交由 L2。
+        L2 **fail-closed 完成唤醒锥**：从 ``current`` 沿「事件循环真的会用来唤醒等待
+           者」的引用可达的人里含本实例在飞分发任务 ⇒ 拒绝；缺属性 / 重命名 /
+           ``TaskGroup._on_completed_fut`` 懒创建窗口 / 未知持有者 / 深度或节点预算
+           耗尽 ⇒ 一律判「无法证明安全」并具名拒绝（绝不静默放行）。首次调用先跑
+           stdlib 属性自检，未通过则本进程内一律拒绝。
+        L2 是 best-effort（只认 asyncio 自己的唤醒机制）；它盖不住的形状见模块
+        docstring 的声明残差 R1/R2。本方法**只读、无副作用**，必须在 ``_closing`` /
+        cancel listener / drain **之前**调用。
         """
-        return _close_graph_verdict(asyncio.current_task(), self._pending_tasks)
+        if current is not None and current in self._pending_tasks:
+            # #109 形状①（直接）：handler 内调用 close() ⇒ ``current`` 就是被登记的分发
+            # 任务，会把**自身**纳入 drain —— 等满超时后自 cancel，再 await gather(含自身)
+            # 触发 RecursionError + "Task was destroyed"。
+            return RuntimeError(_SELF_CLOSE_REFUSAL)
+        if _IN_DISPATCH_BUS.get() is self:
+            # #109/F4 形状：handler 里 create_task/ensure_future/shield 出的子任务继承了
+            # marker（context 复制），即使等待构造绕过了等待图也保守拒绝（声明口径）。
+            return RuntimeError(_SELF_CLOSE_REFUSAL)
+        selftest_error = _ensure_wake_selftest()
+        if selftest_error is not None:
+            # #109 r6：本 CPython 的 asyncio 簿记属性自检未过（未来 Python 改名）⇒
+            # fail-closed：本进程内 close() 一律具名拒绝，绝不带着看不见的图放行。
+            return RuntimeError(_SELF_CLOSE_UNSUPPORTED_REFUSAL.format(
+                detail=selftest_error))
+        verdict, visited, reason = _close_graph_verdict(
+            current, self._pending_tasks)
+        if verdict == "in_graph":
+            # #109/F1：形状②③④……（嵌套 await create_task、gather/shield、显式空
+            # context、``TaskGroup.create_task(..., context=Context())``、
+            # ``functools.partial`` 的 ``func.__self__``、``asyncio.as_completed`` 的
+            # 队列表项、Queue/Event/Condition 的等待者……）。判据是**事件循环的完成
+            # 唤醒边**（见 ``close_graph_verdict``），不是回调写法清单。
+            return RuntimeError(_SELF_CLOSE_REFUSAL)
+        if verdict == "incomplete":
+            # #109 r6 fail-closed：缺属性 / 懒创建 / 未知持有者 / 深度耗尽 ⇒
+            # 「证明不出来」绝不等于「允许」（r5 的 ``getattr(..., None)`` 就是死在这里）。
+            return RuntimeError(_WAKE_GRAPH_INCOMPLETE_REFUSAL.format(
+                reason=reason))
+        if verdict == "budget":
+            # #109/F1 fail-closed：预算内证明不出「不在图内」⇒ 拒绝，绝不当作允许。
+            return RuntimeError(_SELF_CLOSE_BUDGET_REFUSAL.format(
+                budget=_DISPATCH_GRAPH_MAX_NODES, visited=visited))
+        return None
 
     async def close(self):
         """关闭所有子组件的 Redis 连接。
@@ -1560,15 +1420,15 @@ class RedisEventBus(EventBus):
         含 ``event_id`` / ``handler_id`` 的 WARNING。``close()`` **不**取消事件
         处理本身（先等后取消），也不引入队列/并发上限。
 
-        自关停围栏（#109/F1，r5 结构性口径）：在动任何关停副作用之前先证明「调用者
-        不在本实例的分发等待图内」。证明沿**事件循环的完成唤醒边**从当前任务反向
-        可达（``Future._callbacks`` → ``Task.__wakeup`` / 绑定方法 ``__self__`` /
-        ``functools.partial`` 递归 / ``Queue._getters``·``Event._waiters`` 等 asyncio
-        自身唤醒队列），命中在飞分发任务即具名拒绝。代价只与当前任务自己的唤醒锥
-        有关（合法外部关停恒 O(1)，与在飞分发条数无关）；若在
-        ``_DISPATCH_GRAPH_MAX_NODES`` 个节点的预算内**无法枚举完**，按 fail-closed
-        口径同样具名拒绝（``_SELF_CLOSE_BUDGET_REFUSAL``，报出预算与已访问节点数），
-        绝不把「证明不出来」当成「允许」。
+        自关停围栏（#109/F1/F4, **r6 架构**）：在动任何关停副作用之前先证明「调用者
+        不在本实例的分发任务图内」。两层判据见 ``_self_close_refusal`` 与
+        ``plaita/event/_selfclose_guard.py``：L1 dispatch lineage（contextvars 标记 +
+        在飞分发任务身份，不点名私有属性）；L2 **fail-closed** 完成唤醒锥（缺属性 /
+        重命名 / ``TaskGroup._on_completed_fut`` 懒创建 / 未知持有者 / 深度或节点预算
+        耗尽全部具名拒绝）。首次调用先跑 stdlib 属性自检，未过则本进程一律拒绝。
+        代价只与当前任务自己的唤醒锥有关（合法外部关停恒 O(1)，与在飞分发条数无关）。
+        L2 是 best-effort，盖不住的形状（在 dispatch 之外创建、却被分发 handler 等待
+        的任务）是**声明残差 R1**，不宣称完备。
         """
         current = asyncio.current_task()
         running_loop = asyncio.get_running_loop()
@@ -1588,28 +1448,9 @@ class RedisEventBus(EventBus):
                 "请在该总线所属的事件循环里关停；"
                 "如需跨线程请求关停，请用 loop.call_soon_threadsafe 投递。"
             )
-        if current is not None and current in self._pending_tasks:
-            # #109 形状①（直接）：handler 内调用 close() ⇒ ``current`` 就是被登记的分发
-            # 任务，会把**自身**纳入 drain —— 等满超时后自 cancel，再 await gather(含自身)
-            # 触发 RecursionError + "Task was destroyed"。
-            raise RuntimeError(_SELF_CLOSE_REFUSAL)
-        if _IN_DISPATCH_BUS.get() is self:
-            # #109/F4 形状：handler 里 create_task/ensure_future/shield 出的子任务继承了
-            # marker（context 复制），即使等待构造绕过了等待图也保守拒绝（声明口径）。
-            raise RuntimeError(_SELF_CLOSE_REFUSAL)
-        verdict, visited = self._close_graph_probe()
-        if verdict == "in_graph":
-            # #109/F1：形状②③④……（嵌套 await create_task、gather/shield、显式空
-            # context、``TaskGroup.create_task(..., context=Context())``、
-            # ``functools.partial`` 的 ``func.__self__``、``asyncio.as_completed`` 的
-            # 队列表项、Queue/Event/Condition 的等待者……）。判据是**事件循环的完成
-            # 唤醒边**（见 ``_close_graph_verdict``），不是回调写法清单：close 完成后
-            # 会被唤醒的人里若含本实例登记的在飞分发任务，就会把自己纳入 drain。
-            raise RuntimeError(_SELF_CLOSE_REFUSAL)
-        if verdict == "budget":
-            # #109/F1 fail-closed：预算内证明不出「不在图内」⇒ 拒绝，绝不当作允许。
-            raise RuntimeError(_SELF_CLOSE_BUDGET_REFUSAL.format(
-                budget=_DISPATCH_GRAPH_MAX_NODES, visited=visited))
+        refusal = self._self_close_refusal(current)
+        if refusal is not None:
+            raise refusal
         self._closing = True
         for listener in self.listeners:
             if not listener.done():

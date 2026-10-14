@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_event_redis_parity.py::Test109CancelWindowAndSelfClose::test_close_from_own_handler_is_named_refusal"
   ],
-  "old": "        if current is not None and current in self._pending_tasks:\n            # #109 形状①（直接）：handler 内调用 close() ⇒ ``current`` 就是被登记的分发\n            # 任务，会把**自身**纳入 drain —— 等满超时后自 cancel，再 await gather(含自身)\n            # 触发 RecursionError + \"Task was destroyed\"。\n            raise RuntimeError(_SELF_CLOSE_REFUSAL)\n        if _IN_DISPATCH_BUS.get() is self:\n            # #109/F4 形状：handler 里 create_task/ensure_future/shield 出的子任务继承了\n            # marker（context 复制），即使等待构造绕过了等待图也保守拒绝（声明口径）。\n            raise RuntimeError(_SELF_CLOSE_REFUSAL)\n        verdict, visited = self._close_graph_probe()\n        if verdict == \"in_graph\":\n            # #109/F1：形状②③④……（嵌套 await create_task、gather/shield、显式空\n            # context、``TaskGroup.create_task(..., context=Context())``、\n            # ``functools.partial`` 的 ``func.__self__``、``asyncio.as_completed`` 的\n            # 队列表项、Queue/Event/Condition 的等待者……）。判据是**事件循环的完成\n            # 唤醒边**（见 ``_close_graph_verdict``），不是回调写法清单：close 完成后\n            # 会被唤醒的人里若含本实例登记的在飞分发任务，就会把自己纳入 drain。\n            raise RuntimeError(_SELF_CLOSE_REFUSAL)\n        if verdict == \"budget\":\n            # #109/F1 fail-closed：预算内证明不出「不在图内」⇒ 拒绝，绝不当作允许。\n            raise RuntimeError(_SELF_CLOSE_BUDGET_REFUSAL.format(\n                budget=_DISPATCH_GRAPH_MAX_NODES, visited=visited))",
-  "new": "        verdict, visited = \"clean\", 0  # mutation: 自关停围栏整体关闭"
+  "old": "        refusal = self._self_close_refusal(current)\n        if refusal is not None:\n            raise refusal",
+  "new": "        refusal = None  # mutation: 自关停围栏整体关闭（r6）"
 }

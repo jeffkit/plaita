@@ -2,8 +2,8 @@
   "name": "m109-r3-redis-net-callback-edges-off",
   "issue": "109",
   "concern": "F1",
-  "file": "plaita/event/redis.py",
-  "rationale": "完成唤醒边不展开回调引用。r5 口径下**全部**等待边都来自 `_callbacks`（`Task.__wakeup` 绑定方法、partial、函数闭包、asyncio 唤醒队列属性），因此这条等价于「等待图兜底整体关闭」：显式空 context 的 self-close（含 X1/X2/X3 新边族）全部漏检、进入 drain。",
+  "file": "plaita/event/_selfclose_guard.py",
+  "rationale": "完成回调边整体不可见（回调闭包/partial/绑定方法的引用被跳过）⇒ 唤醒锥恒空、显式换 context 的形状全部漏检。r6 重锚到 _selfclose_guard._callback_wake_targets。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_empty_context_net_refuses_before_drain_all_kinds",
     "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_empty_context_new_edge_families_refused"

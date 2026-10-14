@@ -1,0 +1,12 @@
+{
+  "name": "m109-r6-lineage-marker-never-set",
+  "issue": "109",
+  "concern": "F1-L1",
+  "file": "plaita/event/redis.py",
+  "rationale": "L1 dispatch lineage 的 marker 不再设置 ⇒ handler 里 create_task 出的、没有任何完成边可走的 delayed/detached 任务里的 close 被静默放行（L2 从该任务出发的唤醒锥是空的 = clean）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r6_parity.py::Test109R6LineageMarker::test_delayed_detached_close_refused_by_marker_only"
+  ],
+  "old": "    async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:\n        \"\"\"处理事件并记录结果；成功后才 mark 去重。\"\"\"\n        _IN_DISPATCH_BUS.set(self)   # #109/F4：本总线的任务图内标记（copy context 的子任务继承）\n",
+  "new": "    async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:\n        \"\"\"处理事件并记录结果；成功后才 mark 去重。\"\"\"\n"
+}

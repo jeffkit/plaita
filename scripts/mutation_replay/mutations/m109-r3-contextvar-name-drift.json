@@ -2,8 +2,8 @@
   "name": "m109-r3-contextvar-name-drift",
   "issue": "109",
   "concern": "F1-doc",
-  "file": "plaita/event/redis.py",
-  "rationale": "ContextVar 名字与文档漂移（r3 验收者第 1 处过度声明）⇒ 声明↔实现断言失配",
+  "file": "plaita/event/_selfclose_guard.py",
+  "rationale": "ContextVar 名字与文档漂移（r3 验收者第 1 处过度声明）⇒ 声明↔实现断言失配。r6 重锚：ContextVar 与判据内核已拆到 _selfclose_guard.py（redis.py 只做别名再导出）。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_contextvar_name_matches_docs"
   ],

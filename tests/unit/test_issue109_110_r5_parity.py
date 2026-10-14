@@ -16,8 +16,9 @@
     X3 ``asyncio.as_completed``（Queue ``_getters`` 中介）——已在
     ``test_issue109_110_r3_parity.py::test_empty_context_new_edge_families_refused``
     与 ``..._net_refuses_before_drain_all_kinds`` 钉住；这里补**预算**两格。
-  * **近预算格**（``chain=100 < 512``）：唤醒锥完全枚举 ⇒ 命中 ⇒ 具名自关停拒绝。
-  * **超预算格**（``chain=1500 > 512``）：预算内枚举不完 ⇒ **fail-closed 拒绝**
+  * **近预算格**（``chain=100``）：唤醒锥完全枚举 ⇒ 命中 ⇒ 具名自关停拒绝。
+  * **超预算格**（``chain=_DISPATCH_GRAPH_MAX_NODES``，r6 预算 65536）：
+    预算内枚举不完 ⇒ **fail-closed 拒绝**
     （``_SELF_CLOSE_BUDGET_REFUSAL``，文案含预算与已访问节点数）——r4 的
     「节点上限用满即当作未命中」会把这一格变成**放行**（验收者 X4 实测
     pads=1500 时 12/12 漏检），本格是那次退化的直接死法。
@@ -139,7 +140,7 @@ class Test109R5WakeGraphBudget(unittest.IsolatedAsyncioTestCase):
                 nxt = loop.create_future()
                 cur.add_done_callback(nxt.set_result)
                 cur = nxt
-            verdict, visited = _close_graph_verdict(root, {}, budget=512)
+            verdict, visited, _reason = _close_graph_verdict(root, {}, budget=512)
         finally:
             loop.close()
         self.assertEqual(verdict, "clean", "无在飞分发时链路应可完全枚举")
@@ -154,7 +155,7 @@ class Test109R5WakeGraphBudget(unittest.IsolatedAsyncioTestCase):
                 nxt = loop.create_future()
                 cur.add_done_callback(nxt.set_result)
                 cur = nxt
-            verdict, visited = _close_graph_verdict(root, {}, budget=512)
+            verdict, visited, _reason = _close_graph_verdict(root, {}, budget=512)
         finally:
             loop.close()
         self.assertEqual(verdict, "budget",
@@ -179,7 +180,7 @@ class Test109R5WakeGraphBudget(unittest.IsolatedAsyncioTestCase):
         pending_task = loop.create_task(waiter())
         await asyncio.sleep(0)                      # 让 waiter 挂到 cur 上
         try:
-            verdict, visited = _close_graph_verdict(
+            verdict, visited, _reason = _close_graph_verdict(
                 root, {pending_task: ("e", "h")}, budget=512)
         finally:
             pending_task.cancel()
@@ -246,7 +247,7 @@ class Test109R5WakeGraphBudget(unittest.IsolatedAsyncioTestCase):
 
     async def test_over_budget_chain_is_named_budget_refusal(self):
         bus, refusal, drain_calls, listener_cancelled = (
-            await self._run_chain_shape(1500))
+            await self._run_chain_shape(_DISPATCH_GRAPH_MAX_NODES))
         err = _inner(refusal[0])
         self.assertIsInstance(err, RuntimeError, f"{refusal!r}")
         self.assertIn(_BUDGET_MARK, str(err),
@@ -279,7 +280,7 @@ class Test109R5AllowHalf(unittest.IsolatedAsyncioTestCase):
                     _msg(Event(event_type="t.demo", data={})), "h1")
             await asyncio.sleep(0.05)
             in_flight = len(bus._pending_tasks)
-            verdict, visited = _close_graph_verdict(
+            verdict, visited, _reason = _close_graph_verdict(
                 asyncio.current_task(), bus._pending_tasks)
             await bus.close()
         finally:
@@ -315,7 +316,7 @@ class Test109R5AllowHalf(unittest.IsolatedAsyncioTestCase):
 
         w = loop.create_task(waiter())
         await asyncio.sleep(0)                      # 让 _on_completion 注册到 target
-        verdict, visited = _close_graph_verdict(target, {})
+        verdict, visited, _reason = _close_graph_verdict(target, {})
         held.set_result(None)
         target.set_result(None)                     # 收尾：wait 是 ALL_COMPLETED
         await w

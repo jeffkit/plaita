@@ -1,0 +1,12 @@
+{
+  "name": "m109-r6-selftest-failure-ignored",
+  "issue": "109",
+  "concern": "F1-L2",
+  "file": "plaita/event/_selfclose_guard.py",
+  "rationale": "stdlib 属性自检失败被当成通过 ⇒ 「未来 Python 改名」重新变成 fail-open（本进程 close() 会带着看不见的唤醒锥放行）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r6_parity.py::Test109R6SelfTestFailClosed::test_renamed_attribute_makes_close_refuse_everything"
+  ],
+  "old": "    if not _SELFTEST_RAN:\n        _SELFTEST_RESULT = _run_self_test()\n        _SELFTEST_RAN = True\n    return _SELFTEST_RESULT\n",
+  "new": "    if not _SELFTEST_RAN:\n        _SELFTEST_RESULT = None  # mutation: 自检失败被忽略（fail-open）\n        _SELFTEST_RAN = True\n    return _SELFTEST_RESULT\n"
+}

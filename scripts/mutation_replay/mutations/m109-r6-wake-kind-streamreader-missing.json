@@ -1,0 +1,12 @@
+{
+  "name": "m109-r6-wake-kind-streamreader-missing",
+  "issue": "109",
+  "concern": "F1-L2",
+  "file": "plaita/event/_selfclose_guard.py",
+  "rationale": "把 StreamReader 移出已知唤醒类型表 ⇒ _waiter（单数）那条边不再被证明，只能靠未知持有者兜底（精度退化；若未知持有者兜底也关掉即漏检）。该变异由「StreamReader 必须证明出 in_graph（自关停文案）」的断言杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r6_parity.py::Test109R6VerifierCounterexamples::test_streamreader_waiter_wake_is_named_refusal"
+  ],
+  "old": "    dict(name=\"StreamReader\", cls_name=\"StreamReader\",\n         attrs=(\"_waiter\",), nullable=(\"_waiter\",), since=None),\n",
+  "new": ""
+}

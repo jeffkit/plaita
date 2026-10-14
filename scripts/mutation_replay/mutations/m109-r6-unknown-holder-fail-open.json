@@ -1,0 +1,12 @@
+{
+  "name": "m109-r6-unknown-holder-fail-open",
+  "issue": "109",
+  "concern": "F1-L2",
+  "file": "plaita/event/_selfclose_guard.py",
+  "rationale": "未知持有者直接挂着已武装 Future/Queue 时不再 fail-closed ⇒ 自定义 awaitable（self._f）与 3.13 as_completed（_AsCompletedIterator._done）漏检。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r6_parity.py::Test109R6VerifierCounterexamples::test_custom_awaitable_instance_attr_is_named_refusal"
+  ],
+  "old": "    hidden = _direct_armed_wake_state(obj)\n    if hidden is not None:\n        raise WakeGraphIncomplete(\n            f\"未知持有者 {type(obj).__name__} 直接持有唤醒状态（{hidden}），拒绝推断\")\n    return\n",
+  "new": "    return  # mutation: 未知持有者静默跳过（r5 的 fail-open）\n"
+}

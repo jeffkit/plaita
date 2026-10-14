@@ -1,0 +1,13 @@
+{
+  "name": "m109-r6-taskgroup-lazy-window-fail-open",
+  "issue": "109",
+  "concern": "F1-L2",
+  "file": "plaita/event/_selfclose_guard.py",
+  "rationale": "验收者决定性反例的根因：__aexit__ 懒创建 _on_completed_fut（此刻是 None）而 _tasks 非空时静默跳过 ⇒ TaskGroup + await sleep(0) 的 self-close 漏检。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r6_parity.py::Test109R6VerifierCounterexamples::test_taskgroup_sleep0_context_swap_is_named_refusal",
+    "tests/unit/test_issue109_110_r6_parity.py::Test109R6AttributeAbsence::test_taskgroup_lazy_window_is_incomplete"
+  ],
+  "old": "        if values[\"_on_completed_fut\"] is None and values[\"_tasks\"]:\n            raise WakeGraphIncomplete(\n                \"TaskGroup._on_completed_fut 未物化（None）而 _tasks 非空：\"\n                \"__aexit__ 懒创建窗口，group 的等待边读不出来\")\n",
+  "new": "        pass  # mutation: 懒创建窗口静默跳过（r5 的 clean）\n"
+}
