@@ -1,0 +1,15 @@
+{
+  "name": "m109-r12-predicate-restores-eq",
+  "issue": "109",
+  "concern": "B-r12-predicate",
+  "file": "plaita/event/redis.py",
+  "rationale": "把 r12/B 的「静态表 + 类型身份」换回 r11 的「问对象自己」（__eq__ / __func__）⇒ 实例影子（__self__ + __eq__ 恒真）与类级 TOCTOU 描述符都能过判据，具名拒收被绕过（TOCTOU 随后在 _bind_round 的 add_done_callback 上抛，cause 不再是 hostile reason；影子+别的 coroutine 则让第二次 close 挂起）。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r12_parity.py::Test109R12PredicateDoesNotTrustTheObject::test_instance_shadow_with_eq_is_refused_named_and_rolled_back",
+    "tests/unit/test_issue109_110_r12_parity.py::Test109R12PredicateDoesNotTrustTheObject::test_toctou_descriptor_is_refused_named_and_rolled_back",
+    "tests/unit/test_issue109_110_r12_parity.py::Test109R12PredicateDoesNotTrustTheObject::test_shadow_plus_other_coro_no_longer_hangs_the_second_close",
+    "tests/unit/test_issue109_110_r12_parity.py::Test109R12PredicateDoesNotTrustTheObject::test_fake_bound_equality_no_longer_matters"
+  ],
+  "old": "        # ① 类级：静态查表，必须就是 stdlib 本体（描述符/覆写一律出局）。\n        ok, on_class = _guarded(\n            f\"静态读取 {cls.__name__}.{name}\", inspect.getattr_static, cls, name)\n        if not ok or on_class is not baseline:\n            return False\n        # ② 实例级：静态查表，不得有实例影子属性（不触发 __getattribute__）。\n        ok, on_instance = _guarded(\n            f\"静态读取实例的 {name}\", inspect.getattr_static, task, name)\n        if not ok or on_instance is not baseline:\n            return False\n        # ③ 真绑定：类型必须与 stdlib 绑定结果**完全相同**，且绑在本任务上。\n        ok, baseline_bound = _guarded(\n            f\"绑定 asyncio.Task.{name}\", baseline.__get__, task, cls)\n        if not ok:\n            return False\n        ok, bound = _guarded(f\"读取实例的 {name}\", getattr, task, name)\n        if not ok or not callable(bound):\n            return False\n        if type(bound) is not type(baseline_bound):\n            return False\n        if getattr(bound, \"__self__\", None) is not task:\n            return False\n",
+  "new": "        # mutation: 回到 r11 的「问对象自己」（__eq__ / __func__）——两个反例都能过。\n        ok, on_class = _guarded(f\"读取 {cls.__name__}.{name}\", getattr, cls, name)\n        if not ok:\n            return False\n        if (on_class is not baseline\n                and getattr(on_class, \"__func__\", on_class) is not baseline):\n            return False\n        ok, bound = _guarded(f\"读取实例的 {name}\", getattr, task, name)\n        if not ok or not callable(bound):\n            return False\n        if getattr(bound, \"__self__\", None) is not task:\n            return False\n        func = getattr(bound, \"__func__\", None)\n        if func is not None and func is not baseline:\n            return False\n        ok, baseline_bound = _guarded(\n            f\"绑定 asyncio.Task.{name}\", baseline.__get__, task, cls)\n        if not ok:\n            return False\n        ok, same = _guarded(f\"比较实例的 {name}\", lambda: bound == baseline_bound)\n        if not ok or not same:\n            return False\n"
+}

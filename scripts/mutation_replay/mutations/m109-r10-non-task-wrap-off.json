@@ -3,12 +3,12 @@
   "issue": "109",
   "concern": "F1-truth",
   "file": "plaita/event/redis.py",
-  "rationale": "工厂返回非 Task（已完成的 Future / 无 add_done_callback 的 awaitable）时不绕开工厂接管 ⇒ close future 永远 PENDING、coroutine was never awaited、第二次 close 挂起（r9 判负项） r11 重锚：接管路径现在也经 _bind_acceptance。",
+  "rationale": "工厂返回非 Task（已完成的 Future / 无 add_done_callback 的 awaitable）时不绕开工厂接管 ⇒ close future 永远 PENDING、coroutine was never awaited、第二次 close 挂起（r9 判负项）。r11 重锚过 _bind_acceptance；**r12 再锚**：_bind_round / round_ / _started_teardown_task(coro)。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r10_parity.py::Test109R10NonTaskSpawnReturn::test_done_future_return_is_wrapped",
     "tests/unit/test_issue109_110_r10_parity.py::Test109R10NonTaskSpawnReturn::test_awaitable_without_add_done_callback_is_wrapped",
     "tests/unit/test_issue109_110_r10_parity.py::Test109R10NonTaskSpawnReturn::test_factory_returning_bare_coro_is_wrapped"
   ],
-  "old": "        owner = self._started_teardown_task(coro, holder)\n        if owner is not None:\n            logger.debug(\n                \"事件总线关停：工厂返回 %r 而非 Task，收养已启动的 teardown 任务\", type(spawned))\n            return self._bind_acceptance(\n                self._accept_spawned_task(loop, owner, coro), holder)\n        logger.debug(\n            \"事件总线关停：工厂返回 %r 而非 Task，绕开工厂直接接管 teardown coroutine\",\n            type(spawned))\n        return self._bind_acceptance(_own_task_directly(loop, coro, context), holder)\n",
+  "old": "        owner = self._started_teardown_task(coro)\n        if owner is not None:\n            logger.debug(\n                \"事件总线关停：工厂返回 %r 而非 Task，收养已启动的 teardown 任务\", type(spawned))\n            return self._bind_round(\n                self._accept_spawned_task(loop, owner, coro), round_)\n        logger.debug(\n            \"事件总线关停：工厂返回 %r 而非 Task，绕开工厂直接接管 teardown coroutine\",\n            type(spawned))\n        return self._bind_round(_own_task_directly(loop, coro, context), round_)\n",
   "new": "        # mutation: 工厂返回非 Task 时直接交回去（r9 形状：close future 永远悬着）\n        return spawned\n"
 }

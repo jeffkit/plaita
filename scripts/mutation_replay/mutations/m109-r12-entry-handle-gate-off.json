@@ -1,0 +1,12 @@
+{
+  "name": "m109-r12-entry-handle-gate-off",
+  "issue": "109",
+  "concern": "A-r12-handle",
+  "file": "plaita/event/redis.py",
+  "rationale": "去掉 _started_teardown_task 的身份闸（候选必须托管着我们的 coro 或已结束且 coro 已回收）⇒ 工厂经 self._teardown_entry_task 伪造一个**永不结束**的任务就能被收养：close future 一直等它结束（R-1 长等），具名结局被压住。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r12_parity.py::Test109R12ForgeChannelIsGone::test_forged_entry_handle_is_not_adopted"
+  ],
+  "old": "        return candidate if (owns_ours or finished) else None\n",
+  "new": "        return candidate  # mutation: 去掉身份闸，伪造句柄被当真\n"
+}

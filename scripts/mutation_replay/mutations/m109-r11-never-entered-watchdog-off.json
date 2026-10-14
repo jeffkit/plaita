@@ -3,14 +3,15 @@
   "issue": "109",
   "concern": "A1",
   "file": "plaita/event/redis.py",
-  "rationale": "去掉「收养的 Task 结束而入口从未执行 ⇒ 具名结算」这条完成判据（回到 r10 形态）：工厂交回不跑我们 coroutine 的真 Task 时 _close_future 永不结算，两次 close() 永久挂起",
+  "rationale": "去掉「受理的 Task 结束时本轮 future **仍未**结算 ⇒ 具名结算」这条完成判据（回到 r10 形态）：工厂交回不跑我们 coroutine 的真 Task 时 _close_future 永不结算，两次 close() 永久挂起。**r12 重锚两次**：判据先由 _on_teardown_done 的 entered 标记移到 _watch_round 的「future 未结算」事件；随后 r12 收尾又把取用/留档职责与判定职责分开（_record_round_outcome），故 old 再锚到带 never_entered 置位的块。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r11_parity.py::Test109R11NeverEnteredAdoptedTask::test_task_wrapping_other_coro_is_named_not_hung",
     "tests/unit/test_issue109_110_r11_parity.py::Test109R11NeverEnteredAdoptedTask::test_other_coro_exception_is_retrieved",
     "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_already_done_task_is_named",
     "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_cancelled_and_done_task_is_named",
-    "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_cancelled_before_return_midflight_is_named"
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_cancelled_before_return_midflight_is_named",
+    "tests/unit/test_issue109_110_r12_parity.py::Test109R12ForgeChannelIsGone::test_forging_every_reachable_object_is_named_not_hung"
   ],
-  "old": "        ok, holder = _guarded(\"读取受理标记\", getattr, task,\n                              _TEARDOWN_ACCEPTANCE_ATTR, None)\n        if not ok:\n            holder = None\n        if isinstance(holder, dict) and not holder.get(\"entered\"):\n            self._on_teardown_never_entered(task, holder)\n            return\n        if task.cancelled():\n",
-  "new": "        if task.cancelled():\n"
+  "old": "        if not round_.future.done():\n            round_.never_entered = True\n            self._settle_future(\n                round_.future, RuntimeError(_TEARDOWN_NEVER_ENTERED_MESSAGE))\n            self._teardown_error_kind = TEARDOWN_NEVER_ENTERED_KIND\n            logger.warning(\n                \"事件总线关停：受理的 teardown 任务结束时本轮 future 仍未结算 ⇒ 入口从未\"\n                \"执行，具名失败 %s（task=%r）\", TEARDOWN_NEVER_ENTERED_KIND, task)\n",
+  "new": "        if False:  # mutation: 去掉「结束而本轮 future 仍未结算 ⇒ 具名结算」\n            round_.never_entered = True\n            self._settle_future(\n                round_.future, RuntimeError(_TEARDOWN_NEVER_ENTERED_MESSAGE))\n            self._teardown_error_kind = TEARDOWN_NEVER_ENTERED_KIND\n            logger.warning(\n                \"事件总线关停：受理的 teardown 任务结束时本轮 future 仍未结算 ⇒ 入口从未\"\n                \"执行，具名失败 %s（task=%r）\", TEARDOWN_NEVER_ENTERED_KIND, task)\n"
 }

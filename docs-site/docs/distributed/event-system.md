@@ -223,7 +223,7 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `request_close` 里对返回值的**使用**（`add_done_callback` / `done()`）对任意工厂
   行为都不会失败，会失败的都在 spawn 内部并走同一条回滚。
   **r11 更正**：这条保证的前提「真 Task 就安全」并不成立——见下面 r11 两条。
-- **「收养了但入口没跑」不再挂起（r11/A1、A3；r10 声明残差的**结构**关闭）**：
+- **「收养了但入口没跑」不再挂起（r11/A1、A3；**r12/A 已把该判据换掉，见下**）**：
   `isinstance(x, asyncio.Task)` 对**任何**真 Task 都为真。工厂交回一个包着**别的**
   coroutine 的真 Task（同类还有「返回前就被 cancel」「建在**另一个**事件循环上」）时，
   r10 会静默收养：我们的 `_teardown_entry` 从未被 await、`_teardown` 从未跑过 ⇒
@@ -237,8 +237,11 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   事件**——没有 busy-wait，也没有比它更弱的计时假设；返回时已 done/cancelled 的 Task
   走同一条同步判据。**合法包装协程**（`async def wrap(): await <我们的 coro>`）跑到入口
   那一行即置位 ⇒ 照常完成（判据是「入口有没有跑」，不是「coro 是不是同一个对象」）。
-- **不是我们的 Task 一律拒收（r11/A2、B）**：跨事件循环建出来的 Task（close future 只
-  在本循环结算，跨循环收养会让它永远悬着），以及覆写了
+  **r12/A 更正**：这个标记**可被工厂一行伪造**（`holder` 就在交给工厂的 coroutine 的
+  frame 里）⇒ r12 删除标记通道、判据改为「受理的 Task 结束时本轮 future 是否仍未结算」，
+  见下一条。具名 kind / 状态元组 / 「合法包装照常完成」的口径**保持不变**。
+- **不是我们的 Task 一律拒收（r11/A2、B；**r12/B 收紧判据**）**：跨事件循环建出来的
+  Task（close future 只在本循环结算，跨循环收养会让它永远悬着），以及覆写了
   `add_done_callback` / `done` / `cancelled` / `exception` 的**敌对 `Task` 子类**
   （`isinstance` 放行 ⇒ `request_close` 对返回值的使用**裸抛且不回滚**），都由
   `_spawn_teardown` 结构性拒收：`error_kind=teardown-spawn-failed` + **整体回滚**
@@ -249,18 +252,115 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   **结构性检查**：「`request_close` 用到的四个方法（`add_done_callback` / `done` /
   `cancelled` / `exception`）以及 `_accept_spawned_task` 自用的 `get_loop` 都是 stdlib
   原版，且任务绑在本循环上」。
+  **r12/B 更正**：r11 的「原版」是用对象自己提供的东西证的（`__eq__`/`__func__`/逐次
+  动态访问），被「实例影子 + `__eq__` 恒真」与「类级 TOCTOU 描述符」两个反例击败；
+  r12 改成 `inspect.getattr_static`（类表 + 实例表）+ 绑定类型身份，见下一条 r12/B。
   钉住：`tests/unit/test_issue109_110_r11_parity.py`（15 用例，全部 2 s 有界看门狗；
   断言具名结局 + 精确状态元组/组件关闭次数 + 无孤儿 / 无 `never awaited` /
   无 `never retrieved` / 无双关；另含 r10 五行回归与 `_spawn_teardown` 返回契约）。
-- **out of contract（r11/D：合成形状；生产路径不使用 `set_task_factory`，实测仓库内
-  0 处调用）**：
+  r12 追加：`tests/unit/test_issue109_110_r12_parity.py`（12 用例，同样全部 2 s 有界
+  看门狗）——5 条 A 负控（伪造一切 / 入口 frame 枚举 / 伪造总线计数器 / 伪造句柄槽 /
+  直接结算 future 的 R-12a 边界）+ 4 条 B 负控（影子 / TOCTOU / 影子+别的 coroutine /
+  判据不再信 `__eq__`）+ 合法形状全集（默认 Task、纯子类、带属性、`__slots__=()`、
+  `__getattr__`、uvloop）。
+- **r12/A：「入口跑过」的证据从**可写标记**换成**事件**（r11 的标记通道被**删除**）**：
+  r11 把「已进入」标记放进交给工厂的 coroutine 的 frame（`holder` 参数）。工厂拿到的
+  就是这个 coroutine，而 `coro.cr_frame.f_locals` 在**未启动**时就已含
+  `{'holder': {...}, 'self': <RedisEventBus>}`（3.10/3.11/3.12/3.13 实测；
+  **自由变量也出现在 `f_locals` 里**——`co_freevars` 里的 cell 同样可读）。于是一行
+
+  ```python
+  coro.cr_frame.f_locals["holder"]["entered"] = True     # 伪造「入口跑过」
+  return asyncio.Task(some_other_coro(), loop=loop)      # 真 Task，但从不跑我们的
+  ```
+
+  即可绕过收尾判定：**两次 `close()` 永久挂起**（r12 实测四个版本一致的
+  `(True, PENDING, True, 0)`、五个组件 `[0×5]`、`runs=0`、无具名错误）。把标记挪到
+  `self` 上的字段（`_teardown_runs` 等）或闭包自由变量都**不是**修法：两者都在 frame
+  里可达。r12 因此**不设标记**——判据是**事件**：受理的 Task 结束时，本轮
+  `close future` 是否**仍未**结算（只有我们自己的关停路径会结算它）。
+
+  **不变量（r12/A，可复算）**：*本轮结算凭据 `_TeardownRound`（future + 入口 coro +
+  句柄 + judged）只存活在 `_spawn_teardown` 的闭包（看门狗 `_watch.__closure__`）与
+  受理 Task 的属性上，**不作为参数/自由变量出现在交给工厂的 coroutine 的 frame
+  里**；入口 `_teardown_entry()` 因此无参、无标记、不结算。*
+  可达性枚举（`coro.cr_frame.f_locals` / `co_freevars`）：
+
+  | | `f_locals` | `co_freevars` | 伪造后结局 |
+  |---|---|---|---|
+  | r11（修前） | `['holder', 'self']`（holder 里含 `entered`/`future`/`task`/`coro`） | `()` | `HANG/TIMEOUT` ×2，`(True,PENDING,True,0)`、`[0×5]`、`runs=0` |
+  | r12（修后） | `['self']` | `()` | 具名 `teardown-never-entered`，`(True,'None',False,0)`、`[0×5]`、`runs=0`，两次 close 均有界 |
+
+  负控：工厂枚举 `cr_frame.f_locals` 并**伪造其中每一个对象**（dict 写
+  `entered`/`task`/`future`、list 追加、总线标记字段清零），再交回一个跑**别的**
+  coroutine 的真 Task ⇒ 仍具名、仍不挂起、组件一个不关（
+  `test_issue109_110_r12_parity.py::Test109R12ForgeChannelIsGone`）。
+- **r12/B：判据不再问**对象自己**（r11 的 `__eq__`/`__func__`/逐次动态访问被替换）**：
+  r11 的 `_task_uses_stdlib_methods` 用对象提供的 `__eq__`/`__func__` 做「绑定比较」，
+  被两个反例击败：①**实例影子**（`__self__` 指向本任务、无 `__func__`、`__eq__` 恒真的
+  假方法）；②**类级 TOCTOU 描述符**（类访问给 baseline、实例第 1 次访问给真 stdlib
+  绑定方法、第 2 次抛）。两者都让判据放行，随后 `request_close` 对返回值的
+  `add_done_callback` **裸抛且不回滚**（`(True, PENDING, False, 0)`）；①再叠加
+  「交回跑别的 coroutine 的 Task」⇒ 第二次 `close()` 拿到陈旧的 PENDING future ⇒
+  **挂起**（r12 四个版本实测一致）。r12/B 改为**结构判据 + 身份判据**，一次都不问
+  「这两个对象相等吗」：`inspect.getattr_static` 分别查**类表**与**实例表**（不触发
+  描述符、不触发 `__getattribute__`/`__getattr__`）都必须**就是** `asyncio.Task` 上的
+  本体，再真绑定一次并要求 `type(bound) is type(baseline.__get__(task, cls))` 且
+  `bound.__self__ is task`。两个反例都在**静态表**这一步出局（TOCTOU 描述符在
+  **任何**实例访问之前就被拒，`calls == 0`）。
+  合法形状逐一实测放行：默认 `Task`、纯子类、带额外实例属性的子类、`__slots__=()` 子类、
+  覆写 `__getattr__` 的子类、**uvloop 的 task 类型**（3.10–3.13 上 `type(task) is
+  asyncio.Task`）。
+- **r12 具名残差（frame 之外；与 r12/A、B 同处声明）**：
+  * **R-12a（`self` 必然可达）**：入口必须跑总线代码，`self` 因此在
+    `coro.cr_frame.f_locals` 里。工厂可以绕过一切判据**直接结算**
+    `self._close_future`（或改写 `_teardown_runs` / 留档）。r12 实测的后果是**假成功**
+    （`close()` 正常返回、`comps=[0,0,0,0,0]`、`runs` 为工厂写入的值），**不是挂起**。
+    无法关闭：`request_close` 的可执行体逐字节冻结（见下「三处口径更正」），
+    `self._close_future` 必须是返回给调用方的那个真 future；`asyncio.Future.set_result`
+    对任何持有者都可用。**边界**：伪造 frame 可达的**任何**对象不再改变判定。
+  * **R-12b（句柄槽）**：`self._teardown_entry_task` 同属 `self`，可被伪造成别的 Task；
+    但 `_started_teardown_task` 要求候选**确实托管着我们的 coro**（`get_coro() is coro`）
+    或**已结束且 coro 已回收**（`done() and get_coro() is None`），伪造一个「永不结束的
+    任务」不再能被收养（否则会命中 R-1）。伪造一个「已结束的无关 Task」只会走一遍
+    R-1/never-entered 判定。
+  * **R-12c（有状态 `__getattribute__`）**：r12/B 的第 3 步需要真取一次属性；若
+    `type(task).__getattribute__` 对**这一次**给真方法、对 `request_close` 稍后那次给
+    敌对方法，判据无法在两个时刻之间钉住对象。这类必须先通过「静态表 + 类型身份」两道
+    闸，且只在合成形状（生产路径 0 处 `set_task_factory`）里可达。**不声称已关闭。**
+  * **为什么不引入计时器**：能拿到的最强完成事件就是「受理的 Task 结束」（以及
+    「future 已结算」）；比它更弱的只能是自己设超时——那会把「还在关」误报成「关完」，
+    与 r8/G3「失败不伪装成功」的口径冲突。所以 R-1/R-4 这类**真正的长等**被声明为
+    out of contract，而不是用计时器掩盖。
+- **out of contract（r11/D；**r12/C 更正「唯一」**：合成形状；生产路径不使用
+  `set_task_factory`，实测仓库内 0 处调用）**：
   ① 工厂交回的真 Task 既不跑我们的 coroutine、又**永不结束** ⇒ 没有完成事件可依，
-  close future 会一直等到那个任务结束——**这是唯一仍可能长等的形状**（R-1）；
+  close future 会一直等到那个任务结束——**工厂侧**的长等（R-1）。
+  r11 把它写成「**唯一**仍可能长等的形状」是**错的**：见 R-4。
   ② 我们的 coroutine 被别处驱动、而交回的 Task 又不跑它 ⇒ 按①的完成判据具名失败；
   若别处随后真的跑完 teardown，组件是关掉的、调用方却已看到 `teardown-never-entered`（R-2）；
   ③ 覆写 `cancel` / `__setattr__` / `__getattribute__` 等**未纳入检查**的钩子 ⇒
   拒收路径的「中和」只是尽力而为，可能留下一个在别处/别循环上仍会跑的 teardown
   （具名拒绝本身不变；R-3）。
+  ④ **组件自己的 `aclose` / `close` 永不返回 ⇒ `close()` 无界等待**（**R-4**，与工厂
+  **无关**）：入口**已经跑过**（`runs=1`）之后，`_teardown` 的第 3 步逐个 `await` 组件
+  释放；只要其中一个永不返回，`close()` 就一直在等。r12 实测（redis 槽位的 `aclose`
+  挂起）：2 s 看门狗触发，`(True, PENDING, True, 1)`、`comps=[1, 1, 0, 0, 0]`、
+  `_teardown_error_kind=None`、两次 close 都等同一个 PENDING future。
+  `DISPATCH_DRAIN_TIMEOUT_SECONDS`（5.0 s）只界住**在飞分发**那一步，**不界组件释放**。
+  这是**声明的不在契约内**：我们没有权利替用户的组件设超时（超时后强行走下一步会把
+  「关了一半」伪装成「关完」）。有界性由组件实现负责。
+
+  **等待的有界性逐段列清**（`close()` 的等待只由这四段构成）：
+
+  | 段 | 上界 | 依据 |
+  |---|---|---|
+  | 受理（`request_close` 同步段） | 无等待 | 同步执行，`spawn` 失败当场具名回滚 |
+  | ① `_drain_pending_tasks` | `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0 s` | `asyncio.wait(..., timeout=...)`，超时**不取消**、只点名 |
+  | ② `_stop_listeners` | 同上 5.0 s | 逐个 `cancel()` 后 `asyncio.wait(..., timeout=...)` |
+  | ③ `_close_backends` | **无界（R-4）** | 逐个 `await` 组件的 `aclose`/`close`/`disconnect` |
+  | ④ 工厂交回的 Task 永不结束 | **无界（R-1）** | 只有「任务结束」这一事件可依 |
+
 - **r10 报告的三处口径更正（r11/C，命令可复现）**：
   ① 「`request_close` 可执行体 **2070 B**」不可复现（验收方在不同切片下量到
   2722 / 2362 / 2711 / 1486 B）。改为**方法定义**的数字：`request_close` 去掉 docstring
@@ -296,16 +396,21 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   实测输出：`5f6e308=2770B/47L | 8eaf3f6=2770B/47L | 789e070=2770B/47L |
   bbf0d2b=2770B/47L | e1b5356=2770B/47L | HEAD=2770B/47L` 与 `identical: True`
   （r11 只改 `_spawn_teardown` / `_on_teardown_done` 等方法体与 docstring，
-  `request_close` 的可执行体一个字节没动）。
+  `request_close` 的可执行体一个字节没动）。**r12 复算（四个版本、五个历史 rev +
+  新 HEAD）**：仍是 `2770 B / 47 L`、sha256 `8b38c2bd044c563d…`，逐字节相同——
+  r12 只改 `request_close` 的 **docstring**（方法体改动都在 `_TeardownRound` /
+  `_watch_round` / `_task_uses_stdlib_methods` / `_spawn_teardown` / `_bind_round`），
+  可执行体不动，故 5 条锚在该区间的变异仍**零重锚**。
   ② r10 报告的 (A) 行声称「收养的场景 `_teardown_task is None`」**是错的**：收养瞬间它
   是**真的在飞 Task**（状态元组第三元素 ≠ `None`；上面 `(True, PENDING, True, 0)`
   就是那个瞬间，修后由 `teardown-never-entered` 结算）。r11 用例
-  `test_task_wrapping_other_coro_is_named_not_hung` 直接断言该瞬间。
+  `test_task_wrapping_other_coro_is_named_not_hung` 直接断言该瞬间；r12 负控
+  `test_forging_every_reachable_object_is_named_not_hung` 断言同一个瞬间。
   ③ 锚在 `request_close` 块、r10 声称「零重锚」的变异是 **5** 条
   （`m109-r8-loopless-unnamed`、`m109-r8-spawn-order-legacy`、
   `m109-r9-backfill-done-teardown-task`、`m109-r9-spawn-failure-no-rollback`、
   `m109-r9-teardown-task-exception-unretrieved`），**不是 4** 条；r11 上它们仍是零重锚
-  （r11 未触碰 `request_close` 的文件区间）。
+  （r11 未触碰 `request_close` 的文件区间），**r12 上同样零重锚**（同上）。
 - **记录口径一致（r10）**：`_teardown_error_kind` / `_teardown_task_error` 成对改写
   （取消 ⇒ `('cancelled', None)`；异常 ⇒ `(type(exc).__name__, exc)`；正常完成 ⇒
   `(None, None)`）。r9 在取消分支只写 kind 不碰 error，会出现 `kind='cancelled'`
