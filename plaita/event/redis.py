@@ -2,6 +2,7 @@
 基于Redis的事件总线和存储实现
 """
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -16,6 +17,17 @@ logger = logging.getLogger(__name__)
 # cancel 并打 WARNING（含 event_id / handler_id）——契约是「close() 返回后
 # 不存在既未处理、也无记录的第三态」，不是「无限等待 handler 跑完」。
 DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0
+
+# #109/F4：「本 coroutine 位于**某个总线实例**的分发任务图内」标记（值是总线自身）。
+# ``asyncio.create_task`` / ``ensure_future``（含 ``asyncio.shield``）都会复制
+# 调用方的 context，因此 handler 里 await / create_task / shield 出的子任务——
+# 无论嵌套多少层——都继承该标记。``close()`` 据此拒绝「从当前分发的任务图内部
+# 发起关停」：这类关停会让 drain 等待自己的祖先（task-wait cycle），超时后
+# ``Task.cancel`` 沿 ``_fut_waiter`` 递归 ⇒ RecursionError + 任务永久悬置
+# （验收者 V2 形状；r2 的 ``current in _pending_tasks`` 只挡得住直接调用）。
+# 存总线实例而不是布尔：多总线同进程时，A 的 handler 关停 B 不应被误拒。
+_IN_DISPATCH_BUS: contextvars.ContextVar = contextvars.ContextVar(
+    "plaita_redis_in_dispatch_bus", default=None)
 
 # 临时修改sys.path以避免本地文件冲突
 original_path = list(sys.path)
@@ -141,6 +153,23 @@ class RedisEventStorage(EventStorage):
         except Exception as e:
             raise EventError(f"解析事件数据失败: {e}")
     
+    @staticmethod
+    def _zset_member_ids(event_ids) -> List[str]:
+        """把 ``zrangebyscore`` 返回的 member 归一化为 ``str``。
+
+        #109/#110（验收者补的相邻缺陷）：``initialize()`` 用
+        ``aioredis.from_url(url)``（``decode_responses=False``，redis-py 默认），
+        ``zrangebyscore`` / ``scan`` 返回 **bytes**。此前直接
+        ``f"{prefix}events:{event_id}"`` 会拼出 ``...events:b'<id>'``，mget 永远
+        落空 ⇒ ``list_events`` 在**生产连接配置下两个分支都返回空**（fakeredis
+        ``decode_responses=False`` 已复现：显式类型 []、全量 []）。显式归一化后
+        无论连接是否解码都正确。
+        """
+        return [
+            eid.decode("utf-8") if isinstance(eid, (bytes, bytearray)) else str(eid)
+            for eid in event_ids
+        ]
+
     async def list_events(self, event_type: Optional[str] = None, 
                          start_time: Optional[float] = None,
                          end_time: Optional[float] = None,
@@ -166,7 +195,10 @@ class RedisEventStorage(EventStorage):
             
             # 批量获取事件数据
             if event_ids:
-                event_keys = [f"{self.key_prefix}events:{event_id}" for event_id in event_ids]
+                event_keys = [
+                    f"{self.key_prefix}events:{event_id}"
+                    for event_id in self._zset_member_ids(event_ids)
+                ]
                 event_data_list = await self.redis.mget(*event_keys)
                 
                 for event_data in event_data_list:
@@ -184,9 +216,17 @@ class RedisEventStorage(EventStorage):
                 if cursor == 0:
                     break
             
+            type_prefix = f"{self.key_prefix}types:"
             for type_key in type_keys[:10]:
                 type_key_str = type_key.decode('utf-8') if isinstance(type_key, bytes) else type_key
-                event_type = type_key_str.split(':')[-1]
+                # #110/F3：按**已知前缀**剥离 event_type，而不是 split(':')[-1]——
+                # 后者在 event_type 自身含 ':' 时取到截断值（`order:created` →
+                # `created`），重建的 type key 落空 ⇒ 该类型事件**静默丢失**
+                # （fakeredis 复现：全量只回 'plain'，'order:created' 消失）。
+                if type_key_str.startswith(type_prefix):
+                    event_type = type_key_str[len(type_prefix):]
+                else:
+                    event_type = type_key_str
                 
                 # 修复: 直接使用单类型查询逻辑而不是递归调用
                 sub_limit = max(1, limit // len(type_keys))
@@ -204,7 +244,10 @@ class RedisEventStorage(EventStorage):
                 
                 # 批量获取事件数据
                 if event_ids:
-                    event_keys = [f"{self.key_prefix}events:{event_id}" for event_id in event_ids]
+                    event_keys = [
+                        f"{self.key_prefix}events:{event_id}"
+                        for event_id in self._zset_member_ids(event_ids)
+                    ]
                     event_data_list = await self.redis.mget(*event_keys)
                     
                     for event_data in event_data_list:
@@ -1239,6 +1282,7 @@ class RedisEventBus(EventBus):
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
         """处理事件并记录结果；成功后才 mark 去重。"""
+        _IN_DISPATCH_BUS.set(self)   # #109/F4：本总线的任务图内标记（子任务继承）
         try:
             await handler(event)
             await self.processing_tracker.mark_event_processed(event.event_id, handler_id)
@@ -1255,6 +1299,7 @@ class RedisEventBus(EventBus):
     async def _process_with_retry(self, handler: EventHandler, event: Event, 
                                 handler_id: str, retry_policy: RetryPolicy) -> None:
         """带重试机制的事件处理；成功后才 mark 去重。"""
+        _IN_DISPATCH_BUS.set(self)   # #109/F4：本总线的任务图内标记（子任务继承）
         retries = 0
         delay = retry_policy.initial_delay
         
@@ -1293,10 +1338,18 @@ class RedisEventBus(EventBus):
         处理本身（先等后取消），也不引入队列/并发上限。
         """
         current = asyncio.current_task()
-        if current is not None and current in self._pending_tasks:
-            # #109（验收者补的形状）：handler 内调用 close() 会把**自身**纳入
-            # drain —— 等满超时后自 cancel，再 await gather(含自身) 触发
-            # RecursionError + "Task was destroyed"。这里具名拒绝，给出可执行出口。
+        if (current is not None and current in self._pending_tasks) or _IN_DISPATCH_BUS.get() is self:
+            # #109（验收者补的两个形状）：
+            # ① 直接形状：handler 内调用 close() ⇒ ``current`` 就是被登记的分发任务，
+            #    会把**自身**纳入 drain —— 等满超时后自 cancel，再 await gather(含自身)
+            #    触发 RecursionError + "Task was destroyed"。
+            # ② 嵌套形状（r2 只挡①、验收者 V2 复现）：handler ``await
+            #    asyncio.create_task(nested())``，``nested`` 里调用 close() ⇒
+            #    drain 等的是自己的祖先（``_process_event``），``asyncio.wait`` 超时后
+            #    cancel 沿 ``_fut_waiter`` 走回环 ⇒ 进程级 RecursionError，且
+            #    close() 返回后 ``_pending_tasks`` 仍非空、任务永久悬置。
+            # ``_IN_DISPATCH_BUS`` 由分发任务设置、被 await/create_task/shield 出的子任务
+            # 继承（contextvars），①②两种形状与任意层嵌套都在此具名拒绝，给出可执行出口。
             raise RuntimeError(
                 "RedisEventBus.close() 不能从它自己的分发 handler 内调用："
                 "该任务会把自身纳入 drain 并导致自取消/gather 递归。"

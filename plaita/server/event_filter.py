@@ -548,10 +548,32 @@ async def main_async(args):
         # 有限等待在飞分发任务，超时逐个取消并点名 event_id/handler_id。
         # 只补关停接线，不动 SET NX 去重与入队顺序（见 plaita/event/redis.py close()）。
         if event_bus is not None:
-            try:
-                await event_bus.close()
-            except Exception as e:  # noqa: BLE001 — 关停失败不得掩盖主流程异常
-                logger.warning("事件总线关停失败: %s", e)
+            await _close_event_bus(event_bus)
+
+
+async def _close_event_bus(event_bus) -> None:
+    """按能力关停事件总线（#109 收尾接线）。
+
+    ``close()`` 是 **RedisEventBus** 的连接/排空契约（取消监听、drain 在飞分发、
+    释放 pubsub/redis/三个 storage 连接）。``InMemoryEventBus`` /
+    ``SqlalchemyEventBus`` **没有** ``close()``（``EventBus`` 基类也未声明）——
+    r2 的 ``await event_bus.close()`` 对 ``--event-bus-type=memory``（合法 CLI 选项）
+    每次关停都抛 ``AttributeError``，被 ``except`` 记成**假** WARNING
+    「事件总线关停失败: 'InMemoryEventBus' object has no attribute 'close'」。
+
+    这里按能力探测：只有总线**声明**了 ``close`` 才调用；无则跳过（memory/sqlalchemy
+    没有外部连接需要释放；其 ``_pending_tasks`` 的收尾排空**不在**本函数契约内，
+    见 docs-site/docs/distributed/event-system.md 的声明）。
+    """
+    close = getattr(event_bus, "close", None)
+    if close is None:
+        logger.debug(
+            "事件总线 %s 未声明 close()，跳过收尾排空", type(event_bus).__name__)
+        return
+    try:
+        await close()
+    except Exception as e:  # noqa: BLE001 — 关停失败不得掩盖主流程异常
+        logger.warning("事件总线关停失败: %s", e)
 
 def main():
     """命令行入口程序"""

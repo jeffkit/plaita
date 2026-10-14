@@ -9,7 +9,7 @@ import fnmatch
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # sync/async 桥接工具下沉到 core 层, 避免 core → event 反向依赖。
 # 这里保留旧名做向后兼容 (历史上有调用方 import _run_async_from_sync)。
@@ -37,7 +37,11 @@ class EventSubscription(BaseModel):
     subscription_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     # #110/F1：空 event_type 非法——"" 在 matches_event 里 falsy 即通配，而
     # memory/sqlalchemy 的 list 过滤是严格 !=，三后端会对「空类型订阅」分叉。
-    event_type: str = Field(min_length=1)
+    # r2 只有 ``min_length=1``（pydantic 默认英文串、且与 EventNode 的具名原因
+    # 不对称）。现由下面**唯一的**具名 validator 承担（同时拒绝纯空白；
+    # 一个子句一个变异，避免 min_length + validator 双层导致「去掉任一层仍拒绝」
+    # 的不可判死变异）。
+    event_type: str
     filter_condition: Optional[Dict[str, Any]] = None
     correlation_id: Optional[str] = None
     flow_id: Optional[str] = None
@@ -52,6 +56,24 @@ class EventSubscription(BaseModel):
     # None = default/存量订阅（升级前写入，语义零回归）。
     tenant_id: Optional[str] = None
     processed_events: Set[str] = Field(default_factory=set)
+
+    @field_validator("event_type", mode="before")
+    @classmethod
+    def _event_type_must_be_non_empty(cls, value: Any) -> Any:
+        """#110/F1：空 event_type 非法，与 ``EventNode`` **同一具名中文原因**。
+
+        r2 只给 ``EventNode`` 写了具名 validator，``EventSubscription`` 仅
+        ``min_length=1``（pydantic 默认英文串），「两端都具名」属过度声明。
+        这里补齐对称：存储写入口（``store_subscription``）与内存构造入口都拿到
+        同一条可执行提示。
+        """
+        if isinstance(value, str) and not value.strip():
+            raise ValueError(
+                "event_type 不能为空：订阅必须写明要等待的事件类型"
+                "（空类型会被 matches_event 当作通配而命中任意事件；"
+                "如需通配请显式写 \"*\"）"
+            )
+        return value
     
     def mark_event_processed(self, event_id: str) -> None:
         """Mark an event as processed by this subscription."""

@@ -414,12 +414,21 @@ class ServiceRegistry:
             keys = self.redis_client.keys(pattern)
             
             service_types = set()
+            key_prefix = f"{self.REGISTRY_PREFIX}:"
             for key in keys:
                 # 解析 key: plaita:registry:{service_type}:{instance_id}
-                parts = key.decode() if isinstance(key, bytes) else key
-                parts = parts.split(":")
-                if len(parts) >= 3:
-                    service_types.add(parts[2])
+                # #110/F3（同一 split(':') 家族，验收者补的点位）：按**已知前缀**
+                # 剥离，再从右侧去掉唯一的 {instance_id}。此前 `parts[2]` 在
+                # service_type 自身含 ':' 时被截断（`a:b` → `a`）。当前所有
+                # service_type 都是无冒号常量（flow_worker/…_service），故生产
+                # 未暴露；这里是同一截断家族的顺手收口。
+                key_str = key.decode() if isinstance(key, bytes) else key
+                if not key_str.startswith(key_prefix):
+                    continue
+                rest = key_str[len(key_prefix):]
+                service_type = rest.rsplit(":", 1)[0] if ":" in rest else rest
+                if service_type:
+                    service_types.add(service_type)
             
             return list(service_types)
             

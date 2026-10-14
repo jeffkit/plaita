@@ -3,10 +3,13 @@
 """
 import asyncio
 import json
+import logging
 import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Union, cast, Awaitable
+
+from pydantic import ValidationError
 
 try:
     import sqlalchemy as sa
@@ -23,6 +26,8 @@ from .core import (
 )
 from .exceptions import EventError, EventNotFoundError, EventStorageError, EventTimeoutError
 from .utils import normalize_event
+
+logger = logging.getLogger(__name__)
 
 # 创建基础模型
 Base = declarative_base()
@@ -377,20 +382,29 @@ class SqlalchemyEventSubscriptionStorage(EventSubscriptionStorage):
                     record.event_id for record in proc_result.scalars().all()
                 }
                 
-                subscription = EventSubscription(
-                    subscription_id=db_sub.id,
-                    event_type=db_sub.event_type,
-                    filter_condition=db_sub.filter_condition,
-                    correlation_id=db_sub.correlation_id,
-                    flow_id=db_sub.flow_id,
-                    node_id=db_sub.node_id,
-                    created_at=db_sub.created_at,
-                    processed_events=processed_events,
-                    timeout=db_sub.timeout,
-                    tenant_id=db_sub.tenant_id
-                )
+                try:
+                    subscription = EventSubscription(
+                        subscription_id=db_sub.id,
+                        event_type=db_sub.event_type,
+                        filter_condition=db_sub.filter_condition,
+                        correlation_id=db_sub.correlation_id,
+                        flow_id=db_sub.flow_id,
+                        node_id=db_sub.node_id,
+                        created_at=db_sub.created_at,
+                        processed_events=processed_events,
+                        timeout=db_sub.timeout,
+                        tenant_id=db_sub.tenant_id
+                    )
+                except ValidationError as e:
+                    # #110/F1（验收者补的历史脏行）：``event_type`` 在 r2 之前允许空，
+                    # 库里可能躺着存量空类型行；直接构造会让整条查询抛
+                    # ``ValidationError``，把**同一批里的合法订阅一起丢掉**。这里跳过
+                    # 坏行并**具名点名**（id / event_type），其余订阅照常返回。
+                    logger.warning(
+                        "事件订阅存储：跳过非法订阅行（id=%s, event_type=%r）：%s",
+                        db_sub.id, db_sub.event_type, e)
+                    continue
                 subscriptions.append(subscription)
-            
             return subscriptions
     
     async def delete_subscription(self, subscription_id: str) -> bool:
