@@ -1,0 +1,12 @@
+{
+  "name": "m109-r9-teardown-task-exception-unretrieved",
+  "issue": "109",
+  "concern": "F3",
+  "file": "plaita/event/redis.py",
+  "rationale": "不给 teardown Task 挂取用回调 ⇒ 步骤异常无人取用，GC 时打印 「Task exception was never retrieved」（r8 只覆盖了 close Future 一侧）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r9_parity.py::Test109R9NeverRetrievedTaskException::test_failure_path_retrieves_teardown_task_exception"
+  ],
+  "old": "        teardown_task.add_done_callback(self._on_teardown_done)\n        if teardown_task.done():\n            # eager factory 同步跑完（成功或失败）：回调只会被 call_soon 排队，别赌\n            # 循环还来得及跑它——当场取用一次。回调幂等，重复调用无害。\n            self._on_teardown_done(teardown_task)\n        else:\n            # r9（死句柄）：只登记**仍在飞**的 teardown；done 句柄回填会让监督者\n            # （`.cancel()` / `is not None` 判定）把已结束的关停当成在飞的来跟。\n            self._teardown_task = teardown_task\n",
+  "new": "        # mutation: 不挂 done 回调（异常无人取用），并无条件回填句柄\n        self._teardown_task = teardown_task\n"
+}

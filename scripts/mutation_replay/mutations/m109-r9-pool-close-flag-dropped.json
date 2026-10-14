@@ -1,0 +1,14 @@
+{
+  "name": "m109-r9-pool-close-flag-dropped",
+  "issue": "109",
+  "concern": "F2",
+  "file": "plaita/event/redis.py",
+  "rationale": "关停时不传 close_connection_pool ⇒ 4.5.5 与「外部注入池」的 5.x+ 上连接池原样留着（实测连接数 1→1），方法被调用过但资源没释放",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r9_parity.py::Test109R9ReleaseActuallyClosesPool::test_installed_redis_client_releases_connection_pool",
+    "tests/unit/test_issue109_110_r9_parity.py::Test109R9ReleaseActuallyClosesPool::test_aclose_with_pool_kwarg_receives_true",
+    "tests/unit/test_issue109_110_r8_parity.py::Test109R8ReleaseByCapability::test_backend_without_aclose_is_released_via_close"
+  ],
+  "old": "    if _accepts_close_connection_pool(closer):\n        return functools.partial(closer, close_connection_pool=True)\n    return closer\n",
+  "new": "    return closer  # mutation: 裸调用，不传 close_connection_pool\n"
+}

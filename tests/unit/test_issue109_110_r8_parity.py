@@ -20,10 +20,22 @@ r7 的架构（非阻塞、幂等的 ``close()`` 请求 + teardown 在总线自�
 * **G4**：无运行循环的 ``request_close()`` 给出具名
   ``error_kind=no-running-loop``，不再裸 ``RuntimeError``。
 
-另钉四个**曾被变异击杀不了**的属性（见 ``scripts/mutation_replay/mutations/`` 的
-``m109-r8-*``）：监听取消必须发生在 drain **之后**、close future 必须被 finally
-结算、调用者取消不得经 ``shield`` 落到 teardown / close future 上、监听取消不得走
-``asyncio.gather`` 的 ``_GatheringFuture.cancel`` 路径。
+另钉四个 **r8 前只有「超时判红」、没有可归因断言** 的属性（见
+``scripts/mutation_replay/mutations/`` 的 ``m109-r8-*``）：监听取消必须发生在 drain
+**之后**、close future 必须被 finally 结算、调用者取消不得经 ``shield`` 落到
+teardown / close future 上、监听取消不得走 ``asyncio.gather`` 的
+``_GatheringFuture.cancel`` 路径。
+
+**口径更正（r9/Finding 4）**：r8 报告里曾写作「这四个属性去掉实现后套件仍绿」——
+**不实**。r9 复测：在 r8 **之前**的树（``7cf3674``）上做等价变异——把 r7
+``_teardown`` 的 ``finally: future.set_result(None)`` 换成 ``pass``（注意：r8 的
+``m109-r8-teardown-finally-resolve-off`` 定义原文只存在于 r8 之后的代码里，**不能**
+直接套到 r8 之前的树上）——5 个 issue 套件里 **4 个在 240 s 界内仍未结束**
+（``rc=124``，真挂死：``event_redis`` / ``r3`` / ``r5`` / ``r6``），剩下 ``r7``
+套件 57 s 跑完也是 ``12 failed, 2 passed``；**没有一个是「绿」**。抓到它的是
+**timeout**，不是断言。r8 的真实价值是把这种「超时红」变成两条**可归因**的
+``FAILED``。对照：同一棵 pre-r8 树不施加变异时 5 个套件全部 ``rc=0``。该口径同时
+写在 docs ``docs-site/docs/distributed/event-system.md`` 的关停小节。
 """
 
 import asyncio
@@ -216,14 +228,35 @@ class Test109R8ReleaseByCapability(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((both.acloses, both.closes, both.disconnects), (1, 0, 0))
 
     async def test_backend_without_aclose_is_released_via_close(self):
-        """redis-py 4.x 形状：只有 ``close``，没有 ``aclose``。"""
+        """redis-py 4.x 形状：只有 ``close(close_connection_pool=...)``，没有 ``aclose``。
+
+        r8 的这一格只钉「``close`` 被调用过」（自造 fake + 方法名），r9/Finding 2
+        把它改成钉**池真的被关**：4.5.5 的 ``Redis.close(close_connection_pool=None)``
+        不传这个关键字就回落到 ``auto_close_connection_pool``，而 ``from_url()`` 造出
+        的客户端实测是 ``False`` ⇒ 连接数 1 → 1（静默不释放）。所以这里断言
+        ``close_connection_pool is True`` **且**池的 ``disconnect`` 被走到。
+        """
+
+        class _Pool:
+            def __init__(self):
+                self.disconnects = 0
+
+            async def disconnect(self):
+                self.disconnects += 1
 
         class LegacyRedis:
-            def __init__(self):
-                self.closes = 0
+            """4.5.5 ``redis.asyncio.Redis`` 的最小形状。"""
 
-            async def close(self):
+            def __init__(self):
+                self.pool = _Pool()
+                self.closes = 0
+                self.seen_kwargs = []
+
+            async def close(self, close_connection_pool=None):
                 self.closes += 1
+                self.seen_kwargs.append(close_connection_pool)
+                if close_connection_pool:
+                    await self.pool.disconnect()
 
         bus, comps = _make_bus()
         legacy = LegacyRedis()
@@ -231,9 +264,32 @@ class Test109R8ReleaseByCapability(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(bus.close(), timeout=2)
         self.assertEqual(legacy.closes, 1,
                          "G2：没有 aclose 的后端必须经 close 回退被释放（不是静默跳过）")
+        self.assertEqual(legacy.seen_kwargs, [True],
+                         "G2/r9：4.x 的 close 必须带 close_connection_pool=True——"
+                         "裸 close() 在 from_url 客户端上不关池（实测连接数 1→1）")
+        self.assertEqual(legacy.pool.disconnects, 1,
+                         "G2/r9：钉的是**池被关**，不是「方法名被调用过」")
         self.assertIsNone(bus.pubsub)
         for comp in comps[1:]:                    # comps[0] 是被替换掉的 pubsub
             self.assertEqual(comp.closes, 1)
+
+    async def test_four_x_shaped_backend_without_pool_kwarg_still_closed(self):
+        """签名**不接受** ``close_connection_pool`` 的 4.x 形状后端（如 4.5.5 的
+        ``PubSub.close(self)``）：不得因为「塞关键字」而 ``TypeError`` 漏放。"""
+
+        class PubSubShaped:
+            def __init__(self):
+                self.closes = 0
+
+            async def close(self):                # 4.5.5 PubSub.close(self)
+                self.closes += 1
+
+        bus, comps = _make_bus()
+        shaped = PubSubShaped()
+        bus.pubsub = shaped
+        await asyncio.wait_for(bus.close(), timeout=2)
+        self.assertEqual(shaped.closes, 1,
+                         "G2/r9：签名不接受关键字时不得硬塞 close_connection_pool")
 
     async def test_backend_with_only_disconnect_is_released(self):
         class DisconnectOnly:
@@ -342,7 +398,7 @@ class Test109R8RequestCloseLoopless(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 四个此前「击杀不了」的属性
+# 四个此前只有「超时判红」（无可归因断言）的属性
 # --------------------------------------------------------------------------
 class Test109R8VacuousProperties(unittest.IsolatedAsyncioTestCase):
     async def test_listeners_cancelled_after_drain_not_before(self):

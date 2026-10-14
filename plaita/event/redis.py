@@ -3,13 +3,15 @@
 """
 import asyncio
 import contextvars
+import functools
+import inspect
 import json
 import logging
 import time
 import uuid
 import sys
 import os
-from typing import Any, Callable, Dict, List, Optional, Set, Union, Awaitable
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 logger = logging.getLogger(__name__)
 
@@ -33,21 +35,95 @@ _TEARDOWN_INCOMPLETE_MESSAGE = (
     "若总线仍被使用，请检查上一次关停被谁取消。"
 )
 
+# #109（r9/Finding 1）：`_spawn_teardown` 本身失败（自定义 task factory 抛异常、
+# 循环已关闭）时的具名错误。r8 的顺序是「先落盘凭据、再 spawn」；spawn 抛异常时
+# 凭据留在「已受理」状态而 teardown 任务根本不存在 ⇒ close future **永不 resolve**
+# ⇒ **第二次 close() 永久挂起**。现在整个受理动作要么成功、要么回滚成「未受理」。
+TEARDOWN_SPAWN_FAILED_KIND = "teardown-spawn-failed"
+_TEARDOWN_SPAWN_FAILED_MESSAGE = (
+    "RedisEventBus 关停未受理：error_kind=" + TEARDOWN_SPAWN_FAILED_KIND +
+    "——在事件循环里创建 teardown 任务失败（自定义/抛异常的 task factory，"
+    "或已关闭的循环）。本次请求已**整体回滚**：`_closing` / `_close_future` / "
+    "`_teardown_task` 都回到受理前的状态，总线仍可用；在健康的循环上再次调用 "
+    "close() 会重新受理并真正跑完关停。"
+)
 
-def _resolve_closer(target) -> Callable[[], Awaitable[Any]]:
-    """按能力挑关闭方法（#109 r8/G2）：``aclose`` → ``close`` → ``disconnect``。
 
-    redis-py 的 asyncio 客户端在 5.0 才统一成 ``aclose``；4.x 只有 ``close`` /
-    ``disconnect``。这里**不做属性访问的裸 getattr(...) 式调用**：调用方必须在
-    ``_close_one`` 的 try 内解析，否则缺失属性会以 ``AttributeError`` 逃出关停序列。
-    都没有 ⇒ 抛具名 ``AttributeError``，由 ``_close_one`` 记 WARNING。
+def _accepts_close_connection_pool(closer) -> bool:
+    """``closer`` 是否接受 ``close_connection_pool`` 关键字（**看签名**，不猜）。
+
+    redis-py 的 ``Redis.close`` / ``Redis.aclose`` 都带这个形参；``PubSub.close``
+    与自研后端的 ``close``/``aclose`` 不带（4.5.5 的 ``PubSub.close(self)`` 传这个
+    关键字会 ``TypeError``）。签名不可知（C 实现 / 内建 / 装饰器遮蔽）⇒ 按**不支持**
+    处理，绝不赌。
+    """
+    try:
+        sig = inspect.signature(closer)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters
+    if "close_connection_pool" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _pool_closing(closer) -> Callable[[], Any]:
+    """把 closer 包成「连连接池一起关」的调用（#109 r9/Finding 2）。
+
+    真实 redis-py 上，**裸** ``close()`` / ``aclose()`` 常常释放不了连接池：
+    不传 ``close_connection_pool`` 时它们回落到 ``auto_close_connection_pool``，
+    而该标志由**客户端的构造方式**决定——
+
+      * 4.5.5：``Redis.from_url()`` 内部 ``Redis(connection_pool=pool)`` ⇒ 显式池
+        ⇒ ``auto_close_connection_pool=False``（实测）⇒ 裸 ``close()`` **不动池**；
+      * 8.1.0：``from_url()`` 事后把 ``auto_close_connection_pool`` 改回 ``True``
+        ⇒ 裸 ``aclose()`` 可用；但用户显式传 ``connection_pool=`` 的客户端仍是
+        ``False`` ⇒ 裸 ``aclose()`` 同样把池留在原地。
+
+    所以只要签名接受，就显式传 ``close_connection_pool=True``；不接受则原样调用。
+    """
+    if _accepts_close_connection_pool(closer):
+        return functools.partial(closer, close_connection_pool=True)
+    return closer
+
+
+def _resolve_closer(target) -> Callable[[], Any]:
+    """按能力挑关闭方法（#109 r8/G2，r9/Finding 2 补「连池一起关」）。
+
+    优先级 ``aclose`` → ``close`` → ``disconnect``：
+
+      * ``aclose``：redis-py ≥5 的 asyncio 客户端 / fakeredis；
+      * ``close``：redis-py 4.x 的 asyncio 客户端（``close(close_connection_pool=True)``
+        才是真释放）与自定义后端；
+      * ``disconnect``：**最后兜底，且在 redis-py 4.x 上是死分支**——实测 4.5.5 的
+        ``Redis`` 与 ``PubSub`` 都**没有** ``disconnect`` 属性（r8 文档把它写成
+        「redis-py ≥4.2 的 aclose 前身」是错的）；只有别的后端才可能命中。
+
+    这里**不做属性访问的裸调用**：调用方必须在 ``_close_one`` / ``_release_one``
+    的 try 内解析，否则缺失属性会以 ``AttributeError`` 逃出关停序列。
+    都没有 ⇒ 抛具名 ``AttributeError``，由调用方记 WARNING。
     """
     for name in ("aclose", "close", "disconnect"):
         closer = getattr(target, name, None)
-        if callable(closer):
+        if not callable(closer):
+            continue
+        if name == "disconnect":
             return closer
+        return _pool_closing(closer)
     raise AttributeError(
         f"{type(target).__name__} 没有可调用的关闭方法（aclose/close/disconnect 均缺失）")
+
+
+async def _release_one(target) -> None:
+    """解析并调用 ``target`` 的关闭方法（#109 r9/Finding 2）；**只在可 await 时** await。
+
+    非 awaitable 返回值不是理论情形：redis-py 4.x 的 ``PubSub.close()`` 是**同步**
+    方法，返回 ``self.reset()`` 的协程；若 ``PubSub`` 还没建过 connection，它直接
+    ``return None``——裸 ``await`` 会 ``TypeError``。
+    """
+    result = _resolve_closer(target)()
+    if inspect.isawaitable(result):
+        await result
 
 
 def _mark_future_retrieved(future: "asyncio.Future") -> None:
@@ -329,9 +405,16 @@ class RedisEventStorage(EventStorage):
         return result > 0
 
     async def close(self):
-        """关闭 Redis 连接"""
+        """关闭 Redis 连接。
+
+        #109 r9/Finding 2：这里也必须**按能力**释放。旧实现直接 ``await
+        self.redis.aclose()``——redis-py 4.x 的 asyncio 客户端没有 ``aclose``，
+        ``AttributeError`` 让三个存储各自的连接**一个都没释放**（总线那边只能
+        记 WARNING 然后继续）。``_release_one`` 认 ``aclose`` → ``close`` →
+        ``disconnect``，并在签名接受时传 ``close_connection_pool=True`` 真正关池。
+        """
         if self.redis:
-            await self.redis.aclose()
+            await _release_one(self.redis)
             self.redis = None
 
 
@@ -618,9 +701,16 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         return True
     
     async def close(self):
-        """关闭 Redis 连接"""
+        """关闭 Redis 连接。
+
+        #109 r9/Finding 2：这里也必须**按能力**释放。旧实现直接 ``await
+        self.redis.aclose()``——redis-py 4.x 的 asyncio 客户端没有 ``aclose``，
+        ``AttributeError`` 让三个存储各自的连接**一个都没释放**（总线那边只能
+        记 WARNING 然后继续）。``_release_one`` 认 ``aclose`` → ``close`` →
+        ``disconnect``，并在签名接受时传 ``close_connection_pool=True`` 真正关池。
+        """
         if self.redis:
-            await self.redis.aclose()
+            await _release_one(self.redis)
             self.redis = None
 
     async def find_unprocessed_matching_subscriptions(self, event: Event) -> List[EventSubscription]:
@@ -779,9 +869,16 @@ class RedisProcessingTracker(EventProcessingTracker):
         return removed
     
     async def close(self):
-        """关闭 Redis 连接"""
+        """关闭 Redis 连接。
+
+        #109 r9/Finding 2：这里也必须**按能力**释放。旧实现直接 ``await
+        self.redis.aclose()``——redis-py 4.x 的 asyncio 客户端没有 ``aclose``，
+        ``AttributeError`` 让三个存储各自的连接**一个都没释放**（总线那边只能
+        记 WARNING 然后继续）。``_release_one`` 认 ``aclose`` → ``close`` →
+        ``disconnect``，并在签名接受时传 ``close_connection_pool=True`` 真正关池。
+        """
         if self.redis:
-            await self.redis.aclose()
+            await _release_one(self.redis)
             self.redis = None
 
     async def record_processing_attempt(self, event_id: str, handler_id: str, 
@@ -905,6 +1002,12 @@ class RedisEventBus(EventBus):
         self._teardown_task: Optional["asyncio.Task"] = None
         # 观测/断言用：teardown 真的跑了几次（必须恰好 1 次）。
         self._teardown_runs = 0
+        # #109 r9/Finding 3：teardown **Task** 上逃逸的异常（步骤异常；被取消不算）在
+        # 这里具名留档。done 回调顺手 ``task.exception()`` 取用它——不取用的话解释器
+        # 会在 GC 时打印 "Task exception was never retrieved — ... RuntimeError(...)"
+        # （r8 只给 close **Future** 挂了取用回调，Task 这一侧漏了）。
+        self._teardown_task_error: Optional[BaseException] = None
+        self._teardown_error_kind: Optional[str] = None
 
         # 事件处理器字典 {handler_id: (handler_func, event_type, filter_condition, retry_policy)}
         self.handlers = {}
@@ -1511,6 +1614,23 @@ class RedisEventBus(EventBus):
         ``None``，稍后赋值的 future 永不 resolve ⇒ ``await bus.close()`` **永久挂起**。
         故顺序固定为：``_close_future`` → ``_closing`` → ``_teardown_task`` 占位 →
         spawn → 回填真实 task 句柄。任何新的「teardown 会读的属性」都必须加在这之前。
+
+        **r9/Finding 1（spawn 失败必须回滚）**：上面这个顺序自身有一个反面——
+        ``_spawn_teardown`` 抛异常时（自定义/抛异常的 task factory、已关闭的循环），
+        凭据已经落盘而 teardown 任务根本不存在：``_close_future`` 永不 resolve 且
+        ``_closing=True`` ⇒ **第二次 close() 永久挂起**（r7 的旧顺序反而能重试）。
+        所以受理是一个**全有或全无**的动作：spawn 抛异常时把 ``_close_future`` /
+        ``_teardown_task`` 清回 ``None``、``_closing`` 恢复为受理前的值，并抛具名
+        ``error_kind=teardown-spawn-failed``；之后在健康的循环上重试即可正常关停。
+
+        **r9/Finding 3（Task 异常必须被取用）**：teardown 任务上逃逸的异常（步骤抛
+        异常）由 done 回调 ``_on_teardown_done`` 立即取用并留档，避免 GC 时打印
+        "Task exception was never retrieved"。
+
+        **r9（死句柄）**：只有**仍在飞**的 teardown 任务才回填到 ``_teardown_task``。
+        eager factory 下 spawn 可能同步跑完（成功或失败），此时它是 done 句柄；
+        回填等于让监督者（``if bus._teardown_task is not None`` / ``.cancel()``）
+        把一次**已结束**的 teardown 当成在飞的来跟。
         """
         if self._close_future is not None:
             return self._close_future
@@ -1528,12 +1648,34 @@ class RedisEventBus(EventBus):
             ) from exc
         future = loop.create_future()
         # ---- spawn 之前：teardown 触碰的所有属性先就位（r8/F1）----
+        previous_closing = self._closing
         self._close_future = future
         self._closing = True
         self._teardown_task = None          # 占位；同步完成时它就是真实的 None 语义
         # ---- spawn：eager task factory 下这里可能同步跑完整个 teardown ----
-        teardown_task = self._spawn_teardown(loop)
-        self._teardown_task = teardown_task
+        try:
+            teardown_task = self._spawn_teardown(loop)
+        except BaseException as exc:
+            # #109 r9/Finding 1：受理必须**全有或全无**。不变量被破坏时（凭据在、
+            # 任务不在）第二次 close() 会早返回一个永不 resolve 的 future ⇒ 永久
+            # 挂起；这里把状态整体回滚，让重试可行。
+            self._close_future = None
+            self._teardown_task = None
+            self._closing = previous_closing
+            if isinstance(exc, Exception):
+                raise RuntimeError(_TEARDOWN_SPAWN_FAILED_MESSAGE) from exc
+            raise
+        # #109 r9/Finding 3：teardown Task 上逃逸的异常必须被取用（留档 + 取用），
+        # 否则 GC 时打印 "Task exception was never retrieved"。
+        teardown_task.add_done_callback(self._on_teardown_done)
+        if teardown_task.done():
+            # eager factory 同步跑完（成功或失败）：回调只会被 call_soon 排队，别赌
+            # 循环还来得及跑它——当场取用一次。回调幂等，重复调用无害。
+            self._on_teardown_done(teardown_task)
+        else:
+            # r9（死句柄）：只登记**仍在飞**的 teardown；done 句柄回填会让监督者
+            # （`.cancel()` / `is not None` 判定）把已结束的关停当成在飞的来跟。
+            self._teardown_task = teardown_task
         return future
 
     def _spawn_teardown(self, loop: "asyncio.AbstractEventLoop") -> "asyncio.Task":
@@ -1541,12 +1683,43 @@ class RedisEventBus(EventBus):
 
         3.11+ 有 ``loop.create_task(..., context=)``；3.10 没有，但 ``Task.__init__``
         用 ``contextvars.copy_context()`` 捕获当时的 context，所以在 context 里创建即可。
+
+        ``create_task`` 抛异常时（自定义 task factory / 已关闭的循环）这个 coroutine
+        从未被托管过，必须显式 ``close()``，否则 GC 会打 "coroutine ... was never
+        awaited"（r9/Finding 1 的回滚路径）。
         """
         coro = self._teardown()
         context = self._owner_context.copy()
-        if sys.version_info >= (3, 11):
-            return loop.create_task(coro, context=context)
-        return context.run(loop.create_task, coro)
+        try:
+            if sys.version_info >= (3, 11):
+                return loop.create_task(coro, context=context)
+            return context.run(loop.create_task, coro)
+        except BaseException:
+            try:
+                coro.close()
+            except Exception:                    # noqa: BLE001 - 已在失败路径上
+                pass
+            raise
+
+    def _on_teardown_done(self, task: "asyncio.Task") -> None:
+        """teardown 任务的 done 回调：**取用**并具名留档它的异常（#109 r9/Finding 3）。
+
+        r8 只给 close **Future** 挂了 ``_mark_future_retrieved``，Task 这一侧漏了：
+        步骤抛异常（``RuntimeError('boom-step')``）时该 Task 的异常没有任何人取用，
+        解释器在 GC 时经 ``loop.call_exception_handler`` 打印
+        "Task exception was never retrieved"（3.11 + 3.12 实测；in-process 反复跑
+        396 次出现 12 次）。取用**不影响**等待者：关停失败是经 close future 报的。
+
+        被取消（``CancelledError``）不算「未取用」，但同样具名留档，便于归因。
+        """
+        if task.cancelled():
+            self._teardown_error_kind = "cancelled"
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._teardown_task_error = exc
+            self._teardown_error_kind = type(exc).__name__
+            logger.debug("事件总线关停：teardown 任务异常已取用: %r", exc)
 
     async def _teardown(self) -> None:
         """关停序列本体（#109 r7）：在 owner context 里跑，结束时 resolve close future。
@@ -1633,6 +1806,17 @@ class RedisEventBus(EventBus):
         而 r7 的 finally 仍把 future resolve 成成功 ⇒ **调用方看到关停成功、五个组件
         一个都没释放**。现在把对象交给 ``_close_one``，由它按能力探测
         （``aclose`` → ``close`` → ``disconnect``）。
+
+        r9/Finding 2：探测还包含「签名接受时传 ``close_connection_pool=True``」——
+        裸 ``close()`` / 裸 ``aclose()`` 在 4.5.5（``from_url`` ⇒
+        ``auto_close_connection_pool=False``）与「外部注入 connection_pool」的 5.x+
+        上都**不关池**（连接数 1 → 1）。详见 ``_pool_closing``。
+
+        r9 声明：``pubsub`` / ``redis`` 槽位释放后置 ``None``，重试不会重复释放；
+        三个存储槽位保持对象引用，**重试会再调用一次它们的 ``close()``**（真实实现
+        有 ``if self.redis:`` 幂等闸，第二次是 no-op；若 straggler 在两次尝试之间
+        把客户端复活，第二次才关得掉）。这条是有意的，见 docs 与
+        ``test_retry_recloses_storage_components_deliberately``。
         """
         if self.pubsub is not None:
             await self._close_one("pubsub", self.pubsub)
@@ -1647,13 +1831,20 @@ class RedisEventBus(EventBus):
     async def _close_one(self, label: str, target) -> None:
         """解析并调用 ``target`` 的关闭方法；解析失败/调用失败都具名 WARNING 后继续。
 
-        支持范围（r8/G2）：``aclose``（redis-py ≥5 的 asyncio 客户端 / fakeredis）、
-        ``close``（redis-py 4.x 的 asyncio 客户端与自定义后端）、``disconnect``
-        （redis-py ≥4.2 的 aclose 前身）。三者都没有 ⇒ 具名 ``AttributeError`` 被
-        这里接住并记 WARNING，**不**逃出关停序列。
+        支持范围（r8/G2 起，r9/Finding 2 修正）：
+
+          * ``aclose``（redis-py ≥5 的 asyncio 客户端 / fakeredis）——签名接受时传
+            ``close_connection_pool=True``；
+          * ``close``（redis-py 4.x 的 asyncio 客户端与自定义后端）——同样在签名
+            接受时传 ``close_connection_pool=True``（4.5.5 的
+            ``Redis.close(close_connection_pool=None)`` 不传就不关池）；
+          * ``disconnect``（**兜底，且在 redis-py 4.x 上是死分支**：4.5.5 的
+            ``Redis`` / ``PubSub`` 都没有该属性，只有别的后端可能命中）。
+
+        三者都没有 ⇒ 具名 ``AttributeError`` 被这里接住并记 WARNING，**不**逃出关停序列。
         """
         try:
-            await _resolve_closer(target)()
+            await _release_one(target)
         except asyncio.CancelledError:
             raise
         except Exception as exc:                 # noqa: BLE001 - 关停请求已受理，不让它炸
@@ -1688,6 +1879,22 @@ class RedisEventBus(EventBus):
             ``RuntimeError: no running event loop``）。
           * **释放按能力探测**（G2）：``aclose`` → ``close`` → ``disconnect``，单个组件
             解析/调用失败只记具名 WARNING 并继续释放其余组件。
+
+        r9 补充：
+
+          * **spawn 失败整体回滚**（Finding 1）：``_spawn_teardown`` 抛异常（自定义
+            task factory / 已关闭循环）时抛具名 ``error_kind=teardown-spawn-failed``，
+            并把 ``_closing`` / ``_close_future`` / ``_teardown_task`` 恢复到受理前
+            ⇒ 之后重试**不会挂起**（r8 在这里会留下永不 resolve 的 future）。
+          * **释放真的连池一起关**（Finding 2）：签名接受 ``close_connection_pool``
+            时显式传 ``True``；4.5.5 与「外部注入 connection_pool」的 5.x+ 上，
+            裸 ``close()`` / 裸 ``aclose()`` 都不动池。
+          * **teardown Task 的异常被取用**（Finding 3）：done 回调取用并具名留档
+            （``_teardown_task_error`` / ``_teardown_error_kind``），不再出现
+            "Task exception was never retrieved"。
+          * **重试的重复释放口径**：三个存储槽位在重试时会被**再次调用** ``close()``
+            （幂等闸下是 no-op；revived 客户端才关得掉）；``pubsub``/``redis`` 置
+            ``None`` 后不再重复。见 ``_close_backends``。
 
         ``close()`` 返回时：``_closing is True``、teardown 恰好跑过一次、监听到期被取消；
         已登记任务里被点名者允许继续跑完（登记由完成回调回收）。

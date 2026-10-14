@@ -1,0 +1,13 @@
+{
+  "name": "m109-r9-spawn-failure-no-rollback",
+  "issue": "109",
+  "concern": "F1",
+  "file": "plaita/event/redis.py",
+  "rationale": "spawn 失败不回滚 ⇒ 凭据留在「已受理」而任务不存在，第二次 close() 永久挂起（r8 自己引入的挂起路径）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r9_parity.py::Test109R9SpawnFailureRollback::test_throwing_task_factory_rolls_back_and_retry_completes",
+    "tests/unit/test_issue109_110_r9_parity.py::Test109R9SpawnFailureRollback::test_second_close_after_spawn_failure_does_not_hang"
+  ],
+  "old": "        try:\n            teardown_task = self._spawn_teardown(loop)\n        except BaseException as exc:\n            # #109 r9/Finding 1：受理必须**全有或全无**。不变量被破坏时（凭据在、\n            # 任务不在）第二次 close() 会早返回一个永不 resolve 的 future ⇒ 永久\n            # 挂起；这里把状态整体回滚，让重试可行。\n            self._close_future = None\n            self._teardown_task = None\n            self._closing = previous_closing\n            if isinstance(exc, Exception):\n                raise RuntimeError(_TEARDOWN_SPAWN_FAILED_MESSAGE) from exc\n            raise\n",
+  "new": "        teardown_task = self._spawn_teardown(loop)  # mutation: 不捕获、不回滚（r8 形状）\n"
+}

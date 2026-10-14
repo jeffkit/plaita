@@ -1,0 +1,12 @@
+{
+  "name": "m109-r9-backfill-done-teardown-task",
+  "issue": "109",
+  "concern": "F1-wart",
+  "file": "plaita/event/redis.py",
+  "rationale": "无条件回填 teardown 句柄 ⇒ eager 同步跑完（成功或失败）后把**已结束**的句柄当成在飞 teardown，监督者（cancel / `is not None`）被误导",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r9_parity.py::Test109R9SpawnFailureRollback::test_synchronous_failure_does_not_backfill_dead_teardown_task"
+  ],
+  "old": "        else:\n            # r9（死句柄）：只登记**仍在飞**的 teardown；done 句柄回填会让监督者\n            # （`.cancel()` / `is not None` 判定）把已结束的关停当成在飞的来跟。\n            self._teardown_task = teardown_task\n        return future\n",
+  "new": "        self._teardown_task = teardown_task\n        return future\n"
+}

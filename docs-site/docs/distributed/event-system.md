@@ -150,11 +150,36 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   逐个打含 `event_id` / `handler_id` 的 `WARNING`（「未在 N 秒内完成，放手让它跑完并
   记录」），登记由完成回调回收；② **最后**才逐个 `cancel()` 监听任务并等落地；③ 释放
   pubsub / redis / 存储。
-  **释放按能力探测（r8/G2）**：`aclose`（redis-py ≥5 / fakeredis）→ `close`
-  （redis-py 4.x）→ `disconnect`（redis-py ≥4.2），**解析与调用都在同一步的 try 内**，
-  单步失败（含三个方法都缺失）具名 WARNING 后继续释放其余组件。支持范围因此是
-  **redis-py 4.x ~ 8.x**；测试覆盖 `aclose` / 仅 `close` / 仅 `disconnect` / 三者全缺
-  四种形状。r8 前 `_close_backends` 里 `self.pubsub.aclose` 的属性访问在 try **之外**，
+  **释放按能力探测（r8/G2 起，r9/Finding 2 修正并实测）**：解析顺序 `aclose`
+  （redis-py ≥5 / fakeredis）→ `close`（redis-py 4.x 与自定义后端）→ `disconnect`
+  （**兜底，且在 redis-py 上是死分支**：4.5.5 与 8.1.0 的 `Redis`/`PubSub` 都**没有**
+  该属性；r8 文档把它写成「redis-py ≥4.2 的 aclose 前身」是错的，只有别的后端可能
+  命中），**解析与调用都在同一步的 try 内**，单步失败（含三个方法都缺失）具名
+  WARNING 后继续释放其余组件。**光按能力选方法还不够**：`close()` / `aclose()` 只有在
+  **签名接受**时显式传 `close_connection_pool=True` 才真的关连接池——不传时它们回落到
+  `auto_close_connection_pool`，而该标志由**客户端的构造方式**决定（4.5.5 的
+  `Redis.from_url()` ⇒ `False`；5.x+ 的 `from_url()` 事后把它改成 `True`，但**外部注入
+  `connection_pool=` 的客户端仍是 `False`**）。`_pool_closing` 用 `inspect.signature`
+  判断（签名不可知按**不支持**处理，绝不硬塞关键字——4.5.5 的 `PubSub.close(self)` 会
+  `TypeError`；返回值非 awaitable 时也不裸 `await`，4.5.5 的 `PubSub.close()` 是**同步**
+  方法）。三个存储各自的 `close()` 也走同一条能力路径（旧实现直接
+  `await self.redis.aclose()`，4.x 下三个存储的连接**一个都没释放**）。
+
+  **实测支持范围**（连接数由服务端 `CLIENT LIST` 按 `client_name` 计数得出；redis 7）：
+
+  | redis-py | 客户端形状 | 裸关停 | 带 `close_connection_pool=True` |
+  |---|---|---|---|
+  | 4.5.5（真装） | `from_url` | `close()` 后 1 → **1** | — |
+  | 4.5.5（真装） | 外部注入池 | `close()` 后 1 → **1** | `close(True)` 后 1 → **0** |
+  | 8.1.0（安装版） | `from_url`（`auto_close=True`） | `aclose()` 后 1 → **0** | — |
+  | 8.1.0（安装版） | 外部注入池（`auto_close=False`） | `aclose()` 后 1 → **1** | `aclose(True)` 后 1 → **0** |
+  | 4.5.5（真装，四组件总线） | `RedisEventBus` | r8 式裸 `close()`：4 → **4**（零释放） | `bus.close()`（r9）：4 → **0**，无 WARNING |
+
+  即：**4.5.5 上裸 `close()`、5.x+ 上裸 `aclose()` 都可能静默不释放**；保证是
+  「签名接受则连池一起关，不接受则裸调用，全缺失则具名 WARNING」。测试覆盖**安装版
+  真实客户端 + 真实 `ConnectionPool` + 记录型 `Connection`**（钉「池真的被拆」，不是
+  方法名）与 `aclose` / 仅 `close` / 仅 `disconnect` / 三者全缺 / 签名不可知五种形状。
+  r8 前 `_close_backends` 里 `self.pubsub.aclose` 的属性访问在 try **之外**，
   redis-py 4.5.5（无 `aclose`）下 `AttributeError` 逃出 teardown，调用方却看到成功、
   五个组件一个都没释放。
 - **失败不伪装成功（r8/G3）**：teardown 没完整跑完（被 supervisor / 批量
@@ -166,6 +191,34 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 - **无运行循环具名拒绝（r8/G4）**：循环外调用 `request_close()` 给出
   `error_kind=no-running-loop`（不再裸 `RuntimeError: no running event loop`）；
   跨循环拒绝是 `error_kind=cross-loop-close`。
+- **spawn 失败整体回滚（r9/Finding 1）**：「先落凭据、再 spawn」的顺序自身有个反面——
+  `_spawn_teardown` 抛异常时（自定义/抛异常的 task factory、已关闭的循环）凭据在而
+  teardown 任务根本不存在 ⇒ close future 永不 resolve 且 `_closing=True`，
+  **第二次 `close()` 永久挂起**（r8 实测 2 s watchdog 超时；r7 的旧顺序反而能重试）。
+  现在受理是**全有或全无**：失败时把 `_closing` / `_close_future` / `_teardown_task`
+  恢复到受理前的值并抛具名 `error_kind=teardown-spawn-failed`；且只有**仍在飞**的
+  teardown 任务才登记进 `_teardown_task`（eager factory 同步跑完的 done 句柄不回填，
+  监督者按 `_teardown_task is not None` / `.cancel()` 不会被误导）。
+- **teardown Task 的异常被取用（r9/Finding 3）**：r8 只给 close **Future** 挂了取用
+  回调；步骤抛异常时 Task 一侧无人取用，解释器在 GC 时打印
+  `Task exception was never retrieved — RuntimeError('boom-step')`（3.11/3.12 实测；
+  in-process 反复跑 396 次出现 12 次）。现在 done 回调取用并具名留档到
+  `_teardown_task_error` / `_teardown_error_kind`；测试在同一进程内连跑 40 次失败
+  路径，`never retrieved` 计 **0**。
+- **重试的重复释放口径（r9/Finding 4）**：teardown 未完成而重试时，`pubsub` / `redis`
+  槽位已置 `None` ⇒ 不再释放；三个存储槽位保留对象引用 ⇒ **会再调用一次它们的
+  `close()`**（真实实现有 `if self.redis:` 幂等闸，第二次是 no-op）。这是**有意**的：
+  straggler 可能在两次尝试之间经 `initialize()` 把存储的客户端**复活**，第二次才关得掉
+  那个复活出来的连接。测试把计数钉死（`(2, 2, 1)`）。
+- **口径更正（r9/Finding 4）**：曾有说法称「把 `_teardown` 的 `finally` 结算去掉，
+  r8 之前的套件仍全绿」——**不实**。r9 复测：在 r8 **之前**的树（`7cf3674`）上做等价
+  变异（把 r7 `_teardown` 的 `finally: future.set_result(None)` 换成 `pass`；r8 的
+  `m109-r8-teardown-finally-resolve-off` 定义原文只存在于 r8 之后的代码里，**不能**
+  直接套到 r8 之前的树上），5 个 issue 套件里 **4 个在 240 s 界内仍未结束**
+  （`rc=124` 真挂死：`event_redis` / `r3` / `r5` / `r6`），剩下 `r7` 套件 57 s 跑完也是
+  `12 failed, 2 passed`；**没有一个是「绿」**。抓到它的是 **timeout**，不是断言。
+  对照：同一棵 pre-r8 树不施加变异时 5 个套件全部 `rc=0`。r8 的真实价值是把这种
+  「超时红」变成两条**可归因**的 `FAILED`；「变异存活/套件仍绿」的说法是错的。
 - 因此 `close()` 返回后不存在「既未处理、也无处理记录」的静默第三态：每个分发要么在
   界内完成，要么**已点名**且允许继续跑完（`_pending_tasks` 里可能仍留有被点名的慢任务）。
 - `close()` 开始后到达的分发被**拒绝并点名**（`_closing` 围栏），不会绕过本次 drain
