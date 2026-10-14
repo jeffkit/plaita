@@ -3,10 +3,11 @@
   "issue": "109",
   "concern": "F1",
   "file": "plaita/event/redis.py",
-  "rationale": "等待图只看 _fut_waiter 前向边、不扫描回调 / 通知边 ⇒ asyncio.wait 等经回调唤醒的 self-close 漏检，进入 drain",
+  "rationale": "完成唤醒边不展开回调引用。r5 口径下**全部**等待边都来自 `_callbacks`（`Task.__wakeup` 绑定方法、partial、函数闭包、asyncio 唤醒队列属性），因此这条等价于「等待图兜底整体关闭」：显式空 context 的 self-close（含 X1/X2/X3 新边族）全部漏检、进入 drain。",
   "expect_fail": [
-    "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_empty_context_net_refuses_before_drain_all_kinds"
+    "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_empty_context_net_refuses_before_drain_all_kinds",
+    "tests/unit/test_issue109_110_r3_parity.py::Test109R3ResidualHoles::test_empty_context_new_edge_families_refused"
   ],
-  "old": "    stack = [root] + [t for t in asyncio.all_tasks() if isinstance(t, asyncio.Future)]",
-  "new": "    stack = [root]  # mutation: 回调 / 通知边不可见"
+  "old": "    seen: Set[int] = set()\n    for ref, containers in refs:",
+  "new": "    seen: Set[int] = set()\n    for ref, containers in []:  # mutation: 完成回调引用不可见"
 }

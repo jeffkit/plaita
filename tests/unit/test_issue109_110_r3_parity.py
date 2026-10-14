@@ -19,6 +19,7 @@
 
 import asyncio
 import contextvars
+import functools
 import logging
 import tempfile
 import unittest
@@ -275,8 +276,10 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
 
     - F1（``context=contextvars.Context()`` 换掉 context ⇒ 不继承 marker）与
       F2（线程 / executor 各自独立 context ⇒ marker 不跨线程）**能修则修**：
-      F1 由 ``_waits_for`` 等待图兜底兜住（不依赖 contextvars）；F2 由
-      「有在飞分发时跨事件循环 close 具名拒绝」兜住。拒绝都发生在**任何关停
+      F1 由 r5 的**完成唤醒边遍历**兜底兜住（不依赖 contextvars；判据=「close
+      任务完成后会被唤醒的人里含本实例在飞分发任务」，覆盖绑定方法 ``__self__`` /
+      ``functools.partial`` 递归 / 函数 ``__closure__`` / asyncio 唤醒队列属性）；
+      F2 由「有在飞分发时跨事件循环 close 具名拒绝」兜住。拒绝都发生在**任何关停
       副作用之前**（``_closing`` 保持 ``False``）。
     - F3 两处（``call_soon`` 分离的 close、分发结束后才关停的 detached 任务）
       是**保守过度拒绝**：没有 task-wait cycle 也被拒。本文件把它当**声明**钉住，
@@ -296,9 +299,12 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
 
     def _assert_named_refusal(self, refusal_list, bus, live, *, context=""):
         self.assertEqual(len(refusal_list), 1, f"{context}: 未具名拒绝: {refusal_list}")
-        self.assertIsInstance(refusal_list[0], RuntimeError, context)
-        self.assertIn("不能从它自己的分发 handler 内调用",
-                      str(refusal_list[0]), context)
+        err = refusal_list[0]
+        # TaskGroup 形状把子任务异常包成 ExceptionGroup（r5/X1），解一层再断言。
+        if isinstance(err, BaseExceptionGroup):
+            err = err.exceptions[0]
+        self.assertIsInstance(err, RuntimeError, context)
+        self.assertIn("不能从它自己的分发 handler 内调用", str(err), context)
         self.assertFalse(bus._closing,
                          f"{context}: 拒绝必须发生在任何关停副作用之前")
         self.assertEqual(len(bus._pending_tasks), 0, context)
@@ -330,6 +336,30 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
                     async def mid():
                         await loop.create_task(bus.close(), context=ctx)
                     await loop.create_task(mid(), context=ctx)
+                elif kind == "taskgroup":
+                    # 验收者 X1（决定性）：``TaskGroup._on_task_done`` 是 group 的
+                    # 绑定方法，真正被 await 的是 group 的 ``_on_completed_fut``。
+                    async with asyncio.TaskGroup() as tg:
+                        tg.create_task(bus.close(), context=ctx)
+                elif kind == "partial_funcself":
+                    # 验收者 X2：future 在 ``partial.func.__self__``。
+                    waiter = loop.create_future()
+                    task = loop.create_task(bus.close(), context=ctx)
+                    task.add_done_callback(functools.partial(waiter.set_result))
+                    await waiter
+                    refusal.append(task.exception())
+                elif kind == "as_completed":
+                    # 验收者 X3：Queue 中介的完成边（``_on_completion`` 闭包 →
+                    # ``done`` Queue → ``_getters`` 里的 getter → 消费任务）。
+                    # 3.11 的 ``as_completed`` 是同步生成器（yield coroutine）。
+                    task = loop.create_task(bus.close(), context=ctx)
+                    try:
+                        for fut in asyncio.as_completed([task]):
+                            await fut
+                    except BaseException as e:   # noqa: BLE001
+                        refusal.append(e)
+                    else:
+                        refusal.append(task.exception())
             except BaseException as e:           # noqa: BLE001 - 断言拒绝类型/文案
                 refusal.append(e)
 
@@ -358,15 +388,93 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
         bus, refusal, live = await self._run_empty_context_shape("nested")
         self._assert_named_refusal(refusal, bus, live, context="F1/nested")
 
+    async def test_empty_context_new_edge_families_refused(self):
+        """r5/X1–X3 新边族（验收者四项反例的决定性形状）。
+
+        每条都用**独立谓词**断言：具名 ``RuntimeError`` ∧ ``_closing is False``
+        ∧ 未进 drain ∧ listener 未被取消 ∧ 无悬置任务。不用 subTest：让变异
+        重放器能直接解析失败（``SUBFAILED`` 不在重放器语法内）。
+        """
+        for kind in ("taskgroup", "partial_funcself", "as_completed"):
+            bus, refusal, drain_calls, listener_cancelled, live = (
+                await self._run_new_edge_shape(kind))
+            ctx = f"F1-r5/{kind}"
+            self.assertEqual(len(refusal), 1, f"{ctx}: 未具名拒绝: {refusal}")
+            err = refusal[0]
+            if isinstance(err, BaseExceptionGroup):
+                err = err.exceptions[0]
+            self.assertIsInstance(err, RuntimeError, f"{ctx}: {refusal!r}")
+            self.assertIn("不能从它自己的分发 handler 内调用", str(err), ctx)
+            self.assertFalse(bus._closing,
+                             f"{ctx}: 拒绝必须发生在任何关停副作用之前")
+            self.assertEqual(drain_calls, [], f"{ctx}: close() 进了 drain")
+            self.assertFalse(listener_cancelled, f"{ctx}: 拒绝前取消了监听任务")
+            self.assertEqual(len(bus._pending_tasks), 0, ctx)
+            self.assertEqual(live, [], f"{ctx}: close 后仍有悬置任务: {live}")
+
+    async def _run_new_edge_shape(self, kind):
+        """带**真听众任务**的新边族形状：``listener.done()`` 可区分「拒绝」与
+        「已关停」（close 会同步 cancel listener 并 clear）。"""
+        holder, refusal, drain_calls = {}, [], []
+
+        async def handler(event):
+            ctx = contextvars.Context()
+            loop = asyncio.get_running_loop()
+            bus = holder["bus"]
+            try:
+                if kind == "taskgroup":
+                    async with asyncio.TaskGroup() as tg:
+                        tg.create_task(bus.close(), context=ctx)
+                elif kind == "partial_funcself":
+                    waiter = loop.create_future()
+                    task = loop.create_task(bus.close(), context=ctx)
+                    task.add_done_callback(functools.partial(waiter.set_result))
+                    await waiter
+                    refusal.append(task.exception())
+                elif kind == "as_completed":
+                    task = loop.create_task(bus.close(), context=ctx)
+                    try:
+                        for fut in asyncio.as_completed([task]):
+                            await fut
+                    except BaseException as e:       # noqa: BLE001
+                        refusal.append(e)
+                    else:
+                        refusal.append(task.exception())
+                else:
+                    raise AssertionError(kind)
+            except BaseException as e:               # noqa: BLE001
+                refusal.append(e)
+
+        async def fake_drain():
+            drain_calls.append("drain")
+
+        bus = _make_bus(handler)
+        holder["bus"] = bus
+        listener = asyncio.ensure_future(asyncio.Event().wait())
+        bus.listeners.append(listener)
+        with patch.object(bus, "_drain_pending_tasks", new=fake_drain):
+            await bus._process_message(
+                _msg(Event(event_type="t.demo", data={})), "h1")
+            for _ in range(300):
+                if not bus._pending_tasks and refusal:
+                    break
+                await asyncio.sleep(0.01)
+            listener_cancelled = listener.done()
+            listener.cancel()
+            live = await self._settle()
+        return bus, refusal, drain_calls, listener_cancelled, live
+
     async def test_empty_context_net_refuses_before_drain_all_kinds(self):
         """围栏必须发生在副作用之前：进入 ``_drain_pending_tasks`` 即失败。
 
         drain 被替换为记录器，因此即使围栏失灵也不会 hang——本测试是
         ``m109-r3-redis-dispatch-graph-net-off`` 与
         ``m109-r3-redis-net-callback-edges-off`` 两个变异点的**可断言死法**
-        （对六种等待构造都跑一遍）。
+        （对九种等待构造都跑一遍，含 r5 新增的 taskgroup / partial_funcself /
+        as_completed 三族）。
         """
-        for kind in ("direct", "wait", "gather", "shield", "wait_for", "nested"):
+        for kind in ("direct", "wait", "gather", "shield", "wait_for", "nested",
+                     "taskgroup", "partial_funcself", "as_completed"):
             with self.subTest(kind=kind):
                 holder, refusal, drain_calls = {}, [], []
 
@@ -394,6 +502,25 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
                             async def mid():
                                 await loop.create_task(bus.close(), context=ctx)
                             await loop.create_task(mid(), context=ctx)
+                        elif _kind == "taskgroup":
+                            async with asyncio.TaskGroup() as tg:
+                                tg.create_task(bus.close(), context=ctx)
+                        elif _kind == "partial_funcself":
+                            waiter = loop.create_future()
+                            task = loop.create_task(bus.close(), context=ctx)
+                            task.add_done_callback(
+                                functools.partial(waiter.set_result))
+                            await waiter
+                            refusal.append(task.exception())
+                        elif _kind == "as_completed":
+                            task = loop.create_task(bus.close(), context=ctx)
+                            try:
+                                for fut in asyncio.as_completed([task]):
+                                    await fut
+                            except BaseException as e:   # noqa: BLE001
+                                refusal.append(e)
+                            else:
+                                refusal.append(task.exception())
                     except BaseException as e:       # noqa: BLE001
                         refusal.append(e)
 

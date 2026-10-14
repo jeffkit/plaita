@@ -1,0 +1,12 @@
+{
+  "name": "m109-r5-redis-budget-fail-open",
+  "issue": "109",
+  "concern": "F1",
+  "file": "plaita/event/redis.py",
+  "rationale": "唤醒锥预算耗尽时退回 clean（= r4 的 fail-open：把「证明不出来」当成「允许」）⇒ 超过 512 节点的 self-close 链漏检、close 进入 drain（副作用泄漏）。r5 结构性要求：预算耗尽必须具名拒绝。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r5_parity.py::Test109R5WakeGraphBudget::test_over_budget_chain_is_named_budget_refusal"
+  ],
+  "old": "        if count >= budget:\n            return \"budget\", count",
+  "new": "        if count >= budget:\n            return \"clean\", count  # mutation: 预算耗尽 fail-open（r4 缺陷）"
+}

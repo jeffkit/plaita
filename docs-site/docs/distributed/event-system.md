@@ -151,12 +151,48 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
      `create_task` / `ensure_future`（含 `asyncio.shield`）复制 context，因此
      **在未显式换 context 的前提下**，await / create_task / shield 出的子任务
      无论嵌套多少层都继承该标记。
-  2. **等待图兜底**（r3/F1）：`_waits_for()` 从每个在飞分发任务出发遍历 asyncio
-     的等待边——`_fut_waiter`、gather 的 `_children`、完成回调引用（含
-     `asyncio.wait` / `wait_for` 的 `_release_waiter`、shield 的 inner）——只要
-     `close()` 的调用任务在这张图的下游就拒绝，**不依赖 contextvars**。
-  `close()` 命中任一判据即抛**同一条**具名 `RuntimeError`（含可执行出口：在 handler
-  外关停），且发生在**任何关停副作用之前**（`_closing` 保持 `False`）。
+  2. **完成唤醒边遍历**（r5 结构性口径，取代 r3 的 `_waits_for()` 写法枚举）：
+     `close()` 先取**当前任务**（正在执行 close 的 close-task），只沿
+     **事件循环真的会用来唤醒等待者的引用**做可达性遍历——
+     `Future._callbacks` 的每个表项 → 回调引用的对象 → 其中牵动的 Future/Task：
+     * 绑定方法 `__self__`（`Task.__wakeup` 的 `__self__` 就是被唤醒的任务；
+       `TaskGroup._on_task_done` 的 `__self__` 是 group，group 持有
+       `_on_completed_fut`——`__aexit__` 真正 await 的 future）；
+     * `functools.partial` 的 `func` / `args` / `keywords` **递归**（含嵌套 partial；
+       `partial(waiter.set_result)` 的 future 在 `func.__self__`）；
+     * 可执行函数的 `__closure__`（回调里 `ensure_future(notify())` 时真正唤醒
+       等待者的是 `notify` 的闭包状态）；
+     * 容器递归（`Condition._waiters` 的表项、`asyncio.wait` 的 `todo` 集合）；
+     * 只对**asyncio 自身的唤醒队列属性**下钻：`Queue._getters` / `Queue._putters`
+       / `Event._waiters` / `Condition._waiters` / `Semaphore._waiters` /
+       `Lock._waiters` / `TaskGroup._on_completed_fut` / `TaskGroup._tasks`
+       （`asyncio.as_completed` 的完成边就是 `_on_completion` 闭包 → `done` Queue →
+       `_getters` 里的 getter future → 消费任务）。
+     **不扫 `__dict__`**：handler 闭包里的总线对象会经 `_track_task` 的完成回调把
+     全部在飞任务拖进来，会把合法外部关停误判成图内关停。
+     **闭包 cell 里的容器不展开**：`asyncio.wait` / `as_completed` 的 `todo` 集合同时
+     装着 close 任务与全部被等待者，它是兄弟簿记而不是唤醒边；真唤醒目标是同一闭包
+     里的 `waiter` future 或 `Queue`/`Event`/`Condition` 原语（原语的等待队列仍展开）。
+     否则 700 个兄弟会把唤醒锥推过预算、把合法关停误拒
+     （`test_sibling_set_in_wait_does_not_inflate_cone`）。
+     方向与完备性口径（下一位评审可据此查漏）：**「close 任务完成后会被唤醒的人」
+     里若含本实例登记的在飞分发任务，就必然构成 task-wait cycle**——因为该分发
+     任务能恢复，前提正是 close 任务先完成。遍历不依赖 contextvars。
+     **代价**只与当前任务自己的唤醒锥有关，与在飞分发条数无关（合法外部关停
+     实测访问 O(1) 节点：600 个在飞分发 + 外部 close ⇒ `visited=1`）。
+     **预算 fail-closed**：唤醒锥在 `_DISPATCH_GRAPH_MAX_NODES = 512` 个节点的
+     预算内**未闭合**时，`close()` 抛第二条具名 `RuntimeError`
+     （`_SELF_CLOSE_BUDGET_REFUSAL`，文案含预算与已访问节点数），
+     **绝不把「证明不出来」当成「允许」**（r4 的「节点上限用满即当作未命中」正是
+     该缺陷家族第四次复发：pads=1500 时 12 个危险形状 12 个漏检）。
+  `close()` 命中 marker / 遍历口径任一即抛 `_SELF_CLOSE_REFUSAL`（具名
+  `RuntimeError`，含可执行出口：在 handler 外关停），命中预算则抛
+  `_SELF_CLOSE_BUDGET_REFUSAL`；**两条都发生在任何关停副作用之前**
+  （`_closing` 保持 `False`、listener 不取消、不进 `_drain_pending_tasks`）。
+  被判据拒绝的 `close()` 也**不再让调用方 teardown 悬置**：X1 的
+  `asyncio.TaskGroup` + `context=Context()` 形状在 r4 会让 `asyncio.run` 的
+  `_cancel_all_tasks` 无法收尾（外部看门狗 SIGKILL/137），r5 拒绝后
+  `asyncio.run` 正常返回（探针 `TEARDOWN_OK`）。
   `asyncio.shield(bus.close())` 因此从 r2 的「bypass-but-named（drain 超时→取消
   在飞分发）」收紧为**具名拒绝**（测
   `Test109NestedSelfCloseGuard::test_shield_close_is_named_refusal`）：该形状的
@@ -192,21 +228,29 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   等待图下游的 `close()`——先取消监听，再等已登记的在飞分发最多
   `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0` 秒；超时逐个 `cancel()` 并打含
   `event_id` / `handler_id` 的 WARNING；返回后不存在「inflight 且无记录」的第三态。
-  从分发任务图内部（marker 或等待图任一命中）的 `close()` 一律具名拒绝，且拒绝在
-  任何关停副作用之前。
+  从分发任务图内部（marker 或完成唤醒边遍历任一命中）的 `close()` 一律具名拒绝，且
+  拒绝在任何关停副作用之前。
 - **T2（声明不在契约内 / 明知的保守行为）**：
   1. **显式换 context**（`create_task(coro, context=contextvars.Context())`）绕过
-     marker，但由等待图兜底覆盖；等待图只认 asyncio 的等待边，不认「作者用其它
-     同步原语自行耦合同一循环」的形状。
-  2. **线程 / executor**：marker 不跨线程；**有在飞分发**时由跨循环围栏具名拒绝，
+     marker，但由完成唤醒边遍历覆盖（r5 实测覆盖：`TaskGroup.create_task(...,
+     context=Context())`、`asyncio.as_completed`、`partial(waiter.set_result)`、
+     `Event._waiters` / `Queue._getters` / `Condition._waiters`）；遍历只认
+     **事件循环自己的唤醒机制**（`_callbacks` + asyncio 的唤醒队列属性），不认
+     「作者用其它同步原语自行耦合同一循环」的形状。
+  2. **唤醒锥预算**（r5 fail-closed 的声明边界）：`close()` 的唤醒锥在 512 节点内
+     **枚举不完**时按「无法证明安全」具名拒绝（`_SELF_CLOSE_BUDGET_REFUSAL`，报出
+     预算）。合法外部关停只访问 O(1) 节点（600 在飞实测 `visited=1`），因此这条
+     边界不会命中合法形状；只有「故意把完成回调链拉到 512 层以上」的病态/对抗形状
+     才会撞上——撞上也是**拒绝**（fail-closed），不是放行。
+  3. **线程 / executor**：marker 不跨线程；**有在飞分发**时由跨循环围栏具名拒绝，
      **无在飞分发时不拦**。
-  3. **两处保守过度拒绝**（r3 验收者 F3：无 task-wait cycle 也被拒；今天无生产
+  4. **两处保守过度拒绝**（r3 验收者 F3：无 task-wait cycle 也被拒；今天无生产
      调用方）：(a) `call_soon` 分离的 `close()`（handler 已返回、`pending == 0`）；
      (b) 分发结束后 detached 任务才调用的 `close()`（marker 随 context 活到该任务
      结束）。二者由 `test_call_soon_detached_close_after_dispatch_is_refused_declared`
      与 `test_detached_task_after_dispatch_still_refused_declared` 钉住；修掉它们会
      削弱已确认的 spawned-not-awaited 拒绝。
-  4. **SIGTERM**：`event_filter.py` 不注册信号处理器，进程直接结束，本条不含信号
+  5. **SIGTERM**：`event_filter.py` 不注册信号处理器，进程直接结束，本条不含信号
      处理；`asyncio.run` 后未调用 `close()` 的路径不在契约内。
 - **副作用口径**：契约是「要么完成、要么被点名」，不是「handler 副作用必为 0」——
   被取消/被拒的分发里，handler 自己 `create_task` 的子任务、或用 `asyncio.shield`
@@ -247,8 +291,21 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 - 代价（Redis 往返 + `model_validate_json`）与**该 correlation 的订阅数**成正比，
   不再与该 `event_type` 的全部订阅数成正比（100 条同类型只 1 次 `data:` GET，
   实测见 `test_correlation_index_cost_is_bounded_by_matches`）。
-- 同条件的 `list_subscriptions(event_type=…, correlation_id=…)` 与
-  `list_subscriptions(correlation_id=…)` 返回同一集合。
+- **合取语义（#110 r5 决定，取代 r3 的「与 correlation 单条件同集合」声明）**：
+  索引只用来**选候选集**，调用方给出的**每一个**过滤条件都必须真正生效（AND）。
+  判据：`list_subscriptions` 是列表/内省查询，memory 与 sqlalchemy 都按 AND 过滤，
+  且本文件一直声称三后端同一集合；r3 及以前 redis 的 correlation 分支只按索引取行、
+  **不再校验 `event_type`** ⇒ `list_subscriptions(event_type='shared.type',
+  correlation_id='CID')` 会把同 correlation 但 **event_type 不同**的行也返回。
+  **真实 Redis（redis:7-alpine，生产配置 `decode_responses=False`）实测**：修复前
+  2 行（`sub-hit` + `sub-wrong-type`），修复后 1 行；memory/sqlalchemy 一直是 1 行。
+  选择「让三后端一致（AND）」而不是把错答写成声明边界：要 `shared.type` 的订阅却
+  静默拿到 `other.type` 是**错答**，而列表查询的合取口径是三后端与调用方直觉的
+  共识。索引选择不变（correlation 优先，`data:` GET 仍只与该 correlation 的候选数
+  成正比、不回落 type 索引、不全量 SCAN）；只是对已取回的候选行做其余条件过滤，
+  不产生额外 Redis 往返。钉住：`tests/unit/test_issue109_110_r5_parity.py`
+  与 `scripts/selfclose_109_110.py` 的 R5 格（三后端 `returned == 1` 且排除
+  `wrongtype` 行、redis `data_GET == 2`）。
 - **`event_type` 必须非空**（F1，r3 对称化）：`EventNode.event_type` 给具名中文原因 +
   `min_length=1`；`EventSubscription.event_type` 由**本类自己的**具名 validator
   （`mode="before"`）承担（拒绝 `""` 与纯空白）——r2 只有 `min_length=1`（pydantic

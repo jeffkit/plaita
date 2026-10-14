@@ -19,9 +19,11 @@
       pending 清空、被取消/被拒的每一条都点名 event_id+handler_id（无第三态）。
   R3  109 shutdown-during-send：**先关停再发** ⇒ refused == n（围栏真的触发）。
   R4  109 retry（retry_policy != None）：任务被登记且收尾被排空（覆盖另一登记点）。
-  R5  110 correlation 索引：redis returned == 2（该 correlation 的订阅数）且
-      data: GET == 2、同类型其它 correlation 的 n 条一条不碰；memory/sqlalchemy
-      list 层双条件预过滤 returned == 1；type-only：三者 returned == n+1；
+  R5  110 correlation 索引（#110 r5 决定：三后端**合取**）：三后端
+      list(event_type=etype, correlation_id=corr) 都 returned == 1，且同 correlation
+      但 event_type 不同的 wrongtype 行被排除；redis 仍走 correlation 索引
+      （data: GET == 2 = 该 correlation 的候选数，不回落 type 索引/不全量 SCAN）、
+      其它 correlation 的 n 条一条不碰；type-only：三者 returned == n+1；
       global：三者 returned == n+2（SCAN 全量）。
   R6  110 parity：同 (corr,type) 下三后端 find_matching_subscriptions 集合相同。
   R7  F1：空 event_type 在 EventNode / EventSubscription 构造期被拒（ValidationError）。
@@ -244,8 +246,13 @@ async def probe_110(backend, index, inbound):
     # 独立谓词：期望只由 (backend, index, n) 决定
     touched_others = [i for i in ids if i.endswith(tuple(f"o{k}" for k in range(n)))]
     if index == "correlation":
-        want = 1 if backend in ("memory", "sqlalchemy") else 2
-        ok = len(ids) == want and not touched_others
+        # #110（r5 决定）：三后端**合取**过滤 ⇒ 只返回 event_type 与
+        # correlation_id 同时命中的那一行；同 correlation 的 wrongtype 行
+        # （event_type 不同）必须被排除。redis 仍走 correlation 索引（data_GET
+        # 只与该 correlation 的候选数成正比、不回落 type 索引/不全量 SCAN）。
+        want = 1
+        ok = (len(ids) == want and not touched_others
+              and not any(i.endswith("wrongtype") for i in ids))
         if backend == "redis":
             ok = ok and data_gets == 2
         detail = (f"returned={len(ids)} data_GET={data_gets} "
