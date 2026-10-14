@@ -120,7 +120,69 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 
 外延服务监听到外部触发（如审批通过）后 `publish` 一个 `correlation_id=execution_id` 的事件，`FlowWorker` 据此找到挂起流程并恢复（见 [FlowWorker](flow-worker.md)）。
 
+## Redis 分发任务生命周期（#109）
+
+`RedisEventBus._process_message` 对每条入站消息建一个 fire-and-forget 分发任务，
+并用 `_pending_tasks`（`{task: (event_id, handler_id)}`）持强引用——与
+`InMemoryEventBus._track_task` 同一机制。关停契约（实测见
+`tests/unit/test_issue109_110_event_redis_parity.py` 与
+`scripts/selfclose_109_110.py`）：
+
+- `close()` 先取消监听任务，再等**已登记**的在飞分发任务，最多
+  `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0` 秒；仍未完成的逐个 `cancel()`，并对每个
+  被取消的任务打一条 `WARNING`，含 `event_id` 与 `handler_id`。
+- `close()` 返回后不存在「inflight 且无处理记录」的第三态：每个分发要么
+  handler 完成并 `mark_event_processed`，要么被取消且已点名。
+- `close()` 开始后到达的分发被**拒绝并点名**（`_closing` 围栏），不会绕过 drain
+  静默创建。
+- **取消窗口也点名**（F2）：`close()` 先取消监听任务，而监听器是内联 `await`
+  `_process_message` 的；若在首个 await（`is_event_processed` 的 Redis 往返）处被
+  取消，`CancelledError`（BaseException）会被显式捕获、打出含 `event_id` /
+  `handler_id` 的 WARNING 后再抛出——不允许「既不完成、也不点名」。
+- **`close()` 不得从自己的分发 handler 内调用**（F2/验收者补的形状）：那会把自身
+  纳入 drain 并自取消，最终 `RecursionError`。命中时抛具名 `RuntimeError`（含可
+  执行出口：在 handler 外关停）。
+- `EventFilter` CLI（`plaita/server/event_filter.py:main_async`）在 `finally` 中
+  `await event_bus.close()`；调用方若直接 `asyncio.run` 后不调用 `close()`，
+  在飞分发仍会被 loop 取消——**契约要求调用方 close**。
+
+覆盖边界（不宣称「任何情况都不丢」）：GC 压力下任务不被回收（实测）；常规运行
+（不关停）分发照常跑完；SIGTERM 无信号处理时进程直接结束（`event_filter.py`
+不注册信号处理器），本条不含信号处理；`asyncio.run` 后未调用 `close()` 的路径
+不在契约内。**副作用口径**：契约是「要么完成、要么被点名」，不是「handler 副作用
+必为 0」——被取消/被拒的分发里，handler 自己 `create_task` 的子任务或用
+`asyncio.shield` 包住的片段可能在 `close()` 返回后照常产生副作用；本条只保证
+**不静默**。
+
+## Redis 订阅查询索引与代价界（#110）
+
+`RedisEventSubscriptionStorage.list_subscriptions` 的索引优先级是
+**correlation_id → event_type → flow_id → node_id → 全量 SCAN**。给出
+`correlation_id` 时走 `{prefix}correlation:{id}` 索引：
+
+- 代价（Redis 往返 + `model_validate_json`）与**该 correlation 的订阅数**成正比，
+  不再与该 `event_type` 的全部订阅数成正比（100 条同类型只 1 次 `data:` GET，
+  实测见 `test_correlation_index_cost_is_bounded_by_matches`）。
+- 同条件的 `list_subscriptions(event_type=…, correlation_id=…)` 与
+  `list_subscriptions(correlation_id=…)` 返回同一集合。
+- **`event_type` 必须非空**（F1）：`EventNode.event_type` 与
+  `EventSubscription.event_type` 都 `min_length=1`，`EventNode` 另给具名中文原因
+  （空类型会被 `matches_event` 的 falsy 语义当通配，而 memory/sqlalchemy 的 list
+  过滤是严格 `!=`，三后端会对「空类型订阅」分叉；如需通配请显式写 `"*"`）。
+  构造期即 `ValidationError`，作者/编译器与存储写入口都拒。
+- 三后端对齐**只在生产路径** `EventSubscriptionStorage.find_matching_subscriptions`
+  成立（`scripts/selfclose_109_110.py` 的 parity 格：`['hit']`）。原始
+  `list_subscriptions` 层有一个**已写明**的差异：给了 `correlation_id` 时 Redis 返回
+  **该 correlation 的全部订阅**（含别的 event_type；list 层不预过滤 event_type，
+  实测 `returned=2`），memory / sqlalchemy 在 list 层同时过滤两个条件（实测
+  `returned=1`）；两者经 `matches_event` 后一致。
+- `correlation_id` 为空时既有单条件路径行为不变（type/flow/node 索引、全量 SCAN）；
+  全量 SCAN 路径按**已知前缀** `{prefix}data:` 剥离 id（不再 `split(':')[-1]`）——
+  后者在 `subscription_id` 含 `:` 时取到截断值、GET 落空而**静默返回空**。
+
+
 ## 下一步
 
 - [Checkpoint 概念](checkpoint.md)
 - [API: plaita.event.core](../api/event.md)
+
