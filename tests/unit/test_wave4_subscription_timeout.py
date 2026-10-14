@@ -210,6 +210,32 @@ class TestFilterHostedTimeoutChecker:
         # 去重键已落位（挡住后续重发）
         assert redis_client.exists(TIMEOUT_DEDUP_PREFIX + sub.subscription_id) == 1
 
+    def test_timeout_callback_failure_propagates(self):
+        """#153 前提②：超时回调的失败不再被包装吞成日志——上抛给 _check_loop。
+
+        （``_check_loop`` 在调用点记 ERROR 后进入下一轮；失败对上层可观察，
+        订阅超时唤醒链路不再"静默丢"。）
+        """
+        execution_storage, subscription_storage, redis_client = self._make_storages()
+        self._save_suspended(execution_storage)
+        sub = self._timed_out_subscription()
+        run(subscription_storage.store_subscription(sub))
+
+        ef = self._make_filter(execution_storage, subscription_storage, redis_client)
+        calls = []
+
+        async def _broken_callback(subscription):
+            calls.append(subscription.subscription_id)
+            raise ConnectionError("simulated callback outage")
+
+        # 真实回调先跑（入队 1 条），随后坏回调把异常顶到 _check_timeouts 之外
+        ef._timeout_checker.register_timeout_callback(_broken_callback)
+        with pytest.raises(ConnectionError):
+            run(ef._timeout_checker._check_timeouts())
+
+        assert calls == [sub.subscription_id], "坏回调根本没跑（断言空转）"
+        assert len(self._stream_payloads(redis_client, "test:wave4-queue")) == 1
+
     def test_dedup_blocks_second_trigger(self):
         """同一 checker 第二轮检查（订阅尚未来得及注销）不重复入队。"""
         execution_storage, subscription_storage, redis_client = self._make_storages()

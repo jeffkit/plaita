@@ -368,6 +368,42 @@ class TestReconcileLifecycle(ReconcileTestBase):
 
         run(_test())
 
+    def test_periodic_loop_survives_failed_round(self):
+        """#153：失败轮上抛不得终止回扫循环——`_run_loop` 记日志后继续下一轮。
+
+        对象：`scan_once` 被调用 ≥2 次（失败轮之后循环仍在转），且恢复轮把
+        该事件真正补偿进 stream（1 条 resume）。
+        """
+
+        async def _test():
+            await self._setup_pending_async()
+            await self._store_event_directly_async()
+            reconciler = self._make_reconciler(interval_seconds=0.05)
+
+            calls = {"n": 0}
+            real_scan = reconciler.scan_once
+
+            async def _flaky_scan():
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise ConnectionError("simulated transient Redis outage")
+                return await real_scan()
+
+            reconciler.scan_once = _flaky_scan
+            await reconciler.start()
+            await asyncio.sleep(0.3)
+            await reconciler.stop()
+
+            self.assertGreaterEqual(
+                calls["n"], 2, "失败轮后回扫循环没有继续（单轮异常终止了循环）"
+            )
+            self.assertEqual(
+                len(_stream_payloads(self.redis_client, self.QUEUE)), 1,
+                "失败后的恢复轮没有补偿该事件",
+            )
+
+        run(_test())
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -379,12 +415,10 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
     规则：``handle_event`` / ``_on_subscription_timeout`` 中「占去重键 → 入队」
     两步，入队抛错时**删除刚占的键**（成功路径保持键，多实例 NX 去重不变）。
 
-    重抛的可见范围（措辞钉死，勿夸大）：两条路径的 ``raise`` 只保证「方法体内
-    不被静默吞掉」——``handle_event`` 的最外层 ``except`` 立刻把它记成日志
-    （调用方观察不到，见
-    ``test_handle_event_failure_is_swallowed_at_method_boundary``）；超时链路的
-    上抛到直接调用方后被 ``event/timeout.py:81-84`` 的回调包装记成日志。可重放
-    性来自**释放去重键**，不来自重抛。
+    #153 起失败可见性升级（措辞同步钉死）：``handle_event`` 最外层 ``except``
+    记 ERROR 后**继续上抛**（``test_handle_event_failure_propagates_to_caller``）；
+    超时回调包装 ``event/timeout.py`` 同样记 ERROR 后上抛。可重放性依旧来自
+    **释放去重键**。
     """
 
     def test_failed_enqueue_releases_dedup_key_and_replay_enqueues(self):
@@ -398,7 +432,9 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
 
         self.redis_client.xadd = broken_xadd
         try:
-            run(self.event_filter.handle_event(event))  # 异常被最外层吞成日志
+            with pytest.raises(ConnectionError):
+                # #153：失败上抛（最外层 except 记 ERROR 后 raise），不再被吞
+                run(self.event_filter.handle_event(event))
         finally:
             self.redis_client.xadd = real_xadd
 
@@ -428,8 +464,8 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
 
         self.redis_client.xadd = broken_xadd
         try:
-            # 失败**上抛到直接调用方**（生产里 timeout.py 的回调包装立即记日志，
-            # 终端用户同样观察不到），关键是键已归还，下一轮 checker 能真正入队。
+            # 失败**上抛到直接调用方**（生产里 timeout.py 的回调包装记 ERROR 后
+            # 继续上抛给 _check_loop），关键是键已归还，下一轮 checker 能真正入队。
             with pytest.raises(ConnectionError):
                 run(self.event_filter._on_subscription_timeout(subscription))
         finally:
@@ -445,12 +481,12 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
         assert tasks[0]["resume_type"] == "timeout"
         assert len(self.redis_client.keys("plaita:event_filter:timeout:*")) == 1
 
-    def test_handle_event_failure_is_swallowed_at_method_boundary(self):
-        """#87 措辞钉死：``handle_event`` 的入队失败**不会**被调用方观察到。
+    def test_handle_event_failure_propagates_to_caller(self):
+        """#153：``handle_event`` 的入队失败**必须**被调用方观察到（上抛）。
 
-        方法体内的 ``raise`` 随即落入它自己的最外层 ``except Exception``
-        （event_filter.py:239-240）⇒ 调用方只拿到正常返回 + 一条 ERROR 日志。
-        把该 ``except`` 改成再 ``raise``（即"对上抛"的措辞）会立刻让本用例红。
+        #87 r4 曾钉住"被最外层 except 吞掉"的旧语义；#153 判定那是错误语义：
+        回扫器正是靠这层上抛才不会把失败计成 replayed、才不推进游标。这里同时
+        钉住"响亮"（ERROR 日志仍在）与"键已释放"（重放前提不变）。
         """
         self._setup_pending()
         event = self._store_event_directly()
@@ -467,15 +503,9 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
         try:
             lg.setLevel(logging.DEBUG)          # 保证 ERROR 记录一定被创建
             # 对象前置：失败真实发生（下面断言键已释放 + stream 空），
-            # 而**没有任何异常逃出** handle_event ⇒ 调用方观察不到失败。
-            try:
-                result = run(self.event_filter.handle_event(event))
-            except Exception as exc:            # 措辞若被改回「对上抛」会到这里
-                self.fail(f"handle_event 把入队失败上抛给调用方: {exc!r}")
-            self.assertIsNone(
-                result,
-                "handle_event 应正常返回（失败被自己的最外层 except 吞掉）",
-            )
+            # 且异常**逃出** handle_event ⇒ 调用方可观察。
+            with pytest.raises(ConnectionError):
+                run(self.event_filter.handle_event(event))
         finally:
             self.redis_client.xadd = real_xadd
             lg.removeHandler(cap)
@@ -483,6 +513,96 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
 
         assert self.redis_client.keys("plaita:event_filter:dedup:*") == []
         assert _stream_payloads(self.redis_client, self.QUEUE) == []
-        # 失败唯一的落地形态 = 日志；没有它就成了纯静默
+        # 响亮 + 上抛并存：失败不是纯静默
         self.assertTrue(cap.lines, "失败既不上抛也没有日志（纯静默）")
         self.assertTrue(any("处理事件出错" in line for line in cap.lines), cap.lines)
+
+
+class TestScanOnceFailureKeepsCursorAndCountsRejected(ReconcileTestBase):
+    """plaita#153：回扫轮的失败不得计成 replayed，也不得推进游标。
+
+    规则（独立谓词）：``scan_once`` 回放任一事件失败 ⇒ 本轮
+    ``last_replayed == 0``、``last_rejected == 1``、游标**逐字节不变**、
+    异常上抛；Redis 恢复后下一轮把该事件真正重放（``stream len == 1``）。
+    """
+
+    @staticmethod
+    def _break_xadd(redis_client):
+        real = redis_client.xadd
+
+        def broken(*args, **kwargs):
+            raise ConnectionError("simulated transient Redis outage")
+
+        redis_client.xadd = broken
+        return real
+
+    def test_failed_round_does_not_advance_cursor_and_next_round_replays(self):
+        self._setup_pending()
+        cursor0 = time.time()
+        self.redis_client.set(EventReconciler.CURSOR_KEY, str(cursor0))
+        self._store_event_directly(timestamp=time.time())   # 落在 (cursor0, now]
+        reconciler = self._make_reconciler(backfill_seconds=3600)
+
+        real = self._break_xadd(self.redis_client)
+        try:
+            with pytest.raises(ConnectionError):
+                run(reconciler.scan_once())
+        finally:
+            self.redis_client.xadd = real
+
+        # 对象：失败真实发生（键已释放、stream 空）+ 计数 0/1
+        self.assertEqual(self.redis_client.keys("plaita:event_filter:dedup:*"), [])
+        self.assertEqual(_stream_payloads(self.redis_client, self.QUEUE), [])
+        self.assertEqual(reconciler.last_replayed, 0)
+        self.assertEqual(reconciler.last_rejected, 1)
+        # 核心断言：游标逐字节不变（旧行为在这里推进到 window_end）
+        self.assertEqual(
+            self.redis_client.get(EventReconciler.CURSOR_KEY), str(cursor0),
+            "失败轮推进了游标 ⇒ 失败事件被永久跳过",
+        )
+
+        # Redis 恢复 → 下一轮真正重放（失败事件仍在窗口内）
+        replayed = run(reconciler.scan_once())
+        self.assertEqual(replayed, 1)
+        tasks = _stream_payloads(self.redis_client, self.QUEUE)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["type"], "resume")
+        self.assertEqual(tasks[0]["execution_id"], "exec-r1")
+        self.assertEqual(reconciler.last_replayed, 1)
+        self.assertEqual(reconciler.last_rejected, 0)
+
+    def test_rejected_counter_is_per_round(self):
+        """计数按轮重置：成功轮 (1,0) → 失败轮 (0,1) → 恢复轮 (1,0)。"""
+        self._setup_pending()
+        self._store_event_directly()
+        reconciler = self._make_reconciler()
+
+        # 成功轮（对象：真的入队一条）
+        self.assertEqual(run(reconciler.scan_once()), 1)
+        self.assertEqual(
+            (reconciler.last_replayed, reconciler.last_rejected), (1, 0)
+        )
+        self.assertEqual(len(_stream_payloads(self.redis_client, self.QUEUE)), 1)
+
+        # 第二个事件 + xadd 瞬断：本轮 rejected=1 / replayed=0（按轮重置）
+        time.sleep(0.02)
+        self._store_event_directly()
+        real = self._break_xadd(self.redis_client)
+        try:
+            with pytest.raises(ConnectionError):
+                run(reconciler.scan_once())
+        finally:
+            self.redis_client.xadd = real
+
+        self.assertEqual(
+            (reconciler.last_replayed, reconciler.last_rejected), (0, 1),
+            "失败轮计数错误（replayed 未归零或 rejected 未计数）",
+        )
+        self.assertEqual(len(_stream_payloads(self.redis_client, self.QUEUE)), 1)
+
+        # 恢复轮：失败事件补入队，计数回到 (1,0)
+        self.assertEqual(run(reconciler.scan_once()), 1)
+        self.assertEqual(
+            (reconciler.last_replayed, reconciler.last_rejected), (1, 0)
+        )
+        self.assertEqual(len(_stream_payloads(self.redis_client, self.QUEUE)), 2)

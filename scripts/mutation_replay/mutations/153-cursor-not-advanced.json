@@ -1,0 +1,12 @@
+{
+  "name": "153-cursor-not-advanced",
+  "issue": "153",
+  "concern": "规则子句：失败轮回扫游标不得推进",
+  "file": "plaita/server/event_reconcile.py",
+  "old": "                    event.event_id, replayed, self.last_rejected, e,\n                    exc_info=True,\n                )\n                raise",
+  "new": "                    event.event_id, replayed, self.last_rejected, e,\n                    exc_info=True,\n                )\n                self._save_cursor(window_end)\n                raise",
+  "rationale": "失败分支先 _save_cursor(window_end) 再上抛 ⇒ 回到 #153 的缺陷形态：失败事件被游标永久跳过",
+  "expect_fail": [
+    "tests/unit/test_event_reconcile.py::TestScanOnceFailureKeepsCursorAndCountsRejected::test_failed_round_does_not_advance_cursor_and_next_round_replays"
+  ]
+}

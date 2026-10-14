@@ -81,4 +81,8 @@ class SubscriptionTimeoutChecker:
                         try:
                             await callback(subscription)
                         except Exception as e:
-                            logger.error("超时回调执行出错: %s", e) 
+                            logger.error("超时回调执行出错: %s", e, exc_info=True)
+                            # #153：回调失败不得被抹平成日志——上抛给 _check_loop
+                            # （调用点记 ERROR 后进入下一轮重试），让失败对上层
+                            # 可观察（订阅超时唤醒链路不再"静默丢"）。
+                            raise

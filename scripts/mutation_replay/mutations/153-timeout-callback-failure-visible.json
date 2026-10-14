@@ -1,0 +1,12 @@
+{
+  "name": "153-timeout-callback-failure-visible",
+  "issue": "153",
+  "concern": "规则子句：超时回调包装记日志后必须上抛",
+  "file": "plaita/event/timeout.py",
+  "old": "logger.error(\"超时回调执行出错: %s\", e, exc_info=True)\n                            # #153：回调失败不得被抹平成日志——上抛给 _check_loop\n                            # （调用点记 ERROR 后进入下一轮重试），让失败对上层\n                            # 可观察（订阅超时唤醒链路不再\"静默丢\"）。\n                            raise",
+  "new": "logger.error(\"超时回调执行出错: %s\", e, exc_info=True)\n                            # #153：回调失败不得被抹平成日志——上抛给 _check_loop\n                            # （调用点记 ERROR 后进入下一轮重试），让失败对上层\n                            # 可观察（订阅超时唤醒链路不再\"静默丢\"）。\n                            pass",
+  "rationale": "回调包装改回吞掉（pass）⇒ 订阅超时唤醒失败只剩日志、对上层不可观察",
+  "expect_fail": [
+    "tests/unit/test_wave4_subscription_timeout.py::TestFilterHostedTimeoutChecker::test_timeout_callback_failure_propagates"
+  ]
+}

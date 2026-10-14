@@ -216,11 +216,11 @@ class EventFilter:
                     # 路上没有重放入口。释放后下一次重投/回扫才能真正入队；
                     # 成功的入队仍然保留键，维持多实例并发去重（现状不变）。
                     #
-                    # 重抛的可见范围（勿夸大）：这里的 raise 只到本方法体内，
-                    # 随即被 handle_event 最外层 except（:239-240）记成一条
-                    # "处理事件出错" ERROR 后吞掉——**调用方观察不到失败**
-                    # （实测 handle_event propagated: []）。可重放性完全来自
-                    # 「释放去重键」，不来自重抛。
+                    # #153 更新：这里的 raise 现在会一路传到调用方——
+                    # handle_event 最外层 except（:239-243）记一条
+                    # "处理事件出错" ERROR 后**继续上抛**（不再吞掉）：
+                    # 回扫器据此不推进游标、改计 rejected；推送链路是
+                    # fire-and-forget，由 event/redis.py 的包装接收。
                     try:
                         enqueue_task(self.redis_client, self.queue_name, resume_task)
                     except Exception:
@@ -244,6 +244,12 @@ class EventFilter:
             
         except Exception as e:
             logger.error("处理事件出错: %s", e, exc_info=True)
+            # #153：失败必须对调用方可观察——回扫器据此**不推进游标**、改计
+            # `last_rejected`（plaita/server/event_reconcile.py:scan_once）。推送
+            # 链路是 fire-and-forget，由 event/redis.py 的 `_process_event` /
+            # `_process_with_retry` 在上一层接收（记 error 尝试 + 重试），不会逃逸
+            # 成"Task exception was never retrieved"。
+            raise
     
     async def _on_subscription_timeout(self, subscription: EventSubscription) -> None:
         """SubscriptionTimeoutChecker 回调：订阅超时 → 入队 resume_type=timeout。
@@ -319,10 +325,10 @@ class EventFilter:
 
         # #87：与事件链路同款——超时入队失败释放去重键，让下一次 checker
         # 轮次或重投能真正入队（而不是被自己的 NX 键挡到 TTL 到期）。
-        # 措辞边界：这里的 raise **会**到直接调用方，但生产调用方是
-        # SubscriptionTimeoutChecker 的回调包装（event/timeout.py:81-84），
-        # 它同样把异常记成一条 ERROR 日志——终端用户依旧观察不到失败；
-        # 可重放性同样来自释放去重键。
+        # #153 更新：这里的 raise 会到直接调用方；生产调用方是
+        # SubscriptionTimeoutChecker 的回调包装（event/timeout.py:80-86），
+        # 该包装记 ERROR 后**继续上抛**到 `_check_loop`（记日志、下轮重试）——
+        # 失败不再被抹平。
         try:
             enqueue_task(self.redis_client, self.queue_name, resume_task)
         except Exception:
