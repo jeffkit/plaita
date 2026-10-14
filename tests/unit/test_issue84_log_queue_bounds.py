@@ -84,12 +84,46 @@ class TestIssue84QueueBounds(unittest.TestCase):
         self.assertTrue(any("丢弃" in line for line in cap.lines), cap.lines[:2])
 
     def test_failure_reinjection_is_bounded(self):
-        h = _handler(_FailingRedis(), max_queue=100)
-        for _ in range(100):
+        """子句②：flush 失败时**并发追加**导致合并越界 ⇒ 必须截断回上限并计数。
+
+        （r2 的版本用"恰好不超上限"的场景，关掉 overflow 也不会红 ⇒ 断言无效。）
+        """
+        max_q = 100
+
+        class _ConcurrentFailingRedis:
+            """execute 前**并发**追加 max_q 条（模拟 flush 期间的高频日志），然后失败。"""
+
+            def __init__(self):
+                self.handler = None
+
+            def pipeline(self):
+                for _ in range(max_q):
+                    self.handler.emit(_record())
+                raise RuntimeError("redis down")
+
+        client = _ConcurrentFailingRedis()
+        h = _handler(client, max_queue=max_q)
+        client.handler = h
+        for _ in range(max_q):
             h.emit(_record())
-        h._flush()                                       # 失败 ⇒ 回灌同一批
-        self.assertLessEqual(len(h._queue), h.max_queue)
-        self.assertEqual(h.dropped_count, 0)             # 100 条回灌不超上限 ⇒ 不丢
+        pre_dropped = h.dropped_count
+        cap = _AuditCapture()
+        _audit_logger.addHandler(cap)
+        try:
+            h._flush()                                  # 越界回灌
+        finally:
+            _audit_logger.removeHandler(cap)
+        self.assertLessEqual(
+            len(h._queue), max_q,
+            f"回灌越界未被截断：queue={len(h._queue)} > max_queue={max_q}",
+        )
+        # 独立谓词：entries(max_q) + 并发追加(max_q) - 上限(max_q) = max_q 条被丢
+        self.assertEqual(h.dropped_count - pre_dropped, max_q)
+        self.assertTrue(
+            any(("回灌" in line and "丢弃最旧" in line and "累计丢弃" in line)
+                for line in cap.lines),
+            f"回灌截断没有可定位的审计告警: {cap.lines[:2]}",
+        )
 
     def test_recovery_is_lossless(self):
         client = _WorkingRedis()
@@ -102,17 +136,41 @@ class TestIssue84QueueBounds(unittest.TestCase):
         self.assertGreater(client.commands, 0)
 
     def test_failure_warning_is_not_self_captured(self):
+        """子句④：审计告警不得出现在父 logger（`plaita`）的 handler 上。
+
+        r2 的版本用 `lg.info(...)` 入队，但 `plaita` 的有效级别是 WARNING（root 默认）
+        ⇒ **INFO 记录根本没产生**、队列为空、`_flush()` 首行 `if not self._queue: return`
+        直接返回 ⇒ 断言恒真（这就是该变异存活至今的根因）。这里改为：直接 `h.emit(...)`
+        保证队列非空，并在父 logger 上挂内存 handler 观察**审计记录**。
+        """
         lg = logging.getLogger("plaita")
+        cap = _AuditCapture()
+        cap.seen_names = []
+        _orig_emit = cap.emit
+
+        def _emit(record):
+            cap.seen_names.append(record.name)
+            _orig_emit(record)
+
+        cap.emit = _emit
         h = _handler(_FailingRedis(), max_queue=100)
-        lg.addHandler(h)
+        lg.addHandler(cap)
         try:
-            lg.info("one record")
-            mid = len(h._queue)
-            h._flush()                                   # 失败 ⇒ 产出告警
-            after = len(h._queue)
+            for _ in range(3):
+                h.emit(_record())                        # 队列非空 ⇒ flush 真的会失败
+            queue_before = len(h._queue)
+            self.assertEqual(queue_before, 3)
+            h._flush()
         finally:
-            lg.removeHandler(h)
-        self.assertEqual(after, mid, "刷新失败告警被自己的 handler 收进队列（自噬）")
+            lg.removeHandler(cap)
+        audit_records = [n for n in cap.seen_names if n == _audit_logger.name]
+        self.assertEqual(len(audit_records), 0,
+                         "审计告警冒泡到父 logger ⇒ 会被本 handler 收进队列（自噬）")
+        # 日志框架层面的前置条件（保证上面的 0 不是"根本没发"或"没挂 handler"）
+        self.assertIs(_audit_logger.propagate, False,
+                      "审计 logger 必须 propagate=False")
+        self.assertGreater(len(_audit_logger.handlers), 0,
+                           "审计 logger 必须有自有 handler（否则告警不可观测）")
 
     def test_matrix_independent_predicate(self):
         """{全失败, 恢复} × {低, 高} × {默认上限, 自定义上限} 的笛卡尔积。
