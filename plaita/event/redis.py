@@ -2219,6 +2219,15 @@ class RedisEventBus(EventBus):
             （组件其实关过一次）。这是**保守误报**（**绝不**静默成功，且调用方可重试），
             且**无法关闭**：「入口跑没跑」没有任何不可伪造的信号（``_teardown_runs`` 是
             工厂可写字段，用它就会像 r12 的负控那样压住具名结局）。
+          * **R-12a'（冻结体里 ``self._spawn_teardown`` 的实例影子）**：本方法的可执行体
+            逐字节冻结，里面 ``teardown_task = self._spawn_teardown(loop)`` 与
+            ``self._on_teardown_done`` 都是 ``getattr(self, ...)``。前者**故意保留**可影子
+            ——r8 的 F1/同步形状与 r9 的同步失败用例**正是**靠替换它驱动 spawn 路径（测试缝），
+            任何「让它不可影子」的收口都会把那些已验证用例变成空测。因此 r14 **不收口**：
+            影子返回一个不可跟踪的对象（例如 pending future）时，本方法会照常把它当成
+            teardown 句柄、而真凭据无人结算 ⇒ **不声称有界**（进程内对手面，R-12a 同族）。
+            后者只是取用/留档回调；判决与结算由 ``_bind_round`` **先注册**的闭包看门狗
+            （走 ``asyncio.Task`` 的 C 函数）完成 ⇒ 影子有界、具名、改不了调用方看到的结果。
         """
         if self._close_future is not None:
             return self._close_future
@@ -2998,6 +3007,11 @@ class RedisEventBus(EventBus):
             不在完成路径上（影子最多让围栏误判成 bounded 裸抛或跳过，不能让 future 悬置、
             也不能改判决）；``self._pending_tasks`` / ``self._close_future`` 本身是工厂可写
             字段（R-12a/R-13b/R-13c 已具名）。
+          * **冻结体（``request_close``）里的两处 ``self.`` 方法查找**：``self._spawn_teardown``
+            是**故意的测试缝**（r8/r9 的 F1、同步形状用例靠替换它驱动 spawn 路径），任何
+            收口都会把那些已验证用例变成空测 ⇒ 明示为 **R-12a'**、**不声称有界**；
+            ``self._on_teardown_done`` 只是取用/留档回调，判决与结算由**先注册**的闭包看门狗
+            （C 函数）完成 ⇒ 影子有界、具名、改不了调用方看到的结果。
           * **钉回与镜像**（N2）：受理点与判定点都把受理时捕获的真 future 钉回总线字段，
             并把结局镜像到诱饵上 ⇒ 第二/第三次 ``close()`` 不再挂起；失败重试那一轮的凭据
             在 ``_ACCEPTED_CLOSE_FUTURES`` 里，绝不被旧一轮覆盖。

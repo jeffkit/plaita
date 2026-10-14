@@ -394,7 +394,9 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `_task_uses_stdlib_methods` 因此**降级为廉价预检**（类表那层它做得对且便宜），不再是
   唯一闸门。**仅剩的动态查找**是 `request_close` 可执行体里那两行（逐字节冻结，见「三处
   口径更正」）；它们只对**通过三道闸**的 Task 执行，因此解析到的一定是 stdlib 本体，
-  而且**判定/结算（看门狗）根本不经过那两行**。
+  而且**判定/结算（看门狗）根本不经过那两行**。**r14 补充**：冻结体里还有两处 `self.`
+  方法查找（`self._spawn_teardown` / `self._on_teardown_done`）——前者是**故意的测试缝**、
+  明示为 R-12a'（不声称有界），后者已证明改不了调用方看到的结果；逐条见下 r14 小节。
   钉住：`tests/unit/test_issue109_110_r13_parity.py`（**22 用例**，`--collect-only` 实测；
   含一个**同步**用例 `test_uvloop_task_type_is_accepted_if_available`——r13 把计数写成
   「21」时漏了它；其余全部 2 s 有界看门狗；
@@ -425,6 +427,8 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   | `asyncio.shield(self._close_future)` / `shield(self.request_close())` | 换 `_await_close_future`（引擎自建 waiter） |
   | `self.request_close()` / `self._self_close_refusal(...)` | 改 `RedisEventBus.request_close(self)` / `RedisEventBus._self_close_refusal(self, current)`（绕过实例影子；钉住：`test_shadowed_request_close_and_refusal_are_never_consulted`） |
   | 跨循环围栏里的 `task.done()` / `task.get_loop()`（**在飞分发**任务，不在完成路径上） | 保留：影子最多让围栏 bounded 裸抛或跳过，不能让 future 悬置、也不能改判决（钉住：`test_poisoned_pending_tasks_fence_only_fails_bounded`） |
+  | 冻结体里的 `self._spawn_teardown(loop)`（r14 枚举到的尾巴） | **故意保留实例可影子**（r8 F1/同步形状与 r9 同步失败用例的**测试缝**）：不受理可跟踪 Task 的影子会让真凭据无人结算 ⇒ 明示 **R-12a'**、不声称有界（钉住：`test_spawn_teardown_seam_is_honored_and_declared_unbounded`） |
+  | 冻结体里的 `self._on_teardown_done`（同一个 Task 的第二个 done 回调） | 影子只做取用/留档；判决与结算由**先注册**的闭包看门狗（C 函数）完成 ⇒ 有界、具名、改不了调用方看到的结果（钉住：`test_on_teardown_done_shadow_only_touches_the_record`） |
   | `self._pending_tasks` / `self._close_future` 本身（工厂可写字段） | R-12a / R-13b / R-13c 已具名，不声称关闭 |
 
   **N2（第二次 `close()` 挂起）的修法**：受理点（`_bind_round`）与判定点（`_watch_round`）
@@ -443,8 +447,8 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   factory 让 teardown 在 `create_task` 里**同步**跑完（早于受理点钉回），该形状仍是
   **保守误报**（具名 `teardown-never-entered`、组件关过一次、绝不静默成功）；无法关闭，
   因为「入口跑没跑」没有不可伪造的信号（`_teardown_runs` 是工厂可写字段，用它就会像 r12 的
-  负控那样压住具名结局）。钉住：`test_issue109_110_r14_parity.py`（**21 用例**，
-  `--collect-only` 在 3.10/3.11/3.12/3.13 上都量到 21；其中 eager 那条在 3.10/3.11 上
+  负控那样压住具名结局）。钉住：`test_issue109_110_r14_parity.py`（**23 用例**，
+  `--collect-only` 在 3.10/3.11/3.12/3.13 上都量到 23；其中 eager 那条在 3.10/3.11 上
   **skip**，因为那两个运行时没有 `asyncio.eager_task_factory`）。
 - **r12/B：判据不再问**对象自己**（r11 的 `__eq__`/`__func__`/逐次动态访问被替换）**：
   r11 的 `_task_uses_stdlib_methods` 用对象提供的 `__eq__`/`__func__` 做「绑定比较」，
@@ -507,6 +511,15 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
     `create_task` 里同步跑完，`_teardown` 的 finally 读到的 `self._close_future` 已被换成
     诱饵 ⇒ 真 future 在判定点被钉回并结算成 `teardown-never-entered`（组件其实关过一次）。
     **保守误报**（绝不静默成功）；无法关闭：没有不可伪造的「入口跑过」信号。
+  * **R-12a'（替换冻结体里的 `self._spawn_teardown`）**：`request_close` 的可执行体逐字节
+    冻结，里面 `self._spawn_teardown(loop)` 是**实例可影子**的——这是**故意的测试缝**
+    （r8 的 `test_close_future_and_closing_set_before_teardown_spawn` /
+    `test_synchronous_teardown_completion_still_settles_future` 与 r9 的
+    `test_synchronous_failure_does_not_backfill_dead_teardown_task` 都靠替换它驱动 spawn
+    路径）。任何「让它不可影子」的收口都会让这三条已验证用例变成**空测**，所以 r14 不收口：
+    影子返回一个不返回可跟踪 Task 的对象时，冻结体拿到任意对象、真凭据无人结算 ⇒
+    **不声称有界**（R-12a 的进程内对手面）。实测（看门狗 2 s）：`HANG/TIMEOUT`、
+    `comps=[0×5]`；钉住：`test_spawn_teardown_seam_is_honored_and_declared_unbounded`。
   * **为什么不引入计时器**：能拿到的最强完成事件就是「受理的 Task 结束」（以及
     「future 已结算」）；比它更弱的只能是自己设超时——那会把「还在关」误报成「关完」，
     与 r8/G3「失败不伪装成功」的口径冲突。所以 R-1/R-4（以及 R-13a 的完成簿记篡改、R-14a）

@@ -644,6 +644,74 @@ class Test109R14TamperSignalBounds(unittest.IsolatedAsyncioTestCase):
 
 
 # --------------------------------------------------------------------------
+# 冻结体（request_close）里剩下的两处 `self.` 查找：能证的证，证不了的明示
+# --------------------------------------------------------------------------
+def _factory_shadow_on_teardown_done(loop, coro, **kwargs):
+    """工厂在 spawn 内部替换 ``self._on_teardown_done``（冻结体随后那次查找会解析到它）。"""
+    if not _is_our_entry(coro):
+        return _new_task(coro, loop, kwargs)
+    bus = coro.cr_frame.f_locals["self"]
+
+    def noop(*a, **k):
+        _APPLIED.append({"on_teardown_done_shadow": True})
+
+    bus._on_teardown_done = noop
+
+    async def other():
+        return "not-teardown"
+    return _new_task(other(), loop, kwargs)
+
+
+class Test109R14FrozenBodyLookups(unittest.IsolatedAsyncioTestCase):
+    """`request_close` 可执行体逐字节冻结，里面还有两处 `self.` 查找（N8 的枚举尾巴）。
+
+    * ``self._spawn_teardown(loop)``：**故意**保留实例可影子——r8 的 F1/同步形状用例与 r9
+      的同步失败用例正是靠替换它来驱动 spawn 路径（测试缝）。替换成不返回可跟踪 Task 的
+      对象时真凭据无人结算 ⇒ 属 R-12a（工厂可写 `self`），**不声称有界**；这里用看门狗钉住
+      这个明示残差（R-12a'），谁把文档写成「已收口」这条就会红。
+    * ``self._on_teardown_done``：只是**取用/留档**回调；判决与结算由先注册的闭包看门狗
+      （C 函数）完成 ⇒ 影子只可能改留档，改不了调用方看到的结果。下面证明这一点。
+    """
+
+    def setUp(self):
+        _APPLIED.clear()
+
+    async def test_spawn_teardown_seam_is_honored_and_declared_unbounded(self):
+        """``self._spawn_teardown`` 影子被照常解析 ⇒ 明示残差（不声称有界）。"""
+        bus, comps = _make_bus()
+        calls: List[str] = []
+
+        def hostile(loop):
+            calls.append("spawn")
+            return loop.create_future()          # 不返回可跟踪 Task
+
+        bus._spawn_teardown = hostile
+        outcome, exc = await close_once(bus)
+        self.assertEqual(calls, ["spawn"],
+                         "冻结体照常解析实例影子（r8/r9 的测试缝必须仍然有效）")
+        self.assertEqual(
+            outcome, "HANG/TIMEOUT",
+            "R-12a'（明示、不声称有界）：替换 _spawn_teardown 为不返回可跟踪 Task 的对象 ⇒ "
+            "request_close 的冻结体拿到任意对象、真凭据无人结算")
+        self.assertEqual([c.closes for c in comps], [0, 0, 0, 0, 0])
+
+    async def test_on_teardown_done_shadow_only_touches_the_record(self):
+        """``self._on_teardown_done`` 影子：有界 + 具名，且改不了调用方看到的结果。"""
+        bus, comps = _make_bus()
+        with captured_warnings() as records:
+            (out1, exc1), = await _with_factory(
+                bus, _factory_shadow_on_teardown_done, closers=1)
+        self.assertEqual(_APPLIED, [{"on_teardown_done_shadow": True}],
+                         "影子必须真的被冻结体挂上（否则测的不是这条查找）")
+        self.assertEqual(out1, "raised")
+        self.assertEqual(_named_kind(exc1), TEARDOWN_NEVER_ENTERED_KIND,
+                         "判决/结算由闭包看门狗先行 ⇒ 影子改不了调用方看到的结果")
+        self.assertEqual(bus._teardown_error_kind, TEARDOWN_NEVER_ENTERED_KIND)
+        self.assertEqual([c.closes for c in comps], [0, 0, 0, 0, 0])
+        self.assertGreaterEqual(_warn_count(records), 1)
+
+
+# --------------------------------------------------------------------------
 # 登记表与影子集合的自愈 / 边界
 # --------------------------------------------------------------------------
 class Test109R14RegistryHygiene(unittest.IsolatedAsyncioTestCase):
@@ -652,7 +720,8 @@ class Test109R14RegistryHygiene(unittest.IsolatedAsyncioTestCase):
 
     async def test_decoy_never_enters_the_accepted_credential_set(self):
         bus, comps = _make_bus()
-        before = set(map(id, _ACCEPTED_CLOSE_FUTURES))
+        # 快照用**对象集**（不用 id：对象被回收后 id 会被复用，那会让这条断言偶尔假过）
+        before = set(_ACCEPTED_CLOSE_FUTURES)
         (out1, exc1), = await _with_factory(bus, _n2_spawn_decoy_factory, closers=1)
         await settle()
         self.assertEqual(out1, "returned")
@@ -660,7 +729,7 @@ class Test109R14RegistryHygiene(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(decoy, _ACCEPTED_CLOSE_FUTURES,
                          "诱饵不许被登记成「本引擎受理过的凭据」")
         self.assertIs(bus._close_future, _APPLIED[0]["real"])
-        new = [f for f in _ACCEPTED_CLOSE_FUTURES if id(f) not in before]
+        new = [f for f in _ACCEPTED_CLOSE_FUTURES if f not in before]
         self.assertEqual(new, [_APPLIED[0]["real"]])
 
     async def test_registry_and_credential_cleanup_after_bounded_shapes(self):
