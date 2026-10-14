@@ -277,7 +277,13 @@ class Test109R10GenuineSpawnFailure(unittest.IsolatedAsyncioTestCase):
 # --------------------------------------------------------------------------
 class Test109R10AdoptStartedTeardown(unittest.IsolatedAsyncioTestCase):
     async def test_non_eager_create_then_raise_is_adopted_no_orphan(self):
-        """非 eager：Task 已存在 ⇒ 收养 ⇒ 无孤儿、异常被取用、无双关。"""
+        """非 eager：Task 已存在 ⇒ 收养 ⇒ 无孤儿、异常被取用、无双关。
+
+        #109 r11/C2 更正：收养**瞬间** ``_teardown_task`` 是那个**在飞**的收养 Task
+        （不是 ``None``）——r10 报告把它写成 ``None`` 是错的（「结束之后」它才可能因
+        具名失败被清空）。精确断言见
+        ``test_issue109_110_r11_parity.py::Test109R11R10RowsUnchanged`` 的收养态快照。
+        """
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             shape = await run_shape(_factory_create_then_raise)

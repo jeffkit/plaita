@@ -222,6 +222,88 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `_spawn_teardown` 的返回类型因此收紧为「真正的 `asyncio.Task`，否则抛具名错」：
   `request_close` 里对返回值的**使用**（`add_done_callback` / `done()`）对任意工厂
   行为都不会失败，会失败的都在 spawn 内部并走同一条回滚。
+  **r11 更正**：这条保证的前提「真 Task 就安全」并不成立——见下面 r11 两条。
+- **「收养了但入口没跑」不再挂起（r11/A1、A3；r10 声明残差的**结构**关闭）**：
+  `isinstance(x, asyncio.Task)` 对**任何**真 Task 都为真。工厂交回一个包着**别的**
+  coroutine 的真 Task（同类还有「返回前就被 cancel」「建在**另一个**事件循环上」）时，
+  r10 会静默收养：我们的 `_teardown_entry` 从未被 await、`_teardown` 从未跑过 ⇒
+  `_close_future` **永不结算**，两次 `close()` 都永久挂起
+  （`(True, PENDING, True, 0)`、五个组件 `[0×5]`，外加
+  `RuntimeWarning: coroutine ... _teardown_entry was never awaited`）。
+  r11 的判据是 `_teardown_entry` **第一行**置的「已进入」标记（标记 holder 绑在该次受理
+  上、holder 又绑在任务自己身上）：收养的 Task 结束时标记仍未置位 ⇒ 具名结算
+  `error_kind=teardown-never-entered`（`_teardown_runs` **如实为 0**；入口 coroutine
+  若从未启动则一并 `close()`，避免 "was never awaited"）。判据是**「任务结束」这一
+  事件**——没有 busy-wait，也没有比它更弱的计时假设；返回时已 done/cancelled 的 Task
+  走同一条同步判据。**合法包装协程**（`async def wrap(): await <我们的 coro>`）跑到入口
+  那一行即置位 ⇒ 照常完成（判据是「入口有没有跑」，不是「coro 是不是同一个对象」）。
+- **不是我们的 Task 一律拒收（r11/A2、B）**：跨事件循环建出来的 Task（close future 只
+  在本循环结算，跨循环收养会让它永远悬着），以及覆写了
+  `add_done_callback` / `done` / `cancelled` / `exception` 的**敌对 `Task` 子类**
+  （`isinstance` 放行 ⇒ `request_close` 对返回值的使用**裸抛且不回滚**），都由
+  `_spawn_teardown` 结构性拒收：`error_kind=teardown-spawn-failed` + **整体回滚**
+  （`_closing` 回受理前、凭据清空、`_teardown_runs=0`），reason
+  （`teardown-foreign-loop` / `teardown-hostile-task-methods`）写在异常的 `__cause__`，
+  并尽力中和那个被拒任务（挂取用回调 + `cancel()`）。于是 `request_close` 对返回值的
+  **使用**对任意 factory 行为仍然不会失败——但保证方式从 r10 的「类型是 Task」升级为
+  **结构性检查**：「四个被使用的方法都是 stdlib 原版，且任务绑在本循环上」。
+  钉住：`tests/unit/test_issue109_110_r11_parity.py`（15 用例，全部 2 s 有界看门狗；
+  断言具名结局 + 精确状态元组/组件关闭次数 + 无孤儿 / 无 `never awaited` /
+  无 `never retrieved` / 无双关；另含 r10 五行回归与 `_spawn_teardown` 返回契约）。
+- **out of contract（r11/D：合成形状；生产路径不使用 `set_task_factory`，实测仓库内
+  0 处调用）**：
+  ① 工厂交回的真 Task 既不跑我们的 coroutine、又**永不结束** ⇒ 没有完成事件可依，
+  close future 会一直等到那个任务结束——**这是唯一仍可能长等的形状**（R-1）；
+  ② 我们的 coroutine 被别处驱动、而交回的 Task 又不跑它 ⇒ 按①的完成判据具名失败；
+  若别处随后真的跑完 teardown，组件是关掉的、调用方却已看到 `teardown-never-entered`（R-2）；
+  ③ 覆写 `cancel` / `__setattr__` / `__getattribute__` 等**未纳入检查**的钩子 ⇒
+  拒收路径的「中和」只是尽力而为，可能留下一个在别处/别循环上仍会跑的 teardown
+  （具名拒绝本身不变；R-3）。
+- **r10 报告的三处口径更正（r11/C，命令可复现）**：
+  ① 「`request_close` 可执行体 **2070 B**」不可复现（验收方在不同切片下量到
+  2722 / 2362 / 2711 / 1486 B）。改为**方法定义**的数字：`request_close` 去掉 docstring
+  后的可执行体在 `5f6e308`(r9) → `8eaf3f6` → `789e070` → `bbf0d2b` → `e1b5356` → `HEAD`
+  上**逐字节相同、2770 B / 47 行**。切片命令与实测输出：
+
+  ```bash
+  python3 - <<'PY'
+  import re, subprocess
+  def body(rev):
+      L = subprocess.run(["git","show",f"{rev}:plaita/event/redis.py"],
+                         capture_output=True, text=True, check=True).stdout.splitlines(True)
+      i = next(k for k,l in enumerate(L) if re.match(r"\s*def request_close\(", l))
+      end = next((j for j in range(i+1,len(L)) if L[j].strip()
+                  and len(L[j])-len(L[j].lstrip()) <= 4
+                  and re.match(r"\s*(def |async def |@)", L[j])), len(L))
+      out, k = [], i
+      while k < end:
+          if L[k].strip().startswith('"""'):
+              k += 1
+              while k < end and '"""' not in L[k]: k += 1
+              k += 1
+          else:
+              out.append(L[k]); k += 1
+      return "".join(out)
+  revs = ["5f6e308","8eaf3f6","789e070","bbf0d2b","e1b5356","HEAD"]
+  g = {r: body(r) for r in revs}
+  print(" | ".join(f"{r}={len(g[r].encode())}B/{len(g[r].splitlines())}L" for r in revs))
+  print("identical:", len(set(g.values())) == 1)
+  PY
+  ```
+
+  实测输出：`5f6e308=2770B/47L | 8eaf3f6=2770B/47L | 789e070=2770B/47L |
+  bbf0d2b=2770B/47L | e1b5356=2770B/47L | HEAD=2770B/47L` 与 `identical: True`
+  （r11 只改 `_spawn_teardown` / `_on_teardown_done` 等方法体与 docstring，
+  `request_close` 的可执行体一个字节没动）。
+  ② r10 报告的 (A) 行声称「收养的场景 `_teardown_task is None`」**是错的**：收养瞬间它
+  是**真的在飞 Task**（状态元组第三元素 ≠ `None`；上面 `(True, PENDING, True, 0)`
+  就是那个瞬间，修后由 `teardown-never-entered` 结算）。r11 用例
+  `test_task_wrapping_other_coro_is_named_not_hung` 直接断言该瞬间。
+  ③ 锚在 `request_close` 块、r10 声称「零重锚」的变异是 **5** 条
+  （`m109-r8-loopless-unnamed`、`m109-r8-spawn-order-legacy`、
+  `m109-r9-backfill-done-teardown-task`、`m109-r9-spawn-failure-no-rollback`、
+  `m109-r9-teardown-task-exception-unretrieved`），**不是 4** 条；r11 上它们仍是零重锚
+  （r11 未触碰 `request_close` 的文件区间）。
 - **记录口径一致（r10）**：`_teardown_error_kind` / `_teardown_task_error` 成对改写
   （取消 ⇒ `('cancelled', None)`；异常 ⇒ `(type(exc).__name__, exc)`；正常完成 ⇒
   `(None, None)`）。r9 在取消分支只写 kind 不碰 error，会出现 `kind='cancelled'`

@@ -1,0 +1,12 @@
+{
+  "name": "m109-r11-foreign-loop-adopt-off",
+  "issue": "109",
+  "concern": "A2",
+  "file": "plaita/event/redis.py",
+  "rationale": "不检查「工厂交回的 Task 是不是绑在本循环上」⇒ 跨事件循环收养：close future 属于本循环，永远等不到结算（跨循环回调也不受本循环调度）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11ForeignLoopTask::test_foreign_loop_task_is_refused_named_and_bounded"
+  ],
+  "old": "        if spawned_loop is not loop:\n            self._reject_spawned_task(spawned, coro, TEARDOWN_FOREIGN_LOOP_REASON)\n        return spawned\n",
+  "new": "        return spawned\n"
+}

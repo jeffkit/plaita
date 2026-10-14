@@ -1,0 +1,16 @@
+{
+  "name": "m109-r11-never-entered-watchdog-off",
+  "issue": "109",
+  "concern": "A1",
+  "file": "plaita/event/redis.py",
+  "rationale": "去掉「收养的 Task 结束而入口从未执行 ⇒ 具名结算」这条完成判据（回到 r10 形态）：工厂交回不跑我们 coroutine 的真 Task 时 _close_future 永不结算，两次 close() 永久挂起",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11NeverEnteredAdoptedTask::test_task_wrapping_other_coro_is_named_not_hung",
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11NeverEnteredAdoptedTask::test_other_coro_exception_is_retrieved",
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_already_done_task_is_named",
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_cancelled_and_done_task_is_named",
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11AlreadyDoneOrCancelled::test_cancelled_before_return_midflight_is_named"
+  ],
+  "old": "        try:\n            holder = getattr(task, _TEARDOWN_ACCEPTANCE_ATTR, None)\n        except BaseException:                    # noqa: BLE001 - 纯查表\n            holder = None\n        if isinstance(holder, dict) and not holder.get(\"entered\"):\n            self._on_teardown_never_entered(task, holder)\n            return\n        if task.cancelled():\n",
+  "new": "        if task.cancelled():\n"
+}

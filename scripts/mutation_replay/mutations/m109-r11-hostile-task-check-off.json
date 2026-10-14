@@ -1,0 +1,13 @@
+{
+  "name": "m109-r11-hostile-task-check-off",
+  "issue": "109",
+  "concern": "B",
+  "file": "plaita/event/redis.py",
+  "rationale": "不检查「request_close 要用的四个方法是不是 stdlib 原版」⇒ 覆写 add_done_callback 的敌对 Task 子类照样被收养：request_close 对返回值的使用裸抛，且**不回滚**",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11HostileTaskSubclass::test_add_done_callback_override_is_refused_with_rollback",
+    "tests/unit/test_issue109_110_r11_parity.py::Test109R11HostileTaskSubclass::test_instance_level_shadow_is_refused"
+  ],
+  "old": "        if not _task_uses_stdlib_methods(spawned):\n            self._reject_spawned_task(spawned, coro, TEARDOWN_HOSTILE_TASK_REASON)\n        spawned_loop = None\n",
+  "new": "        spawned_loop = None\n"
+}
