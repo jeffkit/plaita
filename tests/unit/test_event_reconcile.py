@@ -417,7 +417,8 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
 
     #153 起失败可见性升级（措辞同步钉死）：``handle_event`` 最外层 ``except``
     记 ERROR 后**继续上抛**（``test_handle_event_failure_propagates_to_caller``）；
-    超时回调包装 ``event/timeout.py`` 同样记 ERROR 后上抛。可重放性依旧来自
+    超时回调包装 ``event/timeout.py`` 同样记 ERROR 后**聚合上抛**
+    （``TimeoutCallbackError``，单个回调失败不中断本轮）。可重放性依旧来自
     **释放去重键**。
     """
 
@@ -521,9 +522,11 @@ class TestEnqueueFailureReleasesDedupKey(ReconcileTestBase):
 class TestScanOnceFailureKeepsCursorAndCountsRejected(ReconcileTestBase):
     """plaita#153：回扫轮的失败不得计成 replayed，也不得推进游标。
 
-    规则（独立谓词）：``scan_once`` 回放任一事件失败 ⇒ 本轮
-    ``last_replayed == 0``、``last_rejected == 1``、游标**逐字节不变**、
-    异常上抛；Redis 恢复后下一轮把该事件真正重放（``stream len == 1``）。
+    规则（独立谓词）：``scan_once`` 回放任一事件失败 ⇒ **该失败事件不算
+    replayed**（真实不变式；首事件即失败时 ``last_replayed == 0``，失败前已
+    成功回放的事件仍计入 ``last_replayed``）、``last_rejected >= 1``、游标
+    **逐字节不变**、异常上抛；Redis 恢复后下一轮把失败事件真正重放
+    （``stream`` 相应 +1）。
     """
 
     @staticmethod
@@ -571,6 +574,69 @@ class TestScanOnceFailureKeepsCursorAndCountsRejected(ReconcileTestBase):
         self.assertEqual(reconciler.last_replayed, 1)
         self.assertEqual(reconciler.last_rejected, 0)
 
+    def test_multi_event_failing_round_keeps_successful_replay_counted(self):
+        """#153/R2：多事件轮**首个成功、其后失败** ⇒ 计数是 (1, 1)，不是 (0, 1)。
+
+        r4 的交付措辞把「失败事件不计成 replayed」误写成「``last_replayed == 0``
+        by construction」——那只在**首个事件即失败**时成立（verifier 实测多事件
+        轮 ``last_replayed=1, last_rejected=1``）。本用例钉死真实不变式：失败
+        事件不计 replayed、失败前已成功的回放仍计入、游标逐字节不变、已成功的
+        早先事件 stream 里确有 1 条。
+        """
+        self._setup_pending(execution_id="exec-r1")
+        self._setup_pending(execution_id="exec-r2")
+        cursor0 = time.time()
+        self.redis_client.set(EventReconciler.CURSOR_KEY, str(cursor0))
+        self._store_event_directly(execution_id="exec-r1", timestamp=time.time())
+        time.sleep(0.02)
+        self._store_event_directly(execution_id="exec-r2", timestamp=time.time())
+        reconciler = self._make_reconciler(backfill_seconds=3600)
+
+        # 只让**第二个**事件的入队失败（首个事件真实入队成功）
+        real_xadd = self.redis_client.xadd
+        calls = {"n": 0}
+
+        def flaky_xadd(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise ConnectionError("simulated transient Redis outage")
+            return real_xadd(*args, **kwargs)
+
+        self.redis_client.xadd = flaky_xadd
+        try:
+            with pytest.raises(ConnectionError):
+                run(reconciler.scan_once())
+        finally:
+            self.redis_client.xadd = real_xadd
+
+        # 前置对象：两个事件都真的被尝试回放（否则下面的计数断言空转）
+        self.assertEqual(calls["n"], 2, "第二个事件没有被尝试回放")
+        # 真实不变式：失败事件不计 replayed，失败前的成功回放照算 ⇒ (1, 1)
+        self.assertEqual(
+            (reconciler.last_replayed, reconciler.last_rejected), (1, 1),
+            "多事件失败轮计数错误（把 last_replayed 误当恒 0？）",
+        )
+        # 游标逐字节不变
+        self.assertEqual(
+            self.redis_client.get(EventReconciler.CURSOR_KEY), str(cursor0),
+            "多事件失败轮推进了游标",
+        )
+        # 早先成功的事件确已入队（1 条），失败事件未入队
+        tasks = _stream_payloads(self.redis_client, self.QUEUE)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["execution_id"], "exec-r1")
+
+        # 恢复轮：游标未动 ⇒ 窗口仍覆盖两个事件；exec-r1 被去重键挡住（不重复
+        # 入队），exec-r2 真正重放 ⇒ 本轮 handle_event 计 2 条（新入队 1 条）。
+        self.assertEqual(run(reconciler.scan_once()), 2)
+        self.assertEqual(
+            (reconciler.last_replayed, reconciler.last_rejected), (2, 0)
+        )
+        tasks = _stream_payloads(self.redis_client, self.QUEUE)
+        self.assertEqual(len(tasks), 2, "恢复轮没有把失败事件真正重放（或多入了）")
+        execs = {t["execution_id"] for t in tasks}
+        self.assertEqual(execs, {"exec-r1", "exec-r2"})
+
     def test_rejected_counter_is_per_round(self):
         """计数按轮重置：成功轮 (1,0) → 失败轮 (0,1) → 恢复轮 (1,0)。"""
         self._setup_pending()
@@ -584,7 +650,7 @@ class TestScanOnceFailureKeepsCursorAndCountsRejected(ReconcileTestBase):
         )
         self.assertEqual(len(_stream_payloads(self.redis_client, self.QUEUE)), 1)
 
-        # 第二个事件 + xadd 瞬断：本轮 rejected=1 / replayed=0（按轮重置）
+        # 第二个事件 + xadd 瞬断：本轮窗口内只有这个失败事件 ⇒ rejected=1 / replayed=0
         time.sleep(0.02)
         self._store_event_directly()
         real = self._break_xadd(self.redis_client)
@@ -596,7 +662,7 @@ class TestScanOnceFailureKeepsCursorAndCountsRejected(ReconcileTestBase):
 
         self.assertEqual(
             (reconciler.last_replayed, reconciler.last_rejected), (0, 1),
-            "失败轮计数错误（replayed 未归零或 rejected 未计数）",
+            "失败轮计数错误（失败事件被计成 replayed，或 rejected 未计数）",
         )
         self.assertEqual(len(_stream_payloads(self.redis_client, self.QUEUE)), 1)
 

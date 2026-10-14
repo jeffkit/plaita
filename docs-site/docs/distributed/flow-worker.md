@@ -486,7 +486,7 @@ flowchart TD
 | 项 | 值 / 语义 |
 |----|-----------|
 | 队列上限 | `RedisStreamHandler.DEFAULT_MAX_QUEUE = 10000`，可由构造参数 `max_queue` 覆盖 |
-| 队列满时 | **丢弃最旧的一条**（`del self._queue[0]`，即丢弃队列头）再入队 —— 保留最新日志。方向由 `tests/unit/test_issue84_log_queue_bounds.py::test_drop_direction_is_oldest_kept` 用可区分消息同时钉住 `queue[0]`/`queue[-1]`（改成 `pop()` 丢最新会立刻变红）；`setup_redis_logging(..., max_queue=)` 亦可覆盖 |
+| 队列满时 | **丢弃最旧的一条**（`self._queue.popleft()`，即丢弃队列头）再入队 —— 保留最新日志。队列是 `collections.deque`：`popleft()` 为 O(1)，10k 上限下持续丢弃不退化成 `del list[0]` 的 O(n²)。方向由 `tests/unit/test_issue84_log_queue_bounds.py::test_drop_direction_is_oldest_kept` 用可区分消息同时钉住 `queue[0]`/`queue[-1]`（改成 `pop()` 丢最新会立刻变红）；`setup_redis_logging(..., max_queue=)` 亦可覆盖 |
 | 丢弃计数 | 公开属性 `RedisStreamHandler.dropped_count`（因上限/失败回灌截断累计丢弃条数） |
 | 丢弃告警 | **不静默**：第 1 条与之后每 `DROP_WARN_EVERY = 100` 条聚合一条 warning，含累计条数与 `队列 x/上限` |
 | 刷新失败 | 只回灌**未成功提交**的部分（本批起；此前各批已 `execute` 成功），合并后超出上限的部分**整批丢弃并计数**（回灌受同一上限约束） |
@@ -497,3 +497,15 @@ flowchart TD
 
 > Stream 侧 `max_len`（默认 `DEFAULT_MAX_LEN = 10000`，`approximate=True`）只约束 Redis 里的
 > Stream 长度，**不**约束 worker 进程内存；进程内存由上面的客户端队列上限约束。
+
+### 事件回扫失败轮：游标不推进、失败不计 replayed（plaita#153）
+
+`EventReconciler.scan_once` 回放任一事件失败时**整轮作废**：
+
+| 项 | 值 / 语义 |
+|----|-----------|
+| 游标 | 停在原处（**逐字节不变**）；失败事件留在下一轮窗口内，Redis 恢复后被真正重放 |
+| `last_replayed` | 本轮**成功回放**的条数。真实不变式是「**失败事件永不被计成 replayed**」——**不是**「恒 0」：失败前已成功回放的事件照算（2 事件轮首成功次失败 ⇒ `(1, 1)`；`last_replayed == 0` 只在**首个事件即失败**时成立） |
+| `last_rejected` | 本轮失败事件数（每轮重置） |
+| 异常 | 上抛给 `_run_loop`（记 ERROR 后下一轮重试，回扫循环不终止） |
+| 超时回调（同单 #153/R1） | `SubscriptionTimeoutChecker._check_timeouts` 对单个回调失败**只记账不中断本轮**（同轮其余回调与后续订阅照常跑），整轮末尾聚合上抛 `TimeoutCallbackError`（携带 `failures` / `subscription_ids`，原始异常为 `__cause__`）——失败仍对 `_check_loop` 可观察，且不饿死同轮其它订阅 |

@@ -1,0 +1,13 @@
+{
+  "name": "153-timeout-callback-collect-not-abort",
+  "issue": "153",
+  "concern": "R1 规则子句：单个回调失败只记账、不得中断本轮（不饿死同轮其余回调/订阅）",
+  "file": "plaita/event/timeout.py",
+  "old": "                except Exception as e:  # noqa: BLE001 — 收集后整轮末尾聚合上抛\n                    failures.append((subscription.subscription_id, e))",
+  "new": "                except Exception as e:  # noqa: BLE001 — 收集后整轮末尾聚合上抛\n                    raise",
+  "rationale": "回到 r4 的立即上抛 ⇒ 第一个坏回调中断整轮，同轮第二个回调与后续订阅被饿死（liveness 回归）",
+  "expect_fail": [
+    "tests/unit/test_wave4_subscription_timeout.py::TestFilterHostedTimeoutChecker::test_callback_failure_does_not_starve_second_callback",
+    "tests/unit/test_wave4_subscription_timeout.py::TestFilterHostedTimeoutChecker::test_failing_callback_for_one_subscription_does_not_starve_other"
+  ]
+}

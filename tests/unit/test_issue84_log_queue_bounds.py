@@ -9,7 +9,8 @@
 * 审计告警走 `plaita.server.log_handler.audit`（`propagate=False`）⇒ **不得**被
   本 handler 收进队列（自噬 delta == 0）；且该 logger 的级别**自持**
   （`WARNING`）⇒ root 抬到 ERROR 也照发，不被 root 级别静默；
-* 刷新失败回灌同样受上限约束：`len(queue) <= max_queue`；
+* 刷新失败回灌同样受上限约束：`len(queue) <= max_queue`，且只回灌**未成功提交**
+  的部分（本批起）——已 `execute` 成功的批次**不得重复入队**；
 * 积压恢复**分批** `execute()`：`chunk_size` 条一批，单次命令数 ≤ `2 × chunk_size`，
   不再一次性构造 2N 条命令（`DEFAULT_CHUNK_SIZE=500`）；
 * 恢复（≤ 上限的正常流量 + 成功刷新）⇒ `queue == 0 且 dropped == 0`（一条不丢）。
@@ -77,6 +78,46 @@ class _RecordingPipe:
 
     def execute(self):
         self.client.batches.append(self.n)
+        return []
+
+
+class _FailSecondBatchRedis:
+    """第 1 批 execute 成功、第 2 批抛（记录每批 xadd 的 message）。
+
+    用于「只回灌未成功提交的本批起部分」：已提交批次的条目不得重复入队。
+    ``commands`` 只累计**成功提交**的命令数（xadd + publish）。
+    """
+
+    def __init__(self):
+        self.committed = []      # 成功 execute 的批次里的 message（按序）
+        self.commands = 0        # 成功提交的命令数
+        self.executes = 0
+
+    def pipeline(self):
+        return _FailSecondBatchPipe(self)
+
+
+class _FailSecondBatchPipe:
+    def __init__(self, client):
+        self.client = client
+        self.entries = []
+        self.n = 0
+
+    def xadd(self, *a, **kw):
+        self.entries.append(a[1]["message"])
+        self.n += 1
+        return self
+
+    def publish(self, *a, **kw):
+        self.n += 1
+        return self
+
+    def execute(self):
+        self.client.executes += 1
+        if self.client.executes >= 2:
+            raise RuntimeError("redis down mid-flush")
+        self.client.commands += self.n
+        self.client.committed.extend(self.entries)
         return []
 
 
@@ -242,7 +283,7 @@ class TestIssue84QueueBounds(unittest.TestCase):
         """方向钉死：队列满时丢**最旧**一条，保留最新 `max_queue` 条。
 
         可区分消息（m0..m4）+ 同时断言 `_queue[0]`（最旧存活）与 `_queue[-1]`
-        （最新一条）：把 `del self._queue[0]` 变异成 `self._queue.pop()`（丢最新）
+        （最新一条）：把 `self._queue.popleft()` 变异成 `self._queue.pop()`（丢最新）
         后本用例立刻红——r2 交付里这个方向没有任何断言钉住，docs 说「丢最旧」
         而测试两个方向都放行。
         """
@@ -291,6 +332,34 @@ class TestIssue84QueueBounds(unittest.TestCase):
         self.assertEqual(h.dropped_count, 15)
         self.assertTrue(cap.lines, "root=ERROR 时丢弃审计告警被 root 级别挡掉（静默丢弃）")
         self.assertTrue(any("丢弃最旧" in line for line in cap.lines), cap.lines[:2])
+
+    def test_reinjection_only_keeps_uncommitted_batches(self):
+        """子句②b：刷新**中途**失败时只回灌未成功提交的部分（本批起）。
+
+        verifier 手测过该路径（1200 条 / chunk=500、第 2 批 execute 抛 ⇒ 回灌
+        ``entries[500:1200]``、已提交的 ``entries[0:500]`` 不重复入队）却无交付
+        用例。独立谓词：7 条 / chunk=3、第 2 批抛 ⇒ 队列恰为 ``entries[3:7]``，
+        已提交的 ``entries[0:3]`` 一条都不在队列里，且无丢弃。
+        """
+        client = _FailSecondBatchRedis()
+        h = _handler(client, max_queue=10000, chunk_size=3)
+        for i in range(7):
+            h.emit(_record(f"m{i}"))
+
+        h._flush()
+
+        # 前置对象：第 1 批真提交、第 2 批真失败（3 条 × (xadd+publish) = 6 命令）
+        self.assertEqual(client.executes, 2)
+        self.assertEqual(client.committed, ["m0", "m1", "m2"])
+        self.assertEqual(client.commands, 6)
+        # 核心断言：只有未提交部分（entries[3:7]）回灌，顺序逐条一致
+        queued = [e["message"] for e in h._queue]
+        self.assertEqual(queued, ["m3", "m4", "m5", "m6"])
+        self.assertEqual(
+            set(queued) & set(client.committed), set(),
+            f"已成功提交的批次被重复回灌: {queued}",
+        )
+        self.assertEqual(h.dropped_count, 0)
 
     def test_pipeline_chunked(self):
         """子句⑤：积压恢复必须**分批** execute，单次命令数有上限。

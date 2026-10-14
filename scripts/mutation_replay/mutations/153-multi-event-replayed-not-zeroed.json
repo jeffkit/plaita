@@ -1,0 +1,12 @@
+{
+  "name": "153-multi-event-replayed-not-zeroed",
+  "issue": "153",
+  "concern": "R2 规则子句：失败事件不计 replayed，但失败前已成功的回放仍计入（last_replayed 非恒 0）",
+  "file": "plaita/server/event_reconcile.py",
+  "old": "                self.last_rejected += 1",
+  "new": "                self.last_rejected += 1\n                self.last_replayed = 0",
+  "rationale": "把「失败事件永不被计成 replayed」实现成「失败即 last_replayed=0」——正是 r4 错措辞的同款误实现：多事件轮里抹掉失败前已成功的回放数",
+  "expect_fail": [
+    "tests/unit/test_event_reconcile.py::TestScanOnceFailureKeepsCursorAndCountsRejected::test_multi_event_failing_round_keeps_successful_replay_counted"
+  ]
+}

@@ -5,6 +5,7 @@ Redis Stream 日志处理器
 import json
 import logging
 import threading
+from collections import deque
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -91,7 +92,10 @@ class RedisStreamHandler(logging.Handler):
         self.pubsub_channel = f"{self.STREAM_CHANNEL_PREFIX}:{service_type}:{instance_id}"
         
         # 异步写入队列和线程
-        self._queue: list = []
+        # #84（perf）：`deque` 而非 `list`——队列满时 `del list[0]` 是 O(n)，
+        # 在 10000 上限 + 持续丢弃下退化成 O(n²)；`popleft()` 常数时间，
+        # 丢弃方向/计数/分批提交语义**零变化**。
+        self._queue: deque = deque()
         self._queue_lock = threading.Lock()
         self._flush_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -123,7 +127,7 @@ class RedisStreamHandler(logging.Handler):
             dropped_total = 0
             with self._queue_lock:
                 if len(self._queue) >= self.max_queue:
-                    del self._queue[0]
+                    self._queue.popleft()
                     self._dropped += 1
                     dropped_total = self._dropped
                 self._queue.append(log_entry)
@@ -199,7 +203,7 @@ class RedisStreamHandler(logging.Handler):
         with self._queue_lock:
             if not self._queue:
                 return
-            entries = self._queue[:]
+            entries = list(self._queue)
             self._queue.clear()
         
         chunk = max(1, int(self.chunk_size))
@@ -236,12 +240,13 @@ class RedisStreamHandler(logging.Handler):
             # **并计数**，绝不静默。
             pending = entries[start:]
             with self._queue_lock:
-                merged = pending + self._queue
+                merged = list(pending)
+                merged.extend(self._queue)      # 合并期间并发追加的条目
                 overflow = len(merged) - self.max_queue
                 if overflow > 0:
                     del merged[:overflow]
                     self._dropped += overflow
-                self._queue = merged
+                self._queue = deque(merged)
                 queue_len = len(self._queue)
                 dropped_total = self._dropped
             _audit_logger.warning(
