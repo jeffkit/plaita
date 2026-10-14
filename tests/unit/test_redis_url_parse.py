@@ -305,6 +305,16 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
         self.assertEqual(_mask_url("redis://host:6379/0"), "redis://host:6379/0")
         self.assertEqual(_mask_url("user:sup3rsecret@host:6379"), "user:***@host:6379")
 
+    def test_nested_cause_is_scrubbed_too(self):
+        """嵌套 cause：底层异常文案里若带裸 URL/口令，也必须先洗掉再进 traceback。"""
+        text = "redis://user:sup3rsecret@host:6379/0?db=x"
+        embedded = factory._safe_reason(ValueError(f"bad value in {text}"), text)
+        self.assertNotIn(SECRET, embedded)
+        self.assertIn("redis://user:***@host:6379/0?db=x", embedded)
+        # 只带口令字面量（没带整条 URL）也要抹掉
+        bare = factory._safe_reason(ValueError(f"bad password {SECRET}"), text)
+        self.assertNotIn(SECRET, bare)
+
     def test_unknown_query_param_warning_is_masked(self):
         """未知 query 只警告不判死——警告本身也是日志，同样不许带口令。"""
         with self.assertLogs("plaita.server.factory", level="WARNING") as logs:
@@ -389,6 +399,17 @@ class TestQueryOptionsPassThrough(unittest.TestCase):
         with self.assertRaises(RedisUrlError) as ctx:
             _parse_redis_url("redis://host:6379/0?ssl_min_version=abc")
         self.assertIn("ssl_min_version", str(ctx.exception))
+
+    def test_passthrough_table_covers_every_redis_py_query_parser(self):
+        """枚举不许漂移：本模块认的参数名必须与 redis-py 的表**逐名**对齐。
+
+        redis-py 将来新增 query 参数时这条会红，提醒把它加进 ``_QUERY_PARAMS``
+        （透传）或 ``_UNSUPPORTED_QUERY_PARAMS``（具名拒绝）。
+        """
+        from redis.connection import URL_QUERY_ARGUMENT_PARSERS
+
+        ours = set(factory._QUERY_PARAMS) | {"db"} | set(factory._UNSUPPORTED_QUERY_PARAMS)
+        self.assertEqual(ours, set(URL_QUERY_ARGUMENT_PARSERS))
 
 
 class TestFactoryCallerBehaviour(unittest.TestCase):
