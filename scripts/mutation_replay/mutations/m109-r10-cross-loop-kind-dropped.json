@@ -1,0 +1,12 @@
+{
+  "name": "m109-r10-cross-loop-kind-dropped",
+  "issue": "109",
+  "concern": "G4-kind",
+  "file": "plaita/event/redis.py",
+  "rationale": "幂等分支里「已在另一个事件循环受理」的拒绝丢掉 error_kind=cross-loop-close ⇒ 与在飞跨循环分支不一致、不可机读（r10 item 10）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r10_parity.py::Test109R10CrossLoopKind::test_idempotent_branch_on_foreign_loop_is_named"
+  ],
+  "old": "                    \"重复请求必须来自同一个事件循环（teardown 归属该循环）。\"\n                    \"error_kind=cross-loop-close\"\n",
+  "new": "                    \"重复请求必须来自同一个事件循环（teardown 归属该循环）。\"\n"
+}

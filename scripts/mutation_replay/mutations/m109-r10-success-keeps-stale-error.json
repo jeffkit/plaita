@@ -1,0 +1,12 @@
+{
+  "name": "m109-r10-success-keeps-stale-error",
+  "issue": "109",
+  "concern": "F3-pair",
+  "file": "plaita/event/redis.py",
+  "rationale": "正常完成不清空上一轮留档 ⇒ 重试成功后 kind/error 仍显示上一次的 ValueError，记录不描述最近一次收尾（r10 item 9）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r10_parity.py::Test109R10ErrorPairConsistency::test_retry_success_clears_previous_error"
+  ],
+  "old": "            logger.debug(\"事件总线关停：teardown 任务异常已取用: %r\", exc)\n            return\n        self._teardown_task_error = None\n        self._teardown_error_kind = None\n",
+  "new": "            logger.debug(\"事件总线关停：teardown 任务异常已取用: %r\", exc)\n            return\n        pass  # mutation: 正常完成不清空上一轮留档\n"
+}

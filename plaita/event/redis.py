@@ -117,9 +117,14 @@ def _resolve_closer(target) -> Callable[[], Any]:
 async def _release_one(target) -> None:
     """解析并调用 ``target`` 的关闭方法（#109 r9/Finding 2）；**只在可 await 时** await。
 
-    非 awaitable 返回值不是理论情形：redis-py 4.x 的 ``PubSub.close()`` 是**同步**
-    方法，返回 ``self.reset()`` 的协程；若 ``PubSub`` 还没建过 connection，它直接
-    ``return None``——裸 ``await`` 会 ``TypeError``。
+    ``isawaitable`` 不是为「``PubSub.close()`` 会返回 ``None``」准备的——那个说法
+    （r9 文档）**不实**：4.5.5 的 ``PubSub.close()`` 虽是**同步**方法
+    （``iscoroutinefunction`` 为 False），但在**真实构造**的 ``PubSub`` 上恒返回
+    ``reset()`` 的协程（实测：``connection is None`` 时也返回 coroutine，不是
+    ``None``）；只有构造中途崩溃、连 ``connection`` 属性都不存在的半成品才会
+    ``return None``（而该对象连 ``__del__`` 都会炸）。检查仍然必要，因为**关闭方法
+    是同步的**、且别的后端可以同步返回 ``None``/其它非 awaitable——不能假定一定可
+    await。
     """
     result = _resolve_closer(target)()
     if inspect.isawaitable(result):
@@ -133,6 +138,33 @@ def _mark_future_retrieved(future: "asyncio.Future") -> None:
     """
     if not future.cancelled():
         future.exception()
+
+
+def _create_owner_task(loop: "asyncio.AbstractEventLoop", coro, context) -> "asyncio.Task":
+    """经 ``loop.create_task`` 建 teardown 任务（**尊重**用户 task factory）。
+
+    3.11+ 有 ``loop.create_task(..., context=)``；3.10 没有，但 ``Task.__init__``
+    会 ``contextvars.copy_context()`` 捕获**当时**的 context，所以在 context 里调用
+    即可（#109 r8/F1 的 owner-context 归属）。
+    """
+    if sys.version_info >= (3, 11):
+        return loop.create_task(coro, context=context)
+    return context.run(loop.create_task, coro)
+
+
+def _own_task_directly(loop: "asyncio.AbstractEventLoop", coro, context) -> "asyncio.Task":
+    """**绕开 task factory**，直接用 ``asyncio.Task`` 接管一个从未启动的 coroutine。
+
+    #109 r10：工厂交回来的不是可跟踪的 ``asyncio.Task``（已完成的 ``Future`` /
+    裸 awaitable / coroutine 本身）时，``close future`` 会永远悬着。此时若 coroutine
+    还没被任何人启动/消费，就自己建一个真 Task 接管它——``loop.create_task`` 会再次
+    咨询那个已经证明交不出 Task 的工厂，所以必须绕过。coroutine 启动过（
+    ``coroutine is being awaited already`` / ``cannot reuse already awaited coroutine``）
+    时构造会抛错，由 ``_spawn_teardown`` 的调用方回滚成具名失败。
+    """
+    if sys.version_info >= (3, 11):
+        return asyncio.Task(coro, context=context)
+    return context.run(lambda: asyncio.Task(coro, loop=loop))
 
 # #109/F1/F4 判据内核（具名拒绝文案 + 两层判据）拆到 ``plaita/event/_selfclose_guard.py``（r6，r7 重新定位）：
 # 该模块只依赖 stdlib，因此可在别的 CPython（3.12/3.13 的干净解释器）里按文件加载、
@@ -1623,9 +1655,27 @@ class RedisEventBus(EventBus):
         ``_teardown_task`` 清回 ``None``、``_closing`` 恢复为受理前的值，并抛具名
         ``error_kind=teardown-spawn-failed``；之后在健康的循环上重试即可正常关停。
 
+        **r10（回滚必须**真实**）**：r9 把「spawn 抛异常」直接等同于「什么都没发生」，
+        但工厂完全可能**先把 coroutine 变成 Task 再抛**（``t = asyncio.Task(coro); raise``，
+        或 eager factory 同步跑完再抛）。那时 teardown 是我们的、可能已经在跑：
+        r9 却回滚成「未受理、总线仍可用」⇒ 非 eager 下留下一个无人取用的孤儿 Task
+        （后来死在 ``cannot reuse already awaited coroutine``），eager 下组件已被关掉
+        而 ``_closing=False``，第二次 ``close()`` 把三个存储**再关一遍**。
+        r10 把「谁创建了 Task」的判定下沉到 ``_spawn_teardown``：**已启动就收养**
+        （返回那个 Task，交给下面既有的 ``add_done_callback`` / ``done()`` 分支），
+        **从未托管才回滚**。因此本方法既有 except 只在「确实没有 teardown 在跑」时触发，
+        回滚后的状态是真实的「总线未动、仍可用」。
+
+        ``_spawn_teardown`` 的返回类型因此收紧为「真正的 ``asyncio.Task``，否则抛异常」
+        （非 Task 的工厂返回值在内部被收养或绕开工厂接管）——所以下面
+        ``add_done_callback`` / ``done()`` / ``.done()`` 这几处**对返回值的
+        使用**对任意 factory 行为都不会失败；会失败的部分全部在 spawn 内部，并已经
+        走同一条回滚。这就是「把返回值的使​​用也纳入 try」的等价保证。
+
         **r9/Finding 3（Task 异常必须被取用）**：teardown 任务上逃逸的异常（步骤抛
         异常）由 done 回调 ``_on_teardown_done`` 立即取用并留档，避免 GC 时打印
-        "Task exception was never retrieved"。
+        "Task exception was never retrieved"。收养来的任务同样挂这个回调
+        （eager 同步跑完的路径由 ``_teardown_entry`` 的 holder 找回句柄）。
 
         **r9（死句柄）**：只有**仍在飞**的 teardown 任务才回填到 ``_teardown_task``。
         eager factory 下 spawn 可能同步跑完（成功或失败），此时它是 done 句柄；
@@ -1678,33 +1728,96 @@ class RedisEventBus(EventBus):
             self._teardown_task = teardown_task
         return future
 
-    def _spawn_teardown(self, loop: "asyncio.AbstractEventLoop") -> "asyncio.Task":
-        """在 **owner context** 里创建 teardown 任务。
+    async def _teardown_entry(self, holder: Dict[str, Any]) -> None:
+        """teardown 的入口包装（#109 r10）：**第一行**就把自己所在的 Task 记进 ``holder``。
 
-        3.11+ 有 ``loop.create_task(..., context=)``；3.10 没有，但 ``Task.__init__``
-        用 ``contextvars.copy_context()`` 捕获当时的 context，所以在 context 里创建即可。
-
-        ``create_task`` 抛异常时（自定义 task factory / 已关闭的循环）这个 coroutine
-        从未被托管过，必须显式 ``close()``，否则 GC 会打 "coroutine ... was never
-        awaited"（r9/Finding 1 的回滚路径）。
+        为什么需要：eager task factory（3.12+ 的公开配置）下 coroutine 在 ``create_task``
+        内部同步跑到 ``StopIteration``；此后 ``Task.get_coro()`` 返回 ``None``（3.12/3.13
+        实测），任务也不再出现在 ``asyncio.all_tasks()`` 里。工厂若在同步跑完之后抛异常，
+        靠 coro 身份或 ``all_tasks()`` 都找不回句柄，它的异常就会无人取用
+        （"Task exception was never retrieved"）。``holder`` 由调用方在 spawn 之前持有，
+        eager 路径下这里第一行即写入 ⇒ 句柄总能拿回。
         """
-        coro = self._teardown()
+        holder["task"] = asyncio.current_task()
+        await self._teardown()
+
+    @staticmethod
+    def _started_teardown_task(coro, holder: Dict[str, Any]) -> Optional["asyncio.Task"]:
+        """找回**已经启动**的 teardown 任务句柄（无则 ``None``）。
+
+        两条线索：①入口包装在 eager 路径写下的 ``holder['task']``；②非 eager 路径下
+        （工厂先 ``create_task`` 再抛、任务尚未跑）``asyncio.all_tasks()`` 里
+        ``get_coro() is coro`` 的那一条。两者都没有 ⇒ 这个 coroutine 从未被托管。
+        """
+        task = holder.get("task")
+        if isinstance(task, asyncio.Task):
+            return task
+        for live in asyncio.all_tasks():
+            if live.get_coro() is coro:
+                return live
+        return None
+
+    @staticmethod
+    def _close_unstarted_coro(coro) -> None:
+        """只对**从未启动**的 teardown coroutine 调 ``close()``（#109 r10 item 3）。
+
+        r9 无条件 ``coro.close()``：工厂「先建 Task 再抛」时那个 Task 已经拥有该
+        coroutine，``close()`` 不抛（实测），却把 Task 弄死在
+        ``RuntimeError('cannot reuse already awaited coroutine')`` 上，且没人取用它的
+        异常。现在只有确认没有 Task 接管过才关；关不掉也只留痕（P0-2 门禁不允许静默吞咽）。
+        """
+        try:
+            coro.close()
+        except Exception as exc:                 # noqa: BLE001 - 已在失败路径上
+            logger.debug(
+                "事件总线关停：关闭未启动的 teardown coroutine 失败（忽略）: %s", exc)
+
+    def _spawn_teardown(self, loop: "asyncio.AbstractEventLoop") -> "asyncio.Task":
+        """在 **owner context** 里创建 teardown 任务（#109 r8/F1；r10 重写成败两条路径）。
+
+        契约（r10 收紧到**可证明**的程度）：**返回值一定是真正的 ``asyncio.Task``，
+        否则抛异常**。因此 ``request_close`` 里对返回值的**使用**
+        （``add_done_callback`` / ``done()``）不可能因为 factory 的行为而失败——这是
+        「r10 item 1：把返回值的使​​用也纳入 try」的等价保证：任何 factory 形状造成的
+        失败都在**本方法内部**发生，由 ``request_close`` 既有的 except 统一回滚。
+
+        三种 factory 行为：
+
+          * **正常返回 Task**：直接用。
+          * **返回非 Task**（已完成的 ``Future`` / 裸 awaitable / coroutine）：它跟踪不了，
+            close future 会永远悬着、coroutine 还会 "was never awaited"。若 coroutine
+            已被启动则收养那个真任务；否则**绕开工厂**用 ``asyncio.Task`` 接管它
+            （``_own_task_directly``）⇒ 真跑一次 teardown。
+          * **抛异常**：工厂可能已经把 coroutine 变成 Task（先 create_task 再抛、eager
+            factory 同步跑完再抛）。此时 teardown 是**我们的、可能正在跑**，必须**收养**
+            （返回任务、不回滚），否则调用方会看到「未受理、总线仍可用」而组件其实已被
+            关掉（r9 的假回滚 ⇒ 二次 close 双关三个存储）。只有确认 coroutine 从未被
+            托管时才 ``close()`` 并让异常冒泡给调用方回滚。
+        """
+        holder: Dict[str, Any] = {}
+        coro = self._teardown_entry(holder)
         context = self._owner_context.copy()
         try:
-            if sys.version_info >= (3, 11):
-                return loop.create_task(coro, context=context)
-            return context.run(loop.create_task, coro)
+            spawned = _create_owner_task(loop, coro, context)
         except BaseException:
-            try:
-                coro.close()
-            except Exception as exc:             # noqa: BLE001 - 已在失败路径上
-                # 不能静默吞咽（tests/unit/test_no_silent_swallow.py 的 P0-2 门禁）：
-                # coroutine 可能已被 eager factory 启动过，close() 这时会抛
-                # "coroutine is being awaited already"——不影响「spawn 失败要回滚」
-                # 这个主结果，但必须留痕。
+            owner = self._started_teardown_task(coro, holder)
+            if owner is not None:
                 logger.debug(
-                    "事件总线关停：关闭未托管的 teardown coroutine 失败（忽略）: %s", exc)
+                    "事件总线关停：spawn 抛异常但 teardown 任务已存在，改为收养: %r", owner)
+                return owner
+            self._close_unstarted_coro(coro)
             raise
+        if isinstance(spawned, asyncio.Task):
+            return spawned
+        owner = self._started_teardown_task(coro, holder)
+        if owner is not None:
+            logger.debug(
+                "事件总线关停：工厂返回 %r 而非 Task，收养已启动的 teardown 任务", type(spawned))
+            return owner
+        logger.debug(
+            "事件总线关停：工厂返回 %r 而非 Task，绕开工厂直接接管 teardown coroutine",
+            type(spawned))
+        return _own_task_directly(loop, coro, context)
 
     def _on_teardown_done(self, task: "asyncio.Task") -> None:
         """teardown 任务的 done 回调：**取用**并具名留档它的异常（#109 r9/Finding 3）。
@@ -1716,15 +1829,26 @@ class RedisEventBus(EventBus):
         396 次出现 12 次）。取用**不影响**等待者：关停失败是经 close future 报的。
 
         被取消（``CancelledError``）不算「未取用」，但同样具名留档，便于归因。
+
+        #109 r10（记录口径一致）：``_teardown_error_kind`` / ``_teardown_task_error``
+        必须描述**同一次**收尾。r9 在取消分支只写 kind 不碰 error，于是
+        `kind='cancelled'` 却仍挂着上一轮的 ``ValueError``；正常完成时也不清，重试
+        成功后仍显示上一次的失败。现在三条分支各自把这一对**整体**改写：
+        取消 ⇒ ('cancelled', None)；异常 ⇒ (type(exc).__name__, exc)；正常完成
+        ⇒ (None, None)。第二次失败仍然覆盖第一次，但覆盖的是**成对**的。
         """
         if task.cancelled():
             self._teardown_error_kind = "cancelled"
+            self._teardown_task_error = None
             return
         exc = task.exception()
         if exc is not None:
             self._teardown_task_error = exc
             self._teardown_error_kind = type(exc).__name__
             logger.debug("事件总线关停：teardown 任务异常已取用: %r", exc)
+            return
+        self._teardown_task_error = None
+        self._teardown_error_kind = None
 
     async def _teardown(self) -> None:
         """关停序列本体（#109 r7）：在 owner context 里跑，结束时 resolve close future。
@@ -1901,6 +2025,19 @@ class RedisEventBus(EventBus):
             （幂等闸下是 no-op；revived 客户端才关得掉）；``pubsub``/``redis`` 置
             ``None`` 后不再重复。见 ``_close_backends``。
 
+        r10 补充：
+
+          * **回滚只发生在「真的没有 teardown 在跑」时**：工厂先建 Task 再抛（eager 或
+            非 eager）时**收养**那个任务、保持关停已受理；不再出现「组件已关掉而
+            ``_closing`` 被回滚成 False」导致的**双关**，也不再留下无人取用的孤儿 Task
+            （r9 反例）。工厂返回非 Task（已完成的 ``Future`` / 无
+            ``add_done_callback`` 的 awaitable）时绕开工厂接管 coroutine ⇒ close future
+            不会永远悬着、也不会打 "coroutine was never awaited"。
+          * **两条具名拒绝**：幂等分支里「已在**另一个**事件循环受理」现在也带
+            ``error_kind=cross-loop-close``（与在飞跨循环分支一致）。
+          * **记录口径一致**：``_teardown_error_kind`` / ``_teardown_task_error`` 成对
+            改写（取消 ⇒ ``('cancelled', None)``，不再残留上一轮异常）。
+
         ``close()`` 返回时：``_closing is True``、teardown 恰好跑过一次、监听到期被取消；
         已登记任务里被点名者允许继续跑完（登记由完成回调回收）。
         """
@@ -1911,6 +2048,7 @@ class RedisEventBus(EventBus):
                 raise RuntimeError(
                     "RedisEventBus.close() 已在另一个事件循环里受理关停请求："
                     "重复请求必须来自同一个事件循环（teardown 归属该循环）。"
+                    "error_kind=cross-loop-close"
                 )
             await asyncio.shield(self._close_future)
             return

@@ -162,18 +162,23 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   `connection_pool=` 的客户端仍是 `False`**）。`_pool_closing` 用 `inspect.signature`
   判断（签名不可知按**不支持**处理，绝不硬塞关键字——4.5.5 的 `PubSub.close(self)` 会
   `TypeError`；返回值非 awaitable 时也不裸 `await`，4.5.5 的 `PubSub.close()` 是**同步**
-  方法）。三个存储各自的 `close()` 也走同一条能力路径（旧实现直接
+  方法）。**「`PubSub.close()` 在没建过 connection 时返回 `None`」是 r9 的错误说法**
+  （r10 更正）：真实构造的 `PubSub` 上 `connection is None` 时它照样返回
+  `reset()` 的协程（实测 `isawaitable` 为 True）；只有构造中途崩溃、连 `connection`
+  属性都不存在的半成品才 `return None`（那个对象连 `__del__` 都会炸）。`isawaitable`
+  检查仍然必要，理由不同：**关闭方法是同步的**，别的后端也可以同步返回 `None`。
+  三个存储各自的 `close()` 也走同一条能力路径（旧实现直接
   `await self.redis.aclose()`，4.x 下三个存储的连接**一个都没释放**）。
 
   **实测支持范围**（连接数由服务端 `CLIENT LIST` 按 `client_name` 计数得出；redis 7）：
 
   | redis-py | 客户端形状 | 裸关停 | 带 `close_connection_pool=True` |
   |---|---|---|---|
-  | 4.5.5（真装） | `from_url` | `close()` 后 1 → **1** | — |
+  | 4.5.5（真装） | `from_url` | `close()` 后 1 → **1** | `close(True)` 后 1 → **0** |
   | 4.5.5（真装） | 外部注入池 | `close()` 后 1 → **1** | `close(True)` 后 1 → **0** |
-  | 8.1.0（安装版） | `from_url`（`auto_close=True`） | `aclose()` 后 1 → **0** | — |
+  | 8.1.0（安装版） | `from_url`（`auto_close=True`） | `aclose()` 后 1 → **0** | `aclose(True)` 后 1 → **0** |
   | 8.1.0（安装版） | 外部注入池（`auto_close=False`） | `aclose()` 后 1 → **1** | `aclose(True)` 后 1 → **0** |
-  | 4.5.5（真装，四组件总线） | `RedisEventBus` | r8 式裸 `close()`：4 → **4**（零释放） | `bus.close()`（r9）：4 → **0**，无 WARNING |
+  | 4.5.5（真装，四组件总线） | `RedisEventBus` | r8 式裸 `close()`：4 → **3**（pubsub 的共享连接**确实**被释放；「零释放」只对三个存储槽位成立——三条各带一次 `'Redis' object has no attribute 'aclose'` WARNING） | `bus.close()`（r9/r10）：4 → **0**，0 WARNING |
 
   即：**4.5.5 上裸 `close()`、5.x+ 上裸 `aclose()` 都可能静默不释放**；保证是
   「签名接受则连池一起关，不接受则裸调用，全缺失则具名 WARNING」。测试覆盖**安装版
@@ -199,11 +204,37 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   恢复到受理前的值并抛具名 `error_kind=teardown-spawn-failed`；且只有**仍在飞**的
   teardown 任务才登记进 `_teardown_task`（eager factory 同步跑完的 done 句柄不回填，
   监督者按 `_teardown_task is not None` / `.cancel()` 不会被误导）。
+- **回滚必须是真的（r10，r9 判负项）**：r9 把「spawn 抛异常」等同于「什么都没发生」。
+  但工厂可以先 `t = asyncio.Task(coro)` 再抛（非 eager），或先让
+  `asyncio.eager_task_factory` 同步跑完再抛（eager）。r9 在这些形状下：
+  **非 eager** 回滚成「未受理、总线仍可用」，却留下**无人取用**的孤儿 Task——它被
+  r9 无条件的 `coro.close()` 弄死在 `cannot reuse already awaited coroutine`，并在 GC 时
+  打印 `Task exception was never retrieved`；**eager** 组件**已经全部关掉**
+  （`_teardown_runs=1`、五个组件各 1 次）而 `_closing` 被回滚成 `False`，第二次
+  `close()` 把三个存储**再关一遍**（`closes=[1,1,2,2,2]`）——这是**双重释放**。
+  r10 把归属判定下沉到 `_spawn_teardown`：**已启动就收养**（返回那个 Task，
+  `_closing` 保持已受理、`_teardown_runs` 如实为 1），**从未托管才回滚**；
+  `coro.close()` **只在从未启动时**调用（启动过就保留其归属与取用回调）。
+  工厂返回**非 Task**（已完成的 `Future` / 没有 `add_done_callback` 的 awaitable /
+  coroutine 本身）时，close future 会永远悬着且 coroutine 打
+  `was never awaited`（r9 实测两次 close 都超时）——r10 绕开工厂用 `asyncio.Task`
+  直接接管，真跑一次关停（`_teardown_runs=1`，不留 PENDING）。
+  `_spawn_teardown` 的返回类型因此收紧为「真正的 `asyncio.Task`，否则抛具名错」：
+  `request_close` 里对返回值的**使用**（`add_done_callback` / `done()`）对任意工厂
+  行为都不会失败，会失败的都在 spawn 内部并走同一条回滚。
+- **记录口径一致（r10）**：`_teardown_error_kind` / `_teardown_task_error` 成对改写
+  （取消 ⇒ `('cancelled', None)`；异常 ⇒ `(type(exc).__name__, exc)`；正常完成 ⇒
+  `(None, None)`）。r9 在取消分支只写 kind 不碰 error，会出现 `kind='cancelled'`
+  却仍挂着上一轮 `ValueError` 的不一致对。
+- **幂等分支的跨循环也具名（r10）**：`close()` 在**另一个**事件循环里发现
+  `_close_future` 已受理时，拒绝文案补上 `error_kind=cross-loop-close`
+  （此前只有「有在飞分发」的分支带这个 kind）。
 - **teardown Task 的异常被取用（r9/Finding 3）**：r8 只给 close **Future** 挂了取用
   回调；步骤抛异常时 Task 一侧无人取用，解释器在 GC 时打印
   `Task exception was never retrieved — RuntimeError('boom-step')`（3.11/3.12 实测；
   in-process 反复跑 396 次出现 12 次）。现在 done 回调取用并具名留档到
-  `_teardown_task_error` / `_teardown_error_kind`；测试在同一进程内连跑 40 次失败
+  `_teardown_task_error` / `_teardown_error_kind`（r10 起收养来的任务也挂它，
+  eager 同步跑完的路径由入口包装的 holder 找回句柄）；测试在同一进程内连跑 40 次失败
   路径，`never retrieved` 计 **0**。
 - **重试的重复释放口径（r9/Finding 4）**：teardown 未完成而重试时，`pubsub` / `redis`
   槽位已置 `None` ⇒ 不再释放；三个存储槽位保留对象引用 ⇒ **会再调用一次它们的
