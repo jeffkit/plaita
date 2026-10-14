@@ -29,6 +29,7 @@ r10 的规则（名字不变）：**受理是全有或全无——总线要么�
 
 import asyncio
 import gc
+import sys
 import unittest
 import warnings
 
@@ -82,8 +83,14 @@ def _factory_raises_without_touching(loop, coro, **kwargs):
 
 
 def _factory_create_then_raise(loop, coro, **kwargs):
-    """非 eager：先建 Task（coroutine 已归它所有）再抛。"""
-    asyncio.Task(coro, loop=loop, context=kwargs.get("context"))
+    """非 eager：先建 Task（coroutine 已归它所有）再抛。
+
+    3.10 的 ``Task.__init__`` 没有 ``context`` 形参（3.11 才加），所以要分版本。
+    """
+    if sys.version_info >= (3, 11):
+        asyncio.Task(coro, loop=loop, context=kwargs.get("context"))
+    else:
+        asyncio.Task(coro, loop=loop)
     raise RuntimeError("factory boom")
 
 
@@ -348,36 +355,57 @@ class Test109R10AdoptStartedTeardown(unittest.IsolatedAsyncioTestCase):
 # 3) 非 Task 的工厂返回值：绕开工厂接管（不得留悬着的 close future）
 # --------------------------------------------------------------------------
 class Test109R10NonTaskSpawnReturn(unittest.IsolatedAsyncioTestCase):
-    async def _assert_wrapped_and_completed(self, factory, label):
+    """非 Task 的工厂返回值：**全有或全无**，两条可接受结局之一。
+
+    平台差异（实测）：``loop.create_task`` 在 ≤3.12 / 3.11 上把工厂返回的非 Task 对象
+    原样交回（于是 r10 **绕开工厂接管**、真跑完关停）；3.13 的 ``base_events.create_task``
+    会对返回值调 ``task.set_name(name)``，非 Task 对象直接
+    ``AttributeError: ... has no attribute 'set_name'``——**在返回前就失败**，r10 因此走
+    另一半：具名 ``teardown-spawn-failed`` + 整体回滚，总线仍可用。两边都满足规则
+    （没有无主 pending ``_close_future``、没有孤儿、没有 ``was never awaited``、没有双关）。
+    """
+
+    async def _assert_all_or_nothing(self, factory, label):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             shape = await run_shape(factory)
             await settle()
-        self.assertEqual(shape.outcome, "returned",
-                         f"{label}：必须被接手并真的跑完关停（r9 让 close future 永悬）")
-        self.assertTrue(shape.bus._closing)
-        self.assertEqual(_close_future_state(shape.bus), "done-ok",
-                         f"{label}：_close_future 不许停在 PENDING")
-        self.assertEqual(shape.bus._teardown_runs, 1,
-                         f"{label}：接管后必须**真的**跑过一次 teardown（不得谎报）")
-        self.assertEqual(shape.closes, [1, 1, 1, 1, 1])
-        self.assertEqual(shape.orphan_count, 0)
+        bus = shape.bus
+        self.assertEqual(shape.orphan_count, 0, f"{label}：不得留下孤儿任务")
         self.assertEqual(
             [w for w in caught if issubclass(w.category, RuntimeWarning)], [],
             f"{label}：不得出现 'coroutine ... was never awaited'")
-        await asyncio.wait_for(shape.bus.close(), timeout=WATCHDOG)
-        self.assertEqual(shape.bus._teardown_runs, 1)
+        if shape.outcome == "returned":
+            # create_task 接受了非 Task 返回值：接管并真跑完。
+            self.assertTrue(bus._closing)
+            self.assertEqual(_close_future_state(bus), "done-ok",
+                             f"{label}：_close_future 不许停在 PENDING")
+            self.assertEqual(bus._teardown_runs, 1,
+                             f"{label}：接管后必须**真的**跑过一次 teardown（不得谎报）")
+            self.assertEqual(shape.closes, [1, 1, 1, 1, 1])
+        else:
+            # create_task 在返回前就拒绝（3.13 的 set_name）：具名回滚，总线仍可用。
+            self.assertEqual(shape.named_kind, "teardown-spawn-failed",
+                             f"{label}：拒绝必须是具名 kind")
+            self.assertFalse(bus._closing)
+            self.assertIsNone(bus._close_future)
+            self.assertIsNone(bus._teardown_task)
+            self.assertEqual(bus._teardown_runs, 0)
+            self.assertEqual(shape.closes, [0, 0, 0, 0, 0])
+        # 健康重试：无论走哪一半都必须能真正关停一次（且不双关）。
+        await asyncio.wait_for(bus.close(), timeout=WATCHDOG)
+        self.assertEqual(bus._teardown_runs, 1)
         self.assertEqual(shape.closes, [1, 1, 1, 1, 1], f"{label}：不得双关")
 
     async def test_done_future_return_is_wrapped(self):
-        await self._assert_wrapped_and_completed(_factory_done_future, "已完成的 Future")
+        await self._assert_all_or_nothing(_factory_done_future, "已完成的 Future")
 
     async def test_awaitable_without_add_done_callback_is_wrapped(self):
-        await self._assert_wrapped_and_completed(
+        await self._assert_all_or_nothing(
             _factory_awaitable_without_callback, "无 add_done_callback 的 awaitable")
 
     async def test_factory_returning_bare_coro_is_wrapped(self):
-        await self._assert_wrapped_and_completed(
+        await self._assert_all_or_nothing(
             _factory_returns_coro, "工厂把 coroutine 交回来")
 
 
@@ -432,8 +460,8 @@ class Test109R10SpawnContract(unittest.IsolatedAsyncioTestCase):
                 try:
                     try:
                         spawned = bus._spawn_teardown(loop)
-                    except BaseException as exc:        # noqa: BLE001 - 断言用
-                        self.assertIn("factory boom", str(exc))
+                    except BaseException:               # noqa: BLE001 - 契约允许的另一半
+                        pass
                     else:
                         self.assertIsInstance(
                             spawned, asyncio.Task,
