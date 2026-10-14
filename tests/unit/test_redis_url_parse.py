@@ -2335,6 +2335,14 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
         头/尾截都还在形态集里。r6/r7 的「每个分隔符只切第一次」正是第五次复发的
         结构根因（``AA@BB@SuperSecretTail`` 的 ``SuperSecretTail`` 不在形态集里）。
         """
+        # 分隔符集本身是**契约的一部分**（r8 要求 1：口令含 ``@ : / ? # %`` 与空白
+        # 时，每一截都要成为 needle）。少了任何一个，闭包都在语义上不完整。
+        for separator in ("@", ":", "/", "?", "#", "%", " ", "\t"):
+            self.assertIn(
+                separator,
+                factory._SECRET_SPLITTERS,
+                f"分隔符集缺 {separator!r}（要求 1 的闭包范围被收窄）",
+            )
         checked = 0
         for _slot, _kind, secret, _url in _cached_corpus(2400):
             forms = set(factory._secret_forms(secret))
