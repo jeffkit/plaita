@@ -82,21 +82,34 @@ def _reentry_error() -> FlowExecutionException:
 
 
 def _inherited_express(parent) -> Dict[str, Any]:
-    """子执行要继承的父级 ``express_*`` 命名空间配置（plaita#106）。
+    """子执行要继承的父级 ``express_*`` 命名空间配置（plaita#106/#141）。
 
-    子执行是新实例 + 新 ``ExecutionContext``，六个命名空间参数各有默认值，
+    子执行是新实例 + 新 ``ExecutionContext``，命名空间参数各有默认值，
     不透传就静默回默认——父级经 ``FlowExecution.run(options=...)`` 自定义命名
     空间后，子流程（``child`` 内联 / ``parallel`` 分支 / ``map`` 迭代体）按自
     定义名寻址会硬 ``KeyError: '$PARAMS' not found``。与
     ``ExecutionContext.child()`` 的同型复制对齐。
+
+    plaita#141：``expose_env`` 也是这条契约的一项（``ExecutionContext.child()``
+    一直传七项，子执行此前只传六项）。两条子执行创建路径因此可以分叉——父级
+    自定义 ``express_environment_variable`` 且声明 ``expose_env`` 时，经
+    ``child()`` 建的子上下文有 allowlist、经 ``get_child_execution()`` 建的没有。
+
+    ``expose_env`` 取 ``parent._ctx`` 而非像六项那样走 FlowExecution 公开属性：
+    ``FlowExecution`` 类体已顶到 SC-003 硬上限 400 LOC（``tests/e2e/
+    test_success_criteria.py`` 会拦），一个只读 property 至少要 4 行——权威副本
+    本来就在 ExecutionContext 上，不值得为形式对称把类撑爆。语义与 ``child()``
+    的 ``expose_env=self.expose_env`` 同源。
     """
     if parent is None:
         return {}
-    return {k: getattr(parent, k) for k in (
+    inherited = {k: getattr(parent, k) for k in (
         "express_prefix", "express_input_name", "express_parent_name",
         "express_node_name", "express_global_name",
         "express_environment_variable",
     )}
+    inherited["expose_env"] = list(parent._ctx.expose_env)
+    return inherited
 
 
 def _validated_timeout_ms(value, source: str) -> Optional[int]:

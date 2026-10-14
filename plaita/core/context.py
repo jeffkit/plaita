@@ -201,6 +201,16 @@ class ExecutionContext(_SystemStateAccessors):
         self.parent = parent
         self.event_bus = event_bus
         self.expose_env = list(expose_env) if expose_env else []
+        # plaita#141：**构造期**继承的 `$ENV` allowlist（仅子上下文可能非空）。
+        # #106 起子执行继承父级 express_* 命名空间，但 `expose_env` 此前只落在上
+        # 一行：`setup_flow` 会按「被执行 flow 自己声明的值」整体覆盖它，父级
+        # allowlist 在子执行里不可观测（子 `$ENV` 恒空，读单个变量靠 `$PARENT`
+        # 回落兜底才不显形）。`setup_flow` 因此需要一份**不被 flow 覆盖**的继承
+        # 快照——根上下文（无 parent）恒为空，避免同一实例跨 run 把上一次 flow
+        # 的 allowlist 泄漏给下一次（历史上 `clean()` 只负责快照、不负责清值）。
+        self._inherited_expose_env = (
+            list(expose_env) if (parent is not None and expose_env) else []
+        )
         # 进程内共享 parent Event；跨进程由 __getstate__/__setstate__ 重建。
         self.cancel_event = parent.cancel_event if parent is not None else threading.Event()
         # 执行级取消意图（2026-10 波次③）：与 cancel_event 职责拆分——
@@ -297,10 +307,21 @@ class ExecutionContext(_SystemStateAccessors):
         # plaita#72：旧序列化体（进程池在滚动升级/跨版本 pickle 的窗口）里没有
         # _parent_snapshot，缺省补 None——setup_flow 只在父存在时消费它。
         self.__dict__.setdefault("_parent_snapshot", None)
+        # plaita#141：同型兼容——旧序列化体没有继承 allowlist 快照。进程模式
+        # 分支的子上下文会被 pickle 后在新进程重建，缺这项会让 setup_flow 直接
+        # AttributeError（而不是退回"无继承"的旧行为）。
+        self.__dict__.setdefault("_inherited_expose_env", [])
 
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         """Populate $INPUT/$PARENT/$GLOBAL/$FLOW_ID/$ENV and sync expose_env."""
         flow_allowlist = list(getattr(flow, "expose_env", None) or [])
+        if not flow_allowlist:
+            # plaita#141：被执行 flow 未声明 `expose_env` 时，子执行继承父级
+            # allowlist（构造期快照，见 __init__）——与 `ExecutionContext.child()`
+            # 一直以来的行为对齐，也让 #106「子执行继承父 express 命名空间」对
+            # `$ENV` 真正可观测（此前子 `$ENV` 恒空，读变量靠 $PARENT 回落兜底）。
+            # 根上下文（无 parent）该快照恒为空 ⇒ 默认 $ENV 用户零行为变更。
+            flow_allowlist = list(self._inherited_expose_env)
         # review-fix B3（伴生）: 先验证新 allowlist 再提交——否则非法 allowlist
         # （如 ["*"]）在此处抛错时 expose_env 已被污染，同一实例下次 run 的
         # clean() 立刻用脏值再次爆炸，把「prepare 抛错」放大成「实例报废」。

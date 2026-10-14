@@ -8,6 +8,35 @@
 
 ## Unreleased（0.5.x）
 
+### 子执行继承父级 `$ENV` 白名单（plaita#141）
+
+**口径（contract）**：子执行（`child` 内联子逻辑 / `parallel` 分支 /
+`map`·`filter`·`find`·`reduce`·`loop` 迭代体）**继承父执行的 `expose_env`
+allowlist**；被执行子流程自己声明了非空 `exposeEnv` 时**以声明为准**（替换，
+不是合并）。`FlowExecution` 的子执行与 `ExecutionContext.child()` 两条创建路径
+自此逐项一致（此前后者复制 7 项、前者只复制 6 项，`expose_env` 分叉）。
+
+- **受影响**：父流程声明了 `expose_env`、子流程自己没有声明的执行——子流程内
+  `$ENV`（或自定义名，如 `$VARS`）现在能看到父级白名单里的变量；此前子执行
+  `$ENV` 恒为空 dict（读单个变量靠 `$PARENT` 回落兜底才不显形，但整份 `$ENV`
+  读出是空的）。
+- **不受影响**：父流程从未声明 `expose_env`（allowlist 为空）的执行——子执行
+  `$ENV` 仍恒为空，行为逐字不变；根执行的 `$ENV` 语义不变。
+- **迁移**：无需改代码。若你依赖"子流程 `$ENV` 恒空"做隔离，请在**子流程**里
+  显式声明它自己要用的 `exposeEnv`（声明替换父级白名单），或不要在父流程声明。
+
+**已知边界（不是缺陷；空声明与未声明不可区分）**：
+
+- **`exposeEnv=[]` 不构成"声明"，子流程无法据此退回空 `$ENV`**。`Flow.expose_env`
+  的字段定义是 `default_factory=list`（`plaita/core/flow.py`），pydantic 模型不保留
+  "用户究竟写没写这个键"这一信息——`exposeEnv=[]` 与完全不写 `exposeEnv` 在模型上
+  都是空 list。因此本单的继承口径只能以**非空**为界：子流程内联声明
+  `exposeEnv=[]` 仍会被 `setup_flow` 回落到父级 allowlist，**子流程要向父级白名单
+  收窄只有两条路**——在子流程里显式列出它自己实际要用的变量（非空即替换，不是
+  合并），或**父流程不声明** `expose_env`（父级快照为空 ⇒ 整条继承链为空）。
+  本单不为此引入哨兵值 / `Optional[None]` 变体来区分"空 vs 未声明"：那会改变
+  `Flow(**ir)` 的既有可序列化形状，超出本单 Boundary。
+
 ### DSL：`@childflow("<text>")` 的位置实参由 `desc` 变成子流程 `flow_id`（plaita#145）
 
 `childflow()` 此前签名是 `childflow(desc=None)`，位置实参只能是说明文字；现在
