@@ -125,7 +125,12 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
       typeof rawDetail === 'string'
         ? rawDetail
         : ((rawDetail as { message?: string } | null)?.message ?? '请求失败')
-    const err = new Error(message) as Error & { detail?: unknown }
+    const err = new Error(message) as Error & { detail?: unknown; status?: number }
+    // HTTP 状态码随错误对象抛出：调用方需要区分「404 路由/资源不存在」与
+    // 「5xx 服务端错误」（如 /source 降级失败的分类展示，见
+    // components/flow/sourceViewState.ts），只凭 message 无法可靠分辨。
+    // 对既有调用方是纯新增的可选属性，不改动 message/detail 行为。
+    err.status = response.status
     if (rawDetail !== null && typeof rawDetail === 'object') err.detail = rawDetail
     throw err
   }

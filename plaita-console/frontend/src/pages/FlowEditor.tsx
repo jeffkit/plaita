@@ -12,6 +12,14 @@ import { autoLayout, type LayoutDirection } from '../components/flow/flowLayout'
 import { symmetricLayout } from '../components/flow/symmetricLayout'
 import DryRunPanel from '../components/flow/DryRunPanel'
 import SourceViewPanel from '../components/flow/SourceViewPanel'
+import {
+  EMPTY_SOURCE_VIEW,
+  embeddedSource,
+  resolveSourceFailure,
+  resolveSourceResponse,
+  type SourceKind,
+  type SourceViewState,
+} from '../components/flow/sourceViewState'
 import type { Node, Edge } from '@xyflow/react'
 import { ArrowLeft, Zap, Code2, Save, Rocket, Play, ChevronRight, AlertTriangle, Undo2, Redo2 } from 'lucide-react'
 import { Button, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui'
@@ -177,8 +185,12 @@ export default function FlowEditor() {
   const metadataRef = useRef<Record<string, unknown> | undefined>(undefined)
   const [flowSource, setFlowSource] = useState('')
   // 源码视图数据来源：authoritative=metadata.source（仓内权威，行号可跳）；
-  // decompiled=后端 emit_source 反编译兜底（画布 flow / 存量 JSON 无内嵌源码）
-  const [sourceKind, setSourceKind] = useState<'authoritative' | 'decompiled' | null>(null)
+  // decompiled=后端 emit_source 反编译兜底（画布 flow / 存量 JSON 无内嵌源码）；
+  // null=无源码视图，或来源未标注（见 sourceViewState.ts）
+  const [sourceKind, setSourceKind] = useState<SourceKind>(null)
+  // 无 @flow 源码视图时的可读原因（/source 的 unavailable reason 或失败分类），
+  // 在源码面板与「源码」按钮上呈现——不再静默吞成「没有这个页签」（#117）
+  const [sourceUnavailableReason, setSourceUnavailableReason] = useState<string | null>(null)
   // 节点详情「查看源码」跳转：高亮行
   const [sourceHighlight, setSourceHighlight] = useState<number | null>(null)
 
@@ -198,22 +210,40 @@ export default function FlowEditor() {
         // 原定义的 metadata（可能含 @flow 源码）原样透传：保存/发布不丢，源码面板可用
         const defMeta = (def.metadata as Record<string, unknown> | undefined) || undefined
         metadataRef.current = defMeta
-        const src = defMeta && typeof defMeta.source === 'string' ? defMeta.source : ''
+        // 内嵌权威源码；纯空白按「没有」处理（与后端 flows.py 的 .strip() 判定一致，
+        // 否则会出现空白却自称权威、且不再走反编译兜底的 @flow 页签）
+        const src = embeddedSource(defMeta)
         setFlowSource(src)
         setSourceKind(src ? 'authoritative' : null)
+        setSourceUnavailableReason(null)
         useFlowEditor.setState({ hasFlowSource: !!src, sourceKind: src ? 'authoritative' : null, sourceLineRequest: null })
         if (!src) {
           // 无内嵌源码（画布 flow / 存量 JSON）：后端 emit_source 反编译兜底。
-          // 失败（不可表达的构造）保持无页签；竞态用 cancelled 防旧版本回写。
+          // 每一种结局都必须可区分（#117）：decompiled 展示源码；unavailable 展示
+          // 后端 reason；404 / 5xx / 网络失败 / 响应不可解析各给分类说明——
+          // 不再一律吞成「无 @flow 页签」的静默状态。竞态用 cancelled 防旧版本
+          // 回写（catch 分支同样受保护），告警留 console 便于排障。
           let cancelled = false
-          api.getFlowVersionSource(flowId, versionParam).then((res) => {
+          const applySourceView = (state: SourceViewState) => {
             if (cancelled) return
-            if (res.source_kind === 'decompiled' && res.source) {
-              setFlowSource(res.source)
-              setSourceKind('decompiled')
-              useFlowEditor.setState({ hasFlowSource: true, sourceKind: 'decompiled' })
+            if (state.source) {
+              setFlowSource(state.source)
+              setSourceKind(state.sourceKind)
+              setSourceUnavailableReason(null)
+              useFlowEditor.setState({ hasFlowSource: true, sourceKind: state.sourceKind, sourceLineRequest: null })
+            } else {
+              setFlowSource('')
+              setSourceKind(null)
+              setSourceUnavailableReason(state.unavailableReason)
+              useFlowEditor.setState({ hasFlowSource: false, sourceKind: null, sourceLineRequest: null })
             }
-          }).catch(() => { /* 反编译不可用：如实不显示 @flow 页签 */ })
+            if (state.warning) console.warn(state.warning)
+          }
+          // 请求中先清掉上一版本的降级说明（版本切换时不残留旧原因）
+          applySourceView(EMPTY_SOURCE_VIEW)
+          api.getFlowVersionSource(flowId, versionParam)
+            .then((res) => applySourceView(resolveSourceResponse(res)))
+            .catch((err) => applySourceView(resolveSourceFailure(err)))
           sourceFetchCancelled = () => { cancelled = true }
         }
         setGraph(ns as Node[], es as Edge[])
@@ -237,6 +267,8 @@ export default function FlowEditor() {
         baseVersionRef.current = { version: '', updatedAt: null }
         metadataRef.current = undefined
         setFlowSource('')
+        setSourceKind(null)
+        setSourceUnavailableReason(null)
         useFlowEditor.setState({ hasFlowSource: false, sourceLineRequest: null })
         setGraph([], [])
         setMsg(`版本定义解析失败：${(e as Error).message}`)
@@ -719,9 +751,14 @@ export default function FlowEditor() {
           size="sm"
           onClick={() => { collapseToRoot(); setShowSource((v) => !v) }}
           className={showSource ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400' : undefined}
+          title={sourceUnavailableReason ? `无 @flow 源码视图：${sourceUnavailableReason}` : undefined}
         >
           <Code2 size={13} />
           源码
+          {/* 无 @flow 页签时给一个可发现的标记：点开面板即见具体原因（#117） */}
+          {sourceUnavailableReason && (
+            <span aria-hidden="true" className="ml-1 px-1 rounded bg-amber-500/15 text-[10px] text-amber-300">!</span>
+          )}
         </Button>
         </div>
       </div>
@@ -834,6 +871,7 @@ export default function FlowEditor() {
               flow={sourceFlow}
               source={flowSource || undefined}
               sourceKind={sourceKind}
+              unavailableReason={sourceUnavailableReason}
               highlightLine={sourceKind === 'authoritative' ? sourceHighlight : null}
               onHighlightDone={() => setSourceHighlight(null)}
               onClose={() => {

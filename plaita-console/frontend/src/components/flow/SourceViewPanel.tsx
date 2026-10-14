@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as YAML from 'yaml'
-
-type Format = 'yaml' | 'json' | 'flow'
+import { sourceNoteText, type SourceFormat, type SourceKind } from './sourceViewState'
 
 interface SourceViewPanelProps {
   /** 当前画布对应的 flow 定义（已序列化为 JS 对象，含 flow_id/version/desc/inputType/nodes 等）。 */
@@ -10,8 +9,12 @@ interface SourceViewPanelProps {
   source?: string
   /** 源码来源：authoritative=仓内权威源码（行号可与节点 source_line 对应）；
    *  decompiled=后端 emit_source 反编译兜底——语义等效但**非权威**：无注释、
-   *  id/行号不对应仓内文件，行号跳转停用；缺省按 authoritative 处理。 */
-  sourceKind?: 'authoritative' | 'decompiled' | null
+   *  id/行号不对应仓内文件，行号跳转停用；null/缺省=来源未标注，**不认领权威性**
+   *  （说明文案随之下调，避免缺省值把未知来源说成行号可对应）。 */
+  sourceKind?: SourceKind
+  /** 无 @flow 源码时的可读原因（/source 返回 unavailable 的 reason，或请求失败的
+   *  分类说明）；有源码时为 null。非空即表明「这个版本确实没有可展示的 @flow 源码」。 */
+  unavailableReason?: string | null
   /** 需要高亮并滚动到的源码行（1-based）；滚动定位完成后回调 onHighlightDone。 */
   highlightLine?: number | null
   onHighlightDone?: () => void
@@ -24,8 +27,8 @@ interface SourceViewPanelProps {
  * 发布链路写入），追加「@flow」页签——按行号展示，支持外部按 source_line
  * 高亮定位（画布节点 → 源码行回溯）。
  */
-export default function SourceViewPanel({ flow, source, sourceKind = 'authoritative', highlightLine, onHighlightDone, onClose }: SourceViewPanelProps) {
-  const [format, setFormat] = useState<Format>(source ? 'flow' : 'yaml')
+export default function SourceViewPanel({ flow, source, sourceKind = null, unavailableReason = null, highlightLine, onHighlightDone, onClose }: SourceViewPanelProps) {
+  const [format, setFormat] = useState<SourceFormat>(source ? 'flow' : 'yaml')
   const [copied, setCopied] = useState(false)
   const highlightRef = useRef<HTMLSpanElement | null>(null)
 
@@ -62,8 +65,8 @@ export default function SourceViewPanel({ flow, source, sourceKind = 'authoritat
     }
   }
 
-  const formats: Format[] = source ? ['flow', 'yaml', 'json'] : ['yaml', 'json']
-  const formatLabel: Record<Format, string> = { flow: '@flow', yaml: 'YAML', json: 'JSON' }
+  const formats: SourceFormat[] = source ? ['flow', 'yaml', 'json'] : ['yaml', 'json']
+  const formatLabel: Record<SourceFormat, string> = { flow: '@flow', yaml: 'YAML', json: 'JSON' }
 
   return (
     <div className="w-[28rem] bg-dark-900/95 border-l border-dark-700 p-4 overflow-y-auto text-sm flex flex-col">
@@ -71,6 +74,16 @@ export default function SourceViewPanel({ flow, source, sourceKind = 'authoritat
         <h3 className="font-semibold text-dark-100">源码</h3>
         <button onClick={onClose} className="text-dark-400 hover:text-dark-100">✕</button>
       </div>
+
+      {!source && unavailableReason && (
+        <p
+          role="status"
+          className="mb-3 px-2 py-1.5 rounded bg-dark-700/60 border border-dark-600 text-[11px] leading-relaxed text-dark-200"
+        >
+          <span className="text-dark-100">当前版本没有 @flow 源码视图：</span>
+          {unavailableReason}
+        </p>
+      )}
 
       {sourceKind === 'decompiled' && (
         <p className="mb-3 px-2 py-1.5 rounded bg-amber-500/10 border border-amber-500/30 text-[11px] leading-relaxed text-amber-300">
@@ -104,11 +117,7 @@ export default function SourceViewPanel({ flow, source, sourceKind = 'authoritat
       </div>
 
       <p className="text-xs text-dark-400 mb-2">
-        {format === 'yaml'
-          ? 'YAML：配置文件首选，支持注释。保存到文件用 .yaml / .yml 后缀，Flow.from_file 可直接加载。'
-          : format === 'json'
-            ? 'JSON：与可视化编排工具互通的格式，Flow.from_string 可直接加载。'
-            : '权威 @flow 源码（节点 id 即变量名 / 条件语义）；行号与画布节点 source_line 对应。'}
+        {sourceNoteText(format, sourceKind)}
       </p>
 
       {sourceLines ? (
