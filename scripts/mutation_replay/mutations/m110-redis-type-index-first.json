@@ -1,0 +1,14 @@
+{
+  "name": "m110-redis-type-index-first",
+  "issue": "110",
+  "concern": "#110",
+  "file": "plaita/event/redis.py",
+  "rationale": "索引优先级退回 event_type ⇒ 代价 O(该类型全部订阅)（#110 回归）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test110CorrelationIndexPriority::test_correlation_index_cost_is_bounded_by_matches",
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test110CorrelationIndexPriority::test_equivalent_to_correlation_only_query",
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test110CorrelationIndexPriority::test_cross_backend_parity_with_memory"
+  ],
+  "old": "        if correlation_id:\n            key = f\"{self.key_prefix}correlation:{correlation_id}\"\n            subscription_ids = await self.redis.smembers(key)\n        elif event_type:\n            key = f\"{self.key_prefix}type:{event_type}\"\n            subscription_ids = await self.redis.smembers(key)",
+  "new": "        if event_type:\n            key = f\"{self.key_prefix}type:{event_type}\"\n            subscription_ids = await self.redis.smembers(key)\n        elif correlation_id:\n            key = f\"{self.key_prefix}correlation:{correlation_id}\"\n            subscription_ids = await self.redis.smembers(key)"
+}

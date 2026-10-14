@@ -1,0 +1,12 @@
+{
+  "name": "m109-redis-selfclose-guard-off",
+  "issue": "109",
+  "concern": "F2",
+  "file": "plaita/event/redis.py",
+  "rationale": "handler 内 close() 不具名拒绝 ⇒ 自纳入 drain / RecursionError",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test109CancelWindowAndSelfClose::test_close_from_own_handler_is_named_refusal"
+  ],
+  "old": "        if current is not None and current in self._pending_tasks:",
+  "new": "        if False:  # mutation: 围栏失效"
+}

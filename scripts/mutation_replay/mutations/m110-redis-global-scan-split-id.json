@@ -1,0 +1,12 @@
+{
+  "name": "m110-redis-global-scan-split-id",
+  "issue": "110",
+  "concern": "F3③",
+  "file": "plaita/event/redis.py",
+  "rationale": "全量 SCAN 用 split(':')[-1] 取 id ⇒ 含 ':' 的订阅静默丢失",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test110CorrelationIndexPriority::test_global_scan_keeps_colon_containing_ids"
+  ],
+  "old": "            _data_prefix = f\"{self.key_prefix}data:\"\n            subscription_ids = [\n                (key.decode('utf-8') if isinstance(key, bytes) else key)[len(_data_prefix):]\n                for key in data_keys\n            ]",
+  "new": "            subscription_ids = [\n                (key.decode('utf-8') if isinstance(key, bytes) else key).split(':')[-1]\n                for key in data_keys\n            ]  # mutation: 截断 id"
+}

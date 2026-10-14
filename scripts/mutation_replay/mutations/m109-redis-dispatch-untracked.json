@@ -1,0 +1,13 @@
+{
+  "name": "m109-redis-dispatch-untracked",
+  "issue": "109",
+  "concern": "#109",
+  "file": "plaita/event/redis.py",
+  "rationale": "分发任务不持强引用 ⇒ close() 无对象可排空（第三态回归）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test109DispatchTaskLifetime::test_dispatch_task_is_tracked_then_released",
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test109DispatchTaskLifetime::test_close_waits_for_short_dispatch_and_marks"
+  ],
+  "old": "        self._pending_tasks[task] = (event_id, handler_id)\n        task.add_done_callback(lambda t: self._pending_tasks.pop(t, None))",
+  "new": "        pass  # mutation: 不持引用"
+}

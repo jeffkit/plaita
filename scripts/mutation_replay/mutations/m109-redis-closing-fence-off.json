@@ -1,0 +1,12 @@
+{
+  "name": "m109-redis-closing-fence-off",
+  "issue": "109",
+  "concern": "#109",
+  "file": "plaita/event/redis.py",
+  "rationale": "关停围栏失效 ⇒ close() 后到达的分发静默创建、绕过 drain",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test109DispatchTaskLifetime::test_dispatch_after_close_starts_is_refused_loudly"
+  ],
+  "old": "            if self._closing:",
+  "new": "            if False:  # mutation: 围栏失效"
+}

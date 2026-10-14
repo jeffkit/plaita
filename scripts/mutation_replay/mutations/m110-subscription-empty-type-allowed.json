@@ -1,0 +1,13 @@
+{
+  "name": "m110-subscription-empty-type-allowed",
+  "issue": "110",
+  "concern": "F1",
+  "file": "plaita/event/core.py",
+  "rationale": "订阅 event_type 允许空 ⇒ 三后端对空类型订阅语义分叉",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test110EventTypeMustBeNonEmpty::test_subscription_rejects_empty_event_type",
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test110EventTypeMustBeNonEmpty::test_empty_type_subscription_cannot_enter_storage"
+  ],
+  "old": "    event_type: str = Field(min_length=1)",
+  "new": "    event_type: str = Field()  # mutation: 允许空"
+}

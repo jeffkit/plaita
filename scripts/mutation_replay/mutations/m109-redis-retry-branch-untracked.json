@@ -1,0 +1,12 @@
+{
+  "name": "m109-redis-retry-branch-untracked",
+  "issue": "109",
+  "concern": "F3②",
+  "file": "plaita/event/redis.py",
+  "rationale": "retry 分支登记点不持引用 ⇒ retry 分发在收尾被静默取消",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test109CancelWindowAndSelfClose::test_retry_branch_task_is_tracked_and_drained"
+  ],
+  "old": "                self._track_task(\n                    asyncio.create_task(\n                        self._process_with_retry(handler, event, handler_id, retry_policy)\n                    ),\n                    event.event_id, handler_id,\n                )",
+  "new": "                asyncio.create_task(\n                    self._process_with_retry(handler, event, handler_id, retry_policy)\n                )  # mutation: 不登记"
+}

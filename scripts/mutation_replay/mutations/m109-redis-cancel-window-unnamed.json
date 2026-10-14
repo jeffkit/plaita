@@ -1,0 +1,12 @@
+{
+  "name": "m109-redis-cancel-window-unnamed",
+  "issue": "109",
+  "concern": "F2",
+  "file": "plaita/event/redis.py",
+  "rationale": "取消窗口不点名 ⇒ 既不完成也不点名（静默丢失回归）",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test109CancelWindowAndSelfClose::test_cancel_window_names_event_instead_of_silent_loss"
+  ],
+  "old": "        except asyncio.CancelledError:\n            # #109/F2：取消窗口点名——不改变取消语义（继续向上抛），只是不留\n            # 「既不完成、也不点名」的静默结局。\n            logger.warning(\n                \"事件总线关停：分发在取消窗口内被取消（event_id=%s, handler_id=%s）\",\n                event_id, handler_id,\n            )\n            raise\n",
+  "new": ""
+}

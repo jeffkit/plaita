@@ -45,13 +45,19 @@ def _make_event(event_type="order.created", data=None, correlation_id=None):
 
 def _make_sub(event_type="order.created", correlation_id=None, flow_id=None,
               node_id=None, filter_condition=None):
-    return EventSubscription(
-        event_type=event_type,
+    kwargs = dict(
         correlation_id=correlation_id,
         flow_id=flow_id,
         node_id=node_id,
         filter_condition=filter_condition,
     )
+    if event_type == "":
+        # #110/F1：EventSubscription.event_type 现在 min_length=1（空类型订阅在
+        # Redis 走 correlation 索引时会与 memory/sqlalchemy 分叉，模型层直接拒）。
+        # 这条用例是 matches_event 内部 falsy-通配分支的变异杀手，用
+        # model_construct 绕过构造期校验保留它的检验力。
+        return EventSubscription.model_construct(event_type=event_type, **kwargs)
+    return EventSubscription(event_type=event_type, **kwargs)
 
 
 # ---------------------------------------------------------------------------
