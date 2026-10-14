@@ -22,6 +22,20 @@ r3（P0）：r2 的 ``_mask_url`` 是正则（口令字符类排除 ``/`` 与空
 并以 ``redis.connection.parse_url`` **接地**：只要 redis-py 认出口令，就断言
 原文与 parse_url 口令的**长度 ≥3 前缀/后缀**都不出现在 ``str``/``repr``/
 traceback 任何一处。
+
+r4（P0）：r3 仍有三处「依赖输入形态」的漏点，本文件把它们钉死：
+
+* 结构层只在**字面 ``://``** 之后找 userinfo ⇒ 单斜杠 ``redis:/user:pw@host``、
+  大写 ``REDIS:/…``、凭据在 scheme 前 ``user:pw@redis://host`` 认不出凭据，
+  **原样返回**（r2 反而掩住了，是 r3 的回归）。现在锚点是**全串最后一个 ``@``**，
+  与 ``://`` 无关；
+* 口令重复写在 userinfo 之外（``?socket_timeout=PwX``、``/PwX``）时活下来。
+  现在识别到的口令以**原文 / percent-encoded / decoded** 三种形态在 userinfo 段
+  与 path/query/fragment 上再洗一遍（scheme/host 是结构，不参与替换）；
+* ``raise … from exc`` 的 ``__cause__`` 是 ``traceback`` **独立渲染的对象**，
+  只洗消息文案不够。现在换成洗过的**同类型替身**。
+
+三个渲染面（``str`` / ``repr`` / ``traceback.format_exception``）都有断言。
 """
 from __future__ import annotations
 
@@ -147,6 +161,44 @@ LEAK_SHAPES = [
     ("missing scheme", "user:Pr0d2024x@host:6379", "Pr0d2024x"),
     ("wrong scheme", "http://user:Pr0d2024x@host:6379/0", "Pr0d2024x"),
     ("non-str bytes", b"redis://user:Pr0d2024x@host:6379/0", "Pr0d2024x"),
+    # r4 Finding 1 逐字复现（验证者的五个形态）：r2 掩住了、r3 原样返回——
+    # 结构性回归，因为 r3 只在**字面 '://'** 的 authority 里找 userinfo。
+    ("r4 single-slash typo", "redis:/user:pw@host", "pw"),
+    ("r4 single-slash typo with port/db", "redis:/user:pw@host:6379/0", "pw"),
+    ("r4 single-slash uppercase scheme", "REDIS:/user:pw@host", "pw"),
+    ("r4 credentials before scheme", "user:pw@redis://host", "pw"),
+    ("r4 credentials before rediss", "user:pw@rediss://host:6380/0", "pw"),
+    # r4 Finding 1 兜底层：口令重复出现在 userinfo 之外（query/path）
+    ("r4 password repeated in query", "redis://user:PwX@host:6379/0?socket_timeout=PwX", "PwX"),
+    (
+        "r4 password repeated percent-encoded in query",
+        "redis://user:@Pr0d2024x@host:6379/0?socket_timeout=%40Pr0d2024x",
+        "@Pr0d2024x",
+    ),
+]
+
+
+#: r4 Finding 1：验证者的五个形态 × **≥3 字符口令**（verbatim 那组口令只有 2 字符，
+#: 走不到 ≥3 前缀/后缀 needle 方法）。这组必须有 ``://`` 之外的锚定能力。
+GLOBAL_FAIL_CLOSED_URLS = [
+    "redis:/user:Pr0d2024x@host",
+    "redis:/user:Pr0d2024x@host:6379/0",
+    "REDIS:/user:Pr0d2024x@host",
+    "rediss:/:Pr0d2024x@host:6380/0",
+    "user:Pr0d2024x@redis://host",
+    "user:Pr0d2024x@rediss://host:6380/0",
+    "user:Pr0d2024x@host:6379",
+    # 空 authority 多写一个斜杠 / 口令含 '/' 的畸形态（r2 掩了、r3 漏了）
+    "redis:///user:Pr0d2024x@host",
+    "redis:/u@u:p/word@host:0/p/word",
+]
+
+#: r4 Finding 1 兜底层：口令在 userinfo 之外又被写了一遍（原文 / 编码 / path）。
+RESIDUAL_REPEAT_URLS = [
+    "redis://user:Pr0d2024x@host:6379/0?socket_timeout=Pr0d2024x",
+    "redis://user:Pr0d2024x@host:6379/0?socket_timeout=%40Pr0d2024x",
+    "redis://user:Pr0d2024x@host:6379/Pr0d2024x",
+    "redis://user:Pr0d2024x@host:6379/0?db=Pr0d2024x",
 ]
 
 
@@ -183,6 +235,16 @@ def _exception_messages(traceback_text: str) -> str:
         for line in traceback_text.splitlines()
         if not line.startswith('  File "') and line != "Traceback (most recent call last):"
     )
+
+
+def _surfaces(exc: BaseException) -> dict:
+    """异常在生产里的三个渲染面：``str`` / ``repr`` / ``traceback.format_exception``。
+
+    后者的 ``File "..."`` 源码路径行被剥掉（见 ``_exception_messages``），
+    ``from exc`` 的嵌套 cause 文案保留——它才是 r4 Finding 2 的泄露面。
+    """
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return {"str": str(exc), "repr": repr(exc), "traceback-messages": _exception_messages(tb)}
 
 
 def _effective(client: Redis) -> dict:
@@ -458,6 +520,136 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
         for line in logs.output:
             self.assertNotIn(SECRET, line)
             self.assertIn("redis://user:***@host:6379/0", line)
+
+
+class TestMaskerCannotLeakByConstruction(unittest.TestCase):
+    """plaita#88 r4 P0：掩码不再依赖「输入是合法 URL」。
+
+    r3 只认字面 ``://``、只替换一次、且把 ``__cause__`` 原样留给 traceback；
+    这里把三条漏点（全局 fail-closed / 兜底重洗 / cause 替身）都钉在
+    ``str`` / ``repr`` / ``traceback.format_exception`` 三个渲染面上。
+    """
+
+    def test_global_fail_closed_rule_table(self):
+        """锚点是「凭据形状的最后一个 '@'」，不依赖字面 '://'。"""
+        expected = {
+            "redis:/user:pw@host": "redis:/user:***@host",
+            "redis:/user:pw@host:6379/0": "redis:/user:***@host:6379/0",
+            "REDIS:/user:pw@host": "REDIS:/user:***@host",
+            "user:pw@redis://host": "user:***@redis://host",
+            "user:pw@rediss://host:6380/0": "user:***@rediss://host:6380/0",
+            # 空 authority 多写一个斜杠 / 口令含 '#'、'?'
+            "redis:///user:pw@host": "redis:///user:***@host",
+            "redis:///:p#w@host": "redis:///:***@host",
+            "redis:///:p?w@host": "redis:///:***@host",
+            # 口令本身含 '/'：结构定位只能整段前缀当凭据（只多掩不少掩）
+            "redis:/u@u:p/w@/0@x": "redis:***@x",
+            # keep：path/query 的 '@' 不是 userinfo
+            "redis://host:6379/0@x": "redis://host:6379/0@x",
+            "redis://host:6379/0?ref=a@b": "redis://host:6379/0?ref=a@b",
+            "redis://host/0?x=1:2@y": "redis://host/0?x=1:2@y",
+        }
+        for url, want in expected.items():
+            self.assertEqual(_mask_url(url), want, url)
+
+    def test_global_fail_closed_never_returns_input_verbatim(self):
+        for url in GLOBAL_FAIL_CLOSED_URLS:
+            masked = _mask_url(url)
+            self.assertNotEqual(masked, url, url)
+            self.assertNotIn("Pr0d2024x", masked, url)
+            self.assertNotIn("p/word", masked, url)
+            for needle in _partial_needles("Pr0d2024x") | _partial_needles("p/word"):
+                self.assertNotIn(needle, masked, f"{url}: {needle!r}")
+
+    def test_global_fail_closed_message_surfaces(self):
+        for url in GLOBAL_FAIL_CLOSED_URLS:
+            with self.assertRaises(RedisUrlError) as ctx:
+                _parse_redis_url(url)
+            exc = ctx.exception
+            self.assertIn(_mask_url(url), str(exc), url)
+            for kind, text in _surfaces(exc).items():
+                for secret in ("Pr0d2024x", "p/word"):
+                    self.assertNotIn(secret, text, f"{url}/{kind}")
+                    for needle in _partial_needles(secret):
+                        self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
+
+    def test_residual_repeat_in_query_or_path_is_redacted(self):
+        for url in RESIDUAL_REPEAT_URLS:
+            masked = _mask_url(url)
+            self.assertNotIn("Pr0d2024x", masked, url)
+            for needle in _partial_needles("Pr0d2024x"):
+                self.assertNotIn(needle, masked, f"{url}: {needle!r}")
+            with self.assertRaises(RedisUrlError) as ctx:
+                _parse_redis_url(url)
+            exc = ctx.exception
+            self.assertIn(masked, str(exc), url)
+            for kind, text in _surfaces(exc).items():
+                for needle in _partial_needles("Pr0d2024x"):
+                    self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
+
+    def test_cause_object_is_independently_sanitized(self):
+        """r4 Finding 2：``from exc`` 的 ``__cause__`` 是 traceback 独立渲染的对象。"""
+        url = "redis://user:@Pr0d2024x@host:6379/0?socket_timeout=%40Pr0d2024x"
+        with self.assertRaises(RedisUrlError) as ctx:
+            _parse_redis_url(url)
+        exc = ctx.exception
+        chain = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        # 链仍在（诊断价值），但底层文案换成了洗过的同类型替身
+        self.assertIsNotNone(exc.__cause__, "cause 链不该被丢掉")
+        self.assertIn("socket_timeout", chain)
+        self.assertIn(_mask_url(url), str(exc))
+        for text in (chain, str(exc.__cause__), repr(exc.__cause__)):
+            for needle in ("@Pr0d2024x", "%40Pr0d2024x", "Pr0d2024x"):
+                self.assertNotIn(needle, text, f"cause 链泄露 {needle!r}")
+        self.assertIn("float", chain.lower())
+
+    def test_message_fields_that_are_not_urls_are_scrubbed(self):
+        """``?db=<口令>`` / ``/<口令>`` / ``?<口令>=1`` 这些字段也是消息面。"""
+        for url in (
+            "redis://user:Pr0d2024x@host:6379/0?db=Pr0d2024x",
+            "redis://user:Pr0d2024x@host:6379/Pr0d2024x",
+        ):
+            with self.assertRaises(RedisUrlError) as ctx:
+                _parse_redis_url(url)
+            for kind, text in _surfaces(ctx.exception).items():
+                self.assertNotIn("Pr0d2024x", text, f"{url}/{kind}")
+                for needle in _partial_needles("Pr0d2024x"):
+                    self.assertNotIn(needle, text, f"{url}/{kind}/{needle}")
+        # 口令写在 query **名**里：未知参数只警告不判死——warning 同样是日志面
+        with self.assertLogs("plaita.server.factory", level="WARNING") as logs:
+            target = _parse_redis_url("redis://user:Pr0d2024x@host:6379/0?Pr0d2024x=1")
+        self.assertEqual((target.host, target.port), ("host", 6379))
+        for line in logs.output:
+            self.assertNotIn("Pr0d2024x", line)
+            for needle in _partial_needles("Pr0d2024x"):
+                self.assertNotIn(needle, line)
+
+    def test_password_substring_of_scheme_or_host_is_not_a_false_red(self):
+        """口令恰好是 scheme/host 的子串：朴素 needle 检查给的是**假红**。
+
+        兜底重洗只作用于 userinfo 段与 host 之后的 path/query/fragment（见
+        ``_redact_residuals``）——scheme/host 是结构、也是诊断信息，不参与替换，
+        否则口令 ``redis`` 会把 scheme 抹成 ``***://``，且没有任何安全收益。
+        """
+        url = "redis://user:redis@redis.example.com:6379/0"
+        masked = _mask_url(url)
+        self.assertEqual(masked, "redis://user:***@redis.example.com:6379/0")
+        self.assertNotIn(":redis@", masked)
+        self.assertIn("@redis.example.com:6379/0", masked)
+        # 同一个 needle 在**无凭据**的同类 URL 里也在 ⇒ needle 命中不等于泄露
+        self.assertIn("redis", _mask_url("redis://redis.example.com:6379/0"))
+
+    def test_masker_is_linear_on_long_input(self):
+        """~70k 字符：口令 70k 且在 query 里重复一遍，掩码必须一趟做完。
+
+        （任何退化成回溯的实现都会在这里挂死；实现只做 O(n) 的 find/rfind/replace。）
+        """
+        secret = "P" * 69990 + " Secret"
+        url = f"redis://user:{secret}@host:6379/0?socket_timeout={secret}"
+        self.assertEqual(
+            _mask_url(url), "redis://user:***@host:6379/0?socket_timeout=***"
+        )
+        self.assertNotIn(secret, _mask_url(url))
 
 
 class TestQueryOptionsPassThrough(unittest.TestCase):

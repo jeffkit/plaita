@@ -1,0 +1,12 @@
+{
+  "name": "88-masker-skips-residual-redaction",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    if not forms:\n        return masked\n    return _redact_residuals(masked, start, start + len(replacement), forms)\n",
+  "new": "    return masked\n",
+  "rationale": "删掉兜底重洗：结构层只替换 userinfo 里的口令，口令重复写在 ?socket_timeout=PwX / /PwX 里时原样留在拒绝消息里 —— plaita#88 r4 Finding 1（cannot-leak by construction 的第二层）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_residual_repeat_in_query_or_path_is_redacted"
+  ],
+  "issue": "88"
+}

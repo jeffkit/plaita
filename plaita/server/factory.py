@@ -9,7 +9,7 @@
 import logging
 import os
 from typing import NamedTuple, Optional
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 logger = logging.getLogger("plaita.server.factory")
 
@@ -29,85 +29,281 @@ _REDACTED = "***"
 
 #: authority 的结束符：与 ``urlsplit`` 的 netloc 语义一致（`://` 之后到首个
 #: ``/`` / ``?`` / ``#``）。注意这**不是**正则能表达的：口令里可以合法出现
-#: ``@``、空格、``:``、``/`` 等，唯一的权威定界是「authority 里**最后**一个
-#: ``@`` 是 userinfo 分隔符，它之前**第一个** ``:`` 才是用户/口令分界」——
-#: 这正是 r2 的正则 ``[^/@\\s:]*:[^/@\\s]*@`` 掩不住
+#: ``@``、空格、``:`` 等，唯一的权威定界是「authority 里**最后**一个 ``@`` 是
+#: userinfo 分隔符，它之前**第一个** ``:`` 才是用户/口令分界」——这正是 r2 的
+#: 正则 ``[^/@\s:]*:[^/@\s]*@`` 掩不住
 #: ``redis://user:@Pr0d2024x@redis.internal:0`` / ``redis://user:p@ssword@host``
 #: / ``redis://user:Super Secret@host`` 的原因（plaita#88 r3）。
 _AUTHORITY_DELIMITERS = "/?#"
-#: path 的结束符（比 authority 宽：允许 ``#``/``?`` 落在**畸形凭据内部**，
-#: 覆盖 r2 记录的「口令里写了裸 '#'」形态）。
+#: 放宽一档的定界（只认 ``/``）：覆盖「口令里写了裸 ``#``/``?``」的畸形形态
+#: （``redis://:pw#x@host:6379/0``）——``urlsplit`` 会把它当 fragment，但用户
+#: 意图明显是凭据。
 _PATH_DELIMITERS = "/"
 
+#: percent-escape 的十六进制字母大小写两种拼法都要认（``%2F`` / ``%2f``）。
+_HEX_LOWER = str.maketrans("ABCDEF", "abcdef")
 
-def _authority_span(text: str) -> tuple:
-    """``(start, stop)``：``://`` 之后（无 ``://`` 则从 0 起）到首个 ``/?#``。
 
-    只认字面 ``://``，与 scheme 大小写无关——``REDIS://``、缺 scheme 的
-    ``user:pw@host`` 都落在这里。
-    """
-    sep = text.find("://")
-    start = sep + 3 if sep != -1 else 0
-    rest = text[start:]
-    stop = len(rest)
-    for ch in _AUTHORITY_DELIMITERS:
-        idx = rest.find(ch)
+def _delimiter_stop(text: str, origin: int, delimiters: str) -> int:
+    """``origin`` 起首个 ``delimiters`` 字符的位置（没有则 ``len(text)``）。"""
+    stop = len(text)
+    for ch in delimiters:
+        idx = text.find(ch, origin)
         if idx != -1 and idx < stop:
             stop = idx
-    return start, start + stop
+    return stop
 
 
-def _split_userinfo(region: str):
-    """把一段 authority 切成 ``(user, password, host_port)``；无口令返回 None。
+def _scan_last_credential_at(text: str, origin: int, stop: int, hard_query_at: int = -1):
+    """在 ``text[origin:stop]`` 里找**最后**一个凭据形状的 ``@``。
 
-    结构性规则（镜像 ``urlsplit``）：``rsplit("@", 1)``——authority 里**最后**
-    一个 ``@`` 才是 userinfo 分隔符；userinfo 再按**第一个** ``:`` 分用户/口令。
-    口令整体（含 ``@``/空格/``:``）原样返回，绝不截断。
+    段边界是 ``/``（镜像 authority/path 段结构）。段内要有 ``:``，且该 ``:`` 必须
+    在段内首个 ``?``/``#`` **之前**——``redis://:p?w@host``（``?`` 在口令里）因此
+    命中，而 ``redis://host/0?x=1:2@y``（query 里的 ``:`` 在 ``?`` 之后）不命中。
+
+    ``hard_query_at``（首个 ``?``/``#`` 的全局位置，-1 = 没有）再加一档：**先**看
+    它之前的候选（那才是 authority 侧的 userinfo），只有它之前一个都没有时，才
+    接受它之后、且**用户名段为空**（``colon_at == seg_start``）的候选
+    （``redis://:p?w@host``）——否则 ``...?db=p@ssword`` 这种「口令重复写在 query
+    值里」的 ``@`` 会被误当 userinfo，把真口令挤出掩码之外。
+
+    单趟左→右扫描，O(n)、无回溯。返回 ``(at, seg_start)``；没有 ``(-1, -1)``。
     """
-    at = region.rfind("@")
-    if at == -1:
-        return None
-    userinfo = region[:at]
-    if ":" not in userinfo:
-        return None  # 只有用户名：没有可泄露的口令
-    user, password = userinfo.split(":", 1)
-    return user, password, region[at + 1 :]
+    seg_start = origin
+    colon_at = -1
+    query_at = -1
+    best_at = -1
+    best_start = -1
+    late_at = -1
+    late_start = -1
+    i = origin
+    while i < stop:
+        ch = text[i]
+        if ch == "/":
+            seg_start = i + 1
+            colon_at = -1
+            query_at = -1
+        elif ch == ":":
+            if colon_at == -1:
+                colon_at = i
+        elif ch == "?" or ch == "#":
+            if query_at == -1:
+                query_at = i
+        elif ch == "@" and colon_at != -1 and (query_at == -1 or colon_at < query_at):
+            if hard_query_at == -1 or i < hard_query_at:
+                best_at, best_start = i, seg_start
+            elif (
+                colon_at == seg_start
+                or query_at == -1
+                # ``:`` 与 ``?``/``#`` 之间是纯数字 ⇒ 那是 authority 的**端口**
+                # 冒号（``host:6379?ref=a@b``），不是 userinfo 的用户/口令分界；
+                # ``:p#w@``（'#' 在口令里）之间是 ``p`` ⇒ 认。
+                or not text[colon_at + 1 : query_at].isdigit()
+            ):
+                late_at, late_start = i, seg_start
+        i += 1
+    if best_at != -1:
+        return best_at, best_start
+    return late_at, late_start
 
 
 def _locate_credentials(text: str):
-    """结构化定位 userinfo，返回 ``(start, stop, user, password, host_port)``。
+    """结构化定位 userinfo：``(start, at, user, password)``；不是 userinfo 则 None。
 
-    先按 ``urlsplit`` 语义取 authority（首个 ``/?#`` 截断）；若其中认不出口令，
-    再放宽到首个 ``/`` 重看一次（畸形凭据里含裸 ``#``/``?`` 的形态）。
+    规则（**不依赖输入是否合法**，全部单趟线性扫描，无正则/无回溯）：
+
+    1. `anchor = 全串最后一个 ``@```——它是唯一候选 userinfo 分隔符；
+    2. ``anchor`` 之前若有 ``://``（scheme 大小写无关），凭据从它之后找；否则从
+       串首找——缺 scheme 的 ``user:pw@host``、单斜杠 ``redis:/user:pw@host``、
+       凭据在 scheme 前的 ``user:pw@redis://host`` 都落在这里；
+    3. 有 ``://`` 时按三档收紧到放宽：
+       * **(1) 规整 authority**（首个 ``/?#`` 之前）里有 ``@`` → 那就是 userinfo
+         （``redis://user:pw@host/0@x`` 里 path 的 ``@`` 顶不掉它）；这一段认不出
+         ``:`` 也返回 ``(start, at, None, None)``，由调用方 fail-closed 抹成
+         ``***``（``redis://user@host`` → ``redis://***@host``）；
+       * **(2) 段边界放宽到首个 ``/``**，取最后一个「所在段含 ``:``」的 ``@``——
+         覆盖裸 ``#``/``?`` 落在口令里的畸形形态（``redis://:pw#x@host``）；要求含
+         ``:`` 是为了不把 ``redis://host?ref=a@b`` 的 query ``@`` 误当 userinfo；
+       * **(3) 再看 path 首段**（扫到 ``?``/``#`` 之前）——覆盖空 authority 多写
+         一个斜杠的形态（``redis:///user:pw@host``）；段里没有 ``:`` 的 ``@`` 就是
+         path/query 的（``redis://host:6379/0@x``、``.../0?ref=a@b``）→ 返回 None，
+         原样保留；
+    4. 缺 ``://`` 的畸形输入**不受**首个 ``/?#`` 限制（r3 的漏点正在这里：
+       ``redis:/user:pw@host`` 的 authority 只到 ``redis:``，一个凭据都认不出，
+       于是原样回显）：先找最后一个「段里含 ``:``」的 ``@``（``redis:/`` 当 scheme
+       前缀保留，``user:pw`` 才是凭据候选）；扫不到就把**整段前缀**当凭据
+       （口令本身含 ``/`` 的畸形态 ``redis:/u@u:p/w@/0@x``，只多掩不少掩）；
+       连 ``:`` 都没有（``foo@bar``）则 fail-closed：把 anchor 前最后一段抹成
+       ``***``；
+    5. userinfo 按**第一个** ``:`` 分用户/口令（口令整体返回，含 ``@``/空格/``:``）；
+       没有 ``:`` 时 ``user`` 与 ``password`` 都是 None。
     """
-    start, stop = _authority_span(text)
-    split = _split_userinfo(text[start:stop])
-    if split is None:
-        slash = text.find(_PATH_DELIMITERS, start)
-        stop2 = slash if slash != -1 else len(text)
-        if stop2 > stop:
-            split = _split_userinfo(text[start:stop2])
-            if split is not None:
-                stop = stop2
-    if split is None:
+    anchor = text.rfind("@")
+    if anchor == -1:
         return None
-    user, password, host_port = split
-    return start, stop, user, password, host_port
+    sep = text.rfind("://", 0, anchor)
+    if sep != -1:
+        scheme_end = sep + 3
+        # (1) 规整 authority（首个 ``/?#`` 之前）：里面有 ``@`` 且认得出 ``:``
+        #     就是 userinfo（``redis://user:pw@host/0@x`` 里 path 的 ``@`` 顶不掉它）。
+        auth_stop = _delimiter_stop(text, scheme_end, _AUTHORITY_DELIMITERS)
+        at_auth = text.rfind("@", scheme_end, auth_stop)
+        if at_auth != -1 and ":" in text[scheme_end:at_auth]:
+            at, origin = at_auth, scheme_end
+        else:
+            # (2) 段边界放宽到首个 ``/``：覆盖裸 ``#``/``?``/``@`` 落在口令里
+            #     （``redis://user:p?w@host``、``redis://:pw#x@host``、
+            #     ``REDIS://u@u:p?w@host``）——r3 的放宽就是这个语义。
+            at, origin = _scan_last_credential_at(
+                text, scheme_end, _delimiter_stop(text, scheme_end, _PATH_DELIMITERS)
+            )
+            if at == -1:
+                # (3) 全串（到 ``?``/``#`` 前优先）：覆盖空 authority 多写斜杠
+                #     （``redis:///user:pw@host``）。段里没有 ``:`` 的 ``@`` 就是
+                #     path/query 的（``redis://host:6379/0@x``、``.../0?ref=a@b``）。
+                at, origin = _scan_last_credential_at(
+                    text,
+                    scheme_end,
+                    len(text),
+                    hard_query_at=_delimiter_stop(text, scheme_end, "?#"),
+                )
+            if at == -1:
+                if at_auth == -1:
+                    return None
+                # authority 里的 ``@`` 认不出 ``:`` → fail-closed 抹整段
+                # （``redis://user@host:6379`` → ``redis://***@host:6379``）。
+                at, origin = at_auth, scheme_end
+    else:
+        # 缺 ``://`` 的畸形输入：锚点仍是全串最后一个 ``@``。先扫凭据形状的段
+        # （``redis:/user:pw@host`` → ``user:pw``）；扫不到再把整段前缀当凭据
+        # （口令含 ``/`` 的畸形态），连 ``:`` 都没有才是纯 ``foo@bar``——
+        # fail-closed 抹掉 userinfo 候选。
+        at, origin = _scan_last_credential_at(
+            text, 0, len(text), hard_query_at=_delimiter_stop(text, 0, "?#")
+        )
+        if at == -1:
+            if ":" in text[:anchor]:
+                origin, at = 0, anchor
+            else:
+                cut = -1
+                for ch in _AUTHORITY_DELIMITERS:
+                    idx = text.rfind(ch, 0, anchor)
+                    if idx > cut:
+                        cut = idx
+                origin, at = cut + 1, anchor
+    userinfo = text[origin:at]
+    if ":" not in userinfo:
+        return origin, at, None, None
+    user, password = userinfo.split(":", 1)
+    return origin, at, user, password
+
+
+def _lower_hex(encoded: str) -> str:
+    """把 ``%4A`` 式转义的十六进制字母改成小写（``%4a``）——URL 里两种拼法都合法。"""
+    out = []
+    i = 0
+    while i < len(encoded):
+        if encoded[i] == "%" and i + 2 < len(encoded):
+            out.append("%")
+            out.append(encoded[i + 1 : i + 3].translate(_HEX_LOWER))
+            i += 3
+        else:
+            out.append(encoded[i])
+            i += 1
+    return "".join(out)
+
+
+def _encoding_forms(secret: str) -> frozenset:
+    """一个字符串的三种书写形态：原文 / percent-decoded / percent-encoded。"""
+    forms = {secret}
+    decoded = unquote(secret)
+    if decoded:
+        forms.add(decoded)
+        encoded = quote(decoded, safe="")
+        forms.add(encoded)
+        forms.add(_lower_hex(encoded))
+    raw_encoded = quote(secret, safe="")
+    forms.add(raw_encoded)
+    forms.add(_lower_hex(raw_encoded))
+    forms.discard("")
+    return frozenset(forms)
+
+
+def _secret_forms(secret: str) -> tuple:
+    """一个口令候选的**所有书写形态**（原文 / percent-decoded / percent-encoded）。
+
+    兜底重洗（见 ``_mask_url``）要认出「同一个口令换个写法又出现在 query/path
+    里」——``?socket_timeout=@Pr0d2024x`` 与 ``?socket_timeout=%40Pr0d2024x``
+    都必须能被洗掉。按长度降序返回：长形态先替换，避免短形态把长形态切碎。
+
+    结构定位若多吞了一段（畸形态里口令本身含 ``/``/``@``：候选 ``/:p/w``、
+    ``u@u:a\nb``），真正的口令往往是**第一个** ``:``/``@`` 之后那截——把它连同
+    它的编码形态一起纳入（只多洗、不少洗）。
+    """
+    if not secret:
+        return ()
+    forms = set(_encoding_forms(secret))
+    for sep in (":", "@"):
+        cut = secret.find(sep)
+        if cut != -1:
+            forms |= _encoding_forms(secret[cut + 1 :])
+    forms.discard("")
+    return tuple(sorted(forms, key=len, reverse=True))
+
+
+def _redact_residuals(masked: str, start: int, at_masked: int, forms: tuple) -> str:
+    """兜底重洗：结构层识别到的口令若又出现在别处，一律抹掉。
+
+    只洗两个**凭据面**：``[start, at_masked)``（userinfo 本身，覆盖「用户名 ==
+    口令」）与 host 之后的 path/query/fragment。scheme 与 host 原样保留——它们是
+    结构性诊断信息，且可能是口令的子串（口令 ``redis``、host ``redis.internal``）；
+    无差别全局替换会把 scheme 抹成 ``***://``（假红），没有任何安全收益。
+    """
+    def scrub(segment: str) -> str:
+        for form in forms:
+            if form in segment:
+                segment = segment.replace(form, _REDACTED)
+        return segment
+
+    userinfo = masked[start:at_masked]
+    rest = masked[at_masked + 1 :]  # '@' 之后：host + path/query/fragment
+    host_end = len(rest)
+    for ch in _AUTHORITY_DELIMITERS:
+        idx = rest.find(ch)
+        if idx != -1 and idx < host_end:
+            host_end = idx
+    return (
+        masked[:start]
+        + scrub(userinfo)
+        + "@"
+        + rest[:host_end]
+        + scrub(rest[host_end:])
+    )
 
 
 def _mask_url(value: object) -> str:
     """把 URL 渲染成可安全写进异常/日志的形态：口令一律 ``***``。
 
     ``redis://user:sup3rsecret@host:6379/0`` → ``redis://user:***@host:6379/0``。
-    口令里带 ``@`` / 空格 / ``#`` / nbsp 等（r2 正则的漏网形态）同样整体抹掉；
-    scheme/host/port/db/path 原样保留，消息仍可诊断。
+    口令里带 ``@`` / 空格 / tab / nbsp / ``:`` / ``%`` / unicode 等（r2 正则的漏网
+    形态）同样整体抹掉；scheme/host/port/db/path 原样保留，消息仍可诊断。
 
-    **fail-closed**：认不出 userinfo 时也绝不原样返回——authority 里有 ``@``
-    的一律把 userinfo 段抹成 ``***``（用户名可留作诊断的形态保留 ``user:***``，
-    认不出用户名的形态整体抹成 ``***@host``）。
+    **cannot-leak by construction**（安全性不依赖输入形态是否合法）：
+
+    * **结构层**：``_locate_credentials`` 以全串最后一个 ``@`` 为锚，覆盖单斜杠
+      ``redis:/user:pw@host``、大写 ``REDIS:/...``、凭据在 scheme 前
+      ``user:pw@redis://host`` 等畸形形态；认不出 userinfo 时 fail-closed——
+      userinfo 整体抹成 ``***``（认得出用户名则保留 ``user:***`` 以便诊断），
+      绝不原样返回。
+    * **兜底层**：把结构层**识别到的口令**的所有书写形态（原文 / percent-encoded /
+      decoded）在 userinfo 段与 path/query/fragment 里再洗一遍——口令重复写在
+      ``?socket_timeout=PwX`` 或 ``/PwX`` 里也活不下来。这一层刻意不碰 scheme 与
+      host（见 ``_redact_residuals`` 的假红说明）。
+
     ``_parse_redis_url`` 的**所有**拒绝分支只允许用它渲染原始输入：``RedisUrlError``
-    会被 ``flow_worker`` / ``event_filter`` 的 ``logger.error("...: %s", e)``
-    原样写进生产日志（后者还带 ``exc_info=True``），裸 URL 等于把 Redis 口令落盘。
+    会被 ``flow_worker`` / ``event_filter`` 的 ``logger.error("...: %s", e)`` 原样写进
+    生产日志（后者还带 ``exc_info=True``——``from exc`` 的 cause 是**另一个独立渲染
+    面**，见 ``_sanitized_cause``）。
     """
     if isinstance(value, (bytes, bytearray)):
         value = bytes(value).decode("utf-8", "replace")
@@ -115,46 +311,83 @@ def _mask_url(value: object) -> str:
         return f"<{type(value).__name__}>"
 
     credentials = _locate_credentials(value)
-    if credentials is not None:
-        start, stop, user, _password, host_port = credentials
-        return f"{value[:start]}{user}:{_REDACTED}@{host_port}{value[stop:]}"
+    if credentials is None:
+        return value  # 没有可锚定的 userinfo：不存在凭据（path/query 的 '@' 不算）
+    start, at, user, password = credentials
+    if password is None:
+        # fail-closed：认不出用户/口令分界，整段 userinfo 当凭据处理（连兜底层
+        # 的 needle 也用它），否则 ``unix://p?w@host:6379/p?w`` 这种「无 ':' 的
+        # userinfo + path 里重复一遍」会漏。
+        replacement = _REDACTED
+        forms = _secret_forms(value[start:at])
+    else:
+        replacement = f"{user}:{_REDACTED}"
+        forms = _secret_forms(password)
+    masked = f"{value[:start]}{replacement}@{value[at + 1:]}"
 
-    # fail-closed：凭据形状却认不出 userinfo → 抹掉 ``@`` 之前的整段，绝不原样返回。
-    start, stop = _authority_span(value)
-    region = value[start:stop]
-    at = region.rfind("@")
-    if at == -1:
-        return value  # authority 里没有 ``@``：不存在 userinfo（path 里的 ``@`` 不算）
-    return f"{value[:start]}{_REDACTED}@{region[at + 1 :]}{value[stop:]}"
+    if not forms:
+        return masked
+    return _redact_residuals(masked, start, start + len(replacement), forms)
 
 
 def _passwords(text: str) -> tuple:
-    """原始 URL 里出现的口令字面量（原文 + percent-decoded 形态）。
+    """原始 URL 里出现的口令字面量（原文 + percent-decoded + encoded 形态）。
 
-    与 ``_mask_url`` 同源（同一套结构化定位），所以带 ``@``/空格的口令也能
-    被完整取出——r2 的正则只取到 ``@`` 前一小截，``_safe_reason`` 因此漏洗。
+    与 ``_mask_url`` 同源（同一套结构化定位），所以带 ``@``/空格/裸 ``#`` 的口令
+    也能被完整取出——r2 的正则只取到 ``@`` 前一小截，``_safe_reason`` 因此漏洗。
+    认不出用户名的 fail-closed 形态把整段 userinfo 当口令处理（宁可多洗）。
     """
     if not isinstance(text, str):
         return ()
     credentials = _locate_credentials(text)
     if credentials is None:
         return ()
-    raw = credentials[3]
-    if not raw:
-        return ()
-    return tuple({raw, unquote(raw)})
+    start, at, _user, password = credentials
+    if password is None:
+        return _secret_forms(text[start:at])
+    return _secret_forms(password)
 
 
 def _safe_reason(exc: BaseException, text: str) -> str:
     """底层异常的**安全**渲染（只用在嵌套 cause 的位置）。
 
     不假设 ``urlsplit``/``int``/``float`` 的报错文案里没有整条 URL 或口令：
-    先掩码裸 URL、再抹掉密码字面量，然后才允许进入消息/traceback。
+    先掩码裸 URL、再抹掉口令的所有书写形态，然后才允许进入消息/traceback。
     """
-    reason = _mask_url(str(exc))
+    reason = str(exc)
     for secret in _passwords(text):
         reason = reason.replace(secret, _REDACTED)
-    return reason
+    # 先洗口令字面量、再掩 URL：反过来的话 ``could not convert ...: 'p@ssword'``
+    # 会被 _mask_url 从中间切开（``...float:***@ssword'``），留下 ≥3 后缀。
+    return _mask_url(reason)
+
+
+def _scrub(value: object, text: str) -> str:
+    """把 ``text`` 里识别到的口令从**任意消息字段**里抹掉。
+
+    ``?<口令>=1``（口令写在 query **名**里）、``?db=<口令>`` / ``/<口令>``
+    （写在**值**里）这些字段会被拒绝消息原样 ``{...!r}`` 回显——它们不是 URL，
+    不能靠 ``_mask_url``，只能按同一套 ``_passwords`` 形态洗。
+    """
+    text_value = str(value)
+    for secret in _passwords(text):
+        text_value = text_value.replace(secret, _REDACTED)
+    return text_value
+
+
+def _sanitized_cause(exc: BaseException, text: str) -> BaseException:
+    """底层异常的**安全替身**：``from exc`` 的 ``__cause__`` 是对象，会被
+    ``traceback`` / ``exc_info=True`` **独立渲染**——只把文案洗进
+    ``RedisUrlError`` 的消息不够（plaita#88 r4 Finding 2）。
+
+    返回同类型、只带 ``_safe_reason`` 文案的新异常；它没有 traceback，所以链上
+    只剩洗过的消息，原始 URL/口令不会随 ``__cause__`` 落盘。
+    """
+    safe = _safe_reason(exc, text)
+    try:
+        return type(exc)(safe)
+    except Exception:  # pragma: no cover - 构造签名特殊的异常类型
+        return ValueError(safe)
 
 
 class RedisUrlError(ValueError):
@@ -246,9 +479,9 @@ def _coerce_query_value(key: str, value: str, text: str) -> object:
         return parser(value)
     except (TypeError, ValueError) as exc:
         raise RedisUrlError(
-            f"Redis URL 的 query 参数 {key!r} 取值非法: {_safe_reason(exc, text)}"
-            f"（URL={_mask_url(text)!r}）"
-        ) from exc
+            f"Redis URL 的 query 参数 {_scrub(key, text)!r} 取值非法: "
+            f"{_safe_reason(exc, text)}（URL={_mask_url(text)!r}）"
+        ) from _sanitized_cause(exc, text)
 
 
 def _parse_query_options(query: dict, text: str) -> dict:
@@ -269,7 +502,7 @@ def _parse_query_options(query: dict, text: str) -> dict:
         value = values[0]
         if key in _UNSUPPORTED_QUERY_PARAMS:
             raise RedisUrlError(
-                f"Redis URL 的 query 参数 {key!r} 不被 Redis 客户端支持"
+                f"Redis URL 的 query 参数 {_scrub(key, text)!r} 不被 Redis 客户端支持"
                 f"（连接期会 TypeError，请改用 socket_timeout）: {_mask_url(text)}"
             )
         if key in _QUERY_PARAMS:
@@ -279,13 +512,15 @@ def _parse_query_options(query: dict, text: str) -> dict:
     if unknown:
         logger.warning(
             "Redis URL 含 redis-py 未定义的 query 参数 %s，已按 parse_url 语义忽略: %s",
-            sorted(unknown),
+            sorted(_scrub(key, text) for key in unknown),
             _mask_url(text),
         )
     return options
 
 
-def _redis_db_from_url(path: Optional[str], db_query: Optional[str], shown: str) -> int:
+def _redis_db_from_url(
+    path: Optional[str], db_query: Optional[str], shown: str, text: str
+) -> int:
     """URL 路径/``db`` 查询参数 → 数据库编号（非法即具名失败）。
 
     ``db`` 查询参数优先于路径（与 ``Redis.from_url`` 同序）；``/`` 与空路径
@@ -293,21 +528,25 @@ def _redis_db_from_url(path: Optional[str], db_query: Optional[str], shown: str)
     此时 db 只认查询参数（缺省 0）。
 
     ``shown`` 必须是 ``_mask_url`` 处理过的 URL——本函数的消息会进生产日志。
+    ``text`` 是**原始**输入：``int()`` 失败的 cause 是另一个渲染面，要用它把
+    口令从 ``_sanitized_cause`` 里洗掉（``shown`` 已被掩码，取不出口令）。
     """
     if db_query:
         try:
             db = int(db_query)
         except ValueError as exc:
             raise RedisUrlError(
-                f"Redis URL 的 db 查询参数不是整数: {db_query!r}（URL={shown!r}）"
-            ) from exc
+                f"Redis URL 的 db 查询参数不是整数: {_scrub(db_query, text)!r}"
+                f"（URL={shown!r}）"
+            ) from _sanitized_cause(exc, text)
     elif path is None or path in ("", "/"):
         db = 0
     elif path.startswith("/") and path[1:].isascii() and path[1:].isdigit():
         db = int(path[1:])
     else:
         raise RedisUrlError(
-            f"Redis URL 的路径必须是数据库编号（形如 /0）: {path!r}（URL={shown!r}）"
+            f"Redis URL 的路径必须是数据库编号（形如 /0）: {_scrub(path, text)!r}"
+            f"（URL={shown!r}）"
         )
     if db < 0:
         raise RedisUrlError(f"Redis URL 的数据库编号不能为负: {db}（URL={shown!r}）")
@@ -360,7 +599,7 @@ def _parse_redis_url(redis_url: Optional[str] = None) -> RedisTarget:
     except ValueError as exc:  # 非法 IPv6 字面量等
         raise RedisUrlError(
             f"Redis URL 非法（{_safe_reason(exc, text)}）: {shown!r}"
-        ) from exc
+        ) from _sanitized_cause(exc, text)
 
     if parts.fragment:
         raise RedisUrlError(
@@ -377,7 +616,7 @@ def _parse_redis_url(redis_url: Optional[str] = None) -> RedisTarget:
         socket_path = unquote(parts.path) if parts.path else None
         if not socket_path:
             raise RedisUrlError(f"unix:// URL 缺少 socket 路径: {shown!r}")
-        db = _redis_db_from_url(None, db_query, shown)
+        db = _redis_db_from_url(None, db_query, shown, text)
         return RedisTarget(
             None, 0, db, password, username, "unix", socket_path, options
         )
@@ -388,7 +627,7 @@ def _parse_redis_url(redis_url: Optional[str] = None) -> RedisTarget:
     except ValueError as exc:  # 端口非整数 / 端口越界
         raise RedisUrlError(
             f"Redis URL 非法（{_safe_reason(exc, text)}）: {shown!r}"
-        ) from exc
+        ) from _sanitized_cause(exc, text)
 
     if not host:
         raise RedisUrlError(f"Redis URL 缺少主机名: {shown!r}")
@@ -396,7 +635,7 @@ def _parse_redis_url(redis_url: Optional[str] = None) -> RedisTarget:
         port = 6379
     if port == 0:
         raise RedisUrlError(f"Redis URL 的端口不能为 0: {shown!r}")
-    db = _redis_db_from_url(parts.path, db_query, shown)
+    db = _redis_db_from_url(parts.path, db_query, shown, text)
     return RedisTarget(host, port, db, password, username, scheme_token, None, options)
 
 

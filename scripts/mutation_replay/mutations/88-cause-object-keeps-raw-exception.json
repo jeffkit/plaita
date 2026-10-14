@@ -1,0 +1,12 @@
+{
+  "name": "88-cause-object-keeps-raw-exception",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "            f\"Redis URL 的 query 参数 {_scrub(key, text)!r} 取值非法: \"\n            f\"{_safe_reason(exc, text)}（URL={_mask_url(text)!r}）\"\n        ) from _sanitized_cause(exc, text)\n",
+  "new": "            f\"Redis URL 的 query 参数 {_scrub(key, text)!r} 取值非法: \"\n            f\"{_safe_reason(exc, text)}（URL={_mask_url(text)!r}）\"\n        ) from exc\n",
+  "rationale": "退回 `raise ... from exc`：__cause__ 是 traceback/logger.error(exc_info=True) **独立渲染的对象**，float(\"@Pr0d2024x\") 的原始文案（含口令）照样进 format_exception —— plaita#88 r4 Finding 2 P0",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_cause_object_is_independently_sanitized"
+  ],
+  "issue": "88"
+}

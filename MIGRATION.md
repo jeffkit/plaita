@@ -69,12 +69,14 @@ allowlist**；被执行子流程自己声明了非空 `exposeEnv` 时**以声明
 #### query 参数：不再一律拒绝
 
 redis-py 认识的连接参数现在会**转换后透传**给存储客户端，值与队列侧
-`Redis.from_url` 一致（同一个 URL 不再有两套连接参数）：
-`db`、`socket_timeout`、`socket_connect_timeout`、`socket_keepalive`、
-`socket_read_size`、`health_check_interval`、`protocol`、`legacy_responses`、
-`retry_on_error`、`retry_on_timeout`、`max_connections`、
-`ssl_check_hostname`、`ssl_min_version`、`ssl_include_verify_flags`、
-`ssl_exclude_verify_flags`。
+`Redis.from_url` 一致（同一个 URL 不再有两套连接参数）。透传名单
+（`factory._QUERY_PARAMS`）是 **14 个名字**：`socket_timeout`、
+`socket_connect_timeout`、`socket_keepalive`、`socket_read_size`、
+`health_check_interval`、`protocol`、`legacy_responses`、`retry_on_error`、
+`retry_on_timeout`、`max_connections`、`ssl_check_hostname`、`ssl_min_version`、
+`ssl_include_verify_flags`、`ssl_exclude_verify_flags`；另有 **`db`**（本模块单独
+处理，优先级高于路径）与 **`timeout`**（具名拒绝，见下）——三者合计 16 个，与
+`redis.connection.URL_QUERY_ARGUMENT_PARSERS` 逐名对齐（有防漂移测试）。
 
 - `?socket_timeout=5&health_check_interval=30`（生产常见形态）现在**能启动**；
   取值非法（如 `?socket_timeout=abc`）才具名拒绝。
@@ -96,13 +98,28 @@ redis-py 认识的连接参数现在会**转换后透传**给存储客户端，�
 `factory._mask_url` 渲染：`redis://user:***@host:6379/0`——密码永不出现，
 用户名保留；`?socket_timeout=abc` 这类底层 cause 也先洗一遍。
 
-掩码是**结构化**的（镜像 `urlsplit`，不是正则）：在 `://` 之后的 authority 上取
-**最后一个** `@` 作 userinfo 分隔符，userinfo 再按**第一个** `:` 分用户/口令，
-口令整体替换为 `***`——因此口令里含 `@` / 空格 / tab / nbsp / `:` / `%` / unicode
-等（正则掩不住的形态）同样不会漏；`path`/`query` 里的 `@` 不会被误当 userinfo。
-**认不出 userinfo 时 fail-closed**：authority 里有 `@` 却认不出口令的形态，
-userinfo 整体抹成 `***`（如 `redis://user@host:6379` → `redis://***@host:6379`），
-host/port/db 保留以便诊断。
+掩码是**结构化**的（镜像 `urlsplit`，不是正则），而且**不依赖输入是否合法**
+（r3 只在字面 `://` 的 authority 里找 userinfo，单斜杠与「凭据在 scheme 前」的
+形态会因为认不出而**原样回显**——那是 r3 的回归，已经修掉）：
+
+- 锚点是「全串最后一个**凭据形状**的 `@`」：所在段（`/` 分段）里要有 `:`，且该
+  `:` 必须在该段首个 `?`/`#` 之前。于是 `redis:/user:pw@host`、`REDIS:/user:pw@host`、
+  `user:pw@redis://host`、`redis:///user:pw@host`（空 authority 多写斜杠）、
+  `redis://user:p?w@host` 都能掩住；userinfo 再按**第一个** `:` 分用户/口令，
+  口令整体替换为 `***`。
+- `path`/`query` 里的 `@` 不会被误当 userinfo：`redis://host:6379/0@x`、
+  `redis://host:6379/0?ref=a@b` 原样保留（区分方式是「`@` 所在段里没有 `:`」）。
+- **兜底重洗**：结构层识别到的口令还会以原文 / percent-encoded / decoded 三种形态，
+  在 userinfo 段与 host 之后的 path/query/fragment 里再洗一遍——口令重复写在
+  `?socket_timeout=PwX` 或 `/PwX` 里也活不下来。`?db=<口令>`、`/<口令>`、
+  `?<口令>=1` 这些**不是 URL 的消息字段**同样先洗后回显。scheme 与 host **不**参与
+  替换（它们是结构性诊断信息，也可能恰好是口令的子串——无差别全局替换是假红）。
+- **认不出 userinfo 时 fail-closed**：`@` 之前认不出口令的形态，userinfo 整体抹成
+  `***`（如 `redis://user@host:6379` → `redis://***@host:6379`），host/port/db 保留
+  以便诊断。
+- 拒绝分支的 `raise … from exc` 改成 `raise … from <洗过的同类型替身>`：`__cause__`
+  是 `traceback` / `logger.error(..., exc_info=True)` **独立渲染的对象**，只把文案洗进
+  `RedisUrlError` 的消息并不够。
 
 **迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态；
 仅写用户名不写口令的 URL 也会显示成 `***@host`。

@@ -1,0 +1,13 @@
+{
+  "name": "88-masker-not-global-fail-closed",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "        at, origin = _scan_last_credential_at(\n            text, 0, len(text), hard_query_at=_delimiter_stop(text, 0, \"?#\")\n        )\n        if at == -1:\n            if \":\" in text[:anchor]:\n                origin, at = 0, anchor\n            else:\n                cut = -1\n                for ch in _AUTHORITY_DELIMITERS:\n                    idx = text.rfind(ch, 0, anchor)\n                    if idx > cut:\n                        cut = idx\n                origin, at = cut + 1, anchor\n",
+  "new": "        return None  # r3：只认字面 '://' —— 单斜杠/凭据在 scheme 前的形态原样返回\n",
+  "rationale": "退回 r3 的「只在字面 '://' 之后找 userinfo」：redis:/user:pw@host、redis:/user:pw@host:6379/0、REDIS:/user:pw@host 认不出凭据，_mask_url 原样返回，而 _parse_redis_url 把裸 URL 写进拒绝消息（str/repr/traceback/exc_info=True 日志）—— plaita#88 r4 Finding 1 P0（相对 r2 的回归）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_global_fail_closed_rule_table",
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_global_fail_closed_never_returns_input_verbatim"
+  ],
+  "issue": "88"
+}
