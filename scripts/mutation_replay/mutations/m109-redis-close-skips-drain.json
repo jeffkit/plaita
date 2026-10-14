@@ -6,7 +6,7 @@
   "rationale": "close() 不排空 ⇒ 在飞分发既无完成也无点名（第三态回归）",
   "expect_fail": [
     "tests/unit/test_issue109_110_event_redis_parity.py::Test109DispatchTaskLifetime::test_close_waits_for_short_dispatch_and_marks",
-    "tests/unit/test_issue109_110_event_redis_parity.py::Test109DispatchTaskLifetime::test_close_timeout_cancels_and_names_event_and_handler"
+    "tests/unit/test_issue109_110_event_redis_parity.py::Test109DispatchTaskLifetime::test_close_timeout_names_straggler_and_does_not_cancel"
   ],
   "old": "        await self._drain_pending_tasks()",
   "new": "        pass  # mutation: 不排空"

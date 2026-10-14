@@ -23,8 +23,9 @@
     「节点上限用满即当作未命中」会把这一格变成**放行**（验收者 X4 实测
     pads=1500 时 12/12 漏检），本格是那次退化的直接死法。
   * **允许半边**：≥600 个在飞分发 + **外部** close 仍必须放行（``refusal is None``、
-    ``pending_after == 0``、600 条超时点名 WARNING）；遍历代价只与 close 任务自己
-    的唤醒锥有关（实测 ``visited`` 为个位数），与在飞分发条数无关。
+    600 条超时点名 WARNING、**超时任务不被取消**——r7 起 ``close()`` 返回时它们仍在
+    ``_pending_tasks`` 里，由完成回调回收）；遍历代价只与 close 任务自己的唤醒锥
+    有关（实测 ``visited`` 为个位数），与在飞分发条数无关。
 
 #110（``list_subscriptions`` 的合取语义）
   r3 及以前 redis 的 correlation 分支只按索引取行、不再校验 ``event_type`` ⇒
@@ -264,11 +265,14 @@ class Test109R5AllowHalf(unittest.IsolatedAsyncioTestCase):
     """允许半边：合法外部关停不得被新判据误拒。"""
 
     async def test_600_inflight_external_close_still_allowed(self):
+        """600 在飞 + **外部** close：放行；r7 起超时**不取消**它们，点名后放手跑完。"""
         release = asyncio.Event()
         n = 600
+        finished = []
 
         async def handler(event):
             await release.wait()
+            finished.append(event.event_id)
 
         bus = _make_bus(handler)
         catch = _Catch()
@@ -282,7 +286,17 @@ class Test109R5AllowHalf(unittest.IsolatedAsyncioTestCase):
             in_flight = len(bus._pending_tasks)
             verdict, visited, _reason = _close_graph_verdict(
                 asyncio.current_task(), bus._pending_tasks)
-            await bus.close()
+            with patch.object(redis_mod, "DISPATCH_DRAIN_TIMEOUT_SECONDS", 0.05):
+                await bus.close()
+            self.assertEqual(bus._teardown_runs, 1, "teardown 必须恰好一次")
+            warns = [m for m in catch.lines if "分发任务未在" in m]
+            self.assertEqual(len(warns), n,
+                             "600 个超时分发必须逐个点名（无第三态）")
+            for m in warns:
+                self.assertIn("event_id=", m)
+                self.assertIn("handler_id=h1", m)
+            self.assertEqual(len(bus._pending_tasks), n,
+                             "r7：超时任务不得被取消/清空登记（留给完成回调）")
         finally:
             logger.removeHandler(catch)
             release.set()
@@ -291,10 +305,13 @@ class Test109R5AllowHalf(unittest.IsolatedAsyncioTestCase):
         self.assertLess(visited, 16,
                         "外部关停的唤醒锥必须是 O(1)，与在飞分发条数无关")
         self.assertTrue(bus._closing, "合法外部关停必须真的执行")
+        for _ in range(400):
+            if not bus._pending_tasks:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(finished), n,
+                         "被点名的在飞分发必须能全部跑完（未被 cancel）")
         self.assertEqual(len(bus._pending_tasks), 0)
-        warns = [m for m in catch.lines if "分发任务未在" in m]
-        self.assertEqual(len(warns), n,
-                         "600 个被取消的分发必须逐个点名（无第三态）")
 
     async def test_sibling_set_in_wait_does_not_inflate_cone(self):
         """``asyncio.wait`` 闭包里的兄弟集合不得被当作唤醒边（否则预算被撑爆）。

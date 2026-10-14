@@ -128,35 +128,46 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 `tests/unit/test_issue109_110_event_redis_parity.py` 与
 `scripts/selfclose_109_110.py`）：
 
-- `close()` 先取消监听任务，再等**已登记**的在飞分发任务，最多
-  `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0` 秒；仍未完成的逐个 `cancel()`，并对每个
-  被取消的任务打一条 `WARNING`，含 `event_id` 与 `handler_id`。
-- `close()` 返回后不存在「inflight 且无处理记录」的第三态：每个分发要么
-  handler 完成并 `mark_event_processed`，要么被取消且已点名。
-- `close()` 开始后到达的分发被**拒绝并点名**（`_closing` 围栏），不会绕过 drain
+- **`close()` 是总体、非阻塞、幂等的关停请求**（r7）：受理时同步置 `_closing`
+  （拒绝新分发），在**总线构造 context**（`_owner_context`）里创建 teardown 任务，
+  返回同一个 close future；`close()` 用 `asyncio.shield` 等它 ⇒ teardown **不是
+  调用者的 context 后代**，调用者被取消也不打断关停。重复 `close()` 返回同一个
+  future（幂等；`_teardown_runs == 1`）。
+- **teardown 顺序**（P0 是**顺序**的后果，不是检测的后果）：① 有界等待（默认
+  `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0`）已登记的在飞分发，**不取消**它们；超时的
+  逐个打含 `event_id` / `handler_id` 的 `WARNING`（「未在 N 秒内完成，放手让它跑完并
+  记录」），登记由完成回调回收；② **最后**才逐个 `cancel()` 监听任务并等落地；③ 释放
+  pubsub / redis / 存储（单步失败具名 WARNING 后继续）。
+- 因此 `close()` 返回后不存在「既未处理、也无处理记录」的静默第三态：每个分发要么在
+  界内完成，要么**已点名**且允许继续跑完（`_pending_tasks` 里可能仍留有被点名的慢任务）。
+- `close()` 开始后到达的分发被**拒绝并点名**（`_closing` 围栏），不会绕过本次 drain
   静默创建。
-- **取消窗口也点名**（F2）：`close()` 先取消监听任务，而监听器是内联 `await`
-  `_process_message` 的；若在首个 await（`is_event_processed` 的 Redis 往返）处被
-  取消，`CancelledError`（BaseException）会被显式捕获、打出含 `event_id` /
-  `handler_id` 的 WARNING 后再抛出——不允许「既不完成、也不点名」。
-- **`close()` 不得从自己分发的任务图内部调用**（F2 + r3/F4 + r3/F1 + r5/X1–X4 + r6 决定性反例）：
-  直接形状（handler 内 `await bus.close()`）与**嵌套/间接形状**——handler
-  `await asyncio.create_task(nested())` / `gather` / `asyncio.shield(bus.close())` /
-  spawned-not-awaited / `TaskGroup.create_task(..., context=Context())` +
-  `await asyncio.sleep(0)`——都会让 drain 等待自己的祖先（task-wait cycle）：
-  `asyncio.wait` 超时后 `Task.cancel` 沿 `_fut_waiter` 无界递归 ⇒ 进程级
-  `RecursionError` + 任务永久悬置。**r6 换架构**：判据内核拆到
-  `plaita/event/_selfclose_guard.py`（只依赖 stdlib，可在别的 CPython 上按文件加载
-  驱动）。不再往「私有属性名白名单」里加形状——那是 **fail-open by construction**
-  （属性缺失/改名即静默跳过；验收者的属性缺失表：present ⇒ in_graph，absent ⇒ clean）
-  ——改成两层 + 一个运行时自检：
-  1. **L1 dispatch lineage**（主判据，廉价，不点名任何私有属性）：分发 handler 运行时置
+- **取消窗口也点名**（F2）：监听器内联 `await _process_message`，若在首个 await
+  （`is_event_processed` 的 Redis 往返）处被 `close()` 取消，`CancelledError`
+  （BaseException）会被显式捕获、打出含 `event_id` / `handler_id` 的 WARNING 后再
+  抛出——不允许「既不完成、也不点名」。
+- **自关停（#109/F1/F4…r7）：`close()` 对任意调用者安全，判据只是提前拒绝。**
+  r6 把安全性押在两层判据上，被独立验收者两个决定性反例判负（两者**都不再是安全性
+  残差**，见 T2）：
+  * **CE-1** 两层未知持有者 `Outer(Gate(f))`：L2 的未知持有者扫描只进一层 `__dict__`，
+    看不到内层已武装的 future；
+  * **CE-2** 在 dispatch 之外创建、被某个 handler 等待的 close 任务：`create_task`
+    的 `call_soon` 先于 awaiter 注册 `__wakeup`，L2 的首 tick 快照结构性看不到这条
+    **纯 asyncio 簿记**的唤醒边。
+
+  r7 的结论：**让 `close()` 按构造安全，不再让判据承载安全性**（顺序见上：不取消在飞
+  分发、监听最后取消、请求在 owner context 调度、close future 由 teardown 收敛）。
+  判据保留为**提前、响亮**的拒绝，且只在**确有在飞分发任务**时生效（无在飞分发时直接
+  放行，见 T2.4）。两层判据（内核 `plaita/event/_selfclose_guard.py`，只依赖 stdlib，
+  可在别的 CPython 上按文件加载驱动）：
+  1. **L1 dispatch lineage**（廉价，不点名任何私有属性）：分发 handler 运行时置
      `contextvars.ContextVar("plaita_redis_in_dispatch_bus")`（值是总线实例）；
      `create_task` / `TaskGroup.create_task` / `ensure_future`（含 `shield`）复制当前
-     context ⇒ handler 里创建的任务、以及这些任务再创建的任务**传递地**继承该标记。
+     context ⇒ handler 里创建的任务、以及它们再创建的任务**传递地**继承该标记。
      `close()` 在任何副作用之前具名拒绝：`current_task()` 就是本实例登记的在飞分发
-     任务，或当前 context 的标记就是本总线。**声明作用域**：显式换 context
-     （`context=Context()`）或换线程/executor 不继承，走 L2 / 跨循环围栏。
+     任务，或当前 context 的标记就是本总线。**显式换 context（`context=Context()`）
+     或换线程/executor 不继承**——**不再声称 L2「覆盖」这些绕过**：L2 命中就提前拒绝，
+     命不中就走安全关停（更晚），两种结局都安全。
   2. **L2 完成唤醒锥（fail-closed）**（defence in depth）：从正在执行 `close()` 的
      任务出发，沿「事件循环真的会用来唤醒等待者」的引用做可达性遍历——
      `Future._callbacks` 的每个表项 → 回调牵动的 Future/Task：绑定方法 `__self__`
@@ -173,23 +184,26 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
      挂着已武装的唤醒原语（未完成 Future/Task、有 getter 的 Queue）⇒ 拒绝（3.13
      `as_completed` 的 `_AsCompletedIterator._done`、自定义 awaitable 的 `self._f`）；
      展开深度 / 节点预算耗尽 ⇒ 拒绝。闭包 cell 里的**容器**不展开（`asyncio.wait` /
-     `as_completed` 的 `todo` 是兄弟簿记，展开会误拒 600+ 在飞的合法关停——声明残差 R2）。
+     `as_completed` 的 `todo` 是兄弟簿记，展开会误拒 600+ 在飞的合法关停——判据盲区 R2）。
      **不扫 `__dict__`**，但对未知持有者只扫**一层**直接属性找已武装原语：因此
      `RedisEventBus` 自己经 `_track_task` 回调闭包出现时（`_pending_tasks`/`listeners`
      是容器、`lock` 未武装）不会误拒跨总线关停。
+     **r7：判据内部任何非具名异常（例如自定义描述符抛 `ValueError`）都在
+     `close_graph_verdict` 内收敛成具名 `incomplete`**，绝不裸逃到 `close()`。
   3. **stdlib 属性自检**（把「未来 Python 改名」从 fail-open 变 fail-closed）：首次
      `close()` 在 running loop 内对 `Task`/`Future`/`TaskGroup`/`Queue`/`Event`/
      `Condition`/`Semaphore`/`Lock`/`Barrier`/`StreamReader` **新建实例**并检查期望
-     属性；缺任一 ⇒ 本进程内 `close()` 一律具名拒绝
+     属性；缺任一 ⇒ **有在飞分发时** `close()` 具名拒绝
      （`_SELF_CLOSE_UNSUPPORTED_RUNTIME_REFUSAL`，文案点名缺哪个属性）。
+     **没有 running loop 时不缓存结果**（r7 缺陷修复：把「没跑成」缓存成失败会让本
+     进程此后每次 `close()` 都被拒，是 fail-closed DoS）。
   `close()` 命中 L1 或在飞分发任务即抛 `_SELF_CLOSE_REFUSAL`；命中 fail-closed 情形抛
   `_WAKE_GRAPH_INCOMPLETE_REFUSAL`；命中预算抛 `_SELF_CLOSE_BUDGET_REFUSAL`；自检未过抛
   `_SELF_CLOSE_UNSUPPORTED_RUNTIME_REFUSAL`。**四条都在任何关停副作用之前**
   （`_closing` 保持 `False`、listener 不取消、不进 `_drain_pending_tasks`）。拒绝后
-  `asyncio.run` 正常返回（`Test109R6AsyncioRunTeardown`）。**r5 的对照实测**：同一
-  反例在 r5 上 guard 判 `('clean', 1)` 且进入 drain（`_closing=True`、listener 已取消）；
-  验收者在完整总线上实测 70 s 仍被外部看门狗 SIGKILL/137，本仓 stub 复现里它被 5 s
-  drain 超时取消——两种结局都证明 r5 **不拒绝**。
+  `asyncio.run` 正常返回（`Test109R6AsyncioRunTeardown`）。**历史对照**：同一反例在
+  r5 上 guard 判 `('clean', 1)` 且进入 drain、被 5 s drain 超时取消；在 r6 上 CE-1 被
+  放行并取消在飞任务、CE-2 触发 `Task.cancel` 递归（见 T2.1）。
   `asyncio.shield(bus.close())` 自 r5 起从
   「bypass-but-named」收紧为**具名拒绝**。**日志口径修正**（r3 验收者第 3 处过度声明）：
   该拒绝只有在**未被 handler 接住**时才经 `_process_event` 打 1 条 handler 失败日志；
@@ -216,78 +230,57 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   调用上述收尾；调用方若直接 `asyncio.run` 后不调用 `close()`，在飞分发仍会被
   loop 取消——**契约要求调用方 close**（Redis 后端）。
 
-覆盖边界（**T1/T2 口径**，不宣称「任何情况都不丢」，也不宣称围栏完备）：
+覆盖边界（**T1/T2 口径**，不宣称「任何情况都不丢」，也不宣称判据完备）：
 
-- **T1（本契约覆盖）**：同一事件循环里、且 `close()` 的调用任务不在本实例在飞分发
-  任务图内的关停——先取消监听，再等已登记的在飞分发最多
-  `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0` 秒；超时逐个 `cancel()` 并打含
-  `event_id` / `handler_id` 的 WARNING；返回后不存在「inflight 且无记录」的第三态。
-  L1（marker / 在飞分发任务身份）**或** L2（完成唤醒锥）任一命中的 `close()` 一律
-  具名拒绝，且拒绝在任何关停副作用之前；L2 证明不出来（缺属性 / 懒创建 / 未知持有者 /
-  预算或深度耗尽）同样具名拒绝（fail-closed）。
-- **T2（声明不在契约内 / 明知的保守行为 / 声明残差）**：
-  1. **显式换 context**（`create_task(coro, context=contextvars.Context())`）绕过
-     L1，由 L2 覆盖。r6 形状表实测：`TaskGroup` + `await asyncio.sleep(0)`（懒创建
-     窗口）、两级 `TaskGroup`、`Barrier`、`StreamReader._waiter`、
-     `partial(waiter.set_result)`、`as_completed` 都被具名拒绝。
-  2. **唤醒锥预算**（fail-closed 的声明边界）：`_DISPATCH_GRAPH_MAX_NODES = 65536`
-     个节点内**枚举不完**时按「无法证明安全」具名拒绝。**边界精确且经过测量**：唤醒锥
+- **T1（本契约覆盖）**：同一事件循环里的关停——受理后停新分发，有界等待已登记的
+  在飞分发（最多 `DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0` 秒）；超时**不取消**、只打含
+  `event_id` / `handler_id` 的 WARNING 并放手让它跑完；监听**最后**取消。
+  **任意**调用者形状都安全（无自取消、无 `RecursionError`、无「Task was destroyed but
+  it is pending」、无 handler 被 `_closing` 连坐取消、总线恰好关停一次）：handler 内
+  `await close()`、handler 后代带 `context=Context()`、两层未知持有者
+  `Outer(Gate(f))`、线程 / executor + `run_coroutine_threadsafe` + `wrap_future`、
+  CE-2 形状、`__slots__` 持有者、只有 close 任务的 `TaskGroup`、嵌套 `TaskGroup`——
+  见 `tests/unit/test_issue109_110_r7_parity.py`（逐形状断言症状）。
+  L1（marker / 在飞分发身份）**或** L2（完成唤醒锥）命中的 `close()` **提前**具名
+  拒绝，且在任何关停副作用之前；L2 证明不出来（缺属性 / 懒创建 / 未知持有者 / 预算或
+  深度耗尽 / 判据内部非具名异常）同样具名拒绝。**判据只在确有在飞分发任务时生效。**
+- **T2（声明不在契约内 / 仅**延迟**差异，不是安全差异）**：
+  1. **判据漏判的形状**（L1 无标记、L2 认不出）：显式 `context=Context()` 换掉
+     context、两层未知持有者（**CE-1**）、`__slots__` 藏 future（R1）、在 dispatch
+     之外创建却被 handler 等待的 **CE-2** 形状。r6 把它们当**安全**残差并因此在完整
+     总线上出现自取消 / `RecursionError`；**r7 起漏判只意味着关停更晚**（有界：
+     drain 超时后放手，teardown 不取消在飞分发），安全性由关停顺序保证、不依赖判据。
+     **属性缺失表 10/10 仍成立**：每个已知私有属性 present ⇒ `in_graph`，删掉 ⇒ 具名
+     `incomplete`（`Test109R6AttributeAbsence`）。
+  2. **唤醒锥预算**（提前拒绝的声明边界）：`_DISPATCH_GRAPH_MAX_NODES = 65536` 个节点
+     内**枚举不完**时按「无法证明安全」具名拒绝 `budget`。**边界精确且经过测量**：唤醒锥
      65536 节点放行、65537 节点拒绝；对纯 future 链即链长 65535 放行 / 65536 拒绝
      （`Test109R6BudgetBoundary::test_documented_budget_boundary_65536`）。r5 的 512
-     预算被验收者证伪——「合法 ≥510 深的 await 链被拒」而 r5 文档却称只有病态/对抗
-     形状会撞上；r6 实测合法 600 / 10000 层 await 链**完全枚举、判 clean**
+     预算被验收者证伪；r6/r7 实测合法 600 / 10000 层 await 链**完全枚举、判 clean**
      （`test_legit_600_and_10000_deep_await_chain_not_refused`）。预算只把「无法证明」
      变成具名拒绝，**任何超过 65536 节点的唤醒锥都会被拒**——这是明知的保守边界，
      不是「只有对抗形状才撞上」。把预算分支改回 `clean` 的变异
      `m109-r5-redis-budget-fail-open` 被 `test_over_budget_chain_is_named_budget_refusal`
      杀死。
   3. **线程 / executor**：L1 不跨线程（各自独立 context）；**有在飞分发**时由跨循环
-     围栏具名拒绝，**无在飞分发时不拦**。
-  4. **两处保守过度拒绝**（r3 验收者 F3：无 task-wait cycle 也被拒；今天无生产
-     调用方）：(a) `call_soon` 分离的 `close()`（handler 已返回、`pending == 0`）；
-     (b) 分发结束后 detached 任务才调用的 `close()`（marker 随 context 活到该任务
-     结束）。二者由 `test_call_soon_detached_close_after_dispatch_is_refused_declared`
-     与 `test_detached_task_after_dispatch_still_refused_declared` 钉住；修掉它们会
-     削弱已确认的 spawned-not-awaited 拒绝。(b) 同时是 L1 独立检验力的死法
-     （`Test109R6LineageMarker::test_delayed_detached_close_refused_by_marker_only`）。
-  5. **声明残差 R1（两层机制盖不住的形状）**：`close()` 由一个**在 dispatch 之外
-     创建**、却被某个分发 handler 等待的任务发起。L1 对该任务没有标记（它不是任何
-     handler context 的后代）；L2 是 **best-effort**——它只认 asyncio 自己的完成唤醒
-     边，若唤醒边由作者自建的同步原语承载、且藏在 L2 看不到的地方，`close()` 会被
-     放行并进入 drain（自等祖先）。**最小复现**（`__slots__` 对象把 future 藏起来：
-     L2 的未知持有者只扫 `__dict__`，`vars()` 在 slots 对象上抛 `TypeError`）：
-
-     ```python
-     class SlotGate:
-         __slots__ = ("f",)          # 无 __dict__ ⇒ 未知持有者扫描看不到 f
-
-     async def scenario(bus):
-         loop = asyncio.get_running_loop()
-         gate = SlotGate()
-         gate.f = loop.create_future()
-
-         async def handler(event):   # D：在飞分发任务
-             await gate.f            # D 等的就是这个 future
-
-         bus.handlers["h1"] = (handler, "*", None, None)
-         await bus._process_message(msg, "h1")
-
-         close_task = loop.create_task(bus.close())   # 在 dispatch 之外创建
-         close_task.add_done_callback(lambda t: gate.f.set_result(None))
-         await close_task            # close 完成会唤醒 D ⇒ drain 自等
-     ```
-
-     该形状被判 **clean 放行**（`Test109R6HonestBoundary` 钉住当前行为，是**声明残差**
-     而不是 completeness 声明）。为什么两层都够不到：L1 判的是 **context 后代关系**，
-     这个 close 任务不是任何 handler 的后代；L2 判的是 **asyncio 自己的唤醒边**，
-     而作者用自建原语耦合同一循环时，那条边不在 asyncio 的簿记属性里。
-  6. **声明残差 R2**：唤醒边**只由一个存在回调闭包 cell 里的容器**持有的形状不展开
-     （闭包 cell 的兄弟簿记规则，见 L2）；这是为了不把 `asyncio.wait` /
-     `as_completed` 的 700 个兄弟当成唤醒边而误拒合法关停（声明盲区，不是完备性）。
-  7. **SIGTERM**：`event_filter.py` 不注册信号处理器，进程直接结束，本条不含信号
-     处理；`asyncio.run` 后未调用 `close()` 的路径不在契约内。
-- **版本边界（r6 实测；判据内核 `plaita/event/_selfclose_guard.py` 只依赖 stdlib，
-  可独立抽出驱动）**：
+     围栏具名拒绝，**无在飞分发时不拦**；**同一循环**的 `run_coroutine_threadsafe` +
+     `wrap_future` 属于 T1（r7 形状表钉住）。
+  4. **过度拒绝已消失**（r7）：r3 曾声明的两处（`call_soon` 分离的 close、分发结束后
+     detached 任务里的 close）与验收者报告的**未声明**一处（只有 close 任务的
+     `TaskGroup`）现在都**放行**——没有在飞分发就没有可保护对象，判据不适用。
+     这些形状与「被提前拒绝」只差**延迟**（提前拒绝更快失败），不是安全差异；合法
+     TaskGroup 调用者不再需要任何绕行。钉住：
+     `Test109R3ResidualHoles::test_call_soon_detached_close_after_dispatch_is_now_allowed`、
+     `..._detached_task_after_dispatch_is_now_allowed`、
+     `Test109R7EndToEndShapes::test_shape_taskgroup_with_only_close_task_works`。
+  5. **判据盲区 R2**：唤醒边**只由一个存在回调闭包 cell 里的容器**持有时不展开（闭包
+     cell 的兄弟簿记规则，见 L2）；这是为了不把 `asyncio.wait` / `as_completed` 的 700
+     个兄弟当成唤醒边而误拒合法关停。同属**延迟差异**，不是安全差异。
+  6. **SIGTERM**：`event_filter.py` 不注册信号处理器，进程直接结束；`asyncio.run` 后
+     未调用 `close()` 的路径不在契约内。
+- **版本边界（r6/r7 实测；判据内核 `plaita/event/_selfclose_guard.py` 只依赖 stdlib，
+  可独立抽出驱动。范围：该表**只驱动判据内核**；r7 的关停顺序属于 `RedisEventBus`，
+  由仓库 venv（3.11）上的 `test_issue109_110_r7_parity.py` 端到端覆盖）**：
 
   | CPython | stdlib 属性自检 | 形状表（`scripts/selfclose_109_110_versions.py`） | 备注 |
   |---|---|---|---|
@@ -298,14 +291,14 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
 
   运行方式：3.11 用仓库 venv；3.10/3.12/3.13 用
   `uv run --no-project --python <v> python scripts/selfclose_109_110_versions.py`
-  （不装 plaita 依赖，按文件路径加载判据内核，用真实 asyncio 对象驱动）。四个版本
-  **都安全**；自检在每个运行时重新验证属性表，若未来 Python 改名 ⇒ 该运行时 `close()`
-  全拒（fail-closed），不会静默。
+  （不装 plaita 依赖，按文件路径加载判据内核，用真实 asyncio 对象驱动）。四个版本的
+  判据形状表都 OK；自检在每个运行时重新验证属性表，若未来 Python 改名 ⇒ 该运行时
+  **有在飞分发时** `close()` 具名拒绝（fail-closed），不会静默；**无运行循环时自检
+  结果不缓存**（r7 缺陷修复）。
 - **副作用口径**：契约是「要么完成、要么被点名」，不是「handler 副作用必为 0」——
-  被取消/被拒的分发里，handler 自己 `create_task` 的子任务、或用 `asyncio.shield`
-  包住的**其它** work 片段，可能在 `close()` 返回后照常产生副作用；守卫拒绝的嵌套
-  形状里，`nested` 子任务也已执行到 `close()` 调用点（此前可能有副作用）才被拒。
-  本条只保证**不静默**。
+  被提前拒绝的分发根本没建任务；**超时被点名的分发会继续跑完**，因此 handler 及其
+  自己 `create_task` 的子任务、`asyncio.shield` 包住的**其它** work 片段，可能在
+  `close()` 返回后照常产生副作用。本条只保证**不静默**（r7 起还保证**不取消**）。
 - GC 压力下任务不被回收（实测）；常规运行（不关停）分发照常跑完。
 
 ## Redis 事件存储 `list_events`（#110 相邻缺陷，r3）

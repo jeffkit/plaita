@@ -204,7 +204,11 @@ class Test109NestedSelfCloseGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live, [])
 
     async def test_spawned_detached_task_close_is_named_refusal(self):
-        """spawned-not-awaited 的子任务同样继承 context ⇒ 具名拒绝（保守口径）。"""
+        """spawned-not-awaited 的子任务同样继承 context；**分发仍在飞时** ⇒ 具名拒绝。
+
+        r7：判据只在确有在飞分发时才有意义，所以 handler 用 ``await asyncio.sleep``
+        把分发保持在飞，让 marker 成为该形状的唯一判据。
+        """
         holder = {}
         refusal = []
 
@@ -216,9 +220,12 @@ class Test109NestedSelfCloseGuard(unittest.IsolatedAsyncioTestCase):
 
         async def handler(event):
             asyncio.create_task(nested())
+            await asyncio.sleep(0.05)       # 分发仍在飞（pending 非空）
 
         bus, live = await self._run_shape(holder, handler)
         self.assertEqual(len(refusal), 1, f"detached 子任务未拒绝: {refusal}")
+        self.assertIn("不能从它自己的分发 handler 内调用", str(refusal[0]))
+        self.assertFalse(bus._closing)
         self.assertEqual(len(bus._pending_tasks), 0)
         self.assertEqual(live, [])
 
@@ -281,10 +288,10 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
       ``functools.partial`` 递归 / 函数 ``__closure__`` / asyncio 唤醒队列属性）；
       F2 由「有在飞分发时跨事件循环 close 具名拒绝」兜住。拒绝都发生在**任何关停
       副作用之前**（``_closing`` 保持 ``False``）。
-    - F3 两处（``call_soon`` 分离的 close、分发结束后才关停的 detached 任务）
-      是**保守过度拒绝**：没有 task-wait cycle 也被拒。本文件把它当**声明**钉住，
-      不修——修掉它会削弱已确认的 spawned-not-awaited（S6）拒绝，且今天无生产
-      调用方。见 docs-site/docs/distributed/event-system.md 的 T1/T2 表述。
+    - F3 两处（``call_soon`` 分离的 close、分发结束后才关停的 detached 任务）r3 曾
+      是**保守过度拒绝**；**r7 起放行**：判据只在「确有在飞分发任务」时才有意义，
+      没有可保护对象就不拒绝——两者退化成「晚一点的关停」，安全性由 ``close()`` 的
+      关停顺序（owner context 调度 teardown、不取消在飞分发、监听最后取消）保证。
     """
 
     async def _settle(self):
@@ -611,17 +618,22 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bus._closing)
         self.assertEqual(live, [])
 
-    async def test_call_soon_detached_close_after_dispatch_is_refused_declared(self):
-        """F3(a) 声明：``call_soon`` 分离的 close（无 cycle、pending==0）仍被保守拒绝。"""
+    async def test_call_soon_detached_close_after_dispatch_is_now_allowed(self):
+        """F3(a)（r7 放行）：``call_soon`` 分离的 close（handler 已返回、pending==0）。
+
+        r3 把它当「明知的保守过度拒绝」声明钉住；r7 的口径是**判据只在有在飞分发时
+        才有意义**——没有可保护对象就放行，这类形状退化成「晚一点的关停」，安全。
+        """
         holder = {}
 
         async def handler(event):
             async def late():
                 try:
                     await holder["bus"].close()
-                    holder["refusal"] = None
                 except BaseException as e:       # noqa: BLE001
                     holder["refusal"] = e
+                holder["ran"] = True
+
             asyncio.get_running_loop().call_soon(
                 lambda: asyncio.ensure_future(late()))
 
@@ -630,23 +642,28 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
         await bus._process_message(
             _msg(Event(event_type="t.demo", data={})), "h1")
         live = await self._settle()
-        self.assertIsInstance(holder.get("refusal"), RuntimeError,
-                              f"F3(a) 声明漂移: {holder}")
-        self.assertIn("不能从它自己的分发 handler 内调用", str(holder["refusal"]))
-        self.assertFalse(bus._closing)
+        self.assertTrue(holder.get("ran"), "detached close 未跑")
+        self.assertNotIn("refusal", holder, f"r7：pending==0 时不该拒绝: {holder}")
+        self.assertTrue(bus._closing, "关停请求必须被受理")
+        self.assertEqual(bus._teardown_runs, 1, "teardown 必须恰好一次")
         self.assertEqual(live, [])
 
-    async def test_detached_task_after_dispatch_still_refused_declared(self):
-        """F3(b) 声明：分发结束后 detached 任务里的 close 仍带 marker ⇒ 保守拒绝。"""
+    async def test_detached_task_after_dispatch_is_now_allowed(self):
+        """F3(b)（r7 放行）：分发结束后 detached 任务里的 close（marker 还在）。
+
+        marker 只是**提前拒绝**的线索，不是安全机制；此时 pending==0，纳不进任何
+        在飞分发，放行后 teardown 立即完成。L1 的独立检验力由
+        ``Test109R6LineageMarker``（分发**仍在飞**时 marker 是唯一判据）钉住。
+        """
         holder = {}
 
         async def late():
             await asyncio.sleep(0.2)             # 此时分发早已结束（pending==0）
             try:
                 await holder["bus"].close()
-                holder["refusal"] = None
             except BaseException as e:           # noqa: BLE001
                 holder["refusal"] = e
+            holder["ran"] = True
 
         async def handler(event):
             asyncio.create_task(late())
@@ -655,11 +672,15 @@ class Test109R3ResidualHoles(unittest.IsolatedAsyncioTestCase):
         holder["bus"] = bus
         await bus._process_message(
             _msg(Event(event_type="t.demo", data={})), "h1")
-        await asyncio.sleep(0.4)
+        for _ in range(200):
+            if holder.get("ran"):
+                break
+            await asyncio.sleep(0.02)
         live = await self._settle()
-        self.assertIsInstance(holder.get("refusal"), RuntimeError,
-                              f"F3(b) 声明漂移: {holder}")
-        self.assertFalse(bus._closing)
+        self.assertTrue(holder.get("ran"), "detached close 未跑")
+        self.assertNotIn("refusal", holder, f"r7：pending==0 时不该拒绝: {holder}")
+        self.assertTrue(bus._closing)
+        self.assertEqual(bus._teardown_runs, 1)
         self.assertEqual(len(bus._pending_tasks), 0)
         self.assertEqual(live, [])
 

@@ -1,25 +1,36 @@
-"""#109 自关停围栏（r6 架构）：**只依赖 stdlib**，可独立抽出在别的 CPython 上驱动。
+"""#109 自关停围栏（r7 架构）：**只依赖 stdlib**，可独立抽出在别的 CPython 上驱动。
 
-本模块是 ``RedisEventBus.close()`` 的判据内核，按评审要求从 ``redis.py`` 拆出：
-不 import plaita、不 import redis，因此可以在 3.12 / 3.13 的干净解释器里按文件加载、
-用真实 stdlib 对象驱动（``scripts/selfclose_109_110_versions.py``）。
+本模块是 ``RedisEventBus.close()`` 的**提前拒绝**判据内核，按评审要求从 ``redis.py``
+拆出：不 import plaita、不 import redis，因此可以在 3.12 / 3.13 的干净解释器里按文件
+加载、用真实 stdlib 对象驱动（``scripts/selfclose_109_110_versions.py``）。
+
+**r7 的定位（先读这段）：判据不是安全机制，只是提前、响亮的拒绝。**
+    ``close()`` 的安全性由 ``redis.py`` 的**关停顺序与归属**保证，不由本模块保证：
+      * 关停请求在**总线构造 context**里调度 teardown（``RedisEventBus._owner_context``）
+        ⇒ teardown 永远不是调用者的 context 后代；
+      * teardown 有界等待在飞分发后**不取消**它们（只具名 WARNING 后放手），监听任务
+        **最后**才逐个取消 ⇒ 不会再出现「drain 取消一个正在 await close() 的任务」
+        导致的 ``Task.cancel`` 沿 ``_fut_waiter`` 环无界递归（CE-2）。
+    因此本模块**漏判**的后果只是「关停更晚 / 重复请求」，绝不是自取消或挂起。
+    判据保留，是因为它便宜，且能拦住**最常见**的自关停写法（handler 内直接关停）。
 
 两层判据（**分工与边界见下，不宣称完备**）：
 
-L1 —— dispatch lineage（廉价，危险方向 sound，不点名任何私有属性）
+L1 —— dispatch lineage（廉价，不点名任何私有属性）
     分发 handler 运行时置 ``IN_DISPATCH_BUS``（contextvars）。``asyncio.create_task`` /
     ``TaskGroup.create_task`` 复制当前 context，因此 handler 里 create_task /
     ensure_future / shield 出来的任务——以及这些任务再 create 出来的任务——都继承
     该标记。``close()`` 在动任何关停副作用之前拒绝：
       * ``current_task()`` 就是本总线登记的在飞分发任务（``_pending_tasks``），或
       * 当前 context 的标记就是本总线（handler 内 / 其后代任务内发起关停）。
-    显式 ``context=contextvars.Context()`` 换掉 context 会**绕过 L1**，交由 L2。
+    显式 ``context=contextvars.Context()`` 换掉 context 会**绕过 L1**；这类形状
+    **不再宣称由 L2 覆盖**——L2 命中就提前拒绝，命不中就照常关停（只是更晚），
+    两种结局都安全（见上面 r7 定位与文档的「性能/延迟差异」清单）。
 
 L2 —— 完成唤醒锥（defence in depth，**fail-closed**）
     从正在执行 ``close()`` 的任务出发，沿「事件循环真的会用来唤醒等待者」的引用做
     可达性遍历（``Future._callbacks`` 的每个表项 → 回调牵动的 Future/Task）。命中
-    在飞分发任务 ⇒ ``in_graph``（必然 task-wait cycle）。**证明不出来 ⇒ 拒绝**，
-    绝不静默跳过：
+    在飞分发任务 ⇒ ``in_graph``。**证明不出来 ⇒ 具名 incomplete**，绝不静默跳过：
       * 已知 asyncio 簿记类型（Task/Future/Queue/Event/Condition/Semaphore/Lock/
         Barrier/StreamReader/TaskGroup）的期望属性缺失或被重命名 ⇒ ``incomplete``；
       * ``TaskGroup._on_completed_fut`` 为 ``None`` 而 ``_tasks`` 非空 ⇒
@@ -29,21 +40,29 @@ L2 —— 完成唤醒锥（defence in depth，**fail-closed**）
         ``_AsCompletedIterator`` 持有 ``_done`` Queue；自定义 awaitable 持有
         ``self._f``）；
       * 展开深度耗尽 / 节点预算耗尽 ⇒ ``incomplete`` / ``budget``。
+    **r7：判据内任何非具名异常都不许离开 ``close_graph_verdict``**——判据收敛成具名
+    ``incomplete``（例如自定义描述符在 ``_require`` 上抛 ``ValueError``）。
 
 **stdlib 自检（把「未来 Python 改名」从 fail-open 变成 fail-closed）**
     首次使用时（close() 在 running loop 内）对每个受支持类型**新建实例**并检查期望
     属性确实存在；任一缺失或版本不含该类型却本应含（3.11+ 的 TaskGroup/Barrier）⇒
-    本进程内 ``close()`` 一律具名拒绝（``UNSUPPORTED_RUNTIME_REFUSAL``）。
+    在有在飞分发时 ``close()`` 具名拒绝（``UNSUPPORTED_RUNTIME_REFUSAL``）。
+    **无运行中的事件循环时不缓存结果**（r7 缺陷修复）：把「没跑成」缓存成失败会让
+    之后每次 ``close()`` 都被拒（fail-closed DoS）。
 
 **诚实边界（本模块不能证明什么）**
-    1. 两层都盖不住：``close()`` 由一个**在 dispatch 之外创建**、却被某个分发 handler
-       等待的任务发起。L1 无标记；L2 是 best-effort——它只认 asyncio 自己的唤醒机制，
-       不认「作者用别的同步原语自行耦合同一循环」的形状（声明残差 R1，见文档）。
+    1. 判据认不出：``close()`` 由一个**在 dispatch 之外创建**、却被某个分发 handler
+       等待的任务发起（例如 ``__slots__`` 对象藏 future，或两层未知持有者
+       ``Outer(Gate(f))``）。L1 无标记；L2 只认 asyncio 自己的唤醒簿记，不认
+       「作者用多层对象 / 别的同步原语自行耦合同一循环」的形状（声明残差 R1）。
+       **r7 起这不是安全性残差**：漏判只让关停晚一点（``redis.py::_teardown`` 有界
+       等待后放手，不取消、不递归），文档的「性能/延迟差异」清单列了这类形状。
     2. 回调闭包 cell 里的**容器**不展开（``asyncio.wait`` / ``as_completed`` 的
        ``todo`` 兄弟簿记集合；展开它会把唤醒锥撑爆并误拒 600+ 在飞的合法外部关停）。
-       因此「唤醒边只由一个存在闭包 cell 里的容器持有」是声明盲区（残差 R2）。
+       因此「唤醒边只由存在闭包 cell 里的容器持有」是判据盲区（残差 R2）——同样是
+       延迟差异，不是安全差异。
     3. L2 只对**已知类型**下钻其私有簿记属性；已知集合的完备性由上面的自检保证
-       （缺名即全拒），但「asyncio 新增一种我们不知道的唤醒原语」无法被自检发现——
+       （缺名即拒），但「asyncio 新增一种我们不知道的唤醒原语」无法被自检发现——
        这类未知原语只有在**直接**挂在未知持有者上时才被 fail-closed 拦下。
 """
 
@@ -94,19 +113,21 @@ IN_DISPATCH_BUS: contextvars.ContextVar = contextvars.ContextVar(
     "plaita_redis_in_dispatch_bus", default=None)
 
 # 每条拒绝文案都带上的**能力边界**（要求：拒绝文案里说明判据不能证明什么）。
-# 不宣称完备：围栏只认 asyncio 自己的唤醒机制；由「在 dispatch 之外创建、却被某个
-# 分发 handler 等待」的 close 任务发起、且唤醒边不走 asyncio 簿记的形状，不在判据内
-# （文档的声明残差 R1）。
+# r7 口径：判据不是安全机制，只是提前、响亮的拒绝；``close()`` 的安全性由
+# ``redis.py`` 的关停顺序与归属保证（见模块 docstring 的 r7 定位）。漏判的后果是
+# 「关停更晚 / 重复」，不是自取消或挂起——所以这里不再声称 L2「覆盖」L1 的绕过形状。
 _BEST_EFFORT_CLAUSE = (
-    "【能力边界】本围栏只认 asyncio 自己的唤醒机制（Future._callbacks 与 asyncio 的"
-    "唤醒簿记属性），是 best-effort，不宣称完备：close 若由**在 dispatch 之外创建**、"
-    "却被某个分发 handler 等待的任务发起，且那条唤醒边不走 asyncio 簿记"
-    "（例如藏在 __slots__ 对象或作者自建调度里），本判据覆盖不到（声明残差 R1）。"
+    "【能力边界】close() 本身对任意调用者安全（关停请求在总线构造 context 里调度、"
+    "teardown 不取消在飞分发任务、监听最后才取消）；本判据只是**提前、响亮**的拒绝，"
+    "是 best-effort、不宣称完备：它认不出所有「在 dispatch 之外创建、却被某个分发 "
+    "handler 等待」的形状（例如 __slots__ 藏 future、两层未知持有者；声明残差 R1）。"
+    "漏判的后果只是关停更晚或重复请求，不是自取消/挂起。"
 )
 
 SELF_CLOSE_REFUSAL = (
     "RedisEventBus.close() 不能从它自己的分发 handler 内调用："
-    "该任务会把自身纳入 drain 并导致自取消/gather 递归。"
+    "该调用会被计入本次关停的在飞分发集合，让关停等待自己的祖先"
+    "（r7 起由关停顺序兜住——只是更慢；历史实现在此自取消/gather 递归）。"
     "请在 handler 之外（监听循环/CLI 收尾）关停；"
     "如需在 handler 内请求关停，请先 return 再由外部调用。"
 ) + _BEST_EFFORT_CLAUSE
@@ -135,6 +156,20 @@ _SELFTEST_EXTRA_ATTRS: Dict[str, Tuple[str, ...]] = {}
 
 _SELFTEST_RAN = False
 _SELFTEST_RESULT: Optional[str] = None
+
+# r7：无运行中的事件循环时 ensure_self_test() 的返回文案（**不缓存**）。
+_SELFTEST_NO_LOOP = (
+    "未运行自检（当前没有运行中的事件循环，拿不到真实 asyncio 实例）："
+    "按 r7 口径不缓存该结果，绝不把「没跑成」毒化成后续 close() 的失败"
+)
+
+
+def _running_loop_or_none():
+    """有运行中的事件循环则返回它，否则 None（不抛）。"""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 class WakeGraphIncomplete(Exception):
@@ -202,6 +237,12 @@ def _require(obj: Any, attr: str) -> Any:
     except AttributeError as exc:
         raise WakeGraphIncomplete(
             f"{type(obj).__name__}.{attr} 不存在（可能被重命名）") from exc
+    except Exception as exc:                     # noqa: BLE001 - r7：非 AttributeError 也必须具名
+        # 验收者补的缺陷：自定义描述符（property）可以抛非 AttributeError，裸异常
+        # 会逃出 close_graph_verdict。这里收敛成具名 incomplete。
+        raise WakeGraphIncomplete(
+            f"{type(obj).__name__}.{attr} 读取失败（{type(exc).__name__}: {exc}）"
+        ) from exc
 
 
 def _match_kind(obj: Any) -> Optional[Dict[str, Any]]:
@@ -399,12 +440,29 @@ def close_graph_verdict(root: Any, pending: Any,
     返回 ``(verdict, visited, reason)``，``verdict`` ∈
     ``{"clean", "in_graph", "incomplete", "budget"}``：
 
-      * ``in_graph``：命中在飞分发任务（必然 task-wait cycle）；
-      * ``clean``：预算内**完全枚举完**且未命中（可放行）；
-      * ``incomplete``：缺属性 / 懒创建窗口 / 未知持有者 / 深度耗尽 ⇒ **无法证明安全**；
-      * ``budget``：节点预算内仍有待展开 ⇒ **无法证明安全**。
-    ``incomplete`` 与 ``budget`` 都必须具名拒绝（fail-closed）。
+      * ``in_graph``：命中在飞分发任务（证明出 task-wait cycle）；
+      * ``clean``：预算内**完全枚举完**且未命中；
+      * ``incomplete``：缺属性 / 懒创建窗口 / 未知持有者 / 深度耗尽 / **判据内部非具名
+        异常** ⇒ 无法证明安全；
+      * ``budget``：节点预算内仍有待展开 ⇒ 无法证明安全。
+    ``incomplete`` 与 ``budget`` 都只触发**提前拒绝**（r7：拒绝不是安全机制，见模块
+    docstring）。
+
+    **r7：任何异常都不许离开本函数**——判据内部的非具名异常（例如自定义描述符抛
+    ``ValueError``）在这里收敛成具名 ``incomplete``，绝不把裸异常抛给 ``close()``。
     """
+    try:
+        return _close_graph_walk(root, pending, budget)
+    except WakeGraphIncomplete as exc:
+        return "incomplete", 0, str(exc)
+    except Exception as exc:                     # noqa: BLE001 - r7：非具名异常收敛
+        return "incomplete", 0, (
+            f"判据展开时出现非具名异常（{type(exc).__name__}: {exc}），按 fail-closed "
+            "当成无法证明安全")
+
+
+def _close_graph_walk(root: Any, pending: Any,
+                      budget: int) -> Tuple[str, int, Optional[str]]:
     if root is None:
         return "incomplete", 0, "拿不到当前任务（current_task() is None）"
     visited: Set[int] = set()
@@ -507,8 +565,20 @@ def _run_self_test() -> Optional[str]:
 
 
 def ensure_self_test() -> Optional[str]:
-    """首次调用时跑自检并缓存；返回 None=通过，否则为具名失败原因。"""
+    """首次调用（在 running loop 内）时跑自检并缓存；返回 None=通过，否则具名失败原因。
+
+    r7 缺陷修复：**没有运行中的事件循环时不缓存**——本模块的自检必须新建真实的
+    asyncio 对象（Task/Queue/…），无循环时根本跑不起来。旧实现把
+    ``RuntimeError: no running event loop`` 当成具名失败缓存下来，于是**一次无循环的
+    调用（例如 ``RedisEventBus.ensure_self_test()`` 被当探针调）会让本进程此后每次
+    ``close()`` 都被具名拒绝**（fail-closed DoS）。现在无循环只返回一段「未运行」文案、
+    不置 ``_SELFTEST_RAN``；``close()`` 永远在 running loop 内跑自检。
+    """
     global _SELFTEST_RAN, _SELFTEST_RESULT
+    if _SELFTEST_RAN:
+        return _SELFTEST_RESULT
+    if _running_loop_or_none() is None:
+        return _SELFTEST_NO_LOOP
     if not _SELFTEST_RAN:
         _SELFTEST_RESULT = _run_self_test()
         _SELFTEST_RAN = True

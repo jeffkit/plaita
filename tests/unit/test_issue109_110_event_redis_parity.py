@@ -4,7 +4,8 @@
     ``RedisEventBus._process_message`` 的 fire-and-forget 分发任务必须有强引用
     （``_pending_tasks`` / ``_track_task``，与 ``InMemoryEventBus`` 同一机制），
     且 ``close()`` 返回后不得存在「inflight 且无处理记录」的第三态：有限等待，
-    超时逐个取消并打 WARNING（含 ``event_id`` / ``handler_id``）。
+    **超时不被取消**（r7），而是逐个打含 ``event_id`` / ``handler_id`` 的 WARNING
+    后放手让它跑完；登记由完成回调回收。
 
 #110（订阅查询索引）
     ``list_subscriptions(correlation_id=..., event_type=...)`` 必须走 correlation
@@ -140,12 +141,15 @@ class Test109DispatchTaskLifetime(unittest.IsolatedAsyncioTestCase):
                          [(event.event_id, "h1")])
         self.assertEqual(len(bus._pending_tasks), 0)
 
-    async def test_close_timeout_cancels_and_names_event_and_handler(self):
+    async def test_close_timeout_names_straggler_and_does_not_cancel(self):
+        """#109 r7：超时的在飞分发**不被取消**——具名 WARNING 后放手让它跑完。"""
         entered, release = asyncio.Event(), asyncio.Event()
+        finished = []
 
         async def handler(event):
             entered.set()
             await release.wait()
+            finished.append(event.event_id)
 
         bus = _make_bus(handler)
         event = Event(event_type="t.demo", data={})
@@ -156,19 +160,23 @@ class Test109DispatchTaskLifetime(unittest.IsolatedAsyncioTestCase):
             await entered.wait()
             with patch.object(redis_mod, "DISPATCH_DRAIN_TIMEOUT_SECONDS", 0.1):
                 await asyncio.wait_for(bus.close(), timeout=10)
+            warnings = [m for m in catch.lines if "关停" in m]
+            self.assertEqual(len(warnings), 1, f"超时未点名: {catch.lines}")
+            self.assertIn(event.event_id, warnings[0])
+            self.assertIn("h1", warnings[0])
+            self.assertEqual(finished, [], "close() 不该等到 handler 跑完")
+            self.assertEqual(len(bus._pending_tasks), 1,
+                             "r7：超时任务不得被取消/清空登记（留给完成回调）")
+            self.assertEqual(bus._teardown_runs, 1, "teardown 必须恰好一次")
         finally:
             logging.getLogger("plaita.event.redis").removeHandler(catch)
             release.set()
-
-        # 不存在「inflight 且无记录」的第三态
-        inflight = [t for t in asyncio.all_tasks()
-                    if t is not asyncio.current_task() and not t.done()
-                    and "_process_event" in t.get_coro().__qualname__]
-        self.assertEqual(inflight, [], "close() 返回后仍有在飞分发任务（#109 第三态）")
-        warnings = [m for m in catch.lines if "关停" in m]
-        self.assertEqual(len(warnings), 1, f"超时取消未点名: {catch.lines}")
-        self.assertIn(event.event_id, warnings[0])
-        self.assertIn("h1", warnings[0])
+        for _ in range(200):
+            if not bus._pending_tasks:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(finished, [event.event_id],
+                         "被点名的在飞分发必须能跑完（不得被 cancel）")
         self.assertEqual(len(bus._pending_tasks), 0)
 
 

@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_r6_parity.py::Test109R6AttributeAbsence::test_deleted_attributes_are_named_incomplete"
   ],
-  "old": "def _require(obj: Any, attr: str) -> Any:\n    \"\"\"严格读一个**已知簿记属性**：不存在 ⇒ fail-closed（绝不回退成 None 跳过）。\n\n    这是 r5→r6 的核心修复：r5 的 ``getattr(obj, attr, None)`` 让「属性被重命名」\n    变成静默放行（验收者属性缺失表：present ⇒ in_graph，absent ⇒ clean）。\n    \"\"\"\n    try:\n        return getattr(obj, attr)\n    except AttributeError as exc:\n        raise WakeGraphIncomplete(\n            f\"{type(obj).__name__}.{attr} 不存在（可能被重命名）\") from exc",
-  "new": "def _require(obj: Any, attr: str) -> Any:\n    \"\"\"mutation: 缺失属性静默跳过（r5 的 fail-open）。\"\"\"\n    return getattr(obj, attr, None)\n"
+  "old": "def _require(obj: Any, attr: str) -> Any:\n    \"\"\"严格读一个**已知簿记属性**：不存在 ⇒ fail-closed（绝不回退成 None 跳过）。\n\n    这是 r5→r6 的核心修复：r5 的 ``getattr(obj, attr, None)`` 让「属性被重命名」\n    变成静默放行（验收者属性缺失表：present ⇒ in_graph，absent ⇒ clean）。\n    \"\"\"\n    try:\n        return getattr(obj, attr)\n    except AttributeError as exc:\n        raise WakeGraphIncomplete(\n            f\"{type(obj).__name__}.{attr} 不存在（可能被重命名）\") from exc\n    except Exception as exc:                     # noqa: BLE001 - r7：非 AttributeError 也必须具名\n        # 验收者补的缺陷：自定义描述符（property）可以抛非 AttributeError，裸异常\n        # 会逃出 close_graph_verdict。这里收敛成具名 incomplete。\n        raise WakeGraphIncomplete(\n            f\"{type(obj).__name__}.{attr} 读取失败（{type(exc).__name__}: {exc}）\"\n        ) from exc",
+  "new": "def _require(obj: Any, attr: str) -> Any:\n    \"\"\"mutation: 缺失属性静默跳过（r5 的 fail-open，r7 重锚：连非 AttributeError 一起删）。\"\"\"\n    return getattr(obj, attr, None)\n"
 }

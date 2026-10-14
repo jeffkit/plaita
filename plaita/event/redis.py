@@ -2,6 +2,7 @@
 基于Redis的事件总线和存储实现
 """
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -12,15 +13,18 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union, Awaitable
 
 logger = logging.getLogger(__name__)
 
-# #109：RedisEventBus.close() 排空在飞分发任务的有限等待秒数。超时后逐个
-# cancel 并打 WARNING（含 event_id / handler_id）——契约是「close() 返回后
-# 不存在既未处理、也无记录的第三态」，不是「无限等待 handler 跑完」。
+# #109（r7）：RedisEventBus 关停时**有界等待**在飞分发任务的秒数。超时后**不取消**
+# 任何在飞分发任务（旧实现在此 cancel，正是自取消 / `Task.cancel` 沿 `_fut_waiter`
+# 环无界递归的来源），只对每个未完成任务打一条含 event_id / handler_id 的 WARNING，
+# 然后放手让它跑完；登记由任务自己的完成回调回收。监听任务在这一步**之后**才取消。
 DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0
 
-# #109/F1/F4 判据内核（具名拒绝文案 + 两层判据）拆到 ``plaita/event/_selfclose_guard.py``（r6）：该模块只依赖
-# stdlib，因此可在别的 CPython（3.12/3.13 的干净解释器）里按文件加载、用真实 asyncio
-# 对象驱动（版本表见 scripts/selfclose_109_110_versions.py）。两层判据（dispatch
-# lineage + fail-closed 完成唤醒锥）、stdlib 自检、诚实边界都写在该模块 docstring。
+# #109/F1/F4 判据内核（具名拒绝文案 + 两层判据）拆到 ``plaita/event/_selfclose_guard.py``（r6，r7 重新定位）：
+# 该模块只依赖 stdlib，因此可在别的 CPython（3.12/3.13 的干净解释器）里按文件加载、
+# 用真实 asyncio 对象驱动（版本表见 scripts/selfclose_109_110_versions.py）。
+# **r7：判据不是安全机制，只是提前、响亮的拒绝**——安全性由下面 `close()` /
+# `_teardown` 的**顺序与归属**保证（请求在总线构造 context 里调度、teardown 不取消在飞
+# 分发、监听最后取消）；漏判只让关停更晚。判据的边界写在 guard 模块 docstring。
 from ._selfclose_guard import (          # noqa: E402
     DISPATCH_GRAPH_MAX_NODES as _DISPATCH_GRAPH_MAX_NODES,
     IN_DISPATCH_BUS as _IN_DISPATCH_BUS,
@@ -851,6 +855,18 @@ class RedisEventBus(EventBus):
         # close() 已开始排空后拒绝新分发（#109 收尾围栏，避免绕过 drain）
         self._closing = False
 
+        # #109 r7：关停请求的**归属上下文**。在总线构造时捕获，teardown 任务显式以它
+        # 创建（``loop.create_task(..., context=...)``）⇒ teardown **永远不是调用者的
+        # context 后代**，无论调用者跑在什么 context（handler / 显式空 Context / 线程）。
+        # 顺手把 dispatch 标记清成 None：teardown 自身不在任何总线的分发图内。
+        self._owner_context = contextvars.copy_context()
+        self._owner_context.run(_IN_DISPATCH_BUS.set, None)
+        # close() 的幂等凭据：首个请求创建，重复请求返回**同一个** future。
+        self._close_future: Optional["asyncio.Future"] = None
+        self._teardown_task: Optional["asyncio.Task"] = None
+        # 观测/断言用：teardown 真的跑了几次（必须恰好 1 次）。
+        self._teardown_runs = 0
+
         # 事件处理器字典 {handler_id: (handler_func, event_type, filter_condition, retry_policy)}
         self.handlers = {}
         self.lock = asyncio.Lock()
@@ -868,30 +884,42 @@ class RedisEventBus(EventBus):
         task.add_done_callback(lambda t: self._pending_tasks.pop(t, None))
 
     async def _drain_pending_tasks(self) -> None:
-        """关停时排空已登记的分发任务（#109 的收尾契约）。
+        """有界等待已登记的在飞分发任务；**绝不取消**它们（#109 r7）。
 
-        有限等待 ``DISPATCH_DRAIN_TIMEOUT_SECONDS``；仍未完成的逐个 ``cancel()``
-        并打 WARNING（含 ``event_id`` / ``handler_id``），再等它们真正落地——
-        保证 ``close()`` 返回后不存在「inflight 且无记录」的第三态。
+        r6 及以前的实现是「等满 ``DISPATCH_DRAIN_TIMEOUT_SECONDS`` 后逐个
+        ``task.cancel()`` 再 ``gather``」。那正是 P0 的一半：当某个在飞分发任务正在
+        ``await bus.close()`` 时，取消它会沿 ``Task._fut_waiter`` 走进
+        ``asyncio.wait``/``gather`` 的 ``_GatheringFuture.cancel`` 环（drain 的 wait
+        等它、它等 close、close 等 drain）⇒ 无限递归 ``RecursionError`` +
+        「Task was destroyed but it is pending」。r7 改成：
+
+          * 超时的任务只打一条含 ``event_id`` / ``handler_id`` 的 WARNING
+            （「未在 N 秒内完成，放手让它跑完」），**不 cancel、不清空登记**；
+          * 登记表 ``_pending_tasks`` 由任务自己的完成回调回收——``close()`` 返回后
+            仍在表里的，就是被点名过的慢任务（由调用方/事件循环收尾）。
+
+        本方法自身**不抛**（除 CancelledError）：任何内部异常都具名记 WARNING 后返回，
+        保证关停序列不会卡在这一步。
         """
         pending = [t for t in self._pending_tasks if not t.done()]
         if not pending:
-            self._pending_tasks.clear()
             return
-        _done, still = await asyncio.wait(
-            pending, timeout=DISPATCH_DRAIN_TIMEOUT_SECONDS,
-        )
+        try:
+            _done, still = await asyncio.wait(
+                pending, timeout=DISPATCH_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                 # noqa: BLE001 - 关停序列不因 drain 卡住
+            logger.warning("事件总线关停：等待在飞分发时异常（继续关停）: %s", exc)
+            return
         for task in still:
             event_id, handler_id = self._pending_tasks.get(task, (None, None))
             logger.warning(
-                "事件总线关停：分发任务未在 %.1fs 内完成，取消并记录"
+                "事件总线关停：分发任务未在 %.1fs 内完成，放手让它跑完并记录"
                 "（event_id=%s, handler_id=%s）",
                 DISPATCH_DRAIN_TIMEOUT_SECONDS, event_id, handler_id,
             )
-            task.cancel()
-        if still:
-            await asyncio.gather(*still, return_exceptions=True)
-        self._pending_tasks.clear()
 
     async def initialize(self):
         """初始化Redis连接（按事件循环缓存客户端）。
@@ -1359,23 +1387,34 @@ class RedisEventBus(EventBus):
                 await asyncio.sleep(delay)
     
     def _self_close_refusal(self, current) -> Optional[RuntimeError]:
-        """(#109/F1/F4, r6) 关停前判据：返回要抛的具名 ``RuntimeError``，或 None=放行。
+        """(#109/F1/F4, r6；r7 重新定位) 关停前判据：返回要抛的具名 ``RuntimeError``，或 None=放行。
+
+        **r7 语义**：判据只是**提前、响亮的拒绝**，不是安全机制。``close()`` 已按构造
+        对任意调用者安全（见 ``request_close`` / ``_teardown``）；这里拒绝是为了在
+        **最常见**的写法（handler 内直接关停）上尽早给出可执行的错误，而不是为了
+        防住挂起。因此判据的适用前提缩小为「**确有在飞分发任务**」：没有可保护对象时
+        一律放行（顺手修掉验收者报告的两类过度拒绝——合法 ``TaskGroup`` 里只有 close
+        任务、以及分发结束后 detached 任务里的 close）。
 
         两层（细节与诚实边界见 ``plaita/event/_selfclose_guard.py`` 的模块 docstring）：
 
         L1 **dispatch lineage**：``current`` 就是本实例登记的在飞分发任务，或当前
            context 的 ``IN_DISPATCH_BUS`` 标记就是本总线（handler 内 / handler
            ``create_task`` 出的后代任务——context 复制传递）。**不点名任何私有属性**。
-           handler 显式换 ``context=Context()`` 时 L1 失灵，交由 L2。
-        L2 **fail-closed 完成唤醒锥**：从 ``current`` 沿「事件循环真的会用来唤醒等待
-           者」的引用可达的人里含本实例在飞分发任务 ⇒ 拒绝；缺属性 / 重命名 /
-           ``TaskGroup._on_completed_fut`` 懒创建窗口 / 未知持有者 / 深度或节点预算
-           耗尽 ⇒ 一律判「无法证明安全」并具名拒绝（绝不静默放行）。首次调用先跑
-           stdlib 属性自检，未通过则本进程内一律拒绝。
-        L2 是 best-effort（只认 asyncio 自己的唤醒机制）；它盖不住的形状见模块
-        docstring 的声明残差 R1/R2。本方法**只读、无副作用**，必须在 ``_closing`` /
-        cancel listener / drain **之前**调用。
+           handler 显式换 ``context=Context()`` 时 L1 失灵——L2 命中则提前拒绝，
+           命不中则照常关停（只是更晚），两种结局都安全。
+        L2 **完成唤醒锥**：从 ``current`` 沿「事件循环真的会用来唤醒等待者」的引用可达
+           的人里含本实例在飞分发任务 ⇒ 拒绝；缺属性 / 重命名 / ``TaskGroup.
+           _on_completed_fut`` 懒创建窗口 / 未知持有者 / 深度或节点预算耗尽 ⇒ 具名
+           incomplete。首次调用先跑 stdlib 属性自检，未过则本进程内（**有在飞分发时**）
+           拒绝。本方法**只读、无副作用**，必须在 ``_closing`` / cancel listener /
+           drain **之前**调用。
         """
+        if not [t for t in self._pending_tasks if not t.done()]:
+            # r7：没有在飞分发 ⇒ 没有任何可纳入本次关停的任务，也就没有 task-wait
+            # cycle 可言。放行（不再发生「合法 TaskGroup-only / 分发后 detached 调用
+            # 被拒」的过度拒绝）。判据保留的唯一意义是拦常标记形状，见 docstring。
+            return None
         if current is not None and current in self._pending_tasks:
             # #109 形状①（直接）：handler 内调用 close() ⇒ ``current`` 就是被登记的分发
             # 任务，会把**自身**纳入 drain —— 等满超时后自 cancel，再 await gather(含自身)
@@ -1411,27 +1450,139 @@ class RedisEventBus(EventBus):
                 budget=_DISPATCH_GRAPH_MAX_NODES, visited=visited))
         return None
 
-    async def close(self):
-        """关闭所有子组件的 Redis 连接。
+    def request_close(self) -> "asyncio.Future":
+        """受理关停请求（#109 r7）：**幂等、非阻塞**，返回「关停完成」的同一个 future。
 
-        关停契约（#109，与 memory 后端 ``_track_task`` 同一机制）：``close()``
-        返回时，本实例已登记的分发任务不允许停在「既未跑完、也无处理记录」的第三
-        态——要么在 ``DISPATCH_DRAIN_TIMEOUT_SECONDS`` 内跑完，要么被取消并留一条
-        含 ``event_id`` / ``handler_id`` 的 WARNING。``close()`` **不**取消事件
-        处理本身（先等后取消），也不引入队列/并发上限。
+        这是 r7 的核心：``close()`` 不再由调用者直接执行关停序列，而是
 
-        自关停围栏（#109/F1/F4, **r6 架构**）：在动任何关停副作用之前先证明「调用者
-        不在本实例的分发任务图内」。两层判据见 ``_self_close_refusal`` 与
-        ``plaita/event/_selfclose_guard.py``：L1 dispatch lineage（contextvars 标记 +
-        在飞分发任务身份，不点名私有属性）；L2 **fail-closed** 完成唤醒锥（缺属性 /
-        重命名 / ``TaskGroup._on_completed_fut`` 懒创建 / 未知持有者 / 深度或节点预算
-        耗尽全部具名拒绝）。首次调用先跑 stdlib 属性自检，未过则本进程一律拒绝。
-        代价只与当前任务自己的唤醒锥有关（合法外部关停恒 O(1)，与在飞分发条数无关）。
-        L2 是 best-effort，盖不住的形状（在 dispatch 之外创建、却被分发 handler 等待
-        的任务）是**声明残差 R1**，不宣称完备。
+          1. 受理时同步置 ``_closing``（立刻停止受理新分发，先于 teardown 的第一个
+             事件循环 tick），对**重复请求**直接返回首次创建的同一个 future；
+          2. 用 ``context=self._owner_context`` 创建 teardown 任务——owner context 是
+             **总线构造时**捕获的，因此 teardown 永远不是调用者的 context 后代：调用者
+             是 handler、显式空 ``Context()``、还是线程里 ``run_coroutine_threadsafe``
+             投递的协程，都改不了这一点；
+          3. 立即返回 future（非阻塞）。等关停完成就 await 它（``close()`` 的做法），
+             想 fire-and-forget 就丢掉——teardown 是独立任务，调用者被取消不连坐。
         """
-        current = asyncio.current_task()
+        if self._close_future is not None:
+            return self._close_future
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        teardown_task = self._spawn_teardown(loop)
+        self._close_future = future
+        self._teardown_task = teardown_task
+        self._closing = True
+        return future
+
+    def _spawn_teardown(self, loop: "asyncio.AbstractEventLoop") -> "asyncio.Task":
+        """在 **owner context** 里创建 teardown 任务。
+
+        3.11+ 有 ``loop.create_task(..., context=)``；3.10 没有，但 ``Task.__init__``
+        用 ``contextvars.copy_context()`` 捕获当时的 context，所以在 context 里创建即可。
+        """
+        coro = self._teardown()
+        context = self._owner_context.copy()
+        if sys.version_info >= (3, 11):
+            return loop.create_task(coro, context=context)
+        return context.run(loop.create_task, coro)
+
+    async def _teardown(self) -> None:
+        """关停序列本体（#109 r7）：在 owner context 里跑，结束时 resolve close future。
+
+        顺序（P0 是**顺序**的后果，不是检测的后果）：
+          1. ``_drain_pending_tasks``：有界等待在飞分发，**不取消**任何任务；
+          2. ``_stop_listeners``：**最后**才取消监听任务（此刻已不再产生新分发）；
+          3. ``_close_backends``：释放连接/存储。
+        ``_close_future`` 在 finally 里 resolve：即使某步异常/被取消，等待者也不悬置。
+        """
+        self._teardown_runs += 1
+        try:
+            await self._teardown_steps()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            future = self._close_future
+            if future is not None and not future.done():
+                future.set_result(None)
+
+    async def _teardown_steps(self) -> None:
+        await self._drain_pending_tasks()
+        await self._stop_listeners()
+        await self._close_backends()
+
+    async def _stop_listeners(self) -> None:
+        """取消监听任务：**逐个** cancel，再统一等落地。
+
+        「不取消在飞分发」的前提下，这里是唯一还会 cancel 的地方；监听任务是生产方，
+        不 await 在飞分发任务，因此 ``Task.cancel`` 的 ``_fut_waiter`` 链无环。仍然
+        逐个 cancel（绝不用 ``gather(...)`` 的 cancel）——CE-2 的 ``RecursionError``
+        正是 ``_GatheringFuture.cancel`` 沿「close↔drain↔dispatch」环重入。
+        """
+        listeners = [t for t in self.listeners if not t.done()]
+        self.listeners.clear()
+        for listener in listeners:
+            listener.cancel()
+        if listeners:
+            try:
+                await asyncio.wait(
+                    listeners, timeout=DISPATCH_DRAIN_TIMEOUT_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:             # noqa: BLE001 - 关停序列不卡在这
+                logger.warning("事件总线关停：等待监听任务落地时异常: %s", exc)
+
+    async def _close_backends(self) -> None:
+        """释放 pubsub / redis / 三个存储；任一失败具名记 WARNING 后继续。"""
+        if self.pubsub is not None:
+            await self._close_one("pubsub", self.pubsub.aclose)
+            self.pubsub = None
+        if self.redis is not None:
+            await self._close_one("redis", self.redis.aclose)
+            self.redis = None
+        await self._close_one("event_storage", self.event_storage.close)
+        await self._close_one("subscription_storage", self.subscription_storage.close)
+        await self._close_one("processing_tracker", self.processing_tracker.close)
+
+    async def _close_one(self, label: str, closer) -> None:
+        try:
+            await closer()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                 # noqa: BLE001 - 关停请求已受理，不让它炸
+            logger.warning("事件总线关停：释放 %s 失败: %s", label, exc)
+
+    async def close(self):
+        """关闭所有子组件（#109 r7：**总体的、非阻塞的关停请求**）。
+
+        r7 契约（取代 r6 的「先判据、再按旧顺序关停」）：
+
+          * ``close()`` 对**任意**调用者安全：受理时同步置 ``_closing``（停新分发），
+            在**总线构造 context** 里调度 teardown，并用 ``asyncio.shield`` 等待 ⇒
+            teardown 不是调用者的 context 后代，调用者被取消也不会打断关停。
+          * teardown **不取消**在飞分发任务：有界等待后只具名 WARNING 并放手让它们
+            跑完（旧的「超时 cancel」正是自取消 / ``Task.cancel`` 沿 ``_fut_waiter``
+            环无界递归的来源）。
+          * 监听任务**最后**才取消。端到端因此不再有 hang / ``RecursionError`` /
+            「Task was destroyed but it is pending」/ handler 被 ``_closing`` 取消。
+          * 幂等：重复调用（含 handler 内那次被提前拒绝后的重试）返回同一个 future。
+          * 判据（``_self_close_refusal``）仍作为**提前、响亮的拒绝**保留（拦最常见的
+            handler 内直接关停）；漏判不影响安全性，只让关停更晚。没有在飞分发时判据
+            直接放行（修掉验收者报告的过度拒绝）。
+
+        ``close()`` 返回时：``_closing is True``、teardown 恰好跑过一次、监听到期被取消；
+        已登记任务里被点名者允许继续跑完（登记由完成回调回收）。
+        """
         running_loop = asyncio.get_running_loop()
+        if self._close_future is not None:
+            # 幂等分支：关停已受理，重复调用只等同一个 future（不再走判据/副作用）。
+            if self._close_future.get_loop() is not running_loop:
+                raise RuntimeError(
+                    "RedisEventBus.close() 已在另一个事件循环里受理关停请求："
+                    "重复请求必须来自同一个事件循环（teardown 归属该循环）。"
+                )
+            await asyncio.shield(self._close_future)
+            return
+        current = asyncio.current_task()
         foreign = [
             task for task in self._pending_tasks
             if not task.done() and task.get_loop() is not running_loop
@@ -1451,24 +1602,9 @@ class RedisEventBus(EventBus):
         refusal = self._self_close_refusal(current)
         if refusal is not None:
             raise refusal
-        self._closing = True
-        for listener in self.listeners:
-            if not listener.done():
-                listener.cancel()
-        self.listeners.clear()
-        
-        await self._drain_pending_tasks()
-        
-        if self.pubsub:
-            await self.pubsub.aclose()
-            self.pubsub = None
-        if self.redis:
-            await self.redis.aclose()
-            self.redis = None
-        
-        await self.event_storage.close()
-        await self.subscription_storage.close()
-        await self.processing_tracker.close()
+        # 请求受理后 teardown 独立跑（owner context + shield）：
+        # 调用者被取消/超时不会打断关停，也不会把 teardown 变成调用者的后代。
+        await asyncio.shield(self.request_close())
 
     async def get_event(self, event_id: str) -> Event:
         """获取事件"""

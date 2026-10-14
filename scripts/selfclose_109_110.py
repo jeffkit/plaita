@@ -3,7 +3,7 @@
 
     PYTHONPATH=<tree> python scripts/selfclose_109_110.py            # 期望 gap=0
     PYTHONPATH=<tree> python scripts/selfclose_109_110.py --inject X # 负控：必须 gap>0
-    X ∈ {untracked, no-drain, fence-off, type-first}
+    X ∈ {untracked, no-drain, cancel-stragglers, fence-off, type-first}
 
 纪律（针对 r2 验收的 F3）：
 - **每个格的期望由独立谓词从「输入」算出**，不看实现返回值再回填。
@@ -15,8 +15,10 @@
 
 规则（谓词）：
   R1  109 normal/gc：finished == n 且 marked == n 且 pending 清空（该完成的不丢）。
-  R2  109 shutdown/loop-close：finished + cancelled + refused == n、inflight == 0、
-      pending 清空、被取消/被拒的每一条都点名 event_id+handler_id（无第三态）。
+  R2  109 shutdown/loop-close（r7 口径）：finished + refused == n、**超时不被取消**
+      （只打含 event_id+handler_id 的「未在 ... 放手让它跑完」WARNING）、被点名的
+      在飞分发释放后必须真正落地（``left == 0``，且没有「取消窗口」点名）。
+      ``close()`` 返回时 ``_pending_tasks`` 允许仍持有被点名的慢任务。
   R3  109 shutdown-during-send：**先关停再发** ⇒ refused == n（围栏真的触发）。
   R4  109 retry（retry_policy != None）：任务被登记且收尾被排空（覆盖另一登记点）。
   R5  110 correlation 索引（#110 r5 决定：三后端**合取**）：三后端
@@ -181,19 +183,25 @@ async def probe_109(lifecycle, inbound, concurrency, retry=False):
         with patch.object(redis_mod, "DISPATCH_DRAIN_TIMEOUT_SECONDS", 0.05):
             await asyncio.wait_for(bus.close(), timeout=10)
         refused = len([m for m in catch.lines if "拒绝新的分发" in m])
-        cancelled = len([m for m in catch.lines
-                         if "取消窗口" in m or "未在" in m])
-        inflight = [t for t in asyncio.all_tasks()
-                    if t is not asyncio.current_task() and not t.done()
-                    and "_process" in t.get_coro().__qualname__]
+        # r7：超时**不取消**，只点名（"未在 ... 放手让它跑完并记录"）
+        stragglers = [m for m in catch.lines if "未在" in m]
         named = all(("event_id=" in m and "handler_id=h1" in m)
-                    for m in catch.lines if "拒绝新的分发" in m or "取消" in m)
-        accounted = len(finished) + cancelled + refused
-        detail = (f"finished={len(finished)} cancelled={cancelled} refused={refused} "
-                  f"inflight={len(inflight)} accounted={accounted}/{n}")
-        # R2：要么完成、要么被取消/拒绝并点名
-        ok = (accounted == n and not inflight and len(bus._pending_tasks) == 0
-              and named)
+                    for m in catch.lines
+                    if "拒绝新的分发" in m or "未在" in m)
+        pending_at_close = len(bus._pending_tasks)
+        cancelled_lines = [m for m in catch.lines if "取消窗口" in m]
+        # r7：放手跑完——释放后被点名的在飞分发必须真正落地（证明没被 cancel）
+        release.set()
+        for _ in range(300):
+            if not bus._pending_tasks:
+                break
+            await asyncio.sleep(0.01)
+        left = len(bus._pending_tasks)
+        detail = (f"finished={len(finished)} stragglers={len(stragglers)} "
+                  f"refused={refused} left={left} pending_at_close={pending_at_close}")
+        # R2（r7）：要么完成、要么被点名（超时不再取消）；被点名的必须能跑完
+        ok = (len(finished) + refused == n and left == 0 and named
+              and pending_at_close == len(stragglers) and not cancelled_lines)
         return detail, ok
     finally:
         logger.removeHandler(catch)
@@ -335,14 +343,28 @@ def apply_inject(name):
         async def _noop(self):
             self._pending_tasks.clear()
         redis_mod.RedisEventBus._drain_pending_tasks = _noop
+    elif name == "cancel-stragglers":
+        # r7 负控：把「超时只点名、不取消」打回 r6 的「超时逐个 cancel」——
+        # R2 必须看到被点名的在飞分发没能跑完（finished 少、无「未在」点名）。
+        async def drain_cancel_all(self):
+            pending = [t for t in self._pending_tasks if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        redis_mod.RedisEventBus._drain_pending_tasks = drain_cancel_all
     elif name == "fence-off":
-        orig_close = redis_mod.RedisEventBus.close
+        # r7 负控：受理关停请求后立刻清掉 `_closing`（r2 的「关停后仍可分发」缺陷）。
+        # teardown 还在跑，新分发却能进入登记表而不被本次关停覆盖 ⇒ R3 期望 refused==n
+        # 必不成立。
+        orig_request_close = redis_mod.RedisEventBus.request_close
 
-        async def close_then_clear_fence(self):
-            await orig_close(self)
+        def request_close_fence_off(self):
+            future = orig_request_close(self)
             self._closing = False
+            return future
 
-        redis_mod.RedisEventBus.close = close_then_clear_fence
+        redis_mod.RedisEventBus.request_close = request_close_fence_off
     elif name == "type-first":
         async def list_event_type_first(self, event_type=None, correlation_id=None,
                                         flow_id=None, node_id=None):
@@ -410,6 +432,7 @@ async def main(inject):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--inject", default=None,
-                    choices=[None, "untracked", "no-drain", "fence-off", "type-first"])
+                    choices=[None, "untracked", "no-drain",
+                             "cancel-stragglers", "fence-off", "type-first"])
     a = ap.parse_args()
     sys.exit(asyncio.run(main(a.inject)))

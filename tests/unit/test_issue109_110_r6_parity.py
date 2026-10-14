@@ -45,6 +45,7 @@ import fakeredis
 import fakeredis.aioredis
 
 import plaita.event._selfclose_guard as guard_mod
+import plaita.event.redis as redis_mod
 from plaita.event.core import Event, EventSubscription
 from plaita.event.redis import (
     RedisEventBus,
@@ -429,20 +430,39 @@ class Test109R6SelfTestFailClosed(unittest.IsolatedAsyncioTestCase):
     """stdlib 自检失败 ⇒ close() 全拒（未来 Python 改名不再静默放行）。"""
 
     async def test_renamed_attribute_makes_close_refuse_everything(self):
-        bus = _make_bus(lambda e: None)
+        """自检未过 + **有在飞分发** ⇒ close() 具名拒绝（未来 Python 改名 fail-closed）。
+
+        r7：判据的适用前提是「确有在飞分发任务」（无在飞分发时直接放行，见
+        ``_self_close_refusal``），所以这里保留一个在飞分发让自检分支可达。
+        """
+        release = asyncio.Event()
+
+        async def handler(event):
+            await release.wait()
+
+        bus = _make_bus(handler)
+        await bus._process_message(
+            _msg(Event(event_type="t.demo", data={})), "h1")
         guard_mod._SELFTEST_EXTRA_ATTRS["Queue"] = ("_putters_renamed_away",)
         guard_mod.reset_self_test()
         try:
-            with self.assertRaises(RuntimeError) as ctx:
-                await bus.close()
+            with patch.object(redis_mod, "DISPATCH_DRAIN_TIMEOUT_SECONDS", 0.1):
+                with self.assertRaises(RuntimeError) as ctx:
+                    await bus.close()
         finally:
             guard_mod._SELFTEST_EXTRA_ATTRS.pop("Queue", None)
             guard_mod.reset_self_test()
+            release.set()
         text = str(ctx.exception)
         assert _INCOMPLETE_MARK in text, text
         assert "自检未通过" in text, text
         assert "_putters_renamed_away" in text, text
         assert bus._closing is False, "自检拒绝必须在任何关停副作用之前"
+        for _ in range(200):
+            if not bus._pending_tasks:
+                break
+            await asyncio.sleep(0.01)
+        assert len(bus._pending_tasks) == 0
 
     async def test_self_test_passes_on_repo_runtime(self):
         guard_mod.reset_self_test()
@@ -454,30 +474,48 @@ class Test109R6LineageMarker(unittest.IsolatedAsyncioTestCase):
     """L1（dispatch lineage）的独立检验力 + 允许半边不回归。"""
 
     async def test_delayed_detached_close_refused_by_marker_only(self):
-        """handler 里 create_task 出的 delayed 任务：分发已结束、无 await 边可走，
-        只剩 marker 能拦（L2 从该任务出发的唤醒锥是空的 ⇒ clean）。"""
+        """handler 里 create_task 出的 delayed 任务：分发**仍在飞**（pending 非空）、
+        该任务继承 marker；L2 从它出发的唤醒锥是空的 ⇒ 只有 marker 能拦。
+
+        r7：无在飞分发时判据直接放行（见 r3 的 F3 用例），所以这里用 ``gate`` 把分发
+        保持 in-flight，marker 仍是唯一判据。
+        """
         holder = {}
+        gate = asyncio.Event()
 
         async def late():
-            await asyncio.sleep(0.15)             # 此时分发早已结束（pending==0）
+            await asyncio.sleep(0.05)             # 分发仍在飞（gate 未放行）
             try:
                 await holder["bus"].close()
-                holder["refusal"] = None
             except BaseException as e:            # noqa: BLE001
                 holder["refusal"] = e
+            holder["ran"] = True
 
         async def handler(event):
             asyncio.create_task(late())           # 不 await：没有 L2 可见的完成边
+            await gate.wait()
 
         bus = _make_bus(handler)
         holder["bus"] = bus
-        await bus._process_message(
-            _msg(Event(event_type="t.demo", data={})), "h1")
-        await asyncio.sleep(0.4)
-        assert isinstance(holder.get("refusal"), RuntimeError), \
-            f"L1 marker 未拦下 delayed detached close: {holder}"
-        assert _SELF_CLOSE_MARK in str(holder["refusal"])
-        assert bus._closing is False
+        try:
+            await bus._process_message(
+                _msg(Event(event_type="t.demo", data={})), "h1")
+            with patch.object(redis_mod, "DISPATCH_DRAIN_TIMEOUT_SECONDS", 0.1):
+                for _ in range(200):
+                    if holder.get("ran"):
+                        break
+                    await asyncio.sleep(0.02)
+            assert isinstance(holder.get("refusal"), RuntimeError), \
+                f"L1 marker 未拦下 delayed detached close: {holder}"
+            assert _SELF_CLOSE_MARK in str(holder["refusal"])
+            assert bus._closing is False
+            assert len(bus._pending_tasks) == 1, "在飞分发不该被拒绝动作动过"
+        finally:
+            gate.set()
+        for _ in range(200):
+            if not bus._pending_tasks:
+                break
+            await asyncio.sleep(0.01)
         assert len(bus._pending_tasks) == 0
 
     async def test_external_close_still_allowed_after_marker_layer(self):
@@ -557,9 +595,11 @@ class _SlotGate:
 
 
 class Test109R6HonestBoundary(unittest.IsolatedAsyncioTestCase):
-    """文档声明的残差 R1：L2 的未知持有者只扫一层 ``__dict__``，slots 对象看不到。
+    """声明残差 R1：L2 的未知持有者只扫一层 ``__dict__``，slots 对象看不到。
 
-    本用例钉住的是**声明过的边界**（当前判 clean 放行），不是 completeness 声明：
+    本用例钉住的是**判据边界**（当前判 clean）。r7 起这是**检测/延迟**残差，不是
+    安全性残差：``close()`` 对任意调用者安全，漏判只让关停更晚（见
+    ``redis.py::_teardown`` 的顺序与 ``tests/unit/test_issue109_110_r7_parity.py``）。
     若哪天改成拒绝，必须同步改这里的断言与文档的残差 R1 段。
     """
 
