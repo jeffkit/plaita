@@ -35,7 +35,9 @@ class EventSubscription(BaseModel):
     事件订阅信息
     """
     subscription_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    event_type: str
+    # #110/F1：空 event_type 非法——"" 在 matches_event 里 falsy 即通配，而
+    # memory/sqlalchemy 的 list 过滤是严格 !=，三后端会对「空类型订阅」分叉。
+    event_type: str = Field(min_length=1)
     filter_condition: Optional[Dict[str, Any]] = None
     correlation_id: Optional[str] = None
     flow_id: Optional[str] = None

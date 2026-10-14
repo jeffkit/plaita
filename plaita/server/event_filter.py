@@ -486,6 +486,7 @@ def _resolve_queue_name(cli_value: Optional[str]) -> str:
 
 async def main_async(args):
     """异步主函数"""
+    event_bus = None
     try:
         # 创建执行状态存储
         storage_kwargs = {
@@ -541,6 +542,16 @@ async def main_async(args):
     except Exception as e:
         logger.error("事件过滤器启动失败: %s", e, exc_info=True)
         sys.exit(1)
+    finally:
+        # #109：关停排空。``main_async`` 返回后 ``asyncio.run`` 会取消所有在飞任务
+        # （事件既不进 handler、也不写处理记录，且无日志）——这里显式 ``close()``：
+        # 有限等待在飞分发任务，超时逐个取消并点名 event_id/handler_id。
+        # 只补关停接线，不动 SET NX 去重与入队顺序（见 plaita/event/redis.py close()）。
+        if event_bus is not None:
+            try:
+                await event_bus.close()
+            except Exception as e:  # noqa: BLE001 — 关停失败不得掩盖主流程异常
+                logger.warning("事件总线关停失败: %s", e)
 
 def main():
     """命令行入口程序"""

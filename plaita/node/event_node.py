@@ -5,7 +5,7 @@ import time
 from typing import Any, ClassVar, Dict, Optional
 from enum import Enum
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 
 from ..logger import logger
 from .basic import Node
@@ -37,8 +37,27 @@ class EventNode(Node):
     # "eventType"，而 JSON flow 定义历来用 "event_type"——两者都收（2026-10-01
     # dist-demo 实证：此前 DSL 的 EVENT 从未真正构建成功过）。
     event_type: str = Field(
+        min_length=1,
         validation_alias=AliasChoices("event_type", "eventType"),
         description="订阅的事件类型：须与事件发布方的 type 一致（支持 $ 表达式）")
+
+    @field_validator("event_type", mode="before")
+    @classmethod
+    def _event_type_must_be_non_empty(cls, value: Any) -> Any:
+        """#110/F1：空 event_type 非法。
+
+        ``""`` 在 ``EventSubscription.matches_event`` 里是 **falsy ⇒ 通配**
+        （不过滤类型），而 memory/sqlalchemy 的 list 过滤是**严格 !=** ——
+        同一个空类型订阅在 Redis（生产）上会命中该 correlation 的**任意**
+        event_type，三后端语义分叉。这里在**作者/编译器入口**直接拒绝并给可执行
+        提示（pydantic 的 min_length 已挡一层，这里给具名中文原因）。
+        """
+        if isinstance(value, str) and not value.strip():
+            raise ValueError(
+                "event_type 不能为空：event 节点必须写明要等待的事件类型"
+                "（空类型会被当成通配而命中任意事件；如需通配请显式写 \"*\"）"
+            )
+        return value
     # #136：AliasChoices 与 event_type / subscription_timeout **同理由**
     #（codeflow 编译器、console 表单、sexpr 发射都用 camelCase `eventFilter`）。
     # 此前该字段**漏了别名**，于是 camelCase 被 pydantic 静默忽略、落回默认 `{}`

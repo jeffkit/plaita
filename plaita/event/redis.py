@@ -12,6 +12,11 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union, Awaitable
 
 logger = logging.getLogger(__name__)
 
+# #109：RedisEventBus.close() 排空在飞分发任务的有限等待秒数。超时后逐个
+# cancel 并打 WARNING（含 event_id / handler_id）——契约是「close() 返回后
+# 不存在既未处理、也无记录的第三态」，不是「无限等待 handler 跑完」。
+DISPATCH_DRAIN_TIMEOUT_SECONDS = 5.0
+
 # 临时修改sys.path以避免本地文件冲突
 original_path = list(sys.path)
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -340,15 +345,27 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
                                correlation_id: Optional[str] = None,
                                flow_id: Optional[str] = None,
                                node_id: Optional[str] = None) -> List[EventSubscription]:
-        """列出事件订阅"""
+        """列出事件订阅。
+
+        索引口径（#110，与 memory / sqlalchemy 后端对齐）：
+        ``correlation_id`` **优先于** ``event_type``——两者同时给出时走
+        ``{prefix}correlation:{correlation_id}`` 索引，代价与**该 correlation_id
+        的订阅数**成正比，而不是与该 event_type 的全部订阅数成正比。这与 memory 的
+        「两个条件都过滤」和 sqlalchemy 的「correlation_id 收进 WHERE」得到同一集合：
+        带 ``correlation_id`` 过滤时，``correlation_id`` 为空的订阅**不返回**
+        （``matches_event`` 对空 correlation 是通配，但三个后端的 list 过滤口径都是
+        「给了 correlation_id 就必须相等」，见 tests/unit/test_issue109_110_event_redis_parity.py）。
+        ``correlation_id`` 为空时行为不变：依次退到 event_type / flow_id / node_id
+        索引，四者都为空时走全量 ``SCAN``。
+        """
         await self.initialize()
         
-        # 确定使用哪个索引
-        if event_type:
-            key = f"{self.key_prefix}type:{event_type}"
-            subscription_ids = await self.redis.smembers(key)
-        elif correlation_id:
+        # 确定使用哪个索引（#110：correlation_id 选择性更高，优先）
+        if correlation_id:
             key = f"{self.key_prefix}correlation:{correlation_id}"
+            subscription_ids = await self.redis.smembers(key)
+        elif event_type:
+            key = f"{self.key_prefix}type:{event_type}"
             subscription_ids = await self.redis.smembers(key)
         elif flow_id:
             key = f"{self.key_prefix}flow:{flow_id}"
@@ -364,8 +381,12 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
                 data_keys.extend(keys)
                 if cursor == 0:
                     break
+            # #110/F3：按**已知前缀**剥离 id，而不是 split(':')[-1]——后者在
+            # subscription_id 自身含 ':' 时取到截断值，GET 落空 ⇒ 全量路径**静默
+            # 返回空**（生产 uuid4 无冒号所以没暴露；语料的 global 格把它钉住）。
+            _data_prefix = f"{self.key_prefix}data:"
             subscription_ids = [
-                (key.decode('utf-8') if isinstance(key, bytes) else key).split(':')[-1]
+                (key.decode('utf-8') if isinstance(key, bytes) else key)[len(_data_prefix):]
                 for key in data_keys
             ]
         
@@ -750,10 +771,55 @@ class RedisEventBus(EventBus):
         # 事件监听器任务
         self.listeners = []
 
+        # fire-and-forget 分发任务的强引用（#109，与 memory 后端的
+        # InMemoryEventBus._pending_tasks / _track_task 同一机制）：
+        # {task: (event_id, handler_id)}。task 完成回调自动移除，不阻碍回收。
+        self._pending_tasks: Dict["asyncio.Task", tuple] = {}
+        # close() 已开始排空后拒绝新分发（#109 收尾围栏，避免绕过 drain）
+        self._closing = False
+
         # 事件处理器字典 {handler_id: (handler_func, event_type, filter_condition, retry_policy)}
         self.handlers = {}
         self.lock = asyncio.Lock()
     
+    def _track_task(self, task: "asyncio.Task", event_id: str, handler_id: str) -> None:
+        """持住 fire-and-forget 分发任务的强引用（#109）。
+
+        裸 ``create_task`` 的返回值不落到任何地方时，loop 关闭 / ``asyncio.run``
+        收尾会把在飞任务静默取消（事件既不进 handler、也不写处理记录）。这里与
+        memory 后端 ``InMemoryEventBus._track_task`` 同形：登记强引用 + 完成回调
+        自动丢弃；额外记录 ``(event_id, handler_id)`` 供 ``close()`` 在超时取消时
+        点名（至少不出现「没处理、没记录、没日志」的第三态）。
+        """
+        self._pending_tasks[task] = (event_id, handler_id)
+        task.add_done_callback(lambda t: self._pending_tasks.pop(t, None))
+
+    async def _drain_pending_tasks(self) -> None:
+        """关停时排空已登记的分发任务（#109 的收尾契约）。
+
+        有限等待 ``DISPATCH_DRAIN_TIMEOUT_SECONDS``；仍未完成的逐个 ``cancel()``
+        并打 WARNING（含 ``event_id`` / ``handler_id``），再等它们真正落地——
+        保证 ``close()`` 返回后不存在「inflight 且无记录」的第三态。
+        """
+        pending = [t for t in self._pending_tasks if not t.done()]
+        if not pending:
+            self._pending_tasks.clear()
+            return
+        _done, still = await asyncio.wait(
+            pending, timeout=DISPATCH_DRAIN_TIMEOUT_SECONDS,
+        )
+        for task in still:
+            event_id, handler_id = self._pending_tasks.get(task, (None, None))
+            logger.warning(
+                "事件总线关停：分发任务未在 %.1fs 内完成，取消并记录"
+                "（event_id=%s, handler_id=%s）",
+                DISPATCH_DRAIN_TIMEOUT_SECONDS, event_id, handler_id,
+            )
+            task.cancel()
+        if still:
+            await asyncio.gather(*still, return_exceptions=True)
+        self._pending_tasks.clear()
+
     async def initialize(self):
         """初始化Redis连接（按事件循环缓存客户端）。
 
@@ -1096,11 +1162,21 @@ class RedisEventBus(EventBus):
             await pubsub.punsubscribe(redis_pattern)
     
     async def _process_message(self, message, handler_id: str):
-        """处理收到的消息"""
+        """处理收到的消息。
+
+        #109/F2：``close()`` 先取消监听任务，而监听器是**内联** ``await``
+        ``_process_message`` 的；其首个 await（``is_event_processed``，真实
+        Redis 往返）之前/之中被取消时，``CancelledError`` 是 BaseException，
+        下面的 ``except Exception`` 接不住 ⇒ 事件既不完成、也不点名。这里显式
+        捕获并在重新抛出前**点名**，保证「要么完成、要么被点名」在取消窗口内
+        也成立（日志之外无副作用，事件不会因此被执行）。
+        """
+        event_id = None
         try:
             # 解析事件数据
             event_data = message['data']
             event = Event.model_validate_json(event_data)
+            event_id = event.event_id
             
             # 获取处理器信息
             handler_info = self.handlers.get(handler_id)
@@ -1126,12 +1202,38 @@ class RedisEventBus(EventBus):
             if await self.processing_tracker.is_event_processed(event.event_id, handler_id):
                 return
             
-            # 处理事件
+            if self._closing:
+                # #109 收尾围栏：close() 已开始排空后到达的分发不再静默创建
+                # （否则它会绕过本次 drain，成为「没处理、没记录、没日志」的第三态）
+                logger.warning(
+                    "事件总线正在关停：拒绝新的分发（event_id=%s, handler_id=%s）",
+                    event.event_id, handler_id,
+                )
+                return
+            # 处理事件（#109：fire-and-forget 但持强引用，收尾由 close() 排空）
             if retry_policy:
-                asyncio.create_task(self._process_with_retry(handler, event, handler_id, retry_policy))
+                self._track_task(
+                    asyncio.create_task(
+                        self._process_with_retry(handler, event, handler_id, retry_policy)
+                    ),
+                    event.event_id, handler_id,
+                )
             else:
-                asyncio.create_task(self._process_event(handler, event, handler_id))
+                self._track_task(
+                    asyncio.create_task(
+                        self._process_event(handler, event, handler_id)
+                    ),
+                    event.event_id, handler_id,
+                )
                 
+        except asyncio.CancelledError:
+            # #109/F2：取消窗口点名——不改变取消语义（继续向上抛），只是不留
+            # 「既不完成、也不点名」的静默结局。
+            logger.warning(
+                "事件总线关停：分发在取消窗口内被取消（event_id=%s, handler_id=%s）",
+                event_id, handler_id,
+            )
+            raise
         except Exception as e:
             logger.warning("处理事件消息失败: %s", e)
     
@@ -1182,11 +1284,32 @@ class RedisEventBus(EventBus):
                 await asyncio.sleep(delay)
     
     async def close(self):
-        """关闭所有子组件的 Redis 连接"""
+        """关闭所有子组件的 Redis 连接。
+
+        关停契约（#109，与 memory 后端 ``_track_task`` 同一机制）：``close()``
+        返回时，本实例已登记的分发任务不允许停在「既未跑完、也无处理记录」的第三
+        态——要么在 ``DISPATCH_DRAIN_TIMEOUT_SECONDS`` 内跑完，要么被取消并留一条
+        含 ``event_id`` / ``handler_id`` 的 WARNING。``close()`` **不**取消事件
+        处理本身（先等后取消），也不引入队列/并发上限。
+        """
+        current = asyncio.current_task()
+        if current is not None and current in self._pending_tasks:
+            # #109（验收者补的形状）：handler 内调用 close() 会把**自身**纳入
+            # drain —— 等满超时后自 cancel，再 await gather(含自身) 触发
+            # RecursionError + "Task was destroyed"。这里具名拒绝，给出可执行出口。
+            raise RuntimeError(
+                "RedisEventBus.close() 不能从它自己的分发 handler 内调用："
+                "该任务会把自身纳入 drain 并导致自取消/gather 递归。"
+                "请在 handler 之外（监听循环/CLI 收尾）关停；"
+                "如需在 handler 内请求关停，请先 return 再由外部调用。"
+            )
+        self._closing = True
         for listener in self.listeners:
             if not listener.done():
                 listener.cancel()
         self.listeners.clear()
+        
+        await self._drain_pending_tasks()
         
         if self.pubsub:
             await self.pubsub.aclose()
