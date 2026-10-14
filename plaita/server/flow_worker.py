@@ -1673,7 +1673,10 @@ class FlowWorker:
             logger.warning("start 幂等键孤儿释放失败（忽略）: %s: %s", key, e)
 
     def _handle_start_dedup_hit(
-        self, flow_id: str, mapped_execution_id: Optional[str]
+        self,
+        flow_id: str,
+        mapped_execution_id: Optional[str],
+        params: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """处理幂等键命中：绝不二次 start。
 
@@ -1689,6 +1692,18 @@ class FlowWorker:
           delay/approval 服务的 resume 链路，重入队 continue 会被
           ``_handle_resume`` 的 pending 校验拒绝（ResumeError）；#33 起
           resume_flow 对 suspended+continue 直接幂等短路，重入队更是无谓。
+
+        ``params``（调度/手动 start 消息的入参，#122）：命中发生在「首次
+        处理未完成」的窗口——盘上 running 行仍是 ``start_flow`` 刚落的初始
+        快照（``context={}``，首节点还没成功过）。此时 resume 走
+        ``saved_context={}`` 的**假值分支**，会以 ``params or {}`` 重新
+        ``setup_flow``：重入队的 resume 若不带上原 start 的 params，
+        ``$INPUT`` 就被绑成 ``{}``——调度 params（如
+        ``watch_agent``）静默丢失，且此后该执行整条生命周期都拿不到它。
+        故重入队的 resume 消息携带 params（非空 dict 才加该键，空的与
+        存量消息形状一致）；``resume_flow`` 把它透传给引擎，只在
+        checkpoint 为空时生效（非空 checkpoint 走真值分支，params 不参与
+        ——续跑语义零变化）。
         """
         if not mapped_execution_id:
             return None
@@ -1729,6 +1744,13 @@ class FlowWorker:
                     "tenant_id": current_tenant(),
                     "timestamp": datetime.now().isoformat(),
                 }
+                # #122：把原 start 的 params 带到 resume 载体上。命中窗口里盘上
+                # running 行的 context 还是 ``start_flow`` 落的 ``{}``（首节点
+                # 未成功），resume 会走「无 checkpoint → setup_flow(params or
+                # {})」分支；不带 params 就等于把调度入参清成 ``{}``。空 dict
+                # 不加键——存量消息形状与测试断言零变化。
+                if isinstance(params, dict) and params:
+                    resume_msg["params"] = dict(params)
                 try:
                     enqueue_task(redis_client, queue_name, resume_msg)
                 except Exception as e:  # noqa: BLE001 — 入队失败让 start 消息重投
@@ -1847,7 +1869,9 @@ class FlowWorker:
                 dedup_key, execution_id
             )
             if dedup_action == "hit":
-                hit_result = self._handle_start_dedup_hit(flow_id, mapped_execution_id)
+                hit_result = self._handle_start_dedup_hit(
+                    flow_id, mapped_execution_id, params=params
+                )
                 if hit_result is not None:
                     return hit_result
                 # 孤儿映射（首次执行从未落盘）：释放后重新认领，让本次启动
@@ -2014,7 +2038,8 @@ class FlowWorker:
 
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
                     data: Optional[Dict[str, Any]] = None,
-                    delivery_count: Optional[int] = None) -> Dict[str, Any]:
+                    delivery_count: Optional[int] = None,
+                    params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         恢复流程执行。
 
@@ -2027,6 +2052,10 @@ class FlowWorker:
             resume_type: 恢复类型
             data: 恢复数据
             delivery_count: 消息投递次数（可观测；见 _process_execution_result）
+            params: 可选入参（#122）。只在盘上 checkpoint 为空时被引擎用来
+                重新 ``setup_flow``（start→resume 载体转换会撞上这种窗口）；
+                checkpoint 非空（正常 resume）时**不参与**——续跑一律以盘上
+                context 为准，续跑语义零变化。
         """
         # 加载执行状态。None 仅表示键不存在——Redis 后端的读取瞬断/反序列化
         # 失败现以上抛 ExecutionStateLoadError，由 run() 的重投递路径处理，
@@ -2331,8 +2360,14 @@ class FlowWorker:
             # ``result.execution_id`` 回空、且重试计数键退化成
             # ``noderetry::{node}``（无执行 id），运维无法从键反查执行。
             # start 路径（本文件 ``start_flow``）早已是同款正确范式。
+            #
+            # ``params``（#122）：仅在 ``state.context`` 为空（假值）时被引擎
+            # 用于 ``setup_flow``——即 start→resume 载体转换撞上的「首节点还
+            # 没成功过」窗口；checkpoint 非空时引擎走真值分支，params 不参与
+            # （续跑语义零变化，见 ``DistributedStrategy.execute``）。
             result = execution.run_distributed(
                 flow,
+                params=params,
                 saved_context=state.context,
                 resume_type=resume_type,
                 resume_data=data,
@@ -3895,6 +3930,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     message_data.get("resume_type"),
                     message_data.get("data"),
                     delivery_count=delivery_count,
+                    # #122：start→resume 载体转换（start 幂等命中）会把原 start
+                    # 的 params 带过来。它只在盘上 checkpoint 为空时生效——
+                    # 那时不带上就等于把调度入参清成 ``{}``（$INPUT 丢失）。
+                    params=message_data.get("params"),
                 )
             else:
                 raise ValueError(f"unknown task type: {message_type!r}")

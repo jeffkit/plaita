@@ -27,6 +27,7 @@ execution_id 从头跑，首节点副作用双份（文档已标注首节点须�
   会被误判为重复启动而永不执行，键必须调用方显式声明「同键=同逻辑 start」。
 """
 import json
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -43,6 +44,7 @@ from plaita.server.flow_worker import (
     RedisFlowWorker,
     ServiceDispatchError,
 )
+from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 
 
@@ -357,3 +359,126 @@ class TestConsoleBFF:
         assert req.dedup_key is None
         req2 = StartFlowRequest(flow_id="f1", dedup_key="order-123")
         assert req2.dedup_key == "order-123"
+
+
+class TestStartToResumeParamsCarry:
+    """plaita#122：start 幂等命中把 start 载体转成 resume 载体时，必须把原
+    start 的 params 带上。
+
+    命中窗口里盘上 running 行还是 ``start_flow`` 刚落的初始快照
+    （``context={}``，首节点尚未成功——首节点失败/worker 崩溃/重启都落在
+    这个窗口）。resume 拿到假值 ``saved_context`` 会走「无 checkpoint →
+    ``setup_flow(flow, (), params or {})``」分支：重入队的 resume 不携带
+    params 时 ``$INPUT`` 被绑成 ``{}``——调度 params（keeper-watch 的
+    ``watch_agent``）静默丢失，此后整条执行生命周期都取不到，运维「只调
+    参数不改代码」的手段失效。
+    """
+
+    @staticmethod
+    def _running_state(execution_id: str, context: Dict[str, Any]) -> Any:
+        return ExecutionState(
+            execution_id=execution_id, flow_id="f1", status="running", context=context
+        )
+
+    def test_hit_running_resume_carries_start_params(self):
+        """命中 running → 重入队的 resume 消息携带原 start 的 params。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage, _flow_storage())
+        # 命中窗口：running 行是初始快照（首节点还没成功过）
+        storage.save_execution_state("exec-1", self._running_state("exec-1", {}))
+        fake.set("plaita:start-dedup:k1", "exec-1")
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.execution_id = "exec-2"
+            result = worker.start_flow(
+                "f1", {"watch_agent": "deepseek-flash"}, version="1", dedup_key="k1"
+            )
+
+        assert result["resume_requeued"] is True
+        inst.run_distributed.assert_not_called()  # 绝不二次 start
+        entry = fake.xrange(QUEUE)
+        assert len(entry) == 1
+        fields = entry[0][1]
+        payload = fields["payload"] if "payload" in fields else fields[b"payload"]
+        msg = json.loads(payload)
+        assert msg["type"] == "resume"
+        assert msg["execution_id"] == "exec-1"
+        assert msg["params"] == {"watch_agent": "deepseek-flash"}
+
+    def test_hit_running_resume_without_params_keeps_message_shape(self):
+        """空 params 不写 ``params`` 键——无参数调度的消息形状零变化。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage, _flow_storage())
+        storage.save_execution_state("exec-1", self._running_state("exec-1", {}))
+        fake.set("plaita:start-dedup:k1", "exec-1")
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.execution_id = "exec-2"
+            worker.start_flow("f1", {}, version="1", dedup_key="k1")
+
+        fields = fake.xrange(QUEUE)[0][1]
+        payload = fields["payload"] if "payload" in fields else fields[b"payload"]
+        assert "params" not in json.loads(payload)
+
+    def test_resume_with_empty_checkpoint_binds_input_from_message_params(self):
+        """盘上 checkpoint 为空 + 消息带 params → ``$INPUT`` 恢复为消息 params。
+
+        这是 #122 的端到端性质断言：``_dispatch_task`` 把 resume 消息的
+        params 透传给 ``resume_flow`` → ``run_distributed`` → 引擎在假值
+        ``saved_context`` 分支用它 ``setup_flow``。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage, _flow_storage())
+        storage.save_execution_state("exec-1", self._running_state("exec-1", {}))
+
+        worker._dispatch_task(
+            {
+                "type": "resume",
+                "flow_id": "f1",
+                "execution_id": "exec-1",
+                "resume_type": "continue",
+                "tenant_id": "default",
+                "params": {"watch_agent": "deepseek-flash"},
+            },
+            delivery_count=1,
+        )
+
+        state = storage.load_execution_state("exec-1")
+        assert state.status == "completed"
+        assert state.context["$INPUT"] == {"watch_agent": "deepseek-flash"}
+
+    def test_resume_with_nonempty_checkpoint_ignores_message_params(self):
+        """checkpoint 非空（正常 resume）→ 盘上 ``$INPUT`` 为准，params 不参与。
+
+        续跑语义零变化：只有假值 checkpoint（start→resume 转换窗口）才用
+        消息 params 重新绑定。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage, _flow_storage())
+        storage.save_execution_state(
+            "exec-1",
+            self._running_state("exec-1", {"$INPUT": {"watch_agent": "from-checkpoint"}}),
+        )
+
+        worker._dispatch_task(
+            {
+                "type": "resume",
+                "flow_id": "f1",
+                "execution_id": "exec-1",
+                "resume_type": "continue",
+                "tenant_id": "default",
+                "params": {"watch_agent": "from-message"},
+            },
+            delivery_count=1,
+        )
+
+        state = storage.load_execution_state("exec-1")
+        assert state.context["$INPUT"] == {"watch_agent": "from-checkpoint"}

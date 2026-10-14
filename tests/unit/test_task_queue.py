@@ -318,7 +318,24 @@ class TestRedisFlowWorkerDispatch(unittest.TestCase):
                     "data": {"k": 1},
                 }
             )
-            resume.assert_called_once_with("f", "e", "event", {"k": 1}, delivery_count=None)
+            # params 透传是 plaita#122 的 additive 契约：无 params 的 resume
+            # 消息（event/timeout 等）传 None，续跑语义与存量完全一致
+            resume.assert_called_once_with(
+                "f", "e", "event", {"k": 1}, delivery_count=None, params=None)
+        with patch.object(worker, "resume_flow") as resume:
+            # start→resume 载体转换（start 幂等命中）会带上原 start 的 params
+            worker._dispatch_task(
+                {
+                    "type": "resume",
+                    "flow_id": "f",
+                    "execution_id": "e",
+                    "resume_type": "continue",
+                    "params": {"watch_agent": "deepseek-flash"},
+                }
+            )
+            resume.assert_called_once_with(
+                "f", "e", "continue", None, delivery_count=None,
+                params={"watch_agent": "deepseek-flash"})
 
     def test_dispatch_unknown_type_raises(self):
         from plaita.server.flow_worker import RedisFlowWorker
