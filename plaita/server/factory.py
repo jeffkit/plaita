@@ -8,7 +8,6 @@
 """
 import logging
 import os
-import re
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -28,16 +27,84 @@ _REDIS_SCHEMES = ("redis", "rediss", "unix")
 #: 错误消息/日志里密码的固定掩码——凭据唯一允许出现的形态。
 _REDACTED = "***"
 
-#: URL userinfo（``user:password@``）的识别式。故意**不**用 ``urlsplit``：
-#: 待掩码的恰恰是畸形 URL，``urlsplit`` 对它可能直接抛错（非法 IPv6 字面量），
-#: 掩码自身绝不能失败。字符类允许 '#'/'?'，以覆盖「密码里写了裸 '#'」的形态。
-_USERINFO_RE = re.compile(r"(?P<userinfo>[^/@\s:]*:[^/@\s]*)(?P<at>@)")
+#: authority 的结束符：与 ``urlsplit`` 的 netloc 语义一致（`://` 之后到首个
+#: ``/`` / ``?`` / ``#``）。注意这**不是**正则能表达的：口令里可以合法出现
+#: ``@``、空格、``:``、``/`` 等，唯一的权威定界是「authority 里**最后**一个
+#: ``@`` 是 userinfo 分隔符，它之前**第一个** ``:`` 才是用户/口令分界」——
+#: 这正是 r2 的正则 ``[^/@\\s:]*:[^/@\\s]*@`` 掩不住
+#: ``redis://user:@Pr0d2024x@redis.internal:0`` / ``redis://user:p@ssword@host``
+#: / ``redis://user:Super Secret@host`` 的原因（plaita#88 r3）。
+_AUTHORITY_DELIMITERS = "/?#"
+#: path 的结束符（比 authority 宽：允许 ``#``/``?`` 落在**畸形凭据内部**，
+#: 覆盖 r2 记录的「口令里写了裸 '#'」形态）。
+_PATH_DELIMITERS = "/"
+
+
+def _authority_span(text: str) -> tuple:
+    """``(start, stop)``：``://`` 之后（无 ``://`` 则从 0 起）到首个 ``/?#``。
+
+    只认字面 ``://``，与 scheme 大小写无关——``REDIS://``、缺 scheme 的
+    ``user:pw@host`` 都落在这里。
+    """
+    sep = text.find("://")
+    start = sep + 3 if sep != -1 else 0
+    rest = text[start:]
+    stop = len(rest)
+    for ch in _AUTHORITY_DELIMITERS:
+        idx = rest.find(ch)
+        if idx != -1 and idx < stop:
+            stop = idx
+    return start, start + stop
+
+
+def _split_userinfo(region: str):
+    """把一段 authority 切成 ``(user, password, host_port)``；无口令返回 None。
+
+    结构性规则（镜像 ``urlsplit``）：``rsplit("@", 1)``——authority 里**最后**
+    一个 ``@`` 才是 userinfo 分隔符；userinfo 再按**第一个** ``:`` 分用户/口令。
+    口令整体（含 ``@``/空格/``:``）原样返回，绝不截断。
+    """
+    at = region.rfind("@")
+    if at == -1:
+        return None
+    userinfo = region[:at]
+    if ":" not in userinfo:
+        return None  # 只有用户名：没有可泄露的口令
+    user, password = userinfo.split(":", 1)
+    return user, password, region[at + 1 :]
+
+
+def _locate_credentials(text: str):
+    """结构化定位 userinfo，返回 ``(start, stop, user, password, host_port)``。
+
+    先按 ``urlsplit`` 语义取 authority（首个 ``/?#`` 截断）；若其中认不出口令，
+    再放宽到首个 ``/`` 重看一次（畸形凭据里含裸 ``#``/``?`` 的形态）。
+    """
+    start, stop = _authority_span(text)
+    split = _split_userinfo(text[start:stop])
+    if split is None:
+        slash = text.find(_PATH_DELIMITERS, start)
+        stop2 = slash if slash != -1 else len(text)
+        if stop2 > stop:
+            split = _split_userinfo(text[start:stop2])
+            if split is not None:
+                stop = stop2
+    if split is None:
+        return None
+    user, password, host_port = split
+    return start, stop, user, password, host_port
 
 
 def _mask_url(value: object) -> str:
-    """把 URL 渲染成可安全写进异常/日志的形态：密码一律 ``***``。
+    """把 URL 渲染成可安全写进异常/日志的形态：口令一律 ``***``。
 
     ``redis://user:sup3rsecret@host:6379/0`` → ``redis://user:***@host:6379/0``。
+    口令里带 ``@`` / 空格 / ``#`` / nbsp 等（r2 正则的漏网形态）同样整体抹掉；
+    scheme/host/port/db/path 原样保留，消息仍可诊断。
+
+    **fail-closed**：认不出 userinfo 时也绝不原样返回——authority 里有 ``@``
+    的一律把 userinfo 段抹成 ``***``（用户名可留作诊断的形态保留 ``user:***``，
+    认不出用户名的形态整体抹成 ``***@host``）。
     ``_parse_redis_url`` 的**所有**拒绝分支只允许用它渲染原始输入：``RedisUrlError``
     会被 ``flow_worker`` / ``event_filter`` 的 ``logger.error("...: %s", e)``
     原样写进生产日志（后者还带 ``exc_info=True``），裸 URL 等于把 Redis 口令落盘。
@@ -47,21 +114,32 @@ def _mask_url(value: object) -> str:
     if not isinstance(value, str):
         return f"<{type(value).__name__}>"
 
-    def _repl(match) -> str:
-        userinfo = match.group("userinfo")
-        if ":" not in userinfo:
-            return match.group(0)  # 只有用户名：没有可泄露的密码
-        return f"{userinfo.split(':', 1)[0]}:{_REDACTED}@"
+    credentials = _locate_credentials(value)
+    if credentials is not None:
+        start, stop, user, _password, host_port = credentials
+        return f"{value[:start]}{user}:{_REDACTED}@{host_port}{value[stop:]}"
 
-    return _USERINFO_RE.sub(_repl, value, count=1)
+    # fail-closed：凭据形状却认不出 userinfo → 抹掉 ``@`` 之前的整段，绝不原样返回。
+    start, stop = _authority_span(value)
+    region = value[start:stop]
+    at = region.rfind("@")
+    if at == -1:
+        return value  # authority 里没有 ``@``：不存在 userinfo（path 里的 ``@`` 不算）
+    return f"{value[:start]}{_REDACTED}@{region[at + 1 :]}{value[stop:]}"
 
 
 def _passwords(text: str) -> tuple:
-    """原始 URL 里出现的密码字面量（percent-encoded 原文 + 解码后形态）。"""
-    match = _USERINFO_RE.search(text)
-    if match is None or ":" not in match.group("userinfo"):
+    """原始 URL 里出现的口令字面量（原文 + percent-decoded 形态）。
+
+    与 ``_mask_url`` 同源（同一套结构化定位），所以带 ``@``/空格的口令也能
+    被完整取出——r2 的正则只取到 ``@`` 前一小截，``_safe_reason`` 因此漏洗。
+    """
+    if not isinstance(text, str):
         return ()
-    raw = match.group("userinfo").split(":", 1)[1]
+    credentials = _locate_credentials(text)
+    if credentials is None:
+        return ()
+    raw = credentials[3]
     if not raw:
         return ()
     return tuple({raw, unquote(raw)})

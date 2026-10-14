@@ -95,7 +95,17 @@ redis-py 认识的连接参数现在会**转换后透传**给存储客户端，�
 （后者还带 `exc_info=True`）。所有拒绝分支回显的 URL 现在都经
 `factory._mask_url` 渲染：`redis://user:***@host:6379/0`——密码永不出现，
 用户名保留；`?socket_timeout=abc` 这类底层 cause 也先洗一遍。
-**迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态。
+
+掩码是**结构化**的（镜像 `urlsplit`，不是正则）：在 `://` 之后的 authority 上取
+**最后一个** `@` 作 userinfo 分隔符，userinfo 再按**第一个** `:` 分用户/口令，
+口令整体替换为 `***`——因此口令里含 `@` / 空格 / tab / nbsp / `:` / `%` / unicode
+等（正则掩不住的形态）同样不会漏；`path`/`query` 里的 `@` 不会被误当 userinfo。
+**认不出 userinfo 时 fail-closed**：authority 里有 `@` 却认不出口令的形态，
+userinfo 整体抹成 `***`（如 `redis://user@host:6379` → `redis://***@host:6379`），
+host/port/db 保留以便诊断。
+
+**迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态；
+仅写用户名不写口令的 URL 也会显示成 `***@host`。
 
 ### DSL：`@childflow("<text>")` 的位置实参由 `desc` 变成子流程 `flow_id`（plaita#145）
 

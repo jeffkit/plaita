@@ -14,8 +14,14 @@ IPv6 字面量等形态被改写成 localhost，而同一进程的队列/事件�
 没有第四态：任何形态都不得静默变成 localhost。
 
 r2（P0）：拒绝消息里的 URL 一律经 ``factory._mask_url`` 渲染（密码 ``***``）——
-它会被 ``flow_worker`` / ``event_filter`` 原样写进生产日志；本文件用
-``LEAK_SHAPES`` 表钉死「口令不出现在 ``str``/``repr``/traceback 任何一处」。
+它会被 ``flow_worker`` / ``event_filter`` 原样写进生产日志。
+
+r3（P0）：r2 的 ``_mask_url`` 是正则（口令字符类排除 ``/`` 与空白、只掩第一个
+``X:Y@``），口令含 ``@``/空格的形态照样原样落盘。本文件改用**结构化**掩码
+（authority 里最后一个 ``@`` 分 userinfo、userinfo 第一个 ``:`` 分用户/口令），
+并以 ``redis.connection.parse_url`` **接地**：只要 redis-py 认出口令，就断言
+原文与 parse_url 口令的**长度 ≥3 前缀/后缀**都不出现在 ``str``/``repr``/
+traceback 任何一处。
 """
 from __future__ import annotations
 
@@ -85,26 +91,98 @@ REFUSED = [
     ("unix without socket path", "unix://"),
 ]
 
-#: 带凭据的拒绝形态（plaita#88 r2 P0）：消息会进生产日志，口令一个字都不能出现。
+#: 带凭据的拒绝形态（plaita#88 r2 P0 → r3 结构化掩码）：消息会进生产日志，
+#: 口令一个字都不能出现。
+#:
+#: 每条 = ``(形态名, URL, 原文里出现的口令字面量)``。测试用
+#: ``redis.connection.parse_url`` **接地**（复核 redis-py 真正会拿去连的口令），
+#: 再断言「原文口令」与「parse_url 口令」的**长度 ≥3 前缀/后缀**都不出现在
+#: ``str``/``repr``/traceback 里——r2 的正则只掩住普通中段口令，本表覆盖
+#: 口令含 ``@``（前/后/多个）/空格/tab/nbsp/``:``/``%``/unicode、空用户、空口令、
+#: authority 多个 ``@``、裸 ``#``、bytes、缺 scheme、畸形 authority 等全部形态。
 SECRET = "sup3rsecret"
 LEAK_SHAPES = [
-    ("non-str bytes", b"redis://user:sup3rsecret@host:6379/0"),
-    ("unsupported scheme", "REDIS://user:sup3rsecret@host:6379/0"),
-    ("missing scheme", "user:sup3rsecret@host:6379"),
-    ("wrong scheme", "http://user:sup3rsecret@host:6379/0"),
-    ("bad db query", "redis://user:sup3rsecret@host:6379/0?db=x"),
-    ("negative db query", "redis://user:sup3rsecret@host:6379/0?db=-1"),
-    ("bad db path", "redis://user:sup3rsecret@host:6379/foo"),
-    ("invalid query value", "redis://user:sup3rsecret@host:6379/0?socket_timeout=abc"),
-    ("timeout query param", "redis://user:sup3rsecret@host:6379/0?timeout=3"),
-    ("fragment", "redis://user:sup3rsecret@host:6379/0#frag"),
-    ("invalid IPv6 literal", "redis://user:sup3rsecret@[::1:6379/0"),
-    ("port non-numeric", "redis://user:sup3rsecret@host:notaport"),
-    ("port out of range", "redis://user:sup3rsecret@host:99999"),
-    ("port zero", "redis://user:sup3rsecret@host:0"),
-    ("missing host", "redis://user:sup3rsecret@/3"),
-    ("unix without socket path", "unix://user:sup3rsecret@"),
+    # r2 正则的四个漏网形态（r3 P0 反例，逐字保留）
+    ("at leading password", "redis://user:@Pr0d2024x@redis.internal:0", "@Pr0d2024x"),
+    ("space in password", "redis://user:Super Secret@redis.internal:0", "Super Secret"),
+    ("at inside password", "redis://user:p@ssword@redis.internal:0", "p@ssword"),
+    ("nbsp in password", "redis://user:Super\xa0Secret@redis.internal:0", "Super\xa0Secret"),
+    # 口令里 '@' 的其余位置 / 多个 '@'
+    ("at trailing password", "redis://user:Pr0d2024x@@redis.internal:0", "Pr0d2024x@"),
+    ("multiple at in password", "redis://user:Pr0d2024x@c@redis.internal:0", "Pr0d2024x@c"),
+    ("multiple at in authority", "redis://a@b:Pr0d2024x@c@redis.internal:0", "Pr0d2024x@c"),
+    # 空白 / 结构字符 / percent-escape / unicode
+    ("tab in password", "redis://user:Super\tSecret@redis.internal:0", "Super\tSecret"),
+    ("colon in password", "redis://user:Su:per@redis.internal:0", "Su:per"),
+    ("percent-encoded at", "redis://user:Pr0d%402024x@redis.internal:0", "Pr0d%402024x"),
+    ("percent-encoded slash", "redis://user:Pr0d%2F2024x@redis.internal:0", "Pr0d%2F2024x"),
+    ("unicode password", "redis://user:p\u00e4ssw\u00f6rd@redis.internal:0", "p\u00e4ssw\u00f6rd"),
+    # 空用户 / 空口令 / 口令在裸 '#'
+    ("empty user", "redis://:Pr0d2024x@redis.internal:0", "Pr0d2024x"),
+    ("empty password", "redis://user:@redis.internal:0", ""),
+    ("raw hash in password", "redis://:Pr0d2024x#x@host:6379/0", "Pr0d2024x#x"),
+    # 各拒绝分支
+    ("fragment", "redis://user:Pr0d2024x@redis.internal:6379/0#frag", "Pr0d2024x"),
+    ("bad db query", "redis://user:Pr0d2024x@redis.internal:6379/0?db=x", "Pr0d2024x"),
+    ("negative db query", "redis://user:Pr0d2024x@redis.internal:6379/0?db=-1", "Pr0d2024x"),
+    ("bad db path", "redis://user:Pr0d2024x@redis.internal:6379/foo", "Pr0d2024x"),
+    (
+        "invalid query value",
+        "redis://user:Pr0d2024x@redis.internal:6379/0?socket_timeout=abc",
+        "Pr0d2024x",
+    ),
+    (
+        "timeout query param",
+        "redis://user:Pr0d2024x@redis.internal:6379/0?timeout=3",
+        "Pr0d2024x",
+    ),
+    ("port non-numeric", "redis://user:Pr0d2024x@host:notaport", "Pr0d2024x"),
+    ("port out of range", "redis://user:Pr0d2024x@host:99999", "Pr0d2024x"),
+    ("port zero", "redis://user:Pr0d2024x@host:0", "Pr0d2024x"),
+    ("missing host", "redis://user:Pr0d2024x@/3", "Pr0d2024x"),
+    ("invalid IPv6 literal", "redis://user:Pr0d2024x@[::1:6379/0", "Pr0d2024x"),
+    ("malformed authority", "redis://[::1:user:Pr0d2024x@host/0", "Pr0d2024x"),
+    ("unix without socket path", "unix://user:Pr0d2024x@", "Pr0d2024x"),
+    ("unsupported scheme", "REDIS://user:Pr0d2024x@host:6379/0", "Pr0d2024x"),
+    ("missing scheme", "user:Pr0d2024x@host:6379", "Pr0d2024x"),
+    ("wrong scheme", "http://user:Pr0d2024x@host:6379/0", "Pr0d2024x"),
+    ("non-str bytes", b"redis://user:Pr0d2024x@host:6379/0", "Pr0d2024x"),
 ]
+
+
+def _redis_py_password(url) -> object:
+    """``redis.connection.parse_url`` 真正会拿去连的口令；它解析不了时 None。
+
+    测试的**接地**来源：不断言「我以为的口令」，只断言 redis-py 自己认的口令。
+    """
+    if not isinstance(url, str):
+        return None
+    try:
+        return parse_url(url).get("password")
+    except Exception:
+        return None
+
+
+def _partial_needles(secret: str) -> set:
+    """口令的所有长度 ≥3 前缀/后缀——抓 r2 那种 ``ssword`` 式部分泄露。"""
+    return {
+        secret[i : i + length]
+        for length in range(3, len(secret) + 1)
+        for i in range(0, len(secret) - length + 1)
+    }
+
+
+def _exception_messages(traceback_text: str) -> str:
+    """traceback 里**异常消息**的部分：剥掉 ``File "..."`` 源码路径。
+
+    临时树路径（``.../worktrees/...``）可能恰好包含口令的 3 字子串；路径不是
+    泄露面，真正的泄露面是异常消息与 ``from exc`` 的嵌套 cause 文案。
+    """
+    return "\n".join(
+        line
+        for line in traceback_text.splitlines()
+        if not line.startswith('  File "') and line != "Traceback (most recent call last):"
+    )
 
 
 def _effective(client: Redis) -> dict:
@@ -272,24 +350,37 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
     """
 
     def test_no_refusal_message_contains_the_password(self):
-        for shape, url in LEAK_SHAPES:
-            with self.subTest(shape=shape):
-                with self.assertRaises(RedisUrlError) as ctx:
-                    _parse_redis_url(url)
-                exc = ctx.exception
-                rendered = {
-                    "str": str(exc),
-                    "repr": repr(exc),
-                    "traceback": "".join(
-                        traceback.format_exception(type(exc), exc, exc.__traceback__)
-                    ),
-                }
+        # 不用 subTest：变异重放脚本只认 ``FAILED tests/...`` 行，SUBFAILED-only
+        # 的死法它解析不出 killed-by（见 replay.py 的 detail 提取）。
+        for shape, url, literal in LEAK_SHAPES:
+            with self.assertRaises(RedisUrlError) as ctx:
+                _parse_redis_url(url)
+            exc = ctx.exception
+            traceback_text = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )
+            rendered = {
+                "str": str(exc),
+                "repr": repr(exc),
+                "traceback-messages": _exception_messages(traceback_text),
+            }
+            # 接地：redis-py 真正会用的口令（它自己解析不了的形态不参与）
+            secrets = {literal}
+            redis_py_password = _redis_py_password(url)
+            if isinstance(redis_py_password, str) and redis_py_password:
+                secrets.add(redis_py_password)
+            secrets.discard("")
+            for secret in secrets:
                 for kind, text in rendered.items():
-                    with self.subTest(shape=shape, kind=kind):
-                        self.assertNotIn(SECRET, text)
-                # 只掩码、不删光：诊断仍能认出是哪条 URL
-                self.assertIn(_mask_url(url), str(exc))
-                self.assertIn(_REDACTED, str(exc))
+                    self.assertNotIn(secret, text, f"{shape}/{kind}: 口令原文泄露")
+                    for needle in _partial_needles(secret):
+                        self.assertNotIn(
+                            needle, text, f"{shape}/{kind}: 口令片段 {needle!r} 泄露"
+                        )
+                self.assertNotIn(secret, traceback_text, f"{shape}: traceback 泄露口令")
+            # 只掩码、不删光：诊断仍能认出是哪条 URL
+            self.assertIn(_mask_url(url), str(exc), f"{shape}: 掩码形态丢失")
+            self.assertIn(_REDACTED, str(exc), f"{shape}: 缺少掩码")
 
     def test_mask_helper_itself(self):
         self.assertEqual(
@@ -304,6 +395,45 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
         # 没有凭据 → 原样；没有 scheme 的形态也要能掩码
         self.assertEqual(_mask_url("redis://host:6379/0"), "redis://host:6379/0")
         self.assertEqual(_mask_url("user:sup3rsecret@host:6379"), "user:***@host:6379")
+        # r3 P0：authority 里**最后**一个 '@' 才是分隔符，口令整体（含 '@'/空白）抹掉
+        self.assertEqual(
+            _mask_url("redis://user:@Pr0d2024x@redis.internal:0"),
+            "redis://user:***@redis.internal:0",
+        )
+        self.assertEqual(
+            _mask_url("redis://user:p@ssword@redis.internal:0"),
+            "redis://user:***@redis.internal:0",
+        )
+        self.assertEqual(
+            _mask_url("redis://user:Super Secret@redis.internal:0"),
+            "redis://user:***@redis.internal:0",
+        )
+        self.assertEqual(
+            _mask_url("redis://user:Super\xa0Secret@redis.internal:0"),
+            "redis://user:***@redis.internal:0",
+        )
+
+    def test_mask_helper_fails_closed(self):
+        """r3：认不出 userinfo 也绝不原样返回——r2 正是「失败即返回原文」才漏的。"""
+        # urlsplit 直接抛错的畸形 authority（redis-py 也解析不了）
+        raw = "redis://[::1:user:Pr0d2024x@host/0"
+        masked = _mask_url(raw)
+        self.assertNotIn("Pr0d2024x", masked)
+        self.assertIn("@host", masked)  # host 仍在，诊断不丢
+        # 认不出用户名的形态：userinfo 整体抹成 ***，host 保留
+        self.assertEqual(_mask_url("redis://user@host:6379"), "redis://***@host:6379")
+        self.assertNotEqual(
+            _mask_url("redis://user@host:6379"), "redis://user@host:6379"
+        )
+
+    def test_mask_helper_keeps_path_at_out_of_userinfo(self):
+        """path/query 里的 '@' 不是 userinfo 分隔符——不得误抹 host。"""
+        self.assertEqual(
+            _mask_url("redis://host:6379/0@x"), "redis://host:6379/0@x"
+        )
+        self.assertEqual(
+            _mask_url("redis://host:6379/0?ref=a@b"), "redis://host:6379/0?ref=a@b"
+        )
 
     def test_nested_cause_is_scrubbed_too(self):
         """嵌套 cause：底层异常文案里若带裸 URL/口令，也必须先洗掉再进 traceback。"""
@@ -314,6 +444,10 @@ class TestRefusalMessagesNeverLeakCredentials(unittest.TestCase):
         # 只带口令字面量（没带整条 URL）也要抹掉
         bare = factory._safe_reason(ValueError(f"bad password {SECRET}"), text)
         self.assertNotIn(SECRET, bare)
+        # r3：带 '@' 的完整口令，_passwords 也必须整体取出并洗掉（r2 正则只取到一截）
+        at_text = "redis://user:@Pr0d2024x@redis.internal:0"
+        scrubbed = factory._safe_reason(ValueError("port needs @Pr0d2024x"), at_text)
+        self.assertNotIn("@Pr0d2024x", scrubbed)
 
     def test_unknown_query_param_warning_is_masked(self):
         """未知 query 只警告不判死——警告本身也是日志，同样不许带口令。"""

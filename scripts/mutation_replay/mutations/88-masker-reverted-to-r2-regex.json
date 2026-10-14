@@ -1,0 +1,12 @@
+{
+  "name": "88-masker-reverted-to-r2-regex",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    credentials = _locate_credentials(value)\n    if credentials is not None:\n        start, stop, user, _password, host_port = credentials\n        return f\"{value[:start]}{user}:{_REDACTED}@{host_port}{value[stop:]}\"\n\n    # fail-closed：凭据形状却认不出 userinfo → 抹掉 ``@`` 之前的整段，绝不原样返回。\n    start, stop = _authority_span(value)\n    region = value[start:stop]\n    at = region.rfind(\"@\")\n    if at == -1:\n        return value  # authority 里没有 ``@``：不存在 userinfo（path 里的 ``@`` 不算）\n    return f\"{value[:start]}{_REDACTED}@{region[at + 1 :]}{value[stop:]}\"\n",
+  "new": "    import re\n\n    # r2 的正则掩码（已被 r3 结构化掩码取代）：口令字符类排除 \"/\" 与空白，\n    # 且只掩第一个 \"X:Y@\" —— 口令含 \"@\"/空格 的形态照样原样落盘。\n    userinfo_re = re.compile(r\"(?P<userinfo>[^/@\\s:]*:[^/@\\s]*)(?P<at>@)\")\n\n    def _repl(match) -> str:\n        userinfo = match.group(\"userinfo\")\n        if \":\" not in userinfo:\n            return match.group(0)\n        return f\"{userinfo.split(':', 1)[0]}:{_REDACTED}@\"\n\n    return userinfo_re.sub(_repl, value, count=1)\n",
+  "rationale": "把 r3 的结构化掩码退回 r2 的正则掩码：口令字符类排除 '/' 与空白、且只掩第一个 'X:Y@'，于是口令含 '@'/空格/nbsp 的拒绝形态（redis://user:@Pr0d2024x@host:0 等）原样落进生产日志 —— plaita#88 r3 P0 原始缺陷",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestRefusalMessagesNeverLeakCredentials::test_no_refusal_message_contains_the_password"
+  ],
+  "issue": "88"
+}
