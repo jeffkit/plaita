@@ -35,10 +35,29 @@ r4（P0）：r3 仍有三处「依赖输入形态」的漏点，本文件把它�
 * ``raise … from exc`` 的 ``__cause__`` 是 ``traceback`` **独立渲染的对象**，
   只洗消息文案不够。现在换成洗过的**同类型替身**。
 
-三个渲染面（``str`` / ``repr`` / ``traceback.format_exception``）都有断言。
+r5（P0）：r4 的架构（结构化、单遍、无 ``re``、兜底重洗、cause 替身）保留，补四处：
+
+* **R1**：三个结构档都要求凭据形状的 ``@`` 落在**同一个 ``/`` 段**内——口令里含
+  ``/`` 时（``redis://user:p/w@host``）段先被截断，三档全部落空，
+  ``_mask_url`` 走 ``if credentials is None: return value`` **原样返回**；
+* **R2**：``_passwords`` / ``_scrub`` 依赖 ``_locate_credentials``，没有 userinfo 时
+  整层重洗空转——``redis://host:6379/0?db=Pr0d:x@y``（r2 掩了、r3/r4 漏了）；
+* **R3**：``raise … from _sanitized_cause(...)`` 只置 ``__cause__``，
+  ``__context__`` 仍是**原始**异常，走 ``__context__`` 的消费者拿到明文；
+* **R4**：本文件的 needle 只用 ``redis.connection.parse_url`` 接地，而它在端口/db
+  cast 失败时产不出 password——r1 的两族因此**按构造**看不见（见
+  ``LITERAL_GROUNDED`` 的第二类「字面接地」行）。
+
+r5 追加（``#158`` 验收交回）：``_mask_url`` 必须是 **total**（任意 ``str`` 不抛，
+含 ``os.environ`` surrogateescape 的孤立代理字符）；``@`` 前没有凭据冒号时也要
+fail-closed（``:`` 被写成 ``/``/``?``/``#``）；没有 ``@`` 的凭据样 token 同样要洗。
+
+四个渲染面（``str`` / ``repr`` / ``traceback.format_exception`` / 真实
+``logger.error(..., exc_info=True)``）都有断言。
 """
 from __future__ import annotations
 
+import logging
 import traceback
 import unittest
 
@@ -201,6 +220,166 @@ RESIDUAL_REPEAT_URLS = [
     "redis://user:Pr0d2024x@host:6379/0?db=Pr0d2024x",
 ]
 
+#: r5 R4：第二类**字面接地**（literal grounding）行——r4 的表「按构造」看不见的两族。
+#:
+#: 为什么必须另起一类：``LEAK_SHAPES`` 的 needle 由
+#: ``redis.connection.parse_url`` **接地**（复核 redis-py 真正会拿去连的口令），
+#: 但 ``parse_url`` 在**端口/db cast 失败**时直接抛异常、产不出 password——r5 R1
+#: 的两族反例（口令含 ``/`` 被 ``urlsplit`` 截断在 authority、凭据只写在 query 值
+#: 里）恰好落在这个盲区。只用 ``parse_url`` 接地 ⇒ needle 集合**按构造**不含这些
+#: 口令，表再全也看不见它们（这正是 r4 漏掉两个规则级反例的原因）。
+#:
+#: 本类的 needle 是**字面量**：写 URL 的人自己知道口令是哪一段，不经过 parse_url。
+#: 每条 = ``(形态名, URL, 字面量口令, 接地方式, 备注)``——
+#:
+#: * ``"literal"``：本类。``why`` 写明这一行为什么只能字面接地；
+#: * ``"parse_url+literal"``：与 ``LEAK_SHAPES`` 同款双臂接地（对照用）。
+#:
+#: **red-then-green**：备注带 ``r4-verbatim`` 的行在 ``2f660c6``（r4）上就是红的
+#: ——``_mask_url`` 把口令原样返回（或部分返回），
+#: ``test_literal_grounded_never_returns_input_verbatim`` /
+#: ``test_literal_grounded_rows_never_leak`` 会失败；修完变绿。
+LITERAL_GROUNDED = [
+    # --- 端口 cast 失败：口令里的 '/' 先把 authority 截断，urlsplit 只把口令段
+    #     当端口值去 int()——parse_url 在这里抛，产不出 password。 ---
+    (
+        "slash-in-password port cast",
+        "redis://user:pa55word/x@host",
+        "pa55word",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "slash-in-password port cast with port/db",
+        "redis://user:pa55word/x@host:6379/0",
+        "pa55word",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "slash-in-password unicode port cast",
+        "redis://user:p\u00e4ssw\u00f6rd/h@host",
+        "p\u00e4ssw\u00f6rd",
+        "literal",
+        "r4-verbatim",
+    ),
+    # --- db= cast 失败：凭据只写在 query 值里，authority 里根本没有 userinfo ---
+    (
+        "query-value credential, db cast",
+        "redis://host:6379/0?db=Pr0d:Secret1@y",
+        "Secret1",
+        "literal",
+        "r4-verbatim（r2 掩了、r3/r4 漏了）",
+    ),
+    (
+        "query-value credential, no at-sign, db cast",
+        "redis://host:6379/0?db=Pr0d:Secret1",
+        "Secret1",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "query-value credential, no userinfo",
+        "redis://host?user:Secret1@x",
+        "Secret1",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "query-value credential, u= position",
+        "redis://host:6379/0?u=X:Secret1@x",
+        "Secret1",
+        "literal",
+        "r4-verbatim（验证者的 37 个残留全是这一族）",
+    ),
+    # --- ':' 被写成 '/'/'?'/'#'：没有任何候选凭据冒号，但 '@' 前是口令 ---
+    (
+        "colon written as slash",
+        "redis://user/Tr0ub4dor@host:6379/0",
+        "Tr0ub4dor",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "colon written as question mark",
+        "redis://user?Tr0ub4dor@host:6379/0",
+        "Tr0ub4dor",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "colon written as hash",
+        "redis://user#Tr0ub4dor@host:6379/0",
+        "Tr0ub4dor",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "colon written as hash, second at-token",
+        "redis://user#Tr0ub4dor@host:6379/0?u=X:Y@x",
+        "Tr0ub4dor",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "question mark before colon",
+        "redis://?user:Tr0ub4dor@127.0.0.1:679/0",
+        "Tr0ub4dor",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "hash before colon in authority",
+        "redis://se#r:Tr0ub4dor@127.0.0.1:679/0",
+        "Tr0ub4dor",
+        "literal",
+        "r4-verbatim",
+    ),
+    # --- 完全没有 '@'：redis-py 的 userinfo 位为空，但 'X:Y' 仍是凭据样文本 ---
+    (
+        "no at-sign, credential token in authority",
+        "redis://user:Tr0ub4dor127.0.0.1:679/0",
+        "Tr0ub4dor",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "no at-sign, credential token in query",
+        "redis://host:6379/0?u=X:Secret1",
+        "Secret1",
+        "literal",
+        "r4-verbatim",
+    ),
+    (
+        "no at-sign, credential token in path",
+        "redis://host/0/X:Secret1",
+        "Secret1",
+        "literal",
+        "r4-verbatim",
+    ),
+    # --- 两个渲染面同时接地（对照：这一族两版都能接上） ---
+    (
+        "userinfo + query credential",
+        "redis://user:Pr0d2024x@host:6379/0?u=X:Secret1@x",
+        "Secret1",
+        "parse_url+literal",
+        "r4-verbatim（第二个跨度）",
+    ),
+]
+
+#: r5 A：``_mask_url`` 链必须 **total**——``os.environ`` 用 surrogateescape 解码
+#: 非 UTF-8 字节得到孤立代理字符，``quote``/``unquote`` 的 utf-8 编码会抛
+#: ``UnicodeEncodeError``。这些串在 #158 的两个新调用点上实测把启动路径打崩。
+SURROGATE_URLS = [
+    "redis://user:p\udcffw@127.0.0.1:679/0",
+    "redis://user:p\udcffw/x@127.0.0.1:679/0",
+    "redis://user:\udcff\udcfe@host:6379/0",
+    "redis://host:6379/0?db=\udcff\udcfe",
+    "redis://host:6379/0?u=X:\udcff\udcfe@x",
+    "redis://user:Tr0ub4dor\udcff@host:6379/0",
+    "\udcff\udcfe",
+]
+
 
 def _redis_py_password(url) -> object:
     """``redis.connection.parse_url`` 真正会拿去连的口令；它解析不了时 None。
@@ -225,26 +404,91 @@ def _partial_needles(secret: str) -> set:
 
 
 def _exception_messages(traceback_text: str) -> str:
-    """traceback 里**异常消息**的部分：剥掉 ``File "..."`` 源码路径。
+    """traceback 里**异常消息**的部分：剥掉源码路径、源码摘录与 caret 行。
 
-    临时树路径（``.../worktrees/...``）可能恰好包含口令的 3 字子串；路径不是
-    泄露面，真正的泄露面是异常消息与 ``from exc`` 的嵌套 cause 文案。
+    临时树路径（``.../worktrees/...``）与函数名（``return _parse_redis_url_checked``）
+    可能恰好包含口令的 3 字子串（``Secret1`` → ``ret``）；路径/代码不是泄露面，
+    真正的泄露面是异常消息与 ``from exc`` 的嵌套 cause 文案。
     """
-    return "\n".join(
-        line
-        for line in traceback_text.splitlines()
-        if not line.startswith('  File "') and line != "Traceback (most recent call last):"
-    )
+    out = []
+    for line in traceback_text.splitlines():
+        if '  File "' in line or line == "Traceback (most recent call last):":
+            continue
+        if line[:1] in (" ", "\t"):
+            continue  # 源码摘录 / caret 行
+        out.append(line)
+    return "\n".join(out)
+
+
+def _logged_error_text(exc: BaseException) -> str:
+    """真实 ``logger.error(..., exc_info=True)`` 的渲染（``event_filter.py:488`` 同款）。
+
+    ``logging.Formatter`` 会把 ``record.exc_info``（含 ``__cause__`` 链）一并渲染——
+    这正是生产日志里落盘的内容，也是第四个渲染面。``File "..."`` 行照旧剥掉。
+    """
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):  # pragma: no cover - 由格式化驱动
+            records.append(self.format(record))
+
+    log = logging.getLogger("plaita.server.factory")
+    handler = _Capture()
+    old_level = log.level
+    log.addHandler(handler)
+    log.setLevel(logging.ERROR)
+    try:
+        log.error("事件过滤器启动失败: %s", exc, exc_info=True)
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(old_level)
+    return _exception_messages("\n".join(records))
 
 
 def _surfaces(exc: BaseException) -> dict:
-    """异常在生产里的三个渲染面：``str`` / ``repr`` / ``traceback.format_exception``。
+    """异常在生产里的**四个**渲染面：``str`` / ``repr`` /
+    ``traceback.format_exception`` / 真实 ``logger.error(..., exc_info=True)``。
 
-    后者的 ``File "..."`` 源码路径行被剥掉（见 ``_exception_messages``），
+    前两者的 ``File "..."`` 源码路径行被剥掉（见 ``_exception_messages``），
     ``from exc`` 的嵌套 cause 文案保留——它才是 r4 Finding 2 的泄露面。
     """
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    return {"str": str(exc), "repr": repr(exc), "traceback-messages": _exception_messages(tb)}
+    return {
+        "str": str(exc),
+        "repr": repr(exc),
+        "traceback-messages": _exception_messages(tb),
+        "logger-exc_info": _logged_error_text(exc),
+    }
+
+
+def _capture_log_lines(fn) -> list:
+    """跑 ``fn``，返回 ``plaita.server.factory`` 的全部格式化日志行（含 traceback）。"""
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):  # pragma: no cover - 由格式化驱动
+            records.append(self.format(record))
+
+    log = logging.getLogger("plaita.server.factory")
+    handler = _Capture()
+    old_level = log.level
+    log.addHandler(handler)
+    log.setLevel(logging.DEBUG)
+    try:
+        fn()
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(old_level)
+    return records
+
+
+def _refusal_text(url) -> str:
+    """``_parse_redis_url(url)`` 的拒绝文案；解析成功时返回 ``""``。"""
+    try:
+        _parse_redis_url(url)
+    except RedisUrlError as exc:
+        return str(exc)
+    return ""
 
 
 def _effective(client: Redis) -> dict:
@@ -650,6 +894,308 @@ class TestMaskerCannotLeakByConstruction(unittest.TestCase):
             _mask_url(url), "redis://user:***@host:6379/0?socket_timeout=***"
         )
         self.assertNotIn(secret, _mask_url(url))
+
+
+class TestSlashInPasswordAndResidualSpans(unittest.TestCase):
+    """plaita#88 r5 R1/R2：口令含 ``/`` 与「凭据只在 query 值里」两族。
+
+    r4 的三档都要求凭据形状的 ``@`` 落在同一个 ``/`` 段内；口令他含 ``/`` 时先被
+    截断 ⇒ ``_mask_url`` 的 ``if credentials is None: return value`` 原样返回。
+    r2 的 ``_passwords`` 又依赖 userinfo，没有 userinfo 时整层重洗空转。
+    """
+
+    def test_r1_slash_in_password_rule_table(self):
+        """R1 反例族的**精确**掩码（r4 上全部 verbatim）。"""
+        expected = {
+            "redis://user:p/w@host": "redis://user:***@host",
+            "redis://user:pa55word/x@host": "redis://user:***@host",
+            "redis://user:pw/w@host": "redis://user:***@host",
+            "redis://user:p/w@host:6379/0": "redis://user:***@host:6379/0",
+            "redis://user:p/w@host/0": "redis://user:***@host/0",
+            "redis://user:p\u00e4ssw\u00f6rd/h@host": "redis://user:***@host",
+        }
+        for url, want in expected.items():
+            self.assertEqual(_mask_url(url), want, url)
+        # R1 与 R5-A 的交界：70k 的口令里含 '/' 也必须一趟掩完（O(n)）
+        big = "x" * 70000
+        self.assertEqual(_mask_url(f"redis://user:{big}/w@host"), "redis://user:***@host")
+        # keep 形态逐字不动（它们的 '@' 是 path/query、没有凭据冒号）
+        for keep in (
+            "redis://host:6379/0@x",
+            "redis://host/0?ref=a@b",
+            "redis://host:6379/0?db=1@2",
+            "redis://host:6379/0",
+            "redis://host/0?x=1:2@y",
+        ):
+            self.assertEqual(_mask_url(keep), keep)
+
+    def test_r2_residual_is_independent_of_userinfo(self):
+        """R2：没有 userinfo 也要洗——精确掩码与 r2 的形态一致。"""
+        expected = {
+            # r2 掩了、r3/r4 原样返回（验证者的回归集）
+            "redis://host:6379/0?db=Pr0d:x@y": "redis://host:6379/0?db=Pr0d:***@y",
+            "redis://host?user:pw@x": "redis://host?user:***@x",
+            "redis://host:6379/0?u=X:Y@x": "redis://host:6379/0?u=X:***@x",
+            "redis://host:6379/0?u=X:Y@x&v=A:B@y": "redis://host:6379/0?u=X:***@y",
+        }
+        for url, want in expected.items():
+            self.assertEqual(_mask_url(url), want, url)
+        # 真正无凭据的 URL 一个字都不动（不是无差别全局替换）
+        for clean in (
+            "redis://host:6379/0",
+            "redis://host:6379/0?socket_timeout=5",
+            "redis://host:6379/0?db=2",
+            "redis://[::1]:6379/0",
+            "unix:///tmp/plaita-redis.sock?db=1",
+        ):
+            self.assertEqual(_mask_url(clean), clean)
+
+    def test_r2_message_fields_and_cause_are_masked_without_userinfo(self):
+        """R2 的四个渲染面：没有 userinfo 时拒绝消息/cause 里的口令也要洗。
+
+        r4 的 ``_passwords`` 依赖 ``_locate_credentials``，这里返回 ``()`` ⇒
+        ``_scrub(db_query, text)`` 原样回显 ``'Pr0d:Pr0d2024x'``。
+        """
+        # user token 与口令不共享 ≥3 子串：掩码保留 ``Acct`` 是**设计**（r2 同形），
+        # 否则 ``Pr0d`` 这种「用户名恰好是口令前缀」会给出假红。
+        url = "redis://host:6379/0?db=Acct:Pr0d2024x@y"
+        masked = _mask_url(url)
+        self.assertEqual(masked, "redis://host:6379/0?db=Acct:***@y")
+        with self.assertRaises(RedisUrlError) as ctx:
+            _parse_redis_url(url)
+        exc = ctx.exception
+        self.assertIn(masked, str(exc))
+        for kind, text in _surfaces(exc).items():
+            self.assertNotIn("Pr0d2024x", text, f"{kind}: 口令原文泄露")
+            for needle in _partial_needles("Pr0d2024x"):
+                self.assertNotIn(needle, text, f"{kind}: 口令片段 {needle!r} 泄露")
+        # cause 也是独立渲染面，同样洗过
+        self.assertIsNotNone(exc.__cause__)
+        self.assertNotIn("Pr0d2024x", str(exc.__cause__))
+
+    def test_at_without_candidate_colon_fails_closed(self):
+        """r5 B：``:`` 被写成 ``/``/``?``/``#`` 时也要掩，keep 逐字不动。"""
+        expected = {
+            "redis://user/Tr0ub4dor@host:6379/0": "redis://user/***@host:6379/0",
+            "redis://user?Tr0ub4dor@host:6379/0": "redis://user?***@host:6379/0",
+            "redis://user#Tr0ub4dor@host:6379/0": "redis://user#***@host:6379/0",
+            "redis://user#Tr0ub4dor@host:6379/0?u=X:Y@x": "redis://user#***@host:6379/0?u=X:***@x",
+        }
+        for url, want in expected.items():
+            self.assertEqual(_mask_url(url), want, url)
+        # keep：空 token / 纯数字 db / '='/':' 之后（r4 已验证）
+        for keep in (
+            "redis://host:6379/0@x",
+            "redis://host/0?ref=a@b",
+            "redis://host:6379/0?db=1@2",
+            "redis://host/0?x=1:2@y",
+            "redis://host/@x",
+        ):
+            self.assertEqual(_mask_url(keep), keep)
+
+    def test_no_at_sign_credential_token_is_masked(self):
+        """r5 C：没有 ``@`` 的凭据样 token（``X:Y``）也要洗，host/port/db 保留。"""
+        expected = {
+            "redis://user:Tr0ub4dor127.0.0.1:679/0": "redis://user:***:679/0",
+            "redis://host:6379/0?u=X:Secret1": "redis://host:6379/0?u=X:***",
+            "redis://host/0/X:Secret1": "redis://host/0/X:***",
+        }
+        for url, want in expected.items():
+            self.assertEqual(_mask_url(url), want, url)
+        # 端口/数字 token 不是凭据（keep）
+        for clean in (
+            "redis://host:6379/0",
+            "redis://host:6379/0?x=1:2",
+            "redis://[::1]:6379/0",
+            "redis://[2001:db8::1]:6380/2",
+        ):
+            self.assertEqual(_mask_url(clean), clean)
+
+
+class TestLiteralGroundedRows(unittest.TestCase):
+    """r5 R4：第二类「字面接地」行 + 它必须是**载荷**（不能只靠 parse_url 接地）。"""
+
+    def test_literal_grounded_rows_never_leak(self):
+        """每条字面接地行：掩码 + 四个渲染面 + 日志，都不出现口令的任何 ≥3 片段。
+
+        有的行是**具名拒绝**（端口/db cast 失败、fragment），有的是**警告后忽略**
+        （未知 query 名）——两条路径都是日志面，都要查。
+        """
+        for shape, url, literal, _grounding, _why in LITERAL_GROUNDED:
+            masked = _mask_url(url)
+            self.assertNotIn(literal, masked, f"{shape}: _mask_url 泄露")
+            for needle in _partial_needles(literal):
+                self.assertNotIn(needle, masked, f"{shape}: {needle!r} 泄露")
+
+            box: dict = {}
+
+            def _run() -> None:
+                try:
+                    _parse_redis_url(url)
+                except Exception as exc:  # noqa: BLE001 - 具名拒绝或底层异常
+                    box["exc"] = exc
+
+            log_lines = _capture_log_lines(_run)
+            exc = box.get("exc")
+            if isinstance(exc, RedisUrlError):
+                self.assertIn(masked, str(exc), f"{shape}: 掩码形态丢失")
+                for kind, text in _surfaces(exc).items():
+                    self.assertNotIn(literal, text, f"{shape}/{kind}: 口令原文泄露")
+                    for needle in _partial_needles(literal):
+                        self.assertNotIn(needle, text, f"{shape}/{kind}/{needle}")
+                if exc.__cause__ is not None:
+                    for kind, text in (
+                        ("cause-str", str(exc.__cause__)),
+                        ("cause-repr", repr(exc.__cause__)),
+                    ):
+                        for needle in _partial_needles(literal):
+                            self.assertNotIn(needle, text, f"{shape}/{kind}/{needle}")
+            else:
+                # 没有具名拒绝（未知 query 参数）⇒ 必须至少有一条掩码日志
+                self.assertTrue(log_lines, f"{shape}: 既没拒绝也没日志")
+            for line in log_lines:
+                for needle in _partial_needles(literal):
+                    self.assertNotIn(needle, line, f"{shape}/log/{needle}")
+
+    def test_literal_grounded_never_returns_input_verbatim(self):
+        """red-then-green：这些行在 r4（``2f660c6``）上 ``_mask_url`` 原样返回。"""
+        for shape, url, literal, _grounding, why in LITERAL_GROUNDED:
+            masked = _mask_url(url)
+            self.assertNotEqual(masked, url, f"{shape}: 原样返回（r4 的红行）")
+            self.assertNotIn(literal, masked, f"{shape}: {why}")
+
+    def test_parse_url_grounding_is_blind_to_these_rows(self):
+        """为什么必须另起「字面接地」：这些行 parse_url 根本产不出 password。
+
+        如果本断言失败（parse_url 开始能解析这些形态），说明 ``LITERAL_GROUNDED``
+        可以并回 ``LEAK_SHAPES``——但**在 r4 上**它们必须是盲区，否则 r4 的表就
+        不会漏掉 R1/R2。
+        """
+        blind = [
+            row
+            for row in LITERAL_GROUNDED
+            if not isinstance(_redis_py_password(row[1]), str)
+        ]
+        self.assertGreaterEqual(len(blind), 12, "字面接地的载荷行太少")
+        # 其中至少一行 r4 会 verbatim 返回（红行）
+        self.assertTrue(any(why == "r4-verbatim" for *_rest, why in LITERAL_GROUNDED))
+
+    def test_grounding_tag_is_declared(self):
+        """每一行都必须显式声明接地方式（``literal`` / ``parse_url+literal``）。"""
+        tags = {row[3] for row in LITERAL_GROUNDED}
+        self.assertEqual(tags, {"literal", "parse_url+literal"})
+        for shape, url, literal, grounding, why in LITERAL_GROUNDED:
+            self.assertTrue(grounding in {"literal", "parse_url+literal"}, shape)
+            self.assertTrue(literal, f"{shape}: 字面 needle 不能为空")
+            self.assertTrue(url and why, shape)
+
+
+class TestContextAndTotality(unittest.TestCase):
+    """r5 R3（``__context__``）+ A（``_mask_url`` 链 total）+ 位置反例。"""
+
+    #: 四个 ``raise … from _sanitized_cause(...)`` 站点各一个触发串。
+    #: ``__context__`` 挂着**原始**异常（``str()`` 带明文），``raise … from`` 盖不住。
+    SANITIZED_CAUSE_SITES = [
+        ("urlsplit ValueError", "redis://user:Pr0d2024x@[::1:6379/0", "IPv6"),
+        ("port ValueError", "redis://user:Pr0d2024x@host:notaport", "Port"),
+        (
+            "db query ValueError",
+            "redis://user:Pr0d2024x@host:6379/0?db=x",
+            "db",
+        ),
+        (
+            "query value ValueError",
+            "redis://user:Pr0d2024x@host:6379/0?socket_timeout=abc",
+            "socket_timeout",
+        ),
+    ]
+
+    def test_context_never_holds_the_original_exception(self):
+        """R3：每个 ``from _sanitized_cause`` 站点，``__context__`` 都不含明文。"""
+        for shape, url, wording in self.SANITIZED_CAUSE_SITES:
+            with self.assertRaises(RedisUrlError) as ctx:
+                _parse_redis_url(url)
+            exc = ctx.exception
+            self.assertIsNotNone(exc.__cause__, f"{shape}: 洗过的 cause 替身丢了")
+            # 核心断言：隐式 context 被摘掉，原始异常（带明文）不再挂在链上
+            self.assertIsNone(exc.__context__, f"{shape}: __context__ 仍挂着原始异常")
+            self.assertNotIn("Pr0d2024x", str(exc.__cause__), shape)
+            # 消息仍可诊断（原因文案保留）
+            self.assertIn(wording.lower(), (str(exc) + str(exc.__cause__)).lower(), shape)
+            for kind, text in _surfaces(exc).items():
+                for needle in _partial_needles("Pr0d2024x"):
+                    self.assertNotIn(needle, text, f"{shape}/{kind}/{needle}")
+            # 任何一个 ``__context__`` 后代（如果存在）也不能带明文
+            node = exc.__context__
+            while node is not None:
+                self.assertNotIn("Pr0d2024x", str(node), shape)
+                node = node.__context__
+
+    def test_every_source_sanitized_cause_site_is_covered(self):
+        """防漂移：源码里 ``from _sanitized_cause(`` 的站点数 == 本测试的触发数。"""
+        import pathlib
+        import re
+
+        source = pathlib.Path(factory.__file__).read_text(encoding="utf-8")
+        self.assertEqual(
+            len(re.findall(r"from _sanitized_cause\(", source)),
+            len(self.SANITIZED_CAUSE_SITES),
+        )
+
+    def test_masker_chain_is_total_on_surrogateescape_strings(self):
+        """r5 A：任意 ``str``（含 surrogateescape 孤立代理）都不得抛。"""
+        import random
+
+        rnd = random.Random(88)
+        chain = {
+            "_mask_url": factory._mask_url,
+            "_passwords": factory._passwords,
+            "_scrub": lambda u: factory._scrub(u, u),
+            "_safe_reason": lambda u: factory._safe_reason(ValueError(f"bad {u}"), u),
+            "_sanitized_cause": lambda u: factory._sanitized_cause(
+                ValueError(f"bad {u}"), u
+            ),
+        }
+        shapes = [
+            "redis://user:{b}@127.0.0.1:679/0",
+            "redis://user:{b}/x@127.0.0.1:679/0",
+            "redis://host:6379/0?db={b}",
+            "redis://host:6379/0?u=X:{b}@x",
+            "redis://user:Tr0ub4dor{b}@host:6379/0",
+            "{b}",
+        ]
+        for url in SURROGATE_URLS:
+            for name, fn in chain.items():
+                try:
+                    fn(url)
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"{name}({url!r}) 抛了 {type(exc).__name__}: {exc}")
+        for _ in range(400):
+            blob = bytes(rnd.randrange(256) for _ in range(rnd.randrange(1, 6))).decode(
+                "utf-8", "surrogateescape"
+            )
+            url = rnd.choice(shapes).replace("{b}", blob)
+            for name, fn in chain.items():
+                try:
+                    fn(url)
+                except Exception as exc:  # noqa: BLE001
+                    self.fail(f"{name}({url!r}) 抛了 {type(exc).__name__}: {exc}")
+            masked = factory._mask_url(url)
+            if "Tr0ub4dor" in url:
+                self.assertNotIn("Tr0ub4dor", masked, url)
+
+    def test_surrogateescape_does_not_leak_the_password(self):
+        """A 的「不泄」半边：代理字符口令的 ≥3 可打印片段不得出现在四个渲染面。"""
+        literal = "Tr0ub4dor"
+        for url in (
+            f"redis://user:{literal}\udcff@host:6379/0",
+            f"redis://user:{literal}\udcff/x@host:6379/0",
+            f"redis://host:6379/0?u=X:{literal}\udcff@y",
+        ):
+            masked = _mask_url(url)
+            self.assertNotIn(literal, masked, url)
+            for needle in _partial_needles(literal):
+                self.assertNotIn(needle, masked, f"{url}: {needle!r}")
 
 
 class TestQueryOptionsPassThrough(unittest.TestCase):

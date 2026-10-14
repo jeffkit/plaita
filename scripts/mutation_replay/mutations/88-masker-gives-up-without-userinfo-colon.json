@@ -1,0 +1,13 @@
+{
+  "name": "88-masker-gives-up-without-userinfo-colon",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "            if at == -1:\n                if at_auth == -1:\n                    # (4) 全局兜底（r5 R1/R2）：authority 里根本没有 ``@``，但凭据\n                    #     形状的跨度可以在任何位置（口令含 ``/``、凭据写在 query\n                    #     值里）——认不出 userinfo ≠ 没有凭据，绝不原样返回。\n                    span = _global_credential_span(text)\n                    if span is not None:\n                        start, colon_at, at = span\n                        return start, at, text[start:colon_at], text[colon_at + 1 : at]\n                    # (5) 连凭据冒号都没有（``:`` 被写成 ``/``/``?``/``#``）：\n                    #     只要 ``@`` 前的 token 不是已验证的 keep，就 fail-closed。\n                    return _fail_closed_at(text, anchor)\n                # authority 里的 ``@`` 认不出 ``:`` → fail-closed 抹整段\n                # （``redis://user@host:6379`` → ``redis://***@host:6379``）。\n                at, origin = at_auth, scheme_end\n",
+  "new": "            if at == -1:\n                if at_auth == -1:\n                    return None\n",
+  "rationale": "退回 r4：三档都认不出 userinfo 时直接 return None（等价于旧的 ``_mask_url`` 早退）。口令含 '/' 被 urlsplit 截断的 redis://user:pa55word/x@host、以及凭据只写在 query 值里的 redis://host:6379/0?db=Pr0d:x@y 因此原样落盘 —— plaita#88 r5 R1/R2",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestSlashInPasswordAndResidualSpans::test_r1_slash_in_password_rule_table",
+    "tests/unit/test_redis_url_parse.py::TestSlashInPasswordAndResidualSpans::test_r2_residual_is_independent_of_userinfo"
+  ],
+  "issue": "88"
+}

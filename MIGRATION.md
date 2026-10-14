@@ -121,6 +121,39 @@ redis-py 认识的连接参数现在会**转换后透传**给存储客户端，�
   是 `traceback` / `logger.error(..., exc_info=True)` **独立渲染的对象**，只把文案洗进
   `RedisUrlError` 的消息并不够。
 
+r5 补的四条（`#88` 独立验证 FAIL 的规则级反例 + `#158` 交回的反例）：
+
+- **全局层（R1）**：上面三个结构档都要求凭据形状的 `@` 落在**同一个 `/` 段**内——
+  口令里含 `/` 时（`redis://user:p/w@host`）`/` 先把段截断，三档全部落空，
+  `_mask_url` 走早退**原样返回**。现在补一档「**非端口**冒号 + 它之后**最后一个**
+  `@`」的全局跨度：`redis://user:p/w@host` → `redis://user:***@host`、
+  `redis://user:p/w@host:6379/0` → `redis://user:***@host:6379/0`。
+- **兜底层不再依赖 userinfo（R2）**：`_passwords` / `_scrub` 此前依赖
+  `_locate_credentials`，没有 userinfo 时整层空转——`redis://host:6379/0?db=Pr0d:x@y`
+  在 r2 掩住了、r3/r4 **原样返回**（回归）。现在 query 值 / path 里任何凭据形状跨度
+  都洗：`?db=Pr0d:***@y`。
+  **更正 r4 的说法**：r4 称「回归集 994 → 0、残留全部是口令自身含 `/`/`?`/`#` 的
+  畸形 URL」。独立验证者用另一套生成器给出回归集 **1135 / 残留 37**（全是
+  `redis://host:6379/0?u=X:Y@x` 这类 **query 值位置**），另有 437 个 `?u=…` 位置、
+  193 个 username 位置的泄露，其口令**不含** `/`/`?`/`#` 任何一个。两个数字的差异
+  来自生成器的形态网格与接地方式不同（本单复算用 `parse_url` 接地 + 字面接地两套，
+  见 `tests/unit/test_redis_url_parse.py::LITERAL_GROUNDED`），不是「收敛」。
+- **没有 `@` 也要洗（C）**：`redis://user:sup3rsecret127.0.0.1:679/0`（`@` 写漏/被抹）
+  在 redis-py 里 userinfo 位为空，但 `X:Y` 仍是凭据样文本——现在渲染成
+  `redis://user:***:679/0`（host/port/db 保留）。
+- **`@` 前没有凭据冒号时 fail-closed（B）**：`:` 被写成 `/`/`?`/`#` 的
+  `redis://user/sup3rsecret@host` 不再原样返回（→ `redis://user/***@host`）。
+  已验证的 keep 逐字不动：`redis://host:6379/0@x`、`redis://host/0?ref=a@b`、
+  `redis://host:6379/0?db=1@2`、`redis://host/0?x=1:2@y`。
+- **`_mask_url` 是 total**：任意 `str` 都不抛——`os.environ` 的 surrogateescape 会把
+  非 UTF-8 字节解码成**孤立代理字符**，`quote()` 的 utf-8 编码随即抛
+  `UnicodeEncodeError`（`#158` 的两个新调用点因此启动期硬崩，而同输入 redis-py 的
+  `from_url` 本身是接受的）。现在这类形态按 WTF-8 字节渲染（只多掩不少掩）。
+- **`__context__` 也摘干净（R3）**：`raise … from _sanitized_cause(...)` 只置
+  `__cause__`；`__context__` 仍是那个 `str()` 带明文口令的**原始**异常，任何走
+  `__context__` 的消费者都能读到。解析器现在在异常离开前把 `__context__` 置 `None`
+  （`__cause__` 替身链与消息原样保留）。
+
 **迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态；
 仅写用户名不写口令的 URL 也会显示成 `***@host`。
 
