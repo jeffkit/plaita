@@ -6,7 +6,8 @@
   "new": "            kwargs[\"unix_socket_path\"] = None\n",
   "rationale": "unix_socket_path 不传给客户端 ⇒ 存储改用 TCP 默认端点",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestFactoryCallerBehaviour::test_storage_and_queue_end_up_on_same_endpoint"
+    "tests/unit/test_redis_url_parse.py::TestFactoryCallerBehaviour::test_storage_and_queue_end_up_on_same_endpoint",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_unix_socket_path_reaches_client_kwargs"
   ],
   "issue": "88"
 }

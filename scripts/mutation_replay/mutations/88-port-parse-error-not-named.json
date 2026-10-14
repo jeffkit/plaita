@@ -6,7 +6,8 @@
   "new": "    host = unquote(parts.hostname) if parts.hostname else None\n    port = parts.port\n",
   "rationale": "非法端口抛裸 ValueError（非具名 RedisUrlError），调用方分不清是配置错还是别处错",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_non_integer_port_is_refused"
   ],
   "issue": "88"
 }

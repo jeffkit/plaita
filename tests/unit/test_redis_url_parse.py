@@ -2652,6 +2652,69 @@ class TestQueryOptionsPassThrough(unittest.TestCase):
         self.assertEqual(ours, set(URL_QUERY_ARGUMENT_PARSERS))
 
 
+class TestPlainKillersForDeclaredMutants(unittest.TestCase):
+    """#88 的 11 条变异此前**只由 ``subTest`` 的 ``SUBFAILED(`` 行变红**——官方
+    replayer 的 ``killed-by`` 因此为空，换个口径就是「存活」。r8 把每条**提为不经
+    ``subTest`` 的普通断言**，击杀证据因此是普通 ``FAILED <nodeid>``：
+
+    ``88-absent-url-turned-into-hard-error`` / ``88-client-kwargs-drops-unix-path`` /
+    ``88-client-kwargs-drops-username`` / ``88-fragment-accepted`` /
+    ``88-missing-host-falls-back-to-localhost`` / ``88-negative-db-allowed`` /
+    ``88-port-parse-error-not-named`` / ``88-port-zero-allowed`` /
+    ``88-scheme-refusal-removed-silent-localhost`` / ``88-unknown-query-params-ignored`` /
+    ``88-uppercase-scheme-accepted``（一一对应，见各自的 ``expect_fail``）。
+    """
+
+    def test_absent_url_uses_documented_default(self):
+        self.assertEqual(
+            _parse_redis_url(None),
+            RedisTarget("localhost", 6379, 0, None, None, "redis"),
+        )
+
+    def test_unix_socket_path_reaches_client_kwargs(self):
+        target = _parse_redis_url("unix:///tmp/plaita-redis.sock?db=1")
+        self.assertEqual(
+            target.client_kwargs().get("unix_socket_path"), "/tmp/plaita-redis.sock"
+        )
+
+    def test_username_reaches_client_kwargs(self):
+        target = _parse_redis_url("redis://alice:sup3rsecret@host:6379/0")
+        self.assertEqual(target.client_kwargs().get("username"), "alice")
+
+    def test_fragment_is_named_refusal(self):
+        with self.assertRaises(RedisUrlError) as ctx:
+            _parse_redis_url("redis://host:6379/0#frag")
+        self.assertIn("fragment", str(ctx.exception))
+
+    def test_missing_host_is_refused_not_localhost(self):
+        with self.assertRaises(RedisUrlError):
+            _parse_redis_url("redis:///3")
+
+    def test_negative_db_query_is_refused(self):
+        with self.assertRaises(RedisUrlError):
+            _parse_redis_url("redis://host:6379/0?db=-1")
+
+    def test_non_integer_port_is_refused(self):
+        with self.assertRaises(RedisUrlError):
+            _parse_redis_url("redis://host:notaport")
+
+    def test_port_zero_is_refused(self):
+        with self.assertRaises(RedisUrlError):
+            _parse_redis_url("redis://host:0")
+
+    def test_unsupported_scheme_is_refused(self):
+        with self.assertRaises(RedisUrlError):
+            _parse_redis_url("http://host:6379/0")
+
+    def test_known_query_param_reaches_client_kwargs(self):
+        target = _parse_redis_url("redis://host:6379/0?socket_timeout=5")
+        self.assertEqual(target.client_kwargs().get("socket_timeout"), 5.0)
+
+    def test_uppercase_scheme_is_refused(self):
+        with self.assertRaises(RedisUrlError):
+            _parse_redis_url("REDIS://host:6379/0")
+
+
 class TestFactoryCallerBehaviour(unittest.TestCase):
     """入口行为：解析器是 execution/flow 存储连接参数的唯一来源。"""
 

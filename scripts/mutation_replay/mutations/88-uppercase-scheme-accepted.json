@@ -6,7 +6,8 @@
   "new": "    if scheme_token.lower() not in _REDIS_SCHEMES:\n",
   "rationale": "REDIS:// 被放过：存储能建，队列 Redis.from_url 仍拒绝 ⇒ 同一 URL 两种结局",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_uppercase_scheme_is_refused"
   ],
   "issue": "88"
 }

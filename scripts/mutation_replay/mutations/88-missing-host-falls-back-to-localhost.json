@@ -6,7 +6,8 @@
   "new": "    if not host:\n        host = \"localhost\"\n",
   "rationale": "redis:// 空目标静默回落 localhost —— 原缺陷的另一条路径",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_missing_host_is_refused_not_localhost"
   ],
   "issue": "88"
 }

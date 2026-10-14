@@ -6,7 +6,8 @@
   "new": "",
   "rationale": "端口 0（不可用端点）被放过",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_port_zero_is_refused"
   ],
   "issue": "88"
 }

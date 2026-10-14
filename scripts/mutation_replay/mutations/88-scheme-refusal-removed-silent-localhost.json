@@ -6,7 +6,8 @@
   "new": "    scheme_token = text.split(\"://\", 1)[0] if \"://\" in text else \"\"\n    if scheme_token not in _REDIS_SCHEMES:\n        # 原缺陷：不认识的形态直接给默认端点，连日志都没有\n        return RedisTarget(\"localhost\", 6379, 0, None, None, \"redis\")\n",
   "rationale": "非白名单/缺 scheme/大写 scheme 静默回落 localhost —— #88 的原始行为",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_unsupported_scheme_is_refused"
   ],
   "issue": "88"
 }

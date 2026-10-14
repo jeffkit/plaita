@@ -6,7 +6,8 @@
   "new": "    if not text:\n        raise RedisUrlError(\"redis_url 未配置\")\n",
   "rationale": "把「没配 Redis」当硬错误 —— 会打断未配置 redis 的既有部署（#99/#95 边界）",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestAbsentUsesDocumentedDefault::test_none_empty_and_whitespace"
+    "tests/unit/test_redis_url_parse.py::TestAbsentUsesDocumentedDefault::test_none_empty_and_whitespace",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_absent_url_uses_documented_default"
   ],
   "issue": "88"
 }

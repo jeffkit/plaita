@@ -6,7 +6,8 @@
   "new": "",
   "rationale": "负 db 被放过（?db=-1 落到 SELECT -1 的运行时错误）",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error"
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_negative_db_query_is_refused"
   ],
   "issue": "88"
 }

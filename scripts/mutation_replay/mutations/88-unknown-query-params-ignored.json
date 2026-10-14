@@ -6,7 +6,8 @@
   "new": "        unknown.append(key)\n",
   "rationale": "r2 契约：redis-py 认的 query 参数必须透传进客户端 kwargs。该变异把已识别的参数当「未知」丢弃 ⇒ 存储侧 socket_timeout/health_check_interval 不生效、队列侧生效，同一个 URL 又变成两套连接参数",
   "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestQueryOptionsPassThrough::test_supported_query_params_reach_client_kwargs"
+    "tests/unit/test_redis_url_parse.py::TestQueryOptionsPassThrough::test_supported_query_params_reach_client_kwargs",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_known_query_param_reaches_client_kwargs"
   ],
   "issue": "88"
 }
