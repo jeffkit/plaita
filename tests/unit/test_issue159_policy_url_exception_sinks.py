@@ -1604,9 +1604,19 @@ _TEST_REF_RE = re.compile(r"(Test[A-Za-z0-9_]+)::(test_[A-Za-z0-9_]+)")
 
 
 def _http_module_docstring_refs():
-    """``plaita/node/http.py`` 全文（含 docstring）里出现的 ``TestX::test_y`` 引用。"""
-    source = (PLAITA_DIR / "node" / "http.py").read_text(encoding="utf-8")
-    return sorted(set(_TEST_REF_RE.findall(source)))
+    """``plaita/node/http.py`` 与 ``plaita/server/url_redaction.py`` 全文（含 docstring）里的 ``TestX::test_y`` 引用。
+
+    plaita#160/#161 集成：清洗器（及其 docstring）已从 node/http.py 迁至
+    url_redaction.py —— 引用可解析的检查面随迁移扩到两个模块。
+    """
+    sources = [
+        (PLAITA_DIR / "node" / "http.py").read_text(encoding="utf-8"),
+        (PLAITA_DIR / "server" / "url_redaction.py").read_text(encoding="utf-8"),
+    ]
+    refs = set()
+    for source in sources:
+        refs.update(_TEST_REF_RE.findall(source))
+    return sorted(refs)
 
 
 class TestDocstringReferencesResolve:

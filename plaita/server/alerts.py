@@ -21,7 +21,12 @@ from typing import Any, Callable, Dict, Optional
 # plaita#159：webhook 的**凭据在 path/query 里**（Slack/飞书/钉钉/企微），
 # ``factory._mask_url`` 只抹 userinfo 口令、保留 path——对 webhook 不够。
 # ``self.url`` 本体仍持原文（要 POST），只有渲染进日志的那一份走掩码。
-from .url_redaction import _mask_webhook_url_for_log
+# plaita#161：``self._post`` 抛出的第三方异常（requests/aiohttp/urllib）文本里
+# 带着 ``url: …``——同样在**消息构造处**过共享清洗器（``_scrub_url_text``，
+# url_redaction 是唯一实现）。本行原本就没有 ``exc_info=True``（只记异常文本，
+# 不记栈），故仍只渲染一行：多打一整条 traceback 属于诊断面的**行为变更**，
+# 不在本单范围。
+from .url_redaction import _mask_webhook_url_for_log, _scrub_url_text
 
 logger = logging.getLogger("plaita.server.alerts")
 
@@ -144,7 +149,7 @@ class WebhookAlerter:
                     logger.warning(
                         "告警 webhook 发送失败 url=%s: %s",
                         _mask_webhook_url_for_log(self.url),
-                        exc,
+                        _scrub_url_text(exc),
                     )
             finally:
                 with self._cond:

@@ -2,10 +2,10 @@
   "name": "159-absolute-url-regex-drops-brackets",
   "concern": "#159-r4-P0",
   "issue": "159",
-  "file": "plaita/node/http.py",
+  "file": "plaita/server/url_redaction.py",
   "old": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^ \\t\\r\\n\\f\\v]+\")",
   "new": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^ \\t\\r\\n\\f\\v\\[\\]]+\")",
-  "rationale": "退回「方括号不在字符类里」的形态：`[` 处匹配落空 ⇒ 方括号 authority 的裸 URL 整段穿过清洗器。r4 把该变异 re-base 到新的 ASCII-空白边界正则上（旧的 r3 正则已不存在）；杀手改成 r4 的**精确字符串**行——r4 新加的「凭据键=值」规则会把 `access_token=` 的值单独掩掉，纯 needle 判据不再足以杀它。",
+  "rationale": "退回「方括号不在字符类里」的形态：`[` 处匹配落空 ⇒ 方括号 authority 的裸 URL 整段穿过清洗器。r4 把该变异 re-base 到新的 ASCII-空白边界正则上（旧的 r3 正则已不存在）；杀手改成 r4 的**精确字符串**行——r4 新加的「凭据键=值」规则会把 `access_token=` 的值单独掩掉，纯 needle 判据不再足以杀它。（#161 把该实现整体提取到 plaita/server/url_redaction.py 成为共享渲染器；锚点 file 随迁，old/new 用 r4 定稿的 ASCII-空白边界正则，语义不变。）",
   "expect_fail": [
     "tests/unit/test_issue159_policy_url_exception_sinks.py::TestSeparatorMatrixAllSixSurfaces::test_renderer_level_exact_string[bracketed-0020]",
     "tests/unit/test_issue159_policy_url_exception_sinks.py::TestSeparatorMatrixAllSixSurfaces::test_renderer_level_exact_string[bracketed-002C]",

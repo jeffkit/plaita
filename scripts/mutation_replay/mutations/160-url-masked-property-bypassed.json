@@ -1,0 +1,13 @@
+{
+  "name": "160-url-masked-property-bypassed",
+  "concern": "#160-P1",
+  "issue": "160",
+  "file": "plaita/node/http.py",
+  "old": "        return _mask_policy_url(self.url)\n",
+  "new": "        return self.url if isinstance(self.url, str) else str(self.url)\n",
+  "rationale": "`HttpRequestInfo.url_masked` 退回原文（与 #159 的 `159-policy-renderer-bypassed` 同形）：掩码视图成了别名，调用方以为拿到了掩码串。",
+  "expect_fail": [
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestMaskedView::test_url_masked_keeps_endpoint",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestSerialisationSurfaces::test_repr_of_the_attachment_family_is_masked"
+  ]
+}

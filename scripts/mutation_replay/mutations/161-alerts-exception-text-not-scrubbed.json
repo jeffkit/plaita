@@ -1,0 +1,13 @@
+{
+  "name": "161-alerts-exception-text-not-scrubbed",
+  "concern": "#161-P0",
+  "issue": "161",
+  "file": "plaita/server/alerts.py",
+  "old": "                        _mask_webhook_url_for_log(self.url),\n                        _scrub_url_text(exc),\n",
+  "new": "                        _mask_webhook_url_for_log(self.url),\n                        exc,\n",
+  "rationale": "绕过共享清洗器：投递失败的 WARNING 重新把第三方异常对象（requests 的 `Max retries exceeded with url: /path?access_token=…`）原样交给 logger。",
+  "expect_fail": [
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestAlertsDeliveryWarning::test_five_record_surfaces_never_carry_the_token",
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestNoSitePassesABareException::test_three_files_are_clean"
+  ]
+}

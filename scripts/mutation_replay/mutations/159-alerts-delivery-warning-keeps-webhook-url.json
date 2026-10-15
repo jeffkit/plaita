@@ -3,9 +3,9 @@
   "concern": "#159-P0",
   "issue": "159",
   "file": "plaita/server/alerts.py",
-  "old": "                    logger.warning(\n                        \"告警 webhook 发送失败 url=%s: %s\",\n                        _mask_webhook_url_for_log(self.url),\n                        exc,\n                    )\n",
-  "new": "                    logger.warning(\"告警 webhook 发送失败 url=%s: %s\", self.url, exc)\n",
-  "rationale": "投递失败 WARNING 退回回显 self.url：path 里的 webhook 密钥进日志（#159 的 sink 1 原始缺陷）。",
+  "old": "                    logger.warning(\n                        \"告警 webhook 发送失败 url=%s: %s\",\n                        _mask_webhook_url_for_log(self.url),\n                        _scrub_url_text(exc),\n                    )\n",
+  "new": "                    logger.warning(\n                        \"告警 webhook 发送失败 url=%s: %s\",\n                        self.url,\n                        _scrub_url_text(exc),\n                    )\n",
+  "rationale": "投递失败 WARNING 退回回显 self.url：path 里的 webhook 密钥进日志（#159 的 sink 1 原始缺陷）。（#161 把 exc 也过了共享清洗器，本变异的 old 随新代码更新；变异本身仍只还原 webhook URL 的掩码——exc 清洗的变异由 161-alerts-* 单独覆盖。）",
   "expect_fail": [
     "tests/unit/test_issue159_webhook_url_secret_sinks.py::TestWebhookDeliveryFailureLogHidesCredential::test_warning_record_never_carries_the_secret"
   ]
