@@ -1,0 +1,12 @@
+{
+  "name": "88-factory-ignores-caller-url",
+  "concern": "#88-T",
+  "file": "plaita/server/factory.py",
+  "old": "            target = _parse_redis_url(redis_url)\n",
+  "new": "            target = _parse_redis_url(DEFAULT_REDIS_URL)\n",
+  "rationale": "调用点不再把 args.redis_url 交给解析器 ⇒ 存储恒连 localhost",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestFactoryCallerBehaviour::test_execution_and_flow_go_through_parser"
+  ],
+  "issue": "88"
+}

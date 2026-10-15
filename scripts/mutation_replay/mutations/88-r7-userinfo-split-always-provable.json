@@ -1,0 +1,13 @@
+{
+  "name": "88-r7-userinfo-split-always-provable",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    return not (auth_start <= colon_at < auth_stop and \"@\" in text[auth_start:colon_at])",
+  "new": "    return True",
+  "rationale": "关掉 r7 的 authority 用户/口令分界可证性判据（回到 r6 的「有候选冒号就认」）：`redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0` 的用户段尾巴 `Ccc` 重新没有任何跨度覆盖，五个渲染面重新泄露口令后缀。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_r7_authority_userinfo_ambiguity_rule_table",
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_oracle_grounded_prefix_suffix_never_leaks"
+  ],
+  "issue": "88"
+}

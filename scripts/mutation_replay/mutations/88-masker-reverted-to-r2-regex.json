@@ -1,0 +1,12 @@
+{
+  "name": "88-masker-reverted-to-r2-regex",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    spans = _credential_spans(value)\n    extra_masks = _literal_ranges(value, literals)\n    if not spans and not extra_masks:\n        return value\n    return _render_redacted(\n        value, spans, _redaction_forms(value, spans), extra_masks\n    )",
+  "new": "    import re\n\n    # r2 的正则掩码（已被 r3/r4/r5/r6 枚举掩码取代）：口令字符类排除 \"/\" 与空白，\n    # 且只掩第一个 \"X:Y@\" —— 口令含 \"@\"/空格/\"/\" 的形态照样原样落盘。\n    userinfo_re = re.compile(r\"(?P<userinfo>[^/@\\s:]*:[^/@\\s]*)(?P<at>@)\")\n\n    def _repl(match) -> str:\n        userinfo = match.group(\"userinfo\")\n        if \":\" not in userinfo:\n            return match.group(0)\n        return f\"{userinfo.split(':', 1)[0]}:{_REDACTED}@\"\n\n    return userinfo_re.sub(_repl, value, count=1)",
+  "rationale": "把掩码退回 r2 的单正则实现：口令含 `@`/空白/`/` 的形态照样原样落盘（r8 重写定义：掩码尾部已换成同一趟渲染）。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestRefusalMessagesNeverLeakCredentials::test_no_refusal_message_contains_the_password"
+  ],
+  "issue": "88"
+}

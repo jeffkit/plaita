@@ -1,0 +1,12 @@
+{
+  "name": "88-cause-object-keeps-raw-exception",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "            f\"（URL={_mask_url(text, literals=literals)!r}）\"\n        ) from _sanitized_cause(exc, text, literals)",
+  "new": "            f\"（URL={_mask_url(text, literals=literals)!r}）\"\n        ) from exc",
+  "rationale": "把 query 取值站点的洗过的 cause 替身换回原始异常：`__cause__` 是 traceback / exc_info=True 独立渲染的对象，只洗消息文案不够（plaita#88 r4 Finding 2）。r8 重写定义：站点已改为 `_mask_url(text, literals=…)` 同一趟渲染。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_cause_object_is_independently_sanitized"
+  ],
+  "issue": "88"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "88-r6-masker-drops-authority-fail-closed",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    at = text.rfind(\"@\", auth_start, auth_stop)\n    if at <= auth_start:\n        return ()\n    for colon_at in _candidate_colons(text, auth_start):\n        if colon_at >= at:\n            break\n        return ()\n    return (_CredentialSpan(auth_start, auth_start, at),)\n",
+  "new": "    return ()  # r6 变异：authority 里认不出冒号时不再 fail-closed\n",
+  "rationale": "关掉 r3 的 authority fail-closed 腿：redis://user@host:6379 认不出用户/口令分界却不再整段抹掉（redis://@@@A@host 这类畸形态同族），拒绝消息里留下 userinfo 原文。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestRefusalMessagesNeverLeakCredentials::test_mask_helper_fails_closed"
+  ],
+  "issue": "88"
+}

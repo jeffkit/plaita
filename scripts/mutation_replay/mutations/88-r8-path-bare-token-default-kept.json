@@ -1,0 +1,12 @@
+{
+  "name": "88-r8-path-bare-token-default-kept",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    if not token:\n        return True\n    if token.isascii() and token.isdigit():\n        return True\n    return \":\" in token or \"@\" in token",
+  "new": "    return True",
+  "rationale": "path 段裸 token 的 default-deny（r8 要求 2，`#159` 的前提）：关掉后 `redis://host:6379/0/Pr0d2024x` 原样返回。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r8_non_authority_default_deny_rule_table"
+  ],
+  "issue": "88"
+}

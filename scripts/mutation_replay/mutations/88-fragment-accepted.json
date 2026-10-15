@@ -1,0 +1,13 @@
+{
+  "name": "88-fragment-accepted",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    if parts.fragment:\n        # r7 默认拒绝：fragment 是攻击者可控文本——回显的 URL 里把它抹掉，否则\n        # ``?u=X:<口令里带 '#'>`` 这类形态会把口令尾巴留在这条消息上（实测）。\n        # 抹的是**原文**里从首个 ``#`` 到串尾那截：``urlsplit`` 解析前会做 WHATWG\n        # 归一化把 ``\\t``/``\\n``/``\\r`` 删掉，所以 ``parts.fragment`` 与原文不逐字\n        # 相同（实测 ``#% \\t\\xa0…Cxz9a=1`` 洗不掉）。\n        raw_fragment = text[text.find(\"#\") :]\n        raise RedisUrlError(\n            f\"Redis URL 不支持 fragment: \"\n            f\"{_mask_url(text, literals=(raw_fragment, raw_fragment[1:]))!r}\"\n            f\"（凭据里的 '#' 请写成 %23）\"\n        )",
+  "new": "    # r8 变异：fragment 不再具名拒绝（redis-py 的 ``parse_url`` 也不认 fragment）\n",
+  "rationale": "#88 的具名拒绝契约：fragment 必须在建立任何连接之前具名失败。r8 重写定义：字面量默认拒绝已改为同一趟渲染。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_every_refused_shape_raises_named_error",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_fragment_is_named_refusal"
+  ],
+  "issue": "88"
+}

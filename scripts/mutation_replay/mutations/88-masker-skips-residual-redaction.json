@@ -1,0 +1,13 @@
+{
+  "name": "88-masker-skips-residual-redaction",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "            for form in present:\n                # 纯分隔符形态是**结构本身**（``@@@A`` 的 ``@``/``@@``），不是\n                # 凭据材料——拿它当 needle 会把结构抹掉（``redis://@@@A@host``\n                # → ``redis://******host``）。形态集照旧包含它（闭包性质），\n                # 只是渲染层不施加。\n                if _is_structural_form(form):\n                    continue\n                if form in segment:\n                    segment = segment.replace(form, _REDACTED)\n            out.append(segment)",
+  "new": "            out.append(text[i:j])  # r4：不做兜底重洗",
+  "rationale": "关掉兜底重洗层（r8 重写定义：重洗循环现在先按 `present` 预筛并跳过纯分隔符形态）。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_global_fail_closed_rule_table",
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r8_non_authority_default_deny_rule_table"
+  ],
+  "issue": "88"
+}

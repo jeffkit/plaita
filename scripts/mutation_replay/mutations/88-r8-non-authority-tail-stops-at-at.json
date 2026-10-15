@@ -1,0 +1,12 @@
+{
+  "name": "88-r8-non-authority-tail-stops-at-at",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    at = text.rfind(\"@\", colon_at)\n    if (\n        at != -1\n        and _tail_is_credential_material(\n            text, colon_at, sep, auth_start, auth_stop\n        )\n        and not _residual_tail_is_benign(text, at)\n    ):\n        return _value_token_stop(text, at + 1)\n    return at",
+  "new": "    at = text.rfind(\"@\", colon_at)\n    if (\n        at != -1\n        and _tail_is_credential_material(\n            text, colon_at, sep, auth_start, auth_stop\n        )\n        and False\n    ):\n        return _value_token_stop(text, at + 1)\n    return at",
+  "rationale": "非 authority 位置「掩到值 token 末尾」的腿（r8 要求 2）：关掉后 `redis://host:6379/X:AA@BB@SuperSecretTail` 只掩到最后一个 `@`，尾巴 `@SuperSecretTail` 留在 path 上。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r8_non_authority_default_deny_rule_table"
+  ],
+  "issue": "88"
+}

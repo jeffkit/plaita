@@ -1,0 +1,12 @@
+{
+  "name": "88-masker-gives-up-without-userinfo-colon",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "        if not keep:\n            spans.append(_CredentialSpan(start, start, at))\n        i = at + 1\n",
+  "new": "        if not keep:\n            pass  # r5 B 被关掉：`@` 前没有候选冒号时不再 fail-closed\n        i = at + 1\n",
+  "rationale": "关掉 r5 B 的 fail-closed token 腿：redis://user/sup3rsecret@host（':' 被写成 '/'）没有任何候选冒号，于是 _mask_url 原样返回，拒绝消息把裸 URL 写进日志。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestSlashInPasswordAndResidualSpans::test_at_without_candidate_colon_fails_closed"
+  ],
+  "issue": "88"
+}

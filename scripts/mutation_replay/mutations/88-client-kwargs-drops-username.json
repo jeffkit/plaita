@@ -1,0 +1,13 @@
+{
+  "name": "88-client-kwargs-drops-username",
+  "concern": "#88-R",
+  "file": "plaita/server/factory.py",
+  "old": "        if self.username is not None:\n            kwargs[\"username\"] = self.username\n",
+  "new": "",
+  "rationale": "解析出的 username 不传给客户端 ⇒ 存储以 default 用户连接",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestFactoryCallerBehaviour::test_storage_and_queue_end_up_on_same_endpoint",
+    "tests/unit/test_redis_url_parse.py::TestPlainKillersForDeclaredMutants::test_username_reaches_client_kwargs"
+  ],
+  "issue": "88"
+}

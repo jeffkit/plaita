@@ -1,0 +1,13 @@
+{
+  "name": "88-r6-scheme-anchor-is-last",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    sep = text.find(\"://\")\n    if sep != -1:\n        return sep\n",
+  "new": "    sep = text.rfind(\"://\")\n    if sep != -1:\n        return sep\n",
+  "rationale": "把 scheme 冒号的判据退回 r5 的 `rfind(\"://\")` 锚点：口令自己的 '://' 被当成 scheme 边界，redis://user:pa55word://x@host 只掩到尾巴（r5 R1）。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_enumerate_all_spans_rule_table",
+    "tests/unit/test_redis_url_parse.py::TestLiteralGroundedRows::test_literal_grounded_rows_never_leak"
+  ],
+  "issue": "88"
+}

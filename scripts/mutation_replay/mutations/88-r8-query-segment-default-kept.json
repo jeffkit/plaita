@@ -1,0 +1,12 @@
+{
+  "name": "88-r8-query-segment-default-kept",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    if not segment:\n        return True\n    if segment.isascii() and segment.isdigit():\n        return True\n    if \"@\" in segment:",
+  "new": "    return True\n    if segment.isascii() and segment.isdigit():\n        return True\n    if \"@\" in segment:",
+  "rationale": "query 段（未声明名字 / 裸取值 / fragment）的 default-deny（r8 要求 2a）：关掉后 `?socket_timeout=Pr0d2024x`、`?Pr0d2024x=1` 原样回显。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r8_non_authority_default_deny_rule_table"
+  ],
+  "issue": "88"
+}

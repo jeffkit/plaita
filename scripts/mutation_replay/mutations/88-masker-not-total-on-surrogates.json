@@ -1,0 +1,12 @@
+{
+  "name": "88-masker-not-total-on-surrogates",
+  "concern": "#88-P0",
+  "file": "plaita/server/factory.py",
+  "old": "    try:\n        encoded = quote(text, safe=\"\")\n    except UnicodeError:\n        try:\n            payload = text.encode(\"utf-8\", \"surrogateescape\")\n        except UnicodeError:\n            payload = text.encode(\"utf-8\", \"surrogatepass\")\n        encoded = quote(payload, safe=\"\")\n    return frozenset({encoded, _lower_hex(encoded)})\n",
+  "new": "    return frozenset({quote(text, safe=\"\"), _lower_hex(quote(text, safe=\"\"))})\n",
+  "rationale": "退回「不兜底」的 quote：os.environ 的 surrogateescape 孤立代理字符会让 quote 的 utf-8 编码抛 UnicodeEncodeError，_mask_url 链因此不 total（r5 A 的原始缺陷）。",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestContextAndTotality::test_masker_chain_is_total_on_surrogateescape_strings"
+  ],
+  "issue": "88"
+}

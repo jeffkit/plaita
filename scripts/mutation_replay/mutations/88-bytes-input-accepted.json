@@ -1,0 +1,12 @@
+{
+  "name": "88-bytes-input-accepted",
+  "concern": "#88-D",
+  "file": "plaita/server/factory.py",
+  "old": "    if not isinstance(raw, str):\n        raise RedisUrlError(\n            f\"redis_url 必须是字符串，收到 {type(raw).__name__}: {_mask_url(raw)!r}\"\n        )\n",
+  "new": "    if not isinstance(raw, str):\n        raw = raw.decode(\"utf-8\", \"replace\")\n",
+  "rationale": "bytes/非 str 输入被解码后继续解析（原契约是具名拒绝，值经掩码渲染）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestMalformedIsNamedRefusal::test_bytes_input_is_named_refusal"
+  ],
+  "issue": "88"
+}

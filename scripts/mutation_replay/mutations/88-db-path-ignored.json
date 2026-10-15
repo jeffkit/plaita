@@ -1,0 +1,12 @@
+{
+  "name": "88-db-path-ignored",
+  "concern": "#88-H",
+  "file": "plaita/server/factory.py",
+  "old": "    elif path.startswith(\"/\") and path[1:].isascii() and path[1:].isdigit():\n        db = int(path[1:])\n",
+  "new": "    elif path.startswith(\"/\"):\n        db = 0\n",
+  "rationale": "路径 db 被吞成 0（且 /foo 这种非法路径不再具名拒绝）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestParseAcceptedShapes::test_db_from_path"
+  ],
+  "issue": "88"
+}

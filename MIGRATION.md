@@ -83,6 +83,385 @@ allowlist**；被执行子流程自己声明了非空 `exposeEnv` 时**以声明
   合并），或**父流程不声明** `expose_env`（父级快照为空 ⇒ 整条继承链为空）。
   本单不为此引入哨兵值 / `Optional[None]` 变体来区分"空 vs 未声明"：那会改变
   `Flow(**ir)` 的既有可序列化形状，超出本单 Boundary。
+### Redis URL 解析：畸形形态从「静默回落 localhost」改为具名拒绝（plaita#88）
+
+`plaita/server/factory.py::_parse_redis_url` 此前用手写正则只认
+`redis://[:password@]host:port[/db]`，匹配失败就**静默**返回 `localhost:6379/0`：
+于是 `rediss://`、`user:pass@`、省略端口、IPv6 字面量等都被改写成 localhost，而同一
+进程的队列/事件总线仍按原始 URL 连——存储与队列连到**两个** Redis。现在这些形态
+要么完整解析（与队列侧 `Redis.from_url` 同端点），要么在建立连接前抛
+`RedisUrlError`（fail-closed，启动期一次性暴露）。
+
+**未配置**（`None` / 空串 / 纯空白）仍然走文档化默认 `redis://localhost:6379/0`，
+不是错误——只有「配错了」才拒绝。
+
+#### 旧解析器接受、现在会抛 `RedisUrlError` 的形态
+
+| 形态（密码一律显示为掩码） | 旧行为 | 现在 | 迁移动作 |
+|---|---|---|---|
+| `redis://` | localhost:6379/0 | 拒绝（无目标） | 补全 host，或直接不传 `redis_url`（走默认） |
+| `redis:///3` | localhost:6379/0 | 拒绝（缺主机名） | 写成 `redis://<host>/3` |
+| `REDIS://host:6379/0` | localhost | 拒绝（scheme 必须小写） | 改小写 `redis://` |
+| `http://host:6379` / `host:6379` / `//host:6379` | localhost | 拒绝（不支持/缺 scheme） | 用 `redis://` / `rediss://` / `unix://` |
+| `redis://user:***@host:notaport` | `host` + 默认端口 | 拒绝（端口非整数） | 端口写数字 |
+| `redis://host:99999` | `host:99999` | 拒绝（端口越界 0-65535） | 端口改到合法区间 |
+| `redis://host:0` | `host:0` | 拒绝（端口 0 不是可连端点） | 省略端口（默认 6379）或写真实端口 |
+| `redis://[::1:6379/0` | `host='['` | 拒绝（非法 IPv6 字面量） | 补 `]`：`redis://[::1]:6379/0` |
+| `redis://host/foo` | localhost:6379/0 | 拒绝（路径只能是 db 编号） | 写 `/0`…`/15`，或把参数放 query |
+| `redis://user:***@host:6379/0?db=x` | `user` + db 0 | 拒绝（db 不是整数） | `?db=<int>` |
+| `redis://host:6379/0?db=-1` | localhost | 拒绝（db 不能为负） | 用非负 db |
+| `redis://host:6379/0#frag`、`redis://:***@host:6379/0#frag` | `host` + 默认 db | 拒绝（不支持 fragment） | 凭据里的 `#` 写成 `%23`，其余 `#` 删除 |
+| `unix://` | localhost | 拒绝（缺 socket 路径） | 写 `unix:///path/to/redis.sock` |
+
+#### query 参数：不再一律拒绝
+
+redis-py 认识的连接参数现在会**转换后透传**给存储客户端，值与队列侧
+`Redis.from_url` 一致（同一个 URL 不再有两套连接参数）。透传名单
+（`factory._QUERY_PARAMS`）是 **14 个名字**：`socket_timeout`、
+`socket_connect_timeout`、`socket_keepalive`、`socket_read_size`、
+`health_check_interval`、`protocol`、`legacy_responses`、`retry_on_error`、
+`retry_on_timeout`、`max_connections`、`ssl_check_hostname`、`ssl_min_version`、
+`ssl_include_verify_flags`、`ssl_exclude_verify_flags`；另有 **`db`**（本模块单独
+处理，优先级高于路径）与 **`timeout`**（具名拒绝，见下）——三者合计 16 个，与
+`redis.connection.URL_QUERY_ARGUMENT_PARSERS` 逐名对齐（有防漂移测试）。
+
+- `?socket_timeout=5&health_check_interval=30`（生产常见形态）现在**能启动**；
+  取值非法（如 `?socket_timeout=abc`）才具名拒绝。
+- redis-py **不认识**的名字（如 `?foo=bar`）不再判死：记一条掩码 warning 后忽略。
+  它们无法透传（`redis.Redis.__init__` 没有 `**kwargs`）；队列侧也只是把未知名字
+  塞进 `connection_kwargs`、第一次连接同样 `TypeError`，所以「忽略」不比队列侧更差，
+  但不会再炸启动。
+- **仍是与 `parse_url` 的差异**：`?timeout=3` 被具名拒绝。`parse_url` 接受它，但
+  `AbstractConnection` 没有 `timeout` 形参——`Redis.from_url("...?timeout=3")` 能构造
+  客户端、第一次连接就 `TypeError`。请改用 `?socket_timeout=3`。
+- 同样地，以下形态 `parse_url` 也接受、但本解析器仍然拒绝（这是 #88 的修复目标本身，
+  不是遗漏）：空目标 `redis://`、缺主机名 `redis:///3`、端口 0、非法 db 路径
+  `redis://host/foo`、fragment、`unix://` 缺 socket 路径、`?db=-1`。
+
+#### 错误消息里的 URL 一律掩码
+
+`RedisUrlError` 的消息会被 `flow_worker` / `event_filter` 直接写进生产日志
+（后者还带 `exc_info=True`）。所有拒绝分支回显的 URL 现在都经
+`factory._mask_url` 渲染：`redis://user:***@host:6379/0`——密码永不出现，
+用户名保留；`?socket_timeout=abc` 这类底层 cause 也先洗一遍。
+
+掩码是**结构化**的（镜像 `urlsplit`，不是正则），而且**不依赖输入是否合法**
+（r3 只在字面 `://` 的 authority 里找 userinfo，单斜杠与「凭据在 scheme 前」的
+形态会因为认不出而**原样回显**——那是 r3 的回归，已经修掉）：
+
+- 锚点是「全串最后一个**凭据形状**的 `@`」：所在段（`/` 分段）里要有 `:`，且该
+  `:` 必须在该段首个 `?`/`#` 之前。于是 `redis:/user:pw@host`、`REDIS:/user:pw@host`、
+  `user:pw@redis://host`、`redis:///user:pw@host`（空 authority 多写斜杠）、
+  `redis://user:p?w@host` 都能掩住；userinfo 再按**第一个** `:` 分用户/口令，
+  口令整体替换为 `***`。
+- `path`/`query` 里的 `@` 不会被误当 userinfo：`redis://host:6379/0@x`、
+  `redis://host:6379/0?ref=a@b` 原样保留（区分方式是「`@` 所在段里没有 `:`」）。
+- **兜底重洗**：结构层识别到的口令还会以原文 / percent-encoded / decoded 三种形态，
+  在 userinfo 段与 host 之后的 path/query/fragment 里再洗一遍——口令重复写在
+  `?socket_timeout=PwX` 或 `/PwX` 里也活不下来。`?db=<口令>`、`/<口令>`、
+  `?<口令>=1` 这些**不是 URL 的消息字段**同样先洗后回显。scheme 与 host **不**参与
+  替换（它们是结构性诊断信息，也可能恰好是口令的子串——无差别全局替换是假红）。
+- **认不出 userinfo 时 fail-closed**：`@` 之前认不出口令的形态，userinfo 整体抹成
+  `***`（如 `redis://user@host:6379` → `redis://***@host:6379`），host/port/db 保留
+  以便诊断。
+- 拒绝分支的 `raise … from exc` 改成 `raise … from <洗过的同类型替身>`：`__cause__`
+  是 `traceback` / `logger.error(..., exc_info=True)` **独立渲染的对象**，只把文案洗进
+  `RedisUrlError` 的消息并不够。
+
+r5 补的四条（`#88` 独立验证 FAIL 的规则级反例 + `#158` 交回的反例）：
+
+- **全局层（R1）**：上面三个结构档都要求凭据形状的 `@` 落在**同一个 `/` 段**内——
+  口令里含 `/` 时（`redis://user:p/w@host`）`/` 先把段截断，三档全部落空，
+  `_mask_url` 走早退**原样返回**。现在补一档「**非端口**冒号 + 它之后**最后一个**
+  `@`」的全局跨度：`redis://user:p/w@host` → `redis://user:***@host`、
+  `redis://user:p/w@host:6379/0` → `redis://user:***@host:6379/0`。
+- **兜底层不再依赖 userinfo（R2）**：`_passwords` / `_scrub` 此前依赖
+  `_locate_credentials`，没有 userinfo 时整层空转——`redis://host:6379/0?db=Pr0d:x@y`
+  在 r2 掩住了、r3/r4 **原样返回**（回归）。现在 query 值 / path 里任何凭据形状跨度
+  都洗：`?db=Pr0d:***@y`。
+  **更正 r4 的说法**：r4 称「回归集 994 → 0、残留全部是口令自身含 `/`/`?`/`#` 的
+  畸形 URL」。独立验证者用另一套生成器给出回归集 **1135 / 残留 37**（全是
+  `redis://host:6379/0?u=X:Y@x` 这类 **query 值位置**），另有 437 个 `?u=…` 位置、
+  193 个 username 位置的泄露，其口令**不含** `/`/`?`/`#` 任何一个。两个数字的差异
+  来自生成器的形态网格与接地方式不同（本单复算用 `parse_url` 接地 + 字面接地两套，
+  见 `tests/unit/test_redis_url_parse.py::LITERAL_GROUNDED`），不是「收敛」。
+- **没有 `@` 也要洗（C）**：`redis://user:sup3rsecret127.0.0.1:679/0`（`@` 写漏/被抹）
+  在 redis-py 里 userinfo 位为空，但 `X:Y` 仍是凭据样文本——现在渲染成
+  `redis://user:***:679/0`（host/port/db 保留）。
+- **`@` 前没有凭据冒号时 fail-closed（B）**：`:` 被写成 `/`/`?`/`#` 的
+  `redis://user/sup3rsecret@host` 不再原样返回（→ `redis://user/***@host`）。
+  已验证的 keep 逐字不动：`redis://host:6379/0@x`、`redis://host/0?ref=a@b`、
+  `redis://host:6379/0?db=1@2`、`redis://host/0?x=1:2@y`。
+- **`_mask_url` 是 total**：任意 `str` 都不抛——`os.environ` 的 surrogateescape 会把
+  非 UTF-8 字节解码成**孤立代理字符**，`quote()` 的 utf-8 编码随即抛
+  `UnicodeEncodeError`（`#158` 的两个新调用点因此启动期硬崩，而同输入 redis-py 的
+  `from_url` 本身是接受的）。现在这类形态按 WTF-8 字节渲染（只多掩不少掩）。
+- **`__context__` 也摘干净（R3）**：`raise … from _sanitized_cause(...)` 只置
+  `__cause__`；`__context__` 仍是那个 `str()` 带明文口令的**原始**异常，任何走
+  `__context__` 的消费者都能读到。解析器现在在异常离开前把 `__context__` 置 `None`
+  （`__cause__` 替身链与消息原样保留）。
+
+r6 改的是**结构**，不是再补两个特例（`#88` 独立验证第 3 次同类复发：r3 只锚 authority、
+r4 的兜底按 userinfo 有无分档、r5 拿 `rfind("://")` 当锚点且只看第一个候选冒号）：
+
+- **枚举全部跨度（r6）**：`_credential_spans` 一次枚举**每一个**凭据候选跨度——
+  冒号候选（**非端口**冒号 + 配对 `@`）、没有 `@` 的凭据 token、`@` 前没有候选冒号的
+  fail-closed token、no-scheme 粗档、authority 认不出冒号时的 fail-closed。`_mask_url`
+  把它们的口令段**全部**掩掉，不再存在「the credential span」。r5 的两个规则级反例因此
+  在结构上没有立足点：
+
+  | 反例 | r5（泄露） | r6 |
+  |---|---|---|
+  | 口令含 `://`（R1） | `redis://user:pa55word://***@host` | `redis://user:***@host` |
+  | 有 userinfo 时的第二条跨度（R2） | 消息字段原样带 `'Acct:Secret1@x'` | `'Acct:***@x'` |
+
+  五条 `@` 跨度/三条非 `@` 跨度的**候选边界**（也是本轮的公开契约）：
+
+  * 候选冒号 = depth 0（不在 IPv6 `[...]` 里）+ 非端口冒号（`_is_port_colon`）+
+    不是 scheme 冒号。scheme 冒号取「**第一个** `://` 的冒号」，或没有 `://` 时
+    「串首 `scheme:` 且后面紧跟 `/`」的那个——**不再** `rfind("://")`（R1 的根因）；
+  * 配对 `@`：authority 里取「首个 `/` 之前最后一个 `@`」（R2 的边界），authority 之外
+    取「该冒号之后最后一个 `@`」；段内没有 `@` 或那个 `@` 让口令为空时回退到最后一个
+    `@`（口令含 `/` 的畸形态，只多掩不少掩）；
+  * **端口判据分区域**：authority 里数字段只在 `/` 或串尾结束才算端口（
+    `redis://user:9?0b@host`、`redis://user:9#Z@host` 的 `?`/`#` 是口令字符）；
+    authority 之外维持 r4 已验证的 `/?#@`；
+  * **边界**（本轮已知的、与 HEAD 同形的盲区，不在候选跨度内，故不被本层覆盖）：
+    `?db=<没有冒号的普通值>`、`?<没有冒号的查询名>=1`、`?u=X:911/bzx`（数字打头 + `/`
+    与 `host:port/db` 局部同形）、`?db=S3cr3t/1:2` 尾部的 `:digits`。
+- **内部一致性不变量（r6，新增）**：`_mask_url` 与 `_passwords` **只**经同一个
+  `_credential_spans`（`_redaction_forms` 是它的 needle 版），所以
+  **`_passwords(s) != ()` ⟹ `_mask_url(s)` 不含其中任何形态、且 `_mask_url(s) != s`**；
+  反之 **`_mask_url(s) != s` ⟹ `_passwords(s) != ()`**（没识别出口令就不许改串）。
+  r5 的 R1（`_passwords` 取到 `pa55word` 而 `_mask_url` 掩不住）与 R2
+  （`_mask_url` 掩了、`_passwords` 取不到）都是这条不变量的违反。它由
+  `tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_consistency_invariant_on_fuzz_corpus`
+  钉住。
+- **生成式性质测试取代形态表的角色（r6）**：形态表是「枚举我以为的危险形状」，而
+  r3/r4/r5 三次漏掉的都是表里**没有**的形状。现在
+  `TestMaskerGenerativeProperty::test_generated_secret_in_every_candidate_position_never_leaks`
+  把随机口令（含 `@ : / ? # %`、空白、`://`）注入**每一个候选位置**（userinfo /
+  empty-user / slash-in-password / query 值 / path / fragment / 无 `@` / 多跨度 /
+  用户名==口令 / 单斜杠），对**每个**形状断言口令原文与**所有 ≥3 字符前缀/后缀**都不在
+  五个渲染面（`_mask_url` / `str` / `repr` / `traceback` / 真 `logger.error(…, exc_info=True)`）
+  上。**3000 个形状，实测 0.75s**（`pytest -k TestMaskerGenerativeProperty`）；
+  形态表（`LITERAL_GROUNDED`）保留为回归清单。
+- **`_secret_forms` 补三版书写形态（r6）**：`urlsplit` 解析前会剥掉 URL 里的
+  `\t`/`\n`/`\r`、`parts.port` 的报错文案是 `%r`（非 ASCII 变转义写法），所以除
+  原文/percent-decoded/percent-encoded 之外再补「剥空白」与「`unicode_escape`」两版；
+  并按 `: @ ? # & =` 切开取**头截与尾截**（口令本身含分隔符时，消息字段里出现的是
+  切开后的那一截）。只多洗不少洗。
+- **`_quoted_forms` 的代理字符兜底更正（r6）**：`surrogateescape` 能编回的
+  （`U+DC80`-`U+DCFF`）现在按**原始字节**渲染，`_quoted_forms('\udcff')` = `%FF`
+  （on-the-wire 形态）；只有编不回的孤立代理（`U+D800` 之类）才退回 `surrogatepass`
+  的 WTF-8 字节（`%ED%A0%80`）。r5 的注释把 WTF-8 说成 on-the-wire，是错的（无泄露，
+  但注释不真）。
+- **`#158` 的既存 sink（本轮**不**修，只登记）**：`plaita/server/services/__main__.py:55`
+  的 `logger.info("连接 Redis: %s", redis_url)` 在 INFO 级打印**裸 URL**（含口令）——
+  它在正常的、**合法**配置路径上就会被调用，不属于 `_mask_url` 能覆盖的「拒绝文案」面。
+  该 sink 归 `#158`，在本 diff 之外；本单只保证 `plaita/server/factory.py` 渲染的文案
+  与 `__cause__`/`__context__` 链不泄。
+
+### r7：掩码的验收判据从「自洽」改成「完备」（oracle 接地）
+
+r6 的 `_passwords(s) != () ⟹ _mask_url(s)` 不含那些形态 **与** `_mask_url(s) != s`
+两条都成立（`_passwords` 与 `_mask_url` 共用 `_credential_spans` 一个枚举），可它仍然
+泄露。独立验证者给出的规则级反例（本单第四次同类复发）：
+
+| 形态 | 三个 oracle 报出的口令 | r5 | r6（泄露） | r7 |
+|---|---|---|---|---|
+| `redis://zB0@@cB9cB@@Ccc:zB0@@cB9cB@@Ccc@host:6379/0` | `zB0@@cB9cB@@Ccc` | `redis://***:***@host:6379/0` | `redis://***@@***@@Ccc:***@host:6379/0` | `redis://***@host:6379/0` |
+| `redis://Q7w@E4r@T5y:Q7w@E4r@T5y@host:6379/0` | `Q7w@E4r@T5y` | `redis://***:***@host:6379/0` | `redis://***@***@T5y:***@host:6379/0` | `redis://***@host:6379/0` |
+
+（三个 oracle = `redis.connection.parse_url`（队列侧真正拿去连的）、
+`urllib.parse.urlsplit`、本仓 `_parse_redis_url`，三者逐字一致。）
+
+- **根因（结构）**：`_VALUE_DELIMITERS` 含 `@`，`_at_colon_spans` 的 `start` 从候选
+  冒号往左退到用户段**最后一个 `@`** 就停，于是那个 `@` 之后的 token（`Ccc`）既不在
+  任何 `[mask_from, stop)` 区间里、也不在 `_secret_forms` 的形态集里（它只按**第一个**
+  分隔符切头/尾截）——两头都不覆盖。**r7 的处置不是加特例**：新增
+  `_userinfo_split_is_provable`——authority 里候选冒号**之前还有 `@`** ⇒ 用户/口令分界
+  **不可证** ⇒ 整段 userinfo fail-closed（`[auth_start, 配对 @)` 全掩）。
+  `user==pw`、口令含 `@ : / ? # %` 与空白的**任何**形态都走这一条路。分界**可证**的
+  形态逐字不变（`redis://user:p@ssword@redis.internal:0` → `redis://user:***@redis.internal:0`）。
+- **验收判据换成完备性（oracle 接地）**：性质测试的 needle **不再来自注入文本**，而是
+  来自 oracle 报出的口令——对每个形状断言它的任何 **≥3 前缀/后缀**（主判据）与**所有
+  ≥3 子串**（更严）都不出现在五个渲染面（`_mask_url` / `str` / `repr` / `traceback`
+  / 真 `logger.error(…, exc_info=True)`）与 `__cause__` 替身上。
+  `TestMaskerGenerativeProperty` 的语料 9000 个形状、13 个候选槽、**每个槽同一个全
+  字母表**；运行时见 `pytest -k TestMaskerGenerativeProperty`（约 8s，含五次渲染面）。
+  **自洽不蕴含完备**——r6 就是反例，所以两条判据都留，完备性是主验收。
+- **不变量合格化**：无限定版本是**假**的。验证者的 432 个反例全是「口令形态与**有意
+  保留的结构 token** 撞车」，例如 `redis://user:Q7w:9:6379@host:6379/0` 的 `_passwords`
+  含 `6379` 而 host 端口 `6379` 本来就该留下。现在的陈述是：
+  `_passwords(s) != ()` ⟹ `_mask_url(s)` 不含其中任何形态（**与 scheme / 可证用户名 /
+  host / port / db / 非 authority 跨度的用户 token 偶然重合的除外**）、且 `!= s`；
+  反之 `_mask_url(s) != s` ⟹ `_passwords(s) != ()`。
+- **语料逐槽记账**：r6 的 6000 行语料里 `user==pw` 槽用
+  `safe_token(allow_at=False, allow_colon=False)`，545 个形状**没有一个含 `@`**——洞正是
+  被这个字母表收窄藏住的。r7 删掉全部 `allow_at` / `allow_colon` / `safe_token` 开关，
+  13 个候选槽（userinfo user / password、`user==pw`、query 值 / 名、无 `@` 的 `?u=X:`、
+  path、fragment、no-scheme、single-slash、empty-user、multi-span、slash-in-password）
+  **每个**都用全字母表；`test_corpus_per_slot_counts_and_alphabet` 逐槽断言样本数与
+  `@ : / ? # % ` + `\t` + `\xa0` 的覆盖，任何收窄都会红。
+- **三处默认拒绝（同单，不是新工作）**：`?db=<非法值>`、`?<未知名>=1`、fragment /
+  非法 query 取值的**回显**原本原样带攻击者可控文本（r5/r6 同形）。现在消息字段、
+  回显的 URL 与 `__cause__` 里都抹成 `***`（保留参数名 `db` / `socket_timeout` 与固定
+  措辞）。对应 `LITERAL_GROUNDED` 新增两行（`grounding="message-field"`），它们在
+  r5/r6 上是红的。
+- **已知边界（r7 语料暴露、r5/r6 同形、不在本单的修复范围）**：
+  1. `?db=<没有冒号的普通值>`；2. `?<没有冒号的查询名>=1`；3. `?u=X:911/bzx`（数字
+  打头 + `/` 与 `host:port/db` 局部同形）；4. `?db=S3cr3t/1:2` 尾部的 `:digits`；
+  **5.** r6 列表漏掉的第 5 条——authority 用户段里**最后一个 `@` 之后的 token**
+  （`redis://zB0@@…@@Ccc:…` 的 `Ccc`）——**r7 已修**，见上；
+  **6.** 注入文本含 `#` 时尾部落在 fragment 里（`redis://user:CcAax??axzA@@x00/x@host`
+  的 `x00`、`redis://host/0/X:0190??…@y` 的 `0190??`）：这截不在任何凭据跨度内，
+  掩码器按契约保留，**r5 同样泄露**（不是 r7 回归），故 `slash-in-password` /
+  `query-value-no-at` / `path` 三个槽在 r7 只做 oracle 断言（逐槽计数可见其
+  `oracle_grounded`，`oracle_grounded=0` 的槽即「oracle 说不出话」的槽）。
+- **计数更正（r6 报告/提交信息）**：r6 随掩码改动重写的 r5 变异定义是 **7** 条（不是
+  6 条）：`88-credentials-fall-back-to-verbatim`、`88-masker-gives-up-without-userinfo-colon`、
+  `88-masker-not-global-fail-closed`、`88-masker-not-total-on-surrogates`、
+  `88-masker-reverted-to-r2-regex`、`88-masker-skips-residual-redaction`、
+  `88-passwords-skip-no-at-token`；随改动变化的变异文件共 **14** 个（7 重写 + 7 新增），
+  不是 13。
+- **r7 变异**：定义总数 42（31 条由普通 `FAILED` 行杀死、11 条只由 `SUBFAILED(` 行
+  杀死，与 r6 的 28 + 11 相比只是分母变大）。新增 3 条单腿：`88-r7-userinfo-split-always-provable`
+  （关掉分界可证性 → `Ccc` 重新泄露，2 条 `FAILED`）、`88-r7-db-value-echoed`、
+  `88-r7-unknown-name-echoed`（各 1 条 `FAILED`）。r6 三条**夸大**的 `expect_fail`
+  已修正——它们的声明杀手现在真的会红：`88-r6-scheme-anchor-is-last`（新断言「scheme
+  分隔符 `://` 必须保留」）、`88-r6-masker-only-first-span`（`test_consistency_invariant_on_fuzz_corpus`
+  现在同时钉合格化不变量与完备性）、`88-masker-not-global-fail-closed`
+  （`GLOBAL_FAIL_CLOSED_URLS` 改成 `(url, secret)` 并补 `redis:/user:911/z@host`）。
+
+**迁移**：若有脚本/告警解析这些消息文本去比对原始 URL，请改比对掩码形态；
+仅写用户名不写口令的 URL 也会显示成 `***@host`。
+
+### r8：掩码机制改为**对分隔符闭合** + 非 authority 值位置 default-deny（plaita#88 第五次复发）
+
+r7 的「oracle 接地的完备性」判据本身是对的，但**机制**还开着一个口子：同一缺陷类
+第五次复发（r3 只认 authority → r4 单斜杠 → r5 `rfind("://")` 锚点 → r6 漏用户名
+token → r7 漏非 authority 尾巴）。规则级反例：
+
+```
+redis://user:AA@BB@SuperSecretTail@host:6379/0?u=X:AA@BB@SuperSecretTail
+  三个 oracle（redis.connections.parse_url / urlsplit / _parse_redis_url）都报
+  AA@BB@SuperSecretTail；r5 == r6 == r7 输出
+  redis://user:***@host:6379/0?u=X:***@SuperSecretTail
+  ⇒ 105 个 ≥3 子串 × 3 oracle = 315 个非豁免片段存活（最长 16 字符）
+```
+
+**根因（结构）**：`_secret_forms` 只按每个分隔符的**第一个**出现位置切头/尾；
+`_span_at` 的非 authority 分支停在**最后一个 `@`**。于是口令第二个 `@` 之后的尾巴
+既不在任何 `[mask_from, stop)` 区间里、也不在 needle 集里。**r8 不再加模板，改闭合**：
+
+1. **分隔符闭包**（`_secret_forms` / `_delimiter_pieces`）：对分隔符集的**每一个**
+   出现位置切头/尾，并把每个片段**重新入队**到不动点；分隔符集补上了此前缺的
+   `/`、`%` 与空白（`_SECRET_SPLITTERS`）。闭合性质：对任意返回形态 `f`、任意分隔符
+   `sep`、`f` 里 `sep` 的任意出现位置 `k`，**非空**的 `f[:k]` 与 `f[k+1:]` 都仍在
+   形态集里（`test_secret_forms_closed_under_resplitting`，逐形态断言）。
+   纯分隔符片段（`@@@A` 切出的 `@`/`@@`）仍在形态集里（闭包要求），但**渲染层**
+   不拿它们当 needle（`_is_structural_form`），否则结构性 `@` 会被抹成 `******`。
+2. **非 authority 值位置 default-deny**（`_span_at`、`_no_at_colon_spans`、
+   `_query_pair_spans`、`_path_segment_spans`、fragment 分支）：authority 之外**没有
+   host**——query 值 / path 段 / fragment 里 `@` 之后的文本同样是凭据材料。判据：
+   配对 `@` 之后的尾巴**长于 1 个字符**就掩到**值 token 末尾**（`&`/`#`/串尾；
+   `_value_token_stop`）。单字符尾（`@x`/`@y`/`@b`）是 r2/r4 已验证的 keep，逐字不变；
+   未声明 query 名、裸取值、裸 path 段一律按凭据处理（`?socket_timeout=<secret>`、
+   `?<secret>=1`、`redis://host/0/<secret>` 在 r7 上 `_mask_url` **原样返回、零覆盖**）。
+   query/fragment 段用**紧**判据（尾巴量到段末；`@` 之后即便以 `/`/`:` 开头也算凭据），
+   path 段用松判据（r5 B 的 `#Tr0ub4dor@host:6379/0` 形态逐字保留）。
+3. **默认拒绝字面量与掩码进同一趟**（`_mask_url(value, *, literals=())` +
+   `_literal_ranges`，删除 `_scrub_literal`）：r7 的「先 `str.replace` 再 `_mask_url`」
+   会把凭据**切碎**再掩，残余认不出来（`redis://user:xCb0B??AxB#xcC@host…` 的 fragment
+   消息留下 `??AxB`；`?u=X:AA@BB@SuperSecretTail` 的未知名 WARNING 留下
+   `?0xzzAC?…` 型尾巴）。字面量现在与跨度一样在**原文**上算区间、进同一个 `m` 态，
+   没有中间态。`literals` 是**关键字**参数（默认 `()`）：`_mask_url(x)` 单参调用逐字
+   不变，`#158`/`#159` 按名字 import 这个函数因此不受影响。
+
+**完备性陈述（升级版）**：完备性 = **对分隔符的闭包**（形态集对 `:`/`@`/`?`/`#`/
+`&`/`=`/`/`/`%`/空白闭合）**加上**「每一个可能承载凭据的非 authority 值位置都被
+覆盖」（不可证良性即整值/整段掩）。oracle 接地的判据不变：口令的任何 ≥3 前缀/后缀
+与**所有** ≥3 子串都不出现在五个渲染面（`_mask_url` / `str` / `repr` /
+`traceback` / 真 `logger.error(…, exc_info=True)`）与 `__cause__` 替身上。
+
+**语料与记账（r8 要求 1b/2a/3）**：
+- 槽位 13 → **24**（新增 11 个 r8 家族槽：query 值/path 段/fragment 逐字出现、
+  `?db=`/`?u=`/`?socket_timeout=` 三种位置、`Acct:`/`X:` 前缀、凭据两次且**不带**
+  收尾 `@x`），每个槽仍用**同一个全字母表**（并补上多字节 `ä`/`中` 与
+  surrogateescape 字节 `\udcff`）。
+- **多种子扫掠**：20 个种子（含验证者用过的 **119** 与 **20261015**）× 480 形状，
+  逐槽断言「oracle 接地或字面接地」并有「**未断言形状数 == 0**」断言；
+  主语料 9000 形状在种子 88 上跑全子串判据。逐槽断言表（n / oracle / literal /
+  needles / 结构性豁免 / 数字豁免 / 泄露 / 未断言）在 `-s` 下打印。
+- **r8 家族覆盖**：`_R8_FAMILIES` 的 5 个家族（query-value-verbatim /
+  query-value-prefixed / credential-twice-no-closing-at / fragment-verbatim /
+  path-verbatim）各自断言「≥1 条 oracle 接地样本」。
+
+**豁免面（要求 3）：从「碰巧在白名单里」改成「位置级可证结构性」**。
+`_neutralize` 把**结构 token 的出现**替换成等长占位符，然后才查 needle——
+`@Za` / `@@9` 这类「分隔符 + host 前缀」的跨界撞车不再被误判为泄露，
+而 `Acc` 落在可证用户名 `Acct:` 里的整条豁免也不再发生（真漏若共享该子串仍会红）。
+验证者的 **seed 119** 反例 `redis://user:aCab@@acC010@@acayaaa/x@host` 因此被证明是
+**instrument 假红**：三个 oracle 都报 `aCab@@acC010@`，r7 输出
+`redis://user:***@acayaaa/***@host` 里唯一「存活」的 needle 是 `@ac`——它是跨度的
+`@` + host 前缀 `acayaaa`（`_preserved_literals` 有 `acayaaa`，没有 `@ac`）。
+该 shape 已作为**固定回归行**（`test_r8_seed_119_structural_collision_regression`）；
+真漏（`@SuperSecretTail`：`SuperSecretTail` 不是任何结构 token）照旧红。
+`_INTERPRETER_WORDING` 另收解释器/本项目固定措辞（`base 10:` 含 `10:`、
+scheme 列表含 `://`、链式异常样板句），逐条计数。
+
+**已登记的已知边界（r8 起有断言、计数公布、断言不增长）**：
+1. `slash-in-password`（数字打头 + `/`：`redis://user:1900/x@host`）与
+   `host:port/db` 局部同形，r4 已验证的端口判据按 keep 取——前缀留在消息面；
+2. **纯数字 needle**（`?db=Acct:090@x` 原样保留 = r4 的 `?db=1@2` 契约）；
+3. 未声明 query **名**里 `:` 之前那截按 r5 C 的 user-token 契约保留
+   （`?u=X:Secret1` → `?u=X:***` 逐字已验证）——该槽的字面 needle 因此用固定的
+   裸未知名 `Pr0d2024x`；
+4. query 值里 `?`/`#`/`/` 造成的**跨字段**溢出（r7 已知边界第 6 条的剩余部分）
+   只在 oracle 说不出话、且没有任何凭据跨度可重洗时成立。
+这四条都在 `_R8_KNOWN_BOUNDARY_LEAKS` 里按槽登记上限，测试断言**不超过**上限。
+
+**顺带修的 portability 缺陷（同文件）**：`_quoted_forms` 的 docstring 里写了字面
+`'\udcff'`——非 raw docstring 会把它解析成**真的孤立代理字符**，CPython **3.13**
+在**编译期**就把它编码成 UTF-8，于是 `import plaita.server.factory` 直接
+`UnicodeEncodeError: 'utf-8' codec can't encode character '\udcff' …`
+（实测 **3.13.15**；3.11/3.12 不报，故 `6a9cdba8` 起潜伏）。r8 把源码里的裸代理
+转义改成转义写法，并加了一条**版本无关**回归
+（`TestSourcePortability`：源文本无裸代理转义 + 源文件可 `compile`）。
+
+**精度处置**：重洗层不再施加**子 3 字符**的 needle（`?u=…` 的 1 字符名字、
+`=` 切出的残片）——它们满足不了完备性判据（≥3），误伤面却很大（实测会把
+userinfo 的 `u` 洗成 `redis://***ser:***@…`）。掩码段本身仍覆盖短口令，`_passwords`
+仍返回它们（消息字段的 `_scrub` 用得到）。
+
+**精度代价（本轮明确登记，不牺牲安全）**：`redis://@@host` → `redis://******host`、
+`redis://@:pw@host` → `redis://******host`（r5/r6 是 `redis://@:***@host`）——
+闭包把 `@@`/`@` 当结构形态在**重洗层**跳过，但掩码段仍是整段 `***`。
+
+**导入契约**：`_mask_url` / `_parse_redis_url` / `RedisUrlError` / `RedisTarget`
+**不改名**；`_mask_url` 只**新增**关键字参数 `literals=`（`#158`/`#159` 按名字 import
+它，单参调用逐字不变）。掩码契约的调用方在别处按名字 import，删除/改名会立刻炸。
+
+**变异**：定义总数 42 → **48**（新增 6 条 r8 单腿：闭包不动点、非 authority 尾巴、
+path 裸 token default-deny、query 段 default-deny、fragment default-deny、no-at 值
+token 延长；另有 6 条既有定义随 `_scrub_literal` 并入 `_mask_url` 的重写——
+`88-cause-object-keeps-raw-exception`、`88-db-query-ignored`、`88-fragment-accepted`、
+`88-r7-db-value-echoed`、`88-r7-unknown-name-echoed`、
+`88-whole-parser-reverted-to-original-regex`，其中最后一条的 `old` 是整段解析体）。
+计数见提交信息与本次报告。
+
+**r8 的相对读数（本单自带生成器，seed 20261015 / 6000 形状 / 5 个模板 A/F/G/H/I，
+逐模板 1200；与 committed instrument 同一套豁免规则）**见提交信息与本轮报告；
+要点：模板 A（`user==pw`）r7 已 21/31 → r8 **0/0**；F/G/H/I（凭据逐字作为
+query 值 / path 段 / fragment / 两次且无收尾 `@x`）r7 的 155/160、41/47、21/25、
+154/160 → r8 **0/0**。
+
+**运行时**：`tests/unit/test_redis_url_parse.py` 从 r7 的约 12s 升到约 10 分钟——
+24 槽 × 9000 形状的全子串判据 + 20 种子扫掠 + 闭包（形态集中位数 32、长口令可达
+数千）都在这里。生产路径不受影响（一条普通 URL 的 `_mask_url` 仍是亚毫秒级）；
+`_secret_forms_cached` / `_delimiter_pieces` / `_encoding_forms` / `_quoted_forms`
+都带进程内 LRU。
 
 ### DSL：`@childflow("<text>")` 的位置实参由 `desc` 变成子流程 `flow_id`（plaita#145）
 

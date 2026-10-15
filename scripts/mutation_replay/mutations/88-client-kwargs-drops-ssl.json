@@ -1,0 +1,12 @@
+{
+  "name": "88-client-kwargs-drops-ssl",
+  "concern": "#88-Q",
+  "file": "plaita/server/factory.py",
+  "old": "        if self.ssl:\n            kwargs[\"ssl\"] = True\n",
+  "new": "",
+  "rationale": "rediss:// 的 TLS 不再传给客户端 ⇒ 明文降级（#88 报告的安全边界失效）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestFactoryCallerBehaviour::test_no_more_second_endpoint_for_rediss"
+  ],
+  "issue": "88"
+}
