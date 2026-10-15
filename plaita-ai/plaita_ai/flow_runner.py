@@ -183,8 +183,35 @@ def get_skill_text(skill_name: str = "flow-coder") -> str:
     raise FileNotFoundError(f"skill not found: {skill_name}")
 
 
+class PathTraversalError(ValueError):
+    """Caller-supplied path escapes the skill reference root (#54)."""
+
+
 def get_skill_reference(skill_name: str, ref_name: str) -> str:
-    """Load a bundled skill reference file."""
+    """Load a bundled skill reference file, contained to the references root.
+
+    ``skill_name``/``ref_name`` are untrusted caller input (MCP tool, CLI).
+    Containment is resolve-then-check, not blacklisting: the request is
+    resolved against the real references root and the resolved real path must
+    stay inside it — absolute paths, ``..`` segments and symlink escapes all
+    resolve outside the root and are refused with :class:`PathTraversalError`.
+    No silent fallback to a wider path.
+    """
+    if not skill_name or Path(skill_name).name != skill_name:
+        # A skill is a bare directory under skills/, never a path — otherwise
+        # the caller could move the containment root itself.
+        raise PathTraversalError(
+            f"skill_name must be a bare skill directory name, got: {skill_name!r}"
+        )
+    skills_root = (Path(__file__).resolve().parent / "skills").resolve()
+    root = (skills_root / skill_name / "references").resolve()
+    requested = (root / ref_name).resolve()
+    if not requested.is_relative_to(root):
+        raise PathTraversalError(
+            f"skill reference escapes the references root: "
+            f"{skill_name}/{ref_name} resolves to {requested}"
+        )
+
     package = "plaita_ai.skills"
     path = f"{skill_name}/references/{ref_name}"
     try:
@@ -192,9 +219,8 @@ def get_skill_reference(skill_name: str, ref_name: str) -> str:
     except (FileNotFoundError, OSError, TypeError):
         pass
 
-    here = Path(__file__).resolve().parent / "skills" / skill_name / "references" / ref_name
-    if here.is_file():
-        return here.read_text(encoding="utf-8")
+    if requested.is_file():
+        return requested.read_text(encoding="utf-8")
     raise FileNotFoundError(f"skill reference not found: {skill_name}/{ref_name}")
 
 

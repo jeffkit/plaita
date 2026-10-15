@@ -10,6 +10,7 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from plaita_ai.flow_runner import (
+    PathTraversalError,
     compile_flow,
     get_skill_reference,
     get_skill_text,
@@ -217,8 +218,18 @@ def flow_get_skill_reference(
     skill_name: str = "flow-coder",
     reference: str = "codeflow-reference.md",
 ) -> str:
-    """Return a bundled skill reference document (full @flow syntax)."""
-    return get_skill_reference(skill_name, reference)
+    """Return a bundled skill reference document (full @flow syntax).
+
+    ``reference`` is contained to the skill's references root: absolute paths,
+    ``..`` traversal and symlink escapes are refused with a named
+    ``PathTraversalError`` refusal payload instead of being read (#54).
+    """
+    try:
+        return get_skill_reference(skill_name, reference)
+    except PathTraversalError as exc:
+        return result_json(
+            {"ok": False, "error": str(exc), "error_type": "PathTraversalError"}
+        )
 
 
 def _build_tool_instructions() -> str:
