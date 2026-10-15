@@ -1,0 +1,14 @@
+{
+  "name": "159-bracket-unclosed-readmitted",
+  "concern": "#159-r7-F2",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "        return \"]\" in host  # 方括号端点兜底：闭合即保留（r4 冻结契约，见 docstring）\n",
+  "new": "        return True  # mutant: 未闭合方括号也放行（r3 反例 A 回来）\n",
+  "rationale": "方括号腿改成恒 True ⇒ `http://[web`（`[` 未闭合、凭据可能落在被截断的那段里，r3 反例 A 的根因）重新被当成不动点、逐字穿过。该腿在 r7 从死代码变成活代码（`_token_is_canonical` 不再提前 `return \"]\" in authority`），所以这一格现在真的可被杀死。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_truncated_bracket_token_fails_closed",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_guard_rejects_identity_and_plaintext_tail",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBracketedAuthorityResidualR7::test_bracket_branch_is_live_code"
+  ]
+}

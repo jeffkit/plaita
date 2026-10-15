@@ -322,9 +322,10 @@ _MASK_PLACEHOLDER = "***"
 #: * 键回看的区间 ``(b_i, s_i)`` **两两不交**——``s_i`` 本身不是 :data:`_KEY_CHARS`，
 #:   从 ``s_j``（j>i）向左的回看一旦碰到 ``s_i`` 就停下，故 ``b_j ≥ s_i``；
 #:   空白回看与转义反斜杠回看同理（间隔端点不可能是空白/反斜杠）。
-#: * 引号 ``find``：产出跨度时 ``i = v1`` 跳过已扫区间，区间两两不交；未产出跨度
-#:   只有两种情况——空值（``find`` 扫 0 字符）或切片恰为 ``***``（``find`` 扫 3
-#:   字符）；未闭合引号则一次扫到 ``n`` 后 ``i = n`` 直接结束。
+#: * 引号闭引号扫描（:func:`_find_closing_quote`）：产出跨度时 ``i = v1`` 跳过已扫
+#:   区间，区间两两不交；未产出跨度只有两种情况——空值（扫 0 字符）或切片恰为
+#:   ``***``（扫 3 字符）；未闭合引号则一次扫到 ``n`` 后 ``i = n`` 直接结束。
+#:   反斜杠计数是常数空间、每位置访问一次 ⇒ 扫描本身线性（r7 F3 的转义闭引号修法）。
 #:
 #: 故总体 O(n)、无回溯，不需要任何硬窗口。
 #: ASCII 空白——与 :data:`_ABSOLUTE_URL_RE` 同一条边界判据（只有 ASCII 空白结束 token）。
@@ -394,6 +395,34 @@ def _key_before_separator(text: str, sep_index: int) -> str:
     return text[j:end]
 
 
+def _find_closing_quote(text: str, start: int, quote: str) -> int:
+    """从 ``start`` 起找**未被反斜杠转义**的闭引号；找不到返回 ``len(text)``（r7）。
+
+    单趟前向扫：只有**紧邻的连续反斜杠个数为奇数**时，该引号才算被转义
+    （``\\"`` 转义、``\\\\"`` 不转义），与 Java / JSON 双重编码文本的约定一致。
+    用「先数反斜杠、再判奇偶」而不是「对每个引号往左看」是为了**线性**：
+    任一位置最多被访问一次，反斜杠计数是常数空间。
+
+    存在的理由（r7 F3）：``text.find(quote, v0)`` 会把值里被转义的 ``\\"`` 当闭引号
+    ⇒ 掩码停在 ``\\"`` 处，其后的原文（含密钥本体）整段留在输出里。r4/r5/r6 三版
+    都漏：``access_token="pre\\"Ks9Qm4Zt"`` → ``access_token="***"Ks9Qm4Zt"``。
+    """
+    n = len(text)
+    i = start
+    backslashes = 0
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            backslashes += 1
+            i += 1
+            continue
+        if ch == quote and backslashes % 2 == 0:
+            return i
+        backslashes = 0
+        i += 1
+    return n
+
+
 def _credential_run_spans(text: str) -> list:
     """扫出全部「凭据键 = 值」的**值跨度** ``(v0, v1)``（升序、不重叠）。
 
@@ -401,10 +430,15 @@ def _credential_run_spans(text: str) -> list:
     值跨度一旦命中就跳到 ``v1`` 继续扫（不回头）⇒ 整体 O(n)、无回溯。已经是占位
     ``***`` 的值不再产出跨度（掩码的不动点，二次清洗必须逐字不变）。
 
-    **带引号的值扫到真末尾**（r6）：``find`` 不再有 ``_QUOTED_VALUE_WINDOW`` 上界。
+    **带引号的值扫到真末尾**（r6）：不再有 ``_QUOTED_VALUE_WINDOW`` 上界。
     上界的代价是把第 4096 个字符之后的原文整段留在输出里（>4 KB 的断言值 + 密钥
     本体泄漏），而收益（避免二次代价）由 ``i = v1`` 的摊还已经给出——未闭合引号
     一次扫到 ``n`` 即结束，没有「每处都扫到串尾」的形态。
+
+    **值内部的转义引号不再截断掩码**（r7）：闭引号由 :func:`_find_closing_quote`
+    找——**未被反斜杠转义**的那个才算闭引号。旧实现（r4/r5/r6 三版）用
+    ``text.find`` 直接把 ``\\"`` 当闭引号 ⇒ 掩码停在它前面，其后原文（含密钥本体）
+    留在输出里：``access_token="pre\\"Ks9Qm4Zt"`` → ``access_token="***"Ks9Qm4Zt"``。
 
     值的开引号也认转义形态 ``\\"K\\"``（Java / 双重编码文本），与键侧同一残口。
     """
@@ -432,8 +466,8 @@ def _credential_run_spans(text: str) -> list:
             v0 = k + 2 if escaped else k + 1
             if v0 >= n:
                 continue
-            close = text.find(quote, v0)
-            v1 = n if close == -1 else close
+            close = _find_closing_quote(text, v0, quote)
+            v1 = close
         else:
             v0 = k
             v1 = v0
@@ -593,36 +627,89 @@ def _authority_of(token: str) -> str:
     return rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
 
 
-def _authority_may_hold_a_credential(authority: str) -> bool:
-    """无**实际掩码**的 token，其 authority 是否**可能**把凭据放在 host 位置（r6）。
+#: 单标签 host 的**闭合白名单**：只有这些「众所周知的本地名」在没有点号时才保留。
+#: 单标签是唯一「在字符层面与不透明凭据 token 无法区分」的形态（``h`` 与
+#: ``ks9qm4zt`` 都是合式 LDH 单标签），语法判据在这一格没有信息可用 ⇒ 除白名单外
+#: 一律 fail closed。**闭合**（不是前缀/词缀规则）：每加一个名字都要单独审查。
+#: 大小写不敏感。``host`` 在列是因为 r5 已钉住 ``http://host:8080`` 必须保留。
+_BENIGN_SINGLE_LABEL_HOSTS = frozenset({"h", "host", "localhost"})
+#: 合式 DNS 标签（LDH）：字母/数字/连字符，不以连字符开头或结尾，1–63 字符
+#: （RFC 1035 的长度上界正是这里挡住「把整条 JWT 放进 host 位置」的结构性理由）。
+_DNS_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
-    判据（只对「没有掩掉任何字节」的 token 施加）：**host 位置出现大写 ASCII 字母**
-    ⇒ 判为可能承载凭据，fail closed。
 
-    为什么是大小写而不是别的：
+def _is_dns_name(host: str) -> bool:
+    """≥2 个合式 LDH 标签的点分名（``example.com`` / ``API.EXAMPLE.COM`` / ``10.1.2.3``）。
 
-    * DNS 名大小写不敏感、惯例全小写；``authority`` 位置出现大写，在本单观察到的
-      泄漏家族里正是驼峰/混合大小写的不透明 token（``Ks9Qm4Zt``），而不是主机名；
-    * 必须与 r5 已经钉住的**无凭据端点**共存：``http://h`` / ``http://host:8080``
-      （全小写）保留，``http://example.com`` / ``https://api.example.com`` 保留，
-      ``http://[web,hook]:8443``（方括号端点形态）保留；只有
-      ``http://Ks9Qm4Zt``（及 ``http://Ks9Qm4Zt/``）这类**大写、无 payload 可掩**的
-      authority 退化常量。``http://localhost:8080`` 等全小写宿主不受影响。
-
-    代价与方向（刻意）：``http://Example.com`` 这类**合法但非常规的大写主机名**也会
-    退化为常量——可诊断性与不可泄漏冲突时，本单一律选后者（与
-    :func:`_mask_bracketed_absolute_url` 同一取舍）。
-
-    诚实边界：全小写的不透明 token（``http://ks9qm4zt``）本判据**不**覆盖——它与
-    ``http://h`` 在字符层面不可区分，属于与「冻结契约的 host 残留」并列的已声明残口。
+    IPv4 点分四段**不需要单独一腿**：纯数字标签本身就是合式 LDH 标签，所以
+    ``10.1.2.3`` 由本条覆盖（r7 曾写过一条 ``_is_ipv4_literal``，它是本条的真子集 ⇒
+    已删除，避免「看着在守、其实永远走不到」的死判据）。反过来说 ``256.1.2.3`` 也会
+    被当作**点分名**收下——语法上它确实是一个点分名，这不是 IP 校验器的位置。
     """
-    host = authority.rpartition("@")[2]
+    labels = host.split(".")
+    if len(labels) < 2:
+        return False
+    return all(_DNS_LABEL_RE.match(label) is not None for label in labels)
+
+
+def _host_is_identifiable(host: str) -> bool:
+    """host 是否**语法上可识别的宿主标识**——属性判据（r7；取代 r6 的大小写代理）。
+
+    **属性**：只有「渲染结果**没掩掉任何 path/query 字节**」的 token 才会走到这里
+    （见 :func:`_token_is_canonical`）。此时「保留端点」的唯一正当理由是「authority
+    是一个**语法上可识别的宿主标识**、不是凭据本体」。判据只依赖 host 的**结构**，
+    与大小写**无关**（r6 的「host 里有没有大写 ASCII」是代理，两个方向都错）：
+
+    1. **方括号 authority**（``[…]``）：``]`` 闭合即保留。这是 r3/r4 冻结的**端点
+       兜底契约**（:func:`_mask_bracketed_absolute_url`）——``urlsplit`` 把方括号内容
+       当 IPv6 字面量校验，``[bad]`` / ``[web,hook]`` / ``[web{hook]`` 一律被拒，
+       兜底保留 ``host`` 供运维定位。**代价（已声明，见
+       :func:`_scrub_url_text` 残口清单）**：``http://[Ks9Qm4Zt]`` 与合法端点
+       ``http://[bad]`` 是**同一个串类**（``[`` + 单个合式 DNS 标签 + ``]``），而
+       ``[bad]`` 的保留被既有测试钉住（``http://user:SECRET@[bad]:1/x?…`` →
+       ``http://[bad]:1``）⇒ 任何掩掉 ``[Ks9Qm4Zt]`` 的规则都会一起掩掉 ``[bad]``，
+       所以本判据在此格**不能** fail closed，只能登记。
+    2. 非方括号：剥掉 userinfo 与 ``:port`` 之后，host 必须是
+       * 一个 **≥2 标签的点分 DNS 名**（``example.com`` / ``api.example.com`` /
+         ``Example.com`` / ``API.EXAMPLE.COM``；每个标签是合式 LDH、1–63 字符。
+         ``10.1.2.3`` 这类 IPv4 点分四段由本腿覆盖——见 :func:`_is_dns_name`），或
+       * 一个**单标签**名，且其小写形式在**闭合白名单**
+         :data:`_BENIGN_SINGLE_LABEL_HOSTS`（``h`` / ``host`` / ``localhost``）。
+    3. 其余一律 fail closed（渲染结果不可用 ⇒ 退化为 :data:`UNPRINTABLE_URL`）。
+
+    **与 r6 的两个方向**（r6 把「大写字母」当判据，于是两向都错）：
+
+    * 假阴性（r6 放行、r4 曾是常量）：``http://ks9qm4zt`` / ``http://deadbeef`` /
+      ``http://hunter2`` / ``http://550e8400-e29b-41d4-a716-446655440000`` 这类
+      **全小写的不透明 token**。现在它们是「非白名单单标签」⇒ fail closed。
+    * 假阳性（r6 打成常量、r5/r4 曾保留）：``http://Example.com`` /
+      ``http://API.EXAMPLE.COM`` / ``http://EXAMPLE.com:443/`` 这类**合法点分 DNS 名**。
+      结构判据不看大小写 ⇒ 保留。
+
+    **代价（诚实边界，逐条可测）**：单标签但**不在**白名单里的名字同样 fail closed
+    ⇒ ``http://DESKTOP-ABC123``（真实机器名）、``http://webhook`` 这类合法单标签端点
+    也退化为常量。这是与 r5 已钉住的 ``http://h`` / ``http://host:8080`` 同一格的取舍：
+    可诊断性与不可泄漏冲突时选后者；该决定由
+    ``TestHostIdentityPropertyR7::test_single_label_non_whitelisted_is_declared_masked``
+    钉住。
+
+    **点分的不透明 token**（``http://secret.example``、把 JWT 放进 host 位置）只要每个
+    标签 ≤63 字符且是 LDH 就仍被保留——**已声明残口**，与「冻结契约的 host 残留」
+    （``http://Ks9Qm4Zt/x`` → ``http://Ks9Qm4Zt/***``）同类。63 字符的 DNS 标签上界
+    把**真实**的 JWT（单段通常远超 63）挡在 fail-closed 一侧。
+    """
+    host = host.rpartition("@")[2]
+    # 只留 authority 本体：``_authority_of`` 的同一刀（``/`` / ``?`` / ``#`` 之前）。
+    # 少了这一刀 ``http://h/`` 的 host 会读成 ``"h/"`` ⇒ 白的单标签名被判黑。
+    host = host.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
     if host.startswith("["):
-        return "]" not in host  # 方括号未闭合：凭据可能落在被截断的那段里
+        return "]" in host  # 方括号端点兜底：闭合即保留（r4 冻结契约，见 docstring）
     host = host.split(":", 1)[0]
     if not host:
+        return False
+    if _is_dns_name(host):
         return True
-    return host != host.lower()
+    return host.lower() in _BENIGN_SINGLE_LABEL_HOSTS
 
 
 def _token_is_canonical(token: str) -> bool:
@@ -643,16 +730,19 @@ def _token_is_canonical(token: str) -> bool:
       <unprintable-url>``）。渲染器的职责是掩**凭据**，不是擦掉 URL；没有 payload
       就意味着没有 path/query 可泄，端点本身保留即是正确渲染。
 
-     **r6 收紧（FINDING 3 的过宽处）**：r5 把「无 payload 的裸端点」整类放进不动点，
-     于是 ``http://Ks9Qm4Zt``（host 位置就是密钥本体）也从 r4 的常量变成了原文——
-     那是 r5 相对 r4 新开的暴露面。现在两条同时成立才算不动点：
+     **r6 收紧（FINDING 3 的过宽处）+ r7 换成属性判据**：r5 把「无 payload 的裸端点」
+     整类放进不动点，于是 ``http://Ks9Qm4Zt``（host 位置就是密钥本体）也从 r4 的常量
+     变成了原文——那是 r5 相对 r4 新开的暴露面。现在两条同时成立才算不动点：
 
      * payload 为**空或只剩结构分隔符**（``/``、``//``、``?``、``#``），或**只有
        fragment 被掩**——即没有掩掉任何 path/query 字节，不能作为「保留可疑
        authority」的理由；payload 的 path/query 里只要有 ``***``（真掩过）就仍是
        合法不动点；
-     * authority **不像**承载凭据的形态（:func:`_authority_may_hold_a_credential`）：
-       host 位置出现大写 ASCII 字母即判 fail-closed。
+     * authority 必须是**语法上可识别的宿主标识**（r7；见
+       :func:`_host_is_identifiable` 里的属性与其代价）：≥2 标签的点分
+       DNS 名 / 闭合的方括号端点 / 白名单里的本地单标签名。**与大小写无关**——r6 的
+       「host 里有没有大写 ASCII」是代理，两个方向都错（全小写的不透明 token 被放行，
+       合法的大写主机名被打成常量）。
 
     反之 ``http://[web``（``[`` **未闭合**、无 payload，r3 反例 A 的根因）仍**不是**
     不动点：凭据可能落在被截断的方括号里，且它的身份替换正是 r4 修掉的那个缺口。
@@ -667,16 +757,17 @@ def _token_is_canonical(token: str) -> bool:
         if _MASK_PLACEHOLDER in payload.partition("#")[0]:
             return True
         # 纯结构 payload（``/`` / ``?`` / ``#``）或只有 fragment 被掩：
-        # 落到下面的 authority 判据（r6）。
+        # 落到下面的 authority 判据（r6，r7 改成属性判据）。
     scheme, sep, rest = token.partition("://")
     if not sep or scheme.lower() not in _ENDPOINT_SCHEMES:
         return False
-    authority = rest.rpartition("@")[2]
+    authority = _authority_of(token).rpartition("@")[2]
     if not authority:
         return False
-    if authority.startswith("["):
-        return "]" in authority
-    return not _authority_may_hold_a_credential(authority)
+    # r7：方括号**不**在这里短路——交给 :func:`_host_is_identifiable` 一并判，
+    # 它的方括号分支因此是**活代码**（r6 的同一分支是死代码：唯一的调用者在这里
+    # 就先 `return "]" in authority` 了）。
+    return _host_is_identifiable(authority)
 
 
 def _leaves_plaintext_payload(token: str, rendered: str) -> bool:
@@ -770,7 +861,9 @@ def _scrub_url_text(text: object) -> str:
       驼峰/粘连键名、JSON 引号值、转义引号 ``\"k\":\"v\"`` 一并覆盖，见
       :func:`_credential_run_spans` 上方的判据与线性证明）；
     * **url 端点**在「没有掩到任何字节」时的取舍见 :func:`_token_is_canonical`
-      （无凭据端点保留；authority 位置疑似凭据则 fail-closed）。
+      （判据是**属性**：authority 必须是语法上可识别的宿主标识——点分 DNS 名（含
+      IPv4 点分四段）/ 白名单本地单标签 / 闭合方括号端点；否则 fail-closed。见
+      :func:`_host_is_identifiable`）。
 
     **判据的诚实边界（r4 明确并钉住）**：本清洗器认的是「URL 形状 **或** 凭据键
     的 ``key=value`` 串」。因此：
@@ -784,7 +877,7 @@ def _scrub_url_text(text: object) -> str:
       由 ``TestBareCredentialRunIsMasked::test_non_credential_key_value_runs_pass_through``
       钉住（该引用的可解析性由 ``TestDocstringReferencesResolve`` 钉住，防漂移）。
 
-    **r6 声明的残口（未修，逐条给可达性）**：
+    **r6 声明、r7 仍有（逐条给可达性与理由）**：
 
     * **CJK / 非 ASCII 键名**（``密钥=K…``）不命中——词干表全是 ASCII 小写分量，
       且 :data:`_KEY_CHARS` 只含 ASCII 字母数字与 ``_.-``。现实可达性取决于上游
@@ -793,12 +886,26 @@ def _scrub_url_text(text: object) -> str:
       值在 ``>`` 处**立即结束** ⇒ 跨度为空、原文穿过；
     * **``client_id`` / ``access_key_id``** 是 OAuth/AWS 的**标识符**而非密钥，
       词干表里没有它们 ⇒ 刻意不掩（与 ``code`` / ``port`` 同类；评审已接受）；
-    * **全小写的不透明 token 落在 host 位置**（``http://ks9qm4zt``）不触发
-      :func:`_authority_may_hold_a_credential`——它与 r5 已钉住的 ``http://h``
-      在字符层面不可区分，属于与「冻结契约的 host 残留」并列的残口。
+    * **方括号 authority 里的凭据**（``http://[Ks9Qm4Zt]``、``http://[Ks9Qm4Zt]:8443``、
+      ``http://[Ks9Qm4Zt]/x``）：保留。理由**不是**「没看出来」，而是**与合法端点同串
+      类**——``http://[bad]``（``[`` + 单个合式 DNS 标签 + ``]``）的保留被既有测试钉住
+      （``http://user:SECRET@[bad]:1/x?…`` → ``http://[bad]:1``），任何掩掉
+      ``[Ks9Qm4Zt]`` 的规则都会一起掩掉 ``[bad]``。属于 :func:`_host_is_identifiable`
+      第 1 条的**冻结契约代价**；
+    * **点分的不透明 token 落在 host 位置**（``http://secret.example``、每个标签
+      ≤63 字符的 JWT 形 host）：``_is_dns_name`` 只看标签文法 ⇒ 保留。与「冻结契约的
+      host 残留」（``http://Ks9Qm4Zt/x`` → ``http://Ks9Qm4Zt/***``）同类；真实 JWT
+      的单段长度通常远超 63 ⇒ 结构性地落在 fail-closed 一侧；
+    * **单标签但不在白名单里的合法主机名**（``http://DESKTOP-ABC123``、``http://webhook``）
+      退化为常量——:func:`_host_is_identifiable` 的取舍代价（宁 fail closed）。
 
-    ``{\"token\":\"K\"}``（Java / 双重编码文本里的**转义引号**）曾是残口，r6 已关闭：
-    键侧剥闭引号后再跳过转义反斜杠、值侧认 ``\"`` 开引号。
+    ``http://ks9qm4zt`` 这类**全小写的不透明单标签 host** 曾是 r6 的残口
+    （判据只看大写字母），r7 已关闭：非白名单单标签一律 fail closed。
+
+    ``{\"token\":\"K\"}``（Java / 双重编码文本里的**转义引号**）曾是残口，r6 关了键侧
+    与值的开引号；**值内部的转义引号**（``token="pre\"K"``、``{\"token\":\"a\"bK\"}``）
+    在 r4/r5/r6 **三版都漏**（掩码停在 ``\"`` 处、其后原文留在输出里），r7 关闭
+    （:func:`_find_closing_quote` 单趟前向扫描，见该函数）。
 
     **total**（与 ``url_redaction._mask_webhook_url`` 同一判据）：任何输入都返回
     ``str``；清洗过程任何异常退化为 ``UNPRINTABLE_URL``，绝不上抛、绝不回原文；

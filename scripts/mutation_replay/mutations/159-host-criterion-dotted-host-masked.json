@@ -1,0 +1,14 @@
+{
+  "name": "159-host-criterion-dotted-host-masked",
+  "concern": "#159-r7-F1",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "    if _is_dns_name(host):\n        return True\n",
+  "new": "    if _is_dns_name(host):\n        return False  # mutant: 合法点分宿主名也 fail closed\n",
+  "rationale": "F1 的**假阳性方向**单独成变异：把「点分 DNS 名 ⇒ 保留」这一腿掐掉 ⇒ `http://Example.com` / `https://api.example.com` / `http://example.com` 这类**无凭据端点**退化为常量（r5 FINDING 3 的过宽拒绝回来）。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestHostIdentityPropertyR7::test_dotted_hosts_are_kept[Example.com]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestHostIdentityPropertyR7::test_dotted_hosts_are_kept[API.EXAMPLE.COM]",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestCredentialFreeUrlsKeepTheirEndpoint::test_endpoint_survives[bare-host]"
+  ]
+}

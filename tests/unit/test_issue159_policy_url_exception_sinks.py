@@ -1901,18 +1901,29 @@ class TestDeclaredGapsR6:
         assert _scrubber()("access_key_id=" + SECRET) == "access_key_id=***"
         assert _is_credential_key()("client_id") is False
 
-    def test_lowercase_opaque_host_is_declared(self):
-        """全小写的不透明 token 落在 host 位置不触发 r6 判据——它与 r5 钉住的
-        ``http://h`` 在字符层面不可区分（与冻结契约的 host 残口并列）。"""
-        assert _scrubber()("http://ks9qm4zt") == "http://ks9qm4zt"
+    def test_lowercase_opaque_host_is_no_longer_a_gap(self):
+        """r6 的残口 **r7 已关闭**：全小写的不透明 token 落在 host 位置时不再穿过。
+
+        r6 判据只看「host 里有没有大写 ASCII」，于是 ``http://ks9qm4zt`` 与 r5 钉住的
+        ``http://h`` 一样被放行；r7 换成属性判据（非白名单单标签 fail closed），
+        与 ``http://Ks9Qm4Zt`` 同一格。方向断言：**必须**变常量。
+        """
+        assert _scrubber()("http://ks9qm4zt") == UNPRINTABLE_URL
 
     def test_escaped_json_quotes_are_now_closed(self):
         """Java / 双重编码文本里的 ``\\"token\\":\\"K\\"`` 曾是残口（``\\`` 隔断回看），
-        r6 关闭：键侧跳过转义反斜杠、值侧认 ``\\"`` 开引号。"""
+        r6 关闭了键侧与值的开引号。
+
+        **r7 更正了闭引号的判据**：r6 用 ``text.find``，把 ``\\"`` 当成闭引号 ⇒ 值里
+        的转义引号会**截断掩码**。r7 要求闭引号是**未被转义**的那个（见
+        :func:`_find_closing_quote`），代价是双重编码文本里「每个引号都写成 ``\\"``」
+        时找不到闭引号 ⇒ 掩到串尾（**fail closed**，宁可多掩）。精确形态由
+        ``TestEscapedQuoteInValueR7`` 逐条钉住。
+        """
         assert _scrubber()('{\\"token\\":\\"' + SECRET + '\\"}') == \
-            '{\\"token\\":\\"***"}'
+            '{\\"token\\":\\"***'
         assert _scrubber()('fail \\"access_token\\"=\\"' + SECRET + '\\"') == \
-            'fail \\"access_token\\"=\\"***"'
+            'fail \\"access_token\\"=\\"***'
 
     def test_escaped_form_is_linear(self):
         """关闭残口不许引入回溯：一遍 256 KB 的转义形态必须远低于上限。"""
@@ -1924,3 +1935,415 @@ class TestDeclaredGapsR6:
         elapsed = time.monotonic() - started
         _assert_clean(rendered, "r6-escaped-256k")
         assert elapsed < 2.0, f"转义形态 256 KB 耗时 {elapsed:.3f}s —— 退化了？"
+
+
+# --------------------------------------------------------------------------- #
+# ㉔ r7（F1）：host 判据从「大小写代理」换成**属性** —— 两个方向 + 大小写不变性
+# --------------------------------------------------------------------------- #
+def _host_identity():
+    fn = getattr(http_mod, "_host_is_identifiable", None)
+    assert fn is not None, (
+        "缺少 plaita/node/http.py::_host_is_identifiable（r7 的 host 属性判据）"
+    )
+    return fn
+
+
+def _closing_quote_scanner():
+    fn = getattr(http_mod, "_find_closing_quote", None)
+    assert fn is not None, (
+        "缺少 plaita/node/http.py::_find_closing_quote（r7 的转义闭引号扫描）"
+    )
+    return fn
+
+
+#: r6 的**假阴性**：r6 的「host 出现大写 ASCII 字母」代理放行、r4 曾是常量。
+#: 全部是「全小写的不透明 token 落在 host 位置」这一类。
+_R7_LOWERCASE_OPAQUE_HOSTS = (
+    ("ks9qm4zt", "http://ks9qm4zt"),
+    ("ks9qm4zt-slash", "http://ks9qm4zt/"),
+    ("ks9qm4zt-port", "http://ks9qm4zt:8080"),
+    ("hex-16", "http://7f3a9c2b8e1d4f6a"),
+    ("hex-8", "http://deadbeef"),
+    ("hex-12", "http://a1b2c3d4e5f6"),
+    ("password-word", "http://hunter2"),
+    ("secret-word", "http://secret"),
+    ("b64url-ish", "http://eyjhbgcioi"),
+    ("punycode", "http://xn--ks9qm4zt"),
+    ("alnum-12", "http://abc123def456"),
+    ("uuid", "http://550e8400-e29b-41d4-a716-446655440000"),
+    ("in-sentence", "Failed to connect to http://deadbeef"),
+    ("quoted", "boom url='http://hunter2'"),
+    ("userinfo", "http://user:pw@ks9qm4zt"),
+    ("port-and-slash", "http://7f3a9c2b8e1d4f6a:443/"),
+)
+
+#: r6 的**假阳性**：r6 打成常量、r4/r5 保留的**合法点分 DNS 名 / 白名单本地名**。
+_R7_DOTTED_HOSTS_KEPT = (
+    ("Example.com", "http://Example.com"),
+    ("MyHost.local", "http://MyHost.local"),
+    ("API.EXAMPLE.COM", "http://API.EXAMPLE.COM"),
+    ("EXAMPLE.COM-slash", "http://EXAMPLE.COM/"),
+    ("EXAMPLE.com-443-slash", "http://EXAMPLE.com:443/"),
+    ("Localhost-8080", "http://Localhost:8080"),
+    ("mixed-dot", "https://Api.Example.COM:8443"),
+)
+
+#: 单标签**闭合白名单**（大小写不敏感）：只有这些众所周知的本地名保留。
+_R7_BENIGN_SINGLE_LABELS = ("h", "host", "localhost", "H", "HOST", "LocalHost")
+#: 单标签但**不在**白名单：一律 fail closed（含真实机器名这一格代价）。
+_R7_NON_BENIGN_SINGLE_LABELS = (
+    "ks9qm4zt", "Ks9Qm4Zt", "deadbeef", "hunter2", "secret", "webhook",
+    "DESKTOP-ABC123", "myhost", "internal", "xn--ks9qm4zt", "a1b2c3d4e5f6",
+)
+
+
+def _r7_lowercase_opaque_needs(label: str) -> list:
+    """把 host 本体当密钥，逐条给 ≥3 字符前后缀 needle（与 ``leak_needles`` 同口径）。"""
+    return leak_needles(label)
+
+
+class TestHostIdentityPropertyR7:
+    """F1：**属性判据**取代 r6 的「host 里有没有大写 ASCII」代理。
+
+    属性（见 ``plaita/node/http.py::_host_is_identifiable``）：没有真掩码的 token 只在
+    authority 是**语法上可识别的宿主标识**时保留端点——IPv4 字面量 / ≥2 标签的点分
+    DNS 名（含 IPv4 点分四段）/ 闭合方括号端点 / 白名单里的本地单标签名；其余 fail closed。
+    判据与大小写**无关**。
+    """
+
+    @pytest.mark.parametrize(
+        "label,text", _R7_LOWERCASE_OPAQUE_HOSTS, ids=[c[0] for c in _R7_LOWERCASE_OPAQUE_HOSTS]
+    )
+    def test_lowercase_opaque_hosts_fail_closed(self, label, text):
+        """假阴性方向（r6 放行、r4 曾是常量）：全小写的不透明 host 必须变常量。
+
+        ``ks9qm4zt`` 这一格就是「非白名单单标签」，与 ``Ks9Qm4Zt`` 同一判据——
+        r6 只看大小写，所以只抓到了后者。
+        """
+        rendered = _scrubber()(text)
+        needles = _r7_lowercase_opaque_needs(label) if label not in ("in-sentence", "quoted", "userinfo", "port-and-slash") else []
+        if needles:
+            hits = find_needles(rendered, needles)
+            assert hits == [], f"r7[{label}]：host 本体留在输出里（needles={hits}）：{rendered!r}"
+        assert rendered.endswith(UNPRINTABLE_URL), f"r7[{label}]：实际={rendered!r}"
+        assert rendered != text, f"r7[{label}]：原文穿过"
+
+    @pytest.mark.parametrize(
+        "label,text", _R7_DOTTED_HOSTS_KEPT, ids=[c[0] for c in _R7_DOTTED_HOSTS_KEPT]
+    )
+    def test_dotted_hosts_are_kept(self, label, text):
+        """假阳性方向（r6 打成常量、r5/r4 保留）：合法点分 DNS 名必须**逐字保留**。
+
+        这就是 F4 要的那条「会红」的断言：判据若退回大小写代理，这些行立刻变红。
+        """
+        rendered = _scrubber()(text)
+        assert rendered == text, f"r7-kept[{label}]：实际={rendered!r} 期望={text!r}"
+
+    @pytest.mark.parametrize(
+        "label,text", _R7_DOTTED_HOSTS_KEPT, ids=[c[0] for c in _R7_DOTTED_HOSTS_KEPT]
+    )
+    def test_dotted_hosts_are_fixed_points(self, label, text):
+        once = _scrubber()(text)
+        assert _scrubber()(once) == once, f"r7-kept[{label}]：非幂等（{once!r}）"
+
+    @pytest.mark.parametrize(
+        "label,text", _R7_DOTTED_HOSTS_KEPT + _R7_LOWERCASE_OPAQUE_HOSTS,
+        ids=[c[0] for c in _R7_DOTTED_HOSTS_KEPT + _R7_LOWERCASE_OPAQUE_HOSTS],
+    )
+    def test_six_surfaces_through_the_real_entry_point(self, label, text):
+        """六个输出面**逐字**带着清洗后的形态（真节点 + 真 ``_handle_node_error``）。
+
+        断言用「清洗器的输出必须原样出现在每个面里」而不是「面里有密钥」——前者同时
+        钉住「保留了该保留的」与「掩掉了该掩的」，也让大小写代理回退时立刻变红。
+        """
+        expected = _scrubber()(text)
+        node, exc = _entry_exception(text, "gen")
+        for name, rendered in _six_surfaces(node, exc).items():
+            assert expected in rendered, (
+                f"r7[{label}] {name}: 期望 {expected!r} 出现在面里，实际 {rendered[:200]!r}"
+            )
+
+    @pytest.mark.parametrize("path", ("gen", "do"))
+    def test_lowercase_opaque_host_is_constant_on_both_paths(self, path):
+        node, exc = _entry_exception("http://ks9qm4zt", path)
+        for name, rendered in _six_surfaces(node, exc).items():
+            _assert_clean(rendered, f"r7-lower[{path}] {name}")
+            assert "ks9qm4zt" not in rendered, f"r7-lower[{path}] {name}: {rendered!r}"
+
+    def test_single_label_whitelist_is_closed(self):
+        """单标签白名单：**闭合**、大小写不敏感、逐个可审。"""
+        fn = _host_identity()
+        for name in _R7_BENIGN_SINGLE_LABELS:
+            assert fn(name) is True, name
+        for name in _R7_NON_BENIGN_SINGLE_LABELS:
+            assert fn(name) is False, name
+
+    def test_single_label_non_whitelisted_is_declared_masked(self):
+        """代价（已声明）：单标签但不在白名单里的**合法**端点也退化为常量。
+
+        ``http://DESKTOP-ABC123`` 是真实机器名，r5 保留、r6 也保留（大写不受 r6 判据
+        影响？——不，r6 的判据正是「有大写就 fail closed」，所以 r6 **已经**把它打成
+        常量）。方向刻意：单标签是唯一与不透明凭据不可区分的形态，语法判据在这一格
+        没有信息，只能 fail closed。
+        """
+        assert _scrubber()("http://DESKTOP-ABC123") == UNPRINTABLE_URL
+        assert _scrubber()("http://webhook") == UNPRINTABLE_URL
+        assert _host_identity()("DESKTOP-ABC123") is False
+        assert _host_identity()("webhook") is False
+
+    def test_case_invariance_of_the_decision(self):
+        """属性判据必须**与大小写无关**——r6 的代理正是这一条不成立。
+
+        对每个样本，``lower()`` / ``upper()`` / ``swapcase()`` 三种写法必须给出**同一
+        个**判定（保留 ⇔ 保留）。这直接杀死「看字符类/大小写」的判据形态。
+        """
+        fn = _host_identity()
+        samples = (
+            "example.com", "API.EXAMPLE.COM", "MyHost.local", "ks9qm4zt", "Ks9Qm4Zt",
+            "DESKTOP-ABC123", "h", "LOCALHOST", "10.1.2.3", "deadbeef",
+            "EXAMPLE.com:443", "550e8400-e29b-41d4-a716-446655440000",
+        )
+        for sample in samples:
+            verdicts = {fn(v) for v in (sample, sample.lower(), sample.upper(), sample.swapcase())}
+            assert len(verdicts) == 1, f"{sample!r}: 判定随大小写变化 {verdicts}"
+            rendered = {_scrubber()(f"http://{v}") for v in (sample, sample.lower())}
+            assert all(r == UNPRINTABLE_URL for r in rendered) or all(
+                r != UNPRINTABLE_URL for r in rendered
+            ), f"{sample!r}: 清洗结果随大小写变化 {rendered}"
+
+    def test_ip_literal_and_dns_name_structure(self):
+        """结构判据本体：≥2 标签 DNS 名（含 IPv4 点分四段）/ 单标签白名单 / 空串。"""
+        fn = _host_identity()
+        assert fn("10.1.2.3") is True
+        assert fn("255.255.255.255") is True
+        # ``256.1.2.3`` 不是 IP，但**语法上**是 4 标签点分名 ⇒ 收下（这里不是 IP 校验器）
+        assert fn("256.1.2.3") is True
+        assert fn("10.1.2") is True                # 3 标签数字名同样是点分名
+        assert fn("example.com") is True
+        assert fn("a.b.c.d.e.f") is True
+        assert fn("-bad.example") is False         # 标签以连字符开头
+        assert fn("bad-.example") is False         # 标签以连字符结尾
+        assert fn("example..com") is False         # 空标签
+        assert fn("") is False
+        assert fn("a" * 64 + ".example") is False   # 标签 >63 字符（RFC 1035 上界）
+        assert fn("a" * 63 + ".example") is True    # 恰好 63 ⇒ 仍合式
+
+    def test_dotted_opaque_host_is_a_declared_residual(self):
+        """**已声明残口**：点分的不透明 token 只要每个标签 ≤63 字符且是 LDH 就仍保留。
+
+        ``http://secret.example`` 是 r4 曾掩、r7 保留的一格（与「冻结契约的 host 残留」
+        同类）。结构性理由：真实 JWT 的单段长度通常远超 63 字符 ⇒ 落在 fail-closed 侧
+        （见下一条），但**短**的点分 token（如 ``secret.example``）留不住。
+        """
+        assert _scrubber()("http://secret.example") == "http://secret.example"
+        short_jwt_host = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0"  # 两段、各 ≤63
+        assert _scrubber()(f"http://{short_jwt_host}") == f"http://{short_jwt_host}"
+
+    def test_real_jwt_host_with_long_segment_fails_closed(self):
+        """63 字符上界的结构性收益：**真实** JWT（单段远超 63）落进 fail-closed 侧。"""
+        header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        payload_len = 300
+        payload = "A" * payload_len
+        host = f"{header}.{payload}.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c"
+        assert any(len(part) > 63 for part in host.split("."))
+        assert _host_identity()(host) is False
+        assert _scrubber()(f"http://{host}") == UNPRINTABLE_URL
+
+    def test_fuzz_single_label_family_all_fail_closed(self):
+        """fuzz（**穷举**、无随机源）：单标签 host 族**全部** fail closed。
+
+        生成器口径（写死便于复算）：``itertools.product`` over
+        ``"abk9qm4zth"``，长度 1..5，共 ``8+64+512+4096+32768 = 37448`` 条。
+        白名单里的 ``h`` 是唯一例外（长度 1，单独排除）。与该族对照，r6 的实现
+        （大小写代理）会**全数放行**——见 ``host_fuzz.py`` 的四版对照：``[a-z0-9]``
+        长度 ≤3 的 47988 条里 r6 放行 47988 条、r4 全判常量。
+        """
+        import itertools
+
+        fn = _host_identity()
+        scrub = _scrubber()
+        alphabet = "abk9qm4zth"
+        checked = 0
+        for n in range(1, 6):
+            for tup in itertools.product(alphabet, repeat=n):
+                host = "".join(tup)
+                if host in _R7_BENIGN_SINGLE_LABELS:
+                    continue
+                assert fn(host) is False, f"fuzz: {host!r} 被判为可识别宿主"
+                checked += 1
+        assert checked >= 37000, f"fuzz 覆盖面太小（{checked}）"
+
+    def test_fuzz_dns_family_all_kept(self):
+        """fuzz 的反方向（**穷举**）：点分 DNS 名 + 其大小写变体**全部**逐字保留。
+
+        生成器口径：``alphabet="abk9"`` 上长度 1..3 的标签 × ``{com, local, COM}``
+        的点分组合，共 ``(4+16+64)*3 = 252`` 条；再对每条做 ``upper/title/capitalize``
+        变体。r6 的实现把其中带大写的全部打成常量（假阳性）。
+        """
+        import itertools
+
+        scrub = _scrubber()
+        alphabet = "abk9"
+        tlds = ("com", "local", "COM")
+        checked = 0
+        for n in range(1, 4):
+            for tup in itertools.product(alphabet, repeat=n):
+                lab = "".join(tup)
+                for tld in tlds:
+                    for host in (f"{lab}.{tld}", f"{lab.upper()}.{tld}", f"{lab.title()}.{tld}"):
+                        assert scrub(f"http://{host}") == f"http://{host}", host
+                        checked += 1
+        assert checked >= 250, f"fuzz 覆盖面太小（{checked}）"
+
+    def test_fuzz_case_invariance_is_exhaustive_on_the_family(self):
+        """判据必须**与大小写无关**——对穷举族逐条验四种写法给出同一判定。
+
+        这正是「代理 vs 属性」的可判据化：r6 的大小写判据在这一条上必然变红。
+        """
+        import itertools
+
+        fn = _host_identity()
+        alphabet = "abk9"
+        checked = 0
+        for n in range(1, 5):
+            for tup in itertools.product(alphabet, repeat=n):
+                host = "".join(tup)
+                verdicts = {fn(v) for v in (host, host.lower(), host.upper(), host.swapcase())}
+                assert len(verdicts) == 1, f"{host!r}: 判定随大小写变化 {verdicts}"
+                checked += 1
+        assert checked >= 300, f"fuzz 覆盖面太小（{checked}）"
+
+
+class TestBracketedAuthorityResidualR7:
+    """F2：方括号 authority 的**已声明残口** + 死代码转活代码。
+
+    ``http://[Ks9Qm4Zt]`` / ``http://[Ks9Qm4Zt]:8443`` 在 r4/r5/r6 都**逐字穿过**
+    （未声明）。r7 的选择是**声明**而不是掩掉，理由是可证的**同串类**：
+    ``http://[bad]``（``[`` + 单个合式 DNS 标签 + ``]``）的保留被既有测试钉住
+    （``http://user:SECRET@[bad]:1/x?access_token=…`` → ``http://[bad]:1``，
+    ``TestBracketedEndpointFallback::test_userinfo_is_dropped_but_endpoint_is_kept``），
+    因此任何能掩掉 ``[Ks9Qm4Zt]`` 的规则都会一起掩掉 ``[bad]``。
+    """
+
+    def test_pinned_benign_bracket_endpoint_is_the_same_string_class(self):
+        """同串类证明：``[bad]`` 与 ``[Ks9Qm4Zt]`` 都是「单标签方括号 authority」。
+
+        两者都保留；下面的断言把「合法端点必须保留」与「可疑端点也保留」并排钉住——
+        谁想掩掉后者，必须先让前者变红。
+        """
+        benign = "http://[bad]"
+        suspicious = f"http://[{SECRET}]"
+        assert _scrubber()(benign) == benign
+        assert _scrubber()(suspicious) == suspicious
+        assert _host_identity()("[bad]") is True
+        assert _host_identity()(f"[{SECRET}]") is True
+
+    @pytest.mark.parametrize("text", (
+        f"http://[{SECRET}]",
+        f"http://[{SECRET}]:8443",
+        f"http://[{SECRET}]/x",
+        f"http://[{SECRET}]/x?access_token=Q",
+        "Failed to connect to http://[bad]",
+        "http://[web,hook]:8443",
+        "http://[webhook.internal]:8443",
+        "http://[::1]:8080",
+        "http://user:pw@[bad]:1/x?access_token=Q",
+    ))
+    def test_declared_bracket_forms_are_fixed_points(self, text):
+        once = _scrubber()(text)
+        assert _scrubber()(once) == once, f"方括号形态非幂等：{text!r} -> {once!r}"
+
+    def test_bracket_branch_is_live_code(self):
+        """F2 第二半：``_host_is_identifiable`` 的方括号分支必须是**活代码**。
+
+        r6 的同一分支是死代码——唯一的调用者 ``_token_is_canonical`` 在调用之前就先
+        ``return "]" in authority``。现在方括号**不**短路，分支被真实调用。
+        """
+        fn = _host_identity()
+        assert fn("[bad]") is True
+        assert fn(f"[{SECRET}]") is True
+        assert fn("[web") is False            # 未闭合 ⇒ fail closed（r3 反例 A 的根因）
+        assert fn("") is False
+        # 与 ``_token_is_canonical`` 的入口一致：未闭合方括号不是不动点
+        assert http_mod._token_is_canonical("http://[web") is False
+        assert http_mod._token_is_canonical("http://[bad]") is True
+
+    def test_unclosed_bracket_still_never_passes_through(self):
+        assert _scrubber()(f"http://[web/robot/send?access_token={SECRET}") != \
+            f"http://[web/robot/send?access_token={SECRET}"
+
+
+#: F3 的逐条形态：值**内部**的转义引号（r4/r5/r6 三版都截断掩码）。
+#: 显式 ``ids`` 是必须的——pytest 默认把整条文本塞进 node id，而变异声明的
+#: ``expect_fail`` 行必须逐字可寻址（否则「声明行真红」无法机读校验）。
+#: 上面七条里挑三条做幂等钉子（修法不得把掩码形态变成非不动点）。
+_R7_IDEMPOTENT_F3_IDS = frozenset({"dq-inner-escape", "json-dq-inner-escape",
+                                   "java-double-encoded"})
+
+_R7_ESCAPED_VALUE_CASES = (
+    ("dq-inner-escape", 'access_token="pre\\"' + SECRET + '"'),
+    ("dq-inner-escape-2", 'token="a\\"b' + SECRET + '"'),
+    ("sq-inner-escape", "password='pre\\'" + SECRET + "'"),
+    ("json-dq-inner-escape", '{"token":"pre\\"' + SECRET + '"}'),
+    ("json-dq-escape-then-plain", '{"token":"a\\"b' + SECRET + '"}'),
+    ("java-double-encoded", '{\\"token\\":\\"a\\"b' + SECRET + '\\"}'),
+    ("key-side-and-inner", 'failed "password"="pre\\"' + SECRET + '"'),
+)
+
+
+class TestEscapedQuoteInValueR7:
+    """F3：值**内部**的转义引号不再截断掩码（r4/r5/r6 三版都漏）。
+
+    r6 只关了键侧与值的**开**引号；``text.find(quote, v0)`` 仍把 ``\\"`` 当闭引号 ⇒
+    掩码停在 ``\\"`` 处，其后原文（含密钥本体）整段留在输出里。r7 由
+    :func:`_find_closing_quote` 找**未被反斜杠转义**的闭引号。
+    """
+
+    @pytest.mark.parametrize(
+        "label,text", _R7_ESCAPED_VALUE_CASES, ids=[c[0] for c in _R7_ESCAPED_VALUE_CASES]
+    )
+    def test_escaped_quote_in_value_never_truncates_the_mask(self, label, text):
+        rendered = _scrubber()(text)
+        hits = find_needles(rendered, leak_needles(SECRET))
+        assert hits == [], f"r7-f3[{label}]：转义引号截断了掩码（needles={hits}）：{rendered!r}"
+        assert SECRET not in rendered, f"r7-f3[{label}]：{rendered!r}"
+
+    @pytest.mark.parametrize(
+        "label,text", tuple(c for c in _R7_ESCAPED_VALUE_CASES
+                            if c[0] in _R7_IDEMPOTENT_F3_IDS),
+        ids=[c[0] for c in _R7_ESCAPED_VALUE_CASES if c[0] in _R7_IDEMPOTENT_F3_IDS],
+    )
+    def test_escaped_quote_forms_are_idempotent(self, label, text):
+        once = _scrubber()(text)
+        assert _scrubber()(once) == once, f"r7-f3[{label}]：非幂等（{once!r}）"
+
+    def test_exact_shapes_of_the_enumerated_f3_cases(self):
+        """逐条钉住 r4/r5/r6 的泄漏形态与 r7 的修法（精确字符串）。"""
+        assert _scrubber()('access_token="pre\\"' + SECRET + '"') == 'access_token="***"'
+        assert _scrubber()('token="a\\"b' + SECRET + '"') == 'token="***"'
+        assert _scrubber()('{"token":"pre\\"' + SECRET + '"}') == '{"token":"***"}'
+        assert _scrubber()('{\\"token\\":\\"a\\"b' + SECRET + '\\"}') == '{\\"token\\":\\"***'
+
+    def test_closing_quote_scanner_skips_escaped_quotes(self):
+        """扫描器本体：只有**奇数个**紧邻反斜杠才算转义（``\\"`` 转义、``\\\\"`` 不转义）。"""
+        scan = _closing_quote_scanner()
+        assert scan('ab"cd', 0, '"') == 2
+        assert scan('ab\\"cd"ef', 0, '"') == 6          # 第一个被转义（下标 3），跳到下标 6
+        assert scan('ab\\\\"cd', 0, '"') == 4           # 两个反斜杠 ⇒ 不转义
+        assert scan('ab\\\\\\"cd', 0, '"') == 8         # 三个 ⇒ 转义（无闭引号 ⇒ 串尾）
+        assert scan("no quote here", 0, '"') == len("no quote here")
+        assert scan('a"b', 3, '"') == 3                 # 起点即闭引号
+
+    def test_escaped_quote_scan_is_linear(self):
+        """线性钉子：长转义运行不许退化（反斜杠计数是单趟常数空间）。"""
+        import time
+
+        for text in (
+            'token="' + "\\\\" * 20000 + '"',
+            'token="' + 'a\\"' * 20000 + '"',
+            'token="' + "\\" * 40000,
+        ):
+            started = time.monotonic()
+            _scrubber()(text)
+            elapsed = time.monotonic() - started
+            assert elapsed < 2.0, f"转义运行 {len(text)} 字符耗时 {elapsed:.3f}s —— 退化了？"
