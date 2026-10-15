@@ -32,6 +32,7 @@ import random
 import pytest
 
 from plaita.core.url_redaction import UNPRINTABLE_URL, _mask_url_for_log
+import plaita.server.factory  # noqa: F401 — plaita#160/#161 重切：_mask_url 注册点在 factory 模块体（不 import 则 fail-closed）
 from tests.unit._url_sink_support import (
     PLAITA_DIR,
     PingFailingRedis,
@@ -228,9 +229,6 @@ class TestNonUtf8PasswordNeverBreaksCallers:
     def test_renderer_failure_degrades_to_safe_constant_not_raw_url(self, monkeypatch):
         """掩码器被 patch 成抛异常：调用点必须拿到安全常量，绝不拿到原串。"""
         from plaita.core import url_redaction
-import plaita.server.factory  # noqa: F401 — plaita#160/#161 重切：_mask_url 的注册点在本模块
-                          # （factory 模块体 server→core 向下注册）；不 import 则日志/渲染路径 fail-closed。
-
         def boom(value):
             raise UnicodeEncodeError("utf-8", "x", 0, 1, "boom")
 
