@@ -3053,34 +3053,41 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 兜底总上限（#123 评审建议）也在此生效：键空间漂移（节点 id 变化等）
         # 会让单节点预算失效，此时靠「不看键名、只看次数」的总计数兜住——
         # 守卫是消息层的最后一道闸，不能只有会失效的那一条判据。
-        total_exhausted = self._node_retry_total_exhausted(execution_id)
-        if retry_count >= self._node_retry_budget() or total_exhausted:
-            logger.error(
-                "执行 %s 非终态但节点重试计数已达预算（%s/%s）%s，终态化 error "
-                "后放行死信，不再重入队: %s",
-                execution_id, retry_count, self._node_retry_budget(),
-                "或已达兜底总上限" if total_exhausted else "",
-                getattr(task, "message_id", "?"),
-            )
-            state.status = "error"
-            state.error = {
-                "message": (
-                    f"节点执行失败：重试预算耗尽（{retry_count} 次），"
-                    "执行无法继续推进"
-                ),
-                "node_retries": retry_count,
-            }
-            state.end_time = datetime.now().isoformat()
-            try:
-                self._persist_state_or_raise(
-                    execution_id, state, "dlq_guard_node_retry_exhausted"
+        # plaita#57：终态化分支（兜底计数读 + 置 error + persist）必须整体在
+        # 租户上下文内——原实现在 reset_current_tenant 之后，非 default 租户的
+        # state 被写进 default 命名空间、兜底计数也读不到自己的键（读写同病）。
+        token = set_current_tenant(body.get("tenant_id"))
+        try:
+            total_exhausted = self._node_retry_total_exhausted(execution_id)
+            if retry_count >= self._node_retry_budget() or total_exhausted:
+                logger.error(
+                    "执行 %s 非终态但节点重试计数已达预算（%s/%s）%s，终态化 error "
+                    "后放行死信，不再重入队: %s",
+                    execution_id, retry_count, self._node_retry_budget(),
+                    "或已达兜底总上限" if total_exhausted else "",
+                    getattr(task, "message_id", "?"),
                 )
-            except Exception as exc:  # noqa: BLE001 — 写盘失败不丢消息
-                logger.warning(
-                    "死信守卫终态化失败（保守跳过死信）: %s: %s", execution_id, exc
-                )
-                return False
-            return True
+                state.status = "error"
+                state.error = {
+                    "message": (
+                        f"节点执行失败：重试预算耗尽（{retry_count} 次），"
+                        "执行无法继续推进"
+                    ),
+                    "node_retries": retry_count,
+                }
+                state.end_time = datetime.now().isoformat()
+                try:
+                    self._persist_state_or_raise(
+                        execution_id, state, "dlq_guard_node_retry_exhausted"
+                    )
+                except Exception as exc:  # noqa: BLE001 — 写盘失败不丢消息
+                    logger.warning(
+                        "死信守卫终态化失败（保守跳过死信）: %s: %s", execution_id, exc
+                    )
+                    return False
+                return True
+        finally:
+            reset_current_tenant(token)
 
         try:
             enqueue_task(self.redis_client, self.queue_name, dict(body))
