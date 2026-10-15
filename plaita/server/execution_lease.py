@@ -66,6 +66,15 @@ class ExecutionLeaseError(RuntimeError):
 # 才可能是本 worker 进程写的租约，反解才有「查注册表核存活」的意义。
 _HOLDER_LIVENESS_PREFIXES = ("start", "resume", "worker")
 
+# 新格式 holder 末段（``uuid.uuid4().hex[:16]``）的**定长**（#155）。
+# 旧格式守卫只能靠 ``isdigit()`` 判「末段是 fencing 世代号」，而新格式末段是
+# 16 位 hex——它恰好全落在 ``0-9`` 时会被守卫吞掉（``uuid4`` 把版本半字节钉在
+# ``'4'``，故 ``P=(10/16)^15≈8.67e-4≈1/1153`` 每次门禁 ⇒ 概率性假红）。两个
+# 形状只能靠长度区分：真实世代号来自 Redis ``INCR``（无前导零、实际远短于
+# 16 位），故把 16 位纯数字末段判给新格式。本常量同时供 ``new_holder_token``
+# 生成用——长度口径只有一个来源。
+_HOLDER_UUID_HEX_LEN = 16
+
 
 def holder_instance_id(lease_value: Optional[str]) -> Optional[str]:
     """从租约值反解持有者的服务注册表 instance id（#50 存活核算）。
@@ -73,16 +82,23 @@ def holder_instance_id(lease_value: Optional[str]) -> Optional[str]:
     租约值是 ``{holder}``（普通档）或 ``{holder}:{gen}``（fencing 档）；
     新格式 holder 为 ``{prefix}:{instance_id}:{uuid}``（见
     ``new_holder_token``）。旧格式（``{prefix}:{uuid}``）与一切无法识别的
-    形状返回 None——调用方按「存活未知」处理，保持既有语义。末段纯数字
-    的 3 段值是旧格式 holder + fencing 世代，同样判 None（instance id 为
-    ``{hostname}-{uuid8}``，不会是纯数字）。
+    形状返回 None——调用方按「存活未知」处理，保持既有语义。
+
+    3 段值末段纯数字时通常是旧格式 holder + fencing 世代（``{gen}``），判
+    None；但新格式末段是**定长 16 位** hex（见 ``_HOLDER_UUID_HEX_LEN``），
+    全为十进制数字时 ``isdigit()`` 同样为真（#155）——这种长度的纯数字末段
+    按新格式反解，其余纯数字末段仍按旧格式判 None。
     """
     if not lease_value:
         return None
     parts = lease_value.split(":")
     if len(parts) not in (3, 4) or parts[0] not in _HOLDER_LIVENESS_PREFIXES:
         return None
-    if len(parts) == 3 and parts[2].isdigit():
+    if (
+        len(parts) == 3
+        and parts[2].isdigit()
+        and len(parts[2]) != _HOLDER_UUID_HEX_LEN
+    ):
         return None
     return parts[1] or None
 
@@ -201,7 +217,11 @@ def new_holder_token(prefix: str = "worker", instance_id: Optional[str] = None) 
     ``{prefix}:{instance_id}:{uuid}``——其他 worker 可从租约值反解持有者
     并查注册表核实其在册与否，区分「活持有者」与「持有者死后残留的
     TTL 尾巴」。缺省保持历史形状 ``{prefix}:{uuid}``。
+
+    末段长度固定为 ``_HOLDER_UUID_HEX_LEN``（16 位 hex）——这是
+    ``holder_instance_id`` 区分「新格式 holder」与「旧格式 + 世代号」的唯一
+    依据（#155），不要改短。
     """
     if instance_id:
-        return f"{prefix}:{instance_id}:{uuid.uuid4().hex[:16]}"
-    return f"{prefix}:{uuid.uuid4().hex[:16]}"
+        return f"{prefix}:{instance_id}:{uuid.uuid4().hex[:_HOLDER_UUID_HEX_LEN]}"
+    return f"{prefix}:{uuid.uuid4().hex[:_HOLDER_UUID_HEX_LEN]}"
