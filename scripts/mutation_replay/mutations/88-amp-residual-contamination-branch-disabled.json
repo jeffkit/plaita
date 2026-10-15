@@ -1,0 +1,16 @@
+{
+  "name": "88-amp-residual-contamination-branch-disabled",
+  "concern": "#88-r9",
+  "file": "plaita/server/factory.py",
+  "old": "        elif \":\" in token or \"@\" in token:\n            j = i",
+  "new": "        elif False and (\":\" in token or \"@\" in token):\n            j = i",
+  "rationale": "禁用 r9 污染分支：被证明携带凭据的 path 段不再把 ``&`` 切出的裸残段重走 default-deny —— ``X:Pw&Sec9`` 的 ``Sec9`` 复活（r9 反例族）",
+  "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_r9_counterexamples_suffix_after_ampersand_is_masked",
+    "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_multiple_ampersands_mask_every_residual",
+    "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_ampersand_seam_across_slash_segments",
+    "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_retention_contract_and_no_at_residual",
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r9_ampersand_counterexample_regression"
+  ],
+  "issue": "88"
+}
