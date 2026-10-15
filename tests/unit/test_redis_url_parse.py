@@ -1367,6 +1367,28 @@ _SLOTS = [
     ),
     ("r8-path-verbatim", "oracle", lambda s: f"redis://user:{s}@host:6379/{s}"),
     ("r8-path-prefixed", "oracle", lambda s: f"redis://user:{s}@host:6379/X:{s}@y"),
+    # --- r9 家族：``&`` 接缝（plaita#88 r9）——冒号腿在 ``&`` 处收边，已被证明
+    #     携带凭据的 path 段按 ``&`` 切出的裸残段重走同一条 default-deny 判据
+    #     （规则级用例见 TestAmpersandSeamR9）。形状与反例族一一对应：段首/段中/
+    #     段尾/多个 ``&``、紧贴掩码缝（残段即口令）、``@`` 段的裸残段、authority
+    #     拷贝（oracle 接地 + 钉住 path 拷贝同掩）。无 authority 的形状 oracle
+    #     沉默 ⇒ 记账表退回注入文本 needle（同 ``path`` 槽的 literal 语义）；
+    #     ``literal`` 种只给「任何口令都必掩」的形状——``&X:{s}`` / ``0@x&{s}``
+    #     的**纯数字**口令按 r4/phase-1 契约逐字保留（数值 token / 数值残段可证
+    #     良性），「候选槽却原样返回」不变量会假红，故这两条按 ``userinfo-user``
+    #     的先例用 ``oracle`` 种跳过该不变量；泄露仍逐槽记账，纯数字 needle 由
+    #     r4 契约过滤。家族的 oracle 接地由 authority 拷贝那条供给。
+    ("r9-amp-start", "oracle", lambda s: f"redis://host:6379/&X:{s}"),
+    ("r9-amp-mid", "literal", lambda s: f"redis://host:6379/X:{s}&More"),
+    ("r9-amp-end", "literal", lambda s: f"redis://host:6379/X:{s}&"),
+    ("r9-amp-multi", "literal", lambda s: f"redis://host:6379/X:{s}&Sec9&More"),
+    ("r9-amp-adjacent", "literal", lambda s: f"redis://host:6379/X:Pw&{s}"),
+    ("r9-amp-at-residual", "oracle", lambda s: f"redis://host:6379/0@x&{s}"),
+    (
+        "r9-amp-authority-copy",
+        "oracle",
+        lambda s: f"redis://user:{s}@host:6379/0/X:{s}&More",
+    ),
 ]
 
 #: r8 家族的**槽位分组**（要求 3）：每个家族至少要有 1 条 **oracle 接地**样本
@@ -1384,6 +1406,17 @@ _R8_FAMILIES = {
     ),
     "fragment-verbatim": ("r8-fragment-verbatim", "r8-fragment-prefixed"),
     "path-verbatim": ("r8-path-verbatim", "r8-path-prefixed"),
+    # r9 家族共用一条判据（``&`` 接缝残段重走 default-deny），oracle 接地由
+    # authority 拷贝槽供给——家族判据（≥1 条 oracle 接地）对全家族求和。
+    "path-ampersand-seam": (
+        "r9-amp-start",
+        "r9-amp-mid",
+        "r9-amp-end",
+        "r9-amp-multi",
+        "r9-amp-adjacent",
+        "r9-amp-at-residual",
+        "r9-amp-authority-copy",
+    ),
 }
 
 
@@ -1842,8 +1875,9 @@ class TestEnumerateAllSpans(unittest.TestCase):
         的 needle 用**全字母表**语料（r6 的语料把这个槽的 `@` 删掉了）。
         """
         rnd = random.Random(88)
-        # 24 个槽（r7 是 13 个）后，同样的 2600 只能给 literal/suffix 槽 ~1050 个
-        # 样本；放大到 4600 让下限断言（>=1700）保持原值不变。
+        # 31 个槽（r7 是 13 个、r8 是 24 个；r9 的 ``&`` 接缝家族 7 条）后，
+        # 同样的 2600 只能给 literal/suffix 槽 ~1090 个样本；放大到 4600
+        # （literal/suffix 槽 ~1930 个）让下限断言（>=1700）保持原值不变。
         corpus = _slot_corpus(rnd, 4600)
         checked = 0
         for slot, kind, secret, url in corpus:
@@ -2329,6 +2363,32 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
         self.assertEqual(leaks, [], f"结构撞车被误判: {leaks}")
         self.assertGreaterEqual(excused, 1, "``@ac`` 没被位置感知豁免")
         self.assertGreaterEqual(checked, 10)
+
+    def test_r9_ampersand_counterexample_regression(self):
+        """验证者 r9 反例 shape（固定回归行，同 seed 119 行的理由）。
+
+        sweep 生成器**产不出**这个形状：``&`` 既不在 ``_FUZZ_ALPHABET`` 也不在
+        ``_FUZZ_PARTS`` 里（把它加进字母表会把 r4 keep 面与已登记边界全部重排，
+        超出本轮范围）——所以把反例钉成固定行。断言与主语料同一条判据：
+        ``Sec9`` 的任何 ≥3 子串不许出现在五个渲染面（+ ``__cause__``）上。
+        """
+        # 生成器确实覆盖不到——这正是本回归行存在的理由
+        self.assertNotIn("&", _FUZZ_ALPHABET)
+        self.assertNotIn("&", _FUZZ_PARTS)
+        for url in (
+            "redis://host:6379/X:Pw&Sec9",
+            "redis://host:6379/0/X:Pw&Sec9/db",
+        ):
+            self.assertNotIn("Sec9", _mask_url(url), url)
+            # 枚举侧认得出（同源同枚举），掩码侧不许活
+            self.assertIn("Sec9", _passwords(url), url)
+            faces = _shape_faces(url)
+            tokens = _preserved_literals(url)
+            leaks, _excused, checked = _leak_report(
+                _fuzz_needles("Sec9", all_substrings=True), faces, tokens
+            )
+            self.assertEqual(leaks, [], f"{url}: {leaks[:3]}")
+            self.assertGreaterEqual(checked, 3, f"{url}: needle 太少")
 
     def test_secret_forms_closed_under_resplitting(self):
         """**闭合性质**（要求 1）：对语料里每个形态、每个分隔符、每个出现位置，
