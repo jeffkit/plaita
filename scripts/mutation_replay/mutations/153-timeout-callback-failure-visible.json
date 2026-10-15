@@ -1,0 +1,12 @@
+{
+  "name": "153-timeout-callback-failure-visible",
+  "issue": "153",
+  "concern": "规则子句：超时回调失败必须聚合上抛（不得只记日志）",
+  "file": "plaita/event/timeout.py",
+  "old": "        if failures:\n            raise TimeoutCallbackError(failures) from failures[0][1]",
+  "new": "        if failures:\n            pass  # 变异：聚合失败被静默吞掉（不再上抛给 _check_loop）",
+  "rationale": "整轮末尾的聚合上抛改成 pass ⇒ 回调失败只剩日志、对上层不可观察（#153 原始症状）",
+  "expect_fail": [
+    "tests/unit/test_wave4_subscription_timeout.py::TestFilterHostedTimeoutChecker::test_timeout_callback_failure_propagates"
+  ]
+}

@@ -306,20 +306,27 @@ Plaita事件系统支持混合使用不同的组件实现，为不同应用场�
 
 ### 8.2 常见混合模式示例
 
+> **`MixedEventBus` 类未实现（2026-10-14 更正）**：历史文档里的
+> `MixedEventBus(bus_type=..., storage_type=..., subscription_type=...,
+> tracker_type=...)` 在代码中不存在（`grep -rn MixedEventBus plaita/` 零命中）。
+> 混合后端的做法是：构造一个 `EventBus` 实现，再替换它的 `event_storage` /
+> `subscription_storage` / `processing_tracker` 三个普通属性。详见
+> [事件系统用户指南 §6.4 / §6.4.1](event-USER_GUIDE.md)。
+
 1. **Redis EventBus + DB EventStorage**
    - 使用Redis的高性能特性处理实时事件分发
    - 使用关系数据库存储事件历史和处理记录
    - 实现方式：
      ```python
-     # 创建混合事件总线
-     event_bus = MixedEventBus(
-         bus_type="redis",
-         storage_type="db",
-         subscription_type="redis",
-         tracker_type="db",
-         redis_url="redis://localhost:6379/0",
-         database_url="postgresql+asyncpg://user:pass@localhost/dbname"
-     )
+     from sqlalchemy.ext.asyncio import create_async_engine
+     from plaita.event import RedisEventBus, SqlalchemyEventStorage, SqlalchemyEventProcessingTracker
+
+     redis_bus = RedisEventBus(redis_url="redis://localhost:6379/0")
+     await redis_bus.initialize()
+
+     engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/dbname")
+     redis_bus.event_storage = SqlalchemyEventStorage(engine, create_tables=True)
+     redis_bus.processing_tracker = SqlalchemyEventProcessingTracker(engine)
      ```
 
 2. **Memory EventBus + Redis EventStorage**
@@ -327,14 +334,10 @@ Plaita事件系统支持混合使用不同的组件实现，为不同应用场�
    - 适合开发测试环境
    - 实现方式：
      ```python
-     # 创建混合事件总线
-     event_bus = MixedEventBus(
-         bus_type="memory",
-         storage_type="redis",
-         subscription_type="memory",
-         tracker_type="redis",
-         redis_url="redis://localhost:6379/0"
-     )
+     from plaita.event import InMemoryEventBus, RedisEventStorage
+
+     event_bus = InMemoryEventBus()
+     event_bus.event_storage = RedisEventStorage("redis://localhost:6379/0")
      ```
 
 3. **Redis EventBus + Redis Storage + DB Tracker**
@@ -342,15 +345,14 @@ Plaita事件系统支持混合使用不同的组件实现，为不同应用场�
    - 数据库记录详细的处理历史，便于分析和审计
    - 实现方式：
      ```python
-     # 创建混合事件总线
-     event_bus = MixedEventBus(
-         bus_type="redis",
-         storage_type="redis",
-         subscription_type="redis",
-         tracker_type="db",
-         redis_url="redis://localhost:6379/0",
-         database_url="sqlite+aiosqlite:///events.db"
-     )
+     from sqlalchemy.ext.asyncio import create_async_engine
+     from plaita.event import RedisEventBus, SqlalchemyEventProcessingTracker
+
+     redis_bus = RedisEventBus(redis_url="redis://localhost:6379/0")
+     await redis_bus.initialize()
+
+     engine = create_async_engine("sqlite+aiosqlite:///events.db")
+     redis_bus.processing_tracker = SqlalchemyEventProcessingTracker(engine)
      ```
 
 ### 8.3 混合模式优势
@@ -614,6 +616,7 @@ A: 混合模式确实会引入不同后端之间的转换开销，但通过合�
 **Q: 如何从单一后端迁移到混合后端？**
 
 A: 系统设计支持平滑迁移：
-1. 先引入MixedEventBus，配置为全部使用原后端
-2. 逐步替换单个组件到新后端
-3. 验证系统稳定性后继续替换其他组件 
+1. 先建好一个 `EventBus`，并把 `event_storage` / `subscription_storage` /
+   `processing_tracker` 三个属性**全部配成原后端**（等价于单后端）
+2. 逐步把单个属性替换成新后端（见 §8.2）
+3. 验证系统稳定性后继续替换其他组件

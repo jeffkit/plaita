@@ -477,3 +477,59 @@ flowchart TD
 - **残留订阅 GC**：EventFilter 匹配到已终态（completed/error）执行的订阅时，
   就地注销该订阅而不是入队注定失败的 resume——error 路径泄漏的订阅不再
   需要等 7 天 TTL。
+
+### Redis 日志 handler 的客户端队列上限（plaita#84）
+
+`RedisStreamHandler`（`enable_redis_logging=True` 时默认挂载）把日志先放进**客户端队列**
+再批量写 Redis Stream。该队列是**有界**的，边界与 Stream 侧的 `max_len` **无关**：
+
+| 项 | 值 / 语义 |
+|----|-----------|
+| 队列上限 | `RedisStreamHandler.DEFAULT_MAX_QUEUE = 10000`，可由构造参数 `max_queue` 覆盖 |
+| 队列满时 | **丢弃最旧的一条**（`self._queue.popleft()`，即丢弃队列头）再入队 —— 保留最新日志。队列是 `collections.deque`：`popleft()` 为 O(1)，10k 上限下持续丢弃不退化成 `del list[0]` 的 O(n²)。方向由 `tests/unit/test_issue84_log_queue_bounds.py::test_drop_direction_is_oldest_kept` 用可区分消息同时钉住 `queue[0]`/`queue[-1]`（改成 `pop()` 丢最新会立刻变红）；`setup_redis_logging(..., max_queue=)` 亦可覆盖 |
+| 丢弃计数 | 公开属性 `RedisStreamHandler.dropped_count`（因上限/失败回灌截断累计丢弃条数） |
+| 丢弃告警 | **不静默**：第 1 条与之后每 `DROP_WARN_EVERY = 100` 条聚合一条 warning，含累计条数与 `队列 x/上限` |
+| 刷新失败 | 只回灌**未成功提交**的部分（本批起；此前各批已 `execute` 成功），合并后超出上限的部分**整批丢弃并计数**（回灌受同一上限约束） |
+| 分批提交 | 每 `DEFAULT_CHUNK_SIZE = 500` 条一次 `pipeline.execute()`（构造参数 `chunk_size` 可覆盖）⇒ 积压恢复时单次提交命令数 ≤ `2 × chunk_size`（每条 1×`xadd` + 1×`publish`），不再一次性构造 2N 条命令的洪峰 |
+| 告警路径 | 走 `plaita.server.log_handler.audit`（`propagate=False` + 自有 stderr handler）⇒ **不会**被本 handler 自己收进队列（避免失败期间告警自噬、队列排不空） |
+| 告警级别 | 该 logger 显式 `setLevel(WARNING)`，**不**继承 root：`PLAITA_LOG_LEVEL=ERROR` 或嵌入方抬 root 时丢弃/回灌告警照发（否则 `warning` 在记录创建前就被判 disabled，静默丢弃而 `dropped_count` 照涨） |
+| 正常流量 | 不丢弃：仅在 `len(queue) >= max_queue` 时丢最旧；成功刷新后队列清空 |
+
+> Stream 侧 `max_len`（默认 `DEFAULT_MAX_LEN = 10000`，`approximate=True`）只约束 Redis 里的
+> Stream 长度，**不**约束 worker 进程内存；进程内存由上面的客户端队列上限约束。
+
+### 事件回扫失败轮：游标不推进、失败不计 replayed（plaita#153）
+
+`EventReconciler.scan_once` 回放任一事件失败时**整轮作废**：
+
+| 项 | 值 / 语义 |
+|----|-----------|
+| 游标 | 停在原处（**逐字节不变**）；失败事件留在下一轮窗口内，Redis 恢复后被真正重放 |
+| `last_replayed` | 本轮**成功回放**的条数。真实不变式是「**失败事件永不被计成 replayed**」——**不是**「恒 0」：失败前已成功回放的事件照算（2 事件轮首成功次失败 ⇒ `(1, 1)`；`last_replayed == 0` 只在**首个事件即失败**时成立） |
+| `last_rejected` | 本轮失败事件数（每轮重置） |
+| 异常 | 上抛给 `_run_loop`（记 ERROR 后下一轮重试，回扫循环不终止） |
+| 超时回调（同单 #153/R1） | `SubscriptionTimeoutChecker._check_timeouts` 对单个回调失败**只记账不中断本轮**（同轮其余回调与后续订阅照常跑），整轮末尾聚合上抛 `TimeoutCallbackError`（携带 `failures` / `subscription_ids`，原始异常为 `__cause__`）——失败仍对 `_check_loop` 可观察，且不饿死同轮其它订阅 |
+
+`TimeoutCallbackError` 的**公开入口**是 `plaita.event`（实现处 `plaita.event.timeout` 是内部路径）：
+
+```python
+from plaita.event import TimeoutCallbackError   # 公开入口
+```
+
+**R1 的两条已知边界（本单未修，勿当成已修）**：
+
+- **T1 — 回调抛 `BaseException` 仍中断本轮、饿死其余回调**：`KeyboardInterrupt` /
+  `SystemExit` 不被本链路的 `except Exception` 捕获，因此会跳过本轮剩余回调与后续
+  订阅。这是**刻意**不 catch（进程级信号不应被聚合成「某订阅的回调失败」）。
+  **base 修订 `b46f78e` 行为完全相同**——既有边界，非本单引入；本单**不修**，
+  也不为此加 `except BaseException`。
+- **T2 — 回调永不返回仍饿死同轮其余回调**：本单**没有**引入 per-callback 超时预算
+  （无 `asyncio.wait_for` / `timeout=`），一个 await 永不结束的回调会把同轮后续回调
+  与后续订阅**永久挂住**。要收敛须另开单设计超时预算，本单**不修**。
+
+**r5 变动性质的如实说明（verifier C2/C3）**：`plaita/server/event_reconcile.py` 在
+r5（`fc8fccf`）里的改动是 **docstring/注释 + 钉子测试**，**零可执行变更**；
+`plaita/server/log_handler.py` 的**失败回灌行 `pending = entries[start:]`（决定「只回灌
+未提交批次」的那一行）未被 r5 改动**——r5 对该文件其余部位只是 `list` → `deque` 的
+**语义等价机械适配**（代码注释已声明「丢弃方向/计数/分批提交语义**零变化**」）。即
+C2/C3 是**措辞更正 + 测试**，**不是**行为修复；上表的行为契约由 r4 的执行代码承担。

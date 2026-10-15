@@ -1,0 +1,13 @@
+{
+  "name": "153-rejected-count",
+  "issue": "153",
+  "concern": "规则子句：失败按轮计入 last_rejected",
+  "file": "plaita/server/event_reconcile.py",
+  "old": "                self.last_rejected += 1",
+  "new": "                self.last_rejected += 0",
+  "rationale": "失败不再计数 ⇒ rejected 恒 0，失败轮不可观测",
+  "expect_fail": [
+    "tests/unit/test_event_reconcile.py::TestScanOnceFailureKeepsCursorAndCountsRejected::test_rejected_counter_is_per_round",
+    "tests/unit/test_event_reconcile.py::TestScanOnceFailureKeepsCursorAndCountsRejected::test_failed_round_does_not_advance_cursor_and_next_round_replays"
+  ]
+}

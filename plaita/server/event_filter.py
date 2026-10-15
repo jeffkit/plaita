@@ -90,6 +90,17 @@ class EventFilter:
             )
             self._timeout_checker.register_timeout_callback(self._on_subscription_timeout)
     
+    def _release_dedup_key(self, dedup_key: str) -> None:
+        """#87：入队失败时归还去重键（best-effort，删除失败只记日志）。
+
+        释放是「失败可重放」的最小前提：键在 TTL 内不可能自行消失，而重投/
+        回扫都以 ``SET NX`` 判定，占着的键会把重放挡在门外。
+        """
+        try:
+            self.redis_client.delete(dedup_key)
+        except Exception:  # noqa: BLE001 — 释放瞬断：只记日志，不掩盖入队异常
+            logger.warning("释放去重键失败: %s", dedup_key, exc_info=True)
+
     async def handle_event(self, event: Event) -> None:
         """
         处理事件，实现EventHandler接口
@@ -136,7 +147,10 @@ class EventFilter:
                         s for s in (flow_subs or [])
                         if getattr(s, "flow_id", None) == state.flow_id
                     ]
-                except Exception:  # noqa: BLE001 — 巡检失败不影响主流程
+                except Exception as e:  # noqa: BLE001 — 巡检失败不影响主流程
+                    # #87 批次纪律：禁止往静默吞咽白名单里加条目——就地补日志，
+                    # 让"孤儿订阅巡检失败"可观测（巡检本身仍不阻塞主流程）。
+                    logger.debug("孤儿订阅巡检失败: %s", e, exc_info=True)
                     orphans = []
                 if orphans:
                     logger.warning(
@@ -196,8 +210,28 @@ class EventFilter:
                         }
                     }
                     
-                    enqueue_task(self.redis_client, self.queue_name, resume_task)
-                    
+                    # #87：入队失败必须**释放刚占用的去重键**——否则
+                    # 「键已占、resume 未入队」的中间态在 3600s TTL 内把该
+                    # (event_id, subscription_id) 永久判为已处理，而事件链
+                    # 路上没有重放入口。释放后下一次重投/回扫才能真正入队；
+                    # 成功的入队仍然保留键，维持多实例并发去重（现状不变）。
+                    #
+                    # #153 更新：这里的 raise 现在会一路传到调用方——
+                    # handle_event 最外层 except（:239-243）记一条
+                    # "处理事件出错" ERROR 后**继续上抛**（不再吞掉）：
+                    # 回扫器据此不推进游标、改计 rejected；推送链路是
+                    # fire-and-forget，由 event/redis.py 的包装接收。
+                    try:
+                        enqueue_task(self.redis_client, self.queue_name, resume_task)
+                    except Exception:
+                        self._release_dedup_key(dedup_key)
+                        logger.error(
+                            "事件 %s 入队失败，已释放去重键以便重放（订阅 %s，队列 %s）",
+                            event.event_id, subscription.subscription_id,
+                            self.queue_name, exc_info=True,
+                        )
+                        raise
+
                     logger.info("已将事件 %s 入队 stream %s，关联订阅: %s", event.event_id, self.queue_name, subscription.subscription_id)
                     
                     await self.subscription_storage.mark_event_processed(
@@ -210,6 +244,12 @@ class EventFilter:
             
         except Exception as e:
             logger.error("处理事件出错: %s", e, exc_info=True)
+            # #153：失败必须对调用方可观察——回扫器据此**不推进游标**、改计
+            # `last_rejected`（plaita/server/event_reconcile.py:scan_once）。推送
+            # 链路是 fire-and-forget，由 event/redis.py 的 `_process_event` /
+            # `_process_with_retry` 在上一层接收（记 error 尝试 + 重试），不会逃逸
+            # 成"Task exception was never retrieved"。
+            raise
     
     async def _on_subscription_timeout(self, subscription: EventSubscription) -> None:
         """SubscriptionTimeoutChecker 回调：订阅超时 → 入队 resume_type=timeout。
@@ -283,7 +323,21 @@ class EventFilter:
             },
         }
 
-        enqueue_task(self.redis_client, self.queue_name, resume_task)
+        # #87：与事件链路同款——超时入队失败释放去重键，让下一次 checker
+        # 轮次或重投能真正入队（而不是被自己的 NX 键挡到 TTL 到期）。
+        # #153 更新：这里的 raise 会到直接调用方；生产调用方是
+        # SubscriptionTimeoutChecker 的回调包装（event/timeout.py:80-86），
+        # 该包装记 ERROR 后**继续上抛**到 `_check_loop`（记日志、下轮重试）——
+        # 失败不再被抹平。
+        try:
+            enqueue_task(self.redis_client, self.queue_name, resume_task)
+        except Exception:
+            self._release_dedup_key(dedup_key)
+            logger.error(
+                "订阅 %s 超时 resume 入队失败，已释放去重键以便重放（执行 %s，队列 %s）",
+                sub_id, execution_id, self.queue_name, exc_info=True,
+            )
+            raise
         logger.info(
             "订阅 %s 超时，已入队 timeout resume（执行 %s，队列 %s）",
             sub_id, execution_id, self.queue_name,

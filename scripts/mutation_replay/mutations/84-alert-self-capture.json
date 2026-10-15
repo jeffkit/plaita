@@ -1,0 +1,12 @@
+{
+  "name": "84-alert-self-capture",
+  "concern": "④告警不自噬",
+  "file": "plaita/server/log_handler.py",
+  "old": "_audit_logger.propagate = False",
+  "new": "_audit_logger.propagate = True",
+  "rationale": "审计告警改回经自身 handler ⇒ 失败告警自噬（#84 规则④）",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_failure_warning_is_not_self_captured"
+  ],
+  "issue": "84"
+}

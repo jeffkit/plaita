@@ -19,7 +19,12 @@
 周期/回填窗口可用 ``PLAITA_EVENT_RECONCILE_INTERVAL`` /
 ``PLAITA_EVENT_RECONCILE_BACKFILL``（秒）覆盖默认值。
 
-任何扫描/回放异常都吞掉打 warning，绝不影响 Pub/Sub 推送主链路。
+扫描失败（读存储）：吞掉打 warning 并放弃本轮（游标不动，多扫不漏扫）。
+回放失败（#153）：本轮**整轮作废**——不推进游标、**失败事件不计入
+``replayed``/``last_replayed``**（真实不变式是「失败事件永不被计成 replayed」；
+失败前已成功回放的事件仍计入 ``last_replayed``——「``last_replayed == 0``」只在
+**首个事件即失败**时成立，不是构造性保证），计入 ``last_rejected`` 后上抛；
+``_run_loop`` 记日志并在下一轮重试，绝不影响 Pub/Sub 推送主链路。
 """
 import asyncio
 import logging
@@ -85,9 +90,29 @@ class EventReconciler:
         self.batch_size = int(batch_size)
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        #: #153 上一轮 ``scan_once`` 的计数（每轮重置）：成功回放数 / 失败数。
+        #: 失败轮不推进游标且上抛；``last_replayed`` 是**失败前已成功回放**的条数
+        #: （不是恒 0），``last_rejected`` 是失败事件数——供调用方与运维读出
+        #: 「本轮作废」的规模。
+        self.last_replayed = 0
+        self.last_rejected = 0
 
     async def scan_once(self) -> int:
-        """扫描 (游标或回填窗口起点, now] 窗口并回放，返回回放事件数。"""
+        """扫描 (游标或回填窗口起点, now] 窗口并回放，返回回放事件数。
+
+        #153：任一事件回放失败即**整轮作废**——不推进游标，**失败事件不计入
+        ``replayed``/``last_replayed``**，计入 ``self.last_rejected`` 后响亮上抛
+        （由 ``_run_loop`` 记日志并在下一轮重试）。游标停在原处 ⇒ 失败事件仍留在
+        下一轮窗口内，Redis 恢复后会被真正重放，而不会被"失败也算成功"的游标
+        永久跳过。
+
+        真实不变式是「**失败事件永不被计成 replayed**」，不是「``last_replayed
+        == 0``」：多事件轮里若前面已有事件成功回放，``last_replayed`` 停在成功
+        条数上（例如 2 事件轮首成功、次失败 ⇒ ``(last_replayed, last_rejected)
+        == (1, 1)``）；``last_replayed == 0`` 只在**首个事件即失败**时成立。
+        """
+        self.last_replayed = 0
+        self.last_rejected = 0
         now = time.time()
         window_start = self._load_cursor()
         if window_start is None:
@@ -115,13 +140,22 @@ class EventReconciler:
                 # 事件不会重复 resume；终态执行的残留订阅也会被就地回收。
                 await self.event_filter.handle_event(event)
                 replayed += 1
-            except Exception as e:  # noqa: BLE001 — 单事件失败不拖累其余
-                logger.warning(
-                    "事件回扫: 回放事件 %s 失败（跳过）: %s", event.event_id, e,
+                self.last_replayed = replayed
+            except Exception as e:
+                # #153：失败**不再**被计成 replayed（`last_replayed` 停在失败前
+                # 已成功的条数）、也不再推进游标。上抛即跳过下方的
+                # `_save_cursor(window_end)`，本轮整轮作废；失败事件留在下一轮
+                # 窗口内，Redis 恢复后被真正重放。
+                self.last_rejected += 1
+                logger.error(
+                    "事件回扫: 回放事件 %s 失败——本轮游标不推进"
+                    "（replayed=%d，rejected=%d）：%s",
+                    event.event_id, replayed, self.last_rejected, e,
                     exc_info=True,
                 )
-        # 游标推进到窗口上界（回放幂等可容忍边界事件下轮重扫；若因个别
-        # 失败不推进，同一窗口会被无限重扫）。写失败只多扫不漏扫。
+                raise
+        # 游标推进到窗口上界（仅当本轮**全部**回放成功；失败轮在上面的 except
+        # 里上抛，绝不会走到这里）。写失败只多扫不漏扫。
         self._save_cursor(window_end)
         if events:
             logger.info(

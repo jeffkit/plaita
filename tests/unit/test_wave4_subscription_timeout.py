@@ -29,7 +29,7 @@ from plaita.core.executor import FlowExecution, ExecutionMode, _subscribe_event
 from plaita.core.flow import Flow
 from plaita.event.core import EventSubscription
 from plaita.event.memory import InMemoryEventSubscriptionStorage
-from plaita.event.timeout import SubscriptionTimeoutChecker
+from plaita.event.timeout import SubscriptionTimeoutChecker, TimeoutCallbackError
 from plaita.node import End, Node, Start
 from plaita.node.event_node import EventNode, EventNodeStatus
 from plaita.server.event_filter import EventFilter
@@ -209,6 +209,165 @@ class TestFilterHostedTimeoutChecker:
         assert task["data"]["event_type"] == "approval"
         # 去重键已落位（挡住后续重发）
         assert redis_client.exists(TIMEOUT_DEDUP_PREFIX + sub.subscription_id) == 1
+
+    def test_timeout_callback_failure_propagates(self):
+        """#153 前提②：超时回调的失败不再被包装吞成日志——聚合上抛给 _check_loop。
+
+        （``_check_loop`` 在调用点记 ERROR 后进入下一轮；失败对上层可观察，
+        订阅超时唤醒链路不再"静默丢"。原始异常保留在 ``failures`` 里。）
+        """
+        execution_storage, subscription_storage, redis_client = self._make_storages()
+        self._save_suspended(execution_storage)
+        sub = self._timed_out_subscription()
+        run(subscription_storage.store_subscription(sub))
+
+        ef = self._make_filter(execution_storage, subscription_storage, redis_client)
+        calls = []
+
+        async def _broken_callback(subscription):
+            calls.append(subscription.subscription_id)
+            raise ConnectionError("simulated callback outage")
+
+        # 真实回调先跑（入队 1 条），随后坏回调的失败被聚合上抛到 _check_timeouts 之外
+        ef._timeout_checker.register_timeout_callback(_broken_callback)
+        with pytest.raises(TimeoutCallbackError) as excinfo:
+            run(ef._timeout_checker._check_timeouts())
+
+        assert calls == [sub.subscription_id], "坏回调根本没跑（断言空转）"
+        # 原始异常与定位信息都还在（不是"只剩一行日志"）
+        assert excinfo.value.subscription_ids == [sub.subscription_id]
+        assert isinstance(excinfo.value.failures[0][1], ConnectionError)
+        assert len(self._stream_payloads(redis_client, "test:wave4-queue")) == 1
+
+    def test_callback_failure_does_not_starve_second_callback(self):
+        """#153/R1 回归：同轮两个回调，第一个抛 ⇒ 第二个仍必须跑到并**入队**。
+
+        r4 的 `raise` 在第一个坏回调处中断整轮（verifier 实测 ``calls=["bad"]``）；
+        修复后是「逐条记账 + 整轮末尾聚合上抛」⇒ ``calls=["bad","good"]``，
+        且第二个回调真正把 timeout resume 入了队。
+        """
+        execution_storage, subscription_storage, redis_client = self._make_storages()
+        self._save_suspended(execution_storage)
+        sub = self._timed_out_subscription()
+        run(subscription_storage.store_subscription(sub))
+
+        ef = self._make_filter(execution_storage, subscription_storage, redis_client)
+        calls = []
+
+        async def _bad(subscription):
+            calls.append("bad")
+            raise ConnectionError("simulated callback outage")
+
+        async def _good(subscription):
+            calls.append("good")
+            await ef._on_subscription_timeout(subscription)   # 第二个回调真入队
+
+        # 顺序钉死：坏回调在前，good（真入队）在后
+        ef._timeout_checker._on_timeout_callbacks.clear()
+        ef._timeout_checker.register_timeout_callback(_bad)
+        ef._timeout_checker.register_timeout_callback(_good)
+
+        raised = None
+        try:
+            run(ef._timeout_checker._check_timeouts())
+        except Exception as e:  # noqa: BLE001 — 本轮失败由末尾聚合上抛承载
+            raised = e
+
+        # 核心断言：第二个回调必须跑到（r4 在这里只剩 ["bad"]）
+        assert calls == ["bad", "good"], f"第二个回调被第一个的失败饿死: {calls}"
+        assert isinstance(raised, TimeoutCallbackError), (
+            f"失败没有以聚合异常抵达调用方: {raised!r}"
+        )
+        tasks = self._stream_payloads(redis_client, "test:wave4-queue")
+        assert len(tasks) == 1, f"第二个回调没有完成入队: {tasks}"
+        assert tasks[0]["resume_type"] == "timeout"
+        assert tasks[0]["execution_id"] == "exec-w4-1"
+
+    def test_failing_callback_for_one_subscription_does_not_starve_other(self):
+        """#153/R1 回归（跨订阅）：subA 的回调持续失败不得饿死 subB。
+
+        verifier 实测 r4：subA 失败即整轮中断 ⇒ subB 从未被处理；修复后同轮
+        subA/subB 都被扫到，subB 的 timeout resume 正常入队（stream 2 条）。
+        """
+        execution_storage, subscription_storage, redis_client = self._make_storages()
+        self._save_suspended(execution_storage, execution_id="exec-w4-A")
+        self._save_suspended(execution_storage, execution_id="exec-w4-B")
+        sub_a = self._timed_out_subscription(execution_id="exec-w4-A")
+        sub_b = self._timed_out_subscription(execution_id="exec-w4-B")
+        run(subscription_storage.store_subscription(sub_a))
+        run(subscription_storage.store_subscription(sub_b))
+        # 前置：存储顺序确定（subA 在前），否则本用例钉不住"谁先失败"
+        assert [s.subscription_id for s in run(subscription_storage.list_subscriptions())] == [
+            sub_a.subscription_id, sub_b.subscription_id,
+        ]
+
+        ef = self._make_filter(execution_storage, subscription_storage, redis_client)
+        seen = []
+
+        async def _flaky(subscription):
+            if subscription.subscription_id == sub_a.subscription_id:
+                raise ConnectionError("simulated callback outage for subA")
+
+        async def _recorder(subscription):
+            seen.append(subscription.subscription_id)
+
+        # 顺序：[真实入队回调, _flaky（只对 subA 抛）, 记录器]
+        ef._timeout_checker.register_timeout_callback(_flaky)
+        ef._timeout_checker.register_timeout_callback(_recorder)
+
+        raised = None
+        try:
+            run(ef._timeout_checker._check_timeouts())
+        except Exception as e:  # noqa: BLE001 — 本轮失败由末尾聚合上抛承载
+            raised = e
+
+        # 核心断言：subA 失败不得让 subB 从未被扫到（r4 在这里 seen == []）
+        assert seen == [sub_a.subscription_id, sub_b.subscription_id], (
+            f"subB 被 subA 的失败饿死: {seen}"
+        )
+        assert isinstance(raised, TimeoutCallbackError), (
+            f"失败没有以聚合异常抵达调用方: {raised!r}"
+        )
+        assert raised.subscription_ids == [sub_a.subscription_id]
+        tasks = self._stream_payloads(redis_client, "test:wave4-queue")
+        assert {t["execution_id"] for t in tasks} == {"exec-w4-A", "exec-w4-B"}, (
+            f"跨订阅入队不完整: {tasks}"
+        )
+
+    def test_check_loop_survives_failing_callback_round(self):
+        """#153/R1：坏回调的聚合上抛不得终止 checker 循环——下一轮继续检查。"""
+
+        async def _test():
+            execution_storage, subscription_storage, redis_client = self._make_storages()
+            self._save_suspended(execution_storage)
+            sub = self._timed_out_subscription()
+            await subscription_storage.store_subscription(sub)
+
+            ef = self._make_filter(execution_storage, subscription_storage, redis_client,
+                                   interval=0.01)
+            rounds = {"n": 0}
+            real_check = ef._timeout_checker._check_timeouts
+
+            async def _counting_check():
+                rounds["n"] += 1
+                await real_check()
+
+            async def _bad(subscription):
+                raise ConnectionError("simulated callback outage")
+
+            ef._timeout_checker._check_timeouts = _counting_check
+            ef._timeout_checker._on_timeout_callbacks.clear()
+            ef._timeout_checker.register_timeout_callback(_bad)
+
+            await ef._timeout_checker.start()
+            await asyncio.sleep(0.1)
+            await ef._timeout_checker.stop()
+
+            assert rounds["n"] >= 2, (
+                f"失败轮终止了 checker 循环（只跑了 {rounds['n']} 轮）"
+            )
+
+        run(_test())
 
     def test_dedup_blocks_second_trigger(self):
         """同一 checker 第二轮检查（订阅尚未来得及注销）不重复入队。"""
@@ -395,3 +554,90 @@ class TestTimeoutResumeConsumer:
             flow, mode=ExecutionMode.DISTRIBUTED, context=r3["context"], event_bus=mock_bus,
         )
         assert r4["id"] == "task2"
+
+
+# ─── 5. 公开入口契约：TimeoutCallbackError（#153/R1） ─────────
+
+
+class TestTimeoutCallbackErrorPublicEntry:
+    """#153/R1：聚合异常必须从 `plaita.event` 公开可达，且 `__all__` 不得挂空名。
+
+    这一组是**契约钉子**（不是实现钉子）：调用方按 flow-worker.md 写
+    ``from plaita.event import TimeoutCallbackError`` 必须成立；文档承诺的公开形状
+    （``failures`` / ``subscription_ids`` / ``__cause__``）必须逐项对得上。
+    """
+
+    def test_public_import_path_is_the_same_class(self):
+        """(a) 公开路径可导入，且与实现处是同一个类（不是影子副本）。"""
+        from plaita.event import TimeoutCallbackError as Public
+
+        assert Public is TimeoutCallbackError, "公开入口与 plaita.event.timeout 不是同一个类"
+
+    def test_every_name_in_dunder_all_exists_and_star_import_works(self):
+        """(b) `__all__` 全量清扫：每个名字都真的在模块上，star-import 真跑通。
+
+        本仓出过「`__all__` 挂了不存在的名字 ⇒ `from ... import *` 直接
+        AttributeError」的事故；下面两步（hasattr 清扫 + star-import 实跑）是这个
+        bug 类的通用钉子——`__all__` 里任何空名都会立刻变红。
+        """
+        import plaita.event as event_pkg
+
+        missing = [n for n in event_pkg.__all__ if not hasattr(event_pkg, n)]
+        assert missing == [], f"plaita.event.__all__ 挂了不存在的名字: {missing}"
+
+        namespace: dict = {}
+        exec("from plaita.event import *", namespace)  # noqa: S102 — 被测行为本身
+        not_exported = [n for n in event_pkg.__all__ if n not in namespace]
+        assert not_exported == [], f"star-import 未导出: {not_exported}"
+        assert "TimeoutCallbackError" in namespace
+
+    def test_aggregate_public_shape_matches_documented_contract(self):
+        """(c) 用**真实一轮 checker** 复核公开形状（不靠构造自证）。
+
+        文档承诺：``.failures`` 是 ``(subscription_id, 原始异常)`` 序列、
+        ``.subscription_ids`` 与之逐项对应、``__cause__`` 是**第一个**原始异常。
+        同一订阅挂两个回调 ⇒ 一轮里两条失败，形状与顺序一起被钉住。
+        """
+        sub = EventSubscription(
+            subscription_id="sub-public-shape",
+            event_type="approval",
+            correlation_id="exec-public-shape",
+            timeout=1.0,
+            created_at=time.time() - 60.0,
+        )
+
+        class _OneSubStorage:
+            async def list_subscriptions(self):
+                return [sub]
+
+        first = ConnectionError("first outage")
+        second = ValueError("second outage")
+        seen = []
+
+        async def _bad(_sub):
+            seen.append(len(seen))
+            raise (first if len(seen) == 1 else second)
+
+        checker = SubscriptionTimeoutChecker(_OneSubStorage(), check_interval=0.01)
+        checker.register_timeout_callback(_bad)
+        checker.register_timeout_callback(_bad)   # 同一轮两个回调 ⇒ 两条失败
+
+        raised = None
+        try:
+            run(checker._check_timeouts())
+        except Exception as e:  # noqa: BLE001 — 本轮失败由末尾聚合上抛承载
+            raised = e
+
+        assert isinstance(raised, TimeoutCallbackError), f"未聚合上抛: {raised!r}"
+        assert seen == [0, 1], "同一轮两个回调没有都跑到（断言空转）"
+
+        failures = list(raised.failures)
+        assert [type(exc) for _sid, exc in failures] == [ConnectionError, ValueError]
+        assert [sid for sid, _exc in failures] == [sub.subscription_id] * 2
+        assert list(raised.subscription_ids) == [sub.subscription_id] * 2, (
+            ".subscription_ids 必须与 .failures 的订阅 id 逐项对应"
+        )
+        assert raised.__cause__ is failures[0][1], (
+            "__cause__ 必须是第一个原始异常（不是聚合异常自身、也不是 None）"
+        )
+        assert raised.__cause__ is first

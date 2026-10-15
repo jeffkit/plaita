@@ -1,0 +1,12 @@
+{
+  "name": "84-drop-alert-silent",
+  "concern": "③丢弃计数/告警",
+  "file": "plaita/server/log_handler.py",
+  "old": "            if dropped_total and (dropped_total == 1",
+  "new": "            if False and (dropped_total == 1",
+  "rationale": "丢弃不再响亮告警（静默丢弃）（#84 规则③）",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_queue_is_bounded_and_drops_counted"
+  ],
+  "issue": "84"
+}

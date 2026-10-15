@@ -1,0 +1,12 @@
+{
+  "name": "84-drop-direction-newest",
+  "concern": "规则子句1b：队列满丢**最旧**（方向；deque.popleft 为 O(1)）",
+  "file": "plaita/server/log_handler.py",
+  "old": "                    self._queue.popleft()",
+  "new": "                    self._queue.pop()",
+  "rationale": "队列满改丢**最新**（deque.pop()）⇒ 保留最旧日志、丢刚产生的日志（方向反了）",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_drop_direction_is_oldest_kept"
+  ],
+  "issue": "84"
+}

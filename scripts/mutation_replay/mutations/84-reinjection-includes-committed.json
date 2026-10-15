@@ -1,0 +1,12 @@
+{
+  "name": "84-reinjection-includes-committed",
+  "issue": "84",
+  "concern": "子句②b：刷新中途失败只回灌未成功提交的部分（已 execute 成功的批次不得重复入队）",
+  "file": "plaita/server/log_handler.py",
+  "old": "            pending = entries[start:]",
+  "new": "            pending = entries[:]",
+  "rationale": "回灌整批（含已成功提交的批次）⇒ 恢复后已写进 Stream 的日志被重复 xadd/publish（#84 修复前的 entries 全量回灌）",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_reinjection_only_keeps_uncommitted_batches"
+  ]
+}

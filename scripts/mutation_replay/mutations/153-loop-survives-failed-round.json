@@ -1,0 +1,12 @@
+{
+  "name": "153-loop-survives-failed-round",
+  "issue": "153",
+  "concern": "规则子句：单轮失败上抛不得终止回扫后台循环",
+  "file": "plaita/server/event_reconcile.py",
+  "old": "            try:\n                await self.scan_once()\n            except Exception as e:  # noqa: BLE001 — 循环体任何异常不终止回扫\n                logger.warning(\"事件回扫: 扫描循环异常（忽略）: %s\", e, exc_info=True)\n",
+  "new": "            await self.scan_once()\n",
+  "rationale": "去掉 _run_loop 的异常兜底 ⇒ 失败轮把回扫任务打死（scan_once 只被调 1 次），失败后永不重扫",
+  "expect_fail": [
+    "tests/unit/test_event_reconcile.py::TestReconcileLifecycle::test_periodic_loop_survives_failed_round"
+  ]
+}

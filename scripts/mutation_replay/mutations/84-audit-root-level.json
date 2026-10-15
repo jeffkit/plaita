@@ -1,0 +1,12 @@
+{
+  "name": "84-audit-root-level",
+  "concern": "规则子句5：审计告警级别自持，不受 root（PLAITA_LOG_LEVEL）牵制",
+  "file": "plaita/server/log_handler.py",
+  "old": "_audit_logger.setLevel(logging.WARNING)",
+  "new": "_audit_logger.setLevel(logging.NOTSET)",
+  "rationale": "审计 logger 级别留在 NOTSET ⇒ 继承 root；root=ERROR 时 15 次丢弃 0 条审计记录（实测），丢弃静默",
+  "expect_fail": [
+    "tests/unit/test_issue84_log_queue_bounds.py::TestIssue84QueueBounds::test_audit_warning_survives_root_level_error"
+  ],
+  "issue": "84"
+}
