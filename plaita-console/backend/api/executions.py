@@ -83,15 +83,22 @@ class ResumeFlowRequest(BaseModel):
     # 字段，人工/值守用 continue 抢在 pending start 被 reclaim 之前时，调度
     # 时下发的 params 永远到不了 `$INPUT`（worker 侧 #122 已修好 start→resume
     # 转换路径的丢参，这条是**另一条路由上"从来传不了"**的同类面）。
-    # 语义与 #122 一致：只在盘上 checkpoint 为空（假值 saved_context）时被
-    # 引擎用来重新 `setup_flow`；checkpoint 非空（正常续跑）时忽略。
+    # 语义与 #122 一致：**只有 resume_type=continue** 打在盘上 checkpoint 为空
+    # （假值 saved_context）时才被引擎用来重新 `setup_flow` 并绑定 `$INPUT`；
+    # 空 checkpoint 下的 retry/cancel/timeout/event 在该分支**之前**就被策略层
+    # 守卫以 ResumeGuardError 拒绝（执行保持 running、消息被 ack 吞掉、
+    # `$INPUT` 永不绑定——预存语义）；checkpoint 非空（正常续跑）时 params
+    # 惰性，绑定值一律以盘上 checkpoint 为准。
     params: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "可选调度入参（#157）：仅在盘上 checkpoint 为空（如手动 continue "
-            "抢在 pending start 被 reclaim 之前）时绑定 `$INPUT`；不传或空 "
-            "dict 不落 `params` 键（与 #122 的 resume 载体形状一致），"
-            "checkpoint 非空时忽略"
+            "可选调度入参（#157）：仅在 `resume_type=continue` 且盘上 "
+            "checkpoint 为空时被引擎绑定为 `$INPUT`（手动 continue 抢在 "
+            "pending start 被 reclaim 之前的窗口）；空 checkpoint 下 "
+            "retry/cancel/timeout/event 被策略层守卫以 `ResumeGuardError` "
+            "拒绝（执行保持 running）；不传/空/`null` 不落 `params` 键"
+            "（与 #122 的 resume 载体形状一致）；checkpoint 非空时 "
+            "`params` 惰性，绑定值一律以盘上 checkpoint 为准"
         ),
     )
 
