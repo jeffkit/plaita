@@ -1059,7 +1059,10 @@ def _literal_ranges(text: str, literals: tuple) -> tuple:
     """
     ranges = []
     for literal in literals:
-        if not literal:
+        # 子 3 字符的字面量不抹：满足不了完备性判据（≥3），误伤面却很大——未知名
+        # ``u`` 会把 ``redis://user:…`` 洗成 ``redis://***ser:…``（r8 实测，WARNING
+        # 面）。真正的凭据短口令仍由跨度掩码覆盖。
+        if not literal or len(literal) < 3:
             continue
         start = text.find(literal)
         while start != -1:
