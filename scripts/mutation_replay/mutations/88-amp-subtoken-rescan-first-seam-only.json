@@ -1,14 +1,15 @@
 {
-  "name": "88-amp-subtoken-rescan-first-seam-only",
-  "file": "plaita/server/factory.py",
-  "old": "                if amp == -1:\n                    break\n                j = amp + 1",
-  "new": "                if True:\n                    break\n                j = amp + 1",
-  "rationale": "子 token 重扫只认第一个 ``&`` 缝：多缝段的后续残段（``X:Pw&Sec9&More`` 的 ``More``、跨 ``/`` 段的 ``Pw2``）无人认领复活",
-  "expect_fail": [
-    "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_multiple_ampersands_mask_every_residual",
-    "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_ampersand_seam_across_slash_segments",
-    "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_r9_counterexamples_suffix_after_ampersand_is_masked",
-    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r9_ampersand_counterexample_regression"
-  ],
-  "issue": "88"
+ "name": "88-amp-subtoken-rescan-first-seam-only",
+ "file": "plaita/server/factory.py",
+ "old": "                if amp == -1:\n                    break\n                j = amp + 1",
+ "new": "                if True:\n                    break\n                j = amp + 1",
+ "rationale": "子 token 重扫只认第一个 ``&`` 缝：多缝段的后续残段（``X:Pw&Sec9&More`` 的 ``More``、跨 ``/`` 段的 ``Pw2``）无人认领复活",
+ "expect_fail": [
+  "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_multiple_ampersands_mask_every_residual",
+  "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_ampersand_seam_across_slash_segments",
+  "tests/unit/test_redis_url_parse.py::TestAmpersandSeamR9::test_r9_counterexamples_suffix_after_ampersand_is_masked",
+  "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_r9_ampersand_counterexample_regression"
+ ],
+ "issue": "88",
+ "concern": "重扫只认第一个 `&` 缝 ⇒ 第二个 `&` 缝之后的裸残段再次原样泄漏（`redis://host:6379/X:Pw&Sec9&More` → `X:***&***&More`，`More` 活）——污染规则必须对段内每个 `&` 子 token 生效，不是只处理首个。"
 }
