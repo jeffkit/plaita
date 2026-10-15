@@ -1,0 +1,12 @@
+{
+  "name": "159-fragment-only-mask-readmits-host",
+  "concern": "#159-r6-P3",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "        if _MASK_PLACEHOLDER in payload.partition(\"#\")[0]:\n            return True\n",
+  "new": "        if _MASK_PLACEHOLDER in payload:  # mutant: fragment 里的 *** 也算真掩码\n            return True\n",
+  "rationale": "把「path/query 被掩过」放宽成「payload 任意位置有 ***」⇒ 只有 fragment 被掩的 `http://Ks9Qm4Zt/#frag` 重新保留可疑 host（r6 FINDING 6 的边界）。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestCredentialShapedAuthorityR6::test_credential_shaped_host_fails_closed[fragment-only-secret-host]"
+  ]
+}

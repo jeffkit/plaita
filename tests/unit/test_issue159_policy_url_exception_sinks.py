@@ -1462,6 +1462,15 @@ class TestCredentialRunScalingR5:
         ("dot-glued", lambda n: "token." * n),
         ("kv-repeated", lambda n: "access_token=" * n),
         ("quoted-colon-repeated", lambda n: '"token":' * n),
+        # r6 自加的形状：两处窗口（键回看、引号值 find）去掉后必须仍然线性。
+        ("eq-run", lambda n: "=" * n),
+        ("colon-run", lambda n: ":" * n),
+        ("quote-run", lambda n: '"' * n),
+        ("unclosed-quote-megabytes", lambda n: 'token="' + "p" * n),
+        ("unclosed-quote-multi", lambda n: ('token="' + "p" * 200 + "=") * (n // 210)),
+        ("mixed-quote-eq", lambda n: '"=' * (n // 2)),
+        ("suffix-key", lambda n: "access_token_" + "a" * n + "=" + SECRET),
+        ("escaped-json", lambda n: ('{\\"token\\":\\"' + "p" * 200 + '\\"}') * (n // 215)),
     )
     _SIZES = (1000, 2000, 4000, 8000)
 
@@ -1576,8 +1585,13 @@ class TestCredentialFreeUrlsKeepTheirEndpoint:
         ``url_redaction`` 同样只保留 ``scheme://host[:port]``。因此把凭据**只**写进
         host 位置的形态在任何带 payload 的 URL 上都早已原样保留（``4d832348`` 实测：
         ``http://Ks9Qm4Zt/robot/send?access_token=X`` → ``http://Ks9Qm4Zt/***/***?***``）。
-        r5 只把**无 payload** 的那一格从常量改回端点，暴露面**同源同形**、没有扩大；
-        这属于与 ``access_token%3D…`` / 「跨 ASCII 空白被切开的凭据」并列的**已声明残口**。
+
+        **r5 原文在此说错了**：r5 曾写「r5 只把**无 payload** 的那一格从常量改回端点，
+        暴露面**同源同形**、没有扩大」——错。同类同形是对的，但 **r5 确实扩大了输入
+        集合**：``http://Ks9Qm4Zt``（无 payload，r4 是常量）在 r5 变成原文。
+        r6 把这一格里 authority 疑似承载凭据的部分收回（见
+        :class:`TestCredentialShapedAuthorityR6`），只留下**有 payload** 的一格
+        （本测试）作为与 ``access_token%3D…`` 并列的已声明残口。
         """
         assert _scrubber()(f"http://{SECRET}/robot/send?access_token=X") == \
             f"http://{SECRET}/***/***?***"
@@ -1615,3 +1629,298 @@ class TestDocstringReferencesResolve:
             if f"class {cls}" not in corpus or f"def {name}" not in corpus
         ]
         assert missing == [], f"docstring 指向不存在的测试：{missing}"
+
+
+# --------------------------------------------------------------------------- #
+# ⑲ r6（FINDING 4）：带引号的值必须掩到**真末尾**——>4 KB 的窗口截断回归
+# --------------------------------------------------------------------------- #
+_R6_SIZES = (8192, 65536, 262144)
+
+
+def _r6_place(secret: str, size: int, where: str) -> str:
+    """把密钥放在 ``size`` 长值体的 start / middle / end。
+
+    ``middle`` 的起点**严格 > 4096**（r5 的 ``_QUOTED_VALUE_WINDOW``），
+    这样三个位置都覆盖到窗口边界两侧。
+    """
+    if where == "start":
+        return secret + "p" * (size - len(secret))
+    if where == "end":
+        return "p" * (size - len(secret)) + secret
+    half = min(max(size // 2, 4104), size - len(secret))
+    return "p" * half + secret + "p" * (size - half - len(secret))
+
+
+def _r6_quoted_large_cases():
+    cases = []
+    for size in _R6_SIZES:
+        for where in ("start", "middle", "end"):
+            body = _r6_place(SECRET, size, where)
+            cases.append((f"dq-closed-{size}-{where}",
+                          f'access_token="{body}"', 'access_token="***"'))
+            cases.append((f"dq-unclosed-{size}-{where}",
+                          f'access_token="{body}', 'access_token="***'))
+    body = _r6_place(SECRET, 8192, "end")
+    cases.append(("sq-closed-8k-end", f"password='{body}'", "password='***'"))
+    cases.append(("sq-unclosed-8k-end", f"password='{body}", "password='***"))
+    cases.append(("xapikey-closed-8k-end", f'x-api-key="{body}"', 'x-api-key="***"'))
+    cases.append(("xapikey-unclosed-8k-end", f'x-api-key="{body}', 'x-api-key="***'))
+    cases.append(("json-key-closed-8k-end", f'{{"access_token": "{body}"}}',
+                  '{"access_token": "***"}'))
+    cases.append(("query-param-closed-8k-end", f"/robot/send?access_token={body}",
+                  "/robot/send?access_token=***"))
+    return tuple(cases)
+
+
+_R6_QUOTED_LARGE = _r6_quoted_large_cases()
+
+
+class TestLargeQuotedValueR6:
+    """r6 FINDING 4：``_QUOTED_VALUE_WINDOW = 4096`` 把掩码截断在窗口末尾。
+
+    r5（``646d9ad``）实测：``access_token="<8184×p>Ks9Qm4Zt"`` → 输出是
+    ``access_token="***<4096 字符明文，含密钥本体>``；**闭合引号在窗口外时同样截断**
+    （``find`` 在 ``[v0, v0+4096)`` 里找不到闭引号就 ``v1 = v0 + 4096``）。
+    r4（``4d83234``）同一输入是 ``access_token="***"``——**r5 相对 r4 回归**。
+    可达性：多 claim 的 IdP JWT（Azure AD 等）>4 KB 是常态。
+
+    修法：``find`` 不带 end ⇒ 扫到真末尾；线性由 ``i = v1`` 的摊还给出
+    （未闭合引号一次扫到 n 即结束），无需任何窗口。
+    """
+
+    @pytest.mark.parametrize(
+        "label,text,expected", _R6_QUOTED_LARGE,
+        ids=[case[0] for case in _R6_QUOTED_LARGE],
+    )
+    def test_renderer_masks_the_whole_value(self, label, text, expected):
+        rendered = _scrubber()(text)
+        _assert_clean(rendered, f"r6-large[{label}]")
+        assert rendered == expected, (
+            f"{label}: len(in)={len(text)} len(out)={len(rendered)}\n"
+            f"  实际={rendered[:80]!r}…\n  期望={expected[:80]!r}…"
+        )
+
+    @pytest.mark.parametrize(
+        "label,text,expected", _R6_QUOTED_LARGE,
+        ids=[case[0] for case in _R6_QUOTED_LARGE],
+    )
+    @pytest.mark.parametrize("path", ("gen", "do"))
+    def test_six_surfaces_through_the_real_entry_point(self, label, text, expected, path):
+        node, exc = _entry_exception(text, path)
+        surfaces = _six_surfaces(node, exc)
+        for name, rendered in surfaces.items():
+            _assert_clean(rendered, f"r6-large[{label}][{path}] {name}")
+
+    @pytest.mark.parametrize("size", _R6_SIZES)
+    def test_span_reaches_the_true_end_of_the_value(self, size):
+        """跨度级证据：掩码区间必须真的到值末尾，而不是窗口末尾。"""
+        spans = _credential_spans()
+        for where in ("start", "middle", "end"):
+            body = _r6_place(SECRET, size, where)
+            unclosed = f'access_token="{body}'
+            got = spans(unclosed)
+            assert got, f"{size}/{where}: 没扫出跨度"
+            assert got[-1][1] == len(unclosed), (
+                f"{size}/{where}: 跨度止于 {got[-1][1]}，值的真末尾是 {len(unclosed)}"
+            )
+            closed = unclosed + '"'
+            got = spans(closed)
+            assert got and got[-1][1] == len(closed) - 1, (size, where, got, len(closed))
+
+    def test_unclosed_quote_is_a_fixed_point(self):
+        """幂等：掩完一次之后再洗一次必须逐字不变（占位不进二次跨度）。"""
+        once = _scrubber()('access_token="' + _r6_place(SECRET, 8192, "end"))
+        assert _scrubber()(once) == once
+
+
+# --------------------------------------------------------------------------- #
+# ⑳ r6（FINDING 5）：键 token 的后缀侧——64 字符回看窗口的截断回归
+# --------------------------------------------------------------------------- #
+_R6_SUFFIX_SIZES = (58, 59, 64, 200, 4096)
+
+
+class TestKeyTokenSuffixWindowR6:
+    """r6 FINDING 5：``_MAX_KEY_WINDOW = 64`` 在**前缀**侧安全，在**后缀**侧漏。
+
+    ``access_token_`` + ``'a'*s`` + ``=SECRET``：键 token 的前 64 字符恰好是
+    ``access_token_`` + 55 个 ``a``；``s ≥ 59`` 时回看窗口整段落在 ``a`` 串里 ⇒
+    键名取成纯 ``a`` 串、判据落空、原文穿过。r4（``4d832348``）在 ``s = 200``
+    仍掩（正则无窗口上限）——**又是 r5 相对 r4 的回归**。
+
+    修法：回看到 :data:`_KEY_CHARS` 的起点，不设上限；线性由「各分隔符的键回看
+    区间两两不交」给出（分隔符本身不在 ``_KEY_CHARS`` 里，回看不到前一个分隔符之前）。
+    """
+
+    @pytest.mark.parametrize("size", _R6_SUFFIX_SIZES)
+    def test_suffix_side_key_token_is_masked(self, size):
+        text = "access_token_" + "a" * size + "=" + SECRET
+        rendered = _scrubber()(text)
+        _assert_clean(rendered, f"r6-suffix[{size}]")
+        assert rendered == "access_token_" + "a" * size + "=***", (
+            f"s={size}: 键名后缀把回看窗口撑爆 ⇒ 判据落空\n  实际={rendered!r}"
+        )
+
+    @pytest.mark.parametrize("size", (59, 4096))
+    @pytest.mark.parametrize("path", ("gen", "do"))
+    def test_six_surfaces_through_the_real_entry_point(self, size, path):
+        text = "access_token_" + "a" * size + "=" + SECRET
+        node, exc = _entry_exception(text, path)
+        for name, rendered in _six_surfaces(node, exc).items():
+            _assert_clean(rendered, f"r6-suffix[{size}][{path}] {name}")
+
+    def test_prefix_side_is_unchanged(self):
+        """前缀侧（词干紧贴分隔符）不受影响：超长良性前缀也照样命中。"""
+        text = "x" * 5000 + " access_token=" + SECRET
+        assert _scrubber()(text) == "x" * 5000 + " access_token=***"
+
+    def test_benign_long_key_token_still_passes_through(self):
+        """反方向：键 token 里没有凭据**分量**时，再长也不许掩（诊断文本主体）。"""
+        for text in ("x" * 200 + "_status=500", "y" * 4096 + "_retries=3"):
+            assert _scrubber()(text) == text
+
+    def test_spans_cover_the_whole_key_token(self):
+        size = 200
+        key = "access_token_" + "a" * size
+        got = _credential_spans()(f"{key}={SECRET}")
+        assert got == [(len(key) + 1, len(key) + 1 + len(SECRET))], got
+
+
+# --------------------------------------------------------------------------- #
+# ㉑ r6（FINDING 6）：authority 疑似承载凭据 + 没有真掩码 ⇒ fail closed
+# --------------------------------------------------------------------------- #
+_R6_HOST_FAIL_CLOSED = (
+    ("bare-secret-host", f"http://{SECRET}"),
+    ("slash-secret-host", f"http://{SECRET}/"),
+    ("double-slash-secret-host", f"http://{SECRET}//"),
+    ("port-secret-host", f"http://{SECRET}:8080"),
+    ("userinfo-secret-host", f"http://user:pw@{SECRET}"),
+    ("fragment-only-secret-host", f"http://{SECRET}/#frag"),
+    ("in-sentence", f"Failed to connect to http://{SECRET}"),
+    ("quoted-in-sentence", f"boom url='http://{SECRET}'"),
+)
+_R6_HOST_KEPT = (
+    ("bare-host", "http://example.com", "http://example.com"),
+    ("host-port", "http://host:8080", "http://host:8080"),
+    ("https-bare", "https://api.example.com", "https://api.example.com"),
+    ("failed-to-connect", "Failed to connect to http://example.com",
+     "Failed to connect to http://example.com"),
+    ("single-label-lowercase", "http://h", "http://h"),
+    ("single-label-trailing-slash", "http://h/", "http://h/"),
+    ("localhost-port", "http://localhost:8080", "http://localhost:8080"),
+    ("bracket-endpoint", "http://[web,hook]:8443", "http://[web,hook]:8443"),
+    ("ipv4", "http://10.1.2.3", "http://10.1.2.3"),
+)
+
+
+class TestCredentialShapedAuthorityR6:
+    """r6 FINDING 6：r5 恢复端点时把「host 位置就是密钥本体 + 无 payload」也放了进来。
+
+    ``http://Ks9Qm4Zt`` 在 r4 是 ``<unprintable-url>``，r5 变成原文——**r5 新开的
+    暴露面**（评审同时指出 r5 的 docstring 说「没有扩大」不准确：同类同形，
+    但**输入集合扩大了**）。
+
+    **判据（精确）**：一个 token 只有在「掩掉过字节」时才算合法不动点；
+    payload 为空或只剩结构分隔符（``/``、``//``、``?``、``#``）时，authority
+    必须**不像**承载凭据——host 位置出现大写 ASCII 字母即判 fail-closed。
+
+    为什么 ``example.com`` 保留而 ``Ks9Qm4Zt`` 不：DNS 名大小写不敏感、惯例全小写，
+    authority 位置出现大写字母在观察到的泄漏家族里就是驼峰 token，不是主机名；
+    而 r5 已钉住的 ``http://h`` / ``http://host:8080`` / ``http://localhost:8080``
+    全是小写，此判据与它们共存。
+
+    方向（刻意）：``http://Example.com`` 这类合法但非常规的大写主机名也退化常量。
+    """
+
+    @pytest.mark.parametrize(
+        "label,text", _R6_HOST_FAIL_CLOSED, ids=[c[0] for c in _R6_HOST_FAIL_CLOSED]
+    )
+    def test_credential_shaped_host_fails_closed(self, label, text):
+        rendered = _scrubber()(text)
+        _assert_clean(rendered, f"r6-host[{label}]")
+        assert SECRET not in rendered, f"{label}: 密钥本体留在输出里：{rendered!r}"
+        assert rendered.endswith(UNPRINTABLE_URL), f"{label}: 实际={rendered!r}"
+
+    @pytest.mark.parametrize(
+        "label,text,expected", _R6_HOST_KEPT, ids=[c[0] for c in _R6_HOST_KEPT]
+    )
+    def test_credential_free_endpoints_are_still_kept(self, label, text, expected):
+        rendered = _scrubber()(text)
+        _assert_clean(rendered, f"r6-host-free[{label}]")
+        assert rendered == expected, f"{label}: 实际={rendered!r} 期望={expected!r}"
+
+    @pytest.mark.parametrize("path", ("gen", "do"))
+    def test_six_surfaces_through_the_real_entry_point(self, path):
+        node, exc = _entry_exception(f"http://{SECRET}", path)
+        for name, rendered in _six_surfaces(node, exc).items():
+            _assert_clean(rendered, f"r6-host[{path}] {name}")
+
+    def test_kept_endpoints_are_fixed_points(self):
+        for label, text, _expected in _R6_HOST_KEPT:
+            once = _scrubber()(text)
+            assert _scrubber()(once) == once, f"{label}: 非幂等（{once!r}）"
+
+    def test_frozen_contract_host_residual_is_restated(self):
+        """与上面新判据**并列**的已声明残口（**r4 起冻结契约**，本单不动）：
+
+        只要 token 有 payload（哪怕 payload 全被掩掉），host 位置的凭据就按 ``#88``
+        的 ``_mask_url_for_log`` 契约保留（只抹 userinfo、保 host）。所以
+        ``http://Ks9Qm4Zt/x`` / ``http://Ks9Qm4Zt/robot/send?access_token=X``
+        仍然保留 host——r6 只收「**没有**真掩码」的那一格。
+        """
+        assert _scrubber()(f"http://{SECRET}/x") == f"http://{SECRET}/***"
+        assert _scrubber()(f"http://{SECRET}/robot/send?access_token=X") == \
+            f"http://{SECRET}/***/***?***"
+
+
+# --------------------------------------------------------------------------- #
+# ㉒ r6（FINDING 7）：诚实残口清单——未修的逐条钉住，修掉的不许回退
+# --------------------------------------------------------------------------- #
+class TestDeclaredGapsR6:
+    """未修的残口（逐条给可达性）+ 本轮关掉的那一条（转义引号）。"""
+
+    def test_cjk_key_is_declared_out_of_scope(self):
+        """CJK 键名不命中：词干表全是 ASCII 分量，``_KEY_CHARS`` 也只含 ASCII。"""
+        assert _scrubber()("密钥=" + SECRET) == "密钥=" + SECRET
+        assert _scrubber()("令牌='" + SECRET + "'") == "令牌='" + SECRET + "'"
+
+    def test_key_arrow_value_form_is_declared(self):
+        """``key=>value``：``>`` 在 ``_VALUE_STOP`` 里 ⇒ 值立即结束、跨度为 0。"""
+        assert _scrubber()("token=>" + SECRET) == "token=>" + SECRET
+        assert _scrubber()("access_token=>" + SECRET) == "access_token=>" + SECRET
+
+    def test_client_id_is_an_identifier_not_a_secret(self):
+        """``client_id`` 分量 ``client`` / ``id`` 都不在词干表 ⇒ 刻意不掩。"""
+        assert _scrubber()("client_id=" + SECRET) == "client_id=" + SECRET
+
+    def test_access_key_id_is_masked_via_its_key_component(self):
+        """**对评审假设的诚实更正**：``access_key_id`` **会**被掩——分量 ``key``
+        命中词干表（与 ``x-api-key`` 同一条规则）。方向是 fail-closed：它是 AWS
+        凭据**标识符**，多掩无害。若将来要「不掩标识符」，必须先给 ``key`` 分量
+        加例外，那会同时影响 ``x-api-key``。"""
+        assert _is_credential_key()("access_key_id") is True
+        assert _scrubber()("access_key_id=" + SECRET) == "access_key_id=***"
+        assert _is_credential_key()("client_id") is False
+
+    def test_lowercase_opaque_host_is_declared(self):
+        """全小写的不透明 token 落在 host 位置不触发 r6 判据——它与 r5 钉住的
+        ``http://h`` 在字符层面不可区分（与冻结契约的 host 残口并列）。"""
+        assert _scrubber()("http://ks9qm4zt") == "http://ks9qm4zt"
+
+    def test_escaped_json_quotes_are_now_closed(self):
+        """Java / 双重编码文本里的 ``\\"token\\":\\"K\\"`` 曾是残口（``\\`` 隔断回看），
+        r6 关闭：键侧跳过转义反斜杠、值侧认 ``\\"`` 开引号。"""
+        assert _scrubber()('{\\"token\\":\\"' + SECRET + '\\"}') == \
+            '{\\"token\\":\\"***"}'
+        assert _scrubber()('fail \\"access_token\\"=\\"' + SECRET + '\\"') == \
+            'fail \\"access_token\\"=\\"***"'
+
+    def test_escaped_form_is_linear(self):
+        """关闭残口不许引入回溯：一遍 256 KB 的转义形态必须远低于上限。"""
+        import time
+
+        text = ('{\\"access_token\\":\\"' + "p" * 200 + '\\"}') * 1200
+        started = time.monotonic()
+        rendered = _scrubber()(text)
+        elapsed = time.monotonic() - started
+        _assert_clean(rendered, "r6-escaped-256k")
+        assert elapsed < 2.0, f"转义形态 256 KB 耗时 {elapsed:.3f}s —— 退化了？"
