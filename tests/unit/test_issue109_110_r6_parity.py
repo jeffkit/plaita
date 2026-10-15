@@ -32,7 +32,6 @@ listener 未取消、未进 ``_drain_pending_tasks``）：
 import asyncio
 import contextvars
 import os
-import sys
 import unittest
 from unittest.mock import patch
 
@@ -235,17 +234,16 @@ class Test109R6VerifierCounterexamples(unittest.IsolatedAsyncioTestCase):
         assert _INCOMPLETE_MARK in str(err), f"未知持有者应 fail-closed: {err}"
 
     async def test_as_completed_pinned_on_running_cpython(self):
-        """``as_completed`` 形状：本仓库运行时 3.11/3.12 由 Queue 中介边证明出 in_graph；
-        3.13 的 ``_AsCompletedIterator``（未知持有者持 ``_done`` Queue）由 fail-closed
-        拦下（见 scripts/selfclose_109_110_versions.py 的跨版本实测）。两者都是具名拒绝。
+        """``as_completed`` 形状：3.11/3.12 经 Queue ``_getters`` 中介边证明出
+        in_graph；3.13 起经 ``_AsCompletedIterator``（r15-recut 注册的已知 kind：
+        close task → ``_handle_completion`` → 迭代器 → ``_done`` Queue →
+        ``_getters``）同样证明出 in_graph。r15 曾在 3.13 上把该形状判成
+        「未知持有者 fail-closed（incomplete）」，与 r3_parity 的文案契约冲突，
+        是本次重切（bounce）的根因——重切后按 r3 契约统一为 SELF_CLOSE 文案。
         """
         err = await self._assert_shape_refused("as_completed")
-        if sys.version_info >= (3, 13):
-            assert _INCOMPLETE_MARK in str(err), \
-                f"3.13 的 _AsCompletedIterator 应走未知持有者 fail-closed: {err}"
-        else:
-            assert _SELF_CLOSE_MARK in str(err), \
-                f"3.11/3.12 的 as_completed 应经 Queue._getters 证明出图内: {err}"
+        assert _SELF_CLOSE_MARK in str(err), \
+            f"as_completed 应证明出图内（3.11/3.12/3.13+ 一致）: {err}"
 
 
 class _Gate:

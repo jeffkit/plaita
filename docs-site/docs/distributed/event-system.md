@@ -851,14 +851,16 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
      `func`/`args`/`keywords` 递归、函数 `__closure__` 的 cell、以及**已知 asyncio
      唤醒簿记类型**的期望属性（`Task`/`Future._callbacks`、`Queue._getters`·`_putters`、
      `Event`·`Condition`·`Semaphore`·`Lock._waiters`、`Barrier._cond._waiters`、
-     `StreamReader._waiter`（单数）、`TaskGroup._tasks`·`_on_completed_fut`）。
+     `StreamReader._waiter`（单数）、`TaskGroup._tasks`·`_on_completed_fut`、
+     3.13+ `_AsCompletedIterator._done`·`_todo`）。
      **不再有 `getattr(..., None)` 静默跳过**：已知属性读不到 ⇒ 具名拒绝
      （`_WAKE_GRAPH_INCOMPLETE_REFUSAL`，文案含 `error_kind=wake-graph-incomplete`）；
      `TaskGroup._on_completed_fut is None` 而 `_tasks` 非空 ⇒ 拒绝（验收者决定性反例：
      `__aexit__` **懒创建**该 future，r5 在此刻读不到「group 被谁 await」的边 ⇒ clean
      ⇒ close 进 drain ⇒ 与在飞分发任务互等、70 s 后被 SIGKILL）；未知持有者**直接**
-     挂着已武装的唤醒原语（未完成 Future/Task、有 getter 的 Queue）⇒ 拒绝（3.13
-     `as_completed` 的 `_AsCompletedIterator._done`、自定义 awaitable 的 `self._f`）；
+     挂着已武装的唤醒原语（未完成 Future/Task、有 getter 的 Queue）⇒ 拒绝（自定义
+     awaitable 的 `self._f`；r15 重切起 3.13 `as_completed` 的 `_AsCompletedIterator`
+     已注册为**已知 kind**，见下方「3.13 重切」说明，不再走未知持有者）；
      展开深度 / 节点预算耗尽 ⇒ 拒绝。闭包 cell 里的**容器**不展开（`asyncio.wait` /
      `as_completed` 的 `todo` 是兄弟簿记，展开会误拒 600+ 在飞的合法关停——判据盲区 R2）。
      **不扫 `__dict__`**，但对未知持有者只扫**一层**直接属性找已武装原语：因此
@@ -868,7 +870,8 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
      `close_graph_verdict` 内收敛成具名 `incomplete`**，绝不裸逃到 `close()`。
   3. **stdlib 属性自检**（把「未来 Python 改名」从 fail-open 变 fail-closed）：首次
      `close()` 在 running loop 内对 `Task`/`Future`/`TaskGroup`/`Queue`/`Event`/
-     `Condition`/`Semaphore`/`Lock`/`Barrier`/`StreamReader` **新建实例**并检查期望
+     `Condition`/`Semaphore`/`Lock`/`Barrier`/`StreamReader`（3.13+ 另有
+     `_AsCompletedIterator`，经公开 API `as_completed([future])` 构造）**新建实例**并检查期望
      属性；缺任一 ⇒ **有在飞分发时** `close()` 具名拒绝
      （`_SELF_CLOSE_UNSUPPORTED_RUNTIME_REFUSAL`，文案点名缺哪个属性）。
      **没有 running loop 时不缓存结果**（r7 缺陷修复：把「没跑成」缓存成失败会让本
@@ -967,7 +970,15 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   | 3.10.21 | 通过 | 7/7 | 无 `TaskGroup`/`Barrier`（类型不存在 ⇒ 对应形状不可达，自检按版本跳过） |
   | 3.11.16（仓库 venv） | 通过 | 11/11 | `as_completed` 经 `Queue._getters` 证明出 in_graph |
   | 3.12.14 | 通过 | 11/11 | 同 3.11 |
-  | 3.13.15 | 通过 | 11/11 | `as_completed` 返回 `_AsCompletedIterator`：未知持有者持 `_done`（Queue）⇒ **fail-closed（incomplete）**，不再漏检 |
+  | 3.13.15 | 通过 | 11/11 | r15 重切前：`as_completed` 返回 `_AsCompletedIterator`，当未知持有者 fail-closed（incomplete）；**重切后**：`_AsCompletedIterator` 注册为已知 kind（3.13+），`as_completed` 经 `_done` Queue → `_getters` 证明出 **in_graph**，与 3.11/3.12 同判（r3 契约文案一致） |
+
+  **3.13 重切（#109/#110 bounce 修复）**：r15 曾把 3.13 的 `_AsCompletedIterator` 当
+  「未知持有者直接持 `_done` Queue」fail-closed，导致 `as_completed` 形状在 3.13 上
+  给出 `wake-graph-incomplete` 文案，与 r3 验收契约（拒绝文案必须点名自关停）冲突。
+  重切按本判据既定维护路径**升级期望属性表**：`_resolve_cls` 增 `asyncio.tasks`
+  私有类回退，`_WAKE_KIND_SPECS` 增 `AsCompletedIterator`（`_done`/`_todo`，since
+  (3,13)），唤醒锥可证：close task → `_handle_completion` → 迭代器 → `_done` Queue
+  → `_getters` → 等待任务。未知持有者语义不变（`self._f` 形状仍 fail-closed）。
 
   运行方式：3.11 用仓库 venv；3.10/3.12/3.13 用
   `uv run --no-project --python <v> python scripts/selfclose_109_110_versions.py`

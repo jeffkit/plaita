@@ -36,13 +36,14 @@ L2 —— 完成唤醒锥（defence in depth，**fail-closed**）
     可达性遍历（``Future._callbacks`` 的每个表项 → 回调牵动的 Future/Task）。命中
     在飞分发任务 ⇒ ``in_graph``。**证明不出来 ⇒ 具名 incomplete**，绝不静默跳过：
       * 已知 asyncio 簿记类型（Task/Future/Queue/Event/Condition/Semaphore/Lock/
-        Barrier/StreamReader/TaskGroup）的期望属性缺失或被重命名 ⇒ ``incomplete``；
+        Barrier/StreamReader/TaskGroup、3.13+ 的 ``_AsCompletedIterator``）的期望
+        属性缺失或被重命名 ⇒ ``incomplete``；
       * ``TaskGroup._on_completed_fut`` 为 ``None`` 而 ``_tasks`` 非空 ⇒
         ``incomplete``（``__aexit__`` **懒创建**窗口：属性存在但未物化）；
       * 未知持有者**直接**持有已武装的唤醒原语（未完成 Future/Task、有 getter 的
-        Queue 等）⇒ ``incomplete``（例：3.13 ``as_completed`` 的
-        ``_AsCompletedIterator`` 持有 ``_done`` Queue；自定义 awaitable 持有
-        ``self._f``）；
+        Queue 等）⇒ ``incomplete``（例：自定义 awaitable 持有 ``self._f``；
+        r15-recut 起 3.13 ``as_completed`` 的 ``_AsCompletedIterator`` 已注册为
+        **已知 kind**（见上），不再是未知持有者）；
       * 展开深度耗尽 / 节点预算耗尽 ⇒ ``incomplete`` / ``budget``。
     **r7：判据内任何非具名异常都不许离开 ``close_graph_verdict``**——判据收敛成具名
     ``incomplete``（例如自定义描述符在 ``_require`` 上抛 ``ValueError``）。
@@ -209,6 +210,17 @@ _WAKE_KIND_SPECS: Tuple[Dict[str, Any], ...] = (
          attrs=("_cond",), nullable=(), since=(3, 11)),
     dict(name="StreamReader", cls_name="StreamReader",
          attrs=("_waiter",), nullable=("_waiter",), since=None),
+    # r15-recut（3.13 bounce 修复）：``as_completed`` 在 3.13 起返回
+    # ``asyncio.tasks._AsCompletedIterator``（私有簿记类：``_done`` Queue + ``_todo``
+    # set，完成回调 ``_handle_completion`` 把完成的 future 塞进 ``_done``，等待者经
+    # ``Queue._getters`` 被唤醒）。r15 曾把它当**未知持有者** fail-closed（incomplete），
+    # 与 r3_parity :438 的文案契约（SELF_CLOSE）在 3.13 上冲突。按本模块既定的维护
+    # 路径「升级期望属性表」把它注册为**已知 kind**：唤醒边变成可证明的真实簿记
+    # （close task → ``_handle_completion`` → 迭代器 → ``_done`` Queue →
+    # ``_getters`` → 等待任务），3.13 上同样判 ``in_graph``。未知持有者语义不变
+    # （自定义 awaitable 的 ``self._f`` 仍 fail-closed）。
+    dict(name="AsCompletedIterator", cls_name="_AsCompletedIterator",
+         attrs=("_done", "_todo"), nullable=(), since=(3, 13)),
 )
 
 _FUTURE_CLS = asyncio.Future
@@ -220,11 +232,17 @@ _BOUND_CALLABLES = (types.MethodType, types.BuiltinFunctionType,
 
 
 def _resolve_cls(cls_name: str):
-    """按名字取 asyncio 类型；不存在返回 None（老版本/被改名都走这里）。"""
-    try:
-        return getattr(asyncio, cls_name)
-    except AttributeError:
-        return None
+    """按名字取 asyncio 类型；不存在返回 None（老版本/被改名都走这里）。
+
+    3.13 起部分簿记类是 ``asyncio.tasks`` 的**私有类**（如 ``_AsCompletedIterator``），
+    不在 ``asyncio`` 顶层命名空间——先查顶层，再查 ``asyncio.tasks``。
+    """
+    for holder in (asyncio, asyncio.tasks):
+        try:
+            return getattr(holder, cls_name)
+        except AttributeError:
+            continue
+    return None
 
 
 def _kind_cls(kind: Dict[str, Any]):
@@ -295,6 +313,10 @@ def _kind_is_armed(obj: Any, kind: Dict[str, Any]) -> bool:
         return bool(_require(cond, "_waiters"))
     if name == "StreamReader":
         return _require(obj, "_waiter") is not None
+    if name == "AsCompletedIterator":
+        # 还有未完成的后继（它们的完成回调会往 ``_done`` 塞结果）⇒ 视为已武装；
+        # ``_todo`` 清空（如超时后）则本原语不再牵动任何 Future。
+        return bool(_require(obj, "_todo"))
     return bool(_require(obj, "_waiters"))
 
 
@@ -304,8 +326,9 @@ def _direct_armed_wake_state(obj: Any) -> Optional[str]:
     **只扫一层、不进容器**：RedisEventBus 自己的闭包会出现在回调里（``_track_task``
     的 lambda cell 是 bus），而 bus 的 ``_pending_tasks`` / ``listeners`` 是容器、
     ``lock`` 未武装——所以合法跨总线关停不会被误拒。反之，合法地把未完成 Future
-    （自定义 awaitable 的 ``self._f``）或带 getter 的 Queue（3.13 ``as_completed``）
-    挂在实例属性上的持有者会被 fail-closed 拦下。
+    （自定义 awaitable 的 ``self._f``）挂在实例属性上的持有者会被 fail-closed 拦下。
+    （r15-recut 起 3.13 ``as_completed`` 的 ``_AsCompletedIterator`` 持 ``_done``
+    Queue 不再走这里——它已注册为已知 kind，见 ``_WAKE_KIND_SPECS``。）
     """
     try:
         state = vars(obj)
@@ -533,6 +556,11 @@ def _build_selftest_instances() -> Dict[str, Any]:
             instances[name] = asyncio.Barrier(2)
         elif name == "StreamReader":
             instances[name] = asyncio.StreamReader(limit=2 ** 16)
+        elif name == "AsCompletedIterator":
+            # r15-recut：3.13 的 ``as_completed`` 迭代器。用**未完成 future** 构造
+            # （``ensure_future`` 对 future 原样返回：不产生任务、不调度任何东西），
+            # 只验「期望属性存在」；``_run_self_test`` 收尾时取消它。
+            instances[name] = asyncio.as_completed([loop.create_future()])
         else:                                    # pragma: no cover - 表驱动
             raise AssertionError(f"未注册的自检构造: {name}")
     return instances
@@ -566,6 +594,10 @@ def _run_self_test() -> Optional[str]:
     task = instances.get("Task")
     if task is not None and not task.done():
         task.cancel()
+    aci = instances.get("AsCompletedIterator")
+    if aci is not None:
+        for fut in list(getattr(aci, "_todo", ()) or ()):
+            fut.cancel()                 # 自检构造的未完成 future，收尾防悬置
     return "; ".join(problems) if problems else None
 
 
