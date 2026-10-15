@@ -2031,6 +2031,11 @@ _R8_KNOWN_BOUNDARY_LEAKS = {
     "slash-in-password": 8,
     "r9-amp-multi": 32,
     "r9-amp-at-residual": 640,
+    # 非 r9：r7 槽的**潜在**边界，31 槽轮转换密后首次被扫掠踩到（seed 29）：
+    # 口令含 ``??`` 时取值里的 ``?`` 切碎 query，整段原样返回（HEAD 与 a09f05c
+    # 同为逐字 keep，``?u=X:119??C9AAa??AbAAAy`` 实测）。全部 20 种子实测最大
+    # 30（仅 seed 29），上界 = 观测最大 + 余量；掩码器侧补 ``?`` 分支后收紧。
+    "query-value-no-at": 32,
 }
 
 
