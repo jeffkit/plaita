@@ -42,9 +42,20 @@ from urllib.parse import urlsplit
 #: ``#88`` 的掩码器——Redis URL（userinfo 口令）的唯一渲染路径。
 #: **按名字 import**：``#88`` 若改名/删除，这里在 import 期即炸（fail-loud），
 #: 而不是悄悄退化成一个不再掩码的版本。
-from plaita.server.factory import _mask_url
+# plaita#160/#161 重切：本模块住 foundation（core），而掩码语法的家在
+# server.factory（#88 已落地，50 条锚在 factory.py）—— foundation 不得 import
+# server，故用**注册注入**：factory 模块体（server→core 向下）把 ``_mask_url``
+# 注册进来；未注册（纯 node 进程）时日志路径 fail-closed 返回不可打印占位，
+# 绝不泄漏明文。monkeypatch 口径不变（测试照旧 patch 本模块的 ``_mask_url``）。
+_mask_url = None
 
-logger = logging.getLogger("plaita.server.url_redaction")
+
+def register_mask_url_impl(fn) -> None:
+    """``plaita.server.factory`` 在模块体里调用：把 ``_mask_url`` 注册进本模块。"""
+    global _mask_url
+    _mask_url = fn
+
+logger = logging.getLogger("plaita.core.url_redaction")
 
 #: 掩码失败时的**安全常量**——绝不退回原始 URL。
 UNPRINTABLE_URL = "<unprintable-url>"
@@ -161,6 +172,9 @@ def _safe_render(url: object, renderer: Callable[[object], str]) -> str:
 
 
 def _mask_url_for_log(url: object) -> str:
+    if _mask_url is None:                     # factory 未注册（纯 node 进程）：fail-closed
+        logger.warning("_mask_url 未注册——日志路径 fail-closed 掩码")
+        return UNPRINTABLE_URL
     """Redis/通用 URL（``userinfo`` 口令）进日志前的**总兜底**渲染。
 
     复用 ``#88`` 的 ``factory._mask_url``——不另起一套掩码（同一个 URL 两套渲染

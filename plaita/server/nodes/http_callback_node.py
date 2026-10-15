@@ -14,7 +14,7 @@ from ...logger import logger
 # ``url: …``（评估器内部走网络/第三方库时的形态）——``logger.warning(…, e)``
 # 同样在**构造处**过共享清洗器。该行原本也没有 ``exc_info``，故只渲染一行
 # （``_scrub_url_text`` 对非字符串输入先 ``str()`` 再清洗）。
-from ..url_redaction import _mask_webhook_url_for_log, _scrub_url_text
+from ...core.url_redaction import _mask_webhook_url_for_log, _scrub_url_text
 
 
 class HttpCallbackNode(BaseExtendedNode):

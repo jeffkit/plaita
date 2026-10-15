@@ -31,7 +31,7 @@ import random
 
 import pytest
 
-from plaita.server.url_redaction import UNPRINTABLE_URL, _mask_url_for_log
+from plaita.core.url_redaction import UNPRINTABLE_URL, _mask_url_for_log
 from tests.unit._url_sink_support import (
     PLAITA_DIR,
     PingFailingRedis,
@@ -227,7 +227,9 @@ class TestNonUtf8PasswordNeverBreaksCallers:
 
     def test_renderer_failure_degrades_to_safe_constant_not_raw_url(self, monkeypatch):
         """掩码器被 patch 成抛异常：调用点必须拿到安全常量，绝不拿到原串。"""
-        from plaita.server import url_redaction
+        from plaita.core import url_redaction
+import plaita.server.factory  # noqa: F401 — plaita#160/#161 重切：_mask_url 的注册点在本模块
+                          # （factory 模块体 server→core 向下注册）；不 import 则日志/渲染路径 fail-closed。
 
         def boom(value):
             raise UnicodeEncodeError("utf-8", "x", 0, 1, "boom")
@@ -240,7 +242,7 @@ class TestNonUtf8PasswordNeverBreaksCallers:
 
     def test_registry_metadata_failure_degrades_to_safe_constant(self, monkeypatch):
         from plaita.server import flow_worker as flow_worker_module
-        from plaita.server import url_redaction
+        from plaita.core import url_redaction
 
         def boom(value):
             raise RuntimeError("masker exploded")
@@ -266,7 +268,7 @@ class TestNonUtf8PasswordNeverBreaksCallers:
         """把 ``_mask_url`` patch 成抛异常后，服务启动器依旧只走 ``SystemExit``。"""
         import redis as redis_pkg
 
-        from plaita.server import url_redaction
+        from plaita.core import url_redaction
         from plaita.server.services import __main__ as svc_main
 
         monkeypatch.setattr(
@@ -429,6 +431,6 @@ class TestNoLoggerCallInterpolatesRawCredentialUrl:
         offenders = scan_plaita_for_credential_url_logs()
         assert offenders == [], (
             "logger.* 直接插值了原始凭据 URL（口令/webhook 密钥会进日志）——"
-            "请经 plaita/server/url_redaction.py 的 _mask_url_for_log / "
+            "请经 plaita/core/url_redaction.py 的 _mask_url_for_log / "
             "_mask_webhook_url_for_log 渲染后再记录：\n  " + "\n  ".join(offenders)
         )

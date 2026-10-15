@@ -30,7 +30,7 @@ from plaita.core.errors import NodeException
 # 同样按名字 import、不复制文法： ``#160`` 的记录面曾经只按 7 名清单掩 header
 # 键，``X-Api-Key`` / ``X-Token`` / ``apikey`` / ``X-Goog-Api-Key`` 因此整套穿过。
 # 这里直接复用共享凭据键谓词（r5 重写文法时本 import 自动跟上；rename 即 import 期炸）。
-from plaita.server.url_redaction import (  # noqa: F401 — 部分名字仅供历史可达性
+from plaita.core.url_redaction import (  # noqa: F401 — 部分名字仅供历史可达性
     UNPRINTABLE_URL,
     _ABSOLUTE_URL_RE,
     _credential_run_spans,

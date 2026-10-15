@@ -13,7 +13,7 @@ HTTP 客户端异常文本（``requests`` 的 ``url: /path?query`` / ``aiohttp``
 本文件钉三件事：
 
 1. **共享渲染器**：``_scrub_url_text`` 的家已从 ``node/http.py`` 迁到
-   ``plaita/server/url_redaction.py``，``node`` 层与 ``#161`` 的三个站点用的是
+   ``plaita/core/url_redaction.py``，``node`` 层与 ``#161`` 的三个站点用的是
    **同一个函数对象**（:func:`test_node_layer_and_sites_share_one_implementation`
    用 ``is`` 断言，不是「同名两份」）。
 2. **构造处清洗**（``#158`` r2 纪律）：不在 logger 调用点打补丁。``exc_info=True``
@@ -41,8 +41,10 @@ import socket
 import pytest
 
 import plaita.node.http as http_mod
-from plaita.server import url_redaction
-from plaita.server.url_redaction import (
+from plaita.core import url_redaction
+import plaita.server.factory  # noqa: F401 — plaita#160/#161 重切：_mask_url 的注册点在本模块
+                          # （factory 模块体 server→core 向下注册）；不 import 则日志/渲染路径 fail-closed。
+from plaita.core.url_redaction import (
     _scrub_exception_text,
     _scrub_url_text,
 )

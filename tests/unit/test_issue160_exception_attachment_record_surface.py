@@ -59,7 +59,9 @@ from plaita.node.http import (
     HttpRequestInfo,
     _render_header_for_record,
 )
-from plaita.server import url_redaction
+from plaita.core import url_redaction
+import plaita.server.factory  # noqa: F401 — plaita#160/#161 重切：_mask_url 的注册点在本模块
+                          # （factory 模块体 server→core 向下注册）；不 import 则日志/渲染路径 fail-closed。
 from tests.unit._url_sink_support import find_needles, leak_needles
 
 SECRET = "Ks9Qm4Zt"

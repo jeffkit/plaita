@@ -2,10 +2,10 @@
  "name": "159-policy-renderer-bypassed",
  "concern": "#159-r2-P0",
  "issue": "159",
- "file": "plaita/server/url_redaction.py",
+ "file": "plaita/core/url_redaction.py",
  "old": "    return _mask_webhook_url_for_log(_mask_url_for_log(url))\n",
  "new": "    return url if isinstance(url, str) else str(url)\n",
- "rationale": "把构造面渲染器换成恒等函数：AST 守卫看不见（``_mask_policy_url(url)`` 在语法上仍是掩码调用），但明文重新进异常消息、五个面全部泄露——动态测试是这条回归的唯一杀手。（r5 重 derive 声明行：原第二行 `TestPolicyExceptionNeverCarriesTheSecret::test_success_path_surfaces[denied-hosts]` 在本条变异下**恒绿**——r4 与 r5 实测都 PASSED：恒等渲染器吐出的明文 URL 仍会被`_scrub_url_text` 的 URL 那趟整体掩成 `<unprintable-url>`，该行测不到「构造面渲染器」这条腿。换成 `TestPolicyUrlRenderer::*` 三行——它们直接对着被变异的那个函数说话。） | plaita#160/#161 集成：清洗器已迁至 url_redaction.py，锚点随迁。",
+ "rationale": "把构造面渲染器换成恒等函数：AST 守卫看不见（``_mask_policy_url(url)`` 在语法上仍是掩码调用），但明文重新进异常消息、五个面全部泄露——动态测试是这条回归的唯一杀手。（r5 重 derive 声明行：原第二行 `TestPolicyExceptionNeverCarriesTheSecret::test_success_path_surfaces[denied-hosts]` 在本条变异下**恒绿**——r4 与 r5 实测都 PASSED：恒等渲染器吐出的明文 URL 仍会被`_scrub_url_text` 的 URL 那趟整体掩成 `<unprintable-url>`，该行测不到「构造面渲染器」这条腿。换成 `TestPolicyUrlRenderer::*` 三行——它们直接对着被变异的那个函数说话。） | plaita#160/#161 集成：清洗器已迁至 url_redaction.py，锚点随迁。 plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
  "expect_fail": [
   "tests/unit/test_issue159_policy_url_exception_sinks.py::TestPolicyUrlRenderer::test_keeps_endpoint_and_masks_path_and_query",
   "tests/unit/test_issue159_policy_url_exception_sinks.py::TestPolicyUrlRenderer::test_never_returns_the_secret_or_any_needle",

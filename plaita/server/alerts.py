@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, Optional
 # url_redaction 是唯一实现）。本行原本就没有 ``exc_info=True``（只记异常文本，
 # 不记栈），故仍只渲染一行：多打一整条 traceback 属于诊断面的**行为变更**，
 # 不在本单范围。
-from .url_redaction import _mask_webhook_url_for_log, _scrub_url_text
+from ..core.url_redaction import _mask_webhook_url_for_log, _scrub_url_text
 
 logger = logging.getLogger("plaita.server.alerts")
 

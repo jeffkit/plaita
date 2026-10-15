@@ -44,7 +44,9 @@ from plaita.node.http import (
     _host_allowed,
     _validate_host_target,
 )
-from plaita.server.url_redaction import UNPRINTABLE_URL
+from plaita.core.url_redaction import UNPRINTABLE_URL
+import plaita.server.factory  # noqa: F401 — plaita#160/#161 重切：_mask_url 的注册点在本模块
+                          # （factory 模块体 server→core 向下注册）；不 import 则日志/渲染路径 fail-closed。
 from tests.unit import _url_sink_support as sink_support
 from tests.unit._url_sink_support import (
     PLAITA_DIR,
@@ -1604,14 +1606,14 @@ _TEST_REF_RE = re.compile(r"(Test[A-Za-z0-9_]+)::(test_[A-Za-z0-9_]+)")
 
 
 def _http_module_docstring_refs():
-    """``plaita/node/http.py`` 与 ``plaita/server/url_redaction.py`` 全文（含 docstring）里的 ``TestX::test_y`` 引用。
+    """``plaita/node/http.py`` 与 ``plaita/core/url_redaction.py`` 全文（含 docstring）里的 ``TestX::test_y`` 引用。
 
     plaita#160/#161 集成：清洗器（及其 docstring）已从 node/http.py 迁至
     url_redaction.py —— 引用可解析的检查面随迁移扩到两个模块。
     """
     sources = [
         (PLAITA_DIR / "node" / "http.py").read_text(encoding="utf-8"),
-        (PLAITA_DIR / "server" / "url_redaction.py").read_text(encoding="utf-8"),
+        (PLAITA_DIR / "core" / "url_redaction.py").read_text(encoding="utf-8"),
     ]
     refs = set()
     for source in sources:

@@ -78,7 +78,7 @@ from plaita.server.tenant_status import tenant_is_active
 # 那正是 #88 的根因形态），并加一层「掩码失败 ⇒ 安全常量、绝不抛」的 fail-closed。
 # ``RedisUrlError`` / ``_parse_redis_url`` 仍直接来自 #88 的 factory（唯一解析路径）。
 from plaita.server.factory import RedisUrlError, _parse_redis_url
-from plaita.server.url_redaction import _mask_url_for_log, _mask_webhook_url_for_log
+from plaita.core.url_redaction import _mask_url_for_log, _mask_webhook_url_for_log
 
 
 def _env_switch(name: str) -> bool:

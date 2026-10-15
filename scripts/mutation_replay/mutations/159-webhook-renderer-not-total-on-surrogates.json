@@ -1,12 +1,12 @@
 {
-  "name": "159-webhook-renderer-not-total-on-surrogates",
-  "concern": "#159-P0",
-  "issue": "159",
-  "file": "plaita/server/url_redaction.py",
-  "old": "    try:\n        rendered.encode(\"utf-8\")\n    except UnicodeEncodeError:\n        # 孤立代理字符（POSIX ``os.environ`` 的 surrogateescape）等「写不进日志」的\n        # 字符：任何 utf-8 handler 都会在这里炸 ⇒ 退化常量，绝不原样放出。\n        return UNPRINTABLE_URL\n    return rendered\n",
-  "new": "    return rendered\n",
-  "rationale": "去掉 webhook 渲染器的可编码性兜底：host 里含孤立代理字符（surrogateescape）时返回写不进 utf-8 日志的串，渲染器不再 total。",
-  "expect_fail": [
-    "tests/unit/test_issue159_webhook_url_secret_sinks.py::TestWebhookRendererIsTotal::test_never_raises_and_output_is_loggable[surrogate-in-host]"
-  ]
+ "name": "159-webhook-renderer-not-total-on-surrogates",
+ "concern": "#159-P0",
+ "issue": "159",
+ "file": "plaita/core/url_redaction.py",
+ "old": "    try:\n        rendered.encode(\"utf-8\")\n    except UnicodeEncodeError:\n        # 孤立代理字符（POSIX ``os.environ`` 的 surrogateescape）等「写不进日志」的\n        # 字符：任何 utf-8 handler 都会在这里炸 ⇒ 退化常量，绝不原样放出。\n        return UNPRINTABLE_URL\n    return rendered\n",
+ "new": "    return rendered\n",
+ "rationale": "去掉 webhook 渲染器的可编码性兜底：host 里含孤立代理字符（surrogateescape）时返回写不进 utf-8 日志的串，渲染器不再 total。 plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_webhook_url_secret_sinks.py::TestWebhookRendererIsTotal::test_never_raises_and_output_is_loggable[surrogate-in-host]"
+ ]
 }

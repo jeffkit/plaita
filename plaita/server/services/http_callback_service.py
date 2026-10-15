@@ -46,7 +46,7 @@ from ...logger import logger
 # 而不是事后给 logger 打补丁：``exc_info=True`` 的 traceback 由 Formatter 在
 # logger 之后重渲染，构造面清洗盖不住它，故改用 ``_scrub_exception_text`` 把
 # 「异常文本 + 栈」一起渲染并清洗。
-from ..url_redaction import _scrub_exception_text
+from ...core.url_redaction import _scrub_exception_text
 
 # 回调注册 TTL：7 天自清理（与仓内事件/订阅键 TTL 惯例一致）。
 CALLBACK_RECORD_TTL_SECONDS = 7 * 86400

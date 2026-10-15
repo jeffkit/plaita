@@ -1,14 +1,14 @@
 {
-  "name": "159-render-canonical-guard-dropped",
-  "concern": "#159-r4-P0",
-  "issue": "159",
-  "file": "plaita/server/url_redaction.py",
-  "old": "    if not _token_is_canonical(rendered):\n        return False\n",
-  "new": "    if False:  # mutant: 规范形态守卫被摘掉\n        return False\n",
-  "rationale": "摘掉「渲染结果必须是规范形态」这条总守卫：`_render_absolute_url_ref` 又会对 `http://[web`（方括号未闭合）返回输入本身——**恒等替换**（r3 反例 A 的直接成因）；同时 `http://h/***?t=K` 这种「掩码没盖住 payload」的形态也被放行。（#161：实现已提取到 plaita/server/url_redaction.py，锚点 file 随迁。）",
-  "expect_fail": [
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_truncated_bracket_token_fails_closed",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_guard_rejects_identity_and_plaintext_tail",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_payload_less_endpoint_fails_closed"
-  ]
+ "name": "159-render-canonical-guard-dropped",
+ "concern": "#159-r4-P0",
+ "issue": "159",
+ "file": "plaita/core/url_redaction.py",
+ "old": "    if not _token_is_canonical(rendered):\n        return False\n",
+ "new": "    if False:  # mutant: 规范形态守卫被摘掉\n        return False\n",
+ "rationale": "摘掉「渲染结果必须是规范形态」这条总守卫：`_render_absolute_url_ref` 又会对 `http://[web`（方括号未闭合）返回输入本身——**恒等替换**（r3 反例 A 的直接成因）；同时 `http://h/***?t=K` 这种「掩码没盖住 payload」的形态也被放行。（#161：实现已提取到 plaita/server/url_redaction.py，锚点 file 随迁。） plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_truncated_bracket_token_fails_closed",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_guard_rejects_identity_and_plaintext_tail",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestNoIdentityReplacement::test_payload_less_endpoint_fails_closed"
+ ]
 }

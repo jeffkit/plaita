@@ -22,9 +22,11 @@ import logging
 
 import pytest
 
-from plaita.server import url_redaction
+from plaita.core import url_redaction
+import plaita.server.factory  # noqa: F401 — plaita#160/#161 重切：_mask_url 的注册点在本模块
+                          # （factory 模块体 server→core 向下注册）；不 import 则日志/渲染路径 fail-closed。
 from plaita.server.alerts import WebhookAlerter
-from plaita.server.url_redaction import (
+from plaita.core.url_redaction import (
     UNPRINTABLE_URL,
     _mask_webhook_url,
     _mask_webhook_url_for_log,
