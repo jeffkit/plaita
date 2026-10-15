@@ -1,15 +1,15 @@
 {
-  "name": "159-key-window-cap-reintroduced",
-  "concern": "#159-r6-P2",
-  "issue": "159",
-  "file": "plaita/node/http.py",
-  "old": "    end = j\n    while j > 0 and text[j - 1] in _KEY_CHARS:\n        j -= 1\n    return text[j:end]\n",
-  "new": "    end = j\n    low = max(0, sep_index - 64)  # mutant: 恢复 64 字符回看窗口\n    while j > low and text[j - 1] in _KEY_CHARS:\n        j -= 1\n    return text[j:end]\n",
-  "rationale": "恢复 r5 的 `_MAX_KEY_WINDOW = 64`：`access_token_` + `'a'*s` + `=SECRET` 在 s ≥ 59 时键 token 被截成纯 a 串 ⇒ 判据落空、原文穿过（r6 FINDING 5；r4 在 s=200 仍掩）。",
-  "expect_fail": [
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_suffix_side_key_token_is_masked[59]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_suffix_side_key_token_is_masked[200]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_suffix_side_key_token_is_masked[4096]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_spans_cover_the_whole_key_token"
-  ]
+ "name": "159-key-window-cap-reintroduced",
+ "concern": "#159-r6-P2",
+ "issue": "159",
+ "file": "plaita/server/url_redaction.py",
+ "old": "    end = j\n    while j > 0 and text[j - 1] in _KEY_CHARS:\n        j -= 1\n    return text[j:end]\n",
+ "new": "    end = j\n    low = max(0, sep_index - 64)  # mutant: 恢复 64 字符回看窗口\n    while j > low and text[j - 1] in _KEY_CHARS:\n        j -= 1\n    return text[j:end]\n",
+ "rationale": "恢复 r5 的 `_MAX_KEY_WINDOW = 64`：`access_token_` + `'a'*s` + `=SECRET` 在 s ≥ 59 时键 token 被截成纯 a 串 ⇒ 判据落空、原文穿过（r6 FINDING 5；r4 在 s=200 仍掩）。 plaita#160/#161 集成：清洗器迁 url_redaction.py，锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_suffix_side_key_token_is_masked[59]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_suffix_side_key_token_is_masked[200]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_suffix_side_key_token_is_masked[4096]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestKeyTokenSuffixWindowR6::test_spans_cover_the_whole_key_token"
+ ]
 }

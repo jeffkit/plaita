@@ -1,15 +1,15 @@
 {
-  "name": "159-value-escaped-quote-truncates",
-  "concern": "#159-r7-F3",
-  "issue": "159",
-  "file": "plaita/node/http.py",
-  "old": "            close = _find_closing_quote(text, v0, quote)\n            v1 = close\n",
-  "new": "            close = text.find(quote, v0)  # mutant: 把 \\\" 当闭引号（r4/r5/r6 的截断形态）\n            v1 = n if close == -1 else close\n",
-  "rationale": "退回 r4/r5/r6 的 `text.find`：值**内部**的转义引号被当成闭引号 ⇒ 掩码停在 `\\\"` 处，其后原文（含密钥本体）整段留在输出里（`access_token=\"pre\\\"Ks9Qm4Zt\"` → `access_token=\"***\"Ks9Qm4Zt\"`）。",
-  "expect_fail": [
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_exact_shapes_of_the_enumerated_f3_cases",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_escaped_quote_in_value_never_truncates_the_mask[dq-inner-escape]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_escaped_quote_in_value_never_truncates_the_mask[java-double-encoded]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_escaped_quote_in_value_never_truncates_the_mask[key-side-and-inner]"
-  ]
+ "name": "159-value-escaped-quote-truncates",
+ "concern": "#159-r7-F3",
+ "issue": "159",
+ "file": "plaita/server/url_redaction.py",
+ "old": "            close = _find_closing_quote(text, v0, quote)\n            v1 = close\n",
+ "new": "            close = text.find(quote, v0)  # mutant: 把 \\\" 当闭引号（r4/r5/r6 的截断形态）\n            v1 = n if close == -1 else close\n",
+ "rationale": "退回 r4/r5/r6 的 `text.find`：值**内部**的转义引号被当成闭引号 ⇒ 掩码停在 `\\\"` 处，其后原文（含密钥本体）整段留在输出里（`access_token=\"pre\\\"Ks9Qm4Zt\"` → `access_token=\"***\"Ks9Qm4Zt\"`）。 plaita#160/#161 集成：清洗器迁 url_redaction.py，锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_exact_shapes_of_the_enumerated_f3_cases",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_escaped_quote_in_value_never_truncates_the_mask[dq-inner-escape]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_escaped_quote_in_value_never_truncates_the_mask[java-double-encoded]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestEscapedQuoteInValueR7::test_escaped_quote_in_value_never_truncates_the_mask[key-side-and-inner]"
+ ]
 }

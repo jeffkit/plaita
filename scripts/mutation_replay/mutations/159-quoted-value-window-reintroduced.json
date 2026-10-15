@@ -1,15 +1,15 @@
 {
-  "name": "159-quoted-value-window-reintroduced",
-  "concern": "#159-r6-P1/r7",
-  "issue": "159",
-  "file": "plaita/node/http.py",
-  "old": "            close = _find_closing_quote(text, v0, quote)\n            v1 = close\n",
-  "new": "            close = text.find(quote, v0, min(n, v0 + 4096))  # mutant: 恢复 4096 截断\n            v1 = close if close != -1 else min(n, v0 + 4096)\n",
-  "rationale": "恢复 r5 的 `_QUOTED_VALUE_WINDOW = 4096`：引号值在第 4096 个字符处被截断，之后的明文（含密钥本体）留在输出里。>4 KB 的 IdP/JWT 断言值实测泄漏（r6 FINDING 4；r4 同输入掩到真末尾）。r7 换成 `_find_closing_quote` 后此变异同步改写（锚点必须逐字节唯一）。",
-  "expect_fail": [
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_renderer_masks_the_whole_value[dq-unclosed-65536-middle]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_renderer_masks_the_whole_value[dq-closed-262144-end]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_six_surfaces_through_the_real_entry_point[gen-dq-unclosed-65536-end]",
-    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_span_reaches_the_true_end_of_the_value[65536]"
-  ]
+ "name": "159-quoted-value-window-reintroduced",
+ "concern": "#159-r6-P1/r7",
+ "issue": "159",
+ "file": "plaita/server/url_redaction.py",
+ "old": "            close = _find_closing_quote(text, v0, quote)\n            v1 = close\n",
+ "new": "            close = text.find(quote, v0, min(n, v0 + 4096))  # mutant: 恢复 4096 截断\n            v1 = close if close != -1 else min(n, v0 + 4096)\n",
+ "rationale": "恢复 r5 的 `_QUOTED_VALUE_WINDOW = 4096`：引号值在第 4096 个字符处被截断，之后的明文（含密钥本体）留在输出里。>4 KB 的 IdP/JWT 断言值实测泄漏（r6 FINDING 4；r4 同输入掩到真末尾）。r7 换成 `_find_closing_quote` 后此变异同步改写（锚点必须逐字节唯一）。 plaita#160/#161 集成：清洗器迁 url_redaction.py，锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_renderer_masks_the_whole_value[dq-unclosed-65536-middle]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_renderer_masks_the_whole_value[dq-closed-262144-end]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_six_surfaces_through_the_real_entry_point[gen-dq-unclosed-65536-end]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestLargeQuotedValueR6::test_span_reaches_the_true_end_of_the_value[65536]"
+ ]
 }
