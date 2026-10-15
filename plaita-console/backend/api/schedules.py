@@ -122,13 +122,23 @@ def _tenant_is_active(request: Request, tenant_id: Optional[str]) -> bool:
     return tenant_is_active(getattr(request.app.state, "redis", None), tenant_id)
 
 
-def _get_schedule(redis: Redis, schedule_id: str) -> dict:
+def _get_schedule(redis: Redis, schedule_id: str, *, tenant_id: Optional[str]) -> dict:
+    """按 id 取调度定义；tenant_id 非空时做归属校验（#63）。
+
+    - tenant_id=None（平台视角：api-key / 未切换租户的平台管理员）→ 不过滤；
+    - 租户视角：与 list_all 同一判据比对 HASH 内 tenant_id，不匹配按
+      404 拒绝（与「不存在」同形，不暴露条目是否存在）。
+    每个单条端点的集群分支都必须显式传入 tenant_id。
+    """
     raw = redis.hget(SCHEDULES_KEY, schedule_id)
     if raw is None:
         raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
     if isinstance(raw, bytes):
         raw = raw.decode()
-    return json.loads(raw)
+    schedule = json.loads(raw)
+    if tenant_id is not None and (schedule.get("tenant_id") or "default") != tenant_id:
+        raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+    return schedule
 
 
 def _save_schedule(redis: Redis, schedule: dict) -> None:
@@ -235,7 +245,7 @@ def get_one(schedule_id: str, request: Request, redis: Redis = Depends(get_redis
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
         return _view(schedule)
-    return _view(_get_schedule(redis, schedule_id))
+    return _view(_get_schedule(redis, schedule_id, tenant_id=tenant_scope(request)))
 
 
 @router.put("/schedules/{schedule_id}")
@@ -248,7 +258,7 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
     else:
-        schedule = _get_schedule(redis, schedule_id)
+        schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
 
     if req.name is not None:
         if not req.name.strip():
@@ -286,7 +296,7 @@ def remove(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_
                                      tenant_id=tenant_scope(request)):
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
         return {"success": True, "schedule_id": schedule_id}
-    _get_schedule(redis, schedule_id)
+    _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
     redis.hdel(SCHEDULES_KEY, schedule_id)
     redis.delete(SCHEDULE_FIRES_KEY.format(schedule_id=schedule_id))
     return {"success": True, "schedule_id": schedule_id}
@@ -303,7 +313,7 @@ def enable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_
         schedule["enabled"] = True
         schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
         return _view(local.update_schedule(store, schedule_id, schedule, tenant_id=tenant))
-    schedule = _get_schedule(redis, schedule_id)
+    schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     schedule["enabled"] = True
     schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
     schedule["updated_at"] = _now_iso()
@@ -322,7 +332,7 @@ def disable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis
         schedule["enabled"] = False
         schedule["next_run_at"] = ""
         return _view(local.update_schedule(store, schedule_id, schedule, tenant_id=tenant))
-    schedule = _get_schedule(redis, schedule_id)
+    schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     schedule["enabled"] = False
     schedule["updated_at"] = _now_iso()
     _save_schedule(redis, schedule)
@@ -344,7 +354,7 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
             raise HTTPException(status_code=502, detail="触发失败，请查看 console 日志")
         return {"success": True, "execution_id": execution_id}
 
-    schedule = _get_schedule(redis, schedule_id)
+    schedule = _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
     if not _tenant_is_active(request, schedule.get("tenant_id")):
         raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
     # 与手动「启动流程」同源：写任务队列 Stream
@@ -360,7 +370,7 @@ def history(schedule_id: str, request: Request, limit: int = 10,
     if (local := _get_local(request)) is not None:
         records = local.fire_history(flow_store.get_flow_store(), schedule_id, limit)
         return {"schedule_id": schedule_id, "records": records, "total": len(records)}
-    _get_schedule(redis, schedule_id)
+    _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
     limit = max(1, min(50, limit))
     raw = redis.lrange(SCHEDULE_FIRES_KEY.format(schedule_id=schedule_id), 0, limit - 1)
     records = []

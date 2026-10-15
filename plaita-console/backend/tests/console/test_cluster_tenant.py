@@ -224,3 +224,53 @@ class TestClusterScheduleTenant:
         r = client.post("/api/schedules/s-acme/trigger", headers=_headers("acme"))
         assert r.status_code == 403, r.text
         assert _queued_messages(env) == []
+
+    def test_single_endpoints_reject_cross_tenant(self, env):
+        """#63：集群档单条端点必须做租户归属校验。
+
+        acme 视角（X-Tenant-ID=acme）访问 default 条目（无 tenant_id 字段）：
+        GET/PUT/DELETE/enable/disable/trigger/history 全部 404 且零副作用；
+        同租户条目照常 200；平台视角（不带 X-Tenant-ID）不受影响。
+        """
+        env.hset("plaita:schedules", "s-acme", json.dumps({
+            "schedule_id": "s-acme", "name": "acme调度", "flow_id": "f",
+            "cron": "* * * * *", "enabled": True, "tenant_id": "acme",
+            "params": {},
+        }))
+        env.hset("plaita:schedules", "s-def", json.dumps({
+            "schedule_id": "s-def", "name": "default调度", "flow_id": "f",
+            "cron": "* * * * *", "enabled": True, "params": {"secret": "x"},
+        }))
+        client = _client(env)
+
+        # 跨租户读/停用/启用/触发/历史 → 404（先测非破坏性端点）
+        for path in ["/api/schedules/s-def", "/api/schedules/s-def/history"]:
+            r = client.get(path, headers=_headers("acme"))
+            assert r.status_code == 404, f"GET {path} -> {r.status_code}: {r.text}"
+        for path in ["/api/schedules/s-def/enable", "/api/schedules/s-def/disable",
+                     "/api/schedules/s-def/trigger"]:
+            r = client.post(path, json={}, headers=_headers("acme"))
+            assert r.status_code == 404, f"POST {path} -> {r.status_code}: {r.text}"
+        assert env.hexists("plaita:schedules", "s-def") == 1  # 未被改写/停用
+        assert _queued_messages(env) == []  # 未被越权触发入队
+
+        # 跨租户 PUT/DELETE：404 且条目原样保留（DELETE 不清触发历史键）
+        r = client.put("/api/schedules/s-def", json={"params": {"evil": True}},
+                       headers=_headers("acme"))
+        assert r.status_code == 404, r.text
+        assert json.loads(env.hget("plaita:schedules", "s-def"))["params"] == {"secret": "x"}
+        r = client.delete("/api/schedules/s-def", headers=_headers("acme"))
+        assert r.status_code == 404, r.text
+        assert env.hexists("plaita:schedules", "s-def") == 1
+        assert env.exists("plaita:schedule:fires:s-def") == 0
+
+        # 同租户：读/改照常
+        assert client.get("/api/schedules/s-acme",
+                          headers=_headers("acme")).status_code == 200
+        r = client.put("/api/schedules/s-acme", json={"params": {"k": "v"}},
+                       headers=_headers("acme"))
+        assert r.status_code == 200, r.text
+        assert r.json()["params"] == {"k": "v"}
+
+        # 平台视角：仍可访问 default 条目（tenant_scope=None 不过滤）
+        assert client.get("/api/schedules/s-def", headers=_headers()).status_code == 200
