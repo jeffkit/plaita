@@ -842,9 +842,12 @@ async def resume_execution(
     - **execution_id**: 执行 ID
     - **resume_type**: 恢复类型
     - **data**: 恢复数据
-    - **params**: 可选调度入参（#157）。只在盘上 checkpoint 为空时绑定
-      `$INPUT`（手动 continue 抢在 pending start 被 reclaim 之前的窗口）；
-      不传/空则不落 `params` 键，checkpoint 非空时忽略。
+    - **params**: 可选调度入参（#157）。**只在 `resume_type=continue` 且盘上
+      checkpoint 为空时**被引擎绑定为 `$INPUT`（手动 continue 抢在 pending
+      start 被 reclaim 之前的窗口）；空 checkpoint 下 retry/cancel/timeout/
+      event 被策略层守卫以 `ResumeGuardError` 拒绝（执行保持 running）；
+      不传/空/`null` 不落 `params` 键；checkpoint 非空时 `params` 惰性，
+      绑定值一律以盘上 checkpoint 为准。
     """
     # 本地单机模式：从 SQLite checkpoint 继续（分布式策略）
     if (local := get_local_executor(http_request)) is not None:
