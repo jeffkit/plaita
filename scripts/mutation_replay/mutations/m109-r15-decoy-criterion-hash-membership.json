@@ -1,0 +1,13 @@
+{
+  "name": "m109-r15-decoy-criterion-hash-membership",
+  "issue": "109",
+  "concern": "N9-r15-identity",
+  "file": "plaita/event/redis.py",
+  "rationale": "把身份判据换回 r14 的 `WeakSet` 成员判定（`field not in _ACCEPTED_CLOSE_FUTURES`）：判据重新**问对象自己**求 `hash`（撞桶时还会 `__eq__`）⇒ `__hash__ = None` 的 `_EvilFuture` 诱饵让判定点抛 `TypeError`（被边界兜住 ⇒ 钉回不发生、结局退化成保守误报），受理点抛的那次被受理 guard 吞掉 ⇒ 直接换字段的形状不再钉回。杀死者：r15 的 `_EvilFuture` 两用例（spawn 窗口 / 直接换）——它们断言「钉回 + 具名 + 有界 + 组件只关一次」。",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r15_parity.py::Test109R15DecoyShapesAreNamedAndBounded::test_evil_future_decoy_in_the_spawn_window_is_named_and_bounded",
+    "tests/unit/test_issue109_110_r15_parity.py::Test109R15DecoyShapesAreNamedAndBounded::test_evil_future_decoy_swapped_directly_at_the_spawn_window"
+  ],
+  "old": "    if field is None or field is future:\n        return False\n    try:\n        ref = _ACCEPTED_CLOSE_FUTURE_REFS.get(id(field))\n        return not (ref is not None and ref() is field)\n    except BaseException as exc:                 # noqa: BLE001 - 见 docstring：按非凭据处理\n        logger.debug(\"事件总线关停：身份索引查找失败（按非凭据处理）: %r\", exc)\n        return False\n",
+  "new": "    if field is None or field is future:\n        return False\n    return field not in _ACCEPTED_CLOSE_FUTURES  # mutation: 回到按对象自身 hash 的 WeakSet 成员判定\n"
+}

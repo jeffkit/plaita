@@ -3,10 +3,10 @@
   "issue": "109",
   "concern": "N2-r14-mirror",
   "file": "plaita/event/redis.py",
-  "rationale": "不把真 future 的结局镜像到诱饵上 ⇒ 已经开跑、已经把诱饵当等待对象的第二个 `close()`永远收不到完成事件（挂起）。杀死者：r14 的「等待者已在诱饵上」用例。",
+  "rationale": "判定点钉回真 future 但不把结局镜像到诱饵 ⇒ 已经等在诱饵上的 `close()` 永远悬着。杀死者：r14 的「诱饵上已经有等待者」用例（r15 起镜像在 `_repin_and_mirror` 里）。",
   "expect_fail": [
     "tests/unit/test_issue109_110_r14_parity.py::Test109R14CredentialRepin::test_n2_waiter_already_on_the_decoy_is_released"
   ],
-  "old": "                self._close_future = future\n                self._release_decoy_waiters(decoy, future)\n",
-  "new": "                self._close_future = future\n                pass  # mutation: 不把结局镜像到诱饵 ⇒ 已等在诱饵上的 close 悬着\n"
+  "old": "        try:\n            self._close_future = future\n        except BaseException as exc:                 # noqa: BLE001 - 钉回失败仍要继续镜像\n            logger.debug(\"事件总线关停：判定点钉回幂等凭据失败（继续镜像）: %r\", exc)\n        self._release_decoy_waiters(decoy, future)\n",
+  "new": "        try:\n            self._close_future = future\n        except BaseException as exc:                 # noqa: BLE001 - 钉回失败仍要继续镜像\n            logger.debug(\"事件总线关停：判定点钉回幂等凭据失败（继续镜像）: %r\", exc)\n        pass  # mutation: 不把结局镜像到诱饵 ⇒ 已等在诱饵上的 close 悬着\n"
 }
