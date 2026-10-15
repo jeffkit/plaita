@@ -2063,6 +2063,20 @@ class TestHostIdentityPropertyR7:
                 f"r7[{label}] {name}: 期望 {expected!r} 出现在面里，实际 {rendered[:200]!r}"
             )
 
+    @pytest.mark.parametrize(
+        "label,text", _R7_DOTTED_HOSTS_KEPT, ids=[c[0] for c in _R7_DOTTED_HOSTS_KEPT]
+    )
+    @pytest.mark.parametrize("path", ("gen", "do"))
+    def test_dotted_hosts_are_kept_on_both_real_paths(self, path, label, text):
+        """两个**真实入口路径**（``rsp=None`` ⇒ 1001 / ``rsp`` + ``send_request_fail`` ⇒ 1002）
+        都必须保留合法点分端点——假阳性方向的六面证据不只在 ``gen`` 一条路上成立。"""
+        expected = _scrubber()(text)
+        node, exc = _entry_exception(text, path)
+        for name, rendered in _six_surfaces(node, exc).items():
+            assert expected in rendered, (
+                f"r7-kept[{path}/{label}] {name}: 期望 {expected!r}，实际 {rendered[:200]!r}"
+            )
+
     @pytest.mark.parametrize("path", ("gen", "do"))
     def test_lowercase_opaque_host_is_constant_on_both_paths(self, path):
         node, exc = _entry_exception("http://ks9qm4zt", path)
