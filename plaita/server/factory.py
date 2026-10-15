@@ -730,14 +730,39 @@ def _path_segment_spans(path_start: int, path_stop: int, text: str) -> tuple:
     就整段掩。**空 authority**（``redis:///user:pw@host``）与 **unix socket 路径**
     不走这条——前者的 ``@`` 之后是 host（r5 粗档的已验证形态），后者本来就不是
     db/凭据位。
+
+    r9 反例（``redis://host:6379/X:Pw&Sec9`` → ``X:***&Sec9``）：含 ``:`` 的段被
+    ``_token_is_provably_benign`` 交给冒号腿，而冒号腿在 ``&`` 处收边
+    （``_no_at_colon_spans`` 的延长与 ``_value_token_stop`` 都止于 ``&``），``&``
+    之后的裸残段无人认领——path 扫描只按 ``/`` 切，不再有规则覆盖它。规则：
+    **已被证明携带凭据的 path 段污染到段末——段内按 ``&`` 切出的每个裸子 token
+    （不含 ``:``/``@``，那些归冒号腿）重走同一条 default-deny 判据，不可证良性
+    就掩到子 token 末尾**；无凭据段的路径（含 ``&`` 与否）逐字不变。
     """
     spans = []
     i = path_start
     while i <= path_stop:
         slash = text.find("/", i)
         end = path_stop if slash == -1 or slash > path_stop else slash
-        if not _token_is_provably_benign(text[i:end]):
+        token = text[i:end]
+        if not _token_is_provably_benign(token):
             spans.append(_CredentialSpan(i, i, end, True))
+        elif ":" in token or "@" in token:
+            j = i
+            while j < end:
+                amp = text.find("&", j, end)
+                sub_end = end if amp == -1 else amp
+                sub = text[j:sub_end]
+                if (
+                    sub
+                    and ":" not in sub
+                    and "@" not in sub
+                    and not _token_is_provably_benign(sub)
+                ):
+                    spans.append(_CredentialSpan(j, j, sub_end, True))
+                if amp == -1:
+                    break
+                j = amp + 1
         if slash == -1 or slash >= path_stop:
             break
         i = slash + 1

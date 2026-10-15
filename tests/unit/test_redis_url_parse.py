@@ -2815,5 +2815,91 @@ class TestSingleParser(unittest.TestCase):
         self.assertEqual([p.name for p in hits], ["factory.py"])
 
 
+class TestAmpersandSeamR9(unittest.TestCase):
+    """plaita#88 r9：``&`` 接缝——被证明携带凭据的 path 段污染到段末。
+
+    反例机制：``redis://host:6379/X:Pw&Sec9`` 的段含 ``:`` ⇒
+    ``_token_is_provably_benign`` 把它交给冒号腿，而冒号腿（``_no_at_colon_spans``
+    的延长与 ``_value_token_stop``）在 ``&`` 处收边；path 扫描只按 ``/`` 切，
+    ``&`` 之后的裸残段 ``Sec9`` 无人认领、原样落盘。r9 规则：已被证明携带凭据的
+    path 段，段内按 ``&`` 切出的每个裸子 token（不含 ``:``/``@``，那些归冒号腿）
+    重走同一条 default-deny 判据，不可证良性就掩到子 token 末尾。
+    """
+
+    def test_r9_counterexamples_suffix_after_ampersand_is_masked(self):
+        # 验证者实测的两个反例：Sec9 不得在任何位置存活
+        for raw in (
+            "redis://host:6379/X:Pw&Sec9",
+            "redis://host:6379/0/X:Pw&Sec9/db",
+        ):
+            masked = _mask_url(raw)
+            self.assertNotIn("Sec9", masked, f"{raw}: Sec9 存活")
+            self.assertIn("X:***", masked, f"{raw}: 冒号腿的掩码缝丢了")
+            self.assertNotEqual(masked, raw)
+            # 一致性不变量：掩了 ⟹ _passwords 认得出（同源同枚举）
+            self.assertIn("Sec9", _passwords(raw), f"{raw}: _passwords 取不到 Sec9")
+
+    def test_ampersand_at_start_of_segment(self):
+        # 段首 ``&``：空子 token 是良性（r5 的空 token keep），凭据归冒号腿
+        self.assertEqual(
+            _mask_url("redis://host:6379/&X:Pw"), "redis://host:6379/&X:***"
+        )
+
+    def test_ampersand_at_end_of_segment(self):
+        # 段尾 ``&``：尾随空子 token 逐字保留（r2/r4 的单字符尾契约同族）
+        self.assertEqual(
+            _mask_url("redis://host:6379/X:Pw&"), "redis://host:6379/X:***&"
+        )
+
+    def test_multiple_ampersands_mask_every_residual(self):
+        # 多个 ``&``：每个裸残段独立判定，一个都不许活
+        masked = _mask_url("redis://host:6379/X:Pw&Sec9&More")
+        self.assertEqual(masked, "redis://host:6379/X:***&***&***")
+        self.assertNotIn("Sec9", masked)
+        self.assertNotIn("More", masked)
+
+    def test_ampersand_seam_across_slash_segments(self):
+        # 缝横跨 ``/`` 段：中段残段、后段裸段（HEAD 本就整段掩）都掩
+        self.assertEqual(
+            _mask_url("redis://host:6379/X:Pw&Sec9/db&Pw2"),
+            "redis://host:6379/X:***&***/***",
+        )
+
+    def test_ampersand_digit_residual_is_provably_benign_kept(self):
+        # 纯数字残段可证良性（与 ``?db=1`` 的数值 keep 同一条判据），逐字保留
+        self.assertEqual(
+            _mask_url("redis://host:6379/X:Pw&0"), "redis://host:6379/X:***&0"
+        )
+        self.assertEqual(
+            _mask_url("redis://host:6379/0@x&0"), "redis://host:6379/0@x&0"
+        )
+
+    def test_benign_ampersand_path_without_credential_span_unchanged(self):
+        # 无凭据段的 ``&`` 路径与 HEAD 逐字一致（整段掩/良性判定都不经 r9 规则）
+        self.assertEqual(
+            _mask_url("redis://host:6379/0/1&2"), "redis://host:6379/0/***"
+        )
+        self.assertEqual(
+            _mask_url("redis://host:6379/0/a&b"), "redis://host:6379/0/***"
+        )
+        # 声明过的 query 名 + 数值取值：对照组逐字不变
+        self.assertEqual(
+            _mask_url("redis://host:6379/0?socket_timeout=5&health_check_interval=30"),
+            "redis://host:6379/0?socket_timeout=5&health_check_interval=30",
+        )
+
+    def test_retention_contract_and_no_at_residual(self):
+        # 保留契约行：字节对字节
+        self.assertEqual(
+            _mask_url("redis://user/Tr0ub4dor@host:6379/0"),
+            "redis://user/***@host:6379/0",
+        )
+        # 同一缝的 ``@`` 形：``0@x`` 是 r4 已验证 keep，``&`` 之后的裸残段 ``a``
+        # 与 ``Sec9`` 同类——default-deny 掩掉
+        self.assertEqual(
+            _mask_url("redis://host:6379/0@x&a"), "redis://host:6379/0@x&***"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
