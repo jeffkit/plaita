@@ -578,7 +578,10 @@ class TestIssue69R12MutationJsonContract(unittest.TestCase):
             missing = [k for k in self.REPLAYER_KEYS if k not in spec]
             if missing:
                 problems.append(f"{path.name}: 缺键 {missing}")
-            if str(spec.get("issue")) != "69":
+            # plaita#88：统一 store 下 mutations 目录是**多单元共享**的（88-* 也住这里），
+            # `issue == "69"` 断言收窄到本单元自己的 69-*.json；键集与 expect_fail 检查
+            # 保持全局（任何单元的变异都必须带齐 replayer 键、声明行不得为空）。
+            if path.name.startswith("69-") and str(spec.get("issue")) != "69":
                 problems.append(f"{path.name}: issue={spec.get('issue')!r}")
             if not spec.get("expect_fail"):
                 problems.append(f"{path.name}: expect_fail 为空")
