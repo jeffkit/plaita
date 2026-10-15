@@ -750,7 +750,66 @@ class Test109R15CompletionPathIsLoopAttributeFree(unittest.IsolatedAsyncioTestCa
 
 
 # --------------------------------------------------------------------------
-# ⑥ 留档与索引卫生
+# ⑥ R-12a' 的理由句（必修项 B）是可执行的：① 本可由 task factory 驱动，②③ 必须由
+#    冻结体里的 spawn 交回**已结束的非 Task** —— 谁改掉任一条，这里就红。
+# --------------------------------------------------------------------------
+class Test109R15ResidualRationaleIsExecutable(unittest.IsolatedAsyncioTestCase):
+    async def test_the_assignment_order_can_be_observed_through_a_task_factory(self):
+        """①「观察 spawn 前的赋值顺序」**不需要**冻结体的实例影子：生产缝
+        ``loop.set_task_factory`` 同样能在 spawn 时读到 ``_close_future`` / ``_closing`` /
+        ``_teardown_task``（本单其余用例正是这样威胁 spawn 的）⇒ R-12a' 收窄后的理由句成立。"""
+        bus, comps = _make_bus()
+        loop = asyncio.get_running_loop()
+        seen: Dict[str, Any] = {}
+
+        def factory(loop, coro, **kwargs):
+            if _is_our_entry(coro):
+                seen["close_future"] = bus._close_future
+                seen["closing"] = bus._closing
+                seen["teardown_task"] = bus._teardown_task
+                seen["loop"] = loop
+            return _new_task(coro, loop, kwargs)
+
+        saved = loop.get_task_factory()
+        loop.set_task_factory(factory)
+        try:
+            outcome, exc = await _close_once(bus)
+        finally:
+            loop.set_task_factory(saved)
+            await _settle()
+        self.assertEqual((outcome, exc), ("returned", None))
+        self.assertIsNotNone(seen.get("close_future"), "工厂在 spawn 时就能读到幂等凭据")
+        self.assertIs(seen["closing"], True, "工厂在 spawn 时就能看到 _closing 已置位")
+        self.assertIsNone(seen["teardown_task"], "占位语义与 ① 一致")
+        self.assertIs(seen["loop"], loop)
+        self.assertEqual([c.closes for c in comps], [1, 1, 1, 1, 1])
+
+    async def test_the_two_sync_shape_tests_still_need_the_spawn_seam(self):
+        """②③ 的理由可执行化：这两条用例的源码仍替换 ``bus._spawn_teardown`` 并交回
+        ``loop.create_future()``（已结束的非 Task），且都**不**用 task factory。谁把它们改写成
+        工厂路线，这里就红——那时 R-12a' 的理由句必须重写。"""
+        import tests.unit.test_issue109_110_r8_parity as r8_parity
+        import tests.unit.test_issue109_110_r9_parity as r9_parity
+
+        sources = {
+            "②": inspect.getsource(
+                r8_parity.Test109R8F1AssignmentOrder
+                .test_synchronous_teardown_completion_still_settles_future),
+            "③": inspect.getsource(
+                r9_parity.Test109R9SpawnFailureRollback
+                .test_synchronous_failure_does_not_backfill_dead_teardown_task),
+        }
+        for label, src in sources.items():
+            self.assertIn("bus._spawn_teardown = ", src,
+                          f"{label} 仍必须靠冻结体里的实例影子驱动")
+            self.assertIn("loop.create_future()", src,
+                          f"{label} 仍必须交回一个**非 Task** 的句柄")
+            self.assertNotIn("set_task_factory", src,
+                             f"{label} 用不了 task factory（工厂只能交回 Task）")
+
+
+# --------------------------------------------------------------------------
+# ⑦ 留档与索引卫生
 # --------------------------------------------------------------------------
 class Test109R15RegistryHygiene(unittest.IsolatedAsyncioTestCase):
     async def test_decoy_never_enters_either_the_index_or_the_bookkeeping_set(self):

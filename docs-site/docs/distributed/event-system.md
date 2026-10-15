@@ -492,8 +492,8 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
     | `__class__` 谎报 / 非 Future | 具名但有 loop exc 记 `TypeError`（镜像那步逃逸） | 具名有界、loop exc **空** |
     | `None`（对照：不是诱饵） | 具名（「允许重试」的正常状态） | 同左 |
     | 计数影子 `loop.create_future`（必修项 A） | 完成路径命中 **1** 次；影子返回永不落地的 awaitable ⇒ 第一次 `close()` 不返回 | 命中 **0** 次；两次 `close()` 都 `returned` |
-  * 钉住：`tests/unit/test_issue109_110_r15_parity.py`（**27 用例**，`--collect-only` 在
-    3.10/3.11/3.12/3.13 上都量到 27；含 2 个 subtest）；r15 新增 **3** 条变异、重锚 **5** 个
+  * 钉住：`tests/unit/test_issue109_110_r15_parity.py`（**29 用例**，`--collect-only` 在
+    3.10/3.11/3.12/3.13 上都量到 29；含 2 个 subtest）；r15 新增 **3** 条变异、重锚 **5** 个
     JSON，逐条实测见下 ④。
   * **r15 的「声称 → 用例」映射**（parent 的常设规则：没有一条会变红的用例就不算声称）：
 
@@ -511,6 +511,8 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
     | 受理之后绝不回滚（回滚判据收窄） | `test_a_raising_criterion_hook_does_not_roll_back_the_accepted_round`、`test_bind_round_never_raises_after_acceptance` |
     | 无孤儿 Task / 无 never-awaited / 索引不续命 | `test_decoy_shapes_leave_no_orphan_task_or_unawaited_coroutine`、`test_registry_is_bounded_after_hostile_shapes` |
     | 完成路径不读 loop 实例属性（必修项 A） | `test_completion_path_never_reads_the_loop_instance`、`test_shadowed_loop_create_future_cannot_unbound_the_completion_path`、`test_waiter_is_created_by_a_class_call_not_a_loop_attribute` |
+    | 必修项 B：① 赋值顺序**本可**由 task factory 观察 | `test_the_assignment_order_can_be_observed_through_a_task_factory` |
+    | 必修项 B：②③ 必须由 spawn 交回**已结束的非 Task** 驱动（理由可执行） | `test_the_two_sync_shape_tests_still_need_the_spawn_seam` |
     | R-15a：有在飞分发 + 影子 `create_future` ⇒ **不声称有界**（明示） | `test_pending_dispatch_plus_loop_shadow_is_declared_unbounded` |
     | `request_close` 可执行体冻结（2770 B / 47 L / sha256 同一） | `test_frozen_request_close_body_is_still_byte_identical` |
 - **r12/B：判据不再问**对象自己**（r11 的 `__eq__`/`__func__`/逐次动态访问被替换）**：
