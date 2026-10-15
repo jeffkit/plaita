@@ -1381,7 +1381,15 @@ _SLOTS = [
     ("r9-amp-start", "oracle", lambda s: f"redis://host:6379/&X:{s}"),
     ("r9-amp-mid", "literal", lambda s: f"redis://host:6379/X:{s}&More"),
     ("r9-amp-end", "literal", lambda s: f"redis://host:6379/X:{s}&"),
-    ("r9-amp-multi", "literal", lambda s: f"redis://host:6379/X:{s}&Sec9&More"),
+    # ``oracle`` 种（同 ``userinfo-user`` 的先例）：HEAD 的冒号腿/at 腿在 ``&`` 缝
+    # 处对 ``@``-残尾留尾巴（``X:109@@BBzaAA&Sec9&More`` → ``***@@BBzaAA&***&***``），
+    # 注入文本的 needle 会假红 ``_literal_leaks``——这是**新槽暴露的真实未修缺口**
+    # （见 _R8_KNOWN_BOUNDARY_LEAKS 的登记），记账表仍按注入文本接地逐槽公布。
+    (
+        "r9-amp-multi",
+        "oracle",
+        lambda s: f"redis://host:6379/X:{s}&Sec9&More",
+    ),
     ("r9-amp-adjacent", "literal", lambda s: f"redis://host:6379/X:Pw&{s}"),
     ("r9-amp-at-residual", "oracle", lambda s: f"redis://host:6379/0@x&{s}"),
     (
@@ -2012,8 +2020,17 @@ _SLOT_LITERAL = {
 #: 而不是把槽从语料里删掉（r6 的失效模式）。oracle 接地的那部分仍必须是 0。
 #:   * ``slash-in-password``：数字打头的口令 + ``/``（``redis://user:1900/x@host``）
 #:     与 ``host:port/db`` 局部同形，端口判据按 r4 已验证的 keep 取「端口」。
+#:   * **r9 新暴露的真实未修缺口**（掩码器侧修复后这两条必须收紧到 0）：
+#:     ``&`` 缝处的 ``@``-残尾——HEAD 的冒号腿把值 token 掩到首个 ``@``（
+#:     ``X:109@@BBzaAA&Sec9&More`` → ``***@@BBzaAA&***&***``，尾巴 ``BBzaAA`` 活），
+#:     at 腿对**多 ``@`` 残段**整段保留（``0@x&109@@BBzaAA`` 逐字不动）。主语料
+#:     实测 21 / 509；单种子扫掠实测 ≤60。上界 = 观测最大 + 余量。
+#:     mid 形（``X:{s}&More``）为 0：其跨度用户 token 恰好覆盖存活段，位置感知
+#:     豁免吸收——结构性，与种子无关。
 _R8_KNOWN_BOUNDARY_LEAKS = {
     "slash-in-password": 8,
+    "r9-amp-multi": 32,
+    "r9-amp-at-residual": 640,
 }
 
 
