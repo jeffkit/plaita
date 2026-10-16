@@ -220,6 +220,86 @@ class TestCliBuild(unittest.TestCase):
         self.assertEqual(md["team"], "keeper")
         self.assertEqual(md["source_format"], "plaita@flow")
 
+    def test_check_without_flag_on_embedded_artifact_passes(self):
+        """plaita#90 验收 1：嵌入产物 + 无 flag ``--check`` 不得假红。
+
+        修复前：重编译基准不含 metadata.source，committed 嵌入产物必然
+        exit=1 且 diff 出现 ``-  "metadata": {``，提示照做即删数据。
+        """
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "embed.json"
+        self.assertEqual(
+            main(["build", str(src), "-o", str(out_path), "--embed-source"]), 0)
+        committed = out_path.read_text(encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = main(["build", str(src), "-o", str(out_path), "--check"])
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertNotIn("-  \"metadata\": {", err.getvalue())
+        # --check 不落盘：产物逐字节保持
+        self.assertEqual(out_path.read_text(encoding="utf-8"), committed)
+        md = json.loads(committed)["metadata"]
+        self.assertEqual(md["source"], _FLOW_SRC)
+        self.assertEqual(md["source_format"], "plaita@flow")
+
+    def test_plain_rebuild_preserves_embedded_metadata(self):
+        """plaita#90 验收 2：嵌入产物被无 flag build「按提示同步」后 metadata 仍在且未变。"""
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "embed.json"
+        self.assertEqual(
+            main(["build", str(src), "-o", str(out_path), "--embed-source"]), 0)
+        before = out_path.read_text(encoding="utf-8")
+        self.assertEqual(main(["build", str(src), "-o", str(out_path)]), 0)
+        after = out_path.read_text(encoding="utf-8")
+        self.assertEqual(before, after, "同步必须字节级保留已提交的嵌入产物")
+        doc = json.loads(after)
+        self.assertEqual(doc["metadata"]["source"], _FLOW_SRC)
+        self.assertEqual(doc["metadata"]["source_format"], "plaita@flow")
+        # 同步后带 flag 的 check 也一致（修复前此方向会反转成假红）
+        self.assertEqual(main(
+            ["build", str(src), "-o", str(out_path), "--embed-source",
+             "--check"]), 0)
+
+    def test_stale_embedded_artifact_check_diff_keeps_metadata(self):
+        """plaita#90：源码真落后时无 flag check 仍报红，但 diff 不得指向删 metadata。"""
+        src = self._write_source("hello_flow.py", _FLOW_SRC)
+        out_path = self.dir / "embed.json"
+        self.assertEqual(
+            main(["build", str(src), "-o", str(out_path), "--embed-source"]), 0)
+        src.write_text(_FLOW_SRC.replace("hi ", "hey "), encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = main(["build", str(src), "-o", str(out_path), "--check"])
+        self.assertEqual(rc, 1)
+        self.assertIn("产物落后源码", err.getvalue())
+        self.assertNotIn("-  \"metadata\": {", err.getvalue())
+        # 按提示重跑同步：metadata.source 跟进到新源码原文，而不是被删除
+        self.assertEqual(main(["build", str(src), "-o", str(out_path)]), 0)
+        md = json.loads(out_path.read_text(encoding="utf-8"))["metadata"]
+        self.assertEqual(md["source"], _FLOW_SRC.replace("hi ", "hey "))
+
+    def test_committed_metadata_requires_source_key(self):
+        """plaita#90 守卫边界：committed 只有非 source 的 metadata 时不得误继承嵌入。
+
+        ``@flow(metadata=...)`` 声明的 metadata 不带 --embed-source 也会进产物
+        （无 source 键）；此形态必须维持原口径——不得因「有 metadata」就误判
+        为已嵌入而注入 source（误注入会让 check 立即红、重建产物漂移）。
+        """
+        src = self._write_source(
+            "meta_flow.py",
+            '@flow(metadata={"team": "keeper"})\ndef m(INPUT):\n    return 1\n')
+        out_path = self.dir / "meta.json"
+        self.assertEqual(main(["build", str(src), "-o", str(out_path)]), 0)
+        doc = json.loads(out_path.read_text(encoding="utf-8"))
+        self.assertEqual(doc["metadata"], {"team": "keeper"})
+        # 无 flag check：重编译同 metadata ⇒ 本就一致（误注入 source 会假红）
+        self.assertEqual(main(
+            ["build", str(src), "-o", str(out_path), "--check"]), 0)
+        # 无 flag 重建：同样不得注入 source
+        self.assertEqual(main(["build", str(src), "-o", str(out_path)]), 0)
+        doc = json.loads(out_path.read_text(encoding="utf-8"))
+        self.assertEqual(doc["metadata"], {"team": "keeper"})
+
     def test_missing_source_is_exit_2(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):

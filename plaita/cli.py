@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import importlib
+import json
 import os
 import secrets
 import sys
@@ -117,6 +118,20 @@ def _load_ir(args: argparse.Namespace, source_text: str):
     return ir
 
 
+def _committed_has_embedded_source(out_path: Path) -> bool:
+    """committed 产物是否已嵌入 ``metadata.source``（plaita#90）。
+
+    只读探测：解析失败 / 非 dict 根 / metadata 无 ``source`` 键一律视为
+    未嵌入，行为与修复前一致（损坏产物由既有的逐字节比对路径报红）。
+    """
+    try:
+        doc = json.loads(out_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    meta = doc.get("metadata") if isinstance(doc, dict) else None
+    return isinstance(meta, dict) and "source" in meta
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     from plaita.dsl.codeflow._canonical import (
         count_nodes,
@@ -132,13 +147,24 @@ def _cmd_build(args: argparse.Namespace) -> int:
     source_text = source_path.read_text(encoding="utf-8")
     ir = _load_ir(args, source_text)
     doc = ir if args.format == "ir" else to_canonical(ir)
-    if args.embed_source:
-        # @flow 源码原文随产物发布（console 源码页签 / 节点→源码行跳转的数据源）
-        embed_source(doc, source_text)
-    text = serialize_canonical(doc)
 
     out_path = (Path(args.out) if args.out
                 else source_path.with_suffix(".plaita.json"))
+
+    # plaita#90：是否嵌源码不能只看本次 flag。--check 与 --embed-source 是两条
+    # 独立 flag（help 文本、自带示例、flow-coder 规范均无「必须成对」约定），
+    # 而旧实现「嵌入与否完全由本次 flag 决定」且重编译 text 同时充当 check 基准
+    # 与落盘内容——committed 的嵌入产物遇上无 flag 调用必然被判「落后」，照提示
+    # 重跑同步还会把 metadata.source 静默删掉（console 权威源码页签/行号跳转的
+    # 数据源）。故以 committed 产物的嵌入状态补齐口径：已嵌入 ⇒ 本次继承嵌入
+    # （embed_source 按当前源码原文重算——源码没变则逐字节不变，源码变了则
+    # 同步到新原文）；本次显式传 --embed-source 仍无条件生效，产物无 metadata
+    # 时行为与修复前完全一致（test_no_embed_by_default 契约不动）。
+    embed = args.embed_source or _committed_has_embedded_source(out_path)
+    if embed:
+        # @flow 源码原文随产物发布（console 源码页签 / 节点→源码行跳转的数据源）
+        embed_source(doc, source_text)
+    text = serialize_canonical(doc)
 
     # 产物路径防护：@flow 源码是审查主体（见 dsl/codeflow/_canonical.py 背景），
     # 产物绝不能写到源码头上。resolve() 而非 Path.__eq__，以覆盖 ./x.py、
