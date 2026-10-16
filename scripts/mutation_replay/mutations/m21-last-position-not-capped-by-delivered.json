@@ -1,0 +1,13 @@
+{
+  "name": "m21-last-position-not-capped-by-delivered",
+  "issue": "85",
+  "concern": "U1",
+  "file": "plaita/event/redis.py",
+  "rationale": "推进边界不按「最后一条已投递事件」封顶 → 越过已检查未投递事件，多类型交错静默丢失",
+  "expect_fail": [
+    "tests/unit/test_issue85_no_loss_oracle.py::test_page_no_loss_oracle[2-3-2-0-front-interleaved]",
+    "tests/unit/test_issue85_no_loss_oracle.py::test_reconciler_no_loss_oracle[3-250-200-0-front-interleaved]"
+  ],
+  "old": "            proposed, [event for _score, event in merged],",
+  "new": "            proposed, [],"
+}

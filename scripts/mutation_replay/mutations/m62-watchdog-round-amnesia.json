@@ -1,0 +1,12 @@
+{
+  "name": "m62-watchdog-round-amnesia",
+  "issue": "85",
+  "concern": "AL2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "看门狗轮序号不落库（恒为 1）⇒ 饥饿年龄永远算不出、重启后失忆（AL2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL2SingleStarvedAcrossRestarts::test_single_starved_field_is_named_despite_restarts"
+  ],
+  "old": "            n = int(self.redis_client.incr(self._starved_round_key()) or 1)",
+  "new": "            n = 1"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m01-as_str-bytes-passthrough",
+  "issue": "79",
+  "concern": "#79",
+  "file": "plaita/event/redis.py",
+  "rationale": "bytes 客户端下 event_id 不解码 → f-string 拼出 b'<uuid>' 键 → list_events 恒空",
+  "expect_fail": [
+    "tests/unit/test_issue79_event_storage_list_events.py::test_bytes_client_returns_stored_event"
+  ],
+  "old": "        return value.decode(\"utf-8\")",
+  "new": "        return value"
+}

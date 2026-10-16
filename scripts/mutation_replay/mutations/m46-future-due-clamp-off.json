@@ -1,0 +1,12 @@
+{
+  "name": "m46-future-due-clamp-off",
+  "issue": "85",
+  "concern": "AD4",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "不夹取/不告警超界 due ⇒ 时钟偏快/回拨静默停摆（AD4）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD4ClockSkew::test_far_future_due_is_clamped_and_loud"
+  ],
+  "old": "        if not future:",
+  "new": "        if True:"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m43-heal-warning-off",
+  "issue": "85",
+  "concern": "AD1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "自愈不告警 ⇒ 「hash pending 但 due 缺失」变成静默（AD1②）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD1HealCursorPersistence::test_heal_warning_is_aggregated"
+  ],
+  "old": "        if healed:",
+  "new": "        if False:"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "m10-memory-list-events-unsorted",
+  "issue": "85",
+  "concern": "S6",
+  "file": "plaita/event/memory.py",
+  "rationale": "内存后端按插入序返回（违反升序契约）→ 乱序插入时漏扫",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS6MemoryStorageOrdering::test_memory_storage_list_events_is_time_ordered",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS6MemoryStorageOrdering::test_reconciler_recovers_all_with_out_of_order_insertion"
+  ],
+  "old": "        result.sort(key=lambda e: (e.timestamp, e.event_id))",
+  "new": "        pass  # mutated: insertion order"
+}

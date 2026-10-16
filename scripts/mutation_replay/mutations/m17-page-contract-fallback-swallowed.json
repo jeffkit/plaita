@@ -1,0 +1,12 @@
+{
+  "name": "m17-page-contract-fallback-swallowed",
+  "issue": "85",
+  "concern": "U4",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "包装/代理绕过身份判定、落到默认实现时把 NotImplementedError 吞成空页+排空 → 静默 0 恢复",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT5PageContractMandatory::test_wrapped_page_reader_landing_on_default_is_loud"
+  ],
+  "old": "            except NotImplementedError:\n                logger.error(\n                    \"事件回扫: 事件存储 %s 的 list_events_page 落到默认实现\"\n                    \"（包装/代理绕过身份判定）——走保守路径\",\n                    type(self.event_storage).__name__,\n                )",
+  "new": "            except NotImplementedError:\n                return EventPage(events=[], exhausted=True, skipped=[], last_position=None)"
+}

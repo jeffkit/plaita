@@ -1,0 +1,12 @@
+{
+  "name": "m32-quarantine-select-newest-first",
+  "issue": "85",
+  "concern": "W1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "选择「最晚到期」而非最早 ⇒ 持续到达的新条目永远压住老条目（W1① 饿死）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW1SelectorFairness::test_continuous_arrival_does_not_starve_old_entries"
+  ],
+  "old": "                self._due_key(), \"-inf\", now_ms + QUARANTINE_GATE_SLACK_MS,\n                start=0, num=limit,",
+  "new": "                self._due_key(), now_ms + QUARANTINE_GATE_SLACK_MS, \"-inf\","
+}

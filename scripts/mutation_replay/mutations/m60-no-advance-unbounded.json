@@ -1,0 +1,12 @@
+{
+  "name": "m60-no-advance-unbounded",
+  "issue": "85",
+  "concern": "AI2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "「不推进游标」无上界 ⇒ 毒字段活锁、其它条目被拖住（AI2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI2BoundedNoAdvance::test_persistent_failure_advances_loudly_after_bound"
+  ],
+  "old": "            if no_adv < QUARANTINE_NO_ADVANCE_MAX and processed < len(items):",
+  "new": "            if True:"
+}

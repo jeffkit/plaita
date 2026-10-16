@@ -1,0 +1,12 @@
+{
+  "name": "m09-batch-size-guard-off",
+  "issue": "85",
+  "concern": "S4",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "去掉 batch_size<=0 守卫 → 空窗口 IndexError",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS4BatchSizeGuard::test_batch_size_zero_no_crash_no_scan"
+  ],
+  "old": "        if self.batch_size <= 0:",
+  "new": "        if False:  # mutated"
+}

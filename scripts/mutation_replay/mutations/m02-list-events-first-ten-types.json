@@ -1,0 +1,12 @@
+{
+  "name": "m02-list-events-first-ten-types",
+  "issue": "79",
+  "concern": "#79",
+  "file": "plaita/event/redis.py",
+  "rationale": "无类型分支回到只遍历前 10 个事件类型",
+  "expect_fail": [
+    "tests/unit/test_issue79_event_storage_list_events.py::test_more_than_ten_event_types_all_returned"
+  ],
+  "old": "        for type_key in type_keys:\n            entries = await self.redis.zrangebyscore(\n                type_key, min_score, max_score, \n                start=0, num=limit, withscores=True",
+  "new": "        for type_key in type_keys[:10]:\n            entries = await self.redis.zrangebyscore(\n                type_key, min_score, max_score, \n                start=0, num=limit, withscores=True"
+}

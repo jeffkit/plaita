@@ -1,0 +1,12 @@
+{
+  "name": "m45-parse-retry-unbounded",
+  "issue": "85",
+  "concern": "AD3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "不可解析元数据无界重试（不移入 dead-letter）⇒ 永久占队头（AD3）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD3UnparseableNoHeadOfLine::test_healthy_entries_recover_and_corrupt_is_dead_lettered"
+  ],
+  "old": "        if n >= QUARANTINE_PARSE_MAX_ATTEMPTS:",
+  "new": "        if False:"
+}

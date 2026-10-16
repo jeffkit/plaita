@@ -1,0 +1,12 @@
+{
+  "name": "m25-drain-confirmation-skipped",
+  "issue": "85",
+  "concern": "U7",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "首次空读即推进 window_end → 空读后追加到已存在类型的事件永久丢（U7）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU7ConfirmDrain::test_event_appended_to_existing_type_after_empty_read_is_not_lost"
+  ],
+  "old": "            if self._drained_confirmed:",
+  "new": "            if True:  # mutated: 首次空读即宣告排空"
+}

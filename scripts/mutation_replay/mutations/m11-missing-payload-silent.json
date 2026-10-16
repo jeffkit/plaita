@@ -1,0 +1,12 @@
+{
+  "name": "m11-missing-payload-silent",
+  "issue": "79",
+  "concern": "S7",
+  "file": "plaita/event/redis.py",
+  "rationale": "载荷缺失不再 ERROR（静默跳过）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS7LoudMissingPayload::test_missing_payload_logs_error_with_event_id"
+  ],
+  "old": "                    logger.error(\n                        \"事件存储: 索引成员载荷缺失（已过期/被逐出/半写）: \"\n                        \"event_id=%s key=%s\", event_id, f\"{self.key_prefix}events:{event_id}\",",
+  "new": "                    logger.debug(\n                        \"事件存储: 索引成员载荷缺失（已过期/被逐出/半写）: \"\n                        \"event_id=%s key=%s\", event_id, f\"{self.key_prefix}events:{event_id}\","
+}

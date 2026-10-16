@@ -1,0 +1,12 @@
+{
+  "name": "m53-left-pending-not-persisted",
+  "issue": "85",
+  "concern": "AF6",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "「上轮仍有 pending」标志退回进程内 ⇒ 重启后清单消失不再告警（AF6）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF6VanishWarningAcrossRestarts::test_vanish_warning_survives_restart"
+  ],
+  "old": "            return bool(self.redis_client.get(self._left_pending_key())) or \\\n                self._quarantine_left_pending",
+  "new": "            return self._quarantine_left_pending"
+}

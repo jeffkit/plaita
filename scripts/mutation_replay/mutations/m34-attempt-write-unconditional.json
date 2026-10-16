@@ -1,0 +1,12 @@
+{
+  "name": "m34-attempt-write-unconditional",
+  "issue": "85",
+  "concern": "W3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "attempts 续期写不再条件判定 ⇒ 陈旧快照复活已投递条目（假 ERROR，W3）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW3StaleAttemptWrite::test_stale_attempt_write_does_not_resurrect_deleted_entry"
+  ],
+  "old": "        applied = self._quarantine_cond_update(\n            event_id,\n            lambda m: m.update({\"attempts\": attempts, \"due_ms\": due_ms}),\n        )",
+  "new": "        if self.redis_client is not None:\n            self.redis_client.hset(QUARANTINE_KEY, event_id, json.dumps({\"ts\": 0.0, \"first_seen\": time.time(), \"attempts\": attempts, \"due_ms\": due_ms, \"reason\": \"x\", \"state\": \"pending\"}))"
+}

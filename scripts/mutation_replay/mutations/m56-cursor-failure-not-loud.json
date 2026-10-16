@@ -1,0 +1,12 @@
+{
+  "name": "m56-cursor-failure-not-loud",
+  "issue": "85",
+  "concern": "AH3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "游标写失败只报泛泛一句（无连续轮数/条数/首个 id）⇒ 不可定位（AH3）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH3CursorWriteLoud::test_cursor_write_failure_is_loud_with_ids"
+  ],
+  "old": "                \"事件回扫: 持久化自愈游标失败（**连续 %d 轮**）：本片已处理 %d/%d 条、\"",
+  "new": "                \"事件回扫: 自愈游标写失败\","
+}

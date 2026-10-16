@@ -1,0 +1,12 @@
+{
+  "name": "m16-landed-probe-off",
+  "issue": "85",
+  "concern": "T3",
+  "file": "plaita/server/event_filter.py",
+  "rationale": "不做「XADD 是否已落盘」判定 → 模糊失败被无条件回滚 → 重复投递",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5a_ambiguous_enqueue_failure_does_not_duplicate"
+  ],
+  "old": "                        if self._task_already_in_stream(self.queue_name, resume_task):",
+  "new": "                        if False:  # mutated"
+}

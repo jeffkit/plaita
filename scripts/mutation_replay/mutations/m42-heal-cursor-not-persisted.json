@@ -1,0 +1,12 @@
+{
+  "name": "m42-heal-cursor-not-persisted",
+  "issue": "85",
+  "concern": "AD1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "自愈游标不持久化（每轮都从头扫）⇒ 重启后剩余 hash-only 条目永久不自愈（AD1）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD1HealCursorPersistence::test_heal_progress_survives_restart_every_round"
+  ],
+  "old": "            if next_cursor:",
+  "new": "            if False:"
+}

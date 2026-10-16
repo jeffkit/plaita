@@ -1,0 +1,12 @@
+{
+  "name": "m30-quarantine-ttl-not-aligned",
+  "issue": "85",
+  "concern": "V3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "清单 TTL 不与存储 TTL 对齐 → 载荷还在而清单先过期（静默丢失面）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV3QuarantineTtl::test_ttl_aligned_with_storage_ttl"
+  ],
+  "old": "            base = max(base, int(storage_ttl) * 2)",
+  "new": "            base = base"
+}

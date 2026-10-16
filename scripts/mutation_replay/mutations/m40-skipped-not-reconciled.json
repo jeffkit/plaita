@@ -1,0 +1,12 @@
+{
+  "name": "m40-skipped-not-reconciled",
+  "issue": "85",
+  "concern": "AA4",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "零投递只看向 skipped 真假、不与推进位置对账 → 伪造 skipped 可骗过（AA4）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA4SkippedReconciliation::test_forged_skipped_cannot_justify_far_advance"
+  ],
+  "old": "            reconciled = max_skipped is not None and new_cursor[0] <= max_skipped",
+  "new": "            reconciled = max_skipped is not None"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m24-trust-exhausted-with-events",
+  "issue": "85",
+  "concern": "U6",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "盲信存储自报的 exhausted=True（带事件也采信）→ 实现错误的页会静默丢未读事件",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU6DoNotTrustExhausted::test_exhausted_with_events_is_not_trusted"
+  ],
+  "old": "        trusted_exhausted = page.exhausted and not events",
+  "new": "        trusted_exhausted = page.exhausted"
+}

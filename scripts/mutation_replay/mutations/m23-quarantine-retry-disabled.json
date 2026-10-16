@@ -1,0 +1,13 @@
+{
+  "name": "m23-quarantine-retry-disabled",
+  "issue": "85",
+  "concern": "U3'",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "隔离清单不做真实重试（get_event 恒 None）→ 载荷恢复后仍永久丢（R2/A1a/A1b）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU3QuarantineRetry::test_r2_restored_payload_after_cursor_passed_is_recovered",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU3QuarantineRetry::test_a1a_missing_payload_restored_is_retried_and_delivered"
+  ],
+  "old": "                event = await self.event_storage.get_event(event_id)",
+  "new": "                event = None"
+}
