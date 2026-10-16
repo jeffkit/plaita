@@ -481,6 +481,14 @@ def _validate_host_target(
 
     if allowed_hosts:
         if not any(_host_entry_matches(entry, hostname, resolved_ips) for entry in allowed_hosts):
+            if resolved_ips is None and any("/" in entry for entry in allowed_hosts if entry):
+                # #83：CIDR 条目按解析后 IP 匹配，解析失败必须显式失败——退化成
+                # 「not in allowed_hosts」会把「解析不了/配置不生效」伪装成
+                # 「目标不在网段内」，把运营者引去查 DNS 而不是查策略。
+                raise URLPolicyError(
+                    f"Cannot resolve {hostname!r} to verify allowed_hosts CIDR entry: "
+                    f"{_mask_policy_url(url)}"
+                )
             raise URLPolicyError(
                 f"URL host {hostname!r} is not in allowed_hosts {list(allowed_hosts)}: "
                 f"{_mask_policy_url(url)}"
@@ -512,7 +520,9 @@ def _host_allowed(
     规则按顺序：scheme 必须是 http/https；denied_hosts 命中即拒（支持精确
     域名、``*.suffix`` 通配、CIDR）；allowed_hosts 非空时必须命中其一；
     block_private_networks=True 时解析目标并对每个地址拒绝私网段（含 DNS
-    解析——只看字面 host 挡不住域名解析到内网的绕过）。
+    解析——只看字面 host 挡不住域名解析到内网的绕过）。CIDR 条目按解析后
+    IP 匹配，因此解析门在 allowed_hosts/denied_hosts 存在含 ``/`` 条目时
+    同样打开（#83：此前只配 CIDR 白名单时解析不发生、条目恒不匹配）。
 
     ``resolver(hostname, port) -> Optional[List[str]]`` 可注入替代 DNS 解析
     （生产路径传 TTL 缓存版 :func:`_cached_resolve_host`）；缺省保持本函数
@@ -532,7 +542,13 @@ def _host_allowed(
     hostname = hostname.lower().strip("[]")
 
     resolved_ips: Optional[list] = None
-    if denied_hosts or block_private_networks:
+    # 解析门（#83）：denied_hosts / block_private_networks 需要 IP；allowed_hosts
+    # 里**存在 CIDR 条目**（含 ``/``）时也必须解析——此前门条件不含 allowed_hosts，
+    # 只配 CIDR 白名单时恒不匹配、全拒。纯精确域名/``*.suffix`` 白名单不触发解析
+    # （不多付一次 DNS），既有用例的纯函数路径保持纯函数。
+    if denied_hosts or block_private_networks or any(
+        "/" in entry for entry in (allowed_hosts or []) if entry
+    ):
         resolved_ips = (resolver or _resolve_host)(
             hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
         )

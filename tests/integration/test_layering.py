@@ -84,9 +84,45 @@ def _is_type_checking_block(node: ast.If) -> bool:
     return False
 
 
-def _collect_runtime_imports(tree: ast.AST) -> list[str]:
-    """Return module names imported at runtime (skipping TYPE_CHECKING)."""
+def _pkg_parts_of(pyfile: pathlib.Path) -> tuple[str, ...]:
+    """pyfile 所定义模块的**绝对包路径**：``plaita/storage/fenced.py`` → ``("plaita", "storage")``。
+
+    ``__init__.py`` 的父目录恰好就是包自身（``plaita/storage/__init__.py`` 的
+    ``parts[:-1]`` 同样是 ``("storage",)``），两种情况同一式。
+    """
+    return ("plaita",) + pyfile.resolve().relative_to(_LOKI).parts[:-1]
+
+
+def _resolve_import_from(node: ast.ImportFrom, pkg_parts: tuple[str, ...]) -> list[str]:
+    """把 ImportFrom（含相对导入）解析成绝对模块名（PEP 328：按所在包上溯）。
+
+    ``from ..server.execution_lease import X`` in ``plaita.storage.fenced``
+    → ``plaita.server.execution_lease``。``from . import name``（module 为
+    None）解析为「包 + alias 名」的子模块候选——对前缀禁表是保守近似：
+    真子模块必命中，普通属性多记一条无害名。level 上溯越过 plaita 顶层
+    （导入已落在包外）不产生 ``plaita.*`` 名，返回空。
+    """
+    if node.level == 0:
+        return [node.module] if node.module else []
+    up = node.level - 1
+    if up >= len(pkg_parts):
+        return []
+    head = ".".join(pkg_parts[: len(pkg_parts) - up] if up else pkg_parts)
+    if node.module:
+        return [f"{head}.{node.module}"]
+    names = [alias.name for alias in node.names if alias.name != "*"]
+    return [f"{head}.{name}" for name in names] or [head]
+
+
+def _collect_runtime_imports(tree: ast.AST, pyfile: pathlib.Path) -> list[str]:
+    """Return module names imported at runtime (skipping TYPE_CHECKING).
+
+    相对导入（``node.level > 0``）按所在文件包路径解析成绝对名后再参与
+    禁表比对（#96：此前 level>0 被整体跳过，storage→server 的相对反向
+    依赖恒绿）。
+    """
     imports: list[str] = []
+    pkg_parts = _pkg_parts_of(pyfile)
 
     class _Walker(ast.NodeVisitor):
         def __init__(self):
@@ -99,11 +135,9 @@ def _collect_runtime_imports(tree: ast.AST) -> list[str]:
             self.generic_visit(node)
 
         def visit_ImportFrom(self, node: ast.ImportFrom):
-            # Only absolute imports resolve to a real module dependency;
-            # relative imports stay inside the package and are handled by
-            # the per-layer prefix mapping elsewhere.
-            if not self.in_type_checking and node.level == 0 and node.module:
-                imports.append(node.module)
+            # 相对导入与绝对导入同权：解析成绝对名后进同一份禁表比对（#96）。
+            if not self.in_type_checking:
+                imports.extend(_resolve_import_from(node, pkg_parts))
             self.generic_visit(node)
 
         def visit_If(self, node: ast.If):
@@ -129,7 +163,7 @@ def _all_py_files(layer: str):
         yield pyfile
 
 
-def _collect_top_level_imports(tree: ast.AST) -> list[str]:
+def _collect_top_level_imports(tree: ast.AST, pyfile: pathlib.Path) -> list[str]:
     """Imports that live at module top level (not nested in any function).
 
     Foundation files may lazy-import ``plaita.event`` inside a function body
@@ -138,8 +172,12 @@ def _collect_top_level_imports(tree: ast.AST) -> list[str]:
 
     ``if TYPE_CHECKING:`` blocks are exempt — those imports are type-only and
     never execute at runtime, so they cannot create a real reverse dependency.
+
+    相对导入同样解析成绝对名（#96：否则 foundation 顶层 ``from ..event …``
+    的相对写法可绕过本约束）。
     """
     imports: list[str] = []
+    pkg_parts = _pkg_parts_of(pyfile)
 
     class _Walker(ast.NodeVisitor):
         def __init__(self):
@@ -153,8 +191,8 @@ def _collect_top_level_imports(tree: ast.AST) -> list[str]:
             self.generic_visit(node)
 
         def visit_ImportFrom(self, node: ast.ImportFrom):
-            if not self.in_function and not self.in_type_checking and node.level == 0 and node.module:
-                imports.append(node.module)
+            if not self.in_function and not self.in_type_checking:
+                imports.extend(_resolve_import_from(node, pkg_parts))
             self.generic_visit(node)
 
         def visit_FunctionDef(self, node):
@@ -258,7 +296,7 @@ class TestReverseImportStaticAnalysis:
                 tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=str(pyfile))
             except SyntaxError:
                 continue
-            for imp in _collect_runtime_imports(tree):
+            for imp in _collect_runtime_imports(tree, pyfile):
                 for prefix in forbidden:
                     if imp == prefix or imp.startswith(prefix + "."):
                         violations.append(f"{pyfile.relative_to(_REPO_ROOT)}: imports {imp}")
@@ -282,7 +320,7 @@ class TestReverseImportStaticAnalysis:
                 tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=str(pyfile))
             except SyntaxError:
                 continue
-            for imp in _collect_top_level_imports(tree):
+            for imp in _collect_top_level_imports(tree, pyfile):
                 if imp == "plaita.event" or imp.startswith("plaita.event."):
                     violations.append(f"{pyfile.relative_to(_REPO_ROOT)}: top-level import {imp}")
         assert violations == [], (
@@ -318,7 +356,81 @@ class TestReverseImportStaticAnalysis:
                 tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=str(pyfile))
             except SyntaxError:
                 continue
-            for imp in _collect_runtime_imports(tree):
+            for imp in _collect_runtime_imports(tree, pyfile):
                 if imp == forbidden_prefix or imp.startswith(forbidden_prefix + "."):
                     violations.append(f"{pyfile.name}: imports {imp}")
         assert violations == [], "\n".join(violations)
+
+
+class TestRelativeImportResolution:
+    """#96：相对导入必须解析成绝对名再比对禁表。
+
+    门禁曾对 ``node.level > 0`` 的 ImportFrom 整体跳过（旧注释谎称由别处的
+    per-layer prefix mapping 处理，实际并不存在），``plaita/storage/fenced.py``
+    相对反向导入 ``..server.execution_lease`` 因此恒绿。
+    """
+
+    def test_relative_importfrom_resolves_to_absolute(self):
+        node = ast.parse(
+            "from ..server.execution_lease import ExecutionLeaseError\n"
+        ).body[0]
+        assert _resolve_import_from(node, ("plaita", "storage")) == [
+            "plaita.server.execution_lease"
+        ]
+
+    def test_relative_from_package_imports_resolve_as_submodule_candidates(self):
+        # ``from ..server import execution_lease`` 的 node.module 是 "server"：
+        # 解析到基名 plaita.server（alias 是属性/子模块二选一，基名已足以
+        # 命中禁前缀 plaita.server，不会漏报）。
+        node = ast.parse("from ..server import execution_lease\n").body[0]
+        assert _resolve_import_from(node, ("plaita", "storage")) == ["plaita.server"]
+
+    def test_single_dot_import_resolves_to_sibling(self):
+        node = ast.parse("from . import base\n").body[0]
+        assert _resolve_import_from(node, ("plaita", "storage")) == ["plaita.storage.base"]
+
+    def test_overshoot_beyond_plaita_resolves_to_nothing(self):
+        node = ast.parse("from ...outside import thing\n").body[0]
+        assert _resolve_import_from(node, ("plaita", "storage")) == []
+
+    def test_absolute_importfrom_unchanged(self):
+        node = ast.parse("from plaita.server.flow_worker import FlowWorker\n").body[0]
+        assert _resolve_import_from(node, ("plaita", "storage")) == [
+            "plaita.server.flow_worker"
+        ]
+
+
+class TestRelativeImportGateCatchesReverseDeps:
+    """端到端负控：相对写法的反向依赖必须被门禁报出（修前恒绿 = 假绿）。"""
+
+    def test_storage_relative_reverse_import_is_flagged(self, tmp_path, monkeypatch):
+        root = tmp_path / "plaita" / "storage"
+        root.mkdir(parents=True)
+        (root / "violator.py").write_text(
+            "from ..server.execution_lease import ExecutionLeaseError\n", encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "_LOKI", tmp_path / "plaita")
+        monkeypatch.setitem(globals(), "_REPO_ROOT", tmp_path)
+        violations = TestReverseImportStaticAnalysis._violations_for_layer("storage")
+        assert any(
+            "violator.py" in v and "plaita.server.execution_lease" in v for v in violations
+        ), f"相对导入的反向依赖必须被门禁报出（#96 前恒空）: {violations}"
+
+    def test_foundation_relative_top_level_event_import_is_flagged(
+        self, tmp_path, monkeypatch
+    ):
+        root = tmp_path / "plaita" / "core"
+        root.mkdir(parents=True)
+        (root / "violator.py").write_text(
+            "from ..event import bus\n", encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "_LOKI", tmp_path / "plaita")
+        violations = []
+        for pyfile in _all_py_files("foundation"):
+            tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=str(pyfile))
+            for imp in _collect_top_level_imports(tree, pyfile):
+                if imp == "plaita.event" or imp.startswith("plaita.event."):
+                    violations.append(f"{pyfile.name}: top-level import {imp}")
+        assert violations, (
+            "foundation 顶层相对写法的 event 导入必须被拦（#96 前恒空）: " + str(violations)
+        )
