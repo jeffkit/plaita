@@ -180,15 +180,25 @@ class TestValidTimeoutStillWinsStrictest(unittest.TestCase):
                 self.assertEqual(captured, [None])
                 self.assertFalse(result["is_end"])
 
-    def test_zero_is_still_unlimited_per_parse_semantics(self):
-        """0 / 零时长（``PT``）的既有语义（``_parse_timeout`` → None=无限额）
-        不在本单改动范围——它们不是"畸形"，而是既有的"零时长=无限制"。"""
+    def test_zero_is_a_zero_budget_not_unlimited(self):
+        """0 / 零时长（``PT``/``PT0S``）是**显式零预算**（plaita#138 起）。
+
+        #139 的边界是"畸形输入不得静默降级"；零预算不是畸形，但"0 = 无限额"
+        的旧口径正是兄弟单 #138 的缺陷本身——它让"取最严"在取到最严值（0）
+        时反而完全失效。此处按 #138 的结论钉住：0 必须作为最严预算下发，
+        且流程被立即打断。
+        """
         for value in (0, "PT", "PT0S"):
             with self.subTest(value=value):
                 captured, patcher = _capture_strategy_timeout()
+                started = time.time()
                 with patcher:
-                    FlowExecution().run_distributed(_flow(seconds=0.0), timeout=value)
-                self.assertEqual(captured, [None])
+                    with self.assertRaises(FlowExecutionException):
+                        FlowExecution().run_distributed(_flow(seconds=0.3), timeout=value)
+                self.assertEqual(captured, [0],
+                                 "0/零时长必须作为最严预算（0ms）下发，而不是 None")
+                self.assertLess(time.time() - started, 0.25,
+                                "零预算必须立即超时，而不是跑满 0.3s 的节点")
 
 
 if __name__ == "__main__":

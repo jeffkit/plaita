@@ -420,8 +420,10 @@ class TestFlowExecutionRunClassmethod(unittest.TestCase):
 
     def test_timeout_zero_not_applied(self):
         """_21: `timeout and execution.timeout` — timeout=0 is falsy, would keep None.
-        But timeout=0 means 'no limit' in some frameworks. In this code, 0 or None = no limit.
-        We use a clearly positive value for the test above.
+
+        plaita#138 起 ``0`` 是**显式零预算**（最严），不是"无限额"；这里仍用
+        明确的正值验证"参数确实落到 execution.timeout"（零预算路径由
+        ``tests/unit/test_issue138_zero_timeout_budget.py`` 钉住）。
         """
         _, ex = _capture_execution_on_run(self.flow, timeout=500)
         self.assertIsNotNone(ex.timeout)

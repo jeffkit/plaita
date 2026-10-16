@@ -208,11 +208,12 @@ class TestNodeRunnerAllRetriesExhausted(unittest.IsolatedAsyncioTestCase):
 
 
 class TestParseTimeout(unittest.TestCase):
-    def test_non_str_non_numeric_returns_none(self):
-        """Line 269: non-str, non-int/float → None."""
+    def test_non_str_non_numeric_raises(self):
+        """plaita#139：非 str/非数值不再是 ``None``（= 静默无限额），而是具名拒绝。"""
         runner = _make_runner()
-        result = runner._parse_timeout(object())
-        self.assertIsNone(result)
+        with self.assertRaises(ValueError) as ctx:
+            runner._parse_timeout(object())
+        self.assertIn("unsupported type object", str(ctx.exception))
 
     def test_none_returns_none(self):
         runner = _make_runner()

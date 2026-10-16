@@ -33,6 +33,12 @@ plaita 提供节点级/流程级的超时控制、错误策略与重试，并把
 | `PT1M` | 1 分钟 |
 | `PT1H` | 1 小时 |
 | `5000` | 5000 毫秒 |
+| `0` / `"0"` / `PT0S` / `PT` | **显式零预算**（最严，立即超时）。plaita#138 起不再被当作"不限额" |
+| 未设 / `""` / `None` | **不限额**（未提供预算） |
+
+`0` 与"没给超时"是两种不同语义：前者是**最严预算**，后者才是不限额。历史上
+的解析把 `0` 与零时长 ISO 串一并归成"不限额"，于是"取最严"在取到最严值（`0`）
+时反而完全失效——`flow.timeout="PT0S"` 曾让一个 0.309s 的节点跑满（plaita#138）。
 
 > 注：`Flow.timeout` 字段当前类型为 `Optional[str]`，故上表的"毫秒整数"写法在 JSON 里会被 pydantic 以 `string_type` 拒绝（传字符串 `"5000"` 可用）；这是既有的模型/文档不一致，另单跟踪。
 
@@ -54,6 +60,8 @@ plaita 提供节点级/流程级的超时控制、错误策略与重试，并把
 调用方传入的 `timeout`、节点自身 `timeout`、流程 `timeout` 之间取**更严（更小）者**生效，不会静默丢弃。流程级剩余时间会作为节点执行的最大预算下传。
 
 distributed（worker / console）逐步推进路径同样按此取严（plaita#71），但**每一步调用独立计预算**——引擎不把已耗时长写进 checkpoint，所以「整个流程累计不超过 X」只在 normal/generator 的单次运行内是硬保证；distributed 下 `flow.timeout` 是**每步上限**，需要跨步累计的调用方请从 checkpoint 恢复剩余量后作为调用期 `timeout` 传入。
+
+非法/畸形的 timeout 一律**响亮失败**，不静默降级：非数值非字符串类型（`list`/`dict`/任意对象）、负值、非有限 `float`（`inf`/`nan`）、超过 `sys.float_info.max` 的毫秒整数、含年/月分量的 ISO 时长（`P1Y`、`P1M`——没有固定秒数）、非法串。normal/generator 路径直接抛 `ValueError`（点名违规值与受支持的写法）；distributed 入口按既有契约归一成 `FlowErrorException`。历史上它们被静默当成"无限额"（`_parse_timeout` 返回 `None`），调用方预算被无声丢弃——plaita#139。
 
 ### 协作式取消
 

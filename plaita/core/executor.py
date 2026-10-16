@@ -40,7 +40,7 @@ from plaita.core.context import ExecutionContext
 from plaita.core.executor_compat import CompatRunMixin
 
 logger = logging.getLogger(__name__)
-from plaita.core.runner import NodeRunner
+from plaita.core.runner import InvalidTimeoutError, NodeRunner
 # 策略层符号 re-export, 保持 ``from plaita.core.executor import ...`` 历史路径。
 from plaita.core.strategies import (  # noqa: F401
     DistributedStrategy,
@@ -68,6 +68,24 @@ _KNOWN_RUN_OPTIONS = frozenset({
     "express_prefix", "express_input_name", "express_parent_name",
     "express_node_name", "express_global_name", "express_environment_variable",
 })
+
+
+def _reject_unknown_execute_options(options: dict) -> None:
+    """``FlowExecution.execute(**options)`` 的未知关键字具名拒绝（plaita#137）。
+
+    历史上这里接了 ``**options`` 却从不消费——未知关键字被**静默丢弃**（连
+    warning 都没有），``execute(flow, {}, typo=1)`` 与不传完全等价。未知
+    option 一定不是有意传的：``FlowExecution.run()`` 才接受 ``express_*``
+    等 option。模块级（不在 ``FlowExecution`` 类体里）是 SC-003 尺寸预算的
+    既有约定，见 ``executor_compat.py``。
+    """
+    if not options:
+        return
+    raise TypeError(
+        "FlowExecution.execute() got unexpected keyword argument(s) "
+        f"{sorted(options)}; valid: params, lazy, timeout "
+        "(express_* options are accepted by FlowExecution.run())"
+    )
 
 
 def _reentry_error() -> FlowExecutionException:
@@ -115,38 +133,32 @@ def _inherited_express(parent) -> Dict[str, Any]:
 def _validated_timeout_ms(value, source: str) -> Optional[int]:
     """distributed 入口的 timeout 输入校验 + 归一（plaita#139）。
 
-    与 ``NodeRunner._parse_timeout`` 的关键区别是**拒绝静默降级**：
-    ``_parse_timeout`` 对非 str/number 的类型返回 ``None``（= 无限额），而
-    distributed 契约要求非法输入要么响亮失败、要么按最严预算执行。#71 的
-    merge 若直接照搬宽容口径，``timeout=[1,2]`` / ``dict`` 这类非法类型会
-    从改动前的 ``FlowErrorException(TypeError)`` 退化成**静默无限额**。
+    #139 起 ``NodeRunner._parse_timeout`` 自己就是**拒绝静默降级**的：非法
+    类型/负值/非有限 float/超界整数/非法串一律抛 ``InvalidTimeoutError``
+    （``ValueError`` 子类），永不返回 ``None``（= 无限额）。本层只做两件事：
 
-    规则：``None``/空串 → 无限额；``bool``/非负 ``int``/``float`` → 毫秒；
-    数字串/ISO 8601 时长串 → 毫秒；其余（含负数、list/dict/任意对象、
-    非法串）抛 ``ValueError``，消息带违规值与来源，由 ``run_distributed``
-    归一成 distributed 契约的 ``FlowErrorException``。
+    1. 把"非 str/number"的**类型**错误补成带类型名的文案（解析层只看得到
+       类型名，但这里能给出"你给的是 list/dict/对象"的完整指引）；
+    2. 把解析层的具名拒绝补上**来源**（``flow.timeout`` /
+       ``execution.timeout`` / ``run_distributed(timeout=...)``），便于定位
+       是三个入口里的哪一个丢了预算。
+
+    规则：``None``/空串 → 无限额；``bool``/非负 ``int``/``float`` → 毫秒
+    （``0`` = **零预算**，最严；plaita#138 起不再被当作"无限额"）；
+    数字串/ISO 8601 时长串 → 毫秒；其余抛 ``ValueError``，由
+    ``run_distributed`` 归一成 distributed 契约的 ``FlowErrorException``。
     """
     if value is None:
         return None
     if isinstance(value, bool):
         value = int(value)
-    if isinstance(value, (int, float)):
-        if value < 0:
-            raise ValueError(
-                f"Invalid timeout {value!r} from {source}: must be a non-negative "
-                f"number of milliseconds or an ISO 8601 duration string"
-            )
-        return NodeRunner._parse_timeout(value)  # 0 仍按既有语义=无限额
-    if isinstance(value, str):
-        if not value:
+    if isinstance(value, (int, float, str)):
+        if isinstance(value, str) and not value:
             return None
         try:
             return NodeRunner._parse_timeout(value)
-        except ValueError as e:
-            raise ValueError(
-                f"Invalid timeout {value!r} from {source}: use milliseconds as a "
-                f"plain number (e.g. '300') or an ISO 8601 duration (e.g. 'PT0.3S')"
-            ) from e
+        except InvalidTimeoutError as e:
+            raise InvalidTimeoutError(e.value, e.reason, source) from e
     raise ValueError(
         f"Invalid timeout {value!r} from {source}: expected milliseconds as a "
         f"number (e.g. 300) or an ISO 8601 duration string (e.g. 'PT0.3S'); "
@@ -474,6 +486,7 @@ class FlowExecution(CompatRunMixin):
             raise TypeError("params must be a dictionary or None")
         if params is None:
             params = {}
+        _reject_unknown_execute_options(options)  # plaita#137（模块级，SC-003 预算外置）
         # 调用方传入的 timeout 与已设置的 self.timeout 取更严者, 不再静默丢弃
         if timeout is not None:
             merged = self._merge_timeout(self.timeout, timeout)

@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import datetime
 import functools
 import logging
+import math
 import os
+import sys
 import threading
 import time
 from typing import Any, Optional, Tuple, TYPE_CHECKING
@@ -75,24 +78,107 @@ def _coerce_strategy(value) -> ErrorStrategy:
 
 
 
+#: 非法 timeout 的统一拒收文案（plaita#139）：错误消息逐字复用，避免各处措辞漂移。
+_TIMEOUT_FORMS = (
+    "use milliseconds as a plain number (e.g. 300 or '300') or an ISO 8601 "
+    "duration (e.g. 'PT0.3S', 'PT2S', 'PT1M')"
+)
+
+#: 毫秒预算的上界：引擎把毫秒换算成秒时走 float（``timeout_ms / 1000.0``，
+#: runner / strategies 多处），超过 ``sys.float_info.max`` 的整数在这一步抛
+#: ``OverflowError: int too large to convert to float``——那是内部崩溃，不是
+#: 具名拒绝，也不是可用预算。校验层据此具名拒绝（#139 家族：调用方给的预算
+#: 要么被采用，要么被点名拒绝，不能变成引擎内部异常）。
+_MAX_TIMEOUT_MS = sys.float_info.max
+
+
+class InvalidTimeoutError(ValueError):
+    """非法 timeout 的具名拒绝（plaita#139）。
+
+    ``reason`` 不含值/形状前缀，供上层（distributed 校验层）补上"来源"上下文
+    后重新抛出——避免出现 ``Invalid timeout X from S: Invalid timeout X: ...``
+    这类重复前缀。
+    """
+
+    def __init__(self, value, reason: str, source: Optional[str] = None):
+        self.value = value
+        self.reason = reason
+        self.source = source
+        where = f" from {source}" if source else ""
+        super().__init__(f"Invalid timeout {value!r}{where}: {reason}; {_TIMEOUT_FORMS}")
+
+
 def _parse_timeout_uncached(timeout):
-    if not timeout:
+    """解析超时为毫秒预算；``None``/``""`` = 不限额，``0`` = 零预算（最严）。
+
+    规则（plaita#138 / #139；**逐句与实现一致**）：
+
+    - ``None`` 或空串 ``""`` ⇒ ``None``：**未提供**超时，不限额。
+    - ``0`` / ``0.0`` / ``False`` / ``"0"`` / ``"PT0S"`` / ``"PT"`` ⇒ ``0``：
+      **显式零预算**，是最严的限额（立即超时），**不再**被当作"不限额"
+      —— 这正是 #138：旧实现让"取最严"在取到最严值（0）时反而完全失效。
+    - 正数 ``int``/``float`` ⇒ 毫秒；数字串（``"300"``）⇒ 毫秒；ISO 8601
+      **固定长度**时长串（``"PT0.3S"``）⇒ 毫秒。
+    - 其余一律 :class:`InvalidTimeoutError`（``ValueError`` 子类，点名违规值 +
+      受支持形状）：负数（``-5`` 曾被原样返回，``-0.5`` 更被 ``int()`` 截成
+      ``0``）、非有限 ``float``（``inf`` 曾抛裸 ``OverflowError``）、超过
+      :data:`_MAX_TIMEOUT_MS` 的整数（引擎内部 ``/1000.0`` 处才炸）、含年/月
+      分量的 ISO 时长（无固定秒数，``total_seconds()`` 会静默丢掉年/月）、
+      非法类型与非法串。**永不静默返回 ``None``**（= 静默丢弃调用方预算，
+      plaita#139）。
+
+    历史上这里以 ``if not timeout: return None`` 开头（#138），并以
+    ``return None`` 收尾处理所有非法类型（#139）。
+    """
+    if timeout is None:
         return None
+    if isinstance(timeout, bool):
+        # bool 是 int 子类；显式归一，避免 True/False 走数值分支的歧义。
+        timeout = int(timeout)
     if isinstance(timeout, (int, float)):
+        if isinstance(timeout, float) and not math.isfinite(timeout):
+            raise InvalidTimeoutError(timeout, "must be a finite number")
+        if timeout < 0:
+            raise InvalidTimeoutError(timeout, "must be a non-negative number")
+        if timeout > _MAX_TIMEOUT_MS:
+            raise InvalidTimeoutError(
+                timeout,
+                f"exceeds the maximum supported budget ({_MAX_TIMEOUT_MS!r} ms)",
+            )
         return int(timeout)
-    if not isinstance(timeout, str):
-        return None
-    if timeout.isdigit():
-        return int(timeout)
-    try:
-        duration = isodate.parse_duration(timeout)
-    except Exception as e:
-        # 历史上第三方 isodate.ISO8601Error 裸穿透，用户不知道合法格式长什么样
-        raise ValueError(
-            f"Invalid timeout {timeout!r}: use milliseconds as a plain number "
-            f"(e.g. '300') or an ISO 8601 duration (e.g. 'PT0.3S', 'PT2S', 'PT1M')"
-        ) from e
-    return None if duration.total_seconds() == 0 else int(duration.total_seconds() * 1000)
+    if isinstance(timeout, str):
+        if not timeout:
+            return None
+        if timeout.isdigit():
+            value = int(timeout)
+            if value > _MAX_TIMEOUT_MS:
+                raise InvalidTimeoutError(
+                    timeout,
+                    f"exceeds the maximum supported budget ({_MAX_TIMEOUT_MS!r} ms)",
+                )
+            return value
+        try:
+            duration = isodate.parse_duration(timeout)
+        except Exception as e:
+            # 历史上第三方 isodate.ISO8601Error 裸穿透，用户不知道合法格式长什么样
+            raise InvalidTimeoutError(
+                timeout, "is not a valid ISO 8601 duration"
+            ) from e
+        if not isinstance(duration, datetime.timedelta):
+            # isodate 用 ``Duration`` 表示含年/月分量的时长——它们没有固定秒数，
+            # ``total_seconds()`` 会把年/月静默丢掉（``"P1Y"`` → 0、
+            # ``"P1YT1H"`` → 3600）。当超时用只会静默给出错误的预算。
+            raise InvalidTimeoutError(
+                timeout,
+                "contains year/month components, which have no fixed length",
+            )
+        total_seconds = duration.total_seconds()
+        if total_seconds < 0:
+            raise InvalidTimeoutError(timeout, "must be a non-negative duration")
+        return int(total_seconds * 1000)
+    raise InvalidTimeoutError(
+        timeout, f"has unsupported type {type(timeout).__name__}"
+    )
 
 
 @functools.lru_cache(maxsize=256)
@@ -102,6 +188,9 @@ def _parse_timeout_cached(timeout):
 
 def _parse_timeout(timeout) -> Optional[int]:
     """解析节点/flow 超时为毫秒数（2026-10 加 memo：isodate 解析 ~4µs/次）。
+
+    ``None``/``""`` ⇒ ``None``（未提供 = 不限额）；``0``/``"PT0S"`` ⇒ ``0``
+    （**显式零预算**，最严；plaita#138 起不再被静默归成不限额）。
 
     lru_cache 不缓存异常，非法串保持每次抛 ValueError；不可哈希的输入在进
     缓存前按类型门直接走原逻辑（行为与旧版逐分支一致）。
@@ -285,15 +374,22 @@ class NodeRunner:
             raise err
 
         total_timeout_ms: Optional[int] = None
-        if config_timeout:
+        # plaita#138：0 是**合法的最严预算**，必须用 ``is not None`` 判定；
+        # 旧的 ``if config_timeout:`` / ``elif max_timeout_ms:`` 把 0 当 falsy
+        # 跳过 ⇒ 显式零预算退化成"不限额"（策略传下来的 remaining 归零同理）。
+        if config_timeout is not None:
             total_timeout_ms = config_timeout
-            if max_timeout_ms:
+            if max_timeout_ms is not None:
                 total_timeout_ms = min(config_timeout, max_timeout_ms)
-        elif max_timeout_ms:
+        elif max_timeout_ms is not None:
             total_timeout_ms = max_timeout_ms
 
-        time_limit_by_flow = (not config_timeout and max_timeout_ms is not None) or (
-            max_timeout_ms is not None and config_timeout and max_timeout_ms < config_timeout
+        # 超时归属：flow 级预算存在且比节点自带预算更严（或节点未给）时，
+        # 该节点的超时是"流程级强加"。旧式真值判定在 config_timeout=0 时把
+        # 节点自带的零预算误判成"没有节点预算"，从而把归属错记成 FLOW_ERROR。
+        time_limit_by_flow = (
+            max_timeout_ms is not None
+            and (config_timeout is None or max_timeout_ms < config_timeout)
         )
 
         start_time = time.time()

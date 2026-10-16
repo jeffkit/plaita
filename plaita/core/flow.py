@@ -505,15 +505,32 @@ class Flow(BaseModel):
         return None
 
     def run(self, *args, **params):
+        """同步执行。输入走 ``run({...})``（单个 dict/scalar）或 ``run(key=value, ...)``。
+
+        契约：**每个关键字都成为 ``$INPUT`` 的一个字段**（README 的
+        ``flow.run(name="kongjie")``），包括在兄弟入口里是执行控制的
+        ``mode``/``params``/``timeout`` 等名字——它们在这里**不**被拒绝。
+
+        只有 :data:`_RESERVED_RUN_KEYWORDS`（历史输入包装别名
+        ``inputs_data``/``input_data``，以及 ``run_compatible`` 的形参
+        ``lazy``）按名拒绝：它们到不了调用方以为的位置，静默接受只会
+        变成"看起来正常"的错误结果（plaita#137）。要传同名**输入字段**，
+        用 dict 形式：``flow.run({"inputs_data": ...})``。
+        """
         _enforce_dict_input(args)
+        _reject_reserved_run_keywords(params)
         return FlowExecution().run_compatible(self, False, *args, **params)
 
     async def arun(self, *args, **params):
+        """异步 :meth:`run`；输入与保留关键字契约同 :meth:`run`。"""
         _enforce_dict_input(args)
+        _reject_reserved_run_keywords(params)
         return await FlowExecution().arun_compatible(self, False, *args, **params)
 
     def debug(self, *args, **params):
+        """generator 模式的 :meth:`run`；输入与保留关键字契约同 :meth:`run`。"""
         _enforce_dict_input(args)
+        _reject_reserved_run_keywords(params)
         return FlowExecution().run_compatible(self, True, *args, **params)
 
     @property
@@ -572,6 +589,49 @@ def _enforce_dict_input(args: tuple) -> None:
         )
 
 
+#: ``Flow.run/arun/debug`` 的**保留关键字名**（plaita#137）。
+#:
+#: 既有契约：``flow.run(**kwargs)`` 把**每个**关键字映射成 ``$INPUT`` 字段
+#: （README「``flow.run(name="kongjie")``」/ ``_coerce_input_value``）。所以
+#: **不存在**"任意未知关键字"——任何名字都可以是合法输入字段，仓库自己的测试
+#: 就用 ``lb.run(params={})`` / ``fb.run(greeting=...)`` 传输入。按兄弟入口的
+#: 参数名一刀切拒绝会误伤 ``mode``/``params``/``timeout`` 这些合法输入字段。
+#:
+#: 只拒绝"看起来是 API 参数、实际永远到不了调用方以为的位置"的名字：
+#:
+#: - ``inputs_data`` / ``input_data``：历史输入包装别名。它们会被静默塞进
+#:   ``$INPUT``，于是 ``flow.run(inputs_data={"ok": True})`` 返回 ``None``
+#:   ——与"流程跑完没有输出"无法区分（#137 的实测实例：一份 issue 复现脚本
+#:   因此让 true branch 从未执行）。整仓（代码/测试/文档）零出现。
+#: - ``lazy``：``run_compatible(self, flow, lazy, ...)`` 的第 2 位置形参，
+#:   永远到不了 ``$INPUT``。当前抛 Python 原生的
+#:   ``got multiple values for argument 'lazy'``，不点名修法；这里改成具名
+#:   拒绝并指向 ``flow.debug()``。
+#:
+#: 要把同名键真的当输入字段，走 dict 位置参数：``flow.run({...})``——
+#: 保留名不是"禁用名"。
+_RESERVED_RUN_KEYWORDS = frozenset({"inputs_data", "input_data", "lazy"})
+
+
+def _reject_reserved_run_keywords(params: dict) -> None:
+    """``Flow.run/arun/debug`` 的保留 kwargs 具名拒绝（plaita#137）。
+
+    错误消息点名违规键、说明 ``kwargs`` 的既有语义（映射成 ``$INPUT`` 字段）、
+    并给出"要用同名输入字段就走 dict 形式"的修法。
+    """
+    reserved = sorted(k for k in params if k in _RESERVED_RUN_KEYWORDS)
+    if not reserved:
+        return
+    raise TypeError(
+        f"flow.run() got reserved keyword argument(s) {reserved}: these never "
+        f"become $INPUT fields. inputs_data/input_data are historical "
+        f"input-wrapper aliases, and lazy is a signature-bound execution "
+        f"control (use flow.debug() for generator mode). flow.run(**kwargs) "
+        f"maps every keyword to a $INPUT field; to pass an input field with one "
+        f"of these names, use the dict form: flow.run({{{reserved[0]!r}: ...}})."
+    )
+
+
 def parse(content: Union[str, dict]) -> Optional[Flow]:
     """Parse flow definition from JSON/YAML string or dict.
 
@@ -608,6 +668,7 @@ def parse_and_run(content: str, *args, **kwargs):
     from plaita.io_format import loads
 
     _enforce_dict_input(args)
+    _reject_reserved_run_keywords(kwargs)
     data = loads(content)
     flow = Flow.model_validate(data)
     return FlowExecution().run_compatible(flow, False, *args, **kwargs)
