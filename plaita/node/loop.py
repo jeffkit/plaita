@@ -554,7 +554,12 @@ class While(InlineFlow):
     condition: Optional[Union[Condition, ConditionGroup]] = None
     max_iterations: int = 1000
 
-    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"maxIterations"})
+    # 基类 `InlineFlow.LEGACY_KEYS` 声明了 ``childFlow``（canonical 正典把
+    # while 的 ``child_flow`` 改名成它，`_canonical.py`）——本类此前只声明
+    # ``maxIterations``，把基类那份**覆写掉**了，于是 canonical 产物每次
+    # `Flow.model_validate` 都误报 `unknown config keys ['childFlow'] will be
+    # IGNORED`，诱导作者去"修"正确的流程（plaita#89）。
+    LEGACY_KEYS: ClassVar[frozenset] = frozenset({"maxIterations", "childFlow"})
 
     @model_validator(mode="before")
     @classmethod

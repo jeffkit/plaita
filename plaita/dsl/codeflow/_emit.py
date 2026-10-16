@@ -442,7 +442,14 @@ class _BodyEmitter:
         return lines, join
 
     def _emit_while(self, node: Dict[str, Any], outer_stop: Set[str]) -> List[str]:
-        child_ir = node.get("child_flow") or {}
+        # 两形都收（camel 优先，与发动机 `FlowNode.setup_child_flow` 的
+        # `values.get("childFlow") or values.get("child_flow")` 同口径）：
+        # canonical（console 正典，`_canonical.py`）把 while 的 `child_flow`
+        # 改名成 `childFlow`，存量 JSON flow 与 `compile_source` IR 用 snake。
+        # 只读 snake 会让 `python -m plaita build` 的默认产物在**所有**
+        # `emit_source` 消费端恒抛 `childFlow 缺 start 节点`（console
+        # `/source` 恒 unavailable / plaita-ai 往返断链）——plaita#89。
+        child_ir = node.get("childFlow") or node.get("child_flow") or {}
         cond = _invert_cond(node.get("condition", {}), _COND_NS)
         body = self._emit_inline_child(child_ir, _loop_body_ns("rounds"))
         # 恒用 for-head 形态：它是唯一能显式 id= 钉住节点 id 的写法（statement

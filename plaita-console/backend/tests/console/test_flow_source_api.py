@@ -44,6 +44,23 @@ def _authored_def(flow_id: str = "authored") -> str:
     return json.dumps(d)
 
 
+def _canonical_while_def(flow_id: str = "whileflow") -> str:
+    """``python -m plaita build`` 的默认产物形态（canonical：while 的
+    ``child_flow`` 已改名成 ``childFlow``）——plaita#89 的反编译兜底形状。
+
+    直接走真实编译链生成，避免手写 JSON 与 canonical 序列化器漂移。
+    """
+    from plaita.dsl.codeflow import compile_source, to_canonical
+
+    src = '''
+def use_while(INPUT):
+    while item.n > 0:
+        return {"n": item.n - 1}
+    return "done"
+'''
+    return json.dumps(to_canonical(compile_source(src)))
+
+
 @pytest.fixture()
 def client(tmp_path) -> TestClient:
     flow_store.init_engine(f"sqlite:///{tmp_path / 'flows.db'}")
@@ -85,6 +102,23 @@ def test_decompiled_fallback_without_metadata(client: TestClient):
     assert sorted(n["type"] for n in back["nodes"]) == ["end", "start"]
     end = [n for n in back["nodes"] if n["type"] == "end"][0]
     assert end["output"] == "$INPUT.name"
+
+
+def test_decompiled_fallback_for_canonical_while(client: TestClient):
+    """plaita#89：canonical 产物（while 的子图键是 camel ``childFlow``）也能
+    反编译——此前 ``_emit_while`` 只读 snake，端点恒回 ``unavailable``。"""
+    _put_version(client, "whileflow", _canonical_while_def())
+    r = client.get("/api/flows/whileflow/versions/0.0.1/source")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["source_kind"] == "decompiled", body
+    assert "WHILE(" in body["source"]
+    # 反编译产物可回编译，且循环体子图仍在
+    from plaita.dsl.codeflow import compile_source
+
+    back = compile_source(body["source"], flow_id="use_while")
+    while_node = [n for n in back["nodes"] if n["type"] == "while"][0]
+    assert while_node["child_flow"]["nodes"]
 
 
 def test_unavailable_reports_reason_not_500(client: TestClient):

@@ -111,14 +111,21 @@ def embed_source(doc: Dict[str, Any], source: str) -> Dict[str, Any]:
 
 
 def count_nodes(doc: Dict[str, Any]) -> int:
-    """统计文档里的节点总数（含 childFlow / parallel 分支子图，供 CLI 摘要）。"""
+    """统计文档里的节点总数（含 childFlow / parallel 分支子图，供 CLI 摘要）。
+
+    子图键**两形都收**：正典文档用 camel ``childFlow``（:func:`canonical_node`
+    改名 while 的 snake 键），而 CLI 的 ``--format ir`` 分支把 ``compile_source``
+    直出的 IR（snake ``child_flow``）交给本函数——只认 camel 会让
+    ``count_nodes(ir) != count_nodes(to_canonical(ir))``，``--format ir`` 的
+    ``N nodes`` 摘要与 ``--check`` 的 OK 行漏数循环体（plaita#89）。
+    """
     total = 0
     stack: List[Dict[str, Any]] = [doc]
     while stack:
         scope = stack.pop()
         for node in scope.get("nodes", []):
             total += 1
-            child = node.get("childFlow")
+            child = node.get("childFlow") or node.get("child_flow")
             if isinstance(child, dict):
                 stack.append(child)
             for branch in node.get("branches", []) or []:
