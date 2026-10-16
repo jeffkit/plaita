@@ -22,6 +22,12 @@
   ``_mask_url(s)`` 不含其中任何形态（与有意保留的结构 token——scheme / 可证用户名 /
   host / port / db / 非 authority 跨度的用户 token——偶然重合的除外）、且 ``!= s``；
   反之 ``_mask_url(s) != s`` ⟹ ``_passwords(s) != ()``。
+  **#165 的溢出分支**：输入的**形状**超出 #165 的预算时（``_MAX_SPAN_SCAN_WORK``
+  形状闸门，或 ``_MAX_CLOSURE_CHARS`` / ``_MAX_REDACTION_CHARS`` 字符预算）
+  ``_mask_url`` fail-closed 退化为常量 ``***``、``_passwords`` 返回 ``(text,)``
+  （整条原文当唯一 needle，即「整段洗掉」的保守解）。不变量因此在该分支上照旧
+  成立：``'***'`` 里没有原文的任何字节，而 ``(text,)`` 非空。溢出只由**分隔符
+  密度与规模**决定，与凭据内容无关。
 * **完备性才是验收方向（r7）**：oracle（``redis.connection.parse_url``，并用
   ``urlsplit`` 与 ``_parse_redis_url`` 交叉核对）报出的口令，任何 ≥3 前缀/后缀
   与所有 ≥3 子串都不得出现在五个渲染面上。**自洽不蕴含完备**——r6 的
@@ -37,6 +43,7 @@
   渲染（``_mask_url(..., literals=...)``）。**完备性 = 对分隔符的闭包 + 每个可能
   承载凭据的非 authority 值位置都被覆盖**。
 """
+import contextvars
 import functools
 import logging
 import os
@@ -102,6 +109,85 @@ _SECRET_SPLITTERS = (
     "\r",
     "\xa0",
 )
+
+# --------------------------------------------------------------------------- #
+# plaita#165：清洗器的**复杂度上界**（硬上限 + fail-closed）
+# --------------------------------------------------------------------------- #
+# 背景（实测，见 /tmp 的证据与 MIGRATION.md 的 #165 节）：``_mask_url`` 对
+# ``"x://" * n`` 这类**分隔符密集**的输入是**超二次**的，两个独立的来源：
+#
+# 1. ``_secret_forms_cached`` 的**闭包**：形态集要求「每个分隔符的每个出现位置
+#    都切一刀」⇒ 分隔符出现 k 次就有 Θ(k²) 个片段，片段长度又是 O(n)
+#    ⇒ Θ(n³) 字符工作（n = 输入长度）。实测 ``"x://"*40``（160 字符）里
+#    ``_push`` 被调用 **3,471,881** 次（cProfile）。
+# 2. ``_no_at_colon_spans`` 的**逐候选前向扫描**：每个候选冒号都要扫到
+#    ``?#&@`` / 端口形 / 串尾，而 ``"x://"*n`` 里没有 ``?#&@`` ⇒ 每个候选扫到
+#    串尾 ⇒ Θ(k²)（实测 n=1000 时 ``_is_port_colon`` 被调用 **499,500** 次）。
+#
+# 清洗器挂在**第三方错误文本**路径上（``HTTP.handle_http_node_err`` 等），输入
+# 长度由对端决定 ⇒ 几百 KB 就能占满 worker（与 #68「输入规模决定成本」同族）。
+#
+# 修法遵循本模块既有的两条纪律：**要么在预算内精确**、**要么 fail-closed**
+# （``_mask_url`` 退化常量、绝不回原文），**绝不半掩**（半掩 = 悄悄漏）。
+#
+# 预算一律按**字符数**而不是「输入长度」或「条数」计费，理由有实测支撑：
+# ``test_masker_is_linear_on_long_input`` 钉住「70 000 字符的口令必须一趟掩完」
+# （那条口令只有 1 个分隔符 ⇒ 闭包是 O(n)、本该线性），所以**长度上限**会误杀
+# 真正线性的长输入；而 ``"x://"*n`` 的代价来自**分隔符密度**。字符预算正好只惩罚
+# 后者：同样的 n，分隔符稀疏时闭包是 O(n) 字符、稠密时是 Θ(n³)。
+#
+# * :data:`_MAX_SPAN_SCAN_WORK`——**输入形状闸门**：``len(text) * text.count(":")``
+#   是 ``_credential_spans`` 里两个 Θ(n²) 项的计费量（``_no_at_colon_spans`` 的
+#   逐候选前向扫描 + ``_query_segment_is_provably_benign`` 的切片，两者都按
+#   「候选冒号数 × 扫描长度」付费）。它是 O(1) 的（``str.count`` 走 C），超限即
+#   fail-closed，不进入 ``_credential_spans``。
+# * :data:`_MAX_CLOSURE_CHARS`——**单个凭据候选**的闭包字符预算（种子 + 每个派生
+#   形态 + 每个切片都按长度计费，见 :func:`_secret_forms_cached`）。
+# * :data:`_MAX_REDACTION_CHARS`——**一次清洗累计**的字符预算（ContextVar 传递，
+#   见 :data:`_closure_budget`），覆盖「凭据片」与「闭包」两部分。单条跨度合规
+#   不蕴含总量合规：一条 URL 上可以有 O(n) 条各不超限的跨度。
+#
+# **直调 ``_secret_forms`` 不受预算限制**（ContextVar 默认 ``None``）：那条路是
+# r8 闭合性质的契约面（``test_secret_forms_closed_under_resplitting`` 直接对它
+# 断言「每个分隔符的每个出现位置的头/尾截都在形态集里」），预算只加在
+# **掩码/口令路径**上——那才是 #165 的 DoS 面。
+#
+# 标定（实测，见 MIGRATION.md 的 #165 节与 RED-PROOF.md 的曲线表）：
+#
+# ====================================  ==================  ====================
+# 形状                                   字符计费量           实测耗时
+# ====================================  ==================  ====================
+# ``"P"*69990 + " Secret"``（1 分隔符）  ~7×10⁵（O(n)）      一趟线性
+# 语料最重的真实形状（79 字符、稠密）     ~9×10⁵ / 88,992 切   20 ms
+# ``"x://"*40``（160 字符）              2.8×10⁵ 切 / 2×10⁷   51 ms（无预算）
+# ``"x://"*400``（1 600 字符）           ~2.8×10⁶ 切          本应在秒级
+# ``"x://"*20000``（80 KB）              —                    > 30 s（不返回）
+# ====================================  ==================  ====================
+_MAX_SPAN_SCAN_WORK = 1 << 21
+_MAX_CLOSURE_CHARS = 1 << 20
+_MAX_REDACTION_CHARS = 1 << 24
+
+
+class _RedactionOverflow(Exception):
+    """#165：清洗的形态闭包**超出预算**——调用方必须整体 fail-closed。
+
+    刻意继承 ``Exception`` 而不是复用 ``ValueError``/``RuntimeError``：
+    ``_mask_url`` 的 total 契约（``#158`` r1 A）要求它**任何**输入都不上抛，
+    这个信号只在模块内的两个调用点（``_mask_url`` / ``_passwords``）被吃掉。
+    """
+
+
+#: 一次清洗的**累计**闭包切点预算（元素为剩余额度），由 :func:`_mask_url` /
+#: :func:`_passwords` 在调用期间设置、``finally`` 复位。默认 ``None`` = **不设限**
+#: ——直调 :func:`_secret_forms` 的路径（r8 闭合性质契约面）逐字保持旧行为。
+#:
+#: 用 ``ContextVar`` 而不是模块级计数器：``_mask_url`` 会被多个 flow worker 线程
+#: 并发调用，共享计数器会让**另一个线程的消耗**在这里造成假 fail-closed（丢诊断，
+#: 且测试会 flaky）。ContextVar 对每个线程/任务各有一份，天然隔离。
+_closure_budget: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
+    "plaita_mask_closure_budget", default=None,
+)
+
 
 #: percent-escape 的十六进制字母大小写两种拼法都要认（``%2F`` / ``%2f``）。
 _HEX_LOWER = str.maketrans("ABCDEF", "abcdef")
@@ -981,10 +1067,34 @@ def _secret_forms_cached(secret: str) -> tuple:
     一条 URL 上 ``_mask_url`` / ``_passwords`` / ``_safe_reason`` 会对**同一个**
     跨度文本反复求形态集（一条 URL 上 5-10 次），闭包（含编码形态）每次 1ms 级。
     缓存把每形状的形态计算量压回一次。键是跨度文本本身，故缓存值不含任何全局状态。
+
+    #165：闭包是 ``Θ(k²)`` 个片段（k = 分隔符出现次数）、片段又长 O(n)，敌对形状
+    上是 ``Θ(n³)``。这里是**按字符计费**的预算（超预算抛
+    :class:`_RedactionOverflow`，由 ``_mask_url`` / ``_passwords`` 整体
+    fail-closed）：种子、每个派生形态、每个切片入队时都扣 ``len(value)``；单个
+    候选另有 :data:`_MAX_CLOSURE_CHARS` 上限，整次清洗共享
+    :data:`_closure_budget`（ContextVar）。
+
+    **不设长度上限**：``test_masker_is_linear_on_long_input`` 钉住 70 000 字符的
+    口令必须一趟掩完——那条口令只有 1 个分隔符，闭包本来就是 O(n)，按长度设限会
+    误杀真正线性的输入。字符预算只惩罚**分隔符密度**（同样的长度，稀疏时 O(n)
+    字符、稠密时 Θ(n³)）。
+
+    预算内**逐字**等于 r8 的闭包——预算是上界，不是近似。预算不命中时抛异常、
+    **绝不**返回一个「少洗了几条」的形态集：那才是静默漏点。
+
+    预算**只在** :data:`_closure_budget` 非 ``None`` 时生效（掩码/口令路径）；
+    直调 :func:`_secret_forms` 时 ``chars_left is None`` ⇒ 不设限，r8 的闭合性质
+    契约（``test_secret_forms_closed_under_resplitting``）因此逐字不变。
     """
     if not secret:
         return ()
     forms: set = set()
+    budget = _closure_budget.get()
+    if budget is None:
+        chars_left = None
+    else:
+        chars_left = min(_MAX_CLOSURE_CHARS, budget[0])
     #: 工作队列项 = ``(串, 是否还允许展开它的派生形态)``。**派生**=percent
     #: 编码/解码 + ``unicode_escape``；派生输出只再参与「按分隔符切」，不再派生
     #: （``quote`` 对 ``%`` 会 ``%25``→``%2525``、``unicode_escape`` 对 ``\`` 会
@@ -996,8 +1106,35 @@ def _secret_forms_cached(secret: str) -> tuple:
         work.append((stripped, True))
         queued.add(stripped)
 
+    def _charge(length: int) -> None:
+        """扣本候选与本次清洗的字符预算；超预算即具名溢出信号。
+
+        计费点是**入队**（``_push``）与**切片产出**（``_delimiter_pieces`` 的每条
+        片段）——两者都是真实的字符搬运，正是要界住的东西。
+        """
+        nonlocal chars_left
+        if chars_left is None:
+            return
+        chars_left -= length
+        budget[0] -= length
+        if chars_left < 0 or budget[0] < 0:
+            raise _RedactionOverflow(
+                f"credential-form closure exceeds {_MAX_CLOSURE_CHARS} charged "
+                f"chars for one candidate or the {_MAX_REDACTION_CHARS}-char "
+                f"per-call budget (candidate is {len(secret)} chars)"
+            )
+
+    _charge(len(secret))
+    if stripped != secret:
+        _charge(len(stripped))
+
     def _push(value: str, expand: bool) -> None:
-        if value and value not in queued:
+        if not value:
+            return
+        # 计费在**每一次**调用上（含去重命中的重复片段）：重复片段也要真实地
+        # 切一次字符串，正是要界住的搬运量。
+        _charge(len(value))
+        if value not in queued:
             queued.add(value)
             work.append((value, expand))
 
@@ -1124,15 +1261,22 @@ def _render_redacted(
     #: 只对这几条做替换——语义不变（不出现的形态替换是恒等）。
     present = tuple(form for form in forms if form in text)
     kind = bytearray(b"s" * n)  # s=可重洗 / p=结构性保护 / m=必掩
+    # #165：区间标记用 bytearray 切片赋值（C 层 memcpy）而不是逐字节
+    # ``for i in range(...)``。语义逐字相同（后写覆盖先写，次序不变），但把
+    # 「O(条数) × O(长度)」的 Python 级循环降成 C 循环——重叠跨度密集时这是
+    # 唯一还在的 Θ(n²) 项（实测 n=1000 的 ``"x://"*n`` 上占 _mask_url 的 24%）。
     for start, stop in _protected_regions(text, spans):
-        for i in range(start, min(stop, n)):
-            kind[i] = ord("p")
+        stop = min(stop, n)
+        if stop > start:
+            kind[start:stop] = b"p" * (stop - start)
     for span in spans:
-        for i in range(span.mask_from, min(span.stop, n)):
-            kind[i] = ord("m")
+        start, stop = span.mask_from, min(span.stop, n)
+        if stop > start:
+            kind[start:stop] = b"m" * (stop - start)
     for start, stop in extra_masks:
-        for i in range(start, min(stop, n)):
-            kind[i] = ord("m")
+        stop = min(stop, n)
+        if stop > start:
+            kind[start:stop] = b"m" * (stop - start)
     out = []
     i = 0
     while i < n:
@@ -1172,9 +1316,24 @@ def _redaction_forms(text: str, spans: tuple) -> tuple:
       urlsplit / redis-py 只看到 authority 内那截——端口/db cast 失败的消息里出现
       的正是它（``Port could not be cast ... 'pa55word'``）。判据是「分隔符确实
       切在凭据跨度**内部**」，普通 ``user:pw@host/0`` 不算。
+
+    #165：**单条跨度合规不蕴含总量合规**——一条 URL 上可以有 O(n) 条跨度，每条都
+    在 :func:`_secret_forms_cached` 的预算内。两道闸门：
+    :data:`_closure_budget`（ContextVar，一次清洗累计字符）与只看**单条跨度长度**
+    的提前判据。提前判据**先于切片**做——否则「O(n) 条各含 O(n) 字符的跨度」光是
+    切片搬运就是 Θ(n²)（``_delimiter_stop`` 与切片都在这个量级）。
     """
     forms = set()
+    budget = _closure_budget.get()
     for span in spans:
+        length = span.stop - span.mask_from
+        if budget is not None:
+            budget[0] -= length
+            if budget[0] < 0:
+                raise _RedactionOverflow(
+                    f"redaction spans exceed the {_MAX_REDACTION_CHARS}-char "
+                    f"per-call budget (span of {length} chars)"
+                )
         pieces = [text[span.mask_from : span.stop]]
         cut = _delimiter_stop(text, span.mask_from, _AUTHORITY_DELIMITERS)
         if span.mask_from < cut < span.stop:
@@ -1259,13 +1418,36 @@ def _mask_url(value: object, *, literals: tuple = ()) -> str:
     if not isinstance(value, str):
         return f"<{type(value).__name__}>"
 
-    spans = _credential_spans(value)
-    extra_masks = _literal_ranges(value, literals)
-    if not spans and not extra_masks:
-        return value
-    return _render_redacted(
-        value, spans, _redaction_forms(value, spans), extra_masks
-    )
+    # plaita#165：**输入形状闸门**（O(1)，``str.count`` 走 C）。``_credential_spans``
+    # 里两个 Θ(n²) 项按「候选冒号数 × 扫描长度」计费——``_no_at_colon_spans`` 的
+    # 逐候选前向扫描与 ``_query_segment_is_provably_benign`` 的切片。乘积
+    # ``len(text) * text.count(":")`` 是这两个量的上界，低于阈值即可放心进入枚举；
+    # 超阈即 O(1) fail-closed 退化为 :data:`_REDACTED`（绝不回原文、绝不半掩）。
+    #
+    # **刻意不是「输入长度上限」**：长度不是代价的来源——70 000 字符、3 个冒号的
+    # URL（``test_masker_is_linear_on_long_input``）乘积仅 2×10⁵，必须照常一趟掩完；
+    # 而 80 KB 的 ``"x://"*20000`` 乘积 1.6×10⁹、实测 >30 s 不返回。
+    if len(value) * value.count(":") > _MAX_SPAN_SCAN_WORK:
+        return _REDACTED
+
+    #: #165 累计预算：整次清洗（含**每一条**跨度与其闭包）共享
+    #: :data:`_MAX_REDACTION_CHARS` 个字符额度。``finally`` 复位 —— ContextVar
+    #: 不会被泄漏给后续调用。
+    budget_token = _closure_budget.set([_MAX_REDACTION_CHARS])
+    try:
+        spans = _credential_spans(value)
+        extra_masks = _literal_ranges(value, literals)
+        if not spans and not extra_masks:
+            return value
+        forms = _redaction_forms(value, spans)
+    except _RedactionOverflow:
+        # 形态闭包超预算（分隔符密集的敌对形状）：整体掩码。**不是**「掩掉跨度、
+        # 跳过重洗」——重洗层正是「同一个口令换个写法又出现」的唯一防线，跳过它
+        # 等于把 r8 的完备性悄悄关掉。
+        return _REDACTED
+    finally:
+        _closure_budget.reset(budget_token)
+    return _render_redacted(value, spans, forms, extra_masks)
 
 
 
@@ -1282,10 +1464,24 @@ def _passwords(text: str) -> tuple:
     值里的凭据（``?db=Pr0d:x@y``）都能被完整取出。r4 的 ``_passwords`` 依赖
     ``_locate_credentials``（没有 userinfo 时整层空转，r5 R2）；r5 的
     ``_global_credential_span`` 只取第一个候选冒号（同样取不到第二条跨度）。
+
+    #165：与 ``_mask_url`` **同一套预算**（同一个 ``_redaction_forms``）。超预算时
+    返回 ``(text,)``——**整条原文当唯一 needle**（把整段洗掉的保守解），而不是
+    ``()``：``_mask_url`` 在同一输入上走 ``_REDACTED`` 常量分支，方向不变量
+    （``_mask_url(s) != s`` ⟺ ``_passwords(s) != ()``，见
+    ``TestEnumerateAllSpans::test_converse_holds_on_clean_and_malformed_shapes``）
+    因此**在溢出分支上依然成立**。常量里没有原文的任何字节，所以反方向
+    （``_mask_url(s)`` 不含任何返回形态）也成立。
     """
     if not isinstance(text, str):
         return ()
-    return _redaction_forms(text, _credential_spans(text))
+    budget_token = _closure_budget.set([_MAX_REDACTION_CHARS])
+    try:
+        return _redaction_forms(text, _credential_spans(text))
+    except _RedactionOverflow:
+        return (text,)
+    finally:
+        _closure_budget.reset(budget_token)
 
 
 def _raw_query_names(query_text: str) -> tuple:

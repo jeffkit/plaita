@@ -2497,6 +2497,49 @@ def _mapping_get(obj: Any, path: str) -> Any:
     return obj.get(path, None)
 
 
+#: plaita#163（#69 r13 确认的前置残留）：路径遍历的 ``isinstance`` 探测在宿主
+#: ``__class__`` 抛异常时的**具名拒绝**。
+#:
+#: 为什么探测会进宿主代码：``isinstance(x, C)`` 在**真实类型不命中**时会回落读
+#: ``x.__class__``（``tp_getattro`` ⇒ 宿主 ``__getattribute__`` / ``property``）。
+#: 宿主在那里抛异常时，探测把**裸**异常冒到用户侧（r6 起就存在、DSL 可达），与
+#: r11（``_canonical_persistable_kind``）/ r13（``_engine_mapping_view``）建立的
+#: 「能进宿主代码的读取要么走 C 槽、要么具名拒绝」冲突。与
+#: :data:`_MAPPING_VIEW_PROBE_FAILED_TEMPLATE` 是同一条纪律，只是发生在**路径遍历**
+#: 这一跳（同形缺陷在 ``_engine_mapping_view`` 直调时已具名，先经过路径遍历就漏）。
+#:
+#: 刻意**不回显**宿主异常的文本：宿主控制它，可能带凭据/对象内部状态（与 r13 的
+#: probe-failed 模板同一处置）。
+_TRAVERSAL_PROBE_FAILED_TEMPLATE = (
+    "expression path {path!r} read a value whose host class {type_name!r} raises "
+    "{exc_type} from __getattribute__ while the engine probes isinstance({kind}), "
+    "so the engine cannot tell whether the value is engine data. A read that enters "
+    "host code must either go through a C slot or be refused by name (plaita#69). "
+    "Make the host class answer __class__ normally, or hand the engine a plain "
+    "dict/list/str built from known-good data."
+)
+
+
+def _probe_isinstance(value: Any, kinds: Any, *, kind_name: str, path: str) -> bool:
+    """``isinstance`` 探测的**具名化**包装（plaita#69 / #163）。
+
+    判据**一字不改**：能判出来时返回值与 ``isinstance`` 逐字相同（含 ``__class__``
+    伪造与 ABC 注册的既有语义），热路径代价也不变（无异常时 ``try`` 是零代价的）。
+    只有在宿主把探测炸掉时，把裸异常换成具名 ``ValueError``（含 ``plaita#69``）。
+
+    真实类型命中时 CPython 根本不会去读 ``__class__``、也就走不到抛异常那一跳；
+    所以**触发本拒绝的输入，在修复前拿到的是裸异常**——不存在「本来能跑通的路径
+    被拒掉」的语义回归。
+    """
+    try:
+        return isinstance(value, kinds)
+    except Exception as exc:                # noqa: BLE001 - 宿主 __getattribute__ 的任意异常
+        raise ValueError(_TRAVERSAL_PROBE_FAILED_TEMPLATE.format(
+            path=path, type_name=type(value).__name__,
+            exc_type=type(exc).__name__, kind=kind_name,
+        )) from exc
+
+
 def _get_attr(obj: Any, path: str) -> Any:
     """Read *path* off *obj* — mirrors the non-bracket branch of the old
     ``plaita.io.get_attr``.
@@ -2513,8 +2556,11 @@ def _get_attr(obj: Any, path: str) -> Any:
     rejects ``__``-prefixed path segments (the key itself stays readable through
     the ``$F.*`` mapping helpers).  Rejection raises ``ValueError`` — never a
     silent ``None``.  See the gate comment above for the rationale and scope.
+
+    plaita#163：``isinstance(obj, dict)`` 走 :func:`_probe_isinstance`——宿主
+    ``__class__`` 抛异常时是具名 ``ValueError``（含 ``plaita#69``），不是裸异常。
     """
-    if isinstance(obj, dict):
+    if _probe_isinstance(obj, dict, kind_name="dict", path=path):
         return _mapping_get(obj, path)
     if hasattr(obj, "__getitem__") and hasattr(obj, "get"):
         return _mapping_get(obj, path)
@@ -2949,7 +2995,9 @@ class ExpressionParser:
                     if live_walk:
                         path_parts.append(f"[{target}]")
                     continue
-                if root_key == f"{prefix}INPUT" and isinstance(obj, dict) and target not in obj:
+                if (root_key == f"{prefix}INPUT"
+                        and _probe_isinstance(obj, dict, kind_name="dict", path=raw)
+                        and target not in obj):
                     # 静默 None 是 INPUT 缺键的历史语义；debug 留痕便于排查拼写错误
                     logger.debug(
                         "expression references missing input key %r; evaluating to None", raw,
@@ -2961,7 +3009,8 @@ class ExpressionParser:
                 # [tag]、引号、换行等元字符）不再二次解析，否则节点输出一旦被下游
                 # $NODE 路径引用就会因内容触发误解析（如 "[promo] ..." 被当列表）。
                 # ``raw`` 模式下整条路径都不递归：字符串原样返回（#130）。
-                if (not raw_mode and isinstance(attr, str)
+                if (not raw_mode
+                        and _probe_isinstance(attr, str, kind_name="str", path=raw)
                         and (attr.startswith(prefix) or "{%" in attr)):
                     # 方案 A（#104）：递归前先扫根键。嵌套串以**持有它的父容器**
                     # 为 context 求值，所以只要它引用的任一上下文根在当前父容器里

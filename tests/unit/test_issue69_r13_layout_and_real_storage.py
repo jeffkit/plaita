@@ -531,9 +531,14 @@ class TestIssue69R13MappingViewReadsRealStorage(unittest.TestCase):
     def test_raising_getattribute_probe_is_named_not_bare_runtimeerror(self):
         """``isinstance`` 回落读 ``__class__`` 时宿主抛异常 ⇒ 具名拒绝，不漏裸 ``RuntimeError``。
 
-        只直接钉 ``_engine_mapping_view``：DSL 面 ``$F.keys($INPUT.d)`` 会先经过
-        **路径遍历**的 ``isinstance(attr, str)``（r11 范围内、本轮未改），那条裸
-        ``RuntimeError`` 不是本跳的问题。
+        只直接钉 ``_engine_mapping_view``：DSL 面 ``$F.keys($INPUT.d)`` 会**先**经过
+        **路径遍历**的 ``isinstance(attr, str)``。
+
+        plaita#163（后续单）已补上那一跳：遍历里的探测改走
+        ``expression_parser._probe_isinstance``，宿主 ``__class__`` 抛异常时同样具名
+        拒绝（含 ``plaita#69``）。DSL 面的动态断言由
+        ``tests/unit/test_issue163_path_traversal_probe.py`` 钉住；本测试继续只钉
+        ``_engine_mapping_view`` 这一跳本身（两个跳各自有独立反例）。
         """
         value = _RaisingGetattribute()
         with self.assertRaises(ValueError) as cm:

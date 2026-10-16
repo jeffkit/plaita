@@ -63,6 +63,25 @@ UNPRINTABLE_URL = "<unprintable-url>"
 #: 被抹掉的 path segment / query / fragment 占位。
 PLACEHOLDER = "***"
 
+# --------------------------------------------------------------------------- #
+# plaita#165：清洗入口的**硬上限**（fail-closed 有界化）
+# --------------------------------------------------------------------------- #
+# 本模块的每个公开清洗入口最终都把手上的串交给掩码器（``factory._mask_url``，
+# 经 :data:`_mask_url` 注册注入）。掩码器对**分隔符密集**的输入是超二次的
+# （``"x://" * n``：n=20 约 23 ms、n=40 约 168 ms、n=80 约 1458 ms ⇒ 三次量级），
+# 而本模块的调用点全在**日志 / 异常文本**路径上（``HTTP.handle_http_node_err``
+# 等），输入长度由第三方库/对端决定 ⇒ 一个几百 KB 的错误文本就能占满 worker。
+#
+# 掩码器自身已按 #165 加了预算与硬上限（``factory._MAX_MASK_INPUT`` 等，超限
+# fail-closed）。**这里再加一层同口径的入口上限**，理由是入口的契约比掩码器更强：
+# 它必须「任何输入都不抛、且成本有界」，所以超限时**根本不进**掩码器，直接退化为
+# :data:`UNPRINTABLE_URL`（绝不回原文 —— 与「不能安全渲染时退化为常量」同一口径）。
+# 现实输入（2 KB 以内的 URL / 文本）全部落在限内，渲染逐字不变。
+_MAX_CLEAN_INPUT = 2048
+#: 单次 :func:`_scrub_url_text` 交给渲染器的 URL **累计**字符预算。单条 token 合规
+#: 不蕴含总量合规（一条 80 KB 文本里可以塞满 2 KB 的敌对 token）。
+_MAX_SCRUB_URL_CHARS = 1 << 16
+
 #: 只承认「端点型」scheme：其余 scheme（``javascript:`` / ``unix:`` / 拿凭据当
 #: scheme 的畸形串）无从判断哪一段是端点、哪一段是密钥 ⇒ 整体退化常量。
 _SAFE_SCHEMES = frozenset({"http", "https"})
@@ -156,6 +175,9 @@ def _safe_render(url: object, renderer: Callable[[object], str]) -> str:
     ``services.__main__.main()`` 直接抛 ``UnicodeEncodeError``）。
     """
     try:
+        if not _within_clean_budget(url):     # plaita#165：超限不进掩码器
+            logger.debug("URL 清洗输入超出 #165 硬上限，退化为安全常量")
+            return UNPRINTABLE_URL
         rendered = renderer(url)
     except Exception:  # noqa: BLE001 — fail-closed：掩码失败不得炸调用方
         # 刻意**不**打印异常文本：``UnicodeEncodeError`` 的 ``str()`` 就带着口令里的
@@ -171,6 +193,21 @@ def _safe_render(url: object, renderer: Callable[[object], str]) -> str:
     return rendered
 
 
+def _within_clean_budget(url: object) -> bool:
+    """``url`` 是否在 :data:`_MAX_CLEAN_INPUT` 内（#165 的入口硬上限）。
+
+    只看**长度**，不碰内容：``str`` 按字符数，``bytes``/``bytearray`` 按字节数
+    （解码后至多同长 —— ``decode('utf-8', 'replace')`` 不会变长）。非这两种类型
+    交给 ``_coerce_url_text`` 判定（它们本就 O(1) 退化）。超限一律 fail-closed，
+    绝不回原文。
+    """
+    if isinstance(url, str):
+        return len(url) <= _MAX_CLEAN_INPUT
+    if isinstance(url, (bytes, bytearray)):
+        return len(url) <= _MAX_CLEAN_INPUT
+    return True
+
+
 def _mask_url_for_log(url: object) -> str:
     if _mask_url is None:                     # factory 未注册（纯 node 进程）：fail-closed
         logger.warning("_mask_url 未注册——日志路径 fail-closed 掩码")
@@ -179,6 +216,8 @@ def _mask_url_for_log(url: object) -> str:
 
     复用 ``#88`` 的 ``factory._mask_url``——不另起一套掩码（同一个 URL 两套渲染
     正是 ``#88`` 的根因形态）；只在外面加「不抛 + 安全常量」。
+
+    #165：超长输入在 :func:`_safe_render` 的入口上限处 fail-closed，**不进**掩码器。
     """
     return _safe_render(url, _mask_url)
 
@@ -523,7 +562,11 @@ def _mask_relative_url_ref(ref: str) -> str:
     与绝对 URL 同一条「绝不恒等替换」守卫（r4）：渲染结果与入参**恒等**时，只有
     已经是掩码形态（``/***/***?***``）才算合法的幂等不动点，否则退化为
     :data:`UNPRINTABLE_URL`。
+
+    #165：超长引用（> :data:`_MAX_CLEAN_INPUT`）直接退化常量。
     """
+    if not _within_clean_budget(ref):
+        return UNPRINTABLE_URL
     try:
         parts = urlsplit(ref)
     except Exception:  # noqa: BLE001 — 畸形串退化为常量，绝不回原文
@@ -840,7 +883,13 @@ def _render_absolute_url_ref(token: str) -> str:
     只有当它**不可用**（:func:`_render_is_usable` 为假：退化常量 / 恒等替换 / 尾部
     仍带明文 payload）时，才看 :func:`_mask_bracketed_absolute_url` 能否把端点救回来。
     两层都不可用即 :data:`UNPRINTABLE_URL`——绝不回原文、绝不恒等替换。
+
+    #165：token 超过 :data:`_MAX_CLEAN_INPUT` 时**不**调用掩码器（掩码器对分隔符
+    密集的长 token 是超二次的），直接退化常量；累计预算由 :func:`_scrub_url_text`
+    在替换器里扣减。
     """
+    if not _within_clean_budget(token):
+        return UNPRINTABLE_URL
     primary = _mask_policy_url(token)
     if _render_is_usable(token, primary):
         return primary
@@ -930,9 +979,20 @@ def _scrub_url_text(text: object) -> str:
             logger.debug("异常文本无法字符串化，退化为安全常量")
             return UNPRINTABLE_URL
     try:
-        scrubbed = _ABSOLUTE_URL_RE.sub(
-            lambda m: _render_absolute_url_ref(m.group(0)), text,
-        )
+        # plaita#165：**累计**预算。单条 token 合规不蕴含总量合规——一条 80 KB 的
+        # 第三方异常文本可以塞满 2 KB 的敌对 token，逐个渲染仍是 Θ(n²)。预算用尽
+        # 之后的 token 一律退化常量（fail-closed：丢诊断，不丢安全，也不失有界）。
+        budget = [_MAX_SCRUB_URL_CHARS]
+
+        def _render_token(match):
+            token = match.group(0)
+            budget[0] -= len(token)
+            if budget[0] < 0:
+                logger.debug("URL 清洗累计预算用尽（#165），退化为安全常量")
+                return UNPRINTABLE_URL
+            return _render_absolute_url_ref(token)
+
+        scrubbed = _ABSOLUTE_URL_RE.sub(_render_token, text)
         scrubbed = _RELATIVE_URL_RE.sub(
             lambda m: m.group("prefix") + _mask_relative_url_ref(m.group("ref")), scrubbed,
         )
