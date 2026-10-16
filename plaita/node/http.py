@@ -3,16 +3,47 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import urljoin, urlparse, urlsplit, urlencode
 import io
 from pydantic import ConfigDict, Field, model_validator
 
 from plaita.node.basic import Node
 from plaita.core.errors import NodeException
+# 策略/第三方文本里的 URL 渲染（#158+#159 r2 建，`#160`+`#161` 起为**共享**实现：
+# `_scrub_url_text` / `_mask_policy_url` 的家已迁到 url_redaction，node 层只按名字
+# import 以免两套渲染分叉）。url_redaction 只依赖 stdlib 的 server.factory，
+# 不触发 server extra，也不与 node 层成环（依赖方向单一：node → server）。
+#
+# 后五个名字（``_ABSOLUTE_URL_RE`` / ``_CREDENTIAL_RUN_RE`` / ``_token_is_canonical`` /
+# ``_render_is_usable`` / ``_leaves_plaintext_payload``）本身在 node 层**不再被调用**，
+# 是**名字稳定再导出**：``#159`` 的测试与巡检脚本经 ``plaita.node.http._X`` 取渲染器
+# 内部件（``http_mod._ABSOLUTE_URL_RE`` / ``getattr(http_mod, "_render_is_usable")`` …），
+# 提取实现时若让这些名字消失，等于把「实现搬家」变成「接口破坏」。按名字再导出即可：
+# rename/删除会在 import 期即炸（fail-loud），而不是悄悄换一份渲染。
+#
+# ``_is_credential_key``（``#160`` 修复轮加）是**记录面 header 键判据的第二腿**，
+# 同样按名字 import、不复制文法： ``#160`` 的记录面曾经只按 7 名清单掩 header
+# 键，``X-Api-Key`` / ``X-Token`` / ``apikey`` / ``X-Goog-Api-Key`` 因此整套穿过。
+# 这里直接复用共享凭据键谓词（r5 重写文法时本 import 自动跟上；rename 即 import 期炸）。
+from plaita.core.url_redaction import (  # noqa: F401 — 部分名字仅供历史可达性
+    UNPRINTABLE_URL,
+    _ABSOLUTE_URL_RE,
+    _credential_run_spans,
+    _find_closing_quote,
+    _host_is_identifiable,
+    _is_credential_key,
+    _leaves_plaintext_payload,
+    _mask_policy_url,
+    _render_is_usable,
+    _scrub_url_text,
+    _token_is_canonical,
+    logger,
+)
 from plaita.core.http_session import (
     _BlockAllCookies,
     _new_oneshot_session,
@@ -152,6 +183,12 @@ class HttpRequestInfo:
     为空，连接类错误被 ``handle_http_node_err`` 归为 1003（节点处理错误），
     而同步同错误归 1002（发送请求错误）。补上请求快照让两条路径分类一致，
     同时错误帧里能带出「请求是什么」（method/url/headers）。
+
+    ``#160``：本对象是**传输忠实**快照——``url`` 与真正发出的请求逐字节相同
+    （``wrap_http_node_err`` 直接把 ``rsp.raw_request`` 挂到 ``exc.details``），
+    所以它是「实际发了什么」的记录，**不是**日志面。要进日志/序列化请用
+    :attr:`url_masked` / :meth:`HttpNodeErrorInfo.redacted`；``repr`` 已 fail-closed
+    掩码（安全不依赖「现在还没有运行时读它」）。
     """
 
     def __init__(self, method: str, url: str, headers: Optional[Dict[str, str]] = None,
@@ -161,23 +198,115 @@ class HttpRequestInfo:
         self.headers = dict(headers) if headers else {}
         self.body = body
 
+    @property
+    def url_masked(self) -> str:
+        """URL 的**掩码视图**：``scheme://host[:port]/***?***``（端点保留，凭据全抹）。"""
+        return _mask_policy_url(self.url)
+
+    def __repr__(self) -> str:
+        # 掩码面：``#160`` 的 fail-closed 记录渲染。原文只留在属性里（传输面），
+        # 本对象（及 ``exc.details`` / ``exc.details.response`` 同族）的任何
+        # ``repr``/``str``——含 ``traceback`` 里的对象打印、``repr([obj])``、
+        # ``json.dumps(obj, default=str)``、``json.dumps(vars(obj), default=str)``、
+        # ``logging`` 的 ``%r``/``%s``——都拿不到凭据：header **值**（不只凭据名）
+        # 与 body 都过共享渲染器 :func:`_scrub_url_text`。
+        # 该绝对 claim 由 ``tests/unit/test_issue160_exception_attachment_record_surface.py::
+        # TestAbsoluteClaimEnforced`` 逐面机械断言（claim 失效即该测试变红）。
+        return (
+            f"HttpRequestInfo(method={self.method!r}, url={self.url_masked!r}, "
+            f"headers={_mask_record_headers(self.headers)!r}, "
+            f"body={_mask_record_body(self.body)!r})"
+        )
+
 
 class HttpNodeErrorInfo:
-    """HTTP节点错误信息"""
+    """HTTP节点错误信息（``exc.details``，``#160`` 起**显式声明为非日志面**）。
+
+    字段名 ``code`` / ``message`` / ``request`` / ``response`` 与 ``#158``+``#159``
+    逐字不变；``request``/``response`` 持有的是**传输忠实**快照（``request.url``
+    与真正发出去的 ``rsp.raw_request.url`` 字节相同），供错误分支/重试诊断读。
+
+    **选型（``#160`` 验收的二选一）**：这里选「声明非日志面 + 掩码 ``__repr__``」，
+    而不是「把字段本身掩码」，理由是：
+
+    1. ``details.request.url`` 的原文被 C2 错误帧契约测试钉住
+       （``tests/unit/test_clean_c2_http_error_frame.py`` 断言 ``.../api`` 原样可读），
+       掩码字段会破坏那份「记录 = 实际发出内容」的契约，且改动要外溢到别的单；
+    2. 泄露信道是**序列化**（``repr``/``str``/traceback/JSON shipper），而不是属性
+       访问——``__repr__`` 是唯一必然进日志的那一面，在它上面 fail-closed 恰好
+       覆盖信道，且「无人读它」不再是安全前提；
+    3. 需要结构化日志的消费者有显式的 :meth:`redacted` **掩码视图**（JSON 安全），
+       不必也不该把原始快照塞进日志。
+    """
+
     def __init__(self, code: int, message: str, request=None, response=None):
         self.code = code
         self.message = message
         self.request = request
         self.response = response
 
+    def redacted(self) -> Dict[str, Any]:
+        """**掩码视图**（``#160``）：JSON 安全的 dict，可直接 ``json.dumps``。
+
+        形状与事件面同源：``code`` / ``message`` + 请求/响应各自的
+        ``method|url|headers|body`` 与 ``status|statusText|headers|body``。
+        请求 URL 走 :func:`_mask_policy_url`（端点保留）；**headers 的键**走
+        :func:`_is_credential_header_name`（7 名清单 ∪ 共享凭据键谓词），
+        **headers 的值**与 body 走 :func:`_scrub_url_text`——记录面每一个值都过
+        共享渲染器，判据不分叉（``#160`` 修复轮）；``message`` 再过一次清洗
+        （幂等），保证「即使调用方塞了未清洗的 message，视图也不带凭据」。
+        """
+        request_view = None
+        if self.request is not None:
+            request_view = {
+                "method": getattr(self.request, "method", None),
+                "url": _mask_policy_url(getattr(self.request, "url", None)),
+                "headers": _mask_record_headers(getattr(self.request, "headers", None)),
+                "body": _mask_record_body(getattr(self.request, "body", None)),
+            }
+        response_view = None
+        if self.response is not None:
+            response_view = {
+                "status": getattr(self.response, "status", None),
+                "statusText": getattr(self.response, "status_text", None),
+                "headers": _mask_record_headers(getattr(self.response, "headers", None)),
+                "body": _mask_record_body(getattr(self.response, "data", None)),
+            }
+        return {
+            "code": self.code,
+            "message": _scrub_url_text(self.message),
+            "request": request_view,
+            "response": response_view,
+        }
+
+    def __repr__(self) -> str:
+        view = self.redacted()  # 记录面唯一实现：掩码只在这里做一次
+        return (
+            f"HttpNodeErrorInfo(code={view['code']!r}, message={view['message']!r}, "
+            f"request={view['request']!r}, response={view['response']!r})"
+        )
+
 
 class HttpNodeResponse:
-    """HTTP节点响应"""
+    """HTTP节点响应（``exc.details.response``；``#160`` 起同属非日志面）。
+
+    ``headers``（``Set-Cookie`` / ``WWW-Authenticate`` …）与 ``data``（可能回显
+    请求凭据）都是**逐字**快照；``repr`` 用记录面渲染器
+    （:func:`_render_header_for_record` + :func:`_mask_record_body`）——header 键
+    按凭据名判据掩、其余 header **值**与 body 一律过 :func:`_scrub_url_text`。
+    """
     def __init__(self, status: int, status_text: str, headers: Dict, data: Any):
         self.status = status
         self.status_text = status_text
         self.headers = headers
         self.data = data
+
+    def __repr__(self) -> str:
+        return (
+            f"HttpNodeResponse(status={self.status!r}, status_text={self.status_text!r}, "
+            f"headers={_mask_record_headers(self.headers)!r}, "
+            f"data={_mask_record_body(self.data)!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -327,37 +456,47 @@ def _validate_host_target(
     allowed_hosts: Optional[List[str]],
     denied_hosts: Optional[List[str]],
     block_private_networks: bool,
-    url_for_msg: str,
+    url: str,
 ) -> None:
     """按节点策略校验 host + 已解析地址，违反即抛 :class:`URLPolicyError`。
 
     :func:`_host_allowed`（请求前校验）与连接期策略（DNS pinning，
     :class:`_PolicyResolver` / ``_PinnedHTTPAdapter``）共用这一份判定——
     校验与建连同源，攻击者权威 DNS 无法先答公网过校验、连接时答内网穿透。
+
+    ``url`` 只用于**诊断后缀**，且一律经 :func:`_mask_policy_url` 渲染后才进
+    异常消息：该消息随后会被 ``str(err)`` 包进 ``NodeException`` /
+    ``NodeExecutionError`` 并由 runner/worker 的 ``logger.*(…, e)`` 打印
+    （``#158``+``#159`` r2 的 finding）。连接期调用点传 ``//host:port`` 这类
+    无凭据的合成端点，渲染为 ``UNPRINTABLE_URL`` 也不丢 host（``hostname``
+    本来就在消息里）。
     """
     if denied_hosts:
         for entry in denied_hosts:
             if _host_entry_matches(entry, hostname, resolved_ips):
                 raise URLPolicyError(
-                    f"URL host {hostname!r} matches denied_hosts entry {entry!r}: {url_for_msg}"
+                    f"URL host {hostname!r} matches denied_hosts entry {entry!r}: "
+                    f"{_mask_policy_url(url)}"
                 )
 
     if allowed_hosts:
         if not any(_host_entry_matches(entry, hostname, resolved_ips) for entry in allowed_hosts):
             raise URLPolicyError(
-                f"URL host {hostname!r} is not in allowed_hosts {list(allowed_hosts)}: {url_for_msg}"
+                f"URL host {hostname!r} is not in allowed_hosts {list(allowed_hosts)}: "
+                f"{_mask_policy_url(url)}"
             )
 
     if block_private_networks:
         if resolved_ips is None:
             raise URLPolicyError(
-                f"Cannot resolve {hostname!r} to verify block_private_networks policy: {url_for_msg}"
+                f"Cannot resolve {hostname!r} to verify block_private_networks policy: "
+                f"{_mask_policy_url(url)}"
             )
         for ip in resolved_ips:
             if _ip_matches_networks(ip, _PRIVATE_NETWORKS):
                 raise URLPolicyError(
                     f"URL host {hostname!r} resolves to private/special address {ip} "
-                    f"(block_private_networks=true): {url_for_msg}"
+                    f"(block_private_networks=true): {_mask_policy_url(url)}"
                 )
 
 
@@ -381,10 +520,15 @@ def _host_allowed(
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise URLPolicyError(f"URL scheme {parsed.scheme!r} is not allowed (http/https only): {url!r}")
+        # scheme 单独回显（jeffkit 要的诊断信息）；URL 本体经掩码渲染——它随后会
+        # 随 NodeException/NodeExecutionError 进 runner/worker 的日志。
+        raise URLPolicyError(
+            f"URL scheme {parsed.scheme!r} is not allowed (http/https only): "
+            f"{_mask_policy_url(url)!r}"
+        )
     hostname = parsed.hostname
     if not hostname:
-        raise URLPolicyError(f"URL has no hostname: {url!r}")
+        raise URLPolicyError(f"URL has no hostname: {_mask_policy_url(url)!r}")
     hostname = hostname.lower().strip("[]")
 
     resolved_ips: Optional[list] = None
@@ -484,20 +628,59 @@ def _redirect_request(response, request, next_url: str):
 # 错误帧摘要（C2-1）：HttpNodeErrorInfo 上的 status/headers/body 要进事件流，
 # body 按长度截断（思路同 obs._clip 的防大 payload，错误帧取更小量级）、
 # 凭据类头脱敏（复用重定向剥离集，响应侧补 set-cookie）。
+#
+# ``#160`` 修复轮：headers 的**值**不再原样——凭据名（7 名清单 ∪ 共享凭据键谓词）
+# 仍换 ``***``，其余值过 ``_scrub_url_text``（响应头回显请求 URL 的一族：
+# ``Location`` / ``X-Echo-Url``）。此处是全模块唯一的 header 渲染实现。
 # ---------------------------------------------------------------------------
 _ERROR_FRAME_BODY_MAX_CHARS = 2048
 
 _SENSITIVE_ERROR_FRAME_HEADERS = _SENSITIVE_REDIRECT_HEADERS | frozenset({"set-cookie"})
 
 
+def _is_credential_header_name(key: Any) -> bool:
+    """header 键是否凭据名（``#160`` 修复轮：判据两条腿，**不**再只看 7 名清单）。
+
+    * 第一腿 = r4 的 7 名清单 :data:`_SENSITIVE_ERROR_FRAME_HEADERS`
+      （``authorization`` / ``cookie`` / ``cookie2`` / ``proxy-authorization`` /
+      ``proxy-authenticate`` / ``www-authenticate`` / ``set-cookie``）——逐字保留，
+      其中 ``cookie2`` 这类**共享谓词不命中**的名字靠这一腿兜住；
+    * 第二腿 = ``url_redaction._is_credential_key``（**按名字 import，不复制文法**）：
+      ``X-Api-Key`` / ``X-Token`` / ``X-Auth-Token`` / ``apikey`` / ``X-Goog-Api-Key``
+      命中。r5 重写凭据键文法时这里自动跟上；改名会在 import 期 fail-loud。
+    """
+    name = str(key)
+    return name.lower() in _SENSITIVE_ERROR_FRAME_HEADERS or _is_credential_key(name)
+
+
+def _render_header_for_record(key: Any, value: Any) -> Any:
+    """**单个 header** 的唯一渲染（事件面与记录面共用）：凭据名 → ``***``；
+    其余值一律过共享 URL 渲染器 :func:`_scrub_url_text`。
+
+    ``#160`` 修复轮的根因是**判据分叉**：``_mask_record_body`` 会过
+    :func:`_scrub_url_text`，header 却只看名字。于是「值里回显 URL」的两族 header
+    （响应侧 ``Location`` / ``X-Echo-Url``，请求侧用户自带 ``X-Api-Key`` 等）整套
+    穿过到 ``repr`` / ``redacted()`` / ``exc.response``。
+    这里把 header **值**也交给**同一个**渲染器（``_scrub_url_text``，唯一实现），
+    判据不再分叉。诊断价值保留：非 URL 值原样（``req-123`` /
+    ``application/json``），URL 值退化为 ``scheme://host[:port]/***`` 形状。
+    """
+    if _is_credential_header_name(key):
+        return "***"
+    return _scrub_url_text(value)
+
+
 def _mask_error_frame_headers(headers: Any) -> Dict[str, Any]:
-    """凭据类响应头值替换为 '***'，其余原样保留。"""
+    """错误帧 headers 的**唯一**渲染，事件面与记录面共用（判据不分叉）。
+
+    凭据名（7 名清单 ∪ 共享凭据键谓词）→ ``***``；其余 header **值**过
+    :func:`_scrub_url_text`。此前只按 7 名清单掩键、值原样——响应头回显请求 URL
+    （``Location`` / ``X-Echo-Url``）时事件载荷与 ``repr`` 一起泄露（``#160`` 修复轮）。
+    非 ``dict`` 返回 ``{}``（事件面「宁可少给」的历史行为不变）。
+    """
     if not isinstance(headers, dict):
         return {}
-    return {
-        k: ("***" if str(k).lower() in _SENSITIVE_ERROR_FRAME_HEADERS else v)
-        for k, v in headers.items()
-    }
+    return {k: _render_header_for_record(k, v) for k, v in headers.items()}
 
 
 def _summarize_error_frame_body(data: Any) -> Optional[str]:
@@ -524,6 +707,71 @@ def _summarize_error_frame_response(response: Optional["HttpNodeResponse"]) -> O
         "headers": _mask_error_frame_headers(response.headers),
         "body": _summarize_error_frame_body(response.data),
     }
+
+
+# ---------------------------------------------------------------------------
+# plaita#160：``exc.details`` 的**记录面**渲染（``__repr__`` / ``redacted()``）。
+#
+# 修复轮（组合轮 08b3f7fe 定验 FAIL 的那一点）：记录面**每一个值**都过共享渲染器
+# ``_scrub_url_text``——header **值**（请求/响应两侧）、body、URL 一律同一条判据；
+# header **键**判据也加宽到共享凭据键谓词（不再只看 7 名清单）。判据**不许分叉**
+# 是这一节的第一纪律：``_mask_record_body`` 洗 body 而 header 只按名字，正是原缺口。
+#
+# 因此 header 渲染只有一份实现 :func:`_render_header_for_record`（事件面
+# ``_mask_error_frame_headers`` 也调它）。仍然**刻意原样**的只有事件载荷
+# ``exc.response['body']``（r4 定稿的 C2 契约，见 ``HttpNodeErrorInfo`` 选型说明），
+# 其原样性由 ``tests/unit/test_issue160_exception_attachment_record_surface.py::
+# TestDeclaredRawSurfaces`` 钉住。
+# ---------------------------------------------------------------------------
+
+
+def _mask_record_headers(headers: Any) -> Dict[str, Any]:
+    """记录面 headers：先收敛成 ``dict`` 再交给**同一**渲染器（不是第二份判据）。
+
+    ``requests`` 的 ``PreparedRequest.headers`` 是 ``CaseInsensitiveDict``（
+    ``MutableMapping`` 而**不是** ``dict`` 子类），事件面的 ``_mask_error_frame_headers``
+    对它返回 ``{}``——放在事件面是「宁可少给」，放在记录面会把诊断信息整块吞掉。
+    这里显式 ``dict(...)`` 收敛（失败仍退化为 ``{}``），既保住诊断，也不改变
+    事件面对「非 dict」的既有行为。
+    """
+    if headers is None:
+        return {}
+    if not isinstance(headers, dict):
+        try:
+            headers = dict(headers)
+        except Exception:  # noqa: BLE001 — 记录面不许抛
+            logger.debug("记录面 headers 无法收敛为 dict，按不可渲染处理")
+            return {}
+    try:
+        return _mask_error_frame_headers(headers)
+    except Exception:  # noqa: BLE001 — 记录面不许抛（渲染失败整块退化为不可渲染）
+        logger.debug("记录面 headers 渲染失败，按不可渲染处理")
+        return {}
+
+
+def _mask_record_body(body: Any) -> Optional[str]:
+    """记录面（``repr`` / ``redacted()``）里的请求/响应体。
+
+    先按事件面的上限截断（``_summarize_error_frame_body``，防大 payload 进日志），
+    再过 :func:`_scrub_url_text` 清洗 URL 凭据分量。``bytes`` 按 ``utf-8/replace``
+    解码——**不**用 ``str(b"...")`` 那种带转义的 repr（ASCII 密钥在里面与原文等价，
+    例如 ``b'access_token=Ks9Qm4Zt'``）。任何异常退化为 ``UNPRINTABLE_URL``。
+
+    边界（刻意）：只抹**URL 形态**的凭据与凭据类头，不承诺识别 body 里任意
+    ``{"token": "…"}`` 字段——那是远端内容语义，超出本渲染器的判据。
+    """
+    if body is None:
+        return None
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = bytes(body).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 — 解码兜底，绝不上抛
+            logger.debug("记录面 body 解码失败，按不可渲染处理")
+            return UNPRINTABLE_URL
+    summary = _summarize_error_frame_body(body)
+    if summary is None:
+        return None
+    return _scrub_url_text(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -1277,7 +1525,7 @@ class HTTP(Node):
             body = evaluate(self.body, ctx)
             return body
         except Exception as e:
-            raise Exception(f"Failed to parse body: {str(e)}")
+            raise Exception(f"Failed to parse body: {_scrub_url_text(str(e))}")
     
     def parse_query(self, ctx):
         """解析查询参数"""
@@ -1290,7 +1538,7 @@ class HTTP(Node):
                 return query
             return None
         except Exception as e:
-            raise Exception(f"Failed to parse query: {str(e)}")
+            raise Exception(f"Failed to parse query: {_scrub_url_text(str(e))}")
     
     def parse_header(self, ctx):
         """解析请求头"""
@@ -1309,7 +1557,7 @@ class HTTP(Node):
                         headers[key] = value
             return headers
         except Exception as e:
-            raise Exception(f"Failed to parse headers: {str(e)}")
+            raise Exception(f"Failed to parse headers: {_scrub_url_text(str(e))}")
     
     def parse_url(self, ctx):
         """解析URL"""
@@ -1317,7 +1565,7 @@ class HTTP(Node):
             url_value = evaluate(self.url, ctx)
             return str(url_value)
         except Exception as e:
-            raise Exception(f"Failed to parse URL: {str(e)}")
+            raise Exception(f"Failed to parse URL: {_scrub_url_text(str(e))}")
     
     def handle_http_node_err(self, err, http_rsp):
         """处理HTTP节点错误"""
@@ -1342,8 +1590,25 @@ class HTTP(Node):
 
         - ``exc.details``  — 完整 ``HttpNodeErrorInfo``（结构化 request/response）
         - ``exc.response`` — 事件安全的 dict 摘要（status/statusText/headers/
-          body），headers 凭据类脱敏、body 截断（``_summarize_error_frame_response``）
+          body），headers 凭据名脱敏**且其余值过共享 URL 渲染器**（修复轮起与
+          记录面同一份实现）、body 截断（``_summarize_error_frame_response``）
+          —— 其中 body 是 **r4 定稿的 C2 契约**，刻意原样（由 ``#160`` 的
+          ``TestDeclaredRawSurfaces`` 钉住）；进日志/序列化请用
+          ``exc.details.redacted()``。
+
+        ``#158``+``#159`` r2：``message`` 是**唯一**的异常消息构造点，先过
+        :func:`_scrub_url_text`——第三方客户端（requests/aiohttp）把请求 URL 写进
+        自己的异常文本，``handle_http_node_err`` 的 ``str(err)`` 会把它整段转手；
+        清洗必须在进 ``NodeException`` 之前（下游 logger 打补丁是盲区形态）。
+
+        ``#160``：``request=rsp.raw_request`` 是**传输忠实**引用（同一个对象、
+        ``url`` 逐字节不变——``raw_request`` 还要被别处读，掩码它等于改传输记录）。
+        记录面的凭据防护放在 ``HttpNodeErrorInfo``/``HttpRequestInfo``/
+        ``HttpNodeResponse`` 的 ``__repr__`` 与 ``redacted()`` 上：``details`` 是
+        非日志面，任何进日志的渲染都已掩码——**header 值**也在内（修复轮：响应侧
+        ``Location``/``X-Echo-Url`` 这类回显 URL 的头不再原样穿过）。
         """
+        message = _scrub_url_text(message)
         error_info = None
 
         if rsp and not rsp.empty():

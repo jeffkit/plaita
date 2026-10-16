@@ -1,0 +1,12 @@
+{
+ "name": "159-absolute-url-scheme-bound-dropped",
+ "concern": "#159-r7-线性",
+ "issue": "159",
+ "file": "plaita/core/url_redaction.py",
+ "old": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^ \\t\\r\\n\\f\\v]+\")",
+ "new": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]*://[^ \\t\\r\\n\\f\\v]+\")",
+ "rationale": "去掉 scheme 体的 `{0,31}` 上界（r4 定验的 O(n²) 回溯形态）：`[A-Za-z0-9+.\\-]*` 在「100k 字母数字串 + `://`」上退化，r4 实测 5318 ms（加界后 4.6 ms）。这条变异专门钉住「线性钉子**会红**」——即 `test_huge_input_is_scrubbed_in_linear_time` 不是空断言。 plaita#160/#161 集成：清洗器迁 url_redaction.py，锚随迁。 plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBareCredentialRunIsMasked::test_huge_input_is_scrubbed_in_linear_time"
+ ]
+}

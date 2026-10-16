@@ -1,0 +1,13 @@
+{
+  "name": "160-request-info-repr-keeps-raw-url",
+  "concern": "#160-P0",
+  "issue": "160",
+  "file": "plaita/node/http.py",
+  "old": "            f\"HttpRequestInfo(method={self.method!r}, url={self.url_masked!r}, \"\n",
+  "new": "            f\"HttpRequestInfo(method={self.method!r}, url={self.url!r}, \"\n",
+  "rationale": "记录面 `__repr__` 还原成原文 url：`repr(exc.details)` / `json.dumps(details, default=str)` / traceback 里的对象打印重新带上 access_token —— 「掩码视图」被绕过（#160 验收点名的那条变异）。（只声明**确实**会红的行：端到端 sync 路径的 request 是 requests.PreparedRequest，不走 HttpRequestInfo.__repr__，故不计入本变异的红行。）（只声明真红的行：`str(exc.details)` 走 redacted() 的 dict 视图，不经过 HttpRequestInfo.__repr__，故不计入。）",
+  "expect_fail": [
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestSerialisationSurfaces::test_repr_of_the_attachment_family_is_masked",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestSerialisationSurfaces::test_json_dumps_of_the_attachment_is_masked"
+  ]
+}

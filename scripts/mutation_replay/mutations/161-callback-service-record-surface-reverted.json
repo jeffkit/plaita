@@ -1,0 +1,13 @@
+{
+  "name": "161-callback-service-record-surface-reverted",
+  "concern": "#161-P0",
+  "issue": "161",
+  "file": "plaita/server/services/http_callback_service.py",
+  "old": "            logger.error(\"处理HTTP回调任务失败: %s\", _scrub_exception_text(e))\n",
+  "new": "            logger.error(\"处理HTTP回调任务失败: %s\", e, exc_info=True)\n",
+  "rationale": "回退记录面：恢复 `exc_info=True` + 裸异常对象。消息参数看似「已传 e」，但 `record.exc_info` 与 Formatter 渲染出的 `exc_text` 会用原始异常重新渲染 traceback ⇒ 五个记录面里两个重新带令牌。",
+  "expect_fail": [
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestHttpCallbackServiceSites::test_handle_task",
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestNoSitePassesABareException::test_three_files_are_clean"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+ "name": "159-bracketed-endpoint-fallback-dropped",
+ "concern": "#159-r3-P2",
+ "issue": "159",
+ "file": "plaita/core/url_redaction.py",
+ "old": "    host = authority.rpartition(\"@\")[2]  # 丢 userinfo（#88 的口令形态）\n    if not host.startswith(\"[\"):\n        return UNPRINTABLE_URL\n    rendered = f\"{scheme.lower()}://{host}\"\n",
+ "new": "    return UNPRINTABLE_URL\n",
+ "rationale": "丢掉方括号 authority 的端点兜底（`[webhook.internal]` / `[]` 这类 urlsplit 会抛的形态直接退化 UNPRINTABLE_URL）：不再泄露，但 `host:port` 诊断价值丢失——「掩码后仍能定位端点」这条 r3 验收要求随之失效。（#160+#161：该实现已从 plaita/node/http.py 提取到 plaita/server/url_redaction.py 成为共享渲染器，故锚点跟随——语义与判据不变。） plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBracketedAuthorityFamilyIsMasked::test_renderer_level_masks_and_keeps_endpoint[bracket-hostname]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestBracketedAuthorityFamilyIsMasked::test_endpoint_fallback_drops_userinfo_of_malformed_bracket"
+ ]
+}

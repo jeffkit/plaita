@@ -1,0 +1,12 @@
+{
+  "name": "159-guard-drops-alias-tracking",
+  "concern": "#159-r2-P1",
+  "issue": "159",
+  "file": "tests/unit/_url_sink_support.py",
+  "old": "            if isinstance(value, ast.Name):\n                is_url = _is_credential_url_name(value.id, aliases)\n            elif isinstance(value, ast.Attribute):\n                is_url = _is_credential_url_name(_dotted(value), aliases)\n            else:\n                is_url = False\n",
+  "new": "            is_url = False\n",
+  "rationale": "去掉赋值别名传播：`u = redis_url; logger.info(\"u=%s\", u)` 这类现实写法在名字判据下隐身（定验实测 MISS 之一）。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestGuardCoversTheVerifiedMissFamily::test_guard_sees_local_aliases"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "160-redacted-view-keeps-raw-url",
+  "concern": "#160-P0",
+  "issue": "160",
+  "file": "plaita/node/http.py",
+  "old": "                \"url\": _mask_policy_url(getattr(self.request, \"url\", None)),\n",
+  "new": "                \"url\": getattr(self.request, \"url\", None),\n",
+  "rationale": "掩码视图 `redacted()` 的 request.url 退回原文：`json.dumps(details.redacted())` 直接把令牌交给结构化日志/JSON shipper —— 显式掩码视图失效。",
+  "expect_fail": [
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestMaskedView::test_redacted_is_json_safe_and_clean",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestSerialisationSurfaces::test_repr_of_the_attachment_family_is_masked",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestSerialisationSurfaces::test_json_dumps_of_the_attachment_is_masked"
+  ]
+}

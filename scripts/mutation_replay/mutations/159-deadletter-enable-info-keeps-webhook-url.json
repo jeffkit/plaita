@@ -1,0 +1,12 @@
+{
+  "name": "159-deadletter-enable-info-keeps-webhook-url",
+  "concern": "#159-P0",
+  "issue": "159",
+  "file": "plaita/server/flow_worker.py",
+  "old": "            logger.info(\n                \"死信告警 webhook 已启用: %s\",\n                _mask_webhook_url_for_log(self._alert_webhook),\n            )\n",
+  "new": "            logger.info(\"死信告警 webhook 已启用: %s\", self._alert_webhook)\n",
+  "rationale": "死信告警启用 INFO 退回回显 self._alert_webhook：钉钉 access_token / 企微 key 直接进日志（#159 的 sink 2 原始缺陷）。",
+  "expect_fail": [
+    "tests/unit/test_issue159_webhook_url_secret_sinks.py::TestDeadLetterWebhookEnableLogHidesCredential::test_info_record_never_carries_the_secret"
+  ]
+}

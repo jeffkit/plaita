@@ -1268,6 +1268,12 @@ def _mask_url(value: object, *, literals: tuple = ()) -> str:
     )
 
 
+
+# plaita#160/#161 重切：掩码语法的家留在本模块（50 条已落地锚在此），
+# 但 foundation 的 url_redaction（node/server 双方共用的清洗器）需要它——
+# server→core 向下注册，foundation 不得反向 import server。
+from plaita.core.url_redaction import register_mask_url_impl as _register_url_redaction_mask  # noqa: E402
+_register_url_redaction_mask(_mask_url)
 def _passwords(text: str) -> tuple:
     """原始 URL 里出现的口令字面量（原文 + percent-decoded + encoded 形态）。
 

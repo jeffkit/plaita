@@ -18,6 +18,16 @@ import queue
 import threading
 from typing import Any, Callable, Dict, Optional
 
+# plaita#159：webhook 的**凭据在 path/query 里**（Slack/飞书/钉钉/企微），
+# ``factory._mask_url`` 只抹 userinfo 口令、保留 path——对 webhook 不够。
+# ``self.url`` 本体仍持原文（要 POST），只有渲染进日志的那一份走掩码。
+# plaita#161：``self._post`` 抛出的第三方异常（requests/aiohttp/urllib）文本里
+# 带着 ``url: …``——同样在**消息构造处**过共享清洗器（``_scrub_url_text``，
+# url_redaction 是唯一实现）。本行原本就没有 ``exc_info=True``（只记异常文本，
+# 不记栈），故仍只渲染一行：多打一整条 traceback 属于诊断面的**行为变更**，
+# 不在本单范围。
+from ..core.url_redaction import _mask_webhook_url_for_log, _scrub_url_text
+
 logger = logging.getLogger("plaita.server.alerts")
 
 DEFAULT_WEBHOOK_TIMEOUT = 5.0
@@ -82,7 +92,7 @@ class WebhookAlerter:
                 logger.warning(
                     "告警 webhook 队列已满，事件丢弃 (total=%d, url=%s)",
                     self._dropped,
-                    self.url,
+                    _mask_webhook_url_for_log(self.url),
                 )
             return False
         with self._cond:
@@ -136,7 +146,11 @@ class WebhookAlerter:
                     self._sent += 1
                 except Exception as exc:  # noqa: BLE001 - 告警失败不得影响主流程
                     self._failed += 1
-                    logger.warning("告警 webhook 发送失败 url=%s: %s", self.url, exc)
+                    logger.warning(
+                        "告警 webhook 发送失败 url=%s: %s",
+                        _mask_webhook_url_for_log(self.url),
+                        _scrub_url_text(exc),
+                    )
             finally:
                 with self._cond:
                     self._pending -= 1

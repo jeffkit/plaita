@@ -1,0 +1,12 @@
+{
+  "name": "160-response-repr-keeps-raw-body",
+  "concern": "#160-P1",
+  "issue": "160",
+  "file": "plaita/node/http.py",
+  "old": "            f\"data={_mask_record_body(self.data)!r})\"\n",
+  "new": "            f\"data={self.data!r})\"\n",
+  "rationale": "响应面 `__repr__` 还原成原文 body：上游把请求 URL（含令牌）回显进错误体时，`repr(exc.details)` 重新泄露。（redacted() 不走 HttpNodeResponse.__repr__，故不计入。）",
+  "expect_fail": [
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestSerialisationSurfaces::test_repr_of_the_attachment_family_is_masked"
+  ]
+}

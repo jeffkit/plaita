@@ -32,6 +32,23 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts).isoformat()
 
 
+def _node_label(node: object) -> str:
+    """观测告警里的节点标签：**只有**类型名与 id，绝不 ``repr(node)``。
+
+    plaita#158（同类面）：节点对象是 pydantic 模型，``repr`` 会带上全部字段——
+    ``RedisNode.target`` 正是带口令的 Redis URL，``%r`` 会把它写进 WARNING 日志。
+    本函数只回答「是哪个节点」，且 ``node.id`` 本身可能就是失败原因（``on_node_start``
+    里失败的那句正是 ``str(node.id)``），故再兜一层，不让标签构造把回调炸第二次。
+    """
+    node_type = type(node).__name__
+    try:
+        return f"{node_type}(id={node.id!s})"
+    except Exception:  # noqa: BLE001 — 标签构造失败也必须能告警
+        # 不外抛：调用方正在告警路径上（观测代码不得把执行带崩）。
+        logger.debug("节点标签构造失败，退回类型名", exc_info=True)
+        return f"<{node_type}>"
+
+
 class NodeTimingCallback(FlowCallback):
     """采集节点开始/结束时间；``snapshot()`` 返回可直接序列化的字典。
 
@@ -52,7 +69,7 @@ class NodeTimingCallback(FlowCallback):
         try:
             self._open[str(node.id)] = self._clock()
         except Exception:  # noqa: BLE001 — 观测失败绝不影响执行
-            logger.warning("节点耗时采集 on_node_start 失败: %r", node, exc_info=True)
+            logger.warning("节点耗时采集 on_node_start 失败: %s", _node_label(node), exc_info=True)
 
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:  # noqa: ARG002
         try:
@@ -66,7 +83,7 @@ class NodeTimingCallback(FlowCallback):
             ended = self._clock()
             self._record(node_id, started, ended, max(0, int((ended - started) * 1000)), error or exception)
         except Exception:  # noqa: BLE001
-            logger.warning("节点耗时采集 on_node_end 失败: %r", node, exc_info=True)
+            logger.warning("节点耗时采集 on_node_end 失败: %s", _node_label(node), exc_info=True)
 
     def _record(
         self,

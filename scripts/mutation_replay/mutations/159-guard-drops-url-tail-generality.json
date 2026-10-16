@@ -1,0 +1,13 @@
+{
+  "name": "159-guard-drops-url-tail-generality",
+  "concern": "#159-P0",
+  "issue": "159",
+  "file": "tests/unit/_url_sink_support.py",
+  "old": "    if tail in extra_names:\n        return True\n    if _URL_NAME_RE.search(dotted):\n        return True\n    return bool(_URL_TAIL_RE.search(tail))\n",
+  "new": "    return bool(_URL_NAME_RE.search(dotted))\n",
+  "rationale": "守卫退回「名字里必须有 redis_url/webhook」：self.url / request.url / cfg[\"url\"] / full_url 这类真正的 URL 标识符重新隐身——这正是 #159 对 #158 守卫不可见的根因，也是 r2 定验 MISS 族的核心。（r2 把 r1 的 `_URL_TAIL_RE.match` 换成 `search` 并加了别名分支，本变异随新判据 re-base。）",
+  "expect_fail": [
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestNoLoggerCallInterpolatesRawCredentialUrl::test_guard_reddens_on_non_redis_credential_urls",
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestNoLoggerCallInterpolatesRawCredentialUrl::test_probe_file_reintroducing_the_pattern_reddens_then_greens"
+  ]
+}

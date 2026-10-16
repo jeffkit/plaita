@@ -1,0 +1,17 @@
+{
+  "name": "160-header-value-not-scrubbed",
+  "concern": "#160-P0",
+  "issue": "160",
+  "file": "plaita/node/http.py",
+  "old": "    return _scrub_url_text(value)\n",
+  "new": "    return value\n",
+  "rationale": "记录面 header **值**退回原样（修复轮定验 FAIL 的那一点）：`_render_header_for_record` 只按名字掩凭据头，不再过共享渲染器 `_scrub_url_text`。响应头回显请求 URL 的家族（真实 302 的 `Location`、`X-Echo-Url`）于是重新穿过 `repr(details)` / `redacted()` / `json.dumps` / logging —— 判据在同一个记录面里再次分叉（body 洗、header 不洗）。",
+  "expect_fail": [
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestResponseHeaderEchoFamily::test_echoing_response_header_is_scrubbed_on_every_path[Location]",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestResponseHeaderEchoFamily::test_echoing_response_header_is_scrubbed_on_every_path[X-Echo-Url]",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestResponseHeaderEchoFamily::test_real_302_round_trip_location_echo",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestAbsoluteClaimEnforced::test_claim_holds_on_every_serialisation_path",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestDeclaredRawSurfaces::test_event_frame_body_is_deliberately_raw_headers_are_fixed",
+    "tests/unit/test_issue160_exception_attachment_record_surface.py::TestDeclaredRawSurfaces::test_masked_view_is_the_safe_path_for_the_same_fixture"
+  ]
+}

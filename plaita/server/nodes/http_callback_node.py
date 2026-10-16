@@ -8,6 +8,13 @@ from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
+# 回调 URL 进日志前经掩码渲染（#159 r2：守卫把 ``full_url`` 族纳入判据后，这处
+# INFO 是仓内唯一被点名的 ``full_url`` 记录点）。``config`` 本体仍持原文。
+# plaita#161：``_resolve_value`` 里 ``execution.evaluate`` 抛出的异常文本也可能带
+# ``url: …``（评估器内部走网络/第三方库时的形态）——``logger.warning(…, e)``
+# 同样在**构造处**过共享清洗器。该行原本也没有 ``exc_info``，故只渲染一行
+# （``_scrub_url_text`` 对非字符串输入先 ``str()`` 再清洗）。
+from ...core.url_redaction import _mask_webhook_url_for_log, _scrub_url_text
 
 
 class HttpCallbackNode(BaseExtendedNode):
@@ -111,7 +118,11 @@ class HttpCallbackNode(BaseExtendedNode):
             "retry_config": self.get_default_retry_config()
         }
         
-        logger.info("HTTP回调节点 [%s] 配置: 回调URL=%s", self.id, config['callback_config']['full_url'])
+        logger.info(
+            "HTTP回调节点 [%s] 配置: 回调URL=%s",
+            self.id,
+            _mask_webhook_url_for_log(config['callback_config']['full_url']),
+        )
         
         return config
     
@@ -230,7 +241,9 @@ class HttpCallbackNode(BaseExtendedNode):
                 resolved = execution.evaluate(value)
                 return resolved if resolved is not None else value
             except Exception as e:
-                logger.warning("解析变量引用失败 %s: %s", value, e)
+                logger.warning(
+                    "解析变量引用失败 %s: %s", value, _scrub_url_text(e),
+                )
                 return value
         
         return value

@@ -1,0 +1,13 @@
+{
+  "name": "161-callback-service-scan-site-reverted",
+  "concern": "#161-P1",
+  "issue": "161",
+  "file": "plaita/server/services/http_callback_service.py",
+  "old": "            logger.error(\"扫描回调注册失败: %s\", _scrub_exception_text(e))\n",
+  "new": "            logger.error(\"扫描回调注册失败: %s\", e, exc_info=True)\n",
+  "rationale": "同一文件另一个站点（`get_registered_callbacks` 的 scan_iter 分支）回退记录面：证明六个站点是逐个被钉住的，不是只钉了一个代表。",
+  "expect_fail": [
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestHttpCallbackServiceSites::test_get_registered_callbacks_scan",
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestNoSitePassesABareException::test_three_files_are_clean"
+  ]
+}

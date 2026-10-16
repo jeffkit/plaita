@@ -40,6 +40,13 @@ from typing import Any, Dict, Optional, Tuple
 
 from .base_service import BaseExtendedService
 from ...logger import logger
+# plaita#161：本文件每个 ``except Exception as e`` 都把 e 交给 ``logger.error``。
+# e 可能是 redis/第三方 HTTP 客户端抛的异常——文本可能带 ``url: …``（requests/
+# aiohttp 族形态）。在**消息构造处**过一次共享清洗器（url_redaction 是唯一实现），
+# 而不是事后给 logger 打补丁：``exc_info=True`` 的 traceback 由 Formatter 在
+# logger 之后重渲染，构造面清洗盖不住它，故改用 ``_scrub_exception_text`` 把
+# 「异常文本 + 栈」一起渲染并清洗。
+from ...core.url_redaction import _scrub_exception_text
 
 # 回调注册 TTL：7 天自清理（与仓内事件/订阅键 TTL 惯例一致）。
 CALLBACK_RECORD_TTL_SECONDS = 7 * 86400
@@ -287,7 +294,7 @@ class HttpCallbackService(BaseExtendedService):
             logger.info("HTTP回调服务已启动")
             return True
         except Exception as e:  # noqa: BLE001 — 启动失败只告警不扩散
-            logger.error("启动HTTP回调服务失败: %s", e, exc_info=True)
+            logger.error("启动HTTP回调服务失败: %s", _scrub_exception_text(e))
             return False
 
     def stop_service(self) -> bool:
@@ -300,7 +307,7 @@ class HttpCallbackService(BaseExtendedService):
             logger.info("HTTP回调服务已停止")
             return True
         except Exception as e:  # noqa: BLE001 — 停止失败只告警不扩散
-            logger.error("停止HTTP回调服务失败: %s", e, exc_info=True)
+            logger.error("停止HTTP回调服务失败: %s", _scrub_exception_text(e))
             return False
 
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -336,7 +343,7 @@ class HttpCallbackService(BaseExtendedService):
                 return False
 
         except Exception as e:  # noqa: BLE001 — 任务失败只告警返回 False
-            logger.error("处理HTTP回调任务失败: %s", e, exc_info=True)
+            logger.error("处理HTTP回调任务失败: %s", _scrub_exception_text(e))
             return False
 
     async def handle_callback_request(
@@ -409,7 +416,7 @@ class HttpCallbackService(BaseExtendedService):
             return response_config.get("success_response", {"status": "success"})
 
         except Exception as e:  # noqa: BLE001 — 失败转错误响应不扩散
-            logger.error("处理HTTP回调请求失败: %s", e, exc_info=True)
+            logger.error("处理HTTP回调请求失败: %s", _scrub_exception_text(e))
             return {"status": "error", "message": str(e)}
 
     def validate_task_config(self, task_config: Dict[str, Any]) -> bool:
@@ -435,14 +442,14 @@ class HttpCallbackService(BaseExtendedService):
         try:
             keys = list(self._redis_client.scan_iter(match=f"{self._record_prefix}*"))
         except Exception as e:  # noqa: BLE001 — 巡检失败返回空不扩散
-            logger.error("扫描回调注册失败: %s", e, exc_info=True)
+            logger.error("扫描回调注册失败: %s", _scrub_exception_text(e))
             return {}
         if not keys:
             return {}
         try:
             raws = self._redis_client.mget(keys)
         except Exception as e:  # noqa: BLE001 — 同上
-            logger.error("批量读取回调注册失败: %s", e, exc_info=True)
+            logger.error("批量读取回调注册失败: %s", _scrub_exception_text(e))
             return {}
         callbacks: Dict[str, Any] = {}
         for key, raw in zip(keys, raws):

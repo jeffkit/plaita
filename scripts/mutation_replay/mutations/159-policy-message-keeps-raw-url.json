@@ -1,0 +1,13 @@
+{
+  "name": "159-policy-message-keeps-raw-url",
+  "concern": "#159-r2-P0",
+  "issue": "159",
+  "file": "plaita/node/http.py",
+  "old": "                    f\"URL host {hostname!r} resolves to private/special address {ip} \"\n                    f\"(block_private_networks=true): {_mask_policy_url(url)}\"\n",
+  "new": "                    f\"URL host {hostname!r} resolves to private/special address {ip} \"\n                    f\"(block_private_networks=true): {url}\"\n",
+  "rationale": "把 blockPrivateNetworks 的 URLPolicyError 消息还原成原始 URL：明文随异常对象被 str(err) 折进 NodeException/NodeExecutionError——r2 finding 的原形。AST 守卫第二腿负责在生产源码层面判红；直接调用策略判定（不经 NodeException 的文本清洗层）时动态面也重红。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestGuardSeesUrlBearingExceptionMessages::test_no_exception_message_carries_a_credential_url",
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestPolicyExceptionNeverCarriesTheSecret::test_policy_error_message_itself_is_masked"
+  ]
+}

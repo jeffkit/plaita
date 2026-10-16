@@ -1,0 +1,23 @@
+{
+ "name": "159-absolute-url-regex-unicode-boundary",
+ "concern": "#159-r4-P0",
+ "issue": "159",
+ "file": "plaita/core/url_redaction.py",
+ "old": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^ \\t\\r\\n\\f\\v]+\")",
+ "new": "_ABSOLUTE_URL_RE = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]{0,31}://[^\\s]+\")",
+ "rationale": "把 token 边界退回 `\\s`（对 str 是 Unicode 感知的）：NBSP / 窄空格 / 表意空格都会「结束」token ⇒ `http://h/x\\u00a0?t=<secret>` 的尾巴原样留下。（r7：selector 形态的声明展开成 11 条显式 param 行——声明行现在逐字可机读校验。） | plaita#160/#161 集成：清洗器已迁至 url_redaction.py，锚点随迁。 plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
+ "expect_fail": [
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[EM-SPACE-\\u2003]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[EN-QUAD-\\u2000]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[HAIR-\\u200a]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[IDEOGRAPHIC-\\u3000]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[LS-\\u2028]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[NARROW-NBSP-\\u202f]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[NBSP-\\xa0]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[NEL-\\x85]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[OGHAM-\\u1680]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[PS-\\u2029]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_unicode_spaces_do_not_end_the_token[THIN-\\u2009]",
+  "tests/unit/test_issue159_policy_url_exception_sinks.py::TestAsciiOnlyTokenBoundary::test_boundary_class_is_ascii_only"
+ ]
+}

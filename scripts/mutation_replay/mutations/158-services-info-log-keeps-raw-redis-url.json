@@ -1,0 +1,13 @@
+{
+  "name": "158-services-info-log-keeps-raw-redis-url",
+  "concern": "#158-P0",
+  "issue": "158",
+  "file": "plaita/server/services/__main__.py",
+  "old": "    # plaita#158：口令不得进 INFO 日志（落盘 + 日志聚合 + docker logs）。\n    logger.info(\"连接 Redis: %s\", _mask_url_for_log(redis_url))\n",
+  "new": "    logger.info(\"连接 Redis: %s\", redis_url)\n",
+  "rationale": "把启动 INFO 行还原成直接插值原始连接串：口令进日志文件/日志聚合/docker logs（#158 的 sink 1 原始缺陷）。",
+  "expect_fail": [
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestServiceStartupLogHidesPassword::test_info_line_never_contains_the_password",
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestServiceStartupLogHidesPassword::test_no_log_record_field_carries_the_password_or_a_needle"
+  ]
+}

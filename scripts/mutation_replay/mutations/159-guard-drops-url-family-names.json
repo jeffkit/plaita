@@ -1,0 +1,12 @@
+{
+  "name": "159-guard-drops-url-family-names",
+  "concern": "#159-r2-P1",
+  "issue": "159",
+  "file": "tests/unit/_url_sink_support.py",
+  "old": "_URL_TAIL_RE = re.compile(r\"(?:url|uri)$\", re.I)\n",
+  "new": "_URL_TAIL_RE = re.compile(r\"^(?:url|uri)$\", re.I)\n",
+  "rationale": "把末段判据退回「恰是 url/uri」：定验实测 full_url / callback_url / base_url / cfg[\"full_url\"] 全部隐身。生产全树扫描此刻仍绿（http_callback_node 的 full_url 已改掩码），所以杀手是判据覆盖测试本身。",
+  "expect_fail": [
+    "tests/unit/test_issue159_policy_url_exception_sinks.py::TestGuardCoversTheVerifiedMissFamily::test_guard_sees_url_family_names_and_getattr_get"
+  ]
+}

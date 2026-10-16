@@ -1,0 +1,13 @@
+{
+  "name": "161-callback-node-exception-text-not-scrubbed",
+  "concern": "#161-P0",
+  "issue": "161",
+  "file": "plaita/server/nodes/http_callback_node.py",
+  "old": "                    \"解析变量引用失败 %s: %s\", value, _scrub_url_text(e),\n",
+  "new": "                    \"解析变量引用失败 %s: %s\", value, e,\n",
+  "rationale": "绕过共享清洗器：`_resolve_value` 的 WARNING 重新把第三方异常对象交给 logger（同族的 kafka/approval/redis_queue 三个节点有同一行，见报告）。",
+  "expect_fail": [
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestHttpCallbackNodeResolveValue::test_five_record_surfaces_never_carry_the_token",
+    "tests/unit/test_issue161_third_party_exception_text_sinks.py::TestNoSitePassesABareException::test_three_files_are_clean"
+  ]
+}
