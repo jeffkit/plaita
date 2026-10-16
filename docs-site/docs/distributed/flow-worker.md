@@ -129,9 +129,20 @@ python -m plaita.server.flow_worker \
   retry；其余图错误（`NodeNotFoundError` 等）→ 维持现状终态化 error。
   超时不重试是刻意的：确定性信号重试=再烧一次全款。
 - **载体**：at-least-once 消息重投本身。重试时执行**不终态化**（磁盘 state
-  停在最后成功步 checkpoint——失败节点不写 context），run() **显式重投**同体新副本（先入队再 ack；
-  `claim_min_idle_ms`（默认 60s）后被回收重投，resume 从 checkpoint 自然重跑
-  失败节点。重投路径不依赖 pending 回收：消息可能已被竞争者的 `ExecutionLeaseError`
+  停在最后成功步 checkpoint——失败节点不写 context），run() **显式重投**新副本
+  （先入队再 ack；**重投前按重试次数指数退避**：`min(30s, 1s×2^(n-1))`，即
+  1s/2s/4s/8s…封顶 30s——plaita#91：旧实现「入队即重投」无任何节奏，5 次预算
+  ~40ms 烧光，持续数秒的上游抖动本可自愈却被直接打成 error 终态。退避睡在消费
+  线程内，单 worker 会推迟同队列其他任务 ≤30s；队列级延迟投递（ZSET/延迟
+  Stream）是演进项。cap 30s < `claim_min_idle_ms`（默认 60s），睡窗内原条
+  pending 不会被对端 XCLAIM 抢走）。resume 从 checkpoint 自然重跑失败节点。
+  **start 载体的重投带 resume 语义**（plaita#91）：盘上已有同一 `execution_id`
+  的状态行时，重投副本转换为 `{"type": "resume", "resume_type": "continue"}`
+  载体（与 start 幂等命中 `_handle_start_dedup_hit` 的转换同形状，非空
+  `params` 随载体透传），从 checkpoint 续跑——不从首节点整条重放、不用
+  `context={}` 覆写盘上 checkpoint；盘上无行（首持久化前崩溃）、flow_id 与
+  盘上行不一致或读盘失败时才原样重投 start。重投路径不依赖 pending 回收：
+  消息可能已被竞争者的 `ExecutionLeaseError`
   分支 ack 释放，只留 pending 会导致重投永不发生（2026-10-09 plaita#52 实证）。
   重投失败（Redis 抖动）才退化为不 ack 留 pending；两种情况都不计 poison。
 - **预算**：重试计数键 `{ns}:execution:noderetry:{id}:{node_id}`（INCR + 滑动

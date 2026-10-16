@@ -63,7 +63,7 @@ from plaita.server.flow_worker import (
     NodeFailureTerminalizedError,
     RedisFlowWorker,
 )
-from plaita.server.task_queue import StreamTask
+from plaita.server.task_queue import StreamTask, enqueue_task
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 
@@ -681,3 +681,188 @@ class TestExplicitRequeueOnRetryableFailure:
         q.ack.side_effect = RuntimeError("redis blip")
         assert w._requeue_retryable_failure(self._task(), q) is True
         q.enqueue.assert_called_once()
+
+
+# ---------- plaita#91：显式重投的退避节奏 + start 载体的 resume 语义 ----------
+#
+# 基线缺陷（#91，b975109 引入）：显式重投「立即入队 + ack」之间没有任何退避，
+# 新副本 XADD 后下一次 read 立即命中——5 次预算在 ~60ms 内烧光（相邻间隔
+# ~1ms）；同时 start 载体重投原样复制 body，每轮经 start_flow 用 context={}
+# 覆写盘上 checkpoint 并从首个节点整条重放。
+#
+# 守卫契约（issue 验收条款）：
+# - resume 载体连续失败：相邻两次重投的间隔（注入时钟观测）≥ 退避下限且按
+#   attempt 指数递增；第 5 次失败仍终态化 error、error.node_retries == 4
+#   （预算语义不变）。
+# - start 载体 + 盘上已有 checkpoint：重投副本 body["type"] == "resume"
+#   （resume_type=continue），run_distributed 收到的 saved_context 等于盘上
+#   checkpoint，盘上 context 不被 {} 覆写。
+# - 测试注入 _sleep 假时钟，禁止真 sleep 拉长套件。
+
+
+def _consume_until_settled(worker, real_queue, *, max_rounds=12):
+    """手摇 run() 的消费循环，分支语义与 ``RedisFlowWorker.run`` 一致：
+
+    read → _dispatch_task → 成功 ack；``NodeExecutionRetryableError`` →
+    run() 的显式重投分支（#91 起带退避与载体转换）；``ValueError``
+    （NodeFailureTerminalizedError）→ poison ack（终态化路径）。
+    返回 (bodies, requeued) —— 依次读到的消息体与重投返回值。
+    """
+    bodies = []
+    requeued = []
+    for _ in range(max_rounds):
+        task = real_queue.read(block_ms=10)
+        if task is None:
+            break
+        bodies.append(dict(task.body))
+        try:
+            worker._dispatch_task(task.body, delivery_count=task.delivery_count)
+            real_queue.ack(task.message_id)
+        except NodeExecutionRetryableError as exc:
+            # run() 的显式重投分支（与 run() 同参调用）。TypeError 兜底只为
+            # 让守卫在「退避缝隙尚未落地」的基线上红在**语义**（重投间隔/
+            # 载体形状）而非签名——守卫的保护面是行为，不是参数形状。
+            try:
+                ok = worker._requeue_retryable_failure(task, real_queue, exc)
+            except TypeError:
+                ok = worker._requeue_retryable_failure(task, real_queue)
+            requeued.append(ok)
+        except ValueError:
+            # 预算耗尽已在处理函数内终态化 error（NodeFailureTerminalizedError）
+            real_queue.ack(task.message_id)
+            break
+    return bodies, requeued
+
+
+class TestRequeueBackoff:
+    """#91 守卫一：显式重投必须带指数退避，不得让 5 次预算秒烧。"""
+
+    def test_retry_reenqueue_backs_off_exponentially(self, monkeypatch):
+        """resume 载体连续失败：退避 1s→2s→4s→8s（attempt=1..4），
+        第 5 次失败仍终态化 error 且 node_retries == 4（预算语义不变）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(TEST_FLOW)
+        worker = _redis_worker(fake, storage, flow_storage, claim_min_idle_ms=1)
+        storage.save_execution_state("exec-1", _state())
+
+        enqueue_task(fake, "test:worker-node-retry", {
+            "type": "resume", "flow_id": "f1", "execution_id": "exec-1",
+            "resume_type": "continue", "tenant_id": "default",
+        })
+
+        import plaita.server.flow_worker as fw
+
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        # raising=False：基线（退避缝隙未落地）上 patch 无害跳过，守卫红在
+        # 「间隔全 0」的语义上而非 AttributeError。
+        monkeypatch.setattr(fw, "_sleep", fake_sleep, raising=False)
+
+        real_queue = worker._get_task_queue()
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.run_distributed.side_effect = _node_failure_exc()
+            bodies, requeued = _consume_until_settled(worker, real_queue)
+
+        assert requeued == [True, True, True, True]
+        # 退避梯度：min(cap, base * 2**(attempt-1))，attempt=1..4 → 1,2,4,8
+        assert sleeps == [1.0, 2.0, 4.0, 8.0]
+        # 预算语义不变：第 5 次失败终态化 error
+        state = storage.load_execution_state("exec-1")
+        assert state.status == "error"
+        assert state.error.get("node_retries") == 4
+
+    def test_backoff_attempt_zero_is_noop(self, monkeypatch):
+        """未知 attempt（直接调用的旧调用方）不退避——向后兼容旧签名语义。"""
+        import plaita.server.flow_worker as fw
+
+        assert fw._node_retry_backoff_seconds(0) == 0.0
+
+
+class TestStartCarrierResumesFromCheckpoint:
+    """#91 守卫二：start 载体重投必须有 resume 语义。
+
+    盘上已有同一 execution_id 的行时，重投副本必须是 resume 载体
+    （resume_type=continue）：从 checkpoint 续跑，不从首节点整条重放，
+    也不用 context={} 覆写盘上 running 行（镜像 _handle_start_dedup_hit
+    的既有 start→resume 转换，#122 params 透传同款）。"""
+
+    def test_start_failure_reenqueues_resume_carrier(self, monkeypatch):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(TEST_FLOW)
+        worker = _redis_worker(fake, storage, flow_storage, claim_min_idle_ms=1)
+
+        import plaita.server.flow_worker as fw
+
+        # raising=False：同上，基线上红在「载体仍是 start」的语义上。
+        monkeypatch.setattr(fw, "_sleep", lambda s: None, raising=False)
+
+        enqueue_task(fake, "test:worker-node-retry", {
+            "type": "start", "flow_id": "f1", "version": "1",
+            "params": {"watch_agent": "agent-x"},
+            "execution_id": "exec-s", "tenant_id": "default",
+        })
+
+        real_queue = worker._get_task_queue()
+        step1_ctx = {"$LAST_NODE": "start", "$NODE": {"start": {"status": "success"}}}
+        step2_ctx = {"$LAST_NODE": "a", "$NODE": {"start": {"status": "success"},
+                                                  "a": {"status": "success"}}}
+        calls = []
+
+        def scripted(flow, **kwargs):
+            disk = storage.load_execution_state("exec-s")
+            calls.append({
+                "saved_context": kwargs.get("saved_context"),
+                "disk_context_at_call": getattr(disk, "context", None) if disk else None,
+            })
+            if len(calls) == 1:
+                # start 节点成功
+                return {"execution_id": "exec-s", "is_end": False,
+                        "is_suspend": False, "context": dict(step1_ctx)}
+            if len(calls) == 2:
+                # 节点 a 成功（步界把 checkpoint 推进到 a 后落盘）
+                return {"execution_id": "exec-s", "is_end": False,
+                        "is_suspend": False, "context": dict(step2_ctx)}
+            if len(calls) == 3:
+                # 后继节点瞬态失败 → 可重试（此时盘上 checkpoint = a 已成功）
+                raise _node_failure_exc()
+            return {"execution_id": "exec-s", "is_end": True,
+                    "context": {"$LAST_NODE": "end", "done": 1}}
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.run_distributed.side_effect = scripted
+            bodies, requeued = _consume_until_settled(worker, real_queue)
+
+        assert requeued == [True]
+        # 重投副本是 resume 载体（不是原样 start）
+        assert bodies[1]["type"] == "resume"
+        assert bodies[1]["resume_type"] == "continue"
+        assert bodies[1]["execution_id"] == "exec-s"
+        assert bodies[1]["flow_id"] == "f1"
+        assert bodies[1]["tenant_id"] == "default"
+        # #122：非空 params 随载体透传（与 _handle_start_dedup_hit 一致）
+        assert bodies[1].get("params") == {"watch_agent": "agent-x"}
+        # run_distributed 第 1 次调用是 start 入口（本就无 saved_context）；
+        # 第 2 次是步进循环从 start 推进到 a（step1→step2 上下文）
+        assert calls[0]["saved_context"] is None
+        assert calls[1]["saved_context"] == step1_ctx
+        # 第 4 次调用（重投后那一轮）走 resume：saved_context = 盘上
+        # checkpoint（a 已成功推进），且处理期间盘上 context 未被 start 的
+        # context={} 初始快照覆写
+        assert calls[3]["saved_context"] == step2_ctx
+        assert calls[3]["disk_context_at_call"] == step2_ctx
+        # 执行最终完成；全程 run_distributed 恰 4 次调用（start 两步成功 +
+        # 失败步 + resume 一步收尾），没有从首节点整条重放
+        assert len(calls) == 4
+        state = storage.load_execution_state("exec-s")
+        assert state.status == "completed"
