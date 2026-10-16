@@ -788,6 +788,38 @@ def _c_event(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     return spec
 
 
+def _c_mock(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
+    """``(mock <id> [:value v] -> next)``：#146 补的节点表条目。
+
+    ``Mock``（``plaita/node/mock.py``）是数据固定（pin）占位节点，唯一自有字段是
+    ``value``（原样作为节点输出返回），另有继承自 ``Node`` 的 ``output``——
+    console 的 dryrun 把被 pin 的节点整体替换成 mock 时**保留原节点的 ``output``**，
+    故这里一并读回，避免"替换后往返一次就丢字段"。
+
+    ``:value`` 必须经 ``_value()`` 编译（#87e4dd7 的 dict 字面量规则）：否则
+    ``(dict :a 1)`` 会原样留成 ``['dict', 'a', 1]`` 列表，发射侧再按 list 分支
+    丢冒号 ⇒ 往返后不再是 dict。位置写法（``(mock m 42)``）等价于 ``:value``，
+    与 ``_c_assignment`` / ``_c_end`` 的单值位置参数同形；多余位置参数**报错**
+    而不是静默丢弃（同 ``_c_assignment`` 的理由）。
+    """
+    pos, kw = _split_args(args)
+    pos = _take_id(pos, kw)
+    spec: Dict[str, Any] = {"type": "mock"}
+    _common_fields(kw, spec, ctx)
+    raw = pos[0] if pos else _opt(kw, "value")
+    if len(pos) > 1:
+        raise SyntaxError(
+            f"mock 最多接受一个位置值，收到 {len(pos)} 个；"
+            "如需固定多个字段请用 :value 包一个 (dict ...) 字面量"
+        )
+    if raw is not None:
+        spec["value"] = _value(raw)
+    out = _opt(kw, "output")
+    if out is not None:
+        spec["output"] = _value(out)
+    return spec
+
+
 def _reduce(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     spec = _collection_common("reduce", args, ctx)
     _, kw = _split_args(args)
@@ -816,6 +848,10 @@ _NODE_COMPILERS = {
     "code": _c_code,
     "http": _c_http,
     "event": _c_event,
+    # #146：节点表覆盖缺口——`mock`（plaita/node/mock.py）读侧从来没有 dispatch
+    # 分支，写侧也没有发射臂，含 mock 节点的 flow 在 sexpr 里既发不出字段也读不
+    # 回来（发射 `(mock :id m)` 丢 value/next，再解析直接 "未知节点类型 'mock'"）。
+    "mock": _c_mock,
 }
 
 
@@ -1199,6 +1235,30 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # #150: `_c_code` reads `:input` into `CodeNode.input`; dropped before.
         if n.get("input") is not None:
             parts.append(f":input {_expr_to_src(n['input'])}")
+        if n.get("next") is not None:
+            parts.append(f"-> {n['next']}")
+    elif t == "mock":
+        # #146：`mock` 不在节点表里，base 的 `_node_to_src` 会穿过所有分支、
+        # 只发出空壳 `(mock :id m)`：`value` 与 `next` 静默丢失，再解析直接
+        # 抛 "未知节点类型 'mock'"（不是静默丢字段，而是硬失败）。
+        #
+        # 关键字顺序：所有 `:kw value` 排在 `-> next` 之前，沿用 `7d0add9` 给
+        # event `:filter` 立下的形状（也是 `_common_kw_to_src` 的发射形状）。
+        #
+        # 注意别把这条读成"读侧要求"：`_split_args` 是**平扫**，箭头之后的平铺
+        # `:kw value` 照样被读成关键字（实测 `(mock :id m -> e :value 42)` 与
+        # `(mock :id m -> e :value (dict :a 1))` 都能读回）。退化成位置参数的是
+        # **不在关键字槽位上的**嵌套 list form（#136 的尾随 `(on-error …)`）。
+        # 这里仍按"关键字先于后继"发射：形状稳定，且不依赖读侧平扫的实现细节。
+        #
+        # `value = None` 与"字段缺席"语义等价（`Mock.value` 默认 None），故按
+        # `is not None` 判断，与 `_flow_level_fields_to_src` 的"None 一律不发"一致。
+        if n.get("value") is not None:
+            parts.append(f":value {_expr_to_src(n['value'])}")
+        # `output` 继承自 `Node`：dryrun 把被 pin 的节点换成 mock 时保留原节点的
+        # `output`（见 plaita-console/backend/services/dryrun.py），漏发即往返丢字段。
+        if n.get("output") is not None:
+            parts.append(f":output {_expr_to_src(n['output'])}")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "event":

@@ -895,6 +895,16 @@ _ISSUE_150_READER_TYPES = frozenset((
 #: (:meth:`…test_no_undocumented_writer_exclusions`)，避免豁免被悄悄加进来。
 _WRITER_NODE_TYPE_EXCLUSIONS = {}
 
+#: ``_ISSUE_150_READER_TYPES`` 之后**增量**补进 ``_NODE_COMPILERS`` 的节点类型。
+#:
+#: ``_ISSUE_150_READER_TYPES`` 是 #150 正文那 21 项的**历史快照**，不随新节点
+#: 改写（否则快照失去证据意义）。增量单独记账：``#146`` 把 ``mock``
+#: （``plaita/node/mock.py``）补进节点表——base 上它既不在读侧 dispatch 也不在
+#: 写侧发射臂里，含 mock 节点的 flow 无法 sexpr 往返。
+#: 这个集合既是计数断言的豁免来源，也是"新增节点类型必须显式登记"的账本：
+#: 忘了登记，下面两个计数断言直接转红。
+_POST_150_READER_TYPES = frozenset({"mock"})
+
 
 def _reader_node_compilers():
     """AST 抽取 ``_NODE_COMPILERS`` 的 ``{节点类型: handler 源码}`` 映射。"""
@@ -961,7 +971,9 @@ class TestWriterNodeTypeSymmetry(unittest.TestCase):
             groups.setdefault(handler, set()).add(ntype)
         aliases = {tuple(sorted(g)) for g in groups.values() if len(g) > 1}
         self.assertEqual(aliases, {("assign", "assignment")})
-        self.assertEqual(len(groups), 17, "reader 节点实现数应为 17")
+        self.assertEqual(
+            len(groups), 17 + len(_POST_150_READER_TYPES),
+            "reader 节点实现数应为 17（#150）+ 其后登记的新类型")
 
     def test_writer_emits_no_node_type_the_reader_rejects(self):
         """反向：写侧不得发射读侧不认识的类型（防单方面扩写侧）。"""
@@ -969,11 +981,16 @@ class TestWriterNodeTypeSymmetry(unittest.TestCase):
         self.assertEqual(extra, set(), f"写侧发射了读侧不接受的类型: {sorted(extra)}")
 
     def test_issue_150_count_is_18_reader_keys_plus_3_non_nodes(self):
-        reader = set(_reader_node_compilers())
+        reader = set(_reader_node_compilers()) - _POST_150_READER_TYPES
         self.assertEqual(reader | _NON_NODE_READER_KEYS, _ISSUE_150_READER_TYPES)
         self.assertEqual(reader & _NON_NODE_READER_KEYS, set())
         self.assertEqual(len(reader), 18)
         self.assertEqual(len(_ISSUE_150_READER_TYPES), 21)
+        # #146 增量：登记集合必须真的在读侧表里（防账本写了却没实现）
+        self.assertTrue(
+            _POST_150_READER_TYPES <= set(_reader_node_compilers()),
+            f"登记为 #150 后新增但读侧没有: "
+            f"{sorted(_POST_150_READER_TYPES - set(_reader_node_compilers()))}")
 
     def test_no_undocumented_writer_exclusions(self):
         self.assertEqual(_WRITER_NODE_TYPE_EXCLUSIONS, {})
@@ -1051,6 +1068,15 @@ _NODE_TYPE_ROUNDTRIP_CORPUS = (
     ("event", '(flow g :input-type object (start :id n0 -> ev)'
               ' (event :id ev :type tick :filter (dict :a 1) :timeout 5 -> e)'
               ' (end :id e :output 9))'),
+    # #146：base 上 `mock` 不在节点表里——写侧穿过所有分支只发 `(mock :id n0)`，
+    # `value`/`output`/`next` 全丢，再解析直接 "未知节点类型 'mock'"。
+    # 本行按 #150 验收 3 的口径把该类型读侧能读的字段填满：`:value` 走 87e4dd7 的
+    # dict 字面量拼写（不经 `_value()` 会退化成 list）、继承字段 `:output`
+    # （dryrun 换 mock 时保留原节点的 output）、`:timeout`（公共关键字）与
+    # `-> next`；所有关键字排在 `-> next` **之前**（7d0add9 的关键字序规则）。
+    ("mock", '(flow g :input-type object (start :id n0 -> mk)'
+             ' (mock :id mk :value (dict :a 1 :b "$INPUT.x") :output "$NODE.mk"'
+             ' :timeout 5 -> e) (end :id e :output 9))'),
 )
 
 

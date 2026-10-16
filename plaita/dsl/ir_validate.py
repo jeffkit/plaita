@@ -305,10 +305,11 @@ _FUNC_REF_RE = re.compile(r"(?<![A-Za-z0-9_.$])\$F\.([A-Za-z0-9_]+)\s*\(")
 # - ``code``：CODE 节点源码是 Python/JS，不是 plaita 表达式；
 # - ``childFlow``/``child_flow``/``flow``：嵌套子图是独立作用域，随递归按
 #   各自 graph.ids 单独校验——留在父节点扫描里会把子图引用错记到父图头上；
-# - ``error``：end 的失败载荷是**纯字面数据**（引擎 ``End.execute`` 直接
-#   ``self.error.get(...)``，从不求值），里面的 "$NODE.x" 只是文本，扫它会把
-#   正常流程判成悬空引用（典型：载荷引用 end 自身 id，而 end 的 id 在
-#   emit→compile 后由语义 slug 重命名）；
+# - ``error``：**仅节点级**（见 ``_UNSCANNED_NODE_ONLY_KEYS``）。end 的失败
+#   载荷是**纯字面数据**（引擎 ``End.execute`` 直接 ``self.error.get(...)``，
+#   从不求值），里面的 "$NODE.x" 只是文本，扫它会把正常流程判成悬空引用
+#   （典型：载荷引用 end 自身 id，而 end 的 id 在 emit→compile 后由语义 slug
+#   重命名）；
 # - ``desc``/``name`` 等文档/结构字段：散文里的 "$NODE.foo" 不是引用。
 _UNSCANNED_KEYS = frozenset({
     "code", "desc", "description", "name", "title", "label", "node_name",
@@ -316,6 +317,19 @@ _UNSCANNED_KEYS = frozenset({
     "flowId", "source_line", "language", "error",
     "childFlow", "child_flow", "flow",
 })
+
+#: 只在**节点级**免扫的键（plaita#144）。
+#:
+#: ``error`` 的免扫理由（end 的失败载荷是纯数据）只在**节点自己的** ``error``
+#: 字段成立。base 把它实现成"任意深度上精确键名匹配"，于是任何恰好叫 ``error``
+#: 的**普通字段**（嵌套在 ``output`` 里、出现在 list 元素里、藏在 childFlow 节点
+#: 的任意字段下……）下的悬空 ``$NODE``/``$F`` 引用都被一并放行——免扫的爆炸半径
+#: 远大于其理由。这里把节点级与嵌套级拆开：嵌套层仍免扫其余键（保持 base 行为），
+#: 唯独 ``error`` 不再同深度同名即豁免。
+_UNSCANNED_NODE_ONLY_KEYS = frozenset({"error"})
+
+#: 嵌套层免扫键 = 任意深度免扫集合 − 仅节点级键。
+_UNSCANNED_NESTED_KEYS = _UNSCANNED_KEYS - _UNSCANNED_NODE_ONLY_KEYS
 
 
 def _iter_strings(obj: Any, *, skip_keys: FrozenSet[str]) -> Iterable[str]:
@@ -333,9 +347,18 @@ def _iter_strings(obj: Any, *, skip_keys: FrozenSet[str]) -> Iterable[str]:
 
 
 def _collect_refs(node: Dict[str, Any], regex) -> List[str]:
+    """收集节点里的引用。
+
+    节点级键按 ``_UNSCANNED_KEYS`` 整棵子树跳过（plaita#144：``error`` 只在这里
+    豁免），节点内部的嵌套字典/list 走 ``_UNSCANNED_NESTED_KEYS``——同名
+    ``error`` 的普通字段在嵌套层不再免扫。
+    """
     refs: List[str] = []
-    for s in _iter_strings(node, skip_keys=_UNSCANNED_KEYS):
-        refs.extend(regex.findall(s))
+    for k, v in node.items():
+        if isinstance(k, str) and k in _UNSCANNED_KEYS:
+            continue
+        for s in _iter_strings(v, skip_keys=_UNSCANNED_NESTED_KEYS):
+            refs.extend(regex.findall(s))
     return refs
 
 
@@ -345,7 +368,9 @@ def check_node_refs(node, path, graph) -> Optional[str]:
     运行期复核：未命中静默求值为 ``None``（下游拿到空值继续跑，典型沉默损坏）。
     $NODE 按执行作用域解析——子图内引用父图节点 id 同样为 None（实证），
     故按 graph.ids 差集判定；difflib 给近似 id 提示。
-    CODE 节点 code 体与 desc/name 等文档字段不扫（见 _UNSCANNED_KEYS）。
+    CODE 节点 code 体与 desc/name 等文档字段不扫；``error`` 只在**节点级**
+    豁免（end 的失败载荷是纯数据），嵌套层同名字段照扫（见 ``_UNSCANNED_KEYS``
+    / ``_UNSCANNED_NODE_ONLY_KEYS``）。
     """
     refs = _collect_refs(node, _NODE_REF_RE)
     if not refs:
