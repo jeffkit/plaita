@@ -1,0 +1,12 @@
+{
+  "name": "68-dominance-filtered-comprehension",
+  "issue": "68",
+  "concern": "O3",
+  "file": "plaita/core/expression.py",
+  "rationale": "上界调用在带 if False 的推导式里（结果可能为空）",
+  "old": "    bounds = [_render_size(arg) for arg in args]\n",
+  "new": "    bounds = [_render_size(arg) for arg in args if False]\n    bounds = [0 for arg in args]\n",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged"
+  ]
+}

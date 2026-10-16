@@ -1,0 +1,12 @@
+{
+  "name": "m63-watchdog-ignores-state",
+  "issue": "85",
+  "concern": "AL1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "有界搜索不排除非 pending ⇒ abandoned 被误报为饥饿（AI4②/AL1）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI4WatchdogDirections::test_abandoned_state_is_not_starvation"
+  ],
+  "old": "                state_ok = (meta.get(\"state\") or \"pending\") == \"pending\"  # AL1: 非 pending 不算饥饿",
+  "new": "                state_ok = True  # AL1: 非 pending 不算饥饿"
+}

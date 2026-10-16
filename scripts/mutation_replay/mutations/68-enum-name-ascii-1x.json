@@ -1,0 +1,13 @@
+{
+  "name": "68-enum-name-ascii-1x",
+  "concern": "AR1",
+  "file": "plaita/core/expression.py",
+  "old": "    name_part = 10 * (len(_class_name(cls)) + len(_enum_member_name(value))) + 8",
+  "new": "    name_part = 1 * (len(_class_name(cls)) + len(_enum_member_name(value))) + 8",
+  "rationale": "enum 类名/成员名退回 1×：`%a` 下 `_name_=\"é\"*1000` 投影 1031 / 实际 4008",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded",
+    "tests/unit/test_expression_size_guard.py::TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_astral_names_are_bounded"
+  ],
+  "issue": "68"
+}

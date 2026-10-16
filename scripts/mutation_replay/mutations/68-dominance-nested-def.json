@@ -1,0 +1,12 @@
+{
+  "name": "68-dominance-nested-def",
+  "issue": "68",
+  "concern": "O3",
+  "file": "plaita/core/expression.py",
+  "rationale": "上界调用藏在嵌套 def 里（可能永远不被调用）",
+  "old": "    bounds = [_render_size(arg) for arg in args]\n",
+  "new": "    def _bound(args):\n        return [_render_size(arg) for arg in args]\n    bounds = [0 for arg in args]\n",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged"
+  ]
+}

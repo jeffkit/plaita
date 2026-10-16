@@ -1,0 +1,12 @@
+{
+  "name": "68-timezone-name-constant",
+  "concern": "AM1",
+  "file": "plaita/core/expression.py",
+  "old": "    if cls is _datetime_module.timezone:\n        # AM1：`str(timezone)` 就是**作者可写的 name**（`timezone(timedelta(0), \"E\"*1e7)`\n        # ⇒ 10,000,000 字符）；repr 再内嵌 name 的 repr。读 C 槽\n        # `timezone.tzname(value, None)`（与 `str()` 同值，0 作者调用）取真实 name，\n        # 按 repr 转义 10× 计。\n        try:\n            name = _datetime_module.timezone.tzname(value, None)\n        except Exception as exc:              # noqa: BLE001 - 读不到 ⇒ 拒绝\n            _render_unmeasurable(exc)\n            return None\n        if type(name) is not str:\n            return None\n        if as_repr:\n            return 10 * str.__len__(name) + 64\n        return str.__len__(name) + 8\n",
+  "new": "    if cls is _datetime_module.timezone:\n        return 64\n",
+  "rationale": "timezone 退回常量 64：`timezone(timedelta(0), \"E\"*1e7)` `%s` 投影 64 / 实际 10,000,000",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFourthRoundConstantBounds::test_timezone_name_is_bounded"
+  ],
+  "issue": "68"
+}

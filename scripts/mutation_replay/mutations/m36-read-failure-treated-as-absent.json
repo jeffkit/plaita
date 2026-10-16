@@ -1,0 +1,12 @@
+{
+  "name": "m36-read-failure-treated-as-absent",
+  "issue": "85",
+  "concern": "AA1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "元数据读失败被当成「字段不存在」→ 选中的一批被移出 due，永久孤儿（AA1）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA1ReadFailureNoOrphan::test_transient_hmget_failure_does_not_orphan_entries"
+  ],
+  "old": "            return {eid: None for eid in ids}, False",
+  "new": "            return {eid: None for eid in ids}, True"
+}

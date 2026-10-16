@@ -1,0 +1,12 @@
+{
+  "name": "m05-strict-after-becomes-inclusive",
+  "issue": "85",
+  "concern": "S2",
+  "file": "plaita/event/redis.py",
+  "rationale": "复合游标退化为含端 → 并列块/单条批活锁",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS2CompositeCursor::test_batch_size_one_progresses_over_distinct_timestamps"
+  ],
+  "old": "                    if after is not None and (score, member) <= after:",
+  "new": "                    if after is not None and (score, member) < after:"
+}

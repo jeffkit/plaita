@@ -1,0 +1,13 @@
+{
+  "name": "68-mod-numeric-magnitude-not-counted",
+  "concern": "AC4",
+  "file": "plaita/core/expression.py",
+  "old": "    if spec.conversion in \"diuoxX\":\n        pad = spec.precision if spec.precision > 0 else 0\n        return max(base, pad, width) + 8\n    precision = spec.precision if spec.precision >= 0 else 6\n    if spec.conversion in \"eE\":\n        return max(precision + 8, width) + 8\n    # f/F/g/G：整数部分按量级计（`%f % 1e300` 实测 308 字符）\n    return max(base + precision, width) + 8\n",
+  "new": "    precision = spec.precision if spec.precision >= 0 else 6\n    return max(precision, width) + 32\n",
+  "rationale": "数值量级不再进上界（float/Decimal/int 都退回常量）⇒ `%f % 1e300` 上界 40、实际 308",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSeventeenthRoundT2T3Numeric::test_numeric_magnitude_is_counted",
+    "tests/unit/test_expression_size_guard.py::TestSeventeenthRoundT2T3Numeric::test_numeric_projection_corpus_has_no_underestimates"
+  ],
+  "issue": "68"
+}

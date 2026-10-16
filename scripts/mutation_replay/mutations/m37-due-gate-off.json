@@ -1,0 +1,12 @@
+{
+  "name": "m37-due-gate-off",
+  "issue": "85",
+  "concern": "AA2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "取消到期门 → 未到期的条目被提前选中（backoff 不强制，AA2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA2AbsoluteDue::test_due_gate_enforces_backoff"
+  ],
+  "old": "                self._due_key(), \"-inf\", now_ms + QUARANTINE_GATE_SLACK_MS,",
+  "new": "                self._due_key(), \"-inf\", \"+inf\","
+}

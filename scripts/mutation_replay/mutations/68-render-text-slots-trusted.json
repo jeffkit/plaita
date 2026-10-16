@@ -1,0 +1,12 @@
+{
+  "name": "68-render-text-slots-trusted",
+  "concern": "AC2.1/★双向",
+  "file": "plaita/core/expression.py",
+  "old": "        if owner is None or _dunder_is_builtin(cls, name, base):\n            continue                          # 祖先没有该槽 / 子类只是显式别名\n        return False\n    return True\n",
+  "new": "        if owner is None or _dunder_is_builtin(cls, name, base):\n            continue                          # 祖先没有该槽 / 子类只是显式别名\n    return True\n",
+  "rationale": "`_slots_owned_by_base` 不再因覆写被派发槽而拒绝 ⇒ 覆写 __str__/__repr__ 的子类按祖先语义算上界（上界被击穿）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFirstRoundRenderDispatch::test_overriding_slot_subclasses_are_refused_by_name"
+  ],
+  "issue": "68"
+}

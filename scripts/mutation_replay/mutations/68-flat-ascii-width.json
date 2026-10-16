@@ -1,0 +1,13 @@
+{
+  "name": "68-flat-ascii-width",
+  "concern": "AU1",
+  "file": "plaita/core/expression.py",
+  "old": "def _str_escape_width(value: Any) -> int:\n    \"\"\"精确的 ``ascii(value)`` 长度（对 ``%r`` 是保守上界）：C 级计数，不构造展开串。\"\"\"\n    length = str.__len__(value)\n    total = length + 2                                  # 每字符 1 + 两端引号\n    total += str.count(value, \"\\\\\")\n    # repr 的引号选择：串里同时有 `\"` 时用 `'` 定界 ⇒ `'` 被转义（+1）；否则用 `\"` 定界，\n    # `'` 原样保留。这是 `ascii()`/`repr()` 的真实行为，不是最坏情形近似。\n    if str.__contains__(value, '\"'):\n        total += str.count(value, \"'\")\n    total += str.count(value, \"\\t\") + str.count(value, \"\\n\") + str.count(value, \"\\r\")\n    # AU1：链式剥离（类互斥）；每步一份与当前串同大的结果，峰值实测 2.1–4.2×（见\n    # `TestTwentyEighthRoundBoundComputePeak` 的预算断言与文档）。\n    kept, escaped = _RE_ASCII_ESCAPES.subn(\"\", value)\n    total += 3 * escaped\n    kept, latin = _RE_LATIN1.subn(\"\", kept)\n    total += 3 * latin\n    kept, bmp = _RE_BMP.subn(\"\", kept)\n    total += 5 * bmp\n    kept, astral = _RE_ASTRAL.subn(\"\", kept)\n    total += 9 * astral\n    return total\n",
+  "new": "def _str_escape_width(value: Any) -> int:\n    return 10 * str.__len__(value) + 10\n",
+  "rationale": "str 的 ascii/repr 上界退回扁平 10× ⇒ `\\n`*9999 被误拒（真实 20,000 ≤ 允许 100,000）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySeventhRoundAsciiThreshold::test_long_control_and_nonascii_strings_render_under_percent_a",
+    "tests/unit/test_expression_size_guard.py::TestTwentySeventhRoundAsciiThreshold::test_percent_a_bound_is_exact_and_shared_with_percent_r"
+  ],
+  "issue": "68"
+}

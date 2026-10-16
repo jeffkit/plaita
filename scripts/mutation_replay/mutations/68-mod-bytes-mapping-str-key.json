@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-bytes-mapping-str-key",
+  "concern": "T1",
+  "file": "plaita/core/expression.py",
+  "old": "    if bytes_mode:\n        return key.encode(\"latin-1\")\n    return key\n",
+  "new": "    return key\n",
+  "rationale": "bytes 模式仍用 str 键查映射（原生用 bytes 键 ⇒ 缺键判错 ⇒ fail-open 放大）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSeventeenthRoundT1BytesMapping::test_bytes_mapping_fuzz_native_implies_failure"
+  ],
+  "issue": "68"
+}

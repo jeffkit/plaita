@@ -1,0 +1,12 @@
+{
+  "name": "m57-starvation-watchdog-off",
+  "issue": "85",
+  "concern": "AH4",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "关闭饥饿看门狗 ⇒ 涓流成功掩盖片外饿死（AH4）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH4StarvationWatchdog::test_trickle_success_does_not_hide_starvation"
+  ],
+  "old": "        self._quarantine_starvation_watchdog(healed)",
+  "new": "        pass"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m49-heal-advances-without-processing",
+  "issue": "85",
+  "concern": "AF2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "推进游标但不处理本片 ⇒ 「写游标后崩溃」窗口会永久跳过整片（AF2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF2HealCrashWindow::test_crash_in_cursor_window_every_round_still_heals_all"
+  ],
+  "old": "        items = list((chunk or {}).items())",
+  "new": "        items = []"
+}

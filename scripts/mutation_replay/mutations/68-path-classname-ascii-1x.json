@@ -1,0 +1,12 @@
+{
+  "name": "68-path-classname-ascii-1x",
+  "concern": "AR1",
+  "file": "plaita/core/expression.py",
+  "old": "    return 10 * state + 10 * len(_class_name(cls)) + 16",
+  "new": "    return 10 * state + 1 * len(_class_name(cls)) + 16",
+  "rationale": "PurePath 子类名退回 1×：`%a` 下 `type(\"É\"*1000, (PurePosixPath,), {})` 投影 1076 / 实际 4008",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded"
+  ],
+  "issue": "68"
+}

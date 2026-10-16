@@ -1,0 +1,12 @@
+{
+  "name": "m22-stopped-early-disabled",
+  "issue": "85",
+  "concern": "U2",
+  "file": "plaita/event/redis.py",
+  "rationale": "全类型读尽但 readable > limit 时仍判排空 → 未投递事件被跳过（no-loss oracle 覆盖）",
+  "expect_fail": [
+    "tests/unit/test_issue85_no_loss_oracle.py::test_page_no_loss_oracle[3-5-10-0-front-interleaved]"
+  ],
+  "old": "        stopped_early = len(readable) > limit",
+  "new": "        stopped_early = False"
+}

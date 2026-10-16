@@ -1,0 +1,12 @@
+{
+  "name": "m64-retry-overflow-silent",
+  "issue": "85",
+  "concern": "AI3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "片尾重试溢出静默延迟 ⇒ >64 失败字段无告警（AI3）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI3RetryOverflowLoud::test_overflow_is_reported_not_silent"
+  ],
+  "old": "            if leftover:",
+  "new": "            if False:"
+}

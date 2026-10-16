@@ -1,0 +1,12 @@
+{
+  "name": "68-oxX-float-index-native",
+  "concern": "AB1",
+  "file": "plaita/core/expression.py",
+  "old": "    if kind == \"index\":\n        # AB1：原生对**任何**对象都会派发 `__index__` ⇒ 类里有这个槽就绝不能判必错。\n        if isinstance(value, int):\n            return False\n        return not _has_raw_slot(cls, \"__index__\")\n",
+  "new": "    if kind == \"index\":\n        if isinstance(value, int):\n            return False\n        if _numeric_kind(value) is not None:\n            return True\n        return not _has_raw_slot(cls, \"__index__\")\n",
+  "rationale": "o/x/X 上把 float/Decimal 一律判“原生必错”，漏掉原生会派发子类 __index__",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestNineteenthRoundABAdversarialCorpus::test_adversarial_corpus_invariants"
+  ],
+  "issue": "68"
+}

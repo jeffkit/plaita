@@ -1,0 +1,12 @@
+{
+  "name": "68-ancestor-cslot-float-read",
+  "concern": "AC7",
+  "file": "plaita/core/expression.py",
+  "old": "            value = float.__float__(value)\n",
+  "new": "            value = float(value)\n",
+  "rationale": "float 子类真值读取从 `float.__float__` C 槽退回 `float(value)`（跑作者 `__float__`）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestEighteenthRoundZ1NumericSubclasses::test_adversarial_numeric_subclasses_have_no_underestimates"
+  ],
+  "issue": "68"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m65-watchdog-estimate-trigger-off",
+  "issue": "85",
+  "concern": "AL1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "去掉「估计触发」⇒ 自愈被 marker 跳过时看门狗恒不报警（AL1）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL1WatchdogWhenHealCannotAdvance::test_persistent_cursor_failure_is_still_watched"
+  ],
+  "old": "        if hash_len > due_n and healed == 0:",
+  "new": "        if False:"
+}

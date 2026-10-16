@@ -1,0 +1,12 @@
+{
+  "name": "m44-quarantine-pin-unbounded",
+  "issue": "85",
+  "concern": "AD2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "入清单失败无限期钉住（无上界、不放行尾巴）⇒ 整条回扫链可被一个坏成员停摆（AD2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD2RuntimeErrorInsideExec::test_runtime_error_inside_exec_recovers_tail_after_giveup"
+  ],
+  "old": "            if pin_streak < QUARANTINE_PIN_GIVEUP_ROUNDS:",
+  "new": "            if True:"
+}

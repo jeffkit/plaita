@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-no-conversion-native",
+  "concern": "Z5.2",
+  "file": "plaita/core/expression.py",
+  "old": "    if not specs:\n        # Z5.2：没有转换符（如 \"%%(a)s\"）——原生在 dict 参数下**成功**且结果 ≤ 格式串\n        # 长度（无放大）⇒ 按 render 处理，不再错误地声称\"原生必错\"。\n        return _ModDecision(\"render\", fmt_len, fmt_len, [], [], \"\")\n",
+  "new": "",
+  "rationale": "无转换符（\"%%(a)s\"）退回 native 判定（原生其实成功）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestEighteenthRoundZ3Z4Z5::test_no_conversion_format_is_a_render"
+  ],
+  "issue": "68"
+}

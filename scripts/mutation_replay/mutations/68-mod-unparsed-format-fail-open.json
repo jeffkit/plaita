@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-unparsed-format-fail-open",
+  "issue": "68",
+  "concern": "Q1",
+  "file": "plaita/core/expression.py",
+  "rationale": "解析不出来就退回 native（projected=0 空转）：'%*s%' 又在分配后才报错",
+  "old": "    if specs is None:\n        return _ModDecision(\"refuse\", 0, 0, [], [],\n                            \"格式串无法在不运行作者代码的前提下解析（未闭合/非法转换符）\")\n",
+  "new": "    if specs is None:\n        return _ModDecision(\"native\", 0, 0, [], [], \"unparsed\")\n",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestFifteenthRoundQ1ShapeMatrix::test_unparsable_format_with_star_width_is_refused"
+  ]
+}

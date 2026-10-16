@@ -1,0 +1,12 @@
+{
+  "name": "m03-decode-responses-off",
+  "issue": "79",
+  "concern": "#79",
+  "file": "plaita/event/redis.py",
+  "rationale": "自建生产客户端不开 decode_responses（回到 bytes member）",
+  "expect_fail": [
+    "tests/unit/test_issue79_event_storage_list_events.py::test_initialize_builds_client_with_decode_responses"
+  ],
+  "old": "            self.redis = await aioredis.from_url(\n                self.redis_url, decode_responses=True\n            )",
+  "new": "            self.redis = await aioredis.from_url(\n                self.redis_url, decode_responses=False\n            )"
+}

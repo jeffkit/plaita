@@ -1,0 +1,12 @@
+{
+  "name": "m28-quarantine-reschedule-off",
+  "issue": "85",
+  "concern": "W1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "失败后不续期（due 分数不变）→ 同一条目永远被选中，毒条目饿死其余（W1/V1②）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV1QuarantineRetryWindow::test_poison_entry_does_not_starve_others"
+  ],
+  "old": "            self._quarantine_reschedule(event_id, attempts, now_ms)",
+  "new": "            self._quarantine_cond_update(\n                event_id, lambda m: m.update({\"attempts\": attempts}),\n            )"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m67-sweep-never-finds",
+  "issue": "85",
+  "concern": "AL3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "有界搜索永不返回 id ⇒ 看门狗无法点名（AL3①）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL3SweepReachable::test_sweep_is_called_and_not_found_output_reachable"
+  ],
+  "old": "                        return eid, scanned, False",
+  "new": "                        return None, scanned, False"
+}

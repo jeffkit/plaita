@@ -1,0 +1,12 @@
+{
+  "name": "m58-dead-overflow-per-entry",
+  "issue": "85",
+  "concern": "AH5",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "dead-letter 溢出按条告警 ⇒ 1005 条时 5 行（应每轮聚合一行，AH5①）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH5SmallItems::test_dead_overflow_is_aggregated_per_round"
+  ],
+  "old": "                    self._dead_overflow_pending.append((event_id, size))",
+  "new": "                    logger.error(\n                        \"事件回扫: dead-letter 已达 %d 条（上界 %d，id=%s）\",\n                        size, QUARANTINE_DEAD_MAX, event_id,\n                    )"
+}

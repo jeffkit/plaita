@@ -1,0 +1,14 @@
+{
+  "name": "m70-gap-streak-write-shortcircuit",
+  "issue": "85",
+  "concern": "BB2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "停滞计数写入被短路为 0 ⇒ 积压告警全部静默（BB2「静音一切」的那行）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAV2SlowDeclineAndOscillationAreLoud::test_slow_decline_is_loud",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAY2SlowConvergenceWording::test_slow_but_converging_is_not_called_divergent",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAS1GrowingBacklogIsLoud::test_growing_backlog_warns_even_with_progress"
+  ],
+  "old": "                    self._gap_streak_key(), stall_streak,",
+  "new": "                    self._gap_streak_key(), 0,  # BB2: 停滞计数永不累积"
+}

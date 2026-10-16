@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-numeric-protocol-accepted",
+  "issue": "68",
+  "concern": "Q4",
+  "file": "plaita/core/expression.py",
+  "rationale": "自定义 __index__/__int__ 值不再拒（判定路径会跑作者协议）",
+  "old": "        if not _conversion_accepts(spec.conversion, value, bytes_mode):\n            return _ModDecision(\n                \"refuse\", 0, 0, [], [],\n                f\"字段 {spec.conversion!r} 的值 {_type_name(value)!r} 没有可读祖先 C 槽; \"\n                + _numeric_escape_hint(spec.conversion, bytes_mode))\n",
+  "new": "",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestFifteenthRoundQ4ValuePredicates::test_numeric_protocol_only_values_refused_with_escape_hatch"
+  ]
+}

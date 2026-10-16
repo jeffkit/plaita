@@ -1,0 +1,12 @@
+{
+  "name": "m41-put-failure-still-advances",
+  "issue": "85",
+  "concern": "AA3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "入隔离清单失败仍推进游标 → 坏成员没登记、事件永久丢（AA3）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA3TwoKeyDivergence::test_put_failure_does_not_advance_cursor_past_bad_member"
+  ],
+  "old": "        if quarantine_failed:",
+  "new": "        if False:"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "68-object-fallback-name-constant",
+  "concern": "AM1",
+  "file": "plaita/core/expression.py",
+  "old": "        if base is object:\n            # AM1：默认 `object.__repr__` = `<__module__.qualname object at 0x…>`，\n            # 类名可写（实测 20,000,025 字符 / 峰值 25MB）⇒ 读真实类名。\n            name = _class_name_bound(cls)\n            return None if name is None else name + 64\n",
+  "new": "        if base is object:\n            return 256\n",
+  "rationale": "默认 object repr 退回常量 256：类名写成 1e7 字符 ⇒ 投影 256 / 实际 20,000,025",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFourthRoundConstantBounds::test_author_writable_class_names_are_bounded",
+    "tests/unit/test_expression_size_guard.py::TestTwentyFourthRoundConstantBounds::test_datetime_tzinfo_repr_is_bounded"
+  ],
+  "issue": "68"
+}

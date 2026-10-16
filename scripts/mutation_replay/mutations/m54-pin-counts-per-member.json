@@ -1,0 +1,12 @@
+{
+  "name": "m54-pin-counts-per-member",
+  "issue": "85",
+  "concern": "AH1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "每成员失败各 INCR 一次 ⇒ k 条 dangling 时 k 轮内就 giveup（AH1）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH1PinCountsRounds::test_giveup_always_at_round_10_regardless_of_dangling_count"
+  ],
+  "old": "                        event_id, QUARANTINE_PIN_GIVEUP_ROUNDS,",
+  "new": "                        event_id, self._quarantine_pin_round() + 1,"
+}

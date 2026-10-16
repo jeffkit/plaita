@@ -1,0 +1,12 @@
+{
+  "name": "m35-vanish-warning-unconditional",
+  "issue": "85",
+  "concern": "W4",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "「清单消失」告警不看「上轮是否仍有 pending」⇒ 正常恢复后误报（W4）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW4VanishWarningPrecision::test_normal_recovery_does_not_warn_about_vanish"
+  ],
+  "old": "        if self._quarantine_due_count() == 0 and self._get_left_pending():",
+  "new": "        if self._quarantine_due_count() == 0:"
+}

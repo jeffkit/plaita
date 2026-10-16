@@ -1,0 +1,12 @@
+{
+  "name": "68-dominance-match-case",
+  "issue": "68",
+  "concern": "O3",
+  "file": "plaita/core/expression.py",
+  "rationale": "上界调用在 match 分支里（不支配后续渲染）",
+  "old": "    bounds = [_render_size(arg) for arg in args]\n",
+  "new": "    match args:\n        case _:\n            bounds = [_render_size(arg) for arg in args]\n    bounds = [0 for arg in args]\n",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged"
+  ]
+}

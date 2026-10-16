@@ -1,0 +1,12 @@
+{
+  "name": "68-buffer-str-length-for-author-bytes",
+  "concern": "AC2.3/★双向(b)",
+  "file": "plaita/core/expression.py",
+  "old": "    if not _is_bytes_like(value):\n        return None\n",
+  "new": "    if isinstance(value, str):\n        return str.__len__(value)          # 变异：把 str 当 bytes-like（原生不是）\n    if not _is_bytes_like(value):\n        return None\n",
+  "rationale": "bytes 模式的 buffer 上界退回 `_bytes_like_len`（str 也算）⇒ 带作者 __bytes__ 的 str 子类被按字符数放行（fail-open）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFirstRoundRenderDispatch::test_buffer_dispatch_ignores_author_bytes_for_c_slots"
+  ],
+  "issue": "68"
+}

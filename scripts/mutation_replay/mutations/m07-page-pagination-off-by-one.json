@@ -1,0 +1,12 @@
+{
+  "name": "m07-page-pagination-off-by-one",
+  "issue": "85",
+  "concern": "S1",
+  "file": "plaita/event/redis.py",
+  "rationale": "翻页边界 off-by-one：坏载荷吃满一批即停止翻页，后面的有效事件读不到",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS1ExhaustionMustBeExplicit::test_dangling_index_flood_does_not_exhaust_candidates"
+  ],
+  "old": "                if len(entries) < chunk_size:\n                    type_done = True\n                    break",
+  "new": "                if len(entries) <= chunk_size:\n                    type_done = True\n                    break"
+}

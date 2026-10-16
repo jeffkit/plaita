@@ -1,0 +1,12 @@
+{
+  "name": "68-bytes-flat-width",
+  "concern": "AU1",
+  "file": "plaita/core/expression.py",
+  "old": "def _bytes_repr_width(value: Any, prefix: int, prototype: type,\n                      always_escape_apostrophe: bool = False) -> int:\n    r\"\"\"bytes/bytearray 的 repr 上界：可打印 ASCII 1、其余 `\\xNN` 4、`'`/`\\` 最坏 2。\n\n    AX1（第二十八轮）：CPython 的 ``bytearray.__repr__`` **无条件**转义 ``'``，而\n    ``bytes.__repr__`` 只在串里同时含 ``\"`` 时才转义 ``'``（否则换用 ``\"`` 定界）。\n    两者的引号规则必须分开，否则 bytearray 上界低于实际（且能绕过 1e8 硬上限）。\n    AX2：不可打印计数用 ``translate(None, delete)``（1× 临时量），不用 regex `subn`（88×）。\n    \"\"\"\n    length = prototype.__len__(value)\n    total = length + prefix\n    total += prototype.count(value, b\"\\\\\")\n    if always_escape_apostrophe or prototype.__contains__(value, b'\"'):\n        total += prototype.count(value, b\"'\")\n    nonprint = length - prototype.__len__(\n        value.translate(None, _BYTES_DELETE_NONPRINT))\n    short = (prototype.count(value, b\"\\t\") + prototype.count(value, b\"\\n\")\n             + prototype.count(value, b\"\\r\"))\n    # `\\t`/`\\n`/`\\r` 的真实宽度是 2（只 +1），其余不可打印/非 ASCII 才是 `\\xNN`（+3）。\n    total += short + 3 * (nonprint - short)\n    return total\n",
+  "new": "def _bytes_repr_width(value: Any, prefix: int, prototype: type) -> int:\n    return 4 * prototype.__len__(value) + 32\n",
+  "rationale": "bytes repr 上界退回 4×+32 ⇒ bytes `é`*12496（24,992B）被误拒（真实 99,971 ≤ 允许 100,000）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySeventhRoundAsciiThreshold::test_bytes_repr_width_is_exact"
+  ],
+  "issue": "68"
+}

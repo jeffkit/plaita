@@ -1,0 +1,12 @@
+{
+  "name": "m20-rollback-failure-not-marked",
+  "issue": "85",
+  "concern": "T3",
+  "file": "plaita/server/event_filter.py",
+  "rationale": "回滚失败后不打「未完成认领」标记 → 键残留为已投递 → 下轮静默丢单",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5b_rollback_failure_marks_unresolved_and_pins"
+  ],
+  "old": "                                    self.redis_client.set(dedup_key, \"0\", ex=3600)",
+  "new": "                                    pass  # mutated"
+}

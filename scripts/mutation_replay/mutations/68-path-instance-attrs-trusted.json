@@ -1,0 +1,13 @@
+{
+  "name": "68-path-instance-attrs-trusted",
+  "concern": "AG1",
+  "file": "plaita/core/expression.py",
+  "old": "        if issubclass(base, _pathlib_module.PurePath):\n            return _path_render_bound(value, as_repr)\n",
+  "new": "        if issubclass(base, _pathlib_module.PurePath):\n            parts = _pathlib_module.PurePath.parts.__get__(value, base)\n            return 24 + sum(10 * len(part) for part in parts) + len(parts)\n",
+  "rationale": "路径子类回退到 r21 的 `parts` 安全投影：遮蔽 `_str` 的 property 被接受（上界 67 / 实际 10,000,000）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySecondRoundInstanceAttributeShadowing::test_path_attribute_shadowing_is_refused_before_rendering",
+    "tests/unit/test_expression_size_guard.py::TestTwentySecondRoundInstanceAttributeShadowing::test_path_instance_dict_protocol_shadowing_is_refused"
+  ],
+  "issue": "68"
+}

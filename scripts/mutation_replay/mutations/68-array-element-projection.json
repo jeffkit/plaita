@@ -1,0 +1,14 @@
+{
+  "name": "68-array-element-projection",
+  "concern": "AP1",
+  "file": "plaita/core/expression.py",
+  "old": "    \"d\": 26, \"f\": 26,\n",
+  "new": "    \"d\": 24, \"f\": 24,          # 变异：退回旧的 24/元素投影（低估 2）\n",
+  "rationale": "array 每元素退回 24：array('d',[-max]*K) 实际 26/元素 ⇒ 投影低于实际、K=4,166,000 绕过 1e8 硬上限",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_every_typecode_worst_case_has_bound_ge_actual",
+    "tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_array_hard_limit_is_not_bypassed",
+    "tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_array_subclass_and_nested_shapes_are_bounded"
+  ],
+  "issue": "68"
+}

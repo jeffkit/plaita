@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-huge-int-e-native-precedence",
+  "concern": "AC5",
+  "file": "plaita/core/expression.py",
+  "old": "            if not _numeric_slots_clean(value, rule.slots):\n                # 覆写了 __float__/__index__/__int__ 的 int 子类：原生会派发作者协议\n                # ⇒ 不可证 ⇒ 返回 False（调用方拒绝），绝不判 native。\n                return False\n            return int.bit_length(value) > 1024      # 巨大 int ⇒ OverflowError/TypeError\n",
+  "new": "            return False\n",
+  "rationale": "巨大 int 在 e/f/g 上不再判原生 OverflowError/TypeError ⇒ 尺寸错误抢先于原生类型/溢出错误",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSeventeenthRoundT2T3Numeric::test_native_error_precedes_size_error_for_huge_ints"
+  ],
+  "issue": "68"
+}

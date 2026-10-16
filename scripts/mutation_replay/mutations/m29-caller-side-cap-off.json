@@ -1,0 +1,12 @@
+{
+  "name": "m29-caller-side-cap-off",
+  "issue": "85",
+  "concern": "V2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "调用侧不封顶（只信页的 last_position）→ 谎报页静默丢未投递事件",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV2CallerSideCap::test_lying_last_position_page_does_not_lose_events"
+  ],
+  "old": "            new_cursor, capped_by_caller = advance_boundary(\n                proposed_cursor, delivered_ok,\n            )",
+  "new": "            new_cursor, capped_by_caller = proposed_cursor, False"
+}

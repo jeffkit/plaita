@@ -1,0 +1,13 @@
+{
+  "name": "68-dominance-comprehension-iterable",
+  "concern": "T6",
+  "file": "tests/unit/test_expression_size_guard.py",
+  "old": "    if _inside_comprehension_iterable(site_node, parents) is not None and \\\n            _comprehension_ancestors(call_node, parents):\n        # Z3/T6：站点的渲染点在**任一**推导式的 iter 里（含嵌套），而上界调用在**任一**\n        # 推导式里 ⇒ iter 先于元素求值（嵌套时外层 iter 先于内层元素），调用不支配它。\n        return False\n",
+  "new": "",
+  "rationale": "删除推导式 iter 支配检查 ⇒ 深度 1/嵌套推导式假绿",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSeventeenthRoundT4T5T6::test_comprehension_iterable_is_not_dominated",
+    "tests/unit/test_expression_size_guard.py::TestEighteenthRoundZ3Z4Z5::test_nested_comprehension_iterable_is_not_dominated"
+  ],
+  "issue": "68"
+}

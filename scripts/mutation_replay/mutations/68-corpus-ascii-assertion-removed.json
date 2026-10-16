@@ -1,0 +1,12 @@
+{
+  "name": "68-corpus-ascii-assertion-removed",
+  "concern": "AR1",
+  "file": "tests/unit/test_expression_size_guard.py",
+  "old": "                if repr_bound < len(ascii(value)):\n                    misses.append((\"ascii\", label, repr_bound, len(ascii(value))))\n                for conversion, expected in ((\"r\", len(repr(value))),\n                                             (\"a\", len(ascii(value)))):",
+  "new": "                if repr_bound < len(repr(value)):\n                    misses.append((\"ascii\", label, repr_bound, len(repr(value))))\n                for conversion, expected in ((\"r\", len(repr(value))),\n                                             (\"a\", len(repr(value)))):",
+  "rationale": "语料去掉 ascii 断言（退回只比 repr）⇒ 护栏用例必须红（证明该断言在防“结构不可见”）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySixthRoundAsciiExpansion::test_corpus_asserts_ascii_expansion"
+  ],
+  "issue": "68"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "68-content-size-userstring-recursion",
+  "concern": "T5",
+  "file": "plaita/core/expression.py",
+  "old": "    # T5：精确 UserString/UserList 的迭代器产出**还是包装类型**（长度 1）⇒ 通用容器\n    # 分支会无限递归到预算耗尽。走它们的精确 `.data`（C 槽读；不是精确内建 ⇒ 具名拒绝）。\n    if cls is _collections.UserString:\n        data = object.__getattribute__(value, \"data\")\n        if type(data) is not str:\n            raise ValueError(\n                f\"$F.* cannot bound 'UserString' with non-exact .data; \"\n                f\"{_ESCAPE_LIST_HINT}\")\n        return str.__len__(data)\n    if cls is _collections.UserList:\n        data = object.__getattribute__(value, \"data\")\n        if type(data) is not list:\n            raise ValueError(\n                f\"$F.* cannot bound 'UserList' with non-exact .data; \"\n                f\"{_ESCAPE_LIST_HINT}\")\n        value = data\n    elif isinstance(value, (_collections.UserString, _collections.UserList)):\n        # T5：子类可以覆写 __iter__ ⇒ 读它的迭代器就是跑作者代码；在迭代前拒绝。\n        raise ValueError(\n            f\"$F.* cannot bound {_type_name(value)} (UserString/UserList 子类; \"\n            f\"迭代会跑作者 __iter__). {_ESCAPE_LIST_HINT}\")\n",
+  "new": "",
+  "rationale": "UserString/UserList 退回通用容器分支（迭代器产出还是包装类型 ⇒ 无限递归）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSeventeenthRoundT4T5T6::test_userstring_and_userlist_use_their_data"
+  ],
+  "issue": "68"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "m13-quarantine-pins-instead-of-advancing",
+  "issue": "85",
+  "concern": "T1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "坏条目隔离后仍钉住游标（不推进）→ 其后的尾部事件被永久饿死",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT1QuarantineAndAdvance::test_a4a_one_dangling_then_six_valid",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT1QuarantineAndAdvance::test_a4d_persisted_cursor_dangling_front_across_rounds"
+  ],
+  "old": "            new_cursor = page.last_position",
+  "new": "            new_cursor = after"
+}

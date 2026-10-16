@@ -1,0 +1,12 @@
+{
+  "name": "68-bytes-subn-counting",
+  "concern": "AX1/AX2/AX3",
+  "file": "plaita/core/expression.py",
+  "old": "    nonprint = length - prototype.__len__(\n        value.translate(None, _BYTES_DELETE_NONPRINT))",
+  "new": "    nonprint = _re_module.subn(rb\"[^\\x20-\\x7e]\", b\"\", value)[1]",
+  "rationale": "不可打印计数退回 regex `subn`（每匹配一个 match 对象）⇒ 上界计算自身 88× 输入内存",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyEighthRoundBytearrayAndBoundPeak::test_bound_computation_peak_budget"
+  ],
+  "issue": "68"
+}

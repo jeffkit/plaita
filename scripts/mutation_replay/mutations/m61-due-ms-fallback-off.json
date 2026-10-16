@@ -1,0 +1,12 @@
+{
+  "name": "m61-due-ms-fallback-off",
+  "issue": "85",
+  "concern": "AI2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "due_ms 非法不再回落 ⇒ 该字段永久不可自愈、卡住游标（AI2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI2BoundedNoAdvance::test_non_numeric_due_ms_does_not_block_the_rest"
+  ],
+  "old": "            return now_ms",
+  "new": "            raise"
+}

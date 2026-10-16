@@ -1,0 +1,12 @@
+{
+  "name": "m39-heal-off",
+  "issue": "85",
+  "concern": "AA3",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "关闭 hash-only 自愈 → 只有元数据的 pending 永不重试（AA3）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA3TwoKeyDivergence::test_hash_only_pending_is_healed_and_recovered"
+  ],
+  "old": "        start_idx = min(marker, len(items))          # AH2：跳过已完成前缀",
+  "new": "        start_idx = len(items)"
+}

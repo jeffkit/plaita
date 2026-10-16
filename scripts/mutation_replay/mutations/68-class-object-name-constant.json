@@ -1,0 +1,12 @@
+{
+  "name": "68-class-object-name-constant",
+  "concern": "AM1",
+  "file": "plaita/core/expression.py",
+  "old": "    if cls is type or (isinstance(value, type) and _dunder_is_builtin(cls, \"__repr__\", type)):\n        # AM1：`type.__repr__`/`type.__str__` 输出 `<class '__module__.qualname'>`，\n        # 两个名字**建成后仍可写** ⇒ 必须读真实值（不可变 getters），不能用常量。\n        name = _class_name_bound(value)\n        return None if name is None else name + 64\n",
+  "new": "    if cls is type or (isinstance(value, type) and _dunder_is_builtin(cls, \"__repr__\", type)):\n        return 256\n",
+  "rationale": "类对象 repr 退回常量 256：`type(\"E\"*1e7,(),{})` 投影 256 / 实际 10,000,019",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFourthRoundConstantBounds::test_author_writable_class_names_are_bounded"
+  ],
+  "issue": "68"
+}

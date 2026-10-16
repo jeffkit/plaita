@@ -1,0 +1,12 @@
+{
+  "name": "m27-delivery-failure-bypasses-window",
+  "issue": "85",
+  "concern": "V1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "投递失败分支绕过放弃窗（只有读不到才判超窗）→ 毒条目 attempts 无限增长、永远 pending",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV1QuarantineRetryWindow::test_poison_entry_beyond_window_is_abandoned_loudly"
+  ],
+  "old": "            over_window = (\n                attempts >= QUARANTINE_MAX_ATTEMPTS\n                or (now - first_seen) >= QUARANTINE_ABANDON_SECONDS\n            )",
+  "new": "            over_window = (event is None and (\n                attempts >= QUARANTINE_MAX_ATTEMPTS\n                or (now - first_seen) >= QUARANTINE_ABANDON_SECONDS\n            ))"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "m15-unresolved-claim-not-recognized",
+  "issue": "85",
+  "concern": "T3",
+  "file": "plaita/server/event_filter.py",
+  "rationale": "未完成认领（值 0）被当成已投递 → 回滚失败的事件被静默跳过、永久丢",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5b_rollback_failure_marks_unresolved_and_pins"
+  ],
+  "old": "            return self._decode_state(self.redis_client.get(dedup_key)) == \"0\"",
+  "new": "            return False"
+}

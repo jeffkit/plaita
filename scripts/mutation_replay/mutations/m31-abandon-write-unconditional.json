@@ -1,0 +1,12 @@
+{
+  "name": "m31-abandon-write-unconditional",
+  "issue": "85",
+  "concern": "V4",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "放弃写回不做条件判定 → 可把已投递/已放弃条目重写成 abandoned（假 ERROR，V4）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV4ConditionalAbandon::test_abandon_write_requires_still_pending"
+  ],
+  "old": "        applied = self._quarantine_cond_update(event_id, _mut)\n        if applied:\n            # AY3②(a)：放弃后必须**同时**离开 due 索引，否则 `HLEN-ZCARD-abandoned`\n            # 在「已放弃但仍在 due」的窗口里**低估 gap**（漏报），且看门狗若插在中间\n            # 会看到漂移。ZREM 幂等，调用方重复移除无害。\n            try:\n                self.redis_client.zrem(self._due_key(), event_id)\n            except Exception as e:  # noqa: BLE001 — 移除失败只是下一轮再试\n                logger.warning(\"事件回扫: 放弃时移出 due 失败: %s\", e)\n            self._abandoned_count_add(1)      # AV1②：非 pending 不计入 gap\n        return applied",
+  "new": "        applied = True  # V4 mutation: 不做条件判定\n        return applied"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "68-bytes-mode-fail-open",
+  "concern": "AC2/AC5",
+  "file": "plaita/core/expression.py",
+  "old": "    if kind == \"buffer\":\n        # bytes 模式的 `s`/`b`：真 buffer 直读；否则原生派发 `__bytes__`\n        # （类里没有 ⇒ 必然 TypeError；有 ⇒ 不可证 ⇒ 交给 `_conversion_accepts` 拒）。\n        return not _is_bytes_like(value) and not _has_raw_slot(cls, \"__bytes__\")\n",
+  "new": "    if kind == \"buffer\":\n        return True\n",
+  "rationale": "bytes 模式把「可能有作者 __bytes__」一律判原生必错 ⇒ 放行给原生（跑作者协议、放大）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSixteenthRoundS1BytesMode::test_native_decision_implies_native_failure_fuzz",
+    "tests/unit/test_expression_size_guard.py::TestSixteenthRoundS1BytesMode::test_author_bytes_protocol_is_refused_without_running_it"
+  ],
+  "issue": "68"
+}

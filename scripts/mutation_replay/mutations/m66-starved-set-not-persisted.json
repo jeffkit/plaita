@@ -1,0 +1,12 @@
+{
+  "name": "m66-starved-set-not-persisted",
+  "issue": "85",
+  "concern": "AL1/AL2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "饥饿集合不落库 ⇒ 跨重启的饥饿失去记忆（AL1/AL2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL2SingleStarvedAcrossRestarts::test_single_starved_field_is_named_despite_restarts"
+  ],
+  "old": "                if self.redis_client.hsetnx(self._starved_key(), eid, rnd):",
+  "new": "                if False:"
+}

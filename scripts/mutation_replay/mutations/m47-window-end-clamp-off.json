@@ -1,0 +1,12 @@
+{
+  "name": "m47-window-end-clamp-off",
+  "issue": "85",
+  "concern": "AD5",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "推进不夹到 window_end ⇒ 伪造 skipped 可把游标推到未来并粘住（AD5）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD5WindowEndClamp::test_forged_skipped_cannot_push_cursor_beyond_window"
+  ],
+  "old": "        if new_cursor is not None and new_cursor[0] > window_end:",
+  "new": "        if False:"
+}

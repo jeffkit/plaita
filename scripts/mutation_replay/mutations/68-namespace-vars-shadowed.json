@@ -1,0 +1,13 @@
+{
+  "name": "68-namespace-vars-shadowed",
+  "concern": "AG2",
+  "file": "plaita/core/expression.py",
+  "old": "        namespace = _NAMESPACE_DICT_DESCRIPTOR.__get__(value, type(value))\n",
+  "new": "        namespace = vars(value)          # 变异：回到 r21 的 vars()，会跑作者 __dict__ property\n",
+  "rationale": "SimpleNamespace 的真实实例 dict 改回 `vars()`：决策路径跑作者 property（3 次调用）且上界按 property 投影",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySecondRoundInstanceAttributeShadowing::test_namespace_dict_shadowing_uses_the_real_instance_dict",
+    "tests/unit/test_expression_size_guard.py::TestTwentySecondRoundInstanceAttributeShadowing::test_decision_path_has_zero_author_calls_for_all_shadow_shapes"
+  ],
+  "issue": "68"
+}

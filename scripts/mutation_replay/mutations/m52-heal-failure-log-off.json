@@ -1,0 +1,12 @@
+{
+  "name": "m52-heal-failure-log-off",
+  "issue": "85",
+  "concern": "AF5",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "自愈失败路径不汇总 ⇒ 失败静默（AF5）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF5DoubleFaultLoud::test_failure_path_is_aggregated"
+  ],
+  "old": "            failed = len(still) + leftover",
+  "new": "            failed = 0  # AF5 mutation: 失败路径不报"
+}

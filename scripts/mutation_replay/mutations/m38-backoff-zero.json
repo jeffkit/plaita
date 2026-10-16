@@ -1,0 +1,12 @@
+{
+  "name": "m38-backoff-zero",
+  "issue": "85",
+  "concern": "AA2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "失败后不推后（backoff=0）→ 冻结时钟下同一条目永远被选中，饿死其余（AA2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA2AbsoluteDue::test_backoff_survives_a_frozen_clock"
+  ],
+  "old": "        backoff = max(1, min(int(attempts), QUARANTINE_BACKOFF_MAX))",
+  "new": "        backoff = 0"
+}

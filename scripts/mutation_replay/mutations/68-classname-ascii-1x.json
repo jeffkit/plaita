@@ -1,0 +1,12 @@
+{
+  "name": "68-classname-ascii-1x",
+  "concern": "AR1",
+  "file": "plaita/core/expression.py",
+  "old": "        total += 10 * str.__len__(part)",
+  "new": "        total += str.__len__(part)",
+  "rationale": "类名退回 1×：`%a` 下 `type(\"É\"*1000,(),{})` 投影 1064 / 实际 4009",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded"
+  ],
+  "issue": "68"
+}

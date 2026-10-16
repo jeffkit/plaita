@@ -1,0 +1,12 @@
+{
+  "name": "m48-pin-streak-in-process",
+  "issue": "85",
+  "concern": "AF1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "钉住计数退回进程内 ⇒ 每轮重启时永不 giveup、尾巴永久饿死（AF1）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF1PinnedGiveupAcrossRestarts::test_restart_every_round_still_gives_up_and_delivers_tail"
+  ],
+  "old": "            n = int(self.redis_client.incr(self._pin_streak_key()) or 1)",
+  "new": "            n = self._quarantine_pin_streak + 1"
+}

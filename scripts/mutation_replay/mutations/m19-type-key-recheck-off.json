@@ -1,0 +1,12 @@
+{
+  "name": "m19-type-key-recheck-off",
+  "issue": "85",
+  "concern": "T6",
+  "file": "plaita/event/redis.py",
+  "rationale": "不做「页读期间新建类型键」复核 → 不一致视图下假报排空、漏扫",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT6ExhaustedConsistency::test_new_type_key_created_during_read_is_not_reported_exhausted"
+  ],
+  "old": "        if exhausted and event_type is None:",
+  "new": "        if False:  # mutated"
+}

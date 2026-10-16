@@ -1,0 +1,12 @@
+{
+  "name": "m33-zero-delivery-without-evidence-allowed",
+  "issue": "85",
+  "concern": "W2",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "零投递的反活锁例外不再要求隔离证据 ⇒ 违约页静默越过未投递事件（W2）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW2ZeroDeliveryEvidence::test_zero_delivery_without_evidence_is_loud_and_does_not_advance"
+  ],
+  "old": "            if not reconciled:",
+  "new": "            if False:"
+}

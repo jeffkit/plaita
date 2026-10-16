@@ -1,0 +1,12 @@
+{
+  "name": "68-e-family-snan-native",
+  "concern": "AB4",
+  "file": "plaita/core/expression.py",
+  "old": "        # AB4：Decimal('sNaN') 原生是 TypeError；float 的 inf/nan 原生**成功**。\n        if _is_signaling_nan(value):\n            return True\n",
+  "new": "",
+  "rationale": "e/f/g 家族不再对 sNaN 让原生先抛（bytes 模式原生是 TypeError）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestNineteenthRoundABAdversarialCorpus::test_snan_surfaces_native_errors_in_both_modes"
+  ],
+  "issue": "68"
+}

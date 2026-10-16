@@ -1,0 +1,13 @@
+{
+  "name": "m59-marker-write-dead",
+  "issue": "85",
+  "concern": "AI1",
+  "file": "plaita/server/event_reconcile.py",
+  "rationale": "片内进度写入变死代码 ⇒ 不可捕获崩溃后无法收敛（AI1）",
+  "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI1MarkerWrite::test_uncatchable_crash_still_converges",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI1MarkerWrite::test_kv_set_str_roundtrip"
+  ],
+  "old": "    def _kv_set_str(self, key: str, value: str) -> None:",
+  "new": "    def _kv_set_str(self, key: str, value: str) -> None:\n        return  # 不写"
+}

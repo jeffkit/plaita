@@ -1,0 +1,12 @@
+{
+  "name": "68-function-qualname-constant",
+  "concern": "AM1",
+  "file": "plaita/core/expression.py",
+  "old": "    if cls is _types_module.FunctionType:\n        # AM1：`<function QUALNAME at 0x…>`，`__qualname__` 可写（实测 10,000,026）。\n        return _function_repr_bound(value)\n",
+  "new": "    if cls is _types_module.FunctionType:\n        return 256\n",
+  "rationale": "函数 repr 退回常量 256：`__qualname__=\"E\"*1e7` ⇒ 投影 256 / 实际 10,000,026",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFourthRoundConstantBounds::test_function_qualname_is_bounded"
+  ],
+  "issue": "68"
+}
