@@ -24,6 +24,7 @@ import os
 from contextvars import ContextVar, Token
 from typing import Any, List, Optional
 
+from ..core.errors import ExecutionLeaseError
 from ..logger import logger
 from .base import ExecutionState, ExecutionStorage
 from .redis import (
@@ -33,11 +34,6 @@ from .redis import (
     execution_start_time_score,
     execution_state_ttl_seconds,
 )
-
-try:  # server/__init__ 仅含轻量辅助，无循环导入风险
-    from ..server.execution_lease import ExecutionLeaseError
-except ImportError:  # pragma: no cover — 极端打包环境退化为 RuntimeError
-    ExecutionLeaseError = RuntimeError  # type: ignore[misc,assignment]
 
 
 # 单段 Lua：fence 世代匹配才允许写执行状态。

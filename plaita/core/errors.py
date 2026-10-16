@@ -308,3 +308,13 @@ class ErrorHandler(BaseModel):
 
 class RecoverableErrorHandler(ErrorHandler):
     retry_times: int = Field(0, alias="retryTimes")
+
+
+class ExecutionLeaseError(RuntimeError):
+    """执行租约失守（resume 抢占失败 / fence 世代失配）。
+
+    定义下沉到 core（plaita#96）：storage（fenced CAS 写拒绝旧世代）与
+    server（execution_lease / flow_worker）两侧必须共用**同一类对象**——
+    定义留在 server 曾迫使 storage 相对导入 ``..server``，构成被分层
+    禁止的反向依赖。server 侧 ``execution_lease.py`` 复用本定义。
+    """

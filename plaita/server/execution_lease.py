@@ -12,6 +12,8 @@ import logging
 import uuid
 from typing import Optional, Protocol, Union
 
+from ..core.errors import ExecutionLeaseError  # re-export（#96 下沉定义，身份不变）
+
 logger = logging.getLogger("plaita.server.execution_lease")
 
 DEFAULT_LEASE_TTL_SECONDS = 120
@@ -58,8 +60,9 @@ return gen
 """
 
 
-class ExecutionLeaseError(RuntimeError):
-    """Raised when resume cannot acquire or keep the execution lease."""
+# ExecutionLeaseError 定义在 plaita.core.errors（plaita#96 下沉）——此处
+# 顶部 re-export，`from plaita.server.execution_lease import ExecutionLeaseError`
+# 的既有导入面（flow_worker / 存量测试）身份不变。
 
 
 # 持有者 token 里嵌入 instance id 的前缀白名单（#50）：只有这几类持有者
