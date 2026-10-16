@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-format-operand-subclass",
+  "concern": "Z4",
+  "file": "plaita/core/expression.py",
+  "old": "    if type(a) not in (str, bytes, bytearray):\n        if isinstance(a, (str, bytes, bytearray)):\n            # Z4.1：子类可覆写 `__mod__`/`__bytes__` ⇒ 原生会跑作者代码且预检被绕过\n            # （实测 `$F.mod(EvilStr(...), …)` 先分配 90.1MB）。一律分配前拒绝。\n            raise ValueError(\n                f\"$F.mod cannot bound the {_type_name(a)} format operand \"\n                f\"(格式串必须是**精确** str/bytes/bytearray; 子类可覆写 __mod__/__bytes__). \"\n                f\"Refusing to build an unbounded result. {_RENDER_ESCAPE_HINT}\"\n            )\n        return _native_mod(a, b)\n",
+  "new": "    if not isinstance(a, (str, bytes, bytearray)):\n        return _native_mod(a, b)\n",
+  "rationale": "格式操作数允许子类 ⇒ 原生 `__mod__`/`__bytes__` 在预检前被跑（90MB 级）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestEighteenthRoundZ3Z4Z5::test_format_operand_subclass_is_refused_before_allocation"
+  ],
+  "issue": "68"
+}

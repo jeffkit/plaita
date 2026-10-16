@@ -1,0 +1,12 @@
+{
+  "name": "68-uuid-int-read-constant",
+  "concern": "AG1",
+  "file": "plaita/core/expression.py",
+  "old": "        if base is _uuid_module.UUID:\n            return _uuid_render_bound(value, as_repr)\n",
+  "new": "        if base is _uuid_module.UUID:\n            return 64\n",
+  "rationale": "UUID 子类回退到常量 64：遮蔽 `int` 的 property 被接受（上界 74 / 实际 332,197）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySecondRoundInstanceAttributeShadowing::test_uuid_int_shadowing_is_refused_before_rendering"
+  ],
+  "issue": "68"
+}

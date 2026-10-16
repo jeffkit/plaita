@@ -1,0 +1,12 @@
+{
+  "name": "68-enum-class-name-constant",
+  "concern": "AM1",
+  "file": "plaita/core/expression.py",
+  "old": "    if (isinstance(value, type) and issubclass(value, _enum_module.Enum)\n            and _dunder_is_builtin(cls, \"__repr__\", _enum_module.EnumMeta)):\n        # AM1：`EnumMeta.__repr__` = `<enum 'qualname'>` ⇒ 读真实类名，不能用常量。\n        name = _class_name_bound(value)\n        return None if name is None else name + 32\n",
+  "new": "    if (isinstance(value, type) and issubclass(value, _enum_module.Enum)\n            and _dunder_is_builtin(cls, \"__repr__\", _enum_module.EnumMeta)):\n        return 256\n",
+  "rationale": "enum 类对象 repr 退回常量 256：`enum.Enum(\"E\"*1e7, {\"A\":1})` 投影 256 / 实际 10,000,009",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFourthRoundConstantBounds::test_author_writable_class_names_are_bounded"
+  ],
+  "issue": "68"
+}

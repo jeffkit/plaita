@@ -1,0 +1,13 @@
+{
+  "name": "68-stdlib-only-gate-off",
+  "concern": "AG1/AG2",
+  "file": "plaita/core/expression.py",
+  "old": "            if key in _AUTO_NS_DESCRIPTOR_KEYS \\\n                    and type(raw) is _types_module.GetSetDescriptorType:\n                continue\n            return False\n",
+  "new": "            continue          # 变异：完全跳过实例属性归属检查\n",
+  "rationale": "完全跳过实例属性归属检查（`_stdlib_only_below` 只 continue；为保持缩进把整个 if/return 块换成 continue）：PurePath/UUID 的遮蔽子类被接受",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySecondRoundInstanceAttributeShadowing::test_path_attribute_shadowing_is_refused_before_rendering",
+    "tests/unit/test_expression_size_guard.py::TestTwentySecondRoundInstanceAttributeShadowing::test_uuid_int_shadowing_is_refused_before_rendering"
+  ],
+  "issue": "68"
+}

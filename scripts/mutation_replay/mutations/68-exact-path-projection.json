@@ -1,0 +1,13 @@
+{
+  "name": "68-exact-path-projection",
+  "concern": "AJ1",
+  "file": "plaita/core/expression.py",
+  "old": "    if cls in _PATH_EXACT_TYPES:\n        # AJ1（第二十三轮）：精确 `PurePath` 的 `_str`/`_drv`/`_root` 槽同样可写\n        # （`p._str = \"E\"*1e7` ⇒ 投影 67 / 实际 10,000,000）⇒ 精确类型也走同一道闸\n        # （`_path_state_chars` 读的**就是**真实槽，所以精确类型同样成立）。\n        return _path_render_bound(value, as_repr)\n",
+  "new": "    if cls in _PATH_EXACT_TYPES:\n        try:\n            return 24 + sum(10 * len(part) for part in value.parts) + len(value.parts)\n        except Exception as exc:              # noqa: BLE001\n            _render_unmeasurable(exc)\n            return None\n",
+  "rationale": "精确 PurePath 分支回退到 r22 的 `value.parts` 投影：`p._str=\"E\"*1e7` 被接受（投影 67 / 实际 10,000,000）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyThirdRoundExactTypeSlots::test_exact_path_slot_writes_are_bounded_or_refused",
+    "tests/unit/test_expression_size_guard.py::TestTwentyThirdRoundExactTypeSlots::test_exact_path_slot_writes_refuse_before_allocating"
+  ],
+  "issue": "68"
+}

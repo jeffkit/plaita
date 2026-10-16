@@ -1,0 +1,13 @@
+{
+  "name": "68-bytearray-apostrophe-rule",
+  "concern": "AX1/AX2/AX3",
+  "file": "plaita/core/expression.py",
+  "old": "        return _bytes_repr_width(value, _BYTEARRAY_REPR_PREFIX, bytearray,\n                                 always_escape_apostrophe=True)",
+  "new": "        return _bytes_repr_width(value, _BYTEARRAY_REPR_PREFIX, bytearray)",
+  "rationale": "bytearray 退回 bytes 的引号规则 ⇒ bytearray(b\"'''\") 上界 17 < 实际 20（r27 回归）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyEighthRoundBytearrayAndBoundPeak::test_bytearray_apostrophe_rule_matches_native_exhaustively",
+    "tests/unit/test_expression_size_guard.py::TestTwentyEighthRoundBytearrayAndBoundPeak::test_bytearray_apostrophe_hard_limit_is_not_bypassed"
+  ],
+  "issue": "68"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "68-numeric-subclass-slots-trusted",
+  "concern": "AB2",
+  "file": "plaita/core/expression.py",
+  "old": "def _numeric_slots_clean(value: Any, slots: Tuple[str, ...]) -> bool:\n    \"\"\"数值子类的相关槽都还是**祖先**的实现 ⇒ 可用 C 槽读真值（否则不可证）。\"\"\"\n    cls = type(value)\n    for base in _NUMERIC_ANCESTORS:\n        if isinstance(value, base):\n            ancestor = base\n            break\n    else:\n        return False\n    if cls is ancestor:\n        return True\n",
+  "new": "def _numeric_slots_clean(value: Any, slots: Tuple[str, ...]) -> bool:\n    return True\n",
+  "rationale": "数值子类槽被覆写仍当可证 ⇒ __int__/__len__/__str__ 进决策路径且上界低估",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestNineteenthRoundABAdversarialCorpus::test_adversarial_corpus_invariants"
+  ],
+  "issue": "68"
+}

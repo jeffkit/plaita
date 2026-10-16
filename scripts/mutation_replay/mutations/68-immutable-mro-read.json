@@ -1,0 +1,12 @@
+{
+  "name": "68-immutable-mro-read",
+  "concern": "AC1",
+  "file": "plaita/core/expression.py",
+  "old": "def _type_mro(cls: type) -> tuple:\n    return _TYPE_MRO_GETTER.__get__(cls, type)\n",
+  "new": "def _type_mro(cls: type) -> tuple:\n    return cls.__mro__\n",
+  "rationale": "类型层 MRO 读回退成属性读 ⇒ 元类数据描述符可欺骗（AC1）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentiethRoundACMetaAndInstrumentation::test_immutable_reads_are_used_for_type_layer_facts"
+  ],
+  "issue": "68"
+}

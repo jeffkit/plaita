@@ -1,0 +1,12 @@
+{
+  "name": "68-dominance-nested-comprehension",
+  "concern": "Z3",
+  "file": "tests/unit/test_expression_size_guard.py",
+  "old": "    if _inside_comprehension_iterable(site_node, parents) is not None and \\\n            _comprehension_ancestors(call_node, parents):\n        # Z3/T6：站点的渲染点在**任一**推导式的 iter 里（含嵌套），而上界调用在**任一**\n        # 推导式里 ⇒ iter 先于元素求值（嵌套时外层 iter 先于内层元素），调用不支配它。\n        return False\n",
+  "new": "    site_comprehension = _inside_comprehension_iterable(site_node, parents)\n    if site_comprehension is not None and site_comprehension in \\\n            _comprehension_ancestors(call_node, parents):\n        return False\n",
+  "rationale": "推导式支配判定退回“同一推导式” ⇒ 嵌套 ≥2 层假绿",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestEighteenthRoundZ3Z4Z5::test_nested_comprehension_iterable_is_not_dominated"
+  ],
+  "issue": "68"
+}

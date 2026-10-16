@@ -1,0 +1,12 @@
+{
+  "name": "68-exact-uuid-slot-constant",
+  "concern": "AJ1",
+  "file": "plaita/core/expression.py",
+  "old": "    if cls is _uuid_module.UUID:\n        # AJ1（第二十三轮）：**精确类型**的实例槽同样可写（`object.__setattr__(u,\"int\",10**400000)`\n        # ⇒ 常量 64 被击穿）⇒ 精确类型也必须走同一道闸，不能走常量。\n        return _uuid_render_bound(value, as_repr)\n",
+  "new": "    if cls is _uuid_module.UUID:\n        return 64\n",
+  "rationale": "精确 UUID 分支回退常量 64：`object.__setattr__(u,\"int\",10**400000)` 被接受（投影 74 / 实际 332,197）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyThirdRoundExactTypeSlots::test_exact_uuid_int_slot_write_is_bounded"
+  ],
+  "issue": "68"
+}

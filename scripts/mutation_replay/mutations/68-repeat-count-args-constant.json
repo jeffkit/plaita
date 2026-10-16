@@ -1,0 +1,12 @@
+{
+  "name": "68-repeat-count-args-constant",
+  "concern": "AM1",
+  "file": "plaita/core/expression.py",
+  "old": "    if cls in _ARG_EMBEDDING_ITERATOR_TYPES:\n        # AM1：`repeat(x)`/`count(start, step)` 的 repr **内嵌参数**（元素/整数）⇒\n        # 读 C `__reduce__` 拿真实参数并递归求界；读不到 ⇒ 拒绝。精确 C 类型，0 作者调用。\n        return _arg_embedding_iter_bound(value, cls)\n",
+  "new": "    if cls in _ARG_EMBEDDING_ITERATOR_TYPES:\n        return 256\n",
+  "rationale": "repeat/count 退回常量 256：`repeat(\"E\"*1e7)` 投影 256 / 实际 10,000,010、`count(10**2000)` 1008",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyFourthRoundConstantBounds::test_repeat_and_count_embed_real_args"
+  ],
+  "issue": "68"
+}

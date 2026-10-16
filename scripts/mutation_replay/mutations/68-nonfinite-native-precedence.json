@@ -1,0 +1,12 @@
+{
+  "name": "68-nonfinite-native-precedence",
+  "concern": "Z2",
+  "file": "plaita/core/expression.py",
+  "old": "        if _is_non_finite_number(value):\n            return True                        # Z2：OverflowError/ValueError\n",
+  "new": "        if _is_non_finite_number(value):\n            return False\n",
+  "rationale": "inf/nan 不再判“原生必错” ⇒ 尺寸错误盖过 OverflowError/ValueError",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestEighteenthRoundZ2NonFinite::test_non_finite_surfaces_native_errors"
+  ],
+  "issue": "68"
+}

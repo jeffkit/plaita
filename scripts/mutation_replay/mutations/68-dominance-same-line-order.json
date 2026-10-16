@@ -1,0 +1,12 @@
+{
+  "name": "68-dominance-same-line-order",
+  "concern": "S5",
+  "file": "tests/unit/test_expression_size_guard.py",
+  "old": "    if call_node.lineno != site_node.lineno:\n        return call_node.lineno < site_node.lineno\n    # S5：**同一行内**必须严格在前（`col_offset`），否则 `x = str(v); b = _render_size(v)`\n    # 这类逆序也会被判\"被支配\"。\n    return call_node.col_offset < site_node.col_offset\n",
+  "new": "    return call_node.lineno <= site_node.lineno\n",
+  "rationale": "同行内只看 lineno（逆序也算支配）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSixteenthRoundS5SameLineOrder::test_call_later_in_the_same_line_does_not_dominate"
+  ],
+  "issue": "68"
+}

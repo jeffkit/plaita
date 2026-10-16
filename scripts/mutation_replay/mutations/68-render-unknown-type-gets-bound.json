@@ -1,0 +1,12 @@
+{
+  "name": "68-render-unknown-type-gets-bound",
+  "concern": "AC1/AC3",
+  "file": "plaita/core/expression.py",
+  "old": "    if _is_plain_namespace(value):\n        return _render_namespace_bound(value)\n    return None\n",
+  "new": "    if _is_plain_namespace(value):\n        return _render_namespace_bound(value)\n    return 256                            # 变异：未知渲染类型给假上界 ⇒ 放行给原生\n",
+  "rationale": "未知渲染类型不再是 None（给假上界 256）⇒ 决策放行、原生跑作者 __str__/__repr__ 放大",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestFifteenthRoundQ3DoomedFields::test_unknown_render_type_before_a_native_error_is_refused"
+  ],
+  "issue": "68"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "68-ascii-budget-uses-own-bound",
+  "concern": "AU1",
+  "file": "plaita/core/expression.py",
+  "old": "        return max(_content_size(value), 1)",
+  "new": "        return max(_render_size(value, as_repr=True) or 0, 1)",
+  "rationale": "`%a` 的成长基准改回**自己的上界**（自买预算）⇒ `😀`*1e6 会渲染 10,000,002 字符（峰值 ~20MB）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentySeventhRoundAsciiThreshold::test_astral_expansion_still_refuses_before_rendering",
+    "tests/unit/test_expression_size_guard.py::TestTwentySeventhRoundAsciiThreshold::test_growth_threshold_is_where_real_expansion_exceeds_budget"
+  ],
+  "issue": "68"
+}

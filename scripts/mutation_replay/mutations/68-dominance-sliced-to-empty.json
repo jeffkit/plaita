@@ -1,0 +1,12 @@
+{
+  "name": "68-dominance-sliced-to-empty",
+  "issue": "68",
+  "concern": "O3",
+  "file": "tests/unit/test_expression_size_guard.py",
+  "rationale": "扫描器不再把 Subscript（`[...][:0]`）算作不支配（O3 修复回退）",
+  "old": "                      ast.With, ast.AsyncWith, ast.Subscript, ast.Match)\n",
+  "new": "                      ast.With, ast.AsyncWith, ast.Match)\n",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged"
+  ]
+}

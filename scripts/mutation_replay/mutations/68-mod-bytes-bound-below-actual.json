@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-bytes-bound-below-actual",
+  "concern": "AC1",
+  "file": "plaita/core/expression.py",
+  "old": "    if rule.kind in (\"str\", \"repr\", \"buffer\"):\n        # S1：bytes 模式 %s/%b 输出就是**原始字节**（不转义），按 buffer 字节数计；\n        # 旧实现落进 float 分支给 32 ⇒ `%b` 配 200 万字节 memoryview 时上界低于实际 2.7 万倍。\n        if spec.precision >= 0:\n            base = min(base, spec.precision)\n        return max(base, width) + 8\n",
+  "new": "    if rule.kind in (\"str\", \"repr\", \"buffer\"):\n        return max(32, width) + 8          # 变异：buffer 字节数不进上界（低于实际）\n",
+  "rationale": "bytes 模式 %s/%b 的上界退回常量 32 ⇒ `%b` 配 200 万字节 memoryview 时上界低于实际 2.7 万倍",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestSixteenthRoundS1BytesMode::test_large_memoryview_bound_is_the_byte_length"
+  ],
+  "issue": "68"
+}

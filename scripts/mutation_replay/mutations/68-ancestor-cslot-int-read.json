@@ -1,0 +1,12 @@
+{
+  "name": "68-ancestor-cslot-int-read",
+  "concern": "AC7",
+  "file": "plaita/core/expression.py",
+  "old": "        if type(value) is not int:\n            # 子类：`int.__index__` C 槽读**真实值**（不跑覆写的 __index__/__int__），\n            # 与原生 `%d` 读真实存储一致。\n            value = int.__index__(value)\n",
+  "new": "        if type(value) is not int:\n            value = value.__index__()\n",
+  "rationale": "int 子类真值读取从 `int.__index__` C 槽退回**实例调用**（跑作者覆写）⇒ 上界被击穿",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestEighteenthRoundZ1NumericSubclasses::test_adversarial_numeric_subclasses_have_no_underestimates"
+  ],
+  "issue": "68"
+}

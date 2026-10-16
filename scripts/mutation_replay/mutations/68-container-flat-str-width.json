@@ -1,0 +1,12 @@
+{
+  "name": "68-container-flat-str-width",
+  "concern": "AX1/AX2/AX3",
+  "file": "plaita/core/expression.py",
+  "old": "                # AX3（第二十八轮）：容器元素与标量共用**真实逐字符**宽度（不再是扁平\n                # 10×），否则预算内的合法值被拒。\n                total += _str_escape_width(item) + extra",
+  "new": "                total += 10 * len(item) + 10 + extra",
+  "rationale": "容器 str 快路退回扁平 10× ⇒ [\"\\n\"*100_000] 的 %a 上界 1,000,038 > 允许 400,008（预算内被拒）",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestTwentyEighthRoundBytearrayAndBoundPeak::test_container_str_fast_path_renders_within_budget"
+  ],
+  "issue": "68"
+}

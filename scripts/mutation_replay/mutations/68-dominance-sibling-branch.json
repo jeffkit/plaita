@@ -1,0 +1,12 @@
+{
+  "name": "68-dominance-sibling-branch",
+  "issue": "68",
+  "concern": "Q5",
+  "file": "tests/unit/test_expression_size_guard.py",
+  "rationale": "兄弟 case/handler 退回只看父字段名（另一分支的渲染点被误判为被支配）",
+  "old": "            if isinstance(current, (ast.ExceptHandler, ast.match_case)):\n                field = id(current)           # Q5：兄弟 case/handler 必须区分\n",
+  "new": "",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestFifteenthRoundQ5SiblingBranches::test_sibling_branches_are_red"
+  ]
+}

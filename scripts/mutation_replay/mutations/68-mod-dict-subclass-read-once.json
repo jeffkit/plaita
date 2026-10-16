@@ -1,0 +1,12 @@
+{
+  "name": "68-mod-dict-subclass-read-once",
+  "issue": "68",
+  "concern": "Q2",
+  "file": "plaita/core/expression.py",
+  "rationale": "dict 子类退回实例 __getitem__（覆写会执行；有状态映射可 TOCTOU）",
+  "old": "                cache[key] = dict.get(snapshot, key, _MISSING)   # C 槽 + 只读一次\n",
+  "new": "                cache[key] = snapshot[key]\n",
+  "expect_fail": [
+    "tests/unit/test_expression_size_guard.py::TestThirteenthRoundO2ModDecisionPath::test_dict_subclass_stateful_getitem_is_read_once_via_c_slot"
+  ]
+}
