@@ -140,6 +140,12 @@ ALLOWED_SILENT_FINGERPRINTS = {
     # 时**保守判「仍在推进」**（返回 True），以免把一个还在沙箱里跑长节点的
     # 执行直接 release 掉租约、任其被 keeper 判死。宁可多观测一轮。
     'if getattr(execution, "cancel_requested", False): | except Exception: | return True',
+    # #91（2026-10-16 落地）重投载体的上下文快照序列化：循环引用等序列化失败
+    # 返回 None ⇒ 上层按「无上下文」走原样重投——重投即处理，fail-safe 语义。
+    "return json.loads(json.dumps(context, default=_default)) | except Exception: | return None",
+    # #81（2026-10-16 落地）node Redis 客户端 LRU(8) 淘汰最旧连接时的 close：
+    # best-effort 关闭，close 失败不破坏连接池与请求路径（淘汰本身已达容量目标）。
+    "evicted.close() | except Exception: | pass",
 }
 
 
