@@ -525,6 +525,20 @@ class Supervisor:
         proposal = self.proposer.propose(context)
         if not proposal or not proposal.get("definition"):
             result["reason"] = "proposer returned no candidate"
+            # #92：**区分两种成因**并给出诊断出口。
+            # 此前「提案阶段失败」（编译门耗尽/输出不可解析 ⇒ propose 返回 None
+            # 但 last_error 非空）与「提案池本来就是空的」（last_error 为空）
+            # 折叠成完全相同的 status/reason，而 last_error/last_source 只留在
+            # proposer 对象上、**返回结构里没有任何字段承载它** ⇒ 自改进循环静默收工。
+            last_error = getattr(self.proposer, "last_error", None)
+            if last_error:
+                result["no_proposal_cause"] = "proposal_failed"
+                result["proposer_error"] = last_error
+                last_source = getattr(self.proposer, "last_source", None)
+                if last_source:
+                    result["proposer_last_source"] = last_source
+            else:
+                result["no_proposal_cause"] = "pool_empty"
             return result
         return self.evaluate_proposal(flow_id, dataset, proposal, baseline=baseline)
 
@@ -643,14 +657,23 @@ class Supervisor:
             consecutive_failures = 0
             if status == "no_proposal":
                 final_status = "no_proposal"
+                # #92：把成因带出去，别让自改进循环"静默收工"到无法归因
+                no_proposal_cause = outcome.get("no_proposal_cause")
                 break
             cand_avg = outcome.get("candidate_report", {}).get("avg_score")
             if status == "improved" and cand_avg is not None and cand_avg >= self.policy.target_score:
                 final_status = "target_reached"
                 break
-        return {
+        result_out = {
             "flow_id": flow_id,
             "final_status": final_status,
             "iterations": iterations,
             "iterations_run": len(iterations),
         }
+        # #92：成因随 `final_status` 一起返回（非 no_proposal 时为 None）
+        result_out["no_proposal_cause"] = locals().get("no_proposal_cause")
+        if locals().get("no_proposal_cause") == "proposal_failed":
+            result_out["proposer_error"] = (
+                (iterations[-1] or {}).get("proposer_error") if iterations else None
+            )
+        return result_out
