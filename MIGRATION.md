@@ -6,7 +6,7 @@
 
 ---
 
-## Unreleased（0.5.x）
+## Unreleased
 
 ### 控制台 resume 请求体新增可选 `params`（plaita#157）
 
@@ -83,6 +83,7 @@ allowlist**；被执行子流程自己声明了非空 `exposeEnv` 时**以声明
   合并），或**父流程不声明** `expose_env`（父级快照为空 ⇒ 整条继承链为空）。
   本单不为此引入哨兵值 / `Optional[None]` 变体来区分"空 vs 未声明"：那会改变
   `Flow(**ir)` 的既有可序列化形状，超出本单 Boundary。
+
 ### Redis URL 解析：畸形形态从「静默回落 localhost」改为具名拒绝（plaita#88）
 
 `plaita/server/factory.py::_parse_redis_url` 此前用手写正则只认
@@ -930,7 +931,6 @@ meta-deceived shadow）× 7 格式（str/bytes 两模式）= 140 检查 / 0 违�
   实例确实会走 `getattr`（子类实例有 `__dict__`），但返回值只被 `match()` 当
   **布尔**消费、不回流表达式求值，因此不构成逃逸面；详见该函数上方注释。
 
-
 ### http 节点：`$NODE.<http_id>` 由**裸响应体**变为**结果结构**（plaita#129）
 
 `http` 节点历史上把响应上下文用 `set_state("$NODE.<id>.RESPONSE", …)` 写入，但状态层
@@ -1083,44 +1083,6 @@ HTTP 节点的 `allowedHosts` / `deniedHosts` / `blockPrivateNetworks` 此前**�
   sync/async 同归 **1002**（`DO_REQUEST`，错误帧带请求快照、无响应）；响应体超限
   （`ResponseTooLargeError`）两条路径同归 **1003**（`NODE_EXEC`，错误帧带响应快照）。
 
-### 安全与分布式加固（2026-09 R4 定向深潜轮）
-
-安全专项（威胁模型：能写流程 JSON 的人是半信任主体）：
-
-1. **CodeNode 后端白名单**：`register_code_node(allowed_backends=(...))` 设置后，
-   流程 JSON 里的 `sandbox_backend` 不在白名单内即**解析期硬失败**。此前流程作者
-   可把运营者选定的默认后端逐节点覆盖为 `"unsafe"`（宿主任意代码执行）。
-2. **restricted 沙箱移除 `functools`/`operator`**：`operator.attrgetter("__class__")`
-   走 C 层属性访问绕过 `_getattr_` 拦截，可完整逃逸（确定性 PoC 已验证）。
-   restricted 定位收敛为"仅防误用"，禁止用于半信任作者。
-3. **subprocess 沙箱环境变量白名单**：子进程不再继承宿主全量 `os.environ`
-   （历史等于把 API key/云凭证交给沙箱内代码）。白名单外用
-   `code.SUBPROCESS_ENV_EXTRA` 按需补充。注意 macOS 无 RLIMIT 内存上限。
-4. **HTTP 节点 SSRF 防护钩子**（默认行为不变）：新增 `requestTimeout`（默认 30s）、
-   `allowedHosts` / `deniedHosts`（精确/`*.suffix`/CIDR）、`blockPrivateNetworks`、
-   `maxRedirects`。任一策略激活时重定向改为逐跳校验后手动跟随。
-5. **`$F.pow` 指数上限**（默认 **1000000**，owner 的 K1 口径：上限取真实流量不可达量级）
-   + **分配前**结果规模预检（`int` 结果的位数 ≤ `|b| × digits(a)`，放大由渲染闸负责）：
-   `$F.pow(9, 9999999)` 这类 20 字节表达式仍在分配前拒（指数超上限），
-   `$F.pow(2, 20000)`（6KB，纯数据）**通过**，`$F.pow(9, 999999)`（~1MB，放大）按渲染闸拒。
-6. **`expose_env` 拒绝 `"*"`/空串/带空白键**：此前静默落空（以为暴露了实际没有）。
-
-分布式专项（Redis 全链路实测）：
-
-7. **RedisEventBus/RedisExecutionStorage 客户端按事件循环重建**：worker 每个分布式步骤
-   跑在新建的 asyncio 循环里，缓存的 aioredis 连接跨循环失效——含 event 节点的
-   流程约每两次挂起即失败一次并丢单。修复后按循环重建（外部注入的客户端不接管）。
-8. **重复投递的 resume 任务幂等短路**：终态执行的 resume 原样返回，不再把
-   completed/error 改写。`redis publish` 的 dict/str 形式支持 `correlation_id`
-   关键字（EventFilter 的 correlation 匹配此前无法通过该形式设置）。
-9. **subprocess 沙箱地址空间上限默认关闭**：`PLAITA_SANDBOX_MEMORY_MB` 默认值
-   从 256 改为 **0（不限制）**。RLIMIT_AS 卡的是虚拟地址而非 RSS，Linux 上
-   256MB 让 node/pnpm 类命令启动即 V8 OOM（V8 启动期预留远超 256MB 虚拟地址），
-   失败只剩截断崩溃栈；macOS 不强制 RLIMIT_AS，故本地部署从未暴露。
-   - 变更前：默认 256MB，Linux 上 node/npm/pnpm 系代码节点、setup、gate 全部不可用。
-   - 迁移：无需动作。确有需要（纯 Python 小脚本、多租户防护）才显式设
-     `PLAITA_SANDBOX_MEMORY_MB=<MB>`；node 系命令请保持 0。
-
 ### writefile 写入 jail 默认开启（2026-10）
 
 **部署入口注入 `PLAITA_NODES_WORKSPACE_ROOT`**（plaita#39）：`writefile` 节点
@@ -1203,90 +1165,6 @@ HTTP 节点的 `allowedHosts` / `deniedHosts` / `blockPrivateNetworks` 此前**�
   `PLAITA_CODE_BACKEND=docker`。多租户部署保持默认（`docker`）即可。
   详见 [运维 Runbook · code 沙箱后端白名单](docs-site/docs/distributed/ops-runbook.md#code-沙箱后端白名单)。
 
-### 编排内核行为收紧（2026-09 评审修复轮，建议以 0.6.0 发布）
-
-本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程
-本身有配置问题——以下是判断与迁移方法：
-
-1. **switch/if 分支未命中且无 default → 抛 `FlowExecutionException`**
-   - 变更前：调度层把整个 `$NODE` 状态表当流程结果返回，流程"成功"结束。
-   - 迁移：给分支节点补 default 分支；或在该节点上配
-     `"errorHandler": {"strategy": "continue"}` 显式保留旧的跳过行为。
-2. **http 节点失败 → raise（errorHandler 真正生效）**
-   - 变更前：请求失败时把 `NodeException` 对象当**节点结果**返回，下游拿到
-     异常对象当数据用；`errorHandler` 的 continue/continue_with 永不生效。
-   - 迁移：依赖旧行为（拿到 NodeException 对象继续跑）的流程，改为配置
-     `errorHandler`（`continue` / `continue_with` + `defaultValue`）。
-   - 同时修复了 http 节点表达式求值的参数颠倒——0.5.x 里真实 HTTP 请求
-     实际上从不成功（集成测试全 mock 未覆盖真实路径）。
-3. **挂起中的 EventNode 拒绝 `resume_type="continue"` 绕过**（抛 `ResumeError`）：
-   必须先用 `event`/`cancel`/`timeout` 消费事件，之后才能 continue 推进。
-4. **分布式 resume 完成后注销事件订阅**：此前死订阅会持续匹配后续同类型
-   事件。依赖"死订阅仍命中"的行为（不应该存在）需自行改掉。
-5. **`FlowExecution` 实例不可重入**：同一实例并发/重入 run 会抛错。并发场景
-   每次新建实例（`Flow.run()` 每次新建，不受影响）。
-6. **End 节点 `resultType` 默认 `success`**：不再需要显式写
-   `"resultType": "success"` 才能拿到 output；未知的 resultType 值打
-   warning 并按 success 处理（此前静默返回 None）。
-7. **未知配置键告警**：节点/Flow JSON 里拼错的字段名（如 `conditon`）现在
-   打 warning（含合法键清单），不再被 pydantic `extra=ignore` 静默吞掉。
-   CI 里若把 warning 当错误需注意存量流程的清理。
-8. **`ExecutionMode.from_string` 非法值抛 `ValueError`**（原裸 `KeyError`）；
-   `parse()` 对非 python runtime 抛 `ValueError`（原 `RuntimeError`）。
-9. **`retryTimes` 负数按 0 处理**：至少执行一次节点；此前负数会静默跳过
-   节点执行并吞掉 abort 错误。
-10. **PlaitaClient**：新增 `PlaitaClientError`/`PlaitaClientNetworkError`/
-    `PlaitaClientResponseError`（均继承 `Exception`，老 `except Exception` 不受影响）；
-    `run_flow` 不传 `input_data` 现在等价于 `{}`；`clear_cache(flow_id)` 只清
-    该 flow 的版本（此前静默清空全部）。
-11. **`timeout` 字段非法格式**（如 `"100ms"`）抛 `ValueError` 并列出合法写法
-    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
-12. **表达式默认注册表未知函数 → `NameError`**（带 did-you-mean 与可用清单）：
-    `$F.JSON_DUMPS(...)` 这类拼写错误不再返回 `'undefined'` 字符串流入下游。
-    scoped 自定义注册表保持 `'undefined'` 契约不变。
-13. **可疑字面量告警**：表达式位置出现 `{{name}}`、f-string、`await ...`、
-    裸函数调用等"其他语言模板/代码习惯"的字符串，现在打 warning（原样返回
-    不变，历史上零告警）。
-14. **JSON 路径结构检查告警**：`Flow.from_string` 现在会跑 ir_validate 的
-    结构检查（id 重复 / next 悬空 / if 缺分支目标 / switch 缺 default /
-    子流程节点缺 childFlow），命中即 warning——历史上这些只在
-    Builder/codeflow 路径生效，JSON 路径重复 id 静默 last-wins。
-15. **`$FLOW` 别名 / 表达式 KeyError 带可用根清单 / YAML fallback 告警**：
-    `$FLOW` 等价 `$FLOW_ID`；未知根的 KeyError 列出全部可用根；JSON 解析
-    失败但 YAML fallback 成功时打 warning（YAML 会把裸 `no/on` 篡改成
-    `False/True`）。
-
-
-    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
-
-
-### Storage：`db` 执行/流程存储从公开路径下架
-
-**变更前**：`--execution-storage-type db` / `--flow-storage-type db` 以及
-`create_storage_component("db", "execution"|"flow")` 会实例化
-`SqlalchemyExecutionStorage` / `SqlalchemyFlowStorage`。
-**问题**：这些实现的方法是 `async def`，而 `ExecutionStorage`/`FlowStorage` ABC
-与 `FlowWorker`/`EventFilter` 均为**同步**调用——状态不会真正落盘（coroutine 被当返回值）。
-
-**变更后**：
-
-- factory 对 `db` + `execution`/`flow` 直接 `ValueError`（说明原因与替代方案）
-- FlowWorker / EventFilter CLI：`--execution-storage-type` / `--flow-storage-type`
-  仅接受 `memory` | `redis`
-- `db` **subscription** / **event-bus** 另需 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`（见下节）
-- `plaita.storage.sqlalchemy` 类保留供实验，**不得**再经公开 factory/CLI 用于执行状态
-
-```diff
--python -m plaita.server.flow_worker --execution-storage-type db --database-url ...
-+python -m plaita.server.flow_worker --execution-storage-type redis --redis-url ...
-```
-
-```diff
--create_storage_component("db", "execution", database_url=...)
-+create_storage_component("redis", "execution", redis_url=...)
-+# 或 memory（单测 / 本地）
-```
-
 ### Storage（experimental sqlalchemy）：DDL 迁移由手工 `ALTER TABLE` 改为版本化脚本
 
 **变更前**：`SqlalchemyExecutionStorage` 建表走 `Base.metadata.create_all`——只建
@@ -1324,97 +1202,6 @@ HTTP 节点的 `allowedHosts` / `deniedHosts` / `blockPrivateNetworks` 此前**�
 完好，`load_execution_state` / resume 不受影响；需要刷新列表的话，升级完成后删掉
 `{ns}:execution:index:ready` 触发一次全量回填即可（execution_id 未被索引的键会
 被重新扫描收录）。
-
-### Event：`HAS_SQLALCHEMY` 与 `__all__` 条件修复
-
-**变更前**：SQLAlchemy 符号是否进入 `plaita.event.__all__` 错误地绑定 `HAS_REDIS`。
-**变更后**：独立 `HAS_SQLALCHEMY` 标志；`__all__` 按该标志扩展。
-
-### 任务队列：Redis List → Stream（at-least-once）
-
-**变更前**：`EventFilter` / 测试脚本 `RPUSH`，`RedisFlowWorker` `BLPOP` — **at-most-once**。
-**变更后**：
-
-- 同一 `--queue-name` 键现为 **Redis Stream**（需 Redis 5+）
-- 入队：`XADD`（`plaita.server.task_queue.enqueue_task`）
-- 消费：consumer group（默认 `plaita-workers`）+ `XREADGROUP`；成功 `XACK`；超时 `XCLAIM` 回收 pending
-- 处理失败**不** ack → 至少一次重投；畸形消息 ack 丢弃
-- CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`
-
-**迁移**：
-
-```diff
--redis-cli RPUSH plaita:flow:queue '{"type":"start",...}'
-+python -c "from plaita.server.task_queue import enqueue_task; import redis; r=redis.from_url('redis://...'); enqueue_task(r,'plaita:flow:queue',{...})"
-```
-
-旧 List 键上的积压消息**不会**自动迁移；升级前 drain 或换新 stream 键名。
-
-重复 `start`/`resume` 在崩溃回收后可能再执行一次——节点与副作用应幂等。
-
-### 中间态落盘：每步持久化
-
-**变更前**：`PERSIST_EVERY_N_STEPS = 5`，连续推进最多丢 4 步。
-**变更后**：默认 **1**（每步 `save_execution_state`）。挂起/结束/出错仍为立即落盘。
-
-### Resume：execution lease（防并发）
-
-**变更前**：多 worker 可同时 `resume_flow` 同一 `execution_id`。
-**变更后**：
-
-- `RedisFlowWorker` 默认注入 `RedisExecutionLease`（键 `plaita:execution:lease:{execution_id}`）
-- 取得租约后才 resume；失败抛 `ExecutionLeaseError`，任务**不** XACK
-- 推进循环中 `renew`；结束 `release`（仅 holder 可删）
-- CLI：`--lease-ttl-seconds`（默认 120）
-- 纯 `FlowWorker`（无 Redis）默认 `NullExecutionLease`（测试 / 单进程无约束）
-
-无调用方代码迁移；部署多 worker 时重复 resume 会被租约挡住，直至 holder 释放或 TTL 过期。
-
-### Experimental：`db` / SQLAlchemy 需显式门闩
-
-**变更前**：`create_event_bus("db")` / `create_storage_component("db", "subscription")` 默认可建。
-**变更后**：须设置环境变量 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`，否则 `ValueError`。  
-FlowWorker / EventFilter CLI 的 `--event-bus-type` / `--subscription-storage-type` **不再提供 `db` 选项**（生产用 redis）。
-
-### 任务队列：DLQ + max deliveries
-
-**变更后**：
-
-- 默认 `--max-deliveries=5`；超过后写入 `<queue-name>:dlq` 并 ack 原消息
-- CLI：`--max-deliveries`、`--dlq-key`
-- status 响应含 `queue` 统计（pending / dlq_length / dead_lettered 等）
-- List→Stream 迁移脚本：`scripts/drain_list_queue_to_stream.py`
-- 运维文档：`docs-site/docs/distributed/ops-runbook.md`；幂等：`idempotent-resume.md`
-
-### 文档：Distributed / FlowWorker 可靠性表述收紧（非 API break）
-
-**变更前**：部分文档写「至少一次」「容错长时工作流」「生产级」；订阅 `event_type` 被写成 fnmatch。
-**变更后（文档与注释）**：
-
-- FlowWorker = suspend/resume 编排器；任务队列为 Stream **at-least-once**（见上节）
-- 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 1）
-- 订阅匹配为 event_type **全等**；fnmatch 仅 handler 路径
-- 用户文档入口：`docs-site/docs/distributed/flow-worker.md`「可靠性边界」
-
-### 升级时存量状态处理（Redis / SQLite 里已有的东西怎么办）
-
-0.4.x → 0.5.x 的执行状态 JSON schema 逐键兼容（已实测：0.4.0 挂起 → 0.5.x
-手动 resume 可完成；回滚方向数据层亦可读）。断层在**键的语义与通道**：
-
-1. **升级前 drain 队列**：队列键 `plaita:flow:queue` 从 0.4.x 的 List 换成了
-   Stream（同名不同形）。不 drain 则新 worker 启动即 `WRONGTYPE`。用
-   `scripts/drain_list_queue_to_stream.py` 迁移积压。
-2. **回滚（0.5.x → 0.4.x）前必须排干 Stream**：0.4.x worker 用 BLPOP 消费
-   List，对 Stream 同样 WRONGTYPE。手动 `XACK`+`DEL` 或让新 worker 清空后再回滚。
-3. **存量挂起执行的事件驱动 resume 会静默失效**：0.4.x 的订阅 type 索引挂的是
-   未解析表达式（`plaita:subscription:type:$INPUT.event_type`），0.5.x 的
-   EventFilter 按解析后的类型检索查不到。手动 `resume_flow` 兜底可用；0.5.x 起
-   EventFilter 对同 flow 孤儿订阅会打 warning 提示。
-4. **凭据轮换提醒**：分布式 checkpoint 的 context 含**全量 `$ENV` 快照**
-   （两版皆然），Redis 里的旧 state 携带密钥——升级窗口应轮换凭据。
-
-
----
 
 ### 表达式内建 mutate 函数对五个持久化根就地改写 ⇒ 具名硬报错（plaita#69，r3）
 
@@ -1626,7 +1413,6 @@ producer 结果 / `$F.json_loads($F.json_dumps($INPUT.cfg))`。**r6 修正**：`
 辅助证据；非 fresh 的目标无论如何都会被 default-deny 拒绝）。因此合法大容器
 （`$F.pop($VAR, 0)`，`$VAR` 是引擎物化的 >5 万项容器）不再被误拒；探测预算只约束遍历
 成本，不改变安全方向。
-
 
 ### r6：freshness 收进**每次求值的作用域** + 引擎自有结构拷贝（plaita#69 r6）
 
@@ -2342,7 +2128,223 @@ r13 是 r12 独立验收判 **FAIL** 的收口，两个反例都是 r12 **自己
    （`old` 随函数体改写）与 1 条 r11 视图变异（`$F.keys` 通道关闭后其一条 `expect_fail`
    改写为"通道关闭断言"，从表移除）。绝对数字只对本 revision 成立，改动后必须重跑。
 
+## 0.6.1
 
+0.6.1 为修复版本：`MIGRATION.md` 与 v0.6.0 逐字节相同（`git diff v0.6.0..v0.6.1 -- MIGRATION.md` 为空），无新增破坏性变更。0.6.0 带入的破坏性变更见下节。
+
+## 0.6.0
+
+### 安全与分布式加固（2026-09 R4 定向深潜轮）
+
+安全专项（威胁模型：能写流程 JSON 的人是半信任主体）：
+
+1. **CodeNode 后端白名单**：`register_code_node(allowed_backends=(...))` 设置后，
+   流程 JSON 里的 `sandbox_backend` 不在白名单内即**解析期硬失败**。此前流程作者
+   可把运营者选定的默认后端逐节点覆盖为 `"unsafe"`（宿主任意代码执行）。
+2. **restricted 沙箱移除 `functools`/`operator`**：`operator.attrgetter("__class__")`
+   走 C 层属性访问绕过 `_getattr_` 拦截，可完整逃逸（确定性 PoC 已验证）。
+   restricted 定位收敛为"仅防误用"，禁止用于半信任作者。
+3. **subprocess 沙箱环境变量白名单**：子进程不再继承宿主全量 `os.environ`
+   （历史等于把 API key/云凭证交给沙箱内代码）。白名单外用
+   `code.SUBPROCESS_ENV_EXTRA` 按需补充。注意 macOS 无 RLIMIT 内存上限。
+4. **HTTP 节点 SSRF 防护钩子**（默认行为不变）：新增 `requestTimeout`（默认 30s）、
+   `allowedHosts` / `deniedHosts`（精确/`*.suffix`/CIDR）、`blockPrivateNetworks`、
+   `maxRedirects`。任一策略激活时重定向改为逐跳校验后手动跟随。
+5. **`$F.pow` 指数上限**（默认 **1000000**，owner 的 K1 口径：上限取真实流量不可达量级）
+   + **分配前**结果规模预检（`int` 结果的位数 ≤ `|b| × digits(a)`，放大由渲染闸负责）：
+   `$F.pow(9, 9999999)` 这类 20 字节表达式仍在分配前拒（指数超上限），
+   `$F.pow(2, 20000)`（6KB，纯数据）**通过**，`$F.pow(9, 999999)`（~1MB，放大）按渲染闸拒。
+6. **`expose_env` 拒绝 `"*"`/空串/带空白键**：此前静默落空（以为暴露了实际没有）。
+
+分布式专项（Redis 全链路实测）：
+
+7. **RedisEventBus/RedisExecutionStorage 客户端按事件循环重建**：worker 每个分布式步骤
+   跑在新建的 asyncio 循环里，缓存的 aioredis 连接跨循环失效——含 event 节点的
+   流程约每两次挂起即失败一次并丢单。修复后按循环重建（外部注入的客户端不接管）。
+8. **重复投递的 resume 任务幂等短路**：终态执行的 resume 原样返回，不再把
+   completed/error 改写。`redis publish` 的 dict/str 形式支持 `correlation_id`
+   关键字（EventFilter 的 correlation 匹配此前无法通过该形式设置）。
+9. **subprocess 沙箱地址空间上限默认关闭**：`PLAITA_SANDBOX_MEMORY_MB` 默认值
+   从 256 改为 **0（不限制）**。RLIMIT_AS 卡的是虚拟地址而非 RSS，Linux 上
+   256MB 让 node/pnpm 类命令启动即 V8 OOM（V8 启动期预留远超 256MB 虚拟地址），
+   失败只剩截断崩溃栈；macOS 不强制 RLIMIT_AS，故本地部署从未暴露。
+   - 变更前：默认 256MB，Linux 上 node/npm/pnpm 系代码节点、setup、gate 全部不可用。
+   - 迁移：无需动作。确有需要（纯 Python 小脚本、多租户防护）才显式设
+     `PLAITA_SANDBOX_MEMORY_MB=<MB>`；node 系命令请保持 0。
+
+### 编排内核行为收紧（2026-09 评审修复轮）
+
+本轮把一批"静默错误结果"变成显式报错。若升级后流程开始抛错，通常说明流程
+本身有配置问题——以下是判断与迁移方法：
+
+1. **switch/if 分支未命中且无 default → 抛 `FlowExecutionException`**
+   - 变更前：调度层把整个 `$NODE` 状态表当流程结果返回，流程"成功"结束。
+   - 迁移：给分支节点补 default 分支；或在该节点上配
+     `"errorHandler": {"strategy": "continue"}` 显式保留旧的跳过行为。
+2. **http 节点失败 → raise（errorHandler 真正生效）**
+   - 变更前：请求失败时把 `NodeException` 对象当**节点结果**返回，下游拿到
+     异常对象当数据用；`errorHandler` 的 continue/continue_with 永不生效。
+   - 迁移：依赖旧行为（拿到 NodeException 对象继续跑）的流程，改为配置
+     `errorHandler`（`continue` / `continue_with` + `defaultValue`）。
+   - 同时修复了 http 节点表达式求值的参数颠倒——0.5.x 里真实 HTTP 请求
+     实际上从不成功（集成测试全 mock 未覆盖真实路径）。
+3. **挂起中的 EventNode 拒绝 `resume_type="continue"` 绕过**（抛 `ResumeError`）：
+   必须先用 `event`/`cancel`/`timeout` 消费事件，之后才能 continue 推进。
+4. **分布式 resume 完成后注销事件订阅**：此前死订阅会持续匹配后续同类型
+   事件。依赖"死订阅仍命中"的行为（不应该存在）需自行改掉。
+5. **`FlowExecution` 实例不可重入**：同一实例并发/重入 run 会抛错。并发场景
+   每次新建实例（`Flow.run()` 每次新建，不受影响）。
+6. **End 节点 `resultType` 默认 `success`**：不再需要显式写
+   `"resultType": "success"` 才能拿到 output；未知的 resultType 值打
+   warning 并按 success 处理（此前静默返回 None）。
+7. **未知配置键告警**：节点/Flow JSON 里拼错的字段名（如 `conditon`）现在
+   打 warning（含合法键清单），不再被 pydantic `extra=ignore` 静默吞掉。
+   CI 里若把 warning 当错误需注意存量流程的清理。
+8. **`ExecutionMode.from_string` 非法值抛 `ValueError`**（原裸 `KeyError`）；
+   `parse()` 对非 python runtime 抛 `ValueError`（原 `RuntimeError`）。
+9. **`retryTimes` 负数按 0 处理**：至少执行一次节点；此前负数会静默跳过
+   节点执行并吞掉 abort 错误。
+10. **PlaitaClient**：新增 `PlaitaClientError`/`PlaitaClientNetworkError`/
+    `PlaitaClientResponseError`（均继承 `Exception`，老 `except Exception` 不受影响）；
+    `run_flow` 不传 `input_data` 现在等价于 `{}`；`clear_cache(flow_id)` 只清
+    该 flow 的版本（此前静默清空全部）。
+11. **`timeout` 字段非法格式**（如 `"100ms"`）抛 `ValueError` 并列出合法写法
+    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
+12. **表达式默认注册表未知函数 → `NameError`**（带 did-you-mean 与可用清单）：
+    `$F.JSON_DUMPS(...)` 这类拼写错误不再返回 `'undefined'` 字符串流入下游。
+    scoped 自定义注册表保持 `'undefined'` 契约不变。
+13. **可疑字面量告警**：表达式位置出现 `{{name}}`、f-string、`await ...`、
+    裸函数调用等"其他语言模板/代码习惯"的字符串，现在打 warning（原样返回
+    不变，历史上零告警）。
+14. **JSON 路径结构检查告警**：`Flow.from_string` 现在会跑 ir_validate 的
+    结构检查（id 重复 / next 悬空 / if 缺分支目标 / switch 缺 default /
+    子流程节点缺 childFlow），命中即 warning——历史上这些只在
+    Builder/codeflow 路径生效，JSON 路径重复 id 静默 last-wins。
+15. **`$FLOW` 别名 / 表达式 KeyError 带可用根清单 / YAML fallback 告警**：
+    `$FLOW` 等价 `$FLOW_ID`；未知根的 KeyError 列出全部可用根；JSON 解析
+    失败但 YAML fallback 成功时打 warning（YAML 会把裸 `no/on` 篡改成
+    `False/True`）。
+
+
+    （纯数字毫秒或 ISO 8601，如 `"300"` / `"PT0.3S"`）。
+
+### Storage：`db` 执行/流程存储从公开路径下架
+
+**变更前**：`--execution-storage-type db` / `--flow-storage-type db` 以及
+`create_storage_component("db", "execution"|"flow")` 会实例化
+`SqlalchemyExecutionStorage` / `SqlalchemyFlowStorage`。
+**问题**：这些实现的方法是 `async def`，而 `ExecutionStorage`/`FlowStorage` ABC
+与 `FlowWorker`/`EventFilter` 均为**同步**调用——状态不会真正落盘（coroutine 被当返回值）。
+
+**变更后**：
+
+- factory 对 `db` + `execution`/`flow` 直接 `ValueError`（说明原因与替代方案）
+- FlowWorker / EventFilter CLI：`--execution-storage-type` / `--flow-storage-type`
+  仅接受 `memory` | `redis`
+- `db` **subscription** / **event-bus** 另需 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`（见下节）
+- `plaita.storage.sqlalchemy` 类保留供实验，**不得**再经公开 factory/CLI 用于执行状态
+
+```diff
+-python -m plaita.server.flow_worker --execution-storage-type db --database-url ...
++python -m plaita.server.flow_worker --execution-storage-type redis --redis-url ...
+```
+
+```diff
+-create_storage_component("db", "execution", database_url=...)
++create_storage_component("redis", "execution", redis_url=...)
++# 或 memory（单测 / 本地）
+```
+
+### Event：`HAS_SQLALCHEMY` 与 `__all__` 条件修复
+
+**变更前**：SQLAlchemy 符号是否进入 `plaita.event.__all__` 错误地绑定 `HAS_REDIS`。
+**变更后**：独立 `HAS_SQLALCHEMY` 标志；`__all__` 按该标志扩展。
+
+### 任务队列：Redis List → Stream（at-least-once）
+
+**变更前**：`EventFilter` / 测试脚本 `RPUSH`，`RedisFlowWorker` `BLPOP` — **at-most-once**。
+**变更后**：
+
+- 同一 `--queue-name` 键现为 **Redis Stream**（需 Redis 5+）
+- 入队：`XADD`（`plaita.server.task_queue.enqueue_task`）
+- 消费：consumer group（默认 `plaita-workers`）+ `XREADGROUP`；成功 `XACK`；超时 `XCLAIM` 回收 pending
+- 处理失败**不** ack → 至少一次重投；畸形消息 ack 丢弃
+- CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`
+
+**迁移**：
+
+```diff
+-redis-cli RPUSH plaita:flow:queue '{"type":"start",...}'
++python -c "from plaita.server.task_queue import enqueue_task; import redis; r=redis.from_url('redis://...'); enqueue_task(r,'plaita:flow:queue',{...})"
+```
+
+旧 List 键上的积压消息**不会**自动迁移；升级前 drain 或换新 stream 键名。
+
+重复 `start`/`resume` 在崩溃回收后可能再执行一次——节点与副作用应幂等。
+
+### 中间态落盘：每步持久化
+
+**变更前**：`PERSIST_EVERY_N_STEPS = 5`，连续推进最多丢 4 步。
+**变更后**：默认 **1**（每步 `save_execution_state`）。挂起/结束/出错仍为立即落盘。
+
+### Resume：execution lease（防并发）
+
+**变更前**：多 worker 可同时 `resume_flow` 同一 `execution_id`。
+**变更后**：
+
+- `RedisFlowWorker` 默认注入 `RedisExecutionLease`（键 `plaita:execution:lease:{execution_id}`）
+- 取得租约后才 resume；失败抛 `ExecutionLeaseError`，任务**不** XACK
+- 推进循环中 `renew`；结束 `release`（仅 holder 可删）
+- CLI：`--lease-ttl-seconds`（默认 120）
+- 纯 `FlowWorker`（无 Redis）默认 `NullExecutionLease`（测试 / 单进程无约束）
+
+无调用方代码迁移；部署多 worker 时重复 resume 会被租约挡住，直至 holder 释放或 TTL 过期。
+
+### Experimental：`db` / SQLAlchemy 需显式门闩
+
+**变更前**：`create_event_bus("db")` / `create_storage_component("db", "subscription")` 默认可建。
+**变更后**：须设置环境变量 `PLAITA_ALLOW_EXPERIMENTAL_DB=1`，否则 `ValueError`。  
+FlowWorker / EventFilter CLI 的 `--event-bus-type` / `--subscription-storage-type` **不再提供 `db` 选项**（生产用 redis）。
+
+### 任务队列：DLQ + max deliveries
+
+**变更后**：
+
+- 默认 `--max-deliveries=5`；超过后写入 `<queue-name>:dlq` 并 ack 原消息
+- CLI：`--max-deliveries`、`--dlq-key`
+- status 响应含 `queue` 统计（pending / dlq_length / dead_lettered 等）
+- List→Stream 迁移脚本：`scripts/drain_list_queue_to_stream.py`
+- 运维文档：`docs-site/docs/distributed/ops-runbook.md`；幂等：`idempotent-resume.md`
+
+### 文档：Distributed / FlowWorker 可靠性表述收紧（非 API break）
+
+**变更前**：部分文档写「至少一次」「容错长时工作流」「生产级」；订阅 `event_type` 被写成 fnmatch。
+**变更后（文档与注释）**：
+
+- FlowWorker = suspend/resume 编排器；任务队列为 Stream **at-least-once**（见上节）
+- 中间态落盘间隔公开为 `FlowWorker.PERSIST_EVERY_N_STEPS`（默认 1）
+- 订阅匹配为 event_type **全等**；fnmatch 仅 handler 路径
+- 用户文档入口：`docs-site/docs/distributed/flow-worker.md`「可靠性边界」
+
+### 升级时存量状态处理（Redis / SQLite 里已有的东西怎么办）
+
+0.4.x → 0.5.x 的执行状态 JSON schema 逐键兼容（已实测：0.4.0 挂起 → 0.5.x
+手动 resume 可完成；回滚方向数据层亦可读）。断层在**键的语义与通道**：
+
+1. **升级前 drain 队列**：队列键 `plaita:flow:queue` 从 0.4.x 的 List 换成了
+   Stream（同名不同形）。不 drain 则新 worker 启动即 `WRONGTYPE`。用
+   `scripts/drain_list_queue_to_stream.py` 迁移积压。
+2. **回滚（0.5.x → 0.4.x）前必须排干 Stream**：0.4.x worker 用 BLPOP 消费
+   List，对 Stream 同样 WRONGTYPE。手动 `XACK`+`DEL` 或让新 worker 清空后再回滚。
+3. **存量挂起执行的事件驱动 resume 会静默失效**：0.4.x 的订阅 type 索引挂的是
+   未解析表达式（`plaita:subscription:type:$INPUT.event_type`），0.5.x 的
+   EventFilter 按解析后的类型检索查不到。手动 `resume_flow` 兜底可用；0.5.x 起
+   EventFilter 对同 flow 孤儿订阅会打 warning 提示。
+4. **凭据轮换提醒**：分布式 checkpoint 的 context 含**全量 `$ENV` 快照**
+   （两版皆然），Redis 里的旧 state 携带密钥——升级窗口应轮换凭据。
+
+
+---
 
 ## 0.5.0
 
@@ -2400,7 +2402,7 @@ flow = flow_from_source(src)  # 含拓扑校验
 
 ### 1. `plaita.flow` shim 删除（import 路径 break）
 
-**变更前**：`from plaita.flow import Flow, FlowExecution, ...` 可用（带 `DeprecationWarning`，原计划 0.6.0 删）。
+**变更前**：`from plaita.flow import Flow, FlowExecution, ...` 可用（带 `DeprecationWarning`，原计划 0.6.0 删；0.6.0/0.6.1 发布时该承诺未执行，现顺延至 0.7.0——`plaita.errors` / `plaita.types` 兼容 shim 的移除承诺同步改为 0.7.0）。
 **变更后**：`plaita/flow.py` 模块**已删除**，`from plaita.flow import ...` 直接 `ImportError`。
 
 ```diff

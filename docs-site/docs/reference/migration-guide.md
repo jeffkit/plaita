@@ -1,6 +1,6 @@
 # 迁移指南
 
-本页帮你从旧版扁平 API 迁到当前分层架构，并标出 **0.5.0 已落地的 break**。详细旧→新对照见 [节点系统 - 弃用迁移](../nodes/migration.md)；破坏性变更全文见仓库根目录 [`MIGRATION.md`](https://github.com/jeffkit/plaita/blob/main/MIGRATION.md)。
+本页帮你从旧版扁平 API 迁到当前分层架构，并标出 **0.5.0 / 0.6.x 已落地的 break**。详细旧→新对照见 [节点系统 - 弃用迁移](../nodes/migration.md)；破坏性变更全文见仓库根目录 [`MIGRATION.md`](https://github.com/jeffkit/plaita/blob/main/MIGRATION.md)。
 
 ## 0.5.0 必看（已 break）
 
@@ -11,7 +11,19 @@
 | **订阅失败拒绝挂起** | EventBus 订阅失败抛异常，不再返回 `is_suspend=True` |
 | **FlowWorker 默认启用 EventBus** | 仅 `--no-event-bus` 可关闭；`--use-event-bus` 为无操作兼容 |
 
-`plaita.errors` / `plaita.types` 仍为兼容 shim（`DeprecationWarning`），计划在后续大版本移除；新代码请用 `from plaita import ...` 或 `plaita.core.*`。
+`plaita.errors` / `plaita.types` 仍为兼容 shim（`DeprecationWarning`），计划在 **0.7.0** 移除；新代码请用 `from plaita import ...` 或 `plaita.core.*`。
+
+## 0.6.x 必看（已 break）
+
+0.6.0 带入的主要迁移动作（全文见根目录 `MIGRATION.md` 的 `## 0.6.0` 段；0.6.1 为修复版本，无新增破坏性变更）：
+
+| 变更 | 影响 |
+|------|------|
+| **`db` 执行/流程存储从公开路径下架** | `--execution-storage-type db` / `--flow-storage-type db` 不再是公开入口；改用 redis / 内存等支持档，experimental SQLAlchemy 需显式门闩 |
+| **任务队列 Redis List → Stream** | 存量队列需迁移到 Stream 语义（at-least-once）；按旧 List 语义读队列会失配 |
+| **Resume：execution lease** | 并发 resume 被租约拒绝；防多 worker 同时推进同一执行 |
+| **任务队列：DLQ + max deliveries** | 超过投递上限的消息进 DLQ，不再无限重投 |
+| **编排内核行为收紧** | switch/if 未命中且无 default → 抛错；http 节点失败 → raise（`errorHandler` 生效）；`FlowExecution` 实例不可重入；未知配置键打 warning |
 
 ## 0.3.x 起的核心变化
 

@@ -45,7 +45,7 @@ def __getattr__(name: str):
     if name in __all__:
         _warnings.warn(
             f"Importing '{name}' from 'plaita.types' is deprecated and will be "
-            f"removed in plaita 0.6.0. Use 'plaita.core.types' instead.",
+            f"removed in plaita 0.7.0. Use 'plaita.core.types' instead.",
             DeprecationWarning,
             stacklevel=2,
         )
