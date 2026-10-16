@@ -24,6 +24,17 @@ RESUME_EVENT_STORAGE_PREFIX = "plaita:event:"
 RESUME_EVENT_TTL_SECONDS = 7 * 86400
 
 
+class ResumePublishError(RuntimeError):
+    """resume 事件发布失败（#35）——触发未确认，调用方不得当作已触发。
+
+    历史 bug：publish_resume_event 捕获一切发布异常只 logger.error，调用方
+    （delay/approval/http_callback）把「触发失败」当「已触发」走完成路径——
+    delay 把条目 ZREM 出排程，挂起执行的唯一唤醒凭据消失，执行永久
+    suspended（at-most-once）。现发布失败上抛本异常；触发方必须保留
+    排程/记录等待重试或显式死信，不得静默消费。
+    """
+
+
 class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
     """
     外延服务基础类
@@ -370,6 +381,11 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         直发不经 RedisEventBus.publish、不落事件存储，故直发前按
         RedisEventStorage 键格式尽力落盘（_persist_resume_event_best_effort，
         fail-open）——EventReconciler 的回扫兜底才能覆盖 Pub/Sub 丢通知窗口。
+
+        Raises:
+            ResumePublishError: 发布失败（#35）。落盘（_persist_resume_event_
+            best_effort）仍 fail-open 不上抛；直发/总线发布失败必须上抛，
+            让触发方保留排程重试——吞掉即触发方按已触发完成，任务永久丢失。
         """
         event = Event(
             event_type=event_type,
@@ -396,8 +412,9 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 event_type,
                 event.correlation_id,
             )
-        except Exception as e:  # noqa: BLE001 — 发布失败只告警，不打断任务主流程
+        except Exception as e:  # noqa: BLE001 — #35：转译为 ResumePublishError 上抛
             logger.error("触发 resume 事件失败: %s", e, exc_info=True)
+            raise ResumePublishError(str(e) or type(e).__name__) from e
     
     def get_active_task_count(self) -> int:
         """
