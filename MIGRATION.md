@@ -506,6 +506,369 @@ query 值 / path 段 / fragment / 两次且无收尾 `@x`）r7 的 155/160、41/
   编译期抛 `_CodeflowError`。详见
   `plaita-ai/plaita_ai/skills/flow-coder/references/authoring-spec.md` §2.7。
 
+### 表达式：数学/容器算子加「结果规模守卫」，超限硬失败（plaita#68）
+
+表达式引擎对「小输入、巨大输出」的多态放大此前只有 `$F.pow` 有守卫
+（`_POW_MAX_EXPONENT = 1_000_000`）。同族的 `$F.mul('A', 1000000000)`、
+`$F.mul(1000000000, 'A')`（`@flow` 源码里写 `"A" * 10**9` / `10**9 * "A"` 都会
+编译成同一条）、`$F.replace`、字符串 `$F.mod`、`$F.join` 等几十字节表达式能在
+worker **自身进程**里一次分配 0.1–1GB；flow 级 timeout、HTTP 响应上限、沙箱
+`RLIMIT_AS` 都拦不到（分配发生在求值器内部、早于任何可中断点）。
+
+**判定规则**（识别放大，而不是限制绝对大小）：
+
+```
+allowed = min( max(floor, factor * input_size), hard )
+```
+
+| 旋钮 | 默认 | 环境变量 |
+|------|------|----------|
+| floor（小输入时的下限） | `100_000`（字符/字节/元素） | `PLAITA_EXPR_MAX_RESULT_SIZE` |
+| factor（允许的放大倍数） | `4` | `PLAITA_EXPR_GROWTH_FACTOR` |
+| hard（单次结果硬上限） | `100_000_000` | `PLAITA_EXPR_MAX_RESULT_HARD` |
+
+环境变量在模块导入时读取一次，改后需重启进程；非法/非正值静默回退默认。
+
+**输入规模只信权威协议，且按内容量**：`_content_size` 对 str/bytes/bytearray 取长度、真实缓冲取 `memoryview(x).nbytes`、映射/容器**由我们自己枚举**（不做 `max(前 N 项)×n` 这类近似；自引用只计一次；嵌套深度预算 `_DATA_WALK_MAX_DEPTH = 10^6`（**声明值**；`_content_size` 是递归实现，走查期间把解释器递归上限临时抬到 6000 帧 ⇒ **有效预算 ≈2000 层**，超出的病态嵌套 fail-closed 并给出 `$F.* nested value exceeds the interpreter recursion budget`；超过声明预算时消息为 `$F.* nested value exceeds the data-verification budget: depth <N> (limit 1000000 levels)`）；扫描精确到项，只有累计到 `hard` 才提前返回）；**不信**任何对象自报的 `itemsize`/`__len__`（说谎对象会把额度抬高），其它对象按 0 计。`%s/%r/%a` 的渲染投影另走 `_render_size`，带自定义 `__str__`/`__repr__` 的对象无法界定 ⇒ 预检保守拒绝。
+
+**判定是「调用点级」的，不是「函数级」的**：每个带守卫的算子在调用 Python 算子
+之前算出**这次调用**的结果上界——算不出来时（类型不匹配 / 无法枚举）该调用注定
+抛**原生** `TypeError`/`KeyError`/`ValueError`，而不是"跳过守卫"。求值侧探针也
+**不再按函数白名单跳过**，每次 `$F.*` 调用都按同一条比值规则复核一遍（输入规模用
+**内容量**：字符串长度、容器内容之和、int 十进制位数上界——不是元素个数/参数个数）。
+
+**分配之前拦截（prevention）**——这些算子在调用 Python 算子前预检：
+
+| 算子 | 拦截条件 |
+|------|----------|
+| `mul` | 任意「类型支持 `__mul__` 且有 `__len__`」的对象重复（`seq*int` **与** `int*seq` 双向：str/bytes/bytearray/list/tuple/`array.array`/`deque`）超限；**长度一律走内建祖先 C 槽**（`str.__len__`/`list.__len__`…），实例覆写的 `__len__` 只骗到额度、骗不到 `str.__mul__` 读的真实存储（第十二轮 M1：`LyingLenStr('a'*1000, __len__→1)` × 50000 曾按 1 计费、原生造出 50,000,000 字符）；**没有可读真实存储的内建祖先 ⇒ 直接拒绝**（自定义序列不再按实例 `__len__` 猜） |
+| `replace` | `len(s) + 命中数 × (len(new)-len(old))`（空模式按 `len(s)*(len(new)+1)+len(new)`）超限；`bytes`/`bytearray` 的 pattern/replacement 按**任意 buffer 协议对象**判定（`memoryview`/`array`/`mmap`… 与原生语义一致，字节数走真实 buffer 协议）。**长度与命中数走祖先 C 槽**（`str.__len__`/`str.count`…，第十二轮 M1：覆写 `count → 0` 曾让 100,000,000 字符的替换通过）；替换本身走 `str.replace`/`bytes.replace`/`bytearray.replace` 的 C 槽，非 str/bytes 的自定义 `replace` 不可证 ⇒ 拒 |
+| `mod` / `concat` / 模板插值 | 渲染类路径（`%s/%r/%a`、`concat`、`{% ... %}`）先过**渲染前闸**（第八轮改为**方案 A：精确类型 + 可证上界**）：只放行**精确内建/标准库类型**（`str`/`bytes`/`bytearray`/`int`/`float`/`bool`/`None`/`list`/`tuple`/`set`/`frozenset`/`dict`/视图/`range`/`memoryview`/内建迭代器/`Decimal`/`datetime`/`date`/`time`/`timedelta`/`UUID`/`PurePath`/`Pattern`/`Enum`/`array`/`deque`/`SimpleNamespace`/默认 repr 的对象；**namedtuple 不在白名单**——它不做整体渲染，见下方「已知边界」），上界按各自规则**可证**（`repr` 转义按 4×、容器含每项 2 字符分隔余量、bytearray 含前缀）；**子类**只有在其 `__str__`/`__repr__` 与安全祖先是**同一原始槽**（未覆写；读 MRO `__dict__`、描述符一律不认）时才按祖先语义处理；**计费与枚举一律走祖先 C 槽**（`str.__len__`/`list.__iter__`/`dict.items`…）——这条对**所有算子**成立（第十一轮 H1 只改了渲染路径；第十二轮 M1 把 `mul`/`replace`/`add`/`extend`/`append`/`join` 的前置检查与预留也改成祖先槽）。实例覆写的 `__iter__`/`__len__`/`count`/`join` 只骗到额度、骗不到原生算子/`str()`/`repr()` 读的真实存储（H1 曾按 16 字节放行 100,004,000 字符）；**没有对应 C 槽可读的值 ⇒ 拒绝**而不是按实例协议猜；可子类化的 stdlib 类型（`PurePath`/`Pattern`/`SimpleNamespace`…）同样只认**精确类型或 dunder 同一性**（D2）。其余**在渲染之前拒绝**，消息带"可用 `str(x)` 放宽"的提示。枚举期间的用户异常一律收口成"不可界定 ⇒ `ValueError`"（D4）。`join`/`sort` 在调用点把不可信任的实参**物化一次**，守卫测量与执行**共用同一次迭代**（D5）。判据只看**真实类型对象**（精确成员/MRO 函数对象比较），**不看** `__module__` 之类可自述的字符串。H1/H2 两个反例（list 子类谎报 `__len__`、`__module__` 伪造）已分别修掉并各有具名测试；第二十一轮起这一族与 `%` 的 `s`/`r`/`a`/bytes 模式 `b` 共用**唯一派发表** `_RENDER_DISPATCH`（见下方「`%` 派发表」），类型层读取改为不可变 `type.__dict__[...]` getsets，元类数据描述符欺骗（`Meta.__mro__`/`Meta.__dict__` 撒谎）不再能骗过归属判定 |
+| `mod` | str/bytes 的 `%` **是 printf 格式化**：解析映射键 `%(k)`、flags、宽度（数字或 `*`，含**负宽度取绝对值**）、精度（`.N` / `.*`）与转换符，并按"**分配量**"预检——`'%.90000000f'`、`'%.900000000g'`（结果只有 1 字符却分配 ~1GB）、`'%(k)100000000s'`、`'%100000000s' % {'x': 1}`、`'%*d' % (-1e8, 1)` 都在此拦住。`s`/`r`/`a` 的精度是**截断**（`min(上界, 精度)`，原生 0 额外分配），**不是宽度累加**——
+`'%.*s' % (200000, 'x'*500)` 结果只有 500 字符 ⇒ 通过；数值转换的精度才是补零位数
+（`max(..., 精度)`）。第十五轮起：`specs` 解析不出来、`*` 宽度/精度解不出（非精确
+`int`）、或 `%s/%r/%a` 的值没有可证上界 ⇒ **默认拒绝**（不再有"解析不出来 ⇒ 下界 0 ⇒
+放行"的路径）；错误点之前会被原生构造的字段全部计入上界（Q3 doomed-field）。**转换符 × 值类型**不合法（`%d` 配 str/None、`%x` 配 float、`%c` 配长串、bytes 模式 `%s` 配 str…）一律先交给原生抛 `TypeError`。**上限判定不容许空转**（第十三轮 O1）：格式串的宽度/精度本身就是**分配下界**，纯 `str` 操作解析（含未闭合前缀）；`plan` 不可得时若不能证明原生必然抛错，**直接拒绝**而不是放行（旧实现把 `projected` 退化成 0：`'%50000000s%'` 59.7MB、`'%400000000s%'` 476.9MB 之后才 `incomplete format`）。**星号宽度/精度只接受精确 `int`（含子类）并用 `int.__index__` C 槽读**，非 int ⇒ 拒（绝不跑覆写的 `__int__`：实测 `EvilInt` 让上界算成 1、原生按 90,000,000 分配）。**映射取值只读一次**：解析成精确 dict 后**用同一份值**渲染（消除 TOCTOU：有状态映射第一次返回 `'s'`、第二次 150MB 曾绕过 143.1MB），`dict` 及子类走 `dict.get` C 槽（**不触发 `__missing__`**；`defaultdict` 缺键在被拒路径上不再插入默认值）。**映射参数只认可证的映射**（第十二轮 M2 → 第十六轮 S2 收紧）：精确 `ChainMap`/`UserDict` 与 `dict`/`dict` 子类一次性快照后只读一次（`dict.get` C 槽）；`MappingProxyType` 一律拒绝（`copy()` 会跑被包 dict 子类的作者协议，且证明不了被包对象是精确 dict）；**上限判定结构性地无条件执行**（不再「plan 为 None 就整段跳过」），而「原生错误优先」仍是硬契约。第十八/十九/二十一轮补：**唯一判据表** `_RENDER_DISPATCH`（第二十一轮把旧的 `_CONVERSION_DISPATCH` 与渲染分类集合合并成**一张**表：key = 转换符，value = `(kind, slots, bound)`；`_CONVERSION_DISPATCH` 只是它的**派生投影**）驱动 `_conversion_accepts`/`_definitely_rejected`/`_spec_bound`/`_spec_input_size`/`_render_size` 与对抗语料，方向 **fail-closed**（转换符/槽未知 ⇒ 拒绝，绝不判 native）；**归属判定只发生在每行的 `bound` 里**（`_slots_owned_by_base` 用不可变 `_slot_owner`/`_type_namespace` 读真实 MRO），`_STR_SAFE_OWNERS`/`_REPR_SAFE_OWNERS` 已删除。实测事实与测试逐一对照见下方「`%` 派发表」。实测口径：**精确 int/bool/float/Decimal** 与**槽未被覆写的子类**走祖先 C 槽给上界（`int.__index__`/`float.__float__`/`Decimal.adjusted`/`is_nan`/`is_infinite`）；**任一被派发槽被覆写**的 int/float/Decimal 子类（`__int__`/`__index__`/`__float__`/`__trunc__`/`__abs__`/`__eq__`/`__ne__`/`__len__`/`__str__`/`__repr__`/`__bytes__`）⇒ **拒绝 + 具名逃生口**（`int(x)`/`float(x)`/`str(x)`/`bytes(x)`），**0 次作者调用且配额不被抬高**。**★4 实测的例外**：**int 及其子类**在 `d/i/u/o/x/X/c` 上原生按 **C 存储直读**、**不派发任何槽**（覆写 `__int__`/`__index__` 被原生忽略、0 次作者调用）⇒ 这些转换符对 int 家族**不做槽检查**，上界仍走 `int.__index__` C 槽读真实值。**bytes 模式的同类事实**：bytes/bytearray 子类的 `%s`/`%b` 直读 C buffer、**忽略**覆写的 `__bytes__` ⇒ 放行且按 C 字节数计；只有**非 buffer** 带作者 `__bytes__` 的形状（含 `PurePath` 子类覆写 `__bytes__`/`__str__`/`__fspath__`/`_str`）才具名拒绝。`o/x/X` 上 float/Decimal **只有类里根本没有 `__index__`** 才判原生必错（原生对任何对象都会派发 `__index__`）；“干净”的巨大 int 在 `e/f/g` 上判原生 OverflowError/TypeError；`Decimal('sNaN')` 在 `e/f/g` 家族上判原生 TypeError；无转换符（`"%%(a)s"`）按 render。T3 的覆盖是 **`e/f/g` × 巨大 int** 家族（str 模式 OverflowError / bytes 模式 TypeError）；T6/Z3 的覆盖是**推导式 iter（含 ≥2 层嵌套）**。 |
+| `join` | 分隔符长度与 `join` 本身**走祖先 C 槽**（`str.__len__`/`str.join`…，第十二轮 M1：覆写 `__len__`/`join` 的分隔符曾让 125,006 字符通过 / 返回 5,000,000 字符）；调用点只把**被消费的那个实参**（元素表）物化一次，分隔符等标量原样传下去。分隔符被 `元素数-1` 次重复后的总长超限；被 join 的对象可以是**任意可迭代**——**调用点**先物化一次再按内容量累计（边枚举边用内容下界提前拒绝），包装/偏应用形态同样生效。物化 list 的指针有独立的**字节**预算（默认 1250 万项 / 100MB 指针）。**`len()` 只对精确内建类型生效**（`type(x) is list/tuple/str`，此时是 CPython 自己的实现）；**子类与其它可迭代一律枚举计数**——list/tuple/str 子类谎报 `__len__` 曾在预检里让 `len(sep)*(n-1)` 项消失、导致整块结果被造出来（第八轮 H1，实测峰值 206–961MB），现在诚实与谎报**行为一致**且峰值 ≈0 |
+| `sort` | `sorted()` 同样会**消费**单次迭代器：调用点先物化一次再判定（与 `join` 同一套机制） |
+| `add`/`extend`/`append`/`concat` | 只受 hard 约束（结果 ≈ 输入，线性不放大）；未枚举的同类序列（`array.array`/`deque` 等）按元素数一并预检，**元素数走祖先 C 槽**（第十二轮 M1）；没有 C 槽可读的同类型自定义 `__add__` 序列 ⇒ 拒（不按实例 `__len__` 猜） |
+
+#### `%` 派发表：单一口径、实测事实与测试对照（plaita#68 第二十一/二十二轮）
+
+`plaita/core/expression.py` 里 **`_RENDER_DISPATCH` 是唯一判据表**：key = 转换符，
+value = `(kind, slots, bound)`。`_conversion_accepts` / `_definitely_rejected` /
+`_spec_bound` / `_spec_input_size` / `_render_size` 全部只查它（`_render_size` 只做
+"s"/"r" 行的分派）；`_CONVERSION_DISPATCH` 是它的派生投影（`conversion -> (kind, slots)`）。
+**归属判定由同一张表分两处驱动**（第二十二轮 AG4 更正措辞）：数值族在
+`_conversion_accepts` 里按本行的 `kind`/`slots` 调 `_numeric_slots_clean`；文本/buffer 族
+（`s`/`r`/`a`/`b`）在每行的 `bound` 里判定（`_slots_owned_by_base` + 纯 Python 祖先的实例
+属性闸，见下）。`r`/`a` 行按 `s` 行的 slots **并集**收紧（`object.__str__` 就是 `repr`，
+三行共用一个上界函数）；`char` 行的 `bound` 为 `None`（上界是宽度常量，`_spec_bound`
+直接算）。`_STR_SAFE_OWNERS`/`_REPR_SAFE_OWNERS` 已删除。
+bytes 模式的 `%s`/`%b` 由 `_render_rule` 路由到同一张表的 buffer 行。
+
+**第二十二轮 AG1/AG2 加固（纯 Python 祖先的实例属性）**：`PurePath`/`UUID`/`SimpleNamespace`
+的 `__str__`/`__repr__` 是 Python/C 代码，会读**实例槽**（`_str`/`_drv`/`_root`/`_parts`、
+`int`、真实实例 dict）。作者只要在子类类体里放同名 property 就能换掉祖先读到的值
+（实测 `class P(PurePosixPath): _str = property(...)` ⇒ r21 `%s` 上界 **67**、实际
+**10,000,000**、峰值 **10.00MB**；`SimpleNamespace.__dict__` property ⇒ 上界 51、实际
+10,000,010、峰值 22.5MB；`UUID.int` property ⇒ 上界 74、实际 332,197），而且 r21 的
+`_mod_decide` 会**调用**这些 property（`_parts` 4 次 / `__dict__` 3 次）。加固后：
+
+* `PurePath`/`UUID` 子类：从 `cls` 到最近的已知 stdlib 祖先之间，**任何一层类命名空间
+  不得新增名字**（`_stdlib_only_below`，只放行 `__module__`/`__qualname__`/`__doc__`/
+  `__slots__` 与解释器自动补的 `__dict__`/`__weakref__` getset）；上界改读**真实实例槽**
+  （`object.__getattribute__` 读 member_descriptor，0 作者调用）——路径 bytes 用
+  `4×槽字符数+16`，路径 str/repr 用 `10×槽字符数+真实类名+16`，UUID 按 `int.bit_length`
+  算 `'%032x'` 长度；native 会派发作者 property 的形状因此**具名拒绝**。
+* `SimpleNamespace`：改读 `SimpleNamespace.__dict__` 上的 member_descriptor（C 直读真实
+  实例 dict，property 遮蔽无效），与原生 C repr 看到同一份数据；决策路径 **0 作者调用**，
+  上界按真实内容计（key 需 exact `str` 或 `__repr__` 归属仍是 `str`）。
+* 元类数据描述符遮蔽 `type.__name__` 的子类一律拒绝（原生 repr/str 会读 `cls.__name__`）；
+  `Enum` 的类名也改走不可变 getter。
+* **实例 dict** 里出现 `_format_parsed_parts`/`as_posix`/`_from_parts`/`_flavour` 也一律拒绝：
+  `PurePath.__str__/__repr__` 用**普通属性查找**读 `self._format_parsed_parts(...)` /
+  `self.as_posix()`（二者不是数据描述符，实例属性可以遮蔽；实测 `p.as_posix = lambda:
+  "y"*10**7` ⇒ `repr(p)` 10,000,009 字符、r21 上界 81）。检查只读实例 dict，0 作者调用。
+* 注意：`_path_bytes_bound` 与 `_render_type_bound` 现在共用同一套实例属性闸——r21 只在
+  bytes 模式查了 `_str`，`%r`/`%a` 走 `_render_type_bound` 时没有查，所以同样中招。
+
+**第二十三轮 AJ1（精确类型同样走闸）**：上面这些闸最初只装在**子类**路径上，而
+`_render_type_bound` 的**精确类型分支**（`cls in _PATH_EXACT_TYPES` 走 `value.parts`
+投影、`cls is UUID` 走常量 64）绕过了它们——精确类型的实例槽同样可写：
+`p = PurePosixPath("/x/y"); p._str = "E"*10**7` ⇒ `%s` 投影 **67** / 实际 **10,000,000**，
+`%r` 投影 67 / 实际 10,000,017、峰值 **22.50MB**（分配后才拦）；
+`object.__setattr__(uuid.UUID(int=1), "int", 10**400000)` ⇒ 投影 **74** / 实际 **332,197**。
+修后两个精确分支改调 `_path_render_bound`/`_uuid_render_bound`（与子类共用同一道闸）：
+精确 path 巨槽 ⇒ projected 100,000,089 ≥ 实际、`_fn_mod` 分配前 `ValueError`
+@0.0018MB；精确 UUID 巨 int ⇒ projected 332,207 ≥ 332,197、**0 作者调用**；
+`{% $F.mod('%r',$INPUT.p) %}` 的端到端峰值从 22.501MB（分配后拦）降到 0.002MB。
+逐分支清单（含常量/投影标记）见 `docs/mutation-testing.md` 第二十三轮小节。
+
+**第二十四轮 AM1（常量上界必须读真实成分）**：上一轮的"逐分支清单"里，多条**常量上界**
+被作者可控字符串证伪——`type.__repr__`/`object.__repr__` 输出 `tp_name`（=
+`__module__` + `__qualname__`，**建成后仍可写**）、`EnumMeta.__repr__`、函数 repr（`__qualname__`）、
+`timezone.__str__`（`name`）、`repeat`/`count` 的 repr（参数）都会内嵌作者数据：
+`class C: pass; C.__qualname__ = "E"*1e7` ⇒ `%r` 投影 **266** / 实际 **20,000,025**、
+峰值 25MB；`type("E"*1e7,(),{})` 266/10,000,019；enum 类 266/10,000,009；函数
+`__qualname__` 266/10,000,026；`timezone(timedelta(0),"E"*1e7)` `%s` 74/10,000,000；
+`itertools.repeat("E"*1e7)` 266/10,000,010。修后这些族一律**读真实成分**（不可变
+`type.__dict__["__module__"/"__qualname__"]` getters、`FunctionType.__qualname__` getter、
+C 槽 `timezone.tzname(value, None)`、C `__reduce__` 的真实参数递归求界），读不到 ⇒ 拒绝；
+`repeat`/`count` 从"固定短 repr"集合移除。实测巨名形状端到端在**分配前**拒绝
+（`_fn_mod` `ValueError` @0.0018MB；模板 0.0015–0.087MB）。
+
+
+**第二十五轮 AP1（array 每元素按 typecode）**：清单里最后的"投影假设" `32 + len×24` 被
+实测证伪——`repr(-sys.float_info.max)` 是 24 字符、array repr 每元素再加 `", "` ⇒ **26/元素**
+（`array('d',[-max]*2_000_000)`：旧投影 48,000,042 / 实际 52,000,012、`_fn_mod` RET @181MB；
+K=4,166,000 旧投影 99,984,032 ≤ 1e8 而实际 108,316,012 ⇒ **绕过 1e8 硬上限**）。现在
+`_array_render_bound` 按 **typecode 的实测最坏值**给界（`d`/`f` 26、`b`/`B` 6、`h`/`H` 8、
+`i`/`I` 13、`l`/`L`/`q`/`Q` 23、`u` 转义 10×/字符），精确类型与子类共用，未知 typecode 拒绝；
+K=4,166,000 现在 projected 108,316,042 > 1e8 ⇒ 分配前 `ValueError`。
+
+**第二十六轮 AR1/AR4（`%a` 的 ascii 展开）**：`_bound_repr` 同时服务 `%r` 与 `%a`，而
+`ascii()` 把每个非 ASCII 字符展开成 `\xNN`/`\uNNNN`/`\UNNNNNNNN`（4–10×）。四处作者
+可控名字原先按 1× 计：`_enum_member_render_bound`（类名+成员名）、`_path_render_bound`
+（类名）、`_uuid_render_bound`（类名）、`_tzinfo_extra`（`ZoneInfo.key`，4×）——`%a` 下
+enum 成员 `_name_="é"*1000` ⇒ 投影 1031 / 实际 4008；`"😀"*1e6` ⇒ 投影 1,000,031 /
+实际 10,000,008、`_fn_mod` **RET**（峰值 20.00MB）。现在这些名字一律按 **10×** 计
+（`%r` 保守、`%a` 正确），并把 `%a` 的成长额度改成按值的**权威内容量**（`_content_size`）
+计（ascii 展开不吃额度）⇒ 1M 星平面四形状在**分配前** `ValueError`（峰值 0.0031–0.0936MB；
+r25 是分配后 8.0–20.1MB），而 `%r`、非 ASCII 的 `%r`、ASCII 的 `%a` 仍正常渲染。精确
+`str` 的 repr 上界改为内容感知（可打印 ASCII ≤2×、控制字符与非 ASCII ≤10×）。
+
+**第二十七轮 AU1/AU2（真实逐字符宽度）**：上一轮的"两分法最坏值"把上界做得比真实更悲观——
+`"\n"*9999` 真实 ascii 只有 20,000，却被算成 100,010 > 允许 100,000 而**误拒**（`%r` 能渲染）；
+`"é"*9999`、`"\n"*100000`、bytes `"é"*12496` 同样。现在按**真实逐字符宽度**编译上界：
+1 = 可打印 ASCII（`'`/`\` 除外）、2 = `'`/`\`/`\t`/`\n`/`\r`、4 = 其它控制字符与
+0x80–0xff、6 = 0x100–0xffff、10 = ≥0x10000，两端引号 +2（bytes 前缀 +3 / bytearray +14），
+引号按 repr 真实行为；计数全走 C 级（`str.count` + 正则 `subn` 链式剥离），不构造展开串。
+`%a` 的成长基准是值的**权威内容量**，拒 ⇔ `fmt_len + spec_bound > max(100_000,
+4×(fmt_len+内容))`：`"é"*24_997` 渲染、24,998 起拒；`"😀"*9_998` 渲染、9,999 起拒；
+`"😀"*1e6` 仍**渲染前**拒绝（峰值 8.45MB < 实际 10,000,002 字符），`%r` 对同一值正常渲染。
+`%a` 的拒绝消息写明 ascii 展开、真实阈值与逃生口（改用 `%r` 或提高
+`PLAITA_EXPR_GROWTH_FACTOR`）。bytes 上界同时从 4n+24/32 收紧为真实值（`b"x"*10` 由 64 → 13）。
+
+**第二十八轮 AX1–AX3（bytearray 引号 / 上界计算峰值 / 容器快路）**：
+① CPython 的 `bytearray.__repr__` **无条件**转义 `'`，而 `bytes.__repr__` 只在串里同时含
+`"` 时才转义——r27 让二者共用 bytes 规则 ⇒ `bytearray(b"'")` 上界 15 < 实际 16、
+`bytearray(b"'"*1e6)` 1,000,014 vs 2,000,014（**可绕 1e8 硬上限**）；现在 `bytearray` 传
+`always_escape_apostrophe=True`，穷举 256 单字节 + 全部 ≤3 组合 0 低估，`bytearray(b"'"*K)`
+上界 = 2K+14 ⇒ K>5e7 越过硬上限。
+② bytes 的不可打印计数从 regex `subn`（每匹配一个 match 对象，实测 **88×** 输入内存）
+改成 `bytes.translate(None, delete)`（**1.00×**）；`str` 侧保持 `re.subn` 链，峰值预算
+实测 2.11×（astral 4MB→8.45MB）/4.22×（BMP 2MB→8.45MB）/2.23×（astral 40MB→89.10MB），
+峰值预算**逐路径**写清（H2）：`bytes`/`bytearray` **恰好 1.00×**（0.2/1/2/20MB
+各档）⇒ 满足字面 H2；`str` **不满足字面 H2**，采用有界预算——astral 2.11×（4MB）/
+2.23×（40MB）、BMP CJK 4.22×（2MB）/4.28×（40MB）storage、纯 ASCII 快路 0×，预算是按
+`len(value)`（**字符数**，非 `sys.getsizeof`/storage）的 ≤10×，常数与消息写在
+`test_bound_computation_peak_budget` 里；拒绝时机不受影响（1e8 硬上限与形状检查仍在渲染前）。
+③ `_container_render_bound` 的 str 快路改用真实逐字符宽度 ⇒ `["\n"*100_000]` 的 `%a`
+由“上界 1,000,038 > 允许 400,008 误拒”变为渲染（bound 200,030 ≥ 实际 200,004）。
+
+| 家族 | 实测原生派发 | 放行（可证） | 拒绝（fail-closed，具名 + 逃生口） | 回归测试 |
+|------|--------------|--------------|------------------------------------|----------|
+| `d/i/u` | int 家族：C 存储直读、**不派发任何槽**（覆写 `__int__`/`__index__` 被忽略、0 次调用）；float/Decimal：`__int__` | 精确 int/bool/float/Decimal 与**槽未被覆写**的子类；量级走 `int.__index__`/`float.__float__`/`Decimal.adjusted` | 覆写 `__int__` 的 float/Decimal 子类；只有 `__index__`/`__int__` 协议可取数的自定义对象 ⇒ `int(x)`/`float(x)` | `TestEighteenthRoundZ1NumericSubclasses`、`TestNineteenthRoundABAdversarialCorpus::test_adversarial_corpus_invariants` |
+| `o/x/X` | 同上（int 家族 C 存储；float/Decimal 需 `__index__`，类里根本没有才判原生 TypeError） | 精确 int 与 int 子类 | float/Decimal（即使有 `__index__`）；自定义 `__index__` ⇒ `int(x)` | 同上 |
+| `e/E/f/F/g/G` | float/Decimal 派发 `__float__`；巨大 int 原生 OverflowError/TypeError；`Decimal('sNaN')` 原生 TypeError | 精确 int/float/Decimal 与槽干净子类（`inf`/`nan` 原生优先） | 覆写 `__float__`/`__index__` 的子类 ⇒ `float(x)` | `TestEighteenthRoundZ2NonFinite`、`TestSeventeenthRoundT2T3Numeric` |
+| `c` | int ⇒ 单码点；str/bytes-like 长度为 1 | 精确 int；长度 1 的 str/bytes-like | 其余 ⇒ 原生 TypeError 或具名拒绝 | `TestFifteenthRoundQ4ValuePredicates` |
+| `s`（str 模式） | `__str__`（`object.__str__` 的返回就是 `repr(self)`，所以 slots 同时含 `__repr__`） | 精确 str/bytes/bytearray/int/float/bool/None/容器/视图/迭代器/`Decimal`/`datetime`/`UUID`/`PurePath`/`Pattern`/`Enum`/`array`/`deque`/`SimpleNamespace`/默认 repr 的对象；**干净子类**（`__str__`/`__repr__` 与祖先同一原始槽） | 覆写 `__str__` **或** `__repr__` 的子类，**含元类数据描述符欺骗**（`Meta.__mro__`/`__dict__` 撒谎不影响判定）⇒ `str(x)` | `TestTwentyFirstRoundRenderDispatch::test_legit_types_are_not_over_refused`、`::test_overriding_slot_subclasses_are_refused_by_name`、`TestTwentiethRoundACMetaAndInstrumentation` |
+| `r`/`a` | `__repr__` | 同上（Enum 成员按 `enum`/`flag`/`int`/`str` 原始槽分别给上界，value 计入） | 覆写 `__str__`/`__repr__` 的子类 | 同上、`TestTwelfthRoundM6M7EnumAndTimezone` |
+| `s`/`b`（bytes 模式） | 真 buffer ⇒ C 直读（**忽略**覆写的 `__bytes__`）；非 buffer ⇒ `__bytes__` | C buffer（bytes/bytearray/memoryview/array…）；`PurePath` 家族：`__bytes__`/`__fspath__`/`__str__`/`_format_parsed_parts` **逐槽归属校验**（不可变 `_slot_owner`）**且**从子类到最近的已知 stdlib 路径类之间任何一层类命名空间不得新增名字（`_stdlib_only_below`——`PurePath.__str__` 是 Python 代码、会读**实例槽** `_str`/`_drv`/`_root`/`_parts`，作者 property 能遮蔽它们），上界取**真实实例槽**字符数 `4×+16` | 作者 `__bytes__`（非 buffer 的任何形状，含 `str`/`PurePath` 子类）；遮蔽 `_str`/`_drv`/`_root`/`_parts` 的路径子类 ⇒ `bytes(x)`/`bytearray(x)` | `TestTwentyFirstRoundRenderDispatch::test_buffer_dispatch_ignores_author_bytes_for_c_slots`、`TestTwentySecondRoundInstanceAttributeShadowing` |
+
+**语料规模（第二十一轮，覆盖 revision 见 `docs/mutation-testing.md`）**：
+`test_ac4_render_dispatch_full_table` 生成
+`17 转换符 × 2 模式（str 模式跳过 b）× 5 值类型（int/float/Decimal/str/bytes）
+× 4 家族（exact / clean / overriding / meta-deceived） = 660 格`，违规判据是两条方向
+（原生成功且无作者调用却拒绝；`native` 却原生成功；`render` 上界 < 实际；`render` 但原生
+实测会跑作者协议），当前 **660 检查 / 0 违规 / 0 跳过**。
+`test_legit_types_are_not_over_refused` 另有 **84 检查 / 0 漏**（str/bytes/bytearray +
+干净子类 + Enum/IntEnum + UUID + PurePath（含 Windows）/干净子类 × `s/r/a/b`）。
+`test_overriding_slot_subclasses_are_refused_by_name` 覆盖 14 个形状（7 个正常 + 7 个
+`_meta_deceived`），每个形状**先用原生正控证明"该槽确实被派发"**，再断言决策为 `refuse`、
+0 次作者调用、拒绝消息含类型名、tracemalloc 峰值 < 4MB。
+
+**第二十二轮 AG1/AG2/AG3 语料（同一 revision 见 `docs/mutation-testing.md`）**：
+`TestTwentySecondRoundInstanceAttributeShadowing`（7 用例 / 58 subtests）——
+① 路径/`UUID`/`SimpleNamespace` 的实例属性**遮蔽 property** 形状（含实例 dict 遮蔽
+`as_posix`/`_format_parsed_parts`）：决策 `refuse`、0 次作者调用、native 正控证明该
+property/实例属性确实被派发、峰值 < 4MB；
+② 清白子类（PurePosixPath/PureWindowsPath/PosixPath/SimpleNamespace/UUID 的 `pass` 子类）
+**35 检查 / 0 漏**（≥ 实际、0 调用）；
+③ `SimpleNamespace.__dict__` property：按**真实实例 dict** 给上界（`projected ≥ 实际`，
+决策路径 0 调用，native C repr 也不调用该 property）；
+④ AC4 的"纯 Python 祖先"维度：`5 基类 × 4 家族（exact / clean / shadow-property /
+meta-deceived shadow）× 7 格式（str/bytes 两模式）= 140 检查 / 0 违规 / 0 跳过`；
+⑤ `test_decision_path_has_zero_author_calls_for_all_shadow_shapes`：真 property 计数器
+（不是 dunder）在决策路径上必须为 0。
+
+**量级示例（放行侧）**：`"x" * 10**6`（输入 1 字节）被拒；`join(20 段 × 10000 字符)`
+= 200000 字符**通过**（输入内容本身就 20 万）；`json_dumps([{"k":"v"*100}]*2000)`
+= 222000 字符**通过**；`mod("%s %s", (100KB, 100KB))` = 200001 字符**通过**；
+`join(200 段 × 1KB)`、`join(['b'], $INPUT.long_sep)`（只有一个元素时分隔符根本不进
+结果——注意模板文法里没有 `*`，这里的"长分隔符"要来自 context 而不是表达式内运算）、
+`mul('x'*200000, 2)`、`mul('x'*100001, 1)` 都通过。
+**拒绝侧的例子**：`today('%c' * 100000)` = 2400000 字符（输入 20 万 → 24 倍放大，
+超过 factor=4）按设计拒绝——这是**探针（检测）**拦下的（`today` 没有预检），
+与"非放大的大输入必须放行"并不矛盾。
+
+**类型错误优先于尺寸错误**：`str + list`、`list * str`、`set * int`、
+`join` 非匹配元素、`%` 的参数个数/mapping 键缺失/非法转换符/`b'%s' % 'x'` 等
+在任何规模（包括把三只旋钮压到 `1/1/1`）都抛原生 `TypeError`/`KeyError`/
+`ValueError`，不会被改写成尺寸错误。
+
+**求值路径上的口径（第六轮修正）**：判定分两层，两层都要说清——
+
+* **预检层（分配前闸）**：上表列出的内建放大算子在调用 Python 算子之前判定；
+* **探针层（求值侧网）**：`$F.*` 返回后按同一条比值规则复核。它用的输入规模是
+  调用点**在调用之前**算好、并作为**本帧局部量**传进来的快照——既没有线程本地
+  之类的共享槽位（第四轮删掉），也**不在调用后回读实参**（第六轮修正：否则被调用者
+  只要 `lst.clear(); lst.extend([...巨大...])` 就能把额度抬高，实测旧实现可放行
+  99,000,000 字符 / 峰值 123MB）。`{% ... %}` 插值同样过这条守卫。
+
+需要"先物化再判定"的算子（`join`/`sort`，**按算子名**判定，所以
+`functools.partial`/lambda/绑定方法/同名覆盖等包装形态同样生效）由**调用点**在调用
+前把单次迭代器物化一次并**替换实参**：投影、输入规模与真正的执行共用同一份数据。
+
+**输入/渲染口径**（第六轮修正）：`_content_size` **只信权威协议**——`str`/`bytes`/
+`bytearray` 长度、真实缓冲的 `memoryview(x).nbytes`、映射/容器由我们自己枚举；
+**不信**任何对象自报的 `itemsize`/`__len__`（说谎缓冲对象实测能把额度抬到 2500 万），
+其它对象按 0 计。`%s/%r/%a` 的渲染投影用独立的 `_render_size`：能界定才给上界，
+带自定义 `__str__`/`__repr__` 的对象**无法界定 ⇒ 预检保守拒绝**。
+
+**求值侧探针是网，不是闸**：表达式求值时还会对**每一次** `$F.*` 调用做硬上限
+判定并套同一条比值规则。两者的差别是准确的：
+
+- 上表列出的内建放大算子：**在分配之前拒绝**（实测 tracemalloc 峰值不随放大
+  规模增长，拒绝路径峰值 ≤1MB）；
+- 没有预检的路径（自定义注册函数、`$F.slice`、`$F.json_loads`、`$F.today`…）：
+  **检测到（值已经被分配出来了），不是阻止**——例如自定义函数
+  `$F.boom(1000000)` 会先造出 1MB 字符串再被拒；恶意自定义函数内部先做一次
+  合法大操作再返回 99MB 字符串，同样只能**事后**拒绝（峰值就是它自己分配的
+  94MB）。把体量大的计算放在自定义函数里不能靠这条守卫省内存。
+  **额度只由这次调用在"调用之前"测得的实参快照决定**：判定没有线程本地/跨函数
+  通道，也不在调用后回读实参——`func(*args)` 期间跑的任何代码（内部合法调用、嵌套
+  `evaluate`、被 monkeypatch 的辅助函数、**改写自己的可变实参**）都**无法**放行
+  外层结果。
+
+**迁移**：正常流程无需动作。确有合法的大结果需求时，按量级调大上面三个旋钮
+（如 `PLAITA_EXPR_GROWTH_FACTOR=16` 或 `PLAITA_EXPR_MAX_RESULT_SIZE=2000000`），
+或把大块拼接/替换移到节点 I/O（CodeNode / 模板节点）而不是表达式里。错误归因
+沿用该节点既有的错误处理策略（`error`/`fallback`/默认失败）；超限是确定性失败，
+重试不会变好。
+
+**已知边界（plaita#68，第十二轮收敛后的口径）**：
+
+- **渲染类路径一律"先判后渲染"**：`$F.mod` 的**格式操作数必须是精确 `str`/`bytes`/`bytearray`**（子类可覆写 `__mod__`/`__bytes__` ⇒ 预检被绕过，实测先分配 90.1MB；第十八轮 Z4.1 起分配前拒绝 + `str(x)` 逃生口）；`%s/%r/%a`、`$F.concat`、`{% ... %}`
+  插值先用 `_render_size` 求**可证上界**，上界不可得或超额度 ⇒ **直接 `ValueError`**
+  （不调用 `str()`）。`_size_guard_result` 的事后探针只是**第二道网**，不承担"给分配
+  设界"的职责——不能只靠它。**错误消息本身也是一次渲染**：拒绝文案里的 int 走
+  `_safe_int_text`（C 槽 + 位数），不会调用敌意 `__str__` 或展开巨大十进制。
+- **namedtuple 不做整体渲染**：`__code__` 相同不等于行为相同（闭包 cell /
+  `__globals__` / 描述符 `__get__` 都能换成敌意实现），因此删除了 namedtuple 快速
+  通道。**索引下钻可用**（`$INPUT.v[1]` 实测返回元素）；**`$INPUT.v.a` 这类字段访问
+  在本表达式文法里不可用——它静默返回 `None`**（不是本单引入的行为，实测如此）。
+  需要整体渲染时请在**上游**（节点或自定义函数）先 `str(x)` 再传入——表达式文法里
+  没有裸函数调用：`$F.concat(str(x))` 这种内层写法直接 `ParseException`；`{% str(x) %}`
+  内层不合法 ⇒ 整串**原样返回**并告警；整串 `str(x)` 不含 `{%`、也不以 `$` 开头，
+  按纯文本原样返回。
+- **子类的 dunder 判据读 MRO `__dict__` 的原始槽**并与安全祖先做同一性比较，描述符
+  对象一律不认（"类上返回真实现、实例上返回敌意实现"同样被拒）；无覆写的标量子类
+  （`int`/`float`/`str`/`Decimal`/`datetime`…）按祖先**标量**规则给上界，不去迭代。
+- **enum / tzinfo 的作者数据计入上界**（第十二轮 M6/M7，第十三轮 O5/O6 收紧/放宽）：
+  `repr(Enum 成员)` 内嵌 `value` 的 repr、`repr(datetime/time)` 内嵌 `tzinfo` 的 repr 都跑
+  同一套计费；`IntEnum`/`IntFlag`/`StrEnum`/`Flag` 成员按各自 `__str__` 原始槽给上界；
+  **只覆写 `__repr__` 的 enum 子类一律拒**（O5：上界曾 28 vs 实际 5,000,000）；
+  精确 `zoneinfo.ZoneInfo` 按 `key` 计费（O6，合法时间戳不再误拒），`ZoneInfo` **子类**
+  与未知 tzinfo 仍拒。
+- **`collections.UserList`/`UserString`**（第十三轮 O6）：精确类型走其精确 `.data`
+  （list/str）的 C 槽计长度；`data` 不是精确内建或类型是子类 ⇒ 仍拒。
+
+```
+# `$F.mul/add/extend/replace` 不接受无 C 槽自定义序列
+- `abc.Sequence` 子类、自定义 `replace` 宿主、自定义非标序列：**被拒**。
+- 逃生口：产值的节点/插件**必须**把序列**显式**包成 `list(...)` / `tuple(...)` / `dict(...)` / `set(...)`。
+- 已放行：标准库 `list`/`tuple`/`dict`/`set`/`UserList`/`zoneinfo.ZoneInfo`。
+```
+
+  同一口径也适用于**数值/映射**（第十五轮 Q2/Q4，第十六轮 S1/S2 统一）：自定义
+  `__index__`/`__int__`/`__float__` 的值在 `%d/%x/%c` 上被拒（逃生口
+  `int(x)`/`float(x)`）；`fractions.Fraction` 不在可证数值白名单（`%f` 等一律拒，
+  逃生口 `float(x)`）；自定义 `__getitem__` 映射（含 `dict` 子类以外的有状态映射）
+  被拒（逃生口 `dict(x)`）；**`MappingProxyType` 一律拒绝**（S2：`type(proxy)` 恒为
+  `mappingproxy`，被包对象不可访问 ⇒ 证明不了它是精确 `dict`；`proxy.copy()` 实测会跑
+  被包 dict 子类的 `__getitem__`，**不是 C 槽**）。放行的是精确
+  `ChainMap`/`UserDict` 与 `dict`/`dict` 子类（**只读一次**、计费与渲染共用同一份快照）。
+  **bytes 模式与 str 模式共用同一判据**（S1）：`b'%s'`/`b'%b'` 只放行 **buffer 协议**
+  （字节数走内存视图 ⇒ 可证上界），自带 `__bytes__`/`__index__`-only 的对象
+  **分配前拒绝、0 次作者协议调用**；`b'%a'`/`b'%r'` 走 repr 可证上界；任何
+  "解不出来"的形状默认**拒绝**，绝不退回"原生必错 ⇒ projected=0 ⇒ 放行"。
+  所有拒绝消息都**点名**对应逃生口（`list(x)`/`tuple(x)`/`dict(x)`/`int(x)`/
+  `float(x)`/`bytes(x)`），不是通用措辞。
+  **X2.1（映射子类）**：`ChainMap`/`UserDict` 的**子类**在读取任何属性之前就拒绝
+  （子类可以覆写 `maps`/`data` 为 property 或换成别的对象类型，读它＝运行作者代码，
+  实测 `keys`/`__getitem__` 覆写 0 次调用即拒）；精确 `ChainMap` 的 `.maps` 必须是
+  精确 `list`、每项必须是 `dict`，逐项用 `dict.items` C 槽合并；**`MappingProxyType`
+  一律拒绝**（第十六轮 S2：`type(proxy)` 恒为 `mappingproxy`、被包对象不可访问，
+  `proxy.copy()` 实测会跑被包 dict 子类的实例 `__getitem__`（1 次作者调用 + 伪造值），
+  不是 C 槽；逃生口 `dict(x)`）；`UserDict` 的 `.data` 必须是精确 `dict`。
+  **走查深度（X2.2 + 第十六轮 T4.2）**：`_DATA_WALK_MAX_DEPTH = 10^6` 是**声明**预算，但
+  `_content_size` 是递归实现，实际会被解释器递归上限截断；走查期间把上限临时抬到
+  **6000 帧 ⇒ 有效深度 ≈2996 层（±1，随嵌套构造的计数方式而变；测试**动态探测**真实边界，不写死数字）**并在 `finally` 逐字节还原。
+  再深的病态嵌套 fail-closed，**实际路径**发出的是带真实深度的准确消息：
+  `$F.* nested value exceeds the interpreter recursion budget: depth <N> (declared budget
+  1000000 levels; the walk raises the interpreter recursion limit to 6000 frames while it
+  runs)` + `list(x)` 逃生口（第十六轮 T4.2 修掉了旧实现的乱码 `result too large: 0 levels`）。
+  **精确 `UserString`/`UserList`** 的迭代器产出仍是包装类型（长度 1）⇒ 走它们的精确
+  `.data`（C 槽）：`_content_size`/`mul`/`add`/`extend` 可用；`.data` 不是精确内建或
+  类型是**子类** ⇒ 迭代前具名拒绝（`replace`/`concat` 仍拒，逃生口 `str(x)`）。
+- **`%r`（`as_repr`）与 `__str__`-only 覆写**（第十五轮 Q8②，口径写清）：enum 成员
+  只覆写 `__str__` 时，`%r` 仍可用——它走 `Enum.__repr__` 原型槽 + 成员 `value` 的
+  repr（各有可证上界，实测上界 22 ≥ 实际 9），而 `%s` 被拒；**`str` 子类**只覆写
+  `__str__` 时**两者都拒**（子类判据按 `__str__`/`__repr__` 原始槽整体看，任一覆写即
+  视为不可证——保守方向），逃生口是上游 `str(x)`/`repr(x)`。
+- **日志/消息里的作者可控字符串一律截断**（第十三轮 O4）：类型名截到 64 字符、
+  异常消息只用 `BaseException.args` 的 C 槽取单 str 参数并截到 200 字符（不调用
+  覆写的 `__str__`）；`type(x).__name__` 可被作者设成 3MB（实测 WARNING 3,000,051
+  字节），截断属本单的渲染量面。
+- **渲染点清单守卫（第十二轮 H3 / 第十三轮 O3/O7）**：`expression.py`/`expression_parser.py` 里所有
+  `str()`/`repr()`/`format()`/`ascii()`、`%` 格式化、`.format()`/`.join()`/`.replace()`、
+  `__str__`/`__repr__`/`__format__`/`__mod__` 属性取用、f-string 形参插值、`logger.*`
+  插值调用、以及**可静态识别的间接构造**（模块别名指向渲染原语、`getattr(x, name)(…)`、
+  `getattr(str,'__call__')(…)`、`operator.methodcaller`、`json.dumps`、`io.StringIO().write`、
+  `print(a)`、`__builtins__['repr'](a)`、`vars(m)['str'](a)`、`__import__('builtins').str(a)`、
+  `csv.writer(f).writerow(a)`、`Path(p).write_text(a)`、**未被调用只被传递的** dunder
+  （`functools.reduce(str.__add__, xs)`）、以及**根是形参直接别名**的 f-string
+  （`x = a; f"{x}"`）），都由 AST 测试**逐点登记**（宁红勿绿）。标为 `guarded` 的点，其
+  具名上界调用必须**支配**它：条件链前缀 + 同层更早，且**带 `if` 的推导式、`[:0]` 切片、
+  嵌套 `def`/`lambda`、`match` 分支**里的调用一律算不支配（第十三轮 O3 的四种形状都要求红，
+  定义原文存在 `TestTwelfthRoundH3RenderSiteInventory._DOMINANCE_MUTATIONS`）。另有每个渲染
+  入口的**行为反例**（喂"上界小、实际大"的敌意对象，断言分配前拒绝）。**清单是启发式、
+  不是完备证明**。第十五轮 Q7 补齐了 `LOG.warning('%s', a)` / `self.logger.warning(...)`、
+  `w = fh.write; w(a)`（绑定方法别名）、`json.dump(a, fh)`、`getattr(fh,'write')(a)`、
+  以及**根是形参/函数内局部名的属性/下标链** f-string（`f"{obj.attr}"`、`f"{d['k']}"`）。
+  **明确未覆盖（静态扫描器看不到，已逐条点名）**：经 `csv`/`logging` 配置间接拿到的
+  格式化器、运行期 `getattr` 拼接出的调用链、模块级常量属性链的 f-string、
+  `json.dump` 之外的第三方序列化入口；上界真假由祖先槽反例等行为用例承重。
+- **日志不插值作者数据（第十二轮 M4）**：评估路径上的 `logger.*` 只记**类型名/元数/形态**
+  （`parse_function` 记 `argc`+`arg_types`；`_render_unmeasurable` 只记异常类型名），
+  `%s` 不再渲染作者对象（修复前实测日志 5,000,296 字节、峰值 10.8MB）。仓库级日志卫生
+  （全仓 588 站点）是 plaita#151，不在本单。
+- **只收口 `Exception`**：守卫把 `Exception` 子类转成"不可界定 ⇒ `ValueError`"，
+  `BaseException`/`KeyboardInterrupt`/`SystemExit` 照旧穿透（不会被吞）。
+- **enum / tzinfo 的作者数据计入上界（第十二轮 M6/M7）**：`repr(Enum 成员)` 内嵌
+  `value` 的 repr、`repr(datetime/time)` 内嵌 `tzinfo` 的 repr，都跑同一套计费；
+  `IntEnum`/`IntFlag`/`StrEnum`/`Flag` 成员按各自 `__str__` 原始槽给上界（不再一律
+  误拒）；覆写 `__str__` 的 enum 子类仍然拒绝，`tzinfo` 的 repr 不可界定则拒绝渲染。
+- **`_render_size(...) is None` 是唯一的生产闸**：第十二轮 M8 删除了实际只被测试引用的
+  `_has_bounded_repr` 谓词（它与闸的判据曾在函数/lamda 等类型上不一致），文档不再把
+  它称作"渲染前闸"。
+- **注册函数（自定义 `$F.xxx`）仍是"检测而非阻止"**：它们在 `$F.*` 返回后由探针
+  复核，分配已发生；作者自定义算子若要提前拒绝，请自行调 `_render_size` 或遵循
+  文档口径。`$F.json_dumps` 同理（登记在渲染点清单里、无预检）。
+- 容器硬上限按**元素数**计量、`join` 物化有独立的**指针字节**预算（显式守卫）。
+
 ### 表达式：字段段不再能遍历 Python 内部属性（下划线名硬报错，plaita#55）
 
 `$ROOT.field.field…` 的字段段此前无条件交给 `_get_attr` 的 `getattr` 回退（没有
@@ -736,8 +1099,10 @@ HTTP 节点的 `allowedHosts` / `deniedHosts` / `blockPrivateNetworks` 此前**�
 4. **HTTP 节点 SSRF 防护钩子**（默认行为不变）：新增 `requestTimeout`（默认 30s）、
    `allowedHosts` / `deniedHosts`（精确/`*.suffix`/CIDR）、`blockPrivateNetworks`、
    `maxRedirects`。任一策略激活时重定向改为逐跳校验后手动跟随。
-5. **`$F.pow` 指数上限**（默认 10000）：`$F.pow(9, 9999999)` 这类 20 字节表达式
-   曾可烧掉分钟级 CPU。
+5. **`$F.pow` 指数上限**（默认 **1000000**，owner 的 K1 口径：上限取真实流量不可达量级）
+   + **分配前**结果规模预检（`int` 结果的位数 ≤ `|b| × digits(a)`，放大由渲染闸负责）：
+   `$F.pow(9, 9999999)` 这类 20 字节表达式仍在分配前拒（指数超上限），
+   `$F.pow(2, 20000)`（6KB，纯数据）**通过**，`$F.pow(9, 999999)`（~1MB，放大）按渲染闸拒。
 6. **`expose_env` 拒绝 `"*"`/空串/带空白键**：此前静默落空（以为暴露了实际没有）。
 
 分布式专项（Redis 全链路实测）：

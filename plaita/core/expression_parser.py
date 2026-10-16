@@ -160,7 +160,9 @@ C ``ob_type`` slot and always stays safe.
 
 from __future__ import annotations
 
+import logging
 import re
+import sys
 import threading
 import types
 import weakref
@@ -175,6 +177,13 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import pyparsing as pp
 
+from plaita.core import expression as _expression
+
+# 文档承诺**原样抛出**的原生算子错误（类型/键/转换/除零…）：这些不得被改写成尺寸错误。
+_NATIVE_OPERATOR_ERRORS = (
+    TypeError, ValueError, KeyError, IndexError, AttributeError,
+    ZeroDivisionError, OverflowError, UnicodeError, MemoryError, StopIteration,
+)
 from plaita.core.expression import (
     ExpressionRegistry,
     _fn_getDictKeys,
@@ -246,6 +255,38 @@ def _warn_unmatched_template(value: str) -> None:
     )
 
 _SPECIAL_ROOTS = ("INPUT", "NODE", "PARENT", "GLOBAL", "ENV")
+
+
+def _size_guard_result(func_name: str, value: Any, input_size: int) -> Any:
+    """求值侧结果规模网（issue #68）：**对每一次 $F.* 调用都生效**。
+
+    判定只依赖调用点**在调用之前**算好并作为值传进来的 ``input_size``（本帧
+    局部量）：
+
+    * 没有线程本地、没有跨函数通道——``func(*args)`` 期间跑什么代码都无法改变它；
+    * 也**不**在调用后回读实参——被调用者改写自己的可变实参（
+      ``lst.clear(); lst.extend([...])``）同样无效（第六轮验收 必修 1）。
+
+    仍然要如实说明：本函数在 ``func(*args)`` **之后**运行，对**没有**预检的路径
+    只能"检测到"（值已分配）；已知放大算子在 ``expression.py`` 里已做分配前预检，
+    本函数是兜底网（含数值分支、未枚举算子、自定义注册函数）。
+    """
+    size = _expression._measure(value)
+    hard = _expression._EXPR_MAX_RESULT_HARD
+    if size > hard:
+        raise ValueError(
+            f"$F.{func_name} result too large: {size} {_expression._measured_unit(value)} "
+            f"(limit {hard}). Refusing to build an unbounded result."
+        )
+    if size <= _expression._EXPR_MAX_RESULT_SIZE:
+        return value
+    allowed = _expression._allowed_result_size(input_size)
+    if size > allowed:
+        raise ValueError(
+            f"$F.{func_name} result too large: {size} {_expression._measured_unit(value)} "
+            f"(limit {allowed}). Refusing to build an unbounded result."
+        )
+    return value
 
 
 def _const_thunk(value: Any) -> Thunk:
@@ -2565,7 +2606,9 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
             # 探针失败按"该容器没有这个根键"继续往下试（保守：宁可把数据文本原样
             # 返回，也不让它带着误导性的归因去递归求值）；留痕便于排查自定义上下文。
             logger.debug(
-                "contains probe failed for %s root %r: %s", type(obj).__name__, root_key, exc,
+                "contains probe failed for %s root %r: %s",
+                _expression._type_name(obj), root_key,
+                _expression._exception_message(exc),
             )
     get = getattr(obj, "get", None)
     if callable(get):
@@ -2573,7 +2616,9 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
             return get(root_key, _MISSING) is not _MISSING
         except Exception as exc:  # noqa: BLE001
             logger.debug(
-                "get probe failed for %s root %r: %s", type(obj).__name__, root_key, exc,
+                "get probe failed for %s root %r: %s",
+                _expression._type_name(obj), root_key,
+                _expression._exception_message(exc),
             )
     if hasattr(obj, "__dict__"):
         # 兜底分支，与 _get_attr 的 getattr 分支对齐（属性风格的自定义上下文）。
@@ -2636,7 +2681,7 @@ def _warn_raw_accessor_collision(path: str) -> None:
         "node/key with id 'raw' — it is resolved as that node (backwards "
         "compatibility), so the verbatim '$NODE.raw.<id>...' accessor (#130) is NOT "
         "available in this flow; rename the node to use the accessor.",
-        path,
+        _expression._clip(path),
     )
 
 
@@ -3017,7 +3062,10 @@ class ExpressionParser:
                     else:
                         value = _detach_alias(value, func_name, plan)
                 args.append(value)
-            logger.debug("parse_function: func_name=%s, args=%s", func_name, args)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("parse_function: func_name=%s, argc=%d, arg_types=%s",
+                             _expression._clip(func_name), len(args),
+                             [_expression._type_name(arg) for arg in args])
             func = _lookup_function(registry, func_name)
             if func is None:
                 if registry is None:
@@ -3034,8 +3082,10 @@ class ExpressionParser:
                     )
                 # scoped registry 故意对未暴露函数返回 "undefined"——保留契约
                 logger.warning(
-                    "expression function %r not registered (registry=%r); returning 'undefined'",
-                    func_name, registry,
+                    "expression function %r not registered (registry_type=%s); "
+                    "returning 'undefined'",
+                    _expression._clip(func_name),
+                    _expression._clip(type(registry).__name__),
                 )
                 func = _UNDEFINED
             # plaita#69 r13: the engine's own mapping-view helpers read the **real**
@@ -3043,16 +3093,51 @@ class ExpressionParser:
             # argument's own ``keys``/``values``/``items`` (host self-description is
             # not evidence). Only the engine-builtin callables are intercepted; a
             # host callable registered under the same name is left untouched.
+            # ⚠ 拦截必须先于 #68 的实参测量——测量会探锚宿主对象，把 r13 的
+            # 具名拒绝（spoofed __class__ 等）吃成 #68 的 unmeasurable 包装。
             if (len(args) == 1
                     and _STORAGE_VIEW_BUILTINS.get(func_name) is func):
                 result = _engine_mapping_view(func_name, args[0])
-            else:
+                if isinstance(result, (dict, list, set, frozenset, tuple)):
+                    _note_fresh_result(registry, func_name, result)
+                # 引擎视图返回后再测量（此时对象已被 r13 判决为真 dict 存储）
+                return _size_guard_result(
+                    func_name, result, _expression._measure_input(args))
+            # plaita#68 ①②（调用前）：会消费可迭代对象的算子先把单次迭代器物化一次
+            #    （按名字而不是函数对象 ⇒ partial/lambda/绑定方法/同名覆盖同样生效）；
+            #    只物化**被消费的那个实参**（join 的元素表 / sort 的序列）——分隔符等
+            #    标量实参原样传下去（第十二轮 M1 实测，str 子类分隔符物化会变原生 TypeError）。
+            if func_name in _expression.ITERABLE_CONSUMING_NAMES and args:
+                args = ((_expression._materialize_for_consuming(args[0]),)
+                        + tuple(args[1:]))
+            # plaita#68 ②：内建算子的语义预检（按函数对象；覆盖同名算子不会被误用）
+            prepare = _expression.PROJECTIONS.get(func)
+            if prepare is not None:
+                prepared = prepare(args)        # 可能抛"分配前拒绝"
+                if prepared is not None:
+                    args = prepared             # 物化后的实参（判定与执行共用）
+            # plaita#68 ③：**调用之前**算好输入规模（本帧局部量，调用后不再回读实参）
+            input_size = _expression._measure_input(args)
+            # plaita#68 ④（H2）：算子内部（`bool()`/`len()`/`__sizeof__` 等用户协议）
+            # 抛出的**非原生**异常也要转成守卫的"不可界定 ⇒ ValueError"；
+            # 文档承诺的原生 TypeError/KeyError/ValueError/… 照旧原样抛出。
+            try:
                 result = func(*args)
-            # r5 freshness registration: only a container result can ever be a
-            # mutation target, and only producers create new containers.
+            except _NATIVE_OPERATOR_ERRORS:
+                raise
+            except Exception as exc:          # noqa: BLE001 - 用户对象异常不得漏出
+                _expression._render_unmeasurable(exc)
+                raise ValueError(
+                    f"$F.* unmeasurable value ({type(exc).__name__}) "
+                    f"result too large: 0 bytes (limit 0). "
+                    "Refusing to build an unbounded result."
+                ) from exc
+            # plaita#69 r5 freshness registration: only a container result can ever
+            # be a mutation target, and only producers create new containers.
             if isinstance(result, (dict, list, set, frozenset, tuple)):
                 _note_fresh_result(registry, func_name, result)
-            return result
+            # plaita#68：输出规模守卫（所有结果的单一判定点）。
+            return _size_guard_result(func_name, result, input_size)
 
         thunk._plaita_call = func_name                  # plaita#69 producer classification
         thunk._plaita_args = tuple(arg_thunks)          # plaita#69 r3 F2: callee-arg reach
@@ -3189,7 +3274,30 @@ class ExpressionParser:
             if seg_thunk is None:  # literal gap between matches
                 out.append(value[start:end])
             else:
-                out.append(str(seg_thunk(frame)))
+                # 插值也要过结果守卫（第六轮验收 必修 4；第七轮验收 必修 1：
+                # **渲染之前**就要拒绝）。渲染规模无法界定（自定义 __str__/__repr__
+                # 且类型不在内建渲染白名单里）或预估超过额度 ⇒ 直接抛错，绝不
+                # "先渲染再判"（LyingMapping 实测元素合计 1MB、真实渲染 99MB）。
+                raw = seg_thunk(frame)
+                bound = _expression._render_size(raw)
+                if bound is None:
+                    raise ValueError(
+                        f"$F.template cannot bound the rendered size of "
+                        f"{type(raw).__name__!r} (渲染语义不在可证白名单里). "
+                        f"Refusing to build an unbounded result. "
+                        f"{_expression._RENDER_ESCAPE_HINT}"
+                    )
+                # 渲染额度＝渲染上界本身（不能用"内容量/元素数下界"抬高额度，
+                # 第八轮验收 必修 4）：只需撞硬上限就拒。
+                if bound > _expression._EXPR_MAX_RESULT_HARD:
+                    raise ValueError(
+                        f"$F.template result too large: {bound} chars "
+                        f"(limit {_expression._EXPR_MAX_RESULT_HARD}). "
+                        "Refusing to build an unbounded result."
+                    )
+                raw_size = bound
+                text = str(raw)
+                out.append(_size_guard_result("template", text, raw_size))
         return "".join(out)
 
     def _compile_template(self, value: str) -> list:
