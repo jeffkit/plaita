@@ -124,6 +124,7 @@ class RedisStreamTaskQueue:
         dlq_key: Optional[str] = None,
         dlq_max_len: Optional[int] = None,
         dead_letter_guard: Optional[Callable[[StreamTask], bool]] = None,
+        reclaim_lease_guard: Optional[Callable[[Dict[str, Any]], bool]] = None,
         max_schema_version: Optional[int] = TASK_SCHEMA_VERSION,
         on_dead_letter: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
@@ -149,6 +150,15 @@ class RedisStreamTaskQueue:
         # 决策前调用：True=允许死信；False 或抛异常=跳过（消息留 pending）。
         # None（默认）恒放行——存量行为零变化。
         self.dead_letter_guard = dead_letter_guard
+        # #47：reclaim 前的活跃租约闸门。``_reclaim_one`` 原本只按 idle 阈值
+        # XCLAIM，不看执行是否仍活着——排队/处理中的消息被反复抢占，
+        # delivery_count 虚增触顶后经死信守卫「非终态+租约空」分支重入队，
+        # 形成「死信→重入队→再烧 5 次投递→再死信」循环（DLQ 噪声 + churn）。
+        # 回调契约：入参 = 消息体 dict，返回 True = 执行仍有活跃租约 →
+        # reclaim 跳过该条（不 XCLAIM、不计数，等其终态/租约过期）；False =
+        # 存量 reclaim 接管（真孤儿恢复路径不受影响）。None（默认）恒跳过
+        # 检查——存量行为零变化。回调抛异常按「无法确认无租约」保守跳过。
+        self.reclaim_lease_guard = reclaim_lease_guard
         # #26 告警钩子：死信只 logger.error 时值守全靠人刷日志。钩子在**入队
         # 之后**调用（事件已持久化，钩子失败不回滚死信语义），且 best-effort
         # ——WebhookAlerter.send 是非阻塞入队，绝不反压消费主循环。
@@ -162,6 +172,7 @@ class RedisStreamTaskQueue:
             "poison_acked": 0,
             "failed": 0,
             "dlq_guard_skipped": 0,
+            "reclaim_lease_skipped": 0,
             "residue_swept": 0,
         }
 
@@ -526,6 +537,58 @@ class RedisStreamTaskQueue:
             return int(entry[3] or 1)
         return 1
 
+    def _peek_task_body(self, message_id: str) -> Optional[Dict[str, Any]]:
+        """XCLAIM 前无副作用读消息体（#47：XRANGE 不动 PEL/delivery_count）。
+
+        读不到（Redis 瞬断/信封损坏/条目已不存在）返回 None：调用方放行按
+        存量 reclaim——探测缺位不得切断恢复路径（XCLAIM 侧的 Redis 异常
+        自有既有兜底）。
+        """
+        try:
+            entries = self.redis.xrange(
+                self.stream_key, min=message_id, max=message_id, count=1
+            )
+        except Exception as exc:  # noqa: BLE001 — 保守放行，见 docstring
+            logger.debug("reclaim 前读消息体失败（放行 reclaim）: id=%s: %s", message_id, exc)
+            return None
+        if not entries:
+            return None
+        _mid, fields = entries[0]
+        try:
+            body = json.loads(_payload_from_fields(fields))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            logger.debug("reclaim 前消息体解析失败（放行 reclaim）: id=%s: %s", message_id, exc)
+            return None
+        return body if isinstance(body, dict) else None
+
+    def _reclaim_allowed_by_lease(self, body: Dict[str, Any], message_id: str) -> bool:
+        """#47：XCLAIM 前的活跃租约闸门。True=允许 reclaim；False=跳过该条。
+
+        回调（``reclaim_lease_guard``）按消息体判「执行是否仍有活跃租约」：
+        True（租约活跃）→ 跳过——不 XCLAIM、不计数，等其终态/租约过期；
+        False → 存量 reclaim 接管（真孤儿恢复路径不受影响）。回调抛异常按
+        「无法确认无租约」保守跳过（与 dead_letter_guard 异常语义同向：宁可
+        少抢一轮，不可误伤活执行）；消息留 pending，下轮探测再判。
+        """
+        try:
+            active = bool(self.reclaim_lease_guard(body))
+        except Exception as exc:  # noqa: BLE001 — 探测故障保守跳过
+            self._metrics["reclaim_lease_skipped"] += 1
+            logger.warning(
+                "reclaim_lease_guard 探测失败（保守跳过 reclaim）: id=%s: %s",
+                message_id,
+                exc,
+            )
+            return False
+        if active:
+            self._metrics["reclaim_lease_skipped"] += 1
+            logger.debug(
+                "reclaim 跳过（执行租约活跃，等其终态/过期再接管）: id=%s",
+                message_id,
+            )
+            return False
+        return True
+
     def _reclaim_one(self) -> Optional[StreamTask]:
         """抢回一条 idle 超阈的 pending 消息（一条；无则 None）。
 
@@ -534,6 +597,10 @@ class RedisStreamTaskQueue:
         处置都继续扫下一条 pending。处置必须在同一轮扫描内完成而不能交给
         调用方重扫：XCLAIM 会把条目 idle 归零，``claim_min_idle_ms`` 极小时
         （如单测的 1ms）下一轮扫描会立刻再抢到同一条目，外层循环空转。
+
+        #47：XCLAIM 前先过活跃租约闸门（``reclaim_lease_guard``）——租约
+        活跃的条目直接跳过（不 XCLAIM、不计数），排队/处理中的消息不再被
+        反复抢占刷 ``times_delivered`` 触顶死信。未配守卫时零变化。
         """
         try:
             pending = self.redis.xpending_range(
@@ -560,6 +627,13 @@ class RedisStreamTaskQueue:
             if idle < self.claim_min_idle_ms:
                 continue
             msg_id_str = _decode(msg_id)
+            # #47：租约闸门在 XCLAIM 之前——抢走一条「执行还活着」的消息
+            # 只会白白虚增投递次数（死信循环的根因），先探测再决定。
+            if self.reclaim_lease_guard is not None:
+                body = self._peek_task_body(msg_id_str)
+                if body is not None and not self._reclaim_allowed_by_lease(body, msg_id_str):
+                    continue
+                # body 读不到 → 放行按存量 reclaim（恢复路径优先于探测完整性）
             claimed = self.redis.xclaim(
                 self.stream_key,
                 self.group_name,
