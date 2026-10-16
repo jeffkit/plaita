@@ -105,6 +105,13 @@ class TestGuardFinalizeTenantNamespace:
         payload = json.loads(raw)
         assert payload["status"] == "error"
         assert payload["error"]["node_retries"] == BUDGET
+        # plaita#93：异常驱动的落盘点之外，守卫的终态化也必须带机器可判别的
+        # 身份（守卫看不到原始异常/节点业务码 ⇒ 用引擎的节点 abort 默认码 +
+        # worker 级判据名，而不是编造一个看起来像业务码的数字）。
+        from plaita.core.errors import DEFAULT_NODE_ABORT_CODE
+
+        assert payload["error"]["code"] == DEFAULT_NODE_ABORT_CODE
+        assert payload["error"]["error_type"] == "node_retry_budget_exhausted"
         # 终态化分支不重入队（与既有 TestGuardBackstop 语义一致）
         assert fake.xlen("test:issue57-guard") == 0
 

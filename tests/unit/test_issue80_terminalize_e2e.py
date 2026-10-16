@@ -81,6 +81,9 @@ def test_unserializable_terminalizes_error_and_state_actually_persists():
     assert saved.status == "error"
     assert saved.error.get("context_sanitized") is True
     assert "#80" in str(saved.error.get("rule", ""))
+    # plaita#93：这一处终态化同样落异常身份（StateSerializationError 没有引擎
+    # 错误码 ⇒ error_type 取异常类名），下游不必解析中文 message 分类。
+    assert saved.error.get("error_type") == "StateSerializationError"
 
 
 def test_persisted_context_is_json_safe_and_stringified():
@@ -128,3 +131,5 @@ def test_layer2_falls_back_to_minimal_error_state_when_persist_keeps_failing():
     last = storage.saved_states[-1]
     assert last.status == "error"
     assert last.context == {}, "层 2 应落一个**不含 context** 的最小状态"
+    # plaita#93：降级路径也要带异常身份（同层 1，error_type = 异常类名）
+    assert last.error.get("error_type") == "StateSerializationError"

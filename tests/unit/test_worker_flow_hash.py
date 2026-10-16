@@ -229,6 +229,10 @@ class TestResumeFlowHashEnforcement:
         assert "已变更" in state.error["message"]
         assert state.error["stored_flow_hash"] == _expected_hash(TEST_FLOW)
         assert state.error["current_flow_hash"] == _expected_hash(MODIFIED_FLOW)
+        # plaita#93：本处终态化不由异常驱动，用引擎通用 flow 级错误码 + worker
+        # 级判据名给出机器可判别身份（下游不必解析中文 message 分类）。
+        assert state.error["code"] == -500
+        assert state.error["error_type"] == "flow_hash_mismatch"
 
     def test_hash_match_proceeds(self):
         """指纹一致 → 正常推进（不被误伤）。"""

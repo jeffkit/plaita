@@ -228,6 +228,12 @@ class TestFailNodeBudgetExhaustsDespiteSuccesses:
             "消息无限重投（plaita#123 事故本体）"
         )
         assert saved.error.get("node_retries") == budget - 1
+        # plaita#93：步进循环的终态化（本文件走的正是这一条）同样要落引擎
+        # 已算出的结构化身份，而不是只有一段中文 message。
+        from plaita.core.errors import DEFAULT_NODE_ABORT_CODE
+
+        assert saved.error.get("code") == DEFAULT_NODE_ABORT_CODE
+        assert saved.error.get("error_type") == "node_error"
         assert saved.error.get("failed_node") == "b"
 
     def test_per_node_scope_is_exactly_what_makes_it_converge(self):

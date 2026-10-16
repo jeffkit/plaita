@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import Enum
 import hashlib
 import inspect
 import json
@@ -22,7 +23,9 @@ from redis.exceptions import RedisError
 from plaita.core.errors import ResumeType
 from plaita.event.core import EventBus
 from plaita.core.errors import (
+    DEFAULT_NODE_ABORT_CODE,
     FlowCancelledException,
+    FlowExecutionException,
     FlowTimeoutError,
     NodeExecutionError,
     NodeTimeoutError,
@@ -689,6 +692,131 @@ def _node_id_from_chain(exc: BaseException) -> Optional[str]:
         node = node.__cause__
         depth += 1
     return None
+
+
+# ---------------------------------------------------------------------------
+# 落盘错误的结构化字段（plaita#93）
+# ---------------------------------------------------------------------------
+#
+# 落盘边界（各处 ``state.error``）历史上只写 ``str(e)``：引擎已经算出的
+# ``code`` / ``error_type``（``FlowExecutionException`` 自带）与 HTTP 节点
+# 特意挂载的 ``exc.details`` / ``exc.response``（plaita/node/http.py 的
+# ``wrap_http_node_err``）在最后一步全部被抹平，执行终态只剩一段中文 message
+# ——console / DLQ 巡检 / issue-keeper 之类下游只能 ``startswith`` 解析文本。
+#
+# 非异常驱动的两处终态化（flow_hash 不匹配 / 死信守卫重试预算耗尽）没有可抄
+# 的异常，用引擎自己的**通用错误身份**标注并把 worker 级判据写进 ``error_type``
+# （见各站点的注释）——不编造"看起来像节点业务码"的数字。
+
+# ``FlowExecutionException.code`` 的基类默认值（= FlowErrorType.FLOW_ERROR）。
+_FLOW_ERROR_CODE = -500
+
+
+def _iter_error_chain(exc: BaseException):
+    """沿 ``__cause__``（缺省退 ``__context__``）上溯异常链。
+
+    深度与重试判据（``_NODE_RETRY_CHAIN_MAX_DEPTH``）同口径，并按对象 id 去环。
+    """
+    node: Optional[BaseException] = exc
+    seen: Set[int] = set()
+    depth = 0
+    while node is not None and depth <= _NODE_RETRY_CHAIN_MAX_DEPTH:
+        if id(node) in seen:
+            return
+        seen.add(id(node))
+        yield node
+        node = getattr(node, "__cause__", None) or getattr(node, "__context__", None)
+        depth += 1
+
+
+def _jsonable_error_value(value: Any) -> Any:
+    """错误字段 → JSON 可序列化标量（``FlowErrorType`` 等枚举取 ``.value``）。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    return str(value)
+
+
+def _error_details_summary(details: Any) -> Optional[Dict[str, Any]]:
+    """``exc.details``（HTTP 节点的 ``HttpNodeErrorInfo``）→ 落盘安全的紧凑摘要。
+
+    只走 ``details.redacted()``（#160 的**唯一**掩码视图，JSON 安全）并丢掉
+    body：``exc.response`` 已有一份截断（``_ERROR_FRAME_BODY_MAX_CHARS``）且
+    脱敏的摘要，而落盘状态是长期资产——status/code/headers 足够定位「连不上」
+    还是「远端返回了什么」，不必把 body 再抄一份。任何渲染异常都吞掉：
+    明细丢失绝不能拖垮终态化。
+    """
+    render = getattr(details, "redacted", None)
+    if not callable(render):
+        return None
+    try:
+        view = render()
+    except Exception:  # noqa: BLE001 — 明细渲染失败不影响终态化
+        return None
+    if not isinstance(view, dict):
+        return None
+    summary: Dict[str, Any] = {}
+    if view.get("code") is not None:
+        summary["code"] = _jsonable_error_value(view["code"])
+    if view.get("message") is not None:
+        summary["message"] = _jsonable_error_value(view["message"])
+    request = view.get("request")
+    if isinstance(request, dict):
+        summary["request"] = {k: request.get(k) for k in ("method", "url", "headers")}
+    response = view.get("response")
+    if isinstance(response, dict):
+        summary["response"] = {k: response.get(k) for k in ("status", "statusText", "headers")}
+    return summary or None
+
+
+def _error_fields(exc: Optional[BaseException]) -> Dict[str, Any]:
+    """从异常链提取可落盘的**结构化错误字段**（plaita#93）。
+
+    取值口径：
+
+    * ``code`` / ``error_type`` **优先取节点级引擎异常**（``NodeExecutionError``
+      / ``NodeTimeoutError``）：分布式路径上 ``run_distributed`` 把一切归一化成
+      ``FlowErrorException``（外部契约 code=-500，见
+      ``docs-site/docs/guide/error-handling.md``），节点身份挂在 ``__cause__``
+      上——只取外壳会把「哪种错误」也一并抹平。链上没有节点级异常时取**最深的**
+      引擎异常（``FlowExecutionException`` 子类；外壳只是归一化容器，语义在
+      ``__cause__``），再退回链首——真正终态化那次异常。
+    * 链上没有任何 ``error_type`` 时以异常类名兜底：落盘字段必须**永远存在**
+      且机器可判别，否则下游又只能回去解析文本。
+    * ``details`` / ``response`` 取链上第一份（HTTP 节点把它们挂在链尾的
+      ``NodeException`` 上）；``response`` 已是脱敏 + 截断的摘要，可直接落盘。
+    * 返回值只用 JSON 可序列化标量；取不到任何字段时返回 ``{}``，调用方
+      ``**_error_fields(e)`` 的字典形状与修复前逐字一致（老消费方零影响）。
+    """
+    if exc is None:
+        return {}
+    chain = list(_iter_error_chain(exc))
+    if not chain:
+        return {}
+    identity: Optional[BaseException] = next(
+        (node for node in chain
+         if isinstance(node, (NodeExecutionError, NodeTimeoutError))), None)
+    if identity is None:
+        engine = [node for node in chain if isinstance(node, FlowExecutionException)]
+        identity = engine[-1] if engine else chain[0]
+    fields: Dict[str, Any] = {}
+    code = getattr(identity, "code", None)
+    if code is not None:
+        fields["code"] = _jsonable_error_value(code)
+    error_type = getattr(identity, "error_type", None)
+    fields["error_type"] = (_jsonable_error_value(error_type)
+                            if error_type is not None else type(identity).__name__)
+    response = next((node.response for node in chain
+                     if isinstance(getattr(node, "response", None), dict)), None)
+    if response:
+        fields["response"] = response
+    details = next((node.details for node in chain
+                    if getattr(node, "details", None) is not None), None)
+    summary = _error_details_summary(details)
+    if summary:
+        fields["details"] = summary
+    return fields
 
 
 class StatePersistError(RuntimeError):
@@ -2475,6 +2603,12 @@ class FlowWorker:
                     state.status = "error"
                     state.error = {
                         "message": mismatch_msg,
+                        # plaita#93：本处终态化不由异常驱动（有专门的字段承载
+                        # 细节），但落盘面同样要给下游一个机器可判别的身份：
+                        # code 用引擎的通用 flow 级错误码（-500），error_type
+                        # 是本处的 worker 级判据（不是节点业务码）。
+                        "code": _FLOW_ERROR_CODE,
+                        "error_type": "flow_hash_mismatch",
                         "stored_flow_hash": stored_flow_hash,
                         "current_flow_hash": current_flow_hash,
                         "stored_flow_hash_algo": stored_algo,
@@ -2667,9 +2801,12 @@ class FlowWorker:
                 state.error = {
                     "message": f"节点执行失败（重试 {retries} 次后仍失败）: {e}",
                     "node_retries": retries,
+                    # plaita#93：终态化那一刻把引擎已算出的 code / error_type 与
+                    # HTTP 明细摘要如实落盘（message 保留，老消费方零影响）。
+                    **_error_fields(e),
                 }
             else:
-                state.error = {"message": str(e)}
+                state.error = {"message": str(e), **_error_fields(e)}
             if failed_node:
                 state.error["failed_node"] = failed_node
             state.end_time = datetime.now().isoformat()
@@ -2854,6 +2991,9 @@ class FlowWorker:
                             "context_sanitized": True,
                             "rule": "non-JSON values coerced to str via default=str (#80)",
                             "exception": str(exc)[:200],
+                            # plaita#93：异常身份也落盘（可序列化失败本身没有
+                            # 引擎错误码，error_type 退化为异常类名）。
+                            **_error_fields(exc),
                         }
                         state.end_time = datetime.now().isoformat()
                         try:
@@ -2879,7 +3019,8 @@ class FlowWorker:
                             "message": (
                                 "执行状态不可序列化，且净化后仍无法落盘"
                                 f"（永久失败，不重投）: {str(exc)[:200]}"
-                            )
+                            ),
+                            **_error_fields(exc),
                         }
                         state.end_time = datetime.now().isoformat()
                         self._persist_state_or_raise(
@@ -2933,9 +3074,11 @@ class FlowWorker:
                         state.error = {
                             "message": f"节点执行失败（重试 {retries} 次后仍失败）: {e}",
                             "node_retries": retries,
+                            # plaita#93：步进失败终态化同样落结构化字段。
+                            **_error_fields(e),
                         }
                     else:
-                        state.error = {"message": str(e)}
+                        state.error = {"message": str(e), **_error_fields(e)}
                     if failed_node:
                         state.error["failed_node"] = failed_node
                     state.end_time = datetime.now().isoformat()
@@ -3326,6 +3469,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         "执行无法继续推进"
                     ),
                     "node_retries": retry_count,
+                    # plaita#93：守卫只能看到计数键（#123 起键按节点隔离，
+                    # 守卫看不到「是哪个节点」、更看不到原始异常），无法抄
+                    # 节点业务码——用引擎的节点 abort 默认码标注「这是节点
+                    # 反复失败」的类别，具体判据写进 error_type。
+                    "code": DEFAULT_NODE_ABORT_CODE,
+                    "error_type": "node_retry_budget_exhausted",
                 }
                 state.end_time = datetime.now().isoformat()
                 try:
