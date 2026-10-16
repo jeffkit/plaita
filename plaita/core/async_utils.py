@@ -176,11 +176,16 @@ def async_gen_to_sync(agen):
         _DONE = object()
         q: "_queue.Queue" = _queue.Queue()
 
+        # #70：**停止信号**。原实现没有它 ⇒ 消费者 break/close 后，后台线程仍把
+        # async generator 全速拉到底（on_flow_end 按 result=None 触发、_running 提前
+        # 复位、同实例可重入并行）。消费者一侧在 finally 里 set 它，_drive 每轮检查。
+        _stop = threading.Event()
+
         def _drive():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                while True:
+                while not _stop.is_set():          # ← #70 停止检查（每轮）
                     try:
                         item = loop.run_until_complete(agen.__anext__())
                     except StopAsyncIteration:
@@ -189,6 +194,8 @@ def async_gen_to_sync(agen):
                     except BaseException as e:  # noqa: BLE001
                         q.put(e)
                         break
+                    if _stop.is_set():             # ← #70 取到后若已要求停止则**丢弃**，
+                        break                      #    不再塞进无界队列
                     q.put(item)
             finally:
                 try:
@@ -208,6 +215,8 @@ def async_gen_to_sync(agen):
                     raise item
                 yield item
         finally:
+            # #70：先**通知**再 join —— 否则 join 只能干等线程把生成器跑完
+            _stop.set()
             worker.join(timeout=5)
             if worker.is_alive():
                 logger.warning(
