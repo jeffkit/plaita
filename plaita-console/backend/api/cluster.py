@@ -254,9 +254,11 @@ async def stop_all_services(request: StopServiceRequest):
     """
     manager = get_service_manager()
     results = await manager.stop_all(request.graceful)
-    
+
     return {
-        "success": all(results.values()),
+        # 空结果集不能翻成功：all({}) is True 会把「没停任何东西」伪装成
+        # 成功回执（#100，如托管表为空/实例全部脱管的场景）。
+        "success": bool(results) and all(results.values()),
         "results": results
     }
 

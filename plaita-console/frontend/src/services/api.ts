@@ -111,7 +111,9 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
   if (response.status === 401 && !url.startsWith('/auth/login') && !url.startsWith('/auth/setup')) {
     clearSession()
-    window.location.assign('/login')
+    // 子路径部署下 /login 不是本 console 的登录页（登录页在 ${SUB_PATH}/login，
+    // router basename 同源），写死根路径会把用户踢出 console（#103）
+    window.location.assign(`${SUB_PATH}/login`)
     throw new Error('登录已过期，请重新登录')
   }
 

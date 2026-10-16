@@ -10,6 +10,9 @@ export default function Logs() {
   const [searchParams, setSearchParams] = useSearchParams()
   const levelFilter = searchParams.get('level') || ''
   const instanceFilter = searchParams.get('instance_id') || ''
+  // #102：Cluster 实例卡深链带 service_type+instance_id；后端对只有
+  // instance_id 的历史链接同样按条目收窄，这里两者都透传
+  const serviceTypeFilter = searchParams.get('service_type') || ''
 
   const setParam = (key: string, value: string) => {
     const next = new URLSearchParams(searchParams)
@@ -32,6 +35,7 @@ export default function Logs() {
     const params = new URLSearchParams()
     if (levelFilter) params.set('level', levelFilter)
     if (instanceFilter) params.set('instance_id', instanceFilter)
+    if (serviceTypeFilter) params.set('service_type', serviceTypeFilter)
 
     // C4-4：EventSource 无法携带 Authorization/X-Admin-API-Key 头，鉴权部署
     // 下 SSE 连接必然 401。/logs/stream 的后端归属另一批次（本批次不可改，
@@ -96,14 +100,15 @@ export default function Logs() {
       cancelled = true
       controller.abort()
     }
-  }, [isStreaming, useSSE, levelFilter, instanceFilter])
+  }, [isStreaming, useSSE, levelFilter, instanceFilter, serviceTypeFilter])
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['logs', levelFilter, instanceFilter],
+    queryKey: ['logs', levelFilter, instanceFilter, serviceTypeFilter],
     queryFn: () =>
       api.getLogs({
         level: levelFilter || undefined,
         instance_id: instanceFilter || undefined,
+        service_type: serviceTypeFilter || undefined,
         limit: 200,
       }),
     refetchInterval: isStreaming && !useSSE ? 2000 : false,
@@ -204,8 +209,16 @@ export default function Logs() {
       />
 
       {/* 活跃筛选 chips：来源可见、可移除 */}
-      {(instanceFilter || levelFilter) && (
+      {(instanceFilter || levelFilter || serviceTypeFilter) && (
         <div className="flex items-center gap-2">
+          {serviceTypeFilter && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-line bg-plaita-500/10 text-caption text-plaita-400 font-mono">
+              {serviceTypeFilter}
+              <button onClick={() => setParam('service_type', '')} aria-label="移除服务类型筛选" title="移除服务类型筛选">
+                <X size={12} />
+              </button>
+            </span>
+          )}
           {instanceFilter && (
             <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-line bg-plaita-500/10 text-caption text-plaita-400 font-mono">
               {instanceFilter}
@@ -235,7 +248,7 @@ export default function Logs() {
         ) : filteredLogs.length === 0 ? (
           <EmptyState
             icon={<ScrollText size={20} />}
-            message={instanceFilter || levelFilter || searchText ? '没有匹配的日志' : '暂无日志'}
+            message={instanceFilter || levelFilter || serviceTypeFilter || searchText ? '没有匹配的日志' : '暂无日志'}
             hint={instanceFilter ? '该实例可能尚未产生日志；可移除筛选查看全部' : undefined}
           />
         ) : (
@@ -272,8 +285,10 @@ export default function Logs() {
   )
 }
 
-// 日志行组件：级别色只做语义点缀，正文保持中性（DESIGN.md §6-5）
-function LogLine({ log }: { log: { timestamp: string; level: string; message: string; service_type?: string } }) {
+// 日志行组件：级别色只做语义点缀，正文保持中性（DESIGN.md §6-5）。
+// #102：行内渲染 instance_id——实例筛选下混入行（同 service_type 其他实例）
+// 必须可与目标实例的行区分。
+function LogLine({ log }: { log: { timestamp: string; level: string; message: string; service_type?: string; instance_id?: string } }) {
   const levelColors: Record<string, string> = {
     DEBUG: 'text-ink-faint',
     INFO: 'text-ink-secondary',
@@ -292,6 +307,11 @@ function LogLine({ log }: { log: { timestamp: string; level: string; message: st
       {log.service_type && (
         <span className="text-ink-faint w-24 truncate shrink-0">
           {log.service_type}
+        </span>
+      )}
+      {log.instance_id && (
+        <span className="text-ink-faint w-40 truncate shrink-0">
+          {log.instance_id}
         </span>
       )}
       <span className="flex-1 text-ink-secondary">{log.message}</span>
