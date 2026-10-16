@@ -2,9 +2,9 @@
   "name": "69-r13-mapping-view-trusted-host",
   "concern": "#69 r13 `$F.keys/values/items` 必须读真实 dict 存储（基类 C 描述符），不能调用宿主覆写的方法",
   "file": "plaita/core/expression_parser.py",
-  "old": "            if (len(args) == 1\n                    and _STORAGE_VIEW_BUILTINS.get(func_name) is func):\n                result = _engine_mapping_view(func_name, args[0])\n            else:\n                result = func(*args)\n",
+  "old": "            if (len(args) == 1\n                    and _STORAGE_VIEW_BUILTINS.get(func_name) is func):\n                result = _engine_mapping_view(func_name, args[0])\n                if isinstance(result, (dict, list, set, frozenset, tuple)):\n                    _note_fresh_result(registry, func_name, result)\n                # 引擎视图返回后再测量（此时对象已被 r13 判决为真 dict 存储）\n                return _size_guard_result(\n                    func_name, result, _expression._measure_input(args))\n",
   "new": "            result = func(*args)\n",
-  "rationale": "退回 r12 的行为（`_fn_keys(a) = a.keys()` 等直接问宿主）：`class LieKeysPlainList(dict): def keys(self): return ['LIE']` 把宿主自述的 `['LIE']` 物化进 `$VAR`（`items`/`values`/`getDictKeys`/`getDictValues` 同形），宿主覆写方法被调用。由 r13 映射视图判决的正常 `FAILED` 行杀死，外加 r11/r12 两条改成「通道关闭」的 DSL 回归。",
+  "rationale": "退回 r12 的行为（`_fn_keys(a) = a.keys()` 等直接问宿主）：`class LieKeysPlainList(dict): def keys(self): return ['LIE']` 把宿主自述的 `['LIE']` 物化进 `$VAR`（`items`/`values`/`getDictKeys`/`getDictValues` 同形），宿主覆写方法被调用。由 r13 映射视图判决的正常 `FAILED` 行杀死，外加 r11/r12 两条改成「通道关闭」的 DSL 回归。【2026-10-16 rebase union 修订】锚点随 #68 r30 并合重排（拦截提前到 #68 实参测量之前，防测量吃掉具名拒绝）；变异语义不变（退回宿主自述路径）。",
   "expect_fail": [
     "tests/unit/test_issue69_r13_layout_and_real_storage.py::TestIssue69R13MappingViewReadsRealStorage::test_lying_keys_items_values_yield_the_real_storage",
     "tests/unit/test_issue69_r13_layout_and_real_storage.py::TestIssue69R13MappingViewReadsRealStorage::test_the_alias_helpers_read_the_same_real_storage",

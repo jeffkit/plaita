@@ -1,5 +1,5 @@
 # 变异测试（Mutation Testing）基线与流程
-> **最后更新**：2026-10-12（§2.5 末节：plaita#55 后单模块重跑 —— 745 变异，初筛 534 killed / 211 非 killed / 0 timeout，独立进程 recheck 后 **623/745 = 83.6%**（122 个 true survived = 117 个旧代码分支 + 2 个 #104 等价 + 2 个 #130 等价 + 1 个 #55 等价）；**#55 新增/改动代码 0 个非等价的真 survived**，`_get_attr` 本轮 0 survived（#130 轮为 2）。上一轮：plaita#130 后单模块重跑（含独立验收补测）—— 734 变异，初筛 531 killed，独立 recheck 后 **611/734 = 83.2%**；**#130 新增/改动代码只剩 2 个等价变异、0 个非等价的真 survived**，123 个 true survived = **119 个旧代码分支 + 2 个 #104 新增代码的等价变异 + 2 个 #130 新增代码的等价变异**，旧代码部分可由"companion 测试集不含 flow 级用例/未断言 DEBUG 文案"解释；上一轮 #104 为 558/681 = 81.9%，两轮都在 §2.5 末两节。
+> **最后更新**：2026-10-13（§2.5 plaita#68 **十二轮**返工记录；最终形态＝**方案 A｜精确类型 + 可证上界**。第九轮补齐 D1–D5：模糊语料真上界（30 用例 × str/repr）、枚举异常收口成 `ValueError`、join/sort **单次物化**（有状态可迭代对象不得在第二遍长出来）、同质容器渲染上界快路径（10M 项 14.55s → 0.26s）；第十轮删掉 namedtuple 快速通道、dunder 判据改读 MRO 原始槽；第十一轮把**计费与枚举改走祖先 C 槽**；第十二轮用 **AST 渲染点清点守卫**替换那条"通过时毫无意义"的文本顺序断言。电池 460 用例。**口径**：NO-DIFF 只代表「该电池覆盖范围内无差异」，不等于等价证明；聚合数字必须标注 revision，且必须能在交付树里 grep 到。）
 > 同时（#107 后重跑 `state.py` / `errors.py` 单模块基线，见 §2.12.1 / §2.19.1：
 > `state.py` **95.8%（318/332，独立复核后）**，14 survived 全部是改动前就存在的、本次未触碰的位点；
 > `errors.py` **82.5%（80/97）**，17 survived 同理。两模块旧的 99.1% / 100% 在现工具链下**不复现**，
@@ -167,7 +167,7 @@
 | 模块 | 得分 | 变异点 | 状态 |
 |---|---|---|---|
 | `plaita/core/callback.py` | 100% | 118/118 | ✅ 已建立 |
-| `plaita/core/expression.py` | 100% | 575/575 | ✅ 已建立 |
+| `plaita/core/expression.py` | 100% | 575/575 | ⚠️ **575/575 是 plaita#68 改动前的旧口径**（#68 之后见 §2.5 末节的逐轮扫描表；那些聚合数字各自标注了 revision，不能与 575/575 混用）｜✅ 已建立（**2026-10-13 plaita#68 后重新单模块扫描**：与 `expression_parser.py` 合并 1800 变异、真实 86.4%，见 §2.5 末节；575/575 是改动前口径） |
 | `plaita/node/calculate.py` | 98.7% | 215/216 | ✅ 1 个等价变异 |
 | `plaita/node/decide.py` | 100% | 136/136 | ✅ 已建立 |
 | `plaita/core/parallel_executor.py` | 100% | 39/39 | ✅ 已建立 |
@@ -287,187 +287,721 @@ test_reviewfix_a_truthy_cond.py test_context.py test_coverage_sweep.py
 `"XXnullXX"` 后整套单测确实红；未被断言的 DEBUG 文案变异在独立进程里稳定
 survived。）
 
-| 阶段 | 数字 |
+### 2026-10-13 plaita#68 第十五轮（Q1–Q8：% 结构性判定 + 映射快照 + 兄弟分支 + 可重放变异）
+
+第十五轮把第十二/十三轮的"% 判定"从"逐形状补"改成**结构性可证**：`specs` 解析不出来、
+`*` 宽度/精度解不出（非精确 `int`）、`%s/%r/%a` 的值没有可证上界 ⇒ **默认拒绝**；错误点
+之前会被原生构造的字段全部计入上界；映射改成"一次性快照 + 只读一次"（精确 `dict`/`dict`
+子类走 `dict.get` C 槽，三种已知 stdlib 映射物化成精确 dict，其余拒绝 + `dict(x)` 逃生口）；
+数值转换只放行精确数值并用 C 槽读，自定义 `__index__`/`__int__`/`__float__` 拒绝 +
+`int(x)`/`float(x)` 逃生口；支配性检查把兄弟 `case`/`handler` 与带 `guard` 的 case 也算作
+不支配；owner 的 K1 口径把遍历预算提到 10^6（`_DATA_WALK_MAX_DEPTH`），`$F.pow` 指数上限
+提到 10^6、放大由渲染闸的**分配前**预检负责。
+
+新增可重放交付物：`scripts/mutation_replay/`（`replay.py` + `mutations/*.json`，10 条 #68
+变异：5 条支配性形状 + Q1 未解析格式 fail-open + Q2 dict 子类 `__getitem__` + Q3 未知
+`%s` 类型退回 native + Q4 数值协议接受 + Q5 兄弟分支）。用法：
+
+```bash
+python scripts/mutation_replay/replay.py --list
+python scripts/mutation_replay/replay.py --one 68-dominance-sliced-to-empty
+python scripts/mutation_replay/replay.py --all --source worktree   # 提交前（HEAD+工作区）
+python scripts/mutation_replay/replay.py --all --source head       # 只重放已提交内容
+```
+
+每条先在干净树上跑 `expect_fail`（必须全绿），再逐字节应用 `old→new` 并重跑（必须至少 1
+条红）；`old` 出现次数 ≠ 1 报 **stale** 并判失败（定义原文漂移即失效）。临时树用
+`git archive HEAD`（`--source worktree` 再叠加工作区改动）导出到仓外，`cwd`/`PYTHONPATH`
+指向该树并断言 `plaita.__file__` 落在树内。
+
+### 2026-10-13 plaita#68 规模守卫（十二轮返工，最终采用**方案 A：精确类型 + 可证上界**）
+
+`plaita#68` 把 `$F.pow` 的守卫推广到同族算子。八轮 FAIL 各抓到一类问题，其中**连续
+四轮都在相邻的启发式通道上翻车**（判定通道 → 实参改写 → 渲染上界估计 → 子类
+`__len__` → `__module__` 字符串），因此第八轮**换判据形状**：
+
+* **渲染路径 = 方案 A**：只放行**精确类型白名单**（内建标量/容器/视图/迭代器 +
+  `Decimal`/`datetime`/`date`/`time`/`timedelta`/`UUID`/`PurePath`/`Pattern`/`Enum`/
+  `array`/`deque`/`SimpleNamespace`/默认 repr 的对象；**namedtuple 不在白名单**——第十轮
+  整条删掉了它的快速通道），每个类型按各自
+  规则给**可证上界**（`repr` 转义 4×、bytearray 前缀、容器每项 2 字符分隔且**元素数
+  计入渲染上界**）；**子类**只在 `__str__`/`__repr__` 与安全祖先是**同一原始槽**
+  （读 MRO `__dict__`，描述符不认）时按祖先语义，且**计费与枚举一律走祖先 C 槽**
+  （`str.__len__`/`list.__iter__`/`dict.items`…），绝不调用实例覆写的
+  `__iter__`/`__len__`；其余**渲染前拒绝**，消息带 `str(x)` 提示。
+  判据只看**真实类型对象**，不看 `__module__` 之类可自述字符串 ⇒ 子类 `__len__`
+  伪造、`__module__` 伪造、上界低估、元素数下界滥用、R1 误拒**一次性消失**；
+  代价是渲染自定义对象需作者显式转换（已写进 MIGRATION/guide）。
+* **`len()` 只对精确内建类型生效**（`type(x) is list/tuple/str`）：子类/其它可迭代
+  一律枚举计数（H1：list 子类谎报 `__len__=0` 曾让 `len(sep)*(n-1)` 从投影里消失，
+  实测峰值 206–961MB，现在诚实/谎报**行为一致**且峰值 ≈0）。
+* **上界 ≥ 实际渲染**有表驱动测试（第九轮扩成 **30 条模糊语料** × `str`/`repr`）；
+  `None` 契约（子项不可界定 ⇒ 整条 `None` ⇒ 统一 `ValueError`）有具名测试。
+* **第十一轮 H1–H6**：① **渲染路径的计费与枚举走祖先 C 槽**（`str.__len__`/
+  `list.__iter__`/`dict.items`…）——实例覆写的 `__iter__`/`__len__` 只骗得上界、骗不到
+  渲染的 C 槽（曾按 16 字节放行 100,004,000 字符、峰值 105.96MB；现在上界 ≥ 实际、
+  渲染前拒绝、峰值不随攻击者 N 增长）；② 事后网的 `_measure`（`len`/`__sizeof__`）与
+  算子内部的用户协议调用（`bool()` 等）全部收口成「不可界定 ⇒ `ValueError`」；③ 那条
+  「文本顺序」结构断言在真实绕过发生时照样通过 ⇒ **第十二轮替换为带支配性检查的 AST
+  渲染点清点守卫**（见下）；④ `PurePath` 子类按祖先匹配、`Enum` **类对象**放行；
+  ⑤ 清掉重复定义与死代码（`_is_generated_namedtuple`）。
+* **第十二轮 M1–M8（验收 FAIL 的返工）**：① **M1** 把「祖先 C 槽」推广到**所有算子**
+  的前置检查/预留（`mul`/`replace`/`add`/`extend`/`append`/`join`）——说谎的
+  `__len__`/`count`/`join` 一律不采信、没有 C 槽可读就拒（修复前 `_fn_mul(LyingLenStr
+  ("a"*1000, __len__→1), 50000)` 返回 50,000,000 字符 @47.7MB；`join` 的覆写 `join`
+  返回 5,000,000）；② **M2** `$F.mod` 的映射参数不再要求精确 `dict`（`MappingProxyType`/
+  `ChainMap`/`UserDict`/覆写 `__contains__` 的 dict 子类走与原生相同的 `values[key]`
+  路径），且**上限判定结构性地无条件执行**（修复前这四类直接返回 100,000,000 字符
+  @95–100MB），`_mod_arg_plan` 里不得再有 `isinstance(values, dict)` 早退（有 AST 钉死）；
+  ③ **M3** 守卫升级为**支配性检查**（条件链前缀 + 同层更早），把上界调用挪进 `if False:`
+  必红（修复前该变异 309 条用例全绿、`_fn_concat(Hostile5MB)` 返回 5,000,000 @4.77MB；
+  现在原版 ValueError @0.0MB、变异版红）；并为**每个渲染入口**配行为反例；④ **M4**
+  评估路径日志不插值作者数据（`parse_function` 记 argc+arg_types；`_render_unmeasurable`
+  只记异常类型名；修复前日志 5,000,296 字节 @10.81MB）；⑤ **M5** 扫描器覆盖间接构造
+  （模块别名、`getattr(str,'__call__')`、`operator.methodcaller`、`json.dumps`、
+  `io.StringIO().write`、`logger.*` 插值）；⑥ **M6** enum 成员的 `value`、`datetime`/
+  `time` 的 `tzinfo` 的 repr 计入上界（修复前 160 vs 实际 1,000,044）；⑦ **M7**
+  `IntEnum`/`IntFlag`/`StrEnum`/`Flag` 成员按各自 `__str__` 原始槽给上界（不再 None）；
+  ⑧ **M8** 删除只被测试引用、且与闸判据不一致的 `_has_bounded_repr`（唯一生产闸是
+  `_render_size(...) is None`），文档同步。
+* **第十三轮 O1–O8（第二次验收 FAIL 的返工）**：① **O1** `%` 的上限判定不再空转——
+  格式串宽度/精度就是分配下界（纯 str 解析，容忍未闭合前缀），`plan=None` 时不能证明
+  原生必抛就**拒绝**（旧实现 `projected=0`：`'%50000000s%'` 59.7MB / `'%400000000s%'`
+  476.9MB 之后才 `incomplete format`；`'%200000000s' % ('a','b')` 190.8MB；
+  `'%200000000d' % IntOnly()` 本应原生成功却被谓词假阴性放行）；② **O2** 星号宽度只收
+  精确 `int` + `int.__index__` C 槽（不跑 `__int__`），映射取值一次并**用同一份值**渲染
+  （消除 TOCTOU：有状态映射 143.1MB），`dict` 子类走 `dict.get`（`defaultdict` 缺键在
+  被拒路径不再插入默认值）；③ **O3** 支配性检查补齐四种形状（带 `if` 的推导式、`[:0]`、
+  嵌套 def、match 分支），五种变异定义原文见
+  `TestTwelfthRoundH3RenderSiteInventory._DOMINANCE_MUTATIONS`（全部必红）；④ **O4**
+  日志/消息里的作者可控字符串截断（类型名 ≤64、异常消息走 `BaseException.args` C 槽
+  ≤200；旧实现 3MB 类型名 ⇒ 3,000,051 字节日志）；⑤ **O5** 只覆写 `__repr__` 的 enum
+  子类拒绝（上界曾 28 vs 实际 5,000,000）；⑥ **O6** 精确 `ZoneInfo` 计入上界（合法时间戳
+  不再误拒）、精确 `UserList`/`UserString` 走 `.data` C 槽；自定义序列/自定义 `replace`
+  保持拒绝并写明爆炸半径与逃生口；⑦ **O7** 扫描器补间接构造（`print`、
+  `__builtins__[...]`、`vars(...)[...]`、动态 `getattr`、`__import__('builtins')`、
+  `writerow`/`write_text`、未调用 dunder、形参直接别名的 f-string），并在文档写明
+  **清单是启发式、不是完备证明**；⑧ **O8** residual 清单与实际一致。
+* **第十二轮 H3**：① `_safe_int_text`（`int.bit_length`/`int.__repr__` C 槽）——
+  `_fn_pow`/`_fn_mul` 的拒绝文案不再渲染敌意 int 子类（修复前 `f"{n}"` 调
+  `__str__` 造出 20,000,098 字符 / 峰值 40MB），`_size_refusal` 的规模数字同样走它；
+  ② `_render_namespace_bound` 用 `str.__len__` 读 key，不再 `str(key)`；③ **AST
+  渲染点清点守卫**（M3/M5 已升级，见上）。**它是清单不是证明**：上界真假由祖先槽
+  行为用例与每个入口的行为反例承重。
+* **第九轮 D1–D5**：① namedtuple 分支必须比较 `__repr__` 的**代码对象**（同名同字段
+  现场生成原型；覆写 ⇒ 拒绝）——**该通道已于第十轮整条删除**（代码对象相同 ≠ 行为
+  相同），此处只作历史记录；并修掉"容器里 2 元 tuple 被误当 mapping 的 (k,v) 对"；
+  ② `PurePath`/`Pattern`/`SimpleNamespace` 等可子类化 stdlib 类型一律**精确类型或
+  dunder 同一性**（`class P(PurePosixPath): __repr__=100k` 曾被放行）；③ 模糊语料把
+  9 处低估修成真上界（`str` 的 repr 按 `\U0010ffff`＝10×、`datetime` 含 tzinfo 160、
+  `Pattern` 带 flags 文字、`Decimal` 位数不截断…）；④ 枚举期间的用户异常全部收口成
+  "不可界定 ⇒ ValueError"（`__iter__`/`items` 抛异常不再漏原始异常）；⑤ join/sort
+  在调用点把不可信任实参**物化一次**、守卫与执行共用同一次迭代（有状态对象首遍 1000
+  项、次遍 40 万项 ⇒ 曾拿到 4000 万字符结果）。
+
+| 阶段（**表头写明 revision**） | 数字 |
 |---|---|
-| `mutmut run` 初筛（覆盖率口径生成） | 681 变异：480 killed / 201 非 killed / **0 timeout** |
-| 独立进程 recheck（201 个非 killed） | 76 个假阳 → **125 true survived** ⇒ 556/681 = **81.6%** |
-| 复核后补 2 条断言（下列） | `_compile_variable__mutmut_73`、`__mutmut_83` → killed ⇒ 558/681 = **81.9%**，**123 true survived** |
+| `mutmut run`（revision = **第九轮交付**（扫描时 hash `64a92e2`；该 commit 在后续 rebase 中 hash 会变，**以提交信息 `fix(expr): #68 第九轮 D1–D5…` 为标识**，内容不变），收窄 `expression.py`+`expression_parser.py`，7 文件测试集） | **2750 变异**：**2175 killed / 566 survived / 8 timeout / 1 not-checked**（575 非 killed） |
+| #68 代码的 **259** 个非 killed：独立进程 recheck（12 workers，单独跑） | **0 假阳 killed / 251 true survived / 8 error** |
+| 同上：差分 oracle（**交付电池 460 用例** × 2 组 env，12 workers） | **7 公开路径 DIFFERS（全部 `_parse_format_specs` 死循环）+ 0 PRIV-ONLY + 252 NO-DIFF** |
+| 结论 | 该电池覆盖范围内 **0 个可杀的非等价幸存**；7 条只能记 error（hang） |
+| 手造变异：恢复 `_join_item_lengths` 的 `len()` 快路径（H1） | **1 failed = killed**（第十轮实测更正；文档旧值 4 是错的） |
+| 手造变异：恢复 `__module__ == "itertools"` 判据（H2） | **1 failed = killed**（我的补丁形状：在 `_has_bounded_repr` 与 `_render_size` 两处恢复；验收者另形状实测 2。复现：`git diff` 见报告命令） |
+| 手造变异：回退 `_render_size` 的"闸门顺序" | **等价**（方案 A 下容器分支只匹配精确类型，顺序不可观测） |
+| 手造变异：D1 去掉 namedtuple 的 `__repr__` 代码对象同一性 | **5 failed = killed**（concat/列表/裸模板/dict 四条路径 + 判定） |
+| 手造变异：D5 去掉调用点单次物化（回到 `_materialize_one_shot` 两遍枚举） | **3 failed = killed** |
+| 手造变异（第十轮）：恢复 namedtuple 快速通道（比 code 不比闭包/描述符） | `TestTenthRoundF1CodeIdentityIsNotBehaviour` + `TestTenthRoundF2PreRenderRefusal` 红（F1-a/F1-b/F2 共 5 条） |
+| 手造变异（第十轮）：把 `_raw_dunder` 换回属性查找 `cls.__str__` | `test_descriptor_repr_is_refused` 红（描述符 `__get__` 绕过） |
+| 手造变异（第十轮）：`_content_size` 的 `len(value)` 移出 try | `TestTenthRoundF4UntrustedProtocols` 红（漏原始 `RuntimeError`） |
+| 第十轮（F1–F5：删 namedtuple 通道、原始槽同一性、渲染前拒绝、异常收口、标量子类） | 按流程"先报告后跑长变异"，**本轮未跑全量**（验收者亦指示本轮不跑）；新增/改动的判据由 5 条手造变异与 13 条具名用例覆盖（见下） |
+| 上一版历史数字 | 第八轮（方案 A 首版）：2639 变异 / 2088 killed / 551 非 killed；oracle 13 DIFFERS + 4 PRIV-ONLY ⇒ 补 9 条精确断言后 9 killed / 0 survived。**不代表当前交付** |
 
-**#104 新增/改动代码：0 个非等价 survived**。新代码只剩 2 个等价变异：
+**复核方法（可复现，脚本随交付）**：驱动与电池在 `scripts/mutation68/`
+（`recheck.py` / `oracle.py` / `battery.py` / `survivors.txt` / `README.md`），
+完整步骤与口径见该目录 README：
 
-- `_scan_root_refs_impl__mutmut_7`：`_QUOTED_SPAN_RE.sub(" ", text)` →
-  `sub("XX XX", text)`——替换串本身只被当作"非 `$` 填充"，结果完全相同；
-- `_scan_root_refs__mutmut_1`：`len(text) <= 4096` → `< 4096`——只影响是否走
-  `lru_cache`，返回值不变。
-
-**123 个 true survived = 121 个旧代码分支 + 2 个本 PR 新增代码的等价变异**。旧代码的
-121 个分布在 14 个函数（按数量：`_build_grammar` 27、`_compile_function_call` 18、
-`_compile_variable` 15、`_warn_suspicious_literal` 14、`_annotate_parse_error` 11、
-`_warn_unmatched_template` 10、`_lookup_and_store` 7、`_eval_boolean` 5、
-`_eval_non_string` 4、`_compile_template` 4、`_eval` 2、`_get_attr` 2、
-`_eval_prefix` 1、`_cached_compile` 1）。两类成因已定位：
-
-1. **companion 测试集不含 flow 级用例**：例如 `pp.Keyword("null")` 系列变异在
-   上表 15 个文件里 survived，但手工注入该变异后 `test_codeflow_while.py` 立刻
-   红（**实测**）——注意该文件里**没有**字面量 `null`：它的 flow 源码写 Python
-   `None`，由 codeflow 编译器 `_render_arg` 渲染成 `null` 再交给表达式引擎；
-   反过来，真正含字面量 `null` 的 `test_codeflow_extended.py` /
-   `test_codeflow_canonical.py` / `test_coverage_sweep.py` /
-   `test_sexpr_mutations.py` 单独跑注入后**仍全绿**（已实测）。即这些不是
-   "假 survived"，而是**测试集口径比历史记录更宽/更窄的产物**。
-2. **未断言 DEBUG/WARNING 文案**：`_compile_function_call` 的
-   `logger.debug("parse_function: func_name=%s, args=%s", ...)`、
-   `_compile_variable` 的 INPUT 缺键 debug、`_warn_*` / `_annotate_parse_error`
-   的文案变异——现有测试只覆盖 warning 的部分子串，参数被改 `None` 或文案被
-   改写时不红。
-
-**结论**：模块历史表里的 100%（313/313、433/433、449/449）对应 2026-10 之前的
-代码 + 更窄的覆盖口径，**在 HEAD 上不可复现**；本表已按 2026-10-12 的真实复扫
-更新。要回到 100% 需要单独一轮"日志文案 + flow 级用例纳入 recheck 测试集"的
-补测，与 #104 无关，不在本 PR 范围内。
-
-### 2026-10-12 plaita#130 后的单模块重跑（真实分 83.2%，含独立验收补测）
-
-`plaita#130` 在 `_compile_variable` 的 thunk 里加了 `$NODE.raw.<节点>[.<路径>…]`
-显式取原文分支，并新增 `_RAW_MODIFIER` / `_warn_raw_accessor_collision` /
-`_warned_raw_collisions`。按 §7.2 单模块重跑（`only_mutate` 收窄为
-`plaita/core/expression_parser.py`）。
-
-**测试集口径**（`pytest_add_cli_args_test_selection`）= 上一节 15 个**文件** + 新增 1 个
-**文件** `tests/unit/test_expression_parser_raw_accessor.py` ⇒ **共 16 个文件**；该新
-文件本身 **28 个用例 / 20 个测试函数**（26/18 是首轮数字，独立验收补测后 +2）。逐文件
-清单（复核命令即用这 16 条路径）：
-
-```
-tests/unit/test_evaluate.py tests/unit/test_io_mutations.py
-tests/unit/test_expression.py tests/unit/test_expression_golden.py
-tests/unit/test_expression_cache.py tests/unit/test_expression_parser_mutations.py
-tests/unit/test_expression_parser_names.py tests/unit/test_expression_parser_path_recursion.py
-tests/unit/test_expression_parser_raw_accessor.py tests/unit/test_expression_parser_root_scan.py
-tests/unit/test_reviewfix_a_strings.py tests/unit/test_reviewfix_a_template_warn.py
-tests/unit/test_reviewfix_a_parse_diag.py tests/unit/test_reviewfix_a_truthy_cond.py
-tests/unit/test_context.py tests/unit/test_coverage_sweep.py
+```bash
+# 0) 收窄配置（跑完逐字节还原 pyproject.toml）
+#    only_mutate = ["plaita/core/expression.py", "plaita/core/expression_parser.py"]
+#    pytest_add_cli_args_test_selection = <上面 7 个文件>
+rm -rf mutants .mutmut-cache && python -m mutmut run
+python -m mutmut results | grep -E ": *(survived|timeout|not checked)$" \
+  | sed 's/:[[:space:]]*[a-z ]*$//;s/^[[:space:]]*//' | sort -u > survivors.txt
+# 1) 独立进程复核（MUTANT_UNDER_TEST = **完整** module.mutant_name）
+python scripts/mutation68/recheck.py . 6 < survivors.txt
+# 2) 差分 oracle
+python scripts/mutation68/oracle.py mutants scripts/mutation68/battery.py survivors.txt 6
 ```
 
-| 阶段 | 数字 |
+**13 个 DIFFERS 的处置**（独立进程逐条确认）：**7 个**是 `_parse_format_specs` 的
+hang（`i += 1` → `i = 1` 死循环，rc=124 ⇒ error，不是等价）；**6 个**是
+`_prepare_join` 的**消息/算术级**差异（`*`→`/`、`(count±1)`、`what=None`、
+`unit=None`、`_unit_for(None)`），由新增的
+`test_prepare_join_refusal_message_evaluate_path`（求值路径逐字文案）全部杀灭
+（独立进程 6 killed / 0 survived）。⇒ **在电池覆盖范围内未发现非等价幸存**（口径：NO-DIFF ≠ 等价证明）。
+
+**验收者手搓的两个漏杀变异**（第三轮明确提出）在本轮被测试杀灭，复现：
+
+```bash
+# M-precision：把"字面精度"从上界里拿掉
+#   （_spec_bound 的 diuoxX 分支去掉 pad、浮点分支的 precision 改回常数 6）
+cp -R <repo> /tmp/mutk-precision && <按上面改> && \
+  cd /tmp/mutk-precision && pytest tests/unit/test_expression_size_guard.py -q
+#   → 14 failed（killed）
+# M-byteslike：把 _is_bytes_like 退回 isinstance(value, (bytes, bytearray))
+#   → 6 failed（killed）
+```
+
+> **与上一轮的关系**：上一轮（第二轮返工后）的数字是 2010 变异 / 1777→1661 killed /
+> 134 非 killed recheck（14/111/9）/ oracle 23 DIFFERS + 2 PRIV-ONLY + 117 NO-DIFF，
+> 并声称"#68 代码 0 个非等价幸存"。第三轮验收用**手搓的非等价变异**证伪了其中两条
+> （字面精度、任意 bytes-like 都 SURVIVED），并要求把驱动脚本放进交付——本轮已
+> 补测杀灭、把 `scripts/mutation68/` 连同全量 `survivors.txt` 一起交付。文档里
+> "PRE_CHECKED_FUNCTIONS / 元素数上限"的旧表述均已随本节重写作废。
+
+### 2026-10-14 plaita#68 第二十一轮：`_RENDER_DISPATCH` 单表 + s/r/a/b 归属闸
+
+* **唯一判据表**：`conversion -> (kind, slots, bound)`。`_conversion_accepts` /
+  `_definitely_rejected` / `_spec_bound` / `_spec_input_size` / `_render_size` 全部只查
+  它（`_render_size` 只做 `s`/`r` 行的分派）；`_CONVERSION_DISPATCH` 是它的**派生投影**。
+  **归属判定只发生在每行的 `bound` 里**：`_slots_owned_by_base` 用不可变
+  `_slot_owner`/`_type_namespace` 读真实 MRO，`_STR_SAFE_OWNERS`/`_REPR_SAFE_OWNERS`
+  已删除；旧的类型分类集合合并为 `_PROVEN_RENDER_OWNERS`（`_safe_render_base` 唯一查它）。
+  bytes 模式 `s`/`b` 由 `_render_rule` 路由到 buffer 行。
+* **行为修复（base `d7924ff` → HEAD，实测）**：`%b` 与 bytes 模式 `%s` 对 `PurePath`
+  家族从"过度拒绝（`ValueError`，原生成功）"改为放行——`b"%b" % PurePosixPath('/x/y')`
+  base `ValueError` @2.1KB → HEAD `render` len 4（上界 52）@1.2KB、**0 次作者调用**；
+  覆写 `__bytes__`/`__str__` 的路径子类仍具名拒绝（同样 0 调用）。其余形状（`%s` 覆写
+  `__str__`、覆写 `__repr__` 的 list 子类、元类欺骗）base/HEAD 都拒绝，无回归。
+* **正控**：`TestTwentyFirstRoundRenderDispatch`（5 用例 / 65 subtests）——单表来源断言；
+  合法类型 **84 检查 / 0 漏**；覆写被派发槽的 **14 个形状**（7 正常 + 7 `_meta_deceived`）
+  每个**先用原生正控证明该槽确实被派发**再断言 `refuse` + 0 调用 + 消息含类型名 + 峰值
+  <4MB；AC4 全表 **660 检查 / 0 违规 / 0 跳过**；bytes/bytearray 子类覆写 `__bytes__`
+  被原生忽略（C buffer 直读）⇒ 放行且按 C 字节数计。
+* **定点变异（revision 见下方聚合；`replay.py --all` 两种 source）**：第二十一轮新增
+  `68-render-text-slots-trusted` / `68-buffer-str-length-for-author-bytes` /
+  `68-path-bytes-slots-trusted`，全部 **KILLED**（分别由
+  `test_overriding_slot_subclasses_are_refused_by_name` ×2 与
+  `test_buffer_dispatch_ignores_author_bytes_for_c_slots` 杀死）。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
 |---|---|
-| `mutmut run` 初筛（覆盖率口径生成） | 734 变异：531 killed / 203 非 killed / **0 timeout** |
-| 独立进程 recheck（203 个非 killed） | 80 个假阳 → **123 true survived** ⇒ 611/734 = **83.2%** |
+| 定点变异重放（revision = **`f811dfd0bdc19837fe65a8e7abd43c48dc62f70b`（tree `601c2e9fd4f13c447c02809b5a0d877c09fdc915`）**；第二十一轮的代码/测试在此提交定格，其后只追加变异定义与文档） | **31 变异：31 KILLED / 0 SURVIVED** |
+| 同上，`python scripts/mutation_replay/replay.py --all --source head`（export = `git archive f811dfd`） | **31 变异：31 KILLED / 0 SURVIVED** |
+| 第二十一轮重锚（refactor 后不可达/失效的定义） | `68-bytes-mode-fail-open`/`68-mod-bytes-bound-below-actual`/`68-mod-huge-int-e-native-precedence`/`68-mod-numeric-magnitude-not-counted` **重锚到新代码**；`68-mod-unbounded-render-type-let-native` **退役并重新表达**为 `68-render-unknown-type-gets-bound`（旧锚点所在的 "bound is None ⇒ refuse" 分支已前移为表行 `bound`-非 None 的 accept 闸 ⇒ 旧锚点不可达；新命名变异钉住同一不变量："未知渲染类型不得拿到假上界"） |
+| 第二十一轮新增（3 条，`_RENDER_DISPATCH` 归属闸 / buffer 长度 / 路径槽闭包） | **3 KILLED** |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI）；历史全量数字见上表（第九轮 revision） |
 
-> **口径提醒**：上表"初筛"是**单次测量**。同一份代码、同一选择集重复跑 `mutmut run`，
-> 初筛 killed / 非 killed 会因 mutmut worker 长时复用而抖动——本轮实测两个读数：
-> 531/203 与 521/213（变异总数恒为 **734**、timeout 恒为 **0**）。可信的是独立
-> recheck 后的 **123 true survived ⇒ 611/734 = 83.2%**；上表的 80 个假阳也只属于
-> 531/203 那次读数。（这正是 §1/§3「初筛不可信、必须独立 recheck」的又一实例。）
+### 2026-10-14 plaita#68 第二十二轮：纯 Python 祖先的**实例属性**闸（AG1/AG2/AG3）
 
-**#130 新增代码：0 个非等价的真 survived，只剩 2 个等价变异**：
+第二十一轮的单表收敛本身被复算通过，但验收者发现**新接受面**：r21 的 `s`/`r`/`a` 对
+`PurePath`/`UUID`/`SimpleNamespace` 子类只检查了 `__str__`/`__repr__` 的槽归属，而上界读的
+是"安全投影"（`PurePath.parts`、`vars()`、常量 64）——这些祖先的 `__str__`/`__repr__` 是
+Python/C 代码，读的是**实例槽**，作者在子类类体里放同名 property 即可遮蔽。
 
-- `_compile_variable__mutmut_29`（`raw_mode = False` → `None`）：**等价**——`raw_mode`
-  只出现在 `not raw_mode` 里，`not None` 与 `not False` 同值；
-- `_compile_variable__mutmut_39`（`segments[0][0] == "field"` →
-  `segments[1][0] == "field"`）：**等价**——同一条件里的 `segments[0][2] == "raw"`
-  已蕴含首段是 field（索引段的第三槽是数字串，永不为 `raw`），被替换掉的判断冗余。
+**base `f811dfd`（r21）实测**（同一探针）：
 
-**123 true survived = 119 个旧代码分支 + 2 个 #104 新增代码的等价变异 +
-2 个 #130 新增代码的等价变异**。旧代码 121 → 119 是因为 #130 新增的 `$NODE.raw…`
-用例顺带杀掉了 2 个 `_compile_variable` 旧变异点。旧代码成因仍与上一节相同
-（companion 测试集不含 flow 级用例 / 未断言 DEBUG-WARNING 文案）。
+| 形状 | decision | projected | 实际 | 峰值 | 决策路径作者调用 |
+|---|---|---|---|---|---|
+| `class P(PurePosixPath): _str = property(→"E"*1e7)` × `%s` | render | **67** | **10,000,000** | **10.00MB** | 0 |
+| 同上 × `%r` | render | 67 | 10,000,014 | 32.50MB | 0 |
+| 同上 × `b"%b"` | refuse | 0 | — | — | 0（r21 只在 bytes 模式查了 `_str`） |
+| `class B(UUID): int = property(→10**400000)` × `%s` | render | **74** | **332,197** | 1.00MB | 0 |
+| `class NS(SimpleNamespace): __dict__ = property(→{"a":"x"})`（真 dict 10MB）× `%r` | render | **51** | **10,000,016** | 22.50MB | **3** |
+| `p.as_posix = lambda: "y"*1e7` × `%r`（实例 dict，非数据描述符） | render | **67** | 10,000,016 | 32.50MB | 0 |
 
-**独立验收补测（首轮 609/734 = 83.0% → 复扫 611/734 = 83.2%）**：首轮
-`_warn_raw_accessor_collision` 有 4 个真 survived——2 个文案变异（`XX` 前缀/后缀、
-`$NODE`→`$node`）与 2 个 **dedupe 重置阈值非等价变异**（`len(_warned_raw_collisions)
-> 512` → `>= 512` / `> 513`）；补测后 **4 个全部 killed**：
+端到端（r21）：`{% $F.mod('%s',$INPUT.p) %}` 峰值 50.11MB、`{% $INPUT.p %}` 20.06MB、
+`{% $F.concat($INPUT.p) %}` 20.04MB（事后探针只在上限之后才拦）。
 
-- `test_node_named_raw_wins_and_warns_once_per_string` 对**新** WARNING 做全文案断言
-  （与 #104 对其新增 DEBUG 轨迹的做法一致）⇒ 2 个文案变异 killed；
-- 新增白盒用例 `test_collision_dedupe_reset_threshold_is_exact`：`monkeypatch` 预置
-  512 个不同路径，断言恰好 512 条时**不清零**（`> 512` → `>= 512` 会让已记路径二次
-  告警 ⇒ 红）、第 514 次调用时**必须清零**（`> 513` 会让集合无界增长 ⇒ 红）⇒ 2 个
-  阈值变异 killed。这 2 个 id 另用独立进程复核（`mutants/` 内 `MUTANT_UNDER_TEST=<id>`
-  跑同一 16 文件集，先跑未变异树自检 rc=0）：`__mutmut_2` rc=1，红在
-  `assert 2 == 1`（第 512 条即清零，`p0` 二次告警）；`__mutmut_3` rc=1，红在
-  `assert 2 == 3`（第 513 条不清零，`p0` 仍被去重）。
+**r22 修复（`abeaba6`）与实测**：
 
-因此本模块**新增代码已无非等价幸存者**；`_warn_suspicious_literal`（14 survived）/
-`_warn_unmatched_template`（10 survived）里同形的阈值变异仍未处理——那是既有代码的
-缺口，不在本单范围。
+* `_stdlib_only_below(cls, trusted)`：从子类到最近的已知 stdlib 祖先之间，**任何一层类命名
+  空间不得新增名字**（只放行 `__module__`/`__qualname__`/`__doc__`/`__slots__` 与解释器自动
+  补的 `__dict__`/`__weakref__` getset）；`_path_state_chars`/`_path_render_bound`/
+  `_uuid_render_bound` 改读**真实实例槽**（member_descriptor，0 作者调用）；
+  `_path_instance_state_clean` 拒绝实例 dict 里的 `_format_parsed_parts`/`as_posix`/…；
+  `_metaclass_name_unshadowed` 拒绝元类遮蔽 `type.__name__`。
+* `SimpleNamespace` 改读 `SimpleNamespace.__dict__` 上的 member_descriptor（C 直读真实实例
+  dict，property 无效）。
+* 实测（r22）：上述遮蔽形状 `_mod_decide` **全部 refuse、0 次作者调用**；
+  `_fn_mod` 全部 `ValueError` @**0.002MB**；端到端模板 `ValueError` @0.019–0.109MB；
+  `NS.__dict__` 形状 decision **render / projected 100,000,011 ≥ 实际 10,000,016 / 0 调用**
+  （按真实 dict 计，而非 property 投影）。
+* 语料：`TestTwentySecondRoundInstanceAttributeShadowing`（7 用例 / 58 subtests）——
+  遮蔽形状 6 格式 × 4 槽（`_str`/`_drv`/`_root`/`_parts`）+ UUID + NS + 实例 dict；
+  清白子类 35 检查 / 0 漏；AC4 纯 Python 祖先维度 `5 基类 × 4 家族 × 7 格式 = 140 检查 /
+  0 违规 / 0 跳过`；决策路径 0 调用（真 property 计数器）。
 
-recheck 机制与上一节相同：**未用** `scripts/recheck_mutants.sh`（其 TESTS 常量不含
-表达式解析器测试文件），而是在 `mutants/` 内用
-`MUTANT_UNDER_TEST=<id> python -m pytest -x -q -p no:randomly <上面 16 个文件>`
-逐点跑（超时由 Python `subprocess.run(timeout=120)` 强制，不用裸 `timeout`），
-rc=0 ⇒ survived、124/126/127 ⇒ error（本轮 0 个）、其余 ⇒ killed；并先对未变异树
-跑同一集合自检（rc=0）。
+**AG4 措辞更正**：删除"归属判定只在每行 `bound` 里"的过度声称（数值族在
+`_conversion_accepts` 按行 `kind`/`slots` 判）；`_char_render_bound` 是死代码 ⇒ 删除，
+`char` 行的 `bound` 置 `None`（上界是宽度常量）；`r`/`a` 行沿用 `s` 行 slots 并集的理由写进
+`_slots_owned_by_base` docstring；MIGRATION 中"`_drv`/`_root`/`_parts` 全由 `PurePath` 提供"
+的说法改成实测事实。
 
-### 2026-10-12 plaita#55 后的单模块重跑（真实分 83.6%，#55 新增代码 0 个非等价 survived）
-
-`plaita#55`（P0 安全）在 `_get_attr` 的属性遍历路径上加了闸门：`_` 开头的段名在
-**属性读取**上一律抛 `ValueError`（不再返回 `None`），映射路径只拒绝 `__` 开头的
-**路径段**（单下划线键保持可读，`$NODE._n2` 这类自动生成的节点 id 不受影响；该键
-经 `$F.get` / `$F.keys` 等显式映射辅助仍可读——刻意的不对称，见 MIGRATION.md #55）。
-改动新增 `_reject_reserved_field` / `_mapping_get` 两个模块级函数、一条逐字错误文案
-常量 `_REJECTION_TEMPLATE`，并重写了 `_get_attr` 的分支。按 §7.2 单模块重跑
-（`only_mutate` 收窄为 `plaita/core/expression_parser.py`）。
-
-**测试集口径**（`pytest_add_cli_args_test_selection`）= 上一节 16 个**文件** + 新增
-1 个**文件** `tests/unit/test_issue55_attr_traversal.py` ⇒ **共 17 个文件**；该新文件
-**84 个用例 / 31 个测试函数**（含 issue 原文 repro 的端到端用例、19 个 dunder/私有名
-× 多个段位置的枚举矩阵、`$F.*` 映射辅助与路径形态的**不对称**钉子、
-**公有属性遍历不受限**的已文档化边界、以及 dict `_` 键 / `$NODE._n2` 等阳性对照）。
-
-> 口径提醒（2026-10-13，独立验收后复跑）：新文件里有一条断言"仓库文档逐字引用运行时
-> 文案"的测试——mutmut 的 `mutants/` 副本只含 `plaita/` + `tests/` + `pyproject.toml`，
-> 文档不在其中，故该测试在 `mutants/` 内**自动 skip**（这正是 companion 测试集的硬
-> 约束：不得依赖 `plaita/`+`tests/` 之外的文件，否则 `mutmut run` 的基线自检直接红）。
-> 代码侧文案仍由同文件里不 skip 的逐字断言钉住。
-
-逐文件清单（复核命令即用这 17 条路径）：
-
-```
-tests/unit/test_evaluate.py tests/unit/test_io_mutations.py
-tests/unit/test_expression.py tests/unit/test_expression_golden.py
-tests/unit/test_expression_cache.py tests/unit/test_expression_parser_mutations.py
-tests/unit/test_expression_parser_names.py tests/unit/test_expression_parser_path_recursion.py
-tests/unit/test_expression_parser_raw_accessor.py tests/unit/test_expression_parser_root_scan.py
-tests/unit/test_reviewfix_a_strings.py tests/unit/test_reviewfix_a_template_warn.py
-tests/unit/test_reviewfix_a_parse_diag.py tests/unit/test_reviewfix_a_truthy_cond.py
-tests/unit/test_context.py tests/unit/test_coverage_sweep.py
-tests/unit/test_issue55_attr_traversal.py
-```
-
-| 阶段 | 数字 |
+| 变异聚合（**表头写明 revision**） | 数字 |
 |---|---|
-| `mutmut run` 初筛（覆盖率口径生成） | 745 变异：534 killed / 211 非 killed / **0 timeout** |
-| 独立进程 recheck（211 个非 killed；pass 1 六路并行） | 89 个假阳 → **122 true survived** ⇒ 623/745 = **83.6%** |
-| 顺序复核（pass 2：122 个 true survived 逐个单进程重跑） | **122/122 复现 survived**，0 killed / 0 error |
+| 定点变异重放（revision = **`abeaba64e93576483179f6f5bd2108e4f6271835`（tree `86645cdb9df5a04139e9a119bc5acb67ff9e91b6`）**，第二十二轮代码/测试定格处） | **34 变异：34 KILLED / 0 SURVIVED** |
+| 同上，`python scripts/mutation_replay/replay.py --all --source head`（export = `git archive abeaba6`） | **34 变异：34 KILLED / 0 SURVIVED** |
+| 第二十二轮新增（4 条 AG1/AG2） | `68-path-instance-attrs-trusted` / `68-uuid-int-read-constant` / `68-namespace-vars-shadowed` / `68-stdlib-only-gate-off` 全部 KILLED |
+| 第二十二轮退役 | `68-path-bytes-slots-trusted`（r21 新增；`old` 锚定 `_PATH_BYTES_SLOTS` 循环，r22 换成 `_stdlib_only_below` + 真实实例槽读取后出现 0 次）⇒ 不变量由 `68-stdlib-only-gate-off` + `68-path-instance-attrs-trusted` 覆盖 |
+| 回归门禁（同一 revision `abeaba6`） | 定向 427 passed / 496 subtests；`tests/unit` 5466 passed / 9 skipped / 758 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5741 passed / 18 skipped / coverage 95.41%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
 
-**#55 新增/改动代码：0 个非等价的真 survived，只剩 1 个等价变异**：
+### 2026-10-14 plaita#68 第二十三轮：**精确类型**槽也必须走同一道闸（AJ1–AJ4）
 
-- `x__mapping_get__mutmut_5`（`obj.get(path, None)` → `obj.get(path, )`）：**等价**——
-  `dict` / `collections.abc.Mapping` / 本仓 `CheckpointState.get(key, default=None)`
-  的省略默认值就是 `None`，两种写法对一切符合 Mapping 约定的容器返回值相同；只有
-  自定义 `get` 使用非 `None` 默认值的非约定容器才可区分，那属于调用方容器自身的偏差。
-  与 §2.5 对 `_get_attr__mutmut_3` 的历史判定同形（同一行代码本轮移入 `_mapping_get`）。
-- 另两个闸门函数的变异全貌：`_reject_reserved_field` **2/2 killed**（段名/逐字文案断言），
-  `_mapping_get` **5 个里 4 killed**，`_get_attr` **34/34 killed**（该函数在 #130 轮
-  有 2 个 true survived，本轮为 0）。
+r22 的 `_stdlib_only_below` 等闸只装在**子类**路径上；验收者指出 `_render_type_bound` 的
+**精确类型分支**绕过了它们，而精确类型的实例槽同样可写。
 
-**122 true survived = 117 个旧代码分支 + 2 个 #104 新增代码的等价变异 +
-2 个 #130 新增代码的等价变异 + 1 个 #55 新增代码的等价变异**。函数分布（survived 数）：
-`_build_grammar` 27、`_compile_function_call` 18、`_compile_variable` 15（内含 #130 的
-2 个等价变异）、`_warn_suspicious_literal` 14、`_annotate_parse_error` 11、
-`_warn_unmatched_template` 10、`_lookup_and_store` 7、`_eval_boolean` 5、
-`_eval_non_string` 4、`_compile_template` 4、`_eval` 2、`_eval_prefix` 1、
-`_cached_compile` 1、`_scan_root_refs_impl` 1、`_scan_root_refs` 1、`_mapping_get` 1；
-`_get_attr` 0。旧代码成因仍与上一节相同（companion 测试集不含 flow 级用例 /
-未断言 DEBUG-WARNING 文案），不在本单范围。
+**base r22 `2b09c9e` 实测**（普通赋值/`object.__setattr__`，无需子类）：
 
-recheck 机制：**未用** `scripts/recheck_mutants.sh`（其 `TESTS` 常量既过时又不含本轮
-新增测试文件，且本机无 GNU `timeout`），改用自写驱动——`mutants/` 内
-`MUTANT_UNDER_TEST=<id> python -m pytest -x -q -p no:randomly <上面 17 个文件>`，
-超时由 Python `subprocess.run(timeout=120)` 强制；rc=0 ⇒ survived、124/126/127 ⇒
-error（本轮 0 个）、其余 ⇒ killed。pass 1 六路并行初筛，pass 2 对每个 survived
-**顺序单进程**复现（两遍结论一致：122 survived / 0 error）。
+| 形状 | decision | projected | 实际 | 峰值（native） |
+|---|---|---|---|---|
+| `p = PurePosixPath("/x/y"); p._str = "E"*1e7` × `%s` | render | **67** | **10,000,000** | 0.00MB |
+| 同上 × `%r` / `%a` / `b"%r"` / `b"%a"` | render | 67 | 10,000,017 | **22.50MB** |
+| `PureWindowsPath` 同写 × `%s` | render | 87 | 10,000,000 | 0.00MB |
+| `p._drv = "E"*1e7` × `%s` | render | 67 | 10,000,004 | 20.00MB |
+| `p._root = "E"*1e7` × `%r` | render | 67 | 10,000,020 | 32.50MB |
+| `object.__setattr__(u, "int", 10**400000)` × `%s` | render | **74** | **332,197** | 0.99MB |
+| 同上 × `%r`/`b"%r"` | render | 74 | 332,205 | 0.99MB |
+
+对照（r22 已正确）：带 `_str` 的**干净子类** ⇒ 100,000,082 ≥ 10,000,000；干净 UUID 子类 ⇒
+332,207 ≥ 332,197；精确 path 的 `_parts` 巨大 ⇒ 100,010,045 ≥ 10,010,017（说明
+`_path_render_bound` 本身正确，只是精确分支没走它）。
+
+**r23 修复（`5fa1980`）**：`cls in _PATH_EXACT_TYPES` 与 `cls is UUID` 两个精确分支改调
+`_path_render_bound` / `_uuid_render_bound`（与子类共用同一道闸；`_path_state_chars` 读的
+就是真实 `_str`/`_drv`/`_root`/`_parts` 槽，所以精确类型同样成立）。
+
+**逐分支清单（AJ3）**：`_render_type_bound` 的每条分支、走哪条上界、为何可证、控制用例。
+"常量/投影"标记表示该上界不是逐槽验证，而是**常量或对 C 级状态/固定语义的假设**，其成立
+条件写在括号里；每条都有运行时控制
+`TestTwentyThirdRoundExactTypeSlots::test_every_exact_type_branch_has_bound_ge_actual`
+（68 个精确值，逐条断言 `bound ≥ len(str)` 与 `bound_repr ≥ len(repr)`）。
+
+| 分支 | 上界 | 可证性 | 控制 |
+|---|---|---|---|
+| `cls is str` | `len` / **`_str_escape_width`（真实逐字符转义和 + 2 引号）** | **AU1 更正（第二十七轮）**：`10×len+10` 是伪影（`"\n"*9999` 真实 20,000 却被算成 100,010 ⇒ 误拒）；现在按 1/2/4/6/10 逐字符计 | `TestTwentySeventhRoundAsciiThreshold` + 变异 `68-flat-ascii-width` |
+| `cls is bytes` / `bytearray` | **`_bytes_repr_width`（可打印 1、`\t`/`\n`/`\r`/`\` 2、其余 `\xNN` 4 + 前缀 3/14；`bytearray` 的 `'` 无条件转义、`bytes` 仅在含 `"` 时转义）** | **AU1/AX1 更正**：`4×len+24/32` 自己就超 4× 允许量；r27 又让 bytearray 用 bytes 的引号规则 ⇒ `bytearray(b"'")` 上界 15 < 实际 16、可绕 1e8 硬上限 | `TestTwentySeventhRoundAsciiThreshold::test_bytes_repr_width_is_exact`、`TestTwentyEighthRoundBytearrayAndBoundPeak` + 变异 `68-bytes-flat-width`/`68-bytearray-apostrophe-rule` |
+| `cls is bool` | 常量 8（`True`/`False` ≤ 5） | 布尔只有两个字面量 | 分支控制 |
+| `cls is int` | `_value_size+2` | C 十进制位数（`int.bit_length`） | 分支控制 + T2 语料 |
+| `value is None` | 常量 4 | 只有 `None` | 分支控制 |
+| `cls is float` | 常量 32（`repr` ≤ 24，inf/nan 3–4） | C `float_repr` 固定语义 | 分支控制 + Z2 |
+| `cls in (list,tuple,set,frozenset)` / `dict` / `_DICT_VIEW_TYPES` | `_container_render_bound`（逐项 10×/4× + 2 分隔） | **精确类型** ⇒ 迭代/长度走 C 槽；子项递归可证 | 分支控制 + 容器语料 |
+| `cls is range` | `48 + Σ_value_size(start/stop/step)` | C 属性（`range.start` 等），精确类型 | 分支控制 |
+| `cls is memoryview` | 常量 64（`<memory at 0x…>`） | C repr 固定形态 | 分支控制 |
+| `cls is type` / 元类 repr 由 `type` 提供 | **`_class_name_bound`（读真实 `__module__`/`__qualname__`，10× 转义 + 64）** | **AM1 更正**：`tp_name` = `__module__`+`__qualname__`，**建成后仍可写**（`type("E"*1e7,(),{})` ⇒ 10,000,019）⇒ 常量 256 是推理不是证明 | `test_author_writable_class_names_are_bounded` + 变异 `68-class-object-name-constant` |
+| enum **类对象**（EnumMeta repr） | **`_class_name_bound` + 32** | **AM1 更正**：`<enum 'qualname'>` 嵌真实类名（`enum.Enum("E"*1e7,{...})` ⇒ 10,000,009） | `test_author_writable_class_names_are_bounded` + 变异 `68-enum-class-name-constant` |
+| `cls in _SHORT_REPR_ITERATOR_TYPES` | 常量 256 | **逐类实测**为固定短串 `<... object at 0x…>`（23 个）；`repeat`/`count` **不在集合里**（repr 内嵌参数） | `test_fixed_iterator_reprs_are_bounded` |
+| `repeat` / `count`（`_ARG_EMBEDDING_ITERATOR_TYPES`） | **读 C `__reduce__` 的真实参数并递归求界** | **AM1 更正**：`repeat(x)`/`count(n)` 的 repr 内嵌参数（`repeat("E"*1e7)` 10,000,010、`count(10**1000)` 1008） | `test_repeat_and_count_embed_real_args` + 变异 `68-repeat-count-args-constant` |
+| `cls is Decimal` | `len(digits)+len(str(exponent))+32` | C `as_tuple`；`str(exponent)` 是 ≤20 位小整数（渲染点登记为 `bounded`） | 分支控制 + M6/M7 |
+| **`cls is UUID`** | **`_uuid_render_bound`（逐槽）** | 读真实 `int` 槽（r23 改；常量 64 被 `object.__setattr__` 击穿） | `test_exact_uuid_int_slot_write_is_bounded` + 变异 `68-exact-uuid-slot-constant` |
+| `cls is datetime/time` | 160（`str`，只有偏移）/ 160 + `_tzinfo_extra`（`repr`） | `str` 无作者成分；`repr` 的 tzinfo 走 `_render_size(tz, True)` 递归界（tzinfo 子类由 `base is object` 读真实类名，见下行） | `test_datetime_tzinfo_repr_is_bounded` + 变异 `68-object-fallback-name-constant` |
+| `cls is timezone` | **C 槽 `timezone.tzname(value, None)` 读真实 name + 转义界** | **AM1 更正**：`str(timezone)` 就是作者可写的 name（`timezone(timedelta(0),"E"*1e7)` `%s` ⇒ 10,000,000） | `test_timezone_name_is_bounded` + 变异 `68-timezone-name-constant` |
+| `cls is date` / `timedelta` | 常量 40 / 96 | C repr 固定形态（`timedelta.max` ≤ 70；date 无作者成分） | 分支控制 |
+| `cls is re.Pattern` | `10×len(pattern)+32+16×popcount(flags)` | C getset `pattern`/`flags` | 分支控制 |
+| **`cls in _PATH_EXACT_TYPES`** | **`_path_render_bound`（逐槽）** | 读真实 `_str`/`_drv`/`_root`/`_parts`/`_pparts` 槽（r23 改） | `test_exact_path_slot_writes_*` + 变异 `68-exact-path-projection` |
+| `cls is array.array` | **`_array_render_bound`：按 typecode 的实测最坏每元素宽度**（`d`/`f` 26、64 位整数 23、`b`/`B` 6、`h`/`H` 8、`i`/`I` 13；`u` 按转义 10×/字符） | **AP1 更正（第二十五轮）**：原 “每项 ≤24 字符” 已被证伪——`repr(-sys.float_info.max)` = 24 + `", "` = **26/元素**（K=2e6：投影 48,000,042 / 实际 52,000,012、峰值 181MB；K=4,166,000：旧投影 99,984,032 ≤ 1e8 而实际 108,316,012 ⇒ 绕过硬上限） | `TestTwentyFifthRoundArrayElementBounds`（3 用例）+ 变异 `68-array-element-projection` |
+| `cls is deque` | `_container_render_bound` | 精确类型 C 槽 | 分支控制 |
+| `cls is FunctionType` | **`_function_repr_bound`（读真实 `__qualname__`）** | **AM1 更正**：`<function QUALNAME at 0x…>`，`__qualname__` 可写（10,000,026） | `test_function_qualname_is_bounded` + 变异 `68-function-qualname-constant` |
+| 内建函数/内建方法 | 常量 256 | 名字只来自 C 内建（`len.__qualname__` 只读） | `test_function_qualname_is_bounded` |
+| `types.MethodType`（Python 绑定方法）/ `functools.partial` | `None` ⇒ 拒绝 | **AM4 更正**：二者内嵌 `self`/函数的 repr，**不在 256 分支**，走 fallback 因自带 `__repr__` 被拒（`_render_size(partial(f)) is None`） | 分支控制 |
+| `OrderedDict`/`defaultdict` | `_container_render_bound` | 精确类型 C 槽 | 分支控制 |
+| `isinstance(value, Enum)` | `_enum_member_render_bound` | `_name_`/`_value_`（EnumMeta 保留 `_sunder_`，不能作者覆写）+ value 递归可证 + 元类 `__name__` 闸 | M6/M7 + r23 分支控制 |
+| fallback：`_safe_render_base` + `_slots_owned_by_base` | `_subclass_render_bound`（含 `_path_render_bound`/`_uuid_render_bound`/`_render_namespace_bound`） | 槽归属（不可变 `_slot_owner`/`_type_namespace`）+ r22 实例属性闸 | r21/r22 双向控制 + 变异 |
+| `base is object`（默认 repr） | **`_class_name_bound` + 64** | **AM1 更正**（AM4 ⑦）：`<__module__.qualname object at 0x…>`，类名可写（20,000,025 / 峰值 25MB）⇒ 原“常量 256”为假 | `test_author_writable_class_names_are_bounded` + 变异 `68-object-fallback-name-constant` |
+| else | `None` ⇒ 调用方拒绝 | 不可证 | `68-render-unknown-type-gets-bound` |
+
+`_spec_bound`（表行 bound + 精度/宽度算术）与 `_spec_input_size`（表行 bound 或
+`_value_size`）不自行做归属判定：文本/buffer 族直接复用该行 bound，数值族用
+`_numeric_magnitude_bound`；`char` 行 bound 为 `None`（`max(1,width)+8` 常量）。
+
+**AJ4 端到端（r23 vs r22）**：`{% $F.mod('%r',$INPUT.p) %}`（`p._str="E"*1e7`）
+r22 **22.501MB 分配后才拦** → r23 `ValueError` @**0.082MB**（decision=render /
+projected 100,000,089 ≥ 实际 10,000,017，尺寸闸在渲染前拒绝）；`{% $INPUT.p %}` 0.019MB、
+`{% $F.concat($INPUT.p) %}` 0.029MB，同样分配前拒绝。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
+|---|---|
+| 定点变异重放（revision = **`5fa198080dbcfa09a3d41b02ebc2fa48fe9baad5`（tree `6a6a4b7d8087d2fa2e51bc15b8f37c12a855c567`）**） | **36 变异：36 KILLED / 0 SURVIVED** |
+| 同上，`--all --source head`（export = `git archive 5fa1980`） | **36 变异：36 KILLED / 0 SURVIVED** |
+| 第二十三轮新增（2 条，触碰**精确分支**） | `68-exact-path-projection` / `68-exact-uuid-slot-constant` 全部 KILLED |
+| 回归门禁（同一 revision） | 定向 431 passed / 566 subtests；`tests/unit` 5470 passed / 9 skipped / 828 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5745 passed / 18 skipped / coverage 95.41%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
+
+### 2026-10-14 plaita#68 第二十四轮：**常量上界**也必须读真实成分或拒绝（AM1–AM5）
+
+第二十三轮的逐分支清单里，多条"常量上界"被**作者可控字符串**证伪：这些 repr 都把
+`__module__`/`__qualname__`/`__name__`/`name`/参数嵌进输出，而它们**建成后仍可写**。
+
+**base r23 `0f38361` 实测**（decision / projected / 实际 / native 峰值）：
+
+| 形状 | projected | 实际 | 峰值 |
+|---|---|---|---|
+| `class C: pass; C.__qualname__ = "E"*1e7` ⇒ `%r` | **266** | **20,000,025** | **25.00MB** |
+| `C.__module__ = "E"*1e7`（同类名变体） | 266 | 10,000,013 | 12.50MB |
+| `type("E"*1e7, (), {})` ⇒ `%r` | 266 | 10,000,019 | 12.50MB |
+| `enum.Enum("E"*1e7, {"A": 1})` ⇒ `%r` | 266 | 10,000,009 | 22.50MB |
+| 函数 `f.__qualname__ = "E"*1e7` ⇒ `%r` | 266 | 10,000,026 | 12.50MB |
+| `timezone(timedelta(0), "E"*1e7)` ⇒ `%s` | 74 | 10,000,000 | 22.50MB |
+| `datetime(..., tzinfo=Tz())`（`Tz.__qualname__` 巨大）⇒ `%r` | 242 | 10,000,091 | 22.50MB |
+| `datetime.time(..., tzinfo=Tz())` ⇒ `%r` | 242 | 10,000,075 | 22.50MB |
+| `itertools.repeat("E"*1e7)` ⇒ `%r` | 266 | 10,000,010 | 22.50MB |
+
+端到端 r23：`{% $F.mod('%r',$INPUT.x) %}` 分别 12.604MB（类）/12.509（函数）/
+22.509（timezone）/22.530（repeat）**之后**才 `ValueError`；`{% $INPUT.x %}`（类）12.516MB。
+
+**r24 修复（`f9b0bbc`）——每个族"读真实成分或拒绝"，全部 0 次作者调用**：
+
+| 族 | 读什么（不可变/C 槽） | 修后实测 |
+|---|---|---|
+| 类对象（`type.__repr__`/`__str__`） | `type.__dict__["__module__"/"__qualname__"]` getters，10× 转义 + 64 | projected 100,000,154 ≥ 实际 10,000,019；`_fn_mod` `ValueError` @0.0018MB |
+| enum 类对象（EnumMeta repr） | 同上 + 32 | projected 100,000,122 ≥ 10,000,009 |
+| 默认 `object.__repr__`（fallback `base is object`） | 同一个 `_class_name_bound` | projected 100,000,154 ≥ 20,000,025 |
+| Python 函数 | `FunctionType.__qualname__` getter，10× + 64 | projected 100,000,074 ≥ 10,000,026 |
+| 内建函数/方法 | 常量 256（名字来自 C 内建，`len.__qualname__` 只读） | ≥ 实际 |
+| `timezone` | C 槽 `timezone.tzname(value, None)` 取真实 `name` | `%s` projected 10,000,018 ≥ 10,000,000（1× 非放大）；`%r` 拒绝/有界 |
+| `datetime`/`time` repr 的 tzinfo | `_tzinfo_extra` → `_render_size(tz, True)` → 对象 fallback 读真实类名 | projected 100,000,322 ≥ 10,000,091 |
+| `repeat` / `count` | C `__reduce__` 的真实参数递归求界 | `repeat("E"*1e7)` ≥ 10,000,010；`count(10**1000)` ≥ 1008；小参数仍正常 render（`repeat("x",5)` 14 字符） |
+| `_SHORT_REPR_ITERATOR_TYPES`（23 个） | 常量 256，**逐类实测** repr 为固定短串 | `test_fixed_iterator_reprs_are_bounded` |
+| `types.MethodType` / `functools.partial` | **拒绝**（`None`；内嵌 `self`/函数 repr，**不在 256 分支**） | AM4 ⑥ 更正；`_render_size(partial(f)) is None` |
+
+**AM5 端到端（r24）**：巨名类形状 `{% $F.mod('%r',$INPUT.x) %}` **0.0866MB**（r23 12.604MB）、
+`{% $INPUT.x %}` 0.0187MB；函数 0.0117/0.0015MB；timezone 0.0117MB（`{% $INPUT.x %}` 是
+**1× 非放大**：输出即作者自持的 `name`，decision render / projected ≥ 实际）；repeat
+0.0321/0.0015MB。全部 `ValueError` 或 1× render，均在分配前/同量级。
+
+**AM2 语料**：`test_every_exact_type_branch_has_bound_ge_actual` 改为**按族生成**：
+实测 **56 个值 / 40 个族**（默认实例 + 作者字符串变体 + 边界长度；
+`class-longname`/`plain-object-longqual`/`plain-object-longmod`/`enum-class-long`/
+`function-longqual`/`timezone-name`/`datetime-bigtz`/`repeat`/`count`…），逐条断言
+`bound ≥ len(str)` 与 `bound_repr ≥ len(repr)`。文档计数已改为实测值。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
+|---|---|
+| 定点变异重放（revision = **`f9b0bbcd8fa717798e79e82ca35ab5c1f3b3686a`（tree `b438590b069bffba0d72beb8e1e9f21acfb35be5`）**） | **42 变异：42 KILLED / 0 SURVIVED** |
+| 同上，`--all --source head`（export = `git archive f9b0bbc`） | **42 变异：42 KILLED / 0 SURVIVED** |
+| 第二十四轮新增（6 条，各对应一个常量族） | `68-class-object-name-constant` / `68-enum-class-name-constant` / `68-object-fallback-name-constant` / `68-function-qualname-constant` / `68-timezone-name-constant` / `68-repeat-count-args-constant` 全部 KILLED |
+| 回归门禁（同一 revision） | 定向 438 passed / 837 subtests；`tests/unit` 5477 passed / 9 skipped / 1099 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5752 passed / 18 skipped / coverage 95.28%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
+
+### 2026-10-14 plaita#68 第二十五轮：`array.array` 每元素投影被证伪（AP1–AP3）
+
+AJ3 清单里最后一条"投影假设"（`32 + len×24`）被实测证伪：`repr(-sys.float_info.max)` 是
+**24** 字符，array 的 repr 每元素再加 `", "` ⇒ **26/元素**。
+
+**base r24 `698bebd` 实测**（`%r`）：
+
+| 形状 | projected | 实际 | `_fn_mod` | 峰值 |
+|---|---|---|---|---|
+| `array('d', [-max]*1_000)` | 24,042 | 26,012 | RET | 0.09MB |
+| `array('d', [-max]*100_000)` | 2,400,042 | 2,600,012 | RET | 9.05MB |
+| `array('d', [-max]*1_000_000)` | 24,000,042 | 26,000,012 | RET | 90.50MB |
+| `array('d', [-max]*2_000_000)` | **48,000,042** | **52,000,012** | **RET** | **181.00MB** |
+| `array('f', [-3.4028235e38]*1_000_000)` | 24,000,042 | 25,000,012 | RET | 88.25MB |
+| 干净 `array.array` 子类（`d` × 1M） | 24,000,042 | 26,000,010 | RET | 90.50MB |
+| `[array('d',[-max]*100_000)]` | 2,400,060 | 2,600,014 | RET | 9.05MB |
+| K=4,166,000（推导/实测） | **99,984,032 ≤ 1e8** | **108,316,012** | — | 绕过硬上限 |
+
+端到端（r24）：`{% $F.mod('%r',$INPUT.a) %}` K=2M ⇒ **RET 52,000,012 字符、峰值 181.10MB**
+（每次调用的闸与事后网都放行）。
+
+**r25 修复（`d5b2189`）**：新增 `_array_render_bound`，按 **typecode 的实测最坏每元素宽度**
+（`_ARRAY_ITEM_BOUND`）计算，typecode 走 C getset、长度走 `array.__len__`（0 作者调用），
+未知 typecode ⇒ 拒绝；精确类型与子类分支共用：
+`d`/`f` **26**（24 字符 repr + 2 分隔）、`b`/`B` 6、`h`/`H` 8、`i`/`I` 13、`l`/`L`/`q`/`Q` 23
+（64 位整数最坏 20 位 + 符号 + 2），`u` 按 repr 转义最坏 **10×/字符**。
+
+**实测 r25**：`d` K=1e3/1e5/1e6/2e6 ⇒ projected 26,042 / 2,600,042 / 26,000,042 /
+**52,000,042 ≥ 实际 52,000,012**；`f` 1M ⇒ 26,000,042 ≥ 25,000,012；子类 1M ⇒
+26,000,042 ≥ 26,000,010；list 内 ⇒ 2,600,060 ≥ 2,600,014；`u` 最坏转义 ⇒ 3,042 ≥ 2,014；
+**K=4,166,000 ⇒ projected 108,316,042 > 1e8 ⇒ `_fn_mod` ValueError @0.0MB（分配前拒绝）**。
+
+**AP2 语料/变异**：`_family_corpus` 增补每 typecode 最坏值（`b/B/h/H/i/I/l/L/q/Q` 最坏整数、
+`d`/`f` 最坏浮点、`array('u', 不可打印+星平面混排)`、干净子类、list/dict 内嵌），
+语料从 56 值/40 族增至 **72 值 / 40 族**（实测）；新增变异 **`68-array-element-projection`**
+（`"d": 26, "f": 26` → `24`）由新用例杀红。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
+|---|---|
+| 定点变异重放（revision = **`d5b2189ed92df2da634cc68b5fb4a9a55ed39ad2`（tree `e64966509e06add25a25385123a3898a83c7d7af`）**） | **43 变异：43 KILLED / 0 SURVIVED** |
+| 同上，`--all --source head`（export = `git archive d5b2189`） | **43 变异：43 KILLED / 0 SURVIVED** |
+| 第二十五轮新增 | `68-array-element-projection` KILLED（`test_every_typecode_worst_case_has_bound_ge_actual`） |
+| 回归门禁（同一 revision） | 定向 441 passed / 863 subtests；`tests/unit` 5480 passed / 9 skipped / 1125 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5755 passed / 18 skipped / coverage 95.26%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
+
+### 2026-10-14 plaita#68 第二十六轮：`%a`（ascii）展开 vs 按 1× 计的作者名字（AR1–AR4）
+
+`_bound_repr` 同时服务 `%r` 与 `%a`，而 `ascii()` 会把**每个非 ASCII 字符**展开成
+`\xNN`/`\uNNNN`/`\UNNNNNNNN`（4–10×）。AJ3 清单/实现里有四处作者可控名字仍按 **1×** 计。
+
+**base r25 `3342d82` 实测（`%a`）**：
+
+| 形状 | projected | 实际 | `_fn_mod` | 峰值 |
+|---|---|---|---|---|
+| enum 成员 `_name_="é"*1000` | **1031** | **4008** | RET | 0.01MB |
+| enum 类 `__name__="É"*1000`（其成员的 repr） | 1030 | 4007 | RET | 0.01MB |
+| `PurePath` 子类 `__name__="É"*1000` | 1116 | 4008 | RET | 0.01MB |
+| `UUID` 子类 `__name__="É"*1000` | 1050 | 4040 | RET | 0.01MB |
+| enum 成员 `_name_="😀"*1e6` | 1,000,031 | **10,000,008** | **RET** | **20.00MB** |
+| enum 类 / Path 子类 / UUID 子类 同规模 | 1,000,030 / 1,000,076 / 1,000,050 | 10,000,007 / 10,000,008 / 10,000,040 | RET | ~20MB |
+
+端到端 r25：`{% $F.mod('%a',$INPUT.x) %}`（1M 星平面四个形状）⇒ **值已分配**
+（峰值 8.0–20.1MB）之后才拦。`%r` 不受影响（repr 保留可打印非 ASCII）——**只有 `%a`**。
+
+**r26 逐处清单（AR1：`as_repr=True` 路径上所有作者可控字符串）**：
+
+| 位置 | 名字来源 | 之前 | 之后 |
+|---|---|---|---|
+| `_enum_member_render_bound` | `_class_name(cls)` + `_enum_member_name(value)` | 1× | **10×**（投影） |
+| `_path_render_bound` | `_class_name(cls)` | 1× | **10×** |
+| `_uuid_render_bound` | `_class_name(cls)` | 1× | **10×** |
+| `_tzinfo_extra`（精确 `ZoneInfo`） | `key` | 4× | **10×** |
+| `_class_name_bound`（类对象 / 默认 object repr） | `__module__`+`__qualname__` | 10×（r24 已改） | 10×（不变） |
+| `_function_repr_bound` | 函数 `__qualname__` | 10×（r24 已改） | 10×（不变） |
+| `_render_namespace_bound` | namespace 键 | 10×（r22 已改） | 10×（不变） |
+| `_array_render_bound`（`u`） | 码点 | 10×（r25 已改） | 10×（不变） |
+| 精确 `str` / `str` 子类的 repr 上界 | 内容字符 | 一律 10× | **内容感知**：可打印 ASCII ≤2×（引号/反斜杠）、控制字符与非 ASCII ≤10× |
+| `_spec_input_size`（`%a` 的成长额度） | — | `_render_size(value, as_repr=True)` | **`max(_content_size(value), 1)`**（ascii 展开不吃额度 ⇒ 分配前拒绝） |
+
+其余 `as_repr` 路径逐处核对后**不改**（无作者可控字符串或已是 10×）：`Decimal` 的
+`digits`/`exponent`（整数）、`bytes`/`bytearray` 4×（repr 已转义成 ASCII，`ascii()` 恒等）、
+`re.Pattern` 10×、容器递归、`datetime`/`timezone`/`date`/`timedelta` 的 C 字段、
+`bool`/`float`/`memoryview` 常量、`FunctionType` 之外的 C 内建函数/方法。
+
+**实测 r26**：enum 成员/类名/Path/UUID 子类名 ⇒ `%a` projected 10,039 / 10,039 / 10,076 /
+10,050 ≥ 实际 4,007 / 4,009 / 4,008 / 4,040；`%r` 同形状正常渲染（保守 10× 不吃额度）。
+
+**AR4 端到端（`%a`，1M 星平面四形状）**：
+
+| 形状 | r25 峰值 | r26 峰值 | decision |
+|---|---|---|---|
+| enum 成员名 | 20.101MB（分配后） | **0.0936MB** | render / projected 10,000,039 ≥ 实际 10,000,007，成长额度只按 `_content_size` ⇒ 分配前 `ValueError` |
+| enum 类名 | 8.009MB | **0.0031MB** | 同上（projected 10,000,122 ≥ 4,000,009） |
+| `PurePath` 子类名 | 8.009MB | **0.0031MB** | 同上（projected 10,000,076 ≥ 4,000,008） |
+| `UUID` 子类名 | 0.032MB | **0.0031MB** | 同上（projected 10,000,050 ≥ 4,000,040） |
+
+合法性对照（未被误拒）：`%a`/`%r` 的 1M ASCII str ⇒ `ok` @~1.0MB；`%r` 的 1M 非 ASCII str
+⇒ `ok` @1.0MB；小 `é` 的 `%a`、普通 path/enum/UUID/class/timezone 的 `%r`/`%a` 全部 `ok`。
+
+**AR2 语料**：运行时控制同时断言 `len(str)`、`len(repr)` 与 **`len(ascii(v))`**，并按
+**`%r`/`%a` 分开**跑 `_mod_decide`；语料加非 ASCII 名字族（`é`/`É`/`😀`，覆盖 enum 成员名、
+enum 类名、`PurePath`/`UUID` 子类名、函数 `__qualname__`、`timezone` name、namespace key、
+类对象、普通对象）⇒ 实测 **87 值 / 40 族**、0 miss。护栏用例
+`test_corpus_asserts_ascii_expansion` 断言语料源码里确有 `ascii(` 比较（防"结构上不可见"）。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
+|---|---|
+| 定点变异重放（revision = **`762d88272438a1638001eaf0076a2aaa1b83d284`（tree `c9346a6a496a96b3b48d3cd3bbba7f9e21057535`）**） | **48 变异：48 KILLED / 0 SURVIVED** |
+| 同上，`--all --source head`（export = `git archive 762d882`） | **48 变异：48 KILLED / 0 SURVIVED** |
+| 第二十六轮新增（5 条，各带死法） | `68-classname-ascii-1x` / `68-enum-name-ascii-1x` / `68-path-classname-ascii-1x` / `68-uuid-classname-ascii-1x` 各退回 1× ⇒ 被 `TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded`（星平面族另由 `::test_ascii_expansion_astral_names_are_bounded`）杀红；`68-corpus-ascii-assertion-removed`（**测试文件**变异：把语料里的 `len(ascii(value))` 换回 `len(repr(value))`）⇒ 被 `::test_corpus_asserts_ascii_expansion` 杀红 |
+| 回归门禁（同一 revision） | 定向 445 passed / 920 subtests；`tests/unit` 5484 passed / 9 skipped / 1182 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5759 passed / 18 skipped / coverage 95.26%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
+
+### 2026-10-14 plaita#68 第二十七轮：`%a`/str/bytes 上界改为**真实逐字符宽度**（AU1–AU4）
+
+第二十六轮把 str/bytes 的 repr/ascii 上界做成"两分法最坏值"（可打印 ASCII ≤2× / 其它 ≤10×），
+**上界比真实更悲观 ⇒ 合法长字符串被拒**（owner 禁止的那条）。
+
+**base r26 `4c13ebc` 复现**：
+
+| 形状 | projected | allowed | 实际 ascii | `%a` | `%r` |
+|---|---|---|---|---|---|
+| `"\n"*9999` | 100,010 | 100,000 | 20,000 | **ValueError** | RET 20,000 |
+| `"\t"*9999` | 100,010 | 100,000 | 20,000 | **ValueError** | RET |
+| `"é"*9999` | 100,010 | 100,000 | 39,998 | **ValueError** | RET 39,998 |
+| `"\x00"*10000` | 100,020 | 100,000 | 40,002 | **ValueError** | RET 40,002 |
+| `"\n"*100000` | 1,000,020 | 400,008 | 200,002 | **ValueError** | RET 200,002 |
+| bytes `"é"*12496`（24,992B） | 100,002 | 100,000 | 99,971 | **ValueError** | RET |
+
+**r27 修复（`3e47347`）：真实逐字符宽度表**（`_str_escape_width` / `_bytes_repr_width`，
+C 级计数：`str.count` + 编译正则 `subn` 链式剥离；临时副本 ≤ 输入同大，**绝不构造展开串**）：
+
+| 字符类 | 真实宽度 | 新上界用的宽度 |
+|---|---|---|
+| 可打印 ASCII（0x20–0x7e，`'`/`\` 除外） | 1 | 1 |
+| `'`（串里同时含 `"` 时）、`\`、`\t`、`\n`、`\r` | 2 | 2 |
+| 其它 C0/C1 控制字符、0x80–0xff | 4（`\xNN`） | 4 |
+| 0x100–0xffff | 6（`\uNNNN`） | 6 |
+| ≥0x10000 | 10（`\UNNNNNNNN`） | 10 |
+| 两端引号 | +2（bytes 前缀+收尾 +3 / bytearray +14） | 同 |
+
+**实测 r27**：`"\n"*9999` ⇒ 20,010 ≥ 20,000 **渲染**（峰值 0.10MB）；`"é"*9999` ⇒
+40,008 ≥ 39,998 渲染；`"\x00"*10000`、`"\n"*100000`（0.20MB）、bytes `"é"*12496`
+（99,981 ≥ 99,971，2.22MB）全部渲染；`%a` 上界对 `str` **精确等于** `len(ascii(v))`，
+bytes/bytearray 精确等于 `len(repr(v))`。
+
+**AU2 阈值（实测）**：拒 ⇔ `fmt_len + spec_bound > max(100_000, 4 × (fmt_len + 内容))`；
+`%a` 的成长基准是值的**权威内容量**（`_content_size`），上界不再自买预算：
+- `"é"*24_997` 渲染 / `"é"*24_998` 起拒；
+- `"😀"*9_998` 渲染 / `"😀"*9_999` 起拒；`"😀"*1e6` ⇒ **渲染前** ValueError
+  （峰值 8.45MB，来自上界计算的 C 级临时副本，< 实际 10,000,002 字符），而 `%r` 对同一值
+  正常渲染（1,000,002 字符）；
+- `"\n"*2_000_000` 从不被拒（真实展开 ≤4×）。
+
+**AU3 逃生口与消息**：`%a` 的规模拒绝消息追加：ascii 展开说明（最多 10×）+ 真实阈值口径
++ 改用 `%r` + `PLAITA_EXPR_GROWTH_FACTOR`（硬上限仍在）。正控用例
+`TestTwentySeventhRoundAsciiThreshold`（5 用例）：长 `\n`/`\t`/`\x00`/`é`/bytes 的 `%a`
+**必须渲染**、`"😀"*1e6` 必须拒、阈值实测、`%a` 上界精确且与 `%r` 同源、bytes 上界精确。
+语料族数断言改为实测 **41**（r26 写的 40 是错的）。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
+|---|---|
+| 定点变异重放（revision = **`3e473472b4c5a8c853ceb6ad6c15ef6b3a722a45`（tree `38bb2de52d0cb5ee48275add5bb1ff83d9677f2a`）**） | **51 变异：51 KILLED / 0 SURVIVED** |
+| 同上，`--all --source head`（export = `git archive 3e47347`） | **51 变异：51 KILLED / 0 SURVIVED** |
+| 第二十七轮新增（3 条，各带死法） | `68-flat-ascii-width`（str 退回扁平 10×）⇒ 被 `TestTwentySeventhRoundAsciiThreshold::test_long_control_and_nonascii_strings_render_under_percent_a` 杀红；`68-bytes-flat-width`（bytes 退回 4n+32）⇒ 被 `::test_bytes_repr_width_is_exact` 杀红；`68-ascii-budget-uses-own-bound`（`%a` 基准改回自己的上界）⇒ 被 `::test_astral_expansion_still_refuses_before_rendering` 杀红 |
+| 保留（AU4） | AR1 四处 1×→10×、`_tzinfo_extra` 4×→10×、语料 `ascii` 断言 + 按模式分开、测试文件变异 `68-corpus-ascii-assertion-removed`、r26 全部变异与门禁 |
+| 回归门禁（同一 revision） | 定向 450 passed / 947 subtests；`tests/unit` 5489 passed / 9 skipped / 1209 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5764 passed / 18 skipped / coverage 95.28%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
+
+### 2026-10-14 plaita#68 第二十八轮：bytearray 引号规则、上界计算峰值、容器 str 快路（AX1–AX4）
+
+`str` 侧逐字符宽度在 r27 已被验收者穷举确认 0 错；本轮是**同族**的三条：bytearray 的引号
+规则、**上界计算自身**的内存放大、容器路径残留的扁平 10×。
+
+**base r27 `1ae3641` 复现**：
+
+| 形状 | r27 | 实际 |
+|---|---|---|
+| `_render_size(bytearray(b"'"), as_repr=True)` | **15** | 16 |
+| `_render_size(bytearray(b"'''"), as_repr=True)` | **17** | 20 |
+| `bytearray(b"'"*1_000_000)` 的 `%s` | projected 1,000,014 | **2,000,014**（`_fn_mod` RET @6.00MB） |
+| `bytearray(b"'"*5e7)` | bound 50,000,014 ≤ 1e8 | 100,000,014 ⇒ **硬上限被绕过** |
+| `_render_size(<2MB 非 ASCII bytes>)` 的**计算峰值** | **88.45MB（88.5×）** | — |
+| `_mod_decide("%r", <2MB 非 ASCII bytes>)` 峰值 | **177.13MB（88.6×）** | — |
+| `["\n"*100_000]` 的 `%a` | bound 1,000,038 / 允许 400,008 | 200,004 ⇒ **预算内被拒** |
+
+**r28 修复（`5abc2f2`）**：
+1. **AX1**：`_bytes_repr_width(..., always_escape_apostrophe=False)`——`bytearray` 传 `True`
+   （CPython 的 `bytearray.__repr__` 无条件转义 `'`），`bytes` 保留“仅当串里同时含 `"`
+   才转义”的规则。穷举 **256 单字节 × 2 类型 + 全部 ≤3 长度组合（7 字符表，1464×2）** ⇒ 0 低估；
+   `bytearray(b"'"*K)` 上界 = **2K+14**（K=0/1/3/1000 实测相等），K>5e7 时 2K+14 > 1e8
+   ⇒ 硬上限绕过关闭。
+2. **AX2**：bytes 的不可打印计数改 `bytes.translate(None, delete)`——实测峰值
+   **1.00×**（0.2MB→0.20MB、2MB→2.00MB、bytearray 2MB→2.00MB）；regex `subn` 的
+   88× 消失。`str` 侧仍是 `re.subn` 链（`str.translate` 无 delete 参数），
+   **峰值预算（H2，逐路径口径——不准笼统说"全部路径不放大内存"）**：
+   - `bytes`/`bytearray`：**恰好 1.00×**（0.2MB / 1MB / 2MB / 20MB 各档实测同值）；
+     满足字面 H2。
+   - `str`：**不满足字面 H2**，采用**有界且被测试守卫的预算**——实测
+     astral 4MB→8.45MB（**2.11× storage**）、astral 40MB→89.10MB（2.23×）、
+     BMP CJK 2MB→8.45MB（**4.22×**）、BMP CJK 40MB→160MB（4.28×）、
+     纯 ASCII 快路 **0.00×**；预算是按 **`len(value)`（字符数）** 计的上限 ≤10×
+     （**不是** `sys.getsizeof`、也不是 storage 字节数），常数写在
+     `TestTwentyEighthRoundBytearrayAndBoundPeak::test_bound_computation_peak_budget`
+     的断言与消息里。理由链：小常数、线性、瞬时、只占守卫自己的临时量，且**从不推迟
+     结果拒绝**（`1e8` 硬上限与形状检查仍在渲染前）。是否接受这种"预算化的有限放大"
+     由 owner 拍板；若要求降到 ~1×，路线是保留 `str.isascii()` 快路并把 4 趟链换成
+     单趟/UTF-8 lead-byte 分类（代价 ≈2× 拷贝或少量 C 维护），作为**独立一轮**并附
+     峰值阶梯复测。
+3. **AX3**：`_container_render_bound` 的 str 快路改用 `_str_escape_width`（不再是扁平
+   `10×len+10`）⇒ `["\n"*100_000]` bound 200,030 ≥ 实际 200,004、允许 400,008 **渲染**；
+   set / 嵌套 / tuple / dict / 混合 list 同样渲染。既有 H1 用例按 1× 语义重述：小 n 的
+   合法结果现在预算内渲染，只有真实上界越过硬上限的形状才必须分配前拒。
+
+**AX3 措辞对齐**：`%a` 的上界在**标量与容器元素**上都是真实逐字符展开和（消息里“精确”
+的说法现在对两条路径都成立）；`str` 上界对 `%r` 的可打印非 ASCII 仍是**保守**（≥ 实际）。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
+|---|---|
+| 定点变异重放（revision = **`5abc2f238ffba1029a2945cfb85b98f94aa6059d`（tree `db3272452764ab7644e3838c12df850a614d3bac`）**） | **54 变异：54 KILLED / 0 SURVIVED** |
+| 同上，`--all --source head`（export = `git archive 5abc2f2`） | **54 变异：54 KILLED / 0 SURVIVED** |
+| 第二十八轮新增（3 条，各带死法） | `68-bytearray-apostrophe-rule`（bytearray 退回 bytes 规则）⇒ 被 `TestTwentyEighthRoundBytearrayAndBoundPeak::test_bytearray_apostrophe_rule_matches_native_exhaustively` 杀红；`68-bytes-subn-counting`（恢复正则计数）⇒ 被 `::test_bound_computation_peak_budget` 杀红；`68-container-flat-str-width`（容器快路退回扁平 10×）⇒ 被 `::test_container_str_fast_path_renders_within_budget` 杀红 |
+| 变异锚点再表述 | `68-flat-ascii-width` / `68-bytes-flat-width`（r27 新增）的 `old` 按 r28 的函数体**重新表述**（锚点 1 次匹配、仍 KILLED），未退役 |
+| 保留（AX4） | str 的全码位/引号规则/`\xNN`/`\uNNNN`/`\UNNNNNNNN`/孤立代理正确性、13/23 精确化、AU2 阈值（é 24,998 / 😀 9,999）、AU3 消息与逃生口、语料 87 值/41 族、四条名字位点与 `ZoneInfo.key`、array `d`/`u`、r27 全部 51 条变异 |
+| 回归门禁（同一 revision） | 定向 455 passed / 964 subtests；`tests/unit` 5494 passed / 9 skipped / 1226 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5769 passed / 18 skipped / coverage 95.29%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
+
+### 2026-10-14 plaita#68 第二十九轮：逐变异 `expect_fail` 实证审计 + H2 逐路径口径（AZ1–AZ4）
+
+**AZ1（逐条实证）**：把 54 条变异**逐条**施加到导出的干净树上（`git archive HEAD`），用
+`expect_fail` 里的节点跑 pytest（**不加 `-x`**），逐条记录哪些节点**实际红**、红了几条
+subfail。结果：**50 条变异的声明 100% 命中**；**4 条含虚假条目**（绿却写在 `expect_fail`
+里），已按实测修正：
+| 变异 | 删除的假条目 | 实际击杀 |
+|---|---|---|
+| `68-bytes-flat-width` | `TestTwentyEighthRoundBytearrayAndBoundPeak::test_bound_computation_peak_budget`（该测试在此变异下**通过**：函数签名未变） | `TestTwentySeventhRoundAsciiThreshold::test_bytes_repr_width_is_exact`（9 条 subfail） |
+| `68-exact-uuid-slot-constant` | `TestTwentyThirdRoundExactTypeSlots::test_every_exact_type_branch_has_bound_ge_actual` | `::test_exact_uuid_int_slot_write_is_bounded`（5 条 subfail） |
+| `68-mod-bytes-mapping-str-key` | `TestSeventeenthRoundT1BytesMapping::test_bytes_mode_uses_bytes_keys` | `::test_bytes_mapping_fuzz_native_implies_failure`（1 条） |
+| `68-oxX-float-index-native` | `TestEighteenthRoundZ2NonFinite::test_non_finite_surfaces_native_errors` | `TestNineteenthRoundABAdversarialCorpus::test_adversarial_corpus_invariants`（1 条） |
+
+**逐变异 → 实际红测试表**（code revision `5abc2f2`；"红测试数"= 实际 FAILED 的节点数，
+"subfail 行"= 原始失败行数）：
+
+| 变异 | 红测试数 | subfail 行 | 实际红的测试（类::方法） |
+|---|---|---|---|
+| `68-ancestor-cslot-float-read` | 1 | 1 | TestEighteenthRoundZ1NumericSubclasses::test_adversarial_numeric_subclasses_have_no_underestimates |
+| `68-ancestor-cslot-int-read` | 1 | 1 | TestEighteenthRoundZ1NumericSubclasses::test_adversarial_numeric_subclasses_have_no_underestimates |
+| `68-array-element-projection` | 3 | 7 | TestTwentyFifthRoundArrayElementBounds::test_every_typecode_worst_case_has_bound_ge_actual, TestTwentyFifthRoundArrayElementBounds::test_array_hard_limit_is_not_bypassed, TestTwentyFifthRoundArrayElementBounds::test_array_subclass_and_nested_shapes_are_bounded |
+| `68-ascii-budget-uses-own-bound` | 2 | 2 | TestTwentySeventhRoundAsciiThreshold::test_astral_expansion_still_refuses_before_rendering, TestTwentySeventhRoundAsciiThreshold::test_growth_threshold_is_where_real_expansion_exceeds_budget |
+| `68-buffer-str-length-for-author-bytes` | 1 | 2 | TestTwentyFirstRoundRenderDispatch::test_buffer_dispatch_ignores_author_bytes_for_c_slots |
+| `68-bytearray-apostrophe-rule` | 2 | 2 | TestTwentyEighthRoundBytearrayAndBoundPeak::test_bytearray_apostrophe_rule_matches_native_exhaustively, TestTwentyEighthRoundBytearrayAndBoundPeak::test_bytearray_apostrophe_hard_limit_is_not_bypassed |
+| `68-bytes-flat-width` | 1 | 9 | TestTwentySeventhRoundAsciiThreshold::test_bytes_repr_width_is_exact |
+| `68-bytes-mode-fail-open` | 2 | 6 | TestSixteenthRoundS1BytesMode::test_native_decision_implies_native_failure_fuzz, TestSixteenthRoundS1BytesMode::test_author_bytes_protocol_is_refused_without_running_it |
+| `68-bytes-subn-counting` | 1 | 3 | TestTwentyEighthRoundBytearrayAndBoundPeak::test_bound_computation_peak_budget |
+| `68-class-object-name-constant` | 1 | 5 | TestTwentyFourthRoundConstantBounds::test_author_writable_class_names_are_bounded |
+| `68-classname-ascii-1x` | 1 | 3 | TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded |
+| `68-container-flat-str-width` | 1 | 4 | TestTwentyEighthRoundBytearrayAndBoundPeak::test_container_str_fast_path_renders_within_budget |
+| `68-content-size-userstring-recursion` | 1 | 1 | TestSeventeenthRoundT4T5T6::test_userstring_and_userlist_use_their_data |
+| `68-corpus-ascii-assertion-removed` | 1 | 1 | TestTwentySixthRoundAsciiExpansion::test_corpus_asserts_ascii_expansion |
+| `68-dominance-comprehension-iterable` | 2 | 2 | TestSeventeenthRoundT4T5T6::test_comprehension_iterable_is_not_dominated, TestEighteenthRoundZ3Z4Z5::test_nested_comprehension_iterable_is_not_dominated |
+| `68-dominance-filtered-comprehension` | 1 | 1 | TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged |
+| `68-dominance-if-false` | 1 | 3 | TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged |
+| `68-dominance-match-case` | 1 | 3 | TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged |
+| `68-dominance-nested-comprehension` | 1 | 1 | TestEighteenthRoundZ3Z4Z5::test_nested_comprehension_iterable_is_not_dominated |
+| `68-dominance-nested-def` | 1 | 1 | TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged |
+| `68-dominance-same-line-order` | 1 | 1 | TestSixteenthRoundS5SameLineOrder::test_call_later_in_the_same_line_does_not_dominate |
+| `68-dominance-sibling-branch` | 1 | 2 | TestFifteenthRoundQ5SiblingBranches::test_sibling_branches_are_red |
+| `68-dominance-sliced-to-empty` | 1 | 1 | TestTwelfthRoundH3RenderSiteInventory::test_moving_the_bound_call_out_of_dominance_is_flagged |
+| `68-e-family-snan-native` | 1 | 3 | TestNineteenthRoundABAdversarialCorpus::test_snan_surfaces_native_errors_in_both_modes |
+| `68-enum-class-name-constant` | 1 | 5 | TestTwentyFourthRoundConstantBounds::test_author_writable_class_names_are_bounded |
+| `68-enum-name-ascii-1x` | 2 | 3 | TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded, TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_astral_names_are_bounded |
+| `68-exact-path-projection` | 2 | 13 | TestTwentyThirdRoundExactTypeSlots::test_exact_path_slot_writes_are_bounded_or_refused, TestTwentyThirdRoundExactTypeSlots::test_exact_path_slot_writes_refuse_before_allocating |
+| `68-exact-uuid-slot-constant` | 1 | 5 | TestTwentyThirdRoundExactTypeSlots::test_exact_uuid_int_slot_write_is_bounded |
+| `68-flat-ascii-width` | 2 | 17 | TestTwentySeventhRoundAsciiThreshold::test_long_control_and_nonascii_strings_render_under_percent_a, TestTwentySeventhRoundAsciiThreshold::test_percent_a_bound_is_exact_and_shared_with_percent_r |
+| `68-function-qualname-constant` | 1 | 5 | TestTwentyFourthRoundConstantBounds::test_function_qualname_is_bounded |
+| `68-immutable-mro-read` | 1 | 1 | TestTwentiethRoundACMetaAndInstrumentation::test_immutable_reads_are_used_for_type_layer_facts |
+| `68-mod-bytes-bound-below-actual` | 1 | 1 | TestSixteenthRoundS1BytesMode::test_large_memoryview_bound_is_the_byte_length |
+| `68-mod-bytes-mapping-str-key` | 1 | 1 | TestSeventeenthRoundT1BytesMapping::test_bytes_mapping_fuzz_native_implies_failure |
+| `68-mod-dict-subclass-read-once` | 1 | 1 | TestThirteenthRoundO2ModDecisionPath::test_dict_subclass_stateful_getitem_is_read_once_via_c_slot |
+| `68-mod-format-operand-subclass` | 1 | 1 | TestEighteenthRoundZ3Z4Z5::test_format_operand_subclass_is_refused_before_allocation |
+| `68-mod-huge-int-e-native-precedence` | 1 | 6 | TestSeventeenthRoundT2T3Numeric::test_native_error_precedes_size_error_for_huge_ints |
+| `68-mod-no-conversion-native` | 1 | 1 | TestEighteenthRoundZ3Z4Z5::test_no_conversion_format_is_a_render |
+| `68-mod-numeric-magnitude-not-counted` | 2 | 7 | TestSeventeenthRoundT2T3Numeric::test_numeric_magnitude_is_counted, TestSeventeenthRoundT2T3Numeric::test_numeric_projection_corpus_has_no_underestimates |
+| `68-mod-numeric-protocol-accepted` | 1 | 8 | TestFifteenthRoundQ4ValuePredicates::test_numeric_protocol_only_values_refused_with_escape_hatch |
+| `68-mod-unparsed-format-fail-open` | 1 | 2 | TestFifteenthRoundQ1ShapeMatrix::test_unparsable_format_with_star_width_is_refused |
+| `68-namespace-vars-shadowed` | 2 | 9 | TestTwentySecondRoundInstanceAttributeShadowing::test_namespace_dict_shadowing_uses_the_real_instance_dict, TestTwentySecondRoundInstanceAttributeShadowing::test_decision_path_has_zero_author_calls_for_all_shadow_shapes |
+| `68-nonfinite-native-precedence` | 1 | 3 | TestEighteenthRoundZ2NonFinite::test_non_finite_surfaces_native_errors |
+| `68-numeric-subclass-slots-trusted` | 1 | 1 | TestNineteenthRoundABAdversarialCorpus::test_adversarial_corpus_invariants |
+| `68-object-fallback-name-constant` | 2 | 23 | TestTwentyFourthRoundConstantBounds::test_author_writable_class_names_are_bounded, TestTwentyFourthRoundConstantBounds::test_datetime_tzinfo_repr_is_bounded |
+| `68-oxX-float-index-native` | 1 | 1 | TestNineteenthRoundABAdversarialCorpus::test_adversarial_corpus_invariants |
+| `68-path-classname-ascii-1x` | 1 | 1 | TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded |
+| `68-path-instance-attrs-trusted` | 2 | 19 | TestTwentySecondRoundInstanceAttributeShadowing::test_path_attribute_shadowing_is_refused_before_rendering, TestTwentySecondRoundInstanceAttributeShadowing::test_path_instance_dict_protocol_shadowing_is_refused |
+| `68-render-text-slots-trusted` | 1 | 9 | TestTwentyFirstRoundRenderDispatch::test_overriding_slot_subclasses_are_refused_by_name |
+| `68-render-unknown-type-gets-bound` | 1 | 5 | TestFifteenthRoundQ3DoomedFields::test_unknown_render_type_before_a_native_error_is_refused |
+| `68-repeat-count-args-constant` | 1 | 10 | TestTwentyFourthRoundConstantBounds::test_repeat_and_count_embed_real_args |
+| `68-stdlib-only-gate-off` | 2 | 27 | TestTwentySecondRoundInstanceAttributeShadowing::test_path_attribute_shadowing_is_refused_before_rendering, TestTwentySecondRoundInstanceAttributeShadowing::test_uuid_int_shadowing_is_refused_before_rendering |
+| `68-timezone-name-constant` | 1 | 5 | TestTwentyFourthRoundConstantBounds::test_timezone_name_is_bounded |
+| `68-uuid-classname-ascii-1x` | 1 | 1 | TestTwentySixthRoundAsciiExpansion::test_ascii_expansion_of_author_names_is_bounded |
+| `68-uuid-int-read-constant` | 1 | 3 | TestTwentySecondRoundInstanceAttributeShadowing::test_uuid_int_shadowing_is_refused_before_rendering |
+
+**AZ2（H2 逐路径口径）**：见本文件第二十八轮小节的"峰值预算（H2，逐路径口径）"——
+`bytes`/`bytearray` **恰好 1.00×**（含 20MB 档）；`str` **不满足字面 H2**，实测
+astral 2.11×（4MB）/2.23×（40MB）、BMP CJK 4.22×（2MB）/4.28×（40MB）storage、
+纯 ASCII 快路 0×，采用**按 `len(value)`（字符数，非 storage）≤10× 的有界预算**，
+常数与单位写在 `TestTwentyEighthRoundBytearrayAndBoundPeak::test_bound_computation_peak_budget`
+的断言与消息里。不接受"全部路径不放大内存"的笼统说法。
+
+**AZ3**：`str` 的实现**本轮不动**（等 owner 对"预算化有限放大"拍板）；若要求降到 ~1×，
+路线（保留 `str.isascii()` 快路 + 单趟 `len(s) − len(s.encode('latin-1','ignore'))` 或
+UTF-8 lead-byte 分类器）作为**独立一轮**并附峰值阶梯复测。
+
+| 变异聚合（**表头写明 revision**） | 数字 |
+|---|---|
+| 定点变异重放（revision = **`d0a2a2e82551547c78e4b59da4da298afe692775`（tree `06882634f3e86be357b3582b46aa527351ccf550`）**） | **54 变异：54 KILLED / 0 SURVIVED（顺序执行）** |
+| 同上，`--all --source head`（export = `git archive d0a2a2e`） | **54 变异：54 KILLED / 0 SURVIVED** |
+| AZ1 审计 | 54 条逐条实跑：50 条声明全命中、4 条修正（上表）；所有 54 条 `old` 锚点仍恰好 1 次匹配 |
+| 回归门禁（同一 revision） | 定向 455 passed / 964 subtests；`tests/unit` 5494 passed / 9 skipped / 1226 subtests；`tests/integration tests/e2e` 275 passed / 9 skipped；`scripts/ci-gate.sh` **PASSED**（5769 passed / 18 skipped / coverage 95.29%）；ruff clean；`pyproject.toml` 与 `plaita/core/__init__.py` 与基线逐字节相同 |
+| 本轮未跑 | `mutmut` 全量扫描（仓规禁止塞进 PR CI） |
 
 ## 2.6 concurrent.py 强化（2026-07-06，100%）
 
