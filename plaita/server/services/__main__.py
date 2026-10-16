@@ -10,6 +10,7 @@
 """
 import argparse
 import asyncio
+import logging
 import os
 import signal
 import sys
@@ -40,6 +41,15 @@ SERVICE_CLASSES = {
 
 
 def main():
+    # plaita#46：库内 logger（plaita/logger.py）只挂 NullHandler、输出交由应用
+    # 配置——本启动器此前漏配，经它起的 delay/schedule/approval/callback/queue
+    # 五个扩展服务全域静默（运维实证：systemd 日志文件 0 字节，2026-10-07）。
+    # 与 flow_worker.main() 同款修法（2026-09 分布式评审 P2-6 的漏修面）：
+    # level 取 PLAITA_LOG_LEVEL 缺省 INFO，输出仍交 systemd/容器侧收集。
+    logging.basicConfig(
+        level=os.environ.get("PLAITA_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description='Plaita 扩展服务启动器')
     parser.add_argument(
         'service_type',
