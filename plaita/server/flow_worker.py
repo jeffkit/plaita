@@ -30,7 +30,12 @@ from plaita.core.errors import (
 )
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
-from plaita.storage.base import ExecutionState, ExecutionStorage, FlowStorage
+from plaita.storage.base import (
+    ExecutionState,
+    ExecutionStorage,
+    FlowStorage,
+    StateSerializationError,
+)
 from plaita.storage.fenced import (
     reset_current_fence_token,
     set_current_fence_token,
@@ -440,6 +445,27 @@ def _engine_version() -> str:
         return "unknown"
 
 
+def sanitize_context_for_persist(context: Any) -> Optional[dict]:
+    """#80 层 1：把不可 JSON 化的值**降级为 str**，返回**副本**。
+
+    **绝不就地改原对象** —— 原 ``context`` 仍被其它路径引用（终态化是收尾动作，
+    不该反向改动流程语义）。
+
+    返回 ``None`` 表示「连兜底都失败」（如**循环引用**，``json.dumps`` 会抛
+    ``ValueError: Circular reference detected``）⇒ 由调用方走层 2（最小 error 状态）。
+    """
+    def _default(o: Any) -> str:
+        try:
+            return str(o)
+        except Exception:  # noqa: BLE001 —— __str__ 自己抛异常的对象
+            return f"<unstr-able {type(o).__name__}>"
+
+    try:
+        return json.loads(json.dumps(context, default=_default))
+    except Exception:  # noqa: BLE001 —— 循环引用等，交给层 2
+        return None
+
+
 def _is_retryable_node_failure(exc: BaseException) -> bool:
     """判别「可重试的节点执行失败」vs「协议/图错误/超时/取消」。
 
@@ -558,9 +584,15 @@ def _node_id_from_chain(exc: BaseException) -> Optional[str]:
 
 
 class StatePersistError(RuntimeError):
-    """执行状态落盘失败（``save_execution_state`` 返回 False）。
+    """执行状态落盘失败（``save_execution_state`` 返回 False）——**瞬态**那一支。
 
-    Redis 后端把一切异常（网络瞬断/序列化失败）吞成 False；终态/挂起/步进
+    **#80 起本类只表示「可重试的落盘失败」**（Redis 瞬断 ⇒ 返回 False）。
+    「不可序列化」是**永久**失败、已从本类**分家**为
+    ``plaita.storage.base.StateSerializationError``（存储层直接抛，不返回 False），
+    由调用点转成可观测终态——**别把两者再合回一个类型**：那正是 #80 的病灶。
+    （本条注释原写『网络瞬断/序列化失败均如此』，已随契约分家同步。）
+
+    历史：终态/挂起/步进
     落盘失败若被静默放行，消息会被 ack——节点副作用已发生而执行状态永远
     停在旧值（僵尸执行）。此处把 False 升级为异常，让 ``RedisFlowWorker.run``
     的兜底路径不 ack 消息、走 at-least-once 重投。
@@ -1447,8 +1479,16 @@ class FlowWorker:
     def _persist_state_or_raise(self, execution_id: str, state: ExecutionState, phase: str) -> None:
         """落盘执行状态并检查返回值：False → 抛 ``StatePersistError``。
 
-        ``save_execution_state`` 的契约是吞掉一切异常返回 False（Redis 后端
-        网络瞬断/序列化失败均如此）。start 路径历史上检查过返回值，但
+        **#80 起契约已分家（本条注释此前是错的，必须同步）**：``save_execution_state``
+        **不再**吞掉一切异常返回 False——
+          * **Redis 瞬断** ⇒ 仍返回 False ⇒ 本方法抛 ``StatePersistError``
+            （消息不 ack、走 at-least-once 重投，这是瞬态该走的路）；
+          * **状态不可序列化** ⇒ 存储层**抛** ``StateSerializationError``
+            （永久失败，重投不会让它变好）⇒ 它**绕过**本方法的 False 分支直接上抛，
+            由调用点的 ``except StateSerializationError`` 转成**可观测终态**。
+        留着旧措辞就是把「声明与实现脱钩」（#140 同族）埋回代码里。
+
+        历史：start 路径历史上检查过返回值，但
         终态/挂起/取消/步进/错误态保存与 resume 两条路径此前不检查——
         is_end 落盘失败 → break → 正常返回 → 消息被 ack，节点副作用已发生
         而执行状态永远停在 running/suspended（僵尸执行）。统一在此收口：
@@ -2683,6 +2723,56 @@ class FlowWorker:
 
                 except ExecutionLeaseError:
                     raise
+                except StateSerializationError as exc:
+                    # #80：**永久失败，重投无用** ⇒ 转可观测终态（不落进下面的
+                    # 通用 except，那会把永久失败送进重试判别）。
+                    # 必须**先净化**：导致不可序列化的那个值还在 context 里，
+                    # 直接终态化再落盘会**再抛同一个异常**（终态永远落不下去）。
+                    logger.error(
+                        "执行状态不可序列化，终态化 error（不重投）: execution_id=%s, err=%s",
+                        execution_id, exc,
+                    )
+                    _sanitized = sanitize_context_for_persist(context)
+                    if _sanitized is not None:
+                        # 层 1：只改**持久化副本**，原 context 不动
+                        state.context = _sanitized
+                        state.status = "error"
+                        state.error = {
+                            "context_sanitized": True,
+                            "rule": "non-JSON values coerced to str via default=str (#80)",
+                            "exception": str(exc)[:200],
+                        }
+                        state.end_time = datetime.now().isoformat()
+                        try:
+                            self._persist_state_or_raise(
+                                execution_id, state, "serialization_error"
+                            )
+                        except StateSerializationError:
+                            logger.error(
+                                "层 1（净化后）仍无法落盘，降级最小 error 状态: execution_id=%s",
+                                execution_id,
+                            )
+                            _sanitized = None
+                    if _sanitized is None:
+                        # 层 2（C）：最小 error 状态，**不含 context** —— 丢现场是
+                        # 最后一道闸，不是第一选择
+                        logger.error(
+                            "降级最小 error 状态落盘（不含 context）: execution_id=%s",
+                            execution_id,
+                        )
+                        state.context = {}
+                        state.status = "error"
+                        state.error = {
+                            "message": (
+                                "执行状态不可序列化，且净化后仍无法落盘"
+                                f"（永久失败，不重投）: {str(exc)[:200]}"
+                            )
+                        }
+                        state.end_time = datetime.now().isoformat()
+                        self._persist_state_or_raise(
+                            execution_id, state, "serialization_error_minimal"
+                        )
+                    break
                 except StatePersistError:
                     # 步进落盘失败必须原样上抛：若落进下面的通用 except，
                     # 会把可重投的瞬态失败改写成 error 终态（消息被 ack 后

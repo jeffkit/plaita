@@ -26,6 +26,7 @@ from typing import Any, List, Optional
 
 from ..logger import logger
 from .base import ExecutionState, ExecutionStorage
+from .base import StateSerializationError
 from .redis import (
     TERMINAL_EXECUTION_STATUSES,
     RedisExecutionStorage,
@@ -117,6 +118,14 @@ class FencedExecutionStorage(ExecutionStorage):
         fence_key = f"{namespace}:execution:fence:{execution_id}"
         try:
             serialized = self._inner.serialize_state(state.model_dump())
+        except Exception as e:
+            # #80：与普通写路径同判据 —— 不可序列化是**永久**失败，不得吞成
+            # `False`（那会被上层当瞬态重投）。
+            logger.error(
+                "fenced 执行状态不可序列化 %s（永久失败，不重试）: %s", execution_id, e
+            )
+            raise StateSerializationError(execution_id, e) from e
+        try:
             # C4-3 对齐（Track B 任务2）：fenced 落盘的终态键此前只 SET 不带
             # EX，永不过期、只能靠 console 读时补偿。现按状态取与普通路径
             # （RedisExecutionStorage.save_execution_state）同源的 TTL——常量

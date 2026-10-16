@@ -7,6 +7,36 @@ from pydantic import BaseModel, Field
 from ..logger import logger
 
 
+class StateSerializationError(RuntimeError):
+    """执行状态**不可序列化**（写侧永久失败）——与「Redis 瞬断」严格区分。
+
+    为什么必须有这个类型（plaita#80）：`RedisExecutionStorage.save_execution_state`
+    原先用**一个** `except Exception -> return False` 把两类性质完全不同的故障
+    混成同一返回值：
+
+    * **不可序列化**：`state.context` 里出现了非 JSON 值。重试一万次也不会变好；
+    * **Redis 瞬断**：该退避后重投。
+
+    调用方（FlowWorker）把 `False` 一律当**瞬态**处理（不 ack、等重投），于是前者
+    表现为「每次落盘都失败 → 反复从 checkpoint 重跑同一节点 → 副作用重放 → 执行
+    永远拿不到终态，直到投递耗尽进 DLQ」。同一个 state 在 memory 后端恒 `True`
+    （它不做 JSON 序列化），所以这个缺陷只在 Redis 后端显形、且会被任何
+    memory 后端写的单测掩盖。
+
+    与 `ExecutionStateLoadError` 对称（读侧/写侧各一支）。**刻意不继承
+    `ValueError`**：FlowWorker 把 `ValueError` 当「畸形消息」poison ack，
+    继承它会让本应终态化的永久失败被当成消息格式错误。
+    """
+
+    def __init__(self, execution_id: str, cause: BaseException):
+        super().__init__(
+            f"执行状态不可序列化（永久失败，重试无用）：execution_id={execution_id}；"
+            f"底层 {type(cause).__name__}: {cause}"
+        )
+        self.execution_id = execution_id
+        self.cause = cause
+
+
 class ExecutionState(BaseModel):
     """
     流程执行状态模型，用于表示流程执行的完整状态信息

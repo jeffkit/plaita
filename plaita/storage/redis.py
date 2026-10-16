@@ -5,7 +5,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Union, Tuple
 
 from ..logger import logger
-from .base import ExecutionStorage, ExecutionState, FlowStorage
+from .base import (
+    ExecutionStorage,
+    ExecutionState,
+    FlowStorage,
+    StateSerializationError,
+)
 
 try:
     import redis
@@ -293,8 +298,17 @@ class RedisExecutionStorage(ExecutionStorage):
         同理，fenced 路径的索引成员（ZADD）也在该 Lua 内维护（fenced.py）。
         """
         key = self.get_namespace_key('execution', execution_id)
+        # #80：把**序列化**移出 Redis 操作的 try。序列化失败是**永久**失败
+        # （重试无用），必须与「Redis 瞬断」区分开上报，否则会被下游当成瞬态
+        # 反复重投，执行永远拿不到终态。
         try:
             serialized = self.serialize_state(state.model_dump())
+        except Exception as e:
+            logger.error(
+                "执行状态不可序列化 %s（永久失败，不重试）: %s", execution_id, e
+            )
+            raise StateSerializationError(execution_id, e) from e
+        try:
             ttl = (
                 execution_state_ttl_seconds()
                 if state.status in TERMINAL_EXECUTION_STATUSES
