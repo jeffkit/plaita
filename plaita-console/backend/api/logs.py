@@ -122,16 +122,16 @@ async def list_logs(
             total=len(rows),
         )
 
-    # 构建 Stream key 模式
-    if service_type and instance_id:
-        pattern = f"plaita:logs:{service_type}:{instance_id}"
-        keys = [pattern]
-    elif service_type:
+    # 构建 Stream key 模式：instance_id 一律不参与 key 拼接，只作条目过滤
+    # （#102）。发布侧 key 本就按 service_type:instance_id 分流
+    # （plaita/server/log_handler.py），日志页的深链可能只有 instance_id
+    # （历史链接、Cluster 卡片深链），仅凭 instance_id 拼不出 key——曾因此
+    # 退化为全量键且从不按条目收窄，实例筛选静默失效。
+    if service_type:
         pattern = f"plaita:logs:{service_type}:*"
-        keys = redis.keys(pattern)
     else:
         pattern = "plaita:logs:*"
-        keys = redis.keys(pattern)
+    keys = redis.keys(pattern)
     
     logs = []
     tenant = tenant_scope(request)
@@ -163,11 +163,16 @@ async def list_logs(
                         message=entry_data.get("message", ""),
                         context=json.loads(entry_data.get("context", "{}"))
                     )
-                    
+
                     # 级别筛选
                     if level and log_entry.level != level:
                         continue
-                    
+
+                    # 实例筛选：key 择取已不含 instance_id，必须按条目字段
+                    # 收窄，与 /logs/instance/{instance_id} 语义对齐（#102）
+                    if instance_id and log_entry.instance_id != instance_id:
+                        continue
+
                     logs.append(log_entry)
                 except Exception:
                     continue
@@ -396,11 +401,17 @@ async def stream_logs(
                 if message and message["type"] in ("message", "pmessage"):
                     try:
                         data = json.loads(message["data"])
-                        
+
                         # 级别筛选
                         if level and data.get("level") != level:
                             continue
-                        
+
+                        # 实例筛选：仅给 instance_id 时频道是通配的，须按
+                        # 条目 instance_id 收窄（#102）；service_type+
+                        # instance_id 齐备时走精确频道，天然已收窄
+                        if instance_id and data.get("instance_id") != instance_id:
+                            continue
+
                         yield {
                             "event": "log",
                             "data": json.dumps(data)

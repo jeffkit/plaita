@@ -606,8 +606,16 @@ class ServiceManager:
         instance = self.instances.get(instance_id)
         if not instance:
             return False
-        
-        launcher = self.get_launcher()
+
+        # 迁移实例（见 reset_service_manager，#100）可能来自另一 mode 的旧
+        # 集群：按实例自身句柄类型选 launcher，避免新集群 mode 翻转后旧
+        # 实例无法收尸。
+        if instance.container_id:
+            launcher = self._docker_launcher
+        elif instance.pid:
+            launcher = self._process_launcher
+        else:
+            launcher = self.get_launcher()
         success = await launcher.stop(instance, graceful)
         
         if success:
@@ -1067,7 +1075,30 @@ def get_service_manager() -> ServiceManager:
 
 
 def reset_service_manager():
-    """重置服务管理器（用于集群切换时重新加载配置）"""
+    """重置服务管理器（用于集群切换时重新加载配置）。
+
+    旧单例不能简单置空：已拉起的实例是 start_new_session 的独立进程（或
+    docker 容器），reset 本身并不会停掉它们；若托管实例表与 launcher 句柄
+    随旧单例一起丢弃，/cluster/instances 显示为空、/cluster/stop-all 遍历
+    空表被 all({}) 翻成 success，旧集群 worker 从此失联（stop-then-start
+    链路断裂，只能手工 ps/docker 收尸）。因此把实例表与两个 launcher 的
+    句柄迁移给新单例，并返回迁移统计供日志与测试观测（#100）。
+    """
     global _manager
+    old = _manager
     _manager = None
+    if old is None:
+        return {"instances": 0, "processes": 0, "containers": 0}
+    new = get_service_manager()
+    new.instances.update(old.instances)
+    new._process_launcher._processes.update(old._process_launcher._processes)
+    new._docker_launcher._containers.update(old._docker_launcher._containers)
+    counts = {
+        "instances": len(old.instances),
+        "processes": len(old._process_launcher._processes),
+        "containers": len(old._docker_launcher._containers),
+    }
+    if any(counts.values()):
+        _log.info("reset_service_manager: 迁移旧管理面托管实例到新单例 %s", counts)
+    return counts
 

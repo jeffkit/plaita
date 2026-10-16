@@ -115,11 +115,13 @@ const NAV_COLLAPSED_KEY = 'plaita-nav-collapsed'
 const router = createBrowserRouter(
   [
   // /login 显式路由（2026-10-06）：未认证时根路径已条件渲染 <Login>，但
-  // logout 的 window.location.assign('/login') 与用户直接访问 /login 都会
+  // logout 的跳转（现经 SUB_PATH 构造，见下）与用户直接访问 /login 都会
   // 落到本路由——此前未定义 → React Router 默认 404 错误页。
   {
     path: '/login',
-    element: <Login onSuccess={() => window.location.assign('/')} />,
+    // 落点跟随 SUB_PATH（#103）：子路径部署下真实地址是 ${SUB_PATH}/，
+    // 写死 '/' 会把用户送出 console；根路径部署 SUB_PATH 为 ''、行为不变
+    element: <Login onSuccess={() => window.location.assign(SUB_PATH || '/')} />,
   },
   {
     path: '/',
@@ -163,7 +165,8 @@ function Layout() {
       /* 会话已无效也照常退出 */
     }
     clearSession()
-    window.location.assign('/login')
+    // 与 401 分支同源（#103）：登录页真实地址是 ${SUB_PATH}/login
+    window.location.assign(`${SUB_PATH}/login`)
   }
   const toggleCollapsed = () =>
     setCollapsed((v) => {

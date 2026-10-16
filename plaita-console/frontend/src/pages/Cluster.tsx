@@ -365,8 +365,8 @@ function LogDialog({
         </div>
         
         <div className="mt-4 flex justify-between items-center">
-          <a 
-            href={`/logs?instance_id=${instanceId}`}
+          <a
+            href={`/logs?service_type=${serviceType}&instance_id=${instanceId}`}
             className="text-sm text-plaita-400 hover:text-plaita-300"
           >
             在日志页面查看更多 →
