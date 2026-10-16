@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import threading
 import time
 import uuid
@@ -17,6 +18,7 @@ import sys
 
 from cachetools import TTLCache
 from redis import Redis
+from redis.exceptions import RedisError
 from plaita.core.errors import ResumeType
 from plaita.event.core import EventBus
 from plaita.core.errors import (
@@ -52,6 +54,7 @@ from plaita.server.task_queue import (
     DEFAULT_CLAIM_MIN_IDLE_MS,
     DEFAULT_CONSUMER_GROUP,
     DEFAULT_MAX_DELIVERIES,
+    RECONNECT_BACKOFF_SECONDS,
     RedisStreamTaskQueue,
     StreamTask,
     enqueue_task,
@@ -4099,168 +4102,184 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         while self._running and not self._drain_event.is_set():
             # 盘预检（#49）在 sweep 之前：低盘期本进程不做任何与领取相关的
             # 动作（残留 sweep 由池内其他健康 worker 承担），空转等盘回线。
-            if self._disk_guard_blocks_claim():
-                self._wait_disk_guard()
-                continue
-            self._sweep_residue_if_due(queue)
-            # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
-            # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
-            # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
-            # 上限 ≈1s，空轮询的 Redis 往返开销可忽略。
-            task = queue.read(block_ms=min(self.read_block_ms, 1_000))
-            if not task:
-                continue
-
-            self._bump_active(+1)
-            acked = False
             try:
-                self._dispatch_task(task.body, delivery_count=task.delivery_count)
-                queue.ack(task.message_id)
-                acked = True
-            except TaskNotForThisWorker as exc:
-                # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：**交接**
-                # 给其他 worker——ack 原消息 + 重入队新副本（delivery 归 1）。
-                # 不能只「留 pending」：对端会按 claim_min_idle_ms 反复 XCLAIM，
-                # 每次让 deliveries +1，两 worker 下 5 轮即触顶 → 误死信
-                # （2026-10-06 双机实测）。交接无损耗，且新副本仍会回到
-                # 共享队列由亲和的 worker 领走。
-                # **有界**：交接次数按 execution_id 计数（AFFINITY_HANDOVER_MAX），
-                # 达上限即终态化 error——否则「重入队使 delivery 恒为 1」会让
-                # 交接永无终止条件（2026-10-11 无限交接风暴，见
-                # _handover_non_affine 与 _terminalize_handover_exhausted）。
-                queue.note_lease_conflict()  # 复用「让给别人」计数口径
-                self._handover_non_affine(task, queue, exc)
-            except ExecutionLeaseError as exc:
-                # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
-                # 持有者**活着**时 ack 释放本消息（2026-10-06 修）。
-                #
-                # 原行为「不 ack 留 pending」的实测问题：持有者跑长节点
-                # （agentrun 分钟级）期间，对端每 claim_min_idle_ms(60s)
-                # XCLAIM 一次，**每次让 Redis deliveries +1** → 烧到超限
-                # 触发死信（实测 delivery 达 22/31），死信守卫虽正确拦下
-                # （租约仍在→跳过）并最终重入队，但产生大量假死信污染 DLQ、
-                # 浪费队列往返。
-                #
-                # 为何 ack 对活持有者是安全的：任务**没有丢**——它在持有者
-                # 手里正常推进。但「租约在」≠「持有者在」：持有者进程死后
-                # 租约键还有 ≤TTL 的尾巴（#50 双机实证：维护窗 SIGTERM 杀
-                # 持有者 → 节点失败重试的重投消息在 60s 被对端回收 → 命中
-                # 本分支被 ack → 非终态执行唯一重投载体被吞，执行停 running
-                # 退化成 2h zombie reap）。故 ack 前先经
-                # ``_lease_conflict_ack_safe`` 核实持有者仍在注册表：
-                # 在册（活持有者）→ ack；不在册（TTL 尾巴）→ 不 ack 留
-                # pending，等租约过期后下一轮 reclaim 正常取得租约从
-                # checkpoint 续跑（代价 ≤TTL+60s，远小于 2h reap）。
-                # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
-                # 那里**没人**能跑该任务，必须留给对端。
-                if self._lease_conflict_ack_safe(task.body):
-                    queue.note_lease_conflict()
+                if self._disk_guard_blocks_claim():
+                    self._wait_disk_guard()
+                    continue
+                self._sweep_residue_if_due(queue)
+                # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
+                # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
+                # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
+                # 上限 ≈1s，空轮询的 Redis 往返开销可忽略。
+                task = queue.read(block_ms=min(self.read_block_ms, 1_000))
+                if not task:
+                    continue
+
+                self._bump_active(+1)
+                acked = False
+                try:
+                    self._dispatch_task(task.body, delivery_count=task.delivery_count)
                     queue.ack(task.message_id)
                     acked = True
-                    logger.info(
-                        "任务 %s 执行被他人持租约（持有者在册，正常竞争），已 ack 释放避免烧 delivery: %s",
-                        task.message_id,
-                        exc,
-                    )
-                    body = task.body if isinstance(task.body, dict) else {}
-                    if body.get("type") == "resume":
-                        # plaita#53：resume 被 ack 丢弃 = **本次救援未生效**。上面
-                        # 那句 INFO 只说「消息已释放」，调用方（BFF/值守）看到的仍
-                        # 是「恢复请求已加入队列」而执行一行没推进——即工单里的
-                        # 「假受理」：值守无法区分「已救活」与「白等」。所以这里
-                        # 必须补一句显式的「未生效」+ 可判别的下一步。
-                        logger.warning(
-                            "任务 %s 是 resume（execution=%s, resume_type=%s），但推进租约"
-                            "被在册 worker 持有，本消息已 ack 丢弃——**本次 resume 未生效**"
-                            "（不产生任何节点活动）。若该执行的 node_timings / "
-                            "last_update_time 长时间不动，说明持有者已卡住：反复 resume 无效，"
-                            "需人工 cancel 后按需重开",
+                except TaskNotForThisWorker as exc:
+                    # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：**交接**
+                    # 给其他 worker——ack 原消息 + 重入队新副本（delivery 归 1）。
+                    # 不能只「留 pending」：对端会按 claim_min_idle_ms 反复 XCLAIM，
+                    # 每次让 deliveries +1，两 worker 下 5 轮即触顶 → 误死信
+                    # （2026-10-06 双机实测）。交接无损耗，且新副本仍会回到
+                    # 共享队列由亲和的 worker 领走。
+                    # **有界**：交接次数按 execution_id 计数（AFFINITY_HANDOVER_MAX），
+                    # 达上限即终态化 error——否则「重入队使 delivery 恒为 1」会让
+                    # 交接永无终止条件（2026-10-11 无限交接风暴，见
+                    # _handover_non_affine 与 _terminalize_handover_exhausted）。
+                    queue.note_lease_conflict()  # 复用「让给别人」计数口径
+                    self._handover_non_affine(task, queue, exc)
+                except ExecutionLeaseError as exc:
+                    # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
+                    # 持有者**活着**时 ack 释放本消息（2026-10-06 修）。
+                    #
+                    # 原行为「不 ack 留 pending」的实测问题：持有者跑长节点
+                    # （agentrun 分钟级）期间，对端每 claim_min_idle_ms(60s)
+                    # XCLAIM 一次，**每次让 Redis deliveries +1** → 烧到超限
+                    # 触发死信（实测 delivery 达 22/31），死信守卫虽正确拦下
+                    # （租约仍在→跳过）并最终重入队，但产生大量假死信污染 DLQ、
+                    # 浪费队列往返。
+                    #
+                    # 为何 ack 对活持有者是安全的：任务**没有丢**——它在持有者
+                    # 手里正常推进。但「租约在」≠「持有者在」：持有者进程死后
+                    # 租约键还有 ≤TTL 的尾巴（#50 双机实证：维护窗 SIGTERM 杀
+                    # 持有者 → 节点失败重试的重投消息在 60s 被对端回收 → 命中
+                    # 本分支被 ack → 非终态执行唯一重投载体被吞，执行停 running
+                    # 退化成 2h zombie reap）。故 ack 前先经
+                    # ``_lease_conflict_ack_safe`` 核实持有者仍在注册表：
+                    # 在册（活持有者）→ ack；不在册（TTL 尾巴）→ 不 ack 留
+                    # pending，等租约过期后下一轮 reclaim 正常取得租约从
+                    # checkpoint 续跑（代价 ≤TTL+60s，远小于 2h reap）。
+                    # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
+                    # 那里**没人**能跑该任务，必须留给对端。
+                    if self._lease_conflict_ack_safe(task.body):
+                        queue.note_lease_conflict()
+                        queue.ack(task.message_id)
+                        acked = True
+                        logger.info(
+                            "任务 %s 执行被他人持租约（持有者在册，正常竞争），已 ack 释放避免烧 delivery: %s",
                             task.message_id,
-                            body.get("execution_id"),
-                            body.get("resume_type"),
+                            exc,
                         )
-                else:
-                    queue.note_lease_conflict()
-                    logger.warning(
-                        "任务 %s 租约持有者已死，消息留 pending 等租约过期后重投，防重试载体被吞 (#50): %s",
-                        task.message_id,
-                        exc,
-                    )
-            except NodeExecutionRetryableError as exc:
-                # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
-                # 步 checkpoint，不 ack、不计 poison、留 pending 等回收——
-                # 重投间隔=claim_min_idle_ms（默认 60s），下轮 resume 从
-                # checkpoint 重跑失败节点。预算（重试计数键）已在处理函数
-                # 内判定，耗尽时已在处理函数内终态化 error，不会走到这里
-                # 无限重投。
-                queue.note_failed()
-                # 2026-10-09 修复（plaita#52 真因）：**显式重投**，不再把
-                # 重投的成败押在「消息仍在 PEL」上——同执行可能已被竞争者的
-                # ExecutionLeaseError 分支 ack 释放（"避免烧 delivery"），
-                # 此时 reclaim 无条目可回收，重投永不发生而执行又不终态化，
-                # 结果卡在 running 直到 zombie 线/人工 resume（实测 58 分钟）。
-                if self._requeue_retryable_failure(task, queue):
+                        body = task.body if isinstance(task.body, dict) else {}
+                        if body.get("type") == "resume":
+                            # plaita#53：resume 被 ack 丢弃 = **本次救援未生效**。上面
+                            # 那句 INFO 只说「消息已释放」，调用方（BFF/值守）看到的仍
+                            # 是「恢复请求已加入队列」而执行一行没推进——即工单里的
+                            # 「假受理」：值守无法区分「已救活」与「白等」。所以这里
+                            # 必须补一句显式的「未生效」+ 可判别的下一步。
+                            logger.warning(
+                                "任务 %s 是 resume（execution=%s, resume_type=%s），但推进租约"
+                                "被在册 worker 持有，本消息已 ack 丢弃——**本次 resume 未生效**"
+                                "（不产生任何节点活动）。若该执行的 node_timings / "
+                                "last_update_time 长时间不动，说明持有者已卡住：反复 resume 无效，"
+                                "需人工 cancel 后按需重开",
+                                task.message_id,
+                                body.get("execution_id"),
+                                body.get("resume_type"),
+                            )
+                    else:
+                        queue.note_lease_conflict()
+                        logger.warning(
+                            "任务 %s 租约持有者已死，消息留 pending 等租约过期后重投，防重试载体被吞 (#50): %s",
+                            task.message_id,
+                            exc,
+                        )
+                except NodeExecutionRetryableError as exc:
+                    # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
+                    # 步 checkpoint，不 ack、不计 poison、留 pending 等回收——
+                    # 重投间隔=claim_min_idle_ms（默认 60s），下轮 resume 从
+                    # checkpoint 重跑失败节点。预算（重试计数键）已在处理函数
+                    # 内判定，耗尽时已在处理函数内终态化 error，不会走到这里
+                    # 无限重投。
+                    queue.note_failed()
+                    # 2026-10-09 修复（plaita#52 真因）：**显式重投**，不再把
+                    # 重投的成败押在「消息仍在 PEL」上——同执行可能已被竞争者的
+                    # ExecutionLeaseError 分支 ack 释放（"避免烧 delivery"），
+                    # 此时 reclaim 无条目可回收，重投永不发生而执行又不终态化，
+                    # 结果卡在 running 直到 zombie 线/人工 resume（实测 58 分钟）。
+                    if self._requeue_retryable_failure(task, queue):
+                        acked = True
+                        logger.warning(
+                            "任务 %s 节点执行失败：已显式重投同体新副本（原 delivery=%s）: %s",
+                            task.message_id,
+                            task.delivery_count,
+                            exc,
+                        )
+                    else:
+                        logger.warning(
+                            "任务 %s 节点执行失败待重投 (delivery=%s): %s",
+                            task.message_id,
+                            task.delivery_count,
+                            exc,
+                        )
+                except ResumeProtocolError as exc:
+                    # resume 协议错误（#33）：执行状态与 resume_type 不匹配（如
+                    # continue 打在挂起执行上）。执行**未**终态化、保持原状——
+                    # 错误已可观测（状态行/日志），消息重投只会重复命中同一守卫
+                    # 且烧 delivery，ack 掉。非终态执行不需要重投载体：决议路径
+                    # （event/cancel/timeout resume）各有独立消息。
+                    queue.ack(task.message_id)
+                    queue.note_poison()
                     acked = True
                     logger.warning(
-                        "任务 %s 节点执行失败：已显式重投同体新副本（原 delivery=%s）: %s",
+                        "任务 %s resume 协议错误（执行保持原状不终态化）: %s",
                         task.message_id,
-                        task.delivery_count,
                         exc,
                     )
-                else:
-                    logger.warning(
-                        "任务 %s 节点执行失败待重投 (delivery=%s): %s",
-                        task.message_id,
-                        task.delivery_count,
-                        exc,
-                    )
-            except ResumeProtocolError as exc:
-                # resume 协议错误（#33）：执行状态与 resume_type 不匹配（如
-                # continue 打在挂起执行上）。执行**未**终态化、保持原状——
-                # 错误已可观测（状态行/日志），消息重投只会重复命中同一守卫
-                # 且烧 delivery，ack 掉。非终态执行不需要重投载体：决议路径
-                # （event/cancel/timeout resume）各有独立消息。
-                queue.ack(task.message_id)
-                queue.note_poison()
-                acked = True
-                logger.warning(
-                    "任务 %s resume 协议错误（执行保持原状不终态化）: %s",
-                    task.message_id,
-                    exc,
-                )
-            except ValueError as exc:
-                # 畸形消息：ack 掉避免 poison pill 无限重投
-                logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
-                queue.ack(task.message_id)
-                queue.note_poison()
-                acked = True
-            except Exception as exc:
-                # 兜底重投递路径（at-least-once）：不 ack，等超时回收。
-                # 刻意放在 except ValueError 之后——存储层抛出的
-                # ExecutionStateLoadError（读取瞬断/状态损坏，ReviewFix D1）
-                # 由此处理：消息留在 pending 重投，超过 max_deliveries 才
-                # 进 DLQ；绝不能像 ValueError 一样被当畸形消息 poison ack，
-                # 否则 Redis 抖动一次 = 挂起执行永久失去恢复机会。
-                queue.note_failed()
-                if task.delivery_count >= queue.max_deliveries:
-                    queue.dead_letter(
-                        task,
-                        reason=f"processing_failed:{type(exc).__name__}:{exc}"[:500],
-                    )
+                except ValueError as exc:
+                    # 畸形消息：ack 掉避免 poison pill 无限重投
+                    logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
+                    queue.ack(task.message_id)
+                    queue.note_poison()
                     acked = True
-                else:
-                    logger.error(
-                        "任务处理失败 %s (delivery=%s/%s)，未 ack（将重投）: %s",
-                        task.message_id,
-                        task.delivery_count,
-                        queue.max_deliveries,
-                        exc,
-                        exc_info=True,
-                    )
-            finally:
-                self._bump_active(-1)
-                if not acked:
-                    logger.debug("任务 %s 留在 pending 等待回收", task.message_id)
+                except Exception as exc:
+                    # 兜底重投递路径（at-least-once）：不 ack，等超时回收。
+                    # 刻意放在 except ValueError 之后——存储层抛出的
+                    # ExecutionStateLoadError（读取瞬断/状态损坏，ReviewFix D1）
+                    # 由此处理：消息留在 pending 重投，超过 max_deliveries 才
+                    # 进 DLQ；绝不能像 ValueError 一样被当畸形消息 poison ack，
+                    # 否则 Redis 抖动一次 = 挂起执行永久失去恢复机会。
+                    queue.note_failed()
+                    if task.delivery_count >= queue.max_deliveries:
+                        queue.dead_letter(
+                            task,
+                            reason=f"processing_failed:{type(exc).__name__}:{exc}"[:500],
+                        )
+                        acked = True
+                    else:
+                        logger.error(
+                            "任务处理失败 %s (delivery=%s/%s)，未 ack（将重投）: %s",
+                            task.message_id,
+                            task.delivery_count,
+                            queue.max_deliveries,
+                            exc,
+                            exc_info=True,
+                        )
+                finally:
+                    self._bump_active(-1)
+                    if not acked:
+                        logger.debug("任务 %s 留在 pending 等待回收", task.message_id)
+            except (RedisError, socket.timeout) as exc:
+                # #48：**消费循环级兜底，绝不退出进程**。上面的 read() 已就地吞掉
+                # 瞬时故障族；但循环体内还有 ack/handover/sweep 等 Redis 调用，
+                # 任何一处冒出的 Redis 异常若穿出本函数，就会经 run()（无 except）
+                # 走到 main() 的 sys.exit(1) —— worker 进程整体退出、在跑 run 的
+                # 监视线程全断，新实例启动又 XCLAIM 存量引发重投风暴。
+                # 故在**循环最外层**兜住：记 error + 退避 + continue，Redis 恢复
+                # 后同一循环继续消费（停机语义不变：while 条件仍在下一轮检查）。
+                # 注：`socket.timeout`（py3.10+ 即内建 TimeoutError）**不是**
+                # `RedisError` 的子类，必须与它并列 catch —— 否则从别处冒出的 socket
+                # 超时仍会杀死进程（我第一版就是漏了这一支，被守卫测试当场逮住）。
+                logger.error("消费循环遇到 Redis 故障（退避 %.1fs 后继续轮询）: %r",
+                             RECONNECT_BACKOFF_SECONDS, exc)
+                time.sleep(RECONNECT_BACKOFF_SECONDS)
+                continue
 
     def _bump_active(self, delta: int) -> None:
         """原子调整在跑任务数并刷新注册表 active_tasks（并发下多线程安全）。"""

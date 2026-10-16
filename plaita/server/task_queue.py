@@ -4,12 +4,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Union
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+
+# #48：Redis 的**瞬时**故障家族。redis-py 8.x 里 `TimeoutError` 与 `ConnectionError`
+# 是 `RedisError` 下**互不继承**的兄弟（实测 `issubclass(TimeoutError, ConnectionError)
+# == False`），socket 层超时（`socket.timeout`，py3.10+ 即内建 `TimeoutError`）也不在
+# 这两支之下 —— 所以「只吞 ConnectionError」的写法对超时类**天然失效**，读超时会从
+# `read()` 直穿到 `run()`（无 except）→ 进程 `sys.exit(1)`。
+# 瞬时故障 = 记 warning + 退避重试；**schema/权限类**仍按错误上抛（见 ensure_group）。
+_TRANSIENT_REDIS_ERRORS = (RedisConnectionError, RedisTimeoutError, socket.timeout)
 
 logger = logging.getLogger("plaita.server.task_queue")
 
@@ -165,8 +174,19 @@ class RedisStreamTaskQueue:
                 mkstream=True,
             )
         except Exception as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
+            if "BUSYGROUP" in str(exc):
+                return
+            if isinstance(exc, _TRANSIENT_REDIS_ERRORS):
+                # #48：连接/超时类**不得上抛**。原实现只放过 BUSYGROUP，其余一律
+                # raise —— 而 `_read_once()` 的第一行就是本方法，于是读超时绕开了
+                # `read()` 的 ConnectionError 兜底，直穿到 run() 把 worker 打死。
+                # 这里改为「记 warning + 返回」：本轮没建上组，下一轮轮询再试；
+                # Redis 恢复后自然成功。
+                logger.warning("建消费组失败（瞬时故障，留待下轮重试）: %r", exc)
+                return
+            # 非瞬时（NOAUTH/权限/schema/参数错）仍上抛：这是配置问题，
+            # 静默重试只会把真问题藏起来。
+            raise
 
     def enqueue(self, task: Dict[str, Any]) -> str:
         msg_id = enqueue_task(self.redis, self.stream_key, task)
@@ -181,11 +201,18 @@ class RedisStreamTaskQueue:
         """
         try:
             return self._read_once(block_ms)
-        except RedisConnectionError:
-            # 瞬断（DNS 解析失败/连接拒绝）不得炸穿 run() 主循环——2026-09 的
-            # 修复只容忍了 BLOCK 到期的 TimeoutError，漏了这一支：容器网络抖动
-            # /Redis 重启窗口内 worker 直接退出（e2e-chaos-redis.sh 实测复现）。
+        except _TRANSIENT_REDIS_ERRORS as exc:
+            # #48：**瞬时故障家族**（连接错 / redis 超时 / socket 超时）一律不得
+            # 炸穿 run() 主循环。原实现只写了 `except RedisConnectionError`：
+            #   * 2026-09 的修复容忍了 BLOCK 到期的 TimeoutError（那支在
+            #     `_read_once` 内部已就地返回 None），但**没有**容忍从
+            #     `ensure_group()`/`xclaim` 冒出来的超时——容器网络抖动 /
+            #     Redis 重启窗口里 worker 会直接退出（实测复现）。
+            #   * 又因 redis-py 8.x 里 TimeoutError 与 ConnectionError 互不继承，
+            #     即使写成 ConnectionError 也接不住超时类。
             # 退避后返回 None 继续轮询，Redis 恢复后自动重连恢复消费。
+            logger.warning("读队列失败（瞬时故障，退避 %.1fs 后重试）: %r",
+                           RECONNECT_BACKOFF_SECONDS, exc)
             time.sleep(RECONNECT_BACKOFF_SECONDS)
             return None
 
