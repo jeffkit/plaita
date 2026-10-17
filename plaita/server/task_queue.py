@@ -121,6 +121,7 @@ class RedisStreamTaskQueue:
         group_name: str = DEFAULT_CONSUMER_GROUP,
         consumer_name: str = "worker-1",
         claim_min_idle_ms: int = DEFAULT_CLAIM_MIN_IDLE_MS,
+        reclaim_window: int = 8,
         max_deliveries: int = DEFAULT_MAX_DELIVERIES,
         dlq_key: Optional[str] = None,
         dlq_max_len: Optional[int] = None,
@@ -137,6 +138,12 @@ class RedisStreamTaskQueue:
         self.group_name = group_name
         self.consumer_name = consumer_name
         self.claim_min_idle_ms = claim_min_idle_ms
+        # #196：reclaim 扫描游标（PEL 中上一轮扫到的 message id）。固定只看头 8
+        # 条时，前 8 条都是活跃租约就会把窗口占死，第 9 条起的真孤儿永不被看到。
+        # 每轮从游标处继续、到 PEL 尾部回绕；不新增 Redis 键，纯进程内状态。
+        self._reclaim_cursor: Optional[str] = None
+        # #196：扫描窗口大小（默认 8，仍有界；轮转保证不会饿死窗口外孤儿）。
+        self.reclaim_window = max(1, int(reclaim_window))
         self.max_deliveries = max(1, int(max_deliveries))
         self.dlq_key = dlq_key or dlq_stream_key(stream_key)
         # C4-1：DLQ 裁剪上限（构造参数优先，其次 env，最后默认值）
@@ -602,21 +609,32 @@ class RedisStreamTaskQueue:
         #47：XCLAIM 前先过活跃租约闸门（``reclaim_lease_guard``）——租约
         活跃的条目直接跳过（不 XCLAIM、不计数），排队/处理中的消息不再被
         反复抢占刷 ``times_delivered`` 触顶死信。未配守卫时零变化。
+
+        #196：扫描窗口按 ``_reclaim_cursor`` 轮转——每轮从上一轮扫到的 id
+        处继续（PEL 按 id 升序返回），到尾部回绕到头部。固定只取头 8 条时，
+        前 8 条长期活跃的租约会把窗口占死，第 9 条起的真孤儿永不进入扫描。
+        游标只是进程内状态（不新增 Redis 键）；XCLAIM 会把 idle 归零，故
+        游标自身在下一轮显式跳过，避免把自己的投递次数刷爆。
         """
+        window = self.reclaim_window
         try:
             pending = self.redis.xpending_range(
                 self.stream_key,
                 self.group_name,
-                min="-",
+                min=self._reclaim_cursor or "-",
                 max="+",
-                count=8,
+                count=window,
             )
         except Exception as exc:
             logger.debug("xpending_range reclaim scan failed: %s", _scrub_url_text(exc))
             return None
         if not pending:
+            # 到尾部（或 PEL 空）：下轮回到头部，保证有限轮内覆盖全部 pending。
+            self._reclaim_cursor = None
             return None
 
+        scanned_from = self._reclaim_cursor
+        last_scanned: Optional[str] = None
         for entry in pending:
             if isinstance(entry, dict):
                 msg_id = entry.get("message_id")
@@ -625,9 +643,14 @@ class RedisStreamTaskQueue:
             else:
                 msg_id, _consumer, idle, deliveries = entry[0], entry[1], entry[2], entry[3]
                 deliveries = int(deliveries or 1)
+            msg_id_str = _decode(msg_id)
+            last_scanned = msg_id_str
+            if msg_id_str == scanned_from:
+                # 游标自身：上一轮已处置/已判定，跳过（否则 idle 归零后会被
+                # 自己反复 XCLAIM，白白烧 delivery_count）。
+                continue
             if idle < self.claim_min_idle_ms:
                 continue
-            msg_id_str = _decode(msg_id)
             # #47：租约闸门在 XCLAIM 之前——抢走一条「执行还活着」的消息
             # 只会白白虚增投递次数（死信循环的根因），先探测再决定。
             if self.reclaim_lease_guard is not None:
@@ -645,6 +668,7 @@ class RedisStreamTaskQueue:
             if not claimed:
                 continue
             mid, fields = claimed[0]
+            claimed_id = _decode(mid)
             # delivery_count 语义（2026-10-03 澄清，勿「顺手修」成 +1）：
             # `deliveries` = XCLAIM 前的 times_delivered（已完成派发次数），
             # 本次 XCLAIM 是第 deliveries+1 次投递，故这里上报的是
@@ -655,7 +679,7 @@ class RedisStreamTaskQueue:
             # 阈值判据与可观测透传（FlowWorker 节点重试预算另用 Redis 计数
             # 键，不依赖它），报告展示时理解为 attempt-1 即可。
             task = self._task_from_fields(
-                _decode(mid), fields, delivery_count=max(deliveries, 1)
+                claimed_id, fields, delivery_count=max(deliveries, 1)
             )
             if task.delivery_count >= self.max_deliveries:
                 if self._guard_allows_dead_letter(task):
@@ -663,6 +687,11 @@ class RedisStreamTaskQueue:
                         task,
                         reason=f"max_deliveries={self.max_deliveries}",
                     )
+                self._reclaim_cursor = claimed_id
                 continue
+            self._reclaim_cursor = claimed_id
             return task
+        # 整窗扫完：短窗说明已到 PEL 尾部，下轮回绕到头部；整窗则从窗口尾
+        # 继续（窗口尾条目下轮作为游标被跳过，实际推进 7 条新条目）。
+        self._reclaim_cursor = None if len(pending) < window else last_scanned
         return None

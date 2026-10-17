@@ -1,0 +1,40 @@
+diff --git a/plaita/server/task_queue.py b/plaita/server/task_queue.py
+index 9cc1cc4..f8a5c51 100644
+--- a/plaita/server/task_queue.py
++++ b/plaita/server/task_queue.py
+@@ -621,9 +621,9 @@ class RedisStreamTaskQueue:
+             pending = self.redis.xpending_range(
+                 self.stream_key,
+                 self.group_name,
+-                min=self._reclaim_cursor or "-",
++                min="-",
+                 max="+",
+-                count=window,
++                count=8,
+             )
+         except Exception as exc:
+             logger.debug("xpending_range reclaim scan failed: %s", _scrub_url_text(exc))
+@@ -633,7 +633,7 @@ class RedisStreamTaskQueue:
+             self._reclaim_cursor = None
+             return None
+ 
+-        scanned_from = self._reclaim_cursor
++        scanned_from = None  # MUTANT: fixed head-8, no cursor
+         last_scanned: Optional[str] = None
+         for entry in pending:
+             if isinstance(entry, dict):
+@@ -687,11 +687,11 @@ class RedisStreamTaskQueue:
+                         task,
+                         reason=f"max_deliveries={self.max_deliveries}",
+                     )
+-                self._reclaim_cursor = claimed_id
++                self._reclaim_cursor = None  # MUTANT
+                 continue
+-            self._reclaim_cursor = claimed_id
++            self._reclaim_cursor = None  # MUTANT
+             return task
+         # 整窗扫完：短窗说明已到 PEL 尾部，下轮回绕到头部；整窗则从窗口尾
+         # 继续（窗口尾条目下轮作为游标被跳过，实际推进 7 条新条目）。
+-        self._reclaim_cursor = None if len(pending) < window else last_scanned
++        self._reclaim_cursor = None  # MUTANT
+         return None

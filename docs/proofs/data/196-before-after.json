@@ -1,0 +1,106 @@
+{
+  "issue": 196,
+  "title": "fix(worker): reclaim scan window rotation (cursor + wrap-around)",
+  "generated_at": "2026-10-17T21:00:28.661264+00:00",
+  "base_head": "357f2cd74ad97f1e073b5420bfb8a18458f8acc1",
+  "fix_commit_subject": "fix(worker): #196 reclaim 扫描窗口按游标轮转——活跃租约占满头 8 条时孤儿不再饿死",
+  "carrier_note": "remote/p1-batch-186-189-194-196 branch absent; gist 46a9fd w32.patch (batch of #186/#189/#194/#196). Only the task_queue.py #196 cursor hunk + test_issue196_reclaim_rotation.py were used; #186/#189/#194 were not applied.",
+  "before": {
+    "plaita_file": "/tmp/wt196-before/plaita/__init__.py",
+    "python": "3.13.3",
+    "nine": {
+      "reclaimed": [],
+      "pending_total": 9
+    },
+    "twenty": {
+      "reclaimed": [],
+      "rounds": 10,
+      "active_times_delivered": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "pending_total": 20
+    }
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "nine": {
+      "reclaimed": [
+        "e8"
+      ],
+      "pending_total": 9
+    },
+    "twenty": {
+      "reclaimed": [
+        "e15",
+        "e16",
+        "e17",
+        "e18",
+        "e19"
+      ],
+      "rounds": 7,
+      "active_times_delivered": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "pending_total": 20
+    }
+  },
+  "test_runs": {
+    "targeted": "5 passed",
+    "with_issue47_and_task_queue": "33 passed",
+    "unit_fast": "7740 passed, 11 skipped, 13 deselected, 3429 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8040 passed, 15 skipped, 3429 subtests, coverage 93.83% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main 357f2cd latest completed ci.yml run"
+  },
+  "negative_control": {
+    "mutation": "fixed xpending_range(min='-', count=8), cursor always None",
+    "diff_sha256": "c66e7f7f0770e5184ceee57fbc8430beb02d033da585df115a157da01e83624d",
+    "test_file": {
+      "failed": 3,
+      "passed": 2
+    },
+    "failed": [
+      "test_issue_repro_ninth_orphan_is_reclaimed",
+      "test_twenty_pending_fifteen_active_five_orphans_all_reclaimed",
+      "test_reclaim_window_is_configurable"
+    ],
+    "still_green": [
+      "test_active_entries_are_never_xclaimed",
+      "test_single_active_pending_stays_untouched_across_rounds"
+    ]
+  },
+  "relation": {
+    "issue47": "lease guard polarity and times_delivered semantics unchanged; its tests stay green",
+    "issue186_189_194": "present in the same gist batch but excluded from this commit (boundary: only #196 reclaim surface)"
+  }
+}
