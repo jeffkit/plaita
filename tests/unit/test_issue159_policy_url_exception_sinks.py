@@ -348,18 +348,21 @@ class TestGuardCoversTheVerifiedMissFamily:
         )
 
     def test_probe_inline_getlogger_from_real_source_reddens_then_greens(self, tmp_path):
-        """探针由**真实源文件**（``server/log_handler.py`` 的 inline 调用）改一处生成。"""
-        source_path = PLAITA_DIR / "server" / "log_handler.py"
+        """探针由**真实源文件**（``node/end.py`` 的 inline 调用——#84 后 log_handler 的
+        flush 告警已迁专用 ``_audit_logger``，inline 形态样本改用现存位点）改一处生成。"""
+        source_path = PLAITA_DIR / "node" / "end.py"
         real_source = source_path.read_text(encoding="utf-8")
-        fixed_line = 'logging.getLogger(__name__).warning("日志刷新失败: %s", e)'
-        assert fixed_line in real_source, "前提失效：log_handler.py 里没有该 inline 调用"
+        fixed_line = "logging.getLogger(__name__).warning("
+        assert fixed_line in real_source, "前提失效：node/end.py 里没有该 inline 调用"
 
-        # 真实源本身干净（e 不是 URL 名）
+        # 真实源本身干净（id/result_type 都不是 URL 名）
         assert _log_sites(real_source, filename=str(source_path)) == []
-        # 只把 e 换成 URL 名 ⇒ 守卫必须看见 inline 形态
-        probe = tmp_path / "probe_log_handler.py"
+        # 只在参数表注入一个 URL 名 ⇒ 守卫必须看见 inline 形态
+        probe = tmp_path / "probe_end_node.py"
         probe.write_text(
-            real_source.replace(fixed_line, fixed_line.replace(", e)", ", redis_url)"), 1),
+            real_source.replace(
+                'values.get("id", "?"), result_type,',
+                'values.get("id", "?"), result_type, redis_url,', 1),
             encoding="utf-8",
         )
         assert _log_sites(probe.read_text(encoding="utf-8"), filename=str(probe)), (
