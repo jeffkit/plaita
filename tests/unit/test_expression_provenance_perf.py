@@ -26,6 +26,8 @@ import pathlib
 import time
 import unittest
 
+import pytest
+
 import plaita.core.expression_parser as parser_mod
 from plaita.core.context import ExecutionContext
 from plaita.core.expression_parser import ExpressionParser
@@ -190,6 +192,7 @@ class TestExpressionPerfConstantFactorBudget(unittest.TestCase):
                                 iterations=iterations, repeats=repeats)
         return reference, measured, measured / reference
 
+    @pytest.mark.timeout(900)  # 预算测量含 #203 数据面白名单检查开销，CI 2 核超 150s 默认门（marker 覆盖不动判据）
     def test_mutator_paths_stay_within_the_checked_in_budget(self):
         reference, _ref_us, _ = self._ratio(_REFERENCE)
         self.assertGreater(reference, 0.0)
