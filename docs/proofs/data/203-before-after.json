@@ -1,0 +1,403 @@
+{
+  "issue": 203,
+  "title": "security(expr): mapping containers are data-only (mapping value face + $F.get bypass)",
+  "generated_at": "2026-10-17T17:49:25.178012+00:00",
+  "base_head": "d66db5d2e13a945ea7bb1dc527a581ec449b469b",
+  "fix_commit_subject": "fix(security): #203 映射容器只允许数据——封堵映射值面与 $F.get 旁路（P0）",
+  "before": {
+    "plaita_file": "/tmp/wt203-before/plaita/__init__.py",
+    "python": "3.13.3",
+    "cases": [
+      {
+        "expr": "$NODE.d.k",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$INPUT.x",
+        "ok": true,
+        "type": "str",
+        "value": "input-x"
+      },
+      {
+        "expr": "$F.get($NODE.d, 'k')",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$NODE.h.env",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$NODE.h.env.HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$NODE.d.env",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$NODE.d.env.HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$NODE.cm.SECRET",
+        "ok": true,
+        "type": "str",
+        "value": "s1"
+      },
+      {
+        "expr": "$NODE.ud.SECRET",
+        "ok": true,
+        "type": "str",
+        "value": "s2"
+      },
+      {
+        "expr": "$NODE.mproxy.SECRET",
+        "ok": true,
+        "type": "str",
+        "value": "s3"
+      },
+      {
+        "expr": "$NODE.lst[0]",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$NODE.lst[0].HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$F.get($NODE.h.env, 'HOME')",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$F.getDictValue($NODE.h.env, 'HOME')",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$F.get($NODE.cm, 'SECRET')",
+        "ok": true,
+        "type": "str",
+        "value": "s1"
+      },
+      {
+        "expr": "$F.get($NODE.d, 'env')",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$F.get($F.probe_env(), 'HOME')",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$NODE.pm.SECRET",
+        "ok": true,
+        "type": "str",
+        "value": "s",
+        "poison_reads": 1
+      },
+      {
+        "expr": "$NODE.d.pm",
+        "ok": true,
+        "type": "PoisonMapping",
+        "reads": 1,
+        "poison_reads": 1
+      },
+      {
+        "expr": "$F.get($NODE.d, 'pm')",
+        "ok": true,
+        "type": "PoisonMapping",
+        "reads": 2,
+        "poison_reads": 2
+      },
+      {
+        "expr": "$INPUT.x",
+        "ok": true,
+        "type": "str",
+        "value": "input-x"
+      },
+      {
+        "expr": "$F.get($INPUT, 'x')",
+        "ok": true,
+        "type": "str",
+        "value": "input-x"
+      },
+      {
+        "expr": "$ENV.HOME",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$ENV.HOME",
+        "ok": true,
+        "type": "str",
+        "value": "exposed-home"
+      },
+      {
+        "expr": "$NODE.od.k",
+        "ok": true,
+        "type": "str",
+        "value": "OVERRIDE",
+        "override_reads": 1
+      },
+      {
+        "expr": "$F.get($NODE.od, 'k')",
+        "ok": true,
+        "type": "str",
+        "value": "OVERRIDE",
+        "override_reads": 2
+      }
+    ]
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "cases": [
+      {
+        "expr": "$NODE.d.k",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$INPUT.x",
+        "ok": true,
+        "type": "str",
+        "value": "input-x"
+      },
+      {
+        "expr": "$F.get($NODE.d, 'k')",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$NODE.h.env",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$NODE.h.env.HOME",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$NODE.d.env",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.d.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$NODE.d.env.HOME",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.d.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$NODE.cm.SECRET",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.cm' read a non-data mapping container of type 'ChainMap': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict firs"
+      },
+      {
+        "expr": "$NODE.ud.SECRET",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.ud' read a non-data mapping container of type 'UserDict': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict firs"
+      },
+      {
+        "expr": "$NODE.mproxy.SECRET",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.mproxy' read a non-data mapping container of type 'mappingproxy': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain d"
+      },
+      {
+        "expr": "$NODE.lst[0]",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.lst[0]' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict "
+      },
+      {
+        "expr": "$NODE.lst[0].HOME",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.lst[0]' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict "
+      },
+      {
+        "expr": "$F.get($NODE.h.env, 'HOME')",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$F.getDictValue($NODE.h.env, 'HOME')",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$F.get($NODE.cm, 'SECRET')",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.cm' read a non-data mapping container of type 'ChainMap': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict firs"
+      },
+      {
+        "expr": "$F.get($NODE.d, 'env')",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$F.get(...)' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$F.get($F.probe_env(), 'HOME')",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$F.get(...)' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict f"
+      },
+      {
+        "expr": "$NODE.pm.SECRET",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.pm' read a non-data mapping container of type 'PoisonMapping': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict",
+        "poison_reads": 0
+      },
+      {
+        "expr": "$NODE.d.pm",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.d.pm' read a non-data mapping container of type 'PoisonMapping': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain di",
+        "poison_reads": 0
+      },
+      {
+        "expr": "$F.get($NODE.d, 'pm')",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$F.get(...)' read a non-data mapping container of type 'PoisonMapping': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain d",
+        "poison_reads": 0
+      },
+      {
+        "expr": "$INPUT.x",
+        "ok": true,
+        "type": "str",
+        "value": "input-x"
+      },
+      {
+        "expr": "$F.get($INPUT, 'x')",
+        "ok": true,
+        "type": "str",
+        "value": "input-x"
+      },
+      {
+        "expr": "$ENV.HOME",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$ENV.HOME",
+        "ok": true,
+        "type": "str",
+        "value": "exposed-home"
+      },
+      {
+        "expr": "$NODE.od.k",
+        "ok": true,
+        "type": "str",
+        "value": "real",
+        "override_reads": 0
+      },
+      {
+        "expr": "$F.get($NODE.od, 'k')",
+        "ok": true,
+        "type": "str",
+        "value": "real",
+        "override_reads": 0
+      }
+    ]
+  },
+  "test_runs": {
+    "targeted": "188 passed, 13 subtests passed",
+    "unit_fast": "7724 passed, 11 skipped, 13 deselected, 3429 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8024 passed, 15 skipped, 3429 subtests, coverage 93.82% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main d66db5d latest completed ci.yml run"
+  },
+  "negative_control": {
+    "container_gate_disabled": {
+      "mutation": "is_mapping_like() returns False",
+      "diff_sha256": "f77650fe8d362a34c3937f730a3f5b17bde60b54f3dac296ac3bb2cb69afa97a",
+      "issue203_file": {
+        "failed": 13,
+        "passed": 6
+      },
+      "data_positive_survivors": [
+        "test_data_mappings_stay_readable",
+        "test_checkpoint_state_backed_input_stays_readable",
+        "test_dict_subclass_overrides_are_not_executed",
+        "test_env_allowlist_semantics_unchanged",
+        "test_flow_data_attribute_still_works",
+        "test_docs_quote_issue203_message_verbatim"
+      ],
+      "issue133_file": {
+        "passed": 76
+      },
+      "issue55_file": {
+        "passed": 84
+      }
+    },
+    "code_object_gate_disabled": {
+      "mutation": "the two _is_code_object gates in _get_attr are disabled",
+      "diff_sha256": "0fa456b0fc4f9e7d55e2c1269d867e931d0a93c196e0ca78d8421bc95c767d82",
+      "issue133_file": {
+        "failed": 41,
+        "passed": 35
+      },
+      "issue203_file": {
+        "passed": 19
+      },
+      "note": "The #133 red list is identical to the earlier 42/34 run except test_error_does_not_echo_values, which now passes because the #203 result gate independently refuses the _Environ even with the #133 gate disabled (defence in depth, not a relaxation)."
+    }
+  },
+  "compatibility": {
+    "allowed": [
+      "real dict and subclasses (C slots)",
+      "CheckpointState",
+      "_LazyRootSnapshot"
+    ],
+    "refused": [
+      "os._Environ",
+      "ChainMap",
+      "UserDict",
+      "MappingProxyType",
+      "custom Mapping",
+      "duck-typed __getitem__+get"
+    ],
+    "dict_subclass_override_note": "A dict subclass's overridden get/__getitem__ is not executed; reads go through dict.get. Before this fix the override returned 'OVERRIDE'; after it returns the real storage value 'real'."
+  }
+}

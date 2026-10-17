@@ -145,6 +145,48 @@ expression path '$NODE.h.os' traverses a non-data object of type 'module': attri
     传递敏感模块 / 对象。详见[迁移指南](../reference/migration-guide.md) 的
     #55 / #133 条目。
 
+### 映射遍历：容器必须是数据（安全限制）
+
+#133 关闭**属性**遍历后，映射面仍可能把 live 容器当数据读：`$NODE.h.env` /
+`$NODE.d.env` 返回 live `os._Environ`，随后的 `.HOME` 走映射键；
+`$F.get($NODE.h.env, 'HOME')` 也直接读它。plaita#203 把**映射容器**也收紧为
+只允许数据：
+
+| 表达式 | 结果 |
+|--------|------|
+| `$NODE.d.k`（`d` 是 dict） | 键 `k` 的值 |
+| `$NODE.d._foo`（`d` 是 dict） | 键 `_foo` 的值——**键**不受限 |
+| `$NODE.ds.k`（`ds` 是只加方法的 dict 子类） | 键 `k` 的真实存储值；覆写的 `get`/`__getitem__` 不执行 |
+| `$NODE.h.env`（`env` 是 `os.environ`） | **`ValueError`**：非数据映射容器（`plaita#203`） |
+| `$NODE.d.env` / `$NODE.d.env.HOME` | **`ValueError`**：在 `.env` 就拒绝，环境变量不会被读取 |
+| `$NODE.lst[0]`（`lst[0]` 是 `os.environ`） | **`ValueError`**：索引结果同样是值位置 |
+| `$F.get($NODE.h.env, 'HOME')` / `$F.getDictValue(...)` | **`ValueError`**：`$F.get` 旁路同样拒绝 |
+| `$F.get($NODE.d, 'env')` | **`ValueError`**：返回的 live 容器同样拒绝 |
+| `$F.get($NODE.d, 'k')` | 键 `k` 的值——数据 dict 不变 |
+| `$INPUT.x`（dict / `CheckpointState`） | 值——引擎状态是数据 |
+| `$ENV.HOME` | 仅当 `exposeEnv` 显式包含 `HOME` 时可读（语义未改） |
+
+规则：
+
+* **允许**：真实 `dict`（含子类）与引擎自有状态 mapping（`CheckpointState`
+  以及 `$PARENT` 的内部惰性快照）。dict 子类走 `dict.get` / `dict.keys` 的
+  C 槽，覆写的读写方法不执行；引擎状态走自己的 `get`。
+* **拒绝**：`os.environ`、`collections.ChainMap`、`collections.UserDict`、
+  `types.MappingProxyType`、自定义 `Mapping`、duck-typed `__getitem__` + `get`
+  的 host 对象——在**入口（作基座）/ 结果值 / 索引结果 / 根值**四个位置都抛
+  具名 `ValueError`，在读取任何键 / 值之前终止。
+* **`$F.get` / `$F.getDictValue`**：第一个实参是 host mapping-like 时，在输入
+  测量和 callee 之前拒绝；返回值是 host mapping-like 时也拒绝。
+* **兼容性**：`UserDict` / `ChainMap` / `MappingProxyType` / 自定义 `Mapping`
+  请先转成 plain dict（如 `dict(value)`），或改用 `$ENV` 显式暴露；只加方法的
+  `dict` 子类保持可用。
+
+运行时错误文案（**逐字**，与代码、迁移指南一致）：
+
+```
+expression path '$NODE.h.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict first.
+```
+
 ### 取数据原文：`$NODE.raw.<节点>…`
 
 `$NODE.<节点>.<字段>` 对**看起来像表达式/模板**的字符串字段值会按历史语义重新求值

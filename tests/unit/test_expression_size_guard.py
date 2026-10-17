@@ -55,6 +55,7 @@ from unittest import TestCase, skipUnless
 
 import plaita.core.expression as expr_mod
 import plaita.core.expression_parser as parser_mod
+import plaita.core._data_mapping as data_mapping_mod
 from plaita.core.expression import (
     _BYTEARRAY_REPR_PREFIX,
     ExpressionRegistry,
@@ -3255,6 +3256,7 @@ _RENDER_METHOD_NAMES = frozenset({
 _LIBRARY_SOURCES = {
     "plaita/core/expression.py": expr_mod.__file__,
     "plaita/core/expression_parser.py": parser_mod.__file__,
+    "plaita/core/_data_mapping.py": data_mapping_mod.__file__,
 }
 
 # (模块, 函数, 算子, 源码原文) -> (处置, 具名上界调用或 None, 理由)
@@ -3370,6 +3372,12 @@ _RENDER_SITES = {
      "type_name=type(value).__name__)"): (
         "excluded", None,
         "错误消息模板（plaita#133）：path 是解析器 token（str），type_name 是 "
+        "type(value).__name__（短类名），不插值对象内容；消息 ≤ 固定模板 + 路径长度"),
+    ("plaita/core/_data_mapping.py", "reject_non_data_mapping", "method:format",
+     "NON_DATA_MAPPING_TEMPLATE.format( path=path, "
+     "type_name=type(value).__name__)"): (
+        "excluded", None,
+        "错误消息模板（plaita#203）：path 是表达式 token（str），type_name 是 "
         "type(value).__name__（短类名），不插值对象内容；消息 ≤ 固定模板 + 路径长度"),
     ("plaita/core/expression_parser.py", "_eval_template", "method:join",
      '"".join(out)'): (
@@ -3613,6 +3621,8 @@ _FSTRING_PARAM_SITES = {
         '本模块自造的计数/标签/算子名（常量级或受输入串约束）',
     ('plaita/core/expression.py', '_safe_int_text#local', '{bits}'):
         '本模块自造的计数/标签/算子名（常量级或受输入串约束）',
+    ('plaita/core/expression.py', '_safe_mapping_get#param', '{func_name}'):
+        '引擎自造的算子名（get / getDictValue 静态字面量），非运行期结果数据',
     ('plaita/core/expression.py', '_size_refusal#param', '{unit}'):
         '本模块自造的计数/标签/算子名（常量级或受输入串约束）',
     ('plaita/core/expression.py', '_size_refusal#param', '{what}'):

@@ -11,12 +11,15 @@
 
 1. **属性路径**（``getattr`` 回退）：任何 ``_`` 开头的段名一律抛 ``ValueError``
    ——硬报错，不返回 ``None``（返回 ``None`` 会把越权尝试伪装成"键不存在"）；
-2. **映射路径**（``dict`` / ``__getitem__`` + ``get``）：段名是**键**不是属性，
-   单下划线键保持可读（``$NODE._n2`` 这类 builder 生成的节点 id、刻意存
-   ``_foo`` 键的 dict）；``__`` 开头的**路径段**同样拒绝——路径形态无法与属性
-   遍历尝试区分，静默 ``None`` 只会再造一个"看起来被挡住了"的假象。该键本身仍是
-   普通数据：显式映射辅助 ``$F.get`` / ``$F.getDictValue`` / ``$F.keys`` 照旧可读
-   （**刻意的不对称**，见下方 ``test_dunder_key_asymmetry_...`` 与 MIGRATION.md）。
+2. **映射路径**（真实 ``dict``（含子类）/ 引擎 ``CheckpointState``）：段名是
+   **键**不是属性，单下划线键保持可读（``$NODE._n2`` 这类 builder 生成的节点 id、
+   刻意存 ``_foo`` 键的 dict）；``__`` 开头的**路径段**同样拒绝——路径形态无法与
+   属性遍历尝试区分，静默 ``None`` 只会再造一个"看起来被挡住了"的假象。该键本身
+   仍是普通数据：显式映射辅助 ``$F.get`` / ``$F.getDictValue`` / ``$F.keys`` 照旧
+   可读（**刻意的不对称**，见下方 ``test_dunder_key_asymmetry_...`` 与
+   MIGRATION.md）。非 dict 的 host mapping-like（``_Environ`` / ``ChainMap`` /
+   ``UserDict`` / 自定义 ``Mapping``）在**映射容器**这一层就被 plaita#203 具名拒绝
+   （见 ``test_issue203_data_mapping_traversal.py``）。
 
 异常类型取 ``ValueError``：issue 明确建议，且表达式层已有同类
 （``ExpressionRegistry.register``）。消息只点名被拒段名与原因，不回显对象，且
@@ -97,17 +100,16 @@ class LoudRepr:
         return "<SENTINEL-INTERNAL-OBJECT>"
 
 
-class MappingLike:
-    """非 dict 的映射（``__getitem__`` + ``get``）——数据路径，键不是属性。"""
+class DataDict(dict):
+    """**只加方法**的 dict 子类——数据面，键不是属性（#203 兼容性正控）。
 
-    def __init__(self, data):
-        self._data = dict(data)
+    非 dict 的 host mapping-like（``_Environ`` / ``ChainMap`` / ``UserDict`` /
+    自定义 ``Mapping``）已由 #203 在映射路径上具名拒绝，见
+    ``test_issue203_data_mapping_traversal.py``。
+    """
 
-    def __getitem__(self, key):
-        return self._data[key]
-
-    def get(self, key, default=None):
-        return self._data.get(key, default)
+    def helper(self):
+        return "helper"
 
 
 def _context():
@@ -119,7 +121,7 @@ def _context():
             "loud": LoudRepr(),
             "lst": [Payload()],
             "d": {"x": 1, "_k": "kept"},
-            "map": MappingLike({"_k": "kept", "x": 1}),
+            "map": DataDict({"_k": "kept", "x": 1}),
             "_n2": "node-id-value",
         },
         "$INPUT": {"_k": "kept", "x": 1},
@@ -370,7 +372,7 @@ def test_get_attr_mapping_path_allows_single_underscore_key():
     assert _get_attr({"k": "v"}, "missing") is None
     assert _get_attr({"k": "v"}, "_k") is None          # 键缺失→None，不是拒绝
     assert _get_attr({"_k": "v"}, "_k") == "v"
-    assert _get_attr(MappingLike({"_k": "v"}), "_k") == "v"
+    assert _get_attr(DataDict({"_k": "v"}), "_k") == "v"
 
 
 @pytest.mark.parametrize("name", DUNDERS)
@@ -379,7 +381,7 @@ def test_get_attr_mapping_path_rejects_dunder_key(name):
         _get_attr({"x": 1}, name)
     assert repr(name) in str(excinfo.value)
     with pytest.raises(ValueError):
-        _get_attr(MappingLike({"x": 1}), name)
+        _get_attr(DataDict({"x": 1}), name)
 
 
 @pytest.mark.parametrize("name", DUNDERS + PRIVATE_NAMES)

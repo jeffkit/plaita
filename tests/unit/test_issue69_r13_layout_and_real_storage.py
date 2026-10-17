@@ -526,7 +526,12 @@ class TestIssue69R13MappingViewReadsRealStorage(unittest.TestCase):
             ctx.set_state("$VAR", ctx.evaluate({}))
             with self.assertRaises(Exception) as cm:   # noqa: BLE001 - 判决即探针
                 ctx.evaluate("$F.set($VAR,'k',$F.keys($INPUT.d))")
-        self.assertIn("spoofed __class__", str(cm.exception))
+        message = str(cm.exception)
+        # DSL 面先经过 #203 的容器闸（真实类型判定），伪造的 __class__ 被更早
+        # 具名拒绝；直调 _engine_mapping_view 的 #69 spoofed 拒绝仍由上面钉住。
+        self.assertTrue("plaita#203" in message or "plaita#69" in message)
+        if "plaita#203" not in message:
+            self.assertIn("spoofed __class__", message)
 
     def test_raising_getattribute_probe_is_named_not_bare_runtimeerror(self):
         """``isinstance`` 回落读 ``__class__`` 时宿主抛异常 ⇒ 具名拒绝，不漏裸 ``RuntimeError``。

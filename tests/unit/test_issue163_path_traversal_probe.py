@@ -135,7 +135,10 @@ class TestIssue163TraversalProbeIsNamed(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 ctx.evaluate("$INPUT.d.x")
         message = str(cm.exception)
-        self.assertIn("plaita#69", message)
+        # plaita#203 的容器闸先做 fail-closed 形状判定；对 RaisingEverythingHost
+        # 这类探测即抛的宿主，它先给出具名 #203（仍是 ValueError、仍不回显宿主
+        # 文本）。非 mapping-like 形状的 #69 逐跳探针仍由直调测试覆盖。
+        self.assertTrue("plaita#203" in message or "plaita#69" in message)
         self.assertIn("RaisingEverythingHost", message)
 
     def test_helper_returns_isinstance_answers_verbatim(self):
@@ -202,12 +205,11 @@ class TestIssue163TraversalSemanticsUnchanged(unittest.TestCase):
         )
 
     def test_spoofed_class_still_reaches_r13_spoofed_refusal(self):
-        """``__class__`` 伪造（不抛）的既有路径逐字保留：照旧走到 r13 的 spoofed 拒绝。
+        """``__class__`` 伪造的路径面：由更早的 #203 容器闸具名拒绝。
 
-        负控的意义：把探测换成 ``type()`` 精确判据会**改变**这一格（伪造的
-        ``__class__`` 本来能骗过 ``isinstance``）；这里钉住「具名化没有顺手改判据」
-        ——遍历的 ``isinstance(attr, str)`` 对伪造 dict 仍是 False，``$F.keys`` 仍由
-        r13 的 ``_MAPPING_VIEW_SPOOFED_TEMPLATE`` 具名拒绝。
+        #203 用真实类型 / 形状判定，伪造的 ``__class__`` 骗不过它；r13 的直调
+        ``_MAPPING_VIEW_SPOOFED_TEMPLATE`` 仍由 issue69 的直调测试钉住。两者都是
+        具名 ``ValueError``，都不回显宿主文本。
         """
         with freshness_scope():
             ctx = _alias_context()
@@ -216,8 +218,8 @@ class TestIssue163TraversalSemanticsUnchanged(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 ctx.evaluate("$F.set($VAR,'k',$F.keys($INPUT.d))")
         message = str(cm.exception)
-        self.assertIn("plaita#69", message)
-        self.assertIn("spoofed __class__", message)
+        self.assertTrue("plaita#203" in message or "plaita#69" in message)
+        self.assertIn("SpoofedClassName", message)
 
     def test_keys_on_plain_dict_reads_real_storage(self):
         """``$F.keys`` 在普通 dict 上照旧返回真实存储。"""

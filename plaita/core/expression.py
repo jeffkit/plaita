@@ -22,6 +22,12 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 from plaita.core.url_redaction import _redact_env_value
+from ._data_mapping import (
+    is_data_mapping,
+    is_mapping_like,
+    is_real_dict,
+    reject_non_data_mapping,
+)
 
 logger = logging.getLogger("plaita.core.expression")
 
@@ -3070,11 +3076,38 @@ def _fn_insertListItem(a, b, c): return a[:b] + [c] + a[b:]
 def _fn_keys(a): return a.keys()
 def _fn_values(a): return a.values()
 def _fn_items(a): return a.items()
-def _fn_get(a, b, c=None): return a.get(b, c)
+
+
+def _safe_mapping_get(a, b, c, func_name):
+    """plaita#203: ``$F.get`` / ``$F.getDictValue`` read only data mappings.
+
+    Real ``dict`` (subclasses included) is read through ``dict.get``'s C slot, so
+    a subclass's overridden ``get``/``__getitem__``/``__getattribute__`` is never
+    executed (same #69 r13 discipline as ``$F.keys``/``values``/``items``).  The
+    engine's ``CheckpointState`` keeps its engine-owned ``get``.  A host
+    mapping-like object (``os.environ`` / ``ChainMap`` / ``UserDict`` / custom
+    ``Mapping``) is refused by name before any key is read.  A non-mapping object
+    with a ``get`` method keeps the historical ``a.get`` behaviour.
+    """
+    if not is_data_mapping(a) and is_mapping_like(a):
+        reject_non_data_mapping(a, f"$F.{func_name}(...)")
+    if is_real_dict(a):
+        value = dict.get(a, b, c)
+    else:
+        value = a.get(b, c)
+    # The returned value is a value position too: a data dict may hold
+    # os.environ under a key (`$F.get($NODE.d, 'env')`), and the key read itself
+    # must not hand the live container back.  Data dicts / CheckpointState pass.
+    if not is_data_mapping(value) and is_mapping_like(value):
+        reject_non_data_mapping(value, f"$F.{func_name}(...)")
+    return value
+
+
+def _fn_get(a, b, c=None): return _safe_mapping_get(a, b, c, "get")
 def _fn_set(a, b, c): return a.update({b: c})
 def _fn_delete(a, b): return a.pop(b)
 def _fn_clear(a): return a.clear()
-def _fn_getDictValue(a, b, c=None): return a.get(b, c)
+def _fn_getDictValue(a, b, c=None): return _safe_mapping_get(a, b, c, "getDictValue")
 def _fn_delDictValue(a, b): return a.pop(b)
 def _fn_setDictValue(a, b, c): return a.update({b: c})
 def _fn_getDictKeys(a): return a.keys()

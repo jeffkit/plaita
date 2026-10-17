@@ -1,0 +1,12 @@
+diff --git a/plaita/core/_data_mapping.py b/plaita/core/_data_mapping.py
+index f261479..17fa397 100644
+--- a/plaita/core/_data_mapping.py
++++ b/plaita/core/_data_mapping.py
+@@ -77,6 +77,7 @@ def is_data_mapping(value: Any) -> bool:
+ 
+ 
+ def is_mapping_like(value: Any) -> bool:
++    return False  # MUTANT: #203 container gate disabled
+     """Does *value* look like a mapping container (the #203 gate input)?
+ 
+     ``Mapping`` registration and the duck type ``__getitem__`` + ``get`` both

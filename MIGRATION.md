@@ -968,6 +968,56 @@ meta-deceived shadow）× 7 格式（str/bytes 两模式）= 140 检查 / 0 违�
   负控把 `_get_attr` 的两处闸门关掉后，这些断言必须转红，记录见
   `docs/proofs/133-data-only-traversal.md` 与 `docs/proofs/data/`。
 
+### 表达式：映射容器只允许数据——host mapping-like 具名拒绝（plaita#203）
+
+#133 关闭了**属性**遍历（`$NODE.h.os.environ`），但映射面仍有两条路：容器作值
+（`$NODE.h.env` / `$NODE.d.env` 返回 live `os._Environ`，随后的 `.HOME` 走映射
+键读取）与 `$F.get` 旁路（`$F.get($NODE.h.env, 'HOME')` 直接调
+`_Environ.get`）。本版把**映射容器**也收紧为只允许数据：
+
+- **允许**：真实 `dict`（含子类）与引擎自有状态 mapping（`CheckpointState`
+  以及 `$PARENT` 的内部惰性快照 `_LazyRootSnapshot`）。dict 子类一律走
+  `dict.get` / `dict.keys` 等 C 槽——子类覆写的 `get` / `__getitem__` /
+  `__getattribute__` **不会被调用**（与 #69 r13 的 `$F.keys`/`values`/`items`
+  同一纪律）；引擎状态走自己的 `get`。
+- **拒绝**：`os._Environ`、`collections.ChainMap`、`collections.UserDict`、
+  `types.MappingProxyType`、自定义 `Mapping`、以及 duck-typed
+  `__getitem__` + `get` 的 host 对象——在**入口（作基座）/ 结果值 / 索引结果 /
+  根值**四个位置都抛具名 `ValueError`（含路径、真实类型与 `plaita#203`），
+  在读取任何键/值之前终止。
+- **`$F.get` / `$F.getDictValue`**：第一个实参是 host mapping-like 时，在 `#68`
+  输入测量和 callee **之前**拒绝；返回值是 host mapping-like 时也拒绝。真实 dict
+  走 `dict.get` C 槽，`CheckpointState` 走引擎 `get`；只加 `get` 方法、但没有
+  `__getitem__` 的普通对象保持历史 `get` 行为。
+- **数据面不变**：`$NODE.d.k`、`$INPUT.x`、`$F.get($NODE.d, 'k')`、dataclass /
+  Pydantic / SimpleNamespace、`CheckpointState` 背书的 `$INPUT`、`$ENV` 的
+  `exposeEnv` allowlist 语义都未改动。`$F.keys` / `values` / `items` 对非 dict
+  容器的拒绝沿用 #69（同一结果，只是文案不同）。
+
+**兼容性裁决 / 迁移**：
+
+- `UserDict` / `ChainMap` / `MappingProxyType` / 自定义 `Mapping` 不再能作为
+  表达式映射容器读取；请在交给流程前转成 plain dict（如 `dict(value)`；需要
+  深拷贝时用 `$F.json_loads($F.json_dumps(value))`），或改用 `$ENV` 显式暴露。
+- 只加方法的 `dict` 子类**保持可用**（读真实存储；覆写的读写方法不执行）。
+- `CheckpointState` 只允许**精确类型**；宿主子类覆写 `get` 会被当作 host
+  mapping-like 拒绝。
+- 需要环境变量时走 `$ENV` + `exposeEnv` 显式白名单，不要依赖 `$NODE.*` 读宿主
+  环境。
+
+运行时文案（**逐字**，测试与表达式指南引用同一串）：
+
+    expression path '$NODE.h.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict first.
+
+- **异常类型**：`ValueError`（与 #55/#133 同层、无新增公共异常类）；在 `end`
+  节点 `output` 路径上表现为 `NodeExecutionError`，`__cause__` 为该
+  `ValueError`。
+- **测试 / 负控**：`tests/unit/test_issue203_data_mapping_traversal.py`（容器作值/
+  基座/索引/根值；`$F.get` 两处；poisoned mapping 零调用；数据正控；
+  CheckpointState / dict 子类兼容性；`$ENV`）。负控把映射容器闸与 `$F.get`
+  闸关掉后，这些断言必须转红，记录见
+  `docs/proofs/203-data-mapping-traversal.md` 与 `docs/proofs/data/`。
+
 ### http 节点：`$NODE.<http_id>` 由**裸响应体**变为**结果结构**（plaita#129）
 
 `http` 节点历史上把响应上下文用 `set_state("$NODE.<id>.RESPONSE", …)` 写入，但状态层

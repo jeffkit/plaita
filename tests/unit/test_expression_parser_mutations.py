@@ -831,14 +831,24 @@ class TestGetAttr(TestCase):
         """dict 无 key 时返回 None（obj.get(path, None) 与 obj.get(path,) 等价）。"""
         self.assertIsNone(_get_attr({"k": "v"}, "missing"))
 
-    def test_dict_like_object_uses_get(self):
-        """dict-like 对象（有 __getitem__ 和 get）走 dict 分支。"""
+    def test_dict_like_object_is_gated(self):
+        """非 dict 的 mapping-like 由 #203 具名拒绝；真实 dict 子类仍走映射路径。"""
         class DictLike:
             def __getitem__(self, k):
                 return "item"
+
             def get(self, k, default=None):
                 return f"got:{k}"
-        self.assertEqual(_get_attr(DictLike(), "mykey"), "got:mykey")
+
+        with self.assertRaises(ValueError) as cm:
+            _get_attr(DictLike(), "mykey")
+        self.assertIn("plaita#203", str(cm.exception))
+
+        class DataDict(dict):
+            pass
+
+        self.assertEqual(
+            _get_attr(DataDict({"mykey": "got:mykey"}), "mykey"), "got:mykey")
 
     def test_attribute_object_uses_getattr(self):
         """普通对象走 getattr 分支。"""

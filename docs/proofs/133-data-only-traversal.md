@@ -176,6 +176,10 @@ $NODE.d.env.HOME      # d = {"env": os.environ}              ⇒ '/Users/...'
 原因：`os.environ`（`_Environ`）是 mapping-like 容器，`_get_attr` 走映射路径
 （键不是属性），#133 的代码对象闸不覆盖它；issue 正文明确「映射/索引路径
 保持不变」。按边界另开新单（映射值/容器的数据类型判定），不混入本 commit。
+
+> **后续（2026-10-18）**：该残面已由 **#203** 关闭（映射容器闸 + `$F.get`
+> 旁路；见 `docs/proofs/203-data-mapping-traversal.md`）。本文件保留 #133
+> 落地当时的边界记录，不改写历史。
 本 commit 的保证是：**属性遍历**不再能把 module/function/class/... 当值或当基座，
 因此 `$NODE.h.os.environ.HOME` 在 `.os` 就具名拒绝。
 

@@ -193,6 +193,12 @@ from plaita.core.expression import (
     _fn_values,
     get_default_expression_registry,
 )
+from plaita.core._data_mapping import (
+    is_data_mapping,
+    is_mapping_like,
+    is_real_dict,
+    reject_non_data_mapping,
+)
 from plaita.core.types import (
     PERSISTABLE_CONTAINER_TYPES,
     PERSISTABLE_IMMUTABLE_TYPES,
@@ -447,6 +453,29 @@ def _reject_non_data_traversal(path: str, value: Any, path_hint: Any = None) -> 
         path = _render_path(root_key, walked[:upto])
     raise ValueError(_TRAVERSAL_REJECTION_TEMPLATE.format(
         path=path, type_name=type(value).__name__))
+
+
+def _reject_non_data_mapping_entry(path: str, value: Any,
+                                   path_hint: Any = None) -> None:
+    """Raise the named plaita#203 refusal for a host mapping-like container."""
+    if path_hint is not None:
+        root_key, walked, upto = path_hint
+        path = _render_path(root_key, walked[:upto])
+    reject_non_data_mapping(value, path)
+
+
+def _gate_mapping_value(value: Any, path: str, path_hint: Any = None) -> None:
+    """Refuse a host mapping-like *value* (plaita#203); data/non-mappings pass.
+
+    Data mappings (real ``dict`` / ``CheckpointState``) are checked first — no
+    host probe runs for them.  For other objects, ``is_mapping_like`` may probe
+    ``__class__`` / ``__getattribute__`` but never calls ``__getitem__``/``get``;
+    the poisoned-mapping test pins that zero-read property.
+    """
+    if is_data_mapping(value):
+        return
+    if is_mapping_like(value):
+        _reject_non_data_mapping_entry(path, value, path_hint)
 
 
 # ---------------------------------------------------------------------------
@@ -2629,9 +2658,17 @@ def _mapping_get(obj: Any, path: str) -> Any:
     other ``_``-prefixed keys stay readable because they are keys, not
     attributes.  The key remains readable through the explicit ``$F.*`` mapping
     helpers, which do not go through this resolver.
+
+    plaita#203：只有**真实 dict**（含子类）与引擎的 ``CheckpointState`` 能走到
+    这里（入口闸已判过）。真实 dict 走 ``dict.get`` 的 C 槽——子类覆写的
+    ``get`` / ``__getitem__`` / ``__getattribute__`` **零调用**（与 #69 r13 的
+    ``$F.keys``/``values``/``items`` 同一纪律）；``CheckpointState`` 的 ``get``
+    是引擎代码，原样调用。
     """
     if path.startswith(_RESERVED_DUNDER_PREFIX):
         _reject_reserved_field(path)
+    if any(base is dict for base in type(obj).__mro__):
+        return dict.get(obj, path, None)
     return obj.get(path, None)
 
 
@@ -2758,8 +2795,14 @@ def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
     **值**若也是代码对象同样拒绝——所以 ``$NODE.h.os`` 本身即抛错，不会先返回
     模块再等下一段。谓词只看 ``type(obj).__mro__``，不读对象自己的 ``__class__``
     （#163 纪律）。``path_hint=(root_key, walked, upto)`` 只在拒绝时渲染完整路径，
-    成功路径不做字符串拼接。映射路径 / 索引路径的键与容器语义不变（``os.environ``
-    作为**容器**被按键读取时仍是数据面）。
+    成功路径不做字符串拼接。
+
+    plaita#203：**映射容器本身**也按对象种类判——只有真实 ``dict``（含子类，走
+    ``dict`` C 槽）与引擎的 ``CheckpointState`` 能作为映射被读；``os.environ`` /
+    ``ChainMap`` / ``UserDict`` / ``MappingProxyType`` / 自定义 ``Mapping`` 等
+    host mapping-like 在入口、结果值、索引结果三处都具名拒绝（#203）。所以
+    ``$NODE.h.env`` 不会返回 live ``_Environ``，``$NODE.h.env.HOME`` 也不会读到
+    环境变量。数据 dict 的键、列表索引、``$F.*`` 的合法面不变。
 
     plaita#163：``isinstance(obj, dict)`` 走 :func:`_probe_isinstance`——宿主
     ``__class__`` 抛异常时是具名 ``ValueError``（含 ``plaita#69``），不是裸异常。
@@ -2776,17 +2819,29 @@ def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
     """
     if _is_code_object(obj):
         _reject_non_data_traversal(path, obj, path_hint)
+    # plaita#203: a host mapping-like **base** is refused before any probe reads
+    # a key (and before #69's dict/view probes can be reached).
+    _gate_mapping_value(obj, path, path_hint)
     if _probe_isinstance(obj, dict, kind_name="dict", path=path):
-        return _mapping_get(obj, path)
+        if not is_real_dict(obj):
+            # A spoofed __class__ = dict shape: refuse by name instead of letting
+            # dict.get raise a bare TypeError (#163 fail-closed discipline).
+            _reject_non_data_mapping_entry(path, obj, path_hint)
+        value = _mapping_get(obj, path)
+        _gate_mapping_value(value, path, path_hint)
+        return value
     if (_probe_hasattr(obj, "__getitem__", path=path)
             and _probe_hasattr(obj, "get", path=path)):
-        return _mapping_get(obj, path)
+        value = _mapping_get(obj, path)
+        _gate_mapping_value(value, path, path_hint)
+        return value
     if path.startswith(_RESERVED_FIELD_PREFIX):
         _reject_reserved_field(path)
     if _probe_hasattr(obj, "__dict__", path=path):
         value = getattr(obj, path, None)
         if _is_code_object(value):
             _reject_non_data_traversal(path, value, path_hint)
+        _gate_mapping_value(value, path, path_hint)
         return value
     return None
 
@@ -3204,6 +3259,10 @@ class ExpressionParser:
                     f"Available roots (with {parser.prefix!r} prefix): "
                     "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
                 ) from None
+            # plaita#203: a live host mapping must not be returned as a root value
+            # either (e.g. a flow that passes os.environ as $INPUT); dict /
+            # CheckpointState roots are the documented data shapes and pass.
+            _gate_mapping_value(obj, root_key)
             # plaita#164：宿主显式声明过的 scratch 绑定在这里（读取点）进入本次
             # 求值的 freshness 作用域——只有"本次声明 + 同一个对象"才登记。
             _note_scratch_read(context, root_key, obj)
@@ -3234,6 +3293,13 @@ class ExpressionParser:
             for position, (kind, target, raw) in enumerate(effective_segments):
                 if kind == "index":
                     obj = obj[target]
+                    # plaita#203: an index can hand back a live host mapping just
+                    # as an attribute/mapping key can; refuse it before it can be
+                    # returned or traversed further.
+                    _gate_mapping_value(
+                        obj, f"[{target}]",
+                        (root_key, effective_segments, position + 1),
+                    )
                     if live_walk:
                         path_parts.append(f"[{target}]")
                     continue
@@ -3383,6 +3449,31 @@ class ExpressionParser:
                     _expression._clip(type(registry).__name__),
                 )
                 func = _UNDEFINED
+            # plaita#203: `$F.get` / `$F.getDictValue` are the other mapping read
+            # point.  A host mapping-like first argument is refused **before** the
+            # #68 input measurement and before the callee, so neither `get` nor
+            # `__getitem__` is called.  Only the engine's own callables are gated;
+            # a host callable registered under the same name is left untouched
+            # (same rule as the r13 storage-view interception below).
+            if (args
+                    and (_expression._fn_get is func
+                         or _expression._fn_getDictValue is func)):
+                first = args[0]
+                if not is_data_mapping(first) and is_mapping_like(first):
+                    _reject_non_data_mapping_entry(
+                        f"$F.{func_name}(...)", first)
+                elif is_data_mapping(first) and len(args) >= 2:
+                    # Value-position gate **before** #68's input measurement:
+                    # measuring a data dict can iterate its values, which would
+                    # call a nested host mapping's protocols.  Read the one key
+                    # through the safe C-slot / engine-state path and refuse a
+                    # host mapping result before any measurement touches it.
+                    if is_real_dict(first):
+                        preview = dict.get(first, args[1], None)
+                    else:
+                        preview = first.get(args[1], None)
+                    _gate_mapping_value(
+                        preview, f"$F.{func_name}(...)")
             # plaita#69 r13: the engine's own mapping-view helpers read the **real**
             # dict storage through the base C descriptors instead of calling the
             # argument's own ``keys``/``values``/``items`` (host self-description is

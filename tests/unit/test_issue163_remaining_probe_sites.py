@@ -120,6 +120,30 @@ def _named(exc: BaseException, *, type_name: str, needle: str) -> None:
         assert host_text not in message, f"刻意不回显宿主异常文本：{message!r}"
 
 
+def _named_or_container_gate(exc: BaseException, *, type_name: str,
+                             needle: str) -> None:
+    """plaita#203 容器闸先于 #69 逐跳探针：两种具名拒绝都接受。
+
+    `RefuseOn` / `RefuseOnWithGetItem` / `RaisingEverythingHost` 这类宿主在
+    ``__getitem__`` / ``get`` 探针上抛异常，#203 的 fail-closed 判定会先具名
+    拒绝，因此不再抵达 #69 的逐跳探针。两者都是 ``ValueError``、都不回显宿主
+    文本；非 mapping-like 形状仍由 #69 覆盖（本文件的直调探针测试仍钉 #69）。
+    """
+    assert isinstance(exc, ValueError), f"必须是具名 ValueError，实际 {exc!r}"
+    assert not isinstance(exc, RuntimeError), f"漏了裸 RuntimeError：{exc!r}"
+    message = str(exc)
+    assert type_name in message, f"归因要用真实类名：{message!r}"
+    if "plaita#203" in message:
+        for host_text in ("host refuses", "host __getitem__ raises",
+                          "host __contains__ raises"):
+            assert host_text not in message, f"刻意不回显宿主异常文本：{message!r}"
+        return
+    assert "plaita#69" in message
+    assert needle in message, f"要点明哪一跳探针：{message!r}"
+    for host_text in ("host refuses", "host __getitem__ raises", "host __contains__ raises"):
+        assert host_text not in message, f"刻意不回显宿主异常文本：{message!r}"
+
+
 class TestSiblingProbeSitesAreNamed(unittest.TestCase):
     """宿主 ``__class__``/``__getattribute__`` 抛异常 ⇒ 具名拒绝，不是裸异常。"""
 
@@ -127,12 +151,12 @@ class TestSiblingProbeSitesAreNamed(unittest.TestCase):
     def test_get_attr_getitem_probe_is_named(self):
         with self.assertRaises(ValueError) as cm:
             _get_attr(RefuseOn("__getitem__", "get"), "x")
-        _named(cm.exception, type_name="RefuseOn", needle="'__getitem__'")
+        _named_or_container_gate(cm.exception, type_name="RefuseOn", needle="'__getitem__'")
 
     def test_get_attr_get_probe_is_named(self):
         with self.assertRaises(ValueError) as cm:
             _get_attr(RefuseOnWithGetItem("get"), "x")
-        _named(cm.exception, type_name="RefuseOnWithGetItem", needle="'get'")
+        _named_or_container_gate(cm.exception, type_name="RefuseOnWithGetItem", needle="'get'")
 
     def test_get_attr_dict_probe_is_named(self):
         with self.assertRaises(ValueError) as cm:
@@ -146,7 +170,7 @@ class TestSiblingProbeSitesAreNamed(unittest.TestCase):
             ctx.set_state("$INPUT", {"d": RefuseOn("__getitem__", "get")})
             with self.assertRaises(ValueError) as cm:
                 ctx.evaluate("$INPUT.d.x")
-        _named(cm.exception, type_name="RefuseOn", needle="'__getitem__'")
+        _named_or_container_gate(cm.exception, type_name="RefuseOn", needle="'__getitem__'")
 
     def test_traversal_dsl_dict_probe_is_named(self):
         with freshness_scope():
@@ -196,7 +220,7 @@ class TestSiblingProbeSitesAreNamed(unittest.TestCase):
                     ctx.set_state("$NODE", node)
                     with self.assertRaises(ValueError) as cm:
                         ctx.evaluate("$NODE.raw.x")
-                _named(cm.exception, type_name=type_name, needle=needle)
+                _named_or_container_gate(cm.exception, type_name=type_name, needle=needle)
 
     # --- _compile_function_call 的 tuple 型 isinstance -------------------
     def test_function_result_tuple_isinstance_probe_is_named(self):
@@ -351,15 +375,8 @@ class TestSiblingProbeSemanticsUnchanged(unittest.TestCase):
         class Payload:
             text = "hello"
 
-        class MappingLike:
-            def __init__(self, data):
-                self._data = data
-
-            def __getitem__(self, key):
-                return self._data[key]
-
-            def get(self, key, default=None):
-                return self._data.get(key, default)
+        class MappingLike(dict):
+            """真实 dict 子类：plaita#203 后的数据面正控。"""
 
         self.assertEqual(_get_attr({"k": "v"}, "k"), "v")
         self.assertIsNone(_get_attr({"k": "v"}, "missing"))
@@ -457,12 +474,12 @@ class TestReadSitesKeepTheirNativeContract(unittest.TestCase):
                 ctx.evaluate("$INPUT.d.x")
 
     # --- _mapping_get → obj.get(path, None)：真实读取（清单外同形，保留） ---
-    def test_mapping_get_read_keeps_host_error(self):
-        """映射分支的真实读取（``obj.get``）与 ``getattr`` 读同一处置：原生契约。
+    def test_mapping_get_host_container_is_gated(self):
+        """#203：宿主 mapping-like 在容器闸拒绝，不再进入 ``obj.get``。
 
-        ``_get_attr`` 的 ``__getitem__``/``get`` **探针**已具名化（``RefuseOn("get")``
-        会在探针处被具名拒绝）；能走到 ``_mapping_get`` 的是"探针已证明 ``get``
-        存在"的形状，此时 ``get`` 自己抛的异常是它的操作错误。
+        旧契约「探针已证明 ``get`` 存在 ⇒ ``get`` 自己抛的异常原生透出」只适用
+        于数据 mapping；#203 后非 dict 的 host mapping-like 在读取前具名拒绝，
+        原生宿主错误不再可达（有意的攻击面收缩）。
         """
         class MappingGetRaises:
             def __getitem__(self, key):
@@ -471,18 +488,22 @@ class TestReadSitesKeepTheirNativeContract(unittest.TestCase):
             def get(self, key, default=None):
                 raise RuntimeError("host get raises")
 
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(ValueError) as cm:
             _get_attr(MappingGetRaises(), "x")
-        self.assertEqual("host get raises", str(cm.exception))
+        message = str(cm.exception)
+        self.assertIn("plaita#203", message)
+        self.assertIn("MappingGetRaises", message)
+        self.assertNotIn("host get raises", message)
 
     def test_mapping_get_probe_itself_is_named(self):
-        """对照：``get`` **属性探针**本身失败 ⇒ 具名（本单已收口那一跳）。"""
+        """``get`` 属性探针失败 ⇒ #203 容器闸先具名拒绝（非 mapping-like 仍走 #69）。"""
         with freshness_scope():
             ctx = _alias_context()
             ctx.set_state("$INPUT", {"d": RefuseOnWithGetItem("get")})
             with self.assertRaises(ValueError) as cm:
                 ctx.evaluate("$INPUT.d.x")
-        self.assertIn("plaita#69", str(cm.exception))
+        _named_or_container_gate(
+            cm.exception, type_name="RefuseOnWithGetItem", needle="'get'")
 
     # --- 2994 obj[target]：真实读取（下标协议） -------------------------
     def test_subscript_read_keeps_host_error(self):
@@ -502,15 +523,20 @@ class TestReadSitesKeepTheirNativeContract(unittest.TestCase):
                 ctx.evaluate("$INPUT.d[0]")
 
     def test_subscript_read_class_shape_is_already_named_by_163(self):
-        """``obj[target]`` 的 ``__class__`` 半边**已由 #163 的 ``isinstance(attr, str)``
-        探针覆盖**：宿主在第一段字段就被具名拒绝，走不到下标段。"""
+        """``$INPUT.d[0]`` 的宿主 class 形状在更早的容器闸具名拒绝。
+
+        #203 在 ``_get_attr`` 入口的 fail-closed 探测先于 #163 的
+        ``isinstance(attr, str)``；两者都是具名 ``ValueError``，且都不回显宿主
+        文本。非 mapping-like 形状的 #69 逐跳探针仍由直调测试覆盖。
+        """
         with freshness_scope():
             ctx = _alias_context()
             ctx.set_state("$INPUT", {"d": RefuseClass()})
             with self.assertRaises(ValueError) as cm:
                 ctx.evaluate("$INPUT.d[0]")
-        self.assertIn("plaita#69", str(cm.exception))
-        self.assertIn("isinstance(str)", str(cm.exception))
+        message = str(cm.exception)
+        self.assertIn("RefuseClass", message)
+        self.assertTrue("plaita#203" in message or "plaita#69" in message)
 
     # --- 3000 target not in obj：INPUT 缺键判据（仅 DEBUG 留痕） --------
     def test_input_missing_key_probe_keeps_host_error(self):

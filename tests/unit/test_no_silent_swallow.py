@@ -155,6 +155,14 @@ ALLOWED_SILENT_FINGERPRINTS = {
     # 异常细节不影响「进程组已被杀」这一主结果。
     "proc.kill() | except Exception: | pass",
     "proc.communicate(timeout=1) | except Exception: | pass",
+    # plaita#203 数据映射判定（plaita/core/_data_mapping.py）：宿主
+    # `__class__` / `__getattribute__` 探测失败时一律 fail-closed（is_engine_state/
+    # is_real_dict 返回 False，is_mapping_like 返回 True），由调用方转成具名
+    # ValueError；异常细节不是用户数据，不需要记录。
+    "return any(type(value) is cls for cls in _engine_mapping_types()) | except Exception: | return False",
+    "return any(base is dict for base in type(value).__mro__) | except Exception: | return False",
+    "if isinstance(value, Mapping): | except Exception: | return True",
+    'return hasattr(value, "__getitem__") and hasattr(value, "get") | except Exception: | return True',
 }
 
 
