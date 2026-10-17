@@ -1,0 +1,68 @@
+{
+  "issue": 199,
+  "title": "fix(core): run_async_from_sync cross-thread bridge does not copy contextvars",
+  "generated_at": "2026-10-17T19:10:01.313081+00:00",
+  "base_head": "95bd64cab99e25c2c63ea853e5fcdd6430948c67",
+  "fix_commit_subject": "fix(core): #199 run_async_from_sync 跨线程桥复制 contextvars——租户/fence 不再退回 default",
+  "before": {
+    "plaita_file": "/tmp/wt199-before-95/plaita/__init__.py",
+    "python": "3.13.3",
+    "bridged": {
+      "tenant": "default",
+      "fence": "no-fence",
+      "file": "creds.json",
+      "shared": "https://default.example",
+      "default_only": "READ_OK"
+    }
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "bridged": {
+      "tenant": "tenant-b",
+      "fence": "fence-b",
+      "file": "creds.tenant-b.json",
+      "shared": "https://acme.example",
+      "default_only": "CredentialError"
+    }
+  },
+  "test_runs": {
+    "targeted": "6 passed",
+    "async_utils_plus_issue58": "39 passed",
+    "unit_fast": "7730 passed, 11 skipped, 13 deselected, 3429 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8030 passed, 15 skipped, 3429 subtests, coverage 93.82% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main 95bd64c latest completed ci.yml run (95bd64c only adds the perf-test timeout marker)"
+  },
+  "negative_control": {
+    "mutation": "restore ThreadPoolExecutor.submit(asyncio.run, coro) (no ctx copy)",
+    "diff_sha256": "d3af92fbf7f8688b884dc6f541c64a337249774478b1bcfa360bb33d43454b79",
+    "test_file": {
+      "failed": 3,
+      "passed": 3
+    },
+    "failed": [
+      "test_bridge_propagates_tenant_and_fence_contextvars",
+      "test_bridge_credentials_read_tenant_side_file",
+      "test_bridge_default_tenant_unchanged"
+    ],
+    "still_green": [
+      "test_bridge_context_is_isolated_from_coroutine_mutations",
+      "test_no_loop_path_keeps_context",
+      "test_bridge_still_propagates_exceptions"
+    ]
+  },
+  "residuals": [
+    {
+      "surface": "plaita/core/async_utils.py async_gen_to_sync worker",
+      "status": "worker thread also loses contextvars (repro: default/no-fence)",
+      "action": "separate issue"
+    },
+    {
+      "surface": "plaita-console/backend/api/cluster.py:1087 raw executor.submit(asyncio.run, publish_event())",
+      "status": "raw bridge also does not copy contextvars",
+      "action": "separate console issue (boundary)"
+    }
+  ]
+}

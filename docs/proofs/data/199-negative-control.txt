@@ -1,0 +1,28 @@
+# plaita#199 负控：还原裸 submit
+
+diff --git a/plaita/core/async_utils.py b/plaita/core/async_utils.py
+index 4d48129..90249fe 100644
+--- a/plaita/core/async_utils.py
++++ b/plaita/core/async_utils.py
+@@ -62,9 +62,8 @@ def run_async_from_sync(coro):
+         # then executes `asyncio.run(coro)` in the worker with the caller's
+         # contextvars; `asyncio.run` creates the task in that same context, so
+         # the whole coroutine tree inherits it.
+-        ctx = contextvars.copy_context()
+         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+-            return pool.submit(ctx.run, asyncio.run, coro).result()
++            return pool.submit(asyncio.run, coro).result()
+     return asyncio.run(coro)
+ 
+ 
+
+## tests/unit/test_issue199_async_bridge_context.py
+FAILED tests/unit/test_issue199_async_bridge_context.py::test_bridge_propagates_tenant_and_fence_contextvars
+FAILED tests/unit/test_issue199_async_bridge_context.py::test_bridge_credentials_read_tenant_side_file
+FAILED tests/unit/test_issue199_async_bridge_context.py::test_bridge_default_tenant_unchanged
+3 failed, 3 passed in 0.13s
+
+## 仍绿的三条（不依赖跨线程复制）
+- test_bridge_context_is_isolated_from_coroutine_mutations
+- test_no_loop_path_keeps_context
+- test_bridge_still_propagates_exceptions

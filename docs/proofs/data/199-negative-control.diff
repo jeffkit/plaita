@@ -1,0 +1,15 @@
+diff --git a/plaita/core/async_utils.py b/plaita/core/async_utils.py
+index 4d48129..90249fe 100644
+--- a/plaita/core/async_utils.py
++++ b/plaita/core/async_utils.py
+@@ -62,9 +62,8 @@ def run_async_from_sync(coro):
+         # then executes `asyncio.run(coro)` in the worker with the caller's
+         # contextvars; `asyncio.run` creates the task in that same context, so
+         # the whole coroutine tree inherits it.
+-        ctx = contextvars.copy_context()
+         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+-            return pool.submit(ctx.run, asyncio.run, coro).result()
++            return pool.submit(asyncio.run, coro).result()
+     return asyncio.run(coro)
+ 
+ 

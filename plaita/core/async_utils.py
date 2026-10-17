@@ -20,6 +20,7 @@ Public helpers:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 
@@ -31,10 +32,17 @@ logger = logging.getLogger("plaita.core.async_utils")
 def run_async_from_sync(coro):
     """Run an async coroutine from a synchronous context.
 
-    If no event loop is running, uses ``asyncio.run``.
-    If a loop is already running (e.g. inside an async framework),
-    offloads to a thread via a short-lived ``ThreadPoolExecutor`` so we
-    do not nest ``asyncio.run`` inside a running loop.
+    If no event loop is running, uses ``asyncio.run`` (same thread, same
+    contextvars).  If a loop is already running (e.g. inside an async
+    framework), offloads to a thread via a short-lived
+    ``ThreadPoolExecutor`` so we do not nest ``asyncio.run`` inside a running
+    loop.
+
+    plaita#199：``submit`` 不传播 contextvars——新线程只有默认上下文，租户 /
+    fence ContextVar 会在桥后退回 default（异步请求内跑 sync flow 时整条
+    flow 读 default 租户凭据，#58 的线程节点修复覆盖不到这里）。running-loop
+    分支因此在 **submit 前** ``copy_context()``，worker 内用 ``ctx.run`` 驱动
+    ``asyncio.run``；无 loop 分支本就在当前线程，保持不变。
     """
     import concurrent.futures
 
@@ -48,8 +56,15 @@ def run_async_from_sync(coro):
         # A hard-coded wall-clock cap here would silently override all user-configured
         # timeouts and cause mysterious failures for any flow that runs longer than
         # the arbitrary constant.
+        #
+        # The context copy must happen in the **calling** thread: a `Context`
+        # cannot be entered from another thread once it is running.  `ctx.run`
+        # then executes `asyncio.run(coro)` in the worker with the caller's
+        # contextvars; `asyncio.run` creates the task in that same context, so
+        # the whole coroutine tree inherits it.
+        ctx = contextvars.copy_context()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+            return pool.submit(ctx.run, asyncio.run, coro).result()
     return asyncio.run(coro)
 
 
