@@ -146,6 +146,9 @@ ALLOWED_SILENT_FINGERPRINTS = {
     # #81（2026-10-16 落地）node Redis 客户端 LRU(8) 淘汰最旧连接时的 close：
     # best-effort 关闭，close 失败不破坏连接池与请求路径（淘汰本身已达容量目标）。
     "evicted.close() | except Exception: | pass",
+    # #93（2026-10-16 落地）error 落盘接线的明细渲染：redacted() 渲染异常时
+    # 返回 None（放弃明细）——明细丢失绝不能拖垮终态化（交付方 docstring 原话）。
+    "view = render() | except Exception: | return None",
 }
 
 
