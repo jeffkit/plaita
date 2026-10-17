@@ -41,7 +41,10 @@ def _dataset_root() -> Path:
 def _resolve_dataset_path(name: str) -> Path:
     root = _dataset_root()
     candidate = (root / name).resolve()
-    if not str(candidate).startswith(str(root)):
+    # #209：按**路径归属**判越界，不是字符串前缀。`startswith` 会放行同前缀
+    # 兄弟目录（root 与 root-evil/）；is_relative_to 按路径段比较，绝对路径
+    # 与 `..` 逃逸解析后同样拒绝。
+    if not candidate.is_relative_to(root):
         raise HTTPException(status_code=400, detail="dataset 路径越界")
     if not candidate.exists():
         raise HTTPException(status_code=404, detail=f"数据集不存在: {name}（根目录 {root}）")

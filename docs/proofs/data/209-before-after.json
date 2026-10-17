@@ -1,0 +1,107 @@
+{
+  "issue": 209,
+  "title": "security(console/supervisor): dataset path ownership check (no startswith sibling-prefix bypass)",
+  "generated_at": "2026-10-17T23:40:26.617542+00:00",
+  "base_head": "d1ca49c49df33099b1ab67397145116d123d5144",
+  "fix_commit_subject": "fix(console): #209 supervisor 数据集路径按归属判越界——关闭同前缀兄弟目录穿越",
+  "before": {
+    "plaita_file": "/tmp/wt209-before/plaita/__init__.py",
+    "python": "3.13.3",
+    "root": "/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-gfe61quw/supervisor-datasets",
+    "normal": {
+      "ok": true,
+      "path": "/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-gfe61quw/supervisor-datasets/case.json"
+    },
+    "subdir": {
+      "ok": true,
+      "path": "/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-gfe61quw/supervisor-datasets/sub/case.json"
+    },
+    "sibling_prefix": {
+      "ok": true,
+      "path": "/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-gfe61quw/supervisor-datasets-evil/x.json"
+    },
+    "absolute": {
+      "ok": false,
+      "status": 400,
+      "detail": "dataset 路径越界"
+    },
+    "dotdot": {
+      "ok": false,
+      "status": 400,
+      "detail": "dataset 路径越界"
+    },
+    "missing": {
+      "ok": false,
+      "status": 404,
+      "detail": "数据集不存在: missing.json（根目录 /private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-gfe61quw/supervisor-datasets）"
+    },
+    "listed": [
+      "case.json",
+      "sub"
+    ]
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "root": "/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-lqsirmie/supervisor-datasets",
+    "normal": {
+      "ok": true,
+      "path": "/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-lqsirmie/supervisor-datasets/case.json"
+    },
+    "subdir": {
+      "ok": true,
+      "path": "/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-lqsirmie/supervisor-datasets/sub/case.json"
+    },
+    "sibling_prefix": {
+      "ok": false,
+      "status": 400,
+      "detail": "dataset 路径越界"
+    },
+    "absolute": {
+      "ok": false,
+      "status": 400,
+      "detail": "dataset 路径越界"
+    },
+    "dotdot": {
+      "ok": false,
+      "status": 400,
+      "detail": "dataset 路径越界"
+    },
+    "missing": {
+      "ok": false,
+      "status": 404,
+      "detail": "数据集不存在: missing.json（根目录 /private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/plaita209-lqsirmie/supervisor-datasets）"
+    },
+    "listed": [
+      "case.json",
+      "sub"
+    ]
+  },
+  "test_runs": {
+    "console_dataset_path": "6 passed",
+    "console_supervisor_existing": "5 passed",
+    "unit_fast": "7752 passed, 11 skipped, 13 deselected, 3429 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8052 passed, 15 skipped, 3429 subtests, coverage 93.83% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main d1ca49c latest completed ci.yml run"
+  },
+  "negative_control": {
+    "mutation": "restore str(candidate).startswith(str(root))",
+    "diff_sha256": "9b8eac663f745b813a4737117b27b8eb05fefbfe56da9eeca89cb7200d61c5bd",
+    "test_file": {
+      "failed": 1,
+      "passed": 5
+    },
+    "failed": [
+      "test_sibling_prefix_is_rejected"
+    ],
+    "still_green": [
+      "test_normal_file_and_subdir_allowed",
+      "test_absolute_path_is_rejected",
+      "test_dotdot_escape_is_rejected",
+      "test_missing_normal_path_is_404_not_400",
+      "test_list_datasets_filtering_unchanged"
+    ]
+  }
+}
