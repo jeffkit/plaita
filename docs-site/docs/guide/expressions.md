@@ -70,14 +70,23 @@ $NODE.list[0]          # 等价写法
 $NODE.list[-1]         # 末项
 ```
 
-### 属性遍历与下划线名（安全限制）
+### 属性遍历：只允许数据（安全限制）
 
-字段段读的是**数据**：`dict` / 映射按**键**取，其它对象按**属性**取。下划线名在
-**属性读取**上被拒绝，并且是**硬报错**（不是返回 `None`）：
+字段段读的是**数据**：`dict` / 映射按**键**取，其它对象按**属性**取。属性读取
+有两道**硬报错**（不是返回 `None`）的闸门：
+
+1. **下划线名**（plaita#55）：`_` 开头的段名一律拒绝；
+2. **代码对象**（plaita#133）：属性遍历只允许数据。属性解析出的值是 module /
+   function / builtin function / method / class / frame / traceback / generator /
+   coroutine / async generator / code object 时拒绝——按 `type(obj).__mro__`
+   真实类型判定，不读对象自己的 `__class__`。结果值是代码对象时**该字段本身**
+   就抛错（`$NODE.obj.os` 即拒绝，不会先返回模块再等 `.environ`）。
 
 | 表达式 | 结果 |
 |--------|------|
-| `$NODE.obj.text` | `"hello"`（公开属性） |
+| `$NODE.obj.text` | `"hello"`（公开**数据**属性） |
+| `$NODE.obj.os`（`os` 是 module） | **`ValueError`**：代码对象，`plaita#133` |
+| `$NODE.obj.os.environ` | **`ValueError`**：在 `.os` 就拒绝，环境变量不会被读取 |
 | `$NODE.obj.__class__` | **`ValueError`**：`'__class__'` 不是允许的字段名 |
 | `$NODE.obj._private` | **`ValueError`** |
 | `$NODE.d._foo`（`d` 是 dict） | 键 `_foo` 的值——**键**不受限 |
@@ -87,40 +96,54 @@ $NODE.list[-1]         # 末项
 
 规则：
 
-* **属性读取**：任何 `_` 开头的段名一律拒绝；
+* **属性读取**：任何 `_` 开头的段名一律拒绝；解析出代码对象（module / function /
+  class / frame / generator / coroutine / code 等）也一律拒绝；
 * **路径段取值**：单下划线键保持可读（`{"_foo": …}`、builder 自动生成的 `_n2` 节点 id）；
   `__` 开头的**路径段**（`$NODE.d.__class__`）拒绝——路径形态无法与属性遍历尝试区分，
   静默 `None` 只会掩盖越权尝试；
-* 拒绝是**硬错误**：抛 `ValueError`（消息点名该段并说明原因），在 `end` 节点的
-  `output` 等路径上表现为节点错误。不要指望"被挡住 → 得到 `None`"。
+* **映射 / 索引路径保持原语义**：字段段在 dict / 映射上是**键**，不是属性；数组索引
+  与映射值按原语义读取。本闸门只针对**属性遍历**；
+* 拒绝是**硬错误**：抛 `ValueError`（消息点名路径、真实类型与 `plaita#133`），在
+  `end` 节点的 `output` 等路径上表现为节点错误。不要指望"被挡住 → 得到 `None`"。
 
 **刻意的不对称（映射辅助不受限）**：`$NODE.d.__class__` 抛错，但
 `$F.get($NODE.d, '__class__')` / `$F.getDictValue($NODE.d, '__class__')` 仍返回该键的
 **数据值**，`$F.keys($NODE.d)` 也仍列出它。映射辅助只是"按键取数据"——键不是属性、
 不产生反射语义；路径形态的拒绝针对的是与属性遍历无法区分、且会静默 `None` 的写法。
 
-原因：`$NODE.<节点>.__class__.__init__.__globals__.os.environ` 这类链在节点返回
-dataclass / pydantic / 普通实例时能读出执行进程的全部环境变量，绕开 `$ENV` 的
-`exposeEnv` allowlist（见下文）。数组索引、公开属性、`dict` 键、`{% … %}` 插值与
-`$NODE.raw.…` 都不受影响。迁移说明见[迁移指南](../reference/migration-guide.md)。
+原因：`$NODE.<节点>.__class__.__init__.__globals__.os.environ` 这类**反射链**，以及
+`$NODE.h.os.environ` 这类**公有属性链**，在节点返回 dataclass / pydantic / 普通实例
+或 `SimpleNamespace(os=os)` 时都能读出执行进程的环境变量，绕开 `$ENV` 的
+`exposeEnv` allowlist（见下文）。#55 关闭反射链，#133 关闭公有属性链；公开**数据**
+属性、`dict` 键、`{% … %}` 插值与 `$NODE.raw.…` 都不受影响。迁移说明见
+[迁移指南](../reference/migration-guide.md)。
 
-运行时错误文案（**逐字**，与代码、迁移指南一致）：
+运行时错误文案（**逐字**，与代码、迁移指南一致）。
+
+下划线闸（#55）：
 
 ```
-expression field name '__class__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Only this prefix is gated: public attributes of node-returned objects stay readable by design (MIGRATION.md #55).
+expression field name '__class__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Public attribute traversal is additionally data-only (plaita#133): public attributes that resolve to modules, functions, classes, frames, generators, coroutines or other code objects are refused by name.
 ```
 
-!!! warning "已知边界：本限制只覆盖 `_` 前缀，不是整体沙箱"
+数据面闸（#133）：
 
-    只保留 `_` 前缀名，**公有属性遍历不受限**。节点返回值若把模块挂在**公有**属性
-    上，公有链照旧可读——例如节点返回 `SimpleNamespace(os=os)` 时，
-    `$NODE.h.os.environ` 就是活的 `os.environ`（可继续取到具体变量值）。这不是缺陷，
-    而是本限制声明的范围：它关闭的是"反射到 Python 内部属性"（`__class__` →
-    `__globals__`）这条路，**不把节点返回值变成不可信数据**。
+```
+expression path '$NODE.h.os' traverses a non-data object of type 'module': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged.
+```
 
-    因此：`exposeEnv` 是"显式暴露"清单而非沙箱；**节点插件不应返回把敏感模块 /
-    对象挂在公有属性上的返回值**（`os` / `sys` / 连接串对象等）。这是作者侧的信任
-    边界。详见[迁移指南](../reference/migration-guide.md) 的 #55 条目。
+!!! warning "边界：属性遍历只允许数据，映射 / 索引与 `$F.*` 未改"
+
+    #133 的收紧落在**属性遍历**：公有属性若解析出模块 / 函数 / 类 / frame /
+    generator / coroutine / code 对象，具名拒绝；公有**数据**属性仍可读。
+    `dict` / 映射的键与值、数组索引、`$F.*` 注册表、`$ENV` 的 `exposeEnv`
+    allowlist 都保持原语义。
+
+    **代价**：流程若把方法 / 类 / 模块**当值**读取（例如
+    `$NODE.obj.some_method`），现在会抛 `ValueError`；请改为读取该字段背后的
+    数据值。`exposeEnv` 仍是"显式暴露"清单而非沙箱；节点插件不应依赖公有属性
+    传递敏感模块 / 对象。详见[迁移指南](../reference/migration-guide.md) 的
+    #55 / #133 条目。
 
 ### 取数据原文：`$NODE.raw.<节点>…`
 

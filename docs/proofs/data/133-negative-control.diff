@@ -1,0 +1,22 @@
+diff --git a/plaita/core/expression_parser.py b/plaita/core/expression_parser.py
+index a88a981..e65764b 100644
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -2774,7 +2774,7 @@ def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
+     文档承诺的原生 ``TypeError``/``KeyError``/``ValueError`` 照旧原样抛出），
+     具名化会改写原生异常类型 ⇒ 保留现状（见 W22-A RED-PROOF §3）。
+     """
+-    if _is_code_object(obj):
++    if False:  # MUTANT: entry gate disabled
+         _reject_non_data_traversal(path, obj, path_hint)
+     if _probe_isinstance(obj, dict, kind_name="dict", path=path):
+         return _mapping_get(obj, path)
+@@ -2785,7 +2785,7 @@ def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
+         _reject_reserved_field(path)
+     if _probe_hasattr(obj, "__dict__", path=path):
+         value = getattr(obj, path, None)
+-        if _is_code_object(value):
++        if False:  # MUTANT: result gate disabled
+             _reject_non_data_traversal(path, value, path_hint)
+         return value
+     return None

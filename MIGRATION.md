@@ -893,8 +893,9 @@ meta-deceived shadow）× 7 格式（str/bytes 两模式）= 140 检查 / 0 违�
   值或静默 `None`）现在抛错；`$…. __x__` 这种**路径段**写法也抛错。节点插件返回值
   里的 `_` 前缀字段若需被流程引用，请改公开名，或把值放进 dict（dict 的 `_` 前缀键
   不受影响）。
-- **不受影响**：公开属性、`dict` 键（含 `_` 前缀）、`[n]` / `.n` 索引、`{% … %}`
-  插值、`$NODE.raw.…`（`raw` 只关掉字符串二次求值，不关掉本闸门）、
+- **不受影响**：公开**数据**属性（模块 / 函数 / 类等代码对象另见下方 #133 条目）、
+  `dict` 键（含 `_` 前缀）、`[n]` / `.n` 索引、`{% … %}` 插值、
+  `$NODE.raw.…`（`raw` 只关掉字符串二次求值，不关掉本闸门）、
   `$PARENT.$INPUT.name` 这类段名带 `$` 的写法、`$F.*` 注册表，以及
   `exposeEnv` allowlist 本身的语义（未改动）。
 - **异常类型**：`ValueError`——表达式层既有类型（`ExpressionRegistry` 同类型），
@@ -902,7 +903,7 @@ meta-deceived shadow）× 7 格式（str/bytes 两模式）= 140 检查 / 0 违�
   `NodeExecutionError`（`__cause__` 为该 `ValueError`，消息含被拒段名）。
   运行时文案（**逐字**，测试与表达式指南引用同一串）：
 
-      expression field name '__class__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Only this prefix is gated: public attributes of node-returned objects stay readable by design (MIGRATION.md #55).
+      expression field name '__class__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Public attribute traversal is additionally data-only (plaita#133): public attributes that resolve to modules, functions, classes, frames, generators, coroutines or other code objects are refused by name.
 
 - **为何不在编译期拦截**：字段段的容器类型只有运行期才知道（`$NODE._n2` 是 dict
   键、`$NODE.<obj>._x` 才是属性），因此闸门放在运行期唯一收口点，而非 `dot_field`
@@ -916,20 +917,56 @@ meta-deceived shadow）× 7 格式（str/bytes 两模式）= 140 检查 / 0 违�
   `tests/unit/test_issue55_attr_traversal.py::test_dunder_key_asymmetry_with_mapping_helpers_is_pinned`
   钉为显式行为。
 
-**已知边界（不是缺陷；本单只保留 `_` 前缀，不做整体沙箱化）**：
+**范围说明（#55 的下界 + #133 的数据面）**：
 
-- **公有属性遍历不受限**。节点返回值若把模块挂在**公有**属性上，公有链照旧可读：
-  `{"$NODE": {"h": SimpleNamespace(os=os)}}` 下 `$NODE.h.os.environ` 求值结果就是
-  活的 `os.environ`（实测可继续取到具体变量值）。它不是本单要关闭的"反射到 Python
-  内部属性"路径，且 issue 的 Boundary 明确不做整体沙箱化 ⇒
-  **节点插件不应返回把敏感模块/对象挂在公有属性上的返回值**（`os` / `sys` /
-  连接串对象等）；这是作者侧的信任边界，不是表达式引擎能保证的事。
+- **公有属性遍历不是无限制的**：#55 只关闭 `_` 前缀；#133 在同一收口点增加了
+  对象种类闸——公有属性解析出 module / function / class / frame / generator /
+  coroutine / code 等对象时具名拒绝。公有**数据**属性仍可读；映射 / 索引路径
+  保持原语义（见下一条 #133 条目）。
+- **映射路径与索引路径不变**：字段段在 dict / 映射上是**键**，不是属性；映射
+  值按原语义返回（`$F.*` 也不在 #133 的改动面内）。本单只保证**属性遍历**的
+  数据面，不承诺映射容器内部的值形状。
 - **`$ENV` 的 `exposeEnv` 是"显式暴露"清单，不是沙箱**。本单修的是绕过它的**反射
-  路径**（`__class__` → `__globals__` → 进程环境）；它不承诺"表达式拿不到进程信息"
-  ——上面那条公有属性链就是反例。
+  路径**（`__class__` → `__globals__` → 进程环境）；它不承诺"表达式拿不到进程信息"。
 - **`plaita.io.get_attr`（Property 匹配用）不在本闸门内**。它对 `dict` **子类**
   实例确实会走 `getattr`（子类实例有 `__dict__`），但返回值只被 `match()` 当
   **布尔**消费、不回流表达式求值，因此不构成逃逸面；详见该函数上方注释。
+
+### 表达式：属性遍历只允许数据——代码对象具名拒绝（plaita#133）
+
+#55 关闭了下划线前缀的反射链，但**公有属性**仍可把模块 / 函数 / 类 / frame 等
+挂在节点返回值上：`{"$NODE": {"h": SimpleNamespace(os=os)}}` 下
+`$NODE.h.os.environ` 会返回活的 `os.environ`（可继续读任意变量），完全绕开
+`$ENV` 的 `exposeEnv` allowlist。本版把属性遍历收紧为**只允许数据**：
+
+- **判据是对象种类，不是属性名**：在唯一收口点 `_get_attr`，先按
+  `type(obj).__mro__`（C 层真实类型，不读对象自己的 `__class__`；#163 纪律）
+  判断基座对象；属性路径解析出的**值**也做同一判断。命中 module / function /
+  builtin function / method / class（`type`）/ frame / traceback / generator /
+  coroutine / async generator / code object ⇒ 抛具名 `ValueError`（含路径、
+  真实类型名与 `plaita#133`）。
+- **早停**：`$NODE.h.os` 本身即抛错，不会先返回模块再等 `.environ`；因此
+  `.environ.HOME` 这条链在读取环境变量之前就终止。
+- **数据面不变**：dataclass / 普通类 / Pydantic / SimpleNamespace 的公开数据
+  字段照旧可读；`dict` 键（含 `_` 前缀）、`[n]` / `.n` 索引、`{% … %}`、
+  `$NODE.raw.…`、`$F.*` 注册表与 `$ENV` allowlist 语义都未改动。
+- **映射 / 索引路径保持原语义**：字段段在 dict / 映射上是**键**，不是属性；
+  映射值按原语义返回。本闸门只针对属性遍历，不把映射容器内部的值形状纳入
+  数据面判定。
+- **代价**：流程若合法地把一个方法 / 类 / 模块**当值**读取（例如
+  `$NODE.obj.some_method`），现在会抛错；请改为返回/读取该字段背后的数据值。
+  这是把安全收紧落在攻击面、同时保留普通数据读写的取舍。
+
+运行时文案（**逐字**，测试与表达式指南引用同一串）：
+
+    expression path '$NODE.h.os' traverses a non-data object of type 'module': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged.
+
+- **异常类型**：`ValueError`（与 #55 同层、无新增公共异常类）；在 `end` 节点
+  `output` 路径上表现为 `NodeExecutionError`，`__cause__` 为该 `ValueError`。
+- **测试 / 负控**：`tests/unit/test_issue133_data_only_traversal.py`（每种代码
+  对象的值位置 + 基座位置；四根对称；数据正控；全路径/类型/不回显断言）；
+  负控把 `_get_attr` 的两处闸门关掉后，这些断言必须转红，记录见
+  `docs/proofs/133-data-only-traversal.md` 与 `docs/proofs/data/`。
 
 ### http 节点：`$NODE.<http_id>` 由**裸响应体**变为**结果结构**（plaita#129）
 

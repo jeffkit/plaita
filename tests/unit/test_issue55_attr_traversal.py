@@ -20,14 +20,14 @@
 
 异常类型取 ``ValueError``：issue 明确建议，且表达式层已有同类
 （``ExpressionRegistry.register``）。消息只点名被拒段名与原因，不回显对象，且
-**不作安全承诺**（只覆盖 ``_`` 前缀；公有属性遍历不在本闸门范围内）。
+**不作安全承诺**。
 
-已知边界（**不是缺陷**，独立验收一轮要求显式文档化）：
-
-* 公有属性链不受限：节点返回值若把一个模块挂在**公有**属性上，
-  ``$NODE.h.os.environ`` 仍可读到进程环境——本单只关闭"反射到 Python 内部
-  属性"这条路，不做整体沙箱化（issue Boundary）；节点插件不应返回暴露敏感
-  模块的对象。
+``_`` 前缀闸门是**下界**，不是全部：plaita#133 在同一收口点增加了「属性遍历只
+允许数据」的对象种类闸——模块 / 函数 / 类 / frame / generator / coroutine / code
+对象按**真实类型**（``type(obj).__mro__``，不读 ``__class__``）拒绝，
+``$NODE.h.os.environ`` 因而抛具名 ``ValueError``（见
+``test_issue133_data_only_traversal.py``）。公有**数据**属性仍可读；映射 / 索引
+路径保持原语义。
 """
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,8 +50,9 @@ ISSUE55_MESSAGE = (
     "starting with '_' are reserved for Python internals (for example __class__ / "
     "__globals__ / __init__), so the attribute form reaches process state and "
     "bypasses the $ENV allowlist, which is an opt-in exposure list and not a "
-    "sandbox. Only this prefix is gated: public attributes of node-returned "
-    "objects stay readable by design (MIGRATION.md #55)."
+    "sandbox. Public attribute traversal is additionally data-only (plaita#133): "
+    "public attributes that resolve to modules, functions, classes, frames, "
+    "generators, coroutines or other code objects are refused by name."
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -243,20 +244,25 @@ def test_dunder_key_asymmetry_with_mapping_helpers_is_pinned(parser):
     assert list(parser.evaluate("$F.keys($NODE.d)", ctx)) == ["__class__", "x"]
 
 
-def test_public_attribute_traversal_is_not_sandboxed(parser):
-    """**已文档化的限制**（独立验收第 1 条）：公有属性链不受本闸门约束。
+def test_public_attribute_traversal_is_data_only(parser):
+    """契约改写（#133）：公有链只允许数据，不再断言旧洞可读。
 
-    节点返回的对象若把模块挂在公有属性上，`$NODE.h.os.environ` 仍可读到进程环境。
-    这不是本单缺陷：issue 的 Boundary 明确"不做整体沙箱化"，修复只关闭"反射到
-    Python 内部属性"这条路（`__class__` / `__globals__`）。节点插件不应返回暴露
-    敏感模块的对象——文档（MIGRATION.md / 表达式指南）已按此表述。
+    修复前本测试断言 ``$NODE.h.os.environ is os.environ``（把洞当"已文档化的
+    限制"）。#133 落地后该链必须**具名拒绝**：``$NODE.h.os`` 本身就在属性结果
+    闸上抛错，不会先返回模块再等下一段；数据属性（``text``）不受影响。
     """
     import os
 
-    ctx = {"$NODE": {"h": SimpleNamespace(os=os)}}
-    assert parser.evaluate("$NODE.h.os.environ", ctx) is os.environ
-    with pytest.raises(ValueError, match="__class__"):
-        parser.evaluate("$NODE.h.os.__class__", ctx)
+    ctx = {"$NODE": {"h": SimpleNamespace(os=os, text="hi")}}
+    for expr in ("$NODE.h.os", "$NODE.h.os.environ",
+                 "$NODE.h.os.environ.HOME"):
+        with pytest.raises(ValueError) as excinfo:
+            parser.evaluate(expr, ctx)
+        message = str(excinfo.value)
+        assert "plaita#133" in message, expr
+        assert "$NODE.h.os" in message, expr
+        assert "module" in message, expr
+    assert parser.evaluate("$NODE.h.text", ctx) == "hi"
 
 
 # ---------------------------------------------------------------------------
@@ -509,13 +515,16 @@ def test_docs_quote_runtime_message_verbatim():
 
 
 def test_rejection_message_makes_no_sandbox_promise():
-    """错误文案不得把"改用公有属性"写成安全承诺（独立验收第 1 条）。"""
+    """错误文案不得把"改用公有属性"写成安全承诺（#55/#133 共同口径）。"""
     with pytest.raises(ValueError) as excinfo:
         _get_attr(Plain(), "__class__")
     message = str(excinfo.value)
-    assert "Only this prefix is gated" in message
-    assert "stay readable by design" in message
+    assert "plaita#133" in message
     assert "Use a public attribute name" not in message
+    # 旧文案的两句"只看这个前缀 / 公有属性按设计可读"已随 #133 作废：
+    # 公有属性现在也受对象种类闸约束，不能再给作者错误的豁免暗示。
+    assert "Only this prefix is gated" not in message
+    assert "stay readable by design" not in message
 
 
 def test_legacy_io_get_attr_is_reachable_but_not_an_expression_door():

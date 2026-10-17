@@ -1,0 +1,328 @@
+{
+  "issue": 133,
+  "title": "security(expr): attribute traversal is data-only (code objects refused by real type)",
+  "generated_at": "2026-10-17T16:45:41.810226+00:00",
+  "base_head": "f60397063e7866be6b9caeb0a184bc0d9e87a515",
+  "fix_commit_subject": "fix(security): #133 属性遍历只允许数据——代码对象按真实类型具名拒绝",
+  "carrier_note": "patch-133-data-only-traversal.patch is absent from gist 501029c5, #133 comment 6235415328 and #156. The fix was implemented from the issue specification by the landing seat.",
+  "before": {
+    "plaita_file": "/tmp/wt133-before/plaita/__init__.py",
+    "python": "3.13.3",
+    "cases": [
+      {
+        "expr": "$NODE.h.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$NODE.d.k",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$NODE.payload.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$INPUT.payload.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$NODE.ns.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$F.get($NODE.d, 'k')",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$NODE.h.os",
+        "ok": true,
+        "type": "module"
+      },
+      {
+        "expr": "$NODE.h.os.environ",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$NODE.h.os.environ.HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$NODE.h.os.__class__",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression field name '__class__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Only this prefix is gated: public attributes of node-returned objects stay readable by desi"
+      },
+      {
+        "expr": "$NODE.h.mod.environ",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$NODE.h.fn.x",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$NODE.h.cls.some_attr",
+        "ok": false,
+        "exc": "TypeError",
+        "msg": "string indices must be integers, not 'NoneType'"
+      },
+      {
+        "expr": "$NODE.h.gen.gi_frame",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$NODE.h.coro.cr_frame",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$NODE.h.agen.ag_frame",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$NODE.h.frame.f_locals",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$NODE.h.tb.tb_next",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$NODE.h.code.co_consts",
+        "ok": true,
+        "type": "NoneType",
+        "value": null
+      },
+      {
+        "expr": "$NODE.h.method.__self__",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression field name '__self__' is not allowed in an expression path: names starting with '_' are reserved for Python internals (for example __class__ / __globals__ / __init__), so the attribute form reaches process state and bypasses the $ENV allowlist, which is an opt-in exposure list and not a sandbox. Only this prefix is gated: public attributes of node-returned objects stay readable by desig"
+      },
+      {
+        "expr": "$NODE.h.env",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$NODE.h.env.HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$NODE.d.env.HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      }
+    ]
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "cases": [
+      {
+        "expr": "$NODE.h.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$NODE.d.k",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$NODE.payload.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$INPUT.payload.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$NODE.ns.text",
+        "ok": true,
+        "type": "str",
+        "value": "hello"
+      },
+      {
+        "expr": "$F.get($NODE.d, 'k')",
+        "ok": true,
+        "type": "str",
+        "value": "v"
+      },
+      {
+        "expr": "$NODE.h.os",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.os' traverses a non-data object of type 'module': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.os.environ",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.os' traverses a non-data object of type 'module': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.os.environ.HOME",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.os' traverses a non-data object of type 'module': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.os.__class__",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.os' traverses a non-data object of type 'module': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.mod.environ",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.mod' traverses a non-data object of type 'module': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.fn.x",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.fn' traverses a non-data object of type 'builtin_function_or_method': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.cls.some_attr",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.cls' traverses a non-data object of type 'ABCMeta': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.gen.gi_frame",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.gen' traverses a non-data object of type 'generator': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.coro.cr_frame",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.coro' traverses a non-data object of type 'coroutine': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.agen.ag_frame",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.agen' traverses a non-data object of type 'async_generator': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.frame.f_locals",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.frame' traverses a non-data object of type 'frame': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.tb.tb_next",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.tb' traverses a non-data object of type 'traceback': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.code.co_consts",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.code' traverses a non-data object of type 'code': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.method.__self__",
+        "ok": false,
+        "exc": "ValueError",
+        "msg": "expression path '$NODE.h.method' traverses a non-data object of type 'builtin_function_or_method': attribute traversal is data-only (plaita#133), so modules, functions, builtin functions, methods, classes, frames, tracebacks, generators, coroutines, async generators and code objects are refused by name. Read a data field instead; mapping keys and numeric indices are unchanged."
+      },
+      {
+        "expr": "$NODE.h.env",
+        "ok": true,
+        "type": "_Environ"
+      },
+      {
+        "expr": "$NODE.h.env.HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      },
+      {
+        "expr": "$NODE.d.env.HOME",
+        "ok": true,
+        "type": "str",
+        "same_as_home": true,
+        "len": 11
+      }
+    ]
+  },
+  "test_runs": {
+    "targeted_contract_and_render_inventory": "169 passed, 13 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "unit_full": "7715 passed, 2 failed (render-site registry; both re-run green after the registry entry was added: 9 passed, 13 subtests)",
+    "landing_gate_ci": "success: origin/main f603970 latest completed ci.yml run",
+    "ci_gate": "PASSED: pytest tests/ 8005 passed, 15 skipped, 3429 subtests, coverage 93.86% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "unit_fast": "7704 passed, 11 skipped, 13 deselected, 3429 subtests passed"
+  },
+  "negative_control": {
+    "mutation": "disable the _get_attr entry gate and the attribute-result gate",
+    "mutation_diff_sha256": "23c8afd1754f87cdb9f84d401c364ef186b11388cbed681e78f5c59baef2f680",
+    "issue133_test_file": {
+      "failed": 42,
+      "passed": 34
+    },
+    "issue55_contract_file": {
+      "failed": 1,
+      "passed": 83
+    },
+    "killed": true,
+    "note": "Data-positive and mapping/index tests stay green under the mutation; the failures are the code-object rejection assertions."
+  },
+  "adjacent_route_out_of_scope": {
+    "exprs": [
+      "$NODE.h.env",
+      "$NODE.h.env.HOME",
+      "$NODE.d.env.HOME"
+    ],
+    "status": "still readable (mapping-like value; mapping path unchanged by #133)",
+    "action": "separate issue filed, not mixed into this commit"
+  }
+}

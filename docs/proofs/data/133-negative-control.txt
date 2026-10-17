@@ -1,0 +1,74 @@
+# plaita#133 负控：把 _get_attr 的入口闸与结果闸同时关掉
+
+## mutation diff
+diff --git a/plaita/core/expression_parser.py b/plaita/core/expression_parser.py
+index a88a981..e65764b 100644
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -2774,7 +2774,7 @@ def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
+     文档承诺的原生 ``TypeError``/``KeyError``/``ValueError`` 照旧原样抛出），
+     具名化会改写原生异常类型 ⇒ 保留现状（见 W22-A RED-PROOF §3）。
+     """
+-    if _is_code_object(obj):
++    if False:  # MUTANT: entry gate disabled
+         _reject_non_data_traversal(path, obj, path_hint)
+     if _probe_isinstance(obj, dict, kind_name="dict", path=path):
+         return _mapping_get(obj, path)
+@@ -2785,7 +2785,7 @@ def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
+         _reject_reserved_field(path)
+     if _probe_hasattr(obj, "__dict__", path=path):
+         value = getattr(obj, path, None)
+-        if _is_code_object(value):
++        if False:  # MUTANT: result gate disabled
+             _reject_non_data_traversal(path, value, path_hint)
+         return value
+     return None
+
+## tests/unit/test_issue133_data_only_traversal.py
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[module-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[function-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[builtin_function-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[builtin_method-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[bound_method-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[class-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[frame-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[traceback-_make_traceback]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[generator-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[coroutine-_make_coroutine]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[async_generator-_make_async_generator]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_get_attr_refuses_code_object_as_base[code-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[module-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[function-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[builtin_function-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[builtin_method-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[bound_method-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[class-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[frame-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[traceback-_make_traceback]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[generator-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[coroutine-_make_coroutine]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[async_generator-_make_async_generator]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_attribute_value[code-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[module-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[function-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[builtin_function-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[builtin_method-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[bound_method-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[class-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[frame-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[traceback-_make_traceback]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[generator-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[coroutine-_make_coroutine]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[async_generator-_make_async_generator]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_parser_refuses_code_object_as_base[code-<lambda>]
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_all_roots_are_gated
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_error_names_full_path_and_real_type
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_runtime_message_is_exact
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_rejection_message_makes_no_sandbox_promise
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_error_does_not_echo_values
+FAILED tests/unit/test_issue133_data_only_traversal.py::test_flow_output_chain_raises_and_never_leaks_env
+42 failed, 34 passed in 0.58s
+
+## tests/unit/test_issue55_attr_traversal.py
+FAILED tests/unit/test_issue55_attr_traversal.py::test_public_attribute_traversal_is_data_only
+1 failed, 83 passed in 0.40s

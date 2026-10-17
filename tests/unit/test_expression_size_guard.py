@@ -3364,6 +3364,13 @@ _RENDER_SITES = {
      "_REJECTION_TEMPLATE.format(path=path)"): (
         "excluded", None,
         "错误消息模板：path 是解析器 token（str），消息 ≤4x len(path) ≤ 输入串"),
+    ("plaita/core/expression_parser.py", "_reject_non_data_traversal",
+     "method:format",
+     "_TRAVERSAL_REJECTION_TEMPLATE.format( path=path, "
+     "type_name=type(value).__name__)"): (
+        "excluded", None,
+        "错误消息模板（plaita#133）：path 是解析器 token（str），type_name 是 "
+        "type(value).__name__（短类名），不插值对象内容；消息 ≤ 固定模板 + 路径长度"),
     ("plaita/core/expression_parser.py", "_eval_template", "method:join",
      '"".join(out)'): (
         "bounded", None,

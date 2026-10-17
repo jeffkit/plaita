@@ -341,19 +341,23 @@ def _lookup_function(registry: Optional[Any], func_name: str) -> Optional[Callab
 #   explicit mapping helpers (``$F.get`` / ``$F.getDictValue`` / ``$F.keys`` …)
 #   still read/see it — that asymmetry is documented in MIGRATION.md (#55).
 #
-# **Scope (do not over-read this gate).** Only the ``_`` *prefix* is gated.  Public
-# attribute traversal is NOT sandboxed: a node that returns an object with a
-# public attribute pointing at a module (``SimpleNamespace(os=os)``) is still
-# traversable — ``$NODE.h.os.environ`` evaluates to the live process environment.
-# That is the trusted-authoring boundary this issue's Boundary section keeps
-# ("no whole-engine sandboxing"); the fix removes the *reflection* path to Python
-# internals, it does not turn node return values into untrusted data.  Node
-# plugins must therefore not return objects that expose sensitive modules.
+# **Scope.** The ``_`` prefix gate above is the lower bound; plaita#133 adds a
+# second, orthogonal gate: attribute traversal is **data-only**.  A public
+# attribute can hold a module / function / class / frame / generator / coroutine
+# / code object just as easily as an underscore-prefixed one can, so
+# ``$NODE.h.os.environ`` used to evaluate to the live process environment even
+# after #55.  #133 refuses those object kinds by real type at ``_get_attr``'s
+# entrance (the base object) and when the attribute's value is resolved (so
+# ``$NODE.h.os`` itself is refused, not only the next segment).  Data values —
+# including mapping-like containers such as ``os.environ`` when they are the
+# container being read — stay readable; the mapping / index paths are otherwise
+# unchanged.  ``$ENV``'s allowlist, the ``$F.*`` registry and ``{% %}``
+# semantics are untouched.
 #
 # Rejection is a hard ``ValueError`` (the exception type the issue selects and
 # the one this layer already raises — ``ExpressionRegistry``): a silent ``None``
-# is indistinguishable from a missing key, which is the failure mode #55 calls
-# out.  Nothing about the object is echoed in the message.
+# is indistinguishable from a missing key, which is the failure mode #55 and #133
+# call out.  Nothing about the object is echoed in the message.
 _RESERVED_FIELD_PREFIX = "_"
 _RESERVED_DUNDER_PREFIX = "__"
 
@@ -364,14 +368,85 @@ _REJECTION_TEMPLATE = (
     "starting with '_' are reserved for Python internals (for example __class__ / "
     "__globals__ / __init__), so the attribute form reaches process state and "
     "bypasses the $ENV allowlist, which is an opt-in exposure list and not a "
-    "sandbox. Only this prefix is gated: public attributes of node-returned "
-    "objects stay readable by design (MIGRATION.md #55)."
+    "sandbox. Public attribute traversal is additionally data-only (plaita#133): "
+    "public attributes that resolve to modules, functions, classes, frames, "
+    "generators, coroutines or other code objects are refused by name."
 )
 
 
 def _reject_reserved_field(path: str) -> None:
     """Raise ``ValueError`` for a rejected traversal segment (plaita#55)."""
     raise ValueError(_REJECTION_TEMPLATE.format(path=path))
+
+
+#: plaita#133: object kinds that an expression path must never traverse.  A
+#: public attribute can hold a module / function / class / frame / generator /
+#: coroutine / code object just as easily as an underscore-prefixed one can, so
+#: the ``_`` gate alone leaves a live process-state route (``$NODE.h.os.environ``).
+#: These are **real types** (``type(obj).__mro__``), never the object's
+#: ``__class__``: plaita#163 established that a host can make ``__class__`` raise
+#: or lie, while ``type(obj)`` reads the C ``ob_type`` slot without entering host
+#: code.  ``type`` itself is included so class objects are refused too.
+_REJECTED_TRAVERSAL_TYPES = (
+    types.ModuleType,
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.MethodType,
+    types.CodeType,
+    types.FrameType,
+    types.TracebackType,
+    types.GeneratorType,
+    types.CoroutineType,
+    types.AsyncGeneratorType,
+    type,
+)
+
+#: Exact wording is pinned by tests/unit/test_issue133_data_only_traversal.py
+#: (runtime message == the string quoted in MIGRATION.md and the expression
+#: guide).  It names the path, the real type and the issue, and deliberately
+#: echoes no value (a code object may carry credentials in its attributes).
+_TRAVERSAL_REJECTION_TEMPLATE = (
+    "expression path {path!r} traverses a non-data object of type {type_name!r}: "
+    "attribute traversal is data-only (plaita#133), so modules, functions, "
+    "builtin functions, methods, classes, frames, tracebacks, generators, "
+    "coroutines, async generators and code objects are refused by name. Read a "
+    "data field instead; mapping keys and numeric indices are unchanged."
+)
+
+
+def _is_code_object(obj: Any) -> bool:
+    """Return ``True`` when *obj* is a code-like object (plaita#133).
+
+    The predicate walks ``type(obj).__mro__`` — the C-level type slot — so a
+    host-defined ``__class__`` property cannot influence the verdict (plaita#163
+    discipline).  Membership is **identity** (``is``), not ``in``: a metaclass
+    may define ``__eq__`` and claim its instances' class is ``type`` (#170 F1
+    showed the same equality trap in a dispatch predicate), which would turn a
+    data instance into a false refusal.
+
+    It is deliberately a **type** check, not an attribute-name or value-shape
+    check: ``os.environ`` is a mapping-like data container and stays readable as
+    a mapping, while the module that exposes it does not.
+    """
+    return any(
+        any(base is rejected for rejected in _REJECTED_TRAVERSAL_TYPES)
+        for base in type(obj).__mro__
+    )
+
+
+def _reject_non_data_traversal(path: str, value: Any, path_hint: Any = None) -> None:
+    """Raise the named plaita#133 refusal for a code-like *value*.
+
+    *path_hint* is ``(root_key, walked_segments, upto)`` supplied by the
+    evaluator; rendering it only on the error path keeps the hot path free of
+    string work.  Direct ``_get_attr`` callers (tests, internal helpers) pass no
+    hint and get the segment name in the message.
+    """
+    if path_hint is not None:
+        root_key, walked, upto = path_hint
+        path = _render_path(root_key, walked[:upto])
+    raise ValueError(_TRAVERSAL_REJECTION_TEMPLATE.format(
+        path=path, type_name=type(value).__name__))
 
 
 # ---------------------------------------------------------------------------
@@ -2661,7 +2736,7 @@ def _probe_getattr(value: Any, attribute: str, default: Any, *, path: str) -> An
         )) from exc
 
 
-def _get_attr(obj: Any, path: str) -> Any:
+def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
     """Read *path* off *obj* — mirrors the non-bracket branch of the old
     ``plaita.io.get_attr``.
 
@@ -2678,6 +2753,14 @@ def _get_attr(obj: Any, path: str) -> Any:
     the ``$F.*`` mapping helpers).  Rejection raises ``ValueError`` — never a
     silent ``None``.  See the gate comment above for the rationale and scope.
 
+    plaita#133：入口先用**真实类型**拒绝代码对象（module / function / class /
+    frame / generator / coroutine / code / method / traceback），属性路径解析出的
+    **值**若也是代码对象同样拒绝——所以 ``$NODE.h.os`` 本身即抛错，不会先返回
+    模块再等下一段。谓词只看 ``type(obj).__mro__``，不读对象自己的 ``__class__``
+    （#163 纪律）。``path_hint=(root_key, walked, upto)`` 只在拒绝时渲染完整路径，
+    成功路径不做字符串拼接。映射路径 / 索引路径的键与容器语义不变（``os.environ``
+    作为**容器**被按键读取时仍是数据面）。
+
     plaita#163：``isinstance(obj, dict)`` 走 :func:`_probe_isinstance`——宿主
     ``__class__`` 抛异常时是具名 ``ValueError``（含 ``plaita#69``），不是裸异常。
 
@@ -2691,6 +2774,8 @@ def _get_attr(obj: Any, path: str) -> Any:
     文档承诺的原生 ``TypeError``/``KeyError``/``ValueError`` 照旧原样抛出），
     具名化会改写原生异常类型 ⇒ 保留现状（见 W22-A RED-PROOF §3）。
     """
+    if _is_code_object(obj):
+        _reject_non_data_traversal(path, obj, path_hint)
     if _probe_isinstance(obj, dict, kind_name="dict", path=path):
         return _mapping_get(obj, path)
     if (_probe_hasattr(obj, "__getitem__", path=path)
@@ -2699,7 +2784,10 @@ def _get_attr(obj: Any, path: str) -> Any:
     if path.startswith(_RESERVED_FIELD_PREFIX):
         _reject_reserved_field(path)
     if _probe_hasattr(obj, "__dict__", path=path):
-        return getattr(obj, path, None)
+        value = getattr(obj, path, None)
+        if _is_code_object(value):
+            _reject_non_data_traversal(path, value, path_hint)
+        return value
     return None
 
 
@@ -3157,7 +3245,11 @@ class ExpressionParser:
                         "expression references missing input key %r; evaluating to None", raw,
                     )
                 container = obj
-                attr = _get_attr(container, target)
+                attr = _get_attr(
+                    container, target,
+                    # #133: render the full path only if the gate rejects.
+                    path_hint=(root_key, effective_segments, position + 1),
+                )
                 # 仅当字符串属性值本身是表达式（$ 前缀变量 / {% %} 模板）时才递归
                 # 求值——这是"嵌套表达式字符串"的历史语义。任意普通字符串（可能含
                 # [tag]、引号、换行等元字符）不再二次解析，否则节点输出一旦被下游
