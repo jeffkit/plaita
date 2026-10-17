@@ -38,6 +38,7 @@ from plaita.core.callback import (
 )
 from plaita.core.context import ExecutionContext
 from plaita.core.executor_compat import CompatRunMixin
+from plaita.core.executor_express import ExpressNamespaceMixin
 
 logger = logging.getLogger(__name__)
 from plaita.core.runner import InvalidTimeoutError, NodeRunner
@@ -207,7 +208,7 @@ def _merge_timeout_ms(a_ms, b_ms):
     return min(a_ms, b_ms)
 
 
-class FlowExecution(CompatRunMixin):
+class FlowExecution(ExpressNamespaceMixin, CompatRunMixin):
     """Thin facade composing ExecutionContext, NodeRunner, and strategies.
 
     Nodes receive this instance as the ``execution`` parameter.  State and
@@ -311,53 +312,9 @@ class FlowExecution(CompatRunMixin):
         self._ctx.cancel_event.set()
         self._ctx.cancel_requested.set()
 
-    @property
-    def express_prefix(self) -> str:
-        return self._ctx.express_prefix
-
-    @express_prefix.setter
-    def express_prefix(self, value: str) -> None:
-        self._ctx.express_prefix = value
-
-    @property
-    def express_input_name(self) -> str:
-        return self._ctx.express_input_name
-
-    @express_input_name.setter
-    def express_input_name(self, value: str) -> None:
-        self._ctx.express_input_name = value
-
-    @property
-    def express_parent_name(self) -> str:
-        return self._ctx.express_parent_name
-
-    @express_parent_name.setter
-    def express_parent_name(self, value: str) -> None:
-        self._ctx.express_parent_name = value
-
-    @property
-    def express_node_name(self) -> str:
-        return self._ctx.express_node_name
-
-    @express_node_name.setter
-    def express_node_name(self, value: str) -> None:
-        self._ctx.express_node_name = value
-
-    @property
-    def express_global_name(self) -> str:
-        return self._ctx.express_global_name
-
-    @express_global_name.setter
-    def express_global_name(self, value: str) -> None:
-        self._ctx.express_global_name = value
-
-    @property
-    def express_environment_variable(self) -> str:
-        return self._ctx.express_environment_variable
-
-    @express_environment_variable.setter
-    def express_environment_variable(self, value: str) -> None:
-        self._ctx.express_environment_variable = value
+    # express_* 命名空间族(12 property)已按职责拆至
+    # ``plaita/core/executor_express.py`` 的 ``ExpressNamespaceMixin``
+    # (SC-003:FlowExecution 曾达 411 LOC > 硬天花板 400,见 run de1fc13/4f5a7b6)。
 
     @property
     def state(self) -> _StateView:
