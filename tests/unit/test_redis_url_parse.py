@@ -2467,6 +2467,7 @@ class TestMaskerGenerativeProperty(unittest.TestCase):
                 f"{name}: 泄露超过登记的已知边界",
             )
 
+    @pytest.mark.timeout(1200)  # 4600 语料 × 掩码全链在 CI 2 核上 >150s 默认门（本机 3.13.3 实测 13m12s）
     def test_corpus_assertion_table_has_no_unasserted_shape(self):
         """多种子扫掠（要求 1b）+ 逐槽断言表（要求 2a）：未断言形状数 **== 0**。
 
