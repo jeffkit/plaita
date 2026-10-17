@@ -3427,6 +3427,29 @@ _RENDER_SITES = {
      '_MAPPING_VIEW_SPOOFED_TEMPLATE.format( func=func_name, type_name=type(value).__name__)'): (
         'excluded', None,
         "#69 拒绝消息模板（_MUTATOR_*/_MAPPING_VIEW_*）：插值 func 名/实参位/静态路径渲染/类型名，均来自静态表达式源，非运行期结果数据"),
+    # --- #163 探测具名化模板（W22-A 登记补记：`_probe_isinstance` 是 #163 交付的
+    #     站点——它落进源码时未同步本表，`fix/w14-a` @ `bd3954ea` 上本类即红；
+    #     `_probe_hasattr` 是 W22-A 补的同形状第二条）---
+    ('plaita/core/expression_parser.py', '_probe_isinstance', 'method:format',
+     '_TRAVERSAL_PROBE_FAILED_TEMPLATE.format( path=path, type_name=type(value).__name__, exc_type=type(exc).__name__, kind=kind_name, )'): (
+        'excluded', None,
+        "#163 探测具名化拒绝模板：插值 path 是解析器 token / 静态表达式路径渲染，"
+        "type_name/exc_type 是类型名（type() 读 C 槽，非运行期结果数据），"
+        "宿主异常文本刻意不回显；与 _MAPPING_VIEW_* 模板同一先例，非结果放大面"),
+    ('plaita/core/expression_parser.py', '_probe_hasattr', 'method:format',
+     '_HOST_ATTRIBUTE_PROBE_FAILED_TEMPLATE.format( path=path, type_name=type(value).__name__, exc_type=type(exc).__name__, attribute=attribute, )'): (
+        'excluded', None,
+        "#163 同形残面（W22-A）属性探针具名化拒绝模板：插值 path 是解析器 token / "
+        "静态表达式路径渲染，type_name/exc_type 是类型名（type() 读 C 槽，非运行期"
+        "结果数据），attribute 是引擎自选的属性名常量，宿主异常文本刻意不回显；"
+        "与 _MAPPING_VIEW_* 模板同一先例，非结果放大面"),
+    ('plaita/core/expression_parser.py', '_probe_getattr', 'method:format',
+     '_HOST_ATTRIBUTE_PROBE_FAILED_TEMPLATE.format( path=path, type_name=type(value).__name__, exc_type=type(exc).__name__, attribute=attribute, )'): (
+        'excluded', None,
+        "#163 同形残面（W22-A）属性探针具名化拒绝模板（取属性值那一支，与 "
+        "_probe_hasattr 同模板）：插值 path 是解析器 token / 静态表达式路径渲染，"
+        "type_name/exc_type 是类型名（type() 读 C 槽，非运行期结果数据），"
+        "attribute 是引擎自选的属性名常量，宿主异常文本刻意不回显；非结果放大面"),
     ('plaita/core/expression_parser.py', '_gate_mutator_argument', 'log:warning',
      '"plaita#69 mutation gate: failing closed for %r"'): (
         'excluded', None,
