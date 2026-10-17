@@ -1,12 +1,12 @@
 {
-  "name": "m12-cursor-rollback-guard-off",
-  "issue": "85",
-  "concern": "S8",
-  "file": "plaita/server/event_reconcile.py",
-  "rationale": "去掉游标单调守卫 → 陈旧写者可回退游标触发整窗重扫",
-  "expect_fail": [
-    "tests/unit/test_issue85_reconcile_hardening.py::TestS8CursorNoCas::test_save_cursor_refuses_rollback"
-  ],
-  "old": "            if current is not None and cursor < (current[0], current[1]):",
-  "new": "            if False:  # mutated"
+ "name": "m12-cursor-rollback-guard-off",
+ "issue": "85",
+ "concern": "S8",
+ "file": "plaita/server/event_reconcile.py",
+ "rationale": "去掉游标单调守卫 → 陈旧写者可回退游标触发整窗重扫",
+ "expect_fail": [
+  "tests/unit/test_issue85_reconcile_hardening.py::TestS8CursorNoCas::test_save_cursor_refuses_rollback"
+ ],
+ "old": "        if current is not None and cursor < (current[0], current[1]):",
+ "new": "        if False:  # mutated"
 }

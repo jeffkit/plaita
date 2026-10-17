@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
+from plaita.core.url_redaction import _scrub_url_text
 
 
 class KafkaQueueNode(BaseExtendedNode):
@@ -151,7 +152,7 @@ class KafkaQueueNode(BaseExtendedNode):
                 resolved = execution.evaluate(value)
                 return resolved if resolved is not None else value
             except Exception as e:
-                logger.warning("解析变量引用失败 %s: %s", value, e)
+                logger.warning("解析变量引用失败 %s: %s", value, _scrub_url_text(e))
                 return value
         
         return value

@@ -1,0 +1,561 @@
+{
+ "count": 50,
+ "definitions": [
+  {
+   "name": "m07-page-pagination-off-by-one",
+   "issue": "85",
+   "concern": "S1",
+   "file": "plaita/event/redis.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS1ExhaustionMustBeExplicit::test_dangling_index_flood_does_not_exhaust_candidates"
+   ],
+   "unlanded_feature": "页契约（EventPage/list_events_page）显式排空语义 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m13-quarantine-pins-instead-of-advancing",
+   "issue": "85",
+   "concern": "T1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT1QuarantineAndAdvance::test_a4a_one_dangling_then_six_valid",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT1QuarantineAndAdvance::test_a4d_persisted_cursor_dangling_front_across_rounds"
+   ],
+   "unlanded_feature": "隔离清单 + 推进（quarantine-and-advance）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m15-unresolved-claim-not-recognized",
+   "issue": "85",
+   "concern": "T3",
+   "file": "plaita/server/event_filter.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5b_rollback_failure_marks_unresolved_and_pins"
+   ],
+   "unlanded_feature": "去重认领回滚 / landed 探针 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m16-landed-probe-off",
+   "issue": "85",
+   "concern": "T3",
+   "file": "plaita/server/event_filter.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5a_ambiguous_enqueue_failure_does_not_duplicate"
+   ],
+   "unlanded_feature": "去重认领回滚 / landed 探针 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m17-page-contract-fallback-swallowed",
+   "issue": "85",
+   "concern": "U4",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT5PageContractMandatory::test_wrapped_page_reader_landing_on_default_is_loud"
+   ],
+   "unlanded_feature": "页契约默认实现响亮 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m19-type-key-recheck-off",
+   "issue": "85",
+   "concern": "T6",
+   "file": "plaita/event/redis.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT6ExhaustedConsistency::test_new_type_key_created_during_read_is_not_reported_exhausted"
+   ],
+   "unlanded_feature": "exhausted 一致性复核 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m20-rollback-failure-not-marked",
+   "issue": "85",
+   "concern": "T3",
+   "file": "plaita/server/event_filter.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5b_rollback_failure_marks_unresolved_and_pins"
+   ],
+   "unlanded_feature": "去重认领回滚 / landed 探针 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m21-last-position-not-capped-by-delivered",
+   "issue": "85",
+   "concern": "U1",
+   "file": "plaita/event/redis.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_no_loss_oracle.py::test_page_no_loss_oracle[2-3-2-0-front-interleaved]",
+    "tests/unit/test_issue85_no_loss_oracle.py::test_reconciler_no_loss_oracle[3-250-200-0-front-interleaved]"
+   ],
+   "unlanded_feature": "last_position 由已投递事件封顶 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m22-stopped-early-disabled",
+   "issue": "85",
+   "concern": "U2",
+   "file": "plaita/event/redis.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_no_loss_oracle.py::test_page_no_loss_oracle[3-5-10-0-front-interleaved]"
+   ],
+   "unlanded_feature": "stopped_early 显式化 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m23-quarantine-retry-disabled",
+   "issue": "85",
+   "concern": "U3'",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU3QuarantineRetry::test_r2_restored_payload_after_cursor_passed_is_recovered",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU3QuarantineRetry::test_a1a_missing_payload_restored_is_retried_and_delivered"
+   ],
+   "unlanded_feature": "隔离清单真实重试（get_event）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m24-trust-exhausted-with-events",
+   "issue": "85",
+   "concern": "U6",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU6DoNotTrustExhausted::test_exhausted_with_events_is_not_trusted"
+   ],
+   "unlanded_feature": "exhausted 不得在有事件时被采信 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m25-drain-confirmation-skipped",
+   "issue": "85",
+   "concern": "U7",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU7ConfirmDrain::test_event_appended_to_existing_type_after_empty_read_is_not_lost"
+   ],
+   "unlanded_feature": "排空确认（drain confirmation）—— 未落地（最小实现用截断判据，语义不同）",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m27-delivery-failure-bypasses-window",
+   "issue": "85",
+   "concern": "V1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV1QuarantineRetryWindow::test_poison_entry_beyond_window_is_abandoned_loudly"
+   ],
+   "unlanded_feature": "隔离重试窗 / 毒条目放弃 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m28-quarantine-reschedule-off",
+   "issue": "85",
+   "concern": "W1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV1QuarantineRetryWindow::test_poison_entry_does_not_starve_others"
+   ],
+   "unlanded_feature": "隔离清单选择器公平性 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m29-caller-side-cap-off",
+   "issue": "85",
+   "concern": "V2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV2CallerSideCap::test_lying_last_position_page_does_not_lose_events"
+   ],
+   "unlanded_feature": "调用侧封顶（advance_boundary）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m30-quarantine-ttl-not-aligned",
+   "issue": "85",
+   "concern": "V3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV3QuarantineTtl::test_ttl_aligned_with_storage_ttl"
+   ],
+   "unlanded_feature": "隔离 TTL 与存储 TTL 对齐 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m31-abandon-write-unconditional",
+   "issue": "85",
+   "concern": "V4",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV4ConditionalAbandon::test_abandon_write_requires_still_pending"
+   ],
+   "unlanded_feature": "条件放弃（CAS）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m32-quarantine-select-newest-first",
+   "issue": "85",
+   "concern": "W1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW1SelectorFairness::test_continuous_arrival_does_not_starve_old_entries"
+   ],
+   "unlanded_feature": "隔离清单选择器公平性 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m33-zero-delivery-without-evidence-allowed",
+   "issue": "85",
+   "concern": "W2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW2ZeroDeliveryEvidence::test_zero_delivery_without_evidence_is_loud_and_does_not_advance"
+   ],
+   "unlanded_feature": "零投递需证据 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m34-attempt-write-unconditional",
+   "issue": "85",
+   "concern": "W3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW3StaleAttemptWrite::test_stale_attempt_write_does_not_resurrect_deleted_entry"
+   ],
+   "unlanded_feature": "陈旧 attempt 条件写 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m35-vanish-warning-unconditional",
+   "issue": "85",
+   "concern": "W4",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW4VanishWarningPrecision::test_normal_recovery_does_not_warn_about_vanish"
+   ],
+   "unlanded_feature": "消失告警精度 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m36-read-failure-treated-as-absent",
+   "issue": "85",
+   "concern": "AA1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA1ReadFailureNoOrphan::test_transient_hmget_failure_does_not_orphan_entries"
+   ],
+   "unlanded_feature": "读失败不得孤儿化（hmget 失败）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m37-due-gate-off",
+   "issue": "85",
+   "concern": "AA2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA2AbsoluteDue::test_due_gate_enforces_backoff"
+   ],
+   "unlanded_feature": "绝对 due / 退避下限 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m38-backoff-zero",
+   "issue": "85",
+   "concern": "AA2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA2AbsoluteDue::test_backoff_survives_a_frozen_clock"
+   ],
+   "unlanded_feature": "绝对 due / 退避下限 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m39-heal-off",
+   "issue": "85",
+   "concern": "AA3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA3TwoKeyDivergence::test_hash_only_pending_is_healed_and_recovered"
+   ],
+   "unlanded_feature": "两键自愈（hash↔due）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m40-skipped-not-reconciled",
+   "issue": "85",
+   "concern": "AA4",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA4SkippedReconciliation::test_forged_skipped_cannot_justify_far_advance"
+   ],
+   "unlanded_feature": "skipped 对账 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m41-put-failure-still-advances",
+   "issue": "85",
+   "concern": "AA3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA3TwoKeyDivergence::test_put_failure_does_not_advance_cursor_past_bad_member"
+   ],
+   "unlanded_feature": "两键自愈（hash↔due）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m42-heal-cursor-not-persisted",
+   "issue": "85",
+   "concern": "AD1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD1HealCursorPersistence::test_heal_progress_survives_restart_every_round"
+   ],
+   "unlanded_feature": "自愈游标持久化 / 告警聚合 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m43-heal-warning-off",
+   "issue": "85",
+   "concern": "AD1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD1HealCursorPersistence::test_heal_warning_is_aggregated"
+   ],
+   "unlanded_feature": "自愈游标持久化 / 告警聚合 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m44-quarantine-pin-unbounded",
+   "issue": "85",
+   "concern": "AD2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD2RuntimeErrorInsideExec::test_runtime_error_inside_exec_recovers_tail_after_giveup"
+   ],
+   "unlanded_feature": "钉住轮数有上界 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m45-parse-retry-unbounded",
+   "issue": "85",
+   "concern": "AD3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD3UnparseableNoHeadOfLine::test_healthy_entries_recover_and_corrupt_is_dead_lettered"
+   ],
+   "unlanded_feature": "不可解析条目有界重试 → dead-letter —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m46-future-due-clamp-off",
+   "issue": "85",
+   "concern": "AD4",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD4ClockSkew::test_far_future_due_is_clamped_and_loud"
+   ],
+   "unlanded_feature": "未来 due 夹取 / 合法退避不告警 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m48-pin-streak-in-process",
+   "issue": "85",
+   "concern": "AF1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF1PinnedGiveupAcrossRestarts::test_restart_every_round_still_gives_up_and_delivers_tail"
+   ],
+   "unlanded_feature": "钉住计数跨重启（Redis 持久化）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m49-heal-advances-without-processing",
+   "issue": "85",
+   "concern": "AF2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF2HealCrashWindow::test_crash_in_cursor_window_every_round_still_heals_all"
+   ],
+   "unlanded_feature": "自愈崩溃窗 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m50-stall-warning-always",
+   "issue": "85",
+   "concern": "AF3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD4ClockSkew::test_legitimate_backoff_is_not_warned"
+   ],
+   "unlanded_feature": "停滞告警判据 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m52-heal-failure-log-off",
+   "issue": "85",
+   "concern": "AF5",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF5DoubleFaultLoud::test_failure_path_is_aggregated"
+   ],
+   "unlanded_feature": "自愈双故障聚合 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m53-left-pending-not-persisted",
+   "issue": "85",
+   "concern": "AF6",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF6VanishWarningAcrossRestarts::test_vanish_warning_survives_restart"
+   ],
+   "unlanded_feature": "left_pending 跨重启 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m54-pin-counts-per-member",
+   "issue": "85",
+   "concern": "AH1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH1PinCountsRounds::test_giveup_always_at_round_10_regardless_of_dangling_count"
+   ],
+   "unlanded_feature": "钉住按轮计数 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m57-starvation-watchdog-off",
+   "issue": "85",
+   "concern": "AH4",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH4StarvationWatchdog::test_trickle_success_does_not_hide_starvation"
+   ],
+   "unlanded_feature": "饥饿看门狗 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m58-dead-overflow-per-entry",
+   "issue": "85",
+   "concern": "AH5",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH5SmallItems::test_dead_overflow_is_aggregated_per_round"
+   ],
+   "unlanded_feature": "小件聚合（dead 溢出）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m59-marker-write-dead",
+   "issue": "85",
+   "concern": "AI1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI1MarkerWrite::test_uncatchable_crash_still_converges",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI1MarkerWrite::test_kv_set_str_roundtrip"
+   ],
+   "unlanded_feature": "KV marker 写入（防不可捕获崩溃）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m60-no-advance-unbounded",
+   "issue": "85",
+   "concern": "AI2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI2BoundedNoAdvance::test_persistent_failure_advances_loudly_after_bound"
+   ],
+   "unlanded_feature": "无推进有上界 / due_ms 兜底 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m61-due-ms-fallback-off",
+   "issue": "85",
+   "concern": "AI2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI2BoundedNoAdvance::test_non_numeric_due_ms_does_not_block_the_rest"
+   ],
+   "unlanded_feature": "无推进有上界 / due_ms 兜底 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m62-watchdog-round-amnesia",
+   "issue": "85",
+   "concern": "AL2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL2SingleStarvedAcrossRestarts::test_single_starved_field_is_named_despite_restarts"
+   ],
+   "unlanded_feature": "饥饿集合持久化 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m63-watchdog-ignores-state",
+   "issue": "85",
+   "concern": "AL1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI4WatchdogDirections::test_abandoned_state_is_not_starvation"
+   ],
+   "unlanded_feature": "看门狗判据（heal 推不动时）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m64-retry-overflow-silent",
+   "issue": "85",
+   "concern": "AI3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI3RetryOverflowLoud::test_overflow_is_reported_not_silent"
+   ],
+   "unlanded_feature": "重试溢出响亮 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m65-watchdog-estimate-trigger-off",
+   "issue": "85",
+   "concern": "AL1",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL1WatchdogWhenHealCannotAdvance::test_persistent_cursor_failure_is_still_watched"
+   ],
+   "unlanded_feature": "看门狗判据（heal 推不动时）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m66-starved-set-not-persisted",
+   "issue": "85",
+   "concern": "AL1/AL2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL2SingleStarvedAcrossRestarts::test_single_starved_field_is_named_despite_restarts"
+   ],
+   "unlanded_feature": "看门狗 + 饥饿集合持久化 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m67-sweep-never-finds",
+   "issue": "85",
+   "concern": "AL3",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL3SweepReachable::test_sweep_is_called_and_not_found_output_reachable"
+   ],
+   "unlanded_feature": "清扫可达 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  },
+  {
+   "name": "m70-gap-streak-write-shortcircuit",
+   "issue": "85",
+   "concern": "BB2",
+   "file": "plaita/server/event_reconcile.py",
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAV2SlowDeclineAndOscillationAreLoud::test_slow_decline_is_loud",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAY2SlowConvergenceWording::test_slow_but_converging_is_not_called_divergent",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAS1GrowingBacklogIsLoud::test_growing_backlog_warns_even_with_progress"
+   ],
+   "unlanded_feature": "停滞计数写入（积压告警）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。"
+  }
+ ]
+}

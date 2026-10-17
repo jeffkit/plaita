@@ -87,6 +87,7 @@ def server(tmp_path, monkeypatch):
     thread.join(timeout=5)
 
 
+@pytest.mark.needs_form_parser
 def test_e2e_plaita_client_fetch_and_run(server: str):
     client = PlaitaClient(secret_id=SECRET_ID, secret_key=SECRET_KEY, url=server)
     # _fetch_flow 返回 flow JSON **字符串**（服务端 data.flow 是字符串，客户端

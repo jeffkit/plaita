@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
+from plaita.core.url_redaction import _redact_env_value
 
 logger = logging.getLogger("plaita.core.expression")
 
@@ -299,10 +300,10 @@ def _resolve_positive_int(env_name: str, default: int) -> int:
     try:
         value = int(raw)
     except ValueError:
-        logger.warning("%s=%r 非法，回退默认 %d", env_name, raw, default)
+        logger.warning("%s=%s 非法，回退默认 %d", env_name, _redact_env_value(raw), default)
         return default
     if value <= 0:
-        logger.warning("%s=%r 非正，回退默认 %d", env_name, raw, default)
+        logger.warning("%s=%s 非正，回退默认 %d", env_name, _redact_env_value(raw), default)
         return default
     return value
 

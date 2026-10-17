@@ -41,8 +41,11 @@ from plaita.event.redis import RedisEventBus, RedisEventStorage
 _SHARED_SERVER = fakeredis.FakeServer()
 
 
-async def _fake_from_url(url):
-    # 与生产 ``aioredis.from_url(url)`` 默认一致：decode_responses=False
+async def _fake_from_url(url, **kwargs):
+    # 故意**忽略** ``decode_responses`` 并返回 bytes 客户端：本组 D3 测的是
+    # 「外部注入/共用连接池是 bytes 客户端」时 list_events 的 bytes 安全性
+    # （RedisEventStorage.initialize 现在自建客户端时显式开 decode_responses，
+    # 但注入路径不受它控制）。
     return fakeredis.aioredis.FakeRedis(server=_SHARED_SERVER, decode_responses=False)
 
 

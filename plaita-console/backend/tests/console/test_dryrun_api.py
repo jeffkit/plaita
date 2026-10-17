@@ -266,6 +266,15 @@ def test_dry_run_hierarchy_parallel_branches(client: TestClient):
                             ]},
                         },
                     ],
+                    # joinBranches 钉死归因时序（#134 CI 接入前必修）：
+                    # 不写 join 的分支属 background（fire-and-forget）——p 立即返回，
+                    # 主线程可能先 open 'end'，分支 flow 的跨线程归因兜底
+                    # （services/dryrun.py::_find_spawn_node_record 取"最近 open 节点"）
+                    # 会随机把分支归到 'end'（实测全量套件 ~半数概率翻车，冷/热线程池
+                    # 决定胜负）。join 分支令 p 阻塞等待，分支 flow 启动时 'p' 必然
+                    # open，归因确定走 'p'；守卫意图（兄弟分支同层 depth=1、不被爬链
+                    # 嵌套）与跨线程归因兜底路径（worker 线程 TLS 为空）均不变。
+                    "joinBranches": ["b1", "b2"],
                     "next": "end",
                 },
                 {"type": "end", "id": "end", "resultType": "success", "output": "$NODE.p"},

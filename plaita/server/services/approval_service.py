@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 from .base_service import BaseExtendedService
 from ...logger import logger
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 # 队列消费周期（秒）。service_config.poll_interval 可覆盖。
 APPROVAL_POLL_INTERVAL_SECONDS = 0.5
@@ -134,7 +135,7 @@ class ApprovalService(BaseExtendedService):
             logger.info("审批服务已启动（消费队列: %s）", self.queue_key)
             return True
         except Exception as e:  # noqa: BLE001 — 启动失败只告警不扩散
-            logger.error("启动审批服务失败: %s", e, exc_info=True)
+            logger.error("启动审批服务失败: %s", _scrub_exception_text(e))
             return False
 
     def stop_service(self) -> bool:
@@ -154,7 +155,7 @@ class ApprovalService(BaseExtendedService):
             logger.info("审批服务已停止")
             return True
         except Exception as e:  # noqa: BLE001 — 停止失败只告警不扩散
-            logger.error("停止审批服务失败: %s", e, exc_info=True)
+            logger.error("停止审批服务失败: %s", _scrub_exception_text(e))
             return False
 
     def _consume_queue(self) -> None:
@@ -168,7 +169,7 @@ class ApprovalService(BaseExtendedService):
             try:
                 self._consume_batch()
             except Exception as e:  # noqa: BLE001 — 单轮失败不杀消费线程
-                logger.error("审批队列轮询失败: %s", e, exc_info=True)
+                logger.error("审批队列轮询失败: %s", _scrub_exception_text(e))
             self._stop_event.wait(timeout=self._poll_interval)
 
     def _consume_batch(self) -> None:
@@ -211,7 +212,7 @@ class ApprovalService(BaseExtendedService):
                 try:
                     duplicate = bool(self._redis_client.get(self._record_key(approval_id)))
                 except Exception as e:  # noqa: BLE001 — 查询失败按不存在处理
-                    logger.warning("审批记录查询失败（按不存在处理）: %s", e)
+                    logger.warning("审批记录查询失败（按不存在处理）: %s", _scrub_url_text(e))
             if duplicate:
                 # 队列是 at-least-once：崩溃/重投会重复投递同一条。记录已在
                 # 说明审批已创建，重放不能重建记录（会清掉已落的审批决策）。
@@ -224,11 +225,11 @@ class ApprovalService(BaseExtendedService):
             finally:
                 try:
                     loop.close()
-                except Exception:
-                    logger.warning("event loop close failed during task cleanup", exc_info=True)
+                except Exception as exc:
+                    logger.warning("event loop close failed during task cleanup: %s", _scrub_exception_text(exc))
             logger.info("审批任务 %s 执行完成: %s", task_id, result)
         except Exception as e:  # noqa: BLE001 — 单任务失败不杀消费线程
-            logger.error("审批任务 %s 执行失败: %s", task_id, e, exc_info=True)
+            logger.error("审批任务 %s 执行失败: %s", task_id, _scrub_exception_text(e))
             self._handle_task_error(task_config, e)
         finally:
             self.active_tasks.discard(task_id)
@@ -248,7 +249,7 @@ class ApprovalService(BaseExtendedService):
         try:
             self._redis_client.lrem(self.queue_key, 1, raw)
         except Exception as e:  # noqa: BLE001 — 出队失败下轮重试
-            logger.error("审批任务出队失败: %s", e)
+            logger.error("审批任务出队失败: %s", _scrub_url_text(e))
         with self._inflight_lock:
             self._inflight.discard(raw)
 
@@ -287,7 +288,7 @@ class ApprovalService(BaseExtendedService):
             return True
 
         except Exception as e:  # noqa: BLE001 — 任务失败只告警返回 False
-            logger.error("处理审批任务失败: %s", e, exc_info=True)
+            logger.error("处理审批任务失败: %s", _scrub_exception_text(e))
             return False
 
     async def submit_approval_decision(self, approval_id: str, approver_id: str, decision: str, comments: str = "") -> Dict[str, Any]:
@@ -312,7 +313,7 @@ class ApprovalService(BaseExtendedService):
                 approval_id, approver_id, decision, comments
             )
         except Exception as e:  # noqa: BLE001 — 失败转错误响应不扩散
-            logger.error("提交审批决策失败: %s", e, exc_info=True)
+            logger.error("提交审批决策失败: %s", _scrub_exception_text(e))
             return {"status": "error", "message": str(e)}
 
     async def _submit_decision_memory(
@@ -449,8 +450,8 @@ class ApprovalService(BaseExtendedService):
         finally:
             try:
                 self._redis_client.eval(_RELEASE_IF_OWNED_LUA, 1, lock_key, holder)
-            except Exception:  # noqa: BLE001 — 释放失败靠锁 TTL 兜底过期
-                logger.warning("审批锁释放失败（TTL 兜底）: %s", lock_key, exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — 释放失败靠锁 TTL 兜底过期
+                logger.warning("审批锁释放失败（TTL 兜底）: %s: %s", lock_key, _scrub_exception_text(exc))
 
     @staticmethod
     def _build_completed_event_data(
@@ -539,14 +540,14 @@ class ApprovalService(BaseExtendedService):
         try:
             keys = list(self._redis_client.scan_iter(match=f"{self._record_prefix}*"))
         except Exception as e:  # noqa: BLE001 — 巡检失败返回空不扩散
-            logger.error("扫描审批记录失败: %s", e, exc_info=True)
+            logger.error("扫描审批记录失败: %s", _scrub_exception_text(e))
             return []
         if not keys:
             return []
         try:
             raws = self._redis_client.mget(keys)
         except Exception as e:  # noqa: BLE001 — 同上
-            logger.error("批量读取审批记录失败: %s", e, exc_info=True)
+            logger.error("批量读取审批记录失败: %s", _scrub_exception_text(e))
             return []
         records = []
         for raw in raws:

@@ -28,6 +28,7 @@ from .schedule_service import ScheduleService
 from .redis_queue_service import RedisQueueService
 from .approval_service import ApprovalService
 from .http_callback_service import HttpCallbackService
+from ...core.url_redaction import _scrub_url_text
 
 
 # 服务类映射
@@ -75,7 +76,7 @@ def main():
         redis_client.ping()
         logger.info("Redis 连接成功")
     except Exception as e:
-        logger.error("Redis 连接失败: %s", e)
+        logger.error("Redis 连接失败: %s", _scrub_url_text(e))
         sys.exit(1)
     
     # 创建事件总线

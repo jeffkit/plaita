@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Optional
 from redis import Redis
 
 from ..logger import logger
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 
 class ControlCommand:
@@ -129,7 +130,7 @@ class ControlListener:
                 self._pubsub.unsubscribe(self.control_channel)
                 self._pubsub.close()
             except Exception as e:
-                logger.warning("关闭 Pub/Sub 时出错: %s", e)
+                logger.warning("关闭 Pub/Sub 时出错: %s", _scrub_url_text(e))
         
         if self._listener_thread:
             self._listener_thread.join(timeout=5)
@@ -159,7 +160,7 @@ class ControlListener:
                     self._handle_message(message["data"])
 
         except Exception as e:
-            logger.error("控制监听器出错: %s", e, exc_info=True)
+            logger.error("控制监听器出错: %s", _scrub_exception_text(e))
     
     def _handle_message(self, data):
         """
@@ -189,7 +190,7 @@ class ControlListener:
                 logger.warning("未知的控制指令: %s", command.command)
                 
         except Exception as e:
-            logger.error("处理控制指令失败: %s", e, exc_info=True)
+            logger.error("处理控制指令失败: %s", _scrub_exception_text(e))
     
     def _handle_stop(self, command: ControlCommand):
         """处理停止指令"""

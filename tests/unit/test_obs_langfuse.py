@@ -402,6 +402,39 @@ class TestDirectErrorHooks(unittest.TestCase):
         self.assertEqual(span.updates[0]["status_message"], "炸了")
         self.assertTrue(span.ended)
 
+    def test_keep_span_open_marker_leaves_span_open_on_error(self):
+        """**路径标记守卫**（收口批①，防「错误路径一律 end」再回来）。
+
+        本类里两条测试**都**带 error 调 `on_node_end`，区分点**不在**「有没有 error」，
+        而在**来路**（okguitar 裁决 B 的核心洞察）：
+        - `test_mark_error_on_open_span`（上方）：**不带**标记 ⇒ 直接错误钩子 ⇒ **必须 end**
+        - 本测试：**带** `keep_span_open=True` ⇒ abort/取消/超时补发 ⇒ **必须保持 open**
+
+        本测试直接打 `LangfuseCallback.on_node_end`，**不经 runner 接线** —— 这样即使有人
+        把 runner 侧的标记删掉，也会有一条**定位到 obs 层**的测试明确失败，而不是只有
+        端到端那条间接暴露。**两条测试必须一起成立**，才算「按来路分流」的契约完好。
+        """
+        recorder = FakeRecorder()
+        cb = LangfuseCallback(client=recorder, background=False)
+
+        class F:
+            flow_id = "f"
+
+        class N:
+            id = "keep_open"
+            node_type = "t"
+
+        cb.on_node_start(F(), N())
+        # 与「直接错误钩子」同一形状（都带 error），**只多一个路径标记**
+        cb.on_node_end(F(), N(), error="aborted", keep_span_open=True)
+        span = [o for o in recorder.observations
+                if o.kind == "span" and o.name == "keep_open"][0]
+        # ① 错误**仍要可见**（#25 的诉求不能被牺牲）
+        self.assertEqual(span.updates[0]["level"], "ERROR")
+        self.assertEqual(span.updates[0]["status_message"], "aborted")
+        # ② 但 span **不得被终结**（abort 契约）
+        self.assertFalse(span.ended, "带 keep_span_open=True 的错误回调不得终结 span")
+
     def test_unmatched_node_end_is_noop(self):
         recorder = FakeRecorder()
         cb = LangfuseCallback(client=recorder, background=False)

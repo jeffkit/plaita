@@ -76,6 +76,20 @@ def _dt_to_iso(value: Any) -> str:
         return str(value)
 
 
+def _parse_updated_at(value: Any) -> Optional[datetime]:
+    """客户端回传的乐观锁基准串 → datetime（CAS 谓词用）；解析失败返回 None。
+
+    基准以 datetime 绑定进条件 UPDATE，由驱动按列类型归一（SQLite 存储格式
+    与 PG timestamp 均正确比对），避免「ISO 串 vs 库内格式」的表面差异误判。
+    """
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_unique_violation(exc: IntegrityError) -> bool:
     """判断 IntegrityError 是否为**唯一约束冲突**（而非主键冲突等其它完整性错误）。
 
@@ -402,26 +416,35 @@ class FlowStore:
                     raise ValueError(
                         f"版本 {flow_id}@{version} 已发布，不可覆盖"
                     )
-                stored = self._stored_updated_at(session, flow_id, version, tenant_id)
-                if (
-                    base_updated_at is not None
-                    and stored is not None
-                    and stored != base_updated_at
-                    and not force
-                ):
+                # ---- #101 修复：乐观锁必须是原子 CAS ----
+                # 旧实现「独立 SELECT 读 updated_at 比对 → 按主键 ORM UPDATE」
+                # 两步之间无行锁无条件更新，两个持同一 base 的并发保存会双双
+                # 通过检查、后写者静默覆盖先写者。现合并为单条条件 UPDATE：
+                # WHERE 带 ``updated_at = :base`` 谓词，rowcount==0 即基准已
+                # 被他人推进（或行已消失）→ 拒绝（409 语义），面朝安全侧。
+                cas_ok = self._cas_update_draft(
+                    session,
+                    flow_id=flow_id,
+                    version=version,
+                    tenant_id=tenant_id,
+                    definition=definition,
+                    layout=layout,
+                    status=status,
+                    base_updated_at=base_updated_at,
+                    force=force,
+                )
+                if not cas_ok:
+                    stored = self._stored_updated_at(
+                        session, flow_id, version, tenant_id
+                    )
                     raise VersionConflictError(
                         f"画布所基于的版本已被他人更新（{flow_id}@{version}），"
                         "请加载最新或选择强制覆盖",
                         latest_updated_at=stored,
                     )
-                existing.definition = definition
-                existing.layout = layout
-                existing.status = status
-                session.flush()
-                self._touch_updated_at(session, flow_id, version, tenant_id)
                 session.commit()
                 return SaveFlowDefinitionResult(
-                    flow_id=flow_id, version=version, status=existing.status
+                    flow_id=flow_id, version=version, status=status
                 )
             row = FlowVersion(
                 tenant_id=tenant_id,
@@ -437,6 +460,66 @@ class FlowStore:
             self._touch_updated_at(session, flow_id, version, tenant_id)
             session.commit()
             return SaveFlowDefinitionResult(flow_id=flow_id, version=version, status=status)
+
+    def _cas_update_draft(
+        self,
+        session: Session,
+        *,
+        flow_id: str,
+        version: str,
+        tenant_id: str,
+        definition: str,
+        layout: str,
+        status: str,
+        base_updated_at: Optional[str],
+        force: bool,
+    ) -> bool:
+        """单条条件 UPDATE 原子完成「基准比对 + 草稿写入 + 基准前进」（#101）。
+
+        返回 True=写入成功；False=基准已过期/无法判定（调用方应抛
+        VersionConflictError，拒绝面朝安全侧）。能力降级：
+
+        - ``flow_versions.updated_at`` 列不存在（旧库）：无法 CAS，退化为
+          无条件更新（保留历史行为），但 warning 让「无并发保护」可见；
+        - ``base_updated_at`` 为 None（存量调用方，未带基准）或 ``force=True``：
+          按设计跳过比对，无条件更新（原行为不变）。
+        """
+        params: Dict[str, Any] = {
+            "definition": definition,
+            "layout": layout,
+            "status": status,
+            "ts": datetime.utcnow(),
+            "tid": tenant_id,
+            "fid": flow_id,
+            "ver": version,
+        }
+        sql = (
+            "UPDATE flow_versions SET definition = :definition, layout = :layout, "
+            "status = :status, updated_at = :ts "
+            "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver"
+        )
+        if not self._updated_at_supported(session):
+            logger.warning(
+                "flow_versions.updated_at 列不可用，草稿保存退化为无并发保护"
+                "的覆盖写（flow=%s@%s）——乐观锁 #101 失效，请升级库结构",
+                flow_id,
+                version,
+            )
+            sql = (
+                "UPDATE flow_versions SET definition = :definition, "
+                "layout = :layout, status = :status "
+                "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver"
+            )
+        elif base_updated_at is not None and not force:
+            base_dt = _parse_updated_at(base_updated_at)
+            if base_dt is None:
+                # 基准串解析不了就无法构造可信的 CAS 谓词——按过期处理，
+                # 宁可误 409 也不静默覆盖（安全侧）
+                return False
+            sql += " AND updated_at = :base_updated_at"
+            params["base_updated_at"] = base_dt
+        result = session.execute(text(sql), params)
+        return bool(result.rowcount)
 
     # ---- updated_at 原生 SQL（C5-1）----
     # 列不在 ORM 映射内（见模块头注释）；这里统一读写并做能力降级：
@@ -456,7 +539,11 @@ class FlowStore:
     def _touch_updated_at(
         self, session: Session, flow_id: str, version: str, tenant_id: str
     ) -> None:
-        """同事务内刷新 updated_at（保存即前进乐观锁基准）。"""
+        """同事务内刷新 updated_at（保存即前进乐观锁基准）。
+
+        #101 后仅用于新建版本的 INSERT 分支；既有行的更新已并入
+        ``_cas_update_draft`` 的单条条件 UPDATE（比对与写必须同一原子操作）。
+        """
         if not self._updated_at_supported(session):
             return
         session.execute(
@@ -897,8 +984,13 @@ def finish_local_execution(
     output_json: Optional[str] = None,
     error_json: Optional[str] = None,
     context_json: Optional[str] = None,
+    usage_json: Optional[str] = None,
 ) -> None:
-    """终结一条本地执行记录。"""
+    """终结一条本地执行记录。
+
+    ``usage_json``（plaita#37）：run 级 usage 汇总的 JSON 串；**不传 = 不动该
+    列**（老调用方零变化），未采集由调用方显式传 ``"null"``。
+    """
     update_local_execution(
         execution_id,
         status=status,
@@ -906,6 +998,7 @@ def finish_local_execution(
         **({"output_json": output_json} if output_json is not None else {}),
         **({"error_json": error_json} if error_json is not None else {}),
         **({"context_json": context_json} if context_json is not None else {}),
+        **({"usage_json": usage_json} if usage_json is not None else {}),
     )
 
 
@@ -928,6 +1021,9 @@ def _local_row_to_dict(row: LocalExecution) -> dict:
         "output": _loads_or_none(row.output_json),
         # 与 worker 侧 NodeTimingCallback 同构的节点耗时视图，前端只认这一份
         "node_timings": _timings_from_nodes(nodes) or None,
+        # plaita#37 P2：run 级 usage 原样读出（页面级展示视图由 API 层折算，
+        # 本层只做 JSON 解码）。老行/未采集 ⇒ None（**不是 0**）。
+        "usage": _loads_or_none(getattr(row, "usage_json", None)),
     }
 
 
@@ -1203,7 +1299,12 @@ def _migrate_sqlite_columns() -> None:
     from sqlalchemy import text as _text
 
     wanted = {
-        "local_executions": {"context_json": "TEXT NOT NULL DEFAULT 'null'"},
+        "local_executions": {
+            "context_json": "TEXT NOT NULL DEFAULT 'null'",
+            # plaita#37 P2：usage 汇总列。默认 'null' = 未采集——老行补列即得
+            # None（不是 0），零迁移。
+            "usage_json": "TEXT NOT NULL DEFAULT 'null'",
+        },
         # C5-1 乐观并发：旧库补 updated_at 列（新库由 create_all 按追加列后的
         # 映射表直接建出；此处 PRAGMA 判缺再补，幂等）
         "flow_versions": {"updated_at": "DATETIME"},

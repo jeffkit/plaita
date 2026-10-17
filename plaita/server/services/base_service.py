@@ -15,6 +15,7 @@ from ...logger import logger
 from ...event.core import EventBus, Event
 from ..registry import RegistryMixin, ServiceRegistry
 from ..control import ControlMixin
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 # resume 事件尽力落盘的键前缀与 TTL（Track P2 任务2）：与 RedisEventStorage
 # （event/redis.py，key_prefix 默认 "plaita:event:"、DEFAULT_TTL 7 天）键格式
@@ -210,7 +211,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             logger.info("异步任务 %s 执行完成: %s", task_id, result)
             
         except Exception as e:
-            logger.error("异步任务 %s 执行失败: %s", task_id, e, exc_info=True)
+            logger.error("异步任务 %s 执行失败: %s", task_id, _scrub_exception_text(e))
             self._handle_task_error(task_config, e)
         finally:
             # 从活跃任务集合中移除
@@ -220,8 +221,8 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 self.update_registry_info(active_tasks=len(self.active_tasks))
             try:
                 loop.close()
-            except Exception:
-                logger.warning("event loop close failed during task cleanup", exc_info=True)
+            except Exception as exc:
+                logger.warning("event loop close failed during task cleanup: %s", _scrub_exception_text(exc))
     
     def _run_sync_task(self, task_config: Dict[str, Any], task_id: str):
         """
@@ -236,7 +237,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             logger.info("同步任务 %s 执行完成: %s", task_id, result)
             
         except Exception as e:
-            logger.error("同步任务 %s 执行失败: %s", task_id, e, exc_info=True)
+            logger.error("同步任务 %s 执行失败: %s", task_id, _scrub_exception_text(e))
             self._handle_task_error(task_config, e)
         finally:
             # 从活跃任务集合中移除
@@ -300,7 +301,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             self.event_bus.publish_sync("service_error", **error_event_data)
             
         except Exception as e:
-            logger.error("处理任务错误时出错: %s", e, exc_info=True)
+            logger.error("处理任务错误时出错: %s", _scrub_exception_text(e))
     
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """
@@ -322,7 +323,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             logger.info("事件已触发: %s, 数据: %s", event_type, event_data)
 
         except Exception as e:
-            logger.error("触发事件失败: %s", e, exc_info=True)
+            logger.error("触发事件失败: %s", _scrub_exception_text(e))
 
     def _persist_resume_event_best_effort(self, event: Event) -> None:
         """尽力把直发频道的 resume 事件写进事件存储（fail-open）。
@@ -357,7 +358,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         except Exception as e:  # noqa: BLE001 — 兜底链路失败不外溢
             logger.warning(
                 "resume 事件落盘失败（不影响直发主链路，回扫补偿缺失窗口）: %s",
-                e, exc_info=True,
+                _scrub_exception_text(e),
             )
 
     async def publish_resume_event(self, event_type: str, event_data: Dict[str, Any]):
@@ -413,7 +414,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
                 event.correlation_id,
             )
         except Exception as e:  # noqa: BLE001 — #35：转译为 ResumePublishError 上抛
-            logger.error("触发 resume 事件失败: %s", e, exc_info=True)
+            logger.error("触发 resume 事件失败: %s", _scrub_exception_text(e))
             raise ResumePublishError(str(e) or type(e).__name__) from e
     
     def get_active_task_count(self) -> int:
@@ -464,7 +465,7 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         try:
             self.thread_pool.shutdown(wait=True)
         except Exception as e:
-            logger.warning("关闭线程池时出错: %s", e)
+            logger.warning("关闭线程池时出错: %s", _scrub_url_text(e))
         
         logger.info("%s 服务已关闭", self.get_service_type())
 

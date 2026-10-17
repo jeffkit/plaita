@@ -8,6 +8,6 @@
     "tests/unit/test_issue109_110_r3_parity.py::Test110SqlalchemyDirtyRowSkipped::test_dirty_row_skipped_and_good_row_kept_both_shapes",
     "tests/unit/test_issue109_110_r3_parity.py::Test110ModelConstructDivergenceDeclared::test_divergence_counts"
   ],
-  "old": "                    logger.warning(\n                        \"事件订阅存储：跳过非法订阅行（id=%s, event_type=%r）：%s\",\n                        db_sub.id, db_sub.event_type, e)\n                    continue",
+  "old": "                    logger.warning(\n                        \"事件订阅存储：跳过非法订阅行（id=%s, event_type=%r）：%s\",\n                        db_sub.id, db_sub.event_type, _scrub_url_text(e))\n                    continue",
   "new": "                    raise  # mutation: 整批丢弃"
 }

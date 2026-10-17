@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from redis import Redis
 
+from ..core.url_redaction import _scrub_url_text
 from .tenant_context import current_tenant
 
 # 审计通道（#84）：丢弃/刷新失败告警**故意**不挂在 `plaita` logger 树上
@@ -251,7 +252,7 @@ class RedisStreamHandler(logging.Handler):
                 dropped_total = self._dropped
             _audit_logger.warning(
                 "日志刷新失败: %s（本批起回灌 %d 条，丢弃最旧 %d 条，累计丢弃 %d，队列 %d/%d）",
-                e, len(pending), max(0, overflow), dropped_total, queue_len,
+                _scrub_url_text(e), len(pending), max(0, overflow), dropped_total, queue_len,
                 self.max_queue,
             )
     

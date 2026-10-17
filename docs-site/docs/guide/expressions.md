@@ -443,6 +443,37 @@ plaita 内置 60+ 函数，按类别分布在 `ExpressionRegistry` 中：
     verifier 的 T2-1 变体（`ctx.set_state("$V", ctx.get_state("$INPUT")["deep"])`，活子对象
     从未被当路径终点交出过）同样被拒且零写穿。
 
+    **r14 / plaita#164 补记：显式 scratch 捐献 `ctx.set_scratch(key, value)`**。上面那条
+    收紧让"宿主手里已有的对象"没有直白写法；`set_scratch` 是给它的**显式声明**入口，
+    语义 = "这个对象只归本次执行所有、可以被就地改写"：
+
+    ```python
+    ctx.set_scratch("$V", {"a": 1})                        # 显式捐献（私有绑定）
+    parser.evaluate("$F.set($V,'k','v')", ctx.context)     # 就地写，允许
+    ctx.get_state("$V")                                    # {'a': 1, 'k': 'v'}
+    "$V" in ctx.to_dict()                                  # False —— 不进 checkpoint
+    ```
+
+    它**不引入任何"证明对象是活的"谓词**：声明只把对象登记进**读取它的那一次逻辑求值**
+    的 freshness 作用域（读取点登记），所以上面的 r6 作用域语义原样保留。四条边界都要记住：
+
+    * **只登记被声明的那个对象**（对象身份），**不登记它的图**：`$V.cfg` 这类嵌套目标仍被
+      拒。把 `$INPUT` 的子对象塞进 scratch 的图里也**不能**改写它。
+    * **一次求值有效**：声明会被"读到 `$V` 的那次求值"消费；**第二次求值里同一个宿主对象
+      仍被拒**。再用就重新 `set_scratch`。
+    * **不进 checkpoint**：scratch 对表达式可见（`context["$V"]`），但不在 `__iter__` /
+      `len()` / `keys()` / `__eq__` / `to_checkpoint_dict()` 的键视图里；`clean()` 与恢复
+      会丢掉它。
+    * **不得占用 checkpoint 键**（五根与其它 schema 键、以及已在 checkpoint 里的键），
+      声明一个"就是活持久化对象"的对象也被具名 `ValueError` 拒绝（那会新开一条写穿通道）。
+
+    **选 `set_scratch` 还是 `ctx.evaluate({...})`？** 想就地改**你自己手里那个对象**
+    （保留对象身份）⇒ `set_scratch`；`ctx.evaluate(obj)` 会把它换成引擎副本，你手里那个
+    不会被改。只想在**一个表达式里**派生临时容器 ⇒ 直接用 producer
+    （`$F.json_loads(...)` / `$F.slice(...)`），不必绑定。需要"引擎物化一份副本"且物化与
+    改写**属于同一次求值** ⇒ `with freshness_scope(): ctx.set_state("$V", ctx.evaluate({...}))`
+    （跨求值再写它照旧被拒，见上面的 r6 口径）。
+
     **容器键名与深度不参与判决（r4 身份探测 + r5/r6 freshness）**：把活根挂在**任意键名**、
     **任意深度**下都无效——`InlineFlow(input={"$myroot": "$INPUT"})` 里的 `"$INPUT"`
     作为字典值求值就是活根对象；嵌套串 `$F.set($myroot.cfg,'k','v')` 在 r4 由身份探测

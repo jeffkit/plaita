@@ -23,6 +23,7 @@
 import json
 import threading
 import time
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -77,6 +78,23 @@ def _lease_key(fake, execution_id: str) -> str:
     key = f"plaita:execution:lease:{execution_id}"
     assert fake.exists(key), f"租约键 {key} 不存在"
     return key
+
+
+class _Clock(datetime):
+    """把调度服务可见的「现在」钉死，用来分离 due（到期时点）与触发墙钟。"""
+
+    fixed = datetime(2026, 1, 1)
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        return cls.fixed
+
+
+def _fire_with_clock(fake, schedule, queue, when, trigger_kind="cron", **kwargs):
+    """在固定的墙钟时刻触发一次调度（fire_schedule 只调用一次 datetime.now）。"""
+    _Clock.fixed = when
+    with patch("plaita.server.services.schedule_service.datetime", _Clock):
+        return fire_schedule(fake, schedule, queue, trigger_kind=trigger_kind, **kwargs)
 
 
 def _reclaim_as_other_worker(fake, consumer: str = "worker-B", min_idle_ms: int = 1):
@@ -359,25 +377,26 @@ class TestScheduleFireCarriesDedupKey:
         s.update(overrides)
         return s
 
-    def test_message_has_deterministic_dedup_key(self):
+    def test_message_has_deterministic_due_key(self):
         fake = fakeredis.FakeRedis(decode_responses=True)
-        msg_id = fire_schedule(fake, self._schedule(), QUEUE, trigger_kind="cron")
+        due = 1770000000000
+        msg_id = fire_schedule(
+            fake, self._schedule(next_run_at=str(due)), QUEUE, trigger_kind="cron"
+        )
         assert msg_id is not None
         entries = fake.xrange(QUEUE)
         payload = entries[0][1]["payload"]
         msg = json.loads(payload if isinstance(payload, str) else payload.decode())
-        assert msg["dedup_key"]
-        assert msg["dedup_key"].startswith("sched:s9:")
-        # 键值 = schedule_id + 触发时点（秒级 epoch）：确定性、跨周期不同
-        suffix = msg["dedup_key"].rsplit(":", 1)[-1]
-        assert suffix.isdigit()
+        # plaita#118：键基准 = 本次到期时点（epoch 毫秒），不是触发墙钟秒
+        assert msg["dedup_key"] == f"sched:s9:due:{due}"
 
-    def test_dedup_key_follows_fired_at_not_wall_clock_drift(self):
-        """两次触发时间不同 → 键不同（下一周期不被误吞）。"""
+    def test_dedup_key_ignores_wall_clock_drift(self):
+        """同一 due、触发墙钟相差 >1s → 键相同（回写失败 + 锁过期重触发收敛）。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
-        fire_schedule(fake, self._schedule(), QUEUE, trigger_kind="cron")
-        time.sleep(1.1)
-        fire_schedule(fake, self._schedule(), QUEUE, trigger_kind="cron")
+        due = 1770000000000
+        sched = self._schedule(next_run_at=str(due))
+        _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(due / 1000 + 5))
+        _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(due / 1000 + 6))
         entries = fake.xrange(QUEUE)
         keys = {
             json.loads(
@@ -385,7 +404,7 @@ class TestScheduleFireCarriesDedupKey:
             )["dedup_key"]
             for _, f in entries
         }
-        assert len(keys) == 2
+        assert keys == {f"sched:s9:due:{due}"}
 
     def test_manual_trigger_also_keyed(self):
         fake = fakeredis.FakeRedis(decode_responses=True)
@@ -450,3 +469,145 @@ class TestBaseWorkerZeroChange:
         )
         result = worker.start_flow("f1", {}, version="1")
         assert result.get("is_end") is True
+
+
+class TestIssue118DedupKeyBasis:
+    """#118：调度幂等键以**本次到期时点 next_run_at** 为基准，manual 独立键空间。
+
+    红先证（修复前）：同一个 due 两次触发得到两个不同键；同秒两个不同 due 撞成
+    同一个键；cron 与 manual 同秒撞成同一个键。
+    """
+
+    DUE = 1770000000000
+
+    def _schedule(self, **overrides):
+        s = {
+            "schedule_id": "s118", "name": "n", "flow_id": "f1",
+            "cron": "* * * * *", "params": {}, "tenant_id": "acme",
+            "version": "1",
+        }
+        s.update(overrides)
+        return s
+
+    @staticmethod
+    def _msgs(fake):
+        out = []
+        for _, f in fake.xrange(QUEUE):
+            payload = f["payload"]
+            out.append(json.loads(payload if isinstance(payload, str) else payload.decode()))
+        return out
+
+    def test_same_due_two_fires_share_key(self):
+        """① 同一个 next_run_at 被触发两次（回写失败 + 30s 锁过期重触发）→ 同键。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        sched = self._schedule(next_run_at=str(self.DUE))
+        _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 5))
+        _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 6))
+        keys = [m["dedup_key"] for m in self._msgs(fake)]
+        assert keys == [f"sched:s118:due:{self.DUE}"] * 2
+
+    def test_different_due_same_wall_second_differ(self):
+        """② 同一墙钟秒内两个不同 due → 键必须不同（下一周期不被误吞）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        when = datetime.fromtimestamp(self.DUE / 1000 + 5)
+        _fire_with_clock(fake, self._schedule(next_run_at=str(self.DUE)), QUEUE, when)
+        _fire_with_clock(
+            fake, self._schedule(next_run_at=str(self.DUE + 60000)), QUEUE, when
+        )
+        keys = [m["dedup_key"] for m in self._msgs(fake)]
+        assert keys == [
+            f"sched:s118:due:{self.DUE}",
+            f"sched:s118:due:{self.DUE + 60000}",
+        ]
+
+    def test_manual_key_space_disjoint_from_cron(self):
+        """③ 同秒 cron + manual → 两键不等（manual 不被 cron 吞并）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        when = datetime.fromtimestamp(self.DUE / 1000 + 5)
+        _fire_with_clock(fake, self._schedule(next_run_at=str(self.DUE)), QUEUE, when)
+        _fire_with_clock(fake, self._schedule(next_run_at=str(self.DUE)), QUEUE, when,
+                         trigger_kind="manual")
+        cron_key, manual_key = [m["dedup_key"] for m in self._msgs(fake)]
+        assert cron_key == f"sched:s118:due:{self.DUE}"
+        assert manual_key.startswith("sched:s118:manual:")
+        assert manual_key != cron_key
+
+    def test_manual_twice_gets_two_keys(self):
+        """manual 是「立刻再跑一次」：同一纳秒两次调用也不得收敛成一个键。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        when = datetime.fromtimestamp(self.DUE / 1000 + 5)
+        _fire_with_clock(fake, self._schedule(), QUEUE, when, trigger_kind="manual")
+        _fire_with_clock(fake, self._schedule(), QUEUE, when, trigger_kind="manual")
+        keys = [m["dedup_key"] for m in self._msgs(fake)]
+        assert len(set(keys)) == 2
+
+    def test_equivalent_due_encodings_normalize(self):
+        """due 的等价写法（字符串/浮点）必须归一到同一个键。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        when = datetime.fromtimestamp(self.DUE / 1000 + 5)
+        _fire_with_clock(fake, {"schedule_id": "s118", "flow_id": "f1", "cron": "* * * * *",
+                                "params": {}, "tenant_id": "acme",
+                                "next_run_at": str(self.DUE)}, QUEUE, when)
+        _fire_with_clock(fake, {"schedule_id": "s118", "flow_id": "f1", "cron": "* * * * *",
+                                "params": {}, "tenant_id": "acme",
+                                "next_run_at": float(self.DUE)}, QUEUE, when)
+        keys = {m["dedup_key"] for m in self._msgs(fake)}
+        assert keys == {f"sched:s118:due:{self.DUE}"}
+
+    def test_due_at_argument_overrides_definition(self):
+        """显式 due_at（_fire_if_due 传入的判定值）优先于定义里的 next_run_at。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        when = datetime.fromtimestamp(self.DUE / 1000 + 5)
+        _fire_with_clock(fake, self._schedule(next_run_at=str(self.DUE)), QUEUE, when,
+                         due_at=self.DUE + 1)
+        assert self._msgs(fake)[0]["dedup_key"] == f"sched:s118:due:{self.DUE + 1}"
+
+    def test_missing_due_falls_back_to_wall_second(self):
+        """降级：cron 无可用 due → 墙钟秒键（并在日志里 warning，不静默）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        when = datetime.fromtimestamp(self.DUE / 1000 + 5)
+        _fire_with_clock(fake, self._schedule(), QUEUE, when)
+        assert self._msgs(fake)[0]["dedup_key"] == f"sched:s118:fired:{self.DUE // 1000 + 5}"
+
+    def test_same_due_two_dispatches_single_execution(self):
+        """端到端：同 due 的两条消息被消费 → 只有 1 行执行、run_distributed 只跑 1 次。"""
+        from plaita.server.tenant_context import reset_current_tenant, set_current_tenant
+
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage)
+        sched = self._schedule(next_run_at=str(self.DUE))
+        _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 5))
+        _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 6))
+        msgs = self._msgs(fake)
+        assert len(msgs) == 2
+        assert msgs[0]["dedup_key"] == msgs[1]["dedup_key"]
+        # 生产里两条消息各自铸 execution_id；同一 due 的两条本不该都存在，
+        # 这里显式给不同 id 证明 worker 侧也收敛。
+        msgs[0]["execution_id"] = "exec-a"
+        msgs[1]["execution_id"] = "exec-b"
+
+        runs = []
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.run_distributed.side_effect = lambda flow, params=None, execution_id=None: (
+                runs.append(execution_id) or {"execution_id": execution_id, "is_end": True, "context": {}}
+            )
+            results = []
+            for msg in msgs:
+                token = set_current_tenant(msg["tenant_id"])
+                try:
+                    results.append(worker._dispatch_task(msg, delivery_count=1))
+                finally:
+                    reset_current_tenant(token)
+
+        assert runs == ["exec-a"], f"同 due 必须只跑一次，实际 {runs}"
+        assert storage.load_execution_state("exec-b") is None
+        # 第二条消息的同键认领必须命中并映射回首次执行（绝不二次 start）；
+        # 键按租户 namespace 路由，须在同租户上下文里核。
+        token = set_current_tenant(msgs[1]["tenant_id"])
+        try:
+            assert worker._claim_start_dedup(msgs[1]["dedup_key"], "exec-c") == ("hit", "exec-a")
+        finally:
+            reset_current_tenant(token)

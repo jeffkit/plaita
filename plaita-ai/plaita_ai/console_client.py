@@ -165,11 +165,36 @@ class ConsoleClient:
         definition: str,
         layout: str = "{}",
         created_by: str = "plaita-ai",
+        base_updated_at: Optional[str] = None,
+        force: bool = False,
+        allocate_version: bool = False,
     ) -> Dict[str, Any]:
+        """Save (draft) a version — with the console's concurrency controls.
+
+        The console's ``PUT /flows/{id}/versions/{version}`` supports three
+        CAS fields (#59); all of them used to be missing from this payload,
+        which made every write an unconditional overwrite:
+
+        - ``base_updated_at``: the ``updated_at`` this write is based on; a
+          mismatch yields 409 (``version_stale``) instead of silently
+          clobbering a concurrent draft.
+        - ``force``: explicit "overwrite anyway" (bypasses that check).
+        - ``allocate_version``: ignore the path version; the server atomically
+          allocates the next patch version and announces it in the response
+          ``version`` field. Use this instead of computing the number
+          client-side.
+        """
         return self._request(
             "PUT",
             f"/flows/{flow_id}/versions/{version}",
-            json={"definition": definition, "layout": layout, "created_by": created_by},
+            json={
+                "definition": definition,
+                "layout": layout,
+                "created_by": created_by,
+                "base_updated_at": base_updated_at,
+                "force": force,
+                "allocate_version": allocate_version,
+            },
         )
 
     def publish_version(self, flow_id: str, version: str) -> Dict[str, Any]:

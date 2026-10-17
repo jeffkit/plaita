@@ -11,6 +11,7 @@ import logging
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 if TYPE_CHECKING:
     from plaita.node.basic import Node
@@ -110,7 +111,7 @@ class CallbackManager(BaseCallbackManager):
             try:
                 getattr(handler, handler_method)(*args, **kwargs)
             except Exception as e:
-                logger.warning("Error in %s callback: %s", handler_method, e, exc_info=True)
+                logger.warning("Error in %s callback: %s", handler_method, _scrub_exception_text(e))
 
     def on_flow_start(self, flow, **kwargs) -> None:
         self._call_handlers("on_flow_start", flow, **kwargs)
@@ -149,7 +150,7 @@ class LoggerCallback(FlowCallback):
     def on_flow_end(self, flow, result=None, error=None, exception=None, **kwargs) -> None:
         logger.info(
             "[flow end] %s with result: %s, error: %s, exception: %s",
-            flow.flow_id, result, error, exception,
+            flow.flow_id, result, _scrub_url_text(error), _scrub_url_text(exception),
         )
 
     def on_node_start(self, flow, node, **kwargs) -> None:
@@ -158,7 +159,7 @@ class LoggerCallback(FlowCallback):
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:
         logger.info(
             "[node end] %s @ flow %s with result: %s, error: %s, exception: %s",
-            node.id, flow.flow_id, result, error, exception,
+            node.id, flow.flow_id, result, _scrub_url_text(error), _scrub_url_text(exception),
         )
 
     def on_flow_suspend(self, flow, **kwargs) -> None:

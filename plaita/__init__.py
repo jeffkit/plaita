@@ -1,12 +1,21 @@
 __version__ = "0.6.1"
 
+import importlib.util as _importlib_util
 import logging as _logging
 
 _logger = _logging.getLogger(__name__)
 
 _EXTRAS_GUIDE = {
     "redis": ("redis", "pip install plaita[redis]"),
-    "server": ("fastapi", "pip install plaita[server]"),
+    # server extra 的五个依赖全探（pyproject [project.optional-dependencies].server）。
+    # #99：此前只探 fastapi——而 plaita/server/ 模块级真正 import 的是
+    # cachetools/redis；宿主恰好装了 fastapi（例如宿主本身就是 FastAPI 应用）
+    # 时探针误判「extra 已就绪」，`from plaita import FlowWorker` 抛裸
+    # ModuleNotFoundError，没有任何 pip install 指引。
+    "server": (
+        ("fastapi", "uvicorn", "redis", "cachetools", "sqlalchemy"),
+        "pip install plaita[server]",
+    ),
     "code": ("execjs", "pip install plaita[code]"),
     # http extra 实际含 requests + aiohttp 两个依赖，只探测 requests 会让
     # "缺 extra 可操作报错"的承诺在只装 requests 时落空（运行时才炸）。
@@ -16,16 +25,30 @@ _EXTRAS_GUIDE = {
 }
 
 
+def _probe_available(probe_module: str) -> bool:
+    """探测可选 SDK 是否**可导入** —— 用 ``find_spec`` **定位**，不真正导入（#97）。
+
+    ``__import__(name)`` 会把整个包**执行一遍**（fastapi / langfuse / aiohttp 都是重包）
+    ⇒ 导入 ``plaita`` 的代价被可选依赖绑架（实测 523 ms 且 6 个 SDK 全被真正导入）。
+    探测只需要回答"找不找得到"，``find_spec`` 足够且**不产生导入副作用**。
+
+    注意 ``find_spec`` 在**父包缺失**时抛 ``ModuleNotFoundError``（``ImportError`` 子类），
+    在某些 loader 下还会抛 ``ValueError``（``__spec__ is None``）⇒ 两种都当"不可用"。
+    """
+    try:
+        return _importlib_util.find_spec(probe_module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _emit_extras_guidance():
     """Log guidance once when optional extras are missing, at DEBUG level."""
     missing = []
     for extra, (probe_modules, install_cmd) in _EXTRAS_GUIDE.items():
         if isinstance(probe_modules, str):
             probe_modules = (probe_modules,)
-        try:
-            for probe_module in probe_modules:
-                __import__(probe_module)
-        except ImportError:
+        # #97：导入期**只定位、不导入**（见 `_probe_available`）。
+        if not all(_probe_available(m) for m in probe_modules):
             missing.append((extra, install_cmd))
     if missing:
         names = ", ".join(name for name, _ in missing)
@@ -215,8 +238,14 @@ def _maybe_install_uvloop() -> None:
         return
     try:
         import uvloop
-    except Exception:  # noqa: BLE001 - 可选加速缺失：仅留痕，行为不变
-        _logger.debug("PLAITA_LOOP=uvloop but uvloop is not installed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - 可选加速缺失：仅留痕，行为不变
+        # 局部 import：本模块是包入口（顶层有意只 import stdlib），不在 import 期
+        # 拉起 plaita.core 的依赖图；掩码器只在真要记这条 DEBUG 时才加载。
+        from plaita.core.url_redaction import _scrub_exception_text
+
+        # #151：exc_info 的 traceback 由 Formatter 在 logger 之后用原始异常重渲染，
+        # 构造面清洗盖不住 ⇒ 在构造面渲染（清洗）并摘掉 exc_info。
+        _logger.debug("PLAITA_LOOP=uvloop but uvloop is not installed: %s", _scrub_exception_text(exc))
         return
     uvloop.install()
 

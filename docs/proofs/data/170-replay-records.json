@@ -1,0 +1,171 @@
+{
+ "159-renderer-failure-not-fail-closed": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "去掉总兜底：渲染器一抛，调用点（日志/停机/注册路径）就跟着炸——掩码必须 never-raise、失败退化为安全常量。 plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
+  "red": [
+   "TestNonUtf8PasswordNeverBreaksCallers::test_failure_never_breaks_the_startup_log_path",
+   "TestRendererFailureDegradesToSafeConstant::test_dead_letter_enable_log_survives_renderer_failure",
+   "TestRendererFailureDegradesToSafeConstant::test_wrapper_returns_constant_when_renderer_raises"
+  ],
+  "source": "json:159-renderer-failure-not-fail-closed.json"
+ },
+ "88-credentials-fall-back-to-verbatim": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "退回 r4 的「认不出就原样返回」：`_mask_url` 必须总是不原样返回候选槽（r8 重写定义：掩码尾部已换成同一趟渲染）。",
+  "red": [
+   "TestEnumerateAllSpans::test_enumerate_all_spans_never_returns_input_verbatim",
+   "TestMaskerCannotLeakByConstruction::test_global_fail_closed_never_returns_input_verbatim"
+  ],
+  "source": "json:88-credentials-fall-back-to-verbatim.json"
+ },
+ "88-masker-reverted-to-r2-regex": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "把掩码退回 r2 的单正则实现：口令含 `@`/空白/`/` 的形态照样原样落盘（r8 重写定义：掩码尾部已换成同一趟渲染）。",
+  "red": [
+   "TestRefusalMessagesNeverLeakCredentials::test_no_refusal_message_contains_the_password"
+  ],
+  "source": "json:88-masker-reverted-to-r2-regex.json"
+ },
+ "88-r6-masker-skips-enumeration": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "r6 变异：整个跨度枚举层被跳过（r8 重写定义：掩码尾部已换成同一趟渲染）。",
+  "red": [
+   "TestEnumerateAllSpans::test_enumerate_all_spans_rule_table",
+   "TestMaskerGenerativeProperty::test_generated_secret_in_every_candidate_position_never_leaks"
+  ],
+  "source": "json:88-r6-masker-skips-enumeration.json"
+ },
+ "88-r6-passwords-drop-colon-leg": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "只关掉 `_redaction_forms` 的冒号腿（= r5 的全局跨度腿）：_passwords 取不到候选跨度的口令，_scrub 的消息字段与 _mask_url 掩掉的形态分叉（一致性不变量被违反）。",
+  "red": [
+   "TestLiteralGroundedRows::test_literal_grounded_rows_never_leak"
+  ],
+  "source": "json:88-r6-passwords-drop-colon-leg.json"
+ },
+ "m01-as_str-bytes-passthrough": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "bytes 客户端下 event_id 不解码 → f-string 拼出 b'<uuid>' 键 → list_events 恒空",
+  "red": [
+   "test_bytes_client_returns_stored_event"
+  ],
+  "source": "json:m01-as_str-bytes-passthrough.json"
+ },
+ "m02-list-events-first-ten-types": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "无类型分支回到只遍历前 10 个事件类型",
+  "red": [
+   "test_more_than_ten_event_types_all_returned"
+  ],
+  "source": "json:m02-list-events-first-ten-types.json"
+ },
+ "m03-decode-responses-off": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "自建生产客户端不开 decode_responses（回到 bytes member）",
+  "red": [
+   "test_initialize_builds_client_with_decode_responses"
+  ],
+  "source": "json:m03-decode-responses-off.json"
+ },
+ "m05-strict-after-becomes-inclusive": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "复合游标退化为含端 → 并列块/单条批活锁",
+  "red": [
+   "TestS2CompositeCursor::test_batch_size_one_progresses_over_distinct_timestamps"
+  ],
+  "source": "json:m05-strict-after-becomes-inclusive.json"
+ },
+ "m08-handle-event-swallows-again": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "handle_event 重新吞掉异常 → 回扫器看不到回放失败（失败被越过、永久丢）",
+  "red": [
+   "TestS3ReplayFailureVisible::test_enqueue_failure_is_visible_and_retried"
+  ],
+  "source": "json:m08-handle-event-swallows-again.json"
+ },
+ "m09-batch-size-guard-off": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "去掉 batch_size<=0 守卫 → 空窗口 IndexError",
+  "red": [
+   "TestS4BatchSizeGuard::test_batch_size_zero_no_crash_no_scan"
+  ],
+  "source": "json:m09-batch-size-guard-off.json"
+ },
+ "m10-memory-list-events-unsorted": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "内存后端按插入序返回（违反升序契约）→ 乱序插入时漏扫",
+  "red": [
+   "TestS6MemoryStorageOrdering::test_memory_storage_list_events_is_time_ordered",
+   "TestS6MemoryStorageOrdering::test_reconciler_recovers_all_with_out_of_order_insertion"
+  ],
+  "source": "json:m10-memory-list-events-unsorted.json"
+ },
+ "m109-redis-eventstorage-bytes-id": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "不归一化 zrangebyscore 的 bytes member ⇒ 生产连接（decode_responses=False）下 list_events 两分支全空",
+  "red": [
+   "Test110ListEventsProductionConnection::test_explicit_type_branch_bytes_safe",
+   "Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+  ],
+  "source": "json:m109-redis-eventstorage-bytes-id.json"
+ },
+ "m11-missing-payload-silent": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "载荷缺失不再 ERROR（静默跳过）",
+  "red": [
+   "TestS7LoudMissingPayload::test_missing_payload_logs_error_with_event_id"
+  ],
+  "source": "json:m11-missing-payload-silent.json"
+ },
+ "m110-redis-list-events-type-prefix": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "全量分支退回 split(':')[-1] ⇒ 含 ':' 的 event_type 被截断、该类型事件静默丢失",
+  "red": [
+   "Test110ListEventsProductionConnection::test_all_types_branch_keeps_colon_event_type",
+   "Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+  ],
+  "source": "json:m110-redis-list-events-type-prefix.json"
+ },
+ "m12-cursor-rollback-guard-off": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "去掉游标单调守卫 → 陈旧写者可回退游标触发整窗重扫",
+  "red": [
+   "TestS8CursorNoCas::test_save_cursor_refuses_rollback"
+  ],
+  "source": "json:m12-cursor-rollback-guard-off.json"
+ },
+ "m47-window-end-clamp-off": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "推进不夹到 window_end ⇒ 伪造 skipped 可把游标推到未来并粘住（AD5）",
+  "red": [
+   "TestAD5WindowEndClamp::test_forged_skipped_cannot_push_cursor_beyond_window"
+  ],
+  "source": "json:m47-window-end-clamp-off.json"
+ },
+ "m56-cursor-failure-not-loud": {
+  "expect_survive": false,
+  "killed": true,
+  "note": "游标写失败只报泛泛一句（无连续轮数/条数/首个 id）⇒ 不可定位（AH3）",
+  "red": [
+   "TestAH3CursorWriteLoud::test_cursor_write_failure_is_loud_with_ids"
+  ],
+  "source": "json:m56-cursor-failure-not-loud.json"
+ }
+}

@@ -62,6 +62,11 @@ class TestIssue69ScopeInventory(unittest.TestCase):
         10 → 6；同时 `context.ExecutionContext.setup_flow` 的 `$GLOBAL` 每 run 快照
         从 `copy.deepcopy` 改走物化边界 `_snapshot_value` ⇒ `materialise` 13 → 14。
         总数 90 → **87**。
+
+        plaita#164：新增第三个登记钩子 `note_scratch_object`（宿主显式 scratch 捐献，
+        在**读取点**登记；判据是按对象身份的**单个**对象、不遍历闭包）⇒ `fresh-register`
+        6 → **7**、总数 87 → **88**。分类器 `_classify` 同步把该钩子归入
+        `fresh-register`——新增登记点必须被穷举，这正是本清单存在的理由。
         """
         found = inv.discover()
         kinds: dict = {}
@@ -69,8 +74,8 @@ class TestIssue69ScopeInventory(unittest.TestCase):
             kinds[info["kind"]] = kinds.get(info["kind"], 0) + 1
         self.assertEqual(
             {"explore-scope": 15, "state-scope": 27, "child-input": 25,
-             "materialise": 14, "fresh-register": 6}, kinds)
-        self.assertEqual(87, len(found))
+             "materialise": 14, "fresh-register": 7}, kinds)
+        self.assertEqual(88, len(found))
 
     def test_unclassified_site_would_trip_the_guard(self):
         """负控：拿掉任意一条 ⇒ missing 非空；凭空多一条 ⇒ stale 非空（判定不是恒真）。"""

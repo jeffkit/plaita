@@ -562,14 +562,30 @@ class Supervisor:
         }
 
         # Save as the next patch version so humans can see the lineage.
+        #
+        # #59：版本号不能由客户端自算 + 无条件 PUT——两个并发迭代读到同一份
+        # 版本快照会算出同一个 ``next_patch_version``，后写静默覆盖先写（票面
+        # 分数与库里定义脱钩）。这里改成服务端条件写：``allocate_version=True``
+        # 让 console 按库内现有最大 semver 原子分配 patch+1，并**以响应里的
+        # ``version`` 为准**（本地算出的号只作 path 占位，服务端忽略；保留它是
+        # 为了在忽略该字段的旧 console 上退化为原有行为，而不是写坏版本槽）。
         detail = self.client.get_flow(flow_id)
         current_latest = latest_version(list(detail.get("versions") or []))
         if not current_latest:
             raise ConsoleClientError(f"flow {flow_id!r} has no versions")
-        next_version = next_patch_version(current_latest)
-        self.client.save_version(
-            flow_id, next_version, str(proposal["definition"]), created_by=policy.created_by
+        saved = self.client.save_version(
+            flow_id,
+            next_patch_version(current_latest),
+            str(proposal["definition"]),
+            created_by=policy.created_by,
+            allocate_version=True,
         )
+        next_version = str((saved or {}).get("version") or "")
+        if not next_version:
+            raise ConsoleClientError(
+                f"console did not report the allocated version for flow {flow_id!r} "
+                "(allocate_version response missing 'version')"
+            )
         result["candidate_version"] = next_version
         result["rationale"] = proposal.get("rationale", "")
 

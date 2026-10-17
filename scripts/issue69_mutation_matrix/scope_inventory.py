@@ -108,7 +108,11 @@ def _classify(node: ast.Call, callee: str, enclosing: str) -> str:
     npos = len(node.args)
     if callee == "_materialise_child_input" or callee == "_snapshot_value":
         return "materialise"
-    if callee in ("note_fresh_object", "note_fresh_closure"):
+    if callee in ("note_fresh_object", "note_fresh_closure", "note_scratch_object"):
+        # plaita#164 增补第三个登记钩子 `note_scratch_object`：它同样是"往本次求值作用域
+        # 写一条 fresh 事实"的点。判据不同（按对象身份、不遍历闭包、只登记宿主显式声明的
+        # 那一个对象），但**必须**和另外两个一样被穷举——清单漏掉一个登记点正是 X1/X2
+        # 那一类缺陷的入口。
         return "fresh-register"
     base = callee.split(".")[-1]
     if base in ("run_compatible", "arun_compatible"):

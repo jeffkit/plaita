@@ -3,7 +3,7 @@
   "issue": "153",
   "concern": "规则子句：失败轮回扫游标不得推进",
   "file": "plaita/server/event_reconcile.py",
-  "old": "                    event.event_id, replayed, self.last_rejected, e,\n                    exc_info=True,\n                )\n                raise",
+  "old": "                    event.event_id, replayed, self.last_rejected, _scrub_exception_text(e),\n                )\n                raise",
   "new": "                    event.event_id, replayed, self.last_rejected, e,\n                    exc_info=True,\n                )\n                self._save_cursor(window_end)\n                raise",
   "rationale": "失败分支先 _save_cursor(window_end) 再上抛 ⇒ 回到 #153 的缺陷形态：失败事件被游标永久跳过",
   "expect_fail": [

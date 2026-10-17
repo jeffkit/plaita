@@ -35,12 +35,54 @@ __all__ = ["EmitError", "emit_source"]
 
 _AUTO_ID_RE = re.compile(r"_n\d+")
 
+
+def _dual(node: Dict[str, Any], camel: str, snake: str) -> Any:
+    """#142：emit 侧**两侧都读**（camel 优先、snake 兜底）。
+
+    引擎的读取规则是 ``kw.get(snake) or kw.get(camel)``（见 ``_stmt.py``），
+    而 emit 侧此前只读 camel ⇒ **存量/手写 IR 用 snake 拼写时参数被静默丢弃**
+    （无报错，只是少了一个 kwarg）。同文件的 ``eventType``/``eventFilter``
+    早已是两侧读，这里把漏掉的补齐。用 ``is None`` 而非 ``or``，避免
+    ``{"maxConcurrent": None, "max_concurrent": 4}`` 这种存量形状漏读。
+    """
+    v = node.get(camel)
+    if v is None:
+        v = node.get(snake)
+    return v
+
 # 由 _BodyEmitter 专属分支处理的类型；出现在节点调用位置即不可表达
 _UNEMITTABLE_TYPES = {"switch", "bool", "start"}
 
 # 发动机 ErrorHandler 接受的 strategy 取值（`continue-with` 是规范枚举值，
 # `continue_with` 是 DSL/历史拼写；两者发动机都收并归一到 continue-with）。
 _ERROR_HANDLER_STRATEGIES = ("abort", "continue", "continue_with", "continue-with")
+
+
+def _child_ir(node: Dict[str, Any]) -> Dict[str, Any]:
+    """#142：取节点的 childFlow IR —— **两侧读 + 容忍 JSON 字符串**。
+
+    - 两侧读：`childFlow`(camel) / `child_flow`(snake)；
+    - 引擎**接受** `childFlow` 为 JSON **字符串**（`model_validate_json`）⇒ 发射器
+      也对齐：是字符串就 `json.loads` 成 dict，而不是拿字符串去 `.get` 抛裸
+      `AttributeError: 'str' object has no attribute 'get'`；
+    - 既不是 dict 也解析不出 dict（畸形）⇒ `EmitError`（**带节点 id**，不留裸异常）。
+    """
+    v = _dual(node, "childFlow", "child_flow")
+    if v is None:
+        return {}
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (TypeError, ValueError) as exc:
+            raise EmitError(
+                f"节点 {node.get('id')!r} 的 childFlow 是字符串但无法解析为 JSON: {exc}"
+            ) from exc
+    if not isinstance(v, dict):
+        raise EmitError(
+            f"节点 {node.get('id')!r} 的 childFlow 必须对象或 JSON 字符串，"
+            f"实得 {type(v).__name__}"
+        )
+    return v
 
 
 class EmitError(ValueError):
@@ -449,21 +491,25 @@ class _BodyEmitter:
         # 只读 snake 会让 `python -m plaita build` 的默认产物在**所有**
         # `emit_source` 消费端恒抛 `childFlow 缺 start 节点`（console
         # `/source` 恒 unavailable / plaita-ai 往返断链）——plaita#89。
-        child_ir = node.get("childFlow") or node.get("child_flow") or {}
+        child_ir = _child_ir(node)
         cond = _invert_cond(node.get("condition", {}), _COND_NS)
         body = self._emit_inline_child(child_ir, _loop_body_ns("rounds"))
         # 恒用 for-head 形态：它是唯一能显式 id= 钉住节点 id 的写法（statement
         # 形态的 id 由条件 slug 派生，源码层不可控）
         args = [cond, f"id={node['id']!r}"]
-        if "max_iterations" in node:
-            args.append(f"max_iterations={node['max_iterations']}")
+        # #142 成员②：两侧都读（camel 优先）—— 只读 snake 会让 camel 拼写的
+        # 存量/手写 IR 丢掉该参数 ⇒ 运行时落回引擎兜底 max_iterations=1000
+        # （**数值退化**，不只是少一个 kwarg）。
+        _mi = _dual(node, "maxIterations", "max_iterations")
+        if _mi is not None:
+            args.append(f"max_iterations={_mi}")
         lines = [f"for item in WHILE({', '.join(args)}):"]
         lines.extend(f"    {ln}" for ln in body)
         return self._emit_tail(lines, node, outer_stop)
 
     def _emit_collection(self, node: Dict[str, Any], outer_stop: Set[str]) -> List[str]:
         kind = node["type"].upper()
-        child_ir = node.get("childFlow") or {}
+        child_ir = _child_ir(node)
         coll = _invert_value(node.get("collection"), self.ns)
 
         if kind == "REDUCE":
@@ -473,14 +519,23 @@ class _BodyEmitter:
 
         kwargs = [f"id={node['id']!r}"]
         if kind == "MAP":
-            if node.get("concurrent"):
+            # #142：`concurrent` 的**历史别名 `async`** 是引擎 `Map.LEGACY_KEYS`
+            # （`loop.py:257`，validator 把 `async` 归一成 `concurrent`）⇒ 存量/手写 IR
+            # 用 `async: true` 时，发射器只读 `concurrent` 会**静默丢掉并发**。
+            # 正文口径：引擎有 legacy 键的，发射器**也要读 legacy 那个**。
+            if node.get("concurrent") or node.get("async"):
                 kwargs.append("concurrent=True")
-            if node.get("maxConcurrent") is not None:
-                kwargs.append(f"max_concurrent={node['maxConcurrent']}")
+            if _dual(node, "maxConcurrent", "max_concurrent") is not None:
+                kwargs.append(f"max_concurrent={_dual(node, 'maxConcurrent', 'max_concurrent')}")
         if kind == "REDUCE" and node.get("initial") is not None:
             kwargs.append(f"initial={_invert_value(node['initial'], self.ns)}")
 
         body = self._emit_inline_child(child_ir, _loop_body_ns("index"))
+        # #143 emit 侧（集合路径）：`_emit_collection` 此前**从不调用**
+        # `_common_kwargs` ⇒ 集合节点（MAP/FILTER/FIND/LOOP/REDUCE/WHILE）的
+        # `errorHandler` / `timeoutHandler` / `timeout` **双双往返丢失**
+        # （实测 MAP：IR 有两个 handler，emit 后重编译为空）。
+        kwargs.extend(self._common_kwargs(node))
         lines = [f"for {target} in {kind}({', '.join([coll] + kwargs)}):"]
         lines.extend(f"    {ln}" for ln in body)
         return self._emit_tail(lines, node, outer_stop)
@@ -549,6 +604,16 @@ class _BodyEmitter:
                     f"节点 {spec.get('id')!r} 的 errorHandler 不是 dict，"
                     "无法发射为可重编译源码")
             kwargs.append(f"on_error={self._emit_error_handler(error_handler)}")
+        # #143：`timeoutHandler` 在 main 的发射器里**零出现** —— 编译器能收 `on_timeout=`、
+        # 引擎有该字段（`Node` 基类 `basic.py:101`），但发射器从不写它 ⇒ 往返静默丢。
+        # 与 `on_error=` **同口径**（snake 键 + 真值判定 + 非 dict ⇒ EmitError）。
+        timeout_handler = spec.get("timeoutHandler") or spec.get("timeout_handler")
+        if timeout_handler:
+            if not isinstance(timeout_handler, dict):
+                raise EmitError(
+                    f"节点 {spec.get('id')!r} 的 timeoutHandler 不是 dict，"
+                    "无法发射为可重编译源码")
+            kwargs.append(f"on_timeout={self._emit_error_handler(timeout_handler)}")
         return kwargs
 
     def _emit_node_call(self, node: Dict[str, Any]) -> List[str]:
@@ -567,7 +632,9 @@ class _BodyEmitter:
         if node.get("method", "POST") != "POST":
             kwargs.append(f"method={node['method']!r}")
         kwargs.append(f"url={_invert_value(node.get('url'), self.ns)}")
-        for ir_key in ("headers", "body", "timeout", "input"):
+        # #142 附带：**不要**把 "timeout" 放这里 —— `_common_kwargs()`（下方 extent）
+        # 已经会发一次，两处都发会造成 `HTTP(..., timeout=9, timeout=9)` 重复 kwarg。
+        for ir_key in ("headers", "body", "input"):
             if node.get(ir_key) is not None:
                 kwargs.append(f"{ir_key}={_invert_value(node[ir_key], self.ns)}")
         kwargs.extend(self._common_kwargs(node))
@@ -594,9 +661,26 @@ class _BodyEmitter:
         return f"EVENT({', '.join(kwargs)})"
 
     def _call_child_ref(self, node: Dict[str, Any], placeholder: str) -> str:
-        # 发动机 `FlowNode.setup_child_flow` 两个键都收（childFlow / child_flow）；
-        # 编译器自产 camel、存量 JSON flow 用 snake，只读一边会丢整个子图。
+        # main 的 `register()` 本就容忍 childFlow 为 JSON 字符串（含精确错误串
+        # "子流程 childFlow/flow 是字符串但不是合法 JSON"）⇒ 按 main 口径传**原值**，
+        # 不要用我方 `_child_ir` 抢先解析（措辞会与 main 断言不一致）。
         child_ir = node.get("childFlow") or node.get("child_flow") or {}
+        if not child_ir:
+            # #142：**命名引用**（只有 flow_id/flowID/flowVersion，无内联 childFlow）是
+            # 引擎的合法形状（`ReferenceFlow.flow_id`，调度器负责注入子流程），但
+            # `@flow` 源码**无法表达**它 —— `_eval_childflow_arg` 只接受能解析到内联
+            # `@childflow` 的名字（`_nodes.py:235-246`）。此前这里落进 `register({})`
+            # ⇒ 报 `EmitError "childFlow 缺 start 节点"`，**把"命名引用"误报成
+            # "内联 childFlow 不完整"** ⇒ 归因错、运维会往错方向查。
+            _fid = _dual(node, "flow_id", "flowID")
+            _fver = _dual(node, "flow_version", "flowVersion")
+            if _fid or _fver:
+                raise EmitError(
+                    f"节点 {node.get('id')!r} 是**命名引用**（flow_id={_fid!r}, "
+                    f"flow_version={_fver!r}）：调度器注入子流程的形状，"
+                    f"而 @flow 源码只能表达**内联** @childflow（`{placeholder}(flow=<@childflow 函数>)`）"
+                    f"⇒ 该形状**不可发射**。请改为内联 @childflow，或保留在 IR/调度器侧。"
+                )
         child_name = self.childflows.register(child_ir)
         kwargs: List[str] = []
         if node.get("input") is not None:

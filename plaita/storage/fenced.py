@@ -35,6 +35,7 @@ from .redis import (
     execution_start_time_score,
     execution_state_ttl_seconds,
 )
+from plaita.core.url_redaction import _scrub_url_text
 
 
 # 单段 Lua：fence 世代匹配才允许写执行状态。
@@ -118,7 +119,7 @@ class FencedExecutionStorage(ExecutionStorage):
             # #80：与普通写路径同判据 —— 不可序列化是**永久**失败，不得吞成
             # `False`（那会被上层当瞬态重投）。
             logger.error(
-                "fenced 执行状态不可序列化 %s（永久失败，不重试）: %s", execution_id, e
+                "fenced 执行状态不可序列化 %s（永久失败，不重试）: %s", execution_id, _scrub_url_text(e)
             )
             raise StateSerializationError(execution_id, e) from e
         try:
@@ -145,7 +146,7 @@ class FencedExecutionStorage(ExecutionStorage):
                 execution_id,
             )
         except Exception as e:
-            logger.error("Fenced save execution state %s failed: %s", execution_id, e)
+            logger.error("Fenced save execution state %s failed: %s", execution_id, _scrub_url_text(e))
             return False
         if not result:
             # 世代不符：租约已被新世代接管（或 fence 键丢失）。拒绝写并让

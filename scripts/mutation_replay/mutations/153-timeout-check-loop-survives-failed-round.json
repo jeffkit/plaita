@@ -3,7 +3,7 @@
   "issue": "153",
   "concern": "R1 规则子句：聚合上抛的失败轮不得终止 checker 循环（下一轮继续检查）",
   "file": "plaita/event/timeout.py",
-  "old": "            try:\n                await self._check_timeouts()\n            except Exception as e:\n                # #153/R1：失败轮已由 `_check_timeouts` 逐条记 ERROR（含 sub_id 与\n                # exc_info），这里再记一次聚合并进入下一轮重试——循环绝不终止。\n                logger.error(\"超时检查出错: %s\", e, exc_info=True)",
+  "old": "            try:\n                await self._check_timeouts()\n            except Exception as e:\n                # #153/R1：失败轮已由 `_check_timeouts` 逐条记 ERROR（含 sub_id 与\n                # exc_info），这里再记一次聚合并进入下一轮重试——循环绝不终止。\n                logger.error(\"超时检查出错: %s\", _scrub_exception_text(e))",
   "new": "            await self._check_timeouts()",
   "rationale": "去掉循环内的异常兜底 ⇒ 一轮失败直接终止 checker 任务（订阅超时唤醒永久停摆）",
   "expect_fail": [

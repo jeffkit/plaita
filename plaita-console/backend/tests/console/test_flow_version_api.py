@@ -49,6 +49,7 @@ def _auth(validity: int = 3, secret_id: str = SECRET_ID, secret_key: str = SECRE
     return generate_signature(secret_key, secret_id, validity, int(time()))
 
 
+@pytest.mark.needs_form_parser
 def test_valid_signature_returns_published_flow(client: TestClient):
     # 准备已发布 flow
     flow_store.get_flow_store().create_flow("echo")
@@ -97,6 +98,7 @@ def test_expired_signature_401(client: TestClient):
     assert r.status_code == 401
 
 
+@pytest.mark.needs_form_parser
 def test_nonexistent_flow_returns_nonzero_code(client: TestClient):
     r = client.post(
         "/api/flowVersion/semver/detail",
@@ -107,6 +109,7 @@ def test_nonexistent_flow_returns_nonzero_code(client: TestClient):
     assert r.json()["code"] != 0
 
 
+@pytest.mark.needs_form_parser
 def test_unpublished_version_returns_nonzero_code(client: TestClient):
     flow_store.get_flow_store().create_flow("echo")
     flow_store.get_flow_store().save_flow_definition("echo", "0.0.1", _echo_def(), "{}")

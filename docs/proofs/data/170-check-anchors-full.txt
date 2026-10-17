@@ -1,0 +1,105 @@
+锚点检查：409 条定义，问题 104 条（tree=/private/tmp/w25-a）
+  M10-enum-repr-only: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M10-protocol-walk: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M11-class-facts-getattr: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M11-class-facts-getattr-no-validation: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M11-class-facts-no-validation: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M11-no-meta-guard: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M11-one-dunder: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M13-borrow-fn-set: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M13-hooks-scans-only: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M13-view-exact: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M14-dc-preview: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M14-hooks-both: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M14-mapping-get: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M14-objclass-forge: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M14-probe-attr-access: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M15-annotate-preview: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M15-context-strip: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M15-e4-revert: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M15-eq-forge: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M15-warn-value: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M16-cross-type-allow: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M16-g4log-revert: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M16-parse-contains-revert: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M16-registry-guard: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M16-sibling-revert: plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）
+  M16-sort-revert: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M18-json-normalise-revert: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M18-sort-iter-revert: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M18-sort-nondata-gate-revert: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M19-author-capability-inject: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M19-data-gate-fail-open: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M19-json-rehash: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M19-op-slot-revert: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M19-return-gate-fail-open: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-binop-left-only: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M20-data-budget-low: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M20-drift-accepted-drop-none: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-drift-clevel-add-complex: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-drift-clevel-drop-decimal: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-drift-data-add-complex: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-drift-data-drop-str: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-drift-enum-set-empty: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-drift-exactonly-add-dict: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-drift-view-drop-items: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-len-contains-fallback: plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）
+  M20-registration-validator-off: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M20-return-budget-low: plaita/core/expression_parser.py: old 命中 0 次（应为 1）
+  M20-slot-getattr-fallback: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M21-contains-linear: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M21-engine-slot-issubclass: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M21-engine-slot-reason-drift: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M21-view-bases-empty: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M21-wrapper-silent-allow: plaita/core/_author_capability.py: 文件不存在
+  M22-hard-refuse-identity-only: plaita/core/_author_capability.py: 文件不存在
+  M22-metaclass-hook-skip: plaita/core/_author_capability.py: 文件不存在
+  M22-twoface-call-lookup: plaita/core/_engine_calls.py: 文件不存在
+  M22-view-operand-refuse: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M23-accessor-raw: plaita/core/expression.py: old 命中 0 次（应为 1）
+  M23-call-gate-off: plaita/core/_engine_calls.py: 文件不存在
+  M23-code-recheck-off: plaita/core/_engine_calls.py: 文件不存在
+  M23-isinstance-refusal: plaita/core/_author_capability.py: 文件不存在
+  M23-static-dict-revert: plaita/core/_engine_calls.py: 文件不存在
+  M23-static-mro-revert: plaita/core/_engine_calls.py: 文件不存在
+  M23-wrapped-function-only: plaita/core/_engine_calls.py: 文件不存在
+  M23-wrapper-as-leaf: plaita/core/_engine_calls.py: 文件不存在
+  M24-class-object-opaque: plaita/core/_engine_calls.py: 文件不存在
+  M24-gatedcall-trusts-code: plaita/core/_engine_calls.py: 文件不存在
+  M24-identity-membership-eq: plaita/core/_engine_calls.py: 文件不存在
+  M24-routine-membership-in: plaita/core/_engine_calls.py: 文件不存在
+  M25-capability-by-name: plaita/core/_author_capability.py: 文件不存在
+  M25-node-by-name: plaita/core/_author_capability.py: 文件不存在; plaita/core/_author_capability.py: 文件不存在
+  M25-strip-type-str-guard: plaita/core/_author_capability.py: 文件不存在
+  M26-cache-key-code-object: plaita/core/_author_capability.py: 文件不存在
+  M26-guard-after-cache: plaita/core/_author_capability.py: 文件不存在
+  M26-no-consistency-check: plaita/core/_author_capability.py: 文件不存在
+  M27-no-ellipsis: plaita/core/_author_capability.py: 文件不存在
+  M27-no-frozenset-projection: plaita/core/_author_capability.py: 文件不存在
+  M28-allow-parameter-callee: plaita/core/_author_capability.py: 文件不存在
+  M28-allow-rebindable-callee: plaita/core/_author_capability.py: 文件不存在
+  M28-no-default-expression-scan: plaita/core/_author_capability.py: 文件不存在
+  M29-readonly-binding-rebound: plaita/core/_author_capability.py: 文件不存在
+  M29-self-attribute-indirection-allow: plaita/core/_author_capability.py: 文件不存在
+  M30-allow-attribute-write: plaita/core/_author_capability.py: 文件不存在
+  M30-allow-multi-class-ambiguity: plaita/core/_author_capability.py: 文件不存在
+  M30-allow-self-rebind: plaita/core/_author_capability.py: 文件不存在
+  M30-attribute-indirection-always: plaita/core/_author_capability.py: 文件不存在
+  M31-allow-body-aliases: plaita/core/_author_capability.py: 文件不存在
+  M31-allow-object-setattr-path: plaita/core/_author_capability.py: 文件不存在; plaita/core/_author_capability.py: 文件不存在
+  M31-allow-setattr-path: plaita/core/_author_capability.py: 文件不存在; plaita/core/_author_capability.py: 文件不存在
+  M31-allow-type-receiver-expr: plaita/core/_author_capability.py: 文件不存在
+  M32-no-alias-resolution: plaita/core/_author_capability.py: 文件不存在
+  M32-no-cls: plaita/core/_author_capability.py: 文件不存在
+  M32-no-container-resolution: plaita/core/_author_capability.py: 文件不存在
+  M32-no-function-return: plaita/core/_author_capability.py: 文件不存在
+  M32-no-self-instance: plaita/core/_author_capability.py: 文件不存在
+  M33-carve-out-always: plaita/core/_author_capability.py: 文件不存在
+  M33-no-class-name-match: plaita/core/_author_capability.py: 文件不存在
+  M33-no-dunder-class-attrs: plaita/core/_author_capability.py: 文件不存在
+  M33-no-lambda-callee: plaita/core/_author_capability.py: 文件不存在
+  M33-no-subscript-propagation: plaita/core/_author_capability.py: 文件不存在
+  M33-no-type-call: plaita/core/_author_capability.py: 文件不存在
+  M33-no-write-channel: plaita/core/_author_capability.py: 文件不存在
+  M33-reinstate-own-receiver-refusal: plaita/core/_author_capability.py: 文件不存在
+  M9-concat: plaita/core/expression_parser.py: old 命中 0 次（应为 1）

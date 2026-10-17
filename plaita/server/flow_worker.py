@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 import weakref
-from typing import Dict, Any, Optional, Set, Tuple
+from typing import Dict, Any, Mapping, Optional, Set, Tuple
 
 import argparse
 import importlib
@@ -47,6 +47,17 @@ from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STA
 from plaita.logger import logger
 from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
+# #42（W10-a）：worker 容量上报——把「还能接多少活」写进既有 registry metadata
+# 的 ``worker_capacity`` 子键（复用 plaita:registry:flow_worker:<id> 键与 TTL）。
+# #42（W23-a 期 1）：显式派发目标闸——派发侧按容量路由把目标 worker 写进消息体
+# 顶层 ``target_instance_id``，worker 侧复用同一 ``TaskNotForThisWorker`` 交接
+# 路径让出（不新增协议）。
+from plaita.server.capacity import (
+    CAPACITY_METADATA_KEY,
+    build_capacity_block,
+    collect_capacity_metrics,
+    target_mismatch,
+)
 from plaita.server.control import ControlMixin, ControlListener
 from plaita.server.alerts import WebhookAlerter
 from plaita.server.metrics import (
@@ -58,6 +69,14 @@ from plaita.server.metrics import (
 )
 from plaita.server.log_handler import setup_redis_logging
 from plaita.server.node_timings import NodeTimingCallback
+from plaita.storage.usage import aggregate_node_usage, node_results_from_context
+from plaita.server.execution_timeline import (
+    CHANNEL_PREFIX,
+    ExecutionTimelineCallback,
+    event_payload,
+    merge_timeline,
+    publish_enabled,
+)
 from plaita.server.task_queue import (
     DEFAULT_CLAIM_MIN_IDLE_MS,
     DEFAULT_CONSUMER_GROUP,
@@ -84,12 +103,24 @@ from plaita.server.tenant_context import (
     tenant_namespace,
 )
 from plaita.server.tenant_status import tenant_is_active
+# plaita#28：每租户 start 准入配额（最小公平性原语）。console 入口超限 429、
+# worker 对无名额的外部生产方消息超限延迟重投；原语细节见 tenant_quota 模块。
+from plaita.server.tenant_quota import (
+    release_tenant_start,
+    try_admit_tenant_start,
+)
 # plaita#158 / #159：两个持久面（INFO/WARNING 日志、注册元数据）里的 URL 一律经
 # ``url_redaction`` 渲染——它**复用** #88 的 ``factory._mask_url``（不另起一套掩码，
 # 那正是 #88 的根因形态），并加一层「掩码失败 ⇒ 安全常量、绝不抛」的 fail-closed。
 # ``RedisUrlError`` / ``_parse_redis_url`` 仍直接来自 #88 的 factory（唯一解析路径）。
 from plaita.server.factory import RedisUrlError, _parse_redis_url
-from plaita.core.url_redaction import _mask_url_for_log, _mask_webhook_url_for_log
+from plaita.core.url_redaction import (
+    _mask_url_for_log,
+    _mask_webhook_url_for_log,
+    _redact_env_value,
+    _scrub_exception_text,
+    _scrub_url_text,
+)
 
 
 def _env_switch(name: str) -> bool:
@@ -128,6 +159,14 @@ def _affinity_disabled() -> bool:
     """机器亲和闸回滚开关：PLAITA_DISABLE_AFFINITY=1 时不做路径检查
     （回到「领到就跑」的现状；单机/同构环境本就不需要本闸）。"""
     return _env_switch("PLAITA_DISABLE_AFFINITY")
+
+
+def _dispatch_target_disabled() -> bool:
+    """显式派发目标闸回滚开关（#42 期 1）：``PLAITA_DISABLE_DISPATCH_TARGET=1``
+    时不再按消息体 ``target_instance_id`` 让出——回到「谁抢到谁跑」。
+    独立于 ``PLAITA_DISABLE_AFFINITY``：两者是不同判据（路径 vs 显式目标），
+    回滚粒度必须分开，否则回滚一个会顺带关掉另一个。"""
+    return _env_switch("PLAITA_DISABLE_DISPATCH_TARGET")
 
 
 # ---- 节点重试显式重投的退避节奏（plaita#91）----
@@ -205,7 +244,7 @@ def _requeue_body_for_retry(
         tenant = current_tenant()
     except Exception as e:  # noqa: BLE001 — 读盘失败不拦重投（原样 start）
         logger.warning(
-            "执行 %s 重投前查盘失败，start 载体原样重投: %s", execution_id, e
+            "执行 %s 重投前查盘失败，start 载体原样重投: %s", execution_id, _scrub_url_text(e)
         )
         return dict(body)
     finally:
@@ -237,6 +276,10 @@ def _requeue_body_for_retry(
     )
     return resume_body
 
+def _tenant_quota_disabled() -> bool:
+    """每租户 start 配额闸回滚开关（plaita#28）：PLAITA_DISABLE_TENANT_QUOTA=1
+    时 worker 不做准入检查（回到「领到就跑」的现状；console 侧开关独立）。"""
+    return _env_switch("PLAITA_DISABLE_TENANT_QUOTA")
 
 def _metrics_port_from_env() -> int:
     """``/metrics`` 抓取端端口（#26）；未配置 / 非法 = 0 = 不启动。"""
@@ -246,7 +289,7 @@ def _metrics_port_from_env() -> int:
     try:
         return max(0, int(raw))
     except ValueError:
-        logger.warning("PLAITA_METRICS_PORT=%r 非法，已禁用 /metrics 端点", raw)
+        logger.warning("PLAITA_METRICS_PORT=%s 非法，已禁用 /metrics 端点", _redact_env_value(raw))
         return 0
 
 
@@ -282,7 +325,7 @@ def _redis_registry_metadata(redis_url: object) -> Dict[str, Any]:
     try:
         target = _parse_redis_url(redis_url)
     except RedisUrlError as exc:
-        logger.warning("注册元数据无法解析 Redis 端点，仅登记掩码 URL: %s", exc)
+        logger.warning("注册元数据无法解析 Redis 端点，仅登记掩码 URL: %s", _scrub_url_text(exc))
         return metadata
     except Exception:  # noqa: BLE001 — 注册路径绝不为「端点解析」抛
         logger.warning("注册元数据无法解析 Redis 端点，仅登记掩码 URL")
@@ -319,13 +362,13 @@ def _paused_sweeper(max_age_secs: int = 6 * 3600):
         if drv is None or not hasattr(drv, "sweep_paused"):
             return None
     except Exception as exc:  # noqa: BLE001 — 清扫失败不影响启动
-        logger.warning("沙箱清扫准备失败（忽略）：%s", exc)
+        logger.warning("沙箱清扫准备失败（忽略）：%s", _scrub_url_text(exc))
         return None
 
     try:
         import e2b_code_interpreter  # noqa: F401 — 预导入（sweep 内部再取时已缓存）
     except Exception as exc:  # noqa: BLE001 — 缺装只退化为驱动内部导入
-        logger.warning("e2b 预导入失败（忽略，清扫仍会尝试）：%s", exc)
+        logger.warning("e2b 预导入失败（忽略，清扫仍会尝试）：%s", _scrub_url_text(exc))
 
     def _run() -> list:
         try:
@@ -334,7 +377,7 @@ def _paused_sweeper(max_age_secs: int = 6 * 3600):
                 logger.info("启动清扫：回收超龄暂停沙箱 %d 个：%s", len(killed), killed)
             return killed
         except Exception as exc:  # noqa: BLE001
-            logger.warning("启动清扫沙箱失败（忽略）：%s", exc)
+            logger.warning("启动清扫沙箱失败（忽略）：%s", _scrub_url_text(exc))
             return []
 
     return _run
@@ -373,7 +416,7 @@ def _min_free_disk_gib_from_env() -> float:
     try:
         return max(0.0, float(raw))
     except ValueError:
-        logger.warning("PLAITA_WORKER_MIN_FREE_DISK_GIB=%r 非法，盘预检按关闭处理", raw)
+        logger.warning("PLAITA_WORKER_MIN_FREE_DISK_GIB=%s 非法，盘预检按关闭处理", _redact_env_value(raw))
         return 0.0
 
 
@@ -460,7 +503,7 @@ def _register_code_node_for_worker() -> None:
         logger.info("CodeNode 已注册（sandbox_backend=%s）", backend)
         return
     except RuntimeError as e:  # 多为 docker daemon 不可用
-        logger.warning("CodeNode 注册失败（backend=%s）：%s —— 降级 subprocess 重试", backend, e)
+        logger.warning("CodeNode 注册失败（backend=%s）：%s —— 降级 subprocess 重试", backend, _scrub_url_text(e))
     register_code_node(default_backend="subprocess",
                        allowed_backends=_code_allowed_backends_for_worker("subprocess"),
                        allowed_languages=_code_allowed_languages_for_worker())
@@ -480,7 +523,17 @@ DEFAULT_RESIDUE_SWEEP_INTERVAL_SECONDS = 300.0
 # flow 定义指纹的**算法标记**：只有算法口径本身变化（model_dump 行为、字段规范化）
 # 才 bump。resume 时据它分级判定——算法不同但哈希相同说明定义没变（升级导致标签
 # 变化），可直接续跑；算法不同且哈希也不同才需要人工显式裁决。
-FLOW_HASH_ALGO = "flow-dump-json-sortkeys-v1"
+#
+# v2（plaita#36）：指纹口径从「解析后 ``Flow.model_dump``」改为「**存储中的原始
+# 定义 JSON**」（``model_validate`` 之前）。v1 的 dump 会随模型字段演进漂移——
+# 同一份存储定义在新旧引擎下算出不同指纹，滚动升级窗口把在途 run 批量终态化。
+# v1 → v2 是**算法口径变更**：老状态（stored_algo=v1）resume 时哈希必然不同，
+# 走 ``classify_flow_hash_change`` 的 ``mismatch`` + ``upgrade_suspected`` 分级，
+# 由 ``allow_flow_hash_change`` 显式放行（不静默吞掉真实定义变更）。
+FLOW_HASH_ALGO = "flow-definition-json-sortkeys-v2"
+
+# v1 算法标记：只用于识别「老状态来自旧口径」，不再用于计算新指纹。
+FLOW_HASH_ALGO_V1 = "flow-dump-json-sortkeys-v1"
 
 # resume 显式裁决键：允许在指纹变化时继续续跑（升级导致算法口径变化后的补救入口）。
 # 必须由调用方在 resume data 里显式传入，且会打 WARNING + 把新指纹写回状态。
@@ -506,7 +559,7 @@ def _drain_timeout_from_env() -> float:
         value = float(raw)
     except ValueError:
         logger.warning(
-            "PLAITA_WORKER_DRAIN_TIMEOUT=%r 非法，回退默认 %ss", raw, DEFAULT_WORKER_DRAIN_TIMEOUT
+            "PLAITA_WORKER_DRAIN_TIMEOUT=%s 非法，回退默认 %ss", _redact_env_value(raw), DEFAULT_WORKER_DRAIN_TIMEOUT
         )
         return DEFAULT_WORKER_DRAIN_TIMEOUT
     return max(0.0, value)
@@ -551,9 +604,37 @@ def _engine_version() -> str:
         from plaita import __version__
 
         return __version__
-    except Exception:  # noqa: BLE001 — 版本信息拿不到不能影响执行
-        logger.debug("读取引擎版本失败，按 unknown 记录", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — 版本信息拿不到不能影响执行
+        logger.debug("读取引擎版本失败，按 unknown 记录: %s", _scrub_exception_text(exc))
         return "unknown"
+
+
+def canonical_flow_definition_json(flow_definition: Mapping[str, Any]) -> str:
+    """把**存储中的原始流程定义**规范化为稳定 JSON 文本（指纹的输入面）。
+
+    plaita#36：指纹只取这一层——``model_validate`` 之前的定义才是「作者写下的
+    语义」。解析后的 ``Flow.model_dump(mode="json")`` 会随模型字段演进（新增/
+    删除字段、默认值的物化、别名规范化）改变形态，同一份存储定义在新旧引擎下
+    算出不同指纹，滚动升级窗口把在途 run 批量终态化。
+
+    规范化口径：``sort_keys``（dict 序无关）+ ``ensure_ascii=False`` +
+    ``default=str``（非 JSON 原生值降级为 str，与 ``sanitize_context_for_persist``
+    同款兜底，绝不为「日志/指纹路径」抛）。
+    """
+    return json.dumps(
+        flow_definition,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )
+
+
+def compute_flow_definition_hash(flow_definition: Mapping[str, Any]) -> str:
+    """原始定义 JSON 的 sha256（跨进程/跨引擎版本确定）。"""
+    return hashlib.sha256(
+        canonical_flow_definition_json(flow_definition).encode("utf-8")
+    ).hexdigest()
 
 
 def sanitize_context_for_persist(context: Any) -> Optional[dict]:
@@ -752,7 +833,8 @@ def _error_details_summary(details: Any) -> Optional[Dict[str, Any]]:
         return None
     try:
         view = render()
-    except Exception:  # noqa: BLE001 — 明细渲染失败不影响终态化
+    except Exception as exc:  # noqa: BLE001 — 明细渲染失败不影响终态化
+        logger.debug("执行明细渲染失败（不影响终态化）: %s", _scrub_exception_text(exc))
         return None
     if not isinstance(view, dict):
         return None
@@ -886,6 +968,25 @@ class NodeFailureTerminalizedError(ValueError):
     """
 
 
+class TenantQuotaDeferred(RuntimeError):
+    """start 消息超出租户并发配额（plaita#28）：**延迟**，不是失败。
+
+    消费入口抛出——由 run() 的专门分支**重投**（见 _defer_over_quota_start）：
+    入队一份同体新副本到 stream 尾部（让位给更早入队的其他租户消息）+ ack
+    原条。刻意不「留 pending」：XCLAIM 回收每轮让 deliveries +1，烧到
+    max_deliveries 会误死信——配额已满不是消息的错，绝不能因排队而死信。
+    刻意**不是** ValueError 子类（防 poison ack 语义误伤）。
+
+    命中前提：消息不带名额（非 console 入口生产方）。console start 在入口
+    即占名额（try_admit_tenant_start），其消息抵达 worker 时已是成员，闸
+    幂等放行——worker 闸只拦「绕过入口的第三方生产方」的洪峰。
+
+    **有界**（防重投空转）：副本带 ``quota_defers`` 计数，达
+    ``PLAITA_TENANT_QUOTA_DEFER_MAX``（默认 64）后带 ``quota_bypass`` 放行
+    ——宁可短暂突破软配额，不可让消息在队列里无限空转烧 CPU。
+    """
+
+
 class TaskNotForThisWorker(RuntimeError):
     """任务与本机不亲和（repo/run_dir 指向别的机器的绝对路径）。
 
@@ -1007,6 +1108,11 @@ class FlowWorker:
         # on_node_start/on_node_end；落盘时由 _persist_state_or_raise 写入
         # ExecutionState.node_timings。
         self._node_timings: Dict[str, NodeTimingCallback] = {}
+        # run 级事件时间线（plaita#25）：**按执行**一个采集器，与 _node_timings
+        # 同一对钩子、同一落盘收口（_collect_execution_timeline）。它同时是本进程
+        # 向 SSE 频道 ``plaita:execution:events:{id}`` 发布事件的**唯一发布者**
+        # （修复前该频道全仓零发布者，订阅者除 initial_state 外永远静默）。
+        self._timelines: Dict[str, ExecutionTimelineCallback] = {}
         # 执行状态写的**每执行互斥锁**（见 _state_write_lock）：同一 execution_id
         # 的所有状态写（推进路径 _persist_state_or_raise ↔ 看门狗心跳
         # _publish_node_progress）必须串行，否则心跳的「读-改-写」会把并发终态写
@@ -1028,6 +1134,9 @@ class FlowWorker:
         # 注意：_draining 在 _drain_event 里惰性兜底，__new__ 构造的骨架 worker 也安全
         # 初始化流程定义缓存，使用TTL缓存
         self.flow_definition_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
+        # 原始定义指纹缓存（plaita#36）：与 flow_definition_cache 同窗口，
+        # 在 get_flow_definition 里随解析结果一起写入。
+        self.flow_definition_hash_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.execution_lease = execution_lease or NullExecutionLease()
         self.lease_ttl_seconds = lease_ttl_seconds
         # 取消监听（波次③：步内可中断）：基类先建好登记表与停止位，内存 worker
@@ -1096,6 +1205,12 @@ class FlowWorker:
     # 布尔标记即如此：60s > 30s）。取 7 天与其余计数键同款（自清理）。
     AFFINITY_HANDOVER_TTL_SECONDS = 7 * 86400
 
+    # 超配额 start 的**重投延迟有界上限**（plaita#28，与 AFFINITY_HANDOVER_MAX
+    # 同一教训：无界重投 = 自锁）。重投副本落 stream 尾部，一轮 ≈ 当前队列
+    # 排空时间；达上限后带 quota_bypass 放行（存活性 > 软配额）。
+    # env PLAITA_TENANT_QUOTA_DEFER_MAX 可调（≥1）。
+    TENANT_QUOTA_DEFER_MAX = 64
+
     def _node_retry_total_key(self, execution_id: str) -> str:
         """兜底总重试计数键：``{ns}:execution:noderefetch:{id}``。
 
@@ -1117,7 +1232,7 @@ class FlowWorker:
             pipe.expire(key, self.NODE_RETRY_TOTAL_TTL_SECONDS)
             return int(pipe.execute()[0])
         except Exception as e:  # noqa: BLE001 — 计数失败按 1（不阻断现状语义）
-            logger.warning("兜底总重试计数自增失败（按 1）: %s: %s", execution_id, e)
+            logger.warning("兜底总重试计数自增失败（按 1）: %s: %s", execution_id, _scrub_url_text(e))
             return 1
 
     def _node_retry_total_exhausted(self, execution_id: str) -> bool:
@@ -1128,7 +1243,7 @@ class FlowWorker:
         try:
             raw = redis_client.get(self._node_retry_total_key(execution_id))
         except Exception as e:  # noqa: BLE001 — 读失败按未达限（保守，不误杀）
-            logger.warning("兜底总重试计数读取失败（按未达限）: %s: %s", execution_id, e)
+            logger.warning("兜底总重试计数读取失败（按未达限）: %s: %s", execution_id, _scrub_url_text(e))
             return False
         if raw is None:
             return False
@@ -1150,7 +1265,7 @@ class FlowWorker:
             raw = redis_client.get(self._deterministic_failure_key(execution_id))
             return int(raw) if raw is not None else 0
         except Exception as e:  # noqa: BLE001 — 读失败按 0（不误判不可救）
-            logger.warning("确定性失败计数读取失败（按 0）: %s: %s", execution_id, e)
+            logger.warning("确定性失败计数读取失败（按 0）: %s: %s", execution_id, _scrub_url_text(e))
             return 0
 
     def _record_deterministic_failure(self, execution_id: str) -> int:
@@ -1165,7 +1280,7 @@ class FlowWorker:
             pipe.expire(key, self.DETERMINISTIC_FAILURE_TTL_SECONDS)
             return int(pipe.execute()[0])
         except Exception as e:  # noqa: BLE001 — 计数失败按 1（不阻断现状语义）
-            logger.warning("确定性失败计数自增失败（按 1）: %s: %s", execution_id, e)
+            logger.warning("确定性失败计数自增失败（按 1）: %s: %s", execution_id, _scrub_url_text(e))
             return 1
 
     def _deterministic_failure_exhausted(self, execution_id: str) -> bool:
@@ -1188,7 +1303,7 @@ class FlowWorker:
         try:
             redis_client.delete(self._deterministic_failure_key(execution_id))
         except Exception as e:  # noqa: BLE001 — 清零失败无害（下次失败继续累计）
-            logger.warning("确定性失败计数清零失败（忽略）: %s: %s", execution_id, e)
+            logger.warning("确定性失败计数清零失败（忽略）: %s: %s", execution_id, _scrub_url_text(e))
 
     def _g1_wakeup_key(self, execution_id: str) -> str:
         """G1 唤醒计数键：``{ns}:execution:g1wakeups:{id}``（租户路由同上）。"""
@@ -1203,7 +1318,7 @@ class FlowWorker:
             raw = redis_client.get(self._g1_wakeup_key(execution_id))
             return int(raw) if raw is not None else 0
         except Exception as e:  # noqa: BLE001 — 读失败按 0（不阻断人工救援）
-            logger.warning("G1 唤醒计数读取失败（按 0 放行）: %s: %s", execution_id, e)
+            logger.warning("G1 唤醒计数读取失败（按 0 放行）: %s: %s", execution_id, _scrub_url_text(e))
             return 0
 
     def _g1_wakeup_budget_exhausted(self, execution_id: str) -> bool:
@@ -1222,7 +1337,7 @@ class FlowWorker:
             pipe.expire(key, self.G1_WAKEUP_COUNTER_TTL_SECONDS)
             pipe.execute()
         except Exception as e:  # noqa: BLE001 — 计数失败不阻断唤醒（人工救援优先）
-            logger.warning("G1 唤醒计数失败（忽略）: %s: %s", execution_id, e)
+            logger.warning("G1 唤醒计数失败（忽略）: %s: %s", execution_id, _scrub_url_text(e))
 
     def _node_retry_budget(self) -> int:
         """节点重试预算：沿用队列 max_deliveries 语义（默认 5）。
@@ -1280,7 +1395,7 @@ class FlowWorker:
         try:
             raw = redis_client.get(self._retry_counter_key(execution_id, node_id))
         except Exception as e:  # noqa: BLE001 — 瞬断按 0 处理（保守放行死信重入队）
-            logger.warning("读取节点重试计数失败（按 0 处理）: %s: %s", execution_id, e)
+            logger.warning("读取节点重试计数失败（按 0 处理）: %s: %s", execution_id, _scrub_url_text(e))
             return 0
         if raw is None:
             return 0
@@ -1306,13 +1421,13 @@ class FlowWorker:
             try:
                 keys.extend(list(scan(match=f"{base}:*")))
             except Exception as e:  # noqa: BLE001 — 扫描失败退化为单键读
-                logger.warning("扫描节点重试计数键失败（按单键读）: %s: %s", execution_id, e)
+                logger.warning("扫描节点重试计数键失败（按单键读）: %s: %s", execution_id, _scrub_url_text(e))
         best = 0
         for key in keys:
             try:
                 raw = redis_client.get(key)
             except Exception as e:  # noqa: BLE001 — 瞬断按 0 处理（保守放行死信重入队）
-                logger.warning("读取节点重试计数失败（按 0 处理）: %s: %s", execution_id, e)
+                logger.warning("读取节点重试计数失败（按 0 处理）: %s: %s", execution_id, _scrub_url_text(e))
                 continue
             if raw is None:
                 continue
@@ -1347,7 +1462,7 @@ class FlowWorker:
             pipe.expire(key, self.NODE_RETRY_COUNTER_TTL_SECONDS)
             return int(pipe.execute()[0])
         except Exception as e:  # noqa: BLE001 — 计数失败按 1 处理，不阻断重试放行
-            logger.warning("节点重试计数自增失败（按 1 处理）: %s: %s", execution_id, e)
+            logger.warning("节点重试计数自增失败（按 1 处理）: %s: %s", execution_id, _scrub_url_text(e))
             return 1
 
     def _reset_node_retry_counter(
@@ -1373,7 +1488,7 @@ class FlowWorker:
         try:
             self._delete_node_retry_keys(redis_client, execution_id, node_id)
         except Exception as e:  # noqa: BLE001 — 清零失败无害（下次失败继续累计）
-            logger.warning("节点重试计数清零失败（忽略）: %s: %s", execution_id, e)
+            logger.warning("节点重试计数清零失败（忽略）: %s: %s", execution_id, _scrub_url_text(e))
 
     def _delete_node_retry_keys(
         self, redis_client: Any, execution_id: str, node_id: Optional[str]
@@ -1436,19 +1551,19 @@ class FlowWorker:
                 logger.error(
                     "执行 %s 确定性失败累计达上限（%s/%s）——判定不可救，终态化 error"
                     "（后续重投将短路，不再空转）: %s",
-                    execution_id, n, self.DETERMINISTIC_FAILURE_MAX, exc,
+                    execution_id, n, self.DETERMINISTIC_FAILURE_MAX, _scrub_url_text(exc),
                 )
             else:
                 logger.warning(
                     "执行 %s 确定性失败（不重试）第 %s/%s 次: %s",
-                    execution_id, n, self.DETERMINISTIC_FAILURE_MAX, exc,
+                    execution_id, n, self.DETERMINISTIC_FAILURE_MAX, _scrub_url_text(exc),
                 )
             return None
         attempt = self._record_node_retry(execution_id, node_id)
         if attempt >= self._node_retry_budget():
             logger.error(
                 "执行 %s 节点 %s 重试预算耗尽（%s/%s），终态化 error: %s",
-                execution_id, node_id or "?", attempt, self._node_retry_budget(), exc,
+                execution_id, node_id or "?", attempt, self._node_retry_budget(), _scrub_url_text(exc),
             )
             return None
         # 兜底上限（plaita#123 评审建议）：**不看键名、只看次数**。节点维度
@@ -1462,14 +1577,14 @@ class FlowWorker:
             logger.error(
                 "执行 %s 节点重试达**兜底总上限**（%s/%s，节点 %s）——判定键空间"
                 "异常/预算机制失效，终态化 error 防止无界重投: %s",
-                execution_id, total, self.NODE_RETRY_TOTAL_MAX, node_id or "?", exc,
+                execution_id, total, self.NODE_RETRY_TOTAL_MAX, node_id or "?", _scrub_url_text(exc),
             )
             return None
         logger.warning(
             "执行 %s 节点 %s 执行失败，不终态化等待显式重投后重跑失败节点"
             "（第 %s/%s 次重试，重投退避 %.0fs，plaita#91）: %s",
             execution_id, node_id or "?", attempt, self._node_retry_budget(),
-            _node_retry_backoff_seconds(attempt), exc,
+            _node_retry_backoff_seconds(attempt), _scrub_url_text(exc),
         )
         return NodeExecutionRetryableError(
             f"节点执行失败（可重试，第 {attempt}/{self._node_retry_budget()} 次重试，"
@@ -1505,7 +1620,7 @@ class FlowWorker:
             return bool(redis_client.exists(self._cancel_flag_key(execution_id)))
         except Exception as e:
             logger.warning(
-                "取消标志检查失败（视为未取消，下个步界重试）: %s: %s", execution_id, e
+                "取消标志检查失败（视为未取消，下个步界重试）: %s: %s", execution_id, _scrub_url_text(e)
             )
             return False
 
@@ -1583,8 +1698,8 @@ class FlowWorker:
     def _cancel_poll_safely(self) -> None:
         try:
             self._cancel_poll_once()
-        except Exception:  # noqa: BLE001 — 监听线程自身绝不能带崩 worker
-            logger.error("取消监听周期异常", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — 监听线程自身绝不能带崩 worker
+            logger.error("取消监听周期异常: %s", _scrub_exception_text(exc))
 
     def _cancel_poll_once(self) -> None:
         """对全部活跃执行轮询一次取消标志键，命中即中止在途执行。"""
@@ -1605,10 +1720,10 @@ class FlowWorker:
             if callable(cancel):
                 try:
                     cancel()
-                except Exception:  # noqa: BLE001 — cancel 失败仍有步界兜底
+                except Exception as exc:  # noqa: BLE001 — cancel 失败仍有步界兜底
                     logger.warning(
-                        "取消监听调 execution.cancel() 失败: %s",
-                        execution_id, exc_info=True,
+                        "取消监听调 execution.cancel() 失败: %s: %s",
+                        execution_id, _scrub_exception_text(exc),
                     )
             logger.info("取消监听命中标志键，已请求中止在途节点: %s", execution_id)
 
@@ -1717,7 +1832,14 @@ class FlowWorker:
                 locks[execution_id] = lock
             return lock
 
-    def _persist_state_or_raise(self, execution_id: str, state: ExecutionState, phase: str) -> None:
+    def _persist_state_or_raise(
+        self,
+        execution_id: str,
+        state: ExecutionState,
+        phase: str,
+        *,
+        attempt_end: Optional[str] = None,
+    ) -> None:
         """落盘执行状态并检查返回值：False → 抛 ``StatePersistError``。
 
         **#80 起契约已分家（本条注释此前是错的，必须同步）**：``save_execution_state``
@@ -1738,12 +1860,20 @@ class FlowWorker:
         注意：fenced 世代失配是 storage 层 raise ``ExecutionLeaseError``、
         不经本方法的 False 路径——既有失租链路不受影响。
 
+        ``attempt_end``（plaita#25 P2）：**非终态**路径上的「本次投递尝试收口」
+        状态（当前仅 start 失败路径传 ``"error"``）——落盘收口据此在时间线里
+        补一条 ``run_end(final=False)``，而**不改状态行**（status/context/error
+        原样）。终态路径（completed/error/cancelled）忽略该参数，照旧由
+        ``_collect_execution_timeline`` 收口成 ``run_end(final=True)``。
+
         全程持**每执行互斥锁**（``_state_write_lock``）：与本执行的看门狗心跳
         （``_publish_node_progress``）串行，否则心跳的「读-改-写」会把这里的
         终态/步进写整行回滚（2026-10-10 评审复现）。
         """
         with self._state_write_lock(execution_id):
             self._collect_node_timings(execution_id, state)
+            self._collect_execution_timeline(execution_id, state, attempt_end=attempt_end)
+            self._collect_usage(execution_id, state)
             # 沙箱回收挂在同一收口（覆盖 start/步进/挂起/终态所有路径）：
             # 非终态是 no-op，终态按上下文快照释放实例
             self._release_sandboxes(execution_id, state)
@@ -1759,13 +1889,37 @@ class FlowWorker:
                 f"保存执行状态失败 ({phase}): execution_id={execution_id}, "
                 f"status={getattr(state, 'status', '?')}"
             )
+        # start 准入名额释放（plaita#28）：终态（completed/error/cancelled）
+        # 即释放——**单一收口**，覆盖 start/resume 两条路径上的全部终态写
+        # （完成/取消各分支/错误态/交接耗尽终态化）。挂起不释放：执行仍在
+        # 被 admitted 的生命周期内，resume 复用名额。按 ``state.tenant_id``
+        # 路由（而非 ContextVar）——看门狗等无租户上下文线程同样放对账。
+        # 释放是幂等 ZREM、尽力而为：失败由名额条目 TTL 兜底自愈。
+        self._release_quota_slot_if_terminal(execution_id, state)
 
-    def _handlers_for(self, execution_id: str) -> list:
-        """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器
+    def _release_quota_slot_if_terminal(self, execution_id: str, state: ExecutionState) -> None:
+        """终态执行释放 start 准入名额（plaita#28）；非终态 no-op。"""
+        if getattr(state, "status", None) not in TERMINAL_EXECUTION_STATUSES:
+            return
+        release_tenant_start(
+            getattr(self, "redis_client", None),
+            getattr(state, "tenant_id", None),
+            execution_id,
+        )
+
+    def _handlers_for(self, execution_id: str, enqueued_at: Optional[str] = None) -> list:
+        """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器 + 事件时间线
         （+ 沙箱生命周期回收，条件装配）。
 
         采集器**按执行**新建并登记，避免同一 worker 并发处理多个执行时耗时串场；
-        登记表在终态落盘后回收（见 ``_collect_node_timings``）。
+        登记表在终态落盘后回收（见 ``_collect_node_timings`` /
+        ``_collect_execution_timeline``）。同一执行重复调用本方法**复用**已登记
+        的采集器（分布式步进会多次构造 handlers，复用语义与 ``_sandbox_lifecycle_for``
+        同因：新建会丢掉先前采到的事件）。
+
+        ``enqueued_at``（plaita#25）：console 入队时写进消息体的 ``timestamp``，
+        用于回答「排队多久」。老消息/本地档没有该键 ⇒ 时间线里
+        ``queue_wait_ms=None``（未采集），绝不折算成 0。
 
         沙箱回收（2026-10-07）：存在沙箱注册表时挂 `SandboxLifecycleCallback`
         —**flow 结束/挂起/异常三条路径都精确释放实例**，不再干等 AGS 侧 timeout
@@ -1774,11 +1928,51 @@ class FlowWorker:
         """
         timing = NodeTimingCallback()
         self._node_timings[execution_id] = timing
-        handlers = [*self.callback_handlers, timing]
+        timeline = self._timelines.get(execution_id)
+        if timeline is None:
+            timeline = ExecutionTimelineCallback(
+                enqueued_at=enqueued_at,
+                publisher=self._timeline_publisher(execution_id),
+            )
+            self._timelines[execution_id] = timeline
+        handlers = [*self.callback_handlers, timing, timeline]
         sandbox_cb = self._sandbox_lifecycle_for(execution_id)
         if sandbox_cb is not None:
             handlers.append(sandbox_cb)
         return handlers
+
+    def _timeline_publisher(self, execution_id: str):
+        """把事件实时发布到 SSE 频道的回调（best-effort，绝不反压执行）。"""
+
+        def _publish(event: Dict[str, Any]) -> None:
+            self._publish_execution_event(execution_id, event)
+
+        return _publish
+
+    def _publish_execution_event(self, execution_id: str, event: Dict[str, Any]) -> None:
+        """向 ``plaita:execution:events:{id}`` 发布一条执行事件（plaita#25）。
+
+        这是该频道的**唯一发布者**（console 侧只有订阅与删除）。三条纪律：
+
+        - **best-effort**：Redis 抖动/无客户端/开关关闭都只返回，绝不影响执行
+          结果（观测面不得把执行面带崩）；
+        - **可关**：``PLAITA_EXECUTION_EVENTS_PUBLISH=0`` 静默；内存档
+          （无 ``redis_client``）天然 no-op；
+        - **载荷自描述**：事件里带 ``execution_id``，订阅方无需解析频道名。
+        """
+        if not publish_enabled():
+            return
+        client = getattr(self, "redis_client", None)
+        if client is None:
+            return
+        try:
+            client.publish(f"{CHANNEL_PREFIX}{execution_id}", event_payload(execution_id, event))
+        except Exception as exc:  # noqa: BLE001 — 发布失败绝不影响执行
+            logger.warning(
+                "执行事件发布失败（忽略，不影响执行）: execution_id=%s: %s",
+                execution_id,
+                _scrub_exception_text(exc),
+            )
 
     def _sandbox_lifecycle_for(self, execution_id: str):
         """按执行取沙箱生命周期回调（缓存复用）。
@@ -1816,7 +2010,7 @@ class FlowWorker:
         try:
             snaps = collect_workspace_snapshots(getattr(state, "context", None) or {})
         except Exception as exc:  # noqa: BLE001
-            logger.warning("沙箱快照收集失败（忽略）: %s", exc)
+            logger.warning("沙箱快照收集失败（忽略）: %s", _scrub_url_text(exc))
             return
         if not snaps:
             return
@@ -1826,7 +2020,7 @@ class FlowWorker:
             if results:
                 logger.info("终态沙箱释放 %s: %s", execution_id, results)
         except Exception as exc:  # noqa: BLE001 — 回收失败由 AGS TTL 兜底
-            logger.warning("终态沙箱释放失败（忽略）: %s", exc)
+            logger.warning("终态沙箱释放失败（忽略）: %s", _scrub_url_text(exc))
 
     @staticmethod
     def _sandbox_lifecycle_handler():
@@ -1865,6 +2059,81 @@ class FlowWorker:
         state.node_timings = merged
         if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
             self._node_timings.pop(execution_id, None)
+
+    def _collect_execution_timeline(
+        self,
+        execution_id: str,
+        state: ExecutionState,
+        *,
+        attempt_end: Optional[str] = None,
+    ) -> None:
+        """把本次执行的 run 级事件时间线并进状态（与 ``_collect_node_timings``
+        同一落盘收口、同一「合并而非覆盖」语义）。
+
+        - 终态时先补一条 ``run_end(final=True)``（含 status）再快照——「这次跑完
+          没有、以什么状态收的」是时间线的收口事件；
+        - **非终态**的失败尝试（``attempt_end`` 非 None，plaita#25 P2）补一条
+          ``run_end(final=False)``：状态行保持非终态（既有契约：可重投/可
+          cancel），但这次尝试必须留下收口锚点，否则失败 run 的落盘时间线停在
+          半途（失败节点有、收口没有）；
+        - 合并语义（``merge_timeline``）：resume 跨进程时旧事件与旧排队时长
+          必须保留，新进程的 None **不得**把已有答案擦掉；
+        - 终态落盘后回收采集器，避免长跑 worker 泄漏（与 node_timings 同款）；
+          非终态不回收——同一执行的后续尝试还要继续往同一条流里追加。
+        """
+        timeline = self._timelines.get(execution_id)
+        if timeline is None:
+            return
+        terminal = getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES
+        if terminal:
+            timeline.finish_run(getattr(state, "status", None))
+        elif attempt_end is not None:
+            timeline.finish_attempt(attempt_end)
+        drained = timeline.drain()
+        if not drained["events"] and not drained["dropped"] and state.timeline is None:
+            # 还没有任何事件（resume 进程在首个节点前）：保持 None = 未采集，
+            # 不要落一个「采集到了但是空」的假象。
+            return
+        state.timeline = merge_timeline(state.timeline, drained)
+        if terminal:
+            self._timelines.pop(execution_id, None)
+
+    def _collect_usage(self, execution_id: str, state: ExecutionState) -> None:
+        """终态时把每节点 ``usage`` 聚合进 ``ExecutionState.usage``（plaita#37）。
+
+        四条纪律：
+
+        - **只在终态**聚合：半截/非最终数字被读成「本次成本」比没有数字更坏；
+        - **不覆写**：``state.usage`` 已有值（resume / 历史 patch_count 回填）
+          原样保留——与 ``node_timings``/``flow_hash`` 同款零回归语义；
+        - **best-effort**：聚合失败只打 WARNING（响亮、不静默），**绝不影响
+          执行结果**——落盘口径不得把执行面拖下水；
+        - **未采集 ≠ 0**：没有任何节点报 usage ⇒ 保持 ``None``；节点明确报了
+          ``total_tokens=0`` ⇒ 落一个含 0 的 usage。
+        """
+        if getattr(state, "usage", None) is not None:
+            return
+        if getattr(state, "status", "") not in TERMINAL_EXECUTION_STATUSES:
+            return
+        try:
+            usage = aggregate_node_usage(node_results_from_context(state.context))
+        except Exception as exc:  # noqa: BLE001 — 观测/口径失败绝不影响执行结果
+            logger.warning(
+                "usage 聚合失败（忽略，不影响执行结果）: execution_id=%s: %s",
+                execution_id,
+                _scrub_exception_text(exc),
+            )
+            return
+        if usage is None:
+            return
+        try:
+            state.usage = usage
+        except Exception as exc:  # noqa: BLE001 — 赋值/序列化前失败同样不得外抛
+            logger.warning(
+                "usage 落盘失败（忽略，不影响执行结果）: execution_id=%s: %s",
+                execution_id,
+                _scrub_exception_text(exc),
+            )
     
     def get_flow_definition(self, flow_id: str, version: Optional[str] = None) -> Flow:
         """
@@ -1899,8 +2168,8 @@ class FlowWorker:
             if hasattr(self.flow_storage, "diagnose_missing_flow"):
                 try:
                     self.flow_storage.diagnose_missing_flow(flow_id)
-                except Exception:
-                    logger.warning("flow_storage.diagnose_missing_flow(%s) failed", flow_id, exc_info=True)
+                except Exception as exc:
+                    logger.warning("flow_storage.diagnose_missing_flow(%s) failed: %s", flow_id, _scrub_exception_text(exc))
 
             error_msg = f"找不到流程定义: {flow_id}"
             logger.error(error_msg)
@@ -1916,25 +2185,60 @@ class FlowWorker:
             raise ValueError(error_msg)
         
         self.flow_definition_cache[cache_key] = flow
+        # 指纹随定义一起缓存（plaita#36）：指纹只取 model_validate **之前**的
+        # 原始定义，与缓存里的 Flow 同窗口，避免 start/resume 各自重算走叉。
+        self._flow_definition_hash_cache()[cache_key] = compute_flow_definition_hash(
+            flow_definition
+        )
         
         return flow
-    
+
+    def _flow_definition_hash_cache(self) -> "TTLCache":
+        """指纹缓存（惰性兜底：``__new__`` 构造的骨架 worker 不经 ``__init__``）。"""
+        cache = getattr(self, "flow_definition_hash_cache", None)
+        if cache is None:
+            cache = TTLCache(maxsize=100, ttl=300)
+            self.flow_definition_hash_cache = cache
+        return cache
+
+    def get_flow_definition_hash(self, flow_id: str, version: Optional[str] = None) -> str:
+        """当前存储定义的指纹（plaita#36：原始定义 JSON 的 sha256）。
+
+        与 ``get_flow_definition`` 共用缓存窗口：定义加载时就算好（同一次
+        ``flow_storage.get_flow``），调用方（start/resume）不自己从 ``Flow``
+        对象反推——那正是版本漂移的入口。缓存未命中（定义缓存被清 / 加载器被
+        测试替身替换）时回源到**同一个 FlowStorage** 直读原始定义，绝不回退
+        到「解析后 dump」口径。
+        """
+        cache_key = f"{current_tenant()}:{flow_id}:{version or 'latest'}"
+        cache = self._flow_definition_hash_cache()
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        flow_definition = self.flow_storage.get_flow(flow_id, version)
+        if not flow_definition:
+            raise ValueError(f"找不到流程定义: {flow_id}")
+        digest = compute_flow_definition_hash(flow_definition)
+        cache[cache_key] = digest
+        return digest
+
     # ---- flow 定义指纹（波次二任务②）----
 
-    def _compute_flow_hash(self, flow: Flow) -> str:
-        """对实际加载执行的 Flow 计算稳定指纹（sha256 of 规范化 JSON dump）。
+    def _compute_flow_hash(self, flow_definition: Mapping[str, Any]) -> str:
+        """对**存储中的原始流程定义**计算稳定指纹（plaita#36 口径 v2）。
 
-        用 ``model_dump(mode="json")`` + ``sort_keys`` 保证跨进程确定性（同一
-        pydantic 版本下字段序稳定，sort_keys 再兜底 dict 序）。指纹在 start
-        时写入 ExecutionState.flow_hash，resume 时不一致即拒绝续跑。
+        入参必须是 ``model_validate`` **之前**的原始定义（dict/Mapping）：只有
+        它跨 pydantic/plaita 版本稳定。传 ``Flow`` 对象（或任何非 Mapping）一律
+        ``TypeError`` —— 对解析后的 ``model_dump`` 求指纹会让「引擎升级」被误判
+        成「定义变更」，滚动升级窗口把在途 run 批量终态化（#36 的根因）。
         """
-        payload = json.dumps(
-            flow.model_dump(mode="json"),
-            sort_keys=True,
-            ensure_ascii=False,
-            default=str,
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        if not isinstance(flow_definition, Mapping):
+            raise TypeError(
+                "_compute_flow_hash 只接受存储中的原始流程定义（Mapping）；"
+                f"收到 {type(flow_definition).__name__}——对解析后的模型 dump "
+                "求指纹会随模型字段演进漂移（plaita#36），禁止回退到该口径。"
+            )
+        return compute_flow_definition_hash(flow_definition)
 
     # ---- start 幂等键（波次二任务③）----
 
@@ -1970,14 +2274,14 @@ class FlowWorker:
                 key, execution_id, ex=self.START_DEDUP_TTL_SECONDS, nx=True
             )
         except Exception as e:  # noqa: BLE001 — 认领瞬断：不阻塞启动（退化为存量行为）
-            logger.warning("start 幂等键认领失败（按未启用处理）: %s: %s", key, e)
+            logger.warning("start 幂等键认领失败（按未启用处理）: %s: %s", key, _scrub_url_text(e))
             return ("inactive", None)
         if claimed:
             return ("claimed", None)
         try:
             raw = redis_client.get(key)
         except Exception as e:  # noqa: BLE001 — 读取瞬断同上
-            logger.warning("start 幂等键读取失败（按孤儿映射处理）: %s: %s", key, e)
+            logger.warning("start 幂等键读取失败（按孤儿映射处理）: %s: %s", key, _scrub_url_text(e))
             return ("hit", None)
         mapped = raw.decode() if isinstance(raw, bytes) else raw
         return ("hit", mapped or None)
@@ -1996,7 +2300,7 @@ class FlowWorker:
             if current == execution_id:
                 redis_client.delete(key)
         except Exception as e:  # noqa: BLE001 — 释放失败无害（键 7 天自动过期）
-            logger.warning("start 幂等键孤儿释放失败（忽略）: %s: %s", key, e)
+            logger.warning("start 幂等键孤儿释放失败（忽略）: %s: %s", key, _scrub_url_text(e))
 
     def _handle_start_dedup_hit(
         self,
@@ -2120,8 +2424,8 @@ class FlowWorker:
                     finalizer()
                 elif callable(flusher):
                     flusher()
-            except Exception:
-                logger.warning("观测回调终态收尾失败: %r", handler, exc_info=True)
+            except Exception as exc:
+                logger.warning("观测回调终态收尾失败: %r: %s", handler, _scrub_exception_text(exc))
 
     def _bind_observers(self, execution) -> None:
         """把执行实例通知给支持 ``bind_execution`` 的观测回调（plaita.obs）。
@@ -2135,13 +2439,14 @@ class FlowWorker:
             if callable(binder):
                 try:
                     binder(execution)
-                except Exception:
-                    logger.warning("观测回调 bind_execution 失败: %r", handler, exc_info=True)
+                except Exception as exc:
+                    logger.warning("观测回调 bind_execution 失败: %r: %s", handler, _scrub_exception_text(exc))
 
     def start_flow(self, flow_id: str, params: Dict[str, Any], version: Optional[str] = None,
                    execution_id: Optional[str] = None,
                    dedup_key: Optional[str] = None,
-                   delivery_count: Optional[int] = None) -> Dict[str, Any]:
+                   delivery_count: Optional[int] = None,
+                   enqueued_at: Optional[str] = None) -> Dict[str, Any]:
         """
         启动流程执行
 
@@ -2160,6 +2465,9 @@ class FlowWorker:
             dedup_key: 可选 start 幂等键（消息重投/双开收敛；未提供则行为
                 与存量完全一致，见 ``_claim_start_dedup``）
             delivery_count: 消息投递次数（可观测；见 _process_execution_result）
+            enqueued_at: console 入队时间（消息体 ``timestamp``，ISO 串）。用于
+                时间线回答「排队多久」（plaita#25）：缺失/不可解析 ⇒
+                ``queue_wait_ms=None``（未采集），不折算成 0。
 
         Returns:
             Dict[str, Any]: 流程执行结果
@@ -2181,9 +2489,16 @@ class FlowWorker:
 
             # 创建流程执行器并执行流程
             # 复用同一个 FlowExecution 贯穿所有分布式步骤, 保留用户回调
+            handlers = self._handlers_for(execution_id, enqueued_at=enqueued_at)
+            # 时间线开篇（plaita#25）：记 run_start + 由 enqueued_at 算出排队时长。
+            # 位置在**落 running 行之前**——排队时长的终点是「worker 开始处理」，
+            # 不是「首节点开始跑」，否则排队时长会被流程定义加载/租约获取计入。
+            _timeline = self._timelines.get(execution_id)
+            if _timeline is not None:
+                _timeline.start_run()
             execution = FlowExecution(
                 event_bus=self.event_bus,
-                callback_handlers=self._handlers_for(execution_id),
+                callback_handlers=handlers,
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
@@ -2199,6 +2514,9 @@ class FlowWorker:
                     flow_id, mapped_execution_id, params=params
                 )
                 if hit_result is not None:
+                    # 本次没有真正启动：回收按本 id 装配的时间线采集器
+                    # （否则节流命中会在长跑 worker 里留一条无人认领的采集器）。
+                    self._timelines.pop(execution_id, None)
                     return hit_result
                 # 孤儿映射（首次执行从未落盘）：释放后重新认领，让本次启动
                 # 继续受保护；并发后来者抢先认领则放弃设防（存量语义）
@@ -2214,14 +2532,15 @@ class FlowWorker:
                         )
 
             # 先落 running 行再执行（P0 可见性）：首节点期间 /api/executions
-            # 查得到此行、cancel 有锚。flow_hash：对实际加载执行的 Flow 计算
-            # 指纹（波次二任务②）随行落盘——resume 时与当前定义比对，防运行
-            # 中改定义后续跑走错分支。
+            # 查得到此行、cancel 有锚。flow_hash：对**存储中的原始定义**计算
+            # 指纹（plaita#36 口径 v2）随行落盘——resume 时与当前定义比对，防
+            # 运行中改定义后续跑走错分支；原始定义口径保证同一份存储定义在
+            # 不同引擎版本下算同一个指纹。
             state = ExecutionState(
                 execution_id=execution_id,
                 flow_id=flow_id,
                 flow_version=version,
-                flow_hash=self._compute_flow_hash(flow),
+                flow_hash=self.get_flow_definition_hash(flow_id, version),
                 flow_hash_algo=FLOW_HASH_ALGO,
                 engine_version=_engine_version(),
                 tenant_id=current_tenant(),
@@ -2342,7 +2661,7 @@ class FlowWorker:
             raise
 
         except Exception as e:
-            logger.error("执行流程出错: %s", e, exc_info=True)
+            logger.error("执行流程出错: %s", _scrub_exception_text(e))
             # 波次③步内取消：start 路径首个节点在途命中取消监听 →
             # 引擎自 run_distributed 归一化抛出（挂 __cause__）或协作节点自杀
             # 抛普通异常。两条判据任一命中即终态化 cancelled，绝不包成
@@ -2359,8 +2678,60 @@ class FlowWorker:
                     execution_id,
                 )
                 return {"execution_id": execution_id, "status": "cancelled"}
+            # plaita#25 P2：错误路径落盘。确定性失败此前只打日志 + 实时发布事件
+            # ⇒ 状态行停在 start 时落的 running，**落盘时间线只有 run_start**：
+            # 失败节点（runner 已补发 on_node_end(error)）与收口事件都只存在于
+            # 内存/SSE 里，数小时后复盘时没有第二来源。这里走**唯一落盘收口**
+            # 把这次尝试的事件补进 state.timeline，并在流里补一条
+            # run_end(final=False, status=error)。
+            #
+            # 状态行**刻意不动**：错误路径的 running 行是既有契约（可重投、
+            # 可 cancel、zombie 可见——见
+            # tests/unit/test_g1_resume_retry.py::test_running_row_survives_start_failure），
+            # 也保证 ack/重投与死信守卫的判据逐字不变。
+            # best-effort：落盘失败只告警，下面的 RuntimeError 照旧上抛 ⇒
+            # 消息仍不 ack 走 at-least-once 重投。
+            self._record_failed_start_attempt(execution_id, locals().get("state"))
             self._finalize_observers()
             raise RuntimeError(f"执行流程出错: {e}")
+
+    def _record_failed_start_attempt(
+        self,
+        execution_id: str,
+        state: Optional[ExecutionState],
+    ) -> None:
+        """start 路径**确定性失败**的时间线落盘（plaita#25 P2，best-effort）。
+
+        只覆盖非可重试异常分支（可重试族 ``NodeExecutionRetryableError`` /
+        ``ServiceDispatchError`` / ``ExecutionLeaseError`` 在上方原样上抛，
+        执行保持非终态等待重投——那是重试语义，不被观测落盘改写）。
+
+        边界（逐条写清，避免被读成「终态化」）：
+
+        - **不改状态行**：status/context/error/end_time 一个都不动——错误路径的
+          非终态行是既有契约（可重投、可 cancel，见
+          ``tests/unit/test_g1_resume_retry.py`` 的预铸 id 守卫），也保证
+          ack/重投、G1 唤醒矩阵与死信守卫的判据逐字不变；
+        - **只补观测面**：唯一被写的是 ``state.timeline``（本次尝试的
+          ``node_end(ok=false)`` 与 ``run_end(final=False, status=error)``）；
+        - **best-effort**：落盘异常（瞬断/不可序列化/任何异常）只告警、绝不上抛
+          ——上抛会替换掉调用方要抛的 RuntimeError，改写重投语义；
+        - **不回收采集器**：状态非终态，同一执行的后续尝试还要继续往同一条流里
+          追加（终态收口与回收由 ``_collect_execution_timeline`` 负责）。
+        """
+        if state is None:
+            return
+        try:
+            self._persist_state_or_raise(
+                execution_id, state, "start_error_attempt", attempt_end="error"
+            )
+        except Exception as persist_exc:  # noqa: BLE001 — 观测落盘绝不改写 ack 语义
+            logger.warning(
+                "start 失败路径的时间线落盘失败（忽略，消息仍不 ack 走重投）: "
+                "execution_id=%s: %s",
+                execution_id,
+                _scrub_exception_text(persist_exc),
+            )
 
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
                     data: Optional[Dict[str, Any]] = None,
@@ -2518,8 +2889,9 @@ class FlowWorker:
         # worker 的推进写串行化，防「他人持租约推进中却被误终态化」），
         # 不一致 → 终态化 error + raise ValueError（poison ack）——意图是
         # 可观测的终态而不是重投风暴。老状态 flow_hash 为 None → 跳过校验
-        # （零回归）。
-        current_flow_hash = self._compute_flow_hash(flow)
+        # （零回归）。指纹取**存储中的原始定义**（plaita#36 口径 v2）：同一份
+        # 存储定义不受引擎版本/模型字段演进影响。
+        current_flow_hash = self.get_flow_definition_hash(flow_id, version)
 
         # 解析流程定义
         logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
@@ -2737,7 +3109,7 @@ class FlowWorker:
             # 不落进下面的通用 except 二次终态化/包 RuntimeError。
             raise
         except Exception as e:
-            logger.error("恢复流程执行出错: %s", e, exc_info=True)
+            logger.error("恢复流程执行出错: %s", _scrub_exception_text(e))
 
             # 波次③步内取消：被恢复的节点在途命中取消监听 → 引擎抛
             # FlowCancelledException（归一化后挂 __cause__）或协作节点自杀抛
@@ -2773,7 +3145,7 @@ class FlowWorker:
                 logger.warning(
                     "执行 %s (status=%s) 收到与挂起状态不匹配的 resume 请求，"
                     "协议错误不终态化，执行保持原状: %s",
-                    execution_id, getattr(state, "status", "?"), e,
+                    execution_id, getattr(state, "status", "?"), _scrub_url_text(e),
                 )
                 self._finalize_observers()
                 raise ResumeProtocolError(
@@ -2980,7 +3352,7 @@ class FlowWorker:
                     # 直接终态化再落盘会**再抛同一个异常**（终态永远落不下去）。
                     logger.error(
                         "执行状态不可序列化，终态化 error（不重投）: execution_id=%s, err=%s",
-                        execution_id, exc,
+                        execution_id, _scrub_url_text(exc),
                     )
                     _sanitized = sanitize_context_for_persist(context)
                     if _sanitized is not None:
@@ -3033,7 +3405,7 @@ class FlowWorker:
                     # 重投命中 already_terminal 短路），执行永久卡死。
                     raise
                 except Exception as e:
-                    logger.error("流程执行出错: %s", e, exc_info=True)
+                    logger.error("流程执行出错: %s", _scrub_exception_text(e))
                     # 波次③步内取消：两条判据任一命中即终态化 cancelled（= 取消
                     # 点前 checkpoint），绝不写 error：
                     #   ① 异常链含 FlowCancelledException（引擎在下一节点入口
@@ -3137,7 +3509,7 @@ class FlowWorker:
             # 终态 GC 只回收终态，孤儿订阅留到 TTL 过期——可接受。
             # ServiceDispatchError 非 ValueError 子类，不会被 run() 毒丸 ack。
             logger.error(
-                "挂起任务投递失败: %s → %s: %s", subtype, queue_key, e, exc_info=True
+                "挂起任务投递失败: %s → %s: %s", subtype, queue_key, _scrub_exception_text(e)
             )
             raise ServiceDispatchError(
                 f"挂起任务投递失败: {subtype} → {queue_key} "
@@ -3310,6 +3682,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 redis_client=self.redis_client,
                 instance_id=self._service_info.instance_id if self._service_info else "unknown"
             )
+
+            # #42（W10-a）：把容量快照写进 metadata（并立即落一次注册键）。
+            # 放在 init_control 之后：`_service_info` 已建好；此时 `_registry`
+            # 尚未 start_heartbeat，直推一次让派发侧**首个心跳前**就能看到容量
+            # （registry.register() 在 init_registry 内还没执行，本次推送顺带
+            # 完成注册键写入——幂等，register() 之后再覆盖一次同样的值）。
+            self._report_capacity()
         
         # Redis 日志处理器
         self._enable_redis_logging = enable_redis_logging
@@ -3407,7 +3786,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 state = self.execution_storage.load_execution_state(execution_id)
             except Exception as exc:  # noqa: BLE001 — 瞬断保守跳过，不误杀活执行
                 logger.warning(
-                    "死信守卫读执行状态失败（保守跳过死信）: %s: %s", execution_id, exc
+                    "死信守卫读执行状态失败（保守跳过死信）: %s: %s", execution_id, _scrub_url_text(exc)
                 )
                 return False
             retry_count = self._max_node_retry_counter(execution_id)
@@ -3425,7 +3804,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             lease_held = bool(self.redis_client.exists(lease_key))
         except Exception as exc:  # noqa: BLE001 — 瞬断保守跳过，不误杀活执行
             logger.warning(
-                "死信守卫查询租约失败（保守跳过死信）: %s: %s", lease_key, exc
+                "死信守卫查询租约失败（保守跳过死信）: %s: %s", lease_key, _scrub_url_text(exc)
             )
             return False
         if lease_held:
@@ -3483,7 +3862,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     )
                 except Exception as exc:  # noqa: BLE001 — 写盘失败不丢消息
                     logger.warning(
-                        "死信守卫终态化失败（保守跳过死信）: %s: %s", execution_id, exc
+                        "死信守卫终态化失败（保守跳过死信）: %s: %s", execution_id, _scrub_url_text(exc)
                     )
                     return False
                 return True
@@ -3500,7 +3879,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
         except Exception as exc:  # noqa: BLE001 — 重入队失败则不能丢原消息
             logger.warning(
-                "死信守卫重新入队失败（保守跳过死信）: %s: %s", execution_id, exc
+                "死信守卫重新入队失败（保守跳过死信）: %s: %s", execution_id, _scrub_url_text(exc)
             )
             return False
         return True
@@ -3589,8 +3968,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         while not self._watchdog_stop.wait(interval):
             try:
                 self._watchdog_renew_once()
-            except Exception:  # noqa: BLE001 — 看门狗自身绝不能带崩 worker
-                logger.error("租约看门狗周期异常", exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — 看门狗自身绝不能带崩 worker
+                logger.error("租约看门狗周期异常: %s", _scrub_exception_text(exc))
 
     def _publish_node_progress(
         self,
@@ -3660,11 +4039,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 "在跑节点进度发布被 fencing 拒绝（租约已被接管，停止心跳）: %s",
                 execution_id,
             )
-        except Exception:  # noqa: BLE001 — 观测路径不得影响执行
+        except Exception as exc:  # noqa: BLE001 — 观测路径不得影响执行
             logger.warning(
-                "在跑节点进度发布失败（忽略，节点边界仍会落盘）: %s",
+                "在跑节点进度发布失败（忽略，节点边界仍会落盘）: %s: %s",
                 execution_id,
-                exc_info=True,
+                _scrub_exception_text(exc),
             )
         finally:
             if fence_scope is not None:
@@ -3702,7 +4081,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 )
             except Exception as exc:  # noqa: BLE001 — 瞬断不判死
                 logger.warning(
-                    "看门狗 renew 异常（下周期重试）: %s: %s", execution_id, exc
+                    "看门狗 renew 异常（下周期重试）: %s: %s", execution_id, _scrub_url_text(exc)
                 )
                 continue
             finally:
@@ -3737,9 +4116,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             if callable(cancel):
                 try:
                     cancel()
-                except Exception:  # noqa: BLE001 — cancel 失败不影响失租兜底
+                except Exception as exc:  # noqa: BLE001 — cancel 失败不影响失租兜底
                     logger.warning(
-                        "看门狗调 execution.cancel() 失败: %s", execution_id, exc_info=True
+                        "看门狗调 execution.cancel() 失败: %s: %s", execution_id, _scrub_exception_text(exc)
                     )
             else:
                 logger.debug("执行对象无 cancel()（引擎侧波次③前），仅步界兜底")
@@ -3935,7 +4314,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             try:
                 lease_value = self.execution_lease.get_holder(body["execution_id"])
             except Exception as exc:  # noqa: BLE001 — 瞬断按存活未知处理
-                logger.debug("租约持有者存活核算读租约失败（按存活未知）: %s", exc)
+                logger.debug("租约持有者存活核算读租约失败（按存活未知）: %s", _scrub_url_text(exc))
                 return True
         finally:
             reset_current_tenant(token)
@@ -3948,7 +4327,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         try:
             registered = bool(self.redis_client.exists(registry_key))
         except Exception as exc:  # noqa: BLE001 — 瞬断按存活未知处理
-            logger.debug("租约持有者存活核算查注册表失败（按存活未知）: %s", exc)
+            logger.debug("租约持有者存活核算查注册表失败（按存活未知）: %s", _scrub_url_text(exc))
             return True
         if registered:
             # 持有者在册但处于 draining（优雅停机中）：它**不保证**会收尾——
@@ -3983,14 +4362,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         try:
             raw = self.redis_client.get(registry_key)
         except Exception as exc:  # noqa: BLE001 — 瞬断按「非 draining」处理
-            logger.debug("读注册表条目失败（按非 draining 处理）: %s", exc)
+            logger.debug("读注册表条目失败（按非 draining 处理）: %s", _scrub_url_text(exc))
             return False
         if not raw:
             return False
         try:
             data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001 — 非 JSON 值按非 draining 处理
-            logger.debug("注册表条目非 JSON（按非 draining 处理）: %s", exc)
+            logger.debug("注册表条目非 JSON（按非 draining 处理）: %s", _scrub_url_text(exc))
             return False
         return isinstance(data, dict) and data.get("status") == "draining"
 
@@ -4065,7 +4444,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             logger.error(
                 "交接计数自增失败（含 WRONGTYPE 键污染/瞬断）——**界已失效，"
                 "本机不再交接**（退化为留 pending，等对端 reclaim 或运维介入）: "
-                "%s: %s", key, e,
+                "%s: %s", key, _scrub_url_text(e),
             )
             return None
 
@@ -4114,20 +4493,20 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         except Exception as e:  # noqa: BLE001 — 读失败不覆写状态，但仍停止重投
             logger.error(
                 "执行 %s 交接达上限但读执行状态失败——不再重投（留 pending 待"
-                "运维介入），不覆写状态: %s", execution_id, e,
+                "运维介入），不覆写状态: %s", execution_id, _scrub_url_text(e),
             )
             return True
         if state is None:
             logger.error(
                 "执行 %s 交接达上限（%s 次）但执行状态不存在（可能已被 console "
                 "清理/从未创建）——不再重投，留 pending 待运维介入: %s",
-                execution_id, count, exc,
+                execution_id, count, _scrub_url_text(exc),
             )
             return True
         if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
             logger.error(
                 "执行 %s 交接达上限（%s 次）且已是终态 %s——不再交接: %s",
-                execution_id, count, state.status, exc,
+                execution_id, count, state.status, _scrub_url_text(exc),
             )
             # 已是终态 ⇒ 该消息**永远不可能**再被处理，留在 PEL 只会被对端每
             # `claim_min_idle_ms`(60s) 反复 XCLAIM（实测 count 5→6→7→8 递增），
@@ -4153,13 +4532,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         except Exception as e:  # noqa: BLE001 — 写盘失败不丢消息，但仍不重投
             logger.error(
                 "执行 %s 交接达上限但终态化落盘失败——不再重投（留 pending 待"
-                "运维介入）: %s", execution_id, e,
+                "运维介入）: %s", execution_id, _scrub_url_text(e),
             )
             return True
         logger.error(
             "执行 %s 交接达上限（%s/%s）——判定「无宿主可跑」，已终态化 error，"
             "不再交接（终止自旋）。最后一次不亲和原因: %s",
-            execution_id, count, self.AFFINITY_HANDOVER_MAX, exc,
+            execution_id, count, self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
         )
         return True
 
@@ -4191,7 +4570,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         if not isinstance(body, dict):
             # 拿不到消息体：退化为留 pending（对端 reclaim）
             logger.info("任务 %s 不亲和但无体可交接，留 pending: %s",
-                        getattr(task, "message_id", "?"), exc)
+                        getattr(task, "message_id", "?"), _scrub_url_text(exc))
             return
         try:
             key = self._affinity_handover_key(body)
@@ -4206,7 +4585,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 logger.error(
                     "任务 %s 的交接计数不可用（界已失效）——本机不再交接，"
                     "退化为留 pending（绝不丢消息；请查 redis 瞬断/键污染）: %s",
-                    getattr(task, "message_id", "?"), exc,
+                    getattr(task, "message_id", "?"), _scrub_url_text(exc),
                 )
                 return
             if count > self.AFFINITY_HANDOVER_MAX:
@@ -4227,7 +4606,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         "任务 %s 交接达上限（%s/%s）且执行已终态——已 ack 消费该"
                         "死信，终止自旋: %s",
                         getattr(task, "message_id", "?"), count,
-                        self.AFFINITY_HANDOVER_MAX, exc,
+                        self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
                     )
                     return
                 if verdict:
@@ -4238,7 +4617,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "任务 %s 交接达上限（%s/%s）但无 execution_id 可终态化——"
                     "不再交接，留 pending 待运维介入: %s",
                     getattr(task, "message_id", "?"), count,
-                    self.AFFINITY_HANDOVER_MAX, exc,
+                    self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
                 )
                 return
             # 先 ack 原条（移出 PEL、防对端再抢），再重入队新副本
@@ -4248,10 +4627,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 "任务 %s 与本机不亲和，已交接（ack+重入队）给其他 worker"
                 "（第 %s/%s 次）: %s",
                 getattr(task, "message_id", "?"), count,
-                self.AFFINITY_HANDOVER_MAX, exc,
+                self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
             )
         except Exception as e:  # noqa: BLE001 — 交接失败退化为留 pending（绝不丢消息）
-            logger.warning("不亲和任务交接失败（退化为留 pending）: %s: %s", e, exc)
+            logger.warning("不亲和任务交接失败（退化为留 pending）: %s: %s", _scrub_url_text(e), _scrub_url_text(exc))
 
     def _requeue_retryable_failure(
         self, task: Any, queue: Any,
@@ -4305,12 +4684,71 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         try:
             queue.enqueue(requeue_body)
         except Exception as e:  # noqa: BLE001 — 重投失败退化为 reclaim（绝不丢消息）
-            logger.warning("任务 %s 显式重投失败（退化为留 pending 回收）: %s", mid, e)
+            logger.warning("任务 %s 显式重投失败（退化为留 pending 回收）: %s", mid, _scrub_url_text(e))
             return False
         try:
             queue.ack(mid)
         except Exception as e:  # noqa: BLE001 — ack 失败=重复投递，不致命
-            logger.warning("任务 %s 重投后 ack 失败（将产生重复投递，租约去重）: %s", mid, e)
+            logger.warning("任务 %s 重投后 ack 失败（将产生重复投递，租约去重）: %s", mid, _scrub_url_text(e))
+            return True
+        return True
+
+    def _quota_defer_max(self) -> int:
+        """超配额重投上限（env 可调，≥1）：达上限后带 quota_bypass 放行。"""
+        raw = (os.environ.get("PLAITA_TENANT_QUOTA_DEFER_MAX") or "").strip()
+        try:
+            value = int(raw) if raw else 0
+        except (TypeError, ValueError):
+            value = 0
+        return value if value >= 1 else self.TENANT_QUOTA_DEFER_MAX
+
+    def _defer_over_quota_start(self, task: Any, queue: Any, exc: Exception) -> bool:
+        """超配额 start 的**延迟**（plaita#28）：重投尾部 + ack 原条。
+
+        与 ``_requeue_retryable_failure`` 同款安全序（先入队、后 ack：中间
+        崩溃只会产生重复投递，租约机制天然去重，绝不丢消息）；副本带
+        ``quota_defers`` 计数（deliveries 归 1 ⇒ 不烧 delivery、不死信）。
+        重投把消息放到 stream **尾部**——先入队的其他租户消息获得优先，
+        这就是单 stream FIFO 下能做到的「排队」语义（按租户分 stream +
+        加权轮询是 issue #28 的进阶项）。
+
+        有界（与 AFFINITY_HANDOVER_MAX 同一教训：无界重投=自锁）：达
+        ``_quota_defer_max()`` 后副本带 ``quota_bypass=True`` 放行——软配额
+        让位存活性。返回 True=已重投并 ack；False=退化为留 pending。
+        """
+        body = getattr(task, "body", None)
+        mid = getattr(task, "message_id", "?")
+        if not isinstance(body, dict):
+            logger.info("任务 %s 超配额但无体可重投，留 pending 交 reclaim", mid)
+            return False
+        try:
+            defers = int(body.get("quota_defers") or 0) + 1
+        except (TypeError, ValueError):
+            defers = 1
+        body = dict(body)
+        body["quota_defers"] = defers
+        tenant = body.get("tenant_id") or "default"
+        if defers > self._quota_defer_max():
+            body["quota_bypass"] = True
+            logger.warning(
+                "租户 %s start 配额持续已满，execution=%s 已延迟 %d 次达上限，"
+                "带 bypass 放行（存活性优先于软配额）",
+                tenant, body.get("execution_id"), defers - 1,
+            )
+        else:
+            logger.info(
+                "租户 %s start 配额已满，execution=%s 延迟第 %d 次（重投尾部排队）: %s",
+                tenant, body.get("execution_id"), defers, exc,
+            )
+        try:
+            queue.enqueue(body)
+        except Exception as e:  # noqa: BLE001 — 重投失败退化为 reclaim（绝不丢消息）
+            logger.warning("任务 %s 超配额重投失败（退化为留 pending 回收）: %s", mid, _scrub_exception_text(e))
+            return False
+        try:
+            queue.ack(mid)
+        except Exception as e:  # noqa: BLE001 — ack 失败=重复投递，不致命
+            logger.warning("任务 %s 超配额重投后 ack 失败（将产生重复投递）: %s", mid, _scrub_exception_text(e))
             return True
         return True
 
@@ -4330,6 +4768,30 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
             return
 
+        # 每租户 start 准入配额（plaita#28，最小公平性原语）：在租户状态闸
+        # 之后、亲和闸之前。只闸 ``start``——resume 是救援流量，不受 start
+        # 配额拦（挂起执行本就占着名额，闸它只会放大积压）。带名额的消息
+        # （console 入口 429 前已 try_admit）幂等放行；无名额的外部生产方
+        # 消息（schedule 旧形状/第三方直投）超限时抛 TenantQuotaDeferred，
+        # 由消费循环重投尾部排队（不烧 delivery、不死信）。回滚开关
+        # PLAITA_DISABLE_TENANT_QUOTA=1 整闸旁路；消息带 quota_bypass（延迟
+        # 预算耗尽的放行副本）同样旁路——存活性 > 软配额。
+        message_type = message_data.get("type")
+        if (
+            message_type == "start"
+            and not _tenant_quota_disabled()
+            and not message_data.get("quota_bypass")
+            and not try_admit_tenant_start(
+                getattr(self, "redis_client", None),
+                message_data.get("tenant_id"),
+                message_data.get("execution_id"),
+            )
+        ):
+            raise TenantQuotaDeferred(
+                f"租户 {message_data.get('tenant_id') or 'default'} start 配额已满，"
+                f"execution={message_data.get('execution_id')}"
+            )
+
         # 机器亲和性闸（路线二首版，2026-10-06 多机验证）：任务参数里的 repo/
         # run_dir 是**派发方所在机器**的绝对路径。本机不具备该路径 = 跑不了，
         # 应让给有它的 worker（或等它出现）。不拦的话本机抢到就跑 → 秒失败
@@ -4343,11 +4805,25 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             if missing is not None:
                 raise TaskNotForThisWorker(missing)
 
+        # 显式派发目标闸（#42 期 1）：派发侧按容量路由把目标 worker 写进消息体
+        # 顶层 ``target_instance_id``。本机不是目标 ⇒ 抛**同一个**
+        # ``TaskNotForThisWorker``，由 run() 既有交接分支 ack 原条 + 重入队新副本
+        # （副本原样带上该字段）让给目标机——复用既有机制，不新增协议/键/队列。
+        # 为什么不是「本地丢弃」：本机不是目标仅是**本机**的判断，消息必须留在
+        # 池里才有机会落到目标机；丢弃即丢单（见 TaskNotForThisWorker docstring）。
+        # 回滚/放行：PLAITA_DISABLE_DISPATCH_TARGET=1；消息体无该字段（存量广播
+        # 派发）、字段空白/非字符串、本机 instance_id 不可知 ⇒ 一律放行——
+        # 默认零行为变化，且不因注册表缺失把可跑的任务误拦在本机之外。
+        if not _dispatch_target_disabled():
+            not_mine = target_mismatch(message_data, getattr(self, "instance_id", None))
+            if not_mine is not None:
+                raise TaskNotForThisWorker(not_mine)
+
         # 租户上下文：消息携带 tenant_id（缺省 = default，兼容旧生产方）；
         # 存储路由包装器/日志 handler/租约据此选租户 namespace。
         token = set_current_tenant(message_data.get("tenant_id"))
         try:
-            message_type = message_data.get("type")
+            # message_type 已在配额闸处求值（plaita#28），此处直接复用
             if message_type == "start":
                 self.start_flow(
                     message_data.get("flow_id"),
@@ -4356,6 +4832,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     execution_id=message_data.get("execution_id"),
                     dedup_key=message_data.get("dedup_key"),
                     delivery_count=delivery_count,
+                    # plaita#25：console 入队时写进消息体的 timestamp ⇒ 时间线
+                    # 由它算「排队多久」（老消息无此键 ⇒ None，不折算成 0）。
+                    enqueued_at=message_data.get("timestamp"),
                 )
             elif message_type == "resume":
                 self.resume_flow(
@@ -4491,6 +4970,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     free, min_free, path,
                 )
                 self.__dict__["_disk_guard_active"] = False
+                # #42（W10-a）：盘回线立刻撤回「被拦」标记——否则派发侧在
+                # 心跳周期内仍按低盘快照拒单（保守方向，但白等一轮额度）。
+                self._refresh_registry_capacity()
             return False
         if not active:
             logger.warning(
@@ -4499,6 +4981,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 free, min_free, path,
             )
             self.__dict__["_disk_guard_active"] = True
+            # #42（W10-a）：**这条是缺口核心**——盘闸此前只在本进程内空转，
+            # 派发方看不见。进入低盘态即上报，让 capacity 门当轮就避开本机。
+            self._refresh_registry_capacity()
         return True
 
     def _wait_disk_guard(self) -> None:
@@ -4558,6 +5043,15 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # _handover_non_affine 与 _terminalize_handover_exhausted）。
                     queue.note_lease_conflict()  # 复用「让给别人」计数口径
                     self._handover_non_affine(task, queue, exc)
+                except TenantQuotaDeferred as exc:
+                    # 每租户 start 配额已满（plaita#28）：**延迟**，不是失败。
+                    # 入队同体新副本到 stream 尾部（让位给更早入队的其他租户
+                    # 消息——这就是单 stream 下的「排队」语义）+ ack 原条。
+                    # 不留 pending：XCLAIM 回收每轮让 deliveries +1，烧到
+                    # max_deliveries 会误死信——配额已满不是消息的错。
+                    # 重投失败 → 退化为留 pending（绝不丢消息）。
+                    if self._defer_over_quota_start(task, queue, exc):
+                        acked = True
                 except ExecutionLeaseError as exc:
                     # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
                     # 持有者**活着**时 ack 释放本消息（2026-10-06 修）。
@@ -4588,7 +5082,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         logger.info(
                             "任务 %s 执行被他人持租约（持有者在册，正常竞争），已 ack 释放避免烧 delivery: %s",
                             task.message_id,
-                            exc,
+                            _scrub_url_text(exc),
                         )
                         body = task.body if isinstance(task.body, dict) else {}
                         if body.get("type") == "resume":
@@ -4612,7 +5106,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         logger.warning(
                             "任务 %s 租约持有者已死，消息留 pending 等租约过期后重投，防重试载体被吞 (#50): %s",
                             task.message_id,
-                            exc,
+                            _scrub_url_text(exc),
                         )
                 except NodeExecutionRetryableError as exc:
                     # 节点级可重试失败（波次二任务①）：执行状态停在最后成功
@@ -4638,14 +5132,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                             task.message_id,
                             task.body.get("type") if isinstance(task.body, dict) else "?",
                             task.delivery_count,
-                            exc,
+                            _scrub_url_text(exc),
                         )
                     else:
                         logger.warning(
                             "任务 %s 节点执行失败待重投 (delivery=%s): %s",
                             task.message_id,
                             task.delivery_count,
-                            exc,
+                            _scrub_url_text(exc),
                         )
                 except ResumeProtocolError as exc:
                     # resume 协议错误（#33）：执行状态与 resume_type 不匹配（如
@@ -4659,11 +5153,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     logger.warning(
                         "任务 %s resume 协议错误（执行保持原状不终态化）: %s",
                         task.message_id,
-                        exc,
+                        _scrub_url_text(exc),
                     )
                 except ValueError as exc:
                     # 畸形消息：ack 掉避免 poison pill 无限重投
-                    logger.error("丢弃无效任务 %s: %s", task.message_id, exc)
+                    logger.error("丢弃无效任务 %s: %s", task.message_id, _scrub_url_text(exc))
                     queue.ack(task.message_id)
                     queue.note_poison()
                     acked = True
@@ -4687,8 +5181,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                             task.message_id,
                             task.delivery_count,
                             queue.max_deliveries,
-                            exc,
-                            exc_info=True,
+                            _scrub_exception_text(exc),
                         )
                 finally:
                     self._bump_active(-1)
@@ -4705,8 +5198,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 # 注：`socket.timeout`（py3.10+ 即内建 TimeoutError）**不是**
                 # `RedisError` 的子类，必须与它并列 catch —— 否则从别处冒出的 socket
                 # 超时仍会杀死进程（我第一版就是漏了这一支，被守卫测试当场逮住）。
-                logger.error("消费循环遇到 Redis 故障（退避 %.1fs 后继续轮询）: %r",
-                             RECONNECT_BACKOFF_SECONDS, exc)
+                logger.error("消费循环遇到 Redis 故障（退避 %.1fs 后继续轮询）: %s",
+                             RECONNECT_BACKOFF_SECONDS, _scrub_url_text(exc))
                 time.sleep(RECONNECT_BACKOFF_SECONDS)
                 continue
 
@@ -4717,7 +5210,54 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             count = self._active_task_count
         if self._enable_registry:
             self.update_registry_info(active_tasks=count)
-    
+            # #42（W10-a）：容量门按**新鲜**快照判饱和，故在跑数一变就直推一次
+            # 注册键（不等心跳周期）——否则最多 CAPACITY_STALE 级的窗口里，
+            # 派发侧会按「上一轮在跑 0 条」把并发额度压给同一台机器。
+            self._refresh_registry_capacity()
+
+    # ------------------------------------------------- #42 worker 容量上报
+
+    def capacity_snapshot(self) -> Dict[str, Any]:
+        """本机当前容量快照（纯函数式取值，不写注册表）。
+
+        ``free_disk_gib`` 为 ``None`` = 盘探针失败/未启用盘闸路径不可读——与
+        #49 盘闸同口径「探不到就放行」，**不**写成 0（0 会被派发侧当成
+        「真的没盘」而拒单，把探针故障放大成停摆）。
+        """
+        block = build_capacity_block(
+            free_disk_gib=_free_disk_gib(getattr(self, "_disk_guard_path", ".") or "."),
+            min_free_disk_gib=getattr(self, "_min_free_disk_gib", 0.0) or 0.0,
+            disk_blocked=bool(self.__dict__.get("_disk_guard_active")),
+            active_tasks=getattr(self, "_active_task_count", 0) or 0,
+            concurrency=getattr(self, "concurrency", 1) or 1,
+        )
+        return block
+
+    def _refresh_registry_capacity(self) -> None:
+        """把最新容量快照写进注册键（失败只告警，绝不打断消费循环）。
+
+        复用 ``ServiceRegistry.heartbeat``：同键、同 TTL、同 JSON 形状，只是
+        立刻刷一次而不是等心跳线程。注册未启用 / 未初始化 / Redis 瞬断
+        → 静默降级为「无容量信息」（派发侧放行，与存量行为一致）。
+        """
+        if not getattr(self, "_enable_registry", False):
+            return
+        registry = getattr(self, "_registry", None)
+        service_info = getattr(self, "_service_info", None)
+        if registry is None or service_info is None:
+            return
+        try:
+            service_info.metadata[CAPACITY_METADATA_KEY] = json.dumps(
+                self.capacity_snapshot(), ensure_ascii=False
+            )
+            registry.heartbeat(service_info)
+        except Exception as exc:  # noqa: BLE001 — 上报失败不得影响领取/执行
+            logger.warning("worker 容量上报失败（注册表按无容量信息处理）: %s", _scrub_exception_text(exc))
+
+    def _report_capacity(self) -> None:
+        """``__init__`` 期的容量上报入口（注册表尚未 start_heartbeat 时直推一次）。"""
+        self._refresh_registry_capacity()
+
     @property
     def _drain_event(self) -> threading.Event:
         """draining 标志（惰性创建）。
@@ -4879,7 +5419,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         try:
             stats = self._get_task_queue().stats()
         except Exception as exc:
-            logger.warning("读取队列 stats 失败（/metrics 仅返回 worker 指标）: %s", exc)
+            logger.warning("读取队列 stats 失败（/metrics 仅返回 worker 指标）: %s", _scrub_url_text(exc))
             stats = {"stream_key": self.queue_name}
         metrics = collect_queue_metrics(stats)
         service_info = getattr(self, "_service_info", None)
@@ -4897,6 +5437,17 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             instance=self._resolve_consumer_name(),
             registered=service_info is not None,
         ))
+        # #42（W10-a）：容量指标与「派发侧看到的容量」同源（同一快照函数），
+        # 否则看板与派发门会各报一套（口径分叉是最难查的一类事故）。
+        try:
+            capacity_block = self.capacity_snapshot()
+        except Exception as exc:  # noqa: BLE001 — 容量探针故障不该打空整张看板
+            logger.debug("容量快照失败（本次 /metrics 不含容量指标）: %s", _scrub_exception_text(exc))
+            capacity_block = None
+        if capacity_block is not None:
+            metrics.extend(collect_capacity_metrics(
+                capacity_block, instance=self._resolve_consumer_name()
+            ))
         if self._alerter is not None:
             alert_stats = self._alerter.stats()
             for key, help_text in (
@@ -4925,7 +5476,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             self._metrics_server.start()
         except Exception as exc:  # noqa: BLE001 - 端口占用等不得拖垮 worker 启动
             self._metrics_server = None
-            logger.error("启动 /metrics 抓取端失败（端口 %s）: %s", self._metrics_port, exc)
+            logger.error("启动 /metrics 抓取端失败（端口 %s）: %s", self._metrics_port, _scrub_url_text(exc))
 
     def _stop_metrics_server(self) -> None:
         if self._metrics_server is not None:
@@ -5091,9 +5642,9 @@ def main():
             callback_handlers.append(LangfuseCallback())
             logger.info("Langfuse 观测已启用（trace id = 运行时 $EXECUTION_ID）")
         except ImportError as e:
-            logger.warning("Langfuse 观测未启用（缺依赖）: %s", e)
+            logger.warning("Langfuse 观测未启用（缺依赖）: %s", _scrub_url_text(e))
         except Exception as e:  # noqa: BLE001 — SDK 初始化失败（如缺凭据）只降级不退出
-            logger.warning("Langfuse 观测未启用: %s", e)
+            logger.warning("Langfuse 观测未启用: %s", _scrub_url_text(e))
 
     # 外部业务节点模块加载（与 console 的 PLAITA_CONSOLE_NODE_MODULES 约定对齐）：
     # PLAITA_NODE_PATH 冒号分隔追加 sys.path；PLAITA_NODE_MODULES 逗号分隔，
@@ -5111,7 +5662,7 @@ def main():
             register()
             logger.info("已加载外部节点模块: %s", mod_path)
         except Exception as e:
-            logger.error("外部节点模块加载失败 %s: %s", mod_path, e, exc_info=True)
+            logger.error("外部节点模块加载失败 %s: %s", mod_path, _scrub_exception_text(e))
             raise SystemExit(f"外部节点模块加载失败: {mod_path}")
 
     # CodeNode 按需注册：0.4.0 起移出默认注册表（其执行任意用户代码，需显式 opt-in）。
@@ -5211,7 +5762,7 @@ def main():
         worker.run()
 
     except Exception as e:
-        logger.error("流程工作器启动失败: %s", e)
+        logger.error("流程工作器启动失败: %s", _scrub_url_text(e))
         sys.exit(1)
 
 if __name__ == "__main__":

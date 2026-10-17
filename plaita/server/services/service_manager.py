@@ -16,6 +16,7 @@ from .http_callback_service import HttpCallbackService
 from .approval_service import ApprovalService
 from ...logger import logger
 from ...event.core import EventBus
+from plaita.core.url_redaction import _scrub_exception_text
 
 
 class ServiceManager:
@@ -114,7 +115,7 @@ class ServiceManager:
                         logger.error("服务 %s 启动失败", service_type)
                         
                 except Exception as e:
-                    logger.error("启动服务 %s 时出错: %s", service_type, e, exc_info=True)
+                    logger.error("启动服务 %s 时出错: %s", service_type, _scrub_exception_text(e))
             
             self.is_running = success_count > 0
             logger.info("服务管理器启动完成，成功启动 %s/%s 个服务", success_count, len(self.service_classes))
@@ -146,7 +147,7 @@ class ServiceManager:
                     logger.info("服务 %s 停止成功", service_type)
                     
                 except Exception as e:
-                    logger.error("停止服务 %s 时出错: %s", service_type, e, exc_info=True)
+                    logger.error("停止服务 %s 时出错: %s", service_type, _scrub_exception_text(e))
             
             # 清空服务字典
             self.services.clear()
@@ -251,7 +252,7 @@ class ServiceManager:
                     return False
                     
             except Exception as e:
-                logger.error("重启服务 %s 时出错: %s", service_type, e, exc_info=True)
+                logger.error("重启服务 %s 时出错: %s", service_type, _scrub_exception_text(e))
                 return False
     
     def handle_node_config(self, node_config: Dict[str, Any]) -> str:

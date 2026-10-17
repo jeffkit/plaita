@@ -8,6 +8,6 @@
     "tests/unit/test_issue109_110_r15_parity.py::Test109R15WatchdogBoundary::test_mirror_step_failure_does_not_escape_the_done_callback",
     "tests/unit/test_issue109_110_r15_parity.py::Test109R15WatchdogBoundary::test_emergency_settle_lands_the_verdict_even_if_the_judge_body_raises"
   ],
-  "old": "        try:\n            self._judge_round(task, round_, future, judged)\n        except BaseException as exc:                 # noqa: BLE001 - 见 docstring：判定绝不丢\n            logger.debug(\"事件总线关停：判定路径抛异常（看门狗兜底，绝不挂起）: %r\", exc)\n            self._settle_unsettled_round(task, round_, future)\n",
+  "old": "        try:\n            self._judge_round(task, round_, future, judged)\n        except BaseException as exc:                 # noqa: BLE001 - 见 docstring：判定绝不丢\n            logger.debug(\"事件总线关停：判定路径抛异常（看门狗兜底，绝不挂起）: %s\", _scrub_url_text(exc))\n            self._settle_unsettled_round(task, round_, future)\n",
   "new": "        self._judge_round(task, round_, future, judged)  # mutation: 去掉判定路径的异常边界\n"
 }

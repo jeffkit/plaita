@@ -22,7 +22,7 @@ from plaita.dsl.codeflow._expr import (
     _compile_condition,
     _compile_expr,
 )
-from plaita.dsl.codeflow._nodes import _compile_node_call
+from plaita.dsl.codeflow._nodes import _apply_base_kwargs, _compile_node_call
 
 def _compile_block(
     stmts: List[ast.stmt],
@@ -445,6 +445,12 @@ def _compile_for(
         init = kw.get("initial")
         if init is not None:
             spec["initial"] = _compile_expr(init, ctx)
+
+    # #142 编译侧 / #143：集合节点（MAP/FILTER/FIND/LOOP/REDUCE/WHILE）同样要
+    # 消费 `Node` 基类共有字段（timeout / timeoutHandler / on_error）。这条路径与
+    # `_nodes.py` 的内置 kind 路径是**两套 spec 构造**，须在各自收口处各施加一次，
+    # 否则集合节点的同类 kwarg 仍被静默丢弃。
+    _apply_base_kwargs(spec, kw, ctx)
 
     after = _compile_block(rest, ctx, succ)
     if after is None:

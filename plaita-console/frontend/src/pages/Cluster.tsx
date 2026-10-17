@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, ServiceTypeInfo, ManagedInstance, InfrastructureInfo, InfrastructureTemplate, CreateInfrastructureRequest, QuickTestResponse } from '../services/api'
+import { api, SUB_PATH, ServiceTypeInfo, ManagedInstance, InfrastructureInfo, InfrastructureTemplate, CreateInfrastructureRequest, QuickTestResponse } from '../services/api'
 import {
   Play,
   Square,
@@ -366,7 +366,10 @@ function LogDialog({
         
         <div className="mt-4 flex justify-between items-center">
           <a
-            href={`/logs?service_type=${serviceType}&instance_id=${instanceId}`}
+            // 全页跳转的深链：<a href> 不经 React Router，basename（SUB_PATH）不会
+            // 自动注入——写死 '/logs' 在子路径部署下会跳出 console（#171，同 #103
+            // 的 SUB_PATH 构造规则）；根路径部署 SUB_PATH 为 ''、行为不变
+            href={`${SUB_PATH}/logs?service_type=${serviceType}&instance_id=${instanceId}`}
             className="text-sm text-plaita-400 hover:text-plaita-300"
           >
             在日志页面查看更多 →

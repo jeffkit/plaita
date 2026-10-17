@@ -18,6 +18,7 @@ from plaita.core import types
 from plaita.core.expression import ExpressionEvaluator
 from plaita.core.expression_parser import freshness_scope, note_fresh_object
 from plaita.core.state import CheckpointState, _LazyRootSnapshot, _snapshot_value
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 if TYPE_CHECKING:
     from plaita.node.basic import Node
@@ -126,11 +127,11 @@ def _resolve_default_event_bus():
     try:
         from plaita.event import get_default_event_bus
         return get_default_event_bus()
-    except ImportError:
-        logger.warning("plaita.event 不可导入，默认 EventBus 未启用", exc_info=True)
+    except ImportError as exc:
+        logger.warning("plaita.event 不可导入，默认 EventBus 未启用: %s", _scrub_exception_text(exc))
         return None
-    except Exception:
-        logger.warning("Unable to get default event bus", exc_info=True)
+    except Exception as exc:
+        logger.warning("Unable to get default event bus: %s", _scrub_exception_text(exc))
         return None
 
 
@@ -265,6 +266,29 @@ class ExecutionContext(_SystemStateAccessors):
 
     def set_state(self, key: str, value: Any) -> None:
         self._state[key] = value
+
+    def set_scratch(self, key: str, value: Any) -> None:
+        """把 *value* 声明为 *key* 的 **scratch** 绑定（plaita#164）。
+
+        "这个对象只归本次执行所有、可以被就地改写"。在 ``#69`` 的
+        **默认拒绝就地改写**下恢复便利写法::
+
+            ctx.set_scratch("$V", {"a": 1})                    # 显式声明
+            parser.evaluate("$F.set($V,'k','v')", ctx.context)  # 就地写，允许
+
+        边界（详见 :meth:`CheckpointState.set_scratch`）：只登记**被声明的那个
+        对象**（不登记它的图）、**只对下一次读取它的那次求值有效**、**不进
+        checkpoint**、不得占用 checkpoint 键。
+        """
+        self._state.set_scratch(key, value)
+
+    def scratch_keys(self) -> List[str]:
+        """当前 scratch 绑定的键名（这些键不在 checkpoint 里）。"""
+        return self._state.scratch_keys()
+
+    def clear_scratch(self, key: Optional[str] = None) -> None:
+        """丢掉全部 scratch 绑定（或只丢 *key*）；checkpoint 键不受影响。"""
+        self._state.clear_scratch(key)
 
     def get_state(self, key: str, default: Any = None) -> Any:
         return self._state.get(key, default)
@@ -409,7 +433,7 @@ class ExecutionContext(_SystemStateAccessors):
                 # 降级为"只记返回值"，但必须留下痕迹而不是静默吞掉。
                 logger.warning(
                     "node %s: node_result_payload() failed, recording bare result only: %s",
-                    getattr(node, "id", "?"), e,
+                    getattr(node, "id", "?"), _scrub_url_text(e),
                 )
                 payload = None
         if isinstance(payload, dict) and payload:

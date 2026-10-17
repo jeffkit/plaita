@@ -32,6 +32,7 @@ from plaita.core.errors import (
 )
 from plaita.core.runner import NodeRunner
 from plaita.tenant_context import DEFAULT_TENANT_ID, current_tenant
+from plaita.core.url_redaction import _scrub_url_text
 
 if TYPE_CHECKING:
     from plaita.event.core import EventBus
@@ -405,7 +406,7 @@ class DistributedStrategy:
         except Exception as e:
             error = {"code": -500, "message": str(e)}
             callback_manager.on_node_end(flow, current_node, None, error, exception=e)
-            logger.error("Error during resume: %s", e)
+            logger.error("Error during resume: %s", _scrub_url_text(e))
             resume_err = ResumeError(str(e), node=current_node)
             resume_err.source_line = getattr(current_node, "source_line", None)
             raise resume_err from e
@@ -436,7 +437,7 @@ class DistributedStrategy:
                 await outcome
             logger.debug("unregistered subscription %s for resumed node %s", subscription_id, node.id)
         except Exception as e:  # noqa: BLE001 - 注销失败不影响 resume 结果
-            logger.warning("failed to unregister subscription %s after resume: %s", subscription_id, e)
+            logger.warning("failed to unregister subscription %s after resume: %s", subscription_id, _scrub_url_text(e))
 
 
 # ---------------------------------------------------------------------------

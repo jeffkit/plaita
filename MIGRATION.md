@@ -2119,6 +2119,14 @@ r13 是 r12 独立验收判 **FAIL** 的收口，两个反例都是 r12 **自己
    共享是因为重建必须猜构造协议；在快照路径上安全（引擎不就地改写快照），且**不是数据
    通道**：DSL 路径上 `_engine_copy` 对这四个**具名拒绝**（它们不在
    `plaita.core.types` 的可持久化数据模型里）。有测试逐个钉住"共享同一对象 + DSL 具名拒绝"。
+   **plaita#162 补记**：本节、`docs-site/docs/guide/expressions.md` 与 `expression_parser`
+   早已改用枚举口径，但 `plaita/core/state.py` 的**用户可见 docstring** 在 #69 的验收契约里
+   被冻结（必须与 base 逐字节相同），当时仍写着那句假话。#162 把
+   `_snapshot_value.__doc__`（连同 `_snapshot_key_or_member.__doc__` 与 r9 Finding C 叙述）
+   改成同一枚举口径，并加 `tests/unit/test_issue162_snapshot_docstring.py` 做 doc-pin：
+   枚举必须留在 docstring、假话原文必须从 `state.py` 整份源码消失，且"四个反例确实按引用
+   共享 + 确实是容器 + 确实被 `_engine_copy` 具名拒绝"由同一文件实测钉住。
+   `_snapshot_value` 的行为一字未改。
 
 5. **过拒面补充**：除 `BenignDD` 外，记入 stdlib 的真实例子
    `importlib.metadata._collections.FreezableDefaultDict`（Python 子类，数据在真实存储里，
@@ -2345,6 +2353,63 @@ FlowWorker / EventFilter CLI 的 `--event-bus-type` / `--subscription-storage-ty
 
 
 ---
+
+### r14：显式 scratch 捐献 `ctx.set_scratch(key, value)`（plaita#164）
+
+r5–r13 把就地改写的判据收紧成 **default-deny on provenance**（"只有**本次求值中由引擎
+新建**的对象才允许被就地改写"）。方向是对的，但宿主最自然的写法被收紧了：
+
+```python
+ctx.set_state("$V", {"a": 1})                          # 宿主绑定（checkpoint 键）
+parser.evaluate("$F.set($V,'k','v')", ctx.context)
+# → ValueError: ... provenance could not be proven fresh（零写入）
+```
+
+**变更后**：给宿主一个**显式声明**入口。它不新增任何"证明对象是活的"谓词，只是把宿主
+亲自声明为 scratch 的对象登记进**读取它的那一次逻辑求值**的 freshness 作用域。
+
+```python
+ctx.set_scratch("$V", {"a": 1})                        # 显式捐献（私有绑定）
+parser.evaluate("$F.set($V,'k','v')", ctx.context)     # 就地写，允许
+ctx.get_state("$V")                                    # {'a': 1, 'k': 'v'}
+"$V" in ctx.to_dict()                                  # False —— 不进 checkpoint
+```
+
+**语义与边界（每条都有回归测试与变异钉住）**：
+
+- **读取点登记**：`set_scratch` 只**标记**"待登记"。登记发生在某次逻辑求值真正读到这个
+  键的那一刻（变量 thunk 从 context 取出根之后），所以不需要在 `set_scratch` 里造作用域、
+  也不会在作用域打开时被一次**无关**求值消费掉——只有读到 `$V` 的求值才消费它。
+- **只登记被声明的那个对象**（对象身份），**不登记它的图**：`$V.cfg` 这类嵌套目标仍被
+  default-deny 拒绝。因此 scratch **不可能**把活根"洗白"成可写目标——把 `$INPUT` 的子对象
+  塞进 scratch 的图里，嵌套目标照旧拒、`$INPUT` 零写穿。
+- **一次求值有效**（r6 作用域语义原样保留）：声明被"读到它的那次求值"消费；**第二次求值
+  里同一个宿主对象仍被拒**。要再用就重新 `set_scratch`。
+- **不进 checkpoint**：scratch 是本次执行的私有绑定。它对表达式可见
+  （`context["$V"]` / `"$V" in context`），但**不在** `__iter__` / `len()` / `keys()` /
+  `__eq__` / `to_checkpoint_dict()` 的键视图里，`clean()` 与恢复会丢掉它。
+- **不得占用 checkpoint 键**：五个持久化根与其它 schema 键、以及任何**已在** checkpoint
+  里的键都被具名 `ValueError` 拒绝（否则 scratch 会遮蔽一个落盘绑定）。反向也成立：
+  对同名键调用 `set_state` 会**取代** scratch 绑定。
+- **声明一个"就是活持久化对象"的对象被具名拒绝**（`plaita#164`，含被别名到的根名）：
+  宿主把同一个对象同时挂在 checkpoint 上时，登记它等于新开一条写穿通道。
+
+**`set_scratch` 还是 `ctx.evaluate({...})`？选择建议**：
+
+| 你的形状 | 用哪个 | 为什么 |
+| --- | --- | --- |
+| 宿主手里**已有**一个对象（自己造的 dict/list、来自外部库的载荷），想让本次求值就地改它 | `ctx.set_scratch("$V", obj)` | 保留对象身份与就地语义（像 `#69` 之前一样）；`ctx.evaluate(obj)` 会把它**换成引擎副本**，你手里的那个不会被改 |
+| 只想在一个表达式里派生一个临时容器并就地改它 | `$F.json_loads(...)` / `$F.slice(...)` 等 producer | 不需要绑定，producer 结果本来就在本次求值里 fresh |
+| 需要在**同一次**求值里让引擎物化一份副本（不关心原对象） | `with freshness_scope(): ctx.set_state("$V", ctx.evaluate({...}))` | `ctx.evaluate` 的 fresh 只活到它自己的作用域结束；跨求值再写它照旧被拒（r6 C2 反例） |
+| 想跨多次求值反复改同一个对象 | 每次求值前 `set_scratch` 重新声明 | 不存在"长期活的证明"——那正是 r5 的进程级登记被 verifier 打掉的形状 |
+
+**验证**：`tests/unit/test_issue164_scratch_declaration.py`（25 个测试 / 38 个 subTest）、
+2 条变异（`164-scratch-registration-off` 撤销登记、`164-scratch-leaks-into-checkpoint`
+让 scratch 漏进 checkpoint 键视图）全部 KILLED，且都由**普通 `FAILED` 行**杀死。
+`#69` 的不变量未松动：五根 × 就地形状仍具名拒绝、零写穿；`#69` 的 14 位置探针 / 容器轴 /
+X1/X2 由既有测试与 `scripts/issue69_mutation_matrix/probes.py` 复跑钉住。
+
+
 
 ## 0.5.0
 

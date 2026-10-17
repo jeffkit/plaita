@@ -18,7 +18,7 @@ import os
 import sys
 import threading
 import time
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 import isodate
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +35,7 @@ from plaita.core.errors import (
     NodeExecutionError,
     NodeTimeoutError,
 )
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 if TYPE_CHECKING:
     from plaita.core.context import ExecutionContext
@@ -237,9 +238,9 @@ def _handle_node_error(flow, node, error_handler, e: Exception):
     # 只在 DEBUG 级别提供——历史上无条件 exc_info 打整段栈，是主要日志噪音源。
     logger.warning(
         "node %s error handled (errorHandler.strategy=%s): %s: %s",
-        node.name or node.id, strategy.value, type(e).__name__, e,
+        node.name or node.id, strategy.value, type(e).__name__, _scrub_url_text(e),
     )
-    logger.debug("handled node error traceback", exc_info=True)
+    logger.debug("handled node error traceback: %s", _scrub_exception_text(e))
     if strategy == ErrorStrategy.CONTINUE:
         return None
     if strategy == ErrorStrategy.CONTINUE_WITH:
@@ -256,6 +257,28 @@ def _get_error_result(error_handler):
     if strategy == ErrorStrategy.CONTINUE_WITH:
         return error_handler.default_value
     return None
+
+
+def _node_error_payload(exc: BaseException) -> Dict[str, Any]:
+    """失败节点的 ``on_node_end(error=...)`` 载荷（plaita#25）。
+
+    形状与 resume 失败路径（``plaita/core/strategies.py`` 的
+    ``{"code": -500, "message": str(e)}``）逐字同形，读取方无需分支；
+    ``code`` 优先取异常自带的 ``code``（``NodeExecutionError`` 等带码异常），
+    否则 -500（与 distributed 错误归一化同口径）。
+    """
+    try:
+        code = getattr(exc, "code", None)
+        code = int(code) if code is not None else -500
+    except Exception as exc:  # noqa: BLE001 — 取码失败不得影响补发
+        logger.debug("失败节点补发的 code 提取失败，回退 -500: %s",
+                     _scrub_exception_text(exc))
+        code = -500
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001
+        message = f"<{type(exc).__name__}>"
+    return {"code": code, "message": message}
 
 # 无超时同步节点的共享执行池（2026-09 性能评审 P1）：历史上每个 sync 节点
 # 无条件裸起一条 daemon 线程，thread start+join 占线性流程运行时间的 64%。
@@ -319,7 +342,26 @@ class NodeRunner:
         if callback_manager:
             callback_manager.on_node_start(flow, node)
 
-        result = await self._execute_with_retry(flow, node, max_timeout_ms)
+        try:
+            result = await self._execute_with_retry(flow, node, max_timeout_ms)
+        except BaseException as exc:
+            # plaita#25：abort 策略（以及取消/超时）是**直接 raise**，
+            # 历史上 on_node_end 永不触发 ⇒ 失败节点在 node_timings、事件时间线
+            # 与 Langfuse span 三处同时失踪（obs.py 模块 docstring 自认），
+            # 「失败节点恰缺失」的观测盲区由此而来。补发一次 error 形态的
+            # on_node_end：错误形状与 resume 失败路径（strategies.py）逐字同形。
+            # 回调分发器逐 handler 吞异常，故这里不会遮蔽原始错误。
+            # `except BaseException` 是为了把取消（CancelledError/
+            # FlowCancelledException）也收进时间线——它们同样是终态事件。
+            if callback_manager:
+                callback_manager.on_node_end(
+                    flow, node, None, _node_error_payload(exc), exception=exc,
+                    # 收口批①（裁决 B）：这条是 **abort/取消/超时** 的补发路径 ⇒ 用
+                    # **路径标记**告诉带 span 的观测端「标注错误但保持 span 打开」。
+                    # 直接错误钩子不带此标记 ⇒ 仍按既有契约终结 span。
+                    keep_span_open=True,
+                )
+            raise
 
         self.context.last_node_id = node.id
         logger.debug("result: %s", result)

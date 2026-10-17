@@ -5,6 +5,7 @@ import { api, type DryRunNodeResult } from '../../services/api'
 import { Button } from '../ui'
 import SchemaInput from './schemaForm/SchemaInput'
 import { buildTimelineRows } from './timeline'
+import { onlyNodeParam, type DryRunScope } from './dryRunScope'
 
 interface DryRunPanelProps {
   flowJson: string
@@ -49,7 +50,9 @@ export default function DryRunPanel({
   const resizing = useRef(false)
 
   const mut = useMutation({
-    mutationFn: async () => {
+    // #67：执行范围**只**从 mutate 变量来（mutationFn 闭包取自上一次渲染，
+    // 读组件 state 会让请求范围与用户点击的按钮错开一拍）。解码见 dryRunScope.ts。
+    mutationFn: async (scope: DryRunScope) => {
       let input: Record<string, unknown> = {}
       try {
         input = inputJson.trim() ? JSON.parse(inputJson) : {}
@@ -62,7 +65,7 @@ export default function DryRunPanel({
         flowJson,
         input,
         pinned: Object.keys(pins).length ? pins : undefined,
-        onlyNode: onlyNode ?? undefined,
+        onlyNode: onlyNodeParam(scope),
       })
       // 出错节点回写画布标红（节点级 status=error 由采集回调给出）
       const erroredIds = (out.nodes ?? [])
@@ -87,13 +90,15 @@ export default function DryRunPanel({
       return next
     })
   }
+  // #67：范围随本次点击**显式传入**，不再依赖 setState 后的渲染提交。
+  // setOnlyNode 仍在，但只承担展示职责（按钮文案 / 「取消单节点」）。
   const runOnly = (id: string) => {
     setOnlyNode(id)
-    mut.mutate()
+    mut.mutate({ onlyNode: id })
   }
   const runFull = () => {
     setOnlyNode(null)
-    mut.mutate()
+    mut.mutate({ onlyNode: null })
   }
   const toggleGroup = (key: string) => {
     setCollapsedGroups((s) => {

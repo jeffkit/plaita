@@ -254,3 +254,156 @@ def test_api_allocate_version_returns_actual(api_client: TestClient):
     )
     assert r.status_code == 200, r.text
     assert r.json()["version"] == "0.0.2"
+
+
+# ---- #101 守卫：并发保存的「读-比-写」必须原子（CAS 条件更新）----
+#
+# 缺陷（issue #101）：main 上保存既有草稿走「独立 SELECT 读 updated_at 比对 →
+# 按主键的 ORM UPDATE 落库」三步，两步之间无行锁无条件更新。两个持同一
+# base_updated_at 的并发保存会双双通过冲突检查，后写者静默覆盖先写者，
+# 双方都拿到成功。守卫用两个线程 + engine 事件按「语句形状」强制复现
+# read-compare-write 竞态窗口（对修复前后的实现都成立，不耦合实现细节）：
+#
+#   1. writer-A 发起落 definition 的 UPDATE（main 上是不带 updated_at 谓词的
+#      主键定位写）之前，必须等 writer-B 完成它的冲突检查读；
+#   2. writer-B 完成冲突检查读（SELECT updated_at FROM flow_versions）之后、
+#      发起自己的任何写语句之前，必须等 writer-A 的整个保存结束。
+#
+# 即：双方都先读到旧基准，A 写完提交后 B 才落笔——main 上两者都成功（红），
+# 修复后 B 的条件 UPDATE 撞 rowcount==0 → VersionConflictError（恰好一方成功）。
+
+def _race_store(tmp_path):
+    """独立引擎（NullPool：连接只在创建线程内使用，避免 pysqlite 跨线程报错）。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+
+    db_file = tmp_path / "test_race101.db"
+    engine = create_engine(
+        f"sqlite:///{db_file}",
+        future=True,
+        poolclass=NullPool,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    session_local = sessionmaker(bind=engine, expire_on_commit=False)
+    return FlowStore(session_local), engine
+
+
+def _wait_or_die(event: "threading.Event", what: str) -> None:
+    if not event.wait(timeout=15):
+        raise RuntimeError(f"#101 竞态闸门超时：{what}")
+
+
+def _run_same_base_race(store: FlowStore, engine) -> dict:
+    """两线程持同一 base_updated_at 并发保存，返回 {tag: 结果}。"""
+    import threading
+
+    from sqlalchemy import event
+
+    base = store.get_version("echo", "0.0.1").updated_at.isoformat()
+
+    b_checked = threading.Event()  # writer-B 完成冲突检查读
+    a_done = threading.Event()     # writer-A 整个保存结束
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        name = threading.current_thread().name
+        stmt = " ".join(statement.split()).lower()
+        if not stmt.startswith("update"):
+            return
+        if name == "writer-A" and "updated_at" not in stmt:
+            # main 上的落 definition 写法（主键定位、无 updated_at 谓词）：
+            # 必须等 writer-B 先完成它的检查读，才能开始写
+            _wait_or_die(b_checked, "writer-B 未完成冲突检查读")
+        elif name == "writer-B":
+            # writer-B 的任何写都必须等 writer-A 的保存完整结束。
+            # 注意：只能在这里停等——B 此刻尚无任何未决游标/事务，不持锁；
+            # 若停在 SELECT 的 after 钩子里，未消费的游标会持有语句级
+            # SHARED 锁，把 A 的 COMMIT 伪造成 database is locked。
+            _wait_or_die(a_done, "writer-A 未完成保存")
+
+    def after_execute(conn, cursor, statement, parameters, context, executemany):
+        name = threading.current_thread().name
+        stmt = " ".join(statement.split()).lower()
+        if name == "writer-B" and "select updated_at from flow_versions" in stmt:
+            # 这一条就是「读基准做比对」——它已读到旧基准（A 尚未开写），
+            # 只设旗标、不停留（停留会让未消费游标持锁，见上）
+            b_checked.set()
+
+    event.listen(engine, "before_cursor_execute", before_execute)
+    event.listen(engine, "after_cursor_execute", after_execute)
+
+    results: dict = {}
+
+    def worker(tag: str) -> None:
+        try:
+            store.save_flow_definition(
+                "echo", "0.0.1", _echo_definition(tag=tag), base_updated_at=base
+            )
+            results[tag] = "OK"
+        except VersionConflictError as e:
+            results[tag] = ("CONFLICT", e.latest_updated_at)
+        except Exception as e:  # noqa: BLE001 — 其他异常原样暴露，不能伪装成功
+            results[tag] = ("ERROR", repr(e))
+        finally:
+            if tag == "A":
+                a_done.set()
+
+    threads = [
+        threading.Thread(target=worker, args=(tag,), name=f"writer-{tag}")
+        for tag in ("A", "B")
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive(), f"线程 {t.name} 30s 未结束（疑似死锁）"
+    return results
+
+
+def test_concurrent_same_base_saves_exactly_one_wins(tmp_path):
+    """#101 守卫：双标签页持同一 base 并发保存 → 恰好一方成功、另一方 409。"""
+    store, engine = _race_store(tmp_path)
+    store.save_flow_definition("echo", "0.0.1", _echo_definition(tag="init"))
+    results = _run_same_base_race(store, engine)
+
+    oks = [t for t, r in results.items() if r == "OK"]
+    conflicts = [t for t, r in results.items() if isinstance(r, tuple) and r[0] == "CONFLICT"]
+    errors = [t for t, r in results.items() if isinstance(r, tuple) and r[0] == "ERROR"]
+    assert not errors, f"并发保存出现意外异常: {results}"
+    assert len(oks) == 1, f"应恰好一方成功，实际 {results}"
+    assert len(conflicts) == 1, f"应恰好一方收到 VersionConflictError，实际 {results}"
+    winner = oks[0]
+    # 最终落库内容 = 成功一方的内容（失败方的编辑不得静默覆盖）
+    assert json.loads(store.get_version("echo", "0.0.1").definition)["desc"] == winner
+    # 冲突错误必须携带最新基准，供前端「加载最新」
+    loser_latest = results[conflicts[0]][1]
+    final_base = store.get_version("echo", "0.0.1").updated_at.isoformat()
+    assert loser_latest == final_base, f"冲突错误应携带最新 updated_at: {loser_latest} != {final_base}"
+
+
+def test_save_with_base_writes_definition_via_conditional_update(tmp_path):
+    """#101 守卫：带 base 保存时，落 definition 的 UPDATE 必须含 updated_at 谓词
+    （主键定位的无条件 ORM UPDATE 不得再出现——那正是丢编辑的竞态窗口）。"""
+    from sqlalchemy import event
+
+    store, engine = _race_store(tmp_path)
+    store.save_flow_definition("echo", "0.0.1", _echo_definition(tag="init"))
+    base = store.get_version("echo", "0.0.1").updated_at.isoformat()
+
+    updates: list = []
+    event.listen(
+        engine, "before_cursor_execute",
+        lambda conn, cursor, statement, parameters, context, executemany:
+        updates.append(" ".join(statement.split()))
+        if statement.lstrip().upper().startswith("UPDATE") else None,
+    )
+    store.save_flow_definition(
+        "echo", "0.0.1", _echo_definition(tag="cas"), base_updated_at=base
+    )
+    assert updates, "保存应产生 UPDATE 语句"
+    definition_writes = [u for u in updates if "definition" in u.lower()]
+    assert definition_writes, f"应有落 definition 的 UPDATE: {updates}"
+    for u in definition_writes:
+        assert "updated_at" in u.lower(), (
+            f"落 definition 的 UPDATE 缺少 updated_at 条件（读-比-写非原子）: {u}"
+        )

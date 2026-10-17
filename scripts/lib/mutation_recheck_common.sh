@@ -19,7 +19,61 @@
 # shellcheck shell=bash
 
 MUT_TIMEOUT_BIN=""
-MUT_PYTHON_BIN="${PYTHON_BIN:-python3}"
+# 解释器（#167）：由文件末尾的 mut_resolve_python 解析填充——**不**在这里写死
+# 裸 ``python3``（那正是 4 条测试假红的根因，见该函数上方的说明）。
+MUT_PYTHON_BIN=""
+
+# ---- Python 解释器解析（plaita#167）----------------------------------------- #
+#
+# 存在的理由：复核/配置脚本此前**裸调用 PATH 上的 `python3`**。macOS 的系统
+# `python3` 是 3.9.x——没有 `tomllib`（3.11+ 才有）、也常常没有 pytest，于是
+# 「健康机器」上 4 条测试稳定假红：与变异无关的长期红会让「基线不绿」的判断
+# 失真，而按「已知环境红灯」人工豁免正是**可伪造通道**（#167 的口径）。
+#
+# 解析顺序（两条脚本共用，且只写这一处）：
+#
+#   1. ``PYTHON_BIN``——显式覆盖。工作流/runner 把**当前解释器**递进来
+#      （pytest 侧的 ``sys.executable``，见 ``tests/conftest.py``）；
+#   2. ``${VIRTUAL_ENV}/bin/python``——已激活的 venv（本地正常工作流）；
+#   3. ``<repo>/.venv/bin/python``——仓根 venv，``scripts/ci-gate.sh`` 的既有约定；
+#   4. PATH 兜底：``python3`` / ``python`` / ``python3.13`` … 取**第一个 ≥3.11**
+#      的（版本化名字是正常安装产物：系统 3.9 与 3.11+ 常常并存）；
+#   5. 连一个 ≥3.11 都没有：退回裸 ``python3``——**不是**静默失败，脚本侧会
+#      在 Python 里做**具名跳过**（打印缺什么、怎么修），而不是丢一个 traceback。
+mut_python_ok() {
+    # $1 = 解释器路径/名字：存在且 >= 3.11 ⇒ 0
+    command -v "$1" >/dev/null 2>&1 || return 1
+    "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+        >/dev/null 2>&1
+}
+
+mut_repo_root() {
+    # 本文件住在 <repo>/scripts/lib/ ⇒ 仓根是上两级
+    (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+}
+
+mut_resolve_python() {
+    local cand
+    for cand in "${PYTHON_BIN:-}" \
+                "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
+                "$(mut_repo_root)/.venv/bin/python"; do
+        [[ -n "$cand" ]] || continue
+        if command -v "$cand" >/dev/null 2>&1; then
+            printf '%s\n' "$cand"; return 0
+        fi
+    done
+    for cand in python3 python python3.13 python3.12 python3.11; do
+        if mut_python_ok "$cand"; then
+            printf '%s\n' "$cand"; return 0
+        fi
+    done
+    for cand in python3 python; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            printf '%s\n' "$cand"; return 0
+        fi
+    done
+    printf '%s\n' python3
+}
 
 mut_init_timeout() {
     if command -v timeout >/dev/null 2>&1; then
@@ -32,6 +86,15 @@ mut_init_timeout() {
     fi
     command -v "$MUT_PYTHON_BIN" >/dev/null 2>&1 || {
         echo "找不到 ${MUT_PYTHON_BIN}（可用 PYTHON_BIN=... 覆盖）。" >&2; exit 1; }
+    # 解释器还必须能 `import pytest`（#167）：解析到一个没有 pytest 的解释器时，
+    # mut_run 的 rc 只是「没能真正执行」，而复核判定把 rc != 0 记成 killed ⇒
+    # **伪造击杀**（与 #124 缺陷 3 同一形态，也是本单 4 条假红的另一半）。具名
+    # 中止：说清缺什么、怎么修，绝不让它退化成静默的 killed。
+    "$MUT_PYTHON_BIN" -c 'import pytest' >/dev/null 2>&1 || {
+        echo "解释器 ${MUT_PYTHON_BIN} 里没有 pytest（'python -m pytest' 跑不起来）——" >&2
+        echo "继续跑会把「没能执行」记成 killed（伪造击杀）。请设" >&2
+        echo "PYTHON_BIN=<装了 pytest 的解释器> 或激活 venv 后重跑。" >&2
+        exit 1; }
 }
 
 # 无匹配变异点：注意 ${VAR} 的花括号（缺陷 2）
@@ -83,3 +146,8 @@ mut_classify() {
         *)            echo "killed" ;;
     esac
 }
+
+# 解释器解析**在函数定义之后**求值（source 期一次）：所有消费者（mut_run /
+# 各 recheck_*.sh / mutation-module-tests.sh）拿到的是同一个解释器——#167 的
+# 「两条脚本用同一个解释器」由这一处保证，而不是各写一遍顺序。
+MUT_PYTHON_BIN="$(mut_resolve_python)"

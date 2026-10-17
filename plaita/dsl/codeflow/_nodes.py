@@ -16,6 +16,27 @@ from plaita.dsl.codeflow._common import (
 )
 from plaita.dsl.codeflow._expr import _compile_expr
 
+def _apply_base_kwargs(spec: Dict[str, Any], kw: Dict[str, Any], ctx: _CompileCtx) -> None:
+    """#142 编译侧 / #143：把 **``Node`` 基类共有**的字段在所有内置 kind 上统一消费。
+
+    根因：内置 kind 走**手写 ``if`` 链**、无 catch-all、也不报未知 kwarg ⇒ 链外的
+    kwarg 被**静默丢弃**（HTTP 有 `timeout`、CODE/EVENT 没有；`on_error` 只在 HTTP
+    与自定义节点两条路径被消费）。而 ``Node`` 基类**本来就有** ``timeout``
+    （``basic.py:95``）与 ``timeout_handler``（``:101``）⇒ 这些不是新契约，
+    是**既有契约在手写链里漏了**。
+
+    **不覆盖** spec 里已有的键（各 kind 自己的写法优先）。
+    """
+    if "timeout" in kw and "timeout" not in spec:
+        spec["timeout"] = _compile_expr(kw["timeout"], ctx)
+    th = kw.get("timeoutHandler") or kw.get("timeout_handler") or kw.get("on_timeout")
+    if th is not None and "timeoutHandler" not in spec:
+        spec["timeoutHandler"] = _eval_error_handler(th, ctx)
+    eh = kw.get("on_error") or kw.get("on_error_handler")
+    if eh is not None and "errorHandler" not in spec:
+        spec["errorHandler"] = _eval_error_handler(eh, ctx)
+
+
 def _compile_node_call(
     node: ast.Call, ctx: _CompileCtx, assign_name: Optional[str],
 ) -> Dict[str, Any]:
@@ -63,6 +84,7 @@ def _compile_node_call(
         eh = kw.get("on_error") or kw.get("on_error_handler")
         if eh is not None:
             spec["errorHandler"] = _eval_error_handler(eh, ctx)
+        _apply_base_kwargs(spec, kw, ctx)
         return spec
 
     if kind == "CODE":
@@ -84,6 +106,7 @@ def _compile_node_call(
         # subprocess 后端的 10s 墙钟掐死，报成引擎异常。
         if kw.get("sandbox_backend") is not None:
             spec["sandbox_backend"] = _const(kw["sandbox_backend"])
+        _apply_base_kwargs(spec, kw, ctx)
         return spec
 
     if kind == "EVENT":
@@ -95,6 +118,7 @@ def _compile_node_call(
         spec = {"type": "event", "id": nid, "eventType": etype}
         if "filter" in kw:
             spec["eventFilter"] = _const(kw["filter"])
+        _apply_base_kwargs(spec, kw, ctx)
         return spec
 
     if kind in ("CHILD", "REFERENCE"):
@@ -106,6 +130,7 @@ def _compile_node_call(
             raise _CodeflowError(f"{kind} 需要 flow=<childflow 函数>", node)
         child_ir = _eval_childflow_arg(flow_arg, ctx)
         spec = {"type": kind.lower(), "id": nid, "input": inp, "childFlow": child_ir}
+        _apply_base_kwargs(spec, kw, ctx)
         return spec
 
     if kind == "PARALLEL":
@@ -121,6 +146,7 @@ def _compile_node_call(
             spec["joinBranches"] = _eval_join(join, ctx)
         if "conditional" in kw and _const_bool(kw["conditional"]):
             spec["isConditional"] = True
+        _apply_base_kwargs(spec, kw, ctx)
         return spec
 
     # 走到这里：kind 来自 _custom_node_type（自定义节点占位符）
@@ -165,6 +191,7 @@ def _compile_custom_node(
         if arg_name is None:  # **kwargs 解包
             raise _CodeflowError("自定义节点不支持 **kwargs 解包", node)
         spec[arg_name] = _compile_expr(arg_node, ctx)
+    _apply_base_kwargs(spec, kw, ctx)
     return spec
 
 

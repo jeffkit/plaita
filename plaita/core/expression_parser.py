@@ -201,6 +201,7 @@ from plaita.core.types import (
     PERSISTABLE_TYPES,
 )
 from plaita.logger import logger
+from plaita.core.url_redaction import _scrub_url_text
 
 
 # ---------------------------------------------------------------------------
@@ -681,7 +682,7 @@ def _descriptor_for(registry: Optional[Any], func_name: str) -> Optional[Any]:
         desc = getter(func_name)
     except Exception as exc:                  # noqa: BLE001 - dict-like proxy may raise
         logger.debug("expression registry descriptor lookup failed for %r: %s",
-                     func_name, exc)
+                     func_name, _scrub_url_text(exc))
         return None
     return desc if hasattr(desc, "has_side_effects") else None
 
@@ -706,7 +707,7 @@ def _is_persisted_key(context: Any, root_key: str) -> bool:
     try:
         mapping = mapper()
     except Exception as exc:                  # noqa: BLE001 - 读不到就不登记，门另有 fail-closed
-        logger.debug("persisted-key probe failed for %r: %s", root_key, exc)
+        logger.debug("persisted-key probe failed for %r: %s", root_key, _scrub_url_text(exc))
         return False
     return isinstance(mapping, dict) and mapping.get(root_key) in _PERSISTED_FIELDS
 
@@ -728,7 +729,7 @@ def _is_persisted_key_strict(context: Any, root_key: str) -> Optional[bool]:
         mapping = mapper()
     except Exception as exc:                  # noqa: BLE001 - fail closed
         logger.warning("plaita#69 mutation gate: cannot read the state key map "
-                       "(%s: %s); failing closed", type(exc).__name__, exc)
+                       "(%s: %s); failing closed", type(exc).__name__, _scrub_url_text(exc))
         return None
     if not isinstance(mapping, dict):
         logger.warning("plaita#69 mutation gate: state key map is %s, not a dict; "
@@ -758,7 +759,7 @@ def _persisted_root_keys(context: Any) -> Optional[Any]:
         mapping = mapper()
     except Exception as exc:                  # noqa: BLE001 - fail closed, with a log
         logger.warning("plaita#69 mutation gate: cannot read the state key map "
-                       "(%s: %s); failing closed", type(exc).__name__, exc)
+                       "(%s: %s); failing closed", type(exc).__name__, _scrub_url_text(exc))
         return _PERSISTED_LOOKUP_FAILED
     if not isinstance(mapping, dict):
         logger.warning("plaita#69 mutation gate: state key map is %s, not a dict; "
@@ -807,7 +808,7 @@ def _non_root_key_identity_alias(context: Any, root_key: str) -> bool:
     try:
         value = getter(root_key, _MISSING)
     except Exception as exc:                  # noqa: BLE001 - 探测失败不决定
-        logger.debug("non-root key identity probe failed for %r: %s", root_key, exc)
+        logger.debug("non-root key identity probe failed for %r: %s", root_key, _scrub_url_text(exc))
         return False
     if value is _MISSING:
         return False
@@ -831,7 +832,7 @@ def _canonical_container_fast_path(root_key: str, context: Any,
     try:
         value = getter(root_key, _MISSING)
     except Exception as exc:                  # noqa: BLE001 - 探测失败不决定，交给探测
-        logger.debug("canonical fast-path probe failed for %r: %s", root_key, exc)
+        logger.debug("canonical fast-path probe failed for %r: %s", root_key, _scrub_url_text(exc))
         return False
     if value is _MISSING:
         return False
@@ -920,7 +921,7 @@ def _live_alias_index() -> Dict[int, Tuple[str, str]]:
         try:
             mapping = state._key_to_field()
         except Exception as exc:              # noqa: BLE001 - 读不到就不贡献，不静默吞来源
-            logger.debug("live-state key map unreadable during alias probe: %s", exc)
+            logger.debug("live-state key map unreadable during alias probe: %s", _scrub_url_text(exc))
             mapping = None
         if mapping:
             for key, field in mapping.items():
@@ -929,7 +930,7 @@ def _live_alias_index() -> Dict[int, Tuple[str, str]]:
                 try:
                     obj = state[key]
                 except Exception as exc:      # noqa: BLE001 - 缺席/不可读的根不贡献身份
-                    logger.debug("live root %r unreadable during alias probe: %s", key, exc)
+                    logger.debug("live root %r unreadable during alias probe: %s", key, _scrub_url_text(exc))
                     continue
                 if isinstance(obj, (dict, list, set)):
                     index.setdefault(id(obj), (key, key))
@@ -1135,6 +1136,22 @@ def note_fresh_object(obj: Any) -> None:
         _fresh_note(obj)
 
 
+def note_scratch_object(obj: Any) -> None:
+    """Public hook: the **host** declared *obj* as execution-owned scratch (plaita#164).
+
+    与 :func:`note_fresh_object` / :func:`note_fresh_closure` 一样只写**当前**求值作用域
+    （作用域外 no-op，fail-closed），但判据不同、必须分开：
+
+    * **对象身份**，不做精确类型判据 —— 宿主可以声明宿主的容器（``dict`` 子类等）；
+    * **不遍历闭包** —— 声明只覆盖被声明的**那一个**对象，它的图里没有任何东西因此变成
+      fresh（这正是 scratch 不能把活根"洗白"成可写目标的原因）；
+    * 调用方（``_note_scratch_read``）负责"只对本次声明 + 同一个对象"这一层，
+      并在登记前用**既有**的 :func:`_live_alias_index` 拒绝"声明的对象本身就是活
+      持久化对象"的形状。
+    """
+    _fresh_note(obj)
+
+
 def note_fresh_closure(root: Any, budget: Optional[int] = None) -> None:
     """Public hook: the engine created *root* and everything reachable inside it.
 
@@ -1189,6 +1206,52 @@ def freshness_registry_size() -> int:
     """Test hook: number of idents in the active evaluation scope (0 outside)."""
     scope = _FRESH_SCOPE.get()
     return 0 if scope is None else len(scope)
+
+
+# ---------------------------------------------------------------------------
+# plaita#164 — 显式 scratch 捐献在**读取点**登记
+# ---------------------------------------------------------------------------
+# 宿主用 ``ctx.set_scratch("$V", obj)`` 声明"这个对象只归本次执行所有、可以就地
+# 改写"。实现刻意**不**在 ``set_scratch`` 里登记（那时还没有求值作用域，登记到
+# 进程级注册表正是 #69 r6 修掉的漏洞），也**不**在作用域打开时批量登记（那会让一次
+# 无关求值消费掉声明）——登记发生在**某次逻辑求值真正读到这个键的那一刻**：
+#
+#   变量 thunk 从 context 取出根本身之后调一次本函数；``CheckpointState`` 只在
+#   "这个键是本次声明的 scratch 绑定、且取出的就是那个对象（is）"时返回 True 并
+#   消费掉声明。于是：
+#     * 同一次求值里反复读同一个键仍然 fresh（其它读取拿不到声明，但对象已在作用域里）；
+#     * **下一次**求值读到同一个对象时声明已消费 ⇒ 不是 fresh ⇒ default-deny 照拒
+#       （"fresh == 本次求值由引擎新建"的口径原样保留，作用域语义不变）；
+#     * 没有作用域时（理论上不可达）不消费、不登记 —— fail-closed。
+#
+# 只登记**被声明的那个对象**，不登记它的图：声明里嵌套的容器不是 fresh，因此
+# scratch 不可能把活根"洗白"成可写目标（活根身份的判据由**既有**的
+# :func:`_live_alias_index` 提供，本单不新增任何"证明对象是活的"谓词）。
+_SCRATCH_ALIASED_TEMPLATE = (
+    "plaita#164: the object declared as scratch at {path!r} is also reachable from "
+    "the checkpoint-persisted state (it is the live object at {root!r}); registering "
+    "it as fresh would open a write-through channel into the checkpoint, which the "
+    "#69 default-deny gate exists to prevent. Scratch declarations must own their "
+    "objects exclusively: bind a private object, or let the engine materialise one "
+    "(e.g. build it with ctx.evaluate({{...}}) inside the same evaluation)."
+)
+
+
+def _note_scratch_read(context: Any, root_key: Any, value: Any) -> None:
+    """Register a host-declared scratch binding as fresh at its **read** site."""
+    if _FRESH_SCOPE.get() is None:
+        return                              # no active evaluation: fail-closed
+    consume = getattr(context, "consume_scratch_declaration", None)
+    if not callable(consume):
+        return                              # plain dict / nested container context
+    if not consume(root_key, value):
+        return                              # not (or no longer) a declared scratch binding
+    aliased = _live_alias_index().get(id(value))
+    if aliased is not None:
+        # 宿主把**同一个对象**同时挂在 checkpoint 上（$INPUT/$NODE/...）。登记它等于
+        # 给写穿开一条新通道 ⇒ 具名拒绝，而不是静默放行一次写穿。
+        raise ValueError(_SCRATCH_ALIASED_TEMPLATE.format(path=root_key, root=aliased[0]))
+    note_scratch_object(value)
 
 
 class _FreshnessPlan:
@@ -2742,7 +2805,7 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
             logger.debug(
                 "contains probe failed for %s root %r: %s",
                 _expression._type_name(obj), root_key,
-                _expression._exception_message(exc),
+                _scrub_url_text(_expression._exception_message(exc)),
             )
     get = _probe_getattr(obj, "get", None, path=root_key)
     if callable(get):
@@ -2752,7 +2815,7 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
             logger.debug(
                 "get probe failed for %s root %r: %s",
                 _expression._type_name(obj), root_key,
-                _expression._exception_message(exc),
+                _scrub_url_text(_expression._exception_message(exc)),
             )
     if _probe_hasattr(obj, "__dict__", path=root_key):
         # 兜底分支，与 _get_attr 的 getattr 分支对齐（属性风格的自定义上下文）。
@@ -3053,6 +3116,9 @@ class ExpressionParser:
                     f"Available roots (with {parser.prefix!r} prefix): "
                     "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
                 ) from None
+            # plaita#164：宿主显式声明过的 scratch 绑定在这里（读取点）进入本次
+            # 求值的 freshness 作用域——只有"本次声明 + 同一个对象"才登记。
+            _note_scratch_read(context, root_key, obj)
             # plaita#69 r4（结构半边 2 的登记侧）：这条路径若起自活 CheckpointState 的
             # 持久化根，则它交出的对象**属于持久化图**——登记其身份，使别处任何容器
             # （任意键名）挂上它时能被身份探测认出来。热路径上只做一次 ``dict`` 查键

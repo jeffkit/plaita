@@ -26,6 +26,7 @@ from .core import (
 )
 from .exceptions import EventError, EventNotFoundError, EventStorageError, EventTimeoutError
 from .utils import normalize_event
+from plaita.core.url_redaction import _scrub_url_text
 
 logger = logging.getLogger(__name__)
 
@@ -402,7 +403,7 @@ class SqlalchemyEventSubscriptionStorage(EventSubscriptionStorage):
                     # 坏行并**具名点名**（id / event_type），其余订阅照常返回。
                     logger.warning(
                         "事件订阅存储：跳过非法订阅行（id=%s, event_type=%r）：%s",
-                        db_sub.id, db_sub.event_type, e)
+                        db_sub.id, db_sub.event_type, _scrub_url_text(e))
                     continue
                 subscriptions.append(subscription)
             return subscriptions

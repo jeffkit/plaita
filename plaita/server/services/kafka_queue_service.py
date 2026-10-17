@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from .base_service import BaseExtendedService
 from ...logger import logger
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 try:
     # 导入Kafka相关库
@@ -83,7 +84,7 @@ class KafkaQueueService(BaseExtendedService):
             logger.info("Kafka队列服务已启动")
             return True
         except Exception as e:
-            logger.error("启动Kafka队列服务失败: %s", e, exc_info=True)
+            logger.error("启动Kafka队列服务失败: %s", _scrub_exception_text(e))
             return False
     
     def _init_admin_client(self):
@@ -98,7 +99,7 @@ class KafkaQueueService(BaseExtendedService):
             logger.warning("无法连接到Kafka Broker，管理功能将不可用")
             self.admin_client = None
         except Exception as e:
-            logger.warning("初始化Kafka管理客户端失败: %s", e)
+            logger.warning("初始化Kafka管理客户端失败: %s", _scrub_url_text(e))
             self.admin_client = None
     
     def stop_service(self) -> bool:
@@ -114,12 +115,12 @@ class KafkaQueueService(BaseExtendedService):
                 try:
                     self.admin_client.close()
                 except Exception as e:
-                    logger.warning("关闭管理客户端失败: %s", e)
+                    logger.warning("关闭管理客户端失败: %s", _scrub_url_text(e))
             
             logger.info("Kafka队列服务已停止")
             return True
         except Exception as e:
-            logger.error("停止Kafka队列服务失败: %s", e, exc_info=True)
+            logger.error("停止Kafka队列服务失败: %s", _scrub_exception_text(e))
             return False
     
     def _close_all_consumer_groups(self):
@@ -131,7 +132,7 @@ class KafkaQueueService(BaseExtendedService):
                         group_info.consumer.close()
                         logger.info("消费者组 %s 已关闭", group_id)
                 except Exception as e:
-                    logger.warning("关闭消费者组 %s 失败: %s", group_id, e)
+                    logger.warning("关闭消费者组 %s 失败: %s", group_id, _scrub_url_text(e))
             
             self.consumer_groups.clear()
     
@@ -186,7 +187,7 @@ class KafkaQueueService(BaseExtendedService):
                 return group_info
                 
             except Exception as e:
-                logger.error("创建消费者组 %s 失败: %s", group_id, e, exc_info=True)
+                logger.error("创建消费者组 %s 失败: %s", group_id, _scrub_exception_text(e))
                 return None
     
     def destroy_consumer_group(self, group_id: str) -> bool:
@@ -214,7 +215,7 @@ class KafkaQueueService(BaseExtendedService):
                 return True
                 
             except Exception as e:
-                logger.error("销毁消费者组 %s 失败: %s", group_id, e, exc_info=True)
+                logger.error("销毁消费者组 %s 失败: %s", group_id, _scrub_exception_text(e))
                 return False
     
     def get_consumer_group_status(self, group_id: str = None) -> Dict[str, Any]:
@@ -290,7 +291,7 @@ class KafkaQueueService(BaseExtendedService):
                 return True
                 
             except Exception as e:
-                logger.error("提交偏移量失败: %s", e, exc_info=True)
+                logger.error("提交偏移量失败: %s", _scrub_exception_text(e))
                 return False
     
     def seek_to_offset(self, group_id: str, partition: int, offset: int) -> bool:
@@ -321,7 +322,7 @@ class KafkaQueueService(BaseExtendedService):
                 return True
                 
             except Exception as e:
-                logger.error("定位偏移量失败: %s", e, exc_info=True)
+                logger.error("定位偏移量失败: %s", _scrub_exception_text(e))
                 return False
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -369,7 +370,7 @@ class KafkaQueueService(BaseExtendedService):
                 )
                 return True
             except Exception as e:
-                logger.error("Kafka监听任务执行失败: %s", e, exc_info=True)
+                logger.error("Kafka监听任务执行失败: %s", _scrub_exception_text(e))
                 
                 # 触发错误事件
                 error_event_data = {
@@ -389,7 +390,7 @@ class KafkaQueueService(BaseExtendedService):
                 return False
                 
         except Exception as e:
-            logger.error("处理Kafka队列任务失败: %s", e, exc_info=True)
+            logger.error("处理Kafka队列任务失败: %s", _scrub_exception_text(e))
             
             # 触发错误事件
             try:
@@ -402,8 +403,8 @@ class KafkaQueueService(BaseExtendedService):
                     "success": False
                 }
                 await self.trigger_event(task_config.get("event_type"), error_event_data)
-            except Exception:
-                logger.warning("kafka error-event trigger failed", exc_info=True)
+            except Exception as exc:
+                logger.warning("kafka error-event trigger failed: %s", _scrub_exception_text(exc))
 
             return False
     
@@ -444,14 +445,14 @@ class KafkaQueueService(BaseExtendedService):
                     try:
                         if callback(execution_id):
                             return True
-                    except Exception:
-                        logger.warning("flow completion callback raised", exc_info=True)
+                    except Exception as exc:
+                        logger.warning("flow completion callback raised: %s", _scrub_exception_text(exc))
 
             # 默认返回False，保守策略不提前结束
             return False
 
         except Exception as e:
-            logger.warning("检查流程完成状态失败: %s", e)
+            logger.warning("检查流程完成状态失败: %s", _scrub_url_text(e))
             return False
     
     def register_flow_completion_callback(self, callback: Callable[[str], bool]):
@@ -471,7 +472,7 @@ class KafkaQueueService(BaseExtendedService):
             try:
                 await redis_client.set(task_complete_key, "1")
             except Exception as e:
-                logger.warning("标记任务完成失败: %s", e)
+                logger.warning("标记任务完成失败: %s", _scrub_url_text(e))
     
     async def _listen_kafka_topic(self, task_config: Dict[str, Any],
                                 flow_completion_checker: Callable[[], Awaitable[bool]] = None,
@@ -623,7 +624,7 @@ class KafkaQueueService(BaseExtendedService):
                         logger.info("Kafka消费者已关闭")
                 
                 except Exception as e:
-                    logger.error("Kafka消费任务出错: %s", e)
+                    logger.error("Kafka消费任务出错: %s", _scrub_url_text(e))
             
             # 启动Kafka消费任务
             consumer_task = asyncio.create_task(kafka_consumer_task())
@@ -675,7 +676,7 @@ class KafkaQueueService(BaseExtendedService):
                 await redis_client.close()
                 
         except Exception as e:
-            logger.error("Kafka消息监听错误: %s", e, exc_info=True)
+            logger.error("Kafka消息监听错误: %s", _scrub_exception_text(e))
             if redis_client:
                 await redis_client.close()
             raise
@@ -699,7 +700,7 @@ class KafkaQueueService(BaseExtendedService):
             else:
                 return message
         except Exception as e:
-            logger.warning("解析消息失败: %s, 返回原始消息", e)
+            logger.warning("解析消息失败: %s, 返回原始消息", _scrub_url_text(e))
             return message
     
     async def _wait_for_flow_completion(self, execution_id: str,
@@ -762,12 +763,12 @@ class KafkaQueueService(BaseExtendedService):
                 producer.close()
                 return True
             except Exception as e:
-                logger.error("发送消息超时: %s", e)
+                logger.error("发送消息超时: %s", _scrub_url_text(e))
                 producer.close()
                 return False
                 
         except Exception as e:
-            logger.error("发送Kafka消息失败: %s", e)
+            logger.error("发送Kafka消息失败: %s", _scrub_url_text(e))
             return False
     
     def validate_task_config(self, task_config: Dict[str, Any]) -> bool:

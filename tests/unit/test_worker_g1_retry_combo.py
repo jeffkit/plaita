@@ -335,8 +335,10 @@ class TestHashCheckBeforeRetryWakeup:
         assert saved.status == "error"  # 未被翻转成 running
         assert "hash 不匹配" in saved.error["message"]
 
-        # 修复「定义」（这里直接把状态指纹对齐）后再 retry → 正常唤醒推进
-        saved.flow_hash = worker._compute_flow_hash(_flow())
+        # 修复「定义」（这里直接把状态指纹对齐）后再 retry → 正常唤醒推进。
+        # plaita#36：指纹口径是**存储中的原始定义**（model_validate 之前），
+        # 不再是解析后的 Flow 对象。
+        saved.flow_hash = worker._compute_flow_hash(FLOW_DEF)
         storage.save_execution_state("exec-1", saved)
         with patch("plaita.server.flow_worker.FlowExecution") as FE:
             inst = MagicMock()

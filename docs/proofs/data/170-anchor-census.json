@@ -1,0 +1,1102 @@
+{
+ "issue": 170,
+ "route": "C",
+ "generated_at": "2026-10-17T11:01:23+08:00",
+ "baseline_origin_main": "43757bd4235213a6b2afba53d24d9f217fdbdc0f",
+ "head": "22581861dcf828c12ec3f9233b1d043635dc20ea",
+ "head_tree": "9bce20779884de35f9ff6790079d2205e76bdb7f",
+ "summary": {
+  "family_total": 61,
+  "reanchored_and_killed": 11,
+  "parked_pending_landing": 50,
+  "collateral_reanchored_and_killed": 7,
+  "json_store_definitions_checked": 305,
+  "json_store_anchor_problems": 0,
+  "r12_anchor_test": "green (2 passed)",
+  "pre_existing_python_store_stale": {
+   "note": "mutations.py（#133/#33 家族）在 current main 上本就整体陈旧（目标文件不存在 / 修复未落地），与 #170/#79/#85 无关；replay.py --check-anchors 的 full-store 口径仍红。",
+   "definitions_with_missing_file": 49,
+   "definitions_with_count0": 55,
+   "full_store_definitions": 409,
+   "problem_definitions": 104,
+   "lines_with_missing_file": 49,
+   "lines_with_count0": 55
+  }
+ },
+ "reanchored_79_85_family": [
+  {
+   "name": "m01-as_str-bytes-passthrough",
+   "issue": "79",
+   "concern": "#79",
+   "file": "plaita/event/redis.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue79_event_storage_list_events.py::test_bytes_client_returns_stored_event"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "test_bytes_client_returns_stored_event"
+    ]
+   }
+  },
+  {
+   "name": "m02-list-events-first-ten-types",
+   "issue": "79",
+   "concern": "#79",
+   "file": "plaita/event/redis.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue79_event_storage_list_events.py::test_more_than_ten_event_types_all_returned"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "test_more_than_ten_event_types_all_returned"
+    ]
+   }
+  },
+  {
+   "name": "m03-decode-responses-off",
+   "issue": "79",
+   "concern": "#79",
+   "file": "plaita/event/redis.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue79_event_storage_list_events.py::test_initialize_builds_client_with_decode_responses"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "test_initialize_builds_client_with_decode_responses"
+    ]
+   }
+  },
+  {
+   "name": "m05-strict-after-becomes-inclusive",
+   "issue": "85",
+   "concern": "S2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS2CompositeCursor::test_batch_size_one_progresses_over_distinct_timestamps"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestS2CompositeCursor::test_batch_size_one_progresses_over_distinct_timestamps"
+    ]
+   }
+  },
+  {
+   "name": "m08-handle-event-swallows-again",
+   "issue": "85",
+   "concern": "S3",
+   "file": "plaita/server/event_filter.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS3ReplayFailureVisible::test_enqueue_failure_is_visible_and_retried"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestS3ReplayFailureVisible::test_enqueue_failure_is_visible_and_retried"
+    ]
+   }
+  },
+  {
+   "name": "m09-batch-size-guard-off",
+   "issue": "85",
+   "concern": "S4",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS4BatchSizeGuard::test_batch_size_zero_no_crash_no_scan"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestS4BatchSizeGuard::test_batch_size_zero_no_crash_no_scan"
+    ]
+   }
+  },
+  {
+   "name": "m10-memory-list-events-unsorted",
+   "issue": "85",
+   "concern": "S6",
+   "file": "plaita/event/memory.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS6MemoryStorageOrdering::test_memory_storage_list_events_is_time_ordered",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS6MemoryStorageOrdering::test_reconciler_recovers_all_with_out_of_order_insertion"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestS6MemoryStorageOrdering::test_memory_storage_list_events_is_time_ordered",
+     "TestS6MemoryStorageOrdering::test_reconciler_recovers_all_with_out_of_order_insertion"
+    ]
+   }
+  },
+  {
+   "name": "m11-missing-payload-silent",
+   "issue": "79",
+   "concern": "S7",
+   "file": "plaita/event/redis.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS7LoudMissingPayload::test_missing_payload_logs_error_with_event_id"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestS7LoudMissingPayload::test_missing_payload_logs_error_with_event_id"
+    ]
+   }
+  },
+  {
+   "name": "m12-cursor-rollback-guard-off",
+   "issue": "85",
+   "concern": "S8",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS8CursorNoCas::test_save_cursor_refuses_rollback"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestS8CursorNoCas::test_save_cursor_refuses_rollback"
+    ]
+   }
+  },
+  {
+   "name": "m47-window-end-clamp-off",
+   "issue": "85",
+   "concern": "AD5",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD5WindowEndClamp::test_forged_skipped_cannot_push_cursor_beyond_window"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestAD5WindowEndClamp::test_forged_skipped_cannot_push_cursor_beyond_window"
+    ]
+   }
+  },
+  {
+   "name": "m56-cursor-failure-not-loud",
+   "issue": "85",
+   "concern": "AH3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH3CursorWriteLoud::test_cursor_write_failure_is_loud_with_ids"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestAH3CursorWriteLoud::test_cursor_write_failure_is_loud_with_ids"
+    ]
+   }
+  }
+ ],
+ "collateral_reanchored": [
+  {
+   "name": "m109-redis-eventstorage-bytes-id",
+   "issue": "109",
+   "concern": "D3-decode",
+   "file": "plaita/event/redis.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_explicit_type_branch_bytes_safe",
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "Test110ListEventsProductionConnection::test_explicit_type_branch_bytes_safe",
+     "Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+    ]
+   }
+  },
+  {
+   "name": "m110-redis-list-events-type-prefix",
+   "issue": "110",
+   "concern": "D3-split",
+   "file": "plaita/event/redis.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_all_types_branch_keeps_colon_event_type",
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "Test110ListEventsProductionConnection::test_all_types_branch_keeps_colon_event_type",
+     "Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+    ]
+   }
+  },
+  {
+   "name": "159-renderer-failure-not-fail-closed",
+   "issue": "159",
+   "concern": "#159-P0",
+   "file": "plaita/core/url_redaction.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_issue159_webhook_url_secret_sinks.py::TestRendererFailureDegradesToSafeConstant::test_wrapper_returns_constant_when_renderer_raises",
+    "tests/unit/test_issue159_webhook_url_secret_sinks.py::TestRendererFailureDegradesToSafeConstant::test_dead_letter_enable_log_survives_renderer_failure",
+    "tests/unit/test_issue158_redis_url_secret_sinks.py::TestNonUtf8PasswordNeverBreaksCallers::test_failure_never_breaks_the_startup_log_path"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestNonUtf8PasswordNeverBreaksCallers::test_failure_never_breaks_the_startup_log_path",
+     "TestRendererFailureDegradesToSafeConstant::test_dead_letter_enable_log_survives_renderer_failure",
+     "TestRendererFailureDegradesToSafeConstant::test_wrapper_returns_constant_when_renderer_raises"
+    ]
+   }
+  },
+  {
+   "name": "88-credentials-fall-back-to-verbatim",
+   "issue": "88",
+   "concern": "#88-P0",
+   "file": "plaita/server/factory.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_enumerate_all_spans_never_returns_input_verbatim",
+    "tests/unit/test_redis_url_parse.py::TestMaskerCannotLeakByConstruction::test_global_fail_closed_never_returns_input_verbatim"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestEnumerateAllSpans::test_enumerate_all_spans_never_returns_input_verbatim",
+     "TestMaskerCannotLeakByConstruction::test_global_fail_closed_never_returns_input_verbatim"
+    ]
+   }
+  },
+  {
+   "name": "88-masker-reverted-to-r2-regex",
+   "issue": "88",
+   "concern": "#88-P0",
+   "file": "plaita/server/factory.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestRefusalMessagesNeverLeakCredentials::test_no_refusal_message_contains_the_password"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestRefusalMessagesNeverLeakCredentials::test_no_refusal_message_contains_the_password"
+    ]
+   }
+  },
+  {
+   "name": "88-r6-masker-skips-enumeration",
+   "issue": "88",
+   "concern": "#88-P0",
+   "file": "plaita/server/factory.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_enumerate_all_spans_rule_table",
+    "tests/unit/test_redis_url_parse.py::TestMaskerGenerativeProperty::test_generated_secret_in_every_candidate_position_never_leaks"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestEnumerateAllSpans::test_enumerate_all_spans_rule_table",
+     "TestMaskerGenerativeProperty::test_generated_secret_in_every_candidate_position_never_leaks"
+    ]
+   }
+  },
+  {
+   "name": "88-r6-passwords-drop-colon-leg",
+   "issue": "88",
+   "concern": "#88-P0",
+   "file": "plaita/server/factory.py",
+   "anchor_count": 1,
+   "expect_fail": [
+    "tests/unit/test_redis_url_parse.py::TestEnumerateAllSpans::test_enumerate_all_spans_never_returns_input_verbatim",
+    "tests/unit/test_redis_url_parse.py::TestLiteralGroundedRows::test_literal_grounded_rows_never_leak"
+   ],
+   "replay": {
+    "verdict": "KILLED",
+    "red": [
+     "TestLiteralGroundedRows::test_literal_grounded_rows_never_leak"
+    ]
+   }
+  }
+ ],
+ "parked": [
+  {
+   "name": "m07-page-pagination-off-by-one",
+   "issue": "85",
+   "concern": "S1",
+   "file": "plaita/event/redis.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestS1ExhaustionMustBeExplicit::test_dangling_index_flood_does_not_exhaust_candidates"
+   ],
+   "unlanded_feature": "页契约（EventPage/list_events_page）显式排空语义 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m13-quarantine-pins-instead-of-advancing",
+   "issue": "85",
+   "concern": "T1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT1QuarantineAndAdvance::test_a4a_one_dangling_then_six_valid",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT1QuarantineAndAdvance::test_a4d_persisted_cursor_dangling_front_across_rounds"
+   ],
+   "unlanded_feature": "隔离清单 + 推进（quarantine-and-advance）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m15-unresolved-claim-not-recognized",
+   "issue": "85",
+   "concern": "T3",
+   "file": "plaita/server/event_filter.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5b_rollback_failure_marks_unresolved_and_pins"
+   ],
+   "unlanded_feature": "去重认领回滚 / landed 探针 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m16-landed-probe-off",
+   "issue": "85",
+   "concern": "T3",
+   "file": "plaita/server/event_filter.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5a_ambiguous_enqueue_failure_does_not_duplicate"
+   ],
+   "unlanded_feature": "去重认领回滚 / landed 探针 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m17-page-contract-fallback-swallowed",
+   "issue": "85",
+   "concern": "U4",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT5PageContractMandatory::test_wrapped_page_reader_landing_on_default_is_loud"
+   ],
+   "unlanded_feature": "页契约默认实现响亮 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m19-type-key-recheck-off",
+   "issue": "85",
+   "concern": "T6",
+   "file": "plaita/event/redis.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT6ExhaustedConsistency::test_new_type_key_created_during_read_is_not_reported_exhausted"
+   ],
+   "unlanded_feature": "exhausted 一致性复核 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m20-rollback-failure-not-marked",
+   "issue": "85",
+   "concern": "T3",
+   "file": "plaita/server/event_filter.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestT3DedupClaimRollback::test_a5b_rollback_failure_marks_unresolved_and_pins"
+   ],
+   "unlanded_feature": "去重认领回滚 / landed 探针 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m21-last-position-not-capped-by-delivered",
+   "issue": "85",
+   "concern": "U1",
+   "file": "plaita/event/redis.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_no_loss_oracle.py::test_page_no_loss_oracle[2-3-2-0-front-interleaved]",
+    "tests/unit/test_issue85_no_loss_oracle.py::test_reconciler_no_loss_oracle[3-250-200-0-front-interleaved]"
+   ],
+   "unlanded_feature": "last_position 由已投递事件封顶 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m22-stopped-early-disabled",
+   "issue": "85",
+   "concern": "U2",
+   "file": "plaita/event/redis.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_no_loss_oracle.py::test_page_no_loss_oracle[3-5-10-0-front-interleaved]"
+   ],
+   "unlanded_feature": "stopped_early 显式化 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m23-quarantine-retry-disabled",
+   "issue": "85",
+   "concern": "U3'",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU3QuarantineRetry::test_r2_restored_payload_after_cursor_passed_is_recovered",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU3QuarantineRetry::test_a1a_missing_payload_restored_is_retried_and_delivered"
+   ],
+   "unlanded_feature": "隔离清单真实重试（get_event）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m24-trust-exhausted-with-events",
+   "issue": "85",
+   "concern": "U6",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU6DoNotTrustExhausted::test_exhausted_with_events_is_not_trusted"
+   ],
+   "unlanded_feature": "exhausted 不得在有事件时被采信 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m25-drain-confirmation-skipped",
+   "issue": "85",
+   "concern": "U7",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestU7ConfirmDrain::test_event_appended_to_existing_type_after_empty_read_is_not_lost"
+   ],
+   "unlanded_feature": "排空确认（drain confirmation）—— 未落地（最小实现用截断判据，语义不同）",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m27-delivery-failure-bypasses-window",
+   "issue": "85",
+   "concern": "V1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV1QuarantineRetryWindow::test_poison_entry_beyond_window_is_abandoned_loudly"
+   ],
+   "unlanded_feature": "隔离重试窗 / 毒条目放弃 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m28-quarantine-reschedule-off",
+   "issue": "85",
+   "concern": "W1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV1QuarantineRetryWindow::test_poison_entry_does_not_starve_others"
+   ],
+   "unlanded_feature": "隔离清单选择器公平性 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m29-caller-side-cap-off",
+   "issue": "85",
+   "concern": "V2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV2CallerSideCap::test_lying_last_position_page_does_not_lose_events"
+   ],
+   "unlanded_feature": "调用侧封顶（advance_boundary）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m30-quarantine-ttl-not-aligned",
+   "issue": "85",
+   "concern": "V3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV3QuarantineTtl::test_ttl_aligned_with_storage_ttl"
+   ],
+   "unlanded_feature": "隔离 TTL 与存储 TTL 对齐 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m31-abandon-write-unconditional",
+   "issue": "85",
+   "concern": "V4",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestV4ConditionalAbandon::test_abandon_write_requires_still_pending"
+   ],
+   "unlanded_feature": "条件放弃（CAS）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m32-quarantine-select-newest-first",
+   "issue": "85",
+   "concern": "W1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW1SelectorFairness::test_continuous_arrival_does_not_starve_old_entries"
+   ],
+   "unlanded_feature": "隔离清单选择器公平性 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m33-zero-delivery-without-evidence-allowed",
+   "issue": "85",
+   "concern": "W2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW2ZeroDeliveryEvidence::test_zero_delivery_without_evidence_is_loud_and_does_not_advance"
+   ],
+   "unlanded_feature": "零投递需证据 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m34-attempt-write-unconditional",
+   "issue": "85",
+   "concern": "W3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW3StaleAttemptWrite::test_stale_attempt_write_does_not_resurrect_deleted_entry"
+   ],
+   "unlanded_feature": "陈旧 attempt 条件写 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m35-vanish-warning-unconditional",
+   "issue": "85",
+   "concern": "W4",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestW4VanishWarningPrecision::test_normal_recovery_does_not_warn_about_vanish"
+   ],
+   "unlanded_feature": "消失告警精度 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m36-read-failure-treated-as-absent",
+   "issue": "85",
+   "concern": "AA1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA1ReadFailureNoOrphan::test_transient_hmget_failure_does_not_orphan_entries"
+   ],
+   "unlanded_feature": "读失败不得孤儿化（hmget 失败）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m37-due-gate-off",
+   "issue": "85",
+   "concern": "AA2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA2AbsoluteDue::test_due_gate_enforces_backoff"
+   ],
+   "unlanded_feature": "绝对 due / 退避下限 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m38-backoff-zero",
+   "issue": "85",
+   "concern": "AA2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA2AbsoluteDue::test_backoff_survives_a_frozen_clock"
+   ],
+   "unlanded_feature": "绝对 due / 退避下限 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m39-heal-off",
+   "issue": "85",
+   "concern": "AA3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA3TwoKeyDivergence::test_hash_only_pending_is_healed_and_recovered"
+   ],
+   "unlanded_feature": "两键自愈（hash↔due）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m40-skipped-not-reconciled",
+   "issue": "85",
+   "concern": "AA4",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA4SkippedReconciliation::test_forged_skipped_cannot_justify_far_advance"
+   ],
+   "unlanded_feature": "skipped 对账 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m41-put-failure-still-advances",
+   "issue": "85",
+   "concern": "AA3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAA3TwoKeyDivergence::test_put_failure_does_not_advance_cursor_past_bad_member"
+   ],
+   "unlanded_feature": "两键自愈（hash↔due）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m42-heal-cursor-not-persisted",
+   "issue": "85",
+   "concern": "AD1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD1HealCursorPersistence::test_heal_progress_survives_restart_every_round"
+   ],
+   "unlanded_feature": "自愈游标持久化 / 告警聚合 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m43-heal-warning-off",
+   "issue": "85",
+   "concern": "AD1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD1HealCursorPersistence::test_heal_warning_is_aggregated"
+   ],
+   "unlanded_feature": "自愈游标持久化 / 告警聚合 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m44-quarantine-pin-unbounded",
+   "issue": "85",
+   "concern": "AD2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD2RuntimeErrorInsideExec::test_runtime_error_inside_exec_recovers_tail_after_giveup"
+   ],
+   "unlanded_feature": "钉住轮数有上界 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m45-parse-retry-unbounded",
+   "issue": "85",
+   "concern": "AD3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD3UnparseableNoHeadOfLine::test_healthy_entries_recover_and_corrupt_is_dead_lettered"
+   ],
+   "unlanded_feature": "不可解析条目有界重试 → dead-letter —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m46-future-due-clamp-off",
+   "issue": "85",
+   "concern": "AD4",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD4ClockSkew::test_far_future_due_is_clamped_and_loud"
+   ],
+   "unlanded_feature": "未来 due 夹取 / 合法退避不告警 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m48-pin-streak-in-process",
+   "issue": "85",
+   "concern": "AF1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF1PinnedGiveupAcrossRestarts::test_restart_every_round_still_gives_up_and_delivers_tail"
+   ],
+   "unlanded_feature": "钉住计数跨重启（Redis 持久化）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m49-heal-advances-without-processing",
+   "issue": "85",
+   "concern": "AF2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF2HealCrashWindow::test_crash_in_cursor_window_every_round_still_heals_all"
+   ],
+   "unlanded_feature": "自愈崩溃窗 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m50-stall-warning-always",
+   "issue": "85",
+   "concern": "AF3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAD4ClockSkew::test_legitimate_backoff_is_not_warned"
+   ],
+   "unlanded_feature": "停滞告警判据 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m52-heal-failure-log-off",
+   "issue": "85",
+   "concern": "AF5",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF5DoubleFaultLoud::test_failure_path_is_aggregated"
+   ],
+   "unlanded_feature": "自愈双故障聚合 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m53-left-pending-not-persisted",
+   "issue": "85",
+   "concern": "AF6",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAF6VanishWarningAcrossRestarts::test_vanish_warning_survives_restart"
+   ],
+   "unlanded_feature": "left_pending 跨重启 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m54-pin-counts-per-member",
+   "issue": "85",
+   "concern": "AH1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH1PinCountsRounds::test_giveup_always_at_round_10_regardless_of_dangling_count"
+   ],
+   "unlanded_feature": "钉住按轮计数 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m57-starvation-watchdog-off",
+   "issue": "85",
+   "concern": "AH4",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH4StarvationWatchdog::test_trickle_success_does_not_hide_starvation"
+   ],
+   "unlanded_feature": "饥饿看门狗 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m58-dead-overflow-per-entry",
+   "issue": "85",
+   "concern": "AH5",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAH5SmallItems::test_dead_overflow_is_aggregated_per_round"
+   ],
+   "unlanded_feature": "小件聚合（dead 溢出）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m59-marker-write-dead",
+   "issue": "85",
+   "concern": "AI1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI1MarkerWrite::test_uncatchable_crash_still_converges",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI1MarkerWrite::test_kv_set_str_roundtrip"
+   ],
+   "unlanded_feature": "KV marker 写入（防不可捕获崩溃）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m60-no-advance-unbounded",
+   "issue": "85",
+   "concern": "AI2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI2BoundedNoAdvance::test_persistent_failure_advances_loudly_after_bound"
+   ],
+   "unlanded_feature": "无推进有上界 / due_ms 兜底 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m61-due-ms-fallback-off",
+   "issue": "85",
+   "concern": "AI2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI2BoundedNoAdvance::test_non_numeric_due_ms_does_not_block_the_rest"
+   ],
+   "unlanded_feature": "无推进有上界 / due_ms 兜底 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m62-watchdog-round-amnesia",
+   "issue": "85",
+   "concern": "AL2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL2SingleStarvedAcrossRestarts::test_single_starved_field_is_named_despite_restarts"
+   ],
+   "unlanded_feature": "饥饿集合持久化 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m63-watchdog-ignores-state",
+   "issue": "85",
+   "concern": "AL1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI4WatchdogDirections::test_abandoned_state_is_not_starvation"
+   ],
+   "unlanded_feature": "看门狗判据（heal 推不动时）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m64-retry-overflow-silent",
+   "issue": "85",
+   "concern": "AI3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAI3RetryOverflowLoud::test_overflow_is_reported_not_silent"
+   ],
+   "unlanded_feature": "重试溢出响亮 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m65-watchdog-estimate-trigger-off",
+   "issue": "85",
+   "concern": "AL1",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL1WatchdogWhenHealCannotAdvance::test_persistent_cursor_failure_is_still_watched"
+   ],
+   "unlanded_feature": "看门狗判据（heal 推不动时）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m66-starved-set-not-persisted",
+   "issue": "85",
+   "concern": "AL1/AL2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL2SingleStarvedAcrossRestarts::test_single_starved_field_is_named_despite_restarts"
+   ],
+   "unlanded_feature": "看门狗 + 饥饿集合持久化 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m67-sweep-never-finds",
+   "issue": "85",
+   "concern": "AL3",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAL3SweepReachable::test_sweep_is_called_and_not_found_output_reachable"
+   ],
+   "unlanded_feature": "清扫可达 —— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  },
+  {
+   "name": "m70-gap-streak-write-shortcircuit",
+   "issue": "85",
+   "concern": "BB2",
+   "file": "plaita/server/event_reconcile.py",
+   "anchor_count_on_current_main": 0,
+   "expect_fail": [
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAV2SlowDeclineAndOscillationAreLoud::test_slow_decline_is_loud",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAY2SlowConvergenceWording::test_slow_but_converging_is_not_called_divergent",
+    "tests/unit/test_issue85_reconcile_hardening.py::TestAS1GrowingBacklogIsLoud::test_growing_backlog_warns_even_with_progress"
+   ],
+   "unlanded_feature": "停滞计数写入（积压告警）—— 未落地",
+   "reason": "目标代码/测试属于 fix/79-85 的未落地加固面（event_reconcile 2083 行那套）；current main（route C 最小实现）里无对应对象，无法诚实重锚。定义逐字保留在同目录，待落地后原样重放/按 §6 playbook 重切。",
+   "status": "parked"
+  }
+ ],
+ "pre_existing_python_store_problems": {
+  "missing_file": [
+   "M21-wrapper-silent-allow: plaita/core/_author_capability.py: 文件不存在",
+   "M22-hard-refuse-identity-only: plaita/core/_author_capability.py: 文件不存在",
+   "M22-metaclass-hook-skip: plaita/core/_author_capability.py: 文件不存在",
+   "M22-twoface-call-lookup: plaita/core/_engine_calls.py: 文件不存在",
+   "M23-call-gate-off: plaita/core/_engine_calls.py: 文件不存在",
+   "M23-code-recheck-off: plaita/core/_engine_calls.py: 文件不存在",
+   "M23-isinstance-refusal: plaita/core/_author_capability.py: 文件不存在",
+   "M23-static-dict-revert: plaita/core/_engine_calls.py: 文件不存在",
+   "M23-static-mro-revert: plaita/core/_engine_calls.py: 文件不存在",
+   "M23-wrapped-function-only: plaita/core/_engine_calls.py: 文件不存在",
+   "M23-wrapper-as-leaf: plaita/core/_engine_calls.py: 文件不存在",
+   "M24-class-object-opaque: plaita/core/_engine_calls.py: 文件不存在",
+   "M24-gatedcall-trusts-code: plaita/core/_engine_calls.py: 文件不存在",
+   "M24-identity-membership-eq: plaita/core/_engine_calls.py: 文件不存在",
+   "M24-routine-membership-in: plaita/core/_engine_calls.py: 文件不存在",
+   "M25-capability-by-name: plaita/core/_author_capability.py: 文件不存在",
+   "M25-node-by-name: plaita/core/_author_capability.py: 文件不存在; plaita/core/_author_capability.py: 文件不存在",
+   "M25-strip-type-str-guard: plaita/core/_author_capability.py: 文件不存在",
+   "M26-cache-key-code-object: plaita/core/_author_capability.py: 文件不存在",
+   "M26-guard-after-cache: plaita/core/_author_capability.py: 文件不存在",
+   "M26-no-consistency-check: plaita/core/_author_capability.py: 文件不存在",
+   "M27-no-ellipsis: plaita/core/_author_capability.py: 文件不存在",
+   "M27-no-frozenset-projection: plaita/core/_author_capability.py: 文件不存在",
+   "M28-allow-parameter-callee: plaita/core/_author_capability.py: 文件不存在",
+   "M28-allow-rebindable-callee: plaita/core/_author_capability.py: 文件不存在",
+   "M28-no-default-expression-scan: plaita/core/_author_capability.py: 文件不存在",
+   "M29-readonly-binding-rebound: plaita/core/_author_capability.py: 文件不存在",
+   "M29-self-attribute-indirection-allow: plaita/core/_author_capability.py: 文件不存在",
+   "M30-allow-attribute-write: plaita/core/_author_capability.py: 文件不存在",
+   "M30-allow-multi-class-ambiguity: plaita/core/_author_capability.py: 文件不存在",
+   "M30-allow-self-rebind: plaita/core/_author_capability.py: 文件不存在",
+   "M30-attribute-indirection-always: plaita/core/_author_capability.py: 文件不存在",
+   "M31-allow-body-aliases: plaita/core/_author_capability.py: 文件不存在",
+   "M31-allow-object-setattr-path: plaita/core/_author_capability.py: 文件不存在; plaita/core/_author_capability.py: 文件不存在",
+   "M31-allow-setattr-path: plaita/core/_author_capability.py: 文件不存在; plaita/core/_author_capability.py: 文件不存在",
+   "M31-allow-type-receiver-expr: plaita/core/_author_capability.py: 文件不存在",
+   "M32-no-alias-resolution: plaita/core/_author_capability.py: 文件不存在",
+   "M32-no-cls: plaita/core/_author_capability.py: 文件不存在",
+   "M32-no-container-resolution: plaita/core/_author_capability.py: 文件不存在",
+   "M32-no-function-return: plaita/core/_author_capability.py: 文件不存在",
+   "M32-no-self-instance: plaita/core/_author_capability.py: 文件不存在",
+   "M33-carve-out-always: plaita/core/_author_capability.py: 文件不存在",
+   "M33-no-class-name-match: plaita/core/_author_capability.py: 文件不存在",
+   "M33-no-dunder-class-attrs: plaita/core/_author_capability.py: 文件不存在",
+   "M33-no-lambda-callee: plaita/core/_author_capability.py: 文件不存在",
+   "M33-no-subscript-propagation: plaita/core/_author_capability.py: 文件不存在",
+   "M33-no-type-call: plaita/core/_author_capability.py: 文件不存在",
+   "M33-no-write-channel: plaita/core/_author_capability.py: 文件不存在",
+   "M33-reinstate-own-receiver-refusal: plaita/core/_author_capability.py: 文件不存在"
+  ],
+  "count0": [
+   "M10-enum-repr-only: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M10-protocol-walk: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M11-class-facts-getattr: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M11-class-facts-getattr-no-validation: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M11-class-facts-no-validation: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M11-no-meta-guard: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M11-one-dunder: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M13-borrow-fn-set: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M13-hooks-scans-only: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M13-view-exact: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M14-dc-preview: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M14-hooks-both: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M14-mapping-get: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M14-objclass-forge: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M14-probe-attr-access: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M15-annotate-preview: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M15-context-strip: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M15-e4-revert: plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）; plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M15-eq-forge: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M15-warn-value: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M16-cross-type-allow: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M16-g4log-revert: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M16-parse-contains-revert: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M16-registry-guard: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M16-sibling-revert: plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M16-sort-revert: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M18-json-normalise-revert: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M18-sort-iter-revert: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M18-sort-nondata-gate-revert: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M19-author-capability-inject: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M19-data-gate-fail-open: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M19-json-rehash: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M19-op-slot-revert: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M19-return-gate-fail-open: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-binop-left-only: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M20-data-budget-low: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M20-drift-accepted-drop-none: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-drift-clevel-add-complex: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-drift-clevel-drop-decimal: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-drift-data-add-complex: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-drift-data-drop-str: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-drift-enum-set-empty: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-drift-exactonly-add-dict: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-drift-view-drop-items: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-len-contains-fallback: plaita/core/expression.py: old 命中 0 次（应为 1）; plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M20-registration-validator-off: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M20-return-budget-low: plaita/core/expression_parser.py: old 命中 0 次（应为 1）",
+   "M20-slot-getattr-fallback: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M21-contains-linear: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M21-engine-slot-issubclass: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M21-engine-slot-reason-drift: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M21-view-bases-empty: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M22-view-operand-refuse: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M23-accessor-raw: plaita/core/expression.py: old 命中 0 次（应为 1）",
+   "M9-concat: plaita/core/expression_parser.py: old 命中 0 次（应为 1）"
+  ]
+ },
+ "head_note": "HEAD = 最后一条产品/注释修复提交；docs 证据提交在其后，见 git log。"
+}

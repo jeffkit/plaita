@@ -40,6 +40,7 @@ from typing import Any, Dict
 
 from .base_service import BaseExtendedService, ResumePublishError
 from ...logger import logger
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 # 到期轮询/搬运周期（秒）。service_config.poll_interval 可覆盖。
 DELAY_POLL_INTERVAL_SECONDS = 0.5
@@ -137,7 +138,7 @@ class DelayService(BaseExtendedService):
             )
             return True
         except Exception as e:
-            logger.error("启动延迟服务失败: %s", e, exc_info=True)
+            logger.error("启动延迟服务失败: %s", _scrub_exception_text(e))
             return False
 
     def stop_service(self) -> bool:
@@ -152,7 +153,7 @@ class DelayService(BaseExtendedService):
             logger.info("延迟服务已停止")
             return True
         except Exception as e:
-            logger.error("停止延迟服务失败: %s", e, exc_info=True)
+            logger.error("停止延迟服务失败: %s", _scrub_exception_text(e))
             return False
 
     def _consume_queue(self) -> None:
@@ -166,7 +167,7 @@ class DelayService(BaseExtendedService):
                 self._convey_list_to_zset()
                 self._submit_due_tasks()
             except Exception as e:
-                logger.error("延迟队列轮询失败: %s", e, exc_info=True)
+                logger.error("延迟队列轮询失败: %s", _scrub_exception_text(e))
             self._shutdown_event.wait(timeout=self._poll_interval)
 
     # ---- list → ZSET 搬运 ----
@@ -220,7 +221,7 @@ class DelayService(BaseExtendedService):
         try:
             self._redis_client.lrem(self.queue_key, 1, raw)
         except Exception as e:
-            logger.error("延迟队列坏条目移除失败: %s", e)
+            logger.error("延迟队列坏条目移除失败: %s", _scrub_url_text(e))
 
     # ---- 到期提交 ----
 
@@ -261,7 +262,7 @@ class DelayService(BaseExtendedService):
         try:
             raws = self._redis_client.hmget(self.attempts_key, members)
         except Exception as e:
-            logger.error("延迟任务重试态读取失败（按无退避处理）: %s", e)
+            logger.error("延迟任务重试态读取失败（按无退避处理）: %s", _scrub_url_text(e))
             return {}
         out: Dict[str, Dict[str, Any]] = {}
         for member, raw in zip(members, raws or []):
@@ -310,19 +311,19 @@ class DelayService(BaseExtendedService):
             finally:
                 try:
                     loop.close()
-                except Exception:
-                    logger.warning("event loop close failed during task cleanup", exc_info=True)
+                except Exception as exc:
+                    logger.warning("event loop close failed during task cleanup: %s", _scrub_exception_text(exc))
             logger.info("延迟任务 %s 执行完成: %s", task_id, result)
         except ResumePublishError as e:
             # #35：发布失败被上抛到这里。保留排程等重试，不出队、不触发
             # delay_error（任务并未终态失败，重试成功还会 resume；每次抖动
             # 都广播错误事件会把上游错误处理打成双跑）。
             logger.error(
-                "延迟任务 %s 触发发布失败（保留排程待重试）: %s", task_id, e, exc_info=True
+                "延迟任务 %s 触发发布失败（保留排程待重试）: %s", task_id, _scrub_exception_text(e)
             )
             trigger_failed = True
         except Exception as e:
-            logger.error("延迟任务 %s 执行失败: %s", task_id, e, exc_info=True)
+            logger.error("延迟任务 %s 执行失败: %s", task_id, _scrub_exception_text(e))
             self._handle_task_error(task_config, e)
         finally:
             self.active_tasks.discard(task_id)
@@ -382,7 +383,7 @@ class DelayService(BaseExtendedService):
                 )
         except Exception as e:
             # 退避/死信登记失败也不出队：下轮无退避直接重试（at-least-once）。
-            logger.error("延迟任务重试登记失败（条目保留，下轮直接重试）: %s", e, exc_info=True)
+            logger.error("延迟任务重试登记失败（条目保留，下轮直接重试）: %s", _scrub_exception_text(e))
         with self._inflight_lock:
             self._inflight.discard(member)
 
@@ -414,7 +415,7 @@ class DelayService(BaseExtendedService):
                 timestamp=int(time.time() * 1000),
             )
         except Exception as e:
-            logger.warning("死信事件广播失败（死信键仍在）: %s", e, exc_info=True)
+            logger.warning("死信事件广播失败（死信键仍在）: %s", _scrub_exception_text(e))
 
     def _finalize_scheduled(self, member: str) -> None:
         """任务处理走完（触发已确认）：ZREM 出排程态并清 in-flight。
@@ -425,11 +426,11 @@ class DelayService(BaseExtendedService):
         try:
             self._redis_client.zrem(self.scheduled_key, member)
         except Exception as e:
-            logger.error("延迟任务完成登记失败: %s", e)
+            logger.error("延迟任务完成登记失败: %s", _scrub_url_text(e))
         try:
             self._redis_client.hdel(self.attempts_key, member)
         except Exception as e:
-            logger.error("延迟任务重试计数清理失败: %s", e)
+            logger.error("延迟任务重试计数清理失败: %s", _scrub_url_text(e))
         with self._inflight_lock:
             self._inflight.discard(member)
 
@@ -518,7 +519,7 @@ class DelayService(BaseExtendedService):
             # 的失败，不覆盖发布失败（任务未终态失败，不广播 delay_error）。
             raise
         except Exception as e:
-            logger.error("处理延迟任务失败: %s", e, exc_info=True)
+            logger.error("处理延迟任务失败: %s", _scrub_exception_text(e))
             
             # 触发错误事件
             try:
@@ -532,8 +533,8 @@ class DelayService(BaseExtendedService):
                     "success": False
                 }
                 await self.trigger_event(task_config.get("event_type"), error_event_data)
-            except Exception:
-                logger.warning("delay error-event trigger failed", exc_info=True)
+            except Exception as exc:
+                logger.warning("delay error-event trigger failed: %s", _scrub_exception_text(exc))
 
             return False
     
@@ -580,7 +581,7 @@ class DelayService(BaseExtendedService):
             if self._redis_client is not None and hasattr(self._redis_client, "zcard"):
                 scheduled_count = int(self._redis_client.zcard(self.scheduled_key) or 0)
         except Exception as e:
-            logger.debug("zcard(%s) failed: %s", self.scheduled_key, e)
+            logger.debug("zcard(%s) failed: %s", self.scheduled_key, _scrub_url_text(e))
         return {
             "service_type": self.get_service_type(),
             "active_task_count": self.get_active_task_count(),

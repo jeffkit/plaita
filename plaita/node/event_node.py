@@ -9,6 +9,7 @@ from pydantic import AliasChoices, Field, field_validator
 
 from ..logger import logger
 from .basic import Node
+from plaita.core.url_redaction import _scrub_url_text
 
 
 class EventNodeStatus(Enum):
@@ -107,7 +108,7 @@ class EventNode(Node):
             # 如果都不存在，返回默认值
             return default or {}
         except Exception as e:
-            logger.warning("获取节点状态失败: %s", e)
+            logger.warning("获取节点状态失败: %s", _scrub_url_text(e))
             return default or {}
     
     def execute(self, execution):
@@ -141,7 +142,7 @@ class EventNode(Node):
                     logger.warning("执行上下文不支持evaluate方法，无法解析变量引用: %s", self.event_type)
                     resolved_event_type = self.event_type  # 保留原始引用
             except Exception as e:
-                logger.error("解析事件类型变量引用时出错: %s", e)
+                logger.error("解析事件类型变量引用时出错: %s", _scrub_url_text(e))
                 resolved_event_type = self.event_type  # 保留原始引用
         
         # 创建新的状态

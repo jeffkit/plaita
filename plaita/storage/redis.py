@@ -11,6 +11,7 @@ from .base import (
     FlowStorage,
     StateSerializationError,
 )
+from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
 
 try:
     import redis
@@ -103,8 +104,8 @@ def execution_state_ttl_seconds() -> int:
             days = int(raw)
         except ValueError:
             logger.warning(
-                "PLAITA_EXECUTION_STATE_TTL_DAYS=%r 非法，回退默认 %d 天",
-                raw,
+                "PLAITA_EXECUTION_STATE_TTL_DAYS=%s 非法，回退默认 %d 天",
+                _redact_env_value(raw),
                 DEFAULT_EXECUTION_STATE_TTL_DAYS,
             )
             days = DEFAULT_EXECUTION_STATE_TTL_DAYS
@@ -223,7 +224,7 @@ class RedisExecutionStorage(ExecutionStorage):
                     data = self.client.get(key_str)
                 except Exception as e:
                     # 单键不可读（类型不符/瞬断）不得作废整批回填。
-                    logger.error("索引回填跳过不可读的状态键 %s: %s", key_str, e)
+                    logger.error("索引回填跳过不可读的状态键 %s: %s", key_str, _scrub_url_text(e))
                     continue
                 if not data:
                     continue
@@ -231,14 +232,14 @@ class RedisExecutionStorage(ExecutionStorage):
                     state_dict = self.deserialize_state(data)
                 except Exception as e:
                     logger.error(
-                        "索引回填跳过反序列化失败的状态 %s: %s", key_str, e
+                        "索引回填跳过反序列化失败的状态 %s: %s", key_str, _scrub_url_text(e)
                     )
                     continue
                 pipe.zadd(index_key, {execution_id: execution_start_time_score(state_dict)})
             pipe.set(ready_key, "1")
             pipe.execute()
         except Exception as e:
-            logger.error("索引回填失败（本次列表退化为零更新，待下次重试）: %s", e)
+            logger.error("索引回填失败（本次列表退化为零更新，待下次重试）: %s", _scrub_url_text(e))
 
     def _index_slice(self, reverse: bool, offset: int, limit: Optional[int]) -> List[str]:
         """按 start_time 从索引取一段 execution_id（offset/limit 下推到 ZSET）。"""
@@ -273,14 +274,14 @@ class RedisExecutionStorage(ExecutionStorage):
                     states.append(ExecutionState.model_validate(self.deserialize_state(data)))
                     continue
                 except Exception as e:
-                    logger.error("Failed to process execution state: %s", e)
+                    logger.error("Failed to process execution state: %s", _scrub_url_text(e))
                     continue
             stale.append(execution_id)
         if stale:
             try:
                 self.client.zrem(self._execution_index_key(), *stale)
             except Exception as e:
-                logger.error("Failed to prune stale execution index members: %s", e)
+                logger.error("Failed to prune stale execution index members: %s", _scrub_url_text(e))
         return states
 
     def save_execution_state(self, execution_id: str, state: ExecutionState) -> bool:
@@ -305,7 +306,7 @@ class RedisExecutionStorage(ExecutionStorage):
             serialized = self.serialize_state(state.model_dump())
         except Exception as e:
             logger.error(
-                "执行状态不可序列化 %s（永久失败，不重试）: %s", execution_id, e
+                "执行状态不可序列化 %s（永久失败，不重试）: %s", execution_id, _scrub_url_text(e)
             )
             raise StateSerializationError(execution_id, e) from e
         try:
@@ -326,7 +327,7 @@ class RedisExecutionStorage(ExecutionStorage):
             pipe.execute()
             return True
         except Exception as e:
-            logger.error("Failed to save execution state %s: %s", execution_id, e)
+            logger.error("Failed to save execution state %s: %s", execution_id, _scrub_url_text(e))
             return False
     
     def load_execution_state(self, execution_id: str) -> Optional[ExecutionState]:
@@ -363,7 +364,7 @@ class RedisExecutionStorage(ExecutionStorage):
             pipe.execute()
             return True
         except Exception as e:
-            logger.error("Failed to delete execution state: %s", e)
+            logger.error("Failed to delete execution state: %s", _scrub_url_text(e))
             return False
 
     def list_executions(self, query: Optional[Any] = None, order_by: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[ExecutionState]:
@@ -415,7 +416,7 @@ class RedisExecutionStorage(ExecutionStorage):
             return states[offset:offset + limit]
 
         except Exception as e:
-            logger.error("Failed to list executions: %s", e)
+            logger.error("Failed to list executions: %s", _scrub_url_text(e))
             return []
 
 
@@ -500,7 +501,7 @@ class RedisFlowStorage(FlowStorage):
             
             return True
         except Exception as e:
-            logger.error("Failed to save flow definition: %s", e)
+            logger.error("Failed to save flow definition: %s", _scrub_url_text(e))
             return False
     
     def get_flow(self, flow_id: str, version: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -563,7 +564,7 @@ class RedisFlowStorage(FlowStorage):
                 
             return json.loads(data)
         except Exception as e:
-            logger.error("Failed to get flow definition: %s", e)
+            logger.error("Failed to get flow definition: %s", _scrub_url_text(e))
             return None
     
     def list_flows(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -593,7 +594,7 @@ class RedisFlowStorage(FlowStorage):
             
             return result
         except Exception as e:
-            logger.error("Failed to list flows: %s", e)
+            logger.error("Failed to list flows: %s", _scrub_url_text(e))
             return []
     
     def get_flow_versions(self, flow_id: str) -> List[str]:
@@ -611,7 +612,7 @@ class RedisFlowStorage(FlowStorage):
             versions = self.client.smembers(flow_versions_key)
             return list(versions)
         except Exception as e:
-            logger.error("Failed to get flow versions: %s", e)
+            logger.error("Failed to get flow versions: %s", _scrub_url_text(e))
             return []
     
     def delete_flow(self, flow_id: str, version: Optional[str] = None) -> bool:
@@ -663,7 +664,7 @@ class RedisFlowStorage(FlowStorage):
             
             return True
         except Exception as e:
-            logger.error("Failed to delete flow: %s", e)
+            logger.error("Failed to delete flow: %s", _scrub_url_text(e))
 
     def diagnose_missing_flow(self, flow_id: str) -> None:
         """Log Redis-specific diagnostics when a flow definition cannot be found.
@@ -683,5 +684,5 @@ class RedisFlowStorage(FlowStorage):
             logger.error("Redis diagnostics — known flow IDs: %s", flow_ids)
             logger.error("Redis diagnostics — namespace: %s", self.namespace)
         except Exception as e:
-            logger.error("Redis diagnostics failed: %s", e)
+            logger.error("Redis diagnostics failed: %s", _scrub_url_text(e))
             return False 

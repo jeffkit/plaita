@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
 
 # #48：Redis 的**瞬时**故障家族。redis-py 8.x 里 `TimeoutError` 与 `ConnectionError`
 # 是 `RedisError` 下**互不继承**的兄弟（实测 `issubclass(TimeoutError, ConnectionError)
@@ -45,7 +46,7 @@ def _dlq_max_len_from_env() -> int:
     try:
         return max(1, int(raw))
     except ValueError:
-        logger.warning("PLAITA_DLQ_MAX_LEN=%r 非法，回退默认 %d", raw, DEFAULT_DLQ_MAX_LEN)
+        logger.warning("PLAITA_DLQ_MAX_LEN=%s 非法，回退默认 %d", _redact_env_value(raw), DEFAULT_DLQ_MAX_LEN)
         return DEFAULT_DLQ_MAX_LEN
 # redis 瞬断（DNS 解析失败/连接拒绝）后的重试退避：退避完返回 None 让主循环
 # 继续轮询，Redis 恢复后下一次 read 自动重连恢复消费。模块常量便于测试归零。
@@ -193,7 +194,7 @@ class RedisStreamTaskQueue:
                 # `read()` 的 ConnectionError 兜底，直穿到 run() 把 worker 打死。
                 # 这里改为「记 warning + 返回」：本轮没建上组，下一轮轮询再试；
                 # Redis 恢复后自然成功。
-                logger.warning("建消费组失败（瞬时故障，留待下轮重试）: %r", exc)
+                logger.warning("建消费组失败（瞬时故障，留待下轮重试）: %s", _scrub_url_text(exc))
                 return
             # 非瞬时（NOAUTH/权限/schema/参数错）仍上抛：这是配置问题，
             # 静默重试只会把真问题藏起来。
@@ -222,8 +223,8 @@ class RedisStreamTaskQueue:
             #   * 又因 redis-py 8.x 里 TimeoutError 与 ConnectionError 互不继承，
             #     即使写成 ConnectionError 也接不住超时类。
             # 退避后返回 None 继续轮询，Redis 恢复后自动重连恢复消费。
-            logger.warning("读队列失败（瞬时故障，退避 %.1fs 后重试）: %r",
-                           RECONNECT_BACKOFF_SECONDS, exc)
+            logger.warning("读队列失败（瞬时故障，退避 %.1fs 后重试）: %s",
+                           RECONNECT_BACKOFF_SECONDS, _scrub_url_text(exc))
             time.sleep(RECONNECT_BACKOFF_SECONDS)
             return None
 
@@ -288,7 +289,7 @@ class RedisStreamTaskQueue:
                     "xdel(%s, %s) failed (ack already applied): %s",
                     self.stream_key,
                     message_id,
-                    exc,
+                    _scrub_url_text(exc),
                 )
 
     def _group_last_delivered_id(self) -> Optional[str]:
@@ -329,7 +330,7 @@ class RedisStreamTaskQueue:
                 self.stream_key, min="-", max=last_delivered, count=batch_size
             )
         except Exception as exc:
-            logger.debug("残留回收扫描失败（best-effort，忽略）: %s", exc)
+            logger.debug("残留回收扫描失败（best-effort，忽略）: %s", _scrub_url_text(exc))
             return 0
         if not entries:
             return 0
@@ -343,7 +344,7 @@ class RedisStreamTaskQueue:
                 count=batch_size,
             )
         except Exception as exc:
-            logger.debug("残留回收读 PEL 失败（本轮跳过）: %s", exc)
+            logger.debug("残留回收读 PEL 失败（本轮跳过）: %s", _scrub_url_text(exc))
             return 0
         pending_ids = {
             _decode(entry.get("message_id") if isinstance(entry, dict) else entry[0])
@@ -355,7 +356,7 @@ class RedisStreamTaskQueue:
         try:
             deleted = int(self.redis.xdel(self.stream_key, *victims) or 0)
         except Exception as exc:
-            logger.debug("残留回收 XDEL 失败（下轮重试）: %s", exc)
+            logger.debug("残留回收 XDEL 失败（下轮重试）: %s", _scrub_url_text(exc))
             return 0
         self._metrics["residue_swept"] += deleted
         if deleted:
@@ -387,7 +388,7 @@ class RedisStreamTaskQueue:
                 "skip dead-letter, message stays pending: %s",
                 task.message_id,
                 task.delivery_count,
-                exc,
+                _scrub_url_text(exc),
             )
             return False
         if not allowed:
@@ -418,7 +419,7 @@ class RedisStreamTaskQueue:
         try:
             self.redis.xtrim(self.dlq_key, maxlen=self.dlq_max_len, approximate=False)
         except Exception as exc:
-            logger.debug("xtrim(%s, maxlen=%s) failed: %s", self.dlq_key, self.dlq_max_len, exc)
+            logger.debug("xtrim(%s, maxlen=%s) failed: %s", self.dlq_key, self.dlq_max_len, _scrub_url_text(exc))
         self.ack(task.message_id)
         self._metrics["dead_lettered"] += 1
         logger.error(
@@ -443,7 +444,7 @@ class RedisStreamTaskQueue:
                     "ts": time.time(),
                 })
             except Exception as exc:  # noqa: BLE001 - 告警旁路
-                logger.warning("dead_letter 告警钩子失败: %s", exc)
+                logger.warning("dead_letter 告警钩子失败: %s", _scrub_url_text(exc))
         return _decode(dlq_id)
 
     def note_lease_conflict(self) -> None:
@@ -463,11 +464,11 @@ class RedisStreamTaskQueue:
         try:
             stream_len = int(self.redis.xlen(self.stream_key) or 0)
         except Exception as exc:
-            logger.debug("xlen(%s) failed: %s", self.stream_key, exc)
+            logger.debug("xlen(%s) failed: %s", self.stream_key, _scrub_url_text(exc))
         try:
             dlq_len = int(self.redis.xlen(self.dlq_key) or 0)
         except Exception as exc:
-            logger.debug("xlen(%s) failed: %s", self.dlq_key, exc)
+            logger.debug("xlen(%s) failed: %s", self.dlq_key, _scrub_url_text(exc))
         try:
             summary = self.redis.xpending(self.stream_key, self.group_name)
             if isinstance(summary, dict):
@@ -475,7 +476,7 @@ class RedisStreamTaskQueue:
             elif summary:
                 pending_count = int(summary[0] or 0)
         except Exception as exc:
-            logger.debug("xpending(%s, %s) failed: %s", self.stream_key, self.group_name, exc)
+            logger.debug("xpending(%s, %s) failed: %s", self.stream_key, self.group_name, _scrub_url_text(exc))
         return {
             "stream_key": self.stream_key,
             "dlq_key": self.dlq_key,
@@ -504,7 +505,7 @@ class RedisStreamTaskQueue:
         try:
             body = json.loads(_payload_from_fields(fields))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            logger.error("Invalid task payload id=%s: %s", message_id, exc)
+            logger.error("Invalid task payload id=%s: %s", message_id, _scrub_url_text(exc))
             raise ValueError(f"Invalid task payload: {exc}") from exc
         if not isinstance(body, dict):
             raise ValueError("task payload must be a JSON object")
@@ -525,7 +526,7 @@ class RedisStreamTaskQueue:
                 count=1,
             )
         except Exception as exc:
-            logger.debug("xpending_range delivery count failed for %s: %s", message_id, exc)
+            logger.debug("xpending_range delivery count failed for %s: %s", message_id, _scrub_url_text(exc))
             return 1
         if not pending:
             return 1
@@ -549,7 +550,7 @@ class RedisStreamTaskQueue:
                 self.stream_key, min=message_id, max=message_id, count=1
             )
         except Exception as exc:  # noqa: BLE001 — 保守放行，见 docstring
-            logger.debug("reclaim 前读消息体失败（放行 reclaim）: id=%s: %s", message_id, exc)
+            logger.debug("reclaim 前读消息体失败（放行 reclaim）: id=%s: %s", message_id, _scrub_url_text(exc))
             return None
         if not entries:
             return None
@@ -557,7 +558,7 @@ class RedisStreamTaskQueue:
         try:
             body = json.loads(_payload_from_fields(fields))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            logger.debug("reclaim 前消息体解析失败（放行 reclaim）: id=%s: %s", message_id, exc)
+            logger.debug("reclaim 前消息体解析失败（放行 reclaim）: id=%s: %s", message_id, _scrub_url_text(exc))
             return None
         return body if isinstance(body, dict) else None
 
@@ -577,7 +578,7 @@ class RedisStreamTaskQueue:
             logger.warning(
                 "reclaim_lease_guard 探测失败（保守跳过 reclaim）: id=%s: %s",
                 message_id,
-                exc,
+                _scrub_url_text(exc),
             )
             return False
         if active:
@@ -611,7 +612,7 @@ class RedisStreamTaskQueue:
                 count=8,
             )
         except Exception as exc:
-            logger.debug("xpending_range reclaim scan failed: %s", exc)
+            logger.debug("xpending_range reclaim scan failed: %s", _scrub_url_text(exc))
             return None
         if not pending:
             return None

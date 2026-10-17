@@ -36,6 +36,8 @@ import re
 from difflib import get_close_matches
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
+from plaita.core.url_redaction import _scrub_exception_text
+
 
 class FlowIRValidationError(ValueError):
     """Flow IR 拓扑校验失败。
@@ -482,12 +484,12 @@ def check_output_type_literal(node, path, graph) -> Optional[str]:
 
         prop = declared if isinstance(declared, Property) else Property.model_validate(declared)
         ok = match(prop, out)
-    except Exception:  # noqa: BLE001 - outputType 本身非法时交还节点 model_validate 报
+    except Exception as exc:  # noqa: BLE001 - outputType 本身非法时交还节点 model_validate 报
         import logging
 
         logging.getLogger(__name__).debug(
-            "outputType precheck skipped (invalid Property or match failure)",
-            exc_info=True,
+            "outputType precheck skipped (invalid Property or match failure): %s",
+            _scrub_exception_text(exc),
         )
         return None
     if ok:

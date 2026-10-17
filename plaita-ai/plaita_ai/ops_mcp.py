@@ -95,14 +95,36 @@ def register(mcp: Any) -> None:
 
     @mcp.tool()
     @_guarded
-    def console_flow_version_save(flow_id: str, version: str, definition: str, created_by: str = "plaita-ai") -> str:
+    def console_flow_version_save(
+        flow_id: str,
+        version: str,
+        definition: str,
+        created_by: str = "plaita-ai",
+        base_updated_at: str = "",
+        force: bool = False,
+        allocate_version: bool = False,
+    ) -> str:
         """Save a definition string under a semver version (draft, not live).
 
         Args:
             definition: Flow definition as a JSON string.
             created_by: Attribution recorded by the console.
+            base_updated_at: 乐观锁基准（该版本上次保存的 ``updated_at``）：
+                不一致时 console 返回 409 而不是静默覆盖并发草稿。
+            force: 显式强制覆盖（绕过乐观锁检查）。
+            allocate_version: 忽略 path 里的版本号，由服务端原子分配下一个
+                patch 版本；实际版本号以返回值为准（#59：并发迭代不再撞号
+                互相覆盖）。
         """
-        return _get_client().save_version(flow_id, version, definition, created_by=created_by)
+        return _get_client().save_version(
+            flow_id,
+            version,
+            definition,
+            created_by=created_by,
+            base_updated_at=base_updated_at or None,
+            force=force,
+            allocate_version=allocate_version,
+        )
 
     @mcp.tool()
     @_guarded

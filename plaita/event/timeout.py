@@ -19,6 +19,7 @@ import time
 from typing import Any, Callable, List, Optional, Dict, Awaitable
 
 from .core import EventSubscription
+from plaita.core.url_redaction import _scrub_exception_text
 
 # 获取logger
 logger = logging.getLogger("plaita.event")
@@ -98,7 +99,7 @@ class SubscriptionTimeoutChecker:
             except Exception as e:
                 # #153/R1：失败轮已由 `_check_timeouts` 逐条记 ERROR（含 sub_id 与
                 # exc_info），这里再记一次聚合并进入下一轮重试——循环绝不终止。
-                logger.error("超时检查出错: %s", e, exc_info=True)
+                logger.error("超时检查出错: %s", _scrub_exception_text(e))
 
             await asyncio.sleep(self.check_interval)
 
@@ -133,7 +134,7 @@ class SubscriptionTimeoutChecker:
                     failures.append((subscription.subscription_id, e))
                     logger.error(
                         "超时回调执行出错（订阅 %s）: %s",
-                        subscription.subscription_id, e, exc_info=True,
+                        subscription.subscription_id, _scrub_exception_text(e),
                     )
         if failures:
             raise TimeoutCallbackError(failures) from failures[0][1]

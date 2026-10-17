@@ -3,8 +3,8 @@
  "concern": "#159-P0",
  "issue": "159",
  "file": "plaita/core/url_redaction.py",
- "old": "    try:\n        rendered = renderer(url)\n    except Exception:  # noqa: BLE001 — fail-closed：掩码失败不得炸调用方\n        # 刻意**不**打印异常文本：``UnicodeEncodeError`` 的 ``str()`` 就带着口令里的\n        # 那个字符——掩码失败也不能变成新的泄露面。\n        logger.debug(\"URL 掩码失败，退化为安全常量\")\n        return UNPRINTABLE_URL\n",
- "new": "    rendered = renderer(url)\n",
+ "old": "    try:\n        if not _enforce_clean_budget(url, \"safe_render\"):  # plaita#165：超限不进掩码器\n            return UNPRINTABLE_URL\n        rendered = renderer(url)\n    except Exception:  # noqa: BLE001 — fail-closed：掩码失败不得炸调用方\n        # 刻意**不**打印异常文本：``UnicodeEncodeError`` 的 ``str()`` 就带着口令里的\n        # 那个字符——掩码失败也不能变成新的泄露面。\n        logger.debug(\"URL 掩码失败，退化为安全常量\")\n        return UNPRINTABLE_URL\n",
+ "new": "    if not _within_clean_budget(url):     # plaita#165：超限不进掩码器\n        logger.debug(\"URL 清洗输入超出 #165 硬上限，退化为安全常量\")\n        return UNPRINTABLE_URL\n    rendered = renderer(url)\n",
  "rationale": "去掉总兜底：渲染器一抛，调用点（日志/停机/注册路径）就跟着炸——掩码必须 never-raise、失败退化为安全常量。 plaita#160/#161 重切：url_redaction 迁 foundation（core），锚随迁。",
  "expect_fail": [
   "tests/unit/test_issue159_webhook_url_secret_sinks.py::TestRendererFailureDegradesToSafeConstant::test_wrapper_returns_constant_when_renderer_raises",

@@ -394,6 +394,18 @@ class FlowExecution(CompatRunMixin):
     def set_state(self, key: str, value: Any) -> None:
         return self._ctx.set_state(key, value)
 
+    def set_scratch(self, key: str, value: Any) -> None:
+        """plaita#164：把 *value* 声明为 *key* 的 scratch 绑定（不进 checkpoint）。"""
+        return self._ctx.set_scratch(key, value)
+
+    def scratch_keys(self):
+        """plaita#164：当前 scratch 绑定的键名。"""
+        return self._ctx.scratch_keys()
+
+    def clear_scratch(self, key=None) -> None:
+        """plaita#164：丢掉全部（或指定键的）scratch 绑定。"""
+        return self._ctx.clear_scratch(key)
+
     def get_state(self, key: str, default: Any = None) -> Any:
         return self._ctx.get_state(key, default)
 
