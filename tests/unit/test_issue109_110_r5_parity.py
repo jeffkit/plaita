@@ -41,6 +41,7 @@ import contextvars
 import functools
 import logging
 import tempfile
+import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -226,7 +227,10 @@ class Test109R5WakeGraphBudget(unittest.IsolatedAsyncioTestCase):
         with patch.object(bus, "_drain_pending_tasks", new=fake_drain):
             await bus._process_message(
                 _msg(Event(event_type="t.demo", data={})), "h1")
-            for _ in range(400):
+            # 等待窗口随链规模伸缩（#184：CI 实测 65536 节点链传播需 21.1s，
+            # 固定 4s 窗口是假红根源）；条件满足仍即刻返回，判据一字未改。
+            deadline = time.monotonic() + max(60.0, chain * 0.002)
+            while time.monotonic() < deadline:
                 if not bus._pending_tasks and refusal:
                     break
                 await asyncio.sleep(0.01)
