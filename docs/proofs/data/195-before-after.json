@@ -1,0 +1,98 @@
+{
+  "issue": 195,
+  "title": "fix(services): redis_queue/kafka events carry correlation_id for EventFilter resume",
+  "generated_at": "2026-10-17T21:55:33.424772+00:00",
+  "base_head": "574e9f391b16a6cc1951c2713b33f135b912e563",
+  "fix_commit_subject": "fix(services): #195 redis_queue/kafka 事件带 correlation_id——EventFilter 不再丢弃",
+  "before": {
+    "plaita_file": "/tmp/wt195-before/plaita/__init__.py",
+    "python": "3.13.3",
+    "redis_queue": {
+      "normal_correlation_id": null,
+      "error_correlation_id": null,
+      "normal_execution_id": "e1",
+      "error_execution_id": "e1"
+    },
+    "kafka_queue": {
+      "normal_correlation_id": null,
+      "error_correlation_id": null,
+      "normal_execution_id": "e1",
+      "error_execution_id": "e1"
+    },
+    "filter": {
+      "event_correlation_id": null,
+      "queue_tasks": [],
+      "control_correlation_id": null,
+      "control_queue_tasks": []
+    }
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "redis_queue": {
+      "normal_correlation_id": "e1",
+      "error_correlation_id": "e1",
+      "normal_execution_id": "e1",
+      "error_execution_id": "e1"
+    },
+    "kafka_queue": {
+      "normal_correlation_id": "e1",
+      "error_correlation_id": "e1",
+      "normal_execution_id": "e1",
+      "error_execution_id": "e1"
+    },
+    "filter": {
+      "event_correlation_id": "e1",
+      "queue_tasks": [
+        {
+          "type": "resume",
+          "flow_id": "f1",
+          "execution_id": "e1",
+          "resume_type": "event",
+          "tenant_id": "default",
+          "data": {
+            "event_id": "1e7dfc6f-ab45-4c25-a8e5-74d8d0c8fcba",
+            "event_type": "redis_message",
+            "event_data": {
+              "execution_id": "e1",
+              "flow_id": "f1",
+              "trigger_type": "redis_message",
+              "message": "hi"
+            },
+            "subscription_id": "0648dc9a-a483-49b1-bcb2-31bb4f517e60"
+          }
+        }
+      ],
+      "control_correlation_id": null,
+      "control_queue_tasks": []
+    }
+  },
+  "test_runs": {
+    "targeted": "6 passed",
+    "with_issue35_56_services": "27 passed",
+    "unit_fast": "7746 passed, 11 skipped, 13 deselected, 3429 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8046 passed, 15 skipped, 3429 subtests, coverage 93.83% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main 574e9f3 latest completed ci.yml run"
+  },
+  "negative_control": {
+    "mutation": "both services call super().trigger_event (base Event without correlation_id)",
+    "diff_sha256": "fa945ce8cb66339fae182bf6ba62f869a2939536876bdab238edf7697685626f",
+    "test_file": {
+      "failed": 5,
+      "passed": 1
+    },
+    "failed": [
+      "test_redis_queue_normal_and_error_events_carry_correlation_id",
+      "test_kafka_queue_normal_and_error_events_carry_correlation_id",
+      "test_redis_queue_direct_channel",
+      "test_kafka_queue_direct_channel",
+      "test_queue_message_resumes_suspended_event_node"
+    ],
+    "still_green": [
+      "test_event_without_correlation_id_is_still_dropped"
+    ]
+  },
+  "note": "redis_queue/kafka constructors now accept redis_client (service_manager signature probe); registry/control stay disabled. The EventFilter no-correlation-id drop guard is unchanged."
+}

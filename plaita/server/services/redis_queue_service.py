@@ -64,15 +64,19 @@ class RedisQueueService(BaseExtendedService):
     - 优雅关闭
     """
     
-    def __init__(self, event_bus=None, retry_config: Optional[RetryConfig] = None):
+    def __init__(self, event_bus=None, retry_config: Optional[RetryConfig] = None,
+                 redis_client: Optional[Any] = None):
         """
         初始化Redis队列服务
         
         Args:
             event_bus: 事件总线实例
             retry_config: 重试配置
+            redis_client: 同步 Redis 客户端（#195：publish_resume_event 直发
+                plaita:events:{type} 并尽力落盘用；None 时回退 event_bus.publish）。
+                registry/control 保持关闭（队列服务历史行为，不因拿到客户端而启用）。
         """
-        super().__init__(event_bus)
+        super().__init__(event_bus, redis_client=redis_client, enable_registry=False)
         self.retry_config = retry_config or RetryConfig()
         self._connection_state = ConnectionState.DISCONNECTED
         self._active_clients: Dict[str, Any] = {}  # execution_id -> redis_client
@@ -81,6 +85,17 @@ class RedisQueueService(BaseExtendedService):
     def get_service_type(self) -> str:
         """获取服务类型"""
         return "redis_queue"
+
+    async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
+        """触发事件：带 ``correlation_id``（=execution_id），EventFilter 才能关联。
+
+        #195：基类 ``trigger_event`` 构造的 ``Event`` 不带 ``correlation_id``，
+        ``EventFilter.handle_event`` 入口直接丢弃——redis 队列消息（普通/错误）
+        到达后挂起执行永远不 resume。统一走 ``publish_resume_event``（与
+        delay / approval / http_callback 同源：有 redis_client 时直发
+        ``plaita:events:{type}`` 并尽力落盘，无则回退 ``event_bus.publish``）。
+        """
+        await self.publish_resume_event(event_type, event_data)
     
     @property
     def connection_state(self) -> ConnectionState:

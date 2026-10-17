@@ -1,0 +1,26 @@
+diff --git a/plaita/server/services/kafka_queue_service.py b/plaita/server/services/kafka_queue_service.py
+index a8bf219..2d4cf91 100644
+--- a/plaita/server/services/kafka_queue_service.py
++++ b/plaita/server/services/kafka_queue_service.py
+@@ -83,7 +83,7 @@ class KafkaQueueService(BaseExtendedService):
+         delay / approval / http_callback 同源：有 redis_client 时直发
+         ``plaita:events:{type}`` 并尽力落盘，无则回退 ``event_bus.publish``）。
+         """
+-        await self.publish_resume_event(event_type, event_data)
++        await super().trigger_event(event_type, event_data)  # MUTANT: base Event without correlation_id
+     
+     def start_service(self) -> bool:
+         """启动Kafka队列服务"""
+diff --git a/plaita/server/services/redis_queue_service.py b/plaita/server/services/redis_queue_service.py
+index f68962e..55aee63 100644
+--- a/plaita/server/services/redis_queue_service.py
++++ b/plaita/server/services/redis_queue_service.py
+@@ -95,7 +95,7 @@ class RedisQueueService(BaseExtendedService):
+         delay / approval / http_callback 同源：有 redis_client 时直发
+         ``plaita:events:{type}`` 并尽力落盘，无则回退 ``event_bus.publish``）。
+         """
+-        await self.publish_resume_event(event_type, event_data)
++        await super().trigger_event(event_type, event_data)  # MUTANT: base Event without correlation_id
+     
+     @property
+     def connection_state(self) -> ConnectionState:

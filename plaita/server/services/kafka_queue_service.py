@@ -51,8 +51,13 @@ class KafkaQueueService(BaseExtendedService):
     - 消费者再平衡处理
     """
     
-    def __init__(self, event_bus, service_config=None):
-        super().__init__(event_bus, service_config)
+    def __init__(self, event_bus, service_config=None,
+                 redis_client: Optional[Any] = None):
+        # #195：redis_client 供 publish_resume_event 直发 plaita:events:{type}
+        # 并尽力落盘；None 回退 event_bus.publish。registry/control 保持关闭
+        # （队列服务历史行为，不因拿到客户端而启用）。
+        super().__init__(event_bus, service_config, redis_client=redis_client,
+                         enable_registry=False)
         self.consumer_groups: Dict[str, ConsumerGroupInfo] = {}
         self.admin_client: Optional[Any] = None
         self._health_check_task: Optional[asyncio.Task] = None
@@ -68,6 +73,17 @@ class KafkaQueueService(BaseExtendedService):
     def get_service_type(self) -> str:
         """获取服务类型"""
         return "kafka_queue"
+
+    async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
+        """触发事件：带 ``correlation_id``（=execution_id），EventFilter 才能关联。
+
+        #195：基类 ``trigger_event`` 构造的 ``Event`` 不带 ``correlation_id``，
+        ``EventFilter.handle_event`` 入口直接丢弃——Kafka 消息（普通/错误）
+        到达后挂起执行永远不 resume。统一走 ``publish_resume_event``（与
+        delay / approval / http_callback 同源：有 redis_client 时直发
+        ``plaita:events:{type}`` 并尽力落盘，无则回退 ``event_bus.publish``）。
+        """
+        await self.publish_resume_event(event_type, event_data)
     
     def start_service(self) -> bool:
         """启动Kafka队列服务"""
