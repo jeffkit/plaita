@@ -33,7 +33,8 @@ plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distri
 ## 开发约定
 
 **分支：** 特性在独立分支 / worktree；勿直接破坏性改 main 而不过 CI。  
-**提交：** `type: 简述`；**禁止** 提交信息加 `Co-authored-by`，**禁止** `--no-verify` 跳过 hooks。
+**提交：** `type: 简述`；**禁止** 提交信息加 `Co-authored-by`，**禁止** `--no-verify` 跳过 hooks。  
+**落地：** 合并前跑 `python scripts/landing_gate.py ci`（main CI 红=停并）；政策类改动带 `[policy]` 标记 + `Policy-ack` trailer——约定见 `docs/landing-and-acceptance.md`（2026-10-17 提案，待拍板）。
 
 **禁止事项：**
 - 把全量 mutmut 塞进 PR CI（太慢且初筛不可信）
