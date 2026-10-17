@@ -1,0 +1,59 @@
+{
+  "issue": 212,
+  "title": "fix(core): async_gen_to_sync worker does not copy contextvars (lazy/sync flow)",
+  "generated_at": "2026-10-17T20:03:16.446555+00:00",
+  "base_head": "05f588fa530bf90b0321a67549420aa223bb104d",
+  "fix_commit_subject": "fix(core): #212 async_gen_to_sync worker 复制 contextvars——lazy/sync flow 租户不再退回 default",
+  "before": {
+    "plaita_file": "/tmp/wt212-before/plaita/__init__.py",
+    "python": "3.13.3",
+    "bridged": {
+      "tenant": "default",
+      "fence": "no-fence",
+      "file": "creds.json",
+      "shared": "https://default.example",
+      "default_only": "READ_OK"
+    }
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "bridged": {
+      "tenant": "tenant-b",
+      "fence": "fence-b",
+      "file": "creds.tenant-b.json",
+      "shared": "https://acme.example",
+      "default_only": "CredentialError"
+    }
+  },
+  "test_runs": {
+    "targeted": "5 passed",
+    "with_issue199_and_issue58": "44 passed",
+    "unit_fast": "7735 passed, 11 skipped, 13 deselected, 3429 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8035 passed, 15 skipped, 3429 subtests, coverage 93.83% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main 05f588f latest completed ci.yml run"
+  },
+  "negative_control": {
+    "mutation": "restore threading.Thread(target=_drive) (no ctx.run)",
+    "diff_sha256": "3f593d10a07c6aeca10ee344b1966621372f9b77d6ee23ca23ac921ad0ee3553",
+    "test_file": {
+      "failed": 3,
+      "passed": 2
+    },
+    "failed": [
+      "test_lazy_bridge_propagates_tenant_and_fence_contextvars",
+      "test_lazy_bridge_credentials_read_tenant_side_file",
+      "test_lazy_bridge_default_tenant_unchanged"
+    ],
+    "still_green": [
+      "test_lazy_bridge_context_is_isolated_from_generator_mutations",
+      "test_no_loop_lazy_path_keeps_context"
+    ]
+  },
+  "relation": {
+    "issue199": "fixed the eager bridge run_async_from_sync; #212 is the lazy/sync worker branch of async_gen_to_sync",
+    "issue213": "console cluster.py:1087 raw submit is the same family but outside async_utils; separate issue, not mixed into this commit"
+  }
+}

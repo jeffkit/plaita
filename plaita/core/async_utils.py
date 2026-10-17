@@ -166,6 +166,11 @@ def async_gen_to_sync(agen):
     stays valid across yields. When a loop is already running in this
     thread, the generator is driven inside a dedicated worker thread and
     items are forwarded through a queue.
+
+    plaita#212：worker 线程不继承 contextvars。running-loop 分支在**调用线程**
+    ``copy_context()``，整个 ``_drive`` 在 ``ctx.run`` 下执行；每个
+    ``run_until_complete`` task 因此继承调用方的租户 / fence 等 ContextVar。
+    无 loop 分支本就在当前线程，语义不变。
     """
     try:
         asyncio.get_running_loop()
@@ -198,6 +203,13 @@ def async_gen_to_sync(agen):
         # 复位、同实例可重入并行）。消费者一侧在 finally 里 set 它，_drive 每轮检查。
         _stop = threading.Event()
 
+        # plaita#212：worker 线程不继承 contextvars（#199 修的是 eager 桥
+        # ``run_async_from_sync``，这是 lazy/sync 的另一条 worker 路径）。
+        # 在**调用线程**复制 context，整个 `_drive` 在 `ctx.run` 下执行；
+        # `loop.run_until_complete` 创建的 task 因而继承租户 / fence 等
+        # ContextVar。#70 的 stop/queue 语义不变。
+        ctx = contextvars.copy_context()
+
         def _drive():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -221,7 +233,7 @@ def async_gen_to_sync(agen):
                     logger.debug("async gen aclose failed in worker thread: %s", _scrub_exception_text(exc))
                 loop.close()
 
-        worker = threading.Thread(target=_drive, daemon=True)
+        worker = threading.Thread(target=ctx.run, args=(_drive,), daemon=True)
         worker.start()
         try:
             while True:
