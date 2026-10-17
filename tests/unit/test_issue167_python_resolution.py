@@ -142,29 +142,51 @@ class TestBothScriptsShareOneResolution:
         assert str(venv_python) in marker, marker
 
     def test_path_fallback_skips_an_old_python3(self, tmp_path):
-        """PATH 上 ``python3`` 太老 ⇒ 顺序里的下一个 ≥3.11 候选（python3.11）胜出。"""
+        """PATH 上 ``python3`` 太老 ⇒ 兜底跳过它；选中者版本 ≥3.11（**性质判据**）。
+
+        兜底解析按**版本降序**挑候选 ⇒ 宿主装有更新解释器（3.12/3.13）时
+        宿主胜出是**正确结果**——断言写死 ``== "python3.11"`` 会在 CI
+        （/usr/bin 有 python3.13）上假红（run 756f058 实证）。改为性质：
+        ① 太老的 ``python3`` 名字不得胜出；② 选中者（名字或解释器本体）
+        实测版本 ≥3.11；③ 老 python3 至多被 ``-c`` 版本探测，不得干活。
+        判据没有放宽：3.12/3.13 命中是正确结果，照样被②验到 ≥3.11。
+        """
         fake = tmp_path / "bin"
         old = _make_stub_python(fake / "python3", version_ok=False, marker=tmp_path / "marker")
         new = _make_stub_python(fake / "python3.11", version_ok=True, marker=tmp_path / "marker")
         env = _clean_env(PATH=_fake_path(fake))
 
         # PATH 兜底解析出的是**名字**（按名字 exec，走 PATH）
-        assert _resolve_common_lib(env) == "python3.11"
+        resolved = _resolve_common_lib(env)
+        assert resolved != "python3", "兜底选中了太老的 python3——跳过判据失效"
+        stub_won = resolved == "python3.11"
+        if not stub_won:
+            # 真实解释器（仓根 .venv / 宿主）胜出：实跑 -V 验版本 ≥3.11
+            probe = resolved if str(resolved).startswith("/") else (shutil.which(resolved) or resolved)
+            ver_run = subprocess.run([str(probe), "-V"],
+                                     capture_output=True, text=True, timeout=60)
+            ver = (ver_run.stdout or ver_run.stderr).split()[-1]
+            major, minor = (int(p) for p in ver.split(".")[:2])
+            assert (major, minor) >= (3, 11), f"兜底选中了 <3.11 的解释器:{resolved} = {ver}"
 
         r = subprocess.run([BASH, str(MODULE_HELPER), "decide"],
                            capture_output=True, text=True, cwd=REPO, env=env, timeout=120)
         assert r.returncode == 0, r.stderr
-        lines = (tmp_path / "marker").read_text(encoding="utf-8").splitlines()
-        # 按**第一个空格前的完整路径**归属（`.../python3` 是 `.../python3.11` 的前缀，
-        # 前缀匹配会把两者混在一起）
-        old_lines = [ln for ln in lines if ln.split(" ", 1)[0] == str(old)]
-        new_lines = [ln for ln in lines if ln.split(" ", 1)[0] == str(new)]
-        # 老 python3 只允许被**版本探测**（``-c``）碰一下，不许真的拿它读模块表
-        assert old_lines, "没探测到老的 python3？判据失效"
-        assert all(" -c " in ln for ln in old_lines), f"太老的 python3 仍被用于实际工作：{old_lines}"
-        assert any(ln.endswith(" -") for ln in new_lines), (
-            f"模块表不是用 ≥3.11 的那个解释器读的：{new_lines}"
-        )
+        if stub_won:
+            # 桩件胜出 ⇒ 桩件会写 marker,按**第一个空格前的完整路径**归属
+            # （`.../python3` 是 `.../python3.11` 的前缀,前缀匹配会混）:
+            # 老 python3 至多被**版本探测**（``-c``）碰一下,不许真的读模块表。
+            lines = (tmp_path / "marker").read_text(encoding="utf-8").splitlines()
+            old_lines = [ln for ln in lines if ln.split(" ", 1)[0] == str(old)]
+            new_lines = [ln for ln in lines if ln.split(" ", 1)[0] == str(new)]
+            assert old_lines, "没探测到老的 python3？判据失效"
+            assert all(" -c " in ln for ln in old_lines), f"太老的 python3 仍被用于实际工作：{old_lines}"
+            assert any(ln.endswith(" -") for ln in new_lines), (
+                f"模块表不是用 ≥3.11 的那个解释器读的：{new_lines}"
+            )
+            assert str(old) not in {ln.split(" ", 1)[0] for ln in new_lines}
+        # 真实解释器（仓根 .venv / 宿主）胜出时桩件不写 marker;helper rc==0 +
+        # 上方 -V 版本断言即「跳过老 python3、用了 ≥3.11」的证据。
 
 
 class TestOldInterpreterGetsNamedSkip:
@@ -207,9 +229,16 @@ class TestMutRunUsesTheResolvedInterpreter:
     """``mut_run`` 的存活判定必须落在**同一个**解释器上（否则就是伪造 killed）。"""
 
     def test_mut_run_invokes_the_resolved_interpreter(self, tmp_path):
+        """``mut_run`` 必须调用**解析结果**那个解释器（桩件 marker 实证）。
+
+        用 ``PYTHON_BIN``（解析顺序第一档）把解析结果**钉**在桩件上：在装有
+        仓根 ``.venv``/宿主新解释器的机器上，解析会落到真实解释器（不写
+        桩件 marker），marker 归属断言就无法成立——钉第一档让验证在任何
+        机器上确定性地进行。契约本身不变：「mut_run 用解析结果」。
+        """
         fake = tmp_path / "bin"
         chosen = _make_stub_python(fake / "python3", version_ok=True, marker=tmp_path / "marker")
-        env = _clean_env(PATH=_fake_path(fake))
+        env = _clean_env(PATH=_fake_path(fake), PYTHON_BIN=str(chosen))
         tests = "tests/unit/test_decide.py"
         assert (REPO / tests).exists()
 
