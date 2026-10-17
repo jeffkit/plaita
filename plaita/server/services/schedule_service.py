@@ -38,10 +38,11 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from croniter import croniter
 from redis import Redis
+from redis.exceptions import WatchError
 
 from plaita.server.task_queue import enqueue_task
 
@@ -234,15 +235,22 @@ def fire_schedule(
     except Exception as exc:
         logger.warning("调度 %s 触发历史写入失败: %s", schedule_id, _scrub_exception_text(exc))
 
-    # 回写触发状态；错过的周期不补偿——next_run_at 直接跳到现在之后
+    # 回写触发状态；错过的周期不补偿——next_run_at 直接跳到现在之后。
+    # plaita#198：**CAS 合并到当前值**，只碰 last_fired_at/last_enqueue_ok/
+    # next_run_at——调用方传入的 schedule 是扫描开始时的旧快照，整份 `_merge`
+    # 回写会把期间 console 的停用/编辑翻回去。
     try:
-        updates = {
-            "last_fired_at": now.isoformat(),
-            "last_enqueue_ok": "1" if enqueue_ok else "0",
-        }
-        if trigger_kind == "cron":
-            updates["next_run_at"] = str(next_run_after(schedule["cron"], now))
-        redis_client.hset(SCHEDULES_KEY, key=schedule_id, value=json.dumps(_merge(schedule, updates), ensure_ascii=False))
+        def _apply_fire(current: Dict[str, Any]) -> None:
+            current["last_fired_at"] = now.isoformat()
+            current["last_enqueue_ok"] = "1" if enqueue_ok else "0"
+            if trigger_kind == "cron":
+                # 用**当前** cron 重算：并发编辑后的 cron 不能被旧快照的
+                # next_run_at 计算覆盖。
+                cron = current.get("cron") or schedule.get("cron")
+                if cron:
+                    current["next_run_at"] = str(next_run_after(cron, now))
+
+        cas_update_schedule(redis_client, schedule_id, _apply_fire)
     except Exception as exc:
         logger.warning("调度 %s 状态回写失败: %s", schedule_id, _scrub_exception_text(exc))
 
@@ -255,10 +263,81 @@ def fire_schedule(
     return msg_id
 
 
-def _merge(schedule: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
-    merged = dict(schedule)
-    merged.update(updates)
-    return merged
+class ScheduleConflictError(RuntimeError):
+    """plaita#198：console PUT 的乐观锁冲突（当前 updated_at 与基准不一致）。"""
+
+    def __init__(self, schedule_id: str, latest_updated_at: Optional[str]):
+        super().__init__(
+            f"调度 {schedule_id} 已被其他编辑更新"
+            f"（latest updated_at={latest_updated_at!r}）"
+        )
+        self.schedule_id = schedule_id
+        self.latest_updated_at = latest_updated_at
+
+
+def cas_update_schedule(
+    redis_client: Redis,
+    schedule_id: str,
+    mutate: Callable[[Dict[str, Any]], None],
+    *,
+    expected_updated_at: Optional[str] = None,
+    check_updated_at: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """plaita#198：原子读-改-写一个调度定义（WATCH/MULTI），只写回改动的字段。
+
+    ``mutate(current)`` 在 **WATCH 读到的当前值** 上就地修改；调用方持有的
+    旧快照（``fire_schedule`` 的 ``schedule``）不参与写回，因此期间的 console
+    停用/编辑不会被翻回去。
+
+    - ``check_updated_at=True`` 时，当前记录的 ``updated_at`` 必须等于
+      ``expected_updated_at``，否则抛 :class:`ScheduleConflictError`——console
+      PUT 的乐观锁（即使基准是 None/空串也做等值比较，legacy 记录首写后
+      后续写者会冲突）。
+    - 记录不存在 / JSON 损坏 ⇒ 返回 ``None``（调用方按 404/跳过处理）。
+    - ``WatchError``（其他写者抢先）⇒ 重新 WATCH 读-合并-写，不丢更新。
+    """
+    with redis_client.pipeline() as pipe:
+        while True:
+            try:
+                pipe.watch(SCHEDULES_KEY)
+                raw = pipe.hget(SCHEDULES_KEY, schedule_id)
+                if raw is None:
+                    pipe.unwatch()
+                    return None
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+                try:
+                    current = json.loads(raw)
+                except json.JSONDecodeError:
+                    pipe.unwatch()
+                    logger.warning("调度 %s 定义无法解析，放弃 CAS 回写", schedule_id)
+                    return None
+                if not isinstance(current, dict):
+                    pipe.unwatch()
+                    return None
+                if check_updated_at and current.get("updated_at") != expected_updated_at:
+                    latest = current.get("updated_at")
+                    pipe.unwatch()
+                    raise ScheduleConflictError(schedule_id, latest)
+                mutate(current)
+                pipe.multi()
+                pipe.hset(
+                    SCHEDULES_KEY,
+                    schedule_id,
+                    json.dumps(current, ensure_ascii=False),
+                )
+                pipe.execute()
+                return current
+            except WatchError:
+                continue
+            except ScheduleConflictError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 回写失败不阻塞触发主链路
+                logger.warning(
+                    "调度 %s CAS 回写失败: %s",
+                    schedule_id, _scrub_exception_text(exc),
+                )
+                return None
 
 
 def list_schedules(redis_client: Redis) -> List[Dict[str, Any]]:
@@ -376,13 +455,17 @@ class ScheduleService(BaseExtendedService):
 
         next_run_at = schedule.get("next_run_at")
         if not next_run_at:
-            # 自愈：缺失/清零的 next_run_at 从当前时间重算
+            # 自愈：缺失/清零的 next_run_at 从当前时间重算。
+            # plaita#198：同样 CAS 合并，只写 next_run_at；用**当前** cron，
+            # 不整份回写扫描开始时的旧快照（否则会翻回并发的停用/编辑）。
             next_run_at = next_run_after(cron)
-            self._redis_client.hset(
-                SCHEDULES_KEY,
-                key=schedule_id,
-                value=json.dumps(_merge(schedule, {"next_run_at": str(next_run_at)}), ensure_ascii=False),
-            )
+
+            def _apply_self_heal(current: Dict[str, Any]) -> None:
+                effective_cron = current.get("cron") or cron
+                if effective_cron:
+                    current["next_run_at"] = str(next_run_after(effective_cron))
+
+            cas_update_schedule(self._redis_client, schedule_id, _apply_self_heal)
         try:
             next_run_at = int(float(next_run_at))
         except (TypeError, ValueError):

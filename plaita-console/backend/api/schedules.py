@@ -33,6 +33,8 @@ try:
     from plaita.server.services.schedule_service import (
         SCHEDULE_FIRES_KEY,
         SCHEDULES_KEY,
+        ScheduleConflictError,
+        cas_update_schedule,
         fire_schedule,
         list_schedules,
         next_run_after,
@@ -45,6 +47,8 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         from plaita.server.services.schedule_service import (
             SCHEDULE_FIRES_KEY,
             SCHEDULES_KEY,
+            ScheduleConflictError,
+            cas_update_schedule,
             fire_schedule,
             list_schedules,
             next_run_after,
@@ -83,6 +87,9 @@ class ScheduleUpdateRequest(BaseModel):
     cron: Optional[str] = None
     params: Optional[dict] = None
     enabled: Optional[bool] = None
+    # plaita#198 乐观锁：调用方读取时的 updated_at；不一致返回 409
+    # （conflict=schedule_stale，带 latest_updated_at）。
+    expected_updated_at: Optional[str] = None
 
 
 class CronPreviewRequest(BaseModel):
@@ -143,6 +150,18 @@ def _get_schedule(redis: Redis, schedule_id: str, *, tenant_id: Optional[str]) -
 
 def _save_schedule(redis: Redis, schedule: dict) -> None:
     redis.hset(SCHEDULES_KEY, key=schedule["schedule_id"], value=json.dumps(schedule, ensure_ascii=False))
+
+
+def _raise_schedule_conflict(latest_updated_at: Optional[str]) -> None:
+    """#198：结构化 409（参考 flows.py C5-1 的 version_stale 形状）。"""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": "调度已被其他编辑更新，请加载最新后重试",
+            "conflict": "schedule_stale",
+            "latest_updated_at": latest_updated_at,
+        },
+    )
 
 
 def _view(schedule: dict) -> dict:
@@ -252,7 +271,8 @@ def get_one(schedule_id: str, request: Request, redis: Redis = Depends(get_redis
 def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
            redis: Redis = Depends(get_redis_or_none)):
     tenant = tenant_scope(request)
-    if (local := _get_local(request)) is not None:
+    local = _get_local(request)
+    if local is not None:
         store = flow_store.get_flow_store()
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)
         if schedule is None:
@@ -260,33 +280,65 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
     else:
         schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
 
-    if req.name is not None:
-        if not req.name.strip():
-            raise HTTPException(status_code=422, detail="name 不能为空")
-        schedule["name"] = req.name.strip()
-    if req.version is not None:
-        schedule["version"] = req.version or None
-    if req.cron is not None:
-        if not validate_cron(req.cron):
-            raise HTTPException(status_code=422, detail=f"非法 cron 表达式: {req.cron}")
-        schedule["cron"] = req.cron
-    if req.params is not None:
-        schedule["params"] = req.params
-    if req.enabled is not None:
-        schedule["enabled"] = bool(req.enabled)
+    # 输入校验先行（CAS 的 mutate 只做纯字段赋值）
+    if req.name is not None and not req.name.strip():
+        raise HTTPException(status_code=422, detail="name 不能为空")
+    if req.cron is not None and not validate_cron(req.cron):
+        raise HTTPException(status_code=422, detail=f"非法 cron 表达式: {req.cron}")
 
-    # cron/enabled 变化后重算下次触发；编辑即重置节奏
-    if req.cron is not None or req.enabled is not None:
-        schedule["next_run_at"] = (
-            str(next_run_after(schedule["cron"])) if schedule.get("enabled") else ""
+    # #198：乐观锁基准 = 本次读取的 updated_at。请求显式带 expected_updated_at
+    # 时先做一次 409 早判；真正的写回由下面 CAS/WATCH 再做一次（防读后写前
+    # 被并发编辑抢先）。
+    base_updated_at = schedule.get("updated_at")
+    if (req.expected_updated_at is not None
+            and base_updated_at != req.expected_updated_at):
+        _raise_schedule_conflict(base_updated_at)
+
+    def _apply(current: dict) -> None:
+        if req.name is not None:
+            current["name"] = req.name.strip()
+        if req.version is not None:
+            current["version"] = req.version or None
+        if req.cron is not None:
+            current["cron"] = req.cron
+        if req.params is not None:
+            current["params"] = req.params
+        if req.enabled is not None:
+            current["enabled"] = bool(req.enabled)
+        # cron/enabled 变化后重算下次触发；编辑即重置节奏。
+        # 用 current 的 cron（并发编辑以在库值为准，不回退旧快照）。
+        if req.cron is not None or req.enabled is not None:
+            cron = current.get("cron") or schedule.get("cron")
+            current["next_run_at"] = (
+                str(next_run_after(cron)) if current.get("enabled") else ""
+            )
+        current["updated_at"] = _now_iso()
+
+    if local is not None:
+        store = flow_store.get_flow_store()
+        # 本地档无跨进程 CAS；读后写前复核 updated_at，冲突同样 409。
+        fresh = local.get_schedule(store, schedule_id, tenant_id=tenant)
+        if fresh is None:
+            raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+        if fresh.get("updated_at") != base_updated_at:
+            _raise_schedule_conflict(fresh.get("updated_at"))
+        _apply(fresh)
+        try:
+            return _view(local.update_schedule(
+                store, schedule_id, fresh, tenant_id=tenant))
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+
+    try:
+        updated = cas_update_schedule(
+            redis, schedule_id, _apply,
+            expected_updated_at=base_updated_at, check_updated_at=True,
         )
-    schedule["updated_at"] = _now_iso()
-
-    if (local := _get_local(request)) is not None:
-        return _view(local.update_schedule(flow_store.get_flow_store(), schedule_id, schedule,
-                                           tenant_id=tenant))
-    _save_schedule(redis, schedule)
-    return _view(schedule)
+    except ScheduleConflictError as exc:
+        _raise_schedule_conflict(exc.latest_updated_at)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+    return _view(updated)
 
 
 @router.delete("/schedules/{schedule_id}")

@@ -1,0 +1,78 @@
+{
+  "issue": 198,
+  "title": "fix(schedule): fire writeback CAS + console PUT optimistic lock",
+  "generated_at": "2026-10-17T22:51:47.922753+00:00",
+  "base_head": "87e628e3a0cee451e3c9ca239f27951073607060",
+  "fix_commit_subject": "fix(schedule): #198 fire 回写只合并触发字段，console PUT 加乐观锁 409",
+  "before": {
+    "plaita_file": "/tmp/wt198-before/plaita/__init__.py",
+    "python": "3.13.3",
+    "interleaved": {
+      "after_put_enabled": false,
+      "after_fire_enabled": true,
+      "last_fired_at": true,
+      "last_enqueue_ok": "1",
+      "cron": "* * * * *"
+    },
+    "cas": {
+      "available": false
+    }
+  },
+  "after": {
+    "plaita_file": "/Users/kong/projects/infra4agent/plaita/plaita/__init__.py",
+    "python": "3.13.3",
+    "interleaved": {
+      "after_put_enabled": false,
+      "after_fire_enabled": false,
+      "last_fired_at": true,
+      "last_enqueue_ok": "1",
+      "cron": "* * * * *"
+    },
+    "cas": {
+      "available": true,
+      "conflict": true,
+      "latest_updated_at": "t2",
+      "enabled_after": true
+    }
+  },
+  "test_runs": {
+    "unit_targeted": "6 passed",
+    "console_api": "3 passed",
+    "with_issue118_related": "83 passed",
+    "unit_fast": "7752 passed, 11 skipped, 13 deselected, 3429 subtests passed",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8052 passed, 15 skipped, 3429 subtests, coverage 93.83% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main 87e628e latest completed ci.yml run"
+  },
+  "negative_control": {
+    "mutation": "restore the pre-#198 stale full-JSON writeback in fire_schedule",
+    "diff_sha256": "a2e6d39dff9cbeab5bb7afd2ce819eaaf247503e01156797c95302abd1a8f8ac",
+    "unit_file": {
+      "failed": 5,
+      "passed": 1
+    },
+    "console_file": {
+      "failed": 1,
+      "passed": 2
+    },
+    "failed_unit": [
+      "test_interleaved_disable_is_not_flipped_back",
+      "test_fire_recomputes_next_run_from_current_cron",
+      "test_fire_preserves_version_and_params_edited_concurrently",
+      "test_manual_fire_does_not_touch_next_run_at_or_enabled",
+      "test_fire_after_delete_does_not_recreate"
+    ],
+    "failed_console": [
+      "test_interleaved_put_disable_then_fire_keeps_disabled"
+    ],
+    "still_green": [
+      "unit: test_cas_conflict_reports_latest_and_does_not_write",
+      "console: 409 tests independent of the fire path"
+    ]
+  },
+  "relation": {
+    "issue118": "dedup_key/cron due semantics unchanged; related tests green",
+    "issue59_101": "same-family console writeback issues; this fix covers schedule definition face only, note at close"
+  }
+}

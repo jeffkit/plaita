@@ -1,0 +1,43 @@
+# plaita#198 负控：恢复 fire_schedule 旧快照整份回写
+
+diff --git a/plaita/server/services/schedule_service.py b/plaita/server/services/schedule_service.py
+index feb5a7d..7dbe5e0 100644
+--- a/plaita/server/services/schedule_service.py
++++ b/plaita/server/services/schedule_service.py
+@@ -250,7 +250,20 @@ def fire_schedule(
+                 if cron:
+                     current["next_run_at"] = str(next_run_after(cron, now))
+ 
+-        cas_update_schedule(redis_client, schedule_id, _apply_fire)
++        # MUTANT: restore the pre-#198 stale full-JSON writeback
++        updates = {
++            "last_fired_at": now.isoformat(),
++            "last_enqueue_ok": "1" if enqueue_ok else "0",
++        }
++        if trigger_kind == "cron":
++            updates["next_run_at"] = str(next_run_after(schedule["cron"], now))
++        stale = dict(schedule)
++        stale.update(updates)
++        redis_client.hset(
++            SCHEDULES_KEY,
++            key=schedule_id,
++            value=json.dumps(stale, ensure_ascii=False),
++        )
+     except Exception as exc:
+         logger.warning("调度 %s 状态回写失败: %s", schedule_id, _scrub_exception_text(exc))
+ 
+
+## tests/unit/test_issue198_schedule_cas.py
+FAILED tests/unit/test_issue198_schedule_cas.py::test_interleaved_disable_is_not_flipped_back
+FAILED tests/unit/test_issue198_schedule_cas.py::test_fire_recomputes_next_run_from_current_cron
+FAILED tests/unit/test_issue198_schedule_cas.py::test_fire_preserves_version_and_params_edited_concurrently
+FAILED tests/unit/test_issue198_schedule_cas.py::test_manual_fire_does_not_touch_next_run_at_or_enabled
+FAILED tests/unit/test_issue198_schedule_cas.py::test_fire_after_delete_does_not_recreate
+5 failed, 1 passed in 0.65s
+
+## plaita-console/backend/tests/console/test_schedule_cas_api.py（同树）
+FAILED tests/console/test_schedule_cas_api.py::test_interleaved_put_disable_then_fire_keeps_disabled
+1 failed, 2 passed, 1 warning in 0.75s
+
+## 仍绿的一条（CAS 冲突助手本身未被变异）
+- test_cas_conflict_reports_latest_and_does_not_write
