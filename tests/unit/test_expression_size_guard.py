@@ -3523,6 +3523,13 @@ _RENDER_SITES = {
      '"".join(path_parts)'): (
         'excluded', None,
         "拼接引擎自造信号串/C 描述符名/静态路径片段（_scalar_base 路径渲染），非作者数据"),
+    # --- #163 落地侧并合登记（W14-A 2026-10-17 归因补录：_probe_isinstance 具名拒绝消息模板，
+    #     语义 = 静态路径 token/类型名/引擎 kind 串，非结果放大面；与 r13 probe-failed 模板同一纪律）---
+    ('plaita/core/expression_parser.py', '_probe_isinstance', 'method:format',
+     '_TRAVERSAL_PROBE_FAILED_TEMPLATE.format( path=path, type_name=type(value).__name__, exc_type=type(exc).__name__, kind=kind_name, )'): (
+        'excluded', None,
+        "#163 拒绝消息模板：插值 path 是解析器 token（≤ 输入串）、type_name/exc_type 是类型名、"
+        "kind 是引擎自造串（'dict'/'str'）；刻意不回显宿主异常文本，非结果放大面"),
 
 }
 
