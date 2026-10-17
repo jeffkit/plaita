@@ -1,0 +1,12 @@
+{
+  "name": "164-scratch-leaks-into-checkpoint",
+  "concern": "AC1 后半 scratch 绑定不进 checkpoint（私有副本语义）",
+  "file": "plaita/core/state.py",
+  "old": "        for k in self._extras:\n            if k not in self._present:\n                yield k\n",
+  "new": "        for k in self._extras:\n            if k not in self._present:\n                yield k\n        for k in self.scratch_bindings:   # MUTANT(#164): scratch 漏进 checkpoint 键视图\n            yield k\n",
+  "rationale": "让 `__iter__`（`to_checkpoint_dict()` / `dict(state)` / `__eq__` 的键视图）把 scratch 键也吐出来 ⇒ 宿主私有的 scratch 绑定落进落盘数据与恢复面。杀死它的是 #164 的 checkpoint 隔离断言。",
+  "expect_fail": [
+    "tests/unit/test_issue164_scratch_declaration.py::TestScratchIsPrivateAndNotCheckpointed::test_scratch_binding_does_not_enter_the_checkpoint"
+  ],
+  "issue": "164"
+}

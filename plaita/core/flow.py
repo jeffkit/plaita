@@ -22,6 +22,7 @@ from plaita.core.executor import FlowExecution
 from plaita.io import Property
 from plaita.logger import logger
 from plaita.node import End, Node, Start
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 
 def _resolve_cycle(adjacency: Dict[str, List[str]], root: str) -> List[str]:
@@ -176,7 +177,7 @@ class Flow(BaseModel):
                 self.validate_nodes(instances)
         except Exception as e:  # 校验本身绝不能让构造失败（与既有降级策略一致）
             logger.warning("flow %s construction-time node validation failed: %s",
-                           getattr(self, "flow_id", "?"), e)
+                           getattr(self, "flow_id", "?"), _scrub_url_text(e))
         return self
 
     @classmethod
@@ -249,7 +250,7 @@ class Flow(BaseModel):
             except Exception as e:
                 logger.warning(
                     "flow %s structural check (non-fatal, flow still runs): %s",
-                    self.flow_id, e,
+                    self.flow_id, _scrub_url_text(e),
                 )
 
         # 环检测（R6 fuzz B3；plaita#105 修正判据）：next/branches 成环且无 flow
@@ -311,7 +312,7 @@ class Flow(BaseModel):
                     logger.warning(
                         "flow %s node %s (%s) failed construction-time validation "
                         "(non-fatal, the flow still runs): %s",
-                        self.flow_id, getattr(node, "id", "?"), getattr(node, "node_type", "?"), e,
+                        self.flow_id, getattr(node, "id", "?"), getattr(node, "node_type", "?"), _scrub_url_text(e),
                     )
 
     def _warn_uncovered_env_refs(self) -> None:
@@ -335,8 +336,8 @@ class Flow(BaseModel):
                 continue
             try:
                 dump = node.model_dump()
-            except Exception:
-                logger.debug("node model_dump failed during $ENV ref scan", exc_info=True)
+            except Exception as exc:
+                logger.debug("node model_dump failed during $ENV ref scan: %s", _scrub_exception_text(exc))
                 continue
             _collect_env_refs(dump, refs)
         if refs:
@@ -381,7 +382,7 @@ class Flow(BaseModel):
                 logging.getLogger("plaita.core.flow").warning(
                     "content failed JSON parsing (%s) but parsed as YAML — "
                     "double-check the syntax; YAML also coerces bare no/on to "
-                    "False/True", json_err,
+                    "False/True", _scrub_url_text(json_err),
                 )
                 flow = cls.model_validate(data, registry=registry)
             return flow

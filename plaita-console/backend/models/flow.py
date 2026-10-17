@@ -213,6 +213,13 @@ class LocalExecution(Base):
     output_json = Column(Text, nullable=False, default="null")
     error_json = Column(Text, nullable=False, default="null")
     nodes_json = Column(Text, nullable=False, default="[]")
+    # run 级 token/cost 汇总（plaita#37 P2）：JSON 对象或字符串 'null'。
+    # 默认 'null' = **未采集**——老行零迁移（SQLite 补列时 ADD COLUMN 的默认
+    # 值即 'null'，读取侧 `_loads_or_none` 折算成 None），**绝不折算成 0**。
+    # 形状与引擎侧 ExecutionState.usage 同源（plaita.storage.usage 聚合）；
+    # 展示的两级汇总（run/节点）由读取侧经 usage_view / node_usage_breakdown
+    # 只读折算，本列不是第二真相源（真源仍是 context 的 $NODE）。
+    usage_json = Column(Text, nullable=False, default="null")
     # 分布式模式 checkpoint：挂起/每步推进后的上下文快照（resume 用）
     context_json = Column(Text, nullable=False, default="null")
     invoker = Column(String(64), nullable=False, default="local")

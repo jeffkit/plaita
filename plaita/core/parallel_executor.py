@@ -34,6 +34,8 @@ from multiprocessing import Lock as ProcessLock
 from threading import Lock, Semaphore
 from typing import Any, Callable, List, Optional, Protocol, runtime_checkable
 
+from plaita.core.url_redaction import _scrub_exception_text
+
 logger = logging.getLogger(__name__)
 
 THREAD = "thread"
@@ -130,8 +132,8 @@ def _shutdown_background_pools() -> None:
             continue
         try:
             pool.shutdown(wait=False, cancel_futures=True)
-        except Exception:  # pragma: no cover - 退出路径上的 best-effort
-            logger.debug("background pool %r shutdown raised during atexit", kind, exc_info=True)
+        except Exception as exc:  # pragma: no cover - 退出路径上的 best-effort
+            logger.debug("background pool %r shutdown raised during atexit: %s", kind, _scrub_exception_text(exc))
 
 
 atexit.register(_shutdown_background_pools)

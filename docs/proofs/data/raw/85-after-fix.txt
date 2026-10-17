@@ -1,0 +1,6 @@
+scan#1 replayed: 2  seen=['ev0', 'ev1']  cursor=1792206085.5293908|ev1
+scan#2 replayed: 1  seen=['ev0', 'ev1', 'ev2']  cursor=1792206085.530391|ev2
+scan#3 replayed: 1  seen=['ev0', 'ev1', 'ev2', 'ev3']  cursor=1792206085.531391|ev3
+scan#4 replayed: 1  seen=['ev0', 'ev1', 'ev2', 'ev3', 'ev4']  cursor=1792206085.5323908|ev4
+events never replayed: []
+VERDICT: OK

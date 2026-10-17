@@ -74,8 +74,36 @@ def _finalize_cancelled(execution_id: str, context: Optional[Dict[str, Any]]) ->
         execution_id,
         status="cancelled",
         context_json=json.dumps(_safe(context), ensure_ascii=False),
+        usage_json=_usage_json_for(context),
     )
     logger.info("本地执行 %s 已取消（步界收口）", execution_id)
+
+
+def _usage_json_for(context: Any) -> str:
+    """终态 usage 汇总（plaita#37 P2）：JSON 串；未采集 ⇒ ``'null'``（不是 0）。
+
+    - 与集群档 worker 的 ``_collect_usage`` 同一口径（复用
+      ``plaita.storage.usage.aggregate_node_usage``，真源 = ``$NODE[*].usage``），
+      不新增第二真相源；
+    - **best-effort**：聚合抛错只告警并落 ``'null'``——观测口径绝不影响本地
+      执行的终态与前端可用性；
+    - 采集到 0 落 ``{"total_tokens": 0, ...}``，与「未采集」在读取侧严格可分。
+    """
+    try:
+        from plaita.storage.usage import aggregate_node_usage, node_results_from_context
+
+        usage = aggregate_node_usage(node_results_from_context(context))
+    except Exception:  # noqa: BLE001 — 观测口径失败绝不拖累执行/落库
+        logger.warning("本地执行 usage 聚合失败（按未采集落库）", exc_info=True)
+        return "null"
+    if usage is None:
+        return "null"
+    try:
+        return json.dumps(usage, ensure_ascii=False)
+    except (TypeError, ValueError):  # pragma: no cover — usage 是纯标量字典
+        logger.warning("本地执行 usage 序列化失败（按未采集落库）", exc_info=True)
+        return "null"
+
 
 # ---- 租户感知的凭据文件解析 ----
 # 引擎 plaita.credentials 原生按租户上下文路由凭据文件（default = 基础文件，
@@ -396,6 +424,9 @@ def _run_flow(
                     execution_id,
                     output_json=json.dumps(_safe(result.get("result")), ensure_ascii=False),
                     context_json=json.dumps(_safe(context), ensure_ascii=False),
+                    # plaita#37 P2：终态才聚合 usage（半截数字比没有数字更坏），
+                    # 未采集落 'null'（不是 0）。
+                    usage_json=_usage_json_for(context),
                 )
                 if fs.update_local_execution_status_if(execution_id, "running", "completed"):
                     fs.update_local_execution(execution_id, end_time=datetime.utcnow())
@@ -433,12 +464,15 @@ def _run_flow(
             )
     except Exception as e:  # noqa: BLE001 — 执行失败要落库而不是带崩线程
         logger.warning("本地执行 %s 失败: %s", execution_id, e)
+        # plaita#37 P2：失败终态同样聚合 usage（能采到多少算多少；未采集落
+        # 'null'）。异常可能发生在 context 赋值之前 ⇒ locals() 取。
         fs.finish_local_execution(
             execution_id,
             status="failed",
             error_json=json.dumps(
                 {"message": str(e), "type": type(e).__name__}, ensure_ascii=False
             ),
+            usage_json=_usage_json_for(locals().get("context")),
         )
         if langfuse_callback is not None:
             langfuse_callback.finalize()

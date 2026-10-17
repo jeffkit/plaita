@@ -461,7 +461,13 @@ class TestAsyncGenToSyncMutationKillers(unittest.TestCase):
     # --- no-loop path: logger.debug message and exc_info on aclose failure ---
 
     def test_no_loop_aclose_failure_logs_correct_message(self):
-        """When aclose() fails in no-loop path, correct message and exc_info=True are logged."""
+        """aclose 失败在 no-loop 路径上仍要留迹——但改为**构造面清洗**（plaita#151）。
+
+        W12-A/W19-A 的纪律：``exc_info=True`` 让 ``Formatter`` 在 logger 调用之后用
+        **原始异常**重渲染 traceback，构造面清洗盖不住（``#161`` 的核心发现）。故本处
+        改为 ``_scrub_exception_text(exc)`` 渲染进消息、不再传 ``exc_info``；断言相应
+        从「``exc_info=True``」改成「消息 + 清洗后的异常文本」，并钉死没有 exc_info。
+        """
         from unittest.mock import patch
 
         async def gen_broken_close():
@@ -475,10 +481,11 @@ class TestAsyncGenToSyncMutationKillers(unittest.TestCase):
             _ = next(g)
             g.close()
 
-            mock_logger.debug.assert_called_once_with(
-                "async gen aclose failed during sync drain",
-                exc_info=True,
-            )
+            mock_logger.debug.assert_called_once()
+            (fmt, rendered), kwargs = mock_logger.debug.call_args
+            assert fmt == "async gen aclose failed during sync drain: %s"
+            assert "RuntimeError: aclose fail" in rendered
+            assert kwargs == {}, f"exc_info 必须已摘掉，实际 kwargs={kwargs}"
 
     # --- thread path: yields None items correctly (_DONE must be object(), not None) ---
 

@@ -6,8 +6,8 @@ Redis 定义。挂起执行 resume 时用 latest 版本定义，若定义自启�
 
 修复契约：
 - ``ExecutionState`` 新增可选字段 ``flow_hash``（storage/base.py）：start 时
-  对实际加载执行的 Flow 计算指纹（sha256 of ``model_dump(mode="json")`` +
-  sort_keys 规范化 JSON）写入；
+  对**存储中的原始流程定义**（``model_validate`` 之前）计算指纹
+  （sha256 of sort_keys 规范化 JSON）写入；
 - resume_flow 在取得租约后（与活 worker 的推进写串行化，防误终态化他人
   正在推进的执行）比对指纹：不一致 → 终态化 error（message 写明「flow
   定义自启动后已变更，hash 不匹配，执行无法安全续跑」）+ raise ValueError
@@ -18,6 +18,12 @@ Redis 定义。挂起执行 resume 时用 latest 版本定义，若定义自启�
   fenced（save 序列化 + load 透传）自动兼容；sqlalchemy 显式列需补
   （``**state_dict`` 展开进模型构造器，缺列会 TypeError → save False →
   StatePersistError）。
+
+plaita#36（口径 v2）：指纹从「解析后 ``Flow.model_dump``」改为「原始定义
+JSON」。理由与守卫见 ``TestFlowHashStableAcrossEngineVersions``——对解析后的
+模型求指纹会随模型字段演进漂移，滚动升级窗口把在途 run 批量终态化；本文件
+的稳定性守卫必须先能红（旧口径下同一存储定义、不同引擎模型 → 指纹不同），
+再在本口径下恒等。
 """
 import hashlib
 import json
@@ -33,7 +39,12 @@ pytest.importorskip("redis")
 import fakeredis
 
 from plaita.core.flow import Flow
-from plaita.server.flow_worker import FlowWorker, RedisFlowWorker
+from plaita.server.flow_worker import (
+    FLOW_HASH_ALGO,
+    FLOW_HASH_ALGO_V1,
+    FlowWorker,
+    RedisFlowWorker,
+)
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 
@@ -58,6 +69,28 @@ MODIFIED_FLOW = {
 
 
 def _expected_hash(flow_def: dict) -> str:
+    """口径 v2（plaita#36）：**原始定义** JSON 的 sha256，不经 ``Flow`` 解析。
+
+    刻意独立于产品实现重写一遍（而不是调 ``compute_flow_definition_hash``）：
+    测试要能独立证伪产品实现，不能与实现同源。
+    """
+    return hashlib.sha256(
+        json.dumps(
+            flow_def,
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _v1_hash(flow_def: dict) -> str:
+    """口径 v1（旧实现）：解析后 ``model_dump(mode="json")`` 的 sha256。
+
+    只用于构造「老 worker 写下的状态」——滚动升级窗口里 stored_algo=v1 +
+    v1 指纹的执行必须被判成 ``upgrade_suspected``，而不是当成定义变更。
+    """
     return hashlib.sha256(
         json.dumps(
             Flow.model_validate(flow_def).model_dump(mode="json"),
@@ -66,6 +99,16 @@ def _expected_hash(flow_def: dict) -> str:
             default=str,
         ).encode("utf-8")
     ).hexdigest()
+
+
+class _EvolvedFlow(Flow):
+    """模拟「新版本引擎」：给 ``Flow`` 增加一个带默认值的序列化字段。
+
+    真实版本演进（给模型增删字段、物化默认值）就是 plaita#36 的漂移源：
+    同一份存储定义在新旧引擎下 ``model_dump`` 形态不同。
+    """
+
+    added_in_new_version: str = "default-value"
 
 
 def _base_worker(storage=None, flow_storage=None) -> FlowWorker:
@@ -170,7 +213,7 @@ class TestFlowHashRoundTrip:
 
 class TestStartStoresFlowHash:
     def test_start_flow_persists_hash_of_executed_flow(self):
-        """start_flow 落盘的 state.flow_hash == 实际执行 Flow 的指纹。"""
+        """start_flow 落盘的 state.flow_hash == 存储原始定义的指纹（口径 v2）。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         storage = MemoryExecutionStorage()
         flow_storage = MemoryFlowStorage()
@@ -190,14 +233,142 @@ class TestStartStoresFlowHash:
 
         state = storage.load_execution_state("exec-new")
         assert state.flow_hash == _expected_hash(TEST_FLOW)
+        assert state.flow_hash_algo == FLOW_HASH_ALGO
 
     def test_hash_changes_when_definition_changes(self):
         """定义变更 → 指纹变化（校验能感知改定义）。"""
         assert _expected_hash(TEST_FLOW) != _expected_hash(MODIFIED_FLOW)
 
-    def test_hash_deterministic_across_validations(self):
-        """同一定义多次 validate/dump 指纹稳定（跨进程可比）。"""
+    def test_hash_deterministic_across_computations(self):
+        """同一定义多次计算指纹稳定（跨进程可比）。"""
         assert _expected_hash(TEST_FLOW) == _expected_hash(TEST_FLOW)
+
+
+# ---------- plaita#36：指纹跨引擎版本稳定 ----------
+
+
+class TestFlowHashStableAcrossEngineVersions:
+    """口径 v2 的稳定性守卫。
+
+    「假守卫」判定标准（与 tests/unit/test_flow_worker_scenarios.py 同款，
+    写在此处供后人照抄）：一条守卫在满足任一条时即为**假守卫**——
+    ① 零断言（只证明「没抛异常」）；
+    ② 断言不可达（写在 ``try`` 里被同函数的 ``except`` 吞掉）；
+    ③ 断言的对象无法区分名字承诺的行为（如只断言 ``is not None``）。
+    真守卫必须**能红**：改坏被守卫的实现（变异）后必须失败。
+    """
+
+    def _start_and_read_hash(self, fake, flow_storage, execution_id):
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage, flow_storage)
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.execution_id = execution_id
+            inst.run_distributed.return_value = {
+                "execution_id": execution_id,
+                "is_end": True,
+                "context": {"done": True},
+            }
+            worker.start_flow("f1", {}, version="1")
+        return storage.load_execution_state(execution_id).flow_hash
+
+    def test_hash_stable_when_engine_model_gains_field(self, monkeypatch):
+        """同一存储定义、不同引擎模型（版本演进加字段）→ 指纹必须不变。
+
+        变异点：把 ``_compute_flow_hash`` 改回 ``flow.model_dump(...)``（v1
+        口径）→ 本用例立刻红（两次 start 的指纹不同，且与 #36 线上形态一致）。
+        """
+        import plaita.server.flow_worker as fw
+
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(TEST_FLOW)
+
+        hash_old_engine = self._start_and_read_hash(
+            fake, flow_storage, "exec-old-engine"
+        )
+
+        # 「滚动升级」：另一台 worker 跑的是给 Flow 加过字段的新引擎版本，
+        # 读同一份存储定义。
+        monkeypatch.setattr(fw, "Flow", _EvolvedFlow)
+        hash_new_engine = self._start_and_read_hash(
+            fake, flow_storage, "exec-new-engine"
+        )
+
+        assert hash_new_engine == hash_old_engine, (
+            "同一份存储定义在不同引擎模型下指纹漂移——滚动升级会把在途 run "
+            "批量终态化（plaita#36）"
+        )
+
+    def test_compute_hash_rejects_parsed_model(self):
+        """指纹入口只接受**原始定义**；传解析后的 ``Flow`` 必须响亮 TypeError。
+
+        变异点：删掉 ``_compute_flow_hash`` 的入口类型守卫 → 本用例红
+        （旧口径会静默接受 ``Flow`` 对象，正是漂移入口）。
+        """
+        worker = _base_worker()
+        with pytest.raises(TypeError, match="原始流程定义"):
+            worker._compute_flow_hash(Flow.model_validate(TEST_FLOW))
+
+    def test_legacy_v1_state_is_classified_as_upgrade_suspected(self):
+        """老 worker（v1 口径）写下的状态：哈希不同但必须判成「疑似升级」并
+        给出 ``allow_flow_hash_change`` 显式放行提示，而不是含糊的「定义变更」。
+
+        变异点：``FLOW_HASH_ALGO`` 不 bump（退回 v1 标签）→ 本用例红
+        （``upgrade_suspected`` 为 False、``hint`` 为 None）。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(TEST_FLOW)
+        worker = _redis_worker(fake, storage, flow_storage)
+        storage.save_execution_state(
+            "exec-legacy",
+            _state(
+                execution_id="exec-legacy",
+                flow_hash=_v1_hash(TEST_FLOW),
+                flow_hash_algo=FLOW_HASH_ALGO_V1,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="hash 不匹配"):
+            worker.resume_flow("f1", "exec-legacy", "continue")
+
+        state = storage.load_execution_state("exec-legacy")
+        assert state.status == "error"
+        assert state.error["upgrade_suspected"] is True
+        assert "allow_flow_hash_change" in state.error["hint"]
+        assert state.error["stored_flow_hash_algo"] == FLOW_HASH_ALGO_V1
+        assert state.error["current_flow_hash_algo"] == FLOW_HASH_ALGO
+
+    def test_negative_control_genuine_change_has_no_upgrade_hint(self):
+        """负向对照：**真改定义**（算法标记不变）必须仍判 mismatch，且不得打上
+        ``upgrade_suspected`` / 给放行提示——口径稳定化不能把守卫变成「永远放行」。
+        """
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        flow_storage = MemoryFlowStorage()
+        flow_storage.save_flow(MODIFIED_FLOW)
+        worker = _redis_worker(fake, storage, flow_storage)
+        storage.save_execution_state(
+            "exec-changed",
+            _state(
+                execution_id="exec-changed",
+                flow_hash=_expected_hash(TEST_FLOW),
+                flow_hash_algo=FLOW_HASH_ALGO,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="hash 不匹配"):
+            worker.resume_flow("f1", "exec-changed", "continue")
+
+        state = storage.load_execution_state("exec-changed")
+        assert state.status == "error"
+        assert state.error["upgrade_suspected"] is False
+        assert state.error["hint"] is None
+        assert state.error["stored_flow_hash"] == _expected_hash(TEST_FLOW)
+        assert state.error["current_flow_hash"] == _expected_hash(MODIFIED_FLOW)
 
 
 # ---------- resume 校验 ----------

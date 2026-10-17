@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 
 from plaita.core.errors import FlowErrorException, FlowExecutionException
+from plaita.core.url_redaction import _scrub_url_text
 
 logger = logging.getLogger("plaita.core.executor")
 
@@ -50,7 +51,7 @@ async def finish_normal(coro, flow, callback_manager):
         error = {"code": -500, "message": str(e)}
         callback_manager.on_flow_end(flow, None, error, exception=e)
         # raise 已携带完整 traceback，这里不再重复打栈
-        logger.error("flow error: %s", e)
+        logger.error("flow error: %s", _scrub_url_text(e))
         raise FlowErrorException(str(e)) from e
     callback_manager.on_flow_end(flow, result=result)
     return result
@@ -65,7 +66,7 @@ def raise_distributed_error(e, flow, callback_manager):
     """
     error = {"code": -500, "message": str(e)}
     callback_manager.on_flow_end(flow, None, error, exception=e)
-    logger.error("flow error: %s", e)
+    logger.error("flow error: %s", _scrub_url_text(e))
     raise FlowErrorException(str(e)) from e
 
 

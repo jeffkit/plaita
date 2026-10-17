@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, List, Union
 from pydantic import BaseModel, Field
 
 from ..logger import logger
+from plaita.core.url_redaction import _scrub_url_text
 
 
 class StateSerializationError(RuntimeError):
@@ -96,6 +97,31 @@ class ExecutionState(BaseModel):
             "未挂 NodeTimingCallback——读取方必须按缺省处理，不得假定存在。"
         ),
     )
+    timeline: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "run 级**有序事件日志**（plaita#25）："
+            "{events: [{seq, type, at, at_ms, node_id?, duration_ms?, ok?, error?}], "
+            "dropped, max_events, enqueued_at, queue_wait_ms}；"
+            "type ∈ enqueued|run_start|node_start|node_end|run_end。"
+            "queue_wait_ms/enqueued_at 为 None = **未采集**（与「排队 0ms」严格"
+            "区分，读取方不得折算成 0）。None = 老状态或宿主未挂时间线采集器"
+            "——读取方必须按缺省处理，不得假定存在（零回归）。"
+        ),
+    )
+    usage: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "run 级 token 归集（plaita#37）："
+            "{prompt_tokens, completion_tokens, total_tokens, llm_calls, models[], "
+            "source: observed|estimated|mixed, precision, count?, tokens_per_count?}。"
+            "真源是每节点结果 ``context['$NODE'][node_id]['usage']``（本字段是"
+            "聚合视图，不新增第二真相源）；``count``/``tokens_per_count`` 只由"
+            "``patch_count`` 回填，不在聚合时编造。"
+            "None = **未采集**（老状态 / 无任何节点报 usage）——与「采集到 0」"
+            "严格区分，读取方不得折算成 0；resume 不覆写既有值（零回归）。"
+        ),
+    )
 
 class ExecutionStorage(ABC):
     """
@@ -172,7 +198,7 @@ class ExecutionStorage(ABC):
         try:
             return json.dumps(state)
         except Exception as e:
-            logger.error("Failed to serialize state: %s", e)
+            logger.error("Failed to serialize state: %s", _scrub_url_text(e))
             raise
     
     def deserialize_state(self, data: str) -> Dict[str, Any]:
@@ -188,7 +214,7 @@ class ExecutionStorage(ABC):
         try:
             return json.loads(data)
         except Exception as e:
-            logger.error("Failed to deserialize state: %s", e)
+            logger.error("Failed to deserialize state: %s", _scrub_url_text(e))
             raise 
     
 

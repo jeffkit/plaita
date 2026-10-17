@@ -18,10 +18,25 @@ created_at / updated_at / next_run_at / last_fired_at / last_enqueue_ok``
 - 错过的周期**不补偿**：到期后只触发一次，``next_run_at`` 直接跳到当前时间之后
   的下一个 cron 时点（服务停机一小时，恢复后不会连环补跑）。
 - 时区：cron 按调度服务所在机器的本地时间解释。
+
+派发幂等键（``dedup_key``）语义（#23 引入，plaita#118 修正取值基准）：
+- **cron**：``sched:{schedule_id}:due:{due_ms}``。``due_ms`` = **本次到期时点**
+  ``next_run_at``（epoch 毫秒的十进制整数），由 ``_fire_if_due`` 把它判定用的
+  ``next_run_at`` 显式传入 ``due_at``。同一个 due 无论被触发几次（状态回写失败
+  + 30s 锁过期重触发、消息 XCLAIM 重派）都得到**同一个键**，worker 侧 ``SET NX``
+  只放行一次；不同 due 的键必然不同，不会被误吞。
+- **manual**（console「立即触发」）：``sched:{schedule_id}:manual:{ns}-{seq}``，
+  每次调用唯一，与 cron 键空间**不相交**——manual 是用户显式要求「立刻再跑一次」，
+  不得与 cron 同秒互相吞并；同一条 manual 消息被重派时键随消息走，仍收敛。
+- **降级**：cron 且既无 ``due_at`` 也无可用 ``next_run_at`` 时，退回
+  ``sched:{schedule_id}:fired:{墙钟秒}`` 并 warning（调度循环会先自愈
+  ``next_run_at``，该路径只在定义缺失且调用方未传 due 时可达）。
 """
+import itertools
 import json
 import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -31,14 +46,19 @@ from redis import Redis
 from plaita.server.task_queue import enqueue_task
 
 from ...logger import logger
+from ..tenant_quota import release_tenant_start, try_admit_tenant_start
 from ..tenant_status import tenant_is_active
 from .base_service import BaseExtendedService
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 # 与 console 后端共享的 Redis 视图键（console/api/schedules.py 同款常量）
 SCHEDULES_KEY = "plaita:schedules"
 SCHEDULE_FIRES_KEY = "plaita:schedule:fires:{schedule_id}"
 SCHEDULE_LOCK_KEY = "plaita:schedule:lock:{schedule_id}"
 FIRE_HISTORY_MAX = 50
+
+# manual 键内序号：同一纳秒内的两次调用也必须拿到不同键（进程内单调）。
+_MANUAL_SEQ = itertools.count()
 
 
 # ---------- cron / 调度工具（console 后端复用） ----------
@@ -51,7 +71,7 @@ def validate_cron(cron: str) -> bool:
         croniter(cron, datetime.now())
         return True
     except (ValueError, KeyError) as e:
-        logger.debug("非法 cron 表达式 %r: %s", cron, e)
+        logger.debug("非法 cron 表达式 %r: %s", cron, _scrub_url_text(e))
         return False
 
 
@@ -66,16 +86,64 @@ def next_run_after(cron: str, dt: Optional[datetime] = None) -> int:
     return int(nxt.timestamp() * 1000)
 
 
+def normalized_due_ms(schedule: Dict[str, Any], due_at: Any = None) -> Optional[int]:
+    """本次到期时点的规范表示：epoch 毫秒整数，取不到返回 None。
+
+    优先取调用方显式传入的 ``due_at``（cron 侧即 ``_fire_if_due`` 判定用的
+    ``next_run_at``），其次取调度定义里的 ``next_run_at``。规范化固定为
+    ``int(float(...))``：同一 due 的等价写法（``"1791530071848"`` /
+    ``1791530071848`` / ``1791530071848.0``）必须得到同一个键。
+    """
+    for candidate in (due_at, schedule.get("next_run_at")):
+        if candidate is None or candidate == "":
+            continue
+        try:
+            return int(float(candidate))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def build_dedup_key(
+    schedule_id: str,
+    trigger_kind: str,
+    due_ms: Optional[int],
+    wall_second: int,
+) -> str:
+    """构造派发幂等键（语义见模块 docstring）。
+
+    cron 以**本次到期时点**为基准（同一 due ⇒ 同一键）；manual 走独立且每次
+    调用唯一的键空间（不与 cron 同秒互吞）；cron 且无 due 时降级为墙钟秒。
+    """
+    if trigger_kind == "manual":
+        return "sched:{schedule_id}:manual:{ns}-{seq}".format(
+            schedule_id=schedule_id, ns=time.time_ns(), seq=next(_MANUAL_SEQ)
+        )
+    if due_ms is not None:
+        return "sched:{schedule_id}:due:{due_ms}".format(
+            schedule_id=schedule_id, due_ms=due_ms
+        )
+    return "sched:{schedule_id}:fired:{wall_second}".format(
+        schedule_id=schedule_id, wall_second=wall_second
+    )
+
+
 def fire_schedule(
     redis_client: Redis,
     schedule: Dict[str, Any],
     queue_name: str,
     trigger_kind: str = "cron",
+    due_at: Any = None,
 ) -> Optional[str]:
     """触发一次调度：入队 Stream + 记录触发历史 + 回写状态字段。
 
-    供调度服务循环（trigger_kind="cron"）与 console「立即触发」
-    （trigger_kind="manual"）复用，保证消息形状单一来源。
+    供调度服务循环（trigger_kind="cron"，应传 ``due_at`` = 本次到期时点）与
+    console「立即触发」（trigger_kind="manual"）复用，保证消息形状单一来源。
+
+    Args:
+        due_at: 本次到期时点（epoch 毫秒或可转 float 的字符串）。cron 侧由
+            ``_fire_if_due`` 传入其判定用的 ``next_run_at``；缺省时回落到调度
+            定义里的 ``next_run_at``（见 ``normalized_due_ms``）。manual 忽略。
 
     Returns:
         Stream message id；入队失败返回 None。
@@ -86,6 +154,19 @@ def fire_schedule(
     if not tenant_is_active(redis_client, schedule.get("tenant_id")):
         logger.info("租户 %s 已停用，跳过调度 %s 派发", schedule.get("tenant_id"), schedule_id)
         return None
+    # 每租户 start 准入配额（plaita#28）：预铸 execution_id 并在入口占名额，
+    # 消息形状向 console start 对齐（worker 闸按成员幂等放行）。超限则本次
+    # 触发不入队（返回 None，与「租户停用跳过」同语义）：cron 调度等下一次
+    # 到期自然重试，console「立即触发」拿到 None 显示未触发——这就是
+    # 「超限排队/拒绝」在调度入口的形态。fail-open：未配额/redis 故障放行。
+    tenant_id = schedule.get("tenant_id") or "default"
+    execution_id = uuid.uuid4().hex
+    if not try_admit_tenant_start(redis_client, tenant_id, execution_id):
+        logger.info(
+            "租户 %s start 配额已满，跳过调度 %s 本次触发（execution=%s）",
+            tenant_id, schedule_id, execution_id,
+        )
+        return None
     now = datetime.now()
     now_ms = int(now.timestamp() * 1000)
 
@@ -93,6 +174,8 @@ def fire_schedule(
         "type": "start",
         # 调度定义归属租户（console 写入 HASH 值）；缺省视为 default（兼容旧值）
         "tenant_id": schedule.get("tenant_id") or "default",
+        # plaita#28：预铸执行 id（入口已占名额；终态释放按同一 id 路由）
+        "execution_id": execution_id,
         "flow_id": schedule["flow_id"],
         "params": schedule.get("params") or {},
         "timestamp": now.isoformat(),
@@ -105,15 +188,21 @@ def fire_schedule(
     version = schedule.get("version")
     if version:
         message["version"] = version
-    # 确定性幂等键（#23）：start 消息此前无 execution_id 也无 dedup_key，
-    # 消息被 XCLAIM 重派后 worker 就地铸造新 id——同一逻辑 run 出现两个平行
-    # 执行、整条 flow 从头双跑。键 = schedule_id + 触发时点（epoch 秒）：
-    # 同一次到期的重投/重派消息收敛到同一 execution；下一次 cron 到期时间戳
-    # 必然不同，不会误吞后续周期（worker 侧 SET NX EX 7d 认领，见
-    # FlowWorker._claim_start_dedup）。时间戳取秒级：cron 语义最小粒度是分钟，
-    # 秒级已足够区分两次到期，且对时钟小幅回拨容忍。
-    message["dedup_key"] = "sched:{schedule_id}:{fired_at}".format(
-        schedule_id=schedule_id, fired_at=now_ms // 1000
+    # 确定性幂等键（#23，plaita#118 修正基准）：基准必须是**本次到期时点**
+    # 而不是调用墙钟秒。旧键 sched:{id}:{墙钟秒} 有两个失败面：① 同一个 due 被
+    # 重触发（enqueue 成功而 next_run_at 回写失败 + 30s 锁过期）时两次落在不同
+    # 秒 ⇒ 两个不同键 ⇒ worker 各自 SET NX 成功、各自铸 execution_id，同一次
+    # cron 到期整条 flow 双跑；② cron 与 manual 同秒撞成同一个键，manual 被
+    # 静默吞掉。现在 cron 以 due 为基准（同一 due ⇒ 同键，不同 due ⇒ 不同键），
+    # manual 走独立且唯一的键空间。
+    due_ms = normalized_due_ms(schedule, due_at)
+    if trigger_kind != "manual" and due_ms is None:
+        logger.warning(
+            "调度 %s 无可用到期时点（due_at=%r，next_run_at=%r），幂等键降级为墙钟秒",
+            schedule_id, due_at, schedule.get("next_run_at"),
+        )
+    message["dedup_key"] = build_dedup_key(
+        schedule_id, trigger_kind, due_ms, now_ms // 1000
     )
 
     try:
@@ -121,9 +210,11 @@ def fire_schedule(
         msg_id = enqueue_task(redis_client, queue_name, message)
         enqueue_ok = True
     except Exception as e:
-        logger.error("调度 %s 入队失败: %s", schedule_id, e, exc_info=True)
+        logger.error("调度 %s 入队失败: %s", schedule_id, _scrub_exception_text(e))
         msg_id = None
         enqueue_ok = False
+        # 入队失败回滚入口名额（plaita#28），防泄漏到 TTL 才自愈
+        release_tenant_start(redis_client, tenant_id, execution_id)
 
     fire_record = {
         "fired_at": now.isoformat(),
@@ -140,8 +231,8 @@ def fire_schedule(
         pipe.lpush(fires_key, json.dumps(fire_record, ensure_ascii=False))
         pipe.ltrim(fires_key, 0, FIRE_HISTORY_MAX - 1)
         pipe.execute()
-    except Exception:
-        logger.warning("调度 %s 触发历史写入失败", schedule_id, exc_info=True)
+    except Exception as exc:
+        logger.warning("调度 %s 触发历史写入失败: %s", schedule_id, _scrub_exception_text(exc))
 
     # 回写触发状态；错过的周期不补偿——next_run_at 直接跳到现在之后
     try:
@@ -152,8 +243,8 @@ def fire_schedule(
         if trigger_kind == "cron":
             updates["next_run_at"] = str(next_run_after(schedule["cron"], now))
         redis_client.hset(SCHEDULES_KEY, key=schedule_id, value=json.dumps(_merge(schedule, updates), ensure_ascii=False))
-    except Exception:
-        logger.warning("调度 %s 状态回写失败", schedule_id, exc_info=True)
+    except Exception as exc:
+        logger.warning("调度 %s 状态回写失败: %s", schedule_id, _scrub_exception_text(exc))
 
     logger.info(
         "调度 %s（%s）已触发 %s@%s → %s",
@@ -238,7 +329,7 @@ class ScheduleService(BaseExtendedService):
             )
             return True
         except Exception as e:
-            logger.error("启动调度服务失败: %s", e, exc_info=True)
+            logger.error("启动调度服务失败: %s", _scrub_exception_text(e))
             return False
 
     def stop_service(self) -> bool:
@@ -260,7 +351,7 @@ class ScheduleService(BaseExtendedService):
             try:
                 self._tick()
             except Exception as e:
-                logger.error("调度扫描失败: %s", e, exc_info=True)
+                logger.error("调度扫描失败: %s", _scrub_exception_text(e))
             # shutdown_event.wait 兼顾休眠与快速响应停止
             if self._shutdown_event.wait(timeout=self.check_interval):
                 break
@@ -274,7 +365,7 @@ class ScheduleService(BaseExtendedService):
             try:
                 self._fire_if_due(schedule, now_ms)
             except Exception as e:
-                logger.error("调度 %s 处理失败: %s", schedule_id, e, exc_info=True)
+                logger.error("调度 %s 处理失败: %s", schedule_id, _scrub_exception_text(e))
 
     def _fire_if_due(self, schedule: Dict[str, Any], now_ms: int) -> None:
         schedule_id = schedule["schedule_id"]
@@ -307,4 +398,9 @@ class ScheduleService(BaseExtendedService):
         if not self._redis_client.set(lock_key, lock_holder, nx=True, px=30_000):
             return
 
-        fire_schedule(self._redis_client, schedule, self.queue_name, trigger_kind="cron")
+        # due_at 显式传本次判定用的到期时点：幂等键必须锚在 due 上，而不是
+        # 触发墙钟（见 fire_schedule / 模块 docstring）。
+        fire_schedule(
+            self._redis_client, schedule, self.queue_name,
+            trigger_kind="cron", due_at=next_run_at,
+        )

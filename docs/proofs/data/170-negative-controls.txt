@@ -1,0 +1,15 @@
+### m01-as_str-bytes-passthrough
+    ERROR  plaita/event/redis.py: old 命中 0 次（应为 1）
+合计: 1  杀死: 0  存活: 0  错误: 1  其中 documented-unobservable: 0（不判死，不计入杀死）
+  错误: m01-as_str-bytes-passthrough  rc=None  plaita/event/redis.py: old 命中 0 次（应为 1）  | plaita/event/redis.py: old 命中 0 次（应为 1）
+rc=0
+### m12-cursor-rollback-guard-off
+    ERROR  plaita/server/event_reconcile.py: old 命中 0 次（应为 1）
+合计: 1  杀死: 0  存活: 0  错误: 1  其中 documented-unobservable: 0（不判死，不计入杀死）
+  错误: m12-cursor-rollback-guard-off  rc=None  plaita/server/event_reconcile.py: old 命中 0 次（应为 1）  | plaita/server/event_reconcile.py: old 命中 0 次（应为 1）
+rc=0
+### m47-window-end-clamp-off
+    ERROR  plaita/server/event_reconcile.py: old 命中 0 次（应为 1）
+合计: 1  杀死: 0  存活: 0  错误: 1  其中 documented-unobservable: 0（不判死，不计入杀死）
+  错误: m47-window-end-clamp-off  rc=None  plaita/server/event_reconcile.py: old 命中 0 次（应为 1）  | plaita/server/event_reconcile.py: old 命中 0 次（应为 1）
+rc=0

@@ -14,6 +14,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# 解释器与各 recheck_*.sh **同一套解析顺序**（plaita#167）：显式 PYTHON_BIN →
+# 已激活的 ${VIRTUAL_ENV} → 仓根 .venv → PATH 上第一个 ≥3.11。
+# 此前这里裸调 `python3`：macOS 系统 3.9.6 没有 `tomllib`，脚本于是丢一个
+# `ModuleNotFoundError` 并**静默输出空模块表**（"没有匹配 '' 的模块"），让
+# 「模块 → 测试集合」这条本该防假低分的路自己变成假红源。
+# shellcheck source=scripts/lib/mutation_recheck_common.sh
+source scripts/lib/mutation_recheck_common.sh
+
 FILTER="${1:-}"
 MODE="list"
 if [[ "$FILTER" == "--snippet" ]]; then
@@ -22,14 +30,31 @@ fi
 
 # 模块 → 测试文件候选（按 `tests/unit/test_<stem>*.py` 约定匹配；多候选取全部，
 # 因为有些模块的测试分散在若干文件里，漏掉会重演 #125 的"假低分"）。
-modules=$(python3 - <<'PY'
+if ! modules=$("$MUT_PYTHON_BIN" - <<'PY'
+import sys
+
+# 具名跳过（#167）：解释器太老时说清缺什么、怎么修，而不是丢 traceback 后
+# 输出空表——空表会被下游当成「没有匹配的模块」，正是假红/假绿的来源。
+if sys.version_info < (3, 11):
+    sys.stderr.write(
+        "SKIP(#167): 解析到的解释器 %s 是 %d.%d，读 pyproject.toml 需要 Python "
+        ">= 3.11（tomllib）。请设 PYTHON_BIN=<3.11+ 的解释器>、激活 venv，"
+        "或把 3.11+ 放到 PATH 上后重跑；这不是模块表为空。\n"
+        % (sys.executable, sys.version_info[0], sys.version_info[1])
+    )
+    raise SystemExit(4)
+
 import tomllib
+
 with open("pyproject.toml", "rb") as f:
     d = tomllib.load(f)
 for m in d["tool"]["mutmut"].get("only_mutate", []):
     print(m)
 PY
-)
+); then
+    echo "模块表读取失败（解释器：${MUT_PYTHON_BIN}）——见上方 SKIP 理由。" >&2
+    exit 4
+fi
 
 found_any=0
 while IFS= read -r mod; do

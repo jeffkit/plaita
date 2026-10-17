@@ -76,11 +76,57 @@ PLACEHOLDER = "***"
 # fail-closed）。**这里再加一层同口径的入口上限**，理由是入口的契约比掩码器更强：
 # 它必须「任何输入都不抛、且成本有界」，所以超限时**根本不进**掩码器，直接退化为
 # :data:`UNPRINTABLE_URL`（绝不回原文 —— 与「不能安全渲染时退化为常量」同一口径）。
-# 现实输入（2 KB 以内的 URL / 文本）全部落在限内，渲染逐字不变。
-_MAX_CLEAN_INPUT = 2048
+# **门槛值是政策，不是机制**（``[policy]`` 提交单独落，可单独回滚）：机制只要求
+# 「成本有界」，不要求「把正常但很长的 URL 整段掩掉」。门槛定在 **64 KiB**——正常
+# webhook / 策略 URL 与第三方异常文本里的 URL 通常 < 8 KiB，64 KiB 留出近一个数量级
+# 的余量，现实流量**绝无可能**触及；真正敌对的分隔符密集输入由掩码器自己的形状
+# 闸门（``factory._MAX_SPAN_SCAN_WORK``）在 O(1) 内拦下，不依赖这个入口门槛。
+# 依据与冷/热缓存曲线见 ``docs/proofs/165-masker-complexity.md``。
+_MAX_CLEAN_INPUT = 64 * 1024
 #: 单次 :func:`_scrub_url_text` 交给渲染器的 URL **累计**字符预算。单条 token 合规
 #: 不蕴含总量合规（一条 80 KB 文本里可以塞满 2 KB 的敌对 token）。
 _MAX_SCRUB_URL_CHARS = 1 << 16
+
+#: #165 机制：**入口上限触发计数**（进程级、单调递增，测试可断言）。
+#: 计数与 WARNING 是「政策与机制分离」的观测面：机制保证成本有界，政策决定门槛
+#: 宽度；门槛一旦被现实流量触碰，必须**响亮**可见（不许 debug 级静默）。
+_cap_trip_count = 0
+
+
+def _record_cap_trip(where: str, length: int, limit: int) -> None:
+    """#165：一次「因超限而 fail-closed」的**响亮**记录（WARNING + 计数）。
+
+    只记长度与阈值，**绝不**回显输入内容——这里正是掩码器的输入面。
+    """
+    global _cap_trip_count
+    _cap_trip_count += 1
+    logger.warning(
+        "URL 清洗输入超出 #165 上限（%s）：length=%d > limit=%d，已 fail-closed",
+        where,
+        length,
+        limit,
+    )
+
+
+def _input_length(url: object) -> Optional[int]:
+    """``str`` / ``bytes`` / ``bytearray`` 的计量长度；其它类型返回 ``None``。"""
+    if isinstance(url, (str, bytes, bytearray)):
+        return len(url)
+    return None
+
+
+def _enforce_clean_budget(url: object, where: str) -> bool:
+    """#165 入口上限守卫：超限时**先**响亮记录，再让调用方 fail-closed。
+
+    与 :func:`_within_clean_budget` 同判据（``len`` ≤ :data:`_MAX_CLEAN_INPUT`），
+    区别是**触发面可观测**：每次超限都 WARNING + ``_cap_trip_count += 1``。
+    """
+    length = _input_length(url)
+    if length is not None and length > _MAX_CLEAN_INPUT:
+        _record_cap_trip(where, length, _MAX_CLEAN_INPUT)
+        return False
+    return True
+
 
 #: 只承认「端点型」scheme：其余 scheme（``javascript:`` / ``unix:`` / 拿凭据当
 #: scheme 的畸形串）无从判断哪一段是端点、哪一段是密钥 ⇒ 整体退化常量。
@@ -175,8 +221,7 @@ def _safe_render(url: object, renderer: Callable[[object], str]) -> str:
     ``services.__main__.main()`` 直接抛 ``UnicodeEncodeError``）。
     """
     try:
-        if not _within_clean_budget(url):     # plaita#165：超限不进掩码器
-            logger.debug("URL 清洗输入超出 #165 硬上限，退化为安全常量")
+        if not _enforce_clean_budget(url, "safe_render"):  # plaita#165：超限不进掩码器
             return UNPRINTABLE_URL
         rendered = renderer(url)
     except Exception:  # noqa: BLE001 — fail-closed：掩码失败不得炸调用方
@@ -200,12 +245,12 @@ def _within_clean_budget(url: object) -> bool:
     （解码后至多同长 —— ``decode('utf-8', 'replace')`` 不会变长）。非这两种类型
     交给 ``_coerce_url_text`` 判定（它们本就 O(1) 退化）。超限一律 fail-closed，
     绝不回原文。
+
+    只是**判据**（无副作用）；需要「触发可观测」的调用点用
+    :func:`_enforce_clean_budget`（WARNING + 计数）。
     """
-    if isinstance(url, str):
-        return len(url) <= _MAX_CLEAN_INPUT
-    if isinstance(url, (bytes, bytearray)):
-        return len(url) <= _MAX_CLEAN_INPUT
-    return True
+    length = _input_length(url)
+    return length is None or length <= _MAX_CLEAN_INPUT
 
 
 def _mask_url_for_log(url: object) -> str:
@@ -225,6 +270,68 @@ def _mask_url_for_log(url: object) -> str:
 def _mask_webhook_url_for_log(url: object) -> str:
     """webhook URL（凭据在 path/query）进日志前的**总兜底**渲染。"""
     return _safe_render(url, _mask_webhook_url)
+
+
+# --------------------------------------------------------------------------- #
+# plaita#151：**环境变量值**进日志前的唯一渲染（#168 判定表 C 类「环境投影」）
+# --------------------------------------------------------------------------- #
+# 判据来源（#168 `docs/log-site-taxonomy.md` §3 的 C 类第三格）：
+#
+#   「环境变量**值**（env 投影：插值变量在所在函数内赋值自 ``os.environ`` /
+#     ``os.getenv``）⇒ 必须掩」
+#
+# 与 B 类的分界是「env 变量**名**允许、env 变量**值**必须掩」。值得注意的形态是
+# 各处的 `_*_from_env()`：它们的日志文案是「你把 X 配成了非法值，回退默认」——
+# 诊断价值在于**「配错了」**这一事实与值的**形状**（不是数字 / 有多长），而不是值
+# 的原文。原实现用 ``%r``/``%s`` 回显 ``raw``：一份被误置成 ``access_token=…`` 或
+# 直接就是凭据本体的环境变量会被原样写进 stderr / 日志收集器（#151 探针实测 7/7
+# 站点把密钥明文送进 ``record.args``）。
+#
+# #151 的验收口径是「去掉作者数据（改为**长度/形态/计数**）」，故这里**不**回显任何
+# 原文片段（连掩码后的残片也不给——env 值没有「端点」那种必须保留的诊断锚点），
+# 只给「长度 + 形态」这一对结构事实：
+#
+#   ``_redact_env_value("abc")``   -> ``<env:text len=3>``
+#   ``_redact_env_value("8080")``  -> ``<env:int len=4>``
+#   ``_redact_env_value("12.5")``  -> ``<env:number len=4>``
+#   ``_redact_env_value("")``      -> ``<env:empty>``
+#
+# **与掩码语法的关系**：这不是新的一套掩码文法（#88 的根因形态是「同一个 URL 两套
+# 渲染」）；它是一条**恒等去值**规则，不解析内容、不做形状匹配，因此不存在「两个
+# 实现分叉」的余地。凭据形状的值本来也轮不到它——那些走 :func:`_mask_url_for_log`
+# / :func:`_scrub_url_text`。
+#
+# **total**（与本模块其余渲染器同一判据）：任何输入都返回 ``str``，绝不抛、绝不
+# 退回原文；``str()`` / ``len()`` 失败各自退化为具名常量。
+_ENV_INT_RE = re.compile(r"[+-]?\d+")
+_ENV_NUMBER_RE = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
+
+
+def _redact_env_value(value: object) -> str:
+    """环境变量**值** → 进日志的形态描述（绝不回显值本体；``#151``）。"""
+    if value is None:
+        return "<env:unset>"
+    try:
+        text = value if isinstance(value, str) else str(value)
+    except Exception:  # noqa: BLE001 — fail-closed：渲染失败不得炸调用方
+        # 刻意不回显异常文本（它可能带着刚被拒绝的值）。
+        logger.debug("环境变量值无法字符串化，退化为安全常量")
+        return "<env:unrenderable>"
+    stripped = text.strip()
+    if not stripped:
+        return "<env:empty>"
+    try:
+        length = len(text)
+    except Exception:  # noqa: BLE001 — __len__ 可被作者覆写
+        logger.debug("环境变量值长度不可测量，退化为安全常量")
+        return "<env:unrenderable>"
+    if _ENV_INT_RE.fullmatch(stripped):
+        shape = "int"
+    elif _ENV_NUMBER_RE.fullmatch(stripped):
+        shape = "number"
+    else:
+        shape = "text"
+    return f"<env:{shape} len={length}>"
 
 
 # --------------------------------------------------------------------------- #
@@ -563,9 +670,9 @@ def _mask_relative_url_ref(ref: str) -> str:
     已经是掩码形态（``/***/***?***``）才算合法的幂等不动点，否则退化为
     :data:`UNPRINTABLE_URL`。
 
-    #165：超长引用（> :data:`_MAX_CLEAN_INPUT`）直接退化常量。
+    #165：超长引用（> :data:`_MAX_CLEAN_INPUT`）直接退化常量（触发必响亮）。
     """
-    if not _within_clean_budget(ref):
+    if not _enforce_clean_budget(ref, "relative_url_ref"):
         return UNPRINTABLE_URL
     try:
         parts = urlsplit(ref)
@@ -888,7 +995,7 @@ def _render_absolute_url_ref(token: str) -> str:
     密集的长 token 是超二次的），直接退化常量；累计预算由 :func:`_scrub_url_text`
     在替换器里扣减。
     """
-    if not _within_clean_budget(token):
+    if not _enforce_clean_budget(token, "absolute_url_ref"):
         return UNPRINTABLE_URL
     primary = _mask_policy_url(token)
     if _render_is_usable(token, primary):
@@ -988,7 +1095,7 @@ def _scrub_url_text(text: object) -> str:
             token = match.group(0)
             budget[0] -= len(token)
             if budget[0] < 0:
-                logger.debug("URL 清洗累计预算用尽（#165），退化为安全常量")
+                _record_cap_trip("scrub_budget", len(text), _MAX_SCRUB_URL_CHARS)
                 return UNPRINTABLE_URL
             return _render_absolute_url_ref(token)
 
@@ -1009,6 +1116,77 @@ def _scrub_url_text(text: object) -> str:
         logger.debug("清洗结果无法编码为 UTF-8，退化为安全常量")
         return UNPRINTABLE_URL
     return scrubbed
+
+
+# --------------------------------------------------------------------------- #
+# plaita#166：**执行表示**里的凭据值（控制台 / 导出等读面）
+# --------------------------------------------------------------------------- #
+# 为什么需要这一层（与上面那一段的分工）：
+#
+# * ``_scrub_url_text`` / ``_scrub_exception_text`` 处理的是**一段文本**——日志出口；
+# * ``$INPUT`` / checkpoint 是**结构化数据**：凭据既可能落在「键名就叫
+#   ``api_key``/``password``」的格子里，也可能藏在某个字符串值的 URL 里。
+#   本函数把结构化数据当结构走，两件事都用**上面同一套**判据与清洗器做，
+#   不新起第二套文法（``#88`` 的根因形态正是「同一个 URL 两套渲染」）。
+
+#: 凭据键的**整个值**被换成的占位——与日志面同一词汇（``***``）。
+REDACTED_VALUE = "***"
+#: 结构递归的深度上限：越界即把该子树整棵换成占位（fail-closed，绝不回明文）。
+_REDACT_MAX_DEPTH = 64
+
+
+def _redact_value(obj: object, depth: int) -> object:
+    """:func:`redact_credential_values` 的单层实现（递归主体）。"""
+    if depth > _REDACT_MAX_DEPTH:
+        return REDACTED_VALUE
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            if isinstance(key, str) and _is_credential_key(key):
+                # 整棵子树换占位：``credentials`` / ``auth`` 这类键下面挂什么，
+                # 读面都不再展示（键名保留，看得出抹的是哪一个）。
+                out[key] = REDACTED_VALUE
+            else:
+                out[key] = _redact_value(value, depth + 1)
+        return out
+    if isinstance(obj, (list, tuple)):
+        items = [_redact_value(item, depth + 1) for item in obj]
+        return tuple(items) if isinstance(obj, tuple) else items
+    if isinstance(obj, str):
+        return _scrub_url_text(obj)
+    return obj
+
+
+def redact_credential_values(obj: object) -> object:
+    """执行表示（读面副本）里的凭据**值**换占位——``plaita#166``。
+
+    为什么是「值」而不是「键」：``$INPUT`` 是**功能数据**（flow 要用它），改键名
+    会改语义与形状（调用方按名取值）；键名保留则「看得出被抹的是哪个参数」。
+    功能副本（队列载体、worker 侧 ``$INPUT``、盘上 checkpoint）**一字未动**——
+    本函数只作用于读面**构造出来的副本**（见调用方：不传盘上对象本体）。
+
+    判据与日志面同源，不新起第二套：
+
+    * ``dict``：键名命中 :func:`_is_credential_key` ⇒ 整棵子树换
+      :data:`REDACTED_VALUE`；否则递归；
+    * ``list`` / ``tuple``：逐项递归（类型保持）；
+    * ``str``：过 :func:`_scrub_url_text`——URL userinfo 口令、path/query 凭据、
+      ``凭据键=值`` 的裸运行都在这一趟里；
+    * 其余标量（``int`` / ``bool`` / ``None`` …）：原样返回。
+
+    **不改入参**：返回新对象；盘上/内存里的功能副本是调用方的，本函数既不持有
+    也不写它（这条由 ``tests/console`` 的 ``test_redaction_does_not_mutate_its_input``
+    与载体形状用例钉住）。
+
+    **total**（与 ``_mask_webhook_url`` 同一判据）：任何输入都不抛——递归越界、
+    非预期类型、清洗异常一律退化为占位，**绝不**退回明文，也绝不上抛到读面。
+    """
+    try:
+        return _redact_value(obj, 0)
+    except Exception:  # noqa: BLE001 — fail-closed：脱敏失败不得炸读面，更不能回明文
+        # 刻意不记 exc_info：异常文本可能带着刚被抹掉的明文（同 ``_safe_render``）。
+        logger.warning("执行表示脱敏失败，整棵表示退化为占位")
+        return REDACTED_VALUE
 
 
 def _scrub_exception_text(exc: object) -> str:

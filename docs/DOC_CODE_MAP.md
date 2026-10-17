@@ -1,6 +1,6 @@
 # 文档 ↔ 代码映射表
 
-> 最后更新：2026-10-13  
+> 最后更新：2026-10-17  
 > 用途：改代码后按「代码路径模式」匹配，判断是否需要同步文档。
 >
 > **范围说明**：本表是**定向索引**，不是 `docs-site/` 的全量清单——只登记"改了对应代码
@@ -35,6 +35,7 @@
 | `MIGRATION.md` | `plaita/**`, `plaita-ai/**` | 破坏性 API / 安全默认值变更 |
 | `docs/archive/CODE_REVIEW-pre-0.5.md` | — | **已归档**，勿再更新；新审查另开文档 |
 | `README.MD` | `plaita/__init__.py`, `pyproject.toml` | 版本、extras、快速上手示例变更 |
+| `docs-site/docs/reference/configuration.md` | `pyproject.toml` `[project.optional-dependencies]`（extras 权威清单）, `pyproject.toml` `[project.entry-points]`, `pyproject.toml` `[tool.pytest.ini_options]` / `[tool.coverage.*]` | **extras 增删改**（该页 extras 表是对 `pyproject.toml` 的手工复述，`tests/unit/test_docs_extras_sync.py` 逐行比对）；entry_points 节点插件增删；测试/覆盖率配置与本页数值段变更 |
 | `.github/workflows/ci.yml` | `scripts/ci-gate.sh`, `pyproject.toml` `[tool.coverage.*]` | CI 门禁步骤或覆盖率阈值变更 |
 | `plaita-console/backend/auth.py` / `config.py` / `main.py` | `plaita-console/backend/**`, `plaita-console/frontend/src/services/api.ts` | 管理面 Admin API Key、契约 HMAC fail-closed、dry-run 危险节点闸门；Admin/Contract OpenAPI 分面与 README |
 | `plaita-console/README.md` | `plaita-console/backend/main.py`, `plaita-console/backend/api/**` | API 分面说明、鉴权表、Swagger tag |

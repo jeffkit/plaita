@@ -387,6 +387,7 @@ def _publish_flow(client, headers, flow_id, tenant_header=None):
                        headers=h).status_code == 200
 
 
+@pytest.mark.needs_form_parser
 def test_contract_per_tenant_secret_and_global_compat(client, monkeypatch):
     from plaita.client import generate_signature
 

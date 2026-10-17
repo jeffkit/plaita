@@ -39,9 +39,11 @@ ALLOWED_SILENT = {
     # plaita#29（js 接入档位体系 / 语言白名单：docstring 段、模块常量与 JS runner
     # 模板段插入）后再整体下移 81：427→508, 458→539, 466→547；随后 `run_js` 补
     # unsafe 档 docstring（+9）到 517/548/556，位点未变。
-    ("node/code.py", 517),
-    ("node/code.py", 548),
-    ("node/code.py", 556),
+    #
+    # 2026-10-17 W19-A（plaita#151 表外 exc_info 面：顶层 import `_scrub_exception_text`
+    # 再插入 1 行）后这三条**又一次**漂移到 518/549/557。按本文件既有结论（行号条目
+    # 只会「看着绿」），三条改走行号无关的 ALLOWED_SILENT_FINGERPRINTS（见下方
+    # `proc.kill()` / `proc.communicate(timeout=1)` 两条），行号清单不再登记这三处。
     # 2026-10-07 沙箱生命周期回调条件装配：plaita-nodes 是可选依赖，缺装 / 无沙箱
     # 注册表 / 装配失败都返回 None（非沙箱部署零行为变化），异常细节不影响主流程。
     # plaita#22 沙箱白名单接线（`_code_allowed_backends_for_worker` 插入）后整体下移 12：
@@ -146,9 +148,13 @@ ALLOWED_SILENT_FINGERPRINTS = {
     # #81（2026-10-16 落地）node Redis 客户端 LRU(8) 淘汰最旧连接时的 close：
     # best-effort 关闭，close 失败不破坏连接池与请求路径（淘汰本身已达容量目标）。
     "evicted.close() | except Exception: | pass",
-    # #93（2026-10-16 落地）error 落盘接线的明细渲染：redacted() 渲染异常时
-    # 返回 None（放弃明细）——明细丢失绝不能拖垮终态化（交付方 docstring 原话）。
-    "view = render() | except Exception: | return None",
+    # node/code.py `_kill_process_tree` 的两条 best-effort（2026-10-17 W19-A 从
+    # 行号清单迁来，原 517/548/556 → 518/549/557）：强杀进程组后 macOS/Windows
+    # 无 /proc 复核直接 `proc.kill()`；取消/超时路径 `communicate(timeout=1)`
+    # 收尸时若组外残留进程握住管道会再超时——输出已不可得，直接放弃。
+    # 异常细节不影响「进程组已被杀」这一主结果。
+    "proc.kill() | except Exception: | pass",
+    "proc.communicate(timeout=1) | except Exception: | pass",
 }
 
 

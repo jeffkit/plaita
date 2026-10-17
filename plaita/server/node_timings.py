@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from plaita.core.callback import FlowCallback
+from plaita.core.url_redaction import _scrub_exception_text
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,9 @@ def _node_label(node: object) -> str:
     node_type = type(node).__name__
     try:
         return f"{node_type}(id={node.id!s})"
-    except Exception:  # noqa: BLE001 — 标签构造失败也必须能告警
+    except Exception as exc:  # noqa: BLE001 — 标签构造失败也必须能告警
         # 不外抛：调用方正在告警路径上（观测代码不得把执行带崩）。
-        logger.debug("节点标签构造失败，退回类型名", exc_info=True)
+        logger.debug("节点标签构造失败，退回类型名: %s", _scrub_exception_text(exc))
         return f"<{node_type}>"
 
 
@@ -68,8 +69,8 @@ class NodeTimingCallback(FlowCallback):
     def on_node_start(self, flow, node, **kwargs) -> None:  # noqa: ARG002 — 回调契约
         try:
             self._open[str(node.id)] = self._clock()
-        except Exception:  # noqa: BLE001 — 观测失败绝不影响执行
-            logger.warning("节点耗时采集 on_node_start 失败: %s", _node_label(node), exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — 观测失败绝不影响执行
+            logger.warning("节点耗时采集 on_node_start 失败: %s: %s", _node_label(node), _scrub_exception_text(exc))
 
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:  # noqa: ARG002
         try:
@@ -82,8 +83,8 @@ class NodeTimingCallback(FlowCallback):
                 return
             ended = self._clock()
             self._record(node_id, started, ended, max(0, int((ended - started) * 1000)), error or exception)
-        except Exception:  # noqa: BLE001
-            logger.warning("节点耗时采集 on_node_end 失败: %s", _node_label(node), exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("节点耗时采集 on_node_end 失败: %s: %s", _node_label(node), _scrub_exception_text(exc))
 
     def _record(
         self,

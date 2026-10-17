@@ -4,35 +4,35 @@
     "file": "plaita/core/context.py",
     "kind": "fresh-register",
     "kwargs": "",
-    "line": 351
+    "line": 395
   },
   "plaita/core/context.py::ExecutionContext.evaluate::note_fresh_object::pos1::kw[]::#1": {
     "callee": "note_fresh_object",
     "file": "plaita/core/context.py",
     "kind": "fresh-register",
     "kwargs": "",
-    "line": 355
+    "line": 399
   },
   "plaita/core/context.py::ExecutionContext.evaluate::self.evaluate::pos1::kw[]": {
     "callee": "self.evaluate",
     "file": "plaita/core/context.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 350
+    "line": 394
   },
   "plaita/core/context.py::ExecutionContext.evaluate::self.evaluate::pos1::kw[]::#1": {
     "callee": "self.evaluate",
     "file": "plaita/core/context.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 354
+    "line": 398
   },
   "plaita/core/context.py::ExecutionContext.setup_flow::_snapshot_value::pos1::kw[]": {
     "callee": "_snapshot_value",
     "file": "plaita/core/context.py",
     "kind": "materialise",
     "kwargs": "",
-    "line": 317
+    "line": 361
   },
   "plaita/core/context.py::_resolve_expression_string::evaluator.evaluate::pos3::kw[]": {
     "callee": "evaluator.evaluate",
@@ -53,49 +53,56 @@
     "file": "plaita/core/executor.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 376
+    "line": 401
   },
   "plaita/core/executor.py::FlowExecution.execute::self.run_compatible::pos2::kw[]": {
     "callee": "self.run_compatible",
     "file": "plaita/core/executor.py",
     "kind": "child-input",
     "kwargs": "",
-    "line": 468
+    "line": 493
   },
   "plaita/core/expression_parser.py::ExpressionParser._compile_variable.thunk::parser.evaluate::pos3::kw[]": {
     "callee": "parser.evaluate",
     "file": "plaita/core/expression_parser.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1806
+    "line": 3054
   },
   "plaita/core/expression_parser.py::ExpressionParser.parse_function::self.evaluate::pos3::kw[]": {
     "callee": "self.evaluate",
     "file": "plaita/core/expression_parser.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 2089
+    "line": 3409
   },
   "plaita/core/expression_parser.py::_detach_alias::note_fresh_closure::pos1::kw[]": {
     "callee": "note_fresh_closure",
     "file": "plaita/core/expression_parser.py",
     "kind": "fresh-register",
     "kwargs": "",
-    "line": 1210
+    "line": 2451
   },
   "plaita/core/expression_parser.py::_note_fresh_result::note_fresh_closure::pos1::kw[]": {
     "callee": "note_fresh_closure",
     "file": "plaita/core/expression_parser.py",
     "kind": "fresh-register",
     "kwargs": "",
-    "line": 991
+    "line": 1286
   },
   "plaita/core/expression_parser.py::_note_fresh_result::note_fresh_object::pos1::kw[]": {
     "callee": "note_fresh_object",
     "file": "plaita/core/expression_parser.py",
     "kind": "fresh-register",
     "kwargs": "",
-    "line": 995
+    "line": 1290
+  },
+  "plaita/core/expression_parser.py::_note_scratch_read::note_scratch_object::pos1::kw[]": {
+    "callee": "note_scratch_object",
+    "file": "plaita/core/expression_parser.py",
+    "kind": "fresh-register",
+    "kwargs": "",
+    "line": 1253
   },
   "plaita/core/flow.py::Flow.arun::Call.arun_compatible::pos3::kw[]": {
     "callee": "Call.arun_compatible",
@@ -130,28 +137,28 @@
     "file": "plaita/core/state.py",
     "kind": "materialise",
     "kwargs": "",
-    "line": 583
+    "line": 945
   },
   "plaita/core/state.py::CheckpointState.to_checkpoint_dict::_snapshot_value::pos1::kw[]": {
     "callee": "_snapshot_value",
     "file": "plaita/core/state.py",
     "kind": "materialise",
     "kwargs": "",
-    "line": 549
+    "line": 911
   },
   "plaita/core/state.py::CheckpointState.update_node_result::_snapshot_value::pos1::kw[]": {
     "callee": "_snapshot_value",
     "file": "plaita/core/state.py",
     "kind": "materialise",
     "kwargs": "",
-    "line": 661
+    "line": 1023
   },
   "plaita/core/state.py::_LazyRootSnapshot.__getitem__::_snapshot_value::pos1::kw[]": {
     "callee": "_snapshot_value",
     "file": "plaita/core/state.py",
     "kind": "materialise",
     "kwargs": "",
-    "line": 216
+    "line": 472
   },
   "plaita/io.py::evaluate::Call.evaluate::pos3::kw[]": {
     "callee": "Call.evaluate",
@@ -354,70 +361,70 @@
     "file": "plaita/node/event_node.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 114
+    "line": 133
   },
   "plaita/node/http.py::HTTP._build_response_result::execution.evaluate::pos1::kw[]": {
     "callee": "execution.evaluate",
     "file": "plaita/node/http.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 1154
+    "line": 1418
   },
   "plaita/node/http.py::HTTP.parse_addressing::evaluate::pos2::kw[]": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1256
+    "line": 1520
   },
   "plaita/node/http.py::HTTP.parse_addressing::evaluate::pos2::kw[]::#1": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1262
+    "line": 1526
   },
   "plaita/node/http.py::HTTP.parse_body::evaluate::pos2::kw[]": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1277
+    "line": 1541
   },
   "plaita/node/http.py::HTTP.parse_delegate::evaluate::pos2::kw[]": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1234
+    "line": 1498
   },
   "plaita/node/http.py::HTTP.parse_delegate::evaluate::pos2::kw[]::#1": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1240
+    "line": 1504
   },
   "plaita/node/http.py::HTTP.parse_header::evaluate::pos2::kw[]": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1305
+    "line": 1569
   },
   "plaita/node/http.py::HTTP.parse_query::evaluate::pos2::kw[]": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1288
+    "line": 1552
   },
   "plaita/node/http.py::HTTP.parse_url::evaluate::pos2::kw[]": {
     "callee": "evaluate",
     "file": "plaita/node/http.py",
     "kind": "explore-scope",
     "kwargs": "",
-    "line": 1317
+    "line": 1581
   },
   "plaita/node/loop.py::BaseCollectionNode._eval_collection::_snapshot_value::pos1::kw[]": {
     "callee": "_snapshot_value",
@@ -557,21 +564,21 @@
     "file": "plaita/node/redis.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 32
+    "line": 80
   },
   "plaita/node/redis.py::RedisNode.execute::execution.evaluate::pos1::kw[]::#1": {
     "callee": "execution.evaluate",
     "file": "plaita/node/redis.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 54
+    "line": 82
   },
   "plaita/node/redis.py::RedisNode.execute::execution.evaluate::pos1::kw[]::#2": {
     "callee": "execution.evaluate",
     "file": "plaita/node/redis.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 53
+    "line": 81
   },
   "plaita/server/nodes/approval_node.py::ApprovalNode._resolve_value::execution.evaluate::pos1::kw[]": {
     "callee": "execution.evaluate",
@@ -592,7 +599,7 @@
     "file": "plaita/server/nodes/http_callback_node.py",
     "kind": "state-scope",
     "kwargs": "",
-    "line": 230
+    "line": 241
   },
   "plaita/server/nodes/kafka_queue_node.py::KafkaQueueNode._resolve_value::execution.evaluate::pos1::kw[]": {
     "callee": "execution.evaluate",

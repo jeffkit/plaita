@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from redis import Redis
 
 from ..logger import logger
+from plaita.core.url_redaction import _scrub_exception_text
 
 
 class ServiceInfo:
@@ -201,7 +202,7 @@ class ServiceRegistry:
             return True
             
         except Exception as e:
-            logger.error("服务注册失败: %s", e, exc_info=True)
+            logger.error("服务注册失败: %s", _scrub_exception_text(e))
             return False
     
     def unregister(self, service_type: str, instance_id: str) -> bool:
@@ -235,7 +236,7 @@ class ServiceRegistry:
             return True
             
         except Exception as e:
-            logger.error("服务注销失败: %s", e, exc_info=True)
+            logger.error("服务注销失败: %s", _scrub_exception_text(e))
             return False
     
     def heartbeat(self, service_info: ServiceInfo) -> bool:
@@ -273,7 +274,7 @@ class ServiceRegistry:
             return True
             
         except Exception as e:
-            logger.error("心跳失败: %s", e, exc_info=True)
+            logger.error("心跳失败: %s", _scrub_exception_text(e))
             return False
     
     def start_heartbeat(self, service_info: ServiceInfo):
@@ -370,7 +371,7 @@ class ServiceRegistry:
             return None
             
         except Exception as e:
-            logger.error("获取服务信息失败: %s", e, exc_info=True)
+            logger.error("获取服务信息失败: %s", _scrub_exception_text(e))
             return None
     
     def list_services(
@@ -399,7 +400,7 @@ class ServiceRegistry:
             return services
             
         except Exception as e:
-            logger.error("列出服务失败: %s", e, exc_info=True)
+            logger.error("列出服务失败: %s", _scrub_exception_text(e))
             return []
     
     def get_service_types(self) -> List[str]:
@@ -433,7 +434,7 @@ class ServiceRegistry:
             return list(service_types)
             
         except Exception as e:
-            logger.error("获取服务类型失败: %s", e, exc_info=True)
+            logger.error("获取服务类型失败: %s", _scrub_exception_text(e))
             return []
 
 

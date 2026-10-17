@@ -24,6 +24,7 @@ from .exceptions import EventError, EventNotFoundError, EventTimeoutError
 from .utils import normalize_event
 
 from plaita.logger import logger
+from plaita.core.url_redaction import _scrub_exception_text
 
 class MemoryEventStorage(EventStorage):
     """
@@ -57,7 +58,12 @@ class MemoryEventStorage(EventStorage):
                          start_time: Optional[float] = None,
                          end_time: Optional[float] = None,
                          limit: int = 100) -> List[Event]:
-        """列出事件"""
+        """列出事件（按 ``(timestamp, event_id)`` 全局升序，最多 ``limit`` 条）。
+
+        与 ``RedisEventStorage.list_events`` 同一返回契约（#79）：跨类型/跨索引
+        顺序一致，``EventReconciler`` 的续扫游标语义依赖这个序（见 #85）。
+        过滤用 ``is not None`` 而不是真值判断——``0.0`` 是合法时间戳。
+        """
         async with self.lock:
             result = []
             event_ids = []
@@ -68,22 +74,23 @@ class MemoryEventStorage(EventStorage):
                 event_ids = list(self.events.keys())
             
             for event_id in event_ids:
-                if len(result) >= limit:
-                    break
-                    
                 event = self.events.get(event_id)
                 if not event:
                     continue
                     
-                if start_time and event.timestamp < start_time:
+                if start_time is not None and event.timestamp < start_time:
                     continue
                     
-                if end_time and event.timestamp > end_time:
+                if end_time is not None and event.timestamp > end_time:
                     continue
                     
                 result.append(event)
             
-            return result
+            # 与 Redis 后端同序：调用方（回扫游标）按这个序推进。
+            # **先排序再截断**——按插入顺序截断会让 limit 取到「最早插入的
+            # limit 条」而不是「时间最早的 limit 条」，跨后端语义不一致。
+            result.sort(key=lambda e: (e.timestamp, e.event_id))
+            return result[:limit]
     
     async def delete_event(self, event_id: str) -> bool:
         """删除事件"""
@@ -443,7 +450,7 @@ class InMemoryEventBus(EventBus):
                 try:
                     await self._process_event(handler, event, handler_id)
                 except Exception as e:
-                    logger.error("处理事件 %s 出错: %s", event.event_id, e, exc_info=True)
+                    logger.error("处理事件 %s 出错: %s", event.event_id, _scrub_exception_text(e))
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
         """处理事件并记录结果；成功后才 mark 去重。"""

@@ -325,10 +325,19 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
 - **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
   不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
   为重复启动而永不执行。键按租户隔离，7 天过期。
-- **调度服务是唯一的自动加键方**（#23）：`fire_schedule`（cron 循环与 console
-  「立即触发」共用）以确定性键 `sched:{schedule_id}:{触发时点秒}` 入队——
-  同一次到期的消息重派/重投收敛到同一 execution，不产生平行执行；下一次
-  cron 到期时间戳不同，不会被误吞。手动 `POST /executions` 仍不自动加键。
+- **调度服务是唯一的自动加键方**（#23 引入，#118 修正基准）：`fire_schedule`
+  （cron 循环与 console「立即触发」共用）入队的键：
+  - cron → `sched:{schedule_id}:due:{due_ms}`，`due_ms` = **本次到期时点**
+    `next_run_at`（epoch 毫秒）。同一个 due 无论被触发几次（状态回写失败 +
+    30s 互斥锁过期重触发、消息 XCLAIM 重派）都得到同一个键，重派/重投收敛到
+    同一 execution，不产生平行执行；不同 due 的键必然不同，下一周期不会被误吞。
+    旧版键取「触发墙钟秒」，同一个 due 的两次触发落在不同秒即成两个键，双跑。
+  - manual → `sched:{schedule_id}:manual:{ns}-{seq}`，每次调用唯一，与 cron 的
+    键空间不相交——手动「立即触发」是显式要求再跑一次，不得与 cron 同秒互相吞并。
+  - cron 且既无 `due_at` 也无可用 `next_run_at` 时降级为
+    `sched:{schedule_id}:fired:{墙钟秒}` 并 warning（调度循环会先自愈
+    `next_run_at`，该路径只在定义缺失且调用方未传 due 时可达）。
+  手动 `POST /executions` 仍不自动加键。
 
 
 ## 职责

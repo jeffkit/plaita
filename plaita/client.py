@@ -15,6 +15,7 @@ except ImportError as _req_err:  # pragma: no cover - 取决于安装的 extras
     _REQUESTS_IMPORT_ERROR = _req_err
 
 from plaita.core.flow import Flow
+from plaita.core.url_redaction import _scrub_url_text
 
 # PlaitaClient 错误类型: 历史上网络/HTTP/业务失败全部抛裸 Exception,
 # 调用方无法分类捕获。新异常类型均继承 Exception, 老的 ``except Exception`` 不受影响。
@@ -202,7 +203,7 @@ class PlaitaClient:
             self._redis_client = redis.Redis(**config.to_dict())
             self._validate_redis_connection()
         except Exception as e:
-            logger.warning("初始化 Redis 客户端失败: %s", e)
+            logger.warning("初始化 Redis 客户端失败: %s", _scrub_url_text(e))
             self._redis_client = None
             self._redis_available = False
     
@@ -223,7 +224,7 @@ class PlaitaClient:
             logger.info("Redis 连接验证成功")
             return True
         except Exception as e:
-            logger.warning("Redis 连接验证失败: %s", e)
+            logger.warning("Redis 连接验证失败: %s", _scrub_url_text(e))
             self._redis_available = False
             return False
     
@@ -284,7 +285,7 @@ class PlaitaClient:
                         self.memory_cache[cache_key] = flow_obj
                     return flow_obj
             except Exception as e:
-                logger.warning("从 Redis 获取缓存失败: %s", e)
+                logger.warning("从 Redis 获取缓存失败: %s", _scrub_url_text(e))
 
         # 3. 从远程服务获取
         logger.debug("从远程服务获取流程: %s", cache_key)
@@ -322,7 +323,7 @@ class PlaitaClient:
                 )
                 logger.debug("已更新 Redis 缓存: %s, TTL: %ss", cache_key, self.redis_ttl)
             except Exception as e:
-                logger.warning("更新 Redis 缓存失败: %s", e)
+                logger.warning("更新 Redis 缓存失败: %s", _scrub_url_text(e))
     
     def clear_cache(self, flow_id: Optional[str] = None, version: Optional[str] = None) -> int:
         """
@@ -349,7 +350,7 @@ class PlaitaClient:
                 try:
                     self._redis_client.delete(cache_key)
                 except Exception as e:
-                    logger.warning("清除 Redis 缓存失败: %s", e)
+                    logger.warning("清除 Redis 缓存失败: %s", _scrub_url_text(e))
         elif flow_id:
             # 只给 flow_id 不给 version: 只清该 flow 的所有版本。
             # 历史上这里落入"清空全部"分支, 部分指定参数的语义变成了全清。
@@ -367,7 +368,7 @@ class PlaitaClient:
                         self._redis_client.delete(*keys)
                         cleared_count += len(keys)
                 except Exception as e:
-                    logger.warning("清除 Redis 缓存失败: %s", e)
+                    logger.warning("清除 Redis 缓存失败: %s", _scrub_url_text(e))
             logger.info("已清除 flow %s 的 %s 个缓存项", flow_id, cleared_count)
         else:
             # 清除所有缓存

@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from plaita.core.url_redaction import _scrub_exception_text
+
 logger = logging.getLogger(__name__)
 
 TENANT_STATUS_KEY = "plaita:tenant_status"
@@ -28,8 +30,8 @@ def publish_tenant_status(redis_client, tenant_id: Optional[str], status: str) -
         return
     try:
         redis_client.hset(TENANT_STATUS_KEY, key=tenant_id, value=status)
-    except Exception:  # noqa: BLE001 — 同步失败不阻断 console 主流程
-        logger.warning("租户 %s 状态同步到 Redis 失败", tenant_id, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — 同步失败不阻断 console 主流程
+        logger.warning("租户 %s 状态同步到 Redis 失败: %s", tenant_id, _scrub_exception_text(exc))
 
 
 def clear_tenant_status(redis_client, tenant_id: Optional[str]) -> None:
@@ -38,8 +40,8 @@ def clear_tenant_status(redis_client, tenant_id: Optional[str]) -> None:
         return
     try:
         redis_client.hdel(TENANT_STATUS_KEY, tenant_id)
-    except Exception:  # noqa: BLE001
-        logger.warning("租户 %s 状态清理失败", tenant_id, exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("租户 %s 状态清理失败: %s", tenant_id, _scrub_exception_text(exc))
 
 
 def tenant_is_active(redis_client, tenant_id: Optional[str]) -> bool:
@@ -48,8 +50,8 @@ def tenant_is_active(redis_client, tenant_id: Optional[str]) -> bool:
         return True
     try:
         raw = redis_client.hget(TENANT_STATUS_KEY, tenant_id)
-    except Exception:  # noqa: BLE001 — Redis 抖动不误伤全租户
-        logger.warning("读取租户 %s 状态失败，按 active 处理", tenant_id, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — Redis 抖动不误伤全租户
+        logger.warning("读取租户 %s 状态失败，按 active 处理: %s", tenant_id, _scrub_exception_text(exc))
         return True
     if raw is None:
         return True

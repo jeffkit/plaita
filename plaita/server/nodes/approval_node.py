@@ -8,6 +8,7 @@ from pydantic import AliasChoices, Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
+from plaita.core.url_redaction import _scrub_url_text
 
 # 无人审批的兜底终态：审批节点不设订阅超时则永久 suspended（控制面/指标都
 # 无从发现——#56 的另一半）。缺省 24h 后由 event_filter 的
@@ -197,7 +198,7 @@ class ApprovalNode(BaseExtendedNode):
                 resolved = execution.evaluate(value)
                 return resolved if resolved is not None else value
             except Exception as e:
-                logger.warning("解析变量引用失败 %s: %s", value, e)
+                logger.warning("解析变量引用失败 %s: %s", value, _scrub_url_text(e))
                 return value
         
         return value

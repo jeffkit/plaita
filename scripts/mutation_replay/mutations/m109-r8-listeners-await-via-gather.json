@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_r8_parity.py::Test109R8VacuousProperties::test_listener_stop_does_not_use_gather"
   ],
-  "old": "        if listeners:\n            try:\n                await asyncio.wait(\n                    listeners, timeout=DISPATCH_DRAIN_TIMEOUT_SECONDS)\n            except asyncio.CancelledError:\n                raise\n            except Exception as exc:             # noqa: BLE001 - 关停序列不卡在这\n                logger.warning(\"事件总线关停：等待监听任务落地时异常: %s\", exc)",
+  "old": "        if listeners:\n            try:\n                await asyncio.wait(\n                    listeners, timeout=DISPATCH_DRAIN_TIMEOUT_SECONDS)\n            except asyncio.CancelledError:\n                raise\n            except Exception as exc:             # noqa: BLE001 - 关停序列不卡在这\n                logger.warning(\"事件总线关停：等待监听任务落地时异常: %s\", _scrub_url_text(exc))",
   "new": "        if listeners:\n            try:\n                await asyncio.gather(*listeners, return_exceptions=True)\n            except asyncio.CancelledError:\n                raise\n            except Exception as exc:             # noqa: BLE001 - 关停序列不卡在这\n                logger.warning(\"事件总线关停：等待监听任务落地时异常: %s\", exc)"
 }

@@ -31,6 +31,7 @@ from .loop import BaseCollectionNode, Filter, Find, Loop, Map, Reduce, While
 from .mock import Mock
 from .start import Start
 from .http import HTTP
+from plaita.core.url_redaction import _scrub_exception_text
 
 _logger = logging.getLogger(__name__)
 
@@ -80,6 +81,9 @@ class NodeRegistry:
     ) -> None:
         self._nodes: Dict[str, Type[Node]] = {}
         self._discovered = False
+        # #98：加载失败的插件现场（ep.name -> 异常）。发现不再"静默吞掉"——
+        # 解析期可据此把「节点类型不存在」纠正为「插件在、但加载失败」。
+        self._load_errors: Dict[str, BaseException] = {}
         if parent is not None:
             self._nodes.update(parent._nodes)
         self._register_builtins()
@@ -138,6 +142,14 @@ class NodeRegistry:
                 )
             elif close:
                 hint = f" Did you mean {close!r}?"
+            # #98：该类型本应由插件提供、但插件加载失败——别把它归因为拼写
+            # 错误，直接把真实失败原因（缺模块 / import 期异常）带出去。
+            load_error = self._load_errors.get(node_type)
+            if load_error is not None:
+                hint += (
+                    f" The node plugin {node_type!r} is registered but failed to load: "
+                    f"{type(load_error).__name__}: {load_error}."
+                )
             hint += f" Available node types: {available}"
             raise RuntimeError(f"unRecognized node type: {node_type}.{hint}")
         content = node_dict.copy()
@@ -151,6 +163,10 @@ class NodeRegistry:
         """Return an independent shallow copy of this registry."""
         new = NodeRegistry.__new__(NodeRegistry)
         new._nodes = dict(self._nodes)
+        # #98：发现状态与失败现场随副本走——否则副本上 discover()/parse_node()
+        # 会在缺失属性上抛 AttributeError。
+        new._discovered = self._discovered
+        new._load_errors = dict(self._load_errors)
         return new
 
     def __contains__(self, node_type: str) -> bool:
@@ -170,32 +186,62 @@ class NodeRegistry:
         # Python 3.9 returns a dict-like SelectableGroups from entry_points().
         # Test mocks may patch entry_points to return a flat list directly.
         import sys
-        if sys.version_info >= (3, 10):
-            eps = entry_points(group="plaita.nodes")
-        else:
-            raw = entry_points()
-            if hasattr(raw, "get"):
-                # Python 3.9 SelectableGroups / dict API
-                eps = raw.get("plaita.nodes", [])
+        try:
+            if sys.version_info >= (3, 10):
+                eps = entry_points(group="plaita.nodes")
             else:
-                # Flat iterable (e.g. test mock returns [ep, ...] directly)
-                eps = raw
+                raw = entry_points()
+                if hasattr(raw, "get"):
+                    # Python 3.9 SelectableGroups / dict API
+                    eps = raw.get("plaita.nodes", [])
+                else:
+                    # Flat iterable (e.g. test mock returns [ep, ...] directly)
+                    eps = raw
+        except Exception as exc:
+            # #98：importlib.metadata 层面的失败也必须留证（以前它不在 try 内、
+            # 直接冒出且 _discovered 已置位 ⇒ 本进程永久放弃发现）。异常文本经
+            # `_scrub_exception_text` 清洗后并入 `%s`，不再用 `exc_info=True`
+            # —— Formatter 会用 exc_info 重新渲染 traceback（末行是 str(exc)），
+            # 绕过清洗（#151 日志卫生族）。
+            _logger.warning(
+                "Node plugin discovery failed: entry_points('plaita.nodes') raised: %s",
+                _scrub_exception_text(exc),
+            )
+            raise
         for ep in eps:
             try:
                 node_cls = ep.load()
                 self._nodes[node_cls.node_type] = node_cls
-            except Exception:
-                _logger.warning("Failed to load node plugin: %s", ep.name)
+                self._load_errors.pop(ep.name, None)
+            except Exception as exc:
+                # #98：保留失败现场（异常对象 + traceback），日志不再只有插件名。
+                self._load_errors[ep.name] = exc
+                # #151 C 类（收口批②）：**摘掉 exc_info**（Formatter 会用 exc_info 重新渲染
+                # traceback，末行是 str(exc)，绕过清洗）⇒ 异常文本改走单份清洗后的字符串。
+                _logger.warning(
+                    "Failed to load node plugin: %s (%s): %s",
+                    ep.name,
+                    getattr(ep, "value", ""),
+                    _scrub_exception_text(exc),
+                )
 
     def discover(self) -> "NodeRegistry":
         """Lazily discover node plugins via ``plaita.nodes`` entry points.
 
-        Idempotent: only scans on the first call for this registry instance.
+        Idempotent: only scans on the first **successful** call for this
+        registry instance. A scan that raises (``entry_points()`` itself
+        failing) leaves the registry undiscovered so the next call retries —
+        #98: a transient environment failure must not freeze the node set for
+        the lifetime of the process.
         """
         if self._discovered:
             return self
+        try:
+            self._discover_entry_points()
+        except Exception:
+            self._discovered = False
+            raise
         self._discovered = True
-        self._discover_entry_points()
         return self
 
 
@@ -242,6 +288,8 @@ def init_default_registry(*extra_nodes: Type[Node], auto_discover: bool = True) 
     reg = _default_registry
     reg._nodes.clear()
     reg._discovered = False
+    # #98：显式重建即重试——上一轮的失败现场不应残留成误导性的解析提示。
+    reg._load_errors.clear()
     reg._register_builtins()
     if auto_discover:
         reg.discover()

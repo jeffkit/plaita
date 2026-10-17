@@ -33,9 +33,16 @@ from plaita.event.redis import RedisEventBus
 _SHARED_SERVER = fakeredis.FakeServer()
 
 
-async def _fake_from_url(url):
-    """initialize() 的 from_url 打桩：共享 FakeServer 的 fakeredis 客户端。"""
-    return fakeredis.aioredis.FakeRedis(server=_SHARED_SERVER)
+async def _fake_from_url(url, **kwargs):
+    """initialize() 的 from_url 打桩：共享 FakeServer 的 fakeredis 客户端。
+
+    #79（整合期对齐）：``RedisEventStorage.initialize()`` 现在显式传
+    ``decode_responses=True``。桩必须与真实 ``redis.asyncio.from_url``
+    **同签名**（接受并透传关键字），否则 #79 的生产建连配置在本文件里根本
+    跑不到，桩反而先撞成一条假的 ``TypeError``。关键字原样透传给 FakeRedis，
+    解码语义与真实客户端一致——**不动任何断言**。
+    """
+    return fakeredis.aioredis.FakeRedis(server=_SHARED_SERVER, **kwargs)
 
 
 async def _publish_from_remote_bus(event_type, **data):
@@ -83,8 +90,9 @@ class TestWaitForEventLocalPubsub(unittest.IsolatedAsyncioTestCase):
             async def get_message(self, **kw):
                 return None
 
-        async def _bad_from_url(_url):
-            client = fakeredis.aioredis.FakeRedis(server=_SHARED_SERVER)
+        async def _bad_from_url(_url, **kwargs):
+            # 同 `_fake_from_url`：#79 起 initialize() 传 decode_responses=True
+            client = fakeredis.aioredis.FakeRedis(server=_SHARED_SERVER, **kwargs)
             client.pubsub = lambda: _BoomPubSub()
             return client
 

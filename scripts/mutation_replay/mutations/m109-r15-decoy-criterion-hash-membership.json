@@ -8,6 +8,6 @@
     "tests/unit/test_issue109_110_r15_parity.py::Test109R15DecoyShapesAreNamedAndBounded::test_evil_future_decoy_in_the_spawn_window_is_named_and_bounded",
     "tests/unit/test_issue109_110_r15_parity.py::Test109R15DecoyShapesAreNamedAndBounded::test_evil_future_decoy_swapped_directly_at_the_spawn_window"
   ],
-  "old": "    if field is None or field is future:\n        return False\n    try:\n        ref = _ACCEPTED_CLOSE_FUTURE_REFS.get(id(field))\n        return not (ref is not None and ref() is field)\n    except BaseException as exc:                 # noqa: BLE001 - 见 docstring：按非凭据处理\n        logger.debug(\"事件总线关停：身份索引查找失败（按非凭据处理）: %r\", exc)\n        return False\n",
+  "old": "    if field is None or field is future:\n        return False\n    try:\n        ref = _ACCEPTED_CLOSE_FUTURE_REFS.get(id(field))\n        return not (ref is not None and ref() is field)\n    except BaseException as exc:                 # noqa: BLE001 - 见 docstring：按非凭据处理\n        logger.debug(\"事件总线关停：身份索引查找失败（按非凭据处理）: %s\", _scrub_url_text(exc))\n        return False\n",
   "new": "    if field is None or field is future:\n        return False\n    return field not in _ACCEPTED_CLOSE_FUTURES  # mutation: 回到按对象自身 hash 的 WeakSet 成员判定\n"
 }

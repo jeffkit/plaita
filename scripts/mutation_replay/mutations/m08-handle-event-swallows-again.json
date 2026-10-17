@@ -1,12 +1,12 @@
 {
-  "name": "m08-handle-event-swallows-again",
-  "issue": "85",
-  "concern": "S3",
-  "file": "plaita/server/event_filter.py",
-  "rationale": "handle_event 重新吞掉异常 → 回扫器看不到回放失败（失败被越过、永久丢）",
-  "expect_fail": [
-    "tests/unit/test_issue85_reconcile_hardening.py::TestS3ReplayFailureVisible::test_enqueue_failure_is_visible_and_retried"
-  ],
-  "old": "            logger.error(\"处理事件出错: %s\", e, exc_info=True)\n            raise",
-  "new": "            logger.error(\"处理事件出错: %s\", e, exc_info=True)"
+ "name": "m08-handle-event-swallows-again",
+ "issue": "85",
+ "concern": "S3",
+ "file": "plaita/server/event_filter.py",
+ "rationale": "handle_event 重新吞掉异常 → 回扫器看不到回放失败（失败被越过、永久丢）",
+ "expect_fail": [
+  "tests/unit/test_issue85_reconcile_hardening.py::TestS3ReplayFailureVisible::test_enqueue_failure_is_visible_and_retried"
+ ],
+ "old": "            logger.error(\"处理事件出错: %s\", _scrub_exception_text(e))\n            # #153：失败必须对调用方可观察——回扫器据此**不推进游标**、改计\n            # `last_rejected`（plaita/server/event_reconcile.py:scan_once）。推送\n            # 链路是 fire-and-forget，由 event/redis.py 的 `_process_event` /\n            # `_process_with_retry` 在上一层接收（记 error 尝试 + 重试），不会逃逸\n            # 成\"Task exception was never retrieved\"。\n            raise",
+ "new": "            logger.error(\"处理事件出错: %s\", e, exc_info=True)\n            # #153 mutation: 吞掉异常，恢复「回扫器不可观察」的旧语义\n            pass"
 }

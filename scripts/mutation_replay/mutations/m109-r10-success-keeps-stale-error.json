@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_r10_parity.py::Test109R10ErrorPairConsistency::test_retry_success_clears_previous_error"
   ],
-  "old": "            logger.debug(\"事件总线关停：teardown 任务异常已取用: %r\", exception)\n            return\n        self._teardown_task_error = None\n        self._teardown_error_kind = None\n",
+  "old": "            logger.debug(\"事件总线关停：teardown 任务异常已取用: %s\", _scrub_url_text(exception))\n            return\n        self._teardown_task_error = None\n        self._teardown_error_kind = None\n",
   "new": "            logger.debug(\"事件总线关停：teardown 任务异常已取用: %r\", exception)\n            return\n        pass  # mutation: 正常完成不清空上一轮留档\n"
 }

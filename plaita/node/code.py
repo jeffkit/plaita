@@ -95,6 +95,7 @@ from typing import Any, ClassVar, FrozenSet, Optional
 from pydantic import model_validator
 
 from plaita import subprocess_env as _env
+from plaita.core.url_redaction import _scrub_exception_text
 
 from .basic import Node
 
@@ -131,8 +132,8 @@ def _docker_available() -> bool:
             ["docker", "info"], capture_output=True, timeout=5,
         )
         return proc.returncode == 0
-    except Exception:
-        logger.debug("docker daemon probe failed", exc_info=True)
+    except Exception as exc:
+        logger.debug("docker daemon probe failed: %s", _scrub_exception_text(exc))
         return False
 
 JS_FUNC_NAME = "run"
@@ -681,8 +682,8 @@ def _run_docker_container(container_name, cmd, timeout, cancel_event,
                 ["docker", "rm", "-f", container_name],
                 capture_output=True, timeout=15,
             )
-        except Exception:
-            logger.debug("docker rm -f %s failed", container_name, exc_info=True)
+        except Exception as exc:
+            logger.debug("docker rm -f %s failed: %s", container_name, _scrub_exception_text(exc))
         raise
 
     stdout = out.decode(errors="replace") if out else ""

@@ -34,6 +34,8 @@ import threading
 from contextvars import ContextVar
 from typing import Any, Optional
 
+from plaita.core.url_redaction import _scrub_exception_text
+
 logger_name = "plaita.core.http_session"
 
 _flow_session_var: ContextVar[Optional[Any]] = ContextVar(
@@ -74,11 +76,11 @@ async def open_flow_session() -> None:
         return
     try:
         import aiohttp
-    except Exception:  # noqa: BLE001 - http extra 未安装：整块 no-op（debug 留痕）
+    except Exception as exc:  # noqa: BLE001 - http extra 未安装：整块 no-op（debug 留痕）
         import logging
 
         logging.getLogger(logger_name).debug(
-            "aiohttp unavailable; flow http session scope is a no-op", exc_info=True,
+            "aiohttp unavailable; flow http session scope is a no-op: %s", _scrub_exception_text(exc),
         )
         return
     jar = None if _cookies_enabled() else aiohttp.DummyCookieJar()
@@ -96,11 +98,11 @@ async def close_flow_session() -> None:
     if session is not None and not session.closed:
         try:
             await session.close()
-        except Exception:  # noqa: BLE001 - 关闭失败不掩盖流程结果
+        except Exception as exc:  # noqa: BLE001 - 关闭失败不掩盖流程结果
             import logging
 
             logging.getLogger(logger_name).debug(
-                "flow http session close failed", exc_info=True,
+                "flow http session close failed: %s", _scrub_exception_text(exc),
             )
 
 

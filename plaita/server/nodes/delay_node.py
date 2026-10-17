@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 
 from .base_extended_node import BaseExtendedNode
 from ...logger import logger
+from plaita.core.url_redaction import _scrub_url_text
 
 
 class DelayNode(BaseExtendedNode):
@@ -92,7 +93,7 @@ class DelayNode(BaseExtendedNode):
                     logger.warning("延迟时间变量引用解析失败，使用默认值: %s", self.delay_seconds)
                     return 60  # 默认60秒
             except Exception as e:
-                logger.error("解析延迟时间变量引用时出错: %s", e)
+                logger.error("解析延迟时间变量引用时出错: %s", _scrub_url_text(e))
                 return 60  # 默认60秒
         
         return float(self.delay_seconds)

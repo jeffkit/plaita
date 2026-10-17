@@ -957,7 +957,8 @@ class TestEnvResolutionLogging(TestCase):
             if original is not None:
                 os.environ[EXPR_MAX_RESULT_SIZE_ENV] = original
 
-    def test_invalid_env_warns_with_name_and_value(self):
+    def test_invalid_env_warns_with_name_and_shape_not_value(self):
+        """plaita#151：非法值时记**变量名 + 值的形态**，不回显值本体（判定表 C 类）。"""
         import os
 
         original = os.environ.get(EXPR_MAX_RESULT_SIZE_ENV)
@@ -965,8 +966,12 @@ class TestEnvResolutionLogging(TestCase):
             os.environ[EXPR_MAX_RESULT_SIZE_ENV] = "abc"
             with self.assertLogs("plaita.core.expression", level="WARNING") as logs:
                 self.assertEqual(100_000, _resolve_positive_int(EXPR_MAX_RESULT_SIZE_ENV, 100_000))
-            self.assertTrue(any(EXPR_MAX_RESULT_SIZE_ENV in line and "abc" in line
-                                for line in logs.output), logs.output)
+            joined = "\n".join(logs.output)
+            self.assertIn(EXPR_MAX_RESULT_SIZE_ENV, joined, logs.output)
+            # 形态在（丢 _redact_env_value 的变异点在这里红）
+            self.assertIn("<env:text len=3>", joined, logs.output)
+            # 值本体不在（"把值直接 %s 回去"的变异点在这里红）
+            self.assertNotIn("abc", joined, logs.output)
         finally:
             if original is None:
                 os.environ.pop(EXPR_MAX_RESULT_SIZE_ENV, None)
@@ -3326,11 +3331,13 @@ _RENDER_SITES = {
         "bounded", None,
         "int.__repr__ C 槽 + bit_length() <= 64 判定；>64bit 只报位数（H3/M4）"),
     ("plaita/core/expression.py", "_resolve_positive_int", "log:warning",
-     '"%s=%r 非法，回退默认 %d"'): (
+     '"%s=%s 非法，回退默认 %d"'): (
         "excluded", None,
-        "环境变量名/值来自进程环境（启动期，非评估作者数据），%r 只回显配置串"),
+        "环境变量名来自进程环境（名字，允许）；**值**自 plaita#151 起经 "
+        "_redact_env_value 只留长度/形态（判定表 C 类「env 投影」必须掩），"
+        "不再回显配置串"),
     ("plaita/core/expression.py", "_resolve_positive_int", "log:warning",
-     '"%s=%r 非正，回退默认 %d"'): (
+     '"%s=%s 非正，回退默认 %d"'): (
         "excluded", None, "同 _resolve_positive_int 的非法分支"),
     # --- expression_parser.py --------------------------------------------
     ("plaita/core/expression_parser.py", "_warn_suspicious_literal", "log:warning",
@@ -3423,6 +3430,16 @@ _RENDER_SITES = {
      '_MAPPING_VIEW_PROBE_FAILED_TEMPLATE.format( func=func_name, type_name=type(value).__name__)'): (
         'excluded', None,
         "#69 拒绝消息模板（_MUTATOR_*/_MAPPING_VIEW_*）：插值 func 名/实参位/静态路径渲染/类型名，均来自静态表达式源，非运行期结果数据"),
+    # 收口批②（2026-10-17）：#25 批次新增的 scratch-aliased 拒绝模板 —— **同族补登记**。
+    # 与上面 6 条 `_MUTATOR_*`/`_MAPPING_VIEW_*` 同一裁定理由：`path=` 传的是
+    # `root_key`（声明式 scratch 绑定的**静态路径**）、`root=` 传的是
+    # `aliased[0]`（**别名根名**）；两者都来自表达式源/绑定声明，**不是运行期结果数据**。
+    # 站点：`_note_scratch_read` L1253（`_live_alias_index()` 命中别名时 raise）。
+    ('plaita/core/expression_parser.py', '_note_scratch_read', 'method:format',
+     '_SCRATCH_ALIASED_TEMPLATE.format(path=root_key, root=aliased[0])'): (
+        'excluded', None,
+        "#25 scratch 别名拒绝模板：插值静态 scratch 路径（root_key）与别名根名（aliased[0]），"
+        "均来自表达式源/绑定声明，非运行期结果数据（同 _MUTATOR_*/_MAPPING_VIEW_* 族）"),
     ('plaita/core/expression_parser.py', '_engine_mapping_view', 'method:format',
      '_MAPPING_VIEW_SPOOFED_TEMPLATE.format( func=func_name, type_name=type(value).__name__)'): (
         'excluded', None,

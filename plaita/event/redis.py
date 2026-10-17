@@ -200,17 +200,17 @@ def _accept_close_future(future: "asyncio.Future") -> None:
     try:
         _ACCEPTED_CLOSE_FUTURE_REFS[id(future)] = weakref.ref(future)
     except BaseException as exc:                 # noqa: BLE001 - 登记层不可信即不登记
-        logger.debug("事件总线关停：登记受理凭据身份索引失败（只影响钉回判据）: %r", exc)
+        logger.debug("事件总线关停：登记受理凭据身份索引失败（只影响钉回判据）: %s", _scrub_url_text(exc))
     try:
         _ACCEPTED_CLOSE_FUTURES.add(future)      # 留档：只写不读
     except BaseException as exc:                 # noqa: BLE001 - 留档失败不影响判定
-        logger.debug("事件总线关停：登记受理凭据留档失败（忽略）: %r", exc)
+        logger.debug("事件总线关停：登记受理凭据留档失败（忽略）: %s", _scrub_url_text(exc))
     try:
         for stale in [key for key, ref in _ACCEPTED_CLOSE_FUTURE_REFS.items()
                       if ref() is None]:
             _ACCEPTED_CLOSE_FUTURE_REFS.pop(stale, None)
     except BaseException as exc:                 # noqa: BLE001 - 纯清理路径
-        logger.debug("事件总线关停：清理身份索引陈旧条目失败（忽略）: %r", exc)
+        logger.debug("事件总线关停：清理身份索引陈旧条目失败（忽略）: %s", _scrub_url_text(exc))
 
 
 def _is_factory_decoy(field: "Any", future: "asyncio.Future") -> bool:
@@ -231,7 +231,7 @@ def _is_factory_decoy(field: "Any", future: "asyncio.Future") -> bool:
         ref = _ACCEPTED_CLOSE_FUTURE_REFS.get(id(field))
         return not (ref is not None and ref() is field)
     except BaseException as exc:                 # noqa: BLE001 - 见 docstring：按非凭据处理
-        logger.debug("事件总线关停：身份索引查找失败（按非凭据处理）: %r", exc)
+        logger.debug("事件总线关停：身份索引查找失败（按非凭据处理）: %s", _scrub_url_text(exc))
         return False
 
 
@@ -267,7 +267,7 @@ def _round_owns(round_: "_TeardownRound", task: "asyncio.Task") -> bool:
         ref = round_.task_ref
         return ref is not None and ref() is task
     except BaseException as exc:                 # noqa: BLE001 - 留档层不可信即判不匹配
-        logger.debug("事件总线关停：复核受理凭据身份失败（按不匹配处理）: %r", exc)
+        logger.debug("事件总线关停：复核受理凭据身份失败（按不匹配处理）: %s", _scrub_url_text(exc))
         return False
 
 # ``request_close`` 会落到 spawn 返回值上的**全部**方法（#109 r11/B）。任何一项被 Task
@@ -288,7 +288,7 @@ def _swallow_task_result(task: "asyncio.Task") -> None:
         if not asyncio.Task.cancelled(task):
             asyncio.Task.exception(task)
     except BaseException as exc:                 # noqa: BLE001 - 纯清理路径
-        logger.debug("事件总线关停：取用被拒任务的异常失败（忽略）: %r", exc)
+        logger.debug("事件总线关停：取用被拒任务的异常失败（忽略）: %s", _scrub_url_text(exc))
 
 
 def _guarded(what: str, fn: Callable, *args):
@@ -300,7 +300,7 @@ def _guarded(what: str, fn: Callable, *args):
     try:
         return True, fn(*args)
     except BaseException as exc:                 # noqa: BLE001 - 调用不可信即判否
-        logger.debug("事件总线关停：%s 失败（视为不可信）: %r", what, exc)
+        logger.debug("事件总线关停：%s 失败（视为不可信）: %s", what, _scrub_url_text(exc))
         return False, None
 
 
@@ -325,8 +325,8 @@ def _purge_instance_method_shadows(task: "asyncio.Task") -> Optional[str]:
         except AttributeError:
             continue
         except BaseException as exc:             # noqa: BLE001 - 不可信即判否
-            logger.debug("事件总线关停：清除实例方法影子 %s 失败（视为不可信）: %r",
-                         name, exc)
+            logger.debug("事件总线关停：清除实例方法影子 %s 失败（视为不可信）: %s",
+                         name, _scrub_url_text(exc))
             return name
         logger.debug("事件总线关停：清除实例方法影子 %s（受理前）", name)
         return name
@@ -642,6 +642,7 @@ from .core import (
     EventSubscriptionStorage, EventProcessingTracker, RetryPolicy
 )
 from .exceptions import EventError, EventNotFoundError, EventStorageError, EventTimeoutError
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 
 class RedisEventStorage(EventStorage):
@@ -672,6 +673,13 @@ class RedisEventStorage(EventStorage):
         绑定首次使用的循环——跨步骤复用会拿到已关闭循环上的连接，表现为
         随机的 "Event loop is closed"（2026-09 分布式评审 P0-1：约每两次
         挂起失败一次并丢单）。按循环重建客户端 + 刷新 asyncio.Lock。
+
+        #79：自建的生产客户端**显式解码**。redis-py 默认
+        ``decode_responses=False``，zset member / mget 载荷都是 bytes；旧代码把
+        bytes ``event_id`` 直接 f-string 进 ``events:{id}`` 键（变成
+        ``...:b'<uuid>'``），mget 全 miss ⇒ ``list_events`` 恒返回空、事件回扫
+        整条补偿链是死代码。显式解码从建连侧治本；外部注入的 bytes 客户端由
+        ``_as_str`` 归一化兜底（两条都要，后者也覆盖测试/共用连接池）。
         """
         loop = asyncio.get_running_loop()
         # 只重建**由本类创建**的客户端（_redis_loop 已登记）；外部注入的
@@ -682,7 +690,9 @@ class RedisEventStorage(EventStorage):
             and self._redis_loop is not loop
         )
         if self.redis is None or own_client_stale:
-            self.redis = await aioredis.from_url(self.redis_url)
+            self.redis = await aioredis.from_url(
+                self.redis_url, decode_responses=True
+            )
             self._redis_loop = loop
             # 旧循环上的连接交由 GC 回收：跨循环 aclose 会触碰死循环的
             # socket，反而报错。
@@ -745,113 +755,149 @@ class RedisEventStorage(EventStorage):
             raise EventError(f"解析事件数据失败: {e}")
     
     @staticmethod
-    def _zset_member_ids(event_ids) -> List[str]:
-        """把 ``zrangebyscore`` 返回的 member 归一化为 ``str``。
+    def _as_str(value) -> str:
+        """把 zset member / scan key 归一化为 ``str``（bytes 客户端也安全）。
 
-        #109/#110（验收者补的相邻缺陷）：``initialize()`` 用
-        ``aioredis.from_url(url)``（``decode_responses=False``，redis-py 默认），
-        ``zrangebyscore`` / ``scan`` 返回 **bytes**。此前直接
-        ``f"{prefix}events:{event_id}"`` 会拼出 ``...events:b'<id>'``，mget 永远
-        落空 ⇒ ``list_events`` 在**生产连接配置下两个分支都返回空**（fakeredis
-        ``decode_responses=False`` 已复现：显式类型 []、全量 []）。显式归一化后
-        无论连接是否解码都正确。
+        ``move to module level``：``decode_responses=False``（生产
+        ``aioredis.from_url`` 默认）下 ``zrangebyscore`` / ``scan`` 返回
+        **bytes**。旧代码把 bytes ``event_id`` 直接 f-string 进
+        ``f"{prefix}events:{event_id}"``（变成 ``...events:b'<uuid>'``），与
+        ``store_event`` 写入的 str 键不符，mget 全 miss ⇒ ``list_events`` 在
+        生产连接配置下**恒返回空**（fakeredis 已复现：显式类型 []、全量 []）。
         """
-        return [
-            eid.decode("utf-8") if isinstance(eid, (bytes, bytearray)) else str(eid)
-            for eid in event_ids
-        ]
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8")
+        return str(value)
+
+    @staticmethod
+    def _zset_member_ids(event_ids) -> List[str]:
+        """把 ``zrangebyscore`` 返回的 member 归一化为 ``str``（见 :meth:`_as_str`）。
+
+        #79 起 ``list_events`` 直接逐条走 :meth:`_as_str`；本方法作为兼容 shim
+        保留（#109/#110 曾以它为归一化点，外部私有调用方仍可用）。
+        """
+        return [RedisEventStorage._as_str(eid) for eid in event_ids]
+
+    async def _scan_type_keys(self) -> List[str]:
+        """列出全部事件类型索引键（``types:*``），归一化为 ``str`` 并去重。
+
+        ``decode_responses=False``（生产 ``aioredis.from_url`` 默认）下 ``scan``
+        返回 ``bytes``；这里显式解码，调用方不必再关心连接是否解码。
+        """
+        prefix = f"{self.key_prefix}types:"
+        keys: List[str] = []
+        seen: Set[str] = set()
+        cursor = 0
+        while True:
+            cursor, batch = await self.redis.scan(
+                cursor, match=f"{prefix}*", count=100
+            )
+            for raw in batch:
+                key = self._as_str(raw)
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+            if cursor == 0:
+                break
+        return keys
+
+    async def _zrange_entries(
+        self, type_keys: List[str], min_score, max_score, limit: int,
+    ) -> List[tuple]:
+        """把每个类型索引的前 ``limit`` 条 ``(score, event_id)`` 并起来。
+
+        #79：**不再只遍历前 10 个类型**。每个类型各取 ``limit`` 条就足以复原
+        「全类型里最早的 ``limit`` 条」——任何类型里第 ``limit + 1`` 早的条目都
+        不可能进入全局前 ``limit``，因此这样并合并不会漏条目。
+        """
+        found: List[tuple] = []
+        for type_key in type_keys:
+            entries = await self.redis.zrangebyscore(
+                type_key, min_score, max_score, 
+                start=0, num=limit, withscores=True
+            )
+            for member, score in entries:
+                found.append((float(score), self._as_str(member)))
+        return found
 
     async def list_events(self, event_type: Optional[str] = None, 
                          start_time: Optional[float] = None,
                          end_time: Optional[float] = None,
                          limit: int = 100) -> List[Event]:
-        """列出事件"""
-        await self.initialize()
-        
-        result = []
-        
-        # 如果指定了事件类型，则只搜索该类型
-        if event_type:
-            type_key = f"{self.key_prefix}types:{event_type}"
-            
-            # 构建时间范围
-            min_score = start_time if start_time is not None else "-inf"
-            max_score = end_time if end_time is not None else "+inf"
-            
-            # 使用ZRANGEBYSCORE查询指定时间范围内的事件ID
-            event_ids = await self.redis.zrangebyscore(
-                type_key, min_score, max_score, 
-                start=0, num=limit
-            )
-            
-            # 批量获取事件数据
-            if event_ids:
-                event_keys = [
-                    f"{self.key_prefix}events:{event_id}"
-                    for event_id in self._zset_member_ids(event_ids)
-                ]
-                event_data_list = await self.redis.mget(*event_keys)
-                
-                for event_data in event_data_list:
-                    if event_data:
-                        try:
-                            result.append(Event.model_validate_json(event_data))
-                        except Exception:
-                            logger.warning("skipping unparseable event payload in mget batch", exc_info=True)
-        else:
-            type_keys = []
-            cursor = 0
-            while True:
-                cursor, keys = await self.redis.scan(cursor, match=f"{self.key_prefix}types:*", count=100)
-                type_keys.extend(keys)
-                if cursor == 0:
-                    break
-            
-            type_prefix = f"{self.key_prefix}types:"
-            for type_key in type_keys[:10]:
-                type_key_str = type_key.decode('utf-8') if isinstance(type_key, bytes) else type_key
-                # #110/F3：按**已知前缀**剥离 event_type，而不是 split(':')[-1]——
-                # 后者在 event_type 自身含 ':' 时取到截断值（`order:created` →
-                # `created`），重建的 type key 落空 ⇒ 该类型事件**静默丢失**
-                # （fakeredis 复现：全量只回 'plain'，'order:created' 消失）。
-                if type_key_str.startswith(type_prefix):
-                    event_type = type_key_str[len(type_prefix):]
-                else:
-                    event_type = type_key_str
-                
-                # 修复: 直接使用单类型查询逻辑而不是递归调用
-                sub_limit = max(1, limit // len(type_keys))
-                type_key = f"{self.key_prefix}types:{event_type}"
-                
-                # 构建时间范围
-                min_score = start_time if start_time is not None else "-inf"
-                max_score = end_time if end_time is not None else "+inf"
-                
-                # 使用ZRANGEBYSCORE查询指定时间范围内的事件ID
-                event_ids = await self.redis.zrangebyscore(
-                    type_key, min_score, max_score, 
-                    start=0, num=sub_limit
-                )
-                
-                # 批量获取事件数据
-                if event_ids:
-                    event_keys = [
-                        f"{self.key_prefix}events:{event_id}"
-                        for event_id in self._zset_member_ids(event_ids)
-                    ]
-                    event_data_list = await self.redis.mget(*event_keys)
-                    
-                    for event_data in event_data_list:
-                        if event_data:
-                            try:
-                                result.append(Event.model_validate_json(event_data))
-                            except Exception:
-                                logger.warning("skipping unparseable event payload in paged mget", exc_info=True)
+        """列出事件（跨类型按 ``(timestamp, event_id)`` 全局升序，最多 ``limit`` 条）。
 
-                if len(result) >= limit:
-                    break
-        
-        return result[:limit]
+        #79 返回完整性契约：
+
+        * **所有**事件类型都参与——旧实现 ``type_keys[:10]`` 让第 11 个起的
+          类型整类消失（12 类型各 1 条、``limit=200`` 只回 10 条）；
+        * 配额按**全局**最早 ``limit`` 条算——旧实现每类型
+          ``max(1, limit // len(type_keys))`` 条，早事件落在后面的类型时取不到；
+        * 结果是全局时间有序的（旧实现按**类型扫描顺序**拼接，跨类型乱序）——
+          ``EventReconciler`` 的续扫游标语义依赖这条（见 #85）。
+
+        ``decode_responses=False`` 与 ``True`` 两种客户端都受支持：zset member
+        显式解码后再拼 ``events:{id}`` 键（bytes 拼键曾让本函数在生产连接配置下
+        恒返回空；归一化由 :meth:`_as_str` 统一保证）。
+        """
+        await self.initialize()
+        if limit <= 0:
+            return []
+
+        min_score = start_time if start_time is not None else "-inf"
+        max_score = end_time if end_time is not None else "+inf"
+
+        if event_type:
+            type_keys = [f"{self.key_prefix}types:{event_type}"]
+        else:
+            type_keys = await self._scan_type_keys()
+        if not type_keys:
+            return []
+
+        entries = await self._zrange_entries(
+            type_keys, min_score, max_score, limit=limit
+        )
+        # 同一 event_id 理论上只属于一个类型索引；防御性去重（保留最早 score）。
+        by_id: Dict[str, float] = {}
+        for score, event_id in entries:
+            current = by_id.get(event_id)
+            if current is None or score < current:
+                by_id[event_id] = score
+
+        selected = sorted(
+            ((event_id, score) for event_id, score in by_id.items()),
+            key=lambda item: (item[1], item[0]),
+        )[:limit]
+        if not selected:
+            return []
+
+        event_keys = [
+            f"{self.key_prefix}events:{event_id}" for event_id, _score in selected
+        ]
+        event_data_list = await self.redis.mget(*event_keys)
+
+        result: List[Event] = []
+        for (event_id, _score), event_data in zip(selected, event_data_list):
+            if not event_data:
+                # #79：索引里有 member 但载荷缺失（过期/被逐出/半写）是数据面
+                # 损坏——必须**响亮**（ERROR）而不是静默跳过，否则运维看不到
+                # 回扫正在丢事件。
+                logger.error(
+                    "事件存储: 索引成员载荷缺失（已过期/被逐出/半写）: "
+                    "event_id=%s key=%s",
+                    event_id, f"{self.key_prefix}events:{event_id}",
+                )
+                continue
+            try:
+                result.append(Event.model_validate_json(event_data))
+            except Exception as exc:
+                logger.warning(
+                    "skipping unparseable event payload in mget batch: %s",
+                    _scrub_exception_text(exc),
+                )
+
+        # 以载荷里的时间戳为权威再排一次（与 zset score 理论一致；防御分数漂移）。
+        result.sort(key=lambda event: (event.timestamp, event.event_id))
+        return result
     
     async def delete_event(self, event_id: str) -> bool:
         """删除事件"""
@@ -1332,7 +1378,7 @@ class RedisProcessingTracker(EventProcessingTracker):
                     removed += 1
             except (ValueError, TypeError) as e:
                 # 处理解析错误
-                logger.warning("清理记录时出错: %s, key=%s", e, key_str)
+                logger.warning("清理记录时出错: %s, key=%s", _scrub_url_text(e), key_str)
         
         return removed
     
@@ -1525,7 +1571,7 @@ class RedisEventBus(EventBus):
         except asyncio.CancelledError:
             raise
         except Exception as exc:                 # noqa: BLE001 - 关停序列不因 drain 卡住
-            logger.warning("事件总线关停：等待在飞分发时异常（继续关停）: %s", exc)
+            logger.warning("事件总线关停：等待在飞分发时异常（继续关停）: %s", _scrub_url_text(exc))
             return
         for task in still:
             event_id, handler_id = self._pending_tasks.get(task, (None, None))
@@ -1722,7 +1768,7 @@ class RedisEventBus(EventBus):
                                     future.set_result(event)
                                 break
                         except Exception as e:
-                            logger.warning("解析事件数据失败: %s", e)
+                            logger.warning("解析事件数据失败: %s", _scrub_url_text(e))
 
                     # 检查future是否已完成（可能来自其他来源）
                     if future.done():
@@ -1737,12 +1783,12 @@ class RedisEventBus(EventBus):
                 # 取消订阅并关闭本次等待者自己的 pubsub
                 try:
                     await pubsub.unsubscribe(f"plaita:events:{event_type}")
-                except Exception:
-                    logger.warning("wait_for_event 取消订阅失败", exc_info=True)
+                except Exception as exc:
+                    logger.warning("wait_for_event 取消订阅失败: %s", _scrub_exception_text(exc))
                 try:
                     await pubsub.aclose()
-                except Exception:
-                    logger.warning("wait_for_event 关闭 pubsub 失败", exc_info=True)
+                except Exception as exc:
+                    logger.warning("wait_for_event 关闭 pubsub 失败: %s", _scrub_exception_text(exc))
         
         # 启动监听器
         listen_task = asyncio.create_task(listen_for_event())
@@ -1950,7 +1996,7 @@ class RedisEventBus(EventBus):
             )
             raise
         except Exception as e:
-            logger.warning("处理事件消息失败: %s", e)
+            logger.warning("处理事件消息失败: %s", _scrub_url_text(e))
     
     async def _process_event(self, handler: EventHandler, event: Event, handler_id: str) -> None:
         """处理事件并记录结果；成功后才 mark 去重。"""
@@ -1966,7 +2012,7 @@ class RedisEventBus(EventBus):
                 event.event_id, handler_id, "error", str(e)
             )
             # fire-and-forget task：吞掉异常，避免 "Task exception was never retrieved"
-            logger.warning("handler %s 处理事件 %s 失败: %s", handler_id, event.event_id, e)
+            logger.warning("handler %s 处理事件 %s 失败: %s", handler_id, event.event_id, _scrub_url_text(e))
     
     async def _process_with_retry(self, handler: EventHandler, event: Event, 
                                 handler_id: str, retry_policy: RetryPolicy) -> None:
@@ -2421,17 +2467,34 @@ class RedisEventBus(EventBus):
         （那会命中 R-1 的长等）。
         """
         for live in asyncio.all_tasks():
-            if asyncio.Task.get_coro(live) is coro:
+            # 同 #181：读纯 Python 属性而不调 C 的 `get_coro()`（`all_tasks()` 按语义
+            # 只含**未完成**任务 ⇒ 此处本不会命中那形状，但同一文件内保持同一读取通道，
+            # 避免"这里为什么不一样"的再犯；语义完全等价）。
+            if getattr(live, "_coro", None) is coro:
                 return live
         candidate = self._teardown_entry_task
         if not isinstance(candidate, asyncio.Task):
             return None
         try:
-            owns_ours = asyncio.Task.get_coro(candidate) is coro
-            finished = (asyncio.Task.done(candidate)
-                        and asyncio.Task.get_coro(candidate) is None)
+            # #181：`asyncio.Task` 是 **C 实现**（`_asyncio.Task`，不可 monkeypatch），
+            # 其 `get_coro()` 在「**已结束且 coro 已回收**」（`_state == 'FINISHED'` 且
+            # `_coro is None`）的 Task 上会**段错误**（进程信号，不是异常）⇒ Python 层
+            # `except BaseException` 结构上够不着（实测 Python 3.12 必现 5/5）。
+            # 而这个形状**正是本函数 docstring 声明要接受的**「eager 同步跑完的真实形状」
+            # ⇒ 崩溃发生在**接受分支**上。
+            # 修法：**先读纯 Python 属性** `_coro` / `_state`（属性读取不走 C 方法），
+            # 判定完再决定是否触碰 C 层；`done()` 仅在 `_state` 不可得时兜底调用。
+            # **只替换掉危险的那一个调用**：`get_coro()`（C 方法，在「终态且 coro 已回收」
+            # 的形状上段错误）⇒ 改读纯 Python 属性 `_coro`。
+            # 终态判据**仍用 `done()`**：它是 C 方法但**只读 `_state`、不解引用 coro**，
+            # 在坏对象上是安全的；而它**覆盖全部终态**（`FINISHED` / `CANCELLED` / 将来新增），
+            # 不再靠枚举私有 `_state` 字面量 —— 后者正是上一版「语义收窄」的来源
+            # （okguitar 审计 ③：`done() ⟺ FINISHED|CANCELLED`，我只认了 FINISHED）。
+            _coro = getattr(candidate, "_coro", None)
+            owns_ours = _coro is coro
+            finished = (asyncio.Task.done(candidate) and _coro is None)
         except BaseException as exc:             # noqa: BLE001 - 候选不可信即弃用
-            logger.debug("事件总线关停：读取候选 teardown 句柄失败（弃用）: %r", exc)
+            logger.debug("事件总线关停：读取候选 teardown 句柄失败（弃用）: %s", _scrub_url_text(exc))
             return None
         return candidate if (owns_ours or finished) else None
 
@@ -2448,7 +2511,7 @@ class RedisEventBus(EventBus):
             coro.close()
         except Exception as exc:                 # noqa: BLE001 - 已在失败路径上
             logger.debug(
-                "事件总线关停：关闭未启动的 teardown coroutine 失败（忽略）: %s", exc)
+                "事件总线关停：关闭未启动的 teardown coroutine 失败（忽略）: %s", _scrub_url_text(exc))
 
     def _close_entry_coro_if_unstarted(self, coro) -> None:
         """入口 coroutine **从未启动**时才 ``close()``（#109 r11/A1、A2、B）。
@@ -2462,7 +2525,7 @@ class RedisEventBus(EventBus):
         try:
             state = inspect.getcoroutinestate(coro)
         except Exception as exc:                 # noqa: BLE001 - 纯清理路径
-            logger.debug("事件总线关停：读取入口 coroutine 状态失败（忽略）: %r", exc)
+            logger.debug("事件总线关停：读取入口 coroutine 状态失败（忽略）: %s", _scrub_url_text(exc))
             return
         if state == "CORO_CREATED":
             self._close_unstarted_coro(coro)
@@ -2504,7 +2567,7 @@ class RedisEventBus(EventBus):
                 _TEARDOWN_ROUNDS.pop(stale, None)
             _TEARDOWN_ROUNDS[id(task)] = round_
         except BaseException as exc:                 # noqa: BLE001 - 受理已发生：登记失败只留痕
-            logger.debug("事件总线关停：登记本轮受理凭据失败（受理保持有效）: %r", exc)
+            logger.debug("事件总线关停：登记本轮受理凭据失败（受理保持有效）: %s", _scrub_url_text(exc))
         if future is not None:
             # #109 r14/N2：登记「这是本引擎受理过的凭据」——判定点的钉回只针对**非**凭据
             # 的诱饵，绝不覆盖失败重试那一轮的凭据，也绝不把已清成 ``None`` 的失败凭据复活。
@@ -2524,7 +2587,7 @@ class RedisEventBus(EventBus):
                         "已在受理点钉回受理时捕获的真 future（reason=teardown-credential-repinned）")
                     self._close_future = future
             except BaseException as exc:             # noqa: BLE001 - 受理后绝不抛（见 docstring）
-                logger.debug("事件总线关停：受理点钉回幂等凭据失败（受理保持有效）: %r", exc)
+                logger.debug("事件总线关停：受理点钉回幂等凭据失败（受理保持有效）: %s", _scrub_url_text(exc))
 
         # 判定门 ``judged``：本轮的「第一次判定」位。r13 用的是 ``round_.tampered``，
         # 而 round 挂在**模块全局** ``_TEARDOWN_ROUNDS`` 上，工厂一行即可预置（N4）。
@@ -2549,7 +2612,7 @@ class RedisEventBus(EventBus):
         try:
             finished = asyncio.Task.done(task)
         except BaseException as exc:                 # noqa: BLE001 - 读不了就按已完成处理
-            logger.debug("事件总线关停：读取受理任务完成状态失败（按已完成判定）: %r", exc)
+            logger.debug("事件总线关停：读取受理任务完成状态失败（按已完成判定）: %s", _scrub_url_text(exc))
             finished = True
         if finished:
             # eager 同步跑完 / 工厂交回已完成的 Task：判决当场落地（r11/A3）。
@@ -2572,18 +2635,24 @@ class RedisEventBus(EventBus):
                    else _TEARDOWN_HOSTILE_TASK_MESSAGE)
         # #109 r13/B：中和动作一律用类上的 C 函数（被拒的正是方法可能被动过的对象）。
         try:
-            owns_ours = asyncio.Task.get_coro(task) is coro
+            # #181 残留面（对抗验收命中）：与 `_started_teardown_task` **同一崩溃类** ——
+            # `asyncio.Task` 是 C 实现，其 `get_coro()` 在「已结束且 coro 已回收」
+            # （`_state == 'FINISHED'` 且 `_coro is None`）的形状上会**段错误**（进程信号，
+            # `except BaseException` **抓不到**）。**此处比那处更危险**：本函数职责就是拒绝/
+            # 中和一个**被拒**的 Task，其上方注释自陈「被拒的正是方法可能被动过的对象」
+            # ⇒ 对象可信度更低，更不该对它调 C 方法。改读纯 Python 属性。
+            owns_ours = getattr(task, "_coro", None) is coro
         except BaseException as exc:             # noqa: BLE001 - 纯中和路径
-            logger.debug("事件总线关停：读取被拒任务持有的 coroutine 失败（忽略）: %r", exc)
+            logger.debug("事件总线关停：读取被拒任务持有的 coroutine 失败（忽略）: %s", _scrub_url_text(exc))
             owns_ours = False
         try:
             asyncio.Task.add_done_callback(task, _swallow_task_result)
         except BaseException as exc:             # noqa: BLE001 - 纯中和路径
-            logger.debug("事件总线关停：给被拒任务挂取用回调失败（忽略）: %r", exc)
+            logger.debug("事件总线关停：给被拒任务挂取用回调失败（忽略）: %s", _scrub_url_text(exc))
         try:
             asyncio.Task.cancel(task)
         except BaseException as exc:             # noqa: BLE001 - 纯中和路径
-            logger.debug("事件总线关停：取消被拒任务失败（忽略）: %r", exc)
+            logger.debug("事件总线关停：取消被拒任务失败（忽略）: %s", _scrub_url_text(exc))
         if not owns_ours:
             self._close_entry_coro_if_unstarted(coro)
         raise RuntimeError(message)
@@ -2734,7 +2803,7 @@ class RedisEventBus(EventBus):
             if not asyncio.Task.cancelled(task):
                 asyncio.Task.exception(task)
         except BaseException as exc:             # noqa: BLE001 - 纯清理路径
-            logger.debug("事件总线关停：取用 teardown 任务异常失败（忽略）: %r", exc)
+            logger.debug("事件总线关停：取用 teardown 任务异常失败（忽略）: %s", _scrub_url_text(exc))
 
     def _record_round_outcome(self, task: "asyncio.Task",
                               round_: "_TeardownRound") -> None:
@@ -2758,7 +2827,7 @@ class RedisEventBus(EventBus):
             try:
                 exception = asyncio.Task.exception(task)
             except BaseException as exc:         # noqa: BLE001 - 取不到就当无异常
-                logger.debug("事件总线关停：读取 teardown 任务异常失败: %r", exc)
+                logger.debug("事件总线关停：读取 teardown 任务异常失败: %s", _scrub_url_text(exc))
                 exception = None
         if round_.never_entered:
             self._teardown_error_kind = TEARDOWN_NEVER_ENTERED_KIND
@@ -2775,7 +2844,7 @@ class RedisEventBus(EventBus):
         if exception is not None:
             self._teardown_task_error = exception
             self._teardown_error_kind = type(exception).__name__
-            logger.debug("事件总线关停：teardown 任务异常已取用: %r", exception)
+            logger.debug("事件总线关停：teardown 任务异常已取用: %s", _scrub_url_text(exception))
             return
         self._teardown_task_error = None
         self._teardown_error_kind = None
@@ -2846,7 +2915,7 @@ class RedisEventBus(EventBus):
         try:
             self._judge_round(task, round_, future, judged)
         except BaseException as exc:                 # noqa: BLE001 - 见 docstring：判定绝不丢
-            logger.debug("事件总线关停：判定路径抛异常（看门狗兜底，绝不挂起）: %r", exc)
+            logger.debug("事件总线关停：判定路径抛异常（看门狗兜底，绝不挂起）: %s", _scrub_url_text(exc))
             self._settle_unsettled_round(task, round_, future)
 
     def _judge_round(self, task: "asyncio.Task", round_: "_TeardownRound",
@@ -2904,7 +2973,7 @@ class RedisEventBus(EventBus):
         try:
             field = self._close_future
         except BaseException as exc:                 # noqa: BLE001 - 读不到就当没有诱饵
-            logger.debug("事件总线关停：读取幂等凭据字段失败（按无诱饵处理）: %r", exc)
+            logger.debug("事件总线关停：读取幂等凭据字段失败（按无诱饵处理）: %s", _scrub_url_text(exc))
             return None
         return field if _is_factory_decoy(field, future) else None
 
@@ -2922,7 +2991,7 @@ class RedisEventBus(EventBus):
         try:
             self._close_future = future
         except BaseException as exc:                 # noqa: BLE001 - 钉回失败仍要继续镜像
-            logger.debug("事件总线关停：判定点钉回幂等凭据失败（继续镜像）: %r", exc)
+            logger.debug("事件总线关停：判定点钉回幂等凭据失败（继续镜像）: %s", _scrub_url_text(exc))
         self._release_decoy_waiters(decoy, future)
 
     def _settle_unsettled_round(self, task: "asyncio.Task",
@@ -2945,7 +3014,7 @@ class RedisEventBus(EventBus):
                 TEARDOWN_NEVER_ENTERED_KIND, task)
             self._close_entry_coro_if_unstarted(round_.coro)
         except BaseException as exc:                 # noqa: BLE001 - 兜底路径只留痕、绝不回抛
-            logger.debug("事件总线关停：兜底结算失败（仅留痕）: %r", exc)
+            logger.debug("事件总线关停：兜底结算失败（仅留痕）: %s", _scrub_url_text(exc))
 
     @staticmethod
     def _release_decoy_waiters(decoy: "Optional[asyncio.Future]",
@@ -3063,7 +3132,7 @@ class RedisEventBus(EventBus):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:             # noqa: BLE001 - 关停序列不卡在这
-                logger.warning("事件总线关停：等待监听任务落地时异常: %s", exc)
+                logger.warning("事件总线关停：等待监听任务落地时异常: %s", _scrub_url_text(exc))
 
     async def _close_backends(self) -> None:
         """释放 pubsub / redis / 三个存储；任一失败具名 WARNING 后继续。
@@ -3116,7 +3185,7 @@ class RedisEventBus(EventBus):
         except asyncio.CancelledError:
             raise
         except Exception as exc:                 # noqa: BLE001 - 关停请求已受理，不让它炸
-            logger.warning("事件总线关停：释放 %s 失败: %s", label, exc)
+            logger.warning("事件总线关停：释放 %s 失败: %s", label, _scrub_url_text(exc))
 
     async def close(self):
         """关闭所有子组件（#109 r7：**总体的、非阻塞的关停请求**）。

@@ -50,6 +50,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from plaita.core.callback import FlowCallback
+from plaita.core.url_redaction import _scrub_exception_text
 
 logger = logging.getLogger("plaita.obs")
 
@@ -170,8 +171,8 @@ class _ObserverWorker:
                     return
                 try:
                     fn()
-                except Exception:  # noqa: BLE001 - 观测失败不影响流程
-                    logger.warning("langfuse observer event failed", exc_info=True)
+                except Exception as exc:  # noqa: BLE001 - 观测失败不影响流程
+                    logger.warning("langfuse observer event failed: %s", _scrub_exception_text(exc))
             finally:
                 with self._cond:
                     self._pending -= 1
@@ -333,8 +334,8 @@ class LangfuseCallback(FlowCallback):
         try:
             prefix = getattr(execution, "express_prefix", "$")
             value = getter(f"{prefix}EXECUTION_ID")
-        except Exception:  # noqa: BLE001 — 观测旁路
-            logger.warning("读取 $EXECUTION_ID 失败", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — 观测旁路
+            logger.warning("读取 $EXECUTION_ID 失败: %s", _scrub_exception_text(exc))
             return None
         return str(value) if value else None
 
@@ -395,16 +396,16 @@ class LangfuseCallback(FlowCallback):
         if callable(updater):
             try:
                 updater(level="ERROR", status_message=self._clip(message))
-            except Exception:  # noqa: BLE001
-                logger.warning("langfuse update(level=ERROR) failed", exc_info=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("langfuse update(level=ERROR) failed: %s", _scrub_exception_text(exc))
 
     def _flush(self):
         flusher = getattr(self._client, "flush", None)
         if callable(flusher):
             try:
                 flusher()
-            except Exception:  # noqa: BLE001
-                logger.warning("langfuse flush failed", exc_info=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("langfuse flush failed: %s", _scrub_exception_text(exc))
 
     # -------------------------------------------------------- 生命周期钩子
 
@@ -435,15 +436,15 @@ class LangfuseCallback(FlowCallback):
             updater = getattr(root, "update", None)
             if callable(updater):
                 updater(**fields)
-        except Exception:  # noqa: BLE001
-            logger.warning("langfuse root update failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("langfuse root update failed: %s", _scrub_exception_text(exc))
         # v4 的流程根是真 OTel span，必须 end 才会导出（v3 的 trace 是隐式的）
         ender = getattr(root, "end", None)
         if callable(ender):
             try:
                 ender()
-            except Exception:  # noqa: BLE001
-                logger.warning("langfuse root end failed", exc_info=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("langfuse root end failed: %s", _scrub_exception_text(exc))
         self._flush()
         with self._lock:
             self._root = None
@@ -475,24 +476,38 @@ class LangfuseCallback(FlowCallback):
             if raw is not None:
                 try:
                     raw.set_attributes(self._trace_attrs(flow))
-                except Exception:  # noqa: BLE001
-                    logger.warning("写入 trace 级 OTel 属性失败", exc_info=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("写入 trace 级 OTel 属性失败: %s", _scrub_exception_text(exc))
             with self._lock:
                 self._open_spans.setdefault(str(node.id), []).append(span)
-        except Exception:  # noqa: BLE001
-            logger.warning("langfuse span start failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("langfuse span start failed: %s", _scrub_exception_text(exc))
 
     def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:
-        self._dispatch(lambda: self._on_node_end_impl(flow, node, result, error, exception),
-                       boundary=False)
+        # plaita#25 × abort 契约（收口批①，裁决 B）：**路径标记**决定是否终结 span。
+        # 判据**不能**是「有没有 error」—— 直接错误钩子（普通执行失败）带 error 且**必须**
+        # end（既有契约 `test_mark_error_on_open_span`）；而 abort/取消/超时路径
+        # （`runner.py` 的 `except BaseException` 补发那次）同样带 error 却**必须保持
+        # open**（`test_abort_leaves_trace_open`）。两者只差**来路**。
+        keep_open = bool(kwargs.get("keep_span_open"))
+        self._dispatch(
+            lambda: self._on_node_end_impl(flow, node, result, error, exception,
+                                           keep_span_open=keep_open),
+            boundary=False)
 
-    def _on_node_end_impl(self, flow, node, result, error, exception) -> None:
+    def _on_node_end_impl(self, flow, node, result, error, exception,
+                          keep_span_open: bool = False) -> None:
         span = self._pop_span(str(node.id))
         if span is None:
             return
         try:
             if error or exception:
                 self._mark_error(span, error, exception)
+                if keep_span_open:
+                    # abort/取消/超时路径：**标注错误但不终结** —— 由宿主 / Langfuse
+                    # TTL 收尾。既保住 #25 要的「失败可见」，也守住既有「abort 保持
+                    # span 打开」的契约。
+                    return
             elif isinstance(result, dict):
                 # agent 节点的内部事件（agentrun details 输出）：建子
                 # observation——工具调用为 span、文本轮为 generation（无逐轮
@@ -502,8 +517,8 @@ class LangfuseCallback(FlowCallback):
                         continue
                     try:
                         self._render_child_observation(span, item)
-                    except Exception:  # noqa: BLE001
-                        logger.warning("langfuse 子 observation 失败", exc_info=True)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("langfuse 子 observation 失败: %s", _scrub_exception_text(exc))
                 if "usage" in result and "model" in result:
                     # LLM 形状输出（llm/agentrun 节点契约）→ 聚合 generation
                     usage = map_openai_usage(result.get("usage"))
@@ -538,8 +553,8 @@ class LangfuseCallback(FlowCallback):
             ender = getattr(span, "end", None)
             if callable(ender):
                 ender()
-        except Exception:  # noqa: BLE001
-            logger.warning("langfuse span end failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("langfuse span end failed: %s", _scrub_exception_text(exc))
 
     def _render_child_observation(self, span, item: Dict[str, Any]) -> None:
         """把 agent 内部事件渲染为 agent span 的子 observation（立即收口）。"""
@@ -590,8 +605,8 @@ class LangfuseCallback(FlowCallback):
             if callable(ender):
                 try:
                     ender()
-                except Exception:  # noqa: BLE001
-                    logger.warning("langfuse root end failed", exc_info=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("langfuse root end failed: %s", _scrub_exception_text(exc))
         self._flush()
 
     def flush(self) -> None:

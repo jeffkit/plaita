@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from .base_service import BaseExtendedService
 from ...logger import logger
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 try:
     import redis
@@ -98,7 +99,7 @@ class RedisQueueService(BaseExtendedService):
             logger.info("Redis队列服务已启动")
             return True
         except Exception as e:
-            logger.error("启动Redis队列服务失败: %s", e, exc_info=True)
+            logger.error("启动Redis队列服务失败: %s", _scrub_exception_text(e))
             return False
     
     def stop_service(self) -> bool:
@@ -116,15 +117,15 @@ class RedisQueueService(BaseExtendedService):
             for execution_id, client in list(self._active_clients.items()):
                 try:
                     asyncio.get_event_loop().run_until_complete(client.close())
-                except Exception:
-                    logger.warning("redis client close failed during stop (execution_id=%s)", execution_id, exc_info=True)
+                except Exception as exc:
+                    logger.warning("redis client close failed during stop (execution_id=%s): %s", execution_id, _scrub_exception_text(exc))
             self._active_clients.clear()
             
             self._connection_state = ConnectionState.DISCONNECTED
             logger.info("Redis队列服务已停止")
             return True
         except Exception as e:
-            logger.error("停止Redis队列服务失败: %s", e, exc_info=True)
+            logger.error("停止Redis队列服务失败: %s", _scrub_exception_text(e))
             return False
     
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
@@ -192,7 +193,7 @@ class RedisQueueService(BaseExtendedService):
             await self._cleanup_client(execution_id)
             raise
         except Exception as e:
-            logger.error("处理Redis队列任务失败: %s", e, exc_info=True)
+            logger.error("处理Redis队列任务失败: %s", _scrub_exception_text(e))
             await self._trigger_error_event(task_config, str(e))
             await self._cleanup_client(execution_id)
             return False
@@ -226,12 +227,12 @@ class RedisQueueService(BaseExtendedService):
                     self._connection_state = ConnectionState.RECONNECTING
                     logger.warning(
                         "Redis连接失败 (尝试 %d/%d): %s, %.1f秒后重试",
-                        attempt + 1, self.retry_config.max_retries + 1, e, delay,
+                        attempt + 1, self.retry_config.max_retries + 1, _scrub_url_text(e), delay,
                     )
                     await asyncio.sleep(delay)
                 else:
                     self._connection_state = ConnectionState.FAILED
-                    logger.error("Redis连接失败，已达到最大重试次数: %s", e)
+                    logger.error("Redis连接失败，已达到最大重试次数: %s", _scrub_url_text(e))
                     return None
         
         return None
@@ -281,7 +282,7 @@ class RedisQueueService(BaseExtendedService):
             try:
                 await client.close()
             except Exception as e:
-                logger.debug("关闭Redis连接时出错: %s", e)
+                logger.debug("关闭Redis连接时出错: %s", _scrub_url_text(e))
     
     async def _trigger_error_event(self, task_config: Dict[str, Any], error_message: str):
         """触发错误事件"""
@@ -297,7 +298,7 @@ class RedisQueueService(BaseExtendedService):
             }
             await self.trigger_event(task_config.get("event_type"), error_event_data)
         except Exception as e:
-            logger.error("触发错误事件失败: %s", e)
+            logger.error("触发错误事件失败: %s", _scrub_url_text(e))
     
     async def _listen_list_queue(self, redis_client, task_config: Dict[str, Any]) -> bool:
         """
@@ -379,7 +380,7 @@ class RedisQueueService(BaseExtendedService):
                 continue
             except (redis.ConnectionError, redis.TimeoutError) as e:
                 consecutive_errors += 1
-                logger.warning("Redis连接错误 (%s/%s): %s", consecutive_errors, max_consecutive_errors, e)
+                logger.warning("Redis连接错误 (%s/%s): %s", consecutive_errors, max_consecutive_errors, _scrub_url_text(e))
                 
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error("达到最大连续错误次数，停止监听")
@@ -389,7 +390,7 @@ class RedisQueueService(BaseExtendedService):
                 await asyncio.sleep(delay)
             except Exception as e:
                 consecutive_errors += 1
-                logger.error("监听Redis列表队列出错: %s", e, exc_info=True)
+                logger.error("监听Redis列表队列出错: %s", _scrub_exception_text(e))
                 
                 if consecutive_errors >= max_consecutive_errors:
                     return False
@@ -422,7 +423,7 @@ class RedisQueueService(BaseExtendedService):
                 return len(subscriptions) == 0
             return False
         except Exception as e:
-            logger.warning("检查流程完成状态时出错: %s", e)
+            logger.warning("检查流程完成状态时出错: %s", _scrub_url_text(e))
             return False
     
     async def _listen_stream_queue(self, redis_client, task_config: Dict[str, Any]) -> bool:
@@ -499,7 +500,7 @@ class RedisQueueService(BaseExtendedService):
                 continue
             except (redis.ConnectionError, redis.TimeoutError) as e:
                 consecutive_errors += 1
-                logger.warning("Redis流连接错误 (%s/%s): %s", consecutive_errors, max_consecutive_errors, e)
+                logger.warning("Redis流连接错误 (%s/%s): %s", consecutive_errors, max_consecutive_errors, _scrub_url_text(e))
                 
                 if consecutive_errors >= max_consecutive_errors:
                     return False
@@ -508,7 +509,7 @@ class RedisQueueService(BaseExtendedService):
                 await asyncio.sleep(delay)
             except Exception as e:
                 consecutive_errors += 1
-                logger.error("监听Redis流队列出错: %s", e, exc_info=True)
+                logger.error("监听Redis流队列出错: %s", _scrub_exception_text(e))
                 
                 if consecutive_errors >= max_consecutive_errors:
                     return False
@@ -587,8 +588,8 @@ class RedisQueueService(BaseExtendedService):
             try:
                 await pubsub.unsubscribe(channel_name)
                 await pubsub.close()
-            except Exception:
-                logger.debug("pubsub unsubscribe/close failed", exc_info=True)
+            except Exception as exc:
+                logger.debug("pubsub unsubscribe/close failed: %s", _scrub_exception_text(exc))
     
     def _parse_message(self, message: str, message_format: str) -> Any:
         """解析消息"""
@@ -600,7 +601,7 @@ class RedisQueueService(BaseExtendedService):
             else:
                 return message
         except Exception as e:
-            logger.warning("解析消息失败: %s, 返回原始消息", e)
+            logger.warning("解析消息失败: %s, 返回原始消息", _scrub_url_text(e))
             return message
     
     def _parse_stream_message(self, fields: Dict[str, str], message_format: str) -> Any:
@@ -615,7 +616,7 @@ class RedisQueueService(BaseExtendedService):
             else:
                 return fields
         except Exception as e:
-            logger.warning("解析流消息失败: %s, 返回原始字段", e)
+            logger.warning("解析流消息失败: %s, 返回原始字段", _scrub_url_text(e))
             return fields
     
     def validate_task_config(self, task_config: Dict[str, Any]) -> bool:

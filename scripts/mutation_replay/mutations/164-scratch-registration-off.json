@@ -1,0 +1,12 @@
+{
+  "name": "164-scratch-registration-off",
+  "concern": "AC1/AC3 显式 scratch 捐献：登记侧撤销",
+  "file": "plaita/core/expression_parser.py",
+  "old": "        raise ValueError(_SCRATCH_ALIASED_TEMPLATE.format(path=root_key, root=aliased[0]))\n    note_scratch_object(value)\n",
+  "new": "        raise ValueError(_SCRATCH_ALIASED_TEMPLATE.format(path=root_key, root=aliased[0]))\n    return  # MUTANT(#164): 撤销登记 ⇒ 声明的 scratch 目标仍证不出 fresh（便利写法整体失效）\n",
+  "rationale": "把读取点的登记调用撤销（换成提前 return）⇒ 宿主声明的 scratch 对象永远不会进入本次求值的 freshness 登记面，`$F.set($V,'k','v')` 回到 default-deny 具名拒绝。杀死它的正是 #164 的主验收断言（declared scratch object is mutable in place）。",
+  "expect_fail": [
+    "tests/unit/test_issue164_scratch_declaration.py::TestScratchDeclarationIsMutableInPlace::test_declared_scratch_object_is_mutable_in_place"
+  ],
+  "issue": "164"
+}

@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue109_110_r14_parity.py::Test109R14CredentialRepin::test_n2_waiter_already_on_the_decoy_is_released"
   ],
-  "old": "        try:\n            self._close_future = future\n        except BaseException as exc:                 # noqa: BLE001 - 钉回失败仍要继续镜像\n            logger.debug(\"事件总线关停：判定点钉回幂等凭据失败（继续镜像）: %r\", exc)\n        self._release_decoy_waiters(decoy, future)\n",
+  "old": "        try:\n            self._close_future = future\n        except BaseException as exc:                 # noqa: BLE001 - 钉回失败仍要继续镜像\n            logger.debug(\"事件总线关停：判定点钉回幂等凭据失败（继续镜像）: %s\", _scrub_url_text(exc))\n        self._release_decoy_waiters(decoy, future)\n",
   "new": "        try:\n            self._close_future = future\n        except BaseException as exc:                 # noqa: BLE001 - 钉回失败仍要继续镜像\n            logger.debug(\"事件总线关停：判定点钉回幂等凭据失败（继续镜像）: %r\", exc)\n        pass  # mutation: 不把结局镜像到诱饵 ⇒ 已等在诱饵上的 close 悬着\n"
 }

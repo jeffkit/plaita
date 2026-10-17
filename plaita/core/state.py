@@ -94,8 +94,10 @@ def _snapshot_key_or_member(value: Any, role: str) -> Any:
     r9 选择 (a)：键/成员走与 ``_engine_copy`` **完全相同**的归一化入口（宿主类被
     归一化掉、类伪造被具名拒绝），归一化后不可哈希的（例如 ``HashableDict`` →
     ``dict``）同样具名拒绝（``StateSnapshotError``，带真实类型名）。因此快照里
-    不再有按引用共享的键/成员。唯一仍按引用共享的只剩**非容器宿主对象**
-    （它们不是容器，重建语义不适用；见 :func:`_snapshot_value`）。
+    不再有按引用共享的键/成员。仍按引用共享的只剩**重建面之外的值**——既有宿主对象
+    （非容器），也有 ``types.MappingProxyType`` / ``collections.ChainMap`` /
+    ``collections.UserDict`` / ``os._Environ`` 这类**容器**（枚举与"为何共享安全"
+    见 :func:`_snapshot_value`，plaita#162）。
     """
     if type(value) in _SNAPSHOT_EXACT_KEY_TYPES:
         return value
@@ -358,8 +360,9 @@ def _snapshot_value(value: Any) -> Any:
     历史上 checkpoint/context 出口（``to_checkpoint_dict``、``$PARENT`` 快照）
     是浅拷贝——``$NODE`` 等嵌套容器按引用共享，消费方（分布式宿主异步序列化、
     子流程 ``$PARENT``）拿到的是 live 别名：写穿透回运行态、后续执行让已"落盘"
-    的数据漂移。快照只在容器边界重建；JSON 不可表达的非容器对象（与历史行为
-    一致）仍按引用共享——它们本就无法进入 checkpoint 序列化。
+    的数据漂移。快照只在容器边界重建；**重建面之外的一切值**（与历史行为一致）
+    仍按引用共享——其中**包含容器**（枚举见下），它们本就无法被 checkpoint 的
+    JSON 序列化表达。
 
     #107 起改由 :func:`_snapshot_container` 显式栈物化：不再有 Python 递归深度
     限制（深嵌套值不再 ``RecursionError``），容器环按 ``<recursive: path>``
@@ -375,23 +378,45 @@ def _snapshot_value(value: Any) -> Any:
       （r7 的 ``value.items()`` / ``enumerate(value)`` / ``value.copy()`` 会被
       ``set`` 子类的 ``copy() -> self`` 骗成"快照就是活对象"）；
     * 结果必然是**现造的普通** ``dict``/``list``/``tuple``/``set``/``frozenset``，
-      子类被归一化掉，快照与活对象 ``is`` 永不相等；
+      子类被归一化掉，快照与活对象 ``is`` 永不相等（**仅就重建面内的这五种容器
+      而言**——重建面之外的值按引用共享，见下一条）；
     * 产出因而满足 freshness 登记面的精确类型判据（``type(x) is …``，见
       ``expression_parser._is_walkable_container``），
       ``loop._condition_context`` / ``concurrent`` 的 ``note_fresh_closure``
       只可能登记到引擎现造的对象；
-    * 唯一按引用共享的是**非容器宿主对象**（它们不是容器，重建语义不适用）；
-      ``__class__`` 被伪造成容器的"假容器"过不了基类描述符，抛具名
+    * **重建面恰好是** ``dict``/``list``/``tuple``/``set``/``frozenset`` 五种
+      （子类一并按基类协议重建）；**其余一律按引用共享**，其中**包含容器**。
+      plaita#162 实测更正：r8 的措辞把共享面描述为"非容器的宿主对象"，这是
+      **事实错误**——下述四者 ``_snapshot_value(v) is v`` 全为 ``True``，且四者
+      都满足 ``isinstance(v, collections.abc.Container)``：
+
+        * ``types.MappingProxyType``
+        * ``collections.ChainMap``
+        * ``collections.UserDict``
+        * ``os._Environ``（``os.environ``）
+
+      同型（同样按引用共享、同样是容器）还有 ``collections.UserList`` /
+      ``collections.deque`` / ``array.array`` / ``bytearray`` / ``memoryview`` /
+      ``dict`` 的 ``keys``/``values``/``items`` 视图等。共享**不是**重建语义的
+      "例外设计"，而是重建面的**补集**：这些类型无法在不替宿主猜构造协议的前提下
+      重建。
+    * 共享为何安全（不是数据通道）：快照路径对它们只读（引擎不在快照上就地改写
+      ——写路径是 DSL 侧的 ``_engine_copy``），而 ``_engine_copy`` 对不在
+      ``plaita.core.types`` 可持久化数据模型里的类型（含上述四个映射型）**一律
+      具名**拒绝（``_EngineCopyRefused``），所以没有任何"活映射宿主对象被写穿"的
+      通道；
+    * ``__class__`` 被伪造成容器的"假容器"过不了基类描述符，抛具名
       :class:`StateSnapshotError`（含真实类型名），绝不静默共享（r8 G3）。
 
-    plaita#69 **r9 Finding C 更正**：r8 的这段措辞把例外写成"唯一的例外是非容器宿主
-    对象"，但当时 **dict 的键**与 **set/frozenset 的成员**仍按引用进快照
+    plaita#69 **r9 Finding C 更正**：r8 的这段措辞把例外写成"非容器的宿主对象"，
+    但当时 **dict 的键**与 **set/frozenset 的成员**仍按引用进快照
     （``key_is_live=True`` / ``el_is_live=True``）—— 宿主 ``dict`` 子类做键、宿主/
     ``__class__`` 伪造对象做成员时，快照里确实留着活别名。r9 起键/成员也过
     :func:`_snapshot_key_or_member`（与 ``_engine_copy`` 同一归一化入口，归一化不了
-    或归一化后不可哈希的**具名**拒绝，见 r9 Finding B），所以例外确实只剩非容器
-    宿主对象。另外 r9 Finding D：``class M(MutableMapping, dict)``（数据存在 dict
-    存储之外）具名拒绝，不再静默产出空 ``dict``。
+    或归一化后不可哈希的**具名**拒绝，见 r9 Finding B），所以例外确实只剩
+    **重建面之外的值**——r8 把这一面等同于"非容器"是错的（plaita#162 的四个容器
+    反例），正确的口径是"重建面的补集"。另外 r9 Finding D：``class M(MutableMapping,
+    dict)``（数据存在 dict 存储之外）具名拒绝，不再静默产出空 ``dict``。
     """
     if _snapshot_isinstance(value, _LazyRootSnapshot):
         return value.materialize()
@@ -597,6 +622,11 @@ class CheckpointState(BaseModel):
     ``to_checkpoint_dict()`` reproduces the exact key set of the source
     checkpoint (a schema field that was never written is not emitted). This
     is what makes round-trip with old dict-based checkpoints lossless.
+
+    plaita#164：除 checkpoint 键外，模型还持有一层**私有 scratch 绑定**
+    （``set_scratch``）——对表达式可见（``context["$V"]``）、对落盘不可见
+    （不在 ``__iter__`` / ``to_checkpoint_dict()`` 里）。两套键视图的划分见
+    ``set_scratch`` / ``__iter__`` 的说明。
     """
 
     model_config = ConfigDict(
@@ -631,6 +661,20 @@ class CheckpointState(BaseModel):
     # Holds the *storage* key strings (e.g. ``$LAST_NODE``, ``EXPRESS_PREFIX``).
     # Private attr (not a field): not serialised, not validated, mutated freely.
     _present: set = PrivateAttr(default_factory=set)
+    # plaita#164：**不进 checkpoint** 的 scratch 绑定（`set_scratch`）与其"待登记"
+    # 声明面。二者都 `exclude=True` ⇒ 不进 `model_dump()`、也不在 `__iter__` /
+    # `to_checkpoint_dict()` 的 checkpoint 键视图里（scratch 是本次执行的私有对象，
+    # 跨进程/落盘恢复没有语义，见 `set_scratch` 的边界说明）。
+    #
+    # **为什么是字段而不是 `PrivateAttr`（性能，实测）**：变量 thunk 每次读根都要问一次
+    # "这个键有没有待登记的 scratch 声明"，即路径表达式的热路径。pydantic v2 读私有属性
+    # 实测 **~0.46–0.50 µs/次**（走 `BaseModel.__getattr__` 分发，而 `__pydantic_private__`
+    # 本身只值 0.013 µs）；普通字段读 **~0.015 µs/次**。用 `PrivateAttr` 会让
+    # `$INPUT.a.b.c` 这类**纯路径**表达式慢 ~15%（3.48 → 4.03 µs/call，本机实测），
+    # 而 `scripts/issue69_mutation_matrix/perf_baseline.json` 的常量因子守卫以
+    # `$INPUT.a.b.c` **自身**为分母，看不见这种"分母同步变慢"。改用字段后回到基线噪声内。
+    scratch_bindings: Any = Field(default_factory=dict, exclude=True, repr=False)
+    scratch_declared: Any = Field(default_factory=dict, exclude=True, repr=False)
     # routing 缓存（2026-10 BFF 热路径评审）：__getitem__/__setitem__ 每次访问
     # 重建 key<->field 映射实测 ~13µs/节点。路由元组不变即命中；prefix 经
     # EXPRESS_PREFIX 写入变更时元组失配自动重建。
@@ -696,6 +740,10 @@ class CheckpointState(BaseModel):
         extras = self._extras
         if key in extras:
             return extras[key]
+        # plaita#164：scratch 绑定（**不进 checkpoint**）是表达式可见的普通键。
+        scratch = self.scratch_bindings
+        if key in scratch:
+            return scratch[key]
         raise KeyError(key)
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -704,6 +752,11 @@ class CheckpointState(BaseModel):
             self.prefix = value
             self._present.add("EXPRESS_PREFIX")
             return
+        # plaita#164：一次普通（checkpointed）写入**取代**同名的 scratch 绑定，
+        # 保证「一个键要么是 scratch、要么是 checkpoint 键」这条不变量恒成立。
+        if key in self.scratch_bindings:
+            self.scratch_bindings.pop(key, None)
+            self.scratch_declared.pop(key, None)
         mapping = self._key_to_field()
         if key in mapping:
             object.__setattr__(self, mapping[key], value)
@@ -720,10 +773,95 @@ class CheckpointState(BaseModel):
             return False
         if key == "EXPRESS_PREFIX":
             return key in self._present
-        return key in self._present or key in self._extras
+        # plaita#164：scratch 键对表达式可见（`$V in context` 为真），但它们
+        # **不属于 checkpoint 键集**——见下面的 `__iter__` 口径说明。
+        return (key in self._present or key in self._extras
+                or key in self.scratch_bindings)
+
+    # ------------------------------------------------------------------
+    # plaita#164 — 显式 scratch 捐献（**不进 checkpoint** 的私有绑定）
+    # ------------------------------------------------------------------
+    # 两套"键视图"是**故意**分开的，两者都要：
+    #   * 表达式可见面（``__getitem__`` / ``get`` / ``__contains__``）= checkpoint
+    #     键 ∪ scratch 键——``$F.set($V,…)`` 必须能解析出 ``$V``；
+    #   * checkpoint 面（``__iter__`` / ``__len__`` / ``keys`` / ``items`` /
+    #     ``values`` / ``to_checkpoint_dict`` / ``__eq__``）= **只有** checkpoint
+    #     键——scratch 是本次执行的私有对象，落盘没有意义（它的新鲜度声明本来就
+    #     活不过一次逻辑求值），恢复侧也造不出它。
+    # 因此：``len(state)`` / ``dict(state)`` 恒等于 checkpoint 键集，scratch 既不会
+    # 混进落盘数据、也不会改变 ``__eq__`` 的语义。
+
+    def set_scratch(self, key: str, value: Any) -> None:
+        """把 *value* 绑定为 *key* 的 **scratch** 值（plaita#164）。
+
+        语义 = "这个对象只归本次执行所有、可以被就地改写"：宿主用本方法**显式声明**
+        之后，下一次读取该键的逻辑求值会把这个对象登记进该次求值的 freshness
+        作用域，``$F.set/$F.pop/...`` 因而可以通过 ``#69`` 的 default-deny 门。
+
+        边界（都是**刻意**的，不是遗漏）：
+
+        * **只登记被声明的那一个对象**（对象身份），**不登记它的图**。声明里嵌套的
+          容器仍不是 fresh ⇒ 想就地改写嵌套对象，请直接为它单独 ``set_scratch``。
+          这条边界让 scratch **不可能**变成把活根"洗白"成可写目标的通道：声明一个
+          ``{"cfg": <活 $INPUT 子对象>}`` 也只能改外层，内层照旧被拒。
+        * **一次求值有效**（作用域语义）：声明在该次逻辑求值**首次读取**这个键时被
+          消费；下一次求值再读同一个对象**不再是 fresh**，照旧被拒（要再用就重新
+          声明）。``#69`` 的"fresh == 本次求值由引擎新建"口径因此原样保留。
+        * **不进 checkpoint**：scratch 键不在 ``to_checkpoint_dict()`` / ``__iter__``
+          里；``clean()``/恢复会丢掉它。
+        * 不得占用 checkpoint 键：五个持久化根与其它 schema 键、以及任何**已在**
+          checkpoint 里的键都被具名拒绝（否则 scratch 会遮蔽一个落盘绑定）。
+        """
+        if not isinstance(key, str) or not key:
+            raise ValueError(
+                "set_scratch: key must be a non-empty string "
+                f"(got {type(key).__name__}: {key!r})")
+        mapping = self._key_to_field()
+        if key in mapping or key == "EXPRESS_PREFIX":
+            raise ValueError(
+                f"set_scratch: {key!r} is a checkpoint schema key "
+                f"({sorted(mapping)}); scratch bindings are private expression "
+                "keys and must not shadow the schema")
+        if key in self._present or key in self._extras:
+            raise ValueError(
+                f"set_scratch: {key!r} already holds a checkpointed binding; a "
+                "scratch key is never also a checkpoint key (write it with "
+                "set_state, or clear it first)")
+        self.scratch_bindings[key] = value
+        # 声明面与存储面分开：消费发生在"某次逻辑求值读到这个键"的那一刻
+        # （见 expression_parser._note_scratch_read），所以这里只标记"待登记"。
+        self.scratch_declared[key] = value
+
+    def scratch_keys(self) -> List[str]:
+        """当前 scratch 绑定的键（**不是** checkpoint 键集的一部分）。"""
+        return list(self.scratch_bindings)
+
+    def clear_scratch(self, key: Optional[str] = None) -> None:
+        """丢掉全部 scratch 绑定（或只丢 *key*），不触碰 checkpoint 键。"""
+        if key is None:
+            self.scratch_bindings.clear()
+            self.scratch_declared.clear()
+            return
+        self.scratch_bindings.pop(key, None)
+        self.scratch_declared.pop(key, None)
+
+    def consume_scratch_declaration(self, key: Any, value: Any) -> bool:
+        """「本次声明的 scratch 正在被读」——是则消费掉声明并返回 ``True``。
+
+        身份判据（``is``）而非相等：键被重新绑定过时，旧声明不再生效。读取方
+        （``expression_parser`` 的变量 thunk）据此把对象登记成 fresh。
+        """
+        if not isinstance(key, str) or not self.scratch_declared:
+            return False
+        declared = self.scratch_declared.get(key, _UNSET)
+        if declared is _UNSET or declared is not value:
+            return False
+        self.scratch_declared.pop(key, None)
+        return True
 
     def __iter__(self):
         # _present already holds storage keys; extras hold their own keys.
+        # plaita#164：scratch 键**有意**不出现在这里（checkpoint 面）。
         for k in self._present:
             yield k
         for k in self._extras:
@@ -776,6 +914,9 @@ class CheckpointState(BaseModel):
         #107：物化改为显式栈迭代（数据深度与 Python 递归深度解耦，深嵌套值不再
         ``RecursionError``），容器环按 ``<recursive: path>`` 占位符显式截断，
         超 ``_SNAPSHOT_MAX_DEPTH`` 抛 ``StateSnapshotError``（消息含深度与路径）。
+
+        plaita#164：``set_scratch`` 的私有绑定**有意**不出现在这里——``__iter__``
+        就是 checkpoint 键视图，scratch 键不在其中（它们对表达式可见、对落盘不可见）。
         """
         return {k: _snapshot_value(self[k]) for k in self}
 

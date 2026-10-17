@@ -325,7 +325,7 @@ class TestDispatchPassthrough:
         original = worker.start_flow
 
         def spy(flow_id, params, version=None, execution_id=None,
-                dedup_key=None, delivery_count=None):
+                dedup_key=None, delivery_count=None, enqueued_at=None):
             seen["dedup_key"] = dedup_key
             seen["execution_id"] = execution_id
             return {"is_end": True}

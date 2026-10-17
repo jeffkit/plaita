@@ -1,0 +1,8 @@
+client decode_responses = False
+typed   list_events('t00', limit=200) = 1 (expect 1)
+all     list_events(limit=200)        = 12 (expect 12)
+all     types = ['t00', 't01', 't02', 't03', 't04', 't05', 't06', 't07', 't08', 't09', 't10', 't11']
+all     globally time-ordered = True
+limit=5 list_events(limit=5)          = 5 (expect 5), ids=['ev00', 'ev01', 'ev02', 'ev03', 'ev04'] (expect earliest ev00..ev04)
+11 types limit=11 -> 11 (expect 11)
+VERDICT: OK

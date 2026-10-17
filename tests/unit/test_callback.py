@@ -188,10 +188,16 @@ class TestCallbackManagerInit(unittest.TestCase):
 
 class TestCallHandlersErrorLogging(unittest.TestCase):
     """断言 handler 抛错时，_call_handlers 写出的 warning 包含方法名、错误信息
-    且带 traceback（exc_info）。用来杀死改 logger.warning 参数 / 丢 exc_info
-    的变异点。"""
+    且带 traceback。用来杀死改 logger.warning 参数 / 丢异常文本的变异点。
 
-    def test_error_in_handler_logged_with_method_error_and_exc_info(self):
+    plaita#151 起栈**在构造面**渲染进消息（``_scrub_exception_text``），不再用
+    ``exc_info=True``：那一支的 traceback 由 ``Formatter`` 在 logger 调用**之后**
+    用**原始异常**重新渲染，任何「在调用点传干净参数」的做法都盖不住它（``#161``
+    的纪律）。诊断价值（栈帧、异常链）一字未丢——只是那份文本已经过 #88 族清洗，
+    所以断言从「``record.exc_info`` 非空」改成「消息里有栈」+「没有 exc_info」。
+    """
+
+    def test_error_in_handler_logged_with_method_error_and_traceback(self):
         class BadHandler(FlowCallback):
             def on_flow_start(self, flow, **kwargs):
                 raise RuntimeError("boom")
@@ -202,9 +208,14 @@ class TestCallHandlersErrorLogging(unittest.TestCase):
 
         self.assertEqual(len(cm.records), 1)
         record = cm.records[0]
-        self.assertEqual(record.getMessage(), "Error in on_flow_start callback: boom")
-        # exc_info=True 应得到 traceback 三元组；改 exc_info=False 的变异点会留下 False。
-        self.assertTrue(record.exc_info)
+        message = record.getMessage()
+        self.assertTrue(message.startswith("Error in on_flow_start callback: "), message)
+        # 异常文本仍在（丢参数的变异点会在这里红）。
+        self.assertIn("RuntimeError: boom", message)
+        # 栈仍在（丢 _scrub_exception_text 的变异点会在这里红）。
+        self.assertIn("Traceback (most recent call last)", message)
+        # #151：栈不再经 exc_info 二次渲染——那一步绕过构造面清洗。
+        self.assertIsNone(record.exc_info)
 
 
 class TestLoggerCallback(unittest.TestCase):

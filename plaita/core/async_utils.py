@@ -23,6 +23,8 @@ import asyncio
 import logging
 import threading
 
+from plaita.core.url_redaction import _scrub_exception_text
+
 logger = logging.getLogger("plaita.core.async_utils")
 
 
@@ -168,8 +170,8 @@ def async_gen_to_sync(agen):
         finally:
             try:
                 loop.run_until_complete(agen.aclose())
-            except Exception:
-                logger.debug("async gen aclose failed during sync drain", exc_info=True)
+            except Exception as exc:
+                logger.debug("async gen aclose failed during sync drain: %s", _scrub_exception_text(exc))
             loop.close()
     else:
         import queue as _queue
@@ -200,8 +202,8 @@ def async_gen_to_sync(agen):
             finally:
                 try:
                     loop.run_until_complete(agen.aclose())
-                except Exception:
-                    logger.debug("async gen aclose failed in worker thread", exc_info=True)
+                except Exception as exc:
+                    logger.debug("async gen aclose failed in worker thread: %s", _scrub_exception_text(exc))
                 loop.close()
 
         worker = threading.Thread(target=_drive, daemon=True)

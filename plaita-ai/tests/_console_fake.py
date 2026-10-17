@@ -67,6 +67,17 @@ class FakeConsole:
         flow["versions"][version] = view
         return view
 
+    def _next_semver(self, flow_id: str) -> str:
+        """Mirror the real console's ``_next_semver_of``: max X.Y.Z + 1."""
+        best = (0, 0, 0)
+        for version in self.flows.get(flow_id, {}).get("versions", {}):
+            parts = version.split(".")
+            if len(parts) == 3 and all(p.isdigit() for p in parts):
+                triple = tuple(int(p) for p in parts)
+                if triple > best:
+                    best = triple  # type: ignore[assignment]
+        return f"{best[0]}.{best[1]}.{best[2] + 1}"
+
     def seed_execution(
         self,
         flow_id: str,
@@ -168,7 +179,10 @@ class FakeConsole:
                 view = self.flows.get(flow_id, {}).get("versions", {}).get(parts[3])
                 return httpx.Response(200, json=view) if view else httpx.Response(404, json={"detail": "no such version"})
             if len(parts) == 4 and parts[2] == "versions" and method == "PUT":
-                view = self.put_version(flow_id, parts[3], body.get("definition", ""))
+                # #59: allocate_version 时忽略 path 里的版本号，按库内最大
+                # semver 原子分配（真实 console 的 flow_store 契约）。
+                version = self._next_semver(flow_id) if body.get("allocate_version") else parts[3]
+                view = self.put_version(flow_id, version, body.get("definition", ""))
                 view["created_by"] = body.get("created_by", "")
                 return httpx.Response(200, json=view)
             if len(parts) == 3 and parts[2] == "publish" and method == "POST":

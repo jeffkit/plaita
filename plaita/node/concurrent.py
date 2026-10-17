@@ -43,6 +43,7 @@ COROUTINE = "coroutine"
 # 后续 join 分支提交时 pickle 失败。模块级 dict 按 execution_id 索引, 子进程不
 # 触碰, callback 在主进程跑, 安全。
 import threading as _threading
+from plaita.core.url_redaction import _scrub_exception_text
 
 # RLock: get_background_errors 在持锁状态下会再调 _get_bg_state, 需可重入。
 _BG_LOCK = _threading.RLock()
@@ -252,7 +253,7 @@ class Parallel(Node):
             try:
                 self.exec_branch(branch, execution)
             except Exception as exc:  # noqa: BLE001 - 与 background done_callback 同语义
-                logger.warning("parallel background branch %r raised: %s", branch.name, exc, exc_info=True)
+                logger.warning("parallel background branch %r raised: %s", branch.name, _scrub_exception_text(exc))
                 state = _get_bg_state(execution)
                 with _BG_LOCK:
                     state["errors"].append({"branch": branch.name, "error": str(exc)})
@@ -260,7 +261,7 @@ class Parallel(Node):
             try:
                 results[branch.name] = self.exec_branch(branch, execution)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("parallel branch %s raised: %s", branch.name, exc, exc_info=True)
+                logger.warning("parallel branch %s raised: %s", branch.name, _scrub_exception_text(exc))
                 results[branch.name] = {
                     "__parallel_error__": str(exc),
                     "__branch__": branch.name,
@@ -319,13 +320,12 @@ class Parallel(Node):
             try:
                 exc = fut.exception()
             except Exception as e:  # cancelled / executor shutdown
-                logger.debug("background future.exception() unavailable", exc_info=True)
+                logger.debug("background future.exception() unavailable: %s", _scrub_exception_text(e))
                 exc = e
             if exc is None:
                 return
             logger.warning(
-                "parallel background branch %r raised: %s", branch.name, exc,
-                exc_info=True,
+                "parallel background branch %r raised: %s", branch.name, _scrub_exception_text(exc),
             )
             with _BG_LOCK:
                 errors.append({"branch": branch.name, "error": str(exc)})
@@ -390,7 +390,7 @@ class Parallel(Node):
             with lock:
                 results[branch.name] = result
         except Exception as exc:
-            logger.warning("parallel branch %s raised: %s", branch.name, exc, exc_info=True)
+            logger.warning("parallel branch %s raised: %s", branch.name, _scrub_exception_text(exc))
             with lock:
                 results[branch.name] = {
                     "__parallel_error__": str(exc),
@@ -478,7 +478,7 @@ class Parallel(Node):
                 try:
                     await self.exec_branch_async(branch, execution, branch_execution)
                 except Exception as exc:
-                    logger.warning("async background branch %r raised: %s", branch.name, exc, exc_info=True)
+                    logger.warning("async background branch %r raised: %s", branch.name, _scrub_exception_text(exc))
 
             for branch in background_branches:
                 # plaita#72：与 sync 侧同因——后台分支不阻塞父协程，子执行必须
@@ -492,7 +492,7 @@ class Parallel(Node):
                     result = await self.exec_branch_async(branch, execution)
                     return branch.name, result
                 except Exception as exc:
-                    logger.warning("async parallel branch %s raised: %s", branch.name, exc, exc_info=True)
+                    logger.warning("async parallel branch %s raised: %s", branch.name, _scrub_exception_text(exc))
                     return branch.name, {
                         "__parallel_error__": str(exc),
                         "__branch__": branch.name,

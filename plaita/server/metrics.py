@@ -20,6 +20,7 @@ import math
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 logger = logging.getLogger("plaita.server.metrics")
 
@@ -215,8 +216,8 @@ class MetricsHttpServer:
                 try:
                     body = render().encode("utf-8")
                     status = 200
-                except Exception:  # noqa: BLE001 - 抓取端不得因单次渲染失败而崩
-                    logger.warning("渲染 /metrics 失败", exc_info=True)
+                except Exception as exc:  # noqa: BLE001 - 抓取端不得因单次渲染失败而崩
+                    logger.warning("渲染 /metrics 失败: %s", _scrub_exception_text(exc))
                     body, status = b"", 500
                 self.send_response(status)
                 self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -245,7 +246,7 @@ class MetricsHttpServer:
                 server.shutdown()
                 server.server_close()
             except Exception as exc:  # noqa: BLE001 - 停机路径 best-effort
-                logger.debug("关闭 /metrics 服务失败: %s", exc)
+                logger.debug("关闭 /metrics 服务失败: %s", _scrub_url_text(exc))
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None

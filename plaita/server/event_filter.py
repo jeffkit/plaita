@@ -21,6 +21,7 @@ from plaita.server.tenant_context import (
     reset_current_tenant,
     set_current_tenant,
 )
+from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 # 获取logger
 logger = logging.getLogger("plaita.server.event_filter")
@@ -98,8 +99,8 @@ class EventFilter:
         """
         try:
             self.redis_client.delete(dedup_key)
-        except Exception:  # noqa: BLE001 — 释放瞬断：只记日志，不掩盖入队异常
-            logger.warning("释放去重键失败: %s", dedup_key, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — 释放瞬断：只记日志，不掩盖入队异常
+            logger.warning("释放去重键失败: %s: %s", dedup_key, _scrub_exception_text(exc))
 
     async def handle_event(self, event: Event) -> None:
         """
@@ -150,7 +151,7 @@ class EventFilter:
                 except Exception as e:  # noqa: BLE001 — 巡检失败不影响主流程
                     # #87 批次纪律：禁止往静默吞咽白名单里加条目——就地补日志，
                     # 让"孤儿订阅巡检失败"可观测（巡检本身仍不阻塞主流程）。
-                    logger.debug("孤儿订阅巡检失败: %s", e, exc_info=True)
+                    logger.debug("孤儿订阅巡检失败: %s", _scrub_exception_text(e))
                     orphans = []
                 if orphans:
                     logger.warning(
@@ -179,9 +180,9 @@ class EventFilter:
                             "执行 %s 已终态(%s)，回收残留订阅 %s",
                             execution_id, state_status, subscription.subscription_id,
                         )
-                    except Exception:  # noqa: BLE001 — 回收失败不影响主流程
+                    except Exception as exc:  # noqa: BLE001 — 回收失败不影响主流程
                         logger.debug(
-                            "回收订阅 %s 失败", subscription.subscription_id, exc_info=True
+                            "回收订阅 %s 失败: %s", subscription.subscription_id, _scrub_exception_text(exc)
                         )
                 return
 
@@ -223,12 +224,12 @@ class EventFilter:
                     # fire-and-forget，由 event/redis.py 的包装接收。
                     try:
                         enqueue_task(self.redis_client, self.queue_name, resume_task)
-                    except Exception:
+                    except Exception as exc:
                         self._release_dedup_key(dedup_key)
                         logger.error(
-                            "事件 %s 入队失败，已释放去重键以便重放（订阅 %s，队列 %s）",
+                            "事件 %s 入队失败，已释放去重键以便重放（订阅 %s，队列 %s）: %s",
                             event.event_id, subscription.subscription_id,
-                            self.queue_name, exc_info=True,
+                            self.queue_name, _scrub_exception_text(exc),
                         )
                         raise
 
@@ -243,7 +244,7 @@ class EventFilter:
                     logger.debug("订阅与当前执行无关，跳过: %s", subscription.subscription_id)
             
         except Exception as e:
-            logger.error("处理事件出错: %s", e, exc_info=True)
+            logger.error("处理事件出错: %s", _scrub_exception_text(e))
             # #153：失败必须对调用方可观察——回扫器据此**不推进游标**、改计
             # `last_rejected`（plaita/server/event_reconcile.py:scan_once）。推送
             # 链路是 fire-and-forget，由 event/redis.py 的 `_process_event` /
@@ -294,8 +295,8 @@ class EventFilter:
                     "执行 %s 已终态(%s)，订阅 %s 超时后回收",
                     execution_id, state_status, sub_id,
                 )
-            except Exception:  # noqa: BLE001 — 回收失败不影响主流程
-                logger.debug("回收超时订阅 %s 失败", sub_id, exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — 回收失败不影响主流程
+                logger.debug("回收超时订阅 %s 失败: %s", sub_id, _scrub_exception_text(exc))
             return
 
         # 去重：多实例 event_filter / 同一订阅重复触发只入队一次（同 handle_event
@@ -331,11 +332,11 @@ class EventFilter:
         # 失败不再被抹平。
         try:
             enqueue_task(self.redis_client, self.queue_name, resume_task)
-        except Exception:
+        except Exception as exc:
             self._release_dedup_key(dedup_key)
             logger.error(
-                "订阅 %s 超时 resume 入队失败，已释放去重键以便重放（执行 %s，队列 %s）",
-                sub_id, execution_id, self.queue_name, exc_info=True,
+                "订阅 %s 超时 resume 入队失败，已释放去重键以便重放（执行 %s，队列 %s）: %s",
+                sub_id, execution_id, self.queue_name, _scrub_exception_text(exc),
             )
             raise
         logger.info(
@@ -399,7 +400,7 @@ class EventFilter:
                 await asyncio.sleep(1)
 
         except Exception as e:
-            logger.error("启动事件过滤器时出错: %s", e)
+            logger.error("启动事件过滤器时出错: %s", _scrub_url_text(e))
             self._running = False
 
     async def stop(self):
@@ -414,14 +415,14 @@ class EventFilter:
             try:
                 await self._timeout_checker.stop()
             except Exception as e:  # noqa: BLE001 — 停止失败不阻断其余清理
-                logger.error("停止订阅超时检查器时出错: %s", e)
+                logger.error("停止订阅超时检查器时出错: %s", _scrub_url_text(e))
 
         # 停事件回扫（与 start 对称）
         if self._reconciler is not None:
             try:
                 await self._reconciler.stop()
             except Exception as e:  # noqa: BLE001 — 同上
-                logger.error("停止事件回扫时出错: %s", e)
+                logger.error("停止事件回扫时出错: %s", _scrub_url_text(e))
             self._reconciler = None
 
         # 取消事件订阅
@@ -435,7 +436,7 @@ class EventFilter:
                     await self.event_bus.unregister_subscription(self._subscription_id)
                 logger.info("已取消事件订阅: %s", self._subscription_id)
             except Exception as e:
-                logger.error("取消事件订阅时出错: %s", e)
+                logger.error("取消事件订阅时出错: %s", _scrub_url_text(e))
     
     @staticmethod
     def create_event_filter(
@@ -540,7 +541,7 @@ async def main_async(args):
         await event_filter.start(event_type=args.event_type)
         
     except Exception as e:
-        logger.error("事件过滤器启动失败: %s", e, exc_info=True)
+        logger.error("事件过滤器启动失败: %s", _scrub_exception_text(e))
         sys.exit(1)
     finally:
         # #109：关停排空。``main_async`` 返回后 ``asyncio.run`` 会取消所有在飞任务
@@ -573,7 +574,7 @@ async def _close_event_bus(event_bus) -> None:
     try:
         await close()
     except Exception as e:  # noqa: BLE001 — 关停失败不得掩盖主流程异常
-        logger.warning("事件总线关停失败: %s", e)
+        logger.warning("事件总线关停失败: %s", _scrub_url_text(e))
 
 def main():
     """命令行入口程序"""

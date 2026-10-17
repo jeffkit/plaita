@@ -48,6 +48,19 @@ class ExecutionInfo(BaseModel):
     # 节点级耗时：集群模式由 worker 的 NodeTimingCallback 写入执行状态，
     # 本地模式由回调采集的 trace 时间戳折算；老状态/未采集时为 None
     node_timings: Optional[Dict[str, Any]] = Field(None, description="节点级耗时")
+    # token/cost 两级汇总（plaita#37 P2）。**null = 未采集，不是 0**：
+    # - usage：run 级汇总（形状见 plaita.storage.usage.usage_view，含 source/
+    #   estimated/display 串），本地档读 local_executions.usage_json，集群档读
+    #   worker 落盘的 ExecutionState.usage；
+    # - node_usage：节点级只读投影（真源 context.$NODE[*].usage）；
+    #   集群档**列表**路径不读 context（投影不携带），故列表行为 null，
+    #   详情页/本地档给出逐个节点。某节点不在表里 = 该节点未报 usage（≠0）。
+    usage: Optional[Dict[str, Any]] = Field(
+        None, description="run 级 token/成本汇总（null=未采集，非 0）"
+    )
+    node_usage: Optional[Dict[str, Any]] = Field(
+        None, description="节点级 token/成本只读投影（null=未采集/本视图未读取）"
+    )
     # Langfuse 观测深链（启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
     langfuse_trace_url: Optional[str] = Field(None, description="Langfuse trace 页面 URL")
 
@@ -120,7 +133,17 @@ def _task_queue_name() -> str:
 try:
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
+    from plaita.server.tenant_quota import (
+        release_tenant_start,
+        tenant_max_running,
+        try_admit_tenant_start,
+    )
     from plaita.storage.redis import execution_state_ttl_seconds
+    from plaita.storage.usage import (
+        node_results_from_context,
+        node_usage_breakdown,
+        usage_view,
+    )
 except ImportError:  # 平铺布局（cwd=backend）运行时
     import sys as _sys
     from pathlib import Path as _Path
@@ -129,7 +152,17 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         _sys.path.insert(0, _plaita_root)
     from plaita.server.task_queue import enqueue_task
     from plaita.server.tenant_context import tenant_namespace
+    from plaita.server.tenant_quota import (
+        release_tenant_start,
+        tenant_max_running,
+        try_admit_tenant_start,
+    )
     from plaita.storage.redis import execution_state_ttl_seconds
+    from plaita.storage.usage import (
+        node_results_from_context,
+        node_usage_breakdown,
+        usage_view,
+    )
 
 try:
     from ..services import flow_store
@@ -137,6 +170,9 @@ try:
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from services import flow_store  # type: ignore
     from auth import require_auth, tenant_scope  # type: ignore
+
+# plaita#166：执行表示的读面脱敏（与日志出口**同一个**清洗器/凭据键判据）。
+from plaita.core.url_redaction import redact_credential_values
 
 
 def get_redis(request: Request) -> Redis:
@@ -188,6 +224,41 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
     消息永远到不了 worker。统一走 XADD。
     """
     return enqueue_task(redis, _task_queue_name(), message)
+
+
+# ---- plaita#166：执行表示的读面脱敏 ----
+#
+# 两个面在 #157 的验收里被确认为**按引用留存明文**，且都不是 #157 引入的：
+#   * 队列载体（start/resume 消息的 ``params``）——载体本义，flow 要用它；
+#   * execution row 的 ``context.$INPUT``（盘上 checkpoint）——resume 要用它。
+# 两者都是**功能数据**，本单**刻意不改**（改了就丢语义；#157/#122 的通道红线）。
+#
+# 但「留存」不等于「谁都能读」：控制台的执行表示（详情 / 列表 / SSE
+# initial_state）是**同租户任何人**都能拿到的面，而盘上的 ``context`` 是整份
+# checkpoint——`$INPUT` 里的 ``api_key`` / 带口令的 clone URL 因此对非提交者
+# 完全可读。掩码族（#158/#159/#160/#161/#165）只覆盖**日志出口**，这个面一直在
+# 它们的雷达之外，故在此单独立起。
+#
+# 落点纪律（与掩码族同源，见 issue #166 的选项 B）：脱敏施加在**构造表示时**
+# ——``json.dumps`` / pydantic 序列化**之前**，而不是事后过滤已序列化的字符串。
+# 下游任何一次 re-serialize（SSE 的 ``json.dumps``、``ExecutionInfo`` 的
+# ``model_dump``）看到的都已经是抹过的值；漏掉哪一个出口都只是「多一处明文」，
+# 而不是「掩码被绕过」。
+#
+# 不改的：队列载体（``_enqueue`` 的 message）、worker 侧 ``$INPUT`` 绑定、
+# 盘上 checkpoint、`$INPUT` 的键名与功能值（非凭据项一字不动）。
+def _redact_execution_view(info: Dict[str, Any]) -> Dict[str, Any]:
+    """执行表示的读面副本：``context`` / ``input`` 里的凭据值换占位（#166）。
+
+    返回**新 dict**（``context`` / ``input`` 也是新对象）：调用方拿到的盘上
+    对象本体一个字节都不改——功能副本必须逐字节保持不变。
+    """
+    out = dict(info)
+    for field in ("context", "input"):
+        value = out.get(field)
+        if value is not None:
+            out[field] = redact_credential_values(value)
+    return out
 
 
 # ---- 集群档租户键助手 ----
@@ -270,6 +341,14 @@ def _is_mechanism_key(key: str) -> bool:
         # 不参与列表投影；新键改到执行维度后**落进了投影面**，故必须排除，否则
         # `json.loads` 得 int → `summary.get` 即 500（与 noderetry/g1wakeups 同病）。
         or ":execution:affinityhandover:" in key
+        # 同类第十次（2026-10-17，收口批②）：`:execution:events:{id}`
+        # （**#25 执行事件 SSE 频道**，`plaita/server/execution_timeline.py` 的
+        # `CHANNEL_PREFIX = "plaita:execution:events:"`，`flow_worker.py` 为唯一发布者）
+        # —— 它落在 `plaita:execution:*` 投影面内，未排除即混进列表投影。
+        # `test_console_mechanism_keys.py` 的自动防线扫 worker/声明侧源码时
+        # 报「未登记: ['events']」；console 侧自己的用例
+        # （`test_clean_c4_executions_api.py`）也把它列为需排除项。
+        or ":execution:events:" in key
         or ":execution:index" in key
         or key.endswith(":dlq")
     )
@@ -374,6 +453,12 @@ for i = 1, #KEYS do
     local okd, obj = pcall(cjson.decode, data)
     if okd and type(obj) == 'table' then
       n = n + 1
+      -- plaita#37 P2：usage 只回传**序列化后的字符串**（列表行要能区分
+      -- 「未采集(null)」与「采集到 0」；完整 context 依旧不出 Redis）。
+      -- usage 缺失/不可编码 ⇒ 'null'（读取侧折算成 None，不是 0）。
+      local ujson = 'null'
+      local uok, uenc = pcall(cjson.encode, obj['usage'])
+      if uok and type(uenc) == 'string' then ujson = uenc end
       out[n] = {KEYS[i],
         s(obj['status']),
         s(obj['flow_id']),
@@ -382,7 +467,8 @@ for i = 1, #KEYS do
         s(obj['start_time']),
         s(obj['last_update_time']),
         s(obj['end_time']),
-        s(obj['invoker'])}
+        s(obj['invoker']),
+        ujson}
     end
   end
 end
@@ -444,6 +530,9 @@ def _project_summaries(
                 "last_update_time": row[6] or None,
                 "end_time": row[7] or None,
                 "invoker": row[8] or None,
+                # plaita#37 P2：usage 由 Lua 侧 cjson 序列化回传（'null' = 未采集）。
+                # 老脚本/老 Redis 返回的行可能只有 9 列 ⇒ 用长度守卫取。
+                "usage": _parse_projected_usage(row[9] if len(row) > 9 else None),
             }
         # cjson 解析失败被跳过的键：全量兜底
         for key in chunk:
@@ -454,10 +543,31 @@ def _project_summaries(
     return summaries
 
 
+def _parse_projected_usage(raw: Any) -> Optional[Dict[str, Any]]:
+    """Lua 投影回传的 usage 串 → 原始 usage dict（/ ``None`` = 未采集）。
+
+    ``'null'``/空/坏 JSON 一律 ``None``：**绝不当成 0**（列表行必须能区分
+    「这个 run 没采到」与「这个 run 采到 0」）。
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) and value else None
+
+
 def _execution_info_from_summary(
     key_str: str, summary: Dict[str, Any]
 ) -> ExecutionInfo:
-    """由投影摘要构建列表行（context/error 不进列表响应，详情页读全量）。"""
+    """由投影摘要构建列表行（context/error 不进列表响应，详情页读全量）。
+
+    ``node_usage`` 恒为 ``None``：集群档列表路径**刻意不读 context**（全量
+    context 不得进 console 内存，见 ``_EXECUTION_PROJECTION_LUA`` 选型说明），
+    所以这里没有节点级数据——是「本视图不提供」，不是「节点没报 usage」。
+    节点级明细请读详情页（``GET /executions/{id}``）。
+    """
     return ExecutionInfo(
         execution_id=_execution_id_from_key(key_str),
         flow_id=summary.get("flow_id") or "",
@@ -471,6 +581,8 @@ def _execution_info_from_summary(
         invoker=summary.get("invoker"),
         context=None,
         error=None,
+        usage=project_usage(summary.get("usage")),
+        node_usage=None,
     )
 
 
@@ -523,8 +635,42 @@ def _find_execution(
     return None, None
 
 
-# ============ API 端点 ============
+# ---- plaita#37 P2：token/成本的两级展示投影（列表/详情共用） ----
 
+def project_usage(usage: Any) -> Optional[Dict[str, Any]]:
+    """run 级 usage → 展示视图；``None``/坏形状 ⇒ ``None``（未采集，不是 0）。"""
+    return usage_view(usage)
+
+
+def project_node_usage(context: Any) -> Optional[Dict[str, Any]]:
+    """节点级 usage 只读投影（真源 ``context.$NODE[*].usage``）。
+
+    没有任何节点报 usage ⇒ ``None``（未采集）；某节点报 0 ⇒ 该节点在表里且
+    ``total_tokens == 0``（采集到 0）——两级都可分。
+    """
+    try:
+        breakdown = node_usage_breakdown(node_results_from_context(context))
+    except Exception:  # noqa: BLE001 — 展示投影失败绝不把详情接口带崩
+        logger.warning("node_usage 投影失败（按未采集返回）", exc_info=True)
+        return None
+    out = {node_id: view for node_id, view in
+           ((nid, usage_view(entry)) for nid, entry in breakdown.items()) if view}
+    return out or None
+
+
+def _with_usage(info: Dict[str, Any]) -> Dict[str, Any]:
+    """给执行行补上 usage/node_usage（就地返回同一 dict，调用方自持副本）。
+
+    集群档列表路径**不**走这里（列表投影刻意不读 context）：见
+    ``_execution_info_from_summary``——那里的 ``node_usage`` 恒为 null，
+    因为该视图根本没有节点数据（不是「节点未报 usage」）。
+    """
+    info["usage"] = project_usage(info.get("usage"))
+    info["node_usage"] = project_node_usage(info.get("context"))
+    return info
+
+
+# ============ API 端点 ============
 @router.get("/executions", response_model=ExecutionListResponse)
 async def list_executions(
     request: Request,
@@ -544,7 +690,11 @@ async def list_executions(
     """
     if (local := get_local_executor(request)) is not None:
         executions = [
-            ExecutionInfo(**info)
+            # 两批各自独立加了包装（#166：凭据脱敏 ‖ #37 P2：usage 汇总）⇒ 组合：
+            # **先用原始 context 算 usage，最后做脱敏**——`_with_usage` 需要未脱敏的
+            # context 才能算出 node_usage；`_redact_execution_view` 返回新 dict 且
+            # 不动盘上对象，放最后可保证脱敏后不再有任何字段被追加。
+            ExecutionInfo(**_redact_execution_view(_with_usage(info)))
             for info in local.list_local_executions(
                 status=status, flow_id=flow_id, tenant_id=tenant_scope(request)
             )
@@ -616,18 +766,23 @@ async def get_execution(
         info = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
         if info is None:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-        info = dict(info)
+        # #166：读面在**序列化之前**脱敏（``$INPUT`` 是功能数据，保留在盘上与
+        # 载体里；只有表示面抹值）
+        info = _redact_execution_view(dict(info))
         info["langfuse_trace_url"] = obs_link.langfuse_trace_url(execution_id)
-        return ExecutionInfo(**info)
+        return ExecutionInfo(**_with_usage(info))
 
     _tenant, data = _find_execution(request, redis, execution_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
 
     try:
-        data = dict(data)
+        data = _redact_execution_view(dict(data))
         data["langfuse_trace_url"] = obs_link.langfuse_trace_url(execution_id)
-        return ExecutionInfo(**data)
+        # plaita#37 P2：集群档详情 —— run 级 usage 来自 worker 落盘的
+        # ExecutionState.usage；节点级从 context.$NODE 只读投影（列表路径不做，
+        # 见 _execution_info_from_summary）。
+        return ExecutionInfo(**_with_usage(data))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"数据解析失败: {e}")
 
@@ -670,13 +825,14 @@ async def start_execution(
     # start_flow 认账）——调用方即刻可凭 id 轮询/取消，无需等 worker
     # 消费后从执行列表里猜（P0 可见性修复的 API 侧一半）。
     execution_id = uuid.uuid4().hex
+    tenant = tenant_scope(http_request, required=True)
     message = {
         "type": "start",
         "flow_id": request.flow_id,
         "version": request.version,
         "params": request.params,
         "execution_id": execution_id,
-        "tenant_id": tenant_scope(http_request, required=True),
+        "tenant_id": tenant,
         "timestamp": datetime.now().isoformat()
     }
     # start 幂等键 additive 透传（波次二任务③）：仅显式提供时进入消息体，
@@ -684,8 +840,36 @@ async def start_execution(
     # 既带预铸 id（提交方即刻可轮询）又可选带幂等键（重投收敛）。
     if request.dedup_key:
         message["dedup_key"] = request.dedup_key
+    # 每租户 start 准入配额（plaita#28）：超限 **429**，不入队。名额在入口
+    # 即占用（ZSET 成员=execution_id），worker 终态化时释放（崩溃由条目
+    # TTL 自愈）。必须在「入口」拒绝——单 stream FIFO 下，消息一旦入队就
+    # 排死了顺序，事后在 worker 侧再拦已经拦不住积压的形成。未配额租户 /
+    # redis 故障 fail-open（零行为变化）；回滚开关见 tenant_quota 模块。
+    if not try_admit_tenant_start(redis, tenant, execution_id):
+        max_running = tenant_max_running(redis, tenant)
+        logger.warning(
+            "租户 %s start 配额已满（%r），拒绝 start: flow=%s execution=%s",
+            tenant or "default", max_running, request.flow_id, execution_id,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "tenant_quota_exceeded",
+                "tenant_id": tenant or "default",
+                "max_running": max_running,
+                "message": (
+                    f"租户 {tenant or 'default'} 并发 start 数已达上限"
+                    f"（{max_running}），请等待在跑执行终态后重试"
+                ),
+            },
+        )
     # 写入任务队列 Stream（FlowWorker 消费组消费）
-    _enqueue(message, redis)
+    try:
+        _enqueue(message, redis)
+    except Exception:
+        # 入队失败回滚名额，防泄漏（否则该 execution 的名额要等 TTL 才自愈）
+        release_tenant_start(redis, tenant, execution_id)
+        raise
 
     _audit(http_request, "execution.start", execution_id,
            {"flow_id": request.flow_id, "version": request.version, "mode": "queue"})
@@ -1115,13 +1299,20 @@ async def stream_execution_endpoint(request: Request):
 
         async def local_event_generator():
             last = None
-            yield {"event": "initial_state", "data": json.dumps(info, ensure_ascii=False)}
+            # #166：SSE 的 initial_state / update 都是整行执行表示——与详情路由
+            # 同一条脱敏，且都在 ``json.dumps`` 之前。
+            yield {
+                "event": "initial_state",
+                "data": json.dumps(_redact_execution_view(dict(info)), ensure_ascii=False),
+            }
             while True:
                 await asyncio.sleep(1.0)
                 current = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
                 if current is None:
                     break
-                payload = json.dumps(current, ensure_ascii=False, default=str)
+                payload = json.dumps(
+                    _redact_execution_view(dict(current)), ensure_ascii=False, default=str
+                )
                 if payload != last:
                     last = payload
                     yield {"event": "update", "data": payload}
@@ -1138,7 +1329,12 @@ async def stream_execution_endpoint(request: Request):
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
 
     channel = f"plaita:execution:events:{execution_id}"
-    return EventSourceResponse(_execution_event_stream(request, data, channel))
+    # #166：cluster 档的 initial_state 是整行执行表示（含 context.$INPUT），
+    # 与详情路由共用同一条脱敏；update 事件是 worker 发布的事件载荷（另一个面，
+    # 不在本单口径内）。
+    return EventSourceResponse(
+        _execution_event_stream(request, _redact_execution_view(dict(data)), channel)
+    )
 
 
 # raw Starlette Route：绕过 include 级 require_auth（仅此路由），鉴权在端点内
@@ -1151,3 +1347,138 @@ router.add_route(
     include_in_schema=False,
 )
 
+
+# ============ 执行事件时间线（plaita#25） ============
+
+#: 时间线事件类型白名单（本地档投影只发这两类；集群档由 worker 落盘，
+#: 还含 enqueued/run_start/run_end）。
+_TIMELINE_NODE_START = "node_start"
+_TIMELINE_NODE_END = "node_end"
+
+
+def _timeline_envelope(execution_id: Optional[str], status: Optional[str],
+                       source: str, timeline: Optional[Dict[str, Any]],
+                       *, collected: bool, start_time: Any = None,
+                       end_time: Any = None) -> Dict[str, Any]:
+    """时间线响应信封（集群档与本地档共用一个形状）。
+
+    ``collected=False`` = **未采集**（老状态/非分布式宿主）——与「采集到了但
+    事件为空」严格区分，也与 ``queue_wait_ms=None``（排队时长未知）自洽；
+    读取方（前端/值守脚本）不得把 None 折算成 0。
+    """
+    tl = timeline if isinstance(timeline, dict) else {}
+    events = tl.get("events")
+    if not isinstance(events, list):
+        events = []
+    return {
+        "execution_id": execution_id,
+        "status": status,
+        "source": source,
+        "collected": collected,
+        "events": events,
+        "dropped": int(tl.get("dropped") or 0),
+        "max_events": tl.get("max_events"),
+        "enqueued_at": tl.get("enqueued_at"),
+        "queue_wait_ms": tl.get("queue_wait_ms"),
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+
+
+def project_state_timeline(data: Dict[str, Any]) -> Dict[str, Any]:
+    """集群档：直接读 worker 落盘的 ``ExecutionState.timeline``。
+
+    老状态（本字段上线前写入）没有 ``timeline`` 键 ⇒ ``collected=False``：
+    答案是「没有采集到」，不是「没错过任何事件」。
+    """
+    tl = data.get("timeline")
+    return _timeline_envelope(
+        data.get("execution_id"),
+        data.get("status"),
+        "state",
+        tl,
+        collected=isinstance(tl, dict),
+        start_time=data.get("start_time"),
+        end_time=data.get("end_time"),
+    )
+
+
+def project_local_timeline(info: Dict[str, Any]) -> Dict[str, Any]:
+    """本地档：由 ``nodes_json`` 投影出节点级事件（本地执行在 console 进程内跑，
+    节点 trace 本身就带 ``started_ms``/``ended_ms``，是既有真源的**只读视图**，
+    不新增列、不新增写入方）。
+
+    本地档没有 cluster 的入队等待窗口（``start_local_execution`` 建档即开跑），
+    故 ``queue_wait_ms`` 恒为 None（**不假造 0**）；``enqueued_at`` 取建档时间
+    ``start_time`` 仅作参照。
+    """
+    nodes = info.get("nodes")
+    events: List[Dict[str, Any]] = []
+    if isinstance(nodes, list):
+        seq = 0
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = node.get("id")
+            started_ms = node.get("started_ms")
+            if not isinstance(started_ms, int):
+                continue
+            seq += 1
+            events.append({
+                "seq": seq,
+                "type": _TIMELINE_NODE_START,
+                "node_id": node_id,
+                "at": node.get("started_at"),
+                "at_ms": started_ms,
+            })
+            ended_ms = node.get("ended_ms")
+            if not isinstance(ended_ms, int):
+                continue        # 在跑节点：只发 start（与 keeper 活性判据同形态）
+            seq += 1
+            event: Dict[str, Any] = {
+                "seq": seq,
+                "type": _TIMELINE_NODE_END,
+                "node_id": node_id,
+                "at": node.get("ended_at"),
+                "at_ms": ended_ms,
+                "ok": node.get("status") != "error",
+                "error": node.get("error"),
+            }
+            if isinstance(node.get("duration_ms"), int):
+                event["duration_ms"] = node["duration_ms"]
+            events.append(event)
+    return _timeline_envelope(
+        info.get("execution_id"),
+        info.get("status"),
+        "local_nodes_projection",
+        {"events": events},
+        collected=bool(events),
+        start_time=info.get("start_time"),
+        end_time=info.get("end_time"),
+    )
+
+
+@router.get("/executions/{execution_id}/timeline")
+async def get_execution_timeline(
+    execution_id: str,
+    request: Request,
+    redis: Optional[Redis] = Depends(get_redis_or_none),
+):
+    """执行事件时间线（plaita#25）：**排队多久 / 每个节点何时开始跑了多久 /
+    哪个节点失败**——修掉「除 Langfuse（失败节点恰缺失）外没有第二时间线」的盲区。
+
+    - 集群档：读 worker 落盘的 ``ExecutionState.timeline``（有序事件日志，
+      同一份事件已实时发布到 SSE 频道）；
+    - 本地档：读 ``local_executions.nodes_json`` 的只读投影；
+    - 老状态/未采集 ⇒ ``collected=false``、``queue_wait_ms=null``，**不是 0**。
+    """
+    if (local := get_local_executor(request)) is not None:
+        info = local.get_local_execution(execution_id, tenant_id=tenant_scope(request))
+        if info is None:
+            raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+        return project_local_timeline(info)
+
+    _tenant, data = _find_execution(request, redis, execution_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+    return project_state_timeline(data)

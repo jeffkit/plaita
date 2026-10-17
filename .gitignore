@@ -4,6 +4,9 @@
 *.log
 dist
 build
+# Wheel 构建产物不跟踪（#135）：根目录 11 个 *.whl 已出库，防止仓库膨胀
+# 与被 pip 类工具误拾；确需入库的 wheel 用 git add -f 显式添加。
+*.whl
 *.pyc
 .idea
 *.egg-info

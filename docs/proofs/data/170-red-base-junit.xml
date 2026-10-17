@@ -1,0 +1,540 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="12" skipped="0" tests="15" time="1.470" timestamp="2026-10-17T10:57:01.980511+08:00" hostname="Mac"><testcase classname="tests.unit.test_issue79_event_storage_list_events" name="test_bytes_client_returns_stored_event" time="0.005" /><testcase classname="tests.unit.test_issue79_event_storage_list_events" name="test_initialize_builds_client_with_decode_responses" time="0.001"><failure message="AssertionError: 生产建连未开 decode_responses: call('redis://localhost:6379/15')&#10;assert None is True&#10; +  where None = &lt;built-in method get of dict object at 0x10ee5a000&gt;('decode_responses')&#10; +    where &lt;built-in method get of dict object at 0x10ee5a000&gt; = {}.get&#10; +      where {} = call('redis://localhost:6379/15').kwargs&#10; +        where call('redis://localhost:6379/15') = &lt;AsyncMock id='4545098128'&gt;.call_args">def test_initialize_builds_client_with_decode_responses():
+        """自建生产客户端必须开 ``decode_responses``：治本一半（外部注入的
+        bytes 客户端由 ``_zset_member_ids`` 兜底，治标一半，两者都要）。"""
+        from unittest.mock import MagicMock
+    
+        async def _t():
+            storage = RedisEventStorage(redis_url="redis://localhost:6379/15", ttl=3600)
+            assert storage.redis is None
+            fake_client = MagicMock()
+            with patch(
+                "plaita.event.redis.aioredis.from_url",
+                new=AsyncMock(return_value=fake_client),
+            ) as from_url:
+                await storage.initialize()
+            assert from_url.call_args.args[0] == "redis://localhost:6379/15"
+            assert from_url.call_args.kwargs.get("decode_responses") is True, (
+                f"生产建连未开 decode_responses: {from_url.call_args!r}"
+            )
+    
+&gt;       run(_t())
+
+tests/unit/test_issue79_event_storage_list_events.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue79_event_storage_list_events.py:41: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        storage = RedisEventStorage(redis_url="redis://localhost:6379/15", ttl=3600)
+        assert storage.redis is None
+        fake_client = MagicMock()
+        with patch(
+            "plaita.event.redis.aioredis.from_url",
+            new=AsyncMock(return_value=fake_client),
+        ) as from_url:
+            await storage.initialize()
+        assert from_url.call_args.args[0] == "redis://localhost:6379/15"
+&gt;       assert from_url.call_args.kwargs.get("decode_responses") is True, (
+            f"生产建连未开 decode_responses: {from_url.call_args!r}"
+        )
+E       AssertionError: 生产建连未开 decode_responses: call('redis://localhost:6379/15')
+E       assert None is True
+E        +  where None = &lt;built-in method get of dict object at 0x10ee5a000&gt;('decode_responses')
+E        +    where &lt;built-in method get of dict object at 0x10ee5a000&gt; = {}.get
+E        +      where {} = call('redis://localhost:6379/15').kwargs
+E        +        where call('redis://localhost:6379/15') = &lt;AsyncMock id='4545098128'&gt;.call_args
+
+tests/unit/test_issue79_event_storage_list_events.py:119: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue79_event_storage_list_events" name="test_more_than_ten_event_types_all_returned" time="0.006"><failure message="AssertionError: 类型数 12、limit 200 只返回 10 条（前 10 类型截断）&#10;assert 10 == 12&#10; +  where 10 = len([Event(event_id='t00:1700000000.0', event_type='t00', data={}, timestamp=1700000000.0, source='', correlation_id=None)...t(event_id='t05:1700000005.0', event_type='t05', data={}, timestamp=1700000005.0, source='', correlation_id=None), ...])">def test_more_than_ten_event_types_all_returned():
+        """(b) 12 个事件类型各 1 条：无类型列表必须返回全部 12 条。
+    
+        修复前（decode 已修）仍只返回前 10 个类型，``t10``/``t11`` 整类丢失。
+        """
+    
+        async def _t():
+            storage = _storage(True)
+            pairs = [(f"t{i:02d}", BASE_TS + i) for i in range(12)]
+            await _seed(storage, pairs)
+    
+            got = await storage.list_events(limit=200)
+            assert len(got) == 12, f"类型数 12、limit 200 只返回 {len(got)} 条（前 10 类型截断）"
+            assert {e.event_type for e in got} == {f"t{i:02d}" for i in range(12)}, (
+                f"整类事件被跳过: {sorted({e.event_type for e in got})}"
+            )
+    
+&gt;       run(_t())
+
+tests/unit/test_issue79_event_storage_list_events.py:143: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue79_event_storage_list_events.py:41: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        storage = _storage(True)
+        pairs = [(f"t{i:02d}", BASE_TS + i) for i in range(12)]
+        await _seed(storage, pairs)
+    
+        got = await storage.list_events(limit=200)
+&gt;       assert len(got) == 12, f"类型数 12、limit 200 只返回 {len(got)} 条（前 10 类型截断）"
+E       AssertionError: 类型数 12、limit 200 只返回 10 条（前 10 类型截断）
+E       assert 10 == 12
+E        +  where 10 = len([Event(event_id='t00:1700000000.0', event_type='t00', data={}, timestamp=1700000000.0, source='', correlation_id=None)...t(event_id='t05:1700000005.0', event_type='t05', data={}, timestamp=1700000005.0, source='', correlation_id=None), ...])
+
+tests/unit/test_issue79_event_storage_list_events.py:138: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue79_event_storage_list_events" name="test_eleven_types_with_limit_eleven_all_returned" time="0.006"><failure message="AssertionError: limit=11 只返回 10 条（分母含未遍历类型）&#10;assert 10 == 11&#10; +  where 10 = len([Event(event_id='t00:1700000000.0', event_type='t00', data={}, timestamp=1700000000.0, source='', correlation_id=None)...t(event_id='t05:1700000005.0', event_type='t05', data={}, timestamp=1700000005.0, source='', correlation_id=None), ...])">def test_eleven_types_with_limit_eleven_all_returned():
+        """11 个类型、``limit=11``：配额必须用到刀刃上（修复前 sub_limit 分母含
+        未遍历类型，只返回 10 条）。"""
+    
+        async def _t():
+            storage = _storage(True)
+            await _seed(storage, [(f"t{i:02d}", BASE_TS + i) for i in range(11)])
+    
+            got = await storage.list_events(limit=11)
+            assert len(got) == 11, f"limit=11 只返回 {len(got)} 条（分母含未遍历类型）"
+            assert len({e.event_type for e in got}) == 11
+    
+&gt;       run(_t())
+
+tests/unit/test_issue79_event_storage_list_events.py:158: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue79_event_storage_list_events.py:41: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        storage = _storage(True)
+        await _seed(storage, [(f"t{i:02d}", BASE_TS + i) for i in range(11)])
+    
+        got = await storage.list_events(limit=11)
+&gt;       assert len(got) == 11, f"limit=11 只返回 {len(got)} 条（分母含未遍历类型）"
+E       AssertionError: limit=11 只返回 10 条（分母含未遍历类型）
+E       assert 10 == 11
+E        +  where 10 = len([Event(event_id='t00:1700000000.0', event_type='t00', data={}, timestamp=1700000000.0, source='', correlation_id=None)...t(event_id='t05:1700000005.0', event_type='t05', data={}, timestamp=1700000005.0, source='', correlation_id=None), ...])
+
+tests/unit/test_issue79_event_storage_list_events.py:155: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue79_event_storage_list_events" name="test_no_type_listing_is_globally_time_ordered" time="0.003"><failure message="AssertionError: 未全局按时间归并: [1.0, 3.0, 2.0, 4.0]&#10;assert [1.0, 3.0, 2.0, 4.0] == [1.0, 2.0, 3.0, 4.0]&#10;  &#10;  At index 1 diff: 3.0 != 2.0&#10;  Use -v to get more diff">def test_no_type_listing_is_globally_time_ordered():
+        """无类型列表必须全局按时间有序——回扫游标依赖这个顺序。"""
+    
+        async def _t():
+            storage = _storage(True)
+            # 同一类型的时间戳交错：按类型分块遍历会得到 [1,3,2,4]
+            await _seed(
+                storage,
+                [("a", BASE_TS + 1), ("a", BASE_TS + 3),
+                 ("b", BASE_TS + 2), ("b", BASE_TS + 4)],
+            )
+    
+            got = await storage.list_events(start_time=BASE_TS, limit=10)
+            seq = [round(e.timestamp - BASE_TS, 3) for e in got]
+            assert seq == [1.0, 2.0, 3.0, 4.0], f"未全局按时间归并: {seq}"
+            assert [e.timestamp for e in got] == sorted(e.timestamp for e in got)
+    
+&gt;       run(_t())
+
+tests/unit/test_issue79_event_storage_list_events.py:178: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue79_event_storage_list_events.py:41: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        storage = _storage(True)
+        # 同一类型的时间戳交错：按类型分块遍历会得到 [1,3,2,4]
+        await _seed(
+            storage,
+            [("a", BASE_TS + 1), ("a", BASE_TS + 3),
+             ("b", BASE_TS + 2), ("b", BASE_TS + 4)],
+        )
+    
+        got = await storage.list_events(start_time=BASE_TS, limit=10)
+        seq = [round(e.timestamp - BASE_TS, 3) for e in got]
+&gt;       assert seq == [1.0, 2.0, 3.0, 4.0], f"未全局按时间归并: {seq}"
+E       AssertionError: 未全局按时间归并: [1.0, 3.0, 2.0, 4.0]
+E       assert [1.0, 3.0, 2.0, 4.0] == [1.0, 2.0, 3.0, 4.0]
+E         
+E         At index 1 diff: 3.0 != 2.0
+E         Use -v to get more diff
+
+tests/unit/test_issue79_event_storage_list_events.py:175: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue79_event_storage_list_events" name="test_limit_selects_globally_earliest_events" time="0.003"><failure message="AssertionError: limit=2 未取全局最早两条: [1.0, 3.0]&#10;assert [1.0, 3.0] == [1.0, 2.0]&#10;  &#10;  At index 1 diff: 3.0 != 2.0&#10;  Use -v to get more diff">def test_limit_selects_globally_earliest_events():
+        """``limit`` 必须命中全局最早的事件，而不是「每类型分摊配额」的结果。"""
+    
+        async def _t():
+            storage = _storage(True)
+            await _seed(
+                storage,
+                [("a", BASE_TS + 1), ("a", BASE_TS + 2),
+                 ("b", BASE_TS + 3), ("b", BASE_TS + 4)],
+            )
+    
+            got = await storage.list_events(start_time=BASE_TS, limit=2)
+            seq = [round(e.timestamp - BASE_TS, 3) for e in got]
+            assert seq == [1.0, 2.0], f"limit=2 未取全局最早两条: {seq}"
+    
+&gt;       run(_t())
+
+tests/unit/test_issue79_event_storage_list_events.py:196: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue79_event_storage_list_events.py:41: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        storage = _storage(True)
+        await _seed(
+            storage,
+            [("a", BASE_TS + 1), ("a", BASE_TS + 2),
+             ("b", BASE_TS + 3), ("b", BASE_TS + 4)],
+        )
+    
+        got = await storage.list_events(start_time=BASE_TS, limit=2)
+        seq = [round(e.timestamp - BASE_TS, 3) for e in got]
+&gt;       assert seq == [1.0, 2.0], f"limit=2 未取全局最早两条: {seq}"
+E       AssertionError: limit=2 未取全局最早两条: [1.0, 3.0]
+E       assert [1.0, 3.0] == [1.0, 2.0]
+E         
+E         At index 1 diff: 3.0 != 2.0
+E         Use -v to get more diff
+
+tests/unit/test_issue79_event_storage_list_events.py:194: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestS2CompositeCursor" name="test_batch_size_one_progresses_over_distinct_timestamps" time="0.000"><failure message="AssertionError: batch_size=1 无法越过边界事件: ['e0']&#10;assert ['e0'] == ['e0', 'e1', 'e2']&#10;  &#10;  Right contains 2 more items, first extra item: 'e1'&#10;  Use -v to get more diff">self = &lt;tests.unit.test_issue85_reconcile_hardening.TestS2CompositeCursor object at 0x10ee58f10&gt;
+
+    def test_batch_size_one_progresses_over_distinct_timestamps(self):
+        """``batch_size=1``：边界事件（游标那条）不得被当成待处理，否则活锁。"""
+    
+        async def _t():
+            base = time.time() - 100
+            store = MemoryEventStorage()
+            for i in range(3):
+                await store.store_event(_event(f"e{i}", base + i))
+            filt = RecordingFilter()
+            r = _reconciler(
+                store, filt, backfill_seconds=3600, batch_size=1,
+            )
+            for _ in range(5):
+                await r.scan_once()
+            assert sorted(set(filt.seen)) == ["e0", "e1", "e2"], (
+                f"batch_size=1 无法越过边界事件: {filt.seen}"
+            )
+    
+&gt;       run(_t())
+
+tests/unit/test_issue85_reconcile_hardening.py:131: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue85_reconcile_hardening.py:45: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        base = time.time() - 100
+        store = MemoryEventStorage()
+        for i in range(3):
+            await store.store_event(_event(f"e{i}", base + i))
+        filt = RecordingFilter()
+        r = _reconciler(
+            store, filt, backfill_seconds=3600, batch_size=1,
+        )
+        for _ in range(5):
+            await r.scan_once()
+&gt;       assert sorted(set(filt.seen)) == ["e0", "e1", "e2"], (
+            f"batch_size=1 无法越过边界事件: {filt.seen}"
+        )
+E       AssertionError: batch_size=1 无法越过边界事件: ['e0']
+E       assert ['e0'] == ['e0', 'e1', 'e2']
+E         
+E         Right contains 2 more items, first extra item: 'e1'
+E         Use -v to get more diff
+
+tests/unit/test_issue85_reconcile_hardening.py:127: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestS3ReplayFailureVisible" name="test_enqueue_failure_is_visible_and_retried" time="0.018" /><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestS4BatchSizeGuard" name="test_batch_size_zero_no_crash_no_scan" time="0.000"><failure message="AssertionError: batch_size=0 的轮次推进了游标（整窗被跳过）&#10;assert 'plaita:event_reconcile:cursor' not in {'plaita:event_reconcile:cursor': '1792205823.379572'}&#10; +  where 'plaita:event_reconcile:cursor' = EventReconciler.CURSOR_KEY&#10; +  and   {'plaita:event_reconcile:cursor': '1792205823.379572'} = &lt;tests.unit.test_issue85_reconcile_hardening.FakeRedis object at 0x10ee0db50&gt;.kv">self = &lt;tests.unit.test_issue85_reconcile_hardening.TestS4BatchSizeGuard object at 0x10ee5a5d0&gt;
+
+    def test_batch_size_zero_no_crash_no_scan(self):
+        """``batch_size=0``：不取事件、不推进游标（旧实现会把游标推到窗口上界）。"""
+    
+        async def _t():
+            store = MemoryEventStorage()
+            await store.store_event(_event("e0", BASE_TS + 1))
+            redis = FakeRedis()
+            filt = RecordingFilter()
+            r = _reconciler(
+                store, filt, redis, backfill_seconds=3600, batch_size=0,
+            )
+            replayed = await r.scan_once()
+            assert replayed == 0
+            assert filt.seen == []
+            assert EventReconciler.CURSOR_KEY not in redis.kv, (
+                "batch_size=0 的轮次推进了游标（整窗被跳过）"
+            )
+    
+&gt;       run(_t())
+
+tests/unit/test_issue85_reconcile_hardening.py:221: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue85_reconcile_hardening.py:45: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        store = MemoryEventStorage()
+        await store.store_event(_event("e0", BASE_TS + 1))
+        redis = FakeRedis()
+        filt = RecordingFilter()
+        r = _reconciler(
+            store, filt, redis, backfill_seconds=3600, batch_size=0,
+        )
+        replayed = await r.scan_once()
+        assert replayed == 0
+        assert filt.seen == []
+&gt;       assert EventReconciler.CURSOR_KEY not in redis.kv, (
+            "batch_size=0 的轮次推进了游标（整窗被跳过）"
+        )
+E       AssertionError: batch_size=0 的轮次推进了游标（整窗被跳过）
+E       assert 'plaita:event_reconcile:cursor' not in {'plaita:event_reconcile:cursor': '1792205823.379572'}
+E        +  where 'plaita:event_reconcile:cursor' = EventReconciler.CURSOR_KEY
+E        +  and   {'plaita:event_reconcile:cursor': '1792205823.379572'} = &lt;tests.unit.test_issue85_reconcile_hardening.FakeRedis object at 0x10ee0db50&gt;.kv
+
+tests/unit/test_issue85_reconcile_hardening.py:217: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestS6MemoryStorageOrdering" name="test_memory_storage_list_events_is_time_ordered" time="0.000"><failure message="AssertionError: memory list_events 未全局时间有序: ['e2', 'e0', 'e1']&#10;assert ['e2', 'e0', 'e1'] == ['e0', 'e1', 'e2']&#10;  &#10;  At index 0 diff: 'e2' != 'e0'&#10;  Use -v to get more diff">self = &lt;tests.unit.test_issue85_reconcile_hardening.TestS6MemoryStorageOrdering object at 0x10ee5acd0&gt;
+
+    def test_memory_storage_list_events_is_time_ordered(self):
+        """memory 后端与 Redis 后端同序：按 ``(timestamp, event_id)`` 全局升序。"""
+    
+        async def _t():
+            store = MemoryEventStorage()
+            for i in (2, 0, 1):
+                await store.store_event(_event(f"e{i}", BASE_TS + i))
+            got = await store.list_events()
+            assert [e.event_id for e in got] == ["e0", "e1", "e2"], (
+                f"memory list_events 未全局时间有序: {[e.event_id for e in got]}"
+            )
+    
+&gt;       run(_t())
+
+tests/unit/test_issue85_reconcile_hardening.py:237: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue85_reconcile_hardening.py:45: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        store = MemoryEventStorage()
+        for i in (2, 0, 1):
+            await store.store_event(_event(f"e{i}", BASE_TS + i))
+        got = await store.list_events()
+&gt;       assert [e.event_id for e in got] == ["e0", "e1", "e2"], (
+            f"memory list_events 未全局时间有序: {[e.event_id for e in got]}"
+        )
+E       AssertionError: memory list_events 未全局时间有序: ['e2', 'e0', 'e1']
+E       assert ['e2', 'e0', 'e1'] == ['e0', 'e1', 'e2']
+E         
+E         At index 0 diff: 'e2' != 'e0'
+E         Use -v to get more diff
+
+tests/unit/test_issue85_reconcile_hardening.py:233: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestS6MemoryStorageOrdering" name="test_reconciler_recovers_all_with_out_of_order_insertion" time="0.000"><failure message="AssertionError: 乱序写入下回扫漏事件: ['e1', 'e3']&#10;assert ['e1', 'e3'] == ['e0', 'e1', 'e2', 'e3', 'e4']&#10;  &#10;  At index 0 diff: 'e1' != 'e0'&#10;  Right contains 3 more items, first extra item: 'e2'&#10;  Use -v to get more diff">self = &lt;tests.unit.test_issue85_reconcile_hardening.TestS6MemoryStorageOrdering object at 0x10ee5b450&gt;
+
+    def test_reconciler_recovers_all_with_out_of_order_insertion(self):
+        """乱序写入 + ``batch_size=2``：回扫必须把 5 条全部补偿。"""
+    
+        async def _t():
+            base = time.time() - 100
+            store = MemoryEventStorage()
+            for i in (3, 1, 4, 0, 2):
+                await store.store_event(_event(f"e{i}", base + i))
+            filt = RecordingFilter()
+            r = _reconciler(store, filt, backfill_seconds=3600, batch_size=2)
+            for _ in range(5):
+                await r.scan_once()
+            assert sorted(set(filt.seen)) == [f"e{i}" for i in range(5)], (
+                f"乱序写入下回扫漏事件: {sorted(set(filt.seen))}"
+            )
+    
+&gt;       run(_t())
+
+tests/unit/test_issue85_reconcile_hardening.py:255: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue85_reconcile_hardening.py:45: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        base = time.time() - 100
+        store = MemoryEventStorage()
+        for i in (3, 1, 4, 0, 2):
+            await store.store_event(_event(f"e{i}", base + i))
+        filt = RecordingFilter()
+        r = _reconciler(store, filt, backfill_seconds=3600, batch_size=2)
+        for _ in range(5):
+            await r.scan_once()
+&gt;       assert sorted(set(filt.seen)) == [f"e{i}" for i in range(5)], (
+            f"乱序写入下回扫漏事件: {sorted(set(filt.seen))}"
+        )
+E       AssertionError: 乱序写入下回扫漏事件: ['e1', 'e3']
+E       assert ['e1', 'e3'] == ['e0', 'e1', 'e2', 'e3', 'e4']
+E         
+E         At index 0 diff: 'e1' != 'e0'
+E         Right contains 3 more items, first extra item: 'e2'
+E         Use -v to get more diff
+
+tests/unit/test_issue85_reconcile_hardening.py:251: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestS7LoudMissingPayload" name="test_missing_payload_logs_error_with_event_id" time="0.002"><failure message="AssertionError: 载荷缺失没有 ERROR 响亮日志（带 event_id）: []&#10;assert []">self = &lt;tests.unit.test_issue85_reconcile_hardening.TestS7LoudMissingPayload object at 0x10ee5b850&gt;
+
+    def test_missing_payload_logs_error_with_event_id(self):
+        """索引里有 member、载荷缺失：必须 ERROR 且带 event_id（不是 debug 静默）。"""
+        fakeredis = pytest.importorskip("fakeredis")
+        import fakeredis.aioredis
+    
+        from plaita.event.redis import RedisEventStorage
+    
+        async def _t():
+            server = fakeredis.FakeServer()
+            storage = RedisEventStorage(
+                redis_url="redis://localhost:6379/15", ttl=3600
+            )
+            storage.redis = fakeredis.aioredis.FakeRedis(
+                server=server, decode_responses=False
+            )
+            await storage.redis.zadd(
+                f"{storage.key_prefix}types:ghost", {"ghost-event-id": BASE_TS}
+            )
+            logger = logging.getLogger("plaita.event.redis")
+            capture = _LogCapture()
+            previous = logger.level
+            logger.addHandler(capture)
+            logger.setLevel(logging.DEBUG)
+            try:
+                got = await storage.list_events(limit=10)
+            finally:
+                logger.removeHandler(capture)
+                logger.setLevel(previous)
+            assert got == []
+            errors = [
+                record for record in capture.records
+                if record.levelno == logging.ERROR
+                and "ghost-event-id" in record.getMessage()
+            ]
+            assert errors, (
+                "载荷缺失没有 ERROR 响亮日志（带 event_id）: "
+                f"{[(r.levelname, r.getMessage()) for r in capture.records]}"
+            )
+    
+&gt;       run(_t())
+
+tests/unit/test_issue85_reconcile_hardening.py:298: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue85_reconcile_hardening.py:45: in run
+    return loop.run_until_complete(coro)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def _t():
+        server = fakeredis.FakeServer()
+        storage = RedisEventStorage(
+            redis_url="redis://localhost:6379/15", ttl=3600
+        )
+        storage.redis = fakeredis.aioredis.FakeRedis(
+            server=server, decode_responses=False
+        )
+        await storage.redis.zadd(
+            f"{storage.key_prefix}types:ghost", {"ghost-event-id": BASE_TS}
+        )
+        logger = logging.getLogger("plaita.event.redis")
+        capture = _LogCapture()
+        previous = logger.level
+        logger.addHandler(capture)
+        logger.setLevel(logging.DEBUG)
+        try:
+            got = await storage.list_events(limit=10)
+        finally:
+            logger.removeHandler(capture)
+            logger.setLevel(previous)
+        assert got == []
+        errors = [
+            record for record in capture.records
+            if record.levelno == logging.ERROR
+            and "ghost-event-id" in record.getMessage()
+        ]
+&gt;       assert errors, (
+            "载荷缺失没有 ERROR 响亮日志（带 event_id）: "
+            f"{[(r.levelname, r.getMessage()) for r in capture.records]}"
+        )
+E       AssertionError: 载荷缺失没有 ERROR 响亮日志（带 event_id）: []
+E       assert []
+
+tests/unit/test_issue85_reconcile_hardening.py:293: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestS8CursorNoCas" name="test_save_cursor_refuses_rollback" time="0.000"><failure message="AssertionError: 回退游标未被拒绝&#10;assert '1700000000.0' == '1700000100.0'&#10;  &#10;  - 1700000100.0&#10;  ?        ^&#10;  + 1700000000.0&#10;  ?        ^">self = &lt;tests.unit.test_issue85_reconcile_hardening.TestS8CursorNoCas object at 0x10ee58510&gt;
+
+    def test_save_cursor_refuses_rollback(self):
+        """游标单调：陈旧写者不得把游标推回去（会整窗重扫）。"""
+        redis = FakeRedis()
+        r = _reconciler(MemoryEventStorage(), redis=redis, backfill_seconds=3600)
+        redis.kv[EventReconciler.CURSOR_KEY] = repr(BASE_TS + 100)
+        r._save_cursor(BASE_TS)
+&gt;       assert redis.kv[EventReconciler.CURSOR_KEY] == repr(BASE_TS + 100), (
+            "回退游标未被拒绝"
+        )
+E       AssertionError: 回退游标未被拒绝
+E       assert '1700000000.0' == '1700000100.0'
+E         
+E         - 1700000100.0
+E         ?        ^
+E         + 1700000000.0
+E         ?        ^
+
+tests/unit/test_issue85_reconcile_hardening.py:308: AssertionError</failure></testcase><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestAD5WindowEndClamp" name="test_forged_skipped_cannot_push_cursor_beyond_window" time="0.000" /><testcase classname="tests.unit.test_issue85_reconcile_hardening.TestAH3CursorWriteLoud" name="test_cursor_write_failure_is_loud_with_ids" time="0.000"><failure message="AssertionError: 游标写失败没有 ERROR: ['事件回扫: 写入游标失败: simulated cursor write outage']&#10;assert []">self = &lt;tests.unit.test_issue85_reconcile_hardening.TestAH3CursorWriteLoud object at 0x10edd8450&gt;
+
+    def test_cursor_write_failure_is_loud_with_ids(self):
+        """游标写失败必须 ERROR 响亮，并说明后果（下一轮重扫、去重键幂等）。"""
+    
+        redis = _BrokenSetRedis()
+        r = _reconciler(MemoryEventStorage(), redis=redis, backfill_seconds=3600)
+        logger = logging.getLogger("plaita.server.event_reconcile")
+        capture = _LogCapture()
+        previous = logger.level
+        logger.addHandler(capture)
+        logger.setLevel(logging.DEBUG)
+        try:
+            r._save_cursor(BASE_TS)
+        finally:
+            logger.removeHandler(capture)
+            logger.setLevel(previous)
+        errors = [
+            record.getMessage() for record in capture.records
+            if record.levelno == logging.ERROR
+        ]
+&gt;       assert errors, f"游标写失败没有 ERROR: {[r.getMessage() for r in capture.records]}"
+E       AssertionError: 游标写失败没有 ERROR: ['事件回扫: 写入游标失败: simulated cursor write outage']
+E       assert []
+
+tests/unit/test_issue85_reconcile_hardening.py:371: AssertionError</failure></testcase></testsuite></testsuites>
