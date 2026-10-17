@@ -2540,6 +2540,64 @@ def _probe_isinstance(value: Any, kinds: Any, *, kind_name: str, path: str) -> b
         )) from exc
 
 
+#: plaita#163 **同形残面**（属性探针一侧）：宿主 ``__getattribute__`` 在
+#: ``hasattr`` 探测上抛非 ``AttributeError`` 时的**具名拒绝**。
+#:
+#: ``hasattr(x, name)`` 只把 ``AttributeError`` 当"没有这个属性"，宿主抛别的异常
+#: （``RuntimeError`` 等）时**原样上抛**——引擎在做"这个对象是不是映射/容器/属性
+#: 风格上下文"的分支判定，却把宿主的裸异常漏给用户。与
+#: :data:`_TRAVERSAL_PROBE_FAILED_TEMPLATE` 是同一条纪律、同一处置（含真实类名、
+#: 刻意不回显宿主文本），只是探针从 ``isinstance`` 换成了属性存在性。
+_HOST_ATTRIBUTE_PROBE_FAILED_TEMPLATE = (
+    "expression path {path!r} read a value whose host class {type_name!r} raises "
+    "{exc_type} from __getattribute__ while the engine probes the {attribute!r} "
+    "attribute, so the engine cannot tell whether the value is engine data. A read "
+    "that enters host code must either go through a C slot or be refused by name "
+    "(plaita#69). Make the host class answer {attribute!r} normally (or not at all), "
+    "or hand the engine a plain dict/list/str built from known-good data."
+)
+
+#: ``$F.*`` 结果中"可登记为新容器 / 可作 in-place 变更目标"的形状（#163 残面里
+#: **tuple 型** ``isinstance`` 的判据；两处调用点共享，避免判据漂移）。
+_CONTAINER_RESULT_KINDS = (dict, list, set, frozenset, tuple)
+_CONTAINER_RESULT_KIND_NAMES = "dict/list/set/frozenset/tuple"
+
+
+def _probe_hasattr(value: Any, attribute: str, *, path: str) -> bool:
+    """``hasattr`` 探测的**具名化**包装（plaita#163 的同形残面）。
+
+    判据**一字不改**：能判出来时返回值与 ``hasattr`` 逐字相同（``AttributeError``
+    照旧 ⇒ ``False``），无异常时代价也不变（``try`` 零代价）。只有宿主在
+    ``__getattribute__`` 里抛非 ``AttributeError`` 时，才把裸异常换成具名
+    ``ValueError``（含 ``plaita#69``，用 ``type(value).__name__`` 给出真实类名；
+    刻意不回显宿主异常文本）。
+    """
+    try:
+        return hasattr(value, attribute)
+    except Exception as exc:                # noqa: BLE001 - 宿主 __getattribute__ 的任意异常
+        raise ValueError(_HOST_ATTRIBUTE_PROBE_FAILED_TEMPLATE.format(
+            path=path, type_name=type(value).__name__,
+            exc_type=type(exc).__name__, attribute=attribute,
+        )) from exc
+
+
+def _probe_getattr(value: Any, attribute: str, default: Any, *, path: str) -> Any:
+    """``getattr(value, attribute, default)`` 探针的**具名化**包装（同形残面）。
+
+    与 :func:`_probe_hasattr` 是同一处置，只是探针要拿到**属性值**才能判调用
+    （``_container_has_root`` 里 ``getattr(obj, "get", None)`` + ``callable``）。
+    判据一字不改：缺席（``AttributeError``）照旧返回 *default*，只有宿主
+    ``__getattribute__`` 抛别的异常时才具名拒绝。
+    """
+    try:
+        return getattr(value, attribute, default)
+    except Exception as exc:                # noqa: BLE001 - 宿主 __getattribute__ 的任意异常
+        raise ValueError(_HOST_ATTRIBUTE_PROBE_FAILED_TEMPLATE.format(
+            path=path, type_name=type(value).__name__,
+            exc_type=type(exc).__name__, attribute=attribute,
+        )) from exc
+
+
 def _get_attr(obj: Any, path: str) -> Any:
     """Read *path* off *obj* — mirrors the non-bracket branch of the old
     ``plaita.io.get_attr``.
@@ -2559,14 +2617,25 @@ def _get_attr(obj: Any, path: str) -> Any:
 
     plaita#163：``isinstance(obj, dict)`` 走 :func:`_probe_isinstance`——宿主
     ``__class__`` 抛异常时是具名 ``ValueError``（含 ``plaita#69``），不是裸异常。
+
+    plaita#163 同形残面（W22-A）：三个属性探针（``__getitem__`` / ``get`` /
+    ``__dict__``）走 :func:`_probe_hasattr`——宿主 ``__getattribute__`` 抛异常时
+    同样具名拒绝，不是裸异常。
+
+    **未改**：末段 ``getattr(obj, path, None)``（以及映射分支的
+    ``_mapping_get`` → ``obj.get(path, None)``）是**真实读取**（不是探针）：宿主
+    属性/描述符自己抛的异常是它的操作错误，带原生类型契约（``#68 ④`` 同一纪律：
+    文档承诺的原生 ``TypeError``/``KeyError``/``ValueError`` 照旧原样抛出），
+    具名化会改写原生异常类型 ⇒ 保留现状（见 W22-A RED-PROOF §3）。
     """
     if _probe_isinstance(obj, dict, kind_name="dict", path=path):
         return _mapping_get(obj, path)
-    if hasattr(obj, "__getitem__") and hasattr(obj, "get"):
+    if (_probe_hasattr(obj, "__getitem__", path=path)
+            and _probe_hasattr(obj, "get", path=path)):
         return _mapping_get(obj, path)
     if path.startswith(_RESERVED_FIELD_PREFIX):
         _reject_reserved_field(path)
-    if hasattr(obj, "__dict__"):
+    if _probe_hasattr(obj, "__dict__", path=path):
         return getattr(obj, path, None)
     return None
 
@@ -2642,10 +2711,29 @@ def _scan_root_refs(prefix: str, text: str) -> FrozenSet[str]:
 
 
 def _container_has_root(obj: Any, root_key: str) -> bool:
-    """Would ``obj[root_key]`` (the nested thunk's root lookup) succeed?"""
-    if isinstance(obj, dict):
+    """Would ``obj[root_key]`` (the nested thunk's root lookup) succeed?
+
+    plaita#163 同形残面（W22-A）：本函数外层的五处**属性/类型探针**
+    （``isinstance(obj, dict)`` / ``hasattr(__contains__)`` / ``getattr("get")`` /
+    ``hasattr(__dict__)`` / ``hasattr(root_key)``）在宿主 ``__class__`` /
+    ``__getattribute__`` 抛异常时原本漏 **裸** ``RuntimeError``；现在走
+    :func:`_probe_isinstance` / :func:`_probe_hasattr` / :func:`_probe_getattr`
+    具名拒绝（含 ``plaita#69``）。
+
+    为什么是具名拒绝而不是"当作没有这个根键"：本函数是**嵌套字符串该不该求值**的
+    分支判据（``#104`` 方案 A）。宿主拒绝回答"这个容器里有没有该根键"时，静默答
+    "没有"会把一段合法的嵌套表达式串当成**数据文本**原样返回——一次看不见的语义
+    改写；具名拒绝是 fail-closed 且用户可见的处置（与 #163 的论据一致）。
+
+    **未改**：内层 ``root_key in obj`` / ``obj.get(...)`` 的异常照旧吞掉（继续往下
+    试 ⇒ 最终 ``False``，DEBUG 留痕）。那不是引擎的探针失败，而是**容器自己的读取
+    协议**在回答"没有"；这条"保守返回数据文本"的契约有既有测试钉住
+    （``tests/unit/test_expression_parser_root_scan.py`` / #151 的日志可见性），
+    本单不动。
+    """
+    if _probe_isinstance(obj, dict, kind_name="dict", path=root_key):
         return root_key in obj
-    if hasattr(obj, "__contains__"):
+    if _probe_hasattr(obj, "__contains__", path=root_key):
         try:
             return root_key in obj
         except Exception as exc:  # noqa: BLE001 — exotic containers must not break eval
@@ -2656,7 +2744,7 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
                 _expression._type_name(obj), root_key,
                 _expression._exception_message(exc),
             )
-    get = getattr(obj, "get", None)
+    get = _probe_getattr(obj, "get", None, path=root_key)
     if callable(get):
         try:
             return get(root_key, _MISSING) is not _MISSING
@@ -2666,12 +2754,12 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
                 _expression._type_name(obj), root_key,
                 _expression._exception_message(exc),
             )
-    if hasattr(obj, "__dict__"):
+    if _probe_hasattr(obj, "__dict__", path=root_key):
         # 兜底分支，与 _get_attr 的 getattr 分支对齐（属性风格的自定义上下文）。
         # 真实容器（dict / CheckpointState 这类带前缀存储键的映射）都走上面两条；
         # 根键一律带前缀（`$INPUT`），普通 dataclass / Pydantic 模型上恒为假，
         # 因此这条实际只在显式 setattr(obj, "$INPUT", …) 的容器上成立。
-        return hasattr(obj, root_key)
+        return _probe_hasattr(obj, root_key, path=root_key)
     return False
 
 
@@ -3147,7 +3235,9 @@ class ExpressionParser:
             if (len(args) == 1
                     and _STORAGE_VIEW_BUILTINS.get(func_name) is func):
                 result = _engine_mapping_view(func_name, args[0])
-                if isinstance(result, (dict, list, set, frozenset, tuple)):
+                if (_probe_isinstance(result, _CONTAINER_RESULT_KINDS,
+                                      kind_name=_CONTAINER_RESULT_KIND_NAMES,
+                                      path=f"$F.{func_name}(...)")):
                     _note_fresh_result(registry, func_name, result)
                 # 引擎视图返回后再测量（此时对象已被 r13 判决为真 dict 存储）
                 return _size_guard_result(
@@ -3183,7 +3273,12 @@ class ExpressionParser:
                 ) from exc
             # plaita#69 r5 freshness registration: only a container result can ever
             # be a mutation target, and only producers create new containers.
-            if isinstance(result, (dict, list, set, frozenset, tuple)):
+            # plaita#163 同形残面（W22-A）：tuple 型 ``isinstance`` 同样回落读
+            # ``__class__``——宿主注册的函数返回非容器 shape 的对象时可达（见
+            # W22-A RED-PROOF §2 D），改走具名化探针。
+            if (_probe_isinstance(result, _CONTAINER_RESULT_KINDS,
+                                  kind_name=_CONTAINER_RESULT_KIND_NAMES,
+                                  path=f"$F.{func_name}(...)")):
                 _note_fresh_result(registry, func_name, result)
             # plaita#68：输出规模守卫（所有结果的单一判定点）。
             return _size_guard_result(func_name, result, input_size)
