@@ -2111,6 +2111,8 @@ def _print_assertion_table(per_slot: dict, tag: str) -> None:
 # 该类 6 个用例都要把 9000 条语料逐条穿过掩码全链（本机 3.13.3 单文件 13m12s）。
 # marker 必须打在**类**上：只打单个测试时其余用例仍走 pytest-timeout 默认 150s
 # ⇒ CI 2 核必超（#156：test_corpus_per_slot_counts_and_alphabet 在 CI 超时实证）。
+# slow：整类挪出 push 门禁，由 ci-slow 慢车道承接（每场门禁省 ~1-2h）。
+@pytest.mark.slow
 @pytest.mark.timeout(3600)
 class TestMaskerGenerativeProperty(unittest.TestCase):
     """r7 生成式性质测试：验收判据从「自洽」改为「**完备**」，needle 由 oracle 选。

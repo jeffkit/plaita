@@ -91,7 +91,7 @@ jobs:
         run: |
           attempt=1
           until python -m pytest tests/integration tests/e2e \
-            --cov=plaita --cov-fail-under=0 --cov-report= --timeout=150 --timeout-method=thread -x -q; do
+            --cov=plaita --cov-fail-under=0 --cov-report= --timeout=150 -m "not slow" --timeout-method=thread -x -q; do
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
           done
@@ -99,7 +99,7 @@ jobs:
         run: |
           attempt=1
           until ls tests/unit/test_*.py | sort | awk 'NR % 3 == 0' | tr '\n' '\0' | xargs -0 \
-            python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 --timeout-method=thread -x -q; do
+            python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 -m "not slow" --timeout-method=thread -x -q; do
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
           done
@@ -107,7 +107,7 @@ jobs:
         run: |
           attempt=1
           until ls tests/unit/test_*.py | sort | awk 'NR % 3 == 1' | tr '\n' '\0' | xargs -0 \
-            python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 --timeout-method=thread -x -q; do
+            python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 -m "not slow" --timeout-method=thread -x -q; do
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
           done
@@ -116,7 +116,7 @@ jobs:
         run: |
           attempt=1
           until ls tests/unit/test_*.py | sort | awk 'NR % 3 == 2' | tr '\n' '\0' | xargs -0 \
-            python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 --timeout-method=thread -x -q; do
+            python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 -m "not slow" --timeout-method=thread -x -q; do
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
           done

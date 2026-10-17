@@ -182,11 +182,12 @@ class TestExpressionPerfConstantFactorBudget(unittest.TestCase):
         cls.parser = ExpressionParser.for_prefix("$")
         cls.ctx = _context({"a": {"b": {"c": 1}}, "raw": '{"q": 0}'})
 
-    def _ratio(self, expr: str):
+    def _ratio(self, expr: str, iterations: int = ITERATIONS,
+               repeats: int = REPEATS):
         reference = _us_per_call(self.parser, _REFERENCE, self.ctx,
-                                 iterations=ITERATIONS, repeats=REPEATS)
+                                 iterations=iterations, repeats=repeats)
         measured = _us_per_call(self.parser, expr, self.ctx,
-                                iterations=ITERATIONS, repeats=REPEATS)
+                                iterations=iterations, repeats=repeats)
         return reference, measured, measured / reference
 
     def test_mutator_paths_stay_within_the_checked_in_budget(self):
@@ -204,22 +205,32 @@ class TestExpressionPerfConstantFactorBudget(unittest.TestCase):
                          f"常量因子预算超限（baseline={_RATIOS} tol={_TOLERANCE}）: {misses}")
 
     def test_negative_control_slower_mutator_reddens_the_budget(self):
-        """人为把目标位热路径放慢 40µs ⇒ 比值必须越过 ceiling（守卫有区分力）。"""
+        """人为把目标位热路径放慢 ⇒ 比值必须越过 ceiling（守卫有区分力）。
+
+        注入量按**实测 reference 单次成本的比例**（20×）取，而非固定 µs：
+        固定 40µs 在 ~2µs/op 的开发机上 = 20×（比值 ~20 ≫ ceiling），但在
+        ~48µs/op 的 2 核 CI 上只有 0.84×（实测比值 2.06 < ceiling 3.2，
+        run de1fc13 假红）。注入与机器同速缩放后信噪比恒定；迭代数相应
+        收缩以控时长（200 次 × ~1ms × 2 轮在 CI ≈ 0.4s）。
+        """
         saved = parser_mod._is_persisted_key_strict
+        reference, ref_us, _ = self._ratio(_REFERENCE)
+        delay_us = max(40.0, 20.0 * ref_us)
 
         def _slow_probe(context, root_key):
-            _busy_wait_us(40.0)
+            _busy_wait_us(delay_us)
             return saved(context, root_key)
 
         parser_mod._is_persisted_key_strict = _slow_probe
         try:
-            reference, _ref_us, _ = self._ratio(_REFERENCE)
-            _ref, measured, ratio = self._ratio(_MUT_PLAN_REFUSE)
+            _ref, measured, ratio = self._ratio(_MUT_PLAN_REFUSE,
+                                                iterations=200, repeats=2)
         finally:
             parser_mod._is_persisted_key_strict = saved
         ceiling = _RATIOS[_MUT_PLAN_REFUSE] * _TOLERANCE
         print(f"\n[perf-budget-neg] reference={reference:.3f}us "
-              f"slow_mutator={measured:.3f}us ratio={ratio:.2f} ceiling={ceiling:.2f}")
+              f"delay={delay_us:.0f}us slow_mutator={measured:.3f}us "
+              f"ratio={ratio:.2f} ceiling={ceiling:.2f}")
         self.assertGreater(ratio, ceiling,
                            "negative control did not redden the constant-factor budget — "
                            "the budget has no discriminating power")

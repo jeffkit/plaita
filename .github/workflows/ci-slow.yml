@@ -1,0 +1,46 @@
+# 慢车道（2026-10-17）：语料/生成式大测试从 push 门禁（ci.yml）剥离。
+#
+# 背景：#80 真 Redis 用例修通后，掩码语料族（6 用例 × 9000 形态）在 2 核
+# runner 上把门禁判决拖到小时级（run de1fc13 实测 ~5h），落地节奏被
+# 「等判决」绑架。拆分原则：push 门只留快测试（ci.yml 全 chunk -m "not slow"）；
+# 慢测试在本工作流独立运行——**结论不阻塞落地**，红了一起单修（与门禁同口径）。
+name: CI slow lane
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # 每日 03:00 UTC 兜底一跑（push 已覆盖常态）
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: ci-slow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  slow:
+    name: Slow lane (corpus / generative)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    container:
+      image: python:3.13
+      options: --memory 6g --memory-swap 6g
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Install git + nodejs + redis-server
+        run: apt-get update -q && apt-get install -yq git nodejs redis-server && git --version
+      - name: Start Redis (127.0.0.1:6379)
+        run: |
+          redis-server --daemonize yes --port 6379 --save '' --appendonly no
+          redis-cli ping
+      - uses: actions/checkout@v6
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,lint,all]" pytest-timeout build wheel
+      - name: Slow tests (-m slow)
+        run: |
+          python -m pytest tests/unit -m slow \
+            --timeout=3600 --timeout-method=thread -q
