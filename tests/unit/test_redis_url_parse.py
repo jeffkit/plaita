@@ -90,6 +90,8 @@ import logging
 import random
 import traceback
 import unittest
+
+import pytest
 from urllib.parse import unquote, urlsplit
 
 from redis import Redis
