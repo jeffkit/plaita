@@ -1,0 +1,377 @@
+# plaita#228 本机负控复跑（tenant_id=None）
+
+## test_tenants.py（变异下）
+
+..............F.                                                         [100%]
+=================================== FAILURES ===================================
+_______________ test_publish_same_flow_id_does_not_cross_tenants _______________
+
+client = <starlette.testclient.TestClient object at 0x11372c3d0>
+
+    def test_publish_same_flow_id_does_not_cross_tenants(client):
+        """A/B 两租户各建同名 flow ``shared-publish``：A 发布同版本不得命中 B 的行。
+    
+        #228：``publish_flow`` 把 ``tenant`` 传给 ``store.publish_version``；把该参数
+        变异成 ``tenant_id=None`` 后，A 会发布并读回 B 的同名同版本草稿。既有用例
+        （``_publish_flow``）用 ``acme-flow`` / ``default-flow`` 不同 flow_id，发现不了。
+        """
+        root = _login(client, "root", "root-password-1")
+        root_h = _auth(root["token"])
+        for tenant in ("tenant-a", "tenant-b"):
+            assert client.post("/api/tenants", json={"id": tenant},
+                               headers=root_h).status_code == 200
+    
+        a_h = {**root_h, "X-Tenant-ID": "tenant-a"}
+        b_h = {**root_h, "X-Tenant-ID": "tenant-b"}
+        flow_id = "shared-publish"
+    
+        # B：同名 flow + 1.0.0 草稿（definition 带唯一 marker）
+        assert client.post("/api/flows", json={"flow_id": flow_id}, headers=b_h).status_code == 200
+        b_def = json.dumps({"nodes": [
+            {"type": "start", "id": "start", "next": "end"},
+            {"type": "end", "id": "end", "resultType": "success", "output": "B-SECRET"},
+        ]})
+        r = client.put(f"/api/flows/{flow_id}/versions/1.0.0",
+                       json={"definition": b_def, "layout": "{}", "created_by": "b"},
+                       headers=b_h)
+        assert r.status_code == 200, r.text
+    
+        # A：同名 flow，但**没有** 1.0.0 版本
+        assert client.post("/api/flows", json={"flow_id": flow_id}, headers=a_h).status_code == 200
+    
+        # A 发布 1.0.0：不得命中 B 的行（跨租户写 + 读回定义）
+        r = client.post(f"/api/flows/{flow_id}/publish", json={"version": "1.0.0"},
+                        headers=a_h)
+>       assert r.status_code == 404, r.text
+E       AssertionError: {"flow_id":"shared-publish","version":"1.0.0","status":"published","definition":"{\"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"end\"}, {\"type\": \"end\", \"id\": \"end\", \"resultType\": \"success\", \"output\": \"B-SECRET\"}]}","layout":"{}","created_at":"2026-10-18T06:29:23.677225","published_at":"2026-10-18T06:29:23.685635","created_by":"b","updated_at":null}
+E       assert 200 == 404
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_tenants.py:523: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_tenants.py: 167 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+plaita-console/backend/tests/console/test_tenants.py: 19 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:158: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+
+plaita-console/backend/tests/console/test_tenants.py: 64 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:231: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_tenants.py::test_flow_isolation_between_tenants
+plaita-console/backend/tests/console/test_tenants.py::test_switch_tenant_session_flow
+plaita-console/backend/tests/console/test_tenants.py::test_switch_tenant_session_flow
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:270: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row is None or row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_tenants.py::test_api_key_tenant_header_scopes_read_and_write
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:554: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_tenants.py::test_api_key_tenant_header_scopes_read_and_write
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_tenants.py::test_disable_tenant_stops_its_local_schedules
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/local_scheduler.py:102: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.updated_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:647: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:54: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+1 failed, 15 passed, 269 warnings in 3.50s
+
+## 完整 console 套件（变异下）
+
+........................................................................ [ 12%]
+............................ss.......................................... [ 25%]
+......................................ssssssssss........................ [ 38%]
+........................................................................ [ 51%]
+........................................................................ [ 64%]
+........................................................................ [ 77%]
+............s........................................................... [ 90%]
+...............................................F.......                  [100%]
+=================================== FAILURES ===================================
+_______________ test_publish_same_flow_id_does_not_cross_tenants _______________
+
+client = <starlette.testclient.TestClient object at 0x16d6b3930>
+
+    def test_publish_same_flow_id_does_not_cross_tenants(client):
+        """A/B 两租户各建同名 flow ``shared-publish``：A 发布同版本不得命中 B 的行。
+    
+        #228：``publish_flow`` 把 ``tenant`` 传给 ``store.publish_version``；把该参数
+        变异成 ``tenant_id=None`` 后，A 会发布并读回 B 的同名同版本草稿。既有用例
+        （``_publish_flow``）用 ``acme-flow`` / ``default-flow`` 不同 flow_id，发现不了。
+        """
+        root = _login(client, "root", "root-password-1")
+        root_h = _auth(root["token"])
+        for tenant in ("tenant-a", "tenant-b"):
+            assert client.post("/api/tenants", json={"id": tenant},
+                               headers=root_h).status_code == 200
+    
+        a_h = {**root_h, "X-Tenant-ID": "tenant-a"}
+        b_h = {**root_h, "X-Tenant-ID": "tenant-b"}
+        flow_id = "shared-publish"
+    
+        # B：同名 flow + 1.0.0 草稿（definition 带唯一 marker）
+        assert client.post("/api/flows", json={"flow_id": flow_id}, headers=b_h).status_code == 200
+        b_def = json.dumps({"nodes": [
+            {"type": "start", "id": "start", "next": "end"},
+            {"type": "end", "id": "end", "resultType": "success", "output": "B-SECRET"},
+        ]})
+        r = client.put(f"/api/flows/{flow_id}/versions/1.0.0",
+                       json={"definition": b_def, "layout": "{}", "created_by": "b"},
+                       headers=b_h)
+        assert r.status_code == 200, r.text
+    
+        # A：同名 flow，但**没有** 1.0.0 版本
+        assert client.post("/api/flows", json={"flow_id": flow_id}, headers=a_h).status_code == 200
+    
+        # A 发布 1.0.0：不得命中 B 的行（跨租户写 + 读回定义）
+        r = client.post(f"/api/flows/{flow_id}/publish", json={"version": "1.0.0"},
+                        headers=a_h)
+>       assert r.status_code == 404, r.text
+E       AssertionError: {"flow_id":"shared-publish","version":"1.0.0","status":"published","definition":"{\"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"end\"}, {\"type\": \"end\", \"id\": \"end\", \"resultType\": \"success\", \"output\": \"B-SECRET\"}]}","layout":"{}","created_at":"2026-10-18T06:30:31.149223","published_at":"2026-10-18T06:30:31.165216","created_by":"b","updated_at":null}
+E       assert 200 == 404
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_tenants.py:523: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_admin_auth.py: 5 warnings
+plaita-console/backend/tests/console/test_clean_c4_executions_api.py: 10 warnings
+plaita-console/backend/tests/console/test_cluster_switch_rebind.py: 3 warnings
+plaita-console/backend/tests/console/test_cluster_tenant.py: 4 warnings
+plaita-console/backend/tests/console/test_credentials_api.py: 4 warnings
+plaita-console/backend/tests/console/test_e2e_closure.py: 3 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 136 warnings
+plaita-console/backend/tests/console/test_flow_source_api.py: 18 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 37 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 62 warnings
+plaita-console/backend/tests/console/test_flow_version_api.py: 6 warnings
+plaita-console/backend/tests/console/test_flows_api.py: 24 warnings
+plaita-console/backend/tests/console/test_issue166_input_redaction.py: 1 warning
+plaita-console/backend/tests/console/test_issue192_tenant_read_surface.py: 118 warnings
+plaita-console/backend/tests/console/test_issue208_login_rate_limit.py: 10 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 119 warnings
+plaita-console/backend/tests/console/test_issue217_admin_prefix_matrix.py: 48 warnings
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 38 warnings
+plaita-console/backend/tests/console/test_issue223_credentials_atomic_export.py: 23 warnings
+plaita-console/backend/tests/console/test_issue226_credential_isolation.py: 18 warnings
+plaita-console/backend/tests/console/test_issue28_start_quota_429.py: 7 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 99 warnings
+plaita-console/backend/tests/console/test_issue64_queue_key_scope.py: 54 warnings
+plaita-console/backend/tests/console/test_issue73_retry_budget_gate.py: 25 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 10 warnings
+plaita-console/backend/tests/console/test_local_langfuse.py: 93 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 188 warnings
+plaita-console/backend/tests/console/test_local_reconcile.py: 36 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 56 warnings
+plaita-console/backend/tests/console/test_nodes_api.py: 7 warnings
+plaita-console/backend/tests/console/test_pg_portability_bootstrap.py: 2 warnings
+plaita-console/backend/tests/console/test_property_types_api.py: 5 warnings
+plaita-console/backend/tests/console/test_start_returns_execution_id.py: 4 warnings
+plaita-console/backend/tests/console/test_tenants.py: 167 warnings
+plaita-console/backend/tests/console/test_wave12_cancel_api.py: 4 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+plaita-console/backend/tests/console/test_admin_auth.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 11 warnings
+plaita-console/backend/tests/console/test_issue192_tenant_read_surface.py: 13 warnings
+plaita-console/backend/tests/console/test_issue208_login_rate_limit.py: 2 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 9 warnings
+plaita-console/backend/tests/console/test_issue217_admin_prefix_matrix.py: 12 warnings
+plaita-console/backend/tests/console/test_issue64_queue_key_scope.py: 10 warnings
+plaita-console/backend/tests/console/test_issue73_retry_budget_gate.py: 5 warnings
+plaita-console/backend/tests/console/test_tenants.py: 19 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:158: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+
+plaita-console/backend/tests/console/test_admin_auth.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 17 warnings
+plaita-console/backend/tests/console/test_issue192_tenant_read_surface.py: 13 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 9 warnings
+plaita-console/backend/tests/console/test_issue217_admin_prefix_matrix.py: 13 warnings
+plaita-console/backend/tests/console/test_issue64_queue_key_scope.py: 10 warnings
+plaita-console/backend/tests/console/test_issue73_retry_budget_gate.py: 5 warnings
+plaita-console/backend/tests/console/test_tenants.py: 64 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:231: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_e2e_closure.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 31 warnings
+plaita-console/backend/tests/console/test_flow_source_api.py: 4 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 13 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 21 warnings
+plaita-console/backend/tests/console/test_flow_version_api.py: 2 warnings
+plaita-console/backend/tests/console/test_flows_api.py: 3 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 28 warnings
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 2 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 5 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 1 warning
+plaita-console/backend/tests/console/test_local_langfuse.py: 12 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 21 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 6 warnings
+plaita-console/backend/tests/console/test_tenants.py: 4 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:554: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_e2e_closure.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 31 warnings
+plaita-console/backend/tests/console/test_flow_source_api.py: 4 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 14 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 45 warnings
+plaita-console/backend/tests/console/test_flow_version_api.py: 2 warnings
+plaita-console/backend/tests/console/test_flows_api.py: 3 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 28 warnings
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 2 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 5 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 1 warning
+plaita-console/backend/tests/console/test_local_langfuse.py: 12 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 21 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 6 warnings
+plaita-console/backend/tests/console/test_tenants.py: 4 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_e2e_closure.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 29 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 4 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 1 warning
+plaita-console/backend/tests/console/test_flow_version_api.py: 1 warning
+plaita-console/backend/tests/console/test_flows_api.py: 1 warning
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 27 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 1 warning
+plaita-console/backend/tests/console/test_local_langfuse.py: 12 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 20 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 6 warnings
+plaita-console/backend/tests/console/test_tenants.py: 3 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:647: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_e2e_closure.py::test_e2e_plaita_client_fetch_and_run
+  /opt/homebrew/lib/python3.13/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+plaita-console/backend/tests/console/test_e2e_closure.py::test_e2e_plaita_client_fetch_and_run
+  /opt/homebrew/lib/python3.13/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+plaita-console/backend/tests/console/test_enterprise.py::test_audit_records_publish_and_credential
+plaita-console/backend/tests/console/test_enterprise.py::test_promotion_export_import_fingerprint
+plaita-console/backend/tests/console/test_flows_api.py::test_publish_then_cannot_overwrite
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_contract_per_tenant_secret_and_global_compat
+plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:54: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_enterprise.py::test_promotion_export_import_fingerprint
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:102: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "exported_at": datetime.utcnow().isoformat(),
+
+plaita-console/backend/tests/console/test_flow_store.py: 1 warning
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 17 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:491: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "ts": datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 12 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 30 warnings
+plaita-console/backend/tests/console/test_local_langfuse.py: 24 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 60 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 12 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/local_executor.py:192: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().isoformat()
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 2 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 4 warnings
+plaita-console/backend/tests/console/test_local_langfuse.py: 4 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 6 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 3 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/local_executor.py:462: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fs.update_local_execution(execution_id, end_time=datetime.utcnow())
+
+plaita-console/backend/tests/console/test_issue37_usage_display.py::TestLocalApiUsage::test_failed_local_run_still_records_usage
+plaita-console/backend/tests/console/test_local_cancel.py::test_t8_cancel_running_execution_thread_exits_at_boundary
+plaita-console/backend/tests/console/test_local_cancel.py::test_t8_cancel_running_execution_thread_exits_at_boundary
+plaita-console/backend/tests/console/test_local_cancel.py::test_cancel_suspended_execution_finalizes_directly
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:997: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    end_time=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_issue42_dispatch_capacity.py: 16 warnings
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py: 24 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita/server/registry.py:187: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(
+
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_running_becomes_suspended_with_reason
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_fail_mode_terminates_with_end_time
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_only_running_is_touched
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_idempotent_across_restarts
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_idempotent_across_restarts
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_mode_from_env_with_fallback
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_condition_update_protects_concurrent_finish
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_empty_store_is_noop
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/reconcile.py:69: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "reconciled_at": datetime.utcnow().isoformat(),
+
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_fail_mode_terminates_with_end_time
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/reconcile.py:128: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fields["end_time"] = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_local_scheduler.py::test_schedule_crud_roundtrip
+plaita-console/backend/tests/console/test_tenants.py::test_disable_tenant_stops_its_local_schedules
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/local_scheduler.py:102: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.updated_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_local_scheduler.py::test_due_schedule_auto_fires_and_records_history
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/local_scheduler.py:272: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.updated_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_tenants.py::test_flow_isolation_between_tenants
+plaita-console/backend/tests/console/test_tenants.py::test_switch_tenant_session_flow
+plaita-console/backend/tests/console/test_tenants.py::test_switch_tenant_session_flow
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:270: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row is None or row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_running_execution_cancel_writes_flag_not_status
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_suspended_execution_cancel_keeps_direct_write
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_terminal_execution_cancel_is_idempotent
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_cancel_flag_keys_excluded_from_list_and_find
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_tenant_scoped_cancel_writes_tenant_namespace_flag
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_delete_execution_also_clears_cancel_flag
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/tests/console/test_wave12_cancel_api.py:70: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "start_time": datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+1 failed, 545 passed, 13 skipped, 2347 warnings in 66.97s (0:01:06)

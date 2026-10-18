@@ -482,3 +482,83 @@ def test_legacy_db_migration_backfills_default_tenant(tmp_path):
     with pytest.raises(ValueError):
         store.create_flow("legacy-flow", tenant_id="default")
     store.create_flow("legacy-flow", tenant_id="acme")
+
+
+# ---- flows publish 租户过滤（#228） ----
+
+def test_publish_same_flow_id_does_not_cross_tenants(client):
+    """A/B 两租户各建同名 flow ``shared-publish``：A 发布同版本不得命中 B 的行。
+
+    #228：``publish_flow`` 把 ``tenant`` 传给 ``store.publish_version``；把该参数
+    变异成 ``tenant_id=None`` 后，A 会发布并读回 B 的同名同版本草稿。既有用例
+    （``_publish_flow``）用 ``acme-flow`` / ``default-flow`` 不同 flow_id，发现不了。
+    """
+    root = _login(client, "root", "root-password-1")
+    root_h = _auth(root["token"])
+    for tenant in ("tenant-a", "tenant-b"):
+        assert client.post("/api/tenants", json={"id": tenant},
+                           headers=root_h).status_code == 200
+
+    a_h = {**root_h, "X-Tenant-ID": "tenant-a"}
+    b_h = {**root_h, "X-Tenant-ID": "tenant-b"}
+    flow_id = "shared-publish"
+
+    # B：同名 flow + 1.0.0 草稿（definition 带唯一 marker）
+    assert client.post("/api/flows", json={"flow_id": flow_id}, headers=b_h).status_code == 200
+    b_def = json.dumps({"nodes": [
+        {"type": "start", "id": "start", "next": "end"},
+        {"type": "end", "id": "end", "resultType": "success", "output": "B-SECRET"},
+    ]})
+    r = client.put(f"/api/flows/{flow_id}/versions/1.0.0",
+                   json={"definition": b_def, "layout": "{}", "created_by": "b"},
+                   headers=b_h)
+    assert r.status_code == 200, r.text
+
+    # A：同名 flow，但**没有** 1.0.0 版本
+    assert client.post("/api/flows", json={"flow_id": flow_id}, headers=a_h).status_code == 200
+
+    # A 发布 1.0.0：不得命中 B 的行（跨租户写 + 读回定义）
+    r = client.post(f"/api/flows/{flow_id}/publish", json={"version": "1.0.0"},
+                    headers=a_h)
+    assert r.status_code == 404, r.text
+    assert "B-SECRET" not in r.text
+    # B 的版本仍是 draft，发布态未被 A 改写
+    bv = client.get(f"/api/flows/{flow_id}/versions/1.0.0", headers=b_h)
+    assert bv.status_code == 200, bv.text
+    assert bv.json()["status"] == "draft"
+    assert "B-SECRET" in bv.json()["definition"]
+
+    # A 建自己的 1.0.0 并发布：只发布 A 的行，B 仍 draft
+    a_def = json.dumps({"nodes": [
+        {"type": "start", "id": "start", "next": "end"},
+        {"type": "end", "id": "end", "resultType": "success", "output": "A-ONLY"},
+    ]})
+    r = client.put(f"/api/flows/{flow_id}/versions/1.0.0",
+                   json={"definition": a_def, "layout": "{}", "created_by": "a"},
+                   headers=a_h)
+    assert r.status_code == 200, r.text
+    r = client.post(f"/api/flows/{flow_id}/publish", json={"version": "1.0.0"},
+                    headers=a_h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "published"
+    assert "A-ONLY" in body["definition"] and "B-SECRET" not in body["definition"]
+
+    bv = client.get(f"/api/flows/{flow_id}/versions/1.0.0", headers=b_h)
+    assert bv.status_code == 200
+    assert bv.json()["status"] == "draft"
+    assert "B-SECRET" in bv.json()["definition"]
+
+
+def test_publish_check_404_even_before_version_lookup(client):
+    """A 无同名 flow 时发布 → 404（现有行为不变，钉住前置 get_flow_record 过滤）。"""
+    root = _login(client, "root", "root-password-1")
+    root_h = _auth(root["token"])
+    for tenant in ("tenant-a2", "tenant-b2"):
+        assert client.post("/api/tenants", json={"id": tenant},
+                           headers=root_h).status_code == 200
+    b_h = {**root_h, "X-Tenant-ID": "tenant-b2"}
+    assert client.post("/api/flows", json={"flow_id": "only-b"}, headers=b_h).status_code == 200
+    r = client.post("/api/flows/only-b/publish", json={"version": "1.0.0"},
+                    headers={**root_h, "X-Tenant-ID": "tenant-a2"})
+    assert r.status_code == 404, r.text

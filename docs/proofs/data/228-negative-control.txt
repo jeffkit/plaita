@@ -1,0 +1,89 @@
+# plaita#228 负控：flows publish 丢掉 tenant 参数（`tenant_id=None`）
+
+- 基线：`origin/main` = `afe4bba1`（W47 worktree `/tmp/w47`，分支 `fix/w47`）
+- 本单**只补测试**，产品代码零改动。变异仅用于负控，跑完逐字还原。
+- 变异位置：`plaita-console/backend/api/flows.py:365`
+
+```diff
+-        out = store.publish_version(flow_id, req.version, tenant_id=tenant)
++        out = store.publish_version(flow_id, req.version, tenant_id=None)  # MUTATION #228
+```
+
+## 红（mutant）：双租户探针
+
+`PYTHONPATH=/tmp/w47 python docs/proofs/data/228-repro.py`
+
+```json
+{
+  "a_publish_without_own_version": {
+    "status": 200,
+    "leaked_b_definition": true
+  },
+  "b_version_after_a_cross_publish": {
+    "status": "published",
+    "definition_has_b_secret": true
+  },
+  "a_publish_own_version": {
+    "status": 200,
+    "version_status": "published",
+    "definition_has_a_only": false,
+    "definition_has_b_secret": true
+  },
+  "b_version_final": {
+    "status": "published",
+    "definition_has_b_secret": true
+  }
+}
+
+CROSS-TENANT LEAK
+```
+
+A 租户（无本租户 1.0.0 版本）发布成功、读回 B 的完整定义（`B-SECRET`），并把
+B 的版本行置为 `published`——跨租户写 + 跨租户读。
+
+## 红（mutant）：新用例
+
+`pytest plaita-console/backend/tests/console/test_tenants.py -q`
+
+```
+FAILED plaita-console/backend/tests/console/test_tenants.py::test_publish_same_flow_id_does_not_cross_tenants
+1 failed, 15 passed, 1 warning in 4.69s
+```
+
+精确红文案（`assert r.status_code == 404, r.text`）：
+
+```
+>       assert r.status_code == 404, r.text
+E       AssertionError: {"flow_id":"shared-publish","version":"1.0.0","status":"published","definition":"{\"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"end\"}, {\"type\": \"end\", \"id\": \"end\", \"resultType\": \"success\", \"output\": \"B-SECRET\"}]}","layout":"{}","created_at":"2026-10-18T05:25:52.862676","published_at":"2026-10-18T05:25:52.870363","created_by":"b","updated_at":null}
+E       assert 200 == 404
+E        +  where 200 = <Response [200 OK]>.status_code
+```
+
+其余 15 条既有用例在变异下仍全绿——正是 #228 指出的「现有套件发现不了该变异」
+（`_publish_flow` 用 `acme-flow` / `default-flow` 不同 flow_id）。新增的第二条
+用例（A 无同名 flow 时发布 → 404）在变异下也保持绿，它钉的是前置 flow 过滤。
+
+## 绿（修复后 / 原实现）
+
+repro：
+
+```json
+{
+  "a_publish_without_own_version": {"status": 404, "leaked_b_definition": false},
+  "b_version_after_a_cross_publish": {"status": "draft", "definition_has_b_secret": true},
+  "a_publish_own_version": {
+    "status": 200, "version_status": "published",
+    "definition_has_a_only": true, "definition_has_b_secret": false
+  },
+  "b_version_final": {"status": "draft", "definition_has_b_secret": true}
+}
+
+ISOLATED
+```
+
+新用例与整个 console 套件：
+
+```
+pytest plaita-console/backend/tests/console/test_tenants.py -q   → 16 passed
+pytest plaita-console/backend/tests/console -q                  → 539 passed, 13 skipped
+```
