@@ -419,11 +419,29 @@ class _BodyEmitter:
         return f"return {_invert_value(output, self.ns)}"
 
     def _emit_assignment(self, node: Dict[str, Any]) -> List[str]:
-        expr = _invert_value(node.get("output"), self.ns)
+        # plaita#220/L5：`n = expr` 语句形态装不下 `outputType`（类型声明）与
+        # `upstreamOutput`（多 upstream 选择值）——此前两者被静默丢弃。带任一
+        # 附加字段时改发 `ASSIGN(...)`（编译器用 `_compile_node_call` 的 ASSIGN
+        # 分支还原同一个 assignment 节点）；普通赋值保持 base 的字节形态。
+        output_type = _dual(node, "outputType", "output_type")
+        upstream = _dual(node, "upstreamOutput", "upstream_output")
+        if output_type is None and upstream is None:
+            expr = _invert_value(node.get("output"), self.ns)
+            if _AUTO_ID_RE.fullmatch(node["id"]):
+                # 表达式语句（无名赋值）：保持语句形态，不引入变量名
+                return [expr]
+            return [f"{node['id']} = {expr}"]
+
+        kwargs = [f"output={_invert_value(node.get('output'), self.ns)}"]
+        if output_type is not None:
+            kwargs.append(f"output_type={_invert_value(output_type, self.ns)}")
+        if upstream is not None:
+            kwargs.append(f"upstream_output={_invert_value(upstream, self.ns)}")
+        kwargs.extend(self._common_kwargs(node))
+        call = f"ASSIGN({', '.join(kwargs)})"
         if _AUTO_ID_RE.fullmatch(node["id"]):
-            # 表达式语句（无名赋值）：保持语句形态，不引入变量名
-            return [expr]
-        return [f"{node['id']} = {expr}"]
+            return [call]
+        return [f"{node['id']} = {call}"]
 
     def _all_paths_return(self, nid: Optional[str], stop: Set[str]) -> bool:
         """从 nid 出发的所有路径是否都在触及 stop（或图尾）之前 return。"""
@@ -637,6 +655,14 @@ class _BodyEmitter:
         for ir_key in ("headers", "body", "input"):
             if node.get(ir_key) is not None:
                 kwargs.append(f"{ir_key}={_invert_value(node[ir_key], self.ns)}")
+        # plaita#220/L4：HTTP 的 output/query/addressing/delegate 在 @flow 链
+        # 同样没有表达面 ⇒ 往返静默丢（output 改返回形状、query 改请求、
+        # addressing/delegate 改网络路径）。`_compile_node_call` 的 HTTP 分支
+        # 对称接收这四个 kwarg（否则发射出来也会被编译期丢弃）。
+        for ir_key in ("output", "query", "addressing", "delegate"):
+            value = node.get(ir_key)
+            if value is not None:
+                kwargs.append(f"{ir_key}={_invert_value(value, self.ns)}")
         # #200：HTTP 访问策略（SSRF 防护面）过去不在 `_call_http` 的表达面里
         # ⇒ 任何 `emit_source` → 重编译都把白名单/私网阻断静默清空，节点回落
         # 「无限制」默认。camel（--format ir / 手写 JSON）与 snake
@@ -723,13 +749,32 @@ class _BodyEmitter:
         branch_items = []
         for branch in node.get("branches", []):
             child_name = self.childflows.register(branch.get("flow") or {})
-            branch_items.append(f"{branch['name']!r}: {child_name}")
+            # plaita#220/L2：分支的 `input` / `condition` 此前一个字都不发
+            # ⇒ 条件分支退化成无条件、分支输入丢失（sexpr/IR 都保留，仅
+            # @flow 链丢）。有这两者的分支走显式 dict 值形态：
+            #     'a': {'flow': cf, 'input': INPUT.x, 'condition': INPUT.flag}
+            # 无附加字段的分支保持 base 的 `name: child` 形状（字节不变）。
+            extra: List[str] = []
+            if branch.get("input") is not None:
+                extra.append(f"'input': {_invert_value(branch['input'], self.ns)}")
+            if branch.get("condition") is not None:
+                extra.append(
+                    f"'condition': {_invert_cond(branch['condition'], self.ns)}")
+            if extra:
+                branch_items.append(
+                    f"{branch['name']!r}: "
+                    "{'flow': " + child_name + ", " + ", ".join(extra) + "}")
+            else:
+                branch_items.append(f"{branch['name']!r}: {child_name}")
         kwargs = ["branches={" + ", ".join(branch_items) + "}"]
         if node.get("mode", "thread") != "thread":
             kwargs.append(f"mode={node['mode']!r}")
-        if node.get("joinBranches"):
-            kwargs.append(f"join={node['joinBranches']!r}")
-        if node.get("isConditional"):
+        # joinBranches / isConditional 双读：`Flow.model_dump()` 产 snake 键，
+        # `--format ir` / 手写 JSON 用 camel（与全文件 `_dual` 口径一致）。
+        join = _dual(node, "joinBranches", "join_branches")
+        if join:
+            kwargs.append(f"join={join!r}")
+        if _dual(node, "isConditional", "is_conditional"):
             kwargs.append("conditional=True")
         kwargs.extend(self._common_kwargs(node))
         return f"PARALLEL({', '.join(kwargs)})"

@@ -338,6 +338,10 @@ def _compile_while_for(
     if mi is not None and isinstance(mi, ast.Constant) and isinstance(mi.value, int):
         spec["max_iterations"] = mi.value
 
+    # plaita#220/L1（同族）：`for x in WHILE(cond, id='w')` 的 id 同样没有赋值
+    # 语句可借，下游 `output=w` 需要名字作用域里有它。
+    ctx.names[node_id] = f"$NODE.{node_id}"
+
     after = _compile_block(rest, ctx, succ)
     if after is None:
         raise _CodeflowError("WHILE 节点之后悬空：请补 return 或后续语句", head)
@@ -416,6 +420,15 @@ def _compile_for(
     if id_kw is not None and isinstance(id_kw, ast.Constant):
         node_id = str(id_kw.value)
     node_id = ctx.auto_id(node_id)
+
+    # plaita#220/L1：集合节点的 id 必须进名字作用域。发射器为下游
+    # `$NODE.<id>` 生成的是**裸变量名**（`_invert_value` 的 `$NODE.` → `` 规则），
+    # 而集合节点在源码里是 `for item in MAP(..., id='m')`——没有 `m = MAP(...)`
+    # 这种赋值可依赖。不登记 ⇒ 重编译 `output=m` 报「未知名字 'm'」（5/5 集合
+    # 类型都踩）。与 `_compile_assign` 登记 `$NODE.<name>` 同形。
+    # 位置在子流程编译**之后**：体内读不到集合节点自己的结果（父侧尚未写回，
+    # 与 docstring 的声明一致），故不能让 id 漏进体的 parent 快照。
+    ctx.names[node_id] = f"$NODE.{node_id}"
 
     # 子流程节点列表前置一个 Start 节点指向编译出的入口节点；
     # Flow.start_node 2026-07 起不再做"入度 0 推断"，没有 Start 就直接报错。

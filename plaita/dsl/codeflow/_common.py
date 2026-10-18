@@ -41,6 +41,10 @@ WHILE = _Placeholder("WHILE")
 CHILD = _Placeholder("CHILD")
 REFERENCE = _Placeholder("REFERENCE")
 PARALLEL = _Placeholder("PARALLEL")
+# plaita#220/L5：赋值节点带 `outputType` / `upstreamOutput` 时的显式构造形
+# （`n = ASSIGN(output=..., output_type=..., upstream_output=[...])`）。
+# 普通赋值仍是 `n = expr`，本占位符只在有附加字段时由发射器使用。
+ASSIGN = _Placeholder("ASSIGN")
 
 
 class ErrorHandler:
@@ -106,7 +110,7 @@ _NEGATE_OP = {
     "truthy": "falsy", "falsy": "truthy",
 }
 
-_NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL"}
+_NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL", "ASSIGN"}
 _COLLECTION_CALL_NAMES = {"MAP", "FILTER", "FIND", "LOOP", "REDUCE"}
 # WHILE 走 for-head 专属编译路径（条件循环，无 collection），不算 collection call
 _WHILE_CALL_NAME = "WHILE"

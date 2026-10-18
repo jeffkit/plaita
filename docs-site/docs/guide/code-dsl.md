@@ -235,6 +235,35 @@ double_via_child.run(payload=21)   # -> 42
 > 不给 id 就是 `None`，**不回落函数名**——内联子流程没有可用函数名，回落会让同名子流程撞 id。
 > `emit_source` → `compile_source` 往返保真这个值（#145）；id **只按类型把关**（任何 `str` 都收，含 `""`/纯空白；非 str 如 `@childflow(123)` 编译期抛 `_CodeflowError`）；同一文档内两个**不同**子流程撞 id 只发 `UserWarning`（同一子流程被多处引用不告警）。源码字符串路径只认位置实参（`flow_id=` / 第二个位置实参被忽略）。
 
+### 并行分支字段（PARALLEL）与赋值字段（ASSIGN）
+
+`PARALLEL(branches={...})` 的分支值通常是 `@childflow` 函数；分支需要自己的输入或
+条件时，值写成显式 dict（键：`flow` 必填，`input` / `condition` 可选；不带附加
+字段的分支保持原写法）：
+
+```python
+r = PARALLEL(branches={
+    "hot": {"flow": hot_path, "input": INPUT.item, "condition": INPUT.priority > 5},
+    "cold": cold_path,
+}, conditional=True, join=["hot", "cold"])
+```
+
+赋值节点的两个字段在 `n = expr` 语句形态里没有位置：`output_type`（运行期类型
+校验）与 `upstream_output`（多 upstream 时按 `last_node_id` 选择取值）。需要它们时
+改用 `ASSIGN(...)`（普通赋值仍写 `n = expr`，行为不变）：
+
+```python
+from plaita.dsl.codeflow import ASSIGN
+
+x = ASSIGN(output=INPUT.raw,
+           output_type={"dataType": "string"},
+           upstream_output=[{"upstream": "prev", "value": NODE.prev}])
+```
+
+> 两种写法都只影响 IR 形状：`ASSIGN` 编译出的仍是 `type="assignment"` 节点。
+> `emit_source` 在 IR 带这两个字段时自动选 `ASSIGN(...)` 发射，保证
+> `compile_source(emit_source(ir))` 不丢字段。
+
 ### 编译期校验
 
 `@flow` 在构建 `Flow` 前做静态分析，报行号：
@@ -911,7 +940,7 @@ print(flow_to_sexpr(d))   # 回到可读的 S-expr
 | `plaita.dsl.codeflow.compile_source(src, ...)` | 源码字符串 → IR dict（不构建） |
 | `plaita.dsl.codeflow.childflow(flow_id, *, desc=...)` | 装饰器：子流程函数（`flow_id` 可省；会写进执行上下文，见 §子流程 @childflow + CHILD） |
 | `plaita.dsl.codeflow.compile_func(fn, flow_id)` | Python 函数 → IR dict（不构建） |
-| `plaita.dsl.codeflow.HTTP / CODE / EVENT / MAP / FILTER / FIND / LOOP / REDUCE / CHILD / REFERENCE / PARALLEL` | 内置节点调用占位符 |
+| `plaita.dsl.codeflow.HTTP / CODE / EVENT / MAP / FILTER / FIND / LOOP / REDUCE / CHILD / REFERENCE / PARALLEL / ASSIGN` | 内置节点调用占位符 |
 | 自定义节点占位符 | `node_type` 大写（如 `LLM`/`RETRIEVE`/`TOOL`），须先 `get_default_registry().register(NodeSubclass)` |
 | `plaita.dsl.codeflow.F / INPUT / NODE / GLOBAL / PARENT / ENV` | 命名空间占位符 |
 | `plaita.dsl.codeflow.ErrorHandler(...)` | 错误处理策略构造器 |

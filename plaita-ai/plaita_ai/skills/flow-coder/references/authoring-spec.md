@@ -124,7 +124,7 @@ def bad(INPUT):
 
 ## 5. 业务集成：plaita-nodes（业务 flow 的节点主力）
 
-内置占位符只有 `HTTP/CODE/EVENT/MAP/.../CHILD/PARALLEL`。**Agent 调用、HITL、通知、凭据化连接器都在兄弟仓 plaita-nodes**（22 节点四族，清单见其 README）：
+内置占位符只有 `HTTP/CODE/EVENT/MAP/.../CHILD/PARALLEL/ASSIGN`。**Agent 调用、HITL、通知、凭据化连接器都在兄弟仓 plaita-nodes**（22 节点四族，清单见其 README）：
 
 | 族 | 代表节点 | 用法要点 |
 |----|----------|----------|

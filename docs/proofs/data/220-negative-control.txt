@@ -1,0 +1,1237 @@
+# plaita#220 负控记录：@flow / sexpr 往返丢失六面
+#（集合 id / parallel 分支 / HTTP 四字段 / assignment 两字段 / 值类型）
+
+- 仓：/tmp/w44（`git worktree add --detach /tmp/w44 origin/main`，分支 fix/w44-rebased）
+- 基线：origin/main = f83a2685b7945ec66e9c07e9fcdf31687cba4644（= f83a2685）
+- 修复提交：d90a7bfe897b386e5b4f0d553d32dfddbc863024
+- 解释器：/Users/jeff.jie/.venvs/plaita/bin/python（3.11.16），`PYTHONPATH=/tmp/w44`
+- 负控方法：把本次改动的 7 个 DSL 文件整体还原到 `f83a2685`
+  （`git checkout f83a2685 -- plaita/dsl/sexpr.py plaita/dsl/codeflow/{__init__,_common,_compiler,_emit,_nodes,_stmt}.py`）
+  ——等价于反向应用下面的 diff。
+  变异前 `find . -name __pycache__ -prune -exec rm -rf {} +`，全程
+  `PYTHONDONTWRITEBYTECODE=1`（本仓踩过「旧 .pyc 伪造绿」的坑）；跑完立刻从备份
+  还原并 `cmp` 复核（逐字节一致）。
+- repro：`docs/proofs/data/220-repro.py`；before/after 原始 JSON 见
+  `docs/proofs/data/220-before-after.json`
+- 原始终端输出：`/tmp/w44-out/neg-220.log`（红）、
+  `/tmp/w44-out/neg-220-restore-green.log`（绿）、
+  `/tmp/w44-out/repro-220-mutant.json` / `repro-220-after.json`
+- **L3 不在本补丁范围**：sexpr code `sandbox_backend` 已由 88eb1340 落地。变异态
+  下他侧用例 `tests/unit/test_issue220_sexpr_code_sandbox.py` 仍 **24 passed**
+  （见下「他侧 L3 用例在变异态仍绿」），证明六面与 L3 相互独立。
+
+## mutant diff（修复 → 变异；应用到修复后的树即得变异态）
+
+```diff
+diff --git a/plaita/dsl/codeflow/__init__.py b/plaita/dsl/codeflow/__init__.py
+index a97dfbbc..b8fd8e23 100644
+--- a/plaita/dsl/codeflow/__init__.py
++++ b/plaita/dsl/codeflow/__init__.py
+@@ -8,7 +8,6 @@ plaita.dsl.codeflow — 用纯 Python 函数写 flow（AST 编译到 Flow IR）
+ from __future__ import annotations
+ 
+ from plaita.dsl.codeflow._compiler import (  # noqa: F401
+-    ASSIGN,
+     CHILD,
+     CODE,
+     ENV,
+@@ -74,7 +73,6 @@ __all__ = [
+     "CHILD",
+     "REFERENCE",
+     "PARALLEL",
+-    "ASSIGN",
+     "ErrorHandler",
+     "F",
+     "INPUT",
+diff --git a/plaita/dsl/codeflow/_common.py b/plaita/dsl/codeflow/_common.py
+index eaa7a729..70dc98b9 100644
+--- a/plaita/dsl/codeflow/_common.py
++++ b/plaita/dsl/codeflow/_common.py
+@@ -41,10 +41,6 @@ WHILE = _Placeholder("WHILE")
+ CHILD = _Placeholder("CHILD")
+ REFERENCE = _Placeholder("REFERENCE")
+ PARALLEL = _Placeholder("PARALLEL")
+-# plaita#220/L5：赋值节点带 `outputType` / `upstreamOutput` 时的显式构造形
+-# （`n = ASSIGN(output=..., output_type=..., upstream_output=[...])`）。
+-# 普通赋值仍是 `n = expr`，本占位符只在有附加字段时由发射器使用。
+-ASSIGN = _Placeholder("ASSIGN")
+ 
+ 
+ class ErrorHandler:
+@@ -110,7 +106,7 @@ _NEGATE_OP = {
+     "truthy": "falsy", "falsy": "truthy",
+ }
+ 
+-_NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL", "ASSIGN"}
++_NODE_CALL_NAMES = {"HTTP", "CODE", "EVENT", "CHILD", "REFERENCE", "PARALLEL"}
+ _COLLECTION_CALL_NAMES = {"MAP", "FILTER", "FIND", "LOOP", "REDUCE"}
+ # WHILE 走 for-head 专属编译路径（条件循环，无 collection），不算 collection call
+ _WHILE_CALL_NAME = "WHILE"
+diff --git a/plaita/dsl/codeflow/_compiler.py b/plaita/dsl/codeflow/_compiler.py
+index 80afd633..a2f1db29 100644
+--- a/plaita/dsl/codeflow/_compiler.py
++++ b/plaita/dsl/codeflow/_compiler.py
+@@ -13,7 +13,6 @@ plaita.dsl.codeflow — 用纯 Python 函数写 flow（AST 编译到 Flow IR）
+ from __future__ import annotations
+ 
+ from plaita.dsl.codeflow._common import (  # noqa: F401
+-    ASSIGN,
+     CHILD,
+     CODE,
+     ENV,
+@@ -66,7 +65,6 @@ __all__ = [
+     "CHILD",
+     "REFERENCE",
+     "PARALLEL",
+-    "ASSIGN",
+     "ErrorHandler",
+     "F",
+     "INPUT",
+diff --git a/plaita/dsl/codeflow/_emit.py b/plaita/dsl/codeflow/_emit.py
+index c8820d0f..63b1425e 100644
+--- a/plaita/dsl/codeflow/_emit.py
++++ b/plaita/dsl/codeflow/_emit.py
+@@ -419,29 +419,11 @@ class _BodyEmitter:
+         return f"return {_invert_value(output, self.ns)}"
+ 
+     def _emit_assignment(self, node: Dict[str, Any]) -> List[str]:
+-        # plaita#220/L5：`n = expr` 语句形态装不下 `outputType`（类型声明）与
+-        # `upstreamOutput`（多 upstream 选择值）——此前两者被静默丢弃。带任一
+-        # 附加字段时改发 `ASSIGN(...)`（编译器用 `_compile_node_call` 的 ASSIGN
+-        # 分支还原同一个 assignment 节点）；普通赋值保持 base 的字节形态。
+-        output_type = _dual(node, "outputType", "output_type")
+-        upstream = _dual(node, "upstreamOutput", "upstream_output")
+-        if output_type is None and upstream is None:
+-            expr = _invert_value(node.get("output"), self.ns)
+-            if _AUTO_ID_RE.fullmatch(node["id"]):
+-                # 表达式语句（无名赋值）：保持语句形态，不引入变量名
+-                return [expr]
+-            return [f"{node['id']} = {expr}"]
+-
+-        kwargs = [f"output={_invert_value(node.get('output'), self.ns)}"]
+-        if output_type is not None:
+-            kwargs.append(f"output_type={_invert_value(output_type, self.ns)}")
+-        if upstream is not None:
+-            kwargs.append(f"upstream_output={_invert_value(upstream, self.ns)}")
+-        kwargs.extend(self._common_kwargs(node))
+-        call = f"ASSIGN({', '.join(kwargs)})"
++        expr = _invert_value(node.get("output"), self.ns)
+         if _AUTO_ID_RE.fullmatch(node["id"]):
+-            return [call]
+-        return [f"{node['id']} = {call}"]
++            # 表达式语句（无名赋值）：保持语句形态，不引入变量名
++            return [expr]
++        return [f"{node['id']} = {expr}"]
+ 
+     def _all_paths_return(self, nid: Optional[str], stop: Set[str]) -> bool:
+         """从 nid 出发的所有路径是否都在触及 stop（或图尾）之前 return。"""
+@@ -655,14 +637,6 @@ class _BodyEmitter:
+         for ir_key in ("headers", "body", "input"):
+             if node.get(ir_key) is not None:
+                 kwargs.append(f"{ir_key}={_invert_value(node[ir_key], self.ns)}")
+-        # plaita#220/L4：HTTP 的 output/query/addressing/delegate 在 @flow 链
+-        # 同样没有表达面 ⇒ 往返静默丢（output 改返回形状、query 改请求、
+-        # addressing/delegate 改网络路径）。`_compile_node_call` 的 HTTP 分支
+-        # 对称接收这四个 kwarg（否则发射出来也会被编译期丢弃）。
+-        for ir_key in ("output", "query", "addressing", "delegate"):
+-            value = node.get(ir_key)
+-            if value is not None:
+-                kwargs.append(f"{ir_key}={_invert_value(value, self.ns)}")
+         # #200：HTTP 访问策略（SSRF 防护面）过去不在 `_call_http` 的表达面里
+         # ⇒ 任何 `emit_source` → 重编译都把白名单/私网阻断静默清空，节点回落
+         # 「无限制」默认。camel（--format ir / 手写 JSON）与 snake
+@@ -749,32 +723,13 @@ class _BodyEmitter:
+         branch_items = []
+         for branch in node.get("branches", []):
+             child_name = self.childflows.register(branch.get("flow") or {})
+-            # plaita#220/L2：分支的 `input` / `condition` 此前一个字都不发
+-            # ⇒ 条件分支退化成无条件、分支输入丢失（sexpr/IR 都保留，仅
+-            # @flow 链丢）。有这两者的分支走显式 dict 值形态：
+-            #     'a': {'flow': cf, 'input': INPUT.x, 'condition': INPUT.flag}
+-            # 无附加字段的分支保持 base 的 `name: child` 形状（字节不变）。
+-            extra: List[str] = []
+-            if branch.get("input") is not None:
+-                extra.append(f"'input': {_invert_value(branch['input'], self.ns)}")
+-            if branch.get("condition") is not None:
+-                extra.append(
+-                    f"'condition': {_invert_cond(branch['condition'], self.ns)}")
+-            if extra:
+-                branch_items.append(
+-                    f"{branch['name']!r}: "
+-                    "{'flow': " + child_name + ", " + ", ".join(extra) + "}")
+-            else:
+-                branch_items.append(f"{branch['name']!r}: {child_name}")
++            branch_items.append(f"{branch['name']!r}: {child_name}")
+         kwargs = ["branches={" + ", ".join(branch_items) + "}"]
+         if node.get("mode", "thread") != "thread":
+             kwargs.append(f"mode={node['mode']!r}")
+-        # joinBranches / isConditional 双读：`Flow.model_dump()` 产 snake 键，
+-        # `--format ir` / 手写 JSON 用 camel（与全文件 `_dual` 口径一致）。
+-        join = _dual(node, "joinBranches", "join_branches")
+-        if join:
+-            kwargs.append(f"join={join!r}")
+-        if _dual(node, "isConditional", "is_conditional"):
++        if node.get("joinBranches"):
++            kwargs.append(f"join={node['joinBranches']!r}")
++        if node.get("isConditional"):
+             kwargs.append("conditional=True")
+         kwargs.extend(self._common_kwargs(node))
+         return f"PARALLEL({', '.join(kwargs)})"
+diff --git a/plaita/dsl/codeflow/_nodes.py b/plaita/dsl/codeflow/_nodes.py
+index 42477327..86b57f61 100644
+--- a/plaita/dsl/codeflow/_nodes.py
++++ b/plaita/dsl/codeflow/_nodes.py
+@@ -14,7 +14,7 @@ from plaita.dsl.codeflow._common import (
+     _node_call_kind,
+     _raise_if_unregistered_custom,
+ )
+-from plaita.dsl.codeflow._expr import _compile_condition, _compile_expr
++from plaita.dsl.codeflow._expr import _compile_expr
+ 
+ def _apply_base_kwargs(spec: Dict[str, Any], kw: Dict[str, Any], ctx: _CompileCtx) -> None:
+     """#142 编译侧 / #143：把 **``Node`` 基类共有**的字段在所有内置 kind 上统一消费。
+@@ -81,12 +81,6 @@ def _compile_node_call(
+             spec["timeout"] = _const(kw["timeout"])
+         if "input" in kw:
+             spec["input"] = _const(kw["input"])
+-        # plaita#220/L4：output / query / addressing / delegate 此前不在内置
+-        # kind 的手写链里 ⇒ 发射器写出也会被编译期静默丢弃（与 L4 的 sexpr
+-        # 链同一面）。字段名 snake == camel，无需双拼写。
+-        for ir_key in ("output", "query", "addressing", "delegate"):
+-            if ir_key in kw:
+-                spec[ir_key] = _const(kw[ir_key])
+         # #200：HTTP 访问策略字段（SSRF 防护面）此前不在内置 kind 的手写链里
+         # ⇒ 发射器即使写出 `allowed_hosts=...` 也会被编译期静默丢弃。camel 与
+         # snake 两种 kwarg 拼写都收（与 `_emit.py` 的发射侧对称）。
+@@ -175,36 +169,6 @@ def _compile_node_call(
+         _apply_base_kwargs(spec, kw, ctx)
+         return spec
+ 
+-    if kind == "ASSIGN":
+-        # plaita#220/L5：赋值节点的 `outputType` / `upstreamOutput` 在
+-        # `n = expr` 语句形态里没有表达面（发射器 `_emit_assignment` 只能写
+-        # 赋值右侧）。带附加字段时发射器改用本显式构造形，编译回同一个
+-        # `type=assignment` 节点（IR 键用 console/sexpr 一致的 camelCase）。
+-        if len(pos) > 1:
+-            raise _CodeflowError("ASSIGN 最多一个位置参数（output）", node)
+-        output = kw.get("output")
+-        if output is None and pos:
+-            output = pos[0]
+-        if output is None:
+-            raise _CodeflowError("ASSIGN 需要 output 表达式", node)
+-        spec = {
+-            "type": "assignment",
+-            "id": nid,
+-            "output": _compile_expr(output, ctx),
+-        }
+-        ot = kw.get("output_type")
+-        if ot is None:
+-            ot = kw.get("outputType")
+-        if ot is not None:
+-            spec["outputType"] = _compile_expr(ot, ctx)
+-        up = kw.get("upstream_output")
+-        if up is None:
+-            up = kw.get("upstreamOutput")
+-        if up is not None:
+-            spec["upstreamOutput"] = _compile_expr(up, ctx)
+-        _apply_base_kwargs(spec, kw, ctx)
+-        return spec
+-
+     # 走到这里：kind 来自 _custom_node_type（自定义节点占位符）
+     return _compile_custom_node(node, ctx, assign_name, kind)
+ 
+@@ -308,71 +272,22 @@ def _eval_parallel_branches(node: ast.AST, ctx: _CompileCtx) -> List[Dict[str, A
+         for k, v in zip(node.keys, node.values):
+             if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                 raise _CodeflowError("PARALLEL 分支名必须是字符串常量", node)
+-            branches.append(_parallel_branch_value(k.value, v, ctx))
++            branches.append(_parallel_branch(k.value, v, ctx))
+         return branches
+     if isinstance(node, ast.List):
+         for elt in node.elts:
+-            if not (isinstance(elt, ast.Tuple) and 2 <= len(elt.elts) <= 4):
+-                raise _CodeflowError(
+-                    "PARALLEL 分支需要 (name, flow) 元组"
+-                    "（可选第 3/4 位为 input / condition）", node)
+-            name_e = elt.elts[0]
++            if not (isinstance(elt, ast.Tuple) and len(elt.elts) == 2):
++                raise _CodeflowError("PARALLEL 分支需要 (name, flow) 元组", node)
++            name_e, flow_e = elt.elts
+             if not (isinstance(name_e, ast.Constant) and isinstance(name_e.value, str)):
+                 raise _CodeflowError("PARALLEL 分支名必须是字符串常量", name_e)
+-            extra = list(elt.elts[2:])
+-            branches.append(_parallel_branch(
+-                name_e.value, elt.elts[1], ctx,
+-                input_node=extra[0] if len(extra) > 0 else None,
+-                condition_node=extra[1] if len(extra) > 1 else None,
+-            ))
++            branches.append(_parallel_branch(name_e.value, flow_e, ctx))
+         return branches
+-    raise _CodeflowError(
+-        "PARALLEL branches 需要是 dict 字面量或 (name, flow) 元组列表"
+-        "（值可为 {'flow': …, 'input': …, 'condition': …} 的 dict；"
+-        "元组可选第 3/4 位 input / condition）", node)
++    raise _CodeflowError("PARALLEL branches 需要是 dict 字面量或 (name, flow) 元组列表", node)
+ 
+ 
+-def _parallel_branch_value(name: str, value: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
+-    """dict 形态的分支值：``flow_func`` 或 ``{"flow": …, "input": …, "condition": …}``。
+-
+-    plaita#220/L2：@flow 此前只发 ``branches={name: childflow}``，分支的
+-    ``input``/``condition`` 全丢——条件分支退化成无条件分支、分支输入丢失。
+-    分支值的显式 dict 形态让这两个可选字段有表达面（sexpr/IR 早已保留）。
+-    """
+-    if not isinstance(value, ast.Dict):
+-        return _parallel_branch(name, value, ctx)
+-    fields: Dict[str, ast.AST] = {}
+-    for k, v in zip(value.keys, value.values):
+-        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+-            raise _CodeflowError("PARALLEL 分支字段名必须是字符串常量", value)
+-        fields[k.value] = v
+-    flow_node = fields.get("flow")
+-    if flow_node is None:
+-        raise _CodeflowError("PARALLEL 分支 dict 需要 flow=<@childflow 函数>", value)
+-    unknown = set(fields) - {"flow", "input", "condition"}
+-    if unknown:
+-        raise _CodeflowError(
+-            f"PARALLEL 分支 dict 有未知字段 {sorted(unknown)}"
+-            "（可用：flow / input / condition）", value)
+-    return _parallel_branch(
+-        name, flow_node, ctx,
+-        input_node=fields.get("input"),
+-        condition_node=fields.get("condition"),
+-    )
+-
+-
+-def _parallel_branch(
+-    name: str,
+-    flow_node: ast.AST,
+-    ctx: _CompileCtx,
+-    input_node: Optional[ast.AST] = None,
+-    condition_node: Optional[ast.AST] = None,
+-) -> Dict[str, Any]:
++def _parallel_branch(name: str, flow_node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
+     spec: Dict[str, Any] = {"name": name, "flow": _eval_childflow_arg(flow_node, ctx)}
+-    if input_node is not None:
+-        spec["input"] = _compile_expr(input_node, ctx)
+-    if condition_node is not None:
+-        spec["condition"] = _compile_condition(condition_node, ctx)
+     return spec
+ 
+ 
+diff --git a/plaita/dsl/codeflow/_stmt.py b/plaita/dsl/codeflow/_stmt.py
+index cc85bb8d..14ab7383 100644
+--- a/plaita/dsl/codeflow/_stmt.py
++++ b/plaita/dsl/codeflow/_stmt.py
+@@ -338,10 +338,6 @@ def _compile_while_for(
+     if mi is not None and isinstance(mi, ast.Constant) and isinstance(mi.value, int):
+         spec["max_iterations"] = mi.value
+ 
+-    # plaita#220/L1（同族）：`for x in WHILE(cond, id='w')` 的 id 同样没有赋值
+-    # 语句可借，下游 `output=w` 需要名字作用域里有它。
+-    ctx.names[node_id] = f"$NODE.{node_id}"
+-
+     after = _compile_block(rest, ctx, succ)
+     if after is None:
+         raise _CodeflowError("WHILE 节点之后悬空：请补 return 或后续语句", head)
+@@ -421,15 +417,6 @@ def _compile_for(
+         node_id = str(id_kw.value)
+     node_id = ctx.auto_id(node_id)
+ 
+-    # plaita#220/L1：集合节点的 id 必须进名字作用域。发射器为下游
+-    # `$NODE.<id>` 生成的是**裸变量名**（`_invert_value` 的 `$NODE.` → `` 规则），
+-    # 而集合节点在源码里是 `for item in MAP(..., id='m')`——没有 `m = MAP(...)`
+-    # 这种赋值可依赖。不登记 ⇒ 重编译 `output=m` 报「未知名字 'm'」（5/5 集合
+-    # 类型都踩）。与 `_compile_assign` 登记 `$NODE.<name>` 同形。
+-    # 位置在子流程编译**之后**：体内读不到集合节点自己的结果（父侧尚未写回，
+-    # 与 docstring 的声明一致），故不能让 id 漏进体的 parent 快照。
+-    ctx.names[node_id] = f"$NODE.{node_id}"
+-
+     # 子流程节点列表前置一个 Start 节点指向编译出的入口节点；
+     # Flow.start_node 2026-07 起不再做"入度 0 推断"，没有 Start 就直接报错。
+     child_start_id = child_ctx.auto_id("start")
+diff --git a/plaita/dsl/sexpr.py b/plaita/dsl/sexpr.py
+index f77bedc9..baba8e6f 100644
+--- a/plaita/dsl/sexpr.py
++++ b/plaita/dsl/sexpr.py
+@@ -563,14 +563,6 @@ def _c_assignment(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
+     ot = _opt(kw, "output-type", "outputType")
+     if ot is not None:
+         spec["outputType"] = _type_spec(ot)
+-    # plaita#220/L5a：`Assignment.upstream_output`（多 upstream 选择值）此前
+-    # 读写两侧都没有表达面 ⇒ 往返即丢，`Assignment.execute` 在 >1 个 upstream
+-    # 时按 `state.last_node_id` 挑选的语义整体失效。拼写是
+-    # `(list (dict :upstream u :value "$NODE.u") ...)`——`_value()` 只把
+-    # `(dict …)`/`(list …)` 头编译成容器，所以外层 `list` 头必须显式写。
+-    up = _opt(kw, "upstream-output", "upstreamOutput", "upstream_output")
+-    if up is not None:
+-        spec["upstreamOutput"] = _value(up)
+     return spec
+ 
+ 
+@@ -827,14 +819,6 @@ def _c_http(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
+     inp = _opt(kw, "input")
+     if inp is not None:
+         spec["input"] = _value(inp)
+-    # plaita#220/L4：HTTP 的四个**语义字段**此前读写两侧都没有表达面 ⇒ 往返
+-    # 静默丢失：`output` 改返回形状、`query` 改请求、`addressing`/`delegate`
+-    # 改网络路径（寻址/代理）。`headers`/`body` 早已有面，见下方 L6 的字面量
+-    # 拼写修复。`contentType`/`requestTimeout` 属 #142、访问策略属 #200，不重复。
+-    for field in ("output", "query", "addressing", "delegate"):
+-        value = _opt(kw, field)
+-        if value is not None:
+-            spec[field] = _value(value)
+     # #200：访问策略是 SSRF 防护面（HTTP.allowed_hosts / denied_hosts /
+     # block_private_networks / request_timeout / max_redirects）。读侧此前一条
+     # 都不认 ⇒ 写侧也无法发射 ⇒ 任何 sexpr 往返都把白名单/私网阻断**静默清空**，
+@@ -1086,7 +1070,7 @@ def _scalar_dict_key_to_src(k: Any) -> str:
+     )
+ 
+ 
+-def _dict_entry_to_src(k: Any, v: Any, value_to_src: Any = None) -> str:
++def _dict_entry_to_src(k: Any, v: Any) -> str:
+     """发射一条 ``(dict …)`` 条目——**键**的拼写是 #148 的核心。
+ 
+     写侧两条拼写，与读侧 ``_compile_dict_literal`` / ``_dict_entry_key`` 一一配对：
+@@ -1099,11 +1083,8 @@ def _dict_entry_to_src(k: Any, v: Any, value_to_src: Any = None) -> str:
+       ``"1"`` / ``nil`` 等）一律走 ``_string_to_src`` 恒加引号；读侧
+       ``_dict_entry_key`` 解出精确字符串。**不能**沿用 ``_expr_to_src`` 的裸原子
+       约定——那会把键 ``1`` 读成 ``int``、``nil`` 读成 ``None``、``:x`` 读成 ``x``。
+-
+-    *value_to_src* 默认 ``_expr_to_src``（表达式语义，历史行为）；数据字段
+-    （headers/body/upstreamOutput，plaita#220/L6）传 ``_data_value_to_src``。
+     """
+-    vsrc = (value_to_src or _expr_to_src)(v)
++    vsrc = _expr_to_src(v)
+     if isinstance(k, str):
+         if k and _BARE_ATOM_RE.fullmatch(k):
+             return f":{k} {vsrc}"
+@@ -1117,56 +1098,6 @@ def _dict_to_sexpr(d: Dict[str, Any]) -> str:
+     return "(dict " + " ".join(items) + ")" if items else "(dict)"
+ 
+ 
+-def _data_dict_to_sexpr(d: Dict[Any, Any]) -> str:
+-    """数据 dict → ``(dict …)``，值按 :func:`_data_value_to_src` 发射。"""
+-    items = [_dict_entry_to_src(k, v, _data_value_to_src) for k, v in d.items()]
+-    return "(dict " + " ".join(items) + ")" if items else "(dict)"
+-
+-
+-def _data_value_to_src(x: Any) -> str:
+-    """IR **数据**字段（headers / body / query / upstreamOutput …）→ sexpr。
+-
+-    与 :func:`_expr_to_src` 唯一的差别：**非表达式的字符串恒加引号**。
+-    裸原子约定适合表达式，但对数据有损——``"1"``→``1``(int)、``"true"``→
+-    ``True``、``"42"``→``42``（plaita#220/L6 实测的 headers/body 漂移）。
+-    ``$`` 开头的字符串仍按表达式裸写（前端编译期已丢失"字面 $ 前缀"的区分，
+-    属既有已知边界）。
+-
+-    容器显式写 ``(dict …)`` / ``(list …)`` 头：读侧 ``_value()`` 只对带这两个
+-    头的 form 做容器编译，裸写 ``((dict …) …)`` 会把内层 form 原样留在 IR 里。
+-    """
+-    if isinstance(x, str):
+-        if x.startswith("$"):
+-            return _expr_to_src(x)
+-        return _string_to_src(x)
+-    if isinstance(x, dict):
+-        return _data_dict_to_sexpr(x)
+-    if isinstance(x, list):
+-        return "(list " + " ".join(_data_value_to_src(i) for i in x) + ")"
+-    return _expr_to_src(x)
+-
+-
+-def _upstream_output_to_src(values: Any) -> str:
+-    """``Assignment.upstream_output`` → ``(list (dict …) …)``（plaita#220/L5a）。
+-
+-    外层 ``list`` 头必须显式：``_value()`` 只编译 ``(list …)`` / ``(dict …)``
+-    开头的 form，裸列表会把内层 ``(dict …)`` 原样留下（IR 里变成
+-    ``['dict', ...]``）。非 dict 元素 fail-closed——``Assignment.execute`` 按
+-    ``out["upstream"]`` / ``out["value"]`` 取值，发射成别的形状只会在运行期炸。
+-    """
+-    if not isinstance(values, (list, tuple)):
+-        raise SexprEmitError(
+-            f"assignment 的 upstreamOutput 需要 dict 列表，得到 {values!r}")
+-    items = []
+-    for item in values:
+-        if not isinstance(item, dict):
+-            raise SexprEmitError(
+-                f"assignment 的 upstreamOutput 元素必须是 dict"
+-                f"（含 upstream/value），得到 {item!r}")
+-        items.append(_data_dict_to_sexpr(item))
+-    return "(list " + " ".join(items) + ")"
+-
+-
+ def _cond_to_src(c: Any) -> str:
+     if isinstance(c, dict):
+         if "relation" in c:
+@@ -1314,13 +1245,6 @@ def _node_to_src(n: Dict[str, Any]) -> str:
+         # on the root flow, which #147 made emit).
+         if n.get("outputType") is not None:
+             parts.append(f":output-type {_type_to_src(n['outputType'])}")
+-        # plaita#220/L5a：`upstreamOutput` 在多 upstream 时决定取值
+-        # （`Assignment.execute` 按 `state.last_node_id` 挑选）。读写两侧此前
+-        # 都没有表达面 ⇒ 往返即丢。`None` 与 `[]` 语义等价（字段默认 []），
+-        # 但 IR 里的显式空列表也是可表达的形状，故按 `is not None` 发射。
+-        upstream = _dual(n, "upstreamOutput", "upstream_output")
+-        if upstream is not None:
+-            parts.append(f":upstream-output {_upstream_output_to_src(upstream)}")
+         if n.get("next") is not None:
+             parts.append(f"-> {n['next']}")
+     elif t == "if":
+@@ -1424,22 +1348,13 @@ def _node_to_src(n: Dict[str, Any]) -> str:
+     elif t == "http":
+         parts.append(f":method {n.get('method')}")
+         parts.append(f":url {_expr_to_src(n.get('url'))}")
+-        # plaita#220/L6：headers/body 是**数据**字段，值里的字符串必须恒加引号
+-        # （`_expr_to_src` 的裸原子约定把 "1"/"true"/"42" 读回 int/bool）。
+         if n.get("headers") is not None:
+-            parts.append(f":headers {_data_value_to_src(n['headers'])}")
++            parts.append(f":headers {_expr_to_src(n['headers'])}")
+         if n.get("body") is not None:
+-            parts.append(f":body {_data_value_to_src(n['body'])}")
++            parts.append(f":body {_expr_to_src(n['body'])}")
+         # #150: `_c_http` reads `:input` into `HTTP.input`; the writer dropped it.
+         if n.get("input") is not None:
+             parts.append(f":input {_expr_to_src(n['input'])}")
+-        # plaita#220/L4：四个语义字段（output / query / addressing / delegate）
+-        # 读写两侧此前都没有表达面 ⇒ 往返静默丢。数据拼写走 `_data_value_to_src`
+-        # （`query` 里的数字样字符串同样不得退化成 int）。
+-        for field in ("output", "query", "addressing", "delegate"):
+-            value = n.get(field)
+-            if value is not None:
+-                parts.append(f":{field} {_data_value_to_src(value)}")
+         # #200：访问策略（SSRF 防护面）此前写侧一个字都不发。读侧补齐后这里
+         # 对称发射；全部排在 `-> next` 之前（关键字列表在此终止）。
+         allowed = _dual(n, "allowedHosts", "allowed_hosts")
+```
+
+## 变异态 repro（before）
+
+```json
+{
+  "plaita_file": "/tmp/w44/plaita/__init__.py",
+  "python": "3.11.16",
+  "faces": {
+    "L1": {
+      "ok": false,
+      "types": {
+        "map": {
+          "ok": false,
+          "exc": "_CodeflowError",
+          "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+        },
+        "filter": {
+          "ok": false,
+          "exc": "_CodeflowError",
+          "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+        },
+        "find": {
+          "ok": false,
+          "exc": "_CodeflowError",
+          "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+        },
+        "loop": {
+          "ok": false,
+          "exc": "_CodeflowError",
+          "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+        },
+        "reduce": {
+          "ok": false,
+          "exc": "_CodeflowError",
+          "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+        }
+      }
+    },
+    "L2": {
+      "ok": false,
+      "flow": {
+        "input": null,
+        "condition": null
+      },
+      "sexpr": {
+        "input": "$INPUT.x",
+        "condition": {
+          "field": "$INPUT.flag",
+          "operator": "truthy",
+          "value": true
+        }
+      }
+    },
+    "L4": {
+      "ok": false,
+      "flow_lost": [
+        "output",
+        "query",
+        "addressing",
+        "delegate"
+      ],
+      "sexpr_lost": [
+        "output",
+        "query",
+        "addressing",
+        "delegate"
+      ]
+    },
+    "L5": {
+      "l5b_ok": false,
+      "flow": {
+        "outputType": null,
+        "upstreamOutput": null
+      },
+      "sexpr": {
+        "outputType": {
+          "dataType": "string"
+        },
+        "upstreamOutput": null
+      },
+      "ok": false
+    },
+    "L6": {
+      "ok": false,
+      "flow_headers": {
+        "X-Num": "42",
+        "X-Bool": "true",
+        "X-Str": "ok"
+      },
+      "flow_body": {
+        "n": "1",
+        "b": "false",
+        "s": "42"
+      },
+      "sexpr_headers": {
+        "X-Num": 42,
+        "X-Bool": true,
+        "X-Str": "ok"
+      },
+      "sexpr_body": {
+        "n": 1,
+        "b": false,
+        "s": 42
+      }
+    }
+  },
+  "all_ok": false
+}
+```
+
+## 变异态新用例（红）
+
+```text
+.FF.FFF.F.F                                                         [100%]
+=================================== FAILURES ===================================
+_ TestL1CollectionNodeId.test_every_collection_type_supports_downstream_reference (kind='map') _
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL1CollectionNodeId testMethod=test_every_collection_type_supports_downstream_reference>
+
+    def test_every_collection_type_supports_downstream_reference(self):
+        for kind in ("map", "filter", "find", "loop", "reduce"):
+            with self.subTest(kind=kind):
+                child = _child("$INPUT[0]" if kind == "reduce" else "$INPUT.item")
+                node = {"type": kind, "id": "m", "collection": "$INPUT.items",
+                        "childFlow": child, "next": "e"}
+                if kind == "reduce":
+                    node["initial"] = 0
+>               back, source = _emit_rt(_flow([
+                    _start(nxt="m"), node, _end(output="$NODE.m")]))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:67: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue220_dsl_roundtrip_loss.py:44: in _emit_rt
+    return compile_source(source), source
+           ^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:455: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'm', node = <ast.Name object at 0x10a83c310>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x10a684a90>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+_ TestL1CollectionNodeId.test_every_collection_type_supports_downstream_reference (kind='filter') _
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL1CollectionNodeId testMethod=test_every_collection_type_supports_downstream_reference>
+
+    def test_every_collection_type_supports_downstream_reference(self):
+        for kind in ("map", "filter", "find", "loop", "reduce"):
+            with self.subTest(kind=kind):
+                child = _child("$INPUT[0]" if kind == "reduce" else "$INPUT.item")
+                node = {"type": kind, "id": "m", "collection": "$INPUT.items",
+                        "childFlow": child, "next": "e"}
+                if kind == "reduce":
+                    node["initial"] = 0
+>               back, source = _emit_rt(_flow([
+                    _start(nxt="m"), node, _end(output="$NODE.m")]))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:67: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue220_dsl_roundtrip_loss.py:44: in _emit_rt
+    return compile_source(source), source
+           ^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:455: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'm', node = <ast.Name object at 0x10a612170>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x10890bb90>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+_ TestL1CollectionNodeId.test_every_collection_type_supports_downstream_reference (kind='find') _
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL1CollectionNodeId testMethod=test_every_collection_type_supports_downstream_reference>
+
+    def test_every_collection_type_supports_downstream_reference(self):
+        for kind in ("map", "filter", "find", "loop", "reduce"):
+            with self.subTest(kind=kind):
+                child = _child("$INPUT[0]" if kind == "reduce" else "$INPUT.item")
+                node = {"type": kind, "id": "m", "collection": "$INPUT.items",
+                        "childFlow": child, "next": "e"}
+                if kind == "reduce":
+                    node["initial"] = 0
+>               back, source = _emit_rt(_flow([
+                    _start(nxt="m"), node, _end(output="$NODE.m")]))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:67: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue220_dsl_roundtrip_loss.py:44: in _emit_rt
+    return compile_source(source), source
+           ^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:455: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'm', node = <ast.Name object at 0x10a83f790>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x10a67b990>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+_ TestL1CollectionNodeId.test_every_collection_type_supports_downstream_reference (kind='loop') _
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL1CollectionNodeId testMethod=test_every_collection_type_supports_downstream_reference>
+
+    def test_every_collection_type_supports_downstream_reference(self):
+        for kind in ("map", "filter", "find", "loop", "reduce"):
+            with self.subTest(kind=kind):
+                child = _child("$INPUT[0]" if kind == "reduce" else "$INPUT.item")
+                node = {"type": kind, "id": "m", "collection": "$INPUT.items",
+                        "childFlow": child, "next": "e"}
+                if kind == "reduce":
+                    node["initial"] = 0
+>               back, source = _emit_rt(_flow([
+                    _start(nxt="m"), node, _end(output="$NODE.m")]))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:67: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue220_dsl_roundtrip_loss.py:44: in _emit_rt
+    return compile_source(source), source
+           ^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:455: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'm', node = <ast.Name object at 0x10a611c60>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x109dabe10>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+_ TestL1CollectionNodeId.test_every_collection_type_supports_downstream_reference (kind='reduce') _
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL1CollectionNodeId testMethod=test_every_collection_type_supports_downstream_reference>
+
+    def test_every_collection_type_supports_downstream_reference(self):
+        for kind in ("map", "filter", "find", "loop", "reduce"):
+            with self.subTest(kind=kind):
+                child = _child("$INPUT[0]" if kind == "reduce" else "$INPUT.item")
+                node = {"type": kind, "id": "m", "collection": "$INPUT.items",
+                        "childFlow": child, "next": "e"}
+                if kind == "reduce":
+                    node["initial"] = 0
+>               back, source = _emit_rt(_flow([
+                    _start(nxt="m"), node, _end(output="$NODE.m")]))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:67: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue220_dsl_roundtrip_loss.py:44: in _emit_rt
+    return compile_source(source), source
+           ^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:455: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'm', node = <ast.Name object at 0x108f51600>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x108b241d0>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+_ TestL1CollectionNodeId.test_while_for_head_id_supports_downstream_reference __
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL1CollectionNodeId testMethod=test_while_for_head_id_supports_downstream_reference>
+
+    def test_while_for_head_id_supports_downstream_reference(self):
+        """同族：`for x in WHILE(cond, id='w')` 的 id 同样没有赋值语句可借。"""
+        ir = _flow([
+            _start(nxt="w"),
+            {"type": "while", "id": "w", "condition": {"field": "$INPUT.n", "operator": "gt", "value": 0},
+             "childFlow": _child(), "next": "e"},
+            _end(output="$NODE.w"),
+        ])
+>       back, source = _emit_rt(ir)
+                       ^^^^^^^^^^^^
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:82: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_issue220_dsl_roundtrip_loss.py:44: in _emit_rt
+    return compile_source(source), source
+           ^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:367: in _compile_for
+    return _compile_while_for(head, coll_call, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:341: in _compile_while_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'w', node = <ast.Name object at 0x108ee41c0>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x10a998d50>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'w'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+_ TestL2ParallelBranchFields.test_branch_input_and_condition_round_trip_through_flow _
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL2ParallelBranchFields testMethod=test_branch_input_and_condition_round_trip_through_flow>
+
+    def test_branch_input_and_condition_round_trip_through_flow(self):
+        condition = {"field": "$INPUT.flag", "operator": "truthy", "value": True}
+        ir = _flow([
+            _start(nxt="p"),
+            {"type": "parallel", "id": "p", "mode": "thread",
+             "joinBranches": ["a"], "isConditional": True,
+             "branches": [
+                 {"name": "a", "flow": _child(), "input": "$INPUT.x",
+                  "condition": condition},
+                 {"name": "b", "flow": _child()},
+             ], "next": "e"},
+            _end(),
+        ])
+        back, source = _emit_rt(ir)
+        branch = _nodes_of(back, "parallel")[0]["branches"][0]
+>       self.assertEqual(branch.get("input"), "$INPUT.x", source)
+E       AssertionError: None != '$INPUT.x' : @childflow
+E       def child_1(INPUT):
+E           return INPUT.item
+E       
+E       @childflow
+E       def child_2(INPUT):
+E           return INPUT.item
+E       
+E       @flow('t220')
+E       def t220(INPUT):
+E           p = PARALLEL(branches={'a': child_1, 'b': child_2}, join=['a'], conditional=True)
+E           return 'done'
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:103: AssertionError
+________ TestL4HttpSemanticFields.test_flow_chain_keeps_all_four_fields ________
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL4HttpSemanticFields testMethod=test_flow_chain_keeps_all_four_fields>
+
+    def test_flow_chain_keeps_all_four_fields(self):
+        ir = self._ir()
+        expected = ir["nodes"][1]
+        back, source = _emit_rt(ir)
+        node = _nodes_of(back, "http")[0]
+        for field in _HTTP_FIELDS:
+>           self.assertEqual(node.get(field), expected[field], f"{field}\n{source}")
+E           AssertionError: None != '$INPUT.pick' : output
+E           @flow('t220')
+E           def t220(INPUT):
+E               h = HTTP(method='GET', url='https://example.com')
+E               return 'done'
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:147: AssertionError
+_______ TestL4HttpSemanticFields.test_sexpr_chain_keeps_all_four_fields ________
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL4HttpSemanticFields testMethod=test_sexpr_chain_keeps_all_four_fields>
+
+    def test_sexpr_chain_keeps_all_four_fields(self):
+        ir = self._ir()
+        expected = ir["nodes"][1]
+        back, source = _sexpr_rt(ir)
+        node = _nodes_of(back, "http")[0]
+        for field in _HTTP_FIELDS:
+>           self.assertEqual(node.get(field), expected[field], f"{field}\n{source}")
+E           AssertionError: None != '$INPUT.pick' : output
+E           (flow t220 :input-type object (start :id s -> h) (http :id h :method GET :url https://example.com -> e) (end :id e :output done))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:155: AssertionError
+_ TestL5AssignmentFields.test_flow_chain_keeps_output_type_and_upstream_output _
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL5AssignmentFields testMethod=test_flow_chain_keeps_output_type_and_upstream_output>
+
+    def test_flow_chain_keeps_output_type_and_upstream_output(self):
+        ir = self._ir()
+        expected = ir["nodes"][2]
+        back, source = _emit_rt(ir)
+        node = _nodes_of(back, "assignment")[-1]
+>       self.assertEqual(node.get("outputType"), expected["outputType"], source)
+E       AssertionError: None != {'dataType': 'string'} : @flow('t220')
+E       def t220(INPUT):
+E           prev = INPUT.x
+E           a = INPUT.x
+E           return 'done'
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:176: AssertionError
+________ TestL5AssignmentFields.test_sexpr_chain_keeps_upstream_output _________
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL5AssignmentFields testMethod=test_sexpr_chain_keeps_upstream_output>
+
+    def test_sexpr_chain_keeps_upstream_output(self):
+        ir = self._ir()
+        expected = ir["nodes"][2]
+        back, source = _sexpr_rt(ir)
+        node = _nodes_of(back, "assignment")[-1]
+>       self.assertEqual(node.get("upstreamOutput"), expected["upstreamOutput"], source)
+E       AssertionError: None != [{'upstream': 'u', 'value': '$NODE.prev'}[35 chars]al'}] : (flow t220 :input-type object (start :id s -> prev) (assignment :id prev $INPUT.x -> a) (assignment :id a $INPUT.x :output-type string -> e) (end :id e :output done))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:184: AssertionError
+__ TestL6HttpDataStringTypes.test_headers_and_body_string_values_do_not_drift __
+
+self = <tests.unit.test_issue220_dsl_roundtrip_loss.TestL6HttpDataStringTypes testMethod=test_headers_and_body_string_values_do_not_drift>
+
+    def test_headers_and_body_string_values_do_not_drift(self):
+        headers = {"X-Num": "42", "X-Bool": "true", "X-Str": "ok"}
+        body = {"n": "1", "b": "false", "s": "42"}
+        ir = _flow([
+            _start(nxt="h"),
+            {"type": "http", "id": "h", "method": "POST",
+             "url": "https://example.com", "headers": headers, "body": body,
+             "next": "e"},
+            _end(),
+        ])
+        back, source = _sexpr_rt(ir)
+        node = _nodes_of(back, "http")[0]
+>       self.assertEqual(node.get("headers"), headers, source)
+E       AssertionError: {'X-Num': 42, 'X-Bool': True, 'X-Str': 'ok'} != {'X-Num': '42', 'X-Bool': 'true', 'X-Str': 'ok'}
+E       - {'X-Bool': True, 'X-Num': 42, 'X-Str': 'ok'}
+E       ?            ^
+E       
+E       + {'X-Bool': 'true', 'X-Num': '42', 'X-Str': 'ok'}
+E       ?            ^^   +           +  +
+E        : (flow t220 :input-type object (start :id s -> h) (http :id h :method POST :url https://example.com :headers (dict :X-Num 42 :X-Bool true :X-Str ok) :body (dict :n 1 :b false :s 42) -> e) (end :id e :output done))
+
+tests/unit/test_issue220_dsl_roundtrip_loss.py:212: AssertionError
+=========================== short test summary info ============================
+SUBFAILED(kind='map') tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL1CollectionNodeId::test_every_collection_type_supports_downstream_reference
+SUBFAILED(kind='filter') tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL1CollectionNodeId::test_every_collection_type_supports_downstream_reference
+SUBFAILED(kind='find') tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL1CollectionNodeId::test_every_collection_type_supports_downstream_reference
+SUBFAILED(kind='loop') tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL1CollectionNodeId::test_every_collection_type_supports_downstream_reference
+SUBFAILED(kind='reduce') tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL1CollectionNodeId::test_every_collection_type_supports_downstream_reference
+FAILED tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL1CollectionNodeId::test_while_for_head_id_supports_downstream_reference
+FAILED tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL2ParallelBranchFields::test_branch_input_and_condition_round_trip_through_flow
+FAILED tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL4HttpSemanticFields::test_flow_chain_keeps_all_four_fields
+FAILED tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL4HttpSemanticFields::test_sexpr_chain_keeps_all_four_fields
+FAILED tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL5AssignmentFields::test_flow_chain_keeps_output_type_and_upstream_output
+FAILED tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL5AssignmentFields::test_sexpr_chain_keeps_upstream_output
+FAILED tests/unit/test_issue220_dsl_roundtrip_loss.py::TestL6HttpDataStringTypes::test_headers_and_body_string_values_do_not_drift
+12 failed, 4 passed in 0.49s
+```
+
+## 他侧 L3 用例在变异态仍绿（L3 不属本补丁）
+
+```text
+........................                                                 [100%]
+24 passed in 0.40s
+```
+
+## 还原后 repro（after）
+
+```json
+{
+  "plaita_file": "/tmp/w44/plaita/__init__.py",
+  "python": "3.11.16",
+  "faces": {
+    "L1": {
+      "ok": true,
+      "types": {
+        "map": {
+          "ok": true,
+          "output": "$NODE.m"
+        },
+        "filter": {
+          "ok": true,
+          "output": "$NODE.m"
+        },
+        "find": {
+          "ok": true,
+          "output": "$NODE.m"
+        },
+        "loop": {
+          "ok": true,
+          "output": "$NODE.m"
+        },
+        "reduce": {
+          "ok": true,
+          "output": "$NODE.m"
+        }
+      }
+    },
+    "L2": {
+      "ok": true,
+      "flow": {
+        "input": "$INPUT.x",
+        "condition": {
+          "field": "$INPUT.flag",
+          "operator": "truthy",
+          "value": true
+        }
+      },
+      "sexpr": {
+        "input": "$INPUT.x",
+        "condition": {
+          "field": "$INPUT.flag",
+          "operator": "truthy",
+          "value": true
+        }
+      }
+    },
+    "L4": {
+      "ok": true,
+      "flow_lost": [],
+      "sexpr_lost": []
+    },
+    "L5": {
+      "flow": {
+        "outputType": {
+          "dataType": "string"
+        },
+        "upstreamOutput": [
+          {
+            "upstream": "u",
+            "value": "$NODE.prev"
+          },
+          {
+            "upstream": "v",
+            "value": "literal"
+          }
+        ]
+      },
+      "sexpr": {
+        "outputType": {
+          "dataType": "string"
+        },
+        "upstreamOutput": [
+          {
+            "upstream": "u",
+            "value": "$NODE.prev"
+          },
+          {
+            "upstream": "v",
+            "value": "literal"
+          }
+        ]
+      },
+      "ok": true
+    },
+    "L6": {
+      "ok": true,
+      "flow_headers": {
+        "X-Num": "42",
+        "X-Bool": "true",
+        "X-Str": "ok"
+      },
+      "flow_body": {
+        "n": "1",
+        "b": "false",
+        "s": "42"
+      },
+      "sexpr_headers": {
+        "X-Num": "42",
+        "X-Bool": "true",
+        "X-Str": "ok"
+      },
+      "sexpr_body": {
+        "n": "1",
+        "b": "false",
+        "s": "42"
+      }
+    }
+  },
+  "all_ok": true
+}
+```
+
+## 还原后新用例（绿）
+
+```text
+...................................                                 [100%]
+35 passed, 5 subtests passed in 0.42s
+```
+
+## 复核
+
+- 还原后 7 个 DSL 文件与修复备份逐字节一致（`cmp` 无输出）。
+- 变异态红的是六面各自的往返用例（12 failed / 4 passed；4 条绿的是本来就该绿的
+  正控：sexpr 链的 parallel 分支字段、无附加字段赋值的 `n = expr` 字节形态、
+  `$` 表达式串仍按表达式），见上「变异态新用例」原文。
+- 还原后 `tests/unit/test_issue220_dsl_roundtrip_loss.py` +
+  他侧 `tests/unit/test_issue220_sexpr_code_sandbox.py` 合计 35 passed。

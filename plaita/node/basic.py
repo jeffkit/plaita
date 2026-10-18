@@ -134,8 +134,13 @@ class Node(BaseModel):
         return None
 
     def _validate_output(self, result: Any) -> None:
-        """运行期校验节点输出。``run`` 会在 ``execute`` 后调用本方法，子类可
-        覆写以校验产出格式。默认无操作。"""
+        """运行期校验节点输出。子类可覆写以校验产出格式。默认无操作。
+
+        **两条执行路径都会调用**：``run`` 在 ``execute`` 之后直接调用；
+        async 节点由 ``NodeRunner._run_async_node`` 在 ``arun`` 正常返回后调用
+        （plaita#219——此前只有 sync 路径校验，同一逻辑写成 ``arun`` 会绕过）。
+        抛出的异常按普通节点异常走重试 / errorHandler。
+        """
         return None
 
     def run(self, execution: "NodeExecutionContext") -> Any:

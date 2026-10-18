@@ -563,6 +563,14 @@ def _c_assignment(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     ot = _opt(kw, "output-type", "outputType")
     if ot is not None:
         spec["outputType"] = _type_spec(ot)
+    # plaita#220/L5a：`Assignment.upstream_output`（多 upstream 选择值）此前
+    # 读写两侧都没有表达面 ⇒ 往返即丢，`Assignment.execute` 在 >1 个 upstream
+    # 时按 `state.last_node_id` 挑选的语义整体失效。拼写是
+    # `(list (dict :upstream u :value "$NODE.u") ...)`——`_value()` 只把
+    # `(dict …)`/`(list …)` 头编译成容器，所以外层 `list` 头必须显式写。
+    up = _opt(kw, "upstream-output", "upstreamOutput", "upstream_output")
+    if up is not None:
+        spec["upstreamOutput"] = _value(up)
     return spec
 
 
@@ -819,6 +827,14 @@ def _c_http(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     inp = _opt(kw, "input")
     if inp is not None:
         spec["input"] = _value(inp)
+    # plaita#220/L4：HTTP 的四个**语义字段**此前读写两侧都没有表达面 ⇒ 往返
+    # 静默丢失：`output` 改返回形状、`query` 改请求、`addressing`/`delegate`
+    # 改网络路径（寻址/代理）。`headers`/`body` 早已有面，见下方 L6 的字面量
+    # 拼写修复。`contentType`/`requestTimeout` 属 #142、访问策略属 #200，不重复。
+    for field in ("output", "query", "addressing", "delegate"):
+        value = _opt(kw, field)
+        if value is not None:
+            spec[field] = _value(value)
     # #200：访问策略是 SSRF 防护面（HTTP.allowed_hosts / denied_hosts /
     # block_private_networks / request_timeout / max_redirects）。读侧此前一条
     # 都不认 ⇒ 写侧也无法发射 ⇒ 任何 sexpr 往返都把白名单/私网阻断**静默清空**，
@@ -1070,7 +1086,7 @@ def _scalar_dict_key_to_src(k: Any) -> str:
     )
 
 
-def _dict_entry_to_src(k: Any, v: Any) -> str:
+def _dict_entry_to_src(k: Any, v: Any, value_to_src: Any = None) -> str:
     """发射一条 ``(dict …)`` 条目——**键**的拼写是 #148 的核心。
 
     写侧两条拼写，与读侧 ``_compile_dict_literal`` / ``_dict_entry_key`` 一一配对：
@@ -1083,8 +1099,11 @@ def _dict_entry_to_src(k: Any, v: Any) -> str:
       ``"1"`` / ``nil`` 等）一律走 ``_string_to_src`` 恒加引号；读侧
       ``_dict_entry_key`` 解出精确字符串。**不能**沿用 ``_expr_to_src`` 的裸原子
       约定——那会把键 ``1`` 读成 ``int``、``nil`` 读成 ``None``、``:x`` 读成 ``x``。
+
+    *value_to_src* 默认 ``_expr_to_src``（表达式语义，历史行为）；数据字段
+    （headers/body/upstreamOutput，plaita#220/L6）传 ``_data_value_to_src``。
     """
-    vsrc = _expr_to_src(v)
+    vsrc = (value_to_src or _expr_to_src)(v)
     if isinstance(k, str):
         if k and _BARE_ATOM_RE.fullmatch(k):
             return f":{k} {vsrc}"
@@ -1096,6 +1115,56 @@ def _dict_to_sexpr(d: Dict[str, Any]) -> str:
     # 没有结构的 dict 用 :kv 对表示；目前仅用于 headers/globalContext 等
     items = [_dict_entry_to_src(k, v) for k, v in d.items()]
     return "(dict " + " ".join(items) + ")" if items else "(dict)"
+
+
+def _data_dict_to_sexpr(d: Dict[Any, Any]) -> str:
+    """数据 dict → ``(dict …)``，值按 :func:`_data_value_to_src` 发射。"""
+    items = [_dict_entry_to_src(k, v, _data_value_to_src) for k, v in d.items()]
+    return "(dict " + " ".join(items) + ")" if items else "(dict)"
+
+
+def _data_value_to_src(x: Any) -> str:
+    """IR **数据**字段（headers / body / query / upstreamOutput …）→ sexpr。
+
+    与 :func:`_expr_to_src` 唯一的差别：**非表达式的字符串恒加引号**。
+    裸原子约定适合表达式，但对数据有损——``"1"``→``1``(int)、``"true"``→
+    ``True``、``"42"``→``42``（plaita#220/L6 实测的 headers/body 漂移）。
+    ``$`` 开头的字符串仍按表达式裸写（前端编译期已丢失"字面 $ 前缀"的区分，
+    属既有已知边界）。
+
+    容器显式写 ``(dict …)`` / ``(list …)`` 头：读侧 ``_value()`` 只对带这两个
+    头的 form 做容器编译，裸写 ``((dict …) …)`` 会把内层 form 原样留在 IR 里。
+    """
+    if isinstance(x, str):
+        if x.startswith("$"):
+            return _expr_to_src(x)
+        return _string_to_src(x)
+    if isinstance(x, dict):
+        return _data_dict_to_sexpr(x)
+    if isinstance(x, list):
+        return "(list " + " ".join(_data_value_to_src(i) for i in x) + ")"
+    return _expr_to_src(x)
+
+
+def _upstream_output_to_src(values: Any) -> str:
+    """``Assignment.upstream_output`` → ``(list (dict …) …)``（plaita#220/L5a）。
+
+    外层 ``list`` 头必须显式：``_value()`` 只编译 ``(list …)`` / ``(dict …)``
+    开头的 form，裸列表会把内层 ``(dict …)`` 原样留下（IR 里变成
+    ``['dict', ...]``）。非 dict 元素 fail-closed——``Assignment.execute`` 按
+    ``out["upstream"]`` / ``out["value"]`` 取值，发射成别的形状只会在运行期炸。
+    """
+    if not isinstance(values, (list, tuple)):
+        raise SexprEmitError(
+            f"assignment 的 upstreamOutput 需要 dict 列表，得到 {values!r}")
+    items = []
+    for item in values:
+        if not isinstance(item, dict):
+            raise SexprEmitError(
+                f"assignment 的 upstreamOutput 元素必须是 dict"
+                f"（含 upstream/value），得到 {item!r}")
+        items.append(_data_dict_to_sexpr(item))
+    return "(list " + " ".join(items) + ")"
 
 
 def _cond_to_src(c: Any) -> str:
@@ -1245,6 +1314,13 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # on the root flow, which #147 made emit).
         if n.get("outputType") is not None:
             parts.append(f":output-type {_type_to_src(n['outputType'])}")
+        # plaita#220/L5a：`upstreamOutput` 在多 upstream 时决定取值
+        # （`Assignment.execute` 按 `state.last_node_id` 挑选）。读写两侧此前
+        # 都没有表达面 ⇒ 往返即丢。`None` 与 `[]` 语义等价（字段默认 []），
+        # 但 IR 里的显式空列表也是可表达的形状，故按 `is not None` 发射。
+        upstream = _dual(n, "upstreamOutput", "upstream_output")
+        if upstream is not None:
+            parts.append(f":upstream-output {_upstream_output_to_src(upstream)}")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "if":
@@ -1348,13 +1424,22 @@ def _node_to_src(n: Dict[str, Any]) -> str:
     elif t == "http":
         parts.append(f":method {n.get('method')}")
         parts.append(f":url {_expr_to_src(n.get('url'))}")
+        # plaita#220/L6：headers/body 是**数据**字段，值里的字符串必须恒加引号
+        # （`_expr_to_src` 的裸原子约定把 "1"/"true"/"42" 读回 int/bool）。
         if n.get("headers") is not None:
-            parts.append(f":headers {_expr_to_src(n['headers'])}")
+            parts.append(f":headers {_data_value_to_src(n['headers'])}")
         if n.get("body") is not None:
-            parts.append(f":body {_expr_to_src(n['body'])}")
+            parts.append(f":body {_data_value_to_src(n['body'])}")
         # #150: `_c_http` reads `:input` into `HTTP.input`; the writer dropped it.
         if n.get("input") is not None:
             parts.append(f":input {_expr_to_src(n['input'])}")
+        # plaita#220/L4：四个语义字段（output / query / addressing / delegate）
+        # 读写两侧此前都没有表达面 ⇒ 往返静默丢。数据拼写走 `_data_value_to_src`
+        # （`query` 里的数字样字符串同样不得退化成 int）。
+        for field in ("output", "query", "addressing", "delegate"):
+            value = n.get(field)
+            if value is not None:
+                parts.append(f":{field} {_data_value_to_src(value)}")
         # #200：访问策略（SSRF 防护面）此前写侧一个字都不发。读侧补齐后这里
         # 对称发射；全部排在 `-> next` 之前（关键字列表在此终止）。
         allowed = _dual(n, "allowedHosts", "allowed_hosts")

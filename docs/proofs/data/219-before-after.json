@@ -1,0 +1,62 @@
+{
+  "issue": 219,
+  "title": "fix(core): arun path calls _validate_output",
+  "generated_at": "2026-10-18T03:51:34.696486+00:00",
+  "base_head": "f83a2685b7945ec66e9c07e9fcdf31687cba4644",
+  "fix_branch": "fix/w44-rebased",
+  "fix_commit": "d90a7bfe897b386e5b4f0d553d32dfddbc863024",
+  "repro": "docs/proofs/data/219-repro.py",
+  "negative_control": "docs/proofs/data/219-negative-control.txt",
+  "before": {
+    "plaita_file": "/tmp/w44/plaita/__init__.py",
+    "python": "3.11.16",
+    "results": {
+      "execute_only": {
+        "ok": false,
+        "exc": "NodeExecutionError",
+        "msg": "执行节点v出错了: ValueError: r7 invalid output"
+      },
+      "arun": {
+        "ok": true,
+        "result": "x"
+      },
+      "arun_budget": {
+        "ok": true,
+        "result": "x"
+      },
+      "clean_async": {
+        "ok": true,
+        "result": {
+          "ok": true
+        }
+      }
+    }
+  },
+  "after": {
+    "plaita_file": "/tmp/w44/plaita/__init__.py",
+    "python": "3.11.16",
+    "results": {
+      "execute_only": {
+        "ok": false,
+        "exc": "NodeExecutionError",
+        "msg": "执行节点v出错了: ValueError: r7 invalid output"
+      },
+      "arun": {
+        "ok": false,
+        "exc": "NodeExecutionError",
+        "msg": "执行节点v出错了: ValueError: r7 invalid output"
+      },
+      "arun_budget": {
+        "ok": false,
+        "exc": "NodeExecutionError",
+        "msg": "执行节点v出错了: ValueError: r7 invalid output"
+      },
+      "clean_async": {
+        "ok": true,
+        "result": {
+          "ok": true
+        }
+      }
+    }
+  }
+}

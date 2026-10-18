@@ -67,6 +67,22 @@ def _node_loc_suffix(node) -> str:
     return f" (源码第 {sl} 行)" if sl is not None else ""
 
 
+def _validate_node_output(node: Any, result: Any) -> None:
+    """调用节点的 ``_validate_output``（plaita#219）。
+
+    ``Node.run``（sync 路径）一直在 ``execute`` 之后调它；async 路径
+    （``NodeRunner._run_async_node``）此前**漏调**，同一个节点逻辑写成
+    ``execute`` 或 ``arun`` 输出校验行为不同（公开扩展点缺口）。
+
+    ``getattr`` 而非直接属性访问：``arun`` 是鸭子类型扩展点，历史/第三方
+    执行器可能传入不继承 ``Node`` 的对象（``_run_with_timeout`` 只检查
+    ``arun`` 是协程函数）。没有该校验钩子的对象维持原行为（无操作）。
+    """
+    validate = getattr(node, "_validate_output", None)
+    if validate is not None:
+        validate(result)
+
+
 def _coerce_strategy(value) -> ErrorStrategy:
     """容忍 ErrorStrategy enum / 字符串 / Mock / None, 一律归一为 enum。
 
@@ -480,7 +496,9 @@ class NodeRunner:
     async def _run_async_node(self, node, timeout_ms: Optional[int]) -> Any:
         exec_ctx = self.node_execution or self.context
         if timeout_ms is None:
-            return await node.arun(exec_ctx)
+            result = await node.arun(exec_ctx)
+            _validate_node_output(node, result)
+            return result
         # #194：不能用 ``wait_for`` + ``except asyncio.TimeoutError`` 判预算——
         # py3.10+ 节点自身抛出的 TimeoutError 与 wait_for 的预算超时在 catch
         # 点完全同型，会把业务超时误当引擎超时。先看 task 是否完成：完成 ⇒
@@ -488,7 +506,7 @@ class NodeRunner:
         # ⇒ 才是引擎预算超时。
         task = asyncio.ensure_future(node.arun(exec_ctx))
         try:
-            return await asyncio.wait_for(task, timeout=timeout_ms / 1000.0)
+            result = await asyncio.wait_for(task, timeout=timeout_ms / 1000.0)
         except asyncio.TimeoutError:
             # 区分来源：wait_for 因预算取消 task 时 task 未完成；task 已完成且
             # 带异常 ⇒ 那是节点自己抛的 TimeoutError，原样透传。
@@ -499,6 +517,11 @@ class NodeRunner:
             raise _NodeBudgetExceeded(
                 f"Node execution timed out after {timeout_ms}ms"
             )
+        # plaita#219：``arun`` 路径此前**不调用** ``_validate_output``——同一节点
+        # 逻辑写成 ``execute`` 或 ``arun``，输出校验行为不同。校验放在「正常返回」
+        # 之后（两条分支各一次），超时/异常照旧透传，不改变 #194 的归属语义。
+        _validate_node_output(node, result)
+        return result
 
     async def _run_sync_node(self, node, timeout_ms: Optional[int]) -> Any:
         """Run a sync node in a raw daemon thread to avoid blocking process exit.

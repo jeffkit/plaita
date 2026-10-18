@@ -1,0 +1,227 @@
+{
+  "issue": 220,
+  "title": "fix(dsl): @flow/sexpr round-trip loss faces L1/L2/L4/L5a/L5b/L6",
+  "generated_at": "2026-10-18T03:51:34.704830+00:00",
+  "base_head": "f83a2685b7945ec66e9c07e9fcdf31687cba4644",
+  "fix_branch": "fix/w44-rebased",
+  "fix_commit": "d90a7bfe897b386e5b4f0d553d32dfddbc863024",
+  "repro": "docs/proofs/data/220-repro.py",
+  "negative_control": "docs/proofs/data/220-negative-control.txt",
+  "notes": "本补丁只覆盖六个面：#220 的 L3（sexpr code sandbox_backend）已由 origin/main 的 88eb1340 落地，不重复实现、不改其写法；其证据见 docs/proofs/220-L3-sexpr-sandbox-backend.md。",
+  "before": {
+    "plaita_file": "/tmp/w44/plaita/__init__.py",
+    "python": "3.11.16",
+    "faces": {
+      "L1": {
+        "ok": false,
+        "types": {
+          "map": {
+            "ok": false,
+            "exc": "_CodeflowError",
+            "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+          },
+          "filter": {
+            "ok": false,
+            "exc": "_CodeflowError",
+            "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+          },
+          "find": {
+            "ok": false,
+            "exc": "_CodeflowError",
+            "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+          },
+          "loop": {
+            "ok": false,
+            "exc": "_CodeflowError",
+            "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+          },
+          "reduce": {
+            "ok": false,
+            "exc": "_CodeflowError",
+            "msg": "[codeflow] 第 5 行: 未知名字 'm'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量"
+          }
+        }
+      },
+      "L2": {
+        "ok": false,
+        "flow": {
+          "input": null,
+          "condition": null
+        },
+        "sexpr": {
+          "input": "$INPUT.x",
+          "condition": {
+            "field": "$INPUT.flag",
+            "operator": "truthy",
+            "value": true
+          }
+        }
+      },
+      "L4": {
+        "ok": false,
+        "flow_lost": [
+          "output",
+          "query",
+          "addressing",
+          "delegate"
+        ],
+        "sexpr_lost": [
+          "output",
+          "query",
+          "addressing",
+          "delegate"
+        ]
+      },
+      "L5": {
+        "l5b_ok": false,
+        "flow": {
+          "outputType": null,
+          "upstreamOutput": null
+        },
+        "sexpr": {
+          "outputType": {
+            "dataType": "string"
+          },
+          "upstreamOutput": null
+        },
+        "ok": false
+      },
+      "L6": {
+        "ok": false,
+        "flow_headers": {
+          "X-Num": "42",
+          "X-Bool": "true",
+          "X-Str": "ok"
+        },
+        "flow_body": {
+          "n": "1",
+          "b": "false",
+          "s": "42"
+        },
+        "sexpr_headers": {
+          "X-Num": 42,
+          "X-Bool": true,
+          "X-Str": "ok"
+        },
+        "sexpr_body": {
+          "n": 1,
+          "b": false,
+          "s": 42
+        }
+      }
+    },
+    "all_ok": false
+  },
+  "after": {
+    "plaita_file": "/tmp/w44/plaita/__init__.py",
+    "python": "3.11.16",
+    "faces": {
+      "L1": {
+        "ok": true,
+        "types": {
+          "map": {
+            "ok": true,
+            "output": "$NODE.m"
+          },
+          "filter": {
+            "ok": true,
+            "output": "$NODE.m"
+          },
+          "find": {
+            "ok": true,
+            "output": "$NODE.m"
+          },
+          "loop": {
+            "ok": true,
+            "output": "$NODE.m"
+          },
+          "reduce": {
+            "ok": true,
+            "output": "$NODE.m"
+          }
+        }
+      },
+      "L2": {
+        "ok": true,
+        "flow": {
+          "input": "$INPUT.x",
+          "condition": {
+            "field": "$INPUT.flag",
+            "operator": "truthy",
+            "value": true
+          }
+        },
+        "sexpr": {
+          "input": "$INPUT.x",
+          "condition": {
+            "field": "$INPUT.flag",
+            "operator": "truthy",
+            "value": true
+          }
+        }
+      },
+      "L4": {
+        "ok": true,
+        "flow_lost": [],
+        "sexpr_lost": []
+      },
+      "L5": {
+        "flow": {
+          "outputType": {
+            "dataType": "string"
+          },
+          "upstreamOutput": [
+            {
+              "upstream": "u",
+              "value": "$NODE.prev"
+            },
+            {
+              "upstream": "v",
+              "value": "literal"
+            }
+          ]
+        },
+        "sexpr": {
+          "outputType": {
+            "dataType": "string"
+          },
+          "upstreamOutput": [
+            {
+              "upstream": "u",
+              "value": "$NODE.prev"
+            },
+            {
+              "upstream": "v",
+              "value": "literal"
+            }
+          ]
+        },
+        "ok": true
+      },
+      "L6": {
+        "ok": true,
+        "flow_headers": {
+          "X-Num": "42",
+          "X-Bool": "true",
+          "X-Str": "ok"
+        },
+        "flow_body": {
+          "n": "1",
+          "b": "false",
+          "s": "42"
+        },
+        "sexpr_headers": {
+          "X-Num": "42",
+          "X-Bool": "true",
+          "X-Str": "ok"
+        },
+        "sexpr_body": {
+          "n": "1",
+          "b": "false",
+          "s": "42"
+        }
+      }
+    },
+    "all_ok": true
+  }
+}

@@ -23,7 +23,7 @@ def <name>(INPUT):
 |------|------|
 | 命名空间变量 | `INPUT` `NODE` `GLOBAL` `PARENT` `ENV` |
 | 表达式函数 | `F`（`F.upper` `F.concat` `F.add` `F.len` `F.mod` …） |
-| 内置节点调用 | `HTTP` `CODE` `EVENT` `MAP` `FILTER` `FIND` `LOOP` `REDUCE` `WHILE` `CHILD` `REFERENCE` `PARALLEL` |
+| 内置节点调用 | `HTTP` `CODE` `EVENT` `MAP` `FILTER` `FIND` `LOOP` `REDUCE` `WHILE` `CHILD` `REFERENCE` `PARALLEL` `ASSIGN` |
 | 自定义节点调用 | `node_type` 大写化（如 `LLM` `RETRIEVE` `TOOL` …，须已注册到 `NodeRegistry`） |
 | 错误处理 | `ErrorHandler(strategy, default=...)` |
 
@@ -92,6 +92,8 @@ def greet(INPUT):
 ```
 
 赋值生成 `assignment` 节点，后续用变量名引用其输出。**赋值后必须接 return 或后续语句**，否则报"赋值后悬空"。
+
+`n = expr` 装不下 `outputType`（类型校验）与 `upstreamOutput`（多 upstream 选择）时，用 `ASSIGN(output=..., output_type=..., upstream_output=[...])`；普通赋值不受影响（plaita#220）。
 
 ### end(...)：error / nop 结束出口
 
@@ -266,7 +268,20 @@ def fan_out(INPUT):
     return r
 ```
 
-> **已知限制**：`@flow` 的 PARALLEL 编译期**不接受 per-branch `input`**（分支只带 `name` + `flow`，写 per-branch input 报 `PARALLEL 分支需要 (name, flow) 元组`）。分支子流程**可以**直接读主流程输入（`INPUT.x` / `GLOBAL.x`，实测编译运行通过）；要给不同分支喂不同输入，改用 `CHILD` 串行编排，或在 builder/JSON 层构建 Parallel 节点（那里支持 per-branch `input`）。
+分支需要自己的输入/条件时，值写成显式 dict（`flow` 必填，`input`/`condition` 可选；plaita#220 起支持）：
+
+```python
+r = PARALLEL(
+    branches={
+        "hot": {"flow": sub_a, "input": INPUT.item, "condition": INPUT.priority > 5},
+        "cold": sub_b,
+    },
+    conditional=True,
+    join=["hot", "cold"],
+)
+```
+
+不写附加字段的分支仍是 `{名: 子流程}`；`(名, 子流程)` 元组列表也仍可用（可选第 3/4 位 input/condition）。
 
 ## 9. 编译期校验报错对照
 
@@ -367,6 +382,6 @@ print(flow.run(name="alice"))   # -> "hi ALICE"
 | `plaita.dsl.codeflow.compile_func(fn, flow_id)` | Python 函数 → IR dict（不构建） |
 | `plaita.dsl.codeflow.flow(flow_id, ...)` | 装饰器：Python 函数 → `Flow`（需模块级源文件） |
 | `plaita.dsl.codeflow.childflow(flow_id, *, desc=...)` | 装饰器：子流程函数（`flow_id` 可省；会写进执行上下文，见 §6.1） |
-| 占位符 | `HTTP CODE EVENT MAP FILTER FIND LOOP REDUCE WHILE CHILD REFERENCE PARALLEL` + 自定义节点（`node_type` 大写，如 `LLM`/`RETRIEVE`/`TOOL`，须已注册） |
+| 占位符 | `HTTP CODE EVENT MAP FILTER FIND LOOP REDUCE WHILE CHILD REFERENCE PARALLEL ASSIGN` + 自定义节点（`node_type` 大写，如 `LLM`/`RETRIEVE`/`TOOL`，须已注册） |
 | 命名空间 | `F INPUT NODE GLOBAL PARENT ENV` |
 | 错误处理 | `ErrorHandler(...)` |

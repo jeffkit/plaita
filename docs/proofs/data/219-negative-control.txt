@@ -1,0 +1,214 @@
+# plaita#219 负控记录：arun 路径不调用 _validate_output（自定义 async 节点绕过输出校验）
+
+- 仓：/tmp/w44（`git worktree add --detach /tmp/w44 origin/main`，分支 fix/w44-rebased）
+- 基线：origin/main = f83a2685b7945ec66e9c07e9fcdf31687cba4644（= f83a2685）
+- 修复提交：d90a7bfe897b386e5b4f0d553d32dfddbc863024
+- 解释器：/Users/jeff.jie/.venvs/plaita/bin/python（3.11.16），`PYTHONPATH=/tmp/w44`
+- 负控方法：把 `plaita/core/runner.py` 整体还原到 `f83a2685`
+  （`git checkout f83a2685 -- plaita/core/runner.py`）——等价于反向应用下面的
+  diff（删掉 `_validate_node_output` helper 与两条正常返回分支上的调用）。
+  变异前 `find . -name __pycache__ -prune -exec rm -rf {} +`，全程
+  `PYTHONDONTWRITEBYTECODE=1`（本仓踩过「旧 .pyc 伪造绿」的坑：同尺寸变异在同
+  一秒内会命中旧字节码）；跑完立刻从备份还原并 `cmp` 复核（逐字节一致）。
+- repro：`docs/proofs/data/219-repro.py`；before/after 原始 JSON 见
+  `docs/proofs/data/219-before-after.json`
+- 原始终端输出：`/tmp/w44-out/neg-219.log`（红）、
+  `/tmp/w44-out/neg-219-restore-green.log`（绿）、
+  `/tmp/w44-out/repro-219-mutant.json` / `repro-219-after.json`
+
+## mutant diff（修复 → 变异；应用到修复后的树即得变异态）
+
+```diff
+diff --git a/plaita/core/runner.py b/plaita/core/runner.py
+index 8c8262f4..d1ad066b 100644
+--- a/plaita/core/runner.py
++++ b/plaita/core/runner.py
+@@ -67,22 +67,6 @@ def _node_loc_suffix(node) -> str:
+     return f" (源码第 {sl} 行)" if sl is not None else ""
+ 
+ 
+-def _validate_node_output(node: Any, result: Any) -> None:
+-    """调用节点的 ``_validate_output``（plaita#219）。
+-
+-    ``Node.run``（sync 路径）一直在 ``execute`` 之后调它；async 路径
+-    （``NodeRunner._run_async_node``）此前**漏调**，同一个节点逻辑写成
+-    ``execute`` 或 ``arun`` 输出校验行为不同（公开扩展点缺口）。
+-
+-    ``getattr`` 而非直接属性访问：``arun`` 是鸭子类型扩展点，历史/第三方
+-    执行器可能传入不继承 ``Node`` 的对象（``_run_with_timeout`` 只检查
+-    ``arun`` 是协程函数）。没有该校验钩子的对象维持原行为（无操作）。
+-    """
+-    validate = getattr(node, "_validate_output", None)
+-    if validate is not None:
+-        validate(result)
+-
+-
+ def _coerce_strategy(value) -> ErrorStrategy:
+     """容忍 ErrorStrategy enum / 字符串 / Mock / None, 一律归一为 enum。
+ 
+@@ -496,9 +480,7 @@ class NodeRunner:
+     async def _run_async_node(self, node, timeout_ms: Optional[int]) -> Any:
+         exec_ctx = self.node_execution or self.context
+         if timeout_ms is None:
+-            result = await node.arun(exec_ctx)
+-            _validate_node_output(node, result)
+-            return result
++            return await node.arun(exec_ctx)
+         # #194：不能用 ``wait_for`` + ``except asyncio.TimeoutError`` 判预算——
+         # py3.10+ 节点自身抛出的 TimeoutError 与 wait_for 的预算超时在 catch
+         # 点完全同型，会把业务超时误当引擎超时。先看 task 是否完成：完成 ⇒
+@@ -506,7 +488,7 @@ class NodeRunner:
+         # ⇒ 才是引擎预算超时。
+         task = asyncio.ensure_future(node.arun(exec_ctx))
+         try:
+-            result = await asyncio.wait_for(task, timeout=timeout_ms / 1000.0)
++            return await asyncio.wait_for(task, timeout=timeout_ms / 1000.0)
+         except asyncio.TimeoutError:
+             # 区分来源：wait_for 因预算取消 task 时 task 未完成；task 已完成且
+             # 带异常 ⇒ 那是节点自己抛的 TimeoutError，原样透传。
+@@ -517,11 +499,6 @@ class NodeRunner:
+             raise _NodeBudgetExceeded(
+                 f"Node execution timed out after {timeout_ms}ms"
+             )
+-        # plaita#219：``arun`` 路径此前**不调用** ``_validate_output``——同一节点
+-        # 逻辑写成 ``execute`` 或 ``arun``，输出校验行为不同。校验放在「正常返回」
+-        # 之后（两条分支各一次），超时/异常照旧透传，不改变 #194 的归属语义。
+-        _validate_node_output(node, result)
+-        return result
+ 
+     async def _run_sync_node(self, node, timeout_ms: Optional[int]) -> Any:
+         """Run a sync node in a raw daemon thread to avoid blocking process exit.
+```
+
+## 变异态 repro（before）
+
+```json
+{
+  "plaita_file": "/tmp/w44/plaita/__init__.py",
+  "python": "3.11.16",
+  "results": {
+    "execute_only": {
+      "ok": false,
+      "exc": "NodeExecutionError",
+      "msg": "执行节点v出错了: ValueError: r7 invalid output"
+    },
+    "arun": {
+      "ok": true,
+      "result": "x"
+    },
+    "arun_budget": {
+      "ok": true,
+      "result": "x"
+    },
+    "clean_async": {
+      "ok": true,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}
+```
+
+## 变异态新用例（红）
+
+```text
+FF...F                                                                   [100%]
+=================================== FAILURES ===================================
+__________ TestAsyncOutputValidation.test_arun_path_validates_output ___________
+
+self = <tests.unit.test_issue219_arun_validate_output.TestAsyncOutputValidation testMethod=test_arun_path_validates_output>
+
+    async def test_arun_path_validates_output(self):
+>       with self.assertRaises(NodeExecutionError) as ctx:
+E       AssertionError: NodeExecutionError not raised
+
+tests/unit/test_issue219_arun_validate_output.py:76: AssertionError
+_____ TestAsyncOutputValidation.test_arun_path_with_budget_also_validates ______
+
+self = <tests.unit.test_issue219_arun_validate_output.TestAsyncOutputValidation testMethod=test_arun_path_with_budget_also_validates>
+
+    async def test_arun_path_with_budget_also_validates(self):
+        """有超时预算的 async 分支（wait_for 正常返回）同样校验。"""
+>       with self.assertRaises(NodeExecutionError):
+E       AssertionError: NodeExecutionError not raised
+
+tests/unit/test_issue219_arun_validate_output.py:82: AssertionError
+__ TestAsyncOutputValidation.test_validation_error_goes_through_retry_policy ___
+
+self = <tests.unit.test_issue219_arun_validate_output.TestAsyncOutputValidation testMethod=test_validation_error_goes_through_retry_policy>
+
+    async def test_validation_error_goes_through_retry_policy(self):
+        """校验异常按普通节点异常处理：retryTimes=2 ⇒ 执行 3 次后走 fallback。"""
+        _RETRY_CALLS.clear()
+        node = _RetryingAsync(
+            id="r",
+            error_handler={
+                "strategy": "continue-with",
+                "retryTimes": 2,
+                "defaultValue": "fallback",
+            },
+        )
+        result, _branch = await _runner().run_node(_Flow(), node)
+>       self.assertEqual(result, "fallback")
+E       AssertionError: 'x' != 'fallback'
+E       - x
+E       + fallback
+
+tests/unit/test_issue219_arun_validate_output.py:101: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue219_arun_validate_output.py::TestAsyncOutputValidation::test_arun_path_validates_output
+FAILED tests/unit/test_issue219_arun_validate_output.py::TestAsyncOutputValidation::test_arun_path_with_budget_also_validates
+FAILED tests/unit/test_issue219_arun_validate_output.py::TestAsyncOutputValidation::test_validation_error_goes_through_retry_policy
+3 failed, 3 passed in 0.36s
+```
+
+## 还原后 repro（after）
+
+```json
+{
+  "plaita_file": "/tmp/w44/plaita/__init__.py",
+  "python": "3.11.16",
+  "results": {
+    "execute_only": {
+      "ok": false,
+      "exc": "NodeExecutionError",
+      "msg": "执行节点v出错了: ValueError: r7 invalid output"
+    },
+    "arun": {
+      "ok": false,
+      "exc": "NodeExecutionError",
+      "msg": "执行节点v出错了: ValueError: r7 invalid output"
+    },
+    "arun_budget": {
+      "ok": false,
+      "exc": "NodeExecutionError",
+      "msg": "执行节点v出错了: ValueError: r7 invalid output"
+    },
+    "clean_async": {
+      "ok": true,
+      "result": {
+        "ok": true
+      }
+    }
+  }
+}
+```
+
+## 还原后新用例（绿）
+
+```text
+......                                                                   [100%]
+6 passed in 0.36s
+```
+
+## 复核
+
+- 还原后 `plaita/core/runner.py` 与修复备份逐字节一致（`cmp` 无输出）。
+- 变异态红的是三条 async 用例（`test_arun_path_validates_output` /
+  `test_arun_path_with_budget_also_validates` /
+  `test_validation_error_goes_through_retry_policy`），3 条正控仍绿
+  （`execute_only` 一直会校验、未覆写钩子的节点行为不变、节点自有超时归属不变）——
+  正控绿 + 新用例红 = 变异命中的是「async 分支不校验」这一处，不是测试本身。
+- 相邻既有套件 `test_runner.py` / `test_issue194_node_timeout_attribution.py` /
+  `test_sync_node_timeout.py` 在修复态全绿（见 `/tmp/w44-out/REPORT.md` 测试面）。

@@ -8,6 +8,7 @@ plaita.dsl.codeflow — 用纯 Python 函数写 flow（AST 编译到 Flow IR）�
 from __future__ import annotations
 
 from plaita.dsl.codeflow._compiler import (  # noqa: F401
+    ASSIGN,
     CHILD,
     CODE,
     ENV,
@@ -73,6 +74,7 @@ __all__ = [
     "CHILD",
     "REFERENCE",
     "PARALLEL",
+    "ASSIGN",
     "ErrorHandler",
     "F",
     "INPUT",

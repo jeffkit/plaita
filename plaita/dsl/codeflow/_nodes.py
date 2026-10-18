@@ -14,7 +14,7 @@ from plaita.dsl.codeflow._common import (
     _node_call_kind,
     _raise_if_unregistered_custom,
 )
-from plaita.dsl.codeflow._expr import _compile_expr
+from plaita.dsl.codeflow._expr import _compile_condition, _compile_expr
 
 def _apply_base_kwargs(spec: Dict[str, Any], kw: Dict[str, Any], ctx: _CompileCtx) -> None:
     """#142 编译侧 / #143：把 **``Node`` 基类共有**的字段在所有内置 kind 上统一消费。
@@ -81,6 +81,12 @@ def _compile_node_call(
             spec["timeout"] = _const(kw["timeout"])
         if "input" in kw:
             spec["input"] = _const(kw["input"])
+        # plaita#220/L4：output / query / addressing / delegate 此前不在内置
+        # kind 的手写链里 ⇒ 发射器写出也会被编译期静默丢弃（与 L4 的 sexpr
+        # 链同一面）。字段名 snake == camel，无需双拼写。
+        for ir_key in ("output", "query", "addressing", "delegate"):
+            if ir_key in kw:
+                spec[ir_key] = _const(kw[ir_key])
         # #200：HTTP 访问策略字段（SSRF 防护面）此前不在内置 kind 的手写链里
         # ⇒ 发射器即使写出 `allowed_hosts=...` 也会被编译期静默丢弃。camel 与
         # snake 两种 kwarg 拼写都收（与 `_emit.py` 的发射侧对称）。
@@ -166,6 +172,36 @@ def _compile_node_call(
             spec["joinBranches"] = _eval_join(join, ctx)
         if "conditional" in kw and _const_bool(kw["conditional"]):
             spec["isConditional"] = True
+        _apply_base_kwargs(spec, kw, ctx)
+        return spec
+
+    if kind == "ASSIGN":
+        # plaita#220/L5：赋值节点的 `outputType` / `upstreamOutput` 在
+        # `n = expr` 语句形态里没有表达面（发射器 `_emit_assignment` 只能写
+        # 赋值右侧）。带附加字段时发射器改用本显式构造形，编译回同一个
+        # `type=assignment` 节点（IR 键用 console/sexpr 一致的 camelCase）。
+        if len(pos) > 1:
+            raise _CodeflowError("ASSIGN 最多一个位置参数（output）", node)
+        output = kw.get("output")
+        if output is None and pos:
+            output = pos[0]
+        if output is None:
+            raise _CodeflowError("ASSIGN 需要 output 表达式", node)
+        spec = {
+            "type": "assignment",
+            "id": nid,
+            "output": _compile_expr(output, ctx),
+        }
+        ot = kw.get("output_type")
+        if ot is None:
+            ot = kw.get("outputType")
+        if ot is not None:
+            spec["outputType"] = _compile_expr(ot, ctx)
+        up = kw.get("upstream_output")
+        if up is None:
+            up = kw.get("upstreamOutput")
+        if up is not None:
+            spec["upstreamOutput"] = _compile_expr(up, ctx)
         _apply_base_kwargs(spec, kw, ctx)
         return spec
 
@@ -272,22 +308,71 @@ def _eval_parallel_branches(node: ast.AST, ctx: _CompileCtx) -> List[Dict[str, A
         for k, v in zip(node.keys, node.values):
             if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
                 raise _CodeflowError("PARALLEL 分支名必须是字符串常量", node)
-            branches.append(_parallel_branch(k.value, v, ctx))
+            branches.append(_parallel_branch_value(k.value, v, ctx))
         return branches
     if isinstance(node, ast.List):
         for elt in node.elts:
-            if not (isinstance(elt, ast.Tuple) and len(elt.elts) == 2):
-                raise _CodeflowError("PARALLEL 分支需要 (name, flow) 元组", node)
-            name_e, flow_e = elt.elts
+            if not (isinstance(elt, ast.Tuple) and 2 <= len(elt.elts) <= 4):
+                raise _CodeflowError(
+                    "PARALLEL 分支需要 (name, flow) 元组"
+                    "（可选第 3/4 位为 input / condition）", node)
+            name_e = elt.elts[0]
             if not (isinstance(name_e, ast.Constant) and isinstance(name_e.value, str)):
                 raise _CodeflowError("PARALLEL 分支名必须是字符串常量", name_e)
-            branches.append(_parallel_branch(name_e.value, flow_e, ctx))
+            extra = list(elt.elts[2:])
+            branches.append(_parallel_branch(
+                name_e.value, elt.elts[1], ctx,
+                input_node=extra[0] if len(extra) > 0 else None,
+                condition_node=extra[1] if len(extra) > 1 else None,
+            ))
         return branches
-    raise _CodeflowError("PARALLEL branches 需要是 dict 字面量或 (name, flow) 元组列表", node)
+    raise _CodeflowError(
+        "PARALLEL branches 需要是 dict 字面量或 (name, flow) 元组列表"
+        "（值可为 {'flow': …, 'input': …, 'condition': …} 的 dict；"
+        "元组可选第 3/4 位 input / condition）", node)
 
 
-def _parallel_branch(name: str, flow_node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
+def _parallel_branch_value(name: str, value: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
+    """dict 形态的分支值：``flow_func`` 或 ``{"flow": …, "input": …, "condition": …}``。
+
+    plaita#220/L2：@flow 此前只发 ``branches={name: childflow}``，分支的
+    ``input``/``condition`` 全丢——条件分支退化成无条件分支、分支输入丢失。
+    分支值的显式 dict 形态让这两个可选字段有表达面（sexpr/IR 早已保留）。
+    """
+    if not isinstance(value, ast.Dict):
+        return _parallel_branch(name, value, ctx)
+    fields: Dict[str, ast.AST] = {}
+    for k, v in zip(value.keys, value.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            raise _CodeflowError("PARALLEL 分支字段名必须是字符串常量", value)
+        fields[k.value] = v
+    flow_node = fields.get("flow")
+    if flow_node is None:
+        raise _CodeflowError("PARALLEL 分支 dict 需要 flow=<@childflow 函数>", value)
+    unknown = set(fields) - {"flow", "input", "condition"}
+    if unknown:
+        raise _CodeflowError(
+            f"PARALLEL 分支 dict 有未知字段 {sorted(unknown)}"
+            "（可用：flow / input / condition）", value)
+    return _parallel_branch(
+        name, flow_node, ctx,
+        input_node=fields.get("input"),
+        condition_node=fields.get("condition"),
+    )
+
+
+def _parallel_branch(
+    name: str,
+    flow_node: ast.AST,
+    ctx: _CompileCtx,
+    input_node: Optional[ast.AST] = None,
+    condition_node: Optional[ast.AST] = None,
+) -> Dict[str, Any]:
     spec: Dict[str, Any] = {"name": name, "flow": _eval_childflow_arg(flow_node, ctx)}
+    if input_node is not None:
+        spec["input"] = _compile_expr(input_node, ctx)
+    if condition_node is not None:
+        spec["condition"] = _compile_condition(condition_node, ctx)
     return spec
 
 

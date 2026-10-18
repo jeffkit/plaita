@@ -72,7 +72,7 @@ def <name>(INPUT):
     return <expr>
 ```
 
-- `INPUT` / `F` / `NODE` / `GLOBAL` / `PARENT` / `ENV` / `HTTP` / `CODE` / `EVENT` / `MAP` / `FILTER` / `FIND` / `LOOP` / `REDUCE` / `WHILE` / `CHILD` / `REFERENCE` / `PARALLEL` 这些名字**不需要 import**，是 AST 编译期识别的占位符。
+- `INPUT` / `F` / `NODE` / `GLOBAL` / `PARENT` / `ENV` / `HTTP` / `CODE` / `EVENT` / `MAP` / `FILTER` / `FIND` / `LOOP` / `REDUCE` / `WHILE` / `CHILD` / `REFERENCE` / `PARALLEL` / `ASSIGN` 这些名字**不需要 import**，是 AST 编译期识别的占位符。
 - **自定义节点占位符**：任何注册到 `NodeRegistry` 的 `Node` 子类，用 `node_type` 大写化作占位符即可在 `@flow` 里直接调用（如 `node_type="llm"` → `LLM(prompt=..., model=...)`、`"retrieve"` → `RETRIEVE(query=...)`、`"tool"` → `TOOL(action=...)`）。编译期查 registry，未注册的大写名会报错并列出可用类型，便于自纠。详见下方「自定义节点」。
 - **不要写 `input_type`**：该参数已废弃且被忽略。`$INPUT` 恒为 `run()` 传入的 dict，字段用 `INPUT.x` 访问。
 - **函数体从不被当 Python 执行**，只做静态 AST 分析。所以写法必须在支持子集内，否则编译期报错。
@@ -133,6 +133,9 @@ def greet(INPUT):
     name = F.upper(INPUT.name)
     return F.concat("hi ", name)
 ```
+
+需要 `outputType`（类型校验）或 `upstreamOutput`（多 upstream 选择）时用
+`ASSIGN(output=..., output_type=..., upstream_output=[...])`；普通赋值不受影响（plaita#220）。
 
 ### 集合节点：MAP / FILTER / FIND / LOOP
 
@@ -219,7 +222,18 @@ def fan_out(INPUT):
 
 `mode` 可选 `"thread"` / `"process"` / `"artificial"`，默认 `"thread"`。**不要用 `"coroutine"`**——已于 0.4.0 下线，sync 执行路径不可用（分支内节点表达式求值拿到 `None`，静默产出 `__parallel_error__`），一律用 `"thread"`。
 
-> **已知限制**：`@flow` 的 PARALLEL 编译期**不接受 per-branch `input`**——分支只能带 `name` + `flow`（写 per-branch input 报 `PARALLEL 分支需要 (name, flow) 元组`）。分支子流程**可以**直接读主流程输入（`INPUT.x` / `GLOBAL.x`，实测编译运行通过）；要给不同分支喂不同输入，改用 `CHILD` 串行编排或在 builder/JSON 层构建 Parallel 节点（那里支持 per-branch `input`）。
+分支需要自己的输入/条件时，值写成显式 dict（`flow` 必填，`input`/`condition` 可选；plaita#220 起支持）：
+
+```python
+r = PARALLEL(
+    branches={
+        "hot": {"flow": sub_a, "input": INPUT.item, "condition": INPUT.priority > 5},
+        "cold": sub_b,
+    },
+    conditional=True,
+    join=["hot", "cold"],
+)
+```
 
 ### 自定义节点：LLM / 检索 / 工具 / 领域 action
 
