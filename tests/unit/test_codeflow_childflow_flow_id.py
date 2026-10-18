@@ -341,14 +341,23 @@ def parent(INPUT):
     return r
 '''
 
-_OBSERVABLE_BARE_SRC = _OBSERVABLE_SRC.replace('@childflow("cf")', "@childflow")
+_OBSERVABLE_GLOBAL_SRC = '''
+@childflow("cf")
+def child(INPUT):
+    return GLOBAL.flow_id
 
-_OBSERVABLE_GLOBAL_SRC = _OBSERVABLE_SRC.replace('"$FLOW_ID"', '"$GLOBAL.flow_id"')
+@flow("parent")
+def parent(INPUT):
+    r = CHILD(input={"item": 1}, flow=child)
+    return r
+'''
+
+_OBSERVABLE_BARE_SRC = _OBSERVABLE_GLOBAL_SRC.replace('@childflow("cf")', "@childflow")
 
 _OBSERVABLE_BRANCH_SRC = '''
 @childflow("cf")
 def child(INPUT):
-    if "$FLOW_ID" == "cf":
+    if GLOBAL.flow_id == "cf":
         return "child-id"
     return "parent-id"
 
@@ -362,9 +371,12 @@ def parent(INPUT):
 class TestFlowIdIsObservable:
     """``flow_id`` 会被写进执行上下文，子流程表达式读得到（实测口径）。"""
 
-    def test_child_flow_id_is_visible_as_flow_id_expression(self):
-        """子 ``end`` 输出 ``$FLOW_ID`` ⇒ 子自己的 id（base 这里是父 id）。"""
-        assert flow_from_source(_OBSERVABLE_SRC).run() == "cf"
+    def test_quoted_flow_id_string_is_literal_not_expression(self):
+        """#231：``"$FLOW_ID"`` 是**字面量**（引号内以 ``$`` 开头不再当表达式）。
+
+        动态读取子流程 id 用下一例的 ``GLOBAL.flow_id``（不带引号）。
+        """
+        assert flow_from_source(_OBSERVABLE_SRC).run() == "$FLOW_ID"
 
     def test_child_flow_id_is_visible_as_global_flow_id(self):
         """``context.py:314`` 把 ``flow_id`` 塞进 ``$GLOBAL``。"""
@@ -379,17 +391,16 @@ class TestFlowIdIsObservable:
         assert flow_from_source(_OBSERVABLE_BARE_SRC).run() == "parent"
 
     def test_flow_id_can_change_which_branch_runs(self):
-        """可观测 ⇒ 能改变执行路径：按 ``$FLOW_ID`` 分支的子流程走不同出口。"""
+        """可观测 ⇒ 能改变执行路径：按 ``GLOBAL.flow_id`` 分支的子流程走不同出口。"""
         assert flow_from_source(_OBSERVABLE_BRANCH_SRC).run() == "child-id"
         assert flow_from_source(
             _OBSERVABLE_BRANCH_SRC.replace('@childflow("cf")', "@childflow")).run() == "parent-id"
 
     def test_observability_survives_emit_roundtrip(self):
-        """往返后 `$GLOBAL.flow_id` 仍取到子 id（发射 → 重编译不丢可观测性）。
+        """往返后 `GLOBAL.flow_id` 仍取到子 id（发射 → 重编译不丢可观测性）。
 
-        这里用 ``$GLOBAL.flow_id`` 而不是 ``$FLOW_ID``：后者在发射侧本就逆映射
-        不了（``_emit._BASE_NS`` 没有 ``$FLOW_ID``，**base 同样报 EmitError**，
-        属 #145 之外的既有缺口，本单不动）。
+        这里用不带引号的 ``GLOBAL.flow_id``（动态表达式）而不是字面量
+        ``"$FLOW_ID"``：后者按 #231 是字面量，不再是表达式。
         """
         emitted = emit_source(compile_source(_OBSERVABLE_GLOBAL_SRC))
         assert "@childflow('cf')" in emitted

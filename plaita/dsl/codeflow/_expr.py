@@ -21,8 +21,47 @@ from plaita.dsl.codeflow._common import (
 )
 from plaita.logger import logger
 
+
+class _CompiledExpr(str):
+    """编译器自己产出的 ``$``-表达式串（``$INPUT.x`` / ``$F.concat(...)``）。
+
+    plaita#231：``_compile_expr(ast.Constant)`` 返回的是用户字面量，与编译器
+    产出的表达式同为 plain str，``_render_arg`` 无法区分——以 ``$`` 开头的
+    字面量会被原样塞进 ``$F.func(...)``，运行期当变量求值（KeyError 或静默
+    串值）。用子类标记表达式；只有标记过的值才允许裸渲染。
+    """
+
+
+def _quote_literal(v: str) -> str:
+    """把字面量渲染成文法可还原的双引号字符串（转义 ``\\ " \\n \\r \\t``）。"""
+    escaped = (v.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t"))
+    return '"' + escaped + '"'
+
+
+class _LiteralIR(str):
+    """以 ``$`` 开头的**字面量**的 IR 安全形态。
+
+    字面量值本身以 ``$`` 开头时，直接写进 IR 会被运行期求值器当表达式。
+    本类的字符串值渲染为 ``$F.concat("<literal>")``（运行期得到原字面量）：
+    - IR 序列化（JSON/Flow.model_validate）自动使用该安全串；
+    - 作为 ``$F`` 参数时 ``_render_arg`` 用 ``literal`` 原值加引号，不会嵌套。
+    """
+
+    def __new__(cls, literal: str) -> "_LiteralIR":
+        obj = super().__new__(cls, f"$F.concat({_quote_literal(literal)})")
+        obj.literal = literal
+        return obj
+
+
 def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
     if isinstance(node, ast.Constant):
+        # 字面量恰好以 $ 开头：IR 里必须是可还原的字面量，不能裸写（#231）。
+        if isinstance(node.value, str) and node.value.startswith("$"):
+            return _LiteralIR(node.value)
         return node.value
     if isinstance(node, ast.Name):
         return _resolve_name(node.id, node, ctx)
@@ -30,7 +69,7 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
         base = _compile_expr(node.value, ctx)
         if not isinstance(base, str):
             raise _CodeflowError(f"属性访问的基底必须是命名空间/节点引用，得到 {base!r}", node)
-        return f"{base}.{node.attr}"
+        return _CompiledExpr(f"{base}.{node.attr}")
     if isinstance(node, ast.Call):
         return _compile_call_expr(node, ctx)
     if isinstance(node, ast.BinOp):
@@ -39,14 +78,14 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
             raise _CodeflowError(f"不支持的二元运算 {type(node.op).__name__}", node)
         left = _compile_expr(node.left, ctx)
         right = _compile_expr(node.right, ctx)
-        return f"$F.{fname}({_render_arg(left)}, {_render_arg(right)})"
+        return _CompiledExpr(f"$F.{fname}({_render_arg(left)}, {_render_arg(right)})")
     if isinstance(node, ast.UnaryOp):
         if isinstance(node.op, ast.USub):
             operand = _compile_expr(node.operand, ctx)
-            return f"$F.sub(0, {_render_arg(operand)})"
+            return _CompiledExpr(f"$F.sub(0, {_render_arg(operand)})")
         if isinstance(node.op, ast.Not):
             operand = _compile_expr(node.operand, ctx)
-            return f"$F.not({_render_arg(operand)})"
+            return _CompiledExpr(f"$F.not({_render_arg(operand)})")
         raise _CodeflowError(f"不支持的一元运算 {type(node.op).__name__}", node)
     if isinstance(node, ast.BoolOp):
         # and/or 落到注册表同名逻辑函数（or 返回第一个真值，与 Python 真值语义一致）。
@@ -56,11 +95,13 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
             values = node.values
             compiled = _compile_expr(values[0], ctx)
             for v in values[1:]:
-                compiled = f"$F.and({_render_arg(compiled)}, {_render_arg(_compile_expr(v, ctx))})"
+                compiled = _CompiledExpr(
+                    f"$F.and({_render_arg(compiled)}, {_render_arg(_compile_expr(v, ctx))})"
+                )
             return compiled
         args = [_compile_expr(v, ctx) for v in node.values]
         rendered = ", ".join(_render_arg(a) for a in args)
-        return f"$F.or({rendered})"
+        return _CompiledExpr(f"$F.or({rendered})")
     if isinstance(node, ast.Compare):
         # 比较落到注册表同名比较函数（函数名 == if 节点条件算子名，见 _COMPARE_OP）。
         # 链式比较 a < b < c -> $F.and($F.lt(a,b), $F.lt(b,c))。
@@ -71,24 +112,28 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
             if fname is None:
                 raise _CodeflowError(f"不支持的比较运算 {type(op).__name__}", node)
             right = _compile_expr(comp, ctx)
-            conds.append(f"$F.{fname}({_render_arg(cur)}, {_render_arg(right)})")
+            conds.append(_CompiledExpr(
+                f"$F.{fname}({_render_arg(cur)}, {_render_arg(right)})"
+            ))
             cur = right
         if len(conds) == 1:
-            return conds[0]
+            return _CompiledExpr(conds[0])
         rendered = ", ".join(_render_arg(c) for c in conds)
-        return f"$F.and({rendered})"
+        return _CompiledExpr(f"$F.and({rendered})")
     if isinstance(node, ast.IfExp):
         # 三元 -> $F.ifelse(c, a, b)。急切求值：两支都会被求值（$F 函数皆纯，无副作用风险）。
         cond = _compile_expr(node.test, ctx)
         then = _compile_expr(node.body, ctx)
         other = _compile_expr(node.orelse, ctx)
-        return f"$F.ifelse({_render_arg(cond)}, {_render_arg(then)}, {_render_arg(other)})"
+        return _CompiledExpr(
+            f"$F.ifelse({_render_arg(cond)}, {_render_arg(then)}, {_render_arg(other)})"
+        )
     if isinstance(node, ast.Subscript):
         base = _compile_expr(node.value, ctx)
         idx = _eval_subscript_index(node.slice, ctx)
         if not isinstance(base, str):
             raise _CodeflowError("下标访问的基底必须是命名空间/节点引用", node)
-        return f"{base}[{idx}]"
+        return _CompiledExpr(f"{base}[{idx}]")
     if isinstance(node, ast.Dict):
         d: Dict[Any, Any] = {}
         for k, v in zip(node.keys, node.values):
@@ -113,9 +158,9 @@ def _compile_expr(node: ast.AST, ctx: _CompileCtx) -> Any:
 
 def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
     if name in _NS_PREFIX:
-        return _NS_PREFIX[name]
+        return _CompiledExpr(_NS_PREFIX[name])
     if name in ctx.names:
-        return ctx.names[name]
+        return _CompiledExpr(ctx.names[name])
     if name in _BUILTIN_TO_F:
         # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
         raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
@@ -134,18 +179,16 @@ def _eval_subscript_index(sl: ast.AST, ctx: _CompileCtx) -> str:
 
 def _render_arg(v: Any) -> str:
     """把一个编译后的参数渲染进 ``$F.func(...)`` 的参数串。"""
+    if isinstance(v, _LiteralIR):
+        # 用户字面量恰好以 $ 开头：按原字面量加引号（不能裸写，也不能把
+        # IR 安全壳 "$F.concat(...)" 再嵌一层）。
+        return _quote_literal(v.literal)
+    if isinstance(v, _CompiledExpr):
+        # 编译器产出的表达式才允许裸渲染。
+        return str(v)
     if isinstance(v, str):
-        if v.startswith("$"):
-            return v
-        # 控制字符必须转义：裸换行的字符串常量（多行 prompt 的常态）会让
-        # 文法解析整句失败、退化成变量路径，误报 "$F not found"（2026-09-30
-        # self-improve v2 冒烟实证）。文法的字符串字面量已支持 \n/\t 转义。
-        escaped = (v.replace("\\", "\\\\")
-                    .replace('"', '\\"')
-                    .replace("\n", "\\n")
-                    .replace("\r", "\\r")
-                    .replace("\t", "\\t"))
-        return '"' + escaped + '"'
+        # 普通字面量（包括未经 _compile_expr 的 $ 前缀串）一律按字面量引号。
+        return _quote_literal(v)
     if isinstance(v, bool):
         return "true" if v else "false"
     if v is None:
@@ -162,7 +205,7 @@ def _compile_call_expr(node: ast.Call, ctx: _CompileCtx) -> Any:
             and func.value.id == "F":
         args = [_compile_expr(a, ctx) for a in node.args]
         rendered = ", ".join(_render_arg(a) for a in args)
-        return f"$F.{func.attr}({rendered})"
+        return _CompiledExpr(f"$F.{func.attr}({rendered})")
     # 节点调用出现在表达式位置：不允许（节点调用只能作为语句或赋值右侧）
     node_kind = _node_call_kind(func)
     if node_kind is not None or (
@@ -179,7 +222,7 @@ def _compile_call_expr(node: ast.Call, ctx: _CompileCtx) -> Any:
     if isinstance(func, ast.Name) and func.id in _BUILTIN_TO_F:
         args = [_compile_expr(a, ctx) for a in node.args]
         rendered = ", ".join(_render_arg(a) for a in args)
-        return f"$F.{_BUILTIN_TO_F[func.id]}({rendered})"
+        return _CompiledExpr(f"$F.{_BUILTIN_TO_F[func.id]}({rendered})")
     # 大写占位名但未注册 → 给可读错误（供 AI 自纠）
     _raise_if_unregistered_custom(func, ctx)
     # 其它调用都不支持——给可读的调用名而不是 ast.dump

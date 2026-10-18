@@ -1,0 +1,529 @@
+FFFF..FFFFFF.FFF                                                         [100%]
+=================================== FAILURES ===================================
+__________ test_concat_dollar_literal_is_quoted_and_evaluates_literal __________
+
+    def test_concat_dollar_literal_is_quoted_and_evaluates_literal():
+        out = _output(_flow_src('return F.concat("$5", " USD")'))
+>       assert out == '$F.concat("$5", " USD")', out
+E       AssertionError: $F.concat($5, " USD")
+E       assert '$F.concat($5, " USD")' == '$F.concat("$5", " USD")'
+E         
+E         - $F.concat("$5", " USD")
+E         ?           -   ---
+E         + $F.concat($5, " USD")
+E         ?             ++
+
+tests/unit/test_issue231_dollar_literals.py:42: AssertionError
+__________ test_concat_dollar_root_name_is_literal_not_context_lookup __________
+
+    def test_concat_dollar_root_name_is_literal_not_context_lookup():
+        """``"$INPUT"`` 作为字面量：不得静默替换成上下文值（#231 的核心）。"""
+        out = _output(_flow_src('return F.concat("$INPUT", "x")'))
+>       assert out == '$F.concat("$INPUT", "x")', out
+E       AssertionError: $F.concat($INPUT, "x")
+E       assert '$F.concat($INPUT, "x")' == '$F.concat("$INPUT", "x")'
+E         
+E         - $F.concat("$INPUT", "x")
+E         ?           -      -
+E         + $F.concat($INPUT, "x")
+
+tests/unit/test_issue231_dollar_literals.py:49: AssertionError
+_______________ test_concat_home_literal_does_not_raise_keyerror _______________
+
+    def test_concat_home_literal_does_not_raise_keyerror():
+        out = _output(_flow_src('return F.concat("$HOME", " 未设置")'))
+>       assert evaluate(out, {}) == "$HOME 未设置"
+               ^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:55: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/io.py:254: in evaluate
+    return ExpressionParser.for_prefix(prefix).evaluate(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3582: in evaluate
+    return self._eval(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3596: in _eval
+    return self._eval_prefix(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3623: in _eval_prefix
+    return thunk((context, registry, self.prefix))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3417: in thunk
+    value = argument(frame)
+            ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+frame = ({}, None, '$')
+
+    def thunk(frame: Frame) -> Any:
+        context, registry, prefix = frame
+        # Root lookup: KeyError preserved for missing keys (matches old engine)
+        try:
+            obj = context[root_key]
+        except KeyError:
+            # 保留 KeyError 类型（语义：流程逻辑错误），但给出可用根清单——
+            # 历史上裸 KeyError: '$node' 让 AI 作者无从自纠
+            # （2026-09 LLM 作者模拟 P1-2）。
+>           raise KeyError(
+                f"{root_key!r} not found in expression context. "
+                f"Available roots (with {parser.prefix!r} prefix): "
+                "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+            ) from None
+E           KeyError: "'$HOME' not found in expression context. Available roots (with '$' prefix): INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+
+plaita/core/expression_parser.py:3257: KeyError
+_____________________ test_mixed_literal_and_dynamic_args ______________________
+
+    def test_mixed_literal_and_dynamic_args():
+        """同一调用里字面量与动态表达式并存：只给字面量加引号。"""
+        out = _output(_flow_src('return F.concat("$5", INPUT.x, " tail")'))
+>       assert out == '$F.concat("$5", $INPUT.x, " tail")', out
+E       AssertionError: $F.concat($5, $INPUT.x, " tail")
+E       assert '$F.concat($5...T.x, " tail")' == '$F.concat("$...T.x, " tail")'
+E         
+E         - $F.concat("$5", $INPUT.x, " tail")
+E         ?           -  -
+E         + $F.concat($5, $INPUT.x, " tail")
+
+tests/unit/test_issue231_dollar_literals.py:61: AssertionError
+____________ test_multiline_literal_starting_with_dollar_preserved _____________
+
+    def test_multiline_literal_starting_with_dollar_preserved():
+        out = _output(_flow_src('return F.concat("$line1\\nline2", " tail")'))
+>       assert "\\n" in out, out
+E       AssertionError: $F.concat($line1
+E         line2, " tail")
+E       assert '\\n' in '$F.concat($line1\nline2, " tail")'
+
+tests/unit/test_issue231_dollar_literals.py:80: AssertionError
+______________________ test_pure_dollar_literal_preserved ______________________
+
+    def test_pure_dollar_literal_preserved():
+        out = _output(_flow_src('return "$5"'))
+>       assert isinstance(out, str) and out.startswith("$F.concat("), out
+E       AssertionError: $5
+E       assert (True and False)
+E        +  where True = isinstance('$5', str)
+E        +  and   False = <built-in method startswith of str object at 0x10648aaf0>('$F.concat(')
+E        +    where <built-in method startswith of str object at 0x10648aaf0> = '$5'.startswith
+
+tests/unit/test_issue231_dollar_literals.py:88: AssertionError
+___________ test_nested_dict_dollar_literals_preserved_dynamic_kept ____________
+
+    def test_nested_dict_dollar_literals_preserved_dynamic_kept():
+        src = _flow_src('return {"lit": "$5", "root": "$INPUT", "dyn": INPUT.x}')
+        out = _output(src)
+>       result = evaluate(out, {"$INPUT": {"x": "ABC"}, "$INPUT.x": "WRONG"})
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:95: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/io.py:254: in evaluate
+    return ExpressionParser.for_prefix(prefix).evaluate(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3582: in evaluate
+    return self._eval(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3593: in _eval
+    return self._eval_non_string(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3603: in _eval_non_string
+    return {key: self._eval(val, context, registry) for key, val in value.items()}
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3596: in _eval
+    return self._eval_prefix(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3623: in _eval_prefix
+    return thunk((context, registry, self.prefix))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+frame = ({'$INPUT': {'x': 'ABC'}, '$INPUT.x': 'WRONG'}, None, '$')
+
+    def thunk(frame: Frame) -> Any:
+        context, registry, prefix = frame
+        # Root lookup: KeyError preserved for missing keys (matches old engine)
+        try:
+            obj = context[root_key]
+        except KeyError:
+            # 保留 KeyError 类型（语义：流程逻辑错误），但给出可用根清单——
+            # 历史上裸 KeyError: '$node' 让 AI 作者无从自纠
+            # （2026-09 LLM 作者模拟 P1-2）。
+>           raise KeyError(
+                f"{root_key!r} not found in expression context. "
+                f"Available roots (with {parser.prefix!r} prefix): "
+                "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+            ) from None
+E           KeyError: "'$5' not found in expression context. Available roots (with '$' prefix): INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+
+plaita/core/expression_parser.py:3257: KeyError
+___________ test_nested_list_dollar_literals_preserved_dynamic_kept ____________
+
+    def test_nested_list_dollar_literals_preserved_dynamic_kept():
+        out = _output(_flow_src('return ["$5", INPUT.x]'))
+>       assert evaluate(out, {"$INPUT": {"x": "ABC"}}) == ["$5", "ABC"]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:101: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/io.py:254: in evaluate
+    return ExpressionParser.for_prefix(prefix).evaluate(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3582: in evaluate
+    return self._eval(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3593: in _eval
+    return self._eval_non_string(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3601: in _eval_non_string
+    return [self._eval(item, context, registry) for item in value]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3596: in _eval
+    return self._eval_prefix(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3623: in _eval_prefix
+    return thunk((context, registry, self.prefix))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+frame = ({'$INPUT': {'x': 'ABC'}}, None, '$')
+
+    def thunk(frame: Frame) -> Any:
+        context, registry, prefix = frame
+        # Root lookup: KeyError preserved for missing keys (matches old engine)
+        try:
+            obj = context[root_key]
+        except KeyError:
+            # 保留 KeyError 类型（语义：流程逻辑错误），但给出可用根清单——
+            # 历史上裸 KeyError: '$node' 让 AI 作者无从自纠
+            # （2026-09 LLM 作者模拟 P1-2）。
+>           raise KeyError(
+                f"{root_key!r} not found in expression context. "
+                f"Available roots (with {parser.prefix!r} prefix): "
+                "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+            ) from None
+E           KeyError: "'$5' not found in expression context. Available roots (with '$' prefix): INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+
+plaita/core/expression_parser.py:3257: KeyError
+___________ test_literal_dict_key_starting_with_dollar_is_untouched ____________
+
+    def test_literal_dict_key_starting_with_dollar_is_untouched():
+        """dict **键**是数据，运行期不求值：不得被包成表达式。"""
+        out = _output(_flow_src('return {"$key": "$5"}'))
+>       assert evaluate(out, {}) == {"$key": "$5"}
+               ^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:107: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/io.py:254: in evaluate
+    return ExpressionParser.for_prefix(prefix).evaluate(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3582: in evaluate
+    return self._eval(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3593: in _eval
+    return self._eval_non_string(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3603: in _eval_non_string
+    return {key: self._eval(val, context, registry) for key, val in value.items()}
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3596: in _eval
+    return self._eval_prefix(value, context, registry)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/expression_parser.py:3623: in _eval_prefix
+    return thunk((context, registry, self.prefix))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+frame = ({}, None, '$')
+
+    def thunk(frame: Frame) -> Any:
+        context, registry, prefix = frame
+        # Root lookup: KeyError preserved for missing keys (matches old engine)
+        try:
+            obj = context[root_key]
+        except KeyError:
+            # 保留 KeyError 类型（语义：流程逻辑错误），但给出可用根清单——
+            # 历史上裸 KeyError: '$node' 让 AI 作者无从自纠
+            # （2026-09 LLM 作者模拟 P1-2）。
+>           raise KeyError(
+                f"{root_key!r} not found in expression context. "
+                f"Available roots (with {parser.prefix!r} prefix): "
+                "INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+            ) from None
+E           KeyError: "'$5' not found in expression context. Available roots (with '$' prefix): INPUT, NODE, GLOBAL, PARENT, ENV, FLOW_ID, FLOW(alias of FLOW_ID)"
+
+plaita/core/expression_parser.py:3257: KeyError
+_ test_emit_roundtrip_preserves_dollar_literal_semantics[return F.concat("$5", " USD")] _
+
+body = 'return F.concat("$5", " USD")'
+
+    @pytest.mark.parametrize("body", [
+        'return F.concat("$5", " USD")',
+        'return F.concat("$INPUT", INPUT.x)',
+        'return "$5"',
+        'return {"lit": "$5", "dyn": INPUT.x}',
+        'return ["$5", INPUT.x]',
+    ])
+    def test_emit_roundtrip_preserves_dollar_literal_semantics(body):
+        """IR → @flow → IR：字面量 $ 字符串的语义必须往返保真（#231 对抗复核）。"""
+        ir = compile_source(_flow_src(body))
+        before = ir["nodes"][-1]["output"]
+>       emitted = emit_source(ir)
+                  ^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_emit.py:879: in emit_source
+    body = emitter.emit_chain(start.get("next"), set())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:362: in emit_chain
+    lines.append(self._emit_return(node))
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:419: in _emit_return
+    return f"return {_invert_value(output, self.ns)}"
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:201: in _invert_value
+    return _invert_expr(v, ns)
+           ^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:190: in _invert_expr
+    rendered = ", ".join(_invert_f_arg(a, ns) for a in args)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:190: in <genexpr>
+    rendered = ", ".join(_invert_f_arg(a, ns) for a in args)
+                         ^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:167: in _invert_f_arg
+    return _invert_expr(arg, ns)
+           ^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = '$5'
+ns = [('$NODE.', ''), ('$INPUT', 'INPUT'), ('$GLOBAL', 'GLOBAL'), ('$PARENT', 'PARENT'), ('$ENV', 'ENV')]
+
+    def _invert_expr(s: str, ns: List[Tuple[str, str]] = _BASE_NS) -> str:
+        """把编译后的 ``$``-表达式串逆映射为 Python 表达式源码。"""
+        s = s.strip()
+        if s.startswith("$F."):
+            close = s.rfind(")")
+            if close < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            head = s[3:close]  # 如 'concat($INPUT.x, "a")'
+            lparen = head.find("(")
+            if lparen < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            fn = head[:lparen]
+            args = _split_args(head[lparen + 1 :])
+            rendered = ", ".join(_invert_f_arg(a, ns) for a in args)
+            return f"F.{fn}({rendered})"
+        for prefix, replacement in ns:
+            if s.startswith(prefix):
+                return replacement + s[len(prefix) :]
+>       raise EmitError(f"无法逆映射表达式 {s!r}")
+E       plaita.dsl.codeflow._emit.EmitError: 无法逆映射表达式 '$5'
+
+plaita/dsl/codeflow/_emit.py:195: EmitError
+_____ test_emit_roundtrip_preserves_dollar_literal_semantics[return "$5"] ______
+
+body = 'return "$5"'
+
+    @pytest.mark.parametrize("body", [
+        'return F.concat("$5", " USD")',
+        'return F.concat("$INPUT", INPUT.x)',
+        'return "$5"',
+        'return {"lit": "$5", "dyn": INPUT.x}',
+        'return ["$5", INPUT.x]',
+    ])
+    def test_emit_roundtrip_preserves_dollar_literal_semantics(body):
+        """IR → @flow → IR：字面量 $ 字符串的语义必须往返保真（#231 对抗复核）。"""
+        ir = compile_source(_flow_src(body))
+        before = ir["nodes"][-1]["output"]
+>       emitted = emit_source(ir)
+                  ^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_emit.py:879: in emit_source
+    body = emitter.emit_chain(start.get("next"), set())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:362: in emit_chain
+    lines.append(self._emit_return(node))
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:419: in _emit_return
+    return f"return {_invert_value(output, self.ns)}"
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:201: in _invert_value
+    return _invert_expr(v, ns)
+           ^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = '$5'
+ns = [('$NODE.', ''), ('$INPUT', 'INPUT'), ('$GLOBAL', 'GLOBAL'), ('$PARENT', 'PARENT'), ('$ENV', 'ENV')]
+
+    def _invert_expr(s: str, ns: List[Tuple[str, str]] = _BASE_NS) -> str:
+        """把编译后的 ``$``-表达式串逆映射为 Python 表达式源码。"""
+        s = s.strip()
+        if s.startswith("$F."):
+            close = s.rfind(")")
+            if close < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            head = s[3:close]  # 如 'concat($INPUT.x, "a")'
+            lparen = head.find("(")
+            if lparen < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            fn = head[:lparen]
+            args = _split_args(head[lparen + 1 :])
+            rendered = ", ".join(_invert_f_arg(a, ns) for a in args)
+            return f"F.{fn}({rendered})"
+        for prefix, replacement in ns:
+            if s.startswith(prefix):
+                return replacement + s[len(prefix) :]
+>       raise EmitError(f"无法逆映射表达式 {s!r}")
+E       plaita.dsl.codeflow._emit.EmitError: 无法逆映射表达式 '$5'
+
+plaita/dsl/codeflow/_emit.py:195: EmitError
+_ test_emit_roundtrip_preserves_dollar_literal_semantics[return {"lit": "$5", "dyn": INPUT.x}] _
+
+body = 'return {"lit": "$5", "dyn": INPUT.x}'
+
+    @pytest.mark.parametrize("body", [
+        'return F.concat("$5", " USD")',
+        'return F.concat("$INPUT", INPUT.x)',
+        'return "$5"',
+        'return {"lit": "$5", "dyn": INPUT.x}',
+        'return ["$5", INPUT.x]',
+    ])
+    def test_emit_roundtrip_preserves_dollar_literal_semantics(body):
+        """IR → @flow → IR：字面量 $ 字符串的语义必须往返保真（#231 对抗复核）。"""
+        ir = compile_source(_flow_src(body))
+        before = ir["nodes"][-1]["output"]
+>       emitted = emit_source(ir)
+                  ^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_emit.py:879: in emit_source
+    body = emitter.emit_chain(start.get("next"), set())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:362: in emit_chain
+    lines.append(self._emit_return(node))
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:419: in _emit_return
+    return f"return {_invert_value(output, self.ns)}"
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:203: in _invert_value
+    items = ", ".join(f"{_invert_value(k, ns)}: {_invert_value(x, ns)}" for k, x in v.items())
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:203: in <genexpr>
+    items = ", ".join(f"{_invert_value(k, ns)}: {_invert_value(x, ns)}" for k, x in v.items())
+                                                 ^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:201: in _invert_value
+    return _invert_expr(v, ns)
+           ^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = '$5'
+ns = [('$NODE.', ''), ('$INPUT', 'INPUT'), ('$GLOBAL', 'GLOBAL'), ('$PARENT', 'PARENT'), ('$ENV', 'ENV')]
+
+    def _invert_expr(s: str, ns: List[Tuple[str, str]] = _BASE_NS) -> str:
+        """把编译后的 ``$``-表达式串逆映射为 Python 表达式源码。"""
+        s = s.strip()
+        if s.startswith("$F."):
+            close = s.rfind(")")
+            if close < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            head = s[3:close]  # 如 'concat($INPUT.x, "a")'
+            lparen = head.find("(")
+            if lparen < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            fn = head[:lparen]
+            args = _split_args(head[lparen + 1 :])
+            rendered = ", ".join(_invert_f_arg(a, ns) for a in args)
+            return f"F.{fn}({rendered})"
+        for prefix, replacement in ns:
+            if s.startswith(prefix):
+                return replacement + s[len(prefix) :]
+>       raise EmitError(f"无法逆映射表达式 {s!r}")
+E       plaita.dsl.codeflow._emit.EmitError: 无法逆映射表达式 '$5'
+
+plaita/dsl/codeflow/_emit.py:195: EmitError
+_ test_emit_roundtrip_preserves_dollar_literal_semantics[return ["$5", INPUT.x]] _
+
+body = 'return ["$5", INPUT.x]'
+
+    @pytest.mark.parametrize("body", [
+        'return F.concat("$5", " USD")',
+        'return F.concat("$INPUT", INPUT.x)',
+        'return "$5"',
+        'return {"lit": "$5", "dyn": INPUT.x}',
+        'return ["$5", INPUT.x]',
+    ])
+    def test_emit_roundtrip_preserves_dollar_literal_semantics(body):
+        """IR → @flow → IR：字面量 $ 字符串的语义必须往返保真（#231 对抗复核）。"""
+        ir = compile_source(_flow_src(body))
+        before = ir["nodes"][-1]["output"]
+>       emitted = emit_source(ir)
+                  ^^^^^^^^^^^^^^^
+
+tests/unit/test_issue231_dollar_literals.py:123: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_emit.py:879: in emit_source
+    body = emitter.emit_chain(start.get("next"), set())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:362: in emit_chain
+    lines.append(self._emit_return(node))
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:419: in _emit_return
+    return f"return {_invert_value(output, self.ns)}"
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:206: in _invert_value
+    return "[" + ", ".join(_invert_value(x, ns) for x in v) + "]"
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:206: in <genexpr>
+    return "[" + ", ".join(_invert_value(x, ns) for x in v) + "]"
+                           ^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_emit.py:201: in _invert_value
+    return _invert_expr(v, ns)
+           ^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = '$5'
+ns = [('$NODE.', ''), ('$INPUT', 'INPUT'), ('$GLOBAL', 'GLOBAL'), ('$PARENT', 'PARENT'), ('$ENV', 'ENV')]
+
+    def _invert_expr(s: str, ns: List[Tuple[str, str]] = _BASE_NS) -> str:
+        """把编译后的 ``$``-表达式串逆映射为 Python 表达式源码。"""
+        s = s.strip()
+        if s.startswith("$F."):
+            close = s.rfind(")")
+            if close < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            head = s[3:close]  # 如 'concat($INPUT.x, "a")'
+            lparen = head.find("(")
+            if lparen < 0:
+                raise EmitError(f"无法解析 $F 调用: {s!r}")
+            fn = head[:lparen]
+            args = _split_args(head[lparen + 1 :])
+            rendered = ", ".join(_invert_f_arg(a, ns) for a in args)
+            return f"F.{fn}({rendered})"
+        for prefix, replacement in ns:
+            if s.startswith(prefix):
+                return replacement + s[len(prefix) :]
+>       raise EmitError(f"无法逆映射表达式 {s!r}")
+E       plaita.dsl.codeflow._emit.EmitError: 无法逆映射表达式 '$5'
+
+plaita/dsl/codeflow/_emit.py:195: EmitError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue231_dollar_literals.py::test_concat_dollar_literal_is_quoted_and_evaluates_literal
+FAILED tests/unit/test_issue231_dollar_literals.py::test_concat_dollar_root_name_is_literal_not_context_lookup
+FAILED tests/unit/test_issue231_dollar_literals.py::test_concat_home_literal_does_not_raise_keyerror
+FAILED tests/unit/test_issue231_dollar_literals.py::test_mixed_literal_and_dynamic_args
+FAILED tests/unit/test_issue231_dollar_literals.py::test_multiline_literal_starting_with_dollar_preserved
+FAILED tests/unit/test_issue231_dollar_literals.py::test_pure_dollar_literal_preserved
+FAILED tests/unit/test_issue231_dollar_literals.py::test_nested_dict_dollar_literals_preserved_dynamic_kept
+FAILED tests/unit/test_issue231_dollar_literals.py::test_nested_list_dollar_literals_preserved_dynamic_kept
+FAILED tests/unit/test_issue231_dollar_literals.py::test_literal_dict_key_starting_with_dollar_is_untouched
+FAILED tests/unit/test_issue231_dollar_literals.py::test_emit_roundtrip_preserves_dollar_literal_semantics[return F.concat("$5", " USD")]
+FAILED tests/unit/test_issue231_dollar_literals.py::test_emit_roundtrip_preserves_dollar_literal_semantics[return "$5"]
+FAILED tests/unit/test_issue231_dollar_literals.py::test_emit_roundtrip_preserves_dollar_literal_semantics[return {"lit": "$5", "dyn": INPUT.x}]
+FAILED tests/unit/test_issue231_dollar_literals.py::test_emit_roundtrip_preserves_dollar_literal_semantics[return ["$5", INPUT.x]]
+13 failed, 3 passed in 0.81s

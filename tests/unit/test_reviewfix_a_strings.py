@@ -70,14 +70,15 @@ def test_single_quoted_string_with_escaped_quote(parser):
 
 
 def test_ascii_exhaustive_inverse_property(parser):
-    """ASCII 逐字符穷举：_render_arg → 文法 → 原字符（$ 除外——$ 前缀串按
-    表达式透传渲染，是 _render_arg 的既有设计，非转义问题）。"""
+    """ASCII 逐字符穷举：_render_arg → 文法 → 原字符。
+
+    plaita#231 起 ``$`` 也纳入穷举：字面量一律加引号，不再有「$ 前缀透传」
+    的特例。
+    """
     dq = pp.QuotedString('"', esc_char="\\", esc_quote='"')
     failures = []
     for code in range(1, 128):
         ch = chr(code)
-        if ch == "$":
-            continue  # 表达式透传，见 test_dollar_passthrough_known_edge
         rendered = _render_arg(ch)
         try:
             got = dq.parse_string(rendered, parse_all=True)[0]
@@ -89,13 +90,18 @@ def test_ascii_exhaustive_inverse_property(parser):
     assert failures == []
 
 
-def test_dollar_passthrough_known_edge(parser):
-    """已知边界（不在本修复范围）：常量串以 $ 开头按表达式透传渲染。
-    `$F.concat("$")` 会解析失败——记录现状，防止无意识回归。"""
+def test_dollar_prefix_literal_is_quoted_not_passthrough(parser):
+    """plaita#231：``$`` 前缀字面量不再按表达式透传，``_render_arg`` 加引号。
+
+    ``$F.concat("$")`` / ``"$$INPUT"`` 在修复前透传成非法表达式；现在按
+    字面量渲染并可运行。
+    """
     from plaita.dsl.codeflow._expr import _render_arg as ra
 
-    assert ra("$") == "$"  # 透传，不加引号
-    assert ra("$$INPUT") == "$$INPUT"
+    assert ra("$") == '"$"'
+    assert ra("$$INPUT") == '"$$INPUT"'
+    assert parser.evaluate('$F.concat("$")', {}) == "$"
+    assert parser.evaluate('$F.concat("$$INPUT")', {}) == "$$INPUT"
 
 
 def test_whitespace_escapes_still_converted(parser):
