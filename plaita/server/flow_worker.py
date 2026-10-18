@@ -3096,6 +3096,22 @@ class FlowWorker:
                 early_result["rejected_after_lease"] = True
                 return early_result
 
+            # plaita#247：#241 的复核只替换了 state，version/flow/current_flow_hash
+            # 仍是 acquire 前快照算出的值。窗口内 flow_version 变更（同 flow_id 新
+            # 版本 / 另一 start 载体回写）时，继续用旧 flow 执行并把结果写回新
+            # version 的状态行 ⇒ 执行定义与状态身份不一致。复核后的 state 才是
+            # 权威：版本变了就用新版本重算定义与指纹；hash 冲突仍走下方既有
+            # mismatch 终态路径（绝不带着旧定义/旧指纹续跑）。
+            if state.flow_version != version:
+                logger.warning(
+                    "执行 %s 在 load→acquire 窗口内 flow_version 变更（%r → %r），"
+                    "按租约内复核的新版本重算 flow 定义与指纹（plaita#247）",
+                    execution_id, version, state.flow_version,
+                )
+                version = state.flow_version
+                flow = self.get_flow_definition(flow_id, version)
+                current_flow_hash = self.get_flow_definition_hash(flow_id, version)
+
             state_status = getattr(state, "status", "") or ""
             retry_wakeup = state_status == "error" and \
                 ResumeType.coerce(resume_type) is ResumeType.RETRY

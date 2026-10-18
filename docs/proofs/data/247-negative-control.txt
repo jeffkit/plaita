@@ -1,0 +1,39 @@
+=== 负控：删除租约内复核后的 version/flow/hash 重算 ===
+变异（plaita/server/flow_worker.py，resume_flow 复核后）：
+    删除：
+    if state.flow_version != version:
+        version = state.flow_version
+        flow = self.get_flow_definition(flow_id, version)
+        current_flow_hash = self.get_flow_definition_hash(flow_id, version)
+
+命令：
+  python -m pytest tests/unit/test_issue247_resume_version_refresh.py -q
+
+测试输出（节选）：
+    result = worker.resume_flow("f1", EXEC, "continue")
+>   assert result["result"] == "V2", (
+        f"result {result.get('result')}, expected V2 (or explicit reject)"
+    )
+E   AssertionError: result V1, expected V2 (or explicit reject)
+E   assert 'V1' == 'V2'
+
+    def test_version_switch_with_new_hash_passes():
+        ...
+E   plaita.server.flow_worker.FlowHashMismatchError: flow 定义自启动后已变更，
+    hash 不匹配，执行无法安全续跑 (execution_id=exec-247, flow_id=f1,
+    stored_hash=1200382fca1a..., current_hash=ad91da8da537..., ...)
+    （误报：V2 状态带 V2 hash，却用 V1 的 current_flow_hash 判定）
+
+    def test_stale_hash_on_new_version_is_rejected():
+        ...
+>       with pytest.raises(FlowHashMismatchError):
+E       Failed: DID NOT RAISE FlowHashMismatchError
+    （旧指纹误放行：stored H1 == current H1，继续执行 V1）
+
+FAILED ...::test_version_switch_executes_new_definition
+FAILED ...::test_version_switch_with_new_hash_passes
+FAILED ...::test_stale_hash_on_new_version_is_rejected
+3 failed, 1 passed in 0.63s
+
+=== 还原修复后 ===
+4 passed in 0.63s
