@@ -282,3 +282,88 @@ def test_headless_bootstrap_still_works(tmp_path, monkeypatch):
     # 已有用户 → 向导关闭
     client = TestClient(app)
     assert client.get("/api/auth/setup-status").json()["needs_setup"] is False
+
+
+# ---------------------------------------------------------------- plaita#214
+# viewer **写**保护的回归（非 admin 前缀路由）
+#
+# 缺口：现有 `test_viewer_blocked_from_mutations` 只 POST `/api/credentials`，
+# 而该前缀在 `_ADMIN_PREFIXES` 里 ⇒ 先命中 **admin 前缀闸**（403 "该操作需要
+# admin 角色"）⇒ **从未走到 viewer 写分支**（auth.py 的 `if role == "viewer": raise ...`）。
+# 负控实证：把那行 `raise` 改成 `return`，现有 19 条仍全绿、直接探针
+# `_authorize(viewer, POST /api/flows/x/versions/1)` 不再抛 ⇒ **鉴权绕过级回归隐形**。
+#
+# 本组用例的关键不是"返回 403"（任何闸都能给 403），而是**断言我们打中的是哪个闸**：
+# 必须拿到 viewer 分支的文案「该操作需要 editor 及以上角色」，
+# **不能**是 admin 前缀的「该操作需要 admin 角色」。
+
+#: 从产品源码取 `_ADMIN_PREFIXES`（不硬编码：前缀表变了这里跟着变，
+#: 而"本用例的路径必须落在前缀表之外"这个前置条件永远成立）
+def _admin_prefixes():
+    import auth as _auth_mod
+    return tuple(_auth_mod._ADMIN_PREFIXES)
+
+
+_ADMIN_PREFIXES_OF_TEST = _admin_prefixes()
+
+_VIEWER_WRITE_DETAIL = "该操作需要 editor 及以上角色"
+_ADMIN_PREFIX_DETAIL = "该操作需要 admin 角色"
+
+
+def _mk_request(method: str, path: str):
+    """最小 Starlette Request —— 只为 `_authorize` 读 method/url.path。"""
+    from starlette.requests import Request
+
+    return Request({"type": "http", "method": method, "path": path,
+                    "headers": [], "query_string": b""})
+
+
+@pytest.mark.parametrize("path", [
+    "/api/flows/x/versions/1",      # 非 admin 前缀的写路由（issue 探针路径）
+    "/api/flows",                   # 集合写
+    "/api/schedules/x",
+    "/api/services/x",
+])
+def test_viewer_write_blocked_by_viewer_branch_not_admin_prefix(path):
+    """viewer 的写操作必须被 **viewer 分支** 拒绝（而不是被 admin 前缀闸兜住）。
+
+    两闸都返回 403 ⇒ 只断言状态码无法区分。这里断言**文案**，从而钉死"打中了哪一支"。
+    """
+    from auth import _authorize
+    from fastapi import HTTPException
+
+    req = _mk_request("POST", path)
+    assert not any(path.startswith(p) for p in _ADMIN_PREFIXES_OF_TEST), (
+        f"{path} 落在 admin 前缀内 ⇒ 本用例测不到 viewer 分支")
+
+    with pytest.raises(HTTPException) as exc:
+        _authorize(req, "viewer")
+    assert exc.value.status_code == 403
+    assert exc.value.detail == _VIEWER_WRITE_DETAIL, (
+        f"打中错闸：期望 viewer 分支（{_VIEWER_WRITE_DETAIL}），"
+        f"实得 {exc.value.detail!r}。若为 admin 前缀文案，说明该路径落在 _ADMIN_PREFIXES 内，"
+        "本用例退化为重复覆盖")
+
+
+def test_viewer_read_still_allowed():
+    """同一路径 GET 仍放行（viewer+ 读）——确认上面的拦截来自**写方法**，不是路径。"""
+    from auth import _authorize
+
+    _authorize(_mk_request("GET", "/api/flows/x/versions/1"), "viewer")
+
+
+def test_editor_write_allowed_on_non_admin_prefix():
+    """editor 在非 admin 前缀上可写 —— 证明 viewer 分支只拦 viewer，不误伤 editor。"""
+    from auth import _authorize
+
+    _authorize(_mk_request("POST", "/api/flows/x/versions/1"), "editor")
+
+
+def test_admin_prefix_still_requires_admin():
+    """对照：admin 前缀仍由前缀闸拒绝 editor（两闸并存，未互相遮蔽）。"""
+    from auth import _authorize
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _authorize(_mk_request("POST", "/api/credentials"), "editor")
+    assert exc.value.detail == _ADMIN_PREFIX_DETAIL

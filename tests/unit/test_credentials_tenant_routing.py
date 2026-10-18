@@ -203,3 +203,50 @@ def test_tenant_namespace_unchanged_for_engine_keys():
     # 防回归哨兵：本修复只动凭据文件路径，Redis 键 namespace 映射不受影响
     assert tenant_namespace("acme") == "plaita:acme"
     assert tenant_namespace("default") == "plaita"
+
+
+class TestTenantRootIsNotDefault:
+    """plaita#215：**名为 ``root`` 的租户必须走旁文件，不得归入 default**。
+
+    缺口来源：现有用例覆盖 ``default`` / 空 / ``acme`` / ``t-1234``，**但没有 ``root``**。
+    ``root`` 能通过 console 的 slug 正则（``^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$``），
+    是**合法租户名**；而它的名字又"很像保留字"，极易在后续改动中被顺手写进
+    default 分支（负控实证：把 ``credentials.py`` 改成
+    ``if tid in (DEFAULT_TENANT_ID, "root")`` 后，**原有 12 条全绿**，
+    ``root`` 悄悄读到平台默认凭据文件 ⇒ 跨租户凭据串用）。
+
+    本类补的就是这个回归面。**不只测路径，也测 ``get_credential`` 的端到端取值**——
+    只测路径会漏掉"路径对了但读取仍走 base"的实现方式。
+    """
+
+    @pytest.mark.parametrize("tid", ["root", "admin", "system", "defaults"])
+    def test_reserved_looking_names_use_side_files(self, tid):
+        base = Path("/data/creds.json")
+        # 非 default 一律旁文件；保留样名字不享受 default 待遇
+        assert tenant_credentials_file(tid, base) == Path(f"/data/creds.{tid}.json")
+
+    def test_tenant_root_reads_own_credential_end_to_end(self, cred_env):
+        """``root`` 读到的是**旁文件里的值**，不是默认凭据文件里的同名凭据。"""
+        _write(cred_env, "shared", {"url": "https://default.example"})
+        side = tenant_credentials_file("root", cred_env)
+        assert side == cred_env.with_name(f"{cred_env.stem}.root{cred_env.suffix}")
+        _write(side, "shared", {"url": "https://root.example"})
+
+        token = set_current_tenant("root")
+        try:
+            assert credentials_file() == side
+            assert get_credential("shared")["url"] == "https://root.example"
+        finally:
+            reset_current_tenant(token)
+
+    def test_tenant_root_cannot_read_default_only_credential(self, cred_env):
+        """默认凭据文件里独占的条目对 ``root`` **不可见**（跨租户隔离）。"""
+        _write(cred_env, "default-only", {"url": "https://default.example"})
+
+        token = set_current_tenant("root")
+        try:
+            with pytest.raises(CredentialError) as exc:
+                get_credential("default-only")
+            assert "（无）" in str(exc.value)
+        finally:
+            reset_current_tenant(token)
