@@ -3149,6 +3149,23 @@ class FlowWorker:
             # StatePersistError 走重投，唤醒未生效不清预算）。
             # 不传 node_id ⇒ 清**该执行下所有节点**的计数键（plaita#123 起键按
             # 节点隔离，唤醒是执行级意图，必须整体重来）。
+            if retry_wakeup and not state.context:
+                # plaita#240：retry 的能力前提是盘上有 checkpoint。此前先翻
+                # running 再落盘、等 run_distributed 才由策略层抛
+                # ResumeGuardError；协议错误分支虽「保持原状」，但原状已经被
+                # 改成 running（error/end_time 也被清空）——非法 error→running
+                # 迁移 + 失败证据丢失。必须在**任何状态变更之前**拒绝。
+                # 保持 error 原状（不落盘）、不创建 FlowExecution、不触发节点。
+                message = (
+                    "resume_type='retry' requires a saved checkpoint, but the "
+                    f"execution has none; execution {execution_id} remains error "
+                    "(status=error, error/end_time preserved)"
+                )
+                logger.warning(
+                    "执行 %s 收到 retry 但 checkpoint 为空，拒绝唤醒（保持 error 原状）",
+                    execution_id,
+                )
+                raise ResumeProtocolError(message, execution_id=execution_id)
             if retry_wakeup:
                 state.status = "running"
                 state.error = None
@@ -3228,6 +3245,12 @@ class FlowWorker:
             # error（可观测终态），原样上抛给 run() 按 ValueError poison
             # ack——重投只会命中 already_terminal 短路，终态化已完成，无意义。
             # 不落进下面的通用 except 二次终态化/包 RuntimeError。
+            raise
+        except ResumeProtocolError:
+            # plaita#240：预检在**状态变更前**抛出的协议错误，必须原样上抛给
+            # run()（ack、不终态化）——不能被下面通用 except 当作执行失败
+            # 二次终态化 error。策略层守卫路径仍由 _chain_has_resume_guard_error
+            # 在通用 except 内包成同类异常。
             raise
         except Exception as e:
             logger.error("恢复流程执行出错: %s", _scrub_exception_text(e))

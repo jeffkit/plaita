@@ -1,0 +1,372 @@
+FFFFFF...                                                                [100%]
+=================================== FAILURES ===================================
+_______ test_retry_with_empty_checkpoint_keeps_status_error[empty-dict] ________
+
+empty = {}
+
+    @pytest.mark.parametrize("empty", [{}, None], ids=["empty-dict", "none"])
+    def test_retry_with_empty_checkpoint_keeps_status_error(empty):
+        worker, storage = _setup(empty)
+        # wraps=真实类：预检命中时不构造；变异（预检失效）时真实引擎随即抛
+        # ResumeGuardError，让「status 变 running」成为可断言的精确红。
+        with patch("plaita.server.flow_worker.FlowExecution", wraps=FlowExecution) as FE:
+            with pytest.raises(ResumeProtocolError) as ei:
+                worker.resume_flow("f1", "exec-1", "retry")
+        # 先断言状态（变异时这里给出 `assert 'running' == 'error'` 的精确红）；
+        # 再断言预检在创建执行体之前命中（无节点执行）。
+>       assert "status=error" in str(ei.value)
+E       assert 'status=error' in "resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue')."
+E        +  where "resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue')." = str(ResumeProtocolError("resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue')."))
+E        +    where ResumeProtocolError("resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').") = <ExceptionInfo ResumeProtocolError("resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, ...d; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').") tblen=2>.value
+
+tests/unit/test_issue240_retry_empty_checkpoint.py:118: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.core.executor:_error_normalization.py:69 flow error: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+ERROR    plaita:flow_worker.py:3256 恢复流程执行出错: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 556, in run_distributed
+    return _run_async_sync(coro)
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 75, in run_async_from_sync
+    return asyncio.run(coro)
+           ~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 96, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/strategies.py", line 254, in execute
+    raise ResumeGuardError(
+    ...<3 lines>...
+    )
+plaita.core.errors.ResumeGuardError: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 3210, in resume_flow
+    result = execution.run_distributed(
+        flow,
+    ...<4 lines>...
+        execution_id=execution_id,
+    )
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 558, in run_distributed
+    _raise_distributed_error(e, flow, self.callback_manager)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/_error_normalization.py", line 70, in raise_distributed_error
+    raise FlowErrorException(str(e)) from e
+plaita.core.errors.FlowErrorException: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+WARNING  plaita:flow_worker.py:3289 执行 exec-1 (status=running) 收到与挂起状态不匹配的 resume 请求，协议错误不终态化，执行保持原状: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+__________ test_retry_with_empty_checkpoint_keeps_status_error[none] ___________
+
+empty = None
+
+    @pytest.mark.parametrize("empty", [{}, None], ids=["empty-dict", "none"])
+    def test_retry_with_empty_checkpoint_keeps_status_error(empty):
+        worker, storage = _setup(empty)
+        # wraps=真实类：预检命中时不构造；变异（预检失效）时真实引擎随即抛
+        # ResumeGuardError，让「status 变 running」成为可断言的精确红。
+        with patch("plaita.server.flow_worker.FlowExecution", wraps=FlowExecution) as FE:
+            with pytest.raises(ResumeProtocolError) as ei:
+                worker.resume_flow("f1", "exec-1", "retry")
+        # 先断言状态（变异时这里给出 `assert 'running' == 'error'` 的精确红）；
+        # 再断言预检在创建执行体之前命中（无节点执行）。
+>       assert "status=error" in str(ei.value)
+E       assert 'status=error' in "resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue')."
+E        +  where "resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue')." = str(ResumeProtocolError("resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue')."))
+E        +    where ResumeProtocolError("resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').") = <ExceptionInfo ResumeProtocolError("resume 协议错误（执行保持原状 status=running）: resume_type='retry' requires a saved_context, ...d; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').") tblen=2>.value
+
+tests/unit/test_issue240_retry_empty_checkpoint.py:118: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.core.executor:_error_normalization.py:69 flow error: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+ERROR    plaita:flow_worker.py:3256 恢复流程执行出错: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 556, in run_distributed
+    return _run_async_sync(coro)
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 75, in run_async_from_sync
+    return asyncio.run(coro)
+           ~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 96, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/strategies.py", line 254, in execute
+    raise ResumeGuardError(
+    ...<3 lines>...
+    )
+plaita.core.errors.ResumeGuardError: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 3210, in resume_flow
+    result = execution.run_distributed(
+        flow,
+    ...<4 lines>...
+        execution_id=execution_id,
+    )
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 558, in run_distributed
+    _raise_distributed_error(e, flow, self.callback_manager)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/_error_normalization.py", line 70, in raise_distributed_error
+    raise FlowErrorException(str(e)) from e
+plaita.core.errors.FlowErrorException: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+WARNING  plaita:flow_worker.py:3289 执行 exec-1 (status=running) 收到与挂起状态不匹配的 resume 请求，协议错误不终态化，执行保持原状: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+_____ test_retry_with_empty_checkpoint_preserves_error_payload[empty-dict] _____
+
+empty = {}
+
+    @pytest.mark.parametrize("empty", [{}, None], ids=["empty-dict", "none"])
+    def test_retry_with_empty_checkpoint_preserves_error_payload(empty):
+        worker, storage = _setup(empty)
+        with pytest.raises(ResumeProtocolError):
+            worker.resume_flow("f1", "exec-1", "retry")
+>       assert storage.load_execution_state("exec-1").error == _ORIGINAL_ERROR
+E       AssertionError: assert None == {'code': -500, 'error_type': 'node_failure', 'message': 'boom', 'node_id': 'a'}
+E        +  where None = ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None).error
+E        +    where ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None) = load_execution_state('exec-1')
+E        +      where load_execution_state = <plaita.storage.memory.MemoryExecutionStorage object at 0x11565e490>.load_execution_state
+
+tests/unit/test_issue240_retry_empty_checkpoint.py:130: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.core.executor:_error_normalization.py:69 flow error: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+ERROR    plaita:flow_worker.py:3256 恢复流程执行出错: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 556, in run_distributed
+    return _run_async_sync(coro)
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 75, in run_async_from_sync
+    return asyncio.run(coro)
+           ~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 96, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/strategies.py", line 254, in execute
+    raise ResumeGuardError(
+    ...<3 lines>...
+    )
+plaita.core.errors.ResumeGuardError: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 3210, in resume_flow
+    result = execution.run_distributed(
+        flow,
+    ...<4 lines>...
+        execution_id=execution_id,
+    )
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 558, in run_distributed
+    _raise_distributed_error(e, flow, self.callback_manager)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/_error_normalization.py", line 70, in raise_distributed_error
+    raise FlowErrorException(str(e)) from e
+plaita.core.errors.FlowErrorException: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+WARNING  plaita:flow_worker.py:3289 执行 exec-1 (status=running) 收到与挂起状态不匹配的 resume 请求，协议错误不终态化，执行保持原状: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+________ test_retry_with_empty_checkpoint_preserves_error_payload[none] ________
+
+empty = None
+
+    @pytest.mark.parametrize("empty", [{}, None], ids=["empty-dict", "none"])
+    def test_retry_with_empty_checkpoint_preserves_error_payload(empty):
+        worker, storage = _setup(empty)
+        with pytest.raises(ResumeProtocolError):
+            worker.resume_flow("f1", "exec-1", "retry")
+>       assert storage.load_execution_state("exec-1").error == _ORIGINAL_ERROR
+E       AssertionError: assert None == {'code': -500, 'error_type': 'node_failure', 'message': 'boom', 'node_id': 'a'}
+E        +  where None = ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None).error
+E        +    where ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None) = load_execution_state('exec-1')
+E        +      where load_execution_state = <tests.unit.test_issue240_retry_empty_checkpoint._NoneContextStorage object at 0x11565e990>.load_execution_state
+
+tests/unit/test_issue240_retry_empty_checkpoint.py:130: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.core.executor:_error_normalization.py:69 flow error: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+ERROR    plaita:flow_worker.py:3256 恢复流程执行出错: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 556, in run_distributed
+    return _run_async_sync(coro)
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 75, in run_async_from_sync
+    return asyncio.run(coro)
+           ~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 96, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/strategies.py", line 254, in execute
+    raise ResumeGuardError(
+    ...<3 lines>...
+    )
+plaita.core.errors.ResumeGuardError: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 3210, in resume_flow
+    result = execution.run_distributed(
+        flow,
+    ...<4 lines>...
+        execution_id=execution_id,
+    )
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 558, in run_distributed
+    _raise_distributed_error(e, flow, self.callback_manager)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/_error_normalization.py", line 70, in raise_distributed_error
+    raise FlowErrorException(str(e)) from e
+plaita.core.errors.FlowErrorException: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+WARNING  plaita:flow_worker.py:3289 执行 exec-1 (status=running) 收到与挂起状态不匹配的 resume 请求，协议错误不终态化，执行保持原状: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+_______ test_retry_with_empty_checkpoint_preserves_end_time[empty-dict] ________
+
+empty = {}
+
+    @pytest.mark.parametrize("empty", [{}, None], ids=["empty-dict", "none"])
+    def test_retry_with_empty_checkpoint_preserves_end_time(empty):
+        worker, storage = _setup(empty)
+        with pytest.raises(ResumeProtocolError):
+            worker.resume_flow("f1", "exec-1", "retry")
+>       assert storage.load_execution_state("exec-1").end_time == _ORIGINAL_END_TIME
+E       AssertionError: assert None == '2026-10-02T00:00:00'
+E        +  where None = ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None).end_time
+E        +    where ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None) = load_execution_state('exec-1')
+E        +      where load_execution_state = <plaita.storage.memory.MemoryExecutionStorage object at 0x115695450>.load_execution_state
+
+tests/unit/test_issue240_retry_empty_checkpoint.py:138: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.core.executor:_error_normalization.py:69 flow error: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+ERROR    plaita:flow_worker.py:3256 恢复流程执行出错: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 556, in run_distributed
+    return _run_async_sync(coro)
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 75, in run_async_from_sync
+    return asyncio.run(coro)
+           ~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 96, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/strategies.py", line 254, in execute
+    raise ResumeGuardError(
+    ...<3 lines>...
+    )
+plaita.core.errors.ResumeGuardError: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 3210, in resume_flow
+    result = execution.run_distributed(
+        flow,
+    ...<4 lines>...
+        execution_id=execution_id,
+    )
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 558, in run_distributed
+    _raise_distributed_error(e, flow, self.callback_manager)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/_error_normalization.py", line 70, in raise_distributed_error
+    raise FlowErrorException(str(e)) from e
+plaita.core.errors.FlowErrorException: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+WARNING  plaita:flow_worker.py:3289 执行 exec-1 (status=running) 收到与挂起状态不匹配的 resume 请求，协议错误不终态化，执行保持原状: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+__________ test_retry_with_empty_checkpoint_preserves_end_time[none] ___________
+
+empty = None
+
+    @pytest.mark.parametrize("empty", [{}, None], ids=["empty-dict", "none"])
+    def test_retry_with_empty_checkpoint_preserves_end_time(empty):
+        worker, storage = _setup(empty)
+        with pytest.raises(ResumeProtocolError):
+            worker.resume_flow("f1", "exec-1", "retry")
+>       assert storage.load_execution_state("exec-1").end_time == _ORIGINAL_END_TIME
+E       AssertionError: assert None == '2026-10-02T00:00:00'
+E        +  where None = ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None).end_time
+E        +    where ExecutionState(execution_id='exec-1', flow_id='f1', flow_name=None, flow_version='1', flow_hash=None, flow_hash_algo=N...ime=None, end_time=None, error=None, invoker=None, node_timings=None, timeline=None, usage=None, dispatch_pending=None) = load_execution_state('exec-1')
+E        +      where load_execution_state = <tests.unit.test_issue240_retry_empty_checkpoint._NoneContextStorage object at 0x115695950>.load_execution_state
+
+tests/unit/test_issue240_retry_empty_checkpoint.py:138: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.core.executor:_error_normalization.py:69 flow error: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+ERROR    plaita:flow_worker.py:3256 恢复流程执行出错: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 556, in run_distributed
+    return _run_async_sync(coro)
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 75, in run_async_from_sync
+    return asyncio.run(coro)
+           ~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/async_utils.py", line 96, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/strategies.py", line 254, in execute
+    raise ResumeGuardError(
+    ...<3 lines>...
+    )
+plaita.core.errors.ResumeGuardError: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 3210, in resume_flow
+    result = execution.run_distributed(
+        flow,
+    ...<4 lines>...
+        execution_id=execution_id,
+    )
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/executor.py", line 558, in run_distributed
+    _raise_distributed_error(e, flow, self.callback_manager)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kong/projects/infra4agent/plaita/plaita/core/_error_normalization.py", line 70, in raise_distributed_error
+    raise FlowErrorException(str(e)) from e
+plaita.core.errors.FlowErrorException: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+
+WARNING  plaita:flow_worker.py:3289 执行 exec-1 (status=running) 收到与挂起状态不匹配的 resume 请求，协议错误不终态化，执行保持原状: resume_type='retry' requires a saved_context, but none was provided; the execution cannot be resumed. To start a fresh run, omit resume_type (or pass resume_type='continue').
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue240_retry_empty_checkpoint.py::test_retry_with_empty_checkpoint_keeps_status_error[empty-dict]
+FAILED tests/unit/test_issue240_retry_empty_checkpoint.py::test_retry_with_empty_checkpoint_keeps_status_error[none]
+FAILED tests/unit/test_issue240_retry_empty_checkpoint.py::test_retry_with_empty_checkpoint_preserves_error_payload[empty-dict]
+FAILED tests/unit/test_issue240_retry_empty_checkpoint.py::test_retry_with_empty_checkpoint_preserves_error_payload[none]
+FAILED tests/unit/test_issue240_retry_empty_checkpoint.py::test_retry_with_empty_checkpoint_preserves_end_time[empty-dict]
+FAILED tests/unit/test_issue240_retry_empty_checkpoint.py::test_retry_with_empty_checkpoint_preserves_end_time[none]
+6 failed, 3 passed in 1.20s
