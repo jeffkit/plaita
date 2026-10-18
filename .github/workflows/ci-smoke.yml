@@ -1,0 +1,90 @@
+name: CI Smoke (熔断定检)
+
+# #182 落地熔断自动化：
+#  - 定检冒烟：每 6 小时对 main 跑快子集（~5 分钟），红灯早于用户/交付方感知
+#  - 当日 merge 自动二分：红时对窗口内 merge 逐个 checkout 跑冒烟，定位首红
+#  - 自动提单：定位到肇事 merge 即开 issue（含二分表），link 回 landing-gate 约定
+#
+# 约定：docs/landing-and-acceptance.md §1（熔断）+ 仓内 issue #182。
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'   # 每 6 小时（避开整点高峰）
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Smoke main + bisect on red
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: python:3.13
+      options: --memory 6g --memory-swap 6g
+    env:
+      PYTHONUNBUFFERED: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install git + nodejs + redis-server
+        run: apt-get update -q && apt-get install -yq git nodejs redis-server && git --version && node --version
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0          # 二分需要全历史
+      - name: Start Redis (127.0.0.1:6379)
+        run: |
+          redis-server --daemonize yes --port 6379 --save '' --appendonly no
+          redis-cli ping
+      - name: Install package + deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,lint,all]" pytest-timeout build wheel
+
+      - name: Smoke main
+        id: smoke
+        run: |
+          chmod +x scripts/smoke-bisect.sh
+          if python -m pytest tests/integration/test_layering.py tests/e2e/test_success_criteria.py \
+               tests/unit/test_expression_provenance_perf.py tests/unit/test_no_silent_swallow.py \
+               -q -p no:randomly --no-header --timeout=300 --timeout-method=thread; then
+            echo "conclusion=green" >> "$GITHUB_OUTPUT"
+          else
+            echo "conclusion=red" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bisect the day's merges (on red)
+        if: steps.smoke.outputs.conclusion == 'red'
+        id: bisect
+        run: |
+          chmod +x scripts/smoke-bisect.sh
+          ./scripts/smoke-bisect.sh "24 hours ago" \
+            python -m pytest tests/integration/test_layering.py tests/e2e/test_success_criteria.py \
+              tests/unit/test_expression_provenance_perf.py tests/unit/test_no_silent_swallow.py \
+              -q -p no:randomly --no-header --timeout=300 --timeout-method=thread \
+            | tee bisect.log
+          echo "bisect_log<<EOF" >> "$GITHUB_OUTPUT"
+          echo "bisect.log" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: File issue (on located culprit or unexplained red)
+        if: steps.smoke.outputs.conclusion == 'red'
+        run: |
+          {
+            echo "## 🔴 熔断定检冒烟红（自动提单）"
+            echo
+            echo "- 时间：$(date -u '+%Y-%m-%d %H:%MZ')"
+            echo "- main：${GITHUB_SHA}"
+            echo
+            echo '```'
+            cat bisect.log 2>/dev/null || echo '(无二分日志)'
+            echo '```'
+            echo
+            echo "按 landing-and-acceptance §1：首红优先处置。修复者接手后关闭本单并回链修复 commit。"
+          } > issue-body.md
+          gh issue create \
+            -R jeffkit/plaita \
+            -t "🔴 [auto] 熔断定检冒烟红 @ ${GITHUB_SHA:0:7}" \
+            -F issue-body.md \
+            -l "ci-smoke" || echo "(提单失败——保留日志于 run artifacts)"
