@@ -12,6 +12,7 @@ from .base import (
     StateSerializationError,
 )
 from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
+from plaita import tenant_context as _tenant_ctx
 
 try:
     import redis
@@ -112,6 +113,29 @@ def execution_state_ttl_seconds() -> int:
     if days <= 0:
         return 0
     return days * 86400
+
+
+# #239② 迁移期观测：隐式 default 租户写的站点级首告闩（进程内一次，量级看 tenant_context.write_probe_snapshot() 的 (site, source) 计数）。
+_IMPLICIT_DEFAULT_WARNED: set = set()
+
+
+def _tenant_write_observability(site: str, ident: str) -> None:
+    """#239②：写站点接线探针 + 隐式 default 租户首次 WARNING（迁移期可观测）。
+
+    显式/derived 来源不告警；default 来源每站点进程内只告警一次，
+    完整量级走探针计数。#239③ 将在本观测稳定后切 fail-closed。
+    """
+    try:
+        _tenant_ctx.record_write_probe(site)
+        if (_tenant_ctx.current_tenant_source() == "default"
+                and site not in _IMPLICIT_DEFAULT_WARNED):
+            _IMPLICIT_DEFAULT_WARNED.add(site)
+            logger.warning(
+                "#239 迁移期：隐式 default 租户写 site=%s id=%s"
+                "（后续量级看 write_probe_snapshot）", site, ident
+            )
+    except Exception as e:  # 观测自身绝不阻断写路径
+        logger.debug("#239 观测探针异常 site=%s: %s", site, e)
 
 
 class ExecutionStateLoadError(RuntimeError):
@@ -313,6 +337,7 @@ class RedisExecutionStorage(ExecutionStorage):
         同理，fenced 路径的索引成员（ZADD）也在该 Lua 内维护（fenced.py）。
         """
         key = self.get_namespace_key('execution', execution_id)
+        _tenant_write_observability("redis.save_execution_state", execution_id)
         # #80：把**序列化**移出 Redis 操作的 try。序列化失败是**永久**失败
         # （重试无用），必须与「Redis 瞬断」区分开上报，否则会被下游当成瞬态
         # 反复重投，执行永远拿不到终态。
@@ -371,6 +396,7 @@ class RedisExecutionStorage(ExecutionStorage):
     def delete_execution_state(self, execution_id: str) -> bool:
         """删除流程执行状态（同时移除列表索引成员）"""
         execution_key = self.get_namespace_key('execution', execution_id)
+        _tenant_write_observability("redis.delete_execution_state", execution_id)
         try:
             pipe = self.client.pipeline()
             pipe.delete(execution_key)
@@ -494,6 +520,7 @@ class RedisFlowStorage(FlowStorage):
         Returns:
             bool: 是否保存成功
         """
+        _tenant_write_observability("redis.save_flow", str(flow.get('flow_id', '')))
         flow_id = flow.get("flow_id") or flow.get("id")
         version = flow.get("version", "latest")
         
@@ -650,6 +677,7 @@ class RedisFlowStorage(FlowStorage):
         Returns:
             bool: 是否删除成功
         """
+        _tenant_write_observability("redis.delete_flow", flow_id)
         try:
             # 检查流程ID是否存在
             flow_list_key = self.get_namespace_key('flow_list')
