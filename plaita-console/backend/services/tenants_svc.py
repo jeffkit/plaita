@@ -3,21 +3,32 @@
 - 租户 slug 一经创建不可改；contract_secret_* 为对外 HMAC 契约凭证，
   明文仅在创建/轮换的响应中返回一次
 - 删除保护：租户内仍有流程时拒绝删除（避免误删带数据的租户）
+- 删除清理：凭据（Credential 行 + 引擎导出旁文件）随租户一并删除，
+  否则重建同名租户会继承旧密钥（#245）
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
 
 from sqlalchemy import select
 
 try:
-    from ..models.flow import DEFAULT_TENANT_ID, FlowRecord, Tenant, TenantMember
+    from ..models.flow import (
+        Credential,
+        DEFAULT_TENANT_ID,
+        FlowRecord,
+        Tenant,
+        TenantMember,
+    )
 except ImportError:
     from models.flow import (  # type: ignore
+        Credential,
         DEFAULT_TENANT_ID,
         FlowRecord,
         Tenant,
@@ -25,6 +36,8 @@ except ImportError:
     )
 
 from . import users_svc
+
+logger = logging.getLogger(__name__)
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
 
@@ -190,6 +203,7 @@ def rotate_contract_secret(store, tenant_id: str) -> Dict[str, str]:
 
 
 def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
+    purged_credentials = 0
     with store._session_local() as session:
         row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
         if row is None:
@@ -205,8 +219,28 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
             select(TenantMember).where(TenantMember.tenant_id == tenant_id)
         ).all():
             session.delete(m)
+        # #245：凭据行与租户同事务删除——只删 Tenant 行会让重建的同名租户
+        # 通过 list/get 直接继承旧密钥。
+        credentials = session.scalars(
+            select(Credential).where(Credential.tenant_id == tenant_id)
+        ).all()
+        for c in credentials:
+            session.delete(c)
+        purged_credentials = len(credentials)
         session.delete(row)
         session.commit()
+
+    # DB 行删除后 worker 仍会直接读取导出旁文件，必须一并清理；删除失败
+    # 显式抛出（不静默），避免「租户已删、密钥仍可读」的残留状态。
+    credentials_export = _remove_tenant_credentials_export(tenant_id)
+    if purged_credentials:
+        logger.info(
+            "删除租户 %s：已清理 %d 条凭据及导出文件 %s",
+            tenant_id,
+            purged_credentials,
+            credentials_export,
+        )
+
     if redis_client is not None:
         try:
             from plaita.server.tenant_status import clear_tenant_status
@@ -215,6 +249,29 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
         if clear_tenant_status is not None:
             clear_tenant_status(redis_client, tenant_id)
     return True
+
+
+def _tenant_credentials_export(tenant_id: str) -> Path:
+    """租户凭据导出路径（与 console 导出/worker 读取共用同一命名，#215）。"""
+    try:
+        from . import credentials_svc
+    except ImportError:
+        from services import credentials_svc  # type: ignore
+    return credentials_svc.credentials_file(tenant_id)
+
+
+def _remove_tenant_credentials_export(tenant_id: str) -> Path:
+    path = _tenant_credentials_export(tenant_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return path
+    except OSError:
+        logger.exception(
+            "租户 %s 已删除，但凭据导出文件清理失败: %s", tenant_id, path
+        )
+        raise
+    return path
 
 
 def find_tenant_by_contract_secret_id(store, secret_id: str) -> Dict[str, Any]:

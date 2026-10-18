@@ -45,6 +45,9 @@ def _settings(env="dev", admin_key=ADMIN_KEY):
 
 def _build_app(tmp_path, monkeypatch) -> FastAPI:
     monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", f"sqlite:///{tmp_path}/tenants.db")
+    # #245：delete_tenant 现在会清理该租户的凭据导出文件；这里把路径钉在
+    # tmp_path，避免删 default 的用例碰到 cwd 下真实凭据文件。
+    monkeypatch.setenv("PLAITA_CREDENTIALS_FILE", str(tmp_path / "creds.json"))
     monkeypatch.setattr("config.get_settings", lambda: _settings())
     monkeypatch.setattr("auth.get_settings", lambda: _settings())
     flow_store.init_engine(f"sqlite:///{tmp_path}/tenants.db")

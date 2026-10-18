@@ -1,0 +1,38 @@
+# plaita#245 negative control — pre-fix tenants_svc.delete_tenant (origin/main a7a6fdd state; local HEAD b9d0703 at run time, file byte-identical)
+# command: .venv/bin/python -m pytest plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py -q --tb=short
+
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+______________ test_delete_tenant_purges_credentials_and_sidecar _______________
+plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py:135: in test_delete_tenant_purges_credentials_and_sidecar
+    assert not sidecar.exists(), f"删除租户后凭据旁文件残留: {sidecar}"
+E   AssertionError: 删除租户后凭据旁文件残留: /private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3499/test_delete_tenant_purges_cred0/creds.acme.json
+E   assert not True
+E    +  where True = exists()
+E    +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3499/test_delete_tenant_purges_cred0/creds.acme.json').exists
+------------------------------ Captured log setup ------------------------------
+WARNING  services.flow_store:flow_store.py:1153 alembic 迁移不可用（No module named 'alembic'），回退 create_all（schema 将无版本记录）
+______________ test_delete_tenant_only_purges_its_own_credentials ______________
+plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py:183: in test_delete_tenant_only_purges_its_own_credentials
+    assert not _sidecar(console.creds, "acme").exists()
+E   AssertionError: assert not True
+E    +  where True = exists()
+E    +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3499/test_delete_tenant_only_purges0/creds.acme.json').exists
+E    +      where PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3499/test_delete_tenant_only_purges0/creds.acme.json') = _sidecar(PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3499/test_delete_tenant_only_purges0/creds.json'), 'acme')
+E    +        where PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3499/test_delete_tenant_only_purges0/creds.json') = namespace(client=<starlette.testclient.TestClient object at 0x120711590>, store=<services.flow_store.FlowStore object ...es0/creds.json'), headers={'Authorization': 'Bearer <redacted-ephemeral-test-session>'}).creds
+------------------------------ Captured log setup ------------------------------
+WARNING  services.flow_store:flow_store.py:1153 alembic 迁移不可用（No module named 'alembic'），回退 create_all（schema 将无版本记录）
+_____________________ test_sidecar_removal_failure_is_loud _____________________
+plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py:211: in test_sidecar_removal_failure_is_loud
+    with pytest.raises(PermissionError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE PermissionError
+------------------------------ Captured log setup ------------------------------
+WARNING  services.flow_store:flow_store.py:1153 alembic 迁移不可用（No module named 'alembic'），回退 create_all（schema 将无版本记录）
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py::test_delete_tenant_purges_credentials_and_sidecar
+FAILED plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py::test_delete_tenant_only_purges_its_own_credentials
+FAILED plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py::test_sidecar_removal_failure_is_loud
+3 failed in 0.84s
+
+# pytest rc=1 (pre-fix: all 3 probes red)
