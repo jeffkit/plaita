@@ -436,7 +436,10 @@ function ScheduleDialog({
                 />
                 <select
                   value={flowId}
-                  onChange={(e) => setFlowId(e.target.value)}
+                  onChange={(e) => {
+                    setFlowId(e.target.value)
+                    setVersion('')
+                  }}
                   className="input w-full font-mono"
                   size={Math.min(4, Math.max(2, matchedFlows.length))}
                 >
