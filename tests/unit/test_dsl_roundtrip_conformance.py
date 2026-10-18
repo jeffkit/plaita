@@ -863,11 +863,13 @@ def test_all_registry_types_have_samples():
     # 环境差：不同安装面注册的类型集不同（如 code 节点经 pip extras 激活）。
     # builder 支持按需构造——构造失败才是真缺口。
     still = []
+    import traceback
     for t in missing:
         try:
             S.sample_ir(t)
         except Exception as exc:
-            still.append(f"{t}: {type(exc).__name__}: {exc}")
+            tb = traceback.format_exc().splitlines()[-6:]
+            still.append(f"{t}: {type(exc).__name__}: {exc} || {' | '.join(tb)}")
     assert not still, f"缺样本且现场构造失败: {still}"
 
 
