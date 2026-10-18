@@ -14,6 +14,11 @@ import pytest
 
 pytest.importorskip("cachetools")
 pytest.importorskip("plaita_nodes", reason="沙箱可选依赖未装")
+# 能力探测：#22 的终态释放用例真正依赖的是 **`plaita_nodes.sandbox`**（见下方
+# `import plaita_nodes.sandbox as pns`），而不是整个 `plaita_nodes` 包。
+# 只探包会在「包在、但 sandbox 子模块尚未落地」的树上漏判 —— 那正是 plaita-nodes
+# PR#4 前置项未落时的形态（#193 已证 main 上无 `sandbox.py`）⇒ 用例会红而非跳过。
+pytest.importorskip("plaita_nodes.sandbox", reason="沙箱子模块未落地（plaita-nodes PR#4 前置）")
 
 from plaita.event.memory import InMemoryEventBus
 from plaita.server.flow_worker import FlowWorker
