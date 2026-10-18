@@ -1,0 +1,39 @@
+=== NC1：删掉状态门（suspended 恢复被终态化） ===
+命令：
+  python -m pytest tests/unit/test_issue242_dead_letter_suspended.py -q
+
+测试输出（节选）：
+    @pytest.mark.parametrize("cap", ["total", "node"])
+    def test_suspended_budget_exhausted_stays_suspended(self, cap):
+        ...
+>       assert saved.status == "suspended", f"expected suspended, got {saved.status}"
+E       AssertionError: expected suspended, got error
+E       assert 'error' == 'suspended'
+E         - suspended
+E         + error
+
+FAILED tests/unit/test_issue242_dead_letter_suspended.py::TestSuspendedIsNotTerminalized::test_suspended_budget_exhausted_stays_suspended[total]
+FAILED tests/unit/test_issue242_dead_letter_suspended.py::TestSuspendedIsNotTerminalized::test_suspended_budget_exhausted_stays_suspended[node]
+FAILED tests/unit/test_issue242_dead_letter_suspended.py::TestSuspendedIsNotTerminalized::test_suspended_error_and_end_time_preserved
+3 failed, 4 passed in 0.73s
+
+
+=== NC2：删掉成功推进处的 _reset_node_retry_total ===
+命令：
+  python -m pytest tests/unit/test_issue242_dead_letter_suspended.py -q
+
+测试输出（节选）：
+>       assert fake.get(TOTAL_KEY) is None, (
+            "成功推进必须清零兜底总重试计数——否则长寿命执行必然累计到 "
+            f"{worker.NODE_RETRY_TOTAL_MAX} 后误杀 suspended（plaita#242）"
+        )
+E       AssertionError: 成功推进必须清零兜底总重试计数——否则长寿命执行必然累计到 100 后误杀 suspended（plaita#242）
+E       assert '100' is None
+E        +  where '100' = get('plaita:execution:noderefetch:exec-242')
+
+FAILED tests/unit/test_issue242_dead_letter_suspended.py::TestTotalCounterReset::test_successful_advance_clears_total_counter
+1 failed, 6 passed in 0.64s
+
+
+=== 还原两条变异后 ===
+7 passed in 0.63s

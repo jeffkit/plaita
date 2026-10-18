@@ -1236,6 +1236,27 @@ class FlowWorker:
             logger.warning("兜底总重试计数自增失败（按 1）: %s: %s", execution_id, _scrub_url_text(e))
             return 1
 
+    def _reset_node_retry_total(self, execution_id: str) -> None:
+        """清零兜底总重试计数（DEL；键不存在为幂等 no-op）。
+
+        与 ``_reset_node_retry_counter`` / ``_reset_deterministic_failure_counter``
+        同一个收口：**任一节点成功推进**即清零。计数语义是「连续失败」——
+        长寿命执行跨节点的偶发可重试失败不应终身累计到
+        ``NODE_RETRY_TOTAL_MAX``（plaita#242：100 次重试在长跑流程里可达），
+        否则累计达限后任何一条超投递消息都会让死信守卫误判执行搁浅。
+
+        G1 retry 唤醒**不**清零（与确定性失败计数同款理由）：唤醒后若仍连续
+        撞墙，兜底上限必须还能收敛——唤醒即清会形成「唤醒→清零→再撞→再
+        唤醒」的无界循环。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "delete"):
+            return
+        try:
+            redis_client.delete(self._node_retry_total_key(execution_id))
+        except Exception as e:  # noqa: BLE001 — 清零失败无害（下次失败继续累计）
+            logger.warning("兜底总重试计数清零失败（忽略）: %s: %s", execution_id, _scrub_url_text(e))
+
     def _node_retry_total_exhausted(self, execution_id: str) -> bool:
         """该执行是否已达兜底总重试上限。"""
         redis_client = getattr(self, "redis_client", None)
@@ -3551,6 +3572,11 @@ class FlowWorker:
                     # 确定性失败计数同款「连续」语义：推进过就不是「同一位置
                     # 反复撞墙」，长寿命执行跨节点的偶发确定性失败不应累计判死。
                     self._reset_deterministic_failure_counter(execution_id)
+                    # 兜底总重试计数同样按「连续」语义清零（plaita#242）：它只
+                    # 该兜住「预算机制整体失效后的连续重试」，不能终身累计——
+                    # 否则长寿命执行达 100 次后，任意一条超投递消息都会把
+                    # suspended（等审批/事件）的执行误终态化。
+                    self._reset_node_retry_total(execution_id)
 
                     is_end = result.get("is_end", False)
                     is_suspend = result.get("is_suspend", False)
@@ -4202,13 +4228,20 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 兜底总上限（#123 评审建议）也在此生效：键空间漂移（节点 id 变化等）
         # 会让单节点预算失效，此时靠「不看键名、只看次数」的总计数兜住——
         # 守卫是消息层的最后一道闸，不能只有会失效的那一条判据。
+        # plaita#242：终态化**只允许 status == running**（真正卡住的推进态）。
+        # suspended 在等外部事件/审批/delay/超时，重试计数达限不代表搁浅——
+        # 按 error 终态化会永久封死 resume(event/cancel/timeout) 的唤醒路径。
+        # 非 running 一律保持原状、走下方重入队恢复路径（消息不丢）。
         # plaita#57：终态化分支（兜底计数读 + 置 error + persist）必须整体在
         # 租户上下文内——原实现在 reset_current_tenant 之后，非 default 租户的
         # state 被写进 default 命名空间、兜底计数也读不到自己的键（读写同病）。
         token = set_current_tenant(body.get("tenant_id"))
         try:
             total_exhausted = self._node_retry_total_exhausted(execution_id)
-            if retry_count >= self._node_retry_budget() or total_exhausted:
+            if (
+                getattr(state, "status", "") == "running"
+                and (retry_count >= self._node_retry_budget() or total_exhausted)
+            ):
                 logger.error(
                     "执行 %s 非终态但节点重试计数已达预算（%s/%s）%s，终态化 error "
                     "后放行死信，不再重入队: %s",
