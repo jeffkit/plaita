@@ -7,13 +7,18 @@
 - 集群配置 CRUD
 """
 
+import logging
 import os
+import stat
+import tempfile
 import yaml
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class ClusterInfo(BaseModel):
@@ -46,30 +51,70 @@ class ClusterRegistry:
         self.registry_file = self.base_dir / "registry.yaml"
         self._clusters: Dict[str, ClusterInfo] = {}
         self._active_cluster_id: Optional[str] = None
+        self._load_failed = False
         
         self._load_registry()
         self._ensure_default_cluster()
     
     def _load_registry(self):
-        """加载注册表"""
-        if self.registry_file.exists():
-            try:
-                with open(self.registry_file, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f) or {}
-                
-                self._active_cluster_id = data.get("active_cluster")
-                clusters_data = data.get("clusters", {})
-                
-                for cluster_id, cluster_info in clusters_data.items():
-                    self._clusters[cluster_id] = ClusterInfo(
-                        id=cluster_id,
-                        **cluster_info
-                    )
-            except Exception as e:
-                print(f"加载集群注册表失败: {e}")
-    
+        """加载注册表。
+
+        解析失败时把损坏文件隔离为 ``registry.yaml.corrupt.<ts>`` 并记具名
+        WARNING，同时置 ``_load_failed`` 阻止本次启动重建 default——旧实现只
+        print，随后 ``_ensure_default_cluster`` 见空即覆盖原文件，一次
+        ENOSPC 留下的半截 YAML 会抹掉全部集群登记（plaita#249）。
+        """
+        if not self.registry_file.exists():
+            return
+        try:
+            with open(self.registry_file, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                raise ValueError(f"注册表顶层必须是映射，实际为 {type(data).__name__}")
+            clusters_data = data.get("clusters", {})
+            if not isinstance(clusters_data, dict):
+                raise ValueError(f"clusters 必须是映射，实际为 {type(clusters_data).__name__}")
+
+            self._active_cluster_id = data.get("active_cluster")
+            for cluster_id, cluster_info in clusters_data.items():
+                self._clusters[cluster_id] = ClusterInfo(
+                    id=cluster_id,
+                    **cluster_info
+                )
+        except Exception as e:
+            # 逐条反序列化可能已填了半张表；载入失败即整表作废，避免把
+            # 部分登记当成真实状态对外服务。
+            self._clusters.clear()
+            self._active_cluster_id = None
+            self._load_failed = True
+            backup = self._quarantine_registry_file()
+            logger.warning(
+                "集群注册表载入失败（%s）：%s；损坏文件备份为 %s，"
+                "本次启动保留空表、不重建默认集群",
+                self.registry_file, e, backup,
+            )
+
+    def _quarantine_registry_file(self) -> Optional[Path]:
+        """把损坏的注册表改名为 ``registry.yaml.corrupt.<ts>`` 保留证据。"""
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        backup = self.registry_file.with_name(f"{self.registry_file.name}.corrupt.{stamp}")
+        try:
+            os.replace(self.registry_file, backup)
+        except OSError:
+            logger.warning(
+                "集群注册表损坏文件备份失败（原文件保留）: %s",
+                self.registry_file, exc_info=True,
+            )
+            return None
+        return backup
+
     def _save_registry(self):
-        """保存注册表"""
+        """原子保存注册表：同目录临时文件写满 + fsync 后 ``os.replace``。
+
+        就地截断写下写到一半失败（磁盘满/进程中断）会留下半截 YAML，重启时
+        只能按损坏文件隔离，全部集群登记丢失（plaita#249）。与 #223 凭据导出
+        同一模板：失败路径只影响临时文件，旧文件逐字节不变。
+        """
         data = {
             "active_cluster": self._active_cluster_id,
             "clusters": {
@@ -83,12 +128,41 @@ class ClusterRegistry:
                 for cluster_id, info in self._clusters.items()
             }
         }
-        
-        with open(self.registry_file, 'w', encoding='utf-8') as f:
-            yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
-    
+        # 先序列化再碰文件：yaml.dump 自身失败时连临时文件都不会创建。
+        text = yaml.dump(data, allow_unicode=True, default_flow_style=False)
+
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self.base_dir), prefix=f".{self.registry_file.name}.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            # 沿用旧文件权限；新建时保留 mkstemp 的 0600（registry 含 redis_url）。
+            if self.registry_file.exists():
+                os.chmod(tmp, stat.S_IMODE(self.registry_file.stat().st_mode))
+            os.replace(tmp, self.registry_file)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
     def _ensure_default_cluster(self):
-        """确保存在默认集群"""
+        """确保存在默认集群。
+
+        载入失败时不重建：损坏文件已隔离备份，原 ``registry.yaml`` 不得被
+        default 重新覆盖（plaita#249）。
+        """
+        if self._load_failed:
+            return
         if not self._clusters:
             # 查找项目中的默认配置
             project_config = Path(__file__).parents[2] / "cluster_config.yaml"
