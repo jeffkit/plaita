@@ -1,0 +1,74 @@
+..........F..F..                                                         [100%]
+=================================== FAILURES ===================================
+________________ test_storage_write_default_source_fail_closed _________________
+
+    def test_storage_write_default_source_fail_closed():
+        """phase 2：来源 default（从未设置）→ 具名错误，底层写未发生。"""
+        fake = _FakeFlowStorage()
+    
+        def _run():
+            reset_write_probe()
+            writer = TenantRoutingFlowStorage()
+            writer._current_storage = lambda: fake  # type: ignore[assignment]
+            with pytest.raises(TenantContextMissingError):
+                writer.save_flow({"flow_id": "f"})
+            return write_probe_snapshot()
+    
+>       snapshot = Context().run(_run)
+                   ^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue239_tenant_provenance.py:197: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _run():
+        reset_write_probe()
+        writer = TenantRoutingFlowStorage()
+        writer._current_storage = lambda: fake  # type: ignore[assignment]
+>       with pytest.raises(TenantContextMissingError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita.tenant_context.TenantContextMissingError'>
+
+tests/unit/test_issue239_tenant_provenance.py:193: Failed
+______________ test_credentials_writes_default_source_fail_closed ______________
+
+cred_store = None
+
+    def test_credentials_writes_default_source_fail_closed(cred_store):
+        def _run():
+            with pytest.raises(TenantContextMissingError):
+                credentials_svc.save_credential("probe", "generic", {"x": 1})
+            with pytest.raises(TenantContextMissingError):
+                credentials_svc.delete_credential("probe")
+            return write_probe_snapshot()
+    
+>       snapshot = Context().run(_run)
+                   ^^^^^^^^^^^^^^^^^^^
+
+plaita-console/backend/tests/console/test_issue239_write_probe.py:54: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _run():
+>       with pytest.raises(TenantContextMissingError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita.tenant_context.TenantContextMissingError'>
+
+plaita-console/backend/tests/console/test_issue239_write_probe.py:48: Failed
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_fail_closed
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_fail_closed
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_fail_closed
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_explicit_source_counted
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_explicit_source_counted
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_derived_source_succeeds
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_derived_source_succeeds
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue239_tenant_provenance.py::test_storage_write_default_source_fail_closed
+FAILED plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_fail_closed
+2 failed, 14 passed, 7 warnings in 1.10s

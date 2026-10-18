@@ -1,5 +1,11 @@
 # #239 先行证明：租户来源三态标记 + 写调用点审计探针（只观测）
 
+> **phase 2 已更新（owner 2026-10-18 裁决）**：写路径已切 fail-closed——来源
+> `default` 抛 `TenantContextMissingError`（见
+> `docs/proofs/239-fail-closed-writes.md`）。本文件记录先行观测阶段，其中
+> "default 写仍成功"的断言已被 phase 2 测试迁移取代；三态标记与跨边界传播
+> 机制部分仍然有效。
+
 - 单号：plaita#239（P2；**先行非行为部分**——fail-closed 决策待 owner 对后半裁决）
 - 基线：`origin/main` = `8740485`（#237 契约落地后）
 - 边界：不改任何写行为；探针只计数 + DEBUG。提交信息用 `refs #239`，不关闭

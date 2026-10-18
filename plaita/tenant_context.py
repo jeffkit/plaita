@@ -106,17 +106,38 @@ def mark_tenant_derived() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 写调用点审计探针（plaita#239 先行：只观测/计数，不拦截）
+# 写调用点审计探针 + fail-closed 守卫（plaita#239：先行观测 → owner 裁决强制）
 # ---------------------------------------------------------------------------
 
 _write_probe_lock = threading.Lock()
 _write_probe_counts: Dict[Tuple[str, str], int] = {}
 
 
+class TenantContextMissingError(RuntimeError):
+    """写路径租户上下文缺失（plaita#239 fail-closed）。
+
+    来源为 ``default``（进程/线程从未显式/派生设置租户）时拒绝写：
+    「上下文丢失」不可再被静默当成有意 default——必须由服务入口显式
+    ``set_current_tenant(DEFAULT_TENANT_ID, source="explicit")``，或经
+    #237 的传播链以 ``derived`` 到达。``explicit`` / ``derived`` 照常放行。
+    """
+
+    def __init__(self, site: str, tenant_id: Optional[str] = None):
+        self.site = site
+        self.tenant_id = tenant_id
+        super().__init__(
+            f"tenant context missing for write site={site!r} "
+            f"(tenant={tenant_id!r}, source={TENANT_SOURCE_DEFAULT!r}): "
+            "set_current_tenant(DEFAULT_TENANT_ID, source='explicit') at the "
+            "service entry, or propagate tenant context across the boundary"
+        )
+
+
 def record_write_probe(site: str) -> None:
     """在写调用点记录 (site, 来源) 计数；default 来源额外 DEBUG。
 
-    **行为零变更**：不抛错、不改变返回值、不拦截写。
+    观测原语：不抛错、不改变返回值（phase 2 的强制由
+    :func:`guard_tenant_write` 执行）。
     """
     source = current_tenant_source()
     with _write_probe_lock:
@@ -127,6 +148,18 @@ def record_write_probe(site: str) -> None:
             "tenant write probe: site=%s tenant=%s source=default",
             site, current_tenant(),
         )
+
+
+def guard_tenant_write(site: str) -> None:
+    """写入口 fail-closed 守卫（plaita#239 phase 2，owner 裁决）。
+
+    先记录分布（含被拒的 default 尝试），再在来源为 ``default`` 时抛具名
+    :class:`TenantContextMissingError`；``explicit`` / ``derived`` 放行。
+    """
+    source = current_tenant_source()
+    record_write_probe(site)
+    if source == TENANT_SOURCE_DEFAULT:
+        raise TenantContextMissingError(site, current_tenant())
 
 
 def write_probe_snapshot() -> Dict[Tuple[str, str], int]:

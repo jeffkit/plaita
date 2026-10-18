@@ -24,6 +24,28 @@ import pytest
 os.environ.setdefault("PYTHON_BIN", sys.executable)
 
 
+@pytest.fixture(autouse=True)
+def _explicit_default_tenant():
+    """plaita#239 phase 2：测试显式声明 default 租户（不依赖静默降级）。
+
+    写路径对来源 ``default`` 已 fail-closed；测试进程在入口显式设置
+    ``source='explicit'``，等价单租户部署的迁移行。需要「缺失上下文」形状
+    的用例自行在 fresh ``Context()`` 中运行。
+    """
+    from plaita.tenant_context import (
+        DEFAULT_TENANT_ID,
+        TENANT_SOURCE_EXPLICIT,
+        reset_current_tenant,
+        set_current_tenant,
+    )
+
+    token = set_current_tenant(DEFAULT_TENANT_ID, source=TENANT_SOURCE_EXPLICIT)
+    try:
+        yield
+    finally:
+        reset_current_tenant(token)
+
+
 def pytest_collection_modifyitems(config, items):
     integration_dir = config.rootpath / "tests" / "integration"
     for item in items:

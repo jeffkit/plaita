@@ -58,6 +58,28 @@ _FORM_PARSER_SKIP_REASON = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _explicit_default_tenant():
+    """plaita#239 phase 2：console 测试显式声明 default 租户。
+
+    写路径对来源 ``default`` 已 fail-closed；此 fixture 等价 console 启动
+    入口的迁移行（``set_current_tenant(DEFAULT, source='explicit')``）。
+    需要「缺失上下文」形状的用例自行在 fresh ``Context()`` 中运行。
+    """
+    from plaita.tenant_context import (
+        DEFAULT_TENANT_ID,
+        TENANT_SOURCE_EXPLICIT,
+        reset_current_tenant,
+        set_current_tenant,
+    )
+
+    token = set_current_tenant(DEFAULT_TENANT_ID, source=TENANT_SOURCE_EXPLICIT)
+    try:
+        yield
+    finally:
+        reset_current_tenant(token)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",

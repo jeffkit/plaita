@@ -256,3 +256,11 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 
 MIT
 
+
+## 租户上下文（plaita#239 phase 2）
+
+console 进程启动时显式声明 default 租户
+（`set_current_tenant(DEFAULT_TENANT_ID, source="explicit")`，已在
+`create_app()` / `lifespan` 内置）。凭据/存储写路径对来源 `default` 已
+fail-closed（`TenantContextMissingError`）；自定义 WSGI/ASGI 启动器若绕过
+`create_app()`，必须自行执行同一行声明，否则写操作会被拒绝。

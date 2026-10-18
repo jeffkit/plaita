@@ -13,6 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
 
 from plaita.writefile_jail import apply_writefile_jail
+from plaita.tenant_context import (
+    DEFAULT_TENANT_ID,
+    TENANT_SOURCE_EXPLICIT,
+    set_current_tenant,
+)
 
 # 支持多种运行方式的导入
 try:
@@ -94,6 +99,9 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global redis_client
 
+    # plaita#239 phase 2：显式 default 租户声明（单租户部署迁移行；请求任务
+    # 从事件循环上下文继承，写路径不再静默降级 default）。
+    set_current_tenant(DEFAULT_TENANT_ID, source=TENANT_SOURCE_EXPLICIT)
     settings = get_settings()
 
     # 启动时连接 Redis；不可达则进入本地单机模式（不阻断启动）。
@@ -274,6 +282,9 @@ apply_writefile_jail("console")
 
 def create_app() -> FastAPI:
     """创建 FastAPI 应用"""
+    # plaita#239 phase 2（owner 2026-10-18 裁决）：单租户部署迁移——console
+    # 进程入口**显式**声明 default 租户；写路径对隐式 default 已 fail-closed。
+    set_current_tenant(DEFAULT_TENANT_ID, source=TENANT_SOURCE_EXPLICIT)
     settings = get_settings()
     
     app = FastAPI(

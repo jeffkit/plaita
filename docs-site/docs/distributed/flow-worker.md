@@ -553,3 +553,18 @@ r5（`fc8fccf`）里的改动是 **docstring/注释 + 钉子测试**，**零可�
 未提交批次」的那一行）未被 r5 改动**——r5 对该文件其余部位只是 `list` → `deque` 的
 **语义等价机械适配**（代码注释已声明「丢弃方向/计数/分批提交语义**零变化**」）。即
 C2/C3 是**措辞更正 + 测试**，**不是**行为修复；上表的行为契约由 r4 的执行代码承担。
+
+## 租户上下文显式声明（plaita#239 phase 2）
+
+写路径（credentials/storage 的 `save` / `delete`）在租户来源为 `default`
+（当前进程/线程从未显式或派生设置）时**fail-closed**，抛具名
+`TenantContextMissingError`，不再静默写 default 租户。
+
+- **单租户部署**：服务入口显式声明一次
+  `set_current_tenant(DEFAULT_TENANT_ID, source="explicit")`。`FlowWorker.run()`
+  与 console `create_app()` / `lifespan` 已内置该迁移行；自定义启动器/嵌入方
+  必须保留。
+- **多租户**：任务消息按 `tenant_id` 显式 set；经 #237 传播链（线程池 /
+  asyncio 桥 / 进程 pickle）到达的上下文来源为 `derived`，同样放行。
+- 「未设置」不再等价于「有意 default」；缺失上下文会被拒绝并从日志/探针
+  `write_probe_snapshot()` 的 `(site, "default")` 计数观测到。

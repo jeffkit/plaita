@@ -115,27 +115,14 @@ def execution_state_ttl_seconds() -> int:
     return days * 86400
 
 
-# #239② 迁移期观测：隐式 default 租户写的站点级首告闩（进程内一次，量级看 tenant_context.write_probe_snapshot() 的 (site, source) 计数）。
-_IMPLICIT_DEFAULT_WARNED: set = set()
-
-
 def _tenant_write_observability(site: str, ident: str) -> None:
-    """#239②：写站点接线探针 + 隐式 default 租户首次 WARNING（迁移期可观测）。
+    """#239 phase 2：Redis 写站点租户来源 fail-closed。
 
-    显式/derived 来源不告警；default 来源每站点进程内只告警一次，
-    完整量级走探针计数。#239③ 将在本观测稳定后切 fail-closed。
+    owner 裁决（2026-10-18）：来源 ``default``（从未显式/派生设置）时抛
+    ``TenantContextMissingError``；``explicit`` / ``derived`` 照常写。
+    探针计数由 ``guard_tenant_write`` 内部记录（含被拒尝试）。
     """
-    try:
-        _tenant_ctx.record_write_probe(site)
-        if (_tenant_ctx.current_tenant_source() == "default"
-                and site not in _IMPLICIT_DEFAULT_WARNED):
-            _IMPLICIT_DEFAULT_WARNED.add(site)
-            logger.warning(
-                "#239 迁移期：隐式 default 租户写 site=%s id=%s"
-                "（后续量级看 write_probe_snapshot）", site, ident
-            )
-    except Exception as e:  # 观测自身绝不阻断写路径
-        logger.debug("#239 观测探针异常 site=%s: %s", site, _scrub_url_text(e))
+    _tenant_ctx.guard_tenant_write(site)
 
 
 class ExecutionStateLoadError(RuntimeError):

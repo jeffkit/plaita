@@ -25,6 +25,7 @@ from plaita.tenant_context import (
     TENANT_SOURCE_DEFAULT,
     TENANT_SOURCE_DERIVED,
     TENANT_SOURCE_EXPLICIT,
+    TenantContextMissingError,
     current_tenant,
     current_tenant_source,
     mark_tenant_derived,
@@ -172,18 +173,69 @@ def test_write_probe_counts_explicit_source():
     assert not [k for k in snapshot if k[1] == TENANT_SOURCE_DEFAULT]
 
 
-def test_storage_write_probe_counts_and_does_not_change_behavior():
-    class _FakeFlowStorage:
-        def save_flow(self, flow):
-            return True
+class _FakeFlowStorage:
+    def __init__(self):
+        self.writes = 0
+
+    def save_flow(self, flow):
+        self.writes += 1
+        return True
+
+
+def test_storage_write_default_source_fail_closed():
+    """phase 2：来源 default（从未设置）→ 具名错误，底层写未发生。"""
+    fake = _FakeFlowStorage()
 
     def _run():
         reset_write_probe()
         writer = TenantRoutingFlowStorage()
-        writer._current_storage = lambda: _FakeFlowStorage()  # type: ignore[assignment]
-        ok = writer.save_flow({"flow_id": "f"})
+        writer._current_storage = lambda: fake  # type: ignore[assignment]
+        with pytest.raises(TenantContextMissingError):
+            writer.save_flow({"flow_id": "f"})
+        return write_probe_snapshot()
+
+    snapshot = Context().run(_run)
+    assert snapshot[("storage.save_flow", TENANT_SOURCE_DEFAULT)] == 1
+    assert fake.writes == 0, "fail-closed 时不得触达底层存储写"
+
+
+def test_storage_write_explicit_source_succeeds():
+    fake = _FakeFlowStorage()
+
+    def _run():
+        reset_write_probe()
+        token = set_current_tenant("tenant-b")
+        try:
+            writer = TenantRoutingFlowStorage()
+            writer._current_storage = lambda: fake  # type: ignore[assignment]
+            ok = writer.save_flow({"flow_id": "f"})
+        finally:
+            reset_current_tenant(token)
         return ok, write_probe_snapshot()
 
     ok, snapshot = Context().run(_run)
-    assert ok is True, "探针不得改变写行为"
-    assert snapshot[("storage.save_flow", TENANT_SOURCE_DEFAULT)] == 1
+    assert ok is True
+    assert snapshot[("storage.save_flow", TENANT_SOURCE_EXPLICIT)] == 1
+    assert fake.writes == 1
+
+
+def test_storage_write_derived_source_succeeds():
+    """跨边界传播来的 derived 来源照常放行。"""
+    fake = _FakeFlowStorage()
+
+    def _run():
+        reset_write_probe()
+        token = set_current_tenant("tenant-b")
+        try:
+            writer = TenantRoutingFlowStorage()
+            writer._current_storage = lambda: fake  # type: ignore[assignment]
+            ok = ThreadParallelExecutor(max_workers=1).submit(
+                writer.save_flow, {"flow_id": "f"}).result()
+        finally:
+            reset_current_tenant(token)
+        return ok, write_probe_snapshot()
+
+    ok, snapshot = Context().run(_run)
+    assert ok is True
+    assert snapshot[("storage.save_flow", TENANT_SOURCE_DERIVED)] == 1
+    assert fake.writes == 1

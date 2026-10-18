@@ -102,6 +102,7 @@ from plaita.server.tenant_context import (
     set_current_tenant,
     tenant_namespace,
 )
+from plaita.tenant_context import DEFAULT_TENANT_ID, TENANT_SOURCE_EXPLICIT
 from plaita.server.tenant_status import tenant_is_active
 # plaita#28：每租户 start 准入配额（最小公平性原语）。console 入口超限 429、
 # worker 对无名额的外部生产方消息超限延迟重投；原语细节见 tenant_quota 模块。
@@ -5260,6 +5261,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         成功处理后 ``XACK``；崩溃或未 ack 的消息留在 pending，超时后可被
         其他 consumer ``XCLAIM`` 回收（at-least-once，业务侧应幂等）。
         """
+        # plaita#239 phase 2（owner 2026-10-18 裁决）：单租户部署迁移——
+        # 服务入口**显式**声明 default 租户；写路径对隐式 default 已
+        # fail-closed（TenantContextMissingError）。每条任务消息仍由
+        # `_dispatch_task` 按其 tenant_id 覆盖（显式/derived）。
+        set_current_tenant(DEFAULT_TENANT_ID, source=TENANT_SOURCE_EXPLICIT)
         self._running = True
         queue = self._get_task_queue()
         queue.ensure_group()

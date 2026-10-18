@@ -66,14 +66,19 @@
   - 现状：console 写 API 用显式 `tenant_scope(required=True)`；引擎存储按
     ContextVar 路由。ContextVar 的「上下文丢失」与「有意 default」在当前模型
     里不可区分——真正的硬拒绝需要一个 **explicit-set 标记**
-    （`set_current_tenant` 置位）+ 写路径审计，属于独立语义变更，不在本轮
-    「只动传播面」的边界内；已记为本契约的后续执行项。
-  - **先行已落（plaita#239，只观测）**：`set_current_tenant` 现在携带
-    explicit/derived/default 三态来源（`TenantToken` 同步复位），执行边界
-    worker 调 `mark_tenant_derived()`；`record_write_probe(site)` 在
-    storage（`save_execution_state` / `delete_execution_state` / `save_flow`）
-    与 credentials（`save` / `delete`）计数 + default 来源 DEBUG。
-    **不拦截、不改写行为**；hard fail-closed 仍待 owner 对 #239 后半裁决。
+    （`set_current_tenant` 置位）+ 写路径审计。
+  - **phase 2 已落（plaita#239，owner 2026-10-18 裁决 fail-closed）**：
+    `set_current_tenant` 携带 explicit/derived/default 三态来源（`TenantToken`
+    同步复位），执行边界 worker 调 `mark_tenant_derived()`；
+    `guard_tenant_write(site)` 在 storage（`save_execution_state` /
+    `delete_execution_state` / `save_flow`，含 Redis 直写站点）与 credentials
+    （`save` / `delete`）对来源 `default` 抛具名
+    `TenantContextMissingError`，**不触达写**；`explicit` / `derived` 照常。
+    探针计数保留（含被拒尝试）。
+  - **单租户部署迁移行**：flow_worker / console 启动时显式
+    `set_current_tenant(DEFAULT_TENANT_ID, source="explicit")`（见
+    `flow_worker.run`、console `create_app`/`lifespan`）；测试 conftest 同样
+    显式设 default，不再依赖静默降级。
 - **租户状态闸 fail-open 维持**：缺失记录 = active（default 单租部署兼容）；
   但每次命中（无客户端 / 读失败 / 无记录）必须 `WARNING` 并累加进程内计数
   `tenant_fail_open_total()`（`plaita/server/tenant_status.py`，本轮实现）。
