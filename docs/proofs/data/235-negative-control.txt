@@ -1,0 +1,28 @@
+# plaita#235 负控：把 ConsoleClient._request 还原为「永不重登」（= f04de20 基线实现）
+# 命令：cd plaita-ai && ../.venv/bin/python -m pytest tests/test_issue235_console_session_relogin.py -q --tb=short
+# 结果：2 failed, 2 passed —— 红的两条正是自愈与有界重试；API-Key / login-401 两条守卫保持绿。
+
+FF..                                                                     [100%]
+=================================== FAILURES ===================================
+____________ test_expired_session_relogins_once_and_retry_succeeds _____________
+tests/test_issue235_console_session_relogin.py:70: in test_expired_session_relogins_once_and_retry_succeeds
+    assert client.list_flows()["total"] == 0
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita_ai/console_client.py:150: in list_flows
+    return self._request("GET", "/flows")
+plaita_ai/console_client.py:135: in _request
+    raise ConsoleClientError(
+E   plaita_ai.console_client.ConsoleClientError: console returned 401 for GET /api/flows
+_______________ test_repeated_401_relogins_at_most_once_per_call _______________
+tests/test_issue235_console_session_relogin.py:90: in test_repeated_401_relogins_at_most_once_per_call
+    assert console.login_count == 2  # 该次调用恰好重登一次，不是循环
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   assert 1 == 2
+E    +  where 1 = <tests.test_issue235_console_session_relogin.SessionConsole object at 0x10a1ffb10>
+=========================== short test summary info ============================
+FAILED tests/test_issue235_console_session_relogin.py::test_expired_session_relogins_once_and_retry_succeeds
+FAILED tests/test_issue235_console_session_relogin.py::test_repeated_401_relogins_at_most_once_per_call
+2 failed, 2 passed in 0.39s
+
+# 还原修复后（同一命令）：
+# 4 passed in 0.47s

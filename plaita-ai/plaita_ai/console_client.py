@@ -90,6 +90,16 @@ class ConsoleClient:
             self.login()
         return {"Authorization": f"Bearer {self._session_token}"}
 
+    def _session_auth_configured(self) -> bool:
+        """Whether requests authenticate with a username/password session.
+
+        API-Key 优先：即使同时配了用户名/密码，key 模式收到 401 也只说明
+        key 配错，不是会话过期，不得触发登录重试。
+        """
+        return not self.config.admin_api_key and bool(
+            self.config.username and self.config.password
+        )
+
     def login(self) -> Dict[str, Any]:
         """Username/password login; stores the returned session token."""
         if not (self.config.username and self.config.password):
@@ -120,29 +130,44 @@ class ConsoleClient:
         params: Optional[Dict[str, Any]] = None,
         _skip_auth: bool = False,
     ) -> Any:
-        headers = {} if _skip_auth else self._auth_headers()
         url = f"{self.config.api_prefix}{path}"
-        try:
-            resp = self._http.request(method, url, json=json, params=params, headers=headers)
-        except httpx.HTTPError as exc:
-            raise ConsoleClientError(f"console request failed: {method} {url}: {exc}") from exc
-        if resp.status_code >= 400:
-            detail: Any = None
+        relogged = False
+        while True:
+            headers = {} if _skip_auth else self._auth_headers()
             try:
-                detail = resp.json()
+                resp = self._http.request(method, url, json=json, params=params, headers=headers)
+            except httpx.HTTPError as exc:
+                raise ConsoleClientError(f"console request failed: {method} {url}: {exc}") from exc
+            if (
+                resp.status_code == 401
+                and not relogged
+                and not _skip_auth
+                and self._session_auth_configured()
+            ):
+                # 会话已在 console 侧失效（7 天 TTL / 用户被禁用 / 登出 / 改密）。
+                # 丢掉死 token，重登后重放本次请求；每次调用最多重登一次
+                # （与 console login_guard 的限速兼容，重放仍 401 按普通错误抛出）。
+                relogged = True
+                self._session_token = None
+                self.login()
+                continue
+            if resp.status_code >= 400:
+                detail: Any = None
+                try:
+                    detail = resp.json()
+                except ValueError:
+                    detail = resp.text[:500]
+                raise ConsoleClientError(
+                    f"console returned {resp.status_code} for {method} {url}",
+                    status=resp.status_code,
+                    detail=detail,
+                )
+            if not resp.content:
+                return None
+            try:
+                return resp.json()
             except ValueError:
-                detail = resp.text[:500]
-            raise ConsoleClientError(
-                f"console returned {resp.status_code} for {method} {url}",
-                status=resp.status_code,
-                detail=detail,
-            )
-        if not resp.content:
-            return None
-        try:
-            return resp.json()
-        except ValueError:
-            return resp.text
+                return resp.text
 
     # -- flows & versions --------------------------------------------------
 
