@@ -1,0 +1,82 @@
+# plaita#224 负控：normalize_event 的 dict 分支恢复 `Event.from_dict`
+
+- 基线：`origin/main` = `5d828f0`（工作树 `plaita-wt2`，分支 `wt-b2`）
+- 变异：把本单修复反向还原（`git checkout HEAD -- plaita/event/utils.py`）：
+  - `Event.model_validate(fields)` → **`Event.from_dict(event_type_or_obj)`**（不存在的属性）
+  - 还原「先拷一份再规范化」→ 调用方 dict 可被就地改写
+  - 还原 str 分支 `dict(data) if data else {}` → `data or {}` + 原地 `update`
+- 只改实现，测试与 repro 不动。
+
+## MUTANT diff（对修复树反向）
+
+```diff
+-            fields = dict(event_type_or_obj)
+-            event_data = fields.get('data', {})
++            event_data = event_type_or_obj.get('data', {})
+             if isinstance(event_data, str):
+                 ...
+-            if event_data is None:
+-                event_data = {}
+-            fields['data'] = dict(event_data) if isinstance(event_data, dict) else event_data
+-            for key, value in kwargs.items():
+-                fields.setdefault(key, value)
+-            return Event.model_validate(fields)
++            return Event.from_dict(event_type_or_obj)
+@@ str 分支
+-        event_data = dict(data) if data else {}
++        event_data = data or {}
+```
+
+## 红（mutant）：repro
+
+`.venv/bin/python docs/proofs/data/224-repro.py`（exit=1）
+
+```
+FAIL dict+correlation_id/data 保真且不改入参: AttributeError: from_dict
+FAIL dict 无 data -> data={}: AttributeError: from_dict
+FAIL dict data 为 JSON 字符串: AttributeError: from_dict
+FAIL str 分支不改写调用方 data: AssertionError: str 分支改写了调用方 data: {'x': 1, 'correlation_id': 'cid-7'}
+FAIL dict 分支接收 correlation_id kwarg: AttributeError: from_dict
+
+5 FAILURE(S)
+```
+
+pydantic 侧的根因栈：
+
+```
+plaita/event/utils.py:55: in normalize_event
+    return Event.from_dict(event_type_or_obj)
+...
+pydantic/_internal/_model_construction.py:287: in __getattr__
+    raise AttributeError(item)
+E       AttributeError: from_dict
+```
+
+## 红（mutant）：新用例
+
+`.venv/bin/python -m pytest tests/unit/test_issue224_normalize_event_dict.py -q -p no:cacheprovider`（exit=1）
+
+```
+..FFFFFFF.FF....FFF                                                      [100%]
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_branch_is_public_export
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_preserves_correlation_id
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_without_data_defaults_to_empty_dict
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_with_none_data_defaults_to_empty_dict
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_json_string_data_is_decoded
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_json_string_data_falls_back_to_value
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_accepts_correlation_id_kwarg
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_input_is_not_mutated
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_str_branch_does_not_mutate_caller_data
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_with_non_dict_data_raises_validation_error
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_dict_with_non_str_event_type_raises_validation_error
+FAILED tests/unit/test_issue224_normalize_event_dict.py::test_sqlalchemy_bus_publish_accepts_dict
+12 failed, 7 passed in 1.04s
+```
+
+保持绿的 7 例是修前也不经过 `Event.from_dict` 的分支（Event 实例透传 / str 分支
+构造 / 无 `event_type` 的 dict 当 data / list 与 None、int 抛 TypeError），属正确
+行为，负控不需要它们变红。
+
+## 绿（修复后）
+
+repro：`ALL OK`；新用例：`19 passed in 1.04s`。

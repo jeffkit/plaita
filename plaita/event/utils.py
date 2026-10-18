@@ -33,26 +33,38 @@ def normalize_event(event_type_or_obj, data: Dict[str, Any] = None, **kwargs):
         **kwargs: 其他事件属性
         
     Returns:
-        tuple: (事件类型, 事件数据)
+        Event: 标准化后的事件对象
     """
     from .core import Event
     
     if isinstance(event_type_or_obj, Event):
         return event_type_or_obj
     elif isinstance(event_type_or_obj, str):
-        event_data = data or {}
+        # 拷一份再合并 kwargs：规范化不得就地改写调用方传入的 data（#224）
+        event_data = dict(data) if data else {}
         if kwargs:
             event_data.update(kwargs)
         return Event(event_type=event_type_or_obj, data=event_data)
     elif isinstance(event_type_or_obj, dict):
         if 'event_type' in event_type_or_obj:
-            event_data = event_type_or_obj.get('data', {})
+            # #224：此前调用 pydantic v2 模型上不存在的 ``Event.from_dict`` ⇒ 公开
+            # 导出的 normalize_event 对 dict 形态输入必抛 AttributeError。改走既有
+            # 构造路径（``model_validate``），并让 correlation_id 等字段随 dict 保真
+            # （EventFilter 依赖它做 correlation 路由）。先拷一份：不写调用方字典。
+            fields = dict(event_type_or_obj)
+            event_data = fields.get('data', {})
             if isinstance(event_data, str):
                 try:
                     event_data = json.loads(event_data)
                 except json.JSONDecodeError:
                     event_data = {'value': event_data}
-            return Event.from_dict(event_type_or_obj)
+            if event_data is None:
+                event_data = {}
+            fields['data'] = dict(event_data) if isinstance(event_data, dict) else event_data
+            # kwargs 只补 dict 未显式给出的字段（如 publish(**{"correlation_id": ...})）
+            for key, value in kwargs.items():
+                fields.setdefault(key, value)
+            return Event.model_validate(fields)
         else:
             # 假设这是一个没有明确指定event_type的数据字典
             event_type = kwargs.pop('event_type', 'generic.event')
