@@ -271,3 +271,68 @@ def test_prompt_proposer_current_source_degrades_gracefully():
     # switch 节点不可表达 → 空串（LLM 退回看 JSON definition）
     switch_ir = {"flow_id": "sw", "nodes": [{"type": "switch", "id": "s"}]}
     assert PromptProposer._emit_current_source(switch_ir) == ""
+
+
+# -- #229：regressions 闸（候选 avg 更高但打回既有 case） -------------------------
+
+
+def _trading_handler(flow_json, input_data):
+    """基线过 c0，候选过 c1/c2 但打回 c0：avg 1/3 → 2/3，regressions=[c0]。"""
+    i = int(input_data.get("i", 0))
+    if flow_json == DEF_V2:
+        ok = i in (1, 2)
+    else:
+        ok = i == 0
+    return {
+        "result": {"text": "good output" if ok else "bad output"},
+        "nodes": [],
+        "error": None,
+    }
+
+
+def _trading_dataset() -> Dataset:
+    return Dataset([
+        {"id": f"c{i}", "input": {"i": i}, "expect": {"contains": "good"}}
+        for i in range(3)
+    ])
+
+
+@pytest.mark.parametrize("gate", ["manual", "auto"])
+def test_regressions_block_promotion_even_when_average_improves(gate):
+    """#229-A：avg 更高但把既有 case 打回 ⇒ 不得出 ticket、不得 publish。
+
+    修前该组合会走 ``improved`` 分支：manual 出 promotion ticket，auto 直接
+    ``publish_version``。既有 ``test_regression_is_not_promoted`` 的候选是**未改进**
+    （avg 不升），走不到「avg 升 + 有 regressions」这个真实风险面。
+    """
+    fake = FakeConsole()
+    fake.seed_flow("demo", {"1.0.0": DEF_V1}, published="1.0.0")
+    fake.dry_run_handler = _trading_handler
+    client = make_client(fake)
+
+    published_calls = []
+    real_publish = client.publish_version
+
+    def recording_publish(*args, **kwargs):
+        published_calls.append((args, kwargs))
+        return real_publish(*args, **kwargs)
+
+    client.publish_version = recording_publish
+    sup = Supervisor(
+        client,
+        SupervisorPolicy(promote_gate=gate, min_improvement=0.02),
+        StaticProposer([{"definition": DEF_V2, "rationale": "trade c0 for c1/c2"}]),
+    )
+    outcome = sup.iterate("demo", _trading_dataset())
+
+    comparison = outcome["comparison"]
+    assert comparison["avg_score"]["base"] < comparison["avg_score"]["candidate"]
+    assert comparison["regressions"] == ["c0"]
+    assert outcome["status"] == "no_improvement"
+    assert "promotion_ticket" not in outcome
+    assert outcome.get("promoted") is not True
+    # 「没有调用 publish_version」必须直接断言，而不是只看 published 指针
+    assert published_calls == []
+    assert fake.published["demo"] == "1.0.0"
+    detail = client.get_flow("demo")
+    assert {v["version"]: v["status"] for v in detail["versions"]}["1.0.1"] == "draft"

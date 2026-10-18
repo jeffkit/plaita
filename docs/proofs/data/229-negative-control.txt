@@ -1,0 +1,119 @@
+# plaita#229 负控：Supervisor 放行判定去掉 regressions / judge_blind 两道闸
+
+- 基线：`origin/main` = `afe4bba1`（W47 worktree `/tmp/w47`，分支 `fix/w47`）
+- 本单**只补测试**，放行语义零改动。两处变异分别注入、跑完逐字还原。
+- 变异位置：`plaita-ai/plaita_ai/supervisor.py:615-622` 的 `improved` 判定。
+
+## 变异 A：删除 regressions 闸
+
+```diff
+--- a/plaita-ai/plaita_ai/supervisor.py
++++ b/plaita-ai/plaita_ai/supervisor.py
+@@ -617,7 +617,6 @@
+             and cand_avg >= base_avg + policy.min_improvement
+-            and not verdict.get("regressions")
+         )
+```
+
+### 红（A）：探针
+
+`PYTHONPATH=/tmp/w47:/tmp/w47/plaita-ai python docs/proofs/data/229-repro.py`
+
+```json
+"regressions": [
+  {"gate": "manual", "status": "improved", "has_ticket": true,
+   "promoted": false, "publish_calls": 0, "published_version": "1.0.0",
+   "avg": {"base": 0.3333, "candidate": 0.6667},
+   "regressions": ["c0"]},
+  {"gate": "auto", "status": "improved", "has_ticket": false,
+   "promoted": true, "publish_calls": 1, "published_version": "1.0.1",
+   "avg": {"base": 0.3333, "candidate": 0.6667},
+   "regressions": ["c0"]}
+]
+
+GATE REGRESSION
+```
+
+manual 出 promotion ticket；auto **直接 publish 1.0.1**——回归候选上生产。
+
+### 红（A）：新用例
+
+`pytest plaita-ai/tests -q`
+
+```
+FAILED plaita-ai/tests/test_supervisor.py::test_regressions_block_promotion_even_when_average_improves[manual]
+FAILED plaita-ai/tests/test_supervisor.py::test_regressions_block_promotion_even_when_average_improves[auto]
+FAILED plaita-ai/tests/test_mcp_stdio_smoke.py::TestMcpStdioHandshake::test_initialize_and_tools_list
+3 failed, 206 passed, 34 skipped, 18 warnings in 3.12s
+```
+
+精确红文案：
+
+```
+>       assert outcome["status"] == "no_improvement"
+E       AssertionError: assert 'improved' == 'no_improvement'
+```
+
+（`test_mcp_stdio_smoke` 是变异前就存在的环境失败，见 REPORT。）
+
+## 变异 B：judge_blind 闸 → `and True`
+
+```diff
+             not failed_hard
+-            and not judge_blind
++            and True  # MUTATION #229-B
+             and base_avg is not None
+```
+
+### 红（B）：探针
+
+```json
+"judge_blind": [
+  {"gate": "manual", "status": "improved", "has_ticket": true,
+   "promoted": false, "publish_calls": 0, "published_version": "1.0.0",
+   "judge_unavailable_cases": {"baseline": 1, "candidate": 0},
+   "avg": {"base": 0.5, "candidate": 1.0}, "regressions": [], "reason": ""},
+  {"gate": "auto", "status": "improved", "has_ticket": false,
+   "promoted": true, "publish_calls": 1, "published_version": "1.0.1",
+   "judge_unavailable_cases": {"baseline": 1, "candidate": 0},
+   "avg": {"base": 0.5, "candidate": 1.0}, "regressions": [], "reason": ""}
+]
+
+GATE REGRESSION
+```
+
+盲评（baseline 有 judge 不可达用例）下的分数差被读成改进，auto 直接发布。
+
+### 红（B）：新用例
+
+```
+FAILED plaita-ai/tests/test_evals_judge.py::test_judge_blind_blocks_promotion_when_candidate_avg_is_higher[manual]
+FAILED plaita-ai/tests/test_evals_judge.py::test_judge_blind_blocks_promotion_when_candidate_avg_is_higher[auto]
+FAILED plaita-ai/tests/test_mcp_stdio_smoke.py::TestMcpStdioHandshake::test_initialize_and_tools_list
+3 failed, 206 passed, 34 skipped, 18 warnings in 2.64s
+```
+
+精确红文案：
+
+```
+>       assert outcome["status"] == "no_improvement"
+E       AssertionError: assert 'improved' == 'no_improvement'
+```
+
+两条变异互不干扰：A 下 judge_blind 探针保持 `no_improvement`，B 下 regressions
+探针保持 `no_improvement`。
+
+## 绿（原实现）
+
+探针：`GATES HOLD`（manual/auto 都 `no_improvement`、无 ticket、`publish_calls=0`、
+`published_version=1.0.0`；judge 盲评 reason 保留
+`judge unavailable ... scores not comparable`）。
+
+`pytest plaita-ai/tests -q`
+
+```
+1 failed, 208 passed, 34 skipped in 2.63s
+```
+
+唯一失败是**变异前基线就有**的 `test_mcp_stdio_smoke`
+（环境缺 MCP stdio 依赖，与 #229 无关）。

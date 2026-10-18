@@ -1,0 +1,152 @@
+...........FF                                                            [100%]
+=================================== FAILURES ===================================
+____ test_judge_blind_blocks_promotion_when_candidate_avg_is_higher[manual] ____
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3301/test_judge_blind_blocks_promot0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105baf230>
+gate = 'manual'
+
+    @pytest.mark.parametrize("gate", ["manual", "auto"])
+    def test_judge_blind_blocks_promotion_when_candidate_avg_is_higher(
+        tmp_path, monkeypatch, gate
+    ):
+        """#229-B：baseline 有 judge_unavailable 用例、候选 avg 更高且无 regressions。
+    
+        judge 故障期间的分数与基线不可比（#60）：不能把「outage 结束」读成改进。
+        既有 ``test_supervisor_refuses_promotion_when_judge_was_down`` 的基线/候选
+        定义相同，走不到「avg 升 + 无 regressions + 盲评」的组合。
+        """
+        def_v1, def_v2 = '{"version": 1}', '{"version": 2}'
+        fake = FakeConsole()
+        fake.seed_flow("demo", {"1.0.0": def_v1}, published="1.0.0")
+        fake.dry_run_handler = _judge_trading_handler
+    
+        calls = {"n": 0}
+    
+        def judge(*args, **kwargs):
+            calls["n"] += 1
+            n = calls["n"]
+            if n == 1:
+                # baseline c0：judge 不可达 → 该 case 排除出均值（不计 0 分）
+                return unavailable()
+            if n in (2, 3):
+                # baseline c1/c2 的健康判分镜像内容分，保持 avg=0.5
+                return {"ok": n == 3, "score": 1.0 if n == 3 else 0.0, "reason": "healthy"}
+            return healthy()
+    
+        monkeypatch.setattr("plaita_ai.evals.evals.judge_output", judge)
+    
+        dataset = Dataset(
+            [
+                {"id": f"c{i}", "input": {"i": i},
+                 "expect": {"contains": "good", "judge": "is polite"}}
+                for i in range(3)
+            ],
+            source="judge-blind",
+        )
+        client = make_client(fake)
+        published_calls = []
+        real_publish = client.publish_version
+    
+        def recording_publish(*args, **kwargs):
+            published_calls.append((args, kwargs))
+            return real_publish(*args, **kwargs)
+    
+        client.publish_version = recording_publish
+        sup = Supervisor(
+            client,
+            SupervisorPolicy(promote_gate=gate, min_improvement=0.02),
+            StaticProposer([{"definition": def_v2, "rationale": "outage ended"}]),
+        )
+        outcome = sup.iterate("demo", dataset)
+    
+        assert outcome["judge_unavailable_cases"] == {"baseline": 1, "candidate": 0}
+        comparison = outcome["comparison"]
+        assert comparison["avg_score"]["base"] == 0.5
+        assert comparison["avg_score"]["candidate"] == 1.0
+        assert comparison["regressions"] == []
+        assert comparison["improvements"] == ["c1"]
+>       assert outcome["status"] == "no_improvement"
+E       AssertionError: assert 'improved' == 'no_improvement'
+E         
+E         - no_improvement
+E         + improved
+
+plaita-ai/tests/test_evals_judge.py:317: AssertionError
+_____ test_judge_blind_blocks_promotion_when_candidate_avg_is_higher[auto] _____
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3301/test_judge_blind_blocks_promot1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105baf310>
+gate = 'auto'
+
+    @pytest.mark.parametrize("gate", ["manual", "auto"])
+    def test_judge_blind_blocks_promotion_when_candidate_avg_is_higher(
+        tmp_path, monkeypatch, gate
+    ):
+        """#229-B：baseline 有 judge_unavailable 用例、候选 avg 更高且无 regressions。
+    
+        judge 故障期间的分数与基线不可比（#60）：不能把「outage 结束」读成改进。
+        既有 ``test_supervisor_refuses_promotion_when_judge_was_down`` 的基线/候选
+        定义相同，走不到「avg 升 + 无 regressions + 盲评」的组合。
+        """
+        def_v1, def_v2 = '{"version": 1}', '{"version": 2}'
+        fake = FakeConsole()
+        fake.seed_flow("demo", {"1.0.0": def_v1}, published="1.0.0")
+        fake.dry_run_handler = _judge_trading_handler
+    
+        calls = {"n": 0}
+    
+        def judge(*args, **kwargs):
+            calls["n"] += 1
+            n = calls["n"]
+            if n == 1:
+                # baseline c0：judge 不可达 → 该 case 排除出均值（不计 0 分）
+                return unavailable()
+            if n in (2, 3):
+                # baseline c1/c2 的健康判分镜像内容分，保持 avg=0.5
+                return {"ok": n == 3, "score": 1.0 if n == 3 else 0.0, "reason": "healthy"}
+            return healthy()
+    
+        monkeypatch.setattr("plaita_ai.evals.evals.judge_output", judge)
+    
+        dataset = Dataset(
+            [
+                {"id": f"c{i}", "input": {"i": i},
+                 "expect": {"contains": "good", "judge": "is polite"}}
+                for i in range(3)
+            ],
+            source="judge-blind",
+        )
+        client = make_client(fake)
+        published_calls = []
+        real_publish = client.publish_version
+    
+        def recording_publish(*args, **kwargs):
+            published_calls.append((args, kwargs))
+            return real_publish(*args, **kwargs)
+    
+        client.publish_version = recording_publish
+        sup = Supervisor(
+            client,
+            SupervisorPolicy(promote_gate=gate, min_improvement=0.02),
+            StaticProposer([{"definition": def_v2, "rationale": "outage ended"}]),
+        )
+        outcome = sup.iterate("demo", dataset)
+    
+        assert outcome["judge_unavailable_cases"] == {"baseline": 1, "candidate": 0}
+        comparison = outcome["comparison"]
+        assert comparison["avg_score"]["base"] == 0.5
+        assert comparison["avg_score"]["candidate"] == 1.0
+        assert comparison["regressions"] == []
+        assert comparison["improvements"] == ["c1"]
+>       assert outcome["status"] == "no_improvement"
+E       AssertionError: assert 'improved' == 'no_improvement'
+E         
+E         - no_improvement
+E         + improved
+
+plaita-ai/tests/test_evals_judge.py:317: AssertionError
+=========================== short test summary info ============================
+FAILED plaita-ai/tests/test_evals_judge.py::test_judge_blind_blocks_promotion_when_candidate_avg_is_higher[manual]
+FAILED plaita-ai/tests/test_evals_judge.py::test_judge_blind_blocks_promotion_when_candidate_avg_is_higher[auto]
+2 failed, 11 passed in 0.35s
