@@ -1,0 +1,55 @@
+# plaita#234 负控：还原 start 载体判定 ⇒ checkpoint 被覆写 + 整条重放
+
+负控手法：与 #233 同一基线工作树（origin/main），跑**同一份** repro 与新增测试：
+
+```bash
+cd /tmp/w51-base   # git worktree add --detach /tmp/w51-base origin/main
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/tmp/w51-base \
+  /Users/jeff.jie/.venvs/plaita/bin/python docs/proofs/data/234-repro.py   # rc=1
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/tmp/w51-base \
+  /Users/jeff.jie/.venvs/plaita/bin/python -m pytest \
+  tests/unit/test_issue234_start_carrier_resume.py -q                     # 8 failed / 4 passed
+```
+
+## repro（`docs/proofs/data/234-repro.py`，基线期望红，rc=1）
+
+```
+[1] 重投前盘上: status='running' $LAST_NODE='b' $NODE keys=['a', 'b']
+[2] run_distributed kwargs = {}
+[2] saved_context 是否传入 = False
+[3] run_distributed 调用瞬间盘上 context = {}
+[4] 返回 = {'execution_id': 'exec-replay', 'is_end': True, 'context': {'$LAST_NODE': 'end'}}
+[5] 终态行重投 start → 是否重跑=True, 返回={'execution_id': 'exec-replay', 'is_end': True, 'context': {'$LAST_NODE': 'end'}}
+[6] 挂起行重投 start → 是否重跑=True, 返回={'execution_id': 'exec-replay', 'is_end': True, 'context': {'$LAST_NODE': 'end'}}
+[7] 首投: 是否跑=True, saved_context 是否传入=False
+
+RESULT: FAIL —— start 重投仍会覆写 checkpoint 并整条重放
+```
+
+精确红点：
+
+- `[2]` 重投的 start body 走到 `run_distributed` 时**不带 `saved_context`**；
+- `[3]` 引擎调用瞬间盘上 `context` 已被覆写成 `{}`（`$LAST_NODE` / `$NODE` /
+  `$INPUT` 全丢）；
+- `[5]` / `[6]` 已终态行、挂起行都被 start 载体**重新整条跑了一遍**
+  （终态被覆写回 running，挂起节点被重放）。
+
+## 新增测试（基线期望红：8 failed / 4 passed）
+
+```
+FAILED ...::TestStartRedeliveryResumesFromCheckpoint::test_uses_saved_checkpoint_and_does_not_overwrite
+FAILED ...::TestStartRedeliveryResumesFromCheckpoint::test_resume_type_is_continue
+FAILED ...::TestStartRedeliveryResumesFromCheckpoint::test_checkpoint_survives_until_engine_call
+FAILED ...::TestStartRedeliveryTerminalAndSuspended::test_terminal_row_is_idempotent[completed|error|cancelled]
+FAILED ...::TestStartRedeliveryTerminalAndSuspended::test_suspended_row_is_not_replayed
+FAILED ...::TestStartCarrierCompensationTogether::test_start_carrier_without_dedup_compensates_via_resume
+4 passed（TestFirstDeliveryUnchanged：首投/空 checkpoint/flow_id 不一致——本就不该变）
+```
+
+修复后：`12 passed`（rc=0）。
+
+## 与 #233 的组合断言
+
+`233-repro.py [4]` 与 `test_issue233...::test_start_carrier_without_dedup_compensates_via_resume`
+覆盖「#234 把 start 转成 resume 后，不能又被 #33 的 suspended 幂等短路
+ack 掉补派」——两者共用同一入口（`resume_flow`），基线两处同时红。

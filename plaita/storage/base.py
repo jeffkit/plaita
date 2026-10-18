@@ -122,6 +122,18 @@ class ExecutionState(BaseModel):
             "严格区分，读取方不得折算成 0；resume 不覆写既有值（零回归）。"
         ),
     )
+    dispatch_pending: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "挂起派发凭据（plaita#233）：``status=suspended`` 落盘时**与状态同一"
+            "行原子写入**，记录尚未确认投递的外延服务任务 "
+            "``{pending: true, service_type, service_config, node_id, recorded_at}``；"
+            "``_dispatch_service_task`` 成功后再清空。派发瞬断/进程在"
+            "「落盘→派发」窗口被杀 ⇒ 重投载体（resume/start）据此**幂等补派一次**。"
+            "None = 无待派发任务（含：老状态、正常派发成功、非服务节点挂起）——"
+            "读取方不得把 None 当成「已派发」，它只表示**没有可补偿的凭据**。"
+        ),
+    )
 
 class ExecutionStorage(ABC):
     """
