@@ -132,7 +132,11 @@ class TestG1WakeupIsBounded:
         """达限必须是**幂等返回**而非抛异常——抛异常会让调用方当失败重试。"""
         import inspect
 
-        src = inspect.getsource(RedisFlowWorker.resume_flow)
+        # #241 起前置判定抽到 _load_and_guard_resume_state（resume_flow 调用它
+        # 两次：租约前短路 + 租约内复核）；断言口径跟随真实代码路径。
+        src = inspect.getsource(RedisFlowWorker.resume_flow) + inspect.getsource(
+            RedisFlowWorker._load_and_guard_resume_state
+        )
         assert "g1_wakeups_exhausted" in src, "达限分支必须返回可识别的幂等结果"
         # 该分支内不得 raise
         seg = src.split("_g1_wakeup_budget_exhausted(execution_id)")[1]

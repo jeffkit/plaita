@@ -2841,26 +2841,19 @@ class FlowWorker:
                 _scrub_exception_text(persist_exc),
             )
 
-    def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
-                    data: Optional[Dict[str, Any]] = None,
-                    delivery_count: Optional[int] = None,
-                    params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        恢复流程执行。
+    def _load_and_guard_resume_state(
+        self, flow_id: str, execution_id: str, resume_type: str,
+    ) -> Tuple[ExecutionState, Optional[Dict[str, Any]]]:
+        """加载执行状态并跑 resume 前置判定，返回 ``(state, early_result)``。
 
-        取得 ``execution_id`` 租约后才推进；另一 worker 已持有租约时抛
-        ``ExecutionLeaseError``（RedisFlowWorker 对此**不** XACK，待租约过期后回收）。
+        ``early_result`` 非 None 表示本次 resume **不推进**（终态幂等 /
+        挂起幂等短路 / 唤醒预算耗尽），调用方原样返回即可。
 
-        Args:
-            flow_id: 流程ID
-            execution_id: 执行ID
-            resume_type: 恢复类型
-            data: 恢复数据
-            delivery_count: 消息投递次数（可观测；见 _process_execution_result）
-            params: 可选入参（#122）。只在盘上 checkpoint 为空时被引擎用来
-                重新 ``setup_flow``（start→resume 载体转换会撞上这种窗口）；
-                checkpoint 非空（正常 resume）时**不参与**——续跑一律以盘上
-                context 为准，续跑语义零变化。
+        两处调用（plaita#241）：租约**之前**一次，保留低成本前置短路与
+        #33「suspended + continue 不取租约」契约；取到租约后**必须再调
+        一次**并以这次为准——load 与 acquire 之间另一 worker 可能已把执行
+        推到终态并释放租约，旧快照不能用于推进（fencing 只拒绝旧世代写，
+        本 worker 拿到的是新一代，拦不住旧 state）。
         """
         # 加载执行状态。None 仅表示键不存在——Redis 后端的读取瞬断/反序列化
         # 失败现以上抛 ExecutionStateLoadError，由 run() 的重投递路径处理，
@@ -2870,7 +2863,7 @@ class FlowWorker:
             error_msg = f"找不到执行状态: {execution_id}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        
+
         # 验证流程ID是否匹配
         stored_flow_id = state.flow_id
         if stored_flow_id and stored_flow_id != flow_id:
@@ -2907,7 +2900,7 @@ class FlowWorker:
                 execution_id, self._read_g1_wakeup_count(execution_id),
                 self.G1_MAX_WAKEUPS,
             )
-            return {
+            return state, {
                 "execution_id": execution_id,
                 "status": state_status,
                 "already_terminal": True,
@@ -2932,7 +2925,7 @@ class FlowWorker:
                 execution_id, self._read_deterministic_failure_count(execution_id),
                 self.DETERMINISTIC_FAILURE_MAX,
             )
-            return {
+            return state, {
                 "execution_id": execution_id,
                 "status": state_status,
                 "already_terminal": True,
@@ -2942,7 +2935,7 @@ class FlowWorker:
             logger.info(
                 "执行 %s 已是终态 (%s)，跳过重复 resume", execution_id, state_status,
             )
-            return {
+            return state, {
                 "execution_id": execution_id,
                 "status": state_status,
                 "already_terminal": True,
@@ -2984,19 +2977,39 @@ class FlowWorker:
             }
             if compensated:
                 result["dispatch_compensated"] = True
-            return result
+            return state, result
 
-        if state_status == "running" and ResumeType.coerce(resume_type) is ResumeType.RETRY:
-            # running 执行没有失败节点可重跑（plaita#53 验收 2）：retry 在此的
-            # 语义 = 从 checkpoint 派发后继节点（与 continue 同路），**必须真实
-            # 重派**——禁止「受理后无动作」。显式留痕，值守从日志即可区分
-            # 「真的推进了」与「白等」（租约被他人持有等不生效情形另见 run()
-            # 的租约冲突日志）。
-            logger.warning(
-                "执行 %s 处于 running，resume_type=retry 按「从断点续跑」处理"
-                "（running 执行无失败节点可重跑），本次将从 checkpoint 派发后继节点",
-                execution_id,
-            )
+        return state, None
+
+    def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
+                    data: Optional[Dict[str, Any]] = None,
+                    delivery_count: Optional[int] = None,
+                    params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        恢复流程执行。
+
+        取得 ``execution_id`` 租约后才推进；另一 worker 已持有租约时抛
+        ``ExecutionLeaseError``（RedisFlowWorker 对此**不** XACK，待租约过期后回收）。
+
+        Args:
+            flow_id: 流程ID
+            execution_id: 执行ID
+            resume_type: 恢复类型
+            data: 恢复数据
+            delivery_count: 消息投递次数（可观测；见 _process_execution_result）
+            params: 可选入参（#122）。只在盘上 checkpoint 为空时被引擎用来
+                重新 ``setup_flow``（start→resume 载体转换会撞上这种窗口）；
+                checkpoint 非空（正常 resume）时**不参与**——续跑一律以盘上
+                context 为准，续跑语义零变化。
+        """
+        # 前置判定（租约之前）：终态/挂起幂等短路在此完成，保持 #33 的
+        # 「suspended + continue 不取租约」契约。这里拿到的 state 只是
+        # **预读快照**——取到租约后必须重读并以盘上状态为准（plaita#241）。
+        state, early_result = self._load_and_guard_resume_state(
+            flow_id, execution_id, resume_type
+        )
+        if early_result is not None:
+            return early_result
 
         # 获取流程版本
         version = state.flow_version
@@ -3035,6 +3048,43 @@ class FlowWorker:
             fence_token_reset = set_current_fence_token(fence_token)
 
         try:
+            # TOCTOU 复核（plaita#241）：上面的 load 发生在取租约**之前**。
+            # 若窗口内另一 worker 已把执行推到终态并释放租约，本 worker 随后
+            # 取得的是**新一代**租约——fencing 只拒绝旧世代写，不会拦它拿
+            # 旧 state 继续 run_distributed（节点副作用重放、终态行被二次
+            # 改写）。租约内重读并重跑前置判定；state/early_result 均以本次
+            # 为准，不复用 acquire 前的快照。
+            state, early_result = self._load_and_guard_resume_state(
+                flow_id, execution_id, resume_type
+            )
+            if early_result is not None:
+                logger.info(
+                    "执行 %s 租约内复核发现状态已变更（status=%s）：拒绝本次 "
+                    "resume，不复用 acquire 前的旧 state（plaita#241）",
+                    execution_id, early_result.get("status"),
+                )
+                # 具名拒绝：区别于入口即终态的重复投递——本次是**赢了租约
+                # 竞争、但盘上状态已由上一持有者推进**，测试/值守可据此
+                # 识别 TOCTOU 窗口，而不是当成普通幂等短路。
+                early_result["rejected_after_lease"] = True
+                return early_result
+
+            state_status = getattr(state, "status", "") or ""
+            retry_wakeup = state_status == "error" and \
+                ResumeType.coerce(resume_type) is ResumeType.RETRY
+            if state_status == "running" and \
+                    ResumeType.coerce(resume_type) is ResumeType.RETRY:
+                # running 执行没有失败节点可重跑（plaita#53 验收 2）：retry 在此的
+                # 语义 = 从 checkpoint 派发后继节点（与 continue 同路），**必须真实
+                # 重派**——禁止「受理后无动作」。显式留痕，值守从日志即可区分
+                # 「真的推进了」与「白等」（租约被他人持有等不生效情形另见 run()
+                # 的租约冲突日志）。
+                logger.warning(
+                    "执行 %s 处于 running，resume_type=retry 按「从断点续跑」处理"
+                    "（running 执行无失败节点可重跑），本次将从 checkpoint 派发后继节点",
+                    execution_id,
+                )
+
             # XCLAIM 恢复路径取消检查点（设计稿 §3.1）：crash 后 cancel 消息
             # 或任一 resume 消息被重投，若取消标志在（控制面对运行中执行写的
             # 意图键），直接终态化而非继续推进。上一 checkpoint 已落盘，

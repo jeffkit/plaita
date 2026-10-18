@@ -876,6 +876,22 @@ def test_all_registry_types_have_samples():
             )
 
 
+def test_example_demo_nodes_are_not_product_sweep():
+    """examples.* 演示节点不得进入产品扫掠集（集合随收集顺序漂移会假红）。
+
+    ``tests/e2e/test_agent_examples.py`` 收集时 import ``examples.agent.demo``，
+    后者进程级注册 ``llm``/``tool``/``retrieve``。全量会话（e2e 先于 unit）
+    因而比单跑 conformance 多出 14 条丢失面；pre-fix 基线同样红（plaita#241
+    落地时定位）。产品插件（``plaita*`` 模块）仍保留。
+    """
+    assert S._is_product_node_module("examples.agent.nodes") is False
+    assert S._is_product_node_module("examples") is False
+    assert S._is_product_node_module("plaita.node") is True
+    assert S._is_product_node_module("plaita_nodes.agentrun") is True
+    assert S._is_product_node_module("tests.unit.foo") is False
+    assert S._is_product_node_module("test_probe") is False
+
+
 def _is_known_systematic(t: str, ax: str, path: str) -> bool:
     """已知系统性模式：model 链丢 errorHandler/timeoutHandler 子对象
     （#238 头条发现——Flow.model_dump 序列化面不含错误/超时处理器；

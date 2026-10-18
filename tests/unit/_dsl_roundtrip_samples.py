@@ -49,15 +49,30 @@ from plaita.node import get_default_registry
 REG = get_default_registry()
 
 
+def _is_product_node_module(module: str) -> bool:
+    """节点类所属模块是否属于**产品面**（测试态与 examples 演示面之外）。
+
+    ``examples.agent.demo`` 在 import 时（e2e 模块收集期）就向进程级
+    default registry 注册 ``llm``/``tool``/``retrieve``。它们不是产品插件，
+    且会让扫掠集随 pytest 收集顺序漂移：单跑 conformance 时不在集合里，
+    全量会话（e2e 先于 unit）却多出 llm.model 10 条 + retrieve/tool 4 条
+    丢失面——pre-fix 基线同样红（plaita#241 落地时定位）。产品插件（
+    plaita-nodes 等，模块名 ``plaita*``）仍保留。
+    """
+    if module in ("tests", "examples"):
+        return False
+    return not module.startswith(("tests.", "test_", "examples."))
+
+
 def _is_product_node_type(ntype: str) -> bool:
     """默认 registry 里属于**产品面**的节点类型。
 
     ``get_default_registry()`` 是进程级单例：同一次 pytest 会话里，别的测试
     模块会在 import / fixture 期注册临时节点（``codeflow_test_*`` /
     ``issue*_probe``），并可能把默认不注册的 ``code`` 临时注册进来。扫掠对象
-    必须排除这些测试态类型，否则测试顺序一变（分块 CI / 全量单进程）就出现
-    「registry 有新类型但 harness 没样本」的假红。产品插件（plaita-nodes 等）
-    的类定义在 ``plaita*`` 模块下，保留。
+    必须排除这些测试态类型与 examples 演示节点，否则测试顺序一变（分块 CI /
+    全量单进程）就出现扫掠集漂移的假红。产品插件（plaita-nodes 等）的类定义
+    在 ``plaita*`` 模块下，保留。
     """
     if ntype == "code":
         # CodeNode 在 plaita 里**刻意默认不注册**（执行任意代码需显式 opt-in），
@@ -65,7 +80,7 @@ def _is_product_node_type(ntype: str) -> bool:
         return False
     cls = REG.get(ntype)
     module = str(getattr(cls, "__module__", "")) if cls is not None else ""
-    return not (module == "tests" or module.startswith(("tests.", "test_")))
+    return _is_product_node_module(module)
 
 
 #: 产品面节点类型（本单的扫掠对象；随已装插件集变化）。

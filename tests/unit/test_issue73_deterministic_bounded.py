@@ -226,7 +226,11 @@ class TestExhaustedShortCircuitsRetryWakeup:
         """端到端：判不可救后，`resume_flow(retry)` 必须幂等短路、不抛异常。"""
         import inspect
 
-        src = inspect.getsource(RedisFlowWorker.resume_flow)
+        # #241 起前置判定抽到 _load_and_guard_resume_state（resume_flow 调用它
+        # 两次：租约前短路 + 租约内复核）；断言口径跟随真实代码路径。
+        src = inspect.getsource(RedisFlowWorker.resume_flow) + inspect.getsource(
+            RedisFlowWorker._load_and_guard_resume_state
+        )
         assert "deterministic_failure_exhausted" in src, (
             "resume_flow 必须对「确定性失败不可救」短路，否则消息层重投继续空转"
         )
