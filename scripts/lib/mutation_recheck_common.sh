@@ -13,6 +13,7 @@
 #   mut_init_timeout                       # 解析 timeout/gtimeout，或启用 Python 回退
 #   mut_no_match_exit "$WHAT"              # 无匹配变异点时打印消息并 exit 1（修缺陷 2）
 #   mut_require_tests "$TESTS"             # 测试路径不存在则在开跑前中止（修缺陷 1）
+#   mut_timeout 600 mutmut run            # 任意命令的超时原语（#167 的共用面）
 #   mut_run "$m" 30 $TESTS ; rc=$?         # 跑一个变异点
 #   mut_classify $rc                       # 回显 survived | killed | error
 #
@@ -116,26 +117,35 @@ mut_require_tests() {
     fi
 }
 
+# 通用超时执行：$1=超时秒数，其余=命令。退出码保持命令原值；124=超时。
+# 所有 runner 辅助脚本（mut_run / recheck_mutants 自检 / baseline 的 mutmut run）
+# 共用这一处：没有 timeout/gtimeout 时用**解析出来的**解释器做纯 Python 回退，
+# 不再各自复制一份（#124 的裸 timeout 会以 127 伪造 killed；#167 要求同一解释器）。
+mut_timeout() {
+    local tmo="$1"; shift
+    if [[ -n "$MUT_TIMEOUT_BIN" ]]; then
+        "$MUT_TIMEOUT_BIN" "$tmo" "$@"
+        return $?
+    fi
+    "$MUT_PYTHON_BIN" - "$tmo" "$@" <<'PYEOF'
+import subprocess, sys
+tmo, args = float(sys.argv[1]), sys.argv[2:]
+try:
+    raise SystemExit(subprocess.run(
+        args, stdin=subprocess.DEVNULL, timeout=tmo).returncode)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+PYEOF
+}
+
 # 跑一个变异点：$1=变异名 $2=超时秒数 $3...=pytest 参数
 # 退出码：0=测试通过（可能 survived）；124=超时；其余=测试失败；127 不会出现。
 mut_run() {
     local m="$1" tmo="$2"; shift 2
-    if [[ -n "$MUT_TIMEOUT_BIN" ]]; then
-        MUTANT_UNDER_TEST="$m" "$MUT_TIMEOUT_BIN" "$tmo" \
-            "$MUT_PYTHON_BIN" -m pytest -x -q -p no:randomly "$@" \
-            < /dev/null 2>&1
-        return $?
-    fi
-    MUTANT_UNDER_TEST="$m" "$MUT_PYTHON_BIN" - "$MUT_PYTHON_BIN" "$tmo" "$@" <<'PYEOF'
-import subprocess, sys
-py, tmo, args = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
-try:
-    raise SystemExit(subprocess.run(
-        [py, "-m", "pytest", "-x", "-q", "-p", "no:randomly", *args],
-        stdin=subprocess.DEVNULL, timeout=tmo).returncode)
-except subprocess.TimeoutExpired:
-    raise SystemExit(124)
-PYEOF
+    # 赋值前缀会随函数调用导出给其子进程（pytest 需要看到 MUTANT_UNDER_TEST）。
+    MUTANT_UNDER_TEST="$m" mut_timeout "$tmo" \
+        "$MUT_PYTHON_BIN" -m pytest -x -q -p no:randomly "$@" \
+        < /dev/null 2>&1
 }
 
 # 把退出码分类：0 → survived；124/126/127 → error（**绝不**算 killed）；其余 → killed

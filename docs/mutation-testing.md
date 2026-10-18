@@ -1474,6 +1474,18 @@ shell 以 **rc=127** 退出，会被复核逻辑一律判成 `killed`——本�
 > 同一缺陷也存在于 `recheck_async_utils.sh` / `recheck_codeflow_expr.sh` / `recheck_sexpr.sh`
 > （issue 未提及，本轮一并修），三者改为 `source` 上述公共库。
 
+> **解释器解析的残余面（plaita#167 续，2026-10-18）**：所有会执行 pytest/mutmut 的
+> runner 辅助脚本——`recheck_mutants.sh`、`recheck_{async_utils,codeflow_expr,
+> codeflow_nodes,codeflow_stmt,sexpr}.sh`、`run_full_mutation_sweep.sh`、
+> `run_mutation_baseline.sh`、`run_mut_worker.sh`、`mutation-module-tests.sh`——统一
+> `source scripts/lib/mutation_recheck_common.sh`，解析顺序为
+> `PYTHON_BIN` → `$VIRTUAL_ENV/bin/python` → 仓根 `.venv/bin/python` → PATH 首个
+> ≥3.11（**source 期求值一次**，之后改环境变量不重新解析）。`mut_init_timeout` 在
+> 解析结果缺 pytest 时**具名中止**（缺什么、怎么修），不再让"没能执行"的 rc 落进
+> killed；`recheck_mutants.sh` / `run_full_mutation_sweep.sh` / `run_mutation_baseline.sh`
+> 不再各自复制 `${PYTHON_BIN:-python3}` 与裸 `timeout`。回归见
+> `tests/unit/test_issue167_python_resolution.py`。
+
 ## 2.13 event_node.py 接入（2026-07-08，94.9%）
 
 `plaita/node/event_node.py` 从阶段二基线的 **0%（0/80）** 提升至 **94.9%（187/197）**。
@@ -2192,6 +2204,7 @@ mutmut show <mutant-id>                # 只对真实 survived 看 diff
 | `scripts/run_full_mutation_sweep.sh` | 逐模块初筛 + recheck（主路径） |
 | `scripts/recheck_mutants.sh` | 假阳复核 |
 | `scripts/run_mutation_baseline.sh` | async 逐点独立进程（慢、可信） |
+| `scripts/lib/mutation_recheck_common.sh` | 共享解释器解析 / 超时原语 / 退出码分类 |
 | `tests/unit/*_mutations.py` | 精准杀灭套件 |
 | `docs/mutation-testing-handoff.md` | **已过时**，勿作基线；以本文为准 |
 
