@@ -1,0 +1,61 @@
+# plaita#233 负控：还原挂起派发凭据/补偿 ⇒ 执行永久 suspended
+
+负控手法（在 origin/main 基线工作树上跑**同一份** repro 与新增测试）：
+
+```bash
+git worktree add --detach /tmp/w51-base origin/main
+cp tests/unit/test_issue233_suspend_dispatch_compensation.py \
+   docs/proofs/data/233-repro.py /tmp/w51-base/<对应路径>/
+find /tmp/w51-base -name __pycache__ -type d -prune -exec rm -rf {} +
+cd /tmp/w51-base
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/tmp/w51-base \
+  /Users/jeff.jie/.venvs/plaita/bin/python docs/proofs/data/233-repro.py   # rc=1
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/tmp/w51-base \
+  /Users/jeff.jie/.venvs/plaita/bin/python -m pytest \
+  tests/unit/test_issue233_suspend_dispatch_compensation.py -q            # 10 failed
+```
+
+（等价于 `git checkout origin/main -- plaita/server/flow_worker.py
+plaita/storage/base.py`——基线里没有 `dispatch_pending` 字段，也没有
+`_compensate_suspend_dispatch` / `_clear_suspend_dispatch_pending`。）
+
+## repro（`docs/proofs/data/233-repro.py`，基线期望红，rc=1）
+
+```
+[1] 盘上状态: status='suspended' end_time=None error=None
+[1] 派发凭据 dispatch_pending = None
+[1] plaita:delay:queue 长度 = 0（派发瞬断，应为 0）
+[2] 重投 resume_type=continue 返回: {'execution_id': 'exec-dispatch-retry', 'status': 'suspended', 'already_suspended': True}
+[2] 挂起节点是否重跑: False
+[2] plaita:delay:queue 长度 = 0
+[3] 第二次重投返回: {'execution_id': 'exec-dispatch-retry', 'status': 'suspended', 'already_suspended': True}; plaita:delay:queue 长度 = 0
+[4] start 幂等命中返回: {'execution_id': 'exec-dispatch-retry', 'status': 'suspended', 'deduplicated': True}; 是否重跑=False
+[4] plaita:delay:queue 长度 = 0
+[5] 末态: status='suspended' end_time=None error=None marker=None
+
+RESULT: FAIL —— 挂起派发缺口仍在（执行可能永久 suspended）
+```
+
+精确红点：落盘 suspended 后 rpush 瞬断，重投 continue（#33 幂等短路）、再投一次、
+start 载体（dedup 命中）**三条载体**都没有补派；`plaita:delay:queue` 恒 0 条，
+执行停在 `suspended` 且 `error=None` / `end_time=None`，无组件会再推进它。
+
+## 新增测试（基线期望红）
+
+```
+18 failed, 4 passed, 1 warning
+```
+
+- 233 的 10 条全红（`test_suspend_persists_marker_before_dispatch` /
+  `test_successful_dispatch_clears_marker` /
+  `test_redelivered_resume_dispatches_exactly_once[continue|retry]` /
+  `test_second_redelivery_adds_no_second_task` /
+  `test_compensation_failure_keeps_marker_and_raises` /
+  `test_start_dedup_hit_compensates_pending_dispatch` /
+  `test_skips_when_lease_held_by_active_worker` /
+  `test_no_stale_write_when_disk_state_progressed` …）；
+- 234 的 8 条红（见 `234-negative-control.txt`）；
+- 4 条 passed 是**行为不变**守门（首投 / 空 checkpoint / flow_id 不一致等），
+  基线本就该绿——它们证明修复没有顺手改掉既有语义。
+
+修复后同一命令：`22 passed`（rc=0）。

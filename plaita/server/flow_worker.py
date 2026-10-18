@@ -2402,12 +2402,78 @@ class FlowWorker:
                 "start 幂等键命中：执行 %s 仍在 running，但无队列可重入队 resume"
                 "（内存 worker），执行可能停滞", mapped_execution_id,
             )
-        # suspended / 无队列的 running：只回报现状（绝不二次 start）
+        # suspended：只回报现状（绝不二次 start）；但若落盘留着未清的派发
+        # 凭据（plaita#233 的「落盘→派发」窗口），这条 start 重投是仅存的
+        # 载体——在返回前补派一次（不重跑挂起节点，不重入队 continue）。
+        if status == "suspended":
+            compensated = self._compensate_suspend_dispatch(
+                state, mapped_execution_id, source="start_dedup_hit"
+            )
+            result = {
+                "execution_id": mapped_execution_id,
+                "status": status,
+                "deduplicated": True,
+            }
+            if compensated:
+                result["dispatch_compensated"] = True
+            return result
+        # 无队列的 running：只回报现状（绝不二次 start）
         return {
             "execution_id": mapped_execution_id,
             "status": status,
             "deduplicated": True,
         }
+
+    def _existing_start_checkpoint(
+        self, flow_id: str, execution_id: str
+    ) -> Optional[ExecutionState]:
+        """start 重投时的查盘判定（plaita#234）：返回非 None = 应转 resume 语义。
+
+        判据与 #91 ``_requeue_body_for_retry`` 一致，但覆盖**所有** start 重投
+        来源（XCLAIM 回收 / 死信重入队 / 显式重投），而不只是显式重投那条：
+
+        - 盘上无行 → None（首投，行为逐字不变）；
+        - ``flow_id`` 不一致 → None（转 resume 会被 resume_flow 的流程 ID 校验
+          打成 ValueError poison ack 丢消息；保持原样 start 让不匹配在常规路径
+          暴露）；
+        - 终态（completed/error/cancelled）→ 返回状态：resume_flow 终态短路
+          幂等回报现状，**不重跑**（重放会把已终态行覆写回 running）；
+        - suspended → 返回状态：#33 幂等短路 + #233 挂起补派，**不重跑挂起
+          节点**；
+        - running 且 checkpoint 非空 → 返回状态：从断点续跑（``saved_context``
+          由 resume_flow 携带）；
+        - running 且 checkpoint 为空 → None：start→resume 转换的空 checkpoint
+          窗口（首节点尚未成功过），现有行为不变。
+
+        读盘失败**原样上抛**（``ExecutionStateLoadError`` 非 ValueError，
+        run() 走不 ack 重投）：判定不了有没有断点时，重投一次的成本远低于
+        把已有副作用整条重放。
+        """
+        try:
+            state = self.execution_storage.load_execution_state(execution_id)
+        except Exception as exc:  # noqa: BLE001 — 查盘失败不改写语义，只上抛重投
+            logger.error(
+                "start 载体查盘失败（无法判定是否已有断点，消息将不 ack 重投）: "
+                "execution_id=%s: %s", execution_id, _scrub_exception_text(exc),
+            )
+            raise
+        if state is None:
+            return None
+        stored_flow_id = getattr(state, "flow_id", None)
+        if stored_flow_id and stored_flow_id != flow_id:
+            logger.warning(
+                "start 载体 flow_id 与盘上行不一致（body=%r stored=%r），按首投处理",
+                flow_id, stored_flow_id,
+            )
+            return None
+        status = (getattr(state, "status", "") or "").strip()
+        if status in TERMINAL_EXECUTION_STATUSES:
+            return state
+        if status == "suspended":
+            return state
+        if state.context:
+            return state
+        return None
 
     def _finalize_observers(self) -> None:
         """run 终结（completed/failed）时收尾观测回调。
@@ -2485,6 +2551,11 @@ class FlowWorker:
             # 否则就地铸造；行 id 与 result.execution_id 天然一致。异常遗留
             # 的 running 行是 zombie，交 reaper/心跳年龄判定处置。
             # 位置前移到执行器构造之前：节点耗时采集器按执行登记，需要 id 已定。
+            # preminted（plaita#234）：只有自带 id 的载体才可能命中盘上已有
+            # 断点；就地铸造的 id 天然是首次执行，不必多读一次盘。
+            preminted_execution_id = bool(
+                isinstance(execution_id, str) and execution_id.strip()
+            )
             execution_id = execution_id or uuid.uuid4().hex
 
             # 创建流程执行器并执行流程
@@ -2530,6 +2601,42 @@ class FlowWorker:
                             "start 幂等键孤儿释放后被并发认领，本次启动不设防: %s",
                             dedup_key,
                         )
+
+            # 载体转换（plaita#234）：start 消息**不是只能从首节点起跑**。
+            # 盘上已有该 execution_id 的断点时（worker 崩溃/滚动重启、
+            # StatePersistError、ServiceDispatchError 后消息不 ack 被 XCLAIM
+            # 原样回收——这条回收路径**不经过** #91 的
+            # ``_requeue_body_for_retry``），历史实现会新建 `context={}` 的
+            # 行无条件覆写盘上 checkpoint，再以**不带 saved_context** 的
+            # ``run_distributed`` 从首节点整条重放：已完成节点的外部副作用
+            # 最多重复 max_deliveries 次，且 $LAST_NODE/$NODE/$INPUT 被永久
+            # 抹成 {}，此后连正确的 event/continue resume 也失去续跑现场。
+            #
+            # 修法：把 start 载体**转成 resume 语义**（判定口径与 #91 一致，
+            # 但入口收在 start_flow，覆盖「重投不经 _requeue_body_for_retry」
+            # 的那条路），复用 resume_flow 已有的全部保护：终态/挂起幂等短路
+            # （不重跑）、flow_hash 校验、取消检查、租约，以及 #233 的挂起
+            # 补派。此时尚未取得 start 租约（两者共用同一 execution_id 租约
+            # 键），转调不会自撞锁。
+            if preminted_execution_id:
+                existing_state = self._existing_start_checkpoint(flow_id, execution_id)
+                if existing_state is not None:
+                    logger.warning(
+                        "start 载体命中盘上已有断点（execution_id=%s, status=%s, "
+                        "checkpoint=%s）：转 resume 语义，绝不整条重放/覆写 checkpoint",
+                        execution_id,
+                        existing_state.status,
+                        "有" if existing_state.context else "空",
+                    )
+                    # 时间线采集器**保留**：resume 路径的 _handlers_for 会复用
+                    # 同一采集器，从而保住本消息的 enqueued_at/run_start（#25）。
+                    return self.resume_flow(
+                        flow_id,
+                        execution_id,
+                        "continue",
+                        delivery_count=delivery_count,
+                        params=params,
+                    )
 
             # 先落 running 行再执行（P0 可见性）：首节点期间 /api/executions
             # 查得到此行、cancel 有锚。flow_hash：对**存储中的原始定义**计算
@@ -2854,15 +2961,29 @@ class FlowWorker:
         if state_status == "suspended" and ResumeType.coerce(resume_type) in (
             ResumeType.CONTINUE, ResumeType.RETRY,
         ):
+            # plaita#233：短路**不等于什么都不做**。挂起行上若留着未清的
+            # 派发凭据（「落盘 suspended → 派发」窗口里派发失败/进程被杀），
+            # 这条 continue/retry 重投就是唯一还在的载体——不补派的话
+            # delay/approval 任务永远发不出去，执行永久 suspended。补派
+            # **不重跑挂起节点**（#33 契约不变：不取租约、不造 FlowExecution、
+            # 状态原样），只把 service_config 幂等重投一次并清凭据；
+            # 补派失败抛 ServiceDispatchError → 消息不 ack 继续重投。
+            compensated = self._compensate_suspend_dispatch(
+                state, execution_id, source=f"resume:{resume_type}"
+            )
             logger.info(
                 "执行 %s 处于 suspended（挂起节点待事件决议），resume_type=%s "
-                "不携带推进语义，幂等跳过", execution_id, resume_type,
+                "不携带推进语义，幂等跳过%s", execution_id, resume_type,
+                "（已补派未投递的挂起服务任务）" if compensated else "",
             )
-            return {
+            result = {
                 "execution_id": execution_id,
                 "status": state_status,
                 "already_suspended": True,
             }
+            if compensated:
+                result["dispatch_compensated"] = True
+            return result
 
         if state_status == "running" and ResumeType.coerce(resume_type) is ResumeType.RETRY:
             # running 执行没有失败节点可重跑（plaita#53 验收 2）：retry 在此的
@@ -3261,6 +3382,13 @@ class FlowWorker:
             is_end = result.get("is_end", False)
             is_suspend = result.get("is_suspend", False)
 
+            # plaita#233：任何**非挂起**去向（完成/取消/步进/错误）都意味着
+            # 挂起节点已被越过或决议，残留的「待派发」凭据必须就地清掉——
+            # 否则执行早已续跑/终态化，之后任何一次 continue 重投还会拿旧
+            # 凭据补派一条早已过期的外延任务。
+            if not is_suspend:
+                state.dispatch_pending = None
+
             if is_end:
                 # 落盘前失租检查（波次② §4.1）：看门狗已判死则不写状态，
                 # 消息不 ack 走重投——防止与接管者双写终态
@@ -3275,8 +3403,30 @@ class FlowWorker:
                 self._raise_if_lease_lost(lease_execution_id)
                 state.status = "suspended"
                 state.context = context
+                # plaita#233：「落盘 → 派发」是两段非原子操作，中间死掉时
+                # 没有任何载体能补派（#33 对 suspended+continue 幂等短路、
+                # start 只回报现状、无巡检），执行永久 suspended 且无
+                # error/end_time。修法 = **落盘时带上待派发凭据**
+                # （dispatch_pending，与 suspended 同一次写），派发成功后
+                # 再清；重投载体（resume/start）据此补派一次。
+                #
+                # 为什么是「先落盘 + 凭据」而不是「先派发再落盘」：
+                # ① 先派发后落盘时，「派发成功、落盘失败」是**常态窗口**
+                #    （StatePersistError 正是设计上要不 ack 重投的瞬态），
+                #    每次重投都会重跑挂起节点再派一条 → 重复任务 + 节点副作用
+                #    重放；
+                # ② 先落盘后派发时，失败窗口的代价只是「任务没发出去」，由
+                #    凭据补派收敛到恰好一次（极端残留见
+                #    ``_clear_suspend_dispatch_pending``）。
+                # 即：把「已发生的外部投递」放在「可重放的落盘」之后，让
+                # 不确定窗口只覆盖可补偿的一侧。
+                has_dispatch = self._mark_suspend_dispatch_pending(state, result, context)
                 self._persist_state_or_raise(execution_id, state, "suspended")
                 self._dispatch_service_task(result, context, execution_id)
+                if has_dispatch:
+                    self._clear_suspend_dispatch_pending(
+                        execution_id, state, source="suspend"
+                    )
                 break
             else:
                 # 取消检查点（波次① §3.1 选型 B）：控制面对运行中执行只写
@@ -3459,6 +3609,166 @@ class FlowWorker:
 
         return result
 
+    @staticmethod
+    def _resolve_service_task(
+        result: Dict[str, Any], context: Dict[str, Any]
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """从挂起结果解析 ``(service_config, subtype)``；非服务节点返回 ``(None, "")``。
+
+        单一解析口（plaita#233）：派发路径与**落盘凭据**必须看到同一份配置——
+        两处各写一遍解析逻辑，一旦分叉就会出现「凭据记了 A、实际派发 B」的
+        补偿错投。
+        """
+        service_config = (result or {}).get("service_config")
+        if not isinstance(service_config, dict) or not service_config:
+            nodes = (context or {}).get("$NODE") or {}
+            last_node = (context or {}).get("$LAST_NODE")
+            node_result = nodes.get(last_node) if last_node else None
+            if isinstance(node_result, dict):
+                service_config = node_result.get("service_config")
+        if not isinstance(service_config, dict) or not service_config:
+            return None, ""
+        subtype = str(service_config.get("type") or (result or {}).get("node_subtype") or "").strip()
+        if not subtype:
+            return None, ""
+        return dict(service_config), subtype
+
+    @staticmethod
+    def _pending_suspend_dispatch(state: Any) -> Optional[Dict[str, Any]]:
+        """读取未清的挂起派发凭据（plaita#233）；None = 无可补偿对象。
+
+        老状态没有该字段（pydantic 默认 None）⇒ 一律按「无可补偿」处理：
+        升级前已卡住的 suspended 执行维持原状，零回归（无法凭空知道它是否
+        派发过——猜错会造重复任务）。
+        """
+        marker = getattr(state, "dispatch_pending", None)
+        if isinstance(marker, dict) and marker.get("pending"):
+            return marker
+        return None
+
+    def _mark_suspend_dispatch_pending(
+        self, state: ExecutionState, result: Dict[str, Any], context: Dict[str, Any]
+    ) -> bool:
+        """把「待派发」凭据写进状态对象（plaita#233），由调用方与 suspended
+        **同一次落盘**写下——凭据与状态原子同写，才不会出现「状态已挂起、
+        凭据没记」的不可补偿窗口。
+
+        返回 True = 本次有需要派发的任务（凭据已记）；False = 非服务节点挂起，
+        不需要派发，也不留凭据（避免每挂起一次都多一次无意义的二写）。
+        """
+        service_config, subtype = self._resolve_service_task(result, context)
+        if service_config is None:
+            state.dispatch_pending = None
+            return False
+        state.dispatch_pending = {
+            "pending": True,
+            "service_type": subtype,
+            "service_config": service_config,
+            "node_id": (context or {}).get("$LAST_NODE"),
+            "recorded_at": datetime.now().isoformat(),
+        }
+        return True
+
+    def _clear_suspend_dispatch_pending(
+        self, execution_id: str, state: ExecutionState, *, source: str
+    ) -> None:
+        """派发成功后清凭据（plaita#233）：投递完成与「已派发」标记同一收口。
+
+        清不清得掉决定**幂等性**：清掉后同一载体的再次重投不会再补派第二条；
+        清失败（Redis 瞬断）必须上抛不 ack——吞掉会让标记永久留在盘上，
+        下一次任何 resume/start 都会再补派一次。残留窗口（rpush 已成功、
+        这次清标记的落盘失败）里重投**可能补派重复任务**，由服务侧
+        幂等/租约语义吸收，代价远小于「永久 suspended」。
+        """
+        if getattr(state, "dispatch_pending", None) is None:
+            return
+        state.dispatch_pending = None
+        try:
+            self._persist_state_or_raise(
+                execution_id, state, f"suspend_dispatched_{source}"
+            )
+        except StatePersistError:
+            logger.error(
+                "执行 %s 挂起派发已成功但清除派发凭据失败（%s）——消息将不 ack 重投，"
+                "重投可能**重复派发一次**该外延任务（服务侧需幂等）",
+                execution_id, source,
+            )
+            raise
+
+    def _compensate_suspend_dispatch(
+        self, state: ExecutionState, execution_id: str, *, source: str
+    ) -> bool:
+        """挂起补偿派发（plaita#233）：把落盘凭据里的服务任务幂等重投一次。
+
+        触发面（三条载体共用本函数）：``resume_flow`` 的 suspended 幂等短路
+        （continue/retry）、start 载体（非 dedup 走 resume 委托 / dedup 命中
+        分支）。**不重跑挂起节点**（#33 契约不变），只补「落盘→派发」窗口
+        丢掉的投递。
+
+        返回 True = 本次确实补派了；False = 无凭据 / 已被他人推进 / 持有者
+        活跃（跳过，由持有者推进并重新派发）。
+
+        为什么补派要**短暂持执行租约 + 持锁后重读**（而不是直接拿入口加载的
+        快照去写）：
+
+        - 补派成功后要「清凭据 = 再写一次状态行」，无租约的写是 last-writer-
+          wins——若此刻另一 worker 正持租约把该执行推向终态，这次写会把旧
+          ``suspended`` 快照**倒灌回盘**（唤醒一个已终态的执行）；
+        - 持锁重读顺带消掉「并发重复载体各补派一条」的竞态：只有租约持有者
+          能补派，另一个直接跳过。租约只覆盖「补派 + 清凭据」这一小段（毫秒
+          级），不改变 #33 短路「不重跑、不推进」的语义（无凭据时根本不取租约
+          ——见 ``test_issue33_suspended_continue_guard`` 的零租约断言）。
+        - 租约被活跃持有者占着 ⇒ 跳过而不是抛：对方要么正在推进（会在自己的
+          挂起分支重新派发），要么其载体仍留在 PEL 会被重投，凭据不会被遗忘。
+        """
+        if self._pending_suspend_dispatch(state) is None:
+            return False
+        holder = new_holder_token(
+            prefix="dispatch", instance_id=getattr(self, "instance_id", None)
+        )
+        lease_value, fence_token = self._acquire_lease(execution_id, holder)
+        if lease_value is None:
+            logger.warning(
+                "执行 %s 挂起补派跳过（source=%s）：执行租约被另一 worker 持有，"
+                "由其推进/重新派发", execution_id, source,
+            )
+            return False
+        fence_token_reset = None
+        if fence_token is not None:
+            fence_token_reset = set_current_fence_token(fence_token)
+        try:
+            # 持锁后重读：入口快照可能已被他人推进/终态化，绝不能拿旧快照覆写。
+            fresh = self.execution_storage.load_execution_state(execution_id)
+            marker = (
+                self._pending_suspend_dispatch(fresh) if fresh is not None else None
+            )
+            if marker is None or (getattr(fresh, "status", "") or "") != "suspended":
+                logger.info(
+                    "执行 %s 挂起补派跳过（source=%s）：盘上已无待派凭据或状态已变"
+                    "（status=%r）", execution_id, source,
+                    getattr(fresh, "status", None) if fresh is not None else None,
+                )
+                return False
+            service_config = marker.get("service_config")
+            service_config = (
+                dict(service_config) if isinstance(service_config, dict) else {}
+            )
+            subtype = str(marker.get("service_type") or service_config.get("type") or "")
+            logger.warning(
+                "执行 %s 挂起但派发凭据未清（source=%s, service=%s, node=%s）："
+                "补派一次外延服务任务",
+                execution_id, source, subtype or "?", marker.get("node_id"),
+            )
+            self._dispatch_service_task(
+                {"service_config": service_config}, fresh.context or {}, execution_id
+            )
+            self._clear_suspend_dispatch_pending(execution_id, fresh, source=source)
+            return True
+        finally:
+            if fence_token_reset is not None:
+                reset_current_fence_token(fence_token_reset)
+            self.execution_lease.release(execution_id, lease_value)
+
     def _dispatch_service_task(
         self, result: Dict[str, Any], context: Dict[str, Any], execution_id: str
     ) -> None:
@@ -3471,17 +3781,8 @@ class FlowWorker:
         由对应外延服务消费（DelayService 等）。
         无 redis 客户端（单测/纯内存派生类）时跳过投递。
         """
-        service_config = result.get("service_config")
-        if not isinstance(service_config, dict) or not service_config:
-            nodes = (context or {}).get("$NODE") or {}
-            last_node = (context or {}).get("$LAST_NODE")
-            node_result = nodes.get(last_node) if last_node else None
-            if isinstance(node_result, dict):
-                service_config = node_result.get("service_config")
-        if not isinstance(service_config, dict) or not service_config:
-            return
-        subtype = str(service_config.get("type") or result.get("node_subtype") or "").strip()
-        if not subtype:
+        service_config, subtype = self._resolve_service_task(result, context)
+        if service_config is None:
             return
         redis_client = getattr(self, "redis_client", None)
         if redis_client is None or not hasattr(redis_client, "rpush"):
