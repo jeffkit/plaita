@@ -5,10 +5,12 @@ HTTP回调服务实现
 Track C 任务2（2026-10 分布式可靠性修复）：回调注册历史上存进程内 dict
 （``registered_callbacks``）——服务重启全丢、多实例时回调请求打到另一实例
 查无此路径。现迁 Redis：每回调路径一条 JSON 记录键（带 TTL 自清理，与仓内
-7 天键惯例一致）。回调处理是**原子认领**（Lua GET+DEL 一体）：多实例并发
-到达同一回调路径时恰一实例触发事件，另一实例得到「未注册」——修复前两步
-写在多实例下会双触发 resume。无 redis_client（单测/内存模式）回退进程内
-dict，get_registered_callbacks 返回形状不变。
+7 天键惯例一致）。回调处理是**两阶段认领**（plaita#188：Lua GET +
+``SET claim NX PX`` 占位，发布成功后才删记录）：多实例并发到达同一回调路径
+时恰一实例触发事件，另一实例得到「未注册」；发布失败只释放占位，记录保持
+可认领，外部重试不会永远被答成「未注册」（历史 GET+DEL 一体在瞬断下丢记录）。
+无 redis_client（单测/内存模式）回退进程内 dict，
+get_registered_callbacks 返回形状不变。
 
 #113（2026-10 安全收口）：``HttpCallbackNode`` 生成的
 ``service_config["auth_config"]``（token / basic / signature）历史上只落库、
@@ -35,6 +37,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -64,15 +67,26 @@ CALLBACK_SIGNATURE_TOLERANCE_SECONDS = 300
 # （logger.warning），不进响应。三处失败返回共用该常量，结构上无法再分叉。
 CALLBACK_FAILURE_MESSAGE = "回调路径未注册"
 
-# 原子认领：GET+DEL 一体。两个实例同时到达时恰一实例拿到注册信息并触发，
-# 另一实例得到 nil →「回调路径未注册」。GET 与 DEL 拆成两步（先 GET 处理、
-# 处理完 DEL）在多实例下会让两个实例都触发事件 → 双 resume。
+# 认领（plaita#188）：两阶段，**不再认领即删除**。
+# 1. GET 记录 → ``SET claim NX PX`` 占位（两个实例并发到达时恰一个拿到 → 单触发）；
+# 2. resume 事件发布成功后 DEL 记录 + DEL 占位；
+# 3. 发布失败只 DEL 占位，记录**本体仍在**——外部回调提供方的下一次重试可以
+#    重新认领并触发。
+# 历史实现 GET+DEL 一体：发布瞬断时记录已被删除且无回滚，重试永远得到
+# 「回调路径未注册」，挂起执行只剩 EventReconciler 一条（同一 Redis 故障下
+# 落盘也失败 ⇒ 无补偿）。#35 同型（认领/删除先于可恢复的投递）。
 _CLAIM_CALLBACK_LUA = """
 local v = redis.call('get', KEYS[1])
 if not v then return false end
-redis.call('del', KEYS[1])
+if not redis.call('set', KEYS[2], '1', 'NX', 'PX', ARGV[1]) then
+  return false
+end
 return v
 """
+
+# 处理中占位的 TTL（毫秒）：发布成功后立即 DEL；进程在发布成功后崩溃时，
+# 记录仍在，占位最长阻塞 30s 的重试（宁可短暂不可认领，不可双 resume）。
+CALLBACK_CLAIM_TTL_MS = 30_000
 
 
 class HttpCallbackService(BaseExtendedService):
@@ -95,6 +109,13 @@ class HttpCallbackService(BaseExtendedService):
         self._record_prefix = (service_config or {}).get(
             "http_callback_record_prefix", "plaita:http_callback:registered:"
         )
+        # plaita#188：处理中占位（Redis 走单独键；内存模式走本集合）。记录在
+        # 认领期间**不删除**，发布失败时释放占位即可重试。
+        self._claim_prefix = (service_config or {}).get(
+            "http_callback_claim_prefix", "plaita:http_callback:claim:"
+        )
+        self._claims_in_progress: set = set()
+        self._claim_lock = threading.Lock()
 
     @property
     def _use_redis(self) -> bool:
@@ -103,6 +124,10 @@ class HttpCallbackService(BaseExtendedService):
 
     def _record_key(self, path: str) -> str:
         return f"{self._record_prefix}{path}"
+
+    def _claim_key(self, path: str) -> str:
+        """处理中占位键（plaita#188）——与注册键分离，记录本体不动。"""
+        return f"{self._claim_prefix}{path}"
 
     # ------------------------------------------------------------------
     # 注册记录读取 / 认领
@@ -115,18 +140,54 @@ class HttpCallbackService(BaseExtendedService):
         return self.registered_callbacks.get(path)
 
     def _claim_callback_record(self, path: str) -> Optional[Dict[str, Any]]:
-        """原子认领注册记录（Redis: Lua GET+DEL 一体；内存: pop）。
+        """两阶段认领注册记录（plaita#188）：占位而不删除。
 
-        未注册或已被其他实例抢走时返回 None。认领**必须**发生在凭据校验
-        通过之后：GET+DEL 一体意味着认领即删除，先认领会让一次未授权请求
-        删掉注册记录，把挂起执行变成永久失醒。
+        Redis: Lua `GET` + `SET <claim> NX PX`；内存: 记录留在 dict 里、
+        路径进 ``_claims_in_progress``。未注册或已被其他实例占位时返回 None。
+
+        认领**必须**发生在凭据校验通过之后（#113）：占位虽不删记录，但先占位
+        会让一次未授权请求把合法回调挡在「处理中」窗口外。
+
+        记录本体只在 resume 事件**发布成功后**才删除（``_finish_callback_claim``）
+        ——发布失败可回滚（``_release_callback_claim``），外部重试仍可再认领。
         """
         if self._use_redis:
             raw = self._redis_client.eval(
-                _CLAIM_CALLBACK_LUA, 1, self._record_key(path)
+                _CLAIM_CALLBACK_LUA,
+                2,
+                self._record_key(path),
+                self._claim_key(path),
+                CALLBACK_CLAIM_TTL_MS,
             )
             return json.loads(raw) if raw else None
-        return self.registered_callbacks.pop(path, None)
+        with self._claim_lock:
+            info = self.registered_callbacks.get(path)
+            if info is None or path in self._claims_in_progress:
+                return None
+            self._claims_in_progress.add(path)
+            return info
+
+    def _finish_callback_claim(self, path: str) -> None:
+        """事件已发布：删除注册记录（先）与处理中占位（后）。
+
+        顺序是刻意的：记录先删 ⇒ 即使进程随后崩溃（占位残留）也不会双 resume，
+        最坏是占位 TTL 内不可认领——记录本来就该没了。
+        """
+        if self._use_redis:
+            self._redis_client.delete(self._record_key(path))
+            self._redis_client.delete(self._claim_key(path))
+            return
+        with self._claim_lock:
+            self.registered_callbacks.pop(path, None)
+            self._claims_in_progress.discard(path)
+
+    def _release_callback_claim(self, path: str) -> None:
+        """发布失败：只释放处理中占位，注册记录保持可再次认领。"""
+        if self._use_redis:
+            self._redis_client.delete(self._claim_key(path))
+            return
+        with self._claim_lock:
+            self._claims_in_progress.discard(path)
 
     # ------------------------------------------------------------------
     # 认证校验（消费 auth_config —— 历史缺陷 #113：生产后零读取）
@@ -304,6 +365,7 @@ class HttpCallbackService(BaseExtendedService):
             # 只清进程内存回退态；Redis 注册是跨实例共享的持久态，停机不清
             # （带 TTL 自清理）。
             self.registered_callbacks.clear()
+            self._claims_in_progress.clear()
             logger.info("HTTP回调服务已停止")
             return True
         except Exception as e:  # noqa: BLE001 — 停止失败只告警不扩散
@@ -406,8 +468,23 @@ class HttpCallbackService(BaseExtendedService):
                 "success": True
             }
 
-            # 触发事件
-            await self.trigger_event(task_config.get("event_type"), event_data)
+            # 触发事件。plaita#188：认领是两阶段的——发布成功才删记录，
+            # 发布失败释放占位、记录保持可认领（外部重试不会被答成「未注册」）。
+            published = False
+            try:
+                await self.trigger_event(task_config.get("event_type"), event_data)
+                published = True
+            finally:
+                try:
+                    if published:
+                        self._finish_callback_claim(path)
+                    else:
+                        self._release_callback_claim(path)
+                except Exception as exc:  # noqa: BLE001 — 收尾失败不改变已定的投递结果
+                    logger.warning(
+                        "HTTP回调认领收尾失败（不改变本次投递结果）: %s: %s",
+                        path, _scrub_exception_text(exc),
+                    )
 
             logger.info("HTTP回调已处理: %s", path)
 

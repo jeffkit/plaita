@@ -81,6 +81,21 @@ def _compile_node_call(
             spec["timeout"] = _const(kw["timeout"])
         if "input" in kw:
             spec["input"] = _const(kw["input"])
+        # #200：HTTP 访问策略字段（SSRF 防护面）此前不在内置 kind 的手写链里
+        # ⇒ 发射器即使写出 `allowed_hosts=...` 也会被编译期静默丢弃。camel 与
+        # snake 两种 kwarg 拼写都收（与 `_emit.py` 的发射侧对称）。
+        for ir_key, spellings in (
+            ("allowedHosts", ("allowed_hosts", "allowedHosts")),
+            ("deniedHosts", ("denied_hosts", "deniedHosts")),
+            ("blockPrivateNetworks",
+             ("block_private_networks", "blockPrivateNetworks")),
+            ("requestTimeout", ("request_timeout", "requestTimeout")),
+            ("maxRedirects", ("max_redirects", "maxRedirects")),
+        ):
+            for name in spellings:
+                if name in kw:
+                    spec[ir_key] = _const(kw[name])
+                    break
         eh = kw.get("on_error") or kw.get("on_error_handler")
         if eh is not None:
             spec["errorHandler"] = _eval_error_handler(eh, ctx)
@@ -118,6 +133,11 @@ def _compile_node_call(
         spec = {"type": "event", "id": nid, "eventType": etype}
         if "filter" in kw:
             spec["eventFilter"] = _const(kw["filter"])
+        # #200：订阅超时同样不在内置链里，发射出来也会被静默丢弃。
+        for name in ("subscription_timeout", "subscriptionTimeout"):
+            if name in kw:
+                spec["subscriptionTimeout"] = _const(kw[name])
+                break
         _apply_base_kwargs(spec, kw, ctx)
         return spec
 

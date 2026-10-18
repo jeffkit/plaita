@@ -4110,7 +4110,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 self._lease_lost.add(execution_id)
                 self._lease_watch.pop(execution_id, None)
                 self._lease_orphan_watch[execution_id] = (
-                    execution, tenant_id, fence_token
+                    execution, tenant_id, fence_token, 0
                 )
             cancel = getattr(execution, "cancel", None)
             if callable(cancel):
@@ -4165,17 +4165,80 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         与 `_watchdog_renew_once` 失租分支同款语义（见 `_publish_orphan_progress`）：
         只发布进度心跳，不续租、不重复 cancel。存在的唯一理由是——
         释放租约不等于执行结束，停止发布心跳会让 keeper 把健康 run 判死。
+
+        条目形状 ``(execution, tenant_id, fence_token, rounds)``：``rounds`` 是
+        已发布心跳轮数，仅用于摘除时的泄漏观测日志（plaita#197）。
         """
         with self._lease_watch_lock:
             self._lease_orphan_watch[execution_id] = (
-                execution, tenant_id, fence_token
+                execution, tenant_id, fence_token, 0
             )
-            # 该执行已不再持有租约，但仍在跑：标记为失租态，避免
-            # `_publish_orphan_progress` 误当「已结束」而摘除。
+            # 该执行已不再持有租约，但仍在跑：标记为失租态（步界
+            # `_raise_if_lease_lost` 据此中止，不再继续推进）。
             self._lease_lost.add(execution_id)
 
+    @staticmethod
+    def _orphan_entry(entry: Any) -> tuple:
+        """兼容三元/四元条目（旧调用方/旧测试直接写成三元组）。"""
+        execution, tenant_id, fence_token = entry[0], entry[1], entry[2]
+        rounds = entry[3] if len(entry) > 3 else 0
+        return execution, tenant_id, fence_token, rounds
+
+    def _orphan_execution_alive(self, execution_id: str, execution: Any) -> bool:
+        """失租 orphan 是否仍在推进（plaita#197 的摘除判据）。
+
+        历史判据是「不在 `_lease_watch` 且**不在 `_lease_lost`** 才摘除」，
+        但 `_register_lease_orphan` 自己就往 `_lease_lost` 里写 ⇒ 条件恒假，
+        条目只增不减、已结束的执行被永久续写 `last_update_time`（keeper 的
+        stale 判据永远看不到停滞）。
+
+        现在改为**对象/节点存活**判据（不再让 `_lease_lost` 自我续命）：
+
+        - ``execution._running``：引擎 run 窗口内为真（``run_distributed``
+          每步持有）；取不到该属性视为**未在跑**（``object()``/已回收对象）；
+        - 本 worker 的节点耗时采集器仍有「已开始、未结束」的节点 ⇒ 长节点
+          仍在跑（#123 的生产形态：租约已释放但 impl 仍在沙箱里推进）；
+        - 取不到任何信号 ⇒ 判「已结束」，让观测集有界（#197 的规格）。
+        """
+        if execution is None:
+            return False
+        try:
+            if bool(getattr(execution, "_running", False)):
+                return True
+        except Exception as exc:  # noqa: BLE001 — 判定失败按未知处理，不摘除
+            logger.debug(
+                "失租 orphan %s 的 _running 判定失败（保守保留）: %s",
+                execution_id, _scrub_exception_text(exc),
+            )
+            return True
+        timings = getattr(self, "_node_timings", None) or {}
+        timing = timings.get(execution_id)
+        if timing is None:
+            return False
+        try:
+            return bool(timing.has_open_nodes())
+        except Exception as exc:  # noqa: BLE001 — 同上
+            logger.debug(
+                "失租 orphan %s 的节点活性判定失败（保守保留）: %s",
+                execution_id, _scrub_exception_text(exc),
+            )
+            return True
+
+    def _drop_lease_orphan(self, execution_id: str, reason: str, rounds: int) -> None:
+        """摘除 orphan 观测条目并清失租标记（plaita#197）。
+
+        清 `_lease_lost` 是关键：历史实现只在「新租约登记」/「显式 unregister」
+        时 discard，已结束的 orphan 两者都不会发生 ⇒ 失租集合也永久驻留。
+        """
+        with self._lease_watch_lock:
+            self._lease_orphan_watch.pop(execution_id, None)
+            self._lease_lost.discard(execution_id)
+        logger.info(
+            "失租 orphan 观测摘除: %s（%s，驻留 %d 轮）", execution_id, reason, rounds
+        )
+
     def _publish_orphan_progress(self) -> None:
-        """对**失租后仍在跑**的执行发布进度心跳，已不在活跃表的则摘除。
+        """对**失租后仍在跑**的执行发布进度心跳；已结束/已交回的摘除。
 
         为什么需要（2026-10-10 根治「为什么总靠抢救」）：
         `_watchdog_renew_once` 在续租失败时把执行摘出 `_lease_watch`，此后
@@ -4185,8 +4248,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         17:49 租约被释放 → 18:45/18:47 仍正常完步 → 18:51 因「末节点停滞
         >1800s」被 keeper 判死（**一个健康 run**），产出只能靠值守抢救。
 
-        本方法只做**只读观测**：不续租、不 cancel、不改执行状态。执行离开
-        活跃表（终态/被取消/对象消失）即摘除，不会长期驻留。
+        本方法只做**只读观测**：不续租、不 cancel、不改执行状态。
+
+        plaita#197：摘除判据从「`_lease_lost` 是否仍在」（永远为真）改为
+        ``_orphan_execution_alive``（对象/在跑节点）。执行结束即摘除、清
+        `_lease_lost`、停止心跳——观测集有界，keeper 重新看得到停滞：
+        否则已结束的执行被永久续写 `last_update_time`，stale 判据永不成立。
 
         ``_publish_node_progress`` 自身对「非 running / 无采集器 / 查询失败」
         都是 no-op 或只告警，因此这里无需再判状态。
@@ -4195,7 +4262,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             orphans = list(self._lease_orphan_watch.items())
         if not orphans:
             return
-        for execution_id, (_execution, tenant_id, fence_token) in orphans:
+        for execution_id, entry in orphans:
+            execution, tenant_id, fence_token, rounds = self._orphan_entry(entry)
+            with self._lease_watch_lock:
+                handed_back = execution_id in self._lease_watch
+            if handed_back:
+                # 已被新租约重新登记 ⇒ 交回正常路径，不重复发布
+                self._drop_lease_orphan(
+                    execution_id, "已被新租约接管，交回正常路径", rounds
+                )
+                continue
+            if not self._orphan_execution_alive(execution_id, execution):
+                self._drop_lease_orphan(
+                    execution_id, "执行已结束/不再推进", rounds
+                )
+                continue
             token = set_current_tenant(tenant_id)
             try:
                 self._publish_node_progress(
@@ -4203,16 +4284,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 )
             finally:
                 reset_current_tenant(token)
-            # 已不在活跃执行表 ⇒ 它已结束（终态/取消/被回收），摘除即可。
-            # 用 `_lease_watch` 是否重新登记它作为「仍在本 worker 跑」的信号：
-            # 重新登记（换了新租约）时由正常路径接管，这里也摘除以免重复发布。
             with self._lease_watch_lock:
-                still_active = execution_id in self._lease_watch
-                if not still_active and execution_id not in self._lease_lost:
-                    self._lease_orphan_watch.pop(execution_id, None)
-                elif still_active:
-                    # 已被新租约重新登记 ⇒ 交回正常路径
-                    self._lease_orphan_watch.pop(execution_id, None)
+                if execution_id in self._lease_orphan_watch:
+                    self._lease_orphan_watch[execution_id] = (
+                        execution, tenant_id, fence_token, rounds + 1
+                    )
 
     def _detect_affinity_mismatch(self, message_data: Dict[str, Any]) -> Optional[str]:
         """任务的 repo/run_dir 是否指向本机不存在的路径（机器亲和判定）。

@@ -18,6 +18,7 @@ from plaita.server.event_reconcile import EventReconciler
 from plaita.storage.base import ExecutionStorage
 from plaita.server.task_queue import enqueue_task
 from plaita.server.tenant_context import (
+    DEFAULT_TENANT_ID,
     reset_current_tenant,
     set_current_tenant,
 )
@@ -118,12 +119,14 @@ class EventFilter:
                 return
             
             # 使用correlation_id作为execution_id查询执行状态。
-            # 多租户：租户取自事件数据（挂起服务透传 / console 发布时写入），
-            # 缺省 default（兼容旧事件）；执行状态经租户路由存储读取，
-            # resume 消息同样携带租户（worker 据此路由定义/状态/租约）。
+            # 多租户（plaita#191）：租户**只**取事件受信顶层字段
+            # ``event.tenant_id``（发布端 / 事件总线在 publish 时绑定，见
+            # event.core.bind_trusted_tenant）。``event.data`` 是发布者/客户端
+            # 可控载荷——历史实现直接拿 ``data["tenant_id"]`` 切租户，等于把
+            # 「能给谁注入 resume」的开关交给事件内容；这里不再读它。
             execution_id = event.correlation_id
-            event_data = event.data if isinstance(event.data, dict) else {}
-            tenant_token = set_current_tenant(event_data.get("tenant_id"))
+            event_tenant = event.tenant_id or DEFAULT_TENANT_ID
+            tenant_token = set_current_tenant(event_tenant)
             try:
                 state = self.execution_storage.load_execution_state(execution_id)
             finally:
@@ -132,9 +135,35 @@ class EventFilter:
             if not state:
                 logger.debug("找不到关联的执行状态，跳过处理: %s", execution_id)
                 return
-            
-            # 查询与事件匹配的订阅
-            subscriptions = await self.subscription_storage.find_matching_subscriptions(event, state.context)
+
+            # 强校验（纵深）：即便执行存储未按租户路由（如内存 / 测试替身），
+            # 状态自报的租户也必须与事件受信租户一致——不一致直接丢弃并告警，
+            # 绝不用事件指定的租户去推进别人的挂起执行。
+            state_tenant = getattr(state, "tenant_id", None) or DEFAULT_TENANT_ID
+            if state_tenant != event_tenant:
+                logger.warning(
+                    "事件租户与执行状态租户不一致，丢弃事件（event=%s tenant=%s "
+                    "state_tenant=%s execution=%s）",
+                    event.event_id, event_tenant, state_tenant, execution_id,
+                )
+                return
+
+            # 查询与事件匹配的订阅；订阅租户必须与事件受信租户一致（旧订阅
+            # 无 tenant_id 字段视为 default）。不匹配者在单条日志里点名丢弃，
+            # 不让「租户错配」静默退化成本轮无匹配。
+            matched_subscriptions = await self.subscription_storage.find_matching_subscriptions(
+                event, state.context
+            )
+            subscriptions = [
+                sub for sub in matched_subscriptions
+                if (getattr(sub, "tenant_id", None) or DEFAULT_TENANT_ID) == event_tenant
+            ]
+            dropped_subscriptions = len(matched_subscriptions) - len(subscriptions)
+            if dropped_subscriptions:
+                logger.warning(
+                    "丢弃 %d 条租户不匹配的订阅（event=%s tenant=%s execution=%s）",
+                    dropped_subscriptions, event.event_id, event_tenant, execution_id,
+                )
             
             if not subscriptions:
                 # 升级演练 P1-1：0.4.x 的订阅挂在**未解析表达式**的 type 索引下
@@ -200,9 +229,8 @@ class EventFilter:
                         "flow_id": state.flow_id,
                         "execution_id": execution_id,
                         "resume_type": "event",
-                        "tenant_id": getattr(state, "tenant_id", None)
-                        or event_data.get("tenant_id")
-                        or "default",
+                        # 受信租户（= 事件租户 = 状态租户，上面已强校验）
+                        "tenant_id": event_tenant,
                         "data": {
                             "event_id": event.event_id,
                             "event_type": event.event_type,

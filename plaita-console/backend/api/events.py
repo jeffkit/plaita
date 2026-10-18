@@ -1,8 +1,15 @@
 """
 事件系统管理 API
 提供事件订阅查看、事件发布、事件列表等接口
+
+多租户边界（plaita#191 / #192）：
+- 发布：租户由服务端从请求上下文绑定，写进事件**受信顶层字段** ``tenant_id``；
+  客户端在 ``data`` 里自报的 tenant_id 一律剥离（data 是载荷，不是授权来源）。
+- 读/删：事件与订阅按记录里的受信 ``tenant_id`` 收窄；单条资源不匹配按 404
+  返回（不暴露存在性）。平台视角（``tenant_scope() is None``）保持全量。
 """
 import json
+import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -11,7 +18,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from redis import Redis
 
+try:
+    from ..auth import tenant_scope
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from auth import tenant_scope  # type: ignore
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+def _record_tenant(info: Dict[str, Any]) -> str:
+    """记录归属租户：受信顶层字段，缺失（升级前旧记录）视为 default。"""
+    return info.get("tenant_id") or "default"
 
 
 # ============ 数据模型 ============
@@ -85,11 +104,13 @@ def _scan_keys(redis: Redis, pattern: str, count: int = 100) -> List[str]:
 async def list_events(
     event_type: Optional[str] = None,
     limit: int = Query(default=50, le=200),
+    request: Request = None,
     redis: Redis = Depends(get_redis),
 ):
-    """获取事件列表"""
+    """获取事件列表（plaita#192：按事件受信 tenant_id 收窄，平台视角全量）"""
     pattern = "plaita:event:*"
     keys = _scan_keys(redis, pattern)
+    tenant = tenant_scope(request) if request is not None else None
 
     events: List[EventInfo] = []
     for key in keys:
@@ -106,6 +127,10 @@ async def list_events(
                 continue
             info = json.loads(data)
             if event_type and info.get("event_type") != event_type:
+                continue
+            # 多租户：只认事件受信顶层 tenant_id（旧事件缺字段 → default）；
+            # data 里的 tenant_id 是载荷，绝不作为归属判据（#191）。
+            if tenant and _record_tenant(info) != tenant:
                 continue
             events.append(EventInfo(
                 event_id=info.get("event_id", key.split(":")[-1]),
@@ -126,40 +151,57 @@ async def list_events(
 
 @router.post("/events/publish")
 async def publish_event(
-    request: PublishEventRequest,
+    request: Request,
+    body: PublishEventRequest,
     redis: Redis = Depends(get_redis),
 ):
     """
     手动发布事件到事件总线
 
-    将事件写入 Redis，并通过 Pub/Sub 通知订阅者
+    将事件写入 Redis，并通过 Pub/Sub 通知订阅者。
+
+    多租户（plaita#191）：发布者租户由服务端 ``tenant_scope(required=True)``
+    取自请求上下文，写进**受信顶层字段** ``tenant_id``；客户端在 ``data`` 里
+    自报的 ``tenant_id`` 一律剥离——否则任意租户 editor 只要知道受害租户的
+    execution_id，就能伪造租户给对方的挂起执行注入 resume（审批放行）。
     """
+    tenant = tenant_scope(request, required=True)
+    payload = dict(body.data or {})
+    client_tenant = payload.pop("tenant_id", None)
+    if client_tenant is not None:
+        logger.warning(
+            "事件发布剥离客户端自报租户（event_type=%s，发布者租户=%s，自报=%s）",
+            body.event_type, tenant, client_tenant,
+        )
+
     event_id = str(uuid.uuid4())
     event_data = {
         "event_id": event_id,
-        "event_type": request.event_type,
-        "data": request.data,
+        "event_type": body.event_type,
+        "data": payload,
         "timestamp": time.time(),
-        "correlation_id": request.correlation_id,
+        "correlation_id": body.correlation_id,
         "source": "plaita-console",
+        # 受信租户（服务端字段）：EventFilter 只认它决定执行状态命名空间
+        "tenant_id": tenant,
     }
 
     event_key = f"plaita:event:{event_id}"
     redis.set(event_key, json.dumps(event_data), ex=86400)
 
-    type_key = f"plaita:event:type:{request.event_type}"
+    type_key = f"plaita:event:type:{body.event_type}"
     redis.zadd(type_key, {event_id: time.time()})
     redis.expire(type_key, 86400)
 
     # 引擎 RedisEventBus 的订阅频道是 plaita:events:{type}——
     # 历史上只发 plaita:event:channel:{type}，引擎侧永远收不到
-    redis.publish(f"plaita:events:{request.event_type}", json.dumps(event_data))
-    redis.publish(f"plaita:event:channel:{request.event_type}", json.dumps(event_data))
+    redis.publish(f"plaita:events:{body.event_type}", json.dumps(event_data))
+    redis.publish(f"plaita:event:channel:{body.event_type}", json.dumps(event_data))
 
     return {
         "success": True,
         "event_id": event_id,
-        "event_type": request.event_type,
+        "event_type": body.event_type,
         "message": "事件已发布",
     }
 
@@ -174,10 +216,6 @@ async def list_subscriptions(
     redis: Redis = Depends(get_redis),
 ):
     """获取事件订阅列表（租户视角按订阅内的 tenant_id 过滤）"""
-    try:
-        from ..auth import tenant_scope
-    except ImportError:
-        from auth import tenant_scope  # type: ignore
     tenant = tenant_scope(request) if request is not None else None
 
     pattern = "plaita:subscription:*"
@@ -203,10 +241,8 @@ async def list_subscriptions(
             if flow_id and info.get("flow_id") != flow_id:
                 continue
             # 订阅是流程级数据（流程归租户）；旧订阅无 tenant_id 字段视为 default
-            if tenant:
-                info_tenant = info.get("tenant_id") or "default"
-                if info_tenant != tenant:
-                    continue
+            if tenant and _record_tenant(info) != tenant:
+                continue
             subscriptions.append(SubscriptionInfo(
                 subscription_id=info.get("subscription_id", key.split(":")[-1]),
                 event_type=info.get("event_type", "unknown"),
@@ -225,18 +261,46 @@ async def list_subscriptions(
     return SubscriptionListResponse(subscriptions=subscriptions, total=len(subscriptions))
 
 
+_SUBSCRIPTION_KEY_PREFIX = "plaita:subscription:data:"
+
+
+def _load_subscription_record(redis: Redis, subscription_id: str) -> Dict[str, Any]:
+    raw = redis.get(f"{_SUBSCRIPTION_KEY_PREFIX}{subscription_id}")
+    if not raw:
+        raise HTTPException(status_code=404, detail=f"订阅不存在: {subscription_id}")
+    try:
+        info = json.loads(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"数据解析失败: {exc}")
+    return info if isinstance(info, dict) else {}
+
+
+def _require_owned_subscription(info: Dict[str, Any], subscription_id: str, request: Request) -> None:
+    """单条订阅归属校验（plaita#192）：跨租户按 404，不暴露存在性。
+
+    与 ``schedules._get_schedule`` 同口径：先是 404（不存在）还是 404
+    （无权看）对外不可区分。
+    """
+    tenant = tenant_scope(request)
+    if tenant is None:
+        return
+    if _record_tenant(info) != tenant:
+        logger.warning(
+            "拒绝跨租户访问事件订阅（订阅=%s，请求租户=%s）", subscription_id, tenant
+        )
+        raise HTTPException(status_code=404, detail=f"订阅不存在: {subscription_id}")
+
+
 @router.get("/events/subscriptions/{subscription_id}", response_model=SubscriptionInfo)
 async def get_subscription(
     subscription_id: str,
+    request: Request,
     redis: Redis = Depends(get_redis),
 ):
     """获取订阅详情（引擎 RedisEventBus 写在 plaita:subscription:data:{id}）"""
-    key = f"plaita:subscription:data:{subscription_id}"
-    data = redis.get(key)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"订阅不存在: {subscription_id}")
+    info = _load_subscription_record(redis, subscription_id)
+    _require_owned_subscription(info, subscription_id, request)
     try:
-        info = json.loads(data)
         return SubscriptionInfo(**info)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"数据解析失败: {e}")
@@ -245,18 +309,13 @@ async def get_subscription(
 @router.delete("/events/subscriptions/{subscription_id}")
 async def delete_subscription(
     subscription_id: str,
+    request: Request,
     redis: Redis = Depends(get_redis),
 ):
-    """删除事件订阅（含引擎侧的类型/关联/流程索引）"""
-    key = f"plaita:subscription:data:{subscription_id}"
-    if not redis.exists(key):
-        raise HTTPException(status_code=404, detail=f"订阅不存在: {subscription_id}")
-    info = {}
-    try:
-        raw = redis.get(key)
-        info = json.loads(raw) if raw else {}
-    except Exception:
-        pass
+    """删除事件订阅（含引擎侧的类型/关联/流程索引）。跨租户按 404 且不删除。"""
+    info = _load_subscription_record(redis, subscription_id)
+    _require_owned_subscription(info, subscription_id, request)
+    key = f"{_SUBSCRIPTION_KEY_PREFIX}{subscription_id}"
     pipe = redis.pipeline()
     pipe.delete(key)
     event_type = info.get("event_type")

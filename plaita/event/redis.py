@@ -639,7 +639,8 @@ finally:
 
 from .core import (
     Event, EventBus, EventHandler, EventStorage, EventSubscription, 
-    EventSubscriptionStorage, EventProcessingTracker, RetryPolicy
+    EventSubscriptionStorage, EventProcessingTracker, RetryPolicy,
+    bind_trusted_tenant,
 )
 from .exceptions import EventError, EventNotFoundError, EventStorageError, EventTimeoutError
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
@@ -1632,7 +1633,10 @@ class RedisEventBus(EventBus):
             else:
                 event.pop('correlation_id', None)
             event = Event(event_type=event_type, data=event, correlation_id=correlation_id)
-        
+
+        # plaita#191：受信租户由发布上下文绑定（不读 data.tenant_id）
+        event = bind_trusted_tenant(event)
+
         # 存储事件
         event_id = await self.event_storage.store_event(event)
         
@@ -1671,6 +1675,9 @@ class RedisEventBus(EventBus):
             else:
                 normalized_events.append(event)
         
+        # plaita#191：逐事件绑定受信租户（不读 data.tenant_id）
+        normalized_events = [bind_trusted_tenant(e) for e in normalized_events]
+
         # 批量存储事件
         event_ids = await self.event_storage.batch_store_events(normalized_events)
         

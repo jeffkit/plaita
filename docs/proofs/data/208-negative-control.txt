@@ -1,0 +1,266 @@
+# plaita#208 负控：还原「登录零限速 + host 默认 0.0.0.0」
+
+做法：把本单修复反向应用（下图为 **修复 → 基线** 方向，`git apply` 即得基线
+行为），再跑 `docs/proofs/data/208-repro.py`。
+
+## 反向 diff（修复 → 基线）
+
+```diff
+diff --git a/plaita-console/backend/__main__.py b/plaita-console/backend/__main__.py
+index ebafe8aa..a49edde9 100644
+--- a/plaita-console/backend/__main__.py
++++ b/plaita-console/backend/__main__.py
+@@ -1,16 +1,11 @@
+ """`python -m plaita_console`：pip 安装后的编排台启动入口。"""
+-import logging
+-
+ import uvicorn
+ 
+-from .config import warn_if_public_bind
+ from .main import app, get_settings
+ 
+ 
+ def main() -> None:
+     settings = get_settings()
+-    # #208：默认 127.0.0.1；显式对外监听时留一条启动 warning
+-    warn_if_public_bind(settings.host, logging.getLogger(__name__))
+     # 传 app 对象而非 "plaita_console.main:app" 字符串：
+     # 字符串模式要求模块可被顶层 import（reload 场景），包内运行不可靠
+     uvicorn.run(app, host=settings.host, port=settings.port)
+diff --git a/plaita-console/backend/api/auth_users.py b/plaita-console/backend/api/auth_users.py
+index 86afc9c4..5fd72859 100644
+--- a/plaita-console/backend/api/auth_users.py
++++ b/plaita-console/backend/api/auth_users.py
+@@ -10,9 +10,6 @@
+ - POST /api/users/{u}/password  重置密码（admin）
+ - DELETE /api/users/{u}         删除用户（admin）
+ """
+-
+-import hashlib
+-import logging
+ from typing import Any, Dict, List, Optional
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Request
+@@ -20,39 +17,15 @@ from pydantic import BaseModel, Field
+ 
+ try:
+     from ..auth import require_auth
+-    from ..services import login_guard, tenants_svc, users_svc
++    from ..services import tenants_svc, users_svc
+     from ..services.flow_store import get_flow_store
+ except ImportError:
+     from auth import require_auth  # type: ignore
+-    from services import login_guard, tenants_svc, users_svc  # type: ignore
++    from services import tenants_svc, users_svc  # type: ignore
+     from services.flow_store import get_flow_store  # type: ignore
+ 
+-# plaita#151：异常/外部文本入日志前统一清洗（共享实现，不在此另写一份）
+-from plaita.core.url_redaction import _scrub_url_text
+-
+-logger = logging.getLogger(__name__)
+-
+ router = APIRouter()
+ 
+-#: 登录失败日志里只出现用户名指纹，不回显明文账号（#208 建议 3）
+-_USER_FP_LEN = 12
+-
+-
+-def _client_ip(request: Request) -> str:
+-    """登录限速维度之一：ASGI 客户端地址。
+-
+-    刻意不读 ``X-Forwarded-For``（可伪造，读它等于把限速交给攻击者）；
+-    反向代理部署下需要真实 IP 时应在网关层收敛后再另议（issue 边界）。
+-    """
+-    client = getattr(request, "client", None)
+-    return getattr(client, "host", "") or "unknown"
+-
+-
+-def _user_fingerprint(username: str) -> str:
+-    """用户名指纹：日志可关联同一账号，但不落明文（口令更不落）。"""
+-    digest = hashlib.sha256((username or "").encode("utf-8")).hexdigest()
+-    return digest[:_USER_FP_LEN]
+-
+ 
+ class LoginRequest(BaseModel):
+     username: str = Field(..., min_length=1)
+@@ -100,30 +73,9 @@ def setup(req: CreateUserRequest):
+ 
+ @router.post("/auth/login")
+ def login(req: LoginRequest, request: Request):
+-    """用户名密码换会话 token。
+-
+-    #208：按 (客户端 IP, username) 限速——锁定期内即使口令正确也返回 429，
+-    否则「锁定期内正确口令也被拒」这一验收条件不成立（爆破仍可撞库）。
+-    """
+-    client_ip = _client_ip(request)
+-    retry_after = login_guard.retry_after(client_ip, req.username)
+-    if retry_after:
+-        raise HTTPException(
+-            status_code=429,
+-            detail="登录尝试过于频繁，请稍后再试",
+-            headers={"Retry-After": str(retry_after)},
+-        )
+     info = users_svc.login(get_flow_store(), req.username, req.password)
+     if info is None:
+-        locked_for = login_guard.record_failure(client_ip, req.username)
+-        logger.warning(
+-            "登录失败 ip=%s user=%s%s",
+-            _scrub_url_text(client_ip),
+-            _user_fingerprint(req.username),
+-            f"（失败次数超限，已锁定 {locked_for}s）" if locked_for else "",
+-        )
+         raise HTTPException(status_code=401, detail="用户名或密码错误")
+-    login_guard.reset(client_ip, req.username)
+     return info
+ 
+ 
+diff --git a/plaita-console/backend/config.py b/plaita-console/backend/config.py
+index 0c661acf..4238202d 100644
+--- a/plaita-console/backend/config.py
++++ b/plaita-console/backend/config.py
+@@ -1,19 +1,10 @@
+ """
+ 应用配置
+ """
+-import logging
+ import os
+ from typing import Optional
+ from pydantic import BaseModel, Field
+ 
+-#: 视为「仅本机可达」的监听地址（#208：默认必须是其中之一）
+-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+-
+-#: 默认监听地址。#208：控制台原默认 0.0.0.0，在云主机/容器里会被意外暴露到
+-#: 公网（配合在线爆破可接管 admin）。需要对外时显式
+-#: ``PLAITA_CONSOLE_HOST=0.0.0.0``（docker-compose/e2e 已显式设置）。
+-DEFAULT_HOST = "127.0.0.1"
+-
+ 
+ class Settings(BaseModel):
+     """应用配置"""
+@@ -25,7 +16,7 @@ class Settings(BaseModel):
+     )
+     
+     # 服务器配置
+-    host: str = Field(default=DEFAULT_HOST, description="服务器监听地址")
++    host: str = Field(default="0.0.0.0", description="服务器监听地址")
+     port: int = Field(default=8080, description="服务器监听端口")
+     debug: bool = Field(default=False, description="调试模式")
+     
+@@ -84,7 +75,7 @@ def get_settings() -> Settings:
+     """获取配置实例"""
+     return Settings(
+         redis_url=os.getenv("PLAITA_CONSOLE_REDIS_URL", "redis://localhost:6379/0"),
+-        host=os.getenv("PLAITA_CONSOLE_HOST", DEFAULT_HOST),
++        host=os.getenv("PLAITA_CONSOLE_HOST", "0.0.0.0"),
+         port=int(os.getenv("PLAITA_CONSOLE_PORT", "8080")),
+         debug=os.getenv("PLAITA_CONSOLE_DEBUG", "false").lower() == "true",
+         db_url=os.getenv("PLAITA_CONSOLE_DB_URL", "sqlite:///./plaita_console.db"),
+@@ -100,25 +91,3 @@ def get_settings() -> Settings:
+         recursive_agui_url=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_URL", ""),
+         recursive_agui_api_key=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_API_KEY", ""),
+     )
+-
+-
+-def bind_warning(host: str) -> Optional[str]:
+-    """监听非回环地址时的启动告警文案；回环地址返回 None。
+-
+-    #208：默认改为 127.0.0.1 后，显式对外监听（``PLAITA_CONSOLE_HOST=0.0.0.0``）
+-    是部署方的有意选择——启动日志里留一条 warning，避免「以为只在本机」。
+-    """
+-    if not host or host in LOOPBACK_HOSTS:
+-        return None
+-    return (
+-        f"控制台监听非回环地址 {host!r}（PLAITA_CONSOLE_HOST）："
+-        "确认已配置 PLAITA_CONSOLE_ADMIN_API_KEY / 会话鉴权与网络访问控制，"
+-        "否则登录端点会暴露给该网段（#208）"
+-    )
+-
+-
+-def warn_if_public_bind(host: str, logger: Optional[logging.Logger] = None) -> None:
+-    """在启动路径上打一条非回环监听 warning（文案见 bind_warning）。"""
+-    message = bind_warning(host)
+-    if message:
+-        (logger or logging.getLogger(__name__)).warning(message)
+diff --git a/plaita-console/backend/main.py b/plaita-console/backend/main.py
+index 03b96c81..65d6d5da 100644
+--- a/plaita-console/backend/main.py
++++ b/plaita-console/backend/main.py
+@@ -16,7 +16,7 @@ from plaita.writefile_jail import apply_writefile_jail
+ 
+ # 支持多种运行方式的导入
+ try:
+-    from .config import get_settings, warn_if_public_bind
++    from .config import get_settings
+     from .auth import require_auth
+     from .api import services, executions, queues, logs, cluster, events
+     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
+@@ -30,7 +30,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
+     if __package__ == "plaita_console":
+         raise
+     sys.path.insert(0, str(Path(__file__).parent))
+-    from config import get_settings, warn_if_public_bind
++    from config import get_settings
+     from auth import require_auth
+     from api import services, executions, queues, logs, cluster, events
+     from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
+@@ -405,8 +405,6 @@ def run_server():
+     """启动服务器（用于脚本入口）"""
+     import uvicorn
+     settings = get_settings()
+-    # #208：默认 127.0.0.1；显式对外监听时留一条启动 warning
+-    warn_if_public_bind(settings.host, logger)
+     uvicorn.run(
+         "main:app",
+         host=settings.host,
+diff --git a/plaita-console/backend/run.py b/plaita-console/backend/run.py
+index 53efa2f7..da067426 100644
+--- a/plaita-console/backend/run.py
++++ b/plaita-console/backend/run.py
+@@ -3,7 +3,6 @@
+ 启动脚本 - 支持直接运行
+ 用法: python run.py
+ """
+-import logging
+ import sys
+ import os
+ 
+@@ -13,13 +12,10 @@ if plaita_root not in sys.path:
+     sys.path.insert(0, plaita_root)
+ 
+ import uvicorn
+-from config import warn_if_public_bind
+ from main import app, get_settings
+ 
+ def main():
+     settings = get_settings()
+-    # #208：默认 127.0.0.1；显式对外监听时留一条启动 warning
+-    warn_if_public_bind(settings.host, logging.getLogger("run"))
+     uvicorn.run(
+         "main:app",
+         host=settings.host,
+```
+
+## 红（负控）——`PYTHONPATH=/tmp/w38 python docs/proofs/data/208-repro.py`
+
+```
+RED 连续错误口令第 6 次 429（含锁定期内正确口令）: 第 6 次错误口令返回 401（期望 429）：登录端点零限速，6 次错误口令状态码=[401, 401, 401, 401, 401, 401]
+  GREEN 限速器清理后正确口令 200
+  RED 默认 host=127.0.0.1 且 env 可显式覆盖: Settings().host='0.0.0.0'（期望 127.0.0.1）
+
+RED: 2 项未通过
+  - 连续错误口令第 6 次 429（含锁定期内正确口令）: 第 6 次错误口令返回 401（期望 429）：登录端点零限速，6 次错误口令状态码=[401, 401, 401, 401, 401, 401]
+  - 默认 host=127.0.0.1 且 env 可显式覆盖: Settings().host='0.0.0.0'（期望 127.0.0.1）
+```
+
+精确红点：第 6 次错误口令仍返回 401（`[401, 401, 401, 401, 401, 401]`），
+`Settings().host == '0.0.0.0'`。
+
+## 恢复修复后（同一脚本）
+
+```
+GREEN 连续错误口令第 6 次 429（含锁定期内正确口令）
+GREEN 限速器清理后正确口令 200
+GREEN 默认 host=127.0.0.1 且 env 可显式覆盖
+GREEN: #208 全部通过
+```

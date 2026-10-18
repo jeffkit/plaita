@@ -40,6 +40,7 @@ from plaita.core.url_redaction import (  # noqa: F401 — 部分名字仅供历�
     _leaves_plaintext_payload,
     _mask_policy_url,
     _render_is_usable,
+    _scrub_exception_text,
     _scrub_url_text,
     _token_is_canonical,
     logger,
@@ -1312,6 +1313,7 @@ class _AiohttpResponseWrapper:
 class HTTP(Node):
     """HTTP节点实现"""
     node_type: ClassVar[str] = "http"
+    dry_run_safe: ClassVar[bool] = False
     node_name: ClassVar[str] = "HTTP请求"
     
     # Literal 生成 schema enum（console 表单渲染下拉）；大小写归一由 setup_http
@@ -1431,8 +1433,44 @@ class HTTP(Node):
         """
         return getattr(self, "_response_context", None)
 
+    def _dry_run_result(self, execution):
+        """plaita#190：试跑语义下 HTTP 节点不得建连/出网。
+
+        console 的 dry-run 闸门已按「能力声明」在入口拒绝 http 节点（纵深之一）；
+        这里再做节点级短路，覆盖不经 console 闸门、但显式携带 ``dry_run`` 的
+        执行路径（直接调用 / 其它控制面）。返回形状带 ``dry_run=True`` 与
+        ``skipped``，让调用方一眼看出「没有发生网络 I/O」；URL 经共享渲染器
+        清洗后回显，与记录面同一口径（#151/#158/#159）。
+        """
+        if execution is None:
+            return None
+        try:
+            raw = execution.get_global_variable("dry_run", False)
+            # 只认显式布尔真值：测试/第三方执行上下文常传 MagicMock，而
+            # ``bool(MagicMock)`` 恒为 True——按真值判断会把「假执行上下文」
+            # 误判成试跑。试跑旗标由 console 注入 JSON ``true``（Python True）
+            # 或 ``_DryRunExecution`` 返回 True，不会以 1/"true" 形式出现。
+            requested = isinstance(raw, bool) and raw
+        except Exception as exc:  # noqa: BLE001 — 读旗标失败按真实执行处理，但必须留证
+            logger.warning(
+                "HTTP 节点读取 dry_run 旗标失败，按真实执行处理: %s",
+                _scrub_exception_text(exc),
+            )
+            return None
+        if not requested:
+            return None
+        return {
+            "dry_run": True,
+            "skipped": "http",
+            "method": self.method,
+            "url": _scrub_url_text(str(self.url)),
+        }
+
     def execute(self, execution):
         """执行HTTP请求（同步）"""
+        dry = self._dry_run_result(execution)
+        if dry is not None:
+            return dry
         http_rsp = None
         try:
             executor = self.new_executor(execution)
@@ -1449,6 +1487,9 @@ class HTTP(Node):
 
     async def arun(self, execution):
         """执行HTTP请求（异步，使用 aiohttp，不阻塞事件循环）。"""
+        dry = self._dry_run_result(execution)
+        if dry is not None:
+            return dry
         http_rsp = None
         try:
             executor = self.new_executor(execution)

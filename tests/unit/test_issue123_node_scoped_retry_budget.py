@@ -498,6 +498,17 @@ class TestFallbackTotalRetryCap:
         assert fake.xlen("test:issue123-node-scope") == 1  # 已重入队
 
 
+class _LiveExecution:
+    """最小存活执行对象：`_running` 为真 = 引擎 run 窗口内仍在推进（#197 判据）。"""
+
+    def __init__(self):
+        self._running = True
+        self.cancel_requested = False
+
+    def cancel(self):  # 看门狗失租分支会鸭子调用
+        self.cancel_requested = True
+
+
 def _fake_worker_for_watchdog():
     """构造一个带**真实**锁与集合的最小 worker（不经 __init__ 的重依赖）。
 
@@ -555,7 +566,7 @@ class TestHeartbeatDecoupledFromLease:
         worker = _fake_worker_for_watchdog()
         published = []
         worker._publish_node_progress = lambda eid, **kw: published.append(eid)
-        worker._lease_watch = {"exec-x": ("holder:1", MagicMock(), "default", 1)}
+        worker._lease_watch = {"exec-x": ("holder:1", _LiveExecution(), "default", 1)}
         worker.execution_lease = MagicMock()
         worker.execution_lease.renew.return_value = False   # 续租恒失败
         worker.lease_ttl_seconds = 120
@@ -581,15 +592,32 @@ class TestHeartbeatDecoupledFromLease:
         worker._publish_orphan_progress()
         assert "exec-gone" not in worker._lease_orphan_watch, "已结束的执行应被摘除"
 
-    def test_orphan_kept_while_still_lost(self):
-        """仍在失租集合 ⇒ 保留（这正是「失租后仍健康在跑」的窗口）。"""
+    def test_orphan_kept_while_execution_still_running(self):
+        """执行对象仍在推进 ⇒ 保留并继续发心跳（「失租后仍健康在跑」的窗口）。
+
+        plaita#197：保留判据不再是「还在 `_lease_lost`」（自我续命、永不摘除），
+        而是 execution 的存活信号（`_running` / 在跑节点采集器）。
+        """
         worker = _fake_worker_for_watchdog()
         worker._lease_watch = {}
-        worker._lease_orphan_watch = {"exec-live": (object(), "default", 1)}
+        worker._lease_orphan_watch = {
+            "exec-live": (_LiveExecution(), "default", 1)
+        }
         worker._lease_lost = {"exec-live"}
 
         worker._publish_orphan_progress()
         assert "exec-live" in worker._lease_orphan_watch, "仍在跑的执行必须继续发心跳"
+
+    def test_orphan_dropped_when_execution_ended(self):
+        """执行对象已结束（无存活信号）⇒ 摘除并清 `_lease_lost`（#197）。"""
+        worker = _fake_worker_for_watchdog()
+        worker._lease_watch = {}
+        worker._lease_orphan_watch = {"exec-done": (object(), "default", 1)}
+        worker._lease_lost = {"exec-done"}
+
+        worker._publish_orphan_progress()
+        assert "exec-done" not in worker._lease_orphan_watch, "已结束的执行应被摘除"
+        assert "exec-done" not in worker._lease_lost, "失租标记不得永久驻留"
 
 
 class TestLeaseReleaseNotExecutionEnd:

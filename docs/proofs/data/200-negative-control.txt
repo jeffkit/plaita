@@ -1,0 +1,274 @@
+# plaita#200 负控（6 组：sexpr 写/读、@flow 发/编译、EVENT 两处）
+
+修复文件：`plaita/dsl/sexpr.py`、`plaita/dsl/codeflow/_emit.py`、
+`plaita/dsl/codeflow/_nodes.py`。每组只还原**一个**字段面的修法，
+其余修法保持，证明每条断言都钉在具体字段上而不是整文件噪声。
+每个变异后 `__pycache__` 清空且 `PYTHONDONTWRITEBYTECODE=1`，
+避免同尺寸变异的旧 `.pyc` 被复用（本轮实际踩到过）。
+
+## A · sexpr 写侧不发射 `:allowed-hosts`（其余 4 个策略字段仍在）
+
+逐字段粒度：只删 allowedHosts 的发射分支，`_pick_http` 其它字段仍相等；
+红的是 allowedHosts 与整节点断言。
+
+```diff
+--- a/plaita/dsl/sexpr.py
++++ b/plaita/dsl/sexpr.py
+@@ -1344,9 +1344,6 @@
+             parts.append(f":input {_expr_to_src(n['input'])}")
+         # #200：访问策略（SSRF 防护面）此前写侧一个字都不发。读侧补齐后这里
+         # 对称发射；全部排在 `-> next` 之前（关键字列表在此终止）。
+-        allowed = _dual(n, "allowedHosts", "allowed_hosts")
+-        if allowed is not None:
+-            parts.append(f":allowed-hosts {_host_list_to_src(allowed)}")
+         denied = _dual(n, "deniedHosts", "denied_hosts")
+         if denied is not None:
+             parts.append(f":denied-hosts {_host_list_to_src(denied)}")
+```
+
+```
+$ pytest tests/unit/test_issue200_sexpr_http_event_policy.py
+>           assert kw in src
+E           assert ':allowed-hosts' in '(flow f-policy (start :id s -> h) (http :id h :method GET :url http://example.com :denied-hosts (list "evil.example.c... :request-timeout 5 :max-redirects 2 -> w) (event :id w :type quote.ready :subscription-timeout 120 -> e) (end :id e))'
+>       assert ":allowed-hosts" in src
+E       assert ':allowed-hosts' in '(flow f-policy (start :id s -> h) (http :id h :method GET :url http://example.com :denied-hosts (list "evil.example.c... :request-timeout 5 :max-redirects 2 -> w) (event :id w :type quote.ready :subscription-timeout 120 -> e) (end :id e))'
+>       assert http.allowed_hosts == POLICY_VALUES["allowedHosts"]
+E       AssertionError: assert None == ['example.com', '*.internal.test']
+E        +  where None = HTTP(id='h', name=None, desc=None, output=None, next='w', timeout='', source_line=None, timeout_handler=ErrorHandler(s...directs=2, url='http://example.com', query=None, headers=None, body=None, addressing={'name': 'domain'}, delegate=None).allowed_hosts
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_http_policy_fields
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_snake_case_policy_fields
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_builds_a_flow_with_policy_intact
+3 failed, 11 passed in 0.34s
+[exit 1]
+```
+
+## B · sexpr 读侧不认 `:allowed-hosts`（写侧仍发射）
+
+发射出的源码里字段还在，但编译期丢掉；附带证明读侧的响亮拒绝分支也在
+同一 `_opt` 上（`DID NOT RAISE`）。
+
+```diff
+--- a/plaita/dsl/sexpr.py
++++ b/plaita/dsl/sexpr.py
+@@ -810,9 +810,6 @@
+     # block_private_networks / request_timeout / max_redirects）。读侧此前一条
+     # 都不认 ⇒ 写侧也无法发射 ⇒ 任何 sexpr 往返都把白名单/私网阻断**静默清空**，
+     # 节点回落「无限制」默认。这里补齐读侧，写侧 `_node_to_src` 对称发射。
+-    allowed = _opt(kw, "allowed-hosts", "allowedHosts", "allowed_hosts")
+-    if allowed is not None:
+-        spec["allowedHosts"] = _host_list(allowed, "allowed-hosts")
+     denied = _opt(kw, "denied-hosts", "deniedHosts", "denied_hosts")
+     if denied is not None:
+         spec["deniedHosts"] = _host_list(denied, "denied-hosts")
+```
+
+```
+$ pytest tests/unit/test_issue200_sexpr_http_event_policy.py
+            assert kw in src
+>       assert _pick_http(compile_sexpr(src)["nodes"]) == POLICY_VALUES
+E       AssertionError: assert {'allowedHost...eout': 5, ...} == {'allowedHost...eout': 5, ...}
+E         
+E         Omitting 4 identical items, use -vv to show
+E         Differing items:
+E         {'allowedHosts': None} != {'allowedHosts': ['example.com', '*.internal.test']}
+E         Use -v to get more diff
+        assert ":allowed-hosts" in src
+>       assert _pick_http(compile_sexpr(src)["nodes"]) == POLICY_VALUES
+E       AssertionError: assert {'allowedHost...eout': 5, ...} == {'allowedHost...eout': 5, ...}
+E         
+E         Omitting 4 identical items, use -vv to show
+E         Differing items:
+E         {'allowedHosts': None} != {'allowedHosts': ['example.com', '*.internal.test']}
+E         Use -v to get more diff
+>       assert http.allowed_hosts == POLICY_VALUES["allowedHosts"]
+E       AssertionError: assert None == ['example.com', '*.internal.test']
+E        +  where None = HTTP(id='h', name=None, desc=None, output=None, next='w', timeout='', source_line=None, timeout_handler=ErrorHandler(s...directs=2, url='http://example.com', query=None, headers=None, body=None, addressing={'name': 'domain'}, delegate=None).allowed_hosts
+>       with pytest.raises(SyntaxError, match=message):
+E       Failed: DID NOT RAISE SyntaxError
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_http_policy_fields
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_snake_case_policy_fields
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_builds_a_flow_with_policy_intact
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_reader_rejects_malformed_policy[:allowed-hosts 42-\u9700\u8981\u4e3b\u673a\u5b57\u7b26\u4e32]
+4 failed, 10 passed in 0.51s
+[exit 1]
+```
+
+## C · sexpr 写侧不发射 `:subscription-timeout`
+
+EVENT 侧单点：HTTP 策略仍全绿，只有 subscriptionTimeout 相关断言红。
+
+```diff
+--- a/plaita/dsl/sexpr.py
++++ b/plaita/dsl/sexpr.py
+@@ -1418,9 +1418,6 @@
+         # #200：订阅超时同样只在节点声明里存在过——读写两侧都没有表达面，
+         # 往返即丢 ⇒ 本应超时唤醒的挂起退化成无限等待。与 :filter 同理排在
+         # `-> next` 之前。
+-        sub_timeout = _dual(n, "subscriptionTimeout", "subscription_timeout")
+-        if sub_timeout is not None:
+-            parts.append(f":subscription-timeout {_expr_to_src(sub_timeout)}")
+         # `-> next` 必须**最后**发（它终止关键字列表）
+         if n.get("next") is not None:
+             parts.append(f"-> {n['next']}")
+```
+
+```
+$ pytest tests/unit/test_issue200_sexpr_http_event_policy.py
+>       assert ":subscription-timeout 120" in src
+E       assert ':subscription-timeout 120' in '(flow f-policy (start :id s -> h) (http :id h :method GET :url http://example.com :allowed-hosts (list "example.com" ...lock-private-networks true :request-timeout 5 :max-redirects 2 -> w) (event :id w :type quote.ready -> e) (end :id e))'
+        assert http.allowed_hosts == POLICY_VALUES["allowedHosts"]
+        assert http.denied_hosts == POLICY_VALUES["deniedHosts"]
+        assert http.block_private_networks is True
+        assert http.request_timeout == 5
+        assert http.max_redirects == 2
+>       assert event.subscription_timeout == SUBSCRIPTION_TIMEOUT
+E       AssertionError: assert None == 120
+E        +  where None = EventNode(id='w', name=None, desc=None, output=None, next='e', timeout='', source_line=None, timeout_handler=ErrorHand...r_code=-9527, error_message=None, retry_times=0), event_type='quote.ready', event_filter={}, subscription_timeout=None).subscription_timeout
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_event_subscription_timeout
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_sexpr_roundtrip_builds_a_flow_with_policy_intact
+2 failed, 12 passed in 0.41s
+[exit 1]
+```
+
+## D · `@flow` 发射器不写 HTTP 策略 kwargs
+
+`emit_source` 产物回到 base 的 `HTTP(method=..., url=...)`，重编译归零。
+
+```diff
+--- a/plaita/dsl/codeflow/_emit.py
++++ b/plaita/dsl/codeflow/_emit.py
+@@ -641,18 +641,6 @@
+         # ⇒ 任何 `emit_source` → 重编译都把白名单/私网阻断静默清空，节点回落
+         # 「无限制」默认。camel（--format ir / 手写 JSON）与 snake
+         #（Flow.model_dump()）双读，与 `_nodes.py` 的读侧对称。
+-        for ir_key, py_name in (
+-            ("allowedHosts", "allowed_hosts"),
+-            ("deniedHosts", "denied_hosts"),
+-            ("blockPrivateNetworks", "block_private_networks"),
+-            ("requestTimeout", "request_timeout"),
+-            ("maxRedirects", "max_redirects"),
+-        ):
+-            value = node.get(ir_key)
+-            if value is None:
+-                value = node.get(py_name)
+-            if value is not None:
+-                kwargs.append(f"{py_name}={_invert_value(value, self.ns)}")
+         kwargs.extend(self._common_kwargs(node))
+         return f"HTTP({', '.join(kwargs)})"
+```
+
+```
+$ pytest tests/unit/test_issue200_sexpr_http_event_policy.py
+>           assert kw in src
+E           assert 'allowed_hosts=' in "@flow('f-policy')\ndef f_policy(INPUT):\n    h = HTTP(method='GET', url='http://example.com')\n    w = EVENT(type='quote.ready', subscription_timeout=120)\n    return"
+>       assert "allowed_hosts=" in src
+E       assert 'allowed_hosts=' in "@flow('f-policy')\ndef f_policy(INPUT):\n    h = HTTP(method='GET', url='http://example.com')\n    w = EVENT(type='quote.ready', subscription_timeout=120)\n    return"
+>       assert http.allowed_hosts == POLICY_VALUES["allowedHosts"]
+E       AssertionError: assert None == ['example.com', '*.internal.test']
+E        +  where None = HTTP(id='h', name=None, desc=None, output=None, next='w', timeout='', source_line=3, timeout_handler=ErrorHandler(stra...directs=5, url='http://example.com', query=None, headers=None, body=None, addressing={'name': 'domain'}, delegate=None).allowed_hosts
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_roundtrip_http_policy_and_event_timeout
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_roundtrip_snake_case_policy_fields
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_recompiled_flow_keeps_policy
+3 failed, 11 passed in 0.35s
+[exit 1]
+```
+
+## E · `@flow` 编译器不消费 HTTP 策略 kwargs
+
+源码里 kwargs 写出来了，但编译链没有消费点（读写两侧必须同时补齐）。
+
+```diff
+--- a/plaita/dsl/codeflow/_nodes.py
++++ b/plaita/dsl/codeflow/_nodes.py
+@@ -84,18 +84,6 @@
+         # #200：HTTP 访问策略字段（SSRF 防护面）此前不在内置 kind 的手写链里
+         # ⇒ 发射器即使写出 `allowed_hosts=...` 也会被编译期静默丢弃。camel 与
+         # snake 两种 kwarg 拼写都收（与 `_emit.py` 的发射侧对称）。
+-        for ir_key, spellings in (
+-            ("allowedHosts", ("allowed_hosts", "allowedHosts")),
+-            ("deniedHosts", ("denied_hosts", "deniedHosts")),
+-            ("blockPrivateNetworks",
+-             ("block_private_networks", "blockPrivateNetworks")),
+-            ("requestTimeout", ("request_timeout", "requestTimeout")),
+-            ("maxRedirects", ("max_redirects", "maxRedirects")),
+-        ):
+-            for name in spellings:
+-                if name in kw:
+-                    spec[ir_key] = _const(kw[name])
+-                    break
+         eh = kw.get("on_error") or kw.get("on_error_handler")
+         if eh is not None:
+             spec["errorHandler"] = _eval_error_handler(eh, ctx)
+```
+
+```
+$ pytest tests/unit/test_issue200_sexpr_http_event_policy.py
+            assert kw in src
+>       assert _pick_http(back["nodes"]) == POLICY_VALUES
+E       AssertionError: assert {'allowedHost...t': None, ...} == {'allowedHost...eout': 5, ...}
+E         
+E         Differing items:
+E         {'allowedHosts': None} != {'allowedHosts': ['example.com', '*.internal.test']}
+E         {'requestTimeout': None} != {'requestTimeout': 5}
+E         {'deniedHosts': None} != {'deniedHosts': ['evil.example.com']}
+E         {'blockPrivateNetworks': None} != {'blockPrivateNetworks': True}
+E         {'maxRedirects': None} != {'maxRedirects': 2}
+E         Use -v to get more diff
+        assert "allowed_hosts=" in src
+>       assert _pick_http(back["nodes"]) == POLICY_VALUES
+E       AssertionError: assert {'allowedHost...t': None, ...} == {'allowedHost...eout': 5, ...}
+E         
+E         Differing items:
+E         {'allowedHosts': None} != {'allowedHosts': ['example.com', '*.internal.test']}
+E         {'requestTimeout': None} != {'requestTimeout': 5}
+E         {'deniedHosts': None} != {'deniedHosts': ['evil.example.com']}
+E         {'blockPrivateNetworks': None} != {'blockPrivateNetworks': True}
+E         {'maxRedirects': None} != {'maxRedirects': 2}
+E         Use -v to get more diff
+>       assert http.allowed_hosts == POLICY_VALUES["allowedHosts"]
+E       AssertionError: assert None == ['example.com', '*.internal.test']
+E        +  where None = HTTP(id='h', name=None, desc=None, output=None, next='w', timeout='', source_line=3, timeout_handler=ErrorHandler(stra...directs=5, url='http://example.com', query=None, headers=None, body=None, addressing={'name': 'domain'}, delegate=None).allowed_hosts
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_roundtrip_http_policy_and_event_timeout
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_roundtrip_snake_case_policy_fields
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_recompiled_flow_keeps_policy
+3 failed, 11 passed in 0.43s
+[exit 1]
+```
+
+## F · `@flow` 发射器不写 `subscription_timeout`
+
+EVENT 侧单点：HTTP 策略仍全绿。
+
+```diff
+--- a/plaita/dsl/codeflow/_emit.py
++++ b/plaita/dsl/codeflow/_emit.py
+@@ -675,12 +675,6 @@
+             kwargs.append(f"filter={_invert_value(efilter, self.ns)}")
+         # #200：订阅超时（EventNode.subscription_timeout）此前没有表达面，
+         # 往返即丢 ⇒ 本应超时唤醒的挂起退化成无限等待。
+-        sub_timeout = node.get("subscriptionTimeout")
+-        if sub_timeout is None:
+-            sub_timeout = node.get("subscription_timeout")
+-        if sub_timeout is not None:
+-            kwargs.append(
+-                f"subscription_timeout={_invert_value(sub_timeout, self.ns)}")
+         kwargs.extend(self._common_kwargs(node))
+         return f"EVENT({', '.join(kwargs)})"
+```
+
+```
+$ pytest tests/unit/test_issue200_sexpr_http_event_policy.py
+>           assert kw in src
+E           assert 'subscription_timeout=' in "@flow('f-policy')\ndef f_policy(INPUT):\n    h = HTTP(method='GET', url='http://example.com', allowed_hosts=['example...com'], block_private_networks=True, request_timeout=5, max_redirects=2)\n    w = EVENT(type='quote.ready')\n    return"
+        assert http.allowed_hosts == POLICY_VALUES["allowedHosts"]
+        assert http.block_private_networks is True
+        assert http.request_timeout == 5
+        assert http.max_redirects == 2
+>       assert event.subscription_timeout == SUBSCRIPTION_TIMEOUT
+E       AssertionError: assert None == 120
+E        +  where None = EventNode(id='w', name=None, desc=None, output=None, next='_n1', timeout='', source_line=4, timeout_handler=ErrorHandl...r_code=-9527, error_message=None, retry_times=0), event_type='quote.ready', event_filter={}, subscription_timeout=None).subscription_timeout
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_roundtrip_http_policy_and_event_timeout
+FAILED tests/unit/test_issue200_sexpr_http_event_policy.py::test_codeflow_recompiled_flow_keeps_policy
+2 failed, 12 passed in 0.38s
+[exit 1]
+```

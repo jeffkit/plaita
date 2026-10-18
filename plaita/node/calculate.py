@@ -122,6 +122,7 @@ class Calculate(Node):
     """
 
     node_type: ClassVar[str] = "calculate"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "求值"
     call: Optional[Call] = None
 

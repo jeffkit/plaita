@@ -1,0 +1,76 @@
+{
+  "issue": 207,
+  "title": "sexpr 写侧双读 snake_case resultType（失败出口不再洗成 success）",
+  "base_head": "ef90eb3a4e70371f3bea2c585600355773012789",
+  "fix_commit_subject": "fix(dsl/sexpr): #207 写侧双读 snake_case result_type",
+  "before": {
+    "issue": 207,
+    "plaita_file": "/tmp/w36-before/plaita/__init__.py",
+    "python": "3.11.16",
+    "snake_error": {
+      "ir_key": "result_type",
+      "source": "(flow f-err (start :id s -> e) (end :id e :error (dict :code 4001 :message bad)))",
+      "resultType_after": "success",
+      "error_after": {
+        "code": 4001,
+        "message": "bad"
+      },
+      "ok": false
+    },
+    "camel_error": {
+      "ir_key": "resultType",
+      "source": "(flow f-err (start :id s -> e) (end :id e :result-type error :error (dict :code 4001 :message bad)))",
+      "resultType_after": "error",
+      "error_after": {
+        "code": 4001,
+        "message": "bad"
+      },
+      "ok": true
+    },
+    "snake_nop": {
+      "ir_key": "result_type",
+      "source": "(flow f-err (start :id s -> e) (end :id e :error (dict :code 4001 :message bad)))",
+      "resultType_after": "success",
+      "error_after": {
+        "code": 4001,
+        "message": "bad"
+      },
+      "ok": false
+    }
+  },
+  "after": {
+    "issue": 207,
+    "plaita_file": "/tmp/w36/plaita/__init__.py",
+    "python": "3.11.16",
+    "snake_error": {
+      "ir_key": "result_type",
+      "source": "(flow f-err (start :id s -> e) (end :id e :result-type error :error (dict :code 4001 :message bad)))",
+      "resultType_after": "error",
+      "error_after": {
+        "code": 4001,
+        "message": "bad"
+      },
+      "ok": true
+    },
+    "camel_error": {
+      "ir_key": "resultType",
+      "source": "(flow f-err (start :id s -> e) (end :id e :result-type error :error (dict :code 4001 :message bad)))",
+      "resultType_after": "error",
+      "error_after": {
+        "code": 4001,
+        "message": "bad"
+      },
+      "ok": true
+    },
+    "snake_nop": {
+      "ir_key": "result_type",
+      "source": "(flow f-err (start :id s -> e) (end :id e :result-type nop :error (dict :code 4001 :message bad)))",
+      "resultType_after": "nop",
+      "error_after": {
+        "code": 4001,
+        "message": "bad"
+      },
+      "ok": true
+    }
+  }
+}

@@ -1,0 +1,65 @@
+# plaita#191 负控：还原「发布端绑定受信租户 + EventFilter 只认受信 tenant_id」
+
+负控手法：把修法涉及的发布/消费两侧同时还原到 origin/main（原始漏洞形态）：
+
+```bash
+git checkout origin/main -- \
+  plaita/event/core.py plaita/event/redis.py plaita/event/memory.py \
+  plaita/event/sqlalchemy.py plaita/server/event_filter.py \
+  plaita/server/services/base_service.py \
+  plaita-console/backend/api/events.py
+```
+
+## repro（`docs/proofs/data/191-repro.py`，期望红）
+
+```
+"trusted_tenant": null,
+"data_tenant": "globex",
+"spoof_enqueued": 1,
+"spoof_task_tenants": ["globex"],
+"legit_enqueued": 0,
+"publish_safe": false,
+"consume_safe": false,
+"verdict": "VULNERABLE（跨租户发布/注入链仍通）"
+```
+
+精确红点：租户 acme 的 editor 发布时在 `data.tenant_id` 自报 globex，事件
+落库**没有**受信顶层租户（`trusted_tenant: null`）；EventFilter 用自报租户
+加载到 globex 的挂起执行并**入队 1 条 resume**（`spoof_enqueued: 1`，
+任务租户 `globex`）——即跨租户审批放行。
+
+## 新增测试（期望红）
+
+```
+FAILED test_issue191_event_tenant_binding.py::test_publish_binds_publisher_tenant_and_strips_client_data_tenant
+FAILED test_issue191_event_tenant_binding.py::test_publish_uses_request_tenant_even_if_data_claims_other
+FAILED test_issue191_event_tenant_binding.py::TestEventFilterTenantIsolation::test_spoofed_data_tenant_does_not_resume_other_tenant
+FAILED test_issue191_event_tenant_binding.py::TestEventFilterTenantIsolation::test_trusted_tenant_event_resumes
+FAILED test_issue191_event_tenant_binding.py::TestEventFilterTenantIsolation::test_state_tenant_mismatch_dropped_without_tenant_routing
+FAILED test_issue191_event_tenant_binding.py::TestEventFilterTenantIsolation::test_subscription_tenant_mismatch_dropped
+FAILED test_issue191_event_tenant_binding.py::test_service_resume_event_carries_trusted_tenant
+FAILED test_issue191_event_tenant_binding.py::test_reconciler_replays_both_tenants_once
+8 failed in 0.73s
+```
+
+精确红文案（跨租户注入用例）：
+
+```
+E       AssertionError: data.tenant_id 不得用于切租户
+E       assert [{'type': 'resume', 'tenant_id': 'globex', ...}] == []
+```
+
+精确红文案（回扫补偿用例）：
+
+```
+E       AssertionError: assert [] == ['exec-a', 'exec-b']
+E         Right contains 2 more items, first extra item: 'exec-a'
+```
+
+## 还原修法后
+
+- `docs/proofs/data/191-repro.py` 退出码 0：发布事件 `tenant_id: "acme"`、
+  `data` 不含 `tenant_id`；伪造事件入队 0 条，受信租户事件入队 1 条且
+  `tenant_id: "globex"`；
+- 新增 8 条测试全绿；事件相关既有测试 594 passed（含 #79/#85/#153 回扫、
+  #35 resume 发布、#195 correlation）。

@@ -1,0 +1,62 @@
+# plaita#190 负控：还原「内置节点 dry-run 能力白名单 + HTTP 节点 dry_run 短路」
+
+负控手法：把修法涉及的两层**同时**还原到 origin/main（原始漏洞形态）：
+
+```bash
+git checkout origin/main -- \
+  plaita/node/basic.py plaita/node/start.py plaita/node/end.py \
+  plaita/node/decide.py plaita/node/assignment.py plaita/node/calculate.py \
+  plaita/node/child.py plaita/node/concurrent.py plaita/node/loop.py \
+  plaita/node/mock.py plaita/node/http.py plaita/node/redis.py \
+  plaita/node/event_node.py plaita/node/code.py \
+  plaita-console/backend/services/dryrun.py
+```
+
+## repro（`docs/proofs/data/190-repro.py`，期望红）
+
+```
+"requests_observed": 1,
+"request_paths": [
+  "/latest/meta-data/iam"
+],
+"dry_run_error": "",
+"dry_run_result": {
+  "data": {"secret": "internal-metadata", "path": "/latest/meta-data/iam"},
+  "status": 200, ...
+},
+"verdict": "VULNERABLE（http 节点真实出网）"
+```
+
+精确红点：`requests_observed == 1` 且 `dry_run_error == ""` —— editor 试跑含
+`http` 节点的 flow 时，console backend 进程真实出网并把内网响应体回显进
+`result`（进程内 SSRF）。
+
+## 新增/既有测试（期望红）
+
+```
+FAILED test_issue190_dryrun_node_capability.py::TestHttpNodeBlocked::test_http_flow_rejected_and_probe_gets_zero_requests
+FAILED test_issue190_dryrun_node_capability.py::TestHttpNodeBlocked::test_http_inside_child_flow_is_scanned
+FAILED test_issue190_dryrun_node_capability.py::TestHttpNodeBlocked::test_http_inside_parallel_branch_is_scanned
+FAILED test_issue190_dryrun_node_capability.py::TestHttpNodeSelfGuard::test_direct_execution_with_dry_run_flag_does_not_connect
+FAILED test_issue190_dryrun_node_capability.py::TestOtherSideEffectNodesBlocked::test_redis_node_rejected
+FAILED test_issue190_dryrun_node_capability.py::TestOtherSideEffectNodesBlocked::test_event_node_rejected
+FAILED test_issue190_dryrun_node_capability.py::test_capability_markers_are_explicit_for_builtin_side_effect_nodes
+7 failed, 11 passed
+```
+
+精确红文案（主用例）：
+
+```
+E       AssertionError: 试跑不得让 http 节点真实出网
+E       assert [<hits>] == []
+```
+
+11 passed 里包含 #32 的既有 dry-run 用例（业务节点 dry_run 契约、子流程旗标
+钉死）与纯控制流/未知类型用例——说明红是**http 判据**失效，不是整体坏掉。
+
+## 还原修法后
+
+- `docs/proofs/data/190-repro.py` 退出码 0：`requests_observed: 0`，
+  `dry_run_error: "dry-run 拒绝含危险节点/未声明 dry-run 安全节点的流程...:
+  nodes[fetch].type=http"`；
+- 新增 11 条测试全绿；console 全量 466 passed / 13 skipped。

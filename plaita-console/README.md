@@ -219,7 +219,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | 变量名 | 默认值 | 描述 |
 |--------|--------|------|
 | `PLAITA_CONSOLE_REDIS_URL` | `redis://localhost:6379/0` | Redis 连接 URL |
-| `PLAITA_CONSOLE_HOST` | `0.0.0.0` | 监听地址 |
+| `PLAITA_CONSOLE_HOST` | `127.0.0.1` | 监听地址（**默认仅本机**；对外部署显式设 `0.0.0.0`，启动日志会打 warning，见 #208） |
 | `PLAITA_CONSOLE_PORT` | `8080` | 监听端口 |
 | `PLAITA_CONSOLE_DEBUG` | `false` | 调试模式 |
 | `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | 流程定义/版本/节点描述持久化（SQLAlchemy） |

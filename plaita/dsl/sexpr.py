@@ -751,6 +751,44 @@ def _c_code(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     return spec
 
 
+def _host_list(x: Any, field: str) -> List[str]:
+    """读侧归一 ``:allowed-hosts`` / ``:denied-hosts``：list 或单值 → ``list[str]``。
+
+    ``(list "a" "b")`` 由 ``_value()`` 编译成 list；单值（``:allowed-hosts a``）
+    也接受。元素必须是字符串（主机名 / ``*.suffix`` / CIDR 字面量）；数字或
+    bool 是作者笔误，**响亮拒绝**而不是让 ``Flow.model_validate`` 给出难懂的
+    类型错误（#200）。
+    """
+    values = _value(x)
+    values = values if isinstance(values, list) else [values]
+    out: List[str] = []
+    for v in values:
+        if isinstance(v, str):
+            out.append(str(v))
+            continue
+        raise SyntaxError(
+            f"http 的 :{field} 需要主机字符串（可写成 :{field} host 或 "
+            f":{field} (list host1 host2 ...)），得到 {v!r}"
+        )
+    return out
+
+
+def _positive_seconds(kw: Dict[str, Any], *names: str) -> Any:
+    """读以秒为单位的策略字段（``:request-timeout`` / ``:subscription-timeout``）。
+
+    必须是正数：bool 是作者笔误（``true`` 不是 1 秒），0/负数会让订阅一注册就
+    超时或让请求立刻失败，因此**响亮拒绝**而不是留给运行期。
+    """
+    value = _opt(kw, *names)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SyntaxError(f":{names[0]} 需要数字（秒），得到 {value!r}")
+    if value <= 0:
+        raise SyntaxError(f":{names[0]} 需要正数（秒），得到 {value!r}")
+    return value
+
+
 def _c_http(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     pos, kw = _split_args(args)
     method = _opt(kw, "method")
@@ -768,6 +806,40 @@ def _c_http(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     inp = _opt(kw, "input")
     if inp is not None:
         spec["input"] = _value(inp)
+    # #200：访问策略是 SSRF 防护面（HTTP.allowed_hosts / denied_hosts /
+    # block_private_networks / request_timeout / max_redirects）。读侧此前一条
+    # 都不认 ⇒ 写侧也无法发射 ⇒ 任何 sexpr 往返都把白名单/私网阻断**静默清空**，
+    # 节点回落「无限制」默认。这里补齐读侧，写侧 `_node_to_src` 对称发射。
+    allowed = _opt(kw, "allowed-hosts", "allowedHosts", "allowed_hosts")
+    if allowed is not None:
+        spec["allowedHosts"] = _host_list(allowed, "allowed-hosts")
+    denied = _opt(kw, "denied-hosts", "deniedHosts", "denied_hosts")
+    if denied is not None:
+        spec["deniedHosts"] = _host_list(denied, "denied-hosts")
+    block = _opt(kw, "block-private-networks", "blockPrivateNetworks",
+                 "block_private_networks")
+    if block is not None:
+        if not isinstance(block, bool):
+            raise SyntaxError(
+                "http 的 :block-private-networks 需要 true/false，"
+                f"得到 {block!r}"
+            )
+        spec["blockPrivateNetworks"] = block
+    timeout = _positive_seconds(kw, "request-timeout", "requestTimeout",
+                                 "request_timeout")
+    if timeout is not None:
+        spec["requestTimeout"] = timeout
+    redirects = _opt(kw, "max-redirects", "maxRedirects", "max_redirects")
+    if redirects is not None:
+        ok = (not isinstance(redirects, bool)
+              and isinstance(redirects, (int, float))
+              and redirects >= 0 and int(redirects) == redirects)
+        if not ok:
+            raise SyntaxError(
+                "http 的 :max-redirects 需要非负整数，"
+                f"得到 {redirects!r}"
+            )
+        spec["maxRedirects"] = int(redirects)
     return spec
 
 
@@ -785,6 +857,12 @@ def _c_event(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
         # ⇒ 模型校验把它压成 `{}` ⇒ **事件静默失去过滤条件、不再按条件触发**。
         # 其它关键字（如 `:headers`）走的是 `_value` 路径，故本处属遗漏。
         spec["eventFilter"] = _value(flt)
+    # #200：订阅超时（EventNode.subscription_timeout）此前读写两侧都没有表达面，
+    # 往返即丢 ⇒ 本应超时唤醒的挂起退化成无限等待。
+    sub_timeout = _positive_seconds(kw, "subscription-timeout",
+                                     "subscriptionTimeout", "subscription_timeout")
+    if sub_timeout is not None:
+        spec["subscriptionTimeout"] = sub_timeout
     return spec
 
 
@@ -1079,6 +1157,36 @@ def _common_kw_to_src(n: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _dual(n: Dict[str, Any], camel: str, snake: str) -> Any:
+    """同一字段的 camelCase / snake_case 双读（#200/#207 写侧的统一口径）。
+
+    ``--format ir`` / 手写 JSON 用 camel，``Flow.model_dump()`` 用 snake；写侧
+    只看一种就会静默丢字段。取先出现的非 ``None`` 值——`False` / `0` / `[]`
+    都是合法 IR 值，不能用真值判断。
+    """
+    value = n.get(camel)
+    if value is None:
+        value = n.get(snake)
+    return value
+
+
+def _host_list_to_src(values: Any) -> str:
+    """发射主机策略列表为 ``(list "a" "*.b" ...)``。
+
+    必须显式写 ``list`` 头：裸写 ``(a b)`` 时若首元素恰好是 ``dict`` / ``list``，
+    读侧 ``_value()`` 会把它当字面量容器编译，**静默改形**。每个元素恒走
+    ``_string_to_src``：``1.2.3.4`` / ``true`` / ``nil`` 裸写会被读成
+    int/bool/None，主机名必须永远是字符串（#200）。
+    """
+    if isinstance(values, str):
+        values = [values]
+    elif not isinstance(values, (list, tuple)):
+        raise SexprEmitError(
+            f"主机策略字段需要字符串列表，得到 {values!r}"
+        )
+    return "(list " + " ".join(_string_to_src(str(v)) for v in values) + ")"
+
+
 def _node_to_src(n: Dict[str, Any]) -> str:
     t = n.get("type")
     parts: List[str] = [t]
@@ -1094,8 +1202,15 @@ def _node_to_src(n: Dict[str, Any]) -> str:
     elif t == "end":
         if n.get("output") is not None:
             parts.append(f":output {_expr_to_src(n['output'])}")
-        if n.get("resultType") and n["resultType"] != "success":
-            parts.append(f":result-type {n['resultType']}")
+        # #207：读侧 `_c_end` 只产出 camelCase `resultType`，但同一 IR 的
+        # snake_case 形态（`--format ir` / `Flow.model_dump()`）用
+        # `result_type`——写侧只看 camel 时**不发射 `:result-type`**，
+        # 读侧缺省回填 `success` ⇒ `result_type=error` 的失败出口往返后被
+        # 洗成成功（error 载荷还在，语义已错）。与 codeflow 发射器
+        # （`_emit.py`：`resultType or result_type`）同口径双读。
+        result_type = n.get("resultType") or n.get("result_type")
+        if result_type and result_type != "success":
+            parts.append(f":result-type {result_type}")
         # #136 (item 1 of this patch, the issue itself): `error` used to exist
         # only on the reader side (`_c_end` reads `:error`) while the writer
         # never emitted it -> after a round-trip the payload is gone and the
@@ -1227,6 +1342,29 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # #150: `_c_http` reads `:input` into `HTTP.input`; the writer dropped it.
         if n.get("input") is not None:
             parts.append(f":input {_expr_to_src(n['input'])}")
+        # #200：访问策略（SSRF 防护面）此前写侧一个字都不发。读侧补齐后这里
+        # 对称发射；全部排在 `-> next` 之前（关键字列表在此终止）。
+        allowed = _dual(n, "allowedHosts", "allowed_hosts")
+        if allowed is not None:
+            parts.append(f":allowed-hosts {_host_list_to_src(allowed)}")
+        denied = _dual(n, "deniedHosts", "denied_hosts")
+        if denied is not None:
+            parts.append(f":denied-hosts {_host_list_to_src(denied)}")
+        block = _dual(n, "blockPrivateNetworks", "block_private_networks")
+        if block is not None:
+            if not isinstance(block, bool):
+                raise SexprEmitError(
+                    f"节点 {n.get('id')!r} 的 blockPrivateNetworks 不是 bool"
+                    f"（得到 {block!r}），无法发射成可忠实回读的 :block-private-networks"
+                )
+            parts.append(
+                f":block-private-networks {'true' if block else 'false'}")
+        req_timeout = _dual(n, "requestTimeout", "request_timeout")
+        if req_timeout is not None:
+            parts.append(f":request-timeout {_expr_to_src(req_timeout)}")
+        redirects = _dual(n, "maxRedirects", "max_redirects")
+        if redirects is not None:
+            parts.append(f":max-redirects {redirects}")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "code":
@@ -1277,6 +1415,12 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         ev_filter = n.get("eventFilter", n.get("event_filter"))
         if ev_filter is not None:
             parts.append(f":filter {_expr_to_src(ev_filter)}")
+        # #200：订阅超时同样只在节点声明里存在过——读写两侧都没有表达面，
+        # 往返即丢 ⇒ 本应超时唤醒的挂起退化成无限等待。与 :filter 同理排在
+        # `-> next` 之前。
+        sub_timeout = _dual(n, "subscriptionTimeout", "subscription_timeout")
+        if sub_timeout is not None:
+            parts.append(f":subscription-timeout {_expr_to_src(sub_timeout)}")
         # `-> next` 必须**最后**发（它终止关键字列表）
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")

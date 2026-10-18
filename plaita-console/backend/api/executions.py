@@ -17,10 +17,10 @@ from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 from starlette.routing import Route
 
-try:
-    from services import obs_link
+try:  # 包布局（pip 安装 / `python -m plaita_console`）
+    from ..services import obs_link
 except ImportError:  # 平铺布局（cwd=backend）运行时
-    import obs_link  # type: ignore
+    from services import obs_link  # type: ignore
 
 logger = logging.getLogger(__name__)
 

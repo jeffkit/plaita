@@ -77,6 +77,16 @@ class Node(BaseModel):
     # 内核 DistributedStrategy 据此走 suspend 分支并调 resume(), 不再 isinstance
     # 具体节点类型, 从而切断 core -> plaita.node.event_node 的反向依赖。
     is_suspending: ClassVar[bool] = False
+    # dry-run 能力声明（plaita#190）：console 试跑只放行「显式声明安全」的
+    # 内置节点。三态语义：
+    #   True  —— 纯计算/控制流，试跑执行无副作用；
+    #   False —— 副作用节点（出网 / 写外部存储 / 发布事件 / 执行任意代码），
+    #            试跑必须拒绝（节点自身也应在 dry_run 下短路，纵深防御）；
+    #   None  —— 未声明。内置节点按 False 处理（默认拒绝）；经
+    #            ``PLAITA_CONSOLE_NODE_MODULES`` 动态注册的业务节点不在内置
+    #            判定内，仍按 ``execution.get_global_variable("dry_run")`` 契约
+    #            自守（plaita#32），见 console services/dryrun.py。
+    dry_run_safe: ClassVar[Optional[bool]] = None
 
     # validator 消费但非声明字段的遗留键（camelCase 别名等），unknown-key 告警的
     # 白名单由「声明字段 ∪ alias ∪ LEGACY_KEYS」构成；子类按需扩展。

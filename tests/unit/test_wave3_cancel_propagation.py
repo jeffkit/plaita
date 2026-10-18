@@ -387,22 +387,27 @@ class TestT7ParallelTimeoutNoCrossHarm(unittest.IsolatedAsyncioTestCase):
 
 
 class TestCancelEventMechanics(unittest.TestCase):
-    """cancel() 幂等 / 父子共享 / pickle 剥离重建 / clean() 重同步 / 进程模式入口。"""
+    """cancel() 幂等 / 父子 Event 分工 / pickle 剥离重建 / clean() 重同步 / 进程模式入口。"""
 
-    def test_cancel_idempotent_and_shared_across_child_chain(self):
+    def test_cancel_idempotent_and_propagates_across_child_chain(self):
         parent = FlowExecution()
         child = parent.get_child_execution()
-        # 父子共享同一对 Event 实例（子执行链免费获得传播的机制基础）
-        self.assertIs(parent.cancel_event, child.cancel_event)
+        # plaita#206：节点级 cancel_event 每个子上下文各持一个（父级置位单向
+        # 可见）；执行级 cancel_requested 仍是整条链共享的同一实例。
+        self.assertIsNot(parent.cancel_event, child.cancel_event)
         self.assertIs(parent.cancel_requested, child.cancel_requested)
 
         child.cancel()
         child.cancel()
+        self.assertTrue(child.cancel_requested.is_set())
+        self.assertFalse(parent.cancel_event.is_set(),
+                         "分支置位不得传播到父/兄弟（#206 误杀面）")
+
         parent.cancel()
         self.assertTrue(parent.cancel_requested.is_set())
         self.assertTrue(parent.cancel_event.is_set())
         self.assertTrue(child.cancel_requested.is_set())
-        self.assertTrue(child.cancel_event.is_set())
+        self.assertTrue(child.cancel_event.is_set(), "取消意图仍须沿链传播")
 
     def test_pickle_strips_and_rebuilds_both_events(self):
         ctx = ExecutionContext()

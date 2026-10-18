@@ -1,0 +1,60 @@
+# plaita#211 负控记录：start_service 计数→启动非原子（并发双起）
+
+- 仓：/tmp/w40（worktree，分支 fix/w40）
+- 基线：origin/main = ef90eb3a4e70371f3bea2c585600355773012789
+- 修复提交：d031c2e5f73dfd7e5724bd3168e5494601a805d9
+- 环境：PYTHONPATH=/tmp/w40，解释器 /Users/jeff.jie/.venvs/plaita/bin/python
+- 负控方法：``git checkout origin/main -- plaita-console/backend/services/service_manager.py``
+  （还原整文件到无锁实现），先跑 repro、再跑新用例，记录精确红文案；随后
+  ``git checkout HEAD -- <file>`` 还原并自检（文件干净 + 7 passed）。
+- repro：``docs/proofs/data/211-repro.py``（真实协程并发 + launcher 内
+  ``await asyncio.sleep`` 放大竞态窗口）
+
+## 判定
+
+- 还原后 repro：case A（max_instances=1 两次并发）与 case C（20 并发 /
+  max_instances=3）双双复现「双起」——2/2 与 20/20 次 ``launcher.start``；
+- 还原后新用例 3 红 4 绿：红的是两条并发门 + API 处理函数；绿的 4 条是守卫
+  （max_instances=2 双成功 / 失败回滚 / 预留不可见 / 跨事件循环复用），
+  它们不依赖修复，用于证明修法没有把并发启动锁死；
+- 还原后：``git status`` 干净，7 passed。
+
+## 原始执行记录
+
+```
+## 负控 0：service_manager.py 完整还原到 origin/main ⇒ repro 复现双起
+== case A: max_instances=1，两个并发 start_service ==
+  launcher.start 调用 = 2/2 成功
+  成功 2 个，失败 0 个：[]
+  instances = ['schedule_service-1', 'schedule_service-2']
+  [FAIL] max_instances=1 下并发两次 start_service 实际调用了 2 次 launcher.start（应恰好 1 次）——双起 scheduler，cron 同一时点会被两个调度循环各触发一次
+  [FAIL] 并发两个请求成功了 2 个（应恰好 1 个：另一个必须被拒）
+  [FAIL] 并发两个请求失败了 0 个（应恰好 1 个：另一个必须得到「已在启动」）
+  [FAIL] instances 里有 2 个实例（应 1 个）：['schedule_service-1', 'schedule_service-2']
+== case B: max_instances=2，两个并发都该成功 ==
+  launcher.start 调用 = 2/2 成功，失败 []
+== case C: max_instances=3，20 个并发请求 ==
+  launcher.start 调用 = 20，成功 20，失败 0
+  [FAIL] 20 并发 / max_instances=3 实际启动 20 次（应恰好 3 次）——预留不是原子的，超出的请求全部穿过了计数检查
+  [FAIL] instances 里有 20 个实例（应 3 个）
+== case D: 启动失败必须回滚占位 ==
+  首次启动按预期失败：launcher boom（模拟启动失败）
+  失败后重试成功：schedule_service-1
+result: RED (6 项)
+  1. max_instances=1 下并发两次 start_service 实际调用了 2 次 launcher.start（应恰好 1 次）——双起 scheduler，cron 同一时点会被两个调度循环各触发一次
+  2. 并发两个请求成功了 2 个（应恰好 1 个：另一个必须被拒）
+
+## 负控 1：还原后跑 #211 新用例——精确红文案
+E       AssertionError: max_instances=1 并发两次启动了 2 次（应 1 次）——双起 scheduler
+E       assert 2 == 1
+E       AssertionError: 20 并发 / max_instances=3 实际启动 20 次（应 3 次）——预留不原子，超出配额的请求全部穿过了计数检查
+E       assert 20 == 3
+E       assert 2 == 1
+FAILED plaita-console/backend/tests/console/test_issue211_service_start_atomic.py::test_concurrent_start_single_slot_starts_exactly_once
+FAILED plaita-console/backend/tests/console/test_issue211_service_start_atomic.py::test_many_concurrent_requests_cap_at_max_instances
+FAILED plaita-console/backend/tests/console/test_issue211_service_start_atomic.py::test_api_start_endpoint_reports_already_starting
+3 failed, 4 passed in 0.32s
+
+## 还原后自检（必须干净）
+7 passed in 0.35s
+```

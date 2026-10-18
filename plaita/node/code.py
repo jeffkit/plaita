@@ -950,6 +950,7 @@ class CodeNode(Node):
     """
 
     node_type: ClassVar[str] = "code"
+    dry_run_safe: ClassVar[bool] = False
     node_name: ClassVar[str] = "代码"
 
     language: Optional[str] = None

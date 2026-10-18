@@ -248,6 +248,7 @@ class Switch(Node):
     branch_name_as_target: ClassVar[bool] = True
     node_name: ClassVar[str] = "判断"
     node_type: ClassVar[str] = "switch"
+    dry_run_safe: ClassVar[bool] = True
 
     output_type: Property = Property(data_type=types.STRING, name="branch_name")
 
@@ -298,6 +299,7 @@ class Bool(Switch):
 
     node_name: ClassVar[str] = "IF"
     node_type: ClassVar[str] = "if"
+    dry_run_safe: ClassVar[bool] = True
 
     else_next: Optional[str] = "false"
     next: Optional[str] = "true"
@@ -336,6 +338,7 @@ class SwitchLegacy(Switch):
 
     node_name: ClassVar[str] = "CASE"
     node_type: ClassVar[str] = "case"
+    dry_run_safe: ClassVar[bool] = True
     target: Any = None
     cases: List[Dict] = Field(default_factory=list)
     default: Optional[str] = None

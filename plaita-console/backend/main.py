@@ -16,7 +16,7 @@ from plaita.writefile_jail import apply_writefile_jail
 
 # 支持多种运行方式的导入
 try:
-    from .config import get_settings
+    from .config import get_settings, warn_if_public_bind
     from .auth import require_auth
     from .api import services, executions, queues, logs, cluster, events
     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
@@ -30,7 +30,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
     if __package__ == "plaita_console":
         raise
     sys.path.insert(0, str(Path(__file__).parent))
-    from config import get_settings
+    from config import get_settings, warn_if_public_bind
     from auth import require_auth
     from api import services, executions, queues, logs, cluster, events
     from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
@@ -405,6 +405,8 @@ def run_server():
     """启动服务器（用于脚本入口）"""
     import uvicorn
     settings = get_settings()
+    # #208：默认 127.0.0.1；显式对外监听时留一条启动 warning
+    warn_if_public_bind(settings.host, logger)
     uvicorn.run(
         "main:app",
         host=settings.host,

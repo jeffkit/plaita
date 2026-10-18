@@ -1,0 +1,371 @@
+# plaita#197 负控：失租 orphan 观测集恢复「_lease_lost 自我续命」摘除条件
+
+基线 origin/main d1ca49c4；本单修复未提交（worktree /tmp/w35，分支 fix/w35）。
+负控注入 = 对本单修复 hunk 执行 `git apply -R`（plaita/server/flow_worker.py, plaita/server/node_timings.py）
+⇒ 恢复「not still_active and execution_id not in _lease_lost 才摘除」。
+
+## MUTANT diff（对修复树反向应用 = 缺陷实现）
+
+```diff
+diff --git b/plaita/server/flow_worker.py a/plaita/server/flow_worker.py
+index fd1a31d4..53bc1cb8 100644
+--- b/plaita/server/flow_worker.py
++++ a/plaita/server/flow_worker.py
+@@ -4110,7 +4110,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
+                 self._lease_lost.add(execution_id)
+                 self._lease_watch.pop(execution_id, None)
+                 self._lease_orphan_watch[execution_id] = (
+-                    execution, tenant_id, fence_token, 0
++                    execution, tenant_id, fence_token
+                 )
+             cancel = getattr(execution, "cancel", None)
+             if callable(cancel):
+@@ -4165,80 +4165,17 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
+         与 `_watchdog_renew_once` 失租分支同款语义（见 `_publish_orphan_progress`）：
+         只发布进度心跳，不续租、不重复 cancel。存在的唯一理由是——
+         释放租约不等于执行结束，停止发布心跳会让 keeper 把健康 run 判死。
+-
+-        条目形状 ``(execution, tenant_id, fence_token, rounds)``：``rounds`` 是
+-        已发布心跳轮数，仅用于摘除时的泄漏观测日志（plaita#197）。
+         """
+         with self._lease_watch_lock:
+             self._lease_orphan_watch[execution_id] = (
+-                execution, tenant_id, fence_token, 0
++                execution, tenant_id, fence_token
+             )
+-            # 该执行已不再持有租约，但仍在跑：标记为失租态（步界
+-            # `_raise_if_lease_lost` 据此中止，不再继续推进）。
++            # 该执行已不再持有租约，但仍在跑：标记为失租态，避免
++            # `_publish_orphan_progress` 误当「已结束」而摘除。
+             self._lease_lost.add(execution_id)
+ 
+-    @staticmethod
+-    def _orphan_entry(entry: Any) -> tuple:
+-        """兼容三元/四元条目（旧调用方/旧测试直接写成三元组）。"""
+-        execution, tenant_id, fence_token = entry[0], entry[1], entry[2]
+-        rounds = entry[3] if len(entry) > 3 else 0
+-        return execution, tenant_id, fence_token, rounds
+-
+-    def _orphan_execution_alive(self, execution_id: str, execution: Any) -> bool:
+-        """失租 orphan 是否仍在推进（plaita#197 的摘除判据）。
+-
+-        历史判据是「不在 `_lease_watch` 且**不在 `_lease_lost`** 才摘除」，
+-        但 `_register_lease_orphan` 自己就往 `_lease_lost` 里写 ⇒ 条件恒假，
+-        条目只增不减、已结束的执行被永久续写 `last_update_time`（keeper 的
+-        stale 判据永远看不到停滞）。
+-
+-        现在改为**对象/节点存活**判据（不再让 `_lease_lost` 自我续命）：
+-
+-        - ``execution._running``：引擎 run 窗口内为真（``run_distributed``
+-          每步持有）；取不到该属性视为**未在跑**（``object()``/已回收对象）；
+-        - 本 worker 的节点耗时采集器仍有「已开始、未结束」的节点 ⇒ 长节点
+-          仍在跑（#123 的生产形态：租约已释放但 impl 仍在沙箱里推进）；
+-        - 取不到任何信号 ⇒ 判「已结束」，让观测集有界（#197 的规格）。
+-        """
+-        if execution is None:
+-            return False
+-        try:
+-            if bool(getattr(execution, "_running", False)):
+-                return True
+-        except Exception as exc:  # noqa: BLE001 — 判定失败按未知处理，不摘除
+-            logger.debug(
+-                "失租 orphan %s 的 _running 判定失败（保守保留）: %s",
+-                execution_id, _scrub_exception_text(exc),
+-            )
+-            return True
+-        timings = getattr(self, "_node_timings", None) or {}
+-        timing = timings.get(execution_id)
+-        if timing is None:
+-            return False
+-        try:
+-            return bool(timing.has_open_nodes())
+-        except Exception as exc:  # noqa: BLE001 — 同上
+-            logger.debug(
+-                "失租 orphan %s 的节点活性判定失败（保守保留）: %s",
+-                execution_id, _scrub_exception_text(exc),
+-            )
+-            return True
+-
+-    def _drop_lease_orphan(self, execution_id: str, reason: str, rounds: int) -> None:
+-        """摘除 orphan 观测条目并清失租标记（plaita#197）。
+-
+-        清 `_lease_lost` 是关键：历史实现只在「新租约登记」/「显式 unregister」
+-        时 discard，已结束的 orphan 两者都不会发生 ⇒ 失租集合也永久驻留。
+-        """
+-        with self._lease_watch_lock:
+-            self._lease_orphan_watch.pop(execution_id, None)
+-            self._lease_lost.discard(execution_id)
+-        logger.info(
+-            "失租 orphan 观测摘除: %s（%s，驻留 %d 轮）", execution_id, reason, rounds
+-        )
+-
+     def _publish_orphan_progress(self) -> None:
+-        """对**失租后仍在跑**的执行发布进度心跳；已结束/已交回的摘除。
++        """对**失租后仍在跑**的执行发布进度心跳，已不在活跃表的则摘除。
+ 
+         为什么需要（2026-10-10 根治「为什么总靠抢救」）：
+         `_watchdog_renew_once` 在续租失败时把执行摘出 `_lease_watch`，此后
+@@ -4248,12 +4185,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
+         17:49 租约被释放 → 18:45/18:47 仍正常完步 → 18:51 因「末节点停滞
+         >1800s」被 keeper 判死（**一个健康 run**），产出只能靠值守抢救。
+ 
+-        本方法只做**只读观测**：不续租、不 cancel、不改执行状态。
+-
+-        plaita#197：摘除判据从「`_lease_lost` 是否仍在」（永远为真）改为
+-        ``_orphan_execution_alive``（对象/在跑节点）。执行结束即摘除、清
+-        `_lease_lost`、停止心跳——观测集有界，keeper 重新看得到停滞：
+-        否则已结束的执行被永久续写 `last_update_time`，stale 判据永不成立。
++        本方法只做**只读观测**：不续租、不 cancel、不改执行状态。执行离开
++        活跃表（终态/被取消/对象消失）即摘除，不会长期驻留。
+ 
+         ``_publish_node_progress`` 自身对「非 running / 无采集器 / 查询失败」
+         都是 no-op 或只告警，因此这里无需再判状态。
+@@ -4262,21 +4195,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
+             orphans = list(self._lease_orphan_watch.items())
+         if not orphans:
+             return
+-        for execution_id, entry in orphans:
+-            execution, tenant_id, fence_token, rounds = self._orphan_entry(entry)
+-            with self._lease_watch_lock:
+-                handed_back = execution_id in self._lease_watch
+-            if handed_back:
+-                # 已被新租约重新登记 ⇒ 交回正常路径，不重复发布
+-                self._drop_lease_orphan(
+-                    execution_id, "已被新租约接管，交回正常路径", rounds
+-                )
+-                continue
+-            if not self._orphan_execution_alive(execution_id, execution):
+-                self._drop_lease_orphan(
+-                    execution_id, "执行已结束/不再推进", rounds
+-                )
+-                continue
++        for execution_id, (_execution, tenant_id, fence_token) in orphans:
+             token = set_current_tenant(tenant_id)
+             try:
+                 self._publish_node_progress(
+@@ -4284,11 +4203,16 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
+                 )
+             finally:
+                 reset_current_tenant(token)
++            # 已不在活跃执行表 ⇒ 它已结束（终态/取消/被回收），摘除即可。
++            # 用 `_lease_watch` 是否重新登记它作为「仍在本 worker 跑」的信号：
++            # 重新登记（换了新租约）时由正常路径接管，这里也摘除以免重复发布。
+             with self._lease_watch_lock:
+-                if execution_id in self._lease_orphan_watch:
+-                    self._lease_orphan_watch[execution_id] = (
+-                        execution, tenant_id, fence_token, rounds + 1
+-                    )
++                still_active = execution_id in self._lease_watch
++                if not still_active and execution_id not in self._lease_lost:
++                    self._lease_orphan_watch.pop(execution_id, None)
++                elif still_active:
++                    # 已被新租约重新登记 ⇒ 交回正常路径
++                    self._lease_orphan_watch.pop(execution_id, None)
+ 
+     def _detect_affinity_mismatch(self, message_data: Dict[str, Any]) -> Optional[str]:
+         """任务的 repo/run_dir 是否指向本机不存在的路径（机器亲和判定）。
+diff --git b/plaita/server/node_timings.py a/plaita/server/node_timings.py
+index 44e02fbb..50c7437e 100644
+--- b/plaita/server/node_timings.py
++++ a/plaita/server/node_timings.py
+@@ -146,16 +146,6 @@ class NodeTimingCallback(FlowCallback):
+             }
+         return out
+ 
+-    def has_open_nodes(self) -> bool:
+-        """是否仍有「已开始、未结束」的节点 = 该执行此刻还在干活。
+-
+-        plaita#197：失租 orphan 观测的存活判据。`snapshot()` 会把在跑节点
+-        补成 ``ended_at=""``，但这里只需要一个是/否，且必须读**当前**状态
+-        （不是某次落盘快照）。执行结束后 ``on_node_end`` 会把它从 ``_open``
+-        摘除 ⇒ 观测集可摘除、心跳停止，keeper 的 stale 判据重新可见。
+-        """
+-        return bool(self._open)
+-
+     def reset(self) -> None:
+         self._open.clear()
+         self._timings.clear()
+```
+
+## 红（mutant）：`docs/proofs/data/197-repro.py`
+
+```json
+{
+  "plaita_file": "/tmp/w35/plaita/__init__.py",
+  "ended": {
+    "heartbeat_calls": 3,
+    "orphan_watch_size": 1,
+    "lease_lost": [
+      "e1"
+    ]
+  },
+  "scale": {
+    "orphan_watch_size": 5,
+    "lease_lost_size": 5
+  },
+  "alive": {
+    "calls_while_orphan": 1,
+    "calls_after_handback": 2,
+    "orphan_watch_size": 0
+  }
+}
+```
+
+关键：三轮后 `heartbeat_calls=3` / `orphan_watch_size=1` / `lease_lost=["e1"]`，规模档 5/5——已结束执行被永久续写 `last_update_time`，keeper 的 stale 判据永不成立。
+
+## 红（mutant）：新用例
+
+```
+TESTS
+FF.FF                                                                    [100%]
+=================================== FAILURES ===================================
+__ TestOrphanWatchIsBounded.test_ended_orphan_is_dropped_and_heartbeat_stops ___
+
+self = <tests.unit.test_issue197_lease_orphan_reap.TestOrphanWatchIsBounded object at 0x10e3985d0>
+
+    def test_ended_orphan_is_dropped_and_heartbeat_stops(self):
+        """验收用例：register → 执行已结束 → 两轮后两个集合为空、心跳 0 次。"""
+        worker = _worker()
+        worker._register_lease_orphan("e1", object(), "default", 1)
+        for _ in range(2):
+            worker._publish_orphan_progress()
+    
+>       assert worker._lease_orphan_watch == {}, "已结束的 orphan 必须被摘除"
+E       AssertionError: 已结束的 orphan 必须被摘除
+E       assert {'e1': (<obje...'default', 1)} == {}
+E         
+E         Left contains 1 more item:
+E         {'e1': (<object object at 0x105e83e60>, 'default', 1)}
+E         Use -v to get more diff
+
+tests/unit/test_issue197_lease_orphan_reap.py:56: AssertionError
+______ TestOrphanWatchIsBounded.test_many_finished_orphans_return_to_zero ______
+
+self = <tests.unit.test_issue197_lease_orphan_reap.TestOrphanWatchIsBounded object at 0x10e3991d0>
+
+    def test_many_finished_orphans_return_to_zero(self):
+        """规模用例：连续 register N 个已结束 orphan → 两个集合回到 0。"""
+        worker = _worker()
+        for i in range(5):
+            worker._register_lease_orphan(f"s{i}", object(), "default", i)
+        worker._publish_orphan_progress()
+    
+>       assert len(worker._lease_orphan_watch) == 0
+E       AssertionError: assert 5 == 0
+E        +  where 5 = len({'s0': (<object object at 0x105e83e50>, 'default', 0), 's1': (<object object at 0x105e83e90>, 'default', 1), 's2': (<object object at 0x105e83e70>, 'default', 2), 's3': (<object object at 0x105e83ea0>, 'default', 3), ...})
+E        +    where {'s0': (<object object at 0x105e83e50>, 'default', 0), 's1': (<object object at 0x105e83e90>, 'default', 1), 's2': (<object object at 0x105e83e70>, 'default', 2), 's3': (<object object at 0x105e83ea0>, 'default', 3), ...} = <plaita.server.flow_worker.RedisFlowWorker object at 0x10e383f10>._lease_orphan_watch
+
+tests/unit/test_issue197_lease_orphan_reap.py:67: AssertionError
+________ TestOrphanWatchIsBounded.test_open_node_timing_counts_as_alive ________
+
+self = <tests.unit.test_issue197_lease_orphan_reap.TestOrphanWatchIsBounded object at 0x10e399f10>
+
+    def test_open_node_timing_counts_as_alive(self):
+        """无 ``_running`` 但本 worker 有在跑节点（#123 生产形态）⇒ 仍活。"""
+        worker = _worker()
+        timing = NodeTimingCallback()
+        timing.on_node_start(None, type("N", (), {"id": "impl"})())
+    
+        class _AbandonedExecution:
+            # 引擎 run 已返回（_running=False），但 impl 节点仍在沙箱里跑
+            _running = False
+    
+        worker._node_timings["impl-exec"] = timing
+        try:
+            worker._register_lease_orphan("impl-exec", _AbandonedExecution(), "default", 1)
+            worker._publish_orphan_progress()
+            assert worker.published == ["impl-exec"], "在跑节点仍是活证据"
+    
+            timing.on_node_end(None, type("N", (), {"id": "impl"})())
+            worker._publish_orphan_progress()
+>           assert "impl-exec" not in worker._lease_orphan_watch, "节点结束后应可摘除"
+E           AssertionError: 节点结束后应可摘除
+E           assert 'impl-exec' not in {'impl-exec': (<tests.unit.test_issue197_lease_orphan_reap.TestOrphanWatchIsBounded.test_open_node_timing_counts_as_alive.<locals>._AbandonedExecution object at 0x10e3c18d0>, 'default', 1)}
+E            +  where {'impl-exec': (<tests.unit.test_issue197_lease_orphan_reap.TestOrphanWatchIsBounded.test_open_node_timing_counts_as_alive.<locals>._AbandonedExecution object at 0x10e3c18d0>, 'default', 1)} = <plaita.server.flow_worker.RedisFlowWorker object at 0x10e3c1a10>._lease_orphan_watch
+
+tests/unit/test_issue197_lease_orphan_reap.py:98: AssertionError
+
+During handling of the above exception, another exception occurred:
+
+self = <tests.unit.test_issue197_lease_orphan_reap.TestOrphanWatchIsBounded object at 0x10e399f10>
+
+    def test_open_node_timing_counts_as_alive(self):
+        """无 ``_running`` 但本 worker 有在跑节点（#123 生产形态）⇒ 仍活。"""
+        worker = _worker()
+        timing = NodeTimingCallback()
+        timing.on_node_start(None, type("N", (), {"id": "impl"})())
+    
+        class _AbandonedExecution:
+            # 引擎 run 已返回（_running=False），但 impl 节点仍在沙箱里跑
+            _running = False
+    
+        worker._node_timings["impl-exec"] = timing
+        try:
+            worker._register_lease_orphan("impl-exec", _AbandonedExecution(), "default", 1)
+            worker._publish_orphan_progress()
+            assert worker.published == ["impl-exec"], "在跑节点仍是活证据"
+    
+            timing.on_node_end(None, type("N", (), {"id": "impl"})())
+            worker._publish_orphan_progress()
+            assert "impl-exec" not in worker._lease_orphan_watch, "节点结束后应可摘除"
+        finally:
+>           assert "impl-exec" not in worker._lease_lost
+E           AssertionError: assert 'impl-exec' not in {'impl-exec'}
+E            +  where {'impl-exec'} = <plaita.server.flow_worker.RedisFlowWorker object at 0x10e3c1a10>._lease_lost
+
+tests/unit/test_issue197_lease_orphan_reap.py:100: AssertionError
+__ TestOrphanWatchIsBounded.test_handback_to_new_lease_does_not_publish_again __
+
+self = <tests.unit.test_issue197_lease_orphan_reap.TestOrphanWatchIsBounded object at 0x10e3983d0>
+
+    def test_handback_to_new_lease_does_not_publish_again(self):
+        """验收用例：`_lease_watch` 重新登记 ⇒ 交回正常路径、不重复发布。"""
+        worker = _worker()
+        execution = _LiveExecution()
+        worker._register_lease_orphan("e2", execution, "default", 3)
+        worker._publish_orphan_progress()
+        assert worker.published == ["e2"]
+    
+        worker._register_lease_watch("e2", "lease-2", execution)
+        worker._publish_orphan_progress()
+>       assert worker.published == ["e2"], "交回后不得再走 orphan 发布"
+E       AssertionError: 交回后不得再走 orphan 发布
+E       assert ['e2', 'e2'] == ['e2']
+E         
+E         Left contains one more item: 'e2'
+E         Use -v to get more diff
+
+tests/unit/test_issue197_lease_orphan_reap.py:112: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue197_lease_orphan_reap.py::TestOrphanWatchIsBounded::test_ended_orphan_is_dropped_and_heartbeat_stops
+FAILED tests/unit/test_issue197_lease_orphan_reap.py::TestOrphanWatchIsBounded::test_many_finished_orphans_return_to_zero
+FAILED tests/unit/test_issue197_lease_orphan_reap.py::TestOrphanWatchIsBounded::test_open_node_timing_counts_as_alive
+FAILED tests/unit/test_issue197_lease_orphan_reap.py::TestOrphanWatchIsBounded::test_handback_to_new_lease_does_not_publish_again
+4 failed, 1 passed in 0.60s
+```
+
+## 绿（修复后）：repro + 新用例
+
+```
+REPRO
+{
+  "plaita_file": "/tmp/w35/plaita/__init__.py",
+  "ended": {
+    "heartbeat_calls": 0,
+    "orphan_watch_size": 0,
+    "lease_lost": []
+  },
+  "scale": {
+    "orphan_watch_size": 0,
+    "lease_lost_size": 0
+  },
+  "alive": {
+    "calls_while_orphan": 1,
+    "calls_after_handback": 1,
+    "orphan_watch_size": 0
+  }
+}
+TESTS
+.....                                                                    [100%]
+5 passed in 0.42s
+```

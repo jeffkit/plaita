@@ -19,6 +19,7 @@ class RedisNode(Node):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     node_type: ClassVar[str] = "redis"
+    dry_run_safe: ClassVar[bool] = False
     node_name: ClassVar[str] = "redis缓存"
 
     target: str = Field(..., description="Redis connection URL")

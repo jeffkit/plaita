@@ -1,0 +1,112 @@
+{
+  "issue": 200,
+  "title": "sexpr/@flow 往返补齐 HTTP 访问策略与 EVENT subscriptionTimeout",
+  "base_head": "ef90eb3a4e70371f3bea2c585600355773012789",
+  "fix_commit_subject": "fix(dsl): #200 sexpr/@flow 往返补齐 HTTP 访问策略与 EVENT 订阅超时",
+  "before": {
+    "issue": 200,
+    "plaita_file": "/tmp/w36-before/plaita/__init__.py",
+    "python": "3.11.16",
+    "expected": {
+      "http_policy": {
+        "allowedHosts": [
+          "example.com",
+          "*.internal.test"
+        ],
+        "deniedHosts": [
+          "evil.example.com"
+        ],
+        "blockPrivateNetworks": true,
+        "requestTimeout": 5,
+        "maxRedirects": 2
+      },
+      "subscriptionTimeout": 120
+    },
+    "sexpr": {
+      "source": "(flow f-policy (start :id s -> h) (http :id h :method GET :url http://example.com -> w) (event :id w :type quote.ready -> e) (end :id e))",
+      "after": {
+        "allowedHosts": null,
+        "deniedHosts": null,
+        "blockPrivateNetworks": null,
+        "requestTimeout": null,
+        "maxRedirects": null
+      },
+      "subscriptionTimeout": null,
+      "http_policy_equal": false,
+      "subscription_timeout_equal": false,
+      "ok": false
+    },
+    "codeflow": {
+      "source": "@flow('f-policy')\ndef f_policy(INPUT):\n    h = HTTP(method='GET', url='http://example.com')\n    w = EVENT(type='quote.ready')\n    return",
+      "after": {
+        "allowedHosts": null,
+        "deniedHosts": null,
+        "blockPrivateNetworks": null,
+        "requestTimeout": null,
+        "maxRedirects": null
+      },
+      "subscriptionTimeout": null,
+      "http_policy_equal": false,
+      "subscription_timeout_equal": false,
+      "ok": false
+    }
+  },
+  "after": {
+    "issue": 200,
+    "plaita_file": "/tmp/w36/plaita/__init__.py",
+    "python": "3.11.16",
+    "expected": {
+      "http_policy": {
+        "allowedHosts": [
+          "example.com",
+          "*.internal.test"
+        ],
+        "deniedHosts": [
+          "evil.example.com"
+        ],
+        "blockPrivateNetworks": true,
+        "requestTimeout": 5,
+        "maxRedirects": 2
+      },
+      "subscriptionTimeout": 120
+    },
+    "sexpr": {
+      "source": "(flow f-policy (start :id s -> h) (http :id h :method GET :url http://example.com :allowed-hosts (list \"example.com\" \"*.internal.test\") :denied-hosts (list \"evil.example.com\") :block-private-networks true :request-timeout 5 :max-redirects 2 -> w) (event :id w :type quote.ready :subscription-timeout 120 -> e) (end :id e))",
+      "after": {
+        "allowedHosts": [
+          "example.com",
+          "*.internal.test"
+        ],
+        "deniedHosts": [
+          "evil.example.com"
+        ],
+        "blockPrivateNetworks": true,
+        "requestTimeout": 5,
+        "maxRedirects": 2
+      },
+      "subscriptionTimeout": 120,
+      "http_policy_equal": true,
+      "subscription_timeout_equal": true,
+      "ok": true
+    },
+    "codeflow": {
+      "source": "@flow('f-policy')\ndef f_policy(INPUT):\n    h = HTTP(method='GET', url='http://example.com', allowed_hosts=['example.com', '*.internal.test'], denied_hosts=['evil.example.com'], block_private_networks=True, request_timeout=5, max_redirects=2)\n    w = EVENT(type='quote.ready', subscription_timeout=120)\n    return",
+      "after": {
+        "allowedHosts": [
+          "example.com",
+          "*.internal.test"
+        ],
+        "deniedHosts": [
+          "evil.example.com"
+        ],
+        "blockPrivateNetworks": true,
+        "requestTimeout": 5,
+        "maxRedirects": 2
+      },
+      "subscriptionTimeout": 120,
+      "http_policy_equal": true,
+      "subscription_timeout_equal": true,
+      "ok": true
+    }
+  }
+}

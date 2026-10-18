@@ -34,6 +34,7 @@ worker 推进循环 flow_worker.py:403-458
   ▼
 引擎 plaita/core
   ├─ cancel_event 父子链共享同一 Event ……………………… context.py:205
+  │  （#206 后改为：分支各持一个、父级置位单向可见）
   ├─ 每节点入口无条件 clear ……………………………………… runner.py:264-268   ❌ 并发分支互相清信号
   ├─ 全仓唯一 set 点 = sync 节点超时 ……………………… runner.py:370-371
   ├─ code 沙箱等待循环消费 cancel_event → killpg …… code.py:410-417（killpg :367-384）
@@ -107,6 +108,12 @@ worker A                          Redis                         worker B
 2. `runner._execute_with_retry` 节点入口：照旧只 clear `cancel_event`；**永不碰 `cancel_requested`**；入口处 `cancel_requested.is_set()` 则直接抛 `FlowCancelledException`（新异常，继承 FlowExecutionException），跳过本节点。
 3. `FlowExecution.cancel()` 公共入口（executor.py 新增，约 :159 旁）：同时 set 两个 Event——set `cancel_event` 让 code 沙箱等待循环（code.py:410）当场 killpg，set `cancel_requested` 让引擎在节点边界拒绝继续。
 4. 子执行链免费获得传播（共享同一 Event 实例）；进程模式 Parallel 维持现状：入口检查（concurrent.py:165-172）改为同时查 `cancel_requested`，跨进程传播仍是已声明的限制（concurrent.py:366-372），本设计不解决。
+
+> **#206 修正（2026-10-18）**：`cancel_event` **不再**父子共享同一实例——并行
+> 分支各持一个 `BranchCancelEvent`（父级 Event 单向只读可见），一个分支的 sync
+> 节点超时不会再把兄弟分支正在跑的 code 子进程 killpg 掉；执行级
+> `cancel_requested` 仍沿整条链共享，`cancel()` 的传播语义不变。
+> 复现/负控见 `docs/proofs/data/206-repro.py`、`206-negative-control.txt`。
 
 改动面：`context.py`（~6 行）、`runner.py`（~8 行）、`executor.py`（~10 行）、`errors.py`（1 个异常类）、`concurrent.py`（2 行检查）。normal/generator/distributed 三策略无需改——拦截点在 NodeRunner 公共入口。
 

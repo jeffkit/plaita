@@ -1,0 +1,398 @@
+# plaita#206 负控：Parallel 分支恢复共享父 cancel_event
+
+基线 origin/main d1ca49c4；本单修复未提交（worktree /tmp/w35，分支 fix/w35）。
+负控注入 = 对本单修复 hunk 执行 `git apply -R`（plaita/core/context.py）
+⇒ 恢复「子上下文复用父的 threading.Event 同一实例」。
+
+## MUTANT diff（对修复树反向应用 = 缺陷实现）
+
+```diff
+diff --git b/plaita/core/context.py a/plaita/core/context.py
+index a05fdd69..5e7ad4c6 100644
+--- b/plaita/core/context.py
++++ a/plaita/core/context.py
+@@ -178,56 +178,6 @@ class _SystemStateAccessors:
+         self.set_state(f"{self.express_prefix}FLOW_ID", value)
+ 
+ 
+-class BranchCancelEvent(threading.Event):
+-    """节点级协作取消信号：**分支独立置位，父级置位单向可见**（plaita#206）。
+-
+-    历史实现让子上下文直接复用父的 ``threading.Event``（``parent.cancel_event``
+-    同一实例），于是 `Parallel` 的每个分支共享一个节点级信号：A 分支的 sync
+-    节点超时置位后，B 分支正在跑的 ``code`` 子进程等待循环
+-    （``code._popen_wait_cancellable``）看到置位即 killpg 整棵进程树——**兄弟
+-    分支被误杀**。
+-
+-    本类给每个子上下文一个**自己的** ``threading.Event``，并把父级 Event 作为
+-    「上游」只读查询：
+-
+-    - ``set()`` / ``clear()`` 只作用于本分支（A 的超时不会传播给 B）；
+-    - ``is_set()`` = 本分支置位 **或** 父级置位——父执行的 Parallel 节点超时、
+-      ``cancel()`` 仍能向下传播（既有语义不丢）；
+-    - ``wait()`` 轮询两级（父级置位不会 notify 本 Event，故不能用裸
+-      ``super().wait()``）。
+-
+-    执行级取消意图 ``cancel_requested`` 仍是父子共享的同一实例（粘滞、节点入口
+-    只读不 clear），不受本类影响。
+-    """
+-
+-    __slots__ = ("_parent_cancel_event",)
+-
+-    def __init__(self, parent: Optional[threading.Event] = None) -> None:
+-        super().__init__()
+-        self._parent_cancel_event = parent
+-
+-    def is_set(self) -> bool:
+-        if super().is_set():
+-            return True
+-        parent = self._parent_cancel_event
+-        return parent is not None and parent.is_set()
+-
+-    def wait(self, timeout: Optional[float] = None) -> bool:
+-        import time
+-
+-        deadline = None if timeout is None else time.monotonic() + timeout
+-        while True:
+-            if self.is_set():
+-                return True
+-            if deadline is not None:
+-                remaining = deadline - time.monotonic()
+-                if remaining <= 0:
+-                    return False
+-                super().wait(min(remaining, 0.05))
+-            else:
+-                super().wait(0.05)
+-
+-
+ class ExecutionContext(_SystemStateAccessors):
+     """Runtime state facade: CheckpointState + parent/event_bus/cancel/evaluator.
+ 
+@@ -262,18 +212,12 @@ class ExecutionContext(_SystemStateAccessors):
+         self._inherited_expose_env = (
+             list(expose_env) if (parent is not None and expose_env) else []
+         )
+-        # 节点级取消信号（plaita#206）：子上下文持有**自己**的 Event，父级
+-        # Event 单向只读——分支超时不再误杀兄弟分支，父级取消仍向下传播。
+-        # 跨进程由 __getstate__/__setstate__ 重建（进程模式本就不跨进程传播）。
+-        self.cancel_event = (
+-            BranchCancelEvent(parent.cancel_event) if parent is not None
+-            else threading.Event()
+-        )
++        # 进程内共享 parent Event；跨进程由 __getstate__/__setstate__ 重建。
++        self.cancel_event = parent.cancel_event if parent is not None else threading.Event()
+         # 执行级取消意图（2026-10 波次③）：与 cancel_event 职责拆分——
+         # cancel_event 是"当前节点"级信号（sync 超时置位、下节点入口 clear），
+         # cancel_requested 是粘滞的"整个执行"级取消意图（cancel() 置位、
+-        # 节点入口只读不 clear）。父子共享规则与 cancel_event **不同**：
+-        # 取消意图必须沿整条执行链共享（plaita#206 边界：父级取消走这里）。
++        # 节点入口只读不 clear）。父子共享规则与 cancel_event 同型。
+         self.cancel_requested = (
+             parent.cancel_requested if parent is not None else threading.Event()
+         )
+@@ -363,7 +307,7 @@ class ExecutionContext(_SystemStateAccessors):
+             env=_safe_environment(self.expose_env),
+         )
+         self.cancel_event = (
+-            BranchCancelEvent(self.parent.cancel_event) if self.parent is not None
++            self.parent.cancel_event if self.parent is not None
+             else threading.Event()
+         )
+         self.cancel_requested = (
+```
+
+## 红（mutant）：`docs/proofs/data/206-repro.py`
+
+```json
+{
+  "plaita_file": "/tmp/w35/plaita/__init__.py",
+  "shared_event": {
+    "same_object": true,
+    "child_set_visible_in_parent": true
+  },
+  "parallel": {
+    "result": {
+      "A": {
+        "__parallel_error__": "Timeout handler strategy for executing node slow is abort",
+        "__branch__": "A"
+      },
+      "B": {
+        "__parallel_error__": "执行节点code出错了: RuntimeError: Subprocess sandbox cancelled via cancel_event; process tree killed",
+        "__branch__": "B"
+      }
+    },
+    "cancel_requested_set": false
+  },
+  "parent_cancel": {
+    "cancelled": true,
+    "detail": "FlowCancelledException: Execution cancelled before running node end"
+  }
+}
+```
+
+关键：`same_object=true`，B 分支 code 子进程被 A 分支超时误杀（`Subprocess sandbox cancelled via cancel_event; process tree killed`）。
+
+## 红（mutant）：新用例
+
+```
+TESTS
+.FF.F                                                                    [100%]
+=================================== FAILURES ===================================
+_ TestBranchCancelEventIsolation.test_child_clear_does_not_clear_parent_signal _
+
+self = <tests.unit.test_issue206_branch_cancel_isolation.TestBranchCancelEventIsolation testMethod=test_child_clear_does_not_clear_parent_signal>
+
+    def test_child_clear_does_not_clear_parent_signal(self):
+        parent = ExecutionContext()
+        child = ExecutionContext(parent=parent)
+        parent.cancel_event.set()
+        child.cancel_event.clear()
+>       self.assertTrue(child.cancel_event.is_set(), "子节点入口的 clear 不得清掉父级信号")
+E       AssertionError: False is not true : 子节点入口的 clear 不得清掉父级信号
+
+tests/unit/test_issue206_branch_cancel_isolation.py:133: AssertionError
+___ TestBranchCancelEventIsolation.test_child_has_own_event_but_sees_parent ____
+
+self = <tests.unit.test_issue206_branch_cancel_isolation.TestBranchCancelEventIsolation testMethod=test_child_has_own_event_but_sees_parent>
+
+    def test_child_has_own_event_but_sees_parent(self):
+        parent = ExecutionContext()
+        branch_a = ExecutionContext(parent=parent)
+        branch_b = ExecutionContext(parent=parent)
+    
+        self.assertIsInstance(branch_a.cancel_event, threading.Event)
+>       self.assertIsNot(branch_a.cancel_event, parent.cancel_event)
+E       AssertionError: unexpectedly identical: <threading.Event at 0x10cce34d0: unset>
+
+tests/unit/test_issue206_branch_cancel_isolation.py:118: AssertionError
+_ TestParallelBranchTimeoutDoesNotKillSibling.test_sibling_timeout_leaves_code_branch_untouched _
+
+self = <tests.unit.test_issue206_branch_cancel_isolation.TestParallelBranchTimeoutDoesNotKillSibling testMethod=test_sibling_timeout_leaves_code_branch_untouched>
+
+    async def test_sibling_timeout_leaves_code_branch_untouched(self):
+        """验收用例：A 的 sync 节点 200ms 超时；B 的 code 节点 sleep 1s 正常完成。"""
+        execution = FlowExecution()
+        result = await execution.arun_compatible(_parallel_flow(), False)
+    
+>       self.assertEqual(
+            result.get("B"), "code-ok",
+            f"B 分支的 code 子进程被兄弟分支的超时误杀: {result.get('B')!r}",
+        )
+E       AssertionError: {'__parallel_error__': '执行节点code出错了: Runt[92 chars] 'B'} != 'code-ok' : B 分支的 code 子进程被兄弟分支的超时误杀: {'__parallel_error__': '执行节点code出错了: RuntimeError: Subprocess sandbox cancelled via cancel_event; process tree killed', '__branch__': 'B'}
+
+tests/unit/test_issue206_branch_cancel_isolation.py:148: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.runner:runner.py:533 Sync node slow timed out after 200ms (cancel_event set)
+WARNING  plaita.node.concurrent:concurrent.py:393 parallel branch A raised: Traceback (most recent call last):
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/tasks.py", line 500, in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/private/tmp/w35/plaita/core/runner.py", line 529, in _run_sync_node
+    return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout_ms / 1000.0)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/tasks.py", line 502, in wait_for
+    raise exceptions.TimeoutError() from exc
+TimeoutError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/private/tmp/w35/plaita/core/runner.py", line 447, in _execute_with_retry
+    result = await self._run_with_timeout(node, remaining_timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 464, in _run_with_timeout
+    return await self._run_sync_node(node, timeout_ms)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 538, in _run_sync_node
+    raise TimeoutError(f"Node execution timed out after {timeout_ms}ms")
+TimeoutError: Node execution timed out after 200ms
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/private/tmp/w35/plaita/node/concurrent.py", line 389, in _process_future_result
+    result = future.result()
+             ^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/parallel_executor.py", line 262, in _marked
+    return wrapped(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/node/concurrent.py", line 191, in exec_branch
+    rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/executor_compat.py", line 30, in run_compatible
+    return _drive_strategy(
+           ^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/async_utils.py", line 137, in drive_strategy
+    return run_async_from_sync(finished)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/async_utils.py", line 68, in run_async_from_sync
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/async_utils.py", line 89, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/_error_normalization.py", line 45, in finish_normal
+    result = await coro
+             ^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/strategies.py", line 152, in execute
+    result, branch, next_node, reached_end = await _advance_one(
+                                             ^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/strategies.py", line 471, in _advance_one
+    result, branch = await runner.run_node(
+                     ^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 346, in run_node
+    result = await self._execute_with_retry(flow, node, max_timeout_ms)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 453, in _execute_with_retry
+    return _handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 216, in _handle_timeout
+    raise err
+plaita.core.errors.NodeTimeoutError: Timeout handler strategy for executing node slow is abort
+
+WARNING  plaita.node.concurrent:concurrent.py:393 parallel branch B raised: Traceback (most recent call last):
+  File "/private/tmp/w35/plaita/core/runner.py", line 447, in _execute_with_retry
+    result = await self._run_with_timeout(node, remaining_timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 464, in _run_with_timeout
+    return await self._run_sync_node(node, timeout_ms)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 502, in _run_sync_node
+    return await loop.run_in_executor(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 316, in _wrapped
+    return fn(ctx)
+           ^^^^^^^
+  File "/private/tmp/w35/plaita/node/basic.py", line 132, in run
+    result = self.execute(execution)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/node/code.py", line 1027, in execute
+    return backend_fn(
+           ^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/node/code.py", line 613, in run_python_subprocess
+    out, err = _popen_wait_cancellable(
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/node/code.py", line 552, in _popen_wait_cancellable
+    raise RuntimeError(f"{what} cancelled via cancel_event; process tree killed")
+RuntimeError: Subprocess sandbox cancelled via cancel_event; process tree killed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/private/tmp/w35/plaita/node/concurrent.py", line 389, in _process_future_result
+    result = future.result()
+             ^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/parallel_executor.py", line 262, in _marked
+    return wrapped(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/node/concurrent.py", line 191, in exec_branch
+    rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/executor_compat.py", line 30, in run_compatible
+    return _drive_strategy(
+           ^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/async_utils.py", line 137, in drive_strategy
+    return run_async_from_sync(finished)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/async_utils.py", line 68, in run_async_from_sync
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/async_utils.py", line 89, in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/_error_normalization.py", line 45, in finish_normal
+    result = await coro
+             ^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/strategies.py", line 152, in execute
+    result, branch, next_node, reached_end = await _advance_one(
+                                             ^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/strategies.py", line 471, in _advance_one
+    result, branch = await runner.run_node(
+                     ^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 346, in run_node
+    result = await self._execute_with_retry(flow, node, max_timeout_ms)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 456, in _execute_with_retry
+    return _handle_node_error(flow, node, error_handler, e)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/w35/plaita/core/runner.py", line 236, in _handle_node_error
+    raise err from e
+plaita.core.errors.NodeExecutionError: 执行节点code出错了: RuntimeError: Subprocess sandbox cancelled via cancel_event; process tree killed
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue206_branch_cancel_isolation.py::TestBranchCancelEventIsolation::test_child_clear_does_not_clear_parent_signal
+FAILED tests/unit/test_issue206_branch_cancel_isolation.py::TestBranchCancelEventIsolation::test_child_has_own_event_but_sees_parent
+FAILED tests/unit/test_issue206_branch_cancel_isolation.py::TestParallelBranchTimeoutDoesNotKillSibling::test_sibling_timeout_leaves_code_branch_untouched
+3 failed, 2 passed in 1.06s
+```
+
+## 绿（修复后）：repro + 新用例
+
+```
+REPRO
+{
+  "plaita_file": "/tmp/w35/plaita/__init__.py",
+  "shared_event": {
+    "same_object": false,
+    "child_set_visible_in_parent": false
+  },
+  "parallel": {
+    "result": {
+      "B": "code-ok",
+      "A": {
+        "__parallel_error__": "Timeout handler strategy for executing node slow is abort",
+        "__branch__": "A"
+      }
+    },
+    "cancel_requested_set": false
+  },
+  "parent_cancel": {
+    "cancelled": true,
+    "detail": "FlowCancelledException: Execution cancelled before running node end"
+  }
+}
+TESTS
+.....                                                                    [100%]
+5 passed in 1.94s
+```

@@ -12,6 +12,7 @@ class Start(Node):
 
     node_name: ClassVar[str] = "开始"
     node_type: ClassVar[str] = "start"
+    dry_run_safe: ClassVar[bool] = True
 
     def execute(self, execution):
         pass

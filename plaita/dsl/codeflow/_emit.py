@@ -637,6 +637,22 @@ class _BodyEmitter:
         for ir_key in ("headers", "body", "input"):
             if node.get(ir_key) is not None:
                 kwargs.append(f"{ir_key}={_invert_value(node[ir_key], self.ns)}")
+        # #200：HTTP 访问策略（SSRF 防护面）过去不在 `_call_http` 的表达面里
+        # ⇒ 任何 `emit_source` → 重编译都把白名单/私网阻断静默清空，节点回落
+        # 「无限制」默认。camel（--format ir / 手写 JSON）与 snake
+        #（Flow.model_dump()）双读，与 `_nodes.py` 的读侧对称。
+        for ir_key, py_name in (
+            ("allowedHosts", "allowed_hosts"),
+            ("deniedHosts", "denied_hosts"),
+            ("blockPrivateNetworks", "block_private_networks"),
+            ("requestTimeout", "request_timeout"),
+            ("maxRedirects", "max_redirects"),
+        ):
+            value = node.get(ir_key)
+            if value is None:
+                value = node.get(py_name)
+            if value is not None:
+                kwargs.append(f"{py_name}={_invert_value(value, self.ns)}")
         kwargs.extend(self._common_kwargs(node))
         return f"HTTP({', '.join(kwargs)})"
 
@@ -657,6 +673,14 @@ class _BodyEmitter:
         efilter = node.get("eventFilter", node.get("event_filter"))
         if efilter is not None:
             kwargs.append(f"filter={_invert_value(efilter, self.ns)}")
+        # #200：订阅超时（EventNode.subscription_timeout）此前没有表达面，
+        # 往返即丢 ⇒ 本应超时唤醒的挂起退化成无限等待。
+        sub_timeout = node.get("subscriptionTimeout")
+        if sub_timeout is None:
+            sub_timeout = node.get("subscription_timeout")
+        if sub_timeout is not None:
+            kwargs.append(
+                f"subscription_timeout={_invert_value(sub_timeout, self.ns)}")
         kwargs.extend(self._common_kwargs(node))
         return f"EVENT({', '.join(kwargs)})"
 

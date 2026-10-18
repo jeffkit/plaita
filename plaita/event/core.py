@@ -28,6 +28,32 @@ class Event(BaseModel):
     timestamp: float = Field(default_factory=time.time)
     source: str = ""
     correlation_id: Optional[str] = None
+    # plaita#191：**受信租户**（服务端写入）。``data`` 是发布者/客户端可控
+    # 载荷，绝不能作为租户来源——EventFilter 只读本字段来路由执行状态。
+    # 发布端（console / 事件总线）在 publish 时绑定当前租户；旧事件无本字段
+    # ⇒ None，消费端按 default 处理。
+    tenant_id: Optional[str] = Field(
+        default=None,
+        description="受信租户（服务端写入，客户端不可控；None=升级前的旧事件→default）",
+    )
+
+
+def bind_trusted_tenant(event: Event) -> Event:
+    """发布时绑定受信租户（plaita#191）。
+
+    租户**只**从进程内 ContextVar 取（worker / console 请求上下文已 set），
+    **绝不**读 ``event.data["tenant_id"]``——那是发布者/客户端可控载荷，正是
+    历史跨租户 resume 注入的来源。已显式设置 ``tenant_id`` 的事件不覆盖：
+    服务内部补偿链（delay / approval / http_callback 的 resume 事件）由发布
+    方从服务端任务配置显式写入受信租户。
+    """
+    if event.tenant_id is None:
+        # 局部 import：tenant_context 是顶层无依赖模块，事件层引用安全；
+        # 局部化只为让 event.core 的 import 面保持最小。
+        from plaita.tenant_context import current_tenant
+
+        event.tenant_id = current_tenant()
+    return event
 
 
 class EventSubscription(BaseModel):
