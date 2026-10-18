@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """落地门禁：main CI 红灯熔断 + policy-ack trailer 核验。
 
-约定见 ``docs/landing-and-acceptance.md``（2026-10-17 提案，拍板前可试用不强制）。
+约定见 ``docs/landing-and-acceptance.md``（2026-10-18 owner 拍板生效）。
 只依赖 ``gh`` 与 ``git``，无第三方 Python 包。
 
 用法::
