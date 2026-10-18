@@ -1,9 +1,18 @@
 """
 应用配置
 """
+import logging
 import os
 from typing import Optional
 from pydantic import BaseModel, Field
+
+#: 视为「仅本机可达」的监听地址（#208：默认必须是其中之一）
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+#: 默认监听地址。#208：控制台原默认 0.0.0.0，在云主机/容器里会被意外暴露到
+#: 公网（配合在线爆破可接管 admin）。需要对外时显式
+#: ``PLAITA_CONSOLE_HOST=0.0.0.0``（docker-compose/e2e 已显式设置）。
+DEFAULT_HOST = "127.0.0.1"
 
 
 class Settings(BaseModel):
@@ -16,7 +25,7 @@ class Settings(BaseModel):
     )
     
     # 服务器配置
-    host: str = Field(default="0.0.0.0", description="服务器监听地址")
+    host: str = Field(default=DEFAULT_HOST, description="服务器监听地址")
     port: int = Field(default=8080, description="服务器监听端口")
     debug: bool = Field(default=False, description="调试模式")
     
@@ -75,7 +84,7 @@ def get_settings() -> Settings:
     """获取配置实例"""
     return Settings(
         redis_url=os.getenv("PLAITA_CONSOLE_REDIS_URL", "redis://localhost:6379/0"),
-        host=os.getenv("PLAITA_CONSOLE_HOST", "0.0.0.0"),
+        host=os.getenv("PLAITA_CONSOLE_HOST", DEFAULT_HOST),
         port=int(os.getenv("PLAITA_CONSOLE_PORT", "8080")),
         debug=os.getenv("PLAITA_CONSOLE_DEBUG", "false").lower() == "true",
         db_url=os.getenv("PLAITA_CONSOLE_DB_URL", "sqlite:///./plaita_console.db"),
@@ -91,3 +100,25 @@ def get_settings() -> Settings:
         recursive_agui_url=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_URL", ""),
         recursive_agui_api_key=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_API_KEY", ""),
     )
+
+
+def bind_warning(host: str) -> Optional[str]:
+    """监听非回环地址时的启动告警文案；回环地址返回 None。
+
+    #208：默认改为 127.0.0.1 后，显式对外监听（``PLAITA_CONSOLE_HOST=0.0.0.0``）
+    是部署方的有意选择——启动日志里留一条 warning，避免「以为只在本机」。
+    """
+    if not host or host in LOOPBACK_HOSTS:
+        return None
+    return (
+        f"控制台监听非回环地址 {host!r}（PLAITA_CONSOLE_HOST）："
+        "确认已配置 PLAITA_CONSOLE_ADMIN_API_KEY / 会话鉴权与网络访问控制，"
+        "否则登录端点会暴露给该网段（#208）"
+    )
+
+
+def warn_if_public_bind(host: str, logger: Optional[logging.Logger] = None) -> None:
+    """在启动路径上打一条非回环监听 warning（文案见 bind_warning）。"""
+    message = bind_warning(host)
+    if message:
+        (logger or logging.getLogger(__name__)).warning(message)

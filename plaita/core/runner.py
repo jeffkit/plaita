@@ -45,6 +45,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger("plaita.core.runner")
 
 
+class _NodeBudgetExceeded(Exception):
+    """引擎自身强加的节点**预算**超时（#194）。
+
+    Python 3.10+ 里 ``asyncio.TimeoutError`` 与内建 ``TimeoutError`` 合流，
+    节点自己抛出的超时（aiohttp 上游读超时、socket.timeout 等）与引擎
+    ``wait_for`` 产生的超时在 catch 点完全同型。用本私有类型标记「预算
+    超时」，让节点异常（含 ``TimeoutError``）落进正常重试 / errorHandler
+    分支，而不是被当成预算超时直接 abort（retryTimes 静默失效）。
+    """
+
+
 def _node_source_loc(node) -> Optional[int]:
     """取节点回标的源码行号（仅 @flow 前端编译期写入；其余前端为 None）。"""
     return getattr(node, "source_line", None)
@@ -449,7 +460,10 @@ class NodeRunner:
 
             except FlowResultError as e:
                 _handle_flow_result_error(flow, node, e)
-            except (TimeoutError, asyncio.TimeoutError):
+            except _NodeBudgetExceeded:
+                # #194：只把**引擎预算**超时交给 timeout_handler；节点自己抛的
+                # TimeoutError（含 asyncio.TimeoutError / socket.timeout）走下面
+                # 的普通异常分支——重试与 errorHandler 不再静默失效。
                 return _handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
             except (Exception, NodeException) as e:
                 if attempt == max_retries:
@@ -465,15 +479,26 @@ class NodeRunner:
 
     async def _run_async_node(self, node, timeout_ms: Optional[int]) -> Any:
         exec_ctx = self.node_execution or self.context
-        if timeout_ms is not None:
-            try:
-                return await asyncio.wait_for(
-                    node.arun(exec_ctx),
-                    timeout=timeout_ms / 1000.0,
-                )
-            except asyncio.TimeoutError:
-                raise TimeoutError(f"Node execution timed out after {timeout_ms}ms")
-        return await node.arun(exec_ctx)
+        if timeout_ms is None:
+            return await node.arun(exec_ctx)
+        # #194：不能用 ``wait_for`` + ``except asyncio.TimeoutError`` 判预算——
+        # py3.10+ 节点自身抛出的 TimeoutError 与 wait_for 的预算超时在 catch
+        # 点完全同型，会把业务超时误当引擎超时。先看 task 是否完成：完成 ⇒
+        # 原样透传节点异常（含 TimeoutError，交给重试/errorHandler），未完成
+        # ⇒ 才是引擎预算超时。
+        task = asyncio.ensure_future(node.arun(exec_ctx))
+        try:
+            return await asyncio.wait_for(task, timeout=timeout_ms / 1000.0)
+        except asyncio.TimeoutError:
+            # 区分来源：wait_for 因预算取消 task 时 task 未完成；task 已完成且
+            # 带异常 ⇒ 那是节点自己抛的 TimeoutError，原样透传。
+            if task.done() and not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
+            raise _NodeBudgetExceeded(
+                f"Node execution timed out after {timeout_ms}ms"
+            )
 
     async def _run_sync_node(self, node, timeout_ms: Optional[int]) -> Any:
         """Run a sync node in a raw daemon thread to avoid blocking process exit.
@@ -525,9 +550,16 @@ class NodeRunner:
         if timeout_ms is None:
             return await fut
 
+        # #194：同 ``_run_async_node``——节点线程自己抛的 TimeoutError 会经
+        # fut 透传，必须与「fut 未完成 = 引擎预算超时」分家；否则节点异常被
+        # 误当预算超时 abort（retryTimes 失效）。
         try:
             return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout_ms / 1000.0)
         except asyncio.TimeoutError:
+            if fut.done() and not fut.cancelled():
+                exc = fut.exception()
+                if exc is not None:
+                    raise exc
             if cancel_event is not None:
                 cancel_event.set()
             logger.warning(
@@ -535,7 +567,9 @@ class NodeRunner:
                 getattr(node, "id", "unknown"),
                 timeout_ms,
             )
-            raise TimeoutError(f"Node execution timed out after {timeout_ms}ms")
+            raise _NodeBudgetExceeded(
+                f"Node execution timed out after {timeout_ms}ms"
+            )
 
     # Thin wrappers keep historical ``runner._get_error_result`` call sites.
     def _handle_timeout(self, flow, handler, node, time_limit_by_flow: bool):

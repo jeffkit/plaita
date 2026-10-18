@@ -18,7 +18,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union, Awaitable
 
 from .core import (
     Event, EventBus, EventHandler, EventStorage, EventSubscription, 
-    EventSubscriptionStorage, EventProcessingTracker, RetryPolicy
+    EventSubscriptionStorage, EventProcessingTracker, RetryPolicy,
+    bind_trusted_tenant,
 )
 from .exceptions import EventError, EventNotFoundError, EventTimeoutError
 from .utils import normalize_event
@@ -353,7 +354,10 @@ class InMemoryEventBus(EventBus):
             event = dict(event)
             event_type = event.pop('event_type')
             event = Event(event_type=event_type, data=event)
-        
+
+        # plaita#191：受信租户由发布上下文绑定（不读 data.tenant_id）
+        event = bind_trusted_tenant(event)
+
         # 存储事件
         await self.event_storage.store_event(event)
         
@@ -390,6 +394,9 @@ class InMemoryEventBus(EventBus):
             else:
                 normalized_events.append(event)
         
+        # plaita#191：逐事件绑定受信租户（不读 data.tenant_id）
+        normalized_events = [bind_trusted_tenant(e) for e in normalized_events]
+
         # 批量存储事件
         event_ids = await self.event_storage.batch_store_events(normalized_events)
         

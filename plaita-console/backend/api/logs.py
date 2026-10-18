@@ -12,6 +12,11 @@ from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 
 try:
+    from .redis_scan import scan_keys
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from api.redis_scan import scan_keys  # type: ignore
+
+try:
     from ..auth import tenant_scope
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from auth import tenant_scope  # type: ignore
@@ -69,6 +74,29 @@ def get_redis(request: Request) -> Redis:
 def get_redis_or_none(request: Request) -> Redis:
     """本地单机模式返回 None——list/instance/stats 有本地分支。"""
     return request.app.state.redis
+
+
+def _entry_tenant(entry_data: Any) -> str:
+    """日志条目归属租户（plaita#192）：条目内 ``tenant_id``，旧条目视为 default。
+
+    ``plaita:logs:*`` Stream 与 Pub/Sub 频道都是平台级共享的（键/频道不含租户
+    段，见 log_handler.py），租户边界必须逐条目判——不能靠 key 或频道前缀。
+    """
+    tenant = entry_data.get("tenant_id") or "default"
+    if isinstance(tenant, bytes):
+        tenant = tenant.decode()
+    return tenant
+
+
+# 有界扫描的单请求键预算（#202）：日志每个键还要 XREVRANGE，键预算按端点
+# 读取代价收紧——触界返回部分结果并记 warning，不阻塞共享 Redis。
+_LOG_LIST_MAX_KEYS = 2000
+_LOG_STATS_MAX_KEYS = 1000
+
+
+def _bounded_log_keys(redis: Redis, pattern: str, max_keys: int) -> List[str]:
+    """有界 SCAN 代替 ``KEYS``（#202）：单条命令只扫一页，触界 fail-safe。"""
+    return scan_keys(redis, pattern, max_keys=max_keys).keys
 
 
 # ============ API 端点 ============
@@ -131,8 +159,8 @@ async def list_logs(
         pattern = f"plaita:logs:{service_type}:*"
     else:
         pattern = "plaita:logs:*"
-    keys = redis.keys(pattern)
-    
+    keys = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
+
     logs = []
     tenant = tenant_scope(request)
     tenant_id_filter = tenant if tenant else None
@@ -148,12 +176,8 @@ async def list_logs(
                 try:
                     # 多租户：日志键平台级共享，按条目内 tenant_id 过滤
                     # （旧条目无该字段，视为 default 租户）
-                    if tenant_id_filter:
-                        entry_tenant = entry_data.get("tenant_id") or "default"
-                        if isinstance(entry_tenant, bytes):
-                            entry_tenant = entry_tenant.decode()
-                        if entry_tenant != tenant_id_filter:
-                            continue
+                    if tenant_id_filter and _entry_tenant(entry_data) != tenant_id_filter:
+                        continue
 
                     log_entry = LogEntry(
                         timestamp=entry_data.get("timestamp", entry_id),
@@ -234,7 +258,10 @@ async def get_instance_logs(
 
     # 查找所有可能包含该实例日志的 Stream key
     pattern = "plaita:logs:*"
-    keys = redis.keys(pattern)
+    keys = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
+    # 多租户（plaita#192）：实例 id 可能被他租户猜中/从别处取得，逐条目按
+    # tenant_id 收窄——不能只按 instance_id 匹配。
+    tenant = tenant_scope(request)
     
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
@@ -248,6 +275,8 @@ async def get_instance_logs(
             
             for entry_id, entry_data in entries:
                 try:
+                    if tenant and _entry_tenant(entry_data) != tenant:
+                        continue
                     entry_instance_id = entry_data.get("instance_id")
                     if entry_instance_id != instance_id:
                         continue
@@ -306,29 +335,53 @@ async def get_log_stats(
 
     stats_dict: Dict[str, Dict[str, int]] = {}  # {service_type: {level: count}}
     total_logs = 0
+    # 多租户（plaita#192）：Stream 键与长度都是平台级的——租户视角必须逐条目
+    # 统计（精确），不能把 xlen 当成租户总量、也不能采平台样本估算。
+    tenant = tenant_scope(request)
     
     # 遍历所有日志 Stream
     pattern = "plaita:logs:*"
-    keys = redis.keys(pattern)
+    keys = _bounded_log_keys(redis, pattern, _LOG_STATS_MAX_KEYS)
     
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
         
         try:
-            # 获取 Stream 长度
-            length = redis.xlen(key_str)
-            total_logs += length
-            
             # 从 key 解析服务类型
             parts = key_str.split(":")
             if len(parts) >= 3:
                 service_type = parts[2]
             else:
                 service_type = "unknown"
+
+            if tenant:
+                # 精确统计：只累计本租户条目（日志 Stream 由 log_handler 的
+                # maxlen 约束，逐条读取有界；平台视角仍走下方采样快路径）
+                level_counts: Dict[str, int] = {}
+                matched = 0
+                for _, entry_data in redis.xrange(key_str):
+                    if _entry_tenant(entry_data) != tenant:
+                        continue
+                    matched += 1
+                    level = entry_data.get("level", "INFO")
+                    if isinstance(level, bytes):
+                        level = level.decode()
+                    level_counts[level] = level_counts.get(level, 0) + 1
+                if not matched:
+                    continue
+                total_logs += matched
+                target = stats_dict.setdefault(service_type, {})
+                for level, count in level_counts.items():
+                    target[level] = target.get(level, 0) + count
+                continue
+
+            # 获取 Stream 长度
+            length = redis.xlen(key_str)
+            total_logs += length
             
             # 采样一些日志来统计级别分布
             entries = redis.xrevrange(key_str, count=100)
-            level_counts: Dict[str, int] = {}
+            level_counts = {}
             
             for _, entry_data in entries:
                 level = entry_data.get("level", "INFO")
@@ -377,7 +430,13 @@ async def stream_logs(
     - **service_type**: 按服务类型筛选
     - **instance_id**: 按实例 ID 筛选
     - **level**: 按日志级别筛选
+
+    多租户（plaita#192）：日志频道是平台级通配订阅（``plaita:logs:stream:*``
+    等），频道本身不含租户段——漏过滤时租户 A 的流会收到全平台日志。这里在
+    事件生成器里逐条目按 ``tenant_id`` 收窄；平台视角（无租户上下文）保持全量。
     """
+    tenant = tenant_scope(request)
+
     async def event_generator():
         """事件生成器"""
         pubsub = redis.pubsub()
@@ -401,6 +460,10 @@ async def stream_logs(
                 if message and message["type"] in ("message", "pmessage"):
                     try:
                         data = json.loads(message["data"])
+
+                        # 租户筛选：频道只有平台级通配，必须逐条目判归属
+                        if tenant and _entry_tenant(data) != tenant:
+                            continue
 
                         # 级别筛选
                         if level and data.get("level") != level:

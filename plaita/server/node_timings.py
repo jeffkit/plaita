@@ -146,6 +146,16 @@ class NodeTimingCallback(FlowCallback):
             }
         return out
 
+    def has_open_nodes(self) -> bool:
+        """是否仍有「已开始、未结束」的节点 = 该执行此刻还在干活。
+
+        plaita#197：失租 orphan 观测的存活判据。`snapshot()` 会把在跑节点
+        补成 ``ended_at=""``，但这里只需要一个是/否，且必须读**当前**状态
+        （不是某次落盘快照）。执行结束后 ``on_node_end`` 会把它从 ``_open``
+        摘除 ⇒ 观测集可摘除、心跳停止，keeper 的 stale 判据重新可见。
+        """
+        return bool(self._open)
+
     def reset(self) -> None:
         self._open.clear()
         self._timings.clear()

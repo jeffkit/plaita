@@ -1,0 +1,47 @@
+# plaita#207 负控（1 组：sexpr 写侧 camel-only）
+
+修复文件：`plaita/dsl/sexpr.py`。变异把 `result_type = n.get("resultType") or
+n.get("result_type")` 还原成 base 的 `n["resultType"]`，其余（读侧缺省
+`success`、`:error` 载荷发射）保持不动。
+
+## 唯一变异 · sexpr 写侧退回只读 camelCase `resultType`
+
+只动写侧双读这一处；camel 用例与 `:error` 载荷用例仍绿（3 passed），
+证明红的是「snake 类型丢失」而不是整文件噪声。
+
+```diff
+--- a/plaita/dsl/sexpr.py
++++ b/plaita/dsl/sexpr.py
+@@ -1202,15 +1202,9 @@
+     elif t == "end":
+         if n.get("output") is not None:
+             parts.append(f":output {_expr_to_src(n['output'])}")
+-        # #207：读侧 `_c_end` 只产出 camelCase `resultType`，但同一 IR 的
+-        # snake_case 形态（`--format ir` / `Flow.model_dump()`）用
+-        # `result_type`——写侧只看 camel 时**不发射 `:result-type`**，
+-        # 读侧缺省回填 `success` ⇒ `result_type=error` 的失败出口往返后被
+-        # 洗成成功（error 载荷还在，语义已错）。与 codeflow 发射器
+-        # （`_emit.py`：`resultType or result_type`）同口径双读。
+-        result_type = n.get("resultType") or n.get("result_type")
+-        if result_type and result_type != "success":
+-            parts.append(f":result-type {result_type}")
++        # MUTANT (#207): camel-only write side
++        if n.get("resultType") and n["resultType"] != "success":
++            parts.append(f":result-type {n['resultType']}")
+         # #136 (item 1 of this patch, the issue itself): `error` used to exist
+         # only on the reader side (`_c_end` reads `:error`) while the writer
+         # never emitted it -> after a round-trip the payload is gone and the
+```
+
+```
+$ pytest tests/unit/test_issue207_sexpr_result_type.py
+>       assert ":result-type error" in src
+E       AssertionError: assert ':result-type error' in '(flow f-err (start :id s -> e) (end :id e :error (dict :code 4001 :message bad)))'
+>       assert ":result-type nop" in src
+E       AssertionError: assert ':result-type nop' in '(flow f-err (start :id s -> e) (end :id e :error (dict :code 4001 :message bad)))'
+FAILED tests/unit/test_issue207_sexpr_result_type.py::test_snake_case_error_exit_survives_roundtrip
+FAILED tests/unit/test_issue207_sexpr_result_type.py::test_snake_case_nop_exit_survives_roundtrip
+2 failed, 3 passed in 0.44s
+[exit 1]
+```
+

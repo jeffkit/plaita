@@ -59,6 +59,7 @@ class InlineFlow(FlowNode):
     """
 
     node_type: ClassVar[str] = "child"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "内联子逻辑"
 
     # setup_child_flow 消费的 camelCase 键（child_flow 字段无 alias）——
@@ -89,6 +90,7 @@ class ReferenceFlow(FlowNode):
     """
 
     node_type: ClassVar[str] = "reference"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "引用逻辑"
 
     # 调度器据此解析并注入 child_flow；若不声明为字段，pydantic 会按

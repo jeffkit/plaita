@@ -98,6 +98,7 @@ class Parallel(Node):
     """
 
     node_type: ClassVar[str] = "parallel"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "并行"
 
     branches: List[ParallelBranch] = Field(default_factory=list)

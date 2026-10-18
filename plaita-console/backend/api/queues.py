@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field
 from redis import Redis
 
 try:
+    from .redis_scan import scan_keys
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from api.redis_scan import scan_keys  # type: ignore
+
+try:
     from ..auth import tenant_scope
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from auth import tenant_scope  # type: ignore
@@ -133,6 +138,77 @@ def _owned_by_tenant(data: Any, tenant: Optional[str]) -> bool:
     return (data.get("tenant_id") or "default") == tenant
 
 
+# ============ DLQ 读取（租户收窄） ============
+
+# 租户视角逐页回退补足 count 时的最大扫描条数：死信可能被别租户条目刷屏，
+# 但也不能为此无界扫描整条 Stream。
+_DLQ_SCAN_LIMIT = 500
+
+
+def _parse_dlq_entry(msg_id: Any, fields: Dict[Any, Any]) -> DlqEntry:
+    """DLQ Stream 条目 → DlqEntry（envelope.payload 为原始任务负载）。"""
+    if isinstance(msg_id, bytes):
+        msg_id = msg_id.decode()
+    envelope: Dict[str, Any] = {}
+    for k, v in fields.items():
+        k_str = k.decode() if isinstance(k, bytes) else k
+        if k_str == "payload":
+            raw = v.decode() if isinstance(v, bytes) else v
+            try:
+                envelope = json.loads(raw)
+            except Exception:
+                envelope = {"raw": str(raw)}
+            break
+    if not isinstance(envelope, dict):
+        envelope = {"raw": envelope}
+    return DlqEntry(
+        dlq_id=msg_id,
+        reason=str(envelope.get("reason", "")),
+        source_stream=str(envelope.get("source_stream", "")),
+        source_id=str(envelope.get("source_id", "")),
+        delivery_count=envelope.get("delivery_count"),
+        dead_lettered_at=envelope.get("dead_lettered_at"),
+        payload=envelope.get("payload") or {},
+    )
+
+
+def _read_dlq_entries(
+    redis: Redis, name: str, *, count: int, tenant: Optional[str]
+) -> List[DlqEntry]:
+    """取最近 ``count`` 条**本租户可见**死信，按时间正序返回。
+
+    平台视角等价于单次 ``XREVRANGE``；租户视角逐页回退，跳过别租户条目，
+    直到补满 count 或扫到 ``_DLQ_SCAN_LIMIT``（plaita#192：DLQ Stream 是
+    平台级的，条目 payload 里才带 tenant_id）。
+    """
+    if count <= 0:
+        return []
+    collected: List[DlqEntry] = []
+    scanned = 0
+    batch = max(count, 20)
+    cursor = "+"
+    while len(collected) < count and scanned < _DLQ_SCAN_LIMIT:
+        rows = redis.xrevrange(name, max=cursor, min="-", count=batch)
+        if not rows:
+            break
+        for msg_id, fields in rows:
+            scanned += 1
+            entry = _parse_dlq_entry(msg_id, fields)
+            if tenant is not None and not _owned_by_tenant(entry.payload, tenant):
+                continue
+            collected.append(entry)
+            if len(collected) >= count:
+                break
+        if len(rows) < batch:
+            break
+        last_id = rows[-1][0]
+        if isinstance(last_id, bytes):
+            last_id = last_id.decode()
+        cursor = f"({last_id}"  # 排他游标，避免同一页原地重读
+    collected.reverse()
+    return collected
+
+
 # ============ API 端点 ============
 
 @router.get("/queues", response_model=QueueListResponse)
@@ -141,6 +217,11 @@ async def list_queues(
 ):
     """
     获取所有队列概览
+
+    已知规模泄露残面（plaita#192 记录）：本端点返回的是**平台级**队列长度
+    （键共享、无条目内容）。逐租户精确长度需要对共享 Stream 全量扫描，代价
+    随队列深度线性增长，且与 ``GET /api/queues/{name}`` 的 ``length`` 同口径；
+    条目内容面（``/queues/{name}`` 与 ``/queues/dlq``）已按租户收窄。
     """
     queues = []
     
@@ -161,7 +242,12 @@ async def list_queues(
         return 0
 
     for pattern in KNOWN_QUEUES:
-        keys = redis.keys(pattern)
+        if "*" in pattern:
+            # 通配项走有界 SCAN（#202）：单条命令只扫一页，触界 fail-safe
+            keys = list(_bounded_queue_keys(redis, pattern))
+        else:
+            # 字面键直读（#202）：EXISTS 是 O(1)，再没有全库遍历的理由
+            keys = [pattern] if redis.exists(pattern) else []
         if "*" not in pattern and not keys:
             # 键尚不存在：保留已知队列的零值行，页面不缺行
             queues.append(QueueInfo(
@@ -186,6 +272,19 @@ async def list_queues(
     )
 
 
+# 有界扫描的单请求键预算（#202）：每个键还要 TYPE/LLEN/XLEN（DLQ 再叠
+# XREVRANGE），键预算按读取代价收紧；触界返回部分结果并记 warning。
+_QUEUE_SCAN_MAX_KEYS = 1000
+_DLQ_SCAN_MAX_KEYS = 500
+
+
+def _bounded_queue_keys(
+    redis: Redis, pattern: str, max_keys: int = _QUEUE_SCAN_MAX_KEYS
+) -> List[str]:
+    """有界 SCAN 代替 ``KEYS``（#202）：单条命令只扫一页，触界 fail-safe。"""
+    return scan_keys(redis, pattern, max_keys=max_keys).keys
+
+
 def _is_stream_key(key: str) -> bool:
     """已知的 Stream 键永远保留零值行——含 DLQ（#26）。"""
     return key in ("plaita:flow:queue", "plaita:flow:queue:v2") or key.endswith(DLQ_SUFFIX)
@@ -193,6 +292,7 @@ def _is_stream_key(key: str) -> bool:
 
 @router.get("/queues/dlq", response_model=DlqListResponse)
 async def list_dlq(
+    request: Request,
     count: int = 20,
     redis: Redis = Depends(get_redis)
 ):
@@ -201,12 +301,18 @@ async def list_dlq(
     死信此前只有 worker 的 logger.error——值守看不到堆积，DLQ 被 XTRIM
     裁掉旧条目也无人知晓。本端点把 DLQ 拉进看板。
 
+    多租户（plaita#192）：DLQ Stream 是平台级的（键里没有租户段），租户归属
+    在条目 ``payload.tenant_id``；租户视角只返回本租户条目，平台视角全量。
+    每条 Stream 的 ``length`` 仍是平台级总量（与 ``get_queue`` 的 length
+    同口径，仅规模不含量）。
+
     - **count**: 每个 DLQ Stream 返回的最近条目数（默认 20）
     """
     count = max(0, min(int(count), 200))
+    tenant = tenant_scope(request)
     names = set(KNOWN_DLQ_KEYS)
-    for key in redis.keys(f"*{DLQ_SUFFIX}"):
-        names.add(key if isinstance(key, str) else key.decode())
+    # `*:dlq` 通配必须有界扫（#202）：未知 DLQ 键靠 SCAN 补，只扫一页/触界即停
+    names.update(_bounded_queue_keys(redis, f"*{DLQ_SUFFIX}", max_keys=_DLQ_SCAN_MAX_KEYS))
 
     streams = []
     for name in sorted(names):
@@ -214,33 +320,7 @@ async def list_dlq(
             streams.append(DlqStream(name=name, length=0, entries=[]))
             continue
         length = redis.xlen(name)
-        entries: List[DlqEntry] = []
-        if count:
-            # 取最近 count 条：XREVRANGE 从尾部倒序拿，再翻回时间正序
-            for msg_id, fields in reversed(redis.xrevrange(name, max="+", min="-", count=count)):
-                if isinstance(msg_id, bytes):
-                    msg_id = msg_id.decode()
-                envelope: Dict[str, Any] = {}
-                for k, v in fields.items():
-                    k_str = k.decode() if isinstance(k, bytes) else k
-                    if k_str == "payload":
-                        raw = v.decode() if isinstance(v, bytes) else v
-                        try:
-                            envelope = json.loads(raw)
-                        except Exception:
-                            envelope = {"raw": str(raw)}
-                        break
-                if not isinstance(envelope, dict):
-                    envelope = {"raw": envelope}
-                entries.append(DlqEntry(
-                    dlq_id=msg_id,
-                    reason=str(envelope.get("reason", "")),
-                    source_stream=str(envelope.get("source_stream", "")),
-                    source_id=str(envelope.get("source_id", "")),
-                    delivery_count=envelope.get("delivery_count"),
-                    dead_lettered_at=envelope.get("dead_lettered_at"),
-                    payload=envelope.get("payload") or {},
-                ))
+        entries = _read_dlq_entries(redis, name, count=count, tenant=tenant)
         streams.append(DlqStream(name=name, length=length, entries=entries))
 
     return DlqListResponse(streams=streams, total=len(streams))

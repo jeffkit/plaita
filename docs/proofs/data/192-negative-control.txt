@@ -1,0 +1,60 @@
+# plaita#192 负控：还原 console 读面租户收窄（events / logs / queues）
+
+负控手法：三个 console API 文件整体还原到 origin/main（保留 #191 的事件
+内核修法，只还原读面）：
+
+```bash
+git checkout origin/main -- \
+  plaita-console/backend/api/events.py \
+  plaita-console/backend/api/logs.py \
+  plaita-console/backend/api/queues.py
+```
+
+## repro（`docs/proofs/data/192-repro.py`，期望红）
+
+```
+"logs_instance": {"messages": ["globex-secret-line"], "leaked": true}
+"logs_stats": {"total_logs": 2, "leaked": true}
+"sse": {"tenant_ids": ["globex", "acme"], "leaked": true}
+"events": {"acme_view_ids": ["evt-a", "evt-b"], "leaked": true}
+"subscription_get": {"status": 200, "admin_status": 200, "leaked": true}
+"subscription_delete": {"status": 200, "still_exists": false, "leaked": true}
+"dlq": {"acme_payloads": [{"tenant_id": "globex", "secret": "globex-dlq-secret"}], "leaked": true}
+"verdict": "VULNERABLE（仍有跨租户读/删）"
+```
+
+精确红点：acme viewer 读到 globex 的实例日志/统计/SSE/事件/死信；
+acme editor 对他租户订阅 `DELETE` 返回 200 且记录被真实删除
+（`still_exists: false`）——挂起执行永久失去唤醒。
+
+## 新增测试（期望红）
+
+```
+FAILED test_issue192_tenant_read_surface.py::TestLogsTenantScope::test_instance_logs_only_own_tenant
+FAILED test_issue192_tenant_read_surface.py::TestLogsTenantScope::test_stats_only_own_tenant
+FAILED test_issue192_tenant_read_surface.py::test_sse_does_not_emit_other_tenant_logs
+FAILED test_issue192_tenant_read_surface.py::TestEventsTenantScope::test_event_list_only_own_events
+FAILED test_issue192_tenant_read_surface.py::TestEventsTenantScope::test_cross_tenant_subscription_get_is_404
+FAILED test_issue192_tenant_read_surface.py::TestEventsTenantScope::test_cross_tenant_subscription_delete_is_404_and_does_not_delete
+FAILED test_issue192_tenant_read_surface.py::TestDlqTenantScope::test_dlq_only_own_tenant_entries
+7 failed, 7 passed
+```
+
+精确红文案（删除用例）：
+
+```
+E       assert 200 == 404
+E        +  where 200 = <Response [200 OK]>.status_code
+E       AssertionError: 跨租户不得删除订阅
+```
+
+7 passed 的用例都是**平台视角/本租户可见/已修端点回归**（admin 全量、
+own-tenant 日志与订阅、#64 队列详情回归等）——它们本来就该绿，说明负控
+红的是「跨租户判据」，不是整体坏掉。
+
+## 还原修法后
+
+- `docs/proofs/data/192-repro.py` 退出码 0：逐端点 `leaked: false`，
+  admin 仍全量（events 2 条 / DLQ 1 条 / subscription GET 200）；
+- 新增 15 条测试全绿（含 DLQ 跨租户刷屏时的逐页补足用例）；
+- console 全量 466 passed / 13 skipped。

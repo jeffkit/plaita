@@ -12,6 +12,7 @@ class Mock(Node):
     """
 
     node_type: ClassVar[str] = "mock"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "数据固定"
 
     value: Optional[Any] = None

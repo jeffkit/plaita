@@ -1,0 +1,113 @@
+# plaita#202 负控记录：logs/queues 读面 KEYS → 有界 SCAN
+
+- 仓：/tmp/w40（worktree，分支 fix/w40）
+- 基线：origin/main = ef90eb3a4e70371f3bea2c585600355773012789
+- 修复提交：e8510d623eedc10d7e804d353d0a7283cc2e0671
+- 环境：PYTHONPATH=/tmp/w40，解释器 /Users/jeff.jie/.venvs/plaita/bin/python
+- 负控方法：把修复**逐站点还原**成 ``redis.keys(...)``（或整文件回到 origin/main），
+  跑对应用例，记录精确红文案；每次跑完 ``git checkout HEAD -- <file>`` 还原并
+  自检（文件干净 + 用例全绿）。
+- repro：``docs/proofs/data/202-repro.py``（受控 10 万键 keyspace + 千万虚拟
+  键槽；KEYS/SCAN 按「每键槽 2µs」模拟单线程 Redis 的单命令阻塞成本）
+
+## 判定
+
+- 5 个站点（/logs、/logs/instance/{id}、/logs/stats、/queues、/queues/dlq）
+  各自还原 ⇒ **对应用例单独变红**，红文案指名仍在调用 KEYS；
+- 完整还原 logs.py + queues.py ⇒ repro 在「KEYS 调用 / 单命令阻塞 200ms /
+  超界 500」三类断言上复现（`result: RED (20 项)`）；
+- 还原后：``git status`` 干净，用例 15 passed。
+
+## 原始执行记录
+
+```
+## 负控 0：完整还原 logs.py + queues.py 到 origin/main ⇒ repro 复现
+  GET /logs                    HTTP 200  KEYS=1 SCAN=0 单命令阻塞≤200.0ms 扫描页≤0 单pattern轮次≤0 墙钟=258ms
+  [FAIL] GET /logs 调用了 redis KEYS（plaita:logs:*）——单命令模拟阻塞 200.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /logs 单条命令模拟阻塞 200.0ms > 5ms（SCAN 分页失败，仍是一次性全库遍历）
+  GET /logs/instance/{id}      HTTP 200  KEYS=1 SCAN=0 单命令阻塞≤200.0ms 扫描页≤0 单pattern轮次≤0 墙钟=216ms
+  [FAIL] GET /logs/instance/{id} 调用了 redis KEYS（plaita:logs:*）——单命令模拟阻塞 200.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /logs/instance/{id} 单条命令模拟阻塞 200.0ms > 5ms（SCAN 分页失败，仍是一次性全库遍历）
+  GET /logs/stats              HTTP 200  KEYS=1 SCAN=0 单命令阻塞≤200.0ms 扫描页≤0 单pattern轮次≤0 墙钟=218ms
+  [FAIL] GET /logs/stats 调用了 redis KEYS（plaita:logs:*）——单命令模拟阻塞 200.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /logs/stats 单条命令模拟阻塞 200.0ms > 5ms（SCAN 分页失败，仍是一次性全库遍历）
+  GET /queues                  HTTP 200  KEYS=7 SCAN=0 单命令阻塞≤200.0ms 扫描页≤0 单pattern轮次≤0 墙钟=1578ms
+  [FAIL] GET /queues 调用了 redis KEYS（plaita:flow:queue/plaita:flow:queue:v2/plaita:flow:queue:dlq/plaita:flow:queue:v2:dlq/plaita:delay:queue/plaita:redis_queue:*/plaita:kafka_queue:*）——单命令模拟阻塞 200.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /queues 单条命令模拟阻塞 200.0ms > 5ms（SCAN 分页失败，仍是一次性全库遍历）
+  GET /queues/dlq              HTTP 200  KEYS=1 SCAN=0 单命令阻塞≤200.0ms 扫描页≤0 单pattern轮次≤0 墙钟=220ms
+  [FAIL] GET /queues/dlq 调用了 redis KEYS（*:dlq）——单命令模拟阻塞 200.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /queues/dlq 单条命令模拟阻塞 200.0ms > 5ms（SCAN 分页失败，仍是一次性全库遍历）
+  GET /logs                    HTTP 500  KEYS=1 SCAN=0 单命令阻塞≤0.0ms 扫描页≤0 单pattern轮次≤0 墙钟=3ms
+  [FAIL] GET /logs 调用了 redis KEYS（plaita:logs:*）——单命令模拟阻塞 0.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /logs 超界后未 fail-safe（HTTP 500，应 200 + 部分结果）
+  GET /logs/instance/{id}      HTTP 500  KEYS=1 SCAN=0 单命令阻塞≤0.0ms 扫描页≤0 单pattern轮次≤0 墙钟=1ms
+  [FAIL] GET /logs/instance/{id} 调用了 redis KEYS（plaita:logs:*）——单命令模拟阻塞 0.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /logs/instance/{id} 超界后未 fail-safe（HTTP 500，应 200 + 部分结果）
+  GET /logs/stats              HTTP 500  KEYS=1 SCAN=0 单命令阻塞≤0.0ms 扫描页≤0 单pattern轮次≤0 墙钟=1ms
+  [FAIL] GET /logs/stats 调用了 redis KEYS（plaita:logs:*）——单命令模拟阻塞 0.0ms，共享 Redis 单线程期间所有客户端（worker/队列/事件总线）一起停摆
+  [FAIL] GET /logs/stats 超界后未 fail-safe（HTTP 500，应 200 + 部分结果）
+  GET /queues                  HTTP 500  KEYS=1 SCAN=0 单命令阻塞≤0.0ms 扫描页≤0 单pattern轮次≤0 墙钟=1ms
+
+## 负控 1（/logs）
+  $ 还原站点: logs-list
+  $ /Users/jeff.jie/.venvs/plaita/bin/python -m pytest plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_logs_does_not_call_keys -q
+E       AssertionError: 端点仍走了 KEYS 全库扫描：['plaita:logs:*']（#202）
+E       assert ['plaita:logs:*'] == []
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:98: AssertionError
+>       raise AssertionError(
+E       AssertionError: 端点调用了 redis KEYS(plaita:logs:*)——共享 Redis 上的一次全库阻塞扫描（#202）
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:56: AssertionError
+FAILED plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_logs_does_not_call_keys
+1 failed, 1 warning, 1 error in 0.75s
+
+## 负控 2（/logs/instance/{id}）
+  $ 还原站点: logs-instance
+  $ /Users/jeff.jie/.venvs/plaita/bin/python -m pytest plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_logs_instance_does_not_call_keys -q
+E       AssertionError: 端点仍走了 KEYS 全库扫描：['plaita:logs:*']（#202）
+E       assert ['plaita:logs:*'] == []
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:98: AssertionError
+>       raise AssertionError(
+E       AssertionError: 端点调用了 redis KEYS(plaita:logs:*)——共享 Redis 上的一次全库阻塞扫描（#202）
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:56: AssertionError
+FAILED plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_logs_instance_does_not_call_keys
+1 failed, 1 warning, 1 error in 0.70s
+
+## 负控 3（/logs/stats）
+  $ 还原站点: logs-stats
+  $ /Users/jeff.jie/.venvs/plaita/bin/python -m pytest plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_logs_stats_does_not_call_keys -q
+E       AssertionError: 端点仍走了 KEYS 全库扫描：['plaita:logs:*']（#202）
+E       assert ['plaita:logs:*'] == []
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:98: AssertionError
+>       raise AssertionError(
+E       AssertionError: 端点调用了 redis KEYS(plaita:logs:*)——共享 Redis 上的一次全库阻塞扫描（#202）
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:56: AssertionError
+FAILED plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_logs_stats_does_not_call_keys
+1 failed, 1 warning, 1 error in 0.68s
+
+## 负控 4（/queues）
+  $ 还原站点: queues-list
+  $ /Users/jeff.jie/.venvs/plaita/bin/python -m pytest plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_queues_does_not_call_keys_and_skips_scans_for_literal_keys -q
+E       AssertionError: 端点仍走了 KEYS 全库扫描：['plaita:flow:queue']（#202）
+E       assert ['plaita:flow:queue'] == []
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:98: AssertionError
+>       raise AssertionError(
+E       AssertionError: 端点调用了 redis KEYS(plaita:flow:queue)——共享 Redis 上的一次全库阻塞扫描（#202）
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:56: AssertionError
+FAILED plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_queues_does_not_call_keys_and_skips_scans_for_literal_keys
+1 failed, 1 warning, 1 error in 0.70s
+
+## 负控 5（/queues/dlq）
+  $ 还原站点: queues-dlq
+  $ /Users/jeff.jie/.venvs/plaita/bin/python -m pytest plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_queues_dlq_does_not_call_keys -q
+E       AssertionError: 端点仍走了 KEYS 全库扫描：['*:dlq']（#202）
+E       assert ['*:dlq'] == []
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:98: AssertionError
+>       raise AssertionError(
+E       AssertionError: 端点调用了 redis KEYS(*:dlq)——共享 Redis 上的一次全库阻塞扫描（#202）
+plaita-console/backend/tests/console/test_issue202_bounded_scan.py:56: AssertionError
+FAILED plaita-console/backend/tests/console/test_issue202_bounded_scan.py::test_queues_dlq_does_not_call_keys
+1 failed, 1 warning, 1 error in 0.69s
+
+## 还原后自检（必须干净）
+15 passed, 1 warning in 0.69s
+```

@@ -5,17 +5,24 @@ dry-run 服务：实例化 Flow 并同步执行，收集节点级结果。
 按节点聚合 input(配置)/output(执行结果)/status，并维护主/子流程层级
 （``depth`` / ``flow_path`` / ``flow_id``，供试跑面板做子图缩进）。
 
-安全闸门（两层）：
+安全闸门（两层，plaita#190 起改为**能力白名单**）：
 
-1. 名黑名单：拒绝含 code / 可执行脚本类危险节点的 flow——这些节点无 dry_run
-   契约，只能整体拒跑。
+1. 内置节点能力白名单：内置节点必须显式声明 ``dry_run_safe = True``
+   （``plaita.node.basic.Node`` 的 ClassVar）才允许试跑。未声明按不安全
+   处理；副作用内置节点（http / redis / event）与可执行任意代码的
+   code 族显式声明 False 并在这里被拒绝——**默认拒绝，新增内置节点不会
+   因为「忘了加黑名单」而静默变成可试跑**。历史上这里是名黑名单
+   ``{code,python,javascript,js}``，漏掉了 ``http``：editor 可以试跑一条含
+   HTTP 节点的流程，让 console backend 进程真实出网（进程内 SSRF），响应体
+   回显到试跑面板。HTTP 节点自身另有 dry_run 短路（纵深防御，见
+   ``plaita/node/http.py::_dry_run_result``）。
 2. dry-run 全局旗标：注入 ``globalContext.dry_run=True``，并在执行器读点
    ``get_global_variable`` 上钉死（``_DryRunExecution``）。业务节点（经
    ``PLAITA_CONSOLE_NODE_MODULES`` 注册的 gate / capture / agentrun / llm /
    email / webhooks / database / git_publish 等）按契约读
    ``execution.get_global_variable("dry_run", False)``，为真即跳过真实副作用
-   （子进程 / 出网 / agent CLI）。名黑名单只能枚举内置类型，拦不住动态注册的
-   业务节点——这一层才是它们不真正执行的关键。
+   （子进程 / 出网 / agent CLI）。动态注册的业务节点不在「内置白名单」判定内
+   （无法枚举），这一层才是它们不真正执行的关键。
    仅注入 globalContext 不够：子流程自带 ``globalContext.dry_run=false`` 时，
    子级 context 优先读自己的 $GLOBAL（缺失才回退父级），副作用会被重新打开；
    读点钉死随 ``get_child_execution`` 下发到 inline child / parallel 分支 /
@@ -28,16 +35,19 @@ from typing import Any, Dict, List, Optional, Set
 from plaita.core.callback import FlowCallback
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
+from plaita.core.url_redaction import _scrub_exception_text
 
 try:
     from .flow_store import get_flow_store
 except ImportError:
-    from flow_store import get_flow_store
+    from flow_store import get_flow_store  # type: ignore
 
 logger = logging.getLogger(__name__)
 
-# dry-run 禁止的节点类型（大小写不敏感）。code 可在 backend 进程执行任意 Python。
-_BLOCKED_NODE_TYPES: Set[str] = {
+# 可执行任意代码 / 无法在 backend 进程内安全执行的节点类型别名（大小写不敏感）。
+# CodeNode 默认不注册（需显式 opt-in），因此不能只靠注册表判定——这里在
+# Flow 校验之前就给出明确拒绝。``Set`` 保留给这个别名表。
+_UNSAFE_NODE_ALIASES: Set[str] = {
     "code",
     "python",
     "javascript",
@@ -284,14 +294,52 @@ def apply_debug_transform(
     return {**data, "nodes": out}
 
 
+def _builtin_dry_run_capability(node_type: str) -> Optional[bool]:
+    """节点类型的 dry-run 能力：True 安全 / False 不安全 / None 非内置未注册。
+
+    判定顺序（plaita#190）：
+
+    1. ``plaita.node.basic.Node.dry_run_safe`` 显式声明优先；
+    2. 未声明时按**来源**分流：内置节点（``plaita.node.*``）默认拒绝——新增
+       内置节点不会因为没人更新黑名单而悄悄变成可试跑；动态注册的业务节点
+       （``PLAITA_CONSOLE_NODE_MODULES`` / entry_points）返回 True，由
+       ``_DryRunExecution`` 钉死的 dry_run 读点 + 节点自身契约兜底（#32）。
+    3. 注册表里没有的类型返回 None：交给 ``Flow.model_validate`` 报「未识别
+       节点」，同时避免把节点配置里恰好带 ``type`` 键的 dict 误判成节点。
+    """
+    try:
+        from plaita.node import get_default_registry
+    except Exception as exc:  # noqa: BLE001 — 注册表都加载不了时按不安全处理，但必须留证
+        logger.error(
+            "dry-run 能力判定无法加载节点注册表（按不安全处理）: %s",
+            _scrub_exception_text(exc),
+        )
+        return False
+    cls = get_default_registry().get(node_type)
+    if cls is None:
+        return None
+    declared = getattr(cls, "dry_run_safe", None)
+    if declared is True:
+        return True
+    if declared is False:
+        return False
+    module = getattr(cls, "__module__", "") or ""
+    is_builtin = module == "plaita.node" or module.startswith("plaita.node.")
+    return False if is_builtin else True
+
+
 def _collect_blocked_nodes(data: Any, path: str = "nodes", _depth: int = 0) -> List[str]:
-    """递归扫描 flow dict / 嵌套节点结构，收集被禁节点描述。
+    """递归扫描 flow dict / 嵌套节点结构，收集不可试跑的节点描述。
 
     2026-09 安全评审 P0 修复：原实现只沿固定键（childFlow/flows/branches/children）
     下钻，且把 branches[i] 当 flow dict 找 nodes——而 Parallel 的嵌套 flow 挂在
     ``branches[i].flow``，藏进分支的危险节点（code 等）永远不会被扫描，dry-run
     闸门被整个绕过。改为泛型遍历：含 ``type``/``node_type`` 的 dict 一律视为节点
     （检查并入其所有值下钻），含 ``nodes`` 的 dict 视为子流程，其余容器继续下钻。
+
+    plaita#190：判据从「名黑名单」改为「内置节点能力白名单」——只有显式
+    ``dry_run_safe=True`` 的内置节点可试跑；http / redis / event / code 族
+    未声明安全（或显式 False），在这里被拒绝并点名到节点路径。
     """
     blocked: List[str] = []
     if _depth > 32:  # 防御性深度上限；JSON 结构本无环
@@ -300,7 +348,7 @@ def _collect_blocked_nodes(data: Any, path: str = "nodes", _depth: int = 0) -> L
         ntype = str(data.get("type") or data.get("node_type") or "").strip().lower()
         if ntype:
             nid = data.get("id") or "?"
-            if ntype in _BLOCKED_NODE_TYPES:
+            if ntype in _UNSAFE_NODE_ALIASES or _builtin_dry_run_capability(ntype) is False:
                 blocked.append(f"{path}[{nid}].type={ntype}")
             for key, value in data.items():
                 blocked.extend(
@@ -352,7 +400,8 @@ def dry_run(
             "result": None,
             "nodes": [],
             "error": (
-                "dry-run 拒绝含危险节点的流程（防止 console 进程 RCE）: "
+                "dry-run 拒绝含危险节点/未声明 dry-run 安全节点的流程"
+                "（防止 console 进程内副作用 / RCE）: "
                 + "; ".join(blocked)
             ),
         }
@@ -362,8 +411,8 @@ def dry_run(
     except Exception as e:
         return {"result": None, "nodes": [], "error": f"Flow 校验失败: {e}"}
 
-    # 安全闸门第 2 层（2026-10 评审 P1）：名黑名单只能拦内置 code/python/js，
-    # 拦不住经 PLAITA_CONSOLE_NODE_MODULES 注册的业务节点。统一把
+    # 安全闸门第 2 层（2026-10 评审 P1）：内置节点白名单拦不住经
+    # PLAITA_CONSOLE_NODE_MODULES 注册的业务节点。统一把
     # globalContext.dry_run 置真，让按契约自守的业务节点（gate / capture /
     # agentrun）跳过真实执行；流程显式声明 dry_run=false 也强制覆盖——试跑
     # 语义下不得有副作用。注入覆盖读 $GLOBAL 状态的一侧（表达式 / 状态直读），

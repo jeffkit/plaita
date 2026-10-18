@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import uuid
+import weakref
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -573,6 +574,66 @@ class ServiceManager:
             resolved[key] = value
         return resolved
     
+    # ---- 启动门的原子预留（plaita#211）----
+    # 「计数 → 启动」之间原有 await（launcher.start）：两个并发请求都会在
+    # 对方写入 instances 之前通过计数检查，max_instances=1 的 schedule_service
+    # 因此被拉起两份（cron 同一时点双触发）。修法：把「计数（running +
+    # starting/reserved）→ 预留」放进同一段**无 await** 的临界区（每
+    # service_type 一把 asyncio.Lock），预留只占名额、不污染 instances
+    # （list_instances / refresh_status 看不到幽灵实例）；启动失败在 except
+    # 里释放预留，避免占位泄漏永久占满 max_instances。
+
+    def _start_lock(self, service_type: str) -> asyncio.Lock:
+        """每 service_type 一把锁。
+
+        锁只包住「计数 → 预留」几步同步代码（不含 await），持锁时间可忽略；
+        不跨 ``launcher.start`` 的 await 持锁，max_instances>1 的并发启动仍可
+        并行。``asyncio.Lock`` 在 3.10+ 首次使用时绑定事件循环，跨 loop 复用会
+        抛 RuntimeError——按事件循环分桶（``WeakKeyDictionary``：loop 被回收后
+        条目自动消失，不会因 loop id 复用拿到绑定到死循环的旧锁），测试里对同一
+        manager 多次 ``asyncio.run`` 也不会炸。
+        """
+        locks_by_loop = self.__dict__.setdefault(
+            "_start_locks", weakref.WeakKeyDictionary()
+        )
+        locks = locks_by_loop.setdefault(asyncio.get_running_loop(), {})
+        lock = locks.get(service_type)
+        if lock is None:
+            lock = locks[service_type] = asyncio.Lock()
+        return lock
+
+    def _reserved_starts(self, service_type: str) -> int:
+        """正在启动中（已预留名额、launcher.start 尚未返回）的实例数。"""
+        return self.__dict__.setdefault("_start_reservations", {}).get(service_type, 0)
+
+    async def _reserve_start_slot(self, service_type: str, max_instances: int) -> None:
+        """计数 + 预留原子完成；超限抛 ValueError（第二个并发请求在此被拒）。"""
+        async with self._start_lock(service_type):
+            reserved = self._reserved_starts(service_type)
+            current_count = reserved + sum(
+                1 for inst in self.instances.values()
+                if inst.service_type == service_type
+                and inst.status in ("running", "starting")
+            )
+            if current_count >= max_instances:
+                if reserved:
+                    raise ValueError(
+                        f"服务已在启动中: {service_type}"
+                        f"（{reserved} 个实例启动中，max_instances={max_instances}）"
+                    )
+                raise ValueError(f"已达到最大实例数: {max_instances}")
+            reservations = self.__dict__.setdefault("_start_reservations", {})
+            reservations[service_type] = reserved + 1
+
+    def _release_start_slot(self, service_type: str) -> None:
+        """释放预留名额（成功或失败都要释放，失败不得留下永久占位）。"""
+        reservations = self.__dict__.setdefault("_start_reservations", {})
+        reserved = reservations.get(service_type, 0)
+        if reserved <= 1:
+            reservations.pop(service_type, None)
+        else:
+            reservations[service_type] = reserved - 1
+
     async def start_service(self, service_type: str) -> ManagedInstance:
         """启动一个服务实例"""
         if not self.config:
@@ -582,22 +643,22 @@ class ServiceManager:
             raise ValueError(f"未知服务类型: {service_type}")
         
         service_config = self.config.services[service_type]
-        
-        # 检查实例数量限制
-        current_count = sum(
-            1 for inst in self.instances.values()
-            if inst.service_type == service_type and inst.status == "running"
-        )
-        if current_count >= service_config.max_instances:
-            raise ValueError(f"已达到最大实例数: {service_config.max_instances}")
-        
-        # 解析环境变量
-        env = self._resolve_env(service_config.env)
-        
-        # 启动服务
-        launcher = self.get_launcher()
-        instance = await launcher.start(service_type, service_config, env)
-        
+
+        # 原子预留（#211）：并发第二个请求在这里拿到「已在启动」而不是双实例
+        await self._reserve_start_slot(service_type, service_config.max_instances)
+        try:
+            # 解析环境变量
+            env = self._resolve_env(service_config.env)
+
+            # 启动服务
+            launcher = self.get_launcher()
+            instance = await launcher.start(service_type, service_config, env)
+        except BaseException:
+            self._release_start_slot(service_type)
+            raise
+
+        # 释放与写入之间没有 await：并发请求要么看到预留、要么看到 running 实例
+        self._release_start_slot(service_type)
         self.instances[instance.instance_id] = instance
         return instance
     

@@ -22,7 +22,8 @@ except ImportError:
 
 from .core import (
     Event, EventBus, EventHandler, EventStorage, EventSubscription,
-    EventSubscriptionStorage, EventProcessingTracker, RetryPolicy
+    EventSubscriptionStorage, EventProcessingTracker, RetryPolicy,
+    bind_trusted_tenant,
 )
 from .exceptions import EventError, EventNotFoundError, EventStorageError, EventTimeoutError
 from .utils import normalize_event
@@ -665,6 +666,9 @@ class SqlalchemyEventBus(EventBus):
         if not isinstance(event, Event):
             event = normalize_event(event, **kwargs)
         
+        # plaita#191：受信租户由发布上下文绑定（不读 data.tenant_id）
+        event = bind_trusted_tenant(event)
+
         # 存储事件
         event_id = await self.event_storage.store_event(event)
         

@@ -221,22 +221,33 @@ class TestExecutionContextEnvFiltering(unittest.TestCase):
 
 
 class TestExecutionContextCancelPropagation(unittest.TestCase):
-    """cancel_event 进程内传播：父 set → 子能观测到（thread 模式）。
-    跨进程不传播（pickle 剔除），见 parallel_executor 的协议声明。"""
+    """cancel_event 进程内传播（plaita#206）：子上下文持有**自己的** Event，
+    父级置位单向可见（thread 模式）。跨进程不传播（pickle 剔除），见
+    parallel_executor 的协议声明。"""
 
-    def test_child_shares_parent_cancel_event(self):
+    def test_child_has_own_event_and_sees_parent_set(self):
         parent = ExecutionContext()
         child = ExecutionContext(parent=parent)
-        self.assertIs(child.cancel_event, parent.cancel_event)
+        self.assertIsNot(child.cancel_event, parent.cancel_event,
+                         "子上下文不得复用父的节点级 Event（分支会互相误杀）")
+        parent.cancel_event.set()
+        self.assertTrue(child.cancel_event.is_set(), "父级置位仍须向下传播")
+
+    def test_child_method_has_own_event_and_sees_parent_set(self):
+        parent = ExecutionContext()
+        child = parent.child()
+        self.assertIsNot(child.cancel_event, parent.cancel_event)
         parent.cancel_event.set()
         self.assertTrue(child.cancel_event.is_set())
 
-    def test_child_method_shares_cancel_event(self):
+    def test_child_set_does_not_leak_to_parent_or_siblings(self):
+        """分支 A 置位不得传到父/兄弟分支（#206 的误杀面）。"""
         parent = ExecutionContext()
-        child = parent.child()
-        self.assertIs(child.cancel_event, parent.cancel_event)
-        parent.cancel_event.set()
-        self.assertTrue(child.cancel_event.is_set())
+        branch_a = ExecutionContext(parent=parent)
+        branch_b = ExecutionContext(parent=parent)
+        branch_a.cancel_event.set()
+        self.assertFalse(parent.cancel_event.is_set())
+        self.assertFalse(branch_b.cancel_event.is_set())
 
     def test_root_clean_creates_fresh_event(self):
         ctx = ExecutionContext()
@@ -246,12 +257,12 @@ class TestExecutionContextCancelPropagation(unittest.TestCase):
         self.assertFalse(ctx.cancel_event.is_set())
 
     def test_child_clean_resyncs_to_parent_event(self):
-        """子 clean() 后仍指向父当前 Event，不脱离取消链。"""
+        """子 clean() 后重新挂到父**当前** Event，不脱离取消链。"""
         parent = ExecutionContext()
         child = ExecutionContext(parent=parent)
         parent.clean()  # 父换新 Event
         child.clean()   # 子重新同步到父的新 Event
-        self.assertIs(child.cancel_event, parent.cancel_event)
+        self.assertIsNot(child.cancel_event, parent.cancel_event)
         parent.cancel_event.set()
         self.assertTrue(child.cancel_event.is_set())
 

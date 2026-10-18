@@ -220,10 +220,25 @@ class TestIssue165DeclaredBounds(unittest.TestCase):
         self.assertEqual(factory._MAX_REDACTION_CHARS, 1 << 24)
 
     def test_shape_gate_is_the_documented_product(self):
-        """闸门判据：``len(text) * text.count(":")``（源码级防漂移）。"""
+        """闸门判据：``len(text) * Σ count(sep)``（sep 遍历 ``_SECRET_SPLITTERS``）。
+
+        **#185 前是** ``len(text) * text.count(":")`` —— 那条上界对**零冒号**的
+        分隔符密集输入是**假的**：``"x@"*32768`` 的乘积为 0 ⇒ 闸门形同虚设 ⇒
+        直接落进 ``_delimiter_pieces`` 的 Θ(n²)（实测 n 翻倍耗时 ×3.6~4.3）。
+        ``_delimiter_pieces`` 对**每一个**分隔符的**每一个**出现位置都切两片 ⇒
+        真实代价是 ``len(text) * Σ count(sep)``，闸门必须数这个和。
+
+        本测试是**源码级防漂移**：闸门那行与「计入全部分隔符」的求和必须同时存在。
+        若有人把闸门改回只数 ``":"`` ⇒ 本测试立刻红（负控已实测：改回后
+        ``n=32768`` 从 0.28 ms 退回 123 ms 且未整体掩码）。
+        """
         source = (ROOT / "plaita" / "server" / "factory.py").read_text(encoding="utf-8")
         self.assertEqual(
-            source.count('if len(value) * value.count(":") > _MAX_SPAN_SCAN_WORK:'), 1
+            source.count('if len(value) * _delim_work > _MAX_SPAN_SCAN_WORK:'), 1
+        )
+        self.assertIn(
+            "_delim_work = sum(value.count(sep) for sep in _SECRET_SPLITTERS)", source,
+            "闸门必须计入全部 _SECRET_SPLITTERS（#185）",
         )
         self.assertIn("return _REDACTED", source)
 

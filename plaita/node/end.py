@@ -23,6 +23,7 @@ class End(Node):
     )
 
     node_type: ClassVar[str] = "end"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "结束"
 
     # setup_end 消费的遗留键（result_type 字段无 alias）

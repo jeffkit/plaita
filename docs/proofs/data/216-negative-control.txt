@@ -1,0 +1,303 @@
+# plaita#216 负控（9 条诊断/缓存幸存变异，逐条 replay）
+
+## 0. 基线（before）证据：9 条全部**幸存**
+
+在 `origin/main` 基线上、只跑既有相关套件（新测试文件尚不存在）：
+
+```
+$ pytest tests/unit/test_expression_cache.py tests/unit/test_reviewfix_a_template_warn.py tests/unit/test_expression_parser_root_scan.py
+38 passed in 0.42s
+```
+
+| 变异 | 目标 | 既有套件结果 | 判定 |
+|---|---|---|---|
+| 216-1 | _warn_suspicious_literal 尾句 | 38 passed in 0.40s | **survived** |
+| 216-2 | _warn_unmatched_template 尾句 | 38 passed in 0.45s | **survived** |
+| 216-3 | _annotate_parse_error 提示短语 | 38 passed in 0.42s | **survived** |
+| 216-4 | _warned_literals 去重重置阈值 | 38 passed in 0.41s | **survived** |
+| 216-5 | _warned_unmatched_templates 去重重置阈值 | 38 passed in 0.40s | **survived** |
+| 216-6 | LRU 命中顺序 | 38 passed in 0.41s | **survived** |
+| 216-7 | LRU 容量边界 | 38 passed in 0.41s | **survived** |
+| 216-8 | _render_path 字段段 | 38 passed in 0.41s | **survived** |
+| 216-9 | LRU 逐出端 | 38 passed in 0.45s | **survived** |
+
+合计：`MUTATIONS_KILLED 0/9` —— 这正是 #216 的测试债。
+
+## 1. 修复后（after）：9 条全部**被杀**
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py
+9 passed in 0.14s
+```
+
+合计：`MUTATIONS_KILLED 9/9`。每条变异单独 replay（一次只应用一个），
+跑的是新文件里**对应用例的单个 node id**（`--tests <file>` 且文件存在时
+`216-repro.py` 自动收窄），因此每条红都只指向该条用例。
+
+## 216-1 · _warn_suspicious_literal 尾句 —— killed
+
+变异：`rewrite the string. -> rewrite it.`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -237,7 +237,7 @@
+     logger.warning(
+         "expression %r looks like templating/Python code from another language and was "
+         "returned AS-IS (no evaluation happened). plaita expressions use $INPUT.x / "
+-        "$NODE.id / $F.fn(...) and {%% ... %%} for interpolation — rewrite the string.",
++        "$NODE.id / $F.fn(...) and {%% ... %%} for interpolation — rewrite it.",
+         value if len(value) < 120 else value[:117] + "...",
+     )
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_warning_text_is_pinned
+        assert parser.evaluate(value, {}) == value
+>       assert expected in messages
+E       assert "expression 'hello {{ name }}' looks like templating/Python code from another language and was returned AS-IS (no eval...ppened). plaita expressions use $INPUT.x / $NODE.id / $F.fn(...) and {% ... %} for interpolation — rewrite the string." in ["expression 'hello {{ name }}' looks like templating/Python code from another language and was returned AS-IS (no evaluation happened). plaita expressions use $INPUT.x / $NODE.id / $F.fn(...) and {% ... %} for interpolation — rewrite it."]
+tests/unit/test_issue216_expression_parser_debt.py:72: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_warning_text_is_pinned
+1 failed in 0.12s
+[exit 1]
+```
+
+## 216-2 · _warn_unmatched_template 尾句 —— killed
+
+变异：`fix the inner expression -> repair the inner expression`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -257,7 +257,7 @@
+     logger.warning(
+         "expression %r contains '{%%' but no valid {%% ... %%} expression matched "
+         "(inner expression is malformed or unclosed); it was returned AS-IS without "
+-        "evaluation — fix the inner expression (e.g. {%% $INPUT.x %%}).",
++        "evaluation — repair the inner expression (e.g. {%% $INPUT.x %%}).",
+         value if len(value) < 120 else value[:117] + "...",
+     )
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_warning_text_is_pinned
+        assert parser.evaluate(value, {}) == value
+>       assert expected in messages
+E       assert "expression 'value = {% 1 + 2 %}!' contains '{%' but no valid {% ... %} expression matched (inner expression is malformed or unclosed); it was returned AS-IS without evaluation — fix the inner expression (e.g. {% $INPUT.x %})." in ["expression 'value = {% 1 + 2 %}!' contains '{%' but no valid {% ... %} expression matched (inner expression is malformed or unclosed); it was returned AS-IS without evaluation — repair the inner expression (e.g. {% $INPUT.x %})."]
+tests/unit/test_issue216_expression_parser_debt.py:86: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_warning_text_is_pinned
+1 failed in 0.11s
+[exit 1]
+```
+
+## 216-3 · _annotate_parse_error 提示短语 —— killed
+
+变异：`常见原因： -> 可能原因：`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -3631,7 +3631,7 @@
+         msg = (
+             f"无法解析表达式：{value!r}\n"
+             f"  {line}\n  {caret}（第 {col} 列附近：{exc.msg}）\n"
+-            "常见原因：字符串常量里的引号/反斜杠未转义（写作 \\\" 或 \\\\）；"
++            "可能原因：字符串常量里的引号/反斜杠未转义（写作 \\\" 或 \\\\）；"
+             "使用了不支持的写法（列表/字典字面量、{{...}}、f-string、裸函数调用）；"
+             "或 {% ... %} 模板未闭合。"
+         )
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_parse_error_hint_uses_common_cause_phrase
+        assert "无法解析表达式：'$INPUT.'" in message
+>       assert "常见原因：字符串常量里的引号/反斜杠未转义" in message
+E       assert '常见原因：字符串常量里的引号/反斜杠未转义' in '无法解析表达式：\'$INPUT.\'\n  $INPUT.\n        ^（第 7 列附近：Expected end of text）\n可能原因：字符串常量里的引号/反斜杠未转义（写作 \\" 或 \\\\）；使用了不支持的写法（列表/字典字面量、{{...}}、f-string、裸函数调用）；或 {% ... %} 模板未闭合。, found \'.\'  (at char 6), (line:1, col:7)'
+tests/unit/test_issue216_expression_parser_debt.py:95: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_parse_error_hint_uses_common_cause_phrase
+1 failed in 0.11s
+[exit 1]
+```
+
+## 216-4 · _warned_literals 去重重置阈值 —— killed
+
+变异：`> 512 -> > 1024`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -231,7 +231,7 @@
+ def _warn_suspicious_literal(value: str) -> None:
+     if value in _warned_literals:
+         return
+-    if len(_warned_literals) > 512:
++    if len(_warned_literals) > 1024:
+         _warned_literals.clear()
+     _warned_literals.add(value)
+     logger.warning(
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_dedupe_resets_above_512
+>       assert len(ep._warned_literals) <= 513
+E       AssertionError: assert 600 <= 513
+E        +  where 600 = len({'{{ v0 }}', '{{ v1 }}', '{{ v10 }}', '{{ v100 }}', '{{ v101 }}', '{{ v102 }}', ...})
+E        +    where {'{{ v0 }}', '{{ v1 }}', '{{ v10 }}', '{{ v100 }}', '{{ v101 }}', '{{ v102 }}', ...} = ep._warned_literals
+tests/unit/test_issue216_expression_parser_debt.py:112: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_dedupe_resets_above_512
+1 failed in 0.12s
+[exit 1]
+```
+
+## 216-5 · _warned_unmatched_templates 去重重置阈值 —— killed
+
+变异：`> 512 -> > 1024`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -251,7 +251,7 @@
+ def _warn_unmatched_template(value: str) -> None:
+     if value in _warned_unmatched_templates:
+         return
+-    if len(_warned_unmatched_templates) > 512:
++    if len(_warned_unmatched_templates) > 1024:
+         _warned_unmatched_templates.clear()
+     _warned_unmatched_templates.add(value)
+     logger.warning(
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_dedupe_resets_above_512
+>       assert len(ep._warned_unmatched_templates) <= 513
+E       AssertionError: assert 600 <= 513
+E        +  where 600 = len({'a {% 1 + 0 %} b', 'a {% 1 + 1 %} b', 'a {% 1 + 10 %} b', 'a {% 1 + 100 %} b', 'a {% 1 + 101 %} b', 'a {% 1 + 102 %} b', ...})
+E        +    where {'a {% 1 + 0 %} b', 'a {% 1 + 1 %} b', 'a {% 1 + 10 %} b', 'a {% 1 + 100 %} b', 'a {% 1 + 101 %} b', 'a {% 1 + 102 %} b', ...} = ep._warned_unmatched_templates
+tests/unit/test_issue216_expression_parser_debt.py:123: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_dedupe_resets_above_512
+1 failed in 0.11s
+[exit 1]
+```
+
+## 216-6 · LRU 命中顺序 —— killed
+
+变异：`命中时不 cache.move_to_end(value)`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -3558,10 +3558,6 @@
+                           value: str, compile_fn: Callable[[str], Any]) -> Any:
+         compiled = cache.get(value)
+         if compiled is not None:
+-            try:
+-                cache.move_to_end(value)
+-            except KeyError:  # pragma: no cover - evicted between get and move
+-                pass
+             return compiled
+         compiled = compile_fn(value)
+         with self._cache_lock:
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_lru_hit_moves_entry_to_newest
+        assert list(p._compile_cache) == ["$INPUT.a", "$INPUT.b", "$INPUT.c"]
+>       assert list(p._compile_cache) == ["$INPUT.b", "$INPUT.c", "$INPUT.a"]
+E       AssertionError: assert ['$INPUT.a', ...', '$INPUT.c'] == ['$INPUT.b', ...', '$INPUT.a']
+E         
+E         At index 0 diff: '$INPUT.a' != '$INPUT.b'
+E         Use -v to get more diff
+tests/unit/test_issue216_expression_parser_debt.py:163: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_lru_hit_moves_entry_to_newest
+1 failed in 0.12s
+[exit 1]
+```
+
+## 216-7 · LRU 容量边界 —— killed
+
+变异：`while len(cache) > maxsize -> >= maxsize`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -3567,7 +3567,7 @@
+         with self._cache_lock:
+             cache[value] = compiled
+             cache.move_to_end(value)
+-            while len(cache) > maxsize:
++            while len(cache) >= maxsize:
+                 cache.popitem(last=False)
+         return compiled
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_lru_capacity_boundary_is_maxsize_not_less
+>       assert len(p._compile_cache) == 3
+E       AssertionError: assert 2 == 3
+E        +  where 2 = len(OrderedDict([('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094deac0>), ('$INPUT.c', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094dec00>)]))
+E        +    where OrderedDict([('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094deac0>), ('$INPUT.c', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094dec00>)]) = <plaita.core.expression_parser.ExpressionParser object at 0x1090c3690>._compile_cache
+tests/unit/test_issue216_expression_parser_debt.py:175: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_lru_capacity_boundary_is_maxsize_not_less
+1 failed in 0.11s
+[exit 1]
+```
+
+## 216-8 · _render_path 字段段 —— killed
+
+变异：`raw -> target`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -2973,7 +2973,7 @@
+     """Render the variable path walked so far (``$NODE.llm.text``)."""
+     parts = [root_key]
+     for kind, target, raw in walked:
+-        parts.append(f"[{target}]" if kind == "index" else f".{raw}")
++        parts.append(f"[{target}]" if kind == "index" else f".{target}")
+     return "".join(parts)
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_render_path_uses_raw_field_name_for_special_roots
+>       assert ep._render_path("$INPUT", walked) == "$INPUT.NODE.x"
+E       AssertionError: assert '$INPUT.$NODE.x' == '$INPUT.NODE.x'
+E         
+E         - $INPUT.NODE.x
+E         + $INPUT.$NODE.x
+E         ?        +
+tests/unit/test_issue216_expression_parser_debt.py:213: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_render_path_uses_raw_field_name_for_special_roots
+1 failed in 0.13s
+[exit 1]
+```
+
+## 216-9 · LRU 逐出端 —— killed
+
+变异：`popitem(last=False) -> popitem()`
+
+```diff
+--- a/plaita/core/expression_parser.py
++++ b/plaita/core/expression_parser.py
+@@ -3568,7 +3568,7 @@
+             cache[value] = compiled
+             cache.move_to_end(value)
+             while len(cache) > maxsize:
+-                cache.popitem(last=False)
++                cache.popitem()
+         return compiled
+ 
+     # --- entry points ----------------------------------------------------
+```
+
+```
+$ pytest tests/unit/test_issue216_expression_parser_debt.py::test_lru_evicts_oldest_not_newest
+>           assert "$INPUT.a" not in parser._compile_cache
+E           AssertionError: assert '$INPUT.a' not in OrderedDict([('$INPUT.a', <function ExpressionParser._compile_variable.<locals>.thunk at 0x108fe6ca0>), ('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x109600f40>)])
+E            +  where OrderedDict([('$INPUT.a', <function ExpressionParser._compile_variable.<locals>.thunk at 0x108fe6ca0>), ('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x109600f40>)]) = <plaita.core.expression_parser.ExpressionParser object at 0x1092319d0>._compile_cache
+tests/unit/test_issue216_expression_parser_debt.py:193: AssertionError
+FAILED tests/unit/test_issue216_expression_parser_debt.py::test_lru_evicts_oldest_not_newest
+1 failed in 0.14s
+[exit 1]
+```
+

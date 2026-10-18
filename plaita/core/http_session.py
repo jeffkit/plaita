@@ -64,16 +64,23 @@ def _cookies_enabled() -> bool:
     return os.environ.get(_COOKIES_ENV, "").strip() in ("1", "true", "yes")
 
 
-async def open_flow_session() -> None:
+async def open_flow_session() -> bool:
     """Open the flow-scoped session and publish it on the contextvar.
 
+    Returns ``True`` when **this call created** the session, ``False`` when an
+    outer scope already had one (nested flows via child executions / Parallel
+    branches / Map rounds reuse the outer scope) or when aiohttp is missing.
+
+    The return value is the ownership token that keeps a nested scope from
+    closing a shared session it did not create (plaita#187: before this, every
+    nested ``_flow_session_scoped`` closed the parent's session, so the first
+    Parallel branch to finish broke its siblings' in-flight requests).
+
     No-op when aiohttp is not installed (the HTTP node is unavailable
-    anyway).  Safe to call when a session is already open (nested flows via
-    child executions reuse the outer scope — closing is refcount-free by
-    design: only the driver scope that opened a session closes it).
+    anyway).
     """
     if _flow_session_var.get() is not None:
-        return
+        return False
     try:
         import aiohttp
     except Exception as exc:  # noqa: BLE001 - http extra 未安装：整块 no-op（debug 留痕）
@@ -82,13 +89,14 @@ async def open_flow_session() -> None:
         logging.getLogger(logger_name).debug(
             "aiohttp unavailable; flow http session scope is a no-op: %s", _scrub_exception_text(exc),
         )
-        return
+        return False
     jar = None if _cookies_enabled() else aiohttp.DummyCookieJar()
     connector = aiohttp.TCPConnector(limit=_connector_limit())
     # trust_env 显式 False（aiohttp 默认值，钉死语义）：不读 HTTP_PROXY 等
     # 环境变量——共享 session 若开始吃代理 env 会是静默行为变化。
     session = aiohttp.ClientSession(connector=connector, cookie_jar=jar, trust_env=False)
     _flow_session_var.set(session)
+    return True
 
 
 async def close_flow_session() -> None:

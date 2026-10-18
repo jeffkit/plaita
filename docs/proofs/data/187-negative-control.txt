@@ -1,0 +1,247 @@
+# plaita#187 负控：嵌套作用域恢复无条件关闭共享 aiohttp session
+
+基线 origin/main d1ca49c4；本单修复未提交（worktree /tmp/w35，分支 fix/w35）。
+负控注入 = 对本单修复 hunk 执行 `git apply -R`（plaita/core/http_session.py, plaita/core/async_utils.py）
+⇒ 恢复「open 无所有权标记 + 嵌套作用域无条件 close」。
+
+## MUTANT diff（对修复树反向应用 = 缺陷实现）
+
+```diff
+diff --git b/plaita/core/async_utils.py a/plaita/core/async_utils.py
+index 996c9f8a..985befc8 100644
+--- b/plaita/core/async_utils.py
++++ a/plaita/core/async_utils.py
+@@ -75,34 +75,26 @@ async def _flow_session_scoped(coro):
+     child tasks inherit the session via their context copy) and closed on
+     the same, still-running loop when the flow ends.  See
+     :mod:`plaita.core.http_session` for the lifecycle rationale.
+-
+-    Only the scope that **created** the session closes it (plaita#187): a
+-    nested flow/branch finds the outer session already on the contextvar and
+-    must leave it open for its siblings.  Without this ownership check the
+-    first Parallel branch to finish closed the shared session under the feet
+-    of every other branch's in-flight request ("Connector is closed").
+     """
+     from plaita.core.http_session import close_flow_session, open_flow_session
+ 
+-    created = await open_flow_session()
++    await open_flow_session()
+     try:
+         return await coro
+     finally:
+-        if created:
+-            await close_flow_session()
++        await close_flow_session()
+ 
+ 
+ async def _flow_session_scoped_agen(agen):
+     """Async-generator twin of :func:`_flow_session_scoped` for lazy mode."""
+     from plaita.core.http_session import close_flow_session, open_flow_session
+ 
+-    created = await open_flow_session()
++    await open_flow_session()
+     try:
+         async for item in agen:
+             yield item
+     finally:
+-        if created:
+-            await close_flow_session()
++        await close_flow_session()
+ 
+ 
+ def drive_strategy(target, *, lazy, sync, finish_coro, on_lazy_finally):
+diff --git b/plaita/core/http_session.py a/plaita/core/http_session.py
+index be312ef7..4eefcc1f 100644
+--- b/plaita/core/http_session.py
++++ a/plaita/core/http_session.py
+@@ -64,23 +64,16 @@ def _cookies_enabled() -> bool:
+     return os.environ.get(_COOKIES_ENV, "").strip() in ("1", "true", "yes")
+ 
+ 
+-async def open_flow_session() -> bool:
++async def open_flow_session() -> None:
+     """Open the flow-scoped session and publish it on the contextvar.
+ 
+-    Returns ``True`` when **this call created** the session, ``False`` when an
+-    outer scope already had one (nested flows via child executions / Parallel
+-    branches / Map rounds reuse the outer scope) or when aiohttp is missing.
+-
+-    The return value is the ownership token that keeps a nested scope from
+-    closing a shared session it did not create (plaita#187: before this, every
+-    nested ``_flow_session_scoped`` closed the parent's session, so the first
+-    Parallel branch to finish broke its siblings' in-flight requests).
+-
+     No-op when aiohttp is not installed (the HTTP node is unavailable
+-    anyway).
++    anyway).  Safe to call when a session is already open (nested flows via
++    child executions reuse the outer scope — closing is refcount-free by
++    design: only the driver scope that opened a session closes it).
+     """
+     if _flow_session_var.get() is not None:
+-        return False
++        return
+     try:
+         import aiohttp
+     except Exception as exc:  # noqa: BLE001 - http extra 未安装：整块 no-op（debug 留痕）
+@@ -89,14 +82,13 @@ async def open_flow_session() -> bool:
+         logging.getLogger(logger_name).debug(
+             "aiohttp unavailable; flow http session scope is a no-op: %s", _scrub_exception_text(exc),
+         )
+-        return False
++        return
+     jar = None if _cookies_enabled() else aiohttp.DummyCookieJar()
+     connector = aiohttp.TCPConnector(limit=_connector_limit())
+     # trust_env 显式 False（aiohttp 默认值，钉死语义）：不读 HTTP_PROXY 等
+     # 环境变量——共享 session 若开始吃代理 env 会是静默行为变化。
+     session = aiohttp.ClientSession(connector=connector, cookie_jar=jar, trust_env=False)
+     _flow_session_var.set(session)
+-    return True
+ 
+ 
+ async def close_flow_session() -> None:
+```
+
+## 红（mutant）：`docs/proofs/data/187-repro.py`
+
+```json
+{
+  "plaita_file": "/tmp/w35/plaita/__init__.py",
+  "nested": {
+    "created": null,
+    "contextvar_kept": false,
+    "outer_closed_by_child": true
+  },
+  "concurrent": {
+    "A": "short-branch-done",
+    "B": "ClientConnectionError: Connector is closed."
+  },
+  "root": {
+    "contextvar_after_root": true
+  }
+}
+```
+
+关键：`contextvar_kept=false` / `outer_closed_by_child=true` / `concurrent.B="ClientConnectionError: Connector is closed."`——兄弟分支的在途请求被最先结束的子作用域打断。
+
+## 红（mutant）：新用例
+
+```
+TESTS
+FFFF.                                                                    [100%]
+=================================== FAILURES ===================================
+_ TestNestedFlowSessionScope.test_concurrent_branch_finishing_first_does_not_break_sibling _
+
+self = <tests.unit.test_issue187_http_session_scope.TestNestedFlowSessionScope testMethod=test_concurrent_branch_finishing_first_does_not_break_sibling>
+
+    async def test_concurrent_branch_finishing_first_does_not_break_sibling(self):
+        """验收用例 B：一支先结束，另一支在途请求仍成功（历史：Connector is closed）。"""
+        server = _start_server(delay=0.6)
+        self._server = server
+        url = f"http://127.0.0.1:{server.server_address[1]}/slow"
+        try:
+            async def branch_b():
+                session = get_flow_session()
+                async with session.get(url) as rsp:
+                    return {"status": rsp.status, "body": await rsp.json()}
+    
+            async def branch_a():
+                await asyncio.sleep(0.15)  # 让 B 的请求先进入在途状态
+                await _flow_session_scoped(asyncio.sleep(0))
+                return "short-branch-done"
+    
+            async def both():
+                return await asyncio.gather(
+                    _flow_session_scoped(branch_a()),
+                    _flow_session_scoped(branch_b()),
+                    return_exceptions=True,
+                )
+    
+            results = await _flow_session_scoped(both())
+            self.assertEqual(results[0], "short-branch-done")
+>           self.assertIsInstance(
+                results[1], dict,
+                f"兄弟分支提前结束打断了在途请求: {results[1]!r}",
+            )
+E           AssertionError: ClientConnectionError('Connector is closed.') is not an instance of <class 'dict'> : 兄弟分支提前结束打断了在途请求: ClientConnectionError('Connector is closed.')
+
+tests/unit/test_issue187_http_session_scope.py:123: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  asyncio:base_events.py:1931 Executing <Task finished name='Task-2' coro=<TestNestedFlowSessionScope.test_concurrent_branch_finishing_first_does_not_break_sibling() done, defined at /private/tmp/w35/tests/unit/test_issue187_http_session_scope.py:98> exception=AssertionError("ClientConnectionError('Connector is closed.') is not an instance of <class 'dict'> : 兄弟分支提前结束打断了在途请求: ClientConnectionError('Connector is closed.')") created at /Users/jeff.jie/.local/share/uv/python/cpython-3.11.16-macos-aarch64-none/lib/python3.11/asyncio/runners.py:100> took 0.499 seconds
+_ TestNestedFlowSessionScope.test_nested_lazy_scope_keeps_parent_session_open __
+
+self = <tests.unit.test_issue187_http_session_scope.TestNestedFlowSessionScope testMethod=test_nested_lazy_scope_keeps_parent_session_open>
+
+    async def test_nested_lazy_scope_keeps_parent_session_open(self):
+        """lazy（async generator）驱动同款所有权语义。"""
+        await open_flow_session()
+        outer = get_flow_session()
+        try:
+            async def agen():
+                yield 1
+    
+            seen = [item async for item in _flow_session_scoped_agen(agen())]
+            self.assertEqual(seen, [1])
+>           self.assertIs(get_flow_session(), outer)
+E           AssertionError: None is not <aiohttp.client.ClientSession object at 0x10a67c1d0>
+
+tests/unit/test_issue187_http_session_scope.py:93: AssertionError
+____ TestNestedFlowSessionScope.test_nested_scope_keeps_parent_session_open ____
+
+self = <tests.unit.test_issue187_http_session_scope.TestNestedFlowSessionScope testMethod=test_nested_scope_keeps_parent_session_open>
+
+    async def test_nested_scope_keeps_parent_session_open(self):
+        """验收用例 A：子作用域结束后父 session 仍可复用、contextvar 不丢。"""
+        await open_flow_session()
+        outer = get_flow_session()
+        self.assertIsNotNone(outer)
+        try:
+            await _flow_session_scoped(asyncio.sleep(0))
+>           self.assertIs(get_flow_session(), outer, "嵌套作用域不得清空 contextvar")
+E           AssertionError: None is not <aiohttp.client.ClientSession object at 0x10a67a610> : 嵌套作用域不得清空 contextvar
+
+tests/unit/test_issue187_http_session_scope.py:76: AssertionError
+_________ TestNestedFlowSessionScope.test_open_returns_ownership_token _________
+
+self = <tests.unit.test_issue187_http_session_scope.TestNestedFlowSessionScope testMethod=test_open_returns_ownership_token>
+
+    async def test_open_returns_ownership_token(self):
+>       self.assertTrue(await open_flow_session(), "根本作用域应报告「我创建了 session」")
+E       AssertionError: None is not true : 根本作用域应报告「我创建了 session」
+
+tests/unit/test_issue187_http_session_scope.py:60: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue187_http_session_scope.py::TestNestedFlowSessionScope::test_concurrent_branch_finishing_first_does_not_break_sibling
+FAILED tests/unit/test_issue187_http_session_scope.py::TestNestedFlowSessionScope::test_nested_lazy_scope_keeps_parent_session_open
+FAILED tests/unit/test_issue187_http_session_scope.py::TestNestedFlowSessionScope::test_nested_scope_keeps_parent_session_open
+FAILED tests/unit/test_issue187_http_session_scope.py::TestNestedFlowSessionScope::test_open_returns_ownership_token
+4 failed, 1 passed in 0.86s
+```
+
+## 绿（修复后）：repro + 新用例
+
+```
+REPRO
+{
+  "plaita_file": "/tmp/w35/plaita/__init__.py",
+  "nested": {
+    "created": true,
+    "contextvar_kept": true,
+    "outer_closed_by_child": false
+  },
+  "concurrent": {
+    "A": "short-branch-done",
+    "B": {
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    }
+  },
+  "root": {
+    "contextvar_after_root": true
+  }
+}
+TESTS
+.....                                                                    [100%]
+5 passed in 1.92s
+```

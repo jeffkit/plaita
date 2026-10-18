@@ -12,6 +12,7 @@ import os
 import uuid
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from plaita.core import types
@@ -178,6 +179,54 @@ class _SystemStateAccessors:
         self.set_state(f"{self.express_prefix}FLOW_ID", value)
 
 
+class BranchCancelEvent(threading.Event):
+    """节点级协作取消信号：**分支独立置位，父级置位单向可见**（plaita#206）。
+
+    历史实现让子上下文直接复用父的 ``threading.Event``（``parent.cancel_event``
+    同一实例），于是 `Parallel` 的每个分支共享一个节点级信号：A 分支的 sync
+    节点超时置位后，B 分支正在跑的 ``code`` 子进程等待循环
+    （``code._popen_wait_cancellable``）看到置位即 killpg 整棵进程树——**兄弟
+    分支被误杀**。
+
+    本类给每个子上下文一个**自己的** ``threading.Event``，并把父级 Event 作为
+    「上游」只读查询：
+
+    - ``set()`` / ``clear()`` 只作用于本分支（A 的超时不会传播给 B）；
+    - ``is_set()`` = 本分支置位 **或** 父级置位——父执行的 Parallel 节点超时、
+      ``cancel()`` 仍能向下传播（既有语义不丢）；
+    - ``wait()`` 轮询两级（父级置位不会 notify 本 Event，故不能用裸
+      ``super().wait()``）。
+
+    执行级取消意图 ``cancel_requested`` 仍是父子共享的同一实例（粘滞、节点入口
+    只读不 clear），不受本类影响。
+    """
+
+    __slots__ = ("_parent_cancel_event",)
+
+    def __init__(self, parent: Optional[threading.Event] = None) -> None:
+        super().__init__()
+        self._parent_cancel_event = parent
+
+    def is_set(self) -> bool:
+        if super().is_set():
+            return True
+        parent = self._parent_cancel_event
+        return parent is not None and parent.is_set()
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self.is_set():
+                return True
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                super().wait(min(remaining, 0.05))
+            else:
+                super().wait(0.05)
+
+
 class ExecutionContext(_SystemStateAccessors):
     """Runtime state facade: CheckpointState + parent/event_bus/cancel/evaluator.
 
@@ -212,12 +261,18 @@ class ExecutionContext(_SystemStateAccessors):
         self._inherited_expose_env = (
             list(expose_env) if (parent is not None and expose_env) else []
         )
-        # 进程内共享 parent Event；跨进程由 __getstate__/__setstate__ 重建。
-        self.cancel_event = parent.cancel_event if parent is not None else threading.Event()
+        # 节点级取消信号（plaita#206）：子上下文持有**自己**的 Event，父级
+        # Event 单向只读——分支超时不再误杀兄弟分支，父级取消仍向下传播。
+        # 跨进程由 __getstate__/__setstate__ 重建（进程模式本就不跨进程传播）。
+        self.cancel_event = (
+            BranchCancelEvent(parent.cancel_event) if parent is not None
+            else threading.Event()
+        )
         # 执行级取消意图（2026-10 波次③）：与 cancel_event 职责拆分——
         # cancel_event 是"当前节点"级信号（sync 超时置位、下节点入口 clear），
         # cancel_requested 是粘滞的"整个执行"级取消意图（cancel() 置位、
-        # 节点入口只读不 clear）。父子共享规则与 cancel_event 同型。
+        # 节点入口只读不 clear）。父子共享规则与 cancel_event **不同**：
+        # 取消意图必须沿整条执行链共享（plaita#206 边界：父级取消走这里）。
         self.cancel_requested = (
             parent.cancel_requested if parent is not None else threading.Event()
         )
@@ -307,7 +362,7 @@ class ExecutionContext(_SystemStateAccessors):
             env=_safe_environment(self.expose_env),
         )
         self.cancel_event = (
-            self.parent.cancel_event if self.parent is not None
+            BranchCancelEvent(self.parent.cancel_event) if self.parent is not None
             else threading.Event()
         )
         self.cancel_requested = (

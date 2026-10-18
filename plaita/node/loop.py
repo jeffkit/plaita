@@ -255,6 +255,7 @@ class Loop(BaseCollectionNode):
     """
 
     node_type: ClassVar[str] = "loop"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "重复"
 
     condition: Optional[Union[Condition, ConditionGroup]] = None
@@ -318,6 +319,7 @@ class Map(BaseCollectionNode):
     """
 
     node_type: ClassVar[str] = "map"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "映射"
 
     concurrent: bool = False
@@ -407,6 +409,7 @@ class Filter(BaseCollectionNode):
     """
 
     node_type: ClassVar[str] = "filter"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "过滤"
 
     def execute(self, execution):
@@ -439,6 +442,7 @@ class Find(BaseCollectionNode):
     """
 
     node_type: ClassVar[str] = "find"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "查找"
 
     def execute(self, execution):
@@ -469,6 +473,7 @@ class Reduce(BaseCollectionNode):
     """
 
     node_type: ClassVar[str] = "reduce"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "归纳"
     initial: Annotated[
         Expression,
@@ -549,6 +554,7 @@ class While(InlineFlow):
     """
 
     node_type: ClassVar[str] = "while"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "条件循环"
 
     condition: Optional[Union[Condition, ConditionGroup]] = None

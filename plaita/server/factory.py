@@ -1427,7 +1427,14 @@ def _mask_url(value: object, *, literals: tuple = ()) -> str:
     # **刻意不是「输入长度上限」**：长度不是代价的来源——70 000 字符、3 个冒号的
     # URL（``test_masker_is_linear_on_long_input``）乘积仅 2×10⁵，必须照常一趟掩完；
     # 而 80 KB 的 ``"x://"*20000`` 乘积 1.6×10⁹、实测 >30 s 不返回。
-    if len(value) * value.count(":") > _MAX_SPAN_SCAN_WORK:
+    # plaita#185：**闸门必须数全部 ``_SECRET_SPLITTERS``，不是只数 ``":"``**。
+    # ``_delimiter_pieces`` 对**每一个**分隔符的**每一个**出现位置都要切两片
+    # ⇒ 代价是 ``len(text) * Σ count(sep)``，其中 sep 遍历全部 13 个分隔符。
+    # 只数 ``":"`` 时，``"x@"*32768`` 这类**零冒号**的输入乘积为 0 ⇒ 闸门形同虚设
+    # ⇒ 直接落进 Θ(n²)（实测 n 翻倍耗时 ×3.6~4.3）。计入全部后此类输入
+    # O(1) fail-closed 退化为 :data:`_REDACTED`，与 #165 的既定语义一致（绝不回原文）。
+    _delim_work = sum(value.count(sep) for sep in _SECRET_SPLITTERS)
+    if len(value) * _delim_work > _MAX_SPAN_SCAN_WORK:
         return _REDACTED
 
     #: #165 累计预算：整次清洗（含**每一条**跨度与其闭包）共享

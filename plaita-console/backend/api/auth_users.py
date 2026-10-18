@@ -10,6 +10,9 @@
 - POST /api/users/{u}/password  重置密码（admin）
 - DELETE /api/users/{u}         删除用户（admin）
 """
+
+import hashlib
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,14 +20,38 @@ from pydantic import BaseModel, Field
 
 try:
     from ..auth import require_auth
-    from ..services import tenants_svc, users_svc
+    from ..services import login_guard, tenants_svc, users_svc
     from ..services.flow_store import get_flow_store
 except ImportError:
     from auth import require_auth  # type: ignore
-    from services import tenants_svc, users_svc  # type: ignore
+    from services import login_guard, tenants_svc, users_svc  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
 
+# plaita#151：异常/外部文本入日志前统一清洗（共享实现，不在此另写一份）
+from plaita.core.url_redaction import _scrub_url_text
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+#: 登录失败日志里只出现用户名指纹，不回显明文账号（#208 建议 3）
+_USER_FP_LEN = 12
+
+
+def _client_ip(request: Request) -> str:
+    """登录限速维度之一：ASGI 客户端地址。
+
+    刻意不读 ``X-Forwarded-For``（可伪造，读它等于把限速交给攻击者）；
+    反向代理部署下需要真实 IP 时应在网关层收敛后再另议（issue 边界）。
+    """
+    client = getattr(request, "client", None)
+    return getattr(client, "host", "") or "unknown"
+
+
+def _user_fingerprint(username: str) -> str:
+    """用户名指纹：日志可关联同一账号，但不落明文（口令更不落）。"""
+    digest = hashlib.sha256((username or "").encode("utf-8")).hexdigest()
+    return digest[:_USER_FP_LEN]
 
 
 class LoginRequest(BaseModel):
@@ -73,9 +100,30 @@ def setup(req: CreateUserRequest):
 
 @router.post("/auth/login")
 def login(req: LoginRequest, request: Request):
+    """用户名密码换会话 token。
+
+    #208：按 (客户端 IP, username) 限速——锁定期内即使口令正确也返回 429，
+    否则「锁定期内正确口令也被拒」这一验收条件不成立（爆破仍可撞库）。
+    """
+    client_ip = _client_ip(request)
+    retry_after = login_guard.retry_after(client_ip, req.username)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail="登录尝试过于频繁，请稍后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
     info = users_svc.login(get_flow_store(), req.username, req.password)
     if info is None:
+        locked_for = login_guard.record_failure(client_ip, req.username)
+        logger.warning(
+            "登录失败 ip=%s user=%s%s",
+            _scrub_url_text(client_ip),
+            _user_fingerprint(req.username),
+            f"（失败次数超限，已锁定 {locked_for}s）" if locked_for else "",
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    login_guard.reset(client_ip, req.username)
     return info
 
 

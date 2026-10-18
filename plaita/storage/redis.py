@@ -129,6 +129,20 @@ class ExecutionStateLoadError(RuntimeError):
     """
 
 
+class FlowDefinitionLoadError(RuntimeError):
+    """流程定义**读取失败**（Redis 瞬断/超时或定义 JSON 损坏）。
+
+    #189：与「定义不存在 → get_flow 返回 None」严格区分。worker 的
+    ``get_flow_definition`` 只把 None 翻成 ``ValueError("找不到流程定义")``
+    （消费循环把 ValueError 当畸形消息 poison ack）；本类型原样上抛，落进
+    消费循环的兜底分支——不 ack、等 reclaim/重投，超过 max_deliveries 才
+    进 DLQ。否则 Redis 抖动一次 = start/resume 载体被永久丢弃。
+
+    与 ``ExecutionStateLoadError`` 同口径：刻意**不继承 ValueError**
+    （继承它会让瞬态读故障仍被 poison ack）。
+    """
+
+
 class RedisExecutionStorage(ExecutionStorage):
     """
     基于Redis的状态存储实现
@@ -513,7 +527,9 @@ class RedisFlowStorage(FlowStorage):
             version: 流程版本号，如果为None则返回最新版本
             
         Returns:
-            Dict or None: 流程定义数据，如果不存在则返回None
+            Dict or None: 流程定义数据，如果**不存在**则返回None；
+            读取失败（Redis 瞬断/超时）或定义 JSON 损坏 → 抛
+            ``FlowDefinitionLoadError``（#189，与 ExecutionStateLoadError 同口径）。
         """
         try:
             # 检查流程ID是否存在
@@ -558,14 +574,22 @@ class RedisFlowStorage(FlowStorage):
             # 获取流程定义
             key = self.get_namespace_key('flow', flow_id, target_version)
             data = self.client.get(key)
-            
-            if not data:
-                return None
-                
+        except Exception as e:
+            # #189：瞬态读故障不得吞成 None——worker 会把 None 翻成
+            # ValueError("找不到流程定义") 并被消费循环 poison ack，
+            # start/resume 载体就此永久消失。原样具名上抛，走重投递。
+            raise FlowDefinitionLoadError(
+                f"读取流程定义失败（可能是 Redis 瞬断）: {flow_id}: {_scrub_url_text(e)}"
+            ) from e
+
+        if not data:
+            return None
+        try:
             return json.loads(data)
         except Exception as e:
-            logger.error("Failed to get flow definition: %s", _scrub_url_text(e))
-            return None
+            raise FlowDefinitionLoadError(
+                f"流程定义反序列化失败（数据损坏）: {flow_id}: {_scrub_url_text(e)}"
+            ) from e
     
     def list_flows(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """

@@ -67,8 +67,31 @@ class StreamTask:
     schema_version: int = TASK_SCHEMA_VERSION
 
 
+# #186：畸形消息（payload 非 JSON / JSON 非对象）在**解析点**处置，不再抛给
+# 消费循环。DLQ 信封里的原始 payload 截断到该字符预算——坏消息可能是任意大块
+# 垃圾，不能原样放大进 DLQ（DLQ 条数上限只管条数，不管单条体积）。
+INVALID_PAYLOAD_MAX_CHARS = 500
+
+
 def _decode(value: Union[str, bytes]) -> str:
     return value.decode() if isinstance(value, bytes) else value
+
+
+class InvalidTaskPayload(ValueError):
+    """队列消息 payload 不可解析（非 JSON / 非对象）。
+
+    解析点（``_task_from_fields``）抛出，由 ``read()`` 与 ``_reclaim_one()``
+    就地转成 DLQ 信封并 ack（#186）。**不得穿出队列层**：``read()`` 位于
+    FlowWorker 消费循环的内层 try 之外，漏出去就是一条坏消息打死 worker。
+    保留 ``ValueError`` 基类只为兼容既有调用方的异常预期；队列内部一律按
+    本类型精确处置。
+    """
+
+    def __init__(self, message_id: str, fields: Dict[Any, Any], reason: str):
+        super().__init__(reason)
+        self.message_id = message_id
+        self.fields = fields
+        self.reason = reason
 
 
 def _schema_version_from_fields(fields: Dict[Any, Any]) -> int:
@@ -144,6 +167,19 @@ class RedisStreamTaskQueue:
         self._reclaim_cursor: Optional[str] = None
         # #196：扫描窗口大小（默认 8，仍有界；轮转保证不会饿死窗口外孤儿）。
         self.reclaim_window = max(1, int(reclaim_window))
+        # ``max_deliveries`` 是**三个不同机制共同的上界**（2026-10-18 复核时发现，
+        # 原先没有任何一处声明这一点）——调这个参数会同时改三件事：
+        #   1. **正常重投**：消费了但未 ack 的消息被 reclaim 回来后重新投递；
+        #   2. **#186 DLQ 重复**：``_dead_letter_invalid`` 的顺序是
+        #      ``xadd`` → ``xtrim`` → ``ack``，三者非原子 ⇒ ``ack`` 失败或进程死在该区间时，
+        #      消息仍留 PEL ⇒ 下次再 ``xadd`` 一次 ⇒ **同一 ``source_id`` 在 DLQ 出现多次**。
+        #      重复次数有界，上界就是本参数（每次重放 ``delivery_count`` +1）。
+        #      ⇒ 调大它会让**毒消息的 DLQ 副本更多**，可能挤掉 ``dlq_max_len`` 里的真实死信。
+        #   3. **#189 定义重试**：``FlowDefinitionLoadError`` 不是 ``ValueError`` ⇒
+        #      不被当畸形消息毒化（这是 #189 的修复点），但 worker 侧不特判它 ⇒
+        #      异常上抛 ⇒ 消息未 ack、留 PEL ⇒ 由本参数兜住重试次数。
+        #      ⇒ 定义一直读不到/读坏时，一条消息会以 ``claim_min_idle_ms`` 为间隔重试到本上界。
+        # **因此它是一个跨机制参数，不是"只是重投次数"**：改它之前请确认上面三条都仍可接受。
         self.max_deliveries = max(1, int(max_deliveries))
         self.dlq_key = dlq_key or dlq_stream_key(stream_key)
         # C4-1：DLQ 裁剪上限（构造参数优先，其次 env，最后默认值）
@@ -176,6 +212,7 @@ class RedisStreamTaskQueue:
             "acked": 0,
             "reclaimed": 0,
             "dead_lettered": 0,
+            "invalid_payload": 0,
             "lease_conflicts": 0,
             "poison_acked": 0,
             "failed": 0,
@@ -259,7 +296,16 @@ class RedisStreamTaskQueue:
             # 空轮询是常态，必须返回 None 让上层继续循环——
             # 否则异常炸穿 run() 主循环，worker 启动数秒后即退出。
             return None
-        task = self._parse_read_response(resp, delivery_count=1)
+        try:
+            task = self._parse_read_response(resp, delivery_count=1)
+        except InvalidTaskPayload as exc:
+            # #186：解析点在 read() 的兜底分支之外——一条坏消息（生产者 bug /
+            # 手工 XADD / 升级期旧格式）必须在这里就进 DLQ+ack，绝不能上抛把
+            # worker 打死（消息不 ack 还会留在 PEL 里制造崩溃/重启循环）。
+            self._dead_letter_invalid(
+                exc.message_id, exc.fields, delivery_count=1, reason=exc.reason
+            )
+            return None
         if task is not None and self.max_schema_version is not None and task.schema_version > self.max_schema_version:
             # 语义上无法理解的更新消息：拒收并留证据（DLQ 含 message_id/payload），
             # 绝不按旧语义硬跑——升级期「先升消费者再升生产者」的兜底防线。
@@ -454,6 +500,79 @@ class RedisStreamTaskQueue:
                 logger.warning("dead_letter 告警钩子失败: %s", _scrub_url_text(exc))
         return _decode(dlq_id)
 
+    def _dead_letter_invalid(
+        self,
+        message_id: str,
+        fields: Dict[Any, Any],
+        *,
+        delivery_count: int,
+        reason: str,
+    ) -> str:
+        """#186：解析失败的畸形消息 → DLQ 信封 + ack（绝不抛回消费循环）。
+
+        信封沿用 ``dead_letter`` 的既有字段；``payload`` 放**原始 payload 串**
+        （截断到 ``INVALID_PAYLOAD_MAX_CHARS``），另带 ``raw_fields``（原始
+        信封）与 ``truncated`` 标记，排障时能区分「生产者 bug」与「升级期
+        旧格式」。
+        """
+        def _text(value: Any) -> str:
+            return value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+
+        raw_payload = ""
+        for key in (PAYLOAD_FIELD, b"payload"):
+            if key in fields:
+                raw_payload = _text(fields[key])
+                break
+        truncated = len(raw_payload) > INVALID_PAYLOAD_MAX_CHARS
+        raw_fields = {
+            _text(key): _text(value)[:INVALID_PAYLOAD_MAX_CHARS]
+            for key, value in fields.items()
+        }
+        envelope = {
+            "reason": reason,
+            "source_stream": self.stream_key,
+            "source_id": message_id,
+            "delivery_count": delivery_count,
+            "dead_lettered_at": time.time(),
+            "payload": raw_payload[:INVALID_PAYLOAD_MAX_CHARS],
+            "raw_fields": raw_fields,
+            "truncated": truncated,
+        }
+        dlq_id = self.redis.xadd(
+            self.dlq_key,
+            {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
+        )
+        try:
+            self.redis.xtrim(self.dlq_key, maxlen=self.dlq_max_len, approximate=False)
+        except Exception as exc:
+            logger.debug("xtrim(%s, maxlen=%s) failed: %s", self.dlq_key, self.dlq_max_len, _scrub_url_text(exc))
+        self.ack(message_id)
+        self._metrics["dead_lettered"] += 1
+        self._metrics["invalid_payload"] = self._metrics.get("invalid_payload", 0) + 1
+        logger.error(
+            "Dead-lettered invalid task %s -> %s id=%s (%s)",
+            message_id,
+            self.dlq_key,
+            _decode(dlq_id),
+            reason,
+        )
+        # #26：与 dead_letter 同样外发死信事件（best-effort，告警旁路故障不回滚）。
+        if self.on_dead_letter is not None:
+            try:
+                self.on_dead_letter({
+                    "event": "dead_letter",
+                    "queue": self.stream_key,
+                    "dlq_key": self.dlq_key,
+                    "dlq_id": _decode(dlq_id),
+                    "message_id": message_id,
+                    "delivery_count": delivery_count,
+                    "reason": reason,
+                    "ts": time.time(),
+                })
+            except Exception as exc:  # noqa: BLE001 - 告警旁路
+                logger.warning("dead_letter 告警钩子失败: %s", _scrub_url_text(exc))
+        return _decode(dlq_id)
+
     def note_lease_conflict(self) -> None:
         self._metrics["lease_conflicts"] += 1
 
@@ -513,9 +632,13 @@ class RedisStreamTaskQueue:
             body = json.loads(_payload_from_fields(fields))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             logger.error("Invalid task payload id=%s: %s", message_id, _scrub_url_text(exc))
-            raise ValueError(f"Invalid task payload: {exc}") from exc
+            raise InvalidTaskPayload(
+                message_id, fields, f"invalid_payload: {_scrub_url_text(exc)}"
+            ) from exc
         if not isinstance(body, dict):
-            raise ValueError("task payload must be a JSON object")
+            raise InvalidTaskPayload(
+                message_id, fields, "invalid_payload: task payload must be a JSON object"
+            )
         return StreamTask(
             message_id=message_id,
             body=body,
@@ -678,9 +801,23 @@ class RedisStreamTaskQueue:
             # 契约一致。改成 +1 会让死信提前一轮（5 次变 4 次）。该值仅作
             # 阈值判据与可观测透传（FlowWorker 节点重试预算另用 Redis 计数
             # 键，不依赖它），报告展示时理解为 attempt-1 即可。
-            task = self._task_from_fields(
-                claimed_id, fields, delivery_count=max(deliveries, 1)
-            )
+            try:
+                task = self._task_from_fields(
+                    claimed_id, fields, delivery_count=max(deliveries, 1)
+                )
+            except InvalidTaskPayload as exc:
+                # #186：reclaim 路径同款处置——XCLAIM 之后才发现坏消息，
+                # 也必须 DLQ+ack，不能把解析异常抛回消费循环。游标推到本条
+                # （#196）：坏消息已被 ack 出 PEL，但推进游标仍必要——否则
+                # 下一轮从同一 min 重扫，窗口被本条占位、真孤儿后移。
+                self._dead_letter_invalid(
+                    exc.message_id,
+                    exc.fields,
+                    delivery_count=max(deliveries, 1),
+                    reason=exc.reason,
+                )
+                self._reclaim_cursor = claimed_id
+                continue
             if task.delivery_count >= self.max_deliveries:
                 if self._guard_allows_dead_letter(task):
                     self.dead_letter(

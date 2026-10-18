@@ -392,6 +392,11 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
             event_type=event_type,
             data=event_data,
             correlation_id=event_data.get("execution_id"),
+            # plaita#191：resume 事件的租户来自**服务端任务配置**（execution_id
+            # 同源），写成受信顶层字段——EventFilter 只认它，不再读
+            # ``data["tenant_id"]``。data 里的 tenant_id 原样保留（对外 JSON
+            # 形状不变），但消费端不再拿它决定命名空间。
+            tenant_id=event_data.get("tenant_id") or "default",
         )
         try:
             if self._redis_client is None:

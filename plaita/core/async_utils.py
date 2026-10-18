@@ -75,26 +75,34 @@ async def _flow_session_scoped(coro):
     child tasks inherit the session via their context copy) and closed on
     the same, still-running loop when the flow ends.  See
     :mod:`plaita.core.http_session` for the lifecycle rationale.
+
+    Only the scope that **created** the session closes it (plaita#187): a
+    nested flow/branch finds the outer session already on the contextvar and
+    must leave it open for its siblings.  Without this ownership check the
+    first Parallel branch to finish closed the shared session under the feet
+    of every other branch's in-flight request ("Connector is closed").
     """
     from plaita.core.http_session import close_flow_session, open_flow_session
 
-    await open_flow_session()
+    created = await open_flow_session()
     try:
         return await coro
     finally:
-        await close_flow_session()
+        if created:
+            await close_flow_session()
 
 
 async def _flow_session_scoped_agen(agen):
     """Async-generator twin of :func:`_flow_session_scoped` for lazy mode."""
     from plaita.core.http_session import close_flow_session, open_flow_session
 
-    await open_flow_session()
+    created = await open_flow_session()
     try:
         async for item in agen:
             yield item
     finally:
-        await close_flow_session()
+        if created:
+            await close_flow_session()
 
 
 def drive_strategy(target, *, lazy, sync, finish_coro, on_lazy_finally):

@@ -1,0 +1,76 @@
+# plaita#198 反证：基线 origin/main 已修复（本批不重复实现）
+
+日期：2026-10-18 · 批次：W35 · 工作区：`/tmp/w35`（worktree，基线 `origin/main`）
+
+## 结论
+
+**#198 在基线 `d1ca49c4` 上已经修好，复现不出。** 本批次对其**不做任何代码改动**
+（`w35.patch` 不含 schedule 相关文件），按纪律交反证而非硬修。
+
+关键证据：`origin/main` 的 HEAD 提交本身就是这个单的修复：
+
+```
+d1ca49c4 fix(schedule): #198 fire 回写只合并触发字段，console PUT 加乐观锁 409
+```
+
+该提交同时入库了本单的证明/负控产物（按 #183 纪律）：
+`docs/proofs/198-schedule-cas.md`、`docs/proofs/data/198-repro.py`、
+`docs/proofs/data/198-negative-control.txt`、`docs/proofs/data/198-before-after.json`。
+
+## 复跑（HEAD `d1ca49c4`，`PYTHONPATH=/tmp/w35`，venv python 3.11.16）
+
+### 1) issue 正文的原始复现片段（逐字）
+
+```
+after_put: False
+after_fire: False
+```
+
+正文期望「修复前 False → True」，实测**保持 False**（旧快照不再整份回写）。
+
+### 2) 已入库探针 `docs/proofs/data/198-repro.py`
+
+```json
+{
+  "plaita_file": "/tmp/w35/plaita/__init__.py",
+  "python": "3.11.16",
+  "interleaved": {
+    "after_put_enabled": false,
+    "after_fire_enabled": false,
+    "last_fired_at": true,
+    "last_enqueue_ok": "1",
+    "cron": "* * * * *"
+  },
+  "cas": {
+    "available": true,
+    "conflict": true,
+    "latest_updated_at": "t2",
+    "enabled_after": true
+  }
+}
+```
+
+- `interleaved.after_fire_enabled=false`：触发回写只合并
+  `last_fired_at` / `last_enqueue_ok` / `next_run_at`，没有把 `enabled` 翻回；
+- `cas.available=true` + `cas.conflict=true`：`cas_update_schedule` 的
+  `expected_updated_at` 乐观锁已存在，陈旧基准得到 `ScheduleConflictError`
+  （console API 转结构化 409）。
+
+### 3) 既有回归
+
+```
+$ PYTHONPATH=/tmp/w35 python -m pytest -q tests/unit/test_issue198_schedule_cas.py
+......                                                                   [100%]
+6 passed in 0.62s
+```
+
+## 反证结论对照 issue 验收条件
+
+| #198 验收条件 | 基线实测 |
+|---|---|
+| 读旧快照 → PUT 停用 → fire 回写 → `enabled == false` | **保持 false** ✅ |
+| 并发 PUT 后写者拿 409 / 不静默覆盖 | `ScheduleConflictError`（→ 结构化 409）✅ |
+| 负控：恢复 `_merge` 整份回写 ⇒ 变红 | 已入库 `docs/proofs/data/198-negative-control.txt` ✅ |
+| #118 dedup_key / cron 语义不变 | `test_issue198_schedule_cas.py` 6 passed ✅ |
+
+因此本单在 W35 报告中记为 **「不成立（基线已修）」**，不产生补丁。

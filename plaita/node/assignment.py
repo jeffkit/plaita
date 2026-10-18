@@ -14,6 +14,7 @@ class Assignment(Node):
     """
 
     node_type: ClassVar[str] = "assignment"
+    dry_run_safe: ClassVar[bool] = True
     node_name: ClassVar[str] = "赋值"
 
     output_type: Optional[Property] = None

@@ -27,6 +27,7 @@ class EventNode(Node):
     """
     
     node_type: ClassVar[str] = "event"
+    dry_run_safe: ClassVar[bool] = False
     node_name: ClassVar[str] = "事件节点"
     async_node: ClassVar[bool] = True
     is_suspending: ClassVar[bool] = True

@@ -8,9 +8,9 @@ signature），``HttpCallbackService.handle_callback_request()`` 却没有任何
 
 本文件钉住的契约：
 
-1. 校验发生在**原子认领之前**——校验失败时注册记录必须仍然存在
-   （``_CLAIM_CALLBACK_LUA`` 是 GET+DEL 一体，先认领会把一次未授权请求
-   变成「挂起执行永久失醒」的可用性事故）；
+1. 校验发生在**认领之前**——校验失败时注册记录必须仍然存在
+   （``_CLAIM_CALLBACK_LUA`` 在 #188 后是「占位而不删除」，但先占位仍会把
+   合法回调挡在处理中窗口外；未授权请求绝不能消耗掉认领机会）；
 2. 凭据比对走 ``hmac.compare_digest``（常数时间）；
 3. 三种 ``auth_type`` 的正确/错误凭据各一条；signature 另含过期时间戳；
 4. ``auth_config`` 缺失/为空 → 视为未声明认证（兼容历史注册记录）；

@@ -37,9 +37,15 @@ nodes = ["plaita-nodes>=0.1.0"]
 plaita-console = "plaita_console.__main__:main"
 
 # backend/ 以包名 plaita_console 发布；webDist（前端构建产物）由
-# scripts/build_package.sh 在打包前填充进 backend/，随 wheel 一起分发
+# scripts/build_package.sh 在打包前填充进 backend/，随 wheel 一起分发。
+# #204：force-include 不吃 exclude（会连 tests/、build/lib、*.db、
+# backend/pyproject.toml 一起装进 site-packages），改由 custom hook 暂存出
+# 干净包目录 scripts/hatch_build.py 后再 force-include。
 [tool.hatch.build.targets.wheel]
-force-include = { "backend" = "plaita_console" }
+force-include = { "build/wheel-package/plaita_console" = "plaita_console" }
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "scripts/hatch_build.py"
 
 [tool.hatch.build]
 exclude = ["**/__pycache__", "**/*.pyc"]

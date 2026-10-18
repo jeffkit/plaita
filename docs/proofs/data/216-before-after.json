@@ -1,0 +1,336 @@
+{
+  "issue": 216,
+  "title": "expression_parser 9 条诊断/缓存幸存变异的测试债",
+  "base_head": "ef90eb3a4e70371f3bea2c585600355773012789",
+  "fix_commit_subject": "chore(test): #216 补 9 条诊断/缓存变异用例",
+  "before": {
+    "issue": 216,
+    "plaita_file": "/private/tmp/w36-before/plaita/core/expression_parser.py",
+    "python": "3.11.16",
+    "base_run": {
+      "exit": 0,
+      "summary": [
+        "38 passed in 0.42s"
+      ]
+    },
+    "replay": {
+      "tree": "/private/tmp/w36-before",
+      "tests": [
+        "tests/unit/test_expression_cache.py",
+        "tests/unit/test_reviewfix_a_template_warn.py",
+        "tests/unit/test_expression_parser_root_scan.py"
+      ],
+      "mutations": [
+        {
+          "id": "216-1",
+          "target": "_warn_suspicious_literal 尾句",
+          "mutation": "rewrite the string. -> rewrite it.",
+          "test": "test_suspicious_literal_warning_text_is_pinned",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.40s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-2",
+          "target": "_warn_unmatched_template 尾句",
+          "mutation": "fix the inner expression -> repair the inner expression",
+          "test": "test_unmatched_template_warning_text_is_pinned",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.45s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-3",
+          "target": "_annotate_parse_error 提示短语",
+          "mutation": "常见原因： -> 可能原因：",
+          "test": "test_parse_error_hint_uses_common_cause_phrase",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.42s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-4",
+          "target": "_warned_literals 去重重置阈值",
+          "mutation": "> 512 -> > 1024",
+          "test": "test_suspicious_literal_dedupe_resets_above_512",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.41s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-5",
+          "target": "_warned_unmatched_templates 去重重置阈值",
+          "mutation": "> 512 -> > 1024",
+          "test": "test_unmatched_template_dedupe_resets_above_512",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.40s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-6",
+          "target": "LRU 命中顺序",
+          "mutation": "命中时不 cache.move_to_end(value)",
+          "test": "test_lru_hit_moves_entry_to_newest",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.41s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-7",
+          "target": "LRU 容量边界",
+          "mutation": "while len(cache) > maxsize -> >= maxsize",
+          "test": "test_lru_capacity_boundary_is_maxsize_not_less",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.41s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-8",
+          "target": "_render_path 字段段",
+          "mutation": "raw -> target",
+          "test": "test_render_path_uses_raw_field_name_for_special_roots",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.41s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        },
+        {
+          "id": "216-9",
+          "target": "LRU 逐出端",
+          "mutation": "popitem(last=False) -> popitem()",
+          "test": "test_lru_evicts_oldest_not_newest",
+          "pytest_target": [
+            "tests/unit/test_expression_cache.py",
+            "tests/unit/test_reviewfix_a_template_warn.py",
+            "tests/unit/test_expression_parser_root_scan.py"
+          ],
+          "pytest_exit": 0,
+          "summary": [
+            "38 passed in 0.45s"
+          ],
+          "verdict": "survived",
+          "red_tail": null
+        }
+      ]
+    }
+  },
+  "after": {
+    "issue": 216,
+    "plaita_file": "/private/tmp/w36/plaita/core/expression_parser.py",
+    "python": "3.11.16",
+    "base_run": {
+      "exit": 0,
+      "summary": [
+        "9 passed in 0.14s"
+      ]
+    },
+    "replay": {
+      "tree": "/private/tmp/w36",
+      "tests": [
+        "tests/unit/test_issue216_expression_parser_debt.py"
+      ],
+      "mutations": [
+        {
+          "id": "216-1",
+          "target": "_warn_suspicious_literal 尾句",
+          "mutation": "rewrite the string. -> rewrite it.",
+          "test": "test_suspicious_literal_warning_text_is_pinned",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_warning_text_is_pinned"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.12s"
+          ],
+          "verdict": "killed",
+          "red_tail": "        assert parser.evaluate(value, {}) == value\n>       assert expected in messages\nE       assert \"expression 'hello {{ name }}' looks like templating/Python code from another language and was returned AS-IS (no eval...ppened). plaita expressions use $INPUT.x / $NODE.id / $F.fn(...) and {% ... %} for interpolation — rewrite the string.\" in [\"expression 'hello {{ name }}' looks like templating/Python code from another language and was returned AS-IS (no evaluation happened). plaita expressions use $INPUT.x / $NODE.id / $F.fn(...) and {% ... %} for interpolation — rewrite it.\"]\ntests/unit/test_issue216_expression_parser_debt.py:72: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_warning_text_is_pinned\n1 failed in 0.12s"
+        },
+        {
+          "id": "216-2",
+          "target": "_warn_unmatched_template 尾句",
+          "mutation": "fix the inner expression -> repair the inner expression",
+          "test": "test_unmatched_template_warning_text_is_pinned",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_warning_text_is_pinned"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.11s"
+          ],
+          "verdict": "killed",
+          "red_tail": "        assert parser.evaluate(value, {}) == value\n>       assert expected in messages\nE       assert \"expression 'value = {% 1 + 2 %}!' contains '{%' but no valid {% ... %} expression matched (inner expression is malformed or unclosed); it was returned AS-IS without evaluation — fix the inner expression (e.g. {% $INPUT.x %}).\" in [\"expression 'value = {% 1 + 2 %}!' contains '{%' but no valid {% ... %} expression matched (inner expression is malformed or unclosed); it was returned AS-IS without evaluation — repair the inner expression (e.g. {% $INPUT.x %}).\"]\ntests/unit/test_issue216_expression_parser_debt.py:86: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_warning_text_is_pinned\n1 failed in 0.11s"
+        },
+        {
+          "id": "216-3",
+          "target": "_annotate_parse_error 提示短语",
+          "mutation": "常见原因： -> 可能原因：",
+          "test": "test_parse_error_hint_uses_common_cause_phrase",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_parse_error_hint_uses_common_cause_phrase"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "    def test_parse_error_hint_uses_common_cause_phrase(parser):",
+            "FAILED tests/unit/test_issue216_expression_parser_debt.py::test_parse_error_hint_uses_common_cause_phrase",
+            "1 failed in 0.11s"
+          ],
+          "verdict": "killed",
+          "red_tail": "        assert \"无法解析表达式：'$INPUT.'\" in message\n>       assert \"常见原因：字符串常量里的引号/反斜杠未转义\" in message\nE       assert '常见原因：字符串常量里的引号/反斜杠未转义' in '无法解析表达式：\\'$INPUT.\\'\\n  $INPUT.\\n        ^（第 7 列附近：Expected end of text）\\n可能原因：字符串常量里的引号/反斜杠未转义（写作 \\\\\" 或 \\\\\\\\）；使用了不支持的写法（列表/字典字面量、{{...}}、f-string、裸函数调用）；或 {% ... %} 模板未闭合。, found \\'.\\'  (at char 6), (line:1, col:7)'\ntests/unit/test_issue216_expression_parser_debt.py:95: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_parse_error_hint_uses_common_cause_phrase\n1 failed in 0.11s"
+        },
+        {
+          "id": "216-4",
+          "target": "_warned_literals 去重重置阈值",
+          "mutation": "> 512 -> > 1024",
+          "test": "test_suspicious_literal_dedupe_resets_above_512",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_dedupe_resets_above_512"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.12s"
+          ],
+          "verdict": "killed",
+          "red_tail": ">       assert len(ep._warned_literals) <= 513\nE       AssertionError: assert 600 <= 513\nE        +  where 600 = len({'{{ v0 }}', '{{ v1 }}', '{{ v10 }}', '{{ v100 }}', '{{ v101 }}', '{{ v102 }}', ...})\nE        +    where {'{{ v0 }}', '{{ v1 }}', '{{ v10 }}', '{{ v100 }}', '{{ v101 }}', '{{ v102 }}', ...} = ep._warned_literals\ntests/unit/test_issue216_expression_parser_debt.py:112: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_suspicious_literal_dedupe_resets_above_512\n1 failed in 0.12s"
+        },
+        {
+          "id": "216-5",
+          "target": "_warned_unmatched_templates 去重重置阈值",
+          "mutation": "> 512 -> > 1024",
+          "test": "test_unmatched_template_dedupe_resets_above_512",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_dedupe_resets_above_512"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.11s"
+          ],
+          "verdict": "killed",
+          "red_tail": ">       assert len(ep._warned_unmatched_templates) <= 513\nE       AssertionError: assert 600 <= 513\nE        +  where 600 = len({'a {% 1 + 0 %} b', 'a {% 1 + 1 %} b', 'a {% 1 + 10 %} b', 'a {% 1 + 100 %} b', 'a {% 1 + 101 %} b', 'a {% 1 + 102 %} b', ...})\nE        +    where {'a {% 1 + 0 %} b', 'a {% 1 + 1 %} b', 'a {% 1 + 10 %} b', 'a {% 1 + 100 %} b', 'a {% 1 + 101 %} b', 'a {% 1 + 102 %} b', ...} = ep._warned_unmatched_templates\ntests/unit/test_issue216_expression_parser_debt.py:123: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_unmatched_template_dedupe_resets_above_512\n1 failed in 0.11s"
+        },
+        {
+          "id": "216-6",
+          "target": "LRU 命中顺序",
+          "mutation": "命中时不 cache.move_to_end(value)",
+          "test": "test_lru_hit_moves_entry_to_newest",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_lru_hit_moves_entry_to_newest"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.12s"
+          ],
+          "verdict": "killed",
+          "red_tail": "        assert list(p._compile_cache) == [\"$INPUT.a\", \"$INPUT.b\", \"$INPUT.c\"]\n>       assert list(p._compile_cache) == [\"$INPUT.b\", \"$INPUT.c\", \"$INPUT.a\"]\nE       AssertionError: assert ['$INPUT.a', ...', '$INPUT.c'] == ['$INPUT.b', ...', '$INPUT.a']\nE         \nE         At index 0 diff: '$INPUT.a' != '$INPUT.b'\nE         Use -v to get more diff\ntests/unit/test_issue216_expression_parser_debt.py:163: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_lru_hit_moves_entry_to_newest\n1 failed in 0.12s"
+        },
+        {
+          "id": "216-7",
+          "target": "LRU 容量边界",
+          "mutation": "while len(cache) > maxsize -> >= maxsize",
+          "test": "test_lru_capacity_boundary_is_maxsize_not_less",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_lru_capacity_boundary_is_maxsize_not_less"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.11s"
+          ],
+          "verdict": "killed",
+          "red_tail": ">       assert len(p._compile_cache) == 3\nE       AssertionError: assert 2 == 3\nE        +  where 2 = len(OrderedDict([('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094deac0>), ('$INPUT.c', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094dec00>)]))\nE        +    where OrderedDict([('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094deac0>), ('$INPUT.c', <function ExpressionParser._compile_variable.<locals>.thunk at 0x1094dec00>)]) = <plaita.core.expression_parser.ExpressionParser object at 0x1090c3690>._compile_cache\ntests/unit/test_issue216_expression_parser_debt.py:175: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_lru_capacity_boundary_is_maxsize_not_less\n1 failed in 0.11s"
+        },
+        {
+          "id": "216-8",
+          "target": "_render_path 字段段",
+          "mutation": "raw -> target",
+          "test": "test_render_path_uses_raw_field_name_for_special_roots",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_render_path_uses_raw_field_name_for_special_roots"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.13s"
+          ],
+          "verdict": "killed",
+          "red_tail": ">       assert ep._render_path(\"$INPUT\", walked) == \"$INPUT.NODE.x\"\nE       AssertionError: assert '$INPUT.$NODE.x' == '$INPUT.NODE.x'\nE         \nE         - $INPUT.NODE.x\nE         + $INPUT.$NODE.x\nE         ?        +\ntests/unit/test_issue216_expression_parser_debt.py:213: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_render_path_uses_raw_field_name_for_special_roots\n1 failed in 0.13s"
+        },
+        {
+          "id": "216-9",
+          "target": "LRU 逐出端",
+          "mutation": "popitem(last=False) -> popitem()",
+          "test": "test_lru_evicts_oldest_not_newest",
+          "pytest_target": [
+            "tests/unit/test_issue216_expression_parser_debt.py::test_lru_evicts_oldest_not_newest"
+          ],
+          "pytest_exit": 1,
+          "summary": [
+            "1 failed in 0.14s"
+          ],
+          "verdict": "killed",
+          "red_tail": ">           assert \"$INPUT.a\" not in parser._compile_cache\nE           AssertionError: assert '$INPUT.a' not in OrderedDict([('$INPUT.a', <function ExpressionParser._compile_variable.<locals>.thunk at 0x108fe6ca0>), ('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x109600f40>)])\nE            +  where OrderedDict([('$INPUT.a', <function ExpressionParser._compile_variable.<locals>.thunk at 0x108fe6ca0>), ('$INPUT.b', <function ExpressionParser._compile_variable.<locals>.thunk at 0x109600f40>)]) = <plaita.core.expression_parser.ExpressionParser object at 0x1092319d0>._compile_cache\ntests/unit/test_issue216_expression_parser_debt.py:193: AssertionError\nFAILED tests/unit/test_issue216_expression_parser_debt.py::test_lru_evicts_oldest_not_newest\n1 failed in 0.14s"
+        }
+      ]
+    }
+  }
+}
