@@ -262,13 +262,18 @@ class TestEndToEndCheckpoint:
         assert r2.get("is_suspend", False) is True
 
         # Step 3: 用 event resume 恢复
+        # #221：resume 必须携带挂起期登记的 subscription_id（event_filter 代投的
+        # event/timeout 消息一直带它）；不带 ⇒ 视为陈旧消息被准入守卫拒绝。
         r3 = FlowExecution.run(
             flow,
             mode=ExecutionMode.DISTRIBUTED,
             context=r2["context"],
             event_bus=mock_bus,
             resume_type="event",
-            resume_data={"approved": True},
+            resume_data={
+                "approved": True,
+                "subscription_id": r2["context"]["$NODE"]["wait_event"]["subscription_id"],
+            },
         )
         assert r3["id"] == "wait_event"
         assert r3.get("is_suspend") is not True
@@ -336,5 +341,10 @@ class TestEndToEndCheckpoint:
             context=r2["context"],
             event_bus=mock_bus,
             resume_type="timeout",
+            # #221：timeout 载荷同样必须绑定挂起订阅（生产由
+            # event_filter._on_subscription_timeout 填入）。
+            resume_data={
+                "subscription_id": r2["context"]["$NODE"]["wait_event"]["subscription_id"],
+            },
         )
         assert r3 is not None

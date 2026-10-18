@@ -525,6 +525,8 @@ class TestTimeoutResumeConsumer:
         r3 = FlowExecution.run(
             flow, mode=ExecutionMode.DISTRIBUTED, context=r2["context"], event_bus=mock_bus,
             resume_type="timeout",
+            # #221：timeout 载荷必须绑定挂起订阅（生产由 event_filter 填入）。
+            resume_data={"subscription_id": pending_state["subscription_id"]},
         )
         assert r3["id"] == "wait_event"
         # on_timeout 落状态
@@ -547,6 +549,10 @@ class TestTimeoutResumeConsumer:
         r3 = FlowExecution.run(
             flow, mode=ExecutionMode.DISTRIBUTED, context=r2["context"], event_bus=mock_bus,
             resume_type="timeout",
+            # #221：绑定挂起期登记的订阅（生产 timeout 载荷带 subscription_id）。
+            resume_data={
+                "subscription_id": r2["context"]["$NODE"]["wait_event"]["subscription_id"],
+            },
         )
         assert r3.get("is_suspend") is not True
 

@@ -1033,6 +1033,15 @@ async def run_quick_test(request: QuickTestRequest):
                                 "event_type": event_type,
                                 "payload": published_event.data if published_event else {"message": "Test event triggered!"}
                             }
+                            # #221：event resume 必须绑定挂起期登记的订阅——手工
+                            # 构造的载荷同样要带 subscription_id（生产由
+                            # event_filter 填），否则会被准入守卫当成陈旧消息丢弃。
+                            suspended_state = (
+                                (context or {}).get("$NODE", {}).get(result.get("id"), {})
+                                if isinstance(context, dict) else {}
+                            )
+                            if isinstance(suspended_state, dict) and suspended_state.get("subscription_id"):
+                                event_data["subscription_id"] = suspended_state["subscription_id"]
                             result = FlowExecution.run(
                                 flow, 
                                 params=test_params, 

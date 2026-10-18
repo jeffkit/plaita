@@ -433,7 +433,12 @@ class TestR2SubscriptionCleanup(unittest.TestCase):
         self.assertTrue(step["is_suspend"])
         step2 = execution.run_distributed(
             flow, None, saved_context=step["context"],
-            resume_type="event", resume_data={"approved": True},
+            resume_type="event",
+            # #221：event resume 必须绑定挂起期登记的订阅（生产由 event_filter 填入）。
+            resume_data={
+                "approved": True,
+                "subscription_id": step["context"]["$NODE"]["ev"]["subscription_id"],
+            },
         )
         self.assertFalse(step2["is_suspend"])
         # 订阅应已被清理

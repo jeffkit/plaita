@@ -1,0 +1,87 @@
+# plaita#221 负控：撤掉 resume 的订阅绑定校验 → 陈旧 event resume 重新静默解决下游节点
+
+- 仓：/tmp/w46（`git worktree add --detach /tmp/w46 origin/main`，分支 fix/w46）
+- 基线：origin/main = 9c8820a8（本单按交付方要求以 origin/main 为基线；
+  issue 正文写的 f83a2685 已不是 main 尖端——#219/#220 六面已在 9c8820a8 落地）
+- 修复：`plaita/core/strategies.py` 新增 `_resume_binding_violation` 与
+  `_handle_resume` 准入校验；配套 `plaita-console/backend/api/executions.py`、
+  `plaita-console/backend/services/local_executor.py` 给手工 event/timeout
+  resume 附加私有绑定键（`RESUME_BINDING_KEY`），不污染流程输出。
+- 解释器：/Users/jeff.jie/.venvs/plaita/bin/python（3.11.16），`PYTHONPATH=/tmp/w46`
+- 负控方法：把 `plaita/core/strategies.py` 整体还原到 `9c8820a8`
+  （`git checkout HEAD -- plaita/core/strategies.py`）——等价于反向应用下面的
+  diff（删掉 `_resume_binding_violation` / `RESUME_BINDING_KEY` 与
+  `_handle_resume` 里的准入块）。变异前
+  `find . -name __pycache__ -prune -exec rm -rf {} +`，全程
+  `PYTHONDONTWRITEBYTECODE=1`（本仓踩过「旧 .pyc 伪造绿」的坑：同尺寸变异在同一
+  秒内会命中旧字节码）；跑完立刻从备份还原并 `cmp` 复核（逐字节一致）。
+- repro：`docs/proofs/data/221-repro.py`
+- 原始终端输出：`/tmp/w46-out/neg-221.log`（红）、
+  `/tmp/w46-out/neg-221-restore-green.log`（绿）
+
+## mutant（修复 → 变异；对修复后的树执行 `git checkout HEAD -- plaita/core/strategies.py`）
+
+```diff
+@@ _handle_resume @@
+-        # plaita#221：resume 必须绑定挂起期登记的那条订阅。…
+-        violation = _resume_binding_violation(prev_state, resume_type, resume_data)
+-        if violation:
+-            logger.warning(
+-                "丢弃陈旧 resume（%s）：%s；执行保持挂起，等待当前订阅的决议",
+-                resume_type.value, violation,
+-            )
+-            raise ResumeGuardError(
+-                f"Stale {resume_type.value} resume for EventNode {current_node.id}: "
+-                f"{violation}; execution stays suspended",
+-                node=current_node,
+-            )
+-
+-        # 私有绑定键只用于准入校验，不进节点载荷…
+-        if isinstance(resume_data, dict) and RESUME_BINDING_KEY in resume_data:
+-            resume_data = {…}
+-
+         exec_ctx = runner.node_execution or context
+（同时整段 helper `_SUBSCRIPTION_BOUND_RESUME_TYPES` / `RESUME_BINDING_KEY` /
+  `_resume_binding_violation` 从模块级 helpers 区消失）
+```
+
+## repro（变异态，`/tmp/w46-out/neg-221.log`）
+
+```
+step3 continue -> suspend at: waitB is_suspend= True
+  waitB subscription_id = sub-2
+  waitB status = pending
+step4 STALE resume(A) while suspended at waitB -> node waitB is_suspend= False is_end= False
+  waitB status      = completed
+  waitB event_data  = {'event_id': 'evt-a', 'event_type': 'a.done', 'event_data': {'who': 'A'}, 'subscription_id': 'sub-1'}
+  waitB event_type  = b.done
+  waitB 收到 b.done? -> False
+step5 continue -> node end is_end= True
+RESULT: RED —— 陈旧 resume 静默解决了 waitB，流程带 A 的载荷继续
+[repro exit 1]
+```
+
+## tests（变异态）
+
+```
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_stale_event_resume_at_downstream_node_is_rejected
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_event_and_timeout_same_subscription_only_one_applies
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_resume_without_subscription_id_is_rejected_when_state_has_one
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_resume_with_wrong_event_type_is_rejected
+4 failed, 1 passed in 0.41s
+```
+
+（`test_cancel_without_subscription_id_still_applies` 变异态也绿——cancel 是执行级
+意图，刻意不纳入绑定；它是「不过度收紧」的正控。）
+
+## 还原后（`/tmp/w46-out/neg-221-restore-green.log`）
+
+```
+step4 STALE resume(A) while suspended at waitB -> ResumeGuardError: Stale event resume for EventNode waitB: subscription_id 不匹配（消息 'sub-1' ≠ 挂起订阅 'sub-2'）; execution stays suspended
+  waitB status = pending (仍未推进)
+RESULT: GREEN —— 陈旧 resume 被订阅绑定校验拒绝
+[repro exit 0]
+5 passed
+```
+
+`cmp` 复核：`plaita/core/strategies.py` 与变异前备份逐字节一致。

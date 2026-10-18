@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from plaita.core.callback import FlowCallback
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
-from plaita.core.strategies import ExecutionMode
+from plaita.core.strategies import RESUME_BINDING_KEY, ExecutionMode
 
 try:
     from . import flow_store as fs
@@ -247,6 +247,32 @@ def start_local_execution(
     return _to_info(fs.get_local_execution(execution_id))
 
 
+def _with_resume_binding(context: Any, resume_type: str,
+                         data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """手工 event/timeout resume 附上挂起订阅绑定（plaita#221）。
+
+    本地档审批载荷（如 ``{"approved": True}``）里没有 event_filter 代投时携带的
+    ``subscription_id``；引擎准入校验要求绑定挂起期登记的那条订阅，故从
+    checkpoint 的 ``$NODE[$LAST_NODE]`` 取订阅 id，以私有载体键附加——引擎在
+    分发到节点前剥掉，不污染 ``event_data`` / 流程输出。
+
+    取不到绑定信息时原样返回（历史形状 / 非挂起：交给引擎侧准入裁决）。
+    """
+    if resume_type not in ("event", "timeout"):
+        return data
+    if not isinstance(context, dict):
+        return data
+    last_node = context.get("$LAST_NODE")
+    node_results = context.get("$NODE")
+    state = node_results.get(last_node) if isinstance(node_results, dict) else None
+    binding = state.get("subscription_id") if isinstance(state, dict) else None
+    if not binding:
+        return data
+    enriched = dict(data) if isinstance(data, dict) else {}
+    enriched[RESUME_BINDING_KEY] = str(binding)
+    return enriched
+
+
 def resume_local_execution(
     store: FlowStore,
     execution_id: str,
@@ -287,7 +313,11 @@ def resume_local_execution(
     try:
         _spawn(execution_id, _run_flow,
                store, execution_id, row["flow_id"], row["flow_version"], definition,
-               {}, {"context": context, "resume_type": resume_type, "data": data},
+               {}, {
+                   "context": context,
+                   "resume_type": resume_type,
+                   "data": _with_resume_binding(context, resume_type, data),
+               },
                initial_nodes=row.get("nodes") or [],
                tenant_id=row.get("tenant_id") or "")
     except RuntimeError:

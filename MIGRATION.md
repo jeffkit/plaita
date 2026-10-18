@@ -8,6 +8,39 @@
 
 ## Unreleased
 
+### 手工 event/timeout resume 必须绑定挂起订阅（plaita#221）
+
+**口径（contract）**：`resume_type=event` / `resume_type=timeout` 的 resume
+消息必须携带挂起期登记的那条订阅 id，且 event 还要带上原事件的 `event_type`。
+内核在 `_handle_resume` 的准入阶段比对：
+
+- 生产消息形状：`data["subscription_id"]`（`event_filter` 代投的 event/timeout
+  载荷一直带该字段）；
+- 手工 resume：`data["__plaita_subscription_id"]`（控制台/本地档的私有载体键，
+  引擎分发前剥除，不会写进 `event_data` 或流程输出）。
+
+两者与挂起 checkpoint 的 `$NODE[$LAST_NODE]["subscription_id"]` 不一致、或
+消息完全缺绑定信息而 checkpoint 有订阅 ⇒ 视为**陈旧消息**：记 WARNING 并抛
+`ResumeGuardError`。worker 既有豁免把执行**保持原状**（仍 suspended）、ack
+消息、不终态化——等待当前订阅的真正决议。
+
+**为什么改**：同一挂起点的 event 与 timeout 用两把不同的去重键
+（`event_filter.py` 的 `dedup:<event_id>:<sub>` 与 `timeout:<sub>`），同一订阅可
+同时入队两条 resume。先到的一条解决当前节点、流程推进并在下游重新挂起后，后到
+的陈旧 resume 历史上会通过准入把**下游**节点标成 completed/timeout 并写入上一
+事件的载荷——流程带错数据继续跑且无任何报错。
+
+- **受影响**：任何**手工构造** event/timeout resume 的代码（直接发队列消息、
+  自定义审批服务、脚本）。升级后会拿到 `ResumeGuardError`，不再被静默接受。
+  迁移：发送前从执行 checkpoint 取当前挂起节点的 `subscription_id` 放入
+  `data["subscription_id"]`；event 再带 `event_type`。不知道挂起订阅的消息
+  本就不应被当成有效决议。
+- **不受影响**：`event_filter` 代投的 event/timeout 消息（生产形状本就带
+  `subscription_id`）；控制台 `POST /executions/{id}/resume` 与本地单机档
+  （已自动从 checkpoint 附加私有绑定键）；`cancel`（执行级意图，console 消息
+  `data=None`，刻意不按订阅绑定）；`continue` / `retry`（不经过本准入）；
+  历史 checkpoint 没有 `subscription_id` 的执行（没有可比对的绑定信息，放行）。
+
 ### 控制台 resume 请求体新增可选 `params`（plaita#157）
 
 **口径（contract）**：管理面 `POST /api/executions/{execution_id}/resume`

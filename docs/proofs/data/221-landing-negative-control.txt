@@ -1,0 +1,60 @@
+# plaita#221 落地席负控（独立复跑）
+
+- 基线 HEAD（负控前）: afe4bba；变异 = 撤掉 strategies.py 的订阅绑定准入
+- 解释器: .venv/bin/python (3.13.3)；PYTHONDONTWRITEBYTECODE=1
+- 方法: 备份修复后文件 → git checkout HEAD -- plaita/core/strategies.py → 清 __pycache__ → 跑用例与 repro → 还原 cmp
+
+## 新用例（变异态）
+>       with pytest.raises(Exception) as ei:
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE Exception
+
+tests/unit/test_issue221_resume_subscription_binding.py:286: Failed
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_stale_event_resume_at_downstream_node_is_rejected
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_event_and_timeout_same_subscription_only_one_applies
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_resume_without_subscription_id_is_rejected_when_state_has_one
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_resume_with_wrong_event_type_is_rejected
+FAILED tests/unit/test_issue221_resume_subscription_binding.py::test_real_filter_enqueues_event_and_timeout_then_stale_timeout_rejected
+5 failed, 1 passed in 1.78s
+
+## repro（变异态）
+step1 suspend at: waitA is_suspend= True
+  waitA subscription_id = sub-1
+step2 resume(A) -> node waitA is_suspend= False
+  waitA status = completed
+step3 continue -> suspend at: waitB is_suspend= True
+  waitB subscription_id = sub-2
+  waitB status = pending
+step4 STALE resume(A) while suspended at waitB -> node waitB is_suspend= False is_end= False
+  waitB status      = completed
+  waitB event_data  = {'event_id': 'evt-a', 'event_type': 'a.done', 'event_data': {'who': 'A'}, 'subscription_id': 'sub-1'}
+  waitB event_type  = b.done
+  waitB 收到 b.done? -> False
+step5 continue -> node end is_end= True
+flow end result   = None
+RESULT: RED —— 陈旧 resume 静默解决了 waitB，流程带 A 的载荷继续
+[repro exit=1]
+cmp: BYTE_IDENTICAL
+
+## 还原后（正控）
+......                                                                   [100%]
+6 passed in 1.51s
+  waitB status = pending
+step4 STALE resume(A) while suspended at waitB -> ResumeGuardError: Stale event resume for EventNode waitB: subscription_id 不匹配（消息 'sub-1' ≠ 挂起订阅 'sub-2'）; execution stays suspended
+  waitB status = pending (仍未推进)
+RESULT: GREEN —— 陈旧 resume 被订阅绑定校验拒绝
+[repro exit=]
+
+## 还原后 repro 单跑
+step1 suspend at: waitA is_suspend= True
+  waitA subscription_id = sub-1
+step2 resume(A) -> node waitA is_suspend= False
+  waitA status = completed
+step3 continue -> suspend at: waitB is_suspend= True
+  waitB subscription_id = sub-2
+  waitB status = pending
+step4 STALE resume(A) while suspended at waitB -> ResumeGuardError: Stale event resume for EventNode waitB: subscription_id 不匹配（消息 'sub-1' ≠ 挂起订阅 'sub-2'）; execution stays suspended
+  waitB status = pending (仍未推进)
+RESULT: GREEN —— 陈旧 resume 被订阅绑定校验拒绝
+[repro exit=0]

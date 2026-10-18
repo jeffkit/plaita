@@ -17,6 +17,9 @@ from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 from starlette.routing import Route
 
+# 手工 resume 的订阅绑定私有载体键（与引擎同一常量，见 plaita#221）。
+from plaita.core.strategies import RESUME_BINDING_KEY
+
 try:  # 包布局（pip 安装 / `python -m plaita_console`）
     from ..services import obs_link
 except ImportError:  # 平铺布局（cwd=backend）运行时
@@ -647,6 +650,31 @@ def _find_execution(
     return None, None
 
 
+def suspended_subscription_id(context: Any) -> Optional[str]:
+    """从执行 checkpoint 取「当前挂起节点」的订阅 id（plaita#221）。
+
+    console 的 ``POST /executions/{id}/resume``（审批通过）是**手工** resume：
+    用户载荷（如 ``{"approved": true}``）里没有 event_filter 代投时携带的
+    ``subscription_id``。准入校验要求 resume 绑定挂起期登记的那条订阅，故这里
+    从 ``context.$NODE[$LAST_NODE]`` 取绑定值，以私有载体键放进 resume 数据
+    （引擎分发前剥掉，不进 ``event_data`` / 流程输出）。
+
+    返回 ``None`` 表示 checkpoint 里没有可用的绑定信息（非挂起 / 历史形状）——
+    调用方保持原行为，由引擎侧准入校验裁决。
+    """
+    if not isinstance(context, dict):
+        return None
+    last_node = context.get("$LAST_NODE")
+    node_results = context.get("$NODE")
+    if not last_node or not isinstance(node_results, dict):
+        return None
+    state = node_results.get(last_node)
+    if not isinstance(state, dict):
+        return None
+    subscription_id = state.get("subscription_id")
+    return str(subscription_id) if subscription_id else None
+
+
 # ---- plaita#37 P2：token/成本的两级展示投影（列表/详情共用） ----
 
 def project_usage(usage: Any) -> Optional[Dict[str, Any]]:
@@ -1083,13 +1111,24 @@ async def resume_execution(
             raise HTTPException(status_code=409, detail=block)
 
     # 发送恢复消息
+    # #221：手工 event/timeout resume 也要绑定挂起订阅——用户载荷里没有
+    # subscription_id（那是 event_filter 代投时的字段），从 checkpoint 取当前挂起
+    # 节点的订阅 id，以私有载体键附加（引擎准入校验后剥掉，不进流程输出）。
+    resume_data = request.data
+    if request.resume_type in ("event", "timeout"):
+        binding = suspended_subscription_id(data.get("context"))
+        if binding:
+            # data=None 的手工决议同样携带绑定（载荷为空 dict），与本地档
+            # local_executor._with_resume_binding 的形状保持一致。
+            resume_data = dict(resume_data) if isinstance(resume_data, dict) else {}
+            resume_data[RESUME_BINDING_KEY] = binding
     message = {
         "type": "resume",
         "flow_id": flow_id,
         "execution_id": execution_id,
         "resume_type": request.resume_type,
         "tenant_id": resume_tenant or "default",
-        "data": request.data,
+        "data": resume_data,
         "timestamp": datetime.now().isoformat()
     }
     # plaita#157：把请求体里的调度入参透传进 resume 载体。空/未传**不落键**

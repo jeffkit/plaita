@@ -151,8 +151,18 @@ class TestSuspendedIdempotentShortCircuit:
         for _ in range(3):
             worker.resume_flow("f1", eid, "continue")
 
+        # #221：event resume 必须绑定挂起期登记的订阅（生产消息由 event_filter
+        # 填 subscription_id/event_type；这里照生产载荷形状构造）。
+        checkpoint = storage.load_execution_state(eid).context
+        wait_state = checkpoint["$NODE"]["wait"]
         result = worker.resume_flow(
-            "f1", eid, "event", data={"approved": True})
+            "f1", eid, "event",
+            data={
+                "approved": True,
+                "event_type": "approval",
+                "subscription_id": wait_state["subscription_id"],
+            },
+        )
 
         assert result.get("is_end") is True
         state = storage.load_execution_state(eid)

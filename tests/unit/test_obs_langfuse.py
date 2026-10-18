@@ -547,12 +547,18 @@ class TestDistributedContract(unittest.TestCase):
 
         # 模拟另一进程：全新 Flow 对象 + 全新执行实例，global_context 注入同一 key。
         # 挂起的 event 节点必须以 resume_type="event" 解决（continue 会被内核拒绝）。
+        # #221：event resume 必须绑定挂起期登记的订阅（生产由 event_filter 填入）。
         flow2 = Flow.from_string(json.dumps(flow_json))
         cb2 = LangfuseCallback(client=recorder, background=False)
         execution2 = FlowExecution(event_bus=InMemoryEventBus(), callback_handlers=[cb2])
         step2 = execution2.run_distributed(
             flow2, None, saved_context=step["context"],
-            resume_type="event", resume_data={"type": "approve", "approved": True})
+            resume_type="event",
+            resume_data={
+                "type": "approve",
+                "approved": True,
+                "subscription_id": step["context"]["$NODE"]["wait"]["subscription_id"],
+            })
         while not step2["is_end"]:
             step2 = execution2.run_distributed(
                 flow2, None, saved_context=step2["context"], resume_type="continue")

@@ -395,6 +395,32 @@ class DistributedStrategy:
                 node=current_node,
             )
 
+        # plaita#221：resume 必须绑定挂起期登记的那条订阅。准入判据此前只有
+        # 「is_suspending + status=pending」——同一挂起点的 event 与 timeout 用
+        # 两把**不同**去重键（event_filter.py:222 vs :333），先到的一条解决本
+        # 节点、流程推进并在下游重新挂起后，后到的陈旧 resume 会通过准入把
+        # **下游**节点标成 completed/timeout 并写入上一事件的载荷。此刻执行是
+        # suspended（非终态），终态短路挡不住。
+        violation = _resume_binding_violation(prev_state, resume_type, resume_data)
+        if violation:
+            logger.warning(
+                "丢弃陈旧 resume（%s）：%s；执行保持挂起，等待当前订阅的决议",
+                resume_type.value, violation,
+            )
+            raise ResumeGuardError(
+                f"Stale {resume_type.value} resume for EventNode {current_node.id}: "
+                f"{violation}; execution stays suspended",
+                node=current_node,
+            )
+
+        # 私有绑定键只用于准入校验，不进节点载荷（event_data / 流程输出保持
+        # 调用方给的原样；event_filter 的公开 subscription_id 键不动）。
+        if isinstance(resume_data, dict) and RESUME_BINDING_KEY in resume_data:
+            resume_data = {
+                key: value for key, value in resume_data.items()
+                if key != RESUME_BINDING_KEY
+            }
+
         exec_ctx = runner.node_execution or context
         callback_manager.on_flow_resume(flow)
         callback_manager.on_node_resume(flow, current_node)
@@ -443,6 +469,78 @@ class DistributedStrategy:
 # ---------------------------------------------------------------------------
 # Strategy-shared helpers (module-level)
 # ---------------------------------------------------------------------------
+
+
+#: 必须绑定挂起期订阅的 resume 类型（plaita#221）。
+#:
+#: ``event`` / ``timeout`` 都是 **event_filter 代投**的订阅决议：消息体里带着
+#: 当初注册的 ``subscription_id``（event_filter.py:233 / :342），因此可以且必须
+#: 与挂起 checkpoint 里 ``_subscribe_event`` 写下的 ``node_state["subscription_id"]``
+#: 比对。``cancel`` 是**执行级**意图（console 取消消息 ``data=None``，见
+#: ``api/executions.py`` 的 cancel 入队；取消当前挂起节点本来就是它的语义），
+#: 不按订阅绑定——把它纳入比对会让所有 cancel 都变成「陈旧消息」。
+_SUBSCRIPTION_BOUND_RESUME_TYPES = (ResumeType.EVENT, ResumeType.TIMEOUT)
+
+#: 手工 resume（console 审批 / 本地档恢复）携带订阅绑定的**私有载体键**。
+#:
+#: ``event_filter`` 代投的 event/timeout 载荷把 ``subscription_id`` 直接放在
+#: ``data`` 里——那是生产消息形状，节点也会把它写进 ``event_data``。console 的
+#: 审批载荷是**用户数据**（如 ``{"approved": True}``），若把 ``subscription_id``
+#: 混进去会污染 ``$NODE.<id>.event_data`` 与流程输出，故手工路径用本键承载绑定；
+#: 准入校验通过后由 ``_handle_resume`` 在分发前剥掉，不进节点载荷。
+RESUME_BINDING_KEY = "__plaita_subscription_id"
+
+
+def _resume_binding_violation(prev_state, resume_type, resume_data) -> Optional[str]:
+    """resume 消息是否**未绑定**当前挂起的订阅（plaita#221）；无违规返回 None。
+
+    判据只有一条：resume 消息里的订阅 id 必须等于挂起 checkpoint 里
+    ``prev_state["subscription_id"]``。订阅 id 取自两处：
+
+    * ``resume_data["subscription_id"]``——event_filter 代投的 event/timeout
+      载荷（生产消息形状）；
+    * ``resume_data[RESUME_BINDING_KEY]``——console 手工 resume 的私有载体键
+      （不污染用户载荷）。
+
+    event 类型再加一道 ``event_type`` 比对（消息里的 ``event_type`` 与挂起节点
+    解析后的 ``event_type``）。
+
+    兼容面（刻意保守，不误杀）：
+
+    * 非 ``event``/``timeout`` 类型直接放行（见 ``_SUBSCRIPTION_BOUND_RESUME_TYPES``）；
+    * ``prev_state`` 没有 ``subscription_id``（历史 checkpoint、简化 event bus
+      替身）⇒ 没有可比对的绑定信息，放行——修复前行为不变；
+    * ``event_type`` 任一缺失则不比对（event_filter 的两种载荷都会带，
+      缺失更可能来自历史消息而非伪造）。
+
+    返回的是**可读原因**（进 WARNING 与 ``ResumeGuardError``），不是布尔——
+    排障时要能一眼看出是「缺字段」还是「id 对不上」。
+    """
+    if resume_type not in _SUBSCRIPTION_BOUND_RESUME_TYPES:
+        return None
+    if not isinstance(prev_state, dict):
+        return None
+    expected_sub = prev_state.get("subscription_id")
+    if not expected_sub:
+        return None
+    if not isinstance(resume_data, dict):
+        return (
+            f"resume 消息未携带订阅信息（期望 subscription_id={expected_sub!r}）"
+        )
+    got_sub = resume_data.get("subscription_id") or resume_data.get(RESUME_BINDING_KEY)
+    if not got_sub:
+        return f"resume 消息缺少 subscription_id（期望 {expected_sub!r}）"
+    if str(got_sub) != str(expected_sub):
+        return (
+            f"subscription_id 不匹配（消息 {got_sub!r} ≠ 挂起订阅 {expected_sub!r}）"
+        )
+    expected_type = prev_state.get("event_type")
+    got_type = resume_data.get("event_type")
+    if expected_type and got_type and str(got_type) != str(expected_type):
+        return (
+            f"event_type 不匹配（消息 {got_type!r} ≠ 挂起 event_type {expected_type!r}）"
+        )
+    return None
 
 
 def _create_lazy_output(node, result, branch, context, is_suspend=False, execution_id=None, is_end=False):
