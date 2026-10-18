@@ -167,8 +167,46 @@ def list_tools_registered(as_code: bool = True) -> List[Any]:
         return []
 
 
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9-]+$")
+
+
+class PathTraversalError(ValueError):
+    """Caller-supplied path escapes the skill root (#54/#248)."""
+
+
+def _contained_skill_dir(skill_name: str) -> Path:
+    """Resolve one bundled skill directory, refusing anything outside skills/.
+
+    Two independent guards (plaita#248; same containment contract as #54):
+
+    1. whitelist: the name must be a bare lowercase alnum/hyphen directory
+       name — no ``/``, no ``.``/``..``, no absolute path, no uppercase or
+       other separators that could move the root;
+    2. containment: after ``resolve()`` the directory must still be inside the
+       resolved skills root (lexical and symlink escapes both fail).
+    """
+    if not isinstance(skill_name, str) or not _SKILL_NAME_RE.fullmatch(skill_name):
+        raise PathTraversalError(
+            "skill_name must match ^[a-z0-9-]+$ (bare skill directory name), "
+            f"got: {skill_name!r}"
+        )
+    skills_root = (Path(__file__).resolve().parent / "skills").resolve()
+    contained = (skills_root / skill_name).resolve()
+    if contained == skills_root or not contained.is_relative_to(skills_root):
+        raise PathTraversalError(
+            f"skill_name escapes the skills root: {skill_name!r} resolves to {contained}"
+        )
+    return contained
+
+
 def get_skill_text(skill_name: str = "flow-coder") -> str:
-    """Load bundled skill markdown (for agents without a local skill install)."""
+    """Load bundled skill markdown (for agents without a local skill install).
+
+    ``skill_name`` is untrusted caller input (MCP tool, CLI): it is validated
+    and resolved under the bundled skills root before either the package
+    resource or the editable fallback is read (plaita#248).
+    """
+    contained = _contained_skill_dir(skill_name)
     package = "plaita_ai.skills"
     filename = f"{skill_name}/SKILL.md"
     try:
@@ -177,14 +215,10 @@ def get_skill_text(skill_name: str = "flow-coder") -> str:
         pass
 
     # Editable / dev fallback: plaita-ai/plaita_ai/skills/...
-    here = Path(__file__).resolve().parent / "skills" / skill_name / "SKILL.md"
+    here = contained / "SKILL.md"
     if here.is_file():
         return here.read_text(encoding="utf-8")
     raise FileNotFoundError(f"skill not found: {skill_name}")
-
-
-class PathTraversalError(ValueError):
-    """Caller-supplied path escapes the skill reference root (#54)."""
 
 
 def get_skill_reference(skill_name: str, ref_name: str) -> str:

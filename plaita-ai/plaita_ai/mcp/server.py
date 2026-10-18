@@ -209,8 +209,19 @@ def flow_list_tools(as_json: bool = False) -> str:
 
 @mcp.tool()
 def flow_get_skill(skill_name: str = "flow-coder") -> str:
-    """Return bundled flow-coder skill instructions for writing @flow DSL."""
-    return get_skill_text(skill_name)
+    """Return bundled flow-coder skill instructions for writing @flow DSL.
+
+    ``skill_name`` is contained to the bundled skills root: traversal,
+    absolute paths and other non-bare names are refused with a named
+    ``PathTraversalError`` refusal payload instead of reading host files
+    (plaita#248).
+    """
+    try:
+        return get_skill_text(skill_name)
+    except PathTraversalError as exc:
+        return result_json(
+            {"ok": False, "error": str(exc), "error_type": "PathTraversalError"}
+        )
 
 
 @mcp.tool()
