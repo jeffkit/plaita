@@ -25,6 +25,7 @@ from plaita.tenant_context import (  # noqa: F401 — 兼容 re-export
     LEGACY_NAMESPACE,
     _tenant_ctx,
     current_tenant,
+    record_write_probe,
     reset_current_tenant,
     set_current_tenant,
     tenant_namespace,
@@ -96,12 +97,14 @@ class TenantRoutingExecutionStorage(_TenantRoutingMixin, ExecutionStorage):
     _storage_cls = staticmethod(_fenced_execution_storage_cls)
 
     def save_execution_state(self, execution_id: str, state: Any) -> bool:
+        record_write_probe("storage.save_execution_state")  # #239 只观测
         return self._current_storage().save_execution_state(execution_id, state)
 
     def load_execution_state(self, execution_id: str) -> Optional[Any]:
         return self._current_storage().load_execution_state(execution_id)
 
     def delete_execution_state(self, execution_id: str) -> bool:
+        record_write_probe("storage.delete_execution_state")  # #239 只观测
         return self._current_storage().delete_execution_state(execution_id)
 
     def list_executions(
@@ -125,6 +128,7 @@ class TenantRoutingFlowStorage(_TenantRoutingMixin, FlowStorage):
         return self._current_storage().get_flow(flow_id, version)
 
     def save_flow(self, flow: Dict[str, Any]) -> bool:
+        record_write_probe("storage.save_flow")  # #239 只观测
         return self._current_storage().save_flow(flow)
 
 

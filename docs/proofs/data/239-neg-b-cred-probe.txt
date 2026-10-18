@@ -1,0 +1,58 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_______ test_credentials_writes_default_source_counted_and_still_succeed _______
+
+cred_store = None
+
+    def test_credentials_writes_default_source_counted_and_still_succeed(cred_store):
+        def _run():
+            credentials_svc.save_credential("probe", "generic", {"x": 1})
+            ok = credentials_svc.delete_credential("probe")
+            return ok, write_probe_snapshot()
+    
+        ok, snapshot = Context().run(_run)
+        assert ok is True, "探针不得改变写行为（default 来源仍成功）"
+>       assert snapshot[("credentials.save", TENANT_SOURCE_DEFAULT)] == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: ('credentials.save', 'default')
+
+plaita-console/backend/tests/console/test_issue239_write_probe.py:51: KeyError
+_______________ test_credentials_writes_explicit_source_counted ________________
+
+cred_store = None
+
+    def test_credentials_writes_explicit_source_counted(cred_store):
+        def _run():
+            token = set_current_tenant("tenant-b")
+            try:
+                credentials_svc.save_credential(
+                    "probe-b", "generic", {"x": 2}, tenant_id="tenant-b")
+                ok = credentials_svc.delete_credential("probe-b", tenant_id="tenant-b")
+            finally:
+                reset_current_tenant(token)
+            return ok, write_probe_snapshot()
+    
+        ok, snapshot = Context().run(_run)
+        assert ok is True
+>       assert snapshot[("credentials.save", TENANT_SOURCE_EXPLICIT)] == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: ('credentials.save', 'explicit')
+
+plaita-console/backend/tests/console/test_issue239_write_probe.py:68: KeyError
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_counted_and_still_succeed
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_counted_and_still_succeed
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_counted_and_still_succeed
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_explicit_source_counted
+plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_explicit_source_counted
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_default_source_counted_and_still_succeed
+FAILED plaita-console/backend/tests/console/test_issue239_write_probe.py::test_credentials_writes_explicit_source_counted
+2 failed, 5 warnings in 0.45s

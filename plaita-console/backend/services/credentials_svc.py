@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 
+from plaita.tenant_context import record_write_probe
+
 try:
     from ..models.flow import Base, Credential, DEFAULT_TENANT_ID
     from .flow_store import get_flow_store
@@ -130,6 +132,7 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
         raise ValueError("凭据名称不能为空")
     if not isinstance(data, dict) or not data:
         raise ValueError("凭据数据必须是非空对象")
+    record_write_probe("credentials.save")  # #239 只观测，不改变写行为
     store = get_flow_store()
     encrypted = _encrypt(data)
     with store._session_local() as session:
@@ -154,6 +157,7 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
 
 
 def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
+    record_write_probe("credentials.delete")  # #239 只观测，不改变写行为
     store = get_flow_store()
     with store._session_local() as session:
         query = select(Credential).where(Credential.name == name)

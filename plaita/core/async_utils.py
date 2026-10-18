@@ -25,6 +25,7 @@ import logging
 import threading
 
 from plaita.core.url_redaction import _scrub_exception_text
+from plaita.tenant_context import mark_tenant_derived
 
 logger = logging.getLogger("plaita.core.async_utils")
 
@@ -63,8 +64,14 @@ def run_async_from_sync(coro):
         # contextvars; `asyncio.run` creates the task in that same context, so
         # the whole coroutine tree inherits it.
         ctx = contextvars.copy_context()
+
+        def _run_derived():
+            # plaita#239：跨线程执行 → 租户来源标记 explicit/derived→derived。
+            mark_tenant_derived()
+            return asyncio.run(coro)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(ctx.run, asyncio.run, coro).result()
+            return pool.submit(ctx.run, _run_derived).result()
     return asyncio.run(coro)
 
 
@@ -219,6 +226,8 @@ def async_gen_to_sync(agen):
         ctx = contextvars.copy_context()
 
         def _drive():
+            # plaita#239：跨线程执行 → 来源标记降级为 derived。
+            mark_tenant_derived()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:

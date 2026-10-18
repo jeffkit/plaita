@@ -1,0 +1,26 @@
+..........F                                                              [100%]
+=================================== FAILURES ===================================
+_________ test_storage_write_probe_counts_and_does_not_change_behavior _________
+
+    def test_storage_write_probe_counts_and_does_not_change_behavior():
+        class _FakeFlowStorage:
+            def save_flow(self, flow):
+                return True
+    
+        def _run():
+            reset_write_probe()
+            writer = TenantRoutingFlowStorage()
+            writer._current_storage = lambda: _FakeFlowStorage()  # type: ignore[assignment]
+            ok = writer.save_flow({"flow_id": "f"})
+            return ok, write_probe_snapshot()
+    
+        ok, snapshot = Context().run(_run)
+        assert ok is True, "探针不得改变写行为"
+>       assert snapshot[("storage.save_flow", TENANT_SOURCE_DEFAULT)] == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: ('storage.save_flow', 'default')
+
+tests/unit/test_issue239_tenant_provenance.py:189: KeyError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue239_tenant_provenance.py::test_storage_write_probe_counts_and_does_not_change_behavior
+1 failed, 10 passed in 0.34s

@@ -19,6 +19,7 @@ from plaita.node import Node
 from plaita.node.decide import Branch
 from plaita.core.state import _snapshot_value
 from plaita.core.strategies import ExecutionMode
+from plaita.tenant_context import mark_tenant_derived
 
 # re-export
 __all__ = [
@@ -507,7 +508,12 @@ class Parallel(Node):
             # 用 ``loop.run_in_executor``（裸 executor 不继承提交方 context）。
             # 否则 Parallel 分支在 worker 里读到的租户/fence 退回 default，
             # 凭据路由串到默认租户（#58/#199/#212/#213 同族）。
-            return await asyncio.to_thread(self.pool_execute, self.mode, execution)
+            def _pool_execute_derived():
+                # plaita#239：跨线程 → 来源标记降级为 derived。
+                mark_tenant_derived()
+                return self.pool_execute(self.mode, execution)
+
+            return await asyncio.to_thread(_pool_execute_derived)
 
     def match_condition_branches(self, execution):
         """根据条件匹配需要执行的分支"""

@@ -68,6 +68,12 @@
     里不可区分——真正的硬拒绝需要一个 **explicit-set 标记**
     （`set_current_tenant` 置位）+ 写路径审计，属于独立语义变更，不在本轮
     「只动传播面」的边界内；已记为本契约的后续执行项。
+  - **先行已落（plaita#239，只观测）**：`set_current_tenant` 现在携带
+    explicit/derived/default 三态来源（`TenantToken` 同步复位），执行边界
+    worker 调 `mark_tenant_derived()`；`record_write_probe(site)` 在
+    storage（`save_execution_state` / `delete_execution_state` / `save_flow`）
+    与 credentials（`save` / `delete`）计数 + default 来源 DEBUG。
+    **不拦截、不改写行为**；hard fail-closed 仍待 owner 对 #239 后半裁决。
 - **租户状态闸 fail-open 维持**：缺失记录 = active（default 单租部署兼容）；
   但每次命中（无客户端 / 读失败 / 无记录）必须 `WARNING` 并累加进程内计数
   `tenant_fail_open_total()`（`plaita/server/tenant_status.py`，本轮实现）。

@@ -1093,6 +1093,7 @@ async def run_quick_test(request: QuickTestRequest):
                                     # 如果已有事件循环，创建新的线程执行
                                     import concurrent.futures
                                     import contextvars
+                                    from plaita.tenant_context import mark_tenant_derived
                                     # plaita#213（#199/#212 同根第三处）：submit 不
                                     # 传播 contextvars——新线程只有默认上下文，发布
                                     # 协程里的租户/fence 会退回 default（EventBus
@@ -1100,9 +1101,15 @@ async def run_quick_test(request: QuickTestRequest):
                                     # 线程** copy_context()，worker 内用 ctx.run
                                     # 驱动 asyncio.run（Context 不能在另一线程进入）。
                                     ctx = contextvars.copy_context()
+
+                                    def _run_publish_derived():
+                                        # plaita#239：跨线程 → 来源标记 derived。
+                                        mark_tenant_derived()
+                                        return asyncio.run(publish_event())
+
                                     with concurrent.futures.ThreadPoolExecutor() as executor:
                                         future = executor.submit(
-                                            ctx.run, asyncio.run, publish_event())
+                                            ctx.run, _run_publish_derived)
                                         event_id = future.result(timeout=5)
                                 else:
                                     event_id = asyncio.run(publish_event())

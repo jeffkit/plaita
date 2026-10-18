@@ -1,0 +1,45 @@
+...FF......                                                              [100%]
+=================================== FAILURES ===================================
+__________________ test_thread_executor_submit_marks_derived ___________________
+
+    def test_thread_executor_submit_marks_derived():
+        def _run():
+            token = set_current_tenant("tenant-b")
+            try:
+                ex = ThreadParallelExecutor(max_workers=1)
+                return ex.submit(_state).result()
+            finally:
+                reset_current_tenant(token)
+    
+>       assert Context().run(_run) == ("tenant-b", TENANT_SOURCE_DERIVED)
+E       AssertionError: assert ('tenant-b', 'explicit') == ('tenant-b', 'derived')
+E         
+E         At index 1 diff: 'explicit' != 'derived'
+E         Use -v to get more diff
+
+tests/unit/test_issue239_tenant_provenance.py:81: AssertionError
+____________________ test_thread_executor_map_marks_derived ____________________
+
+    def test_thread_executor_map_marks_derived():
+        def _run():
+            token = set_current_tenant("tenant-b")
+            try:
+                ex = ThreadParallelExecutor(max_workers=2)
+                return ex.map(lambda _: _state(), [1, 2])
+            finally:
+                reset_current_tenant(token)
+    
+>       assert Context().run(_run) == [
+            ("tenant-b", TENANT_SOURCE_DERIVED),
+            ("tenant-b", TENANT_SOURCE_DERIVED),
+        ]
+E       AssertionError: assert [('tenant-b',..., 'explicit')] == [('tenant-b',...', 'derived')]
+E         
+E         At index 0 diff: ('tenant-b', 'explicit') != ('tenant-b', 'derived')
+E         Use -v to get more diff
+
+tests/unit/test_issue239_tenant_provenance.py:93: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue239_tenant_provenance.py::test_thread_executor_submit_marks_derived
+FAILED tests/unit/test_issue239_tenant_provenance.py::test_thread_executor_map_marks_derived
+2 failed, 9 passed in 0.36s

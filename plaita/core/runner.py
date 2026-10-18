@@ -36,6 +36,7 @@ from plaita.core.errors import (
     NodeTimeoutError,
 )
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
+from plaita.tenant_context import mark_tenant_derived
 
 if TYPE_CHECKING:
     from plaita.core.context import ExecutionContext
@@ -547,15 +548,23 @@ class NodeRunner:
             # 见 _NODE_POOL_TLS 说明）——同线程，context 本就在。
             if getattr(_NODE_POOL_TLS, "in_node_pool", False):
                 return node.run(exec_ctx)
+
+            def _run_node_in_pool() -> Any:
+                # plaita#239：跨线程执行 → 租户来源标记降级为 derived。
+                mark_tenant_derived()
+                return _node_pool_bound(node.run)(exec_ctx)
+
             return await loop.run_in_executor(
                 _get_sync_node_pool(),
-                functools.partial(node_ctx.run, _node_pool_bound(node.run), exec_ctx),
+                functools.partial(node_ctx.run, _run_node_in_pool),
             )
 
         cancel_event = getattr(exec_ctx, "cancel_event", None)
         fut: asyncio.Future = loop.create_future()
 
         def _target() -> None:
+            # plaita#239：超时遗弃路径同样跨线程，来源标记 derived。
+            mark_tenant_derived()
             try:
                 result = node.run(exec_ctx)
                 if not loop.is_closed() and not fut.done():

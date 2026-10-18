@@ -36,8 +36,15 @@ from threading import Lock, Semaphore
 from typing import Any, Callable, List, Optional, Protocol, runtime_checkable
 
 from plaita.core.url_redaction import _scrub_exception_text
+from plaita.tenant_context import mark_tenant_derived
 
 logger = logging.getLogger(__name__)
+
+
+def _run_derived(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """线程池 worker 入口：先把租户来源标记降级为 derived（plaita#239）。"""
+    mark_tenant_derived()
+    return fn(*args, **kwargs)
 
 THREAD = "thread"
 PROCESS = "process"
@@ -278,7 +285,7 @@ class ThreadParallelExecutor(_BaseExecutor):
         if self._sem is not None:
             self._sem.acquire()
         ctx = contextvars.copy_context()
-        return self._pool.submit(ctx.run, wrapped, *args, **kwargs)
+        return self._pool.submit(ctx.run, _run_derived, wrapped, *args, **kwargs)
 
     def map(self, fn: Callable[..., Any], items: List[Any]) -> List[Any]:
         """逐 item 复制 contextvars 后提交（每个副本只进入一次）。"""
@@ -290,7 +297,7 @@ class ThreadParallelExecutor(_BaseExecutor):
             if self._sem is not None:
                 self._sem.acquire()
             ctx = contextvars.copy_context()
-            futures.append(self._pool.submit(ctx.run, wrapped, item))
+            futures.append(self._pool.submit(ctx.run, _run_derived, wrapped, item))
         return [f.result() for f in futures]
 
     @property
