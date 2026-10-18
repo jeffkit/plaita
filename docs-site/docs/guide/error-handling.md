@@ -109,6 +109,8 @@ class PollableNode(Node):
 
 `retryTimes` 控制重试次数：在重试耗尽前不触发策略，重试全部失败后才按 `strategy` 处理。
 
+只有瞬态错误会被重试（HTTP 节点的 `NodeException` 1002/1003，含 429 限流），重试间隔为指数退避 `min(30s, 1s × 2^n)`。确定性配置错误不消耗重试次数：`NodeException` 1001（请求生成失败）与非 `NodeException` 的 `ValueError` 会立即按 `strategy` 处理（节点输出校验钩子 `_validate_output` 抛出的异常除外——它们仍按普通节点异常重试）。
+
 ### 超时处理器
 
 节点可单独配 `timeoutHandler`（`ErrorHandler`），决定节点**超时**时怎么办，策略同上：

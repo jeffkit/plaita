@@ -34,6 +34,8 @@ from plaita.core.errors import (
     NodeException,
     NodeExecutionError,
     NodeTimeoutError,
+    is_output_validation_retryable,
+    mark_output_validation_retryable,
 )
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
@@ -80,7 +82,13 @@ def _validate_node_output(node: Any, result: Any) -> None:
     """
     validate = getattr(node, "_validate_output", None)
     if validate is not None:
-        validate(result)
+        try:
+            validate(result)
+        except Exception as exc:  # noqa: BLE001 — 打标后原样抛出
+            # plaita#219：输出校验异常仍按普通节点异常走 retryTimes——即使它是
+            # ValueError，也不得被 node-F2 的配置错误分类误伤。
+            mark_output_validation_retryable(exc)
+            raise
 
 
 def _coerce_strategy(value) -> ErrorStrategy:
@@ -104,6 +112,62 @@ def _coerce_strategy(value) -> ErrorStrategy:
     # 兜底: 未知类型 (如 Mock) 默认 abort, 行为最安全
     return ErrorStrategy.ABORT
 
+
+#: NodeException 错误码 → 重试分类（node-F2）。
+#:
+#: 数值与 ``plaita.node.http`` 的 ``HTTP_GEN_REQUEST_ERROR`` /
+#: ``HTTP_DO_REQUEST_ERROR`` / ``HTTP_NODE_EXEC_ERROR`` 同源；core 不能反向
+#: import node（分层禁止），故在此以字面量声明并由测试钉住。
+#:
+#: - 1001 请求生成错误：URL/表达式/请求体拼装失败，确定性配置问题——重试只会
+#:   把同一个错误重复 retryTimes 次，白白放大失败与上游压力；
+#: - 1002 发送请求错误：连接失败/超时/上游 5xx 抖动，可重试；
+#: - 1003 节点处理错误：上游返回非预期响应（含 429 限流），可重试——但必须
+#:   有退避，否则连续重试会把限流窗口打爆。
+_NON_RETRYABLE_NODE_CODES = frozenset({1001})
+_RETRYABLE_NODE_CODES = frozenset({1002, 1003})
+
+#: 指数退避：第 n 次重试前等待 ``1s × 2^n``，封顶 30s（node-F2）。
+_RETRY_BASE_DELAY_SECONDS = 1.0
+_RETRY_MAX_DELAY_SECONDS = 30.0
+#: 指数上限：2^30 秒已远大于封顶值，仅用于避免 ``2 ** 巨数`` 的构造开销。
+_RETRY_MAX_BACKOFF_EXPONENT = 30
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    """按异常类型/错误码判定是否值得重试（node-F2）。
+
+    - ``NodeException``：1001（请求生成 = 配置/参数确定性错误）不重试；
+      1002/1003（发送/处理 = 瞬态）重试；其余未知码维持历史行为（重试），
+      避免把未来新增的错误码静默降级成「一次都不重试」。
+    - 非 ``NodeException`` 的 ``ValueError``：参数/配置类确定性错误，不重试；
+      但节点输出校验钩子抛出的异常除外（#219 契约：校验异常仍走 retryTimes）。
+    - 其余异常（``RuntimeError``、节点自身 ``TimeoutError`` 等）：保持历史行为。
+    """
+    if isinstance(exc, NodeException):
+        code = getattr(exc, "code", None)
+        if code in _RETRYABLE_NODE_CODES:
+            return True
+        if code in _NON_RETRYABLE_NODE_CODES:
+            return False
+        return True
+    if isinstance(exc, ValueError):
+        return is_output_validation_retryable(exc)
+    return True
+
+
+def _retry_backoff_seconds(attempt: int) -> float:
+    """第 ``attempt`` 次重试（0 起）前的等待秒数：1s × 2^n，封顶 30s。"""
+    exponent = min(max(attempt, 0), _RETRY_MAX_BACKOFF_EXPONENT)
+    return min(
+        _RETRY_MAX_DELAY_SECONDS,
+        _RETRY_BASE_DELAY_SECONDS * (2 ** exponent),
+    )
+
+
+async def _backoff_sleep(delay: float) -> None:
+    """重试间隔。独立函数便于测试替换，避免单测真实等待数秒。"""
+    await asyncio.sleep(delay)
 
 
 #: 非法 timeout 的统一拒收文案（plaita#139）：错误消息逐字复用，避免各处措辞漂移。
@@ -482,8 +546,29 @@ class NodeRunner:
                 # 的普通异常分支——重试与 errorHandler 不再静默失效。
                 return _handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
             except (Exception, NodeException) as e:
-                if attempt == max_retries:
+                if attempt == max_retries or not _is_retryable_error(e):
                     return _handle_node_error(flow, node, error_handler, e)
+                # node-F2：只对瞬态错误重试，重试间隔按指数退避（1s×2^n，封顶
+                # 30s）——确定性配置错误（1001 / ValueError）在上面的分类处直接
+                # 落到 errorHandler，不再被盲目重试 retryTimes 次；429/限流类
+                # 瞬态错误也不再零间隔连打。
+                delay = _retry_backoff_seconds(attempt)
+                # #151 日志卫生：异常对象/类型投影先落到局部变量，logger 参数里
+                # 只允许出现已清洗文本（`_scrub_url_text(e)`）——结构化守卫按
+                # AST 判定，裸 `e` 出现在 logger 实参（含 f-string）即判红。
+                exc_name = type(e).__name__
+                code_suffix = f" code={e.code}" if isinstance(e, NodeException) else ""
+                logger.warning(
+                    "node %s attempt %d/%d failed (%s%s); retrying in %.1fs: %s",
+                    node.name or node.id,
+                    attempt + 1,
+                    max_retries + 1,
+                    exc_name,
+                    code_suffix,
+                    delay,
+                    _scrub_url_text(e),
+                )
+                await _backoff_sleep(delay)
 
         return _get_error_result(error_handler)
 

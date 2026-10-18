@@ -83,12 +83,13 @@ return result
 `NodeRunner.run_node` 负责一个节点的完整执行周期：
 
 1. `callback_manager.on_node_start`
-2. `_execute_with_retry`：按 `retryTimes` 重试，每次按 `min(节点timeout, 剩余预算)` 设超时
+2. `_execute_with_retry`：按 `retryTimes` 重试，每次按 `min(节点timeout, 剩余预算)` 设超时；只重试瞬态错误（`NodeException` 1002/1003），重试间隔指数退避 `min(30s, 1s × 2^n)`；确定性配置错误（`NodeException` 1001 / 非 `NodeException` 的 `ValueError`）不消耗重试次数（输出校验钩子的异常仍按普通异常重试，#219）
 3. 成功：写 `LAST_NODE` / `BRANCH` / `$NODE[id]`，`on_node_end`，返回 `(result, branch)`
 4. 异常分支处理：
     - `FlowResultError` → 包装为 `FlowExecutionException(ERROR_RESULT)`
     - `TimeoutError` → 走 `timeoutHandler`（abort 抛异常 / continue 返 None / continue_with 返默认值）
-    - 其它异常 → 重试耗尽后走 `errorHandler`（abort/continue/continue_with）
+    - 可重试异常 → 退避后重试；重试耗尽后走 `errorHandler`（abort/continue/continue_with）
+    - 不可重试异常 → 立即走 `errorHandler`（不再空转 `retryTimes` 次）
 
 ### 同步/异步执行桥接
 
