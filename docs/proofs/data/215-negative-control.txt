@@ -1,0 +1,74 @@
+...........FFF.                                                          [100%]
+=================================== FAILURES ===================================
+___ TestReservedTenantNames.test_root_and_admin_route_to_side_files_not_base ___
+
+self = <tests.unit.test_credentials_tenant_routing.TestReservedTenantNames object at 0x1041da350>
+
+    def test_root_and_admin_route_to_side_files_not_base(self):
+        base = Path("/data/creds.json")
+>       assert tenant_credentials_file("root", base) == Path("/data/creds.root.json")
+E       AssertionError: assert PosixPath('/data/creds.json') == PosixPath('/data/creds.root.json')
+E        +  where PosixPath('/data/creds.json') = tenant_credentials_file('root', PosixPath('/data/creds.json'))
+E        +  and   PosixPath('/data/creds.root.json') = Path('/data/creds.root.json')
+
+tests/unit/test_credentials_tenant_routing.py:161: AssertionError
+______ TestReservedTenantNames.test_root_tenant_reads_its_side_file_value ______
+
+self = <tests.unit.test_credentials_tenant_routing.TestReservedTenantNames object at 0x1041daad0>
+cred_env = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-2979/test_root_tenant_reads_its_sid0/creds.json')
+
+    def test_root_tenant_reads_its_side_file_value(self, cred_env):
+        # 旁文件名按文档规则**字面**拼出（不借 tenant_credentials_file 算写入路径，
+        # 否则函数本身回归时写读两端一起错、用例仍绿——负控会漏）。
+        side = cred_env.with_name(f"{cred_env.stem}.root{cred_env.suffix}")
+        _write(cred_env, "shared", {"url": "https://default.example"})
+        _write(cred_env, "default-only", {"url": "https://default-only.example"})
+        _write(side, "shared", {"url": "https://root.example"})
+        _write(side, "root-only", {"url": "https://root-only.example"})
+    
+        token = set_current_tenant("root")
+        try:
+>           assert tenant_credentials_file("root", cred_env) == side
+E           AssertionError: assert PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-2979/test_root_tenant_reads_its_sid0/creds.json') == PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-2979/test_root_tenant_reads_its_sid0/creds.root.json')
+E            +  where PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-2979/test_root_tenant_reads_its_sid0/creds.json') = tenant_credentials_file('root', PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-2979/test_root_tenant_reads_its_sid0/creds.json'))
+
+tests/unit/test_credentials_tenant_routing.py:177: AssertionError
+_____ TestReservedTenantNames.test_root_and_admin_do_not_share_side_files ______
+
+self = <tests.unit.test_credentials_tenant_routing.TestReservedTenantNames object at 0x103ab75c0>
+cred_env = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-2979/test_root_and_admin_do_not_sha0/creds.json')
+
+    def test_root_and_admin_do_not_share_side_files(self, cred_env):
+        for tid in ("root", "admin"):
+            side = cred_env.with_name(f"{cred_env.stem}.{tid}{cred_env.suffix}")
+            _write(side, f"{tid}-only", {"url": f"https://{tid}.example"})
+            token = set_current_tenant(tid)
+            try:
+>               assert get_credential(f"{tid}-only")["url"] == f"https://{tid}.example"
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_credentials_tenant_routing.py:197: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'root-only'
+
+    def get_credential(name: str) -> Dict[str, Any]:
+        """按名解析凭据，返回其数据 dict（如 {"url": ...} / {"username":..., "password":...}）。
+    
+        找不到或解密失败抛 :class:`CredentialError`，message 可直接展示给编排用户。
+        """
+        data = _read_store()
+        entry = data.get(name)
+        if entry is None:
+            # 只列当前租户文件内的名字——跨租户文件互不可见，报错不得泄露
+            # 其他租户配置了哪些凭据。
+            known = ", ".join(sorted(data)) or "（无）"
+>           raise CredentialError(f"凭据 {name!r} 不存在（当前租户可用: {known}）。请在编排台「凭据」页创建")
+E           plaita.credentials.CredentialError: 凭据 'root-only' 不存在（当前租户可用: （无））。请在编排台「凭据」页创建
+
+plaita/credentials.py:89: CredentialError
+=========================== short test summary info ============================
+FAILED tests/unit/test_credentials_tenant_routing.py::TestReservedTenantNames::test_root_and_admin_route_to_side_files_not_base
+FAILED tests/unit/test_credentials_tenant_routing.py::TestReservedTenantNames::test_root_tenant_reads_its_side_file_value
+FAILED tests/unit/test_credentials_tenant_routing.py::TestReservedTenantNames::test_root_and_admin_do_not_share_side_files
+3 failed, 12 passed in 0.08s

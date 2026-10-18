@@ -1,0 +1,157 @@
+FFFFFF...                                                                [100%]
+=================================== FAILURES ===================================
+_________ test_viewer_write_forbidden_by_editor_gate[put-flow-version] _________
+
+client_with_users = <starlette.testclient.TestClient object at 0x1115d2900>
+method = 'PUT', path = '/api/flows/hello-plaita/versions/1.1.0'
+body = {'created_by': 'viewer1', 'definition': '{"nodes": [{"type": "start", "id": "start", "next": "end"}, {"type": "end", "id": "end", "resultType": "success", "output": "ok"}]}', 'layout': ''}
+
+    @pytest.mark.parametrize("method,path,body", VIEWER_WRITE_CASES)
+    def test_viewer_write_forbidden_by_editor_gate(client_with_users, method, path, body):
+        """viewer 写非 admin 路由 → 403 + editor 闸文案（#214 的回归钉）。"""
+        viewer = _login(client_with_users, "viewer1", "viewer-password-1")
+        r = client_with_users.request(method, path, headers=_auth(viewer["token"]), json=body)
+>       assert r.status_code == 403, f"{method} {path} 未被 viewer 写闸拒绝: {r.status_code} {r.text}"
+E       AssertionError: PUT /api/flows/hello-plaita/versions/1.1.0 未被 viewer 写闸拒绝: 200 {"flow_id":"hello-plaita","version":"1.1.0","status":"draft","definition":"{\"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"end\"}, {\"type\": \"end\", \"id\": \"end\", \"resultType\": \"success\", \"output\": \"ok\"}]}","layout":"","created_at":"2026-10-18T02:07:58.118803","published_at":null,"created_by":"viewer1","updated_at":"2026-10-18T02:07:58.119257"}
+E       assert 200 == 403
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py:147: AssertionError
+___________ test_viewer_write_forbidden_by_editor_gate[publish-flow] ___________
+
+client_with_users = <starlette.testclient.TestClient object at 0x111ddc7d0>
+method = 'POST', path = '/api/flows/hello-plaita/publish'
+body = {'version': '1.1.0'}
+
+    @pytest.mark.parametrize("method,path,body", VIEWER_WRITE_CASES)
+    def test_viewer_write_forbidden_by_editor_gate(client_with_users, method, path, body):
+        """viewer 写非 admin 路由 → 403 + editor 闸文案（#214 的回归钉）。"""
+        viewer = _login(client_with_users, "viewer1", "viewer-password-1")
+        r = client_with_users.request(method, path, headers=_auth(viewer["token"]), json=body)
+>       assert r.status_code == 403, f"{method} {path} 未被 viewer 写闸拒绝: {r.status_code} {r.text}"
+E       AssertionError: POST /api/flows/hello-plaita/publish 未被 viewer 写闸拒绝: 404 {"detail":"版本不存在: hello-plaita@1.1.0"}
+E       assert 404 == 403
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py:147: AssertionError
+___________ test_viewer_write_forbidden_by_editor_gate[delete-flow] ____________
+
+client_with_users = <starlette.testclient.TestClient object at 0x111eb65d0>
+method = 'DELETE', path = '/api/flows/hello-plaita', body = None
+
+    @pytest.mark.parametrize("method,path,body", VIEWER_WRITE_CASES)
+    def test_viewer_write_forbidden_by_editor_gate(client_with_users, method, path, body):
+        """viewer 写非 admin 路由 → 403 + editor 闸文案（#214 的回归钉）。"""
+        viewer = _login(client_with_users, "viewer1", "viewer-password-1")
+        r = client_with_users.request(method, path, headers=_auth(viewer["token"]), json=body)
+>       assert r.status_code == 403, f"{method} {path} 未被 viewer 写闸拒绝: {r.status_code} {r.text}"
+E       AssertionError: DELETE /api/flows/hello-plaita 未被 viewer 写闸拒绝: 200 {"success":true,"flow_id":"hello-plaita"}
+E       assert 200 == 403
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py:147: AssertionError
+_________ test_viewer_write_forbidden_by_editor_gate[create-schedule] __________
+
+client_with_users = <starlette.testclient.TestClient object at 0x111d2b5c0>
+method = 'POST', path = '/api/schedules'
+body = {'cron': '* * * * *', 'enabled': True, 'flow_id': 'hello-plaita', 'name': 'n'}
+
+    @pytest.mark.parametrize("method,path,body", VIEWER_WRITE_CASES)
+    def test_viewer_write_forbidden_by_editor_gate(client_with_users, method, path, body):
+        """viewer 写非 admin 路由 → 403 + editor 闸文案（#214 的回归钉）。"""
+        viewer = _login(client_with_users, "viewer1", "viewer-password-1")
+        r = client_with_users.request(method, path, headers=_auth(viewer["token"]), json=body)
+>       assert r.status_code == 403, f"{method} {path} 未被 viewer 写闸拒绝: {r.status_code} {r.text}"
+E       AssertionError: POST /api/schedules 未被 viewer 写闸拒绝: 200 {"schedule_id":"sched-20261018100758683","tenant_id":"default","name":"n","flow_id":"hello-plaita","version":null,"cron":"* * * * *","params":{},"enabled":true,"created_by":"","created_at":"2026-10-18T02:07:58.685376","updated_at":"2026-10-18T02:07:58.685378","next_run_at":"1792289280000","last_run_at":"","status":"running"}
+E       assert 200 == 403
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py:147: AssertionError
+_____________ test_viewer_write_forbidden_by_editor_gate[dry-run] ______________
+
+client_with_users = <starlette.testclient.TestClient object at 0x110c323f0>
+method = 'POST', path = '/api/flows/dry-run'
+body = {'flowJson': '{"nodes": [{"type": "start", "id": "start", "next": "end"}, {"type": "end", "id": "end", "resultType": "success", "output": "ok"}]}', 'input': {}}
+
+    @pytest.mark.parametrize("method,path,body", VIEWER_WRITE_CASES)
+    def test_viewer_write_forbidden_by_editor_gate(client_with_users, method, path, body):
+        """viewer 写非 admin 路由 → 403 + editor 闸文案（#214 的回归钉）。"""
+        viewer = _login(client_with_users, "viewer1", "viewer-password-1")
+        r = client_with_users.request(method, path, headers=_auth(viewer["token"]), json=body)
+>       assert r.status_code == 403, f"{method} {path} 未被 viewer 写闸拒绝: {r.status_code} {r.text}"
+E       AssertionError: POST /api/flows/dry-run 未被 viewer 写闸拒绝: 200 {"result":"ok","nodes":[{"id":"start","type":"start","name":"start","input":null,"output":null,"status":"success","error":null,"depth":0,"flow_path":["root"],"flow_id":null},{"id":"end","type":"end","name":"end","input":null,"output":"ok","status":"success","error":null,"depth":0,"flow_path":["root"],"flow_id":null}],"error":null}
+E       assert 200 == 403
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py:147: AssertionError
+________ test_viewer_write_forbidden_by_editor_gate[supervisor-iterate] ________
+
+client_with_users = <starlette.testclient.TestClient object at 0x112305b50>
+method = 'POST', path = '/api/flows/hello-plaita/supervisor/iterate'
+body = {'dataset': 'cases', 'proposer': 'static'}
+
+    @pytest.mark.parametrize("method,path,body", VIEWER_WRITE_CASES)
+    def test_viewer_write_forbidden_by_editor_gate(client_with_users, method, path, body):
+        """viewer 写非 admin 路由 → 403 + editor 闸文案（#214 的回归钉）。"""
+        viewer = _login(client_with_users, "viewer1", "viewer-password-1")
+        r = client_with_users.request(method, path, headers=_auth(viewer["token"]), json=body)
+>       assert r.status_code == 403, f"{method} {path} 未被 viewer 写闸拒绝: {r.status_code} {r.text}"
+E       AssertionError: POST /api/flows/hello-plaita/supervisor/iterate 未被 viewer 写闸拒绝: 503 {"detail":"plaita-ai 未安装（No module named 'plaita_ai'）。在 backend 环境执行: pip install -e ./plaita-ai"}
+E       assert 503 == 403
+E        +  where 503 = <Response [503 Service Unavailable]>.status_code
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py:147: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 124 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 29 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:554: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 29 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 27 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:647: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[put-flow-version]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[publish-flow]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[delete-flow]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[create-schedule]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[supervisor-iterate]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_read_still_allowed
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_editor_write_still_allowed
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_admin_prefix_still_uses_admin_gate
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:158: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[put-flow-version]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[publish-flow]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[delete-flow]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[create-schedule]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[supervisor-iterate]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_read_still_allowed
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_editor_write_still_allowed
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_admin_prefix_still_uses_admin_gate
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:231: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row.expires_at < datetime.utcnow():
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[put-flow-version]
+FAILED plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[publish-flow]
+FAILED plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[delete-flow]
+FAILED plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[create-schedule]
+FAILED plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+FAILED plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[supervisor-iterate]
+6 failed, 3 passed, 228 warnings in 2.86s

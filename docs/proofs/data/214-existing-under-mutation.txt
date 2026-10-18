@@ -1,0 +1,44 @@
+...................                                                      [100%]
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_admin_auth.py: 5 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 136 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+plaita-console/backend/tests/console/test_admin_auth.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 11 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:158: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+
+plaita-console/backend/tests/console/test_admin_auth.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 17 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:231: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_enterprise.py: 31 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:554: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_enterprise.py: 31 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_enterprise.py: 29 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:647: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_enterprise.py::test_audit_records_publish_and_credential
+plaita-console/backend/tests/console/test_enterprise.py::test_promotion_export_import_fingerprint
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:54: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_enterprise.py::test_promotion_export_import_fingerprint
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:102: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "exported_at": datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+19 passed, 266 warnings in 3.13s

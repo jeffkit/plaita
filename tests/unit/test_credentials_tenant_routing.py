@@ -34,12 +34,17 @@ def cred_env(tmp_path, monkeypatch):
 
 
 def _write(path: Path, name: str, data: dict) -> None:
+    """写入/合并一个条目（同文件多次写入不丢已有条目）。"""
     from cryptography.fernet import Fernet
 
+    store = {}
+    if path.is_file():
+        store = json.loads(path.read_text())
     token = Fernet(json.loads('"' + __import__("os").environ["PLAITA_CREDENTIALS_KEY"] + '"')).encrypt(
         json.dumps(data).encode()
     ).decode()
-    path.write_text(json.dumps({name: {"type": "generic", "data": token}}))
+    store[name] = {"type": "generic", "data": token}
+    path.write_text(json.dumps(store))
 
 
 class TestTenantCredentialsFile:
@@ -140,6 +145,58 @@ class TestGetCredentialTenantRouting:
             assert credential_type("t1") is None
         finally:
             reset_current_tenant(token)
+
+
+class TestReservedTenantNames:
+    """plaita#215：root / admin 等保留样租户名不得落到 default 基础文件。
+
+    历史缺口：既有用例只覆盖 default/空/acme/t-1234，从未使用 ``root``。
+    若 ``tenant_credentials_file`` 回归成把 ``root`` 归入 default，现有 12 条
+    全绿，而名为 root 的租户会读取**平台默认凭据文件**（跨租户串用）。
+    这里同时钉路径与真实读取值，避免只测字符串。
+    """
+
+    def test_root_and_admin_route_to_side_files_not_base(self):
+        base = Path("/data/creds.json")
+        assert tenant_credentials_file("root", base) == Path("/data/creds.root.json")
+        assert tenant_credentials_file("admin", base) == Path("/data/creds.admin.json")
+        # default 是唯一读基础文件的租户（历史兼容），保留原行为
+        assert tenant_credentials_file("default", base) == base
+
+    def test_root_tenant_reads_its_side_file_value(self, cred_env):
+        # 旁文件名按文档规则**字面**拼出（不借 tenant_credentials_file 算写入路径，
+        # 否则函数本身回归时写读两端一起错、用例仍绿——负控会漏）。
+        side = cred_env.with_name(f"{cred_env.stem}.root{cred_env.suffix}")
+        _write(cred_env, "shared", {"url": "https://default.example"})
+        _write(cred_env, "default-only", {"url": "https://default-only.example"})
+        _write(side, "shared", {"url": "https://root.example"})
+        _write(side, "root-only", {"url": "https://root-only.example"})
+
+        token = set_current_tenant("root")
+        try:
+            assert tenant_credentials_file("root", cred_env) == side
+            assert credentials_file() == side
+            # 同名凭据必须取 root 旁文件的值，而不是平台默认文件的值
+            assert get_credential("shared")["url"] == "https://root.example"
+            assert get_credential("root-only")["url"] == "https://root-only.example"
+            assert credential_type("shared") == "generic"
+            # default 文件里的条目对 root 不可见（报错只列当前租户文件内的名字）
+            with pytest.raises(CredentialError) as exc:
+                get_credential("default-only")
+            assert "root-only" in str(exc.value)
+            assert "default-only" in str(exc.value)  # 只有请求名本身，不是泄漏来源
+        finally:
+            reset_current_tenant(token)
+
+    def test_root_and_admin_do_not_share_side_files(self, cred_env):
+        for tid in ("root", "admin"):
+            side = cred_env.with_name(f"{cred_env.stem}.{tid}{cred_env.suffix}")
+            _write(side, f"{tid}-only", {"url": f"https://{tid}.example"})
+            token = set_current_tenant(tid)
+            try:
+                assert get_credential(f"{tid}-only")["url"] == f"https://{tid}.example"
+            finally:
+                reset_current_tenant(token)
 
 
 def test_tenant_namespace_unchanged_for_engine_keys():
