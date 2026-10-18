@@ -353,9 +353,11 @@ _ROOT_CASES = (
     ("version", ':version "1.2"', "version", "1.2"),
     ("author", ':author "me"', "author", "me"),
     ("timeout", ":timeout 30", "timeout", 30),
+    # #238：读侧补上 `_value()`，`(dict …)` 编译为真正的 dict（此前原样留成
+    # `['dict', …]` 列表，往返后 globalContext/metadata 形状静默改变）。
     ("globalContext", ':global-context (dict :key "val")', "globalContext",
-     ["dict", "key", "val"]),
-    ("metadata", ':metadata (dict :env "prod")', "metadata", ["dict", "env", "prod"]),
+     {"key": "val"}),
+    ("metadata", ':metadata (dict :env "prod")', "metadata", {"env": "prod"}),
 )
 
 #: ``(childflow …)`` 接受、但 base 不发射的字段（``#149`` 已补 ``flow-id``）。
@@ -823,9 +825,9 @@ class TestDictKeySpellingRoundTrip(unittest.TestCase):
         ``{"a b": 1}`` → ``(dict :a b 1)`` 被再读成 ``['dict','a','b',1]``
         （形状静默改变）。本单后：源码可再解析，键作为**单个**元素保留。
 
-        整树回到 dict 仍受 #147 记录的读侧 ``_value()`` 缺口限制（``_compile_flow``
-        不对 ``:metadata`` 走 ``_value``），故这里断言「可再解析 + 键完整」，而不是
-        dict 相等——那属 #147 的既有残留项，不在 #148 边界内。
+        #238 起 ``_compile_flow`` 对 ``:metadata`` 走 ``_value()``，整树也能
+        回到 dict——这里升级为 dict 相等断言（原「可再解析 + 键完整」的弱口径
+        不再需要）。
         """
         for key in ('q"x', "a b"):
             with self.subTest(key=key):
@@ -836,7 +838,7 @@ class TestDictKeySpellingRoundTrip(unittest.TestCase):
                 emitted = flow_to_sexpr(ir)
                 sexpr_mod.read_forms(emitted)      # 不再抛词法/语法错
                 back = compile_sexpr(emitted)      # 不再抛
-                self.assertEqual(back["metadata"], ["dict", [key, 1]], emitted)
+                self.assertEqual(back["metadata"], {key: 1}, emitted)
 
     # --- 类级不变量：任何发射结果都必须能再解析 ----------------------------
     def test_every_emitted_flow_reparses_over_node_corpus(self):
@@ -903,7 +905,9 @@ _WRITER_NODE_TYPE_EXCLUSIONS = {}
 #: 写侧发射臂里，含 mock 节点的 flow 无法 sexpr 往返。
 #: 这个集合既是计数断言的豁免来源，也是"新增节点类型必须显式登记"的账本：
 #: 忘了登记，下面两个计数断言直接转红。
-_POST_150_READER_TYPES = frozenset({"mock"})
+#: ``#238``：``while``（``plaita.node.loop.While``）补进节点表——它是 registry
+#: 内置类型，但 sexpr 读/写两侧此前都没有它。
+_POST_150_READER_TYPES = frozenset({"mock", "while"})
 
 
 def _reader_node_compilers():
@@ -1008,9 +1012,9 @@ _RT_CHILD = ('(childflow :flow-id cf :input-type object :desc 子 :output-type s
 
 #: #150 验收 3 的往返语料：**每个 reader 节点实现**一条，且把该类型读侧能读的
 #: 字段**全部填满**——最小可编译形状恰好会漏掉"节点内部丢字段"（base 上
-#: parallel 就是空壳）。值一律选用 ``_expr_to_src`` 能忠实回读的拼写：数字样
-#: **字符串**值（``(code :code "1"`` → ``1`` → int）是 #150 边界外的既有
-#: ``_expr_to_src`` 残留，故 ``code`` 行用 ``"return 1"``；该残留另有独测钉住。
+#: parallel 就是空壳）。#238 起 ``code`` 等字面量槽位恒加引号，数字样字符串
+#: （``(code :code "1")``）不再漂移成 int；本语料的 ``"return 1"`` 只是普通
+#: 示例，不再承担「绕开既有残留」的作用。
 _NODE_TYPE_ROUNDTRIP_CORPUS = (
     ("start", '(flow g :input-type object (start :id n0 :timeout 5 -> n1)'
               ' (end :id n1 :output 1))'),
@@ -1046,6 +1050,10 @@ _NODE_TYPE_ROUNDTRIP_CORPUS = (
     ("reduce", '(flow g :input-type object (start :id n0 -> r)'
                ' (reduce :id r :collection "$INPUT.xs" :child %s :initial 0'
                ' :timeout 5 -> e) (end :id e :output 9))' % _RT_CHILD),
+    ("while", '(flow g :input-type object (start :id n0 -> w)'
+              ' (while :id w :when (cond $INPUT.n lt 3) :max-iterations 7'
+              ' :child (childflow (start :id cs -> ce) (end :id ce :output 1))'
+              ' -> e) (end :id e :output 9))'),
     ("child", '(flow g :input-type object (start :id n0 -> ch)'
               ' (child :id ch :input "$INPUT.x" :child %s :timeout 5 -> e)'
               ' (end :id e :output 9))' % _RT_CHILD),

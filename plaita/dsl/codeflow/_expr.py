@@ -246,6 +246,25 @@ def _compile_condition(node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
         return _negate_condition(_compile_condition(node.operand, ctx), node)
     if isinstance(node, ast.Compare):
         return _compile_compare(node, ctx)
+    # #238：`F.contains(left, right)` 是条件算子 contains 的唯一 @flow 拼写
+    # （Python 的 `in` 表示的是 in/notIn，语义方向不同：contains(a, b) 是 b in a）。
+    # 识别成算子形态后，发射器 `_invert_cond` 才能把它还原回 `F.contains(...)`，
+    # conditioned 往返不再因「不支持的条件算子」直接 EmitError。非条件位置
+    # 的 F.contains(...) 仍是普通 $F 表达式，不受影响。
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "contains"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "F"
+        and len(node.args) == 2
+        and not node.keywords
+    ):
+        return {
+            "field": _compile_expr(node.args[0], ctx),
+            "operator": "contains",
+            "value": _compile_expr(node.args[1], ctx),
+        }
     # 裸表达式真值测试 -> truthy 算子（Python bool(x) 语义）。历史实现降级为
     # (expr != False)，空列表/空串/None 会误走真分支——`if items:` 语义错误
     # （2026-10 评审修复包 A1）。过渡期打编译警告，引导作者写显式比较。

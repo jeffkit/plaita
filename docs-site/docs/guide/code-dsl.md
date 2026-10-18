@@ -254,6 +254,13 @@ r = PARALLEL(branches={
 }, conditional=True, join=["hot", "cold"])
 ```
 
+> **分支字段的数据口径（plaita#220/L2）**：`input` 与 `condition` 的值在 sexpr
+> 链上走**数据**发射器——字面字符串 `"true"` / `"42"` / `"nil"` 恒加引号，读回
+> 时不会漂成 `bool` / `int` / `None`（`$` 开头仍按表达式）。条件覆盖引擎全部
+> 12 个算子；`contains` / `notContains` 的 @flow 拼写是
+> `F.contains(field, value)` / `not F.contains(field, value)`（参数序即
+> `value in field`），发射器与编译器对称识别，不再以「不支持的条件算子」拒绝。
+
 赋值节点的两个字段在 `n = expr` 语句形态里没有位置：`output_type`（运行期类型
 校验）与 `upstream_output`（多 upstream 时按 `last_node_id` 选择取值）。需要它们时
 改用 `ASSIGN(...)`（普通赋值仍写 `n = expr`，行为不变）：
@@ -508,8 +515,12 @@ flow.run(age=15)   # -> "未成年"
 | `(start -> <id>)` | start 节点，`->` 即 `next` |
 | `(if :id <id> (cond ...) -> <then> :else <else>)` | if 节点，`->` 是真分支，`:else` 是假分支 |
 | `(end <id> :output <expr> :result-type error :error (dict :code 4001 :message bad))` | end node; `resultType` defaults to `success`, `error` carries the error-exit payload (malformed dict literals here now raise -- see the note below) |
-| `:timeout <dur>` | per-node timeout, accepted by every node type in the sexpr node table (17 types; see the scope note below), e.g. `PT30S` |
-| `:on-error (on-error <strategy> ...)` | per-node error handler, accepted by the same 17 node types |
+| `:timeout <dur>` | per-node timeout, accepted by every node type in the sexpr node table (19 types; see the scope note below), e.g. `PT30S` |
+| `:on-error (on-error <strategy> ...)` | per-node error handler, accepted by the same 19 node types |
+| `:on-timeout (on-timeout <strategy> ...)` | per-node timeout handler (`Node.timeout_handler`；#238 补齐读写两侧) |
+| `:item-type <type>` | collection/while 的循环元素类型声明（`itemType`；完整 Property 走 `(dict …)`） |
+| `:content-type <text>` | HTTP `Content-Type` 头（`content_type` / legacy `contentType`；#238） |
+| `(while :id w :when <cond> :max-iterations N :child (childflow ...) -> <next>)` | while 节点（`plaita.node.loop.While`；#238 补入节点表） |
 | `(cond <field> <op> <value>)` | 单条件，op 支持 `>=` `==` `!=` `in` … |
 | `(and <cond>...)` / `(or ...)` / `(not <cond>)` | 条件组 / 取反 |
 | `(dict :k v ...)` / `(dict ("k" v) ...)` | dict 字面量（headers/body 用）；键不能裸写成 `:k` 时由发射侧改走恒引号元组（plaita#148，见下） |
@@ -521,9 +532,12 @@ flow.run(age=15)   # -> "未成年"
 
 不写 `:id` 时自动分配 `_n1`/`_n2`/…；`end`/`assignment` 支持把第一个位置参数当 id（`(end adult :output "成年")`）。
 
-### 集合节点
+### 集合节点 / while
 
-`(map ...)` / `(filter ...)` / `(find ...)` / `(loop ...)` / `(reduce ...)` 用 `:child` 内联子流程：
+`(map ...)` / `(filter ...)` / `(find ...)` / `(loop ...)` / `(reduce ...)` /
+`(while ...)` 用 `:child` 内联子流程。集合节点用 `:item-type` 声明元素类型；
+`while` 用 `:when` 条件 + 可选 `:max-iterations`（对应 IR 的 `maxIterations`），
+没有 `:collection`：
 
 ```python
 src = """
@@ -567,8 +581,9 @@ src = """
 src = """
 (flow router :input-type object
   (start -> route)
-  (switch :id route
-    (branch a :next end_a :when (cond "$INPUT.type" == "A"))
+  (switch :id route :output-type string
+    (branch a :next end_a :when (cond "$INPUT.type" == "A")
+      :label "A 类" :desc "类型 A")
     (branch b :next end_b :when (cond "$INPUT.type" == "B"))
     (branch dft :next end_dft :default true))
   (end end_a :output "A")
@@ -634,10 +649,16 @@ reader accepts; pinned by
 
 | IR field | Emitted form | Applies to |
 |----------|--------------|------------|
-| `timeout` | `:timeout PT30S` | the sexpr node table (17 node types, see scope note below) |
-| `errorHandler` | `:on-error (on-error <strategy> [:retry N] [:default V] [:code N] [:msg S])` | the sexpr node table (17 node types) |
+| `timeout` | `:timeout PT30S` | the sexpr node table (19 node types, see scope note below) |
+| `errorHandler` | `:on-error (on-error <strategy> [:retry N] [:default V] [:code N] [:msg S])` | the sexpr node table (19 node types) |
+| `timeoutHandler` | `:on-timeout (on-timeout <strategy> …)` (#238) | the sexpr node table (19 node types) |
 | `resultType` | `:result-type error` / `:result-type nop` (omitted when `success`) | `end` |
-| `error` | `:error (dict :code 4001 :message bad)` (any dict literal; `{}` becomes `:error (dict)`) | `end` |
+| `error` | `:error (dict :code 4001 :message "bad")` (any dict literal; data strings are quoted; `{}` becomes `:error (dict)`) | `end` |
+| `itemType` | `:item-type string` (simple dataType) / `:item-type (dict …)` (full Property) | collection nodes |
+| `content_type` | `:content-type "text/plain"` (always quoted) | `http` |
+| `outputType` | `:output-type string` (full Property → `(dict …)`) | `switch`, `case`, `assignment` |
+| branch `label` / `desc` | `:label "…"` / `:desc "…"` | `switch` branches |
+| `next` | `-> <id>` (also on `case` since #238) | all nodes |
 | `flow_id` (nested) | `:flow-id "cf"` (always quoted; omitted entirely when the child has no id) | inline `childFlow` (`(childflow ...)`) |
 
 The nested `childFlow.flow_id` (plaita#149) is emitted right after the
@@ -656,14 +677,15 @@ as a trailing positional form (see above).
 
 !!! note "Scope: which node types `:timeout` / `:on-error` cover"
 
-    "Every node type" means the **17 node types in the sexpr node table**:
+    "Every node type" means the **19 node types in the sexpr node table**:
     `start`, `end`, `assignment` (spelled `assign` or `assignment`), `if`,
-    `switch`, `case`, `loop`, `map`, `filter`, `find`, `reduce`, `child`,
-    `reference`, `parallel`, `code`, `http`, `event`. Model node types with no
-    sexpr compiler -- `mock` (tracked separately as
-    [#146](https://github.com/jeffkit/plaita/issues/146)), `while`, `ignore`,
-    and the non-registry `calculate` / `redis` -- are out of scope: the writer
-    cannot emit those nodes at all, so `:timeout` never appears for them.
+    `switch`, `case`, `loop`, `map`, `filter`, `find`, `reduce`, `while`,
+    `child`, `reference`, `parallel`, `code`, `http`, `event`, `mock`
+    (`mock` was added by
+    [#146](https://github.com/jeffkit/plaita/issues/146), `while` by #238).
+    Model node types with no sexpr compiler -- `ignore` and the non-registry
+    `calculate` / `redis` -- are out of scope: the writer cannot emit those
+    nodes at all, so `:timeout` never appears for them.
 
 !!! warning "Behaviour change: malformed dict literals in `:error` now raise"
 
@@ -714,6 +736,13 @@ emitted spellings are kept in lock-step by two tables in `sexpr.py`
 test `TestFlowLevelFieldSymmetry`: a future reader-side field that the writer
 does not emit turns that test red immediately.
 
+`globalContext` / `metadata` are **data** fields: since #238 the reader runs
+them through `_value()`, so `(dict :env "prod")` becomes the dict
+`{"env": "prod"}` instead of the raw list `["dict", "env", "prod"]`. Type
+declarations with more than `dataType` (children / itemType / constraints) are
+emitted as a full `(dict …)` and read back verbatim; the simple
+`{"dataType": "object"}` form keeps the bare `object` spelling.
+
 Field order follows the reader: `input-type`, `output-type`, `desc`, `version`,
 `author`, `timeout`, `global-context`, `metadata` (children: `flow-id` first,
 then the same subset). A field whose IR value is `None`/absent emits **nothing**
@@ -728,16 +757,15 @@ read `"1.2"` back as a `float`, `"true"` as a `bool`, `"nil"` as `None`. `desc`
 keeps the pre-#147 `_expr_to_src` spelling (`:desc hello`), so its bytes are
 unchanged.
 
-!!! note "Reader-side gap (not part of #147's writer scope)"
+!!! note "Reader-side gap fixed in #238"
 
-    `_compile_flow` does **not** run `:metadata` / `:global-context` through
-    `_value()`, so `(dict :env "prod")` lands in the IR as the raw list
-    `["dict", "env", "prod"]` rather than `{"env": "prod"}`. The writer emits
-    that list (which is why the round-trip is stable), but `parse_sexpr` on a
-    flow that carries either field still fails `Flow` validation
-    (`metadata` / `global_context` are `dict`-typed). Fixing that needs the
-    reader to apply `_value()`, which is tracked separately from this writer
-    delivery.
+    #147 originally recorded that `_compile_flow` did **not** run
+    `:metadata` / `:global-context` through `_value()`, so `(dict :env "prod")`
+    landed in the IR as the raw list `["dict", "env", "prod"]` and
+    `parse_sexpr` then failed `Flow` validation (both fields are `dict`-typed).
+    #238 applies `_value()` on both slots: the IR now holds
+    `{"env": "prod"}` and the full round-trip is a dict; pinned by
+    `TestFlowLevelFieldsRoundTrip::test_root_flow_level_fields_round_trip`.
 
 ### Dict keys in `(dict …)` (plaita#148)
 
@@ -802,7 +830,7 @@ unfaithful source *does* re-parse, which is why a type-level check missed it.
 
 | IR field | Emitted form |
 |----------|--------------|
-| `branches[]` (positional) | `(pbranch <name> :flow (childflow …) [:input <expr>] [:when <cond>])` |
+| `branches[]` (positional) | `(pbranch <name> :flow (childflow …) [:input <expr>] [:when <cond>])` — `:input` 与 `:when` 的值按**数据**发射（#220/L2）：标量形状的字面字符串恒加引号，`$` 开头才是表达式 |
 | `mode` | `:mode thread` (omitted when absent; `thread` is the model default) |
 | `joinBranches` | `:join-branches (b1 b2)` (uniform list spelling, so the empty join set is `:join-branches ()`) |
 | `isConditional` | `:is-conditional true` (only when truthy -- the reader sets `True` for any truthy value, so `false` would be a lie) |
@@ -936,6 +964,28 @@ print(flow_to_sexpr(d))   # 回到可读的 S-expr
 - **`+` 多态、编译期不查类型**：`a + b` 编译成 `$F.add(a, b)` 即 Python `a + b`，对 int/str/list 按 Python `+` 各自语义；要强制字符串拼接请显式用 `F.concat(...)`。完整的支持/不支持写法与精确语义见上文「表达式语义边界」。
 
 ---
+
+## 往返 conformance（#238）
+
+DSL 往返保真从「逐 issue 补丁」升级为 registry 驱动的系统性 conformance：
+`tests/unit/test_issue238_dsl_conformance.py` 以 `NodeRegistry` 为权威清单，
+对**每个节点类型 × 每个 `model_fields` 字段 × 两条链**（`JSON → @flow → JSON`
+与 `JSON → sexpr → JSON`）逐格断言，并在 CI 里单独成步（也随 unit 分块执行）。
+
+- **新增字段必须登记**：registry 的节点类多出一个 `model_field` 而矩阵没有
+  对应条目时，`test_every_registry_field_is_classified` 直接红——新字段不会
+  再成为下一个静默丢字段面。
+- **每个格子有状态**：`OK`（必须逐值往返）、`LOST`（链无法表达，fixture 里
+  给出非默认值并**反向断言仍丢失**——将来补上支持而不更新矩阵也会红）、
+  `INERT`（模型有该字段但本节点类型无运行期/作者面）、`DERIVED`（validator
+  合成或编译期派生注解）、`TYPE_LOST`（整个类型在该链不可表达，发射必须
+  fail-closed）。
+- **已知不可表达项显式登记**：@flow 的 `switch`/`case`（无语句形态）、
+  `start`/`if` 的基类 `timeout`/handler（语句位不存在）、命名引用
+  `reference.flow_id`/`flow_version`（调度器注入形状）、集合节点的 `input`
+  与非输出承载节点的 `output`（引擎不读）等，每格都有原因说明。
+- 归一化比较的口径：剥 `name`/`desc`/`source_line` 派生注解、统一
+  snake/camel 拼写、按图序规范化非语义 id（`$NODE.` 引用到的 id 保持原名）。
 
 ## API 速查
 

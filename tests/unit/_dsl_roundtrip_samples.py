@@ -47,8 +47,30 @@ from plaita.node import get_default_registry
 # ---------------------------------------------------------------------------
 
 REG = get_default_registry()
-#: 默认注册表里的全部节点类型（本单的扫掠对象；#238 时点 = 45 种）。
-NODE_TYPES: List[str] = sorted(REG.list_types())
+
+
+def _is_product_node_type(ntype: str) -> bool:
+    """默认 registry 里属于**产品面**的节点类型。
+
+    ``get_default_registry()`` 是进程级单例：同一次 pytest 会话里，别的测试
+    模块会在 import / fixture 期注册临时节点（``codeflow_test_*`` /
+    ``issue*_probe``），并可能把默认不注册的 ``code`` 临时注册进来。扫掠对象
+    必须排除这些测试态类型，否则测试顺序一变（分块 CI / 全量单进程）就出现
+    「registry 有新类型但 harness 没样本」的假红。产品插件（plaita-nodes 等）
+    的类定义在 ``plaita*`` 模块下，保留。
+    """
+    if ntype == "code":
+        # CodeNode 在 plaita 里**刻意默认不注册**（执行任意代码需显式 opt-in），
+        # 测试注册的 code 不是产品默认面。
+        return False
+    cls = REG.get(ntype)
+    module = str(getattr(cls, "__module__", "")) if cls is not None else ""
+    return not (module == "tests" or module.startswith(("tests.", "test_")))
+
+
+#: 产品面节点类型（本单的扫掠对象；随已装插件集变化）。
+NODE_TYPES: List[str] = sorted(
+    t for t in REG.list_types() if _is_product_node_type(t))
 CLS2TYPE = {REG.get(t): t for t in NODE_TYPES}
 
 #: 伪样本类型：只测 flow 级字段（#147/#149 的面），不带业务节点。

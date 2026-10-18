@@ -81,6 +81,10 @@ def _compile_node_call(
             spec["timeout"] = _const(kw["timeout"])
         if "input" in kw:
             spec["input"] = _const(kw["input"])
+        # #238：Content-Type 此前两侧都没有表达面 ⇒ 往返静默落回默认。
+        content_type = kw.get("content_type") or kw.get("contentType")
+        if content_type is not None:
+            spec["content_type"] = _const(content_type)
         # plaita#220/L4：output / query / addressing / delegate 此前不在内置
         # kind 的手写链里 ⇒ 发射器写出也会被编译期静默丢弃（与 L4 的 sexpr
         # 链同一面）。字段名 snake == camel，无需双拼写。
@@ -243,6 +247,11 @@ def _compile_custom_node(
     eh = kw.pop("on_error", None) or kw.pop("on_error_handler", None)
     if eh is not None:
         spec["errorHandler"] = _eval_error_handler(eh, ctx)
+    # #238：`on_timeout=ErrorHandler(...)` 必须在通用 kwarg 循环前消费——否则
+    # `ErrorHandler(...)` 会被当普通表达式编译并直接报「不支持的调用」。
+    th = kw.pop("on_timeout", None)
+    if th is not None:
+        spec["timeoutHandler"] = _eval_error_handler(th, ctx)
     for arg_name, arg_node in kw.items():
         if arg_name is None:  # **kwargs 解包
             raise _CodeflowError("自定义节点不支持 **kwargs 解包", node)

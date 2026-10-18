@@ -106,6 +106,9 @@ _COMPARE_OP = {
 _NEGATE_OP = {
     "eq": "ne", "ne": "eq", "gt": "lte", "gte": "lt",
     "lt": "gte", "lte": "gt", "in": "notIn", "notIn": "in",
+    # 包含关系的取反：`not F.contains(...)` → notContains（#238，与
+    # `plaita/node/decide.py` 的算子枚举对称；此前这类条件直接编译失败）。
+    "contains": "notContains", "notContains": "contains",
     # 裸真值测试的取反（`not x`）：truthy <-> falsy（2026-10 评审修复包 A1）
     "truthy": "falsy", "falsy": "truthy",
 }

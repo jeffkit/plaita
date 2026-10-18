@@ -406,11 +406,16 @@ def _normalize_op(op: str) -> str:
 
 
 def _compile_error_handler(form: Any) -> Dict[str, Any]:
-    if not isinstance(form, list) or not _is_symbol(form[0]) or str(form[0]) != "on-error":
-        raise SyntaxError(f"错误处理必须是 (on-error strategy ...) 形式，得到 {form!r}")
+    # `on-timeout` 与 `on-error` 共用同一套字段（策略/重试/默认值/错误码/消息）；
+    # 两个头都收：写侧按槽位分别发射，历史语料里的 `(on-error ...)` 也照样可读。
+    if (not isinstance(form, list) or not _is_symbol(form[0])
+            or str(form[0]) not in ("on-error", "on-timeout")):
+        raise SyntaxError(
+            f"错误处理必须是 (on-error strategy ...) 或 (on-timeout strategy ...) 形式，"
+            f"得到 {form!r}")
     pos, kw = _split_args(form[1:])
     if not pos:
-        raise SyntaxError("on-error 需要指定 strategy")
+        raise SyntaxError(f"{form[0]} 需要指定 strategy")
     strategy = str(pos[0])
     if strategy not in ("abort", "continue", "continue_with", "continue-with"):
         # 连字符 "continue-with" 是 ErrorStrategy 的规范枚举值 (core 层两种拼写
@@ -461,9 +466,15 @@ def _compile_childflow(form: Any) -> Dict[str, Any]:
 
 
 def _type_spec(x: Any) -> Any:
+    """类型声明读侧：裸符号 → ``{"dataType": …}``；``(dict …)`` → 完整 Property。
+
+    #238：此前非字符串原样返回，而写侧只发 ``dataType`` ⇒ 带 children /
+    itemType / 约束的完整 Property 往返后只剩 dataType。现在双方都走完整
+    dict 形态（简单 dataType 仍保持裸符号写法，既有语料字节不变）。
+    """
     if isinstance(x, str):
         return {"dataType": x}
-    return x
+    return _value(x)
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +505,12 @@ def _common_fields(kw: Dict[str, Any], spec: Dict[str, Any], ctx: _Ctx) -> None:
     eh = _opt(kw, "on-error", "error-handler")
     if eh is not None:
         spec["errorHandler"] = _compile_error_handler(eh)
+    # #238：timeoutHandler 与 errorHandler 都是 Node 基类字段；读侧此前完全没有
+    # `:on-timeout`（写侧也不发）⇒ 任何节点往返都静默丢超时策略。
+    th = _opt(kw, "on-timeout", "timeout-handler", "timeoutHandler",
+              "timeout_handler")
+    if th is not None:
+        spec["timeoutHandler"] = _compile_error_handler(th)
 
 
 _NON_ID_SYMBOLS = {"true", "false", "nil", "True", "False", "None"}
@@ -602,6 +619,10 @@ def _c_switch(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
         raise SyntaxError("switch 至少需要一条分支")
     spec: Dict[str, Any] = {"type": "switch", "branches": branches}
     _common_fields(kw, spec, ctx)
+    # #238：Switch.output_type 是声明字段（默认 string）；写侧此前不发射。
+    ot = _opt(kw, "output-type", "outputType", "output_type")
+    if ot is not None:
+        spec["outputType"] = _type_spec(ot)
     return spec
 
 
@@ -621,6 +642,14 @@ def _c_branch(args: List[Any]) -> Dict[str, Any]:
         spec["condition"] = _compile_condition(when)
     if _opt(kw, "default", "is-default", "isDefault"):
         spec["isDefault"] = True
+    # #238：Branch.label / desc 是展示元数据（console 分支列表），此前写侧
+    # 不发射 ⇒ 往返丢。它们是文本标签，恒按字符串读。
+    label = _opt(kw, "label")
+    if label is not None:
+        spec["label"] = str(label)
+    desc = _opt(kw, "desc")
+    if desc is not None:
+        spec["desc"] = str(desc)
     return spec
 
 
@@ -639,6 +668,10 @@ def _c_case(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     default = _opt(kw, "default")
     if default is not None:
         spec["default"] = str(default)
+    # Case 继承 Switch 的 output_type 声明字段（#238 补齐写侧对称）。
+    ot = _opt(kw, "output-type", "outputType", "output_type")
+    if ot is not None:
+        spec["outputType"] = _type_spec(ot)
     return spec
 
 
@@ -662,6 +695,9 @@ def _collection_common(ntype: str, args: List[Any], ctx: _Ctx) -> Dict[str, Any]
         "collection": _value(collection),
         "childFlow": _compile_childflow(child),
     }
+    item_type = _opt(kw, "item-type", "itemType", "item_type")
+    if item_type is not None:
+        spec["itemType"] = _type_spec(item_type)
     _common_fields(kw, spec, ctx)
     return spec
 
@@ -672,6 +708,32 @@ def _c_loop(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     when = _opt(kw, "when", "condition")
     if when is not None:
         spec["condition"] = _compile_condition(when)
+    return spec
+
+
+def _c_while(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
+    """``(while :when (cond ...) :child (childflow ...) ...)``（#238）。
+
+    While 是 registry 里的内置节点（``plaita.node.loop.While``），但 sexpr 的
+    节点表此前完全没有它 ⇒ 含 while 的 flow 无法发射/读回。读侧与集合节点
+    同形：条件 + 内联子流程 + 可选 ``:max-iterations``。
+    """
+    _, kw = _split_args(args)
+    cond = _opt(kw, "when", "condition")
+    if cond is None:
+        raise SyntaxError("while 需要 :when（或 :condition）条件")
+    child = _opt(kw, "child", "child-flow", "childFlow")
+    if child is None:
+        raise SyntaxError("while 需要 :child (childflow ...)")
+    spec: Dict[str, Any] = {
+        "type": "while",
+        "condition": _compile_condition(cond),
+        "childFlow": _compile_childflow(child),
+    }
+    _common_fields(kw, spec, ctx)
+    mi = _opt(kw, "max-iterations", "maxIterations", "max_iterations")
+    if mi is not None:
+        spec["maxIterations"] = mi
     return spec
 
 
@@ -827,6 +889,11 @@ def _c_http(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     inp = _opt(kw, "input")
     if inp is not None:
         spec["input"] = _value(inp)
+    # #238：Content-Type（model 字段 content_type / legacy contentType）此前
+    # 两条链都没有表达面 ⇒ 往返静默落回 application/json。
+    ct = _opt(kw, "content-type", "contentType", "content_type")
+    if ct is not None:
+        spec["content_type"] = _value(ct)
     # plaita#220/L4：HTTP 的四个**语义字段**此前读写两侧都没有表达面 ⇒ 往返
     # 静默丢失：`output` 改返回形状、`query` 改请求、`addressing`/`delegate`
     # 改网络路径（寻址/代理）。`headers`/`body` 早已有面，见下方 L6 的字面量
@@ -949,6 +1016,7 @@ _NODE_COMPILERS = {
     "filter": lambda a, ctx: _collection_common("filter", a, ctx),
     "find": lambda a, ctx: _collection_common("find", a, ctx),
     "reduce": _reduce,
+    "while": _c_while,
     "child": _c_child,
     "reference": _c_reference,
     "parallel": _c_parallel,
@@ -984,12 +1052,15 @@ def _compile_flow(form: Any) -> Dict[str, Any]:
         v = _opt(kw, fld)
         if v is not None:
             data[fld] = v
+    # #238：这两个是**数据**字段（dict 字面量），必须经 `_value()` 编译；
+    # 否则 `(dict …)` 会原样留成 `['dict', …]` 列表，往返后 globalContext /
+    # metadata 从 dict 退化成 list。
     gc = _opt(kw, "global-context", "globalContext")
     if gc is not None:
-        data["globalContext"] = gc
+        data["globalContext"] = _value(gc)
     md = _opt(kw, "metadata")
     if md is not None:
-        data["metadata"] = md
+        data["metadata"] = _value(md)
     body = pos[1:]
     ctx = _Ctx()
     data["nodes"] = [_compile_node(n, ctx) for n in body]
@@ -1173,12 +1244,14 @@ def _cond_to_src(c: Any) -> str:
             inner = " ".join(_cond_to_src(x) for x in c["conditions"])
             return f"({c['relation']} {inner})"
         op = c["operator"]
-        return f'(cond {_expr_to_src(c["field"])} {op} {_expr_to_src(c["value"])})'
+        # 比较值是**数据**：字符串 "true"/"1"/"nil" 若走表达式裸原子约定会被
+        # 读回 bool/int/None（#238 全字段 conformance）。`$` 开头的仍按表达式。
+        return f'(cond {_expr_to_src(c["field"])} {op} {_data_value_to_src(c["value"])})'
     return _expr_to_src(c)
 
 
-def _error_handler_to_src(eh: Dict[str, Any]) -> str:
-    """Emit ``errorHandler`` as the nested form ``(on-error <strategy> ...)``.
+def _error_handler_to_src(eh: Dict[str, Any], head: str = "on-error") -> str:
+    """Emit an error/timeout handler as ``(<head> <strategy> ...)``.
 
     #136 (same root, item 3): it must be emitted as the **value** of
     ``:on-error``, not as a trailing positional argument of the node. A
@@ -1191,15 +1264,15 @@ def _error_handler_to_src(eh: Dict[str, Any]) -> str:
     ``errorHandler`` payload round-trips losslessly (including ``errorCode`` /
     ``errorMessage``, which the writer used to drop silently as well).
     """
-    ep = ["on-error", str(eh.get("strategy", "abort"))]
+    ep = [head, str(eh.get("strategy", "abort"))]
     if "retryTimes" in eh:
         ep.append(f":retry {eh['retryTimes']}")
     if "defaultValue" in eh:
-        ep.append(f":default {_expr_to_src(eh['defaultValue'])}")
+        ep.append(f":default {_data_value_to_src(eh['defaultValue'])}")
     if "errorCode" in eh:
         ep.append(f":code {eh['errorCode']}")
     if "errorMessage" in eh:
-        ep.append(f":msg {_expr_to_src(eh['errorMessage'])}")
+        ep.append(f":msg {_data_value_to_src(eh['errorMessage'])}")
     return "(" + " ".join(ep) + ")"
 
 
@@ -1233,9 +1306,14 @@ def _common_kw_to_src(n: Dict[str, Any]) -> List[str]:
     timeout = n.get("timeout")
     if timeout is not None:
         out.append(f":timeout {_expr_to_src(timeout)}")
-    eh = n.get("errorHandler")
+    eh = _dual(n, "errorHandler", "error_handler")
     if eh is not None:
         out.append(f":on-error {_error_handler_to_src(eh)}")
+    # #238：Node.timeout_handler 与 error_handler 同属基类字段；写侧此前
+    # 一个字都不发 ⇒ 往返把超时策略静默清空（读侧已补 :on-timeout）。
+    th = _dual(n, "timeoutHandler", "timeout_handler")
+    if th is not None:
+        out.append(f":on-timeout {_error_handler_to_src(th, 'on-timeout')}")
     return out
 
 
@@ -1302,7 +1380,9 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # exit without a code" apart from "no error exit at all"), hence the
         # `is not None` test rather than truthiness.
         if n.get("error") is not None:
-            parts.append(f":error {_expr_to_src(n['error'])}")
+            # error 是纯数据（End.execute 从不求值）：字符串 "true"/"1" 不能按
+            # 表达式裸原子发射，否则往返后类型漂移（#238）。
+            parts.append(f":error {_data_value_to_src(n['error'])}")
         # #150: `_common_fields` reads `:next` for *every* node, `end` included;
         # this arm was the one place it was not written back.
         if n.get("next") is not None:
@@ -1312,8 +1392,9 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # #150: `_c_assignment` reads `:output-type` and the field is declared on
         # `Assignment.output_type`; the writer dropped it (unlike `:output-type`
         # on the root flow, which #147 made emit).
-        if n.get("outputType") is not None:
-            parts.append(f":output-type {_type_to_src(n['outputType'])}")
+        output_type = _dual(n, "outputType", "output_type")
+        if output_type is not None:
+            parts.append(f":output-type {_type_to_src(output_type)}")
         # plaita#220/L5a：`upstreamOutput` 在多 upstream 时决定取值
         # （`Assignment.execute` 按 `state.last_node_id` 挑选）。读写两侧此前
         # 都没有表达面 ⇒ 往返即丢。`None` 与 `[]` 语义等价（字段默认 []），
@@ -1329,7 +1410,12 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         parts.append(f":else {n.get('else_next')}")
     elif t == "switch":
         for b in n.get("branches", []):
-            bp = ["branch", b.get("name"), f"-> {b.get('next')}"]
+            # `-> next` 只在显式给出时发射：`branch_name_as_target` 语义下
+            # 缺席的 next 表示「name 即目标」，发成 `-> None` 会把字符串
+            # "None" 读成目标 id（#238 全字段盘点发现的发射缺陷）。
+            bp = ["branch", b.get("name")]
+            if b.get("next") is not None:
+                bp.append(f"-> {b['next']}")
             # #150: `_c_branch` reads `:priority`, and `Branch.priority` decides
             # the match order in `Switch.execute` (sorted desc) -- dropping it
             # silently changes which branch wins. Emitted only when present, so
@@ -1340,13 +1426,24 @@ def _node_to_src(n: Dict[str, Any]) -> str:
                 bp.append(f":when {_cond_to_src(b['condition'])}")
             if b.get("isDefault"):
                 bp.append(":default true")
+            # #238：Branch.label / desc 是展示元数据，写侧此前不发射。
+            if b.get("label") is not None:
+                bp.append(f":label {_string_to_src(str(b['label']))}")
+            if b.get("desc") is not None:
+                bp.append(f":desc {_string_to_src(str(b['desc']))}")
             parts.append("(" + " ".join(str(x) for x in bp) + ")")
+        # #238：Switch.output_type 是声明字段；读写两侧此前都不发射/读取。
+        output_type = _dual(n, "outputType", "output_type")
+        if output_type is not None:
+            parts.append(f":output-type {_type_to_src(output_type)}")
         # #150: the switch node's own successor (read by `_common_fields`) was
         # the second omission in this arm.
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "case":
-        parts.append(f":target {_expr_to_src(n.get('target'))}")
+        # target / match value 是数据语义的表达式槽位：`$` 开头按表达式，
+        # 其余字符串恒加引号——否则字面 "true"/"1" 往返后变成 bool/int。
+        parts.append(f":target {_data_value_to_src(n.get('target'))}")
         for c in n.get("cases", []):
             # #150: `_c_match` accepts `:name` and stores ``cases[i]["name"]``
             # (surfaced downstream as the branch `label`). It also *defaults*
@@ -1358,16 +1455,38 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             # custom name survive. The name goes through `_string_to_src` for the
             # same reason `:flow-id` does: it is a label, not an expression, so a
             # numeric-looking name (`"01"`) must not collapse to an int.
-            head = f"(match {_expr_to_src(c.get('value'))} {c.get('id')}"
+            head = f"(match {_data_value_to_src(c.get('value'))} {c.get('id')}"
             cname = c.get("name")
             if cname is not None and str(cname) != str(c.get("value")):
                 head += f" :name {_string_to_src(str(cname))}"
             parts.append(head + ")")
         if n.get("default") is not None:
             parts.append(f":default {n['default']}")
+        # #238：`case.next`（`_common_fields` 读 `:next`）此前写侧完全不发，
+        # 往返后节点图断链。
+        if n.get("next") is not None:
+            parts.append(f"-> {n['next']}")
+        output_type = _dual(n, "outputType", "output_type")
+        if output_type is not None:
+            parts.append(f":output-type {_type_to_src(output_type)}")
+    elif t == "while":
+        # #238：registry 有 While，但 sexpr 节点表此前没有它——含 while 的
+        # flow 既发不出也读不回（未知节点类型）。条件/子流程/上限三件套。
+        parts.append(f":when {_cond_to_src(n.get('condition'))}")
+        child = _dual(n, "childFlow", "child_flow")
+        parts.append(f":child ({_flow_inner_to_src(child)})")
+        max_iterations = _dual(n, "maxIterations", "max_iterations")
+        if max_iterations is not None:
+            parts.append(f":max-iterations {max_iterations}")
+        if n.get("next") is not None:
+            parts.append(f"-> {n['next']}")
     elif t in ("loop", "map", "filter", "find", "reduce"):
         parts.append(f":collection {_expr_to_src(n.get('collection'))}")
-        parts.append(f":child ({_flow_inner_to_src(n.get('childFlow'))})")
+        item_type = _dual(n, "itemType", "item_type")
+        if item_type is not None:
+            parts.append(f":item-type {_type_to_src(item_type)}")
+        child = _dual(n, "childFlow", "child_flow")
+        parts.append(f":child ({_flow_inner_to_src(child)})")
         if t == "loop" and n.get("condition") is not None:
             parts.append(f":when {_cond_to_src(n['condition'])}")
         if t == "map" and n.get("concurrent"):
@@ -1384,7 +1503,8 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             parts.append(f"-> {n['next']}")
     elif t in ("child", "reference"):
         parts.append(f":input {_expr_to_src(n.get('input'))}")
-        parts.append(f":child ({_flow_inner_to_src(n.get('childFlow'))})")
+        child = _dual(n, "childFlow", "child_flow")
+        parts.append(f":child ({_flow_inner_to_src(child)})")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "parallel":
@@ -1401,12 +1521,13 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # `-> next` stays last, exactly as in the other arms.
         if n.get("mode") is not None:
             parts.append(f":mode {n['mode']}")
-        if n.get("joinBranches") is not None:
+        join_branches = _dual(n, "joinBranches", "join_branches")
+        if join_branches is not None:
             # The reader accepts a single name or a list; the list spelling is
             # used uniformly so it round-trips for any cardinality (including
             # the empty join set, `:join-branches ()`).
-            parts.append(f":join-branches {_expr_to_src(list(n['joinBranches']))}")
-        if n.get("isConditional"):
+            parts.append(f":join-branches {_expr_to_src(list(join_branches))}")
+        if _dual(n, "isConditional", "is_conditional"):
             # Truthy-only, like the reader's `if _opt(...): spec[...] = True`:
             # `False` is not an IR value the reader can produce, and emitting
             # `:is-conditional false` would still set the flag to True.
@@ -1415,7 +1536,10 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             bp = ["pbranch", _expr_to_src(b.get("name")),
                   f":flow ({_flow_inner_to_src(b.get('flow'))})"]
             if b.get("input") is not None:
-                bp.append(f":input {_expr_to_src(b['input'])}")
+                # 分支 input 是**数据/表达式混合槽位**：`$…` 按表达式，
+                # 其余字符串恒加引号——裸原子会把 "true"/"42"/"nil" 读成
+                # bool/int/None（#238 conformance 与 #220-L2 同根）。
+                bp.append(f":input {_data_value_to_src(b['input'])}")
             if b.get("condition") is not None:
                 bp.append(f":when {_cond_to_src(b['condition'])}")
             parts.append("(" + " ".join(str(x) for x in bp) + ")")
@@ -1440,6 +1564,10 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             value = n.get(field)
             if value is not None:
                 parts.append(f":{field} {_data_value_to_src(value)}")
+        # #238：Content-Type（content_type / legacy contentType）此前不发射。
+        content_type = _dual(n, "contentType", "content_type")
+        if content_type is not None:
+            parts.append(f":content-type {_string_to_src(str(content_type))}")
         # #200：访问策略（SSRF 防护面）此前写侧一个字都不发。读侧补齐后这里
         # 对称发射；全部排在 `-> next` 之前（关键字列表在此终止）。
         allowed = _dual(n, "allowedHosts", "allowed_hosts")
@@ -1467,7 +1595,9 @@ def _node_to_src(n: Dict[str, Any]) -> str:
             parts.append(f"-> {n['next']}")
     elif t == "code":
         parts.append(f":lang {n.get('language')}")
-        parts.append(f":code {_expr_to_src(n.get('code'))}")
+        # 代码是**字面量源码**（`CodeNode.execute` 不做表达式求值）：`"1"` /
+        # `"true"` 走裸原子会被读回 int/bool，必须恒加引号（#238）。
+        parts.append(f":code {_string_to_src(str(n.get('code')))}")
         # #150: `_c_code` reads `:input` into `CodeNode.input`; dropped before.
         if n.get("input") is not None:
             parts.append(f":input {_expr_to_src(n['input'])}")
@@ -1503,7 +1633,8 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # `value = None` 与"字段缺席"语义等价（`Mock.value` 默认 None），故按
         # `is not None` 判断，与 `_flow_level_fields_to_src` 的"None 一律不发"一致。
         if n.get("value") is not None:
-            parts.append(f":value {_expr_to_src(n['value'])}")
+            # Mock.value 原样返回（不求值）：数据拼写，避免 "true"/"1" 类型漂移。
+            parts.append(f":value {_data_value_to_src(n['value'])}")
         # `output` 继承自 `Node`：dryrun 把被 pin 的节点换成 mock 时保留原节点的
         # `output`（见 plaita-console/backend/services/dryrun.py），漏发即往返丢字段。
         if n.get("output") is not None:
@@ -1511,7 +1642,8 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "event":
-        parts.append(f":type {_expr_to_src(n.get('eventType', n.get('event_type')))}")
+        event_type = _dual(n, "eventType", "event_type")
+        parts.append(f":type {_expr_to_src(event_type)}")
         # #127（同根第二处）：`eventFilter` 只在解析侧存在过——`_c_event` 读
         # `:filter` / `:event-filter` / `:eventFilter` 三个别名并写入 `eventFilter`，
         # 而发射侧原本一个字都不写 ⇒ 往返**静默丢过滤条件**。
@@ -1523,9 +1655,10 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # （`$INPUT.x`），但 **dict filter 在 `Flow.model_validate` 后变成 None**
         # （实测：发射出 `… -> e :filter (dict a 1)`，校验后 eventFilter 消失）。
         # 因此**所有关键字必须排在 `-> next` 之前**。
-        ev_filter = n.get("eventFilter", n.get("event_filter"))
+        ev_filter = _dual(n, "eventFilter", "event_filter")
         if ev_filter is not None:
-            parts.append(f":filter {_expr_to_src(ev_filter)}")
+            # filter 是**匹配数据**：字符串 "true"/"1" 不能按表达式裸原子发射。
+            parts.append(f":filter {_data_value_to_src(ev_filter)}")
         # #200：订阅超时同样只在节点声明里存在过——读写两侧都没有表达面，
         # 往返即丢 ⇒ 本应超时唤醒的挂起退化成无限等待。与 :filter 同理排在
         # `-> next` 之前。
@@ -1586,15 +1719,23 @@ _QUOTED_FLOW_FIELDS = frozenset({"flow_id", "version", "author"})
 def _type_to_src(t: Any) -> Any:
     """``{"dataType": "object"}`` → ``object``：读侧 ``_type_spec`` 的逆。
 
-    保持 base 的既有拼写（裸 ``dataType``，非 dict 原样透出）；dict 里
-    ``dataType`` 之外的键读侧不表达，故不发射。
+    只含 ``dataType`` 的类型保持 base 的裸符号拼写（既有语料字节不变）；
+    带 children / itemType / 约束的完整 Property 必须发成 ``(dict …)``，
+    否则 #238 的全字段往返会把其余键静默洗掉。
     """
-    return t.get("dataType", "object") if isinstance(t, dict) else t
+    if isinstance(t, dict):
+        if set(t) <= {"dataType"}:
+            return t.get("dataType", "object")
+        return _data_value_to_src(t)
+    return t
 
 
 def _flow_field_to_src(ir_key: str, value: Any) -> str:
     if ir_key in ("inputType", "outputType"):
         return _type_to_src(value)
+    if ir_key in ("globalContext", "metadata"):
+        # 纯数据（dict/list/标量），字符串 "true"/"1" 必须保持字符串类型。
+        return _data_value_to_src(value)
     if ir_key in _QUOTED_FLOW_FIELDS:
         return _string_to_src(str(value))
     return _expr_to_src(value)

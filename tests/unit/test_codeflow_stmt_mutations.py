@@ -579,7 +579,7 @@ class TestCompileEndCallMutations:
             _compile_block(_stmts("end(resultType=\"error\")"), _ctx(), None)
         assert str(exc.value) == (
             "[codeflow] 第 7 行: end(...) 不支持的参数 'resultType'"
-            "（可用：output/result_type/error）")
+            "（可用：output/result_type/error/timeout/on_error/on_timeout）")
 
     def test_end_rejects_duplicate_kwarg(self):
         with pytest.raises(_CodeflowError) as exc:

@@ -1,0 +1,5 @@
+plaita#238 negative controls — harness sensitivity evidence
+command: .venv/bin/python -m pytest tests/unit/test_issue238_dsl_conformance.py::TestNegativeControls tests/unit/test_issue238_dsl_conformance.py::TestMatrixCompleteness::test_harness_detects_unregistered_new_field -q
+
+.....                                                                    [100%]
+5 passed in 0.33s

@@ -82,8 +82,12 @@ def _compile_block(
 
 
 # `end(...)` 终止语句的参数表（#76：return 只能表达 success 出口）。
+# #238：end 也是 Node，基类 timeout / errorHandler / timeoutHandler 与其它
+# 节点同口径可配——此前这三个字段在两条链上都没有表达面，往返静默丢。
 _END_CALL_NAME = "end"
-_END_CALL_KWARGS = ("output", "result_type", "error")
+_END_CALL_KWARGS = (
+    "output", "result_type", "error", "timeout", "on_error", "on_timeout",
+)
 
 
 def _is_end_call(stmt: ast.stmt) -> bool:
@@ -110,7 +114,8 @@ def _compile_end_call(head: ast.Expr, ctx: _CompileCtx, rest: List[ast.stmt]) ->
             raise _CodeflowError("end(...) 不支持 ** 解包", kw.value)
         if kw.arg not in _END_CALL_KWARGS:
             raise _CodeflowError(
-                f"end(...) 不支持的参数 {kw.arg!r}（可用：output/result_type/error）", kw.value)
+                f"end(...) 不支持的参数 {kw.arg!r}"
+                f"（可用：{'/'.join(_END_CALL_KWARGS)}）", kw.value)
         if kw.arg in kwargs:
             raise _CodeflowError(f"end(...) 重复的参数 {kw.arg!r}", kw.value)
         kwargs[kw.arg] = kw.value
@@ -163,6 +168,9 @@ def _compile_end_call(head: ast.Expr, ctx: _CompileCtx, rest: List[ast.stmt]) ->
     }
     if error is not None:
         end_node["error"] = error
+    # #238：基类共有字段与所有内置节点同一套消费逻辑（on_timeout 只在
+    # `_apply_base_kwargs` 里处理，别在这里重复实现）。
+    _apply_base_kwargs(end_node, kwargs, ctx)
     if expr_text:
         end_node["name"] = _human_label(f"end {expr_text}")
     end_node["desc"] = _human_label(f"end {expr_text}（第 {head.lineno} 行）", 60)
@@ -334,9 +342,12 @@ def _compile_while_for(
         "condition": cond,
         "child_flow": child_flow,
     }
-    mi = kw.get("max_iterations")
+    mi = kw.get("max_iterations") or kw.get("maxIterations")
     if mi is not None and isinstance(mi, ast.Constant) and isinstance(mi.value, int):
         spec["max_iterations"] = mi.value
+    # #238：While 的基类字段与集合节点同一套消费逻辑；此前这条 for-head
+    # 路径漏调 `_apply_base_kwargs` ⇒ 发射器写出也会被编译期静默丢弃。
+    _apply_base_kwargs(spec, kw, ctx)
 
     # plaita#220/L1（同族）：`for x in WHILE(cond, id='w')` 的 id 同样没有赋值
     # 语句可借，下游 `output=w` 需要名字作用域里有它。
@@ -468,6 +479,11 @@ def _compile_for(
         init = kw.get("initial")
         if init is not None:
             spec["initial"] = _compile_expr(init, ctx)
+    # #238：`itemType`（循环元素类型声明）两条链都没有表达面 ⇒ 往返静默丢。
+    # 存量 IR 用 camel，模型字段是 snake；发射器 `_emit_collection` 双读。
+    item_type = kw.get("item_type") or kw.get("itemType")
+    if item_type is not None:
+        spec["itemType"] = _compile_expr(item_type, ctx)
     if kind == "LOOP" and kw.get("condition") is not None:
         # #227：@flow 链此前不读 `condition=` ⇒ 发射器即使写出也被编译期丢弃。
         # 条件上下文与 while 条件同形（父名字 + `$LOOP-*` 注入名，item/index 遮蔽

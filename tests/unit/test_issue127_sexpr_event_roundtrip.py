@@ -112,11 +112,16 @@ class TestPreExistingCodeQuirkIsSeparate:
 
     SRC = '(flow c (start :id s -> code1) (code :id code1 :lang python :code "1" -> e) (end :id e))'
 
-    def test_code_value_normalization_is_pinned(self):
+    def test_code_value_is_no_longer_type_normalized(self):
+        """#238：代码是字面量源码，`"1"` 往返后必须仍是字符串 `"1"`。
+
+        历史行为（裸原子发射 → 重读成 int）是一条未登记的数据漂移；conformance
+        全字段盘点把它转正为保真断言。
+        """
         ir = compile_sexpr(self.SRC)
         assert _node(ir, "code1")["code"] == "1"          # 解析得到字符串
         back = compile_sexpr(flow_to_sexpr(ir))
-        assert _node(back, "code1")["code"] == 1          # 往返后规整化为 int（既有行为）
+        assert _node(back, "code1")["code"] == "1"        # 往返后仍是字符串
 
     def test_code_next_itself_survives(self):
         """本单关心的那一半：`code` 的 next 是幸存的（issue 里给的 control）。"""

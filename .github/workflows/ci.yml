@@ -120,6 +120,12 @@ jobs:
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
           done
+      # #238：DSL 往返 conformance 单独成步——registry×字段矩阵（全节点类型 ×
+      # 全字段 × 双链，新字段未登记即红）+ 落地席 harvest 三表示扫掠（丢失
+      # 白名单/钉值）；也随 tests/unit/test_*.py 分块被收集，这里是具名快速
+      # 信号（<2s），不替代分块全量。
+      - name: CI gate [1e/6] DSL round-trip conformance (#238)
+        run: python -m pytest tests/unit/test_issue238_dsl_conformance.py tests/unit/test_dsl_roundtrip_conformance.py -x -q
       - name: CI gate [2/4] import layering
         run: bash scripts/ci-gate.sh layering
       - name: CI gate [3/4] wheel contents

@@ -121,7 +121,9 @@ class TestItem1EndErrorRoundTrip:
 
     def test_error_is_emitted(self):
         text = _emit(_end_ir("error", output="no", error=self.PAYLOAD))
-        assert ":error (dict :code 4001 :message bad)" in text, text
+        # #238：error 是纯数据，字符串值恒加引号（"bad" 不能再按裸原子发，
+        # 否则 "true"/"1" 这类合法消息文本会在往返后变类型）。
+        assert ':error (dict :code 4001 :message "bad")' in text, text
 
     def test_error_survives_compile_sexpr(self):
         text, back = _roundtrip_ir(_end_ir("error", output="no", error=self.PAYLOAD))

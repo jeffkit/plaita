@@ -1,0 +1,346 @@
+plaita#238 DSL round-trip conformance matrix
+statuses: ok=must round-trip | lost=chain cannot express (assert still lost)
+          inert=no runtime/author surface | derived=validator/compile annotation
+          type-lost=whole node type unemittable on that chain
+
+## assignment
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=ok         sexpr=ok
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  output_type            flow=ok         sexpr=ok
+  upstream_output        flow=ok         sexpr=ok
+
+## case
+  id                     flow=type-lost  sexpr=ok
+  name                   flow=type-lost  sexpr=derived
+  desc                   flow=type-lost  sexpr=derived
+  source_line            flow=type-lost  sexpr=derived
+  output                 flow=type-lost  sexpr=lost
+  next                   flow=type-lost  sexpr=ok
+  timeout                flow=type-lost  sexpr=ok
+  timeout_handler        flow=type-lost  sexpr=ok
+  error_handler          flow=type-lost  sexpr=ok
+  output_type            flow=type-lost  sexpr=ok
+  branches               flow=type-lost  sexpr=derived
+  target                 flow=type-lost  sexpr=ok
+  cases                  flow=type-lost  sexpr=ok
+  default                flow=type-lost  sexpr=ok
+
+## child
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+
+## code
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  language               flow=ok         sexpr=ok
+  code                   flow=ok         sexpr=ok
+  input                  flow=ok         sexpr=ok
+  sandbox_backend        flow=ok         sexpr=ok
+
+## end
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=ok         sexpr=ok
+  next                   flow=inert      sexpr=inert
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  result_type            flow=ok         sexpr=ok
+  error                  flow=ok         sexpr=ok
+
+## event
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  event_type             flow=ok         sexpr=ok
+  event_filter           flow=ok         sexpr=ok
+  subscription_timeout   flow=ok         sexpr=ok
+
+## filter
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=lost       sexpr=lost
+  collection             flow=ok         sexpr=ok
+  item_type              flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+
+## find
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=lost       sexpr=lost
+  collection             flow=ok         sexpr=ok
+  item_type              flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+
+## http
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=ok         sexpr=ok
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  method                 flow=ok         sexpr=ok
+  content_type           flow=ok         sexpr=ok
+  request_timeout        flow=ok         sexpr=ok
+  allowed_hosts          flow=ok         sexpr=ok
+  denied_hosts           flow=ok         sexpr=ok
+  block_private_networks flow=ok         sexpr=ok
+  max_redirects          flow=ok         sexpr=ok
+  url                    flow=ok         sexpr=ok
+  query                  flow=ok         sexpr=ok
+  headers                flow=ok         sexpr=ok
+  body                   flow=ok         sexpr=ok
+  addressing             flow=ok         sexpr=ok
+  delegate               flow=ok         sexpr=ok
+
+## if
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=lost       sexpr=ok
+  timeout_handler        flow=lost       sexpr=ok
+  error_handler          flow=lost       sexpr=ok
+  else_next              flow=ok         sexpr=ok
+  condition              flow=ok         sexpr=ok
+  branches               flow=derived    sexpr=derived
+  output_type            flow=lost       sexpr=lost
+
+## loop
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=lost       sexpr=lost
+  collection             flow=ok         sexpr=ok
+  item_type              flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+  condition              flow=ok         sexpr=ok
+
+## map
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=lost       sexpr=lost
+  collection             flow=ok         sexpr=ok
+  item_type              flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+  concurrent             flow=ok         sexpr=ok
+  max_concurrent         flow=ok         sexpr=ok
+
+## mock
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=ok         sexpr=ok
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  value                  flow=ok         sexpr=ok
+
+## parallel
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  branches               flow=ok         sexpr=ok
+  mode                   flow=ok         sexpr=ok
+  join_branches          flow=ok         sexpr=ok
+  is_conditional         flow=ok         sexpr=ok
+
+## reduce
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=lost       sexpr=lost
+  collection             flow=ok         sexpr=ok
+  item_type              flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+  initial                flow=ok         sexpr=ok
+
+## reference
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+  flow_id                flow=lost       sexpr=lost
+  flow_version           flow=lost       sexpr=lost
+
+## start
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=lost       sexpr=ok
+  timeout_handler        flow=lost       sexpr=ok
+  error_handler          flow=lost       sexpr=ok
+
+## switch
+  id                     flow=type-lost  sexpr=ok
+  name                   flow=type-lost  sexpr=derived
+  desc                   flow=type-lost  sexpr=derived
+  source_line            flow=type-lost  sexpr=derived
+  output                 flow=type-lost  sexpr=lost
+  next                   flow=type-lost  sexpr=ok
+  timeout                flow=type-lost  sexpr=ok
+  timeout_handler        flow=type-lost  sexpr=ok
+  error_handler          flow=type-lost  sexpr=ok
+  output_type            flow=type-lost  sexpr=ok
+  branches               flow=type-lost  sexpr=ok
+
+## while
+  id                     flow=ok         sexpr=ok
+  name                   flow=derived    sexpr=derived
+  desc                   flow=derived    sexpr=derived
+  source_line            flow=derived    sexpr=derived
+  output                 flow=lost       sexpr=lost
+  next                   flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  timeout_handler        flow=ok         sexpr=ok
+  error_handler          flow=ok         sexpr=ok
+  input                  flow=lost       sexpr=lost
+  condition              flow=ok         sexpr=ok
+  child_flow             flow=ok         sexpr=ok
+  max_iterations         flow=ok         sexpr=ok
+
+## parallel.branches (ParallelBranch)
+  name                   flow=ok         sexpr=ok
+  flow                   flow=ok         sexpr=ok
+  input                  flow=ok         sexpr=ok
+  condition              flow=ok         sexpr=ok
+  priority               flow=lost       sexpr=lost
+  label                  flow=lost       sexpr=lost
+  desc                   flow=lost       sexpr=lost
+  is_default             flow=lost       sexpr=lost
+  next                   flow=lost       sexpr=lost
+
+## switch.branches (Branch)
+  name                   flow=type-lost  sexpr=ok
+  condition              flow=type-lost  sexpr=ok
+  priority               flow=type-lost  sexpr=ok
+  label                  flow=type-lost  sexpr=ok
+  desc                   flow=type-lost  sexpr=ok
+  next                   flow=type-lost  sexpr=ok
+  is_default             flow=type-lost  sexpr=ok
+
+## root flow
+  flow_id                flow=ok         sexpr=ok
+  runtime                flow=ok         sexpr=ok
+  inputType              flow=ok         sexpr=ok
+  outputType             flow=lost       sexpr=ok
+  desc                   flow=ok         sexpr=ok
+  version                flow=ok         sexpr=ok
+  author                 flow=ok         sexpr=ok
+  timeout                flow=ok         sexpr=ok
+  globalContext          flow=ok         sexpr=ok
+  metadata               flow=ok         sexpr=ok
+
+## childflow (CHILD/REFERENCE/PARALLEL)
+  flow_id                flow=ok         sexpr=ok
+  runtime                flow=ok         sexpr=ok
+  inputType              flow=ok         sexpr=ok
+  outputType             flow=lost       sexpr=ok
+  desc                   flow=ok         sexpr=ok
+  version                flow=inert      sexpr=inert
+  author                 flow=inert      sexpr=inert
+  timeout                flow=inert      sexpr=inert
+  globalContext          flow=inert      sexpr=inert
+  metadata               flow=inert      sexpr=inert
+
+## childflow (collection/while inline)
+  flow_id                flow=lost       sexpr=ok
+  runtime                flow=ok         sexpr=ok
+  inputType              flow=ok         sexpr=ok
+  outputType             flow=lost       sexpr=ok
+  desc                   flow=lost       sexpr=ok
+  version                flow=inert      sexpr=inert
+  author                 flow=inert      sexpr=inert
+  timeout                flow=inert      sexpr=inert
+  globalContext          flow=inert      sexpr=inert
+  metadata               flow=inert      sexpr=inert
+
+node types: 19 | fixtures: 19 | cells: 490
+status counts: {'derived': 111, 'inert': 2, 'lost': 52, 'ok': 300, 'type-lost': 25}

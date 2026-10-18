@@ -5,15 +5,23 @@
 
 判读规则：
 1. 每个类型×表示面的当前丢失必须 **⊆ 白名单**（恶化即红）；
-2. 丢失总路径数 **钉死在白名单总量**（修复减少须同 commit 收白名单）；
-3. 全 46 类型样本覆盖必须有（harvest 回退为零即红）。
+2. 丢失总路径数 **钉死在白名单的 active 类型总量**（修复减少须同 commit
+   收白名单；未安装的外部节点类型不参与钉值，见
+   ``test_total_loss_paths_pinned``）；
+3. 全 registry 类型样本覆盖必须有（harvest 回退为零即红）。
 
 已知系统性模式（#238 扫掠结论，2026-10-18）：
-- **model 链全线丢 ``errorHandler``/``timeoutHandler`` 子对象**（46 类型 ×
-  errorCode/errorMessage/timeoutHandler.*）——Flow.model_dump 的序列化面
-  不含错误/超时处理器，是"逐点修不够"的定量证明（190/441 条丢失来自此模式）；
-- sexpr 面 60 类型 ``<type-gap>``：plaita-nodes 外部节点类型不在 sexpr
-  写/读面的支持范围（合法容量边界，非缺陷）。
+- **model 链全线丢 ``errorHandler``/``timeoutHandler`` 子对象**（每个已装
+  类型 × errorCode/errorMessage）——Flow.model_dump 的序列化面不含错误/
+  超时处理器，是"逐点修不够"的定量证明（46 类型全集 190/441；本机 24
+  active 类型快照 156/294，后者是 #238 修复后的基线）；
+- sexpr 面外部类型 ``<type-gap>``：plaita-nodes 节点类型不在 sexpr 写/读面
+  的支持范围（合法容量边界，非缺陷）。
+
+#238 落地侧的 conformance 修复（@flow/sexpr 的 while、contains、itemType、
+content_type、timeoutHandler、end/assignment 基类字段等）已同 commit 收减
+本基线；``test_issue238_dsl_conformance.py`` 的 registry×字段矩阵是另一层
+守卫（新字段未分类即红）。
 """
 
 import sys
@@ -27,7 +35,9 @@ import _dsl_roundtrip_samples as S
 
 AXES = ("sexpr", "model", "e2e")
 
-# 基线白名单：{类型: {表示面: [丢失路径...]}}（2026-10-18 全量扫掠快照）
+# 基线白名单：{类型: {表示面: [丢失路径...]}}
+# 2026-10-18 #238 conformance 修复后的 active 基线；未安装类型保留全集
+# 条目（钉值只算 active，见 test_total_loss_paths_pinned）。
 BASELINE = {
         'agentrun': {
             'sexpr': [
@@ -76,7 +86,6 @@ BASELINE = {
             'sexpr': [
                 'assignment.desc',
                 'assignment.name',
-                'assignment.timeoutHandler',
             ],
             'model': [
                 'assignment.errorHandler.errorCode',
@@ -89,7 +98,8 @@ BASELINE = {
                 'assignment.errorHandler.errorCode',
                 'assignment.errorHandler.errorMessage',
                 'assignment.name',
-                'assignment.timeoutHandler',
+                'assignment.timeoutHandler.errorCode',
+                'assignment.timeoutHandler.errorMessage',
             ],
         },
         'capture': {
@@ -110,10 +120,7 @@ BASELINE = {
             'sexpr': [
                 'case.desc',
                 'case.name',
-                'case.next',
                 'case.output',
-                'case.outputType',
-                'case.timeoutHandler',
             ],
             'model': [
                 'case.errorHandler.errorCode',
@@ -127,10 +134,10 @@ BASELINE = {
                 'case.errorHandler.errorCode',
                 'case.errorHandler.errorMessage',
                 'case.name',
-                'case.next',
                 'case.output',
                 'case.outputType',
-                'case.timeoutHandler',
+                'case.timeoutHandler.errorCode',
+                'case.timeoutHandler.errorMessage',
             ],
         },
         'child': {
@@ -139,7 +146,6 @@ BASELINE = {
                 'child.desc',
                 'child.name',
                 'child.output',
-                'child.timeoutHandler',
             ],
             'model': [
                 'child.errorHandler.errorCode',
@@ -154,7 +160,8 @@ BASELINE = {
                 'child.errorHandler.errorMessage',
                 'child.name',
                 'child.output',
-                'child.timeoutHandler',
+                'child.timeoutHandler.errorCode',
+                'child.timeoutHandler.errorMessage',
             ],
         },
         'decision': {
@@ -217,7 +224,6 @@ BASELINE = {
             'sexpr': [
                 'end.desc',
                 'end.name',
-                'end.timeoutHandler',
             ],
             'model': [
                 'end.errorHandler.errorCode',
@@ -230,7 +236,8 @@ BASELINE = {
                 'end.errorHandler.errorCode',
                 'end.errorHandler.errorMessage',
                 'end.name',
-                'end.timeoutHandler',
+                'end.timeoutHandler.errorCode',
+                'end.timeoutHandler.errorMessage',
             ],
         },
         'event': {
@@ -238,7 +245,6 @@ BASELINE = {
                 'event.desc',
                 'event.name',
                 'event.output',
-                'event.timeoutHandler',
             ],
             'model': [
                 'event.errorHandler.errorCode',
@@ -252,7 +258,8 @@ BASELINE = {
                 'event.errorHandler.errorMessage',
                 'event.name',
                 'event.output',
-                'event.timeoutHandler',
+                'event.timeoutHandler.errorCode',
+                'event.timeoutHandler.errorMessage',
             ],
         },
         'feishu_webhook': {
@@ -273,10 +280,8 @@ BASELINE = {
             'sexpr': [
                 'filter.desc',
                 'filter.input',
-                'filter.itemType',
                 'filter.name',
                 'filter.output',
-                'filter.timeoutHandler',
             ],
             'model': [
                 'filter.errorHandler.errorCode',
@@ -289,20 +294,18 @@ BASELINE = {
                 'filter.errorHandler.errorCode',
                 'filter.errorHandler.errorMessage',
                 'filter.input',
-                'filter.itemType',
                 'filter.name',
                 'filter.output',
-                'filter.timeoutHandler',
+                'filter.timeoutHandler.errorCode',
+                'filter.timeoutHandler.errorMessage',
             ],
         },
         'find': {
             'sexpr': [
                 'find.desc',
                 'find.input',
-                'find.itemType',
                 'find.name',
                 'find.output',
-                'find.timeoutHandler',
             ],
             'model': [
                 'find.errorHandler.errorCode',
@@ -315,10 +318,15 @@ BASELINE = {
                 'find.errorHandler.errorCode',
                 'find.errorHandler.errorMessage',
                 'find.input',
-                'find.itemType',
                 'find.name',
                 'find.output',
-                'find.timeoutHandler',
+                'find.timeoutHandler.errorCode',
+                'find.timeoutHandler.errorMessage',
+            ],
+        },
+        'flow:header': {
+            'e2e': [
+                '<type-gap>',
             ],
         },
         'gate': {
@@ -407,10 +415,8 @@ BASELINE = {
         },
         'http': {
             'sexpr': [
-                'http.content_type',
                 'http.desc',
                 'http.name',
-                'http.timeoutHandler',
             ],
             'model': [
                 'http.errorHandler.errorCode',
@@ -425,7 +431,8 @@ BASELINE = {
                 'http.errorHandler.errorMessage',
                 'http.input',
                 'http.name',
-                'http.timeoutHandler',
+                'http.timeoutHandler.errorCode',
+                'http.timeoutHandler.errorMessage',
             ],
         },
         'http_callback': {
@@ -491,10 +498,8 @@ BASELINE = {
             'sexpr': [
                 'loop.desc',
                 'loop.input',
-                'loop.itemType',
                 'loop.name',
                 'loop.output',
-                'loop.timeoutHandler',
             ],
             'model': [
                 'loop.errorHandler.errorCode',
@@ -507,20 +512,18 @@ BASELINE = {
                 'loop.errorHandler.errorCode',
                 'loop.errorHandler.errorMessage',
                 'loop.input',
-                'loop.itemType',
                 'loop.name',
                 'loop.output',
-                'loop.timeoutHandler',
+                'loop.timeoutHandler.errorCode',
+                'loop.timeoutHandler.errorMessage',
             ],
         },
         'map': {
             'sexpr': [
                 'map.desc',
                 'map.input',
-                'map.itemType',
                 'map.name',
                 'map.output',
-                'map.timeoutHandler',
             ],
             'model': [
                 'map.errorHandler.errorCode',
@@ -534,18 +537,17 @@ BASELINE = {
                 'map.errorHandler.errorCode',
                 'map.errorHandler.errorMessage',
                 'map.input',
-                'map.itemType',
                 'map.maxConcurrent',
                 'map.name',
                 'map.output',
-                'map.timeoutHandler',
+                'map.timeoutHandler.errorCode',
+                'map.timeoutHandler.errorMessage',
             ],
         },
         'mock': {
             'sexpr': [
                 'mock.desc',
                 'mock.name',
-                'mock.timeoutHandler',
             ],
             'model': [
                 'mock.errorHandler.errorCode',
@@ -576,7 +578,6 @@ BASELINE = {
                 'parallel.desc',
                 'parallel.name',
                 'parallel.output',
-                'parallel.timeoutHandler',
             ],
             'model': [
                 'parallel.errorHandler.errorCode',
@@ -590,7 +591,8 @@ BASELINE = {
                 'parallel.errorHandler.errorMessage',
                 'parallel.name',
                 'parallel.output',
-                'parallel.timeoutHandler',
+                'parallel.timeoutHandler.errorCode',
+                'parallel.timeoutHandler.errorMessage',
             ],
         },
         'parse_json': {
@@ -640,10 +642,8 @@ BASELINE = {
             'sexpr': [
                 'reduce.desc',
                 'reduce.input',
-                'reduce.itemType',
                 'reduce.name',
                 'reduce.output',
-                'reduce.timeoutHandler',
             ],
             'model': [
                 'reduce.errorHandler.errorCode',
@@ -656,10 +656,10 @@ BASELINE = {
                 'reduce.errorHandler.errorCode',
                 'reduce.errorHandler.errorMessage',
                 'reduce.input',
-                'reduce.itemType',
                 'reduce.name',
                 'reduce.output',
-                'reduce.timeoutHandler',
+                'reduce.timeoutHandler.errorCode',
+                'reduce.timeoutHandler.errorMessage',
             ],
         },
         'reference': {
@@ -670,7 +670,6 @@ BASELINE = {
                 'reference.flowVersion',
                 'reference.name',
                 'reference.output',
-                'reference.timeoutHandler',
             ],
             'model': [
                 'reference.childFlow',
@@ -688,7 +687,8 @@ BASELINE = {
                 'reference.flowVersion',
                 'reference.name',
                 'reference.output',
-                'reference.timeoutHandler',
+                'reference.timeoutHandler.errorCode',
+                'reference.timeoutHandler.errorMessage',
             ],
         },
         'report': {
@@ -738,7 +738,6 @@ BASELINE = {
                 'start.desc',
                 'start.name',
                 'start.output',
-                'start.timeoutHandler',
             ],
             'model': [
                 'start.errorHandler.errorCode',
@@ -752,18 +751,15 @@ BASELINE = {
                 'start.errorHandler.errorMessage',
                 'start.name',
                 'start.output',
-                'start.timeoutHandler',
+                'start.timeoutHandler.errorCode',
+                'start.timeoutHandler.errorMessage',
             ],
         },
         'switch': {
             'sexpr': [
-                'switch.branches[].desc',
-                'switch.branches[].label',
                 'switch.desc',
                 'switch.name',
                 'switch.output',
-                'switch.outputType',
-                'switch.timeoutHandler',
             ],
             'model': [
                 'switch.errorHandler.errorCode',
@@ -772,15 +768,13 @@ BASELINE = {
                 'switch.timeoutHandler.errorMessage',
             ],
             'e2e': [
-                'switch.branches[].desc',
-                'switch.branches[].label',
                 'switch.desc',
                 'switch.errorHandler.errorCode',
                 'switch.errorHandler.errorMessage',
                 'switch.name',
                 'switch.output',
-                'switch.outputType',
-                'switch.timeoutHandler',
+                'switch.timeoutHandler.errorCode',
+                'switch.timeoutHandler.errorMessage',
             ],
         },
         'wecom_webhook': {
@@ -799,7 +793,10 @@ BASELINE = {
         },
         'while': {
             'sexpr': [
-                '<type-gap>',
+                'while.desc',
+                'while.input',
+                'while.name',
+                'while.output',
             ],
             'model': [
                 'while.errorHandler.errorCode',
@@ -808,7 +805,14 @@ BASELINE = {
                 'while.timeoutHandler.errorMessage',
             ],
             'e2e': [
-                '<type-gap>',
+                'while.desc',
+                'while.errorHandler.errorCode',
+                'while.errorHandler.errorMessage',
+                'while.input',
+                'while.name',
+                'while.output',
+                'while.timeoutHandler.errorCode',
+                'while.timeoutHandler.errorMessage',
             ],
         },
         'writefile': {
@@ -821,16 +825,6 @@ BASELINE = {
                 'writefile.json_mode',
                 'writefile.timeoutHandler.errorCode',
                 'writefile.timeoutHandler.errorMessage',
-            ],
-            'e2e': [
-                '<type-gap>',
-            ],
-        },
-        'flow:header': {
-            'sexpr': [
-                'flow.globalContext',
-                'flow.inputType.children',
-                'flow.metadata',
             ],
             'e2e': [
                 '<type-gap>',
@@ -856,14 +850,21 @@ def _current_losses():
 
 
 def test_all_registry_types_have_samples():
-    """全注册类型都有样本（harvest+补齐零缺口；环境差类型现场按需补建）。"""
+    """产品面注册类型都有样本（环境差类型现场按需补建，构造失败才是真缺口）。
+
+    比较对象只取**产品面** live 类型（``S._is_product_node_type``）：默认
+    registry 是进程级单例，同会话里别的测试会临时注册 ``codeflow_test_*`` /
+    ``issue*_probe`` / ``code``；直接 ``S.REG.list_types()`` 会让本测试随
+    文件收集顺序假红。构造逻辑沿用落地席的「按需 ``S.sample_ir(t)``」口径
+    （不同安装面注册集不同，如 code 节点经 extras 激活）。
+    """
     have = set(S.sample_types())
-    want = set(S.REG.list_types())
+    want = {t for t in S.REG.list_types() if S._is_product_node_type(t)}
     missing = sorted(want - have)
     # 环境差：不同安装面注册的类型集不同（如 code 节点经 pip extras 激活）。
-    # builder 支持按需构造——构造失败才是真缺口。
-    # 环境特有类型（注册激活面随安装浮动）best-effort：构造失败降为 warning 跳过
-    # ——基线覆盖由 builder 已知类型保证；特有类型在可构造的环境里由扫掠自然覆盖。
+    # builder 支持按需构造；环境特有类型 best-effort：构造失败降为 warning
+    # 跳过——基线覆盖由 builder 已知类型保证，特有类型在可构造的环境里由
+    # 扫掠自然覆盖。
     import warnings
     for t in missing:
         try:
@@ -904,13 +905,26 @@ def test_no_loss_outside_whitelist():
 
 
 def test_total_loss_paths_pinned():
-    """丢失总路径数钉死——修复减少须同 commit 收白名单。"""
+    """丢失总路径数钉死——修复减少须同 commit 收白名单。
+
+    只统计**当前环境实际装了的节点类型**（``S.sample_types()``）：全量
+    BASELINE 含 plaita-nodes 的外部类型，未安装时它们没有样本、也不产生
+    丢失面；把所有条目都加进钉值会让同一提交在不同环境（本仓 CI / 装了
+    业务节点的本地 / 落地席环境）给出不同的红绿结论。
+    """
     total = sum(
         len(faces)
-        for axes in _current_losses().values()
+        for t, axes in _current_losses().items()
+        if t in BASELINE
         for faces in axes.values()
     )
-    pinned = sum(len(faces) for axes in BASELINE.values() for faces in axes.values())
+    active = set(S.sample_types()) & set(BASELINE)
+    pinned = sum(
+        len(faces)
+        for t, axes in BASELINE.items()
+        if t in active
+        for faces in axes.values()
+    )
     assert total == pinned, (
         f"丢失总路径 {total} != 白名单钉值 {pinned}——"
         "若为修复所致，请同 commit 收减 BASELINE；若为新增，先定性再登记"

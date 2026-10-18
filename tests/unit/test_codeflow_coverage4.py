@@ -678,7 +678,9 @@ class TestNegateConditionErrors(unittest.TestCase):
         from plaita.dsl.codeflow._expr import _negate_condition  # type: ignore
 
         node = ast.Constant(value=1)
-        cond = {"field": "$INPUT.x", "operator": "contains", "value": "hello"}
+        # contains/notContains 自 #238 起可互相翻转；用确实不在 _NEGATE_OP
+        # 里的算子验证错误分支。
+        cond = {"field": "$INPUT.x", "operator": "bogus", "value": "hello"}
         with self.assertRaises(_CodeflowError) as ctx:
             _negate_condition(cond, node)
         self.assertIn("not 无法翻转运算符", str(ctx.exception))

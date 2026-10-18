@@ -50,8 +50,13 @@ def _dual(node: Dict[str, Any], camel: str, snake: str) -> Any:
         v = node.get(snake)
     return v
 
-# 由 _BodyEmitter 专属分支处理的类型；出现在节点调用位置即不可表达
-_UNEMITTABLE_TYPES = {"switch", "bool", "start"}
+# 由 _BodyEmitter 专属分支处理的类型；出现在节点调用位置即不可表达。
+# `case`（SwitchLegacy）与 `switch` 同属 builder 专属合成节点：@flow 没有
+# 对应语句形态。此前它不在表内 ⇒ `_call_custom` 会发出 `CASE(...)`，而
+# 编译器把 `case` 视为内置类型（`_BUILTIN_HANDLED_TYPES`）→ 既不是节点调用
+# 也不是自定义节点，产出的源码**必然编译失败**。改为与 switch 同口径
+# fail-closed（#238 conformance 全节点类型盘点）。
+_UNEMITTABLE_TYPES = {"switch", "bool", "case", "start"}
 
 # 发动机 ErrorHandler 接受的 strategy 取值（`continue-with` 是规范枚举值，
 # `continue_with` 是 DSL/历史拼写；两者发动机都收并归一到 continue-with）。
@@ -273,6 +278,13 @@ def _invert_cond(cond: Dict[str, Any], ns: List[Tuple[str, str]]) -> str:
     if op == "falsy":
         # `not x` 的规范形态（truthy 取反成 falsy）——还原为 not 写法，slug 才能对上
         return f"not {field}"
+    if op == "contains":
+        # #238：contains 的 @flow 拼写是 `F.contains(field, value)`（b in a 的
+        # 参数序，见 core/expression.py `_fn_contains`）。没有 Python 比较算子
+        # 直接对应它，编译侧 `_expr._compile_condition` 对称识别该调用形态。
+        return f"F.contains({field}, {_invert_value(value, ns)})"
+    if op == "notContains":
+        return f"not F.contains({field}, {_invert_value(value, ns)})"
     py_op = _CMP_PY.get(op)
     if py_op is None:
         raise EmitError(f"不支持的条件算子 {op!r}")
@@ -407,7 +419,11 @@ class _BodyEmitter:
         if result_type not in _END_RESULT_TYPES:
             result_type = "success"
         error = node.get("error")
-        if result_type != "success" or error is not None:
+        # #238：end 也是 Node，基类的 timeout / timeoutHandler / errorHandler
+        # 在 `return` 形态里没有表达面（此前 round-trip 全丢）。任一存在时改用
+        # `end(...)` 一等出口——编译器 `_compile_end_call` 已对称接收这些 kwarg。
+        common = self._common_kwargs(node)
+        if result_type != "success" or error is not None or common:
             # #76：`return` 只能表达 success 出口，resultType=error/nop 与 error
             # 载荷都在此静默丢失（重编译把每个 return 硬编码回 success）。改用
             # `end(...)` 终止语句（与引擎 End 节点同名的一等出口）承载它们，由
@@ -425,6 +441,7 @@ class _BodyEmitter:
                 # #76：error 是纯数据（引擎 `End.execute` 从不求值）——按字面量
                 # 发射，含字面 `$` 的字符串/键名原样保留，不再过表达式逆映射。
                 kwargs.append(f"error={_invert_literal(error)}")
+            kwargs.extend(common)
             return f"end({', '.join(kwargs)})"
         if output is None:
             return "return"
@@ -437,7 +454,11 @@ class _BodyEmitter:
         # 分支还原同一个 assignment 节点）；普通赋值保持 base 的字节形态。
         output_type = _dual(node, "outputType", "output_type")
         upstream = _dual(node, "upstreamOutput", "upstream_output")
-        if output_type is None and upstream is None:
+        # #238：基类 timeout / errorHandler / timeoutHandler 同样装不进
+        # `n = expr` 语句形态；任一存在时也必须走 ASSIGN(...)（否则普通赋值
+        # 的容错字段往返静默丢）。
+        common = self._common_kwargs(node)
+        if output_type is None and upstream is None and not common:
             expr = _invert_value(node.get("output"), self.ns)
             if _AUTO_ID_RE.fullmatch(node["id"]):
                 # 表达式语句（无名赋值）：保持语句形态，不引入变量名
@@ -449,7 +470,7 @@ class _BodyEmitter:
             kwargs.append(f"output_type={_invert_value(output_type, self.ns)}")
         if upstream is not None:
             kwargs.append(f"upstream_output={_invert_value(upstream, self.ns)}")
-        kwargs.extend(self._common_kwargs(node))
+        kwargs.extend(common)
         call = f"ASSIGN({', '.join(kwargs)})"
         if _AUTO_ID_RE.fullmatch(node["id"]):
             return [call]
@@ -533,6 +554,10 @@ class _BodyEmitter:
         _mi = _dual(node, "maxIterations", "max_iterations")
         if _mi is not None:
             args.append(f"max_iterations={_mi}")
+        # #238：While 也是 Node，基类的 timeout / timeoutHandler / errorHandler
+        # 此前在 for-head 形态里一个字都不发（编译侧 `_apply_base_kwargs` 早已
+        # 能收）⇒ 往返静默丢。与集合节点 `_emit_collection` 同口径补齐。
+        args.extend(self._common_kwargs(node))
         lines = [f"for item in WHILE({', '.join(args)}):"]
         lines.extend(f"    {ln}" for ln in body)
         return self._emit_tail(lines, node, outer_stop)
@@ -559,6 +584,11 @@ class _BodyEmitter:
                 kwargs.append(f"max_concurrent={_dual(node, 'maxConcurrent', 'max_concurrent')}")
         if kind == "REDUCE" and node.get("initial") is not None:
             kwargs.append(f"initial={_invert_value(node['initial'], self.ns)}")
+        # #238：`itemType`（循环元素的类型声明）此前两侧都没有表达面 ⇒ 往返静默
+        # 丢（存量 IR 常用 camel 拼写，编译侧 `_compile_for` 双读）。
+        _item_type = _dual(node, "itemType", "item_type")
+        if _item_type is not None:
+            kwargs.append(f"item_type={_invert_value(_item_type, self.ns)}")
         if kind == "LOOP" and node.get("condition") is not None:
             # #227：LOOP 的 `condition` 此前**一个字都不发** ⇒ JSON→@flow→JSON
             # 静默丢条件，循环从「按 condition 控制」退化为无条件遍历（引擎
@@ -684,6 +714,12 @@ class _BodyEmitter:
             value = node.get(ir_key)
             if value is not None:
                 kwargs.append(f"{ir_key}={_invert_value(value, self.ns)}")
+        # #238：`content_type`（Content-Type 头）此前两条链都没有表达面 ⇒
+        # 往返静默落回 application/json。model 声明字段是 snake，存量 IR 常用
+        # legacy `contentType`，两侧都读。
+        content_type = _dual(node, "contentType", "content_type")
+        if content_type is not None:
+            kwargs.append(f"content_type={_invert_value(content_type, self.ns)}")
         # #200：HTTP 访问策略（SSRF 防护面）过去不在 `_call_http` 的表达面里
         # ⇒ 任何 `emit_source` → 重编译都把白名单/私网阻断静默清空，节点回落
         # 「无限制」默认。camel（--format ir / 手写 JSON）与 snake
@@ -801,8 +837,13 @@ class _BodyEmitter:
         return f"PARALLEL({', '.join(kwargs)})"
 
     def _call_custom(self, node: Dict[str, Any]) -> str:
+        # timeoutHandler 由 `_common_kwargs` 统一发成 `on_timeout=`；若这里再按
+        # 原始 dict 发一次，编译器会把 `on_timeout=ErrorHandler(...)` 当普通
+        # 表达式编译并失败（#238：mock 及所有自定义节点的 timeoutHandler 往返
+        # 都是这条断链）。timeout / errorHandler 同理已经统一发。
         skip = {"type", "id", "next", "source_line", "name", "desc",
-                "timeout", "errorHandler"}
+                "timeout", "errorHandler", "timeoutHandler", "timeout_handler",
+                "error_handler"}
         placeholder = node["type"].upper()
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", placeholder):
             raise EmitError(
