@@ -16,7 +16,12 @@
   写/读面的支持范围（合法容量边界，非缺陷）。
 """
 
+import sys
+from pathlib import Path
+
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 import _dsl_roundtrip_samples as S
 
