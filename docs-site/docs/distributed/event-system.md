@@ -47,7 +47,7 @@ Handler 注册（`register_handler`）另走 `EventBus.matches_event_type`，**�
 | `wait_for_event(event_type, timeout, condition)` | 同步等待某事件 |
 | `register_handler(event_type, handler, filter_condition, retry_policy)` | 注册处理器（带重试策略） |
 | `get_event(event_id)` | 取事件 |
-| `publish_sync(event, ...)` | 同步发布（桥接异步 `publish`） |
+| `publish_sync(event, ...)` | 同步发布（桥接异步 `publish`）；memory 后端在返回前有界排空本次发布派发的分发任务（`publish_sync_drain_timeout`，默认 5s，超时只告警不取消），慢 async handler 不会随私有循环关闭被静默丢弃（#218）。Redis 的 handler 由 pubsub listener 在独立循环驱动，不在此排空范围 |
 
 `publish` 支持 `prevent_duplicate_consumption`：在 **handler 成功之后** 才 `mark_event_processed`（失败可重试）。这是 handler 路径的去重，**不是** FlowWorker 任务队列的至少一次投递保证。
 

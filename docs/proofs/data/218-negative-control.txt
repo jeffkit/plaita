@@ -1,0 +1,107 @@
+plaita#218 负控：回退 publish_sync 的 drain（publish_sync 直接 asyncio.run(self.publish(...))，其余改动保留）
+基线：1a7efa1（wt-b2） · 解释器：.venv/bin/python
+命令：.venv/bin/python -m pytest tests/unit/test_issue218_publish_sync_drain.py tests/unit/test_issue218_publish_sync_redis_boundary.py -q
+
+结果：3 failed / 3 passed
+  - test_slow_async_handler_runs_before_publish_sync_returns      FAILED（seen==[]）
+  - test_retry_policy_handler_runs_before_publish_sync_returns   FAILED（seen==[]）
+  - test_slow_async_handler_runs_when_bridge_uses_worker_loop    FAILED（seen==[]）
+  - 永不返回 handler 的「有界返回」用例仍绿（它只钉不挂死，不钉是否排空）
+  - Redis 边界用例仍绿（Redis publish 本就不建分发任务）
+
+--- 原始输出 ---
+.FFF..                                                                   [100%]
+=================================== FAILURES ===================================
+_ TestPublishSyncDrainsInMemoryDispatch.test_retry_policy_handler_runs_before_publish_sync_returns _
+
+self = <tests.unit.test_issue218_publish_sync_drain.TestPublishSyncDrainsInMemoryDispatch testMethod=test_retry_policy_handler_runs_before_publish_sync_returns>
+
+    def test_retry_policy_handler_runs_before_publish_sync_returns(self):
+        """重试分支的分发任务同样被登记并排空（同一 bug 面）。"""
+        bus = InMemoryEventBus()
+        seen = []
+    
+        async def handler(event):
+            await asyncio.sleep(0.05)
+            seen.append(event.event_id)
+    
+        asyncio.run(bus.register_handler(
+            event_type="issue218.retry",
+            handler=handler,
+            retry_policy=RetryPolicy(max_retries=1, initial_delay=0.01),
+        ))
+        event_id = bus.publish_sync(_event("issue218.retry"))
+    
+>       self.assertEqual(seen, [event_id],
+                         "retry 分支的分发任务未被 publish_sync 排空")
+E       AssertionError: Lists differ: [] != ['bf60bf16-7edf-4f26-bb4a-9df48413527b']
+E       
+E       Second list contains 1 additional elements.
+E       First extra element 0:
+E       'bf60bf16-7edf-4f26-bb4a-9df48413527b'
+E       
+E       - []
+E       + ['bf60bf16-7edf-4f26-bb4a-9df48413527b'] : retry 分支的分发任务未被 publish_sync 排空
+
+tests/unit/test_issue218_publish_sync_drain.py:68: AssertionError
+_ TestPublishSyncDrainsInMemoryDispatch.test_slow_async_handler_runs_before_publish_sync_returns _
+
+self = <tests.unit.test_issue218_publish_sync_drain.TestPublishSyncDrainsInMemoryDispatch testMethod=test_slow_async_handler_runs_before_publish_sync_returns>
+
+    def test_slow_async_handler_runs_before_publish_sync_returns(self):
+        """issue 验收条件 1：handler 内 await sleep(0.1)，返回后 seen==1。"""
+        bus = InMemoryEventBus()
+        seen = []
+    
+        async def handler(event):
+            await asyncio.sleep(0.1)
+            seen.append(event.event_id)
+    
+        asyncio.run(bus.register_handler(event_type="issue218.slow", handler=handler))
+        event = _event("issue218.slow", n=1)
+        event_id = bus.publish_sync(event)
+    
+>       self.assertEqual(seen, [event_id],
+                         "publish_sync 返回时慢 async handler 未执行（#218 回归）")
+E       AssertionError: Lists differ: [] != ['cf8e4989-cdc9-4ae8-bd05-c9b358cb12e2']
+E       
+E       Second list contains 1 additional elements.
+E       First extra element 0:
+E       'cf8e4989-cdc9-4ae8-bd05-c9b358cb12e2'
+E       
+E       - []
+E       + ['cf8e4989-cdc9-4ae8-bd05-c9b358cb12e2'] : publish_sync 返回时慢 async handler 未执行（#218 回归）
+
+tests/unit/test_issue218_publish_sync_drain.py:47: AssertionError
+_ TestPublishSyncDrainsFromRunningLoop.test_slow_async_handler_runs_when_bridge_uses_worker_loop _
+
+self = <tests.unit.test_issue218_publish_sync_drain.TestPublishSyncDrainsFromRunningLoop testMethod=test_slow_async_handler_runs_when_bridge_uses_worker_loop>
+
+    async def test_slow_async_handler_runs_when_bridge_uses_worker_loop(self):
+        bus = InMemoryEventBus()
+        seen = []
+    
+        async def handler(event):
+            await asyncio.sleep(0.1)
+            seen.append(event.event_id)
+    
+        await bus.register_handler(event_type="issue218.bridge", handler=handler)
+        event_id = bus.publish_sync(_event("issue218.bridge"))
+    
+>       self.assertEqual(seen, [event_id],
+                         "running-loop 桥接分支未排空分发任务")
+E       AssertionError: Lists differ: [] != ['c96084a2-0be8-4aa4-8efb-47290e6bb2b6']
+E       
+E       Second list contains 1 additional elements.
+E       First extra element 0:
+E       'c96084a2-0be8-4aa4-8efb-47290e6bb2b6'
+E       
+E       - []
+E       + ['c96084a2-0be8-4aa4-8efb-47290e6bb2b6'] : running-loop 桥接分支未排空分发任务
+
+tests/unit/test_issue218_publish_sync_drain.py:110: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue218_publish_sync_drain.py::TestPublishSyncDrainsInMemoryDispatch::test_retry_policy_handler_runs_before_publish_sync_returns
+FAILED tests/unit/test_issue218_publish_sync_drain.py::TestPublishSyncDrainsInMemoryDispatch::test_slow_async_handler_runs_before_publish_sync_returns
+FAILED tests/unit/test_issue218_publish_sync_drain.py::TestPublishSyncDrainsFromRunningLoop::test_slow_async_handler_runs_when_bridge_uses_worker_loop
+3 failed, 3 passed in 0.77s

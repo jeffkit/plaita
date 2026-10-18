@@ -8,7 +8,9 @@
   总线分发只认 ``register_handler``。订阅记录供 EventFilter 等外部组件
   按 correlation_id 检索消费。
 - ``publish`` 是 fire-and-forget：handler 在独立 task 中异步分发。
-  publish 返回后立即关闭事件循环，**不保证** handler 已经执行。
+  ``publish_sync`` 在私有循环关闭前**有界排空**本次发布派发的分发任务
+  （#218），慢 async handler 不会因循环关闭被静默取消；裸 ``publish`` 的
+  fire-and-forget 语义不变。
 """
 import asyncio
 import time
@@ -340,6 +342,57 @@ class InMemoryEventBus(EventBus):
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
 
+    async def _drain_publish_sync_tasks(self) -> None:
+        """有界排空本次 ``publish_sync`` 派发的分发任务（plaita#218）。
+
+        ``publish_sync`` 在独立循环里 ``asyncio.run(self.publish(...))``：
+        ``publish`` 只把 ``_dispatch_event`` 建成 fire-and-forget task 就返回，
+        随后 ``asyncio.run`` 关闭循环并取消 pending task——慢 async handler
+        永远不执行（事件已入库，但订阅方未被唤醒）。这里在循环关闭前等待
+        **本循环上**的在飞分发任务，上限 ``publish_sync_drain_timeout``。
+
+        跨循环任务不归本次 sync 调用管（例如主循环里 async publish 的
+        fire-and-forget 分发）：``asyncio.wait`` 等别的 loop 的 Task 会抛
+        "attached to a different loop"，故按 ``task.get_loop()`` 过滤。
+        超时不取消（与 Redis ``close()`` 的 #109 r7 口径一致）：只打 WARNING，
+        随后由循环自身收尾。
+
+        轮询式收敛：分发任务自身还可能再派生子任务（retry 分支的
+        ``_process_with_retry``），单次快照会在父子交接处漏掉子任务。每轮
+        ``wait`` 返回后重新取快照，直到表内本循环任务清空；总时长仍受
+        ``publish_sync_drain_timeout`` 约束。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.publish_sync_drain_timeout
+        while True:
+            # tuple() 在 C 层一次成型，避免与其它线程的 add/discard 交错
+            # 触发 "Set changed size during iteration"。
+            pending = [
+                task for task in tuple(self._pending_tasks)
+                if not task.done() and task.get_loop() is loop
+            ]
+            if not pending:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                for task in pending:
+                    logger.warning(
+                        "publish_sync 排空超时：分发任务未在 %.1fs 内完成，"
+                        "放手让它随循环收尾（task=%r）",
+                        self.publish_sync_drain_timeout, task,
+                    )
+                return
+            try:
+                await asyncio.wait(pending, timeout=remaining)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:             # noqa: BLE001 - 同步发布不因排空失败而炸
+                logger.warning(
+                    "publish_sync 排空分发任务时异常（继续返回）: %s",
+                    _scrub_exception_text(exc),
+                )
+                return
+
     async def publish(self, event: Union[Event, str, Dict[str, Any]],
                     prevent_duplicate_consumption: bool = True,
                     **kwargs) -> str:
@@ -450,6 +503,9 @@ class InMemoryEventBus(EventBus):
             if retry_policy:
                 # 使用一个单独的任务来处理重试，但确保它被等待
                 task = asyncio.create_task(self._process_with_retry(handler, event, handler_id, retry_policy))
+                # 与无重试分支同样登记强引用：否则 publish_sync 收尾时
+                # 排空集合里看不到它，循环关闭会静默取消重试任务（#218）。
+                self._track_task(task)
                 # 添加完成回调处理异常
                 task.add_done_callback(lambda t: t.exception() if t.done() and not t.cancelled() else None)
             else:

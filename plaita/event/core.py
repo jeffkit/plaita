@@ -391,6 +391,29 @@ class EventBus(ABC):
         """获取事件"""
         pass
 
+    # publish_sync 返回前排空「本次 publish 派发的分发任务」的上限（秒）。
+    # 只有会在 publish 内 fire-and-forget 派发的后端才用到它
+    # （InMemoryEventBus，见 #218）；handler 永不返回时 publish_sync 仍在
+    # 该上限内返回，不挂死调用方。可与 Redis close() 的 drain 口径对齐。
+    publish_sync_drain_timeout: float = 5.0
+
+    async def _publish_and_drain(self, event: Union[Event, str, Dict[str, Any]],
+                                 prevent_duplicate_consumption: bool,
+                                 **kwargs) -> str:
+        """``publish_sync`` 的实际协程：发布后、私有循环关闭前排空分发任务。"""
+        event_id = await self.publish(event, prevent_duplicate_consumption, **kwargs)
+        await self._drain_publish_sync_tasks()
+        return event_id
+
+    async def _drain_publish_sync_tasks(self) -> None:
+        """``publish_sync`` 收尾钩子：有界等待本次 sync 发布派发的分发任务。
+
+        默认无操作——base 总线不登记分发任务。会 fire-and-forget 派发的后端
+        覆盖此钩子（InMemory）。Redis 的 handler 由 pubsub listener 在独立
+        循环驱动，``publish`` 本身不建分发任务，故不适用（#218 边界）。
+        """
+        return None
+
     def publish_sync(self, event: Union[Event, str, Dict[str, Any]],
                      prevent_duplicate_consumption: bool = True,
                      **kwargs) -> str:
@@ -398,9 +421,18 @@ class EventBus(ABC):
 
         Detects whether an event loop is already running and uses
         ``_run_async_from_sync`` to bridge appropriately.
+
+        On backends that dispatch handlers from ``publish`` (InMemory), the
+        bridge drains this publish's dispatch tasks — bounded by
+        ``publish_sync_drain_timeout`` — before ``asyncio.run`` closes the
+        private loop.  Without that drain a slow async handler is cancelled
+        by loop shutdown and silently never runs (plaita#218).
+
+        ``publish`` itself stays fire-and-forget: async callers still return
+        before handlers finish.
         """
         return _run_async_from_sync(
-            self.publish(event, prevent_duplicate_consumption, **kwargs)
+            self._publish_and_drain(event, prevent_duplicate_consumption, **kwargs)
         )
 
 
