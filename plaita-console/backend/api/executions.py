@@ -247,14 +247,26 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
 #
 # 不改的：队列载体（``_enqueue`` 的 message）、worker 侧 ``$INPUT`` 绑定、
 # 盘上 checkpoint、`$INPUT` 的键名与功能值（非凭据项一字不动）。
+#
+# plaita#222：同一个 ``ExecutionInfo`` 里的 ``output``（流程最终输出）与
+# ``nodes[*].output``（本地档节点 trace）也是凭据明文的主要落点——
+# ``assignment(output="$INPUT")`` / ``end(output="$INPUT")`` 会整份回显入参，
+# http 节点响应体也整段进 ``nodes[*].output``。遍历面因此扩到这四个字段；
+# ``redact_credential_values`` 已支持 list 递归，无需新判据。
 def _redact_execution_view(info: Dict[str, Any]) -> Dict[str, Any]:
-    """执行表示的读面副本：``context`` / ``input`` 里的凭据值换占位（#166）。
+    """执行表示的读面副本：``context`` / ``input`` / ``output`` / ``nodes``
+    里的凭据值换占位（#166；遍历面扩至 ``output``/``nodes`` 见 #222）。
 
-    返回**新 dict**（``context`` / ``input`` 也是新对象）：调用方拿到的盘上
-    对象本体一个字节都不改——功能副本必须逐字节保持不变。
+    返回**新 dict**（每个被遍历的字段也是新对象；``nodes`` 是 list-of-dict，
+    ``redact_credential_values`` 已递归 list）：调用方拿到的盘上对象本体一个
+    字节都不改——功能副本必须逐字节保持不变。
+
+    ``output`` 是流程最终输出、``nodes[*].output`` 是本地档节点级 trace：
+    ``assignment(output="$INPUT")`` / ``end(output="$INPUT")`` 会把整份入参
+    （含凭据）回显到这两处，故与 ``context``/``input`` 同属读面（#222）。
     """
     out = dict(info)
-    for field in ("context", "input"):
+    for field in ("context", "input", "output", "nodes"):
         value = out.get(field)
         if value is not None:
             out[field] = redact_credential_values(value)

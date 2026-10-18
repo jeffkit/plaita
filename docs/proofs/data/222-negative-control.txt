@@ -1,0 +1,137 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+____________ test_local_detail_output_and_node_output_are_redacted _____________
+
+local_client = <starlette.testclient.TestClient object at 0x111d934d0>
+
+    def test_local_detail_output_and_node_output_are_redacted(local_client):
+        """``GET /executions/{id}``：``output`` 与 ``nodes[*].output`` 零命中。"""
+        eid = _run_to_completion(local_client)
+        before = _disk_copy(eid)
+        _assert_functional_copy_has_needle(before)
+    
+        r = local_client.get(f"/api/executions/{eid}")
+    
+        assert r.status_code == 200, r.text
+>       _assert_no_needle(r.text)
+
+tests/console/test_issue222_output_redaction.py:148: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+text = '{"execution_id":"f715067148084a4d","flow_id":"redact-output-flow","flow_version":"1.0.0","status":"completed","tenant...on_ms":1,"total_duration_ms":1,"attempts":1,"failed":false}},"usage":null,"node_usage":null,"langfuse_trace_url":null}'
+
+    def _assert_no_needle(text: str) -> None:
+        leaked = [n for n in NEEDLES if n in text]
+>       assert not leaked, f"执行表示里仍留着明文凭据：{leaked}\n{text[:800]}"
+E       AssertionError: 执行表示里仍留着明文凭据：['sk-live-3f9a2b7c1d4e', 'Passw0rd-9f2a', 'Ks9Qm4Zt']
+E         {"execution_id":"f715067148084a4d","flow_id":"redact-output-flow","flow_version":"1.0.0","status":"completed","tenant_id":"default","start_time":"2026-10-18T05:27:29.554564","end_time":"2026-10-18T05:27:29.601431","last_update_time":"2026-10-18T05:27:29.601789","context":{"EXPRESS_PREFIX":"$","$EXECUTION_ID":"f715067148084a4d","$GLOBAL":{"flow_id":"redact-output-flow"},"$ENV":{},"$INPUT":{"watch_agent":"deepseek-flash","api_key":"***","repo":"<unprintable-url>","notify":"<unprintable-url>"},"$BRANCH":null,"$NODE":{"start":null,"assign":{"watch_agent":"deepseek-flash","api_key":"***","repo":"<unprintable-url>","notify":"<unprintable-url>"},"end":{"watch_agent":"deepseek-flash","api_key":"***","repo":"<unprintable-url>","notify":"<unprintable-url>"}},"$PARENT":{},"$LAST_NODE":"end","$FLOW_ID
+E       assert not ['sk-live-3f9a2b7c1d4e', 'Passw0rd-9f2a', 'Ks9Qm4Zt']
+
+tests/console/test_issue222_output_redaction.py:109: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.node.schema:basic.py:34 Flow '?': unknown config keys ['name'] will be IGNORED (possible typo?). Known keys: ['author', 'desc', 'exposeEnv', 'expose_env', 'flowId', 'flow_id', 'globalContext', 'global_context', 'id', 'inputType', 'input_type', 'metadata', 'nodes', 'outputType', 'output_type', 'runtime', 'timeout', 'type', 'version']
+WARNING  plaita:flow.py:312 flow redact-output-flow node assign (assignment) failed construction-time validation (non-fatal, the flow still runs): assignment node 'assign': 缺少必填的 output_type（outputType）。
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+_____________ test_local_list_output_and_node_output_are_redacted ______________
+
+local_client = <starlette.testclient.TestClient object at 0x113e21bd0>
+
+    def test_local_list_output_and_node_output_are_redacted(local_client):
+        """``GET /executions``：同一行表示的另一条出口，同判。"""
+        eid = _run_to_completion(local_client)
+        before = _disk_copy(eid)
+        _assert_functional_copy_has_needle(before)
+    
+        r = local_client.get("/api/executions")
+    
+        assert r.status_code == 200, r.text
+>       _assert_no_needle(r.text)
+
+tests/console/test_issue222_output_redaction.py:176: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+text = '{"executions":[{"execution_id":"433930e850ee4848","flow_id":"redact-output-flow","flow_version":"1.0.0","status":"com..."attempts":1,"failed":false}},"usage":null,"node_usage":null,"langfuse_trace_url":null}],"total":1,"page":1,"size":20}'
+
+    def _assert_no_needle(text: str) -> None:
+        leaked = [n for n in NEEDLES if n in text]
+>       assert not leaked, f"执行表示里仍留着明文凭据：{leaked}\n{text[:800]}"
+E       AssertionError: 执行表示里仍留着明文凭据：['sk-live-3f9a2b7c1d4e', 'Passw0rd-9f2a', 'Ks9Qm4Zt']
+E         {"executions":[{"execution_id":"433930e850ee4848","flow_id":"redact-output-flow","flow_version":"1.0.0","status":"completed","tenant_id":"default","start_time":"2026-10-18T05:27:29.707589","end_time":"2026-10-18T05:27:29.721609","last_update_time":"2026-10-18T05:27:29.721924","context":{"EXPRESS_PREFIX":"$","$EXECUTION_ID":"433930e850ee4848","$GLOBAL":{"flow_id":"redact-output-flow"},"$ENV":{},"$INPUT":{"watch_agent":"deepseek-flash","api_key":"***","repo":"<unprintable-url>","notify":"<unprintable-url>"},"$BRANCH":null,"$NODE":{"start":null,"assign":{"watch_agent":"deepseek-flash","api_key":"***","repo":"<unprintable-url>","notify":"<unprintable-url>"},"end":{"watch_agent":"deepseek-flash","api_key":"***","repo":"<unprintable-url>","notify":"<unprintable-url>"}},"$PARENT":{},"$LAST_NODE":
+E       assert not ['sk-live-3f9a2b7c1d4e', 'Passw0rd-9f2a', 'Ks9Qm4Zt']
+
+tests/console/test_issue222_output_redaction.py:109: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node.schema:basic.py:34 Flow '?': unknown config keys ['name'] will be IGNORED (possible typo?). Known keys: ['author', 'desc', 'exposeEnv', 'expose_env', 'flowId', 'flow_id', 'globalContext', 'global_context', 'id', 'inputType', 'input_type', 'metadata', 'nodes', 'outputType', 'output_type', 'runtime', 'timeout', 'type', 'version']
+WARNING  plaita:flow.py:312 flow redact-output-flow node assign (assignment) failed construction-time validation (non-fatal, the flow still runs): assignment node 'assign': 缺少必填的 output_type（outputType）。
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+=============================== warnings summary ===============================
+tests/console/test_issue222_output_redaction.py:29
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/tests/console/test_issue222_output_redaction.py:29: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient
+
+config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 38 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py::test_local_detail_output_and_node_output_are_redacted
+plaita-console/backend/tests/console/test_issue222_output_redaction.py::test_local_list_output_and_node_output_are_redacted
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:554: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py::test_local_detail_output_and_node_output_are_redacted
+plaita-console/backend/tests/console/test_issue222_output_redaction.py::test_local_list_output_and_node_output_are_redacted
+  /Users/kong/projects/infra4agent/plaita-wt2/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1192: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 12 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/local_executor.py:192: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().isoformat()
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py::test_local_detail_output_and_node_output_are_redacted
+plaita-console/backend/tests/console/test_issue222_output_redaction.py::test_local_list_output_and_node_output_are_redacted
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/local_executor.py:432: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fs.update_local_execution(execution_id, end_time=datetime.utcnow())
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_issue222_output_redaction.py::test_local_detail_output_and_node_output_are_redacted
+FAILED tests/console/test_issue222_output_redaction.py::test_local_list_output_and_node_output_are_redacted
+2 failed, 58 warnings in 1.04s
