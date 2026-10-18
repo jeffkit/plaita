@@ -20,6 +20,7 @@ from plaita.core.expression import ExpressionEvaluator
 from plaita.core.expression_parser import freshness_scope, note_fresh_object
 from plaita.core.state import CheckpointState, _LazyRootSnapshot, _snapshot_value
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
+from plaita.tenant_context import current_tenant, set_current_tenant
 
 if TYPE_CHECKING:
     from plaita.node.basic import Node
@@ -250,6 +251,11 @@ class ExecutionContext(_SystemStateAccessors):
     ) -> None:
         self.parent = parent
         self.event_bus = event_bus
+        # plaita#237：租户是执行身份的一部分，在**构造期**钉在对象上——进程池
+        # 的 pickler 跑在队列线程，那里 current_tenant() 是 default；只在
+        # __getstate__ 读 ContextVar 会把租户丢掉。子上下文继承父执行身份。
+        parent_tenant = getattr(parent, "_tenant_id", None) if parent is not None else None
+        self._tenant_id = parent_tenant or current_tenant()
         self.expose_env = list(expose_env) if expose_env else []
         # plaita#141：**构造期**继承的 `$ENV` allowlist（仅子上下文可能非空）。
         # #106 起子执行继承父级 express_* 命名空间，但 `expose_env` 此前只落在上
@@ -369,20 +375,38 @@ class ExecutionContext(_SystemStateAccessors):
             self.parent.cancel_requested if self.parent is not None
             else threading.Event()
         )
+        # 根上下文 fresh run 重新钉住当前租户；子上下文继承父执行身份
+        # （plaita#237，与 __init__ 同口径）。
+        self._tenant_id = (
+            getattr(self.parent, "_tenant_id", None) if self.parent is not None
+            else current_tenant()
+        ) or current_tenant()
 
     def __getstate__(self):
         # Event isn't picklable; child process gets a fresh unset Event.
         state = self.__dict__.copy()
         state.pop("cancel_event", None)
         state.pop("cancel_requested", None)
+        # plaita#237：ContextVar 不随 pickle 走——进程模式分支在子进程里会读
+        # default 租户。租户是执行身份的一部分，取对象上**构造期钉住**的
+        # _tenant_id（不能在这里读 current_tenant：进程池 pickler 跑在队列
+        # 线程，ContextVar 在那里是 default）。
+        state["_pickled_tenant"] = getattr(self, "_tenant_id", None) or current_tenant()
         return state
 
     def __setstate__(self, state):
+        pickled_tenant = state.pop("_pickled_tenant", None)
         self.__dict__.update(state)
         if not getattr(self, "cancel_event", None):
             self.cancel_event = threading.Event()
         if not getattr(self, "cancel_requested", None):
             self.cancel_requested = threading.Event()
+        self._tenant_id = (
+            pickled_tenant if pickled_tenant is not None else current_tenant()
+        )
+        if pickled_tenant is not None:
+            # 子进程/反序列化侧恢复租户上下文；旧序列化体无该键时保持默认。
+            set_current_tenant(pickled_tenant)
         # plaita#72：旧序列化体（进程池在滚动升级/跨版本 pickle 的窗口）里没有
         # _parent_snapshot，缺省补 None——setup_flow 只在父存在时消费它。
         self.__dict__.setdefault("_parent_snapshot", None)

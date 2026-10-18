@@ -1,0 +1,35 @@
+F..F.                                                                    [100%]
+=================================== FAILURES ===================================
+___________ test_missing_record_is_fail_open_with_warning_and_count ____________
+
+redis_client = <fakeredis._connection.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._connection.FakeRedisConnection(version=(...type=None),orig_host_address=a36f84b2a3fd4c8cae20a47ee0c913c3,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x1066346e0>
+
+    def test_missing_record_is_fail_open_with_warning_and_count(redis_client, caplog):
+        before = tenant_status.tenant_fail_open_total()
+        with caplog.at_level(logging.WARNING, logger="plaita.server.tenant_status"):
+            assert tenant_status.tenant_is_active(redis_client, "tenant-x") is True
+>       assert tenant_status.tenant_fail_open_total() == before + 1
+E       assert 0 == (0 + 1)
+E        +  where 0 = <function tenant_fail_open_total at 0x10660aca0>()
+E        +    where <function tenant_fail_open_total at 0x10660aca0> = tenant_status.tenant_fail_open_total
+
+tests/unit/test_issue237_tenant_status_warning.py:29: AssertionError
+______________ test_no_client_is_fail_open_with_warning_and_count ______________
+
+caplog = <_pytest.logging.LogCaptureFixture object at 0x106659590>
+
+    def test_no_client_is_fail_open_with_warning_and_count(caplog):
+        before = tenant_status.tenant_fail_open_total()
+        with caplog.at_level(logging.WARNING, logger="plaita.server.tenant_status"):
+            assert tenant_status.tenant_is_active(None, "tenant-x") is True
+>       assert tenant_status.tenant_fail_open_total() == before + 1
+E       assert 0 == (0 + 1)
+E        +  where 0 = <function tenant_fail_open_total at 0x10660aca0>()
+E        +    where <function tenant_fail_open_total at 0x10660aca0> = tenant_status.tenant_fail_open_total
+
+tests/unit/test_issue237_tenant_status_warning.py:53: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue237_tenant_status_warning.py::test_missing_record_is_fail_open_with_warning_and_count
+FAILED tests/unit/test_issue237_tenant_status_warning.py::test_no_client_is_fail_open_with_warning_and_count
+2 failed, 3 passed in 0.30s

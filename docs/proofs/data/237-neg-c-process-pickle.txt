@@ -1,0 +1,45 @@
+....FF                                                                   [100%]
+=================================== FAILURES ===================================
+______________________ test_context_pickle_carries_tenant ______________________
+
+tenant_b = None
+
+    def test_context_pickle_carries_tenant(tenant_b):
+        ctx = ExecutionContext()
+        blob = pickle.dumps(ctx)
+        token = set_current_tenant("default")
+        try:
+            rebuilt = pickle.loads(blob)
+            assert rebuilt is not None
+>           assert current_tenant() == "tenant-b", (
+                "ExecutionContext pickle 未携带租户；子进程分支会退回 default（#237）"
+            )
+E           AssertionError: ExecutionContext pickle 未携带租户；子进程分支会退回 default（#237）
+E           assert 'default' == 'tenant-b'
+E             
+E             - tenant-b
+E             + default
+
+tests/unit/test_issue237_context_boundaries.py:140: AssertionError
+___________________ test_parallel_process_branch_sees_tenant ___________________
+
+tenant_b = None
+
+    @pytest.mark.slow
+    def test_parallel_process_branch_sees_tenant(tenant_b):
+        result = FlowExecution().run_compatible(_parallel_flow("process"), False)
+>       assert result == {"A": "tenant-b"}, (
+            f"Parallel process 分支读到 {result!r}；租户未随执行体跨进程（#237）"
+        )
+E       AssertionError: Parallel process 分支读到 {'A': 'default'}；租户未随执行体跨进程（#237）
+E       assert {'A': 'default'} == {'A': 'tenant-b'}
+E         
+E         Differing items:
+E         {'A': 'default'} != {'A': 'tenant-b'}
+E         Use -v to get more diff
+
+tests/unit/test_issue237_context_boundaries.py:150: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue237_context_boundaries.py::test_context_pickle_carries_tenant
+FAILED tests/unit/test_issue237_context_boundaries.py::test_parallel_process_branch_sees_tenant
+2 failed, 4 passed in 0.68s

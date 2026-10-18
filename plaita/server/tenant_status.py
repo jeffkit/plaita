@@ -13,6 +13,7 @@ worker 派发任务前、schedule_service 入队前据此拦截停用租户。
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
 from plaita.core.url_redaction import _scrub_exception_text
@@ -22,6 +23,28 @@ logger = logging.getLogger(__name__)
 TENANT_STATUS_KEY = "plaita:tenant_status"
 STATUS_ACTIVE = "active"
 STATUS_DISABLED = "disabled"
+
+# plaita#237（owner 裁决）：fail-open 语义保持不变（缺失记录 = active，兼容
+# default 单租部署），但每次命中必须 WARNING 计数——否则闸门静默失效无法
+# 从日志/监控发现。计数是进程内的（多 worker 各自累计，由日志聚合）。
+_fail_open_lock = threading.Lock()
+_fail_open_total = 0
+
+
+def tenant_fail_open_total() -> int:
+    """本进程内租户状态闸 fail-open 命中次数（观测/测试用）。"""
+    with _fail_open_lock:
+        return _fail_open_total
+
+
+def _note_fail_open(tenant_id: Optional[str], reason: str) -> None:
+    global _fail_open_total
+    with _fail_open_lock:
+        _fail_open_total += 1
+    logger.warning(
+        "租户状态闸 fail-open（%s）：tenant=%s 按 active 放行（plaita#237 计数）",
+        reason, tenant_id,
+    )
 
 
 def publish_tenant_status(redis_client, tenant_id: Optional[str], status: str) -> None:
@@ -45,15 +68,24 @@ def clear_tenant_status(redis_client, tenant_id: Optional[str]) -> None:
 
 
 def tenant_is_active(redis_client, tenant_id: Optional[str]) -> bool:
-    """租户是否可运行；无客户端 / 读失败 / 无记录 → True（fail-open）。"""
-    if redis_client is None or not tenant_id:
+    """租户是否可运行；无客户端 / 读失败 / 无记录 → True（fail-open + 计数）。
+
+    fail-open 语义不变（plaita#237 边界：不改 default 单租部署兼容），但每次
+    命中都经 :func:`_note_fail_open` 打 WARNING 并累加进程内计数。
+    """
+    if not tenant_id:
+        return True
+    if redis_client is None:
+        _note_fail_open(tenant_id, "无 Redis 客户端")
         return True
     try:
         raw = redis_client.hget(TENANT_STATUS_KEY, tenant_id)
     except Exception as exc:  # noqa: BLE001 — Redis 抖动不误伤全租户
-        logger.warning("读取租户 %s 状态失败，按 active 处理: %s", tenant_id, _scrub_exception_text(exc))
+        _note_fail_open(
+            tenant_id, f"读取失败: {_scrub_exception_text(exc)}")
         return True
     if raw is None:
+        _note_fail_open(tenant_id, "无状态记录")
         return True
     if isinstance(raw, bytes):
         raw = raw.decode()

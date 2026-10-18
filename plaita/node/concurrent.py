@@ -502,9 +502,12 @@ class Parallel(Node):
             pairs = await asyncio.gather(*(_join(b) for b in join_branches))
             return {name: result for name, result in pairs}
         else:
-            # thread / process: delegate to sync pool_execute in a thread
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self.pool_execute, self.mode, execution)
+            # thread / process: delegate to sync pool_execute in a thread.
+            # plaita#237：必须用 ``asyncio.to_thread``（复制 contextvars），不能
+            # 用 ``loop.run_in_executor``（裸 executor 不继承提交方 context）。
+            # 否则 Parallel 分支在 worker 里读到的租户/fence 退回 default，
+            # 凭据路由串到默认租户（#58/#199/#212/#213 同族）。
+            return await asyncio.to_thread(self.pool_execute, self.mode, execution)
 
     def match_condition_branches(self, execution):
         """根据条件匹配需要执行的分支"""

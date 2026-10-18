@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import atexit
+import contextvars
 import logging
 import os
 import threading
@@ -264,6 +265,33 @@ class ThreadParallelExecutor(_BaseExecutor):
                 _pool_tls.in_pool = False
 
         return _marked
+
+    def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """提交到共享线程池，**在调用线程复制 contextvars**（plaita#237）。
+
+        线程池 worker 不继承提交方的 contextvars：Parallel/Map 分支此前在
+        worker 里读不到租户/fence，凭据路由退回 default（#58/#199/#212/#213
+        同族第五处）。每个 submit 调用各取一份 ``copy_context()``，worker 内
+        用 ``ctx.run`` 执行；Context 不能并发进入，故不能复用同一份副本。
+        """
+        wrapped = self._wrap(fn)
+        if self._sem is not None:
+            self._sem.acquire()
+        ctx = contextvars.copy_context()
+        return self._pool.submit(ctx.run, wrapped, *args, **kwargs)
+
+    def map(self, fn: Callable[..., Any], items: List[Any]) -> List[Any]:
+        """逐 item 复制 contextvars 后提交（每个副本只进入一次）。"""
+        if not items:
+            return []
+        wrapped = self._wrap(fn)
+        futures = []
+        for item in items:
+            if self._sem is not None:
+                self._sem.acquire()
+            ctx = contextvars.copy_context()
+            futures.append(self._pool.submit(ctx.run, wrapped, item))
+        return [f.result() for f in futures]
 
     @property
     def supports_cancel_propagation(self) -> bool:

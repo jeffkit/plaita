@@ -1,0 +1,55 @@
+FFF...                                                                   [100%]
+=================================== FAILURES ===================================
+___________ test_thread_executor_submit_propagates_tenant_and_fence ____________
+
+tenant_b = None
+
+    def test_thread_executor_submit_propagates_tenant_and_fence(tenant_b):
+        ex = ThreadParallelExecutor(max_workers=1)
+        got = ex.submit(lambda: (current_tenant(), _FENCE.get())).result()
+>       assert got == ("tenant-b", "fence-b"), (
+            "ThreadParallelExecutor.submit 丢了调用线程的租户/fence（#237）"
+        )
+E       AssertionError: ThreadParallelExecutor.submit 丢了调用线程的租户/fence（#237）
+E       assert ('default', 'no-fence') == ('tenant-b', 'fence-b')
+E         
+E         At index 0 diff: 'default' != 'tenant-b'
+E         Use -v to get more diff
+
+tests/unit/test_issue237_context_boundaries.py:103: AssertionError
+________________ test_thread_executor_map_propagates_each_item _________________
+
+tenant_b = None
+
+    def test_thread_executor_map_propagates_each_item(tenant_b):
+        ex = ThreadParallelExecutor(max_workers=2)
+        got = ex.map(lambda i: (i, current_tenant(), _FENCE.get()), [1, 2])
+>       assert got == [(1, "tenant-b", "fence-b"), (2, "tenant-b", "fence-b")]
+E       AssertionError: assert [(1, 'default..., 'no-fence')] == [(1, 'tenant-...', 'fence-b')]
+E         
+E         At index 0 diff: (1, 'default', 'no-fence') != (1, 'tenant-b', 'fence-b')
+E         Use -v to get more diff
+
+tests/unit/test_issue237_context_boundaries.py:111: AssertionError
+___________________ test_parallel_thread_branch_sees_tenant ____________________
+
+tenant_b = None
+
+    def test_parallel_thread_branch_sees_tenant(tenant_b):
+        result = FlowExecution().run_compatible(_parallel_flow("thread"), False)
+>       assert result == {"A": "tenant-b"}, (
+            f"Parallel thread 分支读到 {result!r}；应继承调用方租户（#237）"
+        )
+E       AssertionError: Parallel thread 分支读到 {'A': 'default'}；应继承调用方租户（#237）
+E       assert {'A': 'default'} == {'A': 'tenant-b'}
+E         
+E         Differing items:
+E         {'A': 'default'} != {'A': 'tenant-b'}
+E         Use -v to get more diff
+
+tests/unit/test_issue237_context_boundaries.py:119: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue237_context_boundaries.py::test_thread_executor_submit_propagates_tenant_and_fence
+FAILED tests/unit/test_issue237_context_boundaries.py::test_thread_executor_map_propagates_each_item
+FAILED tests/unit/test_issue237_context_boundaries.py::test_parallel_thread_branch_sees_tenant
+3 failed, 3 passed in 0.72s
