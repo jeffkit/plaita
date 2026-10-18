@@ -15,43 +15,18 @@
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
-# ---- jeffkit/plaita#124 缺陷 3：集中解析超时原语。macOS 无 GNU `timeout`（也没有
-# ---- `gtimeout`），裸 `timeout` 会以 rc=127 退出；本脚本把 rc!=0 一律当 killed，
-# ---- 于是**复核安全网被静默关闭且给出满分**。这里改为：优先 timeout/gtimeout，
-# ---- 都没有就用纯 Python 超时（subprocess timeout），并在缺失时明确告知。
-if command -v timeout >/dev/null 2>&1; then
-    MUT_TIMEOUT_BIN="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
-    MUT_TIMEOUT_BIN="gtimeout"
-else
-    MUT_TIMEOUT_BIN=""
-    echo "[warn] 本机没有 timeout/gtimeout（macOS 默认如此），改用纯 Python 超时回退。" >&2
-fi
-MUT_PYTHON_BIN="${PYTHON_BIN:-python3}"
+# ---- jeffkit/plaita#124 / #167：超时原语与解释器解析只写一处，见公共库。
+# ---- `mut_init_timeout` 还会在解释器缺 pytest 时**具名中止**——否则 mut_run 的
+# ---- rc 只是「没能执行」，会被下面的 recheck 判成 killed（伪造击杀）。
+# shellcheck source=scripts/lib/mutation_recheck_common.sh
+source scripts/lib/mutation_recheck_common.sh
+mut_init_timeout
 
 # 跑一个变异点：$1=变异点名 $2=超时秒数 $3...=pytest 参数
 # rc: 0=可能 survived；124=超时；其余=被测试杀死；127 不再可能出现（回退路径正常）。
 _run_mutant_pytest() {
     local m="$1" tmo="$2"; shift 2
-    if [[ -n "$MUT_TIMEOUT_BIN" ]]; then
-        MUTANT_UNDER_TEST="$m" "$MUT_TIMEOUT_BIN" "$tmo" \
-            "$MUT_PYTHON_BIN" -m pytest -x -q -p no:randomly --tb=no --no-header "$@" \
-            < /dev/null > /dev/null 2>&1
-        return $?
-    fi
-    MUTANT_UNDER_TEST="$m" "$MUT_PYTHON_BIN" - "$MUT_PYTHON_BIN" "$tmo" "$@" <<'PYEOF'
-import os, subprocess, sys
-py, tmo, args = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
-try:
-    raise SystemExit(subprocess.run(
-        [py, "-m", "pytest", "-x", "-q", "-p", "no:randomly",
-         "--tb=no", "--no-header", *args],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        timeout=tmo).returncode)
-except subprocess.TimeoutExpired:
-    raise SystemExit(124)
-PYEOF
+    mut_run "$m" "$tmo" --tb=no --no-header "$@" > /dev/null 2>&1
 }
 
 # 解析参数 — 支持旧式 positional 及新式 --from-idx / --to-idx
@@ -137,7 +112,7 @@ SYNC_TESTS_FOR_MODULE=(
 # ── 辅助函数 ──────────────────────────────────────────────────────────────
 update_pyproject() {
   local module="$1"
-  python3 <<PYEOF
+  "$MUT_PYTHON_BIN" <<PYEOF
 import re
 module = """$module"""
 path = "pyproject.toml"
@@ -153,7 +128,7 @@ PYEOF
 
 update_test_selection() {
   local tests="$1"
-  python3 <<PYEOF
+  "$MUT_PYTHON_BIN" <<PYEOF
 import re
 tests_str = """$tests"""
 test_list = [t for t in tests_str.split() if t.strip()]
@@ -351,9 +326,9 @@ for i in "${!MODULES[@]}"; do
   # 真实总数/已杀/存活来自 cicd-stats（mutmut run 后立即可用）
   stats_file="mutants/mutmut-cicd-stats.json"
   mutmut export-cicd-stats >/dev/null 2>&1 || true
-  n_total=$(python3 -c "import json;print(json.load(open('$stats_file')).get('total',0))" 2>/dev/null || echo 0)
-  n_killed_pre=$(python3 -c "import json;print(json.load(open('$stats_file')).get('killed',0))" 2>/dev/null || echo 0)
-  n_survived_pre=$(python3 -c "import json;print(json.load(open('$stats_file')).get('survived',0))" 2>/dev/null || echo 0)
+  n_total=$("$MUT_PYTHON_BIN" -c "import json;print(json.load(open('$stats_file')).get('total',0))" 2>/dev/null || echo 0)
+  n_killed_pre=$("$MUT_PYTHON_BIN" -c "import json;print(json.load(open('$stats_file')).get('killed',0))" 2>/dev/null || echo 0)
+  n_survived_pre=$("$MUT_PYTHON_BIN" -c "import json;print(json.load(open('$stats_file')).get('survived',0))" 2>/dev/null || echo 0)
   n_not_checked=$(echo "$raw_results" | grep -c ": *not checked$" || true)
   n_timeout=$(echo "$raw_results" | grep -c ": *timeout$" || true)
   # no_tests / suspicious 也算非 killed，纳入 recheck 候选
@@ -384,7 +359,7 @@ for i in "${!MODULES[@]}"; do
   # 实际 survived = 复核结果（覆盖 pre-run 的 survived）
   total_survived=$rc_survived
   total_killed=$((n_total - total_survived))
-  score=$(python3 -c "print(f'{$total_killed/$n_total*100:.0f}%')")
+  score=$("$MUT_PYTHON_BIN" -c "print(f'{$total_killed/$n_total*100:.0f}%')")
 
   if [[ $total_survived -gt 0 ]]; then
     status="NEEDS_FIX($total_survived survived)"
@@ -409,7 +384,7 @@ echo "Modules with 100%: ${#SUCCESS_MODULES[@]}"
 for m in "${SUCCESS_MODULES[@]}"; do echo "  ✓ $m"; done
 
 # 恢复 pyproject.toml 基线
-python3 <<PYEOF
+"$MUT_PYTHON_BIN" <<PYEOF
 import re
 path = "pyproject.toml"
 content = open(path).read()

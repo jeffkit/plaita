@@ -28,6 +28,30 @@ class NodeException(RuntimeError):
         self.message = message
 
 
+#: 输出校验异常的可重试标记（plaita#219 × node-F2）。
+#:
+#: node-F2 把非 ``NodeException`` 的 ``ValueError`` 归为确定性配置错误、不再
+#: 重试；但 ``Node._validate_output`` 的既有契约（#219）是「校验异常按普通
+#: 节点异常走 retryTimes / errorHandler」。两条契约的交集用实例标记区分：
+#: 节点自主抛出的 ValueError 不重试，校验钩子抛出的异常保持重试。
+_OUTPUT_VALIDATION_RETRY_ATTR = "_plaita_output_validation_retryable"
+
+
+def mark_output_validation_retryable(exc: BaseException) -> None:
+    """给输出校验钩子抛出的异常打上可重试标记。
+
+    打标而不是换异常类型：用户日志与既有测试都按原异常类型/文案断言
+    （``ValueError: …``）。``BaseException`` 实例始终有 ``__dict__``（即使
+    子类声明 ``__slots__``），``setattr`` 不会失败。
+    """
+    setattr(exc, _OUTPUT_VALIDATION_RETRY_ATTR, True)
+
+
+def is_output_validation_retryable(exc: BaseException) -> bool:
+    """该异常是否来自节点输出校验钩子（见 :func:`mark_output_validation_retryable`）。"""
+    return bool(getattr(exc, _OUTPUT_VALIDATION_RETRY_ATTR, False))
+
+
 class FlowErrorType(Enum):
     """流程异常类型"""
 

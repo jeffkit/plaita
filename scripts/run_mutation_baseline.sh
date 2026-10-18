@@ -10,6 +10,11 @@
 #       mutation-baseline.txt（根目录）。
 set -u
 cd "$(dirname "$0")/.."
+# 解释器与超时原语只写一处（plaita#167）：裸 `timeout`/裸 `python3` 在 macOS
+# 上会分别以 rc=127 / 缺 pytest 的形式把结论变成不可信（#124 同族）。
+# shellcheck source=scripts/lib/mutation_recheck_common.sh
+source scripts/lib/mutation_recheck_common.sh
+mut_init_timeout
 
 PER_MUTANT_TIMEOUT=60   # 单变异点墙钟上限（秒），防止个别变异点卡死
 
@@ -37,7 +42,7 @@ killed=0; survived=0; timeout=0; other=0
 : > mutation-baseline.txt
 
 for m in "${MUTANTS[@]}"; do
-    out=$(timeout "${PER_MUTANT_TIMEOUT}" mutmut run "$m" 2>&1 | tr '\r' '\n' \
+    out=$(mut_timeout "${PER_MUTANT_TIMEOUT}" mutmut run "$m" 2>&1 | tr '\r' '\n' \
           | grep -E "^🎉|^🙁|^⏰|^🤔|^🔇|^🧙|^🫥" | head -1)
     case "$out" in
         🎉*) status="killed";    killed=$((killed+1)) ;;
@@ -51,7 +56,7 @@ done
 total=${#MUTANTS[@]}
 decidable=$((killed + survived))
 if [[ $decidable -gt 0 ]]; then
-    score=$(python3 -c "print(f'{$killed/$decidable*100:.1f}')")
+    score=$("$MUT_PYTHON_BIN" -c "print(f'{$killed/$decidable*100:.1f}')")
 else
     score="n/a"
 fi

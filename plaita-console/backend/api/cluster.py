@@ -1311,7 +1311,14 @@ class ClustersListResponse(BaseModel):
 
 class CreateClusterRequest(BaseModel):
     """创建集群请求"""
-    id: str = Field(..., description="集群 ID（英文标识）")
+    # #244：id 直接参与 ``base_dir / id``（创建配置写盘、删除 rmtree）。只允许
+    # 小写字母/数字/连字符且首字符为字母或数字——路径分隔符、``..``、绝对路径
+    # 在 schema 层即 422；registry 侧另有 resolve 后的路径归属复核兜底。
+    id: str = Field(
+        ...,
+        description="集群 ID（小写字母/数字/连字符）",
+        pattern=r"^[a-z0-9][a-z0-9-]*$",
+    )
     name: str = Field(..., description="集群显示名称")
     description: str = Field("", description="集群描述")
     redis_url: str = Field("redis://localhost:6379/0", description="Redis URL")

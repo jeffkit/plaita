@@ -12,8 +12,18 @@
 # 本脚本的判定规则是 `rc==0 → survived，否则 → killed`，因此**任何"没能真正跑起来"
 # 的退出码都绝不能落进 killed 分支**——那会把复核安全网整个静默关掉，还给出满分。
 # 见 jeffkit/plaita#124。
+#
+# 解释器与超时原语都来自 scripts/lib/mutation_recheck_common.sh（plaita#167）：
+# 此前这里自己写 `${PYTHON_BIN:-python3}` + 裸 `timeout`，既忽略了已激活 venv /
+# 仓根 .venv 的 3.11+ 解释器，也可能在 macOS 上把 rc=127 记成 killed。
 set -u
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib/mutation_recheck_common.sh
+source scripts/lib/mutation_recheck_common.sh
+
+# 具名中止（#167）：解析到的解释器没有 pytest 时，mut_run 的 rc 只是「没能执行」，
+# 复核判定会把 rc != 0 记成 killed ⇒ 伪造击杀。这里在开跑前说清缺什么、怎么修。
+mut_init_timeout
 
 WHAT="${1:-timeout}"
 case "$WHAT" in
@@ -35,21 +45,8 @@ else
 fi
 
 if [[ -z "$names" ]]; then
-    echo "没有匹配的变异点（filter=${WHAT}）。" >&2; exit 1
+    mut_no_match_exit "${WHAT}"
 fi
-
-# ---- #124 / 缺陷 3：超时原语必须集中解析。macOS 无 GNU `timeout`，也没有 `gtimeout`；
-# ---- 裸 `timeout` 会以 rc=127 退出，被下面的判定当成 killed ⇒ **伪造满分**。
-# ---- 优先用 `timeout`/`gtimeout`，都没有就退回纯 Python 超时（不静默继续）。
-TIMEOUT_BIN=""
-if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_BIN="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_BIN="gtimeout"
-fi
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
-    echo "找不到 ${PYTHON_BIN}（可用 PYTHON_BIN=... 覆盖）。" >&2; exit 1; }
 
 # 复核时跑的测试集合：必须覆盖 only_mutate 当前目标模块对应的纯同步测试，
 # 否则变异点会被误判为 survived。和 pyproject.toml 的
@@ -60,15 +57,7 @@ TESTS="tests/unit/test_callback.py tests/unit/test_run_forwards_callbacks.py tes
 
 # ---- #124 / 缺陷 1（加固）：测试集合里任何一个路径不存在都在**开跑前**中止，
 # ---- 而不是让 pytest 的 collection error 混进 killed。
-missing=""
-for t in $TESTS; do
-    [[ -e "$t" ]] || missing="${missing} ${t}"
-done
-if [[ -n "$missing" ]]; then
-    echo "复核测试集合里有不存在的路径：${missing}" >&2
-    echo "（这会以 collection error 被误判为 killed，故直接中止。）" >&2
-    exit 1
-fi
+mut_require_tests "$TESTS"
 
 cd mutants 2>/dev/null || { echo "mutants/ 不存在，先执行 mutmut run 生成。" >&2; exit 1; }
 
@@ -76,20 +65,8 @@ cd mutants 2>/dev/null || { echo "mutants/ 不存在，先执行 mutmut run 生�
 # ---- 自检都不过，说明测试环境本身有问题，此时任何 killed/survived 结论都不可信。
 echo "自检：未变异树上先跑一遍复核测试集合…" >&2
 self_rc=0
-if [[ -n "$TIMEOUT_BIN" ]]; then
-    "$TIMEOUT_BIN" 300 "$PYTHON_BIN" -m pytest -x -q -p no:randomly $TESTS \
-        < /dev/null > /dev/null 2>&1 || self_rc=$?
-else
-    "$PYTHON_BIN" - "$PYTHON_BIN" $TESTS <<'PYEOF' || self_rc=$?
-import subprocess, sys
-raise SystemExit(subprocess.run([sys.argv[1], "-m", "pytest", "-x", "-q",
-                                 "-p", "no:randomly", *sys.argv[2:]],
-                                stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=300).returncode)
-PYEOF
-fi
+mut_timeout 300 "$MUT_PYTHON_BIN" -m pytest -x -q -p no:randomly $TESTS \
+    < /dev/null > /dev/null 2>&1 || self_rc=$?
 if [[ $self_rc -ne 0 ]]; then
     echo "自检失败（rc=${self_rc}）：复核测试集合在未变异树上就不通过。" >&2
     echo "这通常意味着测试集合过时或有环境问题，**本轮结论不可信**，已中止。" >&2
@@ -101,32 +78,15 @@ killed=0; survived=0; errors=0; total=0
 while IFS= read -r m; do
     total=$((total+1))
     rc=0
-    if [[ -n "$TIMEOUT_BIN" ]]; then
-        out=$(MUTANT_UNDER_TEST="$m" "$TIMEOUT_BIN" 30 "$PYTHON_BIN" -m pytest -x -q \
-              -p no:randomly $TESTS < /dev/null 2>&1) || rc=$?
-    else
-        out=$(MUTANT_UNDER_TEST="$m" "$PYTHON_BIN" - "$PYTHON_BIN" $TESTS <<'PYEOF' 2>&1 || rc=$?
-import subprocess, sys
-try:
-    raise SystemExit(subprocess.run([sys.argv[1], "-m", "pytest", "-x", "-q",
-                                     "-p", "no:randomly", *sys.argv[2:]],
-                                    stdin=subprocess.DEVNULL,
-                                    timeout=30,
-                                    capture_output=False).returncode)
-except subprocess.TimeoutExpired:
-    raise SystemExit(124)
-PYEOF
-        )
-    fi
-    # ---- #124 / 缺陷 3：把"没能真正执行"与"测试跑失败"区分开。
-    # 124 = 超时；126 = 不可执行；127 = 命令不存在；这些都不是 killed。
-    case "$rc" in
-        0)      status="survived"; survived=$((survived+1)) ;;
-        124|126|127)
-                status="error"
-                errors=$((errors+1))
-                echo "  ! 变异点 ${m} 未能真正执行（rc=${rc}），不计入 killed" >&2 ;;
-        *)      status="killed"; killed=$((killed+1)) ;;
+    mut_run "$m" 30 $TESTS > /dev/null 2>&1 || rc=$?
+    status=$(mut_classify "$rc")
+    case "$status" in
+        survived) survived=$((survived+1)) ;;
+        error)    errors=$((errors+1));
+                  # ---- #124 / 缺陷 3：把"没能真正执行"与"测试跑失败"区分开。
+                  # ---- 124 = 超时；126 = 不可执行；127 = 命令不存在；都不是 killed。
+                  echo "  ! 变异点 ${m} 未能真正执行（rc=${rc}），不计入 killed" >&2 ;;
+        *)        killed=$((killed+1)) ;;
     esac
     printf '%-78s %s\n' "$m" "$status" | tee -a ../mutation-recheck.txt
 done <<< "$names"
@@ -135,7 +95,7 @@ echo "------------------------------------------" | tee -a ../mutation-recheck.t
 echo "复核: $total  killed=$killed  survived=$survived  error=$errors" \
     | tee -a ../mutation-recheck.txt
 if [[ $((killed+survived)) -gt 0 ]]; then
-    "$PYTHON_BIN" -c "print(f'Mutation score (killed/(killed+survived)) = {$killed/($killed+$survived)*100:.1f}%')" \
+    "$MUT_PYTHON_BIN" -c "print(f'Mutation score (killed/(killed+survived)) = {$killed/($killed+$survived)*100:.1f}%')" \
         | tee -a ../mutation-recheck.txt
 fi
 # ---- #124：有 error 就非零退出，绝不把"跑不起来"当成满分收尾。

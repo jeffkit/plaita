@@ -230,6 +230,20 @@ class ClusterRegistry:
             return self.get_cluster(self._active_cluster_id)
         return None
     
+    def _cluster_dir(self, cluster_id: str) -> Path:
+        """由 id 推导的集群目录；解析后必须仍归属 ``base_dir``（plaita#244）。
+
+        ``cluster_id`` 来自 API 输入，直接 ``base_dir / cluster_id`` 会让
+        ``..`` / 绝对路径（以及指向外部的符号链接）把配置写到任意可写位置，
+        删除侧则 ``rmtree`` 掉任意目录。这里按**解析后的路径归属**判定，作为
+        schema 白名单之外的第二道闸（registry 直调同样生效）。
+        """
+        base = self.base_dir.resolve()
+        candidate = (base / cluster_id).resolve()
+        if not candidate.is_relative_to(base):
+            raise ValueError(f"集群 ID 非法: {cluster_id!r}")
+        return candidate
+
     def create_cluster(
         self,
         cluster_id: str,
@@ -245,7 +259,7 @@ class ClusterRegistry:
         
         # 如果没有指定配置路径，按预设创建
         if not config_path:
-            cluster_dir = self.base_dir / cluster_id
+            cluster_dir = self._cluster_dir(cluster_id)
             cluster_dir.mkdir(parents=True, exist_ok=True)
             config_path = str(cluster_dir / "cluster_config.yaml")
             self._create_default_config(config_path, preset=preset, redis_url=redis_url)
@@ -299,8 +313,8 @@ class ClusterRegistry:
         if cluster_id == self._active_cluster_id:
             raise ValueError("不能删除当前活动集群")
         
-        # 删除集群目录（如果在 base_dir 下）
-        cluster_dir = self.base_dir / cluster_id
+        # 删除集群目录（与创建同闸：解析后必须仍在 base_dir 内，plaita#244）
+        cluster_dir = self._cluster_dir(cluster_id)
         if cluster_dir.exists():
             shutil.rmtree(cluster_dir)
         

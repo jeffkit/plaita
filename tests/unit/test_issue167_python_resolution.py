@@ -34,6 +34,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -56,10 +57,12 @@ def _clean_env(**overrides):
 
 
 def _make_stub_python(path: Path, *, version_ok: bool, marker: Path,
-                      module_line: str = "plaita/node/decide.py") -> Path:
+                      module_line: str = "plaita/node/decide.py",
+                      pytest_ok: bool = True) -> Path:
     """造一个**桩解释器**：记录「谁被调用了」，并按需扮演新旧版本。
 
     * ``-c``（版本探测 / 表达式）⇒ ``version_ok`` 决定退出码；
+      其中 ``import pytest`` 由 ``pytest_ok`` 单独决定（#167 的具名中止面）；
     * ``-``（stdin 脚本，即模块表那段）⇒ 打印一行模块名；
     * ``-m pytest …`` ⇒ 退出 0（``mut_run`` 的存活路径）。
     """
@@ -68,7 +71,10 @@ def _make_stub_python(path: Path, *, version_ok: bool, marker: Path,
         "#!/usr/bin/env bash\n"
         f'printf "%s %s\\n" "$0" "$*" >> "{marker}"\n'
         'if [[ "${1:-}" == "-c" ]]; then\n'
-        f"    exit {0 if version_ok else 1}\n"
+        '    case "${2:-}" in\n'
+        f'        *pytest*) exit {0 if pytest_ok else 1} ;;\n'
+        f'        *)        exit {0 if version_ok else 1} ;;\n'
+        "    esac\n"
         "fi\n"
         'if [[ "${1:-}" == "-" ]]; then\n'
         f'    printf "%s\\n" "{module_line}"\n'
@@ -260,3 +266,203 @@ class TestMutRunUsesTheResolvedInterpreter:
         assert re.search(r"-m pytest\b", marker) or re.search(
             r"- .* 60 tests/unit/test_decide\.py", marker
         ), f"没看到 pytest 调用（或其回退形态）：{marker}"
+
+
+class TestMutInitTimeoutAbortsWithoutPytest:
+    """#167 的「必须能 import pytest」不是注释——缺 pytest 必须在开跑前具名中止。"""
+
+    def test_named_abort_when_resolved_interpreter_lacks_pytest(self, tmp_path):
+        chosen = _make_stub_python(
+            tmp_path / "bin" / "python", version_ok=True, pytest_ok=False,
+            marker=tmp_path / "marker",
+        )
+        env = _clean_env(PYTHON_BIN=str(chosen))
+        r = subprocess.run(
+            [BASH, "-c", f'source "{COMMON_LIB}"; mut_init_timeout'],
+            capture_output=True, text=True, cwd=REPO, env=env, timeout=120,
+        )
+        combined = r.stdout + r.stderr
+        assert r.returncode != 0, f"缺 pytest 仍继续跑（会伪造 killed）：{combined[:400]}"
+        assert "没有 pytest" in combined, f"缺具名中止理由：{combined[:400]}"
+        assert "PYTHON_BIN" in combined, f"没告诉用户怎么修：{combined[:400]}"
+        assert "Traceback" not in combined, f"仍是 traceback：{combined[:400]}"
+
+
+class TestRepoRootVenvTier:
+    """解析顺序第三档：没有 PYTHON_BIN / VIRTUAL_ENV 时用仓根 .venv。"""
+
+    def test_dotvenv_wins_over_old_path_python_and_is_evaluated_once(self, tmp_path):
+        repo = tmp_path / "repo"
+        lib = repo / "scripts" / "lib" / "mutation_recheck_common.sh"
+        lib.parent.mkdir(parents=True)
+        shutil.copy(COMMON_LIB, lib)
+
+        venv_python = _make_stub_python(
+            repo / ".venv" / "bin" / "python", version_ok=True,
+            marker=tmp_path / "marker",
+        )
+        fake = tmp_path / "pathbin"
+        # PATH 上的 python3 太老：若解析顺序漏掉仓根 .venv，就会落到它（或失败）。
+        _make_stub_python(fake / "python3", version_ok=False, marker=tmp_path / "marker")
+        env = _clean_env(PATH=_fake_path(fake))
+
+        script = (
+            f'source "{lib}"\n'
+            'printf "first=%s\\n" "$MUT_PYTHON_BIN"\n'
+            # source 之后再改环境变量**不应**触发重新解析（source 期只求值一次）
+            'PYTHON_BIN=/nonexistent/python\n'
+            'printf "second=%s\\n" "$MUT_PYTHON_BIN"\n'
+        )
+        r = subprocess.run([BASH, "-c", script], capture_output=True, text=True,
+                           cwd=repo, env=env, timeout=120)
+        assert r.returncode == 0, r.stderr
+        assert f"first={venv_python}" in r.stdout, r.stdout
+        assert f"second={venv_python}" in r.stdout, r.stdout
+
+
+class TestMutTimeoutPrimitive:
+    """通用超时原语（#167 的共用面）：命令退出码透传，超时归 124。"""
+
+    def test_passthrough_and_timeout(self):
+        env = _clean_env(PYTHON_BIN=sys.executable)
+        script = (
+            f'source "{COMMON_LIB}"\n'
+            'MUT_TIMEOUT_BIN=""\n'  # 强制纯 Python 回退，判据与宿主是否装 GNU timeout 无关
+            'mut_timeout 10 /bin/sh -c "exit 7"; echo "rc1=$?"\n'
+            'mut_timeout 1 /bin/sh -c "sleep 5"; echo "rc2=$?"\n'
+        )
+        r = subprocess.run([BASH, "-c", script], capture_output=True, text=True,
+                           cwd=REPO, env=env, timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert "rc1=7" in r.stdout, f"退出码未透传：{r.stdout}"
+        assert "rc2=124" in r.stdout, f"超时未归 124：{r.stdout}"
+
+
+# 变异测试工具链里**会真正执行 pytest/mutmut**的 runner 辅助脚本。
+# 不含 run_parallel_mutation_sweep.sh：它是 pyenv `loki` 编排器（契约不同）。
+MUTATION_RUNNER_HELPERS = [
+    "recheck_mutants.sh",
+    "recheck_async_utils.sh",
+    "recheck_codeflow_expr.sh",
+    "recheck_codeflow_nodes.sh",
+    "recheck_codeflow_stmt.sh",
+    "recheck_sexpr.sh",
+    "run_full_mutation_sweep.sh",
+    "run_mutation_baseline.sh",
+    "run_mut_worker.sh",
+    "mutation-module-tests.sh",
+]
+
+# 这些脚本直接跑 pytest（或通过 mutmut 跑 pytest），必须先做 pytest 可用性检查。
+# run_mut_worker.sh 只编辑 TOML、mutmut 交给 pyenv loki；mutation-module-tests.sh
+# 只读 TOML（<3.11 有自己的具名 SKIP），两者不需要 mut_init_timeout。
+PYTEST_INIT_HELPERS = {
+    "recheck_mutants.sh",
+    "recheck_async_utils.sh",
+    "recheck_codeflow_expr.sh",
+    "recheck_codeflow_nodes.sh",
+    "recheck_codeflow_stmt.sh",
+    "recheck_sexpr.sh",
+    "run_full_mutation_sweep.sh",
+    "run_mutation_baseline.sh",
+}
+
+BARE_PYTHON = re.compile(r"""(?<![\w$./"'])(python3?)(?![\w.-])""")
+BARE_TIMEOUT = re.compile(r"""(?<![\w$"'])\btimeout\s+\d""")
+
+
+class TestRemainingRunnerHelpersShareResolver:
+    """#167 的解析面不止两条脚本：其余 runner 辅助脚本也必须同源。"""
+
+    @pytest.mark.parametrize("name", MUTATION_RUNNER_HELPERS)
+    def test_helper_sources_the_shared_library(self, name):
+        src = (SCRIPTS / name).read_text(encoding="utf-8")
+        assert "mutation_recheck_common.sh" in src, (
+            f"{name} 没 source 公共库——解释器/超时解析会再次分叉"
+        )
+
+    @pytest.mark.parametrize("name", sorted(PYTEST_INIT_HELPERS))
+    def test_helper_calls_named_pytest_abort(self, name):
+        src = (SCRIPTS / name).read_text(encoding="utf-8")
+        assert re.search(r"^mut_init_timeout\b", src, re.M), (
+            f"{name} 没调用 mut_init_timeout——缺 pytest 时会把「没能执行」记成 killed"
+        )
+
+    @pytest.mark.parametrize("name", MUTATION_RUNNER_HELPERS)
+    def test_no_bare_python_or_timeout_in_executable_lines(self, name):
+        offenders = []
+        for i, line in enumerate((SCRIPTS / name).read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if BARE_PYTHON.search(line) or BARE_TIMEOUT.search(line):
+                offenders.append(f"{name}:{i}: {line.strip()}")
+        assert not offenders, (
+            "以下位置仍裸调 python/timeout（绕开共享解析，可能伪造成 killed）：\n"
+            + "\n".join(offenders)
+        )
+
+    def test_recheck_mutants_actually_uses_the_resolved_interpreter(self, tmp_path):
+        """把 recheck_mutants.sh 放进沙箱，桩解释器实证它走共享解析。
+
+        只做静态断言不够：#167 的教训正是「脚本里有没有某行代码」不等于
+        「实际调用了哪个可执行文件」。这里用 fake ``mutmut`` + stub python 跑完
+        整个脚本，断言 marker 归属是**已激活 venv** 的解释器，而不是 PATH 诱饵。
+        """
+        repo = tmp_path / "repo"
+        (repo / "scripts" / "lib").mkdir(parents=True)
+        (repo / "mutants").mkdir()
+        shutil.copy(COMMON_LIB, repo / "scripts" / "lib" / "mutation_recheck_common.sh")
+        shutil.copy(SCRIPTS / "recheck_mutants.sh", repo / "scripts" / "recheck_mutants.sh")
+
+        src = (SCRIPTS / "recheck_mutants.sh").read_text(encoding="utf-8")
+        m = re.search(r'^TESTS="([^"]*)"', src, re.M)
+        assert m, "recheck_mutants.sh 里没有 TESTS 常量"
+        for t in m.group(1).split():
+            p = repo / t
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("", encoding="utf-8")
+
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        fake_mutmut = fake_bin / "mutmut"
+        fake_mutmut.write_text(
+            '#!/usr/bin/env bash\n'
+            'printf "    plaita.__fake__mutmut_1: timeout\\n"\n',
+            encoding="utf-8",
+        )
+        fake_mutmut.chmod(0o755)
+        decoy = _make_stub_python(
+            fake_bin / "python3", version_ok=False, marker=tmp_path / "marker"
+        )
+        venv_python = _make_stub_python(
+            tmp_path / "venv" / "bin" / "python", version_ok=True,
+            marker=tmp_path / "marker",
+        )
+
+        env = _clean_env(VIRTUAL_ENV=str(tmp_path / "venv"), PATH=_fake_path(fake_bin))
+        r = subprocess.run(
+            [BASH, str(repo / "scripts" / "recheck_mutants.sh"), "timeout"],
+            capture_output=True, text=True, cwd=repo, env=env, timeout=180,
+        )
+        combined = r.stdout + r.stderr
+        assert r.returncode == 0, f"{combined[:800]}"
+        marker = (tmp_path / "marker").read_text(encoding="utf-8")
+        assert str(venv_python) in marker, f"没用共享解析选中的 venv 解释器：{marker}"
+        assert str(decoy) not in marker, f"仍碰了 PATH 上的老 python3：{marker}"
+        record = (repo / "mutation-recheck.txt").read_text(encoding="utf-8")
+        assert "survived" in record, record
+
+    def test_baseline_calls_named_pytest_abort(self, tmp_path):
+        """run_mutation_baseline.sh 也必须在开跑前拦截「缺 pytest」。"""
+        chosen = _make_stub_python(
+            tmp_path / "bin" / "python", version_ok=True, pytest_ok=False,
+            marker=tmp_path / "marker",
+        )
+        env = _clean_env(PYTHON_BIN=str(chosen))
+        r = subprocess.run(
+            [BASH, str(SCRIPTS / "run_mutation_baseline.sh")],
+            capture_output=True, text=True, cwd=REPO, env=env, timeout=120,
+        )
+        combined = r.stdout + r.stderr
+        assert r.returncode != 0, f"缺 pytest 仍继续跑：{combined[:400]}"
+        assert "没有 pytest" in combined, f"缺具名中止理由：{combined[:400]}"

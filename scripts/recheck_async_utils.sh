@@ -50,7 +50,7 @@ done <<< "$names"
 echo "------------------------------------------" | tee -a ../mutation-recheck-async-utils.txt
 echo "复核: $total  killed=$killed  survived=$survived  error=$errors" | tee -a ../mutation-recheck-async-utils.txt
 if [[ $((killed+survived)) -gt 0 ]]; then
-    python3 -c "print(f'Mutation score (recheck) = {$killed/($killed+$survived)*100:.1f}%')" | tee -a ../mutation-recheck-async-utils.txt
+    "$MUT_PYTHON_BIN" -c "print(f'Mutation score (recheck) = {$killed/($killed+$survived)*100:.1f}%')" | tee -a ../mutation-recheck-async-utils.txt
 fi
 # #124：有 error 就非零退出，绝不把"跑不起来"当成满分收尾。
 if [[ $errors -gt 0 ]]; then

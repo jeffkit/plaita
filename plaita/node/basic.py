@@ -5,7 +5,11 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Dict, FrozenSet, Opt
 
 from pydantic import BaseModel, Field, model_validator
 
-from plaita.core.errors import ErrorHandler, RecoverableErrorHandler
+from plaita.core.errors import (
+    ErrorHandler,
+    RecoverableErrorHandler,
+    mark_output_validation_retryable,
+)
 
 if TYPE_CHECKING:
     # 节点应依赖窄接口 NodeExecutionContext，而非完整 FlowExecution facade。
@@ -145,7 +149,13 @@ class Node(BaseModel):
 
     def run(self, execution: "NodeExecutionContext") -> Any:
         result = self.execute(execution)
-        self._validate_output(result)
+        try:
+            self._validate_output(result)
+        except Exception as exc:  # noqa: BLE001 — 打标后原样抛出
+            # #219 契约：校验异常按普通节点异常走重试；node-F2 的 ValueError
+            # 配置分类不得误伤它（见 mark_output_validation_retryable）。
+            mark_output_validation_retryable(exc)
+            raise
         return result
 
     def execute(self, execution: "NodeExecutionContext") -> Any:
