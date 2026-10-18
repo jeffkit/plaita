@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -168,6 +169,35 @@ def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
     return True
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """同目录临时文件写满并 fsync 后原子替换 ``path``。
+
+    先 truncate 再写目标文件时，写到一半失败（磁盘满/超配额/SIGKILL）会把
+    上一份完好的文件毁成半截；这里失败路径只影响临时文件，旧文件逐字节不变。
+    ``os.replace`` 与 ``mkstemp`` 同目录调用，保证替换在同一文件系统内原子生效。
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        # mkstemp 已建成 0600；显式 chmod 保证目标权限与旧实现一致（含 umask 差异）。
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _export_store(tenant_id: Optional[str] = None) -> None:
     """把凭据（密文）按租户导出为引擎可读文件，供节点运行时解密。
 
@@ -196,9 +226,6 @@ def _export_store(tenant_id: Optional[str] = None) -> None:
     for tid, payload in targets.items():
         path = credentials_file(tid)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=1))
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+        text = json.dumps(payload, ensure_ascii=False, indent=1)
+        _atomic_write_text(path, text)
         logger.info("已导出租户 %s 凭据文件 %s（%d 条）", tid, path, len(payload))

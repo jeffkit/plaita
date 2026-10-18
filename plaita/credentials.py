@@ -1,9 +1,13 @@
 """凭据解析——节点运行时按名取用外部服务的机密信息。
 
-存储形态：加密 JSON 文件（由编排台 console 在凭据保存时导出），
+存储形态：加密 JSON 文件（由编排台 console 在凭据保存时**原子替换**导出），
 ``PLAITA_CREDENTIALS_FILE`` 指定路径（默认 ``.plaita-credentials.json``），
 ``PLAITA_CREDENTIALS_KEY`` 为 Fernet 密钥（未设时尝试同级 ``.plaita-credentials.key``
 文件）。加密/解密依赖 ``cryptography``（``pip install plaita[credentials]``）。
+
+文件缺失视为「尚未配置凭据」（空 store）；文件存在但为空/损坏则抛
+:class:`CredentialStoreCorruptError`（fail-loud），不会静默当成空 store。
+导出写失败不会破坏旧文件——旧内容仍可正常解析。
 
 多租户：解析时读租户上下文（``plaita.tenant_context.current_tenant``，与
 分布式存储/日志同源）——非 default 租户读旁文件
@@ -27,6 +31,15 @@ from typing import Any, Dict, Optional
 
 class CredentialError(RuntimeError):
     """凭据缺失/未配置/解密失败。message 面向用户，给出可操作的修复指引。"""
+
+
+class CredentialStoreCorruptError(CredentialError):
+    """凭据文件存在但为空/损坏/不可读——与「文件不存在（尚未配置）」区分。
+
+    文件缺失时返回空 store（合法的「还没有凭据」）；文件存在却读不出完整
+    JSON 时不能静默当成空 store，否则所有凭据会表现为「不存在」，把排查
+    方向引向重新创建凭据，掩盖真正的导出写失败/文件截断。
+    """
 
 
 DEFAULT_FILE = ".plaita-credentials.json"
@@ -109,12 +122,32 @@ def credential_type(name: str) -> Optional[str]:
     return None
 
 
+def _corrupt(path: Path, reason: str) -> CredentialStoreCorruptError:
+    return CredentialStoreCorruptError(
+        f"凭据文件 {path} {reason}。导出文件由编排台在保存凭据时重建："
+        "请核对磁盘空间与文件权限后，在编排台「凭据」页重新保存任意一条凭据"
+    )
+
+
 def _read_store() -> Dict[str, Dict[str, Any]]:
     path = credentials_file()
     if not path.is_file():
         return {}
     try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # is_file() 与读取之间的外部删除：仍按「尚未配置」处理。
         return {}
-    return data if isinstance(data, dict) else {}
+    except OSError as e:
+        raise _corrupt(path, f"无法读取（{e}）") from e
+    if not raw.strip():
+        raise _corrupt(path, "为空（导出写入可能被中断/截断）")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise _corrupt(
+            path, f"不是合法 JSON（{e.msg}，line {e.lineno} column {e.colno}）"
+        ) from e
+    if not isinstance(data, dict):
+        raise _corrupt(path, f"顶层必须是对象，实际为 {type(data).__name__}")
+    return data

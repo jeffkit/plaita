@@ -99,6 +99,16 @@ flow_worker 自动带上密钥环境。
 密钥来源：`PLAITA_CREDENTIALS_KEY` 环境变量，或自动生成于 DB 同目录的
 `.plaita-credentials.key`。多机部署请统一注入同一密钥。
 
+**导出写入是原子的**：保存/删除凭据时先写同目录临时文件（`flush` + `fsync`
++ 0600），再用 `os.replace` 原子替换目标文件。磁盘写满、超配额或进程中断
+不会把上一份完好的导出文件截断成半截 JSON——旧文件逐字节保留，引擎继续
+按旧内容解析。
+
+**引擎读侧 fail-loud**：文件不存在视为「尚未配置凭据」；文件存在但为空、
+JSON 损坏或顶层不是对象时，`plaita.credentials` 抛
+`CredentialStoreCorruptError`（`CredentialError` 子类），报错指明文件路径
+并提示重新保存任意一条凭据以重建导出文件，不再静默降级成「凭据不存在」。
+
 **多租户隔离**：凭据按租户落库与导出——default 租户沿用历史文件
 `.plaita-credentials.json`，其余租户各写旁文件
 `.plaita-credentials.{tenant_id}.json`。引擎侧 `plaita.credentials`
