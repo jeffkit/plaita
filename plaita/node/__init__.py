@@ -19,7 +19,7 @@ import warnings
 from importlib.metadata import entry_points
 from typing import Dict, List, Optional, Type
 
-from .assignment import Assignment
+from .assignment import Assignment, AssignmentError
 from .basic import Node
 from .child import InlineFlow, ReferenceFlow
 from .code import CodeNode

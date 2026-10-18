@@ -6,6 +6,14 @@ from ..io import Property, match
 from ..node.basic import Node
 
 
+class AssignmentError(ValueError):
+    """assignment 节点运行期无法确定取值时抛出（core-F5）。
+
+    具名 ``ValueError`` 子类：既让上层能按类型识别（区别于配置期校验），
+    也保持既有 ``except ValueError`` 处理面的兼容。
+    """
+
+
 class Assignment(Node):
     """变量赋值节点。
 
@@ -62,9 +70,20 @@ class Assignment(Node):
             value = self.upstream_output[0]["value"]
         elif len(self.upstream_output) > 1:
             upstream = execution.state.last_node_id
-            value = [out for out in self.upstream_output if out["upstream"] == upstream]
-            if value:
-                value = value[0]["value"]
+            matched = [out for out in self.upstream_output if out["upstream"] == upstream]
+            if not matched:
+                # core-F5：旧实现把过滤结果 [] 原样交给 evaluate，空列表若通过
+                # output_type 校验就会作为「真值」下发——下游拿到空数据却无法
+                # 区分「合法空结果」与「upstream 根本没有命中」。多 upstream
+                # 的选择是确定性的：当前上游必须在声明列表里，否则是配置/编排
+                # 错误，必须具名拒绝，不能静默产出 []。
+                declared = [out["upstream"] for out in self.upstream_output]
+                raise AssignmentError(
+                    f"assignment node {self.id!r}: 多 upstream 无命中——"
+                    f"当前上游 {upstream!r} 不在 upstream_output 声明的 "
+                    f"{declared!r} 中；拒绝静默下发空列表 []"
+                )
+            value = matched[0]["value"]
         elif self.output is not None:  # 只有一个,不用管upstream；is not None——
             # 假值字面量（0/False/""）也是合法赋值，曾因真值判断被静默吞成 None
             value = self.output

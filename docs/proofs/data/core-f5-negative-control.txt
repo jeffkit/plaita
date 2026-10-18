@@ -1,0 +1,31 @@
+=== 负控：还原「多 upstream 无命中保持过滤结果 []」 ===
+变异（plaita/node/assignment.py）：
+    matched = [out for out in self.upstream_output if out["upstream"] == upstream]
+    if not matched:
+        raise AssignmentError(...)          # 修复态
+    value = matched[0]["value"]
+  →
+    value = [out for out in self.upstream_output if out["upstream"] == upstream]
+    if value:
+        value = value[0]["value"]           # 修复前：无命中保持 []
+
+命令：
+  python -m pytest tests/unit/test_core_f5_assignment_upstream.py -q
+
+测试输出（节选）：
+    def test_no_match_raises_named_error(self):
+        ...
+>       with pytest.raises(AssignmentError) as ei:
+E       Failed: DID NOT RAISE AssignmentError
+
+FAILED tests/unit/test_core_f5_assignment_upstream.py::TestMultiUpstreamNoMatch::test_no_match_raises_named_error
+FAILED tests/unit/test_core_f5_assignment_upstream.py::TestMultiUpstreamNoMatch::test_missing_last_node_id_also_rejected
+2 failed, 6 passed in 0.34s
+
+第二条失败（last_node_id=None，旧实现继续把 [] 交给求值，MagicMock 返回值
+撞 output_type 'array'）：
+E       ValueError: assignment node 'asg-join': 求值结果 <MagicMock ...>
+        不符合声明的 output_type 'array'
+
+=== 还原修复后 ===
+8 passed in 0.28s
