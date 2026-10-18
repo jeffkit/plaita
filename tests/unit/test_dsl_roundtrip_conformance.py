@@ -856,10 +856,19 @@ def _current_losses():
 
 
 def test_all_registry_types_have_samples():
-    """全注册类型都有样本（harvest+补齐零缺口）。"""
+    """全注册类型都有样本（harvest+补齐零缺口；环境差类型现场按需补建）。"""
     have = set(S.sample_types())
     want = set(S.REG.list_types())
-    assert want <= have, f"缺样本类型: {sorted(want - have)}"
+    missing = sorted(want - have)
+    # 环境差：不同安装面注册的类型集不同（如 code 节点经 pip extras 激活）。
+    # builder 支持按需构造——构造失败才是真缺口。
+    still = []
+    for t in missing:
+        try:
+            S.sample_ir(t)
+        except Exception as exc:
+            still.append(f"{t}: {type(exc).__name__}: {exc}")
+    assert not still, f"缺样本且现场构造失败: {still}"
 
 
 def test_no_loss_outside_whitelist():
