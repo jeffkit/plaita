@@ -64,10 +64,12 @@ fi
 # 已按 tests/unit/test_*.py 收集到同一文件）。
 if [ "$PHASE" = "conformance" ]; then
 echo "[conformance] DSL round-trip conformance (#238)..."
-# 两套互补守卫：registry×字段矩阵（全字段全链逐格）+ 落地席 harvest 三表示
-# 扫掠（46 类型全集、丢失路径白名单与钉值）。
+# 三套互补守卫：registry×字段矩阵（全字段全链逐格）+ 落地席 harvest 三表示
+# 扫掠（46 类型全集、丢失路径白名单与钉值）+ #220-L2 分支 input/condition
+# 全算子独立回归（12 算子 × 双链 × 字面量类型）。
 if "$PYTHON_BIN" -m pytest tests/unit/test_issue238_dsl_conformance.py \
-    tests/unit/test_dsl_roundtrip_conformance.py -x -q; then
+    tests/unit/test_dsl_roundtrip_conformance.py \
+    tests/unit/test_issue220_l2_parallel_branch_fields.py -x -q; then
     echo "  ✓ DSL round-trip conformance passed"
 else
     echo "  ✗ DSL round-trip conformance failed"
