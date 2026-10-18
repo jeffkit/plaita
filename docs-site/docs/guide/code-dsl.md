@@ -189,6 +189,12 @@ first_even.run(nums=[1, 3, 4, 6])   # -> 4
 集合子流程里引用集合节点自身的结果（父侧此刻尚未写回）。裸 `INPUT` 在体内指
 子流程输入；要读外层原始输入须显式写 `PARENT.INPUT.<名>`。
 
+循环**之后**，集合节点的 `id=` 同样进入名字作用域：上面的 `return NODE.dbl`
+可直接写成 `return dbl`（解析为 `$NODE.dbl`）。`emit_source` 发射下游
+`$NODE.<id>` 时用的正是这个裸名形态，因此 `IR → @flow → IR` 往返依赖它解析回
+同一个引用（plaita#220-L1）。命名 WHILE 的 for-head（`for item in WHILE(...,
+id="w")`）同理。
+
 ```python
 @flow("scaled_sum")
 def scaled_sum(INPUT):

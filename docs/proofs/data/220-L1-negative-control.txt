@@ -1,0 +1,442 @@
+$ .venv/bin/python -m pytest tests/unit/test_issue220_collection_node_id_scope.py -q
+
+# 负控：还原 origin/main 9c8820a 已落地的两处 id 登记（其余不动）
+
+FFFFFFF.....F                                                            [100%]
+=================================== FAILURES ===================================
+____________ test_collection_node_ref_survives_flow_roundtrip[map] _____________
+
+kind = 'map'
+
+    @pytest.mark.parametrize("kind", _COLLECTION_KINDS)
+    def test_collection_node_ref_survives_flow_roundtrip(kind):
+        """IR -> @flow -> IR：下游 ``$NODE.<id>`` 必须可重编译且逐字段保真。"""
+        original = _collection_ir(kind)
+        emitted = emit_source(original)
+    
+        # 发射形状：下游引用是裸变量名（修复点必须落在编译侧，不是发射器改名）
+        assert emitted.splitlines()[-1] == "    return agg"
+        assert "id='agg'" in emitted
+    
+>       back = compile_source(emitted)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue220_collection_node_id_scope.py:100: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:466: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'agg', node = <ast.Name object at 0x1032ac690>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x1051d3a10>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'agg'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+___________ test_collection_node_ref_survives_flow_roundtrip[filter] ___________
+
+kind = 'filter'
+
+    @pytest.mark.parametrize("kind", _COLLECTION_KINDS)
+    def test_collection_node_ref_survives_flow_roundtrip(kind):
+        """IR -> @flow -> IR：下游 ``$NODE.<id>`` 必须可重编译且逐字段保真。"""
+        original = _collection_ir(kind)
+        emitted = emit_source(original)
+    
+        # 发射形状：下游引用是裸变量名（修复点必须落在编译侧，不是发射器改名）
+        assert emitted.splitlines()[-1] == "    return agg"
+        assert "id='agg'" in emitted
+    
+>       back = compile_source(emitted)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue220_collection_node_id_scope.py:100: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:466: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'agg', node = <ast.Name object at 0x1065a2590>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x106354190>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'agg'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+____________ test_collection_node_ref_survives_flow_roundtrip[find] ____________
+
+kind = 'find'
+
+    @pytest.mark.parametrize("kind", _COLLECTION_KINDS)
+    def test_collection_node_ref_survives_flow_roundtrip(kind):
+        """IR -> @flow -> IR：下游 ``$NODE.<id>`` 必须可重编译且逐字段保真。"""
+        original = _collection_ir(kind)
+        emitted = emit_source(original)
+    
+        # 发射形状：下游引用是裸变量名（修复点必须落在编译侧，不是发射器改名）
+        assert emitted.splitlines()[-1] == "    return agg"
+        assert "id='agg'" in emitted
+    
+>       back = compile_source(emitted)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue220_collection_node_id_scope.py:100: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:466: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'agg', node = <ast.Name object at 0x1065768d0>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x101e4bce0>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'agg'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+____________ test_collection_node_ref_survives_flow_roundtrip[loop] ____________
+
+kind = 'loop'
+
+    @pytest.mark.parametrize("kind", _COLLECTION_KINDS)
+    def test_collection_node_ref_survives_flow_roundtrip(kind):
+        """IR -> @flow -> IR：下游 ``$NODE.<id>`` 必须可重编译且逐字段保真。"""
+        original = _collection_ir(kind)
+        emitted = emit_source(original)
+    
+        # 发射形状：下游引用是裸变量名（修复点必须落在编译侧，不是发射器改名）
+        assert emitted.splitlines()[-1] == "    return agg"
+        assert "id='agg'" in emitted
+    
+>       back = compile_source(emitted)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue220_collection_node_id_scope.py:100: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:466: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'agg', node = <ast.Name object at 0x106477690>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x106316360>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'agg'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+___________ test_collection_node_ref_survives_flow_roundtrip[reduce] ___________
+
+kind = 'reduce'
+
+    @pytest.mark.parametrize("kind", _COLLECTION_KINDS)
+    def test_collection_node_ref_survives_flow_roundtrip(kind):
+        """IR -> @flow -> IR：下游 ``$NODE.<id>`` 必须可重编译且逐字段保真。"""
+        original = _collection_ir(kind)
+        emitted = emit_source(original)
+    
+        # 发射形状：下游引用是裸变量名（修复点必须落在编译侧，不是发射器改名）
+        assert emitted.splitlines()[-1] == "    return agg"
+        assert "id='agg'" in emitted
+    
+>       back = compile_source(emitted)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue220_collection_node_id_scope.py:100: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:466: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'agg', node = <ast.Name object at 0x10659f810>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x1063d1050>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'agg'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+____________ test_named_while_for_head_ref_survives_flow_roundtrip _____________
+
+    def test_named_while_for_head_ref_survives_flow_roundtrip():
+        """命名 WHILE 的 for-head 与集合节点同族：id 也必须进名字作用域。"""
+        original = _while_ir()
+        emitted = emit_source(original)
+        assert "for item in WHILE(" in emitted
+        assert "id='w'" in emitted
+        assert emitted.splitlines()[-1] == "    return w"
+    
+>       back = compile_source(emitted)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue220_collection_node_id_scope.py:119: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:370: in _compile_for
+    return _compile_while_for(head, coll_call, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:344: in _compile_while_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'w', node = <ast.Name object at 0x1065029d0>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x1064f0b90>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'w'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+____________ test_direct_source_downstream_bare_name_binds_node_ref ____________
+
+    def test_direct_source_downstream_bare_name_binds_node_ref():
+        """手写源码（不经发射器）同样按语言契约解析集合节点 id。"""
+>       ir = compile_source(
+            "def f(INPUT):\n"
+            "    for item in MAP(INPUT.items, id='agg'):\n"
+            "        return item\n"
+            "    return agg"
+        )
+
+tests/unit/test_issue220_collection_node_id_scope.py:128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:466: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'agg', node = <ast.Name object at 0x10657cd50>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x10635f310>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 4 行: 未知名字 'agg'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+__________________ test_collection_result_is_live_at_runtime ___________________
+
+    def test_collection_result_is_live_at_runtime():
+        """端到端语义：重编译后的下游引用拿到真实集合结果，不只是文本相等。"""
+>       flow = flow_from_source(emit_source(_collection_ir("map")))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_issue220_collection_node_id_scope.py:192: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita/dsl/codeflow/_source.py:422: in flow_from_source
+    return build_flow(compile_source(src, flow_id, **opts))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:411: in compile_source
+    return _compile_fdef(chosen, final_id, merged, childflows=childflows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_source.py:135: in _compile_fdef
+    entry = _compile_block(list(fdef.body), ctx, succ=None)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:67: in _compile_block
+    return _compile_for(head, ctx, succ, rest)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:466: in _compile_for
+    after = _compile_block(rest, ctx, succ)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_stmt.py:42: in _compile_block
+    output = _compile_expr(head.value, ctx) if head.value is not None else None
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/dsl/codeflow/_expr.py:28: in _compile_expr
+    return _resolve_name(node.id, node, ctx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+name = 'agg', node = <ast.Name object at 0x106374c90>
+ctx = <plaita.dsl.codeflow._common._CompileCtx object at 0x106465fd0>
+
+    def _resolve_name(name: str, node: ast.Name, ctx: _CompileCtx) -> str:
+        if name in _NS_PREFIX:
+            return _NS_PREFIX[name]
+        if name in ctx.names:
+            return ctx.names[name]
+        if name in _BUILTIN_TO_F:
+            # 单独出现的 len(x) 走 Call 分支；裸 len 名字无意义
+            raise _CodeflowError(f"内置函数 {name} 必须以调用形式使用", node)
+>       raise _CodeflowError(
+            f"未知名字 {name!r}：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量", node)
+E       plaita.dsl.codeflow._common._CodeflowError: [codeflow] 第 5 行: 未知名字 'agg'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量
+
+plaita/dsl/codeflow/_expr.py:122: _CodeflowError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_collection_node_ref_survives_flow_roundtrip[map]
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_collection_node_ref_survives_flow_roundtrip[filter]
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_collection_node_ref_survives_flow_roundtrip[find]
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_collection_node_ref_survives_flow_roundtrip[loop]
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_collection_node_ref_survives_flow_roundtrip[reduce]
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_named_while_for_head_ref_survives_flow_roundtrip
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_direct_source_downstream_bare_name_binds_node_ref
+FAILED tests/unit/test_issue220_collection_node_id_scope.py::test_collection_result_is_live_at_runtime
+8 failed, 5 passed in 0.58s
