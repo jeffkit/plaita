@@ -2864,6 +2864,7 @@ class FlowWorker:
 
     def _load_and_guard_resume_state(
         self, flow_id: str, execution_id: str, resume_type: str,
+        *, lease_held: bool = False,
     ) -> Tuple[ExecutionState, Optional[Dict[str, Any]]]:
         """加载执行状态并跑 resume 前置判定，返回 ``(state, early_result)``。
 
@@ -2875,6 +2876,10 @@ class FlowWorker:
         一次**并以这次为准——load 与 acquire 之间另一 worker 可能已把执行
         推到终态并释放租约，旧快照不能用于推进（fencing 只拒绝旧世代写，
         本 worker 拿到的是新一代，拦不住旧 state）。
+
+        ``lease_held``（plaita#243）：第二次调用时外层 resume 已持有该执行
+        租约。suspended 幂等分支的补派必须**复用这份所有权**，不能再次
+        ``_acquire_lease``（自撞 ⇒ 补派跳过 + 消息 ack ⇒ 永久 suspended）。
         """
         # 加载执行状态。None 仅表示键不存在——Redis 后端的读取瞬断/反序列化
         # 失败现以上抛 ExecutionStateLoadError，由 run() 的重投递路径处理，
@@ -2984,7 +2989,8 @@ class FlowWorker:
             # 状态原样），只把 service_config 幂等重投一次并清凭据；
             # 补派失败抛 ServiceDispatchError → 消息不 ack 继续重投。
             compensated = self._compensate_suspend_dispatch(
-                state, execution_id, source=f"resume:{resume_type}"
+                state, execution_id, source=f"resume:{resume_type}",
+                lease_held=lease_held,
             )
             logger.info(
                 "执行 %s 处于 suspended（挂起节点待事件决议），resume_type=%s "
@@ -3076,7 +3082,7 @@ class FlowWorker:
             # 改写）。租约内重读并重跑前置判定；state/early_result 均以本次
             # 为准，不复用 acquire 前的快照。
             state, early_result = self._load_and_guard_resume_state(
-                flow_id, execution_id, resume_type
+                flow_id, execution_id, resume_type, lease_held=True
             )
             if early_result is not None:
                 logger.info(
@@ -3796,20 +3802,28 @@ class FlowWorker:
             raise
 
     def _compensate_suspend_dispatch(
-        self, state: ExecutionState, execution_id: str, *, source: str
+        self, state: ExecutionState, execution_id: str, *, source: str,
+        lease_held: bool = False,
     ) -> bool:
         """挂起补偿派发（plaita#233）：把落盘凭据里的服务任务幂等重投一次。
 
         触发面（三条载体共用本函数）：``resume_flow`` 的 suspended 幂等短路
-        （continue/retry）、start 载体（非 dedup 走 resume 委托 / dedup 命中
-        分支）。**不重跑挂起节点**（#33 契约不变），只补「落盘→派发」窗口
-        丢掉的投递。
+        （continue/retry，两处调用点：租约前 / 租约内复核）、start 载体
+        （非 dedup 走 resume 委托 / dedup 命中分支）。**不重跑挂起节点**
+        （#33 契约不变），只补「落盘→派发」窗口丢掉的投递。
+
+        ``lease_held``（plaita#243）：调用方**已持有**该执行租约（#241 的
+        租约内复核分支）。此时直接复用外层所有权，不再 ``_acquire_lease``
+        ——同一 worker 重入 acquire 必然失败（自撞），补派会被跳过，随后
+        消息 ack、``dispatch_pending`` 执行永久 suspended。独立载体
+        （start dedup / 租约前短路）保持 ``lease_held=False``，仍走短期
+        租约 + 持锁重读。
 
         返回 True = 本次确实补派了；False = 无凭据 / 已被他人推进 / 持有者
         活跃（跳过，由持有者推进并重新派发）。
 
-        为什么补派要**短暂持执行租约 + 持锁后重读**（而不是直接拿入口加载的
-        快照去写）：
+        为什么独立载体要**短暂持执行租约 + 持锁后重读**（而不是直接拿入口
+        加载的快照去写）：
 
         - 补派成功后要「清凭据 = 再写一次状态行」，无租约的写是 last-writer-
           wins——若此刻另一 worker 正持租约把该执行推向终态，这次写会把旧
@@ -3823,6 +3837,10 @@ class FlowWorker:
         """
         if self._pending_suspend_dispatch(state) is None:
             return False
+        if lease_held:
+            # plaita#243：外层 resume 的租约就是所有权凭据，直接投递；
+            # 仍重读盘上状态，避免拿复核前的旧快照覆写。
+            return self._dispatch_suspend_pending(execution_id, source=source)
         holder = new_holder_token(
             prefix="dispatch", instance_id=getattr(self, "instance_id", None)
         )
@@ -3837,37 +3855,46 @@ class FlowWorker:
         if fence_token is not None:
             fence_token_reset = set_current_fence_token(fence_token)
         try:
-            # 持锁后重读：入口快照可能已被他人推进/终态化，绝不能拿旧快照覆写。
-            fresh = self.execution_storage.load_execution_state(execution_id)
-            marker = (
-                self._pending_suspend_dispatch(fresh) if fresh is not None else None
-            )
-            if marker is None or (getattr(fresh, "status", "") or "") != "suspended":
-                logger.info(
-                    "执行 %s 挂起补派跳过（source=%s）：盘上已无待派凭据或状态已变"
-                    "（status=%r）", execution_id, source,
-                    getattr(fresh, "status", None) if fresh is not None else None,
-                )
-                return False
-            service_config = marker.get("service_config")
-            service_config = (
-                dict(service_config) if isinstance(service_config, dict) else {}
-            )
-            subtype = str(marker.get("service_type") or service_config.get("type") or "")
-            logger.warning(
-                "执行 %s 挂起但派发凭据未清（source=%s, service=%s, node=%s）："
-                "补派一次外延服务任务",
-                execution_id, source, subtype or "?", marker.get("node_id"),
-            )
-            self._dispatch_service_task(
-                {"service_config": service_config}, fresh.context or {}, execution_id
-            )
-            self._clear_suspend_dispatch_pending(execution_id, fresh, source=source)
-            return True
+            return self._dispatch_suspend_pending(execution_id, source=source)
         finally:
             if fence_token_reset is not None:
                 reset_current_fence_token(fence_token_reset)
             self.execution_lease.release(execution_id, lease_value)
+
+    def _dispatch_suspend_pending(self, execution_id: str, *, source: str) -> bool:
+        """持租约（自身取得或外层已持）时重读盘上状态并补派一次。
+
+        调用方负责租约生命周期；本函数只做「重读 → 校验仍 suspended 且有
+        凭据 → 投递 → 清凭据」。投递失败上抛（消息不 ack 可重投）；清凭据
+        失败同样上抛（由服务侧幂等吸收重复投递）。
+        """
+        # 持锁后重读：入口快照可能已被他人推进/终态化，绝不能拿旧快照覆写。
+        fresh = self.execution_storage.load_execution_state(execution_id)
+        marker = (
+            self._pending_suspend_dispatch(fresh) if fresh is not None else None
+        )
+        if marker is None or (getattr(fresh, "status", "") or "") != "suspended":
+            logger.info(
+                "执行 %s 挂起补派跳过（source=%s）：盘上已无待派凭据或状态已变"
+                "（status=%r）", execution_id, source,
+                getattr(fresh, "status", None) if fresh is not None else None,
+            )
+            return False
+        service_config = marker.get("service_config")
+        service_config = (
+            dict(service_config) if isinstance(service_config, dict) else {}
+        )
+        subtype = str(marker.get("service_type") or service_config.get("type") or "")
+        logger.warning(
+            "执行 %s 挂起但派发凭据未清（source=%s, service=%s, node=%s）："
+            "补派一次外延服务任务",
+            execution_id, source, subtype or "?", marker.get("node_id"),
+        )
+        self._dispatch_service_task(
+            {"service_config": service_config}, fresh.context or {}, execution_id
+        )
+        self._clear_suspend_dispatch_pending(execution_id, fresh, source=source)
+        return True
 
     def _dispatch_service_task(
         self, result: Dict[str, Any], context: Dict[str, Any], execution_id: str

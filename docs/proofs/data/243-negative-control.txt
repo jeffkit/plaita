@@ -1,0 +1,35 @@
+=== 负控：租约内复核改回 lease_held=False（恢复自撞 acquire） ===
+变异（plaita/server/flow_worker.py，resume_flow 租约内复核）：
+    state, early_result = self._load_and_guard_resume_state(
+        flow_id, execution_id, resume_type, lease_held=True
+    )
+  →
+    state, early_result = self._load_and_guard_resume_state(
+        flow_id, execution_id, resume_type, lease_held=False
+    )
+
+命令：
+  python -m pytest tests/unit/test_issue243_resume_suspended_compensation.py -q
+
+测试输出（节选）：
+        saved = storage.load_execution_state(EXEC)
+        assert saved.status == "suspended"
+>       assert saved.dispatch_pending is None, (
+            f"补派后凭据必须清空，实际 {saved.dispatch_pending!r}"
+            "（自撞路径会留下 pending=True）"
+        )
+E       AssertionError: 补派后凭据必须清空，实际
+        {'pending': True, 'service_type': 'delay',
+         'service_config': {'type': 'delay', 'seconds': 5},
+         'node_id': 'wait', 'recorded_at': '2026-01-01T00:00:00'}
+        （自撞路径会留下 pending=True）
+E       assert {'pending': True, ...} is None
+
+WARNING  plaita:flow_worker.py:3849 执行 exec-243 挂起补派跳过
+        （source=resume:continue）：执行租约被另一 worker 持有，由其推进/重新派发
+
+FAILED tests/unit/test_issue243_resume_suspended_compensation.py::test_suspended_in_acquire_window_compensates_with_held_lease
+1 failed, 1 passed in 0.61s
+
+=== 还原修复后 ===
+2 passed in 0.75s
