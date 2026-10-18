@@ -135,7 +135,7 @@ def _tenant_write_observability(site: str, ident: str) -> None:
                 "（后续量级看 write_probe_snapshot）", site, ident
             )
     except Exception as e:  # 观测自身绝不阻断写路径
-        logger.debug("#239 观测探针异常 site=%s: %s", site, e)
+        logger.debug("#239 观测探针异常 site=%s: %s", site, _scrub_url_text(e))
 
 
 class ExecutionStateLoadError(RuntimeError):
