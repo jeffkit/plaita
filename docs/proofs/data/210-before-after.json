@@ -1,0 +1,102 @@
+{
+  "issue": 210,
+  "title": "fix(console/frontend): Supervisor three bare fetches -> API_BASE + authHeaders",
+  "generated_at": "2026-10-18T00:34:55.576279+00:00",
+  "base_head": "ef90eb3a4e70371f3bea2c585600355773012789",
+  "fix_commit_subject": "fix(console/frontend): #210 Supervisor 三处裸 fetch 改走 API_BASE + authHeaders",
+  "source_scan": {
+    "before": {
+      "tsx": "/private/tmp/wt210-mut/plaita-console/frontend/src/pages/Supervisor.tsx",
+      "raw_fetch_calls": [
+        {
+          "call": "config",
+          "found": true,
+          "has_api_base": false,
+          "has_auth_headers": false,
+          "has_headers": false,
+          "raw_api_literal": true
+        },
+        {
+          "call": "datasets",
+          "found": true,
+          "has_api_base": false,
+          "has_auth_headers": false,
+          "has_headers": false,
+          "raw_api_literal": true
+        },
+        {
+          "call": "iterate",
+          "found": true,
+          "has_api_base": false,
+          "has_auth_headers": false,
+          "has_headers": true,
+          "raw_api_literal": true
+        }
+      ],
+      "all_missing_auth": true,
+      "all_missing_base": true
+    },
+    "after": {
+      "tsx": "/Users/kong/projects/infra4agent/plaita/plaita-console/frontend/src/pages/Supervisor.tsx",
+      "raw_fetch_calls": [
+        {
+          "call": "config",
+          "found": true,
+          "has_api_base": true,
+          "has_auth_headers": true,
+          "has_headers": true,
+          "raw_api_literal": false
+        },
+        {
+          "call": "datasets",
+          "found": true,
+          "has_api_base": true,
+          "has_auth_headers": true,
+          "has_headers": true,
+          "raw_api_literal": false
+        },
+        {
+          "call": "iterate",
+          "found": true,
+          "has_api_base": true,
+          "has_auth_headers": true,
+          "has_headers": true,
+          "raw_api_literal": false
+        }
+      ],
+      "all_missing_auth": false,
+      "all_missing_base": false
+    }
+  },
+  "build": {
+    "command": "npm run build",
+    "exit": 0,
+    "evidence": "docs/proofs/data/210-build.txt"
+  },
+  "test_runs": {
+    "source_level": "5 passed",
+    "unit_fast": "covered by ci-gate full pytest tests/: 8057 passed, 15 skipped, 3429 subtests",
+    "e2e": "74 passed, 3 skipped",
+    "integration": "213 passed, 1 skipped",
+    "ci_gate": "PASSED: pytest tests/ 8057 passed, 15 skipped, 3429 subtests, coverage 93.83% (threshold 80); import layering 3 passed; wheel has no test_*.py; SC-003 size guard satisfied",
+    "landing_gate_ci": "success: origin/main ef90eb3 latest completed ci.yml run"
+  },
+  "negative_control": {
+    "mutation": "restore bare /api fetches (no API_BASE, no authHeaders)",
+    "diff_sha256": "ea1389dd325fd1b68eae68b608b55d52149cad5c0804ebe5594ec560ee602858",
+    "test_file": {
+      "failed": 4,
+      "passed": 1
+    },
+    "failed": [
+      "test_config_probe_uses_api_base_and_auth_headers",
+      "test_datasets_uses_api_base_and_auth_headers",
+      "test_iterate_uses_api_base_and_auth_headers",
+      "test_no_bare_api_fetch_remains"
+    ],
+    "still_green": [
+      "test_error_branches_surface_status_and_detail"
+    ]
+  },
+  "note": "Repo has no Vitest/MSW runner; source-level scan + npm run build are the available checks. API_BASE already embeds SUB_PATH (services/api.ts), authHeaders injects Authorization/X-Admin-API-Key/X-Tenant-ID. #171 (Cluster.tsx deep-link <a href>) is a separate, already-CLOSED family; not modified."
+}

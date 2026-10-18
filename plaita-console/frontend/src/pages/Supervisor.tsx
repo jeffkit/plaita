@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { RefreshCw, Sparkles, CheckCircle2, XCircle } from 'lucide-react'
-import { api } from '../services/api'
+import { api, API_BASE, authHeaders } from '../services/api'
 
 interface IterationOutcome {
   status: string
@@ -88,6 +88,23 @@ function OutcomeBox({ outcome, onApply, applying }: IterationOutcomeBoxProps) {
   )
 }
 
+/** #210：把非 2xx 响应的 status/detail 变成可展示文案（不静默吞错）。 */
+function errorDetailText(body: unknown, resp: Response): string {
+  const detail = (body as { detail?: unknown } | null)?.detail
+  const message =
+    typeof detail === 'string'
+      ? detail
+      : detail
+        ? JSON.stringify(detail)
+        : resp.statusText
+  return `${resp.status} ${message}`.trim()
+}
+
+async function readErrorText(resp: Response): Promise<string> {
+  const body = await resp.json().catch(() => null)
+  return errorDetailText(body, resp)
+}
+
 export default function Supervisor() {
   const [flows, setFlows] = useState<Array<{ flow_id: string }>>([])
   const [flowId, setFlowId] = useState('')
@@ -102,16 +119,26 @@ export default function Supervisor() {
 
   useEffect(() => {
     api.getFlows().then((r) => setFlows(r.flows)).catch(() => setFlows([]))
-    fetch('/api/supervisor/config').then((r) => r.json()).then(setConfig).catch(() => setConfig(null))
+    fetch(`${API_BASE}/supervisor/config`, { headers: authHeaders() })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await readErrorText(r))
+        return r.json()
+      })
+      .then(setConfig)
+      .catch((e) => { setConfig(null); setError(`配置读取失败: ${String(e)}`) })
   }, [])
 
   useEffect(() => {
     if (!flowId) return
     setDatasets([])
-    fetch(`/api/flows/${flowId}/supervisor/datasets`)
-      .then((r) => r.json())
+    setError('')
+    fetch(`${API_BASE}/flows/${flowId}/supervisor/datasets`, { headers: authHeaders() })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await readErrorText(r))
+        return r.json()
+      })
       .then((r) => setDatasets(r.datasets || []))
-      .catch(() => setDatasets([]))
+      .catch((e) => { setDatasets([]); setError(`数据集列表读取失败: ${String(e)}`) })
   }, [flowId])
 
   const run = useCallback(async () => {
@@ -120,14 +147,14 @@ export default function Supervisor() {
     setError('')
     setResult(null)
     try {
-      const resp = await fetch(`/api/flows/${flowId}/supervisor/iterate`, {
+      const resp = await fetch(`${API_BASE}/flows/${flowId}/supervisor/iterate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ dataset, max_iterations: maxIterations }),
       })
-      const body = await resp.json()
+      const body = await resp.json().catch(() => ({}))
       if (!resp.ok) {
-        setError(typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail))
+        setError(errorDetailText(body, resp))
       } else {
         setResult(body)
       }
