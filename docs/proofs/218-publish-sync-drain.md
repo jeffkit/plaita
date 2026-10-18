@@ -88,23 +88,32 @@ AssertionError: Lists differ: [] != ['...'] : running-loop 桥接分支未排空
 
 ## 验收（2026-10-18，wt-b2 · HEAD 1a7efa1 + 本单改动）
 
-解释器：`.venv/bin/python`（worktree 自带）。
+解释器：`.venv/bin/python`（worktree 自带，Python 3.13）。
 
 | 面 | 命令 | 结果 |
 |---|---|---|
-| unit | `pytest tests/unit -m "not slow" -q` | **7833 passed / 16 skipped / 13 deselected**（0 failed） |
+| unit | `pytest tests/unit -m "not slow" -q` | **7833 passed / 16 skipped / 13 deselected**（0 failed，336.87s） |
 | integration | `pytest tests/integration -q` | **213 passed / 1 skipped** |
 | e2e | `pytest tests/e2e -q` | **74 passed / 3 skipped** |
-| 本单用例 | `pytest tests/unit/test_issue218_publish_sync_drain.py tests/unit/test_issue218_publish_sync_redis_boundary.py -q` | **6 passed** |
+| 本单用例 | `pytest tests/unit/test_issue218_publish_sync_drain.py tests/unit/test_issue218_publish_sync_redis_boundary.py -q` | **6 passed**；连续 10 轮 `-p no:cacheprovider` 每轮 **6 passed** |
 | 负控 | 同上（回退 `publish_sync` 的 drain） | **3 failed / 3 passed**（见上方精确红文案） |
+| 原 issue 复现 | `r7_diff3.py`（`P4b`） | `sync.seen = 1`（基线 0）、`pending = 0`、`error = null`；async 侧 `seen = 1` 不变 |
+| 定向面 | event core/memory/decorator/reviewfix + 109/110 parity + integration bridge | **274 passed** |
+
+- `landing_gate.py ci`：main 最近完成 run = `1a7efa1` **success**（03:06Z
+  push）⇒ 绿，允许落地。更早的 `574e5e6` completed=`cancelled` 是后续
+  push 顶掉的并发取消，不是失败。
+- Console 套件未跑：本 worktree venv 未装 console extras（`sse-starlette`
+  等缺失，收集期 ImportError）；本单未改 `plaita-console/**`，协议
+  「console 如涉及」不触发。
 
 ruff：`plaita/event/memory.py` 有 3 条 BLE001（`except Exception`），在
 HEAD `1a7efa1` 原文件上同样存在（行号平移），非本单引入；本单新增代码
 （`core.py` 钩子 + `memory.py::_drain_publish_sync_tasks`）无新增 lint 错误。
 
-`docs-site` 的 `mkdocs build --strict` 本机不可跑：两个 venv 均未安装
-`docs-site/requirements.txt` 里的 `mkdocs-mermaid2-plugin`（`mermaid2` 导入
-失败），与本次文档改动无关；改动仅为 `event-system.md` API 表一行说明。
+`docs-site` 的 `mkdocs build --strict` 本机不可跑：worktree venv 与主
+clone venv 均未安装 `mkdocs`，与本次文档改动无关；改动仅为
+`event-system.md` API 表一行说明。
 
 ## 残留观察（不阻塞本单）
 
