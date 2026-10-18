@@ -791,6 +791,7 @@ IR (and for `priority`, runtime behaviour):
 | `assignment` | `outputType` | `:output-type string` | declared output type lost |
 | `map` | `maxConcurrent` | `:max-concurrent 3` (only when present) | concurrency cap lost |
 | `code` | `input` | `:input <expr>` (only when present) | node input lost |
+| `code` | `sandbox_backend` | `:sandbox-backend "subprocess"` (always quoted; only when the IR carries it) | per-node isolation level lost -- the round-trip silently fell back to the process default (`docker`), a security downgrade (plaita#220-L3) |
 | `http` | `input` | `:input <expr>` (only when present) | node input lost |
 | `end` | node-level `next` | `-> <next>` | successor lost |
 
@@ -803,6 +804,15 @@ appears when the IR actually carries the field. Measured over every
 unchanged=152, changed=19` -- the 19 are exactly the entries whose base
 emission dropped a field or was a hollow `parallel`, with zero unrelated byte
 drift.
+
+`code`'s `sandbox_backend` was found later (plaita#220, face L3, the same
+"populate every field, then round-trip" audit) and follows the same rule: no
+keyword when absent, and the value is only ever emitted as a **quoted string**
+(`_string_to_src`) -- `true` / `1` / `nil` written bare would re-read as
+`bool` / `int` / `None`. `CodeNode.execute` reads the attribute directly (no
+expression evaluation), so both sides fail closed on anything that is not a
+non-empty string literal instead of silently falling back to the default
+isolation level. Pinned by `tests/unit/test_issue220_sexpr_code_sandbox.py`.
 
 !!! note "The issue's "21 reader types" are 18 dispatch keys + 3 non-nodes"
 

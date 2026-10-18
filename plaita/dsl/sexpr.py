@@ -748,6 +748,19 @@ def _c_code(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
     inp = _opt(kw, "input")
     if inp is not None:
         spec["input"] = _value(inp)
+    # #220-L3：`sandbox_backend` 是逐节点的沙箱档位（安全字段，
+    # `plaita/node/code.py::CodeNode.execute` 直接读该属性选隔离实现；缺省回退
+    # 进程级默认）。读侧此前不认这个关键字 ⇒ sexpr 往返静默回退默认档位。
+    # `execute` 不对该字段做表达式求值，故只接受**非空字符串字面量**；其它形状
+    # （list/dict/bool/数字/空串）响亮拒绝，不留给运行期才炸。
+    backend = _opt(kw, "sandbox-backend", "sandbox_backend", "sandboxBackend")
+    if backend is not None:
+        value = _value(backend)
+        if not isinstance(value, str) or not value:
+            raise SyntaxError(
+                f"code 的 :sandbox-backend 需要非空字符串，得到 {value!r}"
+            )
+        spec["sandbox_backend"] = str(value)
     return spec
 
 
@@ -1373,6 +1386,19 @@ def _node_to_src(n: Dict[str, Any]) -> str:
         # #150: `_c_code` reads `:input` into `CodeNode.input`; dropped before.
         if n.get("input") is not None:
             parts.append(f":input {_expr_to_src(n['input'])}")
+        # #220-L3：写侧此前一个字都不发 `sandbox_backend` ⇒ sexpr 往返把
+        # `subprocess`/`restricted`/`unsafe` 静默洗回进程级默认（默认 `docker`），
+        # 隔离档位被无声降级。值只能是字面量字符串（执行期不做表达式求值），
+        # 恒走 `_string_to_src` 加引号：`true`/`1` 裸写会被读成 bool/int。
+        # 不可忠实表达的值 fail-closed，绝不静默丢。
+        backend = _dual(n, "sandboxBackend", "sandbox_backend")
+        if backend is not None:
+            if not isinstance(backend, str) or not backend:
+                raise SexprEmitError(
+                    f"节点 {n.get('id')!r} 的 sandbox_backend 必须是非空字符串"
+                    f"（得到 {backend!r}），无法发射成可忠实回读的 :sandbox-backend"
+                )
+            parts.append(f":sandbox-backend {_string_to_src(backend)}")
         if n.get("next") is not None:
             parts.append(f"-> {n['next']}")
     elif t == "mock":

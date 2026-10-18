@@ -1,0 +1,354 @@
+FFFFFFFFF.FFFFFFFFFFFFFF                                                 [100%]
+=================================== FAILURES ===================================
+____________ test_sexpr_roundtrip_preserves_sandbox_backend[docker] ____________
+
+backend = 'docker'
+
+    @pytest.mark.parametrize("backend", ["docker", "subprocess", "restricted", "unsafe"])
+    def test_sexpr_roundtrip_preserves_sandbox_backend(backend):
+        """#220-L3 主症：档位往返后逐字段相等，且其余 code 字段不回归。"""
+        src = flow_to_sexpr(_ir(backend))
+>       assert f':sandbox-backend "{backend}"' in src
+E       assert ':sandbox-backend "docker"' in '(flow f-l3 (start :id s -> n) (code :id n :lang python :code "def run(x): return x" :input $INPUT.x -> e) (end :id e))'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:89: AssertionError
+__________ test_sexpr_roundtrip_preserves_sandbox_backend[subprocess] __________
+
+backend = 'subprocess'
+
+    @pytest.mark.parametrize("backend", ["docker", "subprocess", "restricted", "unsafe"])
+    def test_sexpr_roundtrip_preserves_sandbox_backend(backend):
+        """#220-L3 主症：档位往返后逐字段相等，且其余 code 字段不回归。"""
+        src = flow_to_sexpr(_ir(backend))
+>       assert f':sandbox-backend "{backend}"' in src
+E       assert ':sandbox-backend "subprocess"' in '(flow f-l3 (start :id s -> n) (code :id n :lang python :code "def run(x): return x" :input $INPUT.x -> e) (end :id e))'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:89: AssertionError
+__________ test_sexpr_roundtrip_preserves_sandbox_backend[restricted] __________
+
+backend = 'restricted'
+
+    @pytest.mark.parametrize("backend", ["docker", "subprocess", "restricted", "unsafe"])
+    def test_sexpr_roundtrip_preserves_sandbox_backend(backend):
+        """#220-L3 主症：档位往返后逐字段相等，且其余 code 字段不回归。"""
+        src = flow_to_sexpr(_ir(backend))
+>       assert f':sandbox-backend "{backend}"' in src
+E       assert ':sandbox-backend "restricted"' in '(flow f-l3 (start :id s -> n) (code :id n :lang python :code "def run(x): return x" :input $INPUT.x -> e) (end :id e))'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:89: AssertionError
+____________ test_sexpr_roundtrip_preserves_sandbox_backend[unsafe] ____________
+
+backend = 'unsafe'
+
+    @pytest.mark.parametrize("backend", ["docker", "subprocess", "restricted", "unsafe"])
+    def test_sexpr_roundtrip_preserves_sandbox_backend(backend):
+        """#220-L3 主症：档位往返后逐字段相等，且其余 code 字段不回归。"""
+        src = flow_to_sexpr(_ir(backend))
+>       assert f':sandbox-backend "{backend}"' in src
+E       assert ':sandbox-backend "unsafe"' in '(flow f-l3 (start :id s -> n) (code :id n :lang python :code "def run(x): return x" :input $INPUT.x -> e) (end :id e))'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:89: AssertionError
+______________ test_sexpr_roundtrip_keeps_string_typed_backend[1] ______________
+
+backend = '1'
+
+    @pytest.mark.parametrize("backend", ["1", "true", "42", "nil"])
+    def test_sexpr_roundtrip_keeps_string_typed_backend(backend):
+        """数字样 / 原子样的档位名必须仍读回字符串（不得退化成 int/bool/None）。"""
+        src = flow_to_sexpr(_ir(backend))
+>       value = _pick(compile_sexpr(src)["nodes"])["sandbox_backend"]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:104: KeyError
+____________ test_sexpr_roundtrip_keeps_string_typed_backend[true] _____________
+
+backend = 'true'
+
+    @pytest.mark.parametrize("backend", ["1", "true", "42", "nil"])
+    def test_sexpr_roundtrip_keeps_string_typed_backend(backend):
+        """数字样 / 原子样的档位名必须仍读回字符串（不得退化成 int/bool/None）。"""
+        src = flow_to_sexpr(_ir(backend))
+>       value = _pick(compile_sexpr(src)["nodes"])["sandbox_backend"]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:104: KeyError
+_____________ test_sexpr_roundtrip_keeps_string_typed_backend[42] ______________
+
+backend = '42'
+
+    @pytest.mark.parametrize("backend", ["1", "true", "42", "nil"])
+    def test_sexpr_roundtrip_keeps_string_typed_backend(backend):
+        """数字样 / 原子样的档位名必须仍读回字符串（不得退化成 int/bool/None）。"""
+        src = flow_to_sexpr(_ir(backend))
+>       value = _pick(compile_sexpr(src)["nodes"])["sandbox_backend"]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:104: KeyError
+_____________ test_sexpr_roundtrip_keeps_string_typed_backend[nil] _____________
+
+backend = 'nil'
+
+    @pytest.mark.parametrize("backend", ["1", "true", "42", "nil"])
+    def test_sexpr_roundtrip_keeps_string_typed_backend(backend):
+        """数字样 / 原子样的档位名必须仍读回字符串（不得退化成 int/bool/None）。"""
+        src = flow_to_sexpr(_ir(backend))
+>       value = _pick(compile_sexpr(src)["nodes"])["sandbox_backend"]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:104: KeyError
+__________________ test_sexpr_writer_reads_camel_ir_spelling ___________________
+
+    def test_sexpr_writer_reads_camel_ir_spelling():
+        """手写 camel IR（``sandboxBackend``）同样发射，与 #200/#207 双读口径一致。"""
+        src = flow_to_sexpr(_ir("subprocess", key="sandboxBackend"))
+>       assert ':sandbox-backend "subprocess"' in src
+E       assert ':sandbox-backend "subprocess"' in '(flow f-l3 (start :id s -> n) (code :id n :lang python :code "def run(x): return x" :input $INPUT.x -> e) (end :id e))'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:112: AssertionError
+_________________ test_sexpr_cross_front_flow_to_sexpr_to_flow _________________
+
+    def test_sexpr_cross_front_flow_to_sexpr_to_flow():
+        """``@flow`` 产出的 IR → sexpr → 再编译：两前端对同一档位口径一致。"""
+        flow_src = emit_source(_ir("restricted"))
+        assert "sandbox_backend='restricted'" in flow_src
+        flow_ir = compile_source(flow_src)
+        assert _pick(flow_ir["nodes"])["sandbox_backend"] == "restricted"
+        sexpr_src = flow_to_sexpr(flow_ir)
+>       assert _pick(compile_sexpr(sexpr_src)["nodes"])["sandbox_backend"] == "restricted"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:131: KeyError
+__________ test_sexpr_reader_accepts_keyword_aliases[sandbox-backend] __________
+
+keyword = 'sandbox-backend'
+
+    @pytest.mark.parametrize(
+        "keyword", ["sandbox-backend", "sandbox_backend", "sandboxBackend"])
+    def test_sexpr_reader_accepts_keyword_aliases(keyword):
+        src = _sexpr_src(f':{keyword} "subprocess"')
+>       assert _pick(compile_sexpr(src)["nodes"])["sandbox_backend"] == "subprocess"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:142: KeyError
+__________ test_sexpr_reader_accepts_keyword_aliases[sandbox_backend] __________
+
+keyword = 'sandbox_backend'
+
+    @pytest.mark.parametrize(
+        "keyword", ["sandbox-backend", "sandbox_backend", "sandboxBackend"])
+    def test_sexpr_reader_accepts_keyword_aliases(keyword):
+        src = _sexpr_src(f':{keyword} "subprocess"')
+>       assert _pick(compile_sexpr(src)["nodes"])["sandbox_backend"] == "subprocess"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:142: KeyError
+__________ test_sexpr_reader_accepts_keyword_aliases[sandboxBackend] ___________
+
+keyword = 'sandboxBackend'
+
+    @pytest.mark.parametrize(
+        "keyword", ["sandbox-backend", "sandbox_backend", "sandboxBackend"])
+    def test_sexpr_reader_accepts_keyword_aliases(keyword):
+        src = _sexpr_src(f':{keyword} "subprocess"')
+>       assert _pick(compile_sexpr(src)["nodes"])["sandbox_backend"] == "subprocess"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'sandbox_backend'
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:142: KeyError
+________ test_sexpr_writer_fail_closed_on_unrepresentable_backend[123] _________
+
+value = 123
+
+    @pytest.mark.parametrize("value", [123, True, ["subprocess"], {"b": "subprocess"}, ""])
+    def test_sexpr_writer_fail_closed_on_unrepresentable_backend(value):
+        """写侧不静默丢：非字符串 / 空串无法忠实回读，必须响亮拒绝。"""
+>       with pytest.raises(SexprEmitError, match="sandbox_backend"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SexprEmitError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:152: Failed
+________ test_sexpr_writer_fail_closed_on_unrepresentable_backend[True] ________
+
+value = True
+
+    @pytest.mark.parametrize("value", [123, True, ["subprocess"], {"b": "subprocess"}, ""])
+    def test_sexpr_writer_fail_closed_on_unrepresentable_backend(value):
+        """写侧不静默丢：非字符串 / 空串无法忠实回读，必须响亮拒绝。"""
+>       with pytest.raises(SexprEmitError, match="sandbox_backend"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SexprEmitError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:152: Failed
+_______ test_sexpr_writer_fail_closed_on_unrepresentable_backend[value2] _______
+
+value = ['subprocess']
+
+    @pytest.mark.parametrize("value", [123, True, ["subprocess"], {"b": "subprocess"}, ""])
+    def test_sexpr_writer_fail_closed_on_unrepresentable_backend(value):
+        """写侧不静默丢：非字符串 / 空串无法忠实回读，必须响亮拒绝。"""
+>       with pytest.raises(SexprEmitError, match="sandbox_backend"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SexprEmitError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:152: Failed
+_______ test_sexpr_writer_fail_closed_on_unrepresentable_backend[value3] _______
+
+value = {'b': 'subprocess'}
+
+    @pytest.mark.parametrize("value", [123, True, ["subprocess"], {"b": "subprocess"}, ""])
+    def test_sexpr_writer_fail_closed_on_unrepresentable_backend(value):
+        """写侧不静默丢：非字符串 / 空串无法忠实回读，必须响亮拒绝。"""
+>       with pytest.raises(SexprEmitError, match="sandbox_backend"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SexprEmitError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:152: Failed
+__________ test_sexpr_writer_fail_closed_on_unrepresentable_backend[] __________
+
+value = ''
+
+    @pytest.mark.parametrize("value", [123, True, ["subprocess"], {"b": "subprocess"}, ""])
+    def test_sexpr_writer_fail_closed_on_unrepresentable_backend(value):
+        """写侧不静默丢：非字符串 / 空串无法忠实回读，必须响亮拒绝。"""
+>       with pytest.raises(SexprEmitError, match="sandbox_backend"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SexprEmitError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:152: Failed
+_ test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend 1-\u975e\u7a7a\u5b57\u7b26\u4e32] _
+
+fragment = ':sandbox-backend 1', message = '非空字符串'
+
+    @pytest.mark.parametrize(
+        "fragment, message",
+        [
+            (":sandbox-backend 1", "非空字符串"),
+            (":sandbox-backend true", "非空字符串"),
+            (':sandbox-backend ""', "非空字符串"),
+            (':sandbox-backend (list "subprocess")', "非空字符串"),
+            (":sandbox-backend (dict :b unsafeprofile)", "非空字符串"),
+        ],
+    )
+    def test_sexpr_reader_fail_closed_on_unrepresentable_backend(fragment, message):
+        """读侧不把非法形状留到运行期：解析期报 SyntaxError。"""
+>       with pytest.raises(SyntaxError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SyntaxError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:168: Failed
+_ test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend true-\u975e\u7a7a\u5b57\u7b26\u4e32] _
+
+fragment = ':sandbox-backend true', message = '非空字符串'
+
+    @pytest.mark.parametrize(
+        "fragment, message",
+        [
+            (":sandbox-backend 1", "非空字符串"),
+            (":sandbox-backend true", "非空字符串"),
+            (':sandbox-backend ""', "非空字符串"),
+            (':sandbox-backend (list "subprocess")', "非空字符串"),
+            (":sandbox-backend (dict :b unsafeprofile)", "非空字符串"),
+        ],
+    )
+    def test_sexpr_reader_fail_closed_on_unrepresentable_backend(fragment, message):
+        """读侧不把非法形状留到运行期：解析期报 SyntaxError。"""
+>       with pytest.raises(SyntaxError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SyntaxError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:168: Failed
+_ test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend ""-\u975e\u7a7a\u5b57\u7b26\u4e32] _
+
+fragment = ':sandbox-backend ""', message = '非空字符串'
+
+    @pytest.mark.parametrize(
+        "fragment, message",
+        [
+            (":sandbox-backend 1", "非空字符串"),
+            (":sandbox-backend true", "非空字符串"),
+            (':sandbox-backend ""', "非空字符串"),
+            (':sandbox-backend (list "subprocess")', "非空字符串"),
+            (":sandbox-backend (dict :b unsafeprofile)", "非空字符串"),
+        ],
+    )
+    def test_sexpr_reader_fail_closed_on_unrepresentable_backend(fragment, message):
+        """读侧不把非法形状留到运行期：解析期报 SyntaxError。"""
+>       with pytest.raises(SyntaxError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SyntaxError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:168: Failed
+_ test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend (list "subprocess")-\u975e\u7a7a\u5b57\u7b26\u4e32] _
+
+fragment = ':sandbox-backend (list "subprocess")', message = '非空字符串'
+
+    @pytest.mark.parametrize(
+        "fragment, message",
+        [
+            (":sandbox-backend 1", "非空字符串"),
+            (":sandbox-backend true", "非空字符串"),
+            (':sandbox-backend ""', "非空字符串"),
+            (':sandbox-backend (list "subprocess")', "非空字符串"),
+            (":sandbox-backend (dict :b unsafeprofile)", "非空字符串"),
+        ],
+    )
+    def test_sexpr_reader_fail_closed_on_unrepresentable_backend(fragment, message):
+        """读侧不把非法形状留到运行期：解析期报 SyntaxError。"""
+>       with pytest.raises(SyntaxError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SyntaxError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:168: Failed
+_ test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend (dict :b unsafeprofile)-\u975e\u7a7a\u5b57\u7b26\u4e32] _
+
+fragment = ':sandbox-backend (dict :b unsafeprofile)', message = '非空字符串'
+
+    @pytest.mark.parametrize(
+        "fragment, message",
+        [
+            (":sandbox-backend 1", "非空字符串"),
+            (":sandbox-backend true", "非空字符串"),
+            (':sandbox-backend ""', "非空字符串"),
+            (':sandbox-backend (list "subprocess")', "非空字符串"),
+            (":sandbox-backend (dict :b unsafeprofile)", "非空字符串"),
+        ],
+    )
+    def test_sexpr_reader_fail_closed_on_unrepresentable_backend(fragment, message):
+        """读侧不把非法形状留到运行期：解析期报 SyntaxError。"""
+>       with pytest.raises(SyntaxError, match=message):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE SyntaxError
+
+tests/unit/test_issue220_sexpr_code_sandbox.py:168: Failed
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_preserves_sandbox_backend[docker]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_preserves_sandbox_backend[subprocess]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_preserves_sandbox_backend[restricted]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_preserves_sandbox_backend[unsafe]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_keeps_string_typed_backend[1]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_keeps_string_typed_backend[true]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_keeps_string_typed_backend[42]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_roundtrip_keeps_string_typed_backend[nil]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_writer_reads_camel_ir_spelling
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_cross_front_flow_to_sexpr_to_flow
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_accepts_keyword_aliases[sandbox-backend]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_accepts_keyword_aliases[sandbox_backend]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_accepts_keyword_aliases[sandboxBackend]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_writer_fail_closed_on_unrepresentable_backend[123]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_writer_fail_closed_on_unrepresentable_backend[True]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_writer_fail_closed_on_unrepresentable_backend[value2]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_writer_fail_closed_on_unrepresentable_backend[value3]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_writer_fail_closed_on_unrepresentable_backend[]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend 1-\u975e\u7a7a\u5b57\u7b26\u4e32]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend true-\u975e\u7a7a\u5b57\u7b26\u4e32]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend ""-\u975e\u7a7a\u5b57\u7b26\u4e32]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend (list "subprocess")-\u975e\u7a7a\u5b57\u7b26\u4e32]
+FAILED tests/unit/test_issue220_sexpr_code_sandbox.py::test_sexpr_reader_fail_closed_on_unrepresentable_backend[:sandbox-backend (dict :b unsafeprofile)-\u975e\u7a7a\u5b57\u7b26\u4e32]
+23 failed, 1 passed in 0.48s
