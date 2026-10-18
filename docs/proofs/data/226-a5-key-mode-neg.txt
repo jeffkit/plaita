@@ -1,0 +1,34 @@
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+_______________________ test_generated_key_file_is_0600 ________________________
+
+cred_store = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3119/test_generated_key_file_is_0600')
+
+    def test_generated_key_file_is_0600(cred_store):
+        key_file = Path(os.environ["PLAITA_CREDENTIALS_KEY_FILE"])
+        assert not key_file.exists(), "fixture 应提供全新密钥文件路径"
+    
+        credentials_svc.save_credential("k", "generic", {"x": 1})
+    
+        assert key_file.is_file(), "无 env key 时应首次生成密钥文件"
+        mode = stat.S_IMODE(key_file.stat().st_mode)
+>       assert mode == 0o600, (
+            f"密钥文件权限必须 0o600（其他用户不得读 Fernet key），实得 {oct(mode)}"
+        )
+E       AssertionError: 密钥文件权限必须 0o600（其他用户不得读 Fernet key），实得 0o644
+E       assert 420 == 384
+
+plaita-console/backend/tests/console/test_issue226_credential_isolation.py:100: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_issue226_credential_isolation.py::test_list_credentials_is_tenant_scoped
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue226_credential_isolation.py: 18 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue226_credential_isolation.py::test_generated_key_file_is_0600
+1 failed, 2 passed, 19 warnings in 0.41s

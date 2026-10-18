@@ -1,0 +1,34 @@
+FF..                                                                     [100%]
+=================================== FAILURES ===================================
+__________ test_client_declared_validity_above_cap_is_rejected[3601] ___________
+
+validity = 3601
+
+    @pytest.mark.parametrize("validity", [3601, 7200])
+    def test_client_declared_validity_above_cap_is_rejected(validity):
+        """客户端自报 3601/7200s 有效期必须被服务端 1h 上限拒绝。"""
+        auth = _auth(validity=validity)
+>       assert signature.verify_authorization(auth, SECRET_ID, SECRET_KEY) is False
+E       AssertionError: assert True is False
+E        +  where True = <function verify_authorization at 0x106ca2160>('secret-id=issue226-id&sign-time=1792299450&key-time=1792299450%3B1792303051&signature=51e5e67928ab49b83ad09186df7ee7341e8ca9535b43eaed0969a849b705a7fe', 'issue226-id', 'issue226-secret')
+E        +    where <function verify_authorization at 0x106ca2160> = signature.verify_authorization
+
+plaita-console/backend/tests/console/test_issue226_signature_guards.py:57: AssertionError
+__________ test_client_declared_validity_above_cap_is_rejected[7200] ___________
+
+validity = 7200
+
+    @pytest.mark.parametrize("validity", [3601, 7200])
+    def test_client_declared_validity_above_cap_is_rejected(validity):
+        """客户端自报 3601/7200s 有效期必须被服务端 1h 上限拒绝。"""
+        auth = _auth(validity=validity)
+>       assert signature.verify_authorization(auth, SECRET_ID, SECRET_KEY) is False
+E       AssertionError: assert True is False
+E        +  where True = <function verify_authorization at 0x106ca2160>('secret-id=issue226-id&sign-time=1792299450&key-time=1792299450%3B1792306650&signature=38c153959629abf5c7a3370e3c50b6c0e0ee302a26005eac49caa0ed6c87f0a8', 'issue226-id', 'issue226-secret')
+E        +    where <function verify_authorization at 0x106ca2160> = signature.verify_authorization
+
+plaita-console/backend/tests/console/test_issue226_signature_guards.py:57: AssertionError
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue226_signature_guards.py::test_client_declared_validity_above_cap_is_rejected[3601]
+FAILED plaita-console/backend/tests/console/test_issue226_signature_guards.py::test_client_declared_validity_above_cap_is_rejected[7200]
+2 failed, 2 passed in 0.40s

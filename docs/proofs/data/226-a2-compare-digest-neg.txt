@@ -1,0 +1,39 @@
+...F                                                                     [100%]
+=================================== FAILURES ===================================
+______________ test_signature_comparison_uses_hmac_compare_digest ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105d56ea0>
+
+    def test_signature_comparison_uses_hmac_compare_digest(monkeypatch):
+        """spy 断言签名比较确实走 `hmac.compare_digest`（而非 `!=`）。
+    
+        验签有两次常量时间比较：secret-id + signature。`!=` 变异后只剩 secret-id
+        那一次 → 本用例红。
+        """
+        calls = []
+        real = hmac.compare_digest
+    
+        def spy(a, b):
+            calls.append((a, b))
+            return real(a, b)
+    
+        monkeypatch.setattr(signature.hmac, "compare_digest", spy)
+        auth = _auth()
+        assert signature.verify_authorization(auth, SECRET_ID, SECRET_KEY) is True
+    
+        fields = signature._parse_authorization(auth)
+        expected = signature._compute_signature(
+            SECRET_KEY, fields["sign_time"], fields["key_time"],
+        )
+>       assert len(calls) == 2, (
+            "验签应做 secret-id 与 signature 两次 compare_digest；"
+            f"实得 {len(calls)} 次：{calls!r}"
+        )
+E       AssertionError: 验签应做 secret-id 与 signature 两次 compare_digest；实得 1 次：[('issue226-id', 'issue226-id')]
+E       assert 1 == 2
+E        +  where 1 = len([('issue226-id', 'issue226-id')])
+
+plaita-console/backend/tests/console/test_issue226_signature_guards.py:91: AssertionError
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue226_signature_guards.py::test_signature_comparison_uses_hmac_compare_digest
+1 failed, 3 passed in 0.30s

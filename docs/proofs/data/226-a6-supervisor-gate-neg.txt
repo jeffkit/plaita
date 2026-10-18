@@ -1,0 +1,38 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_____________________ test_default_promote_gate_is_manual ______________________
+
+    def test_default_promote_gate_is_manual():
+>       assert SupervisorPolicy().promote_gate == "manual", (
+            "SupervisorPolicy 默认 promote_gate 必须是 manual（人工放行）；"
+            "auto 会使自改进循环绕过 promotion ticket 直接发布"
+        )
+E       AssertionError: SupervisorPolicy 默认 promote_gate 必须是 manual（人工放行）；auto 会使自改进循环绕过 promotion ticket 直接发布
+E       assert 'auto' == 'manual'
+E         
+E         - manual
+E         + auto
+
+plaita-ai/tests/test_issue226_supervisor_gate.py:52: AssertionError
+___________ test_default_policy_returns_ticket_and_does_not_publish ____________
+
+    def test_default_policy_returns_ticket_and_does_not_publish():
+        """默认策略（不传 promote_gate）下，改进候选只出 ticket，不发布。"""
+        fake = _seed_with_improvement(FakeConsole())
+        supervisor = Supervisor(
+            _client(fake),
+            SupervisorPolicy(min_improvement=0.02),  # 默认 promote_gate
+            StaticProposer([{"definition": DEF_V2, "rationale": "emit good marker"}]),
+        )
+        outcome = supervisor.iterate("demo", _dataset())
+    
+        assert outcome["status"] == "improved"
+>       assert outcome["promoted"] is False, "默认策略不得自动发布（绕过人工放行）"
+E       AssertionError: 默认策略不得自动发布（绕过人工放行）
+E       assert True is False
+
+plaita-ai/tests/test_issue226_supervisor_gate.py:69: AssertionError
+=========================== short test summary info ============================
+FAILED plaita-ai/tests/test_issue226_supervisor_gate.py::test_default_promote_gate_is_manual
+FAILED plaita-ai/tests/test_issue226_supervisor_gate.py::test_default_policy_returns_ticket_and_does_not_publish
+2 failed in 0.43s
