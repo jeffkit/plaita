@@ -1,0 +1,52 @@
+=== 负控：恢复修复前的 DB-first 顺序（commit 后再 _export_store） ===
+变异（credentials_svc._export_then_commit）：
+    修复态：
+        exported = False
+        try:
+            _export_store(tenant_id, session=session)
+            exported = True
+            session.commit()
+        except Exception:
+            session.rollback()
+            if exported:
+                _export_store(tenant_id)   # commit 失败补偿
+            raise
+  →
+        session.commit()
+        _export_store(tenant_id)
+
+命令：
+  python -m pytest tests/console/test_issue251_credentials_order.py -q
+
+测试输出（节选）：
+    def test_export_failure_leaves_no_new_db_row(self, env, monkeypatch):
+        ...
+>       assert credentials_svc.get_credential_record("new") is None
+E       AssertionError: assert {'name': 'new', 'tenant_id': 'default',
+        'type': 'generic', 'desc': '', ...} is None
+
+    def test_update_export_failure_keeps_old_row_and_file(self, env, monkeypatch):
+        ...
+>       assert record["data"] == SECRET
+E       AssertionError: assert {'token': 'NEW'} == {'token': 'SECRET'}
+
+    def test_export_failure_keeps_db_row_and_engine_value(self, env, monkeypatch):
+        ...
+>       assert not (record is None and engine is not None), (
+            f"db row {record} but engine read {engine}"
+        )
+E       AssertionError: db row None but engine read {'token': 'SECRET'}
+
+    def test_delete_can_be_retried_after_export_failure(self, env, monkeypatch):
+        ...
+>       assert credentials_svc.delete_credential("old") is True
+E       AssertionError: assert False is True
+
+FAILED ...::TestSaveOrder::test_export_failure_leaves_no_new_db_row
+FAILED ...::TestSaveOrder::test_update_export_failure_keeps_old_row_and_file
+FAILED ...::TestDeleteOrder::test_export_failure_keeps_db_row_and_engine_value
+FAILED ...::TestDeleteOrder::test_delete_can_be_retried_after_export_failure
+4 failed, 1 passed in 0.47s
+
+=== 还原修复后 ===
+5 passed in 0.66s

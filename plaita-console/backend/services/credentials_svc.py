@@ -152,8 +152,10 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
             row.data_json = encrypted
             if desc:
                 row.desc = desc
-        session.commit()
-    _export_store(tenant_id)
+        # plaita#251：先原子导出（同一事务内的 flush 让导出声看到新行），
+        # 成功后再提交 DB；导出失败 ⇒ 事务回滚，DB 不留新行、旁文件保持旧值。
+        session.flush()
+        _export_then_commit(session, tenant_id)
 
 
 def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
@@ -166,10 +168,12 @@ def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
         row = session.scalars(query).first()
         if row is None:
             return False
-        session.delete(row)
-        session.commit()
         affected = row.tenant_id
-    _export_store(affected)
+        session.delete(row)
+        # plaita#251：同一事务内 flush 后导出（导出声已看不到该行），成功才
+        # commit；导出失败 ⇒ 回滚，DB 行与旁文件都保留（可安全重试）。
+        session.flush()
+        _export_then_commit(session, affected)
     return True
 
 
@@ -202,18 +206,31 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def _export_store(tenant_id: Optional[str] = None) -> None:
+def _export_store(
+    tenant_id: Optional[str] = None, *, session=None
+) -> None:
     """把凭据（密文）按租户导出为引擎可读文件，供节点运行时解密。
 
     tenant_id=None 导出全部租户（各写各的文件）；指定租户只重导该租户。
     default 租户沿用历史文件路径，保持既有引擎读取兼容。
+
+    ``session``（plaita#251）：调用方事务内的 session。save/delete 在
+    commit **之前**调用；调用方已 ``flush`` 的未提交变更必须被导出声看到
+    （否则导出的还是旧行集）。传 session 时复用该事务、不自行开关 session。
     """
+    if session is not None:
+        _export_from_session(session, tenant_id)
+        return
     store = get_flow_store()
-    with store._session_local() as session:
-        query = select(Credential)
-        if tenant_id is not None:
-            query = query.where(Credential.tenant_id == tenant_id)
-        rows = session.scalars(query).all()
+    with store._session_local() as own_session:
+        _export_from_session(own_session, tenant_id)
+
+
+def _export_from_session(session, tenant_id: Optional[str]) -> None:
+    query = select(Credential)
+    if tenant_id is not None:
+        query = query.where(Credential.tenant_id == tenant_id)
+    rows = session.scalars(query).all()
     by_tenant: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         by_tenant.setdefault(r.tenant_id or DEFAULT_TENANT_ID, {})[r.name] = {
@@ -233,3 +250,30 @@ def _export_store(tenant_id: Optional[str] = None) -> None:
         text = json.dumps(payload, ensure_ascii=False, indent=1)
         _atomic_write_text(path, text)
         logger.info("已导出租户 %s 凭据文件 %s（%d 条）", tid, path, len(payload))
+
+
+def _export_then_commit(session, tenant_id: Optional[str]) -> None:
+    """先原子导出旁文件，成功后再提交 DB（plaita#251）。
+
+    - 导出失败 ⇒ 回滚事务：DB 不留新行/删除，旁文件由 ``_atomic_write_text``
+      保证保持旧值；调用方可安全重试。
+    - 导出成功但 commit 失败 ⇒ DB 回滚，再按回滚后的 DB 状态补导一次，
+      避免旁文件（已含新状态）与 DB（仍旧状态）分叉；补导失败只记日志，
+      原始 commit 异常照常上抛。
+    """
+    exported = False
+    try:
+        _export_store(tenant_id, session=session)
+        exported = True
+        session.commit()
+    except Exception:
+        session.rollback()
+        if exported:
+            try:
+                _export_store(tenant_id)
+            except Exception:
+                logger.exception(
+                    "凭据导出补偿失败（DB 已回滚，旁文件可能超前）: tenant=%s",
+                    tenant_id,
+                )
+        raise
