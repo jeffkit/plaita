@@ -1,0 +1,88 @@
+# plaita#227 负控：恢复「@flow 不发射/不读取 loop.condition」
+
+- 基线：`origin/main` = `afe4bba1`（W47 worktree `/tmp/w47`，分支 `fix/w47`）
+- 变异：把本单两个 hunk 反向还原（等价
+  `git checkout HEAD -- plaita/dsl/codeflow/_emit.py plaita/dsl/codeflow/_stmt.py`）：
+  - `_emit_collection` 的 LOOP 分支删除 `condition=(...)` 发射；
+  - `_compile_for` 删除 `condition=` 读取（及 `_LOOP_COND_VARS` 对称映射）。
+- 只改实现，测试与 repro 不动。
+
+## MUTANT diff（对修复树反向，节选）
+
+```diff
+--- a/plaita/dsl/codeflow/_emit.py
++++ b/plaita/dsl/codeflow/_emit.py
+@@ -566,14 +566,6 @@ class _BodyEmitter:
+         if kind == "REDUCE" and node.get("initial") is not None:
+             kwargs.append(f"initial={_invert_value(node['initial'], self.ns)}")
+-        if kind == "LOOP" and node.get("condition") is not None:
+-            cond = _invert_cond(node["condition"], _LOOP_COND_NS)
+-            kwargs.append(f"condition=({cond})")
+         body = self._emit_inline_child(child_ir, _loop_body_ns("index"))
+--- a/plaita/dsl/codeflow/_stmt.py
++++ b/plaita/dsl/codeflow/_stmt.py
+@@ -474,12 +474,6 @@ def _compile_for(...):
+-    if kind == "LOOP" and kw.get("condition") is not None:
+-        cond_ctx = _CompileCtx(
+-            module_globals=ctx.module_globals, childflows=ctx.childflows)
+-        cond_ctx.names = {**ctx.names, **_LOOP_COND_VARS}
+-        spec["condition"] = _compile_condition(kw["condition"], cond_ctx)
+     _apply_base_kwargs(spec, kw, ctx)
+```
+
+## 红（mutant）：repro
+
+`PYTHONPATH=/tmp/w47 python docs/proofs/data/227-repro.py`
+
+发射产物（条件静默消失）：
+
+```
+@flow('emitted_flow')
+def emitted_flow(INPUT):
+    for item in LOOP(INPUT.items, id='n'):
+        return
+    return
+```
+
+```
+FAIL JSON→@flow→JSON 保留 loop.condition: AssertionError: condition 丢失，回读 loop 节点键=['childFlow', 'collection', 'id', 'next', 'source_line', 'type']
+FAIL condition 组往返逐字段相等: AssertionError: {'type': 'loop', 'id': 'n', 'collection': '$INPUT.items', ... 'next': '_n1', 'source_line': 3}
+ok   sexpr 链保留 loop.condition
+ok   无 condition 的 loop 行为不变
+
+2 FAILURE(S)
+```
+
+## 红（mutant）：新用例
+
+`pytest tests/unit/test_issue227_loop_condition_roundtrip.py -q`
+
+```
+FAILED tests/unit/test_issue227_loop_condition_roundtrip.py::test_emit_source_carries_condition
+FAILED tests/unit/test_issue227_loop_condition_roundtrip.py::test_emit_compile_roundtrip_keeps_simple_condition
+FAILED tests/unit/test_issue227_loop_condition_roundtrip.py::test_emit_compile_roundtrip_keeps_condition_group
+FAILED tests/unit/test_issue227_loop_condition_roundtrip.py::test_roundtrip_keeps_loop_result_condition
+FAILED tests/unit/test_issue227_loop_condition_roundtrip.py::test_compile_source_reads_condition_kwarg
+FAILED tests/unit/test_issue227_loop_condition_roundtrip.py::test_unrepresentable_condition_fails_closed
+FAILED tests/unit/test_issue227_loop_condition_roundtrip.py::test_runtime_semantics_survive_roundtrip
+7 failed, 2 passed in 0.54s
+```
+
+保持绿的 2 条是**反向不变量**（本单不改变的行为）：无 condition 的 loop 不多发
+`condition=`；sexpr 链 `:when` 本来就没丢。负控要求的是「恢复缺陷实现后新用例必红」，
+7/9 精确变红即成立。
+
+## 绿（修复后）
+
+发射产物（条件保真）：
+
+```
+@flow('emitted_flow')
+def emitted_flow(INPUT):
+    for item in LOOP(INPUT.items, id='n', condition=(INPUT.y == 1)):
+        return
+    return
+```
+
+repro：`ALL OK`；新用例：`9 passed in 0.85s`；
+相邻 codeflow/DSL/sexpr/while/#220 套件：`258 passed, 5 subtests passed`。

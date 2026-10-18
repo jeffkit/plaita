@@ -351,6 +351,16 @@ def _compile_while_for(
     return node_id
 
 
+# LOOP 条件名 → 引擎 loop_ctx 注入键（与 `_emit._LOOP_COND_NS` 对称）。
+# 条件在引擎侧与 WHILE 同一求值上下文：父 context + 注入的 `$LOOP-*`；
+# 循环体才是子流程（item/index 走 `$INPUT.item`/`$INPUT.index`）。
+_LOOP_COND_VARS: Dict[str, str] = {
+    "item": "$LOOP-ITEM",
+    "index": "$LOOP-INDEX",
+    "result": "$LOOP-RESULT",
+}
+
+
 def _compile_for(
     head: ast.For, ctx: _CompileCtx, succ: Optional[str], rest: List[ast.stmt],
 ) -> str:
@@ -458,6 +468,14 @@ def _compile_for(
         init = kw.get("initial")
         if init is not None:
             spec["initial"] = _compile_expr(init, ctx)
+    if kind == "LOOP" and kw.get("condition") is not None:
+        # #227：@flow 链此前不读 `condition=` ⇒ 发射器即使写出也被编译期丢弃。
+        # 条件上下文与 while 条件同形（父名字 + `$LOOP-*` 注入名，item/index 遮蔽
+        # 外层同名），childflows 注册表沿用 #77 的继承约定。
+        cond_ctx = _CompileCtx(
+            module_globals=ctx.module_globals, childflows=ctx.childflows)
+        cond_ctx.names = {**ctx.names, **_LOOP_COND_VARS}
+        spec["condition"] = _compile_condition(kw["condition"], cond_ctx)
 
     # #142 编译侧 / #143：集合节点（MAP/FILTER/FIND/LOOP/REDUCE/WHILE）同样要
     # 消费 `Node` 基类共有字段（timeout / timeoutHandler / on_error）。这条路径与

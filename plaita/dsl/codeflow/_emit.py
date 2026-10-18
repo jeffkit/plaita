@@ -110,6 +110,18 @@ _COND_NS: List[Tuple[str, str]] = [
 ]
 
 
+# LOOP 条件运行在引擎 loop_ctx（`plaita/node/loop.py:_condition_context`）：
+# `$LOOP-ITEM` / `$LOOP-INDEX` / `$LOOP-RESULT` 由引擎按轮注入，`$INPUT` /
+# `$NODE` / `$GLOBAL` 等按父侧引用。源层用 item/index/result 三个名字承接
+# （编译侧 `_LOOP_COND_VARS` 对称映射回 `$LOOP-*`）。
+_LOOP_COND_NS: List[Tuple[str, str]] = [
+    ("$LOOP-ITEM", "item"),
+    ("$LOOP-INDEX", "index"),
+    ("$LOOP-RESULT", "result"),
+    *_BASE_NS,
+]
+
+
 def _loop_body_ns(index_name: str) -> List[Tuple[str, str]]:
     """循环体命名空间：循环目标名 → 子流程输入；外层变量 → 裸名（重编译时
     由 ``$PARENT.NODE.`` 映射还原）。REDUCE 子流程用 array 输入按下标取。"""
@@ -547,6 +559,15 @@ class _BodyEmitter:
                 kwargs.append(f"max_concurrent={_dual(node, 'maxConcurrent', 'max_concurrent')}")
         if kind == "REDUCE" and node.get("initial") is not None:
             kwargs.append(f"initial={_invert_value(node['initial'], self.ns)}")
+        if kind == "LOOP" and node.get("condition") is not None:
+            # #227：LOOP 的 `condition` 此前**一个字都不发** ⇒ JSON→@flow→JSON
+            # 静默丢条件，循环从「按 condition 控制」退化为无条件遍历（引擎
+            # default）。与 sexpr 链的 `:when` 同口径，用 `_invert_cond` 还原为
+            # 条件表达式；表达式无法逆映射时 `_invert_cond` 抛 EmitError（fail-closed，
+            # 不产出丢字段的源码）。括号固定：单条条件与 and/or 组都不吃调用
+            # 位置歧义。
+            cond = _invert_cond(node["condition"], _LOOP_COND_NS)
+            kwargs.append(f"condition=({cond})")
 
         body = self._emit_inline_child(child_ir, _loop_body_ns("index"))
         # #143 emit 侧（集合路径）：`_emit_collection` 此前**从不调用**
