@@ -1,0 +1,56 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_____________ test_quick_test_publish_sees_caller_tenant_and_fence _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x101de69e0>
+cred_env = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3022/test_quick_test_publish_sees_c0/creds.json')
+
+    def test_quick_test_publish_sees_caller_tenant_and_fence(monkeypatch, cred_env):
+        """核心性质：发布协程必须看到调用线程的租户/fence（#213）。"""
+        bus = _RecordingBus()
+        _install_fakes(monkeypatch, bus)
+        box = _run_quick_test_case("tenant-b", "fence-b")
+    
+        assert box["response"].success is True, box["response"]
+        assert len(bus.calls) == 1, f"挂起事件应发布一次: {bus.calls!r}"
+        call = bus.calls[0]
+>       assert call["tenant"] == "tenant-b", (
+            "quick-test 发布协程丢了租户 ContextVar（#213）；读到 default 说明 "
+            "submit 未在 copy_context 下运行"
+        )
+E       AssertionError: quick-test 发布协程丢了租户 ContextVar（#213）；读到 default 说明 submit 未在 copy_context 下运行
+E       assert 'default' == 'tenant-b'
+E         
+E         - tenant-b
+E         + default
+
+plaita-console/backend/tests/console/test_issue213_quick_test_context.py:160: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node:__init__.py:436 [console] PLAITA_SANDBOX_ALLOWED_BACKENDS 未配置，沙箱后端白名单取默认 ['docker'] ∪ 生效默认后端 'subprocess' = ['docker', 'subprocess']；流程 JSON 里声明的更弱后端（如 'unsafe'）将被解析期拒绝。
+_______________ test_quick_test_publish_default_tenant_unchanged _______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10740d220>
+cred_env = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3022/test_quick_test_publish_defaul0/creds.json')
+
+    def test_quick_test_publish_default_tenant_unchanged(monkeypatch, cred_env):
+        """default 租户行为不变：base 文件 + default-only 语义不受桥修复影响。"""
+        bus = _RecordingBus()
+        _install_fakes(monkeypatch, bus)
+        box = _run_quick_test_case("default", "fence-default")
+    
+        assert box["response"].success is True, box["response"]
+        call = bus.calls[0]
+        assert call["tenant"] == "default"
+>       assert call["fence"] == "fence-default"
+E       AssertionError: assert 'no-fence' == 'fence-default'
+E         
+E         - fence-default
+E         + no-fence
+
+plaita-console/backend/tests/console/test_issue213_quick_test_context.py:181: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node:__init__.py:436 [console] PLAITA_SANDBOX_ALLOWED_BACKENDS 未配置，沙箱后端白名单取默认 ['docker'] ∪ 生效默认后端 'subprocess' = ['docker', 'subprocess']；流程 JSON 里声明的更弱后端（如 'unsafe'）将被解析期拒绝。
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue213_quick_test_context.py::test_quick_test_publish_sees_caller_tenant_and_fence
+FAILED plaita-console/backend/tests/console/test_issue213_quick_test_context.py::test_quick_test_publish_default_tenant_unchanged
+2 failed in 0.64s

@@ -1083,8 +1083,17 @@ async def run_quick_test(request: QuickTestRequest):
                                 if loop.is_running():
                                     # 如果已有事件循环，创建新的线程执行
                                     import concurrent.futures
+                                    import contextvars
+                                    # plaita#213（#199/#212 同根第三处）：submit 不
+                                    # 传播 contextvars——新线程只有默认上下文，发布
+                                    # 协程里的租户/fence 会退回 default（EventBus
+                                    # 及按租户路由的存储写错命名空间）。在**调用
+                                    # 线程** copy_context()，worker 内用 ctx.run
+                                    # 驱动 asyncio.run（Context 不能在另一线程进入）。
+                                    ctx = contextvars.copy_context()
                                     with concurrent.futures.ThreadPoolExecutor() as executor:
-                                        future = executor.submit(asyncio.run, publish_event())
+                                        future = executor.submit(
+                                            ctx.run, asyncio.run, publish_event())
                                         event_id = future.result(timeout=5)
                                 else:
                                     event_id = asyncio.run(publish_event())
