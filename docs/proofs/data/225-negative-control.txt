@@ -1,0 +1,45 @@
+FFF..                                                                    [100%]
+=================================== FAILURES ===================================
+______ test_operator_allowlist_rejects_flow_declared_backend[subprocess] _______
+
+code_globals = <module 'plaita.node.code' from '/Users/kong/projects/infra4agent/plaita/plaita/node/code.py'>
+backend = 'subprocess'
+
+    @pytest.mark.parametrize("backend", ["subprocess", "unsafe"])
+    def test_operator_allowlist_rejects_flow_declared_backend(code_globals, backend):
+        _register_restricted_only()
+>       with pytest.raises(ValidationError, match="not allowed by the operator") as exc:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'pydantic_core._pydantic_core.ValidationError'>
+
+tests/unit/test_issue225_allowed_backends_regression.py:68: Failed
+________ test_operator_allowlist_rejects_flow_declared_backend[unsafe] _________
+
+code_globals = <module 'plaita.node.code' from '/Users/kong/projects/infra4agent/plaita/plaita/node/code.py'>
+backend = 'unsafe'
+
+    @pytest.mark.parametrize("backend", ["subprocess", "unsafe"])
+    def test_operator_allowlist_rejects_flow_declared_backend(code_globals, backend):
+        _register_restricted_only()
+>       with pytest.raises(ValidationError, match="not allowed by the operator") as exc:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'pydantic_core._pydantic_core.ValidationError'>
+
+tests/unit/test_issue225_allowed_backends_regression.py:68: Failed
+______________ test_default_backend_outside_allowlist_is_rejected ______________
+
+code_globals = <module 'plaita.node.code' from '/Users/kong/projects/infra4agent/plaita/plaita/node/code.py'>
+
+    def test_default_backend_outside_allowlist_is_rejected(code_globals):
+        """未显式声明 sandbox_backend 时，默认后端同样要过运营者白名单。"""
+        _register_restricted_only(default_backend="subprocess")
+>       with pytest.raises(ValidationError, match="not allowed by the operator"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'pydantic_core._pydantic_core.ValidationError'>
+
+tests/unit/test_issue225_allowed_backends_regression.py:80: Failed
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue225_allowed_backends_regression.py::test_operator_allowlist_rejects_flow_declared_backend[subprocess]
+FAILED tests/unit/test_issue225_allowed_backends_regression.py::test_operator_allowlist_rejects_flow_declared_backend[unsafe]
+FAILED tests/unit/test_issue225_allowed_backends_regression.py::test_default_backend_outside_allowlist_is_rejected
+3 failed, 2 passed in 0.27s
