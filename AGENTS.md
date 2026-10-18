@@ -34,7 +34,7 @@ plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distri
 
 **分支：** 特性在独立分支 / worktree；勿直接破坏性改 main 而不过 CI。  
 **提交：** `type: 简述`；**禁止** 提交信息加 `Co-authored-by`，**禁止** `--no-verify` 跳过 hooks。  
-**落地：** 合并前跑 `python scripts/landing_gate.py ci`（main CI 红=停并）；政策类改动带 `[policy]` 标记 + `Policy-ack` trailer——约定见 `docs/landing-and-acceptance.md`（2026-10-17 提案，待拍板）。
+**落地：** 合并前跑 `python scripts/landing_gate.py ci`（main CI 红=停并，硬闸）；政策类改动带 `[policy]` 标记 + `Policy-ack` trailer——约定见 `docs/landing-and-acceptance.md`（2026-10-18 已生效）。
 
 **禁止事项：**
 - 把全量 mutmut 塞进 PR CI（太慢且初筛不可信）
@@ -42,6 +42,7 @@ plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distri
 - 直接引用初筛 `survived`/`timeout` 当真实分数（必须独立进程 recheck）
 - `core` 顶层 import `server` / 可选后端
 - 跳过 hooks（`--no-verify`）
+- 静默降级——吞异常、默认值回退、fail-open 闸门、容量/上限改道等一切「换道」必须留 WARNING 级以上可观测痕迹：**任何降级必须可观测**（对齐 `docs/landing-and-acceptance.md` §2 原则）
 
 **文档同步：** 改代码后查 [`docs/DOC_CODE_MAP.md`](docs/DOC_CODE_MAP.md)，按映射同步相关文档。
 
