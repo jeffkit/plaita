@@ -136,7 +136,7 @@ plaita 核心极轻，只依赖 `pydantic`、`pyparsing`、`isodate`、`croniter
 |-------|---------|---------|
 | `redis` | `pip install plaita[redis]` | Redis 存储 / Redis EventBus |
 | `server` | `pip install plaita[server]` | FastAPI 服务端、FlowWorker、扩展节点 |
-| `code` | `pip install plaita[code]` | `CodeNode`——0.5.0 起**默认 `docker` 容器级沙箱**（`--network none` / `--read-only` / 资源上限，需本机 Docker daemon）；可选 `subprocess` / `restricted`(AST) / `unsafe`；JS 后端仍走 PyExecJS（无沙箱，慎用） |
+| `code` | `pip install plaita[code]` | `CodeNode`——0.5.0 起**默认 `docker` 容器级沙箱**（`--network none` / `--read-only` / 资源上限，需本机 Docker daemon）；可选 `subprocess` / `restricted`(AST) / `unsafe`。JS（`language: "js"`）默认**不在语言白名单**（解析期拒绝）；显式放行后按 `sandbox_backend` 走 `docker`（`node:20-alpine`）/ `subprocess`（`node -e`，墙钟超时+进程组击杀），只有 `unsafe` 才是 PyExecJS（无超时/取消/隔离，需 `execjs`） |
 | `http` | `pip install plaita[http]` | `HTTP` 节点（requests + aiohttp）；`PlaitaClient`（requests） |
 | `yaml` | `pip install plaita[yaml]` | YAML 格式流程定义 |
 | `sqlalchemy` | `pip install plaita[sqlalchemy]` | SQLAlchemy EventBus / Storage（实验性） |
@@ -164,7 +164,7 @@ plaita 的多种定义方式最终均编译为同一执行模型，主要三种�
 
 ## 内置节点
 
-默认注册表含 18 种节点（`plaita/node/__init__.py` 的 `_BUILTIN_NODES`），server 侧另有 5 种条件注册节点（`plaita/server/nodes/`：delay / approval / redis_queue / kafka_queue / http_callback，需 `server` extra），合计 23 种。`code` 节点不在默认注册表，需 `register_code_node()` 显式 opt-in；0.5.0 起 `register_code_node()` 默认走 `docker` 沙箱，daemon 不可用时拒绝注册——见下方[安全](#安全)小节）：
+默认注册表含 18 种节点（`plaita/node/__init__.py` 的 `_BUILTIN_NODES`），server 侧另有 5 种条件注册节点（`plaita/server/nodes/`：delay / approval / redis_queue / kafka_queue / http_callback，需 `server` extra），合计 23 种。`code` 节点不在默认注册表，需 `register_code_node()` 显式 opt-in；0.5.0 起 **库级** `register_code_node()` 默认走 `docker` 沙箱，daemon 不可用时拒绝注册（worker 入口默认后端与降级开关见下方[安全](#安全)小节）：
 
 `start` · `end` · `assignment` · `switch` · `if` · `case` · `loop` · `while` · `map` · `filter` · `find` · `reduce` · `child` · `reference` · `parallel` · `http` · `event` · `mock` · `delay` · `approval` · `redis_queue` · `kafka_queue` · `http_callback`
 
@@ -232,7 +232,11 @@ register_code_node(default_backend="unsafe")      # 完全信任代码作者
 
 daemon 不可用且未显式降级时，注册期报错并指明三种降级路径。
 
-worker 入口（`plaita.server.flow_worker`）同口径且 **fail-closed**：显式
+注意上面说的是**库级 API 默认**。生产 worker 入口（`plaita.server.flow_worker`）
+的 `PLAITA_CODE_BACKEND` 默认是 **`subprocess`**（进程级，不隔离 FS/网络）；
+需要容器隔离必须显式设 `PLAITA_CODE_BACKEND=docker` 且
+`PLAITA_SANDBOX_ALLOWED_BACKENDS` 只含 docker（非 default 租户的 subprocess 在
+spawn 前 fail-closed，见 #256/A42-06）。worker 入口同口径且 **fail-closed**：显式
 `PLAITA_CODE_BACKEND=docker` 而 daemon 不可用时，worker **启动失败并具名拒绝注册**
 （`CodeNodeRegistrationError`），不会自动降级 `subprocess`，也不会把运维显式白名单
 `PLAITA_SANDBOX_ALLOWED_BACKENDS=docker` 扩成 `{docker,subprocess}`。需要可用性降级
@@ -242,7 +246,13 @@ worker 入口（`plaita.server.flow_worker`）同口径且 **fail-closed**：显
 
 ### HMAC nonce Redis 后端（多 worker 重放保护）
 
-plaita-console 的 HMAC 鉴权 nonce 缓存默认是**进程内**单例——gunicorn 多 worker 下每个 worker 独立缓存，3 秒窗口内**跨 worker 重放可行**。生产多 worker 部署必须配 Redis 后端：
+HMAC 鉴权 nonce 缓存的**库级默认**是**进程内**单例；console **集群档**在启动时
+（`main.py`）自动调用 `enable_replay_protection(redis_url)` 切到 `RedisNonceStore`。
+只有以下三种场景仍为进程内：库级直接使用（未调 `enable_replay_protection`）、
+console **本地档**（Redis 不可达）、或集群档启动时 Redis 探活失败（降级会打
+WARNING）。进程内单例下 gunicorn 多 worker 各自独立缓存，3 秒窗口内**跨 worker
+重放可行**；生产多 worker 部署必须保证 Redis 可达，启动日志出现
+`IN-MEMORY nonce store` 警告时不得视为已具备跨 worker 重放保护。手动配置方式：
 
 ```python
 from plaita_console.backend.services.signature import (
