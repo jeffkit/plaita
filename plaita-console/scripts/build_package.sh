@@ -14,6 +14,11 @@ echo "==> 填充 backend/webDist"
 rm -rf "$ROOT/backend/webDist"
 cp -R "$ROOT/frontend/dist" "$ROOT/backend/webDist"
 
+# #266 发布面护栏：随 wheel 出货的 webDist 与 CI 的 dist 扫描同源；
+# 浏览器管理密钥通道一旦回归，构建在打包前 fail-fast。
+echo "==> 扫描 webDist（#266：浏览器管理密钥通道）"
+node "$ROOT/frontend/scripts/check-admin-key.mjs" --dist "$ROOT/backend/webDist"
+
 echo "==> 打 wheel"
 cd "$ROOT"
 # homebrew python 受 PEP 668 保护，build 工具装进独立 venv；系统已有 build 则直用
