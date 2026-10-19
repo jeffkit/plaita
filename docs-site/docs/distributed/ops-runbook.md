@@ -23,16 +23,25 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | 执行状态 | `plaita:execution:{id}` | `plaita:{tenant}:execution:{id}` |
 | 执行列表索引 | `plaita:execution:index`（ZSET，`:ready` 为回填标记） | `plaita:{tenant}:execution:index`（+`:ready`） |
 | resume lease | `plaita:execution:lease:{id}` | `plaita:{tenant}:execution:lease:{id}` |
-| 节点重试计数（可重试预算） | `plaita:execution:noderetry:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:noderetry:{id}` |
+| fence 当前世代（CAS 比较值） | `plaita:execution:fence:{id}`（裸整数，7d TTL，删除执行时清） | `plaita:{tenant}:execution:fence:{id}` |
+| fence 世代计数器（单调锚） | `plaita:execution:fencegen:{id}`（裸整数，**无 TTL，删除执行不清**） | `plaita:{tenant}:execution:fencegen:{id}` |
+| 节点重试计数（可重试预算） | `plaita:execution:noderetry:{id}`（裸整数，7d TTL；另有 `:{node}` 子键） | `plaita:{tenant}:execution:noderetry:{id}` |
+| 兜底总重试计数 | `plaita:execution:noderefetch:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:noderefetch:{id}` |
 | G1 唤醒计数（`retry` 次数上限） | `plaita:execution:g1wakeups:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:g1wakeups:{id}` |
 | 确定性失败计数（连续失败上限） | `plaita:execution:nofail:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:nofail:{id}` |
+| 不亲和交接计数 | `plaita:execution:affinityhandover:{id}`（裸整数，7d TTL） | `plaita:{tenant}:execution:affinityhandover:{id}` |
 | 任务队列 | `plaita:flow:queue`（平台共享，消息内带 `tenant_id`） | 同左 |
 | 租户状态闸（#27） | `plaita:tenant_status`（HASH：`tenant_id -> active\|disabled`，平台机制键） | 同左 |
 
-> 这些**机制键**（lease / fence / cancel / noderetry / g1wakeups / nofail）都是裸
-> 整数或非执行状态载荷，console 的列表/详情路径按前缀逐个排除
-> （`_is_mechanism_key`）——新增同类键必须同步登记，否则 `GET /api/executions`
-> 对 int 调 `.get()` 直接 500（历史已发生四次）。
+> 这些**机制键**（lease / fence / fencegen / cancel / noderetry / noderefetch /
+> g1wakeups / nofail / affinityhandover）都是裸整数或非执行状态载荷，console
+> 的列表/详情路径按前缀逐个排除（`_is_mechanism_key`）——新增同类键必须同步
+> 登记，否则 `GET /api/executions` 对 int 调 `.get()` 直接 500（历史已发生多次）。
+>
+> 删除单个执行时，`delete_execution_state` 清掉上表的 lease / fence 与五类计数键
+> （含 `noderetry:{id}:{node}` 子键）；**`fencegen` 保留且无 TTL**，用于防止
+> 同一 `execution_id` 重建后世代回退（旧 worker 的迟到 save/delete 必须被 CAS
+> 拒绝）。租户整删走 `{ns}:*` 扫描，会把 `fencegen` 一并清掉。
 
 兼容规则：消息缺 `tenant_id` 视为 default；default 租户沿用历史键前缀，新旧版本混跑时 default 流量不受影响，非 default 租户需 console 与 worker 双侧升级。
 

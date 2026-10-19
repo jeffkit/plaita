@@ -67,16 +67,22 @@ end
 # 单段 Lua：只有 fence 世代仍归本持有者时才允许删除执行状态（A43-07）。
 # 与 save 的 CAS 对称——delete 也是状态改写，旧世代不得删除新世代已推进
 # 的状态。删除范围与 RedisExecutionStorage.delete_execution_state 同口径：
-# 状态键 + 索引成员 + fence 键 + lease 键。
-# KEYS[1]=状态键, KEYS[2]=fence 键, KEYS[3]=索引 ZSET, KEYS[4]=lease 键
+# 状态键 + 索引成员 + fence 键 + lease 键 + 执行级计数键（A51-03）。
+# KEYS[1]=状态键, KEYS[2]=fence 键, KEYS[3]=索引 ZSET, KEYS[4]=lease 键,
+# KEYS[5..]=执行级计数键（nofail/g1wakeups/noderefetch/noderetry[:node]/
+# affinityhandover）。
 # ARGV[1]=期望世代, ARGV[2]=execution_id
 # 返回 1=删除成功；0=世代不符（键缺失也算不符）。
+# 世代计数器 fencegen 不在删除范围（A2R13）：它是删除后 ABA 防护的单调锚。
 _FENCED_DELETE_LUA = """
 if redis.call('get', KEYS[2]) == ARGV[1] then
   redis.call('del', KEYS[1])
   redis.call('zrem', KEYS[3], ARGV[2])
   redis.call('del', KEYS[2])
   redis.call('del', KEYS[4])
+  for i = 5, #KEYS do
+    redis.call('del', KEYS[i])
+  end
   return 1
 else
   return 0
@@ -189,10 +195,14 @@ class FencedExecutionStorage(ExecutionStorage):
         """删除执行状态；持世代号时只允许删除**自己的世代**（A43-07）。
 
         无世代（控制面删除 / 未持 fenced 租约 / 单测）→ 透传内层，内层会
-        连同 fence、lease 一并清掉（删除即吊销，A43-01）。持世代 → 单段
-        Lua 先比较 fence 键，匹配才删状态 + 索引成员 + fence + lease；
-        不匹配抛 ``ExecutionLeaseError``（与 save 的 CAS 语义对称——旧世代
-        不得删除新世代已推进的状态，也不得借删除把新世代的状态清掉）。
+        连同 fence、lease、执行级计数键一并清掉（删除即吊销，A43-01 /
+        A51-03）。持世代 → 单段 Lua 先比较 fence 键，匹配才删状态 + 索引
+        成员 + fence + lease + 计数键；不匹配抛 ``ExecutionLeaseError``
+        （与 save 的 CAS 语义对称——旧世代不得删除新世代已推进的状态，也
+        不得借删除把新世代的状态清掉）。
+
+        两条路径都**不**删除 ``fencegen`` 世代计数器（A2R13）：删除后同 id
+        的新执行必须拿到严格更大的世代，旧 worker 的迟到写/删才会被拒。
         """
         generation = current_fence_token()
         if generation is None:
@@ -206,14 +216,23 @@ class FencedExecutionStorage(ExecutionStorage):
 
         state_key = key_builder("execution", execution_id)
         namespace = getattr(self._inner, "namespace", "plaita")
+        counter_key_builder = getattr(
+            self._inner, "counter_keys_for_execution", None
+        )
+        counter_keys = (
+            counter_key_builder(execution_id)
+            if callable(counter_key_builder)
+            else []
+        )
         try:
             result = client.eval(
                 _FENCED_DELETE_LUA,
-                4,
+                4 + len(counter_keys),
                 state_key,
                 execution_fence_key(namespace, execution_id),
                 execution_index_key(namespace),
                 execution_lease_key(namespace, execution_id),
+                *counter_keys,
                 str(int(generation)),
                 execution_id,
             )

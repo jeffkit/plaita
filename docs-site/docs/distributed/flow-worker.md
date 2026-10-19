@@ -492,7 +492,7 @@ flowchart TD
 
 `ExecutionStorage` 接口为**同步**方法：`save_execution_state` / `load_execution_state` / `delete_execution_state` / `list_executions`，并提供 `serialize_state` / `deserialize_state`（JSON）。
 
-Redis 后端的 `delete_execution_state` 是**删除即吊销**：同一 pipeline 内删除状态键、列表索引成员、`{ns}:execution:fence:{id}` 世代键与 `{ns}:execution:lease:{id}` 租约键。在途 worker 下一次落盘会因 fence 世代失配抛 `ExecutionLeaseError`，不会把已删执行的状态写回。`FencedExecutionStorage.delete_execution_state` 在调用方持世代号时先做 fence CAS——旧世代不能删除新世代已推进的状态。
+Redis 后端的 `delete_execution_state` 是**删除即吊销**：同一 pipeline 内删除状态键、列表索引成员、`{ns}:execution:fence:{id}` 当前世代键、`{ns}:execution:lease:{id}` 租约键，以及该执行的计数键（`nofail` / `g1wakeups` / `noderefetch` / `noderetry`（含 `:{node}` 子键）/ `affinityhandover`）。在途 worker 下一次落盘会因 fence 世代失配抛 `ExecutionLeaseError`，不会把已删执行的状态写回；计数键同删保证同一 `execution_id` 重建后预算从零开始。**世代计数器 `{ns}:execution:fencegen:{id}` 刻意不删、无 TTL**：`try_acquire_fenced` 只对它 `INCR`，删除后新 acquire 的世代严格大于旧世代，旧 worker 的迟到 save/delete 才会被 CAS 拒绝（A2R13 ABA 第三格）。`FencedExecutionStorage.delete_execution_state` 在调用方持世代号时先做 fence CAS——旧世代不能删除新世代已推进的状态。
 
 > `plaita.storage.sqlalchemy` 仍存在，但其方法为 `async def`，与上述同步契约及 Worker 调用方式不兼容。公开路径已拒绝 `db` 作为 execution/flow 存储；详见根目录 `MIGRATION.md`「Storage：db 执行/流程存储从公开路径下架」。
 

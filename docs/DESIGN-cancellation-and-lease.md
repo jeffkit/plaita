@@ -149,10 +149,10 @@ worker A                          Redis                         worker B
 
 ### 4.2 fencing token（世代号 CAS 写）
 
-- **世代号产生**：acquire 改走 Lua：`INCR {ns}:execution:fence:{id}` → `SET lease {holder}:{gen} EX ttl` → 返回 gen。renew/release 的 compare 对整个 value 串做，不用改（execution_lease.py:14-29 原样）。
+- **世代号产生**：acquire 改走 Lua：`INCR {ns}:execution:fencegen:{id}`（独立计数器，删除执行不清、无 TTL）→ `SET {ns}:execution:fence:{id} {gen} EX 7d` → `SET lease {holder}:{gen} EX ttl` → 返回 gen。renew/release 的 compare 对整个 value 串做，不用改（execution_lease.py:14-29 原样）。fence 键只承载当前世代供 CAS 比较，删除执行时清掉（删除即吊销）；计数器永续，保证同 id 重建后新世代严格大于任何历史世代（A2R13 第三格 ABA）。
 - **写侧守门**：新增 `FencedExecutionStorage` 包装器（套在 `RedisExecutionStorage` 外，挂进 `TenantRoutingExecutionStorage._storage_cls` 同一注入点，tenant_context.py:76-99）：`save_execution_state` 用单段 Lua `if GET fence_key == ARGV[gen] then SET state_key ...` ——世代不符（已被新世代接管）即拒绝写并让上层抛 `ExecutionLeaseError`。
 - **Redis 原语选型：Lua，不用 WATCH/Multi。** 三条理由：acquire 的 INCR+SET 与写侧的 compare+SET 都是「读-判-写」原子序，WATCH/Multi 需要客户端重试循环、两次 RTT；仓内已有同构 Lua 先例（execution_lease.py:14-29）风格统一；多键原子性 WATCH 也给不了更多保证。
-- **兼容旧数据**：fence 键首次 acquire 时创建（INCR 天然建键）；由**旧 worker** 推进、**新 worker** 只读的混合期，旧 worker 写侧无 CAS 仍可能覆盖——接受为灰度期已知风险（租约本身仍在挡第一道），混合期结束（全 worker 滚动完成）后 fencing 才视为完全生效，见 §6 波次②的验证门。纯内存 storage（单测）走 NullLease 同款 no-op。
+- **兼容旧数据**：fence 键/计数器首次 acquire 时创建；升级瞬间存量 fence 键有值而 `fencegen` 缺失时，以 fence 值为 floor 把计数器抬到其后（fence=7 → 新 gen=8），世代不回退。由**旧 worker** 推进、**新 worker** 只读的混合期，旧 worker 写侧无 CAS 仍可能覆盖——接受为灰度期已知风险（租约本身仍在挡第一道），混合期结束（全 worker 滚动完成）后 fencing 才视为完全生效，见 §6 波次②的验证门。纯内存 storage（单测）走 NullLease 同款 no-op。
 
 ## 5. 测试计划
 

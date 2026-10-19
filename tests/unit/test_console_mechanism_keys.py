@@ -46,6 +46,10 @@ def test_mechanism_keys_are_excluded():
     # 交接计数从 `plaita:affinity:handover:*`（不在投影面）挪到执行维度 ⇒ 新增排除。
     assert f("plaita:execution:affinityhandover:abc")
     assert f("plaita:tenant-a:execution:affinityhandover:abc")
+    # 2026-10-19 补（A2R13）：fence 世代计数器与 fence 键分离——裸整数，
+    # 且 "fencegen:" 不含 ":execution:fence:" 子串，必须单独登记。
+    assert f("plaita:execution:fencegen:abc")
+    assert f("plaita:tenant-a:execution:fencegen:abc")
     assert f("plaita:flow:queue:v2:dlq")
 
 

@@ -382,6 +382,11 @@ def _is_mechanism_key(key: str) -> bool:
         # 报「未登记: ['events']」；console 侧自己的用例
         # （`test_clean_c4_executions_api.py`）也把它列为需排除项。
         or ":execution:events:" in key
+        # 同类第十一次（2026-10-19，A2R13）：`:execution:fencegen:{id}`
+        # （fence 世代计数器，与 fence 键分离）也是**裸整数**。它不是
+        # `:execution:fence:` 的子串（"fencegen:" 中没有 "fence:"），必须
+        # 单独登记，否则 list 投影把它当 summary dict → `summary.get` 500。
+        or ":execution:fencegen:" in key
         or ":execution:index" in key
         or key.endswith(":dlq")
     )

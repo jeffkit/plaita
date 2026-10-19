@@ -41,14 +41,56 @@ def execution_index_key(namespace: str) -> str:
 
 
 def execution_fence_key(namespace: str, execution_id: str) -> str:
-    """fence 世代键：``{namespace}:execution:fence:{id}``。
+    """当前 fence 世代键：``{namespace}:execution:fence:{id}``。
 
     与 ``FencedExecutionStorage`` 的 CAS 写、``RedisExecutionLease`` 的
     ``try_acquire_fenced`` 同源；删除执行必须连同本键一起清掉，否则在途
     worker 仍持匹配世代，下一次节点边界落盘会把状态与索引成员写回
     （duo-a-ledger 第四十三轮 A43-01 / duo-a2-ledger 第五轮）。
+
+    **本键只表示「当前世代」，不是世代计数器**——删除执行时它会被清掉，
+    计数器另见 :func:`execution_fence_generation_key`（A2R13）。
     """
     return f"{namespace}:execution:fence:{execution_id}"
+
+
+def execution_fence_generation_key(namespace: str, execution_id: str) -> str:
+    """fence 世代计数器键：``{namespace}:execution:fencegen:{id}``。
+
+    与 fence 键分离（A2R13 第三格 ABA）：fence 键在删除执行时被清掉（删除
+    即吊销），若世代号也跟着从 0 重新 ``INCR``，同一 execution_id 重建后
+    新 worker 的 gen 会与**旧 worker 的 gen 相同**（首次执行都是 1）——旧
+    worker 的迟到 save 命中 CAS 把状态写回、旧世代 delete 也能删掉新执行。
+
+    本键是单调锚：``try_acquire_fenced`` 只对它 ``INCR``，**删除执行时刻意
+    不删除**，也不设过期时间（TTL 语义见 ``RedisExecutionLease`` 模块注释）。
+    因此删除后新 acquire 的世代必定大于任何历史世代。
+    """
+    return f"{namespace}:execution:fencegen:{execution_id}"
+
+
+# 执行级计数键（值均为裸整数，7 天 TTL 自清理；plaita#73/#123/无限交接风暴
+# 修复）。删除执行时必须在同一 pipeline 里清掉，否则同一 execution_id 的新
+# 执行会继承旧预算：确定性失败（nofail）或 G1 唤醒（g1wakeups）已达上限时，
+# 新执行会被立刻误判「不可救」，连第一次失败都放行不了（A51-03）。
+# ``noderetry`` 另有节点维度子键 ``{base}:{node_id}``，需扫描后一并删除。
+EXECUTION_COUNTER_KEY_TYPES = (
+    "nofail",
+    "g1wakeups",
+    "noderefetch",
+    "noderetry",
+    "affinityhandover",
+)
+
+
+def execution_counter_key(namespace: str, execution_id: str, key_type: str) -> str:
+    """单个执行级计数键：``{namespace}:execution:{key_type}:{id}``。"""
+    return f"{namespace}:execution:{key_type}:{execution_id}"
+
+
+def _escape_redis_glob(value: str) -> str:
+    """转义 Redis SCAN MATCH 的通配字符（execution_id 视为字面量）。"""
+    return "".join("\\" + ch if ch in "\\*?[]" else ch for ch in value)
 
 
 def execution_lease_key(namespace: str, execution_id: str) -> str:
@@ -396,24 +438,62 @@ class RedisExecutionStorage(ExecutionStorage):
                 f"执行状态反序列化失败（数据损坏）: {execution_id}: {e}"
             ) from e
     
+    def counter_keys_for_execution(self, execution_id: str) -> List[str]:
+        """该执行名下的全部计数键（固定五类 + noderetry 节点维度子键）。
+
+        ``noderetry`` 的节点维度子键无法靠固定键名枚举（node_id 未知），
+        用 SCAN MATCH（不用阻塞式 KEYS）收集；扫描失败只记日志并退回固定
+        键集合——删除执行的主语义（状态/fence/lease）不受影响，计数残留
+        由 7 天 TTL 兜底。
+        """
+        base = execution_counter_key(self.namespace, execution_id, "noderetry")
+        keys = [
+            execution_counter_key(self.namespace, execution_id, key_type)
+            for key_type in EXECUTION_COUNTER_KEY_TYPES
+        ]
+        scan = getattr(self.client, "scan_iter", None)
+        if callable(scan):
+            try:
+                keys.extend(
+                    key if isinstance(key, str) else key.decode()
+                    for key in scan(match=f"{_escape_redis_glob(base)}:*")
+                )
+            except Exception as e:
+                logger.warning(
+                    "扫描节点重试计数键失败（按固定计数键删除）: %s: %s",
+                    execution_id,
+                    _scrub_url_text(e),
+                )
+        return keys
+
     def delete_execution_state(self, execution_id: str) -> bool:
-        """删除流程执行状态（同时移除列表索引成员、fence 与 lease）。
+        """删除流程执行状态（同时移除索引、fence、lease 与执行级计数键）。
 
         **删除即吊销**（A43-01）：状态键之外还清 ``{ns}:execution:fence:{id}``
         与 ``{ns}:execution:lease:{id}``。在途 worker 下一次 ``save`` 的世代
         CAS 因 fence 键缺失而不匹配，以 ``ExecutionLeaseError`` 具名拒绝，
         不会把状态与 ZSET 索引成员写回；租约同时释放，避免删除后仍有
-        执行被占用。四条删除在同一 pipeline 中提交，避免「状态已删、fence
+        执行被占用。删除在同一 pipeline 中提交，避免「状态已删、fence
         仍在」的窗口。
+
+        **计数键一并清掉**（A51-03）：``nofail`` / ``g1wakeups`` /
+        ``noderefetch`` / ``noderetry``（含节点维度子键）/
+        ``affinityhandover`` 都按 execution_id 持久 7 天；不随删除清理时，
+        同一 id 的新执行会继承旧预算（确定性失败或 G1 唤醒已达上限时，
+        新执行第一次失败就被判不可救）。世代计数器 ``fencegen`` 刻意
+        **不**在此清理——它是 A2R13 ABA 的单调锚。
         """
         execution_key = self.get_namespace_key('execution', execution_id)
         _tenant_write_observability("redis.delete_execution_state", execution_id)
         try:
+            counter_keys = self.counter_keys_for_execution(execution_id)
             pipe = self.client.pipeline()
             pipe.delete(execution_key)
             pipe.zrem(self._execution_index_key(), execution_id)
             pipe.delete(execution_fence_key(self.namespace, execution_id))
             pipe.delete(execution_lease_key(self.namespace, execution_id))
+            if counter_keys:
+                pipe.delete(*counter_keys)
             pipe.execute()
             return True
         except Exception as e:
