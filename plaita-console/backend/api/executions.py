@@ -25,6 +25,14 @@ try:  # 包布局（pip 安装 / `python -m plaita_console`）
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from services import obs_link  # type: ignore
 
+try:
+    from .sse_redis import SSE_REDIS_RETRY_SECONDS, get_sse_async_redis
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from api.sse_redis import (  # type: ignore
+        SSE_REDIS_RETRY_SECONDS,
+        get_sse_async_redis,
+    )
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -1168,8 +1176,6 @@ async def resume_execution(
 # FastAPI 改变该语义（raw Route 也附加依赖），该测试会失败报警。
 SSE_TICKET_TTL_SECONDS = 60
 SSE_TICKET_KEY_PREFIX = "plaita:sse:ticket:"
-# Redis 抖动时 SSE 循环的重试间隔（异常不终结流）。
-SSE_REDIS_RETRY_SECONDS = 0.5
 
 
 def _sse_ticket_key(ticket: str) -> str:
@@ -1256,23 +1262,11 @@ def _execution_stream_async_redis(request: Request):
     """惰性创建/复用 app 级 ``redis.asyncio`` 客户端（仅 SSE pubsub 使用）。
 
     与 lifespan 的同步客户端并存：SSE 消费必须非阻塞，同步 pubsub 的
-    get_message(timeout=1.0) 会阻塞整个事件循环。测试可直接向
+    get_message(timeout=1.0) 会阻塞整个事件循环。实现在 ``sse_redis.py``，
+    与 logs SSE 共用同一客户端；测试可直接向
     ``app.state.execution_sse_aioredis`` 注入 fake 客户端。
     """
-    client = getattr(request.app.state, "execution_sse_aioredis", None)
-    if client is None:
-        try:
-            from ..config import get_settings
-        except ImportError:  # 平铺布局（cwd=backend）运行时
-            from config import get_settings  # type: ignore
-        import redis.asyncio as aioredis
-
-        # 活动集群的 Redis 优先于 env（plaita#65）：切换集群会更新
-        # app.state.redis_url 并清掉本缓存，直接读 env 会继续连旧集群。
-        url = getattr(request.app.state, "redis_url", None) or get_settings().redis_url
-        client = aioredis.from_url(url, decode_responses=True)
-        request.app.state.execution_sse_aioredis = client
-    return client
+    return get_sse_async_redis(request)
 
 
 async def _execution_event_stream(request: Request, data: Dict[str, Any], channel: str):

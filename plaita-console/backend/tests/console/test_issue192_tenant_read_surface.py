@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import fakeredis
 from fakeredis import FakeRedis
 from fastapi import Depends, FastAPI
 from starlette.testclient import TestClient
@@ -75,18 +76,23 @@ def env(tmp_path, monkeypatch):
         "editor",
         memberships=[{"tenant_id": TENANT_A, "role": "editor"}],
     )
-    redis = FakeRedis(decode_responses=True)
+    # #259：SSE 走 redis.asyncio pubsub；sync/async 共享同一 FakeServer。
+    server = fakeredis.FakeServer()
+    redis = FakeRedis(server=server, decode_responses=True)
+    async_redis = fakeredis.aioredis.FakeRedis(
+        server=server, decode_responses=True)
     _seed(redis)
     app = FastAPI()
     app.state.redis = redis
     app.state.local_mode = False
     app.state.store = store
+    app.state.execution_sse_aioredis = async_redis
     app.include_router(auth_users.router, prefix="/api")
     for module in (events_api, logs_api, queues_api):
         app.include_router(
             module.router, prefix="/api", dependencies=[Depends(require_auth)]
         )
-    return TestClient(app), redis
+    return TestClient(app), redis, async_redis
 
 
 def _login(client: TestClient, username: str, password: str, tenant: str) -> dict:
@@ -202,7 +208,7 @@ def _seed(redis: FakeRedis) -> None:
 
 class TestLogsTenantScope:
     def test_instance_logs_only_own_tenant(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         body = client.get(
             "/api/logs/instance/inst-b", headers=_viewer_a(client)
         ).json()
@@ -214,14 +220,14 @@ class TestLogsTenantScope:
         ]
 
     def test_instance_logs_own_tenant_still_visible(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         body = client.get(
             "/api/logs/instance/inst-a", headers=_viewer_a(client)
         ).json()
         assert [row["message"] for row in body["logs"]] == ["acme-line"]
 
     def test_stats_only_own_tenant(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         body = client.get("/api/logs/stats", headers=_viewer_a(client)).json()
         assert body["total_logs"] == 1, "租户视角不得把平台级 xlen 当租户总量"
 
@@ -229,7 +235,7 @@ class TestLogsTenantScope:
         assert admin_body["total_logs"] == 2
 
     def test_list_logs_regression(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         rows = client.get("/api/logs", headers=_viewer_a(client)).json()["logs"]
         assert [row["message"] for row in rows] == ["acme-line"]
 
@@ -237,8 +243,12 @@ class TestLogsTenantScope:
 class _StubRequest:
     """stream_logs 只用 request.is_disconnected 与 request.state.tenant_id。"""
 
-    def __init__(self, tenant):
-        self.app = SimpleNamespace(state=SimpleNamespace(local_mode=False))
+    def __init__(self, tenant, async_client):
+        self.app = SimpleNamespace(
+            state=SimpleNamespace(
+                local_mode=False, execution_sse_aioredis=async_client
+            )
+        )
         # #254：tenant_id=None 只有在可证明的平台级身份下才等于全量视角
         self.state = SimpleNamespace(
             tenant_id=tenant, role="viewer", platform_admin=tenant is None
@@ -249,10 +259,12 @@ class _StubRequest:
         return False
 
 
-def _drive_sse(fake: FakeRedis, tenant, timeout: float = 8.0) -> list:
+def _drive_sse(
+    fake: FakeRedis, async_fake, tenant, timeout: float = 8.0
+) -> list:
     async def _run():
         resp = await logs_api.stream_logs(
-            request=_StubRequest(tenant),
+            request=_StubRequest(tenant, async_fake),
             service_type=None,
             instance_id=None,
             level=None,
@@ -288,15 +300,15 @@ def _drive_sse(fake: FakeRedis, tenant, timeout: float = 8.0) -> list:
 
 
 def test_sse_does_not_emit_other_tenant_logs(env):
-    _client, fake = env
-    events = _drive_sse(fake, TENANT_A)
+    _client, fake, async_fake = env
+    events = _drive_sse(fake, async_fake, TENANT_A)
     assert [e["tenant_id"] for e in events] == [TENANT_A], "B 的日志条目不得出现在 A 的流里"
     assert all(e["message"] == "acme-stream-line" for e in events)
 
 
 def test_sse_platform_view_gets_all(env):
-    _client, fake = env
-    events = _drive_sse(fake, None)
+    _client, fake, async_fake = env
+    events = _drive_sse(fake, async_fake, None)
     assert {e["tenant_id"] for e in events} == {TENANT_A, TENANT_B}
 
 
@@ -305,7 +317,7 @@ def test_sse_platform_view_gets_all(env):
 
 class TestEventsTenantScope:
     def test_event_list_only_own_events(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         body = client.get("/api/events", headers=_viewer_a(client)).json()
         assert [e["event_id"] for e in body["events"]] == ["evt-a"]
 
@@ -313,12 +325,12 @@ class TestEventsTenantScope:
         assert {e["event_id"] for e in admin_body["events"]} == {"evt-a", "evt-b"}
 
     def test_subscription_list_regression(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         body = client.get("/api/events/subscriptions", headers=_viewer_a(client)).json()
         assert [s["subscription_id"] for s in body["subscriptions"]] == ["sub-a"]
 
     def test_cross_tenant_subscription_get_is_404(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         r = client.get("/api/events/subscriptions/sub-b", headers=_viewer_a(client))
         assert r.status_code == 404
         # 不暴露存在性：平台视角能读到同一条
@@ -326,7 +338,7 @@ class TestEventsTenantScope:
         assert admin.status_code == 200 and admin.json()["subscription_id"] == "sub-b"
 
     def test_cross_tenant_subscription_delete_is_404_and_does_not_delete(self, env):
-        client, redis = env
+        client, redis, _async_redis = env
         r = client.delete("/api/events/subscriptions/sub-b", headers=_editor_a(client))
         assert r.status_code == 404
         assert redis.exists("plaita:subscription:data:sub-b") == 1, "跨租户不得删除订阅"
@@ -336,7 +348,7 @@ class TestEventsTenantScope:
         assert redis.exists("plaita:subscription:data:sub-b") == 0
 
     def test_own_subscription_get_and_delete(self, env):
-        client, redis = env
+        client, redis, _async_redis = env
         assert (
             client.get(
                 "/api/events/subscriptions/sub-a", headers=_viewer_a(client)
@@ -353,7 +365,7 @@ class TestEventsTenantScope:
 
 class TestDlqTenantScope:
     def test_dlq_only_own_tenant_entries(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         body = client.get("/api/queues/dlq", headers=_viewer_a(client)).json()
         payloads = [
             entry["payload"]
@@ -363,7 +375,7 @@ class TestDlqTenantScope:
         assert [p["secret"] for p in payloads] == ["acme-dlq-line"]
 
     def test_dlq_platform_view_sees_all(self, env):
-        client, _redis = env
+        client, _redis, _async_redis = env
         body = client.get("/api/queues/dlq", headers=_admin()).json()
         payloads = [
             entry["payload"]
@@ -377,7 +389,7 @@ class TestDlqTenantScope:
 
     def test_dlq_tenant_paging_past_other_tenant_entries(self, env):
         """别租户条目刷屏时也要补满本租户的 count（逐页回退，非只看首页）。"""
-        client, redis = env
+        client, redis, _async_redis = env
         for i in range(30):
             redis.xadd(DLQ_KEY, _dlq_payload(TENANT_B, f"globex-noise-{i}"))
         for i in range(5):
@@ -397,7 +409,7 @@ class TestDlqTenantScope:
 
 def test_queue_detail_tenant_filter_regression(env):
     """#64 已修端点的回归：共享队列条目按租户过滤不回退。"""
-    client, redis = env
+    client, redis, _async_redis = env
     for tenant in (TENANT_A, TENANT_B):
         redis.xadd(
             "plaita:flow:queue",
