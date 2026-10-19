@@ -37,18 +37,20 @@ def test_code_backend_default_subprocess(monkeypatch):
     assert fw._code_backend_for_worker() == "subprocess"
 
 
-def test_register_code_node_falls_back_when_backend_unavailable(monkeypatch):
-    """backend=docker 但 daemon 不可用 → 降级 subprocess，不抛。"""
+def test_register_code_node_refuses_when_backend_unavailable(monkeypatch):
+    """backend=docker 但 daemon 不可用 → 具名拒绝，不降级（A56-01 fail-closed）。"""
     from plaita.server import flow_worker as fw
     monkeypatch.setenv("PLAITA_CODE_BACKEND", "docker")
+    monkeypatch.setenv("PLAITA_SANDBOX_ALLOWED_BACKENDS", "docker")
+    monkeypatch.delenv("PLAITA_ALLOW_SUBPROCESS_FALLBACK", raising=False)
     calls = []
 
     def fake_register(**kw):
         calls.append(kw["default_backend"])
-        if kw["default_backend"] == "docker":
-            raise RuntimeError("docker daemon not available")
+        raise RuntimeError("docker daemon not available")
 
     import plaita.node as pn
     monkeypatch.setattr(pn, "register_code_node", fake_register)
-    fw._register_code_node_for_worker()
-    assert calls == ["docker", "subprocess"]
+    with pytest.raises(fw.CodeNodeRegistrationError, match="不会自动降级"):
+        fw._register_code_node_for_worker()
+    assert calls == ["docker"]

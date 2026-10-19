@@ -232,6 +232,14 @@ register_code_node(default_backend="unsafe")      # 完全信任代码作者
 
 daemon 不可用且未显式降级时，注册期报错并指明三种降级路径。
 
+worker 入口（`plaita.server.flow_worker`）同口径且 **fail-closed**：显式
+`PLAITA_CODE_BACKEND=docker` 而 daemon 不可用时，worker **启动失败并具名拒绝注册**
+（`CodeNodeRegistrationError`），不会自动降级 `subprocess`，也不会把运维显式白名单
+`PLAITA_SANDBOX_ALLOWED_BACKENDS=docker` 扩成 `{docker,subprocess}`。需要可用性降级
+的部署必须**同时**显式设置两个开关——`PLAITA_ALLOW_SUBPROCESS_FALLBACK=1` 且
+`PLAITA_SANDBOX_ALLOWED_BACKENDS` 含 `subprocess`；否则拒绝注册。注意 `subprocess`
+不隔离 FS/网络（见 [安全](#安全)）。
+
 ### HMAC nonce Redis 后端（多 worker 重放保护）
 
 plaita-console 的 HMAC 鉴权 nonce 缓存默认是**进程内**单例——gunicorn 多 worker 下每个 worker 独立缓存，3 秒窗口内**跨 worker 重放可行**。生产多 worker 部署必须配 Redis 后端：
