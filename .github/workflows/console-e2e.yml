@@ -84,6 +84,13 @@ jobs:
           rm -rf backend/webDist
           cp -R frontend/dist backend/webDist
 
+      # #266 P1 回归护栏：构建产物扫描。Vite 会把 VITE_* 构建期内联进公开
+      # bundle；bundle 内出现管理密钥形态（变量名/localStorage 键/请求头）
+      # 即红，防止浏览器管理 Key 通道回归。
+      - name: Scan frontend bundle for admin key material (#266)
+        working-directory: plaita-console/frontend
+        run: node scripts/check-admin-key.mjs --dist dist
+
       # argusai 的 build 从 mcp2cli daemon 里 spawn docker build 在 runner 上
       # 会秒挂（docker run 正常、buildx 异常，仅 CI 复现），故在普通步骤里
       # 预构建全部镜像——失败时本步直接打印 docker 真实报错；gate/chaos 用

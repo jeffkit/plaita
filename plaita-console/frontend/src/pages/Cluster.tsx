@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, SUB_PATH, ServiceTypeInfo, ManagedInstance, InfrastructureInfo, InfrastructureTemplate, CreateInfrastructureRequest, QuickTestResponse } from '../services/api'
+import { api, errorUserMessage, SUB_PATH, ServiceTypeInfo, ManagedInstance, InfrastructureInfo, InfrastructureTemplate, CreateInfrastructureRequest, QuickTestResponse } from '../services/api'
 import {
   Play,
   Square,
@@ -2234,6 +2234,8 @@ export default function Cluster() {
   const [showQuickTest, setShowQuickTest] = useState(false)
   const [showStopAll, setShowStopAll] = useState(false)
   const [bootstrapMsg, setBootstrapMsg] = useState<string | null>(null)
+  // 生命周期写操作失败必须可见（S17-03：启动/停止/移除不得只复位 spinner）
+  const [actionError, setActionError] = useState<string | null>(null)
   
   // 当前标签页
   const currentTab = searchParams.get('tab') || 'services'
@@ -2276,11 +2278,15 @@ export default function Cluster() {
   const startMutation = useMutation({
     mutationFn: api.startManagedService,
     onSuccess: () => {
+      setActionError(null)
       queryClient.invalidateQueries({ queryKey: ['serviceTypes'] })
       queryClient.invalidateQueries({ queryKey: ['managedInstances'] })
       setStartingType(null)
     },
-    onError: () => {
+    onError: (e: Error) => {
+      const message = errorUserMessage(e)
+      console.warn('[cluster] 启动服务失败:', message, e)
+      setActionError(`启动服务失败：${message}`)
       setStartingType(null)
     },
   })
@@ -2289,11 +2295,15 @@ export default function Cluster() {
   const stopMutation = useMutation({
     mutationFn: (instanceId: string) => api.stopManagedService(instanceId),
     onSuccess: () => {
+      setActionError(null)
       queryClient.invalidateQueries({ queryKey: ['serviceTypes'] })
       queryClient.invalidateQueries({ queryKey: ['managedInstances'] })
       setStoppingId(null)
     },
-    onError: () => {
+    onError: (e: Error) => {
+      const message = errorUserMessage(e)
+      console.warn('[cluster] 停止服务失败:', message, e)
+      setActionError(`停止服务失败：${message}`)
       setStoppingId(null)
     },
   })
@@ -2302,11 +2312,15 @@ export default function Cluster() {
   const removeMutation = useMutation({
     mutationFn: (instanceId: string) => api.removeInstance(instanceId),
     onSuccess: () => {
+      setActionError(null)
       queryClient.invalidateQueries({ queryKey: ['serviceTypes'] })
       queryClient.invalidateQueries({ queryKey: ['managedInstances'] })
       setRemovingId(null)
     },
-    onError: () => {
+    onError: (e: Error) => {
+      const message = errorUserMessage(e)
+      console.warn('[cluster] 移除实例失败:', message, e)
+      setActionError(`移除实例失败：${message}`)
       setRemovingId(null)
     },
   })
@@ -2315,8 +2329,14 @@ export default function Cluster() {
   const clearFailedMutation = useMutation({
     mutationFn: () => api.clearFailedInstances(),
     onSuccess: () => {
+      setActionError(null)
       queryClient.invalidateQueries({ queryKey: ['serviceTypes'] })
       queryClient.invalidateQueries({ queryKey: ['managedInstances'] })
+    },
+    onError: (e: Error) => {
+      const message = errorUserMessage(e)
+      console.warn('[cluster] 清除失败实例失败:', message, e)
+      setActionError(`清除失败实例失败：${message}`)
     },
   })
 
@@ -2479,6 +2499,15 @@ export default function Cluster() {
       {bootstrapMsg && (
         <div className="px-3 py-2 bg-plaita-500/10 text-plaita-400 text-caption rounded-md">
           {bootstrapMsg}
+        </div>
+      )}
+
+      {actionError && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 bg-status-error-dim text-status-error text-caption rounded-md">
+          <span className="min-w-0 break-words">{actionError}</span>
+          <button onClick={() => setActionError(null)} title="关闭" aria-label="关闭错误提示">
+            <X size={14} />
+          </button>
         </div>
       )}
 

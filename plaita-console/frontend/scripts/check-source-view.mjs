@@ -30,6 +30,7 @@ const read = (p) => readFileSync(join(here, p), 'utf8')
 const panelSrc = read('../src/components/flow/SourceViewPanel.tsx')
 const editorSrc = read('../src/pages/FlowEditor.tsx')
 const apiSrc = read('../src/services/api.ts')
+const transportSrc = read('../src/services/transport.ts')
 
 let checks = 0
 const failures = []
@@ -261,7 +262,9 @@ check('FlowEditor 把 reason 传给面板 + 在「源码」按钮上可发现', 
   assert.match(editorSrc, /sourceUnavailableReason\s*\?/)
 })
 check('api.request 把 HTTP status 挂到错误对象上（失败分类的前提）', () => {
-  assert.match(apiSrc, /err\.status\s*=\s*response\.status/)
+  // S17-03 后 request 统一抛 ApiError：状态码由 buildHttpError 写入
+  assert.match(apiSrc, /buildHttpError\(response\.status/)
+  assert.match(transportSrc, /new ApiError\(message, \{[\s\S]*?status,/)
 })
 check('authoritative 主链路未被改写：metadata.source 仍直接作为权威源码', () => {
   assert.match(editorSrc, /embeddedSource\(defMeta\)/)

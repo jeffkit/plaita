@@ -53,6 +53,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def is_api_path(path: str) -> bool:
+    """路径是否落在 ``/api`` 命名空间（供 SPA 兜底拒绝用）。"""
+    clean = (path or "").split("?", 1)[0].strip("/")
+    return clean == "api" or clean.startswith("api/")
+
+
+def make_spa_static_files(directory):
+    """构造 BrowserRouter 兜底静态挂载（模块级工厂，便于独立测试）。
+
+    未命中的非 ``/api`` 路径回 ``index.html``；``/api/*`` 不得被 SPA 兜成
+    200 HTML（S17-03 3C：前端 ``response.json()`` 会得到 ``Unexpected token '<'``）。
+    """
+    from fastapi.responses import JSONResponse
+    from fastapi.staticfiles import StaticFiles
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    class SPAStaticFiles(StaticFiles):
+        """BrowserRouter 深链接回退：未命中的静态路径一律回 index.html。"""
+
+        async def get_response(self, path: str, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code == 404:
+                    scope_path = (scope or {}).get("path", "") or path
+                    if is_api_path(path) or is_api_path(scope_path):
+                        return JSONResponse(
+                            {"detail": f"接口不存在: /{path.lstrip('/')}"},
+                            status_code=404,
+                        )
+                    return await super().get_response("index.html", scope)
+                raise
+
+    return SPAStaticFiles(directory=directory, html=True)
+
 # 全局 Redis 客户端
 redis_client: Redis = None
 
@@ -382,21 +418,7 @@ def create_app() -> FastAPI:
     # /api 与上方健康检查不受影响；"/" 让给前端首页，健康检查走 /health。
     web_dist = Path(__file__).parent / "webDist"
     if web_dist.is_dir():
-        from fastapi.staticfiles import StaticFiles
-        from starlette.exceptions import HTTPException as StarletteHTTPException
-
-        class SPAStaticFiles(StaticFiles):
-            """BrowserRouter 深链接回退：未命中的静态路径一律回 index.html。"""
-
-            async def get_response(self, path: str, scope):
-                try:
-                    return await super().get_response(path, scope)
-                except StarletteHTTPException as exc:
-                    if exc.status_code == 404:
-                        return await super().get_response("index.html", scope)
-                    raise
-
-        app.mount("/", SPAStaticFiles(directory=web_dist, html=True), name="web")
+        app.mount("/", make_spa_static_files(web_dist), name="web")
         logger.info("已托管前端静态资源: %s", web_dist)
     else:
 

@@ -6,7 +6,7 @@ import { HttpAgent } from '@ag-ui/client'
 import '@copilotkit/react-ui/styles.css'
 import { Bot, X } from 'lucide-react'
 import { useFlowEditor } from '../../stores/flowEditor'
-import { api } from '../../services/api'
+import { API_BASE, api, apiFetch } from '../../services/api'
 import { flowToJson } from './flowConverter'
 import { symmetricLayout } from './symmetricLayout'
 
@@ -134,12 +134,10 @@ function CopilotInner({
   // 执行对应工具并 resolve(payload)，CopilotKit 提交 resume 续跑。
   useInterrupt({
     agentId: 'default',
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     enabled: (event: any) => {
       const it = event.interrupt as { metadata?: { frontendTool?: boolean } } | null
       return Boolean(it?.metadata?.frontendTool)
     },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     handler: async ({ interrupt, resolve }: any) => {
       if (!interrupt) return null
       const meta = interrupt.metadata as { toolName?: string } | undefined
@@ -361,11 +359,29 @@ export default function CopilotPanel({
     // @copilotkit 内嵌的 @ag-ui/core 实例与直接依赖在类型上有私有字段差异，运行时同源
     () =>
       new HttpAgent({
-        url: '/api/copilot',
+        // S17-02：子路径部署下必须是 ${SUB_PATH}/api/copilot；鉴权头由
+        // apiFetch 在每次运行按调用时点注入（Bearer + 平台管理员 X-Tenant-ID）。
+        url: `${API_BASE}/copilot`,
         headers: flowId ? { 'X-Flow-Id': flowId } : undefined,
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
+          apiFetch(String(input), init, { stream: true })) as typeof fetch,
       }) as never,
     [flowId]
   )
+
+  // 面板关闭/组件卸载时中止在途运行（不丢 abort 语义）
+  useEffect(() => {
+    const abort = () => {
+      (agent as unknown as { abortRun?: () => void }).abortRun?.()
+    }
+    if (open) return
+    abort()
+  }, [open, agent])
+  useEffect(() => {
+    return () => {
+      (agent as unknown as { abortRun?: () => void }).abortRun?.()
+    }
+  }, [agent])
 
   return (
     <>

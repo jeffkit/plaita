@@ -9,6 +9,9 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "check:source-view": "node scripts/check-source-view.mjs",
     "check:dry-run-scope": "node scripts/check-dry-run-scope.mjs",
+    "check:admin-key": "node scripts/check-admin-key.mjs",
+    "check:admin-key:bundle": "node scripts/check-admin-key.mjs --dist dist",
+    "check:api-transport": "node scripts/check-api-transport.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

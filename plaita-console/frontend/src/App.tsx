@@ -9,6 +9,7 @@ import Setup from './pages/Setup'
 import {
   api,
   clearSession,
+  errorUserMessage,
   getRole,
   getTenant,
   getMemberships,
@@ -19,6 +20,7 @@ import {
 import { createBrowserRouter, RouterProvider, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { ApiErrorBanner } from './components/ui'
 import {
   LayoutGrid,
   GitBranch,
@@ -265,6 +267,9 @@ function Layout() {
       <main className="flex-1 overflow-auto">
         <Outlet />
       </main>
+
+      {/* 写操作失败兜底：无 onError 的 mutation 也不静默 */}
+      <ApiErrorBanner />
     </div>
   )
 }
@@ -277,19 +282,31 @@ function TenantSwitcher({ collapsed }: { collapsed: boolean }) {
   const current = getTenant()
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const [switching, setSwitching] = useState(false)
+  const [switchError, setSwitchError] = useState<string | null>(null)
   if (!platformAdmin && memberships.length <= 1) return null
 
   const switchTo = async (tenantId: string) => {
-    if (tenantId === current) return
+    if (tenantId === current || switching) return
+    setSwitchError(null)
     if (tenantId === '') {
       // 平台管理员的「全量视角」：纯本地状态（服务端以无 X-Tenant-ID 表示）
+      // A2R17-01/B2R17-01：服务端可证明的全量语义另案裁决，不在本条施工。
       setTenant('')
     } else {
+      // S17-01：只有服务端切换成功才落本地；失败保持旧租户并给出可见提示，
+      // 不得 catch 后 setTenant 造成「UI 显示 B、服务端仍在 A」。
+      setSwitching(true)
       try {
         const res = await api.switchTenant(tenantId)
         setTenant(tenantId, res.role)
-      } catch {
-        setTenant(tenantId)
+      } catch (e) {
+        const message = errorUserMessage(e)
+        console.warn('[tenant-switch] 切换失败，保持当前租户:', message, e)
+        setSwitchError(message)
+        return
+      } finally {
+        setSwitching(false)
       }
     }
     qc.clear()
@@ -304,7 +321,7 @@ function TenantSwitcher({ collapsed }: { collapsed: boolean }) {
       {collapsed ? (
         <div
           className="flex justify-center py-1.5 text-micro text-ink-faint"
-          title={`租户: ${current || '全量'}`}
+          title={`租户: ${current || '全量'}${switchError ? `（切换失败：${switchError}）` : ''}`}
         >
           <Building2 size={14} />
         </div>
@@ -312,7 +329,8 @@ function TenantSwitcher({ collapsed }: { collapsed: boolean }) {
         <select
           value={current}
           onChange={(e) => switchTo(e.target.value)}
-          className="input w-full text-caption py-1.5"
+          disabled={switching}
+          className="input w-full text-caption py-1.5 disabled:opacity-50"
           title="切换租户"
         >
           {platformAdmin && <option value="">全量视角（平台）</option>}
@@ -325,6 +343,11 @@ function TenantSwitcher({ collapsed }: { collapsed: boolean }) {
             <option value={current}>{current}</option>
           )}
         </select>
+      )}
+      {!collapsed && switchError && (
+        <p className="mt-1.5 text-caption text-status-error break-words">
+          租户切换失败：{switchError}
+        </p>
       )}
     </div>
   )

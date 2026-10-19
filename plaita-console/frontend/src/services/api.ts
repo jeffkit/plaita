@@ -1,6 +1,23 @@
 /**
  * API 服务层
  */
+import {
+  API_TIMEOUTS,
+  ApiError,
+  buildHttpError,
+  decodeSuccessBody,
+  resolveApiUrl,
+} from './transport'
+
+export {
+  API_TIMEOUTS,
+  ApiError,
+  buildHttpError,
+  errorUserMessage,
+  isTerminalStatus,
+  shouldRetryQuery,
+  type ApiErrorKind,
+} from './transport'
 
 // 子路径部署探测：dsht 隧道以 https://dsht.agentstudio.cc/plaita/（nginx 剥前缀）
 // 暴露；本机等根路径部署检测不命中、行为不变。
@@ -8,16 +25,9 @@ export const SUB_PATH = /^\/plaita(\/|$)/.test(window.location.pathname) ? '/pla
 
 export const API_BASE = `${SUB_PATH}/api`
 
-/** 管理面 API Key：优先 localStorage，其次 Vite 构建期环境变量。 */
-function getAdminApiKey(): string {
-  try {
-    const fromStore = localStorage.getItem('plaita_admin_api_key')
-    if (fromStore) return fromStore
-  } catch {
-    /* SSR / 隐私模式 */
-  }
-  return (import.meta as { env?: Record<string, string> }).env?.VITE_PLAITA_ADMIN_API_KEY || ''
-}
+// #266：平台管理 API Key 只属于服务端/CLI 调用方，浏览器端一律只用会话
+// Bearer。构建期 VITE_* 变量会被 Vite 内联进公开 bundle——任何管理密钥都
+// 不得出现在前端源码/构建配置里。
 
 // 会话 token（RBAC 登录后保存）
 export function getToken(): string | null {
@@ -78,17 +88,14 @@ export function getMemberships(): MembershipInfo[] {
   }
 }
 
-/** request() 同源的鉴权头注入：token 优先，其次管理 Key；平台管理员显式声明
- *  租户上下文（普通用户服务端钉死活跃租户，带头会 403）。供流式 fetch 等绕过
- *  request() 的调用方复用，避免两处实现漂移。 */
+/** 鉴权头注入：只发会话 Bearer；平台管理员显式声明租户上下文（普通用户
+ *  服务端钉死活跃租户，带头会 403）。供流式 fetch 等绕过 request() 的调用方
+ *  复用，避免两处实现漂移。 */
 export function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = {}
   const token = getToken()
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
-  } else {
-    const adminKey = getAdminApiKey()
-    if (adminKey) headers['X-Admin-API-Key'] = adminKey
   }
   if (isPlatformAdmin() && getTenant()) {
     headers['X-Tenant-ID'] = getTenant()
@@ -96,48 +103,149 @@ export function authHeaders(): Record<string, string> {
   return headers
 }
 
+export interface RequestOptions {
+  /** 401 是否清会话并跳登录页（登录期租户选择必须关闭）。默认 true。 */
+  authRedirect?: boolean
+  /** 总超时（含响应体读取）。默认 API_TIMEOUTS.json。 */
+  timeoutMs?: number
+}
+
+export interface ApiFetchOptions {
+  /** 401 是否清会话并跳登录页。默认 true。 */
+  authRedirect?: boolean
+  /** 建连超时；默认 stream 用 10s，其余用 15s。 */
+  timeoutMs?: number
+  /** 流式读：只覆盖建连，不覆盖读流。 */
+  stream?: boolean
+}
+
+function isAuthEndpoint(url: string): boolean {
+  return /\/auth\/(?:login|setup)(?:$|[/?#])/.test(url)
+}
+
+let redirecting = false
+
+/** 401 统一出口：清会话 + 跳登录页（模块级防并发重复跳转）。 */
+function triggerAuthRedirect(): void {
+  if (redirecting) return
+  redirecting = true
+  clearSession()
+  // 子路径部署下 /login 不是本 console 的登录页（登录页在 ${SUB_PATH}/login，
+  // router basename 同源），写死根路径会把用户踢出 console（#103）
+  window.location.assign(`${SUB_PATH}/login`)
+}
+
+/**
+ * 所有直连 fetch 的唯一入口（S17-03）：解析子路径、按调用时点注入鉴权头、
+ * 合并外部 signal、建连超时与 401 统一处理。init.headers / init.signal 原样保留。
+ */
+export async function apiFetch(
+  input: string,
+  init?: RequestInit,
+  opts: ApiFetchOptions = {},
+): Promise<Response> {
+  const url = resolveApiUrl(input, SUB_PATH)
+  const headers = new Headers(init?.headers)
+  for (const [key, value] of Object.entries(authHeaders())) {
+    if (!headers.has(key)) headers.set(key, value)
+  }
+
+  const external = init?.signal ?? null
+  const controller = new AbortController()
+  let timedOut = false
+  const forwardAbort = () => controller.abort()
+  if (external) {
+    if (external.aborted) controller.abort()
+    else external.addEventListener('abort', forwardAbort, { once: true })
+  }
+  const timeoutMs =
+    opts.timeoutMs ?? (opts.stream ? API_TIMEOUTS.streamConnect : API_TIMEOUTS.json)
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+
+  try {
+    const response = await fetch(url, { ...init, headers, signal: controller.signal })
+    if (response.status === 401 && opts.authRedirect !== false && !isAuthEndpoint(url)) {
+      triggerAuthRedirect()
+    }
+    return response
+  } catch {
+    if (timedOut) {
+      throw new ApiError(`请求超时（${Math.round(timeoutMs / 1000)}s）`, {
+        kind: 'timeout',
+        url,
+      })
+    }
+    if (external?.aborted) {
+      throw new ApiError('请求已取消', { kind: 'aborted', url })
+    }
+    throw new ApiError('无法连接服务端，请检查网络或服务状态', { kind: 'network', url })
+  } finally {
+    clearTimeout(timer)
+    external?.removeEventListener('abort', forwardAbort)
+  }
+}
+
 // 通用请求函数
-async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...authHeaders(),
-    ...(options?.headers as Record<string, string> | undefined),
+async function request<T>(
+  url: string,
+  options?: RequestInit,
+  opts: RequestOptions = {},
+): Promise<T> {
+  const fullUrl = `${API_BASE}${url}`
+  const timeoutMs = opts.timeoutMs ?? API_TIMEOUTS.json
+  const external = options?.signal ?? null
+  const controller = new AbortController()
+  const forwardAbort = () => controller.abort()
+  if (external) {
+    if (external.aborted) controller.abort()
+    else external.addEventListener('abort', forwardAbort, { once: true })
   }
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
 
-  const response = await fetch(`${API_BASE}${url}`, {
-    ...options,
-    headers,
-  })
+  const headers = new Headers(options?.headers)
+  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
 
-  if (response.status === 401 && !url.startsWith('/auth/login') && !url.startsWith('/auth/setup')) {
-    clearSession()
-    // 子路径部署下 /login 不是本 console 的登录页（登录页在 ${SUB_PATH}/login，
-    // router basename 同源），写死根路径会把用户踢出 console（#103）
-    window.location.assign(`${SUB_PATH}/login`)
-    throw new Error('登录已过期，请重新登录')
+  const method = (options?.method || 'GET').toUpperCase()
+  const writeHint = method === 'GET' || method === 'HEAD' ? '' : '，结果未知，请刷新确认'
+  const timeoutError = () =>
+    new ApiError(`请求超时（${Math.round(timeoutMs / 1000)}s）${writeHint}`, {
+      kind: 'timeout',
+      url: fullUrl,
+    })
+
+  try {
+    const response = await apiFetch(
+      fullUrl,
+      { ...options, headers, signal: controller.signal },
+      { authRedirect: opts.authRedirect, timeoutMs },
+    )
+    const text = await response.text()
+    const contentType = response.headers.get('content-type')
+
+    if (!response.ok) {
+      throw buildHttpError(response.status, text, contentType, fullUrl)
+    }
+    // 204 / 空 body：现在没有该形态的端点，防御性返回 undefined。
+    if (response.status === 204 || !text.trim()) return undefined as T
+    return decodeSuccessBody(contentType, text, fullUrl) as T
+  } catch (error) {
+    if (timedOut) throw timeoutError()
+    if (error instanceof ApiError) throw error
+    throw new ApiError('无法连接服务端，请检查网络或服务状态', {
+      kind: 'network',
+      url: fullUrl,
+    })
+  } finally {
+    clearTimeout(timer)
+    external?.removeEventListener('abort', forwardAbort)
   }
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: '请求失败' }))
-    // detail 可为字符串（常规错误）或结构化对象（如 C5-1 版本冲突 409：
-    // { message, conflict, latest_updated_at }）——统一取 message 展示，
-    // 并把原始 detail 挂到 Error 上供调用方做结构化分支。
-    const rawDetail = (error as { detail?: unknown }).detail
-    const message =
-      typeof rawDetail === 'string'
-        ? rawDetail
-        : ((rawDetail as { message?: string } | null)?.message ?? '请求失败')
-    const err = new Error(message) as Error & { detail?: unknown; status?: number }
-    // HTTP 状态码随错误对象抛出：调用方需要区分「404 路由/资源不存在」与
-    // 「5xx 服务端错误」（如 /source 降级失败的分类展示，见
-    // components/flow/sourceViewState.ts），只凭 message 无法可靠分辨。
-    // 对既有调用方是纯新增的可选属性，不改动 message/detail 行为。
-    err.status = response.status
-    if (rawDetail !== null && typeof rawDetail === 'object') err.detail = rawDetail
-    throw err
-  }
-
-  return response.json()
 }
 
 // ============ 类型定义 ============
@@ -410,21 +518,21 @@ export const api = {
     return request('/cluster/start', {
       method: 'POST',
       body: JSON.stringify({ service_type: serviceType }),
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async stopManagedService(instanceId: string, graceful = true): Promise<void> {
     return request(`/cluster/stop/${instanceId}`, {
       method: 'POST',
       body: JSON.stringify({ graceful }),
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async stopAllManagedServices(graceful = true): Promise<void> {
     return request('/cluster/stop-all', {
       method: 'POST',
       body: JSON.stringify({ graceful }),
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async getManagedInstances(serviceType?: string): Promise<ManagedInstancesResponse> {
@@ -442,19 +550,19 @@ export const api = {
     return request('/cluster/mode', {
       method: 'POST',
       body: JSON.stringify({ mode }),
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async removeInstance(instanceId: string): Promise<void> {
     return request(`/cluster/instances/${instanceId}`, {
       method: 'DELETE',
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async clearFailedInstances(): Promise<{ cleared_count: number }> {
     return request('/cluster/instances', {
       method: 'DELETE',
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   // ============ 多集群管理 ============
@@ -491,7 +599,7 @@ export const api = {
     return request('/clusters/switch', {
       method: 'POST',
       body: JSON.stringify({ cluster_id: clusterId }),
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async getClusterConfigDetail(clusterId: string): Promise<ClusterConfigDetail> {
@@ -516,11 +624,11 @@ export const api = {
   },
 
   async startInfrastructure(name: string): Promise<{ success: boolean; status?: string; message: string }> {
-    return request(`/cluster/infrastructure/${name}/start`, { method: 'POST' })
+    return request(`/cluster/infrastructure/${name}/start`, { method: 'POST' }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async stopInfrastructure(name: string): Promise<{ success: boolean; message: string }> {
-    return request(`/cluster/infrastructure/${name}/stop`, { method: 'POST' })
+    return request(`/cluster/infrastructure/${name}/stop`, { method: 'POST' }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async checkInfrastructureHealth(name: string): Promise<{
@@ -531,27 +639,27 @@ export const api = {
   }> {
     return request(`/cluster/infrastructure/${name}/check`, {
       method: 'POST',
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async createInfrastructure(data: CreateInfrastructureRequest): Promise<InfrastructureInfo> {
     return request('/cluster/infrastructure', {
       method: 'POST',
       body: JSON.stringify(data),
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async updateInfrastructure(name: string, data: UpdateInfrastructureRequest): Promise<InfrastructureInfo> {
     return request(`/cluster/infrastructure/${name}`, {
       method: 'PUT',
       body: JSON.stringify(data),
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async deleteInfrastructure(name: string): Promise<void> {
     return request(`/cluster/infrastructure/${name}`, {
       method: 'DELETE',
-    })
+    }, { timeoutMs: API_TIMEOUTS.lifecycle })
   },
 
   async getInfrastructureTemplates(): Promise<{ templates: InfrastructureTemplate[] }> {
@@ -743,7 +851,7 @@ export const api = {
     return request('/flows/dry-run', {
       method: 'POST',
       body: JSON.stringify(payload),
-    })
+    }, { timeoutMs: API_TIMEOUTS.dryRun })
   },
 
   // ============ 审计与部署 ============
@@ -791,13 +899,26 @@ export const api = {
     return request('/auth/me')
   },
 
-  async switchTenant(tenantId: string): Promise<{
-    actor: string; role: string; tenant_id: string | null; platform_admin: boolean
+  /**
+   * 切换服务端会话活跃租户（S17-01）。
+   *
+   * 登录期 token 还只在组件内存里：显式传 `token` 注入 Authorization；
+   * `authRedirect:false` 阻止登录期 401 把租户选择页冲掉。
+   */
+  async switchTenant(
+    tenantId: string,
+    opts?: { token?: string; authRedirect?: boolean },
+  ): Promise<{
+    username?: string
+    role: string
+    tenant_id: string | null
+    platform_admin: boolean
   }> {
     return request('/auth/switch-tenant', {
       method: 'POST',
       body: JSON.stringify({ tenant_id: tenantId }),
-    })
+      headers: opts?.token ? { Authorization: `Bearer ${opts.token}` } : undefined,
+    }, { authRedirect: opts?.authRedirect })
   },
 
   // ============ 租户管理（平台管理员） ============

@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play, Square, RefreshCw, ChevronRight, Plus, Trash2, Loader2, X } from 'lucide-react'
-import { api } from '../services/api'
+import { api, errorUserMessage } from '../services/api'
 import StartFlowDialog from '../components/StartFlowDialog'
 import { ServiceHint } from '../components/ServiceHint'
-import { Page, PageHeader, Card, Button, StatusBadge, EmptyState, Table, Th, Tr, Td, TdData, ConfirmDialog } from '../components/ui'
+import { Page, PageHeader, Card, Button, StatusBadge, EmptyState, ErrorState, Table, Th, Tr, Td, TdData, ConfirmDialog } from '../components/ui'
 
 // 删除只对终态开放（A43-01）：running/suspended 的记录直接删会在途执行
 // 复活（集群档）或线程继续跑（本地档）。本地档失败终态写 failed。
@@ -23,6 +23,8 @@ export default function Executions() {
   const [actioningId, setActioningId] = useState<string | null>(null)
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  // 写操作失败必须可见（S17-03：取消/删除不得只复位 spinner）
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const setParam = (key: string, value: string) => {
     const next = new URLSearchParams(searchParams)
@@ -33,7 +35,7 @@ export default function Executions() {
     setSearchParams(next)
   }
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['executions', page, statusFilter, flowFilter],
     queryFn: () =>
       api.getExecutions({
@@ -48,11 +50,15 @@ export default function Executions() {
   const cancelMutation = useMutation({
     mutationFn: api.cancelExecution,
     onSuccess: () => {
+      setActionError(null)
       queryClient.invalidateQueries({ queryKey: ['executions'] })
       setActioningId(null)
       setConfirmCancelId(null)
     },
-    onError: () => {
+    onError: (e: Error) => {
+      const message = errorUserMessage(e)
+      console.warn('[executions] 取消失败:', message, e)
+      setActionError(`取消执行失败：${message}`)
       setActioningId(null)
     },
   })
@@ -60,11 +66,15 @@ export default function Executions() {
   const deleteMutation = useMutation({
     mutationFn: api.deleteExecution,
     onSuccess: () => {
+      setActionError(null)
       queryClient.invalidateQueries({ queryKey: ['executions'] })
       setActioningId(null)
       setConfirmDeleteId(null)
     },
-    onError: () => {
+    onError: (e: Error) => {
+      const message = errorUserMessage(e)
+      console.warn('[executions] 删除失败:', message, e)
+      setActionError(`删除执行失败：${message}`)
       setActioningId(null)
     },
   })
@@ -128,6 +138,15 @@ export default function Executions() {
         onClose={() => setShowStartDialog(false)}
       />
 
+      {actionError && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-md bg-status-error-dim text-status-error text-caption">
+          <span className="min-w-0 break-words">{actionError}</span>
+          <button onClick={() => setActionError(null)} title="关闭" aria-label="关闭错误提示">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {/* 执行列表：整行可点进详情 */}
       <Card className="overflow-hidden">
         <Table>
@@ -146,6 +165,12 @@ export default function Executions() {
               <tr>
                 <td colSpan={6}>
                   <EmptyState message="加载中…" />
+                </td>
+              </tr>
+            ) : isError ? (
+              <tr>
+                <td colSpan={6}>
+                  <ErrorState error={error} title="执行列表加载失败" onRetry={() => refetch()} />
                 </td>
               </tr>
             ) : executions.length === 0 ? (

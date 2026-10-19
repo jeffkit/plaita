@@ -236,7 +236,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | `PLAITA_CONSOLE_SECRET_KEY` | _空_ | 对外契约 HMAC secret-key |
 | `PLAITA_CONSOLE_LANGFUSE` | `auto` | Langfuse 观测（[plaita.obs](../README.MD#可观测性plaitaobs)）：`auto`=配了 `LANGFUSE_PUBLIC_KEY` 即开；`true` 强制开；`false` 强制关。trace id = 执行实例 ID；缺 `plaita[langfuse]` 依赖自动降级为不观测（集群档对应 worker 的 `--langfuse` / `PLAITA_WORKER_LANGFUSE=1`）。另需 `LANGFUSE_PROJECT_ID`（如 proj-plaita-local）——执行详情页的「Langfuse」深链依赖它计算 trace URL |
 
-前端管理面请求会自动带 `X-Admin-API-Key`：优先读 `localStorage.plaita_admin_api_key`，其次 `VITE_PLAITA_ADMIN_API_KEY`。
+`PLAITA_CONSOLE_ADMIN_API_KEY` 只供服务端/CLI 等非浏览器调用方使用（`X-Admin-API-Key` 或 Bearer）。**浏览器端一律使用会话登录后的 Bearer token**——不要通过 `VITE_*` 把管理密钥注入前端 bundle（Vite 会在构建期内联，公开静态资源即可下载，见 #266）。
 
 `POST /api/flows/dry-run` 有两层安全闸门：(1) **拒绝**含 `code` / `python` / `javascript` 等危险节点的流程；(2) 试跑前统一注入 `globalContext.dry_run=True`，并在执行器读点 `get_global_variable("dry_run")` 上钉死（试跑专用 `_DryRunExecution`，随子执行下发——流程声明 `dry_run=false` 也改不回去）——经 `PLAITA_CONSOLE_NODE_MODULES` 注册的业务节点（gate / capture / agentrun / llm / email / webhooks / database / git_publish 等）据此跳过真实副作用（子进程 / 出网 / agent CLI），名黑名单枚举不到它们。二者共同防止 console 进程 RCE。
 

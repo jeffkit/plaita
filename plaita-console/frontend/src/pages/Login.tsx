@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api, setSession, type MembershipInfo } from '../services/api'
+import { api, ApiError, errorUserMessage, setSession, type MembershipInfo } from '../services/api'
 
 // 登录页：未持会话 token 时的全屏入口。
 // 多租户成员登录后若属于多个租户，进入租户选择步骤（单租户直进）。
@@ -8,11 +8,13 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
-  // 租户选择态：login 拿到 memberships 后进入
+  // 租户选择态：login 拿到 memberships 后进入；token 只存组件内存
   const [pendingSession, setPendingSession] = useState<{
     token: string; username: string; role: string
     platformAdmin: boolean; memberships: MembershipInfo[]
   } | null>(null)
+  const [picking, setPicking] = useState<string | null>(null)
+  const [pickError, setPickError] = useState<string | null>(null)
 
   const submit = async () => {
     if (!username || !password) {
@@ -41,21 +43,53 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
         })
       }
     } catch (e) {
-      setError((e as Error).message)
+      setError(errorUserMessage(e))
     } finally {
       setPending(false)
     }
   }
 
-  const pickTenant = (tenantId: string) => {
-    if (!pendingSession) return
-    const m = pendingSession.memberships.find((x) => x.tenant_id === tenantId)
-    setSession(pendingSession.token, pendingSession.username, m?.role || pendingSession.role, {
-      tenantId,
-      platformAdmin: pendingSession.platformAdmin,
-      memberships: pendingSession.memberships,
-    })
-    onSuccess()
+  /**
+   * S17-01：租户选择必须先在服务端切换成功，才把会话落到 localStorage。
+   * 登录期 token 还只在内存里，必须显式传；401 也不能触发整页跳登录
+   * （authRedirect:false），否则选择页会被冲掉。
+   */
+  const pickTenant = async (tenantId: string) => {
+    if (!pendingSession || picking) return
+    setPicking(tenantId)
+    setPickError(null)
+    try {
+      const res = await api.switchTenant(tenantId, {
+        token: pendingSession.token,
+        authRedirect: false,
+      })
+      setSession(pendingSession.token, pendingSession.username, res.role, {
+        tenantId: res.tenant_id ?? tenantId,
+        platformAdmin: res.platform_admin ?? pendingSession.platformAdmin,
+        memberships: pendingSession.memberships,
+      })
+      onSuccess()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        // token 只在内存：清掉选择态回凭据表单，不写任何 localStorage
+        setPendingSession(null)
+        setPickError(null)
+        setError('登录已过期，请重新登录')
+      } else {
+        // 400/超时/网络/5xx：留在选择页可重选
+        setPickError(errorUserMessage(e))
+        console.warn('[login] 租户切换失败:', errorUserMessage(e), e)
+      }
+    } finally {
+      setPicking(null)
+    }
+  }
+
+  const backToLogin = () => {
+    setPendingSession(null)
+    setPickError(null)
+    setPassword('')
+    setError(null)
   }
 
   if (pendingSession) {
@@ -75,13 +109,24 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
               <button
                 key={m.tenant_id}
                 onClick={() => pickTenant(m.tenant_id)}
-                className="w-full flex items-center justify-between px-3 py-2 rounded-md border border-line hover:border-plaita-400 text-caption"
+                disabled={picking !== null}
+                className="w-full flex items-center justify-between px-3 py-2 rounded-md border border-line hover:border-plaita-400 disabled:opacity-50 disabled:cursor-not-allowed text-caption"
               >
                 <span className="text-ink-primary">{m.tenant_id}</span>
-                <span className="text-ink-muted">{m.role}</span>
+                <span className="text-ink-muted">
+                  {picking === m.tenant_id ? '选择中…' : m.role}
+                </span>
               </button>
             ))}
           </div>
+          {pickError && <p className="text-caption text-status-error">{pickError}</p>}
+          <button
+            onClick={backToLogin}
+            disabled={picking !== null}
+            className="w-full text-caption text-ink-muted hover:text-ink-primary disabled:opacity-50"
+          >
+            返回登录
+          </button>
         </div>
       </div>
     )

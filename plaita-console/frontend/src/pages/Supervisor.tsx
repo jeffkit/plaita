@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { RefreshCw, Sparkles, CheckCircle2, XCircle } from 'lucide-react'
-import { api, API_BASE, authHeaders } from '../services/api'
+import { api, API_BASE, API_TIMEOUTS, apiFetch, buildHttpError, errorUserMessage } from '../services/api'
 
 interface IterationOutcome {
   status: string
@@ -88,21 +88,10 @@ function OutcomeBox({ outcome, onApply, applying }: IterationOutcomeBoxProps) {
   )
 }
 
-/** #210：把非 2xx 响应的 status/detail 变成可展示文案（不静默吞错）。 */
-function errorDetailText(body: unknown, resp: Response): string {
-  const detail = (body as { detail?: unknown } | null)?.detail
-  const message =
-    typeof detail === 'string'
-      ? detail
-      : detail
-        ? JSON.stringify(detail)
-        : resp.statusText
-  return `${resp.status} ${message}`.trim()
-}
-
+/** #210 / S17-03：非 2xx 响应统一走 ApiError（保留 status/detail），不静默吞错。 */
 async function readErrorText(resp: Response): Promise<string> {
-  const body = await resp.json().catch(() => null)
-  return errorDetailText(body, resp)
+  const text = await resp.text()
+  return buildHttpError(resp.status, text, resp.headers.get('content-type'), resp.url).userMessage
 }
 
 export default function Supervisor() {
@@ -119,26 +108,26 @@ export default function Supervisor() {
 
   useEffect(() => {
     api.getFlows().then((r) => setFlows(r.flows)).catch(() => setFlows([]))
-    fetch(`${API_BASE}/supervisor/config`, { headers: authHeaders() })
+    apiFetch(`${API_BASE}/supervisor/config`)
       .then(async (r) => {
         if (!r.ok) throw new Error(await readErrorText(r))
         return r.json()
       })
       .then(setConfig)
-      .catch((e) => { setConfig(null); setError(`配置读取失败: ${String(e)}`) })
+      .catch((e) => { setConfig(null); setError(`配置读取失败: ${errorUserMessage(e)}`) })
   }, [])
 
   useEffect(() => {
     if (!flowId) return
     setDatasets([])
     setError('')
-    fetch(`${API_BASE}/flows/${flowId}/supervisor/datasets`, { headers: authHeaders() })
+    apiFetch(`${API_BASE}/flows/${flowId}/supervisor/datasets`)
       .then(async (r) => {
         if (!r.ok) throw new Error(await readErrorText(r))
         return r.json()
       })
       .then((r) => setDatasets(r.datasets || []))
-      .catch((e) => { setDatasets([]); setError(`数据集列表读取失败: ${String(e)}`) })
+      .catch((e) => { setDatasets([]); setError(`数据集列表读取失败: ${errorUserMessage(e)}`) })
   }, [flowId])
 
   const run = useCallback(async () => {
@@ -147,19 +136,19 @@ export default function Supervisor() {
     setError('')
     setResult(null)
     try {
-      const resp = await fetch(`${API_BASE}/flows/${flowId}/supervisor/iterate`, {
+      // S17-03：长跑 iterate 用 600s 分级超时；不自动重试（写操作可能已生效）
+      const resp = await apiFetch(`${API_BASE}/flows/${flowId}/supervisor/iterate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dataset, max_iterations: maxIterations }),
-      })
-      const body = await resp.json().catch(() => ({}))
+      }, { timeoutMs: API_TIMEOUTS.supervisorIterate })
       if (!resp.ok) {
-        setError(errorDetailText(body, resp))
+        setError(await readErrorText(resp))
       } else {
-        setResult(body)
+        setResult(await resp.json())
       }
     } catch (e) {
-      setError(String(e))
+      setError(errorUserMessage(e))
     } finally {
       setRunning(false)
     }
@@ -173,7 +162,7 @@ export default function Supervisor() {
         await api.publishFlow(flowId, version)
         window.alert(`已发布 ${flowId}@${version}`)
       } catch (e) {
-        window.alert(`发布失败: ${String(e)}`)
+        window.alert(`发布失败: ${errorUserMessage(e)}`)
       } finally {
         setApplying(false)
       }

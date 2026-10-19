@@ -13,7 +13,7 @@ import {
   Clock,
 } from 'lucide-react'
 import { api, EventInfo, SubscriptionInfo } from '../services/api'
-import { PageHeader, Card, Button, EmptyState, Table, Th, Tr, Td, TdData, ConfirmDialog, cn } from '../components/ui'
+import { PageHeader, Card, Button, EmptyState, ErrorState, Table, Th, Tr, Td, TdData, ConfirmDialog, cn } from '../components/ui'
 
 type Tab = 'subscriptions' | 'events' | 'publish'
 
@@ -78,7 +78,7 @@ function SubscriptionsPanel({ eventType }: { eventType: string }) {
   const queryClient = useQueryClient()
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['subscriptions', eventType],
     queryFn: () => api.getSubscriptions({ event_type: eventType || undefined }),
     refetchInterval: 10000,
@@ -108,6 +108,8 @@ function SubscriptionsPanel({ eventType }: { eventType: string }) {
 
       {isLoading ? (
         <EmptyState message="加载中…" />
+      ) : isError ? (
+        <ErrorState error={error} title="事件订阅加载失败" onRetry={() => refetch()} />
       ) : subscriptions.length === 0 ? (
         <EmptyState icon={<Radio size={20} />} message="暂无事件订阅" />
       ) : (
@@ -207,7 +209,7 @@ function SubscriptionCard({
 }
 
 function EventsPanel({ eventType }: { eventType: string }) {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['events', eventType],
     queryFn: () => api.getEvents({ event_type: eventType || undefined, limit: 100 }),
     refetchInterval: 10000,
@@ -229,6 +231,8 @@ function EventsPanel({ eventType }: { eventType: string }) {
 
       {isLoading ? (
         <EmptyState message="加载中…" />
+      ) : isError ? (
+        <ErrorState error={error} title="事件记录加载失败" onRetry={() => refetch()} />
       ) : events.length === 0 ? (
         <EmptyState icon={<Zap size={20} />} message="暂无事件记录" />
       ) : (

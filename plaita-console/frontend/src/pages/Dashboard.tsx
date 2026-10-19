@@ -1,29 +1,33 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Server, Play, AlertTriangle, Activity, Inbox, ChevronRight } from 'lucide-react'
 import { api, FlowListResponse, ServiceListResponse, ExecutionListResponse, QueueListResponse } from '../services/api'
 import { ServiceHint } from '../components/ServiceHint'
-import { Page, PageHeader, Card, StatCard, StatusBadge, EmptyState, Table, Th, Tr, Td, TdData } from '../components/ui'
+import { useServiceOnline } from '../hooks/useServiceOnline'
+import { Page, PageHeader, Card, StatCard, StatusBadge, EmptyState, ErrorBanner, Table, Th, Tr, Td, TdData } from '../components/ui'
 
 export default function Dashboard() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  // 本地单机档 /services 与 /queues 恒 503：这是预期形态，不是读面故障
+  const { localMode } = useServiceOnline('flow_worker')
 
   // 获取服务列表
-  const { data: servicesData } = useQuery<ServiceListResponse>({
+  const { data: servicesData, isError: servicesError, error: servicesErrorObj } = useQuery<ServiceListResponse>({
     queryKey: ['services'],
     queryFn: () => api.getServices(),
     refetchInterval: 5000,
   })
 
   // 最近执行（表格展示用）
-  const { data: executionsData, isLoading: executionsLoading } = useQuery<ExecutionListResponse>({
+  const { data: executionsData, isLoading: executionsLoading, isError: executionsError, error: executionsErrorObj } = useQuery<ExecutionListResponse>({
     queryKey: ['executions'],
     queryFn: () => api.getExecutions({ page: 1, size: 10 }),
     refetchInterval: 5000,
   })
 
   // 运行中/错误的准确计数：走各自筛选的 total，而不是在前 100 条里客户端数
-  const { data: runningData } = useQuery<ExecutionListResponse>({
+  const { data: runningData, isError: runningCountError, error: runningCountErrorObj } = useQuery<ExecutionListResponse>({
     queryKey: ['executions', 'running'],
     queryFn: () => api.getExecutions({ page: 1, size: 1, status: 'running' }),
     refetchInterval: 5000,
@@ -42,7 +46,7 @@ export default function Dashboard() {
   })
 
   // 获取队列状态
-  const { data: queuesData } = useQuery<QueueListResponse>({
+  const { data: queuesData, isError: queuesError, error: queuesErrorObj } = useQuery<QueueListResponse>({
     queryKey: ['queues'],
     queryFn: () => api.getQueues(),
     refetchInterval: 5000,
@@ -51,6 +55,16 @@ export default function Dashboard() {
   const services = servicesData?.services || []
   const executions = executionsData?.executions || []
   const queues = queuesData?.queues || []
+  // 读面错误首条：页面必须展示错误，而不是把 500 折成 0/空列表
+  const loadError = servicesError && !localMode
+    ? servicesErrorObj
+    : executionsError
+      ? executionsErrorObj
+      : runningCountError
+        ? runningCountErrorObj
+        : queuesError && !localMode
+          ? queuesErrorObj
+          : null
 
   const onlineServices = services.filter(s => s.status === 'running').length
   const runningExecutions = runningData?.total ?? executions.filter(e => e.status === 'running').length
@@ -60,6 +74,14 @@ export default function Dashboard() {
   return (
     <Page>
       <PageHeader title="仪表盘" subtitle="集群运行概览与最近执行" />
+
+      {loadError && (
+        <ErrorBanner
+          error={loadError}
+          title="仪表盘数据加载失败"
+          onRetry={() => queryClient.invalidateQueries()}
+        />
+      )}
 
       <ServiceHint
         serviceType="flow_worker"
@@ -167,7 +189,7 @@ export default function Dashboard() {
                     </Td>
                   </Tr>
                 ))}
-                {executions.length === 0 && (
+                {executions.length === 0 && !executionsError && (
                   <tr>
                     <td colSpan={5}>
                       <EmptyState
@@ -218,7 +240,7 @@ export default function Dashboard() {
               </div>
             )
           })}
-          {services.length === 0 && (
+          {services.length === 0 && !servicesError && (
             <div className="col-span-full">
               <EmptyState icon={<Server size={20} />} message="暂无在线服务" />
             </div>

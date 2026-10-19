@@ -17,7 +17,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { api } from '../services/api'
-import { EmptyState } from '../components/ui'
+import { EmptyState, ErrorState } from '../components/ui'
 import { GitBranch } from 'lucide-react'
 
 // 服务类型 → 展示名（与集群管理卡片对齐）
@@ -61,7 +61,7 @@ export default function Topology() {
 
 function TopologyInner() {
   const navigate = useNavigate()
-  const { data: topologyData, isLoading } = useQuery({
+  const { data: topologyData, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['topology'],
     queryFn: api.getTopology,
     refetchInterval: 10000,
@@ -230,6 +230,14 @@ function TopologyInner() {
   }
 
   // 拓扑图来自服务注册表（plaita:registry:*），没有实例注册时是「无数据」而不是「空图」
+  if (isError) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <ErrorState error={error} title="拓扑加载失败" onRetry={() => refetch()} />
+      </div>
+    )
+  }
+
   if (!topologyData || topologyData.nodes.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
