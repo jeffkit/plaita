@@ -96,13 +96,17 @@ def setup_status():
 
 
 @router.post("/auth/setup")
-def setup(req: CreateUserRequest):
+def setup(req: CreateUserRequest, request: Request):
     """创建首个管理员（仅 users 表为空时可用），成功直接返回会话。"""
     try:
         info = users_svc.setup_admin(get_flow_store(), req.username, req.password)
     except users_svc.UserError as e:
         raise HTTPException(status_code=409, detail=str(e))
     session = users_svc.login(get_flow_store(), req.username, req.password)
+    _set_audit_identity(request, session)
+    _audit(request, "auth.setup", req.username,
+           {"role": session.get("role")},
+           tenant_id=session.get("active_tenant") or "")
     return session
 
 
@@ -116,6 +120,7 @@ def login(req: LoginRequest, request: Request):
     client_ip = _client_ip(request)
     retry_after = login_guard.retry_after(client_ip, req.username)
     if retry_after:
+        _audit_login_failed(request, req.username, client_ip, "locked")
         raise HTTPException(
             status_code=429,
             detail="登录尝试过于频繁，请稍后再试",
@@ -130,8 +135,16 @@ def login(req: LoginRequest, request: Request):
             _user_fingerprint(req.username),
             f"（失败次数超限，已锁定 {locked_for}s）" if locked_for else "",
         )
+        _audit_login_failed(
+            request, req.username, client_ip,
+            "locked" if locked_for else "bad_credentials",
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     login_guard.reset(client_ip, req.username)
+    _set_audit_identity(request, info)
+    _audit(request, "auth.login", info.get("username", req.username),
+           {"role": info.get("role")},
+           tenant_id=info.get("active_tenant") or "")
     return info
 
 
@@ -165,7 +178,8 @@ def switch_tenant(req: SwitchTenantRequest, request: Request,
         context = users_svc.switch_tenant(get_flow_store(), token, req.tenant_id)
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _audit(request, "auth.switch_tenant", req.tenant_id, {})
+    _audit(request, "auth.switch_tenant", req.tenant_id, {},
+           tenant_id=req.tenant_id)
     return context
 
 
@@ -174,6 +188,9 @@ def logout(request: Request, identity: Dict = Depends(require_auth)):
     auth_header = request.headers.get("Authorization") or ""
     token = auth_header.strip().split(None, 1)[-1]
     users_svc.logout(get_flow_store(), token)
+    _audit(request, "auth.logout", identity.get("actor", ""),
+           {"actor": identity.get("actor", "")},
+           tenant_id=identity.get("tenant_id") or "")
     return {"success": True}
 
 
@@ -208,7 +225,8 @@ def create_user(req: CreateUserRequest, request: Request, identity: Dict = Depen
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _audit(request, "user.create", req.username,
-           {"role": req.role, "platform_admin": req.platform_admin})
+           {"role": req.role, "platform_admin": req.platform_admin},
+           tenant_id="")
     return {"success": True, "username": req.username}
 
 
@@ -222,7 +240,8 @@ def set_role(username: str, req: RoleRequest, request: Request,
         users_svc.set_role(get_flow_store(), username, req.role)
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _audit(request, "user.set_role", username, {"role": req.role})
+    _audit(request, "user.set_role", username, {"role": req.role},
+           tenant_id="")
     return {"success": True, "username": username, "role": req.role}
 
 
@@ -239,7 +258,7 @@ def set_password(username: str, req: PasswordRequest, request: Request,
         users_svc.set_password(get_flow_store(), username, req.password)
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _audit(request, "user.set_password", username, {})
+    _audit(request, "user.set_password", username, {}, tenant_id="")
     return {"success": True, "username": username}
 
 
@@ -257,11 +276,12 @@ def delete_user(username: str, request: Request,
         raise HTTPException(status_code=400, detail=str(e))
     if not deleted:
         raise HTTPException(status_code=404, detail=f"用户不存在: {username}")
-    _audit(request, "user.delete", username, {})
+    _audit(request, "user.delete", username, {}, tenant_id="")
     return {"success": True, "username": username}
 
 
-def _audit(request: Request, action: str, resource_id: str, detail: Dict) -> None:
+def _audit(request: Request, action: str, resource_id: str, detail: Dict,
+           *, tenant_id: Optional[str] = None) -> None:
     """审计钩子（users 模块内置埋点；audit 服务缺失时静默跳过）。"""
     try:
         from ..services import audit as audit_svc
@@ -276,4 +296,38 @@ def _audit(request: Request, action: str, resource_id: str, detail: Dict) -> Non
         resource="user",
         resource_id=resource_id,
         detail=detail,
+        tenant_id=tenant_id,
+    )
+
+
+def _set_audit_identity(request: Request, session: Dict[str, Any]) -> None:
+    """登录/初始化成功后把身份写进 state，供审计（actor/租户/角色）。"""
+    request.state.actor = session.get("username") or ""
+    request.state.tenant_id = session.get("active_tenant") or ""
+    request.state.role = session.get("role")
+    request.state.auth_source = "session"
+
+
+def _audit_login_failed(request: Request, username: str, client_ip: str,
+                        reason: str) -> None:
+    """失败登录审计（A55-S2）：只记 username/ip/reason，绝不记口令。"""
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    request.state.actor = username
+    request.state.tenant_id = ""
+    audit_svc.record_denied(
+        request,
+        action="auth.login_failed",
+        resource="auth",
+        detail={
+            "denied": True,
+            "reason": reason,
+            "username": username,
+            "ip": client_ip,
+            "path": request.url.path,
+        },
+        actor=username,
+        tenant_id="",
     )

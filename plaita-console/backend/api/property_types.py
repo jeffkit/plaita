@@ -49,6 +49,25 @@ def _store() -> flow_store.FlowStore:
     return flow_store.get_flow_store()
 
 
+def _audit(request: Optional[Request], action: str, resource_id: str,
+           detail: Optional[dict] = None, *, tenant_id: Optional[str] = None) -> None:
+    """A55-S1：自定义属性类型写操作审计。"""
+    if request is None:
+        return
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action=action,
+        resource="property_type",
+        resource_id=resource_id,
+        detail=detail,
+        tenant_id=tenant_id,
+    )
+
+
 @router.get("/property-types", response_model=PropertyTypeListResponse)
 def list_property_types(request: Request = None):
     """列出本租户自定义属性类型。"""
@@ -74,6 +93,8 @@ def upsert_property_type(req: UpsertPropertyTypeRequest, request: Request = None
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _audit(request, "property_type.upsert", req.name,
+           {"name": req.name, "base_type": req.base_type}, tenant_id=tenant)
     return PropertyTypeView(**out.model_dump())
 
 
@@ -84,4 +105,6 @@ def delete_property_type(name: str, request: Request = None):
         node_registry_svc.delete_property_type(_store(), name, tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    _audit(request, "property_type.delete", name, {"name": name},
+           tenant_id=tenant or "")
     return {"success": True, "name": name}

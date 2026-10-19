@@ -55,6 +55,25 @@ def _store() -> flow_store.FlowStore:
     return flow_store.get_flow_store()
 
 
+def _audit(request: Optional[Request], action: str, resource_id: str,
+           detail: Optional[dict] = None, *, tenant_id: Optional[str] = None) -> None:
+    """A55-S1：节点描述写操作审计（不记 schema 全文）。"""
+    if request is None:
+        return
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action=action,
+        resource="node",
+        resource_id=resource_id,
+        detail=detail,
+        tenant_id=tenant_id,
+    )
+
+
 @router.get("/nodes", response_model=NodeListResponse)
 def list_nodes(request: Request = None):
     """列出全部可用节点描述（内置 + 当前租户自定义）。"""
@@ -79,6 +98,9 @@ def register_node(req: RegisterNodeRequest, request: Request = None):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _audit(request, "node.register", req.node_type,
+           {"node_type": req.node_type, "category": req.category},
+           tenant_id=tenant)
     return NodeDescriptorView(**out.model_dump())
 
 
@@ -92,6 +114,8 @@ def delete_node(node_type: str, request: Request = None):
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    _audit(request, "node.delete", node_type, {"node_type": node_type},
+           tenant_id=tenant or "")
     return {"success": True, "node_type": node_type}
 
 

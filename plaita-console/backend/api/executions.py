@@ -215,7 +215,8 @@ def get_redis_or_none(request: Request) -> Optional[Redis]:
     return request.app.state.redis
 
 
-def _audit(request: Request, action: str, resource_id: str, detail: Dict | None = None) -> None:
+def _audit(request: Request, action: str, resource_id: str,
+           detail: Dict | None = None, *, tenant_id: Optional[str] = None) -> None:
     try:
         from ..services import audit as audit_svc
     except ImportError:
@@ -223,7 +224,8 @@ def _audit(request: Request, action: str, resource_id: str, detail: Dict | None 
             from services import audit as audit_svc  # type: ignore
         except ImportError:
             return
-    audit_svc.record(request, action=action, resource="execution", resource_id=resource_id, detail=detail)
+    audit_svc.record(request, action=action, resource="execution",
+                     resource_id=resource_id, detail=detail, tenant_id=tenant_id)
 
 
 def get_local_executor(request: Request):
@@ -929,7 +931,8 @@ async def start_execution(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         _audit(http_request, "execution.start", info["execution_id"],
-               {"flow_id": request.flow_id, "version": request.version, "mode": "local"})
+               {"flow_id": request.flow_id, "version": request.version,
+                "mode": "local"}, tenant_id=tenant)
         return {
             "status": "running",
             "flow_id": request.flow_id,
@@ -988,7 +991,8 @@ async def start_execution(
         raise
 
     _audit(http_request, "execution.start", execution_id,
-           {"flow_id": request.flow_id, "version": request.version, "mode": "queue"})
+           {"flow_id": request.flow_id, "version": request.version,
+            "mode": "queue"}, tenant_id=tenant)
     return {
         "status": "queued",
         "flow_id": request.flow_id,
@@ -1010,9 +1014,10 @@ async def cancel_execution(
     """
     # 本地单机模式：标记状态（尽力而为，不中断线程）
     if (local := get_local_executor(request)) is not None:
-        if not local.cancel_local_execution(execution_id, tenant_id=tenant_scope(request)):
+        tenant = tenant_scope(request)
+        if not local.cancel_local_execution(execution_id, tenant_id=tenant):
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-        _audit(request, "execution.cancel", execution_id)
+        _audit(request, "execution.cancel", execution_id, tenant_id=tenant)
         return {
             "success": True,
             "status": "cancelled",
@@ -1077,7 +1082,7 @@ async def cancel_execution(
             ex=CANCEL_FLAG_TTL_SECONDS,
         )
 
-    _audit(request, "execution.cancel", execution_id)
+    _audit(request, "execution.cancel", execution_id, tenant_id=tenant)
     return {
         "success": True,
         "status": "cancelled",
@@ -1110,11 +1115,12 @@ async def delete_execution(
     # 线程汇合最长 LOCAL_DELETE_JOIN_TIMEOUT_SECONDS 秒——放线程池执行，
     # 不阻塞 console 事件循环（与 logs SSE 非阻塞修复同一红线）。
     if (local := get_local_executor(request)) is not None:
+        tenant = tenant_scope(request)
         try:
             deleted = await asyncio.to_thread(
                 local.delete_local_execution,
                 execution_id,
-                tenant_id=tenant_scope(request),
+                tenant_id=tenant,
                 force=force,
             )
         except local.ExecutionActiveError as exc:
@@ -1122,7 +1128,7 @@ async def delete_execution(
         if not deleted:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(request, "execution.delete", execution_id,
-               {"mode": "local", "force": force})
+               {"mode": "local", "force": force}, tenant_id=tenant)
         return {
             "success": True,
             "execution_id": execution_id,
@@ -1171,7 +1177,7 @@ async def delete_execution(
         )
 
     _audit(request, "execution.delete", execution_id,
-           {"force": force, "prior_status": _status})
+           {"force": force, "prior_status": _status}, tenant_id=_tenant)
     return {
         "success": True,
         "execution_id": execution_id,
@@ -1211,7 +1217,8 @@ async def resume_execution(
         if not ok:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(http_request, "execution.resume", execution_id,
-               {"resume_type": request.resume_type, "mode": "local"})
+               {"resume_type": request.resume_type, "mode": "local"},
+               tenant_id=tenant_scope(http_request))
         return {
             "status": "resuming",
             "execution_id": execution_id,
@@ -1265,6 +1272,9 @@ async def resume_execution(
         message["params"] = dict(request.params)
 
     _enqueue(message, redis)
+    _audit(http_request, "execution.resume", execution_id,
+           {"resume_type": request.resume_type, "mode": "queue"},
+           tenant_id=resume_tenant)
 
     return {
         "status": "resuming",
@@ -1328,7 +1338,7 @@ async def create_stream_ticket(
         }
     )
     redis.set(_sse_ticket_key(ticket), payload, ex=SSE_TICKET_TTL_SECONDS)
-    _audit(request, "execution.stream_ticket", execution_id)
+    _audit(request, "execution.stream_ticket", execution_id, tenant_id=_tenant)
     return {"ticket": ticket, "expires_in": SSE_TICKET_TTL_SECONDS}
 
 

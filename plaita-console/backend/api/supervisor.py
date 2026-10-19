@@ -143,9 +143,28 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
         proposer=proposer,
     )
     try:
-        return supervisor.run_loop(flow_id, dataset)
+        result = supervisor.run_loop(flow_id, dataset)
     except Exception as exc:  # noqa: BLE001 —— 引擎/网络错误原样带回
         raise HTTPException(status_code=502, detail=f"supervisor 迭代失败: {exc}") from exc
+    # A55-S1：自迭代审计（flow_id/dataset；不记数据集内容与提案正文）。
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action="supervisor.iterate",
+        resource="supervisor",
+        resource_id=flow_id,
+        detail={
+            "flow_id": flow_id,
+            "dataset": req.dataset,
+            "max_iterations": req.max_iterations,
+            "proposer": req.proposer,
+        },
+        tenant_id=getattr(request.state, "tenant_id", "") or "",
+    )
+    return result
 
 
 @router.get("/supervisor/config")

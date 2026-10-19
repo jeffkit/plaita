@@ -102,6 +102,27 @@ def _inject_context(body: dict) -> dict:
     return body
 
 
+def _audit_copilot(request: Request, brain: str, body: dict, flow_id: str) -> None:
+    """A55-S1：Copilot 运行审计（thread/flow/brain，不记 prompt/messages）。"""
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    thread_id = body.get("threadId") if isinstance(body, dict) else None
+    audit_svc.record(
+        request,
+        action="copilot.run",
+        resource="copilot",
+        resource_id=str(thread_id or flow_id or ""),
+        detail={
+            "thread_id": thread_id,
+            "flow_id": flow_id or None,
+            "brain": brain,
+        },
+        tenant_id=getattr(request.state, "tenant_id", "") or "",
+    )
+
+
 @router.post("/copilot", tags=["admin", "copilot"])
 async def copilot_run(request: Request):
     """AG-UI 协议端点：反代 recursive `POST /agui`，SSE 透传。"""
@@ -153,6 +174,7 @@ async def copilot_run(request: Request):
         adapter = AGUIAdapter(agent=agent, run_input=run_input, accept=accept)
         event_stream = adapter.run_stream()
         sse_stream = adapter.encode_stream(event_stream)
+        _audit_copilot(request, brain, body, flow_id)
         return StreamingResponse(sse_stream, media_type=accept)
 
     if brain == "claude":
@@ -168,6 +190,7 @@ async def copilot_run(request: Request):
             (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
             context_note or "继续。",
         )
+        _audit_copilot(request, brain, body, flow_id)
         return StreamingResponse(
             claude_brain.claude_agui_stream(body, str(goal)),
             media_type="text/event-stream",
@@ -210,6 +233,7 @@ async def copilot_run(request: Request):
             payload = json.dumps({"detail": f"recursive /agui 不可达: {exc}"})
             yield f"data: {payload}\n\n"
 
+    _audit_copilot(request, brain, body, flow_id)
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 

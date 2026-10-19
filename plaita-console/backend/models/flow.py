@@ -286,7 +286,11 @@ class SessionToken(Base):
 
 
 class AuditLog(Base):
-    """审计日志：管理面敏感操作留痕（操作人不记密钥/机密内容）。"""
+    """审计日志：管理面敏感操作留痕（操作人不记密钥/机密内容）。
+
+    A55-S3：认证来源 / key 指纹（sha256 前 16 位，不存明文）/ 请求 ID /
+    角色快照——让「哪把 key、哪次请求、当时的角色」可追溯。
+    """
 
     __tablename__ = "audit_logs"
 
@@ -299,6 +303,11 @@ class AuditLog(Base):
     resource_id = Column(String(128), nullable=False, default="")
     detail_json = Column(Text, nullable=False, default="{}")
     ip = Column(String(64), nullable=False, default="")
+    # server_default：旧调用/脚本以原生 SQL 只写历史列时不触发 NOT NULL。
+    auth_source = Column(String(16), nullable=False, default="", server_default="")
+    key_fingerprint = Column(String(32), nullable=False, default="", server_default="")
+    request_id = Column(String(64), nullable=False, default="", server_default="")
+    role_snapshot = Column(String(16), nullable=False, default="", server_default="")
 
 
 class Deployment(Base):

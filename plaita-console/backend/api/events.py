@@ -10,12 +10,13 @@
 """
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from redis import Redis
 
 try:
@@ -31,6 +32,24 @@ router = APIRouter()
 def _record_tenant(info: Dict[str, Any]) -> str:
     """记录归属租户：受信顶层字段，缺失（升级前旧记录）视为 default。"""
     return info.get("tenant_id") or "default"
+
+
+def _audit(request: Request, action: str, resource_id: str,
+           detail: Optional[Dict[str, Any]] = None, *,
+           tenant_id: Optional[str] = None) -> None:
+    """A55-S1：事件写操作审计（不记 data/payload）。"""
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action=action,
+        resource="event",
+        resource_id=resource_id,
+        detail=detail,
+        tenant_id=tenant_id,
+    )
 
 
 # ============ 数据模型 ============
@@ -65,10 +84,28 @@ class SubscriptionListResponse(BaseModel):
     total: int
 
 
+#: A55-S5：事件类型是 Redis 键的一部分（``plaita:event:type:{event_type}``），
+#: 只能是受限字符集；空白/控制字符会制造怪异键名，``:dlq`` 后缀会被
+#: 队列发现逻辑误认成死信。
+_EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9._:/=-]{1,128}$")
+
+
 class PublishEventRequest(BaseModel):
     event_type: str = Field(..., description="事件类型")
     data: Dict[str, Any] = Field(default_factory=dict, description="事件数据")
     correlation_id: Optional[str] = Field(None, description="关联 ID")
+
+    @field_validator("event_type")
+    @classmethod
+    def _validate_event_type(cls, value: str) -> str:
+        if not _EVENT_TYPE_RE.fullmatch(value or ""):
+            raise ValueError(
+                "event_type 只允许 1-128 位 [A-Za-z0-9._:/=-]，"
+                "不得含空白或控制字符"
+            )
+        if value.lower().endswith(":dlq"):
+            raise ValueError("event_type 不得以 :dlq 结尾（会污染 DLQ/指标视图）")
+        return value
 
 
 # ============ 工具函数 ============
@@ -198,6 +235,15 @@ async def publish_event(
     redis.publish(f"plaita:events:{body.event_type}", json.dumps(event_data))
     redis.publish(f"plaita:event:channel:{body.event_type}", json.dumps(event_data))
 
+    _audit(
+        request, "event.publish", event_id,
+        {
+            "event_type": body.event_type,
+            "correlation_id": body.correlation_id,
+            "event_id": event_id,
+        },
+        tenant_id=tenant,
+    )
     return {
         "success": True,
         "event_id": event_id,
@@ -326,4 +372,13 @@ async def delete_subscription(
     if info.get("flow_id"):
         pipe.srem(f"plaita:subscription:flow:{info['flow_id']}", subscription_id)
     pipe.execute()
+    _audit(
+        request, "event.subscription_delete", subscription_id,
+        {
+            "event_type": event_type,
+            "flow_id": info.get("flow_id"),
+            "correlation_id": info.get("correlation_id"),
+        },
+        tenant_id=_record_tenant(info),
+    )
     return {"success": True, "message": "订阅已删除"}

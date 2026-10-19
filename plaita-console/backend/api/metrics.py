@@ -20,6 +20,13 @@ from redis import Redis
 from plaita.server.metrics import Metric, collect_queue_metrics, render_prometheus
 from plaita.server.task_queue import DEFAULT_CONSUMER_GROUP
 
+try:
+    from .queues import KNOWN_DLQ_KEYS, KNOWN_QUEUES
+    from .redis_scan import scan_keys
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from queues import KNOWN_DLQ_KEYS, KNOWN_QUEUES  # type: ignore
+    from redis_scan import scan_keys  # type: ignore
+
 logger = logging.getLogger("api.metrics")
 
 router = APIRouter()
@@ -34,6 +41,10 @@ KNOWN_STREAM_KEYS = [
 
 REGISTRY_WORKER_PATTERN = "plaita:registry:flow_worker:*"
 
+#: A55-S5：单次抓取最多渲染的 Stream / worker 实例数（防止基数注入）。
+MAX_STREAM_KEYS = 200
+MAX_REGISTRY_INSTANCES = 500
+
 
 def get_redis(request: Request) -> Redis:
     redis = request.app.state.redis
@@ -46,10 +57,6 @@ def get_redis(request: Request) -> Redis:
             ),
         )
     return redis
-
-
-def _decode(value: Any) -> str:
-    return value.decode() if isinstance(value, bytes) else value
 
 
 def _xlen(redis: Redis, key: str) -> int:
@@ -73,17 +80,36 @@ def _pending(redis: Redis, key: str, group: str) -> int:
     return 0
 
 
-def _stream_keys(redis: Redis) -> List[str]:
-    """已知队列 + 实际存在的 DLQ Stream（去重排序）。"""
+def _stream_keys(redis: Redis) -> tuple[List[str], bool]:
+    """已登记队列族 + DLQ 键（去重排序，有界）。
+
+    A55-S5：不再 ``KEYS *:dlq``——事件类型键可以被租户构造成以 ``:dlq``
+    结尾，从而被当成队列指标（基数注入）。只认 ``KNOWN_QUEUES`` 键族，
+    并用有界 SCAN（#202）发现通配前缀下的实际键。
+    """
     names: Set[str] = set(KNOWN_STREAM_KEYS)
-    for key in redis.keys(f"*{DLQ_SUFFIX}"):
-        names.add(_decode(key))
-    return sorted(names)
+    names.update(KNOWN_DLQ_KEYS)
+    truncated = False
+    for pattern in KNOWN_QUEUES:
+        if "*" not in pattern:
+            continue
+        result = scan_keys(redis, pattern, max_keys=MAX_STREAM_KEYS)
+        names.update(result.keys)
+        truncated = truncated or result.truncated
+    keys = sorted(names)
+    if len(keys) > MAX_STREAM_KEYS:
+        keys = keys[:MAX_STREAM_KEYS]
+        truncated = True
+    return keys, truncated
 
 
 def _registry_metrics(redis: Redis) -> List[Metric]:
+    truncated = False
     try:
-        instances = [_decode(k) for k in redis.keys(REGISTRY_WORKER_PATTERN)]
+        result = scan_keys(redis, REGISTRY_WORKER_PATTERN,
+                           max_keys=MAX_REGISTRY_INSTANCES)
+        instances = list(result.keys)
+        truncated = result.truncated
     except Exception as exc:  # noqa: BLE001
         logger.debug("扫描服务注册表失败: %s", exc)
         instances = []
@@ -106,12 +132,33 @@ def _registry_metrics(redis: Redis) -> List[Metric]:
                 "该实例是否在注册表中（1/0）",
             )
         )
+    if truncated:
+        metrics.append(
+            Metric(
+                "metrics_truncated",
+                1,
+                {"kind": "registry"},
+                "gauge",
+                "指标扫描触界（结果不完整，见 WARNING）",
+            )
+        )
     return metrics
 
 
 def collect_cluster_metrics(redis: Redis) -> List[Metric]:
     metrics: List[Metric] = []
-    for key in _stream_keys(redis):
+    stream_keys, truncated = _stream_keys(redis)
+    if truncated:
+        metrics.append(
+            Metric(
+                "metrics_truncated",
+                1,
+                {"kind": "queue"},
+                "gauge",
+                "指标扫描触界（结果不完整，见 WARNING）",
+            )
+        )
+    for key in stream_keys:
         stats: Dict[str, Any] = {
             "stream_key": key,
             "stream_length": _xlen(redis, key),
