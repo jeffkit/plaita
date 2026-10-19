@@ -66,6 +66,9 @@ class EventInfo(BaseModel):
 class EventListResponse(BaseModel):
     events: List[EventInfo]
     total: int
+    # A2R19-04：部分键读取失败时显式标注——空列表不等于「没有事件」。
+    degraded: bool = False
+    skipped: int = 0
 
 
 class SubscriptionInfo(BaseModel):
@@ -82,6 +85,8 @@ class SubscriptionInfo(BaseModel):
 class SubscriptionListResponse(BaseModel):
     subscriptions: List[SubscriptionInfo]
     total: int
+    degraded: bool = False
+    skipped: int = 0
 
 
 #: A55-S5：事件类型是 Redis 键的一部分（``plaita:event:type:{event_type}``），
@@ -150,6 +155,7 @@ async def list_events(
     tenant = tenant_scope(request) if request is not None else None
 
     events: List[EventInfo] = []
+    skipped = 0
     for key in keys:
         if any(seg in key for seg in (":subscription:", ":processing:", ":type:", ":types:", ":channel:")):
             continue
@@ -177,13 +183,26 @@ async def list_events(
                 correlation_id=info.get("correlation_id"),
                 source=info.get("source"),
             ))
-        except Exception:
+        except Exception:  # noqa: BLE001 - 单键读取失败计入 degraded
+            # A2R19-04：读不到的键不得静默混入「空列表」。
+            skipped += 1
             continue
+
+    if skipped:
+        logger.warning(
+            "事件列表读取降级：%d/%d 个键读取失败（返回 %d 条，degraded=true）",
+            skipped, len(keys), len(events),
+        )
 
     events.sort(key=lambda e: e.timestamp or 0, reverse=True)
     events = events[:limit]
 
-    return EventListResponse(events=events, total=len(events))
+    return EventListResponse(
+        events=events,
+        total=len(events),
+        degraded=skipped > 0,
+        skipped=skipped,
+    )
 
 
 @router.post("/events/publish")
@@ -268,6 +287,7 @@ async def list_subscriptions(
     keys = _scan_keys(redis, pattern)
 
     subscriptions: List[SubscriptionInfo] = []
+    skipped = 0
     for key in keys:
         try:
             key_type = redis.type(key)
@@ -276,7 +296,8 @@ async def list_subscriptions(
             if key_type != "string":
                 continue  # 跳过引擎写的 type:/correlation:/flow: 集合键
             data = redis.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 单键读取失败计入 degraded
+            skipped += 1
             continue
         if not data:
             continue
@@ -299,12 +320,24 @@ async def list_subscriptions(
                 created_at=info.get("created_at"),
                 timeout=info.get("timeout"),
             ))
-        except Exception:
+        except Exception:  # noqa: BLE001 - 单条解析失败计入 degraded
+            skipped += 1
             continue
+
+    if skipped:
+        logger.warning(
+            "订阅列表读取降级：%d/%d 个键读取失败（返回 %d 条，degraded=true）",
+            skipped, len(keys), len(subscriptions),
+        )
 
     subscriptions.sort(key=lambda s: s.created_at or 0, reverse=True)
 
-    return SubscriptionListResponse(subscriptions=subscriptions, total=len(subscriptions))
+    return SubscriptionListResponse(
+        subscriptions=subscriptions,
+        total=len(subscriptions),
+        degraded=skipped > 0,
+        skipped=skipped,
+    )
 
 
 _SUBSCRIPTION_KEY_PREFIX = "plaita:subscription:data:"

@@ -732,6 +732,13 @@ DEFAULT_WORKER_DRAIN_TIMEOUT = 30.0
 # 重探一次，盘回线即自动恢复领取（无需重启）。
 DEFAULT_DISK_GUARD_POLL_SECONDS = 15.0
 
+# 启动期服务注册失败的重试退避（A2R19-03）：`register_service()` 内部吞异常、
+# 失败只返回 False；若启动瞬间 Redis 不可达就此放弃，消费循环的读路径会自愈，
+# 注册路径**不会**——worker 恢复后永远缺席注册表（容量/亲和派发/readiness
+# 都看不到它）。失败后按指数退避重试到成功（上限 30s），停止时立即退出。
+REGISTRY_RETRY_INITIAL_SECONDS = 1.0
+REGISTRY_RETRY_MAX_SECONDS = 30.0
+
 # __new__ 构造的骨架 worker（不经 __init__）惰性补建状态写锁登记表时的守卫锁。
 _STATE_WRITE_LOCKS_INIT_GUARD = threading.Lock()
 
@@ -4489,6 +4496,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         )
         self._alerter: Optional[WebhookAlerter] = None
 
+        # 启动期注册重试（A2R19-03）：注册失败时后台线程按有界退避重试；
+        # 成功前 ``_registry_registered`` 保持 False（状态/就绪侧不宣称 ready）。
+        self._registry_registered = False
+        self._registry_retry_thread: Optional[threading.Thread] = None
+        self._registry_retry_stop = threading.Event()
+
         # 租约看门狗（波次② §4.1）：登记活跃 (execution_id → 租约值串/
         # FlowExecution/租户)，每 watchdog_interval_seconds（默认 TTL/3）
         # renew 一次，保证存活 worker 的租约永不空窗——XCLAIM 只会捡到
@@ -6082,9 +6095,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 取消监听（波次③）：轮询取消标志键，命中即中止在途节点
         self._start_cancel_watcher()
 
-        # 注册服务
+        # 注册服务：失败不放弃——后台按有界退避重试，Redis 恢复后自愈（A2R19-03）
         if self._enable_registry:
-            self.register_service()
+            self._ensure_service_registration()
             # 启动控制监听
             self.start_control_listener()
 
@@ -6497,6 +6510,95 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """``__init__`` 期的容量上报入口（注册表尚未 start_heartbeat 时直推一次）。"""
         self._refresh_registry_capacity()
 
+    # ------------------------------------------- 启动期注册重试（A2R19-03）
+
+    def _ensure_service_registration(self) -> bool:
+        """启动期注册一次；失败则启动后台有界退避重试。
+
+        ``register_service()`` 内部吞掉 Redis 异常、失败只返回 False。启动
+        瞬间 Redis 不可达时，消费循环的读路径会自愈（``read()`` 对瞬时故障
+        退避重试），注册路径不会——进程会**永久**缺席注册表。失败后由重试
+        线程补注册；``register_service()`` 成功时会顺带 ``start_heartbeat``。
+        """
+        if not getattr(self, "_enable_registry", False):
+            return True
+        if self.register_service():
+            self._registry_registered = True
+            return True
+        self._start_registry_retry()
+        return False
+
+    def _start_registry_retry(self) -> None:
+        """启动注册重试线程（幂等；已存活则复用）。"""
+        stop_event = getattr(self, "_registry_retry_stop", None)
+        if stop_event is None:
+            stop_event = threading.Event()
+            self._registry_retry_stop = stop_event
+        thread = getattr(self, "_registry_retry_thread", None)
+        if thread is not None and thread.is_alive():
+            return
+        stop_event.clear()
+        self._registry_retry_thread = threading.Thread(
+            target=self._registry_retry_loop,
+            name="plaita-registry-retry",
+            daemon=True,
+        )
+        self._registry_retry_thread.start()
+        logger.warning(
+            "worker 启动期服务注册失败：已进入后台重试（退避 %.0fs→%.0fs，"
+            "上限封顶）；Redis 恢复后自动注册并启动心跳",
+            REGISTRY_RETRY_INITIAL_SECONDS,
+            REGISTRY_RETRY_MAX_SECONDS,
+        )
+
+    def _registry_retry_loop(self) -> None:
+        """指数退避重试注册，直到成功或 worker 停止。
+
+        失败日志由 ``ServiceRegistry.register()`` 逐次打 ERROR；本循环只按
+        退避节奏重试（封顶 30s，Redis 全断时不刷屏），成功后回到心跳线程。
+        """
+        stop_event = self._registry_retry_stop
+        delay = REGISTRY_RETRY_INITIAL_SECONDS
+        attempt = 0
+        while not stop_event.wait(delay):
+            if not getattr(self, "_running", False):
+                return
+            attempt += 1
+            try:
+                ok = self.register_service()
+            except Exception as exc:  # noqa: BLE001 — 重试线程不能因单次异常退出
+                logger.warning(
+                    "worker 注册重试第 %d 次异常: %s", attempt, _scrub_exception_text(exc)
+                )
+                ok = False
+            if ok:
+                self._registry_registered = True
+                logger.warning(
+                    "worker 服务注册已恢复（第 %d 次重试）：注册键已写入、心跳线程已启动",
+                    attempt,
+                )
+                return
+            delay = min(delay * 2, REGISTRY_RETRY_MAX_SECONDS)
+
+    def _stop_registry_retry(self) -> None:
+        """停止注册重试线程（stop() 调用；先于 unregister，避免退出后又被注册）。"""
+        stop_event = getattr(self, "_registry_retry_stop", None)
+        if stop_event is not None:
+            stop_event.set()
+        thread = getattr(self, "_registry_retry_thread", None)
+        if (
+            thread is not None
+            and thread is not threading.current_thread()
+            and thread.is_alive()
+        ):
+            thread.join(timeout=2.0)
+        self._registry_retry_thread = None
+
+    @property
+    def registry_registered(self) -> bool:
+        """本进程当前是否已在注册表中（重试成功前为 False）。"""
+        return bool(getattr(self, "_registry_registered", False))
+
     @property
     def _drain_event(self) -> threading.Event:
         """draining 标志（惰性创建）。
@@ -6589,6 +6691,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 self.update_registry_info(status="draining")
         logger.info("正在停止流程工作器...")
         self._running = False
+
+        # 停止注册重试（A2R19-03）：先于 unregister，避免退出后又被重试线程写回
+        self._stop_registry_retry()
 
         # 停止租约看门狗（波次②）
         self._stop_lease_watchdog()
