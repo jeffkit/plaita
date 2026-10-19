@@ -771,8 +771,18 @@ class TestRequeueBackoff:
             bodies, requeued = _consume_until_settled(worker, real_queue)
 
         assert requeued == [True, True, True, True]
-        # 退避梯度：min(cap, base * 2**(attempt-1))，attempt=1..4 → 1,2,4,8
-        assert sleeps == [1.0, 2.0, 4.0, 8.0]
+        # 退避梯度：min(cap, base * 2**(attempt-1))，attempt=1..4 → 1,2,4,8。
+        # S18-01/A46-06 起退避按 0.2s 分片（可被 D2 打断），故按片数聚合：
+        # 1s→5 片、2s→10 片、4s→20 片、8s→40 片。
+        assert len(sleeps) == 75, "退避必须分片（整块 sleep 打不断 drain 超时）"
+        per_attempt = [
+            sum(sleeps[0:5]),
+            sum(sleeps[5:15]),
+            sum(sleeps[15:35]),
+            sum(sleeps[35:75]),
+        ]
+        assert per_attempt == pytest.approx([1.0, 2.0, 4.0, 8.0])
+        assert all(chunk == pytest.approx(0.2) for chunk in sleeps)
         # 预算语义不变：第 5 次失败终态化 error
         state = storage.load_execution_state("exec-1")
         assert state.status == "error"

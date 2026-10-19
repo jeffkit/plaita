@@ -85,7 +85,7 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | `PLAITA_CODE_BACKEND` | `subprocess` | worker 注册 `code` 节点时生效的沙箱后端；配置后端不可用时 **fail-closed**（见下） |
 | `PLAITA_SANDBOX_ALLOWED_BACKENDS` | `docker` ∪ 生效后端 | `code` 节点后端白名单（见下）；探测失败不会自行扩集 |
 | `PLAITA_ALLOW_SUBPROCESS_FALLBACK` | unset（关闭） | `=1` 且白名单含 `subprocess` 时，才允许配置后端不可用后降级 `subprocess`（A56-01 显式逃生开关） |
-| `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
+| `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的 **advisory 上界**（秒）：超时后停止等待并尽力 cancel 在途执行，但**不承诺节点在 N 秒内中止**；若进程在步返回前退出，消息留 pending 待 XCLAIM 接管（步在退出前完成则允许 ack） |
 | `PLAITA_WORKER_MIN_FREE_DISK_GIB` | unset（= 关闭） | claim 前的本机盘守线（GiB，#49）：低于它就不领任务、空转重探、盘回线自动恢复。应与 flow 内 preflight 节点的阈值对齐（见下） |
 | `PLAITA_WORKER_DISK_GUARD_PATH` | `.`（worker 工作目录） | 盘预检路径（`os.statvfs` 的探测点）；须落在「跑流程会写满」的那个卷上 |
 | `PLAITA_CONSOLE_RECONCILE_ORPHANS` | `suspend` | 本地模式启动对账口径：`suspend` / `fail` / `off` |
@@ -301,20 +301,22 @@ aiohttp 的 10，见 [MIGRATION](https://github.com/jeffkit/plaita/blob/main/MIG
 信号（SIGTERM/SIGINT）与控制通道 stop 命令都只**请求** drain，绝不立即退出：
 
 1. 注册表状态置 `draining`（`GET /api/services` 可见 `flow_worker` 的 status），编排/就绪探针据此摘流量；该状态**立即落盘**，不再等 10s 心跳（S18-02A）；
-2. 消费循环在**任务边界**退出：在途任务完整跑完并 ack；
-3. 等待有界：超过 `PLAITA_WORKER_DRAIN_TIMEOUT`（默认 30s）仍有在途任务 → 放弃当前步并退出。**该消息不 ack**，留在 pending，由其他 worker 经 XCLAIM 从**步界检查点**续跑（那一步会重放）；
+2. 消费循环在**任务边界**退出：在途任务完整跑完并 ack；drain 前已发出、drain 后才返回的 `read`/reclaim 结果**不 dispatch、不 ack**（post-read gate），消息留 pending；
+3. 等待有界（advisory）：超过 `PLAITA_WORKER_DRAIN_TIMEOUT`（默认 30s）仍有在途任务 → 停止等待、**尽力** `execution.cancel()` 并退出；**不承诺节点在 N 秒内中止**。若步在进程退出前完成，仍允许 ack；若进程先退出，消息留 pending，由其他 worker 经 XCLAIM 从**步界检查点**续跑（那一步会重放）。可重试失败的退避 sleep 在超时后立即中断，不再 enqueue/ack；
 4. 退出前把注册表状态置 `stopping`（同样立即落盘）再注销；注销后 closed 闸封住心跳/容量/迟到计数写入，注册键不会复活。
+
+> 语义边界：`PLAITA_WORKER_DRAIN_TIMEOUT` 是「停止领取/停止等待」的上界，不是「节点中止」的上界。硬中断（把 stop token 传进节点/沙箱）是 B18-01，**尚未实现**；在它落地前不要对外承诺「超时放弃当前步」。
 
 K8s/systemd 侧对齐（否则 drain 会被 SIGKILL 提前打断）：
 
 ```yaml
-terminationGracePeriodSeconds: 90   # > PLAITA_WORKER_DRAIN_TIMEOUT，留出收尾余量
+terminationGracePeriodSeconds: 90   # > PLAITA_WORKER_DRAIN_TIMEOUT + 收尾开销（注销/日志/连接关闭）
 # 就绪探针：注册表 status != draining（或进程内 status 命令）
 # preStop：调控制通道 stop（graceful=true），或直接 SIGTERM（handler 已是 drain 语义）
 # 部署策略：maxUnavailable: 0（worker 池禁止并发减容）
 ```
 
-> 单步可能长达数十分钟（如 HITL gate 3300s）。**不要把 grace 调到超过最长步**——正确做法是接受「drain 超时 → 该步重放」，并让业务节点幂等（at-least-once 契约）。
+> 单步可能长达数十分钟（如 HITL gate 3300s）。**不要把 grace 调到超过最长步**——drain 不保证中止节点：单步超过 grace 时仍会被 SIGKILL，随后消息重放。正确做法是接受「drain 超时 → 该步重放」，并让业务节点幂等（at-least-once 契约）。
 
 ### flow_hash 兼容门（引擎升级最容易误伤的一处）
 
@@ -446,11 +448,7 @@ redis-cli KEYS 'plaita:execution:lease:*'
 | 端点 | 覆盖 | 鉴权 |
 |------|------|------|
 | worker `http://<host>:<PLAITA_METRICS_PORT>/metrics` | 本进程队列 `stream_length`/`pending`/`dlq_length` + 全部进程内计数器 + worker 存活/活跃任务数/draining/心跳时间戳 | 无（运维网内网面，勿暴露公网） |
-<<<<<<< HEAD
-| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数 | 任意**已认证会话（viewer+）**或 `X-Admin-API-Key`；全局观测面是否收窄到平台身份待 owner 裁决（见 `docs/proofs/s6-global-observability-policy.md`） |
-=======
-| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数；`plaita_metrics_scrape_degraded` / `plaita_metrics_failed_commands_total{command=…}` 标注本次抓取的部分读失败 | 管理面 `X-Admin-API-Key` |
->>>>>>> origin/wt-b3
+| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数；`plaita_metrics_scrape_degraded` / `plaita_metrics_failed_commands_total{command=…}` 标注本次抓取的部分读失败 | 任意**已认证会话（viewer+）**或 `X-Admin-API-Key`；全局观测面是否收窄到平台身份待 owner 裁决（见 `docs/proofs/s6-global-observability-policy.md`） |
 
 `plaita_workers_registered_total` 归零 = worker 全灭。**但该 0 值可能是「读不到」**：
 console 抓取是逐命令 best-effort 的，单个 `XLEN`/`XPENDING`/注册表扫描失败时

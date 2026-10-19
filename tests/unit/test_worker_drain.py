@@ -70,14 +70,20 @@ class TestDraining:
         worker._force_stop_after_drain(timeout=0.01)
         assert worker._running is False
 
-    def test_drain_timeout_without_active_task_keeps_running_until_loop_exits(self):
+    def test_drain_timeout_without_active_task_also_sets_running_false(self):
+        """S18-01/A45-02：active=0 时定时器也必须置 ``_running=False``。
+
+        旧实现的 `active <= 0: return` 让「定时器先到、任务恰好收尾」的窗口里
+        `_running` 保持 True——已发出的 read 在 drain 后仍可返回并 dispatch
+        （探针 `[new-task-after-drain] running_after_timeout=True`）。
+        """
         worker = _worker()
         worker._running = True
         worker.request_drain("test")
         worker._active_task_count = 0
         worker._force_stop_after_drain(timeout=0.01)
-        # 没有在途任务：无需强退，消费线程会自己退出
-        assert worker._running is True
+        assert worker._running is False
+        assert worker._force_stop_event.is_set()
 
     def test_wait_for_idle_times_out_when_task_stuck(self):
         worker = _worker()

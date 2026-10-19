@@ -189,6 +189,10 @@ def _dispatch_target_disabled() -> bool:
 # 的 60s 同量级），cap 取保守下限 30s。
 NODE_RETRY_BACKOFF_BASE_SECONDS = 1.0
 NODE_RETRY_BACKOFF_CAP_SECONDS = 30.0
+# S18-01/A46-06：退避分片长度（秒）。整体 `time.sleep(delay)` 会挡住 drain
+# 超时后的退出（实测 drain timeout 0.2s，消费线程 ~2s 才退出）；切成小片后
+# 每片检查强停 Event，退出延迟上限 ≈ 一个分片。
+NODE_RETRY_BACKOFF_SLICE_SECONDS = 0.2
 
 
 def _node_retry_backoff_seconds(attempt: int) -> float:
@@ -5665,8 +5669,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             return None
         return target, status
 
-    def _handover_non_affine(self, task: Any, queue: Any, exc: Exception) -> None:
-        """把不亲和的 task 交接给其他 worker：ack 原条 + 重入队同体新副本。
+    def _handover_non_affine(self, task: Any, queue: Any, exc: Exception) -> bool:
+        """把不亲和的 task 交接给其他 worker：**先入队**同体新副本，成功后 ack 原条。
+
+        S18-03（A45-05）：顺序必须是 enqueue→ack——旧实现先 ack 再入队，一旦
+        ``enqueue`` 失败，原条已移出 PEL 且从 Stream 删除，执行唯一载体凭空
+        消失（日志却仍声称「绝不丢消息」）。enqueue 失败 ⇒ 不 ack，原条留
+        pending 由对端 reclaim；ack 失败 ⇒ 新副本已在队列、原条仍在 pending，
+        重复由租约/终态短路吸收。
+
+        返回 True = 原条已 ack（交接完成）；False = 原条留 pending（由 reclaim
+        接管，或已达上限终态化）。``_consume_loop`` 用返回值回写 ``acked``，
+        避免日志把「已交接」与「留 pending」混为一谈。
 
         重入队而非留 pending 的原因见 TaskNotForThisWorker docstring（留
         pending 会被对端反复 XCLAIM 虚增 delivery → 误死信）。
@@ -5694,7 +5708,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             # 拿不到消息体：退化为留 pending（对端 reclaim）
             logger.info("任务 %s 不亲和但无体可交接，留 pending: %s",
                         getattr(task, "message_id", "?"), _scrub_url_text(exc))
-            return
+            return False
         # A46-02：目标机器已不可用（键消失 / 不再是 running）时剥掉
         # target_instance_id，按广播重投——否则集群里每台非目标机都会交接一次，
         # 4 次后 AffinityHandoverExhausted 把可跑任务终态化。
@@ -5726,7 +5740,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "退化为留 pending（绝不丢消息；请查 redis 瞬断/键污染）: %s",
                     getattr(task, "message_id", "?"), _scrub_url_text(exc),
                 )
-                return
+                return False
             if count > self.AFFINITY_HANDOVER_MAX:
                 # 达上限：**不 ack、不重投**——ack 会移出 PEL 让消息凭空消失，
                 # 重投会让自旋继续。留 pending + 终态化 error：终态化的作用是
@@ -5747,9 +5761,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         getattr(task, "message_id", "?"), count,
                         self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
                     )
-                    return
+                    return True
                 if verdict:
-                    return
+                    return False
                 # 无 execution_id 可终态化（老消息/畸形消息）：退化为留 pending，
                 # 绝不丢消息（对端 reclaim 或死信守卫兜底）。
                 logger.error(
@@ -5758,35 +5772,59 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     getattr(task, "message_id", "?"), count,
                     self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
                 )
-                return
+                return False
+            # S18-03（A45-05）：**先入队、后 ack**。旧序 ack→enqueue 在入队
+            # 失败时让原条既出 PEL 又从 Stream 删除 = 唯一载体凭空消失。
+            # A46-02 的目标不可用回退（copy_body 已剥 target）走同一安全序。
             # A44-02：交接副本继承源信封版本（否则新 build 写的副本会被
             # 同组旧 worker 按超版本死信，交接反而丢失恢复载体）。
-            envelope_kwargs = _requeue_envelope_kwargs(task)
-            if stripped_target:
-                # A46-02 回退路径按 enqueue→ack（S18-03 同款安全序）：
-                # 新副本先落地、原条最后 ack；enqueue 失败时原条仍在 PEL，
-                # 绝不丢消息。普通定向/亲和交接的 ack→enqueue 顺序仍由
-                # S18-03 统一，本批不扩散。
-                enqueue_task(
-                    self.redis_client, self.queue_name, copy_body,
-                    **envelope_kwargs,
+            mid = getattr(task, "message_id", "?")
+            try:
+                queue.enqueue(copy_body, **_requeue_envelope_kwargs(task))
+            except Exception as e:  # noqa: BLE001 — 入队失败：不 ack，留 pending
+                logger.warning(
+                    "任务 %s 交接重投失败（原条留 pending，由对端 reclaim）: %s",
+                    mid, _scrub_url_text(e),
                 )
-                queue.ack(getattr(task, "message_id"))
-            else:
-                # 先 ack 原条（移出 PEL、防对端再抢），再重入队新副本
-                queue.ack(getattr(task, "message_id"))
-                enqueue_task(
-                    self.redis_client, self.queue_name, copy_body,
-                    **envelope_kwargs,
+                return False
+            try:
+                queue.ack(mid)
+            except Exception as e:  # noqa: BLE001 — 新副本已入队，原条仍 pending
+                logger.warning(
+                    "任务 %s 交接副本已入队但 ack 原条失败（重复投递，"
+                    "由租约/终态短路去重）: %s",
+                    mid, _scrub_url_text(e),
                 )
+                return False
             logger.info(
-                "任务 %s 与本机不亲和，已交接（ack+重入队）给其他 worker"
+                "任务 %s 与本机不亲和，已交接（enqueue→ack）给其他 worker"
                 "（第 %s/%s 次）: %s",
-                getattr(task, "message_id", "?"), count,
-                self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
+                mid, count, self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
             )
+            return True
         except Exception as e:  # noqa: BLE001 — 交接失败退化为留 pending（绝不丢消息）
             logger.warning("不亲和任务交接失败（退化为留 pending）: %s: %s", _scrub_url_text(e), _scrub_url_text(exc))
+            return False
+
+    def _interruptible_backoff(self, seconds: float) -> bool:
+        """分片退避；返回 True = 被 D2（drain 超时/强停）打断。
+
+        只在**强停**（``_force_stop_event``）时打断：仅请求 draining（D1）
+        仍让在途步完整跑完，包括它的退避重投（S18-01 I5）。分片数按固定
+        片长预先算出（不依赖真实时钟），测试注入的 ``_sleep`` 假时钟不会让
+        循环空转。
+        """
+        if seconds <= 0:
+            return False
+        slices = max(1, int(seconds / NODE_RETRY_BACKOFF_SLICE_SECONDS))
+        if slices * NODE_RETRY_BACKOFF_SLICE_SECONDS < seconds:
+            slices += 1
+        chunk = seconds / slices
+        for _ in range(slices):
+            if self._force_stop_event.is_set():
+                return True
+            _sleep(chunk)
+        return self._force_stop_event.is_set()
 
     def _requeue_retryable_failure(
         self, task: Any, queue: Any,
@@ -5833,7 +5871,15 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 "任务 %s 节点可重试失败，退避 %.0fs 后显式重投（attempt=%s）",
                 mid, delay, attempt,
             )
-            _sleep(delay)
+            # A46-06/S18-01：分片退避，D2（drain 超时强停）时立即放弃——
+            # 不 enqueue、不 ack，原条留 pending（I5）。
+            if self._interruptible_backoff(delay):
+                logger.warning(
+                    "retry-backoff-aborted-by-drain：任务 %s 退避期间进入强停，"
+                    "不重投、不 ack，消息留 pending（attempt=%s）",
+                    mid, attempt,
+                )
+                return False
         requeue_body = _requeue_body_for_retry(
             body, getattr(self, "execution_storage", None)
         )
@@ -6177,12 +6223,16 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         )
         return True
 
-    def run(self):
+    def run(self, wait_for_inflight: bool = False):
         """
         从 Redis Stream consumer group 拉取 ``start`` / ``resume`` 任务。
 
         成功处理后 ``XACK``；崩溃或未 ack 的消息留在 pending，超时后可被
         其他 consumer ``XCLAIM`` 回收（at-least-once，业务侧应幂等）。
+
+        ``wait_for_inflight=True``（S18-01）：退出时 ``stop(wait=True)``，
+        在看门狗/注销之前有界等待在途步收尾（库模式推荐）；CLI 默认 False，
+        以进程退出为硬中止边界。
         """
         # plaita#239 phase 2（owner 2026-10-18 裁决）：单租户部署迁移——
         # 服务入口**显式**声明 default 租户；写路径对隐式 default 已
@@ -6245,7 +6295,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         if not self._running:
                             break
         finally:
-            self.stop()
+            self.stop(wait=wait_for_inflight)
 
     def _sweep_residue_if_due(self, queue: RedisStreamTaskQueue) -> None:
         """按间隔兜底回收「已 ack 未 XDEL」的队列残留条目（#43）。
@@ -6352,6 +6402,19 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 task = queue.read(block_ms=min(self.read_block_ms, 1_000))
                 if not task:
                     continue
+                # S18-01（A45-02）post-read gate：read 在 drain 前发出、drain 后
+                # 才返回时，任务已被本 consumer 从 Stream 领走（PEL 有记录）。
+                # 此时不得 dispatch/ack/bump——否则停机窗口里又启动一个新步，
+                # 且 ack 后进程退出会让该步既没跑完也无 pending 可回收。
+                # 消息留在 PEL，由其他 worker 在 claim_min_idle_ms 后 XCLAIM。
+                # 该 gate 同时覆盖 read 内部 `_reclaim_one` 返回的孤儿。
+                if self._drain_event.is_set():
+                    logger.warning(
+                        "drain-read-gate：drain 后收到任务 %s（read 已发出），"
+                        "不 dispatch、不 ack，消息留 pending 待其他 worker 回收",
+                        task.message_id,
+                    )
+                    break
 
                 self._bump_active(+1)
                 acked = False
@@ -6367,7 +6430,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     acked = True
                 except TaskNotForThisWorker as exc:
                     # 任务不亲和本机（repo/run_dir 指向别的机器的路径）：**交接**
-                    # 给其他 worker——ack 原消息 + 重入队新副本（delivery 归 1）。
+                    # 给其他 worker——先入队新副本（delivery 归 1），成功后 ack 原条。
                     # 不能只「留 pending」：对端会按 claim_min_idle_ms 反复 XCLAIM，
                     # 每次让 deliveries +1，两 worker 下 5 轮即触顶 → 误死信
                     # （2026-10-06 双机实测）。交接无损耗，且新副本仍会回到
@@ -6377,7 +6440,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # 交接永无终止条件（2026-10-11 无限交接风暴，见
                     # _handover_non_affine 与 _terminalize_handover_exhausted）。
                     queue.note_lease_conflict()  # 复用「让给别人」计数口径
-                    self._handover_non_affine(task, queue, exc)
+                    # S18-03：交接现在返回「原条是否已 ack」——enqueue 失败时
+                    # 原条留 pending，acked 必须保持 False 让 finally 的
+                    # 「留在 pending」日志与事实一致。
+                    acked = self._handover_non_affine(task, queue, exc)
                 except TenantQuotaDeferred as exc:
                     # 每租户 start 配额已满（plaita#28）：**延迟**，不是失败。
                     # 入队同体新副本到 stream 尾部（让位给更早入队的其他租户
@@ -6762,16 +6828,32 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         return event
 
     @property
+    def _force_stop_event(self) -> threading.Event:
+        """D2 强停标记（惰性创建，``__new__`` 骨架 worker 同样安全）。
+
+        与 ``_drain_event``（D1：只停止领取）区分：退避重投只在 D2 被打断；
+        仅请求 drain 时在途步必须完整跑完（S18-01 I5）。
+        """
+        event = self.__dict__.get("_force_stopping")
+        if event is None:
+            event = threading.Event()
+            self.__dict__["_force_stopping"] = event
+        return event
+
+    @property
     def draining(self) -> bool:
         return self._drain_event.is_set()
 
     def request_drain(self, reason: str = "manual") -> None:
-        """进入 draining：不再领新任务、注册表标 draining，并启动**有界**等待。
+        """进入 draining（D1）：不再领新任务、注册表标 draining，并启动有界等待。
 
         有界是关键：单个节点步可能跑几十分钟（如 HITL gate），等它做完等于把
-        停机窗口拉到不可接受。超时后 ``_force_stop_after_drain`` 放弃当前步并
-        退出——消息不 ack，留在 pending 由其他 worker 经 XCLAIM 从**步界检查点**
-        续跑。代价是那一步会重放，业务节点须幂等（at-least-once 契约）。
+        停机窗口拉到不可接受。``PLAITA_WORKER_DRAIN_TIMEOUT`` 是**停止领取/
+        停止等待**的上界（advisory），不是「节点中止」的上界：超时后
+        ``_force_stop_after_drain`` 尽力 cancel 在途执行并让 run() 收尾，但不
+        承诺节点在 N 秒内停下。若步在进程退出前完成，仍允许 ack；若进程先
+        退出，消息留 pending 由其他 worker 经 XCLAIM 从**步界检查点**续跑
+        （那一步会重放，业务节点须幂等）。硬中断是 B18-01，未实现。
         """
         with self._active_count_lock:
             if self._drain_event.is_set():
@@ -6806,19 +6888,75 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         timer.start()
 
     def _force_stop_after_drain(self, timeout: float = 0.0) -> None:
-        """drain 超时兜底：放弃当前步并让 run() 收尾退出（消息不 ack）。"""
+        """drain 超时兜底（D2）：停止等待、尽力取消在途执行，让 run() 收尾。
+
+        两个必须点（S18-01/A45-01+A45-02）：
+        - **无论 active 是否为 0 都置 ``_running=False``**。旧实现的
+          ``active <= 0: return`` 让「定时器先到、任务恰好收尾」的窗口里
+          ``_running`` 保持 True，消费线程继续 read/dispatch（探针
+          ``[new-task-after-drain]``）。
+        - 对在途执行做 best-effort cancel（复用取消监听的登记表）；cancel 不
+          保证节点立刻中止（B18-01 未落地），步在进程退出前完成仍可能 ack。
+        """
         if not self._drain_event.is_set():
             return
+        # D2 标记先置位：可中断退避（A46-06）据此当场放弃 enqueue/ack。
+        self._force_stop_event.set()
         active = self._active_task_count
+        self._running = False
         if active <= 0:
+            logger.info(
+                "drain 超时（%.0fs）：无在途任务，停止领取并退出", timeout
+            )
             return
         logger.warning(
-            "drain 超时（%.0fs）仍有 %d 个任务在跑：放弃当前步并退出；"
-            "这些消息不 ack，将由其他 worker XCLAIM 后从步界检查点续跑（该步会重放）",
+            "drain 超时（%.0fs）仍有 %d 个任务在跑：停止等待并尽力取消在途执行；"
+            "不承诺节点在 N 秒内中止（硬中断见 B18-01）。若进程在步返回前退出，"
+            "消息留 pending，由其他 worker XCLAIM 后从步界检查点续跑（该步会重放）",
             timeout,
             active,
         )
-        self._running = False
+        self._cancel_inflight_after_drain()
+
+    def _cancel_inflight_after_drain(self) -> int:
+        """best-effort 取消在途执行（D2）；返回实际调用 cancel 的数量。
+
+        只读快照登记表后在锁外调用（与取消监听同款），避免 cancel 回调里
+        再取 ``_cancel_watch_lock`` 造成自锁。租户上下文按登记项恢复，确保
+        cancel 内的存储/标志键写入落在正确 namespace。
+        """
+        lock = getattr(self, "_cancel_watch_lock", None)
+        if lock is None:
+            return 0
+        with lock:
+            entries = list(getattr(self, "_cancel_watch", {}).items())
+        cancelled = 0
+        for execution_id, entry in entries:
+            try:
+                execution, tenant_id = entry
+            except (TypeError, ValueError):
+                continue
+            cancel = getattr(execution, "cancel", None)
+            if not callable(cancel):
+                continue
+            token = set_current_tenant(tenant_id)
+            try:
+                cancel()
+            except Exception as exc:  # noqa: BLE001 — 取消失败仍有步界兜底
+                logger.warning(
+                    "drain-force-stop-cancel 失败 execution_id=%s: %s",
+                    execution_id, _scrub_exception_text(exc),
+                )
+                continue
+            finally:
+                reset_current_tenant(token)
+            cancelled += 1
+            logger.warning(
+                "drain-force-stop-cancel execution_id=%s（best-effort，"
+                "不保证节点立即中止）",
+                execution_id,
+            )
+        return cancelled
 
     def wait_for_idle(self, timeout: Optional[float] = None) -> bool:
         """等所有在途任务结束；超时返回 False（调用方决定是否强退）。"""
@@ -6829,12 +6967,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             time.sleep(0.05)
         return True
 
-    def stop(self):
+    def stop(self, wait: bool = False):
         """停止流程工作器。
 
         顺序对无损升级很重要：先 draining（摘流量：注册表标 draining + 停止
         领新任务）→ 等 in-flight 收尾（有界）→ 再注销服务。反过来的话，注销
         之后仍可能领到任务，编排会看到「已下线但仍消费」的矛盾状态。
+
+        ``wait=True``（S18-01/B45-06）：在停看门狗/注销之前**有界**等待在途
+        任务收尾（预算沿用 ``PLAITA_WORKER_DRAIN_TIMEOUT`` 的剩余量），库模式
+        调用方应传 True；CLI 默认 False——进程退出即硬中止，daemon 消费线程
+        可能仍在跑，未完成步的消息留 pending 由 XCLAIM 重放。无论哪种模式，
+        本方法都会置 D2 标记，可中断退避据此不再 enqueue/ack。
         """
         if self._drain_timer is not None:
             self._drain_timer.cancel()
@@ -6852,6 +6996,19 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 self._flush_registry_status("draining")
         logger.info("正在停止流程工作器...")
         self._running = False
+        # D2/D3：退避重投不再 enqueue/ack；未完成消息留 pending。
+        self._force_stop_event.set()
+        if wait:
+            budget = _drain_timeout_from_env()
+            started = getattr(self, "_drain_started_at", None)
+            if started is not None:
+                budget = max(0.0, budget - (time.time() - started))
+            if not self.wait_for_idle(budget):
+                logger.warning(
+                    "stop(wait=True) 在 %.0fs 内未等齐在途任务（active=%d）："
+                    "继续收尾退出；未完成步的消息留 pending，由 XCLAIM 重放",
+                    budget, self._active_task_count,
+                )
 
         # 停止注册重试（A2R19-03）：先于 unregister，避免退出后又被重试线程写回
         self._stop_registry_retry()

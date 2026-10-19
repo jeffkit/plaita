@@ -386,9 +386,10 @@ class TestRequeueInheritance:
         })
         worker._handover_non_affine(task, queue, RuntimeError("no affinity"))
 
-        entries = redis.xrange(STREAM)
-        assert len(entries) == 1
-        assert _envelope_version(entries[0][1]) == "1"
+        # S18-03 起交接经 queue.enqueue（enqueue→ack）；信封版本仍继承源消息。
+        assert len(queue.enqueued) == 1
+        _body, kwargs = queue.enqueued[0]
+        assert kwargs == {"schema_version": 1}
         assert queue.acked == ["1-0"]
 
     def test_start_dedup_requeue(self):

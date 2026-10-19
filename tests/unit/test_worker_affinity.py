@@ -168,21 +168,36 @@ class TestAffinityHandover:
         return w
 
     class _FakeQueue:
-        def __init__(self):
+        def __init__(self, redis_client=None, stream="q:test"):
+            self.redis_client = redis_client
+            self.stream = stream
             self.acked = []
             self.conflicts = 0
+            self.calls = []
+        def enqueue(self, body, **kwargs):
+            # S18-03：交接必须经 queue.enqueue（enqueue→ack），不再直写
+            # enqueue_task；记录顺序供断言。
+            from plaita.server.task_queue import enqueue_task
+            self.calls.append("enqueue")
+            if self.redis_client is None:
+                return "fake-id"
+            return enqueue_task(self.redis_client, self.stream, body, **kwargs)
         def ack(self, mid):
+            self.calls.append("ack")
             self.acked.append(mid)
         def note_lease_conflict(self):
             self.conflicts += 1
 
     def test_handover_acks_and_reenqueues(self):
         w = self._worker_with_redis()
-        q = self._FakeQueue()
+        q = self._FakeQueue(w.redis_client)
         body = {"type": "start", "flow_id": "f",
                 "params": {"repo": "/nonexistent/xyz"}}
         task = type("T", (), {"message_id": "1-0", "body": body})()
         w._handover_non_affine(task, q, RuntimeError("no affinity"))
+        assert q.calls == ["enqueue", "ack"], (
+            "S18-03：必须先入队新副本、成功后 ack 原条（enqueue→ack）"
+        )
         assert q.acked == ["1-0"], "原条应被 ack（移出 PEL，防对端再抢）"
         assert w.redis_client.xlen("q:test") == 1, "应重入队恰好一份新副本"
 
@@ -194,7 +209,7 @@ class TestAffinityHandover:
         TTL(30s) 短于回收周期(60s)，抑制间歇失效；计数 + 长 TTL 才能真正有界。
         """
         w = self._worker_with_redis()
-        q = self._FakeQueue()
+        q = self._FakeQueue(w.redis_client)
         body = {"type": "start", "flow_id": "f", "execution_id": "exec-1",
                 "params": {"repo": "/nonexistent/xyz"}}
         task = type("T", (), {"message_id": "1-0", "body": body})()

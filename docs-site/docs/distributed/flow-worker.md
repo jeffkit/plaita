@@ -593,11 +593,46 @@ ERROR，退避封顶保证 Redis 全断时不刷屏；进程内 `registry_regist
 测试：`tests/unit/test_r50_registry_state_machine.py`、
 `tests/unit/test_issue42_dispatch_target.py`。
 
+## drain 状态机与 ack 策略（S18-01，2026-10-19）
+
+| 状态 | 触发 | 行为 |
+|---|---|---|
+| **D0 running** | 正常 | 领取并执行任务 |
+| **D1 drain-requested** | SIGTERM/SIGINT、控制通道 stop | 关闭领取闸；注册表立即置 `draining`；在途步继续跑完并正常 ack |
+| **D2 force-stop** | `PLAITA_WORKER_DRAIN_TIMEOUT` 到期 | 停止等待；对在途执行尽力 `execution.cancel()`；置 `_running=False` 让 `run()` 收尾；**不承诺节点在 N 秒内中止**（硬中断见 B18-01，未实现） |
+| **D3 stopped/closed** | `stop()` 返回后 | 注销注册表；不再产生新步；未完成消息留 pending |
+
+不变量（与代码逐条对应）：
+
+- **I1 post-read gate**：D1 之后，任何「drain 前已发出、drain 后才返回」的
+  `read`/reclaim 结果都**不 dispatch、不 ack、不 bump**，消息留在 PEL 由其他
+  worker 在 `claim_min_idle_ms` 后 XCLAIM（`drain-read-gate` WARNING）。
+- **I2 advisory timeout**：`PLAITA_WORKER_DRAIN_TIMEOUT` 是停止领取/停止等待的
+  上界，不是节点中止的上界。`_force_stop_after_drain` **无论 active 是否为 0**
+  都置 `_running=False`（旧实现的 `active<=0` 早退会让已发出的 read 继续 dispatch）。
+- **I3 未完成不 ack**：只有 `_dispatch_task` 已正常返回的消息才 ack；进程在步
+  返回前退出 → 消息留 pending，由 XCLAIM 重放。若步在 D2 后、进程退出前完成，
+  允许 ack（工作已完成）。
+- **I4 D3 后不再产生新步**：`stop()` 置 D2 标记后，退避/消费线程不得再
+  enqueue/ack。
+- **I5 可中断退避**：节点可重试失败的指数退避按 0.2s 分片，每片检查 D2 标记；
+  只有**强停**打断（仅 D1 仍让在途步完整跑完）。打断后不 enqueue、不 ack，
+  消息留 pending，日志 `retry-backoff-aborted-by-drain`。
+
+交接（亲和闸 `TaskNotForThisWorker`）同样是 **enqueue→ack**：先写同体新副本，
+成功后才 ack 原条；enqueue 失败 → 原条留 pending（绝不先 ack 造成唯一载体消失）；
+ack 失败 → 新副本已在队列、原条仍 pending，重复由租约/终态短路吸收。
+
+**库模式**：`run(wait_for_inflight=True)` / `stop(wait=True)` 会在停看门狗与
+注销之前有界等待在途任务收尾；CLI 默认不等待，以进程退出为硬中止边界
+（daemon 消费线程可能仍在跑，未完成步的消息留 pending）。
+
 ## 停机与运维参数（2026-09）
 
 - **优雅停机**：SIGTERM/SIGINT 后 worker 在当前任务完成后退出。消费阻塞窗口
   上限由 `--read-block-ms`（默认 1000ms）控制——XREADGROUP 的 BLOCK 无法被
-  信号中断，窗口越大停机延迟越长；默认值保证停机延迟 ≲1s。
+  信号中断，窗口越大停机延迟越长；默认值保证停机延迟 ≲1s。drain 的完整状态机、
+  advisory 超时与 ack 策略见上节 [drain 状态机与 ack 策略](#drain-ack-s18-012026-10-19)。
 - **CLI 日志**：`python -m plaita.server.flow_worker` 默认输出 INFO 级控制台
   日志（`PLAITA_LOG_LEVEL` 可调，`--quiet` 关闭）。
 - **本机盘守线（#49）**：`--min-free-disk-gib`（或 `PLAITA_WORKER_MIN_FREE_DISK_GIB`）
