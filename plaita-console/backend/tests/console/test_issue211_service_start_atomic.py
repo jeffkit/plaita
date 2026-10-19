@@ -195,9 +195,12 @@ def test_api_start_endpoint_reports_already_starting(monkeypatch):
 
     async def scenario():
         req = cluster_api.StartServiceRequest(service_type=SERVICE)
+        # #261：handler 需要 Request + 平台身份（HTTP 层由 require_auth 注入）。
+        request = SimpleNamespace()
+        identity = {"actor": "test", "platform_admin": True}
         return await asyncio.gather(
-            cluster_api.start_service(req),
-            cluster_api.start_service(req),
+            cluster_api.start_service(req, request, identity),
+            cluster_api.start_service(req, request, identity),
         )
 
     responses = _run(scenario())

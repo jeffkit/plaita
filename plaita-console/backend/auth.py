@@ -11,8 +11,9 @@
 - GET/HEAD：任意已认证角色（viewer+）
 - 其余方法：editor+
 - admin 专属前缀：/api/users、/api/audit、/api/credentials、/api/cluster、/api/tenants
-- **平台身份专属（#260）**：/api/users 的全局账号变更（创建/改角色/改密/删除）
-  与 /api/services/{id}/stop 等全局生命周期操作要求 ``platform_admin``——
+- **平台身份专属（#260 / #261）**：/api/users 的全局账号变更（创建/改角色/
+  改密/删除）、/api/services/{id}/stop，以及 /api/cluster 与 /api/clusters
+  的全局生命周期 / 基础设施配置 / 集群登记面要求 ``platform_admin``——
   租户角色 admin ≠ 平台身份；本人改密是自助操作，不受此限
 - 生产环境（PLAITA_CONSOLE_ENV=prod）的 DELETE：admin
 
