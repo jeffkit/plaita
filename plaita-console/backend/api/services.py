@@ -4,7 +4,7 @@
 """
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -19,6 +19,11 @@ try:
     from ..services.read_redaction import RedactedResponseModel
 except ImportError:
     from services.read_redaction import RedactedResponseModel  # type: ignore
+
+try:
+    from .redis_scan import scan_keys
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from redis_scan import scan_keys  # type: ignore
 
 router = APIRouter()
 
@@ -47,6 +52,9 @@ class ServiceListResponse(RedactedResponseModel):
     """服务列表响应"""
     services: List[ServiceInfo]
     total: int
+    # A2R20-02：注册表扫描触界时结果不完整（scan_keys 已记 WARNING），
+    # 显式告诉调用方「这只是部分结果」。
+    truncated: bool = False
 
 
 class ServiceNode(RedactedResponseModel):
@@ -73,6 +81,7 @@ class ServiceTopology(RedactedResponseModel):
     nodes: List[ServiceNode]
     edges: List[ServiceEdge]
     timestamp: str
+    truncated: bool = False
 
 
 class StopServiceRequest(BaseModel):
@@ -104,6 +113,55 @@ def parse_service_data(data: str) -> Optional[ServiceInfo]:
         return None
 
 
+# ---- A2R20-02：注册表读面有界化 ----
+# 历史：``redis.scan_iter(match=pattern)`` 不传 count（redis-py 默认 COUNT=10），
+# 15 万键的 keyspace 单次列表请求要发 1.4 万条 SCAN；65 万键 9.2s/6.3 万条，
+# 且端点内是同步 Redis + 逐键 GET（N+1），一次 viewer GET 即冻结 console
+# 事件循环。这里统一走 #202 的有界扫描工具：
+# - COUNT 显式给 1000（PAGE_SIZE_MAX）：65 万键约 650 轮，落在 1500 轮预算内；
+# - 触界返回 ``truncated`` + scan_keys 的 WARNING，不静默给部分结果；
+# - 取值为 MGET 分块，不再逐键往返。
+SERVICE_SCAN_COUNT = 1000
+SERVICE_SCAN_MAX_ROUNDS = 1500
+SERVICE_SCAN_MAX_KEYS = 5000
+SERVICE_SCAN_TIME_BUDGET_S = 1.0
+SERVICE_MGET_CHUNK = 500
+
+
+def _scan_registry_keys(redis: Redis, pattern: str) -> Tuple[List[str], bool]:
+    """有界扫描注册表键（显式 COUNT，keys/rounds/墙钟三重预算）。"""
+    result = scan_keys(
+        redis,
+        pattern,
+        count=SERVICE_SCAN_COUNT,
+        max_keys=SERVICE_SCAN_MAX_KEYS,
+        max_rounds=SERVICE_SCAN_MAX_ROUNDS,
+        time_budget_s=SERVICE_SCAN_TIME_BUDGET_S,
+    )
+    return result.keys, result.truncated
+
+
+def _mget_registry_values(redis: Redis, keys: List[str]) -> Dict[str, Any]:
+    """分块 MGET 取代逐键 GET（N+1 → 批量往返）。"""
+    values: Dict[str, Any] = {}
+    for start in range(0, len(keys), SERVICE_MGET_CHUNK):
+        chunk = keys[start : start + SERVICE_MGET_CHUNK]
+        try:
+            raws = redis.mget(chunk)
+        except Exception:  # noqa: BLE001 - 批量不可用时逐键回退，行为不劣化
+            # 批量不可用时逐键回退（行为不劣化），失败键跳过。
+            raws = [redis.get(key) for key in chunk]
+        for key, raw in zip(chunk, raws):
+            if raw:
+                values[key] = raw
+    return values
+
+
+def _escape_glob(value: str) -> str:
+    """转义 SCAN MATCH 通配字符（instance_id 视为字面量）。"""
+    return "".join("\\" + ch if ch in "\\*?[]" else ch for ch in value)
+
+
 # ============ API 端点 ============
 
 @router.get("/services", response_model=ServiceListResponse)
@@ -125,6 +183,7 @@ async def list_services(
         )
     services = []
     added_instance_ids = set()
+    truncated = False
     
     # 1. 从 Redis 注册表获取服务
     if service_type:
@@ -132,8 +191,8 @@ async def list_services(
     else:
         pattern = "plaita:registry:*"
     
-    keys = list(redis.scan_iter(match=pattern))
-    
+    keys, truncated = _scan_registry_keys(redis, pattern)
+    registry_keys = []
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
         parts = key_str.split(":")
@@ -143,13 +202,14 @@ async def list_services(
         
         if parts[1] != "registry":
             continue
-        
-        data = redis.get(key)
-        if data:
-            service = parse_service_data(data)
-            if service:
-                services.append(service)
-                added_instance_ids.add(service.instance_id)
+        registry_keys.append(key_str)
+
+    # N+1 GET → 分块 MGET（A2R20-02）
+    for key_str, data in _mget_registry_values(redis, registry_keys).items():
+        service = parse_service_data(data)
+        if service:
+            services.append(service)
+            added_instance_ids.add(service.instance_id)
     
     # 2. 添加 ServiceManager 托管的实例（未在 Redis 中注册的）
     try:
@@ -309,7 +369,8 @@ async def list_services(
     
     return ServiceListResponse(
         services=services,
-        total=len(services)
+        total=len(services),
+        truncated=truncated,
     )
 
 
@@ -327,9 +388,9 @@ async def get_topology(
             status_code=503,
             detail="服务注册表依赖 Redis，本地单机档不可用",
         )
-    # 获取所有服务（scan_iter 替代 keys，避免大库 O(N) 阻塞）
+    # 获取所有服务（有界 SCAN 替代无 COUNT 的 scan_iter：A2R20-02）
     pattern = "plaita:registry:*"
-    keys = list(redis.scan_iter(match=pattern))
+    keys, truncated = _scan_registry_keys(redis, pattern)
     
     nodes: List[ServiceNode] = []
     edges: List[ServiceEdge] = []
@@ -345,17 +406,16 @@ async def get_topology(
     # 跟踪已添加的实例 ID，避免重复
     added_instance_ids = set()
     
+    registry_keys = []
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
         parts = key_str.split(":")
         
         if len(parts) < 4 or parts[1] != "registry":
             continue
-        
-        data = redis.get(key)
-        if not data:
-            continue
-        
+        registry_keys.append(key_str)
+
+    for key_str, data in _mget_registry_values(redis, registry_keys).items():
         try:
             info = json.loads(data)
         except Exception:
@@ -473,7 +533,8 @@ async def get_topology(
     return ServiceTopology(
         nodes=nodes,
         edges=edges,
-        timestamp=datetime.now().isoformat()
+        timestamp=datetime.now().isoformat(),
+        truncated=truncated,
     )
 
 
@@ -485,7 +546,7 @@ async def list_service_types(
     获取所有服务类型
     """
     pattern = "plaita:registry:*"
-    keys = redis.keys(pattern)
+    keys, truncated = _scan_registry_keys(redis, pattern)
     
     service_types = set()
     for key in keys:
@@ -496,7 +557,8 @@ async def list_service_types(
     
     return {
         "types": list(service_types),
-        "total": len(service_types)
+        "total": len(service_types),
+        "truncated": truncated,
     }
 
 
@@ -510,9 +572,9 @@ async def get_service(
     
     - **instance_id**: 服务实例 ID
     """
-    # 搜索所有服务类型中的该实例
-    pattern = f"plaita:registry:*:{instance_id}"
-    keys = redis.keys(pattern)
+    # 搜索所有服务类型中的该实例（有界 SCAN，A2R20-02）
+    pattern = f"plaita:registry:*:{_escape_glob(instance_id)}"
+    keys, _truncated = _scan_registry_keys(redis, pattern)
     
     if not keys:
         raise HTTPException(status_code=404, detail=f"服务不存在: {instance_id}")
@@ -549,9 +611,9 @@ async def stop_service(
         request, identity, action="service.stop", resource="service",
         target=instance_id,
     )
-    # 验证服务存在
-    pattern = f"plaita:registry:*:{instance_id}"
-    keys = redis.keys(pattern)
+    # 验证服务存在（有界 SCAN，A2R20-02）
+    pattern = f"plaita:registry:*:{_escape_glob(instance_id)}"
+    keys, _truncated = _scan_registry_keys(redis, pattern)
     
     if not keys:
         raise HTTPException(status_code=404, detail=f"服务不存在: {instance_id}")
@@ -597,9 +659,9 @@ async def get_service_status(
     
     - **instance_id**: 服务实例 ID
     """
-    # 搜索服务
-    pattern = f"plaita:registry:*:{instance_id}"
-    keys = redis.keys(pattern)
+    # 搜索服务（有界 SCAN，A2R20-02）
+    pattern = f"plaita:registry:*:{_escape_glob(instance_id)}"
+    keys, _truncated = _scan_registry_keys(redis, pattern)
     
     if not keys:
         raise HTTPException(status_code=404, detail=f"服务不存在: {instance_id}")

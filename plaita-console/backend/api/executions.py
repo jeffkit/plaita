@@ -7,9 +7,10 @@ import json
 import logging
 import os
 import secrets
+import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -19,11 +20,22 @@ from starlette.routing import Route
 
 # 手工 resume 的订阅绑定私有载体键（与引擎同一常量，见 plaita#221）。
 from plaita.core.strategies import RESUME_BINDING_KEY
+# A2R20-03：执行列表索引键/分数与 storage 写路径同源，避免键名/score 漂移。
+from plaita.storage.redis import (
+    execution_index_key,
+    execution_index_ready_key,
+    execution_start_time_score,
+)
 
 try:  # 包布局（pip 安装 / `python -m plaita_console`）
     from ..services import obs_link
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from services import obs_link  # type: ignore
+
+try:
+    from .redis_scan import scan_keys
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from api.redis_scan import scan_keys  # type: ignore
 
 try:
     from .sse_redis import SSE_REDIS_RETRY_SECONDS, get_sse_async_redis
@@ -82,6 +94,10 @@ class ExecutionListResponse(BaseModel):
     total: int
     page: int
     size: int
+    # A2R20-03：索引/扫描触界时列表只是部分结果（已记 WARNING）。
+    # 无过滤时 total 是索引基数；有过滤且 truncated 时 total 是**已找到的
+    # 匹配数下界**，调用方不得把它当成全集。
+    truncated: bool = False
 
 
 class StartFlowRequest(BaseModel):
@@ -679,6 +695,306 @@ def _execution_info_from_summary(
     )
 
 
+# ---- A2R20-03：执行列表按索引真分页 ----
+# 历史：列表对匹配的全部执行键做无界 SCAN + 逐键服务端投影 + 内存排序，
+# 最后才 `executions[start:end]`——20k 执行 35k 命令 / 2.4s，成本与 page/size
+# 无关；`size` 也没有上限（size=201 会投影并返回 201 行）。
+#
+# ``{ns}:execution:index`` ZSET（score=start_time、member=execution_id）由
+# storage 与 fenced 两条写路径同步维护。列表改为：
+# - 索引就绪（``{ns}:execution:index:ready``）时按 (start_time,id) 真分页：
+#   ZREVRANGE 只取当页 id，再只投影当页（成本 O(page)）；
+# - 存量库（就绪标记缺失）退化为**有界** SCAN 一次：扫完则顺带回填索引并置
+#   标记；触界返回 truncated + WARNING（scan_keys 已记），不静默短页；
+# - 带 status/flow_id 过滤时按索引顺序分块投影、条件收窄，候选/墙钟触界即停。
+EXECUTION_LIST_MAX_SIZE = 200
+EXECUTION_SCAN_COUNT = 1000
+EXECUTION_SCAN_MAX_ROUNDS = 1500
+EXECUTION_SCAN_MAX_KEYS = 100_000
+EXECUTION_SCAN_TIME_BUDGET_S = 1.0
+EXECUTION_FILTER_MAX_CANDIDATES = 10_000
+EXECUTION_FILTER_TIME_BUDGET_S = 1.0
+EXECUTION_INDEX_PAGE_CHUNK = 200
+# 平台视角发现「Redis 里存在但租户表没有」的命名空间：有界 SCAN 结果缓存，
+# 避免单租户平台视角每个请求都走一遍 keyspace。
+_EXECUTION_NS_CACHE_TTL_S = 30.0
+_execution_ns_cache: Dict[str, Any] = {}
+
+
+def _discover_execution_namespaces(redis: Redis) -> List[str]:
+    """有界 SCAN 发现 ``plaita:<tenant>:execution:*`` 的租户命名空间。
+
+    仅在租户表未给出任何租户命名空间时使用（未 bootstrap / 内嵌挂载 /
+    Redis-only 租户）。结果缓存 30s；触界结果不缓存（下次重试完整发现）。
+    """
+    cached_at = _execution_ns_cache.get("at")
+    cached_redis = _execution_ns_cache.get("redis")
+    if (
+        cached_at is not None
+        and cached_redis is redis
+        and time.monotonic() - cached_at < _EXECUTION_NS_CACHE_TTL_S
+    ):
+        return list(_execution_ns_cache.get("namespaces") or [])
+
+    result = scan_keys(
+        redis,
+        "plaita:*:execution:*",
+        count=EXECUTION_SCAN_COUNT,
+        max_keys=1000,
+        max_rounds=EXECUTION_SCAN_MAX_ROUNDS,
+        time_budget_s=EXECUTION_SCAN_TIME_BUDGET_S,
+    )
+    found = set()
+    for key in result.keys:
+        if _is_mechanism_key(key):
+            continue
+        namespace = key.split(":execution:", 1)[0]
+        if namespace and namespace != "plaita":
+            found.add(namespace)
+    namespaces = sorted(found)
+    if not result.truncated:
+        # 持引用（而不是 id）：避免测试里同 id 复用导致跨实例误命中缓存。
+        _execution_ns_cache["redis"] = redis
+        _execution_ns_cache["at"] = time.monotonic()
+        _execution_ns_cache["namespaces"] = list(namespaces)
+    return namespaces
+
+
+def _execution_namespaces(request: Request, tenant: Optional[str], redis: Redis) -> List[str]:
+    """列表要覆盖的命名空间：租户视角单 ns；平台视角 default + 各租户。"""
+    from plaita.server.tenant_context import tenant_namespace
+
+    if tenant:
+        return [tenant_namespace(tenant)]
+    namespaces = ["plaita"]
+    store = getattr(getattr(request, "app", None), "state", None)
+    store = getattr(store, "store", None)
+    if store is not None:
+        try:
+            try:
+                from ..services import tenants_svc
+            except ImportError:
+                from services import tenants_svc  # type: ignore
+            for item in tenants_svc.list_tenants(store):
+                namespace = tenant_namespace(item.get("id"))
+                if namespace not in namespaces:
+                    namespaces.append(namespace)
+        except Exception as exc:  # noqa: BLE001 - 枚举失败不阻断列表
+            logger.warning("枚举租户命名空间失败（平台执行列表退回 default）: %s", exc)
+    if len(namespaces) == 1:
+        # 租户表为空/不可用：Redis-only 租户仍须出现在平台视角（有界发现）。
+        try:
+            for namespace in _discover_execution_namespaces(redis):
+                if namespace not in namespaces:
+                    namespaces.append(namespace)
+        except Exception as exc:  # noqa: BLE001 - 发现失败只影响跨租户覆盖
+            logger.warning("发现租户执行命名空间失败（平台执行列表可能不完整）: %s", exc)
+    return namespaces
+
+
+def _scan_execution_summaries(
+    redis: Redis, namespace: str
+) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+    """索引不可用时的回退：有界 SCAN + 当块投影。返回 (summaries, truncated)。"""
+    result = scan_keys(
+        redis,
+        f"{namespace}:execution:*",
+        count=EXECUTION_SCAN_COUNT,
+        max_keys=EXECUTION_SCAN_MAX_KEYS,
+        max_rounds=EXECUTION_SCAN_MAX_ROUNDS,
+        time_budget_s=EXECUTION_SCAN_TIME_BUDGET_S,
+    )
+    keys = [key for key in result.keys if not _is_mechanism_key(key)]
+    return _project_summaries(redis, keys), result.truncated
+
+
+def _backfill_execution_index(
+    redis: Redis, namespace: str, summaries: Dict[str, Dict[str, Any]]
+) -> None:
+    """存量库一次性回填：扫描结果 → 索引成员 + 就绪标记（失败下次重试）。"""
+    try:
+        index_key = execution_index_key(namespace)
+        pipe = redis.pipeline(transaction=False)
+        count = 0
+        for key, summary in summaries.items():
+            pipe.zadd(
+                index_key,
+                {_execution_id_from_key(key): execution_start_time_score(summary)},
+            )
+            count += 1
+            if count % 1000 == 0:
+                pipe.execute()
+                pipe = redis.pipeline(transaction=False)
+        pipe.set(execution_index_ready_key(namespace), "1")
+        pipe.execute()
+        logger.info(
+            "执行索引回填完成（namespace=%s）：%d 个成员（一次性迁移，"
+            "此后列表走 ZSET 真分页）",
+            namespace,
+            len(summaries),
+        )
+    except Exception as exc:  # noqa: BLE001 - 回填失败不影响本次响应
+        logger.warning(
+            "执行索引回填失败（本次列表仍返回扫描结果，下次请求重试）: %s", exc
+        )
+
+
+def _index_page_rows(
+    redis: Redis, namespace: str, offset: int, limit: int
+) -> Tuple[List[ExecutionInfo], int]:
+    """按索引取一页（ZREVRANGE 下推 offset/limit），只投影当页。
+
+    悬空成员（状态键已被 TTL/外部删除）就地 ZREM，并继续向后取直到本页
+    填满——不返回空洞/短页。
+    """
+    index_key = execution_index_key(namespace)
+    total = int(redis.zcard(index_key) or 0)
+    rows: List[ExecutionInfo] = []
+    start = offset
+    pruned = 0
+    stalled = 0
+    while len(rows) < limit:
+        chunk = max(1, limit - len(rows))
+        members = redis.zrevrange(index_key, start, start + chunk - 1)
+        if not members:
+            break
+        ids = [m if isinstance(m, str) else m.decode() for m in members]
+        keys = [f"{namespace}:execution:{eid}" for eid in ids]
+        summaries = _project_summaries(redis, keys)
+        missing = [eid for eid, key in zip(ids, keys) if key not in summaries]
+        if missing:
+            pruned += len(missing)
+            pruned_ok = True
+            try:
+                redis.zrem(index_key, *missing)
+            except Exception as exc:  # noqa: BLE001 - 剪枝失败不阻断本页
+                pruned_ok = False
+                logger.warning("悬空执行索引成员剪枝失败: %s", exc)
+        else:
+            pruned_ok = True
+        for key in keys:
+            summary = summaries.get(key)
+            if summary is not None:
+                rows.append(_execution_info_from_summary(key, summary))
+        if missing:
+            # 已剪枝：窗口左移 len(missing)，下一轮从剩余有效成员之后继续，
+            # 避免把本窗口里已返回的成员再取一次（重复行）。剪枝成功则索引
+            # 严格变小、循环必然收敛；只有 ZREM 连续失败时才放弃本页。
+            start += len(ids) - len(missing)
+            if not pruned_ok:
+                stalled += 1
+                if stalled >= 3:
+                    break
+            continue
+        start += len(ids)
+        if len(ids) < chunk:
+            break
+    return rows[:limit], max(0, total - pruned)
+
+
+def _filtered_index_rows(
+    redis: Redis,
+    namespace: str,
+    offset: int,
+    limit: int,
+    status: Optional[str],
+    flow_id: Optional[str],
+) -> Tuple[List[ExecutionInfo], int, bool]:
+    """带过滤时按索引顺序分块投影；候选/墙钟触界返回 truncated。
+
+    返回 (最多 offset+limit 行, 已找到的匹配数, truncated)。截断时匹配数
+    是下界（响应里 truncated=true 已显式标注）。
+    """
+    need = offset + limit
+    index_key = execution_index_key(namespace)
+    total = int(redis.zcard(index_key) or 0)
+    rows: List[ExecutionInfo] = []
+    matched = 0
+    scanned = 0
+    start = 0
+    truncated = False
+    deadline = time.monotonic() + EXECUTION_FILTER_TIME_BUDGET_S
+    while start < total:
+        if (
+            scanned >= EXECUTION_FILTER_MAX_CANDIDATES
+            or time.monotonic() >= deadline
+        ):
+            truncated = True
+            break
+        chunk = min(
+            EXECUTION_INDEX_PAGE_CHUNK,
+            EXECUTION_FILTER_MAX_CANDIDATES - scanned,
+        )
+        members = redis.zrevrange(index_key, start, start + chunk - 1)
+        if not members:
+            break
+        ids = [m if isinstance(m, str) else m.decode() for m in members]
+        keys = [f"{namespace}:execution:{eid}" for eid in ids]
+        summaries = _project_summaries(redis, keys)
+        for key in keys:
+            summary = summaries.get(key)
+            if summary is None:
+                continue
+            if status and (summary.get("status") or "") != status:
+                continue
+            if flow_id and (summary.get("flow_id") or "") != flow_id:
+                continue
+            matched += 1
+            if len(rows) < need:
+                rows.append(_execution_info_from_summary(key, summary))
+        start += len(ids)
+        scanned += len(ids)
+        if len(ids) < chunk:
+            break
+    if truncated:
+        logger.warning(
+            "执行列表过滤扫描触界（namespace=%s）：已扫描 %d/%d 个索引成员，"
+            "本次 total=%d 是已找到匹配数的下界",
+            namespace,
+            scanned,
+            total,
+            matched,
+        )
+    return rows, matched, truncated
+
+
+def _namespace_rows(
+    redis: Redis,
+    namespace: str,
+    offset: int,
+    limit: int,
+    status: Optional[str],
+    flow_id: Optional[str],
+) -> Tuple[List[ExecutionInfo], int, bool]:
+    """单命名空间取行：索引就绪走真分页，否则有界扫描兜底。"""
+    index_ready = False
+    try:
+        index_ready = bool(redis.exists(execution_index_ready_key(namespace)))
+    except Exception as exc:  # noqa: BLE001 - 就绪标记读失败按未就绪处理
+        logger.warning("执行索引就绪标记读取失败（按未就绪处理）: %s", exc)
+
+    if not index_ready:
+        summaries, truncated = _scan_execution_summaries(redis, namespace)
+        rows = [
+            _execution_info_from_summary(key, summary)
+            for key, summary in summaries.items()
+        ]
+        if status:
+            rows = [row for row in rows if row.status == status]
+        if flow_id:
+            rows = [row for row in rows if row.flow_id == flow_id]
+        if not truncated:
+            _backfill_execution_index(redis, namespace, summaries)
+        return rows, len(rows), truncated
+
+    if status or flow_id:
+        return _filtered_index_rows(
+            redis, namespace, offset, limit, status, flow_id
+        )
+    rows, total = _index_page_rows(redis, namespace, offset, limit)
+    return rows, total, False
+
+
 def _heal_terminal_ttl(redis: Redis, key: str, info: Dict[str, Any]) -> None:
     """C4-3 读时补偿：fenced 写路径落盘的终态键没有 TTL（其 CAS Lua 只 SET），
     控制面首次读到时补 EXPIRE，使终态键最终自清理。失败不影响本次读取。"""
@@ -792,8 +1108,8 @@ def _with_usage(info: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/executions", response_model=ExecutionListResponse)
 async def list_executions(
     request: Request,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(default=1, ge=1, le=10_000),
+    size: int = Query(default=20, ge=1, le=EXECUTION_LIST_MAX_SIZE),
     status: Optional[str] = None,
     flow_id: Optional[str] = None,
     redis: Optional[Redis] = Depends(get_redis_or_none),
@@ -802,11 +1118,16 @@ async def list_executions(
     获取执行实例列表
     
     - **page**: 页码（从 1 开始）
-    - **size**: 每页数量
+    - **size**: 每页数量（上限 200；超限 422）
     - **status**: 按状态筛选
     - **flow_id**: 按流程 ID 筛选
+
+    A2R20-03：索引就绪时按 start_time ZSET 真分页，只投影当页；存量库首次
+    访问用有界 SCAN 兜底并回填索引。触界返回 ``truncated=true``。
     """
-    if (local := get_local_executor(request)) is not None:
+    truncated = False
+    local = get_local_executor(request)
+    if local is not None:
         executions = [
             # 两批各自独立加了包装（#166：凭据脱敏 ‖ #37 P2：usage 汇总）⇒ 组合：
             # **先用原始 context 算 usage，最后做脱敏**——`_with_usage` 需要未脱敏的
@@ -817,37 +1138,22 @@ async def list_executions(
                 status=status, flow_id=flow_id, tenant_id=tenant_scope(request)
             )
         ]
+        total = len(executions)
     else:
         tenant = tenant_scope(request)
-        # 租户视角只扫本租户 namespace；平台视角扫 default（历史前缀）+ 各租户
-        if tenant:
-            patterns = [f"{tenant_namespace(tenant)}:execution:*"]
-        else:
-            patterns = ["plaita:execution:*", "plaita:*:execution:*"]
-
-        # C4-3：SCAN 出键后服务端投影（EVAL+cjson）取列表字段，
-        # 完整 context 不再逐键 GET/loads 进 console 内存。
-        summaries: Dict[str, Dict[str, Any]] = {}
-        seen: set = set()
-        for pattern in patterns:
-            keys: List[str] = []
-            for key in redis.scan_iter(match=pattern):
-                key_str = key if isinstance(key, str) else key.decode()
-                # 排除租约/取消标志/队列等同前缀机制键
-                if _is_mechanism_key(key_str) or key_str in seen:
-                    continue
-                seen.add(key_str)
-                keys.append(key_str)
-            summaries.update(_project_summaries(redis, keys))
-
+        # 平台视角覆盖 default（历史前缀）+ 各租户命名空间；每个命名空间只取
+        # 全局窗口（offset+size）内的行，合并后排序切片——page=2 不再全扫。
+        offset = (page - 1) * size
+        need = offset + size
         executions = []
-        for key_str, summary in summaries.items():
-            # 筛选
-            if status and (summary.get("status") or "") != status:
-                continue
-            if flow_id and (summary.get("flow_id") or "") != flow_id:
-                continue
-            executions.append(_execution_info_from_summary(key_str, summary))
+        total = 0
+        for namespace in _execution_namespaces(request, tenant, redis):
+            rows, ns_total, ns_truncated = _namespace_rows(
+                redis, namespace, 0, need, status, flow_id
+            )
+            executions.extend(rows)
+            total += ns_total
+            truncated = truncated or ns_truncated
     
     # 按开始时间排序（最新的在前）
     executions.sort(
@@ -856,7 +1162,6 @@ async def list_executions(
     )
     
     # 分页
-    total = len(executions)
     start = (page - 1) * size
     end = start + size
     paginated = executions[start:end]
@@ -865,7 +1170,8 @@ async def list_executions(
         executions=paginated,
         total=total,
         page=page,
-        size=size
+        size=size,
+        truncated=truncated,
     )
 
 

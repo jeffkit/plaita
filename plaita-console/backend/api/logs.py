@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +56,8 @@ class LogListResponse(BaseModel):
     # A2R19-04：部分键/条目读取失败时显式标注——空列表不等于「没有日志」。
     degraded: bool = False
     skipped: int = 0
+    # A2R20-04：全局条目/墙钟预算触界（或键扫描触界）时只是部分结果。
+    truncated: bool = False
 
 
 class LogStatsEntry(BaseModel):
@@ -69,6 +72,9 @@ class LogStatsResponse(BaseModel):
     """日志统计响应"""
     stats: List[LogStatsEntry]
     total_logs: int
+    # A2R20-04：条目/墙钟预算或键扫描触界，统计只是部分结果（有租户过滤时
+    # 计数是下界）。
+    truncated: bool = False
 
 
 # ============ 工具函数 ============
@@ -108,10 +114,32 @@ def _entry_tenant(entry_data: Any) -> str:
 _LOG_LIST_MAX_KEYS = 2000
 _LOG_STATS_MAX_KEYS = 1000
 
+# ---- A2R20-04：单请求**全局条目预算**（不是「每键 × limit」）----
+# 历史：list 每键 `count=limit`（最大 1000）× 最多 2000 键 = 200 万条；
+# instance `count=limit*2` × 2000 = 400 万条；stats 的 tenant 分支
+# `XRANGE` 不带 count，最坏 1000 键 × maxlen(10000) = 1000 万条。三处都在
+# 最后才 `[:limit]`——`limit` 只是返回上限，不是读取预算。
+# 现在预算是**前置**的：每键 `count=min(..., remaining)`，边读边扣减，
+# 触界即停并把 `truncated=true` 带回响应（同时记 WARNING）。
+_LOG_LIST_MAX_ENTRIES = 50_000
+_LOG_INSTANCE_MAX_ENTRIES = 50_000
+_LOG_STATS_MAX_ENTRIES = 50_000
+# 与 server/log_handler.py 的 DEFAULT_MAX_LEN 同值：单流最多这么多条。
+_LOG_STATS_PER_KEY_MAX = 10_000
+# 墙钟预算：与条目预算共同前置生效。0.3s 约束**条目读取循环**（键 SCAN 另有
+# scan_keys 自身的 keys/rounds/墙钟预算）；触界返回 truncated=true，不长时间
+# 阻塞 console 事件循环。
+_LOG_TIME_BUDGET_S = 0.3
 
-def _bounded_log_keys(redis: Redis, pattern: str, max_keys: int) -> List[str]:
-    """有界 SCAN 代替 ``KEYS``（#202）：单条命令只扫一页，触界 fail-safe。"""
-    return scan_keys(redis, pattern, max_keys=max_keys).keys
+
+def _bounded_log_keys(redis: Redis, pattern: str, max_keys: int) -> tuple[List[str], bool]:
+    """有界 SCAN 代替 ``KEYS``（#202）：单条命令只扫一页，触界 fail-safe。
+
+    COUNT 显式给 1000（PAGE_SIZE_MAX）：同样的 keyspace 轮次比默认 500 少一半，
+    留更多墙钟给条目读取。
+    """
+    result = scan_keys(redis, pattern, count=1000, max_keys=max_keys)
+    return result.keys, result.truncated
 
 
 # ============ API 端点 ============
@@ -174,19 +202,31 @@ async def list_logs(
         pattern = f"plaita:logs:{service_type}:*"
     else:
         pattern = "plaita:logs:*"
-    keys = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
+    keys, truncated = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
 
     logs = []
     skipped = 0
     tenant = tenant_scope(request)
     tenant_id_filter = tenant if tenant else None
+    # 全局读取预算（前置）：每键只读到 remaining，读完即扣减。
+    remaining = _LOG_LIST_MAX_ENTRIES
+    deadline = time.monotonic() + _LOG_TIME_BUDGET_S
 
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
+        if remaining <= 0 or time.monotonic() >= deadline:
+            truncated = True
+            break
 
         try:
-            # 从 Redis Stream 读取日志
-            entries = redis.xrevrange(key_str, count=limit)
+            # 从 Redis Stream 读取日志（每键 count 受全局 remaining 约束）
+            count = min(limit, remaining)
+            entries = redis.xrevrange(key_str, count=count)
+            remaining -= len(entries)
+            if remaining <= 0 and len(entries) >= count:
+                # 读满了 remaining：该键可能还有未读条目（下一轮循环会 break，
+                # 单键场景也必须显式标注不完整）。
+                truncated = True
 
             for entry_id, entry_data in entries:
                 try:
@@ -228,6 +268,13 @@ async def list_logs(
             "日志列表读取降级：%d 个键/条目读取失败（返回 %d 条，degraded=true）",
             skipped, len(logs),
         )
+    if truncated:
+        logger.warning(
+            "日志列表触界：全局条目预算 %d / 墙钟 %.1fs / 键预算 %d 任一触界，"
+            "返回 %d 条局部结果（truncated=true）",
+            _LOG_LIST_MAX_ENTRIES, _LOG_TIME_BUDGET_S, _LOG_LIST_MAX_KEYS,
+            len(logs),
+        )
     
     # 按时间排序
     logs.sort(key=lambda x: x.timestamp, reverse=True)
@@ -240,6 +287,7 @@ async def list_logs(
         total=len(logs),
         degraded=skipped > 0,
         skipped=skipped,
+        truncated=truncated,
     )
 
 
@@ -285,21 +333,30 @@ async def get_instance_logs(
 
     # 查找所有可能包含该实例日志的 Stream key
     pattern = "plaita:logs:*"
-    keys = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
+    keys, truncated = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
     # 多租户（plaita#192）：实例 id 可能被他租户猜中/从别处取得，逐条目按
     # tenant_id 收窄——不能只按 instance_id 匹配。
     tenant = tenant_scope(request)
     skipped = 0
+    remaining = _LOG_INSTANCE_MAX_ENTRIES
+    deadline = time.monotonic() + _LOG_TIME_BUDGET_S
     
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
+        if remaining <= 0 or time.monotonic() >= deadline:
+            truncated = True
+            break
         
         try:
-            # 从 Redis Stream 读取日志
+            # 从 Redis Stream 读取日志（每键 count 受全局 remaining 约束）
+            count = min(limit * 2, remaining)
             if order == "desc":
-                entries = redis.xrevrange(key_str, count=limit * 2)  # 多读一些以便筛选
+                entries = redis.xrevrange(key_str, count=count)
             else:
-                entries = redis.xrange(key_str, count=limit * 2)
+                entries = redis.xrange(key_str, count=count)
+            remaining -= len(entries)
+            if remaining <= 0 and len(entries) >= count:
+                truncated = True
             
             for entry_id, entry_data in entries:
                 try:
@@ -336,6 +393,13 @@ async def get_instance_logs(
             "实例日志读取降级（instance=%s）：%d 个键/条目读取失败（返回 %d 条，degraded=true）",
             instance_id, skipped, len(logs),
         )
+    if truncated:
+        logger.warning(
+            "实例日志触界（instance=%s）：全局条目预算 %d / 墙钟 %.1fs / 键预算 %d "
+            "任一触界，返回 %d 条局部结果（truncated=true）",
+            instance_id, _LOG_INSTANCE_MAX_ENTRIES, _LOG_TIME_BUDGET_S,
+            _LOG_LIST_MAX_KEYS, len(logs),
+        )
     
     # 按时间排序
     logs.sort(key=lambda x: x.timestamp, reverse=(order == "desc"))
@@ -348,6 +412,7 @@ async def get_instance_logs(
         total=len(logs),
         degraded=skipped > 0,
         skipped=skipped,
+        truncated=truncated,
     )
 
 
@@ -377,13 +442,20 @@ async def get_log_stats(
     # 多租户（plaita#192）：Stream 键与长度都是平台级的——租户视角必须逐条目
     # 统计（精确），不能把 xlen 当成租户总量、也不能采平台样本估算。
     tenant = tenant_scope(request)
+    truncated = False
+    remaining = _LOG_STATS_MAX_ENTRIES
+    deadline = time.monotonic() + _LOG_TIME_BUDGET_S
     
     # 遍历所有日志 Stream
     pattern = "plaita:logs:*"
-    keys = _bounded_log_keys(redis, pattern, _LOG_STATS_MAX_KEYS)
+    keys, scan_truncated = _bounded_log_keys(redis, pattern, _LOG_STATS_MAX_KEYS)
+    truncated = truncated or scan_truncated
     
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
+        if remaining <= 0 or time.monotonic() >= deadline:
+            truncated = True
+            break
         
         try:
             # 从 key 解析服务类型
@@ -394,11 +466,17 @@ async def get_log_stats(
                 service_type = "unknown"
 
             if tenant:
-                # 精确统计：只累计本租户条目（日志 Stream 由 log_handler 的
-                # maxlen 约束，逐条读取有界；平台视角仍走下方采样快路径）
+                # 精确统计：只累计本租户条目。XRANGE 必须带 count（A2R20-04：
+                # 此前无 count，最坏 1000 键 × maxlen 全读）；全局 remaining
+                # 前置扣减，单键再受 maxlen 上限约束。
                 level_counts: Dict[str, int] = {}
                 matched = 0
-                for _, entry_data in redis.xrange(key_str):
+                per_key = min(_LOG_STATS_PER_KEY_MAX, remaining)
+                entries = redis.xrange(key_str, count=per_key)
+                remaining -= len(entries)
+                if redis.xlen(key_str) > len(entries):
+                    truncated = True
+                for _, entry_data in entries:
                     if _entry_tenant(entry_data) != tenant:
                         continue
                     matched += 1
@@ -418,8 +496,10 @@ async def get_log_stats(
             length = redis.xlen(key_str)
             total_logs += length
             
-            # 采样一些日志来统计级别分布
-            entries = redis.xrevrange(key_str, count=100)
+            # 采样一些日志来统计级别分布（采样也受全局预算约束）
+            sample = min(100, remaining)
+            entries = redis.xrevrange(key_str, count=sample) if sample > 0 else []
+            remaining -= len(entries)
             level_counts = {}
             
             for _, entry_data in entries:
@@ -449,9 +529,18 @@ async def get_log_stats(
                 count=count
             ))
     
+    if truncated:
+        logger.warning(
+            "日志统计触界：全局条目预算 %d / 墙钟 %.1fs / 键预算 %d 任一触界，"
+            "total_logs=%d 与级别分布只是局部结果（truncated=true）",
+            _LOG_STATS_MAX_ENTRIES, _LOG_TIME_BUDGET_S, _LOG_STATS_MAX_KEYS,
+            total_logs,
+        )
+
     return LogStatsResponse(
         stats=stats,
-        total_logs=total_logs
+        total_logs=total_logs,
+        truncated=truncated,
     )
 
 

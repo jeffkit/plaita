@@ -51,10 +51,21 @@ WORKER_HOST = "worker-1.internal:9000"
 
 
 class FakeRedis:
-    """最小 Redis 替身：registry 读面只用到 scan_iter/get/keys。"""
+    """最小 Redis 替身：registry 读面只用到 scan/scan_iter/mget/keys。"""
 
     def __init__(self, data=None):
         self.data = dict(data or {})
+
+    def scan(self, cursor=0, match=None, count=None):
+        """A2R20-02：注册表读面改走有界 SCAN（scan_keys 调 scan）。"""
+        keys = sorted(
+            key for key in self.data
+            if match is None or fnmatch.fnmatch(key, match)
+        )
+        start = int(cursor or 0)
+        batch = keys[start:start + (count or 10)]
+        next_cursor = start + len(batch)
+        return (0 if next_cursor >= len(keys) else next_cursor), batch
 
     def scan_iter(self, match=None, count=None):  # noqa: ARG002
         for key in list(self.data):
@@ -69,6 +80,9 @@ class FakeRedis:
 
     def get(self, key):
         return self.data.get(key)
+
+    def mget(self, keys):
+        return [self.data.get(key) for key in keys]
 
 
 class _InfraConfig:
