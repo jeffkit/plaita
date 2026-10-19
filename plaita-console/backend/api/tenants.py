@@ -1,17 +1,12 @@
-"""租户管理 API（仅平台管理员；/api/tenants 在 _ADMIN_PREFIXES 中强制 admin）。
+"""租户管理 API（平台管理员；成员管理额外允许本租户 admin）。
 
-- GET    /api/tenants                          租户列表（含成员数）
-- POST   /api/tenants                          创建租户（响应一次性返回契约密钥）
-- GET    /api/tenants/{tenant_id}              租户详情
-- POST   /api/tenants/{tenant_id}/status       启用/停用
-- POST   /api/tenants/{tenant_id}/rotate-secret 轮换契约密钥（一次性返回）
-- DELETE /api/tenants/{tenant_id}              删除（租户内有流程时 409）
-- GET    /api/tenants/{tenant_id}/members      成员列表
-- POST   /api/tenants/{tenant_id}/members      添加成员 {username, role}
-- PUT    /api/tenants/{tenant_id}/members/{username}  改成员角色
-- DELETE /api/tenants/{tenant_id}/members/{username}  移除成员
+- 租户 CRUD / 状态 / 密钥：仅平台管理员（/api/tenants 在 _ADMIN_PREFIXES 中）
+- 成员管理：平台管理员，或**本租户**的 admin（#260；跨租户一律 403）
+- 租户 admin 不得添加/修改/移除 ``platform_admin=True`` 的账号
 """
 from typing import Dict
+
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -25,7 +20,13 @@ except ImportError:
     from services import tenants_svc, users_svc  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+#: #260：租户 admin 的成员管理只在本租户内成立；跨租户仍是平台身份专属。
+TENANT_MEMBER_ADMIN_DETAIL = "仅平台管理员或本租户管理员可管理租户成员"
+PLATFORM_ACCOUNT_PROTECTED_DETAIL = "仅平台管理员可操作平台管理员账号"
 
 
 class CreateTenantRequest(BaseModel):
@@ -45,6 +46,45 @@ class MemberRequest(BaseModel):
 def _platform_admin(identity: Dict) -> None:
     if not identity.get("platform_admin"):
         raise HTTPException(status_code=403, detail="仅平台管理员可管理租户")
+
+
+def _tenant_member_admin(request: Request, identity: Dict, tenant_id: str,
+                         *, action: str, target: str = "") -> None:
+    """成员管理闸（#260）：平台管理员，或 active tenant 等于目标租户的 admin。"""
+    if identity.get("platform_admin"):
+        return
+    if identity.get("role") == "admin" and identity.get("tenant_id") == tenant_id:
+        return
+    _audit_denied(request, action, target or tenant_id, TENANT_MEMBER_ADMIN_DETAIL)
+    raise HTTPException(status_code=403, detail=TENANT_MEMBER_ADMIN_DETAIL)
+
+
+def _guard_platform_target(request: Request, identity: Dict, tenant_id: str,
+                           target: str, *, action: str) -> None:
+    """租户 admin 不得触达平台账号（#260；防成员路径成为接管旁路）。"""
+    if identity.get("platform_admin"):
+        return
+    if users_svc.is_platform_admin(get_flow_store(), target):
+        _audit_denied(request, action, f"{tenant_id}/{target}",
+                      PLATFORM_ACCOUNT_PROTECTED_DETAIL)
+        raise HTTPException(status_code=403, detail=PLATFORM_ACCOUNT_PROTECTED_DETAIL)
+
+
+def _audit_denied(request: Request, action: str, resource_id: str, detail: str) -> None:
+    """拒绝尝试留痕：审计 + WARNING（拒绝必须可观测，不做静默降级）。"""
+    logger.warning(
+        "拒绝租户成员操作 action=%s actor=%s target=%s path=%s",
+        action,
+        getattr(getattr(request, "state", None), "actor", ""),
+        resource_id,
+        request.url.path,
+    )
+    _audit(
+        request,
+        f"{action}.denied",
+        resource_id,
+        {"denied": True, "reason": detail},
+    )
 
 
 def _redis(request: Request):
@@ -124,15 +164,19 @@ def delete_tenant(tenant_id: str, request: Request, identity: Dict = Depends(req
 # ---- 成员管理 ----
 
 @router.get("/tenants/{tenant_id}/members")
-def list_members(tenant_id: str, identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+def list_members(tenant_id: str, request: Request,
+                 identity: Dict = Depends(require_auth)):
+    _tenant_member_admin(request, identity, tenant_id, action="tenant.list_members")
     return {"members": tenants_svc.list_tenant_members(get_flow_store(), tenant_id)}
 
 
 @router.post("/tenants/{tenant_id}/members")
 def add_member(tenant_id: str, req: MemberRequest, request: Request,
                identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+    _tenant_member_admin(request, identity, tenant_id, action="tenant.add_member",
+                         target=f"{tenant_id}/{req.username}")
+    _guard_platform_target(request, identity, tenant_id, req.username,
+                           action="tenant.add_member")
     try:
         tenants_svc.add_member(get_flow_store(), tenant_id, req.username, req.role)
     except users_svc.UserError as e:
@@ -144,7 +188,10 @@ def add_member(tenant_id: str, req: MemberRequest, request: Request,
 @router.put("/tenants/{tenant_id}/members/{username}")
 def set_member_role(tenant_id: str, username: str, req: MemberRequest,
                     request: Request, identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+    _tenant_member_admin(request, identity, tenant_id, action="tenant.set_member_role",
+                         target=f"{tenant_id}/{username}")
+    _guard_platform_target(request, identity, tenant_id, username,
+                           action="tenant.set_member_role")
     try:
         tenants_svc.set_member_role(get_flow_store(), tenant_id, username, req.role)
     except users_svc.UserError as e:
@@ -156,7 +203,10 @@ def set_member_role(tenant_id: str, username: str, req: MemberRequest,
 @router.delete("/tenants/{tenant_id}/members/{username}")
 def remove_member(tenant_id: str, username: str, request: Request,
                   identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+    _tenant_member_admin(request, identity, tenant_id, action="tenant.remove_member",
+                         target=f"{tenant_id}/{username}")
+    _guard_platform_target(request, identity, tenant_id, username,
+                           action="tenant.remove_member")
     if not tenants_svc.remove_member(get_flow_store(), tenant_id, username):
         raise HTTPException(status_code=404, detail=f"{username} 不是租户 {tenant_id} 的成员")
     _audit(request, "tenant.remove_member", f"{tenant_id}/{username}")

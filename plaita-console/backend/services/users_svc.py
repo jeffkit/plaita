@@ -317,7 +317,8 @@ def logout(store, token: str) -> bool:
 
 # ---- 用户管理 ----
 
-def list_users(store) -> List[Dict[str, Any]]:
+def list_users(store, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """用户列表。给 ``tenant_id`` 时只返回该租户成员（#260 租户 admin 读面）。"""
     with store._session_local() as session:
         rows = session.scalars(select(User).order_by(User.username)).all()
         memberships: Dict[str, List[Dict[str, str]]] = {}
@@ -325,7 +326,7 @@ def list_users(store) -> List[Dict[str, Any]]:
             memberships.setdefault(m.username, []).append(
                 {"tenant_id": m.tenant_id, "role": m.role}
             )
-        return [
+        result = [
             {
                 "username": r.username,
                 "role": r.role,
@@ -336,6 +337,19 @@ def list_users(store) -> List[Dict[str, Any]]:
             }
             for r in rows
         ]
+        if tenant_id is None:
+            return result
+        return [
+            u for u in result
+            if any(m["tenant_id"] == tenant_id for m in u["memberships"])
+        ]
+
+
+def is_platform_admin(store, username: str) -> bool:
+    """目标账号是否为平台管理员（#260 租户 admin 不得触达平台账号）。"""
+    with store._session_local() as session:
+        row = session.scalars(select(User).where(User.username == username)).first()
+        return bool(row is not None and row.platform_admin)
 
 
 def create_user(
@@ -411,13 +425,27 @@ def set_platform_admin(store, username: str, platform_admin: bool) -> None:
     _revoke_user_sessions(store, username)
 
 
-def delete_user(store, username: str) -> bool:
+def delete_user(store, username: str, *, allow_platform_admin: bool = False) -> bool:
+    """删除用户。
+
+    #260 纵深防御：
+    - 删除平台管理员账号必须经平台身份路径显式放行（``allow_platform_admin``）
+    - 无论操作者是谁，都不允许删掉**最后一个**平台管理员（否则平台失去治理入口）
+    """
     if username == "admin":
         raise UserError("内置 admin 不可删除（可改密/改角色）")
     with store._session_local() as session:
         row = session.scalars(select(User).where(User.username == username)).first()
         if row is None:
             return False
+        if row.platform_admin:
+            if not allow_platform_admin:
+                raise UserError("平台管理员账号仅可由平台管理员删除")
+            remaining = session.scalars(
+                select(User).where(User.platform_admin.is_(True))
+            ).all()
+            if len(remaining) <= 1:
+                raise UserError("不可删除最后一个平台管理员")
         for m in session.scalars(
             select(TenantMember).where(TenantMember.username == username)
         ).all():

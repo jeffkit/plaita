@@ -38,6 +38,13 @@ python -m plaita_console              # 或使用 plaita-console 命令
 - **editor**：编排与执行（增删改流程、发布、试跑、启动执行）
 - **viewer**：只读
 
+多租户部署下，`admin` 是**租户内**角色，不等于平台身份（#260）：
+`/api/users` 的全局账号变更（创建 / 改角色 / 改密 / 删除）与全局服务停止
+只允许 `platform_admin`（或平台级 API-Key）执行；租户 admin 只能经
+`/api/tenants/{tid}/members/*` 管理**本租户**成员，且不能操作平台管理员
+账号。任何已认证角色都可以修改**自己**的密码。租户 admin 的
+`GET /api/users` 只返回本租户成员。
+
 登录后走会话 token（7 天）；`X-Admin-API-Key` 服务账号兼容（等价 admin）。
 角色/密码变更即时撤销旧会话。「用户」页管理账号与角色。
 
