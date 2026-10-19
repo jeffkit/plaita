@@ -142,6 +142,18 @@ flow_worker 自动带上密钥环境。
 密钥来源：`PLAITA_CREDENTIALS_KEY` 环境变量，或自动生成于 DB 同目录的
 `.plaita-credentials.key`。多机部署请统一注入同一密钥。
 
+**安全边界（如实说明，A2R25-08/09）**：凭据行本身是 Fernet 密文，但同一个
+DB 文件里还有 `local_executions.input_json/context_json`（执行 params 与
+`$INPUT` 明文）和 `tenants.contract_secret_key`（对外 HMAC 契约密钥**明文
+列**）。因此 **DB 文件/备份等同敏感数据**：SQLite 文件在 `init_engine` 时
+收紧为 0600，`.plaita-credentials*` 与 `plaita_console.db` 已加入
+`.gitignore`（与 `.dockerignore` 同口径）；多用户主机/备份外发请按凭据
+泄露处置。`contract_secret_key` 的列级加密/密钥管理迁移另单跟踪。另：错/
+缺 `PLAITA_CREDENTIALS_KEY` 时控制台拒绝保存凭据（409
+`credentials_key_mismatch`），启动对账跳过该租户的导出重写（原文件保留），
+不会用新 key 覆盖旧密文造成混合密钥。导出文件在有密文时带
+`__plaita_meta__` 版本头（`key_id`/格式版本），引擎读侧忽略该保留键。
+
 **导出文件默认与 DB 同目录**：未显式设置 `PLAITA_CREDENTIALS_FILE` 时，
 SQLite 部署导出到 DB 同目录的 `.plaita-credentials.json`（非 SQLite 回退
 当前工作目录）。导出文件是 DB 的派生缓存，按 DB 路径落盘让**同一 DB 的

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -1309,6 +1310,44 @@ _TENANT_REBUILD_TABLES = (
 )
 
 
+def _secure_sqlite_db_permissions(db_url: str) -> None:
+    """SQLite 库文件落盘即 0600（A2R25-08）。
+
+    同一个 DB 里还有 ``local_executions.input_json/context_json``（执行 params
+    与 ``$INPUT`` 明文）和 ``tenants.contract_secret_key``（对外 HMAC 契约
+    密钥明文），默认 0644 会让同机其他 UID 直接读走。这里在引擎连接前
+    ``O_CREAT`` 建出文件（受 umask 影响后显式 chmod），已有库也收紧。
+
+    ``:memory:`` 与 ``file:`` URI 跳过（后者路径可能内嵌 query，交给 SQLite
+    自己解析）。无法收紧时 WARNING 但不阻塞启动——权限失败不应让服务起不来，
+    但必须留下可观测痕迹。
+    """
+    try:
+        url = make_url(db_url)
+    except Exception as e:  # noqa: BLE001 — 诊断失败不阻塞启动
+        logger.warning("无法解析 DB URL，跳过 SQLite 文件权限收紧: %s", e)
+        return
+    if url.get_backend_name() != "sqlite":
+        return
+    database = url.database
+    if not database or database == ":memory:" or database.startswith("file:"):
+        return
+    path = Path(database)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            os.chmod(path, 0o600)
+            logger.warning(
+                "SQLite DB 文件权限过宽（0o%o），已收紧为 0600: %s", mode, path
+            )
+    except OSError as e:
+        logger.warning("无法创建/收紧 SQLite DB 文件权限（%s）: %s", path, e)
+
+
 def init_engine(db_url: str) -> Engine:
     """创建/替换全局引擎并对齐 schema。返回引擎实例。
 
@@ -1324,6 +1363,9 @@ def init_engine(db_url: str) -> Engine:
     global _engine, _SessionLocal
     engine_kwargs = _db_engine_kwargs(db_url)
     display_url = _db_display_url(db_url)
+    # A2R25-08：先于首次连接建出/收紧 SQLite 文件权限（0600），避免
+    # create_all/迁移期间以 0644 落盘并被同机其他用户读到。
+    _secure_sqlite_db_permissions(db_url)
     _engine = create_engine(db_url, **engine_kwargs)
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
     logger.info(
