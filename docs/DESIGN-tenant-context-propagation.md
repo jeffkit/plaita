@@ -15,6 +15,7 @@
 | #212 | `async_gen_to_sync`（lazy worker 线程） | 同 #199，整个 `_drive` 在 `ctx.run` 下 |
 | #213 | console `cluster.py` 的 `executor.submit(asyncio.run, ...)` | `submit(ctx.run, asyncio.run, ...)` |
 | #237 | `ThreadParallelExecutor.submit/map`；`Parallel.arun` 的 `run_in_executor`；进程模式分支 | 本文件 + 代码 |
+| #256 | code 节点 Python `subprocess` 沙箱（fresh interpreter） | 父进程经 env 显式传 `PLAITA_TENANT_ID`（`derived`）+ 基础凭据文件/密钥路径；子进程在用户代码前恢复租户，无法恢复则 fail-closed |
 
 每次缺一个显式契约 → 新执行单元再次复发。本契约把「哪些边界必须携带租户、
 怎么携带、缺失时如何处置」写成可 review 的规则。
@@ -32,6 +33,11 @@
 - **进程族**：`Context` 不可 pickle。租户必须作为**执行身份**写入序列化体
   （`ExecutionContext._tenant_id` → `__getstate__` → 子进程 `__setstate__`
   恢复），不能依赖提交进程的 ContextVar。
+- **进程族子进程 runner（code 沙箱）**：租户经 env 显式传入
+  （`PLAITA_TENANT_ID` + 来源），凭据路由同时显式固定为**基础文件**与密钥
+  路径（`PLAITA_CREDENTIALS_FILE` / `PLAITA_CREDENTIALS_KEY_FILE`）；子进程
+  入口在用户代码前 `set_current_tenant`。入口无法恢复租户时必须 fail-closed
+  （不执行用户代码），不能静默按 default 运行（#256）。
 - **`executor.submit` / 第三方 executor**：按线程池规则；无法复制时，必须把
   `tenant_id` 作为显式参数/消息字段传递。
 - **事件总线消费者**：从订阅/消息的 `tenant_id` 字段 `set_current_tenant`，
@@ -57,7 +63,8 @@
 | event_filter 消费者 | 订阅/事件 tenant_id 显式 set/reset | `test_subscription_tenant_timeout` |
 | delay/approval/http_callback/schedule 服务 | `task_config["tenant_id"]` 显式载荷 | 各服务测试 |
 | obs/alerts/metrics/registry/control/log 后台线程 | 基础设施线程，无租户敏感读；日志在调用侧取 tenant | — |
-| code sandbox / agentrun 子进程 | 显式 env/参数，不读 ContextVar | — |
+| code 节点 Python subprocess 沙箱 | 父进程 env 显式携带 `PLAITA_TENANT_ID`（`derived`）+ 基础凭据文件/密钥路径；子进程引导恢复租户，失败 fail-closed（#256） | `test_issue256_subprocess_tenant_credentials` |
+| agentrun 子进程 | 显式 env/参数，不读 ContextVar | — |
 
 ## 4. Owner 裁决（写边界 / 状态闸）
 
@@ -87,7 +94,8 @@
 
 1. 这个边界会不会把代码跑出当前线程/进程/事件循环？
 2. 是线程池？→ 提交侧 `copy_context`（逐任务）；是 asyncio 跨线程？→
-   `asyncio.to_thread`；是进程？→ 租户写入序列化体并在子进程恢复。
+   `asyncio.to_thread`；是进程？→ 租户写入序列化体并在子进程恢复；是
+   子进程 runner？→ env/参数显式携带，子进程入口恢复，无法恢复则 fail-closed。
 3. 添加「租户不退 default」性质测试 + 变异负控（删复制代码必须红）。
 4. 若写存储/凭据，检查租户与路由一致；需要 fail-closed 时先确认 explicit-set
    标记与调用点（见 §4 后续项）。
@@ -96,6 +104,9 @@
 
 `plaita/core/async_utils.py`、`plaita/core/runner.py`、`plaita/core/context.py`、
 `plaita/core/parallel_executor.py`、`plaita/node/concurrent.py`、
-`plaita-console/backend/api/cluster.py`、`plaita/server/tenant_status.py`、
-`plaita/server/{flow_worker,event_filter}.py`、`plaita/server/services/*`。
-证明与负控：`docs/proofs/237-tenant-context-contract.md`、`docs/proofs/data/237-*`。
+`plaita/node/code.py`（code 沙箱子进程，#256）、`plaita/credentials.py`
+（`subprocess_credentials_env`）、`plaita-console/backend/api/cluster.py`、
+`plaita/server/tenant_status.py`、`plaita/server/{flow_worker,event_filter}.py`、
+`plaita/server/services/*`。
+证明与负控：`docs/proofs/237-tenant-context-contract.md`、`docs/proofs/data/237-*`；
+#256：`tests/unit/test_issue256_subprocess_tenant_credentials.py`。

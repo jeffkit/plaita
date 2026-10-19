@@ -154,6 +154,9 @@ return {"stdout": clip_output(stdout, 4000)}   # 超长输出头尾保留，别�
 - `build_subprocess_env(extra=...)` 只放行 `SUBPROCESS_ENV_ALLOWLIST`（`PATH`/`HOME`/
   `TMPDIR`/locale 等）里的宿主变量，再叠加模块级 `SUBPROCESS_ENV_EXTRA` 与调用点 `extra`。
 - 子进程确实需要的凭证/旋钮，走 `extra` 显式声明——白名单即安全边界。
+- 跨进程执行单元还必须**显式**传播租户与凭据路由（`PLAITA_TENANT_ID` + 基础凭据
+  文件/密钥路径，子进程入口恢复租户上下文）；ContextVar 不跨进程，忘了传不等于
+  default。参考 `plaita/node/code.py` 的 plaita#256 实现：无法恢复租户时 fail-closed。
 - `clip_output(text, cap)` 超阈值时保留头 1/4 + 尾 3/4 并标注省略量（诊断信息在尾部）。
   节点输出会进 checkpoint / 事件流，无截断的大输出对低权限 viewer 也是泄露面。
 

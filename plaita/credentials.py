@@ -20,6 +20,11 @@ default/空租户沿用历史文件（零行为变化）。租户隔离由文件
 
     from plaita.credentials import get_credential
     cred = get_credential("feishu-bot")   # -> {"url": "https://...", ...}
+
+跨进程用法（plaita#256）：ContextVar 不跨进程，子进程里的 ``get_credential``
+不会自动继承父进程的租户。需要把基础凭据文件与密钥路径经 env 显式传入
+（:func:`subprocess_credentials_env`），子进程入口再 ``set_current_tenant``，
+由 ``credentials_file()`` 按租户展开旁文件。
 """
 from __future__ import annotations
 
@@ -47,11 +52,16 @@ DEFAULT_KEY_FILE = ".plaita-credentials.key"
 DEFAULT_TENANT_ID = "default"
 
 
+def credentials_base_file() -> Path:
+    """未按租户展开的基础凭据文件路径（``PLAITA_CREDENTIALS_FILE`` 或默认）。"""
+    return Path(os.environ.get("PLAITA_CREDENTIALS_FILE", DEFAULT_FILE))
+
+
 def tenant_credentials_file(tenant_id: Optional[str], base: Optional[Path] = None) -> Path:
     """租户 → 凭据文件路径。default/空 = 基础文件（历史兼容），
     其余租户 = 旁文件 ``<stem>.<tenant_id><suffix>``（与 console 导出同规则）。"""
     if base is None:
-        base = Path(os.environ.get("PLAITA_CREDENTIALS_FILE", DEFAULT_FILE))
+        base = credentials_base_file()
     tid = tenant_id or DEFAULT_TENANT_ID
     if tid == DEFAULT_TENANT_ID:
         return base
@@ -65,11 +75,40 @@ def credentials_file() -> Path:
     return tenant_credentials_file(current_tenant())
 
 
+def credentials_key_file() -> Path:
+    """凭据解密密钥文件路径（``PLAITA_CREDENTIALS_KEY_FILE`` 或 cwd 默认文件）。
+
+    只返回**路径**；``PLAITA_CREDENTIALS_KEY`` 的内联密钥不在此暴露——跨进程
+    调用方应显式传路径，不要把密钥材料复制进子进程环境（plaita#256）。
+    """
+    return Path(os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", DEFAULT_KEY_FILE))
+
+
+def subprocess_credentials_env() -> Dict[str, str]:
+    """子进程凭据路由的显式 env（plaita#256）。
+
+    返回可直接并入 ``plaita.subprocess_env.build_subprocess_env(extra=...)`` 的
+    ``PLAITA_CREDENTIALS_FILE`` / ``PLAITA_CREDENTIALS_KEY_FILE``：
+    子进程的 ``get_credential()`` 与父进程看到同一租户文件，且密钥路径被
+    显式固定，不再静默落回 cwd 的 default 文件。
+
+    ``PLAITA_CREDENTIALS_FILE`` 传的是**基础文件**，不是已展开的旁文件——
+    子进程入口会显式恢复租户上下文，``credentials_file()`` 再按同一规则展开
+    一次。传旁文件会被二次追加 ``.<tenant>`` 后缀（plaita#256 首版实测）。
+    密钥只传**路径**，不传内联 ``PLAITA_CREDENTIALS_KEY``——后者只存在于
+    宿主环境，复制给沙箱代码等于把可解密所有租户文件的密钥交出去。
+    """
+    return {
+        "PLAITA_CREDENTIALS_FILE": str(credentials_base_file()),
+        "PLAITA_CREDENTIALS_KEY_FILE": str(credentials_key_file()),
+    }
+
+
 def _load_key() -> bytes:
     key = os.environ.get("PLAITA_CREDENTIALS_KEY")
     if key:
         return key.encode()
-    key_file = Path(os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", DEFAULT_KEY_FILE))
+    key_file = credentials_key_file()
     if key_file.is_file():
         return key_file.read_bytes().strip()
     raise CredentialError(

@@ -543,6 +543,12 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
         author chooses to run; ``"unsafe"`` 后端连文件系统/网络访问都不限制
         （python ``exec`` 与 js PyExecJS 都没有超时/取消），js 语言还须
         ``allowed_languages`` 显式放行。
+
+        ``"subprocess"`` 自 plaita#256 起会显式传播当前租户与凭据路由
+        （``PLAITA_TENANT_ID`` + 基础凭据文件/密钥路径），子进程内
+        ``get_credential()`` 不再退回 default；无法建立租户上下文时
+        **fail-closed**（用户代码不执行）。但子进程仍有宿主文件系统访问，
+        多租户部署仍应优先 ``"docker"``（容器内不挂载宿主凭据文件）。
     """
     from . import code as _code_module
     effective = default_backend if default_backend is not None else _code_module._DEFAULT_SANDBOX_BACKEND

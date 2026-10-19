@@ -172,6 +172,10 @@ PLAITA_SANDBOX_ALLOWED_BACKENDS=docker PLAITA_CODE_BACKEND=docker \
 未显式配置时的默认档已经挡住 `unsafe` 与 `restricted`；`subprocess` 只在它是生效
 默认后端时可用（worker 默认档即如此）。
 
+`subprocess` 后端自 plaita#256 起显式传播租户与凭据路由（`PLAITA_TENANT_ID` +
+基础凭据文件/密钥路径），无法建立子进程租户上下文时 fail-closed；但它仍有宿主
+文件系统访问。多租户 / 不受信流程请优先 `docker`（容器内不挂载宿主凭据文件）。
+
 ## code 语言白名单（plaita#29 起默认只放行 python） {#code-语言白名单}
 
 `language: "js"` 曾**完全绕开**上面那套档位：js 一律走 PyExecJS（subprocess 拉起外部

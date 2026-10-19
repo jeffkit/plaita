@@ -251,6 +251,13 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 `RLIMIT_AS` 真实生效，会卡住 node/npm/pnpm 系命令的启动（V8 启动期预留 GB 级虚拟地址，
 表现为截断的崩溃栈）——这类命令请保持 `0`。
 
+**多租户凭据（plaita#256）**：`subprocess` 后端启动时把当前执行租户
+（`PLAITA_TENANT_ID`，来源 `derived`）与基础凭据文件/密钥路径显式传入子进程；子进程内
+`current_tenant()` / `credentials_file()` 与所属执行一致，`get_credential()` 读本租户
+旁文件而非 cwd 的 default 文件。子进程无法建立租户上下文时**拒绝执行**（具名
+`TenantContextPropagationError`），不会静默退回 default。`docker` 后端不挂载宿主凭据
+文件；`unsafe` / `restricted` 在宿主进程内沿用执行上下文。
+
 ```json
 {
     "type": "code",
