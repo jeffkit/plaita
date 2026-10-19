@@ -376,6 +376,11 @@ def test_redaction_masks_url_password_and_env_secrets(env: Env):
     for template in templates.json()["templates"]:
         for key, value in (template.get("docker") or {}).get("env", {}).items():
             if "PASSWORD" in key:
+                # B59-01：模板不再内置固定口令，改成纯 ${VAR} 引用（启动时
+                # 从 console 进程环境取值）。引用不含秘密，允许原样回读；
+                # 其他任何值仍必须是 ***。
+                if value.startswith("${") and value.endswith("}"):
+                    continue
                 assert value == "***", (key, value)
 
 

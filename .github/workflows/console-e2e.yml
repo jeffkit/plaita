@@ -28,14 +28,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
 
       - name: Install E2E toolchain
         run: |
@@ -49,7 +49,7 @@ jobs:
       # 浏览器缓存：命中时 playwright install 秒级 no-op；版本不匹配时自动
       # 重下（key 未命中回落 restore-keys，正确性不受影响）
       - name: Cache playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-chromium
@@ -66,7 +66,7 @@ jobs:
       # 再预构建镜像，UI 镜像才有 SPA 可托管。
       # pnpm store 缓存：前端 install 从 ~1min 降到 ~20s
       - name: Cache pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.local/share/pnpm/store
           key: pnpm-${{ runner.os }}-${{ hashFiles('plaita-console/frontend/pnpm-lock.yaml') }}
@@ -81,8 +81,11 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
           cd ..
-          rm -rf backend/webDist
-          cp -R frontend/dist backend/webDist
+          # A59-01：构建上下文只收显式暂存的 _webdist；工作树 webDist 被
+          # .dockerignore 递归排除（避免旧产物进入镜像）。
+          rm -rf backend/_webdist
+          mkdir -p backend/_webdist
+          cp -R frontend/dist/. backend/_webdist/
 
       # #266 P1 回归护栏：构建产物扫描。Vite 会把 VITE_* 构建期内联进公开
       # bundle；bundle 内出现管理密钥形态（变量名/localStorage 键/请求头）
@@ -98,10 +101,10 @@ jobs:
       # buildx + GHA 缓存：suite/YAML 改动时 5 个镜像全部层命中（秒级），
       # 引擎/依赖改动时只重跑受影响层。
       - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build image (redis)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: plaita-console/docker/Dockerfile.redis-e2e
@@ -111,7 +114,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build image (console-backend)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: plaita-console/docker/Dockerfile.e2e
@@ -121,7 +124,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build image (console-ui)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: plaita-console/docker/Dockerfile.e2e
@@ -132,7 +135,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build image (flow-worker)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: plaita-console/docker/Dockerfile.worker-e2e
@@ -142,7 +145,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build image (ext-services)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: plaita-console/docker/Dockerfile.services-e2e
@@ -168,7 +171,7 @@ jobs:
 
       - name: Upload UI debug screenshots
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ui-screenshots
           path: "**/e2e-artifacts/*.png"

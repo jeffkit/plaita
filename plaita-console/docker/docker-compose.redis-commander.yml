@@ -1,0 +1,25 @@
+# Redis Commander —— 可选调试 UI（B59-02）。
+#
+# 它不是默认依赖：该 UI 可对 Redis 执行任意命令，因此：
+#   - 只绑宿主回环（127.0.0.1），不对局域网开放；
+#   - 必须显式提供 HTTP 基本认证（未设置变量时 compose 直接报错）；
+#   - 镜像按 digest 固定（对应上游 2021-07-26 的 latest，标签已不再移动）。
+#
+# 用法（与 deps compose 叠加）：
+#   REDIS_COMMANDER_USER=admin \
+#   REDIS_COMMANDER_PASSWORD='<strong-random>' \
+#     docker compose -f docker-compose.deps.yml \
+#                    -f docker-compose.redis-commander.yml up -d redis-commander
+
+services:
+  redis-commander:
+    image: rediscommander/redis-commander@sha256:19cd0c49f418779fa2822a0496c5e6516d0c792effc39ed20089e6268477e40a
+    container_name: plaita-redis-commander
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+      - HTTP_USER=${REDIS_COMMANDER_USER:?设置 REDIS_COMMANDER_USER}
+      - HTTP_PASSWORD=${REDIS_COMMANDER_PASSWORD:?设置 REDIS_COMMANDER_PASSWORD}
+    depends_on:
+      - redis

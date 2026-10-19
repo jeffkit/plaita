@@ -48,6 +48,8 @@ setup.cfg.mutmut_test
 
 # console 打包时由 build_package.sh 填充的前端产物
 plaita-console/backend/webDist/
+# e2e 构建时显式暂存的前端产物（A59-01：只有它进入 Dockerfile.e2e）
+plaita-console/backend/_webdist/
 .build-venv/
 plaita-console/docker/docker-compose.override.yml
 .argusai/
