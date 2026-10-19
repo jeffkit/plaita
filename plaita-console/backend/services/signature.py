@@ -30,6 +30,12 @@ from time import time
 from typing import Dict, Optional, Protocol, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from plaita.redis_client import (
+    CONSOLE_CONNECT_TIMEOUT_SECONDS,
+    CONSOLE_SOCKET_TIMEOUT_SECONDS,
+    make_redis_client,
+)
+
 logger = logging.getLogger(__name__)
 
 # 允许的时钟偏移（秒），客户端签发时间不应过分超前于此
@@ -114,8 +120,13 @@ class RedisNonceStore:
     """
 
     def __init__(self, redis_url: str, key_prefix: str = _REDIS_NONCE_PREFIX) -> None:
-        import redis  # 延迟导入: 仅启用 Redis 后端时依赖 redis 包
-        self._redis = redis.Redis.from_url(redis_url)
+        # A2R20-05：nonce 在**每个契约请求**上读一次——连接/读超时必须显式
+        # （redis-py 5.x 默认 read=∞，半开 Redis 会让每个请求永久挂起）。
+        self._redis = make_redis_client(
+            redis_url,
+            connect_timeout=CONSOLE_CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=CONSOLE_SOCKET_TIMEOUT_SECONDS,
+        )
         self._prefix = key_prefix
 
     def ping(self) -> None:

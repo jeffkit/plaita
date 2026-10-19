@@ -14,6 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
 
 from plaita.writefile_jail import apply_writefile_jail
+from plaita.redis_client import (
+    CONSOLE_CONNECT_TIMEOUT_SECONDS,
+    CONSOLE_SOCKET_TIMEOUT_SECONDS,
+)
 from plaita.tenant_context import (
     DEFAULT_TENANT_ID,
     TENANT_SOURCE_EXPLICIT,
@@ -61,6 +65,25 @@ def is_api_path(path: str) -> bool:
     return clean == "api" or clean.startswith("api/")
 
 
+def build_health_body(app) -> dict:
+    """``/health`` 响应体（模块级便于单测，不依赖完整 lifespan）。
+
+    ``engine_sync`` 只在集群档存在：A2R20-06 的回填预算触界/失败时启动
+    仍 ready，但这里必须暴露 ``degraded`` 与计数（降级必须可观测）。
+    """
+    body = {
+        "status": "healthy",
+        "local_mode": bool(getattr(app.state, "local_mode", False)),
+    }
+    summary = getattr(app.state, "reconcile_summary", None)
+    if summary:
+        body["reconcile"] = summary
+    engine_sync = getattr(app.state, "engine_sync", None)
+    if engine_sync:
+        body["engine_sync"] = engine_sync
+    return body
+
+
 def make_spa_static_files(directory):
     """构造 BrowserRouter 兜底静态挂载（模块级工厂，便于独立测试）。
 
@@ -94,9 +117,11 @@ def make_spa_static_files(directory):
 redis_client: Redis = None
 
 
-# 建连超时：默认 None 时遇到黑洞主机要等 OS SYN 重试窗口（~2 分钟），而启动
-# 与集群切换都走这条路径（切换还是单 worker 的事件循环）。
-REDIS_CONNECT_TIMEOUT_SECONDS = 2.0
+# 建连/读超时：connect 默认 None 时遇到黑洞主机要等 OS SYN 重试窗口（~2 分钟）；
+# read 默认随 redis-py 版本变化（5.x=∞ / 8.x=5s）——半开 Redis 会永久阻塞启动
+# 与集群切换（后者还是单 worker 的事件循环）。两者都必须显式声明（A2R20-05）。
+REDIS_CONNECT_TIMEOUT_SECONDS = CONSOLE_CONNECT_TIMEOUT_SECONDS
+REDIS_SOCKET_TIMEOUT_SECONDS = CONSOLE_SOCKET_TIMEOUT_SECONDS
 
 
 def connect_redis(url: str) -> Redis:
@@ -113,6 +138,7 @@ def connect_redis(url: str) -> Redis:
         # 让整个读面 500；replace 保留可诊断的替换字符，交给解析层容错。
         encoding_errors="replace",
         socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
     )
     client.ping()
     return client
@@ -241,6 +267,7 @@ async def lifespan(app: FastAPI):
     # plaita-console/scripts/sync_published_to_engine.py 对齐。见 engine_sync 模块
     # docstring 的「边界」段。失败仅 warning。
     if not local_mode and redis_client is not None:
+        app.state.engine_sync = {"status": "running"}
         try:
             try:
                 from .services import engine_sync
@@ -248,11 +275,23 @@ async def lifespan(app: FastAPI):
                 from services import engine_sync  # type: ignore
             stats = engine_sync.sync_all_published_to_engine(
                 redis_client, app.state.store)
+            # A2R20-06：回填有界（pipeline + deadline/版本预算）。超预算或
+            # 有错误时启动继续，但 /health 必须能看出 degraded。
+            degraded = bool(stats.get("truncated")) or stats.get("errors", 0) > 0
+            app.state.engine_sync = dict(stats)
+            app.state.engine_sync["status"] = "degraded" if degraded else "ready"
             logger.info(
-                "启动同步：已发布流程回填引擎存储 → written=%s skipped=%s errors=%s",
+                "启动同步：已发布流程回填引擎存储 → written=%s skipped=%s errors=%s "
+                "truncated=%s(%s) elapsed_ms=%s status=%s",
                 stats.get("written"), stats.get("skipped"), stats.get("errors"),
+                stats.get("truncated"), stats.get("truncated_reason"),
+                stats.get("elapsed_ms"), app.state.engine_sync["status"],
             )
         except Exception as e:  # noqa: BLE001 — 兜底同步不得阻断启动
+            app.state.engine_sync = {
+                "status": "degraded",
+                "error": str(e)[:300],
+            }
             logger.warning("启动同步已发布流程到引擎存储失败（忽略，不阻断启动）: %s", e)
 
         # 租户状态回填（#27）：console 停机期间改过状态 / Redis 被清空时，
@@ -451,13 +490,10 @@ def create_app() -> FastAPI:
         """健康检查端点。
 
         本地模式附带启动对账摘要（``reconcile``）：重启后有僵尸执行被处置时，
-        编排/运维不必翻日志就能看到。
+        编排/运维不必翻日志就能看到。集群档附带 ``engine_sync``（ready/
+        degraded + 回填计数/预算触界原因）。
         """
-        body = {"status": "healthy", "local_mode": bool(getattr(app.state, "local_mode", False))}
-        summary = getattr(app.state, "reconcile_summary", None)
-        if summary:
-            body["reconcile"] = summary
-        return body
+        return build_health_body(app)
 
     # --- 打包发布模式：后端直接托管前端构建产物（pip 安装后无需 Node 环境）---
     # webDist 由 scripts/build_package.sh 从 frontend/dist 填充；仓库开发模式

@@ -30,7 +30,13 @@ def main() -> int:
 
     from plaita.server.task_queue import enqueue_task
 
-    client = redis.Redis.from_url(args.redis_url, decode_responses=True)
+    client = redis.Redis.from_url(
+        args.redis_url,
+        decode_responses=True,
+        # A2R20-05：脚本也是运行时路径，超时预算显式声明（worker 口径）。
+        socket_connect_timeout=5.0,
+        socket_timeout=30.0,
+    )
     moved = 0
     while True:
         if args.limit and moved >= args.limit:

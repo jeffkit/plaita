@@ -7,6 +7,12 @@
 惰性重建，``api/cluster.py`` 切换时负责关闭旧客户端。
 """
 
+from plaita.redis_client import (
+    CONSOLE_CONNECT_TIMEOUT_SECONDS,
+    CONSOLE_SOCKET_TIMEOUT_SECONDS,
+    make_async_redis_client,
+)
+
 # Redis 抖动时 SSE 循环的重试间隔（异常不终结流）。
 SSE_REDIS_RETRY_SECONDS = 0.5
 
@@ -23,11 +29,17 @@ def get_sse_async_redis(request):
             from ..config import get_settings
         except ImportError:  # 平铺布局（cwd=backend）运行时
             from config import get_settings  # type: ignore
-        import redis.asyncio as aioredis
 
         # 活动集群的 Redis 优先于 env（plaita#65）：切换集群会更新
         # app.state.redis_url 并清掉本缓存，直接读 env 会继续连旧集群。
         url = getattr(request.app.state, "redis_url", None) or get_settings().redis_url
-        client = aioredis.from_url(url, decode_responses=True)
+        # A2R20-05：SSE 的底层 socket 读也必须有上界（半开 Redis 不得让生成器
+        # 无限等待）；pubsub 自身按 1s 轮询，5s 读超时只兜网络层。
+        client = make_async_redis_client(
+            url,
+            decode_responses=True,
+            connect_timeout=CONSOLE_CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=CONSOLE_SOCKET_TIMEOUT_SECONDS,
+        )
         request.app.state.execution_sse_aioredis = client
     return client

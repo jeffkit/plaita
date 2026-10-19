@@ -50,6 +50,8 @@ import os
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs, quote, unquote, unquote_plus, urlsplit
 
+from plaita.redis_client import apply_redis_timeout_defaults
+
 logger = logging.getLogger("plaita.server.factory")
 
 _EXPERIMENTAL_DB_ENV = "PLAITA_ALLOW_EXPERIMENTAL_DB"
@@ -1907,7 +1909,9 @@ def create_storage_component(storage_type, component_type, **kwargs):
             # RedisUrlError（具名、可操作），不再静默回落 localhost:6379/0
             # ——那会让存储与队列/事件总线连到两个 Redis。
             target = _parse_redis_url(redis_url)
-            conn = target.client_kwargs()
+            # A2R20-05：URL query 显式值优先；缺省补 worker 口径 5s/30s——
+            # 存储侧与此前被漏掉的队列/租约客户端同一份预算。
+            conn = apply_redis_timeout_defaults(target.client_kwargs())
             # 多租户路由包装器：按 ContextVar 租户选择 namespace
             # （default → 历史 plaita 前缀；其余 plaita:{tenant}）
             if kwargs.get("tenant_routing"):

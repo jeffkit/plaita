@@ -26,6 +26,8 @@ python -m plaita_console              # 或使用 plaita-console 命令
 | `PLAITA_CONSOLE_HOST` / `PLAITA_CONSOLE_PORT` | 监听地址，默认 `0.0.0.0:8080` |
 | `PLAITA_CONSOLE_REDIS_URL` | Redis 连接 |
 | `PLAITA_CONSOLE_DB_URL` | 流程定义持久化（默认本地 SQLite） |
+| `PLAITA_CONSOLE_DB_CONNECT_TIMEOUT` / `..._POOL_TIMEOUT` | 非 SQLite 库的连接/池超时（默认 5s；黑洞/半开 DB fail-fast） |
+| `PLAITA_CONSOLE_ENGINE_SYNC_DEADLINE` | 启动回填墙钟预算（默认 5s；超时仍启动，`/health.engine_sync=degraded`） |
 | `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN=true` | 本地开发免密；局域网/生产请改设 `PLAITA_CONSOLE_ADMIN_API_KEY` |
 | `PLAITA_CONSOLE_SECRET_ID` / `SECRET_KEY` | 对外契约接口的 HMAC 密钥 |
 

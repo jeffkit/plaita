@@ -14,6 +14,7 @@ from redis import Redis
 
 from plaita.event.core import Event, EventSubscription, EventSubscriptionStorage, EventBus, EventStorage
 from plaita.event.timeout import SubscriptionTimeoutChecker
+from plaita.redis_client import make_redis_client
 from plaita.server.event_reconcile import EventReconciler
 from plaita.storage.base import ExecutionStorage
 from plaita.server.task_queue import enqueue_task
@@ -487,7 +488,7 @@ class EventFilter:
         Returns:
             EventFilter: 事件过滤器实例
         """
-        redis_client = Redis.from_url(redis_url)
+        redis_client = make_redis_client(redis_url)
         return EventFilter(
             execution_storage=execution_storage,
             subscription_storage=subscription_storage,

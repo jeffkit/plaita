@@ -392,6 +392,18 @@ alembic 版本化，引导收敛在 `services/schema_migrations.py`，启动时�
 只处理 `running`，条件更新（CAS）避免与执行线程并发完成打架；结果写入
 `GET /health` 的 `reconcile` 字段，启动日志同时告警。
 
+集群档另有 `GET /health` 的 `engine_sync` 字段：启动回填已发布流程到引擎
+Redis 的结果（`status=ready/degraded`、`written/skipped/errors/versions/
+batches/truncated/truncated_reason/elapsed_ms`）。回填按每批 200 版本一个
+pipeline，并受墙钟预算 `PLAITA_CONSOLE_ENGINE_SYNC_DEADLINE`（默认 5s）与
+`PLAITA_CONSOLE_ENGINE_SYNC_MAX_VERSIONS`（默认 5 万）约束；触界只降级、
+不阻断启动，日志有 WARNING。Redis 半开时回填在声明的读超时内失败并降级，
+不会让 readiness 永久不达。
+
+非 SQLite 的 `PLAITA_CONSOLE_DB_URL` 显式设置 connect/pool 超时（默认 5s）
+与 PG `lock_timeout=5s`；DB 黑洞/半开时启动在约 5s 内具名失败（不回退
+`create_all` 再阻塞一次），启动日志中的目标 URL 已脱敏。
+
 ### 已知缺口（本 runbook 尚未覆盖） {#已知缺口}
 
 - **回滚演练**：alembic 的 `downgrade` 路径尚无测试覆盖（当前只有基线版本）。

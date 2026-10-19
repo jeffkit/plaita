@@ -333,7 +333,11 @@ async def list_service_types(
         resource="cluster",
     )
     import json
-    from redis import Redis
+    from plaita.redis_client import (
+        CONSOLE_CONNECT_TIMEOUT_SECONDS,
+        CONSOLE_SOCKET_TIMEOUT_SECONDS,
+        make_redis_client,
+    )
     
     manager = _require_service_manager()
     
@@ -341,7 +345,11 @@ async def list_service_types(
     external_running_counts: dict = {}
     try:
         redis_url = manager.config.redis.get("url", "redis://localhost:6379/0")
-        redis_client = Redis.from_url(redis_url)
+        redis_client = make_redis_client(
+            redis_url,
+            connect_timeout=CONSOLE_CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=CONSOLE_SOCKET_TIMEOUT_SECONDS,
+        )
         
         pattern = "plaita:registry:*"
         keys = redis_client.keys(pattern)
@@ -518,7 +526,11 @@ async def list_managed_instances(
         resource="cluster", target=service_type or "",
     )
     from fastapi import Request
-    from redis import Redis
+    from plaita.redis_client import (
+        CONSOLE_CONNECT_TIMEOUT_SECONDS,
+        CONSOLE_SOCKET_TIMEOUT_SECONDS,
+        make_redis_client,
+    )
     import json
     
     manager = _require_service_manager()
@@ -548,7 +560,11 @@ async def list_managed_instances(
         try:
             # 获取 Redis 客户端
             redis_url = manager.config.redis.get("url", "redis://localhost:6379/0")
-            redis_client = Redis.from_url(redis_url)
+            redis_client = make_redis_client(
+                redis_url,
+                connect_timeout=CONSOLE_CONNECT_TIMEOUT_SECONDS,
+                socket_timeout=CONSOLE_SOCKET_TIMEOUT_SECONDS,
+            )
             
             pattern = "plaita:registry:*"
             keys = redis_client.keys(pattern)

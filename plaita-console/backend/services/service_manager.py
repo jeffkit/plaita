@@ -23,6 +23,12 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+from plaita.redis_client import (
+    HEALTH_CONNECT_TIMEOUT_SECONDS,
+    HEALTH_SOCKET_TIMEOUT_SECONDS,
+    make_redis_client,
+)
+
 try:
     from .atomic_io import atomic_write_text
 except ImportError:  # 平铺布局（cwd=backend）运行时
@@ -1072,9 +1078,12 @@ class ServiceManager:
     async def _check_redis_health(self, infra: InfrastructureConfig) -> Dict[str, Any]:
         """检查 Redis 健康状态"""
         try:
-            from redis import Redis
             url = infra.url or self.config.redis.get("url", "redis://localhost:6379/0")
-            client = Redis.from_url(url, socket_connect_timeout=3)
+            client = make_redis_client(
+                url,
+                connect_timeout=HEALTH_CONNECT_TIMEOUT_SECONDS,
+                socket_timeout=HEALTH_SOCKET_TIMEOUT_SECONDS,
+            )
             ping_result = client.ping()
             info = client.info("server")
             client.close()

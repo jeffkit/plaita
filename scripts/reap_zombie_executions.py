@@ -81,7 +81,13 @@ def build_storage(redis_url: str, namespace: str) -> RedisExecutionStorage:
     开箱即坏的根因）。URL 解析交给 ``Redis.from_url``（username/db/ssl 一并
     覆盖），并沿用存储自身的 ``decode_responses=True``。
     """
-    client = redis.Redis.from_url(redis_url, decode_responses=True)
+    client = redis.Redis.from_url(
+        redis_url,
+        decode_responses=True,
+        # A2R20-05：CLI 运维路径同样不得无限阻塞（worker 口径）。
+        socket_connect_timeout=5.0,
+        socket_timeout=30.0,
+    )
     return RedisExecutionStorage(client=client, namespace=namespace)
 
 

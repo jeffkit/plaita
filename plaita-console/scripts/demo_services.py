@@ -24,7 +24,12 @@ def main():
     print("🚀 Plaita Console 演示服务启动中...\n")
     
     # 连接 Redis
-    redis_client = Redis.from_url('redis://localhost:6379/0')
+    redis_client = Redis.from_url(
+        'redis://localhost:6379/0',
+        # A2R20-05：演示脚本也走统一预算（worker 口径）。
+        socket_connect_timeout=5.0,
+        socket_timeout=30.0,
+    )
     
     try:
         redis_client.ping()

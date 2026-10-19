@@ -134,7 +134,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     import redis as _redis
-    client = _redis.Redis.from_url(redis_url, decode_responses=True)
+    client = _redis.Redis.from_url(
+        redis_url,
+        decode_responses=True,
+        # A2R20-05：回填脚本同样是启动/运维路径，预算显式声明。
+        socket_connect_timeout=5.0,
+        socket_timeout=30.0,
+    )
     client.ping()
 
     written = skipped = errors = 0

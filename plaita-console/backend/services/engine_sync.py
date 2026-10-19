@@ -26,9 +26,16 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, Optional, Union
+import os
+import time
+from typing import Any, Dict, Iterator, Optional, Tuple, Union
 
 from redis import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
+from plaita.core.url_redaction import _redact_env_value
+from plaita.tenant_context import guard_tenant_write
 
 try:
     from plaita.storage.redis import RedisFlowStorage
@@ -44,6 +51,17 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     from plaita.server.tenant_context import tenant_namespace
 
 logger = logging.getLogger(__name__)
+
+#: 每批 pipeline 的版本数（A2R20-06）：3 次往返/版本 → ~1 次/批。
+DEFAULT_SYNC_BATCH_SIZE = 200
+#: 启动回填墙钟预算（秒）：超预算不阻断启动，状态经 /health 暴露为 degraded。
+DEFAULT_SYNC_DEADLINE_SECONDS = 5.0
+#: 单次回填的版本数上限（与 deadline 双保险；触界即 truncated）。
+DEFAULT_SYNC_MAX_VERSIONS = 50_000
+
+_BATCH_ENV = "PLAITA_CONSOLE_ENGINE_SYNC_BATCH"
+_DEADLINE_ENV = "PLAITA_CONSOLE_ENGINE_SYNC_DEADLINE"
+_MAX_VERSIONS_ENV = "PLAITA_CONSOLE_ENGINE_SYNC_MAX_VERSIONS"
 
 
 def _storage(redis: Redis, tenant_id: Optional[str] = None) -> RedisFlowStorage:
@@ -96,30 +114,61 @@ def remove_flow_version_from_engine(redis: Redis, flow_id: str, version: str,
         logger.warning("清理引擎存储版本 %s@%s 失败: %s", flow_id, version, e, exc_info=True)
 
 
-def sync_all_published_to_engine(redis: Redis, store, tenant_id: Optional[str] = None
-                                 ) -> Dict[str, int]:
-    """把 store 里全部 status=published 的版本回填/对齐进引擎 Redis 存储。
-
-    幂等：``save_flow`` 是覆盖写，重复调用只会重写同样内容，不产生脏数据。
-    用于启动时的漂移兜底（历史版本从未重跑发布）以及运维批量对齐。
-
-    入参 ``store`` 为 console FlowStore（鸭子类型：只需 ``list_flows`` /
-    ``list_versions``，避免与 flow_store 循环 import）。``tenant_id=None``
-    表示跨全部租户（``list_flows(None)`` 返回平台全量）。
-
-    **仅写本进程所连的 Redis**——跨机的 worker 需在目标机器另跑回填脚本
-    （见模块 docstring 的「边界」段）。返回 ``{"written", "skipped", "errors"}``。
-
-    本函数绝不抛异常：任何单条失败都计入 errors 并继续，供启动钩子安全调用。
-    """
-    stats = {"written": 0, "skipped": 0, "errors": 0}
+def _env_positive(kind, name: str, default):
+    """环境变量 → 正数；非法值 WARNING + 默认（降级必须可观测）。"""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
     try:
-        flows = store.list_flows(tenant_id)
-    except Exception as e:  # 读库失败：整体放弃，交由调用方处理
-        logger.warning("回填引擎存储：列举流程失败（租户 %s）: %s", tenant_id, e, exc_info=True)
-        stats["errors"] += 1
-        return stats
+        value = kind(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or value <= 0:
+        logger.warning(
+            "%s=%s 非法（需正数），使用默认 %r", name, _redact_env_value(raw), default
+        )
+        return default
+    return value
 
+
+def _resolve_sync_budget(
+    batch_size: Optional[int],
+    deadline_seconds: Optional[float],
+    max_versions: Optional[int],
+) -> Tuple[int, float, int]:
+    """显式参数 > env > 默认。"""
+    batch = (
+        int(batch_size)
+        if batch_size is not None
+        else _env_positive(int, _BATCH_ENV, DEFAULT_SYNC_BATCH_SIZE)
+    )
+    deadline = (
+        float(deadline_seconds)
+        if deadline_seconds is not None
+        else _env_positive(float, _DEADLINE_ENV, DEFAULT_SYNC_DEADLINE_SECONDS)
+    )
+    max_versions = (
+        int(max_versions)
+        if max_versions is not None
+        else _env_positive(int, _MAX_VERSIONS_ENV, DEFAULT_SYNC_MAX_VERSIONS)
+    )
+    return max(1, batch), max(0.001, deadline), max(1, max_versions)
+
+
+def _iter_published_entries(store, tenant_id: Optional[str], stats: Dict[str, Any]
+                            ) -> Iterator[Tuple[Optional[str], str, str, str]]:
+    """逐个产出 ``(tenant_id, flow_id, version, definition)``。
+
+    优先用 FlowStore 的**分页批量**查询（``iter_published_versions``）：把
+    「2 次 SQL/flow」收敛到「1 次 SQL/页」，使启动回填不再随 flow 数线性增长。
+    鸭子类型 store（测试替身/旧实现）没有该方法时退回逐 flow 列举。
+    """
+    bulk = getattr(store, "iter_published_versions", None)
+    if callable(bulk):
+        yield from bulk(tenant_id)
+        return
+
+    flows = store.list_flows(tenant_id)
     for flow in flows:
         fid = getattr(flow, "flow_id", None)
         ftenant = getattr(flow, "tenant_id", tenant_id) or tenant_id
@@ -127,20 +176,178 @@ def sync_all_published_to_engine(redis: Redis, store, tenant_id: Optional[str] =
             continue
         try:
             versions = store.list_versions(fid, tenant_id=ftenant)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 单 flow 读失败不拖垮其余 flow
             logger.warning("回填引擎存储：列举 %s 版本失败: %s", fid, e)
             stats["errors"] += 1
             continue
         for v in versions:
             if getattr(v, "status", "") != "published":
                 continue
-            if not (getattr(v, "definition", "") or "").strip():
+            yield ftenant, fid, v.version, getattr(v, "definition", "") or ""
+
+
+def _flush_batch(redis: Redis, batch: list, stats: Dict[str, Any]) -> Optional[str]:
+    """一个 pipeline 写一批：SET + SADD(flow_list) + SADD(flow_versions)。
+
+    返回 ``None`` 表示继续；返回具名原因表示**停止**（连接级失败/租户闸拒绝）。
+    普通数据错误（如某条命令 WRONGTYPE）计错后继续后续批次。
+    """
+    if not batch:
+        return None
+    try:
+        # 与 RedisFlowStorage.save_flow 同源的写入门禁（#239 phase 2）：
+        # 批量化不得绕过「租户来源 default 时 fail-closed」。
+        guard_tenant_write("redis.save_flow")
+    except Exception as e:  # noqa: BLE001 — 具名拒绝已在 guard 内，计数即可
+        stats["errors"] += len(batch)
+        logger.warning("回填引擎存储：租户写入门禁拒绝（%d 版本）: %s", len(batch), e)
+        return "tenant_guard"
+
+    pipe = redis.pipeline(transaction=False)
+    for key, fid, version, payload, flow_list_key, versions_key in batch:
+        pipe.set(key, payload)
+        pipe.sadd(flow_list_key, fid)
+        pipe.sadd(versions_key, version)
+    try:
+        pipe.execute()
+    except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+        stats["errors"] += len(batch)
+        logger.warning(
+            "回填引擎存储：批次写入失败（%d 版本，连接/超时）: %s", len(batch), e
+        )
+        return "redis_unavailable"
+    except Exception as e:  # noqa: BLE001 — 数据级错误：计错但继续后续批次
+        stats["errors"] += len(batch)
+        logger.warning("回填引擎存储：批次写入失败（%d 版本）: %s", len(batch), e)
+        return None
+    stats["written"] += len(batch)
+    stats["batches"] += 1
+    return None
+
+
+def sync_all_published_to_engine(
+    redis: Redis,
+    store,
+    tenant_id: Optional[str] = None,
+    *,
+    batch_size: Optional[int] = None,
+    deadline_seconds: Optional[float] = None,
+    max_versions: Optional[int] = None,
+) -> Dict[str, Any]:
+    """把 store 里全部 status=published 的版本回填/对齐进引擎 Redis 存储。
+
+    幂等：写入是覆盖写，重复调用只会重写同样内容，不产生脏数据。
+    用于启动时的漂移兜底（历史版本从未重跑发布）以及运维批量对齐。
+
+    入参 ``store`` 为 console FlowStore（鸭子类型：只需 ``list_flows`` /
+    ``list_versions``，避免与 flow_store 循环 import）。``tenant_id=None``
+    表示跨全部租户（``list_flows(None)`` 返回平台全量）。
+
+    **A2R20-06 预算**（启动路径不得无界）：
+    - 每 ``batch_size``（默认 200）个版本一个 pipeline：3 次往返/版本 →
+      ~1 次/批；
+    - 墙钟 ``deadline_seconds``（默认 5s）与版本数 ``max_versions``（默认
+      50k）任一触界即停，已读到的部分批次仍写出，剩余标记 ``truncated``；
+    - 触界/失败都留 WARNING，返回值供 ``/health`` 暴露 ``ready/degraded``。
+
+    **仅写本进程所连的 Redis**——跨机的 worker 需在目标机器另跑回填脚本
+    （见模块 docstring 的「边界」段）。返回写入/跳过/错误/预算统计。
+
+    本函数绝不抛异常：任何失败都计入 errors，供启动钩子安全调用。
+    """
+    batch_size, deadline_seconds, max_versions = _resolve_sync_budget(
+        batch_size, deadline_seconds, max_versions
+    )
+    stats: Dict[str, Any] = {
+        "written": 0,
+        "skipped": 0,
+        "errors": 0,
+        "versions": 0,
+        "batches": 0,
+        "truncated": False,
+        "truncated_reason": None,
+        "batch_size": batch_size,
+        "deadline_seconds": deadline_seconds,
+        "max_versions": max_versions,
+        "elapsed_ms": 0,
+    }
+    started = time.monotonic()
+    deadline_at = started + deadline_seconds
+    batch: list = []
+    stop_reason: Optional[str] = None
+
+    try:
+        entries = _iter_published_entries(store, tenant_id, stats)
+        for ftenant, fid, version, definition in entries:
+            if not definition.strip():
                 stats["skipped"] += 1
                 continue
-            if sync_flow_to_engine(redis, fid, v.version, v.definition,
-                                   tenant_id=ftenant):
-                stats["written"] += 1
-            else:
+            if stats["versions"] >= max_versions:
+                stop_reason = "max_versions"
+                break
+            if time.monotonic() >= deadline_at:
+                stop_reason = "deadline"
+                break
+
+            try:
+                defn = json.loads(definition) if isinstance(definition, str) else dict(definition)
+            except (TypeError, ValueError) as e:
+                logger.warning("回填引擎存储：%s@%s 定义不是合法 JSON: %s", fid, version, e)
                 stats["errors"] += 1
-    logger.info("引擎存储回填完成：%s", stats)
+                continue
+            defn["flow_id"] = fid
+            defn["version"] = version
+            try:
+                payload = json.dumps(defn)
+            except (TypeError, ValueError) as e:
+                logger.warning("回填引擎存储：%s@%s 定义不可序列化: %s", fid, version, e)
+                stats["errors"] += 1
+                continue
+
+            ns = tenant_namespace(ftenant)
+            batch.append((
+                f"{ns}:flow:{fid}:{version}",
+                fid,
+                version,
+                payload,
+                f"{ns}:flow_list",
+                f"{ns}:flow_versions:{fid}",
+            ))
+            stats["versions"] += 1
+            if len(batch) >= batch_size:
+                reason = _flush_batch(redis, batch, stats)
+                batch = []
+                if reason is not None:
+                    stop_reason = reason
+                    break
+    except Exception as e:  # noqa: BLE001 — 读库/分页查询失败：不阻断启动
+        stats["errors"] += 1
+        stop_reason = "store_error"
+        logger.warning("回填引擎存储：列举已发布版本失败（租户 %s）: %s",
+                       tenant_id, e, exc_info=True)
+
+    # 预算/读库触界时，已读到的部分批次仍写出（不丢已完成的工作）；
+    # 写入本身失败（连接/租户闸）时不重试。
+    if batch and stop_reason not in ("redis_unavailable", "tenant_guard"):
+        reason = _flush_batch(redis, batch, stats)
+        if reason is not None:
+            stop_reason = reason
+
+    stats["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    if stop_reason is not None:
+        stats["truncated"] = True
+        stats["truncated_reason"] = stop_reason
+        logger.warning(
+            "引擎存储回填未完成（%s）：written=%s skipped=%s errors=%s "
+            "versions=%s batches=%s elapsed_ms=%s（启动继续，health=degraded）",
+            stop_reason, stats["written"], stats["skipped"], stats["errors"],
+            stats["versions"], stats["batches"], stats["elapsed_ms"],
+        )
+    else:
+        logger.info(
+            "引擎存储回填完成：written=%s skipped=%s errors=%s versions=%s "
+            "batches=%s elapsed_ms=%s",
+            stats["written"], stats["skipped"], stats["errors"],
+            stats["versions"], stats["batches"], stats["elapsed_ms"],
+        )
     return stats

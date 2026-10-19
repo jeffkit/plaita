@@ -69,7 +69,12 @@ def build_storage(redis_url: Optional[str]):
         return None
     from redis import Redis  # noqa: PLC0415  lazy：plaita[redis]
     from plaita.storage.redis import RedisExecutionStorage  # noqa: PLC0415
-    return RedisExecutionStorage(client=Redis.from_url(redis_url))
+    return RedisExecutionStorage(client=Redis.from_url(
+        redis_url,
+        # A2R20-05：CLI 运维路径同样不得无限阻塞（worker 口径）。
+        socket_connect_timeout=5.0,
+        socket_timeout=30.0,
+    ))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

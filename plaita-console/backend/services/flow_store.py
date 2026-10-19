@@ -7,15 +7,20 @@ API 层（M3）可通过 ``run_in_executor`` 调用，避免引入 aiosqlite 额
 """
 import json
 import logging
+import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Column, DateTime, create_engine, delete, select, text, update
-from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import (
+    Column, DateTime, create_engine, delete, select, text, tuple_, update,
+)
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+
+from plaita.core.url_redaction import _redact_env_value
 
 try:
     from ..models.flow import (
@@ -642,6 +647,51 @@ class FlowStore:
                 for r in rows
             ]
 
+    def iter_published_versions(
+        self, tenant_id: Optional[str] = None, page_size: int = 1000
+    ) -> Iterator[Tuple[str, str, str, str]]:
+        """分页流式返回全部 published 版本：(tenant_id, flow_id, version, definition)。
+
+        A2R20-06：启动回填原先对每个 flow 调一次 ``list_versions``（2 次 SQL/
+        flow），pipeline 只解决了 Redis 往返，SQL 仍随 flow 数线性增长。这里
+        用键集分页（每页 1 次 SQL、按 ``(tenant_id, flow_id, version)`` 排序），
+        SQL 往返降到 O(页数)；definition 按页取回，内存不随总版本数增长。
+        """
+        page_size = max(1, int(page_size))
+        cursor: Optional[Tuple[str, str, str]] = None
+        while True:
+            with self._session_local() as session:
+                stmt = select(
+                    FlowVersion.tenant_id,
+                    FlowVersion.flow_id,
+                    FlowVersion.version,
+                    FlowVersion.definition,
+                ).where(FlowVersion.status == "published")
+                stmt = stmt.where(self._tenant_filter(FlowVersion, tenant_id))
+                if cursor is not None:
+                    stmt = stmt.where(
+                        tuple_(
+                            FlowVersion.tenant_id,
+                            FlowVersion.flow_id,
+                            FlowVersion.version,
+                        ) > tuple_(*cursor)
+                    )
+                rows = session.execute(
+                    stmt.order_by(
+                        FlowVersion.tenant_id,
+                        FlowVersion.flow_id,
+                        FlowVersion.version,
+                    ).limit(page_size)
+                ).all()
+            if not rows:
+                return
+            for row in rows:
+                yield (row[0] or "", row[1], row[2], row[3] or "")
+            if len(rows) < page_size:
+                return
+            last = rows[-1]
+            cursor = (last[0] or "", last[1], last[2])
+
     def publish_version(
         self, flow_id: str, version: str, tenant_id: Optional[str] = None
     ) -> FlowVersionOut:
@@ -1159,6 +1209,86 @@ def delete_local_logs(
 
 # ============ 初始化辅助 ============
 
+# A2R20-07：非 SQLite 后端的启动连接/池预算。此前 ``create_engine(db_url)`` 无
+# connect timeout——PG 半开（accept 但不完成握手）时 alembic 迁移永久阻塞，
+# readiness 永不达成。取值与仓内既有 5s 口径对齐；环境变量可覆盖。
+DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_DB_POOL_TIMEOUT_SECONDS = 5.0
+#: PG 迁移/DDL 等锁上界（仅锁等待，不限制语句总时长）。
+DEFAULT_DB_LOCK_TIMEOUT_MS = 5000
+_DB_CONNECT_TIMEOUT_ENV = "PLAITA_CONSOLE_DB_CONNECT_TIMEOUT"
+_DB_POOL_TIMEOUT_ENV = "PLAITA_CONSOLE_DB_POOL_TIMEOUT"
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or value <= 0:
+        logger.warning(
+            "%s=%s 非法（需正数秒），使用默认 %.1fs",
+            name, _redact_env_value(raw), default,
+        )
+        return default
+    return value
+
+
+def _db_display_url(db_url: str) -> str:
+    """启动日志用的脱敏目标（口令 ``***``）。"""
+    try:
+        return make_url(db_url).render_as_string(hide_password=True)
+    except Exception:  # noqa: BLE001 — 渲染失败不得炸启动路径
+        return "<unparsable db_url>"
+
+
+def _db_engine_kwargs(db_url: str) -> dict:
+    """按后端注入连接/池超时；SQLite 路径零变化。"""
+    url = make_url(db_url)
+    backend = url.get_backend_name()
+    kwargs: dict = {"future": True}
+    if backend == "sqlite":
+        return kwargs
+
+    connect_timeout = _env_positive_float(
+        _DB_CONNECT_TIMEOUT_ENV, DEFAULT_DB_CONNECT_TIMEOUT_SECONDS
+    )
+    pool_timeout = _env_positive_float(
+        _DB_POOL_TIMEOUT_ENV, DEFAULT_DB_POOL_TIMEOUT_SECONDS
+    )
+    kwargs["pool_pre_ping"] = True
+    kwargs["pool_timeout"] = pool_timeout
+
+    connect_args: dict = {}
+    if backend in ("postgresql", "mysql", "mariadb"):
+        # psycopg/psycopg2/pymysql 的 connect_timeout 都是整数秒（最小 1）。
+        connect_args["connect_timeout"] = max(1, int(connect_timeout))
+    if backend == "postgresql" and "options" not in url.query:
+        connect_args["options"] = f"-c lock_timeout={DEFAULT_DB_LOCK_TIMEOUT_MS}"
+    if connect_args:
+        kwargs["connect_args"] = connect_args
+    return kwargs
+
+
+def _is_db_connection_error(exc: BaseException) -> bool:
+    """连接/握手/超时类错误（沿 cause/context 链看，alembic 会包一层）。"""
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (OperationalError, InterfaceError)):
+            return True
+        if isinstance(current, DBAPIError) and getattr(
+            current, "connection_invalidated", False
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 # 需要补 tenant_id 列的表（唯一约束无需变更，ADD COLUMN 即可）
 _TENANT_ADDCOLUMN_TABLES = (
     "audit_logs",
@@ -1186,10 +1316,21 @@ def init_engine(db_url: str) -> Engine:
     空库 create_all + 认领基线；存量库（无 alembic_version）认领基线不重放；
     已有版本记录则 upgrade head。这样「升级到哪个 schema」有版本可查、可回滚，
     不再依赖散落的一次性补列脚本。
+
+    A2R20-07：非 SQLite 后端显式声明 connect/pool 超时与 ``pool_pre_ping``；
+    连接类失败**不回退** ``create_all``（半开 DB 上回退只是再阻塞一次），
+    具名抛出让启动 fail-fast。
     """
     global _engine, _SessionLocal
-    _engine = create_engine(db_url, future=True)
+    engine_kwargs = _db_engine_kwargs(db_url)
+    display_url = _db_display_url(db_url)
+    _engine = create_engine(db_url, **engine_kwargs)
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
+    logger.info(
+        "FlowStore 引擎参数: %s（%s）",
+        display_url,
+        engine_kwargs.get("connect_args") or "sqlite（无池超时）",
+    )
     try:
         from . import schema_migrations
     except ImportError:  # 平铺布局（cwd=backend）运行时
@@ -1197,12 +1338,23 @@ def init_engine(db_url: str) -> Engine:
     try:
         _engine.schema_summary = schema_migrations.run_migrations(_engine, db_url)
     except Exception as exc:  # noqa: BLE001 — 见下：仅在 alembic 缺失时降级
+        if _is_db_connection_error(exc):
+            # 连接/握手/超时：回退 create_all 只会用同一不可达目标再阻塞一次。
+            _engine = None
+            _SessionLocal = None
+            logger.error(
+                "FlowStore 引擎初始化失败：数据库连接失败/超时（%s）: %s",
+                display_url, exc,
+            )
+            raise
         # alembic 是 console 的依赖；缺失（如最小安装/测试桩）时退回旧的
         # create_all 路径，保证「装不全也能启动」，但明确告警提示 schema 无版本记录。
         logger.warning("alembic 迁移不可用（%s），回退 create_all（schema 将无版本记录）", exc)
         create_all()
         _engine.schema_summary = {"action": "create_all-fallback", "error": str(exc)}
-    logger.info("FlowStore 引擎已初始化: %s（schema=%s）", db_url, _engine.schema_summary)
+    logger.info(
+        "FlowStore 引擎已初始化: %s（schema=%s）", display_url, _engine.schema_summary
+    )
     return _engine
 
 

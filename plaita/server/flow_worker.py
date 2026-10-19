@@ -46,6 +46,7 @@ from plaita.storage.fenced import (
 )
 from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STATUSES
 from plaita.logger import logger
+from plaita.redis_client import make_redis_client
 from plaita.writefile_jail import apply_writefile_jail
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 # #42（W10-a）：worker 容量上报——把「还能接多少活」写进既有 registry metadata
@@ -4443,7 +4444,16 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         metrics_host: Optional[str] = None,
         alert_webhook: Optional[str] = None,
     ):
-        redis_client = redis_client or Redis.from_url(redis_url)
+        # A2R20-05：队列/租约共用客户端——connect 5s / read 30s 显式声明
+        # （read 必须大于 XREADGROUP BLOCK 窗口，见 task_queue）。
+        if redis_client is None:
+            redis_client = make_redis_client(redis_url)
+            pool_kwargs = redis_client.connection_pool.connection_kwargs
+            logger.info(
+                "Redis 超时预算: connect=%ss read=%ss（PLAITA_REDIS_* 可覆盖）",
+                pool_kwargs.get("socket_connect_timeout"),
+                pool_kwargs.get("socket_timeout"),
+            )
         super().__init__(
             execution_storage,
             flow_storage,
@@ -5498,7 +5508,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         无 redis 客户端（内存 worker / 直连单测）→ 同样返回 None（fail-closed）。
         **生产可达性已核实（2026-10-11 验收要求）**：`RedisFlowWorker.__init__`
-        的 `redis_client = redis_client or Redis.from_url(redis_url)` 保证实例
+        的 `redis_client = redis_client or make_redis_client(redis_url)` 保证实例
         恒有真客户端，`run()` 消费循环也只能经该实例进入 ⇒ 本分支在生产
         **不可达**，只有 `__new__` 骨架 / 内存 worker / 直连单测会走到。仍按
         fail-closed 处理是**纵深防御**：即便将来有人绕开 `__init__`，也不会

@@ -10,6 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from redis import Redis
 
+from plaita.redis_client import (
+    HEALTH_CONNECT_TIMEOUT_SECONDS,
+    HEALTH_SOCKET_TIMEOUT_SECONDS,
+    make_redis_client,
+)
+
 try:
     from ..auth import ensure_platform_admin, require_auth
 except ImportError:
@@ -334,7 +340,11 @@ async def list_services(
                         # 检测 Redis 连接
                         try:
                             redis_url = comp_url or getattr(config.redis, 'url', None) or config.redis.get('url', 'redis://localhost:6379/0')
-                            test_conn = redis.Redis.from_url(redis_url)
+                            test_conn = make_redis_client(
+                                redis_url,
+                                connect_timeout=HEALTH_CONNECT_TIMEOUT_SECONDS,
+                                socket_timeout=HEALTH_SOCKET_TIMEOUT_SECONDS,
+                            )
                             test_conn.ping()
                             status = "running"
                             host = redis_url

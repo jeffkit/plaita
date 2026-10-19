@@ -72,7 +72,13 @@ class TestConstruction:
         fake = fakeredis.FakeStrictRedis(decode_responses=True)
         with patch.object(redis.Redis, "from_url", return_value=fake) as from_url:
             storage = reaper.build_storage("redis://localhost:6379/9", NS)
-        from_url.assert_called_once_with("redis://localhost:6379/9", decode_responses=True)
+        from_url.assert_called_once_with(
+            "redis://localhost:6379/9",
+            decode_responses=True,
+            # A2R20-05：运维脚本也显式声明连接/读超时（worker 口径）。
+            socket_connect_timeout=5.0,
+            socket_timeout=30.0,
+        )
         assert storage.client is fake
         assert storage.namespace == NS
 

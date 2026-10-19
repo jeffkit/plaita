@@ -80,16 +80,19 @@ class _FakeRedis:
 def redis_store(monkeypatch):
     """构造一个用 _FakeRedis 的 RedisNonceStore, 注入 redis 模块。"""
     fake = _FakeRedis()
+    captured: Dict[str, object] = {}
 
     class _RedisStub:
         @staticmethod
-        def from_url(url):
+        def from_url(url, **kwargs):
+            captured.update(kwargs)
             return fake
 
     monkeypatch.setattr(signature, "redis", _RedisStub, raising=False)
     # RedisNonceStore 构造里 ``import redis`` 取的是真模块; 改成 monkeypatch sys.modules
     monkeypatch.setitem(sys.modules, "redis", type("R", (), {"Redis": _RedisStub}))
     store = signature.RedisNonceStore("redis://localhost:0")
+    store.captured_kwargs = captured  # A2R20-05：超时声明断言用
     return store, fake
 
 
@@ -99,6 +102,12 @@ def _make_auth(nonce=None, validity=3, when=None):
 
 
 class TestRedisNonceStore:
+    def test_declares_explicit_redis_timeouts(self, redis_store):
+        """A2R20-05：nonce 每请求读一次，read 超时不得随 redis-py 版本漂移。"""
+        store, _ = redis_store
+        assert store.captured_kwargs["socket_connect_timeout"] == 2.0
+        assert store.captured_kwargs["socket_timeout"] == 5.0
+
     def test_first_use_passes_replay_rejected(self, redis_store):
         store, _ = redis_store
         now = time()
@@ -150,7 +159,7 @@ class TestEnableReplayProtection:
 
     def test_redis_store_configured_when_url_given(self, monkeypatch, caplog):
         monkeypatch.setitem(sys.modules, "redis",
-                            type("R", (), {"Redis": type("C", (), {"from_url": staticmethod(lambda u: _FakeRedis())})}))
+                            type("R", (), {"Redis": type("C", (), {"from_url": staticmethod(lambda u, **kw: _FakeRedis())})}))
         with caplog.at_level(logging.INFO, logger="services.signature"):
             signature.enable_replay_protection(redis_url="redis://localhost:0")
         assert any("multi-worker safe" in r.message for r in caplog.records)
