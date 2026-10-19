@@ -75,7 +75,11 @@ def _guard_platform_target(request: Request, identity: Dict, tenant_id: str,
 
 
 def _audit_denied(request: Request, action: str, resource_id: str, detail: str) -> None:
-    """拒绝尝试留痕：审计 + WARNING（拒绝必须可观测，不做静默降级）。"""
+    """拒绝尝试留痕：审计 + WARNING（拒绝必须可观测，不做静默降级）。
+
+    A55-S2 同口径：``record_denied`` 按 ``(action, actor, ip, tenant)`` 合并
+    窗口内的重复拒绝，低权流量不能按请求数撑大审计表。
+    """
     logger.warning(
         "拒绝租户成员操作 action=%s actor=%s target=%s path=%s",
         action,
@@ -83,11 +87,25 @@ def _audit_denied(request: Request, action: str, resource_id: str, detail: str) 
         resource_id,
         request.url.path,
     )
-    _audit(
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        try:
+            from services import audit as audit_svc  # type: ignore
+        except ImportError:
+            return
+    audit_svc.record_denied(
         request,
-        f"{action}.denied",
-        resource_id,
-        {"denied": True, "reason": detail},
+        action=f"{action}.denied",
+        resource="tenant",
+        resource_id=resource_id,
+        detail={
+            "denied": True,
+            "reason": detail,
+            "method": request.method,
+            "path": request.url.path,
+        },
+        key_suffix=detail,
     )
 
 

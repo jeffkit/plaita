@@ -438,6 +438,22 @@ redis-cli KEYS 'plaita:execution:lease:*'
 
 **读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
 
+### console 审计口径（A55-S2/S3/S4）
+
+- **拒绝审计按窗口合并**：`*.denied` / `auth.denied` / `auth.login_failed` 以
+  `(action, actor, ip, tenant)` 为键，60s 内只落一行；被合并的次数累计到该键
+  下一行的 `detail.suppressed`。平台身份闸（`/api/cluster`、DLQ replay、租户
+  生命周期）与租户成员闸同口径——低权流量不能按请求数撑大审计表。
+- **DLQ replay 归属**：`POST /api/queues/dlq/{dlq_id}/replay` 的成功、具名拒绝
+  以及 404/422 尝试都写 `dlq.replay`；行内 `tenant_id` 是**死信条目所属租户**
+  （不是调用者的 `X-Tenant-ID`），`detail.target_tenant` 同值回显。`actor` /
+  `auth_source` / `key_fingerprint`（API-key 的 sha256 前 16 位）/ `request_id`
+  随行落库，便于回答「哪把 key 在何时回灌了哪个租户的死信」。
+- **读面边界**：`GET /api/audit` 的 `limit` 必须 ≥1（负值 422），上限 1000，
+  默认 200；`before_id` 是稳定游标。服务层（`services/audit.list_audit`）再钳
+  一次，绕过 HTTP 的内部调用也不能物化全表；每次读取另写 `audit.read`，记录
+  过滤条件、生效上限与返回行数。
+
 ## 指标与告警（plaita#26） {#指标与告警}
 
 在此之前死信产生、队列积压、worker 全灭、观测丢弃**全是静默的**——没有指标

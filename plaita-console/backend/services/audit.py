@@ -38,6 +38,12 @@ DENIED_WINDOW_SECONDS = 60.0
 #: 进程内最多跟踪的拒绝键数（防未认证流量把合并表撑大）。
 DENIED_MAX_KEYS = 1024
 
+#: 审计读面默认条数与硬上限（A55-S4）。API 的 ``Query(ge=1)`` 是第一道闸；
+#: 服务层再钳一次——任何绕过 FastAPI 校验的内部调用也不能用 ``limit=-1``
+#: 在 SQLite 上物化全表。
+AUDIT_LIMIT_DEFAULT = 200
+AUDIT_LIMIT_MAX = 1000
+
 _throttle_lock = threading.Lock()
 #: key -> (window_start_monotonic, suppressed_count)
 _denied_windows: Dict[Tuple[str, str, str, str, str], Tuple[float, int]] = {}
@@ -173,9 +179,16 @@ def reset_denied_throttle() -> None:
 
 
 def list_audit(action: Optional[str] = None, actor: Optional[str] = None,
-               limit: int = 200, tenant_id: Optional[str] = None,
+               limit: int = AUDIT_LIMIT_DEFAULT, tenant_id: Optional[str] = None,
                since: Optional[datetime] = None,
                before_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    # A55-S4 纵深：服务层同样钳制。SQLite 把负 LIMIT 当「无上限」，内部
+    # 调用（脚本/测试/未来端点）若不经过 FastAPI 的 ge=1 会物化全表。
+    try:
+        effective_limit = int(limit)
+    except (TypeError, ValueError):
+        effective_limit = AUDIT_LIMIT_DEFAULT
+    limit = max(1, min(effective_limit, AUDIT_LIMIT_MAX))
     try:
         from .flow_store import get_flow_store
     except ImportError:

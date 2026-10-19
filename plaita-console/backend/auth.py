@@ -483,6 +483,10 @@ def ensure_platform_admin(
     - 审计记录 ``<action>.denied``（detail.denied=true，含 method/path）
     - WARNING 日志（拒绝尝试必须可观测，不做静默降级）
 
+    拒绝行走 ``record_denied``（A55-S2）：同一 ``(action, actor, ip, tenant)``
+    在窗口内只落一行——平台闸是低权流量的高频目标（DLQ replay、cluster
+    生命周期），不能按请求数撑大审计表。
+
     自助操作（改自己的密码）不走本函数；路由层先按 ``actor`` 判断。
     """
     if identity.get("platform_admin"):
@@ -499,7 +503,7 @@ def ensure_platform_admin(
     except ImportError:
         from services import audit as audit_svc  # type: ignore
 
-    audit_svc.record(
+    audit_svc.record_denied(
         request,
         action=f"{action}.denied",
         resource=resource or "auth",
@@ -510,6 +514,7 @@ def ensure_platform_admin(
             "method": request.method,
             "path": request.url.path,
         },
+        key_suffix="platform_admin_required",
     )
     raise HTTPException(status_code=403, detail=PLATFORM_ADMIN_REQUIRED_DETAIL)
 

@@ -577,6 +577,39 @@ def _resolve_dlq_key(
     return None
 
 
+def _record_replay_audit(
+    request: Request,
+    *,
+    dlq_key: str,
+    dlq_id: str,
+    detail: Dict[str, Any],
+    tenant_id: str,
+) -> None:
+    """DLQ replay 的 DB 审计（成功/具名拒绝统一口径）。
+
+    A55-S3：``tenant_id`` 是**资源生效租户**（死信条目 payload 的租户），不是
+    调用者的 header 视角——平台管理员带 ``X-Tenant-ID`` 跨租户回灌时，审计行
+    仍落在条目所属租户，``detail.target_tenant`` 同步回显。这样租户 admin 在
+    ``/api/audit`` 能看到「谁回灌了本租户的死信」，平台视角也不丢操作人身份
+    （``actor``/``key_fingerprint`` 由 ``record`` 从 request.state 取）。
+    """
+    try:
+        try:
+            from ..services import audit as audit_svc
+        except ImportError:
+            from services import audit as audit_svc  # type: ignore
+        audit_svc.record(
+            request,
+            action="dlq.replay",
+            resource="queue",
+            resource_id=f"{dlq_key}/{dlq_id}",
+            detail=detail,
+            tenant_id=tenant_id,
+        )
+    except Exception:  # noqa: BLE001 — 审计失败不得改变回灌结果
+        logger.warning("DLQ replay 控制台审计失败（%s/%s）", dlq_key, dlq_id)
+
+
 @router.post("/queues/dlq/{dlq_id}/replay")
 async def replay_dlq(
     dlq_id: str,
@@ -591,6 +624,10 @@ async def replay_dlq(
     tenant_id, schema_version}``；``reason`` 是具名结果（``ok`` /
     ``already_replayed`` / ``schema_too_new`` / ``execution_deleted`` ...）。
     DLQ 原条目**不删除**（证据保留）。
+
+    审计（A55-S3）：成功与具名拒绝都写 ``dlq.replay``；定位失败/目标未登记
+    也在抛 4xx 前留痕（A53-S2「每次尝试」契约）。行内 ``tenant_id`` 是条目
+    的生效租户，``detail.target_tenant`` 同值回显。
     """
     if replay_dead_letter is None:
         raise HTTPException(status_code=503, detail="引擎未安装，无法回灌死信")
@@ -601,11 +638,35 @@ async def replay_dlq(
         resource="queue",
         target=dlq_id,
     )
+    caller_tenant = str(identity.get("tenant_id") or "")
     dlq_key = _resolve_dlq_key(redis, body.dlq_key, dlq_id)
     if dlq_key is None:
+        _record_replay_audit(
+            request,
+            dlq_key=body.dlq_key or "<unresolved>",
+            dlq_id=dlq_id,
+            detail={
+                "replayed": False,
+                "reason": "dlq_not_found",
+                "requested_tenant": body.tenant_id or None,
+            },
+            tenant_id=caller_tenant,
+        )
         raise HTTPException(status_code=404, detail="死信不存在或 DLQ 键未登记")
     target_stream = (body.target_stream or "").strip() or dlq_key[: -len(DLQ_SUFFIX)]
     if target_stream.endswith(DLQ_SUFFIX) or not _queue_key_allowed(target_stream):
+        _record_replay_audit(
+            request,
+            dlq_key=dlq_key,
+            dlq_id=dlq_id,
+            detail={
+                "replayed": False,
+                "reason": "target_not_allowed",
+                "target_stream": body.target_stream or "",
+                "requested_tenant": body.tenant_id or None,
+            },
+            tenant_id=caller_tenant,
+        )
         raise HTTPException(status_code=422, detail="目标队列未登记或不是任务队列")
     result = replay_dead_letter(
         redis,
@@ -617,20 +678,16 @@ async def replay_dlq(
         execution_id=body.execution_id,
         tenant_id=body.tenant_id,
     )
-    try:
-        try:
-            from ..services import audit as audit_svc
-        except ImportError:
-            from services import audit as audit_svc  # type: ignore
-        audit_svc.record(
-            request,
-            action="dlq.replay",
-            resource="queue",
-            resource_id=f"{dlq_key}/{dlq_id}",
-            detail=result.as_dict(),
-        )
-    except Exception:  # noqa: BLE001 — 审计失败不得改变回灌结果
-        logger.warning("DLQ replay 控制台审计失败（%s/%s）", dlq_key, dlq_id)
+    payload = result.as_dict()
+    target_tenant = result.tenant_id or body.tenant_id or caller_tenant
+    payload["target_tenant"] = result.tenant_id or body.tenant_id or None
+    _record_replay_audit(
+        request,
+        dlq_key=dlq_key,
+        dlq_id=dlq_id,
+        detail=payload,
+        tenant_id=target_tenant,
+    )
     return result.as_dict()
 
 

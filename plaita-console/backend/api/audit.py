@@ -45,7 +45,7 @@ def _tenant_generation_since(tenant: Optional[str]) -> Optional[datetime]:
 def list_audit(
     action: Optional[str] = None,
     actor: Optional[str] = None,
-    limit: int = Query(200, ge=1),
+    limit: int = Query(audit_svc.AUDIT_LIMIT_DEFAULT, ge=1),
     before_id: Optional[int] = Query(None, ge=1),
     request: Request = None,
     identity: Dict = Depends(require_auth),
@@ -59,7 +59,7 @@ def list_audit(
     平台身份仍可全量审计（合规证据不随租户删除物理清除）。
     """
     tenant = tenant_scope(request) if request is not None else None
-    effective_limit = min(limit, 1000)
+    effective_limit = min(limit, audit_svc.AUDIT_LIMIT_MAX)
     since: Optional[datetime] = None
     if tenant is not None and not bool(identity.get("platform_admin")):
         since = _tenant_generation_since(tenant)

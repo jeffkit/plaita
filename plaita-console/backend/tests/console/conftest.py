@@ -88,6 +88,23 @@ def _explicit_default_tenant():
         reset_current_tenant(token)
 
 
+@pytest.fixture(autouse=True)
+def _reset_denied_throttle():
+    """每个用例重置拒绝审计合并窗口（A55-S2）。
+
+    ``record_denied`` 的窗口是**进程级**的；同一 actor/action 跨用例重复出现
+    时（集群平台闸、DLQ replay、租户成员闸），上一个用例留下的窗口会把本用例
+    的第一行拒绝也合并掉，而每个 fixture 又用独立 DB ⇒ 断言「有审计行」会假红。
+    """
+    from services import audit as audit_svc
+
+    audit_svc.reset_denied_throttle()
+    try:
+        yield
+    finally:
+        audit_svc.reset_denied_throttle()
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",

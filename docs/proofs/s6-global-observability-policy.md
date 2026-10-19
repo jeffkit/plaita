@@ -64,8 +64,13 @@
    DLQ 的 `length` 同口径。
 5. `api/cluster.py`：读面已有 `ensure_platform_admin`（#263），保持；避免 GET
    触发 `refresh_status()` 的副作用（A2R13-05）。
-6. 审计：拒绝写 `*.denied`；平台身份读取全局面建议写 `observability.read`（或
-   至少指标），以便回答“谁在何时看了全局拓扑”。
+6. 审计：拒绝写 `*.denied`；平台闸与租户成员闸的拒绝行按
+   `(action, actor, ip, tenant)` 60s 窗口合并（`detail.suppressed` 累计），
+   未认证/低权流量不能按请求数撑大审计表；DLQ replay 审计行按死信条目租户
+   归属（`detail.target_tenant`），成功/具名拒绝/4xx 尝试都留痕；平台身份读取
+   全局面建议写 `observability.read`（或至少指标），以便回答“谁在何时看了全局
+   拓扑”。审计读面 `limit` 1..1000 + `before_id` 游标，服务层同钳，读取写
+   `audit.read`。
 7. 文档：`docs-site/docs/distributed/ops-runbook.md` 的 `/api/metrics` 鉴权行
    已改为“任意已认证会话（viewer+），待裁决”；裁决后同步本文件与 runbook。
 
