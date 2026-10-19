@@ -31,7 +31,13 @@ DEFAULT_TENANT_ID = "default"
 
 
 class Tenant(Base):
-    """租户。id 为 slug（创建后不可改），contract_secret_* 为对外 HMAC 契约凭证。"""
+    """租户。id 为 slug（创建后不可改），contract_secret_* 为对外 HMAC 契约凭证。
+
+    A2R25-08（已知项）：``contract_secret_key`` 当前**明文**存储在 tenants 表，
+    与 ``local_executions.input_json/context_json`` 里的执行 params/``$INPUT``
+    一样，DB 文件/备份属于敏感数据。SQLite 文件权限已在 ``init_engine`` 收紧
+    到 0600；列级加密或密钥管理迁移另单，不在本轮改 schema。
+    """
 
     __tablename__ = "tenants"
 
@@ -39,6 +45,7 @@ class Tenant(Base):
     name = Column(String(128), nullable=False, default="")
     status = Column(String(16), nullable=False, default="active")  # active | disabled
     contract_secret_id = Column(String(64), nullable=False, default="", unique=True, index=True)
+    # 明文列（A2R25-08）：DB 备份/同机读权限即可取得；加密改造另单。
     contract_secret_key = Column(String(128), nullable=False, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

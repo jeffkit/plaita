@@ -12,17 +12,15 @@
 - POST   /api/flows/{flow_id}/publish          发布版本（draft → published）
 """
 import json
-import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from redis import Redis
 from pydantic import BaseModel, Field
 
-from plaita.core.flow import Flow
-
 try:
     from ..services import flow_store
+    from ..services import validation
     from ..services.engine_sync import (
         remove_flow_from_engine,
         remove_flow_version_from_engine,
@@ -31,6 +29,7 @@ try:
     from ..auth import ensure_platform_admin, require_auth, tenant_scope
 except ImportError:
     from services import flow_store
+    from services import validation  # type: ignore
     from services.engine_sync import (
         remove_flow_from_engine,
         remove_flow_version_from_engine,
@@ -39,8 +38,6 @@ except ImportError:
     from auth import ensure_platform_admin, require_auth, tenant_scope
 
 router = APIRouter()
-
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$")
 
 
 # ============ 请求/响应模型 ============
@@ -112,7 +109,7 @@ def get_redis_dep(request: Request) -> Redis:
 
 
 def _check_semver(version: str) -> None:
-    if not _SEMVER_RE.match(version or ""):
+    if not validation.is_semver(version):
         raise HTTPException(status_code=422, detail=f"非法 semver 版本号: {version}")
 
 
@@ -123,9 +120,9 @@ def _validate_definition(definition: str) -> None:
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=422, detail=f"definition 非合法 JSON: {e}")
     try:
-        Flow.model_validate(data)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Flow 校验失败: {e}")
+        validation.validate_definition(data)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 # ============ 端点 ============
@@ -453,27 +450,44 @@ class ImportPromotionRequest(BaseModel):
     package: Dict[str, Any]
     new_version: Optional[str] = None
     publish: bool = False
+    # A2R25-02：目标版本已有草稿时默认 409，必须显式 force 才允许覆盖。
+    force: bool = Field(False, description="允许覆盖同版本既有草稿（写入审计）")
 
 
 @router.post("/flows/import-version")
 def import_version(req: ImportPromotionRequest, request: Request = None,
                    redis: Redis = Depends(get_redis_dep)):
+    """导入晋升包：默认为草稿；publish=true 等价于发布（引擎同步 + 部署记录）。"""
     tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
         from ..services import deployments as deployments_svc
     except ImportError:
         from services import deployments as deployments_svc  # type: ignore
-    """导入晋升包：默认为草稿；publish=true 等价于发布（引擎同步 + 部署记录）。"""
     try:
         result = deployments_svc.import_promotion_package(
-            _store(), req.package, new_version=req.new_version, publish=False,
-            tenant_id=tenant,
+            _store(), req.package, new_version=req.new_version,
+            tenant_id=tenant, force=req.force,
         )
+    except deployments_svc.PromotionConflictError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(e), "conflict": e.conflict, **e.details},
+        )
+    except deployments_svc.PromotionValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     flow_id, version = result["flow_id"], result["version"]
     if req.publish:
+        # A2R25-03：发布前再校验一次存储定义——导入链路不因 publish=true
+        # 绕过正常保存/发布已有的 Flow schema 闸。
+        stored = _store().get_version(flow_id, version, tenant_id=tenant)
+        if stored is None:
+            raise HTTPException(
+                status_code=404, detail=f"版本不存在: {flow_id}@{version}"
+            )
+        _validate_definition(stored.definition)
         try:
             out = _store().publish_version(flow_id, version, tenant_id=tenant)
         except LookupError as e:
@@ -493,6 +507,18 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
         result["status"] = "published"
 
     if request is not None:
-        _audit(request, "flow.import", f"{flow_id}@{version}",
-               {"publish": req.publish}, tenant_id=tenant)
+        _audit(
+            request,
+            "flow.import",
+            f"{flow_id}@{version}",
+            {
+                "publish": req.publish,
+                "force": req.force,
+                "overwritten": result.get("overwritten", False),
+                "previous_status": result.get("previous_status"),
+                "previous_definition_hash": result.get("previous_definition_hash"),
+                "definition_hash": result.get("definition_hash"),
+            },
+            tenant_id=tenant,
+        )
     return result

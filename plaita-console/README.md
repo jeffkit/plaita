@@ -63,7 +63,11 @@ pip install -r requirements.txt
 python run.py
 ```
 
-流程定义、版本、执行历史、节点 trace 全部存 SQLite（默认 `./plaita_console.db`，可用 `PLAITA_CONSOLE_DB_URL` 换库）；流程在 console 进程内的后台线程执行。想强制本地档（即使本机有 Redis 也不连），把 Redis URL 指向一个不可达地址即可：
+流程定义、版本、执行历史、节点 trace 全部存 SQLite（默认 `./plaita_console.db`，可用 `PLAITA_CONSOLE_DB_URL` 换库）；流程在 console 进程内的后台线程执行。
+
+> **DB 是敏感数据（A2R25-08）**：`local_executions` 的 `input_json/context_json` 含执行 params 与 `$INPUT` 明文，`tenants.contract_secret_key` 是明文列。SQLite 文件在 `init_engine` 时收紧为 0600，默认库名与 `.plaita-credentials*` 已进 `.gitignore`；DB 备份/外发请按凭据泄露处置（列级加密另单）。
+
+想强制本地档（即使本机有 Redis 也不连），把 Redis URL 指向一个不可达地址即可：
 
 ```bash
 PLAITA_CONSOLE_REDIS_URL=redis://127.0.0.1:1/0 python run.py

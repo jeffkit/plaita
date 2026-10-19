@@ -264,6 +264,252 @@ def test_promotion_export_import_fingerprint(client_with_users, tmp_path, monkey
     assert any(d["flow_id"] == "hello-plaita" and d["version"] == "2.0.1" for d in deps)
 
 
+# ---- A2R25-01/02/03：晋升包往返与导入校验 ----
+
+_UI_DEF = json.dumps(
+    {
+        "desc": "中文描述：UI 保存形态（indent=2）",
+        "nodes": [
+            {"type": "start", "id": "start", "next": "end"},
+            {"type": "end", "id": "end", "resultType": "success", "output": "完成"},
+        ],
+    },
+    ensure_ascii=False,
+    indent=2,
+)
+
+_ASCII_ESCAPED_DEF = json.dumps(
+    {
+        "desc": "中文描述：ASCII 转义形态",
+        "nodes": [
+            {"type": "start", "id": "start", "next": "end"},
+            {"type": "end", "id": "end", "resultType": "success", "output": "完成"},
+        ],
+    },
+    ensure_ascii=True,
+    indent=2,
+)
+
+
+def _promotion_setup(client, headers):
+    """建源版本并导出包；返回 (package, flow_id)。"""
+    created = client.post("/api/flows", headers=headers, json={"flow_id": "promo-src"})
+    assert created.status_code == 200, created.text
+    r = client.put(
+        "/api/flows/promo-src/versions/1.0.0",
+        headers=headers,
+        json={"definition": GOOD_DEF, "layout": "", "created_by": "admin"},
+    )
+    assert r.status_code == 200, r.text
+    pkg = client.get(
+        "/api/flows/promo-src/versions/1.0.0/export", headers=headers
+    ).json()
+    return pkg, "promo-src"
+
+
+@pytest.mark.parametrize("definition", [_UI_DEF, _ASCII_ESCAPED_DEF],
+                         ids=["ui-indent2-non-ascii", "ascii-escaped"])
+def test_promotion_roundtrip_ui_definition(client_with_users, definition):
+    """A2R25-01 主路径：UI 的 JSON.stringify(def, null, 2) 保存后必须可往返。
+
+    旧实现对「原始 definition 字节」算指纹、导入时对重排后的紧凑串重算，
+    缩进/非 ASCII 转义都会让正常包 400「指纹校验失败」。这里两种形态都必须
+    导入成功（负控：去掉正典序列化即红）。
+    """
+    client, store = client_with_users
+    admin = _login(client, "admin", "admin-password-1")
+    h = _auth(admin["token"])
+
+    created = client.post("/api/flows", headers=h, json={"flow_id": "ui-flow"})
+    assert created.status_code == 200, created.text
+    r = client.put(
+        "/api/flows/ui-flow/versions/1.0.0",
+        headers=h,
+        json={"definition": definition, "layout": "", "created_by": "admin"},
+    )
+    assert r.status_code == 200, r.text
+    pkg = client.get(
+        "/api/flows/ui-flow/versions/1.0.0/export", headers=h
+    ).json()
+    # 新包同时带旧字段与正典字段；旧 console 仍可识别 definition_hash。
+    assert pkg["definition_hash"]
+    assert pkg["definition_hash_v2"]
+    assert pkg["definition_hash_version"] == 2
+
+    r = client.post(
+        "/api/flows/import-version",
+        headers=h,
+        json={"package": pkg, "new_version": "1.0.1"},
+    )
+    assert r.status_code == 200, r.text
+    imported = store.get_version("ui-flow", "1.0.1")
+    assert imported is not None
+    assert json.loads(imported.definition)["desc"] == json.loads(definition)["desc"]
+
+
+def test_import_rejects_invalid_version_and_path_traversal(client_with_users):
+    """A2R25-03：非 semver / 路径穿越的 version、flow_id 必须在落库前 422。"""
+    client, store = client_with_users
+    admin = _login(client, "admin", "admin-password-1")
+    h = _auth(admin["token"])
+    pkg, flow_id = _promotion_setup(client, h)
+
+    for bad_version in ("not-a-version", "1.0.0/../../x", "../escape", ""):
+        r = client.post(
+            "/api/flows/import-version",
+            headers=h,
+            json={"package": pkg, "new_version": bad_version},
+        )
+        assert r.status_code == 422, (bad_version, r.status_code, r.text)
+        if bad_version:
+            assert "semver" in r.json()["detail"]
+        assert store.get_version(flow_id, bad_version) is None
+
+    for bad_flow_id in ("../escape", "a/b", "a\\b", ".", ".."):
+        bad_pkg = {**pkg, "flow_id": bad_flow_id}
+        r = client.post(
+            "/api/flows/import-version", headers=h, json={"package": bad_pkg}
+        )
+        assert r.status_code == 422, (bad_flow_id, r.status_code, r.text)
+        assert "flow_id" in r.json()["detail"]
+        assert store.get_flow_record(bad_flow_id) is None
+
+
+def test_import_publish_validates_flow_definition(client_with_users):
+    """A2R25-03：指纹正确也不能 publish 一个 schema 非法的 Flow。"""
+    client, store = client_with_users
+    admin = _login(client, "admin", "admin-password-1")
+    h = _auth(admin["token"])
+    pkg, flow_id = _promotion_setup(client, h)
+
+    bad_definition = {"nodes": [{"type": "does-not-exist", "id": "x"}]}
+    bad_pkg = {
+        **pkg,
+        "definition": bad_definition,
+        # 攻击者可重算无密钥哈希；校验必须落在 Flow schema 上。
+        "definition_hash": deployments_svc.definition_hash(
+            json.dumps(bad_definition, ensure_ascii=False)
+        ),
+        "definition_hash_v2": deployments_svc.canonical_definition_hash(
+            bad_definition
+        ),
+    }
+    r = client.post(
+        "/api/flows/import-version",
+        headers=h,
+        json={"package": bad_pkg, "new_version": "9.9.9", "publish": True},
+    )
+    assert r.status_code == 422, r.text
+    assert "Flow 校验失败" in r.json()["detail"]
+    # 零落库：未创建版本，更没有 published 行。
+    assert store.get_version(flow_id, "9.9.9") is None
+
+
+def test_import_over_draft_requires_force_and_audits(client_with_users):
+    """A2R25-02：草稿覆盖默认 409；force=true 才写，并审计旧/新定义哈希。"""
+    client, store = client_with_users
+    admin = _login(client, "admin", "admin-password-1")
+    h = _auth(admin["token"])
+    pkg, flow_id = _promotion_setup(client, h)
+
+    original_layout = json.dumps({"local": True})
+    old_definition = json.dumps({"nodes": [
+        {"type": "start", "id": "start", "next": "end"},
+        {"type": "end", "id": "end", "resultType": "success", "output": "old"},
+    ]})
+    r = client.put(
+        f"/api/flows/{flow_id}/versions/2.0.0",
+        headers=h,
+        json={"definition": old_definition, "layout": original_layout},
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.post(
+        "/api/flows/import-version",
+        headers=h,
+        json={"package": pkg, "new_version": "2.0.0"},
+    )
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["conflict"] == "draft_exists"
+    assert detail["previous_definition_hash"]
+    # 未 force：既有草稿逐字节未动。
+    kept = store.get_version(flow_id, "2.0.0")
+    assert kept is not None
+    assert kept.layout == original_layout
+    assert kept.definition == old_definition
+
+    r = client.post(
+        "/api/flows/import-version",
+        headers=h,
+        json={"package": pkg, "new_version": "2.0.0", "force": True},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["overwritten"] is True
+    assert body["previous_status"] == "draft"
+    assert body["previous_definition_hash"]
+    assert body["definition_hash"]
+    assert body["previous_definition_hash"] != body["definition_hash"]
+    assert store.get_version(flow_id, "2.0.0").layout == ""
+
+    logs = client.get("/api/audit", headers=h).json()["logs"]
+    row = next(
+        log for log in logs
+        if log["action"] == "flow.import" and log["resource_id"] == f"{flow_id}@2.0.0"
+    )
+    assert row["detail"]["force"] is True
+    assert row["detail"]["overwritten"] is True
+    assert row["detail"]["previous_definition_hash"] == body["previous_definition_hash"]
+    assert row["detail"]["definition_hash"] == body["definition_hash"]
+
+
+def test_import_over_published_is_named_conflict(client_with_users):
+    """A2R25-02：已发布版本不可被导入静默覆盖（具名 409）。"""
+    client, store = client_with_users
+    admin = _login(client, "admin", "admin-password-1")
+    h = _auth(admin["token"])
+    pkg, flow_id = _promotion_setup(client, h)
+
+    client.put(
+        f"/api/flows/{flow_id}/versions/3.0.0",
+        headers=h,
+        json={"definition": GOOD_DEF, "layout": ""},
+    )
+    pr = client.post(
+        f"/api/flows/{flow_id}/publish", headers=h, json={"version": "3.0.0"}
+    )
+    assert pr.status_code == 200, pr.text
+
+    r = client.post(
+        "/api/flows/import-version",
+        headers=h,
+        json={"package": pkg, "new_version": "3.0.0", "force": True},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["conflict"] == "published_immutable"
+    assert store.get_version(flow_id, "3.0.0").status == "published"
+
+
+def test_import_malformed_package_is_named_4xx(client_with_users):
+    """A2R25-12：缺字段的畸形包不得 500（旧实现 KeyError → text/plain 500）。"""
+    client, _ = client_with_users
+    admin = _login(client, "admin", "admin-password-1")
+    h = _auth(admin["token"])
+
+    cases = [
+        ({"kind": "plaita-promotion"}, 422),
+        ({"kind": "plaita-promotion", "flow_id": "x"}, 422),
+        ({"kind": "plaita-promotion", "flow_id": "x", "version": "1.0.0"}, 422),
+        ({"kind": "not-promotion", "flow_id": "x"}, 400),
+    ]
+    for package, expected in cases:
+        r = client.post("/api/flows/import-version", headers=h,
+                        json={"package": package})
+        assert r.status_code == expected, (package, r.status_code, r.text)
+        assert r.headers["content-type"].startswith("application/json")
+
+
 # ---- 首次启动向导 ----
 
 def test_setup_wizard_flow(tmp_path, monkeypatch):

@@ -8,6 +8,7 @@
 安全边界（如实说明）：密钥文件与 DB 同机存放，属静态加密（at-rest）而非
 密钥管理服务；多机部署请把 KEY 放到密钥管理设施并统一注入。
 """
+import hashlib
 import json
 import logging
 import os
@@ -18,7 +19,12 @@ from typing import Any, Dict, List, Optional
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 
-from plaita.credentials import credentials_base_file as _engine_credentials_base_file
+from plaita.credentials import (
+    STORE_FORMAT,
+    STORE_FORMAT_VERSION,
+    STORE_META_KEY,
+    credentials_base_file as _engine_credentials_base_file,
+)
 from plaita.tenant_context import guard_tenant_write
 
 try:
@@ -45,6 +51,21 @@ logger = logging.getLogger(__name__)
 
 class CredentialsDisabledError(RuntimeError):
     """密钥初始化失败等导致凭据功能不可用。"""
+
+
+class CredentialsKeyMismatchError(CredentialsDisabledError):
+    """当前密钥与库中已有密文不匹配（或根本没有可用密钥）。
+
+    A2R25-10：错/缺 key 的恢复环境里，任何写路径都必须拒绝，否则新行会用
+    错误密钥加密、并整文件重写导出，把库变成无 key id 的混合密钥状态。
+
+    ``reason``：``mismatch``（有 key 但解不开）| ``missing``（没有 key）。
+    两者都拒绝写入，但错误体给出可区分的排查方向。
+    """
+
+    def __init__(self, message: str, *, reason: str = "mismatch") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _db_dir() -> Path:
@@ -79,38 +100,94 @@ def credentials_file(tenant_id: str = DEFAULT_TENANT_ID) -> Path:
     return base.with_name(f"{base.stem}.{tenant_id}{base.suffix}")
 
 
-def _fernet() -> Fernet:
+def _load_key_bytes(*, generate: bool) -> bytes:
+    """读取 Fernet key；``generate=True`` 仅在首次加密时允许创建密钥文件。
+
+    读已有密文（``generate=False``）绝不生成新 key：缺 key 时生成一把新
+    key 只会让所有旧密文必然解密失败，并把「未配置」伪装成「密钥不一致」。
+    """
     key = os.environ.get("PLAITA_CREDENTIALS_KEY")
-    if not key:
-        key_file = credentials_key_file()
-        if key_file.is_file():
-            key = key_file.read_bytes().strip().decode()
-        else:
-            key = Fernet.generate_key().decode()
-            key_file.parent.mkdir(parents=True, exist_ok=True)
-            key_file.write_bytes(key.encode())
-            try:
-                os.chmod(key_file, 0o600)
-            except OSError:
-                pass
-            logger.info("已生成凭据密钥文件: %s", key_file)
+    if key:
+        return key.encode() if isinstance(key, str) else key
+    key_file = credentials_key_file()
+    if key_file.is_file():
+        return key_file.read_bytes().strip()
+    if not generate:
+        raise CredentialsDisabledError(
+            "未配置凭据解密密钥：请设置 PLAITA_CREDENTIALS_KEY（Fernet key），"
+            f"或提供 {key_file} 指向密钥文件"
+        )
+    key = Fernet.generate_key()
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    key_file.write_bytes(key)
     try:
-        return Fernet(key.encode() if isinstance(key, str) else key)
+        os.chmod(key_file, 0o600)
+    except OSError:
+        pass
+    logger.info("已生成凭据密钥文件: %s", key_file)
+    return key
+
+
+def _fernet(*, generate: bool = False) -> Fernet:
+    key = _load_key_bytes(generate=generate)
+    try:
+        return Fernet(key)
     except Exception as e:  # noqa: BLE001
         raise CredentialsDisabledError(f"PLAITA_CREDENTIALS_KEY 不是合法 Fernet key: {e}") from e
 
 
+def current_key_id() -> str:
+    """当前密钥的稳定指纹（sha256 前 16 位），写入导出文件的版本头。"""
+    return hashlib.sha256(_load_key_bytes(generate=False)).hexdigest()[:16]
+
+
 def _encrypt(data: Dict[str, Any]) -> str:
-    return _fernet().encrypt(json.dumps(data, ensure_ascii=False).encode()).decode()
+    return _fernet(generate=True).encrypt(
+        json.dumps(data, ensure_ascii=False).encode()
+    ).decode()
 
 
 def _decrypt(token: str) -> Dict[str, Any]:
     try:
-        return json.loads(_fernet().decrypt(token.encode()).decode())
+        return json.loads(_fernet(generate=False).decrypt(token.encode()).decode())
     except InvalidToken as e:
-        raise CredentialsDisabledError(
+        raise CredentialsKeyMismatchError(
             "凭据解密失败：PLAITA_CREDENTIALS_KEY/密钥文件与写入时不一致"
         ) from e
+
+
+def _first_undecryptable(rows) -> Optional[str]:
+    """返回第一条无法用当前密钥解密的凭据名；全部可解返回 None。
+
+    空集合直接返回 None（首次保存正是生成密钥的时点）；有行但缺 key/错 key
+    统一抛 :class:`CredentialsKeyMismatchError`，调用方据此拒绝写入。
+    """
+    rows = list(rows)
+    if not rows:
+        return None
+    try:
+        fernet = _fernet(generate=False)
+    except CredentialsDisabledError as e:
+        raise CredentialsKeyMismatchError(
+            "凭据库已有条目，但当前没有可用的解密密钥"
+            f"（{e}）；已拒绝写入以免覆盖既有导出（原文件保留）。"
+            "请恢复 PLAITA_CREDENTIALS_KEY/密钥文件后重试。",
+            reason="missing",
+        ) from e
+    for row in rows:
+        try:
+            fernet.decrypt(row.data_json.encode())
+        except InvalidToken:
+            return row.name
+    return None
+
+
+def _key_usable_for_rows(rows) -> bool:
+    """当前 key 是否可解开这些行（不抛异常，供删除路径决定是否写版本头）。"""
+    try:
+        return _first_undecryptable(rows) is None
+    except CredentialsKeyMismatchError:
+        return False
 
 
 def list_credentials(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -149,6 +226,10 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
                     tenant_id: str = DEFAULT_TENANT_ID) -> None:
     if not name:
         raise ValueError("凭据名称不能为空")
+    if name == STORE_META_KEY:
+        # 保留键用于导出文件的 key id/版本头，不能被当成一条凭据（否则
+        # 引擎侧过滤后就永远读不到它）。
+        raise ValueError(f"凭据名 {name!r} 为导出文件保留键，请换一个名称")
     if not isinstance(data, dict) or not data:
         raise ValueError("凭据数据必须是非空对象")
     guard_tenant_write("credentials.save")  # #239 fail-closed
@@ -169,12 +250,27 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
             expected_tenant_generation(tenant_id)
             or (tenant.created_at, tenant.contract_secret_id)
         )
-        encrypted = _encrypt(data)
-        row = session.scalars(
-            select(Credential).where(
-                Credential.tenant_id == tenant_id, Credential.name == name
+        # A2R25-10：写前确认库中已有密文都能用当前 key 解开。错/缺 key 的
+        # 恢复环境里直接拒绝，绝不「用新 key 加密新行 + 重写整个导出」——
+        # 那会把可修复的 key 不匹配升级成同一 DB 混合密钥、谁都解不全。
+        existing_rows = session.scalars(
+            select(Credential).where(Credential.tenant_id == tenant_id)
+        ).all()
+        undecryptable = _first_undecryptable(existing_rows)
+        if undecryptable is not None:
+            logger.warning(
+                "凭据保存被拒：既有条目 %s（租户 %s）无法用当前密钥解密；"
+                "未写入 DB、未重写导出文件",
+                undecryptable,
+                tenant_id,
             )
-        ).first()
+            raise CredentialsKeyMismatchError(
+                f"凭据库中的 {undecryptable!r} 无法用当前密钥解密："
+                "PLAITA_CREDENTIALS_KEY/密钥文件与写入时不一致。已拒绝保存"
+                "（DB 与导出文件保持不变）；请恢复原密钥后重试。"
+            )
+        encrypted = _encrypt(data)
+        row = next((r for r in existing_rows if r.name == name), None)
         if row is None:
             session.add(
                 Credential(
@@ -218,7 +314,17 @@ def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
             # 若只返回 404 而不重写文件，操作员就没有凭据 API 可用的撤销路径
             # （引擎仍能解密）。这里按 DB 重导一次目标范围（tenant_id=None
             # 时全量）；写入失败 loud 上抛，不伪装成「本来就不存在」。
-            _export_store(tenant_id, session=session)
+            cleanup_query = select(Credential)
+            if tenant_id is not None:
+                cleanup_query = cleanup_query.where(
+                    Credential.tenant_id == tenant_id
+                )
+            cleanup_rows = session.scalars(cleanup_query).all()
+            _export_store(
+                tenant_id,
+                session=session,
+                verify_key=_key_usable_for_rows(cleanup_rows),
+            )
             logger.info(
                 "DELETE 未命中 DB（name=%s tenant=%s），已按 DB 重导导出文件以清除陈旧条目",
                 name,
@@ -232,7 +338,17 @@ def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
         session.flush()
         # A51-02：删除同属租户作用域写；请求世代失效时不得动重建租户的行。
         assert_tenant_generation(session, affected)
-        _export_then_commit(session, affected)
+        # A2R25-10：删除不要求旧行可解（错 key 恢复时仍需撤销入口）。key
+        # 可用时照常写版本头；不可用时省略头，绝不把「当前 key 的 key_id」
+        # 写进仍含旧密文的导出文件（重写内容与原密文逐条一致）。
+        remaining = session.scalars(
+            select(Credential).where(Credential.tenant_id == affected)
+        ).all()
+        _export_then_commit(
+            session,
+            affected,
+            verify_key=_key_usable_for_rows(remaining),
+        )
     return True
 
 
@@ -265,8 +381,29 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+def _export_payload(
+    entries: Dict[str, Dict[str, Any]], *, include_meta: bool
+) -> Dict[str, Any]:
+    """导出文件的顶层对象：可选 key id/版本头 + 凭据条目。
+
+    空租户仍写 ``{}``（不落版本头）：没有可失配的密文，且保持引擎旧版本
+    对空 store 的解析零变化。有密文时才声明 ``key_id``——调用方必须先确认
+    这些密文确实由当前 key 加密（``_first_undecryptable``）。
+    """
+    if not entries or not include_meta:
+        return dict(entries)
+    return {
+        STORE_META_KEY: {
+            "format": STORE_FORMAT,
+            "version": STORE_FORMAT_VERSION,
+            "key_id": current_key_id(),
+        },
+        **entries,
+    }
+
+
 def _export_store(
-    tenant_id: Optional[str] = None, *, session=None
+    tenant_id: Optional[str] = None, *, session=None, verify_key: bool = True
 ) -> None:
     """把凭据（密文）按租户导出为引擎可读文件，供节点运行时解密。
 
@@ -276,29 +413,40 @@ def _export_store(
     ``session``（plaita#251）：调用方事务内的 session。save/delete 在
     commit **之前**调用；调用方已 ``flush`` 的未提交变更必须被导出声看到
     （否则导出的还是旧行集）。传 session 时复用该事务、不自行开关 session。
+
+    ``verify_key``（A2R25-10）：True 时逐条确认密文可由当前 key 解开，否则
+    抛 :class:`CredentialsKeyMismatchError` 且不落盘。delete 传 False——
+    撤销入口不要求旧 key，导出文件按 DB 现有密文重写但不声明版本头。
     """
     if session is not None:
-        _export_from_session(session, tenant_id)
+        _export_from_session(session, tenant_id, verify_key=verify_key)
         return
     store = get_flow_store()
     with store._session_local() as own_session:
-        _export_from_session(own_session, tenant_id)
+        _export_from_session(own_session, tenant_id, verify_key=verify_key)
 
 
-def _export_from_session(session, tenant_id: Optional[str]) -> None:
+def _export_from_session(
+    session, tenant_id: Optional[str], *, verify_key: bool = True
+) -> None:
     query = select(Credential)
     if tenant_id is not None:
         query = query.where(Credential.tenant_id == tenant_id)
     rows = session.scalars(query).all()
     by_tenant: Dict[str, Dict[str, Any]] = {}
+    rows_by_tenant: Dict[str, List[Any]] = {}
     for r in rows:
-        by_tenant.setdefault(r.tenant_id or DEFAULT_TENANT_ID, {})[r.name] = {
+        tid = r.tenant_id or DEFAULT_TENANT_ID
+        rows_by_tenant.setdefault(tid, []).append(r)
+        by_tenant.setdefault(tid, {})[r.name] = {
             "type": r.type,
             "data": r.data_json,
         }
     if tenant_id is not None:
         # 指定租户：即使已清空也要重写文件（删除最后一条凭据时清空残留）
         targets = {tenant_id: by_tenant.get(tenant_id, {})}
+        if not rows_by_tenant.get(tenant_id):
+            rows_by_tenant[tenant_id] = []
     else:
         # 全量：覆盖存在的租户 + default（历史文件路径始终刷新）
         targets = dict(by_tenant)
@@ -306,12 +454,33 @@ def _export_from_session(session, tenant_id: Optional[str]) -> None:
     for tid, payload in targets.items():
         path = credentials_file(tid)
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps(payload, ensure_ascii=False, indent=1)
+        include_meta = False
+        if verify_key and payload:
+            undecryptable = _first_undecryptable(rows_by_tenant.get(tid, []))
+            if undecryptable is not None:
+                logger.warning(
+                    "拒绝对账/重写租户 %s 的凭据导出：条目 %s 无法用当前密钥解密"
+                    "（原文件保留）",
+                    tid,
+                    undecryptable,
+                )
+                raise CredentialsKeyMismatchError(
+                    f"凭据库中的 {undecryptable!r}（租户 {tid}）无法用当前密钥"
+                    "解密：拒绝重写导出文件（原文件保留）。请恢复原密钥后重试。"
+                )
+            include_meta = True
+        text = json.dumps(
+            _export_payload(payload, include_meta=include_meta),
+            ensure_ascii=False,
+            indent=1,
+        )
         _atomic_write_text(path, text)
         logger.info("已导出租户 %s 凭据文件 %s（%d 条）", tid, path, len(payload))
 
 
-def _export_then_commit(session, tenant_id: Optional[str]) -> None:
+def _export_then_commit(
+    session, tenant_id: Optional[str], *, verify_key: bool = True
+) -> None:
     """先原子导出旁文件，成功后再提交 DB（plaita#251）。
 
     - 导出失败 ⇒ 回滚事务：DB 不留新行/删除，旁文件由 ``_atomic_write_text``
@@ -322,14 +491,14 @@ def _export_then_commit(session, tenant_id: Optional[str]) -> None:
     """
     exported = False
     try:
-        _export_store(tenant_id, session=session)
+        _export_store(tenant_id, session=session, verify_key=verify_key)
         exported = True
         session.commit()
     except Exception:
         session.rollback()
         if exported:
             try:
-                _export_store(tenant_id)
+                _export_store(tenant_id, verify_key=verify_key)
             except Exception:
                 logger.exception(
                     "凭据导出补偿失败（DB 已回滚，旁文件可能超前）: tenant=%s",
@@ -366,8 +535,11 @@ def reconcile_exports() -> Dict[str, Any]:
         tenant_ids = set(session.scalars(select(Tenant.id)).all())
         known = tenant_ids | {DEFAULT_TENANT_ID}
         by_tenant: Dict[str, Dict[str, Any]] = {}
+        rows_by_tenant: Dict[str, List[Any]] = {}
         for r in session.scalars(select(Credential)).all():
-            by_tenant.setdefault(r.tenant_id or DEFAULT_TENANT_ID, {})[r.name] = {
+            tid = r.tenant_id or DEFAULT_TENANT_ID
+            rows_by_tenant.setdefault(tid, []).append(r)
+            by_tenant.setdefault(tid, {})[r.name] = {
                 "type": r.type,
                 "data": r.data_json,
             }
@@ -385,14 +557,49 @@ def reconcile_exports() -> Dict[str, Any]:
             if credentials_file(tid).is_file():
                 targets.add(tid)
 
-        rebuilt = refreshed = purged = 0
+        rebuilt = refreshed = purged = key_mismatch = 0
+        mismatched_tenants: List[str] = []
         for tid in sorted(targets):
             path = credentials_file(tid)
             payload = exports.get(tid, {})
             existed = path.is_file()
+            include_meta = False
+            if payload:
+                # A2R25-10：对账不得在错/缺 key 时重写导出——那会把旧密文
+                # 与「当前 key 的 key_id」拼在一起，并制造混合密钥的假象。
+                # 无法解开就跳过该租户，原文件逐字节保留。
+                try:
+                    undecryptable = _first_undecryptable(
+                        rows_by_tenant.get(tid, [])
+                    )
+                except CredentialsKeyMismatchError as e:
+                    key_mismatch += 1
+                    mismatched_tenants.append(tid)
+                    logger.warning(
+                        "启动对账跳过租户 %s 的凭据导出（原文件保留）：%s",
+                        tid,
+                        e,
+                    )
+                    continue
+                if undecryptable is not None:
+                    key_mismatch += 1
+                    mismatched_tenants.append(tid)
+                    logger.warning(
+                        "启动对账跳过租户 %s 的凭据导出（原文件保留）：条目 %s "
+                        "无法用当前密钥解密",
+                        tid,
+                        undecryptable,
+                    )
+                    continue
+                include_meta = True
             path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_text(
-                path, json.dumps(payload, ensure_ascii=False, indent=1)
+                path,
+                json.dumps(
+                    _export_payload(payload, include_meta=include_meta),
+                    ensure_ascii=False,
+                    indent=1,
+                ),
             )
             if existed:
                 refreshed += 1
@@ -429,12 +636,16 @@ def reconcile_exports() -> Dict[str, Any]:
         "purged": purged,
         "extra_files": extras,
         "orphan_tenants": orphan_tenants,
+        "key_mismatch": key_mismatch,
+        "mismatched_tenants": mismatched_tenants,
     }
     logger.info(
-        "凭据导出对账完成：重建 %d，刷新 %d（其中清空 %d），多余文件 %d",
+        "凭据导出对账完成：重建 %d，刷新 %d（其中清空 %d），多余文件 %d，"
+        "密钥不匹配跳过 %d",
         rebuilt,
         refreshed,
         purged,
         len(extras),
+        key_mismatch,
     )
     return summary
