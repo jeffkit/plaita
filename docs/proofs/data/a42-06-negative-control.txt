@@ -1,0 +1,31 @@
+plaita A42-06 negative control (B3 第三十五轮)
+BASE: origin/main 373395e (含 r33 #256 首版)
+FIX: working tree（只回退 plaita/node/code.py，保留新测试/文档）
+
+== 负控：仅回退 plaita/node/code.py ==
+$ .venv/bin/python docs/proofs/data/a42-06-probe.py
+{
+  "ok": true,
+  "result": {
+    "raw_read": "DEFAULT-ONLY-SECRET",
+    "api_read": "DEFAULT-ONLY-SECRET",
+    "env_paths_visible": true
+  }
+}
+
+$ .venv/bin/python -m pytest \
+    tests/unit/test_issue256_subprocess_tenant_credentials.py::test_tenant_b_subprocess_rejected_before_user_code -q
+E       Failed: DID NOT RAISE TenantContextPropagationError
+1 failed in 1.87s
+
+== 恢复修复后 ==
+$ .venv/bin/python docs/proofs/data/a42-06-probe.py
+{
+  "ok": false,
+  "type": "TenantContextPropagationError",
+  "error": "PLAITA_SUBPROCESS_TENANT_ISOLATION_UNAVAILABLE: subprocess sandbox cannot isolate credentials for tenant 'tenant-b' (language=python); the child would share the worker's file system and the tenant-wide credentials key, so its user code could read the default tenant's credentials. Refusing to run user code; use sandbox_backend='docker' for non-default tenants."
+}
+
+$ .venv/bin/python -m pytest \
+    tests/unit/test_issue256_subprocess_tenant_credentials.py -q
+5 passed in 1.97s

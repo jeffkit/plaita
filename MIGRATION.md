@@ -8,6 +8,22 @@
 
 ## Unreleased
 
+### code 节点 `subprocess` 后端拒绝非 default 租户（A42-06）
+
+**口径（contract）**：`sandbox_backend="subprocess"` 在调用方租户不是
+`default` 时**不再执行用户代码**，而是在 spawn 前抛
+`TenantContextPropagationError`（消息含
+`PLAITA_SUBPROCESS_TENANT_ISOLATION_UNAVAILABLE`）。原因：子进程与 worker
+同用户、文件系统不受限，且所有租户共用同一把凭据解密密钥；#256 首版的
+env 传播只能改凭据路由，不能阻止租户代码直接读取 default 凭据文件或
+`set_current_tenant("default")`（A42-06 探针）。
+
+- **受影响**：多租户部署中把 `subprocess` 作为租户 code 节点后端的流程。
+  迁移：租户级 code 节点改用 `docker` 后端（容器内不挂载宿主凭据）；
+  或让该节点在 default 租户执行（仅当 code 作者完全受信）。
+- **不受影响**：default 租户的 `subprocess` 语义；`docker` 后端。
+  `unsafe` / `restricted` 仍不是凭据隔离边界，运营者不得向租户发放。
+
 ### 手工 event/timeout resume 必须绑定挂起订阅（plaita#221）
 
 **口径（contract）**：`resume_type=event` / `resume_type=timeout` 的 resume

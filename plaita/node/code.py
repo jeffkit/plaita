@@ -75,20 +75,21 @@ All backends are transparently switchable via the ``sandbox_backend`` flow
 JSON field; no other code changes are required when upgrading the isolation
 level.
 
-Tenant context (plaita#256)
----------------------------
-Python ``"subprocess"`` runs user code in a fresh interpreter, so the caller's
-ContextVar does not follow it. The runner explicitly passes the execution
-tenant (``PLAITA_TENANT_ID``, source ``derived``) and the credentials routing
-(``PLAITA_CREDENTIALS_FILE`` base file + ``PLAITA_CREDENTIALS_KEY_FILE``)
-through the child environment; the child bootstrap calls
-``set_current_tenant`` before user code, so ``credentials_file()`` expands the
-tenant side file exactly once. If that bootstrap cannot
-establish the tenant (for example ``plaita`` is not importable in the sandbox
-interpreter), the child exits **before** user code runs and the parent raises
-:class:`TenantContextPropagationError` — a non-default tenant never silently
-degrades to ``default``. The ``"docker"`` backend mounts no host credentials;
-``"unsafe"`` / ``"restricted"`` execute in-process with the caller's context.
+Tenant credential boundary (plaita#256, A42-06)
+-----------------------------------------------
+``"subprocess"`` runs user code in a fresh interpreter **without** a file-system
+boundary: parent and child run as the same OS user, and all tenants share one
+Fernet key. Code in the child can therefore read the default tenant's
+``.plaita-credentials.json`` / ``.plaita-credentials.key`` (or call
+``set_current_tenant("default")``) no matter which credential paths the parent
+puts in its env. The subprocess backend is consequently **not** a credential
+isolation boundary: non-default tenants are refused **before spawning**
+(:class:`TenantContextPropagationError`, message marker
+``PLAITA_SUBPROCESS_TENANT_ISOLATION_UNAVAILABLE``), so their user code never
+runs. Use the ``"docker"`` backend for tenant code (host credentials are not
+mounted). Default-tenant executions keep the historical semantics. The
+``"unsafe"`` / ``"restricted"`` backends run in-process with the caller's
+context and are not credential boundaries either.
 """
 
 from __future__ import annotations
@@ -117,7 +118,6 @@ from plaita.core.url_redaction import _scrub_exception_text
 from plaita.credentials import subprocess_credentials_env
 from plaita.tenant_context import (
     DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID,
-    TENANT_SOURCE_DERIVED,
     current_tenant,
 )
 
@@ -278,9 +278,8 @@ _ALLOWED_LANGUAGES: FrozenSet[str] = frozenset(DEFAULT_SANDBOX_ALLOWED_LANGUAGES
 # ---------------------------------------------------------------------------
 
 _RUNNER_TEMPLATE = textwrap.dedent("""\
-    import os as _os, sys as _sys, json as _json
+    import sys as _sys, json as _json
 
-    __TENANT_BOOTSTRAP__
     # ---- resource limits (Linux only) ------------------------------------
     try:
         import resource as _resource
@@ -305,39 +304,11 @@ _RUNNER_TEMPLATE = textwrap.dedent("""\
 # Sentinel placeholders used by _build_runner_script.  Must be valid Python
 # identifiers so they survive AST-based validation; they are replaced with
 # literal values *before* the runner script is executed.
-_PLACEHOLDER_TENANT_BOOTSTRAP = "__TENANT_BOOTSTRAP__"
 _PLACEHOLDER_MEM = "__MEM_BYTES__"
 _PLACEHOLDER_CODE = "__USER_CODE__"
 
-# 子进程入口的租户引导（plaita#256）：非 default 租户由父进程经 env 显式
-# 传入（ContextVar 不跨进程）。引导失败时在**用户代码之前**退出——绝不静默
-# 以 default 租户继续执行，否则 get_credential 会解出 default 凭据文件。
-_TENANT_BOOTSTRAP_EXIT = 97
-_TENANT_BOOTSTRAP_MARKER = "PLAITA_TENANT_CONTEXT_UNAVAILABLE:"
-_TENANT_BOOTSTRAP = textwrap.dedent(f"""\
-    # ---- tenant context (plaita#256) -------------------------------------
-    _plaita_tenant = _os.environ.get("PLAITA_TENANT_ID")
-    if _plaita_tenant:
-        try:
-            from plaita.tenant_context import set_current_tenant as _set_tenant
-            _set_tenant(
-                _plaita_tenant,
-                source=_os.environ.get("PLAITA_TENANT_SOURCE") or "derived",
-            )
-        except Exception as _e:
-            _sys.stderr.write(
-                "{_TENANT_BOOTSTRAP_MARKER} tenant=%r (%s: %s); refusing to "
-                "run user code under the implicit default tenant\\n"
-                % (_plaita_tenant, type(_e).__name__, _e)
-            )
-            _sys.stderr.flush()
-            raise SystemExit({_TENANT_BOOTSTRAP_EXIT})
-""")
 
-
-def _build_runner_script(
-    user_code: str, mem_bytes: int = 0, *, propagate_tenant: bool = False,
-) -> str:
+def _build_runner_script(user_code: str, mem_bytes: int = 0) -> str:
     """Embed *user_code* inside the runner template.
 
     The user code is inserted at column-0 (module level).  Uses
@@ -345,16 +316,11 @@ def _build_runner_script(
     arbitrary Python code (including dict literals containing ``{`` / ``}``)
     is safe.
 
-    ``propagate_tenant`` injects the child-side bootstrap that restores the
-    explicitly-passed tenant before user code. Only the host subprocess
-    backend sets it: docker mounts no host credentials, and the in-process
-    backends already see the caller's ContextVar.
+    The runner carries no tenant/credential bootstrap: non-default tenants are
+    refused by :func:`run_python_subprocess` before spawning (A42-06), and the
+    docker backend mounts no host credentials.
     """
-    script = _RUNNER_TEMPLATE.replace(
-        _PLACEHOLDER_TENANT_BOOTSTRAP,
-        _TENANT_BOOTSTRAP if propagate_tenant else "",
-    )
-    script = script.replace(_PLACEHOLDER_CODE, user_code)
+    script = _RUNNER_TEMPLATE.replace(_PLACEHOLDER_CODE, user_code)
     script = script.replace(_PLACEHOLDER_MEM, str(mem_bytes))
     return script
 
@@ -679,12 +645,45 @@ def _popen_wait_cancellable(
 # ---------------------------------------------------------------------------
 
 class TenantContextPropagationError(RuntimeError):
-    """非 default 租户无法安全传入沙箱子进程（plaita#256）。
+    """非 default 租户无法在 subprocess 沙箱中安全执行（plaita#256 / A42-06）。
 
-    子进程入口的租户引导在用户代码之前失败（例如沙箱解释器找不到
-    ``plaita``、租户标识非法）时抛出。宁可让该节点执行失败，也不让用户
-    代码在隐式 default 租户下运行并解出 default 凭据。
+    子进程与 worker 同用户、文件系统不受限，且所有租户共用同一把解密密钥：
+    无论父进程是否把凭据路径放进 env，子进程里的用户代码都能自行读取并解密
+    default 租户文件，或 ``set_current_tenant("default")`` 改写路由。因此在
+    spawn 之前就拒绝非 default 租户（用户代码零执行机会）；需要租户级 code
+    节点时使用 ``docker`` 后端（容器内不挂载宿主凭据）。
     """
+
+
+_SUBPROCESS_TENANT_ISOLATION_MARKER = (
+    "PLAITA_SUBPROCESS_TENANT_ISOLATION_UNAVAILABLE"
+)
+
+
+def _refuse_non_default_tenant_in_subprocess(language: str) -> None:
+    """subprocess 后端 fail-closed：非 default 租户不进子进程（A42-06）。
+
+    拒绝发生在 ``Popen`` 之前，用户代码完全没有执行机会。威胁模型是
+    「租户作者半可信」：子进程继承宿主文件系统与租户共享的解密密钥，
+    env 里传不传凭据路径都无法阻止其读取 default 凭据文件。
+    """
+    tenant_id = current_tenant()
+    if tenant_id == _DEFAULT_TENANT_ID:
+        return
+    # fail-closed 闸门必须可观测：拒绝原因与租户/语言进 WARNING（不打印路径）。
+    logger.warning(
+        "subprocess sandbox refused non-default tenant=%s language=%s "
+        "(%s); user code not executed",
+        tenant_id, language, _SUBPROCESS_TENANT_ISOLATION_MARKER,
+    )
+    raise TenantContextPropagationError(
+        f"{_SUBPROCESS_TENANT_ISOLATION_MARKER}: subprocess sandbox cannot "
+        f"isolate credentials for tenant {tenant_id!r} (language={language}); "
+        "the child would share the worker's file system and the tenant-wide "
+        "credentials key, so its user code could read the default tenant's "
+        "credentials. Refusing to run user code; use "
+        "sandbox_backend='docker' for non-default tenants."
+    )
 
 
 def run_python_subprocess(code, input_value, cancel_event=None):
@@ -707,14 +706,15 @@ def run_python_subprocess(code, input_value, cancel_event=None):
     File system and network access are **not** restricted — use the
     ``"docker"`` backend for full network isolation.
 
-    Tenant context (plaita#256): the caller's tenant is carried explicitly
-    via ``PLAITA_TENANT_ID`` (source ``derived``) and the credentials routing
-    (``PLAITA_CREDENTIALS_FILE`` base file + ``PLAITA_CREDENTIALS_KEY_FILE``).
-    The child restores the tenant before running user code, so
-    ``credentials_file()`` expands the tenant side file exactly once. Default-tenant executions keep the historical
-    (implicit default) tenant semantics. If a non-default tenant cannot be
-    restored, the child exits before user code and this function raises
-    :class:`TenantContextPropagationError` — never a silent default fallback.
+    Tenant boundary (plaita#256, A42-06): the child shares the worker's OS
+    user and file system, and every tenant's credentials file is encrypted
+    with the same key, so this backend is **not** a credential isolation
+    boundary. Non-default tenants are refused before spawning
+    (:class:`TenantContextPropagationError`, marker
+    ``PLAITA_SUBPROCESS_TENANT_ISOLATION_UNAVAILABLE``); their user code never
+    runs. Use ``"docker"`` for tenant code. Default-tenant executions keep the
+    historical semantics (including the credential routing env consumed by
+    ``get_credential``).
 
     Input and output are serialised as JSON.  Only JSON-serialisable types
     are supported; complex Python objects (Pydantic models, custom classes)
@@ -726,28 +726,24 @@ def run_python_subprocess(code, input_value, cancel_event=None):
         If the subprocess times out, is cancelled, exits with a non-zero
         code, or the user code raises an exception.
     TenantContextPropagationError
-        If a non-default tenant cannot be established in the child before
-        user code runs.
+        If the caller runs under a non-default tenant: this backend cannot
+        isolate that tenant's credentials from the host file system.
     """
-    tenant_id = current_tenant()
-    propagate_tenant = tenant_id != _DEFAULT_TENANT_ID
-    extra = subprocess_credentials_env()
-    if propagate_tenant:
-        # #237 契约：进程边界显式携带租户，来源标记为 derived（不是 default）。
-        extra["PLAITA_TENANT_ID"] = tenant_id
-        extra["PLAITA_TENANT_SOURCE"] = TENANT_SOURCE_DERIVED
+    _refuse_non_default_tenant_in_subprocess("python")
     mem_bytes = SANDBOX_SUBPROCESS_MEMORY_MB * 1024 * 1024
-    runner = _build_runner_script(
-        code, mem_bytes=mem_bytes, propagate_tenant=propagate_tenant)
+    runner = _build_runner_script(code, mem_bytes=mem_bytes)
     # 环境变量白名单重建（2026-09 安全评审 P1）：历史实现未传 env=，子进程
     # 拿到宿主全量 os.environ——生产环境里等于把 API key/云凭证交给沙箱内
     # 代码。白名单外可用 SUBPROCESS_ENV_EXTRA 按需补充。
+    # 非 default 已在上方拒绝；这里的凭据路由仅服务 default 租户（其用户代码
+    # 本就有权读取 default 凭据），不传 PLAITA_TENANT_ID——子进程没有租户
+    # 引导，必须保持隐式 default 上下文。
+    extra = subprocess_credentials_env()
     child_env = _env.build_subprocess_env(extra=extra)
-    if not propagate_tenant:
-        # 模块级 SUBPROCESS_ENV_EXTRA 可能残留租户变量；default 执行的身份
-        # 由本进程决定，不能让子进程环境里的旧值把它改成别的租户。
-        child_env.pop("PLAITA_TENANT_ID", None)
-        child_env.pop("PLAITA_TENANT_SOURCE", None)
+    # 模块级 SUBPROCESS_ENV_EXTRA 可能残留租户变量；default 执行的身份
+    # 由本进程决定，不能让子进程环境里的旧值把它改成别的租户。
+    child_env.pop("PLAITA_TENANT_ID", None)
+    child_env.pop("PLAITA_TENANT_SOURCE", None)
     proc = subprocess.Popen(
         [sys.executable, "-c", runner],
         stdin=subprocess.PIPE,
@@ -764,13 +760,6 @@ def run_python_subprocess(code, input_value, cancel_event=None):
     stderr = err.decode(errors="replace") if err else ""
 
     if proc.returncode != 0 and not stdout.strip():
-        if (proc.returncode == _TENANT_BOOTSTRAP_EXIT
-                and _TENANT_BOOTSTRAP_MARKER in stderr):
-            raise TenantContextPropagationError(
-                f"Subprocess sandbox could not establish tenant context "
-                f"(tenant={tenant_id!r}); refusing to run user code under the "
-                f"implicit default tenant. Stderr: {stderr[:500] or '(empty)'}"
-            )
         raise RuntimeError(
             f"Subprocess exited with code {proc.returncode}. "
             f"Stderr: {stderr[:500] or '(empty)'}"
@@ -941,7 +930,13 @@ def run_js_subprocess(code, input_value, cancel_event=None):
 
     File system and network access are **not** restricted — use the ``"docker"``
     backend for that.
+
+    Tenant boundary (A42-06): like the Python backend, the node child shares
+    the worker's OS user and file system, so non-default tenants are refused
+    before spawning (:class:`TenantContextPropagationError`); their user code
+    never runs. Use ``"docker"`` for tenant code.
     """
+    _refuse_non_default_tenant_in_subprocess(LANGUAGE_JS)
     script_b64 = base64.b64encode(_build_js_runner_script(code).encode()).decode()
     child_env = _env.build_subprocess_env(extra={_JS_SCRIPT_ENV: script_b64})
     try:

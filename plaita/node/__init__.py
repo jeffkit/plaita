@@ -544,11 +544,13 @@ def register_code_node(registry: Optional[NodeRegistry] = None,
         （python ``exec`` 与 js PyExecJS 都没有超时/取消），js 语言还须
         ``allowed_languages`` 显式放行。
 
-        ``"subprocess"`` 自 plaita#256 起会显式传播当前租户与凭据路由
-        （``PLAITA_TENANT_ID`` + 基础凭据文件/密钥路径），子进程内
-        ``get_credential()`` 不再退回 default；无法建立租户上下文时
-        **fail-closed**（用户代码不执行）。但子进程仍有宿主文件系统访问，
-        多租户部署仍应优先 ``"docker"``（容器内不挂载宿主凭据文件）。
+        ``"subprocess"`` **不是租户凭据隔离边界**（plaita#256 首版传播租户与
+        凭据路径，A42-06 收窄）：子进程与 worker 同用户、文件系统不受限，
+        且所有租户共用同一把解密密钥，租户代码可以改写租户上下文或直接读取
+        default 凭据文件。因此非 default 租户在 spawn 前即被拒绝
+        （``TenantContextPropagationError``，用户代码不执行）；default 租户
+        语义不变。多租户 / 租户级 code 节点必须用 ``"docker"``（容器内不挂载
+        宿主凭据文件）。
     """
     from . import code as _code_module
     effective = default_backend if default_backend is not None else _code_module._DEFAULT_SANDBOX_BACKEND

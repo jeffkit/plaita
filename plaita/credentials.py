@@ -12,19 +12,26 @@
 多租户：解析时读租户上下文（``plaita.tenant_context.current_tenant``，与
 分布式存储/日志同源）——非 default 租户读旁文件
 ``<stem>.<tenant_id><suffix>``（console 凭据页按租户导出的同一命名），
-default/空租户沿用历史文件（零行为变化）。租户隔离由文件路径保证：
-非 default 租户只看得见自己旁文件里的凭据，default 文件对它不可见；
-报错信息只列**当前租户文件内**的凭据名，不泄露其他租户的存在。
+default/空租户沿用历史文件（零行为变化）。**公开 API 路由层**的租户隔离由
+文件路径保证：非 default 租户只看得见自己旁文件里的凭据，default 文件对它
+不可见；报错信息只列**当前租户文件内**的凭据名，不泄露其他租户的存在。
+这不是对同用户任意代码的安全边界——所有租户文件共用同一把密钥，能读文件
+就能解密（A42-06）；code 节点 ``subprocess`` 后端因此对非 default 租户
+fail-closed，租户级 code 节点须用 ``docker``（不挂载宿主凭据）。
 
 节点内用法::
 
     from plaita.credentials import get_credential
     cred = get_credential("feishu-bot")   # -> {"url": "https://...", ...}
 
-跨进程用法（plaita#256）：ContextVar 不跨进程，子进程里的 ``get_credential``
-不会自动继承父进程的租户。需要把基础凭据文件与密钥路径经 env 显式传入
-（:func:`subprocess_credentials_env`），子进程入口再 ``set_current_tenant``，
-由 ``credentials_file()`` 按租户展开旁文件。
+跨进程用法（plaita#256，A42-06 收窄）：ContextVar 不跨进程，子进程里的
+``get_credential`` 不会自动继承父进程的租户。**subprocess 沙箱不是凭据隔离
+边界**——子进程与 worker 同用户、文件系统不受限，且所有租户共用同一把
+Fernet 密钥，租户代码可以直接读取 default 凭据文件，因此 code 节点
+``subprocess`` 后端对非 default 租户 fail-closed（spawn 前拒绝，用户代码
+零执行机会）。当前 :func:`subprocess_credentials_env` 只服务 default 租户
+子进程：显式固定基础文件与密钥路径，保持历史语义。租户级 code 节点请用
+``docker`` 后端（容器内不挂载宿主凭据）。
 """
 from __future__ import annotations
 
@@ -85,18 +92,21 @@ def credentials_key_file() -> Path:
 
 
 def subprocess_credentials_env() -> Dict[str, str]:
-    """子进程凭据路由的显式 env（plaita#256）。
+    """default 租户子进程的显式凭据路由 env（plaita#256，A42-06 收窄）。
 
     返回可直接并入 ``plaita.subprocess_env.build_subprocess_env(extra=...)`` 的
-    ``PLAITA_CREDENTIALS_FILE`` / ``PLAITA_CREDENTIALS_KEY_FILE``：
-    子进程的 ``get_credential()`` 与父进程看到同一租户文件，且密钥路径被
-    显式固定，不再静默落回 cwd 的 default 文件。
+    ``PLAITA_CREDENTIALS_FILE`` / ``PLAITA_CREDENTIALS_KEY_FILE``，让 default
+    租户子进程的 ``get_credential()`` 与父进程看到同一文件（历史上它依赖
+    cwd 落回，显式固定避免 cwd 漂移）。
 
-    ``PLAITA_CREDENTIALS_FILE`` 传的是**基础文件**，不是已展开的旁文件——
-    子进程入口会显式恢复租户上下文，``credentials_file()`` 再按同一规则展开
-    一次。传旁文件会被二次追加 ``.<tenant>`` 后缀（plaita#256 首版实测）。
+    **不要用于非 default 租户**：租户间只靠文件路径隔离，而子进程与 worker
+    同用户、文件系统不受限，且所有租户共用同一把解密密钥——把 base/key
+    路径交给租户子进程等于把可解密所有租户文件的密钥交出去。code 节点
+    ``subprocess`` 后端因此在 spawn 前拒绝非 default 租户（A42-06）；需要
+    租户级 code 节点请用 ``docker`` 后端（不挂载宿主凭据）。
+
     密钥只传**路径**，不传内联 ``PLAITA_CREDENTIALS_KEY``——后者只存在于
-    宿主环境，复制给沙箱代码等于把可解密所有租户文件的密钥交出去。
+    宿主环境，复制给沙箱代码等于直接交出密钥材料。
     """
     return {
         "PLAITA_CREDENTIALS_FILE": str(credentials_base_file()),
