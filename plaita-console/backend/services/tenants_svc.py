@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import secrets
 from datetime import datetime
@@ -50,6 +51,14 @@ except ImportError:
 from . import users_svc
 
 try:
+    from .tenant_write_guard import begin_guarded_transaction, lock_tenant_row
+except ImportError:  # 平铺布局（cwd=backend，services 为顶层包）
+    from services.tenant_write_guard import (  # type: ignore
+        begin_guarded_transaction,
+        lock_tenant_row,
+    )
+
+try:
     from plaita.tenant_context import tenant_namespace as _engine_tenant_namespace
 except ImportError:  # 平铺布局/最小安装：与 plaita.tenant_context 同一映射规则
     def _engine_tenant_namespace(tenant_id: str) -> str:
@@ -71,6 +80,8 @@ _TENANT_RUNNING_KEY = "plaita:tenant_running:{tenant_id}"  # 配额名额 ZSET
 _TENANT_QUOTA_KEY = "plaita:tenant_quota"               # HASH tenant_id -> 上限
 _TENANT_STATUS_KEY = "plaita:tenant_status"             # 与 tenant_status 同键
 _TENANT_STATUS_DISABLED = "disabled"                    # tenant_is_active 拒行值
+# A50-05：共享任务队列（console 派发与 worker 消费同名，env 可覆盖）。
+_TASK_QUEUE_DEFAULT = "plaita:flow:queue"
 
 # default 租户与平台机制键共用 ``plaita:`` 前缀：只按租户数据前缀清理，
 # 不触碰队列/registry 等平台键（flow 定义逐键类型判别，见 _purge_tenant_redis）。
@@ -468,6 +479,32 @@ def _purge_tenant_redis(redis_client, tenant_id: str) -> Dict[str, int]:
     return counts
 
 
+def _task_queue_name() -> str:
+    """console 派发队列名（与 api.executions._task_queue_name 同一解析规则）。"""
+    return os.getenv("PLAITA_CONSOLE_TASK_QUEUE", _TASK_QUEUE_DEFAULT)
+
+
+def _purge_tenant_queue(redis_client, tenant_id: str) -> int:
+    """删除共享任务队列中归属该租户的 start/resume 消息（A50-05）。
+
+    队列是全局 Stream（消息只带 ``tenant_id`` 字段），不在租户命名空间里；
+    删除时不清，同名重建把墓碑覆盖回 active 后旧 start 会重新执行。清理
+    失败必须 loud（与 #255 的 Redis 清理同一口径），否则删除会静默留下
+    可执行的旧消息。
+    """
+    if redis_client is None:
+        return 0
+    try:
+        from plaita.server.task_queue import purge_tenant_tasks
+    except ImportError:
+        logger.exception(
+            "删除租户 %s：无法加载任务队列清理器（旧 start 消息可能留存）",
+            tenant_id,
+        )
+        raise
+    return purge_tenant_tasks(redis_client, _task_queue_name(), tenant_id)
+
+
 def _tombstone_tenant(redis_client, tenant_id: str) -> None:
     """删除墓碑：保留 ``disabled`` 短视图而不是 clear（#255）。
 
@@ -503,6 +540,9 @@ def _purge_orphan_tenant_runtime(session, tenant_id: str, redis_client) -> None:
     _purge_local_tenant_runtime(session, tenant_id)
     session.commit()
     _purge_tenant_redis(redis_client, tenant_id)
+    # 404 补清扫同样要排空队列：旧版本删除留下的 start 消息会在同名重建
+    # 后重新执行（A50-05）。
+    _purge_tenant_queue(redis_client, tenant_id)
     _tombstone_tenant(redis_client, tenant_id)
 
 
@@ -511,7 +551,12 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
     local_counts: Dict[str, int] = {}
     redis_counts: Dict[str, int] = {}
     with store._session_local() as session:
-        row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
+        # A50-01/A50-02：写锁必须先于第一次读（SQLite 为 BEGIN IMMEDIATE；
+        # PG 为下面的 SELECT ... FOR UPDATE）。删除事务从存在性检查到 commit
+        # 全程串行，并发的 save_credential/add_member 要么在删除提交前完成
+        # （其行随后被本事务删掉），要么在其 flush 后复检时看到租户已删。
+        begin_guarded_transaction(session)
+        row = lock_tenant_row(session, tenant_id)
         if row is None:
             # plaita#257：旧实现先 commit 删租户行、后删凭据旁文件；unlink
             # 失败后租户已不存在，重试只拿到 404（「租户已删、旧密钥仍可被
@@ -552,6 +597,11 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
         # 重试可继续清理；commit 成功后不存在需要 404 才能补清的中间态。
         redis_counts = _purge_tenant_redis(redis_client, tenant_id)
         _tombstone_tenant(redis_client, tenant_id)
+        # 墓碑先落，再排空共享队列：worker 在清理期间也不会执行该租户消息；
+        # 队列清理失败 ⇒ 事务回滚、墓碑留在 Redis（重试可继续），绝不留下
+        # 「租户已删、旧 start 仍排队」的复活路径。
+        if redis_client is not None:
+            redis_counts["queue"] = _purge_tenant_queue(redis_client, tenant_id)
         session.commit()
 
     logger.info(

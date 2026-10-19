@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Column, DateTime, create_engine, select, text, update
+from sqlalchemy import Column, DateTime, create_engine, delete, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -1106,6 +1106,26 @@ def delete_local_execution(
         session.delete(row)
         session.commit()
         return True
+
+
+def delete_local_logs(
+    execution_id: str, tenant_id: Optional[str] = None
+) -> int:
+    """删除一条本地执行的全部日志（随执行删除，返回删除行数）。
+
+    日志是执行数据的一部分：此前删执行只删 ``local_executions`` 行，
+    ``local_logs`` 仍可按 ``execution_id`` 查到（「删除后不可恢复」不成立）。
+    """
+    store = get_flow_store()
+    with store._session_local() as session:
+        result = session.execute(
+            delete(LocalLog).where(
+                FlowStore._tenant_filter(LocalLog, tenant_id),
+                LocalLog.execution_id == execution_id,
+            )
+        )
+        session.commit()
+        return int(result.rowcount or 0)
 
 
 # ============ 初始化辅助 ============

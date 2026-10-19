@@ -195,6 +195,7 @@ def dispatch_one(
     params: Optional[Dict[str, Any]] = None,
     queue_name: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    actor: Optional[str] = None,
     dry_run: bool = True,
     shadow: Optional[bool] = None,
     service_type: str = DEFAULT_WORKER_SERVICE_TYPE,
@@ -217,6 +218,10 @@ def dispatch_one(
     ``queue_name`` 缺省跟随 ``PLAITA_CONSOLE_TASK_QUEUE``；金丝雀期由调用方
     显式传金丝雀队列（如 ``plaita:flow:queue:canary``）——生产队列 XLEN 与
     金丝雀队列 XLEN 因此互相独立（期 1 判据③）。
+
+    ``tenant_id`` / ``dry_run`` / ``shadow`` 是服务端权威输入（#262）：HTTP
+    层从认证上下文与 env 解析后传入，不接受请求体直接覆盖。``actor`` 是
+    认证主体的用户名/凭证标识，原样写进台账（「谁派的」）。
     """
     candidates = load_worker_capacity(redis_client, service_type=service_type)
     route = decide_route(candidates)
@@ -274,6 +279,7 @@ def dispatch_one(
         stale=result["stale"],
         candidate_count=len(candidates),
         tenant_id=tenant_id,
+        actor=actor,
         extra={"execution_id": exec_id},
     )
     out = enqueue_with_ledger(

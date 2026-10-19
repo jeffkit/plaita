@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import pytest
@@ -35,7 +36,12 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from api import cluster as cluster_api  # noqa: E402
+from auth import require_auth  # noqa: E402
 from services import cluster_registry as cluster_registry_module  # noqa: E402
+
+# #261：集群登记端点要求平台身份；本文件的关注点是 id 路径注入，用平台身份直通。
+REQUEST = SimpleNamespace(method="POST", url=SimpleNamespace(path="/api/clusters"))
+IDENTITY = {"actor": "test", "platform_admin": True}
 
 
 class Env(NamedTuple):
@@ -63,6 +69,7 @@ def env(tmp_path, monkeypatch) -> Env:
     monkeypatch.setattr(cluster_registry_module, "_cluster_registry", registry)
 
     app = FastAPI()
+    app.dependency_overrides[require_auth] = lambda: IDENTITY
     app.include_router(cluster_api.router, prefix="/api")
     return Env(
         registry=registry,
@@ -162,7 +169,7 @@ def test_api_delete_maps_out_of_base_id_to_400(env: Env) -> None:
     _inject_legacy_entry(env, legacy_id)
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(cluster_api.delete_cluster(legacy_id))
+        asyncio.run(cluster_api.delete_cluster(legacy_id, REQUEST, IDENTITY))
 
     assert excinfo.value.status_code == 400
     assert "集群 ID 非法" in str(excinfo.value.detail)

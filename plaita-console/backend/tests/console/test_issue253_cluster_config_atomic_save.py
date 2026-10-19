@@ -23,6 +23,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from api import cluster as cluster_api  # noqa: E402
+from auth import require_auth  # noqa: E402
 from services import cluster_registry as cluster_registry_module  # noqa: E402
 from services import service_manager as service_manager_module  # noqa: E402
 
@@ -65,6 +66,10 @@ def _temp_files(directory: Path) -> list:
 
 def _client() -> TestClient:
     app = FastAPI()
+    # 本文件只测保存/载入原子性；#261 的 platform_admin 闸用平台身份绕过。
+    app.dependency_overrides[require_auth] = lambda: {
+        "actor": "test", "role": "admin", "tenant_id": None, "platform_admin": True,
+    }
     app.include_router(cluster_api.router, prefix="/api")
     return TestClient(app)
 

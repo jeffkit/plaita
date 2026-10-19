@@ -31,7 +31,9 @@ from .base import StateSerializationError
 from .redis import (
     TERMINAL_EXECUTION_STATUSES,
     RedisExecutionStorage,
+    execution_fence_key,
     execution_index_key,
+    execution_lease_key,
     execution_start_time_score,
     execution_state_ttl_seconds,
 )
@@ -55,6 +57,26 @@ if redis.call('get', KEYS[2]) == ARGV[2] then
     redis.call('set', KEYS[1], ARGV[1])
   end
   redis.call('zadd', KEYS[3], ARGV[4], ARGV[5])
+  return 1
+else
+  return 0
+end
+"""
+
+
+# 单段 Lua：只有 fence 世代仍归本持有者时才允许删除执行状态（A43-07）。
+# 与 save 的 CAS 对称——delete 也是状态改写，旧世代不得删除新世代已推进
+# 的状态。删除范围与 RedisExecutionStorage.delete_execution_state 同口径：
+# 状态键 + 索引成员 + fence 键 + lease 键。
+# KEYS[1]=状态键, KEYS[2]=fence 键, KEYS[3]=索引 ZSET, KEYS[4]=lease 键
+# ARGV[1]=期望世代, ARGV[2]=execution_id
+# 返回 1=删除成功；0=世代不符（键缺失也算不符）。
+_FENCED_DELETE_LUA = """
+if redis.call('get', KEYS[2]) == ARGV[1] then
+  redis.call('del', KEYS[1])
+  redis.call('zrem', KEYS[3], ARGV[2])
+  redis.call('del', KEYS[2])
+  redis.call('del', KEYS[4])
   return 1
 else
   return 0
@@ -112,7 +134,7 @@ class FencedExecutionStorage(ExecutionStorage):
 
         state_key = key_builder("execution", execution_id)
         namespace = getattr(self._inner, "namespace", "plaita")
-        fence_key = f"{namespace}:execution:fence:{execution_id}"
+        fence_key = execution_fence_key(namespace, execution_id)
         try:
             serialized = self._inner.serialize_state(state.model_dump())
         except Exception as e:
@@ -164,7 +186,50 @@ class FencedExecutionStorage(ExecutionStorage):
         return self._inner.load_execution_state(execution_id)
 
     def delete_execution_state(self, execution_id: str) -> bool:
-        return self._inner.delete_execution_state(execution_id)
+        """删除执行状态；持世代号时只允许删除**自己的世代**（A43-07）。
+
+        无世代（控制面删除 / 未持 fenced 租约 / 单测）→ 透传内层，内层会
+        连同 fence、lease 一并清掉（删除即吊销，A43-01）。持世代 → 单段
+        Lua 先比较 fence 键，匹配才删状态 + 索引成员 + fence + lease；
+        不匹配抛 ``ExecutionLeaseError``（与 save 的 CAS 语义对称——旧世代
+        不得删除新世代已推进的状态，也不得借删除把新世代的状态清掉）。
+        """
+        generation = current_fence_token()
+        if generation is None:
+            return self._inner.delete_execution_state(execution_id)
+
+        client = getattr(self._inner, "client", None)
+        key_builder = getattr(self._inner, "get_namespace_key", None)
+        if client is None or not callable(key_builder) or not hasattr(client, "eval"):
+            # 内层非 Redis 后端（注入点约束下不应发生）→ 防御性透传
+            return self._inner.delete_execution_state(execution_id)
+
+        state_key = key_builder("execution", execution_id)
+        namespace = getattr(self._inner, "namespace", "plaita")
+        try:
+            result = client.eval(
+                _FENCED_DELETE_LUA,
+                4,
+                state_key,
+                execution_fence_key(namespace, execution_id),
+                execution_index_key(namespace),
+                execution_lease_key(namespace, execution_id),
+                str(int(generation)),
+                execution_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Fenced delete execution state %s failed: %s",
+                execution_id,
+                _scrub_url_text(e),
+            )
+            return False
+        if not result:
+            raise ExecutionLeaseError(
+                f"fencing token mismatch for execution {execution_id} "
+                f"(gen={generation}); state delete refused"
+            )
+        return True
 
     def list_executions(
         self,

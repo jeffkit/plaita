@@ -38,12 +38,21 @@ python -m plaita_console              # 或使用 plaita-console 命令
 - **editor**：编排与执行（增删改流程、发布、试跑、启动执行）
 - **viewer**：只读
 
-多租户部署下，`admin` 是**租户内**角色，不等于平台身份（#260）：
-`/api/users` 的全局账号变更（创建 / 改角色 / 改密 / 删除）与全局服务停止
-只允许 `platform_admin`（或平台级 API-Key）执行；租户 admin 只能经
-`/api/tenants/{tid}/members/*` 管理**本租户**成员，且不能操作平台管理员
-账号。任何已认证角色都可以修改**自己**的密码。租户 admin 的
-`GET /api/users` 只返回本租户成员。
+多租户部署下，`admin` 是**租户内**角色，不等于平台身份（#260 / #261）：
+`/api/users` 的全局账号变更（创建 / 改角色 / 改密 / 删除）、全局服务停止，
+以及集群管理面的全局生命周期与基础设施配置（服务启停 / stop-all /
+process-docker 模式切换 / 基础设施 CRUD 与容器启停 / 集群登记、切换、
+删除与配置保存）只允许 `platform_admin`（或平台级 API-Key）执行，拒绝写
+`*.denied` 审计。租户 admin 仍可读取集群配置、实例/基础设施列表与健康
+检查。租户 admin 只能经 `/api/tenants/{tid}/members/*` 管理**本租户**
+成员，且不能操作平台管理员账号。任何已认证角色都可以修改**自己**的密码。
+租户 admin 的 `GET /api/users` 只返回本租户成员。
+
+`POST /api/dispatch/one` 的 `shadow` / `dry_run` / `tenant_id` 是服务端
+权威字段（#262）：`shadow` 只取 `PLAITA_CONSOLE_DISPATCH_SHADOW`（请求体
+同名字段忽略）；`dry_run=false` 仅平台身份可写，租户 editor 传 false 会被
+强制干跑并留下 WARNING；`tenant_id` 取认证上下文，只有平台身份可代传其它
+租户，跨租户请求 403 + 审计。派发台账同时记录认证主体 `actor` 与生效租户。
 
 登录后走会话 token（7 天）；`X-Admin-API-Key` 服务账号兼容（等价 admin）。
 角色/密码变更即时撤销旧会话。「用户」页管理账号与角色。

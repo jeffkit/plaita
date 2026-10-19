@@ -1,14 +1,22 @@
 """
 集群管理 API
 提供服务启动、停止、配置等接口
+
+#261（P1 security）：``/api/cluster`` 此前只有 admin 前缀闸——租户角色
+``admin`` 恰好也是 admin，因此租户管理员能启停全局服务、切换模式、改
+基础设施 URL、登记/切换集群（配置接管）。全局生命周期与基础设施配置面
+统一挂 ``ensure_platform_admin``（#260 helper）：租户 admin ≠ 平台身份，
+拒绝写 ``*.denied`` 审计 + WARNING。读面（config/service-types/列表/
+健康检查/模板）不受影响。
 """
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
+    from ..auth import ensure_platform_admin, require_auth
     from ..services.service_manager import (
         ClusterConfigError,
         get_service_manager,
@@ -22,6 +30,7 @@ except ImportError:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
+    from auth import ensure_platform_admin, require_auth  # type: ignore
     from services.service_manager import (
         ClusterConfigError,
         get_service_manager,
@@ -219,10 +228,22 @@ async def list_service_types():
 
 
 @router.post("/cluster/start", response_model=StartServiceResponse)
-async def start_service(request: StartServiceRequest):
+async def start_service(
+    request: StartServiceRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     启动一个服务实例
+
+    #261：托管实例是全局（跨租户）生命周期对象，租户 admin 不是平台身份。
+    全局启停 / 模式切换 / 基础设施配置 / 集群登记统一要求 platform_admin；
+    拒绝进审计。
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.start",
+        resource="cluster", target=request.service_type,
+    )
     manager = _require_service_manager()
     
     try:
@@ -249,10 +270,19 @@ async def start_service(request: StartServiceRequest):
 
 
 @router.post("/cluster/stop/{instance_id}")
-async def stop_service(instance_id: str, request: StopServiceRequest):
+async def stop_service(
+    instance_id: str,
+    request: StopServiceRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     停止一个服务实例
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.stop",
+        resource="cluster", target=instance_id,
+    )
     manager = _require_service_manager()
     
     success = await manager.stop_service(instance_id, request.graceful)
@@ -268,10 +298,17 @@ async def stop_service(instance_id: str, request: StopServiceRequest):
 
 
 @router.post("/cluster/stop-all")
-async def stop_all_services(request: StopServiceRequest):
+async def stop_all_services(
+    request: StopServiceRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     停止所有托管服务
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.stop_all", resource="cluster",
+    )
     manager = _require_service_manager()
     results = await manager.stop_all(request.graceful)
 
@@ -395,12 +432,21 @@ async def get_cluster_config():
 
 
 @router.post("/cluster/mode")
-async def switch_mode(request: SwitchModeRequest):
+async def switch_mode(
+    request: SwitchModeRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     切换服务管理模式（process/docker）
     
     注意：切换模式会停止所有当前托管的服务
     """
+    # 闸先于参数校验：租户身份不得通过 400/422 差异探测管理面状态。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.switch_mode",
+        resource="cluster", target=request.mode,
+    )
     if request.mode not in ("process", "docker"):
         raise HTTPException(status_code=400, detail="无效的模式，必须是 process 或 docker")
     
@@ -522,24 +568,48 @@ async def check_infrastructure_health(name: str):
 
 
 @router.post("/cluster/infrastructure/{name}/start")
-async def start_infrastructure(name: str):
+async def start_infrastructure(
+    name: str,
+    request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """容器化拉起基础设施（docker run/start + 健康等待）"""
+    ensure_platform_admin(
+        request, identity, action="cluster.infrastructure.start",
+        resource="cluster", target=name,
+    )
     manager = _require_service_manager()
     return await manager.start_infrastructure(name)
 
 
 @router.post("/cluster/infrastructure/{name}/stop")
-async def stop_infrastructure(name: str):
+async def stop_infrastructure(
+    name: str,
+    request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """停止基础设施容器（保留容器）"""
+    ensure_platform_admin(
+        request, identity, action="cluster.infrastructure.stop",
+        resource="cluster", target=name,
+    )
     manager = _require_service_manager()
     return await manager.stop_infrastructure(name)
 
 
 @router.post("/cluster/infrastructure", response_model=InfrastructureInfo)
-async def create_infrastructure(request: CreateInfrastructureRequest):
+async def create_infrastructure(
+    request: CreateInfrastructureRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     创建新的基础设施配置
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.infrastructure.create",
+        resource="cluster", target=request.name,
+    )
     manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
@@ -577,10 +647,22 @@ async def create_infrastructure(request: CreateInfrastructureRequest):
 
 
 @router.put("/cluster/infrastructure/{name}", response_model=InfrastructureInfo)
-async def update_infrastructure(name: str, request: UpdateInfrastructureRequest):
+async def update_infrastructure(
+    name: str,
+    request: UpdateInfrastructureRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     更新基础设施配置
+
+    #261：``url`` / ``bootstrap_servers`` 决定数据面连接目标——改它等于
+    配置接管，因此与全局生命周期同闸（platform_admin）。
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.infrastructure.update",
+        resource="cluster", target=name,
+    )
     manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
@@ -619,10 +701,18 @@ async def update_infrastructure(name: str, request: UpdateInfrastructureRequest)
 
 
 @router.delete("/cluster/infrastructure/{name}")
-async def delete_infrastructure(name: str):
+async def delete_infrastructure(
+    name: str,
+    request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     删除基础设施配置
     """
+    ensure_platform_admin(
+        request, identity, action="cluster.infrastructure.delete",
+        resource="cluster", target=name,
+    )
     manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
@@ -1458,10 +1548,21 @@ async def get_cluster(cluster_id: str):
 
 
 @router.post("/clusters", response_model=ClusterInfoResponse)
-async def create_cluster(request: CreateClusterRequest):
+async def create_cluster(
+    request: CreateClusterRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     创建新集群
+
+    #261：集群登记是全局基础设施面（新集群的 Redis URL 会成为数据面目标），
+    租户 admin 可借此把 console 数据面指向任意 Redis ⇒ platform_admin。
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.registry.create",
+        resource="cluster", target=request.id,
+    )
     registry = get_cluster_registry()
     
     try:
@@ -1487,10 +1588,19 @@ async def create_cluster(request: CreateClusterRequest):
 
 
 @router.put("/clusters/{cluster_id}", response_model=ClusterInfoResponse)
-async def update_cluster(cluster_id: str, request: UpdateClusterRequest):
+async def update_cluster(
+    cluster_id: str,
+    request: UpdateClusterRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     更新集群信息
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.registry.update",
+        resource="cluster", target=cluster_id,
+    )
     registry = get_cluster_registry()
     
     try:
@@ -1515,10 +1625,18 @@ async def update_cluster(cluster_id: str, request: UpdateClusterRequest):
 
 
 @router.delete("/clusters/{cluster_id}")
-async def delete_cluster(cluster_id: str):
+async def delete_cluster(
+    cluster_id: str,
+    request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     删除集群
     """
+    ensure_platform_admin(
+        request, identity, action="cluster.registry.delete",
+        resource="cluster", target=cluster_id,
+    )
     registry = get_cluster_registry()
     
     try:
@@ -1589,13 +1707,23 @@ async def _rebind_data_plane(app: FastAPI, redis_url: Optional[str]) -> None:
 
 
 @router.post("/clusters/switch", response_model=ClusterInfoResponse)
-async def switch_cluster(payload: SwitchClusterRequest, request: Request):
+async def switch_cluster(
+    payload: SwitchClusterRequest,
+    request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     切换到指定集群
 
     切换包含三件事：console 数据面重绑到该集群的 Redis、注册表活动指针更新、
     ServiceManager 配置重载（服务管理面读数同样以集群配置为准）。
+
+    #261：切换即改变全局数据面指向，要求 platform_admin。
     """
+    ensure_platform_admin(
+        request, identity, action="cluster.registry.switch",
+        resource="cluster", target=payload.cluster_id,
+    )
     registry = get_cluster_registry()
 
     target = registry.get_cluster(payload.cluster_id)
@@ -1648,14 +1776,24 @@ async def get_cluster_config_detail(cluster_id: str):
 
 @router.put("/clusters/{cluster_id}/config")
 async def save_cluster_config_detail(
-    cluster_id: str, payload: SaveClusterConfigRequest, request: Request
+    cluster_id: str,
+    payload: SaveClusterConfigRequest,
+    request: Request,
+    identity: Dict = Depends(require_auth),
 ):
     """
     保存集群配置（写入前校验 process 白名单，拒绝任意 command 注入）
 
     活动集群的配置文件就是两个平面的 Redis 真相源（管理面读它、数据面也以它
     为准），所以改它等于改数据面：写入落盘后一并重绑。
+
+    #261：配置含 ``redis.url`` 与进程启动参数，属基础设施接管面 ⇒
+    platform_admin。
     """
+    ensure_platform_admin(
+        request, identity, action="cluster.registry.save_config",
+        resource="cluster", target=cluster_id,
+    )
     registry = get_cluster_registry()
 
     try:

@@ -137,13 +137,14 @@ class TestClusterExecutionTenant:
         assert r.status_code == 404
 
     def test_delete_removes_tenant_key(self, env):
-        _seed_execution(env, "acme", "e-acme")
+        # 删除只对终态开放（A43-01）；本用例验租户 namespace 归属
+        _seed_execution(env, "acme", "e-acme", status="completed")
         client = _client(env)
         r = client.delete("/api/executions/e-acme", headers=_headers("acme"))
         assert r.status_code == 200
         assert env.exists("plaita:acme:execution:e-acme") == 0
         # default 键不受影响
-        _seed_execution(env, "default", "e-def")
+        _seed_execution(env, "default", "e-def", status="completed")
         r = client.delete("/api/executions/e-def", headers=_headers())
         assert r.status_code == 200
         assert env.exists("plaita:execution:e-def") == 0

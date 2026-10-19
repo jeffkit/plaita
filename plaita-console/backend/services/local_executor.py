@@ -47,6 +47,20 @@ _lock = threading.Lock()
 # 终态化，每步状态落库改用条件更新——执行线程不再无条件覆写终态。
 _cancel_events: Dict[str, threading.Event] = {}
 
+# 强删墓碑（A43-01 本地档）：force 删除时执行线程可能仍在途（软中断只在
+# 步界生效）。删除是持久语义，故墓碑登记后该执行的 ``_ThreadLogHandler``
+# 写入一律丢弃，避免「删了记录、日志还在长」；线程退出时在 ``_run_flow``
+# 的 finally 清除墓碑，避免无限增长。
+_deleted_executions: set[str] = set()
+
+# force 删除等待执行线程收口的期限（秒）。超时不阻塞请求（删除仍完成），
+# 只记录具名 WARNING——在途节点按本地档软中断语义跑到步界。
+LOCAL_DELETE_JOIN_TIMEOUT_SECONDS = 5.0
+
+
+class ExecutionActiveError(RuntimeError):
+    """本地执行仍在运行/挂起：删除需先取消，或显式 ``force=True``。"""
+
 
 def _register_cancel_event(execution_id: str) -> None:
     with _lock:
@@ -62,6 +76,25 @@ def _cancel_event_set(execution_id: str) -> bool:
     with _lock:
         event = _cancel_events.get(execution_id)
     return bool(event is not None and event.is_set())
+
+
+def _live_thread(execution_id: str) -> Optional[threading.Thread]:
+    """返回该执行当前存活的线程（None = 无在途线程）。"""
+    with _lock:
+        thread = _threads.get(execution_id)
+    if thread is not None and thread.is_alive():
+        return thread
+    return None
+
+
+def _mark_deleted(execution_id: str) -> None:
+    with _lock:
+        _deleted_executions.add(execution_id)
+
+
+def _is_deleted(execution_id: str) -> bool:
+    with _lock:
+        return execution_id in _deleted_executions
 
 
 def _finalize_cancelled(execution_id: str, context: Optional[Dict[str, Any]]) -> None:
@@ -333,8 +366,10 @@ def _spawn(execution_id: str, target, *args, **kwargs) -> None:
         existing = _threads.get(execution_id)
         if existing is not None and existing.is_alive():
             raise RuntimeError(f"执行 {execution_id} 已有运行中的线程")
-        # 新执行线程配对一个新的取消事件（旧线程已退出才会走到这里）
+        # 新执行线程配对一个新的取消事件（旧线程已退出才会走到这里）；
+        # 同 id 重新启动时清掉上一轮的强删墓碑（新执行生命周期）
         _cancel_events[execution_id] = threading.Event()
+        _deleted_executions.discard(execution_id)
         thread = threading.Thread(
             target=target, args=args, kwargs=kwargs,
             name=f"local-exec-{execution_id}", daemon=True,
@@ -520,6 +555,7 @@ def _run_flow(
                 pass
         with _lock:
             _threads.pop(execution_id, None)
+            _deleted_executions.discard(execution_id)
         _pop_cancel_event(execution_id)
 
 
@@ -534,6 +570,10 @@ class _ThreadLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.thread != self._thread_id:
+            return
+        # 已强删的执行：线程可能还在途（软中断到步界才停），此后日志一律
+        # 丢弃——删除是持久语义，不得让 local_logs 在删除后继续增长。
+        if _is_deleted(self._execution_id):
             return
         try:
             fs.insert_local_log(
@@ -603,8 +643,53 @@ def cancel_local_execution(
 
 
 def delete_local_execution(
-    execution_id: str, tenant_id: Optional[str] = None
+    execution_id: str, tenant_id: Optional[str] = None, *, force: bool = False
 ) -> bool:
+    """持久删除本地执行（A43-01 本地档）。
+
+    非终态（running/suspended）默认拒绝（``ExecutionActiveError``）——此前
+    直接删行，后台线程继续跑到结束、``_ThreadLogHandler`` 继续写 local_logs，
+    记录「删了又能在日志页查到」。
+
+    ``force=True`` 时先取消再删：置位取消 Event → 有界等待线程在步界收口
+    →（超时则登记强删墓碑，后续日志写入丢弃并打 WARNING）→ 删除该执行的
+    local_logs → 删除 local_executions 行。日志属于执行数据，随执行一并
+    删除，删除后不可查。
+    """
+    row = fs.get_local_execution(execution_id, tenant_id=tenant_id)
+    if row is None:
+        return False
+
+    status = row.get("status") or ""
+    active = status in ("running", "suspended")
+    thread = _live_thread(execution_id)
+
+    if active and not force:
+        raise ExecutionActiveError(
+            f"执行仍在 {status} 状态，先取消（POST "
+            f"/api/executions/{execution_id}/cancel）待终态后删除；"
+            "如确需立即删除请显式传 force=true"
+        )
+
+    if thread is not None:
+        # 执行线程仍在途：先立墓碑（并发日志立即停止写入），再按取消语义
+        # 收口。终态行但线程尚在 finally 的窗口同样走这段。
+        _mark_deleted(execution_id)
+        with _lock:
+            event = _cancel_events.get(execution_id)
+        if event is not None:
+            event.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=LOCAL_DELETE_JOIN_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                logger.warning(
+                    "本地执行 %s 强删时线程未在 %.1fs 内收口：记录与日志仍删除，"
+                    "在途节点跑到步界后退出（其后续日志写入已丢弃）",
+                    execution_id,
+                    LOCAL_DELETE_JOIN_TIMEOUT_SECONDS,
+                )
+
+    fs.delete_local_logs(execution_id, tenant_id=tenant_id)
     return fs.delete_local_execution(execution_id, tenant_id=tenant_id)
 
 

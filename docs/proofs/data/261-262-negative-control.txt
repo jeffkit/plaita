@@ -1,0 +1,51 @@
+plaita#261 + #262 负控（2026-10-19，wt-b2 / 第三十七轮）
+
+方法：只 stash 源码文件、保留两个新测试文件，先跑 pre-fix，再 pop 跑 post-fix。
+测试：
+- plaita-console/backend/tests/console/test_issue261_cluster_platform_admin.py
+- plaita-console/backend/tests/console/test_issue262_dispatch_authoritative.py
+
+== #261 pre-fix（stash api/cluster.py）==
+14 failed, 3 passed
+租户 admin（tadmin, platform_admin=False）对受闸操作的 pre-fix 回执全部 200：
+  start=200  stop=200  stop-all=200  mode=200
+  infra-create=200  infra-update=200  infra-delete=200  infra-start=200  infra-stop=200
+  cluster-create=200  cluster-update=200  cluster-delete=200  cluster-switch=200  cluster-save-config=200
+具体形态（节选）：
+  ('start', 200, '{"success":true,"instance_id":"flow_worker-1","status":"running","error":null}')
+  ('stop', 200, '{"success":true,"instance_id":"inst-1","message":"服务已停止"}')
+  ('stop-all', 200, '{"success":true,"results":{"inst-1":true}}')
+  ('mode', 200, '{"success":true,"mode":"docker","message":"已切换到 docker 模式"}')
+即：租户 admin 可启停全局服务、切换模式、改基础设施 URL、登记/切换/删除
+集群与保存集群配置（含 redis.url）。
+
+== #261 post-fix（当前工作树）==
+17 passed（14 条负向 + 读面 + 2 条正向）
+
+== #262 pre-fix（stash api/capacity.py + services/dispatcher.py + server/dispatch_ledger.py）==
+6 failed
+  editor 传 shadow=false + dry_run=false：pre-fix shadow=False、真发单
+    （断言「请求体 shadow 必须被剔除」处 False is True）
+  editor 传 tenant-b + dry_run=false：pre-fix 200 + enqueued=true（跨租户入队）：
+    {"shadow":false,"dry_run":false,...,"enqueued":true,"message_id":"...","ledger_recorded":true}
+  editor 同租户 dry_run=false：pre-fix dry_run=False（真发单）
+  api-key 正控：pre-fix 消息体无 tenant_id（KeyError: 'tenant_id'）
+  platform admin 代传：pre-fix 台账无 actor（KeyError: 'actor'）
+  platform admin 传 shadow=false：pre-fix 影子被绕过、真发单
+
+== #262 post-fix（当前工作树）==
+6 passed
+
+== 回归读数 ==
+- 定向 10 文件：119 passed
+- console 全套：667 passed / 13 skipped
+- 根 tests（排除 main 已知红的 tests/unit/test_worker_disk_guard.py）：
+  1 failed / 8514 passed / 16 skipped / 3493 subtests passed。
+  唯一失败 tests/unit/test_issue159_policy_url_exception_sinks.py::
+  test_policy_rejection_happens_before_aiohttp 在**干净 origin/main
+  （c0bffe0）worktree 内同样 1 failed**——环境/Python 3.13 预存问题，
+  与本单无关。
+- tests/unit/test_issue42_dispatch_ledger.py：17 passed
+- landing_gate.py ci：红（main c0bffe0 conclusion=failure，B1 r32 遗留的
+  test_worker_disk_guard fake lambda 缺 schema_version 参数，与本单无关；
+  本地复现 2 failed / 14 passed）

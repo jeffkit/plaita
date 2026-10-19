@@ -21,21 +21,31 @@ console 因此**看不见**低盘/饱和的 worker——2026-10-06 本机盘触�
 键；``POST /one`` 默认 ``dry_run=true`` 且影子模式默认开 ⇒ 同样零写入。
 切流需另一个显式步骤（金丝雀按仓 → 全量），且金丝雀队列与生产队列
 ``XLEN`` 物理隔离（期 1 判据③）。
+
+**服务端权威字段（#262）**：``/dispatch/one`` 的 ``shadow`` / ``dry_run`` /
+``tenant_id`` 不再信任请求体——shadow 只取 env，dry_run=false 仅平台身份
+可写，tenant_id 取认证上下文（仅平台身份可代传）。跨租户非平台请求 403 +
+``dispatch.one.denied`` 审计；台账记录 ``actor`` 与生效租户。
 """
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
+    from ..auth import require_auth, tenant_scope
     from ..services import dispatcher as dispatcher_svc
 except ImportError:  # 平铺布局（cwd=backend）运行时
+    from auth import require_auth, tenant_scope  # type: ignore
     from services import dispatcher as dispatcher_svc  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: #262：租户 editor 试图把派发代传到别的租户时的具名拒绝。
+DISPATCH_TENANT_DENIED_DETAIL = "仅平台管理员可指定派发租户"
 
 
 # ============ 数据模型 ============
@@ -124,7 +134,20 @@ async def dispatch_plan(req: DispatchPlanRequest, request: Request) -> DispatchP
 # ============ 期 1：单次可控派发 + 派发台账 ============
 
 class DispatchOneRequest(BaseModel):
-    """单次可控派发请求（金丝雀/按仓切流的最小单元）。"""
+    """单次可控派发请求（金丝雀/按仓切流的最小单元）。
+
+    #262：``shadow`` / ``dry_run`` 与 ``tenant_id`` 都是**服务端权威字段**，
+    不接受客户端直接覆盖：
+
+    - ``shadow`` 完全由 ``PLAITA_CONSOLE_DISPATCH_SHADOW`` 决定；请求体里的
+      同名字段被显式剔除（``extra="ignore"``），传了也不生效；
+    - ``dry_run`` 仅对平台身份（platform_admin / API-Key）是可写提示；租户
+      editor 传 ``false`` 会被忽略并降为干跑（WARNING 留痕）；
+    - ``tenant_id`` 默认取认证上下文（``tenant_scope(required=True)``）；只有
+      可证明的平台身份可以代传其它租户，其余身份跨租户即 403 + 审计。
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     issue_id: str = Field(..., description="本轮派发的 issue（台账主键）")
     flow_id: Optional[str] = Field(None, description="要跑的 flow（缺省 = issue_id）")
@@ -139,16 +162,20 @@ class DispatchOneRequest(BaseModel):
             "金丝雀队列 ⇒ 与生产队列 XLEN 物理隔离（期 1 判据③）"
         ),
     )
-    tenant_id: Optional[str] = Field(None, description="租户 ID（透传进消息体）")
+    tenant_id: Optional[str] = Field(
+        None,
+        description=(
+            "租户代传提示：仅平台身份有效；普通会话必须等于认证上下文，"
+            "否则 403。缺省取认证上下文"
+        ),
+    )
     dry_run: bool = Field(
         True,
         description=(
             "**默认真** = 只算不发（返回决策与目标，不入队、不写台账）。"
-            "真发单必须显式传 false，且 PLAITA_CONSOLE_DISPATCH_SHADOW 未开启"
+            "仅平台身份（platform_admin / API-Key）可显式传 false 真发单；"
+            "其它身份传 false 会被忽略并强制干跑"
         ),
-    )
-    shadow: Optional[bool] = Field(
-        None, description="影子模式覆盖（缺省跟随 PLAITA_CONSOLE_DISPATCH_SHADOW，默认 true）"
     )
 
 
@@ -187,13 +214,67 @@ class DispatchLedgerResponse(BaseModel):
 
 
 @router.post("/dispatch/one", response_model=DispatchOneResponse)
-async def dispatch_one(req: DispatchOneRequest, request: Request) -> DispatchOneResponse:
+async def dispatch_one(
+    req: DispatchOneRequest,
+    request: Request,
+    identity: Dict = Depends(require_auth),
+) -> DispatchOneResponse:
     """单次可控派发（期 1）：容量路由 → 显式目标 → 入队 + 落台账。
 
     **默认只算不发**（``dry_run=true`` 且影子模式默认开）：返回目标与原因，
     不写任何 Redis 键。真发单需同时 ``dry_run=false`` 且
     ``PLAITA_CONSOLE_DISPATCH_SHADOW=0``——两道闸都显式打开才会入队。
+
+    #262：服务端权威字段。``shadow`` 只取 env（请求体字段被剔除）；
+    ``dry_run=false`` 仅平台身份可写，租户 editor 传 false 会被忽略并
+    强制干跑（WARNING）；``tenant_id`` 取认证上下文，只有平台身份可代传。
+    台账记录 ``actor`` 与实际生效租户。
     """
+    platform_identity = bool(identity.get("platform_admin"))
+
+    # 租户：认证上下文是唯一默认来源；跨租户代传只对平台身份开放。
+    auth_tenant = tenant_scope(request, required=True)
+    requested_tenant = (req.tenant_id or "").strip() or None
+    if requested_tenant and requested_tenant != auth_tenant:
+        if not platform_identity:
+            logger.warning(
+                "拒绝非平台身份的跨租户派发 actor=%s issue=%s auth_tenant=%s "
+                "requested_tenant=%s",
+                identity.get("actor"), req.issue_id, auth_tenant, requested_tenant,
+            )
+            try:
+                from ..services import audit as audit_svc
+            except ImportError:
+                from services import audit as audit_svc  # type: ignore
+            audit_svc.record(
+                request,
+                action="dispatch.one.denied",
+                resource="dispatch",
+                resource_id=req.issue_id,
+                detail={
+                    "denied": True,
+                    "reason": "tenant_delegation_required",
+                    "auth_tenant": auth_tenant,
+                    "requested_tenant": requested_tenant,
+                    "method": request.method,
+                    "path": request.url.path,
+                },
+            )
+            raise HTTPException(status_code=403, detail=DISPATCH_TENANT_DENIED_DETAIL)
+        tenant_id = requested_tenant
+    else:
+        tenant_id = auth_tenant
+
+    # dry_run：非平台身份只能干跑。忽略 false 必须留 WARNING（不是静默降级）。
+    effective_dry_run = bool(req.dry_run)
+    if not effective_dry_run and not platform_identity:
+        logger.warning(
+            "非平台身份请求真实派发已强制降为干跑 actor=%s issue=%s path=%s",
+            identity.get("actor"), req.issue_id, request.url.path,
+        )
+        effective_dry_run = True
+
+    # shadow 不传：dispatch_one 只读 PLAITA_CONSOLE_DISPATCH_SHADOW（服务端配置）。
     result = dispatcher_svc.dispatch_one(
         get_redis(request),
         req.issue_id,
@@ -201,9 +282,9 @@ async def dispatch_one(req: DispatchOneRequest, request: Request) -> DispatchOne
         execution_id=req.execution_id,
         params=req.params,
         queue_name=req.queue_name,
-        tenant_id=req.tenant_id,
-        dry_run=req.dry_run,
-        shadow=req.shadow,
+        tenant_id=tenant_id,
+        dry_run=effective_dry_run,
+        actor=identity.get("actor"),
     )
     return DispatchOneResponse(**result)
 

@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
@@ -149,7 +149,12 @@ try:
         tenant_max_running,
         try_admit_tenant_start,
     )
-    from plaita.storage.redis import execution_state_ttl_seconds
+    from plaita.storage.fenced import FencedExecutionStorage
+    from plaita.storage.redis import (
+        TERMINAL_EXECUTION_STATUSES,
+        RedisExecutionStorage,
+        execution_state_ttl_seconds,
+    )
     from plaita.storage.usage import (
         node_results_from_context,
         node_usage_breakdown,
@@ -168,7 +173,12 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         tenant_max_running,
         try_admit_tenant_start,
     )
-    from plaita.storage.redis import execution_state_ttl_seconds
+    from plaita.storage.fenced import FencedExecutionStorage
+    from plaita.storage.redis import (
+        TERMINAL_EXECUTION_STATUSES,
+        RedisExecutionStorage,
+        execution_state_ttl_seconds,
+    )
     from plaita.storage.usage import (
         node_results_from_context,
         node_usage_breakdown,
@@ -386,6 +396,59 @@ def _tenant_from_key(key: str) -> str:
 def _execution_id_from_key(key: str) -> str:
     """从 ``{ns}:execution:{id}`` 取 execution_id（ns 可含租户段）。"""
     return key.split(":execution:", 1)[1]
+
+
+def _events_key(execution_id: str) -> str:
+    """执行事件 SSE 频道键（与 ``execution_timeline.CHANNEL_PREFIX`` 同源）。"""
+    return f"plaita:execution:events:{execution_id}"
+
+
+def _delete_cluster_execution_state(
+    redis: Redis, tenant: Optional[str], execution_id: str
+) -> bool:
+    """经 storage API 删除执行状态，并吊销 fence/lease（A43-01）。
+
+    生产代码里 console 的删除此前是裸键删除，只删状态/取消标志/事件频道，
+    在途 fenced worker 的下一次落盘仍命中 fence 世代 CAS，把状态与 ZSET
+    索引写回（删除后复活）。这里收敛到 ``delete_execution_state``：状态键、
+    索引成员、fence 世代键、lease 租约键在同一 pipeline 内清掉；此后 worker
+    的 save/delete 因世代失配以 ``ExecutionLeaseError`` 具名拒绝。
+
+    ``FencedExecutionStorage`` 在无世代号的调用方（控制面）直接透传内层；
+    若调用方意外持有世代号，删除同样受 CAS 保护（A43-07）。
+    """
+    storage = FencedExecutionStorage(
+        RedisExecutionStorage(client=redis, namespace=tenant_namespace(tenant))
+    )
+    return storage.delete_execution_state(execution_id)
+
+
+def _signal_cancel_for_force_delete(
+    redis: Redis, tenant: Optional[str], execution_id: str, info: Dict[str, Any]
+) -> None:
+    """显式 force 删除前的「先取消」步骤：写取消意图 + 投 cancel 消息。
+
+    与 ``POST /executions/{id}/cancel`` 同一形态（运行中→标志键 + 消息；
+    挂起→消息即可，状态马上被删）。删除本身会清掉标志键，故这里的作用是
+    让在途/待处理消息走取消语义，而不是留下一个「已删除但消息继续推进」
+    的窗口。
+    """
+    message = {
+        "type": "resume",
+        "flow_id": info.get("flow_id"),
+        "execution_id": execution_id,
+        "resume_type": "cancel",
+        "tenant_id": tenant or "default",
+        "data": None,
+        "timestamp": datetime.now().isoformat(),
+    }
+    _enqueue(message, redis)
+    if (info.get("status") or "") != "suspended":
+        redis.set(
+            _cancel_key(tenant, execution_id),
+            datetime.now().isoformat(),
+            ex=CANCEL_FLAG_TTL_SECONDS,
+        )
 
 
 # ---- 唤醒预算闸（plaita#73）：把 worker 的「幂等拒绝唤醒」变成用户可见的 409 ----
@@ -1022,18 +1085,39 @@ async def cancel_execution(
 async def delete_execution(
     execution_id: str,
     request: Request,
+    force: bool = Query(
+        False,
+        description=(
+            "对 running/suspended 执行显式强制删除：先写取消意图并投 cancel "
+            "消息，再删除状态并吊销 fence/lease。默认对非终态执行返回 409，"
+            "要求先取消到终态"
+        ),
+    ),
     redis: Optional[Redis] = Depends(get_redis_or_none),
 ):
     """
-    删除执行记录（从 Redis 中永久删除）
-    
+    删除执行记录（集群档：状态 + 索引 + 取消标志 + 事件频道 + fence/lease）
+
     - **execution_id**: 执行 ID
+    - **force**: 非终态执行需显式强制（默认 409，指引先取消）
     """
-    # 本地单机模式：从 SQLite 删除
+    # 本地单机模式：先停执行（取消标志/线程汇合），再持久删除记录与日志。
+    # 线程汇合最长 LOCAL_DELETE_JOIN_TIMEOUT_SECONDS 秒——放线程池执行，
+    # 不阻塞 console 事件循环（与 logs SSE 非阻塞修复同一红线）。
     if (local := get_local_executor(request)) is not None:
-        if not local.delete_local_execution(execution_id, tenant_id=tenant_scope(request)):
+        try:
+            deleted = await asyncio.to_thread(
+                local.delete_local_execution,
+                execution_id,
+                tenant_id=tenant_scope(request),
+                force=force,
+            )
+        except local.ExecutionActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-        _audit(request, "execution.delete", execution_id)
+        _audit(request, "execution.delete", execution_id,
+               {"mode": "local", "force": force})
         return {
             "success": True,
             "execution_id": execution_id,
@@ -1043,17 +1127,46 @@ async def delete_execution(
     _tenant, _data = _find_execution(request, redis, execution_id)
     if not _data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-    key = _exec_key(_tenant, execution_id)
+    _status = str(_data.get("status") or "")
 
-    # 删除记录（连同取消标志键，避免残留意图键指向已删除的执行）
-    redis.delete(key)
-    redis.delete(_cancel_key(_tenant, execution_id))
+    # 终态守卫（A43-01）：非终态删除默认拒绝——否则用户在「删除后不可恢复」
+    # 的确认文案下把一条仍在推进的执行删掉，调用方无法区分「已停止」与
+    # 「稍后复活」。显式 force 才允许，并且先走取消意图再吊销。
+    if _status not in TERMINAL_EXECUTION_STATUSES and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"执行仍在 {_status or '非终态'} 状态，先取消（POST "
+                f"/api/executions/{execution_id}/cancel）待终态后删除；"
+                "如确需立即删除请显式传 force=true"
+            ),
+        )
 
-    # 同时删除相关的事件通道（如果存在）
-    event_key = f"plaita:execution:events:{execution_id}"
-    redis.delete(event_key)
-    
-    _audit(request, "execution.delete", execution_id)
+    if _status not in TERMINAL_EXECUTION_STATUSES:
+        _signal_cancel_for_force_delete(redis, _tenant, execution_id, _data)
+
+    # 删除即吊销：状态 + 索引成员 + fence 世代键 + lease 租约键（同 pipeline）。
+    # 在途 worker 后续 save 因世代失配抛 ExecutionLeaseError，不会把状态写回。
+    purged = _delete_cluster_execution_state(redis, _tenant, execution_id)
+
+    # 取消标志与事件频道同事务兜底清理（storage 不拥有这两个键）
+    pipe = redis.pipeline()
+    pipe.delete(_cancel_key(_tenant, execution_id))
+    pipe.delete(_events_key(execution_id))
+    pipe.execute()
+
+    if not purged:
+        logger.error(
+            "删除执行 %s 的状态失败（storage 返回 False），fence/lease 状态"
+            "未知；返回 503 供客户端重试",
+            execution_id,
+        )
+        raise HTTPException(
+            status_code=503, detail="执行状态删除失败，请稍后重试"
+        )
+
+    _audit(request, "execution.delete", execution_id,
+           {"force": force, "prior_status": _status})
     return {
         "success": True,
         "execution_id": execution_id,

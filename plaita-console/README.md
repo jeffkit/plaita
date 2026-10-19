@@ -25,6 +25,7 @@ Plaita 流程引擎可视化管理控制台
 - **租户内唯一**：`flow_id`、凭据名、自定义节点 type、属性类型名的唯一性均为租户内唯一（同名流程可共存于不同租户）。
 - **停用租户对运行面生效（#27）**：`POST /api/tenants/{id}/status` 置 `disabled` 后，该租户已签发会话的 API 调用按请求实时返回 **403**（无需等会话过期；平台管理员不受限，否则无法重新启用），其调度被置 `enabled=false`、`schedule_service` 不再入队。集群档还会把状态写入 Redis `plaita:tenant_status`，供 worker 丢弃该租户的 start/resume（含挂起执行的恢复）——跨 Redis 部署该闸门不生效（见 `docs-site/docs/distributed/ops-runbook.md`）。
 - **删除租户清理（#245/#255/#257）**：`DELETE /api/tenants/{id}` 先校验租户内无流程（有 flow 拒绝，拒绝门先于一切清理）。随后同一事务删除 `credentials`/成员/租户行与本地档四表（`local_schedules`/`local_schedule_fires`/`local_executions`/`local_logs`）；凭据旁文件 `credentials_file(tenant_id)` 在 commit **之前**删除（失败即回滚：租户行还在、可重试，绝不出现「租户已删、旧密钥仍可读」；旧版本留下的 404 残留由 404 路径补清扫）。集群档清理 `{ns}:*` 租户命名空间（执行状态/取消/fence/租约/重试计数/start-dedup、flow 发布定义）与平台键里归属该租户的调度/事件记录/事件订阅（按受信 `tenant_id` 逐条收窄；default 前缀下不碰队列 Stream）。删除后写 Redis `plaita:tenant_status=disabled` 墓碑——在途 start/resume 与旧 enabled 调度不再执行；同名重建回填 `active`。`save_credential` 拒绝已删/不存在的租户（堵迟到写复活 store）。清理失败显式报错；重建同名租户读不到旧凭据/执行/日志/调度。
+- **执行删除持久性（A43-01）**：`DELETE /api/executions/{id}` 只对终态开放；running/suspended 默认 **409**（指引先 cancel），显式 `force=true` 才「先取消再删」。集群档经 `delete_execution_state` 在同一次删除里清掉状态键、列表索引成员、取消标志、事件频道，并**吊销 `{ns}:execution:fence:{id}` 与 `{ns}:execution:lease:{id}`**——在途 worker 的下一次 fenced 落盘因世代失配抛 `ExecutionLeaseError`，不会把已删执行写回（删除后复活）。本地档 `force` 删除置位取消事件并有界等待执行线程收口；超时未退出时登记墓碑丢弃其后续日志写入，随后删除该执行的 `local_logs` 与 `local_executions` 行，删除后不可查。`FencedExecutionStorage.delete_execution_state` 在持世代号时同样做 fence CAS，旧世代不能删除新世代的状态（A43-07）。
 - **契约密钥**：每个租户一组 `contract_secret_id/contract_secret_key`（租户管理页创建/轮换，明文仅显示一次），只能拉取本租户已发布流程；全局 `PLAITA_CONSOLE_SECRET_ID/SECRET_KEY` 仍可用（平台上下文，可拉任意租户），存量集成不破坏。
 - **多租户边界（如实说明）**：集群档的租户数据（流程定义、执行状态、resume 租约）按键 namespace 隔离（`plaita:{tenant}:*`，default 租户保持历史前缀 `plaita:*` 以兼容存量数据），任务消息携带 `tenant_id`（缺省视为 default），引擎日志/调度值/订阅内嵌租户字段供 console 过滤。仍保持平台级共享的：任务队列 Stream（机制通道，租户在消息内）、事件总线存储与 pubsub（跨租户事件总线，订阅按租户过滤；删除租户时按记录 `tenant_id` 清理该租户条目）、服务注册/控制通道。本地档凭据按租户导出到旁文件（`.plaita-credentials.<tenant>.json`），default 租户沿用历史文件路径。
 - **滚动升级兼容**：消息缺 `tenant_id` 按 default 处理；default 租户流量走历史键前缀——旧 worker + 新 console（或反向）混跑时 default 租户不受影响，非 default 租户需双侧升级。
@@ -174,7 +175,7 @@ Console 对外暴露两套鉴权面，**路径前缀同为 `/api`，鉴权方式
 | `/api/services/{id}/stop` | POST | 停止服务 |
 | `/api/executions` | GET | 获取执行列表 |
 | `/api/executions` | POST | 启动新执行 |
-| `/api/executions/{id}` | DELETE | 取消执行 |
+| `/api/executions/{id}` | DELETE | 删除执行（仅终态；running/suspended 返回 409，需先取消或显式 `force=true`）。集群档同时删除状态/索引/取消标志/事件频道并**吊销 fence/lease**；本地档先取消并等待线程收口，再删除执行行与日志 |
 | `/api/executions/{id}/resume` | POST | 恢复执行（`resume_type`=continue/retry/cancel/timeout/event，可选 `data`）；可选 `params`（#157）**只在 `resume_type=continue` 且盘上 checkpoint 为空时**被引擎绑定为 `$INPUT`（手动 continue 抢在 pending start 被 reclaim 之前的窗口）；不传/空/`null` 不落 `params` 键（与 #122 载体形状一致）。**空 checkpoint 下的 `retry`/`cancel`/`timeout`/`event` 与本字段无关**：它们被策略层守卫以 `ResumeGuardError` 拒绝——执行保持 running、消息被 ack 吞掉、`$INPUT` 永不绑定（预存语义，非本单引入）；**checkpoint 非空时 `params` 惰性**，绑定值一律以盘上 checkpoint 为准 |
 | `/api/queues` | GET | 获取队列状态（含死信 DLQ 键） |
 | `/api/queues/dlq` | GET | 死信总览：各 DLQ Stream 堆积量与最近条目（`?count=`） |
