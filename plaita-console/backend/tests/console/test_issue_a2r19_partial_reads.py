@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 import fakeredis
@@ -172,6 +173,51 @@ class TestMetricsDegradation:
         body = client.get("/api/metrics", headers=_headers()).text
         assert "plaita_metrics_scrape_degraded 0" in body
         assert "plaita_metrics_failed_commands_total" not in body
+
+    def test_healthy_scrape_keeps_marker_clear_and_warn_debounced(
+        self, client, redis, monkeypatch, caplog
+    ):
+        """锁定 r44(S5)/r49(A2R19-04) 两版合并接缝：
+
+        - 健康抓取（无命令失败）只导出 marker=0，不粘滞、不告警、不消耗去抖窗口；
+        - 命令失败才置 1，且 WARNING 在 60s 窗口内只发一次（`_last_degraded_warn_at`）；
+        - 失败恢复后的下一次健康抓取立即回到 0 且清空失败计数。
+        """
+        def degraded_warnings():
+            return [r for r in caplog.records if "集群指标采集降级" in r.message]
+
+        monkeypatch.setattr(metrics_api, "_last_degraded_warn_at", 0.0)
+        redis._inner.set("plaita:registry:flow_worker:w1", "{}")
+
+        with caplog.at_level(logging.WARNING, logger=metrics_api.__name__):
+            healthy = client.get("/api/metrics", headers=_headers()).text
+            assert "plaita_metrics_scrape_degraded 0" in healthy
+            assert "plaita_metrics_failed_commands_total" not in healthy
+            assert metrics_api._last_degraded_warn_at == 0.0
+            assert degraded_warnings() == []
+
+            redis.fail_key_commands = {"xlen"}
+            first = client.get("/api/metrics", headers=_headers()).text
+            assert "plaita_metrics_scrape_degraded 1" in first
+            warned_at = metrics_api._last_degraded_warn_at
+            assert warned_at > 0.0
+            assert len(degraded_warnings()) == 1
+
+            second = client.get("/api/metrics", headers=_headers()).text
+            assert "plaita_metrics_scrape_degraded 1" in second
+            assert metrics_api._last_degraded_warn_at == warned_at
+            assert len(degraded_warnings()) == 1  # 窗口内不重复刷屏
+
+            monkeypatch.setattr(
+                metrics_api, "_last_degraded_warn_at", time.monotonic() - 61.0
+            )
+            client.get("/api/metrics", headers=_headers())
+            assert len(degraded_warnings()) == 2  # 窗口过后重新告警
+
+            redis.fail_key_commands = set()
+            recovered = client.get("/api/metrics", headers=_headers()).text
+            assert "plaita_metrics_scrape_degraded 0" in recovered
+            assert "plaita_metrics_failed_commands_total" not in recovered
 
 
 class TestEventsDegradation:
