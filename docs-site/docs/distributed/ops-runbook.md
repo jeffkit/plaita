@@ -42,6 +42,13 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 > （含 `noderetry:{id}:{node}` 子键）；**`fencegen` 保留且无 TTL**，用于防止
 > 同一 `execution_id` 重建后世代回退（旧 worker 的迟到 save/delete 必须被 CAS
 > 拒绝）。租户整删走 `{ns}:*` 扫描，会把 `fencegen` 一并清掉。
+>
+> **恢复现场（A2R25-05/07）**：fenced save/delete 要求 fence 与 fencegen 同时
+> 等于本世代——只恢复旧 `state+fence`（fencegen 留新值）会让陈旧 worker 的
+> 写/删被 `ExecutionLeaseError` 拒绝。只恢复状态键时 `load_execution_state`
+> 会补回索引成员；全量兜底用
+> `python plaita-console/scripts/reindex_executions.py --tenant <slug>`
+> （`--all-tenants` 需 console DB），避免执行在列表里不可见。
 
 兼容规则：消息缺 `tenant_id` 视为 default；default 租户沿用历史键前缀，新旧版本混跑时 default 流量不受影响，非 default 租户需 console 与 worker 双侧升级。
 
@@ -56,6 +63,12 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
   （与 `sync_published_to_engine.py` 同款边界）。
 - 手动排查：`redis-cli HGETALL plaita:tenant_status`；恢复漏发布可重启 console
   （启动回填）或手工 `HSET`。
+- **Redis-only 恢复的墓碑回滚（A2R25-06）**：启动对账以 DB 为权威，把 Redis
+  里 DB 已不存在的非 default 租户回落成 `disabled` 墓碑（`GET /health` 前后的
+  `租户状态对账` 日志汇总 published/disabled_stale/failed）。RDB/键恢复把删除
+  时的 `disabled` 回滚成删除前 `active` 时，**重启 console** 即纠正；字段整条
+  缺失仍按 #237 fail-open（无法与升级前未发布状态区分），恢复后请用
+  `HGETALL` 核对并用上面的 `HSET` 补齐。
 - console 侧另有实时闸：停用后该租户已签发会话的 API 调用返回 **403**，且其调度
   被置为 `enabled=false`。
 
