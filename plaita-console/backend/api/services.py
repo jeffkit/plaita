@@ -565,7 +565,20 @@ async def stop_service(
     }
     
     redis.publish(control_channel, json.dumps(command))
-    
+
+    # A55-S1：成功路径也必须留痕（此前只有 ensure_platform_admin 的 denied）。
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action="service.stop",
+        resource="service",
+        resource_id=instance_id,
+        detail={"instance_id": instance_id, "graceful": req.graceful},
+        tenant_id="",  # 全局生命周期对象（跨租户）
+    )
     return {
         "status": "sent",
         "instance_id": instance_id,

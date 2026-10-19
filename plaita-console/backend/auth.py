@@ -32,6 +32,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 from typing import Any, AsyncGenerator, Dict, Optional
@@ -75,6 +76,64 @@ NO_ACTIVE_TENANT_DETAIL = "当前会话无活跃租户，请先切换租户或�
 #: admin）不是平台身份，不能借此触达平台账号或全局服务。
 PLATFORM_ADMIN_REQUIRED_DETAIL = "该操作需要平台管理员"
 
+#: 审计 action 的资源名（按 path 前缀映射，避免把完整路径塞进 action）。
+_RESOURCE_PREFIXES = (
+    ("/api/flowVersion", "flow_version"),
+    ("/api/flows", "flow"),
+    ("/api/executions", "execution"),
+    ("/api/schedules", "schedule"),
+    ("/api/nodes", "node"),
+    ("/api/property-types", "property_type"),
+    ("/api/events", "event"),
+    ("/api/credentials", "credential"),
+    ("/api/clusters", "cluster"),
+    ("/api/cluster", "cluster"),
+    ("/api/services", "service"),
+    ("/api/queues", "queue"),
+    ("/api/dispatch", "dispatch"),
+    ("/api/tenants", "tenant"),
+    ("/api/users", "user"),
+    ("/api/audit", "audit"),
+    ("/api/copilot", "copilot"),
+    ("/api/supervisor", "supervisor"),
+)
+
+
+def _audit_resource(path: str) -> str:
+    clean = (path or "").split("?", 1)[0]
+    for prefix, resource in _RESOURCE_PREFIXES:
+        if clean == prefix or clean.startswith(prefix + "/"):
+            return resource
+    return "auth"
+
+
+def _audit_denied(request: Request, action: str, resource: str, reason: str,
+                  *, actor: Optional[str] = None, tenant_id: Optional[str] = None,
+                  detail: Optional[Dict[str, Any]] = None) -> None:
+    """拒绝审计（A55-S2）：state 未写入的认证失败也可用（显式 actor）。"""
+    try:
+        from .services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+
+    payload: Dict[str, Any] = {
+        "denied": True,
+        "reason": reason,
+        "method": request.method,
+        "path": request.url.path,
+    }
+    if detail:
+        payload.update(detail)
+    audit_svc.record_denied(
+        request,
+        action=action,
+        resource=resource,
+        detail=payload,
+        actor=actor,
+        tenant_id=tenant_id,
+        key_suffix=reason,
+    )
+
 
 def require_auth(request: Request) -> Dict[str, Any]:
     """FastAPI Depends：会话/API-Key/ insecure 三源认证 + 角色/租户裁决。
@@ -91,21 +150,37 @@ def require_auth(request: Request) -> Dict[str, Any]:
     tenant_id: Optional[str] = None
     tenant_generation = None
     platform_admin = False
+    key_fingerprint = ""
 
     expected_key = (settings.admin_api_key or "").strip()
     if expected_key and api_key_header and secrets.compare_digest(api_key_header.strip(), expected_key):
         actor, role, source = "api-key", "admin", "api-key"
         platform_admin = True  # API-Key 为平台级凭证
+        # A55-S3：只存指纹（sha256 前 16 位），不存 key 明文。
+        key_fingerprint = hashlib.sha256(
+            api_key_header.strip().encode("utf-8")
+        ).hexdigest()[:16]
     elif expected_key and not token and _bearer_matches_admin_key(request, expected_key):
         actor, role, source = "api-key", "admin", "api-key"
         platform_admin = True
+        key_fingerprint = hashlib.sha256(
+            _extract_authorization_bearer(request).encode("utf-8")
+        ).hexdigest()[:16]
     elif token:
         try:
             resolved = users_svc.resolve_session(request.app.state.store, token)
         except users_svc.TenantDisabledError:
             # 活跃租户被停用（#27）：会话本身有效，是租户不可用 → 403
+            _audit_denied(
+                request, "auth.denied", "auth", "tenant_context",
+                actor="anonymous", detail={"cause": "tenant_disabled"},
+            )
             raise HTTPException(status_code=403, detail="租户已停用，会话不可用")
         if resolved is None:
+            _audit_denied(
+                request, "auth.denied", "auth", "unauthenticated",
+                actor="anonymous", detail={"cause": "invalid_session"},
+            )
             raise HTTPException(status_code=401, detail="会话无效或已过期，请重新登录")
         actor = resolved["username"]
         role = resolved["role"]
@@ -123,6 +198,10 @@ def require_auth(request: Request) -> Dict[str, Any]:
             "切勿用于可被网络触达的部署"
         )
     else:
+        _audit_denied(
+            request, "auth.denied", "auth", "unauthenticated",
+            actor="anonymous", detail={"cause": "missing_credentials"},
+        )
         raise HTTPException(
             status_code=401,
             detail="未认证：请登录（POST /api/auth/login）或配置 X-Admin-API-Key",
@@ -131,6 +210,13 @@ def require_auth(request: Request) -> Dict[str, Any]:
     # X-Tenant-ID：仅平台管理员 / API-Key 可指定；普通租户用户钉死其活跃租户
     if header_tenant:
         if not platform_admin:
+            _audit_denied(
+                request, "auth.denied", "auth", "tenant_context",
+                actor=actor, detail={
+                    "cause": "header_requires_platform_admin",
+                    "target_tenant": header_tenant,
+                },
+            )
             raise HTTPException(
                 status_code=403,
                 detail="仅平台管理员可指定 X-Tenant-ID",
@@ -161,6 +247,14 @@ def require_auth(request: Request) -> Dict[str, Any]:
                         header_tenant,
                     )
                 else:
+                    _audit_denied(
+                        request, "auth.denied", "auth", "tenant_context",
+                        actor=actor, tenant_id=header_tenant,
+                        detail={
+                            "cause": "tenant_not_found",
+                            "target_tenant": header_tenant,
+                        },
+                    )
                     raise HTTPException(
                         status_code=403,
                         detail=f"租户不存在或不可用: {header_tenant}",
@@ -171,6 +265,10 @@ def require_auth(request: Request) -> Dict[str, Any]:
     # /api/auth/* 是会话自操作（me/logout/switch-tenant），保留可用性。
     if not platform_admin and tenant_id is None:
         if not request.url.path.startswith("/api/auth/"):
+            _audit_denied(
+                request, "auth.denied", "auth", "tenant_context",
+                actor=actor, detail={"cause": "no_active_tenant"},
+            )
             raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
 
     # 先落 state 再裁决：_authorize 的自助改密例外需要 actor（#260），
@@ -179,6 +277,7 @@ def require_auth(request: Request) -> Dict[str, Any]:
     request.state.role = role
     request.state.auth_source = source
     request.state.tenant_id = tenant_id
+    request.state.key_fingerprint = key_fingerprint
     # A51-02：请求级世代（会话解析同一 JOIN / 平台 X-Tenant-ID 的一次读）。
     # 管理面依赖把它 bind 到 ContextVar；无它（旧挂载/CLI）时各服务回退
     # 「写路径首次读捕获」的存量行为。
@@ -269,6 +368,15 @@ def tenant_scope(request: Request, *, required: bool = False) -> Optional[str]:
     raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
 
 
+def _extract_authorization_bearer(request: Request) -> str:
+    """Authorization 头里的 Bearer 值（无则空串）；仅供指纹计算，不落日志。"""
+    auth = request.headers.get("Authorization") or ""
+    parts = auth.strip().split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return ""
+
+
 def _bearer_matches_admin_key(request: Request, expected: str) -> bool:
     auth = request.headers.get("Authorization") or ""
     parts = auth.strip().split(None, 1)
@@ -292,15 +400,24 @@ def _extract_bearer(request: Request) -> Optional[str]:
 
 def _authorize(request: Request, role: str) -> None:
     path = request.url.path
+    resource = _audit_resource(path)
 
     if role is None:
         # #254：无活跃租户的普通会话没有租户角色。会话自操作仍放行，
         # 其余路径在 require_auth 前置已具名拒绝（这里兜底直调场景）。
         if path.startswith("/api/auth/"):
             return
+        _audit_denied(
+            request, f"{resource}.denied", resource, "tenant_context",
+            detail={"cause": "no_active_tenant"},
+        )
         raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
 
     if _ROLE_RANK.get(role, -1) < 0:
+        _audit_denied(
+            request, f"{resource}.denied", resource, "unknown_role",
+            detail={"role": role},
+        )
         raise HTTPException(status_code=403, detail=f"未知角色: {role}")
 
     method = request.method.upper()
@@ -317,6 +434,10 @@ def _authorize(request: Request, role: str) -> None:
 
     if any(path.startswith(p) for p in _ADMIN_PREFIXES):
         if not self_password and role != "admin":
+            _audit_denied(
+                request, f"{resource}.denied", resource, "role_required",
+                detail={"required_role": "admin"},
+            )
             raise HTTPException(status_code=403, detail="该操作需要 admin 角色")
 
     # /api/auth/* 是会话自操作（me/logout/switch-tenant），任何已认证角色可用
@@ -330,6 +451,10 @@ def _authorize(request: Request, role: str) -> None:
     if method in ("GET", "HEAD", "OPTIONS"):
         return  # viewer+
     if role == "viewer":
+        _audit_denied(
+            request, f"{resource}.denied", resource, "role_required",
+            detail={"required_role": "editor"},
+        )
         raise HTTPException(status_code=403, detail="该操作需要 editor 及以上角色")
 
     if (
@@ -337,6 +462,10 @@ def _authorize(request: Request, role: str) -> None:
         and get_settings().console_env == "prod"
         and role != "admin"
     ):
+        _audit_denied(
+            request, f"{resource}.denied", resource, "role_required",
+            detail={"required_role": "admin", "prod_delete": True},
+        )
         raise HTTPException(status_code=403, detail="生产环境的删除操作需要 admin 角色")
 
 

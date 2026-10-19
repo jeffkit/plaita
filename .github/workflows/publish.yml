@@ -73,6 +73,12 @@ jobs:
           echo "✓ tag $tag == plaita-console $actual"
       - name: 构建前端并打 wheel（backend/webDist 随包分发）
         run: plaita-console/scripts/build_package.sh
+      # #266 A61-03：发布路径独立复扫。build_package.sh 已在打包前 fail-fast；
+      # 这一步直接扫随 wheel 出货的 webDist，防止构建脚本被绕过/改坏。
+      - name: 扫描发布产物 webDist（#266 管理密钥通道）
+        run: >-
+          node plaita-console/frontend/scripts/check-admin-key.mjs
+          --dist plaita-console/backend/webDist
       - uses: actions/upload-artifact@v4
         with:
           name: console-dist

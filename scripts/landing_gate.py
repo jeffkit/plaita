@@ -9,14 +9,17 @@
     python scripts/landing_gate.py ci                    # 合并前必跑；红=1，无结论=2
     python scripts/landing_gate.py ci --override "原因 / ack 人"   # 双 ack 豁免（留痕）
     python scripts/landing_gate.py trailers <base>..<head>          # [policy] 提交须带 Policy-ack
+    python scripts/landing_gate.py dist-scan [--dist DIR]           # 可选相位：#266 产物扫描
 """
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 REPO = "jeffkit/plaita"
 #: 视为「未通过」的 CI 结论（gh JSON 为小写）。
@@ -133,6 +136,35 @@ def cmd_trailers(rev_range: str) -> int:
     return 0
 
 
+def cmd_dist_scan(dist: str | None) -> int:
+    """可选相位：#266 浏览器管理密钥通道的构建产物扫描。
+
+    不并入 ``ci``：Node 与前端产物并非所有落地环境都具备。显式请求时
+    fail-closed——node 或产物目录缺失按「无结论」返回 2，不静默放行。
+    """
+    node = shutil.which("node")
+    if node is None:
+        print("[landing-gate] node 不可用——dist 扫描无结论", file=sys.stderr)
+        return 2
+    root = Path(__file__).resolve().parents[1]
+    scanner = root / "plaita-console/frontend/scripts/check-admin-key.mjs"
+    target = Path(dist) if dist else Path("plaita-console/frontend/dist")
+    if not target.is_absolute():
+        target = root / target
+    if not target.is_dir():
+        print(
+            f"[landing-gate] 构建产物目录不存在: {target}——先构建前端再跑本相位",
+            file=sys.stderr,
+        )
+        return 2
+    proc = subprocess.run([node, str(scanner), "--dist", str(target)])
+    if proc.returncode != 0:
+        print("[landing-gate] ❌ #266 构建产物扫描红", file=sys.stderr)
+        return 1
+    print("[landing-gate] ✅ #266 构建产物扫描绿")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="落地门禁（docs/landing-and-acceptance.md）")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -140,9 +172,16 @@ def main() -> int:
     p_ci.add_argument("--override", metavar="TEXT", help="双 ack 豁免（原因 / ack 人），原样留痕")
     p_tr = sub.add_parser("trailers", help="[policy] 提交的 Policy-ack 核验")
     p_tr.add_argument("range", metavar="BASE..HEAD")
+    p_ds = sub.add_parser("dist-scan", help="可选相位：#266 构建产物管理密钥扫描")
+    p_ds.add_argument(
+        "--dist", metavar="DIR",
+        help="产物目录（默认 plaita-console/frontend/dist）",
+    )
     args = parser.parse_args()
     if args.cmd == "ci":
         return cmd_ci(args.override)
+    if args.cmd == "dist-scan":
+        return cmd_dist_scan(args.dist)
     return cmd_trailers(args.range)
 
 

@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 try:
     from ..auth import require_auth, tenant_scope
@@ -45,30 +45,61 @@ def _tenant_generation_since(tenant: Optional[str]) -> Optional[datetime]:
 def list_audit(
     action: Optional[str] = None,
     actor: Optional[str] = None,
-    limit: int = 200,
+    limit: int = Query(200, ge=1),
+    before_id: Optional[int] = Query(None, ge=1),
     request: Request = None,
     identity: Dict = Depends(require_auth),
 ):
     """最近审计记录（默认 200 条，可按 action/actor 过滤）。
 
+    A55-S4：``limit`` 必须 ≥1（负值在 SQLite 会被当成「无上限」），上限
+    1000 由服务端钳制；``before_id`` 是稳定游标（按 id desc 翻页，无重无漏）。
+
     A54-05：租户视角只看本租户**当前世代**（同名重建后旧世代审计不可见）；
     平台身份仍可全量审计（合规证据不随租户删除物理清除）。
     """
     tenant = tenant_scope(request) if request is not None else None
+    effective_limit = min(limit, 1000)
     since: Optional[datetime] = None
     if tenant is not None and not bool(identity.get("platform_admin")):
         since = _tenant_generation_since(tenant)
         if since is None:
+            _audit_read(request, action, actor, effective_limit, before_id, 0,
+                        tenant)
             return {"logs": []}
-    return {
-        "logs": audit_svc.list_audit(
-            action=action,
-            actor=actor,
-            limit=min(limit, 1000),
-            tenant_id=tenant,
-            since=since,
-        )
-    }
+    logs = audit_svc.list_audit(
+        action=action,
+        actor=actor,
+        limit=effective_limit,
+        tenant_id=tenant,
+        since=since,
+        before_id=before_id,
+    )
+    # A55-S4：取证行为本身可审计（读审计不留痕 = 无法回答谁在何时导出了什么）。
+    _audit_read(request, action, actor, effective_limit, before_id, len(logs),
+                tenant)
+    return {"logs": logs}
+
+
+def _audit_read(request: Optional[Request], action: Optional[str],
+                actor: Optional[str], limit: int, before_id: Optional[int],
+                rows: int, tenant: Optional[str]) -> None:
+    if request is None:
+        return
+    audit_svc.record(
+        request,
+        action="audit.read",
+        resource="audit",
+        detail={
+            "filter_action": action,
+            "filter_actor": actor,
+            "limit": limit,
+            "before_id": before_id,
+            "rows": rows,
+        },
+        # 平台全量读取是全局操作（tenant=""），租户读取落本租户。
+        tenant_id=tenant if tenant is not None else "",
+    )
 
 
 @router.get("/deployments")

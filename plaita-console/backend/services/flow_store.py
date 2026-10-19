@@ -1355,6 +1355,14 @@ def _migrate_sqlite_columns() -> None:
         # C5-1 乐观并发：旧库补 updated_at 列（新库由 create_all 按追加列后的
         # 映射表直接建出；此处 PRAGMA 判缺再补，幂等）
         "flow_versions": {"updated_at": "DATETIME"},
+        # A55-S3：审计身份列（alembic 0002 为主；alembic 不可用时的
+        # create_all 回退路径由这里补列，两路都幂等）。
+        "audit_logs": {
+            "auth_source": "TEXT NOT NULL DEFAULT ''",
+            "key_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "request_id": "TEXT NOT NULL DEFAULT ''",
+            "role_snapshot": "TEXT NOT NULL DEFAULT ''",
+        },
     }
     with _engine.begin() as conn:
         for table, columns in wanted.items():

@@ -43,9 +43,13 @@ class MemberRequest(BaseModel):
     role: str = Field("viewer", description="admin | editor | viewer")
 
 
-def _platform_admin(identity: Dict) -> None:
-    if not identity.get("platform_admin"):
-        raise HTTPException(status_code=403, detail="仅平台管理员可管理租户")
+def _platform_admin(request: Request, identity: Dict, *, action: str,
+                    target: str = "") -> None:
+    """平台身份闸（#260/A55-S2）：拒绝写 ``<action>.denied`` + WARNING。"""
+    if identity.get("platform_admin"):
+        return
+    _audit_denied(request, action, target, "platform_admin_required")
+    raise HTTPException(status_code=403, detail="仅平台管理员可管理租户")
 
 
 def _tenant_member_admin(request: Request, identity: Dict, tenant_id: str,
@@ -93,28 +97,30 @@ def _redis(request: Request):
 
 
 @router.get("/tenants")
-def list_tenants(identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+def list_tenants(request: Request, identity: Dict = Depends(require_auth)):
+    _platform_admin(request, identity, action="tenant.list")
     return {"tenants": tenants_svc.list_tenants(get_flow_store())}
 
 
 @router.post("/tenants")
 def create_tenant(req: CreateTenantRequest, request: Request,
                   identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+    _platform_admin(request, identity, action="tenant.create", target=req.id)
     try:
         tenant = tenants_svc.create_tenant(
             get_flow_store(), req.id, req.name, redis_client=_redis(request)
         )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    _audit(request, "tenant.create", req.id)
+    _audit(request, "tenant.create", req.id, {"target_tenant": req.id},
+           tenant_id="")
     return tenant  # 含 contract_secret_key（仅此一次）
 
 
 @router.get("/tenants/{tenant_id}")
-def get_tenant(tenant_id: str, identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+def get_tenant(tenant_id: str, request: Request,
+               identity: Dict = Depends(require_auth)):
+    _platform_admin(request, identity, action="tenant.get", target=tenant_id)
     try:
         return tenants_svc.get_tenant(get_flow_store(), tenant_id)
     except LookupError as e:
@@ -124,31 +130,34 @@ def get_tenant(tenant_id: str, identity: Dict = Depends(require_auth)):
 @router.post("/tenants/{tenant_id}/status")
 def set_status(tenant_id: str, req: TenantStatusRequest, request: Request,
                identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+    _platform_admin(request, identity, action="tenant.set_status", target=tenant_id)
     try:
         tenants_svc.set_tenant_status(
             get_flow_store(), tenant_id, req.status, redis_client=_redis(request)
         )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _audit(request, "tenant.set_status", tenant_id, {"status": req.status})
+    _audit(request, "tenant.set_status", tenant_id,
+           {"status": req.status, "target_tenant": tenant_id}, tenant_id="")
     return {"success": True, "tenant_id": tenant_id, "status": req.status}
 
 
 @router.post("/tenants/{tenant_id}/rotate-secret")
 def rotate_secret(tenant_id: str, request: Request, identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+    _platform_admin(request, identity, action="tenant.rotate_secret",
+                    target=tenant_id)
     try:
         secret = tenants_svc.rotate_contract_secret(get_flow_store(), tenant_id)
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    _audit(request, "tenant.rotate_secret", tenant_id)
+    _audit(request, "tenant.rotate_secret", tenant_id,
+           {"target_tenant": tenant_id}, tenant_id="")
     return secret  # 含 contract_secret_key（仅此一次）
 
 
 @router.delete("/tenants/{tenant_id}")
 def delete_tenant(tenant_id: str, request: Request, identity: Dict = Depends(require_auth)):
-    _platform_admin(identity)
+    _platform_admin(request, identity, action="tenant.delete", target=tenant_id)
     try:
         deleted = tenants_svc.delete_tenant(
             get_flow_store(), tenant_id, redis_client=_redis(request)
@@ -157,7 +166,8 @@ def delete_tenant(tenant_id: str, request: Request, identity: Dict = Depends(req
         raise HTTPException(status_code=409, detail=str(e))
     if not deleted:
         raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
-    _audit(request, "tenant.delete", tenant_id)
+    _audit(request, "tenant.delete", tenant_id, {"target_tenant": tenant_id},
+           tenant_id="")
     return {"success": True, "tenant_id": tenant_id}
 
 
@@ -213,7 +223,8 @@ def remove_member(tenant_id: str, username: str, request: Request,
     return {"success": True, "username": username, "tenant_id": tenant_id}
 
 
-def _audit(request: Request, action: str, resource_id: str, detail: Dict | None = None) -> None:
+def _audit(request: Request, action: str, resource_id: str,
+           detail: Dict | None = None, *, tenant_id: str | None = None) -> None:
     try:
         from ..services import audit as audit_svc
     except ImportError:
@@ -222,4 +233,4 @@ def _audit(request: Request, action: str, resource_id: str, detail: Dict | None 
         except ImportError:
             return
     audit_svc.record(request, action=action, resource="tenant", resource_id=resource_id,
-                     detail=detail)
+                     detail=detail, tenant_id=tenant_id)

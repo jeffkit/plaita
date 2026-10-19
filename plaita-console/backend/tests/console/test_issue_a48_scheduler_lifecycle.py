@@ -322,21 +322,6 @@ def _delete_tenant_row(store, tenant_id: str) -> None:
             session.commit()
 
 
-def _delete_tenant_flows(store, tenant_id: str) -> None:
-    """清掉夹具为该租户种下的 flow（A54-06 404 补清扫的前置条件）。
-
-    ``delete_tenant`` 的 orphan 路径（租户行已不存在）在仍残留 flow 时会
-    **显式拒绝**（同名重建不得继承旧流程）。本测试要覆盖的是「租户行缺失 +
-    运行数据残留」的 #257 形态，因此必须先把 flow 归档/清除，再走 404 补清扫。
-    """
-    from models.flow import FlowRecord
-    from sqlalchemy import delete as sa_delete
-
-    with store._session_local() as session:
-        session.execute(sa_delete(FlowRecord).where(FlowRecord.tenant_id == tenant_id))
-        session.commit()
-
-
 def test_deleted_tenant_stale_snapshot_does_not_execute(store):
     """租户行被删（#257 orphan 形态，清理尚未跑到）→ 旧快照 fire 不得执行。"""
     _mk_schedule(store, "s-acme", tenant=TENANT_A)
@@ -355,15 +340,29 @@ def test_deleted_tenant_stale_snapshot_does_not_execute(store):
 
 
 def test_deleted_tenant_after_purge_stale_snapshot_does_not_execute(store):
-    """走 #255 404 补清扫（本地四表清空）后，旧快照仍不得复活执行。"""
+    """A54-06 世代：租户行缺失且 flow 残留时，#255 404 补清扫是具名拒绝门
+    （API 409）；平台显式清除 flow 后才完成退役，旧快照全程不得复活执行。"""
     _mk_schedule(store, "s-acme", tenant=TENANT_A)
     snapshot = sched.get_schedule(store, "s-acme")
     _delete_tenant_row(store, TENANT_A)
-    _delete_tenant_flows(store, TENANT_A)
-    assert tenants_svc.delete_tenant(store, TENANT_A) is False
 
-    assert sched.get_schedule(store, "s-acme") is None
+    # 残留 flow 时 404 补清扫必须 loud 拒绝，不得静默清掉运行数据后
+    # 让同名重建继承旧流程（A54-06）；拒绝时凭据/运行数据一字不动。
+    with pytest.raises(tenants_svc.TenantError, match="流程残留"):
+        tenants_svc.delete_tenant(store, TENANT_A)
+    assert sched.get_schedule(store, "s-acme") is not None
+
+    # 拒绝期间旧快照仍被运行面租户闸拦下（A48-04）。
     before = _exec_count(store)
+    assert sched.fire(store, snapshot, trigger_kind="cron") is None
+    assert _exec_count(store) == before
+    assert _fire_count(store, "s-acme") == 0
+
+    # 平台显式归档/清除 flow 后重试删除：404 补清扫完成（返回 False），
+    # 本地调度与触发历史随运行数据一并清掉，旧快照永不复活。
+    store.delete_flow("hello", tenant_id=TENANT_A)
+    assert tenants_svc.delete_tenant(store, TENANT_A) is False
+    assert sched.get_schedule(store, "s-acme") is None
     assert sched.fire(store, snapshot, trigger_kind="cron") is None
     assert _exec_count(store) == before
     assert _fire_count(store, "s-acme") == 0

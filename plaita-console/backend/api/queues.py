@@ -477,6 +477,21 @@ def _bounded_queue_keys(
     return scan_keys(redis, pattern, max_keys=max_keys).keys
 
 
+def known_queue_family_keys(
+    redis: Redis, max_keys: int = _QUEUE_SCAN_MAX_KEYS
+) -> List[str]:
+    """已登记的队列键族（A55-S5）：字面键 + 通配前缀的有界 SCAN。
+
+    只认 ``KNOWN_QUEUES``——绝不 ``SCAN *:dlq``。事件键
+    （``plaita:event:type:x:dlq``）由此不再被误认为队列/DLQ（#202 同源）。
+    """
+    names = {p for p in KNOWN_QUEUES if "*" not in p}
+    for pattern in KNOWN_QUEUES:
+        if "*" in pattern:
+            names.update(_bounded_queue_keys(redis, pattern, max_keys=max_keys))
+    return sorted(names)
+
+
 def _is_stream_key(key: str) -> bool:
     """已知的 Stream 键永远保留零值行——含 DLQ（#26）。"""
     return key in ("plaita:flow:queue", "plaita:flow:queue:v2") or key.endswith(DLQ_SUFFIX)
@@ -506,8 +521,12 @@ async def list_dlq(
     # （租户读面为空），绝不把前代死信归给同名重建的新租户。
     generation_epoch = _tenant_generation_epoch(request, tenant)
     names = set(KNOWN_DLQ_KEYS)
-    # `*:dlq` 通配必须有界扫（#202）：未知 DLQ 键靠 SCAN 补，只扫一页/触界即停
-    names.update(_bounded_queue_keys(redis, f"*{DLQ_SUFFIX}", max_keys=_DLQ_SCAN_MAX_KEYS))
+    # A55-S5：只从**已登记队列族**里发现有界 DLQ 键；不再 SCAN `*:dlq`
+    # （事件类型键可被租户构造为 `...:dlq`，会把 DLQ 看板当注入面）。
+    names.update(
+        key for key in known_queue_family_keys(redis, max_keys=_DLQ_SCAN_MAX_KEYS)
+        if key.endswith(DLQ_SUFFIX)
+    )
 
     streams = []
     for name in sorted(names):

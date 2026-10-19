@@ -6,15 +6,18 @@ POST /api/flows/dry-run
 - 响应：{ result, nodes: [{id,type,name,input,output,status,error,depth,flow_path,flow_id}], error }
   其中 depth/flow_path/flow_id 为主/子流程层级（根层 depth=0），供试跑面板子图缩进。
 """
+import json
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 try:
     from ..services import dryrun as dryrun_svc
+    from ..auth import tenant_scope
 except ImportError:
-    from services import dryrun as dryrun_svc
+    from services import dryrun as dryrun_svc  # type: ignore
+    from auth import tenant_scope  # type: ignore
 
 router = APIRouter()
 
@@ -52,8 +55,34 @@ class DryRunResponse(BaseModel):
 
 
 @router.post("/flows/dry-run", response_model=DryRunResponse)
-def dry_run(req: DryRunRequest):
+def dry_run(req: DryRunRequest, request: Request):
     out = dryrun_svc.dry_run(req.flowJson, req.input, pinned=req.pinned, only_node=req.onlyNode)
+    # A55-S1：试跑审计（flow_id/节点数/only_node；不记 definition）。
+    flow_id = None
+    node_count = 0
+    try:
+        defn = json.loads(req.flowJson)
+        if isinstance(defn, dict):
+            flow_id = defn.get("flow_id") or defn.get("id")
+            node_count = len(defn.get("nodes") or [])
+    except (TypeError, ValueError):
+        pass
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action="flow.dry_run",
+        resource="flow",
+        resource_id=str(flow_id or ""),
+        detail={
+            "flow_id": flow_id,
+            "nodes": node_count,
+            "only_node": req.onlyNode,
+        },
+        tenant_id=tenant_scope(request, required=True),
+    )
     return DryRunResponse(
         result=out["result"],
         nodes=[NodeResult(**n) for n in out["nodes"]],

@@ -198,6 +198,8 @@ def create_flow(req: CreateFlowRequest, request: Request = None):
                                    tenant_id=tenant)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    _audit(request, "flow.create", req.flow_id,
+           {"author": req.author, "desc": req.desc}, tenant_id=tenant)
     return FlowSummaryView(
         flow_id=rec.flow_id,
         tenant_id=rec.tenant_id,
@@ -241,7 +243,7 @@ def delete_flow(flow_id: str, request: Request = None, redis: Redis = Depends(ge
     if redis is not None:
         remove_flow_from_engine(redis, flow_id, tenant_id=tenant)
     if request is not None:
-        _audit(request, "flow.delete", flow_id)
+        _audit(request, "flow.delete", flow_id, tenant_id=tenant)
     return {"success": True, "flow_id": flow_id}
 
 
@@ -337,7 +339,7 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
     out = store.get_version(flow_id, result.version, tenant_id=tenant)
     if request is not None:
         _audit(request, "flow.save_version", f"{flow_id}@{result.version}",
-               {"bytes": len(req.definition)})
+               {"bytes": len(req.definition)}, tenant_id=tenant)
     return VersionView(
         flow_id=out.flow_id,
         version=out.version,
@@ -355,12 +357,18 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
 def delete_version(flow_id: str, version: str, request: Request = None,
                    redis: Redis = Depends(get_redis_dep)):
     tenant = tenant_scope(request, required=True) if request is not None else ""
+    prior = _store().get_version(flow_id, version, tenant_id=tenant)
     try:
         _store().delete_version(flow_id, version, tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     if redis is not None:
         remove_flow_version_from_engine(redis, flow_id, version, tenant_id=tenant)
+    if request is not None:
+        _audit(request, "flow.delete_version", f"{flow_id}@{version}",
+               {"version": version,
+                "prior_status": prior.status if prior is not None else None},
+               tenant_id=tenant)
     return {"success": True, "flow_id": flow_id, "version": version}
 
 
@@ -387,7 +395,8 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
         except ImportError:
             from config import get_settings
         env = get_settings().console_env
-        _audit(request, "flow.publish", f"{flow_id}@{out.version}", {"env": env})
+        _audit(request, "flow.publish", f"{flow_id}@{out.version}",
+               {"env": env}, tenant_id=tenant)
         # 部署记录（切片 C）
         try:
             from ..services import deployments as deployments_svc
@@ -412,7 +421,8 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
     )
 
 
-def _audit(request: Request, action: str, resource_id: str, detail: Dict | None = None) -> None:
+def _audit(request: Request, action: str, resource_id: str,
+           detail: Dict | None = None, *, tenant_id: Optional[str] = None) -> None:
     try:
         from ..services import audit as audit_svc
     except ImportError:
@@ -420,7 +430,8 @@ def _audit(request: Request, action: str, resource_id: str, detail: Dict | None 
             from services import audit as audit_svc  # type: ignore
         except ImportError:
             return
-    audit_svc.record(request, action=action, resource="flow", resource_id=resource_id, detail=detail)
+    audit_svc.record(request, action=action, resource="flow", resource_id=resource_id,
+                     detail=detail, tenant_id=tenant_id)
 
 
 @router.get("/flows/{flow_id}/versions/{version}/export")
@@ -482,5 +493,6 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
         result["status"] = "published"
 
     if request is not None:
-        _audit(request, "flow.import", f"{flow_id}@{version}", {"publish": req.publish})
+        _audit(request, "flow.import", f"{flow_id}@{version}",
+               {"publish": req.publish}, tenant_id=tenant)
     return result

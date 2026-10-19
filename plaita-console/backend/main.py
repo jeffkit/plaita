@@ -4,6 +4,7 @@ Plaita Console Backend - FastAPI 应用入口
 import logging
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -367,6 +368,15 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def request_id_middleware(request, call_next):
+        """A55-S3：每个请求生成服务端 request_id，审计行与响应头同值对账。"""
+        request_id = uuid.uuid4().hex
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     # A51-02：认证世代绑定到请求 ContextVar——所有管理面写路径在 flush 后
     # 同一事务内复核「请求世代 == 当前世代」，防止旧租户请求跨 delete+create

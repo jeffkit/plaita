@@ -171,6 +171,34 @@ def _view(schedule: dict) -> dict:
     return out
 
 
+def _audit(request: Optional[Request], action: str, resource_id: str,
+           detail: Optional[dict] = None, *, tenant_id: Optional[str] = None) -> None:
+    """A55-S1：调度写操作审计（显式传生效租户，不依赖 state）。"""
+    if request is None:
+        return
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action=action,
+        resource="schedule",
+        resource_id=resource_id,
+        detail=detail,
+        tenant_id=tenant_id,
+    )
+
+
+def _schedule_detail(schedule: dict) -> dict:
+    return {
+        "flow_id": schedule.get("flow_id"),
+        "version": schedule.get("version"),
+        "cron": schedule.get("cron"),
+        "enabled": bool(schedule.get("enabled")),
+    }
+
+
 def _validate_flow(flow_id: str, version: Optional[str], tenant_id: Optional[str] = None) -> None:
     store = flow_store.get_flow_store()
     if store.get_flow_record(flow_id, tenant_id=tenant_id) is None:
@@ -234,6 +262,8 @@ def create(req: ScheduleCreateRequest, request: Request, redis: Redis = Depends(
         schedule = local.create_schedule(flow_store.get_flow_store(), schedule)
     else:
         _save_schedule(redis, schedule)
+    _audit(request, "schedule.create", schedule["schedule_id"],
+           _schedule_detail(schedule), tenant_id=tenant)
     return _view(schedule)
 
 
@@ -324,10 +354,12 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
             _raise_schedule_conflict(fresh.get("updated_at"))
         _apply(fresh)
         try:
-            return _view(local.update_schedule(
-                store, schedule_id, fresh, tenant_id=tenant))
+            result = local.update_schedule(store, schedule_id, fresh, tenant_id=tenant)
         except LookupError:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+        _audit(request, "schedule.update", schedule_id,
+               _schedule_detail(result), tenant_id=tenant)
+        return _view(result)
 
     try:
         updated = cas_update_schedule(
@@ -338,19 +370,28 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
         _raise_schedule_conflict(exc.latest_updated_at)
     if updated is None:
         raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+    _audit(request, "schedule.update", schedule_id,
+           _schedule_detail(updated), tenant_id=tenant)
     return _view(updated)
 
 
 @router.delete("/schedules/{schedule_id}")
 def remove(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_or_none)):
+    tenant = tenant_scope(request)
     if (local := _get_local(request)) is not None:
-        if not local.delete_schedule(flow_store.get_flow_store(), schedule_id,
-                                     tenant_id=tenant_scope(request)):
+        store = flow_store.get_flow_store()
+        schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)
+        if schedule is None or not local.delete_schedule(
+                store, schedule_id, tenant_id=tenant):
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+        _audit(request, "schedule.delete", schedule_id,
+               _schedule_detail(schedule), tenant_id=tenant or "")
         return {"success": True, "schedule_id": schedule_id}
-    _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
+    schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     redis.hdel(SCHEDULES_KEY, schedule_id)
     redis.delete(SCHEDULE_FIRES_KEY.format(schedule_id=schedule_id))
+    _audit(request, "schedule.delete", schedule_id,
+           _schedule_detail(schedule), tenant_id=tenant or "")
     return {"success": True, "schedule_id": schedule_id}
 
 
@@ -364,12 +405,17 @@ def enable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
         schedule["enabled"] = True
         schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
-        return _view(local.update_schedule(store, schedule_id, schedule, tenant_id=tenant))
+        result = local.update_schedule(store, schedule_id, schedule, tenant_id=tenant)
+        _audit(request, "schedule.enable", schedule_id,
+               _schedule_detail(result), tenant_id=tenant or "")
+        return _view(result)
     schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     schedule["enabled"] = True
     schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
     schedule["updated_at"] = _now_iso()
     _save_schedule(redis, schedule)
+    _audit(request, "schedule.enable", schedule_id,
+           _schedule_detail(schedule), tenant_id=tenant or "")
     return _view(schedule)
 
 
@@ -383,20 +429,26 @@ def disable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
         schedule["enabled"] = False
         schedule["next_run_at"] = ""
-        return _view(local.update_schedule(store, schedule_id, schedule, tenant_id=tenant))
+        result = local.update_schedule(store, schedule_id, schedule, tenant_id=tenant)
+        _audit(request, "schedule.disable", schedule_id,
+               _schedule_detail(result), tenant_id=tenant or "")
+        return _view(result)
     schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     schedule["enabled"] = False
     schedule["updated_at"] = _now_iso()
     _save_schedule(redis, schedule)
+    _audit(request, "schedule.disable", schedule_id,
+           _schedule_detail(schedule), tenant_id=tenant or "")
     return _view(schedule)
 
 
 @router.post("/schedules/{schedule_id}/trigger")
 def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_or_none)):
     """立即触发一次：本地档直接进程内执行；集群档写任务队列 Stream。"""
+    tenant = tenant_scope(request)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
-        schedule = local.get_schedule(store, schedule_id, tenant_id=tenant_scope(request))
+        schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
         if not _tenant_is_active(request, schedule.get("tenant_id")):
@@ -404,15 +456,23 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
         execution_id = local.trigger_now(store, schedule)
         if execution_id is None:
             raise HTTPException(status_code=502, detail="触发失败，请查看 console 日志")
+        detail = _schedule_detail(schedule)
+        detail["execution_id"] = execution_id
+        _audit(request, "schedule.trigger", schedule_id, detail,
+               tenant_id=schedule.get("tenant_id") or tenant or "")
         return {"success": True, "execution_id": execution_id}
 
-    schedule = _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
+    schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     if not _tenant_is_active(request, schedule.get("tenant_id")):
         raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
     # 与手动「启动流程」同源：写任务队列 Stream
     msg_id = fire_schedule(redis, schedule, TASK_QUEUE_NAME, trigger_kind="manual")
     if msg_id is None:
         raise HTTPException(status_code=502, detail="入队失败，请检查 Redis 与任务队列配置")
+    detail = _schedule_detail(schedule)
+    detail["queue_msg_id"] = msg_id
+    _audit(request, "schedule.trigger", schedule_id, detail,
+           tenant_id=schedule.get("tenant_id") or tenant or "")
     return {"success": True, "msg_id": msg_id}
 
 

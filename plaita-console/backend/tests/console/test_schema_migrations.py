@@ -22,6 +22,16 @@ from services import flow_store as fs  # noqa: E402
 from services import schema_migrations as sm  # noqa: E402
 
 
+def _head_revision() -> str:
+    """当前迁移 head（避免每加一条 revision 都改测试里的硬编码）。"""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(sm._MIGRATIONS_DIR))
+    return ScriptDirectory.from_config(cfg).get_current_head()
+
+
 def _tables(db: Path) -> set:
     con = sqlite3.connect(db)
     try:
@@ -96,13 +106,15 @@ class TestMigrationBootstrap:
 
         second = fs.init_engine(f"sqlite:///{db}")
         assert second.schema_summary["action"] == "upgrade"
-        assert sm.current_revision(second) == sm.BASELINE_REVISION
+        assert sm.current_revision(second) == _head_revision()
 
     def test_bootstrap_is_idempotent_many_times(self, tmp_path):
         db = tmp_path / "many.db"
-        for _ in range(3):
+        for index in range(3):
             engine = fs.init_engine(f"sqlite:///{db}")
-            assert sm.current_revision(engine) == sm.BASELINE_REVISION
+            # 首次认领基线；之后每次启动 upgrade 到 head 并保持不变。
+            expected = sm.BASELINE_REVISION if index == 0 else _head_revision()
+            assert sm.current_revision(engine) == expected
 
     def test_migration_targets_the_engine_it_was_given(self, tmp_path):
         """回归：env.py 曾经只读 console 配置，导致迁移写到「配置指向的库」。

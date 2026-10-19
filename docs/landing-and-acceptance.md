@@ -24,6 +24,18 @@
 - 自动化接线（定检冒烟 + 当日 merge 自动二分 + 自动提单）另单跟踪，见
   仓内 issue「落地熔断自动化」。
 
+**可选相位（`dist-scan`）**：#266 发布面补扫。对前端构建产物执行管理密钥
+通道扫描（源码/文档/`--dist` 产物），默认目录 `plaita-console/frontend/dist`：
+
+```bash
+python scripts/landing_gate.py dist-scan [--dist DIR]
+```
+
+退出码与 `ci` 一致：0 绿、1 红、2 无结论（`node` 或产物缺失，fail-closed）。
+该相位不并入默认 `ci` 判据——Node/前端产物并非所有落地环境都具备；发布构建
+路径（`plaita-console/scripts/build_package.sh` 与 `.github/workflows/publish.yml`）
+已内建同一扫描并在打包前 fail-fast，本相位用于发版前的本地复核。
+
 ## 2. policy-ack trailer：政策类改动显式确认
 
 - **policy-touching 定义**（任一命中即算）：

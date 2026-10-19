@@ -148,6 +148,24 @@ async def dispatch_plan(req: DispatchPlanRequest, request: Request) -> DispatchP
         queue_name=req.queue_name,
         shadow=req.shadow,
     )
+    # A55-S1：影子计划同样留痕（只算不发，但仍是对全局容量面的访问）。
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action="dispatch.plan",
+        resource="dispatch",
+        resource_id=plan.get("queue", ""),
+        detail={
+            "issues": len(req.issue_ids),
+            "queue": plan.get("queue"),
+            "shadow": bool(plan.get("shadow")),
+            "target": plan.get("target"),
+        },
+        tenant_id=tenant_scope(request, required=True),
+    )
     return DispatchPlanResponse(**plan)
 
 
@@ -306,6 +324,30 @@ async def dispatch_one(
         tenant_generation=_tenant_generation(tenant_id),
         dry_run=effective_dry_run,
         actor=identity.get("actor"),
+    )
+    # A55-S1：派发决策成功路径留痕（真发单必记；干跑同样记录）。
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action="dispatch.one",
+        resource="dispatch",
+        resource_id=req.issue_id,
+        detail={
+            "issue_id": req.issue_id,
+            "execution_id": result.get("execution_id"),
+            "queue": result.get("queue"),
+            "tenant_id": tenant_id,
+            "dry_run": bool(result.get("dry_run")),
+            "enqueued": bool(result.get("enqueued")),
+            "target": result.get("target"),
+            "decision": result.get("decision"),
+            "allowed": len(result.get("allowed") or []),
+            "rejected": len(result.get("rejected") or []),
+        },
+        tenant_id=tenant_id,
     )
     return DispatchOneResponse(**result)
 

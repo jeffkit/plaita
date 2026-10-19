@@ -71,6 +71,29 @@ _URL_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^ \t\r\n\f\v\"'<>]
 _REDACT_MAX_DEPTH = 64
 
 
+def _audit_cluster(request: Optional[Request], action: str, target: str = "",
+                   detail: Optional[Dict] = None) -> None:
+    """A55-S1：集群/全局生命周期成功路径审计（tenant=""；URL/secret 不入库）。
+
+    调用方只允许传名称/模式/状态/计数/实例 ID 等元数据，绝不传请求体原文
+    （基础设施 URL、docker env、集群配置都含凭据）。
+    """
+    if request is None:
+        return
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    audit_svc.record(
+        request,
+        action=f"cluster.{action}",
+        resource="cluster",
+        resource_id=str(target or ""),
+        detail=detail,
+        tenant_id="",  # 全局生命周期对象（跨租户）
+    )
+
+
 def _mask_url_token(token: str) -> str:
     """URL 口令段脱敏（保留 scheme/host/port/path/db，供平台运维诊断）。
 
@@ -375,7 +398,15 @@ async def start_service(
     
     try:
         instance = await manager.start_service(request.service_type)
-        
+        _audit_cluster(
+            http_request, "start", request.service_type,
+            {
+                "service_type": request.service_type,
+                "instance_id": instance.instance_id,
+                "status": instance.status,
+                "success": instance.status in ("running", "starting"),
+            },
+        )
         return StartServiceResponse(
             success=instance.status in ("running", "starting"),
             instance_id=instance.instance_id,
@@ -416,7 +447,9 @@ async def stop_service(
     
     if not success:
         raise HTTPException(status_code=404, detail=f"实例不存在或无法停止: {instance_id}")
-    
+
+    _audit_cluster(http_request, "stop", instance_id,
+                   {"instance_id": instance_id, "graceful": request.graceful})
     return {
         "success": True,
         "instance_id": instance_id,
@@ -439,6 +472,14 @@ async def stop_all_services(
     manager = _require_service_manager()
     results = await manager.stop_all(request.graceful)
 
+    _audit_cluster(
+        http_request, "stop_all", "",
+        {
+            "graceful": request.graceful,
+            "stopped": sum(1 for ok in results.values() if ok),
+            "total": len(results),
+        },
+    )
     return {
         # 空结果集不能翻成功：all({}) is True 会把「没停任何东西」伪装成
         # 成功回执（#100，如托管表为空/实例全部脱管的场景）。
@@ -597,7 +638,9 @@ async def switch_mode(
     
     # 切换模式
     manager.config.mode = request.mode
-    
+
+    _audit_cluster(http_request, "switch_mode", request.mode,
+                   {"mode": request.mode})
     return {
         "success": True,
         "mode": request.mode,
@@ -619,7 +662,8 @@ async def refresh_instances(
     )
     manager = _require_service_manager()
     await manager.refresh_status()
-    
+
+    _audit_cluster(http_request, "refresh")
     return {
         "success": True,
         "message": "状态已刷新"
@@ -730,7 +774,9 @@ async def check_infrastructure_health(
     
     health_status = await manager.check_infrastructure_health()
     health = health_status.get(name, {"status": "unknown", "details": None})
-    
+
+    _audit_cluster(http_request, "infrastructure.check", name,
+                   {"name": name, "status": health.get("status", "unknown")})
     return redact_cluster_secrets({
         "name": name,
         "status": health.get("status", "unknown"),
@@ -751,7 +797,9 @@ async def start_infrastructure(
         resource="cluster", target=name,
     )
     manager = _require_service_manager()
-    return await manager.start_infrastructure(name)
+    result = await manager.start_infrastructure(name)
+    _audit_cluster(request, "infrastructure.start", name, {"name": name})
+    return result
 
 
 @router.post("/cluster/infrastructure/{name}/stop")
@@ -766,7 +814,9 @@ async def stop_infrastructure(
         resource="cluster", target=name,
     )
     manager = _require_service_manager()
-    return await manager.stop_infrastructure(name)
+    result = await manager.stop_infrastructure(name)
+    _audit_cluster(request, "infrastructure.stop", name, {"name": name})
+    return result
 
 
 @router.post("/cluster/infrastructure", response_model=InfrastructureInfo)
@@ -805,7 +855,11 @@ async def create_infrastructure(
     # 重新加载配置
     manager.load_config()
     config = manager.get_infrastructure().get(request.name)
-    
+
+    _audit_cluster(
+        http_request, "infrastructure.create", request.name,
+        {"name": request.name, "type": request.type, "enabled": request.enabled},
+    )
     return InfrastructureInfo(
         name=request.name,
         display_name=config.display_name,
@@ -859,7 +913,16 @@ async def update_infrastructure(
     config = manager.get_infrastructure().get(name)
     health_status = await manager.check_infrastructure_health()
     health = health_status.get(name, {"status": "unknown", "details": None})
-    
+
+    # 只记变更后的非敏感字段（URL 可能带口令，绝不入审计）。
+    _audit_cluster(
+        http_request, "infrastructure.update", name,
+        {
+            "name": name,
+            "enabled": config.enabled,
+            "display_name": config.display_name,
+        },
+    )
     return InfrastructureInfo(
         name=name,
         display_name=config.display_name,
@@ -895,7 +958,8 @@ async def delete_infrastructure(
     
     if not success:
         raise HTTPException(status_code=500, detail="删除配置失败")
-    
+
+    _audit_cluster(request, "infrastructure.delete", name, {"name": name})
     return {"success": True, "message": f"已删除基础设施 {name}"}
 
 
@@ -1012,6 +1076,21 @@ async def run_quick_test(
         http_request, identity, action="cluster.quick_test",
         resource="cluster", target=request.test_type,
     )
+    response = await _execute_quick_test(request)
+    # A55-S1：成功/失败都留痕（不含 flow_definition / result 内容）。
+    _audit_cluster(
+        http_request, "quick_test", request.test_type,
+        {
+            "test_type": request.test_type,
+            "execution_id": response.execution_id,
+            "success": bool(response.success),
+        },
+    )
+    return response
+
+
+async def _execute_quick_test(request: QuickTestRequest) -> QuickTestResponse:
+    """quick-test 执行体（审计由外层端点统一写，避免 10 个返回点漏记）。"""
     import uuid
     
     try:
@@ -1595,7 +1674,9 @@ async def remove_instance(
             status_code=400, 
             detail=f"无法移除实例 {instance_id}（可能正在运行或不存在）"
         )
-    
+
+    _audit_cluster(http_request, "instances.remove", instance_id,
+                   {"instance_id": instance_id})
     return {
         "success": True,
         "instance_id": instance_id,
@@ -1618,7 +1699,9 @@ async def clear_failed_instances(
     manager = _require_service_manager()
     
     count = manager.clear_failed_instances()
-    
+
+    _audit_cluster(http_request, "instances.clear", "",
+                   {"cleared_count": count})
     return {
         "success": True,
         "cleared_count": count,
@@ -1809,7 +1892,9 @@ async def create_cluster(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
+    _audit_cluster(http_request, "registry.create", cluster.id,
+                   {"id": cluster.id, "name": cluster.name})
     return ClusterInfoResponse(
         id=cluster.id,
         name=cluster.name,
@@ -1846,7 +1931,9 @@ async def update_cluster(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    
+
+    _audit_cluster(http_request, "registry.update", cluster_id,
+                   {"id": cluster.id, "name": cluster.name})
     return ClusterInfoResponse(
         id=cluster.id,
         name=cluster.name,
@@ -1880,7 +1967,9 @@ async def delete_cluster(
     
     if not success:
         raise HTTPException(status_code=404, detail=f"集群 {cluster_id} 不存在")
-    
+
+    _audit_cluster(request, "registry.delete", cluster_id,
+                   {"id": cluster_id})
     return {"success": True, "message": f"集群 {cluster_id} 已删除"}
 
 
@@ -1991,7 +2080,9 @@ async def switch_cluster(
     except ImportError:  # 平铺布局（cwd=backend）运行时
         from services.service_manager import reset_service_manager  # type: ignore
     reset_service_manager()
-    
+
+    _audit_cluster(request, "registry.switch", payload.cluster_id,
+                   {"id": cluster.id, "name": cluster.name})
     return ClusterInfoResponse(
         id=cluster.id,
         name=cluster.name,
@@ -2085,5 +2176,10 @@ async def save_cluster_config_detail(
             from services.service_manager import reset_service_manager  # type: ignore
         reset_service_manager()
 
+    # 配置内容含 redis.url / 进程参数 / docker env：只记目标集群与是否活动。
+    _audit_cluster(
+        request, "registry.save_config", cluster_id,
+        {"id": cluster_id, "active_cluster": is_active_cluster},
+    )
     return {"success": True, "message": "配置已保存"}
 

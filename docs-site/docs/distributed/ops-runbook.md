@@ -446,7 +446,7 @@ redis-cli KEYS 'plaita:execution:lease:*'
 | 端点 | 覆盖 | 鉴权 |
 |------|------|------|
 | worker `http://<host>:<PLAITA_METRICS_PORT>/metrics` | 本进程队列 `stream_length`/`pending`/`dlq_length` + 全部进程内计数器 + worker 存活/活跃任务数/draining/心跳时间戳 | 无（运维网内网面，勿暴露公网） |
-| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数 | 管理面 `X-Admin-API-Key` |
+| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数 | 任意**已认证会话（viewer+）**或 `X-Admin-API-Key`；全局观测面是否收窄到平台身份待 owner 裁决（见 `docs/proofs/s6-global-observability-policy.md`） |
 
 `plaita_workers_registered_total` 归零 = worker 全灭。启动：
 
