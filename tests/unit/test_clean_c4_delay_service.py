@@ -228,5 +228,20 @@ class TestEndToEndEvent(DelayServiceTestBase):
         self.assertEqual(received[0]["correlation_id"], "e1")
 
 
+class TestPollIntervalValidation(unittest.TestCase):
+    """r39 A7：poll_interval 0/负数会让 Event.wait 立即返回（忙轮询）。"""
+
+    def test_non_positive_or_non_finite_rejected(self):
+        for value in (0, -1, -0.5, "abc", float("inf"), float("nan")):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ctx:
+                    DelayService(None, {"poll_interval": value})
+                self.assertIn("poll_interval", str(ctx.exception))
+
+    def test_positive_interval_accepted(self):
+        svc = DelayService(None, {"poll_interval": 0.05})
+        self.assertEqual(svc._poll_interval, 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()
