@@ -67,3 +67,82 @@ class TestConsoleTaskQueueEnv:
 
         raw = redis.xrange("plaita:flow:queue")[-1][1]
         assert json.loads(raw["payload"]) == payload
+
+
+# ---- A56-02：调度「立即触发」必须跟随 PLAITA_CONSOLE_TASK_QUEUE ----
+
+ADMIN_KEY = "task-queue-env-key"
+
+
+def _settings():
+    from config import Settings
+    s = Settings()
+    s.console_env = "dev"
+    s.admin_api_key = ADMIN_KEY
+    s.allow_insecure_admin = False
+    return s
+
+
+@pytest.fixture()
+def cluster_env(tmp_path, monkeypatch):
+    """集群档（local_mode=False）+ 独立 SQLite（audit 落库用）。"""
+    monkeypatch.setattr("config.get_settings", lambda: _settings())
+    monkeypatch.setattr("auth.get_settings", lambda: _settings())
+    from services import flow_store
+    flow_store.init_engine(f"sqlite:///{tmp_path}/queue-env.db")
+    return FakeRedis(decode_responses=True)
+
+
+class TestScheduleTriggerQueueEnv:
+    def _client(self, redis):
+        from fastapi import Depends, FastAPI
+        from starlette.testclient import TestClient
+        from api import schedules as schedules_api
+        from auth import require_auth
+        from services import flow_store
+
+        app = FastAPI()
+        app.state.redis = redis
+        app.state.local_mode = False  # 集群档分支
+        app.state.store = flow_store.get_flow_store()
+        app.include_router(
+            schedules_api.router, prefix="/api",
+            dependencies=[Depends(require_auth)],
+        )
+        return TestClient(app)
+
+    def test_trigger_default_queue_unchanged(self, cluster_env, monkeypatch):
+        """缺省行为不变：未设 env 时仍入默认队列。"""
+        redis = cluster_env
+        monkeypatch.delenv("PLAITA_CONSOLE_TASK_QUEUE", raising=False)
+        redis.hset("plaita:schedules", "s1", json.dumps({
+            "schedule_id": "s1", "name": "默认调度", "flow_id": "f1",
+            "cron": "* * * * *", "enabled": True, "params": {},
+            "tenant_id": "default",
+        }))
+        r = self._client(redis).post(
+            "/api/schedules/s1/trigger", headers={"X-Admin-API-Key": ADMIN_KEY},
+        )
+        assert r.status_code == 200, r.text
+        assert redis.xlen("plaita:flow:queue") == 1
+        assert redis.xlen("plaita:flow:queue:v2") == 0
+
+    def test_trigger_follows_env_queue(self, cluster_env, monkeypatch):
+        """A56-02 负控：env 设 v2 时 trigger 必须入 v2。
+
+        pre-fix：``trigger_now`` 用静态 ``TASK_QUEUE_NAME``（默认队列）→
+        消息落默认队列而 v2 为空，本用例精确红。
+        """
+        redis = cluster_env
+        monkeypatch.setenv("PLAITA_CONSOLE_TASK_QUEUE", "plaita:flow:queue:v2")
+        redis.hset("plaita:schedules", "s1", json.dumps({
+            "schedule_id": "s1", "name": "v2调度", "flow_id": "f1",
+            "cron": "* * * * *", "enabled": True, "params": {},
+            "tenant_id": "default",
+        }))
+        r = self._client(redis).post(
+            "/api/schedules/s1/trigger", headers={"X-Admin-API-Key": ADMIN_KEY},
+        )
+        assert r.status_code == 200, r.text
+        assert redis.xlen("plaita:flow:queue:v2") == 1, "env 指定的队列必须收到触发消息"
+        assert redis.xlen("plaita:flow:queue") == 0, "默认队列不得再收到触发消息"

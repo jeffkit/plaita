@@ -5324,9 +5324,15 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         ≤30s 消失，早于 60s 的首次回收——在册 = 活持有者，ack 安全；
         不在册 = TTL 尾巴，ack 会吞掉重试载体。
 
-        拿不到任何信号（旧格式租约 / 未启用注册表 / Redis 瞬断）一律按
-        「存活未知」返回 True 保持 ack——宁可回到 zombie reap 兜底，不
-        回归 2026-10-06 修掉的假死信风暴（对端每 60s XCLAIM 烧 delivery）。
+        拿不到任何信号（旧格式租约 / 读租约或注册表瞬断）按「存活未知」返回
+        True 保持 ack——宁可回到 zombie reap 兜底，不回归 2026-10-06 修掉的
+        假死信风暴（对端每 60s XCLAIM 烧 delivery）。
+        **例外：未启用注册表（``--no-registry``）不在此列**（B65-03）：该部署
+        形态下存活信号静态不可得，把「存活未知」当「活持有者」会在持有者被
+        冻结（SIGSTOP/GC/调度饥饿，租约仍有效）时 ack 掉唯一消息——冻结者
+        恢复后 ``lease_lost`` 退出，执行停在 running 且零载体。故该分支一律
+        **不 ack**，留 pending 等租约过期后 reclaim；租约在时死信守卫拒绝
+        死信，不会回归假死信风暴。
         回滚开关 PLAITA_DISABLE_HOLDER_LIVENESS=1 整体旁路（回到无条件 ack）。
 
         A47-F2（A46-04 根因）：持有者存活只证明「进程在」，不证明「会消费
@@ -5361,7 +5367,17 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         if not (isinstance(body, dict) and body.get("execution_id")):
             return True
         if not getattr(self, "_enable_registry", False):
-            return True
+            # B65-03：--no-registry 没有存活信号，不能把「存活未知」当「活
+            # 持有者」。持有者冻结时租约仍有效；ack 掉本消息后冻结者恢复
+            # 即 lease_lost 退出，执行停在 running 且无任何载体。留 pending，
+            # 等租约过期后由 reclaim 续跑（租约在时死信守卫拒绝死信）。
+            logger.warning(
+                "执行 %s 租约冲突，但服务注册表未启用（--no-registry）无法核实"
+                "持有者存活——不 ack，留 pending 等租约过期后 reclaim 续跑 "
+                "(B65-03)",
+                body.get("execution_id"),
+            )
+            return False
         token = set_current_tenant(body.get("tenant_id"))
         try:
             try:

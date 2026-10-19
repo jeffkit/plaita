@@ -58,8 +58,10 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         SCHEDULES_KEY = "plaita:schedules"
         SCHEDULE_FIRES_KEY = "plaita:schedule:fires:{schedule_id}"
 
-# get_redis / TASK_QUEUE_NAME 与 executions 共享同一依赖与队列名
-from .executions import get_redis_or_none, TASK_QUEUE_NAME
+# get_redis / 队列名与 executions 同源：队列名用 _task_queue_name() 在**使用点**
+# 解析（env PLAITA_CONSOLE_TASK_QUEUE > 默认值），不得导入模块级静态别名——
+# 静态值在导入时求值，env 切换/新旧并行验证时触发消息会落错队列（A56-02）
+from .executions import get_redis_or_none, _task_queue_name
 
 try:
     from ..auth import tenant_scope
@@ -465,8 +467,8 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
     schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     if not _tenant_is_active(request, schedule.get("tenant_id")):
         raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
-    # 与手动「启动流程」同源：写任务队列 Stream
-    msg_id = fire_schedule(redis, schedule, TASK_QUEUE_NAME, trigger_kind="manual")
+    # 与手动「启动流程」同源：写任务队列 Stream（队列名在调用点解析 env）
+    msg_id = fire_schedule(redis, schedule, _task_queue_name(), trigger_kind="manual")
     if msg_id is None:
         raise HTTPException(status_code=502, detail="入队失败，请检查 Redis 与任务队列配置")
     detail = _schedule_detail(schedule)

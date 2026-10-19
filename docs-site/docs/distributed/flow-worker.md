@@ -42,7 +42,12 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
    下一轮回收从 checkpoint 续跑（代价 ≤TTL+60s，远小于 zombie reap）；**在册
    但处于 draining/stopping/stopped/starting**（S18-02A）→ 同样**不 ack**：
    这些状态不保证收尾，ack 会释放执行的唯一重投载体。信号缺失
-   （旧格式租约 / `--no-registry` / Redis 瞬断）按「存活未知」退化 ack；
+   （旧格式租约 / Redis 瞬断）按「存活未知」退化 ack；**未启用注册表
+   （`--no-registry`）例外**（B65-03，2026-10-20）：该形态下存活信号静态
+   不可得，把「存活未知」当「活持有者」会在持有者被冻结（SIGSTOP/GC/
+   调度饥饿，租约仍有效）时 ack 掉唯一消息——冻结者恢复后 `lease_lost`
+   退出，执行停在 `running` 且无载体；故该分支一律**不 ack**，留 pending
+   等租约过期后 reclaim（租约在时死信守卫拒绝死信，不会回归假死信风暴）；
    `PLAITA_DISABLE_HOLDER_LIVENESS=1` 整体旁路回到无条件 ack；
    **决议载体例外（A46-04/A47-F2，2026-10-19）**：`resume_type` 为
    `event`/`timeout`/`cancel` 的消息**不看存活信号、一律不 ack**——suspend
