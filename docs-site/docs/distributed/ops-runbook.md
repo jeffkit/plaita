@@ -260,7 +260,7 @@ aiohttp 的 10，见 [MIGRATION](https://github.com/jeffkit/plaita/blob/main/MIG
 
 ### 发布顺序（重要）
 
-1. **先升消费者，再升生产者**：`schema_version` 只在新语义上线时 bump；旧 worker 拒收「比自己新」的消息（进 DLQ + 告警），所以 producer（console BFF / 调度服务 / `event_filter`）必须后升。**例外**：worker 自身的重投/交接/归一化副本继承源消息的版本（不会把旧载体写成新版本），worker 灰度因此不要求整池原子升级；但 `event_filter` / 调度 / BFF 在同一批次产生的是**新载体**，仍按生产者处理。
+1. **先升消费者，再升生产者**：`schema_version` 只在新语义上线时 bump；旧 worker 拒收「比自己新」的消息（进 DLQ + 告警），所以 producer（console BFF / 调度服务 / `event_filter`）必须后升。**例外**：worker 自身的重投/交接/归一化副本继承源消息的版本（不会把旧载体写成新版本），worker 灰度因此不要求整池原子升级；但 `event_filter` / 调度 / BFF 在同一批次产生的是**新载体**，仍按生产者处理。**回滚/生产者先行的处置**（A49-01）：旧 worker 对超版本载体只死信一次，**不再克隆恢复副本**（副本仍是同一版本，克隆会形成 DLQ 线性增长的热环）；载体在 DLQ 里留证，升级后从 DLQ 重放即可，`suspended` 执行也可由后续 event/cancel/timeout 唤醒。
 2. **Console API 先升**（只增不删），确保新旧前端都能用；前端静态资源后发。
 3. **Worker 灰度**：先起新版本实例与旧实例**同 consumer group 混跑**，观察 `lease_conflicts` / `reclaimed` / `dead_lettered` 无异常后，再逐个 drain 旧实例。
 4. 每台 worker 的停机动作是 `draining`，不是 kill（见下）。

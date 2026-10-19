@@ -58,7 +58,17 @@ class DlqEntry(BaseModel):
     source_id: str = Field(default="", description="原消息 id")
     delivery_count: Optional[int] = Field(default=None, description="投递次数")
     dead_lettered_at: Optional[float] = Field(default=None, description="死信 Unix 时间戳")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="原始任务负载")
+    schema_version: Optional[int] = Field(default=None, description="源消息信封版本")
+    payload: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="原始任务负载；畸形消息为 {'raw': 截断原始串}",
+    )
+    raw_fields: Optional[Dict[str, Any]] = Field(
+        default=None, description="畸形消息的原始 Stream 字段（截断）"
+    )
+    truncated: Optional[bool] = Field(
+        default=None, description="畸形 payload 是否被截断"
+    )
 
 
 class DlqStream(BaseModel):
@@ -145,30 +155,73 @@ def _owned_by_tenant(data: Any, tenant: Optional[str]) -> bool:
 _DLQ_SCAN_LIMIT = 500
 
 
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _payload_shape(value: Any) -> Dict[str, Any]:
+    """payload 字段容错（A49-02）。
+
+    正常死信的 ``payload`` 是 dict；``_dead_letter_invalid`` 对畸形消息写的是
+    **截断原始串**（task_queue.py）。定型 ``Dict`` 会在构造 DlqEntry 时抛
+    ValidationError——一条毒丸让整个端点（含所有租户）500。原始串统一包成
+    ``{"raw": ...}``：读面形状不变，证据不丢。
+    """
+    if isinstance(value, dict):
+        return value
+    if value is None or value == "":
+        return {}
+    return {"raw": value if isinstance(value, str) else str(value)}
+
+
 def _parse_dlq_entry(msg_id: Any, fields: Dict[Any, Any]) -> DlqEntry:
-    """DLQ Stream 条目 → DlqEntry（envelope.payload 为原始任务负载）。"""
+    """DLQ Stream 条目 → DlqEntry（envelope.payload 为原始任务负载）。
+
+    解析必须**对单条毒丸容错且不抛**：该函数在租户过滤/端点之前执行，任何
+    异常都会遮蔽全部 DLQ 流与全部租户视角（A49-02）。
+    """
     if isinstance(msg_id, bytes):
         msg_id = msg_id.decode()
-    envelope: Dict[str, Any] = {}
+    envelope: Any = None
+    raw_payload: Any = None
     for k, v in fields.items():
         k_str = k.decode() if isinstance(k, bytes) else k
         if k_str == "payload":
-            raw = v.decode() if isinstance(v, bytes) else v
+            raw_payload = v.decode(errors="replace") if isinstance(v, bytes) else v
             try:
-                envelope = json.loads(raw)
+                envelope = json.loads(raw_payload)
             except Exception:
-                envelope = {"raw": str(raw)}
+                envelope = None
             break
     if not isinstance(envelope, dict):
-        envelope = {"raw": envelope}
+        # 整个信封不可解析 / JSON 非对象：原始串即唯一证据，按 raw 形态展示。
+        envelope = {}
+        payload = _payload_shape(raw_payload)
+    else:
+        payload = _payload_shape(envelope.get("payload"))
+    raw_fields = envelope.get("raw_fields")
+    truncated = envelope.get("truncated")
     return DlqEntry(
         dlq_id=msg_id,
-        reason=str(envelope.get("reason", "")),
-        source_stream=str(envelope.get("source_stream", "")),
-        source_id=str(envelope.get("source_id", "")),
-        delivery_count=envelope.get("delivery_count"),
-        dead_lettered_at=envelope.get("dead_lettered_at"),
-        payload=envelope.get("payload") or {},
+        reason=str(envelope.get("reason") or ""),
+        source_stream=str(envelope.get("source_stream") or ""),
+        source_id=str(envelope.get("source_id") or ""),
+        delivery_count=_optional_int(envelope.get("delivery_count")),
+        dead_lettered_at=_optional_float(envelope.get("dead_lettered_at")),
+        schema_version=_optional_int(envelope.get("schema_version")),
+        payload=payload,
+        raw_fields=raw_fields if isinstance(raw_fields, dict) else None,
+        truncated=bool(truncated) if truncated is not None else None,
     )
 
 

@@ -135,7 +135,7 @@ _RETRY_MAX_DELAY_SECONDS = 30.0
 _RETRY_MAX_BACKOFF_EXPONENT = 30
 
 
-def _is_retryable_error(exc: BaseException) -> bool:
+def is_retryable_error(exc: BaseException) -> bool:
     """按异常类型/错误码判定是否值得重试（node-F2）。
 
     - ``NodeException``：1001（请求生成 = 配置/参数确定性错误）不重试；
@@ -144,6 +144,10 @@ def _is_retryable_error(exc: BaseException) -> bool:
     - 非 ``NodeException`` 的 ``ValueError``：参数/配置类确定性错误，不重试；
       但节点输出校验钩子抛出的异常除外（#219 契约：校验异常仍走 retryTimes）。
     - 其余异常（``RuntimeError``、节点自身 ``TimeoutError`` 等）：保持历史行为。
+
+    A50-03：公开导出。worker 层的重投判据必须复用同一份分类，否则
+    ``NodeExecutionError`` 的 abort 包装会把 1001/ValueError 重新判成可重试，
+    core 的「确定性不重试」在跨层边界丢失（同一错误被 worker 重投 5 次）。
     """
     if isinstance(exc, NodeException):
         code = getattr(exc, "code", None)
@@ -155,6 +159,10 @@ def _is_retryable_error(exc: BaseException) -> bool:
     if isinstance(exc, ValueError):
         return is_output_validation_retryable(exc)
     return True
+
+
+# 兼容旧私有名（本地/下游对 ``_is_retryable_error`` 的引用与测试注释）。
+_is_retryable_error = is_retryable_error
 
 
 def _retry_backoff_seconds(attempt: int) -> float:

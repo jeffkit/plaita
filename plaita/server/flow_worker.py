@@ -33,6 +33,7 @@ from plaita.core.errors import (
 )
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
+from plaita.core.runner import is_retryable_error
 from plaita.storage.base import (
     ExecutionState,
     ExecutionStorage,
@@ -691,9 +692,15 @@ def _is_retryable_node_failure(exc: BaseException) -> bool:
     且原始异常挂在 ``__cause__``（core/_error_normalization.py:59-69）。判据：
 
     - 链中出现 ``NodeExecutionError``（runner.py 节点 abort 时 raise，原始
-      异常再挂它的 ``__cause__``）→ **可重试**——LLM/HTTP 网络抖动属瞬态，
-      磁盘 state 仍停在最后成功步的 checkpoint（strategies.py
+      异常再挂它的 ``__cause__``）→ 默认**可重试**——LLM/HTTP 网络抖动属
+      瞬态，磁盘 state 仍停在最后成功步的 checkpoint（strategies.py
       ``_execute_current_node`` 的 ``runner.run_node`` 抛出时 context 未变）；
+    - **A50-03**：``NodeExecutionError`` 只是 abort 包装层，原始节点异常挂在
+      它的 ``__cause__``。若更深处是 node-F2 判定的确定性错误（1001 /
+      非校验 ValueError），**不重试**——否则 core 里「执行 1 次」的分类在
+      worker 层被包装层抹掉，同一确定性错误还会被重投 5 次。分类直接复用
+      ``core.runner.is_retryable_error``（单一来源），保留 #219 输出校验
+      异常的可重试例外；
     - 链中出现超时（``NodeTimeoutError``/``FlowTimeoutError``）→ **不重试**
       （确定性信号，重试=再烧一次全款，对齐 v3 宿主 D4 决策），维持现状
       终态化 error；
@@ -706,14 +713,18 @@ def _is_retryable_node_failure(exc: BaseException) -> bool:
     """
     cause = getattr(exc, "__cause__", None)
     depth = 0
+    node_failure_seen = False
     while cause is not None and depth < _NODE_RETRY_CHAIN_MAX_DEPTH:
         if isinstance(cause, (NodeTimeoutError, FlowTimeoutError, FlowCancelledException)):
             return False
         if isinstance(cause, NodeExecutionError):
-            return True
+            node_failure_seen = True
+        elif node_failure_seen and not is_retryable_error(cause):
+            # abort 包装层之下的原始异常：确定性分类（F2）不得被包装抹掉。
+            return False
         cause = cause.__cause__
         depth += 1
-    return False
+    return node_failure_seen
 
 
 def _chain_has_cancellation(exc: BaseException) -> bool:
@@ -4353,6 +4364,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         - 非终态 + 租约空（持有者已死）→ **重新入队一份同体消息**（delivery
           归 1，恢复路径重生）后放行原消息死信。并发守卫双入队无害：两条
           新消息被 resume 租约串行化，第二条命中 already_terminal 短路。
+        - 例外（A49-01）：消息因信封版本超出本 build 而被拒收
+          （``task.schema_rejected``）→ **不克隆**，直接放行死信一次。副本会
+          继承同一个超版本，本 build 仍然无法消费：每轮克隆+死信是自持热环
+          （流内恒 1 条、DLQ 线性增长）。租约仍在时仍拒绝死信（留 pending
+          等新 build）。
 
         租户路由：状态存储经 ContextVar 路由、租约键手工拼装，两者都用
         消息体 ``tenant_id``（守卫在 run() 主循环内 ``_dispatch_task`` 之外
@@ -4410,6 +4426,22 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 getattr(task, "message_id", "?"),
             )
             return False
+
+        # A49-01：超版本拒收不走「克隆恢复」。副本继承同一超版本，本 build
+        # 仍会在下一轮拒收并再次克隆——流内恒 1 条、DLQ 每轮 +1，永不收敛。
+        # 允许死信一次（留证+告警），执行状态不终态化：suspended 仍可被后续
+        # event/cancel/timeout 唤醒；运维升级后可从 DLQ 重放（ops-runbook）。
+        # 也刻意跳过下方「节点重试预算耗尽 → 终态化」分支：版本拒收不是节点
+        # 反复失败，不能据此把执行打成 error。
+        if getattr(task, "schema_rejected", False):
+            logger.error(
+                "执行 %s 的消息信封版本（%s）超出本 build 理解范围，拒收后不再"
+                "克隆恢复副本（克隆仍是同一版本，会自持循环）；放行死信一次: %s",
+                execution_id,
+                getattr(task, "schema_version", "?"),
+                getattr(task, "message_id", "?"),
+            )
+            return True
 
         # 节点重试预算耗尽后备判据（波次二任务①）：达限消息在队列层被就地
         # 死信、不经过处理函数；此刻执行非终态、租约已空且重试计数已达预算

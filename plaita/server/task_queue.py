@@ -6,7 +6,7 @@ import logging
 import os
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -69,6 +69,10 @@ class StreamTask:
     delivery_count: int = 1
     # 消息信封版本（缺失/非法 → v1）。消费者据此拒收「比自己新」的语义
     schema_version: int = TASK_SCHEMA_VERSION
+    # 本次死信决策是否来自「信封版本超出本 build 理解范围」的拒收（A49-01）。
+    # 守卫据此**不得**克隆恢复副本：副本继承同一超版本，本 build 仍无法消费，
+    # 每轮「克隆 → 再拒收 → 再克隆」会形成自持热环（流内恒 1 条、DLQ 线性增长）。
+    schema_rejected: bool = False
 
 
 # #186：畸形消息（payload 非 JSON / JSON 非对象）在**解析点**处置，不再抛给
@@ -569,8 +573,14 @@ class RedisStreamTaskQueue:
         返回 True = 已死信；False = 守卫拒绝/异常（消息留 pending）。每次遇到
         都计 ``schema_rejected``：守卫拒绝时消息会留 pending 被下轮再遇到，
         该计数是「拒收尝试」而非「DLQ 行数」（DLQ 行数看 ``dead_lettered``）。
+
+        A49-01：任务带 ``schema_rejected`` 标记交给守卫。FlowWorker 的守卫据此
+        跳过「非终态 + 租约空 → 克隆恢复副本」分支——副本继承同一超版本，本
+        build 仍无法消费，克隆只会把「拒收」变成自持热环（DLQ 每轮 +1）。守卫
+        仍可拒绝死信（典型：执行有活租约）让消息留 pending 等新 build。
         """
         self._metrics["schema_rejected"] = self._metrics.get("schema_rejected", 0) + 1
+        task = replace(task, schema_rejected=True)
         return self.dead_letter_if_allowed(
             task,
             reason=(

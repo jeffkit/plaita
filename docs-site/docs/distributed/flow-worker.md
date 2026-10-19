@@ -83,6 +83,16 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 放行，存量行为不变。DLQ 信封固定带 `schema_version`（畸形消息另带
 `raw_fields`），审计与重放不靠猜。
 
+**超版本拒收不触发死信守卫的「克隆恢复」（A49-01）**：守卫在「执行非终态 +
+租约空」时会重入队一份恢复副本再放行原条死信，但该恢复路径对**版本拒收**不
+成立——副本继承同一个 `schema_version`（A44-02），本 build 仍然无法消费，
+下一轮读到副本又会拒收并再次克隆，形成流内恒 1 条、DLQ 每轮 +1 的自持热环
+（回滚 / 生产者先行 / 伪造信封）。队列在拒收时给任务打 `schema_rejected` 标记，
+FlowWorker 的守卫对该标记**不克隆、不终态化**，只放行死信一次（留证 + 告警）；
+执行保持原状（suspended 仍可被 event/cancel/timeout 唤醒），运维升级后可经
+DLQ 重放入口恢复载体。租约仍在（活 worker 正处理）时仍拒绝死信，消息留
+pending 等新 build。非版本拒收（如 `max_deliveries`）的恢复克隆语义不变。
+
 **版本边界对首投与回收同判**：`_reclaim_one` 在 XCLAIM 之后、返回
 消费循环之前做与 `xreadgroup(">")` 相同的 `schema_version > max_schema_version`
 校验。消费者在 schema 检查/死信 ack 前崩溃时，同一条消息不会因「重启后走
@@ -145,6 +155,10 @@ python -m plaita.server.flow_worker \
 
 - **判别**：`run_distributed` 把异常归一化为 `FlowErrorException`（原始异常在
   `__cause__`）。链中出现 `NodeExecutionError`（节点执行异常）→ 可重试；
+  但其 `__cause__` 里的原始节点异常按 node-F2 同一分类复核（A50-03）：
+  1001 / 非校验 `ValueError` 是确定性错误，不重试（否则 abort 包装层会把 core
+  的「执行 1 次」重新判成可重试，同一错误仍被 worker 重投 5 次）；#219 输出
+  校验异常仍可重试；1002/1003 与未知码维持可重试；
   链中出现超时（`NodeTimeoutError`/`FlowTimeoutError`）或取消
   （`FlowCancelledException`）→ 维持现状终态化 error；
   **恢复守卫类** `ResumeGuardError`——策略层在**分发到节点 `resume()` 之前**
