@@ -523,6 +523,22 @@ Redis 后端的 `delete_execution_state` 是**删除即吊销**：同一 pipelin
 `$NODE`）；调大 `PERSIST_EVERY_N_STEPS`；长流程拆分为 child/子执行。
 增量式 checkpoint（每节点结果独立 key）在路线图上，当前版本请按上述方式规避。
 
+## 启动期服务注册失败的重试（A2R19-03）
+
+服务注册（`plaita:registry:flow_worker:<instance>` + 心跳线程）与队列消费走的是
+**两条独立恢复路径**：队列读对瞬时 Redis 故障退避重试、恢复后自动继续；而
+`register_service()` 只在 `run()` 启动时调用一次，失败（内部吞异常、返回
+False）后不会重来。结果是「worker 启动瞬间 Redis 不可达 → Redis 恢复后队列
+能消费，但注册表永远为空」——`/api/services`、容量快照、亲和派发
+（`target_instance_id`）与以注册表为判据的就绪探针都看不到该进程。
+
+现在启动注册失败会进入**后台有界退避重试**（1s → 2s → … → 30s 封顶，直到
+成功或 `stop()`），成功后由 `register_service()` 顺带启动心跳线程；
+`stop()` 先停重试线程再注销，避免退出后又被写回。失败每次仍由注册表打
+ERROR，退避封顶保证 Redis 全断时不刷屏；进程内 `registry_registered`
+属性在成功前保持 False（成功前不宣称 ready）。测试见
+`tests/unit/test_issue_a2r19_registry_retry.py`。
+
 ## 停机与运维参数（2026-09）
 
 - **优雅停机**：SIGTERM/SIGINT 后 worker 在当前任务完成后退出。消费阻塞窗口

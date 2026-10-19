@@ -52,6 +52,9 @@ class LogListResponse(BaseModel):
     """日志列表响应"""
     logs: List[LogEntry]
     total: int
+    # A2R19-04：部分键/条目读取失败时显式标注——空列表不等于「没有日志」。
+    degraded: bool = False
+    skipped: int = 0
 
 
 class LogStatsEntry(BaseModel):
@@ -174,6 +177,7 @@ async def list_logs(
     keys = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
 
     logs = []
+    skipped = 0
     tenant = tenant_scope(request)
     tenant_id_filter = tenant if tenant else None
 
@@ -210,11 +214,20 @@ async def list_logs(
                         continue
 
                     logs.append(log_entry)
-                except Exception:
+                except Exception:  # noqa: BLE001 - 条目解析失败计入 degraded
+                    # A2R19-04：条目解析失败计入 skipped，不再无痕迹丢弃
+                    skipped += 1
                     continue
-        except Exception:
-            # 如果不是 Stream，跳过
+        except Exception:  # noqa: BLE001 - 键读取失败计入 degraded
+            # 如果不是 Stream/键读取失败：跳过但必须可观测
+            skipped += 1
             continue
+
+    if skipped:
+        logger.warning(
+            "日志列表读取降级：%d 个键/条目读取失败（返回 %d 条，degraded=true）",
+            skipped, len(logs),
+        )
     
     # 按时间排序
     logs.sort(key=lambda x: x.timestamp, reverse=True)
@@ -224,7 +237,9 @@ async def list_logs(
     
     return LogListResponse(
         logs=logs,
-        total=len(logs)
+        total=len(logs),
+        degraded=skipped > 0,
+        skipped=skipped,
     )
 
 
@@ -274,6 +289,7 @@ async def get_instance_logs(
     # 多租户（plaita#192）：实例 id 可能被他租户猜中/从别处取得，逐条目按
     # tenant_id 收窄——不能只按 instance_id 匹配。
     tenant = tenant_scope(request)
+    skipped = 0
     
     for key in keys:
         key_str = key if isinstance(key, str) else key.decode()
@@ -307,10 +323,19 @@ async def get_instance_logs(
                         continue
                     
                     logs.append(log_entry)
-                except Exception:
+                except Exception:  # noqa: BLE001 - 条目解析失败计入 degraded
+                    # A2R19-04：条目解析失败计入 skipped，不再无痕迹丢弃
+                    skipped += 1
                     continue
-        except Exception:
+        except Exception:  # noqa: BLE001 - 键读取失败计入 degraded
+            skipped += 1
             continue
+
+    if skipped:
+        logger.warning(
+            "实例日志读取降级（instance=%s）：%d 个键/条目读取失败（返回 %d 条，degraded=true）",
+            instance_id, skipped, len(logs),
+        )
     
     # 按时间排序
     logs.sort(key=lambda x: x.timestamp, reverse=(order == "desc"))
@@ -320,7 +345,9 @@ async def get_instance_logs(
     
     return LogListResponse(
         logs=logs,
-        total=len(logs)
+        total=len(logs),
+        degraded=skipped > 0,
+        skipped=skipped,
     )
 
 

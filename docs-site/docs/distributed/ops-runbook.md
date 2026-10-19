@@ -445,9 +445,17 @@ redis-cli KEYS 'plaita:execution:lease:*'
 | 端点 | 覆盖 | 鉴权 |
 |------|------|------|
 | worker `http://<host>:<PLAITA_METRICS_PORT>/metrics` | 本进程队列 `stream_length`/`pending`/`dlq_length` + 全部进程内计数器 + worker 存活/活跃任务数/draining/心跳时间戳 | 无（运维网内网面，勿暴露公网） |
-| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数 | 管理面 `X-Admin-API-Key` |
+| console `/api/metrics` | **集群级**：各队列积压 + DLQ 堆积 + 注册表中存活的 flow_worker 数；`plaita_metrics_scrape_degraded` / `plaita_metrics_failed_commands_total{command=…}` 标注本次抓取的部分读失败 | 管理面 `X-Admin-API-Key` |
 
-`plaita_workers_registered_total` 归零 = worker 全灭。启动：
+`plaita_workers_registered_total` 归零 = worker 全灭。**但该 0 值可能是「读不到」**：
+console 抓取是逐命令 best-effort 的，单个 `XLEN`/`XPENDING`/注册表扫描失败时
+仍返回 200 与 0 值以保证页面不整体 500。此时 `plaita_metrics_scrape_degraded`
+为 1、失败命令计入 `plaita_metrics_failed_commands_total`，并打 WARNING（60s
+限流）——**告警规则应先看 degraded=0 再判 0 值**。全断（SCAN 本身失败）仍
+500 fail-closed。`/api/events`、`/api/logs` 等列表端点同理：部分键读取失败时
+响应带 `degraded: true` 与 `skipped: n`（空列表 ≠ 没有数据），并打 WARNING。
+
+启动：
 
 ```bash
 PLAITA_METRICS_PORT=9100 python -m plaita.server.flow_worker \
