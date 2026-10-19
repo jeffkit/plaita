@@ -2,9 +2,15 @@
 
 波次②（设计稿 docs/DESIGN-cancellation-and-lease.md §4.2）在 SET NX 之上
 增加 **fencing token（世代号）**：``try_acquire_fenced`` 以 Lua 原子地
-「NX 抢锁 → INCR 世代键 → 租约值变为 ``{holder}:{gen}``」，renew/release
+「NX 抢锁 → INCR 世代计数器 → 租约值变为 ``{holder}:{gen}``」，renew/release
 仍对**整个 value 串** compare（原样）；fenced storage 的写侧 CAS 据此拒绝
 旧世代的落盘。
+
+世代计数器（``{ns}:execution:fencegen:{id}``）与 fence 键
+（``{ns}:execution:fence:{id}``）分离（A2R13）：fence 键在删除执行时被清掉
+（删除即吊销），计数器则**永不清除、无 TTL**——否则同一 execution_id 重建
+后世代会从 1 重新开始，与旧 worker 世代相同（ABA）。计数器每执行 id 仅一个
+裸整数键，删除后残留无害；fence 键仍保留 7 天 TTL 自清理。
 """
 from __future__ import annotations
 
@@ -47,14 +53,28 @@ end
 # 后 acquire 成功且世代必然递增，旧持有者的写被 fenced storage CAS 拒绝。
 # 设计稿 Lua 草图（无条件 INCR+SET）缺 NX 语义，会破坏「B 持租约时 A
 # resume 抛 ExecutionLeaseError」，实现按 T1 修正为 NX-preserving。
-# KEYS[1]=lease key, KEYS[2]=fence key, ARGV[1]=holder, ARGV[2]=ttl 秒,
-# ARGV[3]=fence key TTL 秒。返回世代号（>0）或 0（已被持有）。
+#
+# A2R13 第三格 ABA：世代号由**独立计数器** KEYS[3]（fencegen）产出，不再
+# INCR fence 键本身。删除执行会清 fence 键（删除即吊销），若计数器也随
+# 之归零，同一 execution_id 重建后的新 worker 会拿到与旧 worker 相同的
+# gen（首次执行均为 1）⇒ 旧 save 命中 CAS、旧 delete 能删新执行。计数器
+# 删除时刻意保留且不设 TTL，故 INCR 永续、世代全局单调。
+# fence 键（KEYS[2]）仍承载「当前世代」供 CAS 比较，保留 7 天 TTL。
+# 兼容旧数据：fence 键已有值而计数器缺失（升级瞬间）时，从 fence 值
+# 取 floor 并把计数器抬到 floor 之后，避免世代回退。
+# KEYS[1]=lease key, KEYS[2]=fence key, KEYS[3]=generation counter key,
+# ARGV[1]=holder, ARGV[2]=ttl 秒, ARGV[3]=fence key TTL 秒。
+# 返回世代号（>0）或 0（已被持有）。
 _FENCED_ACQUIRE_LUA = """
 if redis.call('get', KEYS[1]) then
   return 0
 end
-local gen = redis.call('incr', KEYS[2])
-redis.call('expire', KEYS[2], ARGV[3])
+local floor = tonumber(redis.call('get', KEYS[2])) or 0
+local gen = redis.call('incr', KEYS[3])
+if gen <= floor then
+  gen = redis.call('incrby', KEYS[3], floor - gen + 1)
+end
+redis.call('set', KEYS[2], tostring(gen), 'EX', ARGV[3])
 redis.call('set', KEYS[1], ARGV[1] .. ':' .. tostring(gen), 'EX', ARGV[2])
 return gen
 """
@@ -150,12 +170,23 @@ class RedisExecutionLease:
             else:
                 fence_key_prefix = key_prefix + ":fence:"
         self.fence_key_prefix = fence_key_prefix
+        # 世代计数器前缀与 fence 前缀同族但**独立成键**（A2R13）：fence 键会被
+        # delete_execution_state 清掉，计数器必须留下来继续 INCR。
+        if fence_key_prefix.endswith("fence:"):
+            self.fence_generation_key_prefix = (
+                fence_key_prefix[: -len("fence:")] + "fencegen:"
+            )
+        else:
+            self.fence_generation_key_prefix = fence_key_prefix + ":fencegen:"
 
     def _key(self, execution_id: str) -> str:
         return f"{self.key_prefix}{execution_id}"
 
     def _fence_key(self, execution_id: str) -> str:
         return f"{self.fence_key_prefix}{execution_id}"
+
+    def _fence_generation_key(self, execution_id: str) -> str:
+        return f"{self.fence_generation_key_prefix}{execution_id}"
 
     def try_acquire(self, execution_id: str, holder: str, ttl_seconds: int) -> bool:
         key = self._key(execution_id)
@@ -165,16 +196,21 @@ class RedisExecutionLease:
     def try_acquire_fenced(self, execution_id: str, holder: str, ttl_seconds: int) -> Optional[int]:
         """NX 抢锁 + 世代号递增（原子）。成功返回世代号，被持有返回 None。
 
-        租约值变为 ``{holder}:{gen}``；fence 键 ``{fence_prefix}{id}`` 首次
-        acquire 时由 INCR 创建（兼容旧数据，设计稿 §4.2），TTL 自清理。
+        租约值变为 ``{holder}:{gen}``。世代号由独立计数器
+        ``{fence_prefix 同族}fencegen:{id}`` 单调递增（删除执行不清、无 TTL，
+        A2R13），fence 键只写入当前世代供 CAS 比较，仍带 7 天 TTL。
+        升级兼容：存量 fence 键有值而计数器缺失时，以 fence 值为 floor
+        把计数器抬到其后，世代绝不回退。
         """
         key = self._key(execution_id)
         fence_key = self._fence_key(execution_id)
+        generation_key = self._fence_generation_key(execution_id)
         result = self.redis.eval(
             _FENCED_ACQUIRE_LUA,
-            2,
+            3,
             key,
             fence_key,
+            generation_key,
             holder,
             str(ttl_seconds),
             str(FENCE_KEY_TTL_SECONDS),

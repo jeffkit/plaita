@@ -122,6 +122,8 @@ class TestListProjection:
         # 同前缀机制键：不得出现在列表，也不得干扰投影
         redis.set("plaita:execution:cancel:e1", "2026-09-01T00:00:00")
         redis.set("plaita:execution:lease:e1", "holder-1:1")
+        # A2R13：fence 世代计数器是裸整数，未登记会让列表投影 500
+        redis.set("plaita:execution:fencegen:e1", "1")
         redis.xadd("plaita:execution:some-dlq", {"payload": "x"})
 
         spy = GetSpyRedis(redis)
