@@ -153,6 +153,10 @@ check('#266：authHeaders 只发 Bearer + 平台管理员 X-Tenant-ID', () => {
   assert.match(apiSrc, /headers\['Authorization'\] = `Bearer \$\{token\}`/)
   assert.match(apiSrc, /headers\['X-Tenant-ID'\] = getTenant\(\)/)
 })
+check('#210/S17-02：apiFetch 调用时合并 authHeaders（Supervisor 探针认证性质）', () => {
+  assert.match(apiSrc, /for \(const \[key, value\] of Object\.entries\(authHeaders\(\)\)\)/)
+  assert.match(apiSrc, /if \(!headers\.has\(key\)\) headers\.set\(key, value\)/)
+})
 check('S17-03：request 有 AbortController、非 JSON 守卫、204/空 body 防御', () => {
   assert.match(apiSrc, /new AbortController\(\)/)
   assert.match(apiSrc, /decodeSuccessBody\(/)

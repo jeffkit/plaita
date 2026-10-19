@@ -48,6 +48,14 @@ else:  # 布局异常（非源码仓内运行）时不硬失败，退回既有�
         stacklevel=1,
     )
 
+# ---- 1b) console 后端模块（api/auth/services/config）以 backend/ 为根导入 ----
+# A59-02 分块门禁暴露：部分测试模块自己不插 sys.path，全量跑靠前面模块的
+# 副作用掩盖；chunk C 首模块 test_clean_c4_executions_api.py 单独收集即
+# ``ModuleNotFoundError: api``。conftest 对整目录先插，任意子集/单文件同构。
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 _HAS_FORM_PARSER = importlib.util.find_spec("multipart") is not None
 
 _FORM_PARSER_SKIP_REASON = (

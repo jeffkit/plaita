@@ -1,18 +1,19 @@
 """plaita#263（P1 security 同族读面）：``/api/dispatch/ledger`` 的租户隔离。
 
-缺口：派发台账条目含 ``tenant_id`` / ``actor`` / ``issue_id`` / ``execution_id``
-与队列对账，但端点此前对**任何**已认证身份返回全量 ``XRANGE``——租户 viewer
-可读他租户的派发事实（谁派了哪个执行、因何路由、队列积压量）。
+A54-02 取代说明：本文件最初按 r40 的「租户可显式按 tenant_id 收窄 / 跨租户
+403 审计 / 租户视图返回队列对账」写；r41 A54-02 把端点改为**世代过滤**契约
+（dispatch-ledger 三文件冲突取 main 侧，见 ``b18cb94``）。本文件随之改钉
+现行契约，安全不变量不变：
 
-判据：
-1. 非平台身份只读本租户：rows / ledger / queue_length / parity 同时收窄
-   （缺 ``tenant_id`` 的历史条目不可见，fail-closed）；
-2. 非平台身份显式传他租户 ``tenant_id`` ⇒ 403 + ``dispatch.ledger.denied``
-   审计（不得静默忽略冒充过滤）；
-3. 平台管理员 / 平台 API-Key 默认全量，可显式按租户收窄。
+1. 非平台身份只读**当前世代 + 本租户**的台账行；无 ``tenant_generation`` 的
+   历史行与无 ``tenant_id`` 的 legacy 行一律不可见（fail-closed）；
+2. 跨租户查询参数不能扩权：viewer 传 ``tenant_id=tenant-b`` 仍只拿到本租户
+   当前世代行（端点已不提供按租户收窄入口，未知参数不改变作用域）；
+3. 租户视图的队列对账显式不可用（全局计数不泄露给租户，不伪造成 0/相等）；
+4. 平台管理员 / 平台 API-Key 全量可见（审计面）。
 
-负控（必红）：删除端点里的租户过滤（直接 ``ledger_rows(redis)``）⇒
-``test_viewer_only_sees_own_tenant`` 读到他租户行而精确红。
+负控（必红）：删除端点里的租户/世代过滤（直接 ``ledger_rows(redis)``）⇒
+``test_viewer_only_sees_own_tenant`` 读到 b-*/legacy 行而精确红。
 """
 from __future__ import annotations
 
@@ -31,7 +32,6 @@ if str(BACKEND_DIR) not in sys.path:
 from api import auth_users  # noqa: E402
 from api import capacity as capacity_api  # noqa: E402
 from auth import require_auth  # noqa: E402
-from services import audit as audit_svc  # noqa: E402
 from services import flow_store, tenants_svc, users_svc  # noqa: E402
 
 from plaita.server.dispatch_ledger import (  # noqa: E402
@@ -46,12 +46,14 @@ TENANT_A = "tenant-a"
 TENANT_B = "tenant-b"
 ADMIN_KEY = "issue263-ledger-key"
 QUEUE = "plaita:flow:queue"
+TENANT_SCOPED_PARITY_DETAIL = "租户视图：队列对账仅平台身份可用"
 
 
 class Env:
-    def __init__(self, client, redis):
+    def __init__(self, client, redis, store):
         self.client = client
         self.redis = redis
+        self.store = store
 
 
 def _settings(admin_key: str = ADMIN_KEY):
@@ -64,35 +66,55 @@ def _settings(admin_key: str = ADMIN_KEY):
     return s
 
 
-def _seed(redis):
-    # 台账：tenant-a ×2、tenant-b ×3、无租户历史条目 ×1。
-    for tenant, issue in (
-        (TENANT_A, "a-1"), (TENANT_A, "a-2"),
-        (TENANT_B, "b-1"), (TENANT_B, "b-2"), (TENANT_B, "b-3"),
-    ):
-        entry = build_ledger_entry(
-            issue_id=issue, queue=QUEUE, target_instance_id=None,
-            reason="route:none", tenant_id=tenant, actor=f"{tenant}-editor",
-        )
-        record_dispatch(redis, entry)
-    legacy = build_ledger_entry(
-        issue_id="legacy", queue=QUEUE, target_instance_id=None,
-        reason="route:none", tenant_id=None, actor="legacy",
-    )
-    record_dispatch(redis, legacy)
+def _seed(redis, store):
+    gen_a = tenants_svc.tenant_generation(store, TENANT_A)
+    gen_b = tenants_svc.tenant_generation(store, TENANT_B)
+    assert gen_a and gen_b
 
-    # 队列：tenant-a ×2、tenant-b ×3、无租户 ×1。
-    for tenant, exec_id in (
-        (TENANT_A, "a-1"), (TENANT_A, "a-2"),
-        (TENANT_B, "b-1"), (TENANT_B, "b-2"), (TENANT_B, "b-3"),
+    # 台账：tenant-a 当前世代 ×2、tenant-b 当前世代 ×3、无世代的历史行 ×1、
+    # 无租户的 legacy 行 ×1。后两类对租户视图必须 fail-closed。
+    entries = [
+        ("a-1", TENANT_A, gen_a),
+        ("a-2", TENANT_A, gen_a),
+        ("b-1", TENANT_B, gen_b),
+        ("b-2", TENANT_B, gen_b),
+        ("b-3", TENANT_B, gen_b),
+        ("a-legacy", TENANT_A, None),
+        ("legacy", None, None),
+    ]
+    for issue, tenant, generation in entries:
+        record_dispatch(
+            redis,
+            build_ledger_entry(
+                issue_id=issue,
+                queue=QUEUE,
+                target_instance_id=None,
+                reason="route:none",
+                tenant_id=tenant,
+                tenant_generation=generation,
+                actor=f"{tenant}-editor" if tenant else "legacy",
+            ),
+        )
+
+    # 队列与台账条数一致（7 == 7），让平台视图的 parity 断言有判别力。
+    for issue, tenant in (
+        ("a-1", TENANT_A),
+        ("a-2", TENANT_A),
+        ("b-1", TENANT_B),
+        ("b-2", TENANT_B),
+        ("b-3", TENANT_B),
+        ("a-legacy", TENANT_A),
+        ("legacy", None),
     ):
-        enqueue_task(redis, QUEUE, {
-            "type": "start", "flow_id": "f", "execution_id": exec_id,
-            "tenant_id": tenant, "params": {},
-        })
-    enqueue_task(redis, QUEUE, {
-        "type": "start", "flow_id": "f", "execution_id": "legacy", "params": {},
-    })
+        task = {
+            "type": "start",
+            "flow_id": "f",
+            "execution_id": issue,
+            "params": {},
+        }
+        if tenant:
+            task["tenant_id"] = tenant
+        enqueue_task(redis, QUEUE, task)
 
 
 @pytest.fixture()
@@ -116,7 +138,7 @@ def env(tmp_path, monkeypatch) -> Env:
     users_svc.add_member(store, TENANT_A, "viewer-a", "viewer")
 
     redis = FakeRedis(decode_responses=True)
-    _seed(redis)
+    _seed(redis, store)
 
     app = FastAPI()
     app.state.store = store
@@ -126,7 +148,7 @@ def env(tmp_path, monkeypatch) -> Env:
     app.include_router(
         capacity_api.router, prefix="/api", dependencies=[Depends(require_auth)]
     )
-    return Env(TestClient(app), redis)
+    return Env(TestClient(app), redis, store)
 
 
 def _login(client: TestClient, username: str, password: str) -> dict:
@@ -135,75 +157,64 @@ def _login(client: TestClient, username: str, password: str) -> dict:
     return {"Authorization": f"Bearer {r.json()['token']}"}
 
 
+def _issue_ids(resp) -> set[str]:
+    assert resp.status_code == 200, resp.text
+    return {row["issue_id"] for row in resp.json()["rows"]}
+
+
 def test_viewer_only_sees_own_tenant(env: Env):
-    """负控：去掉租户过滤 ⇒ 本条读到 b-* 行而精确红。"""
+    """负控：去掉租户/世代过滤 ⇒ 本条读到 b-*/legacy 行而精确红。"""
     headers = _login(env.client, "viewer-a", VIEWER_PW)
     resp = env.client.get("/api/dispatch/ledger", headers=headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    assert body["tenant_id"] == TENANT_A
-    issue_ids = {row["issue_id"] for row in body["rows"]}
-    assert issue_ids == {"a-1", "a-2"}, issue_ids
+    assert _issue_ids(resp) == {"a-1", "a-2"}
     assert all(row["tenant_id"] == TENANT_A for row in body["rows"])
     assert body["ledger"] == 2
-    assert body["queue_length"] == 2
-    assert body["parity"] is True
-    assert body["error"] is None
+    # 租户视图不泄露全局队列计数，也不伪造成 0/相等。
+    assert body["queue_length"] is None
+    assert body["parity"] is False
+    assert body["error"] == TENANT_SCOPED_PARITY_DETAIL
+    # A54-02 契约：平台收窄字段不进入租户响应。
+    assert "tenant_id" not in body
 
 
-def test_viewer_cross_tenant_query_is_denied_and_audited(env: Env):
+def test_viewer_cross_tenant_param_cannot_widen_scope(env: Env):
+    """跨租户参数不改变作用域：viewer 仍只读本租户当前世代行。"""
     headers = _login(env.client, "viewer-a", VIEWER_PW)
     resp = env.client.get(
         "/api/dispatch/ledger", params={"tenant_id": TENANT_B}, headers=headers,
     )
-    assert resp.status_code == 403, resp.text
-    assert resp.json().get("detail")
+    assert resp.status_code == 200, resp.text
+    assert _issue_ids(resp) == {"a-1", "a-2"}
     assert TENANT_B not in resp.text
-
-    rows = audit_svc.list_audit(action="dispatch.ledger.denied", limit=50)
-    assert any(
-        row["actor"] == "viewer-a"
-        and row["detail"].get("requested_tenant") == TENANT_B
-        and row["detail"].get("auth_tenant") == TENANT_A
-        for row in rows
-    ), rows
 
 
 def test_viewer_own_tenant_query_ok(env: Env):
-    """显式传本租户不是跨租户：仍 200（避免「无条件 403」冒充隔离）。"""
+    """显式传本租户不是跨租户：仍 200，作用域不变。"""
     headers = _login(env.client, "viewer-a", VIEWER_PW)
     resp = env.client.get(
         "/api/dispatch/ledger", params={"tenant_id": TENANT_A}, headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    assert {row["issue_id"] for row in resp.json()["rows"]} == {"a-1", "a-2"}
+    assert _issue_ids(resp) == {"a-1", "a-2"}
 
 
-def test_platform_admin_sees_all_and_can_narrow(env: Env):
+def test_platform_admin_sees_all(env: Env):
     root = _login(env.client, "root", ROOT_PW)
 
     full = env.client.get("/api/dispatch/ledger", headers=root)
     assert full.status_code == 200, full.text
     body = full.json()
-    assert body["tenant_id"] is None
-    assert {row["issue_id"] for row in body["rows"]} == {
-        "a-1", "a-2", "b-1", "b-2", "b-3", "legacy",
+    assert _issue_ids(full) == {
+        "a-1", "a-2", "b-1", "b-2", "b-3", "a-legacy", "legacy",
     }
-    assert body["ledger"] == 6
-    assert body["queue_length"] == 6
+    assert body["ledger"] == 7
+    assert body["queue_length"] == 7
     assert body["parity"] is True
-
-    narrowed = env.client.get(
-        "/api/dispatch/ledger", params={"tenant_id": TENANT_B}, headers=root,
-    )
-    assert narrowed.status_code == 200, narrowed.text
-    assert narrowed.json()["tenant_id"] == TENANT_B
-    assert {row["issue_id"] for row in narrowed.json()["rows"]} == {
-        "b-1", "b-2", "b-3",
-    }
-    assert narrowed.json()["ledger"] == 3
-    assert narrowed.json()["queue_length"] == 3
+    assert body["error"] is None
+    assert "tenant_id" not in body
 
 
 def test_api_key_is_platform_full_view(env: Env):
@@ -211,5 +222,8 @@ def test_api_key_is_platform_full_view(env: Env):
         "/api/dispatch/ledger", headers={"X-Admin-API-Key": ADMIN_KEY},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["tenant_id"] is None
-    assert resp.json()["ledger"] == 6
+    assert _issue_ids(resp) == {
+        "a-1", "a-2", "b-1", "b-2", "b-3", "a-legacy", "legacy",
+    }
+    assert resp.json()["ledger"] == 7
+    assert "tenant_id" not in resp.json()
