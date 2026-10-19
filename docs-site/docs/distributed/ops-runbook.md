@@ -172,9 +172,10 @@ PLAITA_SANDBOX_ALLOWED_BACKENDS=docker PLAITA_CODE_BACKEND=docker \
 未显式配置时的默认档已经挡住 `unsafe` 与 `restricted`；`subprocess` 只在它是生效
 默认后端时可用（worker 默认档即如此）。
 
-`subprocess` 后端自 plaita#256 起显式传播租户与凭据路由（`PLAITA_TENANT_ID` +
-基础凭据文件/密钥路径），无法建立子进程租户上下文时 fail-closed；但它仍有宿主
-文件系统访问。多租户 / 不受信流程请优先 `docker`（容器内不挂载宿主凭据文件）。
+`subprocess` 后端**不是**租户凭据隔离边界（plaita#256 / A42-06）：子进程与 worker
+同用户、文件系统不受限，所有租户共用同一把解密密钥；非 default 租户会在 spawn 前
+fail-closed（`TenantContextPropagationError`，用户代码不执行），default 语义不变。
+多租户 / 不受信流程必须用 `docker`（容器内不挂载宿主凭据文件）。
 
 ## code 语言白名单（plaita#29 起默认只放行 python） {#code-语言白名单}
 

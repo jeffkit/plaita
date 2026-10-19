@@ -252,12 +252,14 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 `RLIMIT_AS` 真实生效，会卡住 node/npm/pnpm 系命令的启动（V8 启动期预留 GB 级虚拟地址，
 表现为截断的崩溃栈）——这类命令请保持 `0`。
 
-**多租户凭据（plaita#256）**：`subprocess` 后端启动时把当前执行租户
-（`PLAITA_TENANT_ID`，来源 `derived`）与基础凭据文件/密钥路径显式传入子进程；子进程内
-`current_tenant()` / `credentials_file()` 与所属执行一致，`get_credential()` 读本租户
-旁文件而非 cwd 的 default 文件。子进程无法建立租户上下文时**拒绝执行**（具名
-`TenantContextPropagationError`），不会静默退回 default。`docker` 后端不挂载宿主凭据
-文件；`unsafe` / `restricted` 在宿主进程内沿用执行上下文。
+**多租户凭据（plaita#256 / A42-06）**：`subprocess` 后端与 worker 同用户、文件系统
+不受限，且所有租户共用同一把解密密钥——子进程**不是**凭据隔离边界：租户 B 的用户代码
+可以 `set_current_tenant("default")` 改写路由，或直接读取 default 凭据文件并解密
+（A42-06 探针）。因此非 default 租户在该后端 **spawn 之前即被拒绝**（具名
+`TenantContextPropagationError`，消息含 `PLAITA_SUBPROCESS_TENANT_ISOLATION_UNAVAILABLE`），
+用户代码零执行机会；default 租户语义不变。租户级 code 节点请用 `docker` 后端（容器内
+不挂载宿主凭据文件）；`unsafe` / `restricted` 在宿主进程内沿用执行上下文，同样不是
+凭据隔离边界。
 
 ```json
 {
