@@ -87,6 +87,11 @@ DEFAULT_DISPATCH_QUEUE = "plaita:flow:queue"
 REASON_DISK = "disk: low free space"
 REASON_SATURATED = "saturated: active_tasks >= concurrency"
 REASON_DRAINING = "draining"
+#: S18-02A：status 是唯一派发白名单——非 running 一律拒，且在容量判定之前。
+REASON_STARTING = "status: starting"
+REASON_STOPPING = "status: stopping"
+REASON_STOPPED = "status: stopped"
+REASON_STATUS_UNKNOWN = "status: unknown"
 
 #: 路由结论前缀（同样稳定，供台账/看板按前缀聚合）。
 #: ``route: capacity`` = 按容量排序选出了目标；``route: no-dispatchable-worker``
@@ -404,10 +409,18 @@ class DispatchCandidate:
     def reject_reason(self) -> Optional[str]:
         """不可派发原因（前缀稳定，见 ``REASON_*``）；可派发返回 ``None``。
 
-        判定顺序即优先级：draining → 容量缺失/陈旧（放行）→ 盘 → 饱和。
+        判定顺序即优先级：**status 白名单** → 容量缺失/陈旧（放行）→ 盘 → 饱和。
+        S18-02A：只有 ``running`` 参与派发；``starting/draining/stopping/
+        stopped`` 与未知状态在容量判定**之前**就被拒——即使它上报了完美容量，
+        也不得成为派发目标（A46-01）。
         """
-        if self.status == "draining":
-            return REASON_DRAINING
+        if self.status != "running":
+            return {
+                "starting": REASON_STARTING,
+                "draining": REASON_DRAINING,
+                "stopping": REASON_STOPPING,
+                "stopped": REASON_STOPPED,
+            }.get(self.status, REASON_STATUS_UNKNOWN)
         block = self.capacity
         if block is None:
             # 红线：无容量信息（存量 worker / 上报故障 / schema 未知）→ 放行。

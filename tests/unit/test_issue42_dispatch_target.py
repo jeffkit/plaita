@@ -182,12 +182,21 @@ class TestWorkerDispatchGate:
 
 
 class TestHandoverPreservesTarget:
-    """判据②：交接副本必须**原样保留** ``target_instance_id``。"""
+    """判据②：目标仍可用时，交接副本必须**原样保留** ``target_instance_id``。"""
 
     def test_handover_copy_keeps_target_and_target_worker_accepts(self):
         from plaita.server.task_queue import RedisStreamTaskQueue, enqueue_task
 
         w = _skeleton_worker("w-low")
+        # A46-02：交接前会复核目标注册键；目标必须仍 running，否则按广播重投。
+        w.redis_client.setex(
+            "plaita:registry:flow_worker:w-high",
+            30,
+            ServiceInfo(
+                instance_id="w-high", service_type="flow_worker", host="h",
+                status="running",
+            ).to_json(),
+        )
         body = {
             "type": "start", "flow_id": "f", "execution_id": "exec-route",
             "target_instance_id": "w-high",
@@ -214,6 +223,79 @@ class TestHandoverPreservesTarget:
         )
         # 目标机看到的是同一份副本 ⇒ 直接放行
         assert cap.target_mismatch(copy, "w-high") is None
+
+
+class TestHandoverStripsUnavailableTarget:
+    """A46-02：目标不可用（键消失 / 非 running）→ 剥 target 按广播重投。"""
+
+    def _run_handover(self, w, *, body):
+        from plaita.server.task_queue import RedisStreamTaskQueue, enqueue_task
+
+        q = RedisStreamTaskQueue(w.redis_client, CANARY_QUEUE, consumer_name="c1")
+        q.ensure_group()
+        enqueue_task(w.redis_client, CANARY_QUEUE, dict(body))
+        task = q.read(block_ms=1)
+        assert task is not None
+        w._handover_non_affine(task, q, TaskNotForThisWorker("别的机器"))
+        entries = w.redis_client.xrange(CANARY_QUEUE)
+        assert len(entries) == 1, "交接应恰好再入队一份新副本"
+        import json
+
+        return json.loads(entries[0][1]["payload"])
+
+    def _body(self, target="w-gone"):
+        return {
+            "type": "start", "flow_id": "f", "execution_id": "exec-ghost",
+            "target_instance_id": target, "params": {},
+        }
+
+    def test_missing_target_is_stripped_and_broadcast(self):
+        w = _skeleton_worker("w-low")
+        copy = self._run_handover(w, body=self._body("w-gone"))
+        assert "target_instance_id" not in copy, (
+            "目标键不存在时仍保留 target ⇒ 每台非目标机交接一次，"
+            "4 次后 AffinityHandoverExhausted（A46-02 探针）"
+        )
+        assert copy["execution_id"] == "exec-ghost"
+
+    @pytest.mark.parametrize("status", ["draining", "stopping", "stopped"])
+    def test_non_running_target_is_stripped_and_broadcast(self, status):
+        w = _skeleton_worker("w-low")
+        w.redis_client.setex(
+            "plaita:registry:flow_worker:w-gone",
+            30,
+            ServiceInfo(
+                instance_id="w-gone", service_type="flow_worker", host="h",
+                status=status,
+            ).to_json(),
+        )
+        copy = self._run_handover(w, body=self._body("w-gone"))
+        assert "target_instance_id" not in copy
+
+    def test_registry_read_failure_keeps_target_fail_open(self, monkeypatch):
+        w = _skeleton_worker("w-low")
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(w.redis_client, "get", boom)
+        copy = self._run_handover(w, body=self._body("w-high"))
+        assert copy["target_instance_id"] == "w-high", (
+            "一次 Redis 瞬断不得把定向任务广播给不亲和的机器（fail-open）"
+        )
+
+    def test_target_is_preserved_when_running(self):
+        w = _skeleton_worker("w-low")
+        w.redis_client.setex(
+            "plaita:registry:flow_worker:w-high",
+            30,
+            ServiceInfo(
+                instance_id="w-high", service_type="flow_worker", host="h",
+                status="running",
+            ).to_json(),
+        )
+        copy = self._run_handover(w, body=self._body("w-high"))
+        assert copy["target_instance_id"] == "w-high"
 
 
 class TestDecideRoute:

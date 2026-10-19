@@ -36,10 +36,12 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
 1. 抢到消息的 worker resume 时拿不到租约 → `ExecutionLeaseError`。冲突分支
    **先核实持有者存活再决定 ack**（#50，2026-10-08）：租约值嵌有持有者的
    注册表 instance id，回收方查 `plaita:registry:flow_worker:{instance}`——
-   在册（活持有者，正常竞争）→ **ack 释放**（否则对端每 `claim_min_idle_ms`
-   XCLAIM 一次烧一次 delivery，超限即假死信）；**不在册**（持有者已死、
-   租约键是 ≤TTL 的尾巴）→ **不 ack** 留 pending，等租约过期后下一轮回收
-   从 checkpoint 续跑（代价 ≤TTL+60s，远小于 zombie reap）。信号缺失
+   **在册且 `status=running`**（活持有者，正常竞争）→ **ack 释放**（否则对端每
+   `claim_min_idle_ms` XCLAIM 一次烧一次 delivery，超限即假死信）；**不在册**
+   （持有者已死、租约键是 ≤TTL 的尾巴）→ **不 ack** 留 pending，等租约过期后
+   下一轮回收从 checkpoint 续跑（代价 ≤TTL+60s，远小于 zombie reap）；**在册
+   但处于 draining/stopping/stopped/starting**（S18-02A）→ 同样**不 ack**：
+   这些状态不保证收尾，ack 会释放执行的唯一重投载体。信号缺失
    （旧格式租约 / `--no-registry` / Redis 瞬断）按「存活未知」退化 ack；
    `PLAITA_DISABLE_HOLDER_LIVENESS=1` 整体旁路回到无条件 ack；
    **决议载体例外（A46-04/A47-F2，2026-10-19）**：`resume_type` 为
@@ -538,6 +540,42 @@ False）后不会重来。结果是「worker 启动瞬间 Redis 不可达 → Re
 ERROR，退避封顶保证 Redis 全断时不刷屏；进程内 `registry_registered`
 属性在成功前保持 False（成功前不宣称 ready）。测试见
 `tests/unit/test_issue_a2r19_registry_retry.py`。
+
+## 注册表状态机与派发资格（S18-02A）
+
+注册键的 `status` 是**唯一派发白名单**，不是普通字段：
+
+| status | 含义 | 可派发 | 写入 |
+|---|---|---|---|
+| `starting` | 构造完成、`run()` 尚未注册 | ❌ | 仅构造期容量预上报 |
+| `running` | 已注册且心跳正常 | ✅ | 心跳 + 容量 |
+| `draining` | 已请求 drain，在途收尾 | ❌ | 状态**立即**落盘；不再刷新容量 |
+| `stopping` | `stop()` 已开始注销 | ❌ | 状态**立即**落盘 |
+| `stopped` | 注销墓碑（TTL 5s） | ❌ | 仅注销失败时保留 |
+| `closed` | 进程内终态，不再写键 | ❌ | 任何写入 no-op |
+
+- **只有 `running` 参与派发**：`starting/draining/stopping/stopped` 与未知值
+  在容量判定之前就被拒，即使上报了完美容量；`running` 缺容量/陈旧容量仍按
+  红线放行（不因上报故障停摆）。
+- **启动期 drain 保留（S9）**：`register()` 只把 `starting` 迁到 `running`；
+  若 SIGTERM 早于 `run()`（已是 `draining`），注册不会覆盖回 running。
+  终态 `stopped/closed` 拒绝注册（不复活）。
+- **即时落盘（A45-03）**：`request_drain()` / `stop()` 在内存置位后立即写一次
+  注册键（短退避重试 2 次），不再等 10s 心跳；失败打 ERROR 并计入
+  `registry_status_flush_failed_total` 指标。
+- **closed 世代闸（A46-03）**：`stop()` 写完 `stopping`、注销前置 closed；
+  之后心跳、容量上报、`_bump_active(±1)`、注册重试全部不再写 Redis
+  （在跑数仍更新内存，供 metrics/join 使用）。
+- **注销可观测（A46-01）**：先写 `stopped` 墓碑（TTL 5s）再 delete；delete
+  失败时键仍是 stopped（不可派）；get 失败仍继续尝试 delete；任一步失败
+  `stop()` 日志含 `registry_unregister_failed`。
+- **目标不可用回退（A46-02）**：非目标 worker 交接前复核目标注册键；目标
+  不存在或 `status != running` → 剥掉消息体 `target_instance_id` 按广播重投
+  （`dispatch-target-unavailable:broadcast`），避免集群每台机器各交接一次后
+  `AffinityHandoverExhausted`；Redis 读失败保留 target（fail-open）。
+
+测试：`tests/unit/test_r50_registry_state_machine.py`、
+`tests/unit/test_issue42_dispatch_target.py`。
 
 ## 停机与运维参数（2026-09）
 
