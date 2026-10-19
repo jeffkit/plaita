@@ -77,8 +77,9 @@ def _build_app(tmp_path, monkeypatch) -> FastAPI:
     flow_store.ensure_tenant_bootstrap()
     store = flow_store.get_flow_store()
     # #254：普通用户必须挂在租户上才有角色（users.role 遗留回退已移除）
+    # #263：``/api/cluster`` 读面也已 platform_admin 闸，正控必须是平台身份。
     users_svc.create_user(
-        store, "admin", ADMIN_PASSWORD, "admin",
+        store, "admin", ADMIN_PASSWORD, "admin", platform_admin=True,
         memberships=[{"tenant_id": "default", "role": "admin"}],
     )
     users_svc.create_user(

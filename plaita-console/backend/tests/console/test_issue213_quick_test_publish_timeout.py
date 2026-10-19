@@ -117,7 +117,9 @@ def test_publish_timeout_fails_fast_without_waiting_worker(monkeypatch):
 
     async def main():
         started = time.monotonic()
-        response = await run_quick_test(QuickTestRequest(test_type="event"))
+        response = await run_quick_test(
+            QuickTestRequest(test_type="event"), None, {"platform_admin": True}
+        )
         return response, time.monotonic() - started
 
     try:
@@ -149,7 +151,9 @@ def test_publish_within_timeout_still_succeeds(monkeypatch):
     bus = _install_fakes(monkeypatch)
     bus.release.set()  # 不阻塞
 
-    response = asyncio.run(run_quick_test(QuickTestRequest(test_type="event")))
+    response = asyncio.run(run_quick_test(
+        QuickTestRequest(test_type="event"), None, {"platform_admin": True}
+    ))
 
     assert response.success is True, response
     assert bus.calls == 1

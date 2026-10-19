@@ -6,14 +6,36 @@
 ``admin`` 恰好也是 admin，因此租户管理员能启停全局服务、切换模式、改
 基础设施 URL、登记/切换集群（配置接管）。全局生命周期与基础设施配置面
 统一挂 ``ensure_platform_admin``（#260 helper）：租户 admin ≠ 平台身份，
-拒绝写 ``*.denied`` 审计 + WARNING。读面（config/service-types/列表/
-健康检查/模板）不受影响。
+拒绝写 ``*.denied`` 审计 + WARNING。
+
+#263（P1 security）：读面同样没有租户内语义——``GET /cluster/infrastructure``
+与 ``/clusters/{id}/config`` 原样回显 ``redis://:password@…``、
+``services.*.env`` / ``docker.env`` 密钥。本文件**全部端点**统一要求
+platform_admin（不留「读是低危」例外），并在响应序列化层再做一次脱敏兜底
+（URL 口令段 + 凭据键值），防未来新端点漏闸。
 """
 import logging
+import re
 from typing import Dict, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
+
+try:
+    from plaita.core.url_redaction import (
+        REDACTED_VALUE,
+        _is_credential_key,
+        _mask_credential_runs,
+    )
+except ImportError:  # 最小安装（无 plaita 包）时 fail-closed 兜底，绝不回明文
+    REDACTED_VALUE = "***"
+
+    def _is_credential_key(key: str) -> bool:  # type: ignore[misc]
+        raise RuntimeError("plaita.core.url_redaction 不可用")
+
+    def _mask_credential_runs(text: str) -> str:  # type: ignore[misc]
+        raise RuntimeError("plaita.core.url_redaction 不可用")
 
 try:
     from ..auth import ensure_platform_admin, require_auth
@@ -43,6 +65,102 @@ except ImportError:
 
 router = APIRouter()
 
+#: 任意 URL token（scheme://…）——只用于脱敏，不用于策略判断。
+_URL_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^ \t\r\n\f\v\"'<>]+")
+#: 响应结构递归深度上限：越界整棵子树换占位（fail-closed）。
+_REDACT_MAX_DEPTH = 64
+
+
+def _mask_url_token(token: str) -> str:
+    """URL 口令段脱敏（保留 scheme/host/port/path/db，供平台运维诊断）。
+
+    ``redis://:s3cret@host:6379/0`` → ``redis://:***@host:6379/0``；
+    ``postgresql://user:pw@host/db`` → ``postgresql://user:***@host/db``。
+    query 里键名像凭据的参数值一并换占位。解析失败 ⇔ 无法证明无口令 ⇒
+    整段换 ``***``（绝不退回原文）。
+    """
+    try:
+        parts = urlsplit(token)
+    except ValueError:
+        return REDACTED_VALUE
+    netloc = parts.netloc
+    if "@" in netloc:
+        userinfo, _, hostport = netloc.rpartition("@")
+        if ":" in userinfo:
+            user, _, _password = userinfo.partition(":")
+            netloc = f"{user}:***@{hostport}"
+        else:
+            # 只有 userinfo 一段（无法区分用户名/口令）⇒ 整段当凭据抹掉。
+            netloc = f"***@{hostport}"
+        parts = parts._replace(netloc=netloc)
+    if parts.query:
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        redacted = [
+            (name, REDACTED_VALUE if _is_credential_key(name) else value)
+            for name, value in pairs
+        ]
+        if redacted != pairs:
+            parts = parts._replace(
+                query=urlencode(redacted, doseq=True, safe="*")
+            )
+    return urlunsplit(parts)
+
+
+def _redact_string(text: str) -> str:
+    """字符串里的 URL 口令段 + ``password=…`` 型凭据运行。"""
+    try:
+        masked = _URL_TOKEN_RE.sub(
+            lambda match: _mask_url_token(match.group(0)), text
+        )
+        return _mask_credential_runs(masked)
+    except Exception:  # noqa: BLE001 — 脱敏失败不得回原文
+        return REDACTED_VALUE
+
+
+def redact_cluster_secrets(value, _depth: int = 0):
+    """cluster 读面响应的**序列化层**脱敏兜底（#263）。
+
+    - dict：凭据键（``PASSWORD`` / ``SECRET`` / ``TOKEN`` / ``KEY`` 等，与
+      ``plaita.core.url_redaction`` 同一判据）的整棵值换 ``***``；其余递归；
+    - list/tuple：逐项递归（类型保持）；
+    - str：URL 口令段与 ``key=value`` 凭据运行；
+    - 其余标量原样。
+    任何异常退化为 ``***``（fail-closed），绝不上抛、绝不回明文。
+    """
+    try:
+        if _depth > _REDACT_MAX_DEPTH:
+            return REDACTED_VALUE
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                if isinstance(key, str) and _is_credential_key(key):
+                    result[key] = REDACTED_VALUE
+                else:
+                    result[key] = redact_cluster_secrets(item, _depth + 1)
+            return result
+        if isinstance(value, list):
+            return [redact_cluster_secrets(item, _depth + 1) for item in value]
+        if isinstance(value, tuple):
+            return tuple(redact_cluster_secrets(item, _depth + 1) for item in value)
+        if isinstance(value, str):
+            return _redact_string(value)
+        return value
+    except Exception:  # noqa: BLE001 — fail-closed
+        return REDACTED_VALUE
+
+
+class _RedactedResponseModel(BaseModel):
+    """响应模型的序列化层脱敏基类（#263 纵深防御）。
+
+    即便未来新增端点漏挂平台闸，只要响应模型继承本类，URL 口令与 env
+    密钥也不会原样出网。``model_serializer(mode="wrap")`` 在 FastAPI 的
+    ``model_dump`` 路径上生效，且对已是 ``***`` 的输入幂等。
+    """
+
+    @model_serializer(mode="wrap")
+    def _serialize_redacted(self, handler):
+        return redact_cluster_secrets(handler(self))
+
 
 def _require_service_manager():
     """取服务管理器；集群配置损坏时返回 503 + 具名原因（plaita#253）。
@@ -64,7 +182,7 @@ _QUICK_TEST_PUBLISH_TIMEOUT = 5.0
 
 # ============ 数据模型 ============
 
-class ServiceTypeInfo(BaseModel):
+class ServiceTypeInfo(_RedactedResponseModel):
     """服务类型信息"""
     service_type: str
     display_name: str
@@ -73,7 +191,7 @@ class ServiceTypeInfo(BaseModel):
     running_count: int
 
 
-class ServiceTypesResponse(BaseModel):
+class ServiceTypesResponse(_RedactedResponseModel):
     """服务类型列表响应"""
     mode: str  # process 或 docker
     service_types: List[ServiceTypeInfo]
@@ -84,7 +202,7 @@ class StartServiceRequest(BaseModel):
     service_type: str = Field(..., description="服务类型")
 
 
-class StartServiceResponse(BaseModel):
+class StartServiceResponse(_RedactedResponseModel):
     """启动服务响应"""
     success: bool
     instance_id: Optional[str] = None
@@ -97,7 +215,7 @@ class StopServiceRequest(BaseModel):
     graceful: bool = Field(default=True, description="是否优雅停止")
 
 
-class ManagedInstanceResponse(BaseModel):
+class ManagedInstanceResponse(_RedactedResponseModel):
     """托管实例响应"""
     instance_id: str
     service_type: str
@@ -109,13 +227,13 @@ class ManagedInstanceResponse(BaseModel):
     managed_by: str = "console"  # console 或 external (Redis 注册)
 
 
-class ManagedInstancesResponse(BaseModel):
+class ManagedInstancesResponse(_RedactedResponseModel):
     """托管实例列表响应"""
     instances: List[ManagedInstanceResponse]
     total: int
 
 
-class ClusterConfigResponse(BaseModel):
+class ClusterConfigResponse(_RedactedResponseModel):
     """集群配置响应"""
     mode: str
     config_path: str
@@ -126,7 +244,7 @@ class SwitchModeRequest(BaseModel):
     mode: str = Field(..., description="目标模式: process 或 docker")
 
 
-class InfrastructureInfo(BaseModel):
+class InfrastructureInfo(_RedactedResponseModel):
     """基础设施信息"""
     name: str
     display_name: str
@@ -139,7 +257,7 @@ class InfrastructureInfo(BaseModel):
     docker: Optional[dict] = None
 
 
-class InfrastructureListResponse(BaseModel):
+class InfrastructureListResponse(_RedactedResponseModel):
     """基础设施列表响应"""
     infrastructure: List[InfrastructureInfo]
     total: int
@@ -168,10 +286,19 @@ class CreateInfrastructureRequest(BaseModel):
 # ============ API 端点 ============
 
 @router.get("/cluster/service-types", response_model=ServiceTypesResponse)
-async def list_service_types():
+async def list_service_types(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取所有可启动的服务类型（包括外部注册的实例统计）
     """
+    # #263：cluster 读面无租户内语义（模式/实例统计都是全局面），与写面
+    # 同一闸；闸先于 manager/Redis 访问。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.service_types.read",
+        resource="cluster",
+    )
     import json
     from redis import Redis
     
@@ -322,6 +449,8 @@ async def stop_all_services(
 
 @router.get("/cluster/instances", response_model=ManagedInstancesResponse)
 async def list_managed_instances(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
     service_type: Optional[str] = None,
     include_external: bool = True
 ):
@@ -332,6 +461,11 @@ async def list_managed_instances(
         service_type: 过滤服务类型
         include_external: 是否包含 Redis 注册表中的外部实例
     """
+    # #263：实例列表是全局托管面（跨租户 pid/container/错误文本）。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.instances.read",
+        resource="cluster", target=service_type or "",
+    )
     from fastapi import Request
     from redis import Redis
     import json
@@ -417,13 +551,19 @@ async def list_managed_instances(
 
 
 @router.get("/cluster/config", response_model=ClusterConfigResponse)
-async def get_cluster_config():
+async def get_cluster_config(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取当前集群配置
 
     配置载入失败时返回 503 + 具名原因，不再退化成 ``standalone`` 200——
     旧兜底会把损坏的 cluster_config.yaml 伪装成健康（plaita#253）。
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.config.read", resource="cluster",
+    )
     manager = _require_service_manager()
     return ClusterConfigResponse(
         mode=manager.config.mode,
@@ -466,10 +606,17 @@ async def switch_mode(
 
 
 @router.post("/cluster/refresh")
-async def refresh_instances():
+async def refresh_instances(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     刷新所有实例状态
     """
+    # #263 同族顺扫：全局托管实例状态刷新，租户身份不得触发。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.refresh", resource="cluster",
+    )
     manager = _require_service_manager()
     await manager.refresh_status()
     
@@ -482,10 +629,18 @@ async def refresh_instances():
 # ============ 基础设施服务 API ============
 
 @router.get("/cluster/infrastructure", response_model=InfrastructureListResponse)
-async def list_infrastructure():
+async def list_infrastructure(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取所有基础设施服务配置及其健康状态
     """
+    # #263 P1 本体：响应含 redis://:password@… 数据面连接串。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.infrastructure.read",
+        resource="cluster",
+    )
     manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     health_status = await manager.check_infrastructure_health()
@@ -515,10 +670,18 @@ async def list_infrastructure():
 
 
 @router.get("/cluster/infrastructure/{name}")
-async def get_infrastructure_detail(name: str):
+async def get_infrastructure_detail(
+    name: str,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取指定基础设施服务的详细信息和健康状态
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.infrastructure.read",
+        resource="cluster", target=name,
+    )
     manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
@@ -546,10 +709,19 @@ async def get_infrastructure_detail(name: str):
 
 
 @router.post("/cluster/infrastructure/{name}/check")
-async def check_infrastructure_health(name: str):
+async def check_infrastructure_health(
+    name: str,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     检查指定基础设施服务的健康状态
     """
+    # #263：读侧 POST（只探测，但 details 可能回显连接串/驱动异常文本）。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.infrastructure.check",
+        resource="cluster", target=name,
+    )
     manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
@@ -559,12 +731,12 @@ async def check_infrastructure_health(name: str):
     health_status = await manager.check_infrastructure_health()
     health = health_status.get(name, {"status": "unknown", "details": None})
     
-    return {
+    return redact_cluster_secrets({
         "name": name,
         "status": health.get("status", "unknown"),
         "details": health.get("details"),
         "checked_at": datetime.now().isoformat()
-    }
+    })
 
 
 @router.post("/cluster/infrastructure/{name}/start")
@@ -728,10 +900,18 @@ async def delete_infrastructure(
 
 
 @router.get("/cluster/infrastructure-templates")
-async def get_infrastructure_templates():
+async def get_infrastructure_templates(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取预置的基础设施配置模板
     """
+    # #263：模板里带 docker.env 样例密钥；与基础设施读面同闸 + 序列化脱敏。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.infrastructure.templates.read",
+        resource="cluster",
+    )
     templates = [
         {
             "name": "redis",
@@ -790,7 +970,7 @@ async def get_infrastructure_templates():
         }
     ]
     
-    return {"templates": templates}
+    return redact_cluster_secrets({"templates": templates})
 
 
 from datetime import datetime
@@ -802,7 +982,7 @@ class QuickTestRequest(BaseModel):
     params: Optional[dict] = Field(None, description="测试参数")
 
 
-class QuickTestResponse(BaseModel):
+class QuickTestResponse(_RedactedResponseModel):
     """快速测试响应"""
     success: bool
     message: str
@@ -813,7 +993,11 @@ class QuickTestResponse(BaseModel):
 
 
 @router.post("/cluster/quick-test", response_model=QuickTestResponse)
-async def run_quick_test(request: QuickTestRequest):
+async def run_quick_test(
+    request: QuickTestRequest,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     运行快速测试
     
@@ -822,6 +1006,12 @@ async def run_quick_test(request: QuickTestRequest):
     - delay: 延迟测试（Start -> Delay -> End）
     - approval: 审批测试（Start -> Approval -> End）
     """
+    # #263 同族顺扫：quick-test 在宿主里真实执行流程（实测 simple 返回 42）；
+    # 租户身份不得借测试入口在 console 进程内跑任意内置节点流程。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.quick_test",
+        resource="cluster", target=request.test_type,
+    )
     import uuid
     
     try:
@@ -1331,10 +1521,17 @@ async def run_quick_test(request: QuickTestRequest):
 
 
 @router.get("/cluster/test-templates")
-async def get_test_templates():
+async def get_test_templates(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取可用的测试模板
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.test_templates.read",
+        resource="cluster",
+    )
     templates = [
         {
             "id": "simple",
@@ -1376,10 +1573,19 @@ async def get_test_templates():
 
 
 @router.delete("/cluster/instances/{instance_id}")
-async def remove_instance(instance_id: str):
+async def remove_instance(
+    instance_id: str,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     移除一个已停止或出错的实例记录
     """
+    # #263 / A51-05 同族顺扫：托管实例记录是全局生命周期对象。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.instances.remove",
+        resource="cluster", target=instance_id,
+    )
     manager = _require_service_manager()
     
     success = manager.remove_instance(instance_id)
@@ -1398,10 +1604,17 @@ async def remove_instance(instance_id: str):
 
 
 @router.delete("/cluster/instances")
-async def clear_failed_instances():
+async def clear_failed_instances(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     清除所有失败/已停止的实例记录
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.instances.clear",
+        resource="cluster",
+    )
     manager = _require_service_manager()
     
     count = manager.clear_failed_instances()
@@ -1421,7 +1634,7 @@ except ImportError:
     from services.cluster_registry import get_cluster_registry, ClusterInfo
 
 
-class ClusterInfoResponse(BaseModel):
+class ClusterInfoResponse(_RedactedResponseModel):
     """集群信息响应"""
     id: str
     name: str
@@ -1432,7 +1645,7 @@ class ClusterInfoResponse(BaseModel):
     is_active: bool
 
 
-class ClustersListResponse(BaseModel):
+class ClustersListResponse(_RedactedResponseModel):
     """集群列表响应"""
     clusters: List[ClusterInfoResponse]
     active_cluster_id: Optional[str]
@@ -1466,7 +1679,7 @@ class SwitchClusterRequest(BaseModel):
     cluster_id: str
 
 
-class ClusterFullConfigResponse(BaseModel):
+class ClusterFullConfigResponse(_RedactedResponseModel):
     """集群完整配置响应"""
     cluster_id: str
     config: dict
@@ -1478,10 +1691,17 @@ class SaveClusterConfigRequest(BaseModel):
 
 
 @router.get("/clusters", response_model=ClustersListResponse)
-async def list_clusters():
+async def list_clusters(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取所有集群列表
     """
+    # #263 P1 本体：redis_url 原样回显（含口令）。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.registry.read", resource="cluster",
+    )
     registry = get_cluster_registry()
     clusters = registry.list_clusters()
     active = registry.get_active_cluster()
@@ -1504,10 +1724,16 @@ async def list_clusters():
 
 
 @router.get("/clusters/active", response_model=ClusterInfoResponse)
-async def get_active_cluster():
+async def get_active_cluster(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取当前活动集群
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.registry.read", resource="cluster",
+    )
     registry = get_cluster_registry()
     active = registry.get_active_cluster()
     
@@ -1526,10 +1752,18 @@ async def get_active_cluster():
 
 
 @router.get("/clusters/{cluster_id}", response_model=ClusterInfoResponse)
-async def get_cluster(cluster_id: str):
+async def get_cluster(
+    cluster_id: str,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取指定集群信息
     """
+    ensure_platform_admin(
+        http_request, identity, action="cluster.registry.read",
+        resource="cluster", target=cluster_id,
+    )
     registry = get_cluster_registry()
     cluster = registry.get_cluster(cluster_id)
     
@@ -1758,10 +1992,19 @@ async def switch_cluster(
 
 
 @router.get("/clusters/{cluster_id}/config", response_model=ClusterFullConfigResponse)
-async def get_cluster_config_detail(cluster_id: str):
+async def get_cluster_config_detail(
+    cluster_id: str,
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
     """
     获取集群的完整配置内容
     """
+    # #263 P1 本体：完整 YAML 含 redis.url / services.*.env / docker.env。
+    ensure_platform_admin(
+        http_request, identity, action="cluster.registry.config.read",
+        resource="cluster", target=cluster_id,
+    )
     registry = get_cluster_registry()
     
     config = registry.get_cluster_config(cluster_id)

@@ -38,15 +38,20 @@ python -m plaita_console              # 或使用 plaita-console 命令
 - **editor**：编排与执行（增删改流程、发布、试跑、启动执行）
 - **viewer**：只读
 
-多租户部署下，`admin` 是**租户内**角色，不等于平台身份（#260 / #261）：
+多租户部署下，`admin` 是**租户内**角色，不等于平台身份（#260 / #261 / #263）：
 `/api/users` 的全局账号变更（创建 / 改角色 / 改密 / 删除）、全局服务停止，
-以及集群管理面的全局生命周期与基础设施配置（服务启停 / stop-all /
-process-docker 模式切换 / 基础设施 CRUD 与容器启停 / 集群登记、切换、
-删除与配置保存）只允许 `platform_admin`（或平台级 API-Key）执行，拒绝写
-`*.denied` 审计。租户 admin 仍可读取集群配置、实例/基础设施列表与健康
-检查。租户 admin 只能经 `/api/tenants/{tid}/members/*` 管理**本租户**
-成员，且不能操作平台管理员账号。任何已认证角色都可以修改**自己**的密码。
-租户 admin 的 `GET /api/users` 只返回本租户成员。
+以及**集群管理面的全部端点**只允许 `platform_admin`（或平台级 API-Key）
+执行，拒绝写 `*.denied` 审计。集群面包括全局生命周期与基础设施配置
+（服务启停 / stop-all / process-docker 模式切换 / 基础设施 CRUD 与容器
+启停 / 集群登记、切换、删除与配置保存），**也包括 GET 读面**（实例列表、
+基础设施 URL/健康详情、集群列表与完整配置、模板）——这些响应含数据面
+连接串与 env 密钥，没有租户内语义（#263）。所有 cluster 响应再经序列化层
+脱敏：URL 的密码段与 `PASSWORD`/`SECRET`/`TOKEN`/`KEY` 等 env 值显示为
+`***`。`/api/dispatch/ledger` 对非平台身份按本租户过滤（显式传他租户
+403 + 审计），平台身份默认全量。租户 admin 只能经
+`/api/tenants/{tid}/members/*` 管理**本租户**成员，且不能操作平台管理员
+账号。任何已认证角色都可以修改**自己**的密码。租户 admin 的
+`GET /api/users` 只返回本租户成员。
 
 `POST /api/dispatch/one` 的 `shadow` / `dry_run` / `tenant_id` 是服务端
 权威字段（#262）：`shadow` 只取 `PLAITA_CONSOLE_DISPATCH_SHADOW`（请求体

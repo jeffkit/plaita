@@ -729,6 +729,47 @@ def _tombstone_tenant(redis_client, tenant_id: str) -> None:
         raise
 
 
+def _purge_runtime_after_commit(
+    redis_client, tenant_id: str
+) -> tuple[Dict[str, int], "BaseException | None"]:
+    """DB 提交后的运行面清理（A2R13）。
+
+    Redis 全量清理（SCAN 租户命名空间 + 平台键逐条收窄 + 队列遍历）可能耗时
+    数秒，**绝不能**放在 SQLite ``BEGIN IMMEDIATE`` 写事务里：写锁跨清理
+    期间会令并发写撞 ``database is locked``（默认 5s timeout），清理失败而
+    COMMIT 失败时连接还会以 PENDING 状态回池，后续请求全站 500 直到重启。
+
+    两步各自尝试（前一步失败不跳过后一步），汇总后再 loud 上抛。此时租户行
+    已删除，重试 ``delete_tenant`` 会走 404 补清扫继续清理（#257 的「失败可
+    重试、绝不伪装成功」语义）。
+    """
+    counts: Dict[str, int] = {}
+    first_error: "BaseException | None" = None
+    steps = (
+        ("redis", lambda: _purge_tenant_redis(redis_client, tenant_id)),
+        # 队列必须排空：旧 start 消息会在同名重建后重新执行（A50-05）。
+        ("queue", lambda: _purge_tenant_queue(redis_client, tenant_id)),
+    )
+    for label, purge in steps:
+        try:
+            result = purge()
+        except Exception as exc:  # noqa: BLE001 — 两步都要尝试，最后统一上抛
+            logger.exception(
+                "删除租户 %s：%s 运行数据清理失败（数据库删除已提交，"
+                "重试 DELETE 走 404 补清扫可继续）",
+                tenant_id,
+                label,
+            )
+            if first_error is None:
+                first_error = exc
+        else:
+            if label == "queue":
+                counts["queue"] = result
+            else:
+                counts.update(result or {})
+    return counts, first_error
+
+
 def _purge_orphan_tenant_runtime(session, tenant_id: str, redis_client) -> None:
     """404 路径补清扫（#257/#255）：租户行已不在时的历史残留。
 
@@ -736,6 +777,9 @@ def _purge_orphan_tenant_runtime(session, tenant_id: str, redis_client) -> None:
     「已删除」与「尚未 bootstrap 的存量单租部署」，避免 404 误清活跃数据。
     复用调用方 session：此时没有待提交的写，先提交本地清理再清 Redis，
     避免同进程两个 SQLite 连接互相等锁。
+
+    A2R13：墓碑先落（在途消息在清理期间即被拦下），Redis/队列清理失败
+    两步都尝试后 loud 上抛——重试 404 路径继续补偿。
     """
     if tenant_id == DEFAULT_TENANT_ID:
         _tombstone_tenant(redis_client, tenant_id)
@@ -752,11 +796,10 @@ def _purge_orphan_tenant_runtime(session, tenant_id: str, redis_client) -> None:
     _purge_local_tenant_runtime(session, tenant_id)
     _purge_tenant_db_assets(session, tenant_id)
     session.commit()
-    _purge_tenant_redis(redis_client, tenant_id)
-    # 404 补清扫同样要排空队列：旧版本删除留下的 start 消息会在同名重建
-    # 后重新执行（A50-05）。
-    _purge_tenant_queue(redis_client, tenant_id)
     _tombstone_tenant(redis_client, tenant_id)
+    _, purge_error = _purge_runtime_after_commit(redis_client, tenant_id)
+    if purge_error is not None:
+        raise purge_error
 
 
 def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
@@ -809,16 +852,24 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
         # （重试可继续清理），也不可「租户已删而旧密钥仍可读」。
         session.flush()
         credentials_export = _remove_tenant_credentials_export(tenant_id)
-        # #255：Redis 清理与墓碑同样先于 commit——任一失败都保留租户行，
-        # 重试可继续清理；commit 成功后不存在需要 404 才能补清的中间态。
-        redis_counts = _purge_tenant_redis(redis_client, tenant_id)
+        # A2R13：墓碑是廉价 HSET，仍先于 commit——在途消息/调度从这一刻起
+        # 即被拦下；Redis 不可用时写墓碑失败 ⇒ 整单回滚（租户保留、可重试）。
         _tombstone_tenant(redis_client, tenant_id)
-        # 墓碑先落，再排空共享队列：worker 在清理期间也不会执行该租户消息；
-        # 队列清理失败 ⇒ 事务回滚、墓碑留在 Redis（重试可继续），绝不留下
-        # 「租户已删、旧 start 仍排队」的复活路径。
-        if redis_client is not None:
-            redis_counts["queue"] = _purge_tenant_queue(redis_client, tenant_id)
         session.commit()
+
+    # A2R13：Redis 全量清理移出 SQLite 写事务。DB 删除已提交，写锁在毫秒级
+    # 释放；秒级 SCAN/队列遍历不再阻塞并发写。失败 loud，租户行已删 ⇒ 重试
+    # 走 404 补清扫继续补偿（#257 语义：可重试、不伪装成功）。
+    redis_counts, purge_error = _purge_runtime_after_commit(
+        redis_client, tenant_id
+    )
+    if purge_error is not None:
+        logger.error(
+            "删除租户 %s：数据库删除已提交，但运行面清理未完成；"
+            "重试 DELETE（404 补清扫）可继续，租户不会复活",
+            tenant_id,
+        )
+        raise purge_error
 
     logger.info(
         "删除租户 %s：凭据 %d 条（导出文件 %s）、本地 %s、DB 资产 %s、Redis %s",

@@ -138,7 +138,10 @@ def _run_quick_test_case(tenant: str, fence: str) -> dict:
         tenant_token = set_current_tenant(tenant)
         fence_token = _FENCE.set(fence)
         try:
-            box["response"] = await run_quick_test(QuickTestRequest(test_type="event"))
+            box["response"] = await run_quick_test(
+                QuickTestRequest(test_type="event"), None,
+                {"platform_admin": True},
+            )
             box["caller_after"] = (current_tenant(), _FENCE.get())
         finally:
             _FENCE.reset(fence_token)

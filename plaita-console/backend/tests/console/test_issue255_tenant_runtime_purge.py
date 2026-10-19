@@ -280,8 +280,16 @@ def test_delete_tenant_purges_runtime_data_and_recreate_is_clean(env, monkeypatc
     assert redis.keys(f"plaita:{TENANT}:*") == []
 
 
-def test_redis_cleanup_failure_keeps_tenant_retryable(env, monkeypatch):
-    """Redis 清理失败 → loud + 事务回滚，租户仍在；恢复后重试成功。"""
+def test_redis_cleanup_failure_after_commit_is_compensated_by_404_retry(
+    env, monkeypatch,
+):
+    """A2R13：Redis 清理失败发生在 **DB 提交之后**（不再回滚事务）。
+
+    旧实现把秒级 Redis 全量清理放在 ``BEGIN IMMEDIATE`` 写事务里：并发写撞
+    ``database is locked``，commit 失败还会污染连接池（全站 500 到重启）。
+    现在 DB 删除先提交，写锁毫秒级释放；Redis 失败 loud 上抛，重试 DELETE
+    走 404 补清扫继续清理。
+    """
     store, fake = env["store"], env["redis"]
     _seed_local(store)
     sidecar = env["creds"].with_name(f"{env['creds'].stem}.{TENANT}.json")
@@ -307,20 +315,25 @@ def test_redis_cleanup_failure_keeps_tenant_retryable(env, monkeypatch):
     with pytest.raises(OSError, match="redis down"):
         tenants_svc.delete_tenant(store, TENANT, redis_client=_SchedulesDown(fake))
 
-    # 事务回滚：租户/凭据/本地运行数据都还在，重试不会撞 404；
-    # 旁文件已按 #257 先清（fail-safe：租户在而凭据不可达）。
-    with store._session_local() as session:
-        assert session.get(Tenant, TENANT) is not None
-        assert session.scalars(
-            select(Credential).where(Credential.tenant_id == TENANT)
-        ).all() != []
-    assert flow_store.list_local_executions(tenant_id=TENANT) != []
-    assert not sidecar.exists()
-
-    assert tenants_svc.delete_tenant(store, TENANT, redis_client=fake) is True
+    # 1) DB 删除已提交（与旧「回滚」相反）：租户/凭据/本地运行数据都不在。
     with store._session_local() as session:
         assert session.get(Tenant, TENANT) is None
+        assert session.scalars(
+            select(Credential).where(Credential.tenant_id == TENANT)
+        ).all() == []
     assert flow_store.list_local_executions(tenant_id=TENANT) == []
+    assert not sidecar.exists(), "#257：旁文件仍须先于 commit 清掉"
+    assert fake.hget("plaita:tenant_status", TENANT) == "disabled"
+
+    # 2) 连接池健康：失败后的普通读写照常（PENDING 状态不得跨请求残留）。
+    engine = store._session_local.kw["bind"]
+    if hasattr(engine.pool, "checkedout"):
+        assert engine.pool.checkedout() == 0
+    with store._session_local() as session:
+        assert session.scalars(select(Tenant).where(Tenant.id == OTHER)).all()
+
+    # 3) 重试走 404 补清扫：返回 False，但 Redis 清理继续完成。
+    assert tenants_svc.delete_tenant(store, TENANT, redis_client=fake) is False
     assert redis_keys_clean(fake, TENANT)
 
 

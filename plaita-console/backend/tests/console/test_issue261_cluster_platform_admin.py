@@ -13,7 +13,8 @@
    审计（actor=tadmin, denied=True）；前置副作用为零（manager 零调用、
    registry 配置不变）。
 2. 正向：平台管理员（session）与平台级 API-Key 的同一批操作仍 200。
-3. 读面不受影响：租户 admin 仍可读 cluster config/clusters 列表。
+3. 读面（#263 更新）：租户 admin 读 cluster config / clusters 列表同样 403；
+   平台管理员读面仍 200（正控）。
 
 负控（验收时手工执行）：删除任一 handler 的 ``ensure_platform_admin`` 调用
 ⇒ 对应用例回到 pre-fix 200/副作用形态而精确红；其余用例保持绿。
@@ -286,15 +287,25 @@ def test_tenant_admin_denied_for_every_global_surface(
     ), (case_id, rows)
 
 
-def test_tenant_admin_read_surface_unchanged(env: Env):
-    """读面不收紧：租户 admin 仍可读 cluster config 与集群列表。"""
+def test_tenant_admin_read_surface_gated(env: Env):
+    """#263：读面与写面同闸——租户 admin 读 cluster config / 集群列表 403。
+
+    平台管理员正控与脱敏断言在
+    ``test_issue263_cluster_read_surface_gate.py``。
+    """
     tadmin = _login(env.client, "tadmin", TADMIN_PW)
 
-    config = env.client.get("/api/cluster/config", headers=tadmin)
+    for path in ("/api/cluster/config", "/api/clusters"):
+        response = env.client.get(path, headers=tadmin)
+        assert response.status_code == 403, (path, response.text)
+        assert response.json().get("detail") == PLATFORM_ADMIN_REQUIRED_DETAIL
+
+    root = _login(env.client, "root", ROOT_PW)
+    config = env.client.get("/api/cluster/config", headers=root)
     assert config.status_code == 200, config.text
     assert config.json()["mode"] == "process"
 
-    clusters = env.client.get("/api/clusters", headers=tadmin)
+    clusters = env.client.get("/api/clusters", headers=root)
     assert clusters.status_code == 200, clusters.text
     # registry 构造时会自动登记 default 集群；alpha/beta 是 fixture 显式创建的。
     assert {c["id"] for c in clusters.json()["clusters"]} >= {"alpha", "beta"}

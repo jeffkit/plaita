@@ -1,0 +1,80 @@
+r40 (B2) negative controls — 2026-10-19
+=======================================
+
+Each control mutates one source file only, runs the named tests, then restores
+the file and verifies its sha256 matches the green copy.
+
+----------------------------------------------------------------------------
+NC1  #263 cluster read gates removed (redaction kept)
+----------------------------------------------------------------------------
+mutation: replace the 16 new `ensure_platform_admin(...)` calls with `None`
+file:     plaita-console/backend/api/cluster.py
+cmd:      pytest plaita-console/backend/tests/console/test_issue263_cluster_read_surface_gate.py -q
+result:   16 failed, 14 passed
+shape:    AssertionError: ('infrastructure', 200, ...) / assert 200 == 403
+          ('service-types', 200, ...), ('instances', 200, ...),
+          ('refresh', 200, '{"success":true,...}'),
+          ('quick-test', ...), ('instance-remove', 200, ...),
+          ('instances-clear', 200, ...)
+restore:  sha256 match OK
+
+----------------------------------------------------------------------------
+NC1b #263 pre-fix baseline reproduction (gates + redaction both absent)
+----------------------------------------------------------------------------
+mutation: restore `git show HEAD:plaita-console/backend/api/cluster.py`
+cmd:      pytest plaita-console/backend/tests/console/test_issue263_cluster_read_surface_gate.py -q
+result:   24 failed, 6 passed
+shape (credential echo reproduced):
+  ('infrastructure', 200, '... "url":"redis://:s3cret-pass@10.0.0.5:6379/0"
+   ... "details":{"message":"connected to redis://:s3cret-pass@10.0.0.5:6379/0"}')
+  ('infra-detail', 200, '... "url":"redis://:s3cret-pass@10.0.0.5:6379/0" ...')
+  ('clusters-active', 200, '... "redis_url":"redis://:s3cret-pass@10.0.0.5:6379/0" ...')
+  ('cluster-full-config', 200, '... "DB_PASSWORD":"s3cret-pass" ...')
+  ('quick-test', 200, '... "result":{"status":"completed","input":{"value":21},
+   "output":42} ...')   # 宿主真实执行流程：实测输出 42
+restore:  sha256 match OK
+
+----------------------------------------------------------------------------
+NC2  #263 response redaction removed (gates kept)
+----------------------------------------------------------------------------
+mutation: `_RedactedResponseModel._serialize_redacted` -> `return handler(self)`
+file:     plaita-console/backend/api/cluster.py
+cmd:      pytest plaita-console/backend/tests/console/test_issue263_cluster_read_surface_gate.py -q
+result:   8 failed, 22 passed
+shape:    assert 's3cret-pass' not in '{"infrastructure":[... "url":
+          "redis://:s3cret-pass@10.0.0.5:6379/0" ...]}'
+          test_redaction_masks_url_password_and_env_secrets + 7 platform
+          positive-control cases red; all tenant-admin 403 cases stayed green.
+restore:  sha256 match OK
+
+----------------------------------------------------------------------------
+NC3  A2R13 Redis purge moved back inside the BEGIN IMMEDIATE transaction
+----------------------------------------------------------------------------
+mutation: call `_purge_tenant_redis` + `_purge_tenant_queue` before
+          `session.commit()`; remove the post-commit compensation block
+file:     plaita-console/backend/services/tenants_svc.py
+cmd:      pytest test_issue_a2r13_delete_redis_outside_txn.py \
+                 test_issue255_tenant_runtime_purge.py::test_redis_cleanup_failure_after_commit_is_compensated_by_404_retry -q
+result:   3 failed
+shape:    AssertionError: 他租户写被删除侧的 Redis 清理阻塞 1.24s
+          （清理时长 1.2s）——Redis 清理仍在写事务内
+          assert session.get(Tenant, TENANT) is None
+          AssertionError: assert <models.flow.Tenant object ...> is None
+restore:  sha256 match OK
+
+----------------------------------------------------------------------------
+NC4  #263 dispatch ledger tenant filter removed
+----------------------------------------------------------------------------
+mutation: `tenant_id=scope_tenant` -> `tenant_id=None` (rows + parity)
+file:     plaita-console/backend/api/capacity.py
+cmd:      pytest test_issue263_dispatch_ledger_tenant_scope.py::test_viewer_only_sees_own_tenant -q
+result:   1 failed
+shape:    AssertionError: {'a-1', 'a-2', 'b-1', 'b-2', 'b-3', 'legacy'}
+          (viewer-a saw cross-tenant rows + unattributed legacy row)
+restore:  sha256 match OK
+
+----------------------------------------------------------------------------
+Green after restore
+----------------------------------------------------------------------------
+targeted 6 files (263 cluster + 263 ledger + A2R13 + 255 + 261 + 217): 69 passed
+console full: 727 passed, 13 skipped
