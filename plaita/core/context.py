@@ -463,6 +463,13 @@ class ExecutionContext(_SystemStateAccessors):
         # 共享，它们本就进不了 checkpoint；就地改写由 #69 门 default-deny 拒绝）。
         global_context = _snapshot_value(flow.global_context) if flow.global_context else {}
         global_context.update({"flow_id": flow.flow_id})
+        if self.parent is None:
+            # run 身份（plaita-nodes#9）：report 等「run 级结果通道」的缺省
+            # token 必须跨 run 唯一，否则不同 run 写同一个 default 文件。只在
+            # 根上下文写入；子流程（map/while/child）不复制，经
+            # get_global_variable 的 parent 回落共享同一个 run_token。
+            # flow.global_context 显式给出的值优先（setdefault）。
+            global_context.setdefault("run_token", self.execution_id)
         # $PARENT is a snapshot (checkpoint-safe; not a live state)。
         # C1-2（2026-10 评审修复包 C1）：历史上 ``dict(parent.context)`` 是浅
         # 拷贝——``$PARENT.NODE`` 与父 live ``$NODE`` 是同一对象，双向写穿

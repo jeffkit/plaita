@@ -139,6 +139,53 @@ class TestExecutionContextState(unittest.TestCase):
         self.assertEqual(global_ctx["env"], "test")
         self.assertEqual(global_ctx["flow_id"], "f1")
 
+    def test_setup_flow_root_injects_per_run_token(self):
+        """plaita-nodes#9：根 run 注入 run_token；同一实例两次 run 不共享。"""
+        class FakeFlow:
+            flow_id = "f1"
+            id = "f1"
+            global_context = {}
+
+        ctx = ExecutionContext()
+        ctx.clean()
+        ctx.setup_flow(FakeFlow(), (), {})
+        first = ctx.get_global_variable("run_token")
+        self.assertEqual(first, ctx.execution_id)
+
+        ctx.clean()
+        ctx.setup_flow(FakeFlow(), (), {})
+        second = ctx.get_global_variable("run_token")
+        self.assertEqual(second, ctx.execution_id)
+        self.assertNotEqual(first, second)
+
+    def test_setup_flow_child_inherits_parent_run_token(self):
+        """子流程不复制 run_token，经 parent 回落到同一个 run 身份。"""
+        class FakeFlow:
+            flow_id = "child"
+            id = "child"
+            global_context = {}
+
+        root = ExecutionContext()
+        root.clean()
+        root.setup_flow(FakeFlow(), (), {})
+        child = ExecutionContext(parent=root)
+        child.clean()
+        child.setup_flow(FakeFlow(), (), {})
+
+        self.assertNotIn("run_token", child.get_state("$GLOBAL"))
+        self.assertEqual(child.get_global_variable("run_token"), root.execution_id)
+
+    def test_setup_flow_explicit_global_run_token_wins(self):
+        class FakeFlow:
+            flow_id = "f1"
+            id = "f1"
+            global_context = {"run_token": "custom-token"}
+
+        ctx = ExecutionContext()
+        ctx.clean()
+        ctx.setup_flow(FakeFlow(), (), {})
+        self.assertEqual(ctx.get_global_variable("run_token"), "custom-token")
+
     def test_coerce_input_value_dict_positional(self):
         from plaita.core.context import _coerce_input_value
         self.assertEqual(_coerce_input_value(({"a": 1},), {}), {"a": 1})
