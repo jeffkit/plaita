@@ -1,0 +1,18 @@
+# 负控：仅回退 services/cluster_registry.py（保留 test_registry_crud_compensation.py）
+# 命令: python3 -m pytest tests/console/test_registry_crud_compensation.py -q
+
+E       AssertionError: delete 保存失败后目录已被 rmtree（ghost 条目）
+E       assert False
+E        +  where False = is_dir()
+E        +    where is_dir = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3582/test_delete_save_failure_keeps0/clusters/beta').is_dir
+
+tests/console/test_registry_crud_compensation.py:138: AssertionError
+=========================== short test summary info ============================
+FAILED tests/console/test_registry_crud_compensation.py::test_create_save_failure_rolls_back_directory_and_entry
+FAILED tests/console/test_registry_crud_compensation.py::test_create_config_failure_rolls_back_directory
+FAILED tests/console/test_registry_crud_compensation.py::test_create_save_failure_keeps_caller_supplied_config
+FAILED tests/console/test_registry_crud_compensation.py::test_delete_save_failure_keeps_directory_and_entry
+4 failed, 1 passed in 0.14s
+
+# 应绿的一条（成功路径不回归）：test_delete_success_still_removes_directory
+# 还原修复后：5 passed in 0.10s

@@ -318,6 +318,32 @@ class ClusterRegistry:
             raise ValueError(f"集群 ID 非法: {cluster_id!r}")
         return candidate
 
+    @staticmethod
+    def _rollback_created_cluster(
+        cluster_dir: Optional[Path], config_file: Optional[Path]
+    ) -> None:
+        """清理本次 ``create_cluster`` 新建的目录/配置文件（补偿）。
+
+        只看调用方标为「本次新建」的路径：调用方显式给了 ``config_path``
+        或目录本就存在时，不得误删别人的文件。
+        """
+        if config_file is not None:
+            try:
+                config_file.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "回滚新建集群配置失败（文件保留）: %s", config_file, exc_info=True,
+                )
+        if cluster_dir is not None:
+            try:
+                shutil.rmtree(cluster_dir)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning(
+                    "回滚新建集群目录失败（目录保留）: %s", cluster_dir, exc_info=True,
+                )
+
     def create_cluster(
         self,
         cluster_id: str,
@@ -327,17 +353,41 @@ class ClusterRegistry:
         redis_url: str = "redis://localhost:6379/0",
         preset: str = "dev"
     ) -> ClusterInfo:
-        """创建新集群（preset：架构配套 quickstart / dev / prod）"""
+        """创建新集群（preset：架构配套 quickstart / dev / prod）。
+
+        目录 / 配置文件 / registry.yaml 三处写盘按补偿式事务处理：任一
+        步骤失败都回滚已建资源与内存登记。旧实现先建目录、后写 registry，
+        保存失败（ENOSPC 等）会在 ``<base>/<id>/`` 留下无主目录，重试又被
+        「集群已存在」拦下。
+        """
         if cluster_id in self._clusters:
             raise ValueError(f"集群 {cluster_id} 已存在")
-        
+
+        created_dir: Optional[Path] = None
+        created_config: Optional[Path] = None
+
         # 如果没有指定配置路径，按预设创建
         if not config_path:
             cluster_dir = self._cluster_dir(cluster_id)
-            cluster_dir.mkdir(parents=True, exist_ok=True)
-            config_path = str(cluster_dir / "cluster_config.yaml")
-            self._create_default_config(config_path, preset=preset, redis_url=redis_url)
-        
+            config_file = cluster_dir / "cluster_config.yaml"
+            dir_preexisting = cluster_dir.exists()
+            config_preexisting = config_file.exists()
+            try:
+                cluster_dir.mkdir(parents=True, exist_ok=True)
+                self._create_default_config(
+                    str(config_file), preset=preset, redis_url=redis_url)
+            except BaseException:
+                self._rollback_created_cluster(
+                    None if dir_preexisting else cluster_dir,
+                    None if config_preexisting else config_file,
+                )
+                raise
+            if not dir_preexisting:
+                created_dir = cluster_dir
+            if not config_preexisting:
+                created_config = config_file
+            config_path = str(config_file)
+
         info = ClusterInfo(
             id=cluster_id,
             name=name,
@@ -345,10 +395,16 @@ class ClusterRegistry:
             config_path=config_path,
             redis_url=redis_url
         )
-        
+
         self._clusters[cluster_id] = info
-        self._save_registry()
-        
+        try:
+            self._save_registry()
+        except BaseException:
+            # registry 没落盘 = 集群不存在：内存登记与本次新建的文件一并回滚。
+            self._clusters.pop(cluster_id, None)
+            self._rollback_created_cluster(created_dir, created_config)
+            raise
+
         return info
     
     def update_cluster(
@@ -380,21 +436,57 @@ class ClusterRegistry:
         return info
     
     def delete_cluster(self, cluster_id: str) -> bool:
-        """删除集群"""
-        if cluster_id not in self._clusters:
+        """删除集群（目录先原子挪到暂存名，registry 落盘成功后才真删）。
+
+        旧顺序是 ``rmtree`` → 删内存 → 保存：保存失败时磁盘 registry 仍登记
+        该集群而目录已毁，列表看得到、点开配置全空（ghost 条目），且无法
+        重试（目录已不在）。现在先 ``os.replace`` 到同目录暂存路径（同一
+        文件系统内原子），再删内存并保存；保存失败就把目录改回来并复原内
+        存登记，调用方拿到异常后仍可安全重试；保存成功才清理暂存目录。
+        """
+        info = self._clusters.get(cluster_id)
+        if info is None:
             return False
-        
+
         if cluster_id == self._active_cluster_id:
             raise ValueError("不能删除当前活动集群")
-        
+
         # 删除集群目录（与创建同闸：解析后必须仍在 base_dir 内，plaita#244）
         cluster_dir = self._cluster_dir(cluster_id)
+        staged_dir: Optional[Path] = None
         if cluster_dir.exists():
-            shutil.rmtree(cluster_dir)
-        
+            staged_dir = self.base_dir / (
+                f".{cluster_id}.deleting."
+                f"{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+            )
+            os.replace(cluster_dir, staged_dir)
+
         del self._clusters[cluster_id]
-        self._save_registry()
-        
+        try:
+            self._save_registry()
+        except BaseException:
+            # registry 仍是旧内容：内存也复原，目录从暂存名改回来，保持
+            # 「登记 + 目录」一致；数据未丢，调用方可重试。
+            self._clusters[cluster_id] = info
+            if staged_dir is not None:
+                try:
+                    os.replace(staged_dir, cluster_dir)
+                except OSError:
+                    logger.error(
+                        "集群 %s 删除回滚失败：目录仍暂存于 %s（数据未丢），"
+                        "登记已复原", cluster_id, staged_dir, exc_info=True,
+                    )
+            raise
+
+        if staged_dir is not None:
+            try:
+                shutil.rmtree(staged_dir)
+            except OSError:
+                logger.warning(
+                    "集群 %s 已从注册表删除，但暂存目录清理失败: %s",
+                    cluster_id, staged_dir, exc_info=True,
+                )
+
         return True
     
     def switch_cluster(self, cluster_id: str) -> ClusterInfo:
