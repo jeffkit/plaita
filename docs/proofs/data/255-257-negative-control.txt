@@ -1,0 +1,127 @@
+=== #255 / #257 负控证据（第三十三轮，B2 席位，基线 7c6bf3d） ===
+运行目录：plaita-console/
+解释器：../.venv/bin/python（仓根 .venv，Python 3.13.3）
+
+----------------------------------------------------------------------------
+一、#257：delete_tenant 恢复 DB-first（commit 后再删凭据旁文件）
+    + 去掉 save_credential 的租户存在性检查
+
+变异（tenants_svc.delete_tenant）：
+    修复态：
+        session.flush()
+        credentials_export = _remove_tenant_credentials_export(tenant_id)
+        session.commit()
+  →
+        session.flush()
+        session.commit()
+        credentials_export = _remove_tenant_credentials_export(tenant_id)
+
+变异（credentials_svc.save_credential）：删除
+        if session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first() is None:
+            raise ValueError(f"租户不存在或已删除: {tenant_id}（拒绝写入凭据）")
+
+命令：
+    ../.venv/bin/python -m pytest \
+        backend/tests/console/test_issue257_tenant_credentials_order.py -q
+
+输出（节选）：
+    E           AssertionError: assert None is not None
+    E            +  where None = get(Tenant, 'acme')
+    E       Failed: DID NOT RAISE ValueError
+    E       Failed: DID NOT RAISE ValueError
+    FAILED ...::test_sidecar_failure_is_fail_safe_and_retryable
+    FAILED ...::test_save_credential_refuses_deleted_tenant
+    FAILED ...::test_save_credential_refuses_unknown_tenant
+    3 failed, 2 passed, 27 warnings in 2.19s
+
+判读：DB-first 下 unlink 失败后租户行已不存在（fail-safe 反向）；
+save_credential 对已删/未知租户仍写回（复活 store）。
+
+还原修复后：
+    5 passed（test_issue257_tenant_credentials_order.py）
+
+----------------------------------------------------------------------------
+二、#255 负控 A：去掉本地四表清理调用
+        - local_counts = _purge_local_tenant_runtime(session, tenant_id)
+
+命令：
+    ../.venv/bin/python -m pytest \
+        backend/tests/console/test_issue255_tenant_runtime_purge.py::test_delete_tenant_purges_runtime_data_and_recreate_is_clean -q
+
+输出（节选）：
+    E       AssertionError: assert [{'schedule_i...w-acme', ...}] == []
+    E         Left contains one more item: {'schedule_id': 'sched-acme',
+    E         'tenant_id': 'acme', 'name': 'job-acme', 'flow_id': 'flow-acme', ...}
+    FAILED ...::test_delete_tenant_purges_runtime_data_and_recreate_is_clean
+    1 failed, 18 warnings in 1.22s
+
+判读：删除后旧 enabled 调度仍在 local_schedules，本地调度循环会继续触发。
+
+----------------------------------------------------------------------------
+三、#255 负控 B：去掉 Redis 清理 + 墓碑（两条调用）
+        - redis_counts = _purge_tenant_redis(redis_client, tenant_id)
+        - _tombstone_tenant(redis_client, tenant_id)
+
+输出（节选）：
+    E       AssertionError: assert 'active' == 'disabled'
+    E         - disabled
+    E         + active
+    1 failed, 18 warnings in 0.73s
+
+判读：删除后 Redis 短视图仍是 active（tenant_is_active fail-open），
+租户命名空间与平台条目残留。
+
+----------------------------------------------------------------------------
+四、#255 负控 C：只去掉墓碑（保留 Redis 清理）
+        - _tombstone_tenant(redis_client, tenant_id)   # 仅主删除路径这一处
+
+输出（节选）：
+    E       AssertionError: assert 'active' == 'disabled'
+    1 failed, 18 warnings in 0.67s
+
+同状态 fail-open 探针（stale enabled 调度 + 缺失/active 状态）：
+    tenant_is_active: True fail_open: 1
+    fire_schedule returned msg: True queue_len: 1
+
+判读：issue 证据本体——租户状态缺失/未停用时，旧 enabled 调度仍入队
+（queue_len=1）。修复态写 disabled 墓碑后 fire_schedule 返回 None、
+队列长度 0（见 test_issue255_tenant_runtime_purge.py 第 8 组断言）。
+
+----------------------------------------------------------------------------
+五、还原修复后（两单联动）
+
+命令：
+    ../.venv/bin/python -m pytest \
+        backend/tests/console/test_issue255_tenant_runtime_purge.py \
+        backend/tests/console/test_issue257_tenant_credentials_order.py -q
+
+输出：
+    8 passed, 61 warnings in 1.21s
+
+----------------------------------------------------------------------------
+六、全量回归（修复态）
+
+    ../.venv/bin/python -m pytest backend/tests/console -q
+    → 616 passed, 13 skipped, 2888 warnings in 66.05s
+
+    ../.venv/bin/python -m pytest \
+        backend/tests/console/test_tenants.py \
+        backend/tests/console/test_cluster_tenant.py \
+        backend/tests/console/test_local_scheduler.py \
+        backend/tests/console/test_issue191_event_tenant_binding.py \
+        backend/tests/console/test_issue192_tenant_read_surface.py -q
+    → 58 passed, 516 warnings in 25.11s
+
+    ../.venv/bin/python -m ruff check <changed files>
+    → All checks passed!
+
+    .venv/bin/python scripts/landing_gate.py ci
+    → [landing-gate] main 最近完成 run：7c6bf3d conclusion=success
+    → [landing-gate] ✅ main CI 绿，允许落地（exit=0）
+
+----------------------------------------------------------------------------
+七、main 前进后的落地门复跑（881383b，docs-only ledger commit）
+
+    .venv/bin/python scripts/landing_gate.py ci
+    → main 最近完成 run：881383b conclusion=success
+    → ✅ main CI 绿，允许落地（exit=0）

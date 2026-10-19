@@ -33,6 +33,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("PLAITA_CREDENTIALS_KEY", raising=False)
     monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", str(tmp_path / "creds.key"))
     flow_store.init_engine(f"sqlite:///{db_file}")
+    # plaita#257：save_credential 拒绝不存在的租户；default 由 bootstrap 建行。
+    flow_store.ensure_tenant_bootstrap()
     credentials_svc.save_credential("feishu", "webhook", {"url": OLD_URL})
     credentials_svc.save_credential("other", "generic", {"k": "v"})
     return creds

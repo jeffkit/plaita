@@ -35,7 +35,7 @@ from api import auth_users  # noqa: E402
 from api import credentials as credentials_api  # noqa: E402
 from api import tenants as tenants_api  # noqa: E402
 from auth import require_auth  # noqa: E402
-from models.flow import Credential  # noqa: E402
+from models.flow import Credential, Tenant  # noqa: E402
 from services import credentials_svc, flow_store, tenants_svc, users_svc  # noqa: E402
 from plaita.credentials import CredentialError, get_credential  # noqa: E402
 from plaita.tenant_context import reset_current_tenant, set_current_tenant  # noqa: E402
@@ -211,9 +211,20 @@ def test_sidecar_removal_failure_is_loud(console, monkeypatch):
     with pytest.raises(PermissionError):
         tenants_svc.delete_tenant(console.store, "acme")
 
-    # 失败必须可观测：文件仍在（未伪造成清理成功），租户行已删
+    # 失败必须可观测且可恢复（plaita#257 顺序反转）：旁文件仍在（未伪造成
+    # 清理成功），DB 事务已回滚——租户行/凭据行都还在，重试不会撞 404。
     assert sidecar.is_file()
     with console.store._session_local() as session:
+        assert session.scalars(select(Tenant).where(Tenant.id == "acme")).first() is not None
+        assert session.scalars(
+            select(Credential).where(Credential.tenant_id == "acme")
+        ).all() != []
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert tenants_svc.delete_tenant(console.store, "acme") is True
+    assert not sidecar.exists()
+    with console.store._session_local() as session:
+        assert session.scalars(select(Tenant).where(Tenant.id == "acme")).first() is None
         assert session.scalars(
             select(Credential).where(Credential.tenant_id == "acme")
         ).all() == []

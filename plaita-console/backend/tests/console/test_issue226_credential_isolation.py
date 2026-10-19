@@ -25,6 +25,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services import credentials_svc, flow_store  # noqa: E402
+from models.flow import Tenant  # noqa: E402
 
 
 @pytest.fixture()
@@ -36,10 +37,26 @@ def cred_store(tmp_path, monkeypatch):
     monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", str(tmp_path / "creds.key"))
     monkeypatch.delenv("PLAITA_CREDENTIALS_KEY", raising=False)
     flow_store.init_engine(f"sqlite:///{db_file}")
+    _ensure_tenants("default")
     return tmp_path
 
 
+def _ensure_tenants(*tenant_ids: str) -> None:
+    """plaita#257：save_credential 拒绝不存在的租户，先建出归属行。"""
+    store = flow_store.get_flow_store()
+    with store._session_local() as session:
+        for tid in tenant_ids:
+            if session.get(Tenant, tid) is None:
+                session.add(Tenant(
+                    id=tid, name=tid, status="active",
+                    # contract_secret_id 唯一：测试租户各自一份占位值
+                    contract_secret_id=f"t-{tid}", contract_secret_key="k",
+                ))
+        session.commit()
+
+
 def _seed_two_tenants() -> None:
+    _ensure_tenants("A", "B")
     # 同名 shared 在两租户各一份，值不同——跨租户读取会立刻暴露。
     credentials_svc.save_credential(
         "a", "generic", {"url": "https://a.example"}, tenant_id="A")
