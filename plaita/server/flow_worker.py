@@ -55,8 +55,10 @@ from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 # 路径让出（不新增协议）。
 from plaita.server.capacity import (
     CAPACITY_METADATA_KEY,
+    TARGET_INSTANCE_FIELD,
     build_capacity_block,
     collect_capacity_metrics,
+    normalize_target_instance_id,
     target_mismatch,
 )
 from plaita.server.control import ControlMixin, ControlListener
@@ -4501,6 +4503,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._registry_registered = False
         self._registry_retry_thread: Optional[threading.Thread] = None
         self._registry_retry_stop = threading.Event()
+        # S18-02A：生命周期状态即时落盘失败计数（/metrics 可观测量）。
+        self._registry_status_flush_failures = 0
 
         # 租约看门狗（波次② §4.1）：登记活跃 (execution_id → 租约值串/
         # FlowExecution/租户)，每 watchdog_interval_seconds（默认 TTL/3）
@@ -5381,9 +5385,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             # 4 个在途执行全部停 running、PEL=0，见 plaita#52 同族）。
             # 故 draining 持有者不算「安全 ack」，消息留 pending，等租约过期后
             # 由 reclaim 续跑。读注册表失败/无 status 字段 → 保持原语义（ack）。
-            if self._registry_entry_draining(registry_key):
+            if self._registry_entry_not_accepting(registry_key):
                 logger.warning(
-                    "执行 %s 租约持有者 %s 处于 draining（停机中，不保证收尾）"
+                    "执行 %s 租约持有者 %s 处于非 running 状态（停机/启动中，不保证收尾）"
                     "——不 ack，留 pending 等租约过期后 reclaim 续跑",
                     body.get("execution_id"),
                     instance,
@@ -5399,24 +5403,31 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         )
         return False
 
-    def _registry_entry_draining(self, registry_key: str) -> bool:
-        """注册表条目的 status 是否为 ``draining``（优雅停机中的持有者）。
+    def _registry_entry_not_accepting(self, registry_key: str) -> bool:
+        """注册表条目的 status 是否**不保证收尾**（S18-02A / A45-03/A46-04）。
 
-        读失败 / 值非 JSON / 无 status 字段 → False（不改变既有 ack 语义）。
+        对 ``status not in {"running"}`` 返回 True：draining/stopping/stopped/
+        starting 与未知值都视为「持有者可能随时退出」——此时 ack 会释放执行的
+        唯一重投载体（2026-10-11 维护窗事故同族）。
+
+        **保持既有红线**：读失败 / 值非 JSON / **无 status 字段**（存量格式）
+        → False（不改变既有 ack 语义）；缺字段不等于「非 running」。
         """
         try:
             raw = self.redis_client.get(registry_key)
-        except Exception as exc:  # noqa: BLE001 — 瞬断按「非 draining」处理
-            logger.debug("读注册表条目失败（按非 draining 处理）: %s", _scrub_url_text(exc))
+        except Exception as exc:  # noqa: BLE001 — 瞬断按「可收尾」处理（既有语义）
+            logger.debug("读注册表条目失败（按可收尾处理）: %s", _scrub_url_text(exc))
             return False
         if not raw:
             return False
         try:
             data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001 — 非 JSON 值按非 draining 处理
-            logger.debug("注册表条目非 JSON（按非 draining 处理）: %s", _scrub_url_text(exc))
+        except Exception as exc:  # noqa: BLE001 — 非 JSON 值按可收尾处理
+            logger.debug("注册表条目非 JSON（按可收尾处理）: %s", _scrub_url_text(exc))
             return False
-        return isinstance(data, dict) and data.get("status") == "draining"
+        if not isinstance(data, dict) or "status" not in data:
+            return False
+        return data.get("status") != "running"
 
     def _affinity_handover_key(self, body: Dict[str, Any]) -> str:
         """交接计数键：按 **execution_id** 维度（全局稳定，见下）。
@@ -5587,6 +5598,73 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         )
         return True
 
+    def _unavailable_dispatch_target(
+        self, body: Dict[str, Any]
+    ) -> Optional[Tuple[str, str]]:
+        """A46-02：复核显式派发目标是否仍可用；不可用 → ``(target, status)``。
+
+        只有「本机不是目标」的交接才复核（本机就是目标时，这次交接是亲和性
+        让出，目标机可能仍是本机，不能剥掉目标）。判定口径：
+
+        - 目标注册键不存在 → ``missing``（探针里的「幽灵目标」）；
+        - 键存在但 status != ``running``（draining/stopping/stopped/未知）
+          → 剥掉 target 按广播重投，避免 4 次交接后
+          ``AffinityHandoverExhausted``；
+        - **读注册表失败 → 保留 target**（fail-open，与派发侧同口径）：
+          一次 Redis 瞬断不得把可跑的定向任务广播给不亲和的机器；
+        - 目标就是 running → 保留 target（正常定向交接）。
+        """
+        target = normalize_target_instance_id(body.get(TARGET_INSTANCE_FIELD))
+        if target is None:
+            return None
+        try:
+            if target_mismatch(body, getattr(self, "instance_id", None)) is None:
+                return None
+        except Exception as exc:  # noqa: BLE001 — 判据自身异常时保持原交接语义
+            logger.warning(
+                "dispatch-target-check-failed:keep-target target=%s reason=mismatch-error: %s",
+                target,
+                _scrub_url_text(exc),
+            )
+            return None
+
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None:
+            logger.warning(
+                "dispatch-target-check-failed:keep-target target=%s reason=no-redis-client",
+                target,
+            )
+            return None
+        key = f"{ServiceRegistry.REGISTRY_PREFIX}:{self.SERVICE_TYPE}:{target}"
+        try:
+            raw = redis_client.get(key)
+        except Exception as exc:  # noqa: BLE001 — 读失败 fail-open，保留 target
+            logger.warning(
+                "dispatch-target-check-failed:keep-target target=%s: %s",
+                target,
+                _scrub_url_text(exc),
+            )
+            return None
+        if not raw:
+            return target, "missing"
+        try:
+            data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 — 无法证明 running ⇒ 按不可用处理
+            logger.warning(
+                "dispatch-target-check-failed:target-key-not-json target=%s: %s",
+                target,
+                _scrub_url_text(exc),
+            )
+            return target, "invalid"
+        if not isinstance(data, dict):
+            return target, "invalid"
+        status = data.get("status")
+        if not isinstance(status, str) or not status:
+            return target, "unknown"
+        if status == "running":
+            return None
+        return target, status
+
     def _handover_non_affine(self, task: Any, queue: Any, exc: Exception) -> None:
         """把不亲和的 task 交接给其他 worker：ack 原条 + 重入队同体新副本。
 
@@ -5617,6 +5695,22 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             logger.info("任务 %s 不亲和但无体可交接，留 pending: %s",
                         getattr(task, "message_id", "?"), _scrub_url_text(exc))
             return
+        # A46-02：目标机器已不可用（键消失 / 不再是 running）时剥掉
+        # target_instance_id，按广播重投——否则集群里每台非目标机都会交接一次，
+        # 4 次后 AffinityHandoverExhausted 把可跑任务终态化。
+        copy_body = dict(body)
+        unavailable_target = self._unavailable_dispatch_target(body)
+        stripped_target = unavailable_target is not None
+        if stripped_target:
+            target, target_status = unavailable_target
+            copy_body.pop(TARGET_INSTANCE_FIELD, None)
+            logger.warning(
+                "dispatch-target-unavailable:broadcast target=%s status=%s "
+                "(执行 %s 不再定向，按广播重投)",
+                target,
+                target_status,
+                body.get("execution_id"),
+            )
         try:
             key = self._affinity_handover_key(body)
             count = self._record_affinity_handover(key)
@@ -5665,14 +5759,26 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     self.AFFINITY_HANDOVER_MAX, _scrub_url_text(exc),
                 )
                 return
-            # 先 ack 原条（移出 PEL、防对端再抢），再重入队新副本
             # A44-02：交接副本继承源信封版本（否则新 build 写的副本会被
             # 同组旧 worker 按超版本死信，交接反而丢失恢复载体）。
-            queue.ack(getattr(task, "message_id"))
-            enqueue_task(
-                self.redis_client, self.queue_name, dict(body),
-                **_requeue_envelope_kwargs(task),
-            )
+            envelope_kwargs = _requeue_envelope_kwargs(task)
+            if stripped_target:
+                # A46-02 回退路径按 enqueue→ack（S18-03 同款安全序）：
+                # 新副本先落地、原条最后 ack；enqueue 失败时原条仍在 PEL，
+                # 绝不丢消息。普通定向/亲和交接的 ack→enqueue 顺序仍由
+                # S18-03 统一，本批不扩散。
+                enqueue_task(
+                    self.redis_client, self.queue_name, copy_body,
+                    **envelope_kwargs,
+                )
+                queue.ack(getattr(task, "message_id"))
+            else:
+                # 先 ack 原条（移出 PEL、防对端再抢），再重入队新副本
+                queue.ack(getattr(task, "message_id"))
+                enqueue_task(
+                    self.redis_client, self.queue_name, copy_body,
+                    **envelope_kwargs,
+                )
             logger.info(
                 "任务 %s 与本机不亲和，已交接（ack+重入队）给其他 worker"
                 "（第 %s/%s 次）: %s",
@@ -6460,11 +6566,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         with self._active_count_lock:
             self._active_task_count = max(0, self._active_task_count + delta)
             count = self._active_task_count
-        if self._enable_registry:
+        if self._enable_registry and not self._registry_is_closed():
+            # 内存计数照常（metrics/join 需要）；closed 后只到这里为止。
             self.update_registry_info(active_tasks=count)
             # #42（W10-a）：容量门按**新鲜**快照判饱和，故在跑数一变就直推一次
             # 注册键（不等心跳周期）——否则最多 CAPACITY_STALE 级的窗口里，
             # 派发侧会按「上一轮在跑 0 条」把并发额度压给同一台机器。
+            # S18-02A：draining/stopping/stopped 由 _refresh_registry_capacity
+            # 自行跳过（容量上报仅 running；starting 仅构造期预上报）。
             self._refresh_registry_capacity()
 
     # ------------------------------------------------- #42 worker 容量上报
@@ -6494,9 +6603,19 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         """
         if not getattr(self, "_enable_registry", False):
             return
+        if self._registry_is_closed():
+            # 注销后心跳/容量都不得把键写回（A46-03）；在跑数只更新内存。
+            return
         registry = getattr(self, "_registry", None)
         service_info = getattr(self, "_service_info", None)
         if registry is None or service_info is None:
+            return
+        status = getattr(service_info, "status", "")
+        if status not in ("starting", "running"):
+            # S18-02A：容量上报仅 running（starting 只允许构造期的一次预上报）。
+            # draining/stopping/stopped 继续写容量会让派发侧看到「状态停机但
+            # 容量新鲜」的漂移快照，也没有任何派发价值。
+            logger.debug("容量上报跳过：注册状态 %s 不允许刷新容量", status)
             return
         try:
             service_info.metadata[CAPACITY_METADATA_KEY] = json.dumps(
@@ -6505,6 +6624,35 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             registry.heartbeat(service_info)
         except Exception as exc:  # noqa: BLE001 — 上报失败不得影响领取/执行
             logger.warning("worker 容量上报失败（注册表按无容量信息处理）: %s", _scrub_exception_text(exc))
+
+    def _flush_registry_status(self, status: str) -> bool:
+        """S18-02A：生命周期状态**立即**落盘（不再等 10s 心跳）。
+
+        ``flush_registry_status`` 内含 2 次短退避重试；仍失败则 ERROR +
+        ``registry_status_flush_failed_total`` 指标——不得静默。失败不阻断
+        drain/stop 流程（本地状态已经是权威，派发侧最坏在 TTL 内看到旧状态）。
+        """
+        if not getattr(self, "_enable_registry", False):
+            return True
+        if self._registry_is_closed():
+            return True
+        if getattr(self, "_registry", None) is None:
+            return True
+        try:
+            ok = self.flush_registry_status()
+        except Exception as exc:  # noqa: BLE001 — 落盘失败绝不能阻断停机
+            logger.warning("注册状态 %s 立即落盘异常: %s", status, _scrub_exception_text(exc))
+            ok = False
+        if ok:
+            return True
+        self._registry_status_flush_failures = (
+            getattr(self, "_registry_status_flush_failures", 0) + 1
+        )
+        logger.error(
+            "注册状态 %s 立即落盘失败（已重试）：派发侧可能在 TTL 内继续按旧状态选择本机",
+            status,
+        )
+        return False
 
     def _report_capacity(self) -> None:
         """``__init__`` 期的容量上报入口（注册表尚未 start_heartbeat 时直推一次）。"""
@@ -6630,9 +6778,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 return
             self._drain_event.set()
             self._drain_started_at = time.time()
-        if self._enable_registry:
+        if self._enable_registry and not self._registry_is_closed():
+            # 单一状态源：register() 之前（starting）也要让 drain 生效，
+            # 否则 update_service_info 在 _registered_service is None 时直接
+            # return，内存状态都没置上（S9 前置坑）。
+            info = getattr(self, "_service_info", None)
+            if info is not None:
+                info.status = "draining"
             # 注册表可见：编排/K8s 就绪探针据此把这台从流量里摘掉
             self.update_registry_info(status="draining")
+            # 立即落盘（S18-02A / A45-03）：不再等 10s 心跳，否则派发侧在
+            # 这个窗口里仍按 running 选中本机（探针 S3）。
+            self._flush_registry_status("draining")
         timeout = _drain_timeout_from_env()
         logger.info(
             "worker 进入 draining（%s）：不再领新任务，等待 %d 个在途任务收尾（上限 %.0fs）",
@@ -6687,8 +6844,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             with self._active_count_lock:
                 self._drain_event.set()
                 self._drain_started_at = self._drain_started_at or time.time()
-            if self._enable_registry:
+            if self._enable_registry and not self._registry_is_closed():
+                info = getattr(self, "_service_info", None)
+                if info is not None:
+                    info.status = "draining"
                 self.update_registry_info(status="draining")
+                self._flush_registry_status("draining")
         logger.info("正在停止流程工作器...")
         self._running = False
 
@@ -6711,8 +6872,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         
         # 注销服务（先标 stopping：编排侧能看到「正在下线」而非突然消失）
         if self._enable_registry:
+            info = getattr(self, "_service_info", None)
+            if info is not None:
+                info.status = "stopping"
             self.update_registry_info(status="stopping")
-            self.unregister_service()
+            # S18-02A：stopping 也要**立即**落盘（不再等心跳）。
+            self._flush_registry_status("stopping")
+            # 写完 stopping 之后、注销之前置 closed：这一次 flush 是最后一次
+            # 注册表写入；之后心跳/容量/迟到 bump 全部 no-op（A46-03）。
+            self._mark_registry_closed()
+            if not self.unregister_service():
+                logger.error(
+                    "registry_unregister_failed: 服务注销未完全成功"
+                    "（instance=%s；stale 键由 stopped 墓碑/TTL 兜底）",
+                    getattr(self, "instance_id", None),
+                )
         
         # 关闭日志处理器
         if self._log_handler:
@@ -6780,6 +6954,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             heartbeat_timestamp=heartbeat,
             instance=self._resolve_consumer_name(),
             registered=service_info is not None,
+        ))
+        # S18-02A：draining/stopping 立即落盘失败必须可观测（不得静默）。
+        metrics.append(Metric(
+            "registry_status_flush_failed_total",
+            getattr(self, "_registry_status_flush_failures", 0),
+            {},
+            "counter",
+            "生命周期状态立即落盘失败次数（S18-02A）",
         ))
         # #42（W10-a）：容量指标与「派发侧看到的容量」同源（同一快照函数），
         # 否则看板与派发门会各报一套（口径分叉是最难查的一类事故）。

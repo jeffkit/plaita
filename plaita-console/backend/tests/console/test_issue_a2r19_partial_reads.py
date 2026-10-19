@@ -65,6 +65,15 @@ class _FaultyRedis:
                 return attr(pattern, **kwargs)
             return keys
 
+        if name == "scan":
+            def scan(*args, **kwargs):
+                # B2 r44 起读面走有界 SCAN（不再 KEYS），故障注入同样覆盖 SCAN。
+                pattern = kwargs.get("match", args[1] if len(args) > 1 else "*")
+                if any(p in str(pattern) for p in self.fail_scan_patterns):
+                    raise RuntimeError(f"simulated SCAN failure for {pattern!r}")
+                return attr(*args, **kwargs)
+            return scan
+
         if name in {"xlen", "xpending", "type", "get", "xrevrange", "xrange"}:
             def with_fault(*args, **kwargs):
                 self._maybe_fail(name, self._key(args, kwargs))

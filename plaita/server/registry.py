@@ -17,6 +17,27 @@ from ..logger import logger
 from plaita.core.url_redaction import _scrub_exception_text
 
 
+#: 注册表合法生命周期状态（S18-02A）。``closed`` 是**进程内终态**，不落键。
+STATUS_STARTING = "starting"
+STATUS_RUNNING = "running"
+STATUS_DRAINING = "draining"
+STATUS_STOPPING = "stopping"
+STATUS_STOPPED = "stopped"
+STATUS_CLOSED = "closed"
+
+VALID_STATUSES = frozenset({
+    STATUS_STARTING,
+    STATUS_RUNNING,
+    STATUS_DRAINING,
+    STATUS_STOPPING,
+    STATUS_STOPPED,
+    STATUS_CLOSED,
+})
+
+#: 唯一可派发状态——派发门（``capacity.DispatchCandidate``）只认这一个。
+DISPATCHABLE_STATUS = STATUS_RUNNING
+
+
 class ServiceInfo:
     """服务信息数据类"""
     
@@ -179,8 +200,36 @@ class ServiceRegistry:
                 service_info.instance_id
             )
             
-            # 更新状态和心跳时间
-            service_info.status = "running"
+            # 状态机（S18-02A）：只有 starting/running 可迁移到 running。
+            # - draining/stopping：启动期 SIGTERM 可能早于 run()，register 必须
+            #   保留 drain 状态，否则会把「正在停机」的实例复活成可派发（S9）。
+            # - stopped/closed：终态，注册不得复活（返回 False，不写键）。
+            # - 未知状态：保留原值（仍不可派发），不猜测成 running。
+            status = service_info.status
+            if status in (STATUS_STOPPED, STATUS_CLOSED):
+                logger.warning(
+                    "拒绝注册终态服务: %s:%s status=%s",
+                    service_info.service_type,
+                    service_info.instance_id,
+                    status,
+                )
+                return False
+            if status in (STATUS_STARTING, STATUS_RUNNING, "", None):
+                service_info.status = STATUS_RUNNING
+            elif status in (STATUS_DRAINING, STATUS_STOPPING):
+                logger.info(
+                    "注册保留服务生命周期状态 status=%s: %s:%s",
+                    status,
+                    service_info.service_type,
+                    service_info.instance_id,
+                )
+            else:
+                logger.warning(
+                    "注册遇到未知状态 status=%r：保留原值（不可派发）: %s:%s",
+                    status,
+                    service_info.service_type,
+                    service_info.instance_id,
+                )
             service_info.last_heartbeat = datetime.now().isoformat()
             
             # 写入 Redis，设置 TTL
@@ -216,28 +265,88 @@ class ServiceRegistry:
         Returns:
             bool: 注销是否成功
         """
+        key = self._get_registry_key(service_type, instance_id)
+
+        # 注销原子化/可观测（S18-02A / A46-01 S5/S6）：
+        #   1) 读现有条目拿完整快照；**读失败仍继续**（旧实现直接跳出，
+        #      连 delete 都不做，留下 running 残影）；
+        #   2) setex(stopped, 5) 写墓碑——delete 失败时键仍是 stopped，
+        #      派发门不会把注销中的实例当 running；
+        #   3) delete；任一步失败都 ERROR + 返回 False（调用方据此可观测）。
+        raw = None
+        read_ok = True
         try:
-            key = self._get_registry_key(service_type, instance_id)
-            
-            # 先更新状态为 stopping
-            service_data = self.redis_client.get(key)
-            if service_data:
-                service_info = ServiceInfo.from_json(service_data)
-                service_info.status = "stopped"
-                self.redis_client.setex(key, 5, service_info.to_json())  # 5秒后过期
-            
-            # 删除注册信息
-            self.redis_client.delete(key)
-            
-            logger.info("服务已注销: %s:%s", service_type, instance_id)
-            
-            self._registered_service = None
-            
-            return True
-            
+            raw = self.redis_client.get(key)
         except Exception as e:
-            logger.error("服务注销失败: %s", _scrub_exception_text(e))
-            return False
+            read_ok = False
+            logger.error(
+                "服务注销读注册信息失败（仍继续写墓碑/删除）: %s:%s: %s",
+                service_type,
+                instance_id,
+                _scrub_exception_text(e),
+            )
+
+        service_info = None
+        if raw:
+            try:
+                service_info = ServiceInfo.from_json(raw)
+            except Exception as e:
+                logger.warning(
+                    "服务注销时注册信息非 JSON（写最小 stopped 墓碑）: %s:%s: %s",
+                    service_type,
+                    instance_id,
+                    _scrub_exception_text(e),
+                )
+        if service_info is None:
+            service_info = ServiceInfo(
+                instance_id=instance_id,
+                service_type=service_type,
+                host="",
+                status=STATUS_STOPPED,
+            )
+        service_info.status = STATUS_STOPPED
+        service_info.last_heartbeat = datetime.now().isoformat()
+
+        tombstone_ok = False
+        try:
+            self.redis_client.setex(key, 5, service_info.to_json())  # 5秒后过期
+            tombstone_ok = True
+        except Exception as e:
+            logger.error(
+                "服务注销写 stopped 墓碑失败: %s:%s: %s",
+                service_type,
+                instance_id,
+                _scrub_exception_text(e),
+            )
+
+        delete_ok = False
+        try:
+            self.redis_client.delete(key)
+            delete_ok = True
+        except Exception as e:
+            logger.error(
+                "服务注销删除注册键失败（墓碑 stopped 保留至 TTL）: %s:%s: %s",
+                service_type,
+                instance_id,
+                _scrub_exception_text(e),
+            )
+
+        # 注销是终态：无论两步是否完全成功，都不再允许这个对象继续心跳/更新。
+        self._registered_service = None
+
+        if read_ok and tombstone_ok and delete_ok:
+            logger.info("服务已注销: %s:%s", service_type, instance_id)
+            return True
+
+        logger.error(
+            "服务注销未完全成功: %s:%s read_ok=%s tombstone_ok=%s delete_ok=%s",
+            service_type,
+            instance_id,
+            read_ok,
+            tombstone_ok,
+            delete_ok,
+        )
+        return False
     
     def heartbeat(self, service_info: ServiceInfo) -> bool:
         """
@@ -277,12 +386,14 @@ class ServiceRegistry:
             logger.error("心跳失败: %s", _scrub_exception_text(e))
             return False
     
-    def start_heartbeat(self, service_info: ServiceInfo):
+    def start_heartbeat(self, service_info: ServiceInfo, should_write=None):
         """
         启动心跳线程
         
         Args:
             service_info: 服务信息
+            should_write: 可选回调；返回 False 时本轮跳过写入。用于注销后的
+                closed 世代闸（迟到的最后一次心跳不得把键写回）。
         """
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             logger.warning("心跳线程已在运行")
@@ -293,7 +404,9 @@ class ServiceRegistry:
         
         def heartbeat_loop():
             while not self._heartbeat_stop_event.is_set():
-                if self._registered_service:
+                if self._registered_service and (
+                    should_write is None or should_write()
+                ):
                     self.heartbeat(self._registered_service)
                 self._heartbeat_stop_event.wait(self.heartbeat_interval)
         
@@ -471,6 +584,10 @@ class RegistryMixin:
             ttl=ttl,
             heartbeat_interval=heartbeat_interval
         )
+        # 注销世代闸（S18-02A / A46-03）：注销成功后所有写入 no-op。
+        # 惰性 helper 在 ``_registry_is_closed`` / ``_mark_registry_closed``，
+        # 骨架 worker（不走 init_registry 的 __new__ 单测）同样安全。
+        self._registry_closed = threading.Event()
         
         self._service_info = ServiceInfo(
             instance_id=ServiceRegistry.generate_instance_id(),
@@ -479,24 +596,73 @@ class RegistryMixin:
             status="starting",
             metadata=metadata or {}
         )
+
+    # ---------------------------------------------------------- closed 世代闸
+
+    def _registry_is_closed(self) -> bool:
+        """注销后写入闸：True = 本对象已注销，不得再写注册表。"""
+        event = getattr(self, "_registry_closed", None)
+        return bool(event is not None and event.is_set())
+
+    def _mark_registry_closed(self) -> None:
+        """置 closed（幂等）。注销是终态，之后 register/heartbeat/update 全部 no-op。"""
+        event = getattr(self, "_registry_closed", None)
+        if event is None:
+            event = threading.Event()
+            self._registry_closed = event
+        event.set()
+
+    def _registry_heartbeat_allowed(self) -> bool:
+        """心跳线程每轮写入前的 closed 检查（迟到的最后一次写入也拦）。"""
+        return not self._registry_is_closed()
+
+    def flush_registry_status(
+        self, retries: int = 3, backoff: float = 0.1
+    ) -> bool:
+        """**立即**把当前 ``ServiceInfo``（含 status/active/capacity）落盘。
+
+        ``request_drain`` / ``stop`` 不再等 10s 心跳：内存置位后直接写一次。
+        Redis 瞬断时短退避重试（默认 3 次，0.1s/0.2s），仍失败返回 False
+        （调用方负责 ERROR + 指标，不得静默）。
+        """
+        if self._registry_is_closed():
+            return True  # 已注销：无键可写，不算失败
+        registry = getattr(self, "_registry", None)
+        service_info = getattr(self, "_service_info", None)
+        if registry is None or service_info is None:
+            return False
+        attempts = max(1, int(retries))
+        for attempt in range(1, attempts + 1):
+            if registry.heartbeat(service_info):
+                return True
+            if attempt < attempts:
+                time.sleep(max(0.0, float(backoff)) * attempt)
+        return False
     
     def register_service(self) -> bool:
-        """注册服务并启动心跳"""
+        """注册服务并启动心跳。"""
+        if self._registry_is_closed():
+            logger.warning("服务注册已关闭（注销后不得复活），忽略本次注册")
+            return False
         if not self._registry or not self._service_info:
             logger.warning("服务注册未初始化")
             return False
         
         success = self._registry.register(self._service_info)
         if success:
-            self._registry.start_heartbeat(self._service_info)
+            self._registry.start_heartbeat(
+                self._service_info,
+                should_write=self._registry_heartbeat_allowed,
+            )
         
         return success
     
     def unregister_service(self) -> bool:
-        """注销服务并停止心跳"""
+        """注销服务并停止心跳（幂等；入口先置 closed 封住迟到写入）。"""
         if not self._registry or not self._service_info:
             return False
         
+        self._mark_registry_closed()
         self._registry.stop_heartbeat()
         
         return self._registry.unregister(
@@ -510,7 +676,24 @@ class RegistryMixin:
         metadata: Optional[Dict[str, Any]] = None,
         status: Optional[str] = None
     ):
-        """更新注册信息（status 用于 draining 等生命周期状态，None = 不改）"""
+        """更新注册信息（status 用于 draining 等生命周期状态，None = 不改）。
+
+        直接改 ``_service_info``（单一状态源）——``register()`` 之前调用的
+        ``request_drain`` 也要能在内存中生效，否则 ``update_service_info``
+        在 ``_registered_service is None`` 时直接 return（S9 前置坑）。
+        注销后（closed）任何更新都是 no-op。
+        """
+        if self._registry_is_closed():
+            logger.debug("注册表已关闭，忽略状态更新 status=%s", status)
+            return
+        service_info = getattr(self, "_service_info", None)
+        if service_info is not None:
+            if active_tasks is not None:
+                service_info.active_tasks = active_tasks
+            if metadata:
+                service_info.metadata.update(metadata)
+            if status:
+                service_info.status = status
         if self._registry:
             self._registry.update_service_info(
                 active_tasks=active_tasks,

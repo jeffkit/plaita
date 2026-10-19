@@ -300,10 +300,10 @@ aiohttp 的 10，见 [MIGRATION](https://github.com/jeffkit/plaita/blob/main/MIG
 
 信号（SIGTERM/SIGINT）与控制通道 stop 命令都只**请求** drain，绝不立即退出：
 
-1. 注册表状态置 `draining`（`GET /api/services` 可见 `flow_worker` 的 status），编排/就绪探针据此摘流量；
+1. 注册表状态置 `draining`（`GET /api/services` 可见 `flow_worker` 的 status），编排/就绪探针据此摘流量；该状态**立即落盘**，不再等 10s 心跳（S18-02A）；
 2. 消费循环在**任务边界**退出：在途任务完整跑完并 ack；
 3. 等待有界：超过 `PLAITA_WORKER_DRAIN_TIMEOUT`（默认 30s）仍有在途任务 → 放弃当前步并退出。**该消息不 ack**，留在 pending，由其他 worker 经 XCLAIM 从**步界检查点**续跑（那一步会重放）；
-4. 退出前把注册表状态置 `stopping` 再注销。
+4. 退出前把注册表状态置 `stopping`（同样立即落盘）再注销；注销后 closed 闸封住心跳/容量/迟到计数写入，注册键不会复活。
 
 K8s/systemd 侧对齐（否则 drain 会被 SIGKILL 提前打断）：
 
