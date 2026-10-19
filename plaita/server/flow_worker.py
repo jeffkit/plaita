@@ -2501,8 +2501,13 @@ class FlowWorker:
             getattr(self, "execution_storage", None), execution_id, tenant_id
         )
 
-    def _start_carrier_tombstoned(self, body: Dict[str, Any]) -> bool:
-        """start 载体是否指向已删除执行（同租户 + 墓碑命中）。"""
+    def _carrier_tombstoned(self, body: Dict[str, Any]) -> bool:
+        """start/resume 载体是否指向已删除执行（同租户 + 墓碑命中）。
+
+        A51-01 原先只拦 ``start``；A2R25-04 起 ``resume`` 同样在派发闸被拦
+        ——备份恢复把状态键带回来不会撤销墓碑，「删除即不可复活」在 resume
+        载体上必须与 start 同口径。
+        """
         execution_id = body.get("execution_id")
         if not isinstance(execution_id, str) or not execution_id:
             return False
@@ -2513,7 +2518,7 @@ class FlowWorker:
             return False
         logger.warning(
             "执行 %s 已删除（墓碑 tenant=%s reason=%s deleted_at=%s），"
-            "丢弃 start 载体（不重建）: type=%s tenant=%s",
+            "丢弃 %s 载体（不重建/不推进）: tenant=%s",
             execution_id,
             tombstone.get("tenant"),
             tombstone.get("reason"),
@@ -3298,6 +3303,28 @@ class FlowWorker:
             error_msg = f"流程ID不匹配: 期望 {flow_id}, 实际 {stored_flow_id}"
             logger.error(error_msg)
             raise ValueError(error_msg)
+
+        # A2R25-04：恢复路径墓碑闸（与 A51-01 的 start 闸同口径）。删除执行
+        # 清掉状态键后，备份恢复可以把状态键带回来，但墓碑在平台根、同 TTL
+        # 窗口内仍然有效——「删除即不可复活」不能只在 start 载体上成立。
+        # 位置在 load 之后、取租约之前（调用方的租约内复核会再走一遍本函数，
+        # 覆盖 load→acquire 窗口）；命中即具名返回 deleted，绝不 run_distributed。
+        tombstone = self._load_execution_tombstone(execution_id, current_tenant())
+        if tombstone is not None:
+            logger.warning(
+                "执行 %s 已删除（墓碑 tenant=%s reason=%s deleted_at=%s），"
+                "拒绝 resume 推进（resume_type=%s）：恢复的状态键不撤销删除",
+                execution_id,
+                tombstone.get("tenant"),
+                tombstone.get("reason"),
+                tombstone.get("deleted_at"),
+                resume_type,
+            )
+            return state, {
+                "execution_id": execution_id,
+                "status": "deleted",
+                "discarded": True,
+            }
 
         # 终态短路（2026-09 分布式评审 P1-1）：at-least-once 下重复投递的
         # resume 任务会命中已完成的执行。历史实现走完正常 resume 再在异常
@@ -6016,12 +6043,18 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
             return
 
-        # A51-01：执行删除墓碑闸。放在配额闸**之前**——已删执行的 start
-        # 载体不得占用 tenant_running 名额（A51-03）；放在租户状态闸之后，
-        # 停用租户消息仍走既有丢弃路径。命中即返回（消费循环随后 ack），
-        # 同 id 的 dedup 映射一并释放（新 id 复用旧 dedup_key 不受影响）。
-        if message_type == "start" and self._start_carrier_tombstoned(message_data):
-            dedup_key = message_data.get("dedup_key")
+        # A51-01/A2R25-04：执行删除墓碑闸。放在配额闸**之前**——已删执行的
+        # start 载体不得占用 tenant_running 名额（A51-03）；放在租户状态闸
+        # 之后，停用租户消息仍走既有丢弃路径。命中即返回（消费循环随后
+        # ack），同 id 的 dedup 映射一并释放（新 id 复用旧 dedup_key 不受
+        # 影响）。resume 与 start 同口径：恢复状态键不会撤销墓碑，已删执行
+        # 的决议/续跑载体不得再推进。
+        if message_type in ("start", "resume") and self._carrier_tombstoned(
+            message_data
+        ):
+            dedup_key = (
+                message_data.get("dedup_key") if message_type == "start" else None
+            )
             if dedup_key:
                 token = set_current_tenant(message_data.get("tenant_id"))
                 try:
