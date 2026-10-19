@@ -413,6 +413,67 @@ class RedisExecutionStorage(ExecutionStorage):
                 logger.error("Failed to prune stale execution index members: %s", _scrub_url_text(e))
         return states
 
+    def _ensure_index_member(self, execution_id: str, state: ExecutionState) -> None:
+        """读路径自愈：状态可读但索引缺成员时补回（A2R25-07）。
+
+        恢复/外部写入只 SET 回状态键时 ``index:ready`` 仍在——一次性回填
+        不会重跑，列表永远看不到该执行。读取是最早能确认「状态确实存在」
+        的路径，在这里补成员把恢复后的可见性闭合；已存在的成员只多做一次
+        ZSCORE（O(log N)），不改写 score。补回失败只 WARNING 不抛出：详情/
+        直读仍应成功，列表不可见是可观测的降级，不是读取失败。
+        """
+        index_key = self._execution_index_key()
+        try:
+            if self.client.zscore(index_key, execution_id) is not None:
+                return
+            self.client.zadd(
+                index_key, {execution_id: execution_start_time_score(state)}
+            )
+        except Exception as e:  # noqa: BLE001 — 读路径降级：详情可读优先
+            logger.warning(
+                "执行 %s 的索引成员缺失且补回失败（列表可能不可见）: %s",
+                execution_id, _scrub_url_text(e),
+            )
+            return
+        logger.warning(
+            "执行 %s 的状态可读但索引缺成员（恢复/外部写入），读路径已补回"
+            "（A2R25-07）",
+            execution_id,
+        )
+
+    def rebuild_execution_index(self) -> int:
+        """强制重建执行列表索引（A2R25-07 恢复后的显式 reindex）。
+
+        删除索引与就绪标记后按 ``{ns}:execution:*`` 状态键全量回填；用于
+        「只恢复了状态键/先恢复索引后恢复状态」等索引与状态分叉的恢复现场
+        （``load_execution_state`` 的读路径自愈只覆盖被读取到的执行）。
+
+        这是 O(N) SCAN，只在确认列表不可见或灾难恢复后手工调用。返回重建
+        后的索引成员数；清索引/回填/读结果任一步失败返回 ``-1`` 并 ERROR
+        （不得把失败静默当成「0 条」）。
+        """
+        index_key = self._execution_index_key()
+        ready_key = execution_index_ready_key(self.namespace)
+        try:
+            pipe = self.client.pipeline()
+            pipe.delete(index_key)
+            pipe.delete(ready_key)
+            pipe.execute()
+        except Exception as e:  # noqa: BLE001 — 显式维护命令：失败以 -1 上报
+            logger.error("重建执行索引失败（清索引阶段）: %s", _scrub_url_text(e))
+            return -1
+        self._ensure_execution_index()
+        try:
+            # _ensure_execution_index 整批失败时不会置就绪标记；据此区分
+            # 「回填成功（可能 0 条）」与「回填失败」。
+            if not self.client.exists(ready_key):
+                logger.error("重建执行索引失败（回填未完成，就绪标记未置位）")
+                return -1
+            return int(self.client.zcard(index_key) or 0)
+        except Exception as e:  # noqa: BLE001 — 显式维护命令：失败以 -1 上报
+            logger.error("重建执行索引失败（读取结果）: %s", _scrub_url_text(e))
+            return -1
+
     def save_execution_state(self, execution_id: str, state: ExecutionState) -> bool:
         """保存流程执行状态（同步维护 ``{ns}:execution:index`` 索引成员）。
 
@@ -478,11 +539,15 @@ class RedisExecutionStorage(ExecutionStorage):
             return None
         try:
             state_dict = self.deserialize_state(data)
-            return ExecutionState.model_validate(state_dict)
+            state = ExecutionState.model_validate(state_dict)
         except Exception as e:
             raise ExecutionStateLoadError(
                 f"执行状态反序列化失败（数据损坏）: {execution_id}: {e}"
             ) from e
+        # A2R25-07：恢复/外部写入可能只带回状态键，索引成员缺失时列表不可见。
+        # 读路径确认状态存在后补回成员（自愈；失败只 WARNING）。
+        self._ensure_index_member(execution_id, state)
+        return state
     
     def counter_keys_for_execution(self, execution_id: str) -> List[str]:
         """该执行名下的全部计数键（固定五类 + noderetry 节点维度子键）。

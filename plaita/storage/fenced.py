@@ -33,6 +33,7 @@ from .base import StateSerializationError
 from .redis import (
     TERMINAL_EXECUTION_STATUSES,
     RedisExecutionStorage,
+    execution_fence_generation_key,
     execution_fence_key,
     execution_index_key,
     execution_lease_key,
@@ -47,15 +48,25 @@ from plaita.core.url_redaction import _scrub_url_text
 
 # 单段 Lua：fence 世代匹配才允许写执行状态。
 # KEYS[1]=状态键, KEYS[2]=fence 键, KEYS[3]=执行列表索引 ZSET,
+# KEYS[4]=fencegen 世代计数器,
 # ARGV[1]=序列化状态, ARGV[2]=期望世代, ARGV[3]=TTL 秒（0=不带 EX），
 # ARGV[4]=索引 score（start_time epoch），ARGV[5]=索引 member（execution_id）。
-# 返回 1=写入成功；0=世代不符（键缺失也算不符）。
+# 返回 1=写入成功；0=fence 键不符（键缺失也算不符）；
+#      -1=fence 键命中但 fencegen 与期望世代不一致（部分恢复/计数器回滚）。
+# A2R25-05：只比较 fence 键时，把旧 `state+fence` 恢复回来（fencegen 仍是
+# 新值）会让陈旧 worker 的 token 重新命中——删除/换代留下的新 fencegen
+# 不参与 CAS。fencegen 是永不清除的单调锚（A2R13），正常 acquire 在同一段
+# Lua 内把 fence 与 fencegen 写成同一个世代；因此「两者不相等」只可能来自
+# 恢复/手工改键，必须拒绝写并把不一致留成 WARNING 可观测信号。
 # 索引必须在脚本内同步维护：本路径绕过 RedisExecutionStorage.save_execution_state
 # 直接 SET 状态键，不在此 ZADD 则索引成员会滞后（列表长期显示过期 status，
 # 这正是当初否决「save 时维护索引」的顾虑）。
 _FENCED_SAVE_LUA = """
 local ttl = tonumber(ARGV[3]) or 0
 if redis.call('get', KEYS[2]) == ARGV[2] then
+  if redis.call('get', KEYS[4]) ~= ARGV[2] then
+    return -1
+  end
   if ttl > 0 then
     redis.call('set', KEYS[1], ARGV[1], 'EX', ttl)
   else
@@ -75,20 +86,27 @@ end
 # 状态键 + 索引成员 + fence 键 + lease 键 + 执行级计数键（A51-03）+
 # 执行墓碑（A51-01，平台根键）。
 # KEYS[1]=状态键, KEYS[2]=fence 键, KEYS[3]=索引 ZSET, KEYS[4]=lease 键,
-# KEYS[5..N-1]=执行级计数键（nofail/g1wakeups/noderefetch/noderetry[:node]/
+# KEYS[5]=fencegen 世代计数器,
+# KEYS[6..N-1]=执行级计数键（nofail/g1wakeups/noderefetch/noderetry[:node]/
 # affinityhandover），KEYS[N]=执行墓碑键（平台根，最后一个）。
 # ARGV[1]=期望世代, ARGV[2]=execution_id, ARGV[3]=墓碑 TTL 秒（0=不过期）,
 # ARGV[4]=墓碑 payload
-# 返回 1=删除成功；0=世代不符（键缺失也算不符）。墓碑与四删同段 Lua 原子
-# 落盘：脚本中途失败时 Redis 不会只执行一半（Lua 单命令原子）。
-# 世代计数器 fencegen 不在删除范围（A2R13）：它是删除后 ABA 防护的单调锚。
+# 返回 1=删除成功；0=fence 键不符（键缺失也算不符）；
+#      -1=fence 键命中但 fencegen 不一致（A2R25-05：部分恢复的旧 fence）。
+# 墓碑与四删同段 Lua 原子落盘：脚本中途失败时 Redis 不会只执行一半
+# （Lua 单命令原子）。世代计数器 fencegen 不在删除范围（A2R13）：它是删除
+# 后 ABA 防护的单调锚；但删除前必须校验它与本世代一致，否则恢复回来的旧
+# fence 会让陈旧世代获得删除权。
 _FENCED_DELETE_LUA = """
 if redis.call('get', KEYS[2]) == ARGV[1] then
+  if redis.call('get', KEYS[5]) ~= ARGV[1] then
+    return -1
+  end
   redis.call('del', KEYS[1])
   redis.call('zrem', KEYS[3], ARGV[2])
   redis.call('del', KEYS[2])
   redis.call('del', KEYS[4])
-  for i = 5, #KEYS - 1 do
+  for i = 6, #KEYS - 1 do
     redis.call('del', KEYS[i])
   end
   local ttl = tonumber(ARGV[3]) or 0
@@ -177,10 +195,11 @@ class FencedExecutionStorage(ExecutionStorage):
             )
             result = client.eval(
                 _FENCED_SAVE_LUA,
-                3,
+                4,
                 state_key,
                 fence_key,
                 execution_index_key(namespace),
+                execution_fence_generation_key(namespace, execution_id),
                 serialized,
                 str(int(generation)),
                 str(int(ttl)),
@@ -190,6 +209,21 @@ class FencedExecutionStorage(ExecutionStorage):
         except Exception as e:
             logger.error("Fenced save execution state %s failed: %s", execution_id, _scrub_url_text(e))
             return False
+        if result == -1:
+            # A2R25-05：fence 键命中但 fencegen 不一致——部分恢复（旧
+            # state+fence、新 fencegen）或计数器回滚。这不是「租约被接管」
+            # （fence 仍是本世代），而是恢复动作把 CAS 权威值与单调锚拆开
+            # 了；必须拒绝写并 loud，否则陈旧 worker 会把已删执行写回。
+            logger.warning(
+                "fenced 写被拒：执行 %s 的 fence 与 fencegen 世代不一致"
+                "（token gen=%s），判定为部分恢复/计数器回滚；状态写拒绝"
+                "（A2R25-05）",
+                execution_id, generation,
+            )
+            raise ExecutionLeaseError(
+                f"fencing generation inconsistent for execution {execution_id} "
+                f"(gen={generation}); state write refused"
+            )
         if not result:
             # 世代不符：租约已被新世代接管（或 fence 键丢失）。拒绝写并让
             # 上层（FlowWorker 的 except ExecutionLeaseError 链）以失租语义
@@ -256,11 +290,12 @@ class FencedExecutionStorage(ExecutionStorage):
         try:
             result = client.eval(
                 _FENCED_DELETE_LUA,
-                4 + len(counter_keys) + 1,
+                5 + len(counter_keys) + 1,
                 state_key,
                 execution_fence_key(namespace, execution_id),
                 execution_index_key(namespace),
                 execution_lease_key(namespace, execution_id),
+                execution_fence_generation_key(namespace, execution_id),
                 *counter_keys,
                 execution_tombstone_key(execution_id),
                 str(int(generation)),
@@ -275,6 +310,17 @@ class FencedExecutionStorage(ExecutionStorage):
                 _scrub_url_text(e),
             )
             return False
+        if result == -1:
+            # A2R25-05：与 save 同一判据——部分恢复的旧 fence 不得获得删除权。
+            logger.warning(
+                "fenced 删除被拒：执行 %s 的 fence 与 fencegen 世代不一致"
+                "（token gen=%s），判定为部分恢复/计数器回滚（A2R25-05）",
+                execution_id, generation,
+            )
+            raise ExecutionLeaseError(
+                f"fencing generation inconsistent for execution {execution_id} "
+                f"(gen={generation}); state delete refused"
+            )
         if not result:
             raise ExecutionLeaseError(
                 f"fencing token mismatch for execution {execution_id} "
