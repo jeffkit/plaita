@@ -195,7 +195,8 @@ JS 引擎，CommonJS `require` 可用），既不看 `sandbox_backend`，也没�
 js 各档位对应：`docker` 跑 `PLAITA_SANDBOX_DOCKER_NODE_IMAGE`（默认 `node:20-alpine`，
 `--network none` / 只读 FS / 资源与 pids 上限，与 Python 容器同一套加固参数）；
 `subprocess` 跑 `node -e`（`PLAITA_SANDBOX_NODE_BIN`，默认 `node`，受
-`PLAITA_SANDBOX_TIMEOUT` 约束，超时/取消整组击杀 + env 白名单）；`unsafe` 是历史
+`PLAITA_SANDBOX_TIMEOUT` 墙钟秒数约束，0/负值启动期拒绝；超时/取消整组击杀 +
+env 白名单）；`unsafe` 是历史
 PyExecJS 裸跑（无隔离、无超时）。
 
 ```bash

@@ -246,7 +246,8 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 报错。详见
 [运维 Runbook · code 语言白名单](../distributed/ops-runbook.md#code-语言白名单)。
 
-`default_backend="subprocess"` 时子进程受 `PLAITA_SANDBOX_TIMEOUT`（秒，默认 10）约束。
+`default_backend="subprocess"` 时子进程受 `PLAITA_SANDBOX_TIMEOUT`（**墙钟**秒，默认 10；
+不是 CPU 时间——睡眠与计算消耗同一份预算；0/负值在启动期具名拒绝）约束。
 地址空间上限 `PLAITA_SANDBOX_MEMORY_MB`（MB）**默认 `0` = 不限制**：非 0 值在 Linux 上经
 `RLIMIT_AS` 真实生效，会卡住 node/npm/pnpm 系命令的启动（V8 启动期预留 GB 级虚拟地址，
 表现为截断的崩溃栈）——这类命令请保持 `0`。

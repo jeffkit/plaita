@@ -18,8 +18,10 @@ Python backend selection is controlled by ``CodeNode.sandbox_backend``:
 ``"subprocess"``
     Spawns a fresh Python interpreter for every invocation.  The child
     inherits the host's file system and network access, but is bounded by
-    configurable CPU-time and wall-clock timeouts, and an **optional**
-    address-space limit on Linux.  Safer than ``"restricted"`` against code
+    a configurable **wall-clock** timeout (there is no separate CPU-time
+    limit: sleeping and CPU work both consume the same budget), and an
+    **optional** address-space limit on Linux.  Safer than ``"restricted"``
+    against code
     that bypasses RestrictedPython's AST guards, but does **not** block
     network or file I/O.  Input/output is serialised as JSON; only
     JSON-serialisable types are supported.  Environment variables:
@@ -96,6 +98,7 @@ import base64
 import importlib
 import json
 import logging
+import math
 import operator as _op
 import os
 import signal
@@ -167,8 +170,49 @@ LANGUAGE_PYTHON = "python"
 # Sandbox configuration (env-var overrides)
 # ---------------------------------------------------------------------------
 
+def _positive_timeout_seconds(name: str, value: Any) -> float:
+    """计时参数 fail-closed 校验：必须为有限正数（0/负值/非有限具名拒绝）。
+
+    引擎语义 ``timeout=0`` 是零预算（立即超时）；历史实现
+    ``deadline = (...) if timeout else None`` 把 0 当成「无限」——部署脚本
+    把未设置的变量展开成 0 时，沙箱墙钟护栏会整体消失（r39 A1）。与
+    plaita-nodes #205 的 ``_positive_limit`` 同风格：带字段名的 ValueError，
+    让错误在启动/调用期暴露，而不是静默改道。
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a positive number of seconds (got {value!r}); "
+            "0 and negative values are rejected"
+        ) from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError(
+            f"{name} must be a positive number of seconds (got {value!r}); "
+            "0 and negative values are rejected"
+        )
+    return seconds
+
+
+def _positive_int_env_seconds(name: str, default: str) -> int:
+    """读取正数秒级 env；0/负数/非整数在 import 期具名失败。"""
+    raw = os.environ.get(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a positive integer number of seconds (got {raw!r})"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer number of seconds (got {raw!r}); "
+            "0 is a zero budget, not unlimited"
+        )
+    return value
+
+
 # subprocess backend
-SANDBOX_SUBPROCESS_TIMEOUT: int = int(os.environ.get("PLAITA_SANDBOX_TIMEOUT", "10"))
+SANDBOX_SUBPROCESS_TIMEOUT: int = _positive_int_env_seconds("PLAITA_SANDBOX_TIMEOUT", "10")
 # RLIMIT_AS 上限（MB）。默认 0 = 不限制（与 macOS 上的历史实际行为一致）。
 # 2026-10-06 事故：默认 256 在 Linux 上真实生效，node/pnpm 类命令启动即 V8 OOM
 # （V8 启动期预留远超 256MB 的地址空间，RLIMIT_AS 卡的是虚拟地址而非 RSS），
@@ -186,7 +230,7 @@ SUBPROCESS_ENV_EXTRA = _env.SUBPROCESS_ENV_EXTRA
 
 # docker backend
 SANDBOX_DOCKER_IMAGE: str = os.environ.get("PLAITA_SANDBOX_DOCKER_IMAGE", "python:3.12-slim")
-SANDBOX_DOCKER_TIMEOUT: int = int(os.environ.get("PLAITA_SANDBOX_DOCKER_TIMEOUT", "30"))
+SANDBOX_DOCKER_TIMEOUT: int = _positive_int_env_seconds("PLAITA_SANDBOX_DOCKER_TIMEOUT", "30")
 SANDBOX_DOCKER_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_DOCKER_MEMORY_MB", "128"))
 SANDBOX_DOCKER_CPUS: str = os.environ.get("PLAITA_SANDBOX_DOCKER_CPUS", "0.5")
 # 容器运行用户（如 "65534:65534"）。默认空 = 镜像默认用户（root）。
@@ -590,8 +634,17 @@ def _popen_wait_cancellable(
     communicate 以 0.25s 步进重试（stdin 输入只在首调用传，超时续传是
     未定义行为）；两个结束通道都先把进程树杀干净、收回输出，再抛
     RuntimeError——调用方拿到异常的时刻进程已经不存在，不留孤儿。
+
+    ``timeout`` 必须是有限正数（秒）：0/负值在历史上分别意味着「无限」和
+    「误导性报错」，现在一律具名 ValueError（r39 A1）。校验失败时进程可能
+    已经 spawn，先杀整组再抛，避免调用方拿到异常却留下裸进程。
     """
-    deadline = (time.monotonic() + timeout) if timeout else None
+    try:
+        timeout = _positive_timeout_seconds(f"{what} timeout", timeout)
+    except ValueError:
+        _kill_process_tree(proc)
+        raise
+    deadline = time.monotonic() + timeout
     first = True
     while True:
         try:
@@ -774,7 +827,7 @@ def _run_docker_container(container_name, cmd, timeout, cancel_event,
     try:
         out, err = _popen_wait_cancellable(
             proc, timeout, cancel_event, what, json.dumps(input_value).encode())
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         # 客户端进程组已杀；容器本体归 dockerd 管，--rm 只在容器正常退出时
         # 生效——强杀客户端后必须显式 rm，否则容器残活。
         try:

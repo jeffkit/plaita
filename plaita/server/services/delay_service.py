@@ -34,6 +34,7 @@ Redis 抖动时，触发失败被吞、条目已出排程，挂起执行的唯�
 """
 import asyncio
 import json
+import math
 import threading
 import time
 from typing import Any, Dict
@@ -53,6 +54,28 @@ DELAY_MAX_TRIGGER_ATTEMPTS = 5
 # #35：第 n 次失败后的退避 = min(base * 2^(n-1), max) 秒。
 DELAY_RETRY_BACKOFF_BASE_SECONDS = 1.0
 DELAY_RETRY_BACKOFF_MAX_SECONDS = 30.0
+
+
+def _positive_poll_interval(value: Any) -> float:
+    """``poll_interval`` 必须为有限正数；非正值具名拒绝（r39 A7）。
+
+    0/负值传给 ``threading.Event.wait(timeout=...)`` 会立即返回：消费线程
+    退化成忙轮询（吃满一个核并持续打 Redis）。这里不在构造期静默钳到某个
+    下限——配置写错应当 loud fail。
+    """
+    try:
+        interval = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "DelayService poll_interval must be a positive number of seconds "
+            f"(got {value!r})"
+        ) from exc
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError(
+            "DelayService poll_interval must be a positive number of seconds "
+            f"(got {value!r}); 0/negative values would busy-poll"
+        )
+    return interval
 
 
 class DelayService(BaseExtendedService):
@@ -93,7 +116,7 @@ class DelayService(BaseExtendedService):
             self._retry_backoff_base,
             float((service_config or {}).get("retry_backoff_max", DELAY_RETRY_BACKOFF_MAX_SECONDS)),
         )
-        self._poll_interval = float(
+        self._poll_interval = _positive_poll_interval(
             (service_config or {}).get("poll_interval", DELAY_POLL_INTERVAL_SECONDS)
         )
         self._consumer_thread = None
