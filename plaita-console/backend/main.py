@@ -215,6 +215,22 @@ async def lifespan(app: FastAPI):
         logger.error(f"FlowStore 初始化失败: {e}")
         raise
 
+    # A66-03/A66-04：凭据导出文件是 DB 的派生缓存，启动时以 DB 为权威对账。
+    # 缺失重建、陈旧（含 #251 导出→commit 窗口被 SIGKILL 打断留下的鬼凭据）
+    # 刷新、多余旁文件 WARNING。导出失败 ⇒ 拒绝启动：让引擎带着缺失/陈旧
+    # 密钥继续跑，比启动失败更危险——控制台仍显示「凭据正常」，分叉不会自愈。
+    try:
+        from .services import credentials_svc
+    except ImportError:
+        from services import credentials_svc  # type: ignore
+    try:
+        app.state.credential_export_reconcile = credentials_svc.reconcile_exports()
+    except Exception as e:
+        logger.error(
+            "凭据导出对账失败（拒绝启动：DB 与引擎导出文件已分叉）: %s", e
+        )
+        raise
+
     # 引擎存储漂移兜底（尽力而为，不阻断启动）：把 PG 里全部已发布定义
     # 回填/对齐到「本进程所连的 Redis」——补齐「历史版本从未重跑发布」的缺口
     # （console 从 SQLite 迁到 PG 后 Redis 为空，worker 报「找不到流程定义」）。

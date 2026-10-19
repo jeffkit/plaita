@@ -140,6 +140,26 @@ flow_worker 自动带上密钥环境。
 密钥来源：`PLAITA_CREDENTIALS_KEY` 环境变量，或自动生成于 DB 同目录的
 `.plaita-credentials.key`。多机部署请统一注入同一密钥。
 
+**导出文件默认与 DB 同目录**：未显式设置 `PLAITA_CREDENTIALS_FILE` 时，
+SQLite 部署导出到 DB 同目录的 `.plaita-credentials.json`（非 SQLite 回退
+当前工作目录）。导出文件是 DB 的派生缓存，按 DB 路径落盘让**同一 DB 的
+多个 console/worker 副本共享同一份文件**；不再各按 cwd 持有一份互不收敛的
+副本（否则一个副本删除/轮换凭据，其他副本的引擎仍能解出旧值）。引擎侧
+`plaita.credentials` 用同一规则解析默认路径与密钥文件。
+
+- **多副本部署**：共享同一 SQLite DB 的副本无需额外配置；独立启动的
+  worker 需能读到同一 `PLAITA_CONSOLE_DB_URL` 才能解析到 DB 同目录（console
+  拉起的 worker 会自动注入绝对路径）。PostgreSQL 等无法从 DB URL 推断共享
+  目录的后端，**必须**给所有 console/worker 显式注入同一绝对路径的
+  `PLAITA_CREDENTIALS_FILE`（并确保该路径持久化/挂卷）。
+- **容器部署**：DB 同目录若在容器内且未挂卷，重启会丢文件；启动对账会从
+  DB 重建，但请仍把该目录挂持久卷以避免窗口期。
+- **启动对账**：console 启动时以 DB 为权威重建缺失的导出文件、刷新陈旧
+  内容（含进程在「导出成功→提交 DB」间被杀留下的条目），并对没有对应租户
+  的旁文件记 WARNING。对账写入失败会**拒绝启动**，不让引擎带着缺失/陈旧
+  的密钥继续跑。租户删除/同名重建会清掉同 slug 的凭据行与导出文件，新租户
+  不会继承前代密钥。
+
 **导出写入是原子的**：保存/删除凭据时先写同目录临时文件（`flush` + `fsync`
 + 0600），再用 `os.replace` 原子替换目标文件。磁盘写满、超配额或进程中断
 不会把上一份完好的导出文件截断成半截 JSON——旧文件逐字节保留，引擎继续

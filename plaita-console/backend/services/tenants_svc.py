@@ -180,6 +180,21 @@ def create_tenant(store, tenant_id: str, name: str = "",
                 f"租户 slug {tenant_id} 存在前代遗留数据（{detail}）："
                 "请先显式清理/归档后再创建（不允许同名继承）"
             )
+        # A66-02：同名重建不得继承前代凭据。租户行不存在 ⇒ 同 slug 的凭据行
+        # 与导出旁文件都没有合法归属（旧版本删租户未清凭据 / 按 cwd 留下的
+        # 副本）。先清掉再建，避免新租户经陈旧文件解出前代密钥。
+        orphan_credentials = session.scalars(
+            select(Credential).where(Credential.tenant_id == tenant_id)
+        ).all()
+        for stale in orphan_credentials:
+            session.delete(stale)
+        if orphan_credentials:
+            logger.warning(
+                "创建租户 %s：清除 %d 条前代孤儿凭据行（不允许同名继承）",
+                tenant_id,
+                len(orphan_credentials),
+            )
+        _remove_tenant_credentials_export(tenant_id)
         secret_id, secret_key = new_contract_secret()
         row = Tenant(
             id=tenant_id,

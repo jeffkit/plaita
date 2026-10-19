@@ -21,6 +21,7 @@ try:
     from ..models.flow import (
     Base,
     CopilotThread,
+    Credential,
     DEFAULT_TENANT_ID,
     FlowRecord,
     FlowVersion,
@@ -39,6 +40,7 @@ except ImportError:
     from models.flow import (  # type: ignore
     Base,
     CopilotThread,
+    Credential,
     DEFAULT_TENANT_ID,
     FlowRecord,
     FlowVersion,
@@ -1279,10 +1281,26 @@ def _migrate_tenant_schema() -> None:
         logger.info("多租户迁移：重建表 %s，存量数据归入租户 '%s'", ",".join(rebuild), DEFAULT_TENANT_ID)
 
 
+def _remove_default_credentials_export() -> None:
+    """删除 default 租户的导出文件（若存在）；延迟导入避免服务循环依赖。"""
+    try:
+        from . import credentials_svc
+    except ImportError:
+        from services import credentials_svc  # type: ignore
+    path = credentials_svc.credentials_file(DEFAULT_TENANT_ID)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.exception("default 租户重建：凭据导出文件清理失败: %s", path)
+        raise
+
+
 def ensure_tenant_bootstrap() -> None:
     """多租户启动引导（幂等，多租户首次启动时把存量数据收编进 default 租户）。
 
-    - default 租户不存在则创建；
+    - default 租户不存在则创建（重建前清除前代同租户凭据，见 A66-02）；
     - 各租户域表中 tenant_id='' 的存量行归入 default；
     - 无任何 membership 的非平台管理员补 membership(default, users.role)；
     - 首次引导（tenants 表为空）时，既有全局 admin 提升为 platform_admin。
@@ -1294,11 +1312,29 @@ def ensure_tenant_bootstrap() -> None:
         raise RuntimeError("引擎未初始化，请先调用 init_engine()")
     if _engine.url.get_backend_name() != "sqlite":
         return
+    # A66-02：default 行不在 ⇒ 已标记 'default' 的凭据行与导出文件属于前代
+    # （旧版本删租户未清凭据）。必须在下方 `tenant_id='' → default` 迁移
+    # UPDATE 之前删除（否则会把前代行一起「归户」），也必须独立于随后
+    # `_engine.begin()` 的迁移事务（同一 SQLite 库上两个写连接会互相锁死）。
+    with _engine.connect() as conn:
+        default_missing = conn.execute(
+            select(Tenant.id).where(Tenant.id == DEFAULT_TENANT_ID)
+        ).first() is None
+    if default_missing:
+        with _engine.begin() as conn:
+            purged = conn.execute(
+                delete(Credential).where(Credential.tenant_id == DEFAULT_TENANT_ID)
+            ).rowcount or 0
+        if purged:
+            logger.warning(
+                "default 租户重建：清除 %d 条前代孤儿凭据行（不允许继承）",
+                purged,
+            )
+        _remove_default_credentials_export()
+
     with _SessionLocal() as session:  # type: Session
         first_boot = session.query(Tenant).count() == 0
-        if first_boot:
-            session.add(Tenant(id=DEFAULT_TENANT_ID, name="默认租户", status="active"))
-        elif session.query(Tenant).filter(Tenant.id == DEFAULT_TENANT_ID).count() == 0:
+        if default_missing:
             session.add(Tenant(id=DEFAULT_TENANT_ID, name="默认租户", status="active"))
 
         with _engine.begin() as conn:
