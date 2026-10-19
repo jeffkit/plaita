@@ -258,9 +258,9 @@ class _OneShotQueue(RedisStreamTaskQueue):
         self.acked_ids.append(message_id)
         super().ack(message_id)
 
-    def enqueue(self, task):
+    def enqueue(self, task, *, schema_version=None):
         self.enqueued_bodies.append(dict(task))
-        return super().enqueue(task)
+        return super().enqueue(task, schema_version=schema_version)
 
     def note_poison(self):
         self.poison += 1

@@ -263,7 +263,7 @@ class TestResumeDroppedOnLiveLease:
         worker._residue_sweep_lock = threading.Lock()
         worker.read_block_ms = 1
         worker._lease_conflict_ack_safe = lambda body: True
-        worker._dispatch_task = lambda body, delivery_count=None: (_ for _ in ()).throw(
+        worker._dispatch_task = lambda body, delivery_count=None, schema_version=None: (_ for _ in ()).throw(
             ExecutionLeaseError("leased by another worker")
         )
 

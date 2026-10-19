@@ -212,6 +212,23 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def _requeue_envelope_kwargs(source: Any) -> Dict[str, Any]:
+    """重投/交接副本继承**源消息**的信封版本（A44-02）。
+
+    worker 既是消费者也是生产者：它在重投/交接/归一化时写出的副本承载的是
+    源载体的语义，不能无条件盖本 build 的 ``TASK_SCHEMA_VERSION``——否则混跑
+    池里新实例写的恢复副本会被旧实例按「超版本」死信，运维文档的「先升消费者
+    再升生产者」对 worker 自身不成立。
+
+    源版本不可得（非 ``StreamTask`` 的测试桩/畸形对象）时返回空 kwargs，写入口
+    按当前 build 版本落信封（存量行为）；``bool`` 不是合法版本值。
+    """
+    version = getattr(source, "schema_version", None)
+    if isinstance(version, int) and not isinstance(version, bool):
+        return {"schema_version": version}
+    return {}
+
+
 def _requeue_body_for_retry(
     body: Dict[str, Any], storage: Optional[ExecutionStorage]
 ) -> Dict[str, Any]:
@@ -2347,8 +2364,14 @@ class FlowWorker:
         flow_id: str,
         mapped_execution_id: Optional[str],
         params: Optional[Dict[str, Any]] = None,
+        *,
+        schema_version: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """处理幂等键命中：绝不二次 start。
+
+        ``schema_version`` = 触发本次命中的 start 消息信封版本（A44-02）。重入队
+        的 resume 副本继承它；``None``（未从队列派发/老调用方）按当前 build
+        写版本落信封。
 
         - 映射缺失/指向的执行状态不存在（孤儿：认领后首次执行从未落盘，
           如 crash 在 claim 与 save 之间）→ 返回 None，调用方释放映射后按
@@ -2422,7 +2445,13 @@ class FlowWorker:
                 if isinstance(params, dict) and params:
                     resume_msg["params"] = dict(params)
                 try:
-                    enqueue_task(redis_client, queue_name, resume_msg)
+                    # A44-02：resume 副本继承触发命中的 start 消息版本，混跑池
+                    # 里的旧实例仍能接续；不知道源版本时才写当前 build 版本。
+                    enqueue_kwargs = (
+                        {} if schema_version is None
+                        else {"schema_version": schema_version}
+                    )
+                    enqueue_task(redis_client, queue_name, resume_msg, **enqueue_kwargs)
                 except Exception as e:  # noqa: BLE001 — 入队失败让 start 消息重投
                     raise ServiceDispatchError(
                         f"start 幂等命中后重入队 resume 失败 "
@@ -2559,7 +2588,8 @@ class FlowWorker:
                    execution_id: Optional[str] = None,
                    dedup_key: Optional[str] = None,
                    delivery_count: Optional[int] = None,
-                   enqueued_at: Optional[str] = None) -> Dict[str, Any]:
+                   enqueued_at: Optional[str] = None,
+                   schema_version: Optional[int] = None) -> Dict[str, Any]:
         """
         启动流程执行
 
@@ -2581,6 +2611,9 @@ class FlowWorker:
             enqueued_at: console 入队时间（消息体 ``timestamp``，ISO 串）。用于
                 时间线回答「排队多久」（plaita#25）：缺失/不可解析 ⇒
                 ``queue_wait_ms=None``（未采集），不折算成 0。
+            schema_version: 触发本次 start 的消息信封版本（A44-02）。仅用于
+                start 幂等命中后重入队的 resume 副本继承源版本；直接调用方
+                缺省 ``None`` = 按当前 build 写版本。
 
         Returns:
             Dict[str, Any]: 流程执行结果
@@ -2629,7 +2662,8 @@ class FlowWorker:
             )
             if dedup_action == "hit":
                 hit_result = self._handle_start_dedup_hit(
-                    flow_id, mapped_execution_id, params=params
+                    flow_id, mapped_execution_id, params=params,
+                    schema_version=schema_version,
                 )
                 if hit_result is not None:
                     # 本次没有真正启动：回收按本 id 装配的时间线采集器
@@ -4431,7 +4465,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             reset_current_tenant(token)
 
         try:
-            enqueue_task(self.redis_client, self.queue_name, dict(body))
+            # A44-02：恢复副本继承源信封版本（混跑池里旧 worker 仍可接管）。
+            enqueue_task(
+                self.redis_client, self.queue_name, dict(body),
+                **_requeue_envelope_kwargs(task),
+            )
             logger.warning(
                 "执行 %s 非终态且租约已空（持有者已死），原消息 delivery 已超限："
                 "已重新入队恢复路径，放行原消息死信: %s",
@@ -5258,8 +5296,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 )
                 return
             # 先 ack 原条（移出 PEL、防对端再抢），再重入队新副本
+            # A44-02：交接副本继承源信封版本（否则新 build 写的副本会被
+            # 同组旧 worker 按超版本死信，交接反而丢失恢复载体）。
             queue.ack(getattr(task, "message_id"))
-            enqueue_task(self.redis_client, self.queue_name, dict(body))
+            enqueue_task(
+                self.redis_client, self.queue_name, dict(body),
+                **_requeue_envelope_kwargs(task),
+            )
             logger.info(
                 "任务 %s 与本机不亲和，已交接（ack+重入队）给其他 worker"
                 "（第 %s/%s 次）: %s",
@@ -5319,7 +5362,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             body, getattr(self, "execution_storage", None)
         )
         try:
-            queue.enqueue(requeue_body)
+            # A44-02：重投副本继承源信封版本（载体语义属于源消息）。
+            queue.enqueue(requeue_body, **_requeue_envelope_kwargs(task))
         except Exception as e:  # noqa: BLE001 — 重投失败退化为 reclaim（绝不丢消息）
             logger.warning("任务 %s 显式重投失败（退化为留 pending 回收）: %s", mid, _scrub_url_text(e))
             return False
@@ -5378,7 +5422,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 tenant, body.get("execution_id"), defers, exc,
             )
         try:
-            queue.enqueue(body)
+            # A44-02：延迟副本继承源信封版本。
+            queue.enqueue(body, **_requeue_envelope_kwargs(task))
         except Exception as e:  # noqa: BLE001 — 重投失败退化为 reclaim（绝不丢消息）
             logger.warning("任务 %s 超配额重投失败（退化为留 pending 回收）: %s", mid, _scrub_exception_text(e))
             return False
@@ -5389,7 +5434,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             return True
         return True
 
-    def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None) -> None:
+    def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None,
+                       schema_version: Optional[int] = None) -> None:
         # 租户状态闸（plaita#27）：停用租户的 start/resume 一律不执行。消息已
         # 入队才停用（或挂起执行的 resume 来自 delay/approval/event 服务）时，
         # 若照跑则「停用」对运行面是 no-op。此处直接返回 = 消费循环 ack 丢弃
@@ -5472,6 +5518,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # plaita#25：console 入队时写进消息体的 timestamp ⇒ 时间线
                     # 由它算「排队多久」（老消息无此键 ⇒ None，不折算成 0）。
                     enqueued_at=message_data.get("timestamp"),
+                    # A44-02：start 幂等命中的 resume 副本继承源信封版本。
+                    schema_version=schema_version,
                 )
             elif message_type == "resume":
                 self.resume_flow(
@@ -5588,7 +5636,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         try:
             # 先入队、后 ack（与 _requeue_retryable_failure 同款安全序）：
             # 中间崩溃只会产生重复投递（租约串行化），绝不丢消息。
-            queue.enqueue(requeue_body)
+            # A44-02：归一化 continue 副本继承源信封版本。
+            queue.enqueue(requeue_body, **_requeue_envelope_kwargs(task))
         except Exception as enqueue_exc:  # noqa: BLE001 — 重投失败退化为留 pending
             logger.warning(
                 "任务 %s（execution=%s）归一化 continue 重投失败，不 ack、"
@@ -5791,7 +5840,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 self._bump_active(+1)
                 acked = False
                 try:
-                    self._dispatch_task(task.body, delivery_count=task.delivery_count)
+                    self._dispatch_task(
+                        task.body,
+                        delivery_count=task.delivery_count,
+                        # A44-02：派发侧把源信封版本带到 start 幂等命中的
+                        # resume 副本上（同版本时写入口行为不变）。
+                        schema_version=task.schema_version,
+                    )
                     queue.ack(task.message_id)
                     acked = True
                 except TaskNotForThisWorker as exc:

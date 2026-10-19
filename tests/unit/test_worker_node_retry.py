@@ -539,7 +539,7 @@ class TestRunLoopRetrySemantics:
                           delivery_count=3)
         stub = _StubQueue(worker, [task])
 
-        def fake_dispatch(body, delivery_count=None):
+        def fake_dispatch(body, delivery_count=None, schema_version=None):
             seen.append(delivery_count)
 
         with patch.object(worker, "_get_task_queue", return_value=stub):

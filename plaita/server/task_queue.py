@@ -33,6 +33,10 @@ DEFAULT_DLQ_SUFFIX = ":dlq"
 # 一旦改了同名字段的含义/必需性，必须 bump，让仍按旧语义解析的消费者
 # 明确拒收（进 DLQ）而不是「猜着跑」。缺该字段 = v1（历史消息）。
 TASK_SCHEMA_VERSION = 1
+# 信封字段引入（f34266e，2026-10-07）之前的历史消息没有该字段，语义恒为 v1。
+# 它与 TASK_SCHEMA_VERSION（本 build **写入口**的版本）必须分开：bump 后缺
+# 字段仍按 v1 解析与继承，否则历史消息会被当成本代语义执行（A44-02）。
+LEGACY_TASK_SCHEMA_VERSION = 1
 SCHEMA_FIELD = "schema_version"
 # C4-1：DLQ 保留条数。DLQ 是纯记录流（无消费者），不裁剪会无限增长；
 # 每次入队后 XTRIM 保留最近 N 条。env 可调（PLAITA_DLQ_MAX_LEN）。
@@ -95,15 +99,23 @@ class InvalidTaskPayload(ValueError):
 
 
 def _schema_version_from_fields(fields: Dict[Any, Any]) -> int:
-    """信封版本解析：缺失（历史消息）→ v1；非法值 → v1 + 告警（不因信封坏掉吞消息）。"""
+    """信封版本解析：缺失（历史消息）→ v1；非法值 → v1 + 告警（不因信封坏掉吞消息）。
+
+    注意「缺失 = LEGACY_TASK_SCHEMA_VERSION(1)」而不是「= 当前写版本」：
+    升级后仍可能读到信封字段引入前入队的历史消息，它们只能按 v1 语义执行。
+    """
     raw = fields.get(SCHEMA_FIELD, fields.get(SCHEMA_FIELD.encode()))
     if raw is None:
-        return TASK_SCHEMA_VERSION
+        return LEGACY_TASK_SCHEMA_VERSION
     try:
         return int(_decode(raw))
     except (TypeError, ValueError):
-        logger.warning("任务信封 schema_version=%r 无法解析，按 v%d 处理", raw, TASK_SCHEMA_VERSION)
-        return TASK_SCHEMA_VERSION
+        logger.warning(
+            "任务信封 schema_version=%r 无法解析，按 v%d 处理",
+            raw,
+            LEGACY_TASK_SCHEMA_VERSION,
+        )
+        return LEGACY_TASK_SCHEMA_VERSION
 
 
 def _payload_from_fields(fields: Dict[Any, Any]) -> str:
@@ -113,17 +125,33 @@ def _payload_from_fields(fields: Dict[Any, Any]) -> str:
     raise ValueError("missing payload field")
 
 
-def enqueue_task(redis_client, stream_key: str, task: Dict[str, Any]) -> str:
+# DLQ 信封的 payload 覆盖哨兵：``None`` 是合法 payload（畸形消息可能是空串），
+# 不能用 None 表示「未提供」。
+_UNSET = object()
+
+
+def enqueue_task(
+    redis_client,
+    stream_key: str,
+    task: Dict[str, Any],
+    *,
+    schema_version: Optional[int] = None,
+) -> str:
     """Append a start/resume task. Creates the stream if needed.
 
     信封带 ``schema_version``（与 payload 分离：payload 是领域消息，信封是
     传输契约）。旧消费者忽略未知字段；新消费者对「比自己新」的版本拒收。
+
+    ``schema_version`` 缺省 = 本 build 的写版本（新生产消息）。**重投/交接
+    副本必须传源消息的版本**（A44-02）：副本承载的是源消息的语义，盖当前
+    build 的版本会让混跑池里的旧消费者直接拒收唯一恢复载体。
     """
+    version = TASK_SCHEMA_VERSION if schema_version is None else int(schema_version)
     msg_id = redis_client.xadd(
         stream_key,
         {
             PAYLOAD_FIELD: json.dumps(task, ensure_ascii=False),
-            SCHEMA_FIELD: str(TASK_SCHEMA_VERSION),
+            SCHEMA_FIELD: str(version),
         },
     )
     return _decode(msg_id)
@@ -247,8 +275,10 @@ class RedisStreamTaskQueue:
             # 静默重试只会把真问题藏起来。
             raise
 
-    def enqueue(self, task: Dict[str, Any]) -> str:
-        msg_id = enqueue_task(self.redis, self.stream_key, task)
+    def enqueue(self, task: Dict[str, Any], *, schema_version: Optional[int] = None) -> str:
+        msg_id = enqueue_task(
+            self.redis, self.stream_key, task, schema_version=schema_version
+        )
         self._metrics["enqueued"] += 1
         return msg_id
 
@@ -310,17 +340,12 @@ class RedisStreamTaskQueue:
                 exc.message_id, exc.fields, delivery_count=1, reason=exc.reason
             )
             return None
-        if task is not None and self.max_schema_version is not None and task.schema_version > self.max_schema_version:
+        if task is not None and self._unsupported_schema(task):
             # 语义上无法理解的更新消息：拒收并留证据（DLQ 含 message_id/payload），
             # 绝不按旧语义硬跑——升级期「先升消费者再升生产者」的兜底防线。
-            self._metrics["schema_rejected"] = self._metrics.get("schema_rejected", 0) + 1
-            self.dead_letter(
-                task,
-                reason=(
-                    f"unsupported schema_version={task.schema_version} "
-                    f"(this build understands <= {self.max_schema_version})"
-                ),
-            )
+            # A42-05：走队列层守卫单一入口（与超投递/兜底异常同判）。守卫拒绝
+            #（典型：执行仍有活租约）时消息留 pending，等新 build 回收。
+            self._reject_unsupported_schema(task)
             return None
         # xreadgroup(">") 只交付**本消费组从未见过**的新消息：`delivery_count`
         # 恒为 1，表示「本次是第 1 次投递、此前零处理尝试」。`max_deliveries`
@@ -428,6 +453,33 @@ class RedisStreamTaskQueue:
             )
         return deleted
 
+    def _unsupported_schema(self, task: StreamTask) -> bool:
+        """消息信封版本是否超出本 build 的理解范围（``None`` = 关闭校验）。"""
+        return (
+            self.max_schema_version is not None
+            and task.schema_version > self.max_schema_version
+        )
+
+    def _reject_unsupported_schema(self, task: StreamTask) -> bool:
+        """超版本信封的统一处置：计数 + 守卫后的死信单一入口。
+
+        A42-05：首投（``_read_once``）与回收（``_reclaim_one``）**必须同判**
+        ——原实现首投直接 ``dead_letter``、回收完全不校验，同一条消息仅仅因为
+        发生了一次消费者崩溃就从「死信留证」变成「旧语义硬跑」。
+
+        返回 True = 已死信；False = 守卫拒绝/异常（消息留 pending）。每次遇到
+        都计 ``schema_rejected``：守卫拒绝时消息会留 pending 被下轮再遇到，
+        该计数是「拒收尝试」而非「DLQ 行数」（DLQ 行数看 ``dead_lettered``）。
+        """
+        self._metrics["schema_rejected"] = self._metrics.get("schema_rejected", 0) + 1
+        return self.dead_letter_if_allowed(
+            task,
+            reason=(
+                f"unsupported schema_version={task.schema_version} "
+                f"(this build understands <= {self.max_schema_version})"
+            ),
+        )
+
     def _guard_allows_dead_letter(self, task: StreamTask) -> bool:
         """dead_letter 决策前的守卫闸门（Track B 任务1）。
 
@@ -462,7 +514,14 @@ class RedisStreamTaskQueue:
             )
         return allowed
 
-    def dead_letter_if_allowed(self, task: StreamTask, *, reason: str) -> bool:
+    def dead_letter_if_allowed(
+        self,
+        task: StreamTask,
+        *,
+        reason: str,
+        payload: Any = _UNSET,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """守卫闸门后的死信单一入口（plaita#252）。
 
         任何调用方在决定死信前都必须走这里，判定与 ``_read_once`` /
@@ -473,24 +532,50 @@ class RedisStreamTaskQueue:
           消息**留在 pending**，调用方不得 ack，等下一轮处置；
         - 守卫为 ``None``（默认）：恒放行——存量行为零变化。
 
+        覆盖 ``payload``/``extra`` 只给畸形消息信封用（原始串 + raw_fields）；
+        其余调用方保持默认 = 消息体。
+
         worker 的兜底异常分支（``FlowWorker.run``）曾绕过守卫直调
         ``dead_letter``，在瞬态故障/活租约场景把唯一恢复载体 ack 出 PEL。
+        信封版本拒收（A42-05）与畸形 payload（B44-05）是同一契约下的另两处
+        历史旁路：现在都经由本方法。
         """
         if not self._guard_allows_dead_letter(task):
             return False
-        self.dead_letter(task, reason=reason)
+        # 只有畸形消息才覆盖 payload/extra：普通路径的调用形状保持
+        # ``dead_letter(task, reason=...)``，既有子类/测试覆写零变化。
+        overrides: Dict[str, Any] = {}
+        if payload is not _UNSET:
+            overrides["payload"] = payload
+        if extra is not None:
+            overrides["extra"] = extra
+        self.dead_letter(task, reason=reason, **overrides)
         return True
 
-    def dead_letter(self, task: StreamTask, *, reason: str) -> str:
-        """Move task payload to DLQ stream and ack the original message."""
+    def dead_letter(
+        self,
+        task: StreamTask,
+        *,
+        reason: str,
+        payload: Any = _UNSET,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Move task payload to DLQ stream and ack the original message.
+
+        信封固定带 ``schema_version``（A44 b 类）：审计/重放时不依赖 payload
+        猜测源消息的语义版本。
+        """
         envelope = {
             "reason": reason,
             "source_stream": self.stream_key,
             "source_id": task.message_id,
             "delivery_count": task.delivery_count,
             "dead_lettered_at": time.time(),
-            "payload": task.body,
+            "schema_version": task.schema_version,
+            "payload": task.body if payload is _UNSET else payload,
         }
+        if extra:
+            envelope.update(extra)
         dlq_id = self.redis.xadd(
             self.dlq_key,
             {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
@@ -534,13 +619,18 @@ class RedisStreamTaskQueue:
         *,
         delivery_count: int,
         reason: str,
-    ) -> str:
+    ) -> bool:
         """#186：解析失败的畸形消息 → DLQ 信封 + ack（绝不抛回消费循环）。
 
         信封沿用 ``dead_letter`` 的既有字段；``payload`` 放**原始 payload 串**
         （截断到 ``INVALID_PAYLOAD_MAX_CHARS``），另带 ``raw_fields``（原始
         信封）与 ``truncated`` 标记，排障时能区分「生产者 bug」与「升级期
         旧格式」。
+
+        B44-05（守卫第二旁路）：本路径同样经 ``dead_letter_if_allowed``。守卫
+        看到的是不可解析体 ⇒ 传空 body 的 ``StreamTask``（FlowWorker 的守卫对
+        无 ``execution_id`` 的消息恒放行，生产语义不变）；守卫拒绝/异常时消息
+        留 pending，返回 False。
         """
         def _text(value: Any) -> str:
             return value.decode(errors="replace") if isinstance(value, bytes) else str(value)
@@ -555,50 +645,19 @@ class RedisStreamTaskQueue:
             _text(key): _text(value)[:INVALID_PAYLOAD_MAX_CHARS]
             for key, value in fields.items()
         }
-        envelope = {
-            "reason": reason,
-            "source_stream": self.stream_key,
-            "source_id": message_id,
-            "delivery_count": delivery_count,
-            "dead_lettered_at": time.time(),
-            "payload": raw_payload[:INVALID_PAYLOAD_MAX_CHARS],
-            "raw_fields": raw_fields,
-            "truncated": truncated,
-        }
-        dlq_id = self.redis.xadd(
-            self.dlq_key,
-            {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
-        )
-        try:
-            self.redis.xtrim(self.dlq_key, maxlen=self.dlq_max_len, approximate=False)
-        except Exception as exc:
-            logger.debug("xtrim(%s, maxlen=%s) failed: %s", self.dlq_key, self.dlq_max_len, _scrub_url_text(exc))
-        self.ack(message_id)
-        self._metrics["dead_lettered"] += 1
         self._metrics["invalid_payload"] = self._metrics.get("invalid_payload", 0) + 1
-        logger.error(
-            "Dead-lettered invalid task %s -> %s id=%s (%s)",
-            message_id,
-            self.dlq_key,
-            _decode(dlq_id),
-            reason,
+        task = StreamTask(
+            message_id=message_id,
+            body={},
+            delivery_count=delivery_count,
+            schema_version=_schema_version_from_fields(fields),
         )
-        # #26：与 dead_letter 同样外发死信事件（best-effort，告警旁路故障不回滚）。
-        if self.on_dead_letter is not None:
-            try:
-                self.on_dead_letter({
-                    "event": "dead_letter",
-                    "queue": self.stream_key,
-                    "dlq_key": self.dlq_key,
-                    "dlq_id": _decode(dlq_id),
-                    "message_id": message_id,
-                    "delivery_count": delivery_count,
-                    "reason": reason,
-                    "ts": time.time(),
-                })
-            except Exception as exc:  # noqa: BLE001 - 告警旁路
-                logger.warning("dead_letter 告警钩子失败: %s", _scrub_url_text(exc))
-        return _decode(dlq_id)
+        return self.dead_letter_if_allowed(
+            task,
+            reason=reason,
+            payload=raw_payload[:INVALID_PAYLOAD_MAX_CHARS],
+            extra={"raw_fields": raw_fields, "truncated": truncated},
+        )
 
     def note_lease_conflict(self) -> None:
         self._metrics["lease_conflicts"] += 1
@@ -756,6 +815,11 @@ class RedisStreamTaskQueue:
         调用方重扫：XCLAIM 会把条目 idle 归零，``claim_min_idle_ms`` 极小时
         （如单测的 1ms）下一轮扫描会立刻再抢到同一条目，外层循环空转。
 
+        A44-01：XCLAIM 后同样做信封版本校验——超版本消息走与首投相同的
+        守卫死信路径（``_reject_unsupported_schema``），绝不返回给消费循环。
+        否则「首投 → 死信」与「崩溃后 reclaim → 旧语义执行」对同一条消息
+        给出两种语义，升级/回退窗口的崩溃就能绕过版本边界。
+
         #47：XCLAIM 前先过活跃租约闸门（``reclaim_lease_guard``）——租约
         活跃的条目直接跳过（不 XCLAIM、不计数），排队/处理中的消息不再被
         反复抢占刷 ``times_delivered`` 触顶死信。未配守卫时零变化。
@@ -843,6 +907,14 @@ class RedisStreamTaskQueue:
                     delivery_count=max(deliveries, 1),
                     reason=exc.reason,
                 )
+                self._reclaim_cursor = claimed_id
+                continue
+            # A44-01：回收路径与首投**同判**。XCLAIM 后拿到的 task 同样可能是
+            # 新 build 写出的超版本载体；原实现只首投拒收，回收则原样返回执行
+            #（同一条消息：崩溃前死信、崩溃后旧语义硬跑）。检查放在超投递判据
+            # 之前——版本不兼容比「投递次数」更根本，也避免以误导性 reason 死信。
+            if self._unsupported_schema(task):
+                self._reject_unsupported_schema(task)
                 self._reclaim_cursor = claimed_id
                 continue
             if task.delivery_count >= self.max_deliveries:

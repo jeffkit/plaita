@@ -64,7 +64,7 @@ class _LoopWorker:
     def _bump_active(self, delta):
         pass
 
-    def _dispatch_task(self, body, delivery_count=None):
+    def _dispatch_task(self, body, delivery_count=None, schema_version=None):
         self.seen.append(body)
         # 正常消息处理完就停循环，避免依赖 block 超时。
         self._running = False

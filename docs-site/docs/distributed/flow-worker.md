@@ -67,12 +67,27 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 查询失败同样保守跳过；非终态且租约空（持有者已死）重入队一份 delivery 归 1
 的恢复消息后放行。
 
-**死信路径收敛（#252）**：`run()` 兜底异常分支（`ExecutionStateLoadError` /
-`StatePersistError` 等瞬态失败的落点）与 `_reclaim_one` 的超限处置走**同一**
-`dead_letter_guard` 判定（worker 侧经队列层 `dead_letter_if_allowed` 单一入口）：
-守卫拒绝/抛异常时**不 ack**，消息留 pending 等下一轮处置并推进
-`dlq_guard_skipped`；守卫为 `None`（默认）恒放行，存量行为不变。schema 版本
-拒收是语义兼容性判定（有意不进守卫），仍直接 `dead_letter`。
+**死信路径收敛（#252）**：`run()` 兜底异常分支
+（`ExecutionStateLoadError` / `StatePersistError` 等瞬态失败的落点）、
+`_reclaim_one` 的超限处置、**超 `max_schema_version` 的信封拒收**（首投与回收
+同判）以及畸形 payload 处置，走**同一** `dead_letter_guard` 判定（worker 侧经
+队列层 `dead_letter_if_allowed` 单一入口）：守卫拒绝/抛异常时**不 ack**，消息
+留 pending 等下一轮处置并推进 `dlq_guard_skipped`；守卫为 `None`（默认）恒
+放行，存量行为不变。DLQ 信封固定带 `schema_version`（畸形消息另带
+`raw_fields`），审计与重放不靠猜。
+
+**版本边界对首投与回收同判**：`_reclaim_one` 在 XCLAIM 之后、返回
+消费循环之前做与 `xreadgroup(">")` 相同的 `schema_version > max_schema_version`
+校验。消费者在 schema 检查/死信 ack 前崩溃时，同一条消息不会因「重启后走
+reclaim」就从死信留证变成旧语义硬跑。
+
+**worker 作为生产者的版本继承**：worker 的重投/交接/归一化副本
+（start 幂等命中的 resume、节点可重试失败、亲和交接、死信守卫恢复、超配额
+延迟、`#258` 载体归一化）继承**源消息**的 `schema_version`，而不是无条件盖
+当前 build 的写版本。混跑池里新实例写出的恢复副本仍能被旧实例接管；只有新
+生产消息（console BFF / 调度 / `event_filter`）才写当前 `TASK_SCHEMA_VERSION`。
+因此 worker 自身的灰度不再要求「整池原子升级」，但这些**新生产者服务**仍须按
+「先升消费者、再升生产者」的顺序发布（见 Runbook）。
 
 **`--max-deliveries` 计的是处理尝试次数**：`xreadgroup(">")` 交付的首投
 （`delivery_count=1`）此前零处理尝试，绝不会被预判死信——`--max-deliveries 1`

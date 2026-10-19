@@ -260,7 +260,7 @@ aiohttp 的 10，见 [MIGRATION](https://github.com/jeffkit/plaita/blob/main/MIG
 
 ### 发布顺序（重要）
 
-1. **先升消费者，再升生产者**：`schema_version` 只在新语义上线时 bump；旧 worker 拒收「比自己新」的消息（进 DLQ + 告警），所以 producer（console BFF / 调度服务）必须后升。
+1. **先升消费者，再升生产者**：`schema_version` 只在新语义上线时 bump；旧 worker 拒收「比自己新」的消息（进 DLQ + 告警），所以 producer（console BFF / 调度服务 / `event_filter`）必须后升。**例外**：worker 自身的重投/交接/归一化副本继承源消息的版本（不会把旧载体写成新版本），worker 灰度因此不要求整池原子升级；但 `event_filter` / 调度 / BFF 在同一批次产生的是**新载体**，仍按生产者处理。
 2. **Console API 先升**（只增不删），确保新旧前端都能用；前端静态资源后发。
 3. **Worker 灰度**：先起新版本实例与旧实例**同 consumer group 混跑**，观察 `lease_conflicts` / `reclaimed` / `dead_lettered` 无异常后，再逐个 drain 旧实例。
 4. 每台 worker 的停机动作是 `draining`，不是 kill（见下）。
@@ -310,7 +310,7 @@ curl -X POST "$CONSOLE/api/executions/$EXEC_ID/resume" \
 ### 兼容纪律（写进 review checklist）
 
 - `ExecutionState` **只增字段**，新字段必须有缺省值；读取方必须按「None = 没有这个能力」处理（见 `tests/unit/test_upgrade_compat.py`）。
-- 任务消息只增字段；**改语义必须 bump `TASK_SCHEMA_VERSION`**（`plaita/server/task_queue.py`）。入队一律用 `enqueue_task()`，别直接 `XADD`（否则丢信封）。
+- 任务消息只增字段；**改语义必须 bump `TASK_SCHEMA_VERSION`**（`plaita/server/task_queue.py`）。入队一律用 `enqueue_task()`，别直接 `XADD`（否则丢信封）。**重投/交接/归一化副本必须传 `schema_version=源版本`**——副本承载源载体的语义，盖当前版本会让混跑池里的旧消费者拒收唯一恢复载体。
 - Console API 响应只增不删；前端资源内容哈希 + 保留上一版。
 - DB 变更走 expand → backfill → 切读 → contract，禁止一步到位改列语义。
 
