@@ -112,6 +112,7 @@ def build_ledger_entry(
     stale: Any = None,
     candidate_count: Optional[int] = None,
     tenant_id: Optional[str] = None,
+    actor: Optional[str] = None,
     decided_at: Optional[str] = None,
     decided_by: Optional[str] = None,
     message_id: Optional[str] = None,
@@ -148,6 +149,9 @@ def build_ledger_entry(
         "rejected": rejected_rows,
         "stale": [str(x) for x in stale] if isinstance(stale, (list, tuple)) else [],
         "tenant_id": tenant_id,
+        # #262：「谁派的」的认证主体（用户名 / api-key）。``decided_by`` 是
+        # 派发方主机，无法回答跨租户代传时是**哪个账号**触发的。
+        "actor": actor,
     }
     if extra:
         for key, value in extra.items():
