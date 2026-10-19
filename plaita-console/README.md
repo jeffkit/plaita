@@ -40,10 +40,17 @@ Plaita 流程引擎可视化管理控制台
 
 ```bash
 cd plaita-console/docker
-docker-compose up -d
+# 生产/共享环境必须覆盖三个默认值（空密钥时管理 API fail-closed，
+# change-me-* 只用于本地模板演示）
+PLAITA_CONSOLE_ADMIN_API_KEY=<strong-random> \
+PLAITA_CONSOLE_SECRET_ID=<random-id> \
+PLAITA_CONSOLE_SECRET_KEY=<random-secret> \
+  docker compose up -d
 ```
 
-访问 http://localhost:5173 打开控制台。
+访问 http://localhost:5173 打开控制台。compose 的服务端口绑定宿主所有接口；
+不要把它直接暴露到公网，生产请放在反向代理/内网之后（见
+`docs-site/docs/guide/deployment.md`）。
 
 ### 本地单机档（无需 Redis）
 
@@ -77,9 +84,14 @@ Plaita Console 依赖 Redis 来存储服务注册信息。可以使用以下方�
 # 方式 1: 使用本地 Redis
 redis-server
 
-# 方式 2: 使用 Docker 仅启动依赖服务
+# 方式 2: 使用 Docker 仅启动依赖服务（Redis 只绑 127.0.0.1）
 cd plaita-console/docker
-docker-compose -f docker-compose.deps.yml up -d
+docker compose -f docker-compose.deps.yml up -d
+
+# 可选：Redis Commander 调试 UI（默认不启动；必须提供 HTTP 基本认证）
+REDIS_COMMANDER_USER=admin REDIS_COMMANDER_PASSWORD='<strong-random>' \
+  docker compose -f docker-compose.deps.yml \
+                 -f docker-compose.redis-commander.yml up -d redis-commander
 ```
 
 ### 演示模式
@@ -148,6 +160,8 @@ plaita-console/
 │   └── main.py
 ├── docker/                 # Docker 配置
 │   ├── docker-compose.yml
+│   ├── docker-compose.deps.yml
+│   ├── docker-compose.redis-commander.yml
 │   ├── Dockerfile.frontend
 │   └── Dockerfile.backend
 └── README.md

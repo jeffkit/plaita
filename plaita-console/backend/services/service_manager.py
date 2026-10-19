@@ -9,6 +9,7 @@
 import asyncio
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -26,6 +27,18 @@ try:
     from .atomic_io import atomic_write_text
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from atomic_io import atomic_write_text  # type: ignore
+
+# B59-01：基础设施 docker.env 里的 ${VAR} 引用在启动时从 console 进程环境
+# 展开；模板/仓库不再内置固定口令。缺失变量时 start_infrastructure 返回
+# 可操作错误（fail-closed），不会把字面量 "${VAR}" 传给容器。
+_INFRA_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+#: 各数据库镜像启动必需的根口令键（缺失即拒绝启动）
+_DB_REQUIRED_PASSWORD_KEYS = {
+    "postgres": ("POSTGRES_PASSWORD",),
+    "postgresql": ("POSTGRES_PASSWORD",),
+    "mysql": ("MYSQL_ROOT_PASSWORD",),
+    "mariadb": ("MYSQL_ROOT_PASSWORD",),
+}
 
 # 项目根目录（支持通过环境变量覆盖，用于 Docker 环境）
 PROJECT_ROOT = Path(os.environ.get("PLAITA_PROJECT_ROOT", str(Path(__file__).parent.parent.parent.parent)))
@@ -355,7 +368,47 @@ class DockerLauncher(ServiceLauncher):
             )
         
         instance_id = f"{service_type}-{uuid.uuid4().hex[:8]}"
-        image = config.docker.get("image", f"plaita/{service_type}:latest")
+
+        # B59-12：不再按服务名拼 `plaita/<type>` 的 latest 标签兜底。仓库没有
+        # 发布这些镜像，隐式 pull 只会得到通用 404；更糟的是一旦命名空间被
+        # 第三方注册，运维点「启动」就会运行攻击者镜像。image 必须显式配置，
+        # 且必须已在本地（先在目标机构建/拉取），这里不做任何隐式 pull。
+        image = (config.docker or {}).get("image")
+        if not image or not str(image).strip():
+            return ManagedInstance(
+                instance_id=instance_id,
+                service_type=service_type,
+                status="error",
+                start_time=datetime.now().isoformat(),
+                error_message=(
+                    "镜像未配置：cluster_config.yaml 的 service.docker.image 为空。"
+                    "请先在目标机构建/拉取镜像并显式填写 image（见 docs-site/docs/guide/deployment.md）"
+                ),
+            )
+        image = str(image).strip()
+        if image.startswith("-") or any(ch.isspace() for ch in image):
+            return ManagedInstance(
+                instance_id=instance_id,
+                service_type=service_type,
+                status="error",
+                start_time=datetime.now().isoformat(),
+                error_message=f"非法镜像引用: {image!r}（不允许空白或前导 -）",
+            )
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True, text=True, timeout=10,
+        )
+        if inspect.returncode != 0:
+            return ManagedInstance(
+                instance_id=instance_id,
+                service_type=service_type,
+                status="error",
+                start_time=datetime.now().isoformat(),
+                error_message=(
+                    f"镜像 {image} 本地不存在；已阻止隐式 pull（避免从不可信命名空间拉取）。"
+                    f"请先 docker pull {image} 或构建镜像后重试"
+                ),
+            )
         
         # 构建 docker run 命令
         cmd = ["docker", "run", "-d", "--name", instance_id]
@@ -830,6 +883,44 @@ class ServiceManager:
         )
         return result.stdout.strip() or None
 
+    def _resolve_infra_env(self, docker_cfg: Dict[str, Any]):
+        """展开 infrastructure docker.env 中的 ``${VAR}``。
+
+        返回 ``(resolved, missing)``；``missing`` 非空时调用方必须 fail-closed，
+        不能把字面量 ``${VAR}`` 传给容器（否则数据库会用字面量当口令）。
+        """
+        resolved: Dict[str, str] = {}
+        missing: List[str] = []
+        for key, value in (docker_cfg.get("env") or {}).items():
+            if isinstance(value, str):
+                def _replace(match: "re.Match[str]") -> str:
+                    var = match.group(1)
+                    env_value = os.environ.get(var)
+                    if not env_value:
+                        missing.append(var)
+                        return ""
+                    return env_value
+                value = _INFRA_ENV_REF.sub(_replace, value)
+            resolved[str(key)] = str(value)
+        return resolved, sorted(set(missing))
+
+    def _missing_db_password(self, name: str, docker_cfg: Dict[str, Any],
+                             docker_env: Dict[str, str]) -> Optional[str]:
+        """数据库镜像缺少必需口令键时返回该键名（B59-01：不内置弱口令）。"""
+        keys = _DB_REQUIRED_PASSWORD_KEYS.get(str(name).lower())
+        if not keys:
+            image = str(docker_cfg.get("image", "")).lower()
+            if "postgres" in image:
+                keys = ("POSTGRES_PASSWORD",)
+            elif "mysql" in image or "mariadb" in image:
+                keys = ("MYSQL_ROOT_PASSWORD",)
+        if not keys:
+            return None
+        for key in keys:
+            if not docker_env.get(key):
+                return key
+        return None
+
     async def start_infrastructure(self, name: str) -> Dict[str, Any]:
         """容器化拉起基础设施：已存在则 start，否则按 docker 配置 run；
         启动后轮询健康检查（redis ping / kafka 探测 / 数据库连接）。"""
@@ -844,6 +935,27 @@ class ServiceManager:
         if not self._docker_available_now():
             return {"success": False, "message": "Docker 不可用"}
 
+        docker_env, missing_env = self._resolve_infra_env(docker_cfg)
+        if missing_env:
+            return {
+                "success": False,
+                "message": (
+                    f"基础设施 {name} 的 docker.env 引用了未设置的环境变量: "
+                    f"{', '.join(missing_env)}——请在 console 进程环境提供后重试"
+                    "（见 docs-site/docs/guide/deployment.md）"
+                ),
+            }
+        missing_password = self._missing_db_password(name, docker_cfg, docker_env)
+        if missing_password:
+            return {
+                "success": False,
+                "message": (
+                    f"基础设施 {name} 缺少 {missing_password}：数据库模板不再内置固定弱口令。"
+                    f"请在 docker.env 写 ${{{missing_password}}} 并在 console 进程环境提供"
+                    "（见 docs-site/docs/guide/deployment.md）"
+                ),
+            }
+
         cname = f"{self.INFRA_CONTAINER_PREFIX}{name}"
         state = self._infra_container_state(name)
         if state == "running":
@@ -854,10 +966,15 @@ class ServiceManager:
                 return {"success": False, "message": (run_result.stderr or "docker start 失败").strip()[-300:]}
         else:
             # 端口占用预检：宿主端口已被监听时，发布端口会造成连接混叠
-            # （看起来启动成功，客户端连的却是别的实例）——明确拒绝
+            # （看起来启动成功，客户端连的却是别的实例）——明确拒绝。
+            # 支持 "5432:5432" 与 "127.0.0.1:5432:5432" 两种写法；
+            # 只写容器端口（随机宿主端口）时跳过预检。
             import socket as _socket
             for port in docker_cfg.get("ports", []):
-                host_port = int(str(port).split(":")[0])
+                parts = str(port).rsplit(":", 2)
+                if len(parts) < 2 or not parts[-2].isdigit():
+                    continue
+                host_port = int(parts[-2])
                 probe = _socket.socket()
                 probe.settimeout(1)
                 occupied = probe.connect_ex(("127.0.0.1", host_port)) == 0
@@ -872,7 +989,7 @@ class ServiceManager:
                 cmd += ["-p", str(port)]
             for vol in docker_cfg.get("volumes", []):
                 cmd += ["-v", str(vol)]
-            for env_key, env_value in (docker_cfg.get("env") or {}).items():
+            for env_key, env_value in docker_env.items():
                 cmd += ["-e", f"{env_key}={env_value}"]
             cmd.append(docker_cfg["image"])
             run_result = self._docker(*cmd[1:], timeout=180)  # 首次可能拉取镜像；cmd[0] 是 "docker"，_docker 会补

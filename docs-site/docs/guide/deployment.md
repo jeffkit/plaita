@@ -70,6 +70,47 @@ PLAITA_CONSOLE_ADMIN_API_KEY=<服务账号密钥> PLAITA_CONSOLE_ENV=prod \
 或自备。生产建议再设置 `PLAITA_CONSOLE_ADMIN_API_KEY`（服务账号）并关闭
 `ALLOW_INSECURE_ADMIN`。
 
+### Docker / compose 部署
+
+`plaita-console/docker/` 提供三套 compose 与一个可选叠加文件，按需组合：
+
+| 文件 | 内容 | 用法 |
+|---|---|---|
+| `docker-compose.yml` | Redis + backend + frontend + flow-worker | `docker compose up -d` |
+| `docker-compose.dev.yml` | 开发档（高位端口 18080/15173/16379） | `docker compose -f docker-compose.dev.yml up -d` |
+| `docker-compose.deps.yml` | 仅 Redis（`127.0.0.1:6379`） | `docker compose -f docker-compose.deps.yml up -d` |
+| `docker-compose.redis-commander.yml` | 可选 Redis 调试 UI | 见下 |
+
+**必填环境变量**：`docker-compose.yml` 里的 `change-me-*` 只是本地模板默认值；
+共享/生产环境必须覆盖 `PLAITA_CONSOLE_ADMIN_API_KEY`、
+`PLAITA_CONSOLE_SECRET_ID`、`PLAITA_CONSOLE_SECRET_KEY`（空密钥时管理 API
+与契约接口 fail-closed）。集群页的 PostgreSQL/MySQL 模板不再内置固定口令：
+在 console 进程环境设置 `PLAITA_POSTGRES_PASSWORD`（PostgreSQL）或
+`PLAITA_MYSQL_PASSWORD` + `PLAITA_MYSQL_ROOT_PASSWORD`（MySQL），
+`cluster_config.yaml` 里写 `${PLAITA_POSTGRES_PASSWORD}` 等引用；变量缺失时
+「启动」返回可操作错误，不会把字面量当口令传给容器。
+
+**端口边界**：基础设施模板只绑 `127.0.0.1`（数据库/队列不暴露到局域网），
+数据持久化到 named volume（`plaita_pg_data` / `plaita_mysql_data` /
+`plaita_redis_data`）。`docker-compose.yml` 的控制台/前端端口仍绑定所有接口，
+生产请放在反向代理或内网之后。
+
+**Redis Commander**（可选调试 UI）默认不启动——它能对 Redis 执行任意命令。
+启用时必须提供 HTTP 基本认证：
+
+```bash
+REDIS_COMMANDER_USER=admin REDIS_COMMANDER_PASSWORD='<strong-random>' \
+  docker compose -f docker-compose.deps.yml \
+                 -f docker-compose.redis-commander.yml up -d redis-commander
+```
+
+**集群服务镜像**：仓库不构建也不发布 `plaita/*` 服务镜像，console 也不会
+隐式 `docker pull`。Docker 模式下需先在目标机构建/拉取镜像，并在
+`cluster_config.yaml` 的 `services.<name>.docker.image` 显式填写；未配置或
+本地不存在时「启动」直接返回可操作错误（避免从不可控命名空间拉取 `latest`）。
+console backend 镜像不包含前端产物（compose 里由 nginx 容器托管 SPA）；
+发布到 PyPI 的 console wheel 才通过 `build_package.sh` 把 `webDist` 打进包。
+
 ## ③ 分布式（Redis 多实例）—— 生产规模
 
 在 ② 之上把 worker 与外延服务扩到多实例/多机：

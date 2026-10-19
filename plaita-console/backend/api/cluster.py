@@ -37,6 +37,11 @@ except ImportError:  # 最小安装（无 plaita 包）时 fail-closed 兜底，
     def _mask_credential_runs(text: str) -> str:  # type: ignore[misc]
         raise RuntimeError("plaita.core.url_redaction 不可用")
 
+#: 纯环境变量引用（``${VAR}``）不是秘密：保留给模板/配置回读，使 UI 能把
+#: 「启动时从 console 进程环境取口令」的占位符原样带回（B59-01）。真实值
+#: 仍按凭据键脱敏；这里只放行整值就是一个引用的字符串。
+_ENV_REF_ONLY = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
 try:
     from ..auth import ensure_platform_admin, require_auth
     from ..services.service_manager import (
@@ -157,7 +162,12 @@ def redact_cluster_secrets(value, _depth: int = 0):
             result = {}
             for key, item in value.items():
                 if isinstance(key, str) and _is_credential_key(key):
-                    result[key] = REDACTED_VALUE
+                    # B59-01：纯 ${VAR} 引用只是「从进程环境取值」的占位符，
+                    # 不含秘密；放行后 UI/配置回读不会把 *** 写回文件。
+                    if isinstance(item, str) and _ENV_REF_ONLY.match(item):
+                        result[key] = item
+                    else:
+                        result[key] = REDACTED_VALUE
                 else:
                     result[key] = redact_cluster_secrets(item, _depth + 1)
             return result
@@ -985,7 +995,8 @@ async def get_infrastructure_templates(
             "description": "用于状态存储、消息队列和事件总线",
             "docker": {
                 "image": "redis:7-alpine",
-                "ports": ["6379:6379"]
+                "ports": ["127.0.0.1:6379:6379"],
+                "volumes": ["plaita_redis_data:/data"]
             }
         },
         {
@@ -996,7 +1007,7 @@ async def get_infrastructure_templates(
             "description": "分布式消息队列，适用于高吞吐量场景",
             "docker": {
                 "image": "confluentinc/cp-kafka:7.5.0",
-                "ports": ["9092:9092"]
+                "ports": ["127.0.0.1:9092:9092"]
             }
         },
         {
@@ -1004,33 +1015,37 @@ async def get_infrastructure_templates(
             "display_name": "PostgreSQL 数据库",
             "type": "database",
             "url": "postgresql://localhost:5432/plaita",
-            "description": "持久化存储，用于执行状态和流程定义",
+            "description": "持久化存储，用于执行状态和流程定义；口令从 console 进程环境读取",
             "docker": {
                 "image": "postgres:15-alpine",
-                "ports": ["5432:5432"],
+                "ports": ["127.0.0.1:5432:5432"],
+                "volumes": ["plaita_pg_data:/var/lib/postgresql/data"],
                 "env": {
                     "POSTGRES_DB": "plaita",
                     "POSTGRES_USER": "plaita",
-                    "POSTGRES_PASSWORD": "plaita"
+                    "POSTGRES_PASSWORD": "${PLAITA_POSTGRES_PASSWORD}"
                 }
-            }
+            },
+            "required_env": ["PLAITA_POSTGRES_PASSWORD"]
         },
         {
             "name": "mysql",
             "display_name": "MySQL 数据库",
             "type": "database",
             "url": "mysql://localhost:3306/plaita",
-            "description": "持久化存储，用于执行状态和流程定义",
+            "description": "持久化存储，用于执行状态和流程定义；口令从 console 进程环境读取",
             "docker": {
                 "image": "mysql:8",
-                "ports": ["3306:3306"],
+                "ports": ["127.0.0.1:3306:3306"],
+                "volumes": ["plaita_mysql_data:/var/lib/mysql"],
                 "env": {
                     "MYSQL_DATABASE": "plaita",
                     "MYSQL_USER": "plaita",
-                    "MYSQL_PASSWORD": "plaita",
-                    "MYSQL_ROOT_PASSWORD": "root"
+                    "MYSQL_PASSWORD": "${PLAITA_MYSQL_PASSWORD}",
+                    "MYSQL_ROOT_PASSWORD": "${PLAITA_MYSQL_ROOT_PASSWORD}"
                 }
-            }
+            },
+            "required_env": ["PLAITA_MYSQL_PASSWORD", "PLAITA_MYSQL_ROOT_PASSWORD"]
         }
     ]
     

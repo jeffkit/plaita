@@ -1,3 +1,8 @@
+# 基础设施容器化拉起（B59-01）：
+#  - 端口只绑回环（127.0.0.1），不把数据库/队列暴露到宿主所有接口；
+#  - 数据库持久化到 named volume，删容器重建不丢数据；
+#  - 口令不内置固定值：docker.env 用 ${VAR} 引用 console 进程环境变量，
+#    缺失时 start_infrastructure fail-closed（见 deployment.md）。
 infrastructure:
   kafka:
     bootstrap_servers: localhost:9092
@@ -5,7 +10,7 @@ infrastructure:
     docker:
       image: confluentinc/cp-kafka:7.5.0
       ports:
-      - 9092:9092
+      - "127.0.0.1:9092:9092"
     enabled: false
     type: kafka
   postgresql:
@@ -13,11 +18,13 @@ infrastructure:
     docker:
       env:
         POSTGRES_DB: plaita
-        POSTGRES_PASSWORD: plaita
+        POSTGRES_PASSWORD: ${PLAITA_POSTGRES_PASSWORD}
         POSTGRES_USER: plaita
       image: postgres:15-alpine
       ports:
-      - 5432:5432
+      - "127.0.0.1:5432:5432"
+      volumes:
+      - "plaita_pg_data:/var/lib/postgresql/data"
     enabled: true
     type: database
     url: postgresql://localhost:5432/plaita
@@ -26,20 +33,22 @@ infrastructure:
     docker:
       image: redis:7-alpine
       ports:
-      - 6379:6379
-      volumes: []
+      - "127.0.0.1:6379:6379"
+      volumes:
+      - "plaita_redis_data:/data"
     enabled: true
     type: redis
     url: redis://localhost:6379/0
 mode: process
 redis:
   url: redis://localhost:6379/0
+# Docker 模式（B59-12）：仓库不构建/发布 plaita/* 服务镜像，也不会隐式 pull。
+# 运维需先在目标机构建或拉取镜像，再为对应 service 显式配置 docker.image；
+# 未配置时启动会返回可操作错误，而不是从不可信命名空间拉取 latest。
 services:
   delay_service:
     default_instances: 1
     display_name: 延迟定时服务
-    docker:
-      image: plaita/delay-service:latest
     env:
       PLAITA_CHECK_INTERVAL: '5'
       PLAITA_REDIS_URL: ${redis.url}
@@ -49,8 +58,6 @@ services:
   event_filter:
     default_instances: 1
     display_name: 事件恢复器
-    docker:
-      image: plaita/event-filter:latest
     env:
       PLAITA_QUEUE_NAME: plaita:flow:queue
       PLAITA_REDIS_URL: ${redis.url}
@@ -60,9 +67,6 @@ services:
   flow_worker:
     default_instances: 1
     display_name: 流程执行器
-    docker:
-      image: plaita/flow-worker:latest
-      ports: []
     env:
       PLAITA_NODE_MODULES: plaita_nodes,plaita_flows.nodes
       PLAITA_NODE_PATH: /Users/kong/projects/infra4agent/mediaflow:/Users/kong/projects/infra4agent/plaita-nodes/src:/Users/kong/projects/infra4agent/agentproc/sdk/python/src
@@ -77,8 +81,6 @@ services:
   http_callback_service:
     default_instances: 1
     display_name: HTTP 回调服务
-    docker:
-      image: plaita/http-callback-service:latest
     env:
       PLAITA_REDIS_URL: ${redis.url}
     max_instances: 3
@@ -87,8 +89,6 @@ services:
   redis_queue_service:
     default_instances: 1
     display_name: Redis 队列服务
-    docker:
-      image: plaita/redis-queue-service:latest
     env:
       PLAITA_QUEUE_PREFIX: 'plaita:queue:'
       PLAITA_REDIS_URL: ${redis.url}
@@ -98,8 +98,6 @@ services:
   schedule_service:
     default_instances: 1
     display_name: 调度服务
-    docker:
-      image: plaita/schedule-service:latest
     env:
       PLAITA_CHECK_INTERVAL: '1'
       PLAITA_QUEUE_NAME: plaita:flow:queue

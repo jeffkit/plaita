@@ -1,5 +1,9 @@
 # 仅启动第三方依赖服务
-# 用法: docker-compose -f docker-compose.deps.yml up -d
+# 用法: docker compose -f docker-compose.deps.yml up -d
+#
+# B59-02：Redis 只绑宿主回环（127.0.0.1），不暴露到局域网。Redis Commander
+# 默认不启动——它是可对 Redis 执行任意命令的调试 UI，启用方式见
+# docker-compose.redis-commander.yml（强制 HTTP 基本认证 + 回环绑定）。
 
 services:
   # Redis
@@ -7,7 +11,7 @@ services:
     image: redis:7-alpine
     container_name: plaita-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -17,17 +21,5 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redis Commander (可选的 Redis 可视化工具)
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    container_name: plaita-redis-commander
-    ports:
-      - "8081:8081"
-    environment:
-      - REDIS_HOSTS=local:redis:6379
-    depends_on:
-      - redis
-
 volumes:
   redis_data:
-
