@@ -149,7 +149,8 @@ class ResumeFlowRequest(BaseModel):
 # 实际取值在使用点经 PLAITA_CONSOLE_TASK_QUEUE 覆盖，便于新旧并行验证时把
 # console 派发到独立队列——不得在模块导入时求值，否则无法被测试/运行时覆盖。
 DEFAULT_TASK_QUEUE_NAME = "plaita:flow:queue"
-# 兼容别名：schedules 等模块按此名导入（缺省队列名；实际派发请用 _task_queue_name）
+# 兼容别名（外部脚本可能按此名导入）：**只代表默认值，不参与派发**。
+# 任何生产派发必须用 _task_queue_name() 在使用点解析 env（A56-02）。
 TASK_QUEUE_NAME = DEFAULT_TASK_QUEUE_NAME
 
 
