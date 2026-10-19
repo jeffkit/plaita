@@ -42,6 +42,13 @@ CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60
    从 checkpoint 续跑（代价 ≤TTL+60s，远小于 zombie reap）。信号缺失
    （旧格式租约 / `--no-registry` / Redis 瞬断）按「存活未知」退化 ack；
    `PLAITA_DISABLE_HOLDER_LIVENESS=1` 整体旁路回到无条件 ack；
+   **决议载体例外（A46-04/A47-F2，2026-10-19）**：`resume_type` 为
+   `event`/`timeout`/`cancel` 的消息**不看存活信号、一律不 ack**——suspend
+   提交窗口 `[订阅注册, 租约释放)` 内到达的它们不是重复载体，而是挂起执行
+   唯一的唤醒来源（#33）；持有者落盘 suspended 后不会再读它。消息留 pending，
+   租约释放后由 reclaim（或 #242 死信守卫重入队副本）推进；代价是最多
+   `max_deliveries × claim_min_idle_ms` 的延迟与 XCLAIM churn。
+   `continue`/`retry`/`start` 无推进语义，仍按上面的存活判据 ack；
 2. 持租约的活 worker 由看门狗每 lease TTL/3（默认 120s → 40s）续租，步骤
    执行期间租约不会过期——XCLAIM 真正接手的只有已死 worker 的消息；续租成功
    时顺带把**在跑节点**的进度写进 `node_timings`（长节点期间唯一的活性心跳，
@@ -252,6 +259,15 @@ except 终态化成 error，一次重复投递就把可恢复的挂起执行永�
 执行保持原状、消息 ack（豁免面刻意窄，见上节「判别」——节点 `resume()` 自身抛错
 仍终态化 error）。
 
+**租约冲突窗口内的决议载体不 ack（A46-04 / A47-F2，2026-10-19）**：suspend
+提交窗口 `[订阅注册, 租约释放)` 内到达的 `event`/`timeout`/`cancel` 消息，即使
+执行推进租约被**在册** worker 持有，也不得按「重复载体」ack——持有者可能正在
+落盘 `suspended`，释放租约后不会再读这条消息，而它是挂起执行唯一的唤醒来源。
+worker 对这些载体一律不 ack（信号缺失也不退化 ack），消息留 pending，租约释放
+后由 reclaim / #242 死信守卫副本推进。`continue`/`retry` 不携带推进语义，保持
+原有的「持有者在册即 ack」语义；#258 的协议错配状态感知（`ResumeProtocolError`
+分支）是另一个窗口，两套判据互不影响。
+
 **取消意图优先（台账第三十四轮 ④）**：短路前先查取消标志键
 （`{ns}:execution:cancel:{id}`）。挂起前控制面可能已在 running 阶段写下取消
 意图；若此处照常早退，消息被 ack、盘上保持 suspended、flag 仍在——独立的
@@ -283,11 +299,13 @@ cancel 载体一旦丢失，执行会带着取消意图长期挂起。命中 fla
   失败、状态被回滚等都会留下「running + 计数达限」的组合），若把 `running`
   也按「已终态」拒绝，返回的 `already_terminal=True` 就是**谎报终态 + 一行不
   推进**——即工单里的假受理。
-- **resume 被丢弃必须可见**：执行推进租约被**在册** worker 持有时，resume 消息
-  按既有语义 ack 释放（#50/#52：留 pending 会烧 delivery 并产生假死信），但会
-  额外打 WARNING「**本次 resume 未生效**（不产生任何节点活动）」并给出下一步
-  （确认卡死后人工 cancel 再按需重开）——值守据此区分「已救活」与「白等」。
-  每次点「从断点重试」都返回 200 却毫无推进时，先 grep 这行日志。
+- **resume 被丢弃必须可见**：`continue`/`retry` resume 在推进租约被**在册**
+  worker 持有时按既有语义 ack 释放（#50/#52：留 pending 会烧 delivery 并产生
+  假死信），但会额外打 WARNING「**本次 resume 未生效**（不产生任何节点活动）」
+  并给出下一步（确认卡死后人工 cancel 再按需重开）——值守据此区分「已救活」
+  与「白等」。每次点「从断点重试」都返回 200 却毫无推进时，先 grep 这行日志。
+  `event`/`timeout`/`cancel` 决议载体不在此列：它们一律不 ack、留 pending
+  重投（A46-04/A47-F2，见「挂起执行的 continue/retry 幂等短路」一节）。
 
 ## 在跑节点心跳与 keeper 活性判据 {#在跑节点心跳}
 

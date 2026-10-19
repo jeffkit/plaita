@@ -153,6 +153,114 @@ def test_rollback_switch_bypasses_liveness_gate(monkeypatch):
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
+# ---- A46-04 / A47-F2：决议载体在租约冲突窗口内不得 ack ----
+#
+# 挂起窗口 [订阅注册, 租约释放) 内到达的 event/timeout/cancel 不是「重复载体」，
+# 而是 suspended 执行**唯一**的决议来源（#33：挂起只能被 event/cancel/timeout
+# 唤醒）。旧判据只看持有者是否在册，把这三类当重复载体 ack 掉 → 持有者落盘
+# suspended 并释放租约后零载体，执行永久 suspended（默认 event 节点自动恢复网
+# 为 0）。故决议载体一律不 ack，留 pending 等租约释放后 reclaim（#242 守卫保证
+# 不死信）；continue/retry/start 无推进语义，保持原 ack 语义。
+
+DECISION_RESUME_TYPES = ("event", "timeout", "cancel")
+
+
+def _resume_body(resume_type: str) -> dict:
+    return {
+        "type": "resume",
+        "execution_id": "exec-1",
+        "resume_type": resume_type,
+    }
+
+
+def _set_live_holder(redis) -> None:
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    redis.set(
+        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
+        '{"instance_id": "%s", "status": "running"}' % INSTANCE,
+        ex=30,
+    )
+
+
+@pytest.mark.parametrize("resume_type", DECISION_RESUME_TYPES)
+def test_decision_carrier_is_not_ack_safe_with_live_holder(resume_type):
+    """持有者活着也不能 ack event/timeout/cancel——它们是唯一决议载体。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    _set_live_holder(redis)
+    assert (
+        _worker(redis)._lease_conflict_ack_safe(_resume_body(resume_type)) is False
+    )
+
+
+@pytest.mark.parametrize("resume_type", DECISION_RESUME_TYPES)
+def test_decision_carrier_is_not_ack_safe_without_any_signal(resume_type):
+    """信号缺失（--no-registry / 租约键消失）对决议载体不得退化为 ack。
+
+    旧实现在这些分支 fail-open；对决议载体那是「唯一载体被吞」，必须 fail-closed。
+    """
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    assert (
+        _worker(redis, enable_registry=False)
+        ._lease_conflict_ack_safe(_resume_body(resume_type))
+        is False
+    )
+    # 租约键已消失（异常时序）：仍不 ack
+    assert (
+        _worker(redis)._lease_conflict_ack_safe(_resume_body(resume_type)) is False
+    )
+
+
+@pytest.mark.parametrize("resume_type", ("continue", "retry"))
+def test_non_decision_resume_keeps_ack_with_live_holder(resume_type):
+    """continue/retry 不携带推进语义 → 持有者在册时保持原 ack（#33 不变）。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    _set_live_holder(redis)
+    assert (
+        _worker(redis)._lease_conflict_ack_safe(_resume_body(resume_type)) is True
+    )
+
+
+def test_start_body_keeps_ack_with_live_holder():
+    """start 载体保持原语义：持有者在册 → ack（#23/#50 不变）。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    _set_live_holder(redis)
+    assert (
+        _worker(redis)._lease_conflict_ack_safe(
+            {"type": "start", "execution_id": "exec-1"}
+        )
+        is True
+    )
+
+
+def test_decision_carrier_stays_pending_and_reclaimable_after_lease_release():
+    """端到端（Redis 层）：决议载体不被 ack → 租约释放后 peer 可回收推进。
+
+    对应 A47-F2 配方探针：pre-fix 窗口内 ack → 永久 suspended；post-fix
+    pending=1 → 租约释放后由 XCLAIM 接管（delivery 归 1 的副本）。
+    """
+    stream, group = "plaita:flow:queue:f2", "plaita-workers"
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    _set_live_holder(redis)
+    redis.xgroup_create(stream, group, id="0", mkstream=True)
+    redis.xadd(
+        stream,
+        {"data": '{"type": "resume", "execution_id": "exec-1", "resume_type": "event"}'},
+    )
+    _, msgs = redis.xreadgroup(group, INSTANCE, {stream: ">"}, count=1)[0]
+    msg_id = msgs[0][0]
+
+    assert _worker(redis)._lease_conflict_ack_safe(_resume_body("event")) is False
+    assert redis.xpending(stream, group)["pending"] == 1
+
+    # 持有者落盘 suspended 后释放租约：消息仍在，可被同组 peer 回收
+    redis.delete(LEASE_KEY)
+    _next, claimed, _deleted = redis.xautoclaim(
+        stream, group, "peer-consumer", min_idle_time=0, start_id="0-0"
+    )
+    assert [m[0] for m in claimed] == [msg_id]
+    assert '"resume_type": "event"' in claimed[0][1]["data"]
+
+
 def test_tenant_routed_lease_is_read_under_message_tenant():
     """租约键按消息 tenant_id 路由读取（守卫同款键格式）。"""
     from plaita.server.tenant_context import tenant_namespace

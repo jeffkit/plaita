@@ -152,8 +152,16 @@ def _watchdog_disabled() -> bool:
 
 def _holder_liveness_disabled() -> bool:
     """#50 回滚开关：PLAITA_DISABLE_HOLDER_LIVENESS=1 时租约冲突分支不做
-    持有者存活核算——无条件回到「ack 释放」（2026-10-06 语义）。"""
+    持有者存活核算——无条件回到「ack 释放」（2026-10-06 语义，含 A47-F2
+    的决议载体收紧）。"""
     return _env_switch("PLAITA_DISABLE_HOLDER_LIVENESS")
+
+
+# A47-F2：挂起执行的决议载体。subscribe→suspend 提交窗口内到达的
+# event/timeout/cancel 不是重复投递，而是 suspended 的唯一唤醒来源（#33）。
+_DECISION_RESUME_TYPES = frozenset(
+    (ResumeType.EVENT.value, ResumeType.TIMEOUT.value, ResumeType.CANCEL.value)
+)
 
 
 def _affinity_disabled() -> bool:
@@ -4977,9 +4985,36 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         「存活未知」返回 True 保持 ack——宁可回到 zombie reap 兜底，不
         回归 2026-10-06 修掉的假死信风暴（对端每 60s XCLAIM 烧 delivery）。
         回滚开关 PLAITA_DISABLE_HOLDER_LIVENESS=1 整体旁路（回到无条件 ack）。
+
+        A47-F2（A46-04 根因）：持有者存活只证明「进程在」，不证明「会消费
+        这条消息」。suspend 提交窗口 [订阅注册, 租约释放) 内到达的
+        ``resume_type=event/timeout/cancel`` 是挂起执行的**唯一决议载体**
+        （#33：挂起只能被这三者唤醒），持有者落盘 suspended 后不会再读它。
+        旧判据在持有者在册时把它当重复载体 ack ⇒ 释放租约后零载体、执行
+        永久 suspended（默认 event 节点的自动恢复网为 0，见台账 A47-02）。
+        故决议载体**不看任何存活信号、一律不 ack**，留 pending 到租约释放后
+        reclaim；#242 死信守卫在租约仍在时拒绝死信，释放后重入队副本推进。
+        ``continue/retry/start`` 不携带推进语义，保持上面的原判据。本判据
+        只覆盖租约冲突窗口；#258 的 ``ResumeProtocolError`` 状态感知分支是
+        另一个窗口（协议错配），两套判据互不影响。
         """
         if _holder_liveness_disabled():
             return True
+        # A46-04 / A47-F2：决议载体无条件留 pending（含信号缺失分支——
+        # 对「唯一载体」fail-open 就是永久挂起）。
+        if (
+            isinstance(body, dict)
+            and body.get("type") == "resume"
+            and body.get("resume_type") in _DECISION_RESUME_TYPES
+        ):
+            logger.warning(
+                "执行 %s 的 %s 决议载体在租约冲突窗口内到达（持有者可能正在落盘 "
+                "suspended）——不 ack，留 pending 等租约释放后重投推进 "
+                "(A46-04/A47-F2)",
+                body.get("execution_id"),
+                body.get("resume_type"),
+            )
+            return False
         if not (isinstance(body, dict) and body.get("execution_id")):
             return True
         if not getattr(self, "_enable_registry", False):
@@ -5893,13 +5928,16 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # pending，等租约过期后下一轮 reclaim 正常取得租约从
                     # checkpoint 续跑（代价 ≤TTL+60s，远小于 2h reap）。
                     # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
-                    # 那里**没人**能跑该任务，必须留给对端。
+                    # 那里**没人**能跑该任务，必须留给对端。决议载体
+                    # （event/timeout/cancel）另有 A47-F2 守卫：即使持有者在册
+                    # 也不 ack——它们不是重复载体，而是挂起执行的唯一唤醒来源。
                     if self._lease_conflict_ack_safe(task.body):
                         queue.note_lease_conflict()
                         queue.ack(task.message_id)
                         acked = True
                         logger.info(
-                            "任务 %s 执行被他人持租约（持有者在册，正常竞争），已 ack 释放避免烧 delivery: %s",
+                            "任务 %s 执行被他人持租约且载体无推进语义"
+                            "（continue/retry/start，持有者在册），已 ack 释放避免烧 delivery: %s",
                             task.message_id,
                             _scrub_url_text(exc),
                         )
@@ -5923,7 +5961,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     else:
                         queue.note_lease_conflict()
                         logger.warning(
-                            "任务 %s 租约持有者已死，消息留 pending 等租约过期后重投，防重试载体被吞 (#50): %s",
+                            "任务 %s 租约冲突但守卫判定不 ack（持有者已死/停机中，"
+                            "或载体是 event/timeout/cancel 决议载体），消息留 pending "
+                            "等租约释放后重投，防唯一载体被吞 (#50/A46-04): %s",
                             task.message_id,
                             _scrub_url_text(exc),
                         )

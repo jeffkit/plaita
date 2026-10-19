@@ -223,7 +223,10 @@ class TestConsumeLoopClaimGate(unittest.TestCase):
             _disk_guard_poll_seconds=0.01,
             **attrs,
         )
-        w._dispatch_task = lambda body, delivery_count=1: self.dispatched.append(body)
+        w._dispatch_task = (
+            lambda body, delivery_count=1, schema_version=None:
+            self.dispatched.append(body)
+        )
         return w
 
     def _run_loop_briefly(self, w, queue, seconds=0.2):
