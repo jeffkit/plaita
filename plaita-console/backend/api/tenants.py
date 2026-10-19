@@ -63,7 +63,9 @@ def create_tenant(req: CreateTenantRequest, request: Request,
                   identity: Dict = Depends(require_auth)):
     _platform_admin(identity)
     try:
-        tenant = tenants_svc.create_tenant(get_flow_store(), req.id, req.name)
+        tenant = tenants_svc.create_tenant(
+            get_flow_store(), req.id, req.name, redis_client=_redis(request)
+        )
     except tenants_svc.TenantError as e:
         raise HTTPException(status_code=409, detail=str(e))
     _audit(request, "tenant.create", req.id)
