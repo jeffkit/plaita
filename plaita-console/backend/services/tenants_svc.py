@@ -21,29 +21,37 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 try:
     from ..models.flow import (
+        CopilotThread,
         Credential,
         DEFAULT_TENANT_ID,
+        Deployment,
         FlowRecord,
         LocalExecution,
         LocalLog,
         LocalSchedule,
         LocalScheduleFire,
+        NodeDescriptor,
+        PropertyType,
         Tenant,
         TenantMember,
     )
 except ImportError:
     from models.flow import (  # type: ignore
+        CopilotThread,
         Credential,
         DEFAULT_TENANT_ID,
+        Deployment,
         FlowRecord,
         LocalExecution,
         LocalLog,
         LocalSchedule,
         LocalScheduleFire,
+        NodeDescriptor,
+        PropertyType,
         Tenant,
         TenantMember,
     )
@@ -82,6 +90,10 @@ _TENANT_STATUS_KEY = "plaita:tenant_status"             # 与 tenant_status 同�
 _TENANT_STATUS_DISABLED = "disabled"                    # tenant_is_active 拒行值
 # A50-05：共享任务队列（console 派发与 worker 消费同名，env 可覆盖）。
 _TASK_QUEUE_DEFAULT = "plaita:flow:queue"
+
+#: 集群日志 Stream（平台级键，条目内 ``tenant_id`` 归属；A54-01）。
+_LOG_KEY_PATTERN = "plaita:logs:*"
+_LOG_PURGE_BATCH = 256
 
 # default 租户与平台机制键共用 ``plaita:`` 前缀：只按租户数据前缀清理，
 # 不触碰队列/registry 等平台键（flow 定义逐键类型判别，见 _purge_tenant_redis）。
@@ -125,6 +137,24 @@ def get_tenant(store, tenant_id: str) -> Dict[str, Any]:
         return _to_dict(row)
 
 
+def tenant_generation(store, tenant_id: str) -> str | None:
+    """租户世代标识（A54-02）：``tenants.created_at`` 的 ISO 时间。
+
+    ``tenant_id`` 是安全主体标识而非数据所有权凭证——删除后同名重建是
+    **新世代的新主体**。世代取创建时间（删除行即失去，重建得到新值），
+    用于把旧世代派工台账/日志等审计元数据挡在新租户读面之外。与合同密钥
+    ``contract_secret_id``（轮换会变）不同，世代不随合同密钥轮换漂移。
+    租户不存在 ⇒ ``None``（调用方按 fail-closed 处理，不返回任何旧行）。
+    """
+    with store._session_local() as session:
+        created = session.scalars(
+            select(Tenant.created_at).where(Tenant.id == tenant_id)
+        ).first()
+    if created is None:
+        return None
+    return created.isoformat()
+
+
 def create_tenant(store, tenant_id: str, name: str = "",
                   redis_client=None) -> Dict[str, Any]:
     if not _SLUG_RE.match(tenant_id or ""):
@@ -134,6 +164,19 @@ def create_tenant(store, tenant_id: str, name: str = "",
     with store._session_local() as session:
         if session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first():
             raise TenantError(f"租户已存在: {tenant_id}")
+        # A54-06：同名 create 不得继承前代数据（租户行可能已被旧版本/人工删掉
+        # 但 flows/资产仍在）。拒绝门下要求显式清理/归档，绝不静默重新归属。
+        leftovers = {
+            name: count
+            for name, count in _orphan_asset_counts(session, tenant_id).items()
+            if count
+        }
+        if leftovers:
+            detail = "、".join(f"{name}={count}" for name, count in leftovers.items())
+            raise TenantError(
+                f"租户 slug {tenant_id} 存在前代遗留数据（{detail}）："
+                "请先显式清理/归档后再创建（不允许同名继承）"
+            )
         secret_id, secret_key = new_contract_secret()
         row = Tenant(
             id=tenant_id,
@@ -284,6 +327,56 @@ def _purge_local_tenant_runtime(session, tenant_id: str) -> Dict[str, int]:
         ("local_schedules", LocalSchedule),
         ("local_executions", LocalExecution),
         ("local_logs", LocalLog),
+    ):
+        counts[name] = session.execute(
+            delete(model).where(model.tenant_id.in_(ids))
+        ).rowcount or 0
+    return counts
+
+
+def _orphan_asset_counts(session, tenant_id: str) -> Dict[str, int]:
+    """该 slug 下已存在的前代租户数据（租户行不在时也不得同名继承）。
+
+    A54-06 的判据面：``create_tenant`` 与 404 补清扫都先看这里。flow 是可
+    执行资产，绝不能静默继承；其余资产（节点/属性/Copilot/部署）同名重建
+    也会重新可见，同样在拒绝门下。返回 ``{表名: 行数}``。
+    """
+    ids = _tenant_row_ids(tenant_id)
+    counts: Dict[str, int] = {}
+    for name, model in (
+        ("flows", FlowRecord),
+        ("node_descriptors", NodeDescriptor),
+        ("property_types", PropertyType),
+        ("copilot_threads", CopilotThread),
+        ("deployments", Deployment),
+    ):
+        counts[name] = int(
+            session.scalar(
+                select(func.count()).select_from(model).where(
+                    model.tenant_id.in_(ids)
+                )
+            ) or 0
+        )
+    return counts
+
+
+def _purge_tenant_db_assets(session, tenant_id: str) -> Dict[str, int]:
+    """租户级 DB 资产清理（A54-03/04/05）。
+
+    自定义节点描述、属性类型、Copilot 会话元数据、部署记录都带
+    ``tenant_id`` 但不在删除事务里：同名重建后新租户 viewer 经
+    ``/api/nodes``、``/api/property-types``、``/api/copilot/threads``、
+    ``/api/deployments`` 读到前代资产。它们不是平台审计证据，按租户数据
+    随删除事务清理；``audit_logs`` **不删**（合规证据保留），读面另行按
+    世代收窄（见 ``api/audit.py``）。
+    """
+    ids = _tenant_row_ids(tenant_id)
+    counts: Dict[str, int] = {}
+    for name, model in (
+        ("node_descriptors", NodeDescriptor),
+        ("property_types", PropertyType),
+        ("copilot_threads", CopilotThread),
+        ("deployments", Deployment),
     ):
         counts[name] = session.execute(
             delete(model).where(model.tenant_id.in_(ids))
@@ -473,6 +566,9 @@ def _purge_tenant_redis(redis_client, tenant_id: str) -> Dict[str, int]:
     counts["subscriptions"] = _purge_tenant_redis_subscriptions(
         redis_client, tenant_id
     )
+    # A54-01：集群日志 Stream 是平台级键，条目内才带 tenant_id。不清理会在
+    # 同名重建后让新租户 viewer 读到前代 message（/api/logs 三件套）。
+    counts["logs"] = _purge_tenant_logs(redis_client, tenant_id)
     # 配额名额/上限（平台键按租户字段收窄）
     redis_client.delete(_TENANT_RUNNING_KEY.format(tenant_id=tenant_id))
     redis_client.hdel(_TENANT_QUOTA_KEY, tenant_id)
@@ -484,13 +580,53 @@ def _task_queue_name() -> str:
     return os.getenv("PLAITA_CONSOLE_TASK_QUEUE", _TASK_QUEUE_DEFAULT)
 
 
+#: 显式队列 allowlist（逗号/空白分隔）：worker/调度按自定义名消费时补登记。
+_TENANT_PURGE_QUEUES_ENV = "PLAITA_CONSOLE_TENANT_PURGE_QUEUES"
+
+
+def _tenant_queue_names(redis_client) -> List[str]:
+    """删除时要排空的队列键集合（A54-09）。
+
+    单清 console 队列会在「worker 用 ``PLAITA_QUEUE_NAME`` 分流、或 v1/v2
+    并行」时留下可执行的旧 start。集合来源：
+    - console 队列（``PLAITA_CONSOLE_TASK_QUEUE``）；
+    - worker/调度队列（``PLAITA_QUEUE_NAME`` / ``QUEUE_NAME``）；
+    - 显式 allowlist（``PLAITA_CONSOLE_TENANT_PURGE_QUEUES``）；
+    - Redis 里已存在的同族 Stream（``{base}*``，仅 Stream 类型）——覆盖
+      runbook 的 ``plaita:flow:queue:v2`` 等分叉，无需 console 进程知道
+      worker 的 env。
+    去重保序；任何 Redis 读错误上抛（清理失败必须 loud）。
+    """
+    names: List[str] = []
+
+    def _add(name: Any) -> None:
+        if not isinstance(name, str):
+            return
+        value = name.strip()
+        if value and value not in names:
+            names.append(value)
+
+    for env_name in ("PLAITA_CONSOLE_TASK_QUEUE", "PLAITA_QUEUE_NAME", "QUEUE_NAME"):
+        _add(os.getenv(env_name))
+    _add(_TASK_QUEUE_DEFAULT)
+    for item in re.split(r"[,\s]+", os.getenv(_TENANT_PURGE_QUEUES_ENV, "")):
+        _add(item)
+    if redis_client is not None:
+        for base in dict.fromkeys((_TASK_QUEUE_DEFAULT, _task_queue_name())):
+            for key in _scan_redis_keys(redis_client, f"{base}*"):
+                if _redis_text(redis_client.type(key)) == "stream":
+                    _add(key)
+    return names
+
+
 def _purge_tenant_queue(redis_client, tenant_id: str) -> int:
-    """删除共享任务队列中归属该租户的 start/resume 消息（A50-05）。
+    """删除共享任务队列中归属该租户的 start/resume 消息（A50-05/A54-09）。
 
     队列是全局 Stream（消息只带 ``tenant_id`` 字段），不在租户命名空间里；
     删除时不清，同名重建把墓碑覆盖回 active 后旧 start 会重新执行。清理
     失败必须 loud（与 #255 的 Redis 清理同一口径），否则删除会静默留下
-    可执行的旧消息。
+    可执行的旧消息。A54-09：按 :func:`_tenant_queue_names` 的**键集合**
+    逐个排空，不再只看 console 单键。
     """
     if redis_client is None:
         return 0
@@ -502,7 +638,74 @@ def _purge_tenant_queue(redis_client, tenant_id: str) -> int:
             tenant_id,
         )
         raise
-    return purge_tenant_tasks(redis_client, _task_queue_name(), tenant_id)
+    counts: Dict[str, int] = {}
+    for queue_name in _tenant_queue_names(redis_client):
+        counts[queue_name] = purge_tenant_tasks(
+            redis_client, queue_name, tenant_id
+        )
+    total = sum(counts.values())
+    if total:
+        logger.info("删除租户 %s：任务队列清理 %s", tenant_id, counts)
+    return total
+
+
+def _stream_entry_tenant(entry_data: Any) -> str:
+    """日志条目归属租户，与读面 ``api.logs._entry_tenant`` 同一判据。
+
+    键/值可能是 bytes（未开 decode_responses 的客户端）；缺失或空串按
+    ``default`` 处理——读面就是这么归类的，删除侧必须同口径，否则
+    default 租户的旧条目永远清不掉。
+    """
+    if not isinstance(entry_data, dict):
+        return DEFAULT_TENANT_ID
+    tenant = entry_data.get("tenant_id")
+    if tenant is None:
+        tenant = entry_data.get(b"tenant_id")
+    if isinstance(tenant, bytes):
+        tenant = tenant.decode()
+    return tenant or DEFAULT_TENANT_ID
+
+
+def _purge_tenant_logs(redis_client, tenant_id: str) -> int:
+    """删除平台级日志 Stream 中归属该租户的条目（A54-01）。
+
+    ``plaita:logs:{service_type}:{instance_id}`` 是平台级 Stream，键不含
+    租户段；租户边界只在条目字段里（``log_handler._format_record`` 写入
+    ``current_tenant()``）。同名重建后旧条目的 ``tenant_id`` 重新等于新
+    租户 slug ⇒ 新租户 viewer 经 ``/api/logs`` 三件套读到前代 message。
+    删除时按条目收窄 XDEL（日志无消费组，不需要 XACK）；无法解析归属的
+    条目不删（不误伤），非 Stream 键跳过并 WARNING。Redis 错误上抛——
+    清理失败必须 loud，交由调用方重试。
+    """
+    if redis_client is None:
+        return 0
+    deleted = 0
+    for key in _scan_redis_keys(redis_client, _LOG_KEY_PATTERN):
+        key_type = _redis_text(redis_client.type(key))
+        if key_type != "stream":
+            logger.warning(
+                "删除租户 %s：%s 类型为 %s 而非 Stream，跳过日志清理",
+                tenant_id, key, key_type,
+            )
+            continue
+        start = "-"
+        while True:
+            entries = redis_client.xrange(
+                key, min=start, max="+", count=_LOG_PURGE_BATCH
+            )
+            if not entries:
+                break
+            matched = [
+                _redis_text(entry_id)
+                for entry_id, entry_data in entries
+                if _stream_entry_tenant(entry_data) == tenant_id
+            ]
+            if matched:
+                deleted += int(redis_client.xdel(key, *matched) or 0)
+            if len(entries) < _LOG_PURGE_BATCH:
+                break
+            start = f"({_redis_text(entries[-1][0])}"
+    return deleted
 
 
 def _tombstone_tenant(redis_client, tenant_id: str) -> None:
@@ -537,7 +740,17 @@ def _purge_orphan_tenant_runtime(session, tenant_id: str, redis_client) -> None:
     if tenant_id == DEFAULT_TENANT_ID:
         _tombstone_tenant(redis_client, tenant_id)
         return
+    # A54-06：租户行已不在但仍有流程 ⇒ 404 补清扫必须是 loud 的拒绝门：
+    # 静默返回 404 后同名 create 会把旧流程重新归给新租户（可读、可发布、
+    # 可同步执行）。要求先用平台身份显式归档/清除 flows，再重试删除。
+    orphan_counts = _orphan_asset_counts(session, tenant_id)
+    if orphan_counts.get("flows"):
+        raise TenantError(
+            f"租户 {tenant_id} 行已不存在但仍有 {orphan_counts['flows']} 个"
+            "流程残留：请显式归档/清除 flows 后再删除（不会留给同名重建）"
+        )
     _purge_local_tenant_runtime(session, tenant_id)
+    _purge_tenant_db_assets(session, tenant_id)
     session.commit()
     _purge_tenant_redis(redis_client, tenant_id)
     # 404 补清扫同样要排空队列：旧版本删除留下的 start 消息会在同名重建
@@ -562,8 +775,9 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
             # 失败后租户已不存在，重试只拿到 404（「租户已删、旧密钥仍可被
             # 引擎读到」的死路）。404 路径补清扫这份残留——仍删除失败则显式
             # 上抛，不得把「没清掉」伪装成「已不存在」。
-            _remove_tenant_credentials_export(tenant_id)
+            # A54-06：先过 orphan-flow 拒绝门；被拒时凭据/运行数据一字不动。
             _purge_orphan_tenant_runtime(session, tenant_id, redis_client)
+            _remove_tenant_credentials_export(tenant_id)
             return False
         flows = session.scalars(
             select(FlowRecord).where(FlowRecord.tenant_id == tenant_id)
@@ -587,6 +801,8 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
         purged_credentials = len(credentials)
         # #255：本地档运行数据与租户行同一事务（失败整体回滚、可重试）。
         local_counts = _purge_local_tenant_runtime(session, tenant_id)
+        # A54-03/04/05：节点/属性类型/Copilot/部署同事务清理（audit 保留）。
+        asset_counts = _purge_tenant_db_assets(session, tenant_id)
         session.delete(row)
         # plaita#257：删除先落到事务（flush），凭据旁文件（含密钥）清成功
         # 之后才 commit。失败方向 fail-safe：宁可「租户行还在而凭据不可达」
@@ -605,11 +821,12 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
         session.commit()
 
     logger.info(
-        "删除租户 %s：凭据 %d 条（导出文件 %s）、本地 %s、Redis %s",
+        "删除租户 %s：凭据 %d 条（导出文件 %s）、本地 %s、DB 资产 %s、Redis %s",
         tenant_id,
         purged_credentials,
         credentials_export,
         local_counts,
+        asset_counts,
         redis_counts,
     )
     return True

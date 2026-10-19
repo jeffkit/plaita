@@ -195,6 +195,7 @@ def dispatch_one(
     params: Optional[Dict[str, Any]] = None,
     queue_name: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    tenant_generation: Optional[str] = None,
     actor: Optional[str] = None,
     dry_run: bool = True,
     shadow: Optional[bool] = None,
@@ -279,6 +280,7 @@ def dispatch_one(
         stale=result["stale"],
         candidate_count=len(candidates),
         tenant_id=tenant_id,
+        tenant_generation=tenant_generation,
         actor=actor,
         extra={"execution_id": exec_id},
     )
@@ -314,9 +316,24 @@ def dispatch_many(
     }
 
 
-def ledger_rows(redis_client: Any, *, count: Optional[int] = None) -> List[Dict[str, Any]]:
-    """派发台账条目（旧 → 新）；Redis 故障/坏条目 → 跳过（不抛）。"""
-    return read_ledger(redis_client, count=count)
+def ledger_rows(
+    redis_client: Any,
+    *,
+    count: Optional[int] = None,
+    tenant_id: Optional[str] = None,
+    tenant_generation: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """派发台账条目（旧 → 新）；Redis 故障/坏条目 → 跳过（不抛）。
+
+    A54-02：``tenant_id`` + ``tenant_generation`` 同时给出时只返回当前
+    世代的该租户条目；平台视角不传即可全量审计。
+    """
+    return read_ledger(
+        redis_client,
+        count=count,
+        tenant_id=tenant_id,
+        tenant_generation=tenant_generation,
+    )
 
 
 def dispatch_parity(redis_client: Any, queue_name: Optional[str] = None) -> Dict[str, Any]:

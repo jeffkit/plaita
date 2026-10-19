@@ -54,11 +54,29 @@ process-docker 模式切换 / 基础设施 CRUD 与容器启停 / 集群登记�
 强制干跑并留下 WARNING；`tenant_id` 取认证上下文，只有平台身份可代传其它
 租户，跨租户请求 403 + 审计。派发台账同时记录认证主体 `actor` 与生效租户。
 
+`GET /api/dispatch/ledger`（A54-02）：平台身份返回全量台账与全局队列对账；
+租户身份只返回**当前世代**的本租户条目（台账写入 `tenant_generation`，
+同名租户重建后旧世代条目不可见；缺失世代的旧行 fail-closed），且不返回
+全局队列计数——`queue_length=null`、`error` 说明对账仅平台身份可用。
+
+`GET /api/services` 及其详情/拓扑读面（#265）：基础设施与内部组件的合成
+条目在响应序列化层脱敏——连接串 URL 的 userinfo 口令与凭据键值换成
+`***`，保留 scheme/host/port/path/db。租户 viewer 仍可看 worker 实例与
+非敏感状态，但读不到口令。
+
 登录后走会话 token（7 天）；`X-Admin-API-Key` 服务账号兼容（等价 admin）。
 角色/密码变更即时撤销旧会话。「用户」页管理账号与角色。
 
 **审计**：「审计」页留痕管理面敏感操作（发布、保存、删除、执行、凭据变更、
 用户管理），含操作人 / IP / 时间 / 元数据——机密内容永不入审计。
+
+删除租户时 `audit_logs` **不物理删除**（合规证据保留）：租户 admin 的
+`GET /api/audit` 只返回当前世代（`tenants.created_at` 之后）的记录，
+平台身份可跨世代全量审计。自定义节点/属性类型/Copilot 会话/部署记录随
+租户删除事务清理；日志 Stream（`plaita:logs:*`）按条目 `tenant_id` 清理；
+任务队列按 console/worker/allowlist/同族版本队列的**键集合**排空。404
+补清扫遇到残留 flow 时返回 409 具名拒绝，`create_tenant` 也拒绝任何同名
+继承（要求显式清理/归档）。
 
 **环境晋升**：console 实例经 `PLAITA_CONSOLE_ENV` 标识环境（dev/test/prod）：
 

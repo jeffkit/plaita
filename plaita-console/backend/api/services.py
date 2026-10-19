@@ -15,13 +15,18 @@ try:
 except ImportError:
     from auth import ensure_platform_admin, require_auth  # type: ignore
 
+try:
+    from ..services.read_redaction import RedactedResponseModel
+except ImportError:
+    from services.read_redaction import RedactedResponseModel  # type: ignore
+
 router = APIRouter()
 
 
 # ============ 数据模型 ============
 
-class ServiceInfo(BaseModel):
-    """服务信息"""
+class ServiceInfo(RedactedResponseModel):
+    """服务信息（序列化层脱敏：#265 基础设施/组件 host 不回显口令）"""
     instance_id: str = Field(..., description="实例唯一标识")
     service_type: str = Field(..., description="服务类型")
     host: str = Field(..., description="主机地址")
@@ -38,13 +43,13 @@ class ServiceInfo(BaseModel):
     last_heartbeat: Optional[str] = Field(None, description="最后心跳时间")
 
 
-class ServiceListResponse(BaseModel):
+class ServiceListResponse(RedactedResponseModel):
     """服务列表响应"""
     services: List[ServiceInfo]
     total: int
 
 
-class ServiceNode(BaseModel):
+class ServiceNode(RedactedResponseModel):
     """服务拓扑节点"""
     instance_id: str
     service_type: str
@@ -63,7 +68,7 @@ class ServiceEdge(BaseModel):
     label: str
 
 
-class ServiceTopology(BaseModel):
+class ServiceTopology(RedactedResponseModel):
     """服务拓扑"""
     nodes: List[ServiceNode]
     edges: List[ServiceEdge]

@@ -112,6 +112,7 @@ def build_ledger_entry(
     stale: Any = None,
     candidate_count: Optional[int] = None,
     tenant_id: Optional[str] = None,
+    tenant_generation: Optional[str] = None,
     actor: Optional[str] = None,
     decided_at: Optional[str] = None,
     decided_by: Optional[str] = None,
@@ -149,6 +150,9 @@ def build_ledger_entry(
         "rejected": rejected_rows,
         "stale": [str(x) for x in stale] if isinstance(stale, (list, tuple)) else [],
         "tenant_id": tenant_id,
+        # A54-02：租户世代（create 时生成）。同名重建 = 新世代，旧世代的
+        # 派工元数据不得重新命中新租户；平台审计仍可全量读。
+        "tenant_generation": tenant_generation,
         # #262：「谁派的」的认证主体（用户名 / api-key）。``decided_by`` 是
         # 派发方主机，无法回答跨租户代传时是**哪个账号**触发的。
         "actor": actor,
@@ -195,15 +199,49 @@ def read_ledger(
     *,
     count: Optional[int] = None,
     ledger_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    tenant_generation: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """读台账条目（旧 → 新）。Redis 故障/坏条目 → 跳过（绝不抛）。
+
+    ``tenant_id`` + ``tenant_generation`` 同时给出时只返回**当前世代**的
+    该租户条目（A54-02）：同名重建后旧世代条目不再命中新租户。世代缺失
+    （None）视为不可证明归属 ⇒ 不返回任何租户行（fail-closed）；平台视角
+    不传这两个参数，仍可全量审计。
 
     「坏条目」= payload 缺失 / 不可解析 / 不是 JSON 对象。它们**不**让整个
     台账读不出来：跳过并在返回值里不留痕（``ledger_rows_with_errors`` 提供
     带错误计数的版本）。
     """
-    rows, _ = ledger_rows_with_errors(redis_client, count=count, ledger_key=ledger_key)
+    rows, _ = ledger_rows_with_errors(
+        redis_client,
+        count=count,
+        ledger_key=ledger_key,
+        tenant_id=tenant_id,
+        tenant_generation=tenant_generation,
+    )
     return rows
+
+
+#: 租户视图反向扫描的原始条目上限：过滤在读取侧完成，若窗口内的匹配条目
+#: 不足 ``count``，最多再看这么多条（触界 WARNING，不静默截断）。
+_TENANT_LEDGER_MAX_SCAN = 5000
+_LEDGER_SCAN_BATCH = 256
+
+
+def _matches_generation(
+    data: Dict[str, Any],
+    tenant_id: Optional[str],
+    tenant_generation: Optional[str],
+) -> bool:
+    """租户 + 世代双重匹配（世代不可证明 ⇒ 不命中，绝不回退只比租户）。"""
+    if tenant_id is None:
+        return True
+    if data.get("tenant_id") != tenant_id:
+        return False
+    if not tenant_generation:
+        return False
+    return data.get("tenant_generation") == tenant_generation
 
 
 def ledger_rows_with_errors(
@@ -211,17 +249,30 @@ def ledger_rows_with_errors(
     *,
     count: Optional[int] = None,
     ledger_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    tenant_generation: Optional[str] = None,
 ) -> Any:
-    """``(可解析条目, 坏条目数)``——坏条目不静默吞掉（可观测）。"""
+    """``(可解析条目, 坏条目数)``——坏条目不静默吞掉（可观测）。
+
+    带租户过滤时按反向分页扫描直到凑够 ``count`` 条匹配项（或触到
+    ``_TENANT_LEDGER_MAX_SCAN``）；只有匹配项进入结果，``count`` 语义仍是
+    「最近 N 条**可见**记录」。
+    """
     if redis_client is None:
         return [], 0
     key = ledger_key or ledger_key_from_env()
+    tenant_scoped = tenant_id is not None
     try:
-        if count is None:
-            raw_entries = redis_client.xrange(key)
+        if not tenant_scoped:
+            if count is None:
+                raw_entries = redis_client.xrange(key)
+            else:
+                # XREVRANGE 取最近 N 条后再正序，保证「最近 N 条」语义
+                raw_entries = list(reversed(redis_client.xrevrange(key, count=int(count))))
         else:
-            # XREVRANGE 取最近 N 条后再正序，保证「最近 N 条」语义
-            raw_entries = list(reversed(redis_client.xrevrange(key, count=int(count))))
+            raw_entries = _tenant_ledger_entries(
+                redis_client, key, count, tenant_id, tenant_generation
+            )
     except Exception as exc:  # noqa: BLE001 — 读侧故障按「读不到」处理
         logger.warning("派发台账读取失败（按空台账处理）: %s", _scrub_exception_text(exc))
         return [], 0
@@ -238,9 +289,53 @@ def ledger_rows_with_errors(
         if data is None:
             bad += 1
             continue
+        if not _matches_generation(data, tenant_id, tenant_generation):
+            continue
         data.setdefault("ledger_id", _decode(msg_id))
         rows.append(data)
     return rows, bad
+
+
+def _tenant_ledger_entries(
+    redis_client: Any,
+    key: str,
+    count: Optional[int],
+    tenant_id: str,
+    tenant_generation: Optional[str],
+):
+    """反向分页取租户视图的原始条目（旧 → 新），按匹配数截断。"""
+    target = None if count is None else max(0, int(count))
+    if target == 0:
+        return []
+    matched: List[Any] = []
+    scanned = 0
+    upper: Any = "+"
+    while True:
+        page = redis_client.xrevrange(key, max=upper, min="-", count=_LEDGER_SCAN_BATCH)
+        if not page:
+            break
+        for msg_id, fields in page:
+            data = _fields_to_entry(fields)
+            if data is not None and _matches_generation(
+                data, tenant_id, tenant_generation
+            ):
+                matched.append((msg_id, fields))
+        scanned += len(page)
+        if target is not None and len(matched) >= target:
+            break
+        if scanned >= _TENANT_LEDGER_MAX_SCAN:
+            logger.warning(
+                "派发台账租户视图扫描达到上限 %d 条（tenant=%s）：结果可能不完整",
+                _TENANT_LEDGER_MAX_SCAN, tenant_id,
+            )
+            break
+        if len(page) < _LEDGER_SCAN_BATCH:
+            break
+        upper = f"({_decode(page[-1][0])}"
+    if target is not None:
+        matched = matched[:target]
+    matched.reverse()
+    return matched
 
 
 def _fields_to_entry(fields: Any) -> Optional[Dict[str, Any]]:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
@@ -53,7 +54,8 @@ def record(request: Any, action: str, resource: str, resource_id: str = "",
 
 
 def list_audit(action: Optional[str] = None, actor: Optional[str] = None,
-               limit: int = 200, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+               limit: int = 200, tenant_id: Optional[str] = None,
+               since: Optional[datetime] = None) -> List[Dict[str, Any]]:
     try:
         from .flow_store import get_flow_store
     except ImportError:
@@ -63,6 +65,9 @@ def list_audit(action: Optional[str] = None, actor: Optional[str] = None,
         query = select(AuditLog).order_by(AuditLog.ts.desc()).limit(limit)
         if tenant_id is not None:
             query = query.where(AuditLog.tenant_id == tenant_id)
+        # A54-05：租户视角只读当前世代（审计行本身按合规要求保留）。
+        if since is not None:
+            query = query.where(AuditLog.ts >= since)
         if action:
             query = query.where(AuditLog.action == action)
         if actor:
