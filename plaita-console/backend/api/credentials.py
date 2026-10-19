@@ -75,7 +75,24 @@ def list_credentials(request: Request = None):
 @router.get("/credentials/{name}", response_model=CredentialDetail)
 def get_credential(name: str, request: Request = None):
     tenant = tenant_scope(request) if request is not None else None
-    record = credentials_svc.get_credential_record(name, tenant_id=tenant)
+    try:
+        record = credentials_svc.get_credential_record(name, tenant_id=tenant)
+    except credentials_svc.CredentialsKeyMismatchError as e:
+        # A2R25-10：错/缺 key 是「服务当前不可用」而不是 500 裸文本；
+        # 具名返回可操作指引（恢复原密钥），不把明文/密文带进错误体。
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": str(e),
+                "error": "credentials_key_mismatch",
+                "reason": e.reason,
+            },
+        )
+    except credentials_svc.CredentialsDisabledError as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"message": str(e), "error": "credentials_disabled"},
+        )
     if record is None:
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
     # #254：明文返回前校验租户归属。租户上下文下记录必须同属该租户；
@@ -105,8 +122,22 @@ def save_credential(req: CredentialSaveRequest, request: Request = None):
     try:
         credentials_svc.save_credential(req.name, req.type, req.data, req.desc,
                                         tenant_id=tenant)
+    except credentials_svc.CredentialsKeyMismatchError as e:
+        # 409：与当前库状态冲突（密钥不一致），不是请求体错误；拒绝写入
+        # 且原导出文件保持不变（A2R25-10）。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(e),
+                "error": "credentials_key_mismatch",
+                "reason": e.reason,
+            },
+        )
     except credentials_svc.CredentialsDisabledError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(
+            status_code=503,
+            detail={"message": str(e), "error": "credentials_disabled"},
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _audit(request, "credential.save", req.name,

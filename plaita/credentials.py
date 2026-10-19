@@ -61,6 +61,14 @@ DEFAULT_FILE = ".plaita-credentials.json"
 DEFAULT_KEY_FILE = ".plaita-credentials.key"
 DEFAULT_TENANT_ID = "default"
 
+# 导出文件的保留元数据键（A2R25-10）。console 在有密文时写入
+# ``{"format": "plaita-credentials", "version": 2, "key_id": "<sha256 前 16 位>"}``；
+# 引擎读侧必须忽略它，绝不能把它当成一条凭据（否则错误信息会列出内部键名）。
+# 空 store 仍写 ``{}``（无密文可失配，保持旧引擎解析零变化）。
+STORE_META_KEY = "__plaita_meta__"
+STORE_FORMAT = "plaita-credentials"
+STORE_FORMAT_VERSION = 2
+
 
 def _default_credentials_dir() -> Path:
     """默认凭据文件目录：SQLite 时与 DB 同目录，否则 cwd。
@@ -231,4 +239,8 @@ def _read_store() -> Dict[str, Dict[str, Any]]:
         ) from e
     if not isinstance(data, dict):
         raise _corrupt(path, f"顶层必须是对象，实际为 {type(data).__name__}")
+    # A2R25-10：文件级 key id/版本头不是凭据。旧版本引擎没有这个过滤时，
+    # 只会在「凭据不存在」的错误信息里多列一个内部键名；新版本直接剔除，
+    # 凭据名集合与错误提示保持原样。
+    data.pop(STORE_META_KEY, None)
     return data
