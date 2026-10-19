@@ -23,9 +23,9 @@ Plaita 流程引擎可视化管理控制台
 - **凭据明文归属（#254）**：`GET /api/credentials/{name}` 返回明文前校验租户归属——租户上下文必须命中本租户记录，跨租户同名凭据返回 404（不泄露存在性与明文）。
 - **租户内唯一**：`flow_id`、凭据名、自定义节点 type、属性类型名的唯一性均为租户内唯一（同名流程可共存于不同租户）。
 - **停用租户对运行面生效（#27）**：`POST /api/tenants/{id}/status` 置 `disabled` 后，该租户已签发会话的 API 调用按请求实时返回 **403**（无需等会话过期；平台管理员不受限，否则无法重新启用），其调度被置 `enabled=false`、`schedule_service` 不再入队。集群档还会把状态写入 Redis `plaita:tenant_status`，供 worker 丢弃该租户的 start/resume（含挂起执行的恢复）——跨 Redis 部署该闸门不生效（见 `docs-site/docs/distributed/ops-runbook.md`）。
-- **删除租户同步清理凭据（#245）**：`DELETE /api/tenants/{id}` 在删除租户行/成员行的同一事务里删除该租户全部 `credentials` 行，并删除引擎导出旁文件 `credentials_file(tenant_id)`；重建同名租户不会继承旧密钥。旁文件删除失败会显式报错（不静默留下可被 worker 读取的旧密文）。
+- **删除租户清理（#245/#255/#257）**：`DELETE /api/tenants/{id}` 先校验租户内无流程（有 flow 拒绝，拒绝门先于一切清理）。随后同一事务删除 `credentials`/成员/租户行与本地档四表（`local_schedules`/`local_schedule_fires`/`local_executions`/`local_logs`）；凭据旁文件 `credentials_file(tenant_id)` 在 commit **之前**删除（失败即回滚：租户行还在、可重试，绝不出现「租户已删、旧密钥仍可读」；旧版本留下的 404 残留由 404 路径补清扫）。集群档清理 `{ns}:*` 租户命名空间（执行状态/取消/fence/租约/重试计数/start-dedup、flow 发布定义）与平台键里归属该租户的调度/事件记录/事件订阅（按受信 `tenant_id` 逐条收窄；default 前缀下不碰队列 Stream）。删除后写 Redis `plaita:tenant_status=disabled` 墓碑——在途 start/resume 与旧 enabled 调度不再执行；同名重建回填 `active`。`save_credential` 拒绝已删/不存在的租户（堵迟到写复活 store）。清理失败显式报错；重建同名租户读不到旧凭据/执行/日志/调度。
 - **契约密钥**：每个租户一组 `contract_secret_id/contract_secret_key`（租户管理页创建/轮换，明文仅显示一次），只能拉取本租户已发布流程；全局 `PLAITA_CONSOLE_SECRET_ID/SECRET_KEY` 仍可用（平台上下文，可拉任意租户），存量集成不破坏。
-- **多租户边界（如实说明）**：集群档的租户数据（流程定义、执行状态、resume 租约）按键 namespace 隔离（`plaita:{tenant}:*`，default 租户保持历史前缀 `plaita:*` 以兼容存量数据），任务消息携带 `tenant_id`（缺省视为 default），引擎日志/调度值/订阅内嵌租户字段供 console 过滤。仍保持平台级共享的：任务队列 Stream（机制通道，租户在消息内）、事件总线存储与 pubsub（跨租户事件总线，订阅按租户过滤）、服务注册/控制通道。本地档凭据按租户导出到旁文件（`.plaita-credentials.<tenant>.json`），default 租户沿用历史文件路径。
+- **多租户边界（如实说明）**：集群档的租户数据（流程定义、执行状态、resume 租约）按键 namespace 隔离（`plaita:{tenant}:*`，default 租户保持历史前缀 `plaita:*` 以兼容存量数据），任务消息携带 `tenant_id`（缺省视为 default），引擎日志/调度值/订阅内嵌租户字段供 console 过滤。仍保持平台级共享的：任务队列 Stream（机制通道，租户在消息内）、事件总线存储与 pubsub（跨租户事件总线，订阅按租户过滤；删除租户时按记录 `tenant_id` 清理该租户条目）、服务注册/控制通道。本地档凭据按租户导出到旁文件（`.plaita-credentials.<tenant>.json`），default 租户沿用历史文件路径。
 - **滚动升级兼容**：消息缺 `tenant_id` 按 default 处理；default 租户流量走历史键前缀——旧 worker + 新 console（或反向）混跑时 default 租户不受影响，非 default 租户需双侧升级。
 
 ## 快速开始
