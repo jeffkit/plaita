@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { API_BASE, authHeaders } from '../../services/api'
+import { API_BASE, apiFetch, errorUserMessage } from '../../services/api'
 
 // 后端 agent 宿主的 SSE 事件（AG-UI 风格最小集）
 interface AgentEvent {
@@ -61,13 +61,13 @@ export default function AiGenerateDialog({
     if (!prompt.trim()) return
     setStatus('running'); setLines([]); setErrorMsg(''); setIr(null)
     try {
-      // 与 request() 同源：子路径前缀（SUB_PATH 探测）+ 鉴权头（token/管理 Key/
-      // 租户上下文）；响应是 SSE 流，不能走 request()（其消费 response.json()）
-      const resp = await fetch(`${API_BASE}/flows/ai-generate/stream`, {
+      // 与 request() 同源：子路径前缀（SUB_PATH 探测）+ 每次调用时点注入的
+      // 鉴权头；响应是 SSE 流，不能走 request()（其消费 response.text/json）。
+      const resp = await apiFetch(`${API_BASE}/flows/ai-generate/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt }),
-      })
+      }, { stream: true })
       if (!resp.ok || !resp.body) {
         const detail = await resp.text()
         throw new Error(detail.slice(0, 300) || `HTTP ${resp.status}`)
@@ -92,7 +92,7 @@ export default function AiGenerateDialog({
       }
       setStatus((s) => (s === 'running' ? 'error' : s))
     } catch (e: unknown) {
-      setErrorMsg(e instanceof Error ? e.message : String(e))
+      setErrorMsg(errorUserMessage(e))
       setStatus((s) => (s === 'done' ? s : 'error'))
     }
   }

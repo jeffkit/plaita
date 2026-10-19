@@ -2,8 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Play, Pause, RefreshCw, Search, Radio, ScrollText, X, AlertTriangle } from 'lucide-react'
-import { api, API_BASE, authHeaders, LogEntry } from '../services/api'
-import { PageHeader, Button, EmptyState } from '../components/ui'
+import { api, API_BASE, apiFetch, errorUserMessage, LogEntry } from '../services/api'
+import { PageHeader, Button, EmptyState, ErrorState } from '../components/ui'
 
 export default function Logs() {
   // 筛选进 URL：Cluster 实例页的「查看更多」深链可以直达了
@@ -37,10 +37,9 @@ export default function Logs() {
     if (instanceFilter) params.set('instance_id', instanceFilter)
     if (serviceTypeFilter) params.set('service_type', serviceTypeFilter)
 
-    // C4-4：EventSource 无法携带 Authorization/X-Admin-API-Key 头，鉴权部署
-    // 下 SSE 连接必然 401。/logs/stream 的后端归属另一批次（本批次不可改，
-    // 无法挂一次性票据端点），故这里用 fetch 流式读替代 EventSource：
-    // fetch 可带头，鉴权/免鉴权部署下都能建流；断流仍回落轮询。
+    // C4-4：EventSource 无法携带 Authorization 头，鉴权部署下 SSE 连接
+    // 必然 401。/logs/stream 无一次性票据端点，故用 fetch 流式读替代：
+    // apiFetch 在每次建流时注入当前凭证；断流回落轮询。
     const controller = new AbortController()
     let cancelled = false
 
@@ -53,10 +52,9 @@ export default function Logs() {
 
     void (async () => {
       try {
-        const resp = await fetch(`${API_BASE}/logs/stream?${params}`, {
-          headers: authHeaders(),
+        const resp = await apiFetch(`${API_BASE}/logs/stream?${params}`, {
           signal: controller.signal,
-        })
+        }, { stream: true })
         if (!resp.ok || !resp.body) throw new Error(`logs/stream ${resp.status}`)
         const reader = resp.body.getReader()
         const decoder = new TextDecoder()
@@ -88,8 +86,9 @@ export default function Logs() {
         }
         // 服务端正常收尾也视为断流：回落轮询，不允许静默停更
         throw new Error('logs/stream ended')
-      } catch {
+      } catch (e) {
         if (!cancelled && !controller.signal.aborted) {
+          console.warn('[logs-stream] 流式读取结束/失败，回落轮询:', errorUserMessage(e), e)
           setUseSSE(false)
           setSseLost(true)
         }
@@ -102,7 +101,7 @@ export default function Logs() {
     }
   }, [isStreaming, useSSE, levelFilter, instanceFilter, serviceTypeFilter])
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['logs', levelFilter, instanceFilter, serviceTypeFilter],
     queryFn: () =>
       api.getLogs({
@@ -245,6 +244,8 @@ export default function Logs() {
       >
         {isLoading ? (
           <EmptyState message="加载中…" />
+        ) : isError && !(useSSE && isStreaming) ? (
+          <ErrorState error={error} title="日志加载失败" onRetry={() => refetch()} />
         ) : filteredLogs.length === 0 ? (
           <EmptyState
             icon={<ScrollText size={20} />}

@@ -8,6 +8,7 @@ import {
   StatCard,
   StatusBadge,
   EmptyState,
+  ErrorState,
 } from '../components/ui'
 
 /**
@@ -37,7 +38,7 @@ const TONE_TEXT: Record<string, string> = {
 }
 
 export default function Workers() {
-  const { data: svcData, isLoading: svcLoading } = useQuery({
+  const { data: svcData, isLoading: svcLoading, isError: svcError, error: svcErrorObj, refetch: refetchServices } = useQuery({
     queryKey: ['services', 'flow_worker'],
     queryFn: () => api.getServices('flow_worker'),
     refetchInterval: 5000,
@@ -97,6 +98,8 @@ export default function Workers() {
       {/* Worker 列表 */}
       {svcLoading ? (
         <EmptyState message="加载中…" />
+      ) : svcError ? (
+        <ErrorState error={svcErrorObj} title="Worker 列表加载失败" onRetry={() => refetchServices()} />
       ) : workers.length === 0 ? (
         <EmptyState
           icon={<Server size={20} />}

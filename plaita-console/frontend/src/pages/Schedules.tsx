@@ -23,6 +23,7 @@ import {
   Button,
   StatusBadge,
   EmptyState,
+  ErrorState,
   Table,
   Th,
   Tr,
@@ -40,7 +41,7 @@ export default function Schedules() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['schedules'],
     queryFn: api.getSchedules,
     refetchInterval: 5000,
@@ -127,6 +128,12 @@ export default function Schedules() {
               <tr>
                 <td colSpan={7}>
                   <EmptyState message="加载中…" />
+                </td>
+              </tr>
+            ) : isError ? (
+              <tr>
+                <td colSpan={7}>
+                  <ErrorState error={error} title="触发器列表加载失败" onRetry={() => refetch()} />
                 </td>
               </tr>
             ) : schedules.length === 0 ? (

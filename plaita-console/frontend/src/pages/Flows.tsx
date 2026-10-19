@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus } from 'lucide-react'
 import { api } from '../services/api'
-import { Page, PageHeader, Card, Button, EmptyState, Table, Th, Tr, Td, TdData } from '../components/ui'
+import { Page, PageHeader, Card, Button, EmptyState, ErrorState, Table, Th, Tr, Td, TdData } from '../components/ui'
 
 export default function Flows() {
   const navigate = useNavigate()
@@ -75,7 +75,17 @@ export default function Flows() {
             </tr>
           </thead>
           <tbody>
-            {flows.length === 0 && (
+            {flowsQuery.isError ? (
+              <tr>
+                <td colSpan={5}>
+                  <ErrorState
+                    error={flowsQuery.error}
+                    title="流程列表加载失败"
+                    onRetry={() => flowsQuery.refetch()}
+                  />
+                </td>
+              </tr>
+            ) : flows.length === 0 && (
               <tr>
                 <td colSpan={5}>
                   <EmptyState message="暂无流程" hint="在上方创建第一个流程" />

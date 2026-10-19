@@ -1484,6 +1484,10 @@ async def stream_execution_endpoint(request: Request):
                     last = payload
                     yield {"event": "update", "data": payload}
                 if current.get("status") in ("completed", "failed", "cancelled"):
+                    # S17-04：终态必须显式发 finished（即使与上一条 update 相同），
+                    # 保证「最后一条事件一定是 finished」；前端据此正常收尾，
+                    # 不再把服务器正常关闭当断连永久轮询。
+                    yield {"event": "finished", "data": payload}
                     break
                 if await request.is_disconnected():
                     break

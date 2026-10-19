@@ -2,12 +2,12 @@ import { useQuery } from '@tanstack/react-query'
 import { Inbox, ChevronDown, ChevronUp } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../services/api'
-import { Page, PageHeader, Card, EmptyState } from '../components/ui'
+import { Page, PageHeader, Card, EmptyState, ErrorState } from '../components/ui'
 
 export default function Queues() {
   const [expandedQueue, setExpandedQueue] = useState<string | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['queues'],
     queryFn: api.getQueues,
     refetchInterval: 5000,
@@ -21,6 +21,8 @@ export default function Queues() {
 
       {isLoading ? (
         <EmptyState message="加载中…" />
+      ) : isError ? (
+        <ErrorState error={error} title="队列列表加载失败" onRetry={() => refetch()} />
       ) : queues.length === 0 ? (
         <EmptyState icon={<Inbox size={20} />} message="暂无队列" />
       ) : (

@@ -30,6 +30,24 @@ jobs:
       - name: pytest plaita-ai
         run: python -m pytest plaita-ai/tests -q
 
+  console-frontend-contracts:
+    name: Console frontend contracts (#266 / S17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          # check-api-transport.mjs 直接 import .ts（行为断言）；类型擦除需
+          # Node ≥22.18，不能依赖 gate 容器里的系统 nodejs。
+          node-version: "22.18"
+      # #266：源码/README 不得再出现浏览器管理密钥通道
+      # S17：传输层行为（超时/非 JSON/SPA 兜底/retry/终态）+ 出货接线
+      - name: Admin key + transport contracts
+        run: |
+          node plaita-console/frontend/scripts/check-admin-key.mjs
+          node plaita-console/frontend/scripts/check-api-transport.mjs
+
   gate:
     name: Regression gate (py${{ matrix.python-version }})
     timeout-minutes: 60

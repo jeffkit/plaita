@@ -18,7 +18,16 @@ import {
   User,
   CalendarClock,
 } from 'lucide-react'
-import { api, API_BASE, authHeaders, ExecutionInfo, type NodeTiming } from '../services/api'
+import {
+  api,
+  API_BASE,
+  API_TIMEOUTS,
+  apiFetch,
+  errorUserMessage,
+  isTerminalStatus,
+  ExecutionInfo,
+  type NodeTiming,
+} from '../services/api'
 import { Button, Card, StatusBadge, JsonViewer, jsonSummary, cn } from '../components/ui'
 import { useFlowDefinition, type FlowDefinitionState } from '../hooks/useFlowDefinition'
 import { nodeOutgoing } from '../components/flow/flowDefinition'
@@ -39,9 +48,10 @@ function useExecutionSSE(
 
     let cancelled = false
     let evtSource: EventSource | null = null
+    let finished = false
 
-    // C4-4：EventSource 无法携带 Authorization/X-Admin-API-Key 头，鉴权部署
-    // 下直连必然 401——先带头 POST 换 60s 一次性票据，再 ?ticket= 连接。
+    // C4-4：EventSource 无法携带 Authorization 头，鉴权部署下直连必然 401
+    // ——先带头 POST 换 60s 一次性票据，再 ?ticket= 连接。
     // 票据不可用（本地单机模式 503 / viewer 403 / 网络失败）时退回直连：
     // 免鉴权部署照常工作，严格鉴权部署由 onerror 回落轮询。
     const connect = (ticket: string | null) => {
@@ -49,22 +59,42 @@ function useExecutionSSE(
       const query = ticket ? `?ticket=${encodeURIComponent(ticket)}` : ''
       evtSource = new EventSource(`${API_BASE}/executions/${executionId}/stream${query}`)
 
-      evtSource.addEventListener('initial_state', (e) => {
+      const applySnapshot = (raw: string) => {
         try {
-          const data = JSON.parse(e.data)
+          const data = JSON.parse(raw)
           queryClient.setQueryData(['execution', executionId], data)
-        } catch { /* ignore parse errors */ }
+          return data as ExecutionInfo
+        } catch {
+          return null
+        }
+      }
+
+      evtSource.addEventListener('initial_state', (e) => {
+        applySnapshot(e.data)
       })
 
       evtSource.addEventListener('update', (e) => {
-        try {
-          const data = JSON.parse(e.data)
-          queryClient.setQueryData(['execution', executionId], data)
-        } catch { /* ignore parse errors */ }
+        applySnapshot(e.data)
+      })
+
+      // S17-04：后端终态显式发 finished；收到即视为正常收尾——不置 sseLost、
+      // 不回落轮询（旧实现把服务器正常结束当断连，终态页面永久 5s 轮询）。
+      evtSource.addEventListener('finished', (e) => {
+        applySnapshot(e.data)
+        finished = true
+        evtSource?.close()
+        console.info('[executions-sse] 收到 finished 终态事件，停止流与轮询')
       })
 
       evtSource.onerror = () => {
-        // 断开不允许静默：通知调用方回落轮询，页面冻结比报错更危险
+        const cached = queryClient.getQueryData<ExecutionInfo>(['execution', executionId])
+        if (finished || isTerminalStatus(cached?.status)) {
+          // 终态后的关闭（含浏览器对正常结束的 error 回调）不是断连
+          console.warn('[executions-sse] 终态后连接关闭，按正常收尾处理（不回落轮询）')
+          evtSource?.close()
+          return
+        }
+        // 非终态断开不允许静默：通知调用方回落轮询，页面冻结比报错更危险
         // （票据一次性：EventSource 自动重连也会 401，统一走回落）
         evtSource?.close()
         onLoss()
@@ -74,15 +104,18 @@ function useExecutionSSE(
     void (async () => {
       let ticket: string | null = null
       try {
-        const resp = await fetch(
+        const resp = await apiFetch(
           `${API_BASE}/executions/${executionId}/stream/ticket`,
-          { method: 'POST', headers: authHeaders() }
+          { method: 'POST' },
+          { timeoutMs: API_TIMEOUTS.streamConnect },
         )
         if (resp.ok) {
           const body = await resp.json()
           ticket = typeof body?.ticket === 'string' ? body.ticket : null
         }
-      } catch { /* 票据获取失败 → 直连尝试 */ }
+      } catch (e) {
+        console.warn('[executions-sse] 票据获取失败，尝试直连（鉴权部署将回落轮询）:', errorUserMessage(e))
+      }
       connect(ticket)
     })()
 
@@ -133,6 +166,8 @@ export default function ExecutionDetail() {
   // resume 请求的失败信息：BFF 对「唤醒预算已用尽」返回 409（worker 会幂等
   // 拒绝唤醒，重试是哑弹）——必须显式告诉操作者，否则按钮看着「受理了」。
   const [resumeError, setResumeError] = useState<string | null>(null)
+  // 取消失败的可见提示（S17-03：写失败不得静默）
+  const [cancelError, setCancelError] = useState<string | null>(null)
 
   const handleSSELoss = useCallback(() => {
     setUseSSE(false)
@@ -145,13 +180,22 @@ export default function ExecutionDetail() {
     queryKey: ['execution', executionId],
     queryFn: () => api.getExecution(executionId!),
     enabled: !!executionId,
-    refetchInterval: useSSE ? false : 5000,
+    // S17-04：终态恒不轮询；非终态且 SSE 已断开才 5s 兜底。
+    // 即使 SSE 从未建立（一直走轮询），终态后也必须停止。
+    refetchInterval: (query) =>
+      isTerminalStatus(query.state.data?.status) ? false : useSSE ? false : 5000,
   })
 
   const cancelMutation = useMutation({
     mutationFn: () => api.cancelExecution(executionId!),
     onSuccess: () => {
+      setCancelError(null)
       queryClient.invalidateQueries({ queryKey: ['execution', executionId] })
+    },
+    onError: (e: Error) => {
+      const message = errorUserMessage(e)
+      console.warn('[execution-cancel] 取消失败:', message, e)
+      setCancelError(message)
     },
   })
 
@@ -233,6 +277,8 @@ export default function ExecutionDetail() {
     )
   }
 
+  const terminal = isTerminalStatus(execution.status)
+
   return (
     <div className="p-6 h-full overflow-auto space-y-5">
       {/* 头部 */}
@@ -284,30 +330,42 @@ export default function ExecutionDetail() {
           <Button
             variant="ghost"
             size="sm"
+            disabled={terminal}
             onClick={() => {
               setSseLost(false)
               setUseSSE(!useSSE)
             }}
             className={
-              useSSE
-                ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400'
-                : sseLost
-                  ? 'text-status-warning hover:text-status-warning'
-                  : undefined
+              terminal
+                ? undefined
+                : useSSE
+                  ? 'bg-plaita-500/10 text-plaita-400 hover:text-plaita-400'
+                  : sseLost
+                    ? 'text-status-warning hover:text-status-warning'
+                    : undefined
             }
             title={
-              useSSE
-                ? '使用 SSE 实时更新中'
-                : sseLost
-                  ? '实时连接已断开，自动切换为轮询（点击重连）'
-                  : '使用轮询模式'
+              terminal
+                ? '执行已结束'
+                : useSSE
+                  ? '使用 SSE 实时更新中'
+                  : sseLost
+                    ? '实时连接已断开，自动切换为轮询（点击重连）'
+                    : '使用轮询模式'
             }
           >
             <Radio size={13} />
-            {useSSE ? '实时' : sseLost ? '轮询（已断开）' : '轮询'}
+            {terminal ? '已结束' : useSSE ? '实时' : sseLost ? '轮询（已断开）' : '轮询'}
           </Button>
         </div>
       </div>
+
+      {cancelError && (
+        <p className="text-caption text-status-error flex items-center gap-1">
+          <AlertCircle size={12} className="shrink-0" />
+          取消执行失败：{cancelError}
+        </p>
+      )}
 
       {/* 紧凑信息条：状态 + 流程/版本/调用者/时间/耗时/ID 一行读完。
           取代原来占版面 1/3 却只放四行字的「状态卡 + 时间信息」两张大卡 */}
