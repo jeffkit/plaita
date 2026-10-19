@@ -11,11 +11,14 @@ worker 自己暴露的 ``/metrics`` 只有本进程的队列计数器；「worke
 鉴权：随管理面挂载（``X-Admin-API-Key``）——Prometheus 抓取配置里带上即可。
 """
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Set
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from redis import Redis
+from redis.exceptions import ResponseError
 
 from plaita.server.metrics import Metric, collect_queue_metrics, render_prometheus
 from plaita.server.task_queue import DEFAULT_CONSUMER_GROUP
@@ -59,19 +62,97 @@ def get_redis(request: Request) -> Redis:
     return redis
 
 
-def _xlen(redis: Redis, key: str) -> int:
+class _Degradation:
+    """单次抓取内的部分失败累计（A2R19-04）。
+
+    单个 Redis 命令失败时仍返回 0 保证整页不打崩，但**必须**把「读不到」
+    与「真实为零」区分开：``metrics_scrape_degraded`` + 每命令失败计数进
+    响应，WARNING 按抓取频率限流。
+    """
+
+    def __init__(self) -> None:
+        self.failures: Dict[str, int] = {}
+
+    def record(self, command: str) -> None:
+        self.failures[command] = self.failures.get(command, 0) + 1
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.failures)
+
+    def metrics(self) -> List[Metric]:
+        metrics = [
+            Metric(
+                "metrics_scrape_degraded",
+                1 if self.degraded else 0,
+                {},
+                "gauge",
+                "本次抓取是否有 Redis 命令失败（1 = 页面里的 0 值不可信）",
+            )
+        ]
+        for command, count in sorted(self.failures.items()):
+            metrics.append(
+                Metric(
+                    "metrics_failed_commands_total",
+                    count,
+                    {"command": command},
+                    "counter",
+                    "本次抓取中该 Redis 命令的失败次数",
+                )
+            )
+        return metrics
+
+
+#: 降级 WARNING 限流窗口（秒）：Prometheus 抓取通常 15-60s 一次，防止刷屏。
+_DEGRADED_WARN_INTERVAL_SECONDS = 60.0
+_degraded_warn_lock = threading.Lock()
+_last_degraded_warn_at = 0.0
+
+
+def _warn_degradation(degradation: _Degradation) -> None:
+    global _last_degraded_warn_at
+    if not degradation.degraded:
+        return
+    now = time.monotonic()
+    with _degraded_warn_lock:
+        # 0.0 = 本进程尚未告警（也作为测试/运维的显式重置哨兵）。
+        if (
+            _last_degraded_warn_at
+            and now - _last_degraded_warn_at < _DEGRADED_WARN_INTERVAL_SECONDS
+        ):
+            return
+        _last_degraded_warn_at = now
+    summary = ", ".join(
+        f"{command}={count}" for command, count in sorted(degradation.failures.items())
+    )
+    logger.warning(
+        "集群指标采集降级（%s）：相关队列/worker 指标为 0 但**不代表真实为零**"
+        "（已通过 plaita_metrics_scrape_degraded/plaita_metrics_failed_commands_total 导出）",
+        summary,
+    )
+
+
+def _xlen(redis: Redis, key: str, degradation: _Degradation) -> int:
     try:
         return int(redis.xlen(key) or 0)
-    except Exception as exc:  # noqa: BLE001 - 单键读取失败不整单 500
-        logger.debug("xlen(%s) failed: %s", key, exc)
+    except Exception:  # noqa: BLE001 - 单键读取失败不整单 500
+        degradation.record("xlen")
         return 0
 
 
-def _pending(redis: Redis, key: str, group: str) -> int:
+def _pending(redis: Redis, key: str, group: str, degradation: _Degradation) -> int:
     try:
         summary = redis.xpending(key, group)
     except Exception as exc:  # noqa: BLE001 - 组不存在/键不存在按 0
-        logger.debug("xpending(%s, %s) failed: %s", key, group, exc)
+        # 消费组/键尚未创建（NOGROUP / no such key）是**正常空队列**，不是依赖
+        # 故障——不得计入降级，否则每个空队列都会触发假告警。
+        text = str(exc).upper()
+        if isinstance(exc, ResponseError) and (
+            "NOGROUP" in text or "NO SUCH KEY" in text
+        ):
+            logger.debug("xpending(%s, %s) 无消费组/键，按空队列处理", key, group)
+            return 0
+        degradation.record("xpending")
         return 0
     if isinstance(summary, dict):
         return int(summary.get("pending", 0) or 0)
@@ -103,15 +184,15 @@ def _stream_keys(redis: Redis) -> tuple[List[str], bool]:
     return keys, truncated
 
 
-def _registry_metrics(redis: Redis) -> List[Metric]:
+def _registry_metrics(redis: Redis, degradation: _Degradation) -> List[Metric]:
     truncated = False
     try:
         result = scan_keys(redis, REGISTRY_WORKER_PATTERN,
                            max_keys=MAX_REGISTRY_INSTANCES)
         instances = list(result.keys)
         truncated = result.truncated
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("扫描服务注册表失败: %s", exc)
+    except Exception:  # noqa: BLE001 - 扫描失败不整单 500，但必须标降级
+        degradation.record("registry_scan")
         instances = []
     metrics = [
         Metric(
@@ -146,6 +227,7 @@ def _registry_metrics(redis: Redis) -> List[Metric]:
 
 
 def collect_cluster_metrics(redis: Redis) -> List[Metric]:
+    degradation = _Degradation()
     metrics: List[Metric] = []
     stream_keys, truncated = _stream_keys(redis)
     if truncated:
@@ -161,14 +243,18 @@ def collect_cluster_metrics(redis: Redis) -> List[Metric]:
     for key in stream_keys:
         stats: Dict[str, Any] = {
             "stream_key": key,
-            "stream_length": _xlen(redis, key),
-            "dlq_length": _xlen(redis, f"{key}{DLQ_SUFFIX}"),
+            "stream_length": _xlen(redis, key, degradation),
+            "dlq_length": _xlen(redis, f"{key}{DLQ_SUFFIX}", degradation),
         }
         if not key.endswith(DLQ_SUFFIX):
             stats["group"] = DEFAULT_CONSUMER_GROUP
-            stats["pending"] = _pending(redis, key, DEFAULT_CONSUMER_GROUP)
+            stats["pending"] = _pending(
+                redis, key, DEFAULT_CONSUMER_GROUP, degradation
+            )
         metrics.extend(collect_queue_metrics(stats))
-    metrics.extend(_registry_metrics(redis))
+    metrics.extend(_registry_metrics(redis, degradation))
+    metrics.extend(degradation.metrics())
+    _warn_degradation(degradation)
     return metrics
 
 
