@@ -5750,11 +5750,28 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # 否则 Redis 抖动一次 = 挂起执行永久失去恢复机会。
                     queue.note_failed()
                     if task.delivery_count >= queue.max_deliveries:
-                        queue.dead_letter(
-                            task,
-                            reason=f"processing_failed:{type(exc).__name__}:{exc}"[:500],
-                        )
-                        acked = True
+                        reason = f"processing_failed:{type(exc).__name__}:{exc}"[:500]
+                        # plaita#252：死信前必须过与 _read_once/_reclaim_one
+                        # 相同的守卫（队列层 dead_letter_if_allowed 单一入口）。
+                        # 本分支恰是 ExecutionStateLoadError/StatePersistError
+                        # 等瞬态失败的落点：守卫拒绝（活租约/状态读取瞬断）时
+                        # **不得 ack**——消息留 pending，否则唯一恢复载体被
+                        # ack 出 PEL；守卫 None 恒放行，存量行为零变化。
+                        if queue.dead_letter_if_allowed(task, reason=reason):
+                            acked = True
+                        else:
+                            logger.warning(
+                                "任务 %s（execution=%s）处理失败且 delivery=%s/%s "
+                                "已触顶，但死信守卫拒绝/异常（执行仍可恢复）；"
+                                "不 ack，消息留 pending 等下一轮处置: %s",
+                                task.message_id,
+                                task.body.get("execution_id")
+                                if isinstance(task.body, dict)
+                                else None,
+                                task.delivery_count,
+                                queue.max_deliveries,
+                                _scrub_exception_text(exc),
+                            )
                     else:
                         logger.error(
                             "任务处理失败 %s (delivery=%s/%s)，未 ack（将重投）: %s",

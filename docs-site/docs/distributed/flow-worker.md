@@ -67,6 +67,18 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 查询失败同样保守跳过；非终态且租约空（持有者已死）重入队一份 delivery 归 1
 的恢复消息后放行。
 
+**死信路径收敛（#252）**：`run()` 兜底异常分支（`ExecutionStateLoadError` /
+`StatePersistError` 等瞬态失败的落点）与 `_reclaim_one` 的超限处置走**同一**
+`dead_letter_guard` 判定（worker 侧经队列层 `dead_letter_if_allowed` 单一入口）：
+守卫拒绝/抛异常时**不 ack**，消息留 pending 等下一轮处置并推进
+`dlq_guard_skipped`；守卫为 `None`（默认）恒放行，存量行为不变。schema 版本
+拒收是语义兼容性判定（有意不进守卫），仍直接 `dead_letter`。
+
+**`--max-deliveries` 计的是处理尝试次数**：`xreadgroup(">")` 交付的首投
+（`delivery_count=1`）此前零处理尝试，绝不会被预判死信——`--max-deliveries 1`
+仍允许这一次尝试，只有该次尝试失败/未 ack 后（worker 兜底分支或 reclaim）
+才进 DLQ。
+
 部署步骤与故障手册见 [运维 Runbook](ops-runbook.md)；副作用设计见 [幂等 Resume](idempotent-resume.md)。
 
 ## claim 前的本机盘预检（#49） {#claim-前的本机盘预检}

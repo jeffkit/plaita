@@ -180,6 +180,9 @@ class RedisStreamTaskQueue:
         #      异常上抛 ⇒ 消息未 ack、留 PEL ⇒ 由本参数兜住重试次数。
         #      ⇒ 定义一直读不到/读坏时，一条消息会以 ``claim_min_idle_ms`` 为间隔重试到本上界。
         # **因此它是一个跨机制参数，不是"只是重投次数"**：改它之前请确认上面三条都仍可接受。
+        # 计数口径 = **处理尝试次数**：首投（xreadgroup ">"，delivery_count=1）
+        # 永远先获得一次尝试，`max_deliveries=1` 也不会在派发前死信；失败/未 ack
+        # 之后才由 worker 兜底分支或 reclaim 路径处置（plaita#252 捆绑单）。
         self.max_deliveries = max(1, int(max_deliveries))
         self.dlq_key = dlq_key or dlq_stream_key(stream_key)
         # C4-1：DLQ 裁剪上限（构造参数优先，其次 env，最后默认值）
@@ -252,8 +255,9 @@ class RedisStreamTaskQueue:
     def read(self, block_ms: int = 10_000) -> Optional[StreamTask]:
         """Read one task: reclaim stale pending first, then new messages.
 
-        Messages that already exceeded ``max_deliveries`` are moved to the DLQ
-        and acked (not returned).
+        Reclaimed messages that already exhausted their delivery attempts are
+        moved to the DLQ and acked (not returned); fresh messages from
+        ``XREADGROUP ">"`` always get their first processing attempt.
         """
         try:
             return self._read_once(block_ms)
@@ -318,10 +322,14 @@ class RedisStreamTaskQueue:
                 ),
             )
             return None
-        if task is not None and task.delivery_count >= self.max_deliveries:
-            if self._guard_allows_dead_letter(task):
-                self.dead_letter(task, reason=f"max_deliveries={self.max_deliveries}")
-            return None
+        # xreadgroup(">") 只交付**本消费组从未见过**的新消息：`delivery_count`
+        # 恒为 1，表示「本次是第 1 次投递、此前零处理尝试」。`max_deliveries`
+        # 的契约是「N 次处理尝试后死信」（见 `_reclaim_one` 的 delivery_count
+        # 注释与 `docs-site/docs/distributed/flow-worker.md`），所以这里不能
+        # 套用「预算已耗尽」判据——`max_deliveries=1` 时 `1 >= 1` 会在任何
+        # 处理发生前就把合法任务死信（plaita#252 捆绑单：A1 r37 a/P2，零处理
+        # 尝试）。超限存量由 `_reclaim_one` 判定；失败尝试后的死信由
+        # `FlowWorker.run` 兜底分支判定（两者都过 `dead_letter_guard`）。
         return task
 
     def ack(self, message_id: str) -> None:
@@ -453,6 +461,25 @@ class RedisStreamTaskQueue:
                 task.delivery_count,
             )
         return allowed
+
+    def dead_letter_if_allowed(self, task: StreamTask, *, reason: str) -> bool:
+        """守卫闸门后的死信单一入口（plaita#252）。
+
+        任何调用方在决定死信前都必须走这里，判定与 ``_read_once`` /
+        ``_reclaim_one`` 完全一致：
+
+        - 返回 ``True``：已死信（payload 进 DLQ，原消息已 ack）；
+        - 返回 ``False``：守卫拒绝或抛异常（``dlq_guard_skipped`` 已计数），
+          消息**留在 pending**，调用方不得 ack，等下一轮处置；
+        - 守卫为 ``None``（默认）：恒放行——存量行为零变化。
+
+        worker 的兜底异常分支（``FlowWorker.run``）曾绕过守卫直调
+        ``dead_letter``，在瞬态故障/活租约场景把唯一恢复载体 ack 出 PEL。
+        """
+        if not self._guard_allows_dead_letter(task):
+            return False
+        self.dead_letter(task, reason=reason)
+        return True
 
     def dead_letter(self, task: StreamTask, *, reason: str) -> str:
         """Move task payload to DLQ stream and ack the original message."""

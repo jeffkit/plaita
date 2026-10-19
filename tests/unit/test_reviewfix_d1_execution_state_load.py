@@ -154,6 +154,11 @@ class RecordingQueue:
         if self.on_dead_letter:
             self.on_dead_letter()
 
+    def dead_letter_if_allowed(self, task, *, reason):
+        """镜像 RedisStreamTaskQueue 的守卫入口（本桩未配守卫 = 恒放行）。"""
+        self.dead_letter(task, reason=reason)
+        return True
+
 
 def _make_worker(execution_storage):
     worker = RedisFlowWorker(
