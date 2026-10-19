@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 
+from plaita.credentials import credentials_base_file as _engine_credentials_base_file
 from plaita.tenant_context import guard_tenant_write
 
 try:
@@ -25,6 +26,7 @@ try:
     from .flow_store import get_flow_store
     from .tenant_write_guard import (
         assert_tenant_generation,
+        begin_guarded_transaction,
         expected_tenant_generation,
         tenant_generation_token,
     )
@@ -33,6 +35,7 @@ except ImportError:  # 平铺布局（cwd=backend，services 为顶层包）
     from services.flow_store import get_flow_store  # type: ignore
     from services.tenant_write_guard import (  # type: ignore
         assert_tenant_generation,
+        begin_guarded_transaction,
         expected_tenant_generation,
         tenant_generation_token,
     )
@@ -61,10 +64,16 @@ def credentials_file(tenant_id: str = DEFAULT_TENANT_ID) -> Path:
     """凭据导出文件路径：default 租户沿用历史文件（兼容既有引擎读取），
     其余租户写旁文件 ``<stem>.<tenant_id><suffix>``。
 
-    旁文件由引擎侧 plaita.credentials 按租户上下文（plaita.tenant_context，
-    worker 消费任务时从消息体 tenant_id set）读取同一命名——多租户 flow 在
-    worker 上解析凭据时取到的是自己租户的文件，default 文件对它不可见。"""
-    base = Path(os.environ.get("PLAITA_CREDENTIALS_FILE", Path.cwd() / ".plaita-credentials.json"))
+    基础路径与引擎侧 ``plaita.credentials.credentials_base_file`` **同源**：
+    ``PLAITA_CREDENTIALS_FILE`` 显式设置时用它；否则 SQLite 落在 DB 同目录，
+    非 SQLite（PG）或未配置时回退 cwd。导出文件是 DB 的派生缓存，按 DB 路径
+    落盘让「同一 DB 的多个 console/worker 副本」共享同一份导出，而不是各按
+    cwd 持有一份互不收敛的副本（A66-01 ~ A66-04）。
+
+    旁文件由引擎侧按租户上下文（plaita.tenant_context，worker 消费任务时从
+    消息体 tenant_id set）读取同一命名——多租户 flow 在 worker 上解析凭据时
+    取到的是自己租户的文件，default 文件对它不可见。"""
+    base = _engine_credentials_base_file()
     if tenant_id == DEFAULT_TENANT_ID:
         return base
     return base.with_name(f"{base.stem}.{tenant_id}{base.suffix}")
@@ -203,6 +212,18 @@ def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
             query = query.where(Credential.tenant_id == tenant_id)
         row = session.scalars(query).first()
         if row is None:
+            # A66-01/A66-04：DB 无行即权威，但导出文件可能仍含该名字——
+            # #251 的「导出成功→commit」窗口被 SIGKILL 打断会留下文件超前
+            # DB 的鬼凭据，旧版本按 cwd 留下的副本也会残留旧值。重试 DELETE
+            # 若只返回 404 而不重写文件，操作员就没有凭据 API 可用的撤销路径
+            # （引擎仍能解密）。这里按 DB 重导一次目标范围（tenant_id=None
+            # 时全量）；写入失败 loud 上抛，不伪装成「本来就不存在」。
+            _export_store(tenant_id, session=session)
+            logger.info(
+                "DELETE 未命中 DB（name=%s tenant=%s），已按 DB 重导导出文件以清除陈旧条目",
+                name,
+                tenant_id,
+            )
             return False
         affected = row.tenant_id
         session.delete(row)
@@ -315,3 +336,105 @@ def _export_then_commit(session, tenant_id: Optional[str]) -> None:
                     tenant_id,
                 )
         raise
+
+
+def reconcile_exports() -> Dict[str, Any]:
+    """启动对账：以 DB 为权威重建/刷新导出文件（A66-03/A66-04）。
+
+    - **缺失重建**：DB 有凭据而文件不存在（容器无卷/cwd 漂移/误删）→ 写入；
+    - **陈旧刷新**：文件存在但内容可能落后或超前 DB（#251 导出→commit 窗口
+      被 SIGKILL 打断；旧版本按 cwd 留副本）→ 按 DB 全量重写，空租户写
+      ``{}`` 清掉鬼凭据；
+    - **多余告警**：目录里出现没有对应租户的旁文件（旧版本残留/手工复制）
+      → WARNING，不静默删除；
+    - **孤儿行**：凭据行所属租户已不存在（旧版本删租户未清凭据）→ 不导出
+      并 WARNING，避免同 slug 重建后经陈旧文件继承；
+    - **fail-loud**：任何写入失败都上抛，由 lifespan 拒绝启动——否则引擎会
+      带着缺失/陈旧的密钥继续跑，控制台却显示正常。
+
+    DB 无凭据且文件不存在时不落盘（不为空部署凭空创建文件）。返回摘要供
+    启动日志/测试断言。
+    """
+    store = get_flow_store()
+    with store._session_local() as session:
+        # SQLite：先取得写锁，读到写文件期间 save/delete/delete_tenant 的
+        # flush 被阻塞（它们也先 flush 再导出）。否则启动对账可能读旧快照、
+        # 在另一个副本提交新值之后才落盘，把文件写回旧世代（A66-01 复发）。
+        # 其他后端由部署契约要求显式共享 PLAITA_CREDENTIALS_FILE；整文件
+        # RMW 的并发丢更新是既有 A42-13，不在本轮扩面。
+        begin_guarded_transaction(session)
+        tenant_ids = set(session.scalars(select(Tenant.id)).all())
+        known = tenant_ids | {DEFAULT_TENANT_ID}
+        by_tenant: Dict[str, Dict[str, Any]] = {}
+        for r in session.scalars(select(Credential)).all():
+            by_tenant.setdefault(r.tenant_id or DEFAULT_TENANT_ID, {})[r.name] = {
+                "type": r.type,
+                "data": r.data_json,
+            }
+        orphan_tenants = sorted(set(by_tenant) - known)
+        if orphan_tenants:
+            logger.warning(
+                "凭据库存在无对应租户行的凭据（旧版本删除残留，未导出）: %s",
+                ", ".join(orphan_tenants),
+            )
+        exports = {tid: payload for tid, payload in by_tenant.items() if tid in known}
+
+        # 有凭据的租户必须落盘；已有文件的租户（即使已清空）也要按 DB 刷新。
+        targets = set(exports)
+        for tid in known:
+            if credentials_file(tid).is_file():
+                targets.add(tid)
+
+        rebuilt = refreshed = purged = 0
+        for tid in sorted(targets):
+            path = credentials_file(tid)
+            payload = exports.get(tid, {})
+            existed = path.is_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(
+                path, json.dumps(payload, ensure_ascii=False, indent=1)
+            )
+            if existed:
+                refreshed += 1
+                if not payload:
+                    purged += 1
+            else:
+                rebuilt += 1
+            logger.info(
+                "启动对账导出租户 %s 凭据文件 %s（%d 条）",
+                tid,
+                path,
+                len(payload),
+            )
+
+        # 多余旁文件：没有对应租户的文件不被任何写入路径收敛，只能告警。
+        base = credentials_file()
+        expected = {credentials_file(tid).resolve() for tid in known}
+        extras: List[str] = []
+        if base.parent.is_dir():
+            for candidate in sorted(
+                base.parent.glob(f"{base.stem}.*{base.suffix}")
+            ):
+                if candidate.resolve() not in expected:
+                    extras.append(str(candidate))
+                    logger.warning(
+                        "凭据导出目录存在无对应租户的文件（陈旧副本/手工残留）: %s",
+                        candidate,
+                    )
+        session.commit()
+
+    summary = {
+        "rebuilt": rebuilt,
+        "refreshed": refreshed,
+        "purged": purged,
+        "extra_files": extras,
+        "orphan_tenants": orphan_tenants,
+    }
+    logger.info(
+        "凭据导出对账完成：重建 %d，刷新 %d（其中清空 %d），多余文件 %d",
+        rebuilt,
+        refreshed,
+        purged,
+        len(extras),
+    )
+    return summary
