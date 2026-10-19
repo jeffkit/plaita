@@ -9,14 +9,17 @@
 
 import logging
 import os
-import stat
-import tempfile
 import yaml
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
+
+try:
+    from .atomic_io import atomic_write_text
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from atomic_io import atomic_write_text  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -130,30 +133,7 @@ class ClusterRegistry:
         }
         # 先序列化再碰文件：yaml.dump 自身失败时连临时文件都不会创建。
         text = yaml.dump(data, allow_unicode=True, default_flow_style=False)
-
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(self.base_dir), prefix=f".{self.registry_file.name}.", suffix=".tmp"
-        )
-        tmp = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            # 沿用旧文件权限；新建时保留 mkstemp 的 0600（registry 含 redis_url）。
-            if self.registry_file.exists():
-                os.chmod(tmp, stat.S_IMODE(self.registry_file.stat().st_mode))
-            os.replace(tmp, self.registry_file)
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+        atomic_write_text(self.registry_file, text)
 
     def _ensure_default_cluster(self):
         """确保存在默认集群。
@@ -277,11 +257,14 @@ class ClusterRegistry:
         return config
 
     def _create_default_config(self, config_path: str, preset: str = "dev", redis_url: str = "redis://localhost:6379/0"):
-        """创建集群配置（按架构配套预设）"""
+        """创建集群配置（按架构配套预设）。
+
+        同样走原子写：创建到一半失败时不能留下半截 YAML（plaita#253）。
+        """
         Path(config_path).parent.mkdir(parents=True, exist_ok=True)
         config = self._build_preset_config(preset, redis_url)
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+        text = yaml.dump(config, allow_unicode=True, default_flow_style=False)
+        atomic_write_text(config_path, text, default_mode=0o644)
     
     def list_clusters(self) -> List[ClusterInfo]:
         """获取所有集群"""
@@ -512,7 +495,13 @@ class ClusterRegistry:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
-        except Exception:
+        except Exception as e:
+            # 不能静默当作「配置不存在」：否则损坏文件经 API 只看到 404，
+            # 没有可观测痕迹（plaita#253）。
+            logger.warning(
+                "读取集群 %s 配置失败（%s），按不可读处理: %s",
+                cluster_id, config_path, e, exc_info=True,
+            )
             return None
     
     def data_plane_redis_url(self, cluster_id: Optional[str] = None) -> Optional[str]:
@@ -550,10 +539,16 @@ class ClusterRegistry:
             raise
 
         try:
-            with open(info.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+            # 先序列化到字符串，再原子替换：写一半失败（ENOSPC/配额/中断）
+            # 只影响临时文件，旧配置逐字节不变（plaita#253）。
+            text = yaml.dump(config, allow_unicode=True, default_flow_style=False)
+            atomic_write_text(info.config_path, text, default_mode=0o644)
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "保存集群 %s 配置失败（原文件保留）: %s: %s",
+                cluster_id, info.config_path, e, exc_info=True,
+            )
             return False
 
 

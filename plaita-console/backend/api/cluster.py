@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 try:
     from ..services.service_manager import (
+        ClusterConfigError,
         get_service_manager,
         ServiceConfig,
         ManagedInstance,
@@ -22,6 +23,7 @@ except ImportError:
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from services.service_manager import (
+        ClusterConfigError,
         get_service_manager,
         ServiceConfig,
         ManagedInstance,
@@ -31,6 +33,19 @@ except ImportError:
     )
 
 router = APIRouter()
+
+
+def _require_service_manager():
+    """取服务管理器；集群配置损坏时返回 503 + 具名原因（plaita#253）。
+
+    旧 ``GET /api/cluster/config`` 把任何异常折叠成 ``mode=standalone`` 200，
+    损坏的 cluster_config.yaml 因此被伪装成健康；其余 ``/cluster/*`` 端点则
+    裸 500。这里统一转成带配置路径的 503，让故障可见（与 #249 载入隔离对齐）。
+    """
+    try:
+        return get_service_manager()
+    except ClusterConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 #: quick-test 事件发布桥的等待上限（秒）。超时后不得再等 worker 线程：
 #: EventBus 后端卡住时 ``ThreadPoolExecutor.__exit__``（``shutdown(wait=True)``）
@@ -151,7 +166,7 @@ async def list_service_types():
     import json
     from redis import Redis
     
-    manager = get_service_manager()
+    manager = _require_service_manager()
     
     # 先统计 Redis 注册表中的外部实例
     external_running_counts: dict = {}
@@ -208,7 +223,7 @@ async def start_service(request: StartServiceRequest):
     """
     启动一个服务实例
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     
     try:
         instance = await manager.start_service(request.service_type)
@@ -238,7 +253,7 @@ async def stop_service(instance_id: str, request: StopServiceRequest):
     """
     停止一个服务实例
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     
     success = await manager.stop_service(instance_id, request.graceful)
     
@@ -257,7 +272,7 @@ async def stop_all_services(request: StopServiceRequest):
     """
     停止所有托管服务
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     results = await manager.stop_all(request.graceful)
 
     return {
@@ -284,7 +299,7 @@ async def list_managed_instances(
     from redis import Redis
     import json
     
-    manager = get_service_manager()
+    manager = _require_service_manager()
     
     # 刷新托管实例状态
     await manager.refresh_status()
@@ -368,18 +383,15 @@ async def list_managed_instances(
 async def get_cluster_config():
     """
     获取当前集群配置
+
+    配置载入失败时返回 503 + 具名原因，不再退化成 ``standalone`` 200——
+    旧兜底会把损坏的 cluster_config.yaml 伪装成健康（plaita#253）。
     """
-    try:
-        manager = get_service_manager()
-        return ClusterConfigResponse(
-            mode=manager.config.mode,
-            config_path=manager.config_path
-        )
-    except Exception:
-        return ClusterConfigResponse(
-            mode="standalone",
-            config_path=""
-        )
+    manager = _require_service_manager()
+    return ClusterConfigResponse(
+        mode=manager.config.mode,
+        config_path=manager.config_path
+    )
 
 
 @router.post("/cluster/mode")
@@ -392,7 +404,7 @@ async def switch_mode(request: SwitchModeRequest):
     if request.mode not in ("process", "docker"):
         raise HTTPException(status_code=400, detail="无效的模式，必须是 process 或 docker")
     
-    manager = get_service_manager()
+    manager = _require_service_manager()
     
     # 停止所有服务
     await manager.stop_all(graceful=True)
@@ -412,7 +424,7 @@ async def refresh_instances():
     """
     刷新所有实例状态
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     await manager.refresh_status()
     
     return {
@@ -428,7 +440,7 @@ async def list_infrastructure():
     """
     获取所有基础设施服务配置及其健康状态
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     health_status = await manager.check_infrastructure_health()
     
@@ -461,7 +473,7 @@ async def get_infrastructure_detail(name: str):
     """
     获取指定基础设施服务的详细信息和健康状态
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
     if name not in infra_configs:
@@ -492,7 +504,7 @@ async def check_infrastructure_health(name: str):
     """
     检查指定基础设施服务的健康状态
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
     if name not in infra_configs:
@@ -512,14 +524,14 @@ async def check_infrastructure_health(name: str):
 @router.post("/cluster/infrastructure/{name}/start")
 async def start_infrastructure(name: str):
     """容器化拉起基础设施（docker run/start + 健康等待）"""
-    manager = get_service_manager()
+    manager = _require_service_manager()
     return await manager.start_infrastructure(name)
 
 
 @router.post("/cluster/infrastructure/{name}/stop")
 async def stop_infrastructure(name: str):
     """停止基础设施容器（保留容器）"""
-    manager = get_service_manager()
+    manager = _require_service_manager()
     return await manager.stop_infrastructure(name)
 
 
@@ -528,7 +540,7 @@ async def create_infrastructure(request: CreateInfrastructureRequest):
     """
     创建新的基础设施配置
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
     if request.name in infra_configs:
@@ -569,7 +581,7 @@ async def update_infrastructure(name: str, request: UpdateInfrastructureRequest)
     """
     更新基础设施配置
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
     if name not in infra_configs:
@@ -611,7 +623,7 @@ async def delete_infrastructure(name: str):
     """
     删除基础设施配置
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     infra_configs = manager.get_infrastructure()
     
     if name not in infra_configs:
@@ -1278,7 +1290,7 @@ async def remove_instance(instance_id: str):
     """
     移除一个已停止或出错的实例记录
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     
     success = manager.remove_instance(instance_id)
     
@@ -1300,7 +1312,7 @@ async def clear_failed_instances():
     """
     清除所有失败/已停止的实例记录
     """
-    manager = get_service_manager()
+    manager = _require_service_manager()
     
     count = manager.clear_failed_instances()
     

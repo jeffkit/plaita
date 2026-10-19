@@ -1,0 +1,55 @@
+=== 负控：还原 #253 修复前的就地截断写 + 载入静默回退（仅回退 3 个源码文件，保留新测试） ===
+
+命令：
+  git stash push -- plaita-console/backend/services/cluster_registry.py \
+                    plaita-console/backend/services/service_manager.py \
+                    plaita-console/backend/api/cluster.py
+  python -m pytest plaita-console/backend/tests/console/test_issue253_cluster_config_atomic_save.py -q
+
+修复前结果：9 failed, 2 passed（2 条为正常保存/健康端点回归，应绿）
+
+保存路径 1（registry，ENOSPC 注入：yaml.dump 先写半截再抛）：
+  test_registry_save_enospc_keeps_original_and_warns
+  test_put_cluster_config_enospc_returns_4xx_and_keeps_original
+    E   AssertionError: 失败保存毁掉了上一份完好配置
+    E   AssertionError: assert b'mode: proce...\n  flow_work' == b'infrastruct...flow_worker\n'
+        （旧文件已被截断成 35 字节半截 YAML）
+
+保存路径 2（ServiceManager._save_config，同一注入）：
+  test_service_manager_save_enospc_keeps_original_and_warns
+  test_post_infrastructure_enospc_returns_5xx_and_keeps_original
+    保存配置失败: [Errno 28] No space left on device   ← 旧实现只 print
+    E   AssertionError: 失败保存毁掉了上一份完好配置
+    E   AssertionError: assert b'mode: proce...\n  flow_work' == b'infrastruct...ervices: {}\n'
+
+载入路径（预置半截 YAML）：
+  test_corrupt_config_returns_named_503_and_stays_failed
+    E   AttributeError: 'str' object has no attribute 'items'
+        services/service_manager.py:509（旧 load_config 直接把半截 YAML 当 dict）
+    （GET /api/cluster/config 仍返回 200 {"mode":"standalone"}，故障伪装健康）
+
+  test_all_corrupt_shapes_raise_named_error[empty|bad-yaml|services-list|top-level-list]
+    E   AttributeError: module 'services.service_manager' has no attribute 'ClusterConfigError'
+
+完整 pre-fix 输出：/tmp/253-prefix.txt（本文件为交付时的摘录）
+
+=== 恢复修复后 ===
+
+命令：
+  git stash pop
+  python -m pytest plaita-console/backend/tests/console/test_issue253_cluster_config_atomic_save.py -q
+
+结果：11 passed
+  - 两条保存路径 ENOSPC：返回失败（API 400/500）+ 具名 WARNING，原文件逐字节不变、无 .tmp 残留
+  - 半截/空/非映射 YAML：ClusterConfigError（消息含配置路径），/api/cluster/config、
+    /api/cluster/service-types、/api/cluster/infrastructure 均 503；连续两次请求都失败，
+    单例未被登记为 config=None，也未回退默认配置
+  - 正常保存与健康端点：完整内容落盘、/api/cluster/config 200
+
+=== 全量回归 ===
+
+  python -m pytest plaita-console/backend/tests/console -q
+  → 601 passed, 13 skipped（基线 590 passed；新增 11 条全绿）
+
+  python scripts/landing_gate.py ci
+  → [landing-gate] ✅ main CI 绿，允许落地（main 410a374 success）

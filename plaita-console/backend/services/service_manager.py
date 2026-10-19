@@ -22,10 +22,30 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+try:
+    from .atomic_io import atomic_write_text
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from atomic_io import atomic_write_text  # type: ignore
+
 # 项目根目录（支持通过环境变量覆盖，用于 Docker 环境）
 PROJECT_ROOT = Path(os.environ.get("PLAITA_PROJECT_ROOT", str(Path(__file__).parent.parent.parent.parent)))
 
 _log = logging.getLogger(__name__)
+
+
+class ClusterConfigError(RuntimeError):
+    """集群配置文件不可用：缺失且无回退 / YAML 损坏 / 顶层结构非法。
+
+    ``config_path`` 指向出问题的文件，供 API 层原样回给调用方。旧实现里
+    半截 YAML 会在 ``raw_config.get(...)`` 处抛 ``AttributeError``，再被
+    ``GET /api/cluster/config`` 折叠成 ``mode=standalone`` 200——故障被伪装
+    成健康（plaita#253）。
+    """
+
+    def __init__(self, config_path: Any, reason: Any):
+        self.config_path = str(config_path)
+        self.reason = str(reason)
+        super().__init__(f"集群配置载入失败（{self.config_path}）：{self.reason}")
 
 
 def _is_concrete_redis_url(url: Any) -> bool:
@@ -486,7 +506,14 @@ class ServiceManager:
             _log.warning("回写集群 config_path 失败（不影响本次加载）: %s", e)
 
     def load_config(self, config_path: Optional[str] = None) -> ClusterConfig:
-        """加载配置文件"""
+        """加载配置文件。
+
+        损坏/截断（半截 YAML、空文件、顶层或 services 不是映射）时抛
+        :class:`ClusterConfigError`，消息带配置路径；不静默回退默认配置——
+        旧实现会在 ``raw_config.get(...)`` 抛 ``AttributeError``，再被
+        ``GET /api/cluster/config`` 折叠成 ``standalone`` 200，把损坏文件
+        伪装成健康（plaita#253）。
+        """
         if config_path:
             self.config_path = config_path
             
@@ -495,58 +522,84 @@ class ServiceManager:
         if not config_file.exists():
             fallback = self._fallback_config_path()
             if fallback is None:
-                raise FileNotFoundError(f"配置文件不存在: {self.config_path}")
+                raise ClusterConfigError(
+                    self.config_path, "配置文件不存在且无可回退配置")
             _log.warning("集群配置路径失效 %s，回退到 %s", self.config_path, fallback)
             self.config_path = str(fallback)
             config_file = fallback
             self._persist_config_path(str(fallback))
         
-        with open(config_file, 'r', encoding='utf-8') as f:
-            raw_config = yaml.safe_load(f)
-        
-        # 解析服务配置
-        services = {}
-        for service_type, service_data in raw_config.get("services", {}).items():
-            service_data["service_type"] = service_type
-            services[service_type] = ServiceConfig(**service_data)
-        
-        # 解析基础设施配置
-        infrastructure = {}
-        for infra_name, infra_data in raw_config.get("infrastructure", {}).items():
-            infra_data["name"] = infra_name
-            infrastructure[infra_name] = InfrastructureConfig(**infra_data)
-        
-        # 解析内部组件配置
-        eventbus_config = None
-        if "eventbus" in raw_config:
-            eventbus_config = InternalComponentConfig(**raw_config["eventbus"])
-        
-        queue_config = None
-        if "queue" in raw_config:
-            queue_config = InternalComponentConfig(**raw_config["queue"])
-        
-        storage_config = None
-        if "storage" in raw_config:
-            storage_config = InternalComponentConfig(**raw_config["storage"])
-        
-        redis_config = raw_config.get("redis", {})
-        # 集群配置的 redis.url 是权威（plaita#65）：切到别的集群后管理面读数
-        # （/cluster/service-types 等）必须跟着集群走，不能再被 console 数据面
-        # 的 env 无条件拉回旧集群。env 只在集群未给出 url、或给的是 localhost
-        # 占位时兜底（Docker 环境集群配置留的 localhost 须让位）。
-        env_redis_url = os.environ.get("PLAITA_CONSOLE_REDIS_URL")
-        if env_redis_url and not _is_concrete_redis_url(redis_config.get("url")):
-            redis_config["url"] = env_redis_url
-        
-        self.config = ClusterConfig(
-            mode=raw_config.get("mode", "process"),
-            redis=redis_config,
-            services=services,
-            infrastructure=infrastructure,
-            eventbus=eventbus_config,
-            queue=queue_config,
-            storage=storage_config
-        )
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                raw_config = yaml.safe_load(f)
+
+            if not isinstance(raw_config, dict):
+                raise ValueError(
+                    f"顶层必须是映射，实际为 {type(raw_config).__name__}"
+                    "（空文件或写一半被截断）"
+                )
+            for key in ("services", "infrastructure", "redis",
+                        "eventbus", "queue", "storage"):
+                value = raw_config.get(key)
+                if value is not None and not isinstance(value, dict):
+                    raise ValueError(
+                        f"{key} 必须是映射，实际为 {type(value).__name__}"
+                        "（配置被截断？）"
+                    )
+
+            # 解析服务配置
+            services = {}
+            for service_type, service_data in raw_config.get("services", {}).items():
+                service_data["service_type"] = service_type
+                services[service_type] = ServiceConfig(**service_data)
+
+            # 解析基础设施配置
+            infrastructure = {}
+            for infra_name, infra_data in raw_config.get("infrastructure", {}).items():
+                infra_data["name"] = infra_name
+                infrastructure[infra_name] = InfrastructureConfig(**infra_data)
+
+            # 解析内部组件配置
+            eventbus_config = None
+            if "eventbus" in raw_config:
+                eventbus_config = InternalComponentConfig(**raw_config["eventbus"])
+
+            queue_config = None
+            if "queue" in raw_config:
+                queue_config = InternalComponentConfig(**raw_config["queue"])
+
+            storage_config = None
+            if "storage" in raw_config:
+                storage_config = InternalComponentConfig(**raw_config["storage"])
+
+            redis_config = raw_config.get("redis", {})
+            # 集群配置的 redis.url 是权威（plaita#65）：切到别的集群后管理面读数
+            # （/cluster/service-types 等）必须跟着集群走，不能再被 console 数据面
+            # 的 env 无条件拉回旧集群。env 只在集群未给出 url、或给的是 localhost
+            # 占位时兜底（Docker 环境集群配置留的 localhost 须让位）。
+            env_redis_url = os.environ.get("PLAITA_CONSOLE_REDIS_URL")
+            if env_redis_url and not _is_concrete_redis_url(redis_config.get("url")):
+                redis_config["url"] = env_redis_url
+
+            self.config = ClusterConfig(
+                mode=raw_config.get("mode", "process"),
+                redis=redis_config,
+                services=services,
+                infrastructure=infrastructure,
+                eventbus=eventbus_config,
+                queue=queue_config,
+                storage=storage_config
+            )
+        except Exception as e:
+            # 不保留上一份内存配置：否则损坏文件仍以旧值对外服务。原文件
+            # 原地保留（改走 .corrupt 备份会让下一次加载把它当「路径失效」
+            # 回退到别的 checkout，故障再次被伪装健康）。
+            self.config = None
+            _log.warning(
+                "集群配置载入失败（%s），原文件保留未覆盖: %s",
+                config_file, e, exc_info=True,
+            )
+            raise ClusterConfigError(config_file, e) from e
         
         return self.config
     
@@ -997,7 +1050,13 @@ class ServiceManager:
             }
     
     def _save_config(self) -> bool:
-        """保存当前配置到文件"""
+        """保存当前配置到文件（原子写）。
+
+        旧实现 ``open(self.config_path, 'w')`` 先截断再写：ENOSPC / 配额 /
+        进程中断留下半截 YAML，随后 ``load_config`` 失败、``/cluster/*``
+        管理面全量 500（plaita#253）。现在先序列化到字符串，再同目录
+        mkstemp + fsync + ``os.replace``；失败只清理临时文件并记 WARNING。
+        """
         try:
             config_data = {
                 "mode": self.config.mode,
@@ -1032,12 +1091,15 @@ class ServiceManager:
                     infra_data["docker"] = infra.docker
                 config_data["infrastructure"][name] = infra_data
             
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False)
+            text = yaml.dump(config_data, allow_unicode=True, default_flow_style=False)
+            atomic_write_text(self.config_path, text, default_mode=0o644)
             
             return True
         except Exception as e:
-            print(f"保存配置失败: {e}")
+            _log.warning(
+                "保存配置失败（原文件保留）: %s: %s",
+                self.config_path, e, exc_info=True,
+            )
             return False
     
     async def add_infrastructure(
@@ -1115,23 +1177,46 @@ _manager: Optional[ServiceManager] = None
 
 
 def get_service_manager() -> ServiceManager:
-    """获取全局服务管理器"""
+    """获取全局服务管理器。
+
+    只有配置成功载入才登记单例：旧实现在 ``load_config`` 抛异常后仍把
+    ``_manager`` 留成半初始化实例，后续请求拿到 ``config is None`` 的坏
+    单例，错误也从具名原因退化成 ``AttributeError``（plaita#253）。集群配置
+    损坏时异常原样上抛，由 API 层转成带路径的 503；只有注册表自身不可用时
+    才回退默认路径加载，并记 WARNING（降级必须可观测）。
+    """
     global _manager
-    if _manager is None:
-        _manager = ServiceManager()
-        
-        # 尝试从集群注册表加载配置
-        try:
-            from .cluster_registry import get_cluster_registry
-            registry = get_cluster_registry()
-            active_cluster = registry.get_active_cluster()
-            if active_cluster:
-                _manager.load_config(active_cluster.config_path)
-            else:
-                _manager.load_config()
-        except Exception:
-            _manager.load_config()
-    
+    if _manager is not None:
+        return _manager
+
+    manager = ServiceManager()
+
+    # 尝试从集群注册表加载配置
+    try:
+        from .cluster_registry import get_cluster_registry
+        registry = get_cluster_registry()
+        active_cluster = registry.get_active_cluster()
+    except Exception as e:
+        _log.warning("集群注册表不可用，回退到默认配置路径加载: %s", e, exc_info=True)
+        manager.load_config()
+        _manager = manager
+        return _manager
+
+    try:
+        if active_cluster:
+            manager.load_config(active_cluster.config_path)
+        else:
+            manager.load_config()
+    except Exception:
+        # 不登记半初始化单例：下一次请求必须重新尝试并再次拿到同一具名
+        # 错误，而不是复用一个 config=None 的实例。
+        _log.warning(
+            "服务管理器初始化失败（活动集群: %s）",
+            active_cluster.id if active_cluster else None,
+        )
+        raise
+
+    _manager = manager
     return _manager
 
 
