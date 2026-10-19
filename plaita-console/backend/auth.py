@@ -17,6 +17,9 @@
 - 会话用户钉死在其活跃租户（login/switch-tenant 决定），request.state.tenant_id
 - 平台管理员 / API-Key 可带 ``X-Tenant-ID`` 头指定租户；不带则 tenant_id=None
   （平台全量视角：读跨租户，写需明确租户——由 auth.tenant_scope(required=True) 把关）
+- **普通用户会话无活跃租户 → fail-closed（#254）**：tenant_scope 一律 403，
+  绝不把 None 解释为平台全量，写路径也不回退 default；只有可证明的平台级
+  身份（platform_admin / API-Key / admin-key）才享有 None=全量的语义。
 
 本地开发未配置任何鉴权且无用户时：首次启动会引导生成 admin 用户，
 登录后走会话；ALLOW_INSECURE_ADMIN 仍可完全跳过（仅限本机）。
@@ -48,6 +51,13 @@ _ADMIN_PREFIXES = (
     "/api/cluster",
     "/api/tenants",
 )
+
+#: 平台级 auth_source（require_auth 写入 request.state.auth_source）。
+_PLATFORM_AUTH_SOURCES = frozenset({"api-key", "admin-key"})
+
+#: #254：普通会话无活跃租户的具名拒绝。任何「无租户 → 平台全量/default」
+#: 的降级都不得再出现（fail-closed，对齐 #239 租户参数不得降级）。
+NO_ACTIVE_TENANT_DETAIL = "当前会话无活跃租户，请先切换租户或联系管理员"
 
 
 def require_auth(request: Request) -> Dict[str, Any]:
@@ -107,6 +117,13 @@ def require_auth(request: Request) -> Dict[str, Any]:
             )
         tenant_id = header_tenant
 
+    # #254：普通会话无活跃租户 → fail-closed。身份不可证明为平台级时，
+    # tenant_id=None 不得进入管理面（否则 tenant_scope 会把它当平台全量）。
+    # /api/auth/* 是会话自操作（me/logout/switch-tenant），保留可用性。
+    if not platform_admin and tenant_id is None:
+        if not request.url.path.startswith("/api/auth/"):
+            raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
+
     _authorize(request, role)
     request.state.actor = actor
     request.state.role = role
@@ -121,13 +138,39 @@ def require_auth(request: Request) -> Dict[str, Any]:
     }
 
 
+def has_auth_context(request: Request) -> bool:
+    """请求是否经过 require_auth（state.tenant_id 已写入）。
+
+    未挂 require_auth 的测试/内部直调挂载没有该属性；生产管理面全部经
+    ``_mount_admin`` 注入依赖。
+    """
+    state = getattr(request, "state", None)
+    return state is not None and hasattr(state, "tenant_id")
+
+
+def is_platform_request(request: Request) -> bool:
+    """当前请求是否为可证明的平台级身份（#254）。
+
+    ``tenant_scope()`` 只有在它返回真时才允许 None=平台全量。
+    """
+    state = getattr(request, "state", None)
+    if state is None:
+        return False
+    if bool(getattr(state, "platform_admin", False)):
+        return True
+    return getattr(state, "auth_source", None) in _PLATFORM_AUTH_SOURCES
+
+
 def tenant_scope(request: Request, *, required: bool = False) -> Optional[str]:
     """取当前请求的租户上下文。
 
-    - 读路径（required=False）：None = 平台全量视角（跨租户查询不过滤）
-    - 写路径（required=True）：无租户上下文的平台级身份（api-key /
-      未切换租户的平台管理员）回退 default 租户——保持单租户时代
-      的 API-key/E2E 集成兼容；普通租户用户永远钉死其活跃租户。
+    - 读路径（required=False）：具体租户 → 该租户；可证明的平台级身份且无
+      租户上下文 → None（平台全量视角，跨租户查询不过滤）
+    - 写路径（required=True）：无租户上下文的**平台级身份**（api-key /
+      未切换租户的平台管理员）回退 default 租户——保持单租户时代的
+      API-key/E2E 集成兼容。
+    - **普通会话无活跃租户（#254）→ 403 具名拒绝**：读路径不回退平台全量，
+      写路径不回退 default。被移出租户的 viewer/editor 重登后即落在此分支。
     - state 上无 tenant_id 属性（未挂 require_auth 的测试/内部挂载）时
       同样回退 default，保持单租户时代的直调行为。
     """
@@ -140,9 +183,11 @@ def tenant_scope(request: Request, *, required: bool = False) -> Optional[str]:
     if state is None or not hasattr(state, "tenant_id"):
         return None if not required else DEFAULT_TENANT_ID
     tenant = state.tenant_id
-    if not tenant:
+    if tenant:
+        return tenant
+    if is_platform_request(request):
         return None if not required else DEFAULT_TENANT_ID
-    return tenant
+    raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
 
 
 def _bearer_matches_admin_key(request: Request, expected: str) -> bool:
@@ -167,10 +212,18 @@ def _extract_bearer(request: Request) -> Optional[str]:
 
 
 def _authorize(request: Request, role: str) -> None:
+    path = request.url.path
+
+    if role is None:
+        # #254：无活跃租户的普通会话没有租户角色。会话自操作仍放行，
+        # 其余路径在 require_auth 前置已具名拒绝（这里兜底直调场景）。
+        if path.startswith("/api/auth/"):
+            return
+        raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
+
     if _ROLE_RANK.get(role, -1) < 0:
         raise HTTPException(status_code=403, detail=f"未知角色: {role}")
 
-    path = request.url.path
     method = request.method.upper()
 
     if any(path.startswith(p) for p in _ADMIN_PREFIXES):

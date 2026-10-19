@@ -18,7 +18,9 @@ Plaita 流程引擎可视化管理控制台
 
 - **模型**：`tenants` + `tenant_members`（用户↔租户多对多，租户内 admin/editor/viewer 角色）；`users.platform_admin` 为平台管理员（管理租户/成员，可带 `X-Tenant-ID` 头跨租户操作）。
 - **会话**：登录响应含 `memberships` 与 `active_tenant`；`POST /api/auth/switch-tenant` 切换活跃租户；前端侧边栏提供租户切换器。成员变更即吊销该用户全部会话。
+- **无活跃租户 fail-closed（#254）**：普通用户会话若没有任何有效租户成员关系（典型：被移出租户后重新登录），管理 API 一律 **403「当前会话无活跃租户」**——不回退 `users.role` 遗留全局角色，不把 `None` 当作平台全量视角，写路径也不回退 `default`。只有可证明的平台级身份（`PLAITA_CONSOLE_ADMIN_API_KEY` / `users.platform_admin` / insecure 开发开关）享有平台全量视角与写路径 default 回退。
 - **隔离**：流程/版本/执行/调度/凭据/自定义节点/属性类型/Copilot 会话/审计/部署记录全部携带 `tenant_id`，查询按会话租户过滤，跨租户访问即 not-found。存量库首次多租户启动时自动迁移：建 `default` 租户、回填数据、legacy admin 提升为平台管理员。
+- **凭据明文归属（#254）**：`GET /api/credentials/{name}` 返回明文前校验租户归属——租户上下文必须命中本租户记录，跨租户同名凭据返回 404（不泄露存在性与明文）。
 - **租户内唯一**：`flow_id`、凭据名、自定义节点 type、属性类型名的唯一性均为租户内唯一（同名流程可共存于不同租户）。
 - **停用租户对运行面生效（#27）**：`POST /api/tenants/{id}/status` 置 `disabled` 后，该租户已签发会话的 API 调用按请求实时返回 **403**（无需等会话过期；平台管理员不受限，否则无法重新启用），其调度被置 `enabled=false`、`schedule_service` 不再入队。集群档还会把状态写入 Redis `plaita:tenant_status`，供 worker 丢弃该租户的 start/resume（含挂起执行的恢复）——跨 Redis 部署该闸门不生效（见 `docs-site/docs/distributed/ops-runbook.md`）。
 - **删除租户同步清理凭据（#245）**：`DELETE /api/tenants/{id}` 在删除租户行/成员行的同一事务里删除该租户全部 `credentials` 行，并删除引擎导出旁文件 `credentials_file(tenant_id)`；重建同名租户不会继承旧密钥。旁文件删除失败会显式报错（不静默留下可被 worker 读取的旧密文）。

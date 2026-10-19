@@ -169,10 +169,10 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
 
 try:
     from ..services import flow_store
-    from ..auth import require_auth, tenant_scope
+    from ..auth import is_platform_request, require_auth, tenant_scope
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from services import flow_store  # type: ignore
-    from auth import require_auth, tenant_scope  # type: ignore
+    from auth import is_platform_request, require_auth, tenant_scope  # type: ignore
 
 # plaita#166：执行表示的读面脱敏（与日志出口**同一个**清洗器/凭据键判据）。
 from plaita.core.url_redaction import redact_credential_values
@@ -1197,6 +1197,9 @@ async def create_stream_ticket(
         {
             "execution_id": execution_id,
             "tenant_id": tenant_scope(request),
+            # #254：票据必须延续签发方的身份性质——平台身份的 None 才是
+            # 全量视角；否则 EventSource 重放时无租户上下文会被 fail-closed。
+            "platform_admin": is_platform_request(request),
             "issued_at": datetime.now().isoformat(),
         }
     )
@@ -1230,7 +1233,8 @@ def _consume_stream_ticket(
     request.state.actor = "sse-ticket"
     request.state.role = "viewer"
     request.state.auth_source = "sse-ticket"
-    request.state.platform_admin = False
+    # #254：票据如实承载签发方的平台身份；普通用户票据仍钉死具体租户。
+    request.state.platform_admin = bool(grant.get("platform_admin", False))
     request.state.tenant_id = grant.get("tenant_id")
 
 

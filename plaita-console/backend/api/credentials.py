@@ -12,10 +12,20 @@ from pydantic import BaseModel, Field
 
 try:
     from ..services import credentials_svc
-    from ..auth import tenant_scope
+    from ..auth import (
+        NO_ACTIVE_TENANT_DETAIL,
+        has_auth_context,
+        is_platform_request,
+        tenant_scope,
+    )
 except ImportError:
     from services import credentials_svc  # type: ignore
-    from auth import tenant_scope  # type: ignore
+    from auth import (  # type: ignore
+        NO_ACTIVE_TENANT_DETAIL,
+        has_auth_context,
+        is_platform_request,
+        tenant_scope,
+    )
 
 router = APIRouter()
 
@@ -48,6 +58,19 @@ def get_credential(name: str, request: Request = None):
     record = credentials_svc.get_credential_record(name, tenant_id=tenant)
     if record is None:
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
+    # #254：明文返回前校验租户归属。租户上下文下记录必须同属该租户；
+    # tenant_scope 已保证 None 只可能来自可证明的平台级身份（普通会话
+    # 无活跃租户在进入 handler 前就 403），这里再显式复核一次，防止
+    # 未来新增直调路径把 None 当全量绕过归属检查。
+    if tenant is not None and record.get("tenant_id") != tenant:
+        raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
+    if (
+        tenant is None
+        and request is not None
+        and has_auth_context(request)
+        and not is_platform_request(request)
+    ):
+        raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
     return CredentialDetail(**record)
 
 
