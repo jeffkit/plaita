@@ -70,6 +70,8 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | `PLAITA_CLAIM_MIN_IDLE_MS` | `60000` | pending 可被回收的最短空闲 |
 | `PLAITA_LEASE_TTL_SECONDS` | `120` | resume 租约 TTL |
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
+| `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` | 跟随 `PLAITA_EXECUTION_STATE_TTL_DAYS`（30 天） | 执行删除墓碑 TTL（平台根 `plaita:exec_tombstone:{id}`）；`<=0` 永久 |
+| `PLAITA_TASK_MAX_AGE_SECONDS` | `2592000`（30 天） | start/resume 载体最大年龄，超龄在派发时 ack+WARNING 丢弃（墓碑 TTL 到期后的兜底）；`0` 关闭 |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
 | `PLAITA_METRICS_PORT` | unset | worker 的 Prometheus 抓取端端口（unset/`0` = 不启动） |
 | `PLAITA_METRICS_HOST` | `0.0.0.0` | worker `/metrics` 监听地址 |

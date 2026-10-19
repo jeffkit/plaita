@@ -22,7 +22,7 @@ from plaita.tenant_context import (
 # 支持多种运行方式的导入
 try:
     from .config import get_settings, warn_if_public_bind
-    from .auth import require_auth
+    from .auth import require_auth, tenant_generation_context
     from .api import services, executions, queues, logs, cluster, events
     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
     from .api import tenants
@@ -36,7 +36,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
         raise
     sys.path.insert(0, str(Path(__file__).parent))
     from config import get_settings, warn_if_public_bind
-    from auth import require_auth
+    from auth import require_auth, tenant_generation_context
     from api import services, executions, queues, logs, cluster, events
     from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
     from api import tenants  # type: ignore
@@ -315,7 +315,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    admin_deps = [Depends(require_auth)]
+    # A51-02：认证世代绑定到请求 ContextVar——所有管理面写路径在 flush 后
+    # 同一事务内复核「请求世代 == 当前世代」，防止旧租户请求跨 delete+create
+    # 写入重建租户。tenant_generation_context 依赖 require_auth（FastAPI 缓存，
+    # 不会重复执行鉴权）。
+    admin_deps = [Depends(require_auth), Depends(tenant_generation_context)]
     prefix = settings.api_prefix
 
     def _mount_admin(router, resource_tag: str) -> None:

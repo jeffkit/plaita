@@ -196,6 +196,21 @@ class ExecutionStorage(ABC):
         """
         pass
 
+    def load_execution_tombstone(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        """读取执行删除墓碑（A51-01）；无墓碑/后端不支持时返回 None。
+
+        删除是持久语义：状态行被删掉之后，任何仍在队列/PEL 里的 ``start``
+        载体都会让 ``start_flow`` 走「盘上无状态 = 全新执行」分支，把已删
+        执行重建并重放旧输入。墓碑在删除时与状态删除**同原子**落盘，worker
+        在启动/重投/守卫克隆前复核；键位在平台根（不随租户命名空间清理），
+        值至少含 ``tenant``，调用方按消息体租户匹配，避免跨租户同 id 误伤。
+
+        返回 ``{"tenant": str, "deleted_at": str, "reason": str, ...}``；
+        读取/反序列化失败应抛 ``ExecutionStateLoadError``（瞬态不得当
+        「无墓碑」放行重建）。默认实现返回 None，保持第三方/内存后零回归。
+        """
+        return None
+
 
     def serialize_state(self, state: Dict[str, Any]) -> str:
         """

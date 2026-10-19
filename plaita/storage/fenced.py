@@ -20,9 +20,11 @@
 """
 from __future__ import annotations
 
+import json
 import os
 from contextvars import ContextVar, Token
-from typing import Any, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from ..core.errors import ExecutionLeaseError
 from ..logger import logger
@@ -36,6 +38,9 @@ from .redis import (
     execution_lease_key,
     execution_start_time_score,
     execution_state_ttl_seconds,
+    execution_tombstone_key,
+    execution_tombstone_tenant,
+    execution_tombstone_ttl_seconds,
 )
 from plaita.core.url_redaction import _scrub_url_text
 
@@ -67,12 +72,15 @@ end
 # 单段 Lua：只有 fence 世代仍归本持有者时才允许删除执行状态（A43-07）。
 # 与 save 的 CAS 对称——delete 也是状态改写，旧世代不得删除新世代已推进
 # 的状态。删除范围与 RedisExecutionStorage.delete_execution_state 同口径：
-# 状态键 + 索引成员 + fence 键 + lease 键 + 执行级计数键（A51-03）。
+# 状态键 + 索引成员 + fence 键 + lease 键 + 执行级计数键（A51-03）+
+# 执行墓碑（A51-01，平台根键）。
 # KEYS[1]=状态键, KEYS[2]=fence 键, KEYS[3]=索引 ZSET, KEYS[4]=lease 键,
-# KEYS[5..]=执行级计数键（nofail/g1wakeups/noderefetch/noderetry[:node]/
-# affinityhandover）。
-# ARGV[1]=期望世代, ARGV[2]=execution_id
-# 返回 1=删除成功；0=世代不符（键缺失也算不符）。
+# KEYS[5..N-1]=执行级计数键（nofail/g1wakeups/noderefetch/noderetry[:node]/
+# affinityhandover），KEYS[N]=执行墓碑键（平台根，最后一个）。
+# ARGV[1]=期望世代, ARGV[2]=execution_id, ARGV[3]=墓碑 TTL 秒（0=不过期）,
+# ARGV[4]=墓碑 payload
+# 返回 1=删除成功；0=世代不符（键缺失也算不符）。墓碑与四删同段 Lua 原子
+# 落盘：脚本中途失败时 Redis 不会只执行一半（Lua 单命令原子）。
 # 世代计数器 fencegen 不在删除范围（A2R13）：它是删除后 ABA 防护的单调锚。
 _FENCED_DELETE_LUA = """
 if redis.call('get', KEYS[2]) == ARGV[1] then
@@ -80,8 +88,14 @@ if redis.call('get', KEYS[2]) == ARGV[1] then
   redis.call('zrem', KEYS[3], ARGV[2])
   redis.call('del', KEYS[2])
   redis.call('del', KEYS[4])
-  for i = 5, #KEYS do
+  for i = 5, #KEYS - 1 do
     redis.call('del', KEYS[i])
+  end
+  local ttl = tonumber(ARGV[3]) or 0
+  if ttl > 0 then
+    redis.call('set', KEYS[#KEYS], ARGV[4], 'EX', ttl)
+  else
+    redis.call('set', KEYS[#KEYS], ARGV[4])
   end
   return 1
 else
@@ -191,13 +205,17 @@ class FencedExecutionStorage(ExecutionStorage):
     def load_execution_state(self, execution_id: str) -> Optional[ExecutionState]:
         return self._inner.load_execution_state(execution_id)
 
+    def load_execution_tombstone(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        return self._inner.load_execution_tombstone(execution_id)
+
     def delete_execution_state(self, execution_id: str) -> bool:
         """删除执行状态；持世代号时只允许删除**自己的世代**（A43-07）。
 
         无世代（控制面删除 / 未持 fenced 租约 / 单测）→ 透传内层，内层会
         连同 fence、lease、执行级计数键一并清掉（删除即吊销，A43-01 /
         A51-03）。持世代 → 单段 Lua 先比较 fence 键，匹配才删状态 + 索引
-        成员 + fence + lease + 计数键；不匹配抛 ``ExecutionLeaseError``
+        成员 + fence + lease + 计数键，并写平台根执行墓碑（A51-01）；
+        不匹配抛 ``ExecutionLeaseError``
         （与 save 的 CAS 语义对称——旧世代不得删除新世代已推进的状态，也
         不得借删除把新世代的状态清掉）。
 
@@ -224,17 +242,31 @@ class FencedExecutionStorage(ExecutionStorage):
             if callable(counter_key_builder)
             else []
         )
+        # A51-01/A52-01：墓碑与四删同一段 Lua（CAS 成功才写），平台根键位
+        # 保证租户 namespace purge 不会把它擦掉。墓碑键排在计数键之后。
+        tombstone_payload = json.dumps(
+            {
+                "tenant": execution_tombstone_tenant(namespace),
+                "deleted_at": datetime.now().isoformat(),
+                "reason": "execution_deleted",
+            },
+            ensure_ascii=False,
+        )
+        tombstone_ttl = execution_tombstone_ttl_seconds()
         try:
             result = client.eval(
                 _FENCED_DELETE_LUA,
-                4 + len(counter_keys),
+                4 + len(counter_keys) + 1,
                 state_key,
                 execution_fence_key(namespace, execution_id),
                 execution_index_key(namespace),
                 execution_lease_key(namespace, execution_id),
                 *counter_keys,
+                execution_tombstone_key(execution_id),
                 str(int(generation)),
                 execution_id,
+                str(int(tombstone_ttl)),
+                tombstone_payload,
             )
         except Exception as e:
             logger.error(

@@ -586,6 +586,10 @@ class TestIssue118DedupKeyBasis:
         # 这里显式给不同 id 证明 worker 侧也收敛。
         msgs[0]["execution_id"] = "exec-a"
         msgs[1]["execution_id"] = "exec-b"
+        # B52-02 消息最大年龄闸（默认 30 天）会丢弃历史载体；本用例的 DUE
+        # 是固定日期，消费时刻按「刚入队」处理，避免年龄闸干扰去重语义。
+        now_iso = datetime.now().isoformat()
+        msgs[0]["timestamp"] = msgs[1]["timestamp"] = now_iso
 
         runs = []
         with patch("plaita.server.flow_worker.FlowExecution") as FE:

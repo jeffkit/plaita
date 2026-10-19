@@ -23,11 +23,19 @@ from plaita.tenant_context import guard_tenant_write
 try:
     from ..models.flow import Base, Credential, DEFAULT_TENANT_ID, Tenant
     from .flow_store import get_flow_store
-    from .tenant_write_guard import tenant_generation_token
+    from .tenant_write_guard import (
+        assert_tenant_generation,
+        expected_tenant_generation,
+        tenant_generation_token,
+    )
 except ImportError:  # 平铺布局（cwd=backend，services 为顶层包）
     from models.flow import Base, Credential, DEFAULT_TENANT_ID, Tenant  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
-    from services.tenant_write_guard import tenant_generation_token  # type: ignore
+    from services.tenant_write_guard import (  # type: ignore
+        assert_tenant_generation,
+        expected_tenant_generation,
+        tenant_generation_token,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +154,12 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
                 f"租户不存在或已删除: {tenant_id}（拒绝写入凭据）"
             )
         # 记住本次校验通过的租户世代；同名重建会换 token（A50-01 ABA）。
-        tenant_token = (tenant.created_at, tenant.contract_secret_id)
+        # A51-02：请求认证时的世代优先——服务首次读若被拖到 delete+create
+        # 之后，不能把重建租户的世代当成自己的（已护栏路径 0 新增读）。
+        tenant_token = (
+            expected_tenant_generation(tenant_id)
+            or (tenant.created_at, tenant.contract_secret_id)
+        )
         encrypted = _encrypt(data)
         row = session.scalars(
             select(Credential).where(
@@ -196,6 +209,8 @@ def delete_credential(name: str, tenant_id: Optional[str] = None) -> bool:
         # plaita#251：同一事务内 flush 后导出（导出声已看不到该行），成功才
         # commit；导出失败 ⇒ 回滚，DB 行与旁文件都保留（可安全重试）。
         session.flush()
+        # A51-02：删除同属租户作用域写；请求世代失效时不得动重建租户的行。
+        assert_tenant_generation(session, affected)
         _export_then_commit(session, affected)
     return True
 

@@ -494,6 +494,8 @@ flowchart TD
 
 Redis 后端的 `delete_execution_state` 是**删除即吊销**：同一 pipeline 内删除状态键、列表索引成员、`{ns}:execution:fence:{id}` 当前世代键、`{ns}:execution:lease:{id}` 租约键，以及该执行的计数键（`nofail` / `g1wakeups` / `noderefetch` / `noderetry`（含 `:{node}` 子键）/ `affinityhandover`）。在途 worker 下一次落盘会因 fence 世代失配抛 `ExecutionLeaseError`，不会把已删执行的状态写回；计数键同删保证同一 `execution_id` 重建后预算从零开始。**世代计数器 `{ns}:execution:fencegen:{id}` 刻意不删、无 TTL**：`try_acquire_fenced` 只对它 `INCR`，删除后新 acquire 的世代严格大于旧世代，旧 worker 的迟到 save/delete 才会被 CAS 拒绝（A2R13 ABA 第三格）。`FencedExecutionStorage.delete_execution_state` 在调用方持世代号时先做 fence CAS——旧世代不能删除新世代已推进的状态。
 
+**删除墓碑（A51-01/A52-01）**：同一 pipeline（fenced 档同一段 Lua）还会写平台根键 `plaita:exec_tombstone:{execution_id}`，值含 `tenant` / `deleted_at` / `reason`。删除 API 返回后，任何仍在队列/PEL 里的 `start` 载体都不再被 `start_flow` 的「盘上无状态 = 全新执行」分支重建：worker 在派发闸（配额之前）、`start_flow` 直达调用、start 幂等命中、节点失败重投与死信守卫克隆前复核墓碑（同租户才命中；跨租户同 id 放行）。新 `execution_id` 不受影响；同 id 重放被 ack 丢弃并释放 dedup 映射。墓碑 TTL 默认跟随 `PLAITA_EXECUTION_STATE_TTL_DAYS`，可用 `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` 覆盖（`<=0` 永久）。墓碑过期后的历史载体由 `PLAITA_TASK_MAX_AGE_SECONDS`（默认 30 天，`0` 关闭）在派发时丢弃。租户清理（`_purge_tenant_redis`）不触碰平台根墓碑，因此租户删除+同名重建后旧 start 仍不会执行。
+
 > `plaita.storage.sqlalchemy` 仍存在，但其方法为 `async def`，与上述同步契约及 Worker 调用方式不兼容。公开路径已拒绝 `db` 作为 execution/flow 存储；详见根目录 `MIGRATION.md`「Storage：db 执行/流程存储从公开路径下架」。
 
 ## 与 ServiceManager 协作

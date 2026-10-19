@@ -23,7 +23,8 @@ ALLOWED_SILENT = {
     # node/http.py 的两处 JSON 回退已改登记为行号无关指纹（见下方
     # ALLOWED_SILENT_FINGERPRINTS）——plaita#31 的 SSRF 加固在文件上方插入
     # 大量 helper，行号登记会集体漂移。
-    ("storage/memory.py", 138),  # 版本号非纯数字排序失败, 回退到任意版本
+    # 2026-10-19 A51-01 删除墓碑（字段 + delete 内 12 行）后 138→151，位点未变。
+    ("storage/memory.py", 151),  # 版本号非纯数字排序失败, 回退到任意版本
     # 2026-10-02 行号随 TERMINAL_EXECUTION_STATUSES 常量插入下移（105→113），位点未变；
     # 后随波次④（订阅超时 checker 宿主）的 import 与 EventFilter 构造参数插入再下移（113→127），位点未变；
     # 后随事件回扫（EventReconciler 宿主）的 event_storage 参数与 _reconciler 字段插入再下移（127→135），位点未变；

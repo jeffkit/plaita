@@ -29,8 +29,10 @@ except ImportError:  # 兼容不同安装布局
 
 try:
     from ..models.flow import LocalSchedule, LocalScheduleFire
+    from .tenant_write_guard import assert_tenant_generation
 except ImportError:
     from models.flow import LocalSchedule, LocalScheduleFire  # type: ignore
+    from services.tenant_write_guard import assert_tenant_generation  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,8 @@ def create_schedule(store, schedule: Dict[str, Any]) -> Dict[str, Any]:
                 next_run_at=schedule.get("next_run_at") or "",
             )
         )
+        session.flush()
+        assert_tenant_generation(session, schedule.get("tenant_id"))
         session.commit()
     return get_schedule(store, schedule["schedule_id"])
 
@@ -100,6 +104,8 @@ def update_schedule(store, schedule_id: str, schedule: Dict[str, Any],
         row.enabled = bool(schedule.get("enabled", True))
         row.next_run_at = schedule.get("next_run_at") or ""
         row.updated_at = datetime.utcnow()
+        session.flush()
+        assert_tenant_generation(session, tenant_id or row.tenant_id)
         session.commit()
     return get_schedule(store, schedule_id, tenant_id=tenant_id)
 
@@ -138,6 +144,8 @@ def delete_schedule(store, schedule_id: str,
         ).all()
         for f in fires:
             session.delete(f)
+        session.flush()
+        assert_tenant_generation(session, tenant_id or row.tenant_id)
         session.commit()
     return True
 

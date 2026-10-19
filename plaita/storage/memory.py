@@ -11,6 +11,7 @@ class MemoryExecutionStorage(ExecutionStorage):
     
     def __init__(self):
         self.execution_states = {}  # 存储执行状态
+        self.execution_tombstones = {}  # execution_id -> 删除墓碑（A51-01）
     
     def save_execution_state(self, execution_id: str, state: ExecutionState) -> bool:
         """保存流程执行状态"""
@@ -24,11 +25,23 @@ class MemoryExecutionStorage(ExecutionStorage):
         return ExecutionState.model_validate(self.execution_states[execution_id])
     
     def delete_execution_state(self, execution_id: str) -> bool:
-        """删除流程执行状态"""
+        """删除流程执行状态（同时写执行墓碑，A51-01）。"""
         if execution_id in self.execution_states:
             del self.execution_states[execution_id]
+            # 与状态删除同方法内的原子语义：墓碑先于返回可见。内存后端
+            # 不实现 TTL（进程生命周期内始终有效，测试/单机语义）。
+            self.execution_tombstones[execution_id] = {
+                "tenant": "default",
+                "deleted_at": time.time(),
+                "reason": "execution_deleted",
+            }
             return True
         return False
+
+    def load_execution_tombstone(self, execution_id: str):
+        """读取执行删除墓碑；无墓碑返回 None。"""
+        tombstone = self.execution_tombstones.get(execution_id)
+        return dict(tombstone) if tombstone is not None else None
     
     def list_executions(self, query: Optional[Any] = None, order_by: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[ExecutionState]:
         """列出执行状态列表"""

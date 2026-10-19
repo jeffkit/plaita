@@ -34,6 +34,7 @@ try:
     TenantMember,
     User,
 )
+    from .tenant_write_guard import assert_tenant_generation
 except ImportError:
     from models.flow import (  # type: ignore
     Base,
@@ -51,6 +52,7 @@ except ImportError:
     TenantMember,
     User,
 )
+    from services.tenant_write_guard import assert_tenant_generation  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +235,9 @@ class FlowStore:
                     tenant_id=tenant_id, flow_id=flow_id, author=author, desc=desc
                 )
                 session.add(record)
+                # A51-02：flush 取得写串行化点后、同一事务内复核请求世代。
+                session.flush()
+                assert_tenant_generation(session, tenant_id)
                 session.commit()
                 session.refresh(record)
             return record
@@ -291,6 +296,8 @@ class FlowStore:
             )
             session.add(record)
             try:
+                session.flush()
+                assert_tenant_generation(session, tenant_id)
                 session.commit()
             except IntegrityError as e:
                 session.rollback()
@@ -316,6 +323,8 @@ class FlowStore:
             if record is None:
                 raise LookupError(f"流程不存在: {flow_id}")
             session.delete(record)
+            session.flush()
+            assert_tenant_generation(session, tenant_id)
             session.commit()
             return True
 
@@ -442,6 +451,8 @@ class FlowStore:
                         "请加载最新或选择强制覆盖",
                         latest_updated_at=stored,
                     )
+                # A51-02：UPDATE 已在事务内执行；commit 前复核请求世代。
+                assert_tenant_generation(session, tenant_id)
                 session.commit()
                 return SaveFlowDefinitionResult(
                     flow_id=flow_id, version=version, status=status
@@ -458,6 +469,7 @@ class FlowStore:
             session.add(row)
             session.flush()
             self._touch_updated_at(session, flow_id, version, tenant_id)
+            assert_tenant_generation(session, tenant_id)
             session.commit()
             return SaveFlowDefinitionResult(flow_id=flow_id, version=version, status=status)
 
@@ -645,6 +657,8 @@ class FlowStore:
             if row.status != "published":
                 row.status = "published"
                 row.published_at = datetime.utcnow()
+                session.flush()
+                assert_tenant_generation(session, tenant_id)
                 session.commit()
                 session.refresh(row)
             return self._version_to_out(row)
@@ -663,6 +677,8 @@ class FlowStore:
             if row is None:
                 raise LookupError(f"版本不存在: {flow_id}@{version}")
             session.delete(row)
+            session.flush()
+            assert_tenant_generation(session, tenant_id)
             session.commit()
             return True
 
@@ -737,6 +753,8 @@ class FlowStore:
                 row.schema_json = schema_json
                 row.is_builtin = is_builtin
             try:
+                session.flush()
+                assert_tenant_generation(session, tenant_id)
                 session.commit()
             except IntegrityError as e:
                 session.rollback()
@@ -821,6 +839,8 @@ class FlowStore:
             if row is None:
                 raise LookupError(f"节点描述不存在: {node_type}")
             session.delete(row)
+            session.flush()
+            assert_tenant_generation(session, tenant_id)
             session.commit()
             return True
 
@@ -876,6 +896,8 @@ class FlowStore:
                 row.enum_json = enum_json
                 row.default_json = default_json
                 row.desc = desc
+            session.flush()
+            assert_tenant_generation(session, tenant_id)
             session.commit()
             session.refresh(row)
             return self._property_type_to_out(row)
@@ -891,6 +913,8 @@ class FlowStore:
             if row is None:
                 raise LookupError(f"属性类型不存在: {name}")
             session.delete(row)
+            session.flush()
+            assert_tenant_generation(session, tenant_id)
             session.commit()
             return True
 
@@ -938,6 +962,9 @@ def insert_local_execution(
                 invoker=invoker,
             )
         )
+        # A51-02：本地执行行同属租户作用域（迟到 insert 会被重建租户继承）。
+        session.flush()
+        assert_tenant_generation(session, tenant_id)
         session.commit()
 
 

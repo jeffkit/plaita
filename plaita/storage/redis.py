@@ -103,6 +103,52 @@ def execution_index_ready_key(namespace: str) -> str:
     return f"{namespace}:execution:index:ready"
 
 
+# A51-01/A52-01：执行删除墓碑。**平台根**键位（不跟随租户 namespace）：
+# 租户删除的 ``_purge_tenant_redis`` 会按 ``plaita:{tenant}:*`` 或 default 的
+# ``plaita:execution:*`` 清理，墓碑若写在租户命名空间里会被一并擦掉，同名
+# 重建后旧 start 载体又能重建执行。值里带 ``tenant``，检查时按消息体租户
+# 匹配——console 每次 uuid4 新 id，但外部生产者可自带 id，不能跨租户误伤。
+EXECUTION_TOMBSTONE_PREFIX = "plaita:exec_tombstone:"
+
+
+def execution_tombstone_key(execution_id: str) -> str:
+    """执行墓碑键（平台根）：``plaita:exec_tombstone:{execution_id}``。"""
+    return f"{EXECUTION_TOMBSTONE_PREFIX}{execution_id}"
+
+
+def execution_tombstone_ttl_seconds() -> int:
+    """墓碑 TTL（秒）；<=0 表示禁用（永久）。
+
+    默认跟随终态状态 TTL（``PLAITA_EXECUTION_STATE_TTL_DAYS``，30 天）；
+    ``PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`` 可单独覆盖。TTL 到期后
+    同一 id 的历史载体由消息最大年龄闸兜底（见 flow_worker
+    ``PLAITA_TASK_MAX_AGE_SECONDS``），见 B52-02。
+    """
+    raw = (os.environ.get("PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS") or "").strip()
+    if not raw:
+        return execution_state_ttl_seconds()
+    try:
+        seconds = int(raw)
+    except ValueError:
+        logger.warning(
+            "PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS=%s 非法，回退默认状态 TTL",
+            _redact_env_value(raw),
+        )
+        return execution_state_ttl_seconds()
+    return seconds if seconds > 0 else 0
+
+
+def execution_tombstone_tenant(namespace: str) -> str:
+    """从租户 namespace 反解租户 id（墓碑值用；未知形状按 default）。"""
+    if namespace == _tenant_ctx.LEGACY_NAMESPACE:
+        return _tenant_ctx.DEFAULT_TENANT_ID
+    prefix = f"{_tenant_ctx.LEGACY_NAMESPACE}:"
+    suffix = namespace[len(prefix):] if namespace.startswith(prefix) else ""
+    if suffix and ":" not in suffix:
+        return suffix
+    return _tenant_ctx.DEFAULT_TENANT_ID
+
+
 def execution_start_time_score(value: Any) -> float:
     """start_time（ISO 字符串）→ ZSET score（epoch 秒）。
 
@@ -485,9 +531,29 @@ class RedisExecutionStorage(ExecutionStorage):
         """
         execution_key = self.get_namespace_key('execution', execution_id)
         _tenant_write_observability("redis.delete_execution_state", execution_id)
+        # A52-01 边角①：墓碑必须与四删在**同一 MULTI/EXEC** 内落盘。先删
+        # 状态、再单独 SET 墓碑时，两步之间的崩溃/断连会留下「状态已删、
+        # 墓碑未写」，任何 start 载体仍会按「无状态=全新执行」重建。
+        tombstone_payload = json.dumps(
+            {
+                "tenant": execution_tombstone_tenant(self.namespace),
+                "deleted_at": datetime.now().isoformat(),
+                "reason": "execution_deleted",
+            },
+            ensure_ascii=False,
+        )
+        tombstone_ttl = execution_tombstone_ttl_seconds()
         try:
             counter_keys = self.counter_keys_for_execution(execution_id)
             pipe = self.client.pipeline()
+            if tombstone_ttl > 0:
+                pipe.set(
+                    execution_tombstone_key(execution_id),
+                    tombstone_payload,
+                    ex=tombstone_ttl,
+                )
+            else:
+                pipe.set(execution_tombstone_key(execution_id), tombstone_payload)
             pipe.delete(execution_key)
             pipe.zrem(self._execution_index_key(), execution_id)
             pipe.delete(execution_fence_key(self.namespace, execution_id))
@@ -499,6 +565,33 @@ class RedisExecutionStorage(ExecutionStorage):
         except Exception as e:
             logger.error("Failed to delete execution state: %s", _scrub_url_text(e))
             return False
+
+    def load_execution_tombstone(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        """读取平台根执行墓碑（A51-01）。
+
+        键不存在 → None；读取/反序列化失败 → ``ExecutionStateLoadError``
+        （与状态读取同口径：瞬态不得被当成「无墓碑」放行重建）。
+        """
+        key = execution_tombstone_key(execution_id)
+        try:
+            raw = self.client.get(key)
+        except Exception as e:  # noqa: BLE001 — 存储瞬态统一转具名读取错误
+            raise ExecutionStateLoadError(
+                f"读取执行墓碑失败（可能是 Redis 瞬断）: {execution_id}: {e}"
+            ) from e
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except Exception as e:  # noqa: BLE001 — 损坏数据统一转具名读取错误
+            raise ExecutionStateLoadError(
+                f"执行墓碑反序列化失败（数据损坏）: {execution_id}: {e}"
+            ) from e
+        if not isinstance(payload, dict):
+            raise ExecutionStateLoadError(
+                f"执行墓碑形状非法（非对象）: {execution_id}: {payload!r}"
+            )
+        return payload
 
     def list_executions(self, query: Optional[Any] = None, order_by: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[ExecutionState]:
         """列出执行状态列表（走 ``{ns}:execution:index`` ZSET，不再全命名空间扫键）。

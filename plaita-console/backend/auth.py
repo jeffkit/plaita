@@ -34,16 +34,24 @@ from __future__ import annotations
 
 import logging
 import secrets
-from typing import Any, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, Optional
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 try:
     from .config import get_settings
     from .services import users_svc
+    from .services.tenant_write_guard import (
+        bind_tenant_generation,
+        reset_tenant_generation,
+    )
 except ImportError:
     from config import get_settings  # type: ignore
     from services import users_svc  # type: ignore
+    from services.tenant_write_guard import (  # type: ignore
+        bind_tenant_generation,
+        reset_tenant_generation,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +89,7 @@ def require_auth(request: Request) -> Dict[str, Any]:
 
     actor = role = source = None
     tenant_id: Optional[str] = None
+    tenant_generation = None
     platform_admin = False
 
     expected_key = (settings.admin_api_key or "").strip()
@@ -102,6 +111,9 @@ def require_auth(request: Request) -> Dict[str, Any]:
         role = resolved["role"]
         source = "session"
         tenant_id = resolved.get("tenant_id")
+        # A51-02：会话解析（单条 JOIN）与身份同一快照给出租户世代；请求
+        # 生命周期内所有写路径以它为准，不重新捕获。
+        tenant_generation = resolved.get("tenant_generation")
         platform_admin = bool(resolved.get("platform_admin"))
     elif settings.allow_insecure_admin:
         actor, role, source = "insecure", "admin", "insecure"
@@ -124,6 +136,35 @@ def require_auth(request: Request) -> Dict[str, Any]:
                 detail="仅平台管理员可指定 X-Tenant-ID",
             )
         tenant_id = header_tenant
+        # A51-02：平台身份代写目标租户时，认证处读一次 Tenant 行捕获世代。
+        # 行缺失/无世代 → 拒绝（不把 None 当合法租户交给写路径）。
+        # 内嵌/测试挂载没有 app.state.store（无 DB）：退化为不捕获世代，
+        # 但必须留 WARNING——这是「无法校验租户存在性」的可观测降级。
+        store = getattr(request.app.state, "store", None)
+        if store is None:
+            logger.warning(
+                "平台身份指定 X-Tenant-ID=%s，但应用未配置 app.state.store；"
+                "跳过租户世代捕获（内嵌/测试挂载）",
+                header_tenant,
+            )
+        else:
+            tenant_generation = users_svc.read_tenant_generation(
+                store, header_tenant
+            )
+            if tenant_generation is None:
+                if not users_svc.tenant_table_initialized(store):
+                    # 未 bootstrap 的内嵌/测试挂载：租户只存在于 Redis
+                    # namespace。无法校验存在性 → 不捕获世代，但留 WARNING。
+                    logger.warning(
+                        "租户表为空（未 bootstrap），跳过 X-Tenant-ID=%s 的"
+                        "世代捕获（内嵌/测试挂载）",
+                        header_tenant,
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"租户不存在或不可用: {header_tenant}",
+                    )
 
     # #254：普通会话无活跃租户 → fail-closed。身份不可证明为平台级时，
     # tenant_id=None 不得进入管理面（否则 tenant_scope 会把它当平台全量）。
@@ -138,6 +179,10 @@ def require_auth(request: Request) -> Dict[str, Any]:
     request.state.role = role
     request.state.auth_source = source
     request.state.tenant_id = tenant_id
+    # A51-02：请求级世代（会话解析同一 JOIN / 平台 X-Tenant-ID 的一次读）。
+    # 管理面依赖把它 bind 到 ContextVar；无它（旧挂载/CLI）时各服务回退
+    # 「写路径首次读捕获」的存量行为。
+    request.state.tenant_generation = tenant_generation
     request.state.platform_admin = platform_admin
     _authorize(request, role)
     return {
@@ -146,6 +191,30 @@ def require_auth(request: Request) -> Dict[str, Any]:
         "tenant_id": tenant_id,
         "platform_admin": platform_admin,
     }
+
+
+async def tenant_generation_context(
+    request: Request,
+    identity: Dict[str, Any] = Depends(require_auth),
+) -> AsyncGenerator[None, None]:
+    """管理面请求级租户世代绑定（A51-02 最小改造清单第 3 条）。
+
+    在 ``require_auth`` 之后、handler 之前把认证快照里的世代放进
+    ContextVar；同一请求的所有租户作用域写路径（含在 threadpool 里执行的
+    sync handler，anyio 会复制当前 context）都据此在 flush 后复核。无绑定
+    （CLI/单测直接调服务/旧挂载）时 ContextVar 为 None，各服务回退存量行为。
+
+    必须是 **async** 依赖：sync 依赖经线程池执行，其 ContextVar 修改不会
+    传播回请求上下文。
+    """
+    token = bind_tenant_generation(
+        getattr(request.state, "tenant_id", None),
+        getattr(request.state, "tenant_generation", None),
+    )
+    try:
+        yield
+    finally:
+        reset_tenant_generation(token)
 
 
 def has_auth_context(request: Request) -> bool:

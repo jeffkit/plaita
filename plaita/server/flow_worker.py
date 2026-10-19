@@ -238,9 +238,75 @@ def _requeue_envelope_kwargs(source: Any) -> Dict[str, Any]:
     return {}
 
 
+def _load_matching_tombstone(
+    storage: Optional[ExecutionStorage],
+    execution_id: str,
+    tenant_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """读取并匹配执行墓碑（A51-01）；返回 None = 无墓碑/跨租户同 id。
+
+    墓碑在平台根、值里带 ``tenant``：console 每次 uuid4 新 id，但外部生产者
+    可自带 id——只有墓碑租户与载体 ``tenant_id`` 一致才视为「同一执行」，
+    避免跨租户同 id 误伤。读取瞬态错误原样上抛（不得当「无墓碑」放行重建）。
+    """
+    loader = getattr(storage, "load_execution_tombstone", None)
+    if not callable(loader):
+        return None
+    token = set_current_tenant(tenant_id)
+    try:
+        tombstone = loader(execution_id)
+    finally:
+        reset_current_tenant(token)
+    if not tombstone:
+        return None
+    tombstone_tenant = tombstone.get("tenant") or DEFAULT_TENANT_ID
+    carrier_tenant = tenant_id or DEFAULT_TENANT_ID
+    if tombstone_tenant != carrier_tenant:
+        logger.info(
+            "执行 %s 的墓碑属于租户 %s（载体租户 %s），按未命中处理（外部同 id）",
+            execution_id, tombstone_tenant, carrier_tenant,
+        )
+        return None
+    return tombstone
+
+
+# B52-02：墓碑 TTL 到期后仍有载体的兜底闸。主任务流没有 MAXLEN/时间 TTL，
+# pending/积压消息理论上可无限期存活；墓碑过期后同一 start 仍会重建。
+# 默认 30 天（与状态/墓碑默认 TTL 同 horizon），0 = 关闭。
+DEFAULT_TASK_MAX_AGE_SECONDS = 30 * 86400
+
+
+def _task_max_age_seconds() -> int:
+    """消息最大年龄（秒）；未配置/非法回退 30 天，<=0 关闭。"""
+    raw = (os.environ.get("PLAITA_TASK_MAX_AGE_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_TASK_MAX_AGE_SECONDS
+    try:
+        seconds = int(raw)
+    except ValueError:
+        logger.warning(
+            "PLAITA_TASK_MAX_AGE_SECONDS=%s 非法，回退默认 %d 秒",
+            _redact_env_value(raw), DEFAULT_TASK_MAX_AGE_SECONDS,
+        )
+        return DEFAULT_TASK_MAX_AGE_SECONDS
+    return seconds if seconds > 0 else 0
+
+
+def _message_age_seconds(raw_timestamp: Any) -> Optional[float]:
+    """消息体 ``timestamp``（ISO 串）→ 年龄秒；缺失/不可解析返回 None。"""
+    if not isinstance(raw_timestamp, str) or not raw_timestamp.strip():
+        return None
+    try:
+        timestamp = datetime.fromisoformat(raw_timestamp.strip())
+    except (TypeError, ValueError):
+        return None
+    now = datetime.now(timestamp.tzinfo) if timestamp.tzinfo else datetime.now()
+    return (now - timestamp).total_seconds()
+
+
 def _requeue_body_for_retry(
     body: Dict[str, Any], storage: Optional[ExecutionStorage]
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     """#91 载体转换：start 载体重投前查盘，已有行则转 **resume 载体**。
 
     基线原样复制 start body：每轮经 ``start_flow`` 以 ``context={}`` 覆写
@@ -258,13 +324,26 @@ def _requeue_body_for_retry(
     - flow_id 与盘上行不一致 → 原样重投（转换会被 resume_flow 的流程ID
       校验 ValueError 打成 poison ack 丢消息）；
     - 读盘失败（Redis 抖动）→ 原样 start（fail-safe：转换是优化，绝不因
-      它失败而丢消息/丢节奏）。
+      它失败而丢消息/丢节奏）；
+    - **删除墓碑命中（A51-01）→ 返回 None**：调用方必须 ack 原条、不再
+      入队。删除后把 start 原样重投会让 ``start_flow`` 把执行重建完成；
+      墓碑读取瞬态错误同样上抛（不 ack、等重投），绝不 fail-open 重排。
     """
     if body.get("type") != "start":
         return dict(body)
     execution_id = body.get("execution_id")
     if not isinstance(execution_id, str) or not execution_id or storage is None:
         return dict(body)
+    tombstone = _load_matching_tombstone(
+        storage, execution_id, body.get("tenant_id")
+    )
+    if tombstone is not None:
+        logger.warning(
+            "执行 %s 已删除（墓碑 reason=%s），节点失败重投不再生成 start 载体"
+            "（ack 原条）: tenant=%s",
+            execution_id, tombstone.get("reason"), body.get("tenant_id"),
+        )
+        return None
     token = set_current_tenant(body.get("tenant_id"))
     try:
         state = storage.load_execution_state(execution_id)
@@ -2321,6 +2400,52 @@ class FlowWorker:
     # start 去重映射键 TTL：7 天自清理（与取消标志/重试计数键同款模式）。
     START_DEDUP_TTL_SECONDS = 7 * 86400
 
+    def _load_execution_tombstone(
+        self, execution_id: str, tenant_id: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """经 storage API 读取并匹配执行墓碑（A51-01）。"""
+        return _load_matching_tombstone(
+            getattr(self, "execution_storage", None), execution_id, tenant_id
+        )
+
+    def _start_carrier_tombstoned(self, body: Dict[str, Any]) -> bool:
+        """start 载体是否指向已删除执行（同租户 + 墓碑命中）。"""
+        execution_id = body.get("execution_id")
+        if not isinstance(execution_id, str) or not execution_id:
+            return False
+        tombstone = self._load_execution_tombstone(
+            execution_id, body.get("tenant_id")
+        )
+        if tombstone is None:
+            return False
+        logger.warning(
+            "执行 %s 已删除（墓碑 tenant=%s reason=%s deleted_at=%s），"
+            "丢弃 start 载体（不重建）: type=%s tenant=%s",
+            execution_id,
+            tombstone.get("tenant"),
+            tombstone.get("reason"),
+            tombstone.get("deleted_at"),
+            body.get("type"),
+            body.get("tenant_id") or DEFAULT_TENANT_ID,
+        )
+        return True
+
+    def _start_carrier_too_old(self, body: Dict[str, Any]) -> bool:
+        """消息最大年龄闸（B52-02）：墓碑 TTL 到期后的历史载体兜底丢弃。"""
+        max_age = _task_max_age_seconds()
+        if max_age <= 0:
+            return False
+        age = _message_age_seconds(body.get("timestamp"))
+        if age is None or age <= max_age:
+            return False
+        logger.warning(
+            "消息 %s 年龄 %.0fs 超过最大年龄 %ss（execution=%s type=%s），"
+            "丢弃（墓碑/状态 TTL 到期后的历史载体不重建执行）",
+            body.get("message_id") or body.get("timestamp"),
+            age, max_age, body.get("execution_id"), body.get("type"),
+        )
+        return True
+
     def _start_dedup_key(self, dedup_key: str) -> str:
         """start 去重映射键：``{ns}:start-dedup:{key}``（租户路由，与租约键同规则）。"""
         return f"{tenant_namespace(current_tenant())}:start-dedup:{dedup_key}"
@@ -2385,6 +2510,7 @@ class FlowWorker:
         params: Optional[Dict[str, Any]] = None,
         *,
         schema_version: Optional[int] = None,
+        carrier_execution_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """处理幂等键命中：绝不二次 start。
 
@@ -2421,6 +2547,31 @@ class FlowWorker:
             return None
         state = self.execution_storage.load_execution_state(mapped_execution_id)
         if state is None:
+            # A51-01/A52-01 scenario 6：映射指向的执行已被删除。必须区分
+            # 「同一 id 重放」（拒绝并释放映射）与「新 id 复用旧 dedup_key」
+            # （释放映射后按新 id 正常启动）——用载体 id 是否等于映射 id 判定。
+            tombstone = self._load_execution_tombstone(
+                mapped_execution_id, current_tenant()
+            )
+            if tombstone is not None:
+                if carrier_execution_id == mapped_execution_id:
+                    logger.warning(
+                        "start 幂等键命中已删除执行 %s（墓碑），拒绝同 id 重放；"
+                        "释放映射供新启动复用: dedup_key 命中",
+                        mapped_execution_id,
+                    )
+                    return {
+                        "execution_id": mapped_execution_id,
+                        "status": "deleted",
+                        "discarded": True,
+                        "release_dedup": True,
+                    }
+                logger.warning(
+                    "start 幂等键命中已删除执行 %s（墓碑），但载体是新 id %s"
+                    "（复用旧 dedup_key）→ 释放孤儿映射后按新 id 启动",
+                    mapped_execution_id, carrier_execution_id,
+                )
+                return None
             logger.warning(
                 "start 幂等键命中但映射的执行无状态（孤儿映射）: %s",
                 mapped_execution_id,
@@ -2657,6 +2808,32 @@ class FlowWorker:
             )
             execution_id = execution_id or uuid.uuid4().hex
 
+            # A51-01：删除墓碑复核（五种纵深之一）。分派闸之外，直达
+            # ``start_flow`` 的调用同样不得把已删执行重建；新铸造的 id 天然
+            # 不可能有墓碑，只有预铸 id 才需要多读一次。命中即 ack 语义
+            # （返回值供调用方确认），并释放同 id 的 dedup 映射。
+            if preminted_execution_id:
+                tombstone = self._load_execution_tombstone(
+                    execution_id, current_tenant()
+                )
+                if tombstone is not None:
+                    if dedup_key:
+                        self._release_start_dedup(dedup_key, execution_id)
+                    logger.warning(
+                        "执行 %s 已删除（墓碑 tenant=%s reason=%s deleted_at=%s），"
+                        "start_flow 拒绝重建（flow=%s）",
+                        execution_id,
+                        tombstone.get("tenant"),
+                        tombstone.get("reason"),
+                        tombstone.get("deleted_at"),
+                        flow_id,
+                    )
+                    return {
+                        "execution_id": execution_id,
+                        "status": "deleted",
+                        "discarded": True,
+                    }
+
             # 创建流程执行器并执行流程
             # 复用同一个 FlowExecution 贯穿所有分布式步骤, 保留用户回调
             handlers = self._handlers_for(execution_id, enqueued_at=enqueued_at)
@@ -2683,11 +2860,16 @@ class FlowWorker:
                 hit_result = self._handle_start_dedup_hit(
                     flow_id, mapped_execution_id, params=params,
                     schema_version=schema_version,
+                    carrier_execution_id=execution_id,
                 )
                 if hit_result is not None:
                     # 本次没有真正启动：回收按本 id 装配的时间线采集器
                     # （否则节流命中会在长跑 worker 里留一条无人认领的采集器）。
                     self._timelines.pop(execution_id, None)
+                    if hit_result.get("release_dedup") and dedup_key:
+                        self._release_start_dedup(
+                            dedup_key, hit_result.get("execution_id") or mapped_execution_id
+                        )
                     return hit_result
                 # 孤儿映射（首次执行从未落盘）：释放后重新认领，让本次启动
                 # 继续受保护；并发后来者抢先认领则放弃设防（存量语义）
@@ -4427,6 +4609,35 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
             return False
 
+        # A51-01：状态快照可能是删除前读的（守卫窗口：读 state → 删除 →
+        # 探测租约），墓碑必须在租约探测之后、终态化/克隆之前再判一次。
+        # 读取瞬态错误保守跳过死信（消息留 pending），绝不 fail-open 克隆。
+        try:
+            tombstone = _load_matching_tombstone(
+                self.execution_storage, execution_id, body.get("tenant_id")
+            )
+        except Exception as exc:  # noqa: BLE001 — 瞬断保守跳过，不误杀活执行
+            logger.warning(
+                "死信守卫读执行墓碑失败（保守跳过死信）: %s: %s",
+                execution_id, _scrub_url_text(exc),
+            )
+            return False
+
+        # A51-01：执行已删除（墓碑）。原消息放行死信留证，但**不克隆**
+        # 恢复副本——克隆 body 仍是 start/同 id，会在删除后重建执行；也
+        # 不终态化（执行已不存在）。比 state 快照更权威：守卫窗口里 state
+        # 是删除前读的 running。
+        if tombstone is not None:
+            logger.warning(
+                "执行 %s 已删除（墓碑 tenant=%s reason=%s），死信守卫只放行 DLQ、"
+                "不克隆恢复副本: %s",
+                execution_id,
+                tombstone.get("tenant"),
+                tombstone.get("reason"),
+                getattr(task, "message_id", "?"),
+            )
+            return True
+
         # A49-01：超版本拒收不走「克隆恢复」。副本继承同一超版本，本 build
         # 仍会在下一轮拒收并再次克隆——流内恒 1 条、DLQ 每轮 +1，永不收敛。
         # 允许死信一次（留证+告警），执行状态不终态化：suspended 仍可被后续
@@ -5428,6 +5639,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         requeue_body = _requeue_body_for_retry(
             body, getattr(self, "execution_storage", None)
         )
+        if requeue_body is None:
+            # A51-01：执行已被删除（墓碑命中）——ack 原条、不生成任何新
+            # 载体。原样重投 start 会被 start_flow 当「无状态=全新执行」重建。
+            logger.warning(
+                "任务 %s 的执行 %s 已删除（墓碑），节点失败重投被丢弃（ack 原条）",
+                mid, body.get("execution_id"),
+            )
+            try:
+                queue.ack(mid)
+            except Exception as e:  # noqa: BLE001 — ack 失败=重复投递，墓碑会再次拦截
+                logger.warning(
+                    "任务 %s 墓碑丢弃后 ack 失败（将产生重复投递）: %s",
+                    mid, _scrub_url_text(e),
+                )
+            return True
         try:
             # A44-02：重投副本继承源信封版本（载体语义属于源消息）。
             queue.enqueue(requeue_body, **_requeue_envelope_kwargs(task))
@@ -5503,6 +5729,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
     def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None,
                        schema_version: Optional[int] = None) -> None:
+        message_type = message_data.get("type")
+
         # 租户状态闸（plaita#27）：停用租户的 start/resume 一律不执行。消息已
         # 入队才停用（或挂起执行的 resume 来自 delay/approval/event 服务）时，
         # 若照跑则「停用」对运行面是 no-op。此处直接返回 = 消费循环 ack 丢弃
@@ -5518,6 +5746,30 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
             return
 
+        # A51-01：执行删除墓碑闸。放在配额闸**之前**——已删执行的 start
+        # 载体不得占用 tenant_running 名额（A51-03）；放在租户状态闸之后，
+        # 停用租户消息仍走既有丢弃路径。命中即返回（消费循环随后 ack），
+        # 同 id 的 dedup 映射一并释放（新 id 复用旧 dedup_key 不受影响）。
+        if message_type == "start" and self._start_carrier_tombstoned(message_data):
+            dedup_key = message_data.get("dedup_key")
+            if dedup_key:
+                token = set_current_tenant(message_data.get("tenant_id"))
+                try:
+                    self._release_start_dedup(
+                        dedup_key, message_data.get("execution_id")
+                    )
+                finally:
+                    reset_current_tenant(token)
+            return
+
+        # B52-02：消息最大年龄闸。主任务流没有时间 TTL，墓碑 TTL 到期后
+        # 同一 start 仍可重建；超过 horizon 的历史载体直接 ack+WARNING。
+        # 只闸 start/resume（决议/控制载体不做年龄判断，避免误丢唤醒源）。
+        if message_type in ("start", "resume") and self._start_carrier_too_old(
+            message_data
+        ):
+            return
+
         # 每租户 start 准入配额（plaita#28，最小公平性原语）：在租户状态闸
         # 之后、亲和闸之前。只闸 ``start``——resume 是救援流量，不受 start
         # 配额拦（挂起执行本就占着名额，闸它只会放大积压）。带名额的消息
@@ -5526,7 +5778,6 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 由消费循环重投尾部排队（不烧 delivery、不死信）。回滚开关
         # PLAITA_DISABLE_TENANT_QUOTA=1 整闸旁路；消息带 quota_bypass（延迟
         # 预算耗尽的放行副本）同样旁路——存活性 > 软配额。
-        message_type = message_data.get("type")
         if (
             message_type == "start"
             and not _tenant_quota_disabled()

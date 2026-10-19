@@ -103,6 +103,11 @@ class TenantRoutingExecutionStorage(_TenantRoutingMixin, ExecutionStorage):
     def load_execution_state(self, execution_id: str) -> Optional[Any]:
         return self._current_storage().load_execution_state(execution_id)
 
+    def load_execution_tombstone(self, execution_id: str) -> Optional[Any]:
+        # 墓碑键在平台根（A51-01）；仍按当前上下文选租户实例，由实例的
+        # namespace 决定写入值里的 tenant（检查方按消息体租户匹配）。
+        return self._current_storage().load_execution_tombstone(execution_id)
+
     def delete_execution_state(self, execution_id: str) -> bool:
         guard_tenant_write("storage.delete_execution_state")  # #239 fail-closed
         return self._current_storage().delete_execution_state(execution_id)

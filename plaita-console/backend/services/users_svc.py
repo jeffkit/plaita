@@ -16,13 +16,17 @@ import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 
 try:
     from ..models.flow import DEFAULT_TENANT_ID, SessionToken, Tenant, TenantMember, User
-    from .tenant_write_guard import tenant_generation_token
+    from .tenant_write_guard import (
+        assert_tenant_generation,
+        expected_tenant_generation,
+        tenant_generation_token,
+    )
 except ImportError:
     from models.flow import (  # type: ignore
         DEFAULT_TENANT_ID,
@@ -31,7 +35,11 @@ except ImportError:
         TenantMember,
         User,
     )
-    from services.tenant_write_guard import tenant_generation_token  # type: ignore
+    from services.tenant_write_guard import (  # type: ignore
+        assert_tenant_generation,
+        expected_tenant_generation,
+        tenant_generation_token,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -221,9 +229,13 @@ def tenant_is_active(store, tenant_id: Optional[str]) -> bool:
 
 
 def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
-    """token -> {username, role, tenant_id, platform_admin}；无效/过期返回 None。
+    """token -> {username, role, tenant_id, tenant_generation, platform_admin}。
 
     - 角色实时取自 tenant_members（改角色即时生效）
+    - **A51-02**：成员资格 + 角色 + ``Tenant.created_at/contract_secret_id``
+      收成**一条 outer JOIN**。不能先查成员再单独读 Tenant——两条语句之间
+      仍可插入 delete+同名 create，旧请求随后会以「新租户成员」身份通过，
+      或把新世代捕获成自己的。单条语句给出同一快照里的成员关系与世代。
     - active_tenant 的成员资格已失效时自动清空；普通用户随后无角色
       （#254 fail-closed，不回落 ``users.role``），需重新登录/重新授权
     - active_tenant 已停用且非平台管理员 → 抛 TenantDisabledError（#27，鉴权层
@@ -246,17 +258,44 @@ def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
             session.commit()
             return None
         active_tenant = row.active_tenant
-        role = _resolve_role(session, user, active_tenant)
-        if active_tenant and not _is_member(session, row.username, active_tenant):
+        role = None
+        tenant_generation = None
+        tenant_status = None
+        membership = None
+        if active_tenant:
+            membership = session.execute(
+                select(
+                    TenantMember.role,
+                    Tenant.created_at,
+                    Tenant.contract_secret_id,
+                    Tenant.status,
+                )
+                .select_from(TenantMember)
+                .outerjoin(Tenant, Tenant.id == TenantMember.tenant_id)
+                .where(
+                    TenantMember.username == row.username,
+                    TenantMember.tenant_id == active_tenant,
+                )
+            ).first()
+        if membership is not None:
+            role = membership[0]
+            if membership[2] is not None:
+                tenant_generation = (membership[1], membership[2])
+            tenant_status = membership[3]
+        elif user.platform_admin:
+            role = "admin"
+        if active_tenant and membership is None:
             # 成员资格被移除：清空活跃租户；普通用户随之无角色（#254）
             row.active_tenant = None
             active_tenant = None
-            role = _resolve_role(session, user, None)
+            tenant_generation = None
+            role = "admin" if user.platform_admin else None
             session.commit()
         if (
             active_tenant
             and not user.platform_admin
-            and not _tenant_active(session, active_tenant)
+            and tenant_status is not None
+            and tenant_status != "active"
         ):
             # 租户已停用：已签发会话立即失效（不落库、不改行，鉴权层转 403）
             raise TenantDisabledError(f"租户已停用: {active_tenant}")
@@ -264,8 +303,37 @@ def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
             "username": row.username,
             "role": role,
             "tenant_id": active_tenant,
+            "tenant_generation": tenant_generation,
             "platform_admin": bool(user.platform_admin),
         }
+
+
+def tenant_table_initialized(store) -> bool:
+    """租户表是否已 bootstrap（至少一行）；空表 = 内嵌/测试挂载。
+
+    生产 ``lifespan`` 先 ``ensure_tenant_bootstrap`` 再挂路由，因此空表只可能
+    出现在直接装配 router 的测试/内嵌场景。认证侧据此区分「已初始化但租户
+    不存在」（拒绝）与「未初始化表」（跳过世代捕获并 WARNING）。
+    """
+    with store._session_local() as session:
+        return session.query(Tenant).count() > 0
+
+
+def read_tenant_generation(store, tenant_id: str) -> Optional[Tuple[Any, Any]]:
+    """只读一次租户行并返回世代令牌（平台身份带 X-Tenant-ID 时用）。
+
+    认证路径不持写锁：SQLite 快照读即可，PG 也不加 ``FOR UPDATE``（读侧不
+    参与删除串行化；写路径自己的 flush 后复核才需要锁）。
+    """
+    with store._session_local() as session:
+        row = session.execute(
+            select(Tenant.created_at, Tenant.contract_secret_id).where(
+                Tenant.id == tenant_id
+            )
+        ).first()
+        if row is None or row[1] is None:
+            return None
+        return (row[0], row[1])
 
 
 def switch_tenant(store, token: str, tenant_id: str) -> Optional[Dict[str, Any]]:
@@ -481,7 +549,12 @@ def add_member(store, tenant_id: str, username: str, role: str) -> None:
         if tenant is None:
             raise UserError(f"租户不存在: {tenant_id}")
         # 记住本次校验通过的租户世代；同名重建会换 token（A50-02 ABA）。
-        tenant_token = (tenant.created_at, tenant.contract_secret_id)
+        # A51-02：请求级绑定优先——认证时的世代才是本请求的身份；服务首次
+        # 读若发生在 delete+create 之后，不能把它捕获成「自己的」世代。
+        tenant_token = (
+            expected_tenant_generation(tenant_id)
+            or (tenant.created_at, tenant.contract_secret_id)
+        )
         if session.scalars(
             select(User).where(User.username == username)
         ).first() is None:
@@ -514,6 +587,9 @@ def set_member_role(store, tenant_id: str, username: str, role: str) -> None:
         if row is None:
             raise UserError(f"{username} 不是租户 {tenant_id} 的成员")
         row.role = role
+        # A51-02：写（flush 取得串行化点）之后、同一事务内复核请求世代。
+        session.flush()
+        assert_tenant_generation(session, tenant_id)
         session.commit()
     _revoke_user_sessions(store, username)
 
@@ -529,6 +605,8 @@ def remove_member(store, tenant_id: str, username: str) -> bool:
         if row is None:
             return False
         session.delete(row)
+        session.flush()
+        assert_tenant_generation(session, tenant_id)
         session.commit()
     _revoke_user_sessions(store, username)
     return True
