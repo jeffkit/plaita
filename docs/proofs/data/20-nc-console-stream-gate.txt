@@ -1,0 +1,68 @@
+FF.....                                                                  [100%]
+=================================== FAILURES ===================================
+_________________ test_tenant_editor_denied_before_agent_start _________________
+
+client = <starlette.testclient.TestClient object at 0x10928a120>
+generator_calls = [('生成一个回声流程', {'tenant_id': 'tenant-a'})]
+
+    def test_tenant_editor_denied_before_agent_start(client, generator_calls):
+        """负向：租户 editor → 403 具名拒绝，agent 生成器零调用。"""
+        headers = _auth(_login(client, "editor1", EDITOR_PW))
+    
+        r = _post_stream(client, headers)
+    
+>       assert r.status_code == 403, r.text
+E       AssertionError: data: {"type": "finished", "ok": true, "source": "@flow(\"x\")", "ir": null}
+E         
+E         
+E       assert 200 == 403
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py:123: AssertionError
+_________________________ test_tenant_admin_denied_too _________________________
+
+client = <starlette.testclient.TestClient object at 0x1094a5bd0>
+generator_calls = [('生成一个回声流程', {'tenant_id': 'tenant-a'})]
+
+    def test_tenant_admin_denied_too(client, generator_calls):
+        """租户 admin 的 role 是 admin，但仍不是平台身份 → 403。"""
+        headers = _auth(_login(client, "tadmin", TADMIN_PW))
+    
+        r = _post_stream(client, headers)
+    
+>       assert r.status_code == 403, r.text
+E       AssertionError: data: {"type": "finished", "ok": true, "source": "@flow(\"x\")", "ir": null}
+E         
+E         
+E       assert 200 == 403
+E        +  where 200 = <Response [200 OK]>.status_code
+
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py:137: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt3/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py: 44 warnings
+  /Users/kong/projects/infra4agent/plaita-wt3/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_tenant_editor_denied_before_agent_start
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_tenant_admin_denied_too
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_platform_admin_allowed
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_platform_admin_tenant_header_scopes_workspace
+  /Users/kong/projects/infra4agent/plaita-wt3/plaita-console/backend/services/users_svc.py:159: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_tenant_editor_denied_before_agent_start
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_tenant_admin_denied_too
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_platform_admin_allowed
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_platform_admin_tenant_header_scopes_workspace
+  /Users/kong/projects/infra4agent/plaita-wt3/plaita-console/backend/services/users_svc.py:237: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row.expires_at < datetime.utcnow():
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_tenant_editor_denied_before_agent_start
+FAILED plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py::test_tenant_admin_denied_too
+2 failed, 5 passed, 53 warnings in 1.73s

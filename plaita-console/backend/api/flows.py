@@ -28,7 +28,7 @@ try:
         remove_flow_version_from_engine,
         sync_flow_to_engine,
     )
-    from ..auth import tenant_scope
+    from ..auth import ensure_platform_admin, require_auth, tenant_scope
 except ImportError:
     from services import flow_store
     from services.engine_sync import (
@@ -36,7 +36,7 @@ except ImportError:
         remove_flow_version_from_engine,
         sync_flow_to_engine,
     )
-    from auth import tenant_scope
+    from auth import ensure_platform_admin, require_auth, tenant_scope
 
 router = APIRouter()
 
@@ -154,14 +154,25 @@ class AiGenerateRequest(BaseModel):
 
 
 @router.post("/flows/ai-generate/stream")
-def ai_generate_stream(req: AiGenerateRequest):
+def ai_generate_stream(req: AiGenerateRequest, request: Request,
+                       identity: Dict[str, Any] = Depends(require_auth)):
     """AI 生成流程（SSE）：后端作为 agent 宿主跑真实编码 Agent，事件流给前端。
 
     设计（ADR-2026-08-27 phase2）：后端不直连 LLM 端点；Agent 循环由 agentproc
     执行的编码 Agent 负责，编译校验为宿主的确定性检查，错误回喂下一轮。
+
+    pn#20：在宿主上跑编码 Agent（``--permission-mode auto``）是**平台能力**，
+    不是租户编辑功能。``require_auth`` 只保证 editor+，租户 editor/admin 都能
+    通过；这里补平台身份闸（对齐 ``/api/users`` 族）——租户角色 403 具名拒绝，
+    拒绝尝试进审计，且 agent 生成器零启动。
     """
+    ensure_platform_admin(
+        request, identity, action="flows.ai_generate.stream", resource="flow",
+    )
     if not req.prompt.strip():
         raise HTTPException(status_code=422, detail="prompt 不能为空")
+    # 平台管理员可带 X-Tenant-ID 指定工作区命名空间；无则 platform。
+    tenant_id = tenant_scope(request)
     from fastapi.responses import StreamingResponse
     try:
         from ..services import ai_flow
@@ -169,7 +180,7 @@ def ai_generate_stream(req: AiGenerateRequest):
         from services import ai_flow
 
     def event_stream():
-        for ev in ai_flow.generate_flow_events(req.prompt.strip()):
+        for ev in ai_flow.generate_flow_events(req.prompt.strip(), tenant_id=tenant_id):
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream",
