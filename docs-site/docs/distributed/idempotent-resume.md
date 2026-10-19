@@ -41,6 +41,11 @@ if state.status in ("completed", "error", "cancelled"):
 if state.status == "suspended" and resume_type in ("continue", "retry"):
     return  # 幂等（#33）：挂起执行只认 event/cancel/timeout 决议，
     # continue/retry 不携带推进语义，worker 侧同样短路
+if state.status == "running" and resume_type in ("event", "timeout"):
+    # #258：事件/超时决议已消费、流内已推进并落过 checkpoint（step_persist
+    # 瞬断/崩溃后重投）。worker 侧会把载体归一化为 continue 从 checkpoint
+    # 续跑；自定义入口不要直接丢弃这条消息——它是该执行唯一的重投载体。
+    return resume(execution_id, resume_type="continue")
 if state.status != "suspended":
     log.warning("unexpected status=%s", state.status)
 ```

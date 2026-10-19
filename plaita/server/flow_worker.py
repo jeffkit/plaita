@@ -1035,7 +1035,10 @@ class ResumeProtocolError(RuntimeError):
     run() 主循环按
     「消费失败」处理：消息走 ack（执行状态原样可查、事件订阅仍在，真正的
     决议路径 event/cancel/timeout 随时可入），重投只会重复命中同一守卫，
-    无意义。刻意**不是** ValueError 子类（防 poison ack 语义误伤）。
+    无意义。**例外（plaita#258）**：event/timeout 载体在 ``running`` 中间态
+    已错过挂起点（订阅已注销）时，ack 前先状态感知并归一化 ``continue``
+    重投——见 ``_handle_resume_protocol_error``；直接 ack 会丢掉唯一载体。
+    刻意**不是** ValueError 子类（防 poison ack 语义误伤）。
     """
 
     def __init__(self, message: str, execution_id: Optional[str] = None):
@@ -2895,6 +2898,44 @@ class FlowWorker:
                 _scrub_exception_text(persist_exc),
             )
 
+    @staticmethod
+    def _resume_carrier_stale_reason(state: Any, flow: Any) -> Optional[str]:
+        """event/timeout 载体是否已错过可决议的挂起点（plaita#258）。
+
+        返回 None 的两种情形：
+
+        * 盘上不是 ``status=running``——终态/挂起幂等短路与 #33 的既有语义
+          负责处置，不进本判据；
+        * ``running`` 且 ``$LAST_NODE`` 仍是 ``pending`` 的 suspending 节点——
+          事件/超时决议仍有处可落，载体仍有效。
+
+        返回非 None = 执行仍活（running），但流内已经推进过至少一个节点
+        （``$LAST_NODE`` 是非挂起节点），或挂起节点已被决议并落盘
+        （``$LAST_NODE`` 是 suspending 但 ``status != pending``）：此时事件
+        订阅已注销、resume 的决议语义用不上，继续 ack 唯一载体就是 #258 的
+        永久悬挂。调用方应把意图归一化为 ``continue``（从 checkpoint 续跑）。
+        """
+        if (getattr(state, "status", "") or "") != "running":
+            return None
+        context = getattr(state, "context", None)
+        if not isinstance(context, dict):
+            return None
+        last_node_id = context.get("$LAST_NODE")
+        if not last_node_id:
+            return None
+        node = flow.find_node_by_id(last_node_id) if flow is not None else None
+        if node is None:
+            return None
+        if getattr(node, "is_suspending", False) is True:
+            node_results = context.get("$NODE")
+            prev_state = node_results.get(last_node_id) if isinstance(node_results, dict) else None
+            if isinstance(prev_state, dict) and prev_state.get("status", "") == "pending":
+                return None
+        return (
+            f"盘上 status=running、$LAST_NODE={last_node_id!r} 不是 pending "
+            "挂起点，event/timeout 决议无处可落"
+        )
+
     def _load_and_guard_resume_state(
         self, flow_id: str, execution_id: str, resume_type: str,
         *, lease_held: bool = False,
@@ -3175,6 +3216,27 @@ class FlowWorker:
                     "（running 执行无失败节点可重跑），本次将从 checkpoint 派发后继节点",
                     execution_id,
                 )
+
+            # 陈旧 event/timeout 载体的归一化（plaita#258）：resume 在流内
+            # 推进并落过 step_persist 后，若发生瞬态 StatePersistError / 进程
+            # 崩溃，消息按 at-least-once 重投，但 resume_type 仍是 event/timeout
+            # ———而挂起订阅已在第一次 resume 时注销、$LAST_NODE 已不是 pending
+            # 挂起点。策略层会抛 ResumeGuardError（协议错误），旧 run() 分支据此
+            # ack 唯一载体 ⇒ 执行永久停在 running。这里在**取得租约并重读状态
+            # 之后**确认「执行仍活、但决议无处可落」，把本次意图改写为 continue
+            # （剩余工作就是从 checkpoint 续跑，已完成节点不重放）。租约内
+            # 复核保证：另一 worker 已推进到**新的挂起点**时 status=suspended，
+            # 不会走本分支，陈旧 resume 仍由策略层的订阅绑定守卫拒绝（#221）。
+            if resume_type in (ResumeType.EVENT, ResumeType.TIMEOUT, "event", "timeout"):
+                stale_reason = self._resume_carrier_stale_reason(state, flow)
+                if stale_reason:
+                    logger.warning(
+                        "执行 %s 的 %s resume 载体已错过挂起点（%s）；订阅早已注销、"
+                        "执行仍 running，本次归一化为 continue 从 checkpoint 续跑"
+                        "（plaita#258）",
+                        execution_id, resume_type, stale_reason,
+                    )
+                    resume_type = ResumeType.CONTINUE.value
 
             # XCLAIM 恢复路径取消检查点（设计稿 §3.1）：crash 后 cancel 消息
             # 或任一 resume 消息被重投，若取消标志在（控制面对运行中执行写的
@@ -5428,6 +5490,128 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         finally:
             reset_current_tenant(token)
 
+    def _ack_resume_protocol_error(self, task: Any, queue: Any, exc: Exception) -> None:
+        """#33 既有处置：协议错误且无推进语义 ⇒ ack 释放，不终态化。
+
+        这是 #258 修复**未命中**时的原样行为（真协议错配：suspended +
+        continue、陈旧 event 打在仍有活跃订阅的挂起点等）。保留独立方法只为
+        让上面的状态感知分支与原语义一眼可对照。
+        """
+        queue.ack(task.message_id)
+        queue.note_poison()
+        logger.warning(
+            "任务 %s resume 协议错误（执行保持原状不终态化）: %s",
+            task.message_id,
+            _scrub_url_text(exc),
+        )
+
+    def _handle_resume_protocol_error(
+        self, task: Any, queue: Any, exc: ResumeProtocolError
+    ) -> bool:
+        """``run()`` 的 ``ResumeProtocolError`` 分支：ack 前做状态感知处置（#258）。
+
+        旧逻辑无条件 ``ack`` + ``note_poison``，其注释前提是「非终态执行不需要
+        重投载体：决议路径（event/cancel/timeout resume）各有独立消息」。该前提
+        在 #258 的窗口内不成立——事件 resume 已经消费并注销订阅、流内已推进并
+        落盘（``status=running`` + ``$LAST_NODE`` 非挂起点），此后 step_persist
+        瞬断/进程崩溃让同一 event/timeout 消息重投：策略层守卫正确判协议错误，
+        但 ack 掉的是**唯一**还能推进该执行的载体 ⇒ 永久悬挂。与 #50（租约冲突
+        分支 ack 吃掉持有者已死的重试载体）同族：ack 前必须先确认执行是否还有
+        活跃载体，而不是只看「当前这条消息此刻推进不了」。
+
+        处置：
+
+        - 盘上 ``running`` 且载体已错过挂起点 ⇒ 归一化为 ``continue`` 重投一份
+          新副本（先入队、后 ack；任一步失败都**不 ack**，原消息留 pending），
+          把「事件决议」载体切换为「断点续跑」载体；
+        - 其余情况（真 #33 错配 / 终态 / suspended / 状态读不到）⇒ 原样 ack，
+          重投只会重复命中同一守卫或进 poison 循环；
+        - 状态/定义读取瞬断 ⇒ 不 ack，消息留 pending 等回收（与兜底异常分支
+          同口径：绝不能因一次读盘抖动丢掉恢复载体）。
+
+        返回 True = 已 ack（含归一化重投后 ack 原条）；False = 未 ack。
+        """
+        body = getattr(task, "body", None)
+        if not isinstance(body, dict):
+            self._ack_resume_protocol_error(task, queue, exc)
+            return True
+        resume_type = body.get("resume_type")
+        execution_id = body.get("execution_id")
+        flow_id = body.get("flow_id")
+        if resume_type not in ("event", "timeout") or not execution_id or not flow_id:
+            self._ack_resume_protocol_error(task, queue, exc)
+            return True
+
+        token = set_current_tenant(body.get("tenant_id"))
+        try:
+            # 新副本的租户必须取**读盘时**的上下文（body 缺省时 current_tenant()
+            # 才是 load 用的那个 namespace）；reset 之后再取会落回外层默认租户。
+            tenant_id = body.get("tenant_id") or current_tenant()
+            state = self.execution_storage.load_execution_state(execution_id)
+            if state is None:
+                # 状态行不存在：没有可续跑的 checkpoint；沿用旧处置
+                logger.warning(
+                    "任务 %s resume 协议错误且执行 %s 无状态行，按既有语义 ack",
+                    task.message_id, execution_id,
+                )
+                self._ack_resume_protocol_error(task, queue, exc)
+                return True
+            flow = self.get_flow_definition(
+                flow_id, getattr(state, "flow_version", None)
+            )
+            reason = self._resume_carrier_stale_reason(state, flow)
+        except Exception as state_exc:  # noqa: BLE001 — 读盘瞬断不丢载体
+            logger.warning(
+                "任务 %s（execution=%s）resume 协议错误的状态感知失败，"
+                "不 ack，消息留 pending 等回收（plaita#258）: %s",
+                task.message_id, execution_id, _scrub_exception_text(state_exc),
+            )
+            return False
+        finally:
+            reset_current_tenant(token)
+
+        if reason is None:
+            self._ack_resume_protocol_error(task, queue, exc)
+            return True
+
+        requeue_body = {
+            "type": "resume",
+            "flow_id": flow_id,
+            "execution_id": execution_id,
+            "resume_type": "continue",
+            "tenant_id": tenant_id,
+            "timestamp": datetime.now().isoformat(),
+        }
+        params = body.get("params")
+        if isinstance(params, dict) and params:
+            requeue_body["params"] = dict(params)
+        try:
+            # 先入队、后 ack（与 _requeue_retryable_failure 同款安全序）：
+            # 中间崩溃只会产生重复投递（租约串行化），绝不丢消息。
+            queue.enqueue(requeue_body)
+        except Exception as enqueue_exc:  # noqa: BLE001 — 重投失败退化为留 pending
+            logger.warning(
+                "任务 %s（execution=%s）归一化 continue 重投失败，不 ack、"
+                "消息留 pending 等回收（plaita#258）: %s",
+                task.message_id, execution_id, _scrub_exception_text(enqueue_exc),
+            )
+            return False
+        try:
+            queue.ack(task.message_id)
+        except Exception as ack_exc:  # noqa: BLE001 — ack 失败=重复投递，不致命
+            logger.warning(
+                "任务 %s（execution=%s）归一化重投后 ack 失败（将产生重复投递，"
+                "租约去重）: %s",
+                task.message_id, execution_id, _scrub_exception_text(ack_exc),
+            )
+            return True
+        logger.warning(
+            "任务 %s 的 %s resume 载体已错过挂起点（%s）；执行 %s 仍 running，"
+            "已归一化重投 continue 载体从 checkpoint 续跑（plaita#258）",
+            task.message_id, resume_type, reason, execution_id,
+        )
+        return True
+
     def run(self):
         """
         从 Redis Stream consumer group 拉取 ``start`` / ``resume`` 任务。
@@ -5725,16 +5909,17 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # resume 协议错误（#33）：执行状态与 resume_type 不匹配（如
                     # continue 打在挂起执行上）。执行**未**终态化、保持原状——
                     # 错误已可观测（状态行/日志），消息重投只会重复命中同一守卫
-                    # 且烧 delivery，ack 掉。非终态执行不需要重投载体：决议路径
-                    # （event/cancel/timeout resume）各有独立消息。
-                    queue.ack(task.message_id)
-                    queue.note_poison()
-                    acked = True
-                    logger.warning(
-                        "任务 %s resume 协议错误（执行保持原状不终态化）: %s",
-                        task.message_id,
-                        _scrub_url_text(exc),
-                    )
+                    # 且烧 delivery，ack 掉。
+                    #
+                    # plaita#258：旧注释的前提「非终态执行不需要重投载体：决议
+                    # 路径（event/cancel/timeout resume）各有独立消息」只在执行
+                    # 仍停在**可决议的挂起点**时成立。event/timeout resume 已经
+                    # 消费并注销订阅、流内又推进并落过 step_persist（status=
+                    # running、$LAST_NODE 非挂起点）后，这条消息就是唯一载体；
+                    # 直接 ack 会把执行永久留在 running。故 ack 前先做状态感知：
+                    # 仍可续跑 ⇒ 归一化重投 continue 副本；真 #33 错配/终态/
+                    # 挂起 ⇒ 原样 ack。
+                    acked = self._handle_resume_protocol_error(task, queue, exc)
                 except ValueError as exc:
                     # 畸形消息：ack 掉避免 poison pill 无限重投
                     logger.error("丢弃无效任务 %s: %s", task.message_id, _scrub_url_text(exc))
