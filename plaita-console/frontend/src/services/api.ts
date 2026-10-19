@@ -906,7 +906,7 @@ export const api = {
    * `authRedirect:false` 阻止登录期 401 把租户选择页冲掉。
    */
   async switchTenant(
-    tenantId: string,
+    tenantId: string | null,
     opts?: { token?: string; authRedirect?: boolean },
   ): Promise<{
     username?: string
@@ -916,6 +916,7 @@ export const api = {
   }> {
     return request('/auth/switch-tenant', {
       method: 'POST',
+      // A2R17-01：null = 平台管理员显式清空活跃租户（全量视角，只读）。
       body: JSON.stringify({ tenant_id: tenantId }),
       headers: opts?.token ? { Authorization: `Bearer ${opts.token}` } : undefined,
     }, { authRedirect: opts?.authRedirect })

@@ -10,7 +10,7 @@ import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse, urlsplit, urlencode
 import io
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from plaita.node.basic import Node
 from plaita.core.errors import NodeException
@@ -119,6 +119,14 @@ def _require_http():
 HTTP_GEN_REQUEST_ERROR = 1001  # 请求生成错误
 HTTP_DO_REQUEST_ERROR = 1002   # 发送请求错误
 HTTP_NODE_EXEC_ERROR = 1003    # 节点处理逻辑错误
+
+# ---- 构造期上限（A2 r22 P1）----
+# editor 可发布 flow，worker 为多租户共享；不设上限时 1e9 级的 timeout /
+# redirects 足以让单个节点把 worker 钉住（跨租户独占）。数值取工程上远高于
+# 正常需求的量级，同时给单节点最坏耗时一个有限上界。构造期（Pydantic）
+# 拒绝，console 保存/发布返回 422，而不是等运行期才发现。
+MAX_REQUEST_TIMEOUT_SECONDS = 600.0
+MAX_REDIRECTS = 20
 
 # 响应上下文键
 RESPONSE_CTX_KEY = "RESPONSE"
@@ -1376,7 +1384,30 @@ class HTTP(Node):
             values["addressing"] = {"name": "domain"}
             
         return values
-    
+
+    # A2 r22 P1：构造期上限。放在字段 validator（而非 validate()）里，是因为
+    # Flow.validate_nodes 把 validate() 异常降级为 warning；只有 Pydantic 校验
+    # 才能让 console 保存/发布（Flow.model_validate）与运行期加载一并硬拒绝。
+    @field_validator("request_timeout")
+    @classmethod
+    def _validate_request_timeout_upper_bound(cls, value: float) -> float:
+        if value > MAX_REQUEST_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"requestTimeout 超过上限: {value} > {MAX_REQUEST_TIMEOUT_SECONDS} 秒"
+                "（单次请求含每跳重定向的总预算；防止共享 worker 被长期占用）"
+            )
+        return value
+
+    @field_validator("max_redirects")
+    @classmethod
+    def _validate_max_redirects_upper_bound(cls, value: int) -> int:
+        if value > MAX_REDIRECTS:
+            raise ValueError(
+                f"maxRedirects 超过上限: {value} > {MAX_REDIRECTS}"
+                "（重定向跟随次数；防止敌意链路把共享 worker 拖在单节点上）"
+            )
+        return value
+
     def get_type(self) -> str:
         """获取节点类型"""
         return self.node_type

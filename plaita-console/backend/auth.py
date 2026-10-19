@@ -20,7 +20,10 @@
 租户上下文（多租户）：
 - 会话用户钉死在其活跃租户（login/switch-tenant 决定），request.state.tenant_id
 - 平台管理员 / API-Key 可带 ``X-Tenant-ID`` 头指定租户；不带则 tenant_id=None
-  （平台全量视角：读跨租户，写需明确租户——由 auth.tenant_scope(required=True) 把关）
+  （平台全量视角：读跨租户，写需明确租户——由 auth.tenant_scope(required=True)
+  把关；A2R17-01 起**平台管理员会话**的 None 是显式全量视角，写路径 403
+  引导选租户，不再回退 default。API-Key/E2E 等无状态平台凭证保留 default
+  兼容。）
 - **普通用户会话无活跃租户 → fail-closed（#254）**：tenant_scope 一律 403，
   绝不把 None 解释为平台全量，写路径也不回退 default；只有可证明的平台级
   身份（platform_admin / API-Key / admin-key）才享有 None=全量的语义。
@@ -75,6 +78,11 @@ NO_ACTIVE_TENANT_DETAIL = "当前会话无活跃租户，请先切换租户或�
 #: #260：全局账号 / 全局生命周期操作的具名拒绝。租户角色（哪怕是租户
 #: admin）不是平台身份，不能借此触达平台账号或全局服务。
 PLATFORM_ADMIN_REQUIRED_DETAIL = "该操作需要平台管理员"
+
+#: A2R17-01：平台管理员「全量视角」（会话 active_tenant=None）是**只读**的。
+#: 任何租户作用域写路径都必须先选具体租户（switch-tenant 或 X-Tenant-ID），
+#: 不得静默回退 default——否则 UI 标签「全量」与服务端写入租户再次错位。
+FULL_VIEW_WRITE_REQUIRES_TENANT_DETAIL = "全量视角为只读，写操作请先选择具体租户"
 
 #: 审计 action 的资源名（按 path 前缀映射，避免把完整路径塞进 action）。
 _RESOURCE_PREFIXES = (
@@ -344,8 +352,10 @@ def tenant_scope(request: Request, *, required: bool = False) -> Optional[str]:
 
     - 读路径（required=False）：具体租户 → 该租户；可证明的平台级身份且无
       租户上下文 → None（平台全量视角，跨租户查询不过滤）
-    - 写路径（required=True）：无租户上下文的**平台级身份**（api-key /
-      未切换租户的平台管理员）回退 default 租户——保持单租户时代的
+    - 写路径（required=True）：平台管理员**会话**处于全量视角（显式
+      switch-tenant(null) 或本来无活跃租户）→ 403 具名拒绝，引导先选租户
+      （A2R17-01：全量视角只读）。无租户上下文的**无状态平台凭证**
+      （api-key / admin-key / insecure）仍回退 default，保持单租户时代的
       API-key/E2E 集成兼容。
     - **普通会话无活跃租户（#254）→ 403 具名拒绝**：读路径不回退平台全量，
       写路径不回退 default。被移出租户的 viewer/editor 重登后即落在此分支。
@@ -364,7 +374,17 @@ def tenant_scope(request: Request, *, required: bool = False) -> Optional[str]:
     if tenant:
         return tenant
     if is_platform_request(request):
-        return None if not required else DEFAULT_TENANT_ID
+        if not required:
+            return None
+        # A2R17-01：会话型平台管理员的全量视角只读；写路径必须落到具体租户。
+        # 无状态平台凭证（API-Key/E2E）没有「全量视角」这个 UI 状态，保留
+        # default 回退以免破坏既有集成。
+        if getattr(state, "auth_source", None) == "session":
+            raise HTTPException(
+                status_code=403,
+                detail=FULL_VIEW_WRITE_REQUIRES_TENANT_DETAIL,
+            )
+        return DEFAULT_TENANT_ID
     raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
 
 

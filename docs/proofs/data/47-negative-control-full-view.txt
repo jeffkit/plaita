@@ -1,0 +1,12 @@
+## A2R17-01 full-view negative control (pre-fix: source reverted, tests/contract checks kept)
+
+### backend: test_issue_a2r17_full_view.py
+FAILED plaita-console/backend/tests/console/test_issue_a2r17_full_view.py::test_platform_admin_full_view_is_cross_tenant_read
+FAILED plaita-console/backend/tests/console/test_issue_a2r17_full_view.py::test_full_view_write_is_named_rejected_then_works_after_pick
+FAILED plaita-console/backend/tests/console/test_issue_a2r17_full_view.py::test_non_platform_user_cannot_clear_active_tenant
+3 failed, 3 passed, 121 warnings in 1.71s
+
+### frontend contract: check-api-transport.mjs
+  ✗ A2R17-01：TenantSwitcher 全量视角先服务端清租户，成功后落本地: The input did not match the regular expression /await api\.switchTenant\(tenantId \|\| null\)/. Input:
+  ✗ A2R17-01：api.switchTenant 以 null 表示全量视角: The input did not match the regular expression /async switchTenant\(\s*tenantId: string \| null/. Input:
+✗ 2/24 断言失败：

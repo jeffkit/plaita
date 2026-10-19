@@ -107,7 +107,7 @@ class PollableNode(Node):
 
 `defaultValue` 接受**任意类型**——标量、字符串、对象均可，不再限定 dict。
 
-`retryTimes` 控制重试次数：在重试耗尽前不触发策略，重试全部失败后才按 `strategy` 处理。
+`retryTimes` 控制重试次数：在重试耗尽前不触发策略，重试全部失败后才按 `strategy` 处理。**上限为 10**——构造期校验，超限在保存/发布/加载时直接失败（`ValueError` 具名拒绝）。共享 worker 场景下，无上界的重试次数会让单个节点长期占用 worker。
 
 只有瞬态错误会被重试（HTTP 节点的 `NodeException` 1002/1003，含 429 限流），重试间隔为指数退避 `min(30s, 1s × 2^n)`。确定性配置错误不消耗重试次数：`NodeException` 1001（请求生成失败）与非 `NodeException` 的 `ValueError` 会立即按 `strategy` 处理（节点输出校验钩子 `_validate_output` 抛出的异常除外——它们仍按普通节点异常重试）。
 

@@ -289,25 +289,21 @@ function TenantSwitcher({ collapsed }: { collapsed: boolean }) {
   const switchTo = async (tenantId: string) => {
     if (tenantId === current || switching) return
     setSwitchError(null)
-    if (tenantId === '') {
-      // 平台管理员的「全量视角」：纯本地状态（服务端以无 X-Tenant-ID 表示）
-      // A2R17-01/B2R17-01：服务端可证明的全量语义另案裁决，不在本条施工。
-      setTenant('')
-    } else {
-      // S17-01：只有服务端切换成功才落本地；失败保持旧租户并给出可见提示，
-      // 不得 catch 后 setTenant 造成「UI 显示 B、服务端仍在 A」。
-      setSwitching(true)
-      try {
-        const res = await api.switchTenant(tenantId)
-        setTenant(tenantId, res.role)
-      } catch (e) {
-        const message = errorUserMessage(e)
-        console.warn('[tenant-switch] 切换失败，保持当前租户:', message, e)
-        setSwitchError(message)
-        return
-      } finally {
-        setSwitching(false)
-      }
+    // S17-01/A2R17-01：租户与全量视角都必须先在服务端切换成功才落本地。
+    // 全量视角以 tenant_id=null 清空会话活跃租户（服务端只读语义）；本地
+    // setTenant('') 只表示「不带 X-Tenant-ID」。失败保持旧租户并给出可见
+    // 提示，不得 catch 后 setTenant 造成「UI 显示全量、服务端仍在旧租户」。
+    setSwitching(true)
+    try {
+      const res = await api.switchTenant(tenantId || null)
+      setTenant(tenantId, res.role)
+    } catch (e) {
+      const message = errorUserMessage(e)
+      console.warn('[tenant-switch] 切换失败，保持当前租户:', message, e)
+      setSwitchError(message)
+      return
+    } finally {
+      setSwitching(false)
     }
     qc.clear()
     navigate('/')
@@ -343,6 +339,11 @@ function TenantSwitcher({ collapsed }: { collapsed: boolean }) {
             <option value={current}>{current}</option>
           )}
         </select>
+      )}
+      {!collapsed && platformAdmin && !current && (
+        <p className="mt-1.5 text-micro text-ink-muted">
+          全量视角为只读，写操作请先选择具体租户
+        </p>
       )}
       {!collapsed && switchError && (
         <p className="mt-1.5 text-caption text-status-error break-words">
