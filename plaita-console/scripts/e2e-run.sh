@@ -82,6 +82,15 @@ if ! _argus argus-init --project-path "$E2E_PROJECT" >/dev/null 2>&1; then
 fi
 
 if [[ "$NO_BUILD" -eq 0 ]]; then
+  # A59-01：Dockerfile.e2e 只从 backend/_webdist 收前端产物，工作树里的
+  # backend/webDist 已被根 .dockerignore 递归排除。本地 UI E2E 若已构建
+  # webDist，就在构建前显式暂存；API 面保持空目录（镜像内会被删掉）。
+  WEBDIST_STAGE="$E2E_PROJECT/backend/_webdist"
+  rm -rf "$WEBDIST_STAGE"
+  mkdir -p "$WEBDIST_STAGE"
+  if [[ -d "$E2E_PROJECT/backend/webDist" ]]; then
+    cp -R "$E2E_PROJECT/backend/webDist/." "$WEBDIST_STAGE/"
+  fi
   echo "[e2e-run] build..."
   BUILD_OUT="$(_argus argus-build --project-path "$E2E_PROJECT" 2>&1)"
   # argusai 的信封几乎总是 success:true，真实失败在 services[].status=failed

@@ -24,8 +24,15 @@ COPY setup.py .
 RUN pip install --no-cache-dir setuptools wheel cachetools && \
     pip install --no-cache-dir --no-build-isolation .
 
-# 复制 console backend 代码
-COPY plaita-console/backend/ ./backend/
+# 复制 console backend 运行时（A59-01）：只收窄到入口 *.py + 运行子包。
+# 整目录 COPY 会把 tests/、build/lib 旧树、webDist、本地 *.db 与
+# __pycache__ 打进镜像；.dockerignore 的递归规则只作纵深防御。
+# 新增 backend 顶层运行时目录时需同步这里。
+COPY plaita-console/backend/*.py ./backend/
+COPY plaita-console/backend/api ./backend/api
+COPY plaita-console/backend/migrations ./backend/migrations
+COPY plaita-console/backend/models ./backend/models
+COPY plaita-console/backend/services ./backend/services
 
 # 复制集群配置文件
 COPY plaita-console/cluster_config.yaml ./plaita-console/cluster_config.yaml

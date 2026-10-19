@@ -33,11 +33,22 @@ COPY setup.py .
 RUN pip install --no-cache-dir setuptools wheel cachetools && \
     pip install --no-cache-dir --no-build-isolation .
 
-# 复制 console backend 代码
-COPY plaita-console/backend/ ./backend/
+# 复制 console backend 运行时（A59-01）：只收窄到入口 *.py + 运行子包，
+# 与 Dockerfile.backend 同口径（tests/build/db/__pycache__ 不进入镜像）。
+COPY plaita-console/backend/*.py ./backend/
+COPY plaita-console/backend/api ./backend/api
+COPY plaita-console/backend/migrations ./backend/migrations
+COPY plaita-console/backend/models ./backend/models
+COPY plaita-console/backend/services ./backend/services
 
-# API 面 E2E（默认）：开发机残留的 backend/webDist（前端构建产物）会让 "/"
-# 从 JSON 健康响应变成 SPA index.html，删掉以匹配纯后端形态。
+# 前端产物只从显式暂存目录进入镜像：.dockerignore 递归排除工作树里的
+# backend/webDist（可能是旧版本/本地残留）。e2e-run.sh 与 console-e2e.yml
+# 在构建前创建 _webdist（API 面为空目录，UI 面放本次 frontend/dist）。
+# 直接 docker build 时也必须先创建该目录，否则 COPY 失败。
+COPY plaita-console/backend/_webdist/ ./backend/webDist/
+
+# API 面 E2E（默认）：空暂存目录会被拷成空 webDist，这里删掉以匹配纯后端
+# 形态（存在 webDist 会让 "/" 从 JSON 健康响应变成 SPA index.html）。
 # UI 面 E2E：KEEP_WEBDIST=1 保留前端产物，backend 直接托管 SPA（打包发布模式）。
 ARG KEEP_WEBDIST=0
 RUN if [ "$KEEP_WEBDIST" != "1" ]; then rm -rf /app/backend/webDist; fi

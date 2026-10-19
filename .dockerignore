@@ -1,9 +1,42 @@
+# Docker build context 边界（A59-01）。
+# 裸模式（tests、build、__pycache__）只锚定 context 根；子目录必须显式 **/
+# 递归，否则 plaita-console/backend/tests、本地 *.db、build/lib 旧树、
+# webDist 前端产物都会随 COPY 进镜像。这里与 plaita-console/scripts/
+# wheel_stage.py 的运行时白名单保持同一口径。
 .git
-*.pyc
-__pycache__
-node_modules
-plaita-console/frontend/node_modules
+.gitignore
 docs
+docs-site
 tests
+**/tests
+build
+**/build
+__pycache__
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.egg-info
+**/*.db
+**/*.db-journal
+**/*.sqlite3
+**/.env
+**/.env.*
+**/.plaita-credentials*
+**/.pytest_cache
 .pytest_cache
-*.egg-info
+node_modules
+**/node_modules
+.venv
+**/.venv
+venv
+**/venv
+.worktrees
+**/.worktrees
+.flowcast
+**/.flowcast
+# 本地工作区/临时产物（与根 .gitignore 同源）
+local
+**/local
+# 工作树里的 frontend 构建产物不可信（可能是旧版本/本地残留）；
+# e2e UI 构建走 backend/_webdist 显式暂存目录。
+**/webDist
