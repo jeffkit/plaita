@@ -21,10 +21,10 @@ from sqlalchemy import select
 from plaita.tenant_context import guard_tenant_write
 
 try:
-    from ..models.flow import Base, Credential, DEFAULT_TENANT_ID
+    from ..models.flow import Base, Credential, DEFAULT_TENANT_ID, Tenant
     from .flow_store import get_flow_store
 except ImportError:  # 平铺布局（cwd=backend，services 为顶层包）
-    from models.flow import Base, Credential, DEFAULT_TENANT_ID  # type: ignore
+    from models.flow import Base, Credential, DEFAULT_TENANT_ID, Tenant  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
 
 logger = logging.getLogger(__name__)
@@ -134,8 +134,15 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
         raise ValueError("凭据数据必须是非空对象")
     guard_tenant_write("credentials.save")  # #239 fail-closed
     store = get_flow_store()
-    encrypted = _encrypt(data)
     with store._session_local() as session:
+        # plaita#257：已删除 / 从未存在的租户拒绝写回。否则删除后一个迟到的
+        # save 会重新长出凭据行与旁文件（「复活 store」），重建同名租户即可
+        # 继承——删除的清理语义被单次写调用整体绕过。
+        if session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first() is None:
+            raise ValueError(
+                f"租户不存在或已删除: {tenant_id}（拒绝写入凭据）"
+            )
+        encrypted = _encrypt(data)
         row = session.scalars(
             select(Credential).where(
                 Credential.tenant_id == tenant_id, Credential.name == name

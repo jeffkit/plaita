@@ -17,6 +17,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services import credentials_svc, flow_store  # noqa: E402
+from models.flow import Tenant  # noqa: E402
 from plaita.core.parallel_executor import ThreadParallelExecutor  # noqa: E402
 from plaita.tenant_context import (  # noqa: E402
     TENANT_SOURCE_DEFAULT,
@@ -38,6 +39,16 @@ def cred_store(tmp_path, monkeypatch):
     monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", str(tmp_path / "creds.key"))
     monkeypatch.delenv("PLAITA_CREDENTIALS_KEY", raising=False)
     flow_store.init_engine(f"sqlite:///{db_file}")
+    # plaita#257：save_credential 拒绝不存在的租户；本文件用 default 与 tenant-b。
+    store = flow_store.get_flow_store()
+    with store._session_local() as session:
+        for tid in ("default", "tenant-b"):
+            session.add(Tenant(
+                id=tid, name=tid, status="active",
+                # contract_secret_id 唯一：测试租户各自一份占位值
+                contract_secret_id=f"t-{tid}", contract_secret_key="k",
+            ))
+        session.commit()
     reset_write_probe()
     yield
     reset_write_probe()

@@ -207,6 +207,11 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
     with store._session_local() as session:
         row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
         if row is None:
+            # plaita#257：旧实现先 commit 删租户行、后删凭据旁文件；unlink
+            # 失败后租户已不存在，重试只拿到 404（「租户已删、旧密钥仍可被
+            # 引擎读到」的死路）。404 路径补清扫这份残留——仍删除失败则显式
+            # 上抛，不得把「没清掉」伪装成「已不存在」。
+            _remove_tenant_credentials_export(tenant_id)
             return False
         flows = session.scalars(
             select(FlowRecord).where(FlowRecord.tenant_id == tenant_id)
@@ -228,11 +233,13 @@ def delete_tenant(store, tenant_id: str, redis_client=None) -> bool:
             session.delete(c)
         purged_credentials = len(credentials)
         session.delete(row)
+        # plaita#257：删除先落到事务（flush），凭据旁文件（含密钥）清成功
+        # 之后才 commit。失败方向 fail-safe：宁可「租户行还在而凭据不可达」
+        # （重试可继续清理），也不可「租户已删而旧密钥仍可读」。
+        session.flush()
+        credentials_export = _remove_tenant_credentials_export(tenant_id)
         session.commit()
 
-    # DB 行删除后 worker 仍会直接读取导出旁文件，必须一并清理；删除失败
-    # 显式抛出（不静默），避免「租户已删、密钥仍可读」的残留状态。
-    credentials_export = _remove_tenant_credentials_export(tenant_id)
     if purged_credentials:
         logger.info(
             "删除租户 %s：已清理 %d 条凭据及导出文件 %s",
