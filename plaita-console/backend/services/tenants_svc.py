@@ -90,6 +90,9 @@ _TENANT_STATUS_KEY = "plaita:tenant_status"             # 与 tenant_status 同�
 _TENANT_STATUS_DISABLED = "disabled"                    # tenant_is_active 拒行值
 # A50-05：共享任务队列（console 派发与 worker 消费同名，env 可覆盖）。
 _TASK_QUEUE_DEFAULT = "plaita:flow:queue"
+#: DLQ 键后缀（与 ``plaita.server.task_queue.DEFAULT_DLQ_SUFFIX`` 同值；
+#: console 在最小安装下也要能识别，不 import 引擎）。
+_DLQ_SUFFIX = ":dlq"
 
 #: 集群日志 Stream（平台级键，条目内 ``tenant_id`` 归属；A54-01）。
 _LOG_KEY_PATTERN = "plaita:logs:*"
@@ -603,6 +606,10 @@ def _tenant_queue_names(redis_client) -> List[str]:
         if not isinstance(name, str):
             return
         value = name.strip()
+        # DLQ 由 :func:`_purge_tenant_dlq` 按信封内 payload 归属清理；
+        # 混进任务队列排空只会把每个死信误报成「无法归属」。
+        if value.endswith(_DLQ_SUFFIX):
+            return
         if value and value not in names:
             names.append(value)
 
@@ -646,6 +653,60 @@ def _purge_tenant_queue(redis_client, tenant_id: str) -> int:
     total = sum(counts.values())
     if total:
         logger.info("删除租户 %s：任务队列清理 %s", tenant_id, counts)
+    return total
+
+
+def _tenant_dlq_names(redis_client) -> List[str]:
+    """删除时要排空的 DLQ 键集合（#264）。
+
+    与 :func:`_tenant_queue_names` 同一思路：worker 的 DLQ 键可以是
+    ``PLAITA_DLQ_KEY`` 覆盖值、各队列的 ``<queue>:dlq``，或历史上自定义的
+    ``*:dlq``。DLQ 是平台级键（无租户段），只按条目内 ``payload.tenant_id``
+    收窄，绝不清整键。
+    """
+    names: List[str] = []
+
+    def _add(name: Any) -> None:
+        if not isinstance(name, str):
+            return
+        value = name.strip()
+        if value and value not in names:
+            names.append(value)
+
+    _add(os.getenv("PLAITA_DLQ_KEY"))
+    for base in _tenant_queue_names(redis_client):
+        _add(f"{base}{_DLQ_SUFFIX}")
+    if redis_client is not None:
+        for key in _scan_redis_keys(redis_client, f"*{_DLQ_SUFFIX}"):
+            _add(key)
+    return names
+
+
+def _purge_tenant_dlq(redis_client, tenant_id: str) -> int:
+    """删除租户在 DLQ 中的死信（#264/A53-01）。
+
+    ``delete_tenant`` 此前只排空任务 Stream：DLQ（平台级键）不仅保留前代
+    payload，同名重建后新租户 viewer 还能按 ``payload.tenant_id`` 重新读到
+    （含 params/data），回灌后旧执行会以新租户身份真跑。清理口径与
+    :func:`_purge_tenant_queue` 一致：只删能明确归属的条目，损坏/缺
+    ``tenant_id`` 的跳过并 WARNING；任何 Redis 错误上抛（失败 loud，
+    交由调用方重试）。
+    """
+    if redis_client is None:
+        return 0
+    try:
+        from plaita.server.task_queue import purge_tenant_dlq
+    except ImportError:
+        logger.exception(
+            "删除租户 %s：无法加载 DLQ 清理器（前代死信可能留存）", tenant_id
+        )
+        raise
+    counts: Dict[str, int] = {}
+    for dlq_key in _tenant_dlq_names(redis_client):
+        counts[dlq_key] = purge_tenant_dlq(redis_client, dlq_key, tenant_id)
+    total = sum(counts.values())
+    if total:
+        logger.info("删除租户 %s：DLQ 清理 %s", tenant_id, counts)
     return total
 
 
@@ -749,11 +810,13 @@ def _purge_runtime_after_commit(
         ("redis", lambda: _purge_tenant_redis(redis_client, tenant_id)),
         # 队列必须排空：旧 start 消息会在同名重建后重新执行（A50-05）。
         ("queue", lambda: _purge_tenant_queue(redis_client, tenant_id)),
+        # #264：DLQ 是删除清理盲区——前代死信在同名重建后重新可见/可回灌。
+        ("dlq", lambda: _purge_tenant_dlq(redis_client, tenant_id)),
     )
     for label, purge in steps:
         try:
             result = purge()
-        except Exception as exc:  # noqa: BLE001 — 两步都要尝试，最后统一上抛
+        except Exception as exc:  # noqa: BLE001 — 三步都要尝试，最后统一上抛
             logger.exception(
                 "删除租户 %s：%s 运行数据清理失败（数据库删除已提交，"
                 "重试 DELETE 走 404 补清扫可继续）",
@@ -763,8 +826,8 @@ def _purge_runtime_after_commit(
             if first_error is None:
                 first_error = exc
         else:
-            if label == "queue":
-                counts["queue"] = result
+            if label in ("queue", "dlq"):
+                counts[label] = result
             else:
                 counts.update(result or {})
     return counts, first_error

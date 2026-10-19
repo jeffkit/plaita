@@ -107,6 +107,10 @@ def connect_redis(url: str) -> Redis:
     client = Redis.from_url(
         url,
         decode_responses=True,
+        # A53-11：DLQ/队列里可能出现非法 UTF-8（生产者 bug/二进制垃圾）。
+        # 严格解码会在 xrevrange 客户端层直接抛 UnicodeDecodeError，一条毒丸
+        # 让整个读面 500；replace 保留可诊断的替换字符，交给解析层容错。
+        encoding_errors="replace",
         socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
     )
     client.ping()

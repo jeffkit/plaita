@@ -14,6 +14,7 @@
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -170,7 +171,9 @@ def _dlq_payload(tenant: str, secret: str) -> dict:
                 "source_stream": "plaita:flow:queue:v2",
                 "source_id": "1-0",
                 "delivery_count": 9,
-                "dead_lettered_at": 1.0,
+                # #264：租户 DLQ 读面要求条目属于当前世代（>= 租户 created_at）；
+                # 固定 1970 时间戳会被正确判为前代证据而隐藏。
+                "dead_lettered_at": time.time(),
                 "payload": {
                     "tenant_id": tenant,
                     "flow_id": f"flow-{tenant}",

@@ -73,6 +73,7 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` | 跟随 `PLAITA_EXECUTION_STATE_TTL_DAYS`（30 天） | 执行删除墓碑 TTL（平台根 `plaita:exec_tombstone:{id}`）；`<=0` 永久 |
 | `PLAITA_TASK_MAX_AGE_SECONDS` | `2592000`（30 天） | start/resume 载体最大年龄，超龄在派发时 ack+WARNING 丢弃（墓碑 TTL 到期后的兜底）；`0` 关闭 |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
+| `PLAITA_DLQ_MAX_LEN` | `1000` | DLQ 保留条数（**有损 FIFO**：超限裁掉最旧未处理证据，最小 1；多 worker 对同一 DLQ 配置不一致时**最小者赢**）。裁剪/失败计数见 worker `/metrics` 的 `queue_dlq_trimmed_total` / `queue_dlq_trim_failures_total` |
 | `PLAITA_METRICS_PORT` | unset | worker 的 Prometheus 抓取端端口（unset/`0` = 不启动） |
 | `PLAITA_METRICS_HOST` | `0.0.0.0` | worker `/metrics` 监听地址 |
 | `PLAITA_ALERT_WEBHOOK` | unset | 死信/僵尸巡检事件的 JSON POST 出口 |
@@ -464,8 +465,10 @@ PLAITA_METRICS_PORT=9100 python -m plaita.server.flow_worker \
 
 ```json
 {"event": "dead_letter", "queue": "plaita:flow:queue:v2",
- "dlq_key": "plaita:flow:queue:v2:dlq", "message_id": "1699-0",
- "reason": "max_deliveries=5", "delivery_count": 5, "ts": 1699999999.5}
+ "dlq_key": "plaita:flow:queue:v2:dlq", "dlq_id": "1700-0",
+ "message_id": "1699-0", "reason": "max_deliveries=5",
+ "delivery_count": 5, "schema_version": 1, "dlq_length": 7,
+ "dlq_max_len": 1000, "trimmed_count": 0, "ts": 1699999999.5}
 ```
 
 发送是**有界队列 + 后台线程**的 best-effort 旁路：webhook 端慢/挂不会反压队列
@@ -554,7 +557,7 @@ redis-cli DEL plaita:execution:nofail:<execution_id>
 | 任务不消费 | group/stream 键不一致；Worker 未起 | 核对 `--queue-name` / group；看 Worker 日志 |
 | `XLEN>0` 但 `XPENDING`/`lag` 为 0 | 已 `XACK` 未 `XDEL` 的残留条目（XACK 与 XDEL 之间进程被杀），**不是**真积压 | worker 启动时与每 300s 兜底回收（`residue_swept`）；`XRANGE` 看 payload 的 `execution_id`，console 实查为终态即可确认无活干 |
 | pending 堆积 | 处理失败反复 reclaim；lease 冲突 | 查日志；调大 lease TTL；看 DLQ |
-| DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后可人工 `enqueue_task` 回灌（活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收)） |
+| DLQ 增长 | `max_deliveries` 触顶；毒丸/业务错 | `XRANGE` DLQ 查 `reason`；修业务后**必须**经 replay helper / `POST /api/queues/dlq/{dlq_id}/replay` 回灌（一次性标记 + 审计 + 源 `schema_version` 继承；无 `execution_id` 的 start 会铸造确定性 id）。裸 `enqueue_task` 绕过一次性标记，且在回滚窗口可能把超版本载体按错误语义重跑。活 worker 持租约的执行会被死信守卫跳过，见 [FlowWorker · 长步骤与消息回收](flow-worker.md#长步骤与消息回收) |
 | 反复重投，日志刷「保存执行状态失败 (…)」 | Redis 写路径瞬断/序列化失败——落盘失败已不再静默 ack（2026-10 评审修复） | 查 Redis `INFO`/延迟日志；恢复后 pending 自动重投收敛，勿人工 ack |
 | 反复重投，日志刷「挂起任务投递失败」 | 挂起服务队列 `plaita:{subtype}:queue` rpush 失败；suspended 已保留等重派 | 查对应外延服务（DelayService 等）与其队列长度；恢复后重投自动重派 |
 | 双 resume | 旧版本无 lease | 升级到含 lease 的版本；查 lease key |

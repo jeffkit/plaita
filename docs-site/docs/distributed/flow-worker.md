@@ -93,6 +93,22 @@ FlowWorker 的守卫对该标记**不克隆、不终态化**，只放行死信�
 DLQ 重放入口恢复载体。租约仍在（活 worker 正处理）时仍拒绝死信，消息留
 pending 等新 build。非版本拒收（如 `max_deliveries`）的恢复克隆语义不变。
 
+**DLQ replay 契约（A53-S2）**：人工回灌统一走 `plaita/server/dlq_replay.py`
+（console 端点 `POST /api/queues/dlq/{dlq_id}/replay`，平台管理员专属），
+不要直接 `enqueue_task`：
+
+- 以 `(dlq_key, dlq_id)` 写一次性标记（`plaita:dlq:replay:{key}:{id}`，7 天）；
+  第二次回灌返回 `already_replayed`，不发第二条消息；
+- `schema_version` **继承源信封**（缺失 = v1）；超过本 build 理解范围时在入队前
+  具名拒绝 `schema_too_new`，不制造「入队即再死信」的副本；
+- 无 `execution_id` 的 start 载体铸造确定性 id（`uuid5(dlq_key, dlq_id)`）并补
+  `dedup_key`：标记过期/force 重灌仍收敛到同一条执行；
+- 执行墓碑命中 → `execution_deleted`（不复活已删除执行）；缺 `tenant_id` 必须由
+  平台显式指定，payload 租户与显式租户冲突 → `tenant_mismatch`；
+- DLQ 原条目**不删除**；每次尝试写 `plaita:dlq:replay:audit`。保留上限
+  `PLAITA_DLQ_MAX_LEN` 是**有损 FIFO**：裁剪会丢弃未处理证据，`dlq_trimmed` /
+  `dlq_trim_failures` 指标与 WARNING 可见。
+
 **版本边界对首投与回收同判**：`_reclaim_one` 在 XCLAIM 之后、返回
 消费循环之前做与 `xreadgroup(">")` 相同的 `schema_version > max_schema_version`
 校验。消费者在 schema 检查/死信 ack 前崩溃时，同一条消息不会因「重启后走

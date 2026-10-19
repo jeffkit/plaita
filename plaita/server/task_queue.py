@@ -41,6 +41,8 @@ SCHEMA_FIELD = "schema_version"
 # C4-1：DLQ 保留条数。DLQ 是纯记录流（无消费者），不裁剪会无限增长；
 # 每次入队后 XTRIM 保留最近 N 条。env 可调（PLAITA_DLQ_MAX_LEN）。
 DEFAULT_DLQ_MAX_LEN = 1000
+# A53-04：裁剪 WARNING 限频（计数每次都加，日志每队列实例最多 60s 一条）。
+DLQ_TRIM_WARN_INTERVAL_SECONDS = 60.0
 
 
 def _dlq_max_len_from_env() -> int:
@@ -190,6 +192,98 @@ def _task_tenant_id(fields: Dict[Any, Any]) -> Optional[str]:
     if not isinstance(tenant_id, str) or not tenant_id:
         return None
     return tenant_id
+
+
+def _dlq_entry_tenant(fields: Dict[Any, Any]) -> Optional[str]:
+    """DLQ 条目的归属租户（#264）。
+
+    DLQ 信封的形状是 ``{"payload": <原任务体>, "reason": ...}``：租户在
+    **信封内的原任务体**里（``envelope["payload"]["tenant_id"]``），而
+    ``_task_tenant_id`` 读的是信封顶层，因此对 DLQ 恒返回 None。缺失/畸形
+    一律返回 None（调用方跳过并告警），绝不猜测归属。
+    """
+    raw = None
+    for key in (PAYLOAD_FIELD, PAYLOAD_FIELD.encode()):
+        if key in fields:
+            raw = fields[key]
+            break
+    if raw is None:
+        return None
+    try:
+        envelope = json.loads(_decode(raw))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    body = envelope.get("payload")
+    if not isinstance(body, dict):
+        return None
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        return None
+    return tenant_id
+
+
+def purge_tenant_dlq(
+    redis_client,
+    dlq_key: str,
+    tenant_id: str,
+    *,
+    batch_size: int = 256,
+) -> int:
+    """删除 DLQ 中归属 ``tenant_id`` 的条目（#264，A53-01）。
+
+    DLQ 是平台级 Stream（键里没有租户段），且无消费组/PEL——删除只需按
+    信封内 ``payload.tenant_id`` 收窄 ``XDEL``。无法归属（信封/payload
+    损坏、缺显式 ``tenant_id``）的条目**跳过并 WARNING**，绝不误删；
+    非 Stream 键同样跳过并 WARNING。Redis 错误原样上抛：删除清理必须
+    loud，交由调用方重试（与 ``_purge_tenant_queue`` 同口径）。
+    """
+    if not tenant_id:
+        return 0
+    batch_size = max(1, int(batch_size))
+    key_type = _decode(redis_client.type(dlq_key))
+    if key_type not in ("stream", "none"):
+        logger.warning(
+            "DLQ 清理（tenant=%s）：%s 类型为 %s 而非 Stream，跳过",
+            tenant_id, dlq_key, key_type,
+        )
+        return 0
+    if key_type == "none":
+        return 0
+    matched_ids: List[str] = []
+    unattributed = 0
+    start = "-"
+    while True:
+        entries = redis_client.xrange(
+            dlq_key, min=start, max="+", count=batch_size
+        )
+        if not entries:
+            break
+        for message_id, fields in entries:
+            owner = _dlq_entry_tenant(fields)
+            if owner is None:
+                unattributed += 1
+                continue
+            if owner == tenant_id:
+                matched_ids.append(_decode(message_id))
+        if len(entries) < batch_size:
+            break
+        start = f"({_decode(entries[-1][0])}"
+    if unattributed:
+        logger.warning(
+            "DLQ 清理（tenant=%s）：%s 中 %d 条死信无法归属（信封/payload 损坏"
+            "或缺显式 tenant_id），跳过（需人工确认）",
+            tenant_id, dlq_key, unattributed,
+        )
+    deleted = 0
+    for offset in range(0, len(matched_ids), batch_size):
+        deleted += int(
+            redis_client.xdel(dlq_key, *matched_ids[offset:offset + batch_size])
+        )
+    if deleted:
+        logger.info("DLQ 清理（tenant=%s）：%s 删除 %d 条", tenant_id, dlq_key, deleted)
+    return deleted
 
 
 def purge_tenant_tasks(
@@ -353,7 +447,13 @@ class RedisStreamTaskQueue:
             "dlq_guard_skipped": 0,
             "reclaim_lease_skipped": 0,
             "residue_swept": 0,
+            # A53-04：XTRIM 静默裁剪 / 失败都是「证据已丢」的降级，必须可观测。
+            "dlq_trimmed": 0,
+            "dlq_trim_failures": 0,
+            "dlq_ack_failures": 0,
         }
+        # 裁剪告警限频（同一队列实例 60s 一次；计数不丢，只压日志噪声）。
+        self._last_trim_warning_at = 0.0
 
     def ensure_group(self) -> None:
         try:
@@ -690,12 +790,41 @@ class RedisStreamTaskQueue:
             {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
         )
         # C4-1：DLQ 无消费者，入队后裁剪只保留最近 N 条，防无限增长。
+        # A53-04：XTRIM 的返回值此前被丢弃、异常只记 DEBUG——裁剪与失败都是
+        # 「未处理证据已丢/将无界增长」的降级，必须计数并 WARNING（AGENTS.md
+        # 「任何降级必须可观测」）。
+        trimmed = 0
         try:
-            self.redis.xtrim(self.dlq_key, maxlen=self.dlq_max_len, approximate=False)
-        except Exception as exc:
-            logger.debug("xtrim(%s, maxlen=%s) failed: %s", self.dlq_key, self.dlq_max_len, _scrub_url_text(exc))
-        self.ack(task.message_id)
+            trimmed = int(
+                self.redis.xtrim(
+                    self.dlq_key, maxlen=self.dlq_max_len, approximate=False
+                )
+                or 0
+            )
+        except Exception as exc:  # noqa: BLE001 — 裁剪失败降级：计数+WARNING
+            self._metrics["dlq_trim_failures"] += 1
+            logger.warning(
+                "xtrim(%s, maxlen=%s) failed（DLQ 无界增长）: %s",
+                self.dlq_key,
+                self.dlq_max_len,
+                _scrub_url_text(exc),
+            )
+        if trimmed:
+            self._metrics["dlq_trimmed"] += trimmed
+            now = time.time()
+            if now - self._last_trim_warning_at >= DLQ_TRIM_WARN_INTERVAL_SECONDS:
+                self._last_trim_warning_at = now
+                logger.warning(
+                    "DLQ 裁剪：%s 移除最旧 %d 条（max_len=%d）——死信证据已丢；"
+                    "调大 PLAITA_DLQ_MAX_LEN 或落保留策略",
+                    self.dlq_key,
+                    trimmed,
+                    self.dlq_max_len,
+                )
+        # A53-04：dead_lettered/错误日志/告警移到 XADD（及裁剪）之后、ack 之前。
+        # 条目此时已 durable；ack 失败不得让指标与告警漏记已落盘死信。
         self._metrics["dead_lettered"] += 1
+        dlq_length = self._dlq_length_best_effort()
         logger.error(
             "Dead-lettered task %s -> %s id=%s (%s)",
             task.message_id,
@@ -714,12 +843,41 @@ class RedisStreamTaskQueue:
                     "dlq_id": _decode(dlq_id),
                     "message_id": task.message_id,
                     "delivery_count": task.delivery_count,
+                    "schema_version": task.schema_version,
                     "reason": reason,
+                    "dlq_length": dlq_length,
+                    "dlq_max_len": self.dlq_max_len,
+                    "trimmed_count": trimmed,
                     "ts": time.time(),
                 })
             except Exception as exc:  # noqa: BLE001 - 告警旁路
                 logger.warning("dead_letter 告警钩子失败: %s", _scrub_url_text(exc))
+        try:
+            self.ack(task.message_id)
+        except Exception as exc:
+            # ack 失败：死信已 durable，但原消息仍在 PEL，重投会产生同一
+            # source_id 的重复副本（A53-04 第三条）。具名告警后再上抛，
+            # 保持存量「ack 失败可见」的控制流。
+            self._metrics["dlq_ack_failures"] += 1
+            logger.warning(
+                "dead_letter ack failed（source_ack=failed, dlq_id=%s, "
+                "message_id=%s）: %s",
+                _decode(dlq_id),
+                task.message_id,
+                _scrub_url_text(exc),
+            )
+            raise
         return _decode(dlq_id)
+
+    def _dlq_length_best_effort(self) -> Optional[int]:
+        """DLQ 当前长度（告警/审计用；读失败返回 None，不影响死信语义）。"""
+        try:
+            return int(self.redis.xlen(self.dlq_key) or 0)
+        except Exception as exc:  # noqa: BLE001 — 长度仅告警字段，读失败返回 None
+            logger.debug(
+                "xlen(%s) failed: %s", self.dlq_key, _scrub_url_text(exc)
+            )
+            return None
 
     def _dead_letter_invalid(
         self,
@@ -806,6 +964,10 @@ class RedisStreamTaskQueue:
             "stream_length": stream_len,
             "pending": pending_count,
             "dlq_length": dlq_len,
+            "dlq_max_len": self.dlq_max_len,
+            # 「刚好满」与「已丢证据」在 len==max 时不可区分；饱和标记让
+            # 控制台/告警至少能看到下一轮再死信就会裁剪（A53-05）。
+            "dlq_saturated": dlq_len >= self.dlq_max_len,
             "max_deliveries": self.max_deliveries,
             "claim_min_idle_ms": self.claim_min_idle_ms,
             **self._metrics,

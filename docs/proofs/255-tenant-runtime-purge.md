@@ -40,6 +40,13 @@
    - `plaita:subscription:data:*` 及 type/correlation/flow/node 索引、
      processed 去重记录、event_filter timeout/dedup 标记；
    - `plaita:tenant_running:*`、`plaita:tenant_quota` 字段。
+   - **共享任务队列**（A50-05/A54-09）：按消息体 `payload.tenant_id` 收窄
+     `XACK`+`XDEL`，覆盖 console 队列、worker env 队列与已存在的同族 Stream；
+   - **DLQ（#264/A53-01）**：DLQ 是平台级键，条目归属在**信封内**
+     `envelope.payload.tenant_id`（顶层没有 `tenant_id`）；删除时按该字段收窄
+     `XDEL`，畸形/不可归属条目跳过并 WARNING。读面另做纵深：租户视角要求
+     `payload.tenant_id == 当前租户` 且 `dead_lettered_at >= 租户 created_at`
+     （当前世代），前代/不可归属条目只对平台可见。
 4. **墓碑**：删除时写 `plaita:tenant_status[tenant_id] = disabled`（不再
    clear）。`tenant_is_active` 对缺失记录仍 fail-open（兼容语义不变），但
    「显式删除」不再是「缺失」——在途消息/调度被闸门拦下；同名重建

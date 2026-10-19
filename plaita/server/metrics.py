@@ -32,6 +32,8 @@ QUEUE_GAUGES: Tuple[Tuple[str, str, str], ...] = (
     ("stream_length", "queue_stream_length", "Stream 条目数（含未删除残留）"),
     ("pending", "queue_pending", "本消费组 PEL 中未 ack 的条目数"),
     ("dlq_length", "queue_dlq_length", "死信 Stream 条目数"),
+    ("dlq_max_len", "queue_dlq_max_len", "死信保留上限（进程级配置，最小者赢）"),
+    ("dlq_saturated", "queue_dlq_saturated", "死信已达到保留上限（下一条即触发裁剪）"),
     ("max_deliveries", "queue_max_deliveries", "超限进 DLQ 的投递阈值"),
     ("claim_min_idle_ms", "queue_claim_min_idle_ms", "pending 可被回收的最短空闲（毫秒）"),
 )
@@ -44,6 +46,9 @@ QUEUE_COUNTERS: Tuple[Tuple[str, str, str], ...] = (
     ("poison_acked", "queue_poison_acked_total", "本进程畸形消息丢弃数"),
     ("failed", "queue_failed_total", "本进程处理失败数"),
     ("dlq_guard_skipped", "queue_dlq_guard_skipped_total", "守卫拒绝死信、消息留 pending 数"),
+    ("dlq_trimmed", "queue_dlq_trimmed_total", "本进程 DLQ 裁剪（丢弃未处理证据）条数"),
+    ("dlq_trim_failures", "queue_dlq_trim_failures_total", "本进程 XTRIM 失败数（DLQ 无界增长）"),
+    ("dlq_ack_failures", "queue_dlq_ack_failures_total", "本进程死信后 ACK 原消息失败数"),
     ("residue_swept", "queue_residue_swept_total", "本进程回收的已 ack 未删残留数"),
     ("schema_rejected", "queue_schema_rejected_total", "信封版本过新被拒收数"),
 )

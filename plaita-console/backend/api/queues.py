@@ -3,6 +3,8 @@
 提供队列状态查询接口
 """
 import json
+import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,11 +17,17 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     from api.redis_scan import scan_keys  # type: ignore
 
 try:
-    from ..auth import tenant_scope
+    from ..auth import ensure_platform_admin, require_auth, tenant_scope
 except ImportError:  # 平铺布局（cwd=backend）运行时
-    from auth import tenant_scope  # type: ignore
+    from auth import ensure_platform_admin, require_auth, tenant_scope  # type: ignore
+
+try:
+    from plaita.server.dlq_replay import replay_dead_letter
+except ImportError:  # 最小安装（无引擎）时回灌端点返回 503
+    replay_dead_letter = None  # type: ignore
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ============ 数据模型 ============
@@ -69,6 +77,10 @@ class DlqEntry(BaseModel):
     truncated: Optional[bool] = Field(
         default=None, description="畸形 payload 是否被截断"
     )
+    tenant_id: Optional[str] = Field(
+        default=None,
+        description="payload 里显式声明的租户（缺字段/畸形为 null，不猜 default）",
+    )
 
 
 class DlqStream(BaseModel):
@@ -82,6 +94,27 @@ class DlqListResponse(BaseModel):
     """DLQ 列表响应"""
     streams: List[DlqStream]
     total: int
+
+
+class DlqReplayRequest(BaseModel):
+    """死信回灌请求（A53-S2；平台管理员专属）。"""
+    dlq_key: Optional[str] = Field(
+        default=None,
+        description="来源 DLQ 键；缺省时在已登记/已存在的 DLQ 中按条目 id 查找",
+    )
+    target_stream: Optional[str] = Field(
+        default=None,
+        description="目标任务队列；缺省为 dlq_key 去掉 :dlq 后缀",
+    )
+    force: bool = Field(
+        default=False, description="绕过 replay 幂等标记（仅平台管理员，留审计）"
+    )
+    execution_id: Optional[str] = Field(
+        default=None, description="为无 execution_id 的旧 start 载体补 id"
+    )
+    tenant_id: Optional[str] = Field(
+        default=None, description="为缺 tenant_id 的条目显式指定租户"
+    )
 
 
 # ============ 工具函数 ============
@@ -155,6 +188,13 @@ def _owned_by_tenant(data: Any, tenant: Optional[str]) -> bool:
 _DLQ_SCAN_LIMIT = 500
 
 
+def _text(value: Any) -> str:
+    """Redis 字段/键 → str；非法 UTF-8 用 replace 保留可诊断信息（A53-11）。"""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
 def _optional_int(value: Any) -> Optional[int]:
     try:
         return int(value) if value is not None else None
@@ -181,58 +221,115 @@ def _payload_shape(value: Any) -> Dict[str, Any]:
         return value
     if value is None or value == "":
         return {}
-    return {"raw": value if isinstance(value, str) else str(value)}
+    return {"raw": _text(value)}
 
 
 def _parse_dlq_entry(msg_id: Any, fields: Dict[Any, Any]) -> DlqEntry:
     """DLQ Stream 条目 → DlqEntry（envelope.payload 为原始任务负载）。
 
     解析必须**对单条毒丸容错且不抛**：该函数在租户过滤/端点之前执行，任何
-    异常都会遮蔽全部 DLQ 流与全部租户视角（A49-02）。
+    异常都会遮蔽全部 DLQ 流与全部租户视角（A49-02/A53-11）。未知形状统一下
+    降为 ``reason=parse_error:...`` 的诊断条目，而不是抛给 FastAPI。
     """
-    if isinstance(msg_id, bytes):
-        msg_id = msg_id.decode()
-    envelope: Any = None
-    raw_payload: Any = None
-    for k, v in fields.items():
-        k_str = k.decode() if isinstance(k, bytes) else k
-        if k_str == "payload":
-            raw_payload = v.decode(errors="replace") if isinstance(v, bytes) else v
-            try:
-                envelope = json.loads(raw_payload)
-            except Exception:
-                envelope = None
-            break
-    if not isinstance(envelope, dict):
-        # 整个信封不可解析 / JSON 非对象：原始串即唯一证据，按 raw 形态展示。
-        envelope = {}
-        payload = _payload_shape(raw_payload)
-    else:
-        payload = _payload_shape(envelope.get("payload"))
-    raw_fields = envelope.get("raw_fields")
-    truncated = envelope.get("truncated")
-    return DlqEntry(
-        dlq_id=msg_id,
-        reason=str(envelope.get("reason") or ""),
-        source_stream=str(envelope.get("source_stream") or ""),
-        source_id=str(envelope.get("source_id") or ""),
-        delivery_count=_optional_int(envelope.get("delivery_count")),
-        dead_lettered_at=_optional_float(envelope.get("dead_lettered_at")),
-        schema_version=_optional_int(envelope.get("schema_version")),
-        payload=payload,
-        raw_fields=raw_fields if isinstance(raw_fields, dict) else None,
-        truncated=bool(truncated) if truncated is not None else None,
-    )
+    msg_id = _text(msg_id)
+    try:
+        envelope: Any = None
+        raw_payload: Any = None
+        for k, v in fields.items():
+            if _text(k) == "payload":
+                raw_payload = _text(v)
+                try:
+                    envelope = json.loads(raw_payload)
+                except Exception:  # noqa: BLE001 — 不可解析反正走 raw 兜底
+                    envelope = None
+                break
+        if not isinstance(envelope, dict):
+            # 整个信封不可解析 / JSON 非对象：原始串即唯一证据，按 raw 形态展示。
+            envelope = {}
+            payload = _payload_shape(raw_payload)
+        else:
+            payload = _payload_shape(envelope.get("payload"))
+        raw_fields = envelope.get("raw_fields")
+        truncated = envelope.get("truncated")
+        tenant_id = payload.get("tenant_id")
+        if not isinstance(tenant_id, str) or not tenant_id:
+            tenant_id = None
+        return DlqEntry(
+            dlq_id=msg_id,
+            reason=str(envelope.get("reason") or ""),
+            source_stream=str(envelope.get("source_stream") or ""),
+            source_id=str(envelope.get("source_id") or ""),
+            delivery_count=_optional_int(envelope.get("delivery_count")),
+            dead_lettered_at=_optional_float(envelope.get("dead_lettered_at")),
+            schema_version=_optional_int(envelope.get("schema_version")),
+            payload=payload,
+            raw_fields=(
+                {_text(k): v for k, v in raw_fields.items()}
+                if isinstance(raw_fields, dict)
+                else None
+            ),
+            truncated=bool(truncated) if truncated is not None else None,
+            tenant_id=tenant_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — 单条毒丸不得遮蔽整个读面
+        logger.warning(
+            "DLQ 条目 %s 解析失败（按诊断条目返回）: %s", msg_id, exc
+        )
+        return DlqEntry(
+            dlq_id=msg_id,
+            reason=f"parse_error:{type(exc).__name__}",
+            payload={"raw": _text(fields)},
+        )
+
+
+def _dlq_entry_visible(
+    entry: DlqEntry,
+    tenant: Optional[str],
+    generation_epoch: Optional[float],
+) -> bool:
+    """租户视角的死信可见性（#264，纵深防御）。
+
+    不能只看 ``payload.tenant_id``：删除同名重建后，前代条目仍带着同一个
+    slug。判据三条同时成立才可见：
+
+    1. payload 有**显式** ``tenant_id`` 且等于当前租户——缺字段/畸形不再
+       回退 ``default``（A49-02 的 raw 包装曾把缺租户条目误归 default，
+       B53-03）；
+    2. ``dead_lettered_at`` 可解析——缺失/畸形无法证明属于当前世代；
+    3. 死信时间不早于租户当前世代起点（``tenant.created_at``）——前代死信
+       一律归平台可见，绝不归给同名重建的新租户。
+
+    ``generation_epoch`` 取不到时 fail-closed（租户视角不返回任何条目）。
+    平台视角（``tenant is None``）不看本函数。
+    """
+    if tenant is None:
+        return True
+    if entry.tenant_id != tenant:
+        return False
+    if generation_epoch is None or entry.dead_lettered_at is None:
+        return False
+    try:
+        dead_at = float(entry.dead_lettered_at)
+    except (TypeError, ValueError):
+        return False
+    if dead_at != dead_at or dead_at in (float("inf"), float("-inf")):
+        return False
+    return dead_at >= generation_epoch
 
 
 def _read_dlq_entries(
-    redis: Redis, name: str, *, count: int, tenant: Optional[str]
+    redis: Redis,
+    name: str,
+    *,
+    count: int,
+    tenant: Optional[str],
+    generation_epoch: Optional[float] = None,
 ) -> List[DlqEntry]:
     """取最近 ``count`` 条**本租户可见**死信，按时间正序返回。
 
-    平台视角等价于单次 ``XREVRANGE``；租户视角逐页回退，跳过别租户条目，
-    直到补满 count 或扫到 ``_DLQ_SCAN_LIMIT``（plaita#192：DLQ Stream 是
-    平台级的，条目 payload 里才带 tenant_id）。
+    平台视角等价于单次 ``XREVRANGE``；租户视角逐页回退，跳过别租户/前代/
+    无法归属的条目，直到补满 count 或扫到 ``_DLQ_SCAN_LIMIT``（plaita#192：
+    DLQ Stream 是平台级的，条目 payload 里才带 tenant_id）。
     """
     if count <= 0:
         return []
@@ -247,19 +344,61 @@ def _read_dlq_entries(
         for msg_id, fields in rows:
             scanned += 1
             entry = _parse_dlq_entry(msg_id, fields)
-            if tenant is not None and not _owned_by_tenant(entry.payload, tenant):
+            if not _dlq_entry_visible(entry, tenant, generation_epoch):
                 continue
             collected.append(entry)
             if len(collected) >= count:
                 break
         if len(rows) < batch:
             break
-        last_id = rows[-1][0]
-        if isinstance(last_id, bytes):
-            last_id = last_id.decode()
+        last_id = _text(rows[-1][0])
         cursor = f"({last_id}"  # 排他游标，避免同一页原地重读
     collected.reverse()
     return collected
+
+
+def _tenant_generation_epoch(
+    request: Request, tenant: Optional[str]
+) -> Optional[float]:
+    """租户当前世代起点（epoch 秒）；取不到返回 None（调用方 fail-closed）。
+
+    优先复用 ``require_auth`` 的请求快照（会话解析的
+    ``Tenant.created_at``）；未挂鉴权/平台直调时退回一次 DB 读。DB 里的
+    ``created_at`` 是 naive UTC（``datetime.utcnow``），按 UTC 折算，避免
+    部署时区把世代起点挪 8 小时。
+    """
+    if not tenant:
+        return None
+    created: Any = None
+    state = getattr(request, "state", None)
+    snapshot = getattr(state, "tenant_generation", None) if state is not None else None
+    if isinstance(snapshot, tuple) and snapshot:
+        created = snapshot[0]
+    if created is None:
+        try:
+            try:
+                from ..services import flow_store, tenants_svc
+            except ImportError:
+                from services import flow_store, tenants_svc  # type: ignore
+            store = getattr(request.app.state, "store", None)
+            if store is None:
+                store = flow_store.get_flow_store()
+            generation = tenants_svc.tenant_generation(store, tenant)
+            created = datetime.fromisoformat(generation) if generation else None
+        except Exception:  # noqa: BLE001 — 世代不可证明 ⇒ 租户视角不返回
+            logger.exception(
+                "读取租户 %s 世代失败，DLQ 租户读面按 fail-closed 处理", tenant
+            )
+            return None
+    if created is None:
+        return None
+    try:
+        if getattr(created, "tzinfo", None) is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return float(created.timestamp())
+    except (TypeError, ValueError, OSError):
+        logger.warning("租户 %s 世代时间不可解析，DLQ 租户读面 fail-closed", tenant)
+        return None
 
 
 # ============ API 端点 ============
@@ -310,7 +449,7 @@ async def list_queues(
             ))
             continue
         for key in keys:
-            key_str = key if isinstance(key, str) else key.decode()
+            key_str = _text(key)
             length = _queue_length(key_str)
             if length > 0 or _is_stream_key(key_str):
                 queues.append(QueueInfo(
@@ -363,20 +502,117 @@ async def list_dlq(
     """
     count = max(0, min(int(count), 200))
     tenant = tenant_scope(request)
+    # #264：租户视角还要求条目属于**当前世代**。取不到世代 ⇒ fail-closed
+    # （租户读面为空），绝不把前代死信归给同名重建的新租户。
+    generation_epoch = _tenant_generation_epoch(request, tenant)
     names = set(KNOWN_DLQ_KEYS)
     # `*:dlq` 通配必须有界扫（#202）：未知 DLQ 键靠 SCAN 补，只扫一页/触界即停
     names.update(_bounded_queue_keys(redis, f"*{DLQ_SUFFIX}", max_keys=_DLQ_SCAN_MAX_KEYS))
 
     streams = []
     for name in sorted(names):
-        if redis.type(name) != "stream":
+        if _text(redis.type(name)) != "stream":
             streams.append(DlqStream(name=name, length=0, entries=[]))
             continue
         length = redis.xlen(name)
-        entries = _read_dlq_entries(redis, name, count=count, tenant=tenant)
+        entries = _read_dlq_entries(
+            redis,
+            name,
+            count=count,
+            tenant=tenant,
+            generation_epoch=generation_epoch,
+        )
         streams.append(DlqStream(name=name, length=length, entries=entries))
 
     return DlqListResponse(streams=streams, total=len(streams))
+
+
+def _resolve_dlq_key(
+    redis: Redis, requested: Optional[str], dlq_id: str
+) -> Optional[str]:
+    """定位 ``dlq_id`` 所在 DLQ 键（只允许已登记/同族 ``*:dlq`` 键）。"""
+    if requested:
+        if not requested.endswith(DLQ_SUFFIX) or not _queue_key_allowed(requested):
+            return None
+        try:
+            return (
+                requested
+                if redis.xrange(requested, min=dlq_id, max=dlq_id, count=1)
+                else None
+            )
+        except Exception:  # noqa: BLE001 — 读失败按不存在处理（具名 404）
+            logger.warning("replay 定位 DLQ 条目失败（%s/%s）", requested, dlq_id)
+            return None
+    names = set(KNOWN_DLQ_KEYS)
+    names.update(
+        _bounded_queue_keys(redis, f"*{DLQ_SUFFIX}", max_keys=_DLQ_SCAN_MAX_KEYS)
+    )
+    for name in sorted(names):
+        try:
+            if _text(redis.type(name)) == "stream" and redis.xrange(
+                name, min=dlq_id, max=dlq_id, count=1
+            ):
+                return name
+        except Exception:  # noqa: BLE001 — 单个键读取失败不遮蔽其他候选
+            logger.warning("replay 定位 DLQ 键失败（%s）", name, exc_info=True)
+    return None
+
+
+@router.post("/queues/dlq/{dlq_id}/replay")
+async def replay_dlq(
+    dlq_id: str,
+    body: DlqReplayRequest,
+    request: Request,
+    redis: Redis = Depends(get_redis),
+    identity: Dict[str, Any] = Depends(require_auth),
+):
+    """幂等回灌一条死信（A53-S2，平台管理员专属）。
+
+    返回统一 ``{replayed, reason, target_message_id, execution_id,
+    tenant_id, schema_version}``；``reason`` 是具名结果（``ok`` /
+    ``already_replayed`` / ``schema_too_new`` / ``execution_deleted`` ...）。
+    DLQ 原条目**不删除**（证据保留）。
+    """
+    if replay_dead_letter is None:
+        raise HTTPException(status_code=503, detail="引擎未安装，无法回灌死信")
+    ensure_platform_admin(
+        request,
+        identity,
+        action="dlq.replay",
+        resource="queue",
+        target=dlq_id,
+    )
+    dlq_key = _resolve_dlq_key(redis, body.dlq_key, dlq_id)
+    if dlq_key is None:
+        raise HTTPException(status_code=404, detail="死信不存在或 DLQ 键未登记")
+    target_stream = (body.target_stream or "").strip() or dlq_key[: -len(DLQ_SUFFIX)]
+    if target_stream.endswith(DLQ_SUFFIX) or not _queue_key_allowed(target_stream):
+        raise HTTPException(status_code=422, detail="目标队列未登记或不是任务队列")
+    result = replay_dead_letter(
+        redis,
+        dlq_key=dlq_key,
+        dlq_id=dlq_id,
+        target_stream=target_stream,
+        actor=str(identity.get("actor") or "unknown"),
+        force=bool(body.force),
+        execution_id=body.execution_id,
+        tenant_id=body.tenant_id,
+    )
+    try:
+        try:
+            from ..services import audit as audit_svc
+        except ImportError:
+            from services import audit as audit_svc  # type: ignore
+        audit_svc.record(
+            request,
+            action="dlq.replay",
+            resource="queue",
+            resource_id=f"{dlq_key}/{dlq_id}",
+            detail=result.as_dict(),
+        )
+    except Exception:  # noqa: BLE001 — 审计失败不得改变回灌结果
+        logger.warning("DLQ replay 控制台审计失败（%s/%s）", dlq_key, dlq_id)
+    return result.as_dict()
 
 
 @router.get("/queues/{queue_name:path}", response_model=QueueDetailResponse)
@@ -406,9 +642,7 @@ async def get_queue(
     count = max(1, min(int(count), 200))
     tenant = tenant_scope(request)
 
-    key_type = redis.type(queue_name)
-    if isinstance(key_type, bytes):
-        key_type = key_type.decode()
+    key_type = _text(redis.type(queue_name))
 
     tasks = []
     if key_type == "stream":
@@ -416,33 +650,37 @@ async def get_queue(
         length = redis.xlen(queue_name)
         entries = redis.xrange(queue_name, min=start, count=count)
         for i, (msg_id, fields) in enumerate(entries):
-            if isinstance(msg_id, bytes):
-                msg_id = msg_id.decode()
+            msg_id = _text(msg_id)
             payload = None
             for k, v in fields.items():
-                k_str = k.decode() if isinstance(k, bytes) else k
-                if k_str == "payload":
-                    payload = v.decode() if isinstance(v, bytes) else v
+                if _text(k) == "payload":
+                    payload = _text(v)
                     break
             try:
                 data = json.loads(payload)
-            except Exception:
+            except Exception:  # noqa: BLE001 — 非 JSON 保留 raw 证据
                 data = {"raw": str(payload)}
             if not _owned_by_tenant(data, tenant):
                 continue
-            data = {"_msg_id": msg_id, **data}
+            # 非 dict 的 JSON（数组/标量）不能 ``**`` 展开；保持 raw 证据。
+            if isinstance(data, dict):
+                data = {"_msg_id": msg_id, **data}
+            else:
+                data = {"_msg_id": msg_id, "raw": data}
             tasks.append(QueueTask(index=i, data=data))
     elif key_type == "list":
         length = redis.llen(queue_name)
         items = redis.lrange(queue_name, start, start + count - 1)
         for i, item in enumerate(items):
             try:
-                item_str = item if isinstance(item, str) else item.decode()
+                item_str = _text(item)
                 data = json.loads(item_str)
-            except Exception:
+            except Exception:  # noqa: BLE001 — 非 JSON 保留 raw 证据
                 data = {"raw": str(item)}
             if not _owned_by_tenant(data, tenant):
                 continue
+            if not isinstance(data, dict):
+                data = {"raw": data}
             tasks.append(QueueTask(
                 index=start + i,
                 data=data

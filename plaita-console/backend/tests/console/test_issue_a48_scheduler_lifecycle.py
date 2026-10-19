@@ -322,6 +322,21 @@ def _delete_tenant_row(store, tenant_id: str) -> None:
             session.commit()
 
 
+def _delete_tenant_flows(store, tenant_id: str) -> None:
+    """清掉夹具为该租户种下的 flow（A54-06 404 补清扫的前置条件）。
+
+    ``delete_tenant`` 的 orphan 路径（租户行已不存在）在仍残留 flow 时会
+    **显式拒绝**（同名重建不得继承旧流程）。本测试要覆盖的是「租户行缺失 +
+    运行数据残留」的 #257 形态，因此必须先把 flow 归档/清除，再走 404 补清扫。
+    """
+    from models.flow import FlowRecord
+    from sqlalchemy import delete as sa_delete
+
+    with store._session_local() as session:
+        session.execute(sa_delete(FlowRecord).where(FlowRecord.tenant_id == tenant_id))
+        session.commit()
+
+
 def test_deleted_tenant_stale_snapshot_does_not_execute(store):
     """租户行被删（#257 orphan 形态，清理尚未跑到）→ 旧快照 fire 不得执行。"""
     _mk_schedule(store, "s-acme", tenant=TENANT_A)
@@ -344,6 +359,7 @@ def test_deleted_tenant_after_purge_stale_snapshot_does_not_execute(store):
     _mk_schedule(store, "s-acme", tenant=TENANT_A)
     snapshot = sched.get_schedule(store, "s-acme")
     _delete_tenant_row(store, TENANT_A)
+    _delete_tenant_flows(store, TENANT_A)
     assert tenants_svc.delete_tenant(store, TENANT_A) is False
 
     assert sched.get_schedule(store, "s-acme") is None

@@ -7,8 +7,14 @@
 配置：``PLAITA_ALERT_WEBHOOK``（worker 启动时读取）；事件体示例::
 
     {"event": "dead_letter", "queue": "plaita:flow:queue:v2",
-     "dlq_key": "...:dlq", "message_id": "1699-0", "reason": "max_deliveries=5",
-     "delivery_count": 5, "ts": 1699999999.5}
+     "dlq_key": "...:dlq", "dlq_id": "1700-0", "message_id": "1699-0",
+     "reason": "max_deliveries=5", "delivery_count": 5,
+     "schema_version": 1, "dlq_length": 7, "dlq_max_len": 1000,
+     "trimmed_count": 0, "ts": 1699999999.5}
+
+A53-04：``dlq_id``/``dlq_length``/``dlq_max_len``/``trimmed_count``/
+``schema_version`` 是死信落盘时可核对「哪一条、裁剪了几条、容量是否已饱和」
+的字段；告警不再只有一条无 id 的文本。
 """
 from __future__ import annotations
 
