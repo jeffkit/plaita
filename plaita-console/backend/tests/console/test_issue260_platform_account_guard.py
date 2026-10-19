@@ -56,11 +56,26 @@ PLATFORM_ACCOUNT_PROTECTED_DETAIL = "仅平台管理员可操作平台管理员�
 
 
 class FakeRedis:
-    """最小 Redis 替身：只实现 stop 路径用到的 keys/publish。"""
+    """最小 Redis 替身：只实现 stop 路径用到的 scan/publish。"""
 
     def __init__(self, keys=None):
         self._keys = list(keys or [])
         self.published = []
+
+    def scan(self, cursor=0, match=None, count=None):  # noqa: ARG002
+        """A2R20-02：stop 路径改走有界 SCAN（scan_keys 调 scan）。"""
+        import fnmatch
+
+        matched = [
+            key for key in self._keys
+            if match is None or fnmatch.fnmatch(
+                key.decode() if isinstance(key, bytes) else key, match
+            )
+        ]
+        start = int(cursor or 0)
+        batch = matched[start:start + (count or 10)]
+        next_cursor = start + len(batch)
+        return (0 if next_cursor >= len(matched) else next_cursor), batch
 
     def keys(self, pattern):  # noqa: ARG002 - 测试只关心是否发布 stop
         return list(self._keys)
