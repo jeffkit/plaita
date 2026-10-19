@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -49,10 +51,24 @@ _SYNTAX_RULES = """\
 """
 
 
-def _workspace() -> Path:
-    """Agent 工作区（持久，便于排查 agent 过程产物）。"""
-    ws = Path(os.environ.get("PLAITA_CONSOLE_AI_WORKSPACE",
-                             os.path.join(tempfile.gettempdir(), "plaita-console-agent-ws")))
+def _safe_path_component(value: str) -> str:
+    """租户 id → 单层目录名，杜绝 ``..`` / 分隔符逃逸工作区根。"""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip())
+    return cleaned.strip(".") or "default"
+
+
+def _workspace(tenant_id: str | None = None) -> Path:
+    """Agent 工作区：按租户 + 执行隔离（pn#20）。
+
+    历史实现让所有请求共享 ``<tmp>/plaita-console-agent-ws``：不同租户/并发
+    执行的 agent 会读到彼此留下的文件，且同一 workspace 的 run-lock 会互相
+    冲突。现在每次调用生成独立子目录 ``<root>/<tenant>/<run-id>``（持久，
+    便于排查 agent 过程产物）。
+    """
+    root = Path(os.environ.get(
+        "PLAITA_CONSOLE_AI_WORKSPACE",
+        os.path.join(tempfile.gettempdir(), "plaita-console-agent-ws")))
+    ws = root / _safe_path_component(tenant_id or "platform") / uuid.uuid4().hex[:16]
     ws.mkdir(parents=True, exist_ok=True)
     return ws
 
@@ -122,13 +138,18 @@ def _coerce_source(result_text: str, workspace: Path) -> str:
     return ""
 
 
-def generate_flow_events(requirement: str) -> Iterator[dict]:
-    """宿主生成器：yield AG-UI 风格事件 dict（路由层转 SSE）。"""
+def generate_flow_events(requirement: str, *,
+                         tenant_id: str | None = None) -> Iterator[dict]:
+    """宿主生成器：yield AG-UI 风格事件 dict（路由层转 SSE）。
+
+    ``tenant_id`` 只用于工作区命名空间（每次执行另有独立 run 目录），
+    不改变 agent 的凭据/执行语义。
+    """
     from plaita.dsl.codeflow import compile_source
 
     yield {"type": "run_started"}
 
-    workspace = _workspace()
+    workspace = _workspace(tenant_id)
 
     errors: list[str] = []
     ir: dict | None = None
