@@ -7,6 +7,10 @@ import StartFlowDialog from '../components/StartFlowDialog'
 import { ServiceHint } from '../components/ServiceHint'
 import { Page, PageHeader, Card, Button, StatusBadge, EmptyState, Table, Th, Tr, Td, TdData, ConfirmDialog } from '../components/ui'
 
+// 删除只对终态开放（A43-01）：running/suspended 的记录直接删会在途执行
+// 复活（集群档）或线程继续跑（本地档）。本地档失败终态写 failed。
+const DELETABLE_STATUSES = new Set(['completed', 'error', 'cancelled', 'failed'])
+
 export default function Executions() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -194,20 +198,22 @@ export default function Executions() {
                           <Play size={15} />
                         </button>
                       )}
-                      {/* 删除按钮 - 对所有状态显示 */}
-                      <button
-                        onClick={() => setConfirmDeleteId(exec.execution_id)}
-                        disabled={actioningId === exec.execution_id}
-                        className="p-1.5 rounded-md text-ink-muted hover:text-status-error hover:bg-status-error-dim transition-colors
-                                   disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="删除记录"
-                      >
-                        {actioningId === exec.execution_id && deleteMutation.isPending ? (
-                          <Loader2 size={15} className="animate-spin" />
-                        ) : (
-                          <Trash2 size={15} />
-                        )}
-                      </button>
+                      {/* 删除按钮 - 仅终态显示：运行中/挂起需先取消（A43-01） */}
+                      {DELETABLE_STATUSES.has(exec.status) && (
+                        <button
+                          onClick={() => setConfirmDeleteId(exec.execution_id)}
+                          disabled={actioningId === exec.execution_id}
+                          className="p-1.5 rounded-md text-ink-muted hover:text-status-error hover:bg-status-error-dim transition-colors
+                                     disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="删除记录"
+                        >
+                          {actioningId === exec.execution_id && deleteMutation.isPending ? (
+                            <Loader2 size={15} className="animate-spin" />
+                          ) : (
+                            <Trash2 size={15} />
+                          )}
+                        </button>
+                      )}
                       {/* 查看详情按钮 */}
                       <button
                         onClick={() => navigate(`/executions/${exec.execution_id}`)}

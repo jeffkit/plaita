@@ -1,0 +1,24 @@
+A43-01 / A2-r5 执行删除持久性负控（2026-10-19，wt-b2）
+探针：/tmp/a43_delete_negative_control.py <pre|post>
+
+== 修复前（仅 stash 源码 5 文件，保留新测试）==
+[cluster/pre] save_after_delete=True fence_exists=1 lease_exists=1 state_revived=True index_member=True
+[local/pre] thread_alive=True row_deleted=True logs_after_delete=2 messages=['after-delete', 'before-delete']
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_execution_delete_persistence.py::test_running_delete_without_force_is_409_and_keeps_all_keys
+FAILED tests/console/test_execution_delete_persistence.py::test_force_delete_purges_state_index_fence_lease_cancel_events
+FAILED tests/console/test_execution_delete_persistence.py::test_force_delete_tenant_namespace_revokes_tenant_fence_lease
+FAILED tests/console/test_execution_delete_persistence.py::test_terminal_delete_purges_fence_and_lease
+FAILED tests/console/test_execution_delete_persistence.py::test_fenced_delete_refuses_stale_generation
+FAILED tests/console/test_execution_delete_persistence.py::test_local_running_delete_without_force_is_409
+FAILED tests/console/test_execution_delete_persistence.py::test_local_force_delete_stops_log_growth_and_purges_logs
+FAILED tests/console/test_execution_delete_persistence.py::test_local_delete_via_api_requires_force_then_purges_logs
+FAILED tests/console/test_execution_delete_persistence.py::test_local_terminal_delete_purges_logs
+9 failed, 41 warnings in 1.28s
+
+== 修复后（当前工作树）==
+[cluster/post] save_after_delete=ExecutionLeaseError(fencing token mismatch for execution e-probe (gen=1); state write refused) fence_exists=0 lease_exists=0 state_revived=False index_member=False
+[local/post] thread_alive=True row_deleted=True logs_after_delete=0 messages=[]
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+9 passed, 45 warnings in 1.87s

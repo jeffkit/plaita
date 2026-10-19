@@ -40,6 +40,22 @@ def execution_index_key(namespace: str) -> str:
     return f"{namespace}:execution:index"
 
 
+def execution_fence_key(namespace: str, execution_id: str) -> str:
+    """fence 世代键：``{namespace}:execution:fence:{id}``。
+
+    与 ``FencedExecutionStorage`` 的 CAS 写、``RedisExecutionLease`` 的
+    ``try_acquire_fenced`` 同源；删除执行必须连同本键一起清掉，否则在途
+    worker 仍持匹配世代，下一次节点边界落盘会把状态与索引成员写回
+    （duo-a-ledger 第四十三轮 A43-01 / duo-a2-ledger 第五轮）。
+    """
+    return f"{namespace}:execution:fence:{execution_id}"
+
+
+def execution_lease_key(namespace: str, execution_id: str) -> str:
+    """resume 租约键：``{namespace}:execution:lease:{id}``（与租约前缀同源）。"""
+    return f"{namespace}:execution:lease:{execution_id}"
+
+
 def execution_index_ready_key(namespace: str) -> str:
     """索引回填就绪标记键（存量库懒回填只做一次）。"""
     return f"{namespace}:execution:index:ready"
@@ -381,13 +397,23 @@ class RedisExecutionStorage(ExecutionStorage):
             ) from e
     
     def delete_execution_state(self, execution_id: str) -> bool:
-        """删除流程执行状态（同时移除列表索引成员）"""
+        """删除流程执行状态（同时移除列表索引成员、fence 与 lease）。
+
+        **删除即吊销**（A43-01）：状态键之外还清 ``{ns}:execution:fence:{id}``
+        与 ``{ns}:execution:lease:{id}``。在途 worker 下一次 ``save`` 的世代
+        CAS 因 fence 键缺失而不匹配，以 ``ExecutionLeaseError`` 具名拒绝，
+        不会把状态与 ZSET 索引成员写回；租约同时释放，避免删除后仍有
+        执行被占用。四条删除在同一 pipeline 中提交，避免「状态已删、fence
+        仍在」的窗口。
+        """
         execution_key = self.get_namespace_key('execution', execution_id)
         _tenant_write_observability("redis.delete_execution_state", execution_id)
         try:
             pipe = self.client.pipeline()
             pipe.delete(execution_key)
             pipe.zrem(self._execution_index_key(), execution_id)
+            pipe.delete(execution_fence_key(self.namespace, execution_id))
+            pipe.delete(execution_lease_key(self.namespace, execution_id))
             pipe.execute()
             return True
         except Exception as e:
