@@ -931,6 +931,21 @@ class ServiceDispatchError(RuntimeError):
     """
 
 
+class ExecutionIdConflictError(ValueError):
+    """预铸 ``execution_id`` 已属于另一条 flow：拒绝启动，绝不覆盖盘上状态。
+
+    台账第三十一轮 V1（worker P2 批）：盘上 execution_id=X 属于 flow A 时，
+    一条 ``start_flow(flow_id=B, execution_id=X)`` 的载体（畸形/误重投/ID
+    复用）会让 start 新建 ``context={}`` 的 B running 行**覆写 X**——A 的
+    checkpoint/状态永久丢失。现在 start 载体查盘发现 flow_id 不一致即抛本
+    异常，不落任何行、不动 A 的状态。
+
+    刻意继承 ``ValueError``：run() 把 ValueError 当畸形消息 poison ack——
+    同一 execution_id 换 flow 重投永远不会自愈，重投只烧 delivery。
+    状态保留 + 具名日志是这条路径的可观测面。
+    """
+
+
 class FlowHashMismatchError(ValueError):
     """flow 定义自启动后已变更（hash 不匹配），执行无法安全续跑（波次二任务②）。
 
@@ -2455,9 +2470,10 @@ class FlowWorker:
         来源（XCLAIM 回收 / 死信重入队 / 显式重投），而不只是显式重投那条：
 
         - 盘上无行 → None（首投，行为逐字不变）；
-        - ``flow_id`` 不一致 → None（转 resume 会被 resume_flow 的流程 ID 校验
-          打成 ValueError poison ack 丢消息；保持原样 start 让不匹配在常规路径
-          暴露）；
+        - ``flow_id`` 不一致 → 抛 ``ExecutionIdConflictError``：X 属于另一条
+          flow，转 resume 会被流程 ID 校验 poison ack，保持原样 start 则会
+          用 ``context={}`` 覆写 A 的 checkpoint。两种转换都错，只能拒绝
+          （台账第三十一轮 V1）；
         - 终态（completed/error/cancelled）→ 返回状态：resume_flow 终态短路
           幂等回报现状，**不重跑**（重放会把已终态行覆写回 running）；
         - suspended → 返回状态：#33 幂等短路 + #233 挂起补派，**不重跑挂起
@@ -2483,11 +2499,17 @@ class FlowWorker:
             return None
         stored_flow_id = getattr(state, "flow_id", None)
         if stored_flow_id and stored_flow_id != flow_id:
-            logger.warning(
-                "start 载体 flow_id 与盘上行不一致（body=%r stored=%r），按首投处理",
-                flow_id, stored_flow_id,
+            logger.error(
+                "start 拒绝跨 flow 覆写 execution_id（execution_id=%s 盘上属于 "
+                "flow_id=%r，本次 start flow_id=%r）：保留原状态，消息按畸形"
+                "载体 poison ack（台账第三十一轮 V1）",
+                execution_id, stored_flow_id, flow_id,
             )
-            return None
+            raise ExecutionIdConflictError(
+                f"execution_id {execution_id} already belongs to flow "
+                f"{stored_flow_id!r}; refuse to start flow {flow_id!r} with "
+                "the same execution_id"
+            )
         status = (getattr(state, "status", "") or "").strip()
         if status in TERMINAL_EXECUTION_STATUSES:
             return state
@@ -2778,6 +2800,17 @@ class FlowWorker:
                 else:
                     self.execution_lease.release(execution_id, lease_value)
 
+        except ExecutionIdConflictError:
+            # 冲突的 start 未落任何行（查盘在落 running 行之前）。若幂等映射
+            # 是**本次**认领的，释放它——否则 7 天内同 dedup_key 会被指向
+            # 另一条 flow 的 execution_id，后续修正后的 start 也走不到这里。
+            # 原样上抛：run() 按 ValueError poison ack（换 flow 重投不会自愈）。
+            if dedup_key and locals().get("dedup_action") == "claimed":
+                self._release_start_dedup(
+                    dedup_key, mapped_execution_id or execution_id
+                )
+            raise
+
         except (NodeExecutionRetryableError, ServiceDispatchError, ExecutionLeaseError):
             # 节点级可重试失败（波次二任务①）/ 幂等命中后重入队 resume 失败
             # （波次二任务③）/ **租约被他人持有**（A′ + #23，租约覆盖整个
@@ -2981,6 +3014,21 @@ class FlowWorker:
         if state_status == "suspended" and ResumeType.coerce(resume_type) in (
             ResumeType.CONTINUE, ResumeType.RETRY,
         ):
+            # 取消意图优先于挂起幂等短路（台账第三十四轮 ④）：挂起之前写的
+            # 取消标志键（控制面在 running 时只写意图）若在此早退，消息会被
+            # ack、盘上保持 suspended、flag 仍在——独立 cancel 载体丢失时
+            # 执行带着取消意图长期挂起。命中标志即**不早退**：交给调用方
+            # 走正常路径（取租约 → 复核 → 取消终态化），与 resume 入口既有
+            # 取消检查点共用同一收口。仅在确有取消意图时取租约，#33 的
+            # 「suspended + continue 不取租约」契约对其余路径不变。
+            if self._cancel_requested(execution_id):
+                logger.warning(
+                    "执行 %s 处于 suspended 但取消标志已置位：resume_type=%s "
+                    "不按挂起幂等短路，转正常路径在租约内终态化 cancelled"
+                    "（台账第三十四轮 ④）",
+                    execution_id, resume_type,
+                )
+                return state, None
             # plaita#233：短路**不等于什么都不做**。挂起行上若留着未清的
             # 派发凭据（「落盘 suspended → 派发」窗口里派发失败/进程被杀），
             # 这条 continue/retry 重投就是唯一还在的载体——不补派的话

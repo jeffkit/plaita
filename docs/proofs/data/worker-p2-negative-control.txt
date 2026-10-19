@@ -1,0 +1,65 @@
+=== 负控①：还原「start 载体 flow_id 不一致按首投处理」 ===
+变异（plaita/server/flow_worker.py::_existing_start_checkpoint）：
+    logger.error("start 拒绝跨 flow 覆写 execution_id ...")
+    raise ExecutionIdConflictError(...)     # 修复态
+  →
+    logger.warning("start 载体 flow_id 与盘上行不一致 ...，按首投处理")
+    return None                             # 修复前：新建 context={} 行覆写 X
+
+命令：
+  python3 -m pytest tests/unit/test_worker_p2_cross_flow_and_suspended_cancel.py::TestCrossFlowExecutionIdGuard -q
+
+测试输出（节选）：
+    def test_rejected_and_original_checkpoint_preserved(self):
+        ...
+>       with pytest.raises(ExecutionIdConflictError) as excinfo:
+E       Failed: DID NOT RAISE <class '...ExecutionIdConflictError'>
+
+WARNING  plaita:flow_worker.py:2502 start 载体 flow_id 与盘上行不一致（body='fB' stored='fA'），按首投处理
+
+    def test_newly_claimed_dedup_key_is_released(self):
+        ...
+>       with pytest.raises(ExecutionIdConflictError):
+E       Failed: DID NOT RAISE <class '...ExecutionIdConflictError'>
+
+FAILED tests/unit/test_worker_p2_cross_flow_and_suspended_cancel.py::TestCrossFlowExecutionIdGuard::test_rejected_and_original_checkpoint_preserved
+FAILED tests/unit/test_worker_p2_cross_flow_and_suspended_cancel.py::TestCrossFlowExecutionIdGuard::test_newly_claimed_dedup_key_is_released
+2 failed, 2 passed in 0.95s
+
+（另 2 条通过的是「不误伤同 flow 载体转换」与「异常必须是 ValueError
+子类」——它们不依赖被还原的守卫。）
+
+=== 负控②：还原「suspended 早退前不查取消标志」 ===
+变异（plaita/server/flow_worker.py::_load_and_guard_resume_state）：
+    if self._cancel_requested(execution_id):
+        logger.warning("...转正常路径在租约内终态化 cancelled...")
+        return state, None                  # 修复态
+  →
+    （整段删除）                            # 修复前：suspended+continue/retry 直接早退
+
+命令：
+  python3 -m pytest tests/unit/test_worker_p2_cross_flow_and_suspended_cancel.py::TestSuspendedCancelEarlyReturn -q
+
+测试输出（节选）：
+    def test_cancel_flag_terminalizes_instead_of_early_return(self, resume_type):
+        ...
+>       assert out["status"] == "cancelled"
+E       AssertionError: assert 'suspended' == 'cancelled'
+E         - cancelled
+E         + suspended
+
+    def test_start_carrier_with_cancel_flag_also_terminalizes(self):
+        ...
+>       assert out["status"] == "cancelled"
+E       AssertionError: assert 'suspended' == 'cancelled'
+
+FAILED ...::test_cancel_flag_terminalizes_instead_of_early_return[continue]
+FAILED ...::test_cancel_flag_terminalizes_instead_of_early_return[retry]
+FAILED ...::test_start_carrier_with_cancel_flag_also_terminalizes
+3 failed, 1 passed in 0.75s
+
+（通过的 1 条是无取消意图的 #33 契约回归——它刻意不依赖本修复。）
+
+=== 还原修复后 ===
+  python3 -m pytest tests/unit/test_worker_p2_cross_flow_and_suspended_cancel.py tests/unit/test_issue234_start_carrier_resume.py -q
+20 passed in 0.97s

@@ -141,7 +141,11 @@ python -m plaita.server.flow_worker \
   载体（与 start 幂等命中 `_handle_start_dedup_hit` 的转换同形状，非空
   `params` 随载体透传），从 checkpoint 续跑——不从首节点整条重放、不用
   `context={}` 覆写盘上 checkpoint；盘上无行（首持久化前崩溃）、flow_id 与
-  盘上行不一致或读盘失败时才原样重投 start。重投路径不依赖 pending 回收：
+  盘上行不一致或读盘失败时才原样重投 start。**flow_id 不一致的 start 载体
+  由 `start_flow` 查盘后具名拒绝**（`ExecutionIdConflictError`，台账第三十一轮
+  V1）：同一 execution_id 已属于另一条 flow 时既不能转 resume（会被流程 ID
+  校验打成 poison ack），也不能按首投新建 `context={}` 行（会永久覆写原 flow
+  的 checkpoint）——拒绝并保持原状态，消息按畸形载体 poison ack。重投路径不依赖 pending 回收：
   消息可能已被竞争者的 `ExecutionLeaseError`
   分支 ack 释放，只留 pending 会导致重投永不发生（2026-10-09 plaita#52 实证）。
   重投失败（Redis 抖动）才退化为不 ack 留 pending；两种情况都不计 poison。
@@ -220,6 +224,14 @@ except 终态化成 error，一次重复投递就把可恢复的挂起执行永�
 由 `ResumeProtocolError` 豁免承接：**只有策略层守卫 `ResumeGuardError`** 不终态化、
 执行保持原状、消息 ack（豁免面刻意窄，见上节「判别」——节点 `resume()` 自身抛错
 仍终态化 error）。
+
+**取消意图优先（台账第三十四轮 ④）**：短路前先查取消标志键
+（`{ns}:execution:cancel:{id}`）。挂起前控制面可能已在 running 阶段写下取消
+意图；若此处照常早退，消息被 ack、盘上保持 suspended、flag 仍在——独立的
+cancel 载体一旦丢失，执行会带着取消意图长期挂起。命中 flag 时**不短路**：
+转正常路径取租约、在租约内复核并用 resume 入口既有的取消检查点终态化
+`cancelled`（保留取消点前 checkpoint）。无取消意图时「不取租约」契约不变——
+只有确需终态化写盘时才取租约。
 
 ## running 执行的 retry 与分支未命中终态化（#53） {#running-执行的-retry}
 

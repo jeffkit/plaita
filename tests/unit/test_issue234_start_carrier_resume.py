@@ -37,7 +37,7 @@ pytest.importorskip("redis")
 
 import fakeredis
 
-from plaita.server.flow_worker import RedisFlowWorker
+from plaita.server.flow_worker import ExecutionIdConflictError, RedisFlowWorker
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
 
@@ -223,18 +223,27 @@ class TestFirstDeliveryUnchanged:
         assert "saved_context" not in captured["kwargs"]
         assert captured["execution_id"] == EXEC
 
-    def test_flow_id_mismatch_falls_back_to_fresh_start(self):
-        """盘上 flow_id 不一致：不转 resume（那会被流程ID校验打成 poison ack）。"""
+    def test_flow_id_mismatch_is_rejected_without_overwrite(self):
+        """盘上 flow_id 不一致：拒绝启动（第三十一轮 V1），不建新行/不覆写 A。
+
+        旧行为按首投处理——``context={}`` 的 B running 行覆写 X，A 的
+        checkpoint 永久丢失。现在必须具名拒绝且 A 原样保留。
+        """
         worker, storage = _worker()
         _seed(storage, status="running", flow_id="other-flow")
         patcher, FE, captured = _capture_run(worker, storage)
         try:
-            worker.start_flow("f1", {}, version="1", execution_id=EXEC)
+            with pytest.raises(ExecutionIdConflictError) as excinfo:
+                worker.start_flow("f1", {}, version="1", execution_id=EXEC)
         finally:
             patcher.stop()
 
-        assert "saved_context" not in captured["kwargs"]
-        assert FE.return_value.run_distributed.call_count == 1
+        assert isinstance(excinfo.value, ValueError)
+        FE.return_value.run_distributed.assert_not_called()
+        state = storage.load_execution_state(EXEC)
+        assert state.flow_id == "other-flow", "A 的 flow_id 不得被 B 覆写"
+        assert state.status == "running"
+        assert state.context == CHECKPOINT, "A 的 checkpoint 不得被 context={} 覆写"
 
     def test_no_existing_row_created_at_start(self):
         """首投仍先落 running 行（P0 可见性契约不退化）。"""
