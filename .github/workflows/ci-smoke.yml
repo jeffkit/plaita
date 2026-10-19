@@ -6,6 +6,12 @@ name: CI Smoke (熔断定检)
 #  - 自动提单：定位到肇事 merge 即开 issue（含二分表），link 回 landing-gate 约定
 #
 # 约定：docs/landing-and-acceptance.md §1（熔断）+ 仓内 issue #182。
+#
+# 红/绿契约（A60-02）：冒烟红 = 本 job 红。三个步骤都不得吞退出码：
+#   1) Smoke main 显式 exit pytest rc；
+#   2) bisect 用 pipefail + 显式 rc（tee 不能把红洗绿）；
+#   3) 提单失败（含 403）显式红——除非确实无权写 issue，此时至少 artifact 留证。
+# 后续步骤用 always() 保证红路径仍跑；bisect.log / issue-body.md 始终上传。
 
 on:
   schedule:
@@ -15,6 +21,10 @@ on:
 concurrency:
   group: ci-smoke
   cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write            # B59-07：默认 GITHUB_TOKEN 只读，gh issue create 必 403
 
 jobs:
   smoke:
@@ -30,7 +40,7 @@ jobs:
     steps:
       - name: Install git + nodejs + redis-server
         run: apt-get update -q && apt-get install -yq git nodejs redis-server && git --version && node --version
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0          # 二分需要全历史
       - name: Start Redis (127.0.0.1:6379)
@@ -45,32 +55,45 @@ jobs:
       - name: Smoke main
         id: smoke
         run: |
-          chmod +x scripts/smoke-bisect.sh
-          if python -m pytest tests/integration/test_layering.py tests/e2e/test_success_criteria.py \
+          set -uo pipefail
+          rc=0
+          python -m pytest tests/integration/test_layering.py tests/e2e/test_success_criteria.py \
                tests/unit/test_expression_provenance_perf.py tests/unit/test_no_silent_swallow.py \
-               -q -p no:randomly --no-header --timeout=300 --timeout-method=thread; then
+               -q -p no:randomly --no-header --timeout=300 --timeout-method=thread || rc=$?
+          if [ "$rc" -eq 0 ]; then
             echo "conclusion=green" >> "$GITHUB_OUTPUT"
           else
             echo "conclusion=red" >> "$GITHUB_OUTPUT"
+            echo "::error::定检冒烟红（pytest rc=$rc）——继续二分/提单，本 step 以红收尾"
           fi
+          exit "$rc"
 
       - name: Bisect the day's merges (on red)
-        if: steps.smoke.outputs.conclusion == 'red'
+        if: always() && steps.smoke.outputs.conclusion == 'red'
         id: bisect
         run: |
+          set -uo pipefail
           chmod +x scripts/smoke-bisect.sh
+          rc=0
           ./scripts/smoke-bisect.sh "24 hours ago" \
             python -m pytest tests/integration/test_layering.py tests/e2e/test_success_criteria.py \
               tests/unit/test_expression_provenance_perf.py tests/unit/test_no_silent_swallow.py \
               -q -p no:randomly --no-header --timeout=300 --timeout-method=thread \
-            | tee bisect.log
-          echo "bisect_log<<EOF" >> "$GITHUB_OUTPUT"
-          echo "bisect.log" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+            | tee bisect.log || rc=$?
+          {
+            echo "bisect_log<<EOF"
+            echo "bisect.log"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::二分腿红（smoke-bisect rc=$rc）——日志见 bisect.log / artifact"
+          fi
+          exit "$rc"
 
       - name: File issue (on located culprit or unexplained red)
-        if: steps.smoke.outputs.conclusion == 'red'
+        if: always() && steps.smoke.outputs.conclusion == 'red'
         run: |
+          set -uo pipefail
           {
             echo "## 🔴 熔断定检冒烟红（自动提单）"
             echo
@@ -83,8 +106,24 @@ jobs:
             echo
             echo "按 landing-and-acceptance §1：首红优先处置。修复者接手后关闭本单并回链修复 commit。"
           } > issue-body.md
+          rc=0
           gh issue create \
             -R jeffkit/plaita \
             -t "🔴 [auto] 熔断定检冒烟红 @ ${GITHUB_SHA:0:7}" \
             -F issue-body.md \
-            -l "ci-smoke" || echo "(提单失败——保留日志于 run artifacts)"
+            -l "ci-smoke" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::自动提单失败（rc=$rc）——检查 token 的 issues:write 权限/仓库 issue 状态；日志见 artifact"
+            exit "$rc"
+          fi
+
+      - name: Upload bisect + issue artifacts (on red)
+        if: always() && steps.smoke.outputs.conclusion == 'red'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            bisect.log
+            issue-body.md
+          if-no-files-found: ignore
+          retention-days: 14
