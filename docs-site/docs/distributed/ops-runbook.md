@@ -77,7 +77,8 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | 变量 | 默认 | 含义 |
 |------|------|------|
 | `PLAITA_REDIS_URL` / `REDIS_URL` | `redis://localhost:6379/0` | Redis |
-| `PLAITA_QUEUE_NAME` | `plaita:flow:queue` | Stream 键 |
+| `PLAITA_QUEUE_NAME` | `plaita:flow:queue` | Stream 键（worker 消费 / 事件过滤 / 调度派发的回退队列；`PLAITA_CONSOLE_TASK_QUEUE` 存在时调度改用它，见下） |
+| `PLAITA_CONSOLE_TASK_QUEUE` | 未设时 console 用默认值、调度服务回退到 `PLAITA_QUEUE_NAME`/`QUEUE_NAME` | console 生产侧队列（手动启动 / 立即触发 / 容量派发）；**cron 调度派发同样优先读它**（A56-02，与手动启动同源）。新旧并行/改名迁移时两处 env 必须一起改；两个队列名不同源会打 WARNING（消息可能落入无人消费的 Stream） |
 | `PLAITA_CONSUMER_GROUP` | `plaita-workers` | consumer group |
 | `PLAITA_CONSUMER_NAME` | instance_id / `worker-<pid>` | 本实例 consumer |
 | `PLAITA_CLAIM_MIN_IDLE_MS` | `60000` | pending 可被回收的最短空闲 |

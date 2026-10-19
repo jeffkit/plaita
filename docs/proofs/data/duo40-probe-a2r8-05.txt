@@ -1,0 +1,8 @@
+== pre-fix (663dbd0) ==
+text_len=32
+protocol_peak=22457484 bytes = 21.42 MiB
+
+== post-fix (working tree) ==
+agent 协议行超过上限，已截断：kept=3908 lines/4193284 bytes，limits=10000 lines/4194304 bytes，首个越界行=3909/4194357
+text_len=32
+protocol_peak=4392661 bytes = 4.19 MiB

@@ -34,6 +34,7 @@ created_at / updated_at / next_run_at / last_fired_at / last_enqueue_ok``
 """
 import itertools
 import json
+import os
 import threading
 import time
 import uuid
@@ -57,6 +58,47 @@ SCHEDULES_KEY = "plaita:schedules"
 SCHEDULE_FIRES_KEY = "plaita:schedule:fires:{schedule_id}"
 SCHEDULE_LOCK_KEY = "plaita:schedule:lock:{schedule_id}"
 FIRE_HISTORY_MAX = 50
+
+#: 派发队列默认名（与 FlowWorker / console 缺省一致）。
+DEFAULT_QUEUE_NAME = "plaita:flow:queue"
+
+#: 已告警过的 (console_queue, worker_queue) 组合（避免每次派发刷屏）。
+_queue_split_warned: set[tuple[str, str]] = set()
+
+
+def resolve_dispatch_queue_name(configured: Optional[str] = None) -> str:
+    """解析调度派发队列名（A56-02，调用点求值）。
+
+    console 生产侧读 ``PLAITA_CONSOLE_TASK_QUEUE``（api/executions.py 的
+    ``_task_queue_name()``），worker 消费侧读 ``PLAITA_QUEUE_NAME``/``QUEUE_NAME``。
+    调度服务此前在 ``__init__`` 固化后者（且完全忽略 console env），分裂队列/
+    滚动升级时“立即触发”与 cron 会落到不同 Stream。这里改为每次派发时解析，
+    console env 优先；显式 ``service_config["queue_name"]`` 仍然最高优先。
+
+    优先级：``service_config["queue_name"]`` > ``PLAITA_CONSOLE_TASK_QUEUE``
+    > ``PLAITA_QUEUE_NAME`` > ``QUEUE_NAME`` > 默认值。
+
+    当 console/调度侧与 worker 消费侧的 env **同时存在且不同**时打一次
+    WARNING：调度消息会写入 console 队列，而 worker 仍在消费另一个 Stream，
+    这是“200 受理但无人消费”的前兆（迁移时两个 env 必须一起改）。
+    """
+    explicit = str(configured).strip() if configured else ""
+    if explicit:
+        return explicit
+    console_queue = (os.environ.get("PLAITA_CONSOLE_TASK_QUEUE") or "").strip()
+    worker_queue = (os.environ.get("PLAITA_QUEUE_NAME")
+                    or os.environ.get("QUEUE_NAME") or "").strip()
+    if console_queue and worker_queue and console_queue != worker_queue:
+        pair = (console_queue, worker_queue)
+        if pair not in _queue_split_warned:
+            _queue_split_warned.add(pair)
+            logger.warning(
+                "调度派发队列与 worker 消费队列不同源：console/调度=%s，"
+                "worker=%s（PLAITA_CONSOLE_TASK_QUEUE vs PLAITA_QUEUE_NAME）——"
+                "消息可能落入无人消费的队列，迁移时两个 env 必须一起改",
+                console_queue, worker_queue,
+            )
+    return console_queue or worker_queue or DEFAULT_QUEUE_NAME
 
 # manual 键内序号：同一纳秒内的两次调用也必须拿到不同键（进程内单调）。
 _MANUAL_SEQ = itertools.count()
@@ -365,14 +407,13 @@ class ScheduleService(BaseExtendedService):
     """
 
     def __init__(self, event_bus, redis_client: Redis, service_config: Optional[Dict[str, Any]] = None):
-        import os
         # 注意：必须在 super().__init__() 之前就绪——基类构造期间会调用
         # _get_registry_metadata() 读取这些属性
         cfg = service_config or {}
-        self.queue_name = (
-            cfg.get("queue_name")
-            or os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", "plaita:flow:queue"))
-        )
+        # A56-02：显式配置最高优先；env 在**每次派发**时解析（见
+        # resolve_dispatch_queue_name），不在构造期固化。
+        self._explicit_queue_name = str(cfg.get("queue_name") or "").strip() or None
+        self.queue_name = resolve_dispatch_queue_name(self._explicit_queue_name)
         self.check_interval = float(cfg.get("check_interval") or os.environ.get("PLAITA_CHECK_INTERVAL", "1"))
         self._loop_thread: Optional[threading.Thread] = None
 
@@ -386,6 +427,8 @@ class ScheduleService(BaseExtendedService):
         return "schedule_service"
 
     def _get_registry_metadata(self) -> Dict[str, Any]:
+        # 注册/心跳时刷新：env 可能在进程启动后改动（滚动升级按序改 env）
+        self.queue_name = resolve_dispatch_queue_name(self._explicit_queue_name)
         return {
             "queue_name": self.queue_name,
             "check_interval": self.check_interval,
@@ -483,7 +526,9 @@ class ScheduleService(BaseExtendedService):
 
         # due_at 显式传本次判定用的到期时点：幂等键必须锚在 due 上，而不是
         # 触发墙钟（见 fire_schedule / 模块 docstring）。
+        queue_name = resolve_dispatch_queue_name(self._explicit_queue_name)
+        self.queue_name = queue_name
         fire_schedule(
-            self._redis_client, schedule, self.queue_name,
+            self._redis_client, schedule, queue_name,
             trigger_kind="cron", due_at=next_run_at,
         )

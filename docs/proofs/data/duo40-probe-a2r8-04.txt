@@ -1,0 +1,7 @@
+== pre-fix (663dbd0) ==
+limit error: observed_rows=1 observed_bytes=131096
+peak=33905971 bytes = 32.335 MiB = 33111.3x budget
+
+== post-fix (working tree) ==
+limit error: observed_rows=1 observed_bytes=131096
+peak=453737 bytes = 0.433 MiB = 443.1x budget

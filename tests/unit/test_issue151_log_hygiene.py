@@ -284,6 +284,15 @@ _EXEMPT_ENV_NAMES: Dict[Tuple[str, str], str] = {
         "writefile jail 的**工作根路径**（`PLAITA_NODES_WORKSPACE_ROOT`）——判定表 B 类"
         "「基础设施标量/文件系统路径」；掩掉它等于删掉这条日志的全部诊断价值"
     ),
+    ("plaita/server/services/schedule_service.py", "console_queue"): (
+        "调度**派发 Stream 键名**（`PLAITA_CONSOLE_TASK_QUEUE`）——判定表 A 类"
+        "「流程/运行实体标识（跨日志可回查）」；A56-02 的分裂队列告警必须能回答"
+        "「消息进了哪个队列」，掩掉键名这条 WARNING 就失去可操作性"
+    ),
+    ("plaita/server/services/schedule_service.py", "worker_queue"): (
+        "worker **消费 Stream 键名**（`PLAITA_QUEUE_NAME`/`QUEUE_NAME`）——同上，"
+        "实体标识不是凭据值；分裂队列告警需要同时给出生产/消费两侧键名"
+    ),
 }
 
 
