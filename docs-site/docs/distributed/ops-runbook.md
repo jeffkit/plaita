@@ -79,8 +79,9 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | `PLAITA_ALLOW_UNRESTRICTED_WRITES` | unset | `=1` 关闭 writefile jail（仅单机信任部署） |
 | `PLAITA_HTTP_BLOCK_PRIVATE` | unset | `=1` 强制所有 `http` 节点屏蔽回环/内网/链路本地目标（见下） |
 | `PLAITA_HTTP_MAX_RESPONSE_BYTES` | `10485760` | `http` 节点响应体字节上限，超限报错 |
-| `PLAITA_CODE_BACKEND` | `subprocess` | worker 注册 `code` 节点时生效的沙箱后端 |
-| `PLAITA_SANDBOX_ALLOWED_BACKENDS` | `docker` ∪ 生效后端 | `code` 节点后端白名单（见下） |
+| `PLAITA_CODE_BACKEND` | `subprocess` | worker 注册 `code` 节点时生效的沙箱后端；配置后端不可用时 **fail-closed**（见下） |
+| `PLAITA_SANDBOX_ALLOWED_BACKENDS` | `docker` ∪ 生效后端 | `code` 节点后端白名单（见下）；探测失败不会自行扩集 |
+| `PLAITA_ALLOW_SUBPROCESS_FALLBACK` | unset（关闭） | `=1` 且白名单含 `subprocess` 时，才允许配置后端不可用后降级 `subprocess`（A56-01 显式逃生开关） |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | `30` | 优雅停机等待在途任务的上限（秒）；超时放弃当前步并退出，消息留 pending 待 XCLAIM 接管 |
 | `PLAITA_WORKER_MIN_FREE_DISK_GIB` | unset（= 关闭） | claim 前的本机盘守线（GiB，#49）：低于它就不领任务、空转重探、盘回线自动恢复。应与 flow 内 preflight 节点的阈值对齐（见下） |
 | `PLAITA_WORKER_DISK_GUARD_PATH` | `.`（worker 工作目录） | 盘预检路径（`os.statvfs` 的探测点）；须落在「跑流程会写满」的那个卷上 |
@@ -180,6 +181,24 @@ PLAITA_SANDBOX_ALLOWED_BACKENDS=docker PLAITA_CODE_BACKEND=docker \
 
 未显式配置时的默认档已经挡住 `unsafe` 与 `restricted`；`subprocess` 只在它是生效
 默认后端时可用（worker 默认档即如此）。
+
+**配置后端不可用时 fail-closed（A56-01）**：worker 启动注册 `code` 节点时会探测
+`PLAITA_CODE_BACKEND` 指定的后端；`docker` 但 daemon 不可用时**具名拒绝注册并停止
+启动**（`CodeNodeRegistrationError`，日志 `event=code_node.registration_refused`），
+**不会**自动降级 `subprocess`，也**不会**把显式白名单扩集。若部署确实需要可用性
+降级，必须**同时**显式给出两个开关：
+
+```bash
+PLAITA_SANDBOX_ALLOWED_BACKENDS=docker,subprocess \
+PLAITA_CODE_BACKEND=docker \
+PLAITA_ALLOW_SUBPROCESS_FALLBACK=1 \
+  python -m plaita.server.flow_worker --redis-url redis://localhost:6379/0
+```
+
+只开 `PLAITA_ALLOW_SUBPROCESS_FALLBACK=1` 而白名单不含 `subprocess` 仍拒绝注册——
+降级目标必须已在运营者白名单内（否则一次 daemon 抖动就会让流程作者拿到新后端）。
+降级成功打 WARNING（`event=code_node.subprocess_fallback`）。默认 subprocess 档
+（不设 `PLAITA_CODE_BACKEND`）语义不变。
 
 `subprocess` 后端**不是**租户凭据隔离边界（plaita#256 / A42-06）：子进程与 worker
 同用户、文件系统不受限，所有租户共用同一把解密密钥；非 default 租户会在 spawn 前

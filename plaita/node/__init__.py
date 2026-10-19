@@ -395,6 +395,30 @@ SANDBOX_ALLOWED_LANGUAGES_ENV = "PLAITA_SANDBOX_ALLOWED_LANGUAGES"
 DEFAULT_SANDBOX_ALLOWED_BACKENDS: tuple = ("docker",)
 
 
+def operator_configured_sandbox_allowed_backends() -> tuple:
+    """运营者**显式配置**的沙箱后端白名单（不含生效默认后端）。
+
+    ``PLAITA_SANDBOX_ALLOWED_BACKENDS`` 未设置时返回
+    :data:`DEFAULT_SANDBOX_ALLOWED_BACKENDS`。与
+    :func:`resolve_sandbox_allowed_backends` 的区别：后者会把生效默认后端并入
+    结果（"默认后端必须自身可用"），因此无法回答"运营者是否显式放行了某后端"。
+    启动期降级闸门必须用本函数判断（A56-01：Docker 不可用时不得因探测失败扩集）。
+    """
+    from . import code as _code_module
+
+    raw = os.environ.get(SANDBOX_ALLOWED_BACKENDS_ENV, "").strip()
+    if not raw:
+        return tuple(DEFAULT_SANDBOX_ALLOWED_BACKENDS)
+    configured = [b.strip() for b in re.split(r"[,;:\s]+", raw) if b.strip()]
+    invalid = [b for b in configured if b not in _code_module._PYTHON_BACKENDS]
+    if invalid:
+        raise ValueError(
+            f"{SANDBOX_ALLOWED_BACKENDS_ENV}: unknown sandbox backend(s) "
+            f"{invalid}; supported: {sorted(_code_module._PYTHON_BACKENDS)}"
+        )
+    return tuple(sorted(set(configured)))
+
+
 def resolve_sandbox_allowed_backends(default_backend: Optional[str] = None,
                                      component: str = "runtime") -> tuple:
     """解析部署入口生效的沙箱后端白名单（plaita#22）。
@@ -412,17 +436,7 @@ def resolve_sandbox_allowed_backends(default_backend: Optional[str] = None,
     from . import code as _code_module
 
     raw = os.environ.get(SANDBOX_ALLOWED_BACKENDS_ENV, "").strip()
-    if raw:
-        configured = [b.strip() for b in re.split(r"[,;:\s]+", raw) if b.strip()]
-        invalid = [b for b in configured if b not in _code_module._PYTHON_BACKENDS]
-        if invalid:
-            raise ValueError(
-                f"{SANDBOX_ALLOWED_BACKENDS_ENV}: unknown sandbox backend(s) "
-                f"{invalid}; supported: {sorted(_code_module._PYTHON_BACKENDS)}"
-            )
-    else:
-        configured = list(DEFAULT_SANDBOX_ALLOWED_BACKENDS)
-
+    configured = list(operator_configured_sandbox_allowed_backends())
     effective = default_backend or _code_module._DEFAULT_SANDBOX_BACKEND
     allowed = tuple(sorted(set(configured) | {effective}))
 

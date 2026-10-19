@@ -552,7 +552,9 @@ Redis 后端的 `delete_execution_state` 是**删除即吊销**：同一 pipelin
   （`PLAITA_SANDBOX_ALLOWED_BACKENDS`，未配置则 `docker` ∪ 生效后端；生效后端取
   `PLAITA_CODE_BACKEND`，默认 `subprocess`）。流程 JSON 声明的 `sandbox_backend`
   落在白名单外即**解析期拒绝**——否则流程作者可逐节点把后端降级为 `unsafe`
-  （进程内 raw `exec`，宿主任意代码执行）。见
+  （进程内 raw `exec`，宿主任意代码执行）。配置后端不可用时**具名拒绝注册并停止
+  启动**（A56-01 fail-closed），不自动降级、不扩白名单；需要可用性降级须显式设置
+  `PLAITA_ALLOW_SUBPROCESS_FALLBACK=1` 且白名单含 `subprocess`。见
   [运维 Runbook · code 沙箱后端白名单](ops-runbook.md#code-沙箱后端白名单)。
 - **code 语言白名单（plaita#29）**：worker 同时施加语言白名单
   （`PLAITA_SANDBOX_ALLOWED_LANGUAGES`，未配置则只放行 `python`）。`language: "js"`
