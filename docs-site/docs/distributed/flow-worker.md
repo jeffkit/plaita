@@ -15,7 +15,7 @@
 | 挂起 / 结束 / 出错 | **立即** `save_execution_state`；返回 False（Redis 后端吞异常的失败形态）即抛 `StatePersistError`，消息**不** ack 走重投 | 落盘失败不再静默成僵尸执行（2026-10 评审修复；start 路径此前已检查，其余调用点统一收口 `_persist_state_or_raise`） |
 | 挂起服务任务派发 | `rpush` 到 `plaita:{subtype}:queue` 失败（有 redis 时）抛 `ServiceDispatchError`；suspended 状态保留、消息重投后重新执行挂起节点再派发 | 重投会重复注册订阅——EventFilter 终态 GC 只回收终态，孤儿订阅留到 TTL 过期（可接受） |
 | 并发 start / resume | Redis `SET NX EX` lease（`plaita.server.execution_lease`） | 同一 `execution_id` 最多一个推进者——start 与 resume 同一套租约：start 从落 running 行前 acquire、处理结束 finally 释放，因此长任务的 start 消息被 XCLAIM 重派后，重派者拿不到租约、消息被 ack 释放（#23）。抢租约失败的任务**不**烧 delivery（ack 释放）。resume 的终态/挂起幂等短路在租约前（#33），但**取得租约后必重读状态并重跑前置判定**（#241）：`load→acquire` 窗口内另一 worker 若已终态化并释放，本 worker 拿到的虽是新一代租约，也会以盘上状态为准拒绝推进，不用旧快照重跑 |
-| 租户状态闸（#27） | 派发前查 `plaita:tenant_status`（HASH，console 发布/启动回填）；停用租户的 start/resume **直接 ack 丢弃**（不执行、不留 pending） | 「停用租户」对运行面生效：已入队的调度消息、挂起执行的 resume 不再推进。缺失记录 = active（fail-open），跨 Redis 部署闸门不生效——见 [运维 Runbook](ops-runbook.md#停用租户的跨进程生效27) |
+| 租户状态闸（#27） | 派发前查 `plaita:tenant_status`（HASH，console 发布/启动回填）；停用租户的 start/resume **直接 ack 丢弃**（不执行、不留 pending）。**删除租户**（A50-05）额外按消息体显式 `tenant_id` 清共享队列（含各消费组 `XACK`，只 XDEL 会留 PEL 幽灵）；缺 `tenant_id` 的历史/平台消息不删（无法归属） | 「停用租户」对运行面生效：已入队的调度消息、挂起执行的 resume 不再推进。删除是同名重建前的排空点——墓碑翻回 active 后旧 start 不得重放。缺失记录 = active（fail-open），跨 Redis 部署闸门不生效——见 [运维 Runbook](ops-runbook.md#停用租户的跨进程生效27) |
 | 控制面 | Registry / Control / Log / Queue / EventFilter 硬绑 Redis | 换 EventBus 后端 ≠ 换部署拓扑 |
 
 选型含义：

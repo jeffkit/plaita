@@ -7,7 +7,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -159,6 +159,105 @@ def enqueue_task(
 
 def dlq_stream_key(stream_key: str, suffix: str = DEFAULT_DLQ_SUFFIX) -> str:
     return f"{stream_key}{suffix}"
+
+
+def _task_tenant_id(fields: Dict[Any, Any]) -> Optional[str]:
+    """从 Stream 字段里的 ``payload`` 取显式租户 id（A50-05）。
+
+    与派发口径不同：worker 对缺失 ``tenant_id`` 按 default 执行（fail-open），
+    但**删除是破坏性操作**，只清能明确归属的条目。缺字段/空值返回 None，
+    调用方必须跳过——历史消息/平台消息不能被 default 删除顺带清掉。
+    payload 无法解析同样返回 None（跳过并告警）。
+    """
+    raw = None
+    for key in (PAYLOAD_FIELD, PAYLOAD_FIELD.encode()):
+        if key in fields:
+            raw = fields[key]
+            break
+    if raw is None:
+        return None
+    try:
+        body = json.loads(_decode(raw))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        return None
+    return tenant_id
+
+
+def purge_tenant_tasks(
+    redis_client,
+    stream_key: str,
+    tenant_id: str,
+    *,
+    batch_size: int = 256,
+) -> int:
+    """删除共享任务队列里归属 ``tenant_id`` 的 start/resume 消息（A50-05）。
+
+    队列是多租户共用 Stream，消息信封只带 ``tenant_id``。租户删除后同名
+    重建会把墓碑覆盖回 active，未消费的旧消息会重新执行并写进新租户——
+    删除时必须按消息体收窄清理。匹配消息先在各消费组 ``XACK`` 再 ``XDEL``
+    （只 XDEL 会在 PEL 留下 pending 幽灵）；payload 损坏/缺显式 tenant_id
+    的条目跳过并 WARNING，绝不做无法归属的删除（default 与平台键共用
+    Stream，删错即误伤）。返回删除条数。
+    """
+    if not tenant_id:
+        return 0
+    batch_size = max(1, int(batch_size))
+    matched_ids: List[str] = []
+    unattributed = 0
+    start = "-"
+    while True:
+        entries = redis_client.xrange(
+            stream_key, min=start, max="+", count=batch_size
+        )
+        if not entries:
+            break
+        for message_id, fields in entries:
+            mid = _decode(message_id)
+            owner = _task_tenant_id(fields)
+            if owner is None:
+                unattributed += 1
+                continue
+            if owner == tenant_id:
+                matched_ids.append(mid)
+        if len(entries) < batch_size:
+            break
+        start = f"({_decode(entries[-1][0])}"
+    if unattributed:
+        logger.warning(
+            "任务队列清理（tenant=%s）：%d 条消息缺显式 tenant_id 或 payload 无法解析，"
+            "跳过（无法归属，需人工确认）",
+            tenant_id,
+            unattributed,
+        )
+    if not matched_ids:
+        return 0
+    try:
+        groups = redis_client.xinfo_groups(stream_key)
+    except Exception as exc:  # noqa: BLE001 — 无法读组时仍须删条目
+        logger.warning(
+            "任务队列清理：读取消费组失败（%s），仅 XDEL 不 XACK（PEL 可能留 pending）",
+            _scrub_url_text(exc),
+        )
+        groups = []
+    for group in groups:
+        name = group.get("name", group.get("name".encode()))
+        if name is None:
+            continue
+        for offset in range(0, len(matched_ids), batch_size):
+            redis_client.xack(
+                stream_key, name, *matched_ids[offset:offset + batch_size]
+            )
+    deleted = 0
+    for offset in range(0, len(matched_ids), batch_size):
+        deleted += int(
+            redis_client.xdel(stream_key, *matched_ids[offset:offset + batch_size])
+        )
+    return deleted
 
 
 class RedisStreamTaskQueue:

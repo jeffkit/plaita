@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 try:
     from ..models.flow import DEFAULT_TENANT_ID, SessionToken, Tenant, TenantMember, User
+    from .tenant_write_guard import tenant_generation_token
 except ImportError:
     from models.flow import (  # type: ignore
         DEFAULT_TENANT_ID,
@@ -30,6 +31,7 @@ except ImportError:
         TenantMember,
         User,
     )
+    from services.tenant_write_guard import tenant_generation_token  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -473,10 +475,13 @@ def add_member(store, tenant_id: str, username: str, role: str) -> None:
     if role not in ROLES:
         raise UserError(f"非法角色: {role}（可选 {'/'.join(ROLES)}）")
     with store._session_local() as session:
-        if session.scalars(
+        tenant = session.scalars(
             select(Tenant).where(Tenant.id == tenant_id)
-        ).first() is None:
+        ).first()
+        if tenant is None:
             raise UserError(f"租户不存在: {tenant_id}")
+        # 记住本次校验通过的租户世代；同名重建会换 token（A50-02 ABA）。
+        tenant_token = (tenant.created_at, tenant.contract_secret_id)
         if session.scalars(
             select(User).where(User.username == username)
         ).first() is None:
@@ -484,6 +489,15 @@ def add_member(store, tenant_id: str, username: str, role: str) -> None:
         if _is_member(session, username, tenant_id):
             raise UserError(f"{username} 已是租户 {tenant_id} 的成员")
         session.add(TenantMember(username=username, tenant_id=tenant_id, role=role))
+        session.flush()
+        # A50-02：flush 取得写串行化点后在同一事务内复核租户世代。并发
+        # delete 已提交 ⇒ None；delete+同名 create 已提交 ⇒ 新 token。两种
+        # 情况成员行都随事务回滚；尚未提交 ⇒ 删除侧等本事务结束后会显式
+        # 删掉全部成员行（SQLite 的 FK 级联默认不启用，不能依赖声明层）。
+        # 上面的租户检查只负责快速拒绝。
+        current_token = tenant_generation_token(session, tenant_id)
+        if current_token is None or current_token != tenant_token:
+            raise UserError(f"租户不存在: {tenant_id}")
         session.commit()
 
 

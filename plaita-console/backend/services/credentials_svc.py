@@ -23,9 +23,11 @@ from plaita.tenant_context import guard_tenant_write
 try:
     from ..models.flow import Base, Credential, DEFAULT_TENANT_ID, Tenant
     from .flow_store import get_flow_store
+    from .tenant_write_guard import tenant_generation_token
 except ImportError:  # 平铺布局（cwd=backend，services 为顶层包）
     from models.flow import Base, Credential, DEFAULT_TENANT_ID, Tenant  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
+    from services.tenant_write_guard import tenant_generation_token  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +140,13 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
         # plaita#257：已删除 / 从未存在的租户拒绝写回。否则删除后一个迟到的
         # save 会重新长出凭据行与旁文件（「复活 store」），重建同名租户即可
         # 继承——删除的清理语义被单次写调用整体绕过。
-        if session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first() is None:
+        tenant = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
+        if tenant is None:
             raise ValueError(
                 f"租户不存在或已删除: {tenant_id}（拒绝写入凭据）"
             )
+        # 记住本次校验通过的租户世代；同名重建会换 token（A50-01 ABA）。
+        tenant_token = (tenant.created_at, tenant.contract_secret_id)
         encrypted = _encrypt(data)
         row = session.scalars(
             select(Credential).where(
@@ -162,6 +167,17 @@ def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",
         # plaita#251：先原子导出（同一事务内的 flush 让导出声看到新行），
         # 成功后再提交 DB；导出失败 ⇒ 事务回滚，DB 不留新行、旁文件保持旧值。
         session.flush()
+        # A50-01：flush 是写事务的起点（SQLite 取得 RESERVED；PG 下随后的
+        # SELECT ... FOR UPDATE 锁租户行）。在**同一事务内**复核租户世代：
+        # 并发的 delete_tenant 已提交 ⇒ None；delete+同名 create 已提交 ⇒
+        # 新 token。两种情况都回滚，不落凭据行也不导出旁文件。若删除/重建
+        # 还没提交，对方会等本事务结束后处理，新行不会漏。首次检查只负责
+        # 快速拒绝。
+        current_token = tenant_generation_token(session, tenant_id)
+        if current_token is None or current_token != tenant_token:
+            raise ValueError(
+                f"租户不存在或已删除: {tenant_id}（拒绝写入凭据）"
+            )
         _export_then_commit(session, tenant_id)
 
 
