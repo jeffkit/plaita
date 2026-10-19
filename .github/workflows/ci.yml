@@ -16,8 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install plaita + plaita-ai
@@ -35,8 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           # check-api-transport.mjs 直接 import .ts（行为断言）；类型擦除需
           # Node ≥22.18，不能依赖 gate 容器里的系统 nodejs。
@@ -53,8 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
       - name: Install plaita + console backend deps
@@ -138,7 +138,7 @@ jobs:
         run: |
           redis-server --daemonize yes --port 6379 --save '' --appendonly no
           redis-cli ping
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install package + gate deps
         run: |
@@ -173,7 +173,7 @@ jobs:
       - name: CI gate [1b/6] pytest unit A-F
         run: |
           attempt=1
-          until ls tests/unit/test_*.py | sort | awk 'NR % 3 == 0' | tr '\n' '\0' | xargs -0 \
+          until find tests/unit -maxdepth 1 -type f -name 'test_*.py' | sort | awk 'NR % 3 == 0' | tr '\n' '\0' | xargs -0 \
             python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 -m "not slow" --timeout-method=thread -x -q; do
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
@@ -181,7 +181,7 @@ jobs:
       - name: CI gate [1c/6] pytest unit G-Q
         run: |
           attempt=1
-          until ls tests/unit/test_*.py | sort | awk 'NR % 3 == 1' | tr '\n' '\0' | xargs -0 \
+          until find tests/unit -maxdepth 1 -type f -name 'test_*.py' | sort | awk 'NR % 3 == 1' | tr '\n' '\0' | xargs -0 \
             python -m pytest --cov=plaita --cov-append --cov-fail-under=0 --cov-report= --timeout=150 -m "not slow" --timeout-method=thread -x -q; do
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
@@ -190,7 +190,7 @@ jobs:
       - name: CI gate [1d/6] pytest unit R-Z
         run: |
           attempt=1
-          until ls tests/unit/test_*.py | sort | awk 'NR % 3 == 2' | tr '\n' '\0' | xargs -0 \
+          until find tests/unit -maxdepth 1 -type f -name 'test_*.py' | sort | awk 'NR % 3 == 2' | tr '\n' '\0' | xargs -0 \
             python -m pytest --cov=plaita --cov-append --cov-report=term-missing --cov-fail-under=80 --timeout=150 -m "not slow" --timeout-method=thread -x -q; do
             if [ $attempt -ge 3 ]; then echo "chunk failed 3 attempts"; exit 1; fi
             attempt=$((attempt+1)); echo "== retry attempt $attempt =="; sleep 10
