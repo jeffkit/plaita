@@ -101,3 +101,9 @@ AssertionError: assert 'no-fence' == 'fence-default'
 - 验收面：unit 7846P/4F（4F 为 clean 基线同款环境面）；console 518P/13S；
   e2e+integration 287P/4S。
 - landing gate：绿（base `d795b3c` CI success）。
+
+## 残面补充（2026-10-19）
+
+同一桥的**超时语义**残面已单独修复：`with ThreadPoolExecutor` 的
+`shutdown(wait=True)` 会吞掉 5s 超时。见
+`docs/proofs/213b-quick-test-publish-timeout.md`。

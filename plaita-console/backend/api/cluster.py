@@ -32,6 +32,11 @@ except ImportError:
 
 router = APIRouter()
 
+#: quick-test 事件发布桥的等待上限（秒）。超时后不得再等 worker 线程：
+#: EventBus 后端卡住时 ``ThreadPoolExecutor.__exit__``（``shutdown(wait=True)``）
+#: 会把 5s 超时变成无限阻塞（plaita#213 残面）。
+_QUICK_TEST_PUBLISH_TIMEOUT = 5.0
+
 
 # ============ 数据模型 ============
 
@@ -1107,10 +1112,32 @@ async def run_quick_test(request: QuickTestRequest):
                                         mark_tenant_derived()
                                         return asyncio.run(publish_event())
 
-                                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                                    # 不用 ``with``：它的 __exit__ 是
+                                    # shutdown(wait=True)，发布线程卡住时超时
+                                    # 之后的请求仍会无限等待（plaita#213 残面）。
+                                    executor = concurrent.futures.ThreadPoolExecutor(
+                                        max_workers=1,
+                                        thread_name_prefix="quick-test-publish",
+                                    )
+                                    try:
                                         future = executor.submit(
                                             ctx.run, _run_publish_derived)
-                                        event_id = future.result(timeout=5)
+                                        try:
+                                            event_id = future.result(
+                                                timeout=_QUICK_TEST_PUBLISH_TIMEOUT)
+                                        except concurrent.futures.TimeoutError:
+                                            # 运行中的线程无法强行终止（Python
+                                            # 限制），但必须立即放弃等待：cancel
+                                            # 清掉排队任务，shutdown(wait=False)
+                                            # 让本次请求快速失败而不是挂到发布完成。
+                                            future.cancel()
+                                            raise TimeoutError(
+                                                "事件发布超时（>"
+                                                f"{_QUICK_TEST_PUBLISH_TIMEOUT:g}s）："
+                                                "EventBus 发布未在期限内完成，已放弃等待"
+                                            ) from None
+                                    finally:
+                                        executor.shutdown(wait=False, cancel_futures=True)
                                 else:
                                     event_id = asyncio.run(publish_event())
                             except RuntimeError:

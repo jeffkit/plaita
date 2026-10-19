@@ -1,0 +1,13 @@
+# 负控：仅回退 api/cluster.py（保留 test_issue213_quick_test_publish_timeout.py）
+# 命令: python3 -m pytest tests/console/test_issue213_quick_test_publish_timeout.py -q
+# 旧实现：with ThreadPoolExecutor() + future.result(timeout=5)，发布线程阻塞 3s
+
+E           AssertionError: QuickTestResponse(success=True, message="✅ 事件驱动测试完成！
+E           assert True is False
+tests/console/test_issue213_quick_test_publish_timeout.py:126: AssertionError
+1 failed, 1 passed in 3.80s
+
+# 解读：旧实现没有生效超时——future.result 等到发布线程 3s 跑完，with 退出的
+# shutdown(wait=True) 在此期间一直阻塞，最终返回 success=True；延迟断言与
+# success=False 断言同时红。
+# 还原修复后：2 passed in 0.22s
