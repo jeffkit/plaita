@@ -330,8 +330,27 @@ class ErrorHandler(BaseModel):
             return self.default_value
 
 
+#: 单节点失败重试次数上限（A2 r22 升级 P1）。
+#:
+#: 发布面允许 editor 发布 flow，而 worker 为多租户共享：``retryTimes=1e9``
+#: 足以把 worker 长期钉死在单个节点的重试循环里（跨租户独占）。上限取 10
+#: ——远超正常瞬态重试需求，同时把单节点最坏耗时锁在有限量级。构造期
+#: （Pydantic 校验）拒绝，console 保存/发布据此返回 422，而不是等运行期。
+MAX_RETRY_TIMES = 10
+
+
 class RecoverableErrorHandler(ErrorHandler):
     retry_times: int = Field(0, alias="retryTimes")
+
+    @field_validator("retry_times")
+    @classmethod
+    def _validate_retry_times_upper_bound(cls, value: int) -> int:
+        if value > MAX_RETRY_TIMES:
+            raise ValueError(
+                f"retryTimes 超过上限: {value} > {MAX_RETRY_TIMES}"
+                "（单节点重试次数上限，防止共享 worker 被单个流程长期独占）"
+            )
+        return value
 
 
 class ExecutionLeaseError(RuntimeError):

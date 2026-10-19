@@ -290,9 +290,11 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 }
 ```
 
-访问策略（SSRF 防护）：`requestTimeout`（默认 30s）、`allowedHosts` / `deniedHosts`
+访问策略（SSRF 防护）：`requestTimeout`（默认 30s，**上限 600s**）、`allowedHosts` / `deniedHosts`
 （精确域名 / `*.suffix` / CIDR）、`blockPrivateNetworks`（拒绝回环/内网/链路本地等
-私网段）、`maxRedirects`（默认 5，**同步与异步同口径**，超限报 `Too many redirects`）。
+私网段）、`maxRedirects`（默认 5，**上限 20**，同步与异步同口径，超限报 `Too many redirects`）。
+两个上限均在**构造期**校验：保存/发布/加载时超限直接失败，避免单个节点长期占用共享
+worker。
 重定向**不使用客户端自动跟随**（sync/async 同一形状）：节点逐跳手动跟随——策略激活
 时每跳复检、跨源剥离凭据头、中间跳 body 丢弃不读；方法改写与跨源剥离规则对齐
 `requests`（301 仅把 POST 转 GET，302/303 非 HEAD 转 GET，307/308 保留方法与 body；

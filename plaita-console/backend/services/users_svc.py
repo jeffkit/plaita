@@ -352,8 +352,15 @@ def read_tenant_generation(store, tenant_id: str) -> Optional[Tuple[Any, Any]]:
         return (row[0], row[1])
 
 
-def switch_tenant(store, token: str, tenant_id: str) -> Optional[Dict[str, Any]]:
-    """切换会话的活跃租户（须为该租户成员且租户未停用）。"""
+def switch_tenant(store, token: str, tenant_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """切换会话的活跃租户；``tenant_id=None`` 显式清空为平台全量视角。
+
+    - 具体租户：须为该租户成员且租户未停用（既有语义）。
+    - ``None``（A2R17-01）：仅 ``users.platform_admin`` 可调用——把会话
+      ``active_tenant`` 置空，后续请求读跨租户、写被 ``tenant_scope(required=True)``
+      拒绝并引导选租户。普通用户显式切换全量一律拒绝（绝不把 None 当全量，
+      对齐 #254 fail-closed）。
+    """
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with store._session_local() as session:
         row = session.scalars(
@@ -361,12 +368,22 @@ def switch_tenant(store, token: str, tenant_id: str) -> Optional[Dict[str, Any]]
         ).first()
         if row is None or row.expires_at < datetime.utcnow():
             raise UserError("会话无效或已过期，请重新登录")
-        tenant = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
-        if tenant is None or tenant.status != "active":
-            raise UserError(f"租户不可用: {tenant_id}")
-        if not _is_member(session, row.username, tenant_id):
-            raise UserError(f"不是租户 {tenant_id} 的成员")
-        row.active_tenant = tenant_id
+        if tenant_id is None:
+            user = session.scalars(select(User).where(User.username == row.username)).first()
+            if user is None or user.disabled:
+                raise UserError("会话无效或已过期，请重新登录")
+            if not user.platform_admin:
+                # 普通用户没有平台全量语义（#254）；具名拒绝，避免把一次
+                # 非法切换静默成「保持原租户」或「无租户」。
+                raise UserError("仅平台管理员可切换到全量视角")
+            row.active_tenant = None
+        else:
+            tenant = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
+            if tenant is None or tenant.status != "active":
+                raise UserError(f"租户不可用: {tenant_id}")
+            if not _is_member(session, row.username, tenant_id):
+                raise UserError(f"不是租户 {tenant_id} 的成员")
+            row.active_tenant = tenant_id
         session.commit()
     return _session_context(store, token)
 

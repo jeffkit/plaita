@@ -86,7 +86,9 @@ class PasswordRequest(BaseModel):
 
 
 class SwitchTenantRequest(BaseModel):
-    tenant_id: str = Field(..., min_length=1)
+    # A2R17-01：``null`` 是「平台管理员显式切到全量视角（只读）」的合法值；
+    # 字段本身仍必填——缺省/空串都不解释成全量，避免客户端漏传时静默清租户。
+    tenant_id: Optional[str] = Field(..., min_length=1)
 
 
 @router.get("/auth/setup-status")
@@ -178,8 +180,9 @@ def switch_tenant(req: SwitchTenantRequest, request: Request,
         context = users_svc.switch_tenant(get_flow_store(), token, req.tenant_id)
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _audit(request, "auth.switch_tenant", req.tenant_id, {},
-           tenant_id=req.tenant_id)
+    _audit(request, "auth.switch_tenant", req.tenant_id or "(full-view)",
+           {"full_view": req.tenant_id is None},
+           tenant_id=req.tenant_id or "")
     return context
 
 

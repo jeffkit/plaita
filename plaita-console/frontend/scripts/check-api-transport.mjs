@@ -175,6 +175,17 @@ check('S17-01：TenantSwitcher 失败分支不再 setTenant', () => {
   assert.match(appSrc, /\[tenant-switch\] 切换失败/)
   assert.match(appSrc, /setSwitchError\(message\)/)
 })
+check('A2R17-01：TenantSwitcher 全量视角先服务端清租户，成功后落本地', () => {
+  const switcher = appSrc.slice(appSrc.indexOf('const switchTo'), appSrc.indexOf('const options = memberships'))
+  assert.match(switcher, /await api\.switchTenant\(tenantId \|\| null\)/)
+  assert.ok(switcher.indexOf('await api.switchTenant') < switcher.indexOf('setTenant(tenantId, res.role)'),
+    'setTenant 必须晚于 await switchTenant（全量视角同样服务端权威）')
+  assert.match(appSrc, /全量视角为只读，写操作请先选择具体租户/)
+})
+check('A2R17-01：api.switchTenant 以 null 表示全量视角', () => {
+  assert.match(apiSrc, /async switchTenant\(\s*tenantId: string \| null/)
+  assert.match(apiSrc, /JSON\.stringify\(\{ tenant_id: tenantId \}\)/)
+})
 check('S17-02：Copilot 使用 API_BASE + apiFetch，无字面量 /api/copilot', () => {
   assert.match(copilotSrc, /url:\s*`\$\{API_BASE\}\/copilot`/)
   assert.match(copilotSrc, /fetch:\s*\(\(input: RequestInfo \| URL, init\?: RequestInit\)/)
