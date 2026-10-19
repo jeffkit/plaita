@@ -16,6 +16,7 @@ import argparse
 import re
 import subprocess
 import sys
+import time
 
 REPO = "jeffkit/plaita"
 #: 视为「未通过」的 CI 结论（gh JSON 为小写）。
@@ -47,6 +48,42 @@ def cmd_ci(override: str | None) -> int:
         print("[landing-gate] main 上 ci.yml 无已完成 run（全部排队中？）——无结论，不放开")
         return 2
     latest = completed[0]
+
+    # 「被更新推送取代」的 cancelled 不是红：并发推送会取消旧 head 的 run，
+    # 新 head 的 run 才是权威判决。等待其完成（上限 10 分钟），按其结论判定。
+    newest = runs[0]
+    if latest["conclusion"] == "cancelled" and newest["headSha"] != latest["headSha"]:
+        print(
+            f"[landing-gate] run {latest['headSha'][:7]} 被更新推送 {newest['headSha'][:7]} "
+            f"取代（{newest['status']}）——等待新 run 完成后判决"
+        )
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            time.sleep(20)
+            rc, out = _run([
+                "gh", "run", "list", "-R", REPO, "--branch", "main", "--workflow", "ci.yml",
+                "--limit", "10", "--json", "conclusion,status,headSha,displayTitle,createdAt",
+            ])
+            if rc != 0:
+                continue
+            runs = json.loads(out or "[]")
+            head = runs[0]["headSha"] if runs else None
+            done = next(
+                (r for r in runs if r.get("headSha") == head and r.get("status") == "completed"),
+                None,
+            )
+            if done is None:
+                continue
+            latest = done
+            print(
+                f"[landing-gate] 新 head run 完成：{done['createdAt']} {done['headSha'][:7]} "
+                f"conclusion={done['conclusion']}  |  {done.get('displayTitle', '')[:60]}"
+            )
+            break
+        else:
+            print("[landing-gate] 等待超时（新 run 10 分钟未完成）——无结论，不放开，稍后重试")
+            return 2
+
     print(
         f"[landing-gate] main 最近完成 run：{latest['createdAt']} {latest['headSha'][:7]} "
         f"conclusion={latest['conclusion']}  |  {latest['displayTitle'][:60]}"
