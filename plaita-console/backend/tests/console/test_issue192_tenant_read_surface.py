@@ -239,7 +239,10 @@ class _StubRequest:
 
     def __init__(self, tenant):
         self.app = SimpleNamespace(state=SimpleNamespace(local_mode=False))
-        self.state = SimpleNamespace(tenant_id=tenant, role="viewer", platform_admin=False)
+        # #254：tenant_id=None 只有在可证明的平台级身份下才等于全量视角
+        self.state = SimpleNamespace(
+            tenant_id=tenant, role="viewer", platform_admin=tenant is None
+        )
 
     async def is_disconnected(self):
         await asyncio.sleep(0)

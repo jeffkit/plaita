@@ -45,9 +45,13 @@ def _build_app(tmp_path, monkeypatch, env="dev", admin_key: str = "", with_user:
         monkeypatch.setattr("auth.get_settings", lambda: _settings(env, admin_key))
 
     flow_store.init_engine(f"sqlite:///{tmp_path}/rbac.db")
+    flow_store.ensure_tenant_bootstrap()
     store = flow_store.get_flow_store()
     if with_user:
-        users_svc.create_user(store, "admin", "admin-password-1", "admin")
+        users_svc.create_user(
+            store, "admin", "admin-password-1", "admin",
+            memberships=[{"tenant_id": "default", "role": "admin"}],
+        )
 
     app = FastAPI()
     app.state.redis = None
@@ -92,9 +96,18 @@ def client(tmp_path, monkeypatch):
 def client_with_users(tmp_path, monkeypatch):
     app = _build_app(tmp_path, monkeypatch, with_user=False)
     store = flow_store.get_flow_store()
-    users_svc.create_user(store, "admin", "admin-password-1", "admin")
-    users_svc.create_user(store, "editor1", "editor-password-1", "editor")
-    users_svc.create_user(store, "viewer1", "viewer-password-1", "viewer")
+    users_svc.create_user(
+        store, "admin", "admin-password-1", "admin",
+        memberships=[{"tenant_id": "default", "role": "admin"}],
+    )
+    users_svc.create_user(
+        store, "editor1", "editor-password-1", "editor",
+        memberships=[{"tenant_id": "default", "role": "editor"}],
+    )
+    users_svc.create_user(
+        store, "viewer1", "viewer-password-1", "viewer",
+        memberships=[{"tenant_id": "default", "role": "viewer"}],
+    )
     examples_svc.seed_example_flows(store)
     return TestClient(app), store
 
@@ -117,7 +130,8 @@ def test_login_ok_and_me(client_with_users):
     assert info["role"] == "editor"
     me = client.get("/api/auth/me", headers=_auth(info["token"])).json()
     assert me["actor"] == "editor1" and me["role"] == "editor"
-    assert me["tenant_id"] is None and me["platform_admin"] is False
+    # #254：普通用户钉在成员租户上，只有平台身份才有无租户的全量视角
+    assert me["tenant_id"] == "default" and me["platform_admin"] is False
 
 
 def test_login_wrong_password(client_with_users):
@@ -129,7 +143,8 @@ def test_login_wrong_password(client_with_users):
 def test_role_change_revokes_old_role(client_with_users):
     client, store = client_with_users
     info = _login(client, "viewer1", "viewer-password-1")
-    users_svc.set_role(store, "viewer1", "editor")
+    # #254：权限角色以 tenant_members 为准（users.role 遗留回退已移除）
+    users_svc.set_member_role(store, "default", "viewer1", "editor")
     # 安全设计：改角色即撤销旧会话（强制重新登录）
     assert client.get("/api/auth/me", headers=_auth(info["token"])).status_code == 401
     info2 = _login(client, "viewer1", "viewer-password-1")
@@ -179,7 +194,10 @@ def test_api_key_maps_to_admin(tmp_path, monkeypatch):
 def test_prod_delete_requires_admin(tmp_path, monkeypatch):
     app = _build_app(tmp_path, monkeypatch, env="prod")
     examples_svc.seed_example_flows(flow_store.get_flow_store())
-    users_svc.create_user(flow_store.get_flow_store(), "editor1", "editor-password-1", "editor")
+    users_svc.create_user(
+        flow_store.get_flow_store(), "editor1", "editor-password-1", "editor",
+        memberships=[{"tenant_id": "default", "role": "editor"}],
+    )
     client = TestClient(app)
     info = _login(client, "editor1", "editor-password-1")
     r = client.delete("/api/flows/http-echo", headers=_auth(info["token"]))

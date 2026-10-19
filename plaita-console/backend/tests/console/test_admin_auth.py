@@ -25,9 +25,14 @@ def _build_app(tmp_path, monkeypatch, admin_key: str = "", insecure: bool = Fals
     monkeypatch.setenv("PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN", "true" if insecure else "false")
     monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", f"sqlite:///{tmp_path}/auth.db")
     flow_store.init_engine(f"sqlite:///{tmp_path}/auth.db")
+    flow_store.ensure_tenant_bootstrap()
     store = flow_store.get_flow_store()
     if with_user:
-        users_svc.create_user(store, "admin", "admin-password-1", "admin")
+        # #254：普通用户必须挂在租户上才有角色（users.role 遗留回退已移除）
+        users_svc.create_user(
+            store, "admin", "admin-password-1", "admin",
+            memberships=[{"tenant_id": "default", "role": "admin"}],
+        )
 
     app = FastAPI()
     app.state.redis = None

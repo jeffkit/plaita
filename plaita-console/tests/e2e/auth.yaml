@@ -79,7 +79,7 @@ cases:
       body:
         role: "admin"
 
-  - name: "admin 创建 viewer 用户"
+  - name: "admin 创建 viewer 用户（#254：普通用户必须挂租户）"
     request:
       method: POST
       url: http://localhost:18081/api/users
@@ -90,6 +90,9 @@ cases:
         username: "e2e-viewer"
         password: "viewer-pass-123"
         role: "viewer"
+        memberships:
+          - tenant_id: "default"
+            role: "viewer"
     expect:
       status: 200
 
@@ -159,19 +162,20 @@ cases:
     expect:
       status: 403
 
-  - name: "admin 将 viewer 升级为 editor（会话随角色变更被注销）"
+  - name: "admin 将 viewer 升级为 editor（改成员角色，会话随角色变更被注销）"
     request:
-      method: POST
-      url: http://localhost:18081/api/users/e2e-viewer/role
+      method: PUT
+      url: http://localhost:18081/api/tenants/default/members/e2e-viewer
       headers:
         Authorization: "Bearer {{runtime.admin_token}}"
         Content-Type: application/json
       body:
+        username: "e2e-viewer"
         role: "editor"
     expect:
       status: 200
 
-  - name: "旧会话在角色变更后失效（401，set_role 主动注销）"
+  - name: "旧会话在角色变更后失效（401，改成员角色主动注销）"
     request:
       method: GET
       url: http://localhost:18081/api/auth/me

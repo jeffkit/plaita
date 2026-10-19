@@ -74,10 +74,21 @@ def _build_app(tmp_path, monkeypatch) -> FastAPI:
     monkeypatch.setattr("auth.get_settings", lambda: _settings())
 
     flow_store.init_engine(f"sqlite:///{tmp_path}/rbac217.db")
+    flow_store.ensure_tenant_bootstrap()
     store = flow_store.get_flow_store()
-    users_svc.create_user(store, "admin", ADMIN_PASSWORD, "admin")
-    users_svc.create_user(store, "editor1", EDITOR_PASSWORD, "editor")
-    users_svc.create_user(store, "viewer1", VIEWER_PASSWORD, "viewer")
+    # #254：普通用户必须挂在租户上才有角色（users.role 遗留回退已移除）
+    users_svc.create_user(
+        store, "admin", ADMIN_PASSWORD, "admin",
+        memberships=[{"tenant_id": "default", "role": "admin"}],
+    )
+    users_svc.create_user(
+        store, "editor1", EDITOR_PASSWORD, "editor",
+        memberships=[{"tenant_id": "default", "role": "editor"}],
+    )
+    users_svc.create_user(
+        store, "viewer1", VIEWER_PASSWORD, "viewer",
+        memberships=[{"tenant_id": "default", "role": "viewer"}],
+    )
 
     app = FastAPI()
     app.state.redis = None

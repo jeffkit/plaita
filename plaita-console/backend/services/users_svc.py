@@ -4,8 +4,9 @@
 - 会话：随机 32 字节 token，落库只存 SHA-256，有效期 7 天；
   会话携带 ``active_tenant``（多租户成员的当前租户上下文）
 - 角色：租户内角色以 ``tenant_members`` 为准（实时查，改角色即时生效）；
-  ``users.role`` 仅作无租户上下文时的遗留回退；``users.platform_admin``
-  为平台级管理员（跨租户管理）
+  ``users.platform_admin`` 为平台级管理员（跨租户管理）。**无活跃租户的
+  普通用户不再回退 ``users.role`` 遗留全局角色（#254）**：无成员关系即无
+  角色，鉴权层 fail-closed 403。
 - 引导：users 表为空时创建首个 admin（平台管理员）
 """
 from __future__ import annotations
@@ -179,8 +180,12 @@ def login(store, username: str, password: str) -> Optional[Dict[str, Any]]:
 
 
 def _resolve_role(session, user: User, tenant_id: Optional[str]) -> Optional[str]:
-    """角色裁决：活跃租户 → membership.role（实时）；平台管理员 → admin；
-    遗留回退 users.role。用户被禁用返回 None。"""
+    """角色裁决：活跃租户 → membership.role（实时）；平台管理员 → admin。
+
+    #254 fail-closed：无租户上下文的普通用户**不再回退** ``users.role``
+    遗留全局角色——返回 None（无角色）。被移出租户的成员重登后因此无法
+    凭遗留角色进入管理面；鉴权层对无活跃租户的普通会话直接 403。
+    """
     if user is None or user.disabled:
         return None
     if tenant_id:
@@ -194,7 +199,7 @@ def _resolve_role(session, user: User, tenant_id: Optional[str]) -> Optional[str
             return member.role
     if user.platform_admin:
         return "admin"
-    return user.role
+    return None
 
 
 def _tenant_active(session, tenant_id: Optional[str]) -> bool:
@@ -217,7 +222,8 @@ def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
     """token -> {username, role, tenant_id, platform_admin}；无效/过期返回 None。
 
     - 角色实时取自 tenant_members（改角色即时生效）
-    - active_tenant 的成员资格已失效时自动清空（回退平台/遗留视角）
+    - active_tenant 的成员资格已失效时自动清空；普通用户随后无角色
+      （#254 fail-closed，不回落 ``users.role``），需重新登录/重新授权
     - active_tenant 已停用且非平台管理员 → 抛 TenantDisabledError（#27，鉴权层
       转 403）；平台管理员不受限，否则无法把租户重新启用
     """
@@ -240,7 +246,7 @@ def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
         active_tenant = row.active_tenant
         role = _resolve_role(session, user, active_tenant)
         if active_tenant and not _is_member(session, row.username, active_tenant):
-            # 成员资格被移除：清空活跃租户，回退角色
+            # 成员资格被移除：清空活跃租户；普通用户随之无角色（#254）
             row.active_tenant = None
             active_tenant = None
             role = _resolve_role(session, user, None)
