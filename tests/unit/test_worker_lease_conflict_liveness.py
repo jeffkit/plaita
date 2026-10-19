@@ -9,10 +9,16 @@ ExecutionLeaseError 分支**直接 ack**——非终态执行唯一的重投载�
 - 持有者仍在服务注册表（活持有者）→ ack（保留 2026-10-06 假死信修复）；
 - 持有者已不在注册表（死后 TTL 尾巴）→ 不 ack，留 pending 等租约过期后
   reclaim 续跑；
-- 任何信号缺失（旧格式租约 / 未启用注册表 / 读租约失败）→ 退化 ack，
-  不回归假死信风暴。
+- 未启用注册表（``--no-registry``）→ **不 ack**：该形态下没有任何存活信号，
+  「存活未知」不能当「活持有者」——持有者被冻结（SIGSTOP/GC/调度饥饿）时
+  租约仍有效、另一 worker 抢到消息若 ack，冻结者随后 lease_lost 退出，执行
+  停在 running 且无任何载体（B65-03）。留 pending 等租约过期后 reclaim，
+  死信守卫在租约在时拒绝死信，不会回归假死信风暴；
+- 其它信号缺失（旧格式租约 / 读租约失败）→ 退化 ack，不回归假死信风暴。
 """
 from __future__ import annotations
+
+from unittest.mock import patch
 
 import pytest
 
@@ -20,12 +26,14 @@ pytest.importorskip("fakeredis")
 import fakeredis  # noqa: E402
 
 from plaita.server.execution_lease import (  # noqa: E402
+    ExecutionLeaseError,
     RedisExecutionLease,
     holder_instance_id,
     new_holder_token,
 )
 from plaita.server.flow_worker import FlowWorker, RedisFlowWorker  # noqa: E402
 from plaita.server.registry import ServiceRegistry  # noqa: E402
+from plaita.server.task_queue import StreamTask  # noqa: E402
 from plaita.server.tenant_context import TenantRoutingExecutionLease  # noqa: E402
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage  # noqa: E402
 
@@ -126,11 +134,16 @@ def test_legacy_lease_value_defaults_to_ack():
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
-def test_registry_disabled_defaults_to_ack():
-    """未启用注册表（--no-registry）无存活信号 → 退化 ack。"""
+def test_registry_disabled_lease_conflict_is_not_ack_safe():
+    """未启用注册表（--no-registry）→ 无存活信号，租约冲突不得 ack。
+
+    B65-03 负控：持有者被冻结（进程在、租约仍有效、心跳已停）时，另一 worker
+    在 claim_min_idle 后抢到唯一消息；旧实现走「存活未知 → 退化 ack」把载体
+    吞掉，冻结者恢复后 lease_lost 退出，执行停在 running 且零载体。
+    """
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
-    assert _worker(redis, enable_registry=False)._lease_conflict_ack_safe(_body()) is True
+    assert _worker(redis, enable_registry=False)._lease_conflict_ack_safe(_body()) is False
 
 
 def test_missing_lease_defaults_to_ack():
@@ -422,3 +435,100 @@ def test_draining_holder_conflict_keeps_message_reclaimable_by_peer():
     _next, claimed, _deleted = redis.xautoclaim(
         stream, group, "peer-consumer", min_idle_time=0, start_id="0-0")
     assert [m[0] for m in claimed] == [msg_id]
+
+
+# ---- B65-03：--no-registry + 持有者冻结 → 唯一载体必须留 pending ----
+#
+# 无注册表部署没有「持有者是否在册」信号。持有者冻结（SIGSTOP/GC/调度饥饿）
+# 时租约仍有效，另一 worker 按 claim_min_idle 抢到唯一消息；旧实现把
+# 「存活未知」当「活持有者」ack，冻结者恢复后 lease_lost 退出而消息已不存在，
+# 执行停在 running。以下负控在 pre-fix 形态下必红（消息被 ack 出 PEL）。
+
+class _StubQueue:
+    """最小队列桩：弹一条任务后停机；记录 ack/冲突计数。"""
+
+    def __init__(self, worker: RedisFlowWorker, tasks):
+        self._worker = worker
+        self._tasks = list(tasks)
+        self.acked = []
+        self.lease_conflicts = 0
+        self.consumer_name = "stub"
+        self.max_deliveries = 5
+
+    def read(self, block_ms=1000):
+        if self._tasks:
+            return self._tasks.pop(0)
+        self._worker.stop()
+        return None
+
+    def ack(self, message_id):
+        self.acked.append(message_id)
+
+    def note_lease_conflict(self):
+        self.lease_conflicts += 1
+
+    def ensure_group(self):
+        pass
+
+
+def _full_worker(redis) -> RedisFlowWorker:
+    return RedisFlowWorker(
+        redis_url="redis://localhost:6379/15",
+        queue_name="plaita:flow:queue:frozen",
+        execution_storage=MemoryExecutionStorage(),
+        flow_storage=MemoryFlowStorage(),
+        redis_client=redis,
+        enable_registry=False,
+        enable_redis_logging=False,
+    )
+
+
+def test_frozen_holder_conflict_keeps_message_reclaimable_without_registry():
+    """端到端（Redis 层）：--no-registry + 持有者冻结 → 不 ack → 租约消失后
+    peer 可回收唯一载体续跑（B65-03 验收形态）。
+    """
+    stream, group = "plaita:flow:queue:frozen", "plaita-workers"
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    redis.xgroup_create(stream, group, id="0", mkstream=True)
+    redis.xadd(
+        stream,
+        {"data": '{"type": "resume", "execution_id": "exec-1", "resume_type": "continue"}'},
+    )
+    _, msgs = redis.xreadgroup(group, INSTANCE, {stream: ">"}, count=1)[0]
+    msg_id = msgs[0][0]
+
+    # 冻结者租约仍在：不得 ack（pre-fix 返回 True → 消息出 PEL）
+    assert (
+        _worker(redis, enable_registry=False)._lease_conflict_ack_safe(_body())
+        is False
+    )
+    assert redis.xpending(stream, group)["pending"] == 1
+
+    # 持有者冻结超过 TTL、租约消失：唯一载体仍在，可被同组 peer 回收
+    redis.delete(LEASE_KEY)
+    _next, claimed, _deleted = redis.xautoclaim(
+        stream, group, "peer-consumer", min_idle_time=0, start_id="0-0"
+    )
+    assert [m[0] for m in claimed] == [msg_id]
+
+
+def test_run_loop_does_not_ack_frozen_holder_conflict_without_registry():
+    """run() 分支负控：--no-registry 租约冲突不得 ack（pre-fix 吞载体形态）。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    worker = _full_worker(redis)
+    task = StreamTask(
+        message_id="m1",
+        body={"type": "resume", "execution_id": "exec-1", "resume_type": "continue"},
+        delivery_count=1,
+    )
+    stub = _StubQueue(worker, [task])
+    with patch.object(worker, "_get_task_queue", return_value=stub), patch.object(
+        worker,
+        "_dispatch_task",
+        side_effect=ExecutionLeaseError("execution is leased by a frozen holder"),
+    ):
+        worker.run()
+    assert stub.acked == [], "冻结持有者的唯一载体被 ack 吞掉（执行将停 running）"
+    assert stub.lease_conflicts == 1
