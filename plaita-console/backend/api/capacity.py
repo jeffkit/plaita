@@ -46,6 +46,26 @@ router = APIRouter()
 
 #: #262：租户 editor 试图把派发代传到别的租户时的具名拒绝。
 DISPATCH_TENANT_DENIED_DETAIL = "仅平台管理员可指定派发租户"
+#: A54-02：队列对账是全局计数，只对平台身份开放。
+TENANT_SCOPED_PARITY_DETAIL = "租户视图：队列对账仅平台身份可用"
+
+
+def _tenant_generation(tenant_id: Optional[str]) -> Optional[str]:
+    """当前租户世代（create 时间）；取不到 ⇒ None（读面 fail-closed）。"""
+    if not tenant_id:
+        return None
+    try:
+        from ..services import flow_store, tenants_svc
+    except ImportError:  # 平铺布局（cwd=backend）
+        from services import flow_store, tenants_svc  # type: ignore
+    try:
+        return tenants_svc.tenant_generation(flow_store.get_flow_store(), tenant_id)
+    except Exception:  # noqa: BLE001 — 世代不可证明 ⇒ 不返回租户行（响亮记录）
+        logger.exception(
+            "读取租户世代失败（tenant=%s），派发台账租户视图按 fail-closed 处理",
+            tenant_id,
+        )
+        return None
 
 
 # ============ 数据模型 ============
@@ -283,6 +303,7 @@ async def dispatch_one(
         params=req.params,
         queue_name=req.queue_name,
         tenant_id=tenant_id,
+        tenant_generation=_tenant_generation(tenant_id),
         dry_run=effective_dry_run,
         actor=identity.get("actor"),
     )
@@ -294,16 +315,40 @@ async def dispatch_ledger(
     request: Request,
     queue_name: Optional[str] = None,
     count: int = 50,
+    identity: Dict = Depends(require_auth),
 ) -> DispatchLedgerResponse:
-    """派发台账 + 与队列的对账（``台账条数 == 入队条数``，期 1 判据②）。"""
+    """派发台账 + 与队列的对账（``台账条数 == 入队条数``，期 1 判据②）。
+
+    A54-02：平台身份可全量审计；租户身份只看到**当前世代**的本租户条目
+    （同名重建后旧世代 actor/issue/execution 不再命中）。队列对账是全局
+    计数，只对平台身份返回，租户视图显式给出不可用原因（不伪造成 0/相等）。
+    """
     redis = get_redis(request)
-    rows = dispatcher_svc.ledger_rows(redis, count=max(1, min(int(count), 500)))
-    parity = dispatcher_svc.dispatch_parity(redis, queue_name)
+    limit = max(1, min(int(count), 500))
+    if bool(identity.get("platform_admin")):
+        rows = dispatcher_svc.ledger_rows(redis, count=limit)
+        parity = dispatcher_svc.dispatch_parity(redis, queue_name)
+        return DispatchLedgerResponse(
+            queue=parity["queue_name"],
+            ledger=parity["ledger"],
+            queue_length=parity["queue"],
+            parity=parity["parity"],
+            error=parity["error"],
+            rows=rows,
+        )
+
+    tenant = tenant_scope(request)
+    rows = dispatcher_svc.ledger_rows(
+        redis,
+        count=limit,
+        tenant_id=tenant,
+        tenant_generation=_tenant_generation(tenant),
+    )
     return DispatchLedgerResponse(
-        queue=parity["queue_name"],
-        ledger=parity["ledger"],
-        queue_length=parity["queue"],
-        parity=parity["parity"],
-        error=parity["error"],
+        queue=queue_name or dispatcher_svc.dispatch_queue_from_env(),
+        ledger=len(rows),
+        queue_length=None,
+        parity=False,
+        error=TENANT_SCOPED_PARITY_DETAIL,
         rows=rows,
     )
