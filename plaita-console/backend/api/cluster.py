@@ -1924,11 +1924,23 @@ async def _rebind_data_plane(app: FastAPI, redis_url: Optional[str]) -> None:
 
     old_client = getattr(app.state, "redis", None)
     old_sse = getattr(app.state, "execution_sse_aioredis", None)
+    was_local = bool(getattr(app.state, "local_mode", False))
     app.state.redis = client
     app.state.redis_url = redis_url
     # 数据面既然连上了集群 Redis，就不该再走本地单机模式的进程内执行分支
     app.state.local_mode = False
     app.state.execution_sse_aioredis = None
+    if was_local:
+        # A48-01：离开本地档时停掉内置调度循环；遗留 local_schedules 保留但
+        # 不再执行（与 cluster 档启动同语义），显式告警而不是静默消失。
+        try:
+            from ..services import local_scheduler
+        except ImportError:
+            from services import local_scheduler  # type: ignore
+        local_scheduler.stop_scheduler_loop()
+        store = getattr(app.state, "store", None)
+        if store is not None:
+            local_scheduler.warn_local_schedules_inactive(store)
     if old_client is not None:
         old_client.close()
     if old_sse is not None:

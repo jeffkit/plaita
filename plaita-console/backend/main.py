@@ -199,8 +199,13 @@ async def lifespan(app: FastAPI):
             from services import users_svc, local_scheduler  # type: ignore
         app.state.store = flow_store.get_flow_store()
         users_svc.ensure_bootstrap_user(app.state.store)
-        # 本地档内置调度循环：替代集群档的 schedule_service 进程
-        local_scheduler.start_scheduler_loop(app.state.store)
+        if local_mode:
+            # 本地档内置调度循环：替代集群档的 schedule_service 进程
+            local_scheduler.start_scheduler_loop(app.state.store)
+        else:
+            # A48-01：集群档不启动本地调度循环。已落盘的 local_schedules 保留
+            # 原样但不执行（切回本地档可继续），启动时显式告警其不可见语义。
+            local_scheduler.warn_local_schedules_inactive(app.state.store)
     except Exception as e:
         logger.error(f"FlowStore 初始化失败: {e}")
         raise
@@ -260,6 +265,14 @@ async def lifespan(app: FastAPI):
 
     yield
     
+    # A48-01：先停本地调度线程，再断开数据面/存储——线程不得在收尾期间继续
+    # 起执行（lifespan 已退出后仍触发是修复前实测现象）。
+    try:
+        from .services import local_scheduler
+    except ImportError:
+        from services import local_scheduler  # type: ignore
+    local_scheduler.stop_scheduler_loop()
+
     # 关闭时断开 Redis 连接（关当前绑定：集群切换后 redis_client 全局已过时）
     logger.info("关闭 Redis 连接")
     current = getattr(app.state, "redis", None)

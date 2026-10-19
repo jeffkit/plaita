@@ -420,7 +420,14 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
 def history(schedule_id: str, request: Request, limit: int = 10,
             redis: Redis = Depends(get_redis_or_none)):
     if (local := _get_local(request)) is not None:
-        records = local.fire_history(flow_store.get_flow_store(), schedule_id, limit)
+        # A48-03：与集群分支同口径先做归属校验（#63/#192）。fire_history 只按
+        # schedule_id 取数，不先确认调度属于当前租户就会跨租户泄漏执行 ID/错误。
+        store = flow_store.get_flow_store()
+        schedule = local.get_schedule(store, schedule_id,
+                                      tenant_id=tenant_scope(request))
+        if schedule is None:
+            raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+        records = local.fire_history(store, schedule_id, limit)
         return {"schedule_id": schedule_id, "records": records, "total": len(records)}
     _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
     limit = max(1, min(50, limit))

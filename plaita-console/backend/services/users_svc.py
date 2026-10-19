@@ -228,6 +228,22 @@ def tenant_is_active(store, tenant_id: Optional[str]) -> bool:
         return _tenant_active(session, tenant_id)
 
 
+def tenant_is_executable(store, tenant_id: Optional[str]) -> bool:
+    """运行面严格租户闸：非 default 租户行缺失视为**已删除**（#255 / A48-04）。
+
+    与 ``tenant_is_active`` 的区别只有「行缺失」一档：后者对缺失行 fail-open
+    是 #27/#237 的引导/存量兼容语义；但本地调度快照可能持有删除前的行，此时
+    Tenant 行已删、local_schedules 尚未被 404 补清扫，lenient 闸会让已删除
+    租户再执行一次。default 行缺失无法区分「已删除」与「尚未 bootstrap」，
+    因此 default 保留 fail-open（与 #255 清理口径一致）。
+    """
+    if not tenant_id or tenant_id == DEFAULT_TENANT_ID:
+        return tenant_is_active(store, tenant_id)
+    with store._session_local() as session:
+        row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
+        return row is not None and row.status == "active"
+
+
 def resolve_session(store, token: str) -> Optional[Dict[str, Any]]:
     """token -> {username, role, tenant_id, tenant_generation, platform_admin}。
 
