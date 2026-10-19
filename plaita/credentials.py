@@ -1,9 +1,12 @@
 """凭据解析——节点运行时按名取用外部服务的机密信息。
 
 存储形态：加密 JSON 文件（由编排台 console 在凭据保存时**原子替换**导出），
-``PLAITA_CREDENTIALS_FILE`` 指定路径（默认 ``.plaita-credentials.json``），
-``PLAITA_CREDENTIALS_KEY`` 为 Fernet 密钥（未设时尝试同级 ``.plaita-credentials.key``
-文件）。加密/解密依赖 ``cryptography``（``pip install plaita[credentials]``）。
+``PLAITA_CREDENTIALS_FILE`` 指定路径；未显式设置时与 console 同规则解析：
+``PLAITA_CONSOLE_DB_URL`` 为 SQLite 时落在 **DB 同目录**的
+``.plaita-credentials.json``（同一 DB 的多个副本因此读写同一份导出文件），
+否则回退当前工作目录。``PLAITA_CREDENTIALS_KEY`` 为 Fernet 密钥（未设时尝试
+同级 ``.plaita-credentials.key`` 文件）。加密/解密依赖 ``cryptography``
+（``pip install plaita[credentials]``）。
 
 文件缺失视为「尚未配置凭据」（空 store）；文件存在但为空/损坏则抛
 :class:`CredentialStoreCorruptError`（fail-loud），不会静默当成空 store。
@@ -59,9 +62,31 @@ DEFAULT_KEY_FILE = ".plaita-credentials.key"
 DEFAULT_TENANT_ID = "default"
 
 
+def _default_credentials_dir() -> Path:
+    """默认凭据文件目录：SQLite 时与 DB 同目录，否则 cwd。
+
+    与 console ``services.credentials_svc._db_dir`` 同规则。导出文件是 DB 的
+    派生缓存，按 cwd 落盘会让「同 DB 多副本」各持一份互不收敛的副本（A66-01
+    ~ A66-04）；按 DB 路径落盘则同一 SQLite 库的副本天然共享同一个文件。
+    """
+    db_url = os.environ.get("PLAITA_CONSOLE_DB_URL", "").strip()
+    if db_url.startswith("sqlite:///"):
+        raw = db_url[len("sqlite:///"):]
+        if raw and raw != ":memory:":
+            return Path(raw).resolve().parent
+    return Path.cwd()
+
+
 def credentials_base_file() -> Path:
-    """未按租户展开的基础凭据文件路径（``PLAITA_CREDENTIALS_FILE`` 或默认）。"""
-    return Path(os.environ.get("PLAITA_CREDENTIALS_FILE", DEFAULT_FILE))
+    """未按租户展开的基础凭据文件路径。
+
+    ``PLAITA_CREDENTIALS_FILE`` 显式设置时直接使用；否则与 console 导出一致，
+    落在 DB 同目录（SQLite）或 cwd。空字符串按未设置处理。
+    """
+    explicit = os.environ.get("PLAITA_CREDENTIALS_FILE", "").strip()
+    if explicit:
+        return Path(explicit)
+    return _default_credentials_dir() / DEFAULT_FILE
 
 
 def tenant_credentials_file(tenant_id: Optional[str], base: Optional[Path] = None) -> Path:
@@ -83,12 +108,19 @@ def credentials_file() -> Path:
 
 
 def credentials_key_file() -> Path:
-    """凭据解密密钥文件路径（``PLAITA_CREDENTIALS_KEY_FILE`` 或 cwd 默认文件）。
+    """凭据解密密钥文件路径（``PLAITA_CREDENTIALS_KEY_FILE`` 或 DB 同目录）。
+
+    未显式设置时与 console 的 ``credentials_key_file`` 同规则：SQLite 场景
+    落在 DB 同目录，否则 cwd——console 首次生成的密钥因此能被同 DB 副本的
+    引擎直接找到，不必每个 cwd 各放一份。
 
     只返回**路径**；``PLAITA_CREDENTIALS_KEY`` 的内联密钥不在此暴露——跨进程
     调用方应显式传路径，不要把密钥材料复制进子进程环境（plaita#256）。
     """
-    return Path(os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", DEFAULT_KEY_FILE))
+    explicit = os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", "").strip()
+    if explicit:
+        return Path(explicit)
+    return _default_credentials_dir() / DEFAULT_KEY_FILE
 
 
 def subprocess_credentials_env() -> Dict[str, str]:

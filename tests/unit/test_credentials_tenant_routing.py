@@ -11,9 +11,13 @@ import pytest
 from cryptography.fernet import Fernet
 
 from plaita.credentials import (
+    DEFAULT_FILE,
+    DEFAULT_KEY_FILE,
     CredentialError,
     credential_type,
+    credentials_base_file,
     credentials_file,
+    credentials_key_file,
     get_credential,
     tenant_credentials_file,
 )
@@ -70,6 +74,43 @@ class TestTenantCredentialsFile:
 
     def test_default_context_reads_base_file(self, cred_env):
         assert credentials_file() == cred_env
+
+
+class TestDefaultPathResolution:
+    """A66-01/A66-03：默认导出/密钥路径与 DB 同目录（console 同源）。
+
+    导出文件是 DB 的派生缓存；按 cwd 落盘会让同 DB 多副本各持一份、删除/
+    轮换不收敛。默认路径必须跟着 DB 走，显式 env 仍然优先。
+    """
+
+    def test_sqlite_db_dir_is_default_base(self, tmp_path, monkeypatch):
+        db = tmp_path / "console.db"
+        monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", f"sqlite:///{db}")
+        monkeypatch.delenv("PLAITA_CREDENTIALS_FILE", raising=False)
+        monkeypatch.delenv("PLAITA_CREDENTIALS_KEY_FILE", raising=False)
+
+        assert credentials_base_file() == tmp_path / DEFAULT_FILE
+        assert credentials_key_file() == tmp_path / DEFAULT_KEY_FILE
+
+    def test_non_sqlite_falls_back_to_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", "postgresql://u:p@h/db")
+        monkeypatch.delenv("PLAITA_CREDENTIALS_FILE", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        assert credentials_base_file() == tmp_path / DEFAULT_FILE
+
+    def test_explicit_env_wins_over_db_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
+        explicit = tmp_path / "explicit.json"
+        monkeypatch.setenv("PLAITA_CREDENTIALS_FILE", str(explicit))
+
+        assert credentials_base_file() == explicit
+
+    def test_empty_env_treated_as_unset(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
+        monkeypatch.setenv("PLAITA_CREDENTIALS_FILE", "")
+
+        assert credentials_base_file() == tmp_path / DEFAULT_FILE
 
 
 class TestGetCredentialTenantRouting:
