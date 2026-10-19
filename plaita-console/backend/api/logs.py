@@ -2,7 +2,9 @@
 日志查看 API
 提供日志查询和实时日志流接口
 """
+import asyncio
 import json
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -17,9 +19,19 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     from api.redis_scan import scan_keys  # type: ignore
 
 try:
+    from .sse_redis import SSE_REDIS_RETRY_SECONDS, get_sse_async_redis
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from api.sse_redis import (  # type: ignore
+        SSE_REDIS_RETRY_SECONDS,
+        get_sse_async_redis,
+    )
+
+try:
     from ..auth import tenant_scope
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from auth import tenant_scope  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -434,29 +446,51 @@ async def stream_logs(
     多租户（plaita#192）：日志频道是平台级通配订阅（``plaita:logs:stream:*``
     等），频道本身不含租户段——漏过滤时租户 A 的流会收到全平台日志。这里在
     事件生成器里逐条目按 ``tenant_id`` 收窄；平台视角（无租户上下文）保持全量。
+
+    非阻塞消费（#259）：pubsub 必须是 ``redis.asyncio`` 客户端（实现在
+    ``sse_redis.py``，与 execution SSE 的 C4-4 修法同款）。历史实现在 async
+    生成器里调同步 ``get_message(timeout=1.0)``，一次空闲等待就独占事件循环
+    1s——单条 viewer 连接即可让 console 所有请求（含 /health）卡顿。``redis``
+    依赖只用于「本地单机模式 503」的可用性闸门，不参与流式读取。
     """
     tenant = tenant_scope(request)
 
     async def event_generator():
         """事件生成器"""
-        pubsub = redis.pubsub()
-        
-        # 订阅日志通道
+        # 订阅日志通道（载荷语义与历史实现逐字一致）
         if service_type and instance_id:
             channel = f"plaita:logs:stream:{service_type}:{instance_id}"
         elif service_type:
             channel = f"plaita:logs:stream:{service_type}:*"
         else:
             channel = "plaita:logs:stream:*"
-        
-        if "*" in channel:
-            pubsub.psubscribe(channel)
-        else:
-            pubsub.subscribe(channel)
-        
+
+        pubsub = None
         try:
+            try:
+                pubsub = get_sse_async_redis(request).pubsub()
+                if "*" in channel:
+                    await pubsub.psubscribe(channel)
+                else:
+                    await pubsub.subscribe(channel)
+            except Exception as exc:
+                # 订阅失败不静默：给运维留可观测痕迹后结束本条流
+                logger.warning("日志 SSE 订阅失败 %s: %s", channel, exc)
+                return
+
             while True:
-                message = pubsub.get_message(timeout=1.0)
+                try:
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=1.0
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Redis 抖动不终结 SSE：短暂退避后继续消费
+                    logger.warning("日志 SSE 消费异常（保持连接）%s: %s", channel, exc)
+                    await asyncio.sleep(SSE_REDIS_RETRY_SECONDS)
+                    continue
+
                 if message and message["type"] in ("message", "pmessage"):
                     try:
                         data = json.loads(message["data"])
@@ -481,16 +515,23 @@ async def stream_logs(
                         }
                     except Exception:
                         continue
-                
+
                 # 检查客户端是否断开
                 if await request.is_disconnected():
                     break
         finally:
-            if "*" in channel:
-                pubsub.punsubscribe(channel)
-            else:
-                pubsub.unsubscribe(channel)
-            pubsub.close()
-    
+            if pubsub is not None:
+                try:
+                    if "*" in channel:
+                        await pubsub.punsubscribe(channel)
+                    else:
+                        await pubsub.unsubscribe(channel)
+                except Exception:
+                    pass
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    pass
+
     return EventSourceResponse(event_generator())
 
