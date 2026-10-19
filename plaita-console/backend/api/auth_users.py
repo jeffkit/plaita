@@ -4,11 +4,11 @@
 - GET  /api/auth/me       当前身份（需认证）
 - POST /api/auth/switch-tenant  切换会话活跃租户（需认证）
 - POST /api/auth/logout   注销当前会话（需认证）
-- GET  /api/users         用户列表（admin）
-- POST /api/users         创建用户（admin；platform_admin/跨租户 memberships 需平台管理员）
-- POST /api/users/{u}/role      改遗留全局角色（admin）
-- POST /api/users/{u}/password  重置密码（admin）
-- DELETE /api/users/{u}         删除用户（admin）
+- GET  /api/users         用户列表（admin；租户 admin 仅见本租户成员）
+- POST /api/users         创建用户（平台管理员）
+- POST /api/users/{u}/role      改遗留全局角色（平台管理员）
+- POST /api/users/{u}/password  重置密码（平台管理员；本人可自助改密）
+- DELETE /api/users/{u}         删除用户（平台管理员）
 """
 
 import hashlib
@@ -19,11 +19,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
-    from ..auth import require_auth
+    from ..auth import (
+        NO_ACTIVE_TENANT_DETAIL,
+        ensure_platform_admin,
+        require_auth,
+    )
     from ..services import login_guard, tenants_svc, users_svc
     from ..services.flow_store import get_flow_store
 except ImportError:
-    from auth import require_auth  # type: ignore
+    from auth import (  # type: ignore
+        NO_ACTIVE_TENANT_DETAIL,
+        ensure_platform_admin,
+        require_auth,
+    )
     from services import login_guard, tenants_svc, users_svc  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
 
@@ -170,15 +178,27 @@ def logout(request: Request, identity: Dict = Depends(require_auth)):
 
 
 @router.get("/users")
-def list_users(_: Dict = Depends(require_auth)):
-    return {"users": users_svc.list_users(get_flow_store())}
+def list_users(identity: Dict = Depends(require_auth)):
+    """用户列表。平台管理员看全量；租户 admin 只看本租户成员（#260）。
+
+    租户 admin 曾是「全局用户清单」的旁路（可直接枚举平台管理员用户名）；
+    ``_ADMIN_PREFIXES`` 仍拦住 editor/viewer，本函数再按租户收窄读面。
+    """
+    store = get_flow_store()
+    if identity.get("platform_admin"):
+        return {"users": users_svc.list_users(store)}
+    tenant_id = identity.get("tenant_id")
+    if not tenant_id:
+        # 普通会话无活跃租户在 require_auth 已 fail-closed；这里兜底不降级
+        raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
+    return {"users": users_svc.list_users(store, tenant_id=tenant_id)}
 
 
 @router.post("/users")
 def create_user(req: CreateUserRequest, request: Request, identity: Dict = Depends(require_auth)):
-    # 平台管理员专属字段：platform_admin / 跨租户 memberships
-    if (req.platform_admin or req.memberships) and not identity.get("platform_admin"):
-        raise HTTPException(status_code=403, detail="仅平台管理员可设置平台权限或租户成员关系")
+    ensure_platform_admin(
+        request, identity, action="user.create", resource="user", target=req.username
+    )
     try:
         users_svc.create_user(
             get_flow_store(), req.username, req.password, req.role,
@@ -193,7 +213,11 @@ def create_user(req: CreateUserRequest, request: Request, identity: Dict = Depen
 
 
 @router.post("/users/{username}/role")
-def set_role(username: str, req: RoleRequest, request: Request, _: Dict = Depends(require_auth)):
+def set_role(username: str, req: RoleRequest, request: Request,
+             identity: Dict = Depends(require_auth)):
+    ensure_platform_admin(
+        request, identity, action="user.set_role", resource="user", target=username
+    )
     try:
         users_svc.set_role(get_flow_store(), username, req.role)
     except users_svc.UserError as e:
@@ -204,7 +228,13 @@ def set_role(username: str, req: RoleRequest, request: Request, _: Dict = Depend
 
 @router.post("/users/{username}/password")
 def set_password(username: str, req: PasswordRequest, request: Request,
-                 _: Dict = Depends(require_auth)):
+                 identity: Dict = Depends(require_auth)):
+    """重置密码：平台管理员可改任意账号；其余角色只能改自己（自助）。"""
+    if username != identity.get("actor"):
+        ensure_platform_admin(
+            request, identity, action="user.set_password", resource="user",
+            target=username,
+        )
     try:
         users_svc.set_password(get_flow_store(), username, req.password)
     except users_svc.UserError as e:
@@ -214,9 +244,15 @@ def set_password(username: str, req: PasswordRequest, request: Request,
 
 
 @router.delete("/users/{username}")
-def delete_user(username: str, request: Request, _: Dict = Depends(require_auth)):
+def delete_user(username: str, request: Request,
+                identity: Dict = Depends(require_auth)):
+    ensure_platform_admin(
+        request, identity, action="user.delete", resource="user", target=username
+    )
     try:
-        deleted = users_svc.delete_user(get_flow_store(), username)
+        deleted = users_svc.delete_user(
+            get_flow_store(), username, allow_platform_admin=True
+        )
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not deleted:

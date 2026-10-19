@@ -11,6 +11,9 @@
 - GET/HEAD：任意已认证角色（viewer+）
 - 其余方法：editor+
 - admin 专属前缀：/api/users、/api/audit、/api/credentials、/api/cluster、/api/tenants
+- **平台身份专属（#260）**：/api/users 的全局账号变更（创建/改角色/改密/删除）
+  与 /api/services/{id}/stop 等全局生命周期操作要求 ``platform_admin``——
+  租户角色 admin ≠ 平台身份；本人改密是自助操作，不受此限
 - 生产环境（PLAITA_CONSOLE_ENV=prod）的 DELETE：admin
 
 租户上下文（多租户）：
@@ -58,6 +61,10 @@ _PLATFORM_AUTH_SOURCES = frozenset({"api-key", "admin-key"})
 #: #254：普通会话无活跃租户的具名拒绝。任何「无租户 → 平台全量/default」
 #: 的降级都不得再出现（fail-closed，对齐 #239 租户参数不得降级）。
 NO_ACTIVE_TENANT_DETAIL = "当前会话无活跃租户，请先切换租户或联系管理员"
+
+#: #260：全局账号 / 全局生命周期操作的具名拒绝。租户角色（哪怕是租户
+#: admin）不是平台身份，不能借此触达平台账号或全局服务。
+PLATFORM_ADMIN_REQUIRED_DETAIL = "该操作需要平台管理员"
 
 
 def require_auth(request: Request) -> Dict[str, Any]:
@@ -124,12 +131,14 @@ def require_auth(request: Request) -> Dict[str, Any]:
         if not request.url.path.startswith("/api/auth/"):
             raise HTTPException(status_code=403, detail=NO_ACTIVE_TENANT_DETAIL)
 
-    _authorize(request, role)
+    # 先落 state 再裁决：_authorize 的自助改密例外需要 actor（#260），
+    # 拒绝审计也需要 actor。_authorize 抛错时 state 已可观测，无副作用。
     request.state.actor = actor
     request.state.role = role
     request.state.auth_source = source
     request.state.tenant_id = tenant_id
     request.state.platform_admin = platform_admin
+    _authorize(request, role)
     return {
         "actor": actor,
         "role": role,
@@ -226,12 +235,26 @@ def _authorize(request: Request, role: str) -> None:
 
     method = request.method.upper()
 
+    # #260：自助改密不是全局账号操作——任意已认证角色都可改自己的密码。
+    # 仅当路径用户名与当前 actor 完全一致时豁免 admin 前缀（路由 handler
+    # 会再用解码后的路径参数复核，二者不一致即按全局操作裁决）。
+    actor = getattr(getattr(request, "state", None), "actor", None)
+    self_password = (
+        method == "POST"
+        and bool(actor)
+        and path == f"/api/users/{actor}/password"
+    )
+
     if any(path.startswith(p) for p in _ADMIN_PREFIXES):
-        if role != "admin":
+        if not self_password and role != "admin":
             raise HTTPException(status_code=403, detail="该操作需要 admin 角色")
 
     # /api/auth/* 是会话自操作（me/logout/switch-tenant），任何已认证角色可用
     if path.startswith("/api/auth/"):
+        return
+
+    # 自助改密同样跳过 viewer 写闸（写的是自己的凭据）
+    if self_password:
         return
 
     if method in ("GET", "HEAD", "OPTIONS"):
@@ -245,6 +268,51 @@ def _authorize(request: Request, role: str) -> None:
         and role != "admin"
     ):
         raise HTTPException(status_code=403, detail="生产环境的删除操作需要 admin 角色")
+
+
+def ensure_platform_admin(
+    request: Request,
+    identity: Dict[str, Any],
+    *,
+    action: str,
+    resource: str = "",
+    target: str = "",
+) -> None:
+    """全局账号 / 全局生命周期操作的平台身份闸（#260）。
+
+    租户角色 ``admin`` 只代表租户内管理权，不是平台身份。命中拒绝时：
+    - 审计记录 ``<action>.denied``（detail.denied=true，含 method/path）
+    - WARNING 日志（拒绝尝试必须可观测，不做静默降级）
+
+    自助操作（改自己的密码）不走本函数；路由层先按 ``actor`` 判断。
+    """
+    if identity.get("platform_admin"):
+        return
+    logger.warning(
+        "拒绝非平台管理员操作 action=%s actor=%s target=%s path=%s",
+        action,
+        identity.get("actor"),
+        target,
+        request.url.path,
+    )
+    try:
+        from .services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+
+    audit_svc.record(
+        request,
+        action=f"{action}.denied",
+        resource=resource or "auth",
+        resource_id=str(target or ""),
+        detail={
+            "denied": True,
+            "reason": "platform_admin_required",
+            "method": request.method,
+            "path": request.url.path,
+        },
+    )
+    raise HTTPException(status_code=403, detail=PLATFORM_ADMIN_REQUIRED_DETAIL)
 
 
 # 兼容旧引用（部分测试/脚本直接 import）

@@ -10,6 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from redis import Redis
 
+try:
+    from ..auth import ensure_platform_admin, require_auth
+except ImportError:
+    from auth import ensure_platform_admin, require_auth  # type: ignore
+
 router = APIRouter()
 
 
@@ -521,15 +526,24 @@ async def get_service(
 @router.post("/services/{instance_id}/stop")
 async def stop_service(
     instance_id: str,
-    request: StopServiceRequest,
+    req: StopServiceRequest,
+    request: Request,
+    identity: Dict = Depends(require_auth),
     redis: Redis = Depends(get_redis)
 ):
     """
     发送停止指令给指定服务
-    
+
     - **instance_id**: 服务实例 ID
     - **graceful**: 是否优雅停止
+
+    #260 / A42-02：服务实例是全局（跨租户）生命周期对象，租户 editor/admin
+    都不是平台身份。该操作要求 platform_admin；拒绝进审计。
     """
+    ensure_platform_admin(
+        request, identity, action="service.stop", resource="service",
+        target=instance_id,
+    )
     # 验证服务存在
     pattern = f"plaita:registry:*:{instance_id}"
     keys = redis.keys(pattern)
@@ -541,7 +555,7 @@ async def stop_service(
     control_channel = f"plaita:control:{instance_id}"
     command = {
         "command": "stop",
-        "graceful": request.graceful,
+        "graceful": req.graceful,
         "timestamp": datetime.now().isoformat()
     }
     
@@ -551,7 +565,7 @@ async def stop_service(
         "status": "sent",
         "instance_id": instance_id,
         "command": "stop",
-        "graceful": request.graceful
+        "graceful": req.graceful
     }
 
 

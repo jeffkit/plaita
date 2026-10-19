@@ -1,0 +1,29 @@
+plaita#260 negative control (B2 第三十五轮)
+HEAD: 373395e + working tree fix
+
+== 修复后独立探针（tenant-admin/editor 攻击链全部阻断）==
+[tenant-admin-reset-root] 403 {"detail":"该操作需要平台管理员"}
+[owned-root] 401 {"detail":"用户名或密码错误"}
+[tenant-admin-delete-root2] 403 {"detail":"该操作需要平台管理员"}
+[root2-exists] 200
+[editor-stop-service] 403 {"detail":"该操作需要平台管理员"} published= 0
+
+== 负控：仅在 auth.ensure_platform_admin 首行插入 return（保留新测试）==
+[tenant-admin-reset-root] 200 {"success":true,"username":"root"}
+[owned-root] 200 {'token': '39fdcfa8da0842c38104068b5ead2ef34b312f02858dcb5e5f6abc1f1f47eae5', 'username': 'root', 'role': 'admin', 'expires_at': '2026-10-26T03:03:56.968950', 'platform_admin': True, 'memberships': [{'tenant_id': 'default', 'role': 'admin'}], 'active_tenant': 'default'}
+[tenant-admin-delete-root2] 200 {"success":true,"username":"root2"}
+[root2-exists] 401
+[editor-stop-service] 200 {"status":"sent","instance_id":"inst-global","command":"stop","graceful":false} published= 1
+
+FAILED plaita-console/backend/tests/console/test_issue260_platform_account_guard.py::test_tenant_admin_cannot_reset_platform_admin_password
+FAILED plaita-console/backend/tests/console/test_issue260_platform_account_guard.py::test_tenant_admin_cannot_delete_platform_admin
+FAILED plaita-console/backend/tests/console/test_issue260_platform_account_guard.py::test_tenant_admin_cannot_create_user_or_change_global_role
+FAILED plaita-console/backend/tests/console/test_issue260_platform_account_guard.py::test_tenant_editor_and_admin_cannot_stop_global_service
+4 failed, 11 passed, 291 warnings in 4.27s
+
+（4 条失败均为 `assert 200 == 403` 精确红：改密/删号/建号/改角色/停服务
+在闸被还原后重新 200；11 条正向/读面/成员管理用例保持绿。）
+
+== 恢复修复后 ==
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+15 passed, 303 warnings in 4.20s

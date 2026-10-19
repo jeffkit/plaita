@@ -19,6 +19,7 @@ Plaita 流程引擎可视化管理控制台
 - **模型**：`tenants` + `tenant_members`（用户↔租户多对多，租户内 admin/editor/viewer 角色）；`users.platform_admin` 为平台管理员（管理租户/成员，可带 `X-Tenant-ID` 头跨租户操作）。
 - **会话**：登录响应含 `memberships` 与 `active_tenant`；`POST /api/auth/switch-tenant` 切换活跃租户；前端侧边栏提供租户切换器。成员变更即吊销该用户全部会话。
 - **无活跃租户 fail-closed（#254）**：普通用户会话若没有任何有效租户成员关系（典型：被移出租户后重新登录），管理 API 一律 **403「当前会话无活跃租户」**——不回退 `users.role` 遗留全局角色，不把 `None` 当作平台全量视角，写路径也不回退 `default`。只有可证明的平台级身份（`PLAITA_CONSOLE_ADMIN_API_KEY` / `users.platform_admin` / insecure 开发开关）享有平台全量视角与写路径 default 回退。
+- **租户角色 ≠ 平台身份（#260）**：`/api/users` 的全局账号变更（创建 / 改角色 / 改密 / 删除）要求 `users.platform_admin`（或平台级 API-Key）；租户 admin 只能经 `/api/tenants/{tid}/members/*` 管理**本租户**成员，不能操作 `platform_admin=True` 的账号，`GET /api/users` 也只返回本租户成员。全局服务停止（`POST /api/services/{id}/stop`）同样只允许平台身份。任何已认证角色都可以修改自己的密码；被拒绝的尝试进审计（`*.denied`）。
 - **隔离**：流程/版本/执行/调度/凭据/自定义节点/属性类型/Copilot 会话/审计/部署记录全部携带 `tenant_id`，查询按会话租户过滤，跨租户访问即 not-found。存量库首次多租户启动时自动迁移：建 `default` 租户、回填数据、legacy admin 提升为平台管理员。
 - **凭据明文归属（#254）**：`GET /api/credentials/{name}` 返回明文前校验租户归属——租户上下文必须命中本租户记录，跨租户同名凭据返回 404（不泄露存在性与明文）。
 - **租户内唯一**：`flow_id`、凭据名、自定义节点 type、属性类型名的唯一性均为租户内唯一（同名流程可共存于不同租户）。
