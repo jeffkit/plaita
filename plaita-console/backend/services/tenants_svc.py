@@ -23,6 +23,8 @@ from typing import Any, Dict, Iterable, List
 
 from sqlalchemy import delete, func, select
 
+from plaita.core.url_redaction import _scrub_exception_text
+
 try:
     from ..models.flow import (
         CopilotThread,
@@ -281,20 +283,82 @@ def _publish_status(redis_client, tenant_id: str, status: str) -> None:
     publish_tenant_status(redis_client, tenant_id, status)
 
 
-def publish_all_tenant_status(redis_client, store) -> None:
-    """启动兜底：把权威库里的全部租户状态回填到 Redis 短视图。
+def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
+    """启动对账：以 DB 为权威对齐 Redis 租户短视图（#27 / #255 / A2R25-06）。
 
-    补齐「console 停机期间改过状态 / Redis 被清空」的漂移——否则 worker 侧
-    只有 console 运行时改动的状态可见。失败静默（不阻断启动）。
+    除了把 DB 现存租户的状态回填（console 停机期间改状态 / Redis 被清空），
+    还必须识别**反向漂移**：Redis-only 恢复（RDB/键恢复）会把删除时写下的
+    ``disabled`` 墓碑回滚成删除前的 ``active``（或整条缺失），而 DB 里该租户
+    已不存在。只回填现存租户的话，这条旧字段会继续 active，worker 的
+    ``tenant_is_active`` 对已删除租户 fail-open，队列里的旧 start/resume 照跑。
+
+    因此扫描 ``plaita:tenant_status`` 的全部字段：DB 不存在的非 default 租户
+    显式回落 ``disabled`` 墓碑并 WARNING。default 行缺失按 #237/A48-04 口径
+    保持 fail-open（无法区分「已删除」与「尚未 bootstrap」，bootstrap 已在
+    本钩子之前完成，缺失本身就是异常，只告警不改写）。
+
+    返回 ``{"published", "disabled_stale", "failed"}``；读取/回写失败各计入
+    ``failed`` 并 loud——不得把「没对账成功」伪装成「没有漂移」。
     """
+    summary = {"published": 0, "disabled_stale": 0, "failed": 0}
     if redis_client is None:
-        return
+        return summary
     try:
-        from plaita.server.tenant_status import publish_tenant_status
+        from plaita.server.tenant_status import (
+            TENANT_STATUS_KEY,
+            publish_tenant_status,
+        )
     except ImportError:
-        return
-    for t in list_tenants(store):
-        publish_tenant_status(redis_client, t["id"], t["status"])
+        return summary
+    known = {t["id"]: t["status"] for t in list_tenants(store)}
+    for tenant_id, status in known.items():
+        publish_tenant_status(redis_client, tenant_id, status)
+        summary["published"] += 1
+
+    try:
+        entries = redis_client.hgetall(TENANT_STATUS_KEY)
+    except Exception as exc:  # noqa: BLE001 — 不阻断启动，但必须 loud
+        summary["failed"] += 1
+        logger.error(
+            "租户状态对账：读取 Redis 短视图失败，无法识别已删租户墓碑: %s",
+            _scrub_exception_text(exc),
+        )
+        return summary
+
+    stale: List[str] = []
+    for raw_tenant_id in entries:
+        tenant_id = _redis_text(raw_tenant_id)
+        if tenant_id in known:
+            continue
+        if tenant_id == DEFAULT_TENANT_ID:
+            logger.warning(
+                "租户状态对账：Redis 有 default 记录但 DB 无 default 行，"
+                "保持 fail-open（#237/A48-04，不改写为 disabled）"
+            )
+            continue
+        try:
+            # 直接 HSET 而不是 publish_tenant_status：后者吞异常只告警，
+            # 对账失败需要计入 failed 才能让启动摘要反映真实状态。
+            redis_client.hset(
+                TENANT_STATUS_KEY, key=tenant_id, value=_TENANT_STATUS_DISABLED
+            )
+        except Exception as exc:  # noqa: BLE001
+            summary["failed"] += 1
+            logger.error(
+                "租户状态对账：回写已删租户 %s 的 disabled 墓碑失败: %s",
+                tenant_id, _scrub_exception_text(exc),
+            )
+            continue
+        summary["disabled_stale"] += 1
+        stale.append(tenant_id)
+
+    if stale:
+        logger.warning(
+            "租户状态对账：Redis 短视图含 DB 已不存在的租户 %s，已回落 "
+            "disabled 墓碑（#255/A2R25-06；Redis-only 恢复不得复活已删租户）",
+            stale,
+        )
+    return summary
 
 
 def rotate_contract_secret(store, tenant_id: str) -> Dict[str, str]:

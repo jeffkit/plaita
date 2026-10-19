@@ -90,6 +90,11 @@
 - **租户状态闸 fail-open 维持**：缺失记录 = active（default 单租部署兼容）；
   但每次命中（无客户端 / 读失败 / 无记录）必须 `WARNING` 并累加进程内计数
   `tenant_fail_open_total()`（`plaita/server/tenant_status.py`，本轮实现）。
+- **Redis-only 恢复（A2R25-06）**：console 启动对账以 DB 为权威，把 Redis
+  短视图里 DB 已不存在的非 default 租户回落成 `disabled` 墓碑——恢复旧快照
+  把删除时的 disabled 回滚成 active 时，重启 console 即纠正。`tenant_is_active`
+  对「整条记录缺失」仍 fail-open（#237）：无法与升级前未发布状态区分；
+  default 行缺失同样保持（#237/A48-04），只告警不改写。
 
 ## 5. Review 检查项（新增执行单元时）
 

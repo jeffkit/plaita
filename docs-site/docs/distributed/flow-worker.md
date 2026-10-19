@@ -519,6 +519,10 @@ Redis 后端的 `delete_execution_state` 是**删除即吊销**：同一 pipelin
 
 **删除墓碑（A51-01/A52-01）**：同一 pipeline（fenced 档同一段 Lua）还会写平台根键 `plaita:exec_tombstone:{execution_id}`，值含 `tenant` / `deleted_at` / `reason`。删除 API 返回后，任何仍在队列/PEL 里的 `start` 载体都不再被 `start_flow` 的「盘上无状态 = 全新执行」分支重建：worker 在派发闸（配额之前）、`start_flow` 直达调用、start 幂等命中、节点失败重投与死信守卫克隆前复核墓碑（同租户才命中；跨租户同 id 放行）。新 `execution_id` 不受影响；同 id 重放被 ack 丢弃并释放 dedup 映射。墓碑 TTL 默认跟随 `PLAITA_EXECUTION_STATE_TTL_DAYS`，可用 `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` 覆盖（`<=0` 永久）。墓碑过期后的历史载体由 `PLAITA_TASK_MAX_AGE_SECONDS`（默认 30 天，`0` 关闭）在派发时丢弃。租户清理（`_purge_tenant_redis`）不触碰平台根墓碑，因此租户删除+同名重建后旧 start 仍不会执行。
 
+**恢复路径的墓碑/世代语义（A2R25-04/05）**：墓碑同样拦 `resume` 载体——删除后从备份只恢复状态键不会撤销删除。`resume_flow` 在 load 之后、取租约之前（以及租约内复核）命中墓碑即具名返回 `deleted`，绝不 `run_distributed`；派发闸对 `resume` 与 `start` 同口径丢弃。fenced save/delete 的 CAS 还要求 `fence` 与 `fencegen` 都等于本次世代：只恢复旧 `state+fence` 而 `fencegen` 仍为新值时，陈旧 worker 抛 `ExecutionLeaseError`（WARNING 留痕），不会重新获得写/删权。
+
+**恢复后的列表可见性（A2R25-07）**：`load_execution_state` 读到状态键后会检查索引成员，缺失即补回（恢复/外部写入只 SET 状态键的自愈路径，WARNING 留痕）；需要全量兜底时用 `RedisExecutionStorage.rebuild_execution_index()` 或 `plaita-console/scripts/reindex_executions.py --tenant <slug>` 重建索引（O(N) SCAN，仅在恢复现场手工调用）。
+
 > `plaita.storage.sqlalchemy` 仍存在，但其方法为 `async def`，与上述同步契约及 Worker 调用方式不兼容。公开路径已拒绝 `db` 作为 execution/flow 存储；详见根目录 `MIGRATION.md`「Storage：db 执行/流程存储从公开路径下架」。
 
 ## 与 ServiceManager 协作

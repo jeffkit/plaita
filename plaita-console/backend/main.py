@@ -294,16 +294,32 @@ async def lifespan(app: FastAPI):
             }
             logger.warning("启动同步已发布流程到引擎存储失败（忽略，不阻断启动）: %s", e)
 
-        # 租户状态回填（#27）：console 停机期间改过状态 / Redis 被清空时，
-        # worker 侧的租户状态闸只有这份短视图可读——启动时以权威库为准对齐
+        # 租户状态对账（#27/#255/A2R25-06）：console 停机期间改过状态 / Redis
+        # 被清空 / Redis-only 恢复回滚墓碑时，worker 侧的租户状态闸只有这份
+        # 短视图可读——启动时以权威库为准对齐，并把 DB 已不存在的租户回落
+        # disabled（否则恢复的旧快照会让已删租户继续 fail-open active）。
         try:
             try:
                 from .services import tenants_svc
             except ImportError:
                 from services import tenants_svc  # type: ignore
-            tenants_svc.publish_all_tenant_status(redis_client, app.state.store)
+            status_reconcile = tenants_svc.publish_all_tenant_status(
+                redis_client, app.state.store
+            )
+            logger.info(
+                "租户状态对账：published=%s disabled_stale=%s failed=%s",
+                status_reconcile.get("published"),
+                status_reconcile.get("disabled_stale"),
+                status_reconcile.get("failed"),
+            )
+            if status_reconcile.get("disabled_stale"):
+                logger.warning(
+                    "租户状态对账发现 Redis 恢复了已删除租户的旧状态：%s 个"
+                    "租户已回落 disabled 墓碑（#255/A2R25-06）",
+                    status_reconcile.get("disabled_stale"),
+                )
         except Exception as e:  # noqa: BLE001 — 不得阻断启动
-            logger.warning("租户状态回填失败（忽略，不阻断启动）: %s", e)
+            logger.warning("租户状态对账失败（忽略，不阻断启动）: %s", e)
 
     # HMAC 重放保护：本地档（Redis 不可达）直接配进程内存档；集群档配 Redis
     # nonce store（enable_replay_protection 内部会 ping 一次，连不上同样降级
