@@ -61,6 +61,14 @@ python -m plaita_console              # 或使用 plaita-console 命令
 强制干跑并留下 WARNING；`tenant_id` 取认证上下文，只有平台身份可代传其它
 租户，跨租户请求 403 + 审计。派发台账同时记录认证主体 `actor` 与生效租户。
 
+`POST /api/dispatch/one` 与 `/api/dispatch/plan` 的容量路由带**队列维度**
+（A64-05）：只有注册 metadata `queue_name` 与本次派发队列一致的 worker
+才可能成为目标（缺 metadata 的存量 worker 按默认队列
+`plaita:flow:queue` 处理），跨队列候选以稳定原因 `queue: mismatch` 进入
+`rejected`；命中目标后消息投到目标 worker 消费的队列。避免 v1/v2 金丝雀
+或滚动升级时目标指向另一队列、消息落到无人消费队列后交接耗尽、
+执行被误终态化为 `AffinityHandoverExhausted`。
+
 `GET /api/dispatch/ledger`（A54-02）：平台身份返回全量台账与全局队列对账；
 租户身份只返回**当前世代**的本租户条目（台账写入 `tenant_generation`，
 同名租户重建后旧世代条目不可见；缺失世代的旧行 fail-closed），且不返回

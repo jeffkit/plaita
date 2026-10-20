@@ -22,6 +22,8 @@
 3. **纯函数派发门**（``filter_dispatchable`` / ``select_dispatch_target`` /
    ``decide_route``）：输入候选快照、输出「可派 + 拒绝原因 + 目标」，供
    intake flow / console / 单测共用同一份判据（策略改定义不改代码）。
+   A64-05 起带**队列维度**：``queue_name`` 给定时先按候选消费队列过滤，
+   跨队列候选以 ``queue: mismatch`` 拒绝（缺 metadata 按默认队列）。
 4. **影子模式**（``shadow_dispatch_plan``）：只算不发——plan 里只包含目标与
    队列名，**绝不写任何 Redis 键**（验收 5：影子期生产队列零新增）。
 5. **显式派发目标闸**（``TARGET_INSTANCE_FIELD`` / ``target_mismatch``）：
@@ -84,6 +86,10 @@ DEFAULT_DISPATCH_QUEUE = "plaita:flow:queue"
 
 #: 拒绝原因前缀：**稳定字符串**，供 flow 侧 assignment 节点按前缀分支
 #: （改文案不算改语义，改前缀算）。
+#: A64-05：候选消费的队列（registry metadata ``queue_name``）与本次派发队列
+#: 不一致。容量路由必须带队列维度——跨队列选中 target 会让消息落到 target
+#: 永远读不到的队列，worker 交接耗尽后把执行误终态化为 error。
+REASON_QUEUE_MISMATCH = "queue: mismatch"
 REASON_DISK = "disk: low free space"
 REASON_SATURATED = "saturated: active_tasks >= concurrency"
 REASON_DRAINING = "draining"
@@ -138,6 +144,20 @@ def shadow_mode_from_env() -> bool:
 def dispatch_queue_from_env() -> str:
     """派发队列名（``PLAITA_CONSOLE_TASK_QUEUE``，与 console 发单同源）。"""
     return (os.environ.get(DISPATCH_QUEUE_ENV) or "").strip() or DEFAULT_DISPATCH_QUEUE
+
+
+def candidate_queue_name(metadata: Any) -> str:
+    """候选消费的队列名（registry metadata ``queue_name``）。
+
+    缺失/空白/非字符串 ⇒ **默认队列**（未升级 worker 的注册 metadata 没有
+    该键；它们按历史约定消费 ``plaita:flow:queue``）。返回原字符串，不做
+    去空白——worker 用的是原值作为 Stream 键，改写会让判据与事实漂移。
+    """
+    if isinstance(metadata, dict):
+        raw = metadata.get("queue_name")
+        if isinstance(raw, str) and raw.strip():
+            return raw
+    return DEFAULT_DISPATCH_QUEUE
 
 
 # ------------------------------------------------------------------ 容量块
@@ -406,14 +426,25 @@ class DispatchCandidate:
             capacity_stale=is_capacity_stale(block),
         )
 
-    def reject_reason(self) -> Optional[str]:
+    @property
+    def queue_name(self) -> str:
+        """候选实际消费的队列名（缺 metadata ⇒ 默认队列，兼容存量 worker）。"""
+        return candidate_queue_name(self.metadata)
+
+    def reject_reason(self, queue_name: Optional[str] = None) -> Optional[str]:
         """不可派发原因（前缀稳定，见 ``REASON_*``）；可派发返回 ``None``。
 
-        判定顺序即优先级：**status 白名单** → 容量缺失/陈旧（放行）→ 盘 → 饱和。
+        判定顺序即优先级：**队列维度** → status 白名单 → 容量缺失/陈旧
+        （放行）→ 盘 → 饱和。``queue_name`` 为 ``None`` 时不做队列过滤
+        （纯函数调用方/看板保持原语义）；给定时，候选消费的队列必须与
+        本次派发队列一致——A64-05：跨队列 target 的消息会投到 target 读不到
+        的队列，worker 交接耗尽后把执行误终态化为 error。
         S18-02A：只有 ``running`` 参与派发；``starting/draining/stopping/
         stopped`` 与未知状态在容量判定**之前**就被拒——即使它上报了完美容量，
         也不得成为派发目标（A46-01）。
         """
+        if queue_name is not None and self.queue_name != queue_name:
+            return f"{REASON_QUEUE_MISMATCH} (worker consumes {self.queue_name})"
         if self.status != "running":
             return {
                 "starting": REASON_STARTING,
@@ -471,17 +502,23 @@ class DispatchRejection:
 
 def filter_dispatchable(
     candidates: Iterable[Any],
+    *,
+    queue_name: Optional[str] = None,
 ) -> Tuple[List[DispatchCandidate], List[DispatchRejection]]:
     """容量门：``(可派候选, 被拒候选)``。
 
     接受 ``DispatchCandidate`` 或任意同形对象（``ServiceInfo`` / duck-typed
     stub）。**纯函数**——不读 Redis、不写 Redis、不改入参。
+
+    ``queue_name`` 给定时候选必须先过队列维度：只有消费该队列的 worker
+    才有资格成为目标（缺 metadata 按默认队列，见
+    :func:`candidate_queue_name`）。``None`` = 不做队列过滤（看板/存量调用）。
     """
     allowed: List[DispatchCandidate] = []
     rejected: List[DispatchRejection] = []
     for item in candidates:
         cand = item if isinstance(item, DispatchCandidate) else DispatchCandidate.from_service_info(item)
-        reason = cand.reject_reason()
+        reason = cand.reject_reason(queue_name)
         if reason is None:
             allowed.append(cand)
         else:
@@ -496,12 +533,17 @@ def filter_dispatchable(
     return allowed, rejected
 
 
-def select_dispatch_target(candidates: Iterable[Any]) -> Optional[DispatchCandidate]:
+def select_dispatch_target(
+    candidates: Iterable[Any],
+    *,
+    queue_name: Optional[str] = None,
+) -> Optional[DispatchCandidate]:
     """在容量门之上做确定性选择：剩余盘最多 → 在跑最少 → id 字典序。
 
     无可派候选返回 ``None``（调用方据此走「本轮不派单」而非「随便派一台」）。
+    ``queue_name`` 语义同 :func:`filter_dispatchable`。
     """
-    allowed, _ = filter_dispatchable(candidates)
+    allowed, _ = filter_dispatchable(candidates, queue_name=queue_name)
     if not allowed:
         return None
     return sorted(allowed, key=lambda c: c.sort_key())[0]
@@ -526,13 +568,21 @@ class RouteDecision:
         return self.target.instance_id if self.target else None
 
 
-def decide_route(candidates: Iterable[Any]) -> RouteDecision:
-    """容量路由（**唯一**实现）：容量门 + 确定性排序 + 稳定原因。
+def decide_route(
+    candidates: Iterable[Any],
+    *,
+    queue_name: Optional[str] = None,
+) -> RouteDecision:
+    """容量路由（**唯一**实现）：队列维度 + 容量门 + 确定性排序 + 稳定原因。
 
     ``build_dispatch_plan`` / 真实派发 / flow 侧 assignment 节点都走这里——
     排序键在 ``DispatchCandidate.sort_key`` 里只有一份，本函数不再复制判据。
+
+    ``queue_name`` 给定时**先按队列过滤再排序**：``active_tasks`` 等容量
+    指标只在同一队列内可比（A64-05）。跨队列候选以
+    ``REASON_QUEUE_MISMATCH`` 进入 ``rejected``，不静默消失。
     """
-    allowed, rejected = filter_dispatchable(candidates)
+    allowed, rejected = filter_dispatchable(candidates, queue_name=queue_name)
     if not allowed:
         return RouteDecision(
             target=None, reason=REASON_ROUTE_NO_TARGET,
@@ -622,11 +672,12 @@ def shadow_dispatch_plan(
     影子期唯一输出是 HTTP 响应/日志）。
     """
     shadow = shadow_mode_from_env()
+    queue = queue_name or dispatch_queue_from_env()
     candidates = load_worker_capacity(redis_client, service_type=service_type)
-    route = decide_route(candidates)
+    route = decide_route(candidates, queue_name=queue)
     return {
         "shadow": shadow,
-        "queue": (queue_name or dispatch_queue_from_env()),
+        "queue": queue,
         "issue_ids": list(issue_ids or []),
         "target": route.target_instance_id,
         "reason": route.reason,

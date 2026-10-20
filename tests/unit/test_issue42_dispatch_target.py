@@ -66,10 +66,12 @@ def _block(free_disk_gib, *, disk_blocked=False, active_tasks=0, concurrency=1):
     }
 
 
-def _candidate(instance_id, *, block=None, status="running"):
+def _candidate(instance_id, *, block=None, status="running", queue_name=None):
     from plaita.server.capacity import CAPACITY_METADATA_KEY
 
     metadata = {} if block is None else {CAPACITY_METADATA_KEY: block}
+    if queue_name is not None:
+        metadata["queue_name"] = queue_name
     return cap.DispatchCandidate.from_service_info(ServiceInfo(
         instance_id=instance_id,
         service_type="flow_worker",
@@ -346,6 +348,57 @@ class TestDecideRoute:
         assert cap.decide_route([a, b, c]).target_instance_id == "w-a"
         assert cap.decide_route([c, a, b]).target_instance_id == "w-a"
         assert cap.decide_route([b, c, a]).target_instance_id == "w-a"
+
+    def test_queue_filter_excludes_cross_queue_candidate(self):
+        """A64-05：v1 派发不得选中消费 v2 的 worker（即使它容量最好）。"""
+        route = cap.decide_route(
+            [
+                _candidate("w-v1", block=_block(100.0), queue_name="q:v1"),
+                _candidate("w-v2", block=_block(500.0), queue_name="q:v2"),
+            ],
+            queue_name="q:v1",
+        )
+        assert route.target_instance_id == "w-v1"
+        assert [r.instance_id for r in route.rejected] == ["w-v2"]
+        assert route.rejected[0].reason.startswith(cap.REASON_QUEUE_MISMATCH)
+
+    def test_queue_filter_without_match_returns_no_target(self):
+        """只注册 v2 worker ⇒ v1 路由 no-target（转广播），不得跨队列定向。"""
+        route = cap.decide_route(
+            [_candidate("w-v2", block=_block(500.0), queue_name="q:v2")],
+            queue_name="q:v1",
+        )
+        assert route.target_instance_id is None
+        assert route.reason == cap.REASON_ROUTE_NO_TARGET
+        assert [r.instance_id for r in route.rejected] == ["w-v2"]
+        assert route.rejected[0].reason.startswith(cap.REASON_QUEUE_MISMATCH)
+
+    def test_missing_queue_metadata_means_default_queue(self):
+        """缺 ``queue_name`` metadata 的存量 worker 按默认队列参与匹配。"""
+        legacy = _candidate("w-legacy", block=_block(120.0))
+        assert legacy.queue_name == cap.DEFAULT_DISPATCH_QUEUE
+        assert cap.decide_route(
+            [legacy], queue_name=cap.DEFAULT_DISPATCH_QUEUE,
+        ).target_instance_id == "w-legacy"
+        route = cap.decide_route([legacy], queue_name=CANARY_QUEUE)
+        assert route.target_instance_id is None
+        assert route.rejected[0].reason.startswith(cap.REASON_QUEUE_MISMATCH)
+
+    def test_blank_or_non_string_queue_metadata_means_default_queue(self):
+        for raw in ("", "   ", None, 12, [], {}):
+            cand = cap.DispatchCandidate.from_service_info(ServiceInfo(
+                instance_id="w-x", service_type="flow_worker", host="h",
+                metadata={"queue_name": raw},
+            ))
+            assert cand.queue_name == cap.DEFAULT_DISPATCH_QUEUE
+
+    def test_queue_filter_none_keeps_legacy_cross_queue_selection(self):
+        """``queue_name=None`` = 不做队列过滤（看板/存量调用语义不变）。"""
+        route = cap.decide_route(
+            [_candidate("w-v2", block=_block(500.0), queue_name="q:v2")],
+        )
+        assert route.target_instance_id == "w-v2"
+        assert route.rejected == []
 
     def test_red_baseline_no_target_means_low_disk_worker_claims(self):
         """★ 红先证的**语义**形态：没有目标字段时，低盘 worker **不会**让出。
