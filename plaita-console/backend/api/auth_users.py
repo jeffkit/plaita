@@ -343,4 +343,7 @@ def _audit_login_failed(request: Request, username: str, client_ip: str,
         },
         actor=username,
         tenant_id="",
+        # A55-S2：合并键含 reason——「口令错误」与「锁定期拒绝」是两种证据，
+        # 不能在同一 60s 窗口里被前一行吞掉（否则锁定尝试在审计面不可见）。
+        key_suffix=reason,
     )

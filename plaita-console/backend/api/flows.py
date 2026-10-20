@@ -214,6 +214,13 @@ def ai_generate_stream(req: AiGenerateRequest, request: Request,
     except ImportError:  # 平铺布局（cwd=backend）运行时
         from services import ai_flow
 
+    # A55-S1 残面：r55 时本端点只有 ensure_platform_admin 的 denied 审计，
+    # 成功生成（平台宿主上跑编码 Agent）无留痕。只记 agent/工作区租户，
+    # prompt 与生成物一律不入库。
+    _audit(request, "flow.ai_generate", "",
+           {"agent": req.agent, "tenant_id": tenant_id or ""},
+           tenant_id=tenant_id or "")
+
     def event_stream():
         for ev in ai_flow.generate_flow_events(req.prompt.strip(), tenant_id=tenant_id):
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"

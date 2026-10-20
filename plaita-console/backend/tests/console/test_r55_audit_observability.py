@@ -499,3 +499,148 @@ def test_metrics_scans_only_registered_queue_family_and_is_bounded(env: Env):
 
     dlq = env.client.get("/api/queues/dlq", headers=root).json()
     assert all("plaita:event:" not in s["name"] for s in dlq["streams"])
+
+
+# --------------------------------------------------- r55 S1-S5 落地面残面（r56）
+def test_ai_generate_success_path_is_audited(env: Env, monkeypatch):
+    """S1 残面：r55 的 ai-generate 只有 denied 审计，成功生成要留痕。
+
+    A55-01 把它归在「仅拒绝审计」的 17 个端点里，S1 的修复清单只列了
+    26 个「完全无审计」+ cluster 19，于是它是唯一剩下的 denial-only 写面。
+    """
+    root = _login(env.client, "root", ROOT_PW)
+    from services import ai_flow
+
+    monkeypatch.setattr(
+        ai_flow, "generate_flow_events",
+        lambda prompt, tenant_id=None: iter([{"type": "run_started"}]),
+    )
+    resp = env.client.post(
+        "/api/flows/ai-generate/stream",
+        json={"prompt": "PROMPT-SECRET", "agent": "glm-52"},
+        headers=root,
+    )
+    assert resp.status_code == 200, resp.text
+    row = _assert_audit("flow.ai_generate", actor="root")
+    assert row["detail"]["agent"] == "glm-52"
+    assert row["tenant_id"] == "default"
+    assert row["detail"]["tenant_id"] == "default"
+    assert "PROMPT-SECRET" not in json.dumps(row["detail"])
+
+
+def test_tenant_member_ops_audit_target_tenant(env: Env):
+    """S3 残面：成员关系的生效租户是**目标租户**，不是平台 actor 的 ""。"""
+    root = _login(env.client, "root", ROOT_PW)
+    users_svc.create_user(env.store, "viewer2", "viewer2-password", "viewer")
+
+    resp = env.client.post(
+        f"/api/tenants/{TENANT_A}/members",
+        json={"username": "viewer2", "role": "viewer"},
+        headers=root,
+    )
+    assert resp.status_code == 200, resp.text
+    row = _assert_audit("tenant.add_member",
+                        resource_id=f"{TENANT_A}/viewer2")
+    assert row["tenant_id"] == TENANT_A
+    assert row["detail"]["target_tenant"] == TENANT_A
+
+    resp = env.client.put(
+        f"/api/tenants/{TENANT_A}/members/viewer2",
+        json={"username": "viewer2", "role": "editor"},
+        headers=root,
+    )
+    assert resp.status_code == 200, resp.text
+    row = _assert_audit("tenant.set_member_role",
+                        resource_id=f"{TENANT_A}/viewer2")
+    assert row["tenant_id"] == TENANT_A
+    assert row["detail"]["target_tenant"] == TENANT_A
+
+    resp = env.client.delete(
+        f"/api/tenants/{TENANT_A}/members/viewer2", headers=root)
+    assert resp.status_code == 200, resp.text
+    row = _assert_audit("tenant.remove_member",
+                        resource_id=f"{TENANT_A}/viewer2")
+    assert row["tenant_id"] == TENANT_A
+    assert row["detail"]["target_tenant"] == TENANT_A
+
+
+def test_login_failure_reasons_are_separately_throttled(env: Env, monkeypatch):
+    """S2 残面：合并键必须含 reason——锁定尝试不能被口令错误行吞掉。"""
+    from services import login_guard
+
+    resp = env.client.post(
+        "/api/auth/login",
+        json={"username": "root", "password": "wrong-password"},
+    )
+    assert resp.status_code == 401
+    first = _assert_audit("auth.login_failed", actor="root")
+    assert first["detail"]["reason"] == "bad_credentials"
+
+    monkeypatch.setattr(login_guard, "retry_after", lambda ip, username: 30)
+    resp = env.client.post(
+        "/api/auth/login",
+        json={"username": "root", "password": "wrong-password"},
+    )
+    assert resp.status_code == 429
+    reasons = {
+        row["detail"]["reason"] for row in _rows("auth.login_failed")
+        if row["actor"] == "root"
+    }
+    assert reasons == {"bad_credentials", "locked"}
+
+
+def test_platform_global_ops_audit_empty_tenant_with_target(env: Env):
+    """S3 验收：平台全局操作 tenant=""，目标租户落在 detail.target_tenant。"""
+    root = _login(env.client, "root", ROOT_PW)
+    resp = env.client.post(
+        "/api/tenants", json={"id": "tenant-b", "name": "Tenant B"}, headers=root)
+    assert resp.status_code == 200, resp.text
+    row = _assert_audit("tenant.create", resource_id="tenant-b")
+    assert row["tenant_id"] == ""
+    assert row["detail"]["target_tenant"] == "tenant-b"
+
+
+def test_api_key_write_with_tenant_header_audits_that_tenant(env: Env):
+    """S3 验收：API-key 带 X-Tenant-ID=acme 时审计落 acme，不回退 default。"""
+    headers = {"X-Admin-API-Key": ADMIN_KEY, "X-Tenant-ID": TENANT_A}
+    resp = env.client.post(
+        "/api/nodes",
+        json={"node_type": "custom-r55-header", "node_name": "Header"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    row = _assert_audit("node.register", resource_id="custom-r55-header")
+    assert row["tenant_id"] == TENANT_A
+    assert row["auth_source"] == "api-key"
+
+
+def test_denied_audit_growth_is_bounded_under_1000_bad_requests(env: Env):
+    """S2 验收：1000 次同键坏请求只落一行，合并计数不丢。"""
+    import types
+
+    state = types.SimpleNamespace(
+        actor="viewer1", tenant_id=TENANT_A, auth_source="session",
+        key_fingerprint="", request_id="", role="viewer",
+    )
+    request = types.SimpleNamespace(
+        state=state,
+        client=types.SimpleNamespace(host="10.0.0.9"),
+        method="POST",
+        url=types.SimpleNamespace(path="/api/nodes"),
+    )
+    for _ in range(1000):
+        audit_svc.record_denied(
+            request, "node.denied", "node", detail={"denied": True},
+            actor="viewer1", tenant_id=TENANT_A, key_suffix="role_required",
+        )
+    assert len(_rows("node.denied")) == 1
+
+    # 窗口到期后的下一行必须带 suppressed=999（不是静默丢弃）
+    audit_svc.record_denied(
+        request, "node.denied", "node", detail={"denied": True},
+        actor="viewer1", tenant_id=TENANT_A, key_suffix="role_required",
+        window_seconds=0,
+    )
+    rows = _rows("node.denied")
+    assert len(rows) == 2
+    assert max(row["detail"].get("suppressed", 0) for row in rows) == 999
