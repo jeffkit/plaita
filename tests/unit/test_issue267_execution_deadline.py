@@ -389,6 +389,44 @@ class TestRequestTimeoutTotalBudget:
         assert "requestTimeout" in str(exc.value)
 
 
+class TestIssue267ScaledWorstCase:
+    """issue 正文 38.6h 配置的等比例缩小复现（不真跑 21×600s×11 次）。
+
+    原配置：requestTimeout=600 × maxRedirects=20 × retryTimes=10，且
+    Flow.timeout 缺省。这里等比缩到 requestTimeout=0.2s、deadline=0.45s：
+    旧语义（逐跳重置 + 无 deadline）会跑 ~21×0.08s×11 次 ≈ 18s；修复后必须在
+    执行 deadline 附近被切断，且抛具名 ExecutionDeadlineError。
+    """
+
+    def test_scaled_worst_case_is_cut_at_deadline(self, slow_redirect_server, monkeypatch):
+        monkeypatch.setenv(EXECUTION_DEADLINE_ENV, "0.45")
+        flow = Flow.model_validate(
+            {
+                "flow_id": "issue267-38h-scaled",
+                "nodes": [
+                    {"id": "s", "type": "start", "next": "h"},
+                    {
+                        "id": "h",
+                        "type": "http",
+                        "url": slow_redirect_server,
+                        "requestTimeout": 0.2,
+                        "maxRedirects": 20,
+                        "errorHandler": {"strategy": "abort", "retryTimes": 10},
+                        "next": "e",
+                    },
+                    {"id": "e", "type": "end"},
+                ],
+            }
+        )
+        started = time.time()
+        with pytest.raises(ExecutionDeadlineError):
+            flow.run()
+        elapsed = time.time() - started
+        assert elapsed < 1.5, (
+            f"38.6h 配置的等比复现跑出 {elapsed:.2f}s：deadline/总预算未切断"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 5. worker 收尸契约：deadline 不重试，可结构化落盘
 # ---------------------------------------------------------------------------

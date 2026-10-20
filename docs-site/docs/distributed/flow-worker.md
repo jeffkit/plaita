@@ -182,8 +182,10 @@ python -m plaita.server.flow_worker \
   1001 / 非校验 `ValueError` 是确定性错误，不重试（否则 abort 包装层会把 core
   的「执行 1 次」重新判成可重试，同一错误仍被 worker 重投 5 次）；#219 输出
   校验异常仍可重试；1002/1003 与未知码维持可重试；
-  链中出现超时（`NodeTimeoutError`/`FlowTimeoutError`）或取消
-  （`FlowCancelledException`）→ 维持现状终态化 error；
+  链中出现超时（`NodeTimeoutError`/`FlowTimeoutError`，含执行级
+  `ExecutionDeadlineError`——它是 `FlowTimeoutError` 子类，#267）或取消
+  （`FlowCancelledException`）→ 维持现状终态化 error；deadline 到期不会重投
+  （`_error_fields` 保留 code=-1 / `flow_error`，可从执行状态收尸）；
   **恢复守卫类** `ResumeGuardError`——策略层在**分发到节点 `resume()` 之前**
   逐个标记出来的那几个位点（continue/retry 想绕过 pending 挂起节点、resume 打在
   无挂起/非挂起 checkpoint 上、给出非 continue 的 resume 意图却没有 checkpoint），
