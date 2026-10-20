@@ -219,7 +219,15 @@ def get_credential_record(name: str, tenant_id: Optional[str] = None) -> Optiona
         row = session.scalars(query).first()
         if row is None:
             return None
-        return {"name": row.name, "tenant_id": row.tenant_id, "type": row.type, "desc": row.desc, "data": _decrypt(row.data_json)}
+        return {
+            "name": row.name,
+            "tenant_id": row.tenant_id,
+            "type": row.type,
+            "desc": row.desc,
+            # A2R24-07：与列表行同一投影，详情页不再缺更新时间。
+            "updated_at": row.updated_at.isoformat(),
+            "data": _decrypt(row.data_json),
+        }
 
 
 def save_credential(name: str, type_: str, data: Dict[str, Any], desc: str = "",

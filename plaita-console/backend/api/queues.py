@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
 from redis import Redis
 
 try:
@@ -55,6 +60,8 @@ class QueueDetailResponse(BaseModel):
     """队列详情响应"""
     name: str
     length: int
+    # A2R24-07：列表 QueueInfo 已投影 queue_type，详情补齐（页面不再靠猜）。
+    queue_type: str = "list"
     tasks: List[QueueTask]
 
 
@@ -96,7 +103,7 @@ class DlqListResponse(BaseModel):
     total: int
 
 
-class DlqReplayRequest(BaseModel):
+class DlqReplayRequest(StrictRequestModel):
     """死信回灌请求（A53-S2；平台管理员专属）。"""
     dlq_key: Optional[str] = Field(
         default=None,
@@ -720,6 +727,14 @@ async def get_queue(
 
     key_type = _text(redis.type(queue_name))
 
+    # 与列表同一口径：存在的键报真实类型；键尚不存在时按已知队列族回退
+    # （列表对未建键的零值行也是这么标注的）。
+    queue_type = (
+        key_type
+        if key_type != "none"
+        else ("stream" if _is_stream_key(queue_name) else "list")
+    )
+
     tasks = []
     if key_type == "stream":
         # Stream 队列（plaita:flow:queue）：XRANGE 取消息，payload 字段即任务 JSON
@@ -767,6 +782,7 @@ async def get_queue(
     return QueueDetailResponse(
         name=queue_name,
         length=length,
+        queue_type=queue_type,
         tasks=tasks
     )
 
