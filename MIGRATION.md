@@ -8,6 +8,25 @@
 
 ## Unreleased
 
+### console 列表 `total` 语义与分页参数（A2R24-02/05/08）
+
+**口径（contract）**：`/api/logs`、`/api/logs/instance/{id}`、`/api/events` 的
+`total` 从「本页返回条数」改为「扫描窗口内的匹配总数」（`truncated=true` 时是
+下界），并新增 `returned`（本页条数）与 `next_cursor`（键集游标，回传 `cursor`
+可翻完全部历史）；`limit=0`/负数现在 **422**（此前本地档返回 1 条、集群档返回
+空 + degraded）；`/api/logs/instance` 的 `order` 非 `asc`/`desc` 现在 **422**
+（此前静默按 asc/desc 之一执行）。`/api/queues/{name}` 的 Stream `start` 从
+「Stream ID」改为**索引**（与 list 同语义），`start>10000` 422，深队列改用
+`next_start_id`/`start_id` 排他游标。`/api/schedules/{id}/trigger` 统一返回
+`{success, mode, execution_id, msg_id}`（两模式字段不再互斥）。
+
+- **受影响**：把 `total` 当作「本页条数」的脚本/前端；依赖 `limit=0` 返回空或
+  一条的调用方；把 Stream ID 传给 `start` 的深队列客户端。
+- **迁移**：页大小改用 `returned`；需要全量历史时按 `next_cursor` 翻页；
+  队列深链用 `start_id`；触发响应按 `mode` 读对应标识（缺省侧为 `null`）。
+- **不受影响**：`/api/executions` 的 `total`（本来就是真匹配数）；响应里的
+  既有字段与排序方向。
+
 ### code 节点 `subprocess` 后端拒绝非 default 租户（A42-06）
 
 **口径（contract）**：`sandbox_backend="subprocess"` 在调用方租户不是

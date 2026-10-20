@@ -79,7 +79,13 @@ class EventInfo(BaseModel):
 
 class EventListResponse(BaseModel):
     events: List[EventInfo]
+    # A2R24-05：``total`` 是**匹配总数**（受全局扫描预算约束；``truncated=true``
+    # 时是下界），``returned`` 是本页条数；``next_cursor`` 可直接回传给
+    # ``?cursor=`` 继续翻页（历史不再在 limit 之外不可达）。
     total: int
+    returned: int = 0
+    truncated: bool = False
+    next_cursor: Optional[str] = None
     # A2R19-04：部分键读取失败时显式标注——空列表不等于「没有事件」。
     degraded: bool = False
     skipped: int = 0
@@ -160,14 +166,38 @@ def _scan_keys(redis: Redis, pattern: str, count: int = 100) -> List[str]:
 
 # ============ 事件 API ============
 
+def _parse_event_cursor(raw: Optional[str]) -> Optional[tuple]:
+    """解析 ``<timestamp>:<event_id>`` 游标（A2R24-05）。
+
+    时间戳是浮点数（无冒号），event_id 可能含冒号——按第一个冒号切分。
+    非法游标 422，不静默退回首页（否则翻页会无限重复）。
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    ts_part, sep, event_id = str(raw).strip().partition(":")
+    if not sep or not event_id:
+        raise HTTPException(status_code=422, detail="cursor 非法（需 <timestamp>:<event_id>）")
+    try:
+        return float(ts_part), event_id
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="cursor 非法（timestamp 不是数字）")
+
+
 @router.get("/events", response_model=EventListResponse)
 async def list_events(
     event_type: Optional[str] = None,
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: Optional[str] = None,
     request: Request = None,
     redis: Redis = Depends(get_redis),
 ):
-    """获取事件列表（plaita#192：按事件受信 tenant_id 收窄，平台视角全量）"""
+    """获取事件列表（plaita#192：按事件受信 tenant_id 收窄，平台视角全量）。
+
+    A2R24-05：``total`` 为匹配总数、``truncated`` 表示还有更多，``next_cursor``
+    传回 ``cursor`` 即可继续翻页。事件按 ``(timestamp, event_id)`` 降序，游标
+    是排他键集（同时间戳的多条事件不会被跳过）。
+    """
+    cursor_key = _parse_event_cursor(cursor)
     pattern = "plaita:event:*"
     keys = _scan_keys(redis, pattern)
     tenant = tenant_scope(request) if request is not None else None
@@ -219,18 +249,31 @@ async def list_events(
             continue
 
     events = list(events_by_id.values())
+    if cursor_key is not None:
+        events = [
+            event for event in events
+            if (event.timestamp or 0.0, event.event_id) < cursor_key
+        ]
     if skipped:
         logger.warning(
             "事件列表读取降级：%d/%d 个键读取失败（返回 %d 条，degraded=true）",
             skipped, len(keys), len(events),
         )
 
-    events.sort(key=lambda e: e.timestamp or 0, reverse=True)
-    events = events[:limit]
+    events.sort(key=lambda e: (e.timestamp or 0.0, e.event_id), reverse=True)
+    total = len(events)
+    page = events[:limit]
+    truncated = total > len(page)
+    next_cursor = None
+    if truncated and page:
+        next_cursor = f"{page[-1].timestamp or 0.0}:{page[-1].event_id}"
 
     return EventListResponse(
-        events=events,
-        total=len(events),
+        events=page,
+        total=total,
+        returned=len(page),
+        truncated=truncated,
+        next_cursor=next_cursor,
         degraded=skipped > 0,
         skipped=skipped,
     )

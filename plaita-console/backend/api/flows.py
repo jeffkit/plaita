@@ -48,6 +48,11 @@ try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
 except ImportError:
     from error_contract import error_detail, scrubbed_detail  # type: ignore
 
+try:  # A2R24-09：SSE 路由的 OpenAPI 媒体类型声明
+    from ..streaming import EventStreamResponse
+except ImportError:
+    from streaming import EventStreamResponse  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -111,6 +116,8 @@ class VersionView(BaseModel):
     created_by: str = ""
     # C5-1：草稿最近保存时间——前端保存时的乐观锁基准
     updated_at: Optional[str] = None
+    # A2R24-07：实体租户（平台视角下详情不再丢失归属）
+    tenant_id: str = ""
 
 
 class SaveVersionRequest(StrictRequestModel):
@@ -188,7 +195,7 @@ class AiGenerateRequest(StrictRequestModel):
     agent: str = Field("glm-52", description="编码 Agent profile（agentproc/agents.json）")
 
 
-@router.post("/flows/ai-generate/stream")
+@router.post("/flows/ai-generate/stream", response_class=EventStreamResponse)
 def ai_generate_stream(req: AiGenerateRequest, request: Request,
                        identity: Dict[str, Any] = Depends(require_auth)):
     """AI 生成流程（SSE）：后端作为 agent 宿主跑真实编码 Agent，事件流给前端。
@@ -247,10 +254,39 @@ def create_flow(req: CreateFlowRequest, request: Request = None):
     )
 
 
+def _resolve_platform_tenant(store, flow_id: str, version: Optional[str] = None) -> Optional[str]:
+    """平台全量视角（``tenant is None``）下解析实体租户（A2R24-07）。
+
+    ``flow_id`` 只在租户内唯一：两个租户都发布同名 flow 时，旧的
+    ``get_flow_record(..., tenant_id=None).first()`` 没有 tie-breaker，详情/
+    导出会静默挑一个。这里显式 409 并列出候选租户，调用方带 ``X-Tenant-ID``
+    重试即可。单租户（或不存在）时返回该租户，后续读面带租户过滤。
+    """
+    tenants = (
+        store.list_version_tenants(flow_id, version)
+        if version is not None
+        else store.list_flow_tenants(flow_id)
+    )
+    if len(tenants) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail(
+                "ambiguous_flow_id",
+                f"{flow_id}"
+                + (f"@{version}" if version is not None else "")
+                + " 在多个租户中存在，请用 X-Tenant-ID 指定租户",
+                available_tenants=tenants,
+            ),
+        )
+    return tenants[0] if tenants else None
+
+
 @router.get("/flows/{flow_id}", response_model=FlowDetailResponse)
 def get_flow(flow_id: str, request: Request = None):
     tenant = tenant_scope(request) if request is not None else None
     store = _store()
+    if tenant is None:
+        tenant = _resolve_platform_tenant(store, flow_id)
     rec = store.get_flow_record(flow_id, tenant_id=tenant)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
@@ -295,7 +331,10 @@ def delete_flow(flow_id: str, request: Request = None, redis: Redis = Depends(ge
 @router.get("/flows/{flow_id}/versions/{version}", response_model=VersionView)
 def get_version(flow_id: str, version: str, request: Request = None):
     tenant = tenant_scope(request) if request is not None else None
-    out = _store().get_version(flow_id, version, tenant_id=tenant)
+    store = _store()
+    if tenant is None:
+        tenant = _resolve_platform_tenant(store, flow_id, version)
+    out = store.get_version(flow_id, version, tenant_id=tenant)
     if out is None:
         raise HTTPException(status_code=404, detail=f"版本不存在: {flow_id}@{version}")
     return VersionView(
@@ -308,6 +347,7 @@ def get_version(flow_id: str, version: str, request: Request = None):
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
         updated_at=out.updated_at.isoformat() if out.updated_at else None,
+        tenant_id=out.tenant_id,
     )
 
 
@@ -397,6 +437,7 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
         updated_at=out.updated_at.isoformat() if out.updated_at else None,
+        tenant_id=out.tenant_id,
     )
 
 
@@ -469,6 +510,7 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
         updated_at=out.updated_at.isoformat() if out.updated_at else None,
+        tenant_id=out.tenant_id,
     )
 
 
@@ -487,14 +529,22 @@ def _audit(request: Request, action: str, resource_id: str,
 
 @router.get("/flows/{flow_id}/versions/{version}/export")
 def export_version(flow_id: str, version: str, request: Request = None):
-    """导出晋升包（定义 + 指纹 + 元信息），跨环境 console 晋升的载体。"""
+    """导出晋升包（定义 + 指纹 + 元信息），跨环境 console 晋升的载体。
+
+    A2R24-07：晋升包的 ``tenant_id`` 取**实体租户**，不再取调用方上下文
+    （平台 API-Key 导出 default 租户的版本时此前返回 ``""``，源租户丢失）。
+    平台全量视角下同名 flow 跨租户 → 409 ``ambiguous_flow_id``。
+    """
     tenant = tenant_scope(request) if request is not None else None
+    store = _store()
+    if tenant is None:
+        tenant = _resolve_platform_tenant(store, flow_id, version)
     try:
         from ..services import deployments as deployments_svc
     except ImportError:
         from services import deployments as deployments_svc  # type: ignore
     try:
-        return deployments_svc.build_promotion_package(_store(), flow_id, version,
+        return deployments_svc.build_promotion_package(store, flow_id, version,
                                                        tenant_id=tenant)
     except LookupError as e:
         raise HTTPException(

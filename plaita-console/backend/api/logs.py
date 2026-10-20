@@ -5,9 +5,10 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -26,6 +27,11 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         SSE_REDIS_RETRY_SECONDS,
         get_sse_async_redis,
     )
+
+try:  # A2R24-09：SSE 路由的 OpenAPI 媒体类型声明
+    from ..streaming import EventStreamResponse
+except ImportError:
+    from streaming import EventStreamResponse  # type: ignore
 
 try:
     from ..auth import tenant_scope
@@ -47,17 +53,24 @@ class LogEntry(BaseModel):
     instance_id: Optional[str] = Field(None, description="实例 ID")
     message: str = Field(..., description="日志消息")
     context: Optional[Dict[str, Any]] = Field(None, description="上下文信息")
+    # A2R24-05：集群档 Stream 条目 id（本地档为行 id）——游标翻页的键集成分。
+    entry_id: Optional[str] = Field(None, description="条目 id（游标翻页用）")
 
 
 class LogListResponse(BaseModel):
     """日志列表响应"""
     logs: List[LogEntry]
+    # A2R24-05：``total`` 是扫描窗口内的**匹配总数**（``truncated=true`` 时为
+    # 下界），``returned`` 是本页条数；``next_cursor`` 回传给 ``?cursor=``
+    # 可继续翻页（limit 之外的历史不再不可达）。
     total: int
+    returned: int = 0
     # A2R19-04：部分键/条目读取失败时显式标注——空列表不等于「没有日志」。
     degraded: bool = False
     skipped: int = 0
     # A2R20-04：全局条目/墙钟预算触界（或键扫描触界）时只是部分结果。
     truncated: bool = False
+    next_cursor: Optional[str] = None
 
 
 class LogStatsEntry(BaseModel):
@@ -120,6 +133,13 @@ def _entry_tenant(entry_data: Any) -> str:
     return tenant
 
 
+def _text(value: Any) -> str:
+    """把 Stream 字段/条目 id 归一化为 ``str``（bytes 客户端也安全）。"""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
 # 有界扫描的单请求键预算（#202）：日志每个键还要 XREVRANGE，键预算按端点
 # 读取代价收紧——触界返回部分结果并记 warning，不阻塞共享 Redis。
 _LOG_LIST_MAX_KEYS = 2000
@@ -141,6 +161,49 @@ _LOG_STATS_PER_KEY_MAX = 10_000
 # scan_keys 自身的 keys/rounds/墙钟预算）；触界返回 truncated=true，不长时间
 # 阻塞 console 事件循环。
 _LOG_TIME_BUDGET_S = 0.3
+
+# ---- A2R24-05：键集游标 ----
+# 排序键是 ``(timestamp, entry_id)``；游标编码为 ``<timestamp>|<entry_id>``
+# （ISO 时间戳含冒号，不能拿冒号当分隔符）。``entry_id`` 在集群档是 Stream
+# 条目 id、本地档是行 id。
+_LOG_CURSOR_SEP = "|"
+
+
+def _encode_log_cursor(entry: "LogEntry") -> str:
+    return f"{entry.timestamp}{_LOG_CURSOR_SEP}{entry.entry_id or ''}"
+
+
+def _parse_log_cursor(raw: Optional[str]) -> Optional[Tuple[str, str]]:
+    """解析游标；非法值 422（不静默退回首页，否则翻页会无限重复）。"""
+    if raw is None or not str(raw).strip():
+        return None
+    timestamp, sep, entry_id = str(raw).strip().partition(_LOG_CURSOR_SEP)
+    if not sep or not timestamp:
+        raise HTTPException(
+            status_code=422,
+            detail=f"cursor 非法（需 <timestamp>{_LOG_CURSOR_SEP}<entry_id>）",
+        )
+    return timestamp, entry_id
+
+
+def _log_sort_key(entry: "LogEntry") -> Tuple[str, str]:
+    return entry.timestamp, entry.entry_id or ""
+
+
+def _cursor_keeps(entry: "LogEntry", cursor: Optional[Tuple[str, str]], ascending: bool) -> bool:
+    if cursor is None:
+        return True
+    return _log_sort_key(entry) > cursor if ascending else _log_sort_key(entry) < cursor
+
+
+def _stream_cursor_bound(raw_entry_id: str) -> Optional[str]:
+    """把游标里的条目 id 转成排他 Stream 边界（``(id``），非 Stream ID 返回 None。"""
+    if not raw_entry_id or not _STREAM_ID_RE.match(raw_entry_id):
+        return None
+    return f"({raw_entry_id}"
+
+
+_STREAM_ID_RE = re.compile(r"^\d+(?:-\d+)?$")
 
 
 def _bounded_log_keys(redis: Redis, pattern: str, max_keys: int) -> tuple[List[str], bool]:
@@ -234,7 +297,8 @@ async def list_logs(
     service_type: Optional[str] = None,
     instance_id: Optional[str] = None,
     level: Optional[str] = None,
-    limit: int = Query(default=100, le=1000),
+    limit: int = Query(default=100, ge=1, le=1000),
+    cursor: Optional[str] = None,
     request: Request = None,
     redis: Redis = Depends(get_redis_or_none)
 ):
@@ -244,25 +308,48 @@ async def list_logs(
     - **service_type**: 按服务类型筛选
     - **instance_id**: 按实例 ID 筛选
     - **level**: 按日志级别筛选
-    - **limit**: 返回数量限制
+    - **limit**: 返回数量限制（1..1000；``0``/负数 422）
+    - **cursor**: 上一页的 ``next_cursor``（键集游标，倒序翻页）
     """
+    cursor_key = _parse_log_cursor(cursor)
     # 本地单机模式：读 SQLite 执行日志
     local_fs, is_local = _local_store(request) if request else (None, False)
     if is_local:
-        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit,
-                                        tenant_id=tenant_scope(request))
+        before_ts = None
+        before_id = None
+        if cursor_key is not None:
+            try:
+                before_ts = datetime.fromisoformat(cursor_key[0])
+            except ValueError:
+                raise HTTPException(status_code=422, detail="cursor 非法（timestamp 不是 ISO）")
+            if cursor_key[1]:
+                try:
+                    before_id = int(cursor_key[1])
+                except ValueError:
+                    before_id = None
+        rows = local_fs.list_local_logs(
+            level=level, execution_id=instance_id, limit=limit + 1,
+            tenant_id=tenant_scope(request),
+            before_ts=before_ts, before_id=before_id,
+        )
+        entries = [
+            LogEntry(
+                timestamp=r["timestamp"],
+                level=r["level"],
+                service_type=r["service_type"],
+                instance_id=r["instance_id"],
+                message=r["message"],
+                entry_id=r.get("entry_id"),
+            )
+            for r in rows
+        ]
+        page = entries[:limit]
         return LogListResponse(
-            logs=[
-                LogEntry(
-                    timestamp=r["timestamp"],
-                    level=r["level"],
-                    service_type=r["service_type"],
-                    instance_id=r["instance_id"],
-                    message=r["message"],
-                )
-                for r in rows
-            ],
-            total=len(rows),
+            logs=page,
+            total=len(entries),
+            returned=len(page),
+            truncated=len(entries) > len(page),
+            next_cursor=_encode_log_cursor(page[-1]) if len(entries) > len(page) and page else None,
         )
 
     # 构建 Stream key 模式（A2R28-01）：instance_id 存在时下推到精确键
@@ -291,9 +378,15 @@ async def list_logs(
             break
 
         try:
-            # 从 Redis Stream 读取日志（每键 count 受全局 remaining 约束）
-            count = min(limit, remaining)
-            entries = redis.xrevrange(key_str, count=count)
+            # 从 Redis Stream 读取日志（每键 count 受全局 remaining 约束；
+            # 多取 1 条用于判断是否还有下一页）
+            count = min(limit + 1, remaining)
+            bound = _stream_cursor_bound(cursor_key[1]) if cursor_key else None
+            entries = (
+                redis.xrevrange(key_str, max=bound, count=count)
+                if bound else
+                redis.xrevrange(key_str, count=count)
+            )
             remaining -= len(entries)
             if remaining <= 0 and len(entries) >= count:
                 # 读满了 remaining：该键可能还有未读条目（下一轮循环会 break，
@@ -313,7 +406,8 @@ async def list_logs(
                         service_type=entry_data.get("service_type"),
                         instance_id=entry_data.get("instance_id"),
                         message=entry_data.get("message", ""),
-                        context=json.loads(entry_data.get("context", "{}"))
+                        context=json.loads(entry_data.get("context", "{}")),
+                        entry_id=_text(entry_id),
                     )
 
                     # 级别筛选
@@ -323,6 +417,9 @@ async def list_logs(
                     # 实例筛选：key 择取已不含 instance_id，必须按条目字段
                     # 收窄，与 /logs/instance/{instance_id} 语义对齐（#102）
                     if instance_id and log_entry.instance_id != instance_id:
+                        continue
+
+                    if not _cursor_keeps(log_entry, cursor_key, ascending=False):
                         continue
 
                     logs.append(log_entry)
@@ -348,18 +445,22 @@ async def list_logs(
             len(logs),
         )
     
-    # 按时间排序
-    logs.sort(key=lambda x: x.timestamp, reverse=True)
+    # 按 (timestamp, entry_id) 排序；游标是排他键集，翻页不重不漏。
+    logs.sort(key=_log_sort_key, reverse=True)
     
     # 限制数量
-    logs = logs[:limit]
+    total = len(logs)
+    page = logs[:limit]
+    truncated = truncated or total > len(page)
     
     return LogListResponse(
-        logs=logs,
-        total=len(logs),
+        logs=page,
+        total=total,
+        returned=len(page),
         degraded=skipped > 0,
         skipped=skipped,
         truncated=truncated,
+        next_cursor=_encode_log_cursor(page[-1]) if truncated and page else None,
     )
 
 
@@ -367,8 +468,9 @@ async def list_logs(
 async def get_instance_logs(
     instance_id: str,
     level: Optional[str] = None,
-    limit: int = Query(default=100, le=1000),
-    order: str = Query(default="desc", description="排序方式: asc 或 desc"),
+    limit: int = Query(default=100, ge=1, le=1000),
+    order: Literal["asc", "desc"] = Query(default="desc", description="排序方式: asc 或 desc"),
+    cursor: Optional[str] = None,
     request: Request = None,
     redis: Redis = Depends(get_redis_or_none)
 ):
@@ -377,30 +479,52 @@ async def get_instance_logs(
     
     - **instance_id**: 服务实例 ID
     - **level**: 按日志级别筛选
-    - **limit**: 返回数量限制
-    - **order**: 排序方式 (asc: 时间正序, desc: 时间倒序)
+    - **limit**: 返回数量限制（1..1000；``0``/负数 422）
+    - **order**: 排序方式（``asc``/``desc``；其他值 422——不再静默按 asc）
+    - **cursor**: 上一页的 ``next_cursor``（与 ``order`` 同向翻页）
     """
+    cursor_key = _parse_log_cursor(cursor)
+    ascending = order == "asc"
     logs = []
 
     # 本地单机模式：instance_id 即本地执行 ID
     local_fs, is_local = _local_store(request) if request else (None, False)
     if is_local:
-        rows = local_fs.list_local_logs(level=level, execution_id=instance_id, limit=limit,
-                                        tenant_id=tenant_scope(request))
-        if order == "asc":
-            rows = list(reversed(rows))
+        before_ts = None
+        before_id = None
+        if cursor_key is not None:
+            try:
+                before_ts = datetime.fromisoformat(cursor_key[0])
+            except ValueError:
+                raise HTTPException(status_code=422, detail="cursor 非法（timestamp 不是 ISO）")
+            if cursor_key[1]:
+                try:
+                    before_id = int(cursor_key[1])
+                except ValueError:
+                    before_id = None
+        rows = local_fs.list_local_logs(
+            level=level, execution_id=instance_id, limit=limit + 1,
+            tenant_id=tenant_scope(request),
+            before_ts=before_ts, before_id=before_id, ascending=ascending,
+        )
+        entries = [
+            LogEntry(
+                timestamp=r["timestamp"],
+                level=r["level"],
+                service_type=r["service_type"],
+                instance_id=r["instance_id"],
+                message=r["message"],
+                entry_id=r.get("entry_id"),
+            )
+            for r in rows
+        ]
+        page = entries[:limit]
         return LogListResponse(
-            logs=[
-                LogEntry(
-                    timestamp=r["timestamp"],
-                    level=r["level"],
-                    service_type=r["service_type"],
-                    instance_id=r["instance_id"],
-                    message=r["message"],
-                )
-                for r in rows
-            ],
-            total=len(rows),
+            logs=page,
+            total=len(entries),
+            returned=len(page),
+            truncated=len(entries) > len(page),
+            next_cursor=_encode_log_cursor(page[-1]) if len(entries) > len(page) and page else None,
         )
 
     # A2R28-01：实例键级下推——发布侧键是
@@ -423,12 +547,22 @@ async def get_instance_logs(
             break
         
         try:
-            # 从 Redis Stream 读取日志（每键 count 受全局 remaining 约束）
-            count = min(limit * 2, remaining)
-            if order == "desc":
-                entries = redis.xrevrange(key_str, count=count)
+            # 从 Redis Stream 读取日志（每键 count 受全局 remaining 约束；
+            # 多取 1 条用于判断是否还有下一页）
+            count = min(limit + 1, remaining)
+            bound = _stream_cursor_bound(cursor_key[1]) if cursor_key else None
+            if ascending:
+                entries = (
+                    redis.xrange(key_str, min=bound, count=count)
+                    if bound else
+                    redis.xrange(key_str, count=count)
+                )
             else:
-                entries = redis.xrange(key_str, count=count)
+                entries = (
+                    redis.xrevrange(key_str, max=bound, count=count)
+                    if bound else
+                    redis.xrevrange(key_str, count=count)
+                )
             remaining -= len(entries)
             if remaining <= 0 and len(entries) >= count:
                 truncated = True
@@ -447,11 +581,15 @@ async def get_instance_logs(
                         service_type=entry_data.get("service_type"),
                         instance_id=entry_data.get("instance_id"),
                         message=entry_data.get("message", ""),
-                        context=json.loads(entry_data.get("context", "{}"))
+                        context=json.loads(entry_data.get("context", "{}")),
+                        entry_id=_text(entry_id),
                     )
                     
                     # 级别筛选
                     if level and log_entry.level != level:
+                        continue
+
+                    if not _cursor_keeps(log_entry, cursor_key, ascending=ascending):
                         continue
                     
                     logs.append(log_entry)
@@ -476,18 +614,22 @@ async def get_instance_logs(
             _LOG_LIST_MAX_KEYS, len(logs),
         )
     
-    # 按时间排序
-    logs.sort(key=lambda x: x.timestamp, reverse=(order == "desc"))
+    # 按 (timestamp, entry_id) 排序；游标与排序同向，翻页不重不漏。
+    logs.sort(key=_log_sort_key, reverse=not ascending)
     
     # 限制数量
-    logs = logs[:limit]
+    total = len(logs)
+    page = logs[:limit]
+    truncated = truncated or total > len(page)
     
     return LogListResponse(
-        logs=logs,
-        total=len(logs),
+        logs=page,
+        total=total,
+        returned=len(page),
         degraded=skipped > 0,
         skipped=skipped,
         truncated=truncated,
+        next_cursor=_encode_log_cursor(page[-1]) if truncated and page else None,
     )
 
 
@@ -635,7 +777,7 @@ async def get_log_stats(
     )
 
 
-@router.get("/logs/stream")
+@router.get("/logs/stream", response_class=EventStreamResponse)
 async def stream_logs(
     request: Request,
     service_type: Optional[str] = None,

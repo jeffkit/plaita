@@ -23,7 +23,7 @@
 """
 import json
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -107,6 +107,20 @@ class ScheduleUpdateRequest(StrictRequestModel):
 class CronPreviewRequest(StrictRequestModel):
     cron: str
     count: int = Field(5, ge=1, le=20)
+
+
+class TriggerScheduleResponse(BaseModel):
+    """A2R24-08：本地/集群两模式统一的触发响应。
+
+    历史：本地档只返回 ``execution_id``、集群档只返回 ``msg_id``，前端 TS 只
+    声明了 ``msg_id``（本地档读成 undefined）。现在两模式都返回同一字段集，
+    用 ``mode`` 说明标识语义，缺省侧为 ``null``（不是字段消失）。
+    """
+
+    success: bool
+    mode: Literal["local", "cluster"]
+    execution_id: Optional[str] = None
+    msg_id: Optional[str] = None
 
 
 # ============ 内部工具 ============
@@ -455,9 +469,14 @@ def disable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis
     return _view(schedule)
 
 
-@router.post("/schedules/{schedule_id}/trigger")
+@router.post(
+    "/schedules/{schedule_id}/trigger", response_model=TriggerScheduleResponse
+)
 def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_or_none)):
-    """立即触发一次：本地档直接进程内执行；集群档写任务队列 Stream。"""
+    """立即触发一次：本地档直接进程内执行；集群档写任务队列 Stream。
+
+    A2R24-08：两模式返回同一字段集（``mode`` 区分标识语义）。
+    """
     tenant = tenant_scope(request)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
@@ -473,7 +492,9 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
         detail["execution_id"] = execution_id
         _audit(request, "schedule.trigger", schedule_id, detail,
                tenant_id=schedule.get("tenant_id") or tenant or "")
-        return {"success": True, "execution_id": execution_id}
+        return TriggerScheduleResponse(
+            success=True, mode="local", execution_id=execution_id, msg_id=None,
+        )
 
     schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     if not _tenant_is_active(request, schedule.get("tenant_id")):
@@ -486,7 +507,9 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
     detail["queue_msg_id"] = msg_id
     _audit(request, "schedule.trigger", schedule_id, detail,
            tenant_id=schedule.get("tenant_id") or tenant or "")
-    return {"success": True, "msg_id": msg_id}
+    return TriggerScheduleResponse(
+        success=True, mode="cluster", execution_id=None, msg_id=msg_id,
+    )
 
 
 @router.get("/schedules/{schedule_id}/history")

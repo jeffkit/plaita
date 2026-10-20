@@ -347,7 +347,11 @@ export interface QueueTask {
 export interface QueueDetailResponse {
   name: string
   length: number
+  queue_type?: string
   tasks: QueueTask[]
+  // A2R24-02：Stream 分页按索引切片；next_start_id 是排他游标（深队列用）。
+  truncated?: boolean
+  next_start_id?: string | null
 }
 
 export interface LogEntry {
@@ -357,6 +361,8 @@ export interface LogEntry {
   instance_id?: string
   message: string
   context?: Record<string, unknown>
+  // A2R24-05：条目 id（游标翻页的键集成分）。
+  entry_id?: string | null
 }
 
 export interface LogListResponse {
@@ -367,6 +373,9 @@ export interface LogListResponse {
   degraded?: boolean
   skipped?: number
   truncated?: boolean
+  // A2R24-05：本页条数与下一页游标（total 是匹配总数；truncated 时是下界）。
+  returned?: number
+  next_cursor?: string | null
 }
 
 // ============ 集群管理类型 ============
@@ -1073,7 +1082,12 @@ export const api = {
     return request(`/schedules/${scheduleId}/disable`, { method: 'POST' })
   },
 
-  async triggerSchedule(scheduleId: string): Promise<{ success: boolean; msg_id: string }> {
+  async triggerSchedule(scheduleId: string): Promise<{
+    success: boolean
+    mode: 'local' | 'cluster'
+    execution_id?: string | null
+    msg_id?: string | null
+  }> {
     return request(`/schedules/${scheduleId}/trigger`, { method: 'POST' })
   },
 

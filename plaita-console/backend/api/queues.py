@@ -4,6 +4,7 @@
 """
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +35,11 @@ except ImportError:  # 最小安装（无引擎）时回灌端点返回 503
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+#: A2R24-02：索引分页的起点上限（与 executions page≤10000 同量级）。超过走
+#: ``start_id`` 排他游标，避免按索引切片时一次物化无界条目。
+_QUEUE_MAX_START = 10000
+_STREAM_ID_RE = re.compile(r"^\d+(?:-\d+)?$")
+
 
 # ============ 数据模型 ============
 
@@ -63,6 +69,10 @@ class QueueDetailResponse(BaseModel):
     # A2R24-07：列表 QueueInfo 已投影 queue_type，详情补齐（页面不再靠猜）。
     queue_type: str = "list"
     tasks: List[QueueTask]
+    # A2R24-02：Stream 分页按**索引**切片（与 list 同语义），并给出排他游标
+    # （``next_start_id``）供深队列直接跳到下一页；``truncated`` 表示后面还有。
+    truncated: bool = False
+    next_start_id: Optional[str] = None
 
 
 class DlqEntry(BaseModel):
@@ -704,20 +714,31 @@ async def get_queue(
     queue_name: str,
     start: int = 0,
     count: int = 20,
+    start_id: Optional[str] = None,
     redis: Redis = Depends(get_redis)
 ):
     """
     获取队列详情
 
     - **queue_name**: 队列名称（须为已登记的 plaita 队列键）
-    - **start**: 起始索引（非负）
+    - **start**: 起始索引（0..10000；list 与 stream 同为**索引**，不是 Stream ID）
     - **count**: 获取数量（1..200；上限外夹紧到边界）
+    - **start_id**: Stream 排他游标（上一页返回的 ``next_start_id``）；给出时
+      忽略 ``start``，直接 ``XRANGE (start_id`` 继续——深队列分页不必重扫前 N 条
     """
     # 资源范围：不登记的键一律 404（不泄露键是否存在）
     if not _queue_key_allowed(queue_name):
         raise HTTPException(status_code=404, detail="队列不存在")
     if start < 0:
         raise HTTPException(status_code=422, detail="start 不能为负数")
+    if start > _QUEUE_MAX_START:
+        raise HTTPException(
+            status_code=422,
+            detail=f"start 不能超过 {_QUEUE_MAX_START}（深队列请用 start_id 游标）",
+        )
+    if start_id is not None and not _STREAM_ID_RE.match(start_id.strip()):
+        raise HTTPException(status_code=422, detail="start_id 必须是合法的 Stream ID")
+    start_id = start_id.strip() if start_id else None
     # 下限 1 而非 0：`count=0` 会让 redis-py 的 `xrange`/`lrange` 客户端直接抛
     # `DataError: value is not an integer or out of range`（`XRANGE ... COUNT 0`
     # 不合法）——端点 500。此前 0 也没被拦（stream 键从未设过上限），#64 收紧
@@ -736,11 +757,26 @@ async def get_queue(
     )
 
     tasks = []
+    truncated = False
+    next_start_id = None
     if key_type == "stream":
-        # Stream 队列（plaita:flow:queue）：XRANGE 取消息，payload 字段即任务 JSON
+        # Stream 队列（plaita:flow:queue）：A2R24-02——``start`` 是**索引**，
+        # 不是 Stream ID。历史实现把 start 直接当 XRANGE 下界，``start=2`` 与
+        # ``start=0`` 返回同一页、index 恒为 0,1（翻页永远重复第一页）。
+        # 这里先按 start+count+1 取有界窗口再切片（多取 1 条用于判断还有更多）；
+        # 深队列由 ``start_id`` 排他游标走 O(log N) 路径。
         length = redis.xlen(queue_name)
-        entries = redis.xrange(queue_name, min=start, count=count)
-        for i, (msg_id, fields) in enumerate(entries):
+        if start_id is not None:
+            raw = redis.xrange(queue_name, min=f"({start_id}", count=count + 1)
+            window = raw[:count]
+            offset = 0
+            truncated = len(raw) > count
+        else:
+            raw = redis.xrange(queue_name, min="-", count=start + count + 1)
+            window = raw[start:start + count]
+            offset = start
+            truncated = len(raw) > start + count
+        for i, (msg_id, fields) in enumerate(window):
             msg_id = _text(msg_id)
             payload = None
             for k, v in fields.items():
@@ -758,10 +794,13 @@ async def get_queue(
                 data = {"_msg_id": msg_id, **data}
             else:
                 data = {"_msg_id": msg_id, "raw": data}
-            tasks.append(QueueTask(index=i, data=data))
+            tasks.append(QueueTask(index=offset + i, data=data))
+        if truncated and window:
+            next_start_id = _text(window[-1][0])
     elif key_type == "list":
         length = redis.llen(queue_name)
         items = redis.lrange(queue_name, start, start + count - 1)
+        truncated = start + len(items) < length
         for i, item in enumerate(items):
             try:
                 item_str = _text(item)
@@ -783,6 +822,8 @@ async def get_queue(
         name=queue_name,
         length=length,
         queue_type=queue_type,
-        tasks=tasks
+        tasks=tasks,
+        truncated=truncated,
+        next_start_id=next_start_id,
     )
 

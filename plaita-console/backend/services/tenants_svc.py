@@ -135,11 +135,21 @@ def list_tenants(store) -> List[Dict[str, Any]]:
 
 
 def get_tenant(store, tenant_id: str) -> Dict[str, Any]:
+    """租户详情（A2R24-07：补齐列表已有的 ``member_count``）。"""
     with store._session_local() as session:
         row = session.scalars(select(Tenant).where(Tenant.id == tenant_id)).first()
         if row is None:
             raise LookupError(f"租户不存在: {tenant_id}")
-        return _to_dict(row)
+        out = _to_dict(row)
+        out["member_count"] = int(
+            session.scalar(
+                select(func.count())
+                .select_from(TenantMember)
+                .where(TenantMember.tenant_id == tenant_id)
+            )
+            or 0
+        )
+        return out
 
 
 def tenant_generation(store, tenant_id: str) -> str | None:

@@ -1873,11 +1873,20 @@ SSE_TICKET_TTL_SECONDS = 60
 SSE_TICKET_KEY_PREFIX = "plaita:sse:ticket:"
 
 
+class StreamTicketResponse(BaseModel):
+    """A2R24-09：执行 SSE 的连接票据（stream 本体刻意不进 schema）。"""
+
+    ticket: str = Field(..., description="一次性 SSE 票据（60s、单次使用）")
+    expires_in: int = Field(..., description="票据有效期（秒）")
+
+
 def _sse_ticket_key(ticket: str) -> str:
     return f"{SSE_TICKET_KEY_PREFIX}{ticket}"
 
 
-@router.post("/executions/{execution_id}/stream/ticket")
+@router.post(
+    "/executions/{execution_id}/stream/ticket", response_model=StreamTicketResponse
+)
 async def create_stream_ticket(
     execution_id: str,
     request: Request,

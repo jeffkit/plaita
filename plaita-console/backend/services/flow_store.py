@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
-    Column, DateTime, create_engine, delete, select, text, tuple_, update,
+    Column, DateTime, and_, create_engine, delete, or_, select, text, tuple_, update,
 )
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError
@@ -175,6 +175,8 @@ class FlowVersionOut(BaseModel):
     created_by: str = ""
     # C5-1：草稿最近一次保存时间，前端保存时作为乐观锁基准（base_updated_at）回传
     updated_at: Optional[datetime] = None
+    # A2R24-07：实体租户（平台全量视角也能说清版本属于谁；导出包用它填源租户）
+    tenant_id: str = ""
 
 
 class SaveFlowDefinitionResult(BaseModel):
@@ -288,6 +290,35 @@ class FlowStore:
                     FlowRecord.flow_id == flow_id,
                 )
             ).first()
+
+    def list_flow_tenants(self, flow_id: str) -> List[str]:
+        """平台全量视角下 ``flow_id`` 命中的租户（A2R24-07 歧义检测）。
+
+        平台读面 ``tenant_id=None`` 走 ``.first()``，同名 flow 跨租户时无
+        tie-breaker；调用方据此返回 409，而不是静默挑一个。
+        """
+        with self._session_local() as session:
+            rows = session.scalars(
+                select(FlowRecord.tenant_id)
+                .where(FlowRecord.flow_id == flow_id)
+                .distinct()
+                .order_by(FlowRecord.tenant_id.asc())
+            ).all()
+            return [tenant_id or "" for tenant_id in rows]
+
+    def list_version_tenants(self, flow_id: str, version: str) -> List[str]:
+        """平台全量视角下 ``flow_id@version`` 命中的租户（导出/详情歧义检测）。"""
+        with self._session_local() as session:
+            rows = session.scalars(
+                select(FlowVersion.tenant_id)
+                .where(
+                    FlowVersion.flow_id == flow_id,
+                    FlowVersion.version == version,
+                )
+                .distinct()
+                .order_by(FlowVersion.tenant_id.asc())
+            ).all()
+            return [tenant_id or "" for tenant_id in rows]
 
     def create_flow(
         self, flow_id: str, author: str = "", desc: str = "", tenant_id: str = ""
@@ -750,6 +781,7 @@ class FlowStore:
             created_by=row.created_by,
             # ISO 串 → datetime（解析失败按 None，保持兼容）
             updated_at=datetime.fromisoformat(updated_at) if updated_at else None,
+            tenant_id=getattr(row, "tenant_id", "") or "",
         )
 
     # ---- node descriptors ----
@@ -1667,21 +1699,52 @@ def list_local_logs(
     execution_id: str = None,
     limit: int = 200,
     tenant_id: Optional[str] = None,
+    before_ts: Optional[datetime] = None,
+    before_id: Optional[int] = None,
+    ascending: bool = False,
 ) -> list:
+    """本地执行日志（A2R24-05：支持键集游标 ``(ts, id)`` 与双向排序）。
+
+    ``before_ts``/``before_id`` 是**排他**游标：``ascending=False`` 取更旧的
+    记录（``(ts,id) < cursor``），``ascending=True`` 取更新的记录
+    （``(ts,id) > cursor``）。调用方多取 1 条用于判断是否还有下一页。
+    """
     store = get_flow_store()
     with store._session_local() as session:
         query = (
             select(LocalLog)
             .where(FlowStore._tenant_filter(LocalLog, tenant_id))
-            .order_by(LocalLog.ts.desc())
-            .limit(max(1, min(1000, limit)))
         )
+        if before_ts is not None:
+            if before_id is not None:
+                comparison = (
+                    or_(
+                        LocalLog.ts > before_ts,
+                        and_(LocalLog.ts == before_ts, LocalLog.id > before_id),
+                    )
+                    if ascending
+                    else or_(
+                        LocalLog.ts < before_ts,
+                        and_(LocalLog.ts == before_ts, LocalLog.id < before_id),
+                    )
+                )
+            else:
+                comparison = (
+                    LocalLog.ts > before_ts if ascending else LocalLog.ts < before_ts
+                )
+            query = query.where(comparison)
+        if ascending:
+            query = query.order_by(LocalLog.ts.asc(), LocalLog.id.asc())
+        else:
+            query = query.order_by(LocalLog.ts.desc(), LocalLog.id.desc())
+        query = query.limit(max(1, min(1001, limit)))
         if level:
             query = query.where(LocalLog.level == level)
         if execution_id:
             query = query.where(LocalLog.execution_id == execution_id)
         return [
             {
+                "entry_id": str(r.id),
                 "timestamp": r.ts.isoformat() if r.ts else "",
                 "level": r.level,
                 "service_type": "local-console",

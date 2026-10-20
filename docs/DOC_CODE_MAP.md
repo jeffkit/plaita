@@ -35,7 +35,7 @@
 | `docs-site/docs/ai/mcp.md` | `plaita-ai/plaita_ai/mcp/**`, `plaita-ai/plaita_ai/cli/main.py`, `plaita-ai/plaita_ai/tools/bootstrap.py` | MCP 工具列表、插件加载、PLAITA_TOOLS/RESOURCES、`tools validate\|list` |
 | `docs-site/docs/ai/fot-agent.md` / `ai/react-agent.md` | `plaita-ai/plaita_ai/agent/**` | Agent 构造参数、工具注册与双用途语义 |
 | `docs-site/docs/reference/cli.md` | `plaita-ai/plaita_ai/cli/**`, `plaita/__main__.py` | plaita / plaita-ai CLI 子命令 |
-| `MIGRATION.md` | `plaita/**`, `plaita-ai/**` | 破坏性 API / 安全默认值变更 |
+| `MIGRATION.md` | `plaita/**`, `plaita-ai/**`, `plaita-console/backend/**` | 破坏性 API / 安全默认值变更 |
 | `docs/archive/CODE_REVIEW-pre-0.5.md` | — | **已归档**，勿再更新；新审查另开文档 |
 | `README.MD` | `plaita/__init__.py`, `pyproject.toml` | 版本、extras、快速上手示例变更 |
 | `docs-site/docs/reference/configuration.md` | `pyproject.toml` `[project.optional-dependencies]`（extras 权威清单）, `pyproject.toml` `[project.entry-points]`, `pyproject.toml` `[tool.pytest.ini_options]` / `[tool.coverage.*]` | **extras 增删改**（该页 extras 表是对 `pyproject.toml` 的手工复述，`tests/unit/test_docs_extras_sync.py` 逐行比对）；entry_points 节点插件增删；测试/覆盖率配置与本页数值段变更 |
