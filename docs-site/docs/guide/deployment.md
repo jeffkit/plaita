@@ -84,7 +84,11 @@ PLAITA_CONSOLE_ADMIN_API_KEY=<服务账号密钥> PLAITA_CONSOLE_ENV=prod \
 **必填环境变量**：`docker-compose.yml` 里的 `change-me-*` 只是本地模板默认值；
 共享/生产环境必须覆盖 `PLAITA_CONSOLE_ADMIN_API_KEY`、
 `PLAITA_CONSOLE_SECRET_ID`、`PLAITA_CONSOLE_SECRET_KEY`（空密钥时管理 API
-与契约接口 fail-closed）。集群页的 PostgreSQL/MySQL 模板不再内置固定口令：
+与契约接口 fail-closed）。仓库根目录提供 [`.env.example`](https://github.com/jeffkit/plaita/blob/main/.env.example)
+样例：`cp .env.example plaita-console/docker/.env` 后填写三个必填项再
+`docker compose up -d`；也可以 `docker compose --env-file .env -f
+plaita-console/docker/docker-compose.yml up -d`。全部变量的默认值与失败形态见
+[分布式 runbook 的「环境变量参考」](../distributed/ops-runbook.md#环境变量参考)。集群页的 PostgreSQL/MySQL 模板不再内置固定口令：
 在 console 进程环境设置 `PLAITA_POSTGRES_PASSWORD`（PostgreSQL）或
 `PLAITA_MYSQL_PASSWORD` + `PLAITA_MYSQL_ROOT_PASSWORD`（MySQL），
 `cluster_config.yaml` 里写 `${PLAITA_POSTGRES_PASSWORD}` 等引用；变量缺失时

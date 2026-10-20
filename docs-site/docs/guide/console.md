@@ -23,7 +23,7 @@ python -m plaita_console              # 或使用 plaita-console 命令
 
 | 变量 | 说明 |
 |------|------|
-| `PLAITA_CONSOLE_HOST` / `PLAITA_CONSOLE_PORT` | 监听地址，默认 `0.0.0.0:8080` |
+| `PLAITA_CONSOLE_HOST` / `PLAITA_CONSOLE_PORT` | 监听地址，默认 `127.0.0.1:8080`；非回环地址启动打 WARNING。官方容器 CMD 固定 `--host 0.0.0.0`，容器部署用端口映射控制暴露面 |
 | `PLAITA_CONSOLE_REDIS_URL` | Redis 连接 |
 | `PLAITA_CONSOLE_DB_URL` | 流程定义持久化（默认本地 SQLite） |
 | `PLAITA_CONSOLE_DB_CONNECT_TIMEOUT` / `..._POOL_TIMEOUT` | 非 SQLite 库的连接/池超时（默认 5s；黑洞/半开 DB fail-fast） |
@@ -31,10 +31,15 @@ python -m plaita_console              # 或使用 plaita-console 命令
 | `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN=true` | 本地开发免密；局域网/生产请改设 `PLAITA_CONSOLE_ADMIN_API_KEY` |
 | `PLAITA_CONSOLE_SECRET_ID` / `SECRET_KEY` | 对外契约接口的 HMAC 密钥 |
 
+仓库根目录的 [`.env.example`](https://github.com/jeffkit/plaita/blob/main/.env.example)
+给出 compose 必填项与常用项样例；变量的完整默认值、读取时机、0/非法值语义见
+[分布式 runbook「环境变量参考」](../distributed/ops-runbook.md#环境变量参考)。
+
 ## 企业能力：RBAC / 审计 / 环境晋升
 
-**RBAC**：`PLAITA_CONSOLE_ADMIN_PASSWORD` 未设时，首次启动自动生成 admin
-账号（随机密码打印到日志，请立即修改）。角色三级：
+**RBAC**：设置了 `PLAITA_CONSOLE_ADMIN_PASSWORD` 且 users 表为空时，首次启动
+自动创建 `admin`（平台管理员）；**未设置时不会自动建号，也不会打印随机密码**，
+前端会进入「创建管理员」向导。角色三级：
 
 - **admin**：全部权限（用户管理 / 凭据 / 集群 / 审计 / 生产环境删除）
 - **editor**：编排与执行（增删改流程、发布、试跑、启动执行）

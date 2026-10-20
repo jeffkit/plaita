@@ -42,9 +42,17 @@ Plaita 流程引擎可视化管理控制台
 ### 使用 Docker Compose
 
 ```bash
+# 推荐：从样例文件开始，填写三个必填项
+cp .env.example plaita-console/docker/.env
+# 编辑 plaita-console/docker/.env 后：
+cd plaita-console/docker && docker compose up -d
+```
+
+也可以临时用内联环境变量（生产/共享环境必须覆盖三个默认值；空密钥时管理 API
+fail-closed，`change-me-*` 只用于本地模板演示）：
+
+```bash
 cd plaita-console/docker
-# 生产/共享环境必须覆盖三个默认值（空密钥时管理 API fail-closed，
-# change-me-* 只用于本地模板演示）
 PLAITA_CONSOLE_ADMIN_API_KEY=<strong-random> \
 PLAITA_CONSOLE_SECRET_ID=<random-id> \
 PLAITA_CONSOLE_SECRET_KEY=<random-secret> \

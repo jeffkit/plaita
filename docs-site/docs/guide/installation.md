@@ -80,11 +80,13 @@ python -m plaita_console
 
 | 变量 | 说明 |
 |------|------|
-| `PLAITA_CONSOLE_PORT` / `PLAITA_CONSOLE_HOST` | 监听地址（默认 `0.0.0.0:8080`） |
+| `PLAITA_CONSOLE_PORT` / `PLAITA_CONSOLE_HOST` | 监听地址（默认 `127.0.0.1:8080`；官方容器 CMD 固定 `0.0.0.0`） |
 | `PLAITA_CONSOLE_REDIS_URL` | Redis 连接（默认 `redis://localhost:6379/0`） |
 | `PLAITA_CONSOLE_ADMIN_API_KEY` | 管理 API 密钥；本地开发可设 `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN=true` 免密 |
 
-详见 [编排台使用](console.md)。
+compose 部署可先复制仓库根的 [`.env.example`](https://github.com/jeffkit/plaita/blob/main/.env.example)
+并填写必填项。详见 [编排台使用](console.md) 与
+[分布式 runbook「环境变量参考」](../distributed/ops-runbook.md#环境变量参考)。
 
 ## 节点插件包
 
