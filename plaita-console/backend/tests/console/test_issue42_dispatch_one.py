@@ -300,24 +300,40 @@ class TestDispatchQueueScoping:
         assert [r["instance_id"] for r in plan["rejected"]] == ["w-v2"]
         assert plan["rejected"][0]["reason"].startswith("queue: mismatch")
 
-    def test_worker_without_queue_metadata_is_default_queue_only(
-        self, redis, prod_shadow_off,
+    def test_worker_without_queue_metadata_is_unknown_not_default(
+        self, redis, prod_shadow_off, monkeypatch,
     ):
-        """缺 metadata 的存量 worker 只消费默认队列：v1 派发排除，默认队列可选。"""
+        """B75-01：缺 metadata 的 worker 是 unknown，不再按默认队列假设。
+
+        默认 skip：无论派哪个队列都不定向（unknown ≠ default），但消息仍按
+        调用方队列**广播**——legacy default worker 仍能抢到（不带 target 字段）。
+        assume-default 兼容开关只对默认队列生效，且必须标记 queue_source。
+        """
         _register_worker(redis, "w-legacy", queue_name=None)
         miss = dispatcher_svc.dispatch_one(
             redis, "issue-legacy-v1", queue_name=CANARY_QUEUE, dry_run=False,
         )
         assert miss["target"] is None
-        assert miss["rejected"][0]["reason"].startswith("queue: mismatch")
-        assert f"worker consumes {PROD_QUEUE}" in miss["rejected"][0]["reason"]
+        assert miss["decision"] == "broadcast"
+        assert miss["rejected"][0]["reason"].startswith("queue: unknown")
 
-        hit = dispatcher_svc.dispatch_one(
+        broadcast = dispatcher_svc.dispatch_one(
             redis, "issue-legacy-default", queue_name=PROD_QUEUE, dry_run=False,
         )
-        assert hit["target"] == "w-legacy"
-        assert hit["queue"] == PROD_QUEUE
-        assert _message(redis, PROD_QUEUE)["target_instance_id"] == "w-legacy"
+        assert broadcast["target"] is None
+        assert broadcast["decision"] == "broadcast"
+        assert broadcast["queue_source"] == "declared"
+        assert broadcast["rejected"][0]["reason"].startswith("queue: unknown")
+        assert "target_instance_id" not in _message(redis, PROD_QUEUE)
+
+        monkeypatch.setenv("PLAITA_DISPATCH_UNKNOWN_QUEUE", "assume-default")
+        assumed = dispatcher_svc.dispatch_one(
+            redis, "issue-legacy-assumed", queue_name=PROD_QUEUE, dry_run=False,
+        )
+        assert assumed["target"] == "w-legacy"
+        assert assumed["queue"] == PROD_QUEUE
+        assert assumed["queue_source"] == "assumed-default"
+        assert _message(redis, PROD_QUEUE, index=1)["target_instance_id"] == "w-legacy"
 
 
 class TestRedLinesAllowWhenRouteUnavailable:

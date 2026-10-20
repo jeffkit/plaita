@@ -56,6 +56,7 @@ from plaita.server.capacity import (  # noqa: E402
     CAPACITY_METADATA_KEY,
     CAPACITY_SCHEMA_VERSION,
     CAPACITY_STALE_SECONDS,
+    DEFAULT_DISPATCH_QUEUE,
     DispatchCandidate,
     build_capacity_block,
     capacity_from_metadata,
@@ -313,7 +314,10 @@ class TestLoadWorkerCapacity(unittest.TestCase):
             instance_id="w-1",
             service_type="flow_worker",
             host="h",
-            metadata={CAPACITY_METADATA_KEY: json.dumps(_block())},
+            metadata={
+                "queue_name": DEFAULT_DISPATCH_QUEUE,
+                CAPACITY_METADATA_KEY: json.dumps(_block()),
+            },
         ))
         before = set(r.redis_client.keys("*"))
         plan = shadow_dispatch_plan(r.redis_client, ["issue-a", "issue-b"])

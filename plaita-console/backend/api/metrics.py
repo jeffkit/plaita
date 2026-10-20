@@ -253,6 +253,10 @@ def collect_cluster_metrics(redis: Redis) -> List[Metric]:
             )
         metrics.extend(collect_queue_metrics(stats))
     metrics.extend(_registry_metrics(redis, degradation))
+    # B75-01：派发侧 unknown 队列计数（进程内累计，与计划/派发同源判据）。
+    from plaita.server.capacity import collect_dispatch_metrics
+
+    metrics.extend(collect_dispatch_metrics())
     metrics.extend(degradation.metrics())
     _warn_degradation(degradation)
     return metrics

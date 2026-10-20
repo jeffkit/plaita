@@ -67,12 +67,23 @@ python -m plaita_console              # 或使用 plaita-console 命令
 租户，跨租户请求 403 + 审计。派发台账同时记录认证主体 `actor` 与生效租户。
 
 `POST /api/dispatch/one` 与 `/api/dispatch/plan` 的容量路由带**队列维度**
-（A64-05）：只有注册 metadata `queue_name` 与本次派发队列一致的 worker
-才可能成为目标（缺 metadata 的存量 worker 按默认队列
-`plaita:flow:queue` 处理），跨队列候选以稳定原因 `queue: mismatch` 进入
+（A64-05 / B75-01）：只有注册 metadata `queue_name` 与本次派发队列一致的
+worker 才可能成为目标，跨队列候选以稳定原因 `queue: mismatch` 进入
 `rejected`；命中目标后消息投到目标 worker 消费的队列。避免 v1/v2 金丝雀
 或滚动升级时目标指向另一队列、消息落到无人消费队列后交接耗尽、
 执行被误终态化为 `AffinityHandoverExhausted`。
+
+队列是**三态**（B75-01）：`queue_name` 非空且非纯空白 = 声明（known）；
+缺失/空白/非字符串 = unknown，**不再按默认队列假设**。unknown 只拒绝
+**定向**、不拒绝**广播**：默认 `PLAITA_DISPATCH_UNKNOWN_QUEUE=skip` 下
+unknown 以 `queue: unknown` 进入 `rejected`，消息仍投到调用方队列且不带
+`target_instance_id`，legacy default worker 仍能抢到。需要显式兼容旧部署时
+设 `PLAITA_DISPATCH_UNKNOWN_QUEUE=assume-default`：仅在请求默认队列
+`plaita:flow:queue` 时把 unknown 当默认队列，响应/台账标记
+`queue_source=assumed-default` 并留 WARNING（含 instance_id 列表）；其余
+情况仍是 unknown。plan / dispatch / 台账 / 指标
+`plaita_dispatch_unknown_queue_total{queue}` 共用同一判据。新 worker 注册时
+写 `queue_name` + `queue_contract_version=2`。
 
 `GET /api/dispatch/ledger`（A54-02）：平台身份返回全量台账与全局队列对账；
 租户身份只返回**当前世代**的本租户条目（台账写入 `tenant_generation`，

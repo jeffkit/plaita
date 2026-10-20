@@ -110,6 +110,13 @@ class DispatchPlanResponse(BaseModel):
     shadow: bool = Field(True, description="影子模式（只算不发）")
     shadow_mode: bool = Field(True, description="同 shadow（显式字段，便于看板直读）")
     queue: str = Field(..., description="计划队列名")
+    queue_source: str = Field(
+        "declared",
+        description=(
+            "队列来源：declared（worker 声明/调用方显式给定）| "
+            "assumed-default（unknown 按 PLAITA_DISPATCH_UNKNOWN_QUEUE=assume-default 纳入）"
+        ),
+    )
     issue_ids: List[str] = Field(default_factory=list)
     target: Optional[str] = Field(None, description="本轮选中的 worker（null = 本轮不派）")
     allowed: List[str] = Field(default_factory=list, description="通过容量门的 worker")
@@ -166,6 +173,7 @@ async def dispatch_plan(req: DispatchPlanRequest, request: Request) -> DispatchP
         detail={
             "issues": len(req.issue_ids),
             "queue": plan.get("queue"),
+            "queue_source": plan.get("queue_source"),
             "shadow": bool(plan.get("shadow")),
             "target": plan.get("target"),
         },
@@ -228,6 +236,13 @@ class DispatchOneResponse(BaseModel):
     issue_id: str = Field(..., description="本轮 issue")
     execution_id: str = Field(..., description="执行 ID")
     queue: str = Field(..., description="目标队列")
+    queue_source: str = Field(
+        "declared",
+        description=(
+            "队列来源：declared（worker 声明/调用方显式给定）| "
+            "assumed-default（unknown 按 PLAITA_DISPATCH_UNKNOWN_QUEUE=assume-default 纳入）"
+        ),
+    )
     target: Optional[str] = Field(
         None, description="容量路由选中的 worker（null = 无可派目标 ⇒ 广播放行）"
     )
@@ -344,6 +359,7 @@ async def dispatch_one(
             "issue_id": req.issue_id,
             "execution_id": result.get("execution_id"),
             "queue": result.get("queue"),
+            "queue_source": result.get("queue_source"),
             "tenant_id": tenant_id,
             "dry_run": bool(result.get("dry_run")),
             "enqueued": bool(result.get("enqueued")),

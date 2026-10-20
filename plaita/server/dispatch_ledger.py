@@ -104,6 +104,7 @@ def build_ledger_entry(
     *,
     issue_id: str,
     queue: str,
+    queue_source: str = "declared",
     target_instance_id: Optional[str] = None,
     reason: str = "",
     decision: Optional[str] = None,
@@ -137,6 +138,10 @@ def build_ledger_entry(
         "decided_by": decided_by if decided_by is not None else dispatcher_id_from_env(),
         "issue_id": str(issue_id),
         "queue": str(queue),
+        # B75-01 §5：队列来源——declared = worker 声明/调用方显式给定；
+        # assumed-default = PLAITA_DISPATCH_UNKNOWN_QUEUE=assume-default 下
+        # 把未声明 queue_name 的 worker 当默认队列（显式兼容，必须可审计）。
+        "queue_source": str(queue_source or "declared"),
         "decision": str(decision),
         "reason": str(reason or ""),
         "target_instance_id": target,

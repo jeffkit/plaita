@@ -98,6 +98,7 @@ DEFAULT_WORKER_SERVICE_TYPE = _capacity.DEFAULT_WORKER_SERVICE_TYPE
 DispatchCandidate = _capacity.DispatchCandidate
 TARGET_INSTANCE_FIELD = _capacity.TARGET_INSTANCE_FIELD
 REASON_QUEUE_MISMATCH = _capacity.REASON_QUEUE_MISMATCH
+REASON_QUEUE_UNKNOWN = _capacity.REASON_QUEUE_UNKNOWN
 capacity_age_seconds = _capacity.capacity_age_seconds
 decide_route = _capacity.decide_route
 dispatch_queue_from_env = _capacity.dispatch_queue_from_env
@@ -153,8 +154,9 @@ def build_dispatch_plan(
     返回计划——真正的入队是**另一个显式步骤**（``dispatch_one``），避免
     「看计划」与「发单」被同一个调用顺带做掉。
 
-    路由按本次计划队列过滤：只有消费该队列的 worker 才是候选（A64-05；
-    缺 ``queue_name`` metadata 的存量 worker 按默认队列处理）。
+    路由按本次计划队列过滤：只有**声明**消费该队列的 worker 才是候选
+    （A64-05；B75-01：缺 ``queue_name`` metadata 是 unknown，不再按默认
+    队列假设——见 ``PLAITA_DISPATCH_UNKNOWN_QUEUE``）。
     """
     queue = queue_name or dispatch_queue_from_env()
     candidates = load_worker_capacity(redis_client, service_type=service_type)
@@ -164,6 +166,7 @@ def build_dispatch_plan(
         "shadow": shadow_on,
         "shadow_mode": shadow_on,
         "queue": queue,
+        "queue_source": route.queue_source,
         "issue_ids": list(issue_ids or []),
         "target": route.target_instance_id,
         "reason": route.reason,
@@ -231,10 +234,13 @@ def dispatch_one(
     显式传金丝雀队列（如 ``plaita:flow:queue:canary``）——生产队列 XLEN 与
     金丝雀队列 XLEN 因此互相独立（期 1 判据③）。
 
-    **队列维度（A64-05）**：路由只在消费本次队列的 worker 中选目标；投递
-    队列以目标 worker 的 ``metadata.queue_name`` 为准（与 manual 启动路径
-    同源），跨队列候选以 ``queue: mismatch`` 进入 ``rejected``。这样
-    ``target_instance_id`` 指向的 worker 一定能从消息所在队列读到任务。
+    **队列维度（A64-05 / B75-01）**：路由只在**能证明**消费本次队列的 worker
+    中选目标；投递队列以目标 worker 声明的 ``metadata.queue_name`` 为准（与
+    manual 启动路径同源），跨队列候选以 ``queue: mismatch`` 进入 ``rejected``。
+    未声明队列的候选是 unknown（不是默认队列），默认只拒绝定向、不拒绝广播；
+    只有 ``PLAITA_DISPATCH_UNKNOWN_QUEUE=assume-default``（且请求默认队列）
+    才把 unknown 纳入定向，并在响应/台账标记 ``queue_source=assumed-default``。
+    这样 ``target_instance_id`` 指向的 worker 一定能从消息所在队列读到任务。
 
     ``tenant_id`` / ``dry_run`` / ``shadow`` 是服务端权威输入（#262）：HTTP
     层从认证上下文与 env 解析后传入，不接受请求体直接覆盖。``actor`` 是
@@ -249,16 +255,27 @@ def dispatch_one(
             r.instance_id for r in route.rejected
             if str(r.reason).startswith(REASON_QUEUE_MISMATCH)
         ]
+        unknown_queue = [
+            r.instance_id for r in route.rejected
+            if str(r.reason).startswith(REASON_QUEUE_UNKNOWN)
+        ]
         if cross_queue:
             # 不静默：队列没有消费者时仍按红线广播，但必须留下可观测痕迹。
             logger.warning(
                 "派发队列 %s 没有消费该队列的 worker；跨队列候选被拒: %s",
                 requested_queue, cross_queue,
             )
-    # 投递队列以目标 worker 实际消费的队列为准；无目标时回落到调用方队列
+        if unknown_queue:
+            # B75-01：unknown 不是默认队列；广播仍可达 legacy default 消费者。
+            logger.warning(
+                "派发队列 %s 没有声明消费该队列的 worker；未声明 queue_name "
+                "的候选已跳过定向（unknown ≠ default）: %s",
+                requested_queue, unknown_queue,
+            )
+    # 投递队列以目标 worker 声明/解析出的队列为准；无目标时回落到调用方队列
     # （广播抢单）。路由已按队列过滤，此处在正常情况下是同一队列——保留
     # 该不变量让「消息所在队列 == target 消费队列」不依赖过滤实现。
-    queue = route.target.queue_name if route.target is not None else requested_queue
+    queue = route.target_queue_name or requested_queue
     exec_id = execution_id or issue_id
 
     result: Dict[str, Any] = {
@@ -267,6 +284,7 @@ def dispatch_one(
         "issue_id": str(issue_id),
         "execution_id": exec_id,
         "queue": queue,
+        "queue_source": route.queue_source,
         "target": route.target_instance_id,
         "reason": route.reason,
         "decision": "targeted" if route.target_instance_id else "broadcast",
@@ -304,6 +322,7 @@ def dispatch_one(
     entry = build_ledger_entry(
         issue_id=issue_id,
         queue=queue,
+        queue_source=route.queue_source,
         target_instance_id=route.target_instance_id,
         reason=route.reason,
         allowed=result["allowed"],

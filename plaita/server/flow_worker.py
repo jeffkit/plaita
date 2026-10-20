@@ -4762,6 +4762,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 service_type=self.SERVICE_TYPE,
                 metadata={
                     "queue_name": queue_name,
+                    # B75-01 §6：队列声明的契约版本。派发侧据此区分「新
+                    # worker 明确声明消费队列」与 pre-#158/自定义 worker 的
+                    # 缺失 metadata（unknown ≠ default）。
+                    "queue_contract_version": 2,
                     "consumer_group": self._consumer_group,
                     "dlq_key": self._dlq_key,
                     # B2R31-01：代际与脱敏关键值进注册 metadata——控制面

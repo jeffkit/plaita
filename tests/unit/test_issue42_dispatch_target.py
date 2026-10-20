@@ -373,24 +373,44 @@ class TestDecideRoute:
         assert [r.instance_id for r in route.rejected] == ["w-v2"]
         assert route.rejected[0].reason.startswith(cap.REASON_QUEUE_MISMATCH)
 
-    def test_missing_queue_metadata_means_default_queue(self):
-        """缺 ``queue_name`` metadata 的存量 worker 按默认队列参与匹配。"""
-        legacy = _candidate("w-legacy", block=_block(120.0))
-        assert legacy.queue_name == cap.DEFAULT_DISPATCH_QUEUE
-        assert cap.decide_route(
-            [legacy], queue_name=cap.DEFAULT_DISPATCH_QUEUE,
-        ).target_instance_id == "w-legacy"
-        route = cap.decide_route([legacy], queue_name=CANARY_QUEUE)
-        assert route.target_instance_id is None
-        assert route.rejected[0].reason.startswith(cap.REASON_QUEUE_MISMATCH)
+    def test_missing_queue_metadata_is_unknown_not_default(self):
+        """B75-01：缺 ``queue_name`` metadata 是 unknown，**不是**默认队列。
 
-    def test_blank_or_non_string_queue_metadata_means_default_queue(self):
+        默认策略 skip 下 unknown 只拒绝**定向**；广播仍可达 legacy default
+        消费者。只有显式 ``assume-default`` 才把 unknown 当默认队列纳入。
+        """
+        legacy = _candidate("w-legacy", block=_block(120.0))
+        assert legacy.queue_name is None
+        assert legacy.queue_source == "unknown"
+
+        route = cap.decide_route(
+            [legacy], queue_name=cap.DEFAULT_DISPATCH_QUEUE,
+        )
+        assert route.target_instance_id is None
+        assert route.rejected[0].reason.startswith(cap.REASON_QUEUE_UNKNOWN)
+
+        assumed = cap.decide_route(
+            [legacy], queue_name=cap.DEFAULT_DISPATCH_QUEUE,
+            unknown_queue_policy=cap.UNKNOWN_QUEUE_ASSUME_DEFAULT,
+        )
+        assert assumed.target_instance_id == "w-legacy"
+        assert assumed.queue_source == cap.QUEUE_SOURCE_ASSUMED_DEFAULT
+
+        # 非默认队列：即使开了 assume-default 也不得把 unknown 当默认队列。
+        canary = cap.decide_route(
+            [legacy], queue_name=CANARY_QUEUE,
+            unknown_queue_policy=cap.UNKNOWN_QUEUE_ASSUME_DEFAULT,
+        )
+        assert canary.target_instance_id is None
+        assert canary.rejected[0].reason.startswith(cap.REASON_QUEUE_UNKNOWN)
+
+    def test_blank_or_non_string_queue_metadata_is_unknown(self):
         for raw in ("", "   ", None, 12, [], {}):
             cand = cap.DispatchCandidate.from_service_info(ServiceInfo(
                 instance_id="w-x", service_type="flow_worker", host="h",
                 metadata={"queue_name": raw},
             ))
-            assert cand.queue_name == cap.DEFAULT_DISPATCH_QUEUE
+            assert cand.queue_name is None
 
     def test_queue_filter_none_keeps_legacy_cross_queue_selection(self):
         """``queue_name=None`` = 不做队列过滤（看板/存量调用语义不变）。"""

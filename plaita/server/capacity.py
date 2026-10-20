@@ -23,7 +23,9 @@
    ``decide_route``）：输入候选快照、输出「可派 + 拒绝原因 + 目标」，供
    intake flow / console / 单测共用同一份判据（策略改定义不改代码）。
    A64-05 起带**队列维度**：``queue_name`` 给定时先按候选消费队列过滤，
-   跨队列候选以 ``queue: mismatch`` 拒绝（缺 metadata 按默认队列）。
+   跨队列候选以 ``queue: mismatch`` 拒绝。B75-01 起队列是**三态**：
+   声明（known）/ 未声明（unknown）/ 默认队列假设——unknown 不再等价于
+   default，默认只拒绝定向、不拒绝广播（legacy default worker 仍可消费）。
 4. **影子模式**（``shadow_dispatch_plan``）：只算不发——plan 里只包含目标与
    队列名，**绝不写任何 Redis 键**（验收 5：影子期生产队列零新增）。
 5. **显式派发目标闸**（``TARGET_INSTANCE_FIELD`` / ``target_mismatch``）：
@@ -46,6 +48,7 @@ import json
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -84,12 +87,28 @@ DISPATCH_QUEUE_ENV = "PLAITA_CONSOLE_TASK_QUEUE"
 #: 派发队列默认名（与 FlowWorker / console 缺省一致）。
 DEFAULT_DISPATCH_QUEUE = "plaita:flow:queue"
 
+#: B75-01：worker 未声明 ``queue_name`` 时的定向策略。
+#: ``skip``（默认）= 不把 unknown 当默认队列，只拒绝定向；消息仍按调用方
+#: 队列广播，legacy default worker 仍可消费。``assume-default`` = 仅在
+#: ``requested_queue == DEFAULT_DISPATCH_QUEUE`` 时把 unknown 纳入定向，
+#: 并留 WARNING + ``queue_source=assumed-default``（显式兼容旧部署）。
+UNKNOWN_QUEUE_POLICY_ENV = "PLAITA_DISPATCH_UNKNOWN_QUEUE"
+UNKNOWN_QUEUE_SKIP = "skip"
+UNKNOWN_QUEUE_ASSUME_DEFAULT = "assume-default"
+
+#: 台账/响应里的队列来源（B75-01 §5：只有这两个值）。
+QUEUE_SOURCE_DECLARED = "declared"
+QUEUE_SOURCE_ASSUMED_DEFAULT = "assumed-default"
+
 #: 拒绝原因前缀：**稳定字符串**，供 flow 侧 assignment 节点按前缀分支
 #: （改文案不算改语义，改前缀算）。
 #: A64-05：候选消费的队列（registry metadata ``queue_name``）与本次派发队列
 #: 不一致。容量路由必须带队列维度——跨队列选中 target 会让消息落到 target
 #: 永远读不到的队列，worker 交接耗尽后把执行误终态化为 error。
 REASON_QUEUE_MISMATCH = "queue: mismatch"
+#: B75-01：候选没有可证明的消费队列（缺失/空白/非字符串）——**不等于**
+#: 默认队列。unknown 在默认 ``skip`` 策略下永不进入 ``allowed``/``target``。
+REASON_QUEUE_UNKNOWN = "queue: unknown"
 #: B2R31-01：配置族不同（queue/group/dlq/schema/namespace 任一）⇒ 不得派发。
 REASON_CONFIG_FAMILY_MISMATCH = "config: family mismatch"
 REASON_DISK = "disk: low free space"
@@ -154,18 +173,102 @@ def dispatch_queue_from_env() -> str:
     return resolve_queue_name("console")
 
 
-def candidate_queue_name(metadata: Any) -> str:
-    """候选消费的队列名（registry metadata ``queue_name``）。
+def candidate_queue_name(metadata: Any) -> Optional[str]:
+    """候选**声明**的消费队列名（registry metadata ``queue_name``）。
 
-    缺失/空白/非字符串 ⇒ **默认队列**（未升级 worker 的注册 metadata 没有
-    该键；它们按历史约定消费 ``plaita:flow:queue``）。返回原字符串，不做
-    去空白——worker 用的是原值作为 Stream 键，改写会让判据与事实漂移。
+    B75-01：队列是三态，不是二态——
+
+    - 非空、非纯空白字符串 ⇒ known，返回原字符串（不做去空白：worker 用
+      原值作为 Stream 键，改写会让判据与事实漂移）；
+    - 缺失 / 空白 / 纯空白 / 非字符串 ⇒ **unknown**，返回 ``None``。
+
+    unknown **绝不等于** ``DEFAULT_DISPATCH_QUEUE``。未升级 worker 的注册
+    metadata 可能没有该键、也可能有畸形值；把假设当事实正是 B74-02 的
+    「消息定向到 target 读不到的队列、静默滞留」根因。未知只影响**定向**，
+    不影响**广播**（见 :func:`decide_route`）。
     """
     if isinstance(metadata, dict):
         raw = metadata.get("queue_name")
         if isinstance(raw, str) and raw.strip():
             return raw
-    return DEFAULT_DISPATCH_QUEUE
+    return None
+
+
+def resolve_unknown_queue_policy(value: Optional[str] = None) -> str:
+    """unknown 队列策略（``PLAITA_DISPATCH_UNKNOWN_QUEUE``）。
+
+    ``value=None`` 读 env；显式传入便于单测/调用方固定判据。非法值按
+    ``skip`` 处理并留 WARNING（不能静默把兼容开关开成默认）。
+    """
+    raw = value if value is not None else os.environ.get(UNKNOWN_QUEUE_POLICY_ENV)
+    raw = (raw or "").strip().lower()
+    if raw in ("", UNKNOWN_QUEUE_SKIP):
+        return UNKNOWN_QUEUE_SKIP
+    if raw == UNKNOWN_QUEUE_ASSUME_DEFAULT:
+        return UNKNOWN_QUEUE_ASSUME_DEFAULT
+    logger.warning(
+        "%s=%s 非法（允许 %s/%s），按 %s 处理",
+        UNKNOWN_QUEUE_POLICY_ENV, _redact_env_value(raw),
+        UNKNOWN_QUEUE_SKIP, UNKNOWN_QUEUE_ASSUME_DEFAULT, UNKNOWN_QUEUE_SKIP,
+    )
+    return UNKNOWN_QUEUE_SKIP
+
+
+#: B75-01 §5：``dispatch_unknown_queue_total{queue}`` 的进程内累计。
+#: 只统计「本次派发带队列过滤且候选未声明队列」的次数——广播/不做队列
+#: 过滤的调用（看板）不计，避免把正常的存量调用报成异常。
+_unknown_queue_counts: Dict[str, int] = {}
+_unknown_queue_counts_lock = threading.Lock()
+
+_UNKNOWN_QUEUE_METRIC_HELP = (
+    "派发时遇到未声明 queue_name 的 worker 次数（unknown ≠ default；"
+    "skip 时只拒绝定向，assume-default 时显式纳入默认队列）"
+)
+
+
+def record_unknown_queue(queue_name: str, count: int = 1) -> None:
+    """累加 unknown 队列计数（空队列名忽略；进程内、线程安全）。"""
+    if not queue_name or count <= 0:
+        return
+    with _unknown_queue_counts_lock:
+        _unknown_queue_counts[queue_name] = (
+            _unknown_queue_counts.get(queue_name, 0) + int(count)
+        )
+
+
+def unknown_queue_counts() -> Dict[str, int]:
+    """当前进程内 ``queue → count`` 快照（prometheus 导出/单测）。"""
+    with _unknown_queue_counts_lock:
+        return dict(_unknown_queue_counts)
+
+
+def reset_unknown_queue_counts() -> None:
+    """清空进程内计数（单测隔离用；生产不调用）。"""
+    with _unknown_queue_counts_lock:
+        _unknown_queue_counts.clear()
+
+
+def collect_dispatch_metrics() -> List[Any]:
+    """派发侧指标（``dispatch_unknown_queue_total{queue}``）。
+
+    与 worker 的 ``collect_capacity_metrics`` 同属「派发侧可见面」；console
+    的集群 ``/metrics`` 会把它并入（惰性导入 ``metrics`` 避免环依赖）。
+    """
+    counts = unknown_queue_counts()
+    if not counts:
+        return []
+    from .metrics import Metric  # 局部导入：避免模块级环依赖
+
+    return [
+        Metric(
+            "dispatch_unknown_queue_total",
+            count,
+            {"queue": queue},
+            "counter",
+            _UNKNOWN_QUEUE_METRIC_HELP,
+        )
+        for queue, count in sorted(counts.items())
+    ]
 
 
 # ------------------------------------------------------------------ 容量块
@@ -454,9 +557,40 @@ class DispatchCandidate:
         )
 
     @property
-    def queue_name(self) -> str:
-        """候选实际消费的队列名（缺 metadata ⇒ 默认队列，兼容存量 worker）。"""
+    def queue_name(self) -> Optional[str]:
+        """候选**声明**的消费队列名；``None`` = unknown（缺 metadata/畸形值）。
+
+        B75-01：unknown 绝不回落到默认队列——那是假设，不是事实。
+        """
         return candidate_queue_name(self.metadata)
+
+    @property
+    def queue_source(self) -> str:
+        """候选队列来源：``declared`` / ``unknown``（供诊断/台账分类）。"""
+        return QUEUE_SOURCE_DECLARED if self.queue_name is not None else "unknown"
+
+    def resolve_queue(
+        self,
+        requested_queue: str,
+        unknown_queue_policy: Optional[str] = None,
+    ) -> Tuple[Optional[str], str]:
+        """把候选队列解析为定向用的 ``(队列名, queue_source)``。
+
+        - 声明了队列 ⇒ ``(declared, "declared")``；
+        - 未声明 + ``assume-default`` + 请求队列是默认队列 ⇒
+          ``(DEFAULT_DISPATCH_QUEUE, "assumed-default")``（显式兼容开关）；
+        - 其余未声明 ⇒ ``(None, "unknown")``——不得成为定向目标。
+        """
+        declared = self.queue_name
+        if declared is not None:
+            return declared, QUEUE_SOURCE_DECLARED
+        policy = resolve_unknown_queue_policy(unknown_queue_policy)
+        if (
+            policy == UNKNOWN_QUEUE_ASSUME_DEFAULT
+            and requested_queue == DEFAULT_DISPATCH_QUEUE
+        ):
+            return DEFAULT_DISPATCH_QUEUE, QUEUE_SOURCE_ASSUMED_DEFAULT
+        return None, "unknown"
 
     @property
     def config_family(self) -> Optional[str]:
@@ -471,20 +605,30 @@ class DispatchCandidate:
         self,
         queue_name: Optional[str] = None,
         config_family: Optional[str] = None,
+        unknown_queue_policy: Optional[str] = None,
     ) -> Optional[str]:
         """不可派发原因（前缀稳定，见 ``REASON_*``）；可派发返回 ``None``。
 
         判定顺序即优先级：**队列维度** → status 白名单 → 容量缺失/陈旧
         （放行）→ 盘 → 饱和。``queue_name`` 为 ``None`` 时不做队列过滤
-        （纯函数调用方/看板保持原语义）；给定时，候选消费的队列必须与
+        （纯函数调用方/看板保持原语义）；给定时，候选**声明**的队列必须与
         本次派发队列一致——A64-05：跨队列 target 的消息会投到 target 读不到
         的队列，worker 交接耗尽后把执行误终态化为 error。
+        B75-01：未声明队列的候选默认以 ``queue: unknown`` 拒绝定向；只有
+        ``assume-default`` 兼容开关（且请求默认队列）才把 unknown 当默认。
         S18-02A：只有 ``running`` 参与派发；``starting/draining/stopping/
         stopped`` 与未知状态在容量判定**之前**就被拒——即使它上报了完美容量，
         也不得成为派发目标（A46-01）。
         """
-        if queue_name is not None and self.queue_name != queue_name:
-            return f"{REASON_QUEUE_MISMATCH} (worker consumes {self.queue_name})"
+        if queue_name is not None:
+            resolved, source = self.resolve_queue(queue_name, unknown_queue_policy)
+            if resolved is None:
+                return (
+                    f"{REASON_QUEUE_UNKNOWN} "
+                    "(worker metadata lacks queue_name)"
+                )
+            if source == QUEUE_SOURCE_DECLARED and resolved != queue_name:
+                return f"{REASON_QUEUE_MISMATCH} (worker consumes {resolved})"
         # B2R31-01：family 是硬兼容键。只拒绝两端都明确且不同的候选；
         # 缺失/legacy（存量 worker）放行——升级期不能让广播派发全停。
         if (
@@ -558,21 +702,24 @@ def filter_dispatchable(
     *,
     queue_name: Optional[str] = None,
     config_family: Optional[str] = None,
+    unknown_queue_policy: Optional[str] = None,
 ) -> Tuple[List[DispatchCandidate], List[DispatchRejection]]:
     """容量门：``(可派候选, 被拒候选)``。
 
     接受 ``DispatchCandidate`` 或任意同形对象（``ServiceInfo`` / duck-typed
     stub）。**纯函数**——不读 Redis、不写 Redis、不改入参。
 
-    ``queue_name`` 给定时候选必须先过队列维度：只有消费该队列的 worker
-    才有资格成为目标（缺 metadata 按默认队列，见
-    :func:`candidate_queue_name`）。``None`` = 不做队列过滤（看板/存量调用）。
+    ``queue_name`` 给定时候选必须先过队列维度：只有**能证明**消费该队列的
+    worker 才有资格成为目标（B75-01：缺 metadata 是 unknown，不是默认队列；
+    见 :func:`candidate_queue_name`）。``None`` = 不做队列过滤（看板/存量调用）。
+    ``unknown_queue_policy`` 缺省读 env（见
+    :func:`resolve_unknown_queue_policy`）。
     """
     allowed: List[DispatchCandidate] = []
     rejected: List[DispatchRejection] = []
     for item in candidates:
         cand = item if isinstance(item, DispatchCandidate) else DispatchCandidate.from_service_info(item)
-        reason = cand.reject_reason(queue_name, config_family)
+        reason = cand.reject_reason(queue_name, config_family, unknown_queue_policy)
         if reason is None:
             allowed.append(cand)
         else:
@@ -592,14 +739,19 @@ def select_dispatch_target(
     *,
     queue_name: Optional[str] = None,
     config_family: Optional[str] = None,
+    unknown_queue_policy: Optional[str] = None,
 ) -> Optional[DispatchCandidate]:
     """在容量门之上做确定性选择：剩余盘最多 → 在跑最少 → id 字典序。
 
     无可派候选返回 ``None``（调用方据此走「本轮不派单」而非「随便派一台」）。
-    ``queue_name`` 语义同 :func:`filter_dispatchable`。
+    ``queue_name`` / ``unknown_queue_policy`` 语义同
+    :func:`filter_dispatchable`。
     """
     allowed, _ = filter_dispatchable(
-        candidates, queue_name=queue_name, config_family=config_family
+        candidates,
+        queue_name=queue_name,
+        config_family=config_family,
+        unknown_queue_policy=unknown_queue_policy,
     )
     if not allowed:
         return None
@@ -613,12 +765,18 @@ class RouteDecision:
     ``target is None`` 有两种语义：池里没有候选、或有候选但全被容量门拒。
     两者的对外处置**相同**——放行（广播抢单），故合并为同一个原因前缀
     ``route: no-dispatchable-worker``（派发侧据此**不带** target 字段）。
+
+    B75-01：``queue_source`` 说明目标队列是 worker **声明**的还是按
+    ``assume-default`` 兼容开关**假设**的（``declared`` / ``assumed-default``）。
+    ``target_queue_name`` 是定向实际使用的队列（无目标时 ``None``）。
     """
 
     target: Optional[DispatchCandidate] = None
     reason: str = REASON_ROUTE_NO_TARGET
     allowed: List[DispatchCandidate] = field(default_factory=list)
     rejected: List[DispatchRejection] = field(default_factory=list)
+    queue_source: str = QUEUE_SOURCE_DECLARED
+    target_queue_name: Optional[str] = None
 
     @property
     def target_instance_id(self) -> Optional[str]:
@@ -630,6 +788,7 @@ def decide_route(
     *,
     queue_name: Optional[str] = None,
     config_family: Optional[str] = None,
+    unknown_queue_policy: Optional[str] = None,
 ) -> RouteDecision:
     """容量路由（**唯一**实现）：队列维度 + 容量门 + 确定性排序 + 稳定原因。
 
@@ -638,21 +797,71 @@ def decide_route(
 
     ``queue_name`` 给定时**先按队列过滤再排序**：``active_tasks`` 等容量
     指标只在同一队列内可比（A64-05）。跨队列候选以
-    ``REASON_QUEUE_MISMATCH`` 进入 ``rejected``，不静默消失。
+    ``REASON_QUEUE_MISMATCH`` 进入 ``rejected``，未声明队列的候选以
+    ``REASON_QUEUE_UNKNOWN`` 进入 ``rejected``（默认策略 skip），不静默消失。
+    B75-01：unknown 只在 ``assume-default`` + 默认队列时被显式纳入；该假设
+    必须留 WARNING，并通过 ``queue_source=assumed-default`` 透出。
     """
+    policy = resolve_unknown_queue_policy(unknown_queue_policy)
+    candidate_list = list(candidates)
+    if queue_name is not None:
+        unknown_ids: List[str] = []
+        for item in candidate_list:
+            cand = (
+                item if isinstance(item, DispatchCandidate)
+                else DispatchCandidate.from_service_info(item)
+            )
+            if cand.queue_name is None:
+                unknown_ids.append(cand.instance_id)
+        if unknown_ids:
+            record_unknown_queue(queue_name, len(unknown_ids))
+            assume = (
+                policy == UNKNOWN_QUEUE_ASSUME_DEFAULT
+                and queue_name == DEFAULT_DISPATCH_QUEUE
+            )
+            if assume:
+                logger.warning(
+                    "派发队列 %s：%d 个 worker 未声明 queue_name，按 %s=%s "
+                    "显式当作默认队列参与定向（queue_source=assumed-default）: %s",
+                    queue_name, len(unknown_ids), UNKNOWN_QUEUE_POLICY_ENV,
+                    UNKNOWN_QUEUE_ASSUME_DEFAULT, unknown_ids,
+                )
+            else:
+                logger.warning(
+                    "派发队列 %s：%d 个 worker 未声明 queue_name（%s），按 %s=%s "
+                    "跳过定向（unknown 不等于默认队列；消息仍按调用方队列广播）: %s",
+                    queue_name, len(unknown_ids), REASON_QUEUE_UNKNOWN,
+                    UNKNOWN_QUEUE_POLICY_ENV, policy, unknown_ids,
+                )
     allowed, rejected = filter_dispatchable(
-        candidates, queue_name=queue_name, config_family=config_family
+        candidate_list,
+        queue_name=queue_name,
+        config_family=config_family,
+        unknown_queue_policy=policy,
     )
     if not allowed:
         return RouteDecision(
             target=None, reason=REASON_ROUTE_NO_TARGET,
             allowed=allowed, rejected=rejected,
         )
+    target = sorted(allowed, key=lambda c: c.sort_key())[0]
+    if target.queue_name is not None:
+        queue_source = QUEUE_SOURCE_DECLARED
+        target_queue_name: Optional[str] = target.queue_name
+    elif queue_name == DEFAULT_DISPATCH_QUEUE:
+        queue_source = QUEUE_SOURCE_ASSUMED_DEFAULT
+        target_queue_name = DEFAULT_DISPATCH_QUEUE
+    else:
+        # 不做队列过滤（queue_name=None）时不存在「假设默认队列」的语义。
+        queue_source = QUEUE_SOURCE_DECLARED
+        target_queue_name = queue_name
     return RouteDecision(
-        target=sorted(allowed, key=lambda c: c.sort_key())[0],
+        target=target,
         reason=REASON_ROUTE_CAPACITY,
         allowed=allowed,
         rejected=rejected,
+        queue_source=queue_source,
+        target_queue_name=target_queue_name,
     )
 
 
@@ -738,6 +947,7 @@ def shadow_dispatch_plan(
     return {
         "shadow": shadow,
         "queue": queue,
+        "queue_source": route.queue_source,
         "issue_ids": list(issue_ids or []),
         "target": route.target_instance_id,
         "reason": route.reason,
