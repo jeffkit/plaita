@@ -1158,7 +1158,10 @@ canonical 键，无 Redis schema 变更。
   这是「过期成员继续累积」的已知降级，不得静默；
 * console 删除订阅已补齐 `node:` 索引（此前只清 type/correlation/flow），与引擎
   `delete_subscription` 和租户 purge 的四索引口径一致；
-* 指标：进程级 `event_index_sweep_examined_total` / `event_index_sweep_pruned_total`
+* 指标：进程级 `event_index_pruned_total{kind="event_type|sub_type|sub_correlation|sub_flow|sub_node"}`
+  （读时惰性清理、写侧兜底清理与 janitor 三条删除路径统一计数，
+  `plaita.event.redis.event_index_pruned_metrics()` 读取）/
+  `event_index_sweep_examined_total` / `event_index_sweep_pruned_total`
   / `event_index_sweep_errors_total`（`index_sweep_metrics()` 读取，日志每 tick
   汇总），事件层不依赖 `plaita.server.metrics`。
 
