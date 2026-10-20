@@ -885,8 +885,15 @@ class TestStateViewMutations(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestNormalStrategyRemainingMutations(unittest.IsolatedAsyncioTestCase):
-    async def test_remaining_none_when_no_timeout(self):
-        """Kill remaining = None → "" mutation: verify None is passed when timeout_ms=None."""
+    async def test_remaining_uses_default_deadline_when_no_timeout(self):
+        """plaita#267：timeout_ms=None 不再等于无限额——补执行级默认预算。
+
+        原断言 ``captured[0] is None`` 钉的是修复前契约；现在应由
+        ``execution_deadline_ms`` 给默认值。mutation ``remaining = None → ""``
+        仍会被本断言杀死（"" 不等于默认毫秒数）。
+        """
+        from plaita.core.deadline import default_execution_deadline_ms
+
         ctx = ExecutionContext()
         cb = _make_cb()
         captured = []
@@ -904,7 +911,7 @@ class TestNormalStrategyRemainingMutations(unittest.IsolatedAsyncioTestCase):
         runner.run_node = run_node
         strategy = NormalStrategy()
         await strategy.execute(flow, ctx, runner, cb, timeout_ms=None)
-        self.assertIsNone(captured[0])
+        self.assertEqual(captured[0], default_execution_deadline_ms())
 
     async def test_remaining_decreases_with_elapsed_time(self):
         """Kill elapsed_ms = int((time - start) / 1000) mutation (should use * 1000)."""

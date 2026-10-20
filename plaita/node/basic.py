@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Dict, FrozenSet, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from plaita.core.errors import (
     ErrorHandler,
@@ -119,6 +119,30 @@ class Node(BaseModel):
     @classmethod
     def _schema_hygiene(cls, values: Dict) -> Dict:
         return warn_unknown_keys(cls, values)
+
+    # plaita#267：``node.timeout`` 的非法值必须在**构造期**具名拒绝。
+    # ``_parse_timeout`` 只在运行期解析；此前 ``timeout="-5"`` / ``"999999999999999999"``
+    # （≈3,170 万年）能通过 Pydantic 校验并被 console 保存，直到节点跑起来才
+    # 暴露——共享 worker 已被这个「合法」配置钉住。上限 24h 见
+    # ``MAX_NODE_TIMEOUT_MS``：更长预算应改用 flow 级 deadline。
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _validate_timeout_budget(cls, value):
+        if value is None or value == "":
+            return value
+        # 惰性导入：runner 在 TYPE_CHECKING 下引用 Node，模块顶层互引会成环。
+        from plaita.core.runner import MAX_NODE_TIMEOUT_MS, _parse_timeout_uncached
+
+        try:
+            parsed_ms = _parse_timeout_uncached(value)
+        except ValueError as exc:
+            raise ValueError(f"node.timeout 非法: {exc}") from exc
+        if parsed_ms is not None and parsed_ms > MAX_NODE_TIMEOUT_MS:
+            raise ValueError(
+                f"node.timeout 超过上限: {value!r} > {MAX_NODE_TIMEOUT_MS}ms (24h)；"
+                "需要更长预算请设置 flow 级 timeout"
+            )
+        return value
 
     @model_validator(mode="before")
     @classmethod

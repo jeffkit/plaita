@@ -181,6 +181,19 @@ class FlowTimeoutError(FlowExecutionException):
         super().__init__(self.code, message, self.error_type, node)
 
 
+class ExecutionDeadlineError(FlowTimeoutError):
+    """执行级总预算（deadline）耗尽（plaita#267）。
+
+    与 :class:`FlowTimeoutError` 同 ``code=-1`` / ``FLOW_ERROR`` 归属，既有
+    消费方（normal 模式错误契约、worker 的「超时不重试」判据）零回归；单独
+    成类是为了让**执行总预算到期**与节点自身超时可判别：
+
+    - worker ``_is_retryable_node_failure`` 按 ``FlowTimeoutError`` 家族判定
+      「不重试」，执行终态化 error 可被收尸（不会再重投一次）；
+    - 观测端可按类型名区分「执行 deadline 到期」与「节点 timeoutHandler 超时」。
+    """
+
+
 class FlowErrorException(FlowExecutionException):
     """流程执行通用错误（兜底包装）。"""
 

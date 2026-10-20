@@ -34,6 +34,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..auth import require_auth, tenant_scope
     from ..services import dispatcher as dispatcher_svc
 except ImportError:  # 平铺布局（cwd=backend）运行时
@@ -91,7 +96,7 @@ class WorkerCapacityRow(BaseModel):
     reject_reason: Optional[str] = Field(None, description="不可派原因（前缀稳定）")
 
 
-class DispatchPlanRequest(BaseModel):
+class DispatchPlanRequest(StrictRequestModel):
     issue_ids: List[str] = Field(default_factory=list, description="本轮候选 issue ID")
     queue_name: Optional[str] = Field(
         None, description="计划队列名（缺省跟随 PLAITA_CONSOLE_TASK_QUEUE）"

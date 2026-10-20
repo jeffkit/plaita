@@ -13,6 +13,11 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..services import dryrun as dryrun_svc
     from ..auth import tenant_scope
 except ImportError:
@@ -22,7 +27,7 @@ except ImportError:
 router = APIRouter()
 
 
-class DryRunRequest(BaseModel):
+class DryRunRequest(StrictRequestModel):
     flowJson: str = Field(..., description="Flow 定义 JSON 字符串")
     input: Optional[Dict[str, Any]] = Field(default_factory=dict, description="输入参数")
     pinned: Optional[Dict[str, Any]] = Field(

@@ -19,6 +19,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..auth import (
         NO_ACTIVE_TENANT_DETAIL,
         ensure_platform_admin,
@@ -67,12 +72,12 @@ def _user_fingerprint(username: str) -> str:
     return digest[:_USER_FP_LEN]
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(StrictRequestModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
 
 
-class CreateUserRequest(BaseModel):
+class CreateUserRequest(StrictRequestModel):
     username: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=8)
     role: str = "viewer"
@@ -82,15 +87,15 @@ class CreateUserRequest(BaseModel):
     )
 
 
-class RoleRequest(BaseModel):
+class RoleRequest(StrictRequestModel):
     role: str
 
 
-class PasswordRequest(BaseModel):
+class PasswordRequest(StrictRequestModel):
     password: str = Field(..., min_length=8)
 
 
-class SwitchTenantRequest(BaseModel):
+class SwitchTenantRequest(StrictRequestModel):
     # A2R17-01：``null`` 是「平台管理员显式切到全量视角（只读）」的合法值；
     # 字段本身仍必填——缺省/空串都不解释成全量，避免客户端漏传时静默清租户。
     tenant_id: Optional[str] = Field(..., min_length=1)

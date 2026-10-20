@@ -2,6 +2,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -980,6 +981,20 @@ async def _read_capped_async_body(content, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+class _RequestBudgetExceeded(TimeoutError):
+    """``requestTimeout`` 总预算（含重定向每一跳）耗尽（plaita#267）。
+
+    ``TimeoutError`` 子类：``handle_http_node_err`` 走 ``send_request_fail``
+    （有请求快照、无响应）归 1002 可重试，与 requests 自身的超时同族。
+    """
+
+
+def _cancel_requested(ctx) -> bool:
+    """执行级取消是否已置位（节点层只读；引擎负责抛 FlowCancelledException）。"""
+    event = getattr(ctx, "cancel_requested", None)
+    return bool(event is not None and event.is_set())
+
+
 class HttpExecutor:
     """HTTP执行器"""
     def __init__(self, url, method, query, body, headers, addressing, delegate,
@@ -999,11 +1014,41 @@ class HttpExecutor:
         # 访问策略（2026-09 安全评审 P1-1）。两条路径都手动逐跳跟随：restricted
         # 下每跳复检策略，防止 302 把请求带进被禁网段；默认路径下不读中间跳
         # body，防止敌意 302 绕过响应体上限。上限同为 max_redirects。
+        #
+        # #267：request_timeout 是**整个请求**（含所有重定向跳）的总预算，
+        # 不再逐跳重新起算——旧语义下 600s × 21 跳 = 3.5h 的单次尝试。
         self.request_timeout = request_timeout
         self.allowed_hosts = allowed_hosts
         self.denied_hosts = denied_hosts
         self.block_private_networks = block_private_networks
         self.max_redirects = max_redirects
+
+    def _request_deadline(self) -> float:
+        """本次请求（跨重定向）的绝对截止时刻（monotonic 秒）。"""
+        return time.monotonic() + float(self.request_timeout)
+
+    @staticmethod
+    def _remaining_timeout(deadline: float) -> float:
+        """距请求总预算耗尽的剩余秒数（可能 <=0）。"""
+        return deadline - time.monotonic()
+
+    def _send_sync_with_budget(self, session, request, deadline: float, ctx):
+        """同步发送一跳：取消/总预算耗尽在跳前拒绝，超时取剩余预算。
+
+        抛出的异常由 ``handle_request`` 的 ``except Exception`` 统一转成
+        ``HttpResponse(raw_request=...)`` 错误帧（1002 可重试）。
+        """
+        if _cancel_requested(ctx):
+            raise Exception("Execution cancellation requested")
+        remaining = self._remaining_timeout(deadline)
+        if remaining <= 0:
+            raise _RequestBudgetExceeded(
+                f"requestTimeout={self.request_timeout}s exhausted before "
+                f"the next redirect hop"
+            )
+        return session.send(
+            request, timeout=remaining, allow_redirects=False, stream=True,
+        )
 
     @property
     def _effective_block_private(self) -> bool:
@@ -1103,8 +1148,11 @@ class HttpExecutor:
                 #   body（无上限）——敌意 302 可绕过响应体上限把任意大 body 读进内存。
                 # 上限统一为 maxRedirects（此前默认路径走 requests 的 30）；
                 # stream=True：响应体按上限流式读，避免 GB 级 body 全量进内存。
-                response = session.send(request, timeout=self.request_timeout,
-                                        allow_redirects=False, stream=True)
+                # #267：timeout 是**整个请求**的剩余总预算，逐跳递减，不再每跳重置。
+                deadline = self._request_deadline()
+                response = self._send_sync_with_budget(
+                    session, request, deadline, ctx,
+                )
                 hops = 0
                 while response.is_redirect and hops < self.max_redirects:
                     next_url = urljoin(response.url, response.headers.get("Location", ""))
@@ -1115,8 +1163,9 @@ class HttpExecutor:
                     request = next_request
                     if restricted:
                         self._check_policy(next_url)
-                    response = session.send(request, timeout=self.request_timeout,
-                                            allow_redirects=False, stream=True)
+                    response = self._send_sync_with_budget(
+                        session, request, deadline, ctx,
+                    )
                     hops += 1
                 if response.is_redirect:
                     response.close()
@@ -1188,15 +1237,15 @@ class HttpExecutor:
 
         if self._restrictions_active:
             async with _new_oneshot_session(resolver=_PolicyResolver(self)) as policy_session:
-                return await self._send_async(policy_session, url, headers, data)
+                return await self._send_async(policy_session, url, headers, data, ctx)
 
         session = get_flow_session()
         if session is None or session.closed:
             async with _new_oneshot_session() as oneshot:
-                return await self._send_async(oneshot, url, headers, data)
-        return await self._send_async(session, url, headers, data)
+                return await self._send_async(oneshot, url, headers, data, ctx)
+        return await self._send_async(session, url, headers, data, ctx)
 
-    async def _send_async(self, session, url, headers, data):
+    async def _send_async(self, session, url, headers, data, ctx=None):
         """在给定 session 上执行请求（两条路径都逐跳手动跟随；restricted 时每跳复检策略）。
 
         aiohttp 自己的自动跟随与同步路径（requests）语义不同：301/302 的非 POST
@@ -1208,20 +1257,34 @@ class HttpExecutor:
         ``handle_request`` 的 ``HttpResponse(raw_request=request)`` 对齐，让
         ``send_request_fail()`` 在 async 路径同样成立 → 连接类错误归
         1002(DO_REQUEST)，sync/async 同错误同码。
+
+        #267：``request_timeout`` 是整个请求（跨所有重定向跳）的总预算，
+        每跳用 ``ClientTimeout(total=remaining)``，不再逐跳重置；跳前复查
+        执行级取消。
         """
         raw_request = HttpRequestInfo(method=self.method, url=url, headers=headers, body=data)
         try:
             if self._restrictions_active:
                 self._check_policy(url)
-            timeout = aiohttp.ClientTimeout(total=self.request_timeout)
+            deadline = self._request_deadline()
             current_url, current_method, current_data = url, self.method, data
             for _hop in range(self.max_redirects + 1):
+                if _cancel_requested(ctx):
+                    return HttpResponse(raw_request=raw_request), Exception(
+                        "Execution cancellation requested"
+                    )
+                remaining = self._remaining_timeout(deadline)
+                if remaining <= 0:
+                    return HttpResponse(raw_request=raw_request), _RequestBudgetExceeded(
+                        f"requestTimeout={self.request_timeout}s exhausted before "
+                        f"the next redirect hop"
+                    )
                 async with session.request(
                     method=current_method,
                     url=current_url,
                     headers=headers,
                     data=current_data,
-                    timeout=timeout,
+                    timeout=aiohttp.ClientTimeout(total=remaining),
                     allow_redirects=False,
                 ) as response:
                     location = response.headers.get("Location")
@@ -1339,7 +1402,7 @@ class HTTP(Node):
     # （PLAITA_HTTP_MAX_RESPONSE_BYTES）见模块顶部常量。
     request_timeout: float = Field(
         30.0, alias="requestTimeout",
-        description="单次请求（含重定向每一跳）超时秒数",
+        description="整个请求（含所有重定向跳）的总超时秒数；不再逐跳重新起算",
     )
     allowed_hosts: Optional[List[str]] = Field(
         None, alias="allowedHosts",
@@ -1391,6 +1454,14 @@ class HTTP(Node):
     @field_validator("request_timeout")
     @classmethod
     def _validate_request_timeout_upper_bound(cls, value: float) -> float:
+        # #267：逐跳起算改总预算后，非正/非有限的取值必须构造期拒绝——
+        # aiohttp ``ClientTimeout(total=0)`` 表示**无限额**，负值同样被静默
+        # 当成"不超时"，正好把本字段的保护反转成漏洞。
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                f"requestTimeout 必须是正的有限秒数: {value}"
+                "（整个请求含所有重定向跳的总预算）"
+            )
         if value > MAX_REQUEST_TIMEOUT_SECONDS:
             raise ValueError(
                 f"requestTimeout 超过上限: {value} > {MAX_REQUEST_TIMEOUT_SECONDS} 秒"

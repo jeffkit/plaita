@@ -83,7 +83,7 @@ return result
 `NodeRunner.run_node` 负责一个节点的完整执行周期：
 
 1. `callback_manager.on_node_start`
-2. `_execute_with_retry`：按 `retryTimes` 重试，每次按 `min(节点timeout, 剩余预算)` 设超时；只重试瞬态错误（`NodeException` 1002/1003），重试间隔指数退避 `min(30s, 1s × 2^n)`；确定性配置错误（`NodeException` 1001 / 非 `NodeException` 的 `ValueError`）不消耗重试次数（输出校验钩子的异常仍按普通异常重试，#219）
+2. `_execute_with_retry`：按 `retryTimes` 重试，每次按 `min(节点timeout, 剩余预算)` 设超时；只重试瞬态错误（`NodeException` 1002/1003），重试间隔指数退避 `min(30s, 1s × 2^n)`；确定性配置错误（`NodeException` 1001 / 非 `NodeException` 的 `ValueError`）不消耗重试次数（输出校验钩子的异常仍按普通异常重试，#219）；每次尝试入口检查执行级 `cancel_requested`，退避按 ≤0.5s 分片轮询（cancel ≤1s 生效），退避时长也计入执行预算（#267）
 3. 成功：写 `LAST_NODE` / `BRANCH` / `$NODE[id]`，`on_node_end`，返回 `(result, branch)`
 4. 异常分支处理：
     - `FlowResultError` → 包装为 `FlowExecutionException(ERROR_RESULT)`
@@ -99,7 +99,9 @@ return result
 
 ## 超时合并
 
-`_merge_timeout` 把"流程 `timeout`"与"调用方 `timeout`"取更严者；节点执行时再与"节点自身 `timeout`"取更严。任一为空表示"无限制"。
+`_merge_timeout` 把"流程 `timeout`"与"调用方 `timeout`"取更严者；节点执行时再与"节点自身 `timeout`"取更严。缺省时**不再无限额**：`plaita.core.deadline.execution_deadline_ms` 补执行级默认预算（1800s，`PLAITA_EXECUTION_DEADLINE_SECONDS` 可调），策略层（Normal/Generator/Distributed）在入口应用；显式配置优先，`0` 仍是零预算。执行级预算到期由 runner 抛 `ExecutionDeadlineError`（`FlowTimeoutError` 子类），**绕过** `timeoutHandler`（终态语义），worker 按 `FlowTimeoutError` 家族不重试并终态化 error（#267）。
+
+节点级 `timeout` 的负值/非有限/超大值在**构造期**具名拒绝（Pydantic field validator，上限 `MAX_NODE_TIMEOUT_MS` = 24h），不再等运行期或直到节点执行才暴露。
 
 distributed 入口同样合并与解析（`run_distributed`，plaita#71）：流程 `timeout` / 实例 `timeout` / 调用期 `timeout` 三者经 `_parse_timeout` 归一后取严，再作为 `max_timeout_ms` 传给策略；`DistributedStrategy` 每一步（`_start_new_flow` 与 `_execute_current_node`）都把这个预算交给节点执行——历史实现只在首步的 start 节点传该形参，第 2 步起丢失，且从不读 `flow.timeout`，流程级超时在 worker/console 的生产路径上形同虚设。
 

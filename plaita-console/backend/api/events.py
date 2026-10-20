@@ -17,6 +17,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
+
+try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
 from redis import Redis
 
 try:
@@ -100,7 +105,7 @@ class SubscriptionListResponse(BaseModel):
 _EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9._:/=-]{1,128}$")
 
 
-class PublishEventRequest(BaseModel):
+class PublishEventRequest(StrictRequestModel):
     event_type: str = Field(..., description="事件类型")
     data: Dict[str, Any] = Field(default_factory=dict, description="事件数据")
     correlation_id: Optional[str] = Field(None, description="关联 ID")

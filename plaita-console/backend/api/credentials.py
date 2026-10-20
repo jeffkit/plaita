@@ -11,6 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..services import credentials_svc
     from ..auth import (
         NO_ACTIVE_TENANT_DETAIL,
@@ -55,7 +60,7 @@ def _audit(request: Optional[Request], action: str, resource_id: str,
     )
 
 
-class CredentialSaveRequest(BaseModel):
+class CredentialSaveRequest(StrictRequestModel):
     name: str = Field(..., min_length=1, max_length=128, description="凭据名（节点按名引用）")
     type: str = Field("generic", max_length=64, description="类型标签，如 webhook-bearer / database")
     data: Dict[str, Any] = Field(..., description="凭据数据，如 {url: ...} 或 {username, password}")
@@ -67,6 +72,8 @@ class CredentialDetail(BaseModel):
     tenant_id: str = ""
     type: str
     desc: str = ""
+    # A2R24-07：列表行已投影 updated_at，详情补齐（编辑页显示最近更新时间）。
+    updated_at: Optional[str] = None
     data: Dict[str, Any]
 
 

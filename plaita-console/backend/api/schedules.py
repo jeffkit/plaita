@@ -27,6 +27,11 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
 from redis import Redis
 
 try:
@@ -78,7 +83,7 @@ router = APIRouter()
 
 # ============ 请求/响应模型 ============
 
-class ScheduleCreateRequest(BaseModel):
+class ScheduleCreateRequest(StrictRequestModel):
     name: str = Field(..., description="调度名称")
     flow_id: str = Field(..., description="目标流程 ID")
     version: Optional[str] = Field(None, description="流程版本；空 = 最新已发布")
@@ -88,7 +93,7 @@ class ScheduleCreateRequest(BaseModel):
     created_by: str = Field("", description="创建人")
 
 
-class ScheduleUpdateRequest(BaseModel):
+class ScheduleUpdateRequest(StrictRequestModel):
     name: Optional[str] = None
     version: Optional[str] = None
     cron: Optional[str] = None
@@ -99,7 +104,7 @@ class ScheduleUpdateRequest(BaseModel):
     expected_updated_at: Optional[str] = None
 
 
-class CronPreviewRequest(BaseModel):
+class CronPreviewRequest(StrictRequestModel):
     cron: str
     count: int = Field(5, ge=1, le=20)
 

@@ -128,6 +128,7 @@ _LAZY_EXPORTS = {
     "FlowErrorException": "plaita.core.errors",
     "FlowStartMissingError": "plaita.core.errors",
     "FlowTimeoutError": "plaita.core.errors",
+    "ExecutionDeadlineError": "plaita.core.errors",
     "NodeNotFoundError": "plaita.core.errors",
     "NodeExecutionError": "plaita.core.errors",
     "NodeTimeoutError": "plaita.core.errors",

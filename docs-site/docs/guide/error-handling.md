@@ -34,11 +34,32 @@ plaita 提供节点级/流程级的超时控制、错误策略与重试，并把
 | `PT1H` | 1 小时 |
 | `5000` | 5000 毫秒 |
 | `0` / `"0"` / `PT0S` / `PT` | **显式零预算**（最严，立即超时）。plaita#138 起不再被当作"不限额" |
-| 未设 / `""` / `None` | **不限额**（未提供预算） |
+| 未设 / `""` / `None` | **执行级默认 deadline**（1800s；`PLAITA_EXECUTION_DEADLINE_SECONDS` 可调，见下） |
 
-`0` 与"没给超时"是两种不同语义：前者是**最严预算**，后者才是不限额。历史上
-的解析把 `0` 与零时长 ISO 串一并归成"不限额"，于是"取最严"在取到最严值（`0`）
+`0` 与"没给超时"是两种不同语义：前者是**最严预算**，后者交给执行级默认预算。
+历史上的解析把 `0` 与零时长 ISO 串一并归成"不限额"，于是"取最严"在取到最严值（`0`）
 时反而完全失效——`flow.timeout="PT0S"` 曾让一个 0.309s 的节点跑满（plaita#138）。
+
+#### 执行级 deadline（plaita#267）
+
+`flow.timeout` / `execution.timeout` / 调用期 `timeout` **全部缺省**时，引擎给每个
+执行补一个具名总预算：
+
+- 默认 **1800s**（与运维 runbook「末节点停滞 >1800s 判死」同口径）；
+- 环境变量 `PLAITA_EXECUTION_DEADLINE_SECONDS`（秒，支持小数）由运维调整；
+  非数字 / 非有限 / `<=0` **不会**变成无限额——回退默认并打 WARNING；
+- 显式 timeout（三者任一）仍优先，不再叠加默认值；
+- 超时抛 **`ExecutionDeadlineError`**（`FlowTimeoutError` 子类，`code=-1` /
+  `error_type=flow_error`）。它**不经过**节点的 `timeoutHandler`/`errorHandler`
+  ——执行级预算到期是终态，不能被 `continue` 策略吞掉；
+- worker 侧按 `FlowTimeoutError` 家族判定「不重试」，执行终态化 `error`（可收尸），
+  不会再重投一次把 38.6h 的配置跑两遍；
+- distributed 与 `flow.timeout` 同口径：**每步**一个预算（挂起/等待事件不占
+  worker，也不计入本步墙钟）。
+
+默认预算的作用是兜住"没有任何 timeout 配置"的执行：此前该场景完全无限额，
+`requestTimeout=600` × `maxRedirects=20` × `retryTimes=10` 的合法配置可让单个
+执行占用共享 worker 38.6 小时（issue #267）。
 
 > 注：`Flow.timeout` 字段当前类型为 `Optional[str]`，故上表的"毫秒整数"写法在 JSON 里会被 pydantic 以 `string_type` 拒绝（传字符串 `"5000"` 可用）；这是既有的模型/文档不一致，另单跟踪。
 
@@ -55,6 +76,12 @@ plaita 提供节点级/流程级的超时控制、错误策略与重试，并把
 }
 ```
 
+`node.timeout` 在**构造期**校验（`Flow.model_validate` / 直接实例化节点）：
+负值、非有限值、超过 `sys.float_info.max` 的毫秒数、含年/月分量的 ISO 时长、
+非法串，以及超过 **24h（`MAX_NODE_TIMEOUT_MS`）** 的取值都会被具名拒绝
+（plaita#267）。`0` / `PT0S` 仍是合法的显式零预算。需要单节点跑超过 24h 的
+场景请改用 flow 级 `timeout`（执行 deadline）。
+
 ### 取严原则
 
 调用方传入的 `timeout`、节点自身 `timeout`、流程 `timeout` 之间取**更严（更小）者**生效，不会静默丢弃。流程级剩余时间会作为节点执行的最大预算下传。
@@ -66,6 +93,11 @@ distributed（worker / console）逐步推进路径同样按此取严（plaita#7
 ### 协作式取消
 
 同步节点在 daemon 线程上执行，超时时 plaita 会设置 `ExecutionContext.cancel_event`（一个 `threading.Event`），节点可在长任务里 poll 它提前退出。这是**协作式、尽力而为**的取消；跨进程取消不支持（子进程会拿到全新的未触发事件）。
+
+执行级取消（`FlowExecution.cancel()` / worker 的取消监听）另有粘滞的
+`cancel_requested`：引擎在**每个重试尝试入口**检查，退避等待按 ≤0.5s 分片轮询
+——`retryTimes=10` + 30s 退避不会再把取消拖到下一次尝试（plaita#267，cancel
+在 ≤1s 内打断重试/退避）。退避本身也计入执行预算，不会睡过 deadline。
 
 ```python
 import time

@@ -9,6 +9,7 @@ cooperative cancellation via threading.Event.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import datetime
 import functools
@@ -27,6 +28,7 @@ from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
     ErrorResultException,
     ErrorStrategy,
+    ExecutionDeadlineError,
     FlowCancelledException,
     FlowErrorType,
     FlowExecutionException,
@@ -177,6 +179,76 @@ def _retry_backoff_seconds(attempt: int) -> float:
 async def _backoff_sleep(delay: float) -> None:
     """重试间隔。独立函数便于测试替换，避免单测真实等待数秒。"""
     await asyncio.sleep(delay)
+
+
+#: 取消轮询粒度（秒）：重试退避期间每片最多等这么久就复查一次
+#: ``cancel_requested``——plaita#267 验收要求 cancel 在 ≤1s 内打断重试/退避。
+_CANCEL_POLL_INTERVAL_SECONDS = 0.5
+
+#: 节点级 timeout 的**构造期**上限（毫秒，24h）。#267：``sys.float_info.max``
+#: 只挡得住 ``/1000.0`` 的 OverflowError（≈1.8e308），``"999999999999999999"``
+#: （≈3,170 万年）此前会被原样接受。24h 远大于任何合法节点超时，同时让
+#: 「一个节点钉住共享 worker 数天」在构造期就不可能表达；需要更长预算的场景
+#: 用 flow 级 deadline（显式 flow.timeout）。
+MAX_NODE_TIMEOUT_MS = 24 * 60 * 60 * 1000
+
+
+def _cancelled_error(node) -> FlowCancelledException:
+    """执行级取消的具名异常（与节点入口的取消拒绝同形）。"""
+    err = FlowCancelledException(
+        f"Execution cancelled while running node {node.name or node.id}",
+        node=node,
+    )
+    err.source_line = _node_source_loc(node)
+    return err
+
+
+def _raise_if_cancel_requested(cancel_requested, node) -> None:
+    """``cancel_requested`` 已置位时立即抛取消（重试循环/退避的共用判据）。
+
+    取消是**执行级意图**：必须拦在重试与 errorHandler 之前，否则
+    ``retryTimes=10`` 会把取消拖到退避结束（plaita#267）。
+    """
+    if cancel_requested is not None and cancel_requested.is_set():
+        logger.info("node %s aborted: execution cancellation requested", node.id)
+        raise _cancelled_error(node)
+
+
+async def _backoff_sleep_cancellable(delay: float, cancel_requested, node) -> None:
+    """可被 cancel 打断的退避等待（plaita#267）。
+
+    真实等待按 :data:`_CANCEL_POLL_INTERVAL_SECONDS` 分片轮询 ``cancel_requested``，
+    最坏延迟 ≈ 一个分片；测试替换的 ``_backoff_sleep``（立即返回）仍只被调用
+    一次、收到完整 ``delay``，既有延迟断言零回归。
+    """
+    if cancel_requested is None:
+        await _backoff_sleep(delay)
+        return
+    _raise_if_cancel_requested(cancel_requested, node)
+    if delay <= 0:
+        await _backoff_sleep(delay)
+        return
+    sleeper = asyncio.ensure_future(_backoff_sleep(delay))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {sleeper}, timeout=_CANCEL_POLL_INTERVAL_SECONDS
+            )
+            if sleeper in done:
+                await sleeper  # 传播替换实现可能抛出的异常
+                return
+            if cancel_requested.is_set():
+                sleeper.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sleeper
+                logger.info(
+                    "node %s retry backoff interrupted by execution cancellation",
+                    node.id,
+                )
+                raise _cancelled_error(node)
+    finally:
+        if not sleeper.done():
+            sleeper.cancel()
 
 
 #: 非法 timeout 的统一拒收文案（plaita#139）：错误消息逐字复用，避免各处措辞漂移。
@@ -537,6 +609,10 @@ class NodeRunner:
         start_time = time.time()
 
         for attempt in range(max_retries + 1):
+            # plaita#267：取消检查下沉到**每次尝试**的入口——退避期间被取消
+            # 由 _backoff_sleep_cancellable 当场打断，这里挡住「取消恰好发生在
+            # 退避结束与下一次尝试之间」的窗口。
+            _raise_if_cancel_requested(cancel_requested, node)
             try:
                 if total_timeout_ms is not None:
                     elapsed_ms = int((time.time() - start_time) * 1000)
@@ -553,8 +629,32 @@ class NodeRunner:
                 # #194：只把**引擎预算**超时交给 timeout_handler；节点自己抛的
                 # TimeoutError（含 asyncio.TimeoutError / socket.timeout）走下面
                 # 的普通异常分支——重试与 errorHandler 不再静默失效。
+                _raise_if_cancel_requested(cancel_requested, node)
+                if time_limit_by_flow:
+                    # plaita#267：执行级总预算到期必须**具名**且不可被节点
+                    # timeoutHandler/errorHandler 吞掉（否则一个 continue 策略
+                    # 就能把 deadline 变成摆设）。worker 按 FlowTimeoutError
+                    # 家族判定不重试并终态化 error（可收尸）。
+                    if node.timeout_handler is not None:
+                        logger.warning(
+                            "node %s execution deadline exceeded; node timeoutHandler "
+                            "bypassed (execution-level budget is terminal)",
+                            node.id,
+                        )
+                    err = ExecutionDeadlineError(
+                        f"Flow execution Timeout: execution deadline of "
+                        f"{total_timeout_ms}ms exceeded while running node "
+                        f"{node.name or node.id}"
+                        f"{_node_loc_suffix(node)}",
+                        node=node,
+                    )
+                    err.source_line = _node_source_loc(node)
+                    raise err
                 return _handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
             except (Exception, NodeException) as e:
+                # 取消优先于任何节点错误/重试分类：节点在取消后抛出的普通异常
+                # 不得被包装成 NodeExecutionError 或再重试一轮（#267）。
+                _raise_if_cancel_requested(cancel_requested, node)
                 if attempt == max_retries or not _is_retryable_error(e):
                     return _handle_node_error(flow, node, error_handler, e)
                 # node-F2：只对瞬态错误重试，重试间隔按指数退避（1s×2^n，封顶
@@ -562,6 +662,11 @@ class NodeRunner:
                 # 落到 errorHandler，不再被盲目重试 retryTimes 次；429/限流类
                 # 瞬态错误也不再零间隔连打。
                 delay = _retry_backoff_seconds(attempt)
+                if total_timeout_ms is not None:
+                    # 退避也计入执行预算：不得睡过 deadline 再让下一次尝试
+                    # 发现预算已耗尽（否则总墙钟可超 deadline 最多 30s）。
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    delay = min(delay, max(0.0, (total_timeout_ms - elapsed_ms) / 1000.0))
                 # #151 日志卫生：异常对象/类型投影先落到局部变量，logger 参数里
                 # 只允许出现已清洗文本（`_scrub_url_text(e)`）——结构化守卫按
                 # AST 判定，裸 `e` 出现在 logger 实参（含 f-string）即判红。
@@ -577,7 +682,7 @@ class NodeRunner:
                     delay,
                     _scrub_url_text(e),
                 )
-                await _backoff_sleep(delay)
+                await _backoff_sleep_cancellable(delay, cancel_requested, node)
 
         return _get_error_result(error_handler)
 

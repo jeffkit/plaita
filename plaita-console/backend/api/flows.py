@@ -20,6 +20,11 @@ from redis import Redis
 from pydantic import BaseModel, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..services import flow_store
     from ..services import validation
     from ..services.engine_sync import (
@@ -64,17 +69,35 @@ class FlowListResponse(BaseModel):
     total: int
 
 
-class CreateFlowRequest(BaseModel):
+class CreateFlowRequest(StrictRequestModel):
     flow_id: str = Field(..., description="流程 ID")
     author: str = Field("", description="作者")
     desc: str = Field("", description="描述")
 
 
+class VersionSummaryView(BaseModel):
+    """详情内嵌版本摘要（A2R24-07）：与单版本 ``VersionView`` 同名字段的有类型子集。
+
+    ``definition`` / ``layout`` 体积大且详情不消费，仍走单版本端点读取。
+    """
+
+    version: str
+    status: str
+    created_at: Optional[str] = None
+    published_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class FlowDetailResponse(BaseModel):
     flow_id: str
+    # A2R24-07：详情补齐列表已有的实体字段（平台管理员需要从详情确认归属/
+    # 更新时间；列表 ``FlowSummaryView`` 即同一集合）。
+    tenant_id: str = ""
     author: str = ""
     desc: str = ""
-    versions: List[dict] = Field(default_factory=list)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    versions: List[VersionSummaryView] = Field(default_factory=list)
 
 
 class VersionView(BaseModel):
@@ -90,7 +113,7 @@ class VersionView(BaseModel):
     updated_at: Optional[str] = None
 
 
-class SaveVersionRequest(BaseModel):
+class SaveVersionRequest(StrictRequestModel):
     definition: str = Field(..., description="Flow 定义 JSON 字符串")
     layout: str = Field("{}", description="画布坐标 JSON 字符串")
     created_by: str = Field("", description="保存人")
@@ -103,7 +126,7 @@ class SaveVersionRequest(BaseModel):
     )
 
 
-class PublishRequest(BaseModel):
+class PublishRequest(StrictRequestModel):
     version: str = Field(..., description="要发布的版本号")
 
 
@@ -160,7 +183,7 @@ def list_flows(request: Request = None):
     return FlowListResponse(flows=views, total=len(views))
 
 
-class AiGenerateRequest(BaseModel):
+class AiGenerateRequest(StrictRequestModel):
     prompt: str = Field(..., description="自然语言需求描述")
     agent: str = Field("glm-52", description="编码 Agent profile（agentproc/agents.json）")
 
@@ -232,17 +255,23 @@ def get_flow(flow_id: str, request: Request = None):
     if rec is None:
         raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
     versions = [
-        {
-            "version": v.version,
-            "status": v.status,
-            "created_at": v.created_at.isoformat() if v.created_at else None,
-            "published_at": v.published_at.isoformat() if v.published_at else None,
-            "updated_at": v.updated_at.isoformat() if v.updated_at else None,
-        }
+        VersionSummaryView(
+            version=v.version,
+            status=v.status,
+            created_at=v.created_at.isoformat() if v.created_at else None,
+            published_at=v.published_at.isoformat() if v.published_at else None,
+            updated_at=v.updated_at.isoformat() if v.updated_at else None,
+        )
         for v in store.list_versions(flow_id, tenant_id=tenant)
     ]
     return FlowDetailResponse(
-        flow_id=rec.flow_id, author=rec.author, desc=rec.desc, versions=versions
+        flow_id=rec.flow_id,
+        tenant_id=rec.tenant_id,
+        author=rec.author,
+        desc=rec.desc,
+        created_at=rec.created_at.isoformat() if rec.created_at else None,
+        updated_at=rec.updated_at.isoformat() if rec.updated_at else None,
+        versions=versions,
     )
 
 
@@ -473,7 +502,7 @@ def export_version(flow_id: str, version: str, request: Request = None):
         )
 
 
-class ImportPromotionRequest(BaseModel):
+class ImportPromotionRequest(StrictRequestModel):
     package: Dict[str, Any]
     new_version: Optional[str] = None
     publish: bool = False

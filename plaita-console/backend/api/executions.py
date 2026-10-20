@@ -14,6 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+
+try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 from starlette.routing import Route
@@ -61,6 +66,12 @@ class ExecutionInfo(BaseModel):
     """执行实例信息"""
     execution_id: str = Field(..., description="执行 ID")
     flow_id: str = Field(..., description="流程 ID")
+    # A2R24-06：集群档 Lua 投影与构造器一直传 flow_name，模型却没声明——
+    # Pydantic 默认 extra="ignore" 把它静默丢掉。声明后列表/详情都可见；
+    # 本地档执行行暂无该列（None = 未提供，不是空串）。
+    flow_name: Optional[str] = Field(
+        None, description="流程名称（集群档取自执行状态；null=该视图未提供）"
+    )
     flow_version: Optional[str] = Field(None, description="流程版本")
     status: str = Field(..., description="状态")
     tenant_id: str = Field("", description="租户 ID（本地模式）")
@@ -105,7 +116,7 @@ class ExecutionListResponse(BaseModel):
     truncated: bool = False
 
 
-class StartFlowRequest(BaseModel):
+class StartFlowRequest(StrictRequestModel):
     """启动流程请求"""
     flow_id: str = Field(..., description="流程 ID")
     version: Optional[str] = Field(None, description="流程版本")
@@ -119,7 +130,7 @@ class StartFlowRequest(BaseModel):
     )
 
 
-class ResumeFlowRequest(BaseModel):
+class ResumeFlowRequest(StrictRequestModel):
     """恢复流程请求"""
     resume_type: str = Field(
         ..., description="恢复类型: continue, retry(error 态断点重跑), cancel, timeout, event")

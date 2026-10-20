@@ -12,6 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..services import flow_store, node_registry_svc
     from ..auth import tenant_scope
 except ImportError:
@@ -46,7 +51,7 @@ class NodeListResponse(BaseModel):
     total: int
 
 
-class RegisterNodeRequest(BaseModel):
+class RegisterNodeRequest(StrictRequestModel):
     # 字段名避开 pydantic v2 schema_json shadow 警告；alias 保持请求体键名不变
     model_config = ConfigDict(populate_by_name=True)
 
