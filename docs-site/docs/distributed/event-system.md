@@ -1132,7 +1132,8 @@ canonical 键，无 Redis schema 变更。
 
 升级前 ≤24h 的关键手动事件如需回扫补偿，由 operator 显式执行一次性脚本
 `scripts/migrate_console_events.py`（默认 dry-run，`--apply` 才写入；按剩余 TTL
-复制成 canonical，**不删旧键**，canonical 已存在则跳过）。
+复制成 canonical，**不删旧键**，canonical 已存在则跳过；记录体缺 `event_id` 时
+按 legacy 键后缀派生，重复执行不会因 `Event` 重新生成 uuid 而制造重复记录）。
 
 ### 索引续期 + 读时惰性清理 + 有界 janitor（A69-03）
 

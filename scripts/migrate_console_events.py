@@ -118,6 +118,16 @@ def migrate(client, apply: bool = False) -> Dict[str, int]:
             if not isinstance(info, dict) or "timestamp" not in info:
                 stats["skipped_invalid"] += 1
                 continue
+            # legacy 键形是 ``plaita:event:{event_id}``，旧 console 的记录体一定有
+            # event_id。缺失/空白时从键后缀派生：``Event`` 会给缺失字段生成新
+            # uuid，若原样校验，每次重跑都会写出一个新 canonical 记录，破坏幂等。
+            event_id = info.get("event_id")
+            if not isinstance(event_id, str) or not event_id.strip():
+                derived = key[len(LEGACY_PREFIX):]
+                if not derived:
+                    stats["skipped_invalid"] += 1
+                    continue
+                info = {**info, "event_id": derived}
             event = Event.model_validate(info)
         except Exception as exc:  # noqa: BLE001 — 单条畸形不阻断整批
             stats["skipped_invalid"] += 1

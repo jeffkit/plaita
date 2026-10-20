@@ -80,6 +80,38 @@ def test_zero_remaining_ttl_is_skipped_not_crashing(monkeypatch):
     assert client.exists(event_record_key("evt-last-second")) == 0
 
 
+def test_missing_event_id_derives_from_key_and_stays_idempotent():
+    """记录体缺 event_id 时按 legacy 键后缀派生，重复执行不得生成新记录。
+
+    ``Event`` 对缺失 ``event_id`` 会生成新 uuid；旧实现每次 ``--apply`` 都写一条
+    不同 id 的 canonical 记录，既破坏脚本「重复执行不制造重复事件」的承诺，也让
+    operator 误以为回填在推进。legacy 键形本身携带 id，派生即可。
+    """
+    client = fakeredis.FakeRedis(decode_responses=True)
+    client.set(
+        f"{LEGACY_PREFIX}evt-no-id",
+        json.dumps({
+            "event_type": "approval",
+            "timestamp": time.time(),
+            "data": {"legacy": True},
+        }),
+        ex=3600,
+    )
+
+    first = backfill.migrate(client, apply=True)
+    assert first["migrated"] == 1
+    assert first["skipped_invalid"] == 0
+    assert client.exists(event_record_key("evt-no-id")) == 1, (
+        "缺失 event_id 未按 legacy 键后缀派生"
+    )
+
+    second = backfill.migrate(client, apply=True)
+    assert second["migrated"] == 0
+    assert second["skipped_existing"] == 1
+    canonical = list(client.scan_iter("plaita:event:events:*"))
+    assert len(canonical) == 1, f"重复回填制造了额外 canonical 记录: {canonical}"
+
+
 def test_malformed_and_missing_timestamp_are_skipped():
     client = fakeredis.FakeRedis(decode_responses=True)
     client.set(f"{LEGACY_PREFIX}bad-json", "not-json", ex=3600)
