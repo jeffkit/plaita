@@ -19,6 +19,7 @@
    目标字段（广播抢单），**不因上报缺失停摆**。
 """
 import json
+import logging
 import sys
 import os
 from datetime import datetime, timezone
@@ -78,17 +79,21 @@ def _capacity_block(**over):
     return block
 
 
-def _register_worker(redis, instance_id, *, block=None):
+def _register_worker(redis, instance_id, *, block=None, queue_name=CANARY_QUEUE):
+    """注册到本次派发队列。
+
+    A64-05 之后路由带队列维度：worker 必须与 ``dispatch_one`` 的队列一致
+    才可能成为 target。本文件的主场景是金丝雀队列，故缺省注册在 CANARY。
+    """
     reg = ServiceRegistry(redis)
+    metadata = {} if queue_name is None else {"queue_name": queue_name}
+    if block is not None:
+        metadata[CAPACITY_METADATA_KEY] = json.dumps(block)
     info = ServiceInfo(
         instance_id=instance_id,
         service_type="flow_worker",
         host=f"{instance_id}.host",
-        metadata=(
-            {"queue_name": PROD_QUEUE}
-            if block is None
-            else {"queue_name": PROD_QUEUE, CAPACITY_METADATA_KEY: json.dumps(block)}
-        ),
+        metadata=metadata,
     )
     reg.register(info)
     return info
@@ -226,11 +231,93 @@ class TestDispatchOneRoutesByCapacity:
         )
         assert redis.xlen(CANARY_QUEUE) == 2
         assert redis.xlen(PROD_QUEUE) == 0
-        # 反向：派生产队列不影响金丝雀
-        dispatcher_svc.dispatch_one(redis, "p-1", queue_name=PROD_QUEUE, dry_run=False)
+        # 反向：派生产队列不影响金丝雀，且只在生产队列的 worker 中选目标
+        _register_worker(
+            redis, "w-prod", block=_capacity_block(), queue_name=PROD_QUEUE,
+        )
+        prod = dispatcher_svc.dispatch_one(
+            redis, "p-1", queue_name=PROD_QUEUE, dry_run=False,
+        )
+        assert prod["target"] == "w-prod"
         assert redis.xlen(PROD_QUEUE) == 1
         assert redis.xlen(CANARY_QUEUE) == 2
         assert redis.xlen(DEFAULT_LEDGER_KEY) == 3, "台账条目 == 入队条数（2+1）"
+
+
+class TestDispatchQueueScoping:
+    """A64-05：容量路由带队列维度，投递队列 == 目标 worker 消费队列。"""
+
+    V2 = "plaita:flow:queue:v2"
+
+    def test_cross_queue_candidate_is_rejected_not_targeted(
+        self, redis, prod_shadow_off, caplog,
+    ):
+        """只注册 v2 worker 时派 v1：不得选中它，消息留 v1 广播且不带 target。"""
+        _register_worker(
+            redis, "w-v2", block=_capacity_block(free_disk_gib=500.0),
+            queue_name=self.V2,
+        )
+        with caplog.at_level(logging.WARNING, logger="services.dispatcher"):
+            res = dispatcher_svc.dispatch_one(
+                redis, "issue-cq", queue_name=CANARY_QUEUE, dry_run=False,
+            )
+        assert res["target"] is None, "跨队列 worker 不得成为目标（A64-05）"
+        assert res["decision"] == "broadcast"
+        assert res["reason"].startswith("route: no-dispatchable-worker")
+        assert [r["instance_id"] for r in res["rejected"]] == ["w-v2"]
+        assert res["rejected"][0]["reason"].startswith("queue: mismatch")
+        assert "没有消费该队列的 worker" in caplog.text, "排除必须可观测（WARNING）"
+        assert "target_instance_id" not in _message(redis, CANARY_QUEUE)
+        assert redis.xlen(CANARY_QUEUE) == 1
+        assert redis.xlen(self.V2) == 0
+        row = dispatcher_svc.ledger_rows(redis)[0]
+        assert row["target_instance_id"] is None
+        assert row["queue"] == CANARY_QUEUE
+
+    def test_targeted_dispatch_lands_on_target_queue(self, redis, prod_shadow_off):
+        """同队列派发：目标写进消息体，消息落在该 worker 消费的队列。"""
+        _register_worker(
+            redis, "w-v2", block=_capacity_block(free_disk_gib=500.0),
+            queue_name=self.V2,
+        )
+        res = dispatcher_svc.dispatch_one(
+            redis, "issue-v2", queue_name=self.V2, dry_run=False,
+        )
+        assert res["target"] == "w-v2"
+        assert res["queue"] == self.V2, "投递队列以目标 worker 的 queue_name 为准"
+        assert _message(redis, self.V2)["target_instance_id"] == "w-v2"
+        assert redis.xlen(self.V2) == 1 and redis.xlen(CANARY_QUEUE) == 0
+
+    def test_plan_is_queue_scoped_and_reports_mismatch(self, redis):
+        """影子计划同样按队列过滤，跨队列候选带稳定原因进入 rejected。"""
+        _register_worker(
+            redis, "w-v2", block=_capacity_block(free_disk_gib=500.0),
+            queue_name=self.V2,
+        )
+        plan = dispatcher_svc.build_dispatch_plan(redis, queue_name=CANARY_QUEUE)
+        assert plan["target"] is None
+        assert plan["allowed"] == []
+        assert [r["instance_id"] for r in plan["rejected"]] == ["w-v2"]
+        assert plan["rejected"][0]["reason"].startswith("queue: mismatch")
+
+    def test_worker_without_queue_metadata_is_default_queue_only(
+        self, redis, prod_shadow_off,
+    ):
+        """缺 metadata 的存量 worker 只消费默认队列：v1 派发排除，默认队列可选。"""
+        _register_worker(redis, "w-legacy", queue_name=None)
+        miss = dispatcher_svc.dispatch_one(
+            redis, "issue-legacy-v1", queue_name=CANARY_QUEUE, dry_run=False,
+        )
+        assert miss["target"] is None
+        assert miss["rejected"][0]["reason"].startswith("queue: mismatch")
+        assert f"worker consumes {PROD_QUEUE}" in miss["rejected"][0]["reason"]
+
+        hit = dispatcher_svc.dispatch_one(
+            redis, "issue-legacy-default", queue_name=PROD_QUEUE, dry_run=False,
+        )
+        assert hit["target"] == "w-legacy"
+        assert hit["queue"] == PROD_QUEUE
+        assert _message(redis, PROD_QUEUE)["target_instance_id"] == "w-legacy"
 
 
 class TestRedLinesAllowWhenRouteUnavailable:
