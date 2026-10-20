@@ -707,6 +707,58 @@ def event_retention_ttl_seconds() -> int:
 EVENT_INDEX_PRUNE_ON_WRITE_DISABLE_ENV = "PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE"
 _EVENT_INDEX_PRUNE_ON_WRITE_INTERVAL_SECONDS = 60.0
 _EVENT_INDEX_PRUNE_ON_WRITE_MAX_MEMBERS = 8
+
+# 规格 §3.3「预算/开关/可观测」：`event_index_pruned_total{kind=...}`。
+# 读时惰性清理、写侧兜底、janitor 三条删除路径共用同一组计数；event 层
+# 不 import `plaita.server.metrics`（分层约束），由 `event_index_pruned_metrics()`
+# 提供给运维/测试读取。
+EVENT_INDEX_PRUNED_KINDS = (
+    "event_type",
+    "sub_type",
+    "sub_correlation",
+    "sub_flow",
+    "sub_node",
+)
+_event_index_pruned_counts: Dict[str, int] = {
+    kind: 0 for kind in EVENT_INDEX_PRUNED_KINDS
+}
+_event_index_pruned_lock = threading.Lock()
+
+
+def event_index_pruned_metrics() -> Dict[str, int]:
+    """返回 ``event_index_pruned_total`` 的按 kind 计数副本。"""
+    with _event_index_pruned_lock:
+        return dict(_event_index_pruned_counts)
+
+
+def reset_event_index_pruned_metrics() -> None:
+    """重置按 kind 的删除计数（测试用）。"""
+    with _event_index_pruned_lock:
+        for kind in _event_index_pruned_counts:
+            _event_index_pruned_counts[kind] = 0
+
+
+def _record_event_index_pruned(kind: str, count: int) -> None:
+    """累加一条索引删除计数（未知 kind 不静默丢弃）。"""
+    if count <= 0:
+        return
+    with _event_index_pruned_lock:
+        if kind not in _event_index_pruned_counts:
+            logger.warning(
+                "事件索引删除指标收到未知 kind=%s（已登记，后续可观测）", kind
+            )
+            _event_index_pruned_counts[kind] = 0
+        _event_index_pruned_counts[kind] += int(count)
+
+
+def _subscription_index_kind(index_key: str, key_prefix: str) -> str:
+    """把订阅索引桶键映射到 ``event_index_pruned_total`` 的 kind 标签。"""
+    for raw_kind in ("type", "correlation", "flow", "node"):
+        if index_key.startswith(f"{key_prefix}{raw_kind}:"):
+            return f"sub_{raw_kind}"
+    return "sub_type"
+
+
 #: ``{type_key: {"last": monotonic, "offset": 下一个起检位置}}``——offset 轮转
 #: 保证兜底清理能覆盖整桶，而不是永远只看 score 最小的那 8 个。
 _event_index_write_prune_state: Dict[str, Dict[str, float]] = {}
@@ -762,6 +814,7 @@ def _prune_event_index_on_write(
         missing = [eid for eid, ok in zip(members, flags) if not int(ok)]
         if missing:
             client.zrem(type_key, *missing)
+            _record_event_index_pruned("event_type", len(missing))
             logger.info(
                 "事件索引写侧兜底清理: 桶 %s 检查 %d 个成员，移除 %d 个载荷缺失成员",
                 type_key, len(members), len(missing),
@@ -1166,6 +1219,7 @@ class RedisEventStorage(EventStorage):
                 _scrub_exception_text(exc),
             )
             return 0
+        _record_event_index_pruned("event_type", total)
         logger.info(
             "事件索引惰性清理: 移除 %d 个载荷缺失成员（%d 个类型桶）",
             total, len(missing_by_type),
@@ -1250,6 +1304,7 @@ class RedisEventStorage(EventStorage):
         missing = [eid for eid, ok in zip(members, flags) if not ok]
         if missing:
             await self.redis.zrem(type_key, *missing)
+            _record_event_index_pruned("event_type", len(missing))
             logger.info(
                 "事件索引清扫: 桶 %s 检查 %d 个成员，移除 %d 个载荷缺失成员",
                 type_key, len(members), len(missing),
@@ -1493,6 +1548,10 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         if index_key and missing_ids:
             try:
                 await self.redis.srem(index_key, *missing_ids)
+                _record_event_index_pruned(
+                    _subscription_index_kind(index_key, self.key_prefix),
+                    len(missing_ids),
+                )
                 logger.info(
                     "订阅索引惰性清理: 桶 %s 移除 %d 个数据缺失成员（返回 %d 条）",
                     index_key, len(missing_ids), len(result),
@@ -1609,6 +1668,9 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         missing = [sid for sid, ok in zip(members, flags) if not ok]
         if missing:
             await self.redis.srem(bucket, *missing)
+            _record_event_index_pruned(
+                _subscription_index_kind(bucket, self.key_prefix), len(missing)
+            )
             logger.info(
                 "订阅索引清扫: 桶 %s 检查 %d 个成员，移除 %d 个数据缺失成员",
                 bucket, len(members), len(missing),
