@@ -78,12 +78,20 @@ def _scan_legacy_keys(client) -> list:
 
 
 def _replay_ttl(client, key: str, default_ttl: int) -> Optional[int]:
-    """legacy 记录剩余 TTL：``-1``（无过期）按默认，``-2``（已消失）跳过。"""
+    """legacy 记录剩余 TTL：``-1``（无过期）按默认；``-2`` / ``0`` 跳过。
+
+    ``TTL`` 返回 ``0`` 表示键仍在但剩余不足 1 秒（最后一次采样可能正好落在
+    过期边界）。此时不能拿 ``0`` 去 ``SET ... EX 0``——Redis 会以
+    ``invalid expire time`` 拒绝并让整批回填中断；该记录也等价于已过期，
+    跳过等它自然消失即可。
+    """
     ttl = client.ttl(key)
     if ttl == -2:
         return None
-    if ttl < 0:
+    if ttl == -1:
         return default_ttl
+    if ttl <= 0:
+        return None
     return min(default_ttl, ttl)
 
 

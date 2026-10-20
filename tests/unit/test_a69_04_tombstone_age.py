@@ -333,6 +333,46 @@ def test_start_retry_preserves_source_age(env):
     assert carried < datetime.now() - timedelta(days=39), "重投不得补 now 洗白源年龄"
 
 
+@pytest.mark.parametrize(
+    "payload_timestamp",
+    [
+        "not-a-date",
+        (datetime.now() + timedelta(days=1)).isoformat(),
+    ],
+    ids=["malformed", "future"],
+)
+def test_start_retry_keeps_old_stream_evidence(env, payload_timestamp):
+    """payload 时间戳畸形/超前时，重投仍以源 Stream ID 的老年龄为准。
+
+    回归（A69 核验残面）：旧实现只要 payload ``timestamp`` 是非空字符串就
+    原样复制；畸形值不是年龄证据、超前值会把源 Stream ID 已有的老年龄洗掉，
+    两者都会让重投副本的年龄归零。
+    """
+    class RecordingQueue:
+        def __init__(self):
+            self.enqueued = []
+
+        def enqueue(self, body, **kwargs):
+            self.enqueued.append(dict(body))
+
+        def ack(self, message_id):
+            pass
+
+    source_id = _old_stream_id(29)
+    task = StreamTask(
+        source_id, _start_body(timestamp=payload_timestamp), 1
+    )
+    queue = RecordingQueue()
+    consumed = env.worker._requeue_retryable_failure(task, queue)
+
+    assert consumed is True
+    assert len(queue.enqueued) == 1
+    carried = datetime.fromisoformat(queue.enqueued[0]["timestamp"])
+    assert carried < datetime.now() - timedelta(days=28), (
+        f"重投把源年龄洗成了 payload 值: {carried!r}"
+    )
+
+
 def test_event_filter_resume_gets_timestamp(env):
     """EventFilter 的 event/timeout resume 经 enqueue_task 自动获得年龄起点。"""
     for resume_type in ("event", "timeout"):

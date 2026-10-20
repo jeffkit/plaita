@@ -321,16 +321,29 @@ def _message_age_from_stream_id(message_id: Any) -> Optional[float]:
 def _carrier_timestamp_or_derived(
     body: Dict[str, Any], source_message_id: Any
 ) -> Optional[str]:
-    """载体已有 ``timestamp`` → 原样返回；否则由源 Stream ID 派生（A69-04）。
+    """载体年龄证据：取 payload timestamp 与源 Stream ID 时间中**年龄更大**者。
 
-    返回 None = 源时间和源 Stream ID 都不可用；调用方（重投/克隆）不应
-    用 ``now()`` 洗白老载体——交给 ``enqueue_task`` 的缺失注入只发生在
+    重投/交接/克隆必须保留源年龄，且只能保留或收紧、绝不刷新：
+    - payload ``timestamp`` 畸形（外部生产者）不是年龄证据，不得挡住可靠的
+      源 Stream ID 时间；
+    - payload ``timestamp`` 超前（时钟漂移/伪造）时，源 Stream ID 可能已经
+      更老，不能被新值洗白。
+
+    返回 None = 两源都不可用；调用方（重投/克隆）不应补 ``now()``——那会
+    把老载体变成「刚入队」，交给 ``enqueue_task`` 的缺失注入只发生在
     「全新载体」路径。
     """
-    raw = body.get("timestamp")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-    return timestamp_from_stream_id(source_message_id)
+    candidates = []
+    for raw in (
+        body.get("timestamp"),
+        timestamp_from_stream_id(source_message_id),
+    ):
+        age = _message_age_seconds(raw)
+        if age is not None:
+            candidates.append((age, raw.strip() if isinstance(raw, str) else str(raw)))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def _copy_carrier_body(
