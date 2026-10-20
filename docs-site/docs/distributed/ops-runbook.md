@@ -84,6 +84,7 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | `PLAITA_CLAIM_MIN_IDLE_MS` | `60000` | pending 可被回收的最短空闲 |
 | `PLAITA_LEASE_TTL_SECONDS` | `120` | resume 租约 TTL |
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
+| `PLAITA_EXECUTION_DEADLINE_SECONDS` | `1800` | 未配置任何 `flow.timeout` / `execution.timeout` / 调用期 timeout 时的**执行级总预算**（秒，支持小数）；到期抛 `ExecutionDeadlineError`，worker 不重试并终态化 error（#267）。非数字/非有限/`<=0` 回退默认并打 WARNING |
 | `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` | 跟随 `PLAITA_EXECUTION_STATE_TTL_DAYS`（30 天） | 执行删除墓碑 TTL（平台根 `plaita:exec_tombstone:{id}`）；`<=0` 永久 |
 | `PLAITA_TASK_MAX_AGE_SECONDS` | `2592000`（30 天） | start/resume 载体最大年龄，超龄在派发时 ack+WARNING 丢弃（墓碑 TTL 到期后的兜底）；`0` 关闭 |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |

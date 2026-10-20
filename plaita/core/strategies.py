@@ -21,8 +21,10 @@ from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING
 
 from plaita.core.callback import BaseCallbackManager, CallbackManager
 from plaita.core.context import ExecutionContext
+from plaita.core.deadline import execution_deadline_ms
 from plaita.core.errors import (
     ErrorStrategy,
+    ExecutionDeadlineError,
     FlowExecutionException,
     FlowStartMissingError,
     FlowTimeoutError,
@@ -136,6 +138,10 @@ class NormalStrategy:
     """Execute all nodes to completion, return final result."""
 
     async def execute(self, flow, context, runner, callback_manager, params=None, timeout_ms=None, **options):
+        # plaita#267：显式 flow/execution/调用期 timeout 缺省时补执行级总预算
+        # （默认 1800s，PLAITA_EXECUTION_DEADLINE_SECONDS 可调）。每个节点拿到的
+        # remaining 会随墙钟递减，单次执行不会无限占用共享 worker。
+        timeout_ms = execution_deadline_ms(timeout_ms)
         next_node = flow.start_node
         if next_node is None:
             raise FlowStartMissingError()
@@ -158,7 +164,10 @@ class NormalStrategy:
             logger.debug("next_node: %s with branch: %s", next_node, branch)
 
             if timeout_ms is not None and (time.time() - start_time) > timeout_ms / 1000:
-                raise FlowTimeoutError()
+                raise ExecutionDeadlineError(
+                    f"Flow execution Timeout: execution deadline of {timeout_ms}ms "
+                    f"exceeded before running node {next_node.id}"
+                )
 
         if not reached_end:
             logger.debug("not reached_end: %s", next_node)
@@ -172,6 +181,8 @@ class GeneratorStrategy:
     """Async generator yielding per-node output for debug/stepping."""
 
     async def execute(self, flow, context, runner, callback_manager, params=None, timeout_ms=None, **options):
+        # plaita#267：同 NormalStrategy——缺省补执行级总预算。
+        timeout_ms = execution_deadline_ms(timeout_ms)
         next_node = flow.start_node
         if next_node is None:
             raise FlowStartMissingError()
@@ -199,7 +210,10 @@ class GeneratorStrategy:
             logger.debug("next_node: %s with branch: %s", next_node, branch)
 
             if timeout_ms is not None and (time.time() - start_time) > timeout_ms / 1000:
-                raise FlowTimeoutError()
+                raise ExecutionDeadlineError(
+                    f"Flow execution Timeout: execution deadline of {timeout_ms}ms "
+                    f"exceeded before running node {next_node.id}"
+                )
 
         if not reached_end:
             logger.debug("not reached_end: %s", next_node)
@@ -212,6 +226,10 @@ class DistributedStrategy:
     """Execute one node per call with context persistence for suspend/resume."""
 
     async def execute(self, flow, context, runner, callback_manager, params=None, timeout_ms=None, **options):
+        # plaita#267：distributed 每一步同样受执行级总预算约束（每步独立计，
+        # 挂起/等待事件的时间不占用 worker，也不是本预算的用途）。缺省
+        # 1800s，显式 timeout 优先。
+        timeout_ms = execution_deadline_ms(timeout_ms)
         saved_context = options.get("saved_context")
         resume_type = ResumeType.coerce(options.get("resume_type", "continue"))
         resume_data = options.get("resume_data")
