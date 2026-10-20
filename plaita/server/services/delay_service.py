@@ -93,9 +93,17 @@ class DelayService(BaseExtendedService):
             service_config=service_config,
         )
         import os
-        self.queue_key = os.environ.get(
-            "PLAITA_DELAY_QUEUE",
-            (service_config or {}).get("delay_queue", "plaita:delay:queue"),
+        # B2R31-03：identity 空串不得「覆盖 service_config 得到空键」。
+        delay_env = os.environ.get("PLAITA_DELAY_QUEUE")
+        if delay_env is not None and not str(delay_env).strip():
+            raise ValueError(
+                "PLAITA_DELAY_QUEUE: empty value is not allowed (identity/routing); "
+                "unset it to use service_config/default"
+            )
+        self.queue_key = (
+            str(delay_env).strip()
+            if delay_env is not None
+            else (service_config or {}).get("delay_queue", "plaita:delay:queue")
         )
         # C4-2：排程 ZSET（member=任务 JSON，score=触发时间戳 ms）。
         # list 键仍是生产者契约（flow_worker RPUSH），ZSET 是本服务内部的

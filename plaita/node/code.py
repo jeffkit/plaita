@@ -211,6 +211,47 @@ def _positive_int_env_seconds(name: str, default: str) -> int:
     return value
 
 
+def _sandbox_memory_mb_env() -> int:
+    """``PLAITA_SANDBOX_MEMORY_MB``：0=不限；负值/非数字 fail-fast（B2R31-03）。
+
+    历史上负值被接受并在 runner 里被 ``>0`` 判据静默跳过（等同不限），
+    运维以为设了上限。现在 import 期拒绝——安全/资源类非法值必须 loud。
+    """
+    from plaita.runtime_config import ConfigError, parse_int
+
+    raw = os.environ.get("PLAITA_SANDBOX_MEMORY_MB", "0")
+    if not str(raw).strip():
+        logger.warning("PLAITA_SANDBOX_MEMORY_MB 为空，按 0（不限）处理")
+        return 0
+    try:
+        return parse_int(raw, "PLAITA_SANDBOX_MEMORY_MB", minimum=0)
+    except ConfigError as exc:
+        raise ConfigError(
+            [
+                f"{exc}；0=不限（文档语义），负值/非数字拒绝启动"
+            ]
+        ) from exc
+
+
+def _sandbox_docker_cpus_env() -> str:
+    """``PLAITA_SANDBOX_DOCKER_CPUS``：启动期校验有限正数（B2R31-03）。
+
+    历史上非法值到 ``docker run --cpus=abc`` 才在**执行期**失败；现在 import
+    期 fail-fast，错误含变量名与期望格式。
+    """
+    from plaita.runtime_config import ConfigError, parse_float
+
+    raw = os.environ.get("PLAITA_SANDBOX_DOCKER_CPUS", "0.5")
+    if not str(raw).strip():
+        logger.warning("PLAITA_SANDBOX_DOCKER_CPUS 为空，按 0.5 处理")
+        return "0.5"
+    try:
+        value = parse_float(raw, "PLAITA_SANDBOX_DOCKER_CPUS", minimum=1e-9)
+    except ConfigError as exc:
+        raise ConfigError([f"{exc}；期望有限正数（如 0.5）"]) from exc
+    return str(value)
+
+
 # subprocess backend
 SANDBOX_SUBPROCESS_TIMEOUT: int = _positive_int_env_seconds("PLAITA_SANDBOX_TIMEOUT", "10")
 # RLIMIT_AS 上限（MB）。默认 0 = 不限制（与 macOS 上的历史实际行为一致）。
@@ -218,7 +259,7 @@ SANDBOX_SUBPROCESS_TIMEOUT: int = _positive_int_env_seconds("PLAITA_SANDBOX_TIME
 # （V8 启动期预留远超 256MB 的地址空间，RLIMIT_AS 卡的是虚拟地址而非 RSS），
 # 输出只剩截断崩溃栈；macOS 不强制 RLIMIT_AS，故本地部署从未暴露。设 >0 才
 # 启用限制——小内存纯 Python 脚本场景可显式收紧，node 系命令请保持 0。
-SANDBOX_SUBPROCESS_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_MEMORY_MB", "0"))
+SANDBOX_SUBPROCESS_MEMORY_MB: int = _sandbox_memory_mb_env()
 
 # subprocess 后端的子进程环境变量白名单（2026-09 安全评审 P1）：历史上子进程
 # 继承宿主全量 os.environ。实现已抽到公共层 ``plaita.subprocess_env``（gate /
@@ -232,7 +273,7 @@ SUBPROCESS_ENV_EXTRA = _env.SUBPROCESS_ENV_EXTRA
 SANDBOX_DOCKER_IMAGE: str = os.environ.get("PLAITA_SANDBOX_DOCKER_IMAGE", "python:3.12-slim")
 SANDBOX_DOCKER_TIMEOUT: int = _positive_int_env_seconds("PLAITA_SANDBOX_DOCKER_TIMEOUT", "30")
 SANDBOX_DOCKER_MEMORY_MB: int = int(os.environ.get("PLAITA_SANDBOX_DOCKER_MEMORY_MB", "128"))
-SANDBOX_DOCKER_CPUS: str = os.environ.get("PLAITA_SANDBOX_DOCKER_CPUS", "0.5")
+SANDBOX_DOCKER_CPUS: str = _sandbox_docker_cpus_env()
 # 容器运行用户（如 "65534:65534"）。默认空 = 镜像默认用户（root）。
 # python:3.12-slim 的 /tmp tmpfs 为 1777，nobody 可写；设了用户后沙箱内
 # 代码写非 /tmp 路径会失败——这是预期约束而非 bug。

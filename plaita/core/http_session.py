@@ -52,16 +52,19 @@ def _connector_limit() -> int:
     注意 aiohttp 的 ``ClientTimeout(total=...)`` 从请求发起开始计时、**包含
     在 connector 信号量上的排队时间**：fan-out 并发数长期高于 limit 时会表现
     为莫名 timeout——调大 limit 或调大节点超时。默认与 aiohttp 默认一致。
+
+    B2R31-03：非法值 WARNING + 默认，不再静默。
     """
-    raw = os.environ.get(_CONNECTOR_LIMIT_ENV, "")
-    try:
-        return max(1, int(raw)) if raw else 100
-    except ValueError:
-        return 100
+    from plaita.runtime_config import optional_int_env
+
+    return optional_int_env(_CONNECTOR_LIMIT_ENV, 100, minimum=1)
 
 
 def _cookies_enabled() -> bool:
-    return os.environ.get(_COOKIES_ENV, "").strip() in ("1", "true", "yes")
+    """``PLAITA_HTTP_COOKIES`` strict bool（``TRUE`` 也生效；非法 WARNING+False）。"""
+    from plaita.runtime_config import optional_bool_env
+
+    return optional_bool_env(_COOKIES_ENV, False)
 
 
 async def open_flow_session() -> bool:

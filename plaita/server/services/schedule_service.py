@@ -85,20 +85,11 @@ def resolve_dispatch_queue_name(configured: Optional[str] = None) -> str:
     explicit = str(configured).strip() if configured else ""
     if explicit:
         return explicit
-    console_queue = (os.environ.get("PLAITA_CONSOLE_TASK_QUEUE") or "").strip()
-    worker_queue = (os.environ.get("PLAITA_QUEUE_NAME")
-                    or os.environ.get("QUEUE_NAME") or "").strip()
-    if console_queue and worker_queue and console_queue != worker_queue:
-        pair = (console_queue, worker_queue)
-        if pair not in _queue_split_warned:
-            _queue_split_warned.add(pair)
-            logger.warning(
-                "调度派发队列与 worker 消费队列不同源：console/调度=%s，"
-                "worker=%s（PLAITA_CONSOLE_TASK_QUEUE vs PLAITA_QUEUE_NAME）——"
-                "消息可能落入无人消费的队列，迁移时两个 env 必须一起改",
-                console_queue, worker_queue,
-            )
-    return console_queue or worker_queue or DEFAULT_QUEUE_NAME
+    # B2R31-02：与 manual start/capacity 共用单一 resolver；空串不再静默
+    # 回退（identity 配置错误），跨源不同仍打一次 WARNING（A56-02）。
+    from plaita.runtime_config import resolve_dispatch_queue_name as _resolve
+
+    return _resolve("schedule")
 
 # manual 键内序号：同一纳秒内的两次调用也必须拿到不同键（进程内单调）。
 _MANUAL_SEQ = itertools.count()
@@ -250,7 +241,13 @@ def fire_schedule(
 
     try:
         # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
-        msg_id = enqueue_task(redis_client, queue_name, message)
+        # B2R31-01：新生产消息写当前三维代际。
+        from plaita.runtime_config import envelope_for_stream
+
+        msg_id = enqueue_task(
+            redis_client, queue_name, message,
+            **envelope_for_stream(queue_name, role="schedule"),
+        )
         enqueue_ok = True
     except Exception as e:
         logger.error("调度 %s 入队失败: %s", schedule_id, _scrub_exception_text(e))
@@ -414,7 +411,21 @@ class ScheduleService(BaseExtendedService):
         # resolve_dispatch_queue_name），不在构造期固化。
         self._explicit_queue_name = str(cfg.get("queue_name") or "").strip() or None
         self.queue_name = resolve_dispatch_queue_name(self._explicit_queue_name)
-        self.check_interval = float(cfg.get("check_interval") or os.environ.get("PLAITA_CHECK_INTERVAL", "1"))
+        # B2R31-03：0/负值 = 紧环，拒绝（不是「关闭」）；env 读取走 WARNING+
+        # 安全默认，显式 service_config 非法直接具名失败。
+        if cfg.get("check_interval") is not None:
+            self.check_interval = float(cfg.get("check_interval"))
+            if self.check_interval <= 0:
+                raise ValueError(
+                    "schedule check_interval must be > 0 "
+                    f"(got {cfg.get('check_interval')!r})"
+                )
+        else:
+            from plaita.runtime_config import optional_float_env
+
+            self.check_interval = optional_float_env(
+                "PLAITA_CHECK_INTERVAL", 1.0, minimum=1e-9
+            )
         self._loop_thread: Optional[threading.Thread] = None
 
         super().__init__(

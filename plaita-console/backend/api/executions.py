@@ -172,8 +172,14 @@ TASK_QUEUE_NAME = DEFAULT_TASK_QUEUE_NAME
 
 
 def _task_queue_name() -> str:
-    """解析派发队列名：env ``PLAITA_CONSOLE_TASK_QUEUE`` > 默认值。"""
-    return os.getenv("PLAITA_CONSOLE_TASK_QUEUE", DEFAULT_TASK_QUEUE_NAME)
+    """解析派发队列名：env ``PLAITA_CONSOLE_TASK_QUEUE`` > 默认值。
+
+    B2R31-02：与 capacity/schedule 共用 ``resolve_queue_name``；空串是
+    identity 配置错误（不再写空 Stream 键，A2R31-03）。
+    """
+    from plaita.runtime_config import resolve_queue_name
+
+    return resolve_queue_name("console")
 
 try:
     from plaita.server.task_queue import enqueue_task
@@ -279,8 +285,15 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
     FlowWorker 以 Redis Stream 消费组（XREADGROUP）消费；
     历史上这里误用 rpush（list 类型），与 Stream 同 key 类型冲突，
     消息永远到不了 worker。统一走 XADD。
+
+    B2R31-01：新生产消息写当前三维代际（增量信封字段；旧消费者忽略）。
     """
-    return enqueue_task(redis, _task_queue_name(), message)
+    queue = _task_queue_name()
+    from plaita.runtime_config import envelope_for_stream
+
+    return enqueue_task(
+        redis, queue, message, **envelope_for_stream(queue, role="console")
+    )
 
 
 # ---- plaita#166：执行表示的读面脱敏 ----

@@ -14,6 +14,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
+from plaita.runtime_config import (
+    LEGACY_GENERATION,
+    normalize_generation,
+)
 
 # #48：Redis 的**瞬时**故障家族。redis-py 8.x 里 `TimeoutError` 与 `ConnectionError`
 # 是 `RedisError` 下**互不继承**的兄弟（实测 `issubclass(TimeoutError, ConnectionError)
@@ -40,6 +44,12 @@ TASK_SCHEMA_VERSION = 1
 # 字段仍按 v1 解析与继承，否则历史消息会被当成本代语义执行（A44-02）。
 LEGACY_TASK_SCHEMA_VERSION = 1
 SCHEMA_FIELD = "schema_version"
+# B2R31-01：配置代际信封字段（增量字段；旧消费者忽略未知字段）。
+CONFIG_FAMILY_FIELD = "config_family"
+CONFIG_GENERATION_FIELD = "config_generation"
+BUDGET_GENERATION_FIELD = "budget_generation"
+CONFIG_EFFECTIVE_AT_FIELD = "config_effective_at"
+CONFIG_REJECTED_REASON_FIELD = "config_rejected_reason"
 # C4-1：DLQ 保留条数。DLQ 是纯记录流（无消费者），不裁剪会无限增长；
 # 每次入队后 XTRIM 保留最近 N 条。env 可调（PLAITA_DLQ_MAX_LEN）。
 DEFAULT_DLQ_MAX_LEN = 1000
@@ -52,10 +62,19 @@ def _dlq_max_len_from_env() -> int:
     if not raw:
         return DEFAULT_DLQ_MAX_LEN
     try:
-        return max(1, int(raw))
+        value = int(raw)
     except ValueError:
         logger.warning("PLAITA_DLQ_MAX_LEN=%s 非法，回退默认 %d", _redact_env_value(raw), DEFAULT_DLQ_MAX_LEN)
         return DEFAULT_DLQ_MAX_LEN
+    if value < 1:
+        # B2R31-03：不再静默钳制——0/负值钳到 1 必须留痕。
+        logger.warning(
+            "PLAITA_DLQ_MAX_LEN=%s ≤0，钳制为 1（资源上限拒绝负值；"
+            "启动预检会拒绝该配置）",
+            _redact_env_value(raw),
+        )
+        return 1
+    return value
 # redis 瞬断（DNS 解析失败/连接拒绝）后的重试退避：退避完返回 None 让主循环
 # 继续轮询，Redis 恢复后下一次 read 自动重连恢复消费。模块常量便于测试归零。
 RECONNECT_BACKOFF_SECONDS = 1.0
@@ -77,6 +96,14 @@ class StreamTask:
     # 守卫据此**不得**克隆恢复副本：副本继承同一超版本，本 build 仍无法消费，
     # 每轮「克隆 → 再拒收 → 再克隆」会形成自持热环（流内恒 1 条、DLQ 线性增长）。
     schema_rejected: bool = False
+    # B2R31-01：carrier 因 family/budget 代际被拒（年龄闸死信时置位）。
+    # 守卫据此不得克隆恢复副本——副本继承同一不兼容代际，会形成自持热环。
+    config_rejected: bool = False
+    # B2R31-01：配置代际（缺失/畸形 → legacy，不 gate、不按当前值覆盖）。
+    config_family: str = LEGACY_GENERATION
+    config_generation: str = LEGACY_GENERATION
+    budget_generation: str = LEGACY_GENERATION
+    config_effective_at: Optional[str] = None
 
 
 # #186：畸形消息（payload 非 JSON / JSON 非对象）在**解析点**处置，不再抛给
@@ -177,6 +204,29 @@ def _payload_from_fields(fields: Dict[Any, Any]) -> str:
     raise ValueError("missing payload field")
 
 
+def _config_field_from_fields(fields: Dict[Any, Any], name: str) -> Optional[str]:
+    raw = fields.get(name, fields.get(name.encode()))
+    if raw is None:
+        return None
+    return _decode(raw)
+
+
+def _config_family_from_fields(fields: Dict[Any, Any]) -> str:
+    return normalize_generation(_config_field_from_fields(fields, CONFIG_FAMILY_FIELD), kind="family")
+
+
+def _config_generation_from_fields(fields: Dict[Any, Any]) -> str:
+    return normalize_generation(
+        _config_field_from_fields(fields, CONFIG_GENERATION_FIELD), kind="generation"
+    )
+
+
+def _budget_generation_from_fields(fields: Dict[Any, Any]) -> str:
+    return normalize_generation(
+        _config_field_from_fields(fields, BUDGET_GENERATION_FIELD), kind="budget"
+    )
+
+
 # DLQ 信封的 payload 覆盖哨兵：``None`` 是合法 payload（畸形消息可能是空串），
 # 不能用 None 表示「未提供」。
 _UNSET = object()
@@ -189,6 +239,10 @@ def enqueue_task(
     *,
     schema_version: Optional[int] = None,
     default_timestamp: Optional[str] = None,
+    config_family: Optional[str] = None,
+    config_generation: Optional[str] = None,
+    budget_generation: Optional[str] = None,
+    config_effective_at: Optional[str] = None,
 ) -> str:
     """Append a start/resume task. Creates the stream if needed.
 
@@ -217,13 +271,22 @@ def enqueue_task(
         payload = dict(task)
         payload["timestamp"] = injected or datetime.now().isoformat()
     version = TASK_SCHEMA_VERSION if schema_version is None else int(schema_version)
-    msg_id = redis_client.xadd(
-        stream_key,
-        {
-            PAYLOAD_FIELD: json.dumps(payload, ensure_ascii=False),
-            SCHEMA_FIELD: str(version),
-        },
-    )
+    envelope = {
+        PAYLOAD_FIELD: json.dumps(payload, ensure_ascii=False),
+        SCHEMA_FIELD: str(version),
+    }
+    # B2R31-01：代际字段是**增量**信封字段（旧消费者忽略未知字段）。缺省
+    # （None）不写 = 新生产方未接入代际时的 legacy 行为；重投/交接副本必须
+    # 原样传源信封值（``_requeue_envelope_kwargs``），绝不在这里盖当前值。
+    if config_family is not None:
+        envelope[CONFIG_FAMILY_FIELD] = config_family
+    if config_generation is not None:
+        envelope[CONFIG_GENERATION_FIELD] = config_generation
+    if budget_generation is not None:
+        envelope[BUDGET_GENERATION_FIELD] = budget_generation
+    if config_effective_at is not None:
+        envelope[CONFIG_EFFECTIVE_AT_FIELD] = config_effective_at
+    msg_id = redis_client.xadd(stream_key, envelope)
     return _decode(msg_id)
 
 
@@ -441,10 +504,24 @@ class RedisStreamTaskQueue:
         reclaim_lease_guard: Optional[Callable[[Dict[str, Any]], bool]] = None,
         max_schema_version: Optional[int] = TASK_SCHEMA_VERSION,
         on_dead_letter: Optional[Callable[[Dict[str, Any]], None]] = None,
+        config_family: Optional[str] = None,
+        config_generation: Optional[str] = None,
+        budget_generation: Optional[str] = None,
+        config_effective_at: Optional[str] = None,
+        task_max_age_seconds: int = 0,
     ):
         # 拒收「比自己新」的消息（进 DLQ）是**默认**行为：语义不兼容时宁可显式
         # 死信+告警，也不要按旧语义猜着跑。None 关闭校验（仅供测试/特殊场景）。
         self.max_schema_version = max_schema_version
+        # B2R31-01：本进程的配置代际。``None`` = 未接代际（库内默认/旧测试），
+        # family gate 关闭——存量行为零变化。worker 传入实际代际后，只对
+        # **两端都非 legacy** 的载体判兼容（历史消息始终可执行）。
+        self.config_family = config_family
+        self.config_generation = config_generation
+        self.budget_generation = budget_generation
+        self.config_effective_at = config_effective_at
+        # 0 = 关闭代际年龄闸（库内/旧测试默认）；worker 传实际 task_max_age。
+        self.task_max_age_seconds = max(0, int(task_max_age_seconds or 0))
         self.redis = redis_client
         self.stream_key = stream_key
         self.group_name = group_name
@@ -473,6 +550,11 @@ class RedisStreamTaskQueue:
         # 永远先获得一次尝试，`max_deliveries=1` 也不会在派发前死信；失败/未 ack
         # 之后才由 worker 兜底分支或 reclaim 路径处置（plaita#252 捆绑单）。
         self.max_deliveries = max(1, int(max_deliveries))
+        if int(max_deliveries) < 1:
+            logger.warning(
+                "max_deliveries=%s ≤0，钳制为 1（启动预检会拒绝该配置，B2R31-03）",
+                max_deliveries,
+            )
         self.dlq_key = dlq_key or dlq_stream_key(stream_key)
         # C4-1：DLQ 裁剪上限（构造参数优先，其次 env，最后默认值）
         if dlq_max_len is not None:
@@ -515,18 +597,29 @@ class RedisStreamTaskQueue:
             "dlq_trimmed": 0,
             "dlq_trim_failures": 0,
             "dlq_ack_failures": 0,
+            # B2R31-01：代际可观测计数（family 拒执行/legacy 载体/预算代际漂移）。
+            "config_family_mismatch": 0,
+            "config_legacy": 0,
+            "config_budget_stale": 0,
         }
+        self._last_family_warning_at = 0.0
+        # 启动预检只在首次 read（组已建立）后跑一次。
+        self._budget_preflight_done = False
+        self._orphan_preflight_done = False
         # 裁剪告警限频（同一队列实例 60s 一次；计数不丢，只压日志噪声）。
         self._last_trim_warning_at = 0.0
 
     def ensure_group(self) -> None:
+        start_id = self._group_start_id()
+        created = False
         try:
             self.redis.xgroup_create(
                 self.stream_key,
                 self.group_name,
-                id="0",
+                id=start_id,
                 mkstream=True,
             )
+            created = True
         except Exception as exc:
             if "BUSYGROUP" in str(exc):
                 return
@@ -541,6 +634,40 @@ class RedisStreamTaskQueue:
             # 非瞬时（NOAUTH/权限/schema/参数错）仍上抛：这是配置问题，
             # 静默重试只会把真问题藏起来。
             raise
+        if not created:
+            return
+        # B2R31-01 §消费规则 5：group 改名/首次建组从 0 会重放历史消息。默认
+        # 仍从 0（首次启动要消费积压），但必须可观测——改名场景应显式设
+        # ``PLAITA_CONSUMER_GROUP_START_ID=$``（或在迁移 runbook 里先 drain）。
+        if start_id == "0":
+            try:
+                length = int(self.redis.xlen(self.stream_key) or 0)
+            except Exception as exc:  # noqa: BLE001 — 仅告警字段
+                logger.debug("xlen(%s) failed: %s", self.stream_key, _scrub_url_text(exc))
+                length = 0
+            if length:
+                logger.warning(
+                    "新消费组 %s（stream=%s）从 id=0 建立，将重放 %d 条历史条目；"
+                    "若是 group 改名请改用 PLAITA_CONSUMER_GROUP_START_ID=$ "
+                    "（B2R31-01：改名不重放）",
+                    self.group_name,
+                    self.stream_key,
+                    length,
+                )
+
+    def _group_start_id(self) -> str:
+        """建组起点（``PLAITA_CONSUMER_GROUP_START_ID``，默认 ``0``）。"""
+        raw = os.environ.get("PLAITA_CONSUMER_GROUP_START_ID")
+        if raw is None or not str(raw).strip():
+            return "0"
+        value = str(raw).strip()
+        if value in ("0", "$") or re.fullmatch(r"\d+-\d+", value):
+            return value
+        logger.warning(
+            "PLAITA_CONSUMER_GROUP_START_ID=%r 非法（期望 0/$/<ms-seq>），回退 0",
+            _redact_env_value(value),
+        )
+        return "0"
 
     def enqueue(
         self,
@@ -548,6 +675,10 @@ class RedisStreamTaskQueue:
         *,
         schema_version: Optional[int] = None,
         default_timestamp: Optional[str] = None,
+        config_family: Optional[str] = None,
+        config_generation: Optional[str] = None,
+        budget_generation: Optional[str] = None,
+        config_effective_at: Optional[str] = None,
     ) -> str:
         msg_id = enqueue_task(
             self.redis,
@@ -555,6 +686,10 @@ class RedisStreamTaskQueue:
             task,
             schema_version=schema_version,
             default_timestamp=default_timestamp,
+            config_family=config_family,
+            config_generation=config_generation,
+            budget_generation=budget_generation,
+            config_effective_at=config_effective_at,
         )
         self._metrics["enqueued"] += 1
         return msg_id
@@ -585,6 +720,7 @@ class RedisStreamTaskQueue:
 
     def _read_once(self, block_ms: int) -> Optional[StreamTask]:
         self.ensure_group()
+        self._run_startup_preflights()
         # Drain any over-delivered pending into DLQ before serving work.
         # 超限条目的处置（死信或守卫拒绝后的跳过）内联在 _reclaim_one 的
         # 单轮扫描里——扫描天然收敛，无需外层 while 重扫（重扫会在
@@ -617,6 +753,15 @@ class RedisStreamTaskQueue:
                 exc.message_id, exc.fields, delivery_count=1, reason=exc.reason
             )
             return None
+        if task is not None and self._family_mismatch(task.config_family):
+            self._note_family_mismatch(
+                task.message_id, task.config_family, delivery_count=1
+            )
+            # 不 ack：消息留 PEL pending，等正确代际的 worker 接走
+            # （B2R31-01：family 是兼容键，不是错误值——不轻易死信）。
+            return None
+        if task is not None and task.config_family == LEGACY_GENERATION:
+            self._metrics["config_legacy"] += 1
         if task is not None and self._unsupported_schema(task):
             # 语义上无法理解的更新消息：拒收并留证据（DLQ 含 message_id/payload），
             # 绝不按旧语义硬跑——升级期「先升消费者再升生产者」的兜底防线。
@@ -633,6 +778,132 @@ class RedisStreamTaskQueue:
         # 尝试）。超限存量由 `_reclaim_one` 判定；失败尝试后的死信由
         # `FlowWorker.run` 兜底分支判定（两者都过 `dead_letter_guard`）。
         return task
+
+    def preflight_config_budget(self, sample: int = 256) -> Dict[str, int]:
+        """启动期预算代际预检（B2R31-01 Phase 1）。
+
+        扫描本组 PEL 的有限样本：存在 ``budget_generation`` 与本进程不同的
+        条目时 WARNING + 计数，但**不**立即死信、也不改变既有预算判定——
+        旧 PEL 应按源预算宽限/drain 后再切换（Phase 2 才做逐条源预算）。
+        返回 ``{"scanned","stale","legacy"}``。
+        """
+        summary = {"scanned": 0, "stale": 0, "legacy": 0}
+        if not self.budget_generation:
+            return summary
+        try:
+            pending = self.redis.xpending_range(
+                self.stream_key, self.group_name, min="-", max="+", count=max(1, int(sample))
+            )
+        except Exception as exc:  # noqa: BLE001 — 预检失败不阻断启动，但 loud
+            text = str(exc)
+            if "NOGROUP" in text or "no such key" in text.lower():
+                # 组尚未建立（首次启动、尚未 read）：不是配置问题。
+                logger.debug("预算代际预检跳过（消费组尚未建立）: %s", text)
+                return summary
+            logger.warning(
+                "event=config.budget_stale_preflight_failed queue=%s: %s",
+                self.stream_key, _scrub_url_text(exc),
+            )
+            return summary
+        for entry in pending or []:
+            msg_id = entry.get("message_id") if isinstance(entry, dict) else entry[0]
+            if msg_id is None:
+                continue
+            fields = self._peek_task_fields(_decode(msg_id))
+            if fields is None:
+                continue
+            summary["scanned"] += 1
+            remote = _budget_generation_from_fields(fields)
+            if remote == LEGACY_GENERATION:
+                summary["legacy"] += 1
+            elif remote != self.budget_generation:
+                summary["stale"] += 1
+        if summary["stale"]:
+            logger.warning(
+                "event=config.budget_stale queue=%s local_budget_generation=%s "
+                "stale=%s legacy=%s scanned=%s——PEL 中存在按旧预算投递的条目；"
+                "本次变更要求 drain 或按源预算宽限后再生效（B2R31-01）",
+                self.stream_key,
+                self.budget_generation,
+                summary["stale"],
+                summary["legacy"],
+                summary["scanned"],
+            )
+        return summary
+
+    def preflight_orphan_streams(self, limit: int = 200) -> Dict[str, Any]:
+        """启动期「queue 改名孤儿」预检（B2R31-01 §消费规则 5 / A2R31-01 C）。
+
+        当前 Stream 没有积压时，扫描同前缀的其它 Stream：仍有 group pending
+        说明旧队列里存在没有回收者的在途执行 → WARNING（不自动接管：改名是
+        迁移契约，必须 drain 或双消费）。返回 ``{"scanned", "orphans"}``。
+        """
+        summary: Dict[str, Any] = {"scanned": 0, "orphans": []}
+        try:
+            prefix = self.stream_key.rsplit(":", 1)[0]
+            pattern = f"{prefix}*" if prefix != self.stream_key else f"{self.stream_key}*"
+            keys = []
+            for raw_key in self.redis.scan_iter(match=pattern, count=max(1, int(limit))):
+                key = _decode(raw_key)
+                keys.append(key)
+                if len(keys) >= limit:
+                    break
+        except Exception as exc:  # noqa: BLE001 — 预检不阻断启动，但 loud
+            logger.warning(
+                "event=config.orphan_stream_preflight_failed queue=%s: %s",
+                self.stream_key, _scrub_url_text(exc),
+            )
+            return summary
+        for key in keys:
+            if key == self.stream_key:
+                continue
+            try:
+                if _decode(self.redis.type(key)) != "stream":
+                    continue
+                groups = self.redis.xinfo_groups(key)
+            except Exception as exc:  # noqa: BLE001 — 单个键读失败跳过
+                logger.debug("孤儿队列预检跳过 %s: %s", key, _scrub_url_text(exc))
+                continue
+            summary["scanned"] += 1
+            pending = 0
+            for group in groups or []:
+                if isinstance(group, dict):
+                    pending += int(group.get("pending", 0) or 0)
+            if pending:
+                summary["orphans"].append({"stream": key, "pending": pending})
+        if summary["orphans"]:
+            logger.warning(
+                "event=config.orphan_stream queue=%s orphans=%s——同前缀旧 Stream "
+                "仍有 pending，当前队列改名后这些执行没有回收者；请 drain 或"
+                "双消费后再下线旧队列（B2R31-01/A2R31-01）",
+                self.stream_key, summary["orphans"],
+            )
+        return summary
+
+    def _run_startup_preflights(self) -> None:
+        """首次 read（组已建立）后跑一次预算/孤儿队列预检。
+
+        放在 ``ensure_group`` 之后：启动早期调用 ``XPENDING`` 会因 NOGROUP
+        被跳过，预检形同虚设。异常只 WARNING，绝不阻断消费。
+        """
+        if not self._budget_preflight_done:
+            self._budget_preflight_done = True
+            try:
+                self.preflight_config_budget()
+            except Exception as exc:  # noqa: BLE001 — 预检不阻断消费，但 loud
+                logger.warning(
+                    "event=config.budget_stale_preflight_failed queue=%s: %s",
+                    self.stream_key, _scrub_url_text(exc),
+                )
+        if not self._orphan_preflight_done:
+            self._orphan_preflight_done = True
+            try:
+                self.preflight_orphan_streams()
+            except Exception as exc:  # noqa: BLE001 — 预检不阻断消费，但 loud
+                logger.warning(
+                    "event=config.orphan_stream_preflight_failed queue=%s: %s",
+                    self.stream_key, _scrub_url_text(exc),
+                )
 
     def ack(self, message_id: str) -> None:
         acked = self.redis.xack(self.stream_key, self.group_name, message_id)
@@ -729,6 +1000,111 @@ class RedisStreamTaskQueue:
                 self.stream_key,
             )
         return deleted
+
+    def _family_mismatch(self, remote_family: Optional[str]) -> bool:
+        """两端都非 legacy 且不同 ⇒ 不兼容（B2R31-01 §消费规则 1）。
+
+        未接代际（``config_family is None``）的库内构造恒 False；legacy 载体
+        也恒 False——升级前历史消息必须按旧语义执行。
+        """
+        local = self.config_family
+        if not local or local == LEGACY_GENERATION:
+            return False
+        if not remote_family or remote_family == LEGACY_GENERATION:
+            return False
+        return remote_family != local
+
+    def _note_family_mismatch(
+        self, message_id: str, remote_family: str, *, delivery_count: int
+    ) -> None:
+        self._metrics["config_family_mismatch"] += 1
+        now = time.time()
+        if now - self._last_family_warning_at >= 60.0:
+            self._last_family_warning_at = now
+            logger.warning(
+                "event=config.family_mismatch source_family=%s local_family=%s "
+                "queue=%s message_id=%s delivery_count=%s——消息不执行，留 pending "
+                "等匹配代际的 worker（B2R31-01）",
+                remote_family,
+                self.config_family,
+                self.stream_key,
+                message_id,
+                delivery_count,
+            )
+
+    def _budget_mismatch(self, remote_budget: Optional[str]) -> bool:
+        """PEL 条目的预算代际与本进程不同（B2R31-01 §budget_generation）。
+
+        只对**两端都非 legacy** 的条目生效：历史消息没有预算字段，按现有
+        ``max_deliveries`` 语义处理（否则升级后所有旧载体都会被永久留在
+        PEL）。非 legacy 且不同 ⇒ 不能把新预算作用到旧载体上——留 pending
+        等匹配代际的 worker 或 drain，而不是立即死信。
+        """
+        local = self.budget_generation
+        if not local or local == LEGACY_GENERATION:
+            return False
+        if not remote_budget or remote_budget == LEGACY_GENERATION:
+            return False
+        return remote_budget != local
+
+    def _note_budget_mismatch(
+        self, message_id: str, remote_budget: str, *, delivery_count: int
+    ) -> None:
+        self._metrics["config_budget_stale"] += 1
+        now = time.time()
+        if now - self._last_family_warning_at >= 60.0:
+            self._last_family_warning_at = now
+            logger.warning(
+                "event=config.budget_stale queue=%s message_id=%s "
+                "source_budget_generation=%s local_budget_generation=%s "
+                "delivery_count=%s——新预算不得作用旧 PEL；消息留 pending，"
+                "要求 drain 或按源预算宽限（B2R31-01）",
+                self.stream_key,
+                message_id,
+                remote_budget,
+                self.budget_generation,
+                delivery_count,
+            )
+
+    def _config_age_expired(self, message_id: str) -> bool:
+        """代际拒收载体的年龄闸（B2R31-01：不无限占 PEL）。"""
+        if self.task_max_age_seconds <= 0:
+            return False
+        created = stream_id_timestamp(message_id)
+        if created is None:
+            return False
+        try:
+            age = (datetime.now() - created).total_seconds()
+        except (OverflowError, OSError, ValueError):
+            return False
+        return age > self.task_max_age_seconds
+
+    def _dead_letter_config_rejected(
+        self,
+        message_id: str,
+        fields: Dict[Any, Any],
+        *,
+        delivery_count: int,
+        reason: str,
+    ) -> None:
+        """代际拒收且年龄超限 → DLQ（保留源代际证据），绝不静默留 PEL。
+
+        标记 ``config_rejected``：worker 死信守卫据此不克隆恢复副本（副本继承
+        同一不兼容代际，克隆只会形成自持热环）。
+        """
+        try:
+            task = self._task_from_fields(
+                message_id, fields, delivery_count=delivery_count
+            )
+        except InvalidTaskPayload as exc:
+            self._dead_letter_invalid(
+                exc.message_id, exc.fields,
+                delivery_count=delivery_count, reason=exc.reason,
+            )
+            return
+        self.dead_letter_if_allowed(
+            replace(task, config_rejected=True), reason=reason
+        )
 
     def _unsupported_schema(self, task: StreamTask) -> bool:
         """消息信封版本是否超出本 build 的理解范围（``None`` = 关闭校验）。"""
@@ -855,6 +1231,11 @@ class RedisStreamTaskQueue:
             "delivery_count": task.delivery_count,
             "dead_lettered_at": time.time(),
             "schema_version": task.schema_version,
+            # B2R31-01：DLQ 保留源代际，replay 不猜来源（缺失仍是 legacy）。
+            "config_family": task.config_family,
+            "config_generation": task.config_generation,
+            "budget_generation": task.budget_generation,
+            "config_effective_at": task.config_effective_at,
             "payload": task.body if payload is _UNSET else payload,
         }
         if extra:
@@ -918,6 +1299,9 @@ class RedisStreamTaskQueue:
                     "message_id": task.message_id,
                     "delivery_count": task.delivery_count,
                     "schema_version": task.schema_version,
+                    "config_family": task.config_family,
+                    "config_generation": task.config_generation,
+                    "budget_generation": task.budget_generation,
                     "reason": reason,
                     "dlq_length": dlq_length,
                     "dlq_max_len": self.dlq_max_len,
@@ -992,6 +1376,12 @@ class RedisStreamTaskQueue:
             body={},
             delivery_count=delivery_count,
             schema_version=_schema_version_from_fields(fields),
+            config_family=_config_family_from_fields(fields),
+            config_generation=_config_generation_from_fields(fields),
+            budget_generation=_budget_generation_from_fields(fields),
+            config_effective_at=_config_field_from_fields(
+                fields, CONFIG_EFFECTIVE_AT_FIELD
+            ),
         )
         return self.dead_letter_if_allowed(
             task,
@@ -1075,6 +1465,12 @@ class RedisStreamTaskQueue:
             body=body,
             delivery_count=delivery_count,
             schema_version=_schema_version_from_fields(fields),
+            config_family=_config_family_from_fields(fields),
+            config_generation=_config_generation_from_fields(fields),
+            budget_generation=_budget_generation_from_fields(fields),
+            config_effective_at=_config_field_from_fields(
+                fields, CONFIG_EFFECTIVE_AT_FIELD
+            ),
         )
 
     def _pending_delivery_count(self, message_id: str) -> int:
@@ -1099,6 +1495,28 @@ class RedisStreamTaskQueue:
             return int(entry[3] or 1)
         return 1
 
+    def _peek_task_fields(self, message_id: str) -> Optional[Dict[Any, Any]]:
+        """XCLAIM 前无副作用读原始信封字段（B2R31-01 reclaim 预读）。
+
+        family 不匹配必须在 XCLAIM **之前**判定：先 XCLAIM 再跳过会白烧一次
+        投递预算（``times_delivered`` 不可逆）。读不到返回 None，调用方按存量
+        reclaim 放行——探测缺位不得切断恢复路径。
+        """
+        try:
+            entries = self.redis.xrange(
+                self.stream_key, min=message_id, max=message_id, count=1
+            )
+        except Exception as exc:  # noqa: BLE001 — 保守放行，见 docstring
+            logger.debug(
+                "reclaim 前读信封失败（放行 reclaim）: id=%s: %s",
+                message_id, _scrub_url_text(exc),
+            )
+            return None
+        if not entries:
+            return None
+        _mid, fields = entries[0]
+        return fields
+
     def _peek_task_body(self, message_id: str) -> Optional[Dict[str, Any]]:
         """XCLAIM 前无副作用读消息体（#47：XRANGE 不动 PEL/delivery_count）。
 
@@ -1106,16 +1524,9 @@ class RedisStreamTaskQueue:
         存量 reclaim——探测缺位不得切断恢复路径（XCLAIM 侧的 Redis 异常
         自有既有兜底）。
         """
-        try:
-            entries = self.redis.xrange(
-                self.stream_key, min=message_id, max=message_id, count=1
-            )
-        except Exception as exc:  # noqa: BLE001 — 保守放行，见 docstring
-            logger.debug("reclaim 前读消息体失败（放行 reclaim）: id=%s: %s", message_id, _scrub_url_text(exc))
+        fields = self._peek_task_fields(message_id)
+        if fields is None:
             return None
-        if not entries:
-            return None
-        _mid, fields = entries[0]
         try:
             body = json.loads(_payload_from_fields(fields))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -1210,6 +1621,42 @@ class RedisStreamTaskQueue:
                 continue
             if idle < self.claim_min_idle_ms:
                 continue
+            # B2R31-01：family 预读必须在 XCLAIM 之前——XCLAIM 会烧掉一次
+            # delivery，而 family 不匹配的消息要留给正确代际的 worker。
+            peeked_fields = self._peek_task_fields(msg_id_str)
+            if peeked_fields is not None:
+                remote_family = _config_family_from_fields(peeked_fields)
+                if self._family_mismatch(remote_family):
+                    self._note_family_mismatch(
+                        msg_id_str, remote_family, delivery_count=max(deliveries, 1)
+                    )
+                    if self._config_age_expired(msg_id_str):
+                        self._dead_letter_config_rejected(
+                            msg_id_str, peeked_fields,
+                            delivery_count=max(deliveries, 1),
+                            reason=(
+                                f"config_family_mismatch_age>{self.task_max_age_seconds}s "
+                                f"(source_family={remote_family})"
+                            ),
+                        )
+                    self._reclaim_cursor = msg_id_str
+                    continue
+                remote_budget = _budget_generation_from_fields(peeked_fields)
+                if self._budget_mismatch(remote_budget):
+                    self._note_budget_mismatch(
+                        msg_id_str, remote_budget, delivery_count=max(deliveries, 1)
+                    )
+                    if self._config_age_expired(msg_id_str):
+                        self._dead_letter_config_rejected(
+                            msg_id_str, peeked_fields,
+                            delivery_count=max(deliveries, 1),
+                            reason=(
+                                f"config_budget_stale_age>{self.task_max_age_seconds}s "
+                                f"(source_budget_generation={remote_budget})"
+                            ),
+                        )
+                    self._reclaim_cursor = msg_id_str
+                    continue
             # #47：租约闸门在 XCLAIM 之前——抢走一条「执行还活着」的消息
             # 只会白白虚增投递次数（死信循环的根因），先探测再决定。
             if self.reclaim_lease_guard is not None:
@@ -1258,6 +1705,26 @@ class RedisStreamTaskQueue:
             # 新 build 写出的超版本载体；原实现只首投拒收，回收则原样返回执行
             #（同一条消息：崩溃前死信、崩溃后旧语义硬跑）。检查放在超投递判据
             # 之前——版本不兼容比「投递次数」更根本，也避免以误导性 reason 死信。
+            # B2R31-01：family 兼容优先于 schema 版本（顺序见规格 §消费规则 2）。
+            if self._family_mismatch(task.config_family):
+                # 预读已拦绝大多数；这里是 XCLAIM 成功后的兜底（预读缺失/竞态）。
+                # 不 ack：消息仍留 PEL，等匹配代际的 worker。
+                self._note_family_mismatch(
+                    claimed_id, task.config_family,
+                    delivery_count=max(deliveries, 1),
+                )
+                self._reclaim_cursor = claimed_id
+                continue
+            if task.config_family == LEGACY_GENERATION:
+                self._metrics["config_legacy"] += 1
+            if self._budget_mismatch(task.budget_generation):
+                # 预读已拦绝大多数；XCLAIM 成功后兜底（预读缺失/竞态）。
+                self._note_budget_mismatch(
+                    claimed_id, task.budget_generation,
+                    delivery_count=max(deliveries, 1),
+                )
+                self._reclaim_cursor = claimed_id
+                continue
             if self._unsupported_schema(task):
                 self._reject_unsupported_schema(task)
                 self._reclaim_cursor = claimed_id

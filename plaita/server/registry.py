@@ -567,7 +567,8 @@ class RegistryMixin:
         service_type: str,
         metadata: Optional[Dict[str, Any]] = None,
         ttl: int = ServiceRegistry.DEFAULT_TTL,
-        heartbeat_interval: int = ServiceRegistry.DEFAULT_HEARTBEAT_INTERVAL
+        heartbeat_interval: int = ServiceRegistry.DEFAULT_HEARTBEAT_INTERVAL,
+        instance_id: Optional[str] = None,
     ):
         """
         初始化服务注册
@@ -590,7 +591,9 @@ class RegistryMixin:
         self._registry_closed = threading.Event()
         
         self._service_info = ServiceInfo(
-            instance_id=ServiceRegistry.generate_instance_id(),
+            # B2R31-02：显式实例 id（service_manager 注入的 PLAITA_INSTANCE_ID）
+            # 与注册键必须同值；未注入才生成 hostname-uuid。
+            instance_id=instance_id or ServiceRegistry.generate_instance_id(),
             service_type=service_type,
             host=ServiceRegistry.get_host_address(),
             status="starting",

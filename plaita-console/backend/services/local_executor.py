@@ -389,7 +389,9 @@ def _build_langfuse_callback():
     - 缺 ``plaita[langfuse]`` 依赖或 SDK 初始化失败（如缺凭据）只告警一次。
     """
     global _lf_warned
-    mode = os.getenv("PLAITA_CONSOLE_LANGFUSE", "auto").strip().lower()
+    from plaita.runtime_config import resolve_langfuse_mode
+
+    mode = resolve_langfuse_mode()
     public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "")
     if mode == "false" or (mode == "auto" and not public_key):
         return None

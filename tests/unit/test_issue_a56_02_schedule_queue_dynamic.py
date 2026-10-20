@@ -60,7 +60,12 @@ def test_resolver_explicit_config_wins(monkeypatch):
 def test_resolver_warns_once_on_split_queue(monkeypatch, caplog):
     monkeypatch.setenv("PLAITA_QUEUE_NAME", "plaita:flow:queue")
     monkeypatch.setenv("PLAITA_CONSOLE_TASK_QUEUE", "plaita:flow:queue:v2")
-    with caplog.at_level("WARNING", logger="plaita.server.services.schedule_service"):
+    # B2R31-02：分裂告警收敛到单一 resolver（plaita.runtime_config），
+    # 进程级去重表需按用例清空才能验证「只打一次」。
+    from plaita import runtime_config as rc
+
+    rc._reset_warnings_for_tests()
+    with caplog.at_level("WARNING", logger="plaita.runtime_config"):
         assert resolve_dispatch_queue_name() == "plaita:flow:queue:v2"
         assert resolve_dispatch_queue_name() == "plaita:flow:queue:v2"
     messages = [r.message for r in caplog.records if "不同源" in r.message]

@@ -16,7 +16,7 @@ platform_admin（不留「读是低危」例外），并在响应序列化层再
 """
 import logging
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -274,6 +274,11 @@ class ManagedInstanceResponse(_RedactedResponseModel):
     start_time: str
     error_message: Optional[str] = None
     managed_by: str = "console"  # console 或 external (Redis 注册)
+    # B2R31-01：代际视图（旧注册项缺失 = None；控制面据此发现混跑）。
+    config_family: Optional[str] = None
+    config_generation: Optional[str] = None
+    budget_generation: Optional[str] = None
+    deployment_epoch: Optional[str] = None
 
 
 class ManagedInstancesResponse(_RedactedResponseModel):
@@ -282,10 +287,27 @@ class ManagedInstancesResponse(_RedactedResponseModel):
     total: int
 
 
+def _metadata_value(info: Any, key: str) -> Optional[str]:
+    """从 registry JSON 的 ``metadata`` 子字典取字符串值（缺失/畸形 → None）。"""
+    if not isinstance(info, dict):
+        return None
+    metadata = info.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(key)
+    return value if isinstance(value, str) and value else None
+
+
 class ClusterConfigResponse(_RedactedResponseModel):
     """集群配置响应"""
     mode: str
     config_path: str
+    # B2R31-01：派生的配置代际（控制面可核对 console 的生效配置）。
+    config_family: Optional[str] = None
+    config_generation: Optional[str] = None
+    budget_generation: Optional[str] = None
+    deployment_epoch: Optional[str] = None
+    config_hash: Optional[str] = None
 
 
 class SwitchModeRequest(StrictRequestModel):
@@ -620,7 +642,11 @@ async def list_managed_instances(
                     status=info.get("status", "unknown"),
                     start_time=info.get("start_time", ""),
                     error_message=None,
-                    managed_by="external"
+                    managed_by="external",
+                    config_family=_metadata_value(info, "config_family"),
+                    config_generation=_metadata_value(info, "config_generation"),
+                    budget_generation=_metadata_value(info, "budget_generation"),
+                    deployment_epoch=_metadata_value(info, "deployment_epoch"),
                 ))
                 seen_ids.add(instance_id)
         except Exception as e:
@@ -648,10 +674,61 @@ async def get_cluster_config(
         http_request, identity, action="cluster.config.read", resource="cluster",
     )
     manager = _require_service_manager()
+    # B2R31-01：返回 console 进程的派生代际（与启动日志 event=config.effective
+    # 同源）；读失败不阻断控制面（字段留空）。
+    try:
+        from plaita.runtime_config import load_runtime_config
+
+        generation = load_runtime_config("console", strict=False).generation
+    except Exception:  # noqa: BLE001 — 控制面只读视图，失败留空
+        generation = None
     return ClusterConfigResponse(
         mode=manager.config.mode,
-        config_path=manager.config_path
+        config_path=manager.config_path,
+        config_family=generation.family if generation else None,
+        config_generation=generation.generation if generation else None,
+        budget_generation=generation.budget if generation else None,
+        deployment_epoch=(
+            generation.details.get("deployment_epoch") if generation else None
+        ),
+        config_hash=generation.generation if generation else None,
     )
+
+
+@router.post("/cluster/tenant-status/reconcile")
+async def reconcile_tenant_status(
+    http_request: Request,
+    identity: Dict = Depends(require_auth),
+):
+    """显式触发租户状态对账（A2R31-02 恢复流程入口）。
+
+    Redis-only 恢复（RDB/键恢复、主从切换、备份回灌）发生在 console 运行中
+    时，周期对账最多一个 interval 后纠正；运维也可在恢复后立即调用本端点。
+    以 DB 为权威回落已删租户墓碑，并刷新部署纪元。
+    """
+    ensure_platform_admin(
+        http_request, identity,
+        action="cluster.tenant_status.reconcile", resource="cluster",
+    )
+    redis_client = getattr(http_request.app.state, "redis", None)
+    store = getattr(http_request.app.state, "store", None)
+    if redis_client is None or store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="租户状态对账不可用：cluster Redis 未连接或权威库未初始化",
+        )
+    try:
+        from ..services import tenants_svc
+    except ImportError:
+        from services import tenants_svc  # type: ignore
+    summary = tenants_svc.publish_all_tenant_status(redis_client, store)
+    _audit_cluster(
+        http_request, "tenant_status.reconcile", target="tenant_status",
+        detail=dict(summary),
+    )
+    if summary.get("failed"):
+        logger.warning("显式租户状态对账存在失败项: %s", summary)
+    return summary
 
 
 @router.post("/cluster/mode")

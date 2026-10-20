@@ -84,18 +84,34 @@ class EventReconciler:
         self.event_storage = event_storage
         self.event_filter = event_filter
         self.redis_client = redis_client
-        self.interval_seconds = float(
-            interval_seconds
-            if interval_seconds is not None
-            else os.environ.get("PLAITA_EVENT_RECONCILE_INTERVAL")
-            or DEFAULT_INTERVAL_SECONDS
-        )
-        self.backfill_seconds = float(
-            backfill_seconds
-            if backfill_seconds is not None
-            else os.environ.get("PLAITA_EVENT_RECONCILE_BACKFILL")
-            or DEFAULT_BACKFILL_SECONDS
-        )
+        # B2R31-03：0/负值/非法=拒绝（0 interval 是紧环，不是「关闭」）；
+        # 显式参数由调用方负责校验，env 读取走 WARNING + 安全默认。
+        if interval_seconds is not None:
+            self.interval_seconds = float(interval_seconds)
+            if self.interval_seconds <= 0:
+                raise ValueError(
+                    "event reconcile interval must be > 0 "
+                    f"(got {interval_seconds!r}); use PLAITA_DISABLE_EVENT_RECONCILE "
+                    "to disable"
+                )
+        else:
+            from plaita.runtime_config import optional_float_env
+
+            self.interval_seconds = optional_float_env(
+                "PLAITA_EVENT_RECONCILE_INTERVAL",
+                float(DEFAULT_INTERVAL_SECONDS),
+                minimum=1e-9,
+            )
+        if backfill_seconds is not None:
+            self.backfill_seconds = float(backfill_seconds)
+        else:
+            from plaita.runtime_config import optional_float_env
+
+            self.backfill_seconds = optional_float_env(
+                "PLAITA_EVENT_RECONCILE_BACKFILL",
+                float(DEFAULT_BACKFILL_SECONDS),
+                minimum=0.0,
+            )
         self.batch_size = int(batch_size)
         self._running = False
         self._task: Optional[asyncio.Task] = None

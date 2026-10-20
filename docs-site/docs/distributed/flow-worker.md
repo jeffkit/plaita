@@ -26,6 +26,41 @@
 
 CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）、`--max-deliveries`（默认 5）、`--dlq-key`。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容）。
 
+## 配置代际与运行期配置（A2R31 / B2R31-01/02/03） {#配置代际}
+
+worker 启动时经 `plaita.runtime_config.load_runtime_config("worker")` 一次性解析
+queue/redis/group/dlq/预算/安全开关，并计算三个**互不替代**的代际：
+
+- `config_family`（`cf1-…`）：queue/group/dlq/schema/namespace 的硬兼容键；
+- `config_generation`（`cfg1-…`）：全部语义字段的可观测哈希（不含 log level/metrics port）；
+- `budget_generation`（`bg1-…`）：`max_deliveries`/lease TTL/载体年龄/DLQ 上限。
+
+启动日志 `event=config.effective` 与 registry metadata / 容量块都带这三个值；
+`GET /api/cluster/config` 与 `GET /api/cluster/instances` 可核对混跑。
+
+**消费规则**：
+
+1. 首投与 reclaim 同判：两端都非 `legacy` 且 `config_family` 不同 → 不执行；
+   reclaim 用 `XRANGE` 预读，不 `XCLAIM`、不烧 delivery，消息留 pending +
+   `event=config.family_mismatch`。
+2. `budget_generation` 不同 → 不把新预算作用旧 PEL：留 pending +
+   `event=config.budget_stale`，要求 drain 或按源预算宽限。
+3. 重投/交接/克隆/DLQ replay 继承**源**信封代际；缺失按 `legacy`，绝不盖当前值。
+4. 历史消息（无字段）始终可执行；畸形字段 WARNING + legacy，不按当前值覆盖。
+
+**租户状态纪元**：console 写入状态时同时刷新
+`plaita:tenant_status:epoch`（来自 `PLAITA_DEPLOYMENT_EPOCH`）。worker 的
+`tenant_is_active(..., expected_epoch=...)` 在 epoch 缺失/更旧时拒绝非 default
+租户、default 保持 #237 fail-open；Redis epoch 更新时拒绝本 worker。运行中
+Redis-only 恢复由 console 周期对账（默认 60s）或
+`POST /api/cluster/tenant-status/reconcile` 纠正；`PLAITA_TENANT_STATUS_EPOCH_STRICT=0`
+是回滚阀（启动 WARNING）。
+
+**非法值口径**：identity/security/resource 类在进程入口聚合后 fail-fast；
+optional 类 WARNING + 安全默认；安全门未知值 fail-closed。空串 identity
+（queue/redis/dlq/group/instance id/delay queue/epoch）一律拒绝，不再写空键。
+详见 [运维 Runbook 的非法值矩阵](ops-runbook.md#非法值处理矩阵)。
+
 ## 长步骤与消息回收（claim_min_idle_ms / XCLAIM） {#长步骤与消息回收}
 
 一条任务从被 `XREADGROUP` 读到 `XACK` 前一直留在 consumer group 的 pending

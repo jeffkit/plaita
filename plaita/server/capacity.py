@@ -90,6 +90,8 @@ DEFAULT_DISPATCH_QUEUE = "plaita:flow:queue"
 #: 不一致。容量路由必须带队列维度——跨队列选中 target 会让消息落到 target
 #: 永远读不到的队列，worker 交接耗尽后把执行误终态化为 error。
 REASON_QUEUE_MISMATCH = "queue: mismatch"
+#: B2R31-01：配置族不同（queue/group/dlq/schema/namespace 任一）⇒ 不得派发。
+REASON_CONFIG_FAMILY_MISMATCH = "config: family mismatch"
 REASON_DISK = "disk: low free space"
 REASON_SATURATED = "saturated: active_tasks >= concurrency"
 REASON_DRAINING = "draining"
@@ -142,8 +144,14 @@ def shadow_mode_from_env() -> bool:
 
 
 def dispatch_queue_from_env() -> str:
-    """派发队列名（``PLAITA_CONSOLE_TASK_QUEUE``，与 console 发单同源）。"""
-    return (os.environ.get(DISPATCH_QUEUE_ENV) or "").strip() or DEFAULT_DISPATCH_QUEUE
+    """派发队列名（``PLAITA_CONSOLE_TASK_QUEUE``，与 console 发单同源）。
+
+    B2R31-02：与 manual start/schedule 共用单一 resolver；空串是 identity
+    配置错误，不再静默回落默认队列（A2R31-03）。
+    """
+    from plaita.runtime_config import resolve_queue_name
+
+    return resolve_queue_name("console")
 
 
 def candidate_queue_name(metadata: Any) -> str:
@@ -196,6 +204,10 @@ def build_capacity_block(
     concurrency: int = 1,
     sampled_at: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
+    config_family: Optional[str] = None,
+    config_generation: Optional[str] = None,
+    budget_generation: Optional[str] = None,
+    deployment_epoch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """构造容量块（纯函数，可直接断言）。
 
@@ -213,6 +225,15 @@ def build_capacity_block(
         "concurrency": max(1, _as_int(concurrency, 1)),
         "sampled_at": sampled_at or _now_iso(),
     }
+    # B2R31-01：代际随容量块一起上报（dispatch plan/容量看板可发现混跑）。
+    for key, value in (
+        ("config_family", config_family),
+        ("config_generation", config_generation),
+        ("budget_generation", budget_generation),
+        ("deployment_epoch", deployment_epoch),
+    ):
+        if value is not None:
+            block[key] = value
     if extra:
         for key, value in extra.items():
             block.setdefault(key, value)
@@ -240,7 +261,7 @@ def parse_capacity_block(raw: Any) -> Optional[Dict[str, Any]]:
         return None
     free = data.get("free_disk_gib", None)
     stale_at = data.get("sampled_at")
-    return {
+    parsed = {
         "schema_version": CAPACITY_SCHEMA_VERSION,
         "free_disk_gib": None if free is None else max(0.0, _as_float(free)),
         "min_free_disk_gib": max(0.0, _as_float(data.get("min_free_disk_gib"), 0.0)),
@@ -249,6 +270,12 @@ def parse_capacity_block(raw: Any) -> Optional[Dict[str, Any]]:
         "concurrency": max(1, _as_int(data.get("concurrency"), 1)),
         "sampled_at": stale_at if isinstance(stale_at, str) else None,
     }
+    # 代际字段是增量：旧容量块没有它们时保持缺失（消费侧按 legacy）。
+    for key in ("config_family", "config_generation", "budget_generation", "deployment_epoch"):
+        value = data.get(key)
+        if value is not None:
+            parsed[key] = value
+    return parsed
 
 
 def _coerce_to_mapping(raw: Any) -> Optional[Dict[str, Any]]:
@@ -431,7 +458,20 @@ class DispatchCandidate:
         """候选实际消费的队列名（缺 metadata ⇒ 默认队列，兼容存量 worker）。"""
         return candidate_queue_name(self.metadata)
 
-    def reject_reason(self, queue_name: Optional[str] = None) -> Optional[str]:
+    @property
+    def config_family(self) -> Optional[str]:
+        """候选的配置族（metadata 优先，其次容量块；缺失 = legacy/未知）。"""
+        value = self.metadata.get("config_family") if isinstance(self.metadata, dict) else None
+        if not isinstance(value, str) or not value:
+            block = self.capacity or {}
+            value = block.get("config_family")
+        return value if isinstance(value, str) and value else None
+
+    def reject_reason(
+        self,
+        queue_name: Optional[str] = None,
+        config_family: Optional[str] = None,
+    ) -> Optional[str]:
         """不可派发原因（前缀稳定，见 ``REASON_*``）；可派发返回 ``None``。
 
         判定顺序即优先级：**队列维度** → status 白名单 → 容量缺失/陈旧
@@ -445,6 +485,19 @@ class DispatchCandidate:
         """
         if queue_name is not None and self.queue_name != queue_name:
             return f"{REASON_QUEUE_MISMATCH} (worker consumes {self.queue_name})"
+        # B2R31-01：family 是硬兼容键。只拒绝两端都明确且不同的候选；
+        # 缺失/legacy（存量 worker）放行——升级期不能让广播派发全停。
+        if (
+            config_family is not None
+            and config_family != "legacy"
+            and self.config_family is not None
+            and self.config_family != "legacy"
+            and self.config_family != config_family
+        ):
+            return (
+                f"{REASON_CONFIG_FAMILY_MISMATCH} "
+                f"(worker family {self.config_family})"
+            )
         if self.status != "running":
             return {
                 "starting": REASON_STARTING,
@@ -504,6 +557,7 @@ def filter_dispatchable(
     candidates: Iterable[Any],
     *,
     queue_name: Optional[str] = None,
+    config_family: Optional[str] = None,
 ) -> Tuple[List[DispatchCandidate], List[DispatchRejection]]:
     """容量门：``(可派候选, 被拒候选)``。
 
@@ -518,7 +572,7 @@ def filter_dispatchable(
     rejected: List[DispatchRejection] = []
     for item in candidates:
         cand = item if isinstance(item, DispatchCandidate) else DispatchCandidate.from_service_info(item)
-        reason = cand.reject_reason(queue_name)
+        reason = cand.reject_reason(queue_name, config_family)
         if reason is None:
             allowed.append(cand)
         else:
@@ -537,13 +591,16 @@ def select_dispatch_target(
     candidates: Iterable[Any],
     *,
     queue_name: Optional[str] = None,
+    config_family: Optional[str] = None,
 ) -> Optional[DispatchCandidate]:
     """在容量门之上做确定性选择：剩余盘最多 → 在跑最少 → id 字典序。
 
     无可派候选返回 ``None``（调用方据此走「本轮不派单」而非「随便派一台」）。
     ``queue_name`` 语义同 :func:`filter_dispatchable`。
     """
-    allowed, _ = filter_dispatchable(candidates, queue_name=queue_name)
+    allowed, _ = filter_dispatchable(
+        candidates, queue_name=queue_name, config_family=config_family
+    )
     if not allowed:
         return None
     return sorted(allowed, key=lambda c: c.sort_key())[0]
@@ -572,6 +629,7 @@ def decide_route(
     candidates: Iterable[Any],
     *,
     queue_name: Optional[str] = None,
+    config_family: Optional[str] = None,
 ) -> RouteDecision:
     """容量路由（**唯一**实现）：队列维度 + 容量门 + 确定性排序 + 稳定原因。
 
@@ -582,7 +640,9 @@ def decide_route(
     指标只在同一队列内可比（A64-05）。跨队列候选以
     ``REASON_QUEUE_MISMATCH`` 进入 ``rejected``，不静默消失。
     """
-    allowed, rejected = filter_dispatchable(candidates, queue_name=queue_name)
+    allowed, rejected = filter_dispatchable(
+        candidates, queue_name=queue_name, config_family=config_family
+    )
     if not allowed:
         return RouteDecision(
             target=None, reason=REASON_ROUTE_NO_TARGET,

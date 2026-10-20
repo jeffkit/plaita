@@ -361,20 +361,30 @@ DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 
 
 def operator_block_private() -> bool:
-    """运营者是否强制屏蔽私网目标（``PLAITA_HTTP_BLOCK_PRIVATE=1``）。"""
-    return os.environ.get(HTTP_BLOCK_PRIVATE_ENV, "").strip().lower() in ("1", "true", "yes")
+    """运营者是否强制屏蔽私网目标（``PLAITA_HTTP_BLOCK_PRIVATE=1``）。
+
+    B2R31-03：strict bool（含 ``on``）；非法值按安全门 **fail-closed=True**
+    + WARNING，绝不静默关闭（启动预检会拒绝该配置）。
+    """
+    from plaita.runtime_config import security_bool_env
+
+    return security_bool_env(
+        HTTP_BLOCK_PRIVATE_ENV, default=False, fail_closed=True
+    )
 
 
 def http_max_response_bytes() -> int:
-    """响应体字节上限（``PLAITA_HTTP_MAX_RESPONSE_BYTES``，默认 10MiB）。"""
-    raw = os.environ.get(HTTP_MAX_RESPONSE_BYTES_ENV, "").strip()
-    if not raw:
-        return DEFAULT_MAX_RESPONSE_BYTES
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_MAX_RESPONSE_BYTES
-    return value if value > 0 else DEFAULT_MAX_RESPONSE_BYTES
+    """响应体字节上限（``PLAITA_HTTP_MAX_RESPONSE_BYTES``，默认 10MiB）。
+
+    非法/0/负值 → WARNING + 默认 10MiB（B2R31-03：不再静默回退）。
+    """
+    from plaita.runtime_config import optional_int_env
+
+    return optional_int_env(
+        HTTP_MAX_RESPONSE_BYTES_ENV,
+        DEFAULT_MAX_RESPONSE_BYTES,
+        minimum=1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -390,11 +400,10 @@ _DNS_CACHE_LOCK = threading.Lock()
 
 
 def _dns_ttl_secs() -> float:
-    raw = os.environ.get("PLAITA_HTTP_DNS_TTL", "")
-    try:
-        return max(0.0, float(raw)) if raw else 30.0
-    except ValueError:
-        return 30.0
+    """DNS 缓存 TTL（秒）；非法/NaN/inf → WARNING + 30s，0 关闭缓存。"""
+    from plaita.runtime_config import optional_float_env
+
+    return optional_float_env("PLAITA_HTTP_DNS_TTL", 30.0, minimum=0.0)
 
 
 def _resolve_host(hostname: str, port: Optional[int]) -> Optional[List[str]]:

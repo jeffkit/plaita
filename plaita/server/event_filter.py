@@ -257,7 +257,12 @@ class EventFilter:
                     # 回扫器据此不推进游标、改计 rejected；推送链路是
                     # fire-and-forget，由 event/redis.py 的包装接收。
                     try:
-                        enqueue_task(self.redis_client, self.queue_name, resume_task)
+                        from plaita.runtime_config import envelope_for_stream
+
+                        enqueue_task(
+                            self.redis_client, self.queue_name, resume_task,
+                            **envelope_for_stream(self.queue_name, role="event_filter"),
+                        )
                     except Exception as exc:
                         self._release_dedup_key(dedup_key)
                         logger.error(
@@ -365,7 +370,12 @@ class EventFilter:
         # 该包装记 ERROR 后**继续上抛**到 `_check_loop`（记日志、下轮重试）——
         # 失败不再被抹平。
         try:
-            enqueue_task(self.redis_client, self.queue_name, resume_task)
+            from plaita.runtime_config import envelope_for_stream
+
+            enqueue_task(
+                self.redis_client, self.queue_name, resume_task,
+                **envelope_for_stream(self.queue_name, role="event_filter"),
+            )
         except Exception as exc:
             self._release_dedup_key(dedup_key)
             logger.error(
@@ -528,24 +538,31 @@ class EventFilter:
             subscription_storage=subscription_storage,
             redis_client=redis_client,
             event_bus=event_bus,
-            queue_name=queue_name or os.environ.get(
-                "PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", DEFAULT_QUEUE_NAME)
-            )
+            queue_name=queue_name or _resolve_queue_name(None)
         )
 
 
 from plaita.server.factory import create_storage_component, create_event_bus  # noqa: F401
 
 
+def _event_filter_redis_url() -> str:
+    """event_filter 的 Redis URL（A2R31-04：别名链与 worker/services 同源）。"""
+    from plaita.runtime_config import resolve_redis_url
+
+    return resolve_redis_url("event_filter")
+
+
 def _resolve_queue_name(cli_value: Optional[str]) -> str:
     """队列名解析：CLI 参数 > PLAITA_QUEUE_NAME/QUEUE_NAME env > 默认值。
 
-    与 ``flow_worker.py`` 的既有做法一致。cluster_config.yaml 给本进程配的
-    是 ``PLAITA_QUEUE_NAME`` 环境变量，此前只认 CLI 参数导致该配置失效。
+    与 ``flow_worker.py`` 共用单一 resolver（B2R31-02）；空串是 identity
+    配置错误，不再静默写空 Stream。
     """
     if cli_value and cli_value != DEFAULT_QUEUE_NAME:
         return cli_value
-    return os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", DEFAULT_QUEUE_NAME))
+    from plaita.runtime_config import resolve_queue_name
+
+    return resolve_queue_name("event_filter")
 
 
 async def main_async(args):
@@ -641,14 +658,25 @@ async def _close_event_bus(event_bus) -> None:
 
 def main():
     """命令行入口程序"""
+    # B2R31-03：与 worker/services/console 同口径的启动预检（身份/安全/资源
+    # 非法值 fail-fast；可选调优 WARNING+安全默认）。
+    from plaita.runtime_config import ConfigError, preflight_security_and_limits
+
+    try:
+        preflight_warnings = preflight_security_and_limits()
+    except ConfigError as exc:
+        print(f"配置预检失败，event_filter 拒绝启动：{exc}", file=sys.stderr)
+        raise SystemExit(2)
+    for warning in preflight_warnings:
+        print(f"WARNING 配置预检：{warning}", file=sys.stderr)
     parser = argparse.ArgumentParser(description="Plaita事件过滤器")
     
     # Redis参数
     parser.add_argument("--redis-url",
-                        default=os.environ.get("PLAITA_REDIS_URL", "redis://localhost:6379/0"),
-                        help="Redis 连接地址（默认取 PLAITA_REDIS_URL，与 flow_worker 一致）")
+                        default=_event_filter_redis_url(),
+                        help="Redis 连接地址（PLAITA_REDIS_URL > REDIS_URL，与 flow_worker 一致）")
     parser.add_argument("--queue-name",
-                      default=os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", DEFAULT_QUEUE_NAME)),
+                      default=_resolve_queue_name(None),
                       help="Redis队列名称（默认取 PLAITA_QUEUE_NAME/QUEUE_NAME，与 flow_worker 一致）")
     
     # 数据库参数

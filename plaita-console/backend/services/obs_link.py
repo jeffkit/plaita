@@ -19,7 +19,10 @@ DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
 
 
 def langfuse_enabled() -> bool:
-    mode = os.getenv("PLAITA_CONSOLE_LANGFUSE", "auto").strip().lower()
+    """是否启用 Langfuse（strict enum；未知值=false + WARNING，绝不当开）。"""
+    from plaita.runtime_config import resolve_langfuse_mode
+
+    mode = resolve_langfuse_mode()
     if mode == "false":
         return False
     if mode == "true":

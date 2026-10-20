@@ -53,6 +53,18 @@ from plaita.core.retention import task_max_age_seconds
 from plaita.logger import logger
 from plaita.redis_client import make_redis_client
 from plaita.writefile_jail import apply_writefile_jail
+from plaita.runtime_config import (
+    ConfigError,
+    ConfigGeneration,
+    LEGACY_GENERATION,
+    load_runtime_config,
+    log_config_effective,
+    preflight_security_and_limits,
+    resolve_consumer_group,
+    resolve_dlq_key,
+    resolve_queue_name,
+    resolve_redis_url,
+)
 from plaita.server.registry import RegistryMixin, ServiceRegistry, ServiceInfo
 # #42（W10-a）：worker 容量上报——把「还能接多少活」写进既有 registry metadata
 # 的 ``worker_capacity`` 子键（复用 plaita:registry:flow_worker:<id> 键与 TTL）。
@@ -93,6 +105,7 @@ from plaita.server.task_queue import (
     RECONNECT_BACKOFF_SECONDS,
     RedisStreamTaskQueue,
     StreamTask,
+    _dlq_max_len_from_env,
     enqueue_task,
     timestamp_from_stream_id,
 )
@@ -246,9 +259,20 @@ def _requeue_envelope_kwargs(source: Any) -> Dict[str, Any]:
     按当前 build 版本落信封（存量行为）；``bool`` 不是合法版本值。
     """
     version = getattr(source, "schema_version", None)
+    kwargs: Dict[str, Any] = {}
     if isinstance(version, int) and not isinstance(version, bool):
-        return {"schema_version": version}
-    return {}
+        kwargs["schema_version"] = version
+    # B2R31-01：重投/交接/克隆/DLQ replay 继承**源**代际，绝不盖当前值。
+    # 源缺失/legacy 时不写字段（消费侧按 legacy 处理），因此旧测试的
+    # ``kwargs == {"schema_version": ...}`` 形状保持不变。
+    for attr in ("config_family", "config_generation", "budget_generation"):
+        value = getattr(source, attr, None)
+        if isinstance(value, str) and value and value != LEGACY_GENERATION:
+            kwargs[attr] = value
+    effective_at = getattr(source, "config_effective_at", None)
+    if isinstance(effective_at, str) and effective_at:
+        kwargs["config_effective_at"] = effective_at
+    return kwargs
 
 
 def _load_matching_tombstone(
@@ -4619,9 +4643,59 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._consumer_group = consumer_group
         self._claim_min_idle_ms = claim_min_idle_ms
         self._consumer_name = consumer_name
-        self._max_deliveries = max_deliveries
+        if int(max_deliveries) < 1:
+            logger.warning(
+                "max_deliveries=%s ≤0，钳制为 1（启动预检会拒绝该配置，B2R31-03）",
+                max_deliveries,
+            )
+        self._max_deliveries = max(1, int(max_deliveries))
         self._dlq_key = dlq_key
         self._task_queue: Optional[RedisStreamTaskQueue] = None
+
+        # B2R31-01/02/03：本进程的配置视图与三维代际。库内构造用非 strict
+        # （非法值 WARNING + 安全默认，不阻断嵌入式使用）；CLI 入口另走
+        # preflight 严格校验。显式构造参数优先于 env。
+        resolved_dlq = dlq_key
+        if resolved_dlq is None:
+            try:
+                resolved_dlq = resolve_dlq_key(queue_name, empty_policy="default")
+            except ConfigError as exc:
+                logger.warning(
+                    "DLQ 键解析失败，按默认键继续（配置预检会拒绝启动）: %s",
+                    _scrub_exception_text(exc),
+                )
+                resolved_dlq = f"{queue_name}:dlq"
+        self._runtime_config = load_runtime_config(
+            "worker",
+            strict=False,
+            overrides={
+                "queue_name": queue_name,
+                "redis_url": redis_url,
+                "consumer_group": consumer_group,
+                "dlq_key": resolved_dlq,
+                "max_deliveries": max(1, int(max_deliveries)),
+                "lease_ttl_seconds": max(1, int(lease_ttl_seconds)),
+                "task_max_age_seconds": task_max_age_seconds(),
+                # 与队列构造实际采用的钳制值同源，避免代际哈希与实际预算分叉。
+                "dlq_max_len": _dlq_max_len_from_env(),
+            },
+        )
+        self._config_generation: Optional[ConfigGeneration] = (
+            self._runtime_config.generation
+        )
+        if self._config_generation is not None:
+            self._config_family = self._config_generation.family
+            self._config_generation_id = self._config_generation.generation
+            self._budget_generation = self._config_generation.budget
+            self._config_effective_at = self._config_generation.effective_at
+        else:  # pragma: no cover - build_generation always returns an object
+            self._config_family = LEGACY_GENERATION
+            self._config_generation_id = LEGACY_GENERATION
+            self._budget_generation = LEGACY_GENERATION
+            self._config_effective_at = None
+        self._tenant_status_epoch = self._runtime_config.tenant_status_epoch
+        self._dlq_key = resolved_dlq
+        log_config_effective(logger, self._runtime_config)
 
         # #26 观测导出：``/metrics`` 抓取端（0 = 不启动）与死信告警 webhook。
         # 队列计数器（enqueued/acked/dead_lettered…）是**进程内**状态，只有
@@ -4688,6 +4762,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 service_type=self.SERVICE_TYPE,
                 metadata={
                     "queue_name": queue_name,
+                    "consumer_group": self._consumer_group,
+                    "dlq_key": self._dlq_key,
+                    # B2R31-01：代际与脱敏关键值进注册 metadata——控制面
+                    # （/api/cluster/instances、capacity、drift 预检）据此
+                    # 发现混跑；旧 build 忽略未知键。
+                    "config_family": self._config_family,
+                    "config_generation": self._config_generation_id,
+                    "budget_generation": self._budget_generation,
+                    "config_effective_at": self._config_effective_at,
+                    "max_deliveries": self._max_deliveries,
+                    "lease_ttl_seconds": lease_ttl_seconds,
+                    "task_max_age_seconds": self._runtime_config.task_max_age_seconds,
+                    "dlq_max_len": self._runtime_config.dlq_max_len,
+                    "deployment_epoch": self._runtime_config.deployment_epoch,
+                    "tenant_status_epoch": self._tenant_status_epoch,
                     # plaita#158：本字典会被 registry.register() 原样 ``SETEX`` **持久化**
                     # 进 ``plaita:registry:flow_worker:<instance_id>``——注册键名与
                     # metadata 键语义不变（仍是 ``redis_url``），只有它的**值**是掩码
@@ -4697,7 +4786,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "cache_ttl": cache_ttl,
                 },
                 ttl=registry_ttl,
-                heartbeat_interval=heartbeat_interval
+                heartbeat_interval=heartbeat_interval,
+                instance_id=self._runtime_config.instance_id,
             )
             
             # 初始化控制监听
@@ -4740,6 +4830,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 max_deliveries=self._max_deliveries,
                 dlq_key=self._dlq_key,
             )
+            queue_params = inspect.signature(
+                RedisStreamTaskQueue.__init__
+            ).parameters
+            # B2R31-01：本进程代际进队列；family 不匹配的载体不执行、
+            # 不 XCLAIM（留 pending 等匹配代际的 worker）。按签名探测，
+            # 兼容只实现旧参数的队列桩/并行合入版本。
+            for key, value in (
+                ("config_family", self._config_family),
+                ("config_generation", self._config_generation_id),
+                ("budget_generation", self._budget_generation),
+                ("config_effective_at", self._config_effective_at),
+                ("task_max_age_seconds", self._runtime_config.task_max_age_seconds),
+            ):
+                if key in queue_params:
+                    kwargs[key] = value
             # 死信守卫接线（Track B 契约）：队列类已支持 ``dead_letter_guard``
             # 参数才传入（并行合入期向后兼容——旧类不收该参数，TypeError 会
             # 炸掉 _get_task_queue 的全部调用方）。Track B 合入前守卫不生效，
@@ -4878,12 +4983,17 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # event/cancel/timeout 唤醒；运维升级后可从 DLQ 重放（ops-runbook）。
         # 也刻意跳过下方「节点重试预算耗尽 → 终态化」分支：版本拒收不是节点
         # 反复失败，不能据此把执行打成 error。
-        if getattr(task, "schema_rejected", False):
+        if getattr(task, "schema_rejected", False) or getattr(
+            task, "config_rejected", False
+        ):
             logger.error(
-                "执行 %s 的消息信封版本（%s）超出本 build 理解范围，拒收后不再"
-                "克隆恢复副本（克隆仍是同一版本，会自持循环）；放行死信一次: %s",
+                "执行 %s 的消息信封版本/配置代际（schema=%s, family=%s, budget=%s）"
+                "与本进程不兼容，拒收后不再克隆恢复副本（克隆继承同代际，会自持"
+                "循环）；放行死信一次: %s",
                 execution_id,
                 getattr(task, "schema_version", "?"),
+                getattr(task, "config_family", "?"),
+                getattr(task, "budget_generation", "?"),
                 getattr(task, "message_id", "?"),
             )
             return True
@@ -6072,11 +6182,23 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
     def _quota_defer_max(self) -> int:
         """超配额重投上限（env 可调，≥1）：达上限后带 quota_bypass 放行。"""
         raw = (os.environ.get("PLAITA_TENANT_QUOTA_DEFER_MAX") or "").strip()
+        if not raw:
+            return self.TENANT_QUOTA_DEFER_MAX
         try:
-            value = int(raw) if raw else 0
+            value = int(raw)
         except (TypeError, ValueError):
-            value = 0
-        return value if value >= 1 else self.TENANT_QUOTA_DEFER_MAX
+            logger.warning(
+                "PLAITA_TENANT_QUOTA_DEFER_MAX=%s 非法，回退默认 %s（B2R31-03）",
+                _redact_env_value(raw), self.TENANT_QUOTA_DEFER_MAX,
+            )
+            return self.TENANT_QUOTA_DEFER_MAX
+        if value < 1:
+            logger.warning(
+                "PLAITA_TENANT_QUOTA_DEFER_MAX=%s <1，回退默认 %s（不是无限延迟）",
+                value, self.TENANT_QUOTA_DEFER_MAX,
+            )
+            return self.TENANT_QUOTA_DEFER_MAX
+        return value
 
     def _defer_over_quota_start(self, task: Any, queue: Any, exc: Exception) -> bool:
         """超配额 start 的**延迟**（plaita#28）：重投尾部 + ack 原条。
@@ -6139,7 +6261,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # 若照跑则「停用」对运行面是 no-op。此处直接返回 = 消费循环 ack 丢弃
         # （留 pending 会被反复 XCLAIM 重投，无意义）。状态读 Redis 短视图，
         # 缺失/无客户端 = active（fail-open，见 tenant_status 模块）。
-        if not tenant_is_active(getattr(self, "redis_client", None), message_data.get("tenant_id")):
+        if not tenant_is_active(
+            getattr(self, "redis_client", None),
+            message_data.get("tenant_id"),
+            getattr(self, "_tenant_status_epoch", None),
+        ):
             logger.warning(
                 "租户 %s 已停用，丢弃任务 %s（flow=%s execution=%s）",
                 message_data.get("tenant_id") or "default",
@@ -6826,6 +6952,14 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             disk_blocked=bool(self.__dict__.get("_disk_guard_active")),
             active_tasks=getattr(self, "_active_task_count", 0) or 0,
             concurrency=getattr(self, "concurrency", 1) or 1,
+            config_family=getattr(self, "_config_family", None),
+            config_generation=getattr(self, "_config_generation_id", None),
+            budget_generation=getattr(self, "_budget_generation", None),
+            deployment_epoch=(
+                self._runtime_config.deployment_epoch
+                if getattr(self, "_runtime_config", None) is not None
+                else None
+            ),
         )
         return block
 
@@ -7298,6 +7432,17 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             "counter",
             "start/resume 载体年龄无法判定而 fail-closed 丢弃的次数（A69-04）",
         ))
+        # A2R31-02：租户状态纪元拒绝次数（进程内；Redis-only 恢复后非 default
+        # 租户被拒的直接信号）。
+        from plaita.server.tenant_status import tenant_stale_epoch_total
+
+        metrics.append(Metric(
+            "tenant_status_stale_epoch_total",
+            tenant_stale_epoch_total(),
+            {},
+            "counter",
+            "租户状态不属于当前部署纪元而被拒绝的次数（A2R31-02）",
+        ))
         # #42（W10-a）：容量指标与「派发侧看到的容量」同源（同一快照函数），
         # 否则看板与派发门会各报一套（口径分叉是最难查的一类事故）。
         try:
@@ -7387,23 +7532,37 @@ from plaita.server.factory import create_storage_component, create_event_bus  # 
 
 def main():
     """命令行入口程序"""
+    # B2R31-03：身份/安全/资源类非法值在启动期一次聚合、fail-fast；可选调优
+    # 类降级为 WARNING + 安全默认（不阻断，但绝不静默）。
+    preflight_warnings = []
+    try:
+        preflight_warnings = preflight_security_and_limits()
+        _runtime_cfg = load_runtime_config("worker", strict=True)
+    except ConfigError as exc:
+        print(f"配置预检失败，worker 拒绝启动：{exc}", file=sys.stderr)
+        raise SystemExit(2)
     # CLI 默认给控制台日志：库内 logger 无 handler，原样跑运维看到的是
     # 零输出（2026-09 分布式评审 P2-6）。--quiet / PLAITA_LOG_LEVEL 可调。
     logging.basicConfig(
         level=os.environ.get("PLAITA_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    log_config_effective(logger, _runtime_cfg)
+    # preflight 的 WARNING 发生在 logging.basicConfig 之前（NullHandler），
+    # 这里补打一次，确保可选调优降级在启动日志可见（B2R31-03）。
+    for warning in preflight_warnings:
+        logger.warning("配置预检：%s", warning)
     parser = argparse.ArgumentParser(description="Plaita流程工作器")
     
-    # Redis参数（支持环境变量 PLAITA_REDIS_URL / REDIS_URL）
+    # Redis参数（统一 resolver：PLAITA_REDIS_URL > REDIS_URL > 默认）
     parser.add_argument("--redis-url",
-                      default=os.environ.get("PLAITA_REDIS_URL", os.environ.get("REDIS_URL", "redis://localhost:6379/0")),
+                      default=resolve_redis_url("worker"),
                       help="Redis连接URL")
     parser.add_argument("--queue-name",
-                      default=os.environ.get("PLAITA_QUEUE_NAME", os.environ.get("QUEUE_NAME", "plaita:flow:queue")),
+                      default=resolve_queue_name("worker"),
                       help="Redis Stream 键名（任务队列，需 Redis 5+）")
     parser.add_argument("--consumer-group",
-                      default=os.environ.get("PLAITA_CONSUMER_GROUP", DEFAULT_CONSUMER_GROUP),
+                      default=resolve_consumer_group(),
                       help="Stream consumer group 名称")
     parser.add_argument("--consumer-name",
                       default=os.environ.get("PLAITA_CONSUMER_NAME"),
@@ -7418,7 +7577,7 @@ def main():
                       default=int(os.environ.get("PLAITA_MAX_DELIVERIES", str(DEFAULT_MAX_DELIVERIES))),
                       help="任务最大投递次数，超过后写入 DLQ 并 ack")
     parser.add_argument("--dlq-key",
-                      default=os.environ.get("PLAITA_DLQ_KEY"),
+                      default=resolve_dlq_key(resolve_queue_name("worker"), empty_policy="default"),
                       help="死信 Stream 键（默认 <queue-name>:dlq）")
     
     # 数据库参数

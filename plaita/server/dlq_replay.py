@@ -368,6 +368,21 @@ def replay_dead_letter(
         if max_schema_version is None
         else int(max_schema_version)
     )
+    # B2R31-01：replay 继承源代际（缺失/畸形 → legacy，绝不盖当前值）。
+    from plaita.runtime_config import normalize_generation
+
+    config_envelope = {
+        "config_family": normalize_generation(envelope.get("config_family"), kind="family"),
+        "config_generation": normalize_generation(
+            envelope.get("config_generation"), kind="generation"
+        ),
+        "budget_generation": normalize_generation(
+            envelope.get("budget_generation"), kind="budget"
+        ),
+    }
+    effective_at = envelope.get("config_effective_at")
+    if isinstance(effective_at, str) and effective_at.strip():
+        config_envelope["config_effective_at"] = effective_at.strip()
     if schema_version > limit:
         # 入队前拒绝：先入队再靠消费侧死信会让超版本副本（或 A49-01 克隆）
         # 继续污染 DLQ。
@@ -576,7 +591,8 @@ def replay_dead_letter(
         payload.setdefault("dedup_key", f"dlq-replay:{carrier_execution_id}")
     try:
         target_message_id = enqueue_task(
-            redis, target_stream, payload, schema_version=schema_version
+            redis, target_stream, payload,
+            schema_version=schema_version, **config_envelope,
         )
     except Exception as exc:  # noqa: BLE001 — 入队失败：撤销占位并具名返回
         logger.warning(

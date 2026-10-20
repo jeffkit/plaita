@@ -98,17 +98,21 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 
 | 变量 | 默认 | 读取时机 | 作用与 0/非法值 | 陷阱 |
 |---|---|---|---|---|
-| `PLAITA_REDIS_URL` / `REDIS_URL` | `redis://localhost:6379/0` | `startup` | Redis 连接；`PLAITA_REDIS_URL` 优先，`REDIS_URL` 兼容 fallback | URL 非法/不可达在连接期失败；console 不可达会进本地单档且**不会自动恢复** |
-| `PLAITA_QUEUE_NAME` | `plaita:flow:queue` | `startup` | worker 消费 / 事件过滤 / 调度派发的回退队列 | 多部署共用同一 Redis 时务必隔离；与 `PLAITA_CONSOLE_TASK_QUEUE` 不同源会打 WARNING |
-| `PLAITA_CONSUMER_GROUP` | `plaita-workers` | `startup` | consumer group | 改名等于换消费组，旧 pending 不再被本组回收 |
+| `PLAITA_REDIS_URL` / `REDIS_URL` | `redis://localhost:6379/0` | `startup` | Redis 连接；`PLAITA_REDIS_URL` 优先，`REDIS_URL` 兼容 fallback。worker / services / event_filter / schedule / console 全部走同一 resolver（B2R31-02） | 空串 = identity 配置错误，启动预检拒绝；URL 非法/不可达在连接期失败；console 不可达会进本地单档且**不会自动恢复** |
+| `PLAITA_QUEUE_NAME` / `QUEUE_NAME` | `plaita:flow:queue` | `startup` | worker 消费 / 事件过滤 / 调度派发的回退队列 | 空串启动预检拒绝（不再写空 Stream）；多部署共用同一 Redis 时务必隔离；与 `PLAITA_CONSOLE_TASK_QUEUE` 不同源会打 WARNING |
+| `PLAITA_CONSUMER_GROUP` | `plaita-workers` | `startup` | consumer group | 改名等于换消费组，旧 pending 不再被本组回收；空串拒绝 |
+| `PLAITA_CONSUMER_GROUP_START_ID` | `0` | `startup`（建组） | 新消费组起点；group 改名应设 `$`（不重放历史） | 新组在非空 Stream 上从 `0` 建立会 WARNING 列出将重放的条数 |
 | `PLAITA_CONSUMER_NAME` | instance_id / `worker-<pid>` | `startup` | 本实例 consumer 名 | 多实例不要手工设成同值 |
 | `PLAITA_CLAIM_MIN_IDLE_MS` | `60000` | `startup` | pending 可被回收的最短空闲（毫秒） | 过小会抢走兄弟 worker 处理中的任务；非整数启动 `ValueError` |
 | `PLAITA_LEASE_TTL_SECONDS` | `120` | `startup` | resume 租约 TTL（秒） | 非整数启动 `ValueError` |
-| `PLAITA_MAX_DELIVERIES` | `5` | `startup` | 超过后进 DLQ | 同时约束正常重投、DLQ 重复副本、定义重试三条路径；调大可能挤掉真实死信 |
+| `PLAITA_MAX_DELIVERIES` | `5` | `startup` | 超过后进 DLQ | 同时约束正常重投、DLQ 重复副本、定义重试三条路径；调大可能挤掉真实死信。消息信封带 `budget_generation` 后，改预算不会作用到旧代际的 PEL（留 pending + WARNING，见配置代际小节） |
+| `PLAITA_DEPLOYMENT_EPOCH` | `legacy` | `startup` | 部署纪元（`plaita:tenant_status:epoch` 的权威锚点） | 锚点在部署配置而非 Redis 快照，Redis-only 恢复不会把它一起回滚；空串启动预检拒绝 |
+| `PLAITA_TENANT_STATUS_RECONCILE_SECONDS` | `60` | `startup`（console lifespan） | 运行中租户状态周期对账；`0` = 关闭（启动 WARNING） | 关闭后 Redis-only 恢复的墓碑回滚只能靠 `POST /api/cluster/tenant-status/reconcile` 手动纠正 |
+| `PLAITA_TENANT_STATUS_EPOCH_STRICT` | unset（部署纪元存在时启用） | `startup` | 显式 `0` = 关闭 worker 的租户状态纪元闸（回滚到 #237 fail-open，启动 WARNING） | 关闭后旧快照里的 `active` 会再次放行已删租户 |
 | `PLAITA_EXECUTION_DEADLINE_SECONDS` | `1800` | `call`（每次执行） | 未配置任何 `flow.timeout` / `execution.timeout` / 调用期 timeout 时的执行级总预算（秒，支持小数）；到期抛 `ExecutionDeadlineError`，worker 不重试并终态化 error（#267） | 非数字/非有限/`<=0` 回退默认并 WARNING；env 写 `0` 不会变成“零预算”或“无限” |
 | `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` | `max(2592000, STATE_TTL)` | `call`（每次删除执行） | 执行删除墓碑 TTL（`plaita:exec_tombstone:{id}`） | `<=0` 非法：回退默认 + WARNING，不再表示永久；结果 clamp 到 `PLAITA_TASK_MAX_AGE_SECONDS`（墓碑不得先于年龄闸到期） |
 | `PLAITA_TASK_MAX_AGE_SECONDS` | `2592000`（30 天） | `call`（每次派发） | start/resume 载体最大年龄，超龄在派发时 ack + WARNING 丢弃 | 年龄取 payload `timestamp` 与 Redis Stream ID 时间的**最大值**；两者都不可判 → **fail-closed** 丢弃；`0` 关闭（启动 WARNING：墓碑到期后无兜底） |
-| `PLAITA_DLQ_KEY` | `<queue>:dlq` | `startup` | 死信 Stream | 改键后旧 DLQ 不再被读 |
+| `PLAITA_DLQ_KEY` | `<queue>:dlq` | `startup` | 死信 Stream | 空串启动预检拒绝；worker 的 effective 键写入 registry，删除租户时从 registry 收集（A2R31-08）；改键后旧 DLQ 不再被读 |
 | `PLAITA_EVENT_TTL_SECONDS` | `604800`（7 天） | `call`（每次写事件） | 事件记录/类型索引统一 TTL（console 发布、引擎 `store_event`、服务 resume 落盘同源） | 非法/`<=0` 回退默认并 WARNING；**不要**单独调短而不调整订阅寿命，否则手动唤醒事件会在挂起执行仍等待时先失效 |
 | `PLAITA_EVENT_INDEX_SWEEP_INTERVAL` | `60` | `ctor`（janitor 构造） | 事件/订阅索引 janitor 周期（秒） | 非法/`<=0` 回退默认并 WARNING；已有 janitor 不更新 |
 | `PLAITA_EVENT_INDEX_SWEEP_BUDGET` | `500` | `ctor`（janitor 构造） | 每 tick **每个存储**最多检查的索引成员数 | `<=0` 按 1 执行并 WARNING；预算语义是「检查数」而非「删除数」 |
@@ -125,33 +129,33 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 
 | 变量 | 默认 | 读取时机 | 作用与 0/非法值 | 陷阱 |
 |---|---|---|---|---|
-| `PLAITA_TENANT_MAX_RUNNING` | 未设 / `0` / 负 / 非法 = **不限** | `call`（每次 admit） | 每租户 start 并发上限；`plaita:tenant_quota` HASH 可按租户覆盖；console 超限 429，worker 对无名额外部消息延迟重投 | 0 不是“全拒”；HASH 值 0/负 = 该租户不限，**不会**回退 env |
+| `PLAITA_TENANT_MAX_RUNNING` | 未设 / `0` = 不限（WARNING）；负/非法 = 不限 + WARNING；启动预检拒绝负/非法 | `call`（每次 admit） | 每租户 start 并发上限；`plaita:tenant_quota` HASH 可按租户覆盖；console 超限 429，worker 对无名额外部消息延迟重投 | 0 不是“全拒”；HASH 值 0/负 = 该租户不限（WARNING），**不会**回退 env |
 | `PLAITA_TENANT_RUNNING_TTL_SECONDS` | `86400`；≤0/非法 → 86400 | `call`（每次 admit） | 名额条目 TTL，崩溃自愈 | 长于 TTL 的合法运行会提前让出名额 |
 | `PLAITA_TENANT_QUOTA_DEFER_MAX` | `64`；<1/非法 → 64 | `call`（每次 defer） | worker 超配额重投预算；达限带 `quota_bypass` 放行 | 放行是存活性优先，不是配额失效 |
-| `PLAITA_DLQ_MAX_LEN` | `1000`；非法 → 1000；**0/负 → 1** | `ctor`（队列构造，worker 启动） | 每次死信后 `XTRIM` 保留最近 N 条 | **0 不是关闭，只保留 1 条**；改值需重启；已有队列保留旧值 |
+| `PLAITA_DLQ_MAX_LEN` | `1000`；非法 → 1000 + WARNING；**0/负 → 1 + WARNING**；启动预检拒绝 ≤0 | `ctor`（队列构造，worker 启动） | 每次死信后 `XTRIM` 保留最近 N 条 | **0 不是关闭，只保留 1 条**；钳制必留 WARNING；改值需重启；已有队列保留旧值 |
 | `PLAITA_EXECUTION_STATE_TTL_DAYS` | `30`（2592000s）；≤0 → 0（关闭）；非法 → 30 | `call`（每次 save） | 仅终态（completed/error/cancelled）设 TTL；running/suspended 不设，保恢复 | 0/负是唯一明确的“关闭 TTL” |
 | `PLAITA_WORKER_CONCURRENCY` | `1`；非整数 → 启动 `ValueError`；`0`/负 → 构造时钳 1 | `startup`（argparse/构造） | N 个消费线程 | 非整数是原始 traceback 退出，不是友好告警；0/负不是“停用” |
 | `PLAITA_CAPACITY_STALE_SECONDS` | `90`；≤0/NaN/inf/非法 → 90 + WARNING | `call`（每次判定） | 容量快照新鲜期 | 0 回默认，不是关闭判定 |
 | `PLAITA_CONSOLE_DISPATCH_SHADOW` | `true`；`0/false/no/off`（大小写不敏感）→ false | `call`（每次 plan） | 只影响影子决策标签；真正入队是单独的 `dispatch_one` | 其他任何值（含拼写错误）都是 true |
-| `PLAITA_CONSOLE_TASK_QUEUE` | `plaita:flow:queue` | `call` | console 生产侧队列：手动启动 / 立即触发 / 容量派发 / 调度派发同源（A56-02） | 设为空串时手动启动/触发得到**空 Stream 键**，不是默认值；容量派发路径把空白视为默认；新旧并行时两处 env 必须一起改 |
+| `PLAITA_CONSOLE_TASK_QUEUE` | `plaita:flow:queue` | `call` | console 生产侧队列：手动启动 / 立即触发 / 容量派发 / 调度派发同源（A56-02/B2R31-02） | **空串 = 配置错误**（启动预检与四个读取点统一拒绝，不再得到空 Stream 键）；新旧并行时两处 env 必须一起改 |
 | `PLAITA_DISPATCH_LEDGER_KEY` | `plaita:dispatch:ledger` | `call` | 派发台账键 | 空白 → 默认；改键后旧台账不再被读 |
 | `PLAITA_DISPATCHER_ID` | 主机名 | `call` | 台账 actor 标识 | 空白 → 主机名；多实例同主机名会混账 |
 | `PLAITA_WORKER_LANGFUSE` | 未设；仅**精确 `1`** 开启 | `startup` | 初始化 LangfuseCallback | `true` 不生效；缺 extra/凭据只告警 |
 | `PLAITA_SANDBOX_LIFECYCLE` | `1`；仅**字节等于 `0`** 关闭 | `call`（每次装配 handler） | 挂载 plaita-nodes 沙箱生命周期回调 | `" 0 "`、`"false"`、`"00"` 都仍开启 |
 | `PLAITA_EXECUTION_EVENTS_PUBLISH` | `1`；仅**精确 `0`** 关闭 | `call`（每次发布） | SSE 实时事件发布 | `"false"`/`" 0 "`/`"00"` 仍发布 |
 | `PLAITA_EXECUTION_TIMELINE_MAX` | `500`；0/负 → 1；非法 → 500 + WARNING | `ctor`（callback 构造） | 每执行时间线事件环；超限丢最旧并计 `dropped` | 已有 callback 不更新；0 只留 1 条 |
-| `PLAITA_EVENT_RECONCILE_INTERVAL` | `300` | `ctor`（reconciler 构造） | 事件回扫周期（秒） | 非数字 → 构造 `ValueError`（无回退）；**0/负被接受 → `asyncio.sleep(0)` 紧环**，不是关闭 |
-| `PLAITA_EVENT_RECONCILE_BACKFILL` | `3600` | `ctor` | 启动/游标丢失回扫窗口（秒） | 非数字 → `ValueError`；0/负 = 空窗口/未来窗口，不是“全量回扫” |
+| `PLAITA_EVENT_RECONCILE_INTERVAL` | `300` | `ctor`（reconciler 构造） | 事件回扫周期（秒） | 非数字/0/负 → WARNING + 默认（启动预检拒绝）；不再接受紧环 |
+| `PLAITA_EVENT_RECONCILE_BACKFILL` | `3600` | `ctor` | 启动/游标丢失回扫窗口（秒） | 非数字 → WARNING + 默认；0 = 空窗口，不是“全量回扫” |
 | `PLAITA_WORKER_DENY_REPOS` | 未设；逗号分隔仓名 | `call`（每次 claim） | 命中仓的 start 不领/让出 | 逗号项会 trim；空项忽略 |
 | `PLAITA_WORKER_MIN_FREE_DISK_GIB` | 未设/`0` = 关闭；负 → 0；非法 → 0 + WARNING | `call`（每次 claim） | 低于守线不领取、空转重探、盘回线自动恢复 | 0 是关闭；非法值按关闭（有 WARNING）；支持小数 |
 | `PLAITA_WORKER_DISK_GUARD_PATH` | `.`（worker cwd） | `call`（每次 claim） | `os.statvfs` 探测点 | 须落在实际写入卷；空白 → `.` |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | `30`；负 → 0；非法 → 30 + WARNING | `call`（每次 drain） | 停止领取/停止等待的 **advisory** 上界（秒，支持小数）；超时后尽力 `cancel()` 在途执行 | **不是“节点中止”的上界**：步在进程退出前完成仍可能 ack；进程先退则消息留 pending，由其他 worker 从步界检查点续跑（那一步会重放） |
 | `PLAITA_NODE_PATH` | 未设；`os.pathsep` 分隔 | `startup` | 逐项 `sys.path.insert(0)` | 不校验目录存在 |
 | `PLAITA_NODE_MODULES` | 未设；逗号分隔模块 | `startup` | 逐个 import 并调 `register_all()`/`register()` | 失败 **ERROR + SystemExit**（worker 退出），不是跳过 |
-| `PLAITA_LOG_LEVEL` | `INFO` | `startup` | 根 logger 级别；`--quiet` 等价 WARNING | 非法级别 → `ValueError: Unknown level` traceback |
-| `PLAITA_INSTANCE_ID` | `<service_type>-<pid>` | `startup`（服务 CLI） | 注册表实例 id | 设为空串会得到空 id，不回退默认 |
-| `PLAITA_CHECK_INTERVAL` | `1`（秒） | `ctor`（ScheduleService） | 调度扫描周期 | 非数字 → 构造 `ValueError`；**0/负 → `Event.wait(0)` 紧环** |
-| `PLAITA_DELAY_QUEUE` | `plaita:delay:queue` | `ctor`（DelayService） | 延迟队列键族前缀（`:scheduled`/`:attempts`/`:dead` 派生） | env 优先于 `service_config`，即使空串；不 trim；空串得到空键 |
+| `PLAITA_LOG_LEVEL` | `INFO` | `startup` | 根 logger 级别；`--quiet` 等价 WARNING | 非法级别 → 启动预检具名拒绝（不再裸 `ValueError` traceback） |
+| `PLAITA_INSTANCE_ID` | `<service_type>-<pid>` | `startup`（服务 CLI/worker） | 注册表实例 id；worker 读取并与注册键同值（B2R31-02） | **空串拒绝**；未设才生成 |
+| `PLAITA_CHECK_INTERVAL` | `1`（秒） | `ctor`（ScheduleService） | 调度扫描周期 | 非数字/0/负 → WARNING + 默认（启动预检拒绝）；不再接受紧环 |
+| `PLAITA_DELAY_QUEUE` | `plaita:delay:queue` | `ctor`（DelayService） | 延迟队列键族前缀（`:scheduled`/`:attempts`/`:dead` 派生） | env 优先于 `service_config`；**空串拒绝**（不再得到空键），不 trim |
 
 ### 回滚开关（`strip()` 后等于 `1` 才生效）
 
@@ -243,13 +247,14 @@ busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超�
 
 | 变量 | `0`/负值实测 | 语义 |
 |---|---|---|
-| `PLAITA_DLQ_MAX_LEN` | 0 → 1，-5 → 1 | **不是关闭**；只保留 1 条死信 |
+| `PLAITA_DLQ_MAX_LEN` | 0 → 1 + WARNING，-5 → 1 + WARNING（启动预检拒绝） | **不是关闭**；只保留 1 条死信，钳制必须留痕 |
 | `PLAITA_CAPACITY_STALE_SECONDS` | 0/负 → 90 | 回默认，不是关闭判定 |
 | `PLAITA_EXECUTION_TIMELINE_MAX` | 0/负 → 1 | 不是关闭，只留 1 条事件 |
-| `PLAITA_HTTP_CONNECTOR_LIMIT` | 0/负 → 1 | 不是无限，反而最小 |
-| `PLAITA_HTTP_MAX_RESPONSE_BYTES` | 0/负 → 10MiB | 不是无限，回默认 |
-| `PLAITA_HTTP_DNS_TTL` | 0/负 → 0 | 唯一明确“0=关闭缓存”的 |
-| `PLAITA_TENANT_MAX_RUNNING` | 0/负 → 不限 | 0 不是全拒 |
+| `PLAITA_HTTP_CONNECTOR_LIMIT` | 0/负/非法 → 100 + WARNING | 回默认，不是无限 |
+| `PLAITA_HTTP_MAX_RESPONSE_BYTES` | 0/负/非法 → 10MiB + WARNING | 不是无限，回默认 |
+| `PLAITA_HTTP_DNS_TTL` | 0 → 关闭缓存；负/非法/nan/inf → 30 + WARNING | 0 是唯一明确“关闭缓存”的 |
+| `PLAITA_TENANT_MAX_RUNNING` | 0 → 不限 + WARNING；负/非法 → 不限 + WARNING（启动预检拒绝） | 0 不是全拒 |
+| `PLAITA_TENANT_STATUS_RECONCILE_SECONDS` | 0 → 关闭周期对账 + 启动 WARNING | 不是紧环；关闭后需手动 reconcile |
 | `PLAITA_TENANT_RUNNING_TTL_SECONDS` | 0/负 → 86400 | 回默认 |
 | `PLAITA_TENANT_QUOTA_DEFER_MAX` | 0/负 → 64 | 回默认 |
 | `PLAITA_EXECUTION_STATE_TTL_DAYS` | 0/负 → 0 | 明确关闭 TTL |
@@ -262,24 +267,58 @@ busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超�
 | `PLAITA_WORKER_CONCURRENCY` | 0/负 → 1 | 钳最小，不是关闭 |
 | `PLAITA_EXPR_*` | 0/负 → 默认 | 回默认 + WARNING |
 | `PLAITA_SANDBOX_TIMEOUT` / `_DOCKER_TIMEOUT` | 0/负 → import `ValueError` | 拒绝，不是无限 |
-| `PLAITA_SANDBOX_MEMORY_MB` | 0 = 不限；负值接受 | 负值没有报错，实际等同不限 |
+| `PLAITA_SANDBOX_MEMORY_MB` | 0 = 不限；负值/非数字 import `ConfigError` | 负值不再被接受（B2R31-03） |
+| `PLAITA_SANDBOX_DOCKER_CPUS` | 非有限正数 import `ConfigError` | 不再延迟到执行期失败 |
 | `PLAITA_WORKER_MIN_FREE_DISK_GIB` | 0 = 关闭；负 → 0 | 明确关闭 |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | 0 = 不等待；负 → 0 | 立即进入 force-stop；在途步若在进程退出前完成仍可 ack |
-| `PLAITA_EVENT_RECONCILE_INTERVAL` | 0/负被接受 | **紧环**（`asyncio.sleep(0)`），不是关闭 |
-| `PLAITA_EVENT_RECONCILE_BACKFILL` | 0/负被接受 | 回填窗口为空/未来，不是全量 |
-| `PLAITA_CHECK_INTERVAL` | 0/负被接受 | **紧环**（`Event.wait(0)`），不是停扫 |
+| `PLAITA_EVENT_RECONCILE_INTERVAL` | 0/负/非法 → 300 + WARNING（启动预检拒绝） | 不再接受紧环 |
+| `PLAITA_EVENT_RECONCILE_BACKFILL` | 0/负 → 默认 + WARNING | 回填窗口为空/未来，不是全量 |
+| `PLAITA_CHECK_INTERVAL` | 0/负/非法 → 1 + WARNING（启动预检拒绝） | 不再接受紧环 |
 | `PLAITA_BG_THREAD_WORKERS` / `_PROCESS_WORKERS` | 0/负 import 通过 | 首次建池运行期 `ValueError`，不是无限 |
 | `PLAITA_BG_STATE_MAX` | 0/负 import 通过 | 状态 LRU 立即淘汰，后台错误不可见 |
 
-### 非法值处理矩阵
+### 非法值处理矩阵 {#非法值处理矩阵}
+
+> A2R31 起，worker / console / services / event_filter 的进程入口先跑
+> `preflight_security_and_limits()` + `load_runtime_config(role, strict=True)`；
+> 下表是**统一口径**。库内/嵌入式调用用非 strict 模式：安全门 fail-closed，
+> 其余 WARNING + 安全默认。
 
 | 行为 | 变量 |
 |---|---|
-| **启动/导入期 fail-fast**（`ValueError`，进程退出） | `PLAITA_SANDBOX_TIMEOUT`、`PLAITA_SANDBOX_DOCKER_TIMEOUT`、`PLAITA_BG_THREAD_WORKERS`、`PLAITA_BG_PROCESS_WORKERS`、`PLAITA_BG_STATE_MAX`、`PLAITA_LOG_LEVEL`、`PLAITA_WORKER_CONCURRENCY`（非整数）、`PLAITA_EVENT_RECONCILE_INTERVAL/_BACKFILL`（非数字）、`PLAITA_CHECK_INTERVAL`（非数字）、`PLAITA_CONSOLE_PORT`（非整数）、`PLAITA_SANDBOX_ALLOWED_LANGUAGES/_BACKENDS`（未知值）、`PLAITA_CODE_BACKEND`（worker 路径未知值） |
-| **WARNING + 回退默认** | `PLAITA_DLQ_MAX_LEN`、`PLAITA_EXECUTION_STATE_TTL_DAYS`、`PLAITA_CAPACITY_STALE_SECONDS`、`PLAITA_EXECUTION_TIMELINE_MAX`、`PLAITA_WORKER_DRAIN_TIMEOUT`、`PLAITA_WORKER_MIN_FREE_DISK_GIB`、`PLAITA_EXPR_*`、`PLAITA_EXECUTION_DEADLINE_SECONDS`、`PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`、`PLAITA_TASK_MAX_AGE_SECONDS`、`PLAITA_EVENT_TTL_SECONDS`、`PLAITA_EVENT_INDEX_SWEEP_INTERVAL/_BUDGET`、`PLAITA_CONSOLE_RECONCILE_ORPHANS` |
-| **静默回退默认**（无 WARNING） | `PLAITA_TENANT_MAX_RUNNING`、`PLAITA_TENANT_RUNNING_TTL_SECONDS`、`PLAITA_TENANT_QUOTA_DEFER_MAX`、`PLAITA_HTTP_DNS_TTL`、`PLAITA_HTTP_CONNECTOR_LIMIT`、`PLAITA_HTTP_MAX_RESPONSE_BYTES` |
-| **运行期/执行期才失败** | `PLAITA_SANDBOX_DOCKER_MEMORY_MB`（0/负传给 docker）、`PLAITA_SANDBOX_DOCKER_CPUS`（任意字符串）、`PLAITA_SANDBOX_NODE_BIN`（缺失）、`PLAITA_BG_*_WORKERS=0/负`（首次建池）、`PLAITA_CODE_BACKEND`（直接 `register_code_node` 不传白名单） |
-| **接受任意值/仅特定值特殊** | `PLAITA_CONSOLE_ENV`、`PLAITA_CONSOLE_LANGFUSE`（未知值当开）、`PLAITA_INSTANCE_ID`（空串也接受）、`PLAITA_DELAY_QUEUE`（空串也接受）、`PLAITA_CONSOLE_TASK_QUEUE`（空串也接受） |
+| **启动/导入期 fail-fast**（聚合后一次退出） | `PLAITA_LOG_LEVEL`、`PLAITA_HTTP_BLOCK_PRIVATE`（未知布尔）、`PLAITA_SANDBOX_MEMORY_MB`（负/非数字）、`PLAITA_SANDBOX_DOCKER_CPUS`（非有限正数）、`PLAITA_CONSOLE_LANGFUSE`（非 auto/true/false）、`PLAITA_TENANT_MAX_RUNNING`（负/非数字）、`PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN`（未知布尔）、`PLAITA_EVENT_RECONCILE_INTERVAL` / `PLAITA_CHECK_INTERVAL`（0/负/非数字）、`PLAITA_MAX_DELIVERIES` / `PLAITA_LEASE_TTL_SECONDS` / `PLAITA_DLQ_MAX_LEN`（≤0/非数字）、`PLAITA_SANDBOX_TIMEOUT`、`PLAITA_SANDBOX_DOCKER_TIMEOUT`、`PLAITA_BG_*`、`PLAITA_CONSOLE_PORT`、`PLAITA_SANDBOX_ALLOWED_LANGUAGES/_BACKENDS`、`PLAITA_CODE_BACKEND`（worker 路径未知值） |
+| **空串 identity/routing fail-fast** | `PLAITA_QUEUE_NAME`、`QUEUE_NAME`、`PLAITA_CONSOLE_TASK_QUEUE`、`PLAITA_CONSUMER_GROUP`、`PLAITA_DLQ_KEY`、`PLAITA_REDIS_URL`、`REDIS_URL`、`PLAITA_CONSOLE_REDIS_URL`、`PLAITA_INSTANCE_ID`、`PLAITA_DELAY_QUEUE`、`PLAITA_DEPLOYMENT_EPOCH` |
+| **WARNING + 回退默认（绝不静默）** | `PLAITA_HTTP_MAX_RESPONSE_BYTES`、`PLAITA_HTTP_DNS_TTL`（拒绝 nan/inf）、`PLAITA_HTTP_CONNECTOR_LIMIT`、`PLAITA_HTTP_COOKIES`、`PLAITA_CONSOLE_DEBUG`、`PLAITA_DLQ_MAX_LEN`（≤0 钳 1）、`PLAITA_EXECUTION_STATE_TTL_DAYS`、`PLAITA_CAPACITY_STALE_SECONDS`、`PLAITA_EXECUTION_TIMELINE_MAX`、`PLAITA_WORKER_DRAIN_TIMEOUT`、`PLAITA_WORKER_MIN_FREE_DISK_GIB`、`PLAITA_EXPR_*`、`PLAITA_EXECUTION_DEADLINE_SECONDS`、`PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`、`PLAITA_TASK_MAX_AGE_SECONDS`、`PLAITA_EVENT_TTL_SECONDS`、`PLAITA_EVENT_INDEX_SWEEP_INTERVAL/_BUDGET`、`PLAITA_CONSOLE_RECONCILE_ORPHANS`、`PLAITA_TENANT_MAX_RUNNING`（运行期负/非法按不限）、`PLAITA_TENANT_RUNNING_TTL_SECONDS`、`PLAITA_TENANT_QUOTA_DEFER_MAX` |
+| **运行期/执行期才失败** | `PLAITA_SANDBOX_DOCKER_MEMORY_MB`（0/负传给 docker）、`PLAITA_SANDBOX_NODE_BIN`（缺失）、`PLAITA_BG_*_WORKERS=0/负`（首次建池）、`PLAITA_CODE_BACKEND`（直接 `register_code_node` 不传白名单） |
+| **接受任意值/仅特定值特殊** | `PLAITA_CONSOLE_ENV`、`PLAITA_SANDBOX_LIFECYCLE`/`PLAITA_EXECUTION_EVENTS_PUBLISH`/`PLAITA_WORKER_LANGFUSE`（legacy 精确 0/1）、`PLAITA_DISABLE_*`（strip 后等于 1） |
+
+### 配置代际（A2R31 / B2R31-01）
+
+worker 启动时计算并打印 `event=config.effective`，同时写入 registry metadata 与
+容量块：
+
+| 字段 | 生成 | 用途 |
+|---|---|---|
+| `config_family` | `cf1-` + sha256(queue/group/dlq/schema/namespace)[:12] | **硬兼容键**：两端都非 legacy 且不同 → 首投不执行、reclaim 不 XCLAIM，留 pending + WARNING |
+| `config_generation` | `cfg1-` + sha256(全部影响语义字段)[:12] | 机队一致性/控制面混跑视图；不含 `LOG_LEVEL` 等纯观测项 |
+| `budget_generation` | `bg1-` + sha256(max_deliveries/lease_ttl/task_max_age/dlq_max_len)[:12] | 预算变更不误判为消息不兼容；旧 PEL 留 pending 等 drain/匹配代际 |
+
+- 消息信封新增 `config_family` / `config_generation` / `budget_generation` /
+  `config_effective_at`；旧消费者忽略未知字段。重投/交接/克隆/DLQ replay
+  **继承源值**，缺失按 `legacy`（不 gate，不伪造当前值）。
+- 控制面：`GET /api/cluster/config` 返回 console 的派生哈希；`GET
+  /api/cluster/instances` 显示每个外部实例的三维代际；`/api/services` 的
+  worker metadata 含同样字段。
+- **指标**：`queue_config_family_mismatch_total`、`queue_config_legacy_total`、
+  `queue_config_budget_stale_total`、`tenant_status_stale_epoch_total`。
+- **迁移**：queue/group/DLQ 改名仍需 drain；新消费组对已存在 Stream 用
+  `PLAITA_CONSUMER_GROUP_START_ID=$` 避免重放。family 不匹配的消息会留 pending，
+  需要匹配代际的 worker 或迁移 runbook 处理，不会无限烧 delivery。
+- **租户状态纪元**：console 每次状态写入/对账都刷新
+  `plaita:tenant_status:epoch`（值来自 `PLAITA_DEPLOYMENT_EPOCH`）。worker
+  发现 Redis epoch 缺失/更旧 → 非 default 租户拒绝、default 保持 #237
+  fail-open；Redis epoch 更新 → 本 worker 拒绝。运行中恢复后可用
+  `POST /api/cluster/tenant-status/reconcile` 立即纠正，或等周期对账。
 
 ### 五个最容易踩的坑
 
@@ -287,10 +326,12 @@ busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超�
    `EXECUTION_TIMELINE_MAX=0` 只留 1 条、`BG_*_WORKERS=0` 运行期炸。
 2. **“精确 `0`/`1`”与 `strip` 不是一回事**：`EXECUTION_EVENTS_PUBLISH`/
    `SANDBOX_LIFECYCLE`/`WORKER_LANGFUSE` 是精确匹配；`DISABLE_*` 会 `strip`；
-   `ALLOW_INSECURE_ADMIN` 会 `lower` 但不 `strip`。不要把 `false` 当通用关闭值。
-3. **空串不等于未设**：`PLAITA_CONSOLE_TASK_QUEUE=`（手动启动/触发路径）、
-   `PLAITA_DELAY_QUEUE=`、`PLAITA_INSTANCE_ID=` 会得到空键/空 id；确认不需要该
-   变量时请 `unset`，不要留空值。
+   `ALLOW_INSECURE_ADMIN`/`HTTP_BLOCK_PRIVATE`/`HTTP_COOKIES` 自 A2R31 起走
+   strict bool（`1/true/yes/on` 与 `0/false/no/off`，`strip().lower()`）。
+3. **空串 identity 值 = 配置错误**：`PLAITA_CONSOLE_TASK_QUEUE=`、
+   `PLAITA_DELAY_QUEUE=`、`PLAITA_INSTANCE_ID=`、`PLAITA_QUEUE_NAME=`、
+   `PLAITA_DLQ_KEY=` 等自 A2R31 起启动预检拒绝，不再得到空键/空 id；确认不需要
+   该变量时请 `unset`，不要留空值。
 4. **`import`/`ctor` 组改 env 不重启等于没改**：sandbox、expr、BG、`LOOP` 是 import
    期；DLQ、timeline、reconciler、schedule/delay 服务是构造期。只有 `call` 组能
    进程内热改。

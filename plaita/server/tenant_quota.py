@@ -38,7 +38,7 @@ import logging
 import os
 import time
 from typing import Optional
-from plaita.core.url_redaction import _scrub_exception_text
+from plaita.core.url_redaction import _scrub_exception_text, _redact_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +82,23 @@ def tenant_running_key(tenant_id: Optional[str]) -> str:
 
 def _running_entry_ttl_seconds() -> float:
     raw = os.environ.get(TENANT_RUNNING_TTL_ENV, "")
+    if not raw:
+        return float(DEFAULT_RUNNING_TTL_SECONDS)
     try:
-        ttl = float(raw) if raw else 0.0
+        ttl = float(raw)
     except (TypeError, ValueError):
-        ttl = 0.0
-    return ttl if ttl > 0 else float(DEFAULT_RUNNING_TTL_SECONDS)
+        logger.warning(
+            "%s=%s 非法，回退默认 %s 秒（B2R31-03：不静默）",
+            TENANT_RUNNING_TTL_ENV, _redact_env_value(raw), DEFAULT_RUNNING_TTL_SECONDS,
+        )
+        return float(DEFAULT_RUNNING_TTL_SECONDS)
+    if ttl <= 0:
+        logger.warning(
+            "%s=%s ≤0，回退默认 %s 秒（不是永久/TTL 关闭）",
+            TENANT_RUNNING_TTL_ENV, ttl, DEFAULT_RUNNING_TTL_SECONDS,
+        )
+        return float(DEFAULT_RUNNING_TTL_SECONDS)
+    return ttl
 
 
 def tenant_max_running(redis_client, tenant_id: Optional[str]) -> Optional[int]:
@@ -108,16 +120,39 @@ def tenant_max_running(redis_client, tenant_id: Optional[str]) -> Optional[int]:
         try:
             value = int(raw.decode() if isinstance(raw, bytes) else raw)
         except (TypeError, ValueError):
+            logger.warning(
+                "租户 %s 的配额覆盖值 %r 非法，按不限处理（B2R31-03：不静默）",
+                tenant_id or "default", _redact_env_value(raw),
+            )
             return None
-        return value if value > 0 else None
+        if value <= 0:
+            logger.warning(
+                "租户 %s 的配额覆盖值 %s ≤0，按不限处理（0=不限；全拒请用 disabled）",
+                tenant_id or "default", value,
+            )
+            return None
+        return value
     raw = os.environ.get(TENANT_RUNNING_ENV, "")
     if not raw:
         return None
+    from plaita.runtime_config import ConfigError, parse_int
+
     try:
-        value = int(raw)
-    except (TypeError, ValueError):
+        value = parse_int(raw, TENANT_RUNNING_ENV, minimum=0)
+    except ConfigError as exc:
+        # 启动预检会 fail-fast；库内/运行期按「不限」继续但必须 loud，绝不静默。
+        logger.warning(
+            "%s；按不限处理（启动预检会拒绝该配置，B2R31-03）",
+            _scrub_exception_text(exc),
+        )
         return None
-    return value if value > 0 else None
+    if value == 0:
+        logger.warning(
+            "%s=0：文档语义为「不限」（非「全拒」）；如需全拒请用租户 disabled",
+            TENANT_RUNNING_ENV,
+        )
+        return None
+    return value
 
 
 def _purge_expired(redis_client, key: str, now: float) -> None:

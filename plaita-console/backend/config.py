@@ -82,19 +82,28 @@ class Settings(BaseModel):
 
 def get_settings() -> Settings:
     """获取配置实例"""
+    from plaita.runtime_config import (
+        optional_bool_env,
+        resolve_redis_url,
+        security_bool_env,
+    )
+
     return Settings(
-        redis_url=os.getenv("PLAITA_CONSOLE_REDIS_URL", "redis://localhost:6379/0"),
+        redis_url=resolve_redis_url("console"),
         host=os.getenv("PLAITA_CONSOLE_HOST", DEFAULT_HOST),
         port=int(os.getenv("PLAITA_CONSOLE_PORT", "8080")),
-        debug=os.getenv("PLAITA_CONSOLE_DEBUG", "false").lower() == "true",
+        # B2R31-03：strict bool（1/true/yes/on；0/false/no/off）；非法值
+        # WARNING + 安全默认，不再把 "1" 静默当 False。
+        debug=optional_bool_env("PLAITA_CONSOLE_DEBUG", False),
         db_url=os.getenv("PLAITA_CONSOLE_DB_URL", "sqlite:///./plaita_console.db"),
         secret_id=os.getenv("PLAITA_CONSOLE_SECRET_ID", ""),
         secret_key=os.getenv("PLAITA_CONSOLE_SECRET_KEY", ""),
         admin_api_key=os.getenv("PLAITA_CONSOLE_ADMIN_API_KEY", ""),
-        allow_insecure_admin=os.getenv(
-            "PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN", "false"
-        ).lower()
-        == "true",
+        # 安全门：非法值 fail-closed（False）+ WARNING；启动预检会拒绝该配置。
+        allow_insecure_admin=security_bool_env(
+            "PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN", default=False,
+            fail_closed=False,
+        ),
         console_env=os.getenv("PLAITA_CONSOLE_ENV", "dev"),
         copilot_brain=os.getenv("PLAITA_CONSOLE_COPILOT_BRAIN", "flow_agent"),
         recursive_agui_url=os.getenv("PLAITA_CONSOLE_RECURSIVE_AGUI_URL", ""),

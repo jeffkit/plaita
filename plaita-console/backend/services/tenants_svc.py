@@ -19,7 +19,7 @@ import re
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import delete, func, select
 
@@ -273,6 +273,21 @@ def _disable_tenant_schedules(store, tenant_id: str, redis_client) -> None:
         )
 
 
+def _deployment_epoch() -> Optional[str]:
+    """部署纪元（A2R31-02）：``PLAITA_DEPLOYMENT_EPOCH``，未设 = legacy。"""
+    raw = os.environ.get("PLAITA_DEPLOYMENT_EPOCH")
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        logger.warning(
+            "PLAITA_DEPLOYMENT_EPOCH 为空（identity 配置错误）；本次状态写入"
+            "不写纪元，worker 的 epoch 闸无法生效（启动预检会拒绝该配置）"
+        )
+        return None
+    return value
+
+
 def _publish_status(redis_client, tenant_id: str, status: str) -> None:
     if redis_client is None:
         return
@@ -280,7 +295,9 @@ def _publish_status(redis_client, tenant_id: str, status: str) -> None:
         from plaita.server.tenant_status import publish_tenant_status
     except ImportError:
         return
-    publish_tenant_status(redis_client, tenant_id, status)
+    publish_tenant_status(
+        redis_client, tenant_id, status, epoch=_deployment_epoch()
+    )
 
 
 def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
@@ -307,12 +324,16 @@ def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
         from plaita.server.tenant_status import (
             TENANT_STATUS_KEY,
             publish_tenant_status,
+            publish_tenant_status_epoch,
         )
     except ImportError:
         return summary
+    # A2R31-02：对账同时刷新部署纪元；锚点在部署配置，不在 Redis 快照里。
+    epoch = _deployment_epoch()
+    publish_tenant_status_epoch(redis_client, epoch)
     known = {t["id"]: t["status"] for t in list_tenants(store)}
     for tenant_id, status in known.items():
-        publish_tenant_status(redis_client, tenant_id, status)
+        publish_tenant_status(redis_client, tenant_id, status, epoch=epoch)
         summary["published"] += 1
 
     try:
@@ -753,6 +774,25 @@ def _tenant_dlq_names(redis_client) -> List[str]:
             names.append(value)
 
     _add(os.getenv("PLAITA_DLQ_KEY"))
+    # B2R31-02/A2R31-08：worker 的自定义 DLQ 键可能来自 cluster service env
+    # （console 进程看不到）；registry metadata 是唯一跨进程来源。续期中的
+    # worker 心跳会持续刷新该字段。
+    if redis_client is not None:
+        try:
+            for raw_key in redis_client.scan_iter("plaita:registry:flow_worker:*"):
+                try:
+                    raw = redis_client.get(raw_key)
+                    info = json.loads(raw) if raw else {}
+                except Exception:  # noqa: BLE001 — 单个坏注册项跳过
+                    continue
+                metadata = info.get("metadata") if isinstance(info, dict) else None
+                if isinstance(metadata, dict):
+                    _add(metadata.get("dlq_key"))
+        except Exception as exc:  # noqa: BLE001 — 清理集合是尽力而为，但 loud
+            logger.warning(
+                "读取 worker registry 的 DLQ 键失败（可能漏清自定义 DLQ）: %s",
+                _scrub_exception_text(exc),
+            )
     for base in _tenant_queue_names(redis_client):
         _add(f"{base}{_DLQ_SUFFIX}")
     if redis_client is not None:

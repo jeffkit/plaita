@@ -46,10 +46,29 @@ def main():
     # 五个扩展服务全域静默（运维实证：systemd 日志文件 0 字节，2026-10-07）。
     # 与 flow_worker.main() 同款修法（2026-09 分布式评审 P2-6 的漏修面）：
     # level 取 PLAITA_LOG_LEVEL 缺省 INFO，输出仍交 systemd/容器侧收集。
+    from plaita.runtime_config import (
+        ConfigError,
+        load_runtime_config,
+        log_config_effective,
+        preflight_security_and_limits,
+        resolve_instance_id,
+        resolve_redis_url,
+    )
+
+    preflight_warnings = []
+    try:
+        preflight_warnings = preflight_security_and_limits()
+        runtime_cfg = load_runtime_config("services", strict=True)
+    except ConfigError as exc:
+        print(f"配置预检失败，服务拒绝启动：{exc}", file=sys.stderr)
+        raise SystemExit(2)
     logging.basicConfig(
         level=os.environ.get("PLAITA_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    log_config_effective(logger, runtime_cfg)
+    for warning in preflight_warnings:
+        logger.warning("配置预检：%s", warning)
     parser = argparse.ArgumentParser(description='Plaita 扩展服务启动器')
     parser.add_argument(
         'service_type',
@@ -58,8 +77,8 @@ def main():
     )
     parser.add_argument(
         '--redis-url',
-        default=os.environ.get('PLAITA_REDIS_URL', os.environ.get('REDIS_URL', 'redis://localhost:6379/0')),
-        help='Redis 连接 URL'
+        default=resolve_redis_url("services"),
+        help='Redis 连接 URL（PLAITA_REDIS_URL > REDIS_URL）'
     )
     
     args = parser.parse_args()
@@ -81,8 +100,8 @@ def main():
     # 创建事件总线
     event_bus = RedisEventBus(redis_url=redis_url)
     
-    # 获取实例 ID
-    instance_id = os.environ.get('PLAITA_INSTANCE_ID', f'{args.service_type}-{os.getpid()}')
+    # 获取实例 ID（B2R31-02：注入值与注册键同源；空串由预检拒绝）
+    instance_id = resolve_instance_id() or f'{args.service_type}-{os.getpid()}'
     
     # 创建服务配置
     service_config = {

@@ -174,6 +174,24 @@ async def lifespan(app: FastAPI):
     set_current_tenant(DEFAULT_TENANT_ID, source=TENANT_SOURCE_EXPLICIT)
     settings = get_settings()
 
+    # B2R31-03：console 启动预检（身份/安全/资源类非法值 fail-fast；可选调优
+    # WARNING+安全默认）。与 worker 同口径，杜绝「console rc=0 / worker rc=1」。
+    try:
+        from plaita.runtime_config import (
+            ConfigError,
+            load_runtime_config,
+            log_config_effective,
+            preflight_security_and_limits,
+        )
+
+        preflight_security_and_limits()
+        runtime_config = load_runtime_config("console", strict=True)
+    except ConfigError as exc:
+        logger.error("配置预检失败，console 拒绝启动：%s", exc)
+        raise
+    log_config_effective(logger, runtime_config)
+    app.state.runtime_config = runtime_config
+
     # A69-04：启动期保留期配置校验（每进程一次）。墓碑 TTL 现在独立于 state
     # TTL，``<=0`` 不再表示永久；可疑配置（年龄闸关闭/显式墓碑过短/非法回退）
     # 只 WARNING 不阻断启动，但必须可观测。
@@ -275,6 +293,23 @@ async def lifespan(app: FastAPI):
     # plaita-console/scripts/sync_published_to_engine.py 对齐。见 engine_sync 模块
     # docstring 的「边界」段。失败仅 warning。
     if not local_mode and redis_client is not None:
+        # B2R31-02：跨进程配置漂移预检（queue/redis/dlq/instance id）。
+        # fail-open：只 WARNING + app.state.config_drift，不阻断启动。
+        try:
+            try:
+                from .services import config_drift
+            except ImportError:
+                from services import config_drift  # type: ignore
+            drift = config_drift.preflight_config_drift(redis_client)
+            app.state.config_drift = drift
+            if drift.get("drift"):
+                logger.warning(
+                    "配置漂移预检：%s 项（workers=%s），详见 /health 与日志",
+                    len(drift["drift"]), drift.get("workers"),
+                )
+        except Exception as exc:  # noqa: BLE001 — 预检不得阻断启动
+            app.state.config_drift = {"status": "degraded", "error": str(exc)[:300]}
+            logger.warning("配置漂移预检失败（不阻断启动）: %s", exc)
         app.state.engine_sync = {"status": "running"}
         try:
             try:
@@ -314,6 +349,7 @@ async def lifespan(app: FastAPI):
             status_reconcile = tenants_svc.publish_all_tenant_status(
                 redis_client, app.state.store
             )
+            app.state.tenants_svc = tenants_svc
             logger.info(
                 "租户状态对账：published=%s disabled_stale=%s failed=%s",
                 status_reconcile.get("published"),
@@ -328,6 +364,50 @@ async def lifespan(app: FastAPI):
                 )
         except Exception as e:  # noqa: BLE001 — 不得阻断启动
             logger.warning("租户状态对账失败（忽略，不阻断启动）: %s", e)
+
+        # A2R31-02：运行中周期对账（默认 60s；0=关闭但启动 WARNING）。
+        # 启动对账只覆盖「恢复发生在启动前」；Redis-only 恢复可能发生在运行中，
+        # 没有周期对账就会把 disabled 墓碑回滚成 active 且永久无人纠正。
+        tenants_svc = getattr(app.state, "tenants_svc", None)
+        interval = float(
+            getattr(runtime_config, "tenant_status_reconcile_seconds", 60.0)
+        )
+        if interval > 0 and tenants_svc is not None:
+            import threading
+
+            stop_event = threading.Event()
+            app.state.tenant_status_reconcile_stop = stop_event
+
+            def _reconcile_loop():
+                while not stop_event.wait(interval):
+                    try:
+                        summary = tenants_svc.publish_all_tenant_status(
+                            app.state.redis, app.state.store
+                        )
+                    except Exception as exc:  # noqa: BLE001 — 下轮重试，必须 loud
+                        logger.warning(
+                            "租户状态周期对账失败（下轮重试）: %s", exc
+                        )
+                        continue
+                    if summary.get("disabled_stale") or summary.get("failed"):
+                        logger.warning(
+                            "租户状态周期对账：published=%s disabled_stale=%s failed=%s",
+                            summary.get("published"),
+                            summary.get("disabled_stale"),
+                            summary.get("failed"),
+                        )
+
+            threading.Thread(
+                target=_reconcile_loop,
+                name="tenant-status-reconcile",
+                daemon=True,
+            ).start()
+            logger.info("租户状态周期对账已启用：每 %.1fs（A2R31-02）", interval)
+        elif interval <= 0:
+            logger.warning(
+                "PLAITA_TENANT_STATUS_RECONCILE_SECONDS=0：租户状态周期对账已关闭；"
+                "运行中 Redis-only 恢复的墓碑回滚不会被自动纠正（A2R31-02）"
+            )
 
     # HMAC 重放保护：本地档（Redis 不可达）直接配进程内存档；集群档配 Redis
     # nonce store（enable_replay_protection 内部会 ping 一次，连不上同样降级
@@ -356,6 +436,11 @@ async def lifespan(app: FastAPI):
     except ImportError:
         from services import local_scheduler  # type: ignore
     local_scheduler.stop_scheduler_loop()
+
+    # A2R31-02：先停周期对账线程，再断 Redis（线程不得在收尾期间回写）。
+    stop_event = getattr(app.state, "tenant_status_reconcile_stop", None)
+    if stop_event is not None:
+        stop_event.set()
 
     # 关闭时断开 Redis 连接（关当前绑定：集群切换后 redis_client 全局已过时）
     logger.info("关闭 Redis 连接")
