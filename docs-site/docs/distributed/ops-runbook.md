@@ -215,7 +215,7 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_CONSOLE_HOST` | `127.0.0.1` | `startup`（`run_server`） | 监听地址 | 非回环打 WARNING（#208）；**官方容器 CMD 硬编码 `--host 0.0.0.0`，此 env 不生效且无告警**（A58-01） |
 | `PLAITA_CONSOLE_PORT` | `8080` | `startup`（`run_server`/容器 CMD） | 监听端口 | 非整数 → `get_settings()` `ValueError`（import app 时） |
 | `PLAITA_CONSOLE_REDIS_URL` | `redis://localhost:6379/0` | `startup`（lifespan） | Redis 连接；不可达 → 本地单机模式 | 降级是**永久**的；运行中恢复 Redis 需重启 |
-| `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | `startup`（`init_engine` 一次） | 流程/版本/执行历史 SQLAlchemy URL | 凭据密钥文件目录由它推导；官方 compose 默认无持久卷 |
+| `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | `startup`（`init_engine` 一次） | 流程/版本/执行历史 SQLAlchemy URL | 凭据文件/密钥目录由它推导；**相对 URL 按各进程 cwd 解析**，PG/未设置/内存库回退 cwd 并打 WARNING（A67-04）；官方 compose 默认无持久卷 |
 | `PLAITA_CONSOLE_ENV` | `dev` | `request` / 每次发布 | 环境标识；仅精确 `prod` 时删除需 admin | 其他值（test/staging）无额外语义 |
 | `PLAITA_CONSOLE_ADMIN_API_KEY` | `""` | `request`（`get_settings`） | 管理面 API Key | 空且未 `ALLOW_INSECURE_ADMIN` → 管理 API 503 |
 | `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN` | `false` | `request` | 显式允许无管理 Key（仅本地开发） | 仅 `.lower()=="true"`；`" true "`/`1`/`yes`/`on` **不**生效 |
@@ -225,11 +225,19 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_CONSOLE_NODE_MODULES` | 未设；逗号分隔 | `startup`（import） | 加载业务节点并注册 CodeNode | 失败 WARNING（console 不退出），流程运行期才报未知节点 |
 | `PLAITA_CONSOLE_NODE_PATH` | 未设；`os.pathsep` | `startup`（import） | 逐项插 `sys.path` | 不校验目录存在 |
 | `PLAITA_CONSOLE_LANGFUSE` | `auto` | `call`（每次执行） | `false` 强制关；`true` 强制开；`auto` 配了 `LANGFUSE_PUBLIC_KEY` 才开 | **未知值（如 `bogus`）也当开**；拼写错误的 fail-open 方向是“多采集/多出网” |
-| `PLAITA_CREDENTIALS_FILE` | `.plaita-credentials.json` | `call`（每次读/写） | 引擎/console 凭据文件；console 按租户写旁文件 | 空文件 → `CredentialStoreCorruptError`，不是空 store |
+| `PLAITA_CREDENTIALS_FILE` | SQLite：DB 同目录；非 SQLite/无 DB env：cwd（WARNING） | `call`（每次读/写） | 引擎/console 凭据文件；console 按租户写旁文件 | 未显式设置且无法推断共享目录 → 回退 cwd + WARNING（A67-04）；**多副本必须绝对路径**；空文件 → `CredentialStoreCorruptError`，不是空 store |
 | `PLAITA_CREDENTIALS_KEY` | 未设 | `call`（每次加解密） | 内联 Fernet key，优先于文件 | 非法 key → 使用时 `CredentialError`；不要传给子进程 |
-| `PLAITA_CREDENTIALS_KEY_FILE` | console：DB 同目录；引擎：cwd | `call`（每次加解密） | 密钥文件路径 | console 首次自动生成 0600；引擎缺文件 fail-closed |
+| `PLAITA_CREDENTIALS_KEY_FILE` | console：DB 同目录；引擎：cwd（WARNING） | `call`（每次加解密） | 密钥文件路径 | console 首次用 `O_EXCL` 直接以 0600 创建；存量 0644 在启动对账/读取时收紧 + WARNING（A67-05）；引擎缺文件 fail-closed |
 | `PLAITA_PROJECT_ROOT` | 未设 | `startup`（writefile jail 应用） | jail 默认根的第一候选（`PLAITA_NODES_WORKSPACE_ROOT` 优先） | 落在引擎 checkout 内会上溯到父目录；`/` 不构成边界 |
 | `PLAITA_PYTHON` | 未设 | `launch`（每次拉起服务进程） | 覆盖 `service_manager` 的 `cmd[0]`（业务 venv 解释器） | 从 `process_env` 读（全局 env 或 `services.*.env`）；不校验存在性 |
+
+**凭据导出对账边界（当前定案）**：对账只在 console 启动时执行一次，不是周期
+任务；没有对应租户的旁文件/凭据行只记 WARNING、不自动删除或隔离（B67-01，
+自动收敛留给 owner 裁决）；SIGKILL 落在「导出成功→提交 DB」之间留下的鬼凭据
+最长到下一次重启、同租户写或显式 `DELETE` 才收敛（B67-02）；对账在 SQLite
+写锁内逐租户做文件 I/O，慢盘/万级租户 + 滚动重启的第二个实例可能撞 5s
+busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超时。详见
+[console 配置文档](../guide/console.md) 的「凭据」一节。
 
 ### `0` 值语义速查（不要用一个“0=关闭”概括）
 

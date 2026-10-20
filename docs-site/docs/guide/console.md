@@ -168,29 +168,60 @@ DB 文件里还有 `local_executions.input_json/context_json`（执行 params �
 `__plaita_meta__` 版本头（`key_id`/格式版本），引擎读侧忽略该保留键。
 
 **导出文件默认与 DB 同目录**：未显式设置 `PLAITA_CREDENTIALS_FILE` 时，
-SQLite 部署导出到 DB 同目录的 `.plaita-credentials.json`（非 SQLite 回退
-当前工作目录）。导出文件是 DB 的派生缓存，按 DB 路径落盘让**同一 DB 的
-多个 console/worker 副本共享同一份文件**；不再各按 cwd 持有一份互不收敛的
-副本（否则一个副本删除/轮换凭据，其他副本的引擎仍能解出旧值）。引擎侧
-`plaita.credentials` 用同一规则解析默认路径与密钥文件。
+SQLite 部署导出到 DB 同目录的 `.plaita-credentials.json`。以下情形无法推断
+共享目录，按历史语义回退**当前工作目录**并打一次性 WARNING（A67-04）：
+未设置 `PLAITA_CONSOLE_DB_URL`、URL 非 `sqlite:///`（PG/MySQL 等）、内存
+SQLite；相对 SQLite URL（如 `sqlite:///./x.db`）即使两端字符串相同也会按
+各自进程 cwd 解析，同样 WARNING。回退只保证单进程可用——升级后忘记注入
+DB env 的 worker 会继续读旧 cwd 文件，并能解出已吊销/已轮换的旧值，因此
+**不能把该 WARNING 当噪音**。导出文件是 DB 的派生缓存，按 DB 路径落盘让
+**同一 DB 的多个 console/worker 副本共享同一份文件**；不再各按 cwd 持有
+一份互不收敛的副本（否则一个副本删除/轮换凭据，其他副本的引擎仍能解出
+旧值）。引擎侧 `plaita.credentials` 用同一规则解析默认路径与密钥文件。
 
 - **多副本部署**：共享同一 SQLite DB 的副本无需额外配置；独立启动的
-  worker 需能读到同一 `PLAITA_CONSOLE_DB_URL` 才能解析到 DB 同目录（console
-  拉起的 worker 会自动注入绝对路径）。PostgreSQL 等无法从 DB URL 推断共享
-  目录的后端，**必须**给所有 console/worker 显式注入同一绝对路径的
-  `PLAITA_CREDENTIALS_FILE`（并确保该路径持久化/挂卷）。
+  worker 需能读到同一 `PLAITA_CONSOLE_DB_URL` 的**绝对路径**才能解析到
+  DB 同目录（console 拉起的 worker 会自动注入绝对路径）。PostgreSQL 等无法
+  从 DB URL 推断共享目录的后端，**必须**给所有 console/worker 显式注入同一
+  绝对路径的 `PLAITA_CREDENTIALS_FILE` 与 `PLAITA_CREDENTIALS_KEY_FILE`
+  （并确保该路径持久化/挂卷）。相对 URL 不满足「同一 URL」：各进程会按
+  自己的 cwd 打开不同 DB。
+- **升级迁移（旧版本 → 当前版本）**：先看 console/worker 启动日志是否出现
+  「凭据…默认回退到当前工作目录」WARNING。若有，把旧 cwd 的
+  `.plaita-credentials.json` / `.plaita-credentials.key` 迁移到 DB 同目录
+  （或显式绝对路径）后删除旧副本；只改 DB URL 不够，独立 worker 也必须
+  拿到同一绝对路径。旧 cwd 文件留在原处不会自动清理，其里已删除/已轮换的
+  值会持续可被该 cwd 的进程解出。
 - **容器部署**：DB 同目录若在容器内且未挂卷，重启会丢文件；启动对账会从
   DB 重建，但请仍把该目录挂持久卷以避免窗口期。
 - **启动对账**：console 启动时以 DB 为权威重建缺失的导出文件、刷新陈旧
   内容（含进程在「导出成功→提交 DB」间被杀留下的条目），并对没有对应租户
   的旁文件记 WARNING。对账写入失败会**拒绝启动**，不让引擎带着缺失/陈旧
   的密钥继续跑。租户删除/同名重建会清掉同 slug 的凭据行与导出文件，新租户
-  不会继承前代密钥。
+  不会继承前代密钥。边界（当前定案，自动收敛**不做**）：
+  - **孤儿侧车只告警**：没有对应租户行的旁文件/凭据行只记 `extra_files` /
+    `orphan_tenants` WARNING，不自动删除或隔离——可能是手工放置的共享密钥，
+    自动收敛需 owner 裁决（B67-01）。需要清理时用对应的 `DELETE` 租户
+    凭据入口或人工移走文件。
+  - **对账只在启动时**：没有周期对账；SIGKILL 落在「导出成功→提交 DB」间
+    留下的鬼凭据/落后文件，最长到下一次重启、同租户写或显式 `DELETE` 才
+    收敛。长期不重启的部署请把「重启 console」写进凭据轮换/泄露处置步骤
+    （B67-02）。
+  - **慢盘/滚动重启**：对账在 SQLite 写锁内逐租户做文件 I/O；租户数极多或
+    DB 目录在 NFS/慢盘时，第二个实例可能撞 5s busy timeout 而拒绝启动。
+    fail-loud 是设计，编排层应串行重启或给足重试/超时（B67-03）。
 
 **导出写入是原子的**：保存/删除凭据时先写同目录临时文件（`flush` + `fsync`
 + 0600），再用 `os.replace` 原子替换目标文件。磁盘写满、超配额或进程中断
 不会把上一份完好的导出文件截断成半截 JSON——旧文件逐字节保留，引擎继续
 按旧内容解析。
+
+**密钥文件权限**：console 首次生成密钥时用 `O_EXCL` 直接以 0600 创建
+（不再先 0644 再 chmod，A67-05）；并发首建只有一把 key 胜出，落败进程
+等待并复用胜者写入的 key，不重新生成。已存在的 0644 存量 key 会在启动
+对账与每次读取时收紧为 0600 并打 WARNING；只读挂载等无法 chmod 的场景会
+持续告警（每个路径一次），请修正属主/挂载权限。密钥是解密所有租户凭据的
+唯一材料，`.plaita-credentials.key` 的备份/外发按凭据泄露处置。
 
 **引擎读侧 fail-loud**：文件不存在视为「尚未配置凭据」；文件存在但为空、
 JSON 损坏或顶层不是对象时，`plaita.credentials` 抛
