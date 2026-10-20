@@ -12,6 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..auth import require_auth
     from ..services import tenants_svc, users_svc
     from ..services.flow_store import get_flow_store
@@ -34,16 +39,16 @@ TENANT_MEMBER_ADMIN_DETAIL = "仅平台管理员或本租户管理员可管理�
 PLATFORM_ACCOUNT_PROTECTED_DETAIL = "仅平台管理员可操作平台管理员账号"
 
 
-class CreateTenantRequest(BaseModel):
+class CreateTenantRequest(StrictRequestModel):
     id: str = Field(..., description="租户 ID（slug，3-64 位小写字母/数字/连字符）")
     name: str = Field("", description="展示名（缺省用 id）")
 
 
-class TenantStatusRequest(BaseModel):
+class TenantStatusRequest(StrictRequestModel):
     status: str = Field(..., description="active | disabled")
 
 
-class MemberRequest(BaseModel):
+class MemberRequest(StrictRequestModel):
     username: str = Field(..., min_length=1, max_length=64)
     role: str = Field("viewer", description="admin | editor | viewer")
 

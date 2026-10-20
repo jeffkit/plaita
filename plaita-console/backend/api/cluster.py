@@ -23,6 +23,11 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, model_serializer
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from plaita.core.url_redaction import (
         REDACTED_VALUE,
         _is_credential_key,
@@ -241,7 +246,7 @@ class ServiceTypesResponse(_RedactedResponseModel):
     service_types: List[ServiceTypeInfo]
 
 
-class StartServiceRequest(BaseModel):
+class StartServiceRequest(StrictRequestModel):
     """启动服务请求"""
     service_type: str = Field(..., description="服务类型")
 
@@ -254,7 +259,7 @@ class StartServiceResponse(_RedactedResponseModel):
     error: Optional[str] = None
 
 
-class StopServiceRequest(BaseModel):
+class StopServiceRequest(StrictRequestModel):
     """停止服务请求"""
     graceful: bool = Field(default=True, description="是否优雅停止")
 
@@ -283,7 +288,7 @@ class ClusterConfigResponse(_RedactedResponseModel):
     config_path: str
 
 
-class SwitchModeRequest(BaseModel):
+class SwitchModeRequest(StrictRequestModel):
     """切换模式请求"""
     mode: str = Field(..., description="目标模式: process 或 docker")
 
@@ -307,7 +312,7 @@ class InfrastructureListResponse(_RedactedResponseModel):
     total: int
 
 
-class UpdateInfrastructureRequest(BaseModel):
+class UpdateInfrastructureRequest(StrictRequestModel):
     """更新基础设施配置请求"""
     display_name: Optional[str] = None
     enabled: Optional[bool] = None
@@ -316,7 +321,7 @@ class UpdateInfrastructureRequest(BaseModel):
     docker: Optional[dict] = None
 
 
-class CreateInfrastructureRequest(BaseModel):
+class CreateInfrastructureRequest(StrictRequestModel):
     """创建基础设施配置请求"""
     name: str = Field(..., description="基础设施 ID")
     display_name: str = Field(..., description="显示名称")
@@ -1082,7 +1087,7 @@ async def get_infrastructure_templates(
 from datetime import datetime
 
 
-class QuickTestRequest(BaseModel):
+class QuickTestRequest(StrictRequestModel):
     """快速测试请求"""
     test_type: str = Field("simple", description="测试类型: simple, delay, approval")
     params: Optional[dict] = Field(None, description="测试参数")
@@ -1776,7 +1781,7 @@ class ClustersListResponse(_RedactedResponseModel):
     active_cluster_id: Optional[str]
 
 
-class CreateClusterRequest(BaseModel):
+class CreateClusterRequest(StrictRequestModel):
     """创建集群请求"""
     # #244：id 直接参与 ``base_dir / id``（创建配置写盘、删除 rmtree）。只允许
     # 小写字母/数字/连字符且首字符为字母或数字——路径分隔符、``..``、绝对路径
@@ -1792,14 +1797,14 @@ class CreateClusterRequest(BaseModel):
     preset: str = Field("dev", description="架构配套：quickstart（快速上手）| dev（开发）| prod（生产）")
 
 
-class UpdateClusterRequest(BaseModel):
+class UpdateClusterRequest(StrictRequestModel):
     """更新集群请求"""
     name: Optional[str] = None
     description: Optional[str] = None
     redis_url: Optional[str] = None
 
 
-class SwitchClusterRequest(BaseModel):
+class SwitchClusterRequest(StrictRequestModel):
     """切换集群请求"""
     cluster_id: str
 
@@ -1810,7 +1815,7 @@ class ClusterFullConfigResponse(_RedactedResponseModel):
     config: dict
 
 
-class SaveClusterConfigRequest(BaseModel):
+class SaveClusterConfigRequest(StrictRequestModel):
     """保存集群配置请求"""
     config: dict
 

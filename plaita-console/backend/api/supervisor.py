@@ -23,15 +23,17 @@ from pydantic import BaseModel, Field
 
 try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
     from ..error_contract import error_detail, scrubbed_detail
-except ImportError:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
     from error_contract import error_detail, scrubbed_detail  # type: ignore
+    from request_models import StrictRequestModel  # type: ignore
 
 logger = logging.getLogger("api.supervisor")
 
 router = APIRouter()
 
 
-class SupervisorIterateRequest(BaseModel):
+class SupervisorIterateRequest(StrictRequestModel):
     dataset: str = Field(..., description="数据集名（数据集根目录下的子目录或 .json 文件名）")
     max_iterations: int = Field(1, ge=1, le=5, description="本次跑几轮迭代")
     #: flow = @flow 源码提案 + 编译门（编排单轨默认）；prompt = legacy JSON 提案

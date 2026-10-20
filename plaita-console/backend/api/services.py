@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
 from redis import Redis
 
 from plaita.redis_client import (
@@ -90,7 +95,7 @@ class ServiceTopology(RedactedResponseModel):
     truncated: bool = False
 
 
-class StopServiceRequest(BaseModel):
+class StopServiceRequest(StrictRequestModel):
     """停止服务请求"""
     graceful: bool = Field(default=True, description="是否优雅停止")
 

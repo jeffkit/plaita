@@ -15,6 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
+    from ..request_models import StrictRequestModel
+except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
+    from request_models import StrictRequestModel  # type: ignore
+
+try:
     from ..services import flow_store, node_registry_svc
     from ..auth import tenant_scope
 except ImportError:
@@ -37,7 +42,7 @@ class PropertyTypeView(BaseModel):
     desc: str = ""
 
 
-class UpsertPropertyTypeRequest(BaseModel):
+class UpsertPropertyTypeRequest(StrictRequestModel):
     name: str = Field(..., description="类型名（唯一，≤64 字符）")
     base_type: str = Field("string", description="基础类型：string/integer/number/boolean/array/object")
     enum_options: List[Any] = Field(default_factory=list, description="枚举选项（base_type=string 时有意义）")
