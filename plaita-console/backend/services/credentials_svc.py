@@ -3,7 +3,7 @@
 密钥解析顺序（console 与引擎侧 plaita.credentials 一致）：
 1. 环境变量 ``PLAITA_CREDENTIALS_KEY``（Fernet key）
 2. 密钥文件 ``PLAITA_CREDENTIALS_KEY_FILE``（默认与 DB 同目录 ``.plaita-credentials.key``，
-   首次使用自动生成 440 权限）
+   首次使用以 ``O_EXCL`` 直接生成 0600，不经过先 0644 再 chmod 的窗口）
 
 安全边界（如实说明）：密钥文件与 DB 同机存放，属静态加密（at-rest）而非
 密钥管理服务；多机部署请把 KEY 放到密钥管理设施并统一注入。
@@ -130,6 +130,9 @@ def _create_key_file(key_file: Path) -> bytes:
         fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         logger.info("凭据密钥文件已由另一进程创建，复用: %s", key_file)
+        # 滚动升级边界：旧版本可能刚以 0644 创建了 key（A67-05），落败者
+        # 复用前同样收紧，避免这条路径把宽权限文件留到下次读取/重启。
+        _engine_tighten_key_file_permissions(key_file)
         return _read_existing_key(key_file)
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -572,6 +575,12 @@ def reconcile_exports() -> Dict[str, Any]:
       并 WARNING，避免同 slug 重建后经陈旧文件继承；
     - **fail-loud**：任何写入失败都上抛，由 lifespan 拒绝启动——否则引擎会
       带着缺失/陈旧的密钥继续跑，控制台却显示正常。
+
+    **边界（B67-01/B67-02，自动收敛不做）**：无对应租户的旁文件/凭据行只
+    WARNING、不隔离/删除——可能是手工放置的共享密钥，自动收敛方式待 owner
+    裁决（B67-01）；本函数只在 console 启动 lifespan 调用一次，没有周期
+    对账/epoch，SIGKILL 鬼凭据最长到下一次重启、同租户写或显式 DELETE 才
+    收敛（B67-02）。用户文档见 ``docs-site/docs/guide/console.md``「启动对账」。
 
     DB 无凭据且文件不存在时不落盘（不为空部署凭空创建文件）。返回摘要供
     启动日志/测试断言。
