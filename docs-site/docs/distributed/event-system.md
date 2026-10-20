@@ -1135,6 +1135,17 @@ canonical 键，无 Redis schema 变更。
 复制成 canonical，**不删旧键**，canonical 已存在则跳过；记录体缺 `event_id` 时
 按 legacy 键后缀派生，重复执行不会因 `Event` 重新生成 uuid 而制造重复记录）。
 
+**索引修复（A83-02）**：如果桶曾因旧版短 TTL 写入被砍短并过期，canonical 记录
+（7d）仍在但 `list_events`/回扫看不到——单纯重跑回填只会 `skipped_existing`。
+脚本有两条修复路径：`--apply` 遇到 `skipped_existing` 时顺带确保索引成员存在
+（`index_repaired` 计数）；`--reindex [--apply]` 扫描正典
+`plaita:event:events:*`，把缺失成员补回 `types:{type}`（不依赖 legacy 键是否
+还在，`ZADD` 幂等、桶 TTL 只延长，不改记录 TTL、不删键）。同一条 `--reindex`
+也修复订阅四索引：扫描 `plaita:subscription:data:*`，把缺失成员补回
+type/correlation/flow/node（订阅桶过期后 data 仍在，`list_subscriptions` 与
+EventFilter 匹配对旧订阅全盲，只有重写订阅才会重建索引）。dry-run 会报告
+`reindexed`/`index_repaired` 候选数。
+
 ### 索引续期 + 读时惰性清理 + 有界 janitor（A69-03）
 
 索引桶在写入时续期整键 TTL，但**成员**不会随数据键过期而消失：活跃流量下桶永不
@@ -1146,7 +1157,10 @@ canonical 键，无 Redis schema 变更。
    `PLAITA_EVENT_TTL_SECONDS` 调小时新写也变短），无条件 `EXPIRE` 会把整桶
    砍到最后一条成员的 TTL——桶先过期后，同类型仍存活的记录对 `list_events`/
    回扫全盲，且回填对已存在记录跳过、重跑也补不回索引（A78-01）。回填脚本
-   因此显式传 `index_ttl=默认 7d`；
+   因此显式传 `index_ttl=默认 7d`。订阅四索引（`type:`/`correlation:`/
+   `flow:`/`node:`）同款处理（A83-05）：不同 `ttl` 构造的 storage 写同一桶时
+   不再把旧订阅桶砍短；`-1`（刚 SADD/ZADD 的新桶，或外部创建的持久桶）按目标
+   TTL 设置，是已知边界（B83-01）；
 2. **读时惰性清理**：
    * `RedisEventStorage.list_events` 对已确认载荷缺失的成员按类型桶 `ZREM`
      （ERROR 日志保留：数据面损坏仍要可见，但不再每轮重复）；
@@ -1170,6 +1184,10 @@ canonical 键，无 Redis schema 变更。
   （生产者可控/可回填），按 score 会误删「时间戳老但载荷仍活」的事件；
 * 游标只存在进程内，不新建永久 Redis 键；重启从头扫，幂等；
 * 单桶失败（WRONGTYPE 等）只 WARNING 并计入错误计数，不终止其余桶/下一 tick；
+* 判死+删除的 Lua 每次 `EVAL` 最多携带 500 个成员（A83-03）：预算调大后单桶
+  allowance 可达数千，整条 `EVAL` 会撞上 Lua 5.1 `unpack` 的约 8000 结果上限
+  （`too many results to unpack`）而每 tick 都失败；分批后每个成员的原子性不变，
+  大预算正常收敛；
 * 关闭 janitor（`PLAITA_DISABLE_EVENT_INDEX_SWEEP=1`）必须在启动打 WARNING：
   这是「过期成员继续累积」的已知降级，不得静默；
 * `PLAITA_EVENT_INDEX_SWEEP_INTERVAL` 必须是**有限**正数秒；`nan`/`inf` 会让

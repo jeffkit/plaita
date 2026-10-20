@@ -760,7 +760,7 @@ def _subscription_index_kind(index_key: str, key_prefix: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 索引 TTL 只延长不缩短（A78-01）
+# 索引 TTL 只延长不缩短（A78-01；订阅侧 A83-05）
 #
 # 同一类型桶可能承载**不同 TTL** 的成员：回填脚本按 legacy 剩余 TTL 复制
 # （最短 1s），``PLAITA_EVENT_TTL_SECONDS`` 调小时新写也变短。无条件
@@ -768,8 +768,10 @@ def _subscription_index_kind(index_key: str, key_prefix: str) -> str:
 # 正典记录对 ``list_events``/EventReconciler 全部失明，且回填脚本对已存在
 # 记录 ``skipped_existing``，重跑也不会把成员补回索引。
 #
-# 语义：桶 TTL = max(当前剩余, 本次目标)；``-1``（无过期）也视为更长，不缩短。
-# 新建键（``TTL=-1``）正常设置目标 TTL；``-2``（ZADD 后不应出现）保持缺失。
+# 语义：桶 TTL = max(当前剩余, 本次目标)；``-2``（键不存在）保持缺失。
+# ``-1`` 在脚本里无法区分「本次 ZADD/SADD 刚建的新桶」与「外部创建的持久
+# 桶」——两者都按目标 TTL 设置（新桶必须有过期；仓内写者的 TTL 恒为正，
+# 持久桶只能由外部工具造出，B83-01 记为已知边界，不在写路径加额外往返）。
 # ---------------------------------------------------------------------------
 _INDEX_TTL_EXTEND_LUA = """
 local current = redis.call('TTL', KEYS[1])
@@ -812,6 +814,12 @@ _PRUNE_SUBSCRIPTION_MEMBERS_LUA = _PRUNE_INDEX_MEMBERS_LUA.replace(
     "__REMOVE_COMMAND__", "SREM"
 )
 
+#: 单条 ``EVAL`` 最多携带的成员数。Lua 5.1 的 ``unpack`` 在约 8000 个结果时
+#: 抛 ``too many results to unpack``（A83-03）：janitor 预算调大后单桶
+#: allowance 可达数千，整条 EVAL 失败会让该桶每 tick 都清不动。按批拆分后
+#: 每个成员的「判死 + 删除」仍在单条脚本内原子完成，跨批不影响语义。
+_PRUNE_EVAL_CHUNK_SIZE = 500
+
 
 async def _prune_index_members_atomic(
     redis, index_key: str, record_keys: List[str], members: List[str],
@@ -820,11 +828,16 @@ async def _prune_index_members_atomic(
     """原子清理：``record_key`` 不存在的成员从 ``index_key`` 移除。"""
     if not members:
         return 0
-    return int(
-        await redis.eval(
-            script, 1 + len(record_keys), index_key, *record_keys, *members
+    removed = 0
+    for start in range(0, len(members), _PRUNE_EVAL_CHUNK_SIZE):
+        chunk_members = members[start:start + _PRUNE_EVAL_CHUNK_SIZE]
+        chunk_keys = record_keys[start:start + _PRUNE_EVAL_CHUNK_SIZE]
+        removed += int(
+            await redis.eval(
+                script, 1 + len(chunk_keys), index_key, *chunk_keys, *chunk_members
+            )
         )
-    )
+    return removed
 
 
 def _prune_index_members_atomic_sync(
@@ -834,11 +847,16 @@ def _prune_index_members_atomic_sync(
     """同步版（``store_event_sync`` 的写侧兜底清理）。"""
     if not members:
         return 0
-    return int(
-        client.eval(
-            script, 1 + len(record_keys), index_key, *record_keys, *members
+    removed = 0
+    for start in range(0, len(members), _PRUNE_EVAL_CHUNK_SIZE):
+        chunk_members = members[start:start + _PRUNE_EVAL_CHUNK_SIZE]
+        chunk_keys = record_keys[start:start + _PRUNE_EVAL_CHUNK_SIZE]
+        removed += int(
+            client.eval(
+                script, 1 + len(chunk_keys), index_key, *chunk_keys, *chunk_members
+            )
         )
-    )
+    return removed
 
 
 #: ``{type_key: {"last": monotonic, "offset": 下一个起检位置}}``——offset 轮转
@@ -938,6 +956,31 @@ def store_event_sync(
     _prune_event_index_on_write(client, type_key, key_prefix)
 
 
+def ensure_event_index_member_sync(
+    client,
+    event: Event,
+    index_ttl: int,
+    key_prefix: str = DEFAULT_EVENT_KEY_PREFIX,
+) -> bool:
+    """确保事件在类型索引里，且桶 TTL 只延长不缩短（A83-02 修复入口）。
+
+    ``ZADD`` 幂等：成员已在索引里时只补 TTL。返回 ``True`` 表示本次新增了
+    成员（调用方用于「修复」计数）。用于回填脚本的 ``--reindex`` 与
+    ``skipped_existing`` 分支——已缩短/已过期的桶没有其它修复路径，重跑
+    回填只会 ``skipped_existing`` 跳过。
+
+    桶 TTL 用 :data:`_INDEX_TTL_EXTEND_LUA` 只延长：修复动作本身不得把
+    同类型其它长 TTL 成员的桶砍短（A78-01）。
+    """
+    type_key = event_type_index_key(event.event_type, key_prefix)
+    already_present = client.zscore(type_key, event.event_id) is not None
+    pipe = client.pipeline()
+    pipe.zadd(type_key, {event.event_id: event.timestamp})
+    pipe.eval(_INDEX_TTL_EXTEND_LUA, 1, type_key, int(index_ttl))
+    pipe.execute()
+    return not already_present
+
+
 # 索引清扫状态：进程内游标（不写 Redis 永久键，重启从头扫，幂等）。
 # 结构：``{index_key: {"cursor": int, "pending": [member, ...]}}``。
 
@@ -1011,6 +1054,52 @@ def _as_str(value) -> str:
         return value.decode("utf-8")
     return str(value)
 
+
+
+def subscription_index_keys(
+    subscription: EventSubscription,
+    key_prefix: str = "plaita:subscription:",
+) -> List[str]:
+    """订阅四索引键（type/correlation/flow/node），store/delete/reindex 共用。
+
+    键形只在这里实现一次：console delete 曾漏 `node:` 就是三份拼接漂移的
+    后果；修复/删除路径必须与写入路径逐键一致。
+    """
+    keys = [f"{key_prefix}type:{subscription.event_type}"]
+    if subscription.correlation_id:
+        keys.append(f"{key_prefix}correlation:{subscription.correlation_id}")
+    if subscription.flow_id:
+        keys.append(f"{key_prefix}flow:{subscription.flow_id}")
+    if subscription.node_id:
+        keys.append(f"{key_prefix}node:{subscription.node_id}")
+    return keys
+
+
+def ensure_subscription_index_members_sync(
+    client,
+    subscription: EventSubscription,
+    index_ttl: int,
+    key_prefix: str = "plaita:subscription:",
+) -> int:
+    """确保订阅在四索引里，且桶 TTL 只延长不缩短（A83-02 订阅半）。
+
+    ``SADD`` 幂等：成员已在桶里时只补 TTL。返回本次新增的索引成员数
+    （调用方用于「修复」计数）。与 :func:`ensure_event_index_member_sync`
+    同源——订阅桶过期后 data 键仍在，``list_subscriptions``/EventFilter
+    对旧订阅全盲，重写订阅才会重建索引；本函数是损坏态的唯一修复入口。
+    """
+    keys = subscription_index_keys(subscription, key_prefix)
+    added = sum(
+        1
+        for key in keys
+        if client.sismember(key, subscription.subscription_id) == 0
+    )
+    pipe = client.pipeline()
+    for key in keys:
+        pipe.sadd(key, subscription.subscription_id)
+        pipe.eval(_INDEX_TTL_EXTEND_LUA, 1, key, int(index_ttl))
+    pipe.execute()
+    return added
 
 
 class RedisEventStorage(EventStorage):
@@ -1506,24 +1595,14 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         subscription_key = f"{self.key_prefix}data:{subscription.subscription_id}"
         pipe.set(subscription_key, subscription_data, ex=self.ttl)
         
-        type_key = f"{self.key_prefix}type:{subscription.event_type}"
-        pipe.sadd(type_key, subscription.subscription_id)
-        pipe.expire(type_key, self.ttl)
-        
-        if subscription.correlation_id:
-            correlation_key = f"{self.key_prefix}correlation:{subscription.correlation_id}"
-            pipe.sadd(correlation_key, subscription.subscription_id)
-            pipe.expire(correlation_key, self.ttl)
-        
-        if subscription.flow_id:
-            flow_key = f"{self.key_prefix}flow:{subscription.flow_id}"
-            pipe.sadd(flow_key, subscription.subscription_id)
-            pipe.expire(flow_key, self.ttl)
-        
-        if subscription.node_id:
-            node_key = f"{self.key_prefix}node:{subscription.node_id}"
-            pipe.sadd(node_key, subscription.subscription_id)
-            pipe.expire(node_key, self.ttl)
+        # A83-05：与事件 types: 桶同款「TTL 只延长不缩短」。同一订阅类型桶
+        # 可能承载不同 TTL 成员的写入（不同副本/库用较小 ttl 构造 storage），
+        # 无条件 EXPIRE 会把整桶砍短——桶到期后旧订阅 data 仍在，但
+        # list_subscriptions(event_type=...) 与 EventFilter 匹配全盲。
+        # 四索引键形统一由 subscription_index_keys 给出（store/delete/reindex 同源）。
+        for index_key in subscription_index_keys(subscription, self.key_prefix):
+            pipe.sadd(index_key, subscription.subscription_id)
+            pipe.eval(_INDEX_TTL_EXTEND_LUA, 1, index_key, int(self.ttl))
         
         await pipe.execute()
         return subscription.subscription_id
@@ -1797,27 +1876,10 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         if not subscription:
             return False
             
-        # 从各索引中移除
+        # 从各索引中移除（键形与 store/reindex 同源，避免漏 node: 一类漂移）
         pipe = self.redis.pipeline()
-        
-        # 事件类型索引
-        type_key = f"{self.key_prefix}type:{subscription.event_type}"
-        pipe.srem(type_key, subscription_id)
-        
-        # 关联ID索引
-        if subscription.correlation_id:
-            correlation_key = f"{self.key_prefix}correlation:{subscription.correlation_id}"
-            pipe.srem(correlation_key, subscription_id)
-        
-        # 流程ID索引
-        if subscription.flow_id:
-            flow_key = f"{self.key_prefix}flow:{subscription.flow_id}"
-            pipe.srem(flow_key, subscription_id)
-        
-        # 节点ID索引
-        if subscription.node_id:
-            node_key = f"{self.key_prefix}node:{subscription.node_id}"
-            pipe.srem(node_key, subscription_id)
+        for index_key in subscription_index_keys(subscription, self.key_prefix):
+            pipe.srem(index_key, subscription_id)
         
         # 删除主数据
         subscription_key = f"{self.key_prefix}data:{subscription_id}"
