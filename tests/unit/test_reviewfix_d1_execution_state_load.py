@@ -10,6 +10,7 @@ Redis 抖动一次 = 挂起执行永久失去恢复机会。
   走既有重投递/DLQ 路径）。
 """
 import threading
+from datetime import datetime
 from unittest.mock import Mock
 
 import pytest
@@ -207,6 +208,8 @@ def test_storage_load_error_message_stays_pending_not_acked():
                 "flow_id": "flow-1",
                 "execution_id": "exec-1",
                 "resume_type": "event",
+                # A69-04：合成载体（非数字 message_id）需带年龄证据。
+                "timestamp": datetime.now().isoformat(),
             },
             delivery_count=1,
         )
@@ -229,7 +232,8 @@ def test_storage_load_error_goes_to_dlq_after_max_deliveries():
         StreamTask(
             message_id="msg-2",
             body={"type": "resume", "flow_id": "f", "execution_id": "e",
-                  "resume_type": "event"},
+                  "resume_type": "event",
+                  "timestamp": datetime.now().isoformat()},
             delivery_count=5,  # >= max_deliveries
         )
     )
@@ -251,7 +255,8 @@ def test_missing_state_still_poison_acked():
         StreamTask(
             message_id="msg-3",
             body={"type": "resume", "flow_id": "f", "execution_id": "e",
-                  "resume_type": "event"},
+                  "resume_type": "event",
+                  "timestamp": datetime.now().isoformat()},
             delivery_count=1,
         )
     )
@@ -277,7 +282,8 @@ def test_load_error_does_not_mark_execution_error():
         StreamTask(
             message_id="msg-4",
             body={"type": "resume", "flow_id": "f", "execution_id": "e",
-                  "resume_type": "event"},
+                  "resume_type": "event",
+                  "timestamp": datetime.now().isoformat()},
             delivery_count=1,
         )
     )

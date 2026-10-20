@@ -5,6 +5,8 @@
 - ``tenant_status`` 共享视图：缺失/无客户端 = active（fail-open），
   disabled 才拦。
 """
+from datetime import datetime
+
 import pytest
 
 pytest.importorskip("fakeredis")
@@ -72,7 +74,11 @@ class TestDispatchDropsDisabledTenant:
         assert calls == [], "停用租户的 start/resume 必须丢弃"
 
         # 未发布状态的租户 / default 不受影响（fail-open）
-        worker._dispatch_task({"type": "start", "tenant_id": "default", "flow_id": "f1"})
+        # A69-04：年龄闸在租户状态闸之后，放行用例需带合法入队时间。
+        worker._dispatch_task({
+            "type": "start", "tenant_id": "default", "flow_id": "f1",
+            "timestamp": datetime.now().isoformat(),
+        })
         assert [c[0] for c in calls] == ["start"]
 
     def test_reenabled_tenant_runs_again(self):
@@ -86,5 +92,8 @@ class TestDispatchDropsDisabledTenant:
         assert calls == []
 
         publish_tenant_status(fake, "acme", "active")
-        worker._dispatch_task({"type": "start", "tenant_id": "acme", "flow_id": "f1"})
+        worker._dispatch_task({
+            "type": "start", "tenant_id": "acme", "flow_id": "f1",
+            "timestamp": datetime.now().isoformat(),
+        })
         assert calls == ["start"]

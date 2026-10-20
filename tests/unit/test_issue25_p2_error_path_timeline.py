@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -226,7 +227,9 @@ class TestAckSemanticsUnchanged:
         task = StreamTask(
             message_id="m1",
             body={"type": "start", "flow_id": "w20-p2-boom", "params": {},
-                  "execution_id": "w20p2", "tenant_id": "default"},
+                  "execution_id": "w20p2", "tenant_id": "default",
+                  # A69-04：合成载体（非数字 message_id）需带年龄证据。
+                  "timestamp": datetime.now().isoformat()},
             delivery_count=1,
         )
         stub = _StubQueue(worker, [task])

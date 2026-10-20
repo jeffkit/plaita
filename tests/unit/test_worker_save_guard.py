@@ -28,6 +28,7 @@ rpush 失败被吞 → 执行已 suspended、消息被 ack → delay/approval �
 ``{ns}:execution:lease:{id}`` 按消息体 tenant_id 路由。
 """
 import threading
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -293,6 +294,10 @@ class TestDeadLetterGuard:
         return _redis_worker(fake, storage=storage)
 
     def _task(self, body):
+        # A69-04：合成载体（非数字 message_id）需带年龄证据；同时钉住
+        # 「克隆保留源 timestamp」而非补 now。
+        body = dict(body)
+        body.setdefault("timestamp", datetime.now().isoformat())
         return StreamTask(message_id="msg-1", body=body, delivery_count=5)
 
     def _seed_running(self, worker, execution_id="exec-1"):
@@ -353,7 +358,8 @@ class TestDeadLetterGuard:
 
         entry = fake.xrange("test:worker-save-guard")
         payload = entry[0][1]["payload"] if isinstance(entry[0][1], dict) else entry[0][1][b"payload"]
-        assert _json.loads(payload) == body
+        # A69-04：克隆副本必须**原样**保留源载体（含源 timestamp）。
+        assert _json.loads(payload) == task.body
 
     def test_guard_skips_when_reenqueue_fails(self):
         """重入队失败（Redis 瞬断）→ 保守跳过死信，原消息留 pending。"""

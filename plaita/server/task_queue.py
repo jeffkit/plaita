@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -87,6 +89,50 @@ def _decode(value: Union[str, bytes]) -> str:
     return value.decode() if isinstance(value, bytes) else value
 
 
+_STREAM_ID_RE = re.compile(r"^(\d+)-(\d+)$")
+
+
+def stream_id_timestamp(message_id: Any) -> Optional[datetime]:
+    """Redis Stream ID（``<ms>-<seq>``）→ 该条目的服务端写入时间；非法返回 None。
+
+    A69-04：载体年龄的第二数据源。外部 raw ``XADD``（没有 payload
+    ``timestamp``）与重投副本都以 Stream ID 的毫秒前缀作为「载体首次入队
+    时间」的兜底证据。只接受纯数字 ID；不做异常上抛。
+    """
+    if not isinstance(message_id, str):
+        return None
+    match = _STREAM_ID_RE.match(message_id.strip())
+    if match is None:
+        return None
+    try:
+        milliseconds = int(match.group(1))
+        return datetime.fromtimestamp(milliseconds / 1000.0)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def timestamp_from_stream_id(message_id: Any) -> Optional[str]:
+    """Stream ID → ISO 时间串（派生不出时 None）。"""
+    parsed = stream_id_timestamp(message_id)
+    return parsed.isoformat() if parsed is not None else None
+
+
+def _carrier_timestamp_missing(task: Dict[str, Any]) -> bool:
+    raw = task.get("timestamp") if isinstance(task, dict) else None
+    return not (isinstance(raw, str) and raw.strip())
+
+
+def _valid_iso_timestamp(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    try:
+        datetime.fromisoformat(candidate)
+    except (TypeError, ValueError):
+        return None
+    return candidate
+
+
 class InvalidTaskPayload(ValueError):
     """队列消息 payload 不可解析（非 JSON / 非对象）。
 
@@ -142,6 +188,7 @@ def enqueue_task(
     task: Dict[str, Any],
     *,
     schema_version: Optional[int] = None,
+    default_timestamp: Optional[str] = None,
 ) -> str:
     """Append a start/resume task. Creates the stream if needed.
 
@@ -151,12 +198,29 @@ def enqueue_task(
     ``schema_version`` 缺省 = 本 build 的写版本（新生产消息）。**重投/交接
     副本必须传源消息的版本**（A44-02）：副本承载的是源消息的语义，盖当前
     build 的版本会让混跑池里的旧消费者直接拒收唯一恢复载体。
+
+    A69-04：``timestamp`` = **载体首次入队时间**。payload 已有该字段时
+    **绝不覆盖**（重投/交接/克隆保留源年龄）；缺失/空白时写入
+    ``default_timestamp``（校验 ISO，非法则 WARNING 并回退 now），未提供
+    时写 ``datetime.now()``——EventFilter 的 event/timeout resume 等「新建
+    载体」因此自动获得年龄起点。重投路径若要把源年龄带过来，应自行在
+    payload 里写好 ``timestamp``（或由源 Stream ID 派生）后再调用本函数。
     """
+    payload = task
+    if _carrier_timestamp_missing(task):
+        injected = _valid_iso_timestamp(default_timestamp)
+        if default_timestamp is not None and injected is None:
+            logger.warning(
+                "enqueue_task default_timestamp=%r 非法，回退 now",
+                default_timestamp,
+            )
+        payload = dict(task)
+        payload["timestamp"] = injected or datetime.now().isoformat()
     version = TASK_SCHEMA_VERSION if schema_version is None else int(schema_version)
     msg_id = redis_client.xadd(
         stream_key,
         {
-            PAYLOAD_FIELD: json.dumps(task, ensure_ascii=False),
+            PAYLOAD_FIELD: json.dumps(payload, ensure_ascii=False),
             SCHEMA_FIELD: str(version),
         },
     )
@@ -478,9 +542,19 @@ class RedisStreamTaskQueue:
             # 静默重试只会把真问题藏起来。
             raise
 
-    def enqueue(self, task: Dict[str, Any], *, schema_version: Optional[int] = None) -> str:
+    def enqueue(
+        self,
+        task: Dict[str, Any],
+        *,
+        schema_version: Optional[int] = None,
+        default_timestamp: Optional[str] = None,
+    ) -> str:
         msg_id = enqueue_task(
-            self.redis, self.stream_key, task, schema_version=schema_version
+            self.redis,
+            self.stream_key,
+            task,
+            schema_version=schema_version,
+            default_timestamp=default_timestamp,
         )
         self._metrics["enqueued"] += 1
         return msg_id

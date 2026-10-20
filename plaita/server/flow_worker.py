@@ -44,7 +44,12 @@ from plaita.storage.fenced import (
     reset_current_fence_token,
     set_current_fence_token,
 )
-from plaita.storage.redis import ExecutionStateLoadError, TERMINAL_EXECUTION_STATUSES
+from plaita.storage.redis import (
+    ExecutionStateLoadError,
+    TERMINAL_EXECUTION_STATUSES,
+    validate_tombstone_retention,
+)
+from plaita.core.retention import task_max_age_seconds
 from plaita.logger import logger
 from plaita.redis_client import make_redis_client
 from plaita.writefile_jail import apply_writefile_jail
@@ -89,6 +94,7 @@ from plaita.server.task_queue import (
     RedisStreamTaskQueue,
     StreamTask,
     enqueue_task,
+    timestamp_from_stream_id,
 )
 from plaita.server.execution_lease import (
     DEFAULT_LEASE_TTL_SECONDS,
@@ -280,23 +286,11 @@ def _load_matching_tombstone(
 # B52-02：墓碑 TTL 到期后仍有载体的兜底闸。主任务流没有 MAXLEN/时间 TTL，
 # pending/积压消息理论上可无限期存活；墓碑过期后同一 start 仍会重建。
 # 默认 30 天（与状态/墓碑默认 TTL 同 horizon），0 = 关闭。
-DEFAULT_TASK_MAX_AGE_SECONDS = 30 * 86400
-
-
+# A69-04：env 解析下沉到 ``plaita/core/retention.py``（storage 的墓碑 resolver
+# 与 worker 的年龄闸必须同一口径，且 storage 不得反向 import server）。
 def _task_max_age_seconds() -> int:
-    """消息最大年龄（秒）；未配置/非法回退 30 天，<=0 关闭。"""
-    raw = (os.environ.get("PLAITA_TASK_MAX_AGE_SECONDS") or "").strip()
-    if not raw:
-        return DEFAULT_TASK_MAX_AGE_SECONDS
-    try:
-        seconds = int(raw)
-    except ValueError:
-        logger.warning(
-            "PLAITA_TASK_MAX_AGE_SECONDS=%s 非法，回退默认 %d 秒",
-            _redact_env_value(raw), DEFAULT_TASK_MAX_AGE_SECONDS,
-        )
-        return DEFAULT_TASK_MAX_AGE_SECONDS
-    return seconds if seconds > 0 else 0
+    """消息最大年龄（秒）；未配置/非法回退 30 天，<=0 关闭（见 core.retention）。"""
+    return task_max_age_seconds()
 
 
 def _message_age_seconds(raw_timestamp: Any) -> Optional[float]:
@@ -311,8 +305,49 @@ def _message_age_seconds(raw_timestamp: Any) -> Optional[float]:
     return (now - timestamp).total_seconds()
 
 
+def _message_age_from_stream_id(message_id: Any) -> Optional[float]:
+    """Stream ID（``<ms>-<seq>``）→ 条目写入至今的秒数；非法返回 None。
+
+    A69-04：外部 raw XADD / 老载体可能没有 payload ``timestamp``，但 Stream
+    ID 的毫秒前缀是 Redis 写入时刻的可靠证据。解析统一走
+    ``task_queue.timestamp_from_stream_id``（只接受纯数字 ID，不做异常上抛）。
+    """
+    raw = timestamp_from_stream_id(message_id)
+    if raw is None:
+        return None
+    return (datetime.now() - datetime.fromisoformat(raw)).total_seconds()
+
+
+def _carrier_timestamp_or_derived(
+    body: Dict[str, Any], source_message_id: Any
+) -> Optional[str]:
+    """载体已有 ``timestamp`` → 原样返回；否则由源 Stream ID 派生（A69-04）。
+
+    返回 None = 源时间和源 Stream ID 都不可用；调用方（重投/克隆）不应
+    用 ``now()`` 洗白老载体——交给 ``enqueue_task`` 的缺失注入只发生在
+    「全新载体」路径。
+    """
+    raw = body.get("timestamp")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return timestamp_from_stream_id(source_message_id)
+
+
+def _copy_carrier_body(
+    body: Dict[str, Any], source_message_id: Any = None
+) -> Dict[str, Any]:
+    """重投/交接/克隆副本：复制 body 并保留源年龄（缺失时由源 Stream ID 派生）。"""
+    copy = dict(body)
+    derived = _carrier_timestamp_or_derived(body, source_message_id)
+    if derived is not None:
+        copy["timestamp"] = derived
+    return copy
+
+
 def _requeue_body_for_retry(
-    body: Dict[str, Any], storage: Optional[ExecutionStorage]
+    body: Dict[str, Any],
+    storage: Optional[ExecutionStorage],
+    source_message_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """#91 载体转换：start 载体重投前查盘，已有行则转 **resume 载体**。
 
@@ -332,15 +367,19 @@ def _requeue_body_for_retry(
       校验 ValueError 打成 poison ack 丢消息）；
     - 读盘失败（Redis 抖动）→ 原样 start（fail-safe：转换是优化，绝不因
       它失败而丢消息/丢节奏）；
+    - **年龄保留（A69-04）**：原样重投的副本保留源 ``timestamp``；源缺失时
+      由 ``source_message_id``（Redis Stream ID）派生，绝不补 ``now()``——
+      否则每次重投都把老载体洗成新载体，年龄闸失效。start→resume 转换是
+      **新的恢复载体**，写 ``now()``（规范语义，不是历史 start 重放）；
     - **删除墓碑命中（A51-01）→ 返回 None**：调用方必须 ack 原条、不再
       入队。删除后把 start 原样重投会让 ``start_flow`` 把执行重建完成；
       墓碑读取瞬态错误同样上抛（不 ack、等重投），绝不 fail-open 重排。
     """
     if body.get("type") != "start":
-        return dict(body)
+        return _copy_carrier_body(body, source_message_id)
     execution_id = body.get("execution_id")
     if not isinstance(execution_id, str) or not execution_id or storage is None:
-        return dict(body)
+        return _copy_carrier_body(body, source_message_id)
     tombstone = _load_matching_tombstone(
         storage, execution_id, body.get("tenant_id")
     )
@@ -359,11 +398,11 @@ def _requeue_body_for_retry(
         logger.warning(
             "执行 %s 重投前查盘失败，start 载体原样重投: %s", execution_id, _scrub_url_text(e)
         )
-        return dict(body)
+        return _copy_carrier_body(body, source_message_id)
     finally:
         reset_current_tenant(token)
     if state is None:
-        return dict(body)
+        return _copy_carrier_body(body, source_message_id)
     stored_flow_id = getattr(state, "flow_id", None)
     if stored_flow_id and stored_flow_id != body.get("flow_id"):
         logger.warning(
@@ -371,7 +410,7 @@ def _requeue_body_for_retry(
             "start 载体原样重投",
             execution_id, body.get("flow_id"), stored_flow_id,
         )
-        return dict(body)
+        return _copy_carrier_body(body, source_message_id)
     resume_body = {
         "type": "resume",
         "flow_id": body.get("flow_id"),
@@ -1373,6 +1412,11 @@ class FlowWorker:
         self._cancel_thread: Optional[threading.Thread] = None
         self._cancel_stop = threading.Event()
         self._cancel_poll_seconds: Optional[float] = None
+        # A69-04：年龄闸「两源都不可判」的 fail-closed 计数（/metrics 暴露为
+        # carrier_age_unknown_total；只增不减，运维据此判断是否有生产者缺 timestamp）。
+        self._carrier_age_unknown_total = 0
+        # A69-04：启动期保留期配置校验（每进程一次；可疑配置只 WARNING 不阻断）。
+        validate_tombstone_retention()
 
     # ---- 节点级有界重试（波次二任务①）----
 
@@ -2528,19 +2572,59 @@ class FlowWorker:
         )
         return True
 
-    def _start_carrier_too_old(self, body: Dict[str, Any]) -> bool:
-        """消息最大年龄闸（B52-02）：墓碑 TTL 到期后的历史载体兜底丢弃。"""
+    def _start_carrier_too_old(
+        self, body: Dict[str, Any], stream_message_id: Optional[str] = None
+    ) -> bool:
+        """消息最大年龄闸（B52-02/A69-04）：墓碑 TTL 到期后的历史载体兜底丢弃。
+
+        年龄取**双源最大值**：payload ``timestamp``（ISO）与 Stream ID 的
+        毫秒前缀。两者都有时取大——未来时间戳不能把老 Stream ID 洗白，重投
+        后 Stream ID 变新也不能让 payload 保留的旧年龄被忽略。
+
+        无法判定年龄（两源都缺失/畸形）→ **fail-closed** 丢弃并计数
+        （``carrier_age_unknown_total``）：放行等于把「删后压队熬过墓碑
+        horizon」的载体重新放回执行面。``max_age <= 0`` 仍表示关闭年龄闸，
+        但启动时会由 ``validate_tombstone_retention`` WARNING。
+        """
         max_age = _task_max_age_seconds()
         if max_age <= 0:
             return False
-        age = _message_age_seconds(body.get("timestamp"))
-        if age is None or age <= max_age:
+        ages = [
+            age
+            for age in (
+                _message_age_seconds(body.get("timestamp")),
+                _message_age_from_stream_id(stream_message_id),
+            )
+            if age is not None
+        ]
+        if not ages:
+            self._carrier_age_unknown_total = (
+                getattr(self, "_carrier_age_unknown_total", 0) + 1
+            )
+            logger.warning(
+                "载体 %s 年龄无法判定（timestamp=%r stream_id=%r execution=%s "
+                "type=%s），fail-closed 丢弃（A69-04）",
+                stream_message_id or body.get("message_id"),
+                body.get("timestamp"),
+                stream_message_id,
+                body.get("execution_id"),
+                body.get("type"),
+            )
+            return True
+        age = max(ages)
+        if age < max_age:
             return False
         logger.warning(
-            "消息 %s 年龄 %.0fs 超过最大年龄 %ss（execution=%s type=%s），"
-            "丢弃（墓碑/状态 TTL 到期后的历史载体不重建执行）",
-            body.get("message_id") or body.get("timestamp"),
-            age, max_age, body.get("execution_id"), body.get("type"),
+            "消息 %s 年龄 %.0fs 达到/超过最大年龄 %ss（execution=%s type=%s，"
+            "payload_age=%s stream_age=%s），丢弃（墓碑/状态 TTL 到期后的历史"
+            "载体不重建执行）",
+            stream_message_id or body.get("message_id") or body.get("timestamp"),
+            age,
+            max_age,
+            body.get("execution_id"),
+            body.get("type"),
+            _message_age_seconds(body.get("timestamp")),
+            _message_age_from_stream_id(stream_message_id),
         )
         return True
 
@@ -4854,8 +4938,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         try:
             # A44-02：恢复副本继承源信封版本（混跑池里旧 worker 仍可接管）。
+            # A69-04：副本保留源年龄（缺失时由源 Stream ID 派生）——老载体
+            # 不能因为一次死信守卫克隆就变成「刚入队」。
             enqueue_task(
-                self.redis_client, self.queue_name, dict(body),
+                self.redis_client,
+                self.queue_name,
+                _copy_carrier_body(body, getattr(task, "message_id", None)),
                 **_requeue_envelope_kwargs(task),
             )
             logger.warning(
@@ -5765,7 +5853,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # A46-02：目标机器已不可用（键消失 / 不再是 running）时剥掉
         # target_instance_id，按广播重投——否则集群里每台非目标机都会交接一次，
         # 4 次后 AffinityHandoverExhausted 把可跑任务终态化。
-        copy_body = dict(body)
+        # A69-04：交接副本保留源年龄（缺失时由源 Stream ID 派生）。
+        copy_body = _copy_carrier_body(body, getattr(task, "message_id", None))
         unavailable_target = self._unavailable_dispatch_target(body)
         stripped_target = unavailable_target is not None
         if stripped_target:
@@ -5934,7 +6023,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 )
                 return False
         requeue_body = _requeue_body_for_retry(
-            body, getattr(self, "execution_storage", None)
+            body,
+            getattr(self, "execution_storage", None),
+            # A69-04：源载体缺失 timestamp 时由源 Stream ID 派生，不得补 now。
+            source_message_id=getattr(task, "message_id", None),
         )
         if requeue_body is None:
             # A51-01：执行已被删除（墓碑命中）——ack 原条、不生成任何新
@@ -5996,7 +6088,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             defers = int(body.get("quota_defers") or 0) + 1
         except (TypeError, ValueError):
             defers = 1
-        body = dict(body)
+        body = _copy_carrier_body(body, getattr(task, "message_id", None))
         body["quota_defers"] = defers
         tenant = body.get("tenant_id") or "default"
         if defers > self._quota_defer_max():
@@ -6025,7 +6117,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         return True
 
     def _dispatch_task(self, message_data: Dict[str, Any], delivery_count: Optional[int] = None,
-                       schema_version: Optional[int] = None) -> None:
+                       schema_version: Optional[int] = None,
+                       stream_message_id: Optional[str] = None) -> None:
         message_type = message_data.get("type")
 
         # 租户状态闸（plaita#27）：停用租户的 start/resume 一律不执行。消息已
@@ -6065,11 +6158,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     reset_current_tenant(token)
             return
 
-        # B52-02：消息最大年龄闸。主任务流没有时间 TTL，墓碑 TTL 到期后
-        # 同一 start 仍可重建；超过 horizon 的历史载体直接 ack+WARNING。
+        # B52-02/A69-04：消息最大年龄闸。主任务流没有时间 TTL，墓碑 TTL 到期后
+        # 同一 start 仍可重建；超过 horizon 的历史载体直接 ack+WARNING。年龄取
+        # payload 与 Stream ID 双源最大值；两源都不可判 → fail-closed。
         # 只闸 start/resume（决议/控制载体不做年龄判断，避免误丢唤醒源）。
         if message_type in ("start", "resume") and self._start_carrier_too_old(
-            message_data
+            message_data, stream_message_id
         ):
             return
 
@@ -6484,6 +6578,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                         # A44-02：派发侧把源信封版本带到 start 幂等命中的
                         # resume 副本上（同版本时写入口行为不变）。
                         schema_version=task.schema_version,
+                        # A69-04：载体年龄的第二数据源（外部 raw XADD 没有
+                        # payload timestamp 时由 Stream ID 兜底）。
+                        stream_message_id=task.message_id,
                     )
                     queue.ack(task.message_id)
                     acked = True
@@ -7178,6 +7275,15 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             {},
             "counter",
             "生命周期状态立即落盘失败次数（S18-02A）",
+        ))
+        # A69-04：载体年龄两源都不可判 → fail-closed 丢弃次数（可能意味着
+        # 某个生产者既没写 timestamp、消息也不来自 Redis Stream ID）。
+        metrics.append(Metric(
+            "carrier_age_unknown_total",
+            getattr(self, "_carrier_age_unknown_total", 0),
+            {},
+            "counter",
+            "start/resume 载体年龄无法判定而 fail-closed 丢弃的次数（A69-04）",
         ))
         # #42（W10-a）：容量指标与「派发侧看到的容量」同源（同一快照函数），
         # 否则看板与派发门会各报一套（口径分叉是最难查的一类事故）。

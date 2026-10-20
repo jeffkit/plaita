@@ -89,7 +89,8 @@ end
 # KEYS[5]=fencegen 世代计数器,
 # KEYS[6..N-1]=执行级计数键（nofail/g1wakeups/noderefetch/noderetry[:node]/
 # affinityhandover），KEYS[N]=执行墓碑键（平台根，最后一个）。
-# ARGV[1]=期望世代, ARGV[2]=execution_id, ARGV[3]=墓碑 TTL 秒（0=不过期）,
+# ARGV[1]=期望世代, ARGV[2]=execution_id, ARGV[3]=墓碑 TTL 秒
+# （A69-04 的 resolver 保证 >0；脚本内仍保留 ``<=0`` 不设 TTL 的防御分支）,
 # ARGV[4]=墓碑 payload
 # 返回 1=删除成功；0=fence 键不符（键缺失也算不符）；
 #      -1=fence 键命中但 fencegen 不一致（A2R25-05：部分恢复的旧 fence）。
@@ -110,10 +111,20 @@ if redis.call('get', KEYS[2]) == ARGV[1] then
     redis.call('del', KEYS[i])
   end
   local ttl = tonumber(ARGV[3]) or 0
-  if ttl > 0 then
-    redis.call('set', KEYS[#KEYS], ARGV[4], 'EX', ttl)
-  else
-    redis.call('set', KEYS[#KEYS], ARGV[4])
+  -- A69-04：墓碑只创建（保留首次 deleted_at/tenant/reason）+ 只延长 TTL。
+  -- 用 TTL 比较而不是 EXPIRE GT（GT 要求 Redis >= 7，本脚本明确兼容更老
+  -- 版本）；存量无 TTL 的永久墓碑（ttl == -1）不缩短（安全方向）。
+  if redis.call('exists', KEYS[#KEYS]) == 0 then
+    if ttl > 0 then
+      redis.call('set', KEYS[#KEYS], ARGV[4], 'EX', ttl)
+    else
+      redis.call('set', KEYS[#KEYS], ARGV[4])
+    end
+  elseif ttl > 0 then
+    local current = redis.call('ttl', KEYS[#KEYS])
+    if current >= 0 and current < ttl then
+      redis.call('expire', KEYS[#KEYS], ttl)
+    end
   end
   return 1
 else

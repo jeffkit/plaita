@@ -54,7 +54,8 @@ def test_single_stream_fifo_tenant_b_waits_for_tenant_a_backlog():
     records: list = []  # (tenant, seq, t_start, t_end)
     lock = threading.Lock()
 
-    def slow_dispatch(message_data, delivery_count=None, schema_version=None):
+    def slow_dispatch(message_data, delivery_count=None, schema_version=None,
+                      stream_message_id=None):
         t0 = time.monotonic()
         time.sleep(TASK_COST)  # 模拟重任务占住唯一的串行消费位
         t1 = time.monotonic()

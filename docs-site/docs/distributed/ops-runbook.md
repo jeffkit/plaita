@@ -85,8 +85,8 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | `PLAITA_LEASE_TTL_SECONDS` | `120` | resume 租约 TTL |
 | `PLAITA_MAX_DELIVERIES` | `5` | 超过后进 DLQ |
 | `PLAITA_EXECUTION_DEADLINE_SECONDS` | `1800` | 未配置任何 `flow.timeout` / `execution.timeout` / 调用期 timeout 时的**执行级总预算**（秒，支持小数）；到期抛 `ExecutionDeadlineError`，worker 不重试并终态化 error（#267）。非数字/非有限/`<=0` 回退默认并打 WARNING |
-| `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` | 跟随 `PLAITA_EXECUTION_STATE_TTL_DAYS`（30 天） | 执行删除墓碑 TTL（平台根 `plaita:exec_tombstone:{id}`）；`<=0` 永久 |
-| `PLAITA_TASK_MAX_AGE_SECONDS` | `2592000`（30 天） | start/resume 载体最大年龄，超龄在派发时 ack+WARNING 丢弃（墓碑 TTL 到期后的兜底）；`0` 关闭 |
+| `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` | 独立默认 `2592000`（30 天），且不低于 `PLAITA_EXECUTION_STATE_TTL_DAYS`（取 max） | 执行删除墓碑 TTL（平台根 `plaita:exec_tombstone:{id}`）。**`<=0` 非法**：回退默认 + WARNING，不再表示永久；结果 clamp 到 `PLAITA_TASK_MAX_AGE_SECONDS`（墓碑不得先于年龄闸到期）。二次删除保留首次 `deleted_at`/`tenant`/`reason`，只延长 TTL；升级前的存量永久墓碑不自动缩短 |
+| `PLAITA_TASK_MAX_AGE_SECONDS` | `2592000`（30 天） | start/resume 载体最大年龄，超龄在派发时 ack+WARNING 丢弃（墓碑 TTL 到期后的兜底）。年龄取 payload `timestamp` 与 Redis Stream ID 时间的**最大值**；两者都不可判 → **fail-closed** 丢弃（WARNING + `/metrics` `carrier_age_unknown_total`）；`0` 关闭（启动 WARNING：墓碑到期后无兜底） |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
 | `PLAITA_DLQ_MAX_LEN` | `1000` | DLQ 保留条数（**有损 FIFO**：超限裁掉最旧未处理证据，最小 1；多 worker 对同一 DLQ 配置不一致时**最小者赢**）。裁剪/失败计数见 worker `/metrics` 的 `queue_dlq_trimmed_total` / `queue_dlq_trim_failures_total` |
 | `PLAITA_METRICS_PORT` | unset | worker 的 Prometheus 抓取端端口（unset/`0` = 不启动） |

@@ -501,7 +501,8 @@ class TestConsumeLoopPlumbing:
         def _bump_active(self, delta):
             pass
 
-        def _dispatch_task(self, body, delivery_count=None, schema_version=None):
+        def _dispatch_task(self, body, delivery_count=None, schema_version=None,
+                           stream_message_id=None):
             self.seen.append((body["execution_id"], delivery_count, schema_version))
             self._running = False
 

@@ -12,6 +12,7 @@ from .base import (
     StateSerializationError,
 )
 from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
+from plaita.core.retention import task_max_age_seconds
 from plaita import tenant_context as _tenant_ctx
 
 try:
@@ -116,26 +117,151 @@ def execution_tombstone_key(execution_id: str) -> str:
     return f"{EXECUTION_TOMBSTONE_PREFIX}{execution_id}"
 
 
-def execution_tombstone_ttl_seconds() -> int:
-    """墓碑 TTL（秒）；<=0 表示禁用（永久）。
+#: 墓碑默认 TTL（30 天）。**独立常量**：不再跟随 state TTL——否则
+#: ``PLAITA_EXECUTION_STATE_TTL_DAYS=0`` 会把每一条墓碑变成永久键（A69-04）。
+DEFAULT_EXECUTION_TOMBSTONE_TTL_SECONDS = 30 * 86400
 
-    默认跟随终态状态 TTL（``PLAITA_EXECUTION_STATE_TTL_DAYS``，30 天）；
-    ``PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`` 可单独覆盖。TTL 到期后
-    同一 id 的历史载体由消息最大年龄闸兜底（见 flow_worker
-    ``PLAITA_TASK_MAX_AGE_SECONDS``），见 B52-02。
+#: resolver 告警限频（每次 delete 都会重算 TTL；同一配置只告警一次，避免刷屏）。
+_TOMBSTONE_TTL_WARNED: set = set()
+_TOMBSTONE_RETENTION_VALIDATED = False
+
+
+def _warn_tombstone_ttl_once(key: Any, message: str, *args: Any) -> None:
+    if key in _TOMBSTONE_TTL_WARNED:
+        return
+    _TOMBSTONE_TTL_WARNED.add(key)
+    logger.warning(message, *args)
+
+
+def execution_tombstone_ttl_seconds() -> int:
+    """墓碑 TTL（秒）——独立默认 30 天，且不短于任务最大年龄。
+
+    语义（A69-04，policy 变更）：
+
+    - 未配置 → ``max(30d, STATE_TTL)``；``STATE_TTL=0`` 不再产生永久墓碑
+      （``max`` 只作为「墓碑不短于 state TTL」的下限）；
+    - ``PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS<=0`` → **非法**，回退默认 +
+      WARNING，不再用 ``0`` 隐式表达「永久」；
+    - 结果 clamp 到 ``PLAITA_TASK_MAX_AGE_SECONDS``：墓碑 horizon 必须不短于
+      年龄闸 horizon，否则删除后延迟排队的载体能熬过墓碑再由年龄闸放行；
+    - 存量永久墓碑（升级前 ``<=0`` 写下）保持永久，不缩短（安全方向）。
+
+    TTL 到期后同一 id 的历史载体仍由消息最大年龄闸兜底（见 flow_worker），
+    见 B52-02/A69-04。
     """
+    state_ttl = execution_state_ttl_seconds()
     raw = (os.environ.get("PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS") or "").strip()
-    if not raw:
-        return execution_state_ttl_seconds()
-    try:
-        seconds = int(raw)
-    except ValueError:
-        logger.warning(
-            "PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS=%s 非法，回退默认状态 TTL",
-            _redact_env_value(raw),
+    explicit: Optional[int] = None
+    if raw:
+        try:
+            explicit = int(raw)
+        except ValueError:
+            _warn_tombstone_ttl_once(
+                ("invalid", raw),
+                "PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS=%s 非法，回退默认墓碑 TTL %ss",
+                _redact_env_value(raw),
+                DEFAULT_EXECUTION_TOMBSTONE_TTL_SECONDS,
+            )
+    if explicit is None or explicit <= 0:
+        base = max(DEFAULT_EXECUTION_TOMBSTONE_TTL_SECONDS, state_ttl)
+        if explicit is not None and explicit <= 0:
+            _warn_tombstone_ttl_once(
+                ("non-positive", raw),
+                "PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS=%s<=0 视为非法，回退默认 %ss"
+                "（不再产生永久墓碑；要永久请显式配置一个很大的正数并写入 runbook）",
+                _redact_env_value(raw),
+                base,
+            )
+    else:
+        base = explicit
+    max_age = task_max_age_seconds()
+    if max_age > 0 and base < max_age:
+        _warn_tombstone_ttl_once(
+            ("clamp", base, max_age),
+            "墓碑 TTL=%ss 短于 PLAITA_TASK_MAX_AGE_SECONDS=%ss，clamp 到 %ss"
+            "（墓碑不得先于年龄闸到期）",
+            base,
+            max_age,
+            max_age,
         )
-        return execution_state_ttl_seconds()
-    return seconds if seconds > 0 else 0
+        base = max_age
+    return base
+
+
+# 墓碑落盘：只在键不存在时创建（保留首次 deleted_at/tenant/reason），已存在
+# 时**只延长** TTL（不缩短永久键、不覆盖证据）。用 TTL 比较而不是
+# ``SET NX`` + ``EXPIRE GT``：GT 要求 Redis >= 7，而 fenced 删除的 Lua 已
+# 明确兼容更老 Redis，两条删除路径必须同语义。脚本在删除 pipeline 内执行，
+# 与四删保持同一事务。
+_TOMBSTONE_WRITE_LUA = """
+local ttl = tonumber(ARGV[2]) or 0
+if redis.call('exists', KEYS[1]) == 0 then
+  if ttl > 0 then
+    redis.call('set', KEYS[1], ARGV[1], 'EX', ttl)
+  else
+    redis.call('set', KEYS[1], ARGV[1])
+  end
+  return 1
+end
+if ttl > 0 then
+  local current = redis.call('ttl', KEYS[1])
+  if current >= 0 and current < ttl then
+    redis.call('expire', KEYS[1], ttl)
+  end
+end
+return 0
+"""
+
+
+def validate_tombstone_retention() -> None:
+    """启动期保留期配置校验（每进程一次；FlowWorker / console lifespan 调用）。
+
+    只 WARNING 不抛错：配置可疑不得阻断启动，但必须可观测（AGENTS.md
+    「任何降级必须可观测」）。覆盖三种需要人工介入的形态：
+
+    - 年龄闸被关闭（``<=0``）→ 墓碑到期后没有兜底；
+    - 显式墓碑 TTL 短于任务最大年龄 → 运行期会被 clamp（启动时就提示）；
+    - 显式墓碑 TTL 非法/非正 → 回退默认（``0`` 不再表示永久）。
+    """
+    global _TOMBSTONE_RETENTION_VALIDATED
+    if _TOMBSTONE_RETENTION_VALIDATED:
+        return
+    _TOMBSTONE_RETENTION_VALIDATED = True
+
+    raw = (os.environ.get("PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS") or "").strip()
+    try:
+        explicit = int(raw) if raw else None
+    except ValueError:
+        explicit = None
+    max_age = task_max_age_seconds()
+    effective = execution_tombstone_ttl_seconds()
+
+    if max_age <= 0:
+        logger.warning(
+            "PLAITA_TASK_MAX_AGE_SECONDS<=0：载体年龄闸已关闭——墓碑 TTL（当前 %ss）"
+            "到期后，删除前已存在的 start/resume 载体不再有任何兜底（A69-04）",
+            effective,
+        )
+    if raw:
+        if explicit is None:
+            logger.warning(
+                "墓碑保留期配置 %s 非法：已回退默认 %ss（不再表示永久）",
+                _redact_env_value(raw),
+                effective,
+            )
+        elif explicit <= 0:
+            logger.warning(
+                "墓碑保留期配置 %s<=0 非法：已回退默认 %ss（不再表示永久）",
+                _redact_env_value(raw),
+                effective,
+            )
+        elif max_age > 0 and explicit < max_age:
+            logger.warning(
+                "墓碑保留期配置 %ss 短于任务最大年龄 %ss：已 clamp 到 %ss",
+                explicit,
+                max_age,
+                effective,
+            )
 
 
 def execution_tombstone_tenant(namespace: str) -> str:
@@ -611,14 +737,15 @@ class RedisExecutionStorage(ExecutionStorage):
         try:
             counter_keys = self.counter_keys_for_execution(execution_id)
             pipe = self.client.pipeline()
-            if tombstone_ttl > 0:
-                pipe.set(
-                    execution_tombstone_key(execution_id),
-                    tombstone_payload,
-                    ex=tombstone_ttl,
-                )
-            else:
-                pipe.set(execution_tombstone_key(execution_id), tombstone_payload)
+            # A69-04：只创建 + 只延长。二次 delete 不得覆盖首次 deleted_at/
+            # tenant/reason，也不得把已到期的 horizon 重新拉满成「新删除」。
+            pipe.eval(
+                _TOMBSTONE_WRITE_LUA,
+                1,
+                execution_tombstone_key(execution_id),
+                tombstone_payload,
+                str(int(tombstone_ttl)),
+            )
             pipe.delete(execution_key)
             pipe.zrem(self._execution_index_key(), execution_id)
             pipe.delete(execution_fence_key(self.namespace, execution_id))

@@ -18,6 +18,7 @@ from plaita.redis_client import (
     CONSOLE_CONNECT_TIMEOUT_SECONDS,
     CONSOLE_SOCKET_TIMEOUT_SECONDS,
 )
+from plaita.storage.redis import validate_tombstone_retention
 from plaita.tenant_context import (
     DEFAULT_TENANT_ID,
     TENANT_SOURCE_EXPLICIT,
@@ -172,6 +173,11 @@ async def lifespan(app: FastAPI):
     # 从事件循环上下文继承，写路径不再静默降级 default）。
     set_current_tenant(DEFAULT_TENANT_ID, source=TENANT_SOURCE_EXPLICIT)
     settings = get_settings()
+
+    # A69-04：启动期保留期配置校验（每进程一次）。墓碑 TTL 现在独立于 state
+    # TTL，``<=0`` 不再表示永久；可疑配置（年龄闸关闭/显式墓碑过短/非法回退）
+    # 只 WARNING 不阻断启动，但必须可观测。
+    validate_tombstone_retention()
 
     # 启动时连接 Redis；不可达则进入本地单机模式（不阻断启动）。
     # app.state.redis_url 是「数据面当前连的是哪套 Redis」的真相源，集群切换

@@ -27,6 +27,7 @@ execution_id 从头跑，首节点副作用双份（文档已标注首节点须�
   会被误判为重复启动而永不执行，键必须调用方显式声明「同键=同逻辑 start」。
 """
 import json
+from datetime import datetime
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -334,7 +335,14 @@ class TestDispatchPassthrough:
 
         worker.start_flow = spy
         worker._dispatch_task(
-            {"type": "start", "flow_id": "f1", "params": {}, "dedup_key": "abc"},
+            {
+                "type": "start",
+                "flow_id": "f1",
+                "params": {},
+                "dedup_key": "abc",
+                # A69-04：年龄闸默认开启，合成载体需显式携带入队时间。
+                "timestamp": datetime.now().isoformat(),
+            },
             delivery_count=1,
         )
         assert seen["dedup_key"] == "abc"
@@ -448,6 +456,8 @@ class TestStartToResumeParamsCarry:
                 "resume_type": "continue",
                 "tenant_id": "default",
                 "params": {"watch_agent": "deepseek-flash"},
+                # A69-04：年龄闸默认开启，合成载体需显式携带入队时间。
+                "timestamp": datetime.now().isoformat(),
             },
             delivery_count=1,
         )

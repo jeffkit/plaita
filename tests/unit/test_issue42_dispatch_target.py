@@ -23,6 +23,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 pytest.importorskip("cachetools")
@@ -36,6 +38,18 @@ from plaita.server.flow_worker import RedisFlowWorker, TaskNotForThisWorker  # n
 from plaita.server.registry import ServiceInfo  # noqa: E402
 
 CANARY_QUEUE = "plaita:flow:queue:canary"
+
+
+def _carrier(**extra):
+    """合成 start 载体：A69-04 年龄闸默认开启，直接 dispatch 需带合法时间。"""
+    body = {
+        "type": "start",
+        "flow_id": "f",
+        "execution_id": "e1",
+        "timestamp": datetime.now().isoformat(),
+    }
+    body.update(extra)
+    return body
 
 
 def _block(free_disk_gib, *, disk_blocked=False, active_tasks=0, concurrency=1):
@@ -122,27 +136,21 @@ class TestWorkerDispatchGate:
     def test_non_target_worker_raises_handover_exception(self):
         w = _skeleton_worker("w-low")
         with pytest.raises(TaskNotForThisWorker) as ei:
-            w._dispatch_task({
-                "type": "start", "flow_id": "f", "execution_id": "e1",
-                "target_instance_id": "w-high",
-            })
+            w._dispatch_task(_carrier(target_instance_id="w-high"))
         assert "w-high" in str(ei.value)
 
     def test_target_worker_proceeds_past_the_gate(self):
         """目标机不受闸约束（后续失败与本闸无关——只要不是交接异常）。"""
         w = _skeleton_worker("w-high")
         with pytest.raises(Exception) as ei:
-            w._dispatch_task({
-                "type": "start", "flow_id": "f", "execution_id": "e1",
-                "target_instance_id": "w-high",
-            })
+            w._dispatch_task(_carrier(target_instance_id="w-high"))
         assert not isinstance(ei.value, TaskNotForThisWorker)
 
     def test_untargeted_message_is_zero_behavior_change(self):
         """无目标字段 = 存量广播消息 ⇒ 行为与期 0 完全一致（放行）。"""
         w = _skeleton_worker("w-low")
         with pytest.raises(Exception) as ei:
-            w._dispatch_task({"type": "start", "flow_id": "f", "execution_id": "e1"})
+            w._dispatch_task(_carrier())
         assert not isinstance(ei.value, TaskNotForThisWorker)
 
     def test_unknown_instance_id_is_allowed(self):
@@ -150,10 +158,7 @@ class TestWorkerDispatchGate:
         w = _skeleton_worker(None)
         assert w.instance_id is None
         with pytest.raises(Exception) as ei:
-            w._dispatch_task({
-                "type": "start", "flow_id": "f", "execution_id": "e1",
-                "target_instance_id": "w-high",
-            })
+            w._dispatch_task(_carrier(target_instance_id="w-high"))
         assert not isinstance(ei.value, TaskNotForThisWorker)
 
     def test_rollback_switch_disables_gate(self, monkeypatch):
@@ -164,10 +169,7 @@ class TestWorkerDispatchGate:
         assert fw._dispatch_target_disabled() is True
         w = _skeleton_worker("w-low")
         with pytest.raises(Exception) as ei:
-            w._dispatch_task({
-                "type": "start", "flow_id": "f", "execution_id": "e1",
-                "target_instance_id": "w-high",
-            })
+            w._dispatch_task(_carrier(target_instance_id="w-high"))
         assert not isinstance(ei.value, TaskNotForThisWorker)
 
     def test_affinity_switch_does_not_disable_target_gate(self, monkeypatch):
@@ -175,10 +177,7 @@ class TestWorkerDispatchGate:
         monkeypatch.setenv("PLAITA_DISABLE_AFFINITY", "1")
         w = _skeleton_worker("w-low")
         with pytest.raises(TaskNotForThisWorker):
-            w._dispatch_task({
-                "type": "start", "flow_id": "f", "execution_id": "e1",
-                "target_instance_id": "w-high",
-            })
+            w._dispatch_task(_carrier(target_instance_id="w-high"))
 
 
 class TestHandoverPreservesTarget:
@@ -358,7 +357,7 @@ class TestDecideRoute:
         那会让存量广播派发全部停摆。
         """
         w_low = _skeleton_worker("w-low")
-        broadcast = {"type": "start", "flow_id": "f", "execution_id": "e-bc"}
+        broadcast = _carrier(execution_id="e-bc")
         assert cap.target_mismatch(broadcast, "w-low") is None
         with pytest.raises(Exception) as ei:
             w_low._dispatch_task(dict(broadcast))

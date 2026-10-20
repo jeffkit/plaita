@@ -64,7 +64,8 @@ class _LoopWorker:
     def _bump_active(self, delta):
         pass
 
-    def _dispatch_task(self, body, delivery_count=None, schema_version=None):
+    def _dispatch_task(self, body, delivery_count=None, schema_version=None,
+                       stream_message_id=None):
         self.seen.append(body)
         # 正常消息处理完就停循环，避免依赖 block 超时。
         self._running = False
@@ -125,7 +126,10 @@ class TestInvalidPayloadReadPath:
 
         assert q.read(block_ms=1) is None  # 坏消息先被处置
         task = q.read(block_ms=1)
-        assert task is not None and task.body == normal
+        assert task is not None
+        # A69-04：入队自动注入载体 timestamp；其余字段与原始 body 一致。
+        assert task.body["timestamp"]
+        assert {k: v for k, v in task.body.items() if k != "timestamp"} == normal
         q.ack(task.message_id)
         assert redis.xlen(STREAM) == 0
 
@@ -141,7 +145,12 @@ class TestInvalidPayloadReadPath:
         worker = _LoopWorker()
         RedisFlowWorker._consume_loop(worker, q)  # 修复前：这里抛 ValueError
 
-        assert worker.seen == [normal], "坏消息之后的正常消息没被处理"
+        assert len(worker.seen) == 1, "坏消息之后的正常消息没被处理"
+        # A69-04：入队自动注入载体 timestamp；其余字段与原始 body 一致。
+        assert worker.seen[0]["timestamp"]
+        assert {
+            k: v for k, v in worker.seen[0].items() if k != "timestamp"
+        } == normal
         assert len(_dlq_envelopes(redis, q)) == 1
         assert redis.xlen(STREAM) == 0
 

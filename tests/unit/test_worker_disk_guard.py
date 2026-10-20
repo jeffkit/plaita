@@ -224,8 +224,8 @@ class TestConsumeLoopClaimGate(unittest.TestCase):
             **attrs,
         )
         w._dispatch_task = (
-            lambda body, delivery_count=1, schema_version=None:
-            self.dispatched.append(body)
+            lambda body, delivery_count=1, schema_version=None,
+            stream_message_id=None: self.dispatched.append(body)
         )
         return w
 

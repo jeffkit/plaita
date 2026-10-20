@@ -14,6 +14,7 @@ start/resume 载体永久消失（#48 / ReviewFix D1 的执行状态腿已修，
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from unittest.mock import Mock
 
 import pytest
@@ -150,7 +151,13 @@ def _make_worker(flow_storage):
 
 
 def _start_task(**overrides):
-    body = {"type": "start", "flow_id": "f1", "params": {}}
+    body = {
+        "type": "start",
+        "flow_id": "f1",
+        "params": {},
+        # A69-04：合成 StreamTask（message_id 非数字）需要 payload 年龄证据。
+        "timestamp": datetime.now().isoformat(),
+    }
     body.update(overrides)
     return StreamTask(message_id="msg-1", body=body, delivery_count=1)
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from datetime import datetime
 
 import pytest
 
@@ -78,9 +79,12 @@ def test_dispatch_raises_not_for_this_worker():
     """消费入口：不亲和 → 抛 TaskNotForThisWorker（run() 据此不 ack 留 pending）。"""
     w = _worker()
     with pytest.raises(TaskNotForThisWorker):
-        w._dispatch_task(
-            {"type": "start", "flow_id": "f", "params": {"repo": "/nonexistent/xyz"}}
-        )
+        w._dispatch_task({
+            "type": "start", "flow_id": "f",
+            "params": {"repo": "/nonexistent/xyz"},
+            # A69-04：年龄闸默认开启，合成载体需带合法入队时间。
+            "timestamp": datetime.now().isoformat(),
+        })
 
 
 def test_affinity_disable_switch(monkeypatch):
@@ -93,7 +97,8 @@ def test_affinity_disable_switch(monkeypatch):
     # TaskNotForThisWorker 即可）
     with pytest.raises(Exception) as ei:
         w._dispatch_task({"type": "start", "flow_id": "f",
-                          "params": {"repo": "/nonexistent/xyz"}})
+                          "params": {"repo": "/nonexistent/xyz"},
+                          "timestamp": datetime.now().isoformat()})
     assert not isinstance(ei.value, TaskNotForThisWorker)
 
 

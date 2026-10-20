@@ -29,6 +29,7 @@ import logging
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from .task_queue import (
@@ -36,6 +37,7 @@ from .task_queue import (
     PAYLOAD_FIELD,
     TASK_SCHEMA_VERSION,
     enqueue_task,
+    timestamp_from_stream_id,
 )
 from ..core.url_redaction import _scrub_url_text
 
@@ -87,6 +89,29 @@ def _text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return "" if value is None else str(value)
+
+
+def _dead_letter_carrier_timestamp(
+    envelope: Dict[str, Any], dlq_message_id: str
+) -> Optional[str]:
+    """DLQ 条目的载体入队时间（A69-04）：``dead_lettered_at`` → DLQ Stream ID。
+
+    replay **不得用 now() 刷新年龄**：运维把一条 40 天前的老载体回灌后，
+    它必须仍能被派发闸的年龄闸拦下（否则 replay 就是「洗白老 start」的
+    后门）。两源都不可解析 → None，调用方 fail-closed 拒绝回灌。
+    """
+    raw = envelope.get("dead_lettered_at")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        try:
+            return datetime.fromtimestamp(float(raw)).isoformat()
+        except (OverflowError, OSError, ValueError):
+            pass
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            return datetime.fromisoformat(raw.strip()).isoformat()
+        except ValueError:
+            pass
+    return timestamp_from_stream_id(dlq_message_id)
 
 
 def _read_marker(redis, key: str) -> Optional[Dict[str, Any]]:
@@ -360,6 +385,30 @@ def replay_dead_letter(
         )
 
     payload = dict(body)
+    # A69-04：replay 不得把老载体洗成新载体。payload 缺 timestamp 时用
+    # DLQ 条目的 dead_lettered_at（写入时刻）或 DLQ Stream ID 时间；两源
+    # 都不可解析 ⇒ 拒绝回灌（fail-closed），绝不用 now() 兜底。
+    existing_ts = payload.get("timestamp")
+    if not isinstance(existing_ts, str) or not existing_ts.strip():
+        carrier_ts = _dead_letter_carrier_timestamp(envelope, msg_id)
+        if carrier_ts is None:
+            return _reject(
+                redis,
+                actor=actor,
+                dlq_key=dlq_key,
+                dlq_id=msg_id,
+                target_stream=target_stream,
+                reason="carrier_timestamp_unknown",
+                detail=(
+                    "dead-letter payload has no timestamp and neither "
+                    "dead_lettered_at nor dlq stream id is parseable; "
+                    "replay would reset the carrier age"
+                ),
+                schema_version=schema_version,
+                source_id=source_id,
+                force=force,
+            )
+        payload["timestamp"] = carrier_ts
     owner = payload.get("tenant_id")
     if not isinstance(owner, str) or not owner:
         if not tenant_id:

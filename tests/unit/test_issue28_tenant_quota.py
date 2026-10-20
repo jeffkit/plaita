@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
 
 import pytest
 
@@ -56,7 +57,13 @@ def _make_worker(fake) -> RedisFlowWorker:
 
 
 def _start_msg(tenant="acme", execution_id="e1", **extra):
-    msg = {"type": "start", "flow_id": "f1", "tenant_id": tenant}
+    msg = {
+        "type": "start",
+        "flow_id": "f1",
+        "tenant_id": tenant,
+        # A69-04：年龄闸默认开启，合成载体需显式携带入队时间。
+        "timestamp": datetime.now().isoformat(),
+    }
     if execution_id is not None:
         msg["execution_id"] = execution_id
     msg.update(extra)
@@ -225,7 +232,10 @@ class TestWorkerStartGate:
         assert try_admit_tenant_start(fake, "acme", "slot-holder") is True
         calls = []
         worker.resume_flow = lambda *a, **k: calls.append("resume")
-        worker._dispatch_task({"type": "resume", "tenant_id": "acme", "execution_id": "e1"})
+        worker._dispatch_task({
+            "type": "resume", "tenant_id": "acme", "execution_id": "e1",
+            "timestamp": datetime.now().isoformat(),
+        })
         assert calls == ["resume"]
 
     def test_message_without_execution_id_fail_open(self):

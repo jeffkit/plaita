@@ -539,7 +539,8 @@ class TestRunLoopRetrySemantics:
                           delivery_count=3)
         stub = _StubQueue(worker, [task])
 
-        def fake_dispatch(body, delivery_count=None, schema_version=None):
+        def fake_dispatch(body, delivery_count=None, schema_version=None,
+                          stream_message_id=None):
             seen.append(delivery_count)
 
         with patch.object(worker, "_get_task_queue", return_value=stub):
@@ -645,7 +646,11 @@ class TestExplicitRequeueOnRetryableFailure:
         q = MagicMock()
         task = self._task()
         assert w._requeue_retryable_failure(task, q) is True
-        q.enqueue.assert_called_once_with(task.body)
+        # A69-04：副本保留源载体年龄（源 message_id "1-0" → 1970 毫秒前缀）；
+        # 其余字段与源 body 一致。
+        sent = q.enqueue.call_args[0][0]
+        assert sent["timestamp"]
+        assert {k: v for k, v in sent.items() if k != "timestamp"} == task.body
         q.ack.assert_called_once_with("1-0")
 
     def test_enqueue_happens_before_ack(self):

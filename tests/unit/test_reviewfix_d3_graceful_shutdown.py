@@ -87,7 +87,8 @@ def _make_worker_with_slow_task(storage, started, proceed):
     )
     worker._get_task_queue = lambda: queue
 
-    def slow_dispatch(message_data, delivery_count=None, schema_version=None):
+    def slow_dispatch(message_data, delivery_count=None, schema_version=None,
+                      stream_message_id=None):
         # 模拟在途执行正卡在 LLM 调用/存储写入之间
         # （delivery_count：波次二任务① 起 run() 会透传消息投递次数）
         started.set()

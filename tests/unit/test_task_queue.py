@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 import time
 import unittest
-from unittest.mock import patch
+from datetime import datetime
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -35,7 +36,11 @@ class TestRedisStreamTaskQueue(unittest.TestCase):
 
         read = q_cons.read(block_ms=100)
         self.assertIsNotNone(read)
-        self.assertEqual(read.body, task)
+        # A69-04：入队自动注入载体 timestamp；其余字段与入参一致。
+        self.assertTrue(read.body["timestamp"])
+        self.assertEqual(
+            {k: v for k, v in read.body.items() if k != "timestamp"}, task
+        )
         q_cons.ack(read.message_id)
 
         # 已 ack 的消息不应再被同一 consumer 读到
@@ -297,19 +302,22 @@ class TestRedisFlowWorkerDispatch(unittest.TestCase):
             enable_registry=False,
         )
         with patch.object(worker, "start_flow") as start:
-            worker._dispatch_task({"type": "start", "flow_id": "f", "params": {}, "version": "1"})
+            worker._dispatch_task({"type": "start", "flow_id": "f", "params": {},
+                                   "version": "1",
+                                   "timestamp": datetime.now().isoformat()})
             # rebase 组合：execution_id（G1 预铸）+ dedup_key / delivery_count
             # （波次二任务③/①）三者一起透传
             start.assert_called_once_with(
                 "f", {}, "1", execution_id=None, dedup_key=None, delivery_count=None,
-                enqueued_at=None, schema_version=None)
+                enqueued_at=ANY, schema_version=None)
         with patch.object(worker, "start_flow") as start:
             # BFF 预铸 id 随消息透传（P0 可见性：提交方即刻可轮询）
             worker._dispatch_task({"type": "start", "flow_id": "f", "params": {},
-                                   "version": "1", "execution_id": "pre-1"})
+                                   "version": "1", "execution_id": "pre-1",
+                                   "timestamp": datetime.now().isoformat()})
             start.assert_called_once_with(
                 "f", {}, "1", execution_id="pre-1", dedup_key=None, delivery_count=None,
-                enqueued_at=None, schema_version=None)
+                enqueued_at=ANY, schema_version=None)
         with patch.object(worker, "resume_flow") as resume:
             worker._dispatch_task(
                 {
@@ -318,6 +326,7 @@ class TestRedisFlowWorkerDispatch(unittest.TestCase):
                     "execution_id": "e",
                     "resume_type": "event",
                     "data": {"k": 1},
+                    "timestamp": datetime.now().isoformat(),
                 }
             )
             # params 透传是 plaita#122 的 additive 契约：无 params 的 resume
@@ -333,6 +342,7 @@ class TestRedisFlowWorkerDispatch(unittest.TestCase):
                     "execution_id": "e",
                     "resume_type": "continue",
                     "params": {"watch_agent": "deepseek-flash"},
+                    "timestamp": datetime.now().isoformat(),
                 }
             )
             resume.assert_called_once_with(
