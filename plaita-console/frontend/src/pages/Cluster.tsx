@@ -327,6 +327,14 @@ function LogDialog({
           </button>
           <span className="text-sm text-dark-400 ml-auto">
             共 {logsData?.total || 0} 条日志
+            {logsData?.truncated && (
+              <span
+                className="text-status-warning"
+                title="读取预算/键扫描触界，仅返回部分结果；缩小时间范围或实例范围后重试"
+              >
+                （结果不完整）
+              </span>
+            )}
           </span>
         </div>
         
