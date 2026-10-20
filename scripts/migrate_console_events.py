@@ -136,7 +136,10 @@ def migrate(client, apply: bool = False) -> Dict[str, int]:
             f"events:{event.event_id} (type={event.event_type}, ttl={ttl}s)"
         )
         if apply:
-            store_event_sync(client, event, ttl=ttl)
+            # A78-01：记录按 legacy 剩余 TTL 复制，但类型桶 TTL 用正典默认值
+            # 且只延长不缩短——否则一条剩余 5s 的 legacy 会把同类型 7d 记录
+            # 的索引桶砍到 5s，桶到期后 list_events/回扫对活记录全盲。
+            store_event_sync(client, event, ttl=ttl, index_ttl=default_ttl)
         stats["migrated"] += 1
     return stats
 

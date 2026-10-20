@@ -1135,18 +1135,27 @@ canonical 键，无 Redis schema 变更。
 整体过期，`zcard`/`scard` 持续高于 live 数。单纯停续期会把仍存活成员的桶一起放死，
 因此采用三层组合：
 
-1. **继续续期**（写路径不变）；
+1. **继续续期，但只延长不缩短**：写路径对类型桶执行 `TTL=max(当前剩余, 目标)`。
+   同一桶可能承载不同 TTL 的成员（回填按 legacy 剩余 TTL 复制，最短 1s；
+   `PLAITA_EVENT_TTL_SECONDS` 调小时新写也变短），无条件 `EXPIRE` 会把整桶
+   砍到最后一条成员的 TTL——桶先过期后，同类型仍存活的记录对 `list_events`/
+   回扫全盲，且回填对已存在记录跳过、重跑也补不回索引（A78-01）。回填脚本
+   因此显式传 `index_ttl=默认 7d`；
 2. **读时惰性清理**：
    * `RedisEventStorage.list_events` 对已确认载荷缺失的成员按类型桶 `ZREM`
      （ERROR 日志保留：数据面损坏仍要可见，但不再每轮重复）；
    * `RedisEventSubscriptionStorage.list_subscriptions` 一次 `MGET` 取候选
      （替代逐条 GET 的 N+1），对**被选中桶**里 data 缺失的成员 `SREM`；全量
      `SCAN data:*` 路径没有桶信息，交给 janitor；
+   * 判死与删除在**单条 Lua** 内完成（`EXISTS`+`ZREM/SREM` 原子）。旧实现两段
+     往返，窗口内同 id 被重新写回时会把活成员删出索引（记录在、`list_*` 盲；
+     A78-05）；
 3. **有界 janitor**（`plaita.event.index_janitor.IndexJanitor`，由
    `EventFilter.start()/stop()` 同生命周期挂载，不依赖 EventReconciler 是否启用）：
    `SCAN` 索引键 + `ZSCAN`/`SSCAN` 游标，每 tick 只**检查** `PLAITA_EVENT_INDEX_SWEEP_BUDGET`
    个成员（默认 500），`EXISTS data` 缺失即 `ZREM`/`SREM`。覆盖惰性清理够不到的
-   冷桶（订阅 `flow:`/`node:`）。
+   冷桶（订阅 `flow:`/`node:`）。桶轮转按**本 tick 实际进入的桶数**前进，首轮
+   覆盖≈桶数/预算 个 tick（旧实现每 tick 只 +1，窗口内其余桶被重复检查）。
 
 关键边界：
 
@@ -1156,6 +1165,9 @@ canonical 键，无 Redis schema 变更。
 * 单桶失败（WRONGTYPE 等）只 WARNING 并计入错误计数，不终止其余桶/下一 tick；
 * 关闭 janitor（`PLAITA_DISABLE_EVENT_INDEX_SWEEP=1`）必须在启动打 WARNING：
   这是「过期成员继续累积」的已知降级，不得静默；
+* `PLAITA_EVENT_INDEX_SWEEP_INTERVAL` 必须是**有限**正数秒；`nan`/`inf` 会让
+  `asyncio.wait_for` 的定时器永不触发（启动扫一轮后静默停摆），现在回退默认
+  60s 并 WARNING（A78-04）；
 * console 删除订阅已补齐 `node:` 索引（此前只清 type/correlation/flow），与引擎
   `delete_subscription` 和租户 purge 的四索引口径一致；
 * 指标：进程级 `event_index_pruned_total{kind="event_type|sub_type|sub_correlation|sub_flow|sub_node"}`

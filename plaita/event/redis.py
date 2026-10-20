@@ -759,6 +759,88 @@ def _subscription_index_kind(index_key: str, key_prefix: str) -> str:
     return "sub_type"
 
 
+# ---------------------------------------------------------------------------
+# 索引 TTL 只延长不缩短（A78-01）
+#
+# 同一类型桶可能承载**不同 TTL** 的成员：回填脚本按 legacy 剩余 TTL 复制
+# （最短 1s），``PLAITA_EVENT_TTL_SECONDS`` 调小时新写也变短。无条件
+# ``EXPIRE`` 会把整桶砍到最后一条成员的 TTL——桶先过期后，同类型仍存活的
+# 正典记录对 ``list_events``/EventReconciler 全部失明，且回填脚本对已存在
+# 记录 ``skipped_existing``，重跑也不会把成员补回索引。
+#
+# 语义：桶 TTL = max(当前剩余, 本次目标)；``-1``（无过期）也视为更长，不缩短。
+# 新建键（``TTL=-1``）正常设置目标 TTL；``-2``（ZADD 后不应出现）保持缺失。
+# ---------------------------------------------------------------------------
+_INDEX_TTL_EXTEND_LUA = """
+local current = redis.call('TTL', KEYS[1])
+if current == -2 then
+  return -2
+end
+local target = tonumber(ARGV[1])
+if current == -1 or current < target then
+  redis.call('EXPIRE', KEYS[1], target)
+  return target
+end
+return current
+"""
+
+
+# ---------------------------------------------------------------------------
+# 索引清理的原子判死（A78-05）
+#
+# ``EXISTS data`` 与 ``ZREM/SREM member`` 是两段往返：窗口内同 id 被重新写回
+# 时，新写的活成员会被删出索引（记录在、``list_*`` 盲）。Lua 把判死与删除
+# 合成单命令：写入发生在脚本前 → EXISTS=1 保留；发生在脚本后 → ZADD/SADD
+# 重新入索引。
+# ---------------------------------------------------------------------------
+_PRUNE_INDEX_MEMBERS_LUA = """
+local missing = {}
+for i = 1, #ARGV do
+  if redis.call('EXISTS', KEYS[i + 1]) == 0 then
+    missing[#missing + 1] = ARGV[i]
+  end
+end
+if #missing > 0 then
+  redis.call('__REMOVE_COMMAND__', KEYS[1], unpack(missing))
+end
+return #missing
+"""
+_PRUNE_EVENT_MEMBERS_LUA = _PRUNE_INDEX_MEMBERS_LUA.replace(
+    "__REMOVE_COMMAND__", "ZREM"
+)
+_PRUNE_SUBSCRIPTION_MEMBERS_LUA = _PRUNE_INDEX_MEMBERS_LUA.replace(
+    "__REMOVE_COMMAND__", "SREM"
+)
+
+
+async def _prune_index_members_atomic(
+    redis, index_key: str, record_keys: List[str], members: List[str],
+    script: str,
+) -> int:
+    """原子清理：``record_key`` 不存在的成员从 ``index_key`` 移除。"""
+    if not members:
+        return 0
+    return int(
+        await redis.eval(
+            script, 1 + len(record_keys), index_key, *record_keys, *members
+        )
+    )
+
+
+def _prune_index_members_atomic_sync(
+    client, index_key: str, record_keys: List[str], members: List[str],
+    script: str,
+) -> int:
+    """同步版（``store_event_sync`` 的写侧兜底清理）。"""
+    if not members:
+        return 0
+    return int(
+        client.eval(
+            script, 1 + len(record_keys), index_key, *record_keys, *members
+        )
+    )
+
+
 #: ``{type_key: {"last": monotonic, "offset": 下一个起检位置}}``——offset 轮转
 #: 保证兜底清理能覆盖整桶，而不是永远只看 score 最小的那 8 个。
 _event_index_write_prune_state: Dict[str, Dict[str, float]] = {}
@@ -807,17 +889,21 @@ def _prune_event_index_on_write(
         )
         if not members:
             return
-        pipe = client.pipeline(transaction=False)
-        for event_id in members:
-            pipe.exists(event_record_key(event_id, key_prefix))
-        flags = pipe.execute()
-        missing = [eid for eid, ok in zip(members, flags) if not int(ok)]
-        if missing:
-            client.zrem(type_key, *missing)
-            _record_event_index_pruned("event_type", len(missing))
+        if not members:
+            return
+        # A78-05：判死与 ZREM 合成单命令——窗口内同 id 被重写时保留活成员。
+        removed = _prune_index_members_atomic_sync(
+            client,
+            type_key,
+            [event_record_key(event_id, key_prefix) for event_id in members],
+            members,
+            _PRUNE_EVENT_MEMBERS_LUA,
+        )
+        if removed:
+            _record_event_index_pruned("event_type", removed)
             logger.info(
                 "事件索引写侧兜底清理: 桶 %s 检查 %d 个成员，移除 %d 个载荷缺失成员",
-                type_key, len(members), len(missing),
+                type_key, len(members), removed,
             )
     except Exception as exc:  # noqa: BLE001 — 兜底失败不影响落盘
         logger.warning(
@@ -831,20 +917,25 @@ def store_event_sync(
     event: Event,
     ttl: int,
     key_prefix: str = DEFAULT_EVENT_KEY_PREFIX,
+    index_ttl: Optional[int] = None,
 ) -> None:
     """同步写正典事件（console / base service 共用）。
 
-    与 ``RedisEventStorage.store_event`` 完全同形：记录 string + 类型 ZSET +
-    同 TTL。同步客户端由调用方提供（console 的 ``app.state.redis`` /
-    base service 的 ``_redis_client``），用于绕开 aioredis 跨 loop 问题。
-    写后按 ``PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE`` 做有界兜底清理。
+    与 ``RedisEventStorage.store_event`` 完全同形：记录 string + 类型 ZSET。
+    同步客户端由调用方提供（console 的 ``app.state.redis`` / base service 的
+    ``_redis_client``），用于绕开 aioredis 跨 loop 问题。写后按
+    ``PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE`` 做有界兜底清理。
+
+    ``ttl`` 是**记录**的保留期；``index_ttl`` 是类型桶的目标 TTL（默认同
+    ``ttl``）。两者分离用于回填：legacy 记录按剩余 TTL 复制，但桶 TTL 不得
+    被短成员砍短（A78-01）。桶 TTL 只延长不缩短。
     """
     record_key = event_record_key(event.event_id, key_prefix)
     type_key = event_type_index_key(event.event_type, key_prefix)
     pipe = client.pipeline()
     pipe.set(record_key, event.model_dump_json(), ex=ttl)
     pipe.zadd(type_key, {event.event_id: event.timestamp})
-    pipe.expire(type_key, ttl)
+    pipe.eval(_INDEX_TTL_EXTEND_LUA, 1, type_key, int(index_ttl or ttl))
     pipe.execute()
     _prune_event_index_on_write(client, type_key, key_prefix)
 
@@ -923,13 +1014,6 @@ def _as_str(value) -> str:
     return str(value)
 
 
-async def _exists_flags(redis, keys: List[str]) -> List[int]:
-    pipe = redis.pipeline(transaction=False)
-    for key in keys:
-        pipe.exists(key)
-    return [int(flag) for flag in await pipe.execute()]
-
-
 
 class RedisEventStorage(EventStorage):
     """
@@ -999,11 +1083,13 @@ class RedisEventStorage(EventStorage):
         event_data = event.model_dump_json()
         
         event_key = event_record_key(event.event_id, self.key_prefix)
-        await self.redis.set(event_key, event_data, ex=self.ttl)
-        
         type_key = event_type_index_key(event.event_type, self.key_prefix)
-        await self.redis.zadd(type_key, {event.event_id: event.timestamp})
-        await self.redis.expire(type_key, self.ttl)
+        # A78-01：桶 TTL 只延长不缩短（记录 TTL 可随 env 调小，桶不能被砍短）。
+        pipe = self.redis.pipeline()
+        pipe.set(event_key, event_data, ex=self.ttl)
+        pipe.zadd(type_key, {event.event_id: event.timestamp})
+        pipe.eval(_INDEX_TTL_EXTEND_LUA, 1, type_key, int(self.ttl))
+        await pipe.execute()
         
         return event.event_id
     
@@ -1022,7 +1108,8 @@ class RedisEventStorage(EventStorage):
             
             pipe.set(event_key, event_data, ex=self.ttl)
             pipe.zadd(type_key, {event.event_id: event.timestamp})
-            pipe.expire(type_key, self.ttl)
+            # A78-01：桶 TTL 只延长不缩短。
+            pipe.eval(_INDEX_TTL_EXTEND_LUA, 1, type_key, int(self.ttl))
             event_ids.append(event.event_id)
         
         # 执行管道
@@ -1208,11 +1295,15 @@ class RedisEventStorage(EventStorage):
         """
         total = 0
         try:
-            pipe = self.redis.pipeline(transaction=False)
             for type_key, event_ids in missing_by_type.items():
-                total += len(event_ids)
-                pipe.zrem(type_key, *event_ids)
-            await pipe.execute()
+                removed = await _prune_index_members_atomic(
+                    self.redis,
+                    type_key,
+                    [event_record_key(eid, self.key_prefix) for eid in event_ids],
+                    event_ids,
+                    _PRUNE_EVENT_MEMBERS_LUA,
+                )
+                total += removed
         except Exception as exc:  # noqa: BLE001 — 清理失败不影响读路径
             logger.warning(
                 "事件索引惰性清理失败（下次读重试）: %s",
@@ -1259,16 +1350,19 @@ class RedisEventStorage(EventStorage):
             return 0, 0, 0
 
         # 轮转起点：budget 很小时（如 1）多个桶也能轮流被检查，不会饿死后面的桶。
+        # B78-01：按**本 tick 实际进入的桶数**前进，而不是固定 +1——否则同一窗口
+        # 内的其余桶下一 tick 被重复检查，首轮覆盖需要 N tick 而不是 N/budget。
         rotation = self._index_prune_rotation % len(type_keys)
         type_keys = type_keys[rotation:] + type_keys[:rotation]
-        self._index_prune_rotation = (rotation + 1) % len(type_keys)
 
         per_key = max(1, budget // len(type_keys))
         remaining = budget
         examined = pruned = errors = 0
+        entered = 0
         for type_key in type_keys:
             if remaining <= 0:
                 break
+            entered += 1
             allowance = min(remaining, per_key)
             try:
                 members, removed = await self._prune_one_event_bucket(type_key, allowance)
@@ -1282,6 +1376,8 @@ class RedisEventStorage(EventStorage):
             examined += len(members)
             pruned += removed
             remaining -= len(members)
+        if entered:
+            self._index_prune_rotation = (rotation + entered) % len(type_keys)
         return examined, pruned, errors
 
     async def _prune_one_event_bucket(
@@ -1298,18 +1394,21 @@ class RedisEventStorage(EventStorage):
         self._drop_finished_prune_state(type_key, state)
         if not members:
             return [], 0
-        flags = await _exists_flags(
-            self.redis, [event_record_key(eid, self.key_prefix) for eid in members]
+        # A78-05：EXISTS 判死与 ZREM 在单条 Lua 内完成（无 exists→zrem 窗口）。
+        removed = await _prune_index_members_atomic(
+            self.redis,
+            type_key,
+            [event_record_key(eid, self.key_prefix) for eid in members],
+            members,
+            _PRUNE_EVENT_MEMBERS_LUA,
         )
-        missing = [eid for eid, ok in zip(members, flags) if not ok]
-        if missing:
-            await self.redis.zrem(type_key, *missing)
-            _record_event_index_pruned("event_type", len(missing))
+        if removed:
+            _record_event_index_pruned("event_type", removed)
             logger.info(
                 "事件索引清扫: 桶 %s 检查 %d 个成员，移除 %d 个载荷缺失成员",
-                type_key, len(members), len(missing),
+                type_key, len(members), removed,
             )
-        return members, len(missing)
+        return members, removed
 
     def _drop_finished_prune_state(self, key: str, state: Dict[str, Any]) -> None:
         if _prune_state_finished(state):
@@ -1547,14 +1646,21 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         # 不影响本次返回（下一次读会重试）。
         if index_key and missing_ids:
             try:
-                await self.redis.srem(index_key, *missing_ids)
+                # A78-05：判死与 SREM 合成单命令，避免删掉窗口内重写的活成员。
+                removed = await _prune_index_members_atomic(
+                    self.redis,
+                    index_key,
+                    [f"{self.key_prefix}data:{sid}" for sid in missing_ids],
+                    missing_ids,
+                    _PRUNE_SUBSCRIPTION_MEMBERS_LUA,
+                )
                 _record_event_index_pruned(
                     _subscription_index_kind(index_key, self.key_prefix),
-                    len(missing_ids),
+                    removed,
                 )
                 logger.info(
                     "订阅索引惰性清理: 桶 %s 移除 %d 个数据缺失成员（返回 %d 条）",
-                    index_key, len(missing_ids), len(result),
+                    index_key, removed, len(result),
                 )
             except Exception as exc:  # noqa: BLE001 — 清理失败不影响读路径
                 logger.warning(
@@ -1587,8 +1693,8 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
 
         返回 ``(examined, pruned, errors)``。四个 pattern（type/correlation/
         flow/node）分别 ``SCAN``，每个桶用 ``SSCAN`` 游标 + 进程内 pending；
-        每 tick 最多检查 ``budget`` 个成员。``subscription_id`` 全局唯一不复用，
-        因此 ``EXISTS data`` 为 0 就可以安全 ``SREM``，不会误删同 id 的新数据。
+        每 tick 最多检查 ``budget`` 个成员。判死与 ``SREM`` 在单条 Lua 内完成
+        （A78-05），``subscription_id`` 是否全局唯一不是安全前提。
         单桶失败只 WARNING 并计入 ``errors``，不终止其余桶。
         """
         await self.initialize()
@@ -1626,14 +1732,15 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
 
         rotation = self._index_prune_rotation % len(buckets)
         buckets = buckets[rotation:] + buckets[:rotation]
-        self._index_prune_rotation = (rotation + 1) % len(buckets)
 
         per_key = max(1, budget // len(buckets))
         remaining = budget
         examined = pruned = 0
+        entered = 0
         for bucket in buckets:
             if remaining <= 0:
                 break
+            entered += 1
             allowance = min(remaining, per_key)
             try:
                 members, removed = await self._prune_one_subscription_bucket(
@@ -1649,6 +1756,9 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
             examined += len(members)
             pruned += removed
             remaining -= len(members)
+        if entered:
+            # B78-01：按实际进入的桶数前进，首轮覆盖≈N/budget 个 tick。
+            self._index_prune_rotation = (rotation + entered) % len(buckets)
         return examined, pruned, errors
 
     async def _prune_one_subscription_bucket(
@@ -1662,20 +1772,23 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
             self._index_prune_state.pop(bucket, None)
         if not members:
             return [], 0
-        flags = await _exists_flags(
-            self.redis, [f"{self.key_prefix}data:{sid}" for sid in members]
+        # A78-05：判死与 SREM 合成单命令（窗口内同 id 重写不被误删）。
+        removed = await _prune_index_members_atomic(
+            self.redis,
+            bucket,
+            [f"{self.key_prefix}data:{sid}" for sid in members],
+            members,
+            _PRUNE_SUBSCRIPTION_MEMBERS_LUA,
         )
-        missing = [sid for sid, ok in zip(members, flags) if not ok]
-        if missing:
-            await self.redis.srem(bucket, *missing)
+        if removed:
             _record_event_index_pruned(
-                _subscription_index_kind(bucket, self.key_prefix), len(missing)
+                _subscription_index_kind(bucket, self.key_prefix), removed
             )
             logger.info(
                 "订阅索引清扫: 桶 %s 检查 %d 个成员，移除 %d 个数据缺失成员",
-                bucket, len(members), len(missing),
+                bucket, len(members), removed,
             )
-        return members, len(missing)
+        return members, removed
     
     async def delete_subscription(self, subscription_id: str) -> bool:
         """删除事件订阅"""

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from typing import Any, Dict, Optional, Tuple
 
@@ -79,9 +80,11 @@ def _resolve_interval(value: Optional[float]) -> float:
             SWEEP_INTERVAL_ENV, _redact_env_value(raw), DEFAULT_SWEEP_INTERVAL_SECONDS,
         )
         return DEFAULT_SWEEP_INTERVAL_SECONDS
-    if seconds <= 0:
+    if seconds <= 0 or not math.isfinite(seconds):
+        # A78-04：``nan``/``inf`` 通过 ``float()`` 但会让 ``wait_for`` 的定时器
+        # 永不触发——清扫变成「启动扫一轮后静默停摆」，且原日志只是 INFO。
         logger.warning(
-            "%s=%s 非正数（会变成忙轮询），清扫周期回退默认 %.0fs",
+            "%s=%s 非法（需有限正数秒），清扫周期回退默认 %.0fs",
             SWEEP_INTERVAL_ENV, _redact_env_value(raw), DEFAULT_SWEEP_INTERVAL_SECONDS,
         )
         return DEFAULT_SWEEP_INTERVAL_SECONDS
