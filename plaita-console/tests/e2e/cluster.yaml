@@ -184,12 +184,13 @@ cases:
       headers:
         Content-Type: application/json
       body:
-        description: "Updated by E2E test"
+        # 请求模型 StrictRequestModel（未知字段 422），没有 description 字段
         url: "redis://host.docker.internal:6379/14"
     expect:
       status: 200
       body:
         name: "e2e-test-infra"
+        url: "redis://host.docker.internal:6379/14"
 
   - name: "删除基础设施"
     request:

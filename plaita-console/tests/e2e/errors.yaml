@@ -17,7 +17,10 @@ cases:
     expect:
       status: 404
       body:
-        detail: { contains: "执行不存在" }
+        # A2R24-01 错误契约：detail 收敛为 {code, message}
+        detail:
+          code: "not_found"
+          message: { contains: "执行不存在" }
 
   - name: "不存在的服务实例返回 404"
     request:
@@ -33,7 +36,10 @@ cases:
     expect:
       status: 404
       body:
-        detail: { contains: "订阅不存在" }
+        # A2R24-01 错误契约：detail 收敛为 {code, message}
+        detail:
+          code: "not_found"
+          message: { contains: "订阅不存在" }
 
   # --- 422 请求验证 ---
   - name: "启动流程缺少 flow_id 返回 422"
@@ -80,15 +86,23 @@ cases:
     expect:
       status: 422
 
-  - name: "超大分页参数不崩溃"
+  # A2R20-04 有界分页：page 上限 10_000，超界 422 拒绝（不再静默截断）
+  - name: "超大分页参数被有界分页拒绝"
     request:
       method: GET
       url: http://localhost:18080/api/executions?page=99999&size=20
     expect:
+      status: 422
+
+  - name: "合法上界分页不崩溃"
+    request:
+      method: GET
+      url: http://localhost:18080/api/executions?page=10000&size=20
+    expect:
       status: 200
       body:
         executions: { type: array }
-        page: 99999
+        page: 10000
         total: { type: number }
 
   - name: "日志 limit 超限使用默认值"
