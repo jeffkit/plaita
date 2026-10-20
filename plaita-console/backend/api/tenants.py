@@ -219,7 +219,12 @@ def add_member(tenant_id: str, req: MemberRequest, request: Request,
         tenants_svc.add_member(get_flow_store(), tenant_id, req.username, req.role)
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=error_detail("member_invalid", str(e)))
-    _audit(request, "tenant.add_member", f"{tenant_id}/{req.username}", {"role": req.role})
+    # A55-S3 残面：成员关系属于目标租户（resource 生效租户），平台管理员
+    # 不带 X-Tenant-ID 时 state.tenant_id=None，不能把审计落到 ""——否则该
+    # 租户 admin 在自己的 /api/audit 里看不到「谁改了本租户成员」。
+    _audit(request, "tenant.add_member", f"{tenant_id}/{req.username}",
+           {"role": req.role, "target_tenant": tenant_id},
+           tenant_id=tenant_id)
     return {"success": True, "username": req.username, "tenant_id": tenant_id}
 
 
@@ -234,7 +239,9 @@ def set_member_role(tenant_id: str, username: str, req: MemberRequest,
         tenants_svc.set_member_role(get_flow_store(), tenant_id, username, req.role)
     except users_svc.UserError as e:
         raise HTTPException(status_code=400, detail=error_detail("member_invalid", str(e)))
-    _audit(request, "tenant.set_member_role", f"{tenant_id}/{username}", {"role": req.role})
+    _audit(request, "tenant.set_member_role", f"{tenant_id}/{username}",
+           {"role": req.role, "target_tenant": tenant_id},
+           tenant_id=tenant_id)
     return {"success": True, "username": username, "role": req.role}
 
 
@@ -247,7 +254,8 @@ def remove_member(tenant_id: str, username: str, request: Request,
                            action="tenant.remove_member")
     if not tenants_svc.remove_member(get_flow_store(), tenant_id, username):
         raise HTTPException(status_code=404, detail=f"{username} 不是租户 {tenant_id} 的成员")
-    _audit(request, "tenant.remove_member", f"{tenant_id}/{username}")
+    _audit(request, "tenant.remove_member", f"{tenant_id}/{username}",
+           {"target_tenant": tenant_id}, tenant_id=tenant_id)
     return {"success": True, "username": username, "tenant_id": tenant_id}
 
 

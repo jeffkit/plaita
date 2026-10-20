@@ -702,9 +702,17 @@ redis-cli KEYS 'plaita:execution:lease:*'
 ### console 审计口径（A55-S2/S3/S4）
 
 - **拒绝审计按窗口合并**：`*.denied` / `auth.denied` / `auth.login_failed` 以
-  `(action, actor, ip, tenant)` 为键，60s 内只落一行；被合并的次数累计到该键
-  下一行的 `detail.suppressed`。平台身份闸（`/api/cluster`、DLQ replay、租户
-  生命周期）与租户成员闸同口径——低权流量不能按请求数撑大审计表。
+  `(action, actor, ip, tenant, reason)` 为键，60s 内只落一行；被合并的次数累计到
+  该键下一行的 `detail.suppressed`。平台身份闸（`/api/cluster`、DLQ replay、租户
+  生命周期）与租户成员闸同口径——低权流量不能按请求数撑大审计表。失败登录的
+  `reason` 入键：`bad_credentials` 与锁定期 `locked` 各自成行，锁定尝试不会被
+  前一条口令错误行吞掉。
+- **租户成员操作归属**：`tenant.add_member` / `set_member_role` / `remove_member`
+  的 `tenant_id` 是**目标租户**（不是平台调用者的 `""`），`detail.target_tenant`
+  同值回显——否则该租户 admin 在自己的 `/api/audit` 里看不到「谁改了本租户成员」。
+- **AI 生成留痕**：`flow.ai_generate`（`POST /api/flows/ai-generate/stream`，
+  平台身份专属）在成功启动生成流时写审计，只记 `agent` 与工作区租户，prompt
+  与生成物不入库；拒绝走 `flows.ai_generate.stream.denied`。
 - **DLQ replay 归属**：`POST /api/queues/dlq/{dlq_id}/replay` 的成功、具名拒绝
   以及 404/422 尝试都写 `dlq.replay`；行内 `tenant_id` 是**死信条目所属租户**
   （不是调用者的 `X-Tenant-ID`），`detail.target_tenant` 同值回显。`actor` /

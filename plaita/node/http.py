@@ -1478,9 +1478,32 @@ class HTTP(Node):
             )
         return value
 
+    # A2R28-04：负值/非有限与上限同批构造期拒绝——只校验上限时
+    # ``maxRedirects=-1`` 会一路构造成功，而 sync/async 的重定向循环对负值
+    # 的解释不同（sync 先发一跳再报超限；async 的 ``range(max_redirects+1)``
+    # 为空，一跳都不发就报超限），同一配置两种行为。``0`` 仍是合法的「不跟随」。
+    @field_validator("max_redirects", mode="before")
+    @classmethod
+    def _validate_max_redirects_shape(cls, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return value  # 交给 Pydantic 报类型错误（不吞字符串等输入）
+        if isinstance(value, float) and (
+            not math.isfinite(value) or not value.is_integer()
+        ):
+            raise ValueError(
+                f"maxRedirects 必须是有限整数: {value!r}"
+                "（重定向跟随次数；0 表示不跟随）"
+            )
+        return value
+
     @field_validator("max_redirects")
     @classmethod
-    def _validate_max_redirects_upper_bound(cls, value: int) -> int:
+    def _validate_max_redirects_bounds(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(
+                f"maxRedirects 不能为负值: {value}"
+                "（0 表示不跟随重定向；负值会让 sync/async 行为分叉）"
+            )
         if value > MAX_REDIRECTS:
             raise ValueError(
                 f"maxRedirects 超过上限: {value} > {MAX_REDIRECTS}"
