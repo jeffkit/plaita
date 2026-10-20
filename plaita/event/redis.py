@@ -889,8 +889,6 @@ def _prune_event_index_on_write(
         )
         if not members:
             return
-        if not members:
-            return
         # A78-05：判死与 ZREM 合成单命令——窗口内同 id 被重写时保留活成员。
         removed = _prune_index_members_atomic_sync(
             client,

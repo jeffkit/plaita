@@ -1125,6 +1125,11 @@ console `POST /api/events/publish` 自 **A69-02** 起不再自建旁路键，而
 实例写 canonical）。回滚只需回退 console 代码——旧读面的 `SCAN` + string 解析能读
 canonical 键，无 Redis schema 变更。
 
+**legacy Pub/Sub 频道**：`POST /api/events/publish` 仍向
+`plaita:event:channel:{type}` 发一份通知，仅为兼容仓外消费者保留**一个 release**；
+仓内无订阅者，新消费者应订阅 `plaita:events:{type}`。该频道已 **deprecated**，
+下个 release 删除。
+
 升级前 ≤24h 的关键手动事件如需回扫补偿，由 operator 显式执行一次性脚本
 `scripts/migrate_console_events.py`（默认 dry-run，`--apply` 才写入；按剩余 TTL
 复制成 canonical，**不删旧键**，canonical 已存在则跳过）。
@@ -1152,8 +1157,9 @@ canonical 键，无 Redis schema 变更。
      A78-05）；
 3. **有界 janitor**（`plaita.event.index_janitor.IndexJanitor`，由
    `EventFilter.start()/stop()` 同生命周期挂载，不依赖 EventReconciler 是否启用）：
-   `SCAN` 索引键 + `ZSCAN`/`SSCAN` 游标，每 tick 只**检查** `PLAITA_EVENT_INDEX_SWEEP_BUDGET`
-   个成员（默认 500），`EXISTS data` 缺失即 `ZREM`/`SREM`。覆盖惰性清理够不到的
+   `SCAN` 索引键 + `ZSCAN`/`SSCAN` 游标，每 tick 每个存储（事件/订阅）只**检查**
+   `PLAITA_EVENT_INDEX_SWEEP_BUDGET` 个成员（默认 500），`EXISTS data` 缺失即
+   `ZREM`/`SREM`。覆盖惰性清理够不到的
    冷桶（订阅 `flow:`/`node:`）。桶轮转按**本 tick 实际进入的桶数**前进，首轮
    覆盖≈桶数/预算 个 tick（旧实现每 tick 只 +1，窗口内其余桶被重复检查）。
 
@@ -1170,6 +1176,10 @@ canonical 键，无 Redis schema 变更。
   60s 并 WARNING（A78-04）；
 * console 删除订阅已补齐 `node:` 索引（此前只清 type/correlation/flow），与引擎
   `delete_subscription` 和租户 purge 的四索引口径一致；
+* **写侧兜底清理**：`store_event_sync`（console/base service 的同步写者）在落盘后
+  按 type 每 60s、至多 8 个成员做一次 `EXISTS`+`ZREM`，覆盖「有写者但没有
+  worker/janitor」的 console-only 部署；`PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE=1`
+  可关闭，清理失败只 WARNING，不影响落盘主路径；
 * 指标：进程级 `event_index_pruned_total{kind="event_type|sub_type|sub_correlation|sub_flow|sub_node"}`
   （读时惰性清理、写侧兜底清理与 janitor 三条删除路径统一计数，
   `plaita.event.redis.event_index_pruned_metrics()` 读取）/

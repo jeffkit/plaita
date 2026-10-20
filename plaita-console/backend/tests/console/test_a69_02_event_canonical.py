@@ -432,3 +432,24 @@ def test_trusted_tenant_and_data_strip():
     assert "tenant_id" not in stored["data"], "客户端自报租户必须被剥离"
     assert stored["data"]["approved"] is True
     assert stored["source"] == "plaita-console"
+
+
+def test_publish_keeps_legacy_channel_for_one_release(monkeypatch):
+    """spec §2.3：legacy 频道保留一个 release，外部消费者仍能收到通知。"""
+    server = fakeredis.FakeServer()
+    sync = FakeRedis(server=server, decode_responses=True)
+    channels = []
+    real_publish = sync.publish
+
+    def _capture(channel, message):
+        channels.append(channel)
+        return real_publish(channel, message)
+
+    monkeypatch.setattr(sync, "publish", _capture)
+    client = _publish_client(sync)
+    r = client.post("/api/events/publish", json={"event_type": "approval", "data": {}})
+    assert r.status_code == 200, r.text
+    assert "plaita:events:approval" in channels, channels
+    assert "plaita:event:channel:approval" in channels, (
+        f"legacy 频道已提前删除（规格要求保留一个 release）: {channels}"
+    )
