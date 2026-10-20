@@ -88,6 +88,11 @@ worker 派发 start/resume 前、`schedule_service` 入队前据此拦截停用�
 | `PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS` | 跟随 `PLAITA_EXECUTION_STATE_TTL_DAYS`（30 天） | 执行删除墓碑 TTL（平台根 `plaita:exec_tombstone:{id}`）；`<=0` 永久 |
 | `PLAITA_TASK_MAX_AGE_SECONDS` | `2592000`（30 天） | start/resume 载体最大年龄，超龄在派发时 ack+WARNING 丢弃（墓碑 TTL 到期后的兜底）；`0` 关闭 |
 | `PLAITA_DLQ_KEY` | `<queue>:dlq` | 死信 Stream |
+| `PLAITA_EVENT_TTL_SECONDS` | `604800`（7 天） | 事件记录/类型索引统一 TTL（console 发布、引擎 `store_event`、服务 resume 落盘同源）；非法/`<=0` 回退默认并打 WARNING。**不要**单独调短而不调整订阅寿命：手动唤醒事件会在挂起执行仍等待时先失效 |
+| `PLAITA_EVENT_INDEX_SWEEP_INTERVAL` | `60` | 事件/订阅索引 janitor 周期（秒）；非法/`<=0` 回退默认并 WARNING |
+| `PLAITA_EVENT_INDEX_SWEEP_BUDGET` | `500` | janitor 每 tick **每个存储**最多检查的索引成员数（预算语义是「检查数」而非「删除数」）；`<=0` 按 1 执行并 WARNING |
+| `PLAITA_DISABLE_EVENT_INDEX_SWEEP` | unset | `=1` 关闭 janitor（启动打 WARNING）。冷桶（`flow:`/`node:`）的过期成员将不再被主动清理，`zcard/scard` 可持续高于 live 数 |
+| `PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE` | unset | `=1` 关闭写侧节流兜底清理（每 type 60s、至多 8 个成员的 `EXISTS`+`ZREM`）。仅影响 console-only/无 worker 部署；读时惰性清理不受影响 |
 | `PLAITA_DLQ_MAX_LEN` | `1000` | DLQ 保留条数（**有损 FIFO**：超限裁掉最旧未处理证据，最小 1；多 worker 对同一 DLQ 配置不一致时**最小者赢**）。裁剪/失败计数见 worker `/metrics` 的 `queue_dlq_trimmed_total` / `queue_dlq_trim_failures_total` |
 | `PLAITA_METRICS_PORT` | unset | worker 的 Prometheus 抓取端端口（unset/`0` = 不启动） |
 | `PLAITA_METRICS_HOST` | `0.0.0.0` | worker `/metrics` 监听地址 |

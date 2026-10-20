@@ -150,7 +150,7 @@ def test_publish_binds_publisher_tenant_and_strips_client_data_tenant():
     )
     assert r.status_code == 200, r.text
     event_id = r.json()["event_id"]
-    stored = json.loads(fake.get(f"plaita:event:{event_id}"))
+    stored = json.loads(fake.get(f"plaita:event:events:{event_id}"))
     assert stored["tenant_id"] == TENANT_A, "发布者租户必须由服务端绑定"
     assert "tenant_id" not in stored["data"], "客户端自报租户必须被剥离"
     assert stored["data"]["approved"] is True
@@ -164,7 +164,7 @@ def test_publish_uses_request_tenant_even_if_data_claims_other():
         "/api/events/publish",
         json={"event_type": "approval", "data": {"tenant_id": TENANT_A}},
     )
-    stored = json.loads(fake.get(f"plaita:event:{r.json()['event_id']}"))
+    stored = json.loads(fake.get(f"plaita:event:events:{r.json()['event_id']}"))
     assert stored["tenant_id"] == TENANT_B
 
 

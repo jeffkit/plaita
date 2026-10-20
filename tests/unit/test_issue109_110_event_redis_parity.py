@@ -345,27 +345,29 @@ class Test110CorrelationIndexPriority(unittest.IsolatedAsyncioTestCase):
                 await self._store(storage, 100, correlation_id=f"c-{i:03d}")
             await self._store(storage, 100, correlation_id="CID",
                               subscription_id="sub-target")
-            gets, smembers = [], []
-            real_get, real_smembers = storage.redis.get, storage.redis.smembers
+            mgets, smembers = [], []
+            real_mget, real_smembers = storage.redis.mget, storage.redis.smembers
 
-            async def counting_get(key):
-                gets.append(key)
-                return await real_get(key)
+            async def counting_mget(*keys):
+                mgets.extend(keys)
+                return await real_mget(*keys)
 
             async def counting_smembers(key):
                 smembers.append(key)
                 return await real_smembers(key)
 
-            storage.redis.get = counting_get
+            storage.redis.mget = counting_mget
             storage.redis.smembers = counting_smembers
             subs = await storage.list_subscriptions(
                 event_type="shared.type", correlation_id="CID")
             await storage.close()
 
         self.assertEqual([s.subscription_id for s in subs], ["sub-target"])
-        data_gets = [k for k in gets if "data:" in str(k)]
-        self.assertEqual(len(data_gets), 1,
-                         f"按 event_type 取全量再逐条反序列化（{len(data_gets)} 次 GET）")
+        # A69-03：逐条 GET 已改为一次 MGET；成本断言从「GET 次数」换成
+        # 「MGET 批内的 data 键数」——候选集仍只与 correlation 的匹配数成正比。
+        data_keys = [k for k in mgets if "data:" in str(k)]
+        self.assertEqual(len(data_keys), 1,
+                         f"按 event_type 取全量再逐条反序列化（{len(data_keys)} 个 data 键）")
         self.assertTrue(any("correlation:CID" in str(k) for k in smembers),
                         f"未走 correlation 索引: {smembers}")
         self.assertFalse(any("type:shared.type" in str(k) for k in smembers),
