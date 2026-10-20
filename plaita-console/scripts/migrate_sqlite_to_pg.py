@@ -29,6 +29,15 @@ console 从 SQLite 迁到 PostgreSQL 后，数据是「按行 INSERT 搬过去�
 
 幂等：重复跑只会把序列推到同样的值；建表用 ``create_all``（已存在则跳过）。
 
+敏感列加密（A2R25-08/09）
+========================
+``local_executions.input_json/context_json`` 与 ``tenants.contract_secret_key``
+在源库是 ``enc:v1:`` 字段密文。本脚本按**原始字节**搬列（不重新加密），
+因此目标 PostgreSQL 的 console 必须使用与源库相同的主密钥
+（``PLAITA_CREDENTIALS_KEY`` 或同一份 ``.plaita-credentials.key``），否则
+读取这些行会 fail-loud 报 ``FieldCryptoError``。迁移备份/目标库仍按敏感
+数据处置。
+
 用法
 ====
     python plaita-console/scripts/migrate_sqlite_to_pg.py \

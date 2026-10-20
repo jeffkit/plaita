@@ -20,12 +20,17 @@
 **唯一的 SQL**：console 自己的流程定义库（`flow_store`，SQLAlchemy，默认
 `sqlite:///plaita_console.db`——它是「权威定义库」，发布时才同步到 Redis）。
 
-> **敏感面（A2R25-08，如实说明）**：这个库里不止流程定义——`local_executions`
-> 的 `input_json/context_json` 含执行 params 与 `$INPUT` 明文，
-> `tenants.contract_secret_key` 是对外 HMAC 契约密钥的**明文列**。因此 DB
-> 文件及其备份应等同凭据处理：SQLite 文件由 `init_engine` 收紧为 0600，
-> 不要把库放进仓库/公共目录（`.gitignore` 已排除默认库名与 `.plaita-credentials*`）。
-> `contract_secret_key` 的加密/密钥管理改造另单。
+> **敏感面（A2R25-08/09，如实说明）**：这个库里不止流程定义——
+> `local_executions.input_json/context_json`（执行 params/`$INPUT`/
+> checkpoint）与 `tenants.contract_secret_key`（对外 HMAC 契约密钥）自本轮
+> 起**字段级加密**（`enc:v1:` 密文，AES-GCM；主密钥与凭据加密同源、按用途
+> HKDF 派生）。ORM 读取透明解密；裸 SQL/备份只见密文；存量明文在
+> `init_engine` 回填 + `VACUUM`。SQLite 文件仍由 `init_engine` 收紧为 0600
+> （第二道闸），不要把库放进仓库/公共目录（`.gitignore` 已排除默认库名与
+> `.plaita-credentials*`）。**主密钥丢失 = 历史 checkpoint 与租户契约密钥
+> 不可恢复**：备份 DB 必须同时保护 `.plaita-credentials.key`。`output_json/
+> nodes_json` 仍是明文功能副本（读面脱敏另见 #166/#222），DB 备份整体仍按
+> 凭据泄露处置。PostgreSQL 无文件权限面，字段加密是主要 at-rest 控制。
 
 ⚠️ `cluster_config.yaml` 顶层的 `eventbus / queue / storage` 三个键在
 **console 拉起服务的路径里不生效**（服务进程环境只由 `services.*.env` 组装，
