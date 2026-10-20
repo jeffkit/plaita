@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from plaita.core.url_redaction import _redact_env_value
 
 try:
+    from .. import secure_fields
     from ..models.flow import (
     Base,
     CopilotThread,
@@ -43,6 +44,7 @@ try:
 )
     from .tenant_write_guard import assert_tenant_generation
 except ImportError:
+    import secure_fields  # type: ignore
     from models.flow import (  # type: ignore
     Base,
     CopilotThread,
@@ -1363,6 +1365,10 @@ def init_engine(db_url: str) -> Engine:
     global _engine, _SessionLocal
     engine_kwargs = _db_engine_kwargs(db_url)
     display_url = _db_display_url(db_url)
+    # A2R25-08/09：先定字段加密的密钥来源（DB 同目录/环境变量），再建引擎；
+    # 加密只影响敏感列（input_json/context_json/contract_secret_key），不改变
+    # 连接参数。密钥不可用时由 secure_fields 打 WARNING 后按明文降级。
+    secure_fields.configure(db_url)
     # A2R25-08：先于首次连接建出/收紧 SQLite 文件权限（0600），避免
     # create_all/迁移期间以 0644 落盘并被同机其他用户读到。
     _secure_sqlite_db_permissions(db_url)
@@ -1394,6 +1400,9 @@ def init_engine(db_url: str) -> Engine:
         logger.warning("alembic 迁移不可用（%s），回退 create_all（schema 将无版本记录）", exc)
         create_all()
         _engine.schema_summary = {"action": "create_all-fallback", "error": str(exc)}
+    # A2R25-08/09：把存量明文列加密（幂等）。放在 schema 对齐之后，确保老库
+    # 的表/列已补齐；回填失败只告警不阻塞启动（明文残留是可观测降级）。
+    secure_fields.backfill_sensitive_columns(_engine)
     logger.info(
         "FlowStore 引擎已初始化: %s（schema=%s）", display_url, _engine.schema_summary
     )

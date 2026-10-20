@@ -50,8 +50,10 @@ def _ensure_tenants(*tenant_ids: str) -> None:
             if session.get(Tenant, tid) is None:
                 session.add(Tenant(
                     id=tid, name=tid, status="active",
-                    # contract_secret_id 唯一：测试租户各自一份占位值
-                    contract_secret_id=f"t-{tid}", contract_secret_key="k",
+                    # contract_secret_id 唯一：测试租户各自一份占位值。
+                    # contract_secret_key 留空：非空值会触发字段级加密并提前
+                    # 生成密钥文件（A2R25-08/09），破坏 A5 的「首次保存才建 key」前提。
+                    contract_secret_id=f"t-{tid}", contract_secret_key="",
                 ))
         session.commit()
 

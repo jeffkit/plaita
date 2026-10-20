@@ -155,14 +155,26 @@ flow_worker 自动带上密钥环境。
 密钥来源：`PLAITA_CREDENTIALS_KEY` 环境变量，或自动生成于 DB 同目录的
 `.plaita-credentials.key`。多机部署请统一注入同一密钥。
 
-**安全边界（如实说明，A2R25-08/09）**：凭据行本身是 Fernet 密文，但同一个
-DB 文件里还有 `local_executions.input_json/context_json`（执行 params 与
-`$INPUT` 明文）和 `tenants.contract_secret_key`（对外 HMAC 契约密钥**明文
-列**）。因此 **DB 文件/备份等同敏感数据**：SQLite 文件在 `init_engine` 时
-收紧为 0600，`.plaita-credentials*` 与 `plaita_console.db` 已加入
-`.gitignore`（与 `.dockerignore` 同口径）；多用户主机/备份外发请按凭据
-泄露处置。`contract_secret_key` 的列级加密/密钥管理迁移另单跟踪。另：错/
-缺 `PLAITA_CREDENTIALS_KEY` 时控制台拒绝保存凭据（409
+**安全边界（如实说明，A2R25-08/09）**：凭据行本身是 Fernet 密文。同一个
+DB 里另有三列敏感数据——`local_executions.input_json`（执行 params）、
+`context_json`（checkpoint/`$INPUT`）与 `tenants.contract_secret_key`
+（对外 HMAC 契约密钥）——自本轮起**落盘即字段级加密**（`enc:v1:` 密文，
+AES-GCM；主密钥与凭据加密同源，按用途经 HKDF 派生独立子密钥）。ORM 读取
+透明解密，执行页/恢复/契约验签不受影响；裸 SQL、`sqlite3`、`shutil.copy2`
+备份只能看到密文。存量明文行在 `init_engine` 启动时回填并 `VACUUM`
+（SQLite），回填失败/密钥不可用会打 WARNING 或 ERROR（绝不静默）。
+
+**密钥就是数据的一部分**：丢失/轮换主密钥会让历史执行 checkpoint 与既有
+租户契约密钥**不可恢复**（读取 fail-loud，不会退回明文）。备份 DB 时必须
+同时保护 `.plaita-credentials.key`（0600），或把 `PLAITA_CREDENTIALS_KEY`
+放进密钥管理设施统一注入；不要把两者放进同一个备份包外发。
+
+SQLite 文件仍在 `init_engine` 收紧为 0600（0600 是第二道闸，不替代字段
+加密）；`.plaita-credentials*` 与 `plaita_console.db` 已加入 `.gitignore`
+（与 `.dockerignore` 同口径）。`output_json/nodes_json` 仍是明文功能副本，
+只在读面脱敏（#166/#222）——**DB 文件/备份整体仍按敏感数据处置**。PostgreSQL
+没有文件权限面，字段加密是主要 at-rest 控制。另：错/缺
+`PLAITA_CREDENTIALS_KEY` 时控制台拒绝保存凭据（409
 `credentials_key_mismatch`），启动对账跳过该租户的导出重写（原文件保留），
 不会用新 key 覆盖旧密文造成混合密钥。导出文件在有密文时带
 `__plaita_meta__` 版本头（`key_id`/格式版本），引擎读侧忽略该保留键。

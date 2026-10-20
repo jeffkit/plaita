@@ -10,8 +10,10 @@
 
 * 读面（详情 + 列表）整份响应体零命中 needle，含 ``output`` 与
   ``nodes[*].output``；
-* 盘上功能副本（``input_json`` / ``context_json`` / ``nodes_json`` /
-  ``output_json``）逐字节不变——``#166`` 的「只改表示、不动功能副本」红线。
+* 盘上 ``nodes_json`` / ``output_json`` 功能副本仍逐字节不变（``#166`` 的
+  「只改表示、不动功能副本」红线，脱敏只改表示）；
+* A2R25-08/09 起 ``input_json`` / ``context_json`` 在盘上是 ``enc:v1:``
+  密文（字段级加密），不再是明文功能副本——这两列的断言改为「密文且零命中」。
 
 needle 复用 ``#166`` 族：显式凭据键值 + URL userinfo 口令 + webhook path token。
 判据是「响应体里没有这些字节」，不是「调用了某个函数」。
@@ -123,24 +125,35 @@ def _disk_copy(eid: str) -> tuple:
     return tuple(row)
 
 
-def _assert_functional_copy_has_needle(raw: tuple) -> None:
-    """前置：功能副本确实是明文（否则「零命中」可能只是没落进 output/nodes）。"""
+def _assert_disk_contract(raw: tuple) -> None:
+    """盘上契约：output/nodes 是明文功能副本；input/context 是密文。
+
+    - ``nodes_json`` / ``output_json``：必须含 needle——否则「响应零命中」
+      可能只是数据没落库，用例前提不成立；
+    - ``input_json`` / ``context_json``：A2R25-08/09 字段级加密，必须是
+      ``enc:v1:`` 密文且零命中。
+    """
     input_json, context_json, nodes_json, output_json = raw
     for label, value in (
-        ("input_json", input_json),
-        ("context_json", context_json),
         ("nodes_json", nodes_json),
         ("output_json", output_json),
     ):
         assert value is not None, f"{label} 未落库"
         assert NEEDLE_KEY in value, f"{label} 功能副本里没有凭据明文（用例前提不成立）"
+    for label, value in (
+        ("input_json", input_json),
+        ("context_json", context_json),
+    ):
+        assert value is not None, f"{label} 未落库"
+        assert value.startswith("enc:v1:"), f"{label} 未加密落盘（A2R25-08/09）"
+        assert NEEDLE_KEY not in value, f"{label} 密文里出现了明文凭据"
 
 
 def test_local_detail_output_and_node_output_are_redacted(local_client):
     """``GET /executions/{id}``：``output`` 与 ``nodes[*].output`` 零命中。"""
     eid = _run_to_completion(local_client)
     before = _disk_copy(eid)
-    _assert_functional_copy_has_needle(before)
+    _assert_disk_contract(before)
 
     r = local_client.get(f"/api/executions/{eid}")
 
@@ -168,7 +181,7 @@ def test_local_list_output_and_node_output_are_redacted(local_client):
     """``GET /executions``：同一行表示的另一条出口，同判。"""
     eid = _run_to_completion(local_client)
     before = _disk_copy(eid)
-    _assert_functional_copy_has_needle(before)
+    _assert_disk_contract(before)
 
     r = local_client.get("/api/executions")
 

@@ -24,6 +24,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base
 
+try:  # 包布局 plaita_console.models.flow
+    from ..secure_fields import EncryptedText
+except ImportError:  # 平铺布局（cwd=backend，models 为顶层包）
+    from secure_fields import EncryptedText  # type: ignore
+
 Base = declarative_base()
 
 # 多租户：存量数据/默认租户的固定 slug（首次多租户启动时创建）
@@ -33,10 +38,10 @@ DEFAULT_TENANT_ID = "default"
 class Tenant(Base):
     """租户。id 为 slug（创建后不可改），contract_secret_* 为对外 HMAC 契约凭证。
 
-    A2R25-08（已知项）：``contract_secret_key`` 当前**明文**存储在 tenants 表，
-    与 ``local_executions.input_json/context_json`` 里的执行 params/``$INPUT``
-    一样，DB 文件/备份属于敏感数据。SQLite 文件权限已在 ``init_engine`` 收紧
-    到 0600；列级加密或密钥管理迁移另单，不在本轮改 schema。
+    A2R25-08/09：``contract_secret_key`` 经 ``secure_fields.EncryptedText``
+    透明加密（``enc:v1:`` 密文；主密钥与凭据加密同源、按用途派生）。ORM
+    读取仍是明文（验签/一次性返回不受影响），裸 SQL/备份只能看到密文；
+    存量明文由 ``init_engine`` 回填。SQLite 文件权限仍是 0600 的第二道闸。
     """
 
     __tablename__ = "tenants"
@@ -45,8 +50,9 @@ class Tenant(Base):
     name = Column(String(128), nullable=False, default="")
     status = Column(String(16), nullable=False, default="active")  # active | disabled
     contract_secret_id = Column(String(64), nullable=False, default="", unique=True, index=True)
-    # 明文列（A2R25-08）：DB 备份/同机读权限即可取得；加密改造另单。
-    contract_secret_key = Column(String(128), nullable=False, default="")
+    # A2R25-08/09：落盘即密文（enc:v1:）；读取侧由 TypeDecorator 透明解密。
+    contract_secret_key = Column(EncryptedText(purpose="tenant-contract-secret"),
+                                  nullable=False, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
@@ -206,6 +212,10 @@ class LocalExecution(Base):
 
     本地模式下流程在 console 进程内执行，节点级 trace 由回调写入
     ``nodes_json``；集群模式（有 Redis）执行数据仍在 Redis，本表不使用。
+
+    A2R25-08/09：``input_json``（执行 params）与 ``context_json``
+    （checkpoint/``$INPUT``）经 ``secure_fields.EncryptedText`` 落盘即密文；
+    ``output_json/nodes_json`` 的读面脱敏仍是 #166/#222 的独立契约。
     """
 
     __tablename__ = "local_executions"
@@ -216,7 +226,8 @@ class LocalExecution(Base):
     flow_id = Column(String(128), nullable=False, index=True)
     flow_version = Column(String(64), nullable=False, default="")
     status = Column(String(16), nullable=False, default="running")  # running/completed/failed/cancelled
-    input_json = Column(Text, nullable=False, default="{}")
+    input_json = Column(EncryptedText(purpose="local-execution-input"),
+                        nullable=False, default="{}")
     output_json = Column(Text, nullable=False, default="null")
     error_json = Column(Text, nullable=False, default="null")
     nodes_json = Column(Text, nullable=False, default="[]")
@@ -228,7 +239,8 @@ class LocalExecution(Base):
     # 只读折算，本列不是第二真相源（真源仍是 context 的 $NODE）。
     usage_json = Column(Text, nullable=False, default="null")
     # 分布式模式 checkpoint：挂起/每步推进后的上下文快照（resume 用）
-    context_json = Column(Text, nullable=False, default="null")
+    context_json = Column(EncryptedText(purpose="local-execution-context"),
+                          nullable=False, default="null")
     invoker = Column(String(64), nullable=False, default="local")
     start_time = Column(DateTime, nullable=False, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)
