@@ -1,0 +1,17 @@
+### POST-FIX (A46-02 strip on)
+WARNING plaita: dispatch-target-unavailable:broadcast target=MacBookPro-9d0f0d6e status=stopping (执行 r57-target-exec 不再定向，按广播重投)
+WARNING plaita.node.schema: Assignment 'a': unknown config keys ['result'] will be IGNORED (possible typo?). Known keys: ['desc', 'error_handler', 'id', 'name', 'next', 'output', 'outputType', 'output_type', 'source_line', 'timeout', 'timeout_handler', 'type', 'upstreamOutput', 'upstream_output']
+WARNING plaita: flow f1 node a (assignment) failed construction-time validation (non-fatal, the flow still runs): assignment node 'a': 缺少必填的 output_type（outputType）。
+WARNING plaita: start 载体命中盘上已有断点（execution_id=r57-target-exec, status=running, checkpoint=有）：转 resume 语义，绝不整条重放/覆写 checkpoint
+WARNING plaita.node.schema: Assignment 'a': unknown config keys ['result'] will be IGNORED (possible typo?). Known keys: ['desc', 'error_handler', 'id', 'name', 'next', 'output', 'outputType', 'output_type', 'source_line', 'timeout', 'timeout_handler', 'type', 'upstreamOutput', 'upstream_output']
+WARNING plaita: flow f1 node a (assignment) failed construction-time validation (non-fatal, the flow still runs): assignment node 'a': 缺少必填的 output_type（outputType）。
+[route-while-draining] {'a_draining_in_memory': True, 'a_registry_status': 'running', 'target_is_a': True, 'rejected': [('MacBookPro-422891a1', 'status: starting')]}
+[dispatch-one] {'enqueued': True, 'decision': 'targeted', 'target_is_a': True, 'message_target': 'MacBookPro-9d0f0d6e'}
+[after] {'state_status': 'completed', 'state_error_type': None, 'handover_counter': '1', 'pending': 0, 'stream_len': 0, 'dlq_len': 0}
+
+### NEGATIVE CONTROL (R57_KEEP_TARGET=1, pre-fix shape)
+ERROR plaita: 执行 r57-target-exec 交接达上限（4/3）——判定「无宿主可跑」，已终态化 error，不再交接（终止自旋）。最后一次不亲和原因: target_instance_id=MacBookPro-aa682ae4 非本机（MacBookPro-d7846789）：显式派发给别的 worker（交接让出）
+[route-while-draining] {'a_draining_in_memory': True, 'a_registry_status': 'running', 'target_is_a': True, 'rejected': [('MacBookPro-d7846789', 'status: starting')]}
+[dispatch-one] {'enqueued': True, 'decision': 'targeted', 'target_is_a': True, 'message_target': 'MacBookPro-aa682ae4'}
+[negative-control] keep-target (pre-fix shape)
+[after] {'state_status': 'error', 'state_error_type': 'AffinityHandoverExhausted', 'handover_counter': '4', 'pending': 1, 'stream_len': 1, 'dlq_len': 0}

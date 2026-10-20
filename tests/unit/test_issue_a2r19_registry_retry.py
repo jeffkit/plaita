@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -145,6 +146,36 @@ def test_ensure_registration_success_starts_heartbeat(flaky):
         heartbeat = worker._registry._heartbeat_thread
         assert heartbeat is not None and heartbeat.is_alive()
         assert worker._registry_retry_thread is None
+    finally:
+        _cleanup(worker, flaky)
+
+
+def test_retry_success_preserves_startup_drain_status(flaky):
+    """A2R19-03 × S18-02A：重试注册成功时不得把启动期 draining 复活成 running。
+
+    SIGTERM 早于注册成功（Redis 启动瞬断 + 停机请求）时，重试线程走
+    ``register_service()``；r50 的 register 状态机保留 draining，派发白名单
+    也必须继续拒绝该实例。
+    """
+    worker = _worker(flaky)
+    worker._service_info.status = "draining"
+    try:
+        assert worker._ensure_service_registration() is False
+        assert worker.registry_registered is False
+        flaky.down = False
+        keys = _wait_keys(flaky)
+        assert keys == ["plaita:registry:flow_worker:w-r19"]
+        data = json.loads(flaky.get(keys[0]))
+        assert data["status"] == "draining"
+        from plaita.server.capacity import DispatchCandidate
+        assert DispatchCandidate.from_service_info(
+            worker._service_info).dispatchable is False
+        heartbeat = worker._registry._heartbeat_thread
+        assert heartbeat is not None and heartbeat.is_alive()
+        # 心跳（0.2s）不得把 draining 写回 running
+        time.sleep(0.5)
+        assert json.loads(flaky.get(keys[0]))["status"] == "draining"
+        assert worker.registry_registered is True
     finally:
         _cleanup(worker, flaky)
 

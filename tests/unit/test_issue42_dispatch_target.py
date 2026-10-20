@@ -284,6 +284,18 @@ class TestHandoverStripsUnavailableTarget:
             "一次 Redis 瞬断不得把定向任务广播给不亲和的机器（fail-open）"
         )
 
+    def test_stripped_copy_is_claimable_by_any_worker(self):
+        """A46-02 终态判据：广播副本不得在第三台机器上再次触发交接。
+
+        探针 `r46_dispatch_target_ghost.py` 的交接风暴是「每台非目标机各交接
+        一次 → 4 次后 AffinityHandoverExhausted」；剥 target 后副本对任意
+        worker 都是广播消息，风暴在一次交接内终止。
+        """
+        w = _skeleton_worker("w-low")
+        copy = self._run_handover(w, body=self._body("w-gone"))
+        for instance in ("w-low", "w-third"):
+            assert cap.target_mismatch(copy, instance) is None
+
     def test_target_is_preserved_when_running(self):
         w = _skeleton_worker("w-low")
         w.redis_client.setex(
