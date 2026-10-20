@@ -9,6 +9,7 @@
 """
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -58,7 +59,12 @@ class TestConsoleTaskQueueEnv:
         assert redis.xrange("plaita:flow:queue:late")
 
     def test_payload_shape_preserved(self, monkeypatch):
-        """回归：消息体字段/编码不变（stream key 之外的载荷语义不得动）。"""
+        """回归：消息体字段/编码不变（stream key 之外的载荷语义不得动）。
+
+        A69-04 判定表登记的唯一新增键是载体入队时间 ``timestamp``：只有缺失
+        时才注入，且必须是合法 ISO。除此之外不得出现任何新键，原字段值逐字
+        不变（``set`` 比较同时收紧「多键」与「缺键」两侧）。
+        """
         monkeypatch.delenv("PLAITA_CONSOLE_TASK_QUEUE", raising=False)
         redis = FakeRedis(decode_responses=True)
 
@@ -66,7 +72,10 @@ class TestConsoleTaskQueueEnv:
         executions_api._enqueue(payload, redis)
 
         raw = redis.xrange("plaita:flow:queue")[-1][1]
-        assert json.loads(raw["payload"]) == payload
+        body = json.loads(raw["payload"])
+        assert set(body) == set(payload) | {"timestamp"}
+        assert datetime.fromisoformat(body.pop("timestamp"))
+        assert body == payload
 
 
 # ---- A56-02：调度「立即触发」必须跟随 PLAITA_CONSOLE_TASK_QUEUE ----
